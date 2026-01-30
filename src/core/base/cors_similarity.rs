@@ -1,5 +1,8 @@
 use faer::{Mat, MatRef, Scale};
 use rayon::prelude::*;
+use rustc_hash::FxHashSet;
+use std::borrow::Borrow;
+use std::hash::Hash;
 
 use crate::core::base::info::*;
 use crate::core::math::matrix_helpers::*;
@@ -236,8 +239,8 @@ pub enum DistanceType {
 /// The `DistanceType`.
 pub fn parse_distance_type(s: &str) -> Option<DistanceType> {
     match s.to_lowercase().as_str() {
-        "euclidean" => Some(DistanceType::L2Norm),
-        "manhattan" => Some(DistanceType::L1Norm),
+        "euclidean" | "l2" => Some(DistanceType::L2Norm),
+        "manhattan" | "l1" => Some(DistanceType::L1Norm),
         "canberra" => Some(DistanceType::Canberra),
         "cosine" => Some(DistanceType::Cosine),
         _ => None,
@@ -649,3 +652,189 @@ where
 //////////////////////////////////
 // Topological overlap measures //
 //////////////////////////////////
+
+/// Enum for the TOM function
+#[derive(Debug, Default)]
+pub enum TomType {
+    #[default]
+    Version1,
+    Version2,
+}
+
+/// Parsing the TOM type
+pub fn parse_tom_types(s: &str) -> Option<TomType> {
+    match s.to_lowercase().as_str() {
+        "v1" => Some(TomType::Version1),
+        "v2" => Some(TomType::Version2),
+        _ => None,
+    }
+}
+
+/// Calculates the topological overlap measure (TOM) for a given affinity matrix
+///
+/// The TOM quantifies the relative interconnectedness of two nodes in a network by measuring
+/// how much they share neighbors relative to their connectivity. Higher TOM values indicate
+/// nodes that are part of the same module or cluster.
+///
+/// ### Params
+///
+/// * `affinity_mat` - Symmetric affinity/adjacency matrix
+/// * `signed` - Whether to use signed (absolute values) or unsigned connectivity
+/// * `tom_type` - Algorithm version (Version1 or Version2)
+///
+/// ### Returns
+/// Symmetric TOM matrix with values in [0,1] representing topological overlap
+///
+/// ### Mathematical Formulation
+///
+/// #### Connectivity
+/// For node i: k_i = Σ_j |a_ij| (signed) or k_i = Σ_j a_ij (unsigned)
+///
+/// #### Shared Neighbors
+/// For nodes i,j: l_ij = Σ_k (a_ik * a_kj) - a_ii*a_ij - a_ij*a_jj
+///
+/// #### TOM Calculation
+///
+/// **Version 1:**
+/// - Numerator: a_ij + l_ij
+/// - Denominator (unsigned): min(k_i, k_j) + 1 - a_ij
+/// - Denominator (signed): min(k_i, k_j) + 1 - a_ij (if a_ij ≥ 0) or min(k_i, k_j) + 1 + a_ij (if a_ij < 0)
+/// - TOM_ij = numerator / denominator
+///
+/// **Version 2:**
+/// - Divisor (unsigned): min(k_i, k_j) + a_ij
+/// - Divisor (signed): min(k_i, k_j) + a_ij (if a_ij ≥ 0) or min(k_i, k_j) - a_ij (if a_ij < 0)
+/// - TOM_ij = 0.5 * (a_ij + l_ij/divisor)
+pub fn calc_tom<T>(affinity_mat: MatRef<T>, signed: bool, tom_type: TomType) -> Mat<T>
+where
+    T: BixverseFloat + std::iter::Sum,
+{
+    let n = affinity_mat.nrows();
+    let mut tom_mat = Mat::<T>::zeros(n, n);
+    let connectivity = if signed {
+        (0..n)
+            .map(|i| (0..n).map(|j| affinity_mat.get(i, j).abs()).sum())
+            .collect::<Vec<T>>()
+    } else {
+        col_sums(affinity_mat.as_ref())
+    };
+
+    let dot_products = affinity_mat.as_ref() * affinity_mat.as_ref();
+
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let a_ij = affinity_mat.get(i, j);
+            let shared_neighbours = *dot_products.get(i, j)
+                - *affinity_mat.get(i, i) * *affinity_mat.get(i, j)
+                - *affinity_mat.get(i, j) * *affinity_mat.get(j, j);
+            let f_ki_kj = connectivity[i].min(connectivity[j]);
+
+            let tom_value = match tom_type {
+                TomType::Version1 => {
+                    let numerator = *a_ij + shared_neighbours;
+                    let denominator = if signed {
+                        if *a_ij >= T::zero() {
+                            f_ki_kj + T::one() - *a_ij
+                        } else {
+                            f_ki_kj + T::one() + *a_ij
+                        }
+                    } else {
+                        f_ki_kj + T::one() - *a_ij
+                    };
+                    numerator / denominator
+                }
+                TomType::Version2 => {
+                    let divisor = if signed {
+                        if *a_ij >= T::zero() {
+                            f_ki_kj + *a_ij
+                        } else {
+                            f_ki_kj - *a_ij
+                        }
+                    } else {
+                        f_ki_kj + *a_ij
+                    };
+                    let neighbours = shared_neighbours / divisor;
+                    T::from_f64(0.5).unwrap() * (*a_ij + neighbours)
+                }
+            };
+            tom_mat[(i, j)] = tom_value;
+            tom_mat[(j, i)] = tom_value;
+        }
+    }
+    tom_mat
+}
+
+//////////////////////
+// Set similarities //
+//////////////////////
+
+/// Calculate the set similarity.
+///
+/// ### Params
+///
+/// * `s_1` - The first HashSet.
+/// * `s_2` - The second HashSet.
+/// * `overlap_coefficient` - Shall the overlap coefficient be returned or the
+///   Jaccard similarity
+///
+/// ### Return
+///
+/// The Jaccard similarity or overlap coefficient.
+pub fn set_similarity<T, F>(s_1: &FxHashSet<T>, s_2: &FxHashSet<T>, overlap_coefficient: bool) -> F
+where
+    T: Borrow<String> + Hash + Eq,
+    F: BixverseFloat,
+{
+    let i = s_1.intersection(s_2).count() as u64;
+    let u = if overlap_coefficient {
+        std::cmp::min(s_1.len(), s_2.len()) as u64
+    } else {
+        s_1.union(s_2).count() as u64
+    };
+    F::from_u64(i).unwrap() / F::from_u64(u).unwrap()
+}
+
+/// Calculate the Jaccard similarity between indices
+///
+/// Jaccard similarity between two integer slices via sorting
+///
+/// ### Params
+///
+/// * `a` - Slice of vector a
+/// * `b` - Slice of vector b
+///
+/// ### Returns
+///
+/// The Jaccard similarity
+pub fn jaccard_sorted<T>(a: &[i32], b: &[i32]) -> T
+where
+    T: BixverseFloat,
+{
+    let mut sorted_a = a.to_vec();
+    let mut sorted_b = b.to_vec();
+    sorted_a.sort_unstable();
+    sorted_b.sort_unstable();
+
+    // Remove duplicates
+    sorted_a.dedup();
+    sorted_b.dedup();
+
+    let mut intersection = 0;
+    let mut i = 0;
+    let mut j = 0;
+
+    while i < sorted_a.len() && j < sorted_b.len() {
+        match sorted_a[i].cmp(&sorted_b[j]) {
+            std::cmp::Ordering::Equal => {
+                intersection += 1;
+                i += 1;
+                j += 1;
+            }
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+        }
+    }
+
+    let union = sorted_a.len() + sorted_b.len() - intersection;
+    T::from_usize(intersection).unwrap() / T::from_usize(union).unwrap()
+}

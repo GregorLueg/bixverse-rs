@@ -3,6 +3,7 @@ use extendr_api::*;
 use faer::traits::{ComplexField, RealField};
 use faer_entity::SimpleEntity;
 use half::f16;
+use num_traits::float::TotalOrder;
 use num_traits::{Float, FromPrimitive};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -31,6 +32,7 @@ pub trait BixverseFloat:
     + Sub
     + Mul
     + Div
+    + TotalOrder
 {
 }
 
@@ -49,6 +51,7 @@ impl<T> BixverseFloat for T where
         + Sub
         + Mul
         + Div
+        + TotalOrder
 {
 }
 

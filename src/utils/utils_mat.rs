@@ -1,7 +1,6 @@
-use faer::traits::{ComplexField, RealField};
 use faer::{Mat, MatRef, concat};
-use num_traits::{Float, FromPrimitive};
 
+use crate::prelude::*;
 use crate::utils::utils_vec::flatten_vector;
 
 /// Transform a nested vector into a faer matrix
@@ -18,7 +17,7 @@ use crate::utils::utils_vec::flatten_vector;
 /// The row or column bound matrix.
 pub fn nested_vector_to_faer_mat<T>(nested_vec: Vec<Vec<T>>, col_wise: bool) -> Mat<T>
 where
-    T: Copy,
+    T: BixverseFloat,
 {
     let (nrow, ncol) = if col_wise {
         (nested_vec[0].len(), nested_vec.len())
@@ -46,7 +45,7 @@ where
 /// The diagonal matrix as a faer Matrix.
 pub fn faer_diagonal_from_vec<T>(vec: Vec<T>) -> Mat<T>
 where
-    T: Float,
+    T: BixverseFloat,
 {
     let len = vec.len();
     Mat::from_fn(
@@ -115,7 +114,7 @@ pub fn upper_triangle_indices(n_dim: usize, offset: usize) -> (Vec<usize>, Vec<u
 /// The symmetric, dense matrix.
 pub fn upper_triangle_to_sym_faer<T>(data: &[T], shift: usize, n: usize) -> faer::Mat<T>
 where
-    T: Float + ComplexField,
+    T: BixverseFloat,
 {
     let mut mat = Mat::<T>::zeros(n, n);
     let mut idx = 0;
@@ -146,7 +145,7 @@ where
 /// A vector representing the upper triangle values (row major ordered)
 pub fn faer_mat_to_upper_triangle<T>(x: MatRef<T>, shift: usize) -> Vec<T>
 where
-    T: Copy,
+    T: BixverseFloat,
 {
     assert!(shift <= 1, "The shift should be 0 or 1");
 
@@ -179,7 +178,7 @@ where
 /// The matrix minus the specified row.
 pub fn mat_rm_row<T>(x: MatRef<T>, idx_to_remove: usize) -> Mat<T>
 where
-    T: RealField,
+    T: BixverseFloat,
 {
     assert!(
         idx_to_remove <= x.nrows(),
@@ -214,7 +213,7 @@ where
 #[allow(dead_code)]
 pub fn rowbind_matrices<T>(matrices: Vec<Mat<T>>) -> Mat<T>
 where
-    T: ComplexField + Copy,
+    T: BixverseFloat,
 {
     let ncols = matrices[0].ncols();
     let total_row = matrices.iter().map(|m| m.nrows()).sum();
@@ -252,7 +251,7 @@ where
 /// One column bound matrix from the initial matrices
 pub fn colbind_matrices<T>(matrices: &[Mat<T>]) -> Mat<T>
 where
-    T: ComplexField + Copy,
+    T: BixverseFloat,
 {
     let nrows = matrices[0].nrows();
     let total_col = matrices.iter().map(|m| m.ncols()).sum();
@@ -271,65 +270,6 @@ where
             }
         }
         col_offset += ncols;
-    }
-
-    result
-}
-
-/// Scale a matrix
-///
-/// ### Params
-///
-/// * `mat` - The matrix on which to apply column-wise scaling
-/// * `scale_sd` - Shall the standard deviation be equalised across columns
-///
-/// ### Returns
-///
-/// The scaled matrix.
-pub fn scale_matrix_col<T>(mat: &MatRef<T>, scale_sd: bool) -> Mat<T>
-where
-    T: Float + FromPrimitive + ComplexField,
-{
-    let n_rows = mat.nrows();
-    let n_cols = mat.ncols();
-    let mut means = vec![T::zero(); n_cols];
-
-    for j in 0..n_cols {
-        for i in 0..n_rows {
-            means[j] = means[j] + mat[(i, j)];
-        }
-        means[j] = means[j] / T::from_usize(n_rows).unwrap();
-    }
-
-    let mut result = Mat::zeros(n_rows, n_cols);
-    for j in 0..n_cols {
-        let mean = means[j];
-        for i in 0..n_rows {
-            result[(i, j)] = mat[(i, j)] - mean;
-        }
-    }
-
-    if !scale_sd {
-        return result;
-    }
-
-    let mut std_devs = vec![T::zero(); n_cols];
-    for j in 0..n_cols {
-        for i in 0..n_rows {
-            let val = result[(i, j)];
-            std_devs[j] = std_devs[j] + val * val;
-        }
-        std_devs[j] = (std_devs[j] / (T::from_usize(n_rows).unwrap() - T::one())).sqrt();
-        if std_devs[j] < T::from_f64(1e-10).unwrap() {
-            std_devs[j] = T::one();
-        }
-    }
-
-    for j in 0..n_cols {
-        let std_dev = std_devs[j];
-        for i in 0..n_rows {
-            result[(i, j)] = result[(i, j)] / std_dev;
-        }
     }
 
     result

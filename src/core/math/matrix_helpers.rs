@@ -123,3 +123,23 @@ where
 
     ranked_mat
 }
+
+/// Calculates the column sums of a matrix
+///
+/// ### Params
+///
+/// * `mat` - The matrix for which to calculate the column-wise sums
+///
+/// ### Returns
+///
+/// Vector of the column sums.
+pub fn col_sums<T>(mat: MatRef<T>) -> Vec<T>
+where
+    T: BixverseFloat,
+{
+    let n_rows = mat.nrows();
+    let ones = Mat::from_fn(n_rows, 1, |_, _| T::one());
+    let col_sums = ones.transpose() * mat;
+
+    col_sums.row(0).iter().cloned().collect()
+}
