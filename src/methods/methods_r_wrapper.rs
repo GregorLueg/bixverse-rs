@@ -1,7 +1,12 @@
 use extendr_api::{Attributes, List, Robj};
 
 use crate::methods::cis_target::MotifEnrichment;
+use crate::methods::dgrdl::DgrdlParams;
 use crate::prelude::*;
+
+///////////////
+// CisTarget //
+///////////////
 
 /// Convert motif enrichments to R list format
 ///
@@ -60,4 +65,72 @@ pub fn motif_enrichments_to_r_list<T: BixverseFloat>(enrichments: &[MotifEnrichm
         .unwrap();
 
     result
+}
+
+///////////
+// Dgrdl //
+///////////
+
+impl<T> DgrdlParams<T>
+where
+    T: BixverseFloat,
+{
+    /// Generate the DGRDL parameters from an R list
+    ///
+    /// If values are not found, will use default values
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The R list containing the parameters
+    ///
+    /// ### Returns
+    ///
+    /// The `DgrdlParams` structure based on the R list
+    pub fn from_r_list(r_list: List) -> DgrdlParams<f64> {
+        let dgrdl_params = r_list.into_hashmap();
+
+        let sparsity = dgrdl_params
+            .get("sparsity")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(5) as usize;
+        let dict_size = dgrdl_params
+            .get("dict_size")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(5) as usize;
+        let alpha = dgrdl_params
+            .get("alpha")
+            .and_then(|v| v.as_real())
+            .unwrap_or(1.0);
+        let beta = dgrdl_params
+            .get("beta")
+            .and_then(|v| v.as_real())
+            .unwrap_or(1.0);
+        let max_iter = dgrdl_params
+            .get("max_iter")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(20) as usize;
+        let k_neighbours = dgrdl_params
+            .get("k_neighbours")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(5) as usize;
+        let admm_iter = dgrdl_params
+            .get("admm_iter")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(5) as usize;
+        let rho = dgrdl_params
+            .get("rho")
+            .and_then(|v| v.as_real())
+            .unwrap_or(1.0);
+
+        DgrdlParams {
+            sparsity,
+            dict_size,
+            alpha,
+            beta,
+            max_iter,
+            k_neighbours,
+            admm_iter,
+            rho,
+        }
+    }
 }
