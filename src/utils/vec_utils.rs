@@ -80,7 +80,7 @@ where
 ///
 /// ### Returns
 ///
-/// Tuple of `(min, max)` in the array
+/// Tuple of `(max, min)` in the array
 pub fn array_max_min<T>(arr: &[T]) -> (T, T)
 where
     T: PartialOrd + Copy,
@@ -96,7 +96,7 @@ where
         }
     }
 
-    (min_val, max_val)
+    (max_val, min_val)
 }
 
 /// Get unique elements from a slice of any hashable, equatable numeric type.
