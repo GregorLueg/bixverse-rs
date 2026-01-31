@@ -231,6 +231,64 @@ where
         }
     }
 
+    /// Generates a sparse matrix from a dense matrix
+    ///
+    /// ### Params
+    ///
+    /// * `mat`: The dense matrix to convert to a sparse matrix
+    /// * `format`: The format of the sparse matrix to generate
+    ///
+    /// ### Returns
+    ///
+    /// * `Self`: The sparse matrix generated from the dense matrix
+    pub fn from_dense_matrix(mat: faer::MatRef<T>, format: CompressedSparseFormat) -> Self
+    where
+        T: BixverseFloat,
+    {
+        let (nrows, ncols) = (mat.nrows(), mat.ncols());
+        let mut data = Vec::new();
+        let mut indices = Vec::new();
+        let mut indptr = Vec::new();
+
+        match format {
+            CompressedSparseFormat::Csr => {
+                indptr.push(0);
+                for i in 0..nrows {
+                    for j in 0..ncols {
+                        let val = mat[(i, j)];
+                        if val != T::zero() {
+                            data.push(val);
+                            indices.push(j);
+                        }
+                    }
+                    indptr.push(data.len());
+                }
+            }
+            CompressedSparseFormat::Csc => {
+                indptr.push(0);
+                for j in 0..ncols {
+                    for i in 0..nrows {
+                        let val = mat[(i, j)];
+                        if val != T::zero() {
+                            data.push(val);
+                            indices.push(i);
+                        }
+                    }
+                    indptr.push(data.len());
+                }
+            }
+        }
+
+        Self {
+            data,
+            indices,
+            indptr,
+            cs_type: format,
+            data_2: None,
+            shape: (nrows, ncols),
+        }
+    }
+
     /// Returns the shape of the matrix
     ///
     /// ### Returns
