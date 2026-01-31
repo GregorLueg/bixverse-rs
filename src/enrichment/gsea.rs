@@ -376,6 +376,117 @@ pub fn create_random_gs_indices(
         .collect()
 }
 
+/// Calculate the ES and leading edge genes
+///
+/// ### Params
+///
+/// * `stats` - Gene statistics
+/// * `gs_idx` - Gene set indices
+/// * `gsea_param` - GSEA parameter for weighting
+/// * `return_leading_edge` - Whether to return leading edge genes
+/// * `return_all_extreme` - Whether to return the all points for plotting
+/// * `one_indexed` - Whether indices are one-based
+///
+/// ### Returns
+///
+/// Tuple of (gene statistic, leading edge genes)
+pub fn calc_gsea_stats<T>(
+    stats: &[T],
+    gs_idx: &[i32],
+    gsea_param: T,
+    return_leading_edge: bool,
+    return_all_extreme: bool,
+    one_indexed: bool,
+) -> GseaStats<T>
+where
+    T: BixverseFloat,
+{
+    let n = stats.len();
+    let m = gs_idx.len();
+    let mut r_adj = Vec::with_capacity(m);
+    for &i in gs_idx {
+        let idx = if one_indexed { i - 1 } else { i } as usize;
+        r_adj.push(stats[idx].abs().powf(gsea_param));
+    }
+    let nr: T = r_adj.iter().copied().fold(T::zero(), |acc, x| acc + x);
+    let r_cum_sum: Vec<T> = if nr == T::zero() {
+        gs_idx
+            .iter()
+            .enumerate()
+            .map(|(i, _)| T::from_usize(i).unwrap() / T::from_usize(r_adj.len()).unwrap())
+            .collect()
+    } else {
+        cumsum(&r_adj).iter().map(|x| *x / nr).collect()
+    };
+    let n_t = T::from_usize(n).unwrap();
+    let m_t = T::from_usize(m).unwrap();
+    let top_tmp: Vec<T> = gs_idx
+        .iter()
+        .enumerate()
+        .map(|(i, x)| (T::from_i32(*x).unwrap() - T::from_usize(i + 1).unwrap()) / (n_t - m_t))
+        .collect();
+    let tops: Vec<T> = r_cum_sum
+        .iter()
+        .zip(top_tmp.iter())
+        .map(|(x1, x2)| *x1 - *x2)
+        .collect();
+    let bottoms: Vec<T> = if nr == T::zero() {
+        tops.iter().map(|x| *x - (T::one() / m_t)).collect()
+    } else {
+        tops.iter()
+            .zip(r_adj.iter())
+            .map(|(top, adj)| *top - (*adj / nr))
+            .collect()
+    };
+    let max_p = array_max(&tops);
+    let min_p = array_min(&bottoms);
+    let gene_stat = if max_p == -min_p {
+        T::zero()
+    } else if max_p > -min_p {
+        max_p
+    } else {
+        min_p
+    };
+    let leading_edge = if return_leading_edge {
+        if max_p > -min_p {
+            let max_idx = bottoms
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(idx, _)| idx)
+                .unwrap_or(0);
+            gs_idx.iter().take(max_idx + 1).cloned().collect()
+        } else if max_p < -min_p {
+            let min_idx = bottoms
+                .iter()
+                .enumerate()
+                .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(idx, _)| idx)
+                .unwrap_or(0);
+            gs_idx.iter().skip(min_idx).cloned().rev().collect()
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+    if return_all_extreme {
+        GseaStats {
+            es: gene_stat,
+            leading_edge,
+            top: tops,
+            bottom: bottoms,
+        }
+    } else {
+        GseaStats {
+            es: gene_stat,
+            leading_edge,
+            top: Vec::new(),
+            bottom: Vec::new(),
+        }
+    }
+}
+
 //////////////////
 // Segment tree //
 //////////////////
