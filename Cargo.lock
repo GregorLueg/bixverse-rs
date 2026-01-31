@@ -154,6 +154,7 @@ dependencies = [
  "lz4_flex",
  "memmap2",
  "num-traits",
+ "once_cell",
  "rand 0.9.2",
  "rand_distr 0.5.1",
  "rayon",
