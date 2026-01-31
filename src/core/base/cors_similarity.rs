@@ -649,6 +649,106 @@ where
     res
 }
 
+/// Calculate Gower distance between rows (samples) for mixed data types
+///
+/// Gower distance handles mixed continuous and categorical data by:
+/// - Continuous: normalised Manhattan distance |x_i - x_j| / range
+/// - Categorical: simple mismatch (0 if same, 1 if different)
+///
+/// ### Params
+///
+/// * `mat` - The data matrix (samples × features)
+/// * `is_cat` - Boolean vector indicating which columns are categorical
+/// * `ranges` - Optional pre-computed ranges for continuous variables. If None,
+///   computed from data as max - min for each column.
+///
+/// ### Returns
+///
+/// The Gower distance matrix with values in [0, 1]
+pub fn column_pairwise_gower<T>(mat: &MatRef<T>, is_cat: &[bool], ranges: Option<&[T]>) -> Mat<T>
+where
+    T: BixverseFloat,
+{
+    let (nrow, ncol) = mat.shape();
+    assert_eq!(
+        is_cat.len(),
+        ncol,
+        "is_categorical length {} doesn't match features {}",
+        is_cat.len(),
+        ncol
+    );
+
+    let computed_ranges: Vec<T> = if let Some(r) = ranges {
+        assert_eq!(
+            r.len(),
+            ncol,
+            "ranges length {} doesn't match features {}",
+            r.len(),
+            ncol
+        );
+        r.to_vec()
+    } else {
+        (0..ncol)
+            .into_par_iter()
+            .map(|j| {
+                if is_cat[j] {
+                    T::one()
+                } else {
+                    let mut min_val = T::infinity();
+                    let mut max_val = T::neg_infinity();
+                    for i in 0..nrow {
+                        let val = *mat.get(i, j);
+                        min_val = min_val.min(val);
+                        max_val = max_val.max(val);
+                    }
+                    let range = max_val - min_val;
+                    if range < T::epsilon() {
+                        T::one()
+                    } else {
+                        range
+                    }
+                }
+            })
+            .collect()
+    };
+
+    let pairs: Vec<(usize, usize)> = (0..ncol)
+        .flat_map(|i| ((i + 1)..ncol).map(move |j| (i, j)))
+        .collect();
+
+    let results: Vec<(usize, usize, T)> = pairs
+        .par_iter()
+        .map(|&(col_i, col_j)| {
+            let mut total_dist = T::zero();
+            for row in 0..nrow {
+                let val_i = *mat.get(row, col_i);
+                let val_j = *mat.get(row, col_j);
+
+                let dist = if is_cat[col_i] && is_cat[col_j] {
+                    if (val_i - val_j).abs() < T::epsilon() {
+                        T::zero()
+                    } else {
+                        T::one()
+                    }
+                } else if !is_cat[col_i] && !is_cat[col_j] {
+                    (val_i - val_j).abs() / computed_ranges[col_i].max(computed_ranges[col_j])
+                } else {
+                    T::one()
+                };
+                total_dist += dist;
+            }
+            (col_i, col_j, total_dist / T::from_usize(nrow).unwrap())
+        })
+        .collect();
+
+    let mut res = Mat::zeros(ncol, ncol);
+    for (i, j, dist) in results {
+        res[(i, j)] = dist;
+        res[(j, i)] = dist;
+    }
+    res
+}
+
 //////////////////////////////////
 // Topological overlap measures //
 //////////////////////////////////
