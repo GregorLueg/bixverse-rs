@@ -618,3 +618,62 @@ where
 
     adjacency
 }
+
+/// Generate a Laplacian matrix from an adjacency matrix
+///
+/// ### Params
+///
+/// * `adjacency` - The symmetric adjacency matrix.
+///
+/// ### Returns
+///
+/// The Laplacian matrix
+pub fn adjacency_to_laplacian<T>(adjacency: &MatRef<T>, normalise: bool) -> Mat<T>
+where
+    T: BixverseFloat,
+{
+    assert_symmetric_mat!(adjacency);
+    let n = adjacency.nrows();
+
+    let degrees: Vec<T> = (0..n)
+        .map(|i| {
+            adjacency
+                .row(i)
+                .iter()
+                .copied()
+                .fold(T::zero(), |acc, x| acc + x)
+        })
+        .collect();
+
+    if !normalise {
+        let mut laplacian = adjacency.cloned();
+        for i in 0..n {
+            laplacian[(i, i)] = degrees[i] - adjacency[(i, i)];
+            for j in 0..n {
+                if i != j {
+                    laplacian[(i, j)] = -adjacency[(i, j)];
+                }
+            }
+        }
+        laplacian
+    } else {
+        let inv_sqrt_d: Vec<T> = degrees
+            .iter()
+            .map(|&d| {
+                if d > T::from_f64(1e-10).unwrap() {
+                    T::one() / d.sqrt()
+                } else {
+                    T::zero()
+                }
+            })
+            .collect();
+        let mut laplacian = Mat::zeros(n, n);
+        for i in 0..n {
+            laplacian[(i, i)] = T::one();
+            for j in 0..n {
+                laplacian[(i, j)] -= inv_sqrt_d[i] * adjacency[(i, j)] * inv_sqrt_d[j];
+            }
+        }
+        laplacian
+    }
+}
