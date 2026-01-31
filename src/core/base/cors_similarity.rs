@@ -722,6 +722,8 @@ where
     let dot_products = affinity_mat.as_ref() * affinity_mat.as_ref();
 
     for i in 0..n {
+        // set diagonal element to 1
+        tom_mat[(i, i)] = T::one();
         for j in (i + 1)..n {
             let a_ij = affinity_mat.get(i, j);
             let shared_neighbours = *dot_products.get(i, j)
@@ -837,4 +839,214 @@ where
 
     let union = sorted_a.len() + sorted_b.len() - intersection;
     T::from_usize(intersection).unwrap() / T::from_usize(union).unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    // Tests focus mainly on API; the Rest was heavily tested within R
+
+    use super::*;
+    use faer::Mat;
+    use rustc_hash::FxHashSet;
+
+    // Helper to create a simple matrix for testing
+    // 1.0 2.0
+    // 3.0 4.0
+    // 5.0 6.0
+    fn get_test_mat() -> Mat<f64> {
+        Mat::from_fn(3, 2, |i, j| match (i, j) {
+            (0, 0) => 1.0,
+            (0, 1) => 2.0,
+            (1, 0) => 3.0,
+            (1, 1) => 4.0,
+            (2, 0) => 5.0,
+            (2, 1) => 6.0,
+            _ => 0.0,
+        })
+    }
+
+    fn assert_approx_eq(a: f64, b: f64) {
+        assert!((a - b).abs() < 1e-10, "{} != {}", a, b);
+    }
+
+    #[test]
+    fn test_column_pairwise_cov_f64() {
+        let mat = get_test_mat();
+        let cov = column_pairwise_cov(&mat.as_ref());
+
+        assert_eq!(cov.nrows(), 2);
+        assert_eq!(cov.ncols(), 2);
+
+        // Variance of column 0 (1,3,5) should be 4.0
+        assert_approx_eq(*cov.get(0, 0), 4.0);
+        // Covariance should be positive as they increase together
+        assert!(*cov.get(0, 1) > 0.0);
+    }
+
+    #[test]
+    fn test_column_pairwise_cor_pearson() {
+        let mat = get_test_mat();
+        let cor = column_pairwise_cor(&mat.as_ref(), false);
+
+        // Diagonals must be 1.0
+        assert_approx_eq(*cor.get(0, 0), 1.0);
+        assert_approx_eq(*cor.get(1, 1), 1.0);
+
+        // Correlation should be 1.0 for this linear relationship (x + 1 = y)
+        assert_approx_eq(*cor.get(0, 1), 1.0);
+    }
+
+    #[test]
+    fn test_column_pairwise_cor_spearman() {
+        let mat = get_test_mat();
+        let cor = column_pairwise_cor(&mat.as_ref(), true); // true for spearman
+
+        // Ranks are identical, so correlation should be 1.0
+        assert_approx_eq(*cor.get(0, 1), 1.0);
+    }
+
+    #[test]
+    fn test_cor_two_matrices() {
+        let mat_a = get_test_mat();
+        let mat_b = get_test_mat();
+
+        let cor = cor_two_matrices(&mat_a.as_ref(), &mat_b.as_ref(), false);
+
+        // Correlating identical matrices should yield 1.0s on diagonal
+        assert_approx_eq(*cor.get(0, 0), 1.0);
+        assert_approx_eq(*cor.get(1, 1), 1.0);
+    }
+
+    #[test]
+    fn test_cov2cor() {
+        let mut cov = Mat::<f64>::zeros(2, 2);
+        cov[(0, 0)] = 4.0;
+        cov[(1, 1)] = 4.0;
+        cov[(0, 1)] = 2.0; // correlation should be 0.5
+        cov[(1, 0)] = 2.0;
+
+        let cor = cov2cor(cov.as_ref());
+
+        assert_approx_eq(*cor.get(0, 0), 1.0);
+        assert_approx_eq(*cor.get(0, 1), 0.5);
+    }
+
+    #[test]
+    fn test_distances_l2() {
+        // Orthogonal vectors: (1, 0) and (0, 1)
+        let mat = Mat::<f64>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
+        let dist = column_pairwise_l2_norm(&mat.as_ref());
+
+        assert_approx_eq(*dist.get(0, 0), 0.0);
+        // Sqrt((1-0)^2 + (0-1)^2) = Sqrt(2)
+        assert_approx_eq(*dist.get(0, 1), 2.0_f64.sqrt());
+    }
+
+    #[test]
+    fn test_distances_l1() {
+        let mat = Mat::<f64>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
+        let dist = column_pairwise_l1_norm(&mat.as_ref());
+
+        // |1-0| + |0-1| = 2
+        assert_approx_eq(*dist.get(0, 1), 2.0);
+    }
+
+    #[test]
+    fn test_calc_pmi() {
+        // Simple case: 2 identical columns
+        let data = vec![vec![true, false], vec![true, false]];
+        let pmi = calc_pmi::<f64>(&data, true); // normalised
+
+        assert_approx_eq(*pmi.get(0, 1), 1.0);
+    }
+
+    #[test]
+    fn test_hamming_cat() {
+        use faer::mat;
+
+        // Col 0: 0, 0, 0
+        // Col 1: 0, 1, 0
+        let mat = mat![[0, 0], [0, 1], [0, 0]];
+
+        let hamming = column_pairwise_hamming_cat::<f64>(&mat.as_ref());
+
+        // 1 mismatch out of 3 rows = 0.333...
+        assert_approx_eq(*hamming.get(0, 1), 1.0 / 3.0);
+    }
+
+    #[test]
+    fn test_gower() {
+        let mat = Mat::<f64>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
+        let is_cat = vec![false, false];
+
+        let gower = row_pairwise_gower(&mat.as_ref(), &is_cat, None);
+
+        assert_approx_eq(*gower.get(0, 1), 1.0);
+    }
+
+    #[test]
+    fn test_calc_tom() {
+        use faer::mat;
+
+        // Adjacency with self-loops
+        // Matrix:
+        // 1 1 1
+        // 1 1 0
+        // 1 0 1
+        let adj = mat![[1.0, 1.0, 1.0], [1.0, 1.0, 0.0], [1.0, 0.0, 1.0]];
+
+        // Using Version1, unsigned
+        let tom = calc_tom(adj.as_ref(), false, TomType::Version1);
+
+        // Diagonal should now be 1.0
+        assert_approx_eq(*tom.get(0, 0), 1.0);
+        assert_approx_eq(*tom.get(1, 1), 1.0);
+        assert_approx_eq(*tom.get(2, 2), 1.0);
+
+        // CASE 1: Connected nodes (0 and 1)
+        // Expected = 0.5 (calculated previously)
+        assert_approx_eq(*tom.get(0, 1), 0.5);
+
+        // CASE 2: Unconnected nodes (1 and 2)
+        // Expected = 1/3 (calculated previously)
+        assert_approx_eq(*tom.get(1, 2), 1.0 / 3.0);
+    }
+
+    #[test]
+    fn test_set_similarity() {
+        let mut s1 = FxHashSet::default();
+        s1.insert("A".to_string());
+        s1.insert("B".to_string());
+
+        let mut s2 = FxHashSet::default();
+        s2.insert("B".to_string());
+        s2.insert("C".to_string());
+
+        // Jaccard: Intersection (1) / Union (3)
+        let jaccard: f64 = set_similarity(&s1, &s2, false);
+        assert_approx_eq(jaccard, 1.0 / 3.0);
+
+        // Overlap: Intersection (1) / Min(2, 2)
+        let overlap: f64 = set_similarity(&s1, &s2, true);
+        assert_approx_eq(overlap, 0.5);
+    }
+
+    #[test]
+    fn test_jaccard_sorted() {
+        let a = vec![1, 2, 3];
+        let b = vec![2, 3, 4];
+
+        let sim: f64 = jaccard_sorted(&a, &b);
+        // Inter: {2,3} (2), Union: {1,2,3,4} (4) -> 0.5
+        assert_approx_eq(sim, 0.5);
+    }
+
+    #[test]
+    fn test_parse_helpers() {
+        assert!(matches!(
+            parse_distance_type("l2"),
+            Some(DistanceType::L2Norm)
+        ));
+        assert!(matches!(parse_tom_types("v1"), Some(TomType::Version1)));
+    }
 }

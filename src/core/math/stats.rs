@@ -559,3 +559,43 @@ where
 
     aov_res
 }
+
+///////////////////
+// Probabilities //
+///////////////////
+
+///////////
+// Other //
+///////////
+
+/// Logit function
+///
+/// ### Params
+///
+/// * `p` - Probability value (must be in (0, 1))
+///
+/// ### Returns
+///
+/// Log-odds: ln(p / (1-p))
+pub fn logit<T>(p: T) -> T
+where
+    T: BixverseFloat,
+{
+    (p / (T::one() - p)).ln()
+}
+
+/// Inverse logit (sigmoid) function
+///
+/// ### Params
+///
+/// * `q` - Log-odds value
+///
+/// ### Returns
+///
+/// Probability: exp(q) / (1 + exp(q))
+pub fn inv_logit<T>(q: T) -> T
+where
+    T: BixverseFloat,
+{
+    q.exp() / (T::one() + q.exp())
+}

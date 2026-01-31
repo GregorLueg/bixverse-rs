@@ -1,3 +1,5 @@
+//! This module contains various mathematical functions and utilities.
+
 pub mod linear_algebra;
 pub mod matrix_helpers;
 pub mod pca_svd;
