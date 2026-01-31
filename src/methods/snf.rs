@@ -185,7 +185,7 @@ where
     let (nrows, ncols) = mat.shape();
 
     assert!(
-        is_cat.len() != nrows,
+        is_cat.len() == nrows,
         "The categorical vector length {} doesn't match features {}",
         is_cat.len(),
         nrows
@@ -194,7 +194,7 @@ where
     // compute ranges in parallel
     let computed_ranges: Vec<T> = if let Some(r) = ranges {
         assert!(
-            r.len() != nrows,
+            r.len() == nrows,
             "The range vector length {} doesn't match features {}",
             r.len(),
             nrows
