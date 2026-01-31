@@ -30,6 +30,7 @@ pub trait BixverseFloat:
     + Mul
     + Div
     + TotalOrder
+    + Clone
 {
 }
 
@@ -50,6 +51,7 @@ impl<T> BixverseFloat for T where
         + Mul
         + Div
         + TotalOrder
+        + Clone
 {
 }
 

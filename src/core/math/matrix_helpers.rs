@@ -92,6 +92,30 @@ where
     normalised
 }
 
+/// Normalise the data across rows
+///
+/// ### Params
+///
+/// * `mat` - The matrix to normalise.
+///
+/// ### Returns
+///
+/// The (row-)normalised matrix.
+pub fn normalise_rows_l1<T>(mat: &MatRef<T>) -> Mat<T>
+where
+    T: BixverseFloat + std::iter::Sum,
+{
+    let (nrows, ncols) = mat.shape();
+    Mat::from_fn(nrows, ncols, |i, j| {
+        let row_sum: T = (0..ncols).map(|k| mat[(i, k)]).sum();
+        if row_sum > T::zero() {
+            *mat.get(i, j) / row_sum
+        } else {
+            T::zero()
+        }
+    })
+}
+
 /// Column wise rank normalisation
 ///
 /// ### Params

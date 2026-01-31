@@ -1,7 +1,7 @@
 pub use crate::core::math::sparse::{
     CompressedSparseData, CompressedSparseFormat, parse_compressed_sparse_format,
 };
-pub use crate::graph::graph_structures::SparseGraph;
+pub use crate::graph::graph_structures::{EdgeData, NodeData, SparseGraph};
 pub use crate::utils::heap_structures::OrderedFloat;
 pub use crate::utils::matrix_utils::*;
 pub use crate::utils::traits::*;

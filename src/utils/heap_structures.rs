@@ -6,6 +6,15 @@ use crate::prelude::*;
 #[derive(Clone, Copy)]
 pub struct OrderedFloat<T: BixverseFloat>(pub T);
 
+impl<T> OrderedFloat<T>
+where
+    T: BixverseFloat,
+{
+    pub fn get_value(&self) -> T {
+        self.0
+    }
+}
+
 impl<T: BixverseFloat> PartialEq for OrderedFloat<T> {
     fn eq(&self, other: &Self) -> bool {
         self.0.total_cmp(&other.0) == Ordering::Equal
