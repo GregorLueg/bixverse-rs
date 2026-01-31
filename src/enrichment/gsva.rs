@@ -7,9 +7,8 @@ use std::cell::RefCell;
 use std::sync::Mutex;
 use std::time::Instant;
 
-use crate::core::math::matrix_helpers::rank_matrix_col;
+use crate::core::math::{matrix_helpers::rank_matrix_col, vector_helpers::standard_deviation};
 use crate::prelude::BixverseFloat;
-use crate::utils::vec_utils::standard_deviation;
 
 /////////////
 // Globals //
@@ -219,7 +218,7 @@ where
         }
     } else {
         for test_val in test_row.iter() {
-            let test_val_u64 = test_val.max(zero).to_f64().unwrap() as u64;
+            let test_val_u64 = (*test_val).max(zero).to_f64().unwrap() as u64;
             let mut left_tail = T::zero();
 
             let mut i = 0;

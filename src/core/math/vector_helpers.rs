@@ -96,3 +96,22 @@ where
     let deviations: Vec<T> = x.iter().map(|&val| (val - median_val).abs()).collect();
     median(&deviations)
 }
+
+/// Standard deviation
+///
+/// ### Params
+///
+/// * `x` Slice of `f64`
+///
+/// ### Returns
+///
+/// The standard deviation
+pub fn standard_deviation<T>(x: &[T]) -> T
+where
+    T: BixverseFloat + std::iter::Sum,
+{
+    let n = T::from_usize(x.len()).unwrap();
+    let mean: T = x.iter().copied().sum::<T>() / n;
+    let variance = x.iter().map(|&val| (val - mean).powi(2)).sum::<T>() / (n - T::one());
+    variance.sqrt()
+}

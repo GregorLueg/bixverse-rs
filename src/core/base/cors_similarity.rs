@@ -988,27 +988,14 @@ mod tests {
     fn test_calc_tom() {
         use faer::mat;
 
-        // Adjacency with self-loops
-        // Matrix:
-        // 1 1 1
-        // 1 1 0
-        // 1 0 1
         let adj = mat![[1.0, 1.0, 1.0], [1.0, 1.0, 0.0], [1.0, 0.0, 1.0]];
 
-        // Using Version1, unsigned
         let tom = calc_tom(adj.as_ref(), false, TomType::Version1);
 
-        // Diagonal should now be 1.0
         assert_approx_eq(*tom.get(0, 0), 1.0);
         assert_approx_eq(*tom.get(1, 1), 1.0);
         assert_approx_eq(*tom.get(2, 2), 1.0);
-
-        // CASE 1: Connected nodes (0 and 1)
-        // Expected = 0.5 (calculated previously)
         assert_approx_eq(*tom.get(0, 1), 0.5);
-
-        // CASE 2: Unconnected nodes (1 and 2)
-        // Expected = 1/3 (calculated previously)
         assert_approx_eq(*tom.get(1, 2), 1.0 / 3.0);
     }
 

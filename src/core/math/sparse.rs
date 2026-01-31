@@ -4,7 +4,6 @@ use num_traits::ToPrimitive;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
 use std::ops::{Add, AddAssign, Mul};
 
 use crate::prelude::*;
@@ -711,79 +710,6 @@ where
     coo_to_csr(&rows, &cols, &vals, a.shape)
 }
 
-/// CSR matrix multiplication
-///
-/// This function implements the `CSR @ CSR` type math
-///
-/// ### Params
-///
-/// * `a` - First matrix in CSR format
-/// * `b` - Second matrix in CSR format
-///
-/// ### Returns
-///
-/// Result of A @ B in CSR format
-#[allow(dead_code)]
-pub fn csr_matmul_csr<T>(
-    a: &CompressedSparseData<T>,
-    b: &CompressedSparseData<T>,
-) -> CompressedSparseData<T>
-where
-    T: BixverseNumeric,
-    <T as std::ops::Add>::Output: std::cmp::PartialEq<T>,
-{
-    assert!(a.cs_type.is_csr() && b.cs_type.is_csr());
-    assert_eq!(a.shape.1, b.shape.0, "Dimension mismatch");
-
-    let nrows = a.shape.0;
-    let ncols = b.shape.1;
-
-    // Parallel computation of each row
-    let row_results: Vec<Vec<(usize, T)>> = (0..nrows)
-        .into_par_iter()
-        .map(|i| {
-            let mut row_vals = FxHashMap::default();
-
-            let a_row_start = a.indptr[i];
-            let a_row_end = a.indptr[i + 1];
-
-            for a_idx in a_row_start..a_row_end {
-                let k = a.indices[a_idx];
-                let a_val = a.data[a_idx];
-
-                let b_row_start = b.indptr[k];
-                let b_row_end = b.indptr[k + 1];
-
-                for b_idx in b_row_start..b_row_end {
-                    let j = b.indices[b_idx];
-                    let b_val = b.data[b_idx];
-                    *row_vals.entry(j).or_insert(T::default()) += a_val * b_val;
-                }
-            }
-
-            // Sort columns within this row
-            let mut sorted_row: Vec<(usize, T)> = row_vals.into_iter().collect();
-            sorted_row.sort_unstable_by_key(|(col, _)| *col);
-            sorted_row
-        })
-        .collect();
-
-    // Build CSR directly from row results
-    let mut data = Vec::new();
-    let mut indices = Vec::new();
-    let mut indptr = vec![0; nrows + 1];
-
-    for (i, row) in row_results.iter().enumerate() {
-        for &(col, val) in row {
-            data.push(val);
-            indices.push(col);
-        }
-        indptr[i + 1] = data.len();
-    }
-
-    CompressedSparseData::new_csr(&data, &indices, &indptr, None, (nrows, ncols))
-}
-
 /// Normalises the columns of a CSR matrix to a sum of 1 (L1 norm)
 ///
 /// ### Params
@@ -938,10 +864,6 @@ where
     result
 }
 
-/////////////////////////
-// VERY optimised code //
-/////////////////////////
-
 /// Sparse accumulator for efficient sparse matrix multiplication
 ///
 /// ### Fields
@@ -1034,7 +956,7 @@ where
 /// ### Returns
 ///
 /// Product matrix in CSR format
-pub fn csr_matmul_csr_optimised<T>(
+pub fn csr_matmul_csr<T>(
     a: &CompressedSparseData<T>,
     b: &CompressedSparseData<T>,
 ) -> CompressedSparseData<T>

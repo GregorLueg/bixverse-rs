@@ -9,7 +9,7 @@ use std::time::Instant;
 use thousands::Separable;
 
 use crate::prelude::*;
-use crate::single_cell::data_streaming::data_io::{CellGeneSparseWriter, CellOnFileQuality};
+use crate::single_cell::sc_data::data_io::{CellGeneSparseWriter, CellOnFileQuality};
 
 /////////
 // MTX //

@@ -1,4 +1,6 @@
 use faer::{Mat, linalg::solvers::DenseSolveCore};
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
 use statrs::distribution::FisherSnedecor;
 use statrs::distribution::{Continuous, ContinuousCDF, Normal};
@@ -564,6 +566,39 @@ where
 // Probabilities //
 ///////////////////
 
+/// Implementation of the trigamma function (second derivative of ln(gamma(x)))
+///
+/// ### Params
+///
+/// * `x` - The value for which to calculate the trigamma function.
+///
+/// ### Returns
+///
+/// The trigamma value for the given input.
+pub fn trigamma<T: BixverseFloat>(x: T) -> T {
+    let mut x = x;
+    let mut result = T::zero();
+
+    if x <= T::from_f64(5.0).unwrap() {
+        while x < T::from_f64(5.0).unwrap() {
+            result += T::one() / (x * x);
+            x += T::one();
+        }
+    }
+
+    let xx = x * x;
+    result += T::one() / x
+        + T::one() / (T::from_f64(2.0).unwrap() * xx)
+        + T::one() / (T::from_f64(6.0).unwrap() * xx * x);
+
+    let xxx = xx * x;
+    result += -T::one() / (T::from_f64(30.0).unwrap() * xxx * x)
+        + T::one() / (T::from_f64(42.0).unwrap() * xxx * xx * x)
+        - T::one() / (T::from_f64(30.0).unwrap() * xxx * xxx * x);
+
+    result
+}
+
 ///////////
 // Other //
 ///////////
@@ -598,4 +633,41 @@ where
     T: BixverseFloat,
 {
     q.exp() / (T::one() + q.exp())
+}
+
+/////////////////////
+// Critical values //
+/////////////////////
+
+/// Calculate the critical value using bootstrap resampling
+///
+/// ### Params
+///
+/// * `values` - Slice of values to resample from.
+/// * `sample_size` - Number of samples to draw in the bootstrap sample.
+/// * `alpha` - The significance level for the critical value.
+/// * `seed` - Random seed for reproducibility.
+///
+/// ### Returns
+///
+/// The critical value at the specified alpha level.
+pub fn calculate_critval<T: BixverseFloat>(
+    values: &[T],
+    sample_size: usize,
+    alpha: &T,
+    seed: usize,
+) -> T {
+    let mut rng = StdRng::seed_from_u64(seed as u64);
+    let mut random_sample: Vec<T> = (0..sample_size)
+        .map(|_| {
+            let index = rng.random_range(0..values.len());
+            values[index]
+        })
+        .collect();
+    random_sample.sort_by(|a, b| b.partial_cmp(a).unwrap());
+    let index = (*alpha * T::from_usize(random_sample.len()).unwrap())
+        .ceil()
+        .to_usize()
+        .unwrap();
+    random_sample[index + 1]
 }

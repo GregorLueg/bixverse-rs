@@ -4,7 +4,7 @@ use thousands::Separable;
 
 use crate::core::math::sparse::csc_to_csr;
 use crate::prelude::*;
-use crate::single_cell::data_streaming::data_io::CellGeneSparseWriter;
+use crate::single_cell::sc_data::data_io::CellGeneSparseWriter;
 
 //////////
 // Main //

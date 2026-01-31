@@ -2,6 +2,7 @@
 
 pub mod core;
 pub mod enrichment;
+pub mod graph;
 pub mod prelude;
 pub mod utils;
 

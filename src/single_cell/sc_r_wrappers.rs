@@ -1,6 +1,13 @@
+//! Contains R-specific functions for single-cell data processing that need
+//! the extendr interface.
+
 use extendr_api::*;
 
-use crate::single_cell::data_streaming::data_io::MinCellQuality;
+use crate::single_cell::sc_data::data_io::MinCellQuality;
+
+//////////////////
+// Cell quality //
+//////////////////
 
 impl MinCellQuality {
     /// Generate the MinCellQuality params from an R list

@@ -1,11 +1,10 @@
-use num_traits::{Float, FromPrimitive};
+use num_traits::Float;
 use rand::SeedableRng;
 use rand::prelude::SliceRandom;
 use rand::rngs::StdRng;
 use rustc_hash::FxHashSet;
 use std::fmt::Debug;
 use std::hash::Hash;
-use std::iter::Sum;
 use std::ops::AddAssign;
 
 ////////////////////
@@ -40,7 +39,7 @@ where
 /// The maximum value found in the array
 pub fn array_max<T>(arr: &[T]) -> T
 where
-    T: PartialOrd + Float,
+    T: PartialOrd + Copy,
 {
     let mut max_val = arr[0];
     for number in arr {
@@ -62,7 +61,7 @@ where
 /// The minimum value found in the array
 pub fn array_min<T>(arr: &[T]) -> T
 where
-    T: PartialOrd + Float,
+    T: PartialOrd + Copy,
 {
     let mut min_val = arr[0];
     for number in arr {
@@ -84,7 +83,7 @@ where
 /// Tuple of `(min, max)` in the array
 pub fn array_max_min<T>(arr: &[T]) -> (T, T)
 where
-    T: PartialOrd + Float,
+    T: PartialOrd + Copy,
 {
     let mut min_val = arr[0];
     let mut max_val = arr[0];
@@ -98,25 +97,6 @@ where
     }
 
     (min_val, max_val)
-}
-
-/// Standard deviation
-///
-/// ### Params
-///
-/// * `x` Slice of `f64`
-///
-/// ### Returns
-///
-/// The standard deviation
-pub fn standard_deviation<T>(x: &[T]) -> T
-where
-    T: Float + Sum + FromPrimitive,
-{
-    let n = T::from_usize(x.len()).unwrap();
-    let mean: T = x.iter().copied().sum::<T>() / n;
-    let variance = x.iter().map(|&val| (val - mean).powi(2)).sum::<T>() / (n - T::one());
-    variance.sqrt()
 }
 
 /// Get unique elements from a slice of any hashable, equatable numeric type.

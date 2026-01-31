@@ -452,3 +452,122 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_approx_eq(a: f64, b: f64) {
+        assert!((a - b).abs() < 1e-8, "{} != {}", a, b);
+    }
+
+    #[test]
+    fn test_loess_construction() {
+        let loess: LoessRegression<f64> = LoessRegression::new(0.5, 1);
+        // Should not panic
+        let _res = loess.fit(&[1.0], &[1.0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "Span must be between 0 and 1")]
+    fn test_loess_invalid_span_high() {
+        let _loess: LoessRegression<f64> = LoessRegression::new(1.5, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "Span must be between 0 and 1")]
+    fn test_loess_invalid_span_zero() {
+        let _loess: LoessRegression<f64> = LoessRegression::new(0.0, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only linear (1) and quadratic (2) supported")]
+    fn test_loess_invalid_degree() {
+        let _loess: LoessRegression<f64> = LoessRegression::new(0.5, 3);
+    }
+
+    #[test]
+    fn test_perfect_linear_fit() {
+        // Data: y = 2x + 1
+        let x: Vec<f64> = (0..10).map(|i| i as f64).collect();
+        let y: Vec<f64> = x.iter().map(|v| 2.0 * v + 1.0).collect();
+
+        // Span 0.5, Linear (degree 1)
+        let loess = LoessRegression::new(0.5, 1);
+        let res = loess.fit(&x, &y);
+
+        assert_eq!(res.fitted_vals.len(), 10);
+
+        for (i, &val) in res.fitted_vals.iter().enumerate() {
+            assert_approx_eq(val, y[i]);
+            assert_approx_eq(res.residuals[i], 0.0);
+        }
+    }
+
+    #[test]
+    fn test_perfect_quadratic_fit() {
+        // Data: y = x^2
+        let x: Vec<f64> = vec![-2.0, -1.0, 0.0, 1.0, 2.0];
+        let y: Vec<f64> = x.iter().map(|v| v * v).collect();
+
+        // Span 1.0 (use all points), Quadratic (degree 2)
+        let loess = LoessRegression::new(1.0, 2);
+        let res = loess.fit(&x, &y);
+
+        for (i, &val) in res.fitted_vals.iter().enumerate() {
+            // Should be very close to exact parabola
+            assert_approx_eq(val, y[i]);
+        }
+    }
+
+    #[test]
+    fn test_quadratic_fallback_on_small_sample() {
+        // Only 2 points provided. Quadratic fit needs at least 3.
+        // Should fallback to linear gracefully.
+        let x = vec![1.0, 2.0];
+        let y = vec![2.0, 4.0]; // y = 2x
+
+        let loess = LoessRegression::new(1.0, 2); // Request quadratic
+        let res = loess.fit(&x, &y);
+
+        assert_approx_eq(res.fitted_vals[0], 2.0);
+        assert_approx_eq(res.fitted_vals[1], 4.0);
+    }
+
+    #[test]
+    fn test_handling_nans_and_order() {
+        // Input contains NaNs.
+        // Indices: 0(valid), 1(NaN), 2(valid)
+        let x = vec![1.0, 2.0, 3.0];
+        let y = vec![2.0, f64::NAN, 6.0];
+
+        let loess = LoessRegression::new(1.0, 1);
+        let res = loess.fit(&x, &y);
+
+        // Check vectors length
+        assert_eq!(res.fitted_vals.len(), 3);
+
+        // Index 1 should be 0.0 (or whatever default, logic sets it to 0.0 for invalid)
+        assert_eq!(res.fitted_vals[1], 0.0);
+
+        // Indices 0 and 2 should be fitted.
+        // With only points (1,2) and (3,6), line is y = 2x.
+        assert_approx_eq(res.fitted_vals[0], 2.0);
+        assert_approx_eq(res.fitted_vals[2], 6.0);
+
+        // Valid indices check
+        assert_eq!(res.valid_indices, vec![0, 2]);
+    }
+
+    #[test]
+    fn test_empty_input() {
+        let x: Vec<f64> = vec![];
+        let y: Vec<f64> = vec![];
+
+        let loess = LoessRegression::new(0.5, 1);
+        let res = loess.fit(&x, &y);
+
+        assert!(res.fitted_vals.is_empty());
+        assert!(res.valid_indices.is_empty());
+    }
+}

@@ -1,4 +1,4 @@
-use faer::{Mat, MatRef};
+use faer::{Mat, MatRef, Scale};
 use rayon::prelude::*;
 
 use crate::core::math::vector_helpers::*;
@@ -142,4 +142,24 @@ where
     let col_sums = ones.transpose() * mat;
 
     col_sums.row(0).iter().cloned().collect()
+}
+
+/// Calculates the columns means of a matrix
+///
+/// ### Params
+///
+/// * `mat` - The matrix for which to calculate the column-wise means
+///
+/// ### Returns
+///
+/// Vector of the column means.
+pub fn col_means<T>(mat: MatRef<T>) -> Vec<T>
+where
+    T: BixverseFloat,
+{
+    let n_rows = mat.nrows();
+    let ones = Mat::from_fn(n_rows, 1, |_, _| T::one());
+    let means = ones.transpose() * mat / Scale(T::from_usize(n_rows).unwrap());
+
+    means.row(0).iter().cloned().collect()
 }
