@@ -2,6 +2,7 @@ use faer::{Mat, MatRef};
 use rand::prelude::*;
 
 use crate::graph::graph_structures::{adjacency_to_laplacian, get_knn_graph_adj};
+use crate::prelude::*;
 
 /////////////
 // Helpers //
@@ -129,7 +130,7 @@ where
     let mut features = Mat::zeros(similarities.nrows(), n_clusters);
     for i in 0..similarities.nrows() {
         for j in 0..n_clusters {
-            features[(i, j)] = T::from_f64(eigenvectors[(i, indices[j])].re).unwrap();
+            features[(i, j)] = eigenvectors[(i, indices[j])].re
         }
     }
 
