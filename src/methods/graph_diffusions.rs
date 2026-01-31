@@ -79,8 +79,6 @@ pub fn tied_diffusion_parallel<T>(
 where
     T: BixverseFloat + std::iter::Sum,
 {
-    assert_same_len!(node_names, from, to, personalise_vecs_1, personalise_vecs_2);
-
     let summarisation_type: TiedSumType = parse_tied_sum(&summarisation_fun).unwrap();
     let graph_1 = graph_from_strings(&node_names, &from, &to, weights, undirected);
 
