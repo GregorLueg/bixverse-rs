@@ -1,7 +1,8 @@
+#![allow(dead_code)]
+
 use rayon::prelude::*;
 use std::sync::Arc;
 
-use crate::assert_same_len;
 use crate::graph::graph_structures::graph_from_strings;
 use crate::graph::page_rank::*;
 use crate::prelude::BixverseFloat;
