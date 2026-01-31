@@ -6,6 +6,7 @@ use statrs::distribution::FisherSnedecor;
 use statrs::distribution::{Continuous, ContinuousCDF, Normal};
 use statrs::function::gamma::ln_gamma;
 
+use crate::core::math::vector_helpers::*;
 use crate::prelude::*;
 
 //////////////////
@@ -670,4 +671,73 @@ pub fn calculate_critval<T: BixverseFloat>(
         .to_usize()
         .unwrap();
     random_sample[index + 1]
+}
+
+//////////////
+// Outliers //
+//////////////
+
+#[derive(Clone, Debug, Default)]
+pub enum OutlierDirection {
+    /// Check if outlier is below OR above the thresholds
+    #[default]
+    Both,
+    /// Check if outlier is below the threshold
+    Below,
+    /// Check if outlier is above the threshold
+    Above,
+}
+
+/// Helper function to get the outlier detection method
+///
+/// ### Params
+///
+/// * `s` - String, type of test to run.
+///
+/// ### Returns
+///
+/// Option of the `OutlierDirection`
+pub fn parse_outlier_type(s: &str) -> Option<OutlierDirection> {
+    match s.to_lowercase().as_str() {
+        "below" => Some(OutlierDirection::Below),
+        "above" => Some(OutlierDirection::Above),
+        "twosided" => Some(OutlierDirection::Both),
+        _ => None,
+    }
+}
+
+/// MAD outlier detection
+///
+/// ### Params
+///
+/// * `x` - Slice of values to check for outliers.
+/// * `threshold` - Number of MADs to accept as not being an outlier.
+/// * `direction` - Direction to check for outliers (below, above, or both).
+///
+/// ### Returns
+///
+/// A tuple with a vector of booleans indicating whether each value in the input
+/// is an outlier and the value of applied margin.
+pub fn mad_outlier<T>(x: &[T], threshold: T, direction: OutlierDirection) -> (Vec<bool>, T)
+where
+    T: BixverseFloat,
+{
+    let median_val = match median(x) {
+        Some(m) => m,
+        None => return (vec![], T::zero()),
+    };
+    let mad_val = match mad(x) {
+        Some(m) => m,
+        None => return (vec![], T::zero()),
+    };
+    let margin = threshold * mad_val;
+    let res = x
+        .iter()
+        .map(|&v| match direction {
+            OutlierDirection::Below => v < median_val - margin,
+            OutlierDirection::Above => v > median_val + margin,
+            OutlierDirection::Both => (v - median_val).abs() > margin,
+        })
+        .collect::<Vec<bool>>();
+    (res, margin)
 }
