@@ -380,16 +380,15 @@ where
 ///
 /// Tuple of `(max_positive_score, max_negative_score)`
 #[inline]
-fn gsva_random_walk(
+fn gsva_random_walk<T: BixverseFloat>(
     gene_set_ranks: &[usize],
     decreasing_order_indices: &[usize],
-    symmetric_rank_stats: &[f64],
+    symmetric_rank_stats: &[T],
     tau: f64,
     n: usize,
-) -> (f64, f64) {
-    // Pre-compute weights to avoid repeated tau calculations
+) -> (T, T) {
     let mut weights = Vec::with_capacity(gene_set_ranks.len());
-    let mut total_in = 0.0;
+    let mut total_in = T::zero();
 
     for &rank in gene_set_ranks {
         let orig_gene_idx = decreasing_order_indices[rank];
@@ -397,41 +396,38 @@ fn gsva_random_walk(
         let weight = if tau == 1.0 {
             stat_val
         } else {
-            stat_val.powf(tau)
+            T::from_f64(stat_val.to_f64().unwrap().powf(tau)).unwrap()
         };
         weights.push((rank, weight));
         total_in += weight;
     }
 
-    if total_in <= 0.0 {
-        return (f64::NAN, f64::NAN);
+    if total_in <= T::zero() {
+        return (T::nan(), T::nan());
     }
 
-    // Sort by rank for efficient processing
     weights.sort_unstable_by_key(|&(rank, _)| rank);
 
-    let total_out = (n - gene_set_ranks.len()) as f64;
-    if total_out <= 0.0 {
-        return (f64::NAN, f64::NAN);
+    let total_out = T::from_usize(n - gene_set_ranks.len()).unwrap();
+    if total_out <= T::zero() {
+        return (T::nan(), T::nan());
     }
 
-    let total_in_inv = 1.0 / total_in;
-    let total_out_inv = 1.0 / total_out;
+    let total_in_inv = T::one() / total_in;
+    let total_out_inv = T::one() / total_out;
 
-    // Stream processing without full arrays
-    let mut max_pos = 0.0;
-    let mut max_neg = 0.0;
-    let mut cumulative_in = 0.0;
-    let mut cumulative_out = 0.0;
+    let mut max_pos = T::zero();
+    let mut max_neg = T::zero();
+    let mut cumulative_in = T::zero();
+    let mut cumulative_out = T::zero();
     let mut weight_idx = 0;
 
     for i in 0..n {
-        // Add weight if this position has a gene set member
         if weight_idx < weights.len() && weights[weight_idx].0 == i {
             cumulative_in += weights[weight_idx].1;
             weight_idx += 1;
         } else {
-            cumulative_out += 1.0;
+            cumulative_out += T::one();
         }
 
         let walk_stat = cumulative_in * total_in_inv - cumulative_out * total_out_inv;
@@ -463,17 +459,16 @@ fn gsva_random_walk(
 /// ### Returns
 ///
 /// Vector of ES, one per gene set.
-pub fn gsva_score_genesets(
+pub fn gsva_score_genesets<T: BixverseFloat>(
     gene_sets: &[Vec<usize>],
     decreasing_order_indices: &[usize],
-    symmetric_rank_stats: &[f64],
+    symmetric_rank_stats: &[T],
     tau: f64,
     max_diff: bool,
     abs_rank: bool,
-) -> Vec<f64> {
+) -> Vec<T> {
     let n = decreasing_order_indices.len();
 
-    // Pre-compute rank lookup ONCE
     let rank_lookup: FxHashMap<usize, usize> = decreasing_order_indices
         .iter()
         .enumerate()
@@ -484,7 +479,7 @@ pub fn gsva_score_genesets(
         .iter()
         .map(|gene_set| {
             if gene_set.is_empty() {
-                return f64::NAN;
+                return T::nan();
             }
 
             let mut gene_set_ranks = Vec::with_capacity(gene_set.len());
@@ -495,7 +490,7 @@ pub fn gsva_score_genesets(
             }
 
             if gene_set_ranks.is_empty() {
-                return f64::NAN;
+                return T::nan();
             }
 
             let (walk_stat_pos, walk_stat_neg) = gsva_random_walk(
@@ -507,7 +502,7 @@ pub fn gsva_score_genesets(
             );
 
             if walk_stat_pos.is_nan() || walk_stat_neg.is_nan() {
-                f64::NAN
+                T::nan()
             } else if max_diff {
                 if abs_rank {
                     walk_stat_pos - walk_stat_neg
@@ -535,7 +530,7 @@ pub fn gsva_score_genesets(
 /// ### Returns
 ///
 /// The rank marix that was powered by alpha
-fn calculate_rank_weights(ranks: &MatRef<f64>, alpha: f64) -> Mat<f64> {
+fn calculate_rank_weights<T: BixverseFloat>(ranks: &MatRef<T>, alpha: f64) -> Mat<T> {
     let (n_genes, n_samples) = ranks.shape();
     let mut weights = Mat::zeros(n_genes, n_samples);
 
@@ -545,7 +540,7 @@ fn calculate_rank_weights(ranks: &MatRef<f64>, alpha: f64) -> Mat<f64> {
         .for_each(|(col_idx, mut col)| {
             let ranks_col = ranks.col(col_idx);
             for (row_idx, &rank) in ranks_col.iter().enumerate() {
-                col[row_idx] = rank.abs().powf(alpha);
+                col[row_idx] = T::from_f64(rank.abs().to_f64().unwrap().powf(alpha)).unwrap();
             }
         });
 
@@ -566,32 +561,30 @@ fn calculate_rank_weights(ranks: &MatRef<f64>, alpha: f64) -> Mat<f64> {
 ///
 /// ssGSEA enrichment score for this gene set and sample
 #[inline]
-fn ssgsea_fast_random_walk(
+fn ssgsea_fast_random_walk<T: BixverseFloat>(
     gene_set_indices: &[usize],
     rank_lookup: &FxHashMap<usize, usize>,
     gene_ranking: &[usize],
-    rank_weights: &ColRef<f64>,
-) -> f64 {
+    rank_weights: &ColRef<T>,
+) -> T {
     let n = gene_ranking.len();
     let k = gene_set_indices.len();
 
     if k == 0 {
-        return f64::NAN;
+        return T::nan();
     }
 
-    // Fast path for small gene sets - avoid HashMap lookups
     if k < 32 {
         let gene_set: FxHashSet<usize> = gene_set_indices.iter().copied().collect();
-        let mut sum_weighted_ranks = 0.0;
-        let mut sum_weights = 0.0;
-        let mut sum_gene_set_ranks = 0.0;
+        let mut sum_weighted_ranks = T::zero();
+        let mut sum_weights = T::zero();
+        let mut sum_gene_set_ranks = T::zero();
         let mut found_genes = 0;
 
-        // Single pass through ranking
         for (rank_pos, &gene_idx) in gene_ranking.iter().enumerate() {
             if gene_set.contains(&gene_idx) {
                 let weight = rank_weights[gene_idx];
-                let rank_contribution = (n - rank_pos) as f64;
+                let rank_contribution = T::from_usize(n - rank_pos).unwrap();
 
                 sum_weighted_ranks += weight * rank_contribution;
                 sum_weights += weight;
@@ -599,32 +592,33 @@ fn ssgsea_fast_random_walk(
                 found_genes += 1;
 
                 if found_genes == k {
-                    break; // Found all genes
+                    break;
                 }
             }
         }
 
         if found_genes == 0 {
-            return f64::NAN;
+            return T::nan();
         }
 
         let step_cdf_in_gene_set = sum_weighted_ranks / sum_weights;
-        let sum_all_ranks = (n * (n + 1)) as f64 / 2.0;
-        let step_cdf_out_gene_set = (sum_all_ranks - sum_gene_set_ranks) / (n - found_genes) as f64;
+        let n_t = T::from_usize(n).unwrap();
+        let sum_all_ranks = n_t * (n_t + T::one()) / T::from_f64(2.0).unwrap();
+        let step_cdf_out_gene_set =
+            (sum_all_ranks - sum_gene_set_ranks) / T::from_usize(n - found_genes).unwrap();
 
         return step_cdf_in_gene_set - step_cdf_out_gene_set;
     }
 
-    // Standard path for larger gene sets
-    let mut sum_weighted_ranks = 0.0;
-    let mut sum_weights = 0.0;
-    let mut sum_gene_set_ranks = 0.0;
+    let mut sum_weighted_ranks = T::zero();
+    let mut sum_weights = T::zero();
+    let mut sum_gene_set_ranks = T::zero();
     let mut found_genes = 0;
 
     for &gene_idx in gene_set_indices {
         if let Some(&rank_pos) = rank_lookup.get(&gene_idx) {
             let weight = rank_weights[gene_idx];
-            let rank_contribution = (n - rank_pos) as f64;
+            let rank_contribution = T::from_usize(n - rank_pos).unwrap();
 
             sum_weighted_ranks += weight * rank_contribution;
             sum_weights += weight;
@@ -633,13 +627,15 @@ fn ssgsea_fast_random_walk(
         }
     }
 
-    if found_genes == 0 || sum_weights <= 0.0 {
-        return f64::NAN;
+    if found_genes == 0 || sum_weights <= T::zero() {
+        return T::nan();
     }
 
     let step_cdf_in_gene_set = sum_weighted_ranks / sum_weights;
-    let sum_all_ranks = (n * (n + 1)) as f64 / 2.0;
-    let step_cdf_out_gene_set = (sum_all_ranks - sum_gene_set_ranks) / (n - found_genes) as f64;
+    let n_t = T::from_usize(n).unwrap();
+    let sum_all_ranks = n_t * (n_t + T::one()) / T::from_f64(2.0).unwrap();
+    let step_cdf_out_gene_set =
+        (sum_all_ranks - sum_gene_set_ranks) / T::from_usize(n - found_genes).unwrap();
 
     step_cdf_in_gene_set - step_cdf_out_gene_set
 }
@@ -668,15 +664,15 @@ fn ssgsea_fast_random_walk(
 /// ### Returns
 ///
 /// Matrix of enrichment scores (gene_sets × samples)
-pub fn gsva(
-    expression_matrix: &MatRef<f64>,
+pub fn gsva<T: BixverseFloat>(
+    expression_matrix: &MatRef<T>,
     gene_sets: &[Vec<usize>],
     use_gaussian: bool,
     tau: f64,
     max_diff: bool,
     abs_rank: bool,
     print_timings: bool,
-) -> Mat<f64> {
+) -> Mat<T> {
     let start_total = Instant::now();
     let (_, n_samples) = expression_matrix.shape();
     let mut result = Mat::zeros(gene_sets.len(), n_samples);
@@ -690,18 +686,13 @@ pub fn gsva(
     }
 
     let start_kcdf = Instant::now();
-    let kcdf_matrix = matrix_kernel_density(
-        expression_matrix, // density reference
-        expression_matrix, // test data (same as density)
-        use_gaussian,
-    );
+    let kcdf_matrix = matrix_kernel_density(expression_matrix, expression_matrix, use_gaussian);
     let kcdf_time = start_kcdf.elapsed();
 
     if print_timings {
         println!("Step 1 - Kernel density estimation: {:.2?}", kcdf_time);
     }
 
-    // Parallel processing over samples
     let result_mutex = Mutex::new(&mut result);
     let start_parallel = Instant::now();
 
@@ -709,7 +700,7 @@ pub fn gsva(
         let sample_start = Instant::now();
 
         let extract_start = Instant::now();
-        let sample_kcdf: Vec<f64> = kcdf_matrix.col(sample_idx).iter().copied().collect();
+        let sample_kcdf: Vec<T> = kcdf_matrix.col(sample_idx).iter().copied().collect();
         let extract_time = extract_start.elapsed();
 
         let rank_start = Instant::now();
@@ -738,8 +729,6 @@ pub fn gsva(
 
         let sample_total = sample_start.elapsed();
 
-        // Print timing for every 100th sample or first/last few
-
         if print_timings & (sample_idx < 5 || sample_idx % 100 == 0 || sample_idx >= n_samples - 5)
         {
             println!(
@@ -752,7 +741,6 @@ pub fn gsva(
     let parallel_time = start_parallel.elapsed();
     let total_time = start_total.elapsed();
 
-    // Print message for checking the speed
     if print_timings {
         println!("Step 2-4 - Parallel processing: {:.2?}", parallel_time);
         println!("Total GSVA time: {:.2?}", total_time);
@@ -785,13 +773,13 @@ pub fn gsva(
 /// ### Returns
 ///
 /// Matrix of enrichment scores (gene_sets × samples)
-pub fn ssgsea(
-    expression_matrix: &MatRef<f64>,
+pub fn ssgsea<T: BixverseFloat>(
+    expression_matrix: &MatRef<T>,
     gene_sets: &[Vec<usize>],
     alpha: f64,
     normalization: bool,
     print_timings: bool,
-) -> Mat<f64> {
+) -> Mat<T> {
     let start_total = Instant::now();
     let (n_genes, n_samples) = expression_matrix.shape();
 
@@ -820,7 +808,7 @@ pub fn ssgsea(
     }
 
     let start_scoring = Instant::now();
-    let mut result: Mat<f64> = Mat::zeros(gene_sets.len(), n_samples);
+    let mut result: Mat<T> = Mat::zeros(gene_sets.len(), n_samples);
 
     let result_mutex = Mutex::new(&mut result);
 
@@ -828,16 +816,13 @@ pub fn ssgsea(
         let sample_start = Instant::now();
 
         let ranking_start = Instant::now();
-        // Get gene ranking for this sample (descending order)
-        let sample_ranks: Vec<f64> = ranks.col(sample_idx).iter().copied().collect();
+        let sample_ranks: Vec<T> = ranks.col(sample_idx).iter().copied().collect();
         let mut gene_ranking: Vec<usize> = (0..n_genes).collect();
 
-        // Sort by rank (descending) - equivalent to order(R[, j], decreasing = TRUE)
         gene_ranking
             .sort_unstable_by(|&a, &b| sample_ranks[b].partial_cmp(&sample_ranks[a]).unwrap());
         let ranking_time = ranking_start.elapsed();
 
-        // Calculate enrichment scores for all gene sets
         let score_start = Instant::now();
 
         let mut rank_lookup = FxHashMap::with_capacity_and_hasher(n_genes, FxBuildHasher);
@@ -847,7 +832,7 @@ pub fn ssgsea(
 
         let rank_weights_col = rank_weights.col(sample_idx);
 
-        let scores: Vec<f64> = gene_sets
+        let scores: Vec<T> = gene_sets
             .iter()
             .map(|gene_set| {
                 ssgsea_fast_random_walk(gene_set, &rank_lookup, &gene_ranking, &rank_weights_col)
@@ -855,7 +840,6 @@ pub fn ssgsea(
             .collect();
         let score_end = score_start.elapsed();
 
-        // Store results
         {
             let mut result_guard = result_mutex.lock().unwrap();
             for (gene_set_idx, &score) in scores.iter().enumerate() {
@@ -886,9 +870,8 @@ pub fn ssgsea(
     if normalization {
         let start_norm = Instant::now();
 
-        // Find range of all finite scores without copying
-        let mut min_score = f64::INFINITY;
-        let mut max_score = f64::NEG_INFINITY;
+        let mut min_score = T::infinity();
+        let mut max_score = T::neg_infinity();
         let mut has_finite = false;
 
         for col_idx in 0..result.ncols() {
@@ -902,13 +885,12 @@ pub fn ssgsea(
         }
 
         if !has_finite {
-            return result; // No finite scores to normalize
+            return result;
         }
 
         let range = max_score - min_score;
 
-        if range > 0.0 && range.is_finite() {
-            // Normalize by range
+        if range > T::zero() && range.is_finite() {
             result.par_col_iter_mut().for_each(|col| {
                 for score in col.iter_mut() {
                     if score.is_finite() {
@@ -921,7 +903,7 @@ pub fn ssgsea(
         let norm_time = start_norm.elapsed();
 
         if print_timings {
-            println!("Step 4 - Normalization: {:.2?}", norm_time);
+            println!("Step 4 - Normalisation: {:.2?}", norm_time);
         }
     }
 
