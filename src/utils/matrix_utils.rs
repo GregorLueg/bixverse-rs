@@ -1,7 +1,7 @@
 use faer::{Mat, MatRef, concat};
 
 use crate::prelude::*;
-use crate::utils::utils_vec::flatten_vector;
+use crate::utils::vec_utils::flatten_vector;
 
 /// Transform a nested vector into a faer matrix
 ///

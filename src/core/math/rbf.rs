@@ -3,7 +3,7 @@ use rayon::iter::*;
 
 use crate::core::math::matrix_helpers::*;
 use crate::prelude::*;
-use crate::utils::utils_mat::*;
+use crate::utils::matrix_utils::*;
 
 ///////////
 // Enums //

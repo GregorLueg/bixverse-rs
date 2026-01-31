@@ -1,5 +1,7 @@
 use num_traits::Float;
 
+use crate::prelude::BixverseFloat;
+
 /// Generate the rank of a vector with tie correction.
 ///
 /// ### Params
@@ -40,4 +42,57 @@ where
         }
     }
     ranks
+}
+
+/// Get the median
+///
+/// ### Params
+///
+/// * `x` - The slice for which to calculate the median for.
+///
+/// ### Results
+///
+/// The median (if the vector is not empty)
+pub fn median<T>(x: &[T]) -> Option<T>
+where
+    T: BixverseFloat,
+{
+    if x.is_empty() {
+        return None;
+    }
+    let mut data = x.to_vec();
+    let len = data.len();
+    if len.is_multiple_of(2) {
+        let (_, median1, right) =
+            data.select_nth_unstable_by(len / 2 - 1, |a, b| a.partial_cmp(b).unwrap());
+        let median2 = right
+            .iter()
+            .min_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap();
+        Some((*median1 + *median2) / T::from_f64(2.0).unwrap())
+    } else {
+        let (_, median, _) = data.select_nth_unstable_by(len / 2, |a, b| a.partial_cmp(b).unwrap());
+        Some(*median)
+    }
+}
+
+/// Calculate the MAD
+///
+/// ### Params
+///
+/// * `x` - Slice for which to calculate the MAD for
+///
+/// ### Results
+///
+/// The MAD of the slice.
+pub fn mad<T>(x: &[T]) -> Option<T>
+where
+    T: BixverseFloat,
+{
+    if x.is_empty() {
+        return None;
+    }
+    let median_val = median(x)?;
+    let deviations: Vec<T> = x.iter().map(|&val| (val - median_val).abs()).collect();
+    median(&deviations)
 }

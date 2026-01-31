@@ -4,22 +4,23 @@ use faer::traits::{ComplexField, RealField};
 use faer_entity::SimpleEntity;
 use half::f16;
 use num_traits::float::TotalOrder;
-use num_traits::{Float, FromPrimitive};
+use num_traits::{Float, FromPrimitive, ToPrimitive};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fmt::Display;
 use std::iter::Sum;
-use std::ops::{AddAssign, Div, DivAssign, Mul, Sub, SubAssign};
+use std::ops::{Add, AddAssign, Div, DivAssign, Mul, Sub, SubAssign};
 
-/////////////////
-// Float trait //
-/////////////////
+///////////////////
+// Numeric trait //
+///////////////////
 
 /// Trait for floating-point types used in Bixverse. Has all of the common
 /// floating-point operations and traits.
 pub trait BixverseFloat:
     Float
     + FromPrimitive
+    + ToPrimitive
     + ComplexField
     + Copy
     + 'static
@@ -39,6 +40,7 @@ pub trait BixverseFloat:
 impl<T> BixverseFloat for T where
     T: Float
         + FromPrimitive
+        + ToPrimitive
         + ComplexField
         + Copy
         + 'static
@@ -52,6 +54,39 @@ impl<T> BixverseFloat for T where
         + Mul
         + Div
         + TotalOrder
+{
+}
+
+/// More general numeric trait that includes also integers
+pub trait BixverseNumeric:
+    Clone
+    + Default
+    + Copy
+    + Sync
+    + Send
+    + Add<Output = Self>
+    + Mul<Output = Self>
+    + Sub<Output = Self>
+    + AddAssign
+    + PartialEq
+    + Sub
+    + DivAssign
+{
+}
+
+impl<T> BixverseNumeric for T where
+    T: Clone
+        + Default
+        + Copy
+        + Sync
+        + Send
+        + Add<Output = Self>
+        + Mul<Output = Self>
+        + Sub<Output = Self>
+        + AddAssign
+        + PartialEq
+        + Sub
+        + DivAssign
 {
 }
 
