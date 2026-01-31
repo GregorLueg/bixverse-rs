@@ -187,3 +187,38 @@ where
 
     means.row(0).iter().cloned().collect()
 }
+
+/// Calculate the column standard deviations
+///
+/// ### Params
+///
+/// * `mat` - The matrix for which to calculate the column-wise standard
+///   deviations
+///
+/// ### Returns
+///
+/// Vector of the column standard deviations.
+pub fn col_sds<T>(mat: MatRef<T>) -> Vec<T>
+where
+    T: BixverseFloat,
+{
+    let n = T::from_usize(mat.nrows()).unwrap();
+    let n_cols = mat.ncols();
+
+    let (_, m2): (Vec<T>, Vec<T>) = (0..n_cols)
+        .map(|j| {
+            let mut mean = T::zero();
+            let mut m2 = T::zero();
+            let mut count = T::zero();
+            for i in 0..mat.nrows() {
+                count += T::one();
+                let delta = mat[(i, j)] - mean;
+                mean += delta / count;
+                let delta2 = mat[(i, j)] - mean;
+                m2 += delta * delta2;
+            }
+            (mean, (m2 / (n - T::one())).sqrt())
+        })
+        .unzip();
+    m2
+}
