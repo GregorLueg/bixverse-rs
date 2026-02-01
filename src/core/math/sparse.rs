@@ -289,6 +289,96 @@ where
         }
     }
 
+    /// Create a sparse matrix from an upper triangular matrix.
+    ///
+    /// ### Params
+    ///
+    /// * `upper_triangle` - The upper triangular matrix.
+    /// * `n` - The number of rows and columns in the matrix.
+    /// * `include_diagonal` - Whether to include the diagonal elements.
+    /// * `format` - The format of the sparse matrix.
+    ///
+    /// ### Returns
+    ///
+    /// A sparse matrix.
+    pub fn from_upper_triangle_sym(
+        upper_triangle: &[T],
+        n: usize,
+        include_diagonal: bool,
+        format: CompressedSparseFormat,
+    ) -> Self
+    where
+        T: BixverseFloat,
+    {
+        // lambda function in Rust style...
+        let get_value = |row: usize, col: usize| -> T {
+            if row == col {
+                if include_diagonal {
+                    let offset = row * n - row * (row + 1) / 2 + col;
+                    upper_triangle[offset]
+                } else {
+                    T::one()
+                }
+            } else if row < col {
+                let offset = if include_diagonal {
+                    row * n - row * (row + 1) / 2 + col
+                } else {
+                    row * (n - 1) - row * (row + 1) / 2 + col - 1
+                };
+                upper_triangle[offset]
+            } else {
+                let offset = if include_diagonal {
+                    col * n - col * (col + 1) / 2 + row
+                } else {
+                    col * (n - 1) - col * (col + 1) / 2 + row - 1
+                };
+                upper_triangle[offset]
+            }
+        };
+
+        let mut data = Vec::new();
+        let mut indices = Vec::new();
+        let mut indptr = Vec::new();
+
+        match format {
+            CompressedSparseFormat::Csr => {
+                indptr.push(0);
+                for row in 0..n {
+                    for col in 0..n {
+                        let value = get_value(row, col);
+                        if value != T::zero() {
+                            data.push(value);
+                            indices.push(col);
+                        }
+                    }
+                    indptr.push(data.len());
+                }
+            }
+            CompressedSparseFormat::Csc => {
+                indptr.push(0);
+                for col in 0..n {
+                    for row in 0..n {
+                        let value = get_value(row, col);
+                        if value != T::zero() {
+                            data.push(value);
+                            indices.push(row);
+                        }
+                    }
+                    indptr.push(data.len());
+                }
+            }
+        }
+
+        Self {
+            data,
+            indices,
+            indptr,
+            cs_type: format,
+            data_2: None,
+            shape: (n, n),
+        }
+    }
+
     /// Returns the shape of the matrix
     ///
     /// ### Returns
