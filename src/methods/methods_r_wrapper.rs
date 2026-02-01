@@ -2,6 +2,7 @@ use extendr_api::{Attributes, List, Robj};
 
 use crate::methods::cis_target::MotifEnrichment;
 use crate::methods::dgrdl::DgrdlParams;
+use crate::methods::ica::IcaParams;
 use crate::prelude::*;
 
 ///////////////
@@ -131,6 +132,51 @@ where
             k_neighbours,
             admm_iter,
             rho,
+        }
+    }
+}
+
+/////////
+// ICA //
+/////////
+
+impl<T: BixverseFloat> IcaParams<T> {
+    /// Prepare ICA parameters from R List
+    ///
+    /// Takes in a R list and extracts the ICA parameters or uses sensible defaults.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - R List with the ICA parameters.
+    ///
+    /// ### Returns
+    ///
+    /// `IcaParams` parameter structure.
+    pub fn from_r_list(r_list: List) -> IcaParams<f64> {
+        let ica_params = r_list.into_hashmap();
+
+        let maxit = ica_params
+            .get("maxit")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(200) as usize;
+        let alpha = ica_params
+            .get("alpha")
+            .and_then(|v| v.as_real())
+            .unwrap_or(1.0);
+        let tol = ica_params
+            .get("max_tol")
+            .and_then(|v| v.as_real())
+            .unwrap_or(1e-4);
+        let verbose = ica_params
+            .get("verbose")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        IcaParams {
+            maxit,
+            alpha,
+            tol,
+            verbose,
         }
     }
 }
