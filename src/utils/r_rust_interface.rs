@@ -368,6 +368,7 @@ pub fn r_matrix_to_faer_fp32(x: &RMatrix<f64>) -> Mat<f32> {
 /// * `col_ptr` - The column pointers
 /// * `ncol` - Number of columns
 /// * `nrow` - Number of rows
+/// * `cs_type` - Compressed Sparse Format type
 pub fn sparse_data_to_list<T>(sparse: CompressedSparseData<T>) -> List
 where
     T: Into<Robj> + Clone + Default + Into<f64> + Sync + Add + PartialEq + Mul,
@@ -392,13 +393,18 @@ where
         .collect::<Vec<i32>>();
     let nrow = sparse.shape.0;
     let ncol = sparse.shape.1;
+    let cs_type = match sparse.cs_type {
+        CompressedSparseFormat::Csr => "csr",
+        CompressedSparseFormat::Csc => "csc",
+    };
 
     list!(
         data = data,
         indptr = indptr,
         indices = indices,
         nrow = nrow,
-        ncol = ncol
+        ncol = ncol,
+        cs_type = cs_type.to_string()
     )
 }
 
