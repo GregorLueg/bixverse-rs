@@ -14,6 +14,10 @@ use std::iter::Sum;
 #[derive(Encode, Decode, Serialize, Deserialize, Debug, Clone, Copy, Default)]
 pub struct F16(u16);
 
+/////////////////
+// Conversions //
+/////////////////
+
 impl From<f16> for F16 {
     fn from(f: f16) -> Self {
         F16(f.to_bits())
@@ -25,6 +29,10 @@ impl From<F16> for f16 {
         f16::from_bits(f.0)
     }
 }
+
+//////////////////
+// Iterator sum //
+//////////////////
 
 impl Sum for F16 {
     fn sum<I: Iterator<Item = F16>>(iter: I) -> Self {
@@ -39,6 +47,10 @@ impl<'a> Sum<&'a F16> for F16 {
         F16::from(sum)
     }
 }
+
+//////////////
+// Math ops //
+//////////////
 
 impl std::ops::Add for F16 {
     type Output = F16;
@@ -79,6 +91,78 @@ impl<'a> std::ops::Mul<&'a F16> for F16 {
         F16::from(a * b)
     }
 }
+
+impl std::ops::Sub for F16 {
+    type Output = F16;
+    fn sub(self, other: F16) -> F16 {
+        let a = f16::from(self);
+        let b = f16::from(other);
+        F16::from(a - b)
+    }
+}
+
+impl<'a> std::ops::Sub<&'a F16> for F16 {
+    type Output = F16;
+    fn sub(self, other: &'a F16) -> F16 {
+        let a = f16::from(self);
+        let b = f16::from(*other);
+        F16::from(a - b)
+    }
+}
+
+impl std::ops::AddAssign for F16 {
+    fn add_assign(&mut self, other: F16) {
+        let a = f16::from(*self);
+        let b = f16::from(other);
+        *self = F16::from(a + b);
+    }
+}
+
+impl<'a> std::ops::AddAssign<&'a F16> for F16 {
+    fn add_assign(&mut self, other: &'a F16) {
+        let a = f16::from(*self);
+        let b = f16::from(*other);
+        *self = F16::from(a + b);
+    }
+}
+
+impl std::ops::DivAssign for F16 {
+    fn div_assign(&mut self, other: F16) {
+        let a = f16::from(*self);
+        let b = f16::from(other);
+        *self = F16::from(a / b);
+    }
+}
+
+impl<'a> std::ops::DivAssign<&'a F16> for F16 {
+    fn div_assign(&mut self, other: &'a F16) {
+        let a = f16::from(*self);
+        let b = f16::from(*other);
+        *self = F16::from(a / b);
+    }
+}
+
+impl std::ops::Div for F16 {
+    type Output = F16;
+    fn div(self, other: F16) -> F16 {
+        let a = f16::from(self);
+        let b = f16::from(other);
+        F16::from(a / b)
+    }
+}
+
+impl<'a> std::ops::Div<&'a F16> for F16 {
+    type Output = F16;
+    fn div(self, other: &'a F16) -> F16 {
+        let a = f16::from(self);
+        let b = f16::from(*other);
+        F16::from(a / b)
+    }
+}
+
+//////////////
+// Equality //
+//////////////
 
 impl PartialEq for F16 {
     fn eq(&self, other: &Self) -> bool {
