@@ -3,10 +3,88 @@
 
 use extendr_api::*;
 
+use crate::single_cell::sc_analysis::hdwgcna_meta_cells::MetaCellParams;
+use crate::single_cell::sc_analysis::hotspot::HotSpotParams;
+use crate::single_cell::sc_analysis::milo_r::MiloRParams;
+use crate::single_cell::sc_analysis::seacells::SEACellsParams;
+use crate::single_cell::sc_analysis::super_cells::SuperCellParams;
+use crate::single_cell::sc_analysis::vision::SignatureGenes;
+use crate::single_cell::sc_batch_correction::fast_mnn::FastMnnParams;
 use crate::single_cell::sc_data::data_io::MinCellQuality;
 use crate::single_cell::sc_processing::doublet_detection::BoostParams;
 use crate::single_cell::sc_processing::knn::KnnParams;
 use crate::single_cell::sc_processing::scrublet::ScrubletParams;
+
+/////////////
+// Helpers //
+/////////////
+
+/// Convert assignments to R-friendly list format with unassigned cell handling
+///
+/// Returns -1 for unassigned cells (R convention for missing/unassigned).
+///
+/// ### Params
+///
+/// * `assignments` - Vector where assignments[cell_id] = Some(metacell_id) or None
+/// * `n_cells` - Total number of cells
+/// * `k` - Number of metacells
+///
+/// ### Returns
+///
+/// R List with -1 indicating unassigned cells
+pub fn assignments_to_r_list(assignments: &[Option<usize>], n_cells: usize) -> List {
+    let r_assignments: Vec<i32> = assignments
+        .iter()
+        .map(|&x| match x {
+            Some(id) => (id + 1) as i32,
+            None => -1,
+        })
+        .collect();
+
+    let n_unassigned = assignments.iter().filter(|x| x.is_none()).count();
+
+    let actual_k = assignments
+        .iter()
+        .filter_map(|&x| x)
+        .max()
+        .map(|x| x + 1)
+        .unwrap_or(0);
+
+    let mut metacells = vec![Vec::new(); actual_k];
+
+    for (cell_id, &metacell_id) in assignments.iter().enumerate() {
+        if let Some(id) = metacell_id {
+            metacells[id].push((cell_id + 1) as i32);
+        }
+    }
+
+    let unassigned: Vec<i32> = assignments
+        .iter()
+        .enumerate()
+        .filter_map(|(cell_id, &x)| {
+            if x.is_none() {
+                Some((cell_id + 1) as i32)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let metacells_list: List = metacells.into_iter().map(Robj::from).collect();
+
+    list!(
+        assignments = r_assignments,
+        metacells = metacells_list,
+        unassigned = unassigned,
+        n_metacells = actual_k,
+        n_cells = n_cells,
+        n_unassigned = n_unassigned
+    )
+}
+
+////////////////////
+// Param wrappers //
+////////////////////
 
 //////////////////
 // Cell quality //
@@ -412,6 +490,369 @@ impl BoostParams {
             n_iters,
             p_thresh,
             voter_thresh,
+            knn_params,
+        }
+    }
+}
+
+impl FastMnnParams {
+    /// Generate the FastMnnParams from an R list
+    ///
+    /// Should values not be found within the List, the parameters will default
+    /// to sensible defaults.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the fastMNN parameters.
+    ///
+    /// ### Return
+    ///
+    /// The `FastMnnParams` with all of the parameters.
+    pub fn from_r_list(r_list: List) -> Self {
+        let knn_params = KnnParams::from_r_list(r_list.clone());
+
+        let fastmnn_list = r_list.into_hashmap();
+
+        let sigma = fastmnn_list
+            .get("sigma")
+            .and_then(|v| v.as_real())
+            .unwrap_or(0.1) as f32;
+
+        let cos_norm = fastmnn_list
+            .get("cos_norm")
+            .and_then(|v| v.as_logical())
+            .map(|rb| rb.is_true())
+            .unwrap_or(true);
+
+        let var_adj = fastmnn_list
+            .get("var_adj")
+            .and_then(|v| v.as_logical())
+            .map(|rb| rb.is_true())
+            .unwrap_or(true);
+
+        let no_pcs = fastmnn_list
+            .get("no_pcs")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(30) as usize;
+
+        let random_svd = fastmnn_list
+            .get("random_svd")
+            .and_then(|v| v.as_logical())
+            .map(|rb| rb.is_true())
+            .unwrap_or(true);
+
+        Self {
+            sigma,
+            var_adj,
+            no_pcs,
+            random_svd,
+            cos_norm,
+            knn_params,
+        }
+    }
+}
+
+///////////
+// miloR //
+///////////
+
+impl MiloRParams {
+    /// Generate MiloRParams from an R list
+    ///
+    /// Should values not be found within the List, the parameters will default
+    /// to sensible defaults based on heuristics.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the MiloR parameters
+    ///
+    /// ### Returns
+    ///
+    /// The `MiloRParams` with all parameters set.
+    pub fn from_r_list(r_list: List) -> Self {
+        let knn_params = KnnParams::from_r_list(r_list.clone());
+
+        let params_list = r_list.into_hashmap();
+
+        let prop = params_list
+            .get("prop")
+            .and_then(|v| v.as_real())
+            .unwrap_or(0.2);
+
+        let k_refine = params_list
+            .get("k_refine")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(20) as usize;
+
+        let index_type = std::string::String::from(
+            params_list
+                .get("index_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("annoy"),
+        );
+
+        let refinement_strategy = std::string::String::from(
+            params_list
+                .get("refinement_strategy")
+                .and_then(|v| v.as_str())
+                .unwrap_or("approximate"),
+        );
+
+        Self {
+            prop,
+            k_refine,
+            refinement_strategy,
+            index_type,
+            knn_params,
+        }
+    }
+}
+
+//////////////
+// SeaCells //
+//////////////
+
+impl SEACellsParams {
+    /// Generate SEACellsParams from an R list
+    ///
+    /// Should values not be found within the List, the parameters will default
+    /// to sensible defaults based on the original SEACells implementation.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the SEACells parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The `SEACellsParams` with all parameters set.
+    pub fn from_r_list(r_list: List) -> Self {
+        let knn_params = KnnParams::from_r_list(r_list.clone());
+
+        let seacells_list = r_list.into_hashmap();
+
+        let n_sea_cells = seacells_list
+            .get("n_sea_cells")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(0) as usize;
+
+        let max_fw_iters = seacells_list
+            .get("max_fw_iters")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(50) as usize;
+
+        // convergence_epsilon: algorithm converges when RSS change < epsilon * RSS(0)
+        // Default: 1e-3 from Python implementation
+        let convergence_epsilon = seacells_list
+            .get("convergence_epsilon")
+            .and_then(|v| v.as_real())
+            .unwrap_or(1e-3) as f32;
+
+        let max_iter = seacells_list
+            .get("max_iter")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(100) as usize;
+
+        let min_iter = seacells_list
+            .get("min_iter")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(10) as usize;
+
+        let greedy_threshold = seacells_list
+            .get("greedy_threshold")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(20000) as usize;
+
+        let graph_building = seacells_list
+            .get("graph_building")
+            .and_then(|v| v.as_str())
+            .unwrap_or("union")
+            .to_string();
+
+        let pruning = seacells_list
+            .get("pruning")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let pruning_threshold: f32 = seacells_list
+            .get("pruning_threshold")
+            .and_then(|v| v.as_real())
+            .unwrap_or(1e-7) as f32;
+
+        Self {
+            // seacell
+            n_sea_cells,
+            max_fw_iters,
+            convergence_epsilon,
+            max_iter,
+            min_iter,
+            greedy_threshold,
+            graph_building,
+            pruning,
+            pruning_threshold,
+            // knn
+            knn_params,
+        }
+    }
+}
+
+///////////////
+// MetaCells //
+///////////////
+
+impl MetaCellParams {
+    /// Generate the MetaCellParams from an R list
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The R list with the parameters.
+    ///
+    /// ### Return
+    ///
+    /// The `MetaCellParams` structure.
+    pub fn from_r_list(r_list: List) -> Self {
+        let knn_params = KnnParams::from_r_list(r_list.clone());
+        let meta_cell_params = r_list.into_hashmap();
+
+        // meta cell
+        let max_shared = meta_cell_params
+            .get("max_shared")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(15) as usize;
+        let target_no_metacells = meta_cell_params
+            .get("target_no_metacells")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(1000) as usize;
+        let max_iter = meta_cell_params
+            .get("max_iter")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(5000) as usize;
+
+        Self {
+            max_shared,
+            target_no_metacells,
+            max_iter,
+            knn_params,
+        }
+    }
+}
+
+////////////////
+// SuperCells //
+////////////////
+
+impl SuperCellParams {
+    /// Generate the SuperCellParams from an R list
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The R list with the parameters
+    ///
+    /// ### Return
+    ///
+    /// The `SuperCellParams` structure
+    pub fn from_r_list(r_list: List) -> Self {
+        let knn_params = KnnParams::from_r_list(r_list.clone());
+
+        let params = r_list.into_hashmap();
+
+        // supercell
+        let walk_length = params
+            .get("walk_length")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(3) as usize;
+
+        let graining_factor = params
+            .get("graining_factor")
+            .and_then(|v| v.as_real())
+            .unwrap_or(50.0);
+
+        let linkage_dist = params
+            .get("linkage_dist")
+            .and_then(|v| v.as_str())
+            .unwrap_or("average")
+            .to_string();
+
+        Self {
+            walk_length,
+            graining_factor,
+            linkage_dist,
+            knn_params,
+        }
+    }
+}
+
+////////////
+// Vision //
+////////////
+
+impl SignatureGenes {
+    /// Generate a SignatureGenes from an R list
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - An R list that is expected to have `"pos"` and `"neg"` with
+    ///   0-index positions of the gene for this gene set.
+    pub fn from_r_list(r_list: List) -> Self {
+        let r_list = r_list.into_hashmap();
+
+        let positive: Vec<usize> = r_list
+            .get("pos")
+            .and_then(|v| v.as_integer_vector())
+            .unwrap_or_default()
+            .iter()
+            .map(|x| *x as usize)
+            .collect();
+
+        let negative: Vec<usize> = r_list
+            .get("neg")
+            .and_then(|v| v.as_integer_vector())
+            .unwrap_or_default()
+            .iter()
+            .map(|x| *x as usize)
+            .collect();
+
+        Self { positive, negative }
+    }
+}
+
+/////////////
+// Hotspot //
+/////////////
+
+impl HotSpotParams {
+    /// Generate HotSpotParams from an R list
+    ///
+    /// Should values not be found within the List, the parameters will default
+    /// to sensible defaults based on heuristics.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the Boost parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The `HotSpotParams` with all parameters set.
+    pub fn from_r_list(r_list: List) -> Self {
+        let knn_params = KnnParams::from_r_list(r_list.clone());
+
+        let params_list = r_list.into_hashmap();
+
+        // hotspot
+        let model = std::string::String::from(
+            params_list
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("normal"),
+        );
+
+        let normalise = params_list
+            .get("normalise")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+        Self {
+            model,
+            normalise,
             knn_params,
         }
     }

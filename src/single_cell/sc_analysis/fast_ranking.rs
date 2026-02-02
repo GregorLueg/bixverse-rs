@@ -207,7 +207,7 @@ pub fn rank_csr_chunk_vec(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::prelude::*;
+    use crate::single_cell::sc_traits::F16;
 
     // Helper to create F16 from f32
     fn f16_vec(values: &[f32]) -> Vec<F16> {

@@ -1,4 +1,4 @@
-use faer::Mat;
+use faer::{Mat, MatRef};
 use std::collections::BTreeMap;
 
 use crate::prelude::*;
@@ -201,5 +201,92 @@ where
         };
 
         col_indices
+    }
+}
+
+/// Matrix slice view
+///
+/// Structure to help creating sub slices of a given matrix when needed.
+/// Due to memory structure, slicing creates deep copies, but this function
+/// avoids generating them until the last possible moment.
+///
+/// ### Fields
+///
+/// * `data` - The faer MatRef (original matrix)
+/// * `row_indices` - The row indices you want to slice out.
+/// * `col_indices` - The col indices you want to slice out.
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+pub struct MatSliceView<'a, 'r, 'c, T> {
+    data: MatRef<'a, T>,
+    row_indices: &'r [usize],
+    col_indices: &'c [usize],
+}
+
+#[allow(dead_code)]
+impl<'a, 'r, 'c, T> MatSliceView<'a, 'r, 'c, T>
+where
+    T: BixverseFloat,
+{
+    /// Generate a new MatSliceView
+    ///
+    /// This function will panic if you try to select indices larger than the
+    /// underlying matrix.
+    ///
+    /// ### Params
+    ///
+    /// * `data` - The original MatRef from which you want to slice out data
+    /// * `row_indices` - The row indices you want to slice out.
+    /// * `col_indices` - The col indices you want to slice out.
+    pub fn new(data: MatRef<'a, T>, row_indices: &'r [usize], col_indices: &'c [usize]) -> Self {
+        let max_col_index = col_indices.iter().max().copied().unwrap_or(0);
+        let max_row_index = row_indices.iter().max().copied().unwrap_or(0);
+
+        assert!(
+            max_col_index < data.ncols(),
+            "You selected indices larger than ncol."
+        );
+        assert!(
+            max_row_index < data.nrows(),
+            "You selected indices larger than nrow."
+        );
+
+        Self {
+            data,
+            row_indices,
+            col_indices,
+        }
+    }
+
+    /// Return the number of rows
+    ///
+    /// ### Returns
+    ///
+    /// Number of rows
+    pub fn nrows(&self) -> usize {
+        self.row_indices.len()
+    }
+
+    /// Return the number of columns
+    ///
+    /// ### Returns
+    ///
+    /// Number of columns
+    pub fn ncols(&self) -> usize {
+        self.col_indices.len()
+    }
+
+    /// Return an owned matrix.
+    ///
+    /// Deep copying cannot be circumvented due to memory accessing at this point.
+    /// Subsequent matrix algebra needs a continouos view into memory.
+    ///
+    /// ### Returns
+    ///
+    /// Owned sliced matrix for subsequent usage.
+    pub fn to_owned(&self) -> Mat<T> {
+        Mat::from_fn(self.nrows(), self.ncols(), |i, j| {
+            *self.data.get(self.row_indices[i], self.col_indices[j])
+        })
     }
 }
