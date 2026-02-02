@@ -118,7 +118,7 @@ where
 pub fn calculate_onto_similarity<'a, T>(
     t1: &'a str,
     t2: &'a str,
-    sim_type: OntoSemSimType,
+    sim_type: &OntoSemSimType,
     max_ic: T,
     ancestor_map: &FxHashMap<String, FxHashSet<String>>,
     info_content_map: &BTreeMap<String, T>,
@@ -149,6 +149,52 @@ where
     };
 
     OntoSimRes { t1, t2, sim }
+}
+
+/// Calculate the semantic similarity in an efficient manner for a set of terms
+///
+/// ### Params
+///
+/// * `terms_split` - A vector of tuples with the first element being the term 1
+///   and the second element being the terms against which to calculate
+///   the semantic similarity.
+/// * `sim_type` - Which type of semantic similarity to calculate.
+/// * `ancestor_map` - HashMap with the ancestors of the terms.
+/// * `ic_map` - HashMap with the information content for the terms.
+///
+/// ### Returns
+///
+/// A vector of `OntoSimRes` results.
+pub fn calculate_onto_sim<'a, T>(
+    terms_split: &'a Vec<(String, &[String])>,
+    sim_type: &str,
+    ancestors_map: FxHashMap<String, FxHashSet<String>>,
+    ic_map: BTreeMap<String, T>,
+) -> Vec<OntoSimRes<'a, T>>
+where
+    T: BixverseFloat,
+{
+    let max_ic = ic_map
+        .values()
+        .max_by(|a, b| a.partial_cmp(b).unwrap())
+        .unwrap();
+    let sim_type = parse_onto_similarity_type(sim_type).unwrap_or_default();
+
+    let onto_sim: Vec<Vec<OntoSimRes<'_, T>>> = terms_split
+        .par_iter()
+        .map(|(t1, others)| {
+            let mut sim_vec: Vec<OntoSimRes<'_, T>> = Vec::with_capacity(others.len());
+            others.iter().for_each(|t2| {
+                let sim_res =
+                    calculate_onto_similarity(t1, t2, &sim_type, *max_ic, &ancestors_map, &ic_map);
+                sim_vec.push(sim_res);
+            });
+
+            sim_vec
+        })
+        .collect();
+
+    flatten_vector(onto_sim)
 }
 
 ///////////////////////
