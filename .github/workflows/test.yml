@@ -32,5 +32,10 @@ jobs:
       - name: Set R_HOME on Windows
         if: runner.os == 'Windows'
         run: echo "R_HOME=${{ steps.setup-r.outputs.r-home }}" >> $env:GITHUB_ENV
+      - name: Set Rust target on Windows
+        if: runner.os == 'Windows'
+        run: |
+          rustup target add x86_64-pc-windows-gnu
+    rustup default stable-x86_64-pc-windows-gnu
       - name: Run tests
         run: cargo test --no-default-features && cargo test --all-features
