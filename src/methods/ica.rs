@@ -135,7 +135,7 @@ pub fn prepare_whitening<T: BixverseFloat>(
 /// ### Returns
 ///
 /// The updated mixing matrix.
-pub fn update_mix_mat<T: BixverseFloat>(w: MatRef<T>) -> faer::Mat<T> {
+fn update_mix_mat<T: BixverseFloat>(w: MatRef<T>) -> faer::Mat<T> {
     // SVD
     let svd_res = w.thin_svd().unwrap();
 
@@ -162,7 +162,7 @@ pub fn update_mix_mat<T: BixverseFloat>(w: MatRef<T>) -> faer::Mat<T> {
 /// ### Returns
 ///
 /// Mixing matrix of dimensions `n_comp` x `n_comp`
-pub fn create_w_init<T: BixverseFloat>(n_comp: usize, seed: u64) -> faer::Mat<T> {
+fn create_w_init<T: BixverseFloat>(n_comp: usize, seed: u64) -> faer::Mat<T> {
     let mut rng = StdRng::seed_from_u64(seed);
     let normal = Normal::new(0.0, 1.0).unwrap();
     let vec_size = n_comp.pow(2);

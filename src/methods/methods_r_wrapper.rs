@@ -1,5 +1,7 @@
-use extendr_api::{Attributes, List, Robj};
+use extendr_api::*;
+use std::collections::BTreeMap;
 
+use crate::core::mat_struct::NamedMatrix;
 use crate::methods::cis_target::MotifEnrichment;
 use crate::methods::dgrdl::DgrdlParams;
 use crate::methods::ica::IcaParams;
@@ -179,4 +181,46 @@ impl<T: BixverseFloat> IcaParams<T> {
             verbose,
         }
     }
+}
+
+/////////
+// RBH //
+/////////
+
+/// Transforms a list of R matrices into a vector of R matrices
+///
+/// ### Params
+///
+/// * `matrix_list` - R List of matrices
+///
+/// ### Returns
+///
+/// A vector of tuples with the name of the list element and the R matrix.
+pub fn r_matrix_list_to_vec(matrix_list: List) -> Vec<(String, RArray<f64, [usize; 2]>)> {
+    matrix_list
+        .iter()
+        .map(|(n, obj)| (n.to_string(), obj.as_matrix().unwrap()))
+        .collect()
+}
+
+/// Take a vector of R matrices and generate a BTreeMap of NamedMatrices
+///
+/// ### Params
+///
+/// * `matrix_vector` - Slice of tuples with the first element representing the
+///   name and the second the R matrix
+///
+/// ### Returns
+///
+/// A BTreeMap of `NamedMatrix` objects.
+pub fn r_matrix_vec_to_named_matrices(
+    matrix_vector: &[(String, RArray<f64, [usize; 2]>)],
+) -> BTreeMap<String, NamedMatrix<'_, f64>> {
+    let mut result = BTreeMap::new();
+    for (name, matrix) in matrix_vector {
+        let named_mat = NamedMatrix::<f64>::from_r_matrix(matrix);
+        result.insert(name.clone(), named_mat);
+    }
+
+    result
 }
