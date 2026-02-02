@@ -38,7 +38,7 @@ pub enum OntoSemSimType {
 /// ### Returns
 ///
 /// The parsed semantic similarity type, or None if the string is invalid
-pub fn parse_onto_similarity_type(sim_type: &str) -> Option<OntoSemSimType> {
+fn parse_onto_similarity_type(sim_type: &str) -> Option<OntoSemSimType> {
     match sim_type.to_lowercase().as_str() {
         "resnik" => Some(OntoSemSimType::Resnik),
         "lin" => Some(OntoSemSimType::Lin),
