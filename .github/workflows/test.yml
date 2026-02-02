@@ -29,5 +29,8 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ github.sha }}
           restore-keys: |
             ${{ runner.os }}-cargo-
+      - name: Set R_HOME on Windows
+          if: runner.os == 'Windows'
+          run: echo "R_HOME=${{ steps.setup-r.outputs.r-home }}" >> $env:GITHUB_ENV
       - name: Run tests
         run: cargo test --no-default-features && cargo test --all-features
