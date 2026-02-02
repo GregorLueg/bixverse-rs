@@ -677,3 +677,60 @@ where
         laplacian
     }
 }
+
+/// Convert kNN indices to undirected SparseGraph
+///
+/// ### Params
+///
+/// * `knn` - kNN indices. Excludes self.
+///
+/// ### Returns
+///
+/// Undirected sparse graph with symmetric CSR representation
+pub fn knn_to_sparse_graph<T>(knn: &[Vec<usize>]) -> SparseGraph<T>
+where
+    T: BixverseFloat + std::iter::Sum + BixverseNumeric,
+{
+    let n_nodes = knn.len();
+    let mut edges = Vec::new();
+
+    // Collect all edges in both directions
+    for (i, neighbours) in knn.iter().enumerate() {
+        for &j in neighbours {
+            edges.push((i, j));
+            edges.push((j, i)); // Symmetric
+        }
+    }
+
+    // Sort to group duplicates
+    edges.sort_unstable();
+
+    // Deduplicate and sum weights
+    let mut rows = Vec::new();
+    let mut cols = Vec::new();
+    let mut vals = Vec::new();
+
+    if !edges.is_empty() {
+        let (mut curr_r, mut curr_c) = edges[0];
+        let mut weight = T::one();
+
+        for &(r, c) in &edges[1..] {
+            if r == curr_r && c == curr_c {
+                weight += T::one();
+            } else {
+                rows.push(curr_r);
+                cols.push(curr_c);
+                vals.push(weight);
+                (curr_r, curr_c) = (r, c);
+                weight = T::one();
+            }
+        }
+        rows.push(curr_r);
+        cols.push(curr_c);
+        vals.push(weight);
+    }
+
+    let adjacency = coo_to_csr(&rows, &cols, &vals, (n_nodes, n_nodes));
+
+    SparseGraph::new(n_nodes, adjacency, false)
+}

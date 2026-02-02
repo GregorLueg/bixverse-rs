@@ -14,4 +14,6 @@ pub use crate::single_cell::sc_data::data_io::{
     CellQuality, CscGeneChunk, CsrCellChunk, MinCellQuality, ParallelSparseReader,
 };
 #[cfg(feature = "single-cell")]
+pub use crate::single_cell::sc_processing::knn::*;
+#[cfg(feature = "single-cell")]
 pub use crate::single_cell::sc_traits::*;
