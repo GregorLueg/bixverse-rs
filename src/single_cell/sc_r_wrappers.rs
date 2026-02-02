@@ -11,6 +11,7 @@ use crate::single_cell::sc_analysis::super_cells::SuperCellParams;
 use crate::single_cell::sc_analysis::vision::SignatureGenes;
 use crate::single_cell::sc_batch_correction::fast_mnn::FastMnnParams;
 use crate::single_cell::sc_data::data_io::MinCellQuality;
+use crate::single_cell::sc_data::sc_synthetic_data::CellTypeConfig;
 use crate::single_cell::sc_processing::doublet_detection::BoostParams;
 use crate::single_cell::sc_processing::knn::KnnParams;
 use crate::single_cell::sc_processing::scrublet::ScrubletParams;
@@ -85,6 +86,36 @@ pub fn assignments_to_r_list(assignments: &[Option<usize>], n_cells: usize) -> L
 ////////////////////
 // Param wrappers //
 ////////////////////
+
+//////////////
+// CellType //
+//////////////
+
+impl CellTypeConfig {
+    /// Generate the CellTypeConfig from an R list
+    ///
+    /// If values are not found, will use default values
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The R list containing the parameters. Should have the
+    ///   elements `"marker_genes"`, `"marker_exp_range"`, `"markers_per_cell"`.
+    ///
+    /// ### Returns
+    ///
+    /// The `CellTypeConfig` based on the R list.
+    pub fn from_r_list(r_list: List) -> Self {
+        let map = r_list.into_hashmap();
+
+        let marker_genes = map
+            .get("marker_genes")
+            .and_then(|v| v.as_integer_vector())
+            .map(|v| v.iter().map(|x| *x as usize).collect())
+            .unwrap_or_default();
+
+        CellTypeConfig { marker_genes }
+    }
+}
 
 //////////////////
 // Cell quality //
