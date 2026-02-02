@@ -1,4 +1,4 @@
-name: Test the package
+name: Test the bixverse-rs package
 on:
   push:
     branches: [main]
@@ -30,7 +30,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
       - name: Set R_HOME on Windows
-          if: runner.os == 'Windows'
-          run: echo "R_HOME=${{ steps.setup-r.outputs.r-home }}" >> $env:GITHUB_ENV
+        if: runner.os == 'Windows'
+        run: echo "R_HOME=${{ steps.setup-r.outputs.r-home }}" >> $env:GITHUB_ENV
       - name: Run tests
         run: cargo test --no-default-features && cargo test --all-features
