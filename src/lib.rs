@@ -4,6 +4,7 @@ pub mod core;
 pub mod enrichment;
 pub mod graph;
 pub mod methods;
+pub mod ontology;
 pub mod prelude;
 pub mod utils;
 
