@@ -216,14 +216,12 @@ where
 /// * `row_indices` - The row indices you want to slice out.
 /// * `col_indices` - The col indices you want to slice out.
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct MatSliceView<'a, 'r, 'c, T> {
     data: MatRef<'a, T>,
     row_indices: &'r [usize],
     col_indices: &'c [usize],
 }
 
-#[allow(dead_code)]
 impl<'a, 'r, 'c, T> MatSliceView<'a, 'r, 'c, T>
 where
     T: BixverseFloat,

@@ -5,6 +5,7 @@ edition = "2024"
 authors = ["Gregor Lueg <gregorlueg@me.com>"]
 license = "MIT"
 repository = "https://github.com/GregorLueg/bixverse-rs"
+description = "A Rust library with various utilities for computational biology and single cell."
 
 [lib]
 name = "bixverse_rs"
