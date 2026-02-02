@@ -1,6 +1,7 @@
 #![allow(clippy::needless_range_loop)]
 
 pub mod core;
+pub mod data;
 pub mod enrichment;
 pub mod graph;
 pub mod methods;
