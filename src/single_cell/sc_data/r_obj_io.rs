@@ -1,4 +1,3 @@
-use ann_search_rs::utils::dist::SimdDistance;
 use std::path::Path;
 use thousands::Separable;
 
@@ -31,7 +30,7 @@ pub fn write_r_counts<P: AsRef<Path>, T>(
     verbose: bool,
 ) -> (usize, usize, CellQuality)
 where
-    T: BixverseNumeric + SimdDistance + Into<f64> + Into<u32>,
+    T: BixverseNumeric + Into<f64> + Into<u32>,
 {
     let (no_cells, no_genes) = compressed_data.shape();
 
@@ -82,7 +81,7 @@ pub fn write_r_counts_csr<P: AsRef<Path>, T>(
     verbose: bool,
 ) -> (usize, usize, CellQuality)
 where
-    T: BixverseNumeric + SimdDistance + Into<f64> + Into<u32>,
+    T: BixverseNumeric + Into<f64> + Into<u32>,
 {
     let (no_cells, no_genes) = compressed_data.shape();
 

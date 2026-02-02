@@ -151,3 +151,49 @@ impl F16 {
         f16::from_bits(self.0).to_f32() as f64
     }
 }
+
+///////////////////////
+// f32 and u16 stuff //
+///////////////////////
+
+/// Trait for types that can be converted to f32 and u16.
+pub trait ToF32AndU16: Copy {
+    fn to_f32(self) -> f32;
+    fn to_u16(self) -> u16;
+}
+
+impl ToF32AndU16 for i32 {
+    fn to_f32(self) -> f32 {
+        self as f32
+    }
+    fn to_u16(self) -> u16 {
+        self as u16
+    }
+}
+
+impl ToF32AndU16 for u32 {
+    fn to_f32(self) -> f32 {
+        self as f32
+    }
+    fn to_u16(self) -> u16 {
+        self as u16
+    }
+}
+
+impl ToF32AndU16 for usize {
+    fn to_f32(self) -> f32 {
+        self as f32
+    }
+    fn to_u16(self) -> u16 {
+        self as u16
+    }
+}
+
+impl ToF32AndU16 for u16 {
+    fn to_f32(self) -> f32 {
+        self as f32
+    }
+    fn to_u16(self) -> u16 {
+        self
+    }
+}
