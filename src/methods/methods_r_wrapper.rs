@@ -208,7 +208,7 @@ pub fn r_matrix_list_to_vec(matrix_list: List) -> Vec<(String, RArray<f64, [usiz
 /// ### Params
 ///
 /// * `matrix_vector` - Slice of tuples with the first element representing the
-///   name and the second the R matrix
+///   name and the second the R matrix.
 ///
 /// ### Returns
 ///

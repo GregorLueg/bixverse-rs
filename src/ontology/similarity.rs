@@ -22,7 +22,7 @@ static EMPTY_ANCESTORS: Lazy<FxHashSet<String>> = Lazy::new(FxHashSet::default);
 
 /// Enum to define the different semantic similarity types
 #[derive(Clone, Debug, Default)]
-pub enum OntoSemSimType {
+enum OntoSemSimType {
     #[default]
     Resnik,
     Lin,
@@ -115,7 +115,7 @@ where
 /// ### Returns
 ///
 /// `OntoSimRes` result.
-pub fn calculate_onto_similarity<'a, T>(
+fn calculate_onto_similarity<'a, T>(
     t1: &'a str,
     t2: &'a str,
     sim_type: &OntoSemSimType,

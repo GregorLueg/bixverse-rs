@@ -3,7 +3,9 @@ use indexmap::IndexSet;
 use rayon::prelude::*;
 use std::time::Instant;
 
+use crate::core::math::pca_svd::randomised_sparse_svd;
 use crate::core::math::pca_svd::*;
+use crate::core::math::sparse::sparse_svd_lanczos;
 use crate::prelude::*;
 
 /////////
@@ -151,4 +153,82 @@ pub fn pca_on_sc(
     };
 
     (scores, loadings, s, scaled)
+}
+
+/// Calculate the PCs for single cell data
+///
+/// ### Params
+///
+/// * `f_path` - Path to the gene-based binary file.
+/// * `cell_indices` - Slice of indices for the cells.
+/// * `gene_indices` - Slice of indices for the genes.
+/// * `no_pcs` - Number of principal components to calculate
+/// * `random_svd` - Shall randomised singular value decompostion be used. This
+///   has the advantage of speed-ups, but loses precision.
+/// * `return_scaled` - Return the scaled data.
+/// * `seed` - Seed for randomised SVD.
+///
+/// ### Return
+///
+/// A tuple of the samples projected on thePC space, gene loadings and singular
+/// values.
+#[allow(clippy::too_many_arguments)]
+pub fn pca_on_sc_sparse(
+    f_path: &str,
+    cell_indices: &[usize],
+    gene_indices: &[usize],
+    no_pcs: usize,
+    random_svd: bool,
+    seed: usize,
+    verbose: bool,
+) -> (Mat<f32>, Mat<f32>, Vec<f32>) {
+    let start_total = Instant::now();
+
+    let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
+
+    let start_reading = Instant::now();
+
+    let reader = ParallelSparseReader::new(f_path).unwrap();
+    let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(gene_indices);
+
+    let end_reading = start_reading.elapsed();
+
+    if verbose {
+        println!("Loaded in data : {:.2?}", end_reading);
+    }
+
+    let n_cells = cell_set.len();
+
+    let start_svd = Instant::now();
+
+    gene_chunks.par_iter_mut().for_each(|chunk| {
+        chunk.filter_selected_cells(&cell_set);
+    });
+
+    let csc = from_gene_chunks::<f32>(&gene_chunks, n_cells);
+
+    let (scores, loadings, s) = if random_svd {
+        let svd_res =
+            randomised_sparse_svd::<f32, f32>(&csc, no_pcs, seed as u64, true, None, None);
+        let scores = compute_pc_scores(&svd_res);
+        (scores, svd_res.u().to_owned(), svd_res.s().to_vec())
+    } else {
+        let svd_res = sparse_svd_lanczos::<f32, f32, f32>(&csc, no_pcs, seed as u64, true);
+        let scores = compute_pc_scores(&svd_res);
+        (scores, svd_res.u().to_owned(), svd_res.s().to_vec())
+    };
+
+    let end_svd = start_svd.elapsed();
+
+    if verbose {
+        println!("Finished sparse PCA calculations : {:.2?}", end_svd);
+    }
+
+    let end_total = start_total.elapsed();
+
+    if verbose {
+        println!("Total run time sparse PCA detection: {:.2?}", end_total);
+    }
+
+    (scores, loadings, s)
 }

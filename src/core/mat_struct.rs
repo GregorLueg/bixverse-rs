@@ -236,9 +236,13 @@ where
     /// * `data` - The original MatRef from which you want to slice out data
     /// * `row_indices` - The row indices you want to slice out.
     /// * `col_indices` - The col indices you want to slice out.
-    pub fn new(data: MatRef<'a, T>, row_indices: &'r [usize], col_indices: &'c [usize]) -> Self {
-        let max_col_index = col_indices.iter().max().copied().unwrap_or(0);
-        let max_row_index = row_indices.iter().max().copied().unwrap_or(0);
+    pub fn new(
+        data: MatRef<'a, T>,
+        row_indices: &'r [usize],
+        col_indices: &'c [usize],
+    ) -> MatSliceView<'a, 'r, 'c, T> {
+        let max_col_index = col_indices.iter().copied().fold(0, usize::max);
+        let max_row_index = row_indices.iter().copied().fold(0, usize::max);
 
         assert!(
             max_col_index < data.ncols(),
