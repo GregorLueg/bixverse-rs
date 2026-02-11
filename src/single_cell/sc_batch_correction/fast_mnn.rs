@@ -5,6 +5,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::time::Instant;
 
 use crate::prelude::*;
+use crate::single_cell::sc_batch_correction::batch_utils::cosine_normalise;
 use crate::single_cell::sc_processing::pca::*;
 
 ////////////
@@ -37,26 +38,6 @@ pub struct FastMnnParams {
 /////////////
 // Helpers //
 /////////////
-
-/// Apply cosine normalisation (L2 normalisation) to each row
-///
-/// ### Params
-///
-/// * `mat` - The matrix on which to apply the Cosine normalisation per row
-///
-/// ### Returns
-///
-/// Per row L2-normalised data
-pub fn cosine_normalise(mat: &Mat<f32>) -> Mat<f32> {
-    Mat::from_fn(mat.nrows(), mat.ncols(), |row, col| {
-        let norm = mat.get(row, ..).norm_l2();
-        if norm > 1e-8 {
-            mat[(row, col)] / norm
-        } else {
-            0.0
-        }
-    })
-}
 
 /// Find mutual nearest neighbours from two KNN graphs
 ///
