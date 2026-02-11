@@ -43,6 +43,7 @@ pub struct MiloRParams {
 ///
 /// * `Annoy` - Approximate nearest neighbour index using trees
 /// * `Hnsw` - Hierarchical navigable small world graph index
+/// * `NNDescent` - Nearest neighbour descent index
 pub enum KnnIndex {
     /// The Annoy index
     Annoy(AnnoyIndex<f32>),

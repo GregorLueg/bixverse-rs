@@ -21,15 +21,8 @@ use crate::single_cell::sc_processing::pca::*;
 /// * `var_adj` - Apply variance adjustment to avoid kissing effects
 /// * `no_pcs` - Number of PCs to use for the MNN calculations
 /// * `random_svd` - Boolean. Shall randomised SVD be used.
-/// * `k` - Number of mutual nearest neighbours to identify
-/// * `knn_method` - Approximate nearest neighbour search method. One of
-///   `"annoy"` or `"hnsw"`.
-/// * `dist_metric` - Distance metric to use. One of `"cosine"` or
-///   `"euclidean"`.
-/// * `annoy_n_trees` - Number of trees for Annoy index (only used if
-///   knn_method="annoy")
-/// * `annoy_search_budget` - Search budget per tree for Annoy (only used if
-///   knn_method="annoy")
+/// * `knn_params` - The KnnParams that contains all the hyperparameter for the
+///   various KnnIndices that are implemented.
 #[derive(Clone, Debug)]
 pub struct FastMnnParams {
     pub sigma: f32,
@@ -155,6 +148,15 @@ pub fn compute_correction_vecs(
 }
 
 /// Logspace addition to avoid underflow
+///
+/// ### Params
+///
+/// * `log_a` - Logarithm of first value
+/// * `log_b` - Logarithm of second value
+///
+/// ### Returns
+///
+/// Logarithm of sum of two values
 #[inline]
 fn logspace_add(log_a: f32, log_b: f32) -> f32 {
     if log_a.is_infinite() && log_a.is_sign_negative() {

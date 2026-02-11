@@ -155,7 +155,20 @@ pub fn pca_on_sc(
     (scores, loadings, s, scaled)
 }
 
-/// Calculate the PCs for single cell data
+////////////////
+// Sparse PCA //
+////////////////
+
+/// Calculate the PCs for single cell data (sparse)
+///
+/// This version does NOT scale the data and avoids densifying the data at any
+/// point, avoiding holding a large matrix in memory. This comes at the cost of
+/// the first principal component being largely driven by average gene
+/// expression, but makes analysing large datasets actually tractable. For
+/// the non random version a sparse SVD Lanczos algorithm is used. For the
+/// randomised version, it uses the randomised SVD approach in which the dense
+/// matrix is of much smaller size than the potentially massive scaled, dense
+/// data.
 ///
 /// ### Params
 ///
@@ -163,9 +176,8 @@ pub fn pca_on_sc(
 /// * `cell_indices` - Slice of indices for the cells.
 /// * `gene_indices` - Slice of indices for the genes.
 /// * `no_pcs` - Number of principal components to calculate
-/// * `random_svd` - Shall randomised singular value decompostion be used. This
-///   has the advantage of speed-ups, but loses precision.
-/// * `return_scaled` - Return the scaled data.
+/// * `random_svd` - Shall randomised sparse singular value decompostion be
+///   used. This has the advantage of speed-ups, but loses precision.
 /// * `seed` - Seed for randomised SVD.
 ///
 /// ### Return
@@ -208,8 +220,14 @@ pub fn pca_on_sc_sparse(
     let csc = from_gene_chunks::<f32>(&gene_chunks, n_cells);
 
     let (scores, loadings, s) = if random_svd {
-        let svd_res =
-            randomised_sparse_svd::<f32, f32>(&csc, no_pcs, seed as u64, true, None, None);
+        let svd_res = randomised_sparse_svd::<f32, f32>(
+            &csc,
+            no_pcs,
+            seed as u64,
+            true,
+            Some(100_usize),
+            None,
+        );
         let scores = compute_pc_scores(&svd_res);
         (scores, svd_res.u().to_owned(), svd_res.s().to_vec())
     } else {

@@ -1,6 +1,6 @@
 [package]
 name = "bixverse-rs"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 authors = ["Gregor Lueg <gregorlueg@me.com>"]
 license = "MIT"
@@ -21,7 +21,7 @@ codegen-units = 16
 strip = true
 
 [dependencies]
-ann-search-rs = "0.2.2"
+ann-search-rs = "0.2.3"
 bincode = { version = "2.0.1", features = ["serde"], optional = true }
 extendr-api = "0.8.1"
 faer = "0.23.2"
@@ -44,3 +44,4 @@ rustc-hash = "2.1.1"
 serde = { version = "1.0", features = ["derive"] }
 statrs = "0.18.0"
 thousands = "0.2.0"
+wide = "1.1.1"
