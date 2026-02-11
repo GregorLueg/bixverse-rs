@@ -1,6 +1,8 @@
-use faer::{Mat, MatRef};
+use faer::{Mat, MatMut, MatRef};
+use num_traits::Float;
 use rand::prelude::*;
 use rand_distr::Normal;
+use rayon::prelude::*;
 
 use crate::prelude::*;
 
@@ -20,6 +22,81 @@ pub struct RandomSvdResults<T> {
     pub u: faer::Mat<T>,
     pub v: faer::Mat<T>,
     pub s: Vec<T>,
+}
+
+/// Structure for SVD results
+///
+/// ### Fields
+///
+/// * `u` - Matrix u of the SVD decomposition
+/// * `v` - Matrix v of the SVD decomposition
+/// * `s` - Eigen vectors of the SVD decomposition
+#[derive(Clone, Debug)]
+pub struct SvdResults<T> {
+    pub u: faer::Mat<T>,
+    pub v: faer::Mat<T>,
+    pub s: Vec<T>,
+}
+
+pub trait SvdResult<T> {
+    /// Returns the matrix u of the SVD decomposition
+    fn u(&self) -> &faer::Mat<T>;
+    /// Returns the matrix v of the SVD decomposition
+    fn v(&self) -> &faer::Mat<T>;
+    /// Returns the eigen vectors of the SVD decomposition
+    fn s(&self) -> &[T];
+}
+
+/// Implementations of the SvdResult trait for randomised SvdResults
+impl<T> SvdResult<T> for RandomSvdResults<T> {
+    fn u(&self) -> &faer::Mat<T> {
+        &self.u
+    }
+    fn v(&self) -> &faer::Mat<T> {
+        &self.v
+    }
+    fn s(&self) -> &[T] {
+        &self.s
+    }
+}
+
+/// Implementations of the SvdResult trait for SvdResults
+impl<T> SvdResult<T> for SvdResults<T> {
+    fn u(&self) -> &faer::Mat<T> {
+        &self.u
+    }
+    fn v(&self) -> &faer::Mat<T> {
+        &self.v
+    }
+    fn s(&self) -> &[T] {
+        &self.s
+    }
+}
+
+/////////////
+// Helpers //
+/////////////
+
+/// Calculate the principal component scores from the SVD results
+///
+/// ### Params
+///
+/// * `svd_results` - The (randomised) SVD results
+///
+/// ### Returns
+///
+/// The principal component scores
+pub fn compute_pc_scores<T, S>(svd_results: &S) -> Mat<T>
+where
+    T: Float,
+    S: SvdResult<T>,
+{
+    let n_cells = svd_results.u().nrows();
+    let n_pcs = svd_results.s().len();
+
+    Mat::from_fn(n_cells, n_pcs, |i, j| {
+        svd_results.u()[(i, j)] * svd_results.s()[j]
+    })
 }
 
 ///////////////
@@ -132,4 +209,171 @@ where
         v: svd.V().cloned(),
         s: svd.S().column_vector().iter().copied().collect(),
     }
+}
+
+///////////////////////////
+// Sparse randomised SVD //
+///////////////////////////
+
+/// Randomised sparse SVD - never forms dense intermediate matrices
+///
+/// ### Params
+///
+/// * `matrix` - Sparse matrix (CSR or CSC)
+/// * `rank` - Target rank
+/// * `seed` - For reproducibility
+/// * `use_second_layer` - Whether to use the second layer of the sparse matrix
+///   for SVD calculation.
+/// * `oversampling` - Additional samples (default 10)
+/// * `n_power_iter` - Power iterations for accuracy (default 2)
+///
+/// ### Returns
+///
+/// `RandomSvdResults` containing U (n×k), S (length k), and V (m×k)
+pub fn randomised_sparse_svd<T, F>(
+    matrix: &CompressedSparseData<T>,
+    rank: usize,
+    seed: u64,
+    use_second_layer: bool,
+    oversampling: Option<usize>,
+    n_power_iter: Option<usize>,
+) -> RandomSvdResults<F>
+where
+    T: BixverseNumeric + Into<F>,
+    F: BixverseFloat,
+{
+    let (n, m) = matrix.shape;
+    let os = oversampling.unwrap_or(10);
+    let sample_size = (rank + os).min(m).min(n);
+    let n_iter = n_power_iter.unwrap_or(2);
+
+    let csr = match matrix.cs_type {
+        CompressedSparseFormat::Csr => matrix.clone(),
+        CompressedSparseFormat::Csc => matrix.transform(),
+    };
+
+    let data_float: Vec<F> = if use_second_layer {
+        csr.data_2
+            .as_ref()
+            .expect("data_2 is None but use_second_layer is true")
+            .iter()
+            .map(|&v| v.into())
+            .collect()
+    } else {
+        csr.data.iter().map(|&v| v.into()).collect()
+    };
+
+    let sparse_matvec_a = |x: MatRef<F>, mut y: MatMut<F>| {
+        let ncols = x.ncols();
+        let mut y_data = vec![F::zero(); n * ncols];
+
+        y_data
+            .par_chunks_mut(ncols)
+            .enumerate()
+            .for_each(|(i, row_out)| {
+                for idx in csr.indptr[i]..csr.indptr[i + 1] {
+                    let j = csr.indices[idx];
+                    let a_val = data_float[idx];
+                    for col in 0..ncols {
+                        row_out[col] += a_val * x[(j, col)];
+                    }
+                }
+            });
+
+        for i in 0..n {
+            for col in 0..ncols {
+                y[(i, col)] = y_data[i * ncols + col];
+            }
+        }
+    };
+
+    let sparse_matvec_at = |x: MatRef<F>, mut y: MatMut<F>| {
+        let ncols = x.ncols();
+
+        let partial_results: Vec<Vec<F>> = (0..n)
+            .into_par_iter()
+            .fold(
+                || vec![F::zero(); m * ncols],
+                |mut acc, i| {
+                    for idx in csr.indptr[i]..csr.indptr[i + 1] {
+                        let j = csr.indices[idx];
+                        let a_val = data_float[idx];
+                        for col in 0..ncols {
+                            acc[j * ncols + col] += a_val * x[(i, col)];
+                        }
+                    }
+                    acc
+                },
+            )
+            .collect();
+
+        let mut result = vec![F::zero(); m * ncols];
+        for partial in partial_results {
+            for i in 0..result.len() {
+                result[i] += partial[i];
+            }
+        }
+
+        for j in 0..m {
+            for col in 0..ncols {
+                y[(j, col)] = result[j * ncols + col];
+            }
+        }
+    };
+
+    let mut rng = StdRng::seed_from_u64(seed);
+    let normal = Normal::new(0.0, 1.0).unwrap();
+    let omega = Mat::from_fn(m, sample_size, |_, _| {
+        F::from_f64(normal.sample(&mut rng)).unwrap()
+    });
+
+    let mut y = Mat::<F>::zeros(n, sample_size);
+    sparse_matvec_a(omega.as_ref(), y.as_mut());
+
+    let mut q = y.qr().compute_thin_Q();
+
+    for _ in 0..n_iter {
+        let mut z = Mat::<F>::zeros(m, sample_size);
+        sparse_matvec_at(q.as_ref(), z.as_mut());
+
+        let mut y_new = Mat::<F>::zeros(n, sample_size);
+        sparse_matvec_a(z.as_ref(), y_new.as_mut());
+
+        q = y_new.qr().compute_thin_Q();
+    }
+
+    let mut b = Mat::<F>::zeros(sample_size, m);
+
+    let partial_bs: Vec<Mat<F>> = (0..n)
+        .into_par_iter()
+        .fold(
+            || Mat::<F>::zeros(sample_size, m),
+            |mut b_partial, i| {
+                for idx in csr.indptr[i]..csr.indptr[i + 1] {
+                    let j = csr.indices[idx];
+                    let a_val = data_float[idx];
+                    for k in 0..sample_size {
+                        b_partial[(k, j)] += q[(i, k)] * a_val;
+                    }
+                }
+                b_partial
+            },
+        )
+        .collect();
+
+    for b_partial in partial_bs {
+        for k in 0..sample_size {
+            for j in 0..m {
+                b[(k, j)] += b_partial[(k, j)];
+            }
+        }
+    }
+
+    let svd = b.thin_svd().unwrap();
+
+    let u = &q * svd.U();
+    let s: Vec<F> = svd.S().column_vector().iter().copied().collect();
+    let v = svd.V().to_owned();
+
+    RandomSvdResults { u, s, v }
 }

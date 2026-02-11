@@ -6,6 +6,7 @@ use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
 use std::ops::{Add, AddAssign, Mul};
 
+use crate::core::math::pca_svd::SvdResults;
 use crate::prelude::*;
 
 /////////////
@@ -483,12 +484,12 @@ where
     let (_, ncol) = sparse_data.shape();
     let mut col_ptr = vec![0; ncol + 1];
 
-    // Count occurrences per column
+    // count occurrences per column
     for &c in &sparse_data.indices {
         col_ptr[c + 1] += 1;
     }
 
-    // Cumulative sum to get column pointers
+    // cumulative sum to get column pointers
     for i in 0..ncol {
         col_ptr[i + 1] += col_ptr[i];
     }
@@ -498,7 +499,7 @@ where
     let mut csc_row_ind = vec![0; nnz];
     let mut next = col_ptr[..ncol].to_vec();
 
-    // Iterate through rows and place data in CSC format
+    // iterate through rows and place data in CSC format
     for row in 0..(sparse_data.indptr.len() - 1) {
         for idx in sparse_data.indptr[row]..sparse_data.indptr[row + 1] {
             let col = sparse_data.indices[idx];
@@ -507,7 +508,7 @@ where
             csc_data[pos] = sparse_data.data[idx];
             csc_row_ind[pos] = row;
 
-            // Handle the second layer data
+            // handle the second layer data
             if let (Some(source_data2), Some(csc_d2)) = (&sparse_data.data_2, &mut csc_data2) {
                 csc_d2[pos] = source_data2[idx];
             }
@@ -548,7 +549,7 @@ where
 {
     let n_rows = shape.0;
 
-    // Sort by (row, col) and merge duplicates
+    // sort by (row, col) and merge duplicates
     let mut entries: Vec<(usize, usize, T)> = rows
         .iter()
         .zip(cols.iter())
@@ -1285,14 +1286,16 @@ where
 
     let data_f64: Vec<f64> = csr.data.iter().map(|&v| v.into()).collect();
 
+    // Parallelised matvec: y = A * x
     let matvec = |x: &[f64], y: &mut [f64]| {
-        y.fill(0.0);
-        for i in 0..n {
+        y.par_iter_mut().enumerate().for_each(|(i, yi)| {
+            let mut sum = 0.0;
             for idx in csr.indptr[i]..csr.indptr[i + 1] {
                 let j = csr.indices[idx];
-                y[i] += data_f64[idx] * x[j];
+                sum += data_f64[idx] * x[j];
             }
-        }
+            *yi = sum;
+        });
     };
 
     // Lanczos iteration
@@ -1352,7 +1355,7 @@ where
             }
         }
 
-        // Normalise the transformed eigenvector... Really should do this...
+        // Normalise the transformed eigenvector
         let norm: f64 = evec.iter().map(|x| x * x).sum::<f64>().sqrt();
         for x in &mut evec {
             *x /= norm;
@@ -1370,4 +1373,226 @@ where
     }
 
     (largest_evals, transposed)
+}
+
+/////////////////
+// Lanczos SVD //
+/////////////////
+
+/// Compute sparse SVD using Lanczos on A^T A or AA^T
+///
+/// ### Params
+///
+/// * `matrix` - Sparse matrix (CSR or CSC)
+/// * `n_components` - Number of singular values/vectors to compute
+/// * `seed` - For reproducibility
+/// * `use_second_layer` - If true, use data_2 instead of data
+///
+/// ### Returns
+///
+/// (U, S, V^T) where U is n×k, S is length k, V^T is k×m
+/// Compute sparse SVD using Lanczos on A^T A or AA^T
+///
+/// ### Params
+///
+/// * `matrix` - Sparse matrix (CSR or CSC)
+/// * `n_components` - Number of singular values/vectors to compute
+/// * `seed` - For reproducibility
+/// * `use_second_layer` - If true, use data_2 instead of data
+///
+/// ### Returns
+///
+/// `RandomSvdResults` containing U (n×k), S (length k), and V (m×k)
+pub fn sparse_svd_lanczos<T, U, F>(
+    matrix: &CompressedSparseData<T, U>,
+    n_components: usize,
+    seed: u64,
+    use_second_layer: bool,
+) -> SvdResults<F>
+where
+    T: BixverseNumeric + SimdDistance + Into<F>,
+    U: BixverseNumeric + Into<F> + Clone,
+    F: BixverseFloat + SimdDistance + std::iter::Sum,
+{
+    let (n, m) = matrix.shape;
+
+    let use_ata = n > m;
+    let krylov_dim = if use_ata { m } else { n };
+
+    let n_iter = (n_components * 2 + 10).max(n_components).min(krylov_dim);
+
+    // ensure we have CSR for efficient operations
+    let csr = match matrix.cs_type {
+        CompressedSparseFormat::Csr => matrix.clone(),
+        CompressedSparseFormat::Csc => matrix.transform(),
+    };
+
+    let data_f: Vec<F> = if use_second_layer {
+        csr.data_2
+            .as_ref()
+            .expect("data_2 is None but use_second_layer is true")
+            .iter()
+            .map(|&v| v.into())
+            .collect()
+    } else {
+        csr.data.iter().map(|&v| v.into()).collect()
+    };
+
+    // Parallelized A*x: y = A * x
+    let matvec_a = |x: &[F], y: &mut [F]| {
+        y.par_iter_mut().enumerate().for_each(|(i, yi)| {
+            let mut sum = F::zero();
+            for idx in csr.indptr[i]..csr.indptr[i + 1] {
+                let j = csr.indices[idx];
+                sum += data_f[idx] * x[j];
+            }
+            *yi = sum;
+        });
+    };
+
+    // Parallelized A^T*x: y = A^T * x
+    let matvec_at = |x: &[F], y: &mut [F]| {
+        let partial_sums: Vec<F> = (0..n)
+            .into_par_iter()
+            .fold(
+                || vec![F::zero(); m],
+                |mut acc, i| {
+                    for idx in csr.indptr[i]..csr.indptr[i + 1] {
+                        let j = csr.indices[idx];
+                        acc[j] += data_f[idx] * x[i];
+                    }
+                    acc
+                },
+            )
+            .reduce(
+                || vec![F::zero(); m],
+                |mut a, b| {
+                    for i in 0..m {
+                        a[i] += b[i];
+                    }
+                    a
+                },
+            );
+        y.copy_from_slice(&partial_sums);
+    };
+
+    // define (A^T A)*x or (AA^T)*x without forming the product
+    let matvec_gram: Box<dyn Fn(&[F], &mut [F]) + Sync> = if use_ata {
+        Box::new(|x: &[F], y: &mut [F]| {
+            let mut temp = vec![F::zero(); n];
+            matvec_a(x, &mut temp);
+            matvec_at(&temp, y);
+        })
+    } else {
+        Box::new(|x: &[F], y: &mut [F]| {
+            let mut temp = vec![F::zero(); m];
+            matvec_at(x, &mut temp);
+            matvec_a(&temp, y);
+        })
+    };
+
+    // lanczos iteration
+    let mut v = vec![F::zero(); krylov_dim];
+    let mut v_old = vec![F::zero(); krylov_dim];
+    let mut w = vec![F::zero(); krylov_dim];
+    let mut v_matrix = vec![vec![F::zero(); krylov_dim]; n_iter];
+
+    let mut rng = StdRng::seed_from_u64(seed);
+    for i in 0..krylov_dim {
+        v[i] = F::from(rng.random::<f64>() - 0.5).unwrap();
+    }
+    normalise(&mut v);
+
+    let mut alpha = vec![F::zero(); n_iter];
+    let mut beta = vec![F::zero(); n_iter];
+
+    for j in 0..n_iter {
+        v_matrix[j].copy_from_slice(&v);
+
+        matvec_gram(&v, &mut w);
+        alpha[j] = dot(&w, &v);
+
+        for i in 0..krylov_dim {
+            w[i] -= alpha[j] * v[i];
+            if j > 0 {
+                w[i] -= beta[j - 1] * v_old[i];
+            }
+        }
+
+        beta[j] = norm(&w);
+        if beta[j] < F::from(1e-12).unwrap() {
+            break;
+        }
+
+        v_old.copy_from_slice(&v);
+        v.copy_from_slice(&w);
+        normalise(&mut v);
+    }
+
+    let (evals, evecs) = tridiag_eig(&alpha[..n_iter], &beta[..n_iter - 1]);
+
+    let mut indices: Vec<usize> = (0..evals.len()).collect();
+    indices.sort_by(|&i, &j| evals[j].partial_cmp(&evals[i]).unwrap());
+
+    let mut singular_values: Vec<F> = Vec::with_capacity(n_components);
+    let mut u_vecs: Vec<Vec<F>> = Vec::with_capacity(n_components);
+    let mut v_vecs: Vec<Vec<F>> = Vec::with_capacity(n_components);
+
+    for &idx in indices.iter().take(n_components) {
+        let eval = evals[idx];
+        if eval <= F::zero() {
+            continue;
+        }
+
+        let sigma = eval.sqrt();
+        singular_values.push(sigma);
+
+        // transform eigenvector back to original space
+        let mut gram_evec = vec![F::zero(); krylov_dim];
+        for i in 0..krylov_dim {
+            for j in 0..n_iter {
+                gram_evec[i] += v_matrix[j][i] * evecs[(j, idx)];
+            }
+        }
+
+        // normalise
+        let norm_val: F = gram_evec.iter().map(|x| *x * *x).sum::<F>().sqrt();
+        for x in &mut gram_evec {
+            *x /= norm_val;
+        }
+
+        if use_ata {
+            // gram_evec is eigenvector of A^T A, so it's V
+            // U = (1/σ) * A * V
+            let mut u_vec = vec![F::zero(); n];
+            matvec_a(&gram_evec, &mut u_vec);
+            for x in &mut u_vec {
+                *x /= sigma;
+            }
+
+            u_vecs.push(u_vec);
+            v_vecs.push(gram_evec);
+        } else {
+            // gram_evec is eigenvector of AA^T, so it's U
+            // V = (1/σ) * A^T * U
+            let mut v_vec = vec![F::zero(); m];
+            matvec_at(&gram_evec, &mut v_vec);
+            for x in &mut v_vec {
+                *x /= sigma;
+            }
+
+            u_vecs.push(gram_evec);
+            v_vecs.push(v_vec);
+        }
+    }
+
+    // Convert to faer matrices
+    let u = Mat::from_fn(n, singular_values.len(), |i, j| u_vecs[j][i]);
+    let v = Mat::from_fn(m, singular_values.len(), |i, j| v_vecs[j][i]);
+
+    SvdResults {
+        u,
+        s: singular_values,
+        v,
+    }
 }
