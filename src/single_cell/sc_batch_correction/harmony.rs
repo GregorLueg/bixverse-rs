@@ -305,6 +305,300 @@ pub fn compute_diversity_statistics(
     (o, e)
 }
 
+/// Update cluster centroids using soft assignments
+///
+/// Computes weighted mean: Y = normalise(R * Z_cos)
+/// Each centroid is the R-weighted sum of all cells, then normalised to unit
+/// length.
+///
+/// ### Params
+///
+/// * `z_cos` - Cosine-normalised data (N × d)
+/// * `r` - Soft assignments (K × N)
+///
+/// ### Returns
+///
+/// Updated centroids (K × d), cosine-normalized
+pub fn update_centroids_from_r(z_cos: MatRef<f32>, r: MatRef<f32>) -> Mat<f32> {
+    assert_eq!(r.ncols(), z_cos.nrows(), "R columns must match Z_cos rows");
+
+    let y = r * z_cos;
+
+    // Normalise each row (cluster centroid) to unit L2 norm
+    cosine_normalise(&y)
+}
+
+/// Compute Harmony objective function for convergence checking
+///
+/// Objective = kmeans_error + entropy + cross_entropy:
+///
+/// - kmeans_error: `sum(R .* dist_mat)`
+/// - entropy: `sum(R .* log(R)) per cluster, weighted by sigma`
+/// - cross_entropy: `diversity penalty term`
+///
+/// ### Params
+///
+/// * `r` - Soft assignments (K × N)
+/// * `dist_mat` - Distance matrix (K × N)
+/// * `o` - Observed diversity (K × B)
+/// * `e` - Expected diversity (K × B)
+/// * `sigma` - Per-cluster weights (length K)
+/// * `theta` - Per-batch penalties (length B)
+/// * `batch_indices` - Cell indices per batch (length B)
+///
+/// ### Returns
+///
+/// Objective value (lower is better)
+pub fn compute_objective(
+    r: MatRef<f32>,
+    dist_mat: MatRef<f32>,
+    o: MatRef<f32>,
+    e: MatRef<f32>,
+    sigma: &[f32],
+    theta: &[f32],
+    batch_indices: &[Vec<usize>],
+) -> f32 {
+    let k = r.nrows();
+    let n = r.ncols();
+
+    assert_eq!(dist_mat.nrows(), k);
+    assert_eq!(dist_mat.ncols(), n);
+    assert_eq!(sigma.len(), k);
+    assert_eq!(theta.len(), batch_indices.len());
+
+    // Normalisation constant (from C++ code)
+    let norm_const = 2000.0 / n as f32;
+
+    // first component: K-means error = sum(R .* dist_mat)
+    let mut kmeans_error = 0.0f32;
+    for cluster_idx in 0..k {
+        for cell_idx in 0..n {
+            kmeans_error += r[(cluster_idx, cell_idx)] * dist_mat[(cluster_idx, cell_idx)];
+        }
+    }
+
+    // second component: entropy = sum(safe_entropy(R) .* sigma)
+    // safe_entropy(R[k,n]) = R[k,n] * log(R[k,n]) if R[k,n] > 0, else 0
+    let mut entropy = 0.0f32;
+    for cluster_idx in 0..k {
+        for cell_idx in 0..n {
+            let r_val = r[(cluster_idx, cell_idx)];
+            if r_val > 0.0 {
+                entropy += r_val * r_val.ln() * sigma[cluster_idx];
+            }
+        }
+    }
+
+    // third component: cross-entropy (diversity penalty)
+    // for each cell n in batch b:
+    // sum_k R[k,n] * sigma[k] * theta[b] * log((O[k,b] + E[k,b]) / E[k,b])
+    let mut cross_entropy = 0.0f32;
+    for (batch_idx, cell_indices) in batch_indices.iter().enumerate() {
+        let theta_b = theta[batch_idx];
+
+        for &cell_idx in cell_indices {
+            for cluster_idx in 0..k {
+                let r_val = r[(cluster_idx, cell_idx)];
+                let o_val = o[(cluster_idx, batch_idx)];
+                let e_val = e[(cluster_idx, batch_idx)];
+
+                // log((O + E) / E) = log(O + E) - log(E)
+                // Only compute if E > 0 to avoid division by zero
+                if e_val > 0.0 {
+                    let log_ratio = ((o_val + e_val) / e_val).ln();
+                    cross_entropy += r_val * sigma[cluster_idx] * theta_b * log_ratio;
+                }
+            }
+        }
+    }
+
+    // return total normalised objective
+    (kmeans_error + entropy + cross_entropy) * norm_const
+}
+
+/// Update soft assignments with batch diversity penalties
+///
+/// This is the core Harmony algorithm. Updates R using:
+///
+/// R[k,n] ∝ exp(-dist[k,n]/σ[k]) × (E[k,b]/(O[k,b]+E[k,b]))^θ[b]
+///
+/// Uses block-wise shuffling to efficiently update O and E statistics.
+///
+/// ### Params
+///
+/// * `dist_mat` - Distance matrix (K × N)
+/// * `sigma` - Per-cluster diversity weights (length K)
+/// * `theta` - Per-batch diversity penalties (length B)
+/// * `batch_indices` - Cell indices per batch (length B)
+/// * `pr_b` - Batch frequencies (length B)
+/// * `block_size` - Fraction of cells per update block
+/// * `seed` - Random seed for shuffling
+/// * `r_init` - Initial R matrix (K × N) to start from
+/// * `o_init` - Initial O matrix (K × B)
+/// * `e_init` - Initial E matrix (K × B)
+///
+/// ### Returns
+///
+/// Tuple of
+/// * `0` - R: K×N updated assignments
+/// * `1` - O: K×B updated observed
+/// * `2` - E: K×B updated expected
+pub fn update_r_with_diversity(
+    dist_mat: MatRef<f32>,
+    sigma: &[f32],
+    theta: &[f32],
+    batch_indices: &[Vec<usize>],
+    pr_b: &[f32],
+    block_size: f32,
+    seed: usize,
+    r_init: MatRef<f32>,
+    o_init: MatRef<f32>,
+    e_init: MatRef<f32>,
+) -> (Mat<f32>, Mat<f32>, Mat<f32>) {
+    use rand::SeedableRng;
+    use rand::seq::SliceRandom;
+
+    let k = dist_mat.nrows();
+    let n = dist_mat.ncols();
+    let b = batch_indices.len();
+
+    assert_eq!(sigma.len(), k);
+    assert_eq!(theta.len(), b);
+    assert_eq!(pr_b.len(), b);
+
+    // create cell-to-batch lookup for fast access
+    let mut cell_to_batch = vec![0usize; n];
+    for (batch_idx, cells) in batch_indices.iter().enumerate() {
+        for &cell_idx in cells {
+            cell_to_batch[cell_idx] = batch_idx;
+        }
+    }
+
+    // compute base scaled distances: exp(-dist / sigma)
+    let mut scale_dist = Mat::zeros(k, n);
+    for cluster_idx in 0..k {
+        for cell_idx in 0..n {
+            let dist = dist_mat[(cluster_idx, cell_idx)];
+            scale_dist[(cluster_idx, cell_idx)] = (-dist / sigma[cluster_idx]).exp();
+        }
+    }
+
+    // normalise columns to sum to 1
+    for cell_idx in 0..n {
+        let mut col_sum = 0.0f32;
+        for cluster_idx in 0..k {
+            col_sum += scale_dist[(cluster_idx, cell_idx)];
+        }
+        if col_sum > 0.0 {
+            for cluster_idx in 0..k {
+                scale_dist[(cluster_idx, cell_idx)] /= col_sum;
+            }
+        }
+    }
+
+    // generate shuffled update order
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed as u64);
+    let mut update_order: Vec<usize> = (0..n).collect();
+    update_order.shuffle(&mut rng);
+
+    // create reverse index for unshuffling later
+    let mut reverse_index = vec![0usize; n];
+    for (new_idx, &orig_idx) in update_order.iter().enumerate() {
+        reverse_index[orig_idx] = new_idx;
+    }
+
+    // shuffle matrices according to update_order
+    let mut r_shuffled = Mat::zeros(k, n);
+    let mut scale_dist_shuffled = Mat::zeros(k, n);
+    for (new_idx, &orig_idx) in update_order.iter().enumerate() {
+        for cluster_idx in 0..k {
+            r_shuffled[(cluster_idx, new_idx)] = r_init[(cluster_idx, orig_idx)];
+            scale_dist_shuffled[(cluster_idx, new_idx)] = scale_dist[(cluster_idx, orig_idx)];
+        }
+    }
+
+    // initialise O and E
+    let mut o = o_init.to_owned();
+    let mut e = e_init.to_owned();
+
+    // Block-wise updates
+    let n_blocks = (1.0 / block_size).ceil() as usize;
+    let cells_per_block = (n as f32 * block_size) as usize;
+
+    for block_idx in 0..n_blocks {
+        let idx_min = block_idx * cells_per_block;
+        let idx_max = ((block_idx + 1) * cells_per_block).min(n);
+
+        // Step 1: Remove cells from O and E
+        for cell_idx in idx_min..idx_max {
+            let orig_cell_idx = update_order[cell_idx];
+            let batch_idx = cell_to_batch[orig_cell_idx];
+
+            for cluster_idx in 0..k {
+                let r_val = r_shuffled[(cluster_idx, cell_idx)];
+                o[(cluster_idx, batch_idx)] -= r_val;
+                e[(cluster_idx, batch_idx)] -= r_val * pr_b[batch_idx];
+            }
+        }
+
+        // Step 2: Recompute R for removed cells with diversity penalty
+        for cell_idx in idx_min..idx_max {
+            let orig_cell_idx = update_order[cell_idx];
+            let batch_idx = cell_to_batch[orig_cell_idx];
+            let theta_b = theta[batch_idx];
+
+            let mut new_col_sum = 0.0f32;
+
+            for cluster_idx in 0..k {
+                // Base: exp(-dist / sigma)
+                let base = scale_dist_shuffled[(cluster_idx, cell_idx)];
+
+                // Diversity penalty: (E / (O + E))^theta
+                let o_val = o[(cluster_idx, batch_idx)];
+                let e_val = e[(cluster_idx, batch_idx)];
+                let penalty = if o_val + e_val > 0.0 {
+                    (e_val / (o_val + e_val)).powf(theta_b)
+                } else {
+                    1.0
+                };
+
+                let new_r = base * penalty;
+                r_shuffled[(cluster_idx, cell_idx)] = new_r;
+                new_col_sum += new_r;
+            }
+
+            // Normalize column to sum to 1
+            if new_col_sum > 0.0 {
+                for cluster_idx in 0..k {
+                    r_shuffled[(cluster_idx, cell_idx)] /= new_col_sum;
+                }
+            }
+        }
+
+        // Step 3: Add cells back to O and E
+        for cell_idx in idx_min..idx_max {
+            let orig_cell_idx = update_order[cell_idx];
+            let batch_idx = cell_to_batch[orig_cell_idx];
+
+            for cluster_idx in 0..k {
+                let r_val = r_shuffled[(cluster_idx, cell_idx)];
+                o[(cluster_idx, batch_idx)] += r_val;
+                e[(cluster_idx, batch_idx)] += r_val * pr_b[batch_idx];
+            }
+        }
+    }
+
+    // Unshuffle R back to original order
+    let mut r_final = Mat::zeros(k, n);
+    for (shuffled_idx, &orig_idx) in update_order.iter().enumerate() {
+        for cluster_idx in 0..k {
+            r_final[(cluster_idx, orig_idx)] = r_shuffled[(cluster_idx, shuffled_idx)];
+        }
+    }
+
+    (r_final, o, e)
+}
+
 /////////////
 // Harmony //
 /////////////
@@ -635,5 +929,286 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_update_centroids_simple() {
+        // Z_cos: 4 cells × 3 features (already normalized)
+
+        // Normalize cell 3
+        let norm_3 = (0.5f32 * 0.5 + 0.5 * 0.5).sqrt();
+        let z_cos_norm = mat![
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.5 / norm_3, 0.5 / norm_3, 0.0],
+        ];
+
+        // R: 2 clusters × 4 cells
+        // Cluster 0: strongly assigns to cells 0 and 3
+        // Cluster 1: strongly assigns to cells 1 and 2
+        #[rustfmt::skip]
+            let r = mat![
+                [0.9, 0.1, 0.1, 0.8],  // cluster 0
+                [0.1, 0.9, 0.9, 0.2],  // cluster 1
+            ];
+
+        let y = update_centroids_from_r(z_cos_norm.as_ref(), r.as_ref());
+
+        // Verify dimensions
+        assert_eq!(y.nrows(), 2);
+        assert_eq!(y.ncols(), 3);
+
+        // Cluster 0 should be weighted towards cells 0 and 3 (dim 0 and bit of dim 1)
+        // y_0 = 0.9*[1,0,0] + 0.1*[0,1,0] + 0.1*[0,0,1] + 0.8*[0.707,0.707,0]
+        //     = [0.9 + 0.8*0.707, 0.1 + 0.8*0.707, 0.1]
+        //     ≈ [1.466, 0.666, 0.1]
+        // After normalization: should be heavy in dim 0
+
+        // Check that centroids are unit length
+        let norm_0 = (y[(0, 0)].powi(2) + y[(0, 1)].powi(2) + y[(0, 2)].powi(2)).sqrt();
+        let norm_1 = (y[(1, 0)].powi(2) + y[(1, 1)].powi(2) + y[(1, 2)].powi(2)).sqrt();
+
+        assert!(
+            (norm_0 - 1.0).abs() < 1e-6,
+            "Cluster 0 not unit length: {}",
+            norm_0
+        );
+        assert!(
+            (norm_1 - 1.0).abs() < 1e-6,
+            "Cluster 1 not unit length: {}",
+            norm_1
+        );
+
+        // Cluster 0 should be heavier in dimension 0 than 1
+        assert!(
+            y[(0, 0)] > y[(0, 1)],
+            "Cluster 0 should be heavier in dim 0: [{}, {}, {}]",
+            y[(0, 0)],
+            y[(0, 1)],
+            y[(0, 2)]
+        );
+
+        // Cluster 1 should be heavier in dimensions 1 and 2
+        assert!(
+            y[(1, 1)] > y[(1, 0)],
+            "Cluster 1 should be heavier in dim 1: [{}, {}, {}]",
+            y[(1, 0)],
+            y[(1, 1)],
+            y[(1, 2)]
+        );
+    }
+
+    #[test]
+    fn test_update_centroids_hard_assignment() {
+        // Test with hard (one-hot) assignments
+
+        // 3 cells, 2 dimensions
+        #[rustfmt::skip]
+            let z_cos = mat![
+                [1.0, 0.0],
+                [0.0, 1.0],
+                [0.707, 0.707],  // 45 degree angle
+            ];
+
+        // Hard assignment: cluster 0 gets cells 0 and 2, cluster 1 gets cell 1
+        #[rustfmt::skip]
+            let r = mat![
+                [1.0, 0.0, 1.0],  // cluster 0
+                [0.0, 1.0, 0.0],  // cluster 1
+            ];
+
+        let y = update_centroids_from_r(z_cos.as_ref(), r.as_ref());
+
+        // Cluster 0: average of cells 0 and 2
+        // = ([1,0] + [0.707,0.707]) / 2 = [0.854, 0.354]
+        // After normalization: [0.924, 0.383]
+
+        // Cluster 1: just cell 1
+        // = [0, 1], already normalized
+
+        // Check cluster 1 (simpler case)
+        assert!(
+            (y[(1, 0)] - 0.0).abs() < 1e-6,
+            "Cluster 1 dim 0: {}",
+            y[(1, 0)]
+        );
+        assert!(
+            (y[(1, 1)] - 1.0).abs() < 1e-6,
+            "Cluster 1 dim 1: {}",
+            y[(1, 1)]
+        );
+
+        // Check cluster 0 is normalized
+        let norm = (y[(0, 0)].powi(2) + y[(0, 1)].powi(2)).sqrt();
+        assert!(
+            (norm - 1.0).abs() < 1e-6,
+            "Cluster 0 not normalized: {}",
+            norm
+        );
+
+        // Cluster 0 should be biased towards dim 0
+        assert!(
+            y[(0, 0)] > y[(0, 1)],
+            "Cluster 0: [{}, {}]",
+            y[(0, 0)],
+            y[(0, 1)]
+        );
+    }
+
+    #[test]
+    fn test_compute_objective_decreases() {
+        // Test that objective should decrease as R becomes more confident
+        // (lower entropy) and distances decrease
+
+        let batch_indices = vec![vec![0, 1], vec![2, 3]];
+        let sigma = vec![1.0, 1.0];
+        let theta = vec![1.0, 1.0];
+        let pr_b = vec![0.5, 0.5];
+
+        // Scenario 1: High uncertainty (uniform R)
+        #[rustfmt::skip]
+            let r_uncertain = mat![
+                [0.5, 0.5, 0.5, 0.5],
+                [0.5, 0.5, 0.5, 0.5],
+            ];
+
+        #[rustfmt::skip]
+            let dist_mat_high = mat![
+                [1.0, 1.0, 1.0, 1.0],
+                [1.0, 1.0, 1.0, 1.0],
+            ];
+
+        let (o1, e1) = compute_diversity_statistics(r_uncertain.as_ref(), &batch_indices, &pr_b);
+
+        let obj1 = compute_objective(
+            r_uncertain.as_ref(),
+            dist_mat_high.as_ref(),
+            o1.as_ref(),
+            e1.as_ref(),
+            &sigma,
+            &theta,
+            &batch_indices,
+        );
+
+        // Scenario 2: Low uncertainty (confident R) and lower distances
+        #[rustfmt::skip]
+            let r_confident = mat![
+                [0.9, 0.9, 0.1, 0.1],
+                [0.1, 0.1, 0.9, 0.9],
+            ];
+
+        #[rustfmt::skip]
+            let dist_mat_low = mat![
+                [0.1, 0.1, 1.0, 1.0],
+                [1.0, 1.0, 0.1, 0.1],
+            ];
+
+        let (o2, e2) = compute_diversity_statistics(r_confident.as_ref(), &batch_indices, &pr_b);
+
+        let obj2 = compute_objective(
+            r_confident.as_ref(),
+            dist_mat_low.as_ref(),
+            o2.as_ref(),
+            e2.as_ref(),
+            &sigma,
+            &theta,
+            &batch_indices,
+        );
+
+        // Confident assignments with lower distances should have lower objective
+        assert!(
+            obj2 < obj1,
+            "Confident R should have lower objective: {} vs {}",
+            obj2,
+            obj1
+        );
+    }
+
+    #[test]
+    fn test_compute_objective_components() {
+        // Test that we can compute objective and it's reasonable
+
+        let batch_indices = vec![vec![0, 1], vec![2]];
+        let sigma = vec![1.0, 1.0];
+        let theta = vec![1.0, 1.0];
+        let pr_b = vec![2.0 / 3.0, 1.0 / 3.0];
+
+        #[rustfmt::skip]
+            let r = mat![
+                [0.8, 0.7, 0.2],
+                [0.2, 0.3, 0.8],
+            ];
+
+        #[rustfmt::skip]
+            let dist_mat = mat![
+                [0.1, 0.2, 0.9],
+                [0.9, 0.8, 0.1],
+            ];
+
+        let (o, e) = compute_diversity_statistics(r.as_ref(), &batch_indices, &pr_b);
+
+        let obj = compute_objective(
+            r.as_ref(),
+            dist_mat.as_ref(),
+            o.as_ref(),
+            e.as_ref(),
+            &sigma,
+            &theta,
+            &batch_indices,
+        );
+
+        // Objective should be finite and reasonable
+        assert!(obj.is_finite(), "Objective should be finite");
+        assert!(obj > 0.0, "Objective should be positive (given our setup)");
+
+        // With normalization constant of 2000/3, and our small values,
+        // objective should be in a reasonable range
+        assert!(obj < 10000.0, "Objective seems too large: {}", obj);
+    }
+
+    #[test]
+    fn test_objective_zero_entropy() {
+        // Test with hard (one-hot) assignments → zero entropy contribution
+
+        let batch_indices = vec![vec![0], vec![1]];
+        let sigma = vec![1.0, 1.0];
+        let theta = vec![0.0, 0.0]; // No diversity penalty
+        let pr_b = vec![0.5, 0.5];
+
+        // Hard assignment
+        #[rustfmt::skip]
+            let r = mat![
+                [1.0, 0.0],
+                [0.0, 1.0],
+            ];
+
+        #[rustfmt::skip]
+            let dist_mat = mat![
+                [0.1, 0.9],
+                [0.9, 0.1],
+            ];
+
+        let (o, e) = compute_diversity_statistics(r.as_ref(), &batch_indices, &pr_b);
+
+        let obj = compute_objective(
+            r.as_ref(),
+            dist_mat.as_ref(),
+            o.as_ref(),
+            e.as_ref(),
+            &sigma,
+            &theta,
+            &batch_indices,
+        );
+
+        // With hard assignments and no diversity penalty:
+        // objective ≈ kmeans_error = (1.0*0.1 + 0.0*0.9 + 0.0*0.9 + 1.0*0.1) * (2000/2)
+        //           = 0.2 * 1000 = 200
+        let expected = 0.2 * 1000.0;
+        assert!(
+            (obj - expected).abs() < 1.0,
+            "Objective should be ~200: got {}",
+            obj
+        );
     }
 }
