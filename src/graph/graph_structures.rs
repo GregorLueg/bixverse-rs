@@ -19,6 +19,7 @@ use crate::prelude::*;
 /// * `adjacency` - Sparse CSR representation of the graph with `f16` as
 ///   weights.
 /// * `num_nodes` - Number of nodes represented in the graph.
+/// * `directed` - Whether the graph is directed or not.
 #[derive(Clone, Debug)]
 pub struct SparseGraph<T: Clone> {
     /// Adjacency matrix in CSR (symmetric for undirected graphs)

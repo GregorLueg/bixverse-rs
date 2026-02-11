@@ -1,9 +1,11 @@
 use ann_search_rs::{utils::dist::Dist, utils::ivf_utils::train_centroids};
-use faer::{Mat, MatRef};
+use faer::linalg::solvers::PartialPivLu;
+use faer::{Mat, MatRef, linalg::solvers::DenseSolveCore};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rayon::prelude::*;
+use thousands::*;
 
 use crate::prelude::*;
 use crate::single_cell::sc_batch_correction::batch_utils::cosine_normalise;
@@ -21,50 +23,41 @@ use crate::utils::matrix_utils::{flat_row_major_to_mat, mat_to_flat_row_major};
 /// * `sigma`: cluster diversity weights
 /// * `theta`: batch diversity penalties
 /// * `lambda`: ridge parameters (None = auto-estimate)
-/// * `alpha`: lambda estimation coefficient
-/// * `max_iter_harmony`: outer iterations
-/// * `max_iter_cluster`: inner k-means iterations
-/// * `block_size`: fraction of cells per update block
-/// * `epsilon_cluster`: k-means convergence
-/// * `epsilon_harmony`: harmony convergence
+/// * `block_size`: fraction of cells to update per block (0.0-1.0)
+/// * `max_iter_kmeans`: maximum k-means iterations per Harmony round
+/// * `max_iter_harmony`: maximum Harmony outer iterations
+/// * `epsilon_kmeans`: k-means convergence threshold
+/// * `epsilon_harmony`: harmony convergence threshold
+/// * `window_size`: window size for convergence checking
 pub struct HarmonyParams {
     pub k: usize,
     pub sigma: Vec<f32>,
     pub theta: Vec<f32>,
-    pub lambda: Option<Vec<f32>>,
-    pub alpha: f32,
-    pub max_iter_harmony: usize,
-    pub max_iter_cluster: usize,
+    pub lambda: Vec<f32>,
     pub block_size: f32,
-    pub epsilon_cluster: f32,
+    pub max_iter_kmeans: usize,
+    pub max_iter_harmony: usize,
+    pub epsilon_kmeans: f32,
     pub epsilon_harmony: f32,
+    pub window_size: usize,
 }
 
-///////////
-// State //
-///////////
-
-/// Harmony state
-///
-/// ### Fields
-///
-/// * `z_cos`: cosine-normalised (Nxd)
-/// * `z_corr`: corrected embeddings (Nxd)
-/// * `y`: cluster centroids (d×K)
-/// * `r`: soft assignments (K×N)
-/// * `o`: observed diversity (K×B)
-/// * `e`: expected diversity (K×B)
-/// * `phi`: one-hot batch matrix (B×N)
-/// * `objectives`: convergence tracking
-struct HarmonyState {
-    z_cos: Mat<f32>,
-    z_corr: Mat<f32>,
-    y: Mat<f32>,
-    r: Mat<f32>,
-    o: Mat<f32>,
-    e: Mat<f32>,
-    phi: CompressedSparseData<f32>,
-    objectives: Vec<f32>,
+/// Default implementation for HarmonyParams
+impl Default for HarmonyParams {
+    fn default() -> Self {
+        Self {
+            k: 10,
+            sigma: vec![0.1],
+            theta: vec![2.0],
+            lambda: vec![1.0],
+            block_size: 0.05,
+            max_iter_kmeans: 10,
+            max_iter_harmony: 10,
+            epsilon_kmeans: 1e-5,
+            epsilon_harmony: 1e-4,
+            window_size: 3,
+        }
+    }
 }
 
 /////////////
@@ -367,38 +360,42 @@ pub fn compute_objective(
 ) -> f32 {
     let k = r.nrows();
     let n = r.ncols();
+    let b = batch_indices.len();
 
     assert_eq!(dist_mat.nrows(), k);
     assert_eq!(dist_mat.ncols(), n);
     assert_eq!(sigma.len(), k);
-    assert_eq!(theta.len(), batch_indices.len());
+    assert_eq!(theta.len(), b);
 
-    // normalisation constant (from C++ code)
     let norm_const = 2000.0 / n as f32;
 
-    // first component: K-means error = sum(R .* dist_mat)
+    // K-means error + entropy: iterate cell-first for column-major access
     let mut kmeans_error = 0.0f32;
-    for cluster_idx in 0..k {
-        for cell_idx in 0..n {
-            kmeans_error += r[(cluster_idx, cell_idx)] * dist_mat[(cluster_idx, cell_idx)];
-        }
-    }
-
-    // second component: entropy = sum(safe_entropy(R) .* sigma)
-    // safe_entropy(R[k,n]) = R[k,n] * log(R[k,n]) if R[k,n] > 0, else 0
     let mut entropy = 0.0f32;
-    for cluster_idx in 0..k {
-        for cell_idx in 0..n {
+
+    for cell_idx in 0..n {
+        for cluster_idx in 0..k {
             let r_val = r[(cluster_idx, cell_idx)];
+            kmeans_error += r_val * dist_mat[(cluster_idx, cell_idx)];
             if r_val > 0.0 {
                 entropy += r_val * r_val.ln() * sigma[cluster_idx];
             }
         }
     }
 
-    // third component: cross-entropy (diversity penalty)
-    // for each cell n in batch b:
-    // sum_k R[k,n] * sigma[k] * theta[b] * log((O[k,b] + E[k,b]) / E[k,b])
+    // pre-compute log-ratio table: K × B (instead of recomputing per cell)
+    let mut log_ratio = vec![0.0f32; k * b];
+    for cluster_idx in 0..k {
+        for batch_idx in 0..b {
+            let o_val = o[(cluster_idx, batch_idx)];
+            let e_val = e[(cluster_idx, batch_idx)];
+            if e_val > 0.0 {
+                log_ratio[cluster_idx * b + batch_idx] = ((o_val + e_val) / e_val).ln();
+            }
+        }
+    }
+
+    // cross-entropy using precomputed log-ratios
     let mut cross_entropy = 0.0f32;
     for (batch_idx, cell_indices) in batch_indices.iter().enumerate() {
         let theta_b = theta[batch_idx];
@@ -406,20 +403,12 @@ pub fn compute_objective(
         for &cell_idx in cell_indices {
             for cluster_idx in 0..k {
                 let r_val = r[(cluster_idx, cell_idx)];
-                let o_val = o[(cluster_idx, batch_idx)];
-                let e_val = e[(cluster_idx, batch_idx)];
-
-                // log((O + E) / E) = log(O + E) - log(E)
-                // Only compute if E > 0 to avoid division by zero
-                if e_val > 0.0 {
-                    let log_ratio = ((o_val + e_val) / e_val).ln();
-                    cross_entropy += r_val * sigma[cluster_idx] * theta_b * log_ratio;
-                }
+                cross_entropy +=
+                    r_val * sigma[cluster_idx] * theta_b * log_ratio[cluster_idx * b + batch_idx];
             }
         }
     }
 
-    // return total normalised objective
     (kmeans_error + entropy + cross_entropy) * norm_const
 }
 
@@ -470,7 +459,7 @@ pub fn update_r_with_diversity(
     assert_eq!(theta.len(), b);
     assert_eq!(pr_b.len(), b);
 
-    // Create cell-to-batch lookup for fast access
+    // Cell-to-batch lookup
     let mut cell_to_batch = vec![0usize; n];
     for (batch_idx, cells) in batch_indices.iter().enumerate() {
         for &cell_idx in cells {
@@ -478,20 +467,14 @@ pub fn update_r_with_diversity(
         }
     }
 
-    // Compute base scaled distances: exp(-dist / sigma)
+    // Precompute base scaled distances: exp(-dist / sigma), column-normalised
     let mut scale_dist = Mat::zeros(k, n);
-    for cluster_idx in 0..k {
-        for cell_idx in 0..n {
-            let dist = dist_mat[(cluster_idx, cell_idx)];
-            scale_dist[(cluster_idx, cell_idx)] = (-dist / sigma[cluster_idx]).exp();
-        }
-    }
-
-    // Normalize columns to sum to 1
     for cell_idx in 0..n {
         let mut col_sum = 0.0f32;
         for cluster_idx in 0..k {
-            col_sum += scale_dist[(cluster_idx, cell_idx)];
+            let val = (-dist_mat[(cluster_idx, cell_idx)] / sigma[cluster_idx]).exp();
+            scale_dist[(cluster_idx, cell_idx)] = val;
+            col_sum += val;
         }
         if col_sum > 0.0 {
             for cluster_idx in 0..k {
@@ -500,32 +483,17 @@ pub fn update_r_with_diversity(
         }
     }
 
-    // Generate shuffled update order
+    // shuffled update order (no physical reordering — just index indirection)
     let mut rng = StdRng::seed_from_u64(seed as u64);
     let mut update_order: Vec<usize> = (0..n).collect();
     update_order.shuffle(&mut rng);
 
-    // Create reverse index for unshuffling later
-    let mut reverse_index = vec![0usize; n];
-    for (new_idx, &orig_idx) in update_order.iter().enumerate() {
-        reverse_index[orig_idx] = new_idx;
-    }
-
-    // Shuffle matrices according to update_order
-    let mut r_shuffled = Mat::zeros(k, n);
-    let mut scale_dist_shuffled = Mat::zeros(k, n);
-    for (new_idx, &orig_idx) in update_order.iter().enumerate() {
-        for cluster_idx in 0..k {
-            r_shuffled[(cluster_idx, new_idx)] = r_init[(cluster_idx, orig_idx)];
-            scale_dist_shuffled[(cluster_idx, new_idx)] = scale_dist[(cluster_idx, orig_idx)];
-        }
-    }
-
-    // Initialize O and E
+    // work on R in original layout
+    let mut r = r_init.to_owned();
     let mut o = o_init.to_owned();
     let mut e = e_init.to_owned();
 
-    // Block-wise updates
+    // block-wise updates
     let n_blocks = (1.0 / block_size).ceil() as usize;
     let cells_per_block = (n as f32 * block_size) as usize;
 
@@ -533,38 +501,26 @@ pub fn update_r_with_diversity(
         let idx_min = block_idx * cells_per_block;
         let idx_max = ((block_idx + 1) * cells_per_block).min(n);
 
-        // Step 1: Remove cells from O and E
-        // E depends on total row sum, so removing any cell affects ALL batches
-        for cell_idx in idx_min..idx_max {
-            let orig_cell_idx = update_order[cell_idx];
-            let batch_idx = cell_to_batch[orig_cell_idx];
-
+        // step 1: remove block cells from O and E
+        for &cell_idx in &update_order[idx_min..idx_max] {
+            let batch_idx = cell_to_batch[cell_idx];
             for cluster_idx in 0..k {
-                let r_val = r_shuffled[(cluster_idx, cell_idx)];
-
-                // O: only affects the cell's batch
+                let r_val = r[(cluster_idx, cell_idx)];
                 o[(cluster_idx, batch_idx)] -= r_val;
-
-                // E: affects ALL batches (proportional to pr_b)
                 for b_idx in 0..b {
                     e[(cluster_idx, b_idx)] -= r_val * pr_b[b_idx];
                 }
             }
         }
 
-        // Step 2: Recompute R for removed cells with diversity penalty
-        for cell_idx in idx_min..idx_max {
-            let orig_cell_idx = update_order[cell_idx];
-            let batch_idx = cell_to_batch[orig_cell_idx];
+        // step 2: recompute R for block cells with diversity penalty
+        for &cell_idx in &update_order[idx_min..idx_max] {
+            let batch_idx = cell_to_batch[cell_idx];
             let theta_b = theta[batch_idx];
 
             let mut new_col_sum = 0.0f32;
-
             for cluster_idx in 0..k {
-                // Base: exp(-dist / sigma)
-                let base = scale_dist_shuffled[(cluster_idx, cell_idx)];
-
-                // Diversity penalty: (E / (O + E))^theta
+                let base = scale_dist[(cluster_idx, cell_idx)];
                 let o_val = o[(cluster_idx, batch_idx)];
                 let e_val = e[(cluster_idx, batch_idx)];
                 let penalty = if o_val + e_val > 0.0 {
@@ -572,32 +528,24 @@ pub fn update_r_with_diversity(
                 } else {
                     1.0
                 };
-
                 let new_r = base * penalty;
-                r_shuffled[(cluster_idx, cell_idx)] = new_r;
+                r[(cluster_idx, cell_idx)] = new_r;
                 new_col_sum += new_r;
             }
 
-            // Normalize column to sum to 1
             if new_col_sum > 0.0 {
                 for cluster_idx in 0..k {
-                    r_shuffled[(cluster_idx, cell_idx)] /= new_col_sum;
+                    r[(cluster_idx, cell_idx)] /= new_col_sum;
                 }
             }
         }
 
-        // Step 3: Add cells back to O and E
-        for cell_idx in idx_min..idx_max {
-            let orig_cell_idx = update_order[cell_idx];
-            let batch_idx = cell_to_batch[orig_cell_idx];
-
+        // step 3: add block cells back to O and E
+        for &cell_idx in &update_order[idx_min..idx_max] {
+            let batch_idx = cell_to_batch[cell_idx];
             for cluster_idx in 0..k {
-                let r_val = r_shuffled[(cluster_idx, cell_idx)];
-
-                // O: only affects the cell's batch
+                let r_val = r[(cluster_idx, cell_idx)];
                 o[(cluster_idx, batch_idx)] += r_val;
-
-                // E: affects ALL batches (proportional to pr_b)
                 for b_idx in 0..b {
                     e[(cluster_idx, b_idx)] += r_val * pr_b[b_idx];
                 }
@@ -605,20 +553,393 @@ pub fn update_r_with_diversity(
         }
     }
 
-    // Unshuffle R back to original order
-    let mut r_final = Mat::zeros(k, n);
-    for (shuffled_idx, &orig_idx) in update_order.iter().enumerate() {
-        for cluster_idx in 0..k {
-            r_final[(cluster_idx, orig_idx)] = r_shuffled[(cluster_idx, shuffled_idx)];
+    (r, o, e)
+}
+
+/// Apply per-cluster ridge regression to remove batch effects
+///
+/// For each cluster k:
+///
+/// 1. Weight batch matrix by R[k,n] (soft cluster assignments)
+/// 2. Solve ridge regression to estimate batch effects
+/// 3. Remove batch effects from data
+/// 4. Keep intercept (don't shift global mean)
+///
+/// ### Params
+///
+/// * `z_orig` - Original data (N × d)
+/// * `r` - Soft assignments (K × N)
+/// * `batch_indices` - Cell indices per batch (length B)
+/// * `lambda` - Ridge parameters (length B+1, includes intercept)
+///
+/// ### Returns
+///
+/// Corrected data (N × d)
+pub fn ridge_regression_correction(
+    z_orig: MatRef<f32>,
+    r: MatRef<f32>,
+    batch_indices: &[Vec<usize>],
+    lambda: &[f32],
+) -> Mat<f32> {
+    let n = z_orig.nrows();
+    let d = z_orig.ncols();
+    let k = r.nrows();
+    let b = batch_indices.len();
+
+    assert_eq!(r.ncols(), n);
+    assert_eq!(lambda.len(), b, "lambda should be length B");
+
+    let mut z_corr = z_orig.to_owned();
+
+    for cluster_idx in 0..k {
+        let mut w_b = vec![0.0f32; b];
+        let mut phi_z = Mat::<f32>::zeros(b, d);
+
+        // Row 0 of phi_z accumulates ALL cells (intercept)
+        // Row i (i>=1) accumulates only cells in batch i
+        for (batch_idx, cell_indices) in batch_indices.iter().enumerate() {
+            for &cell_idx in cell_indices {
+                let r_val = r[(cluster_idx, cell_idx)];
+                w_b[batch_idx] += r_val;
+
+                // Intercept row
+                for feat in 0..d {
+                    phi_z[(0, feat)] += r_val * z_orig[(cell_idx, feat)];
+                }
+
+                // Deviation row (non-reference batches only)
+                if batch_idx > 0 {
+                    for feat in 0..d {
+                        phi_z[(batch_idx, feat)] += r_val * z_orig[(cell_idx, feat)];
+                    }
+                }
+            }
+        }
+
+        // Build Phi_Rk * Phi_Rk^T (B × B) analytically:
+        //
+        // For the intercept coding:
+        // phi_rk[0, n] = R[k,n] for all n
+        // phi_rk[i, n] = R[k,n] if n in batch i, else 0  (i >= 1)
+        //
+        // So (Phi * Phi^T)[i,j] = sum_n phi_rk[i,n] * phi_rk[j,n]
+        //
+        // We need sum of R[k,n]^2 per batch for the diagonal terms.
+        let mut w2_b = vec![0.0f32; b]; // sum of R[k,n]^2 per batch
+        for (batch_idx, cell_indices) in batch_indices.iter().enumerate() {
+            for &cell_idx in cell_indices {
+                let r_val = r[(cluster_idx, cell_idx)];
+                w2_b[batch_idx] += r_val * r_val;
+            }
+        }
+        let w2_total: f32 = w2_b.iter().sum();
+
+        let mut design_cov = Mat::<f32>::zeros(b, b);
+
+        // [0,0]: sum of all R[k,n]^2
+        design_cov[(0, 0)] = w2_total;
+
+        // [0,i] and [i,0] for i>=1: sum of R[k,n]^2 for cells in batch i
+        for i in 1..b {
+            design_cov[(0, i)] = w2_b[i];
+            design_cov[(i, 0)] = w2_b[i];
+        }
+
+        // [i,j] for i,j >= 1: delta(i,j) * w2_b[i]
+        for i in 1..b {
+            design_cov[(i, i)] = w2_b[i];
+            // off-diagonal [i,j] for i!=j, both >=1: 0 (disjoint batches)
+        }
+
+        // Add ridge penalty
+        for i in 0..b {
+            design_cov[(i, i)] += lambda[i];
+        }
+
+        // Solve
+        let partial_piv_lu: PartialPivLu<f32> = design_cov.partial_piv_lu();
+        let inv_cov = partial_piv_lu.inverse();
+
+        // W = inv_cov * phi_z : B × d
+        let w = &inv_cov * &phi_z;
+
+        // Apply correction: subtract deviation contributions (rows 1..B-1)
+        // For each cell in batch b (b >= 1):
+        //   z_corr[n, :] -= R[k,n] * W[b, :]
+        for batch_idx in 1..b {
+            for &cell_idx in &batch_indices[batch_idx] {
+                let r_val = r[(cluster_idx, cell_idx)];
+                for feat in 0..d {
+                    z_corr[(cell_idx, feat)] -= r_val * w[(batch_idx, feat)];
+                }
+            }
         }
     }
 
-    (r_final, o, e)
+    z_corr
 }
 
 /////////////
 // Harmony //
 /////////////
+
+/// Check convergence using windowed moving average
+///
+/// ### Params
+///
+/// * `objectives` - Objective values
+/// * `window_size` - Window size
+/// * `epsilon` - Convergence threshold
+///
+/// ### Returns
+///
+/// * `bool` - Whether convergence is reached
+fn check_convergence(objectives: &[f32], window_size: usize, epsilon: f32) -> bool {
+    let n = objectives.len();
+    if n < 2 * window_size {
+        return false;
+    }
+
+    let mut obj_old = 0_f32;
+    let mut obj_new = 0_f32;
+
+    for i in 0..window_size {
+        obj_old += objectives[n - 1 - window_size - i];
+        obj_new += objectives[n - 1 - i];
+    }
+
+    let rel_change = (obj_old - obj_new).abs() / obj_old.abs();
+    rel_change < epsilon
+}
+
+/// Harmony state
+///
+/// ### Fields
+///
+/// * `z_orig` - Original data (N×d)
+/// * `z_cos` - Cosine-normalized (N×d)
+/// * `z_corr` - Corrected embeddings (N×d)
+/// * `y` - Cluster centroids (K×d)
+/// * `r` - Soft assignments (K×N)
+/// * `o` - Observed diversity (K×B)
+/// * `e` - Expected diversity (K×B)
+/// * `phi` - Batch one-hot (B×N)
+/// * `batch_indices` - Cell indices per batch
+/// * `pr_b` - Batch frequencies
+/// * `objectives_kmeans` - K-means objectives
+/// * `objectives_harmony` - Harmony objectives
+struct HarmonyState {
+    z_orig: Mat<f32>,
+    z_cos: Mat<f32>,
+    z_corr: Mat<f32>,
+    y: Mat<f32>,
+    r: Mat<f32>,
+    o: Mat<f32>,
+    e: Mat<f32>,
+    batch_indices: Vec<Vec<usize>>,
+    pr_b: Vec<f32>,
+    objectives_kmeans: Vec<f32>,
+    objectives_harmony: Vec<f32>,
+}
+
+/// Run Harmony batch correction
+///
+/// ### Params
+///
+/// * `pca` - PCA embedding (N × d)
+/// * `batch_labels` - Batch assignment per cell (length N)
+/// * `params` - Harmony hyperparameters
+/// * `seed` - Random seed
+/// * `verbose` - Print progress
+///
+/// ### Returns
+///
+/// Corrected PCA embedding (N × d)
+pub fn harmony(
+    pca: MatRef<f32>,
+    batch_labels: &[usize],
+    params: &HarmonyParams,
+    seed: usize,
+    verbose: bool,
+) -> Mat<f32> {
+    let n = pca.nrows();
+    let d = pca.ncols();
+    let n_batches = batch_labels.iter().max().unwrap() + 1;
+
+    if verbose {
+        println!(
+            "Harmony: {} cells, {} dims, {} batches, {} clusters",
+            n.separate_with_underscores(),
+            d,
+            n_batches,
+            params.k
+        );
+    }
+
+    let sigma = if params.sigma.len() == 1 {
+        vec![params.sigma[0]; params.k]
+    } else {
+        params.sigma.clone()
+    };
+
+    let theta = if params.theta.len() == 1 {
+        vec![params.theta[0]; n_batches]
+    } else {
+        params.theta.clone()
+    };
+
+    // FIX: was n_batches + 1, should be n_batches
+    let lambda = if params.lambda.len() == 1 {
+        vec![params.lambda[0]; n_batches]
+    } else {
+        params.lambda.clone()
+    };
+
+    // --- remainder of harmony() is unchanged from here ---
+
+    let (_, pr_b, batch_indices) = create_phi_matrix(batch_labels, n);
+    let z_orig = pca.to_owned();
+    let z_cos = cosine_normalise(&z_orig);
+
+    if verbose {
+        println!("Running initial k-means...");
+    }
+
+    let y = run_kmeans_cosine(
+        z_cos.as_ref(),
+        params.k,
+        params.max_iter_kmeans,
+        seed,
+        verbose,
+    );
+
+    let dist_mat = compute_cosine_distances(y.as_ref(), z_cos.as_ref());
+    let r = initialise_r_from_dist(dist_mat.as_ref(), &sigma);
+    let (o, e) = compute_diversity_statistics(r.as_ref(), &batch_indices, &pr_b);
+
+    let initial_obj = compute_objective(
+        r.as_ref(),
+        dist_mat.as_ref(),
+        o.as_ref(),
+        e.as_ref(),
+        &sigma,
+        &theta,
+        &batch_indices,
+    );
+
+    let mut state = HarmonyState {
+        z_orig,
+        z_cos,
+        z_corr: pca.to_owned(),
+        y,
+        r,
+        o,
+        e,
+        batch_indices,
+        pr_b,
+        objectives_kmeans: vec![initial_obj],
+        objectives_harmony: vec![initial_obj],
+    };
+
+    if verbose {
+        println!("Initial objective: {:.4}", initial_obj);
+    }
+
+    for harmony_iter in 0..params.max_iter_harmony {
+        if verbose {
+            println!("\n=== Harmony iteration {} ===", harmony_iter + 1);
+        }
+
+        for kmeans_iter in 0..params.max_iter_kmeans {
+            state.y = update_centroids_from_r(state.z_cos.as_ref(), state.r.as_ref());
+
+            let dist_mat = compute_cosine_distances(state.y.as_ref(), state.z_cos.as_ref());
+
+            let (r_new, o_new, e_new) = update_r_with_diversity(
+                dist_mat.as_ref(),
+                &sigma,
+                &theta,
+                &state.batch_indices,
+                &state.pr_b,
+                params.block_size,
+                seed + harmony_iter * 1000 + kmeans_iter,
+                state.r.as_ref(),
+                state.o.as_ref(),
+                state.e.as_ref(),
+            );
+
+            state.r = r_new;
+            state.o = o_new;
+            state.e = e_new;
+
+            let obj = compute_objective(
+                state.r.as_ref(),
+                dist_mat.as_ref(),
+                state.o.as_ref(),
+                state.e.as_ref(),
+                &sigma,
+                &theta,
+                &state.batch_indices,
+            );
+
+            state.objectives_kmeans.push(obj);
+
+            if verbose && kmeans_iter % 5 == 0 {
+                println!("  K-means iter {}: obj = {:.4}", kmeans_iter + 1, obj);
+            }
+
+            if kmeans_iter >= params.window_size {
+                let converged = check_convergence(
+                    &state.objectives_kmeans,
+                    params.window_size,
+                    params.epsilon_kmeans,
+                );
+                if converged {
+                    if verbose {
+                        println!("  K-means converged at iteration {}", kmeans_iter + 1);
+                    }
+                    break;
+                }
+            }
+        }
+
+        if verbose {
+            println!("  Applying ridge regression correction...");
+        }
+
+        state.z_corr = ridge_regression_correction(
+            state.z_orig.as_ref(),
+            state.r.as_ref(),
+            &state.batch_indices,
+            &lambda,
+        );
+
+        state.z_cos = cosine_normalise(&state.z_corr);
+
+        let harmony_obj = *state.objectives_kmeans.last().unwrap();
+        state.objectives_harmony.push(harmony_obj);
+
+        if verbose {
+            println!("  Harmony objective: {:.4}", harmony_obj);
+        }
+
+        if harmony_iter >= 1 {
+            let obj_old = state.objectives_harmony[harmony_iter];
+            let obj_new = state.objectives_harmony[harmony_iter + 1];
+            let rel_change = (obj_old - obj_new).abs() / obj_old.abs();
+
+            if rel_change < params.epsilon_harmony {
+                if verbose {
+                    println!("\nHarmony converged at iteration {}", harmony_iter + 1);
+                    println!("  Final objective: {:.4}", obj_new);
+                }
+                break;
+            }
+        }
+    }
+
+    state.z_corr
+}
 
 ///////////
 // Tests //
@@ -808,11 +1129,11 @@ mod tests {
 
         // R matrix (2 clusters × 6 cells)
         // Each column sums to 1.0
-        #[rustfmt::skip]
-            let r = mat![
-                [0.8, 0.7, 0.6, 0.9, 0.5, 0.3],  // cluster 0
-                [0.2, 0.3, 0.4, 0.1, 0.5, 0.7],  // cluster 1
-            ];
+
+        let r = mat![
+            [0.8, 0.7, 0.6, 0.9, 0.5, 0.3], // cluster 0
+            [0.2, 0.3, 0.4, 0.1, 0.5, 0.7], // cluster 1
+        ];
 
         let (o, e) = compute_diversity_statistics(r.as_ref(), &batch_indices, &pr_b);
 
@@ -896,12 +1217,12 @@ mod tests {
         let pr_b = vec![3.0 / 9.0, 2.0 / 9.0, 4.0 / 9.0];
 
         // Random-ish R matrix (3 clusters × 9 cells)
-        #[rustfmt::skip]
-            let r = mat![
-                [0.5, 0.6, 0.4, 0.7, 0.3, 0.8, 0.2, 0.5, 0.6],
-                [0.3, 0.2, 0.4, 0.2, 0.5, 0.1, 0.6, 0.3, 0.3],
-                [0.2, 0.2, 0.2, 0.1, 0.2, 0.1, 0.2, 0.2, 0.1],
-            ];
+
+        let r = mat![
+            [0.5, 0.6, 0.4, 0.7, 0.3, 0.8, 0.2, 0.5, 0.6],
+            [0.3, 0.2, 0.4, 0.2, 0.5, 0.1, 0.6, 0.3, 0.3],
+            [0.2, 0.2, 0.2, 0.1, 0.2, 0.1, 0.2, 0.2, 0.1],
+        ];
 
         let (o, e) = compute_diversity_statistics(r.as_ref(), &batch_indices, &pr_b);
 
@@ -964,11 +1285,11 @@ mod tests {
         // R: 2 clusters × 4 cells
         // Cluster 0: strongly assigns to cells 0 and 3
         // Cluster 1: strongly assigns to cells 1 and 2
-        #[rustfmt::skip]
-            let r = mat![
-                [0.9, 0.1, 0.1, 0.8],  // cluster 0
-                [0.1, 0.9, 0.9, 0.2],  // cluster 1
-            ];
+
+        let r = mat![
+            [0.9, 0.1, 0.1, 0.8], // cluster 0
+            [0.1, 0.9, 0.9, 0.2], // cluster 1
+        ];
 
         let y = update_centroids_from_r(z_cos_norm.as_ref(), r.as_ref());
 
@@ -1021,19 +1342,19 @@ mod tests {
         // Test with hard (one-hot) assignments
 
         // 3 cells, 2 dimensions
-        #[rustfmt::skip]
-            let z_cos = mat![
-                [1.0, 0.0],
-                [0.0, 1.0],
-                [0.707, 0.707],  // 45 degree angle
-            ];
+
+        let z_cos = mat![
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [0.707, 0.707], // 45 degree angle
+        ];
 
         // Hard assignment: cluster 0 gets cells 0 and 2, cluster 1 gets cell 1
-        #[rustfmt::skip]
-            let r = mat![
-                [1.0, 0.0, 1.0],  // cluster 0
-                [0.0, 1.0, 0.0],  // cluster 1
-            ];
+
+        let r = mat![
+            [1.0, 0.0, 1.0], // cluster 0
+            [0.0, 1.0, 0.0], // cluster 1
+        ];
 
         let y = update_centroids_from_r(z_cos.as_ref(), r.as_ref());
 
@@ -1084,17 +1405,10 @@ mod tests {
         let pr_b = vec![0.5, 0.5];
 
         // Scenario 1: High uncertainty (uniform R)
-        #[rustfmt::skip]
-            let r_uncertain = mat![
-                [0.5, 0.5, 0.5, 0.5],
-                [0.5, 0.5, 0.5, 0.5],
-            ];
 
-        #[rustfmt::skip]
-            let dist_mat_high = mat![
-                [1.0, 1.0, 1.0, 1.0],
-                [1.0, 1.0, 1.0, 1.0],
-            ];
+        let r_uncertain = mat![[0.5, 0.5, 0.5, 0.5], [0.5, 0.5, 0.5, 0.5],];
+
+        let dist_mat_high = mat![[1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 1.0],];
 
         let (o1, e1) = compute_diversity_statistics(r_uncertain.as_ref(), &batch_indices, &pr_b);
 
@@ -1109,17 +1423,10 @@ mod tests {
         );
 
         // Scenario 2: Low uncertainty (confident R) and lower distances
-        #[rustfmt::skip]
-            let r_confident = mat![
-                [0.9, 0.9, 0.1, 0.1],
-                [0.1, 0.1, 0.9, 0.9],
-            ];
 
-        #[rustfmt::skip]
-            let dist_mat_low = mat![
-                [0.1, 0.1, 1.0, 1.0],
-                [1.0, 1.0, 0.1, 0.1],
-            ];
+        let r_confident = mat![[0.9, 0.9, 0.1, 0.1], [0.1, 0.1, 0.9, 0.9],];
+
+        let dist_mat_low = mat![[0.1, 0.1, 1.0, 1.0], [1.0, 1.0, 0.1, 0.1],];
 
         let (o2, e2) = compute_diversity_statistics(r_confident.as_ref(), &batch_indices, &pr_b);
 
@@ -1151,17 +1458,9 @@ mod tests {
         let theta = vec![1.0, 1.0];
         let pr_b = vec![2.0 / 3.0, 1.0 / 3.0];
 
-        #[rustfmt::skip]
-            let r = mat![
-                [0.8, 0.7, 0.2],
-                [0.2, 0.3, 0.8],
-            ];
+        let r = mat![[0.8, 0.7, 0.2], [0.2, 0.3, 0.8],];
 
-        #[rustfmt::skip]
-            let dist_mat = mat![
-                [0.1, 0.2, 0.9],
-                [0.9, 0.8, 0.1],
-            ];
+        let dist_mat = mat![[0.1, 0.2, 0.9], [0.9, 0.8, 0.1],];
 
         let (o, e) = compute_diversity_statistics(r.as_ref(), &batch_indices, &pr_b);
 
@@ -1194,17 +1493,10 @@ mod tests {
         let pr_b = vec![0.5, 0.5];
 
         // Hard assignment
-        #[rustfmt::skip]
-            let r = mat![
-                [1.0, 0.0],
-                [0.0, 1.0],
-            ];
 
-        #[rustfmt::skip]
-            let dist_mat = mat![
-                [0.1, 0.9],
-                [0.9, 0.1],
-            ];
+        let r = mat![[1.0, 0.0], [0.0, 1.0],];
+
+        let dist_mat = mat![[0.1, 0.9], [0.9, 0.1],];
 
         let (o, e) = compute_diversity_statistics(r.as_ref(), &batch_indices, &pr_b);
 
@@ -1238,18 +1530,12 @@ mod tests {
         let theta = vec![1.0, 1.0];
 
         // Initial R (uniform)
-        #[rustfmt::skip]
-            let r_init = mat![
-                [0.5, 0.5, 0.5, 0.5],
-                [0.5, 0.5, 0.5, 0.5],
-            ];
+
+        let r_init = mat![[0.5, 0.5, 0.5, 0.5], [0.5, 0.5, 0.5, 0.5],];
 
         // Distances: cluster 0 close to cells 0,1; cluster 1 close to cells 2,3
-        #[rustfmt::skip]
-            let dist_mat = mat![
-                [0.1, 0.1, 0.9, 0.9],
-                [0.9, 0.9, 0.1, 0.1],
-            ];
+
+        let dist_mat = mat![[0.1, 0.1, 0.9, 0.9], [0.9, 0.9, 0.1, 0.1],];
 
         let (o_init, e_init) = compute_diversity_statistics(r_init.as_ref(), &batch_indices, &pr_b);
 
@@ -1333,17 +1619,9 @@ mod tests {
         let sigma = vec![1.0, 1.0];
         let theta = vec![0.0]; // No penalty
 
-        #[rustfmt::skip]
-            let r_init = mat![
-                [0.5, 0.5],
-                [0.5, 0.5],
-            ];
+        let r_init = mat![[0.5, 0.5], [0.5, 0.5],];
 
-        #[rustfmt::skip]
-            let dist_mat = mat![
-                [0.1, 0.9],
-                [0.9, 0.1],
-            ];
+        let dist_mat = mat![[0.1, 0.9], [0.9, 0.1],];
 
         let (o_init, e_init) = compute_diversity_statistics(r_init.as_ref(), &batch_indices, &pr_b);
 
@@ -1385,18 +1663,12 @@ mod tests {
         let theta = vec![2.0, 2.0]; // Strong diversity penalty
 
         // Initial: cluster 0 gets most cells
-        #[rustfmt::skip]
-            let r_init = mat![
-                [0.9, 0.9, 0.9, 0.9],
-                [0.1, 0.1, 0.1, 0.1],
-            ];
+
+        let r_init = mat![[0.9, 0.9, 0.9, 0.9], [0.1, 0.1, 0.1, 0.1],];
 
         // All cells reasonably close to cluster 0
-        #[rustfmt::skip]
-            let dist_mat = mat![
-                [0.2, 0.2, 0.2, 0.2],
-                [0.8, 0.8, 0.8, 0.8],
-            ];
+
+        let dist_mat = mat![[0.2, 0.2, 0.2, 0.2], [0.8, 0.8, 0.8, 0.8],];
 
         let (o_init, e_init) = compute_diversity_statistics(r_init.as_ref(), &batch_indices, &pr_b);
 
@@ -1428,5 +1700,144 @@ mod tests {
                 col_sum
             );
         }
+    }
+
+    #[test]
+    fn test_ridge_regression_basic() {
+        // Simple case: 2 batches, 4 cells, 2 features
+        let batch_indices = vec![vec![0, 1], vec![2, 3]];
+
+        // Data with clear batch effect in feature 0
+        // Batch 0: feature 0 has mean ~1.0
+        // Batch 1: feature 0 has mean ~5.0
+        let z_orig = mat![
+            [1.0, 0.1], // batch 0
+            [1.1, 0.2], // batch 0
+            [5.0, 0.1], // batch 1
+            [5.1, 0.2], // batch 1
+        ];
+
+        // Hard assignments: cluster 0 gets all cells
+        let r = mat![[1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 0.0],];
+
+        // Small ridge penalty (B=2 batches)
+        let lambda = vec![0.01, 0.01];
+
+        let z_corr =
+            ridge_regression_correction(z_orig.as_ref(), r.as_ref(), &batch_indices, &lambda);
+
+        // After correction, batch effect in feature 0 should be reduced
+        // The mean difference between batches should be smaller
+        let batch0_mean_orig = (z_orig[(0, 0)] + z_orig[(1, 0)]) / 2.0;
+        let batch1_mean_orig = (z_orig[(2, 0)] + z_orig[(3, 0)]) / 2.0;
+        let orig_diff = (batch1_mean_orig - batch0_mean_orig).abs();
+
+        let batch0_mean_corr = (z_corr[(0, 0)] + z_corr[(1, 0)]) / 2.0;
+        let batch1_mean_corr = (z_corr[(2, 0)] + z_corr[(3, 0)]) / 2.0;
+        let corr_diff = (batch1_mean_corr - batch0_mean_corr).abs();
+
+        assert!(
+            corr_diff < orig_diff,
+            "Batch effect should be reduced: orig_diff={}, corr_diff={}",
+            orig_diff,
+            corr_diff
+        );
+
+        // Feature 1 has no batch effect, should remain relatively unchanged
+        let feature1_change: f32 = (0..4)
+            .map(|i| (z_corr[(i, 1)] - z_orig[(i, 1)]).abs())
+            .sum::<f32>()
+            / 4.0;
+
+        assert!(
+            feature1_change < 0.5,
+            "Feature without batch effect should change little: {}",
+            feature1_change
+        );
+    }
+
+    #[test]
+    fn test_ridge_regression_no_correction_needed() {
+        // If data has no batch effect, correction should be minimal
+        let batch_indices = vec![vec![0, 1], vec![2, 3]];
+
+        // Data with no batch effect
+        let z_orig = mat![[1.0, 2.0], [1.0, 2.0], [1.0, 2.0], [1.0, 2.0],];
+
+        let r = mat![[1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 0.0],];
+
+        // B=2 batches
+        let lambda = vec![0.1, 0.1];
+
+        let z_corr =
+            ridge_regression_correction(z_orig.as_ref(), r.as_ref(), &batch_indices, &lambda);
+
+        // Data should be mostly unchanged
+        for i in 0..4 {
+            for j in 0..2 {
+                assert!(
+                    (z_corr[(i, j)] - z_orig[(i, j)]).abs() < 0.5,
+                    "Cell {}, feature {}: changed from {} to {}",
+                    i,
+                    j,
+                    z_orig[(i, j)],
+                    z_corr[(i, j)]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_ridge_regression_soft_assignments() {
+        // Test with soft assignments (cells partially in multiple clusters)
+        let batch_indices = vec![vec![0, 1], vec![2, 3]];
+
+        let z_orig = mat![[1.0, 0.0], [1.0, 0.0], [5.0, 0.0], [5.0, 0.0],];
+
+        // Soft assignments: cells split between two clusters
+        let r = mat![
+            [0.8, 0.9, 0.1, 0.2], // Cluster 0 strongly prefers batch 0
+            [0.2, 0.1, 0.9, 0.8], // Cluster 1 strongly prefers batch 1
+        ];
+
+        // B=2 batches
+        let lambda = vec![0.01, 0.01];
+
+        let z_corr =
+            ridge_regression_correction(z_orig.as_ref(), r.as_ref(), &batch_indices, &lambda);
+
+        // Should still reduce batch effect
+        let batch0_mean_orig = (z_orig[(0, 0)] + z_orig[(1, 0)]) / 2.0;
+        let batch1_mean_orig = (z_orig[(2, 0)] + z_orig[(3, 0)]) / 2.0;
+        let orig_diff = (batch1_mean_orig - batch0_mean_orig).abs();
+
+        let batch0_mean_corr = (z_corr[(0, 0)] + z_corr[(1, 0)]) / 2.0;
+        let batch1_mean_corr = (z_corr[(2, 0)] + z_corr[(3, 0)]) / 2.0;
+        let corr_diff = (batch1_mean_corr - batch0_mean_corr).abs();
+
+        assert!(
+            corr_diff < orig_diff,
+            "Batch effect should be reduced with soft assignments: orig_diff={}, corr_diff={}",
+            orig_diff,
+            corr_diff
+        );
+    }
+
+    #[test]
+    fn test_ridge_regression_preserves_dimensions() {
+        let batch_indices = vec![vec![0], vec![1], vec![2]];
+
+        let z_orig = mat![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0],];
+
+        let r = mat![[0.5, 0.5, 0.5], [0.5, 0.5, 0.5],];
+
+        // B=3 batches
+        let lambda = vec![0.1, 0.1, 0.1];
+
+        let z_corr =
+            ridge_regression_correction(z_orig.as_ref(), r.as_ref(), &batch_indices, &lambda);
+
+        assert_eq!(z_corr.nrows(), z_orig.nrows());
+        assert_eq!(z_corr.ncols(), z_orig.ncols());
     }
 }
