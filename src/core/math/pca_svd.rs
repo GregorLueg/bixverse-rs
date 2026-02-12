@@ -237,6 +237,7 @@ pub fn randomised_sparse_svd<T, F>(
     use_second_layer: bool,
     oversampling: Option<usize>,
     n_power_iter: Option<usize>,
+    col_means: Option<&[F]>,
 ) -> RandomSvdResults<F>
 where
     T: BixverseNumeric + Into<F>,
@@ -247,7 +248,6 @@ where
     let sample_size = (rank + os).min(m).min(n);
     let n_iter = n_power_iter.unwrap_or(2);
 
-    // Avoid unconditional clone — only transform if needed, otherwise borrow.
     let csr_owned;
     let csr: &CompressedSparseData<T> = match matrix.cs_type {
         CompressedSparseFormat::Csr => matrix,
@@ -268,9 +268,25 @@ where
         csr.data.iter().map(|&v| v.into()).collect()
     };
 
-    // A * x — parallel over rows, writing directly into y (no intermediate buffer).
+    // A * x with implicit mean centering: y = (A - 1μᵀ)x = Ax - 1(μᵀx)
     let sparse_matvec_a = |x: MatRef<F>, y: MatMut<F>| {
         let ncols = x.ncols();
+
+        // Pre-compute mean_dots[col] = dot(μ, x[:, col])
+        let mean_dots: Vec<F> = if let Some(mu) = col_means {
+            (0..ncols)
+                .map(|col| {
+                    let mut d = F::zero();
+                    for j in 0..m {
+                        d += mu[j] * x[(j, col)];
+                    }
+                    d
+                })
+                .collect()
+        } else {
+            vec![]
+        };
+
         let y_ptr = y.as_ptr_mut() as usize;
         let y_row_stride = y.row_stride();
         let y_col_stride = y.col_stride();
@@ -278,7 +294,6 @@ where
         (0..n).into_par_iter().for_each(|i| {
             let base = y_ptr as *mut F;
 
-            // Zero this row
             for col in 0..ncols {
                 unsafe {
                     let ptr = base.offset(i as isize * y_row_stride + col as isize * y_col_stride);
@@ -297,10 +312,21 @@ where
                     }
                 }
             }
+
+            // Subtract mean contribution
+            if col_means.is_some() {
+                for col in 0..ncols {
+                    unsafe {
+                        let ptr =
+                            base.offset(i as isize * y_row_stride + col as isize * y_col_stride);
+                        *ptr = *ptr - mean_dots[col];
+                    }
+                }
+            }
         });
     };
 
-    // A^T * x — parallel fold with tree reduction (no collect + serial sum).
+    // Aᵀ * x with implicit mean centering: y = (A - 1μᵀ)ᵀx = Aᵀx - μ(1ᵀx)
     let sparse_matvec_at = |x: MatRef<F>, mut y: MatMut<F>| {
         let ncols = x.ncols();
 
@@ -329,14 +355,33 @@ where
                 },
             );
 
+        // Compute col_sums[col] = sum_i x[i, col]
+        let col_sums: Vec<F> = if let Some(_mu) = col_means {
+            (0..ncols)
+                .map(|col| {
+                    let mut s = F::zero();
+                    for i in 0..n {
+                        s += x[(i, col)];
+                    }
+                    s
+                })
+                .collect()
+        } else {
+            vec![]
+        };
+
         for j in 0..m {
             for col in 0..ncols {
                 y[(j, col)] = result[j * ncols + col];
+                // Subtract mean correction: μ[j] * sum_i(x[i, col])
+                if let Some(mu) = col_means {
+                    y[(j, col)] -= mu[j] * col_sums[col];
+                }
             }
         }
     };
 
-    // Random projection: Y = A * Omega
+    // Random projection: Y = A_centered * Omega
     let mut rng = StdRng::seed_from_u64(seed);
     let normal = Normal::new(0.0, 1.0).unwrap();
     let omega = Mat::from_fn(m, sample_size, |_, _| {
@@ -346,7 +391,6 @@ where
     let mut y = Mat::<F>::zeros(n, sample_size);
     sparse_matvec_a(omega.as_ref(), y.as_mut());
 
-    // Power iteration for better approximation of the column space
     let mut q = y.qr().compute_thin_Q();
 
     for _ in 0..n_iter {
@@ -359,8 +403,7 @@ where
         q = y_new.qr().compute_thin_Q();
     }
 
-    // B = Q^T * A — parallel fold with tree reduction, flat vec accumulator
-    // with layout [j * sample_size + k] so the inner k-loop writes sequentially.
+    // B = Qᵀ * A_centered = Qᵀ * A - (Qᵀ * 1) * μᵀ
     let mut b = Mat::<F>::zeros(sample_size, m);
 
     let b_data = (0..n)
@@ -388,10 +431,28 @@ where
             },
         );
 
-    // Transpose from [j * sample_size + k] into b which is [sample_size × m]
+    // Rank-1 mean correction on B: q_sums[k] = sum_i Q[i, k]
+    let q_sums: Vec<F> = if col_means.is_some() {
+        (0..sample_size)
+            .map(|k| {
+                let mut s = F::zero();
+                for i in 0..n {
+                    s += q[(i, k)];
+                }
+                s
+            })
+            .collect()
+    } else {
+        vec![]
+    };
+
     for j in 0..m {
         for k in 0..sample_size {
-            b[(k, j)] = b_data[j * sample_size + k];
+            let mut val = b_data[j * sample_size + k];
+            if let Some(mu) = col_means {
+                val -= q_sums[k] * mu[j];
+            }
+            b[(k, j)] = val;
         }
     }
 

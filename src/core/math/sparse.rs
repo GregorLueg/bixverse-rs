@@ -1387,6 +1387,7 @@ pub fn sparse_svd_lanczos<T, U, F>(
     n_components: usize,
     seed: u64,
     use_second_layer: bool,
+    col_means: Option<&[F]>,
 ) -> SvdResults<F>
 where
     T: BixverseNumeric + SimdDistance + Into<F>,
@@ -1400,7 +1401,6 @@ where
 
     let n_iter = (n_components * 2 + 10).max(n_components).min(krylov_dim);
 
-    // ensure we have CSR for efficient operations
     let csr = match matrix.cs_type {
         CompressedSparseFormat::Csr => matrix.clone(),
         CompressedSparseFormat::Csc => matrix.transform(),
@@ -1417,19 +1417,32 @@ where
         csr.data.iter().map(|&v| v.into()).collect()
     };
 
-    // Parallelized A*x: y = A * x
+    // y = (A - 1μᵀ)x = Ax - 1·dot(μ, x)
     let matvec_a = |x: &[F], y: &mut [F]| {
+        let mean_dot: F = if let Some(mu) = col_means {
+            let mut d = F::zero();
+            for j in 0..m {
+                d += mu[j] * x[j];
+            }
+            d
+        } else {
+            F::zero()
+        };
+
         y.par_iter_mut().enumerate().for_each(|(i, yi)| {
             let mut sum = F::zero();
             for idx in csr.indptr[i]..csr.indptr[i + 1] {
                 let j = csr.indices[idx];
                 sum += data_f[idx] * x[j];
             }
+            if col_means.is_some() {
+                sum -= mean_dot;
+            }
             *yi = sum;
         });
     };
 
-    // Parallelized A^T*x: y = A^T * x
+    // y = (A - 1μᵀ)ᵀx = Aᵀx - μ·sum(x)
     let matvec_at = |x: &[F], y: &mut [F]| {
         let partial_sums: Vec<F> = (0..n)
             .into_par_iter()
@@ -1452,10 +1465,17 @@ where
                     a
                 },
             );
-        y.copy_from_slice(&partial_sums);
+
+        if let Some(mu) = col_means {
+            let x_sum: F = x.iter().copied().sum();
+            for j in 0..m {
+                y[j] = partial_sums[j] - mu[j] * x_sum;
+            }
+        } else {
+            y.copy_from_slice(&partial_sums);
+        }
     };
 
-    // define (A^T A)*x or (AA^T)*x without forming the product
     let matvec_gram: Box<dyn Fn(&[F], &mut [F]) + Sync> = if use_ata {
         Box::new(|x: &[F], y: &mut [F]| {
             let mut temp = vec![F::zero(); n];
@@ -1470,7 +1490,6 @@ where
         })
     };
 
-    // lanczos iteration
     let mut v = vec![F::zero(); krylov_dim];
     let mut v_old = vec![F::zero(); krylov_dim];
     let mut w = vec![F::zero(); krylov_dim];
@@ -1498,7 +1517,6 @@ where
             }
         }
 
-        // Full reorthogonalisation against all previous Lanczos vectors
         for k in 0..=j {
             let coeff = dot(&w, &v_matrix[k]);
             for i in 0..krylov_dim {
@@ -1534,7 +1552,6 @@ where
         let sigma = eval.sqrt();
         singular_values.push(sigma);
 
-        // transform eigenvector back to original space
         let mut gram_evec = vec![F::zero(); krylov_dim];
         for i in 0..krylov_dim {
             for j in 0..n_iter {
@@ -1542,38 +1559,30 @@ where
             }
         }
 
-        // normalise
         let norm_val: F = gram_evec.iter().map(|x| *x * *x).sum::<F>().sqrt();
         for x in &mut gram_evec {
             *x /= norm_val;
         }
 
         if use_ata {
-            // gram_evec is eigenvector of A^T A, so it's V
-            // U = (1/σ) * A * V
             let mut u_vec = vec![F::zero(); n];
             matvec_a(&gram_evec, &mut u_vec);
             for x in &mut u_vec {
                 *x /= sigma;
             }
-
             u_vecs.push(u_vec);
             v_vecs.push(gram_evec);
         } else {
-            // gram_evec is eigenvector of AA^T, so it's U
-            // V = (1/σ) * A^T * U
             let mut v_vec = vec![F::zero(); m];
             matvec_at(&gram_evec, &mut v_vec);
             for x in &mut v_vec {
                 *x /= sigma;
             }
-
             u_vecs.push(gram_evec);
             v_vecs.push(v_vec);
         }
     }
 
-    // Convert to faer matrices
     let u = Mat::from_fn(n, singular_values.len(), |i, j| u_vecs[j][i]);
     let v = Mat::from_fn(m, singular_values.len(), |i, j| v_vecs[j][i]);
 
