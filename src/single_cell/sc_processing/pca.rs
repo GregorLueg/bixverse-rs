@@ -7,7 +7,7 @@ use crate::core::math::pca_svd::randomised_sparse_svd;
 use crate::core::math::pca_svd::*;
 use crate::core::math::sparse::sparse_svd_lanczos;
 use crate::prelude::*;
-use crate::utils::simd::sum_simd_f32;
+use crate::utils::simd::{sum_simd_f32, variance_simd_f32};
 
 /////////////
 // Helpers //
@@ -64,7 +64,7 @@ pub fn scale_csc_chunk(chunk: &CscGeneChunk, no_cells: usize) -> (Vec<f32>, f32,
         dense_data[row_idx as usize] = chunk.data_norm[idx].to_f32();
     }
     let mean = sum_simd_f32(&dense_data) / no_cells as f32;
-    let variance = dense_data.iter().map(|&x| (x - mean).powi(2)).sum::<f32>() / no_cells as f32;
+    let variance = variance_simd_f32(&dense_data, mean);
     let std_dev = variance.sqrt();
 
     let scaled = if std_dev < 1e-8 {

@@ -343,3 +343,155 @@ pub fn sum_squares_simd_f32(a: &[f32]) -> f32 {
         SimdLevel::Scalar => sum_squares_scalar_f32(a),
     }
 }
+
+//////////////
+// Variance //
+//////////////
+
+/// SIMD variance of a slice of f32 (scalar)
+///
+/// ### Params
+///
+/// * `a` - The slice of f32 values to calculate variance for.
+/// * `mean` - The mean of the values in `a`.
+///
+/// ### Returns
+///
+/// Variance
+#[inline(always)]
+fn variance_scalar_f32(a: &[f32], mean: f32) -> f32 {
+    a.iter().map(|&x| (x - mean).powi(2)).sum::<f32>()
+}
+
+/// SIMD variance of a slice of f32 (128-bit)
+///
+/// ### Params
+///
+/// * `a` - The slice of f32 values to calculate variance for.
+/// * `mean` - The mean of the values in `a`.
+///
+/// ### Returns
+///
+/// Variance
+#[inline(always)]
+fn variance_sse_f32(a: &[f32], mean: f32) -> f32 {
+    let len = a.len();
+    let chunks = len / 4;
+    let mut acc = f32x4::ZERO;
+    let mean_vec = f32x4::splat(mean);
+    unsafe {
+        let a_ptr = a.as_ptr();
+        for i in 0..chunks {
+            let va = f32x4::from(*(a_ptr.add(i * 4) as *const [f32; 4]));
+            let diff = va - mean_vec;
+            acc += diff * diff;
+        }
+    }
+    let mut sum = acc.reduce_add();
+    for i in (chunks * 4)..len {
+        let diff = a[i] - mean;
+        sum += diff * diff;
+    }
+    sum
+}
+
+/// SIMD variance of a slice of f32 (256-bit)
+///
+/// ### Params
+///
+/// * `a` - The slice of f32 values to calculate variance for.
+/// * `mean` - The mean of the values in `a`.
+///
+/// ### Returns
+///
+/// Variance
+#[inline(always)]
+fn variance_avx2_f32(a: &[f32], mean: f32) -> f32 {
+    let len = a.len();
+    let chunks = len / 8;
+    let mut acc = f32x8::ZERO;
+    let mean_vec = f32x8::splat(mean);
+    unsafe {
+        let a_ptr = a.as_ptr();
+        for i in 0..chunks {
+            let va = f32x8::from(*(a_ptr.add(i * 8) as *const [f32; 8]));
+            let diff = va - mean_vec;
+            acc += diff * diff;
+        }
+    }
+    let mut sum = acc.reduce_add();
+    for i in (chunks * 8)..len {
+        let diff = a[i] - mean;
+        sum += diff * diff;
+    }
+    sum
+}
+
+/// SIMD variance of a slice of f32 (512-bit)
+///
+/// ### Params
+///
+/// * `a` - The slice of f32 values to calculate variance for.
+/// * `mean` - The mean of the values in `a`.
+///
+/// ### Returns
+///
+/// Variance
+#[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+#[inline(always)]
+fn variance_avx512_f32(a: &[f32], mean: f32) -> f32 {
+    use std::arch::x86_64::*;
+    let len = a.len();
+    let chunks = len / 16;
+    unsafe {
+        let mut acc = _mm512_setzero_ps();
+        let mean_vec = _mm512_set1_ps(mean);
+        for i in 0..chunks {
+            let va = _mm512_loadu_ps(a.as_ptr().add(i * 16));
+            let diff = _mm512_sub_ps(va, mean_vec);
+            acc = _mm512_fmadd_ps(diff, diff, acc);
+        }
+        let mut sum = _mm512_reduce_add_ps(acc);
+        for i in (chunks * 16)..len {
+            let diff = a[i] - mean;
+            sum += diff * diff;
+        }
+        sum
+    }
+}
+
+/// SIMD variance of a slice of f32 (512-bit fallback)
+///
+/// ### Params
+///
+/// * `a` - The slice of f32 values to calculate variance for.
+/// * `mean` - The mean of the values in `a`.
+///
+/// ### Returns
+///
+/// Variance
+#[cfg(not(all(target_arch = "x86_64", target_feature = "avx512f")))]
+#[inline(always)]
+fn variance_avx512_f32(a: &[f32], mean: f32) -> f32 {
+    variance_avx2_f32(a, mean)
+}
+
+/// SIMD variance of a slice of f32 (dispatch)
+///
+/// ### Params
+///
+/// * `a` - The slice of f32 values to calculate variance for.
+/// * `mean` - The mean of the values in `a`.
+///
+/// ### Returns
+///
+/// Variance
+#[inline]
+pub fn variance_simd_f32(a: &[f32], mean: f32) -> f32 {
+    match detect_simd_level() {
+        SimdLevel::Avx512 => variance_avx512_f32(a, mean),
+        SimdLevel::Avx2 => variance_avx2_f32(a, mean),
+        SimdLevel::Sse => variance_sse_f32(a, mean),
+        SimdLevel::Scalar => variance_scalar_f32(a, mean),
+    }
+}
