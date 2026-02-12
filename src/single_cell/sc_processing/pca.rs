@@ -7,6 +7,7 @@ use crate::core::math::pca_svd::randomised_sparse_svd;
 use crate::core::math::pca_svd::*;
 use crate::core::math::sparse::sparse_svd_lanczos;
 use crate::prelude::*;
+use crate::utils::simd::sum_simd_f32;
 
 /////////////
 // Helpers //
@@ -62,7 +63,7 @@ pub fn scale_csc_chunk(chunk: &CscGeneChunk, no_cells: usize) -> (Vec<f32>, f32,
     for (idx, &row_idx) in chunk.indices.iter().enumerate() {
         dense_data[row_idx as usize] = chunk.data_norm[idx].to_f32();
     }
-    let mean = dense_data.iter().sum::<f32>() / no_cells as f32;
+    let mean = sum_simd_f32(&dense_data) / no_cells as f32;
     let variance = dense_data.iter().map(|&x| (x - mean).powi(2)).sum::<f32>() / no_cells as f32;
     let std_dev = variance.sqrt();
 
@@ -267,11 +268,18 @@ pub fn pca_on_sc_sparse(
             None,
         );
         let scores = compute_pc_scores(&svd_res);
-        (scores, svd_res.u().to_owned(), svd_res.s().to_vec())
+        (
+            scores.submatrix(0, 0, cell_set.len(), no_pcs).to_owned(),
+            svd_res
+                .v()
+                .submatrix(0, 0, gene_indices.len(), no_pcs)
+                .to_owned(),
+            svd_res.s().to_vec(),
+        )
     } else {
         let svd_res = sparse_svd_lanczos::<f32, f32, f32>(&csc, no_pcs, seed as u64, true);
         let scores = compute_pc_scores(&svd_res);
-        (scores, svd_res.u().to_owned(), svd_res.s().to_vec())
+        (scores, svd_res.v().to_owned(), svd_res.s().to_vec())
     };
 
     let end_svd = start_svd.elapsed();

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use faer::{Mat, MatRef};
 use petgraph::Graph;
 use rayon::prelude::*;
