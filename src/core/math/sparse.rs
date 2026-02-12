@@ -176,10 +176,7 @@ where
     ///
     /// The transformed/transposed version
     pub fn transform(&self) -> Self {
-        match self.cs_type {
-            CompressedSparseFormat::Csc => csc_to_csr(self),
-            CompressedSparseFormat::Csr => csr_to_csc(self),
-        }
+        transpose_sparse(self)
     }
 
     /// Transpose and convert
@@ -195,7 +192,7 @@ where
         match self.cs_type {
             CompressedSparseFormat::Csr => {
                 // convert first and then switch around
-                let csc_version = csr_to_csc(self);
+                let csc_version = transpose_sparse(self);
                 CompressedSparseData {
                     data: csc_version.data,
                     indices: csc_version.indices,
@@ -410,120 +407,94 @@ where
     }
 }
 
-/// Transforms a CompressedSparseData that is CSC to CSR
+/// Transpose a compressed sparse matrix (CSC→CSR or CSR→CSC).
+///
+/// This is the standard two-pass sparse transpose in O(nnz) time.
 ///
 /// ### Params
 ///
-/// * `sparse_data` - The CompressedSparseData you want to transform
-pub fn csc_to_csr<T, U>(sparse_data: &CompressedSparseData<T, U>) -> CompressedSparseData<T, U>
-where
-    T: BixverseNumeric,
-    U: BixverseNumeric,
-{
-    let (nrow, _) = sparse_data.shape();
-    let nnz = sparse_data.get_nnz();
-    let mut row_ptr = vec![0; nrow + 1];
-
-    for &r in &sparse_data.indices {
-        row_ptr[r + 1] += 1;
-    }
-
-    for i in 0..nrow {
-        row_ptr[i + 1] += row_ptr[i];
-    }
-
-    let mut csr_data = vec![T::default(); nnz];
-    let mut csr_data2 = sparse_data.data_2.as_ref().map(|_| vec![U::default(); nnz]);
-    let mut csr_col_ind = vec![0; nnz];
-    let mut next = row_ptr[..nrow].to_vec();
-
-    for col in 0..(sparse_data.indptr.len() - 1) {
-        for idx in sparse_data.indptr[col]..sparse_data.indptr[col + 1] {
-            let row = sparse_data.indices[idx];
-            let pos = next[row];
-
-            csr_data[pos] = sparse_data.data[idx];
-            csr_col_ind[pos] = col;
-
-            // Handle the second layer data
-            if let (Some(source_data2), Some(csr_d2)) = (&sparse_data.data_2, &mut csr_data2) {
-                csr_d2[pos] = source_data2[idx];
-            }
-
-            next[row] += 1;
-        }
-    }
-
-    CompressedSparseData {
-        data: csr_data,
-        indices: csr_col_ind,
-        indptr: row_ptr,
-        cs_type: CompressedSparseFormat::Csr,
-        data_2: csr_data2,
-        shape: sparse_data.shape(),
-    }
-}
-
-/// Transform CSR stored data into CSC stored data
-///
-/// This version does a full memory copy of the data.
-///
-/// ### Params
-///
-/// * `sparse_data` - The CompressedSparseData you want to transform
+/// * `sparse_data`: The input compressed sparse matrix to be transformed.
 ///
 /// ### Returns
 ///
-/// The data in CSC format, i.e., `CscData`
-pub fn csr_to_csc<T, U>(sparse_data: &CompressedSparseData<T, U>) -> CompressedSparseData<T, U>
+/// The transposed compressed sparse matrix.
+pub fn transpose_sparse<T, U>(
+    sparse_data: &CompressedSparseData<T, U>,
+) -> CompressedSparseData<T, U>
 where
     T: BixverseNumeric,
     U: BixverseNumeric,
 {
     let nnz = sparse_data.get_nnz();
-    let (_, ncol) = sparse_data.shape();
-    let mut col_ptr = vec![0; ncol + 1];
+    let (nrow, ncol) = sparse_data.shape();
 
-    // count occurrences per column
-    for &c in &sparse_data.indices {
-        col_ptr[c + 1] += 1;
+    // the "minor" dimension is what becomes the new indptr axis.
+    let (new_major, new_type) = match sparse_data.cs_type {
+        CompressedSparseFormat::Csc => (nrow, CompressedSparseFormat::Csr),
+        CompressedSparseFormat::Csr => (ncol, CompressedSparseFormat::Csc),
+    };
+
+    // first pass: count entries per new-major index
+    let mut new_indptr = vec![0usize; new_major + 1];
+    for &idx in &sparse_data.indices {
+        new_indptr[idx + 1] += 1;
+    }
+    for i in 0..new_major {
+        new_indptr[i + 1] += new_indptr[i];
     }
 
-    // cumulative sum to get column pointers
-    for i in 0..ncol {
-        col_ptr[i + 1] += col_ptr[i];
+    // second pass: scatter data
+    let mut new_data: Vec<T> = Vec::with_capacity(nnz);
+    let mut new_indices: Vec<usize> = Vec::with_capacity(nnz);
+    let mut new_data2: Option<Vec<U>> = sparse_data.data_2.as_ref().map(|_| {
+        let mut v = Vec::with_capacity(nnz);
+        unsafe { v.set_len(nnz) };
+        v
+    });
+    unsafe {
+        new_data.set_len(nnz);
+        new_indices.set_len(nnz);
     }
 
-    let mut csc_data = vec![T::default(); nnz];
-    let mut csc_data2 = sparse_data.data_2.as_ref().map(|_| vec![U::default(); nnz]);
-    let mut csc_row_ind = vec![0; nnz];
-    let mut next = col_ptr[..ncol].to_vec();
+    // Reuse new_indptr as the write cursor — we'll restore it afterwards.
+    // Work on a mutable window so we don't need a separate `next` vec.
+    // We iterate old major indices and scatter into new positions.
+    let old_major_len = sparse_data.indptr.len() - 1;
+    for major in 0..old_major_len {
+        for idx in sparse_data.indptr[major]..sparse_data.indptr[major + 1] {
+            let minor = sparse_data.indices[idx];
+            let pos = new_indptr[minor];
 
-    // iterate through rows and place data in CSC format
-    for row in 0..(sparse_data.indptr.len() - 1) {
-        for idx in sparse_data.indptr[row]..sparse_data.indptr[row + 1] {
-            let col = sparse_data.indices[idx];
-            let pos = next[col];
-
-            csc_data[pos] = sparse_data.data[idx];
-            csc_row_ind[pos] = row;
-
-            // handle the second layer data
-            if let (Some(source_data2), Some(csc_d2)) = (&sparse_data.data_2, &mut csc_data2) {
-                csc_d2[pos] = source_data2[idx];
+            // SAFETY: pos < nnz guaranteed by the counting pass
+            unsafe {
+                *new_data.get_unchecked_mut(pos) = sparse_data.data[idx];
+                *new_indices.get_unchecked_mut(pos) = major;
             }
 
-            next[col] += 1;
+            if let (Some(src), Some(dst)) = (&sparse_data.data_2, &mut new_data2) {
+                unsafe {
+                    *dst.get_unchecked_mut(pos) = src[idx];
+                }
+            }
+
+            new_indptr[minor] += 1;
         }
     }
 
+    // restore new_indptr: the scatter pass shifted every entry forward by its
+    // count, so we shift the whole array right by one position.
+    for i in (1..=new_major).rev() {
+        new_indptr[i] = new_indptr[i - 1];
+    }
+    new_indptr[0] = 0;
+
     CompressedSparseData {
-        data: csc_data,
-        indices: csc_row_ind,
-        indptr: col_ptr,
-        cs_type: CompressedSparseFormat::Csc,
-        data_2: csc_data2,
-        shape: sparse_data.shape(),
+        data: new_data,
+        indices: new_indices,
+        indptr: new_indptr,
+        cs_type: new_type,
+        data_2: new_data2,
+        shape: (nrow, ncol),
     }
 }
 

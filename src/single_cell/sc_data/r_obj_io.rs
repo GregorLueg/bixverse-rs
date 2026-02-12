@@ -1,7 +1,7 @@
 use std::path::Path;
 use thousands::Separable;
 
-use crate::core::math::sparse::csc_to_csr;
+use crate::core::math::sparse::transpose_sparse;
 use crate::prelude::*;
 use crate::single_cell::sc_data::data_io::CellGeneSparseWriter;
 
@@ -50,7 +50,7 @@ where
             if verbose {
                 println!("Converting CSC to CSR...");
             }
-            let csr_data = csc_to_csr(&compressed_data);
+            let csr_data = transpose_sparse(&compressed_data);
             write_r_counts_csr(bin_path, csr_data, cell_quality, verbose)
         }
     }
