@@ -247,9 +247,14 @@ where
     let sample_size = (rank + os).min(m).min(n);
     let n_iter = n_power_iter.unwrap_or(2);
 
-    let csr = match matrix.cs_type {
-        CompressedSparseFormat::Csr => matrix.clone(),
-        CompressedSparseFormat::Csc => matrix.transform(),
+    // Avoid unconditional clone — only transform if needed, otherwise borrow.
+    let csr_owned;
+    let csr: &CompressedSparseData<T> = match matrix.cs_type {
+        CompressedSparseFormat::Csr => matrix,
+        CompressedSparseFormat::Csc => {
+            csr_owned = matrix.transform();
+            &csr_owned
+        }
     };
 
     let data_float: Vec<F> = if use_second_layer {
@@ -263,34 +268,43 @@ where
         csr.data.iter().map(|&v| v.into()).collect()
     };
 
-    let sparse_matvec_a = |x: MatRef<F>, mut y: MatMut<F>| {
+    // A * x — parallel over rows, writing directly into y (no intermediate buffer).
+    let sparse_matvec_a = |x: MatRef<F>, y: MatMut<F>| {
         let ncols = x.ncols();
-        let mut y_data = vec![F::zero(); n * ncols];
+        let y_ptr = y.as_ptr_mut() as usize;
+        let y_row_stride = y.row_stride();
+        let y_col_stride = y.col_stride();
 
-        y_data
-            .par_chunks_mut(ncols)
-            .enumerate()
-            .for_each(|(i, row_out)| {
-                for idx in csr.indptr[i]..csr.indptr[i + 1] {
-                    let j = csr.indices[idx];
-                    let a_val = data_float[idx];
-                    for col in 0..ncols {
-                        row_out[col] += a_val * x[(j, col)];
+        (0..n).into_par_iter().for_each(|i| {
+            let base = y_ptr as *mut F;
+
+            // Zero this row
+            for col in 0..ncols {
+                unsafe {
+                    let ptr = base.offset(i as isize * y_row_stride + col as isize * y_col_stride);
+                    *ptr = F::zero();
+                }
+            }
+
+            for idx in csr.indptr[i]..csr.indptr[i + 1] {
+                let j = csr.indices[idx];
+                let a_val = data_float[idx];
+                for col in 0..ncols {
+                    unsafe {
+                        let ptr =
+                            base.offset(i as isize * y_row_stride + col as isize * y_col_stride);
+                        *ptr = *ptr + a_val * x[(j, col)];
                     }
                 }
-            });
-
-        for i in 0..n {
-            for col in 0..ncols {
-                y[(i, col)] = y_data[i * ncols + col];
             }
-        }
+        });
     };
 
+    // A^T * x — parallel fold with tree reduction (no collect + serial sum).
     let sparse_matvec_at = |x: MatRef<F>, mut y: MatMut<F>| {
         let ncols = x.ncols();
 
-        let partial_results: Vec<Vec<F>> = (0..n)
+        let result = (0..n)
             .into_par_iter()
             .fold(
                 || vec![F::zero(); m * ncols],
@@ -305,14 +319,15 @@ where
                     acc
                 },
             )
-            .collect();
-
-        let mut result = vec![F::zero(); m * ncols];
-        for partial in partial_results {
-            for i in 0..result.len() {
-                result[i] += partial[i];
-            }
-        }
+            .reduce(
+                || vec![F::zero(); m * ncols],
+                |mut a, b| {
+                    for i in 0..a.len() {
+                        a[i] += b[i];
+                    }
+                    a
+                },
+            );
 
         for j in 0..m {
             for col in 0..ncols {
@@ -321,6 +336,7 @@ where
         }
     };
 
+    // Random projection: Y = A * Omega
     let mut rng = StdRng::seed_from_u64(seed);
     let normal = Normal::new(0.0, 1.0).unwrap();
     let omega = Mat::from_fn(m, sample_size, |_, _| {
@@ -330,6 +346,7 @@ where
     let mut y = Mat::<F>::zeros(n, sample_size);
     sparse_matvec_a(omega.as_ref(), y.as_mut());
 
+    // Power iteration for better approximation of the column space
     let mut q = y.qr().compute_thin_Q();
 
     for _ in 0..n_iter {
@@ -342,30 +359,39 @@ where
         q = y_new.qr().compute_thin_Q();
     }
 
+    // B = Q^T * A — parallel fold with tree reduction, flat vec accumulator
+    // with layout [j * sample_size + k] so the inner k-loop writes sequentially.
     let mut b = Mat::<F>::zeros(sample_size, m);
 
-    let partial_bs: Vec<Mat<F>> = (0..n)
+    let b_data = (0..n)
         .into_par_iter()
         .fold(
-            || Mat::<F>::zeros(sample_size, m),
-            |mut b_partial, i| {
+            || vec![F::zero(); m * sample_size],
+            |mut acc, i| {
                 for idx in csr.indptr[i]..csr.indptr[i + 1] {
                     let j = csr.indices[idx];
                     let a_val = data_float[idx];
                     for k in 0..sample_size {
-                        b_partial[(k, j)] += q[(i, k)] * a_val;
+                        acc[j * sample_size + k] += q[(i, k)] * a_val;
                     }
                 }
-                b_partial
+                acc
             },
         )
-        .collect();
+        .reduce(
+            || vec![F::zero(); m * sample_size],
+            |mut a, b_vec| {
+                for i in 0..a.len() {
+                    a[i] += b_vec[i];
+                }
+                a
+            },
+        );
 
-    for b_partial in partial_bs {
+    // Transpose from [j * sample_size + k] into b which is [sample_size × m]
+    for j in 0..m {
         for k in 0..sample_size {
-            for j in 0..m {
-                b[(k, j)] += b_partial[(k, j)];
-            }
+            b[(k, j)] = b_data[j * sample_size + k];
         }
     }
 
