@@ -5,6 +5,7 @@
 ### Features
 
 - Sparse SVD and sparse randomised SVD were added for single cell.
+- Harmony added and MNN can take a pre-computed PCA now.
 
 ### Fixes
 

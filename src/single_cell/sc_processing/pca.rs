@@ -8,9 +8,43 @@ use crate::core::math::pca_svd::*;
 use crate::core::math::sparse::sparse_svd_lanczos;
 use crate::prelude::*;
 
-/////////
-// PCA //
-/////////
+/////////////
+// Helpers //
+/////////////
+
+/// Enum representing the type of SVD to use for PCA analysis in single cell
+#[derive(Clone, Debug)]
+pub enum SvdType {
+    /// Dense SVD solving with scaling
+    Dense { randomised: bool },
+    /// Sparse SVD solving without scaling
+    Sparse { randomised: bool },
+}
+
+/// Default implementation for SvdType
+impl Default for SvdType {
+    fn default() -> SvdType {
+        SvdType::Dense { randomised: true }
+    }
+}
+
+/// Parse the SVD type to use
+///
+/// ### Params
+///
+/// * `s` - The string representation of the SVD type
+/// * `randomised` - Whether to use randomised SVD
+///
+/// ### Returns
+///
+/// An Option containing the parsed SVD type, or None if the input is invalid
+pub fn parse_svd_type(s: &str, randomised: bool) -> Option<SvdType> {
+    match s.to_lowercase().as_str() {
+        "dense" => Some(SvdType::Dense { randomised }),
+        "sparse" => Some(SvdType::Sparse { randomised }),
+        _ => None,
+    }
+}
 
 /// Scales the data in a CSC chunk
 ///
@@ -24,7 +58,7 @@ use crate::prelude::*;
 /// A densified, scaled vector per gene basis.
 #[inline]
 pub fn scale_csc_chunk(chunk: &CscGeneChunk, no_cells: usize) -> (Vec<f32>, f32, f32) {
-    let mut dense_data = vec![0.0f32; no_cells];
+    let mut dense_data = vec![0_f32; no_cells];
     for (idx, &row_idx) in chunk.indices.iter().enumerate() {
         dense_data[row_idx as usize] = chunk.data_norm[idx].to_f32();
     }
@@ -34,13 +68,17 @@ pub fn scale_csc_chunk(chunk: &CscGeneChunk, no_cells: usize) -> (Vec<f32>, f32,
 
     let scaled = if std_dev < 1e-8 {
         // Zero variance gene - just return centered data (all zeros after centering)
-        vec![0.0f32; no_cells]
+        vec![0_f32; no_cells]
     } else {
         dense_data.iter().map(|&x| (x - mean) / std_dev).collect()
     };
 
     (scaled, mean, std_dev)
 }
+
+///////////////
+// Dense PCA //
+///////////////
 
 /// Calculate the PCs for single cell data
 ///
