@@ -1519,6 +1519,14 @@ where
             }
         }
 
+        // Full reorthogonalisation against all previous Lanczos vectors
+        for k in 0..=j {
+            let coeff = dot(&w, &v_matrix[k]);
+            for i in 0..krylov_dim {
+                w[i] -= coeff * v_matrix[k][i];
+            }
+        }
+
         beta[j] = norm(&w);
         if beta[j] < F::from(1e-12).unwrap() {
             break;
