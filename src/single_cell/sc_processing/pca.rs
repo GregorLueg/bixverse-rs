@@ -248,15 +248,23 @@ pub fn pca_on_sc_sparse(
         println!("Loaded in data : {:.2?}", end_reading);
     }
 
-    let n_cells = cell_set.len();
+    let start_data_prep = Instant::now();
 
-    let start_svd = Instant::now();
+    let n_cells = cell_set.len();
 
     gene_chunks.par_iter_mut().for_each(|chunk| {
         chunk.filter_selected_cells(&cell_set);
     });
 
     let csc = from_gene_chunks::<f32>(&gene_chunks, n_cells);
+
+    let end_data_prep = start_data_prep.elapsed();
+
+    if verbose {
+        println!("Finished the data preparations : {:.2?}", end_data_prep);
+    }
+
+    let start_svd = Instant::now();
 
     let (scores, loadings, s) = if random_svd {
         let svd_res = randomised_sparse_svd::<f32, f32>(
