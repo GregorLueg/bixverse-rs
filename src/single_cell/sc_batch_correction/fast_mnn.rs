@@ -746,6 +746,7 @@ pub fn split_pca_by_batch(
 /// * `cell_indices` - Indices of cells to include
 /// * `gene_indices` - Indices of genes to include
 /// * `batch_indices` - Batch assignment for each cell
+/// * `pre_computed_pca` - Pre-computed PCA matrix (optional)
 /// * `params` - FastMNN parameters
 /// * `verbose` - Controls verbosity of the function
 /// * `seed` - Random seed for reproducibility
@@ -758,21 +759,33 @@ pub fn fast_mnn_main(
     cell_indices: &[usize],
     gene_indices: &[usize],
     batch_indices: &[usize],
+    pre_computed_pca: Option<Mat<f32>>,
     params: &FastMnnParams,
     verbose: bool,
     seed: usize,
 ) -> Mat<f32> {
     // calculate the PCA across everything
-    let (pca_all, _, _, _) = pca_on_sc(
-        f_path,
-        cell_indices,
-        gene_indices,
-        params.no_pcs,
-        params.random_svd,
-        seed,
-        false,
-        verbose,
-    );
+    let pca_all = if let Some(pca) = pre_computed_pca {
+        if verbose {
+            println!("Using pre-computed PCA")
+        }
+        pca
+    } else {
+        if verbose {
+            println!("Re-computing PCA")
+        }
+        let (pca, _, _, _) = pca_on_sc(
+            f_path,
+            cell_indices,
+            gene_indices,
+            params.no_pcs,
+            params.random_svd,
+            seed,
+            false,
+            verbose,
+        );
+        pca
+    };
 
     let (mut pca_batches, original_indices) = split_pca_by_batch(&pca_all, batch_indices);
 
