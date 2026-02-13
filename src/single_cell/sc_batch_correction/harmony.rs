@@ -127,7 +127,7 @@ pub fn create_batch_info(labels: &[usize], n_cells: usize) -> BatchInfo {
 /// ### Returns
 ///
 /// Vec of `BatchInfo`, one per variable
-pub fn create_batch_infos(all_labels: &[&[usize]], n_cells: usize) -> Vec<BatchInfo> {
+pub fn create_batch_infos(all_labels: &[Vec<usize>], n_cells: usize) -> Vec<BatchInfo> {
     all_labels
         .iter()
         .map(|labels| create_batch_info(labels, n_cells))
@@ -748,7 +748,7 @@ struct HarmonyState {
 /// Corrected PCA embedding (N x d)
 pub fn harmony(
     pca: MatRef<f32>,
-    batch_labels: &[&[usize]],
+    batch_labels: &[Vec<usize>],
     params: &HarmonyParams,
     seed: usize,
     verbose: bool,
@@ -968,7 +968,7 @@ mod tests {
     fn test_create_batch_infos_multiple() {
         let var0 = vec![0, 0, 1, 1];
         let var1 = vec![0, 1, 0, 1];
-        let infos = create_batch_infos(&[&var0, &var1], 4);
+        let infos = create_batch_infos(&[var0, var1], 4);
 
         assert_eq!(infos.len(), 2);
         assert_eq!(infos[0].n_levels, 2);
