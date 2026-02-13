@@ -6,7 +6,7 @@
 
 ## Description
 
-After having lived in `/src/Rust/` folder of the 
+After having lived in `/src/Rust/` folder of the
 [bixverse R package](https://github.com/GregorLueg/bixverse), the
 decision was made to pull out ALL of the functionality and do a refactor on
 top of the code. This has now led to this independent crate that has
@@ -18,6 +18,10 @@ The functions are being heavily tested within the bixverse package, but
 it would be good to add another testing suite here. Also, at some point,
 a Python interface to the single cell part will be written. Additionally,
 a more detailed documentation will be provided.
+
+## News
+
+Updates and summaries can be found [here](https://github.com/GregorLueg/bixverse-rs/docs/news.MD)
 
 ## Licence
 
