@@ -48,9 +48,9 @@ where
     (total_zeroes, row_zeroes, col_zeroes)
 }
 
-//////////////////////////////
-// Sparse format conversion //
-//////////////////////////////
+///////////////////////
+// Sparse structures //
+///////////////////////
 
 /// Type to describe the CompressedSparseFormat
 #[derive(Debug, Clone)]
@@ -59,6 +59,27 @@ pub enum CompressedSparseFormat {
     Csc,
     /// CSR-formatted data
     Csr,
+}
+
+impl CompressedSparseFormat {
+    /// Returns boolean if it's CSC
+    ///
+    /// ### Returns
+    ///
+    /// Boolean indicating if CSC
+    #[inline(always)]
+    pub fn is_csc(&self) -> bool {
+        matches!(self, CompressedSparseFormat::Csc)
+    }
+    /// Returns boolean if it's CSR
+    ///
+    /// ### Returns
+    ///
+    /// Boolean indicating if CSR
+    #[inline(always)]
+    pub fn is_csr(&self) -> bool {
+        matches!(self, CompressedSparseFormat::Csr)
+    }
 }
 
 /// Helper function to parse compressed sparse format
@@ -78,15 +99,57 @@ pub fn parse_compressed_sparse_format(s: &str) -> Option<CompressedSparseFormat>
     }
 }
 
-#[allow(dead_code)]
-impl CompressedSparseFormat {
-    /// Returns boolean if it's CSC
-    pub fn is_csc(&self) -> bool {
-        matches!(self, CompressedSparseFormat::Csc)
+/// Generate structure to store sparse rows or columns
+///
+/// ### Fields
+///
+/// * `indices` - The indices of the values/non-zero positions
+/// * `data` - The values in the row/columns
+/// * `data_2` - An optional second data layer
+/// * `cs_type` - Is the data stored in `Csr` or `Csc`. `Csr` -> sparse row;
+///   `Csc` -> sparse column
+/// * `length` - Total values in that dimension
+pub struct SparseAxis<T, U = T> {
+    pub indices: Vec<usize>,
+    pub data: Vec<T>,
+    pub data_2: Option<Vec<U>>,
+    pub cs_type: CompressedSparseFormat,
+    pub len: usize,
+}
+
+impl<T, U> SparseAxis<T, U>
+where
+    T: BixverseNumeric,
+    U: BixverseNumeric,
+{
+    /// Generate a new `SparseAxis` in CSC format
+    ///
+    /// ### Params
+    ///
+    /// * `indices` - The indices of the values/non-zero positions
+    /// * `data` - The values in the row/columns
+    /// * `data_2` - An optional second data layer
+    /// * `len` - Number of rows in this sparse column
+    pub fn new_csc(indices: Vec<usize>, data: Vec<T>, data_2: Option<Vec<U>>, len: usize) -> Self {
+        SparseAxis {
+            indices,
+            data,
+            data_2,
+            cs_type: CompressedSparseFormat::Csc,
+            len,
+        }
     }
-    /// Returns boolean if it's CSR
-    pub fn is_csr(&self) -> bool {
-        matches!(self, CompressedSparseFormat::Csr)
+
+    /// Get references to the indices and second layer
+    ///
+    /// ### Returns
+    ///
+    /// A tuple of `(indices, data_2)`
+    pub fn get_indices_data_2(&self) -> (&[usize], &[U]) {
+        let indices = &self.indices;
+        let data_2 = self.data_2.as_ref().expect("target gene requires data_2");
+
+        (indices, data_2)
     }
 }
 
@@ -213,19 +276,6 @@ where
                     shape: (self.shape.1, self.shape.0),
                 }
             }
-        }
-    }
-
-    /// Transpose the matrix
-    #[allow(dead_code)]
-    pub fn transpose_from_h5ad(&self) -> Self {
-        CompressedSparseData {
-            data: self.data.clone(),
-            indices: self.indices.clone(),
-            indptr: self.indptr.clone(),
-            cs_type: self.cs_type.clone(),
-            data_2: self.data_2.clone(),
-            shape: (self.shape.1, self.shape.0),
         }
     }
 
@@ -406,6 +456,10 @@ where
         self.data_2.clone().unwrap()
     }
 }
+
+////////////////////////
+// Format conversions //
+////////////////////////
 
 /// Transpose a compressed sparse matrix (CSC→CSR or CSR→CSC).
 ///
@@ -622,6 +676,10 @@ where
 
     CompressedSparseData::new_csr(&data, &indices, &indptr, None, shape)
 }
+
+///////////////////////
+// Sparse operations //
+///////////////////////
 
 /// Add two CSR matrices together
 ///

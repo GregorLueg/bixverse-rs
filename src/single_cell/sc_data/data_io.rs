@@ -670,9 +670,9 @@ impl CscGeneChunk {
             .map(|(pos, &cell_id)| (cell_id, pos))
             .collect();
 
-        let mut new_data_raw = Vec::new();
-        let mut new_data_norm = Vec::new();
-        let mut new_row_indices = Vec::new();
+        let mut new_data_raw = Vec::with_capacity(cells_to_keep.len());
+        let mut new_data_norm = Vec::with_capacity(cells_to_keep.len());
+        let mut new_row_indices = Vec::with_capacity(cells_to_keep.len());
 
         // tterate in cells_to_keep order (critical for PCA! tripped over this one...)
         for (new_row_idx, &cell_index) in cells_to_keep.iter().enumerate() {
@@ -710,6 +710,24 @@ impl CscGeneChunk {
         let avg = sum / cells_to_keep.len() as f32;
 
         (self.original_index, avg)
+    }
+
+    /// Transform the chunk to a sparse Axis of CSC type
+    ///
+    /// ### Params
+    ///
+    /// * `n_cells` - Number of cells represented in the data
+    ///
+    /// ### Returns
+    ///
+    /// `SparseAxis` with u16 in the main slot and f32 in the data_2 layer.
+    pub fn to_sparse_axis(&self, n_cells: usize) -> SparseAxis<u16, f32> {
+        SparseAxis::new_csc(
+            self.indices.iter().map(|x| *x as usize).collect(),
+            self.data_raw.to_vec(),
+            Some(self.data_norm.iter().map(|x| x.to_f32()).collect()),
+            n_cells,
+        )
     }
 }
 
