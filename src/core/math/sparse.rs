@@ -1396,10 +1396,8 @@ where
     F: BixverseFloat + SimdDistance + std::iter::Sum,
 {
     let (n, m) = matrix.shape;
-
     let use_ata = n > m;
     let krylov_dim = if use_ata { m } else { n };
-
     let n_iter = (n_components * 2 + 10).max(n_components).min(krylov_dim);
 
     let csr = match matrix.cs_type {
@@ -1418,20 +1416,17 @@ where
         csr.data.iter().map(|&v| v.into()).collect()
     };
 
-    // y = (A - 1μᵀ)x / σ = A(x/σ) - 1(μᵀ(x/σ))
     let matvec_a = |x: &[F], y: &mut [F]| {
         let x_scaled: Vec<F> = if let Some(sd) = col_stds {
             x.iter().enumerate().map(|(j, &v)| v / sd[j]).collect()
         } else {
             x.to_vec()
         };
-
         let mean_dot: F = if let Some(mu) = col_means {
             x_scaled.iter().enumerate().map(|(j, &v)| mu[j] * v).sum()
         } else {
             F::zero()
         };
-
         y.par_iter_mut().enumerate().for_each(|(i, yi)| {
             let mut sum = F::zero();
             for idx in csr.indptr[i]..csr.indptr[i + 1] {
@@ -1445,7 +1440,6 @@ where
         });
     };
 
-    // y = ((A - 1μᵀ) / σ)ᵀx = (Aᵀx - μ·sum(x)) / σ
     let matvec_at = |x: &[F], y: &mut [F]| {
         let partial_sums: Vec<F> = (0..n)
             .into_par_iter()
@@ -1468,7 +1462,6 @@ where
                     a
                 },
             );
-
         let x_sum: F = x.iter().copied().sum();
         for j in 0..m {
             let mut val = partial_sums[j];
@@ -1496,10 +1489,11 @@ where
         })
     };
 
+    let mut v_matrix = Mat::<F>::zeros(krylov_dim, n_iter);
     let mut v = vec![F::zero(); krylov_dim];
     let mut v_old = vec![F::zero(); krylov_dim];
     let mut w = vec![F::zero(); krylov_dim];
-    let mut v_matrix = vec![vec![F::zero(); krylov_dim]; n_iter];
+    let mut w_faer = faer::Col::<F>::zeros(krylov_dim);
 
     let mut rng = StdRng::seed_from_u64(seed);
     for i in 0..krylov_dim {
@@ -1511,7 +1505,9 @@ where
     let mut beta = vec![F::zero(); n_iter];
 
     for j in 0..n_iter {
-        v_matrix[j].copy_from_slice(&v);
+        for i in 0..krylov_dim {
+            v_matrix[(i, j)] = v[i];
+        }
 
         matvec_gram(&v, &mut w);
         alpha[j] = dot(&w, &v);
@@ -1523,11 +1519,16 @@ where
             }
         }
 
-        for k in 0..=j {
-            let coeff = dot(&w, &v_matrix[k]);
-            for i in 0..krylov_dim {
-                w[i] -= coeff * v_matrix[k][i];
-            }
+        // w -= Vj * (Vj^T * w)
+        // Uses faer operator overloading: MatRef * ColRef -> Col, avoids low-level API.
+        for i in 0..krylov_dim {
+            w_faer[i] = w[i];
+        }
+        let vj = v_matrix.as_ref().subcols(0, j + 1);
+        let coeffs = vj.transpose() * w_faer.as_ref();
+        let proj = vj * coeffs.as_ref();
+        for i in 0..krylov_dim {
+            w[i] -= proj[i];
         }
 
         beta[j] = norm(&w);
@@ -1558,17 +1559,10 @@ where
         let sigma = eval.sqrt();
         singular_values.push(sigma);
 
-        let mut gram_evec = vec![F::zero(); krylov_dim];
-        for i in 0..krylov_dim {
-            for j in 0..n_iter {
-                gram_evec[i] += v_matrix[j][i] * evecs[(j, idx)];
-            }
-        }
-
-        let norm_val: F = gram_evec.iter().map(|x| *x * *x).sum::<F>().sqrt();
-        for x in &mut gram_evec {
-            *x /= norm_val;
-        }
+        // gram_evec = v_matrix * evecs.col(idx) via faer operator overloading
+        let gram_col = &v_matrix * evecs.col(idx);
+        let norm_val: F = gram_col.iter().map(|x| *x * *x).sum::<F>().sqrt();
+        let gram_evec: Vec<F> = gram_col.iter().map(|x| *x / norm_val).collect();
 
         if use_ata {
             let mut u_vec = vec![F::zero(); n];
