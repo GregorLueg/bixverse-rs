@@ -2,6 +2,8 @@ use ann_search_rs::utils::KnnValidation;
 use ann_search_rs::utils::dist::Dist;
 use ann_search_rs::*;
 use faer::{MatRef, RowRef};
+use rayon::prelude::*;
+use rustc_hash::FxHashSet;
 use std::time::Instant;
 
 use crate::core::math::sparse::coo_to_csr;
@@ -679,4 +681,32 @@ pub fn generate_knn_with_dist(
     };
 
     remove_self(indices, distances)
+}
+
+///////////
+// Other //
+///////////
+
+/// Compare kNN graphs
+///
+/// ### Params
+///
+/// * `a` - The first kNN graph in form samples x neighbour indices
+/// * `b` - The second kNN graph in form samples x neighbour indices
+///
+/// ### Returns
+///
+/// Number of intersecting neighbours across the two.
+pub fn compare_knn_graphs(a: MatRef<i32>, b: MatRef<i32>) -> Vec<i32> {
+    assert_eq!(a.nrows(), b.nrows());
+
+    (0..a.nrows())
+        .into_par_iter()
+        .map(|row| {
+            let set: FxHashSet<i32> = (0..a.ncols()).map(|j| a[(row, j)]).collect();
+            (0..b.ncols())
+                .filter(|&j| set.contains(&b[(row, j)]))
+                .count() as i32
+        })
+        .collect()
 }
