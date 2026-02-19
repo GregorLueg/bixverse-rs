@@ -64,7 +64,7 @@ pub fn scale_csc_chunk(chunk: &CscGeneChunk, no_cells: usize) -> (Vec<f32>, f32,
         dense_data[row_idx as usize] = chunk.data_norm[idx].to_f32();
     }
     let mean = sum_simd_f32(&dense_data) / no_cells as f32;
-    let variance = variance_simd_f32(&dense_data, mean);
+    let variance = variance_simd_f32(&dense_data, mean) / (no_cells as f32 - 1.0);
     let std_dev = variance.sqrt();
 
     let scaled = if std_dev < 1e-8 {
@@ -156,7 +156,7 @@ pub fn sparse_csc_column_stds(
             let end = csc.indptr[j + 1];
             let slice = &values[start..end];
             let sq_sum: f32 = sum_squares_simd_f32(slice);
-            let variance = (sq_sum / n_f) - col_means[j] * col_means[j];
+            let variance = (sq_sum - n_f * col_means[j] * col_means[j]) / (n_f - 1.0);
             variance.max(0.0).sqrt().max(f32::EPSILON)
         })
         .collect()
