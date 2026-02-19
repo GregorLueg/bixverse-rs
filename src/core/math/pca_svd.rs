@@ -238,6 +238,7 @@ pub fn randomised_sparse_svd<T, F>(
     oversampling: Option<usize>,
     n_power_iter: Option<usize>,
     col_means: Option<&[F]>,
+    col_stds: Option<&[F]>,
 ) -> RandomSvdResults<F>
 where
     T: BixverseNumeric + Into<F>,
@@ -268,17 +269,21 @@ where
         csr.data.iter().map(|&v| v.into()).collect()
     };
 
-    // A * x with implicit mean centering: y = (A - 1μᵀ)x = Ax - 1(μᵀx)
+    // y = (A - 1μᵀ)(x/σ) = A(x/σ) - 1(μᵀ(x/σ))
     let sparse_matvec_a = |x: MatRef<F>, y: MatMut<F>| {
         let ncols = x.ncols();
 
-        // Pre-compute mean_dots[col] = dot(μ, x[:, col])
         let mean_dots: Vec<F> = if let Some(mu) = col_means {
             (0..ncols)
                 .map(|col| {
                     let mut d = F::zero();
                     for j in 0..m {
-                        d += mu[j] * x[(j, col)];
+                        let xv = if let Some(sd) = col_stds {
+                            x[(j, col)] / sd[j]
+                        } else {
+                            x[(j, col)]
+                        };
+                        d += mu[j] * xv;
                     }
                     d
                 })
@@ -305,15 +310,19 @@ where
                 let j = csr.indices[idx];
                 let a_val = data_float[idx];
                 for col in 0..ncols {
+                    let xv = if let Some(sd) = col_stds {
+                        x[(j, col)] / sd[j]
+                    } else {
+                        x[(j, col)]
+                    };
                     unsafe {
                         let ptr =
                             base.offset(i as isize * y_row_stride + col as isize * y_col_stride);
-                        *ptr = *ptr + a_val * x[(j, col)];
+                        *ptr = *ptr + a_val * xv;
                     }
                 }
             }
 
-            // Subtract mean contribution
             if col_means.is_some() {
                 for col in 0..ncols {
                     unsafe {
@@ -326,7 +335,7 @@ where
         });
     };
 
-    // Aᵀ * x with implicit mean centering: y = (A - 1μᵀ)ᵀx = Aᵀx - μ(1ᵀx)
+    // y = ((A - 1μᵀ) / σ)ᵀx = (Aᵀx - μ·sum(x)) / σ
     let sparse_matvec_at = |x: MatRef<F>, mut y: MatMut<F>| {
         let ncols = x.ncols();
 
@@ -355,8 +364,7 @@ where
                 },
             );
 
-        // Compute col_sums[col] = sum_i x[i, col]
-        let col_sums: Vec<F> = if let Some(_mu) = col_means {
+        let col_sums: Vec<F> = if col_means.is_some() {
             (0..ncols)
                 .map(|col| {
                     let mut s = F::zero();
@@ -372,16 +380,18 @@ where
 
         for j in 0..m {
             for col in 0..ncols {
-                y[(j, col)] = result[j * ncols + col];
-                // Subtract mean correction: μ[j] * sum_i(x[i, col])
+                let mut val = result[j * ncols + col];
                 if let Some(mu) = col_means {
-                    y[(j, col)] -= mu[j] * col_sums[col];
+                    val -= mu[j] * col_sums[col];
                 }
+                if let Some(sd) = col_stds {
+                    val /= sd[j];
+                }
+                y[(j, col)] = val;
             }
         }
     };
 
-    // Random projection: Y = A_centered * Omega
     let mut rng = StdRng::seed_from_u64(seed);
     let normal = Normal::new(0.0, 1.0).unwrap();
     let omega = Mat::from_fn(m, sample_size, |_, _| {
@@ -403,9 +413,7 @@ where
         q = y_new.qr().compute_thin_Q();
     }
 
-    // B = Qᵀ * A_centered = Qᵀ * A - (Qᵀ * 1) * μᵀ
-    let mut b = Mat::<F>::zeros(sample_size, m);
-
+    // B = Qᵀ * Z = Qᵀ * A(1/σ) - (Qᵀ1)(μ/σ)ᵀ
     let b_data = (0..n)
         .into_par_iter()
         .fold(
@@ -431,7 +439,6 @@ where
             },
         );
 
-    // Rank-1 mean correction on B: q_sums[k] = sum_i Q[i, k]
     let q_sums: Vec<F> = if col_means.is_some() {
         (0..sample_size)
             .map(|k| {
@@ -446,11 +453,15 @@ where
         vec![]
     };
 
+    let mut b = Mat::<F>::zeros(sample_size, m);
     for j in 0..m {
         for k in 0..sample_size {
             let mut val = b_data[j * sample_size + k];
             if let Some(mu) = col_means {
                 val -= q_sums[k] * mu[j];
+            }
+            if let Some(sd) = col_stds {
+                val /= sd[j];
             }
             b[(k, j)] = val;
         }

@@ -7,7 +7,7 @@ use crate::core::math::pca_svd::randomised_sparse_svd;
 use crate::core::math::pca_svd::*;
 use crate::core::math::sparse::sparse_svd_lanczos;
 use crate::prelude::*;
-use crate::utils::simd::{sum_simd_f32, variance_simd_f32};
+use crate::utils::simd::*;
 
 /////////////
 // Helpers //
@@ -116,6 +116,48 @@ pub fn sparse_csc_column_means(
             let start = csc.indptr[j];
             let end = csc.indptr[j + 1];
             sum_simd_f32(&values[start..end]) / n_f
+        })
+        .collect()
+}
+
+/// Calculates the standard deviation of a CSC sparse matrix chunk
+///
+/// ### Params
+///
+/// * `csc` - The CSC sparse matrix.
+/// * `col_means` - The column means.
+/// * `use_second_layer` - Whether to use the second layer of data.
+///
+/// ### Returns
+///
+/// The standard deviation.
+pub fn sparse_csc_column_stds(
+    csc: &CompressedSparseData<f32>,
+    col_means: &[f32],
+    use_second_layer: bool,
+) -> Vec<f32> {
+    assert!(
+        matches!(csc.cs_type, CompressedSparseFormat::Csc),
+        "Expected CSC format"
+    );
+    let (n, m) = csc.shape;
+    let n_f = n as f32;
+    let values: &[f32] = if use_second_layer {
+        csc.data_2
+            .as_ref()
+            .expect("data_2 is None but use_second_layer is true")
+    } else {
+        &csc.data
+    };
+    (0..m)
+        .into_par_iter()
+        .map(|j| {
+            let start = csc.indptr[j];
+            let end = csc.indptr[j + 1];
+            let slice = &values[start..end];
+            let sq_sum: f32 = sum_squares_simd_f32(slice);
+            let variance = (sq_sum / n_f) - col_means[j] * col_means[j];
+            variance.max(0.0).sqrt().max(f32::EPSILON)
         })
         .collect()
 }
@@ -304,6 +346,7 @@ pub fn pca_on_sc_sparse(
     let end_data_prep = start_data_prep.elapsed();
 
     let col_means = sparse_csc_column_means(&csc, true);
+    let col_stds = sparse_csc_column_stds(&csc, &col_means, true);
 
     if verbose {
         println!("Finished the data preparations : {:.2?}", end_data_prep);
@@ -320,6 +363,7 @@ pub fn pca_on_sc_sparse(
             Some(100_usize),
             None,
             Some(&col_means),
+            Some(&col_stds),
         );
         let scores = compute_pc_scores(&svd_res);
         (
@@ -331,8 +375,14 @@ pub fn pca_on_sc_sparse(
             svd_res.s().to_vec(),
         )
     } else {
-        let svd_res =
-            sparse_svd_lanczos::<f32, f32, f32>(&csc, no_pcs, seed as u64, true, Some(&col_means));
+        let svd_res = sparse_svd_lanczos::<f32, f32, f32>(
+            &csc,
+            no_pcs,
+            seed as u64,
+            true,
+            Some(&col_means),
+            Some(&col_stds),
+        );
         let scores = compute_pc_scores(&svd_res);
         (scores, svd_res.v().to_owned(), svd_res.s().to_vec())
     };

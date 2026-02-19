@@ -1388,6 +1388,7 @@ pub fn sparse_svd_lanczos<T, U, F>(
     seed: u64,
     use_second_layer: bool,
     col_means: Option<&[F]>,
+    col_stds: Option<&[F]>,
 ) -> SvdResults<F>
 where
     T: BixverseNumeric + SimdDistance + Into<F>,
@@ -1417,14 +1418,16 @@ where
         csr.data.iter().map(|&v| v.into()).collect()
     };
 
-    // y = (A - 1μᵀ)x = Ax - 1·dot(μ, x)
+    // y = (A - 1μᵀ)x / σ = A(x/σ) - 1(μᵀ(x/σ))
     let matvec_a = |x: &[F], y: &mut [F]| {
+        let x_scaled: Vec<F> = if let Some(sd) = col_stds {
+            x.iter().enumerate().map(|(j, &v)| v / sd[j]).collect()
+        } else {
+            x.to_vec()
+        };
+
         let mean_dot: F = if let Some(mu) = col_means {
-            let mut d = F::zero();
-            for j in 0..m {
-                d += mu[j] * x[j];
-            }
-            d
+            x_scaled.iter().enumerate().map(|(j, &v)| mu[j] * v).sum()
         } else {
             F::zero()
         };
@@ -1433,7 +1436,7 @@ where
             let mut sum = F::zero();
             for idx in csr.indptr[i]..csr.indptr[i + 1] {
                 let j = csr.indices[idx];
-                sum += data_f[idx] * x[j];
+                sum += data_f[idx] * x_scaled[j];
             }
             if col_means.is_some() {
                 sum -= mean_dot;
@@ -1442,7 +1445,7 @@ where
         });
     };
 
-    // y = (A - 1μᵀ)ᵀx = Aᵀx - μ·sum(x)
+    // y = ((A - 1μᵀ) / σ)ᵀx = (Aᵀx - μ·sum(x)) / σ
     let matvec_at = |x: &[F], y: &mut [F]| {
         let partial_sums: Vec<F> = (0..n)
             .into_par_iter()
@@ -1466,13 +1469,16 @@ where
                 },
             );
 
-        if let Some(mu) = col_means {
-            let x_sum: F = x.iter().copied().sum();
-            for j in 0..m {
-                y[j] = partial_sums[j] - mu[j] * x_sum;
+        let x_sum: F = x.iter().copied().sum();
+        for j in 0..m {
+            let mut val = partial_sums[j];
+            if let Some(mu) = col_means {
+                val -= mu[j] * x_sum;
             }
-        } else {
-            y.copy_from_slice(&partial_sums);
+            if let Some(sd) = col_stds {
+                val /= sd[j];
+            }
+            y[j] = val;
         }
     };
 
