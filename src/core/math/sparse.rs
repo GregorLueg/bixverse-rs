@@ -1520,7 +1520,6 @@ where
         }
 
         // w -= Vj * (Vj^T * w)
-        // Uses faer operator overloading: MatRef * ColRef -> Col, avoids low-level API.
         for i in 0..krylov_dim {
             w_faer[i] = w[i];
         }

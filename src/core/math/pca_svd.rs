@@ -269,25 +269,21 @@ where
         csr.data.iter().map(|&v| v.into()).collect()
     };
 
-    // y = (A - 1μᵀ)(x/σ) = A(x/σ) - 1(μᵀ(x/σ))
-    let sparse_matvec_a = |x: MatRef<F>, y: MatMut<F>| {
-        let ncols = x.ncols();
+    // pre-divide input (m × ncols) by col_stds once, avoiding per-nonzero division.
+    let prescale = |x: MatRef<F>| -> Option<Mat<F>> {
+        col_stds.map(|sd| Mat::from_fn(x.nrows(), x.ncols(), |i, col| x[(i, col)] / sd[i]))
+    };
 
+    // expects x_scaled to already be divided by σ if applicable.
+    // y = A * x_scaled - 1 * (μᵀ * x_scaled)
+    let sparse_matvec_a = |x_scaled: MatRef<F>, y: MatMut<F>| {
+        let ncols = x_scaled.ncols();
+
+        // μᵀ * x_scaled — a (1×m)*(m×ncols) product; faer handles SIMD internally.
         let mean_dots: Vec<F> = if let Some(mu) = col_means {
-            (0..ncols)
-                .map(|col| {
-                    let mut d = F::zero();
-                    for j in 0..m {
-                        let xv = if let Some(sd) = col_stds {
-                            x[(j, col)] / sd[j]
-                        } else {
-                            x[(j, col)]
-                        };
-                        d += mu[j] * xv;
-                    }
-                    d
-                })
-                .collect()
+            let mu_row = MatRef::from_row_major_slice(mu, 1, m);
+            let result = mu_row * x_scaled;
+            (0..ncols).map(|col| result[(0, col)]).collect()
         } else {
             vec![]
         };
@@ -301,8 +297,8 @@ where
 
             for col in 0..ncols {
                 unsafe {
-                    let ptr = base.offset(i as isize * y_row_stride + col as isize * y_col_stride);
-                    *ptr = F::zero();
+                    *base.offset(i as isize * y_row_stride + col as isize * y_col_stride) =
+                        F::zero();
                 }
             }
 
@@ -310,15 +306,10 @@ where
                 let j = csr.indices[idx];
                 let a_val = data_float[idx];
                 for col in 0..ncols {
-                    let xv = if let Some(sd) = col_stds {
-                        x[(j, col)] / sd[j]
-                    } else {
-                        x[(j, col)]
-                    };
                     unsafe {
                         let ptr =
                             base.offset(i as isize * y_row_stride + col as isize * y_col_stride);
-                        *ptr = *ptr + a_val * xv;
+                        *ptr = *ptr + a_val * x_scaled[(j, col)];
                     }
                 }
             }
@@ -335,15 +326,19 @@ where
         });
     };
 
-    // y = ((A - 1μᵀ) / σ)ᵀx = (Aᵀx - μ·sum(x)) / σ
+    // y = (Aᵀx - μ * col_sumsᵀ) / σ
+    // col_sums accumulated inside the fold — no separate O(n * ncols) pass.
     let sparse_matvec_at = |x: MatRef<F>, mut y: MatMut<F>| {
         let ncols = x.ncols();
 
-        let result = (0..n)
+        let (result, col_sums) = (0..n)
             .into_par_iter()
             .fold(
-                || vec![F::zero(); m * ncols],
-                |mut acc, i| {
+                || (vec![F::zero(); m * ncols], vec![F::zero(); ncols]),
+                |(mut acc, mut cs), i| {
+                    for col in 0..ncols {
+                        cs[col] += x[(i, col)];
+                    }
                     for idx in csr.indptr[i]..csr.indptr[i + 1] {
                         let j = csr.indices[idx];
                         let a_val = data_float[idx];
@@ -351,32 +346,21 @@ where
                             acc[j * ncols + col] += a_val * x[(i, col)];
                         }
                     }
-                    acc
+                    (acc, cs)
                 },
             )
             .reduce(
-                || vec![F::zero(); m * ncols],
-                |mut a, b| {
+                || (vec![F::zero(); m * ncols], vec![F::zero(); ncols]),
+                |(mut a, mut cs_a), (b, cs_b)| {
                     for i in 0..a.len() {
                         a[i] += b[i];
                     }
-                    a
+                    for i in 0..ncols {
+                        cs_a[i] += cs_b[i];
+                    }
+                    (a, cs_a)
                 },
             );
-
-        let col_sums: Vec<F> = if col_means.is_some() {
-            (0..ncols)
-                .map(|col| {
-                    let mut s = F::zero();
-                    for i in 0..n {
-                        s += x[(i, col)];
-                    }
-                    s
-                })
-                .collect()
-        } else {
-            vec![]
-        };
 
         for j in 0..m {
             for col in 0..ncols {
@@ -398,74 +382,36 @@ where
         F::from_f64(normal.sample(&mut rng)).unwrap()
     });
 
+    let omega_ref = prescale(omega.as_ref());
     let mut y = Mat::<F>::zeros(n, sample_size);
-    sparse_matvec_a(omega.as_ref(), y.as_mut());
+    sparse_matvec_a(
+        omega_ref
+            .as_ref()
+            .map(|m| m.as_ref())
+            .unwrap_or(omega.as_ref()),
+        y.as_mut(),
+    );
 
     let mut q = y.qr().compute_thin_Q();
 
+    // Reuse buffers across power iterations.
+    let mut z = Mat::<F>::zeros(m, sample_size);
+    let mut y_new = Mat::<F>::zeros(n, sample_size);
+
     for _ in 0..n_iter {
-        let mut z = Mat::<F>::zeros(m, sample_size);
         sparse_matvec_at(q.as_ref(), z.as_mut());
-
-        let mut y_new = Mat::<F>::zeros(n, sample_size);
-        sparse_matvec_a(z.as_ref(), y_new.as_mut());
-
+        let z_scaled = prescale(z.as_ref());
+        sparse_matvec_a(
+            z_scaled.as_ref().map(|m| m.as_ref()).unwrap_or(z.as_ref()),
+            y_new.as_mut(),
+        );
         q = y_new.qr().compute_thin_Q();
     }
 
-    // B = Qᵀ * Z = Qᵀ * A(1/σ) - (Qᵀ1)(μ/σ)ᵀ
-    let b_data = (0..n)
-        .into_par_iter()
-        .fold(
-            || vec![F::zero(); m * sample_size],
-            |mut acc, i| {
-                for idx in csr.indptr[i]..csr.indptr[i + 1] {
-                    let j = csr.indices[idx];
-                    let a_val = data_float[idx];
-                    for k in 0..sample_size {
-                        acc[j * sample_size + k] += q[(i, k)] * a_val;
-                    }
-                }
-                acc
-            },
-        )
-        .reduce(
-            || vec![F::zero(); m * sample_size],
-            |mut a, b_vec| {
-                for i in 0..a.len() {
-                    a[i] += b_vec[i];
-                }
-                a
-            },
-        );
-
-    let q_sums: Vec<F> = if col_means.is_some() {
-        (0..sample_size)
-            .map(|k| {
-                let mut s = F::zero();
-                for i in 0..n {
-                    s += q[(i, k)];
-                }
-                s
-            })
-            .collect()
-    } else {
-        vec![]
-    };
-
-    let mut b = Mat::<F>::zeros(sample_size, m);
-    for j in 0..m {
-        for k in 0..sample_size {
-            let mut val = b_data[j * sample_size + k];
-            if let Some(mu) = col_means {
-                val -= q_sums[k] * mu[j];
-            }
-            if let Some(sd) = col_stds {
-                val /= sd[j];
-            }
-            b[(k, j)] = val;
-        }
-    }
+    // B = Qᵀ * (A - 1μᵀ) / σ = sparse_matvec_at(Q)ᵀ — no duplicate fold needed.
+    let mut b_t = Mat::<F>::zeros(m, sample_size);
+    sparse_matvec_at(q.as_ref(), b_t.as_mut());
+    let b = b_t.transpose().to_owned();
 
     let svd = b.thin_svd().unwrap();
 
