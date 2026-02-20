@@ -5,7 +5,8 @@
 ### Features
 
 - Sparse SVD and sparse randomised SVD were added for single cell.
-- Harmony added and MNN can take a pre-computed PCA now.
+- SIMD instructions for the single cell Hotspot method.
+- Harmony batch correction for single cell.
 
 ### Fixes
 

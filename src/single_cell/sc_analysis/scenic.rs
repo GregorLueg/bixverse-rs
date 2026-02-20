@@ -21,6 +21,7 @@ pub enum RegressionLearner {
     RandomForest(RandomForestConfig),
 }
 
+/// Default implementation for RegressionLearner
 impl Default for RegressionLearner {
     fn default() -> Self {
         RegressionLearner::ExtraTrees(ExtraTreesConfig::default())
@@ -51,7 +52,7 @@ pub fn parse_regression_learner(s: &str) -> Option<RegressionLearner> {
 //////////////////
 
 /// Trait to access different tree regression-based hyper parameters
-trait TreeRegressorConfig {
+trait TreeRegressorConfig: Sync {
     /// Number of trees
     ///
     /// ### Returns
@@ -285,37 +286,6 @@ enum Node {
     },
 }
 
-/// Sorted merge intersection
-///
-/// ### Params
-///
-/// * `y_indices` - Sorted array of indices into `y_data`
-/// * `y_data` - Target variable values; indexed by `y_indices`
-/// * `samples` - Sorted array of sample indices to intersect with `y_indices`
-///
-/// ### Returns
-///
-/// A tuple `(sum, sum_sq)`
-#[inline]
-fn y_stats_merge(y_indices: &[usize], y_data: &[f32], samples: &[usize]) -> (f32, f32) {
-    let (mut sum, mut sum_sq) = (0_f32, 0_f32);
-    let (mut a, mut b) = (0, 0);
-    while a < y_indices.len() && b < samples.len() {
-        match y_indices[a].cmp(&samples[b]) {
-            Equal => {
-                let v = y_data[a];
-                sum += v;
-                sum_sq += v * v;
-                a += 1;
-                b += 1;
-            }
-            Less => a += 1,
-            Greater => b += 1,
-        }
-    }
-    (sum, sum_sq)
-}
-
 /// Variance of the node
 ///
 /// Computes sample variance using the computational formula:
@@ -363,44 +333,122 @@ fn csc_column<'a>(mat: &'a CompressedSparseData<u16, f32>, j: usize) -> (&'a [us
     (&mat.indices[s..e], &vals[s..e])
 }
 
-/// Recursively builds a regression tree node and its subtree using variance
-/// reduction as the splitting criterion.
-///
-/// ### Implementation details
-///
-/// Samples are partitioned by the best split found across `n_features_split`
-/// randomly chosen features. For ExtraTrees a random threshold in
-/// `[lo, max_v)` is drawn; for RF all candidate thresholds are swept in
-/// sorted order.  The function writes the resulting node (Leaf or Split) into
-/// `nodes` and returns its index.  Child indices are patched back into the
-/// parent Split node after both subtrees have been built.
+/// Galloping (exponential) search for `target` in a sorted `slice`,
+/// starting from `hint`.
 ///
 /// ### Params
 ///
-/// * `y_indices` - Sorted sample indices with non-zero target values
-/// * `y_data` - Target values aligned to `y_indices`
-/// * `x` - Feature matrix in CSC format (TF expression)
-/// * `sample_slice` - Mutable sorted slice of sample indices active at this
-///   node; rearranged in-place into left/right partitions before recursing
-/// * `y_sum` - Pre-computed sum of target values for `sample_slice`
-/// * `y_sum_sq` - Pre-computed sum of squared target values
-/// * `n_total` - Total active samples at the root (used for importance scaling)
-/// * `n_features_split` - Number of randomly selected features to evaluate
-/// * `config` - Shared tree hyperparameters
-/// * `depth` - Current recursion depth (0 at root)
-/// * `nodes` - Accumulator for all nodes in the current tree
-/// * `feat_buf` - Reusable buffer for feature index shuffling
-/// * `nz_buf` - Reusable buffer for non-zero feature entries in this node
-/// * `rf_buf` - Reusable buffer for sorted (feature_val, y_val) pairs (RF only)
-/// * `rng` - Per-tree RNG
+/// TODO
 ///
 /// ### Returns
 ///
-/// Index into `nodes` of the node just created.
+/// TODO
+#[inline]
+fn gallop_lb(slice: &[usize], target: usize, hint: usize) -> usize {
+    let len = slice.len();
+    if hint >= len {
+        return len;
+    }
+    // exponential expansion
+    let mut lo = hint;
+    let mut step = 1usize;
+    while lo + step < len && slice[lo + step] < target {
+        lo += step;
+        step <<= 1;
+    }
+    let hi = (lo + step).min(len);
+    // binary search in [lo, hi)
+    let sub = &slice[lo..hi];
+    lo + sub.partition_point(|&v| v < target)
+}
+
+/// Adaptive intersection of a sorted sparse column (col_indices, col_vals)
+/// with a sorted sample_slice.  Writes matching (position_in_sample_slice,
+/// feature_val) pairs into `out`.
+///
+/// Uses galloping search when sample_slice is much smaller than the column,
+/// merge scan otherwise.
+#[inline]
+fn intersect_sparse_samples(
+    col_indices: &[usize],
+    col_vals: &[f32],
+    sample_slice: &[usize],
+    out: &mut Vec<(usize, f32)>,
+) {
+    out.clear();
+    let cn = col_indices.len();
+    let sn = sample_slice.len();
+
+    if sn == 0 || cn == 0 {
+        return;
+    }
+
+    // Heuristic: if scanning from sample_slice with galloping is cheaper
+    // than a full merge, use galloping.
+    // Cost of merge ~ cn + sn;  cost of galloping ~ sn * log2(cn)
+    let gallop_cost = sn as f64 * (cn as f64).log2();
+    let merge_cost = (cn + sn) as f64;
+
+    if gallop_cost < merge_cost {
+        // Galloping: for each sample, find it in the column
+        let mut col_hint = 0usize;
+        for (si, &sample) in sample_slice.iter().enumerate() {
+            col_hint = gallop_lb(col_indices, sample, col_hint);
+            if col_hint < cn && col_indices[col_hint] == sample {
+                out.push((si, col_vals[col_hint]));
+                col_hint += 1;
+            }
+        }
+    } else {
+        // Merge scan
+        let (mut a, mut b) = (0, 0);
+        while a < cn && b < sn {
+            match col_indices[a].cmp(&sample_slice[b]) {
+                Equal => {
+                    out.push((b, col_vals[a]));
+                    a += 1;
+                    b += 1;
+                }
+                Less => a += 1,
+                Greater => b += 1,
+            }
+        }
+    }
+}
+
+///////////////////
+// Tree building //
+///////////////////
+
+/// Per-tree scratch buffers, allocated once and reused across all nodes.
+struct TreeBuffers {
+    feat_buf: Vec<usize>,
+    nz_buf: Vec<(usize, f32)>,
+    rf_buf: Vec<(f32, f32)>,
+    partition_buf: Vec<usize>,
+}
+
+impl TreeBuffers {
+    fn new(n_features: usize) -> Self {
+        Self {
+            feat_buf: Vec::with_capacity(n_features),
+            nz_buf: Vec::new(),
+            rf_buf: Vec::new(),
+            partition_buf: Vec::new(),
+        }
+    }
+}
+
+/// Recursively builds a regression tree node using variance reduction.
+///
+/// Key differences from original:
+/// - `y_dense` is a pre-computed dense array, eliminating binary searches
+/// - Adaptive intersection (galloping vs merge) for sparse column lookups
+/// - Single scratch `partition_buf` reused across all recursive calls
+/// - Single-pass split evaluation for ExtraTrees
 #[allow(clippy::too_many_arguments)]
 fn build_node(
-    y_indices: &[usize],
-    y_data: &[f32],
+    y_dense: &[f32],
     x: &CompressedSparseData<u16, f32>,
     sample_slice: &mut [usize],
     y_sum: f32,
@@ -410,9 +458,7 @@ fn build_node(
     config: &dyn TreeRegressorConfig,
     depth: usize,
     nodes: &mut Vec<Node>,
-    feat_buf: &mut Vec<usize>,
-    nz_buf: &mut Vec<(usize, f32)>,
-    rf_buf: &mut Vec<(f32, f32)>,
+    bufs: &mut TreeBuffers,
     rng: &mut SmallRng,
 ) -> usize {
     let n = sample_slice.len();
@@ -431,11 +477,11 @@ fn build_node(
     let n_features = x.indptr.len() - 1;
     let k = n_features_split.min(n_features);
 
-    feat_buf.clear();
-    feat_buf.extend(0..n_features);
+    bufs.feat_buf.clear();
+    bufs.feat_buf.extend(0..n_features);
     for i in 0..k {
         let j = rng.random_range(i..n_features);
-        feat_buf.swap(i, j);
+        bufs.feat_buf.swap(i, j);
     }
 
     let mut best_score = 0.0f32;
@@ -444,59 +490,50 @@ fn build_node(
     let mut best_y_sum_r = 0.0f32;
     let mut best_y_sum_sq_r = 0.0f32;
 
-    for &feat in &feat_buf[..k] {
-        let (fi, fv) = csc_column(x, feat);
+    for fi_idx in 0..k {
+        let feat = bufs.feat_buf[fi_idx];
+        let (col_indices, col_vals) = csc_column(x, feat);
 
-        nz_buf.clear();
-        let (mut a, mut b) = (0, 0);
-        while a < fi.len() && b < sample_slice.len() {
-            match fi[a].cmp(&sample_slice[b]) {
-                Equal => {
-                    nz_buf.push((b, fv[a]));
-                    a += 1;
-                    b += 1;
-                }
-                Less => a += 1,
-                Greater => b += 1,
-            }
-        }
+        intersect_sparse_samples(col_indices, col_vals, sample_slice, &mut bufs.nz_buf);
 
-        if nz_buf.is_empty() {
+        if bufs.nz_buf.is_empty() {
             continue;
         }
 
-        let (min_v, max_v) = nz_buf
+        let (min_v, max_v) = bufs
+            .nz_buf
             .iter()
             .fold((f32::INFINITY, f32::NEG_INFINITY), |(mn, mx), &(_, v)| {
                 (mn.min(v), mx.max(v))
             });
 
-        let lo = if nz_buf.len() < n { 0.0f32 } else { min_v };
+        let lo = if bufs.nz_buf.len() < n { 0.0f32 } else { min_v };
         if max_v - lo < 1e-10 {
             continue;
         }
 
         if config.random_threshold() {
-            // ExtraTrees: try n_thresholds random thresholds, keep best
+            // ExtraTrees: try n_thresholds random thresholds, keep best.
+            // Single pass: accumulate n_right, y_sum_r, y_sum_sq_r together.
             for _ in 0..config.n_thresholds() {
                 let threshold = rng.random_range(lo..max_v);
 
-                let n_right = nz_buf.iter().filter(|&&(_, v)| v > threshold).count();
+                let mut n_right = 0usize;
+                let mut y_sum_r = 0.0f32;
+                let mut y_sum_sq_r = 0.0f32;
+
+                for &(si, fval) in bufs.nz_buf.iter() {
+                    if fval > threshold {
+                        n_right += 1;
+                        let v = y_dense[sample_slice[si]];
+                        y_sum_r += v;
+                        y_sum_sq_r += v * v;
+                    }
+                }
+
                 let n_left = n - n_right;
                 if n_left < config.min_samples_leaf() || n_right < config.min_samples_leaf() {
                     continue;
-                }
-
-                let (mut y_sum_r, mut y_sum_sq_r) = (0.0f32, 0.0f32);
-                for &(si, fval) in nz_buf.iter() {
-                    if fval > threshold {
-                        let cell = sample_slice[si];
-                        if let Ok(pos) = y_indices.binary_search(&cell) {
-                            let v = y_data[pos];
-                            y_sum_r += v;
-                            y_sum_sq_r += v * v;
-                        }
-                    }
                 }
 
                 let y_sum_l = y_sum - y_sum_r;
@@ -515,24 +552,24 @@ fn build_node(
             }
         } else {
             // RF: sorted sweep over all candidate thresholds
-            rf_buf.clear();
-            rf_buf.extend(nz_buf.iter().map(|&(si, fval)| {
-                let cell = sample_slice[si];
-                let y = y_indices.binary_search(&cell).map_or(0.0, |p| y_data[p]);
+            bufs.rf_buf.clear();
+            bufs.rf_buf.extend(bufs.nz_buf.iter().map(|&(si, fval)| {
+                let y = y_dense[sample_slice[si]];
                 (fval, y)
             }));
-            rf_buf.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Equal));
+            bufs.rf_buf
+                .sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Equal));
 
             let (mut y_sum_r, mut y_sum_sq_r) = (0.0f32, 0.0f32);
             let mut n_right = 0usize;
 
-            for i in (0..rf_buf.len()).rev() {
-                let (fval, yval) = rf_buf[i];
+            for i in (0..bufs.rf_buf.len()).rev() {
+                let (fval, yval) = bufs.rf_buf[i];
                 y_sum_r += yval;
                 y_sum_sq_r += yval * yval;
                 n_right += 1;
 
-                if i > 0 && (rf_buf[i - 1].0 - fval).abs() < 1e-10 {
+                if i > 0 && (bufs.rf_buf[i - 1].0 - fval).abs() < 1e-10 {
                     continue;
                 }
 
@@ -551,7 +588,7 @@ fn build_node(
                     best_score = score;
                     best_feature = feat;
                     best_threshold = if i > 0 {
-                        (rf_buf[i - 1].0 + fval) / 2.0
+                        (bufs.rf_buf[i - 1].0 + fval) / 2.0
                     } else {
                         fval / 2.0
                     };
@@ -568,27 +605,33 @@ fn build_node(
         return idx;
     }
 
-    let (fi, fv) = csc_column(x, best_feature);
-    let mut left_buf: Vec<usize> = Vec::with_capacity(n);
-    let mut right_buf: Vec<usize> = Vec::with_capacity(n);
+    // Partition sample_slice into left/right using a single reusable buffer
+    let (col_indices, col_vals) = csc_column(x, best_feature);
 
-    let mut a = 0;
-    for &s in sample_slice.iter() {
-        while a < fi.len() && fi[a] < s {
-            a += 1;
-        }
-        if a < fi.len() && fi[a] == s && fv[a] > best_threshold {
-            right_buf.push(s);
-        } else {
-            left_buf.push(s);
+    bufs.partition_buf.clear();
+    bufs.partition_buf.reserve(n);
+
+    // We'll write "right" samples into partition_buf, then rearrange
+    // sample_slice in-place as [left..., right...]
+    let mut n_left = 0usize;
+    {
+        let mut a = 0;
+        for i in 0..sample_slice.len() {
+            let s = sample_slice[i];
+            while a < col_indices.len() && col_indices[a] < s {
+                a += 1;
+            }
+            if a < col_indices.len() && col_indices[a] == s && col_vals[a] > best_threshold {
+                bufs.partition_buf.push(s);
+            } else {
+                // Write left samples in-place from the front
+                sample_slice[n_left] = s;
+                n_left += 1;
+            }
         }
     }
-
-    let n_left = left_buf.len();
-    sample_slice[..n_left].copy_from_slice(&left_buf);
-    sample_slice[n_left..].copy_from_slice(&right_buf);
-    drop(left_buf);
-    drop(right_buf);
+    // Copy right samples after left
+    sample_slice[n_left..].copy_from_slice(&bufs.partition_buf);
 
     let y_sum_l = y_sum - best_y_sum_r;
     let y_sum_sq_l = y_sum_sq - best_y_sum_sq_r;
@@ -605,8 +648,7 @@ fn build_node(
     let (left_sl, right_sl) = sample_slice.split_at_mut(n_left);
 
     let left_idx = build_node(
-        y_indices,
-        y_data,
+        y_dense,
         x,
         left_sl,
         y_sum_l,
@@ -616,14 +658,11 @@ fn build_node(
         config,
         depth + 1,
         nodes,
-        feat_buf,
-        nz_buf,
-        rf_buf,
+        bufs,
         rng,
     );
     let right_idx = build_node(
-        y_indices,
-        y_data,
+        y_dense,
         x,
         right_sl,
         best_y_sum_r,
@@ -633,9 +672,7 @@ fn build_node(
         config,
         depth + 1,
         nodes,
-        feat_buf,
-        nz_buf,
-        rf_buf,
+        bufs,
         rng,
     );
 
@@ -666,19 +703,41 @@ fn accumulate_importances(nodes: &[Node], importances: &mut [f32]) {
     }
 }
 
-/// Fit the extra tree regression
+/// Build the dense y-lookup from sparse target data.
 ///
-/// This is done sequential to have the outer loop be run in parallel
+/// Returns (y_dense, y_sum, y_sum_sq) where y_dense[cell_id] = expression value.
+fn build_y_dense(target_variable: &SparseAxis<u16, f32>, n_samples: usize) -> (Vec<f32>, f32, f32) {
+    let (y_indices, y_data) = target_variable.get_indices_data_2();
+    let mut y_dense = vec![0.0f32; n_samples];
+    let mut y_sum = 0.0f32;
+    let mut y_sum_sq = 0.0f32;
+    for (i, &idx) in y_indices.iter().enumerate() {
+        let v = y_data[i];
+        y_dense[idx] = v;
+        y_sum += v;
+        y_sum_sq += v * v;
+    }
+    (y_dense, y_sum, y_sum_sq)
+}
+
+/// Compute y_sum and y_sum_sq for a subsample from the dense lookup.
+#[inline]
+fn y_stats_from_dense(y_dense: &[f32], samples: &[usize]) -> (f32, f32) {
+    let mut sum = 0_f32;
+    let mut sum_sq = 0_f32;
+    for &s in samples {
+        let v = y_dense[s];
+        sum += v;
+        sum_sq += v * v;
+    }
+    (sum, sum_sq)
+}
+
+/// Fit trees with nested parallelism.
 ///
-/// ### Params
-///
-/// * `target_variable` - The target variable, for SCENIC the gene expression
-///   to predict from the TF levels.
-/// * `feature_matrix` - The feature variables, for SCENIC the TF expression
-///   levels.
-/// * `n_samples` - Number of samples, cells.
-/// * `config` - The ExtraTreesConfig
-/// * `seed` -
+/// Trees are built in parallel via rayon. Each thread gets its own RNG,
+/// node vec, and scratch buffers. Importances are merged after all trees
+/// complete.
 fn fit_trees(
     target_variable: &SparseAxis<u16, f32>,
     feature_matrix: &CompressedSparseData<u16, f32>,
@@ -693,8 +752,6 @@ fn fit_trees(
         config.n_features_split()
     };
 
-    let (y_indices, y_data) = target_variable.get_indices_data_2();
-
     let n_sub = if config.subsample_rate() >= 1.0 {
         n_samples
     } else {
@@ -702,84 +759,81 @@ fn fit_trees(
             .max(2 * config.min_samples_leaf())
     };
 
-    let mut sample_indices: Vec<usize> = (0..n_samples).collect();
-    let mut feat_buf: Vec<usize> = Vec::with_capacity(n_features);
-    let mut nz_buf: Vec<(usize, f32)> = Vec::new();
-    let mut rf_buf: Vec<(f32, f32)> = Vec::new();
-    let mut nodes: Vec<Node> = Vec::new();
-    let mut importances = vec![0.0f32; n_features];
+    // Dense y-lookup: O(n_samples) memory, eliminates all binary searches
+    let (y_dense, _y_sum_full, _y_sum_sq_full) = build_y_dense(target_variable, n_samples);
 
-    for tree_idx in 0..config.n_trees() {
-        nodes.clear();
+    // Parallel tree building
+    let tree_importances: Vec<Vec<f32>> = (0..config.n_trees())
+        .into_par_iter()
+        .map(|tree_idx| {
+            let mut rng =
+                SmallRng::seed_from_u64(seed.wrapping_add(tree_idx * 6364136223846793005) as u64);
 
-        let mut rng =
-            SmallRng::seed_from_u64(seed.wrapping_add(tree_idx * 6364136223846793005) as u64);
+            let mut sample_indices: Vec<usize> = (0..n_samples).collect();
+            let mut bufs = TreeBuffers::new(n_features);
+            let mut nodes: Vec<Node> = Vec::new();
 
-        let active = if n_sub < n_samples {
-            if config.bootstrap() {
-                // bootstrap: sample with replacement into first n_sub slots, then sort
-                for i in 0..n_sub {
-                    sample_indices[i] = rng.random_range(0..n_samples);
-                }
-                sample_indices[..n_sub].sort_unstable();
-                let live = {
-                    let s = &mut sample_indices[..n_sub];
-                    if s.is_empty() {
-                        0
-                    } else {
-                        let mut w = 1usize;
-                        for r in 1..s.len() {
-                            if s[r] != s[r - 1] {
-                                s[w] = s[r];
-                                w += 1;
-                            }
-                        }
-                        w
+            let active_len = if n_sub < n_samples {
+                if config.bootstrap() {
+                    for i in 0..n_sub {
+                        sample_indices[i] = rng.random_range(0..n_samples);
                     }
-                };
-                &mut sample_indices[..live]
-            } else {
-                // subsampling without replacement: partial Fisher-Yates then sort
-                sample_indices
-                    .iter_mut()
-                    .enumerate()
-                    .for_each(|(i, v)| *v = i);
-                for i in 0..n_sub {
-                    let j = rng.random_range(i..n_samples);
-                    sample_indices.swap(i, j);
+                    sample_indices[..n_sub].sort_unstable();
+                    // Deduplicate
+                    let mut w = 1usize;
+                    for r in 1..n_sub {
+                        if sample_indices[r] != sample_indices[r - 1] {
+                            sample_indices[w] = sample_indices[r];
+                            w += 1;
+                        }
+                    }
+                    w
+                } else {
+                    sample_indices
+                        .iter_mut()
+                        .enumerate()
+                        .for_each(|(i, v)| *v = i);
+                    for i in 0..n_sub {
+                        let j = rng.random_range(i..n_samples);
+                        sample_indices.swap(i, j);
+                    }
+                    sample_indices[..n_sub].sort_unstable();
+                    n_sub
                 }
-                sample_indices[..n_sub].sort_unstable();
-                &mut sample_indices[..n_sub]
-            }
-        } else {
-            sample_indices
-                .iter_mut()
-                .enumerate()
-                .for_each(|(i, v)| *v = i);
-            &mut sample_indices[..]
-        };
+            } else {
+                n_samples
+            };
 
-        let (y_sum, y_sum_sq) = y_stats_merge(y_indices, y_data, active);
+            let active = &mut sample_indices[..active_len];
+            let (y_sum, y_sum_sq) = y_stats_from_dense(&y_dense, active);
 
-        build_node(
-            y_indices,
-            y_data,
-            feature_matrix,
-            active,
-            y_sum,
-            y_sum_sq,
-            active.len(),
-            n_features_split,
-            config,
-            0,
-            &mut nodes,
-            &mut feat_buf,
-            &mut nz_buf,
-            &mut rf_buf,
-            &mut rng,
-        );
+            build_node(
+                &y_dense,
+                feature_matrix,
+                active,
+                y_sum,
+                y_sum_sq,
+                active_len,
+                n_features_split,
+                config,
+                0,
+                &mut nodes,
+                &mut bufs,
+                &mut rng,
+            );
 
-        accumulate_importances(&nodes, &mut importances);
+            let mut importances = vec![0.0f32; n_features];
+            accumulate_importances(&nodes, &mut importances);
+            importances
+        })
+        .collect();
+
+    // Merge importances across trees
+    let mut importances = vec![0.0f32; n_features];
+    for tree_imp in &tree_importances {
+        for (i, &v) in tree_imp.iter().enumerate() {
+            importances[i] += v;
+        }
     }
 
     let total: f32 = sum_simd_f32(&importances);
@@ -951,8 +1005,6 @@ pub fn run_scenic_grn(
         );
     }
 
-    // build a config with corrected n_features_split for display/logging;
-    // fit_trees recomputes this internally so we just pass the learner as-is
     let mut importance_scores: Vec<Vec<f32>> = vec![Vec::new(); gene_indices.len()];
 
     for (chunk_idx, chunk) in gene_indices.chunks(SCENIC_GENE_CHUNK_SIZE).enumerate() {
@@ -976,6 +1028,8 @@ pub fn run_scenic_grn(
             .map(|c| c.to_sparse_axis(cell_set.len()))
             .collect();
 
+        // Outer parallelism over genes; inner parallelism over trees
+        // happens inside fit_trees. Rayon's work-stealing handles the nesting.
         let chunk_importances: Vec<Vec<f32>> = sparse_columns
             .par_iter()
             .map(|gene| match learner {
@@ -988,7 +1042,7 @@ pub fn run_scenic_grn(
             })
             .collect();
 
-        let base = chunk_idx * 100;
+        let base = chunk_idx * SCENIC_GENE_CHUNK_SIZE;
         for (i, importances) in chunk_importances.into_iter().enumerate() {
             importance_scores[base + i] = importances;
         }
@@ -1025,7 +1079,6 @@ mod tests {
 
     #[test]
     fn node_variance_basic() {
-        // [1, 2, 3]: mean = 2, var = 2/3
         let (sum, sum_sq) = (6.0f32, 14.0f32);
         let v = node_variance(sum, sum_sq, 3);
         assert!((v - 2.0 / 3.0).abs() < 1e-5, "got {v}");
@@ -1044,33 +1097,27 @@ mod tests {
     }
 
     #[test]
-    fn y_stats_merge_full_overlap() {
-        let indices = [0usize, 1, 2];
-        let data = [1.0f32, 2.0, 3.0];
-        let samples = [0usize, 1, 2];
-        let (sum, sum_sq) = y_stats_merge(&indices, &data, &samples);
+    fn gallop_lb_basic() {
+        let data = [0, 2, 5, 7, 10, 15, 20];
+        assert_eq!(gallop_lb(&data, 5, 0), 2);
+        assert_eq!(gallop_lb(&data, 6, 0), 3);
+        assert_eq!(gallop_lb(&data, 0, 0), 0);
+        assert_eq!(gallop_lb(&data, 25, 0), 7);
+    }
+
+    #[test]
+    fn gallop_lb_with_hint() {
+        let data = [0, 2, 5, 7, 10, 15, 20];
+        assert_eq!(gallop_lb(&data, 10, 3), 4);
+        assert_eq!(gallop_lb(&data, 15, 4), 5);
+    }
+
+    #[test]
+    fn y_stats_from_dense_basic() {
+        let y = [1.0f32, 2.0, 3.0, 0.0, 5.0];
+        let samples = [0, 1, 2];
+        let (sum, sum_sq) = y_stats_from_dense(&y, &samples);
         assert!((sum - 6.0).abs() < 1e-6);
         assert!((sum_sq - 14.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn y_stats_merge_partial_overlap() {
-        let indices = [0usize, 2, 4];
-        let data = [1.0f32, 3.0, 5.0];
-        let samples = [1usize, 2, 3];
-        let (sum, sum_sq) = y_stats_merge(&indices, &data, &samples);
-        // only index 2 overlaps
-        assert!((sum - 3.0).abs() < 1e-6);
-        assert!((sum_sq - 9.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn y_stats_merge_no_overlap() {
-        let indices = [0usize, 1];
-        let data = [1.0f32, 2.0];
-        let samples = [3usize, 4];
-        let (sum, sum_sq) = y_stats_merge(&indices, &data, &samples);
-        assert_eq!(sum, 0.0);
-        assert_eq!(sum_sq, 0.0);
     }
 }
