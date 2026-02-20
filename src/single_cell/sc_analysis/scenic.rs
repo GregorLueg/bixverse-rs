@@ -759,81 +759,73 @@ fn fit_trees(
             .max(2 * config.min_samples_leaf())
     };
 
-    // Dense y-lookup: O(n_samples) memory, eliminates all binary searches
     let (y_dense, _y_sum_full, _y_sum_sq_full) = build_y_dense(target_variable, n_samples);
 
-    // Parallel tree building
-    let tree_importances: Vec<Vec<f32>> = (0..config.n_trees())
-        .into_par_iter()
-        .map(|tree_idx| {
-            let mut rng =
-                SmallRng::seed_from_u64(seed.wrapping_add(tree_idx * 6364136223846793005) as u64);
-
-            let mut sample_indices: Vec<usize> = (0..n_samples).collect();
-            let mut bufs = TreeBuffers::new(n_features);
-            let mut nodes: Vec<Node> = Vec::new();
-
-            let active_len = if n_sub < n_samples {
-                if config.bootstrap() {
-                    for i in 0..n_sub {
-                        sample_indices[i] = rng.random_range(0..n_samples);
-                    }
-                    sample_indices[..n_sub].sort_unstable();
-                    // Deduplicate
-                    let mut w = 1usize;
-                    for r in 1..n_sub {
-                        if sample_indices[r] != sample_indices[r - 1] {
-                            sample_indices[w] = sample_indices[r];
-                            w += 1;
-                        }
-                    }
-                    w
-                } else {
-                    sample_indices
-                        .iter_mut()
-                        .enumerate()
-                        .for_each(|(i, v)| *v = i);
-                    for i in 0..n_sub {
-                        let j = rng.random_range(i..n_samples);
-                        sample_indices.swap(i, j);
-                    }
-                    sample_indices[..n_sub].sort_unstable();
-                    n_sub
-                }
-            } else {
-                n_samples
-            };
-
-            let active = &mut sample_indices[..active_len];
-            let (y_sum, y_sum_sq) = y_stats_from_dense(&y_dense, active);
-
-            build_node(
-                &y_dense,
-                feature_matrix,
-                active,
-                y_sum,
-                y_sum_sq,
-                active_len,
-                n_features_split,
-                config,
-                0,
-                &mut nodes,
-                &mut bufs,
-                &mut rng,
-            );
-
-            let mut importances = vec![0.0f32; n_features];
-            accumulate_importances(&nodes, &mut importances);
-            importances
-        })
-        .collect();
-
-    // Merge importances across trees
+    // Sequential tree loop: reuse all buffers across trees
+    let mut sample_indices: Vec<usize> = (0..n_samples).collect();
+    let mut bufs = TreeBuffers::new(n_features);
+    let mut nodes: Vec<Node> = Vec::new();
     let mut importances = vec![0.0f32; n_features];
-    for tree_imp in &tree_importances {
-        for (i, &v) in tree_imp.iter().enumerate() {
-            importances[i] += v;
-        }
+
+    for tree_idx in 0..config.n_trees() {
+        nodes.clear();
+
+        let mut rng =
+            SmallRng::seed_from_u64(seed.wrapping_add(tree_idx * 6364136223846793005) as u64);
+
+        let active_len = if n_sub < n_samples {
+            if config.bootstrap() {
+                for i in 0..n_sub {
+                    sample_indices[i] = rng.random_range(0..n_samples);
+                }
+                sample_indices[..n_sub].sort_unstable();
+                let mut w = 1usize;
+                for r in 1..n_sub {
+                    if sample_indices[r] != sample_indices[r - 1] {
+                        sample_indices[w] = sample_indices[r];
+                        w += 1;
+                    }
+                }
+                w
+            } else {
+                sample_indices
+                    .iter_mut()
+                    .enumerate()
+                    .for_each(|(i, v)| *v = i);
+                for i in 0..n_sub {
+                    let j = rng.random_range(i..n_samples);
+                    sample_indices.swap(i, j);
+                }
+                sample_indices[..n_sub].sort_unstable();
+                n_sub
+            }
+        } else {
+            sample_indices
+                .iter_mut()
+                .enumerate()
+                .for_each(|(i, v)| *v = i);
+            n_samples
+        };
+
+        let active = &mut sample_indices[..active_len];
+        let (y_sum, y_sum_sq) = y_stats_from_dense(&y_dense, active);
+
+        build_node(
+            &y_dense,
+            feature_matrix,
+            active,
+            y_sum,
+            y_sum_sq,
+            active_len,
+            n_features_split,
+            config,
+            0,
+            &mut nodes,
+            &mut bufs,
+            &mut rng,
+        );
+
+        accumulate_importances(&nodes, &mut importances);
     }
 
     let total: f32 = sum_simd_f32(&importances);
@@ -1000,7 +992,8 @@ pub fn run_scenic_grn(
 
     if verbose {
         println!(
-            "Loaded in and filtered TF data to cells of interest: {:.2?}",
+            "Loaded in and filtered TF data (n: {}) to cells of interest: {:.2?}",
+            tf_data.indptr.len() - 1,
             end_reading
         );
     }
@@ -1028,8 +1021,8 @@ pub fn run_scenic_grn(
             .map(|c| c.to_sparse_axis(cell_set.len()))
             .collect();
 
-        // Outer parallelism over genes; inner parallelism over trees
-        // happens inside fit_trees. Rayon's work-stealing handles the nesting.
+        // outer parallelism over genes; inner parallelism over trees
+        // i will trust rayon to handle this
         let chunk_importances: Vec<Vec<f32>> = sparse_columns
             .par_iter()
             .map(|gene| match learner {
