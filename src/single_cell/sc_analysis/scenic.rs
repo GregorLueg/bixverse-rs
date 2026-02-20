@@ -2,13 +2,13 @@ use faer::Mat;
 use indexmap::IndexSet;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use rayon::prelude::*;
-use std::cmp::Ordering::{Equal, Greater, Less};
 use std::time::Instant;
+use thousands::*;
 
 use crate::prelude::*;
 use crate::utils::simd::sum_simd_f32;
 
-const SCENIC_GENE_CHUNK_SIZE: usize = 100;
+const SCENIC_GENE_CHUNK_SIZE: usize = 1000;
 
 ///////////
 // Enums //
@@ -371,139 +371,12 @@ struct HistogramBin {
     y_sum_sq: f32,
 }
 
-/// Builds a 256-bin histogram for a specific feature over the current node's
-/// samples.
-///
-/// ### Params
-///
-/// * `feature_col`
-/// * `sample_slice`
-/// * `y_dense`
-///
-/// ### Returns
-///
-/// The `HistoGramBins` (256)
-#[inline]
-fn build_histogram(
-    feature_col: &[u8],
-    sample_slice: &[usize],
-    y_dense: &[f32],
-) -> [HistogramBin; 256] {
-    let mut hist = [HistogramBin::default(); 256];
-
-    // this loop is tightly bound, linear over sample_slice, and branchless.
-    for &s in sample_slice {
-        let bin_idx = feature_col[s] as usize;
-        let y = y_dense[s];
-
-        hist[bin_idx].count += 1;
-        hist[bin_idx].y_sum += y;
-        hist[bin_idx].y_sum_sq += y * y;
-    }
-
-    hist
-}
-
-/// Partitions `sample_slice` into `left_buf` and `right_buf` based on `threshold`.
-/// Returns the number of elements written to the left buffer.
-#[inline]
-fn partition_branchless(
-    feature_col: &[u8],
-    sample_slice: &[usize],
-    threshold: u8,
-    left_buf: &mut [usize],
-    right_buf: &mut [usize],
-) -> usize {
-    let mut l_idx = 0;
-    let mut r_idx = 0;
-
-    for &s in sample_slice {
-        let val = feature_col[s];
-
-        // branchless logic:
-        // is_right is 1 if true, 0 if false
-        let is_right = (val > threshold) as usize;
-        let is_left = 1 - is_right;
-
-        // write to both buffers at their current indices.
-        // we always overwrite whatever is at that index.
-        left_buf[l_idx] = s;
-        right_buf[r_idx] = s;
-
-        // only increment the index for the buffer that actually
-        // "received" the element.
-        l_idx += is_left;
-        r_idx += is_right;
-    }
-
-    l_idx // return the size of the left partition
-}
-
-/// A store for better cache locality of the data
-///
-/// ### Fields
-///
-/// * `col_indices` - The cell positions expressing that gene
-/// * `col_values` - The normalised expression counts at that position
-struct ColumnStore {
-    col_indices: Vec<Vec<usize>>,
-    col_values: Vec<Vec<f32>>,
-}
-
-impl ColumnStore {
-    /// Generate a new storage from a CSC matrix
-    ///
-    /// ### Params
-    ///
-    /// * `mat` - The CompressedSparseData - must be in CSC format
-    ///
-    /// ### Returns
-    ///
-    /// Initialised self
-    fn from_csc(mat: &CompressedSparseData<u16, f32>) -> Self {
-        assert!(mat.cs_type.is_csc(), "The data must be in CSC format!");
-
-        let n_cols = mat.indptr.len() - 1;
-        let vals = mat.data_2.as_ref().expect("requires data_2");
-        let mut col_indices = Vec::with_capacity(n_cols);
-        let mut col_values = Vec::with_capacity(n_cols);
-        for j in 0..n_cols {
-            let s = mat.indptr[j];
-            let e = mat.indptr[j + 1];
-            col_indices.push(mat.indices[s..e].to_vec());
-            col_values.push(vals[s..e].to_vec());
-        }
-        Self {
-            col_indices,
-            col_values,
-        }
-    }
-
-    /// Returns the data of a given column position
-    ///
-    /// ### Returns
-    ///
-    /// Tuple of `(cell_indices, norm expression)`
-    #[inline]
-    fn column(&self, j: usize) -> (&[usize], &[f32]) {
-        (&self.col_indices[j], &self.col_values[j])
-    }
-
-    /// Returns the number of features stored
-    ///
-    /// ### Returns
-    ///
-    /// Number of features
-    fn no_features(&self) -> usize {
-        self.col_indices.len()
-    }
-}
-
 //////////////////
 // Tree helpers //
 //////////////////
 
 /// Represents a node in a regression decision tree.
+#[allow(dead_code)]
 enum Node {
     /// A leaf (terminal) node containing a constant prediction.
     ///
@@ -573,7 +446,7 @@ struct TreeBuffers {
 impl TreeBuffers {
     fn new(n_features: usize, n_samples: usize) -> Self {
         Self {
-            feat_buf: Vec::with_capacity(n_features),
+            feat_buf: (0..n_features).collect(),
             left_buf: vec![0; n_samples],
             right_buf: vec![0; n_samples],
             hist: [HistogramBin::default(); 256],
@@ -660,7 +533,7 @@ fn evaluate_split(
 #[allow(clippy::too_many_arguments)]
 fn build_node(
     y_dense: &[f32],
-    x: &DenseQuantisedStore, // Now using our dense quantized store
+    x: &DenseQuantisedStore,
     sample_slice: &mut [usize],
     y_sum: f32,
     y_sum_sq: f32,
@@ -688,8 +561,8 @@ fn build_node(
     let n_features = x.n_features;
     let k = n_features_split.min(n_features);
 
-    bufs.feat_buf.clear();
-    bufs.feat_buf.extend(0..n_features);
+    // Partial Fisher-Yates: feat_buf is initialised once in TreeBuffers::new
+    // and always contains each index exactly once. Just shuffle the first k.
     for i in 0..k {
         let j = rng.random_range(i..n_features);
         bufs.feat_buf.swap(i, j);
@@ -705,21 +578,17 @@ fn build_node(
         let feat = bufs.feat_buf[fi_idx];
         let tf_col = x.get_col(feat);
 
-        // O(N) + O(256)
         bufs.build_histograms(tf_col, sample_slice, y_dense);
 
         let min_bin = bufs.hist.iter().position(|b| b.count > 0).unwrap_or(0);
         let max_bin = bufs.hist.iter().rposition(|b| b.count > 0).unwrap_or(255);
 
         if min_bin == max_bin {
-            continue; // No variance in this feature
+            continue;
         }
 
         if config.random_threshold() {
-            // ExtraTrees: Try n_thresholds random splits
             for _ in 0..config.n_thresholds() {
-                // We pick a random bin as threshold. Anything <= threshold goes left.
-                // max_bin - 1 ensures we don't put all samples into the left node.
                 let threshold = rng.random_range(min_bin..max_bin);
                 evaluate_split(
                     threshold,
@@ -738,7 +607,6 @@ fn build_node(
                 );
             }
         } else {
-            // RandomForest: Sweep all valid bins
             for threshold in min_bin..max_bin {
                 evaluate_split(
                     threshold,
@@ -765,12 +633,12 @@ fn build_node(
         return idx;
     }
 
-    // --- Branchless Partitioning ---
     let tf_col = x.get_col(best_feature);
     let mut l_idx = 0;
     let mut r_idx = 0;
 
-    for &s in sample_slice.iter() {
+    for i in 0..n {
+        let s = sample_slice[i];
         let val = tf_col[s];
         let is_right = (val > best_threshold_u8) as usize;
         let is_left = 1 - is_right;
@@ -782,7 +650,6 @@ fn build_node(
         r_idx += is_right;
     }
 
-    // Copy back to sample_slice in-place
     sample_slice[..l_idx].copy_from_slice(&bufs.left_buf[..l_idx]);
     sample_slice[l_idx..].copy_from_slice(&bufs.right_buf[..r_idx]);
 
@@ -792,7 +659,6 @@ fn build_node(
     let node_idx = nodes.len();
     nodes.push(Node::Split {
         feature_idx: best_feature,
-        // Optional: Reconstruct the approximate f32 threshold if needed for output
         threshold: x.feature_min[best_feature]
             + (best_threshold_u8 as f32 / 255.0) * x.feature_range[best_feature],
         left: usize::MAX,
@@ -933,7 +799,6 @@ fn fit_trees(
                 for i in 0..n_sub {
                     sample_indices[i] = rng.random_range(0..n_samples);
                 }
-                sample_indices[..n_sub].sort_unstable();
                 let mut w = 1usize;
                 for r in 1..n_sub {
                     if sample_indices[r] != sample_indices[r - 1] {
@@ -1244,7 +1109,7 @@ mod tests {
     fn branchless_partitioning_logic() {
         let tf_col: Vec<u8> = vec![10, 50, 200, 30, 250, 100];
         // sample slice only contains subset of indices
-        let mut sample_slice: Vec<usize> = vec![0, 1, 2, 4]; // values: 10, 50, 200, 250
+        let sample_slice: Vec<usize> = vec![0, 1, 2, 4]; // values: 10, 50, 200, 250
 
         let mut left_buf = vec![0; 4];
         let mut right_buf = vec![0; 4];
