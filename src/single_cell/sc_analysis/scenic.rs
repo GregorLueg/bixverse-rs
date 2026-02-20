@@ -154,6 +154,7 @@ pub struct ExtraTreesConfig {
     pub min_samples_leaf: usize,
     pub n_features_split: usize,
     pub n_thresholds: usize,
+    pub max_depth: Option<usize>,
 }
 
 /// Default implementation for the ExtraTreesConfig
@@ -164,6 +165,7 @@ impl Default for ExtraTreesConfig {
             min_samples_leaf: 50,
             n_features_split: 0,
             n_thresholds: 1,
+            max_depth: Some(15),
         }
     }
 }
@@ -184,6 +186,9 @@ impl TreeRegressorConfig for ExtraTreesConfig {
     }
     fn n_thresholds(&self) -> usize {
         self.n_thresholds
+    }
+    fn max_depth(&self) -> Option<usize> {
+        self.max_depth
     }
 }
 
@@ -437,8 +442,8 @@ fn node_variance(sum: f32, sum_sq: f32, n: usize) -> f32 {
 /// Per-tree scratch buffers, allocated once and reused across all nodes.
 struct TreeBuffers {
     feat_buf: Vec<usize>,
-    left_buf: Vec<usize>,
-    right_buf: Vec<usize>,
+    left_buf: Vec<u32>,
+    right_buf: Vec<u32>,
     hist: [HistogramBin; 256],
     cum_hist: [HistogramBin; 256], // Prefix sum for O(1) split evaluation
 }
@@ -456,13 +461,13 @@ impl TreeBuffers {
 
     /// Builds the histogram and the cumulative prefix-sum histogram
     #[inline]
-    fn build_histograms(&mut self, tf_col: &[u8], sample_slice: &[usize], y_dense: &[f32]) {
+    fn build_histograms(&mut self, tf_col: &[u8], sample_slice: &[u32], y_dense: &[f32]) {
         self.hist.fill(HistogramBin::default());
 
         // O(N) branchless construction
         for &s in sample_slice {
-            let bin_idx = tf_col[s] as usize;
-            let y = y_dense[s];
+            let bin_idx = tf_col[s as usize] as usize;
+            let y = y_dense[s as usize];
             self.hist[bin_idx].count += 1;
             self.hist[bin_idx].y_sum += y;
             self.hist[bin_idx].y_sum_sq += y * y;
@@ -534,7 +539,7 @@ fn evaluate_split(
 fn build_node(
     y_dense: &[f32],
     x: &DenseQuantisedStore,
-    sample_slice: &mut [usize],
+    sample_slice: &mut [u32],
     y_sum: f32,
     y_sum_sq: f32,
     n_total: usize,
@@ -639,7 +644,7 @@ fn build_node(
 
     for i in 0..n {
         let s = sample_slice[i];
-        let val = tf_col[s];
+        let val = tf_col[s as usize];
         let is_right = (val > best_threshold_u8) as usize;
         let is_left = 1 - is_right;
 
@@ -743,11 +748,11 @@ fn build_y_dense(target_variable: &SparseAxis<u16, f32>, n_samples: usize) -> (V
 
 /// Compute y_sum and y_sum_sq for a subsample from the dense lookup.
 #[inline]
-fn y_stats_from_dense(y_dense: &[f32], samples: &[usize]) -> (f32, f32) {
+fn y_stats_from_dense(y_dense: &[f32], samples: &[u32]) -> (f32, f32) {
     let mut sum = 0_f32;
     let mut sum_sq = 0_f32;
     for &s in samples {
-        let v = y_dense[s];
+        let v = y_dense[s as usize];
         sum += v;
         sum_sq += v * v;
     }
@@ -783,7 +788,7 @@ fn fit_trees(
     let (y_dense, _y_sum_full, _y_sum_sq_full) = build_y_dense(target_variable, n_samples);
 
     // Sequential tree loop: reuse all buffers across trees
-    let mut sample_indices: Vec<usize> = (0..n_samples).collect();
+    let mut sample_indices: Vec<u32> = (0..n_samples).map(|x| x as u32).collect();
     let mut bufs = TreeBuffers::new(n_features, n_samples);
     let mut nodes: Vec<Node> = Vec::new();
     let mut importances = vec![0.0f32; n_features];
@@ -797,7 +802,7 @@ fn fit_trees(
         let active_len = if n_sub < n_samples {
             if config.bootstrap() {
                 for i in 0..n_sub {
-                    sample_indices[i] = rng.random_range(0..n_samples);
+                    sample_indices[i] = rng.random_range(0..n_samples) as u32;
                 }
                 let mut w = 1usize;
                 for r in 1..n_sub {
@@ -811,7 +816,7 @@ fn fit_trees(
                 sample_indices
                     .iter_mut()
                     .enumerate()
-                    .for_each(|(i, v)| *v = i);
+                    .for_each(|(i, v)| *v = i as u32);
                 for i in 0..n_sub {
                     let j = rng.random_range(i..n_samples);
                     sample_indices.swap(i, j);
@@ -823,7 +828,7 @@ fn fit_trees(
             sample_indices
                 .iter_mut()
                 .enumerate()
-                .for_each(|(i, v)| *v = i);
+                .for_each(|(i, v)| *v = i as u32);
             n_samples
         };
 
