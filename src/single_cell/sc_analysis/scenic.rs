@@ -8,6 +8,8 @@ use std::time::Instant;
 use crate::prelude::*;
 use crate::utils::simd::sum_simd_f32;
 
+const SCENIC_GENE_CHUNK_SIZE: usize = 100;
+
 ///////////
 // Enums //
 ///////////
@@ -853,6 +855,52 @@ pub fn fit_random_forest(
 // Main //
 //////////
 
+/// Returns the genes to include in a SCENIC analysis
+///
+/// Returns genes that make sense to include in the scenic analysis.
+///
+/// ### Params
+///
+/// * `min_total_counts` - Minimum number of total counts across all cells that
+///   the gene has to be expressed in.
+/// * `min_cells` - Proportion of cells that the gene has to be expressed in.
+///
+/// ### Returns
+///
+/// Vec of usizes with gene indices to include
+pub fn scenic_gene_filter(
+    f_path: &str,
+    cell_indices: &[usize],
+    min_counts: usize,
+    min_cells: f32,
+) -> Vec<usize> {
+    let reader = ParallelSparseReader::new(f_path).unwrap();
+    let total_genes = reader.get_header().total_genes;
+    let all_gene_indices: Vec<usize> = (0..total_genes).collect();
+    let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
+    let n_cells = cell_indices.len();
+
+    let mut passing = Vec::new();
+
+    for chunk in all_gene_indices.chunks(SCENIC_GENE_CHUNK_SIZE) {
+        let mut gene_chunks = reader.read_gene_parallel(chunk);
+        gene_chunks.par_iter_mut().for_each(|c| {
+            c.filter_selected_cells(&cell_set);
+        });
+
+        for gene in &gene_chunks {
+            let total_counts: u32 = gene.data_raw.iter().map(|&x| x as u32).sum();
+            let expressed_fraction = gene.nnz as f32 / n_cells as f32;
+
+            if total_counts >= min_counts as u32 && expressed_fraction >= min_cells {
+                passing.push(gene.original_index);
+            }
+        }
+    }
+
+    passing
+}
+
 /// Generate the gene-regulatory network using the SCENIC pipeline.
 ///
 /// Predicts the expression of each gene of interest from TF expression levels
@@ -907,12 +955,12 @@ pub fn run_scenic_grn(
     // fit_trees recomputes this internally so we just pass the learner as-is
     let mut importance_scores: Vec<Vec<f32>> = vec![Vec::new(); gene_indices.len()];
 
-    for (chunk_idx, chunk) in gene_indices.chunks(100).enumerate() {
+    for (chunk_idx, chunk) in gene_indices.chunks(SCENIC_GENE_CHUNK_SIZE).enumerate() {
         if verbose {
             println!(
                 "Processing gene chunk {}/{} ({} genes)",
                 chunk_idx + 1,
-                gene_indices.len().div_ceil(100),
+                gene_indices.len().div_ceil(SCENIC_GENE_CHUNK_SIZE),
                 chunk.len()
             );
         }
