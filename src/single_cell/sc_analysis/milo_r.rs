@@ -23,10 +23,7 @@ use crate::prelude::*;
 /// * `refinement_strategy` - Strategy for refining sampled indices
 ///   (`"approximate"`, `"bruteforce"`, or `"index"`)
 /// * `index_type` - Type of kNN index to use (`"annoy"` or `"hnsw"`)
-///
-/// **General kNN params**
-///
-/// * `knn_params` - All of the kNN parameters
+/// * `knn_params` - The knnParams via the `KnnParams` structure.
 pub struct MiloRParams {
     // MiloR parameters
     pub prop: f64,

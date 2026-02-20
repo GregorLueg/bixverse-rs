@@ -79,18 +79,7 @@ type BoostPcaRes = (Mat<f32>, Mat<f32>, Vec<f32>, Vec<f32>);
 ///
 /// **kNN Graph:**
 ///
-/// * `k` - Number of nearest neighbours for the kNN graph. If 0 (default),
-///   automatically calculated as round(0.5 * sqrt(n_cells)).
-/// * `knn_method` - Method for approximate nearest neighbour search.
-///   One of `"annoy"` or `"hnsw"`.
-/// * `dist_metric` - Distance metric to use. One of `"euclidean"` or
-///   `"cosine"`.
-/// * `search_budget` - Search budget for Annoy (higher = more accurate but
-///   slower).
-/// * `n_trees` - Number of trees for Annoy index generation.
-/// * `nn_max_iter` - Maximum iterations for the NNDescent kNN search
-/// * `rho` - Sampling rate for NNDescent.
-/// * `delta` - Early termination criterium for NNDescent
+/// * `knn_params` - The knnParams via the `KnnParams` structure.
 #[derive(Clone, Debug)]
 pub struct BoostParams {
     // general params

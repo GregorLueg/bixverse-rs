@@ -628,30 +628,10 @@ pub fn fused_mul_add_simd(a: &[f32], b: &[f32], c: &[f32], out: &mut [f32]) {
 ///
 /// ### Fields
 ///
-/// **General**
-///
-/// * `knn_method` - Which of the kNN methods to use. One of `"annoy"`, `"hnsw"`
-///   or `"nndescent"`.
-/// * `ann_dist` - Approximate nearest neighbour distance measure. One of
-///   `"euclidean"` or `"cosine"`.
-/// * `k` - Number of neighbours to search
-///
-/// **Annoy**
-///
-/// * `n_tree` - Number of trees for the generation of the index
-/// * `search_budget` - Search budget during querying
-///
-/// **NN Descent**
-///
-/// * `max_iter` - Maximum iterations for the algorithm
-/// * `rho` - Sampling rate for the algorithm
-/// * `delta` - Early termination criterium
-///
-/// **HotSpot**
-///
 /// * `model` - The model to use for modelling the GEX. Choice of
 ///   `"danb"`, `"bernoulli"` or `"normal"`.
 /// * `normalise` - Shall the data be normalised.
+/// * `knn_params` - The knnParams via the `KnnParams` structure.
 pub struct HotSpotParams {
     // hotspot parameters
     pub model: String,

@@ -18,25 +18,7 @@ use crate::prelude::*;
 ///   aggregation
 /// * `target_no_metacells` - Number of target meta cells.
 /// * `max_iter` - Maximum iterations for the algorithm.
-///
-/// **General kNN params**
-///
-/// * `k` - Number of neighbours for the kNN algorithm.
-/// * `knn_method` - Which method to use for the generation of the kNN graph.
-///   One of `"hnsw"`, `"annoy"` or `"nndescent"`
-/// * `ann_dist` - The distance metric for the approximate nearest neighbour
-///   search. One of `"cosine"` or `"euclidean"`.
-///
-/// **Annoy**
-///
-/// * `n_tree` - Number of trees for the generation of the index
-/// * `search_budget` - Search budget during querying
-///
-/// **NN Descent**
-///
-/// * `max_iter` - Maximum iterations for the algorithm
-/// * `rho` - Sampling rate for the algorithm
-/// * `delta` - Early termination criterium
+/// * `knn_params` - The knnParams via the `KnnParams` structure.
 #[derive(Clone, Debug)]
 pub struct MetaCellParams {
     // meta cell params

@@ -65,25 +65,7 @@ pub fn parse_knn_symmetrisation(s: &str) -> Option<KnnSymmetrisation> {
 ///   This can affect numerical stability, but makes runs on large data sets
 ///   feasible.
 /// * `pruning_threshold` - Values that should be pruned away.
-///
-/// **General kNN params**
-///
-/// * `k` - Number of neighbours for the kNN algorithm.
-/// * `knn_method` - Which method to use for the generation of the kNN graph.
-///   One of `"hnsw"`, `"annoy"` or `"nndescent"`
-/// * `ann_dist` - The distance metric for the approximate nearest neighbour
-///   search. For this method fixed to `"euclidean"`.
-///
-/// **Annoy**
-///
-/// * `n_tree` - Number of trees for the generation of the index
-/// * `search_budget` - Search budget during querying
-///
-/// **NN Descent**
-///
-/// * `max_iter` - Maximum iterations for the algorithm
-/// * `rho` - Sampling rate for the algorithm
-/// * `delta` - Early termination criterium
+/// * `knn_params` - The knnParams via the `KnnParams` structure.
 #[derive(Clone, Debug)]
 pub struct SEACellsParams {
     // sea cell
@@ -214,7 +196,7 @@ fn matrix_trace(mat: &CompressedSparseData<f32>) -> f32 {
 /// ### Params
 ///
 /// * `knn_indices` - kNN indices for each cell
-/// * `knn_distances` - kNN distances for each cell  
+/// * `knn_distances` - kNN distances for each cell
 /// * `knn` - Number of nearest neighbours used
 ///
 /// ### Returns
