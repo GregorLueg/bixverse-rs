@@ -737,3 +737,63 @@ where
 
     SparseGraph::new(n_nodes, adjacency, false)
 }
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::math::sparse::CompressedSparseData;
+    use faer::Mat;
+
+    #[test]
+    fn test_sparse_graph_properties() {
+        // Simple line graph: 0 <-> 1 <-> 2
+        let data = vec![1.0, 1.0, 1.0, 1.0];
+        let indices = vec![1, 0, 2, 1]; // neighbors
+        let indptr = vec![0, 1, 3, 4]; // node offsets
+        let csr = CompressedSparseData::<f64, f64>::new_csr(&data, &indices, &indptr, None, (3, 3));
+
+        let graph = SparseGraph::new(3, csr, false);
+
+        assert_eq!(graph.get_node_degree(0), 1);
+        assert_eq!(graph.get_node_degree(1), 2);
+        assert_eq!(graph.total_weight(), 2.0); // 2 undirected edges of weight 1.0
+
+        let (n0_neighbors, n0_weights) = graph.get_neighbours(0);
+        assert_eq!(n0_neighbors, &[1]);
+        assert_eq!(n0_weights, &[1.0]);
+    }
+
+    #[test]
+    fn test_adjacency_to_laplacian() {
+        // Adjacency for 0 <-> 1
+        let mut adj: Mat<f64> = Mat::zeros(2, 2);
+        adj[(0, 1)] = 1.0;
+        adj[(1, 0)] = 1.0;
+
+        // Unnormalized Laplacian: L = D - A
+        // D is [[1, 0], [0, 1]]
+        let lap = adjacency_to_laplacian(&adj.as_ref(), false);
+
+        assert!((lap[(0, 0)] - 1.0).abs() < 1e-6);
+        assert!((lap[(1, 1)] - 1.0).abs() < 1e-6);
+        assert!((lap[(0, 1)] - (-1.0)).abs() < 1e-6);
+        assert!((lap[(1, 0)] - (-1.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_graph_from_strings() {
+        let nodes = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+        let from = vec!["A".to_string(), "B".to_string()];
+        let to = vec!["B".to_string(), "C".to_string()];
+        let weights = vec![1.5, 2.5];
+
+        let graph = graph_from_strings(&nodes, &from, &to, Some(&weights), false);
+
+        assert_eq!(graph.node_count(), 3);
+        assert_eq!(graph.edge_count(), 2);
+    }
+}

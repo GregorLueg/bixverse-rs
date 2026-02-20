@@ -1,9 +1,46 @@
+use indexmap::IndexSet;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use rayon::prelude::*;
 use std::cmp::Ordering::{Equal, Greater, Less};
+use std::time::Instant;
 
 use crate::prelude::*;
 use crate::utils::simd::sum_simd_f32;
+
+///////////
+// Enums //
+///////////
+
+/// Enum to define the type of Regression learner to use
+#[derive(Clone, Debug, Default)]
+pub enum RegressionLearner {
+    /// ExtraTree regression. Simple and fast; might not yield the best
+    /// regression results.
+    #[default]
+    ExtraTrees,
+    /// RandomForest learner. To be implemented
+    RandomForest,
+    /// GradientBoosted learner. To be implemented
+    GradientBoosted,
+}
+
+/// Parse the regression learner
+///
+/// ### Params
+///
+/// * `s` - String to parse
+///
+/// ### Returns
+///
+/// The Option of the `RegressionLearner` Enum with the chosen learner
+pub fn parse_regression_learner(s: &str) -> Option<RegressionLearner> {
+    match s.to_lowercase().as_str() {
+        "extratrees" => Some(RegressionLearner::ExtraTrees),
+        "rf" | "randomforest" => Some(RegressionLearner::RandomForest),
+        "boost" | "gradient_boost" => Some(RegressionLearner::GradientBoosted),
+        _ => None,
+    }
+}
 
 ////////////
 // Params //
@@ -165,7 +202,8 @@ fn csc_column<'a>(mat: &'a CompressedSparseData<u16, f32>, j: usize) -> (&'a [us
 /// * `y_sum_sq` - Sum of squared target values for current samples
 /// * `n_total` - Total number of samples in full dataset (for importance
 ///   weighting)
-/// * `tree_config` - Split criteria and stopping rules
+/// * `n_features_split` - Number of features to split.
+/// * `min_samples_leaf` - Minimum number of samples per leaf.
 /// * `nodes` - Vector accumulating all tree nodes; this function appends to it
 /// * `feat_buf` - Scratch buffer for candidate feature indices
 /// * `nz_buf` - Scratch buffer for non-zero feature values in current sample set
@@ -198,8 +236,8 @@ fn build_node(
     n_features_split: usize,
     min_samples_leaf: usize,
     nodes: &mut Vec<Node>,
-    feat_buf: &mut Vec<usize>,      // scratch: candidate feature indices
-    nz_buf: &mut Vec<(usize, f32)>, // scratch: (pos_in_sample_slice, feature_value)
+    feat_buf: &mut Vec<usize>,
+    nz_buf: &mut Vec<(usize, f32)>,
     rng: &mut SmallRng,
 ) -> usize {
     let n = sample_slice.len();
@@ -215,7 +253,7 @@ fn build_node(
     let n_features = x.indptr.len() - 1;
     let k = n_features_split.min(n_features);
 
-    // Partial Fisher-Yates for k candidate features
+    // partial Fisher-Yates for k candidate features
     feat_buf.clear();
     feat_buf.extend(0..n_features);
     for i in 0..k {
@@ -232,7 +270,7 @@ fn build_node(
     for &feat in &feat_buf[..k] {
         let (fi, fv) = csc_column(x, feat);
 
-        // Collect nonzeros for this feature within current sample set
+        // collect nonzeros for this feature within current sample set
         nz_buf.clear();
         let (mut a, mut b) = (0, 0);
         while a < fi.len() && b < sample_slice.len() {
@@ -257,14 +295,14 @@ fn build_node(
                 (mn.min(v), mx.max(v))
             });
 
-        // If there are zeros in the sample set, effective lower bound is 0.
-        // This ensures zeros (which go left) can be split from nonzeros.
+        // tf there are zeros in the sample set, effective lower bound is 0.
+        // this ensures zeros (which go left) can be split from nonzeros.
         let lo = if nz_buf.len() < n { 0.0f32 } else { min_v };
         if max_v - lo < 1e-10 {
             continue;
         }
 
-        let threshold = rng.gen_range(lo..max_v);
+        let threshold = rng.random_range(lo..max_v);
 
         let n_right = nz_buf.iter().filter(|&&(_, v)| v > threshold).count();
         let n_left = n - n_right;
@@ -272,8 +310,9 @@ fn build_node(
             continue;
         }
 
-        // y stats for right partition: binary search into sorted y_indices for each right sample.
-        // Avoids materialising a sorted right-sample vec.
+        // y stats for right partition: binary search into sorted y_indices
+        // for each right sample. vvoids materialising a sorted right-sample
+        // vec.
         let (mut y_sum_r, mut y_sum_sq_r) = (0.0f32, 0.0f32);
         for &(si, fval) in nz_buf.iter() {
             if fval > threshold {
@@ -308,8 +347,10 @@ fn build_node(
         return idx;
     }
 
-    // Partition sample_slice in place: left (feature <= threshold) | right (feature > threshold).
-    // Zeros go left since threshold >= 0 for expression data.
+    // partition sample_slice in place:
+    // left (feature <= threshold) | right (feature > threshold).
+    // zeros go left since threshold >= 0 for expression data - it's for single
+    // cell
     let (fi, fv) = csc_column(x, best_feature);
     let mut left_buf: Vec<usize> = Vec::with_capacity(n);
     let mut right_buf: Vec<usize> = Vec::with_capacity(n);
@@ -335,7 +376,7 @@ fn build_node(
     let y_sum_l = y_sum - best_y_sum_r;
     let y_sum_sq_l = y_sum_sq - best_y_sum_sq_r;
 
-    // Allocate node slot before recursing so child indices can be filled after
+    // allocate node slot before recursing so child indices can be filled after
     let node_idx = nodes.len();
     nodes.push(Node::Split {
         feature_idx: best_feature,
@@ -442,7 +483,7 @@ pub fn fit_extra_trees(
     let mut importances = vec![0.0f32; n_features];
 
     for tree_idx in 0..config.n_trees {
-        // Reset sample indices without reallocating
+        // reset sample indices without reallocating
         sample_indices
             .iter_mut()
             .enumerate()
@@ -472,10 +513,48 @@ pub fn fit_extra_trees(
         accumulate_importances(&nodes, &mut importances);
     }
 
-    // Average and normalise across trees
-    let total: f32 = importances.iter().sum();
+    // average and normalise across trees
+    let total: f32 = sum_simd_f32(&importances);
     if total > 0.0 {
         importances.iter_mut().for_each(|v| *v /= total);
     }
     importances
+}
+
+//////////
+// Main //
+//////////
+
+pub fn run_scenic(
+    f_path: &str,
+    cell_indices: &[usize],
+    gene_indices: &[usize],
+    tf_indices: &[usize],
+    seed: usize,
+    verbose: bool,
+) {
+    let start_total = Instant::now();
+
+    let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
+
+    let start_reading = Instant::now();
+
+    let reader = ParallelSparseReader::new(f_path).unwrap();
+    let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(tf_indices);
+
+    gene_chunks.par_iter_mut().for_each(|chunk| {
+        chunk.filter_selected_cells(&cell_set);
+    });
+
+    let end_reading = start_reading.elapsed();
+
+    let tf_data: CompressedSparseData<u16, f32> =
+        from_gene_chunks::<u16>(&gene_chunks, cell_set.len());
+
+    if verbose {
+        println!(
+            "Loaded in and filtered TF data to cells of interest: {:.2?}",
+            end_reading
+        );
+    }
 }

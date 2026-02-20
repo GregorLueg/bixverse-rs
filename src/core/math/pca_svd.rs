@@ -421,3 +421,108 @@ where
 
     RandomSvdResults { u, s, v }
 }
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use faer::Mat;
+
+    #[test]
+    fn test_compute_pc_scores() {
+        let u: Mat<f64> = Mat::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
+        let v: Mat<f64> = Mat::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
+        let s = vec![3.0, 1.5];
+
+        let svd_res = SvdResults { u, v, s };
+        let scores = compute_pc_scores(&svd_res);
+
+        // PC scores = U * S
+        assert!((scores[(0, 0)] - 3.0).abs() < 1e-6);
+        assert!((scores[(0, 1)] - 0.0).abs() < 1e-6);
+        assert!((scores[(1, 0)] - 0.0).abs() < 1e-6);
+        assert!((scores[(1, 1)] - 1.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_get_top_eigenvalues() {
+        let mat: Mat<f64> = Mat::from_fn(
+            2,
+            2,
+            |i, j| if i == j { 3.0 - (i as f64 * 2.0) } else { 0.0 },
+        );
+        let top_eigen = get_top_eigenvalues(&mat, 2);
+
+        assert_eq!(top_eigen.len(), 2);
+        assert!((top_eigen[0].0 - 3.0).abs() < 1e-6);
+        assert!((top_eigen[1].0 - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_randomised_svd_logic() {
+        // Create a dense rank-1 matrix A = x * y^T
+        // x = [1.0, 2.0, 3.0, 4.0]^T
+        // y = [1.0, 0.5, 0.25]^T
+        let x = vec![1.0, 2.0, 3.0, 4.0];
+        let y = vec![1.0, 0.5, 0.25];
+        let mut mat: Mat<f64> = Mat::zeros(4, 3);
+        for i in 0..4 {
+            for j in 0..3 {
+                mat[(i, j)] = x[i] * y[j];
+            }
+        }
+
+        // We only need the top 1 PC
+        let svd = randomised_svd(mat.as_ref(), 1, 42, Some(5), Some(4));
+
+        // Test U (Left Singular Vector) correlation with x
+        let u_col = svd.u.col(0);
+        let x_norm: f64 = x.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let mut dot_u = 0.0;
+        for i in 0..4 {
+            dot_u += u_col[i] * (x[i] / x_norm);
+        }
+
+        // Test V (Right Singular Vector) correlation with y
+        let v_col = svd.v.col(0);
+        let y_norm: f64 = y.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let mut dot_v = 0.0;
+        for j in 0..3 {
+            dot_v += v_col[j] * (y[j] / y_norm);
+        }
+
+        // The absolute correlation should be > 0.999 (allowing for sign flips)
+        assert!(dot_u.abs() > 0.999);
+        assert!(dot_v.abs() > 0.999);
+    }
+
+    #[test]
+    fn test_randomised_sparse_svd_logic() {
+        // Create a sparse rank-1 matrix A = x * y^T
+        // x = [0.0, 2.0, 0.0, 4.0]^T
+        // y = [1.0, 0.0, 0.5]^T
+        // Non-zeros will only exist where x_i != 0 AND y_j != 0
+        let data = vec![2.0, 1.0, 4.0, 2.0];
+        let indices = vec![0, 2, 0, 2];
+        let indptr = vec![0, 0, 2, 2, 4];
+        let shape = (4, 3);
+
+        let csr = CompressedSparseData::<f64, f64>::new_csr(&data, &indices, &indptr, None, shape);
+
+        let no_params: Option<&[f64]> = None;
+        let svd = randomised_sparse_svd(&csr, 1, 42, false, Some(5), Some(4), no_params, no_params);
+
+        let u_col = svd.u.col(0);
+        let x_norm = (2.0_f64.powi(2) + 4.0_f64.powi(2)).sqrt(); // sqrt(20)
+        let dot_u = (u_col[1] * 2.0 + u_col[3] * 4.0) / x_norm;
+        assert!(dot_u.abs() > 0.999);
+
+        let v_col = svd.v.col(0);
+        let y_norm = (1.0_f64.powi(2) + 0.5_f64.powi(2)).sqrt(); // sqrt(1.25)
+        let dot_v = (v_col[0] * 1.0 + v_col[2] * 0.5) / y_norm;
+        assert!(dot_v.abs() > 0.999);
+    }
+}
