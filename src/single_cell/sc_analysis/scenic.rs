@@ -252,6 +252,70 @@ impl TreeRegressorConfig for RandomForestConfig {
     }
 }
 
+/////////////////////
+// Storage helpers //
+/////////////////////
+
+/// A store for better cache locality of the data
+///
+/// ### Fields
+///
+/// * `col_indices` - The cell positions expressing that gene
+/// * `col_values` - The normalised expression counts at that position
+struct ColumnStore {
+    col_indices: Vec<Vec<usize>>,
+    col_values: Vec<Vec<f32>>,
+}
+
+impl ColumnStore {
+    /// Generate a new storage from a CSC matrix
+    ///
+    /// ### Params
+    ///
+    /// * `mat` - The CompressedSparseData - must be in CSC format
+    ///
+    /// ### Returns
+    ///
+    /// Initialised self
+    fn from_csc(mat: &CompressedSparseData<u16, f32>) -> Self {
+        assert!(mat.cs_type.is_csc(), "The data must be in CSC format!");
+
+        let n_cols = mat.indptr.len() - 1;
+        let vals = mat.data_2.as_ref().expect("requires data_2");
+        let mut col_indices = Vec::with_capacity(n_cols);
+        let mut col_values = Vec::with_capacity(n_cols);
+        for j in 0..n_cols {
+            let s = mat.indptr[j];
+            let e = mat.indptr[j + 1];
+            col_indices.push(mat.indices[s..e].to_vec());
+            col_values.push(vals[s..e].to_vec());
+        }
+        Self {
+            col_indices,
+            col_values,
+        }
+    }
+
+    /// Returns the data of a given column position
+    ///
+    /// ### Returns
+    ///
+    /// Tuple of `(cell_indices, norm expression)`
+    #[inline]
+    fn column(&self, j: usize) -> (&[usize], &[f32]) {
+        (&self.col_indices[j], &self.col_values[j])
+    }
+
+    /// Returns the number of features stored
+    ///
+    /// ### Returns
+    ///
+    /// Number of features
+    fn no_features(&self) -> usize {
+        self.col_indices.len()
+    }
+}
+
 //////////////////
 // Tree helpers //
 //////////////////
@@ -449,7 +513,7 @@ impl TreeBuffers {
 #[allow(clippy::too_many_arguments)]
 fn build_node(
     y_dense: &[f32],
-    x: &CompressedSparseData<u16, f32>,
+    x: &ColumnStore,
     sample_slice: &mut [usize],
     y_sum: f32,
     y_sum_sq: f32,
@@ -474,7 +538,7 @@ fn build_node(
         return idx;
     }
 
-    let n_features = x.indptr.len() - 1;
+    let n_features = x.no_features();
     let k = n_features_split.min(n_features);
 
     bufs.feat_buf.clear();
@@ -492,7 +556,7 @@ fn build_node(
 
     for fi_idx in 0..k {
         let feat = bufs.feat_buf[fi_idx];
-        let (col_indices, col_vals) = csc_column(x, feat);
+        let (col_indices, col_vals) = x.column(feat);
 
         intersect_sparse_samples(col_indices, col_vals, sample_slice, &mut bufs.nz_buf);
 
@@ -606,7 +670,7 @@ fn build_node(
     }
 
     // Partition sample_slice into left/right using a single reusable buffer
-    let (col_indices, col_vals) = csc_column(x, best_feature);
+    let (col_indices, col_vals) = x.column(best_feature);
 
     bufs.partition_buf.clear();
     bufs.partition_buf.reserve(n);
@@ -740,12 +804,12 @@ fn y_stats_from_dense(y_dense: &[f32], samples: &[usize]) -> (f32, f32) {
 /// complete.
 fn fit_trees(
     target_variable: &SparseAxis<u16, f32>,
-    feature_matrix: &CompressedSparseData<u16, f32>,
+    feature_matrix: &ColumnStore,
     n_samples: usize,
     config: &dyn TreeRegressorConfig,
     seed: usize,
 ) -> Vec<f32> {
-    let n_features = feature_matrix.indptr.len() - 1;
+    let n_features = feature_matrix.no_features();
     let n_features_split = if config.n_features_split() == 0 {
         ((n_features as f64).sqrt() as usize).max(1)
     } else {
@@ -856,9 +920,9 @@ fn fit_trees(
 /// ### Returns
 ///
 /// A `Vec<f32>` of length `n_tfs` with importances normalised to sum to 1.
-pub fn fit_extra_trees(
+fn fit_extra_trees(
     target_variable: &SparseAxis<u16, f32>,
-    feature_matrix: &CompressedSparseData<u16, f32>,
+    feature_matrix: &ColumnStore,
     n_samples: usize,
     config: &ExtraTreesConfig,
     seed: usize,
@@ -887,9 +951,9 @@ pub fn fit_extra_trees(
 /// ### Returns
 ///
 /// A `Vec<f32>` of length `n_tfs` with importances normalised to sum to 1.
-pub fn fit_random_forest(
+fn fit_random_forest(
     target_variable: &SparseAxis<u16, f32>,
-    feature_matrix: &CompressedSparseData<u16, f32>,
+    feature_matrix: &ColumnStore,
     n_samples: usize,
     config: &RandomForestConfig,
     seed: usize,
@@ -990,10 +1054,12 @@ pub fn run_scenic_grn(
     let tf_data: CompressedSparseData<u16, f32> =
         from_gene_chunks::<u16>(&gene_chunks, cell_set.len());
 
+    let tf_data = ColumnStore::from_csc(&tf_data);
+
     if verbose {
         println!(
             "Loaded in and filtered TF data (n: {}) to cells of interest: {:.2?}",
-            tf_data.indptr.len() - 1,
+            tf_data.col_indices.len(),
             end_reading
         );
     }
