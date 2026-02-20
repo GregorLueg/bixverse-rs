@@ -3,7 +3,6 @@ use indexmap::IndexSet;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use rayon::prelude::*;
 use std::time::Instant;
-use thousands::*;
 
 use crate::prelude::*;
 use crate::utils::simd::sum_simd_f32;
@@ -29,14 +28,6 @@ impl Default for RegressionLearner {
 }
 
 /// Parse the regression learner
-///
-/// ### Params
-///
-/// * `s` - String to parse
-///
-/// ### Returns
-///
-/// The Option of the `RegressionLearner` Enum with the chosen learner
 pub fn parse_regression_learner(s: &str) -> Option<RegressionLearner> {
     match s.to_lowercase().as_str() {
         "extratrees" => Some(RegressionLearner::ExtraTrees(ExtraTreesConfig::default())),
@@ -51,80 +42,23 @@ pub fn parse_regression_learner(s: &str) -> Option<RegressionLearner> {
 // Shared trait //
 //////////////////
 
-/// Trait to access different tree regression-based hyper parameters
 trait TreeRegressorConfig: Sync {
-    /// Number of trees
-    ///
-    /// ### Returns
-    ///
-    /// The number of trees to use
     fn n_trees(&self) -> usize;
-
-    /// Minimum number of samples
-    ///
-    /// ### Returns
-    ///
-    /// The minimum number of samples per given leaf
     fn min_samples_leaf(&self) -> usize;
-
-    /// How many features to split
-    ///
-    /// ### Returns
-    ///
-    /// The number of features to split
     fn n_features_split(&self) -> usize;
-
-    /// Shall a random threshold be used (ExtraTrees) or an optimal threshold
-    /// (RF)
-    ///
-    /// ### Returns
-    ///
-    /// Boolean
     fn random_threshold(&self) -> bool;
-
-    /// Number of samples to subsample
-    ///
-    /// ### Returns
-    ///
-    /// How many of the samples to subsample per given tree
     fn subsample_rate(&self) -> f32 {
         1.0
     }
-
-    /// Shall the subsampling be done with bootstrapping
-    ///
-    /// ### Returns
-    ///
-    /// Boolean indicating if bootstrapping should be used
     fn bootstrap(&self) -> bool {
         false
     }
-
-    /// Optional max_depth parameter
-    ///
-    /// ### Returns
-    ///
-    /// Shall the tree-depth be limited
     fn max_depth(&self) -> Option<usize> {
         None
     }
-
-    /// Min variance in a given leaf
-    ///
-    /// ### Returns
-    ///
-    /// Returns the min variance threshold
     fn min_variance(&self) -> f32 {
         1e-10
     }
-
-    /// Number of random thresholds to use
-    ///
-    /// Used for ManyTrees
-    ///
-    /// ### Returns
-    ///
-    /// Number of thresholds to use
     fn n_thresholds(&self) -> usize {
         1
     }
@@ -138,16 +72,6 @@ trait TreeRegressorConfig: Sync {
 // ExtraTrees //
 ////////////////
 
-/// Parameters for the extra tree regression
-///
-/// ### Fields
-///
-/// * `n_trees` - Number of trees to fit
-/// * `min_samples_leaf` - Minimum number of samples per leaf. Will control
-///   the depth.
-/// * `n_features_split` - Number of features to per split
-///   (if zero = sqrt(features))
-/// * `n_thresholds` - Number of random thresholds to test
 #[derive(Clone, Debug)]
 pub struct ExtraTreesConfig {
     pub n_trees: usize,
@@ -157,7 +81,6 @@ pub struct ExtraTreesConfig {
     pub max_depth: Option<usize>,
 }
 
-/// Default implementation for the ExtraTreesConfig
 impl Default for ExtraTreesConfig {
     fn default() -> Self {
         Self {
@@ -165,12 +88,11 @@ impl Default for ExtraTreesConfig {
             min_samples_leaf: 50,
             n_features_split: 0,
             n_thresholds: 1,
-            max_depth: Some(15),
+            max_depth: Some(10), // Reduced depth
         }
     }
 }
 
-/// Trait implementation for ExtraTreesConfig
 impl TreeRegressorConfig for ExtraTreesConfig {
     fn n_trees(&self) -> usize {
         self.n_trees
@@ -196,18 +118,6 @@ impl TreeRegressorConfig for ExtraTreesConfig {
 // RandomForest //
 //////////////////
 
-/// Parameters for the Random Forest regression
-///
-/// ### Fields
-///
-/// * `n_trees` - Number of trees to fit
-/// * `min_samples_leaf` - Minimum number of samples per leaf. Will control
-///   the depth.
-/// * `n_features_split` - Number of features to per split
-///   (if zero = sqrt(features))
-/// * `subsample_rate` - Number of samples to use per tree
-/// * `bootstrap` - Shall the subsampling be bootstrapped
-/// * `max_depth` - Shall the the tree depth be limited
 #[derive(Clone, Debug)]
 pub struct RandomForestConfig {
     pub n_trees: usize,
@@ -218,7 +128,6 @@ pub struct RandomForestConfig {
     pub max_depth: Option<usize>,
 }
 
-/// Default implementation for the RandomForestConfig
 impl Default for RandomForestConfig {
     fn default() -> Self {
         Self {
@@ -227,12 +136,11 @@ impl Default for RandomForestConfig {
             n_features_split: 0,
             subsample_rate: 0.632,
             bootstrap: false,
-            max_depth: None,
+            max_depth: Some(10), // Reduced depth
         }
     }
 }
 
-/// Trait implementation for RandomForestConfig
 impl TreeRegressorConfig for RandomForestConfig {
     fn n_trees(&self) -> usize {
         self.n_trees
@@ -265,35 +173,15 @@ impl TreeRegressorConfig for RandomForestConfig {
 // Quantiser //
 ///////////////
 
-/// Structure to store quantised (dense) values
-///
-/// ### Fields
-///
-/// * `data` - Flat store of the quantised expression values
-/// * `n_cells` - Number of cells
-/// * `n_features` - Number of features
-/// * `feature_mins` - Minimum values for reconstruction
-/// * `feature_range` - Range values for reconstruction
 pub struct DenseQuantisedStore {
-    /// Flattened column-major data: [TF0_cell0, TF0_cell1, ..., TF1_cell0, ...]
     data: Vec<u8>,
     n_cells: usize,
-    n_features: usize,
+    pub n_features: usize,
     feature_min: Vec<f32>,
     feature_range: Vec<f32>,
 }
 
 impl DenseQuantisedStore {
-    /// Generate a new instance from the CompressedSparseData
-    ///
-    /// ### Params
-    ///
-    /// * `mat` - The initial matrix
-    /// * `n_cells` - Number of cells being tested
-    ///
-    /// ### Returns
-    ///
-    /// Initialised self
     pub fn from_csc(mat: &CompressedSparseData<u16, f32>, n_cells: usize) -> Self {
         let n_features = mat.indptr.len() - 1;
         let mut data = vec![0u8; n_features * n_cells];
@@ -308,7 +196,6 @@ impl DenseQuantisedStore {
             let col_indices = &mat.indices[s..e];
             let col_vals = &vals[s..e];
 
-            // find min/max
             let mut min_v = 0_f32;
             let mut max_v = 0_f32;
             for &v in col_vals {
@@ -325,7 +212,6 @@ impl DenseQuantisedStore {
 
             let offset = j * n_cells;
 
-            // quantise
             if range > 1e-10 {
                 let scale = 255.0 / range;
                 for i in 0..col_indices.len() {
@@ -346,11 +232,6 @@ impl DenseQuantisedStore {
         }
     }
 
-    /// Get the values of a given column
-    ///
-    /// ### Returns
-    ///
-    /// Quantised self
     #[inline(always)]
     pub fn get_col(&self, tf_idx: usize) -> &[u8] {
         let start = tf_idx * self.n_cells;
@@ -362,13 +243,6 @@ impl DenseQuantisedStore {
 // Histograms //
 ////////////////
 
-/// Structure for the histograms
-///
-/// ### Params
-///
-/// * `count` - Number of samples
-/// * `y_sum` - Sum of the prediction variable
-/// * `y_sum_sq` - Squared sum of the prediction variable
 #[derive(Clone, Copy, Default)]
 struct HistogramBin {
     count: usize,
@@ -380,28 +254,11 @@ struct HistogramBin {
 // Tree helpers //
 //////////////////
 
-/// Represents a node in a regression decision tree.
 #[allow(dead_code)]
 enum Node {
-    /// A leaf (terminal) node containing a constant prediction.
-    ///
-    /// ### Fields
-    ///
-    /// * `mean` - The predicted regression value
-    Leaf { mean: f32 },
-
-    /// An internal split node that partitions samples by a feature threshold.
-    ///
-    /// ### Fields
-    ///
-    /// * `feature_idx` - Index of the feature used for the split
-    /// * `threshold` - Threshold value; samples where feature < threshold go
-    ///   left
-    /// * `left` - Index of the left child node
-    /// * `right` - Index of the right child node
-    /// * `weighted_impurity_decrease` - Importance metric:
-    ///   `variance_reduction * (n_node / n_total)`  following sklearn's
-    ///   convention
+    Leaf {
+        mean: f32,
+    },
     Split {
         feature_idx: usize,
         threshold: f32,
@@ -411,21 +268,6 @@ enum Node {
     },
 }
 
-/// Variance of the node
-///
-/// Computes sample variance using the computational formula:
-/// `Var = E[X²] - E[X]²`
-/// (Does clamping to avoid issues)
-///
-/// ### Params
-///
-/// * `sum` - Sum of all values in the node
-/// * `sum_sq` - Sum of squared values
-/// * `n` - Number of samples in the node
-///
-/// ### Returns
-///
-/// Sample variance.
 #[inline]
 fn node_variance(sum: f32, sum_sq: f32, n: usize) -> f32 {
     if n < 2 {
@@ -439,13 +281,14 @@ fn node_variance(sum: f32, sum_sq: f32, n: usize) -> f32 {
 // Tree building //
 ///////////////////
 
-/// Per-tree scratch buffers, allocated once and reused across all nodes.
 struct TreeBuffers {
     feat_buf: Vec<usize>,
     left_buf: Vec<u32>,
     right_buf: Vec<u32>,
+    left_y_buf: Vec<f32>,  // NEW: packed Y array
+    right_y_buf: Vec<f32>, // NEW: packed Y array
     hist: [HistogramBin; 256],
-    cum_hist: [HistogramBin; 256], // Prefix sum for O(1) split evaluation
+    cum_hist: [HistogramBin; 256],
 }
 
 impl TreeBuffers {
@@ -454,26 +297,26 @@ impl TreeBuffers {
             feat_buf: (0..n_features).collect(),
             left_buf: vec![0; n_samples],
             right_buf: vec![0; n_samples],
+            left_y_buf: vec![0.0; n_samples],
+            right_y_buf: vec![0.0; n_samples],
             hist: [HistogramBin::default(); 256],
             cum_hist: [HistogramBin::default(); 256],
         }
     }
 
-    /// Builds the histogram and the cumulative prefix-sum histogram
     #[inline]
-    fn build_histograms(&mut self, tf_col: &[u8], sample_slice: &[u32], y_dense: &[f32]) {
+    fn build_histograms(&mut self, tf_col: &[u8], sample_slice: &[u32], y_slice: &[f32]) {
         self.hist.fill(HistogramBin::default());
 
-        // O(N) branchless construction
-        for &s in sample_slice {
-            let bin_idx = tf_col[s as usize] as usize;
-            let y = y_dense[s as usize];
+        // Perfect sequential iteration, zero cache misses!
+        for i in 0..sample_slice.len() {
+            let bin_idx = tf_col[sample_slice[i] as usize] as usize;
+            let y = y_slice[i];
             self.hist[bin_idx].count += 1;
             self.hist[bin_idx].y_sum += y;
             self.hist[bin_idx].y_sum_sq += y * y;
         }
 
-        // O(256) cumulative prefix sum
         let mut acc = HistogramBin::default();
         for i in 0..256 {
             acc.count += self.hist[i].count;
@@ -484,7 +327,6 @@ impl TreeBuffers {
     }
 }
 
-/// Helper function to evaluate variance reduction in O(1) using the cumulative histogram
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn evaluate_split(
@@ -528,16 +370,9 @@ fn evaluate_split(
     }
 }
 
-/// Recursively builds a regression tree node using variance reduction.
-///
-/// Key differences from original:
-/// - `y_dense` is a pre-computed dense array, eliminating binary searches
-/// - Adaptive intersection (galloping vs merge) for sparse column lookups
-/// - Single scratch `partition_buf` reused across all recursive calls
-/// - Single-pass split evaluation for ExtraTrees
 #[allow(clippy::too_many_arguments)]
 fn build_node(
-    y_dense: &[f32],
+    y_slice: &mut [f32], // NEW: Packed Y array!
     x: &DenseQuantisedStore,
     sample_slice: &mut [u32],
     y_sum: f32,
@@ -566,8 +401,6 @@ fn build_node(
     let n_features = x.n_features;
     let k = n_features_split.min(n_features);
 
-    // Partial Fisher-Yates: feat_buf is initialised once in TreeBuffers::new
-    // and always contains each index exactly once. Just shuffle the first k.
     for i in 0..k {
         let j = rng.random_range(i..n_features);
         bufs.feat_buf.swap(i, j);
@@ -583,7 +416,7 @@ fn build_node(
         let feat = bufs.feat_buf[fi_idx];
         let tf_col = x.get_col(feat);
 
-        bufs.build_histograms(tf_col, sample_slice, y_dense);
+        bufs.build_histograms(tf_col, sample_slice, y_slice);
 
         let min_bin = bufs.hist.iter().position(|b| b.count > 0).unwrap_or(0);
         let max_bin = bufs.hist.iter().rposition(|b| b.count > 0).unwrap_or(255);
@@ -644,12 +477,17 @@ fn build_node(
 
     for i in 0..n {
         let s = sample_slice[i];
+        let y = y_slice[i]; // Fetch aligned Y
         let val = tf_col[s as usize];
+
         let is_right = (val > best_threshold_u8) as usize;
         let is_left = 1 - is_right;
 
+        // Partition BOTH arrays perfectly seamlessly
         bufs.left_buf[l_idx] = s;
+        bufs.left_y_buf[l_idx] = y;
         bufs.right_buf[r_idx] = s;
+        bufs.right_y_buf[r_idx] = y;
 
         l_idx += is_left;
         r_idx += is_right;
@@ -657,6 +495,9 @@ fn build_node(
 
     sample_slice[..l_idx].copy_from_slice(&bufs.left_buf[..l_idx]);
     sample_slice[l_idx..].copy_from_slice(&bufs.right_buf[..r_idx]);
+
+    y_slice[..l_idx].copy_from_slice(&bufs.left_y_buf[..l_idx]);
+    y_slice[l_idx..].copy_from_slice(&bufs.right_y_buf[..r_idx]);
 
     let y_sum_r = y_sum - best_y_sum_l;
     let y_sum_sq_r = y_sum_sq - best_y_sum_sq_l;
@@ -672,9 +513,10 @@ fn build_node(
     });
 
     let (left_sl, right_sl) = sample_slice.split_at_mut(l_idx);
+    let (left_y_sl, right_y_sl) = y_slice.split_at_mut(l_idx);
 
     let left_idx = build_node(
-        y_dense,
+        left_y_sl,
         x,
         left_sl,
         best_y_sum_l,
@@ -688,7 +530,7 @@ fn build_node(
         rng,
     );
     let right_idx = build_node(
-        y_dense,
+        right_y_sl,
         x,
         right_sl,
         y_sum_r,
@@ -710,12 +552,6 @@ fn build_node(
     node_idx
 }
 
-/// Calculate the importance values
-///
-/// ### Params
-///
-/// * `nodes` - The slice of nodes
-/// * `importances` - Mutable references to a slice of importances
 fn accumulate_importances(nodes: &[Node], importances: &mut [f32]) {
     for node in nodes {
         if let Node::Split {
@@ -729,41 +565,15 @@ fn accumulate_importances(nodes: &[Node], importances: &mut [f32]) {
     }
 }
 
-/// Build the dense y-lookup from sparse target data.
-///
-/// Returns (y_dense, y_sum, y_sum_sq) where y_dense[cell_id] = expression value.
-fn build_y_dense(target_variable: &SparseAxis<u16, f32>, n_samples: usize) -> (Vec<f32>, f32, f32) {
+fn build_y_dense(target_variable: &SparseAxis<u16, f32>, n_samples: usize) -> Vec<f32> {
     let (y_indices, y_data) = target_variable.get_indices_data_2();
     let mut y_dense = vec![0.0f32; n_samples];
-    let mut y_sum = 0.0f32;
-    let mut y_sum_sq = 0.0f32;
     for (i, &idx) in y_indices.iter().enumerate() {
-        let v = y_data[i];
-        y_dense[idx] = v;
-        y_sum += v;
-        y_sum_sq += v * v;
+        y_dense[idx] = y_data[i];
     }
-    (y_dense, y_sum, y_sum_sq)
+    y_dense
 }
 
-/// Compute y_sum and y_sum_sq for a subsample from the dense lookup.
-#[inline]
-fn y_stats_from_dense(y_dense: &[f32], samples: &[u32]) -> (f32, f32) {
-    let mut sum = 0_f32;
-    let mut sum_sq = 0_f32;
-    for &s in samples {
-        let v = y_dense[s as usize];
-        sum += v;
-        sum_sq += v * v;
-    }
-    (sum, sum_sq)
-}
-
-/// Fit trees with nested parallelism.
-///
-/// Trees are built in parallel via rayon. Each thread gets its own RNG,
-/// node vec, and scratch buffers. Importances are merged after all trees
-/// complete.
 fn fit_trees(
     target_variable: &SparseAxis<u16, f32>,
     feature_matrix: &DenseQuantisedStore,
@@ -785,33 +595,26 @@ fn fit_trees(
             .max(2 * config.min_samples_leaf())
     };
 
-    let (y_dense, _y_sum_full, _y_sum_sq_full) = build_y_dense(target_variable, n_samples);
+    let y_dense = build_y_dense(target_variable, n_samples);
 
-    // Sequential tree loop: reuse all buffers across trees
-    let mut sample_indices: Vec<u32> = (0..n_samples).map(|x| x as u32).collect();
+    let mut sample_indices: Vec<u32> = vec![0; n_samples];
+    let mut root_y_buf: Vec<f32> = vec![0.0; n_samples]; // NEW: Independent buffer
     let mut bufs = TreeBuffers::new(n_features, n_samples);
     let mut nodes: Vec<Node> = Vec::new();
     let mut importances = vec![0.0f32; n_features];
 
     for tree_idx in 0..config.n_trees() {
         nodes.clear();
-
         let mut rng =
             SmallRng::seed_from_u64(seed.wrapping_add(tree_idx * 6364136223846793005) as u64);
 
         let active_len = if n_sub < n_samples {
             if config.bootstrap() {
+                // Correct Bootstrapping logic: duplicates are expected!
                 for i in 0..n_sub {
-                    sample_indices[i] = rng.random_range(0..n_samples) as u32;
+                    sample_indices[i] = rng.random_range(0..n_samples as u32);
                 }
-                let mut w = 1usize;
-                for r in 1..n_sub {
-                    if sample_indices[r] != sample_indices[r - 1] {
-                        sample_indices[w] = sample_indices[r];
-                        w += 1;
-                    }
-                }
-                w
+                n_sub
             } else {
                 sample_indices
                     .iter_mut()
@@ -821,7 +624,6 @@ fn fit_trees(
                     let j = rng.random_range(i..n_samples);
                     sample_indices.swap(i, j);
                 }
-                sample_indices[..n_sub].sort_unstable();
                 n_sub
             }
         } else {
@@ -833,10 +635,21 @@ fn fit_trees(
         };
 
         let active = &mut sample_indices[..active_len];
-        let (y_sum, y_sum_sq) = y_stats_from_dense(&y_dense, active);
+        let root_y = &mut root_y_buf[..active_len];
+
+        // Pack Y directly next to indices
+        let mut y_sum = 0.0f32;
+        let mut y_sum_sq = 0.0f32;
+        for i in 0..active_len {
+            let s = active[i] as usize;
+            let y = y_dense[s];
+            root_y[i] = y;
+            y_sum += y;
+            y_sum_sq += y * y;
+        }
 
         build_node(
-            &y_dense,
+            root_y,
             feature_matrix,
             active,
             y_sum,
@@ -860,27 +673,6 @@ fn fit_trees(
     importances
 }
 
-////////////////
-// ExtraTrees //
-////////////////
-
-/// Fit an Extra Trees regressor and return normalised feature importances.
-///
-/// Thin wrapper around `fit_trees` using `ExtraTreesConfig`. Splits are
-/// chosen at a random threshold between the min and max of each feature,
-/// with no subsampling.
-///
-/// ### Params
-///
-/// * `target_variable` - Sparse target gene expression to predict
-/// * `feature_matrix` - CSC sparse matrix of TF expression levels
-/// * `n_samples` - Number of cells
-/// * `config` - ExtraTrees hyperparameters
-/// * `seed` - Base random seed; each tree derives its own seed from this
-///
-/// ### Returns
-///
-/// A `Vec<f32>` of length `n_tfs` with importances normalised to sum to 1.
 fn fit_extra_trees(
     target_variable: &SparseAxis<u16, f32>,
     feature_matrix: &DenseQuantisedStore,
@@ -891,27 +683,6 @@ fn fit_extra_trees(
     fit_trees(target_variable, feature_matrix, n_samples, config, seed)
 }
 
-//////////////////
-// RandomForest //
-//////////////////
-
-/// Fit a Random Forest regressor and return normalised feature importances.
-///
-/// Thin wrapper around `fit_trees` using `RandomForestConfig`. Splits are
-/// chosen by sweeping all candidate thresholds in sorted order. Supports
-/// subsampling with or without bootstrap.
-///
-/// ### Params
-///
-/// * `target_variable` - Sparse target gene expression to predict
-/// * `feature_matrix` - CSC sparse matrix of TF expression levels
-/// * `n_samples` - Number of cells
-/// * `config` - RandomForest hyperparameters
-/// * `seed` - Base random seed; each tree derives its own seed from this
-///
-/// ### Returns
-///
-/// A `Vec<f32>` of length `n_tfs` with importances normalised to sum to 1.
 fn fit_random_forest(
     target_variable: &SparseAxis<u16, f32>,
     feature_matrix: &DenseQuantisedStore,
@@ -926,19 +697,6 @@ fn fit_random_forest(
 // Main //
 //////////
 
-/// Returns the genes to include in a SCENIC analysis
-///
-/// Returns genes that make sense to include in the scenic analysis.
-///
-/// ### Params
-///
-/// * `min_total_counts` - Minimum number of total counts across all cells that
-///   the gene has to be expressed in.
-/// * `min_cells` - Proportion of cells that the gene has to be expressed in.
-///
-/// ### Returns
-///
-/// Vec of usizes with gene indices to include
 pub fn scenic_gene_filter(
     f_path: &str,
     cell_indices: &[usize],
@@ -972,22 +730,6 @@ pub fn scenic_gene_filter(
     passing
 }
 
-/// Generate the gene-regulatory network using the SCENIC pipeline.
-///
-/// Predicts the expression of each gene of interest from TF expression levels
-/// using an ensemble tree regressor (ExtraTrees or RandomForest). Feature
-/// importances are accumulated per gene and stored in `importance_scores`.
-/// Genes are processed in chunks of 100 to bound peak memory.
-///
-/// ### Params
-///
-/// * `f_path` - Path to the gene-based binary file.
-/// * `cell_indices` - Indices of cells to include in the analysis.
-/// * `gene_indices` - Indices of target genes to regress.
-/// * `tf_indices` - Indices of transcription factor features.
-/// * `learner` - Regression algorithm and its configuration.
-/// * `seed` - Random seed. Each tree gets its own seed.
-/// * `verbose` - Controls verbosity.
 pub fn run_scenic_grn(
     f_path: &str,
     cell_indices: &[usize],
@@ -998,23 +740,18 @@ pub fn run_scenic_grn(
     verbose: bool,
 ) -> Mat<f32> {
     let start_total = Instant::now();
-
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
-
     let start_reading = Instant::now();
-
     let reader = ParallelSparseReader::new(f_path).unwrap();
-    let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(tf_indices);
 
+    let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(tf_indices);
     gene_chunks.par_iter_mut().for_each(|chunk| {
         chunk.filter_selected_cells(&cell_set);
     });
 
     let end_reading = start_reading.elapsed();
-
     let tf_data: CompressedSparseData<u16, f32> =
         from_gene_chunks::<u16>(&gene_chunks, cell_set.len());
-
     let tf_data = DenseQuantisedStore::from_csc(&tf_data, cell_set.len());
 
     if verbose {
@@ -1047,8 +784,6 @@ pub fn run_scenic_grn(
             .map(|c| c.to_sparse_axis(cell_set.len()))
             .collect();
 
-        // outer parallelism over genes; inner parallelism over trees
-        // i will trust rayon to handle this
         let chunk_importances: Vec<Vec<f32>> = sparse_columns
             .par_iter()
             .map(|gene| match learner {
@@ -1111,34 +846,44 @@ mod tests {
     }
 
     #[test]
-    fn branchless_partitioning_logic() {
+    fn branchless_partitioning_logic_packed() {
         let tf_col: Vec<u8> = vec![10, 50, 200, 30, 250, 100];
-        // sample slice only contains subset of indices
-        let sample_slice: Vec<usize> = vec![0, 1, 2, 4]; // values: 10, 50, 200, 250
+        let sample_slice: Vec<u32> = vec![0, 1, 2, 4];
+        let mut y_slice: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
 
         let mut left_buf = vec![0; 4];
         let mut right_buf = vec![0; 4];
-        let threshold = 100u8;
+        let mut left_y_buf = vec![0.0; 4];
+        let mut right_y_buf = vec![0.0; 4];
 
+        let threshold = 100u8;
         let mut l_idx = 0;
         let mut r_idx = 0;
 
-        for &s in sample_slice.iter() {
-            let val = tf_col[s];
+        for i in 0..sample_slice.len() {
+            let s = sample_slice[i];
+            let y = y_slice[i];
+            let val = tf_col[s as usize];
             let is_right = (val > threshold) as usize;
             let is_left = 1 - is_right;
 
             left_buf[l_idx] = s;
+            left_y_buf[l_idx] = y;
             right_buf[r_idx] = s;
+            right_y_buf[r_idx] = y;
 
             l_idx += is_left;
             r_idx += is_right;
         }
 
-        assert_eq!(l_idx, 2); // 10 and 50 are <= 100
-        assert_eq!(r_idx, 2); // 200 and 250 are > 100
+        assert_eq!(l_idx, 2);
+        assert_eq!(r_idx, 2);
 
         assert_eq!(&left_buf[..l_idx], &[0, 1]);
         assert_eq!(&right_buf[..r_idx], &[2, 4]);
+
+        // Assert packed Y array partitioned perfectly along with it
+        assert_eq!(&left_y_buf[..l_idx], &[1.0, 2.0]);
+        assert_eq!(&right_y_buf[..r_idx], &[3.0, 4.0]);
     }
 }
