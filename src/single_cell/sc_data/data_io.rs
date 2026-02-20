@@ -1022,6 +1022,13 @@ impl CellGeneSparseWriter {
 // Streaming reader //
 //////////////////////
 
+/// ParallelSparseReader
+///
+/// ### Params
+///
+/// * `header` - The file header
+/// * `mmap` - Reference to the memory map for safe sharing across threads
+/// * `chunks_start` - Start of the chunks after the hader file
 pub struct ParallelSparseReader {
     header: SparseDataHeader,
     mmap: Arc<memmap2::Mmap>,
