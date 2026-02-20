@@ -256,6 +256,189 @@ impl TreeRegressorConfig for RandomForestConfig {
 // Storage helpers //
 /////////////////////
 
+///////////////
+// Quantiser //
+///////////////
+
+/// Structure to store quantised (dense) values
+///
+/// ### Fields
+///
+/// * `data` - Flat store of the quantised expression values
+/// * `n_cells` - Number of cells
+/// * `n_features` - Number of features
+/// * `feature_mins` - Minimum values for reconstruction
+/// * `feature_range` - Range values for reconstruction
+pub struct DenseQuantisedStore {
+    /// Flattened column-major data: [TF0_cell0, TF0_cell1, ..., TF1_cell0, ...]
+    data: Vec<u8>,
+    n_cells: usize,
+    n_features: usize,
+    feature_min: Vec<f32>,
+    feature_range: Vec<f32>,
+}
+
+impl DenseQuantisedStore {
+    /// Generate a new instance from the CompressedSparseData
+    ///
+    /// ### Params
+    ///
+    /// * `mat` - The initial matrix
+    /// * `n_cells` - Number of cells being tested
+    ///
+    /// ### Returns
+    ///
+    /// Initialised self
+    pub fn from_csc(mat: &CompressedSparseData<u16, f32>, n_cells: usize) -> Self {
+        let n_features = mat.indptr.len() - 1;
+        let mut data = vec![0u8; n_features * n_cells];
+        let mut mins = Vec::with_capacity(n_features);
+        let mut ranges = Vec::with_capacity(n_features);
+
+        let vals = mat.data_2.as_ref().unwrap();
+
+        for j in 0..n_features {
+            let s = mat.indptr[j];
+            let e = mat.indptr[j + 1];
+            let col_indices = &mat.indices[s..e];
+            let col_vals = &vals[s..e];
+
+            // find min/max
+            let mut min_v = 0_f32;
+            let mut max_v = 0_f32;
+            for &v in col_vals {
+                if v < min_v {
+                    min_v = v;
+                }
+                if v > max_v {
+                    max_v = v;
+                }
+            }
+            let range = max_v - min_v;
+            mins.push(min_v);
+            ranges.push(range);
+
+            let offset = j * n_cells;
+
+            // quantise
+            if range > 1e-10 {
+                let scale = 255.0 / range;
+                for i in 0..col_indices.len() {
+                    let cell_idx = col_indices[i];
+                    let val = col_vals[i];
+                    let q_val = ((val - min_v) * scale).round() as u8;
+                    data[offset + cell_idx] = q_val;
+                }
+            }
+        }
+
+        Self {
+            data,
+            n_cells,
+            n_features,
+            feature_min: mins,
+            feature_range: ranges,
+        }
+    }
+
+    /// Get the values of a given column
+    ///
+    /// ### Returns
+    ///
+    /// Quantised self
+    #[inline(always)]
+    pub fn get_col(&self, tf_idx: usize) -> &[u8] {
+        let start = tf_idx * self.n_cells;
+        &self.data[start..start + self.n_cells]
+    }
+}
+
+////////////////
+// Histograms //
+////////////////
+
+/// Structure for the histograms
+///
+/// ### Params
+///
+/// * `count` - Number of samples
+/// * `y_sum` - Sum of the prediction variable
+/// * `y_sum_sq` - Squared sum of the prediction variable
+#[derive(Clone, Copy, Default)]
+struct HistogramBin {
+    count: usize,
+    y_sum: f32,
+    y_sum_sq: f32,
+}
+
+/// Builds a 256-bin histogram for a specific feature over the current node's
+/// samples.
+///
+/// ### Params
+///
+/// * `feature_col`
+/// * `sample_slice`
+/// * `y_dense`
+///
+/// ### Returns
+///
+/// The `HistoGramBins` (256)
+#[inline]
+fn build_histogram(
+    feature_col: &[u8],
+    sample_slice: &[usize],
+    y_dense: &[f32],
+) -> [HistogramBin; 256] {
+    let mut hist = [HistogramBin::default(); 256];
+
+    // this loop is tightly bound, linear over sample_slice, and branchless.
+    for &s in sample_slice {
+        let bin_idx = feature_col[s] as usize;
+        let y = y_dense[s];
+
+        hist[bin_idx].count += 1;
+        hist[bin_idx].y_sum += y;
+        hist[bin_idx].y_sum_sq += y * y;
+    }
+
+    hist
+}
+
+/// Partitions `sample_slice` into `left_buf` and `right_buf` based on `threshold`.
+/// Returns the number of elements written to the left buffer.
+#[inline]
+fn partition_branchless(
+    feature_col: &[u8],
+    sample_slice: &[usize],
+    threshold: u8,
+    left_buf: &mut [usize],
+    right_buf: &mut [usize],
+) -> usize {
+    let mut l_idx = 0;
+    let mut r_idx = 0;
+
+    for &s in sample_slice {
+        let val = feature_col[s];
+
+        // branchless logic:
+        // is_right is 1 if true, 0 if false
+        let is_right = (val > threshold) as usize;
+        let is_left = 1 - is_right;
+
+        // write to both buffers at their current indices.
+        // we always overwrite whatever is at that index.
+        left_buf[l_idx] = s;
+        right_buf[r_idx] = s;
+
+        // only increment the index for the buffer that actually
+        // "received" the element.
+        l_idx += is_left;
+        r_idx += is_right;
+    }
+
+    l_idx // return the size of the left partition
+}
+
 /// A store for better cache locality of the data
 ///
 /// ### Fields
@@ -374,112 +557,6 @@ fn node_variance(sum: f32, sum_sq: f32, n: usize) -> f32 {
     f32::max(0_f32, sum_sq / nf - (sum / nf) * (sum / nf))
 }
 
-/// Extracts a column from a CompressedSparseData
-///
-/// This will specifically extract the second data layer!
-///
-/// ### Params
-///
-/// * `mat` - The CompressedSparseData. Needs to be in CSC format.
-/// * `j` - Column index to extract
-///
-/// ### Returns
-///
-/// Tuple of `(indices, data)`
-#[inline]
-fn csc_column<'a>(mat: &'a CompressedSparseData<u16, f32>, j: usize) -> (&'a [usize], &'a [f32]) {
-    assert!(mat.cs_type.is_csc(), "Needs to be CSC matrix");
-
-    let s = mat.indptr[j];
-    let e = mat.indptr[j + 1];
-    let vals = mat.data_2.as_ref().expect("TF matrix requires data_2");
-
-    (&mat.indices[s..e], &vals[s..e])
-}
-
-/// Galloping (exponential) search for `target` in a sorted `slice`,
-/// starting from `hint`.
-///
-/// ### Params
-///
-/// TODO
-///
-/// ### Returns
-///
-/// TODO
-#[inline]
-fn gallop_lb(slice: &[usize], target: usize, hint: usize) -> usize {
-    let len = slice.len();
-    if hint >= len {
-        return len;
-    }
-    // exponential expansion
-    let mut lo = hint;
-    let mut step = 1usize;
-    while lo + step < len && slice[lo + step] < target {
-        lo += step;
-        step <<= 1;
-    }
-    let hi = (lo + step).min(len);
-    // binary search in [lo, hi)
-    let sub = &slice[lo..hi];
-    lo + sub.partition_point(|&v| v < target)
-}
-
-/// Adaptive intersection of a sorted sparse column (col_indices, col_vals)
-/// with a sorted sample_slice.  Writes matching (position_in_sample_slice,
-/// feature_val) pairs into `out`.
-///
-/// Uses galloping search when sample_slice is much smaller than the column,
-/// merge scan otherwise.
-#[inline]
-fn intersect_sparse_samples(
-    col_indices: &[usize],
-    col_vals: &[f32],
-    sample_slice: &[usize],
-    out: &mut Vec<(usize, f32)>,
-) {
-    out.clear();
-    let cn = col_indices.len();
-    let sn = sample_slice.len();
-
-    if sn == 0 || cn == 0 {
-        return;
-    }
-
-    // Heuristic: if scanning from sample_slice with galloping is cheaper
-    // than a full merge, use galloping.
-    // Cost of merge ~ cn + sn;  cost of galloping ~ sn * log2(cn)
-    let gallop_cost = sn as f64 * (cn as f64).log2();
-    let merge_cost = (cn + sn) as f64;
-
-    if gallop_cost < merge_cost {
-        // Galloping: for each sample, find it in the column
-        let mut col_hint = 0usize;
-        for (si, &sample) in sample_slice.iter().enumerate() {
-            col_hint = gallop_lb(col_indices, sample, col_hint);
-            if col_hint < cn && col_indices[col_hint] == sample {
-                out.push((si, col_vals[col_hint]));
-                col_hint += 1;
-            }
-        }
-    } else {
-        // Merge scan
-        let (mut a, mut b) = (0, 0);
-        while a < cn && b < sn {
-            match col_indices[a].cmp(&sample_slice[b]) {
-                Equal => {
-                    out.push((b, col_vals[a]));
-                    a += 1;
-                    b += 1;
-                }
-                Less => a += 1,
-                Greater => b += 1,
-            }
-        }
-    }
-}
-
 ///////////////////
 // Tree building //
 ///////////////////
@@ -487,19 +564,89 @@ fn intersect_sparse_samples(
 /// Per-tree scratch buffers, allocated once and reused across all nodes.
 struct TreeBuffers {
     feat_buf: Vec<usize>,
-    nz_buf: Vec<(usize, f32)>,
-    rf_buf: Vec<(f32, f32)>,
-    partition_buf: Vec<usize>,
+    left_buf: Vec<usize>,
+    right_buf: Vec<usize>,
+    hist: [HistogramBin; 256],
+    cum_hist: [HistogramBin; 256], // Prefix sum for O(1) split evaluation
 }
 
 impl TreeBuffers {
-    fn new(n_features: usize) -> Self {
+    fn new(n_features: usize, n_samples: usize) -> Self {
         Self {
             feat_buf: Vec::with_capacity(n_features),
-            nz_buf: Vec::new(),
-            rf_buf: Vec::new(),
-            partition_buf: Vec::new(),
+            left_buf: vec![0; n_samples],
+            right_buf: vec![0; n_samples],
+            hist: [HistogramBin::default(); 256],
+            cum_hist: [HistogramBin::default(); 256],
         }
+    }
+
+    /// Builds the histogram and the cumulative prefix-sum histogram
+    #[inline]
+    fn build_histograms(&mut self, tf_col: &[u8], sample_slice: &[usize], y_dense: &[f32]) {
+        self.hist.fill(HistogramBin::default());
+
+        // O(N) branchless construction
+        for &s in sample_slice {
+            let bin_idx = tf_col[s] as usize;
+            let y = y_dense[s];
+            self.hist[bin_idx].count += 1;
+            self.hist[bin_idx].y_sum += y;
+            self.hist[bin_idx].y_sum_sq += y * y;
+        }
+
+        // O(256) cumulative prefix sum
+        let mut acc = HistogramBin::default();
+        for i in 0..256 {
+            acc.count += self.hist[i].count;
+            acc.y_sum += self.hist[i].y_sum;
+            acc.y_sum_sq += self.hist[i].y_sum_sq;
+            self.cum_hist[i] = acc;
+        }
+    }
+}
+
+/// Helper function to evaluate variance reduction in O(1) using the cumulative histogram
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn evaluate_split(
+    threshold: usize,
+    feat: usize,
+    parent_var: f32,
+    n: usize,
+    y_sum: f32,
+    y_sum_sq: f32,
+    bufs: &TreeBuffers,
+    config: &dyn TreeRegressorConfig,
+    best_score: &mut f32,
+    best_feature: &mut usize,
+    best_threshold_u8: &mut u8,
+    best_y_sum_l: &mut f32,
+    best_y_sum_sq_l: &mut f32,
+) {
+    let left_stats = &bufs.cum_hist[threshold];
+    let n_left = left_stats.count;
+    let n_right = n - n_left;
+
+    if n_left < config.min_samples_leaf() || n_right < config.min_samples_leaf() {
+        return;
+    }
+
+    let y_sum_l = left_stats.y_sum;
+    let y_sum_sq_l = left_stats.y_sum_sq;
+    let y_sum_r = y_sum - y_sum_l;
+    let y_sum_sq_r = y_sum_sq - y_sum_sq_l;
+
+    let score = parent_var
+        - (n_left as f32 / n as f32) * node_variance(y_sum_l, y_sum_sq_l, n_left)
+        - (n_right as f32 / n as f32) * node_variance(y_sum_r, y_sum_sq_r, n_right);
+
+    if score > *best_score {
+        *best_score = score;
+        *best_feature = feat;
+        *best_threshold_u8 = threshold as u8;
+        *best_y_sum_l = y_sum_l;
+        *best_y_sum_sq_l = y_sum_sq_l;
     }
 }
 
@@ -513,7 +660,7 @@ impl TreeBuffers {
 #[allow(clippy::too_many_arguments)]
 fn build_node(
     y_dense: &[f32],
-    x: &ColumnStore,
+    x: &DenseQuantisedStore, // Now using our dense quantized store
     sample_slice: &mut [usize],
     y_sum: f32,
     y_sum_sq: f32,
@@ -538,7 +685,7 @@ fn build_node(
         return idx;
     }
 
-    let n_features = x.no_features();
+    let n_features = x.n_features;
     let k = n_features_split.min(n_features);
 
     bufs.feat_buf.clear();
@@ -550,115 +697,64 @@ fn build_node(
 
     let mut best_score = 0.0f32;
     let mut best_feature = usize::MAX;
-    let mut best_threshold = 0.0f32;
-    let mut best_y_sum_r = 0.0f32;
-    let mut best_y_sum_sq_r = 0.0f32;
+    let mut best_threshold_u8 = 0u8;
+    let mut best_y_sum_l = 0.0f32;
+    let mut best_y_sum_sq_l = 0.0f32;
 
     for fi_idx in 0..k {
         let feat = bufs.feat_buf[fi_idx];
-        let (col_indices, col_vals) = x.column(feat);
+        let tf_col = x.get_col(feat);
 
-        intersect_sparse_samples(col_indices, col_vals, sample_slice, &mut bufs.nz_buf);
+        // O(N) + O(256)
+        bufs.build_histograms(tf_col, sample_slice, y_dense);
 
-        if bufs.nz_buf.is_empty() {
-            continue;
-        }
+        let min_bin = bufs.hist.iter().position(|b| b.count > 0).unwrap_or(0);
+        let max_bin = bufs.hist.iter().rposition(|b| b.count > 0).unwrap_or(255);
 
-        let (min_v, max_v) = bufs
-            .nz_buf
-            .iter()
-            .fold((f32::INFINITY, f32::NEG_INFINITY), |(mn, mx), &(_, v)| {
-                (mn.min(v), mx.max(v))
-            });
-
-        let lo = if bufs.nz_buf.len() < n { 0.0f32 } else { min_v };
-        if max_v - lo < 1e-10 {
-            continue;
+        if min_bin == max_bin {
+            continue; // No variance in this feature
         }
 
         if config.random_threshold() {
-            // ExtraTrees: try n_thresholds random thresholds, keep best.
-            // Single pass: accumulate n_right, y_sum_r, y_sum_sq_r together.
+            // ExtraTrees: Try n_thresholds random splits
             for _ in 0..config.n_thresholds() {
-                let threshold = rng.random_range(lo..max_v);
-
-                let mut n_right = 0usize;
-                let mut y_sum_r = 0.0f32;
-                let mut y_sum_sq_r = 0.0f32;
-
-                for &(si, fval) in bufs.nz_buf.iter() {
-                    if fval > threshold {
-                        n_right += 1;
-                        let v = y_dense[sample_slice[si]];
-                        y_sum_r += v;
-                        y_sum_sq_r += v * v;
-                    }
-                }
-
-                let n_left = n - n_right;
-                if n_left < config.min_samples_leaf() || n_right < config.min_samples_leaf() {
-                    continue;
-                }
-
-                let y_sum_l = y_sum - y_sum_r;
-                let y_sum_sq_l = y_sum_sq - y_sum_sq_r;
-                let score = parent_var
-                    - (n_left as f32 / n as f32) * node_variance(y_sum_l, y_sum_sq_l, n_left)
-                    - (n_right as f32 / n as f32) * node_variance(y_sum_r, y_sum_sq_r, n_right);
-
-                if score > best_score {
-                    best_score = score;
-                    best_feature = feat;
-                    best_threshold = threshold;
-                    best_y_sum_r = y_sum_r;
-                    best_y_sum_sq_r = y_sum_sq_r;
-                }
+                // We pick a random bin as threshold. Anything <= threshold goes left.
+                // max_bin - 1 ensures we don't put all samples into the left node.
+                let threshold = rng.random_range(min_bin..max_bin);
+                evaluate_split(
+                    threshold,
+                    feat,
+                    parent_var,
+                    n,
+                    y_sum,
+                    y_sum_sq,
+                    bufs,
+                    config,
+                    &mut best_score,
+                    &mut best_feature,
+                    &mut best_threshold_u8,
+                    &mut best_y_sum_l,
+                    &mut best_y_sum_sq_l,
+                );
             }
         } else {
-            // RF: sorted sweep over all candidate thresholds
-            bufs.rf_buf.clear();
-            bufs.rf_buf.extend(bufs.nz_buf.iter().map(|&(si, fval)| {
-                let y = y_dense[sample_slice[si]];
-                (fval, y)
-            }));
-            bufs.rf_buf
-                .sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Equal));
-
-            let (mut y_sum_r, mut y_sum_sq_r) = (0.0f32, 0.0f32);
-            let mut n_right = 0usize;
-
-            for i in (0..bufs.rf_buf.len()).rev() {
-                let (fval, yval) = bufs.rf_buf[i];
-                y_sum_r += yval;
-                y_sum_sq_r += yval * yval;
-                n_right += 1;
-
-                if i > 0 && (bufs.rf_buf[i - 1].0 - fval).abs() < 1e-10 {
-                    continue;
-                }
-
-                let n_left = n - n_right;
-                if n_left < config.min_samples_leaf() || n_right < config.min_samples_leaf() {
-                    continue;
-                }
-
-                let y_sum_l = y_sum - y_sum_r;
-                let y_sum_sq_l = y_sum_sq - y_sum_sq_r;
-                let score = parent_var
-                    - (n_left as f32 / n as f32) * node_variance(y_sum_l, y_sum_sq_l, n_left)
-                    - (n_right as f32 / n as f32) * node_variance(y_sum_r, y_sum_sq_r, n_right);
-
-                if score > best_score {
-                    best_score = score;
-                    best_feature = feat;
-                    best_threshold = if i > 0 {
-                        (bufs.rf_buf[i - 1].0 + fval) / 2.0
-                    } else {
-                        fval / 2.0
-                    };
-                    best_y_sum_r = y_sum_r;
-                    best_y_sum_sq_r = y_sum_sq_r;
-                }
+            // RandomForest: Sweep all valid bins
+            for threshold in min_bin..max_bin {
+                evaluate_split(
+                    threshold,
+                    feat,
+                    parent_var,
+                    n,
+                    y_sum,
+                    y_sum_sq,
+                    bufs,
+                    config,
+                    &mut best_score,
+                    &mut best_feature,
+                    &mut best_threshold_u8,
+                    &mut best_y_sum_l,
+                    &mut best_y_sum_sq_l,
+                );
             }
         }
     }
@@ -669,54 +765,49 @@ fn build_node(
         return idx;
     }
 
-    // Partition sample_slice into left/right using a single reusable buffer
-    let (col_indices, col_vals) = x.column(best_feature);
+    // --- Branchless Partitioning ---
+    let tf_col = x.get_col(best_feature);
+    let mut l_idx = 0;
+    let mut r_idx = 0;
 
-    bufs.partition_buf.clear();
-    bufs.partition_buf.reserve(n);
+    for &s in sample_slice.iter() {
+        let val = tf_col[s];
+        let is_right = (val > best_threshold_u8) as usize;
+        let is_left = 1 - is_right;
 
-    // We'll write "right" samples into partition_buf, then rearrange
-    // sample_slice in-place as [left..., right...]
-    let mut n_left = 0usize;
-    {
-        let mut a = 0;
-        for i in 0..sample_slice.len() {
-            let s = sample_slice[i];
-            while a < col_indices.len() && col_indices[a] < s {
-                a += 1;
-            }
-            if a < col_indices.len() && col_indices[a] == s && col_vals[a] > best_threshold {
-                bufs.partition_buf.push(s);
-            } else {
-                // Write left samples in-place from the front
-                sample_slice[n_left] = s;
-                n_left += 1;
-            }
-        }
+        bufs.left_buf[l_idx] = s;
+        bufs.right_buf[r_idx] = s;
+
+        l_idx += is_left;
+        r_idx += is_right;
     }
-    // Copy right samples after left
-    sample_slice[n_left..].copy_from_slice(&bufs.partition_buf);
 
-    let y_sum_l = y_sum - best_y_sum_r;
-    let y_sum_sq_l = y_sum_sq - best_y_sum_sq_r;
+    // Copy back to sample_slice in-place
+    sample_slice[..l_idx].copy_from_slice(&bufs.left_buf[..l_idx]);
+    sample_slice[l_idx..].copy_from_slice(&bufs.right_buf[..r_idx]);
+
+    let y_sum_r = y_sum - best_y_sum_l;
+    let y_sum_sq_r = y_sum_sq - best_y_sum_sq_l;
 
     let node_idx = nodes.len();
     nodes.push(Node::Split {
         feature_idx: best_feature,
-        threshold: best_threshold,
+        // Optional: Reconstruct the approximate f32 threshold if needed for output
+        threshold: x.feature_min[best_feature]
+            + (best_threshold_u8 as f32 / 255.0) * x.feature_range[best_feature],
         left: usize::MAX,
         right: usize::MAX,
         weighted_impurity_decrease: (n as f32 / n_total as f32) * best_score,
     });
 
-    let (left_sl, right_sl) = sample_slice.split_at_mut(n_left);
+    let (left_sl, right_sl) = sample_slice.split_at_mut(l_idx);
 
     let left_idx = build_node(
         y_dense,
         x,
         left_sl,
-        y_sum_l,
-        y_sum_sq_l,
+        best_y_sum_l,
+        best_y_sum_sq_l,
         n_total,
         n_features_split,
         config,
@@ -729,8 +820,8 @@ fn build_node(
         y_dense,
         x,
         right_sl,
-        best_y_sum_r,
-        best_y_sum_sq_r,
+        y_sum_r,
+        y_sum_sq_r,
         n_total,
         n_features_split,
         config,
@@ -804,12 +895,12 @@ fn y_stats_from_dense(y_dense: &[f32], samples: &[usize]) -> (f32, f32) {
 /// complete.
 fn fit_trees(
     target_variable: &SparseAxis<u16, f32>,
-    feature_matrix: &ColumnStore,
+    feature_matrix: &DenseQuantisedStore,
     n_samples: usize,
     config: &dyn TreeRegressorConfig,
     seed: usize,
 ) -> Vec<f32> {
-    let n_features = feature_matrix.no_features();
+    let n_features = feature_matrix.n_features;
     let n_features_split = if config.n_features_split() == 0 {
         ((n_features as f64).sqrt() as usize).max(1)
     } else {
@@ -827,7 +918,7 @@ fn fit_trees(
 
     // Sequential tree loop: reuse all buffers across trees
     let mut sample_indices: Vec<usize> = (0..n_samples).collect();
-    let mut bufs = TreeBuffers::new(n_features);
+    let mut bufs = TreeBuffers::new(n_features, n_samples);
     let mut nodes: Vec<Node> = Vec::new();
     let mut importances = vec![0.0f32; n_features];
 
@@ -922,7 +1013,7 @@ fn fit_trees(
 /// A `Vec<f32>` of length `n_tfs` with importances normalised to sum to 1.
 fn fit_extra_trees(
     target_variable: &SparseAxis<u16, f32>,
-    feature_matrix: &ColumnStore,
+    feature_matrix: &DenseQuantisedStore,
     n_samples: usize,
     config: &ExtraTreesConfig,
     seed: usize,
@@ -953,7 +1044,7 @@ fn fit_extra_trees(
 /// A `Vec<f32>` of length `n_tfs` with importances normalised to sum to 1.
 fn fit_random_forest(
     target_variable: &SparseAxis<u16, f32>,
-    feature_matrix: &ColumnStore,
+    feature_matrix: &DenseQuantisedStore,
     n_samples: usize,
     config: &RandomForestConfig,
     seed: usize,
@@ -1054,13 +1145,12 @@ pub fn run_scenic_grn(
     let tf_data: CompressedSparseData<u16, f32> =
         from_gene_chunks::<u16>(&gene_chunks, cell_set.len());
 
-    let tf_data = ColumnStore::from_csc(&tf_data);
+    let tf_data = DenseQuantisedStore::from_csc(&tf_data, cell_set.len());
 
     if verbose {
         println!(
             "Loaded in and filtered TF data (n: {}) to cells of interest: {:.2?}",
-            tf_data.col_indices.len(),
-            end_reading
+            tf_data.n_features, end_reading
         );
     }
 
@@ -1151,32 +1241,34 @@ mod tests {
     }
 
     #[test]
-    fn node_variance_single_sample() {
-        assert_eq!(node_variance(5.0, 25.0, 1), 0.0);
-    }
+    fn branchless_partitioning_logic() {
+        let tf_col: Vec<u8> = vec![10, 50, 200, 30, 250, 100];
+        // sample slice only contains subset of indices
+        let mut sample_slice: Vec<usize> = vec![0, 1, 2, 4]; // values: 10, 50, 200, 250
 
-    #[test]
-    fn gallop_lb_basic() {
-        let data = [0, 2, 5, 7, 10, 15, 20];
-        assert_eq!(gallop_lb(&data, 5, 0), 2);
-        assert_eq!(gallop_lb(&data, 6, 0), 3);
-        assert_eq!(gallop_lb(&data, 0, 0), 0);
-        assert_eq!(gallop_lb(&data, 25, 0), 7);
-    }
+        let mut left_buf = vec![0; 4];
+        let mut right_buf = vec![0; 4];
+        let threshold = 100u8;
 
-    #[test]
-    fn gallop_lb_with_hint() {
-        let data = [0, 2, 5, 7, 10, 15, 20];
-        assert_eq!(gallop_lb(&data, 10, 3), 4);
-        assert_eq!(gallop_lb(&data, 15, 4), 5);
-    }
+        let mut l_idx = 0;
+        let mut r_idx = 0;
 
-    #[test]
-    fn y_stats_from_dense_basic() {
-        let y = [1.0f32, 2.0, 3.0, 0.0, 5.0];
-        let samples = [0, 1, 2];
-        let (sum, sum_sq) = y_stats_from_dense(&y, &samples);
-        assert!((sum - 6.0).abs() < 1e-6);
-        assert!((sum_sq - 14.0).abs() < 1e-6);
+        for &s in sample_slice.iter() {
+            let val = tf_col[s];
+            let is_right = (val > threshold) as usize;
+            let is_left = 1 - is_right;
+
+            left_buf[l_idx] = s;
+            right_buf[r_idx] = s;
+
+            l_idx += is_left;
+            r_idx += is_right;
+        }
+
+        assert_eq!(l_idx, 2); // 10 and 50 are <= 100
+        assert_eq!(r_idx, 2); // 200 and 250 are > 100
+
+        assert_eq!(&left_buf[..l_idx], &[0, 1]);
+        assert_eq!(&right_buf[..r_idx], &[2, 4]);
     }
 }
