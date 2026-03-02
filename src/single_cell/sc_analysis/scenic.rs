@@ -3,6 +3,7 @@ use indexmap::IndexSet;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use rayon::prelude::*;
 use std::time::Instant;
+use thousands::Separable;
 
 use crate::prelude::*;
 
@@ -1150,7 +1151,8 @@ pub fn run_scenic_grn(
     if verbose {
         println!(
             "Loaded, filtered and quantised TF data (n: {}) to cells of interest in: {:.2?}",
-            tf_data.n_features, end_reading
+            tf_data.n_features.separate_with_underscores(),
+            end_reading
         );
     }
 
