@@ -13,9 +13,9 @@ dependencies = [
 
 [[package]]
 name = "ann-search-rs"
-version = "0.2.2"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d032e5c3f2e7317a434be141c04efa212c49db6bbfac5ce0ccc075d0431f0de7"
+checksum = "742469b8cde5d666fadbd1d1481bd55fefc4df0d930a767dc2cada5ffeb87574"
 dependencies = [
  "approx",
  "clap",
@@ -23,7 +23,6 @@ dependencies = [
  "faer-traits",
  "fixedbitset",
  "num-traits",
- "parking_lot",
  "rand 0.9.2",
  "rand_distr 0.5.1",
  "rayon",
