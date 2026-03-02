@@ -330,3 +330,142 @@ where
         distances
     }
 }
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type Graph = KnnLabPropGraph<f64>;
+
+    // 0 -- 1 -- 2
+    fn simple_chain() -> Graph {
+        let edges = vec![0, 1, 1, 2];
+        Graph::from_edge_list(&edges, 3, true)
+    }
+
+    #[test]
+    fn test_csr_structure_symmetric() {
+        let g = simple_chain();
+        // Node 0: [1], Node 1: [0, 2], Node 2: [1]
+        assert_eq!(g.offsets, vec![0, 1, 3, 4]);
+        assert_eq!(g.neighbours.len(), 4);
+    }
+
+    #[test]
+    fn test_weights_normalised() {
+        let g = simple_chain();
+        // Node 1 has two neighbours, each weight should be 0.5
+        let start = g.offsets[1];
+        let end = g.offsets[2];
+        let sum: f64 = g.weights[start..end].iter().sum();
+        assert!((sum - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_weighted_symmetry_average() {
+        // Edge 0->1 weight 0.8, Edge 1->0 weight 0.4 => symmetric weight 0.6
+        let edges = vec![0, 1, 1, 0];
+        let weights = vec![0.8_f64, 0.4];
+        let g = Graph::from_weighted_edge_list(
+            &edges,
+            &weights,
+            2,
+            Some(SymmetryWeightStrategy::Average),
+        );
+        // Both nodes have a single neighbour so weight == 1.0 after normalisation,
+        // but the raw value before normalisation should have been averaged.
+        // With a single edge per node, normalised weight is always 1.0.
+        assert!((g.weights[0] - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_weighted_symmetry_min() {
+        let edges = vec![0, 1, 1, 0];
+        let weights = vec![0.8_f64, 0.4];
+        let g =
+            Graph::from_weighted_edge_list(&edges, &weights, 2, Some(SymmetryWeightStrategy::Min));
+        assert!((g.weights[0] - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_label_spreading_labelled_nodes_anchored() {
+        let g = simple_chain();
+        let labels = vec![vec![1.0_f64, 0.0], vec![0.0, 0.0], vec![0.0, 1.0]];
+        let mask = vec![false, true, false];
+        let result = g.label_spreading(&labels, &mask, 0.9, 100, 1e-6, None);
+
+        // Labelled nodes are soft-anchored, not hard-clamped, so just verify dominance
+        assert!(
+            result[0][0] > result[0][1],
+            "node 0 should still favour class 0"
+        );
+        assert!(
+            result[2][1] > result[2][0],
+            "node 2 should still favour class 1"
+        );
+    }
+
+    #[test]
+    fn test_label_spreading_unlabelled_receives_distribution() {
+        let g = simple_chain();
+        let labels = vec![vec![1.0_f64, 0.0], vec![0.0, 0.0], vec![0.0, 1.0]];
+        let mask = vec![false, true, false];
+        let result = g.label_spreading(&labels, &mask, 0.9, 100, 1e-6, None);
+
+        // Node 1 sits between class 0 and class 1 so should end up roughly 0.5/0.5
+        assert!((result[1][0] - 0.5).abs() < 0.05);
+        assert!((result[1][1] - 0.5).abs() < 0.05);
+    }
+
+    #[test]
+    fn test_max_hops_restricts_propagation() {
+        // 0 -- 1 -- 2 -- 3 -- 4
+        // Node 0 labelled, rest unlabelled, max_hops = 2
+        let edges = vec![0, 1, 1, 2, 2, 3, 3, 4];
+        let g = Graph::from_edge_list(&edges, 5, true);
+        let labels = vec![
+            vec![1.0_f64, 0.0],
+            vec![0.0, 0.0],
+            vec![0.0, 0.0],
+            vec![0.0, 0.0],
+            vec![0.0, 0.0],
+        ];
+        let mask = vec![false, true, true, true, true];
+        let result = g.label_spreading(&labels, &mask, 0.9, 100, 1e-6, Some(2));
+
+        // Node 4 is 4 hops away, should remain all-zero
+        assert!((result[4][0]).abs() < 1e-9);
+        assert!((result[4][1]).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_hop_distances() {
+        let g = simple_chain();
+        let mask = vec![false, true, false];
+        let dists = g.compute_hop_distances(&mask);
+        assert_eq!(dists[0], 0);
+        assert_eq!(dists[1], 1);
+        assert_eq!(dists[2], 0);
+    }
+
+    #[test]
+    fn test_parse_symmetry_strategy() {
+        assert!(matches!(
+            parse_symmetry_strategy("min"),
+            Some(SymmetryWeightStrategy::Min)
+        ));
+        assert!(matches!(
+            parse_symmetry_strategy("MAX"),
+            Some(SymmetryWeightStrategy::Max)
+        ));
+        assert!(matches!(
+            parse_symmetry_strategy("avg"),
+            Some(SymmetryWeightStrategy::Average)
+        ));
+        assert!(parse_symmetry_strategy("nonsense").is_none());
+    }
+}
