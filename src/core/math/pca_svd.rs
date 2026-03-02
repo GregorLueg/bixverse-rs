@@ -394,7 +394,7 @@ where
 
     let mut q = y.qr().compute_thin_Q();
 
-    // Reuse buffers across power iterations.
+    // reuse buffers across power iterations.
     let mut z = Mat::<F>::zeros(m, sample_size);
     let mut y_new = Mat::<F>::zeros(n, sample_size);
 
