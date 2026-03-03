@@ -6,7 +6,7 @@
 
 ## Description
 
-After having lived in `/src/Rust/` folder of the 
+After having lived in `/src/Rust/` folder of the
 [bixverse R package](https://github.com/GregorLueg/bixverse), the
 decision was made to pull out ALL of the functionality and do a refactor on
 top of the code. This has now led to this independent crate that has
