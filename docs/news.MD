@@ -1,4 +1,4 @@
-## 0.1.1
+## 0.1.2
 
 ### Features
 
@@ -6,6 +6,19 @@
   directed graphs.
 
 ### Fixes
+
+*NA*
+
+## 0.1.1
+
+### Features
+
+*NA*
+
+### Fixes
+
+- Bumped the version of `ann-search-rs` to ensure consistency across packages/
+  crates.
 
 ## 0.1.0 (officialrelease)
 
@@ -20,3 +33,5 @@ This version ported over all of the Rust code from
 - Wrong copy/paste documentation was properly updated.
 
 ### Fixes
+
+*NA*
