@@ -104,15 +104,16 @@ where
     ///
     /// * `from` - Index of the from node
     /// * `to` - Index of the to node
+    /// * `n_nodes` - Number of nodes in the graph
     /// * `symmetrise` - Shall the graph we symmetrised
     ///
     /// ### Returns
     ///
     /// Initialised class
-    pub fn from_node_pairs(from: &[usize], to: &[usize], symmetrise: bool) -> Self {
+    pub fn from_node_pairs(from: &[usize], to: &[usize], n_nodes: usize, symmetrise: bool) -> Self {
         assert_eq!(from.len(), to.len(), "from and to must have equal length");
 
-        let mut adj: Vec<Vec<(usize, T)>> = vec![vec![]; from.len()];
+        let mut adj: Vec<Vec<(usize, T)>> = vec![vec![]; n_nodes];
 
         for (&u, &v) in from.iter().zip(to.iter()) {
             adj[u].push((v, T::one()));
@@ -138,6 +139,7 @@ where
     /// * `from` - Index of the from node
     /// * `to` - Index of the to node
     /// * `weights` - The weights between the nodes
+    /// * `n_nodes` - Number of nodes
     /// * `symmetrise` - Symmetrisation strategy
     ///
     /// ### Returns
@@ -147,11 +149,12 @@ where
         from: &[usize],
         to: &[usize],
         weights: &[T],
+        n_nodes: usize,
         symmetrise: Option<SymmetryWeightStrategy>,
     ) -> Self {
         assert_same_len!(from, to, weights);
 
-        let mut adj: Vec<FxHashMap<usize, T>> = vec![FxHashMap::default(); from.len()];
+        let mut adj: Vec<FxHashMap<usize, T>> = vec![FxHashMap::default(); n_nodes];
 
         for (i, (&u, &v)) in from.iter().zip(to.iter()).enumerate() {
             adj[u].insert(v, weights[i]);
@@ -559,5 +562,65 @@ mod tests {
             Some(SymmetryWeightStrategy::Average)
         ));
         assert!(parse_symmetry_strategy("nonsense").is_none());
+    }
+
+    #[test]
+    fn test_node_pairs_matches_edge_list() {
+        let from = vec![0, 1];
+        let to = vec![1, 2];
+        let g = Graph::from_node_pairs(&from, &to, 3, true);
+        assert_eq!(g.offsets, vec![0, 1, 3, 4]);
+        assert_eq!(g.neighbours.len(), 4);
+    }
+
+    #[test]
+    fn test_node_pairs_weights_normalised() {
+        let from = vec![0, 1];
+        let to = vec![1, 2];
+        let g = Graph::from_node_pairs(&from, &to, 3, true);
+        let start = g.offsets[1];
+        let end = g.offsets[2];
+        let sum: f64 = g.weights[start..end].iter().sum();
+        assert!((sum - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_weighted_node_pairs_symmetry_average() {
+        let from = vec![0];
+        let to = vec![1];
+        let weights = vec![0.8_f64];
+        let g = Graph::from_weighted_node_pairs(
+            &from,
+            &to,
+            &weights,
+            2,
+            Some(SymmetryWeightStrategy::Average),
+        );
+        assert!((g.weights[0] - 1.0).abs() < 1e-9);
+        assert!((g.weights[1] - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_weighted_node_pairs_matches_weighted_edge_list() {
+        let from = vec![0, 1];
+        let to = vec![1, 2];
+        let weights = vec![0.6_f64, 0.4];
+
+        let g_pairs = Graph::from_weighted_node_pairs(
+            &from,
+            &to,
+            &weights,
+            3,
+            Some(SymmetryWeightStrategy::Min),
+        );
+        let edges = vec![0, 1, 1, 2];
+        let g_edge =
+            Graph::from_weighted_edge_list(&edges, &weights, 3, Some(SymmetryWeightStrategy::Min));
+
+        assert_eq!(g_pairs.offsets, g_edge.offsets);
+        assert_eq!(g_pairs.neighbours, g_edge.neighbours);
+        for (a, b) in g_pairs.weights.iter().zip(g_edge.weights.iter()) {
+            assert!((a - b).abs() < 1e-9);
+        }
     }
 }
