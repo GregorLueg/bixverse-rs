@@ -22,7 +22,7 @@ a more detailed documentation will be provided.
 ## Updates
 
 Updates on what's happening in this crate can be found
-[here](https://github.com/GregorLueg/bixverse-rs/blob/main/docs/news.md)
+[here](https://github.com/GregorLueg/bixverse-rs/blob/main/docs/news.MD)
 
 ## Licence
 
