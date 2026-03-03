@@ -2,6 +2,7 @@ use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::collections::VecDeque;
 
+use crate::assert_same_len;
 use crate::prelude::BixverseFloat;
 
 /////////////
@@ -95,6 +96,97 @@ where
         }
 
         Self::build_csr(adj)
+    }
+
+    /// Generate KnnLabPropGraph from node pairs
+    ///
+    /// ### Params
+    ///
+    /// * `from` - Index of the from node
+    /// * `to` - Index of the to node
+    /// * `symmetrise` - Shall the graph we symmetrised
+    ///
+    /// ### Returns
+    ///
+    /// Initialised class
+    pub fn from_node_pairs(from: &[usize], to: &[usize], symmetrise: bool) -> Self {
+        assert_eq!(from.len(), to.len(), "from and to must have equal length");
+
+        let mut adj: Vec<Vec<(usize, T)>> = vec![vec![]; from.len()];
+
+        for (&u, &v) in from.iter().zip(to.iter()) {
+            adj[u].push((v, T::one()));
+            if symmetrise {
+                adj[v].push((u, T::one()));
+            }
+        }
+
+        for neighbours in &mut adj {
+            let sum = T::from_usize(neighbours.len()).unwrap();
+            for (_, w) in neighbours.iter_mut() {
+                *w /= sum;
+            }
+        }
+
+        Self::build_csr(adj)
+    }
+
+    /// Build the KnnLabPropGraph from node pairs (with weights)
+    ///
+    /// ### Params
+    ///
+    /// * `from` - Index of the from node
+    /// * `to` - Index of the to node
+    /// * `weights` - The weights between the nodes
+    /// * `symmetrise` - Symmetrisation strategy
+    ///
+    /// ### Returns
+    ///
+    /// Initialised self
+    pub fn from_weighted_node_pairs(
+        from: &[usize],
+        to: &[usize],
+        weights: &[T],
+        symmetrise: Option<SymmetryWeightStrategy>,
+    ) -> Self {
+        assert_same_len!(from, to, weights);
+
+        let mut adj: Vec<FxHashMap<usize, T>> = vec![FxHashMap::default(); from.len()];
+
+        for (i, (&u, &v)) in from.iter().zip(to.iter()).enumerate() {
+            adj[u].insert(v, weights[i]);
+            if let Some(ref strategy) = symmetrise {
+                adj[v]
+                    .entry(u)
+                    .and_modify(|w| {
+                        *w = match strategy {
+                            SymmetryWeightStrategy::Min => w.min(weights[i]),
+                            SymmetryWeightStrategy::Max => w.max(weights[i]),
+                            SymmetryWeightStrategy::Average => {
+                                (*w + weights[i]) / T::from_f64(2.0).unwrap()
+                            }
+                        };
+                    })
+                    .or_insert(weights[i]);
+            }
+        }
+
+        let mut adj_vec: Vec<Vec<(usize, T)>> = adj
+            .into_iter()
+            .map(|map| map.into_iter().collect())
+            .collect();
+
+        for neighbours in &mut adj_vec {
+            let sum = neighbours
+                .iter()
+                .map(|(_, w)| *w)
+                .fold(T::zero(), |a, b| a + b);
+            for (_, w) in neighbours.iter_mut() {
+                *w /= sum;
+            }
+        }
+
+        Self::build_csr(adj_vec)
     }
 
     /// Generate the KnnLabelPropGraph with weights
