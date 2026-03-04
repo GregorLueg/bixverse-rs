@@ -1,4 +1,4 @@
-use ann_search_rs::{utils::dist::Dist, utils::ivf_utils::train_centroids};
+use ann_search_rs::{utils::dist::Dist, utils::k_means_utils::train_centroids};
 use faer::linalg::solvers::PartialPivLu;
 use faer::{Mat, MatRef, linalg::solvers::DenseSolveCore};
 use rand::SeedableRng;
@@ -426,6 +426,7 @@ pub fn compute_objective(
 /// ### Returns
 ///
 /// Tuple of (R: K x N, Vec of (O, E) per variable)
+#[allow(clippy::too_many_arguments)]
 pub fn update_r_with_diversity(
     dist_mat: MatRef<f32>,
     sigma: &[f32],
@@ -1036,7 +1037,7 @@ mod tests {
 
     #[test]
     fn test_initialise_r_from_distances() {
-        let dist_data = vec![0.0, 2.0, 4.0, 4.0, 2.0, 0.0];
+        let dist_data = [0.0, 2.0, 4.0, 4.0, 2.0, 0.0];
         let dist_mat = Mat::from_fn(2, 3, |i, j| dist_data[i * 3 + j]);
         let sigma = vec![1.0, 1.0];
 
@@ -1060,7 +1061,7 @@ mod tests {
 
     #[test]
     fn test_initialise_r_different_sigmas() {
-        let dist_data = vec![1.0, 1.0, 1.0, 1.0];
+        let dist_data = [1.0, 1.0, 1.0, 1.0];
         let dist_mat = Mat::from_fn(2, 2, |i, j| dist_data[i * 2 + j]);
         let sigma = vec![0.5, 2.0];
 

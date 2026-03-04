@@ -1,11 +1,19 @@
 # News
 
-## 0.1.1
+## 0.1.2
 
 ### Features
 
 - Sparse SVD and sparse randomised SVD were added for single cell.
 - Harmony added and MNN can take a pre-computed PCA now.
+
+### Fixes
+
+## 0.1.1
+
+### Features
+
+- Version bump on `ann-search-rs`
 
 ### Fixes
 

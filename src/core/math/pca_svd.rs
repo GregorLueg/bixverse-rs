@@ -230,6 +230,7 @@ where
 /// ### Returns
 ///
 /// `RandomSvdResults` containing U (n×k), S (length k), and V (m×k)
+#[allow(clippy::too_many_arguments)]
 pub fn randomised_sparse_svd<T, F>(
     matrix: &CompressedSparseData<T>,
     rank: usize,
