@@ -331,11 +331,11 @@ impl CsrCellChunk {
         })
     }
 
-    /// Generate a vector of Chunks from CompressedSparseData
+    /// Generate a vector of Chunks from CompressedSparseData2
     ///
     /// ### Params
     ///
-    /// * `sparse_data` - The `CompressedSparseData` (in CSR format!)
+    /// * `sparse_data` - The `CompressedSparseData2` (in CSR format!)
     /// * `min_genes` - Number of genes per cell to be included
     /// * `size_factor` - Size factor for normalisation. 1e6 -> CPM
     ///
@@ -343,7 +343,7 @@ impl CsrCellChunk {
     ///
     /// A tuple of the `Vec<CsrCellChunk>` and if the cell should be kept.
     pub fn generate_chunks_sparse_data<T, U>(
-        sparse_data: CompressedSparseData<T, U>,
+        sparse_data: CompressedSparseData2<T, U>,
         cell_qc: MinCellQuality,
     ) -> (Vec<CsrCellChunk>, CellQuality)
     where
@@ -1328,7 +1328,7 @@ impl ParallelSparseReader {
 ///
 /// A CSC-formatted sparse matrix with raw counts in the primary data layer
 /// and normalised counts in the secondary data layer
-pub fn from_gene_chunks<T>(chunks: &[CscGeneChunk], n_cells: usize) -> CompressedSparseData<T, f32>
+pub fn from_gene_chunks<T>(chunks: &[CscGeneChunk], n_cells: usize) -> CompressedSparseData2<T, f32>
 where
     T: BixverseNumeric + From<u16>,
 {
@@ -1353,7 +1353,7 @@ where
         indptr.push(data.len());
     }
 
-    CompressedSparseData {
+    CompressedSparseData2 {
         data,
         indices,
         indptr,
@@ -1378,7 +1378,7 @@ where
 ///
 /// A CSR-formatted sparse matrix with raw counts in the primary data layer
 /// and normalised counts in the secondary data layer
-pub fn from_cell_chunks<T>(chunks: &[CsrCellChunk], n_genes: usize) -> CompressedSparseData<T, f32>
+pub fn from_cell_chunks<T>(chunks: &[CsrCellChunk], n_genes: usize) -> CompressedSparseData2<T, f32>
 where
     T: BixverseNumeric + From<u16>,
 {
@@ -1403,7 +1403,7 @@ where
         indptr.push(data.len());
     }
 
-    CompressedSparseData {
+    CompressedSparseData2 {
         data,
         indices,
         indptr,

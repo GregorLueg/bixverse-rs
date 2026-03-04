@@ -1,3 +1,5 @@
+//! Information theory-based measures
+
 use faer::{ColRef, Mat, MatRef};
 use rayon::prelude::*;
 

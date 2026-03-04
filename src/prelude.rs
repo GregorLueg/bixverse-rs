@@ -1,5 +1,5 @@
 pub use crate::core::math::sparse::{
-    CompressedSparseData, CompressedSparseFormat, parse_compressed_sparse_format,
+    CompressedSparseData2, CompressedSparseFormat, parse_compressed_sparse_format,
 };
 pub use crate::graph::graph_structures::{EdgeData, NodeData, SparseGraph};
 pub use crate::utils::heap_structures::OrderedFloat;
@@ -23,4 +23,5 @@ pub use crate::single_cell::sc_traits::*;
 // Consts //
 ////////////
 
+/// Version of the single cell files
 pub const SC_FILE_VERSION: u32 = 2;

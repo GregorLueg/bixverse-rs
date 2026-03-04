@@ -134,7 +134,7 @@ pub fn assignments_to_metacells(assignments: &[usize], k: usize) -> Vec<Vec<usiz
 /// * `mat` - The matrix to scale
 /// * `scale` - The scale value
 /// * `dense` - The slice to update
-fn sparse_to_dense_csr_scaled(mat: &CompressedSparseData<f32>, scale: f32, dense: &mut [f32]) {
+fn sparse_to_dense_csr_scaled(mat: &CompressedSparseData2<f32>, scale: f32, dense: &mut [f32]) {
     let (nrows, ncols) = mat.shape;
     dense.fill(0.0);
 
@@ -153,13 +153,13 @@ fn sparse_to_dense_csr_scaled(mat: &CompressedSparseData<f32>, scale: f32, dense
 ///
 /// ### Params
 ///
-/// * `mat` - Mutable reference to the CompressedSparseData to be pruned
+/// * `mat` - Mutable reference to the CompressedSparseData2 to be pruned
 /// * `threshold` - Pruning threshold
 ///
 /// ### Returns
 ///
 /// Pruned matrix.
-fn prune_and_renormalise(mat: &mut CompressedSparseData<f32>, threshold: f32) {
+fn prune_and_renormalise(mat: &mut CompressedSparseData2<f32>, threshold: f32) {
     // Remove values below threshold
     let mut new_data = Vec::new();
     let mut new_indices = Vec::new();
@@ -186,7 +186,7 @@ fn prune_and_renormalise(mat: &mut CompressedSparseData<f32>, threshold: f32) {
     normalise_csr_columns_l1(mat);
 }
 
-fn matrix_trace(mat: &CompressedSparseData<f32>) -> f32 {
+fn matrix_trace(mat: &CompressedSparseData2<f32>) -> f32 {
     let n = mat.shape.0.min(mat.shape.1);
     let mut trace = 0.0;
 
@@ -214,7 +214,7 @@ fn matrix_trace(mat: &CompressedSparseData<f32>) -> f32 {
 /// ### Params
 ///
 /// * `knn_indices` - kNN indices for each cell
-/// * `knn_distances` - kNN distances for each cell  
+/// * `knn_distances` - kNN distances for each cell
 /// * `knn` - Number of nearest neighbours used
 ///
 /// ### Returns
@@ -224,7 +224,7 @@ fn compute_diffusion_kernel(
     knn_indices: &[Vec<usize>],
     knn_distances: &[Vec<f32>],
     knn: usize,
-) -> CompressedSparseData<f32> {
+) -> CompressedSparseData2<f32> {
     let n = knn_indices.len();
     let adaptive_k = (knn / 3).max(1);
 
@@ -273,7 +273,7 @@ fn compute_diffusion_kernel(
 ///
 /// (eigenvalues, eigenvectors) where eigenvectors is (n × n_components)
 fn diffusion_map_from_kernel(
-    kernel: &mut CompressedSparseData<f32>,
+    kernel: &mut CompressedSparseData2<f32>,
     n_components: usize,
     seed: u64,
 ) -> (Vec<f32>, Vec<Vec<f32>>) {
@@ -442,10 +442,10 @@ fn max_min_sampling(data: &[Vec<f32>], num_waypoints: usize, seed: u64) -> Vec<u
 /// * `params` - SEACell parameters.
 pub struct SEACells<'a> {
     n_cells: usize,
-    kernel_mat: Option<CompressedSparseData<f32>>,
-    k_square: Option<CompressedSparseData<f32>>,
-    a: Option<CompressedSparseData<f32>>,
-    b: Option<CompressedSparseData<f32>>,
+    kernel_mat: Option<CompressedSparseData2<f32>>,
+    k_square: Option<CompressedSparseData2<f32>>,
+    a: Option<CompressedSparseData2<f32>>,
+    b: Option<CompressedSparseData2<f32>>,
     archetypes: Option<Vec<usize>>,
     rss_history: Vec<f32>,
     convergence_threshold: Option<f32>,
@@ -1002,10 +1002,10 @@ impl<'a> SEACells<'a> {
     /// Updated assignment matrix
     fn update_a_mat(
         &self,
-        b: &CompressedSparseData<f32>,
-        a_prev: &CompressedSparseData<f32>,
+        b: &CompressedSparseData2<f32>,
+        a_prev: &CompressedSparseData2<f32>,
         verbose: bool,
-    ) -> CompressedSparseData<f32> {
+    ) -> CompressedSparseData2<f32> {
         let k_square = self.k_square.as_ref().unwrap();
 
         let k_b = csr_matmul_csr(k_square, b);
@@ -1102,10 +1102,10 @@ impl<'a> SEACells<'a> {
     /// Updated archetype matrix
     fn update_b_mat(
         &self,
-        a: &CompressedSparseData<f32>,
-        b_prev: &CompressedSparseData<f32>,
+        a: &CompressedSparseData2<f32>,
+        b_prev: &CompressedSparseData2<f32>,
         verbose: bool,
-    ) -> CompressedSparseData<f32> {
+    ) -> CompressedSparseData2<f32> {
         let k_square = self.k_square.as_ref().unwrap();
 
         let a_t = a.transpose_and_convert();
@@ -1206,7 +1206,7 @@ impl<'a> SEACells<'a> {
     /// ### Returns
     ///
     /// RSS value (lower is better fit)
-    fn compute_rss(&self, a: &CompressedSparseData<f32>, b: &CompressedSparseData<f32>) -> f32 {
+    fn compute_rss(&self, a: &CompressedSparseData2<f32>, b: &CompressedSparseData2<f32>) -> f32 {
         // Use simple method for small datasets, trace method for large ones
         if self.n_cells <= 20000 {
             self.compute_rss_simple(a, b)
@@ -1229,8 +1229,8 @@ impl<'a> SEACells<'a> {
     /// The residual sum of squares (RSS)
     fn compute_rss_simple(
         &self,
-        a: &CompressedSparseData<f32>,
-        b: &CompressedSparseData<f32>,
+        a: &CompressedSparseData2<f32>,
+        b: &CompressedSparseData2<f32>,
     ) -> f32 {
         let k_mat = self.kernel_mat.as_ref().unwrap();
         let k_b = csr_matmul_csr(k_mat, b);
@@ -1253,8 +1253,8 @@ impl<'a> SEACells<'a> {
     /// The residual sum of squares (RSS)
     fn compute_rss_trace(
         &self,
-        a: &CompressedSparseData<f32>,
-        b: &CompressedSparseData<f32>,
+        a: &CompressedSparseData2<f32>,
+        b: &CompressedSparseData2<f32>,
     ) -> f32 {
         let k_square = self.k_square.as_ref().unwrap();
 

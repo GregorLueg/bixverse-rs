@@ -234,7 +234,7 @@ pub fn compute_distance_knn(a: RowRef<f32>, b: RowRef<f32>, metric: &Dist) -> f3
     }
 }
 
-/// Helper function to transform kNN data into CompressedSparseData
+/// Helper function to transform kNN data into CompressedSparseData2
 ///
 /// ### Params
 ///
@@ -244,13 +244,13 @@ pub fn compute_distance_knn(a: RowRef<f32>, b: RowRef<f32>, metric: &Dist) -> f3
 ///
 /// ### Return
 ///
-/// `CompressedSparseData` in CSR format with distances to the k-nearest
+/// `CompressedSparseData2` in CSR format with distances to the k-nearest
 /// neighbours stored.
 pub fn knn_to_sparse_dist(
     knn_indices: &[Vec<usize>],
     knn_dists: &[Vec<f32>],
     n_obs: usize,
-) -> CompressedSparseData<f32> {
+) -> CompressedSparseData2<f32> {
     let mut rows = Vec::new();
     let mut cols = Vec::new();
     let mut vals = Vec::new();

@@ -25,7 +25,7 @@ use crate::prelude::*;
 #[derive(Clone, Debug)]
 pub struct SparseGraph<T: Clone> {
     /// Adjacency matrix in CSR (symmetric for undirected graphs)
-    adjacency: CompressedSparseData<T>,
+    adjacency: CompressedSparseData2<T>,
     num_nodes: usize,
     directed: bool,
 }
@@ -34,7 +34,7 @@ impl<T> SparseGraph<T>
 where
     T: Clone + BixverseFloat + std::iter::Sum,
 {
-    pub fn new(num_nodes: usize, adjacency: CompressedSparseData<T>, directed: bool) -> Self {
+    pub fn new(num_nodes: usize, adjacency: CompressedSparseData2<T>, directed: bool) -> Self {
         Self {
             adjacency,
             num_nodes,

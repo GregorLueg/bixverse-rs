@@ -1,3 +1,5 @@
+//! Helper structure to store named matrices
+
 use faer::{Mat, MatRef};
 use std::collections::BTreeMap;
 
@@ -8,16 +10,13 @@ use crate::prelude::*;
 //////////////
 
 /// Structure to store named matrices
-///
-/// ### Fields
-///
-/// * `col_names` - A BTreeMap representing the column names and the col indices
-/// * `row_names` - A BTreeMap representing the row names and the row indices
-/// * `values` - A faer matrix reference representing the matrix values.
 #[derive(Clone, Debug)]
 pub struct NamedMatrix<'a, T> {
+    /// A BTreeMap representing the column names and the col indices
     pub col_names: BTreeMap<String, usize>,
+    /// A BTreeMap representing the row names and the row indices
     pub row_names: BTreeMap<String, usize>,
+    /// A faer matrix reference representing the matrix values.
     pub values: faer::MatRef<'a, T>,
 }
 
