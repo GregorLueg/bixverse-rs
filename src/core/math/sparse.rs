@@ -444,13 +444,10 @@ where
     }
 
     // second pass: scatter data
-    let mut new_data: Vec<T> = Vec::with_capacity(nnz);
-    let mut new_indices: Vec<usize> = Vec::with_capacity(nnz);
-    let mut new_data2: Option<Vec<U>> = sparse_data.data_2.as_ref().map(|_| {
-        let mut v = Vec::with_capacity(nnz);
-        unsafe { v.set_len(nnz) };
-        v
-    });
+    let mut new_data: Vec<T> = vec![T::default(); nnz];
+    let mut new_indices: Vec<usize> = vec![0usize; nnz];
+    let mut new_data2: Option<Vec<U>> =
+        sparse_data.data_2.as_ref().map(|_| vec![U::default(); nnz]);
     unsafe {
         new_data.set_len(nnz);
         new_indices.set_len(nnz);

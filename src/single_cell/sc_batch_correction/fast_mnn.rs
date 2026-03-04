@@ -754,6 +754,7 @@ pub fn split_pca_by_batch(
 /// ### Returns
 ///
 /// Batch-corrected PCA matrix (cells x n_pcs) in original cell order
+#[allow(clippy::too_many_arguments)]
 pub fn fast_mnn_main(
     f_path: &str,
     cell_indices: &[usize],

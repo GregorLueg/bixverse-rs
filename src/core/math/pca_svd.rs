@@ -310,7 +310,7 @@ where
                     unsafe {
                         let ptr =
                             base.offset(i as isize * y_row_stride + col as isize * y_col_stride);
-                        *ptr = *ptr + a_val * x_scaled[(j, col)];
+                        *ptr += a_val * x_scaled[(j, col)];
                     }
                 }
             }
@@ -320,7 +320,7 @@ where
                     unsafe {
                         let ptr =
                             base.offset(i as isize * y_row_stride + col as isize * y_col_stride);
-                        *ptr = *ptr - mean_dots[col];
+                        *ptr -= mean_dots[col];
                     }
                 }
             }
