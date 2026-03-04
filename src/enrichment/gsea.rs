@@ -623,28 +623,16 @@ impl<T: BixverseFloat> SampleChunks<T> {
 /// This is EsRuler implementation for adaptive enrichment score sampling
 ///
 /// Further structure for fgsea multi-level
-///
-/// ### Fields
-///
-/// * `ranks` - Gene ranks used for ES calculation
-/// * `sample_size` - Current sample size (may change during duplication)
-/// * `original_sample_size` - Original sample size for p-value calculation
-/// * `pathway_size` - Number of genes in the pathway
-/// * `current_samples` - Current sample sets being processed
-/// * `enrichment_scores` - Calculated enrichment scores from samples
-/// * `prob_corrector` - Probability correction factors for p-value adjustment
-/// * `chunks_number` - Number of chunks used for optimization
-/// * `chunk_last_element` - Last element index in each chunk
 #[derive(Clone, Debug)]
 struct EsRuler<T> {
-    ranks: Vec<T>,
+    work_ranks: Vec<T>,
     sample_size: usize,
     original_sample_size: usize,
     pathway_size: usize,
-    current_samples: Vec<Vec<usize>>,
+    current_samples: Vec<usize>,
     enrichment_scores: Vec<T>,
     prob_corrector: Vec<usize>,
-    chunks_number: i32,
+    chunks_number: usize,
     chunk_last_element: Vec<i32>,
 }
 
@@ -656,20 +644,32 @@ impl<T: BixverseFloat> EsRuler<T> {
     /// * `inp_ranks` - Input gene ranks
     /// * `inp_sample_size` - Sample size
     /// * `inp_pathway_size` - Pathway size
+    /// * `gsea_param` -
     ///
     /// ### Returns
     ///
     /// Initialised structure
-    fn new(inp_ranks: &[T], inp_sample_size: usize, inp_pathway_size: usize) -> Self {
-        let mut current_samples: Vec<Vec<usize>> = Vec::with_capacity(inp_sample_size);
-        current_samples.resize_with(inp_sample_size, Vec::new);
+    fn new(
+        inp_ranks: &[T],
+        inp_sample_size: usize,
+        inp_pathway_size: usize,
+        gsea_param: T,
+    ) -> Self {
+        // Fast-track for gsea_param == 1.0 to avoid expensive powf
+        let is_one = (gsea_param - T::one()).abs() < T::from_f64(1e-9).unwrap();
+
+        let work_ranks: Vec<T> = if is_one {
+            inp_ranks.iter().map(|x| x.abs()).collect()
+        } else {
+            inp_ranks.iter().map(|x| x.abs().powf(gsea_param)).collect()
+        };
 
         Self {
-            ranks: inp_ranks.to_vec(),
+            work_ranks,
             sample_size: inp_sample_size,
             original_sample_size: inp_sample_size,
             pathway_size: inp_pathway_size,
-            current_samples,
+            current_samples: vec![0; inp_sample_size * inp_pathway_size],
             enrichment_scores: Vec::new(),
             prob_corrector: Vec::new(),
             chunks_number: 0,
@@ -677,58 +677,65 @@ impl<T: BixverseFloat> EsRuler<T> {
         }
     }
 
+    #[inline]
+    fn get_sample_mut(&mut self, idx: usize) -> &mut [usize] {
+        let start = idx * self.pathway_size;
+        &mut self.current_samples[start..start + self.pathway_size]
+    }
+
+    #[inline]
+    fn get_sample(&self, idx: usize) -> &[usize] {
+        let start = idx * self.pathway_size;
+        &self.current_samples[start..start + self.pathway_size]
+    }
+
     /// Removes samples with low ES and duplicates samples with high ES
     ///
     /// This drives the sampling process toward higher and higher ES values
     fn duplicate_samples(&mut self) {
-        let mut stats: Vec<(T, usize)> = vec![(T::zero(), 0); self.sample_size];
-        let mut pos_es_indxs: FxHashSet<usize> = FxHashSet::default();
-        let mut total_pos_es_count: i32 = 0;
+        let mut stats: Vec<(T, usize)> = (0..self.sample_size)
+            .map(|id| {
+                let sample = self.get_sample(id);
+                (calc_positive_es(&self.work_ranks, sample), id)
+            })
+            .collect();
 
-        for (sample_id, stat) in stats.iter_mut().enumerate().take(self.sample_size) {
-            let sample_es_pos = calc_positive_es(&self.ranks, &self.current_samples[sample_id]);
-            let sample_es = calc_es(&self.ranks, &self.current_samples[sample_id]);
-            if sample_es > T::zero() {
+        // Use a bit-mask/boolean vector for O(1) tracking of positive ES indices
+        let mut is_pos_es = vec![false; self.sample_size];
+        let mut total_pos_es_count = 0;
+
+        for id in 0..self.sample_size {
+            if calc_es(&self.work_ranks, self.get_sample(id)) > T::zero() {
+                is_pos_es[id] = true;
                 total_pos_es_count += 1;
-                pos_es_indxs.insert(sample_id);
             }
-            *stat = (sample_es_pos, sample_id);
         }
 
-        stats.sort_unstable_by(|a, b| {
-            a.0.partial_cmp(&b.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.1.cmp(&b.1))
-        });
+        stats.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
         let half_size = self.sample_size / 2;
-        self.enrichment_scores.reserve(half_size);
-        self.prob_corrector.reserve(half_size);
-
-        let mut sample_id = 0;
-        while 2 * sample_id < self.sample_size {
-            self.enrichment_scores.push(stats[sample_id].0);
-            if pos_es_indxs.contains(&stats[sample_id].1) {
+        for i in 0..half_size {
+            self.enrichment_scores.push(stats[i].0);
+            if is_pos_es[stats[i].1] {
                 total_pos_es_count -= 1;
             }
-            self.prob_corrector.push(total_pos_es_count as usize);
-            sample_id += 1;
+            self.prob_corrector.push(total_pos_es_count);
         }
 
-        let mut new_sets = Vec::with_capacity(self.sample_size);
-        let mut sample_id = 0;
-        while 2 * sample_id < self.sample_size - 2 {
-            for _ in 0..2 {
-                new_sets
-                    .push(self.current_samples[stats[self.sample_size - 1 - sample_id].1].clone());
-            }
-            sample_id += 1;
+        // efficiently rebuild the flattened sample vector
+        let mut new_samples = Vec::with_capacity(self.sample_size * self.pathway_size);
+        for i in 0..(half_size - 1) {
+            let src_idx = stats[self.sample_size - 1 - i].1;
+            let src = self.get_sample(src_idx);
+            new_samples.extend_from_slice(src); // Double up high ES samples
+            new_samples.extend_from_slice(src);
         }
-        new_sets.push(self.current_samples[stats[self.sample_size >> 1].1].clone());
+        // add the median sample once to fill the gap
+        let median_src = self.get_sample(stats[half_size].1);
+        new_samples.extend_from_slice(median_src);
 
-        std::mem::swap(&mut self.current_samples, &mut new_sets);
-
-        self.sample_size = self.current_samples.len();
+        self.current_samples = new_samples;
+        self.sample_size = self.current_samples.len() / self.pathway_size;
     }
 
     /// Attempts to improve a sample by swapping genes in/out using perturbation
@@ -744,16 +751,9 @@ impl<T: BixverseFloat> EsRuler<T> {
     ///
     /// Number of successful perturbations
     #[allow(unused_assignments)]
-    fn perturbate(
-        &self,
-        ranks: &[T],
-        k: i32,
-        sample_chunks: &mut SampleChunks<T>,
-        bound: T,
-        rng: &mut StdRng,
-    ) -> i32 {
-        let pert_prmtr = T::from_f64(0.1).unwrap();
-        let n = ranks.len() as i32;
+    fn perturbate(&self, sample_chunks: &mut SampleChunks<T>, bound: T, rng: &mut StdRng) -> i32 {
+        let n = self.work_ranks.len() as i32;
+        let k = self.pathway_size as i32;
         let uid_n = Uniform::new(0, n).unwrap();
         let uid_k = Uniform::new(0, k).unwrap();
 
@@ -762,119 +762,81 @@ impl<T: BixverseFloat> EsRuler<T> {
             .iter()
             .copied()
             .fold(T::zero(), |acc, x| acc + x);
-
         let q1 = T::one() / T::from_i32(n - k).unwrap();
-        let iters = std::cmp::max(1, (T::from_i32(k).unwrap() * pert_prmtr).to_i32().unwrap());
+        // perturbation parameter 0.1
+        let iters = std::cmp::max(1, (k as f64 * 0.1) as i32);
         let mut moves = 0;
 
-        let mut cand_val = -1;
-        let mut has_cand = false;
-        let mut cand_x = 0;
-        let mut cand_y = T::zero();
-
         for _ in 0..iters {
-            let old_ind = uid_k.sample(rng);
+            let old_ind = uid_k.sample(rng) as usize;
             let mut old_chunk_ind = 0;
-            let mut old_ind_in_chunk = 0;
-            let old_val;
+            let mut tmp = old_ind;
 
+            while old_chunk_ind < sample_chunks.chunks.len()
+                && sample_chunks.chunks[old_chunk_ind].len() <= tmp
             {
-                let mut tmp = old_ind;
-                while old_chunk_ind < sample_chunks.chunks.len()
-                    && sample_chunks.chunks[old_chunk_ind].len() <= tmp as usize
-                {
-                    tmp -= sample_chunks.chunks[old_chunk_ind].len() as i32;
-                    old_chunk_ind += 1;
-                }
-                old_ind_in_chunk = tmp;
-                old_val = sample_chunks.chunks[old_chunk_ind][old_ind_in_chunk as usize];
+                tmp -= sample_chunks.chunks[old_chunk_ind].len();
+                old_chunk_ind += 1;
             }
 
+            let old_val = sample_chunks.chunks[old_chunk_ind][tmp];
             let new_val = uid_n.sample(rng);
 
-            let new_chunk_ind = match self.chunk_last_element.binary_search(&(new_val)) {
-                Ok(idx) => idx + 1,
-                Err(idx) => idx,
-            };
+            let new_chunk_ind = self
+                .chunk_last_element
+                .binary_search(&new_val)
+                .unwrap_or_else(|e| e);
+            let new_ind_in_chunk = sample_chunks.chunks[new_chunk_ind].binary_search(&new_val);
 
-            let new_ind_in_chunk =
-                match sample_chunks.chunks[new_chunk_ind].binary_search(&(new_val)) {
-                    Ok(idx) => idx,
-                    Err(idx) => idx,
-                };
-
-            if new_ind_in_chunk < sample_chunks.chunks[new_chunk_ind].len()
-                && sample_chunks.chunks[new_chunk_ind][new_ind_in_chunk] == new_val
-            {
+            // skip if value already exists
+            if new_ind_in_chunk.is_ok() {
                 if new_val == old_val {
                     moves += 1;
                 }
                 continue;
             }
+            let insert_pos = new_ind_in_chunk.unwrap_err();
 
-            sample_chunks.chunks[old_chunk_ind].remove(old_ind_in_chunk as usize);
-            let adjust =
-                if old_chunk_ind == new_chunk_ind && old_ind_in_chunk < new_ind_in_chunk as i32 {
-                    1
-                } else {
-                    0
-                };
-            sample_chunks.chunks[new_chunk_ind].insert(new_ind_in_chunk - adjust, new_val);
+            // store original state for potential rollback
+            let old_ns = ns;
+            let old_chunk_val = old_val;
 
-            ns = ns - ranks[old_val as usize] + ranks[new_val as usize];
-            sample_chunks.chunk_sum[old_chunk_ind] -= ranks[old_val as usize];
-            sample_chunks.chunk_sum[new_chunk_ind] += ranks[new_val as usize];
+            // update NS and chunks
+            sample_chunks.chunks[old_chunk_ind].remove(tmp);
+            // adjust insert position if we removed from the same chunk earlier in the list
+            let adj_insert_pos = if old_chunk_ind == new_chunk_ind && tmp < insert_pos {
+                insert_pos - 1
+            } else {
+                insert_pos
+            };
+            sample_chunks.chunks[new_chunk_ind].insert(adj_insert_pos, new_val);
 
-            if has_cand {
-                match old_val.cmp(&cand_val) {
-                    std::cmp::Ordering::Equal => {
-                        has_cand = false;
-                    }
-                    std::cmp::Ordering::Less => {
-                        cand_x += 1;
-                        cand_y -= ranks[old_val as usize];
-                    }
-                    std::cmp::Ordering::Greater => {}
-                }
-
-                if new_val < cand_val {
-                    cand_x -= 1;
-                    cand_y += ranks[new_val as usize];
-                }
-            }
+            ns = ns - self.work_ranks[old_val as usize] + self.work_ranks[new_val as usize];
+            sample_chunks.chunk_sum[old_chunk_ind] -= self.work_ranks[old_val as usize];
+            sample_chunks.chunk_sum[new_chunk_ind] += self.work_ranks[new_val as usize];
 
             let q2 = T::one() / ns;
-
-            if has_cand && -q1 * T::from_i32(cand_x).unwrap() + q2 * cand_y > bound {
-                moves += 1;
-                continue;
-            }
-
+            let mut ok = false;
             let mut cur_x = 0;
             let mut cur_y = T::zero();
-            let mut ok = false;
             let mut last = -1;
 
+            // simplified bound check
             for i in 0..sample_chunks.chunks.len() {
-                if q2 * (cur_y + sample_chunks.chunk_sum[i]) - q1 * T::from_i32(cur_x).unwrap()
-                    < bound
-                {
-                    cur_y += sample_chunks.chunk_sum[i];
-                    cur_x += self.chunk_last_element[i]
-                        - last
-                        - 1
-                        - sample_chunks.chunks[i].len() as i32;
+                let chunk_y = sample_chunks.chunk_sum[i];
+                let chunk_x =
+                    self.chunk_last_element[i] - last - 1 - sample_chunks.chunks[i].len() as i32;
+
+                if q2 * (cur_y + chunk_y) - q1 * T::from_i32(cur_x).unwrap() < bound {
+                    cur_y += chunk_y;
+                    cur_x += chunk_x;
                     last = self.chunk_last_element[i] - 1;
                 } else {
                     for &pos in &sample_chunks.chunks[i] {
-                        cur_y += ranks[pos as usize];
+                        cur_y += self.work_ranks[pos as usize];
                         cur_x += pos - last - 1;
                         if q2 * cur_y - q1 * T::from_i32(cur_x).unwrap() > bound {
                             ok = true;
-                            has_cand = true;
-                            cand_x = cur_x;
-                            cand_y = cur_y;
-                            cand_val = pos;
                             break;
                         }
                         last = pos;
@@ -888,31 +850,16 @@ impl<T: BixverseFloat> EsRuler<T> {
             }
 
             if !ok {
-                ns = ns - ranks[new_val as usize] + ranks[old_val as usize];
-                sample_chunks.chunk_sum[old_chunk_ind] += ranks[old_val as usize];
-                sample_chunks.chunk_sum[new_chunk_ind] -= ranks[new_val as usize];
-
-                sample_chunks.chunks[new_chunk_ind].remove(new_ind_in_chunk - adjust);
-                sample_chunks.chunks[old_chunk_ind].insert(old_ind_in_chunk as usize, old_val);
-
-                if has_cand {
-                    if new_val == cand_val {
-                        has_cand = false;
-                    } else if old_val < cand_val {
-                        cand_x -= 1;
-                        cand_y += ranks[old_val as usize];
-                    }
-
-                    if new_val < cand_val {
-                        cand_x += 1;
-                        cand_y -= ranks[new_val as usize];
-                    }
-                }
+                // rollback
+                sample_chunks.chunks[new_chunk_ind].remove(adj_insert_pos);
+                sample_chunks.chunks[old_chunk_ind].insert(tmp, old_chunk_val);
+                sample_chunks.chunk_sum[old_chunk_ind] += self.work_ranks[old_val as usize];
+                sample_chunks.chunk_sum[new_chunk_ind] -= self.work_ranks[new_val as usize];
+                ns = old_ns;
             } else {
                 moves += 1;
             }
         }
-
         moves
     }
 
@@ -925,96 +872,100 @@ impl<T: BixverseFloat> EsRuler<T> {
     /// * `es` - Target enrichment score
     /// * `seed` - Random seed
     /// * `eps` - Precision parameter (0.0 for no precision requirement)
-    fn extend(&mut self, es: T, seed: u64, eps: T) {
-        let mut rng = StdRng::seed_from_u64(seed);
+    pub fn extend(&mut self, es: T, seed: u64, eps: T) {
+        let mut init_rng = StdRng::seed_from_u64(seed);
+        let n_range = self.work_ranks.len();
 
-        for sample_id in 0..self.sample_size {
-            self.current_samples[sample_id] =
-                combination(0, self.ranks.len() - 1, self.pathway_size, &mut rng);
-            self.current_samples[sample_id].sort();
-            let _ = calc_es(&self.ranks, &self.current_samples[sample_id]);
+        // initial random samples
+        for i in 0..self.sample_size {
+            let mut sample = combination(0, n_range - 1, self.pathway_size, &mut init_rng);
+            sample.sort_unstable();
+            self.get_sample_mut(i).copy_from_slice(&sample);
         }
 
-        self.chunks_number = std::cmp::max(
-            1,
-            T::from_usize(self.pathway_size)
-                .unwrap()
-                .sqrt()
-                .to_i32()
-                .unwrap(),
-        );
-        self.chunk_last_element = vec![0; self.chunks_number as usize];
-        self.chunk_last_element[self.chunks_number as usize - 1] = self.ranks.len() as i32;
-        let mut tmp: Vec<i32> = vec![0; self.sample_size];
-        let mut samples_chunks =
-            vec![SampleChunks::new(self.chunks_number as usize); self.sample_size];
+        self.chunks_number = (self.pathway_size as f64).sqrt().max(1.0) as usize;
+        self.chunk_last_element = vec![0; self.chunks_number];
+        self.chunk_last_element[self.chunks_number - 1] = n_range as i32;
 
         self.duplicate_samples();
-        while self.enrichment_scores.last().unwrap_or(&T::zero())
-            <= &(es - T::from_f64(1e-10).unwrap())
-        {
+
+        let eps_val = T::from_f64(1e-10).unwrap();
+        while *self.enrichment_scores.last().unwrap_or(&T::zero()) <= (es - eps_val) {
+            // update chunk boundaries
             for i in 0..self.chunks_number - 1 {
-                let pos = (self.pathway_size as i32 + i) / self.chunks_number;
-                let loop_iter = 0..self.sample_size;
-
-                for j in loop_iter {
-                    tmp[j] = self.current_samples[j][pos as usize] as i32;
-                }
-
-                nth_element(&mut tmp, self.sample_size / 2);
-                self.chunk_last_element[i as usize] = tmp[self.sample_size / 2];
+                let pos = (self.pathway_size + i) / self.chunks_number;
+                let mut mid_elements: Vec<i32> = (0..self.sample_size)
+                    .map(|j| self.get_sample(j)[pos] as i32)
+                    .collect();
+                nth_element(&mut mid_elements, self.sample_size / 2);
+                self.chunk_last_element[i] = mid_elements[self.sample_size / 2];
             }
 
-            let loop_iter = 0..self.sample_size;
-            for i in loop_iter {
-                for j in 0..self.chunks_number as usize {
-                    samples_chunks[i].chunk_sum[j] = T::zero();
-                    samples_chunks[i].chunks[j].clear();
-                }
+            let current_bound = *self.enrichment_scores.last().unwrap_or(&T::zero());
+            let pathway_size = self.pathway_size;
+            let sample_size = self.sample_size;
 
-                let mut cnt = 0;
-                for &pos in &self.current_samples[i] {
-                    while cnt < self.chunk_last_element.len()
-                        && self.chunk_last_element[cnt] <= pos as i32
-                    {
-                        cnt += 1;
+            // re-map samples into chunks for the MCMC step
+            let mut samples_chunks: Vec<SampleChunks<T>> = (0..sample_size)
+                .map(|idx| {
+                    let mut sc = SampleChunks::new(self.chunks_number);
+                    let mut cnt = 0;
+                    for &pos in self.get_sample(idx) {
+                        while cnt < self.chunk_last_element.len()
+                            && self.chunk_last_element[cnt] <= pos as i32
+                        {
+                            cnt += 1;
+                        }
+                        sc.chunks[cnt].push(pos as i32);
+                        sc.chunk_sum[cnt] += self.work_ranks[pos];
                     }
-                    samples_chunks[i].chunks[cnt].push(pos as i32);
-                    samples_chunks[i].chunk_sum[cnt] += self.ranks[pos];
+                    sc
+                })
+                .collect();
+
+            let total_moves_needed = (sample_size * pathway_size) as i32;
+            let mut current_total_moves = 0;
+
+            // parallelised MCMC
+            while current_total_moves < total_moves_needed {
+                let moves: i32 = samples_chunks
+                    .par_iter_mut()
+                    .enumerate()
+                    .map(|(i, sc)| {
+                        let mut local_rng = StdRng::seed_from_u64(
+                            seed.wrapping_add(i as u64)
+                                .wrapping_add(current_total_moves as u64),
+                        );
+                        self.perturbate(sc, current_bound, &mut local_rng)
+                    })
+                    .sum();
+                current_total_moves += moves;
+                // prevent infinite loops if stuck
+                if moves == 0 {
+                    break;
                 }
             }
 
-            let mut moves = 0;
-            while moves < (self.sample_size * self.pathway_size) as i32 {
-                let loop_iter = 0..self.sample_size;
-                for sample_id in loop_iter {
-                    moves += self.perturbate(
-                        &self.ranks,
-                        self.pathway_size as i32,
-                        &mut samples_chunks[sample_id],
-                        *self.enrichment_scores.last().unwrap_or(&T::zero()),
-                        &mut rng,
-                    );
+            // write back flattened samples
+            for (i, sc) in samples_chunks.into_iter().enumerate() {
+                let sample_dest = self.get_sample_mut(i);
+                let mut offset = 0;
+                for chunk in sc.chunks {
+                    for &val in &chunk {
+                        sample_dest[offset] = val as usize;
+                        offset += 1;
+                    }
                 }
             }
 
-            let loop_iter = 0..self.sample_size;
-            for i in loop_iter {
-                self.current_samples[i].clear();
-                for j in 0..self.chunks_number as usize {
-                    self.current_samples[i]
-                        .extend(samples_chunks[i].chunks[j].iter().map(|&x| x as usize));
-                }
-            }
-
-            let prev_top_score = *self.enrichment_scores.last().unwrap_or(&T::zero());
+            let prev_top = *self.enrichment_scores.last().unwrap_or(&T::zero());
             self.duplicate_samples();
-            if self.enrichment_scores.last().unwrap_or(&T::zero()) <= &prev_top_score {
+
+            if *self.enrichment_scores.last().unwrap_or(&T::zero()) <= prev_top {
                 break;
             }
-
             if eps != T::zero() {
-                let k = self.enrichment_scores.len() / (self.sample_size.div_ceil(2));
+                let k = self.enrichment_scores.len() / (self.sample_size / 2);
                 if T::from_usize(k).unwrap() > -T::from_f64(0.5).unwrap() * eps.log2() {
                     break;
                 }
@@ -1708,8 +1659,10 @@ fn multilevel_error<T: BixverseFloat>(pval: &T, sample_size: &T) -> T {
 /// ### Returns
 ///
 /// Tuple of (p-value, error quality flag)
+#[allow(clippy::too_many_arguments)]
 pub fn fgsea_multilevel_helper<T: BixverseFloat>(
     enrichment_score: T,
+    gsea_param: T,
     ranks: &[T],
     pathway_size: usize,
     sample_size: usize,
@@ -1725,7 +1678,7 @@ pub fn fgsea_multilevel_helper<T: BixverseFloat>(
         neg_ranks
     };
 
-    let mut es_ruler = EsRuler::new(&ranks, sample_size, pathway_size);
+    let mut es_ruler = EsRuler::new(&ranks, sample_size, pathway_size, gsea_param);
     es_ruler.extend(enrichment_score.abs(), seed, eps);
     es_ruler.get_pval(enrichment_score.abs(), sign)
 }
