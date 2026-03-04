@@ -35,12 +35,20 @@ pub type MitchPathways = (Vec<String>, Vec<Vec<usize>>);
 /// * `mysd` - The standard deviation of the scores for this pathway.
 #[derive(Clone, Debug)]
 pub struct MitchResult<'a, T> {
+    /// Name of the pathway
     pub pathway_name: &'a str,
+    /// Size of the pathway
     pub pathway_size: usize,
+    /// P-value of the MANOVA test on the ranked data
     pub manova_pval: T,
+    /// The scores for each tested contrast for this pathway
     pub scores: Vec<T>,
+    /// The p-values for the individual contrasts based on the ANOVA on top of
+    /// the MANOVA results
     pub anova_pvals: Vec<T>,
+    /// Calculated distances from the hypotenuse.
     pub s_dist: T,
+    /// The standard deviation of the scores for this pathway.
     pub mysd: T,
 }
 
