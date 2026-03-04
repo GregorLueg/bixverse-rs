@@ -1,3 +1,6 @@
+//! Implementation of the CoReMo workflow from François, et al., Nat Commun,
+//! 2024
+
 use faer::MatRef;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;

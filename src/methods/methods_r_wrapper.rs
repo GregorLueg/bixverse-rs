@@ -1,3 +1,5 @@
+//! R wrapper functions for the various bioinformatics methods in this module
+
 use extendr_api::*;
 use std::collections::BTreeMap;
 

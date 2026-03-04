@@ -1,3 +1,6 @@
+//! Helpers to run the mitch multi-dimensional enrichment approach from
+//! Kaspi and Ziemann, Bmc Genomics, 2020
+
 use faer::{Mat, MatRef};
 use rayon::prelude::*;
 

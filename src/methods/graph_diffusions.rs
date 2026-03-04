@@ -1,3 +1,6 @@
+//! Implementation of the tied diffusion method from Paull, et al.,
+//! Bioinformatics, 2013
+
 #![allow(dead_code)]
 
 use rayon::prelude::*;

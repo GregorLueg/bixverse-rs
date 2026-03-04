@@ -1,3 +1,7 @@
+//! Implementations of the reciprocal best hit (RBH) methods for intersections
+//! or correlations, based on the works of Cantini, et al., Bioinformatics,
+//! 2019
+
 use faer::{Mat, unzip, zip};
 use rustc_hash::FxHashSet;
 use std::collections::BTreeMap;
@@ -8,35 +12,29 @@ use crate::prelude::*;
 use crate::utils::vec_utils::{array_max, flatten_vector};
 
 /// Structure for an Rbh triplet Result
-///
-/// ### Fields
-///
-/// * `t1` - Name of term 1 of the ontology
-/// * `t2` - Name of term 2 of the ontology
-/// * `sim` - Calculated similarity
 #[derive(Clone, Debug)]
 pub struct RbhTripletStruc<'a, T> {
+    /// Name of module 1 of the RBH hit
     pub t1: &'a str,
+    /// Name of module 2 of the RBH hit
     pub t2: &'a str,
+    /// Similarity value between the two
     pub sim: T,
 }
 
 /// Structure to store the RBH results.
-///
-/// ### Fields
-///
-/// * `origin` - Name of the origin data set
-/// * `target` - Name of the target data set
-/// * `origin_modules` - Names of the origin modules/gene sets
-/// * `target_modules` - Names of the target modules/gene sets
-/// * `similarities` - Similarities between the modules/gene sets
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub struct RbhResult<T> {
+    /// Name of the origin data set
     pub origin: String,
+    /// Name of the target data set
     pub target: String,
+    /// Names of the origin modules/gene sets
     pub origin_modules: Vec<String>,
+    /// Names of the target modules/gene sets
     pub target_modules: Vec<String>,
+    /// Similarities between the modules/gene sets
     pub similarities: Vec<T>,
 }
 

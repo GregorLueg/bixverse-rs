@@ -1,3 +1,6 @@
+//! Implementation of independent component analysis, based on the fastICA from
+//! Hyvrinen and Oja, Neural Comput., 1997
+
 use faer::{
     Mat, MatRef, Scale,
     linalg::solvers::{PartialPivLu, Solve},
@@ -51,18 +54,15 @@ pub fn parse_ica_type(s: &str) -> Option<IcaType> {
 type IcaRes<T> = (Mat<T>, T);
 
 /// Structure to save ICA parameters
-///
-/// ### Fields
-///
-/// * `maxit` - Maximum number of iterations to run ICA for.
-/// * `alpha` - Alpha parameter for the `logcosh` variant.
-/// * `tol` - Tolerance parameter.
-/// * `verbose` - Shall print messages be returned.
 #[derive(Clone, Debug)]
 pub struct IcaParams<T: BixverseFloat> {
+    /// Maximum number of iterations for ICA
     pub maxit: usize,
+    /// Alpha parameter for the `logcosh` variant.
     pub alpha: T,
+    /// Tolerance parameter.
     pub tol: T,
+    /// Controls ICA internal verbosity
     pub verbose: bool,
 }
 
@@ -178,13 +178,10 @@ fn create_w_init<T: BixverseFloat>(n_comp: usize, seed: u64) -> faer::Mat<T> {
 ///////////////////////////
 
 /// Structure to save ICA CV results
-///
-/// ### Fields
-///
-/// * `pre_white_matrices` - Vector of pre-processed matrices, ready for whitening
-/// * `k_matrices` - Vector of pre-whitening matrices
 pub struct IcaCvData<T: BixverseFloat> {
+    /// Vector of pre-processed matrices, ready for whitening
     pub pre_white_matrices: Vec<Mat<T>>,
+    /// Vector of pre-whitening matrices
     pub k_matrices: Vec<Mat<T>>,
 }
 

@@ -1,3 +1,5 @@
+//! Helpers to run hypergeometric tests for standard overenrichment analysis
+
 use rustc_hash::FxHashSet;
 
 use crate::{

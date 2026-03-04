@@ -1,3 +1,5 @@
+//! Structures for graphs within bixverse.
+
 #![allow(dead_code)]
 
 use faer::{Mat, MatRef};
@@ -34,6 +36,18 @@ impl<T> SparseGraph<T>
 where
     T: Clone + BixverseFloat + std::iter::Sum,
 {
+    /// Generate a new SparseGraph
+    ///
+    /// ### Params
+    ///
+    /// * `num_nodes` - Number of nodes in the graph
+    /// * `adjacency` - CompressedSparseData2 containing the adjacency
+    ///   information
+    /// * `directed` - Is this a directed or undirected graph
+    ///
+    /// ### Returns
+    ///
+    /// Initialised self
     pub fn new(num_nodes: usize, adjacency: CompressedSparseData2<T>, directed: bool) -> Self {
         Self {
             adjacency,
@@ -466,27 +480,21 @@ where
 /////////////////////////
 
 /// NodeData structure
-///
-/// ### Fields
-///
-/// * `name` - name of the node.
-/// * `node_type` - type of the node
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // clippy is wrongly complaining here
 pub struct NodeData<'a> {
+    /// Name of the node.
     pub name: &'a str,
+    /// Type of the node
     pub node_type: &'a str,
 }
 
 /// EdgeData structure
-///
-/// ### Fields
-///
-/// * `edge_type` - type of the edge.
-/// * `weight` - weight of the edge.
 #[derive(Debug, Clone)]
 pub struct EdgeData<'a, T> {
+    /// Type of the edge.
     pub edge_type: &'a str,
+    /// Weight of the edge.
     pub weight: &'a T,
 }
 
