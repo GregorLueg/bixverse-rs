@@ -950,6 +950,7 @@ mod tests {
     use super::*;
     use approx::assert_relative_eq;
     use faer::mat;
+    use std::slice::from_ref;
 
     #[test]
     fn test_create_batch_info() {
@@ -1236,25 +1237,25 @@ mod tests {
         let theta = vec![1.0];
         let r_uncertain = mat![[0.5, 0.5, 0.5, 0.5], [0.5, 0.5, 0.5, 0.5]];
         let dist_mat_high = mat![[1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 1.0]];
-        let oe1 = compute_all_diversity_statistics(r_uncertain.as_ref(), &[info.clone()]);
+        let oe1 = compute_all_diversity_statistics(r_uncertain.as_ref(), from_ref(&info));
         let obj1 = compute_objective(
             r_uncertain.as_ref(),
             dist_mat_high.as_ref(),
             &oe1[..],
             &sigma,
             &theta,
-            std::slice::from_ref(&info),
+            from_ref(&info),
         );
         let r_confident = mat![[0.9, 0.9, 0.1, 0.1], [0.1, 0.1, 0.9, 0.9]];
         let dist_mat_low = mat![[0.1, 0.1, 1.0, 1.0], [1.0, 1.0, 0.1, 0.1]];
-        let oe2 = compute_all_diversity_statistics(r_confident.as_ref(), &[info.clone()]);
+        let oe2 = compute_all_diversity_statistics(r_confident.as_ref(), from_ref(&info));
         let obj2 = compute_objective(
             r_confident.as_ref(),
             dist_mat_low.as_ref(),
             &oe2[..],
             &sigma,
             &theta,
-            std::slice::from_ref(&info),
+            from_ref(&info),
         );
         assert!(
             obj2 < obj1,
@@ -1273,7 +1274,7 @@ mod tests {
 
         let r = mat![[0.8, 0.7, 0.2], [0.2, 0.3, 0.8]];
         let dist_mat = mat![[0.1, 0.2, 0.9], [0.9, 0.8, 0.1]];
-        let oe = compute_all_diversity_statistics(r.as_ref(), &[info.clone()]);
+        let oe = compute_all_diversity_statistics(r.as_ref(), from_ref(&info));
 
         let obj = compute_objective(
             r.as_ref(),
@@ -1281,7 +1282,7 @@ mod tests {
             &oe[..],
             &sigma,
             &theta,
-            std::slice::from_ref(&info),
+            from_ref(&info),
         );
 
         assert!(obj.is_finite());
@@ -1298,7 +1299,7 @@ mod tests {
 
         let r = mat![[1.0, 0.0], [0.0, 1.0]];
         let dist_mat = mat![[0.1, 0.9], [0.9, 0.1]];
-        let oe = compute_all_diversity_statistics(r.as_ref(), &[info.clone()]);
+        let oe = compute_all_diversity_statistics(r.as_ref(), from_ref(&info));
 
         let obj = compute_objective(
             r.as_ref(),
@@ -1306,7 +1307,7 @@ mod tests {
             &oe[..],
             &sigma,
             &theta,
-            std::slice::from_ref(&info),
+            from_ref(&info),
         );
 
         let expected = 0.2 * 1000.0;
@@ -1326,13 +1327,13 @@ mod tests {
 
         let r_init = mat![[0.5, 0.5, 0.5, 0.5], [0.5, 0.5, 0.5, 0.5]];
         let dist_mat = mat![[0.1, 0.1, 0.9, 0.9], [0.9, 0.9, 0.1, 0.1]];
-        let oe_init = compute_all_diversity_statistics(r_init.as_ref(), &[info.clone()]);
+        let oe_init = compute_all_diversity_statistics(r_init.as_ref(), from_ref(&info));
 
         let (r_new, oe_new) = update_r_with_diversity(
             dist_mat.as_ref(),
             &sigma,
             &theta,
-            std::slice::from_ref(&info),
+            from_ref(&info),
             0.5,
             42,
             r_init.as_ref(),
@@ -1391,13 +1392,13 @@ mod tests {
 
         let r_init = mat![[0.5, 0.5], [0.5, 0.5]];
         let dist_mat = mat![[0.1, 0.9], [0.9, 0.1]];
-        let oe_init = compute_all_diversity_statistics(r_init.as_ref(), &[info.clone()]);
+        let oe_init = compute_all_diversity_statistics(r_init.as_ref(), from_ref(&info));
 
         let (r_new, _) = update_r_with_diversity(
             dist_mat.as_ref(),
             &sigma,
             &theta,
-            std::slice::from_ref(&info),
+            from_ref(&info),
             1.0,
             42,
             r_init.as_ref(),
@@ -1417,13 +1418,13 @@ mod tests {
 
         let r_init = mat![[0.9, 0.9, 0.9, 0.9], [0.1, 0.1, 0.1, 0.1]];
         let dist_mat = mat![[0.2, 0.2, 0.2, 0.2], [0.8, 0.8, 0.8, 0.8]];
-        let oe_init = compute_all_diversity_statistics(r_init.as_ref(), &[info.clone()]);
+        let oe_init = compute_all_diversity_statistics(r_init.as_ref(), from_ref(&info));
 
         let (r_new, _) = update_r_with_diversity(
             dist_mat.as_ref(),
             &sigma,
             &theta,
-            std::slice::from_ref(&info),
+            from_ref(&info),
             0.5,
             42,
             r_init.as_ref(),
