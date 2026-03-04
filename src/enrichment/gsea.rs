@@ -765,6 +765,7 @@ impl<T: BixverseFloat> EsRuler<T> {
     /// Attempts to improve a sample by swapping genes in/out using perturbation
     ///
     /// ### Params
+    ///
     /// * `ranks` - Gene ranks
     /// * `k` - Number of genes in sample
     /// * `sample_chunks` - Sample chunks to modify
@@ -1031,11 +1032,13 @@ impl<T: BixverseFloat> EsRuler<T> {
                 }
             }
 
+            let chunks_num = self.chunks_number as usize;
+
             // Write back to the flattened memory array
             for i in 0..self.sample_size {
                 let mut offset = 0;
                 let dest_slice = self.get_sample_mut(i);
-                for j in 0..self.chunks_number as usize {
+                for j in 0..chunks_num {
                     for &val in &samples_chunks[i].chunks[j] {
                         dest_slice[offset] = val as usize;
                         offset += 1;
@@ -1748,7 +1751,6 @@ fn multilevel_error<T: BixverseFloat>(pval: &T, sample_size: &T) -> T {
 #[allow(clippy::too_many_arguments)]
 pub fn fgsea_multilevel_helper<T: BixverseFloat>(
     enrichment_score: T,
-    gsea_param: T,
     ranks: &[T],
     pathway_size: usize,
     sample_size: usize,
@@ -1764,7 +1766,7 @@ pub fn fgsea_multilevel_helper<T: BixverseFloat>(
         neg_ranks
     };
 
-    let mut es_ruler = EsRuler::new(&ranks, sample_size, pathway_size, gsea_param);
+    let mut es_ruler = EsRuler::new(&ranks, sample_size, pathway_size);
     es_ruler.extend(enrichment_score.abs(), seed, eps);
     es_ruler.get_pval(enrichment_score.abs(), sign)
 }
