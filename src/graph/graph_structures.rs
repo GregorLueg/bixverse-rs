@@ -178,6 +178,7 @@ where
 /// * `graph` - The sparse graph
 /// * `node_map` - Maps fine node -> coarse node
 /// * `coarse_weights` - Number of fine nodes that mapped to each coarse node
+#[allow(dead_code)]
 pub struct CoarseLevel<T>
 where
     T: Clone,

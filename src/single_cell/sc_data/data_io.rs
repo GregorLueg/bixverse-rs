@@ -772,7 +772,7 @@ impl FileHeader {
     fn new(cell_based: bool) -> Self {
         Self {
             magic: *b"SCRNASEQ",
-            version: 1,
+            version: SC_FILE_VERSION,
             main_header_offset: 0,
             cell_based,
             _reserved_1: [0; 32],
@@ -1047,6 +1047,14 @@ impl ParallelSparseReader {
         .map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, "File header decode failed")
         })?;
+
+        // assert that this is the right file
+        assert!(
+            file_header.version == SC_FILE_VERSION,
+            "File version mismatch: expected {}, got {}. Please check the version you are using",
+            SC_FILE_VERSION,
+            file_header.version
+        );
 
         // Read main header
         let main_header_offset = file_header.main_header_offset as usize;

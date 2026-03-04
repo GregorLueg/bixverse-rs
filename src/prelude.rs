@@ -18,3 +18,9 @@ pub use crate::single_cell::sc_data::data_io::{
 pub use crate::single_cell::sc_processing::knn::*;
 #[cfg(feature = "single-cell")]
 pub use crate::single_cell::sc_traits::*;
+
+////////////
+// Consts //
+////////////
+
+pub const SC_FILE_VERSION: u32 = 2;

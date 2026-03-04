@@ -1,6 +1,6 @@
 # News
 
-## 0.1.2
+## 0.1.3
 
 ### Features
 
@@ -9,15 +9,31 @@
 
 ### Fixes
 
+*NA*
+
+## 0.1.2
+
+### Features
+
+- Modified graph label propagation algorithm to support max_hops, weights and
+  directed graphs.
+
+### Fixes
+
+*NA*
+
 ## 0.1.1
 
 ### Features
 
-- Version bump on `ann-search-rs`
+`NA`
 
 ### Fixes
 
-## 0.1.0 (release)
+- Bumped the version of `ann-search-rs` to ensure consistency across packages/
+  crates.
+
+## 0.1.0 (official release)
 
 This version ported over all of the Rust code from
 [bixverse](https://github.com/GregorLueg/bixverse) as an independent crate.
@@ -30,3 +46,5 @@ This version ported over all of the Rust code from
 - Wrong copy/paste documentation was properly updated.
 
 ### Fixes
+
+*NA*
