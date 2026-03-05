@@ -513,7 +513,7 @@ impl MtxReader {
             cell_indices: quality.cells_to_keep.to_vec(),
             gene_indices: quality.genes_to_keep.to_vec(),
             lib_size,
-            no_genes: nnz,
+            nnz,
         };
 
         Ok(MtxFinalData {

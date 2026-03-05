@@ -138,7 +138,7 @@ pub fn write_h5_counts<P: AsRef<Path>>(
         cell_indices: file_quality.cells_to_keep.clone(),
         gene_indices: file_quality.genes_to_keep.clone(),
         lib_size,
-        no_genes: nnz,
+        nnz,
     };
 
     (
@@ -770,7 +770,7 @@ pub fn write_h5_csc_to_csr_streaming<P: AsRef<Path>>(
         cell_indices: Vec::new(),
         gene_indices: Vec::new(),
         lib_size,
-        no_genes: nnz,
+        nnz,
     })
 }
 
@@ -1340,6 +1340,6 @@ pub fn write_h5_csr_streaming<P: AsRef<Path>>(
         cell_indices: Vec::new(),
         gene_indices: Vec::new(),
         lib_size,
-        no_genes: nnz,
+        nnz,
     })
 }

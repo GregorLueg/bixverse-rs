@@ -21,19 +21,17 @@ use crate::prelude::*;
 //////////////////
 
 /// Structure to store QC information on cells
-///
-/// ### Fields
-///
-/// * `cell_indices` - Indices of which cells to keep.
-/// * `lib_size` - Optional library size of the cells.
-/// * `no_genes` - Optional number of genes of the cells.
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub struct CellQuality {
+    /// Indices of which cells to keep.
     pub cell_indices: Vec<usize>,
+    /// Indices of which genes to keep
     pub gene_indices: Vec<usize>,
+    /// Library size of cells
     pub lib_size: Vec<usize>,
-    pub no_genes: Vec<usize>,
+    /// Number of cells expressing this gene
+    pub nnz: Vec<usize>,
 }
 
 impl CellQuality {
@@ -57,18 +55,17 @@ impl CellQuality {
 }
 
 /// Structure that stores minimum QC thresholds/info for single cell
-///
-/// ### Fields
-///
-/// * `min_unique_genes` - Minimum number of unique genes per cell/spot.
-/// * `min_lib_size` - Minimum library size per cell/spot.
-/// * `min_cells` - Minimum cells per gene.
-/// * `target_size` - Target size for normalisation.
 #[derive(Clone, Debug)]
 pub struct MinCellQuality {
+    /// Minimum number of unique genes per cell (or spot for Visium type
+    /// technology).
     pub min_unique_genes: usize,
+    /// Minimum library size per cell (or spot for Visium type technology).
     pub min_lib_size: usize,
+    /// Minimum library size per cell (or spot for Visium type technology)/
     pub min_cells: usize,
+    /// Target size for the library size normalisation (typical values 1e4 -
+    /// 1e5 single cell.
     pub target_size: f32,
 }
 
@@ -84,23 +81,19 @@ pub struct MinCellQuality {
 ///
 /// This structure is being generate after a first scan of the file on disk and
 /// defining which cells and genes to actually read in.
-///
-/// ### Fields
-///
-/// * `cells_to_keep` - Vector of indices of the cells to keep.
-/// * `genes_to_keep` - Vector of indices of the genes to keep.
-/// * `cells_to_keep_set` - HashSet of the indices to keep.
-/// * `genes_to_keep_set` - HashSet of the genes to keep.
-/// * `cell_old_to_new` - Mapping of the old indices to the new indices for the
-///   cells.
-/// * `gene_old_to_new` - Mapping of old indices to new indices for the genes.
 #[derive(Debug, Clone)]
 pub struct CellOnFileQuality {
+    /// Vector of indices of the cells to keep.
     pub cells_to_keep: Vec<usize>,
+    /// Vector of indices of the genes to keep.
     pub genes_to_keep: Vec<usize>,
+    /// HashSet of the indices to keep (for look-ups).
     pub cells_to_keep_set: FxHashSet<usize>,
+    /// HashSet of the genes to keep (for look-ups).
     pub genes_to_keep_set: FxHashSet<usize>,
+    /// Mapping of the old indices to the new indices for the cells.
     pub cell_old_to_new: FxHashMap<usize, usize>,
+    /// Mapping of old indices to new indices for the genes.
     pub gene_old_to_new: FxHashMap<usize, usize>,
 }
 
@@ -158,24 +151,21 @@ impl CellOnFileQuality {
 ///
 /// This structure is designed to store the data of a single cell in a
 /// CSR-like format optimised for rapid access on disk.
-///
-/// ### Fields
-///
-/// * `data_raw` - Array of the raw counts of this cell.
-/// * `data_norm` - Array of the normalised counts of this cell. This will do a
-///   CPM-type transformation and then calculate the ln_1p.
-/// * `library_size` - Total library size/UMI counts of the cell.
-/// * `indices` - The col indices of the genes.
-/// * `original_index` - Original (row) index of the cell.
-/// * `to_keep` - Flat if the cell should be included in certain analysis.
-///   Future feature.
 #[derive(Debug)]
 pub struct CsrCellChunk {
+    /// Vector of the raw counts of this cell. This is limited to u16, limiting
+    /// the max raw counts per gene to 65_535
     pub data_raw: Vec<u16>,
+    /// Vector of the norm counts of this cell. A lossy compression for f16 is
+    /// applied.
     pub data_norm: Vec<F16>,
+    /// Total library size/UMI counts of the cell.
     pub library_size: usize,
+    /// Index positions of the genes
     pub indices: Vec<u16>,
+    /// Original index in the data
     pub original_index: usize,
+    /// Flag if the cell should be kept. (Not used at the moment.)
     pub to_keep: bool,
 }
 
@@ -429,7 +419,7 @@ impl CsrCellChunk {
             cell_indices: cells_to_keep,
             gene_indices: genes_to_keep,
             lib_size,
-            no_genes: nnz,
+            nnz,
         };
 
         (res, qc_data)
@@ -485,28 +475,23 @@ impl CsrCellChunk {
 ///
 /// This structure is designed to store the data of a single gene in a
 /// CSC-like format optimised for rapid access on disk.
-///
-/// ### Fields
-///
-/// * `data_raw` - Vector with the raw data.
-/// * `data_norm` - Vector with the normalised data (library size adjusted and
-///   log-normalised).
-/// * `avg_exp` - Vector with average expression.
-/// * `nnz` - Number non-zero values.
-/// * `indices` - The column indices of the data.
-/// * `original_index` - Original index of the gene.
-/// * `to_keep` - Boolean if the gene should be included into anything.
-///   Future feature.
 #[derive(Encode, Decode, Serialize, Deserialize, Debug)]
 pub struct CscGeneChunk {
+    /// Vector with the raw counts per cell/spot for this gene. The maximum
+    /// counts per gene are limited to 65_535
     pub data_raw: Vec<u16>,
+    /// Vector with normalised coutns per cell/spot for this gene. Lossy
+    /// compression to f16 is applied.
     pub data_norm: Vec<F16>,
+    /// Average expression of this gene in the data.
     pub avg_exp: F16,
+    /// Number of cells expressing this gene
     pub nnz: usize,
-    // u32 as there might be clearly more than 65_535 cells in the data
-    // 4_294_967_295 should be enough however...
+    /// Indices of the cells expressing this gene
     pub indices: Vec<u32>,
+    /// Original index from the data
     pub original_index: usize,
+    /// Flag to indicate if gene shall be kept. Not in use at the moment.
     pub to_keep: bool,
 }
 
@@ -717,24 +702,20 @@ impl CscGeneChunk {
 ///
 /// Stores the information in terms of total cells, total genes, number of
 /// chunks in terms of cells and genes and the offset vectors
-///
-/// ### Params
-///
-/// * `total_cells` - Total number of cells in the experiment.
-/// * `total_genes` - Total number of genes in the experiemnt.
-/// * `cell_based` - Boolean. If `true` the data stores cells; if `false` the
-///   data stores genes.
-/// * `no_chunks` - No of chunks that store either cell or gene data.
-/// * `chunk_offsets` - Vector containing the offsets for the cell or gene
-///   chunks.
-/// * `index_map` - FxHashMap with the original index -> chunk info
 #[derive(Encode, Decode, Serialize, Deserialize, Clone)]
 pub struct SparseDataHeader {
+    /// Total number of cells in the experiment.
     pub total_cells: usize,
+    /// Total number of genes in the experiemnt.
     pub total_genes: usize,
+    /// Is the file written in a way for fast cell data retrieval (set to true)
+    /// or for fast gene retrieval (set to false)
     pub cell_based: bool,
+    /// Number of chunks in this file storing either the cell or gene data
     pub no_chunks: usize,
+    /// Offset vector for reading in the data
     pub chunk_offsets: Vec<u64>,
+    /// FxHashMap with the original index -> chunk info
     pub index_map: FxHashMap<usize, usize>,
 }
 
