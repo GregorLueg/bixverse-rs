@@ -76,7 +76,7 @@ pub fn write_h5_counts<P: AsRef<Path>>(
         println!("Step 3/4: Loading filtered data from h5...");
     }
 
-    let file_data: CompressedSparseData<u16> = match file_format {
+    let file_data: CompressedSparseData2<u16> = match file_format {
         CompressedSparseFormat::Csr => {
             read_h5ad_x_data_csr(&h5_path, &file_quality, verbose).unwrap()
         }
@@ -519,12 +519,12 @@ pub fn scan_h5_csc_library_sizes<P: AsRef<Path>>(
 ///
 /// ### Returns
 ///
-/// The `CompressedSparseData` in CSR format with the counts stored as u16.
+/// The `CompressedSparseData2` in CSR format with the counts stored as u16.
 pub fn read_h5ad_x_data_csc<P: AsRef<Path>>(
     file_path: P,
     quality: &CellOnFileQuality,
     verbose: bool,
-) -> Result<CompressedSparseData<u16>> {
+) -> Result<CompressedSparseData2<u16>> {
     let file = File::open(file_path)?;
 
     let data_ds = file.dataset("X/data")?;
@@ -610,7 +610,7 @@ pub fn read_h5ad_x_data_csc<P: AsRef<Path>>(
 
     let shape = (quality.genes_to_keep.len(), quality.cells_to_keep.len());
 
-    Ok(CompressedSparseData {
+    Ok(CompressedSparseData2 {
         data: new_data,
         indices: new_indices,
         indptr: new_indptr,
@@ -1057,12 +1057,12 @@ pub fn parse_h5_csr_quality<P: AsRef<Path>>(
 ///
 /// ### Returns
 ///
-/// The `CompressedSparseData` in CSR format with the counts stored as u16.
+/// The `CompressedSparseData2` in CSR format with the counts stored as u16.
 pub fn read_h5ad_x_data_csr<P: AsRef<Path>>(
     file_path: P,
     quality: &CellOnFileQuality,
     verbose: bool,
-) -> Result<CompressedSparseData<u16>> {
+) -> Result<CompressedSparseData2<u16>> {
     let file = File::open(file_path)?;
 
     let data_ds = file.dataset("X/data")?;
@@ -1166,7 +1166,7 @@ pub fn read_h5ad_x_data_csr<P: AsRef<Path>>(
 
     let shape = (quality.genes_to_keep.len(), quality.cells_to_keep.len());
 
-    Ok(CompressedSparseData {
+    Ok(CompressedSparseData2 {
         data: new_data,
         indices: new_indices,
         indptr: new_indptr,

@@ -5,6 +5,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::time::Instant;
 
 use crate::prelude::*;
+use crate::single_cell::sc_batch_correction::batch_utils::cosine_normalise;
 use crate::single_cell::sc_processing::pca::*;
 
 ////////////
@@ -21,15 +22,8 @@ use crate::single_cell::sc_processing::pca::*;
 /// * `var_adj` - Apply variance adjustment to avoid kissing effects
 /// * `no_pcs` - Number of PCs to use for the MNN calculations
 /// * `random_svd` - Boolean. Shall randomised SVD be used.
-/// * `k` - Number of mutual nearest neighbours to identify
-/// * `knn_method` - Approximate nearest neighbour search method. One of
-///   `"annoy"` or `"hnsw"`.
-/// * `dist_metric` - Distance metric to use. One of `"cosine"` or
-///   `"euclidean"`.
-/// * `annoy_n_trees` - Number of trees for Annoy index (only used if
-///   knn_method="annoy")
-/// * `annoy_search_budget` - Search budget per tree for Annoy (only used if
-///   knn_method="annoy")
+/// * `knn_params` - The KnnParams that contains all the hyperparameter for the
+///   various KnnIndices that are implemented.
 #[derive(Clone, Debug)]
 pub struct FastMnnParams {
     pub sigma: f32,
@@ -44,26 +38,6 @@ pub struct FastMnnParams {
 /////////////
 // Helpers //
 /////////////
-
-/// Apply cosine normalisation (L2 normalisation) to each row
-///
-/// ### Params
-///
-/// * `mat` - The matrix on which to apply the Cosine normalisation per row
-///
-/// ### Returns
-///
-/// Per row L2-normalised data
-pub fn cosine_normalise(mat: &Mat<f32>) -> Mat<f32> {
-    Mat::from_fn(mat.nrows(), mat.ncols(), |row, col| {
-        let norm = mat.get(row, ..).norm_l2();
-        if norm > 1e-8 {
-            mat[(row, col)] / norm
-        } else {
-            0.0
-        }
-    })
-}
 
 /// Find mutual nearest neighbours from two KNN graphs
 ///
@@ -155,6 +129,15 @@ pub fn compute_correction_vecs(
 }
 
 /// Logspace addition to avoid underflow
+///
+/// ### Params
+///
+/// * `log_a` - Logarithm of first value
+/// * `log_b` - Logarithm of second value
+///
+/// ### Returns
+///
+/// Logarithm of sum of two values
 #[inline]
 fn logspace_add(log_a: f32, log_b: f32) -> f32 {
     if log_a.is_infinite() && log_a.is_sign_negative() {
@@ -763,6 +746,7 @@ pub fn split_pca_by_batch(
 /// * `cell_indices` - Indices of cells to include
 /// * `gene_indices` - Indices of genes to include
 /// * `batch_indices` - Batch assignment for each cell
+/// * `pre_computed_pca` - Pre-computed PCA matrix (optional)
 /// * `params` - FastMNN parameters
 /// * `verbose` - Controls verbosity of the function
 /// * `seed` - Random seed for reproducibility
@@ -770,26 +754,39 @@ pub fn split_pca_by_batch(
 /// ### Returns
 ///
 /// Batch-corrected PCA matrix (cells x n_pcs) in original cell order
+#[allow(clippy::too_many_arguments)]
 pub fn fast_mnn_main(
     f_path: &str,
     cell_indices: &[usize],
     gene_indices: &[usize],
     batch_indices: &[usize],
+    pre_computed_pca: Option<Mat<f32>>,
     params: &FastMnnParams,
     verbose: bool,
     seed: usize,
 ) -> Mat<f32> {
     // calculate the PCA across everything
-    let (pca_all, _, _, _) = pca_on_sc(
-        f_path,
-        cell_indices,
-        gene_indices,
-        params.no_pcs,
-        params.random_svd,
-        seed,
-        false,
-        verbose,
-    );
+    let pca_all = if let Some(pca) = pre_computed_pca {
+        if verbose {
+            println!("Using pre-computed PCA")
+        }
+        pca
+    } else {
+        if verbose {
+            println!("Re-computing PCA")
+        }
+        let (pca, _, _, _) = pca_on_sc(
+            f_path,
+            cell_indices,
+            gene_indices,
+            params.no_pcs,
+            params.random_svd,
+            seed,
+            false,
+            verbose,
+        );
+        pca
+    };
 
     let (mut pca_batches, original_indices) = split_pca_by_batch(&pca_all, batch_indices);
 

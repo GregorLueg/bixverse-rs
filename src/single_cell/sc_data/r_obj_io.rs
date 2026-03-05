@@ -1,7 +1,7 @@
 use std::path::Path;
 use thousands::Separable;
 
-use crate::core::math::sparse::csc_to_csr;
+use crate::core::math::sparse::transpose_sparse;
 use crate::prelude::*;
 use crate::single_cell::sc_data::data_io::CellGeneSparseWriter;
 
@@ -14,7 +14,7 @@ use crate::single_cell::sc_data::data_io::CellGeneSparseWriter;
 /// ### Params
 ///
 /// * `bin_path` - Path to the h5 object.
-/// * `compressed_data` - The original R data stored as a CompressedSparseData
+/// * `compressed_data` - The original R data stored as a CompressedSparseData2
 ///   structure.
 /// * `cell_quality` - Structure containing information on the desired minimum
 ///   cell and gene quality + target size for library normalisation.
@@ -25,7 +25,7 @@ use crate::single_cell::sc_data::data_io::CellGeneSparseWriter;
 /// A tuple with `(no_cells, no_genes, cell quality metrics)`
 pub fn write_r_counts<P: AsRef<Path>, T>(
     bin_path: P,
-    compressed_data: CompressedSparseData<T>,
+    compressed_data: CompressedSparseData2<T>,
     cell_quality: MinCellQuality,
     verbose: bool,
 ) -> (usize, usize, CellQuality)
@@ -50,7 +50,7 @@ where
             if verbose {
                 println!("Converting CSC to CSR...");
             }
-            let csr_data = csc_to_csr(&compressed_data);
+            let csr_data = transpose_sparse(&compressed_data);
             write_r_counts_csr(bin_path, csr_data, cell_quality, verbose)
         }
     }
@@ -65,7 +65,7 @@ where
 /// ### Params
 ///
 /// * `bin_path` - Path to the h5 object.
-/// * `compressed_data` - The original R data stored as a CompressedSparseData
+/// * `compressed_data` - The original R data stored as a CompressedSparseData2
 ///   structure.
 /// * `cell_quality` - Structure containing information on the desired minimum
 ///   cell and gene quality + target size for library normalisation.
@@ -76,7 +76,7 @@ where
 /// A tuple with `(no_cells, no_genes, cell quality metrics)`
 pub fn write_r_counts_csr<P: AsRef<Path>, T>(
     bin_path: P,
-    compressed_data: CompressedSparseData<T>,
+    compressed_data: CompressedSparseData2<T>,
     cell_quality: MinCellQuality,
     verbose: bool,
 ) -> (usize, usize, CellQuality)

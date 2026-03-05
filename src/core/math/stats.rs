@@ -1,3 +1,5 @@
+//! Statistical helpers
+
 use faer::{Mat, linalg::solvers::DenseSolveCore};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -92,6 +94,7 @@ where
 // Statistical tests //
 ///////////////////////
 
+/// Test alternatives for different statistical tests
 #[derive(Clone, Debug, Default)]
 pub enum TestAlternative {
     /// Two sided test for the Z-score
@@ -304,32 +307,29 @@ where
 ////////////
 
 /// ManovaResults
-///
-/// ### Fields
-///
-/// * `sscp_between` - Between-groups SSCP matrix
-/// * `sscp_within` - Within-groups SSCP matrix
-/// * `sscp_total` - Total SSCP matrix
-/// * `df_between` - Degrees of freedom between groups
-/// * `df_within` - Degrees of freedom within groups
-/// * `df_total` - Total degrees of freedom
-/// * `n_vars` - Number of variables
-/// * `group_means` - Means for each group
-/// * `overall_mean` - Overall means
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct ManovaResult<T>
 where
     T: BixverseFloat,
 {
+    /// Between-groups SSCP matrix
     pub sscp_between: Mat<T>,
+    /// Within-groups SSCP matrix
     pub sscp_within: Mat<T>,
+    /// Total SSCP matrix
     pub sscp_total: Mat<T>,
+    /// Degrees of freedom between groups
     pub df_between: usize,
+    /// Degrees of freedom within groups
     pub df_within: usize,
+    /// Total degrees of freedom
     pub df_total: usize,
+    /// Number of variables
     pub n_vars: usize,
+    /// Means for each group
     pub group_means: Vec<Vec<T>>,
+    /// Overall means
     pub overall_mean: Vec<T>,
 }
 
@@ -442,30 +442,27 @@ where
 }
 
 /// ManovaSummary
-///
-/// ### Fields
-///
-/// * `wilks_lambda` - Wilks' lambda value
-/// * `pillai_trace` - Pillai's trace value
-/// * `df_between` - Degrees of freedom between groups
-/// * `df_within` - Degrees of freedom within groups
-/// * `f_stat_wilk` - F statistic according to Wilk
-/// * `p_val_wilk` - P-value according to Wilk
-/// * `f_stat_pillai` - F statistic according to Pillai
-/// * `p_val_pillai` - P-value according to Pillai
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct ManovaSummary<T>
 where
     T: BixverseFloat,
 {
+    /// Wilks' lambda value
     pub wilks_lambda: T,
+    /// Pillai's trace value
     pub pillai_trace: T,
+    /// Degrees of freedom between groups
     pub df_between: usize,
+    /// Degrees of freedom within groups
     pub df_within: usize,
+    /// F statistic according to Wilk
     pub f_stat_wilk: T,
+    /// P-value according to Wilk
     pub p_val_wilk: T,
+    /// F statistic according to Pillai
     pub f_stat_pillai: T,
+    /// P-value according to Pillai
     pub p_val_pillai: T,
 }
 
@@ -504,31 +501,37 @@ where
 ///////////
 
 /// AnovaSummary (based on MANOVA models)
-///
-/// ### Fields
-///
-/// * `variable_index` - Variable index
-/// * `ss_between` - Sum of squares between groups
-/// * `ss_within` - Sum of squares within groups
-/// * `ms_between` - Mean square between groups
-/// * `ms_within` - Mean square within groups
-/// * `f_stat` - F statistic
-/// * `p_val` - P-value
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct AnovaSummary<T>
 where
     T: BixverseFloat,
 {
+    /// Variable index
     pub variable_index: usize,
+    /// Sum of squares between groups
     pub ss_between: T,
+    /// Sum of squares within groups
     pub ss_within: T,
+    /// Mean square between groups
     pub ms_between: T,
+    /// Mean square within groups
     pub ms_within: T,
+    /// F statistic
     pub f_stat: T,
+    /// P-value
     pub p_val: T,
 }
 
+/// Generates from MANOVE results the AnovaSummary
+///
+/// ### Params
+///
+/// * `res` - The MANOVA result to analyse
+///
+/// ### Returns
+///
+/// A vector of AnovaSummaries
 pub fn summary_aov<T>(res: &ManovaResult<T>) -> Vec<AnovaSummary<T>>
 where
     T: BixverseFloat,
@@ -677,6 +680,7 @@ pub fn calculate_critval<T: BixverseFloat>(
 // Outliers //
 //////////////
 
+/// Type of outlier detection for MAD thresholding
 #[derive(Clone, Debug, Default)]
 pub enum OutlierDirection {
     /// Check if outlier is below OR above the thresholds

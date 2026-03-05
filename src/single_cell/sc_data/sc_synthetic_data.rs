@@ -31,7 +31,7 @@ pub fn create_sparse_csc_data(
     genes_per_cell: (usize, usize),
     max_exp: i32,
     seed: usize,
-) -> CompressedSparseData<i32> {
+) -> CompressedSparseData2<i32> {
     let weights: Vec<f64> = (1..=ncol).map(|i| 1.0 / i as f64).collect();
     let alias = WeightedAliasIndex::new(weights).unwrap();
 
@@ -77,7 +77,7 @@ pub fn create_sparse_csc_data(
         indptr.push(indices.len());
     }
 
-    CompressedSparseData {
+    CompressedSparseData2 {
         data,
         indices,
         indptr,
@@ -108,7 +108,7 @@ pub fn create_sparse_csr_data(
     no_genes_exp: (usize, usize),
     max_exp: i32,
     seed: usize,
-) -> CompressedSparseData<i32> {
+) -> CompressedSparseData2<i32> {
     let weights: Vec<f64> = (1..=ncol).map(|i| 1.0 / i as f64).collect();
     let alias = WeightedAliasIndex::new(weights).unwrap();
 
@@ -145,7 +145,7 @@ pub fn create_sparse_csr_data(
         indptr.push(indices.len());
     }
 
-    CompressedSparseData {
+    CompressedSparseData2 {
         data,
         indices,
         indptr,
@@ -248,7 +248,7 @@ pub fn create_celltype_sparse_csr_data(
     n_batches: usize,
     batch_effect_strength: &str,
     seed: usize,
-) -> (CompressedSparseData<u32>, Vec<usize>, Vec<usize>) {
+) -> (CompressedSparseData2<u32>, Vec<usize>, Vec<usize>) {
     let batch_strength =
         parse_batch_effect_strength(batch_effect_strength).unwrap_or(BatchEffectStrength::Strong);
 
@@ -373,7 +373,7 @@ pub fn create_celltype_sparse_csr_data(
         indptr.push(indices.len());
     }
 
-    let csr = CompressedSparseData {
+    let csr = CompressedSparseData2 {
         data,
         indices,
         indptr,

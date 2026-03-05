@@ -468,9 +468,9 @@ fn compute_membership_strengths(
 ///
 /// Symmetrised connectivity matrix in CSR format
 fn apply_set_operations(
-    connectivities: CompressedSparseData<f32>,
+    connectivities: CompressedSparseData2<f32>,
     set_op_mix_ratio: f32,
-) -> CompressedSparseData<f32> {
+) -> CompressedSparseData2<f32> {
     let (nrow, ncol) = connectivities.shape;
     let transpose = {
         let csc_transpose = connectivities.transform(); // A^T in CSC
@@ -521,9 +521,9 @@ fn apply_set_operations(
 ///
 /// Trimmed connectivity matrix in CSR format
 fn trim_graph(
-    mut connectivities: CompressedSparseData<f32>,
+    mut connectivities: CompressedSparseData2<f32>,
     trim: usize,
-) -> CompressedSparseData<f32> {
+) -> CompressedSparseData2<f32> {
     let n = connectivities.shape.0;
     let mut thresholds = vec![0.0f32; n];
 
@@ -583,14 +583,14 @@ fn trim_graph(
 ///
 /// ### Returns
 ///
-/// A tuple of two CompressedSparseData with `(indices, connectivities)`.
+/// A tuple of two CompressedSparseData2 with `(indices, connectivities)`.
 pub fn bbknn(
     mat: MatRef<f32>,
     batch_labels: &[usize],
     bbknn_params: &BbknnParams,
     seed: usize,
     verbose: bool,
-) -> (CompressedSparseData<f32>, CompressedSparseData<f32>) {
+) -> (CompressedSparseData2<f32>, CompressedSparseData2<f32>) {
     // parse it and worst case, I default to Annoy
     let knn_method = parse_knn_method(&bbknn_params.knn_params.knn_method).unwrap_or_default();
 

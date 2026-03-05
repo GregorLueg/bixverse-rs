@@ -25,14 +25,14 @@ use crate::prelude::*;
 ///
 /// ### Return
 ///
-/// `CompressedSparseData` in CSR format with aggregated raw counts and re-
+/// `CompressedSparseData2` in CSR format with aggregated raw counts and re-
 /// normalised counts per meta cell.
 pub fn aggregate_meta_cells(
     reader: &ParallelSparseReader,
     metacells: &[&[usize]],
     target_size: f32,
     n_genes: usize,
-) -> CompressedSparseData<u32, f32> {
+) -> CompressedSparseData2<u32, f32> {
     let n_metacells = metacells.len();
     let mut all_data: Vec<u32> = Vec::new();
     let mut all_data_norm: Vec<f32> = Vec::new();
@@ -85,7 +85,7 @@ pub fn aggregate_meta_cells(
         }
     }
 
-    CompressedSparseData::new_csr(
+    CompressedSparseData2::new_csr(
         &all_data,
         &all_indices,
         &all_indptr,
@@ -288,7 +288,7 @@ pub fn get_pseudo_bulked_counts_sparse(
     cell_indices: &[Vec<usize>],
     bulk_type: PseudoBulk,
     verbose: bool,
-) -> CompressedSparseData<f64> {
+) -> CompressedSparseData2<f64> {
     let reader = ParallelSparseReader::new(f_path).unwrap();
     let n_genes = reader.get_header().total_genes;
     let n_groups = cell_indices.len();
@@ -350,7 +350,7 @@ pub fn get_pseudo_bulked_counts_sparse(
         indptr.push(data.len());
     }
 
-    CompressedSparseData {
+    CompressedSparseData2 {
         data,
         indices,
         indptr,

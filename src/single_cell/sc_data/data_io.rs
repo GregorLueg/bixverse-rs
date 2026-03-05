@@ -331,11 +331,11 @@ impl CsrCellChunk {
         })
     }
 
-    /// Generate a vector of Chunks from CompressedSparseData
+    /// Generate a vector of Chunks from CompressedSparseData2
     ///
     /// ### Params
     ///
-    /// * `sparse_data` - The `CompressedSparseData` (in CSR format!)
+    /// * `sparse_data` - The `CompressedSparseData2` (in CSR format!)
     /// * `min_genes` - Number of genes per cell to be included
     /// * `size_factor` - Size factor for normalisation. 1e6 -> CPM
     ///
@@ -343,7 +343,7 @@ impl CsrCellChunk {
     ///
     /// A tuple of the `Vec<CsrCellChunk>` and if the cell should be kept.
     pub fn generate_chunks_sparse_data<T, U>(
-        sparse_data: CompressedSparseData<T, U>,
+        sparse_data: CompressedSparseData2<T, U>,
         cell_qc: MinCellQuality,
     ) -> (Vec<CsrCellChunk>, CellQuality)
     where
@@ -1035,6 +1035,9 @@ impl ParallelSparseReader {
             opts.map(&file)?
         };
 
+        #[cfg(unix)]
+        mmap.advise(memmap2::Advice::Random)?;
+
         // Parse headers from mmap
         let file_header_bytes = &mmap[0..64];
         let (file_header, _) = decode_from_slice::<FileHeader, _>(
@@ -1303,5 +1306,109 @@ impl ParallelSparseReader {
     pub fn get_all_gene_nnz(&self) -> Vec<usize> {
         let iter: Vec<usize> = (0..self.header.total_genes).collect();
         self.read_gene_nnz(&iter)
+    }
+}
+
+//////////////////////
+// Chunks to sparse //
+//////////////////////
+
+/// Converts a slice of gene chunks into a CSC sparse matrix
+///
+/// Constructs a cells × genes compressed sparse column matrix from individual
+/// gene chunks. The primary data layer contains raw counts, whilst the
+/// secondary layer contains normalised counts converted to f32 precision.
+///
+/// ### Params
+///
+/// * `chunks` - Slice of gene chunks to convert
+/// * `n_cells` - Total number of cells in the dataset
+///
+/// ### Returns
+///
+/// A CSC-formatted sparse matrix with raw counts in the primary data layer
+/// and normalised counts in the secondary data layer
+pub fn from_gene_chunks<T>(chunks: &[CscGeneChunk], n_cells: usize) -> CompressedSparseData2<T, f32>
+where
+    T: BixverseNumeric + From<u16>,
+{
+    let n_genes = chunks.len();
+    let mut data = Vec::new();
+    let mut data_2 = Vec::new();
+    let mut indices = Vec::new();
+    let mut indptr = Vec::with_capacity(n_genes + 1);
+
+    indptr.push(0);
+
+    for chunk in chunks {
+        for &val in &chunk.data_raw {
+            data.push(T::from(val));
+        }
+        for &val in &chunk.data_norm {
+            data_2.push(val.to_f32());
+        }
+        for &idx in &chunk.indices {
+            indices.push(idx as usize);
+        }
+        indptr.push(data.len());
+    }
+
+    CompressedSparseData2 {
+        data,
+        indices,
+        indptr,
+        cs_type: CompressedSparseFormat::Csc,
+        data_2: Some(data_2),
+        shape: (n_cells, n_genes),
+    }
+}
+
+/// Converts a slice of cell chunks into a CSR sparse matrix
+///
+/// Constructs a cells × genes compressed sparse row matrix from individual
+/// cell chunks. The primary data layer contains raw counts, whilst the
+/// secondary layer contains normalised counts converted to f32 precision.
+///
+/// ### Params
+///
+/// * `chunks` - Slice of cell chunks to convert
+/// * `n_genes` - Total number of genes in the dataset
+///
+/// ### Returns
+///
+/// A CSR-formatted sparse matrix with raw counts in the primary data layer
+/// and normalised counts in the secondary data layer
+pub fn from_cell_chunks<T>(chunks: &[CsrCellChunk], n_genes: usize) -> CompressedSparseData2<T, f32>
+where
+    T: BixverseNumeric + From<u16>,
+{
+    let n_cells = chunks.len();
+    let mut data = Vec::new();
+    let mut data_2 = Vec::new();
+    let mut indices = Vec::new();
+    let mut indptr = Vec::with_capacity(n_cells + 1);
+
+    indptr.push(0);
+
+    for chunk in chunks {
+        for &val in &chunk.data_raw {
+            data.push(T::from(val));
+        }
+        for &val in &chunk.data_norm {
+            data_2.push(val.to_f32());
+        }
+        for &idx in &chunk.indices {
+            indices.push(idx as usize);
+        }
+        indptr.push(data.len());
+    }
+
+    CompressedSparseData2 {
+        data,
+        indices,
+        indptr,
+        cs_type: CompressedSparseFormat::Csr,
+        data_2: Some(data_2),
+        shape: (n_cells, n_genes),
     }
 }

@@ -1,3 +1,6 @@
+//! Sparse matrix formats, sparse operations and helpers to transform different
+//! formats into each other.
+
 use ann_search_rs::utils::dist::SimdDistance;
 use faer::{Mat, MatRef};
 use num_traits::ToPrimitive;
@@ -6,6 +9,7 @@ use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
 use std::ops::{Add, AddAssign, Mul};
 
+use crate::core::math::pca_svd::SvdResults;
 use crate::prelude::*;
 
 /////////////
@@ -90,30 +94,28 @@ impl CompressedSparseFormat {
 }
 
 /// Structure to store compressed sparse data of either type
-///
-/// ### Fields
-///
-/// * `data` - The values
-/// * `indices` - The indices of the values
-/// * `indptr` - The index pointers
-/// * `cs_type` - Is the data stored in `Csr` or `Csc`.
-/// * `data_2` - An optional second data layer
-/// * `shape` - The shape of the underlying matrix
 #[derive(Debug, Clone)]
-pub struct CompressedSparseData<T, U = T>
+pub struct CompressedSparseData2<T, U = T>
 where
     T: Clone,
     U: Clone,
 {
+    /// The first data slot for this compressed sparse data format
     pub data: Vec<T>,
+    /// The indices of the data points
     pub indices: Vec<usize>,
+    /// The indptr of the data points
     pub indptr: Vec<usize>,
+    /// Enum defining if the data is stored in CSC or CSR
     pub cs_type: CompressedSparseFormat,
+    /// Optional second data slot for a different layer of the data (for
+    /// example raw and normalised counts)
     pub data_2: Option<Vec<U>>,
+    /// Shape of the data (rows, cols)
     pub shape: (usize, usize),
 }
 
-impl<T, U> CompressedSparseData<T, U>
+impl<T, U> CompressedSparseData2<T, U>
 where
     T: BixverseNumeric,
     U: BixverseNumeric,
@@ -175,10 +177,7 @@ where
     ///
     /// The transformed/transposed version
     pub fn transform(&self) -> Self {
-        match self.cs_type {
-            CompressedSparseFormat::Csc => csc_to_csr(self),
-            CompressedSparseFormat::Csr => csr_to_csc(self),
-        }
+        transpose_sparse(self)
     }
 
     /// Transpose and convert
@@ -194,8 +193,8 @@ where
         match self.cs_type {
             CompressedSparseFormat::Csr => {
                 // convert first and then switch around
-                let csc_version = csr_to_csc(self);
-                CompressedSparseData {
+                let csc_version = transpose_sparse(self);
+                CompressedSparseData2 {
                     data: csc_version.data,
                     indices: csc_version.indices,
                     indptr: csc_version.indptr,
@@ -206,7 +205,7 @@ where
             }
             CompressedSparseFormat::Csc => {
                 // no conversion needed here! simple transpose is enough...
-                CompressedSparseData {
+                CompressedSparseData2 {
                     data: self.data.clone(),
                     indices: self.indices.clone(),
                     indptr: self.indptr.clone(),
@@ -221,7 +220,7 @@ where
     /// Transpose the matrix
     #[allow(dead_code)]
     pub fn transpose_from_h5ad(&self) -> Self {
-        CompressedSparseData {
+        CompressedSparseData2 {
             data: self.data.clone(),
             indices: self.indices.clone(),
             indptr: self.indptr.clone(),
@@ -409,120 +408,91 @@ where
     }
 }
 
-/// Transforms a CompressedSparseData that is CSC to CSR
+/// Transpose a compressed sparse matrix (CSC→CSR or CSR→CSC).
+///
+/// This is the standard two-pass sparse transpose in O(nnz) time.
 ///
 /// ### Params
 ///
-/// * `sparse_data` - The CompressedSparseData you want to transform
-pub fn csc_to_csr<T, U>(sparse_data: &CompressedSparseData<T, U>) -> CompressedSparseData<T, U>
-where
-    T: BixverseNumeric,
-    U: BixverseNumeric,
-{
-    let (nrow, _) = sparse_data.shape();
-    let nnz = sparse_data.get_nnz();
-    let mut row_ptr = vec![0; nrow + 1];
-
-    for &r in &sparse_data.indices {
-        row_ptr[r + 1] += 1;
-    }
-
-    for i in 0..nrow {
-        row_ptr[i + 1] += row_ptr[i];
-    }
-
-    let mut csr_data = vec![T::default(); nnz];
-    let mut csr_data2 = sparse_data.data_2.as_ref().map(|_| vec![U::default(); nnz]);
-    let mut csr_col_ind = vec![0; nnz];
-    let mut next = row_ptr[..nrow].to_vec();
-
-    for col in 0..(sparse_data.indptr.len() - 1) {
-        for idx in sparse_data.indptr[col]..sparse_data.indptr[col + 1] {
-            let row = sparse_data.indices[idx];
-            let pos = next[row];
-
-            csr_data[pos] = sparse_data.data[idx];
-            csr_col_ind[pos] = col;
-
-            // Handle the second layer data
-            if let (Some(source_data2), Some(csr_d2)) = (&sparse_data.data_2, &mut csr_data2) {
-                csr_d2[pos] = source_data2[idx];
-            }
-
-            next[row] += 1;
-        }
-    }
-
-    CompressedSparseData {
-        data: csr_data,
-        indices: csr_col_ind,
-        indptr: row_ptr,
-        cs_type: CompressedSparseFormat::Csr,
-        data_2: csr_data2,
-        shape: sparse_data.shape(),
-    }
-}
-
-/// Transform CSR stored data into CSC stored data
-///
-/// This version does a full memory copy of the data.
-///
-/// ### Params
-///
-/// * `sparse_data` - The CompressedSparseData you want to transform
+/// * `sparse_data`: The input compressed sparse matrix to be transformed.
 ///
 /// ### Returns
 ///
-/// The data in CSC format, i.e., `CscData`
-pub fn csr_to_csc<T, U>(sparse_data: &CompressedSparseData<T, U>) -> CompressedSparseData<T, U>
+/// The transposed compressed sparse matrix.
+pub fn transpose_sparse<T, U>(
+    sparse_data: &CompressedSparseData2<T, U>,
+) -> CompressedSparseData2<T, U>
 where
     T: BixverseNumeric,
     U: BixverseNumeric,
 {
     let nnz = sparse_data.get_nnz();
-    let (_, ncol) = sparse_data.shape();
-    let mut col_ptr = vec![0; ncol + 1];
+    let (nrow, ncol) = sparse_data.shape();
 
-    // Count occurrences per column
-    for &c in &sparse_data.indices {
-        col_ptr[c + 1] += 1;
+    // the "minor" dimension is what becomes the new indptr axis.
+    let (new_major, new_type) = match sparse_data.cs_type {
+        CompressedSparseFormat::Csc => (nrow, CompressedSparseFormat::Csr),
+        CompressedSparseFormat::Csr => (ncol, CompressedSparseFormat::Csc),
+    };
+
+    // first pass: count entries per new-major index
+    let mut new_indptr = vec![0usize; new_major + 1];
+    for &idx in &sparse_data.indices {
+        new_indptr[idx + 1] += 1;
+    }
+    for i in 0..new_major {
+        new_indptr[i + 1] += new_indptr[i];
     }
 
-    // Cumulative sum to get column pointers
-    for i in 0..ncol {
-        col_ptr[i + 1] += col_ptr[i];
+    // second pass: scatter data
+    let mut new_data: Vec<T> = vec![T::default(); nnz];
+    let mut new_indices: Vec<usize> = vec![0usize; nnz];
+    let mut new_data2: Option<Vec<U>> =
+        sparse_data.data_2.as_ref().map(|_| vec![U::default(); nnz]);
+    unsafe {
+        new_data.set_len(nnz);
+        new_indices.set_len(nnz);
     }
 
-    let mut csc_data = vec![T::default(); nnz];
-    let mut csc_data2 = sparse_data.data_2.as_ref().map(|_| vec![U::default(); nnz]);
-    let mut csc_row_ind = vec![0; nnz];
-    let mut next = col_ptr[..ncol].to_vec();
+    // Reuse new_indptr as the write cursor — we'll restore it afterwards.
+    // Work on a mutable window so we don't need a separate `next` vec.
+    // We iterate old major indices and scatter into new positions.
+    let old_major_len = sparse_data.indptr.len() - 1;
+    for major in 0..old_major_len {
+        for idx in sparse_data.indptr[major]..sparse_data.indptr[major + 1] {
+            let minor = sparse_data.indices[idx];
+            let pos = new_indptr[minor];
 
-    // Iterate through rows and place data in CSC format
-    for row in 0..(sparse_data.indptr.len() - 1) {
-        for idx in sparse_data.indptr[row]..sparse_data.indptr[row + 1] {
-            let col = sparse_data.indices[idx];
-            let pos = next[col];
-
-            csc_data[pos] = sparse_data.data[idx];
-            csc_row_ind[pos] = row;
-
-            // Handle the second layer data
-            if let (Some(source_data2), Some(csc_d2)) = (&sparse_data.data_2, &mut csc_data2) {
-                csc_d2[pos] = source_data2[idx];
+            // SAFETY: pos < nnz guaranteed by the counting pass
+            unsafe {
+                *new_data.get_unchecked_mut(pos) = sparse_data.data[idx];
+                *new_indices.get_unchecked_mut(pos) = major;
             }
 
-            next[col] += 1;
+            if let (Some(src), Some(dst)) = (&sparse_data.data_2, &mut new_data2) {
+                unsafe {
+                    *dst.get_unchecked_mut(pos) = src[idx];
+                }
+            }
+
+            new_indptr[minor] += 1;
         }
     }
 
-    CompressedSparseData {
-        data: csc_data,
-        indices: csc_row_ind,
-        indptr: col_ptr,
-        cs_type: CompressedSparseFormat::Csc,
-        data_2: csc_data2,
-        shape: sparse_data.shape(),
+    // restore new_indptr: the scatter pass shifted every entry forward by its
+    // count, so we shift the whole array right by one position.
+    for i in (1..=new_major).rev() {
+        new_indptr[i] = new_indptr[i - 1];
+    }
+    new_indptr[0] = 0;
+
+    CompressedSparseData2 {
+        data: new_data,
+        indices: new_indices,
+        indptr: new_indptr,
+        cs_type: new_type,
+        data_2: new_data2,
+        shape: (nrow, ncol),
     }
 }
 
@@ -536,19 +506,19 @@ where
 ///
 /// ### Returns
 ///
-/// `CompressedSparseData` in CSR format
+/// `CompressedSparseData2` in CSR format
 pub fn coo_to_csr<T>(
     rows: &[usize],
     cols: &[usize],
     vals: &[T],
     shape: (usize, usize),
-) -> CompressedSparseData<T>
+) -> CompressedSparseData2<T>
 where
     T: BixverseNumeric,
 {
     let n_rows = shape.0;
 
-    // Sort by (row, col) and merge duplicates
+    // sort by (row, col) and merge duplicates
     let mut entries: Vec<(usize, usize, T)> = rows
         .iter()
         .zip(cols.iter())
@@ -595,7 +565,7 @@ where
         indptr[i + 1] += indptr[i];
     }
 
-    CompressedSparseData::new_csr(&data, &indices, &indptr, None, shape)
+    CompressedSparseData2::new_csr(&data, &indices, &indptr, None, shape)
 }
 
 /// Optimised COO to CSR - assumes input is already sorted by (row, col)
@@ -616,7 +586,7 @@ pub fn coo_to_csr_presorted<T>(
     cols: &[usize],
     vals: &[T],
     shape: (usize, usize),
-) -> CompressedSparseData<T>
+) -> CompressedSparseData2<T>
 where
     T: BixverseNumeric,
 {
@@ -648,23 +618,23 @@ where
         }
     }
 
-    CompressedSparseData::new_csr(&data, &indices, &indptr, None, shape)
+    CompressedSparseData2::new_csr(&data, &indices, &indptr, None, shape)
 }
 
 /// Add two CSR matrices together
 ///
 /// ### Params
 ///
-/// * `a` - Reference to the first CompressedSparseData (in CSR format!)
-/// * `b` - Reference to the second CompressedSparseData (in CSR format!)
+/// * `a` - Reference to the first CompressedSparseData2 (in CSR format!)
+/// * `b` - Reference to the second CompressedSparseData2 (in CSR format!)
 ///
 /// ### Returns
 ///
-/// `CompressedSparseData` with added values between the two.
+/// `CompressedSparseData2` with added values between the two.
 pub fn sparse_add_csr<T>(
-    a: &CompressedSparseData<T>,
-    b: &CompressedSparseData<T>,
-) -> CompressedSparseData<T>
+    a: &CompressedSparseData2<T>,
+    b: &CompressedSparseData2<T>,
+) -> CompressedSparseData2<T>
 where
     T: BixverseNumeric + Into<f64> + Add<Output = T>,
 {
@@ -719,39 +689,39 @@ where
 ///
 /// ### Params
 ///
-/// * `a` - Reference to the first CompressedSparseData (in CSR format!)
+/// * `a` - Reference to the first CompressedSparseData2 (in CSR format!)
 /// * `scalar` - The scalar value to multiply with
 ///
 /// ### Returns
 ///
-/// `CompressedSparseData` with the data multiplied by the scalar.
+/// `CompressedSparseData2` with the data multiplied by the scalar.
 pub fn sparse_scalar_multiply_csr<T>(
-    a: &CompressedSparseData<T>,
+    a: &CompressedSparseData2<T>,
     scalar: T,
-) -> CompressedSparseData<T>
+) -> CompressedSparseData2<T>
 where
     T: BixverseNumeric,
     <T as Mul>::Output: Send,
     Vec<T>: FromParallelIterator<<T as Mul>::Output>,
 {
     let data: Vec<T> = a.data.par_iter().map(|&v| v * scalar).collect();
-    CompressedSparseData::new_csr(&data, &a.indices, &a.indptr, None, a.shape)
+    CompressedSparseData2::new_csr(&data, &a.indices, &a.indptr, None, a.shape)
 }
 
 /// Sparse matrix subtraction
 ///
 /// ### Params
 ///
-/// * `a` - Reference to the first CompressedSparseData (in CSR format!)
-/// * `b` - Reference to the second CompressedSparseData (in CSR format!)
+/// * `a` - Reference to the first CompressedSparseData2 (in CSR format!)
+/// * `b` - Reference to the second CompressedSparseData2 (in CSR format!)
 ///
 /// ### Returns
 ///
 /// The subtracted new matrix
 pub fn sparse_subtract_csr<T>(
-    a: &CompressedSparseData<T>,
-    b: &CompressedSparseData<T>,
-) -> CompressedSparseData<T>
+    a: &CompressedSparseData2<T>,
+    b: &CompressedSparseData2<T>,
+) -> CompressedSparseData2<T>
 where
     T: BixverseNumeric + Into<f64>,
 {
@@ -806,16 +776,16 @@ where
 ///
 /// ### Params
 ///
-/// * `a` - Reference to the first CompressedSparseData (in CSR format!)
-/// * `b` - Reference to the second CompressedSparseData (in CSR format!)
+/// * `a` - Reference to the first CompressedSparseData2 (in CSR format!)
+/// * `b` - Reference to the second CompressedSparseData2 (in CSR format!)
 ///
 /// ### Returns
 ///
 /// The multiplied matrix.
 pub fn sparse_multiply_elementwise_csr<T>(
-    a: &CompressedSparseData<T>,
-    b: &CompressedSparseData<T>,
-) -> CompressedSparseData<T>
+    a: &CompressedSparseData2<T>,
+    b: &CompressedSparseData2<T>,
+) -> CompressedSparseData2<T>
 where
     T: BixverseNumeric,
     <T as std::ops::Add>::Output: std::cmp::PartialEq<T>,
@@ -863,7 +833,7 @@ where
 /// ### Params
 ///
 /// * `csr` - Mutable reference to the CSR matrix (modified in-place)
-pub fn normalise_csr_columns_l1<T>(csr: &mut CompressedSparseData<T>)
+pub fn normalise_csr_columns_l1<T>(csr: &mut CompressedSparseData2<T>)
 where
     T: BixverseNumeric + Into<f64>,
     <T as std::ops::Add>::Output: std::cmp::PartialEq<T>,
@@ -892,7 +862,7 @@ where
 ///
 /// * `csr` - Mutable reference to the CSR matrix (modified in-place)
 #[allow(dead_code)]
-pub fn normalise_csr_rows_l1<T>(csr: &mut CompressedSparseData<T>)
+pub fn normalise_csr_rows_l1<T>(csr: &mut CompressedSparseData2<T>)
 where
     T: BixverseNumeric + Into<f64>,
     // We also need the `Sum` trait for `iter().sum()`
@@ -932,7 +902,7 @@ where
 /// ### Returns
 ///
 /// Frobenius norm ||A||_F = sqrt(sum(A_ij^2))
-pub fn frobenius_norm<T>(mat: &CompressedSparseData<T>) -> f32
+pub fn frobenius_norm<T>(mat: &CompressedSparseData2<T>) -> f32
 where
     T: BixverseNumeric + Into<f32>,
 {
@@ -956,7 +926,7 @@ where
 /// ### Returns
 ///
 /// The Matrix with 0's removed.
-pub fn eliminate_zeros_csr<T>(mat: CompressedSparseData<T>) -> CompressedSparseData<T>
+pub fn eliminate_zeros_csr<T>(mat: CompressedSparseData2<T>) -> CompressedSparseData2<T>
 where
     T: BixverseNumeric,
     <T as std::ops::Add>::Output: std::cmp::PartialEq<T>,
@@ -994,7 +964,7 @@ where
 /// ### Params
 ///
 /// The resulting vector
-pub fn csr_matvec<T>(mat: &CompressedSparseData<T>, vec: &[T]) -> Vec<T>
+pub fn csr_matvec<T>(mat: &CompressedSparseData2<T>, vec: &[T]) -> Vec<T>
 where
     T: BixverseNumeric,
     <T as std::ops::Add>::Output: std::cmp::PartialEq<T>,
@@ -1105,9 +1075,9 @@ where
 ///
 /// Product matrix in CSR format
 pub fn csr_matmul_csr<T>(
-    a: &CompressedSparseData<T>,
-    b: &CompressedSparseData<T>,
-) -> CompressedSparseData<T>
+    a: &CompressedSparseData2<T>,
+    b: &CompressedSparseData2<T>,
+) -> CompressedSparseData2<T>
 where
     T: BixverseNumeric,
 {
@@ -1167,7 +1137,7 @@ where
         indptr.push(data.len());
     }
 
-    CompressedSparseData::new_csr(&data, &indices, &indptr, None, (nrows, ncols))
+    CompressedSparseData2::new_csr(&data, &indices, &indptr, None, (nrows, ncols))
 }
 
 /////////////////////////////////////
@@ -1267,7 +1237,7 @@ where
 /// (eigenvalues, eigenvectors) where eigenvectors[i][j] is element j of
 /// eigenvector i
 pub fn compute_largest_eigenpairs_lanczos<T>(
-    matrix: &CompressedSparseData<T>,
+    matrix: &CompressedSparseData2<T>,
     n_components: usize,
     seed: u64,
 ) -> (Vec<f32>, Vec<Vec<f32>>)
@@ -1285,14 +1255,16 @@ where
 
     let data_f64: Vec<f64> = csr.data.iter().map(|&v| v.into()).collect();
 
+    // Parallelised matvec: y = A * x
     let matvec = |x: &[f64], y: &mut [f64]| {
-        y.fill(0.0);
-        for i in 0..n {
+        y.par_iter_mut().enumerate().for_each(|(i, yi)| {
+            let mut sum = 0.0;
             for idx in csr.indptr[i]..csr.indptr[i + 1] {
                 let j = csr.indices[idx];
-                y[i] += data_f64[idx] * x[j];
+                sum += data_f64[idx] * x[j];
             }
-        }
+            *yi = sum;
+        });
     };
 
     // Lanczos iteration
@@ -1325,6 +1297,14 @@ where
             }
         }
 
+        // full reorthogonalisation
+        for k in 0..=j {
+            let coeff = dot(&w, &v_matrix[k]);
+            for i in 0..n {
+                w[i] -= coeff * v_matrix[k][i];
+            }
+        }
+
         beta[j] = norm(&w);
         if beta[j] < 1e-12 {
             break;
@@ -1352,7 +1332,7 @@ where
             }
         }
 
-        // Normalise the transformed eigenvector... Really should do this...
+        // Normalise the transformed eigenvector
         let norm: f64 = evec.iter().map(|x| x * x).sum::<f64>().sqrt();
         for x in &mut evec {
             *x /= norm;
@@ -1370,4 +1350,243 @@ where
     }
 
     (largest_evals, transposed)
+}
+
+/////////////////
+// Lanczos SVD //
+/////////////////
+
+/// Compute sparse SVD using Lanczos on A^T A or AA^T
+///
+/// ### Params
+///
+/// * `matrix` - Sparse matrix (CSR or CSC)
+/// * `n_components` - Number of singular values/vectors to compute
+/// * `seed` - For reproducibility
+/// * `use_second_layer` - If true, use data_2 instead of data
+///
+/// ### Returns
+///
+/// `SvdResults` containing U (n×k), S (length k), and V (m×k)
+pub fn sparse_svd_lanczos<T, U, F>(
+    matrix: &CompressedSparseData2<T, U>,
+    n_components: usize,
+    seed: u64,
+    use_second_layer: bool,
+    col_means: Option<&[F]>,
+    col_stds: Option<&[F]>,
+) -> SvdResults<F>
+where
+    T: BixverseNumeric + SimdDistance + Into<F> + Clone,
+    U: BixverseNumeric + Into<F> + Clone,
+    F: BixverseFloat + SimdDistance + std::iter::Sum,
+{
+    let (n, m) = matrix.shape;
+    let use_ata = n > m;
+    let krylov_dim = if use_ata { m } else { n };
+    let n_iter = (n_components * 2 + 10).max(n_components).min(krylov_dim);
+
+    // keep both representations to make matvec operations fast
+    let (csr, csc);
+    let csr_owned;
+    let csc_owned;
+
+    match matrix.cs_type {
+        CompressedSparseFormat::Csr => {
+            csr = matrix;
+            csc_owned = matrix.transform();
+            csc = &csc_owned;
+        }
+        CompressedSparseFormat::Csc => {
+            csc = matrix;
+            csr_owned = matrix.transform();
+            csr = &csr_owned;
+        }
+    };
+
+    // helper to extract the right data layer and cast to F
+    let extract_data = |mat: &CompressedSparseData2<T, U>| -> Vec<F> {
+        if use_second_layer {
+            mat.data_2
+                .as_ref()
+                .expect("data_2 is None but use_second_layer is true")
+                .iter()
+                .copied()
+                .map(|v| v.into())
+                .collect()
+        } else {
+            mat.data.iter().copied().map(|v| v.into()).collect()
+        }
+    };
+
+    let data_csr_f = extract_data(csr);
+    let data_csc_f = extract_data(csc);
+
+    // matrix-vector product for A (using CSR)
+    let matvec_a = |x: &[F], y: &mut [F]| {
+        let x_scaled: Vec<F> = if let Some(sd) = col_stds {
+            x.iter().enumerate().map(|(j, &v)| v / sd[j]).collect()
+        } else {
+            x.to_vec()
+        };
+        let mean_dot: F = if let Some(mu) = col_means {
+            x_scaled.iter().enumerate().map(|(j, &v)| mu[j] * v).sum()
+        } else {
+            F::zero()
+        };
+
+        y.par_iter_mut().enumerate().for_each(|(i, yi)| {
+            let mut sum = F::zero();
+            for idx in csr.indptr[i]..csr.indptr[i + 1] {
+                let j = csr.indices[idx];
+                sum += data_csr_f[idx] * x_scaled[j];
+            }
+            if col_means.is_some() {
+                sum -= mean_dot;
+            }
+            *yi = sum;
+        });
+    };
+
+    // matrix-vector product for A^T (using CSC for memory contiguity)
+    let matvec_at = |x: &[F], y: &mut [F]| {
+        let x_sum: F = x.iter().copied().sum();
+
+        y.par_iter_mut().enumerate().for_each(|(j, yj)| {
+            let mut sum = F::zero();
+            for idx in csc.indptr[j]..csc.indptr[j + 1] {
+                let i = csc.indices[idx];
+                sum += data_csc_f[idx] * x[i];
+            }
+
+            if let Some(mu) = col_means {
+                sum -= mu[j] * x_sum;
+            }
+            if let Some(sd) = col_stds {
+                sum /= sd[j];
+            }
+            *yj = sum;
+        });
+    };
+
+    // select Gram matrix operator
+    #[allow(clippy::type_complexity)]
+    let matvec_gram: Box<dyn Fn(&[F], &mut [F]) + Sync> = if use_ata {
+        Box::new(|x: &[F], y: &mut [F]| {
+            let mut temp = vec![F::zero(); n];
+            matvec_a(x, &mut temp);
+            matvec_at(&temp, y);
+        })
+    } else {
+        Box::new(|x: &[F], y: &mut [F]| {
+            let mut temp = vec![F::zero(); m];
+            matvec_at(x, &mut temp);
+            matvec_a(&temp, y);
+        })
+    };
+
+    // lanczos iteration
+    let mut v_matrix = Mat::<F>::zeros(krylov_dim, n_iter);
+    let mut v = vec![F::zero(); krylov_dim];
+    let mut v_old = vec![F::zero(); krylov_dim];
+    let mut w = vec![F::zero(); krylov_dim];
+    let mut w_faer = faer::Col::<F>::zeros(krylov_dim);
+
+    let mut rng = StdRng::seed_from_u64(seed);
+    for i in 0..krylov_dim {
+        v[i] = F::from(rng.random::<f64>() - 0.5).unwrap();
+    }
+    normalise(&mut v);
+
+    let mut alpha = vec![F::zero(); n_iter];
+    let mut beta = vec![F::zero(); n_iter];
+
+    for j in 0..n_iter {
+        for i in 0..krylov_dim {
+            v_matrix[(i, j)] = v[i];
+        }
+
+        matvec_gram(&v, &mut w);
+        alpha[j] = dot(&w, &v);
+
+        for i in 0..krylov_dim {
+            w[i] -= alpha[j] * v[i];
+            if j > 0 {
+                w[i] -= beta[j - 1] * v_old[i];
+            }
+        }
+
+        // Gram-Schmidt / Orthogonalisation
+        // w -= Vj * (Vj^T * w)
+        for i in 0..krylov_dim {
+            w_faer[i] = w[i];
+        }
+        let vj = v_matrix.as_ref().subcols(0, j + 1);
+        let coeffs = vj.transpose() * w_faer.as_ref();
+        let proj = vj * coeffs.as_ref();
+        for i in 0..krylov_dim {
+            w[i] -= proj[i];
+        }
+
+        beta[j] = norm(&w);
+        if beta[j] < F::from(1e-12).unwrap() {
+            break;
+        }
+
+        v_old.copy_from_slice(&v);
+        v.copy_from_slice(&w);
+        normalise(&mut v);
+    }
+
+    // eigendecomposition and reconstruction
+    let (evals, evecs) = tridiag_eig(&alpha[..n_iter], &beta[..n_iter - 1]);
+
+    let mut indices: Vec<usize> = (0..evals.len()).collect();
+    indices.sort_by(|&i, &j| evals[j].partial_cmp(&evals[i]).unwrap());
+
+    let mut singular_values: Vec<F> = Vec::with_capacity(n_components);
+    let mut u_vecs: Vec<Vec<F>> = Vec::with_capacity(n_components);
+    let mut v_vecs: Vec<Vec<F>> = Vec::with_capacity(n_components);
+
+    for &idx in indices.iter().take(n_components) {
+        let eval = evals[idx];
+        if eval <= F::zero() {
+            continue;
+        }
+
+        let sigma = eval.sqrt();
+        singular_values.push(sigma);
+
+        // gram_evec = v_matrix * evecs.col(idx) via faer operator overloading
+        let gram_col = &v_matrix * evecs.col(idx);
+        let norm_val: F = gram_col.iter().map(|x| *x * *x).sum::<F>().sqrt();
+        let gram_evec: Vec<F> = gram_col.iter().map(|x| *x / norm_val).collect();
+
+        if use_ata {
+            let mut u_vec = vec![F::zero(); n];
+            matvec_a(&gram_evec, &mut u_vec);
+            for x in &mut u_vec {
+                *x /= sigma;
+            }
+            u_vecs.push(u_vec);
+            v_vecs.push(gram_evec);
+        } else {
+            let mut v_vec = vec![F::zero(); m];
+            matvec_at(&gram_evec, &mut v_vec);
+            for x in &mut v_vec {
+                *x /= sigma;
+            }
+            u_vecs.push(gram_evec);
+            v_vecs.push(v_vec);
+        }
+    }
+
+    let u = Mat::from_fn(n, singular_values.len(), |i, j| u_vecs[j][i]);
+    let v = Mat::from_fn(m, singular_values.len(), |i, j| v_vecs[j][i]);
+
+    SvdResults {
+        u,
+        s: singular_values,
+        v,
+    }
 }

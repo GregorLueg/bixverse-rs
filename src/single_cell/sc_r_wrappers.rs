@@ -10,6 +10,7 @@ use crate::single_cell::sc_analysis::seacells::SEACellsParams;
 use crate::single_cell::sc_analysis::super_cells::SuperCellParams;
 use crate::single_cell::sc_analysis::vision::SignatureGenes;
 use crate::single_cell::sc_batch_correction::fast_mnn::FastMnnParams;
+use crate::single_cell::sc_batch_correction::harmony::HarmonyParams;
 use crate::single_cell::sc_data::data_io::MinCellQuality;
 use crate::single_cell::sc_data::sc_synthetic_data::CellTypeConfig;
 use crate::single_cell::sc_processing::doublet_detection::BoostParams;
@@ -885,6 +886,102 @@ impl HotSpotParams {
             model,
             normalise,
             knn_params,
+        }
+    }
+}
+
+/////////////
+// Harmony //
+/////////////
+
+impl HarmonyParams {
+    /// Generate HarmonyParams from an R list.
+    ///
+    /// Should values not be found within the List, the parameters will default
+    /// to the values defined in `HarmonyParams::default()`.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the Harmony parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The `HarmonyParams` with all parameters set.
+    pub fn from_r_list(r_list: List) -> Self {
+        let defaults = Self::default();
+        let params_list = r_list.into_hashmap();
+
+        let k = params_list
+            .get("k")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.k);
+
+        let sigma = params_list
+            .get("sigma")
+            .and_then(|v| v.as_real_vector())
+            .map(|v| v.iter().map(|&x| x as f32).collect())
+            .unwrap_or(defaults.sigma);
+
+        let theta = params_list
+            .get("theta")
+            .and_then(|v| v.as_real_vector())
+            .map(|v| v.iter().map(|&x| x as f32).collect())
+            .unwrap_or(defaults.theta);
+
+        let lambda = params_list
+            .get("lambda")
+            .and_then(|v| v.as_real_vector())
+            .map(|v| v.iter().map(|&x| x as f32).collect())
+            .unwrap_or(defaults.lambda);
+
+        let block_size = params_list
+            .get("block_size")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.block_size);
+
+        let max_iter_kmeans = params_list
+            .get("max_iter_kmeans")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.max_iter_kmeans);
+
+        let max_iter_harmony = params_list
+            .get("max_iter_harmony")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.max_iter_harmony);
+
+        let epsilon_kmeans = params_list
+            .get("epsilon_kmeans")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.epsilon_kmeans);
+
+        let epsilon_harmony = params_list
+            .get("epsilon_harmony")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.epsilon_harmony);
+
+        let window_size = params_list
+            .get("window_size")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.window_size);
+
+        Self {
+            k,
+            sigma,
+            theta,
+            lambda,
+            block_size,
+            max_iter_kmeans,
+            max_iter_harmony,
+            epsilon_kmeans,
+            epsilon_harmony,
+            window_size,
         }
     }
 }

@@ -1,3 +1,16 @@
+# News
+
+## 0.1.3
+
+### Features
+
+- Sparse SVD and sparse randomised SVD were added for single cell.
+- Harmony added and MNN can take a pre-computed PCA now.
+
+### Fixes
+
+*NA*
+
 ## 0.1.2
 
 ### Features
@@ -13,14 +26,14 @@
 
 ### Features
 
-*NA*
+`NA`
 
 ### Fixes
 
 - Bumped the version of `ann-search-rs` to ensure consistency across packages/
   crates.
 
-## 0.1.0 (officialrelease)
+## 0.1.0 (official release)
 
 This version ported over all of the Rust code from
 [bixverse](https://github.com/GregorLueg/bixverse) as an independent crate.

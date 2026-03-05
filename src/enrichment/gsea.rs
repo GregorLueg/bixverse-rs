@@ -1,3 +1,6 @@
+//! Gene set enrichment analysis based on the work of Korotkevich, et al.,
+//! bioRxiv, 2021.
+
 use rand::distr::Uniform;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -32,60 +35,51 @@ pub type MultiLevelErrRes<T> = (Vec<T>, Vec<T>);
 /////////////
 
 /// Structure to store GSEA stats
-///
-/// ### Fields
-///
-/// * `es` - Enrichment score
-/// * `leading_edge` - The index positions of the leading edge genes
-/// * `top` - Top points for plotting purposes
-/// * `bottom` - Bottom points for plotting purposes
 #[derive(Clone, Debug)]
 pub struct GseaStats<T> {
+    /// Enrichment score
     pub es: T,
+    /// The index positions of the leading edge genes
     pub leading_edge: Vec<i32>,
+    /// Top points for plotting purposes
     pub top: Vec<T>,
+    /// Bottom points for plotting purposes
     pub bottom: Vec<T>,
 }
 
 /// Structure for final GSEA results from any algorithm
-///
-/// ### Fields
-///
-/// * `es` - Enrichment score
-/// * `nes` - Normalised enrichment score
-/// * `pvals` - The p-value for this pathway based on permutations
-/// * `n_more_extreme` - The number of permutations with higher/lower ES
-/// * `le_zero` - The number of permutation ES ≤ 0
-/// * `ge_zero` - The number of permutation ES ≥ 0
-/// * `size` - The size of the pathway
 #[derive(Clone, Debug)]
 pub struct GseaResults<'a, T> {
+    /// Enrichment score
     pub es: &'a [T],
+    /// Normalised enrichment score
     pub nes: Vec<Option<T>>,
+    /// The p-value for this pathway based on permutations
     pub pvals: Vec<T>,
+    /// The number of permutations with higher/lower ES
     pub n_more_extreme: Vec<usize>,
+    /// The number of permutation ES ≤ 0
     pub le_zero: Vec<usize>,
+    /// The number of permutation ES ≥ 0
     pub ge_zero: Vec<usize>,
+    /// The size of the pathway
     pub size: &'a [usize],
 }
 
 /// Structure for results from the different GSEA permutation methods
-///
-/// ### Fields
-///
-/// * `le_es` - The number of permutations less than the score
-/// * `ge_es` - The number of permutations greater than the score
-/// * `le_zero` - The number of permutation ES ≤ 0
-/// * `ge_zero` - The number of permutation ES ≥ 0
-/// * `le_zero_sum` - The sum of permuted enrichment scores that were ≤ 0
-/// * `ge_zero_sum` - The sum of permuted enrichment scores that were ≥ 0
 #[derive(Clone, Debug)]
 pub struct GseaBatchResults<T> {
+    /// The number of permutations less than the score
     pub le_es: Vec<usize>,
+    /// The number of permutations greater than the score
     pub ge_es: Vec<usize>,
+    /// The number of permutation ES ≤ 0
     pub le_zero: Vec<usize>,
+    /// The number of permutation ES ≥ 0
     pub ge_zero: Vec<usize>,
+    /// The sum of permuted enrichment scores that were ≤ 0
     pub le_zero_sum: Vec<T>,
+    /// The sum of permuted enrichment scores that were ≥ 0
     pub ge_zero_sum: Vec<T>,
 }
 
@@ -94,16 +88,13 @@ pub struct GseaBatchResults<T> {
 ////////////
 
 /// Structure to store GSEA params
-///
-/// ### Fields
-///
-/// * `gsea_param` - The GSEA parameter, usually 1.0
-/// * `max_size` - The maximum size of the allowed pathways
-/// * `min_size` - The minimum size of the allowed pathways
 #[derive(Clone, Debug)]
 pub struct GseaParams<T> {
+    /// The GSEA parameter, usually 1.0
     pub gsea_param: T,
+    /// The maximum size of the allowed pathways
     pub max_size: usize,
+    /// The minimum size of the allowed pathways
     pub min_size: usize,
 }
 

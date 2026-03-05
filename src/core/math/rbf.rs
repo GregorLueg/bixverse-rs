@@ -1,3 +1,5 @@
+//! Radial basis function to transform distances
+
 use faer::{Mat, MatRef};
 use rayon::iter::*;
 
@@ -12,9 +14,12 @@ use crate::utils::matrix_utils::*;
 /// Enum for the RBF function
 #[derive(Debug, Default)]
 pub enum RbfType {
+    /// Gaussian radial basis function
     #[default]
     Gaussian,
+    /// Bump radial basis function
     Bump,
+    /// Inverse quadratic radial basis function
     InverseQuadratic,
 }
 

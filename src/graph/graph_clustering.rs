@@ -1,3 +1,5 @@
+//! Graph-based clustering algorithms, namely spectral clustering
+
 use faer::{Mat, MatRef};
 use rand::prelude::*;
 

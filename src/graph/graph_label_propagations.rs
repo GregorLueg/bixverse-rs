@@ -1,3 +1,6 @@
+//! Label propagation algorithms over kNN graphs specifically (but with
+//! extension to other domains)
+
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::collections::VecDeque;
@@ -44,16 +47,13 @@ pub fn parse_symmetry_strategy(s: &str) -> Option<SymmetryWeightStrategy> {
 ///////////////////////////
 
 /// Structure to store KNN graphs and do label propagation
-///
-/// ### Fields
-///
-/// * `offsets` - Stores the offsets for node i's neighbours
-/// * `neighbours`- Flat array with neighbour indices
-/// * `weights` - Normalised edge weights
 #[derive(Debug, Clone)]
 pub struct KnnLabPropGraph<T> {
+    /// Stores the offsets for node i's neighbours
     pub offsets: Vec<usize>,
+    /// Flat array with neighbour indices
     pub neighbours: Vec<usize>,
+    /// Normalised edge weights
     pub weights: Vec<T>,
 }
 
@@ -161,10 +161,10 @@ where
             if let Some(ref strategy) = symmetrise {
                 adj[v]
                     .entry(u)
-                    .and_modify(|w| {
+                    .and_modify(|w: &mut T| {
                         *w = match strategy {
-                            SymmetryWeightStrategy::Min => w.min(weights[i]),
-                            SymmetryWeightStrategy::Max => w.max(weights[i]),
+                            SymmetryWeightStrategy::Min => (*w).min(weights[i]),
+                            SymmetryWeightStrategy::Max => (*w).max(weights[i]),
                             SymmetryWeightStrategy::Average => {
                                 (*w + weights[i]) / T::from_f64(2.0).unwrap()
                             }
@@ -226,10 +226,11 @@ where
             if let Some(ref strategy) = symmetrise {
                 adj[v]
                     .entry(u)
-                    .and_modify(|w| {
+                    .and_modify(|w: &mut T| {
+                        // to avoid rust analyser complains
                         *w = match strategy {
-                            SymmetryWeightStrategy::Min => w.min(weights[i]),
-                            SymmetryWeightStrategy::Max => w.max(weights[i]),
+                            SymmetryWeightStrategy::Min => (*w).min(weights[i]),
+                            SymmetryWeightStrategy::Max => (*w).max(weights[i]),
                             SymmetryWeightStrategy::Average => {
                                 (*w + weights[i]) / T::from_f64(2.0).unwrap()
                             }

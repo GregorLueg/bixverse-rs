@@ -1,3 +1,5 @@
+//! Specific R wrappers over structures or functions within the `core` module
+
 use extendr_api::prelude::*;
 use std::collections::BTreeMap;
 

@@ -2,6 +2,8 @@ use ann_search_rs::utils::KnnValidation;
 use ann_search_rs::utils::dist::Dist;
 use ann_search_rs::*;
 use faer::{MatRef, RowRef};
+use rayon::prelude::*;
+use rustc_hash::FxHashSet;
 use std::time::Instant;
 
 use crate::core::math::sparse::coo_to_csr;
@@ -232,7 +234,7 @@ pub fn compute_distance_knn(a: RowRef<f32>, b: RowRef<f32>, metric: &Dist) -> f3
     }
 }
 
-/// Helper function to transform kNN data into CompressedSparseData
+/// Helper function to transform kNN data into CompressedSparseData2
 ///
 /// ### Params
 ///
@@ -242,13 +244,13 @@ pub fn compute_distance_knn(a: RowRef<f32>, b: RowRef<f32>, metric: &Dist) -> f3
 ///
 /// ### Return
 ///
-/// `CompressedSparseData` in CSR format with distances to the k-nearest
+/// `CompressedSparseData2` in CSR format with distances to the k-nearest
 /// neighbours stored.
 pub fn knn_to_sparse_dist(
     knn_indices: &[Vec<usize>],
     knn_dists: &[Vec<f32>],
     n_obs: usize,
-) -> CompressedSparseData<f32> {
+) -> CompressedSparseData2<f32> {
     let mut rows = Vec::new();
     let mut cols = Vec::new();
     let mut vals = Vec::new();
@@ -679,4 +681,32 @@ pub fn generate_knn_with_dist(
     };
 
     remove_self(indices, distances)
+}
+
+///////////
+// Other //
+///////////
+
+/// Compare kNN graphs
+///
+/// ### Params
+///
+/// * `a` - The first kNN graph in form samples x neighbour indices
+/// * `b` - The second kNN graph in form samples x neighbour indices
+///
+/// ### Returns
+///
+/// Number of intersecting neighbours across the two.
+pub fn compare_knn_graphs(a: MatRef<i32>, b: MatRef<i32>) -> Vec<i32> {
+    assert_eq!(a.nrows(), b.nrows());
+
+    (0..a.nrows())
+        .into_par_iter()
+        .map(|row| {
+            let set: FxHashSet<i32> = (0..a.ncols()).map(|j| a[(row, j)]).collect();
+            (0..b.ncols())
+                .filter(|&j| set.contains(&b[(row, j)]))
+                .count() as i32
+        })
+        .collect()
 }
