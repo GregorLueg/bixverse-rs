@@ -1,3 +1,6 @@
+//! Implementation of the miloR differential abundance approach on top of kNN
+//! graphs, see Dann, et al., Nat Biotechnol, 2022
+
 use ann_search_rs::annoy::AnnoyIndex;
 use ann_search_rs::hnsw::HnswIndex;
 use ann_search_rs::nndescent::NNDescent;
@@ -28,12 +31,17 @@ use crate::prelude::*;
 ///
 /// * `knn_params` - All of the kNN parameters
 pub struct MiloRParams {
-    // MiloR parameters
+    /// Proportion of cells to sample as neighbourhood indices
     pub prop: f64,
+    /// Number of neighbours to use for refinement
     pub k_refine: usize,
+    /// Strategy for refining sampled indices (`"approximate"`, `"bruteforce"`,
+    /// or `"index"`)
     pub refinement_strategy: String,
+    /// Type of kNN index to use (`"annoy"`, `"hnsw"` or `"nndescent"`)
     pub index_type: String,
-    // kNN
+    /// Parameters for the various approximate nearest neighbour searches
+    /// in ann-search-rs
     pub knn_params: KnnParams,
 }
 
@@ -154,16 +162,13 @@ pub enum KnnIndexType {
 //////////////
 
 /// Enum specifying the refinement strategy for neighbourhood sampling
-///
-/// ### Variants
-///
-/// * `Approximate` - Search within k neighbours only
-/// * `BruteForce` - Linear search through all cells
-/// * `IndexBased` - Use existing kNN index for search
 #[derive(Debug, Clone, Copy)]
 pub enum RefinementStrategy {
+    /// Search within k neighbours only
     Approximate,
+    /// Linear search through all cells
     BruteForce,
+    /// Use existing kNN index for search
     IndexBased,
 }
 

@@ -1,3 +1,6 @@
+//! Implementation of the VISION framework to score spatially correlated
+//! gene sets. See DeTamaso, et al., Nat. Commun., 2019
+
 use extendr_api::{Conversions, List};
 use rayon::prelude::*;
 use std::time::Instant;
@@ -10,14 +13,11 @@ use crate::prelude::*;
 ////////////
 
 /// Structure to store the indices of the SignatureGenes
-///
-/// ### Fields
-///
-/// * `positive` - The gene indices of the positive genes
-/// * `negative` - The gene indices of the negative genes
 #[derive(Clone, Debug)]
 pub struct SignatureGenes {
+    /// The gene indices of the positive genes
     pub positive: Vec<usize>,
+    /// The gene indices of the negative genes
     pub negative: Vec<usize>,
 }
 

@@ -24,8 +24,11 @@ pub type NestedBtreeMap = BTreeMap<String, BTreeMap<String, FxHashSet<String>>>;
 /// Error handling for named numeric conversion
 #[derive(Debug)]
 pub enum NamedVecError {
+    /// Not numeric error
     NotNumeric,
+    /// No Names provided error
     NoNames,
+    /// Missing values in the data error
     MissingValues,
 }
 

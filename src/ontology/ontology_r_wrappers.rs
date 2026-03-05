@@ -1,3 +1,5 @@
+//! R wrappers for the methods that work on ontologies
+
 use extendr_api::*;
 use std::collections::BTreeMap;
 

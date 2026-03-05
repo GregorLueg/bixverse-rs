@@ -1,3 +1,6 @@
+//! Implementation of the Harmony batch correction, please see Korsunsky, et
+//! al., Nat Methods, 2019
+
 use ann_search_rs::{utils::dist::Dist, utils::k_means_utils::train_centroids};
 use faer::linalg::solvers::PartialPivLu;
 use faer::{Mat, MatRef, linalg::solvers::DenseSolveCore};
@@ -15,29 +18,26 @@ use crate::utils::matrix_utils::{flat_row_major_to_mat, mat_to_flat_row_major};
 ////////////
 
 /// Parameters for Harmony batch correction.
-///
-/// ### Fields
-///
-/// * `k`: number of clusters
-/// * `sigma`: per-cluster diversity weights (length 1 or K)
-/// * `theta`: per-variable diversity penalties (length 1 or n_variables)
-/// * `lambda`: ridge penalty (length 1, broadcast to all design matrix columns)
-/// * `block_size`: fraction of cells to update per block (0.0-1.0)
-/// * `max_iter_kmeans`: maximum k-means iterations per Harmony round
-/// * `max_iter_harmony`: maximum Harmony outer iterations
-/// * `epsilon_kmeans`: k-means convergence threshold
-/// * `epsilon_harmony`: harmony convergence threshold
-/// * `window_size`: window size for convergence checking
 pub struct HarmonyParams {
+    /// Number of clusters
     pub k: usize,
+    /// Per-cluster diversity weights (length 1 or K)
     pub sigma: Vec<f32>,
+    /// Per-variable diversity penalties (length 1 or n_variables)
     pub theta: Vec<f32>,
+    /// Ridge penalty (length 1, broadcast to all design matrix columns)
     pub lambda: Vec<f32>,
+    /// Fraction of cells to update per block (0.0-1.0)
     pub block_size: f32,
+    /// Maximum k-means iterations per Harmony round
     pub max_iter_kmeans: usize,
+    /// Maximum Harmony outer iterations
     pub max_iter_harmony: usize,
+    /// K-means clustering convergence threshold
     pub epsilon_kmeans: f32,
+    /// Harmony convergence threshold
     pub epsilon_harmony: f32,
+    /// Window size for convergence checking
     pub window_size: usize,
 }
 
@@ -63,14 +63,12 @@ impl Default for HarmonyParams {
 // Helpers //
 /////////////
 
-/// Observed and expected cluster-batch assignment counts for one batch variable.
-///
-/// ### Fields
-///
-/// * `o` - Observed counts (K x B): sum of soft assignments per cluster per level
-/// * `e` - Expected counts (K x B): expected assignments under uniform mixing
+/// Observed and expected cluster-batch assignment counts for one batch
+/// variable.
 pub struct OEPair {
+    /// Observed counts (K x B): sum of soft assignments per cluster per level
     pub o: Mat<f32>,
+    /// Expected counts (K x B): expected assignments under uniform mixing
     pub e: Mat<f32>,
 }
 
@@ -79,18 +77,15 @@ pub struct OEPair {
 /// Holds the mapping from cells to levels, level frequencies, and
 /// cell index lists per level for one batch variable (e.g. "sample",
 /// "technology", "donor").
-///
-/// ### Fields
-///
-/// * `batch_indices` - cell indices per level (length n_levels)
-/// * `pr_b` - level frequencies (length n_levels)
-/// * `n_levels` - number of distinct levels
-/// * `cell_to_level` - for each cell, its level in this variable (length N)
 #[derive(Debug, Clone)]
 pub struct BatchInfo {
+    /// Cell indices per level (length n_levels)
     pub batch_indices: Vec<Vec<usize>>,
+    /// Level frequencies (length n_levels)
     pub pr_b: Vec<f32>,
+    /// Number of distinct levels
     pub n_levels: usize,
+    /// For each cell, its level in this variable (length N)
     pub cell_to_level: Vec<usize>,
 }
 

@@ -1,3 +1,6 @@
+//! Implementation of the (fast)MNN approach from Haghverdi, et al, Nat
+//! Biotechnol, 2018
+
 use ann_search_rs::*;
 use faer::{Mat, MatRef};
 use rayon::prelude::*;
@@ -13,25 +16,21 @@ use crate::single_cell::sc_processing::pca::*;
 ////////////
 
 /// Parameters for fastMNN batch correction
-///
-/// ### Fields
-///
-/// * `sigma` - Bandwidth of the Gaussian smoothing kernel (as proportion of
-///   space radius after optional cosine normalisation)
-/// * `cos_norm` - Apply cosine normalisation before computing distances
-/// * `var_adj` - Apply variance adjustment to avoid kissing effects
-/// * `no_pcs` - Number of PCs to use for the MNN calculations
-/// * `random_svd` - Boolean. Shall randomised SVD be used.
-/// * `knn_params` - The KnnParams that contains all the hyperparameter for the
-///   various KnnIndices that are implemented.
 #[derive(Clone, Debug)]
 pub struct FastMnnParams {
+    /// Bandwidth of the Gaussian smoothing kernel (as proportion of space
+    /// radius after optional cosine normalisation)/
     pub sigma: f32,
+    /// Apply cosine normalisation before computing distances.
     pub cos_norm: bool,
+    /// Apply variance adjustment to avoid kissing effects.
     pub var_adj: bool,
+    /// Number of PCs to use for the MNN calculations
     pub no_pcs: usize,
+    /// Boolean. Shall randomised SVD be used.
     pub random_svd: bool,
-    // knn parameters
+    /// Parameters for the various approximate nearest neighbour searches
+    /// in ann-search-rs
     pub knn_params: KnnParams,
 }
 
