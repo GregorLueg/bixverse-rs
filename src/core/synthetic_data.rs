@@ -387,3 +387,76 @@ where
     }
     sparse_mat
 }
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use faer::Mat;
+
+    #[test]
+    fn test_parse_sparsification() {
+        assert!(matches!(
+            parse_sparsification("log"),
+            Some(SparsityFunction::Logistic)
+        ));
+        assert!(matches!(
+            parse_sparsification("powerdecay"),
+            Some(SparsityFunction::PowerDecay)
+        ));
+        assert!(matches!(parse_sparsification("unknown"), None));
+    }
+
+    #[test]
+    fn test_generate_bulk_rnaseq_no_modules() {
+        let num_samples = 10;
+        let num_genes = 50;
+        let data = generate_bulk_rnaseq::<f64>(num_samples, num_genes, 42, false, None);
+
+        assert_eq!(data.count_matrix.nrows(), num_genes);
+        assert_eq!(data.count_matrix.ncols(), num_samples);
+        assert_eq!(data.gene_modules.len(), num_genes);
+
+        // With add_modules = false, all genes should be assigned to background module 0
+        assert!(data.gene_modules.iter().all(|&m| m == 0));
+    }
+
+    #[test]
+    fn test_generate_bulk_rnaseq_with_modules() {
+        let num_samples = 10;
+        let num_genes = 100;
+        let module_sizes = vec![20, 30]; // Total 50 genes in modules, 50 in background
+
+        let data =
+            generate_bulk_rnaseq::<f64>(num_samples, num_genes, 42, true, Some(module_sizes));
+
+        assert_eq!(data.count_matrix.nrows(), num_genes);
+        assert_eq!(data.gene_modules.len(), num_genes);
+
+        // Count module assignments
+        let mod_1_count = data.gene_modules.iter().filter(|&&m| m == 1).count();
+        let mod_2_count = data.gene_modules.iter().filter(|&&m| m == 2).count();
+        let background_count = data.gene_modules.iter().filter(|&&m| m == 0).count();
+
+        assert_eq!(mod_1_count, 20);
+        assert_eq!(mod_2_count, 30);
+        assert_eq!(background_count, 50);
+    }
+
+    #[test]
+    fn test_simulate_dropouts_dimensions() {
+        // Create a fake dense count matrix (10 genes, 5 samples)
+        let mat: Mat<f64> = Mat::from_fn(10, 5, |_, _| 100.0);
+
+        let log_sparse = simulate_dropouts_logistic(&mat.as_ref(), 50.0, 1.0, 0.1, 42);
+        assert_eq!(log_sparse.nrows(), 10);
+        assert_eq!(log_sparse.ncols(), 5);
+
+        let power_sparse = simulate_dropouts_power_decay(&mat.as_ref(), 50.0, 0.5, 0.1, 42);
+        assert_eq!(power_sparse.nrows(), 10);
+        assert_eq!(power_sparse.ncols(), 5);
+    }
+}

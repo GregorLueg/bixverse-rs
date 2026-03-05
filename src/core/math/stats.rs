@@ -745,3 +745,83 @@ where
         .collect::<Vec<bool>>();
     (res, margin)
 }
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_logit_and_inv_logit() {
+        let p: f64 = 0.5;
+        let log_odds: f64 = logit(p);
+        assert!((log_odds - 0.0).abs() < 1e-6); // ln(0.5 / 0.5) = ln(1) = 0.0
+
+        let recovered_p = inv_logit(log_odds);
+        assert!((recovered_p - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_z_scores_to_pval() {
+        let z_scores: Vec<f64> = vec![0.0, 1.95996398454]; // ~ 95% confidence interval
+
+        let pvals_two_sided = z_scores_to_pval(&z_scores, "twosided");
+        // Z = 0 -> p = 1.0
+        assert!((pvals_two_sided[0] - 1.0).abs() < 1e-6);
+        // Z = 1.96 -> p ≈ 0.05
+        assert!((pvals_two_sided[1] - 0.05).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_calc_fdr() {
+        // Classic Benjamini-Hochberg test case
+        let pvals: Vec<f64> = vec![0.01, 0.04, 0.03];
+        // Sorted: 0.01 (idx 0), 0.03 (idx 2), 0.04 (idx 1)
+        // Adjusted tmp: 0.01*(3/1)=0.03, 0.03*(3/2)=0.045, 0.04*(3/3)=0.04
+        // Monotonic min backwards: 0.04, min(0.04, 0.045)=0.04, min(0.04, 0.03)=0.03
+        // Result: [0.03, 0.04, 0.04]
+        let fdr = calc_fdr(&pvals);
+
+        assert!((fdr[0] - 0.03).abs() < 1e-6);
+        assert!((fdr[1] - 0.04).abs() < 1e-6);
+        assert!((fdr[2] - 0.04).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_mad_outlier() {
+        let vec: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 100.0];
+        // Median is 3.0
+        // Deviations: [2.0, 1.0, 0.0, 1.0, 97.0]
+        // MAD (median of deviations) is 1.0
+        // Threshold = 3.0, so margin = 3.0
+        // Acceptable range: 3.0 ± 3.0 = [0.0, 6.0]
+        let (outliers, margin) = mad_outlier(&vec, 3.0, OutlierDirection::Both);
+
+        assert!((margin - 3.0).abs() < 1e-6);
+        assert_eq!(outliers, vec![false, false, false, false, true]); // 100.0 is an outlier
+    }
+
+    #[test]
+    fn test_parse_helpers() {
+        assert!(matches!(
+            get_test_alternative("twosided"),
+            Some(TestAlternative::TwoSided)
+        ));
+        assert!(matches!(
+            get_test_alternative("GREATER"),
+            Some(TestAlternative::Greater)
+        ));
+
+        assert!(matches!(
+            parse_outlier_type("below"),
+            Some(OutlierDirection::Below)
+        ));
+        assert!(matches!(
+            parse_outlier_type("Twosided"),
+            Some(OutlierDirection::Both)
+        ));
+    }
+}

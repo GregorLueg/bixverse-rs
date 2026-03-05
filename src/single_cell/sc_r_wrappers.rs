@@ -6,6 +6,7 @@ use extendr_api::*;
 use crate::single_cell::sc_analysis::hdwgcna_meta_cells::MetaCellParams;
 use crate::single_cell::sc_analysis::hotspot::HotSpotParams;
 use crate::single_cell::sc_analysis::milo_r::MiloRParams;
+use crate::single_cell::sc_analysis::scenic::{ExtraTreesConfig, RandomForestConfig};
 use crate::single_cell::sc_analysis::seacells::SEACellsParams;
 use crate::single_cell::sc_analysis::super_cells::SuperCellParams;
 use crate::single_cell::sc_analysis::vision::SignatureGenes;
@@ -982,6 +983,129 @@ impl HarmonyParams {
             epsilon_kmeans,
             epsilon_harmony,
             window_size,
+        }
+    }
+}
+
+////////////////////
+// SCENIC - Trees //
+////////////////////
+
+impl RandomForestConfig {
+    /// Generate RandomForestConfig from an R list.
+    ///
+    /// Should values not be found within the List, the parameters will default
+    /// to the values defined in `RandomForestConfig::default()`.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the RandomForest parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The `RandomForestConfig` with all parameters set.
+    pub fn from_r_list(r_list: List) -> Self {
+        let defaults = Self::default();
+        let params_list = r_list.into_hashmap();
+        let n_trees = params_list
+            .get("n_trees")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.n_trees);
+        let min_samples_leaf = params_list
+            .get("min_samples_leaf")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.min_samples_leaf);
+        let n_features_split = params_list
+            .get("n_features_split")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.n_features_split);
+        let subsample_rate = params_list
+            .get("subsample_rate")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.subsample_rate);
+        let bootstrap = params_list
+            .get("bootstrap")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.bootstrap);
+        let max_depth = params_list
+            .get("max_depth")
+            .and_then(|v| v.as_integer())
+            .map(|v| Some(v as usize))
+            .unwrap_or(defaults.max_depth);
+        let subsample_frac = params_list
+            .get("subsample_frac")
+            .and_then(|v| v.as_real())
+            .map(|v| Some(v as f32))
+            .unwrap_or(defaults.subsample_frac);
+        Self {
+            n_trees,
+            min_samples_leaf,
+            n_features_split,
+            subsample_rate,
+            bootstrap,
+            max_depth,
+            subsample_frac,
+        }
+    }
+}
+
+impl ExtraTreesConfig {
+    /// Generate ExtraTreesConfig from an R list.
+    ///
+    /// Should values not be found within the List, the parameters will default
+    /// to the values defined in `ExtraTreesConfig::default()`.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the ExtraTrees parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The `ExtraTreesConfig` with all parameters set.
+    pub fn from_r_list(r_list: List) -> Self {
+        let defaults = Self::default();
+        let params_list = r_list.into_hashmap();
+        let n_trees = params_list
+            .get("n_trees")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.n_trees);
+        let min_samples_leaf = params_list
+            .get("min_samples_leaf")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.min_samples_leaf);
+        let n_features_split = params_list
+            .get("n_features_split")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.n_features_split);
+        let n_thresholds = params_list
+            .get("n_thresholds")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.n_thresholds);
+        let max_depth = params_list
+            .get("max_depth")
+            .and_then(|v| v.as_integer())
+            .map(|v| Some(v as usize))
+            .unwrap_or(defaults.max_depth);
+        let subsample_frac = params_list
+            .get("subsample_frac")
+            .and_then(|v| v.as_real())
+            .map(|v| Some(v as f32))
+            .unwrap_or(defaults.subsample_frac);
+        Self {
+            n_trees,
+            min_samples_leaf,
+            n_features_split,
+            n_thresholds,
+            max_depth,
+            subsample_frac,
         }
     }
 }

@@ -10,6 +10,7 @@ pub mod hdwgcna_meta_cells;
 pub mod hotspot;
 pub mod milo_r;
 pub mod module_scoring;
+pub mod scenic;
 pub mod seacells;
 pub mod super_cells;
 pub mod vision;

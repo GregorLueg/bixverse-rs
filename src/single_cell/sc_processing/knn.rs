@@ -54,6 +54,8 @@ pub fn parse_knn_method(s: &str) -> Option<KnnSearch> {
 ///
 /// ### Fields
 ///
+/// Below are the fields for the kNN generation via `ann-search-rs`.
+///
 /// **General**
 ///
 /// * `knn_method` - Which of the kNN methods to use. One of `"annoy"`, `"hnsw"`
@@ -72,19 +74,15 @@ pub fn parse_knn_method(s: &str) -> Option<KnnSearch> {
 ///
 /// * `delta` - Early termination criterium.
 /// * `diversify_prob` - Diversifying probability at the end of the index
-///   generation.
+///   generation. Generates additional random edges which can improve the
+///   Recall.
 /// * `ef_budget` - Optional query budget.
 ///
-/// **LSH**
+/// **HNSW**
 ///
-/// * `bits` - Number of bits to use.
-/// * `n_tables` - Number of hash tables to use.
-/// * `max_candidates` - Optional query budget.
-///
-/// **IVF**
-///
-/// * `n_centroids` - Number of centroids to use.
-/// * `n_probes` - Number of centroids to probe.
+/// * `m` - Number of edges to generate per layer.
+/// * `ef_construction` - Budget during the construction of the index.
+/// * `ef_search` - Budget during the search of the index.
 #[derive(Clone, Debug)]
 pub struct KnnParams {
     // general params

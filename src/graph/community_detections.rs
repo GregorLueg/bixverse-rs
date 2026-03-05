@@ -588,3 +588,59 @@ where
 
     final_labels
 }
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::math::sparse::CompressedSparseData;
+
+    fn build_barbell_graph() -> SparseGraph<f64> {
+        // Two triangles (0,1,2) and (3,4,5) connected by edge (2,3)
+        // Edges: 0-1, 1-2, 2-0, 3-4, 4-5, 5-3, 2-3
+        // Symmetric CSR representation:
+        let indptr = vec![0, 2, 4, 7, 10, 12, 14];
+        let indices = vec![
+            1, 2, // 0's neighbors
+            0, 2, // 1's neighbors
+            0, 1, 3, // 2's neighbors
+            2, 4, 5, // 3's neighbors
+            3, 5, // 4's neighbors
+            3, 4, // 5's neighbors
+        ];
+        let data = vec![1.0; 14];
+
+        let csr = CompressedSparseData::<f64, f64>::new_csr(&data, &indices, &indptr, None, (6, 6));
+        SparseGraph::new(6, csr, false)
+    }
+
+    #[test]
+    fn test_louvain_barbell() {
+        let graph = build_barbell_graph();
+        let comms = louvain_sparse_graph(&graph, 1.0, 10, 42);
+
+        // 0, 1, 2 should share a community
+        assert_eq!(comms[0], comms[1]);
+        assert_eq!(comms[1], comms[2]);
+        // 3, 4, 5 should share a different community
+        assert_eq!(comms[3], comms[4]);
+        assert_eq!(comms[4], comms[5]);
+        assert_ne!(comms[2], comms[3]);
+    }
+
+    #[test]
+    fn test_walktrap_barbell() {
+        let graph = build_barbell_graph();
+        // Ask for exactly 2 clusters
+        let comms = walktrap_sparse_graph(&graph, 3, 2, "complete", false);
+
+        assert_eq!(comms[0], comms[1]);
+        assert_eq!(comms[1], comms[2]);
+        assert_eq!(comms[3], comms[4]);
+        assert_eq!(comms[4], comms[5]);
+        assert_ne!(comms[2], comms[3]);
+    }
+}

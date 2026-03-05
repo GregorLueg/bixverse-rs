@@ -204,3 +204,40 @@ fn sylvester_solver_direct<T: BixverseFloat>(
 
     res
 }
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use faer::Mat;
+
+    #[test]
+    fn test_linear_regression() {
+        let x = vec![1.0, 2.0, 3.0];
+        let y = vec![3.0, 5.0, 7.0]; // Formula: y = 2x + 1
+        let (intercept, slope): (f64, f64) = linear_regression(&x, &y);
+
+        assert!((intercept - 1.0).abs() < 1e-6);
+        assert!((slope - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_sylvester_solver() {
+        // Solving AX + XB = C
+        // Let A = 2*I, B = 3*I. Then 2IX + 3XI = 5X = C
+        // If C = 10*I, then X = 2*I
+        let mat_a: Mat<f64> = Mat::from_fn(2, 2, |i, j| if i == j { 2.0 } else { 0.0 });
+        let mat_b: Mat<f64> = Mat::from_fn(2, 2, |i, j| if i == j { 3.0 } else { 0.0 });
+        let mat_c: Mat<f64> = Mat::from_fn(2, 2, |i, j| if i == j { 10.0 } else { 0.0 });
+
+        let x = sylvester_solver(&mat_a.as_ref(), &mat_b.as_ref(), &mat_c.as_ref());
+
+        assert!((x[(0, 0)] - 2.0).abs() < 1e-6);
+        assert!((x[(1, 1)] - 2.0).abs() < 1e-6);
+        assert!((x[(0, 1)] - 0.0).abs() < 1e-6);
+        assert!((x[(1, 0)] - 0.0).abs() < 1e-6);
+    }
+}

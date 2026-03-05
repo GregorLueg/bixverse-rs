@@ -51,9 +51,9 @@ where
     (total_zeroes, row_zeroes, col_zeroes)
 }
 
-//////////////////////////////
-// Sparse format conversion //
-//////////////////////////////
+///////////////////////
+// Sparse structures //
+///////////////////////
 
 /// Type to describe the CompressedSparseFormat
 #[derive(Debug, Clone)]
@@ -62,6 +62,27 @@ pub enum CompressedSparseFormat {
     Csc,
     /// CSR-formatted data
     Csr,
+}
+
+impl CompressedSparseFormat {
+    /// Returns boolean if it's CSC
+    ///
+    /// ### Returns
+    ///
+    /// Boolean indicating if CSC
+    #[inline(always)]
+    pub fn is_csc(&self) -> bool {
+        matches!(self, CompressedSparseFormat::Csc)
+    }
+    /// Returns boolean if it's CSR
+    ///
+    /// ### Returns
+    ///
+    /// Boolean indicating if CSR
+    #[inline(always)]
+    pub fn is_csr(&self) -> bool {
+        matches!(self, CompressedSparseFormat::Csr)
+    }
 }
 
 /// Helper function to parse compressed sparse format
@@ -81,15 +102,57 @@ pub fn parse_compressed_sparse_format(s: &str) -> Option<CompressedSparseFormat>
     }
 }
 
-#[allow(dead_code)]
-impl CompressedSparseFormat {
-    /// Returns boolean if it's CSC
-    pub fn is_csc(&self) -> bool {
-        matches!(self, CompressedSparseFormat::Csc)
+/// Generate structure to store sparse rows or columns
+///
+/// ### Fields
+///
+/// * `indices` - The indices of the values/non-zero positions
+/// * `data` - The values in the row/columns
+/// * `data_2` - An optional second data layer
+/// * `cs_type` - Is the data stored in `Csr` or `Csc`. `Csr` -> sparse row;
+///   `Csc` -> sparse column
+/// * `length` - Total values in that dimension
+pub struct SparseAxis<T, U = T> {
+    pub indices: Vec<usize>,
+    pub data: Vec<T>,
+    pub data_2: Option<Vec<U>>,
+    pub cs_type: CompressedSparseFormat,
+    pub len: usize,
+}
+
+impl<T, U> SparseAxis<T, U>
+where
+    T: BixverseNumeric,
+    U: BixverseNumeric,
+{
+    /// Generate a new `SparseAxis` in CSC format
+    ///
+    /// ### Params
+    ///
+    /// * `indices` - The indices of the values/non-zero positions
+    /// * `data` - The values in the row/columns
+    /// * `data_2` - An optional second data layer
+    /// * `len` - Number of rows in this sparse column
+    pub fn new_csc(indices: Vec<usize>, data: Vec<T>, data_2: Option<Vec<U>>, len: usize) -> Self {
+        SparseAxis {
+            indices,
+            data,
+            data_2,
+            cs_type: CompressedSparseFormat::Csc,
+            len,
+        }
     }
-    /// Returns boolean if it's CSR
-    pub fn is_csr(&self) -> bool {
-        matches!(self, CompressedSparseFormat::Csr)
+
+    /// Get references to the indices and second layer
+    ///
+    /// ### Returns
+    ///
+    /// A tuple of `(indices, data_2)`
+    pub fn get_indices_data_2(&self) -> (&[usize], &[U]) {
+        let indices = &self.indices;
+        let data_2 = self.data_2.as_ref().expect("target gene requires data_2");
+
+        (indices, data_2)
     }
 }
 
@@ -408,6 +471,10 @@ where
     }
 }
 
+////////////////////////
+// Format conversions //
+////////////////////////
+
 /// Transpose a compressed sparse matrix (CSC→CSR or CSR→CSC).
 ///
 /// This is the standard two-pass sparse transpose in O(nnz) time.
@@ -620,6 +687,10 @@ where
 
     CompressedSparseData2::new_csr(&data, &indices, &indptr, None, shape)
 }
+
+///////////////////////
+// Sparse operations //
+///////////////////////
 
 /// Add two CSR matrices together
 ///
@@ -1588,5 +1659,130 @@ where
         u,
         s: singular_values,
         v,
+    }
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use faer::Mat;
+
+    #[test]
+    fn test_parse_sparse_format() {
+        assert!(parse_compressed_sparse_format("csr").unwrap().is_csr());
+        assert!(parse_compressed_sparse_format("CSC").unwrap().is_csc());
+        assert!(parse_compressed_sparse_format("dense").is_none());
+    }
+
+    #[test]
+    fn test_from_dense_and_count_zeroes() {
+        let mat: Mat<f64> = Mat::from_fn(3, 2, |i, j| if i == j { (i + 1) as f64 } else { 0.0 });
+        let (total_zeroes, row_zeroes, col_zeroes) = count_zeroes(&mat.as_ref());
+
+        assert_eq!(total_zeroes, 4);
+        assert_eq!(row_zeroes, vec![1, 1, 2]);
+        assert_eq!(col_zeroes, vec![2, 2]);
+
+        let csr = CompressedSparseData::<f64, f64>::from_dense_matrix(
+            mat.as_ref(),
+            CompressedSparseFormat::Csr,
+        );
+        assert_eq!(csr.shape, (3, 2));
+        assert_eq!(csr.data, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn test_sparse_add_csr() {
+        let shape = (2, 2);
+        let a = CompressedSparseData::<f64, f64>::new_csr(
+            &[1.0, 2.0],
+            &[0, 1],
+            &[0, 1, 2],
+            None,
+            shape,
+        );
+        let b = CompressedSparseData::<f64, f64>::new_csr(
+            &[3.0, 4.0],
+            &[1, 1],
+            &[0, 1, 2],
+            None,
+            shape,
+        );
+        let c = sparse_add_csr(&a, &b);
+
+        assert_eq!(c.data, vec![1.0, 3.0, 6.0]);
+        assert_eq!(c.indices, vec![0, 1, 1]);
+        assert_eq!(c.indptr, vec![0, 2, 3]);
+    }
+
+    #[test]
+    fn test_csr_matvec() {
+        let a = CompressedSparseData::<f64, f64>::new_csr(
+            &[1.0, 2.0, 3.0],
+            &[0, 1, 1],
+            &[0, 2, 3],
+            None,
+            (2, 2),
+        );
+        let vec = vec![2.0, 1.0];
+        let result = csr_matvec(&a, &vec);
+        assert_eq!(result, vec![4.0, 3.0]);
+    }
+
+    #[test]
+    fn test_lanczos_eigenpairs_logic() {
+        // Symmetric rank-1 matrix M = x * x^T
+        // Let x = [1.0, 0.0, 2.0, 0.0]^T
+        let data = vec![1.0, 2.0, 2.0, 4.0];
+        let indices = vec![0, 2, 0, 2];
+        let indptr = vec![0, 2, 2, 4, 4]; // Rows 1 and 3 are empty
+        let shape = (4, 4);
+
+        let csr = CompressedSparseData::<f64, f64>::new_csr(&data, &indices, &indptr, None, shape);
+
+        // Lanczos expects symmetric matrix, this one is symmetric
+        let (evals, evecs) = compute_largest_eigenpairs_lanczos(&csr, 1, 42);
+
+        // True top eigenvalue should be exactly sum(x_i^2) = 1.0 + 4.0 = 5.0
+        assert!((evals[0] - 5.0).abs() < 1e-3);
+
+        // Eigenvectors are returned transposed: evecs[point_idx][comp_idx]
+        // So the first principal component is [evecs[0][0], evecs[1][0], evecs[2][0], evecs[3][0]]
+        let x_norm = 5.0_f32.sqrt();
+        let dot_x = (evecs[0][0] * 1.0 + evecs[2][0] * 2.0) / x_norm;
+
+        assert!(dot_x.abs() > 0.999);
+    }
+
+    #[test]
+    fn test_sparse_svd_lanczos_logic() {
+        // Sparse rank-1 matrix A = x * y^T
+        // x = [0.0, 2.0, 0.0, 4.0]^T
+        // y = [1.0, 0.0, 0.5]^T
+        let data = vec![2.0, 1.0, 4.0, 2.0];
+        let indices = vec![0, 2, 0, 2];
+        let indptr = vec![0, 0, 2, 2, 4];
+        let shape = (4, 3);
+
+        let csr = CompressedSparseData::<f64, f64>::new_csr(&data, &indices, &indptr, None, shape);
+        let no_params: Option<&[f64]> = None;
+
+        let svd = sparse_svd_lanczos(&csr, 1, 42, false, no_params, no_params);
+
+        // Test correlation with theoretical U
+        let u_col = svd.u.col(0);
+        let x_norm = 20.0_f64.sqrt();
+        let dot_u = (u_col[1] * 2.0 + u_col[3] * 4.0) / x_norm;
+        assert!(dot_u.abs() > 0.999);
+
+        // Test correlation with theoretical V
+        let v_col = svd.v.col(0);
+        let y_norm = 1.25_f64.sqrt();
+        let dot_v = (v_col[0] * 1.0 + v_col[2] * 0.5) / y_norm;
+        assert!(dot_v.abs() > 0.999);
     }
 }

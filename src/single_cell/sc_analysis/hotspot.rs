@@ -632,6 +632,7 @@ pub fn fused_mul_add_simd(a: &[f32], b: &[f32], c: &[f32], out: &mut [f32]) {
 /// * `model` - The model to use for modelling the GEX. Choice of
 ///   `"danb"`, `"bernoulli"` or `"normal"`.
 /// * `normalise` - Shall the data be normalised.
+/// * `knn_params` - The knnParams via the `KnnParams` structure.
 pub struct HotSpotParams {
     /// The model to use for modelling the GEX. Choice of `"danb"`,
     /// `"bernoulli"` or `"normal"`.
