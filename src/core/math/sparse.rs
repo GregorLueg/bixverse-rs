@@ -103,20 +103,17 @@ pub fn parse_compressed_sparse_format(s: &str) -> Option<CompressedSparseFormat>
 }
 
 /// Generate structure to store sparse rows or columns
-///
-/// ### Fields
-///
-/// * `indices` - The indices of the values/non-zero positions
-/// * `data` - The values in the row/columns
-/// * `data_2` - An optional second data layer
-/// * `cs_type` - Is the data stored in `Csr` or `Csc`. `Csr` -> sparse row;
-///   `Csc` -> sparse column
-/// * `length` - Total values in that dimension
 pub struct SparseAxis<T, U = T> {
+    /// The indices of the values/non-zero positions
     pub indices: Vec<usize>,
+    /// The values in the row/columns
     pub data: Vec<T>,
+    /// An optional second data layer
     pub data_2: Option<Vec<U>>,
+    /// Is the data stored in `Csr` or `Csc`. `Csr` -> sparse row; `Csc` ->
+    /// sparse column
     pub cs_type: CompressedSparseFormat,
+    /// Total values in that dimension
     pub len: usize,
 }
 
@@ -1687,7 +1684,7 @@ mod tests {
         assert_eq!(row_zeroes, vec![1, 1, 2]);
         assert_eq!(col_zeroes, vec![2, 2]);
 
-        let csr = CompressedSparseData::<f64, f64>::from_dense_matrix(
+        let csr = CompressedSparseData2::<f64, f64>::from_dense_matrix(
             mat.as_ref(),
             CompressedSparseFormat::Csr,
         );
@@ -1698,14 +1695,14 @@ mod tests {
     #[test]
     fn test_sparse_add_csr() {
         let shape = (2, 2);
-        let a = CompressedSparseData::<f64, f64>::new_csr(
+        let a = CompressedSparseData2::<f64, f64>::new_csr(
             &[1.0, 2.0],
             &[0, 1],
             &[0, 1, 2],
             None,
             shape,
         );
-        let b = CompressedSparseData::<f64, f64>::new_csr(
+        let b = CompressedSparseData2::<f64, f64>::new_csr(
             &[3.0, 4.0],
             &[1, 1],
             &[0, 1, 2],
@@ -1721,7 +1718,7 @@ mod tests {
 
     #[test]
     fn test_csr_matvec() {
-        let a = CompressedSparseData::<f64, f64>::new_csr(
+        let a = CompressedSparseData2::<f64, f64>::new_csr(
             &[1.0, 2.0, 3.0],
             &[0, 1, 1],
             &[0, 2, 3],
@@ -1742,7 +1739,7 @@ mod tests {
         let indptr = vec![0, 2, 2, 4, 4]; // Rows 1 and 3 are empty
         let shape = (4, 4);
 
-        let csr = CompressedSparseData::<f64, f64>::new_csr(&data, &indices, &indptr, None, shape);
+        let csr = CompressedSparseData2::<f64, f64>::new_csr(&data, &indices, &indptr, None, shape);
 
         // Lanczos expects symmetric matrix, this one is symmetric
         let (evals, evecs) = compute_largest_eigenpairs_lanczos(&csr, 1, 42);
@@ -1768,7 +1765,7 @@ mod tests {
         let indptr = vec![0, 0, 2, 2, 4];
         let shape = (4, 3);
 
-        let csr = CompressedSparseData::<f64, f64>::new_csr(&data, &indices, &indptr, None, shape);
+        let csr = CompressedSparseData2::<f64, f64>::new_csr(&data, &indices, &indptr, None, shape);
         let no_params: Option<&[f64]> = None;
 
         let svd = sparse_svd_lanczos(&csr, 1, 42, false, no_params, no_params);

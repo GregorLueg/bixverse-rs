@@ -754,7 +754,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::math::sparse::CompressedSparseData;
+    use crate::core::math::sparse::CompressedSparseData2;
     use faer::Mat;
 
     #[test]
@@ -763,7 +763,8 @@ mod tests {
         let data = vec![1.0, 1.0, 1.0, 1.0];
         let indices = vec![1, 0, 2, 1]; // neighbors
         let indptr = vec![0, 1, 3, 4]; // node offsets
-        let csr = CompressedSparseData::<f64, f64>::new_csr(&data, &indices, &indptr, None, (3, 3));
+        let csr =
+            CompressedSparseData2::<f64, f64>::new_csr(&data, &indices, &indptr, None, (3, 3));
 
         let graph = SparseGraph::new(3, csr, false);
 

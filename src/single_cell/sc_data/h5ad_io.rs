@@ -1,3 +1,6 @@
+//! Contains the h5ad-related parts to do read in data from h5ad files and
+//! transform them into the binarised files for usage in bixverse-rs
+
 use hdf5::{File, Result};
 use rayon::prelude::*;
 use std::io::Result as IoResult;

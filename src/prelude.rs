@@ -1,5 +1,5 @@
 pub use crate::core::math::sparse::{
-    CompressedSparseData2, CompressedSparseFormat, parse_compressed_sparse_format,
+    CompressedSparseData2, CompressedSparseFormat, SparseAxis, parse_compressed_sparse_format,
 };
 pub use crate::graph::graph_structures::{EdgeData, NodeData, SparseGraph};
 pub use crate::utils::heap_structures::OrderedFloat;

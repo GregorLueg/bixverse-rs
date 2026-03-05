@@ -1,3 +1,7 @@
+//! Contains the streaming engine for bixverse single cell application. This
+//! has the structures for cells/spots and genes ready, plus various utilities,
+//! writers and readers.
+
 use bincode::{Decode, Encode, config, decode_from_slice, serde::encode_to_vec};
 use half::f16;
 use indexmap::IndexSet;
@@ -1004,15 +1008,12 @@ impl CellGeneSparseWriter {
 //////////////////////
 
 /// ParallelSparseReader
-///
-/// ### Params
-///
-/// * `header` - The file header
-/// * `mmap` - Reference to the memory map for safe sharing across threads
-/// * `chunks_start` - Start of the chunks after the hader file
 pub struct ParallelSparseReader {
+    /// The file header
     header: SparseDataHeader,
+    /// Reference to the memory map for safe sharing across threads
     mmap: Arc<memmap2::Mmap>,
+    /// Start position of the chunks after the hader file
     chunks_start: u64,
 }
 

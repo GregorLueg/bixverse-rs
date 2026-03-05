@@ -471,8 +471,8 @@ mod tests {
         // Create a dense rank-1 matrix A = x * y^T
         // x = [1.0, 2.0, 3.0, 4.0]^T
         // y = [1.0, 0.5, 0.25]^T
-        let x = vec![1.0, 2.0, 3.0, 4.0];
-        let y = vec![1.0, 0.5, 0.25];
+        let x = [1.0, 2.0, 3.0, 4.0];
+        let y = [1.0, 0.5, 0.25];
         let mut mat: Mat<f64> = Mat::zeros(4, 3);
         for i in 0..4 {
             for j in 0..3 {
@@ -515,7 +515,7 @@ mod tests {
         let indptr = vec![0, 0, 2, 2, 4];
         let shape = (4, 3);
 
-        let csr = CompressedSparseData::<f64, f64>::new_csr(&data, &indices, &indptr, None, shape);
+        let csr = CompressedSparseData2::<f64, f64>::new_csr(&data, &indices, &indptr, None, shape);
 
         let no_params: Option<&[f64]> = None;
         let svd = randomised_sparse_svd(&csr, 1, 42, false, Some(5), Some(4), no_params, no_params);

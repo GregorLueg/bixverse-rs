@@ -1,3 +1,6 @@
+//! Contains the R-based reading in of data (for example for Seurat type files)
+//! to transform the counts into the binary Rust-based files.
+
 use std::path::Path;
 use thousands::Separable;
 

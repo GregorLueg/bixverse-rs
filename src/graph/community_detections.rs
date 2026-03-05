@@ -596,7 +596,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::math::sparse::CompressedSparseData;
+    use crate::core::math::sparse::CompressedSparseData2;
 
     fn build_barbell_graph() -> SparseGraph<f64> {
         // Two triangles (0,1,2) and (3,4,5) connected by edge (2,3)
@@ -613,7 +613,8 @@ mod tests {
         ];
         let data = vec![1.0; 14];
 
-        let csr = CompressedSparseData::<f64, f64>::new_csr(&data, &indices, &indptr, None, (6, 6));
+        let csr =
+            CompressedSparseData2::<f64, f64>::new_csr(&data, &indices, &indptr, None, (6, 6));
         SparseGraph::new(6, csr, false)
     }
 

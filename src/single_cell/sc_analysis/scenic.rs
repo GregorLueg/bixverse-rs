@@ -129,11 +129,17 @@ trait TreeRegressorConfig: Sync {
 /// * `subsample_frac` - Optional fraction of cells to subsample per tree.
 #[derive(Clone, Debug)]
 pub struct ExtraTreesConfig {
+    /// Number of trees to build.
     pub n_trees: usize,
+    /// Minimum samples per leaf node.
     pub min_samples_leaf: usize,
+    /// Features considered per split; `0` means `sqrt(n_features)`.
     pub n_features_split: usize,
+    /// Random thresholds to test per feature per node.
     pub n_thresholds: usize,
+    /// Maximum tree depth.
     pub max_depth: Option<usize>,
+    /// Optional fraction of cells to subsample per tree.
     pub subsample_frac: Option<f32>,
 }
 
@@ -192,12 +198,21 @@ impl TreeRegressorConfig for ExtraTreesConfig {
 ///   (overrides `subsample_rate`).
 #[derive(Clone, Debug)]
 pub struct RandomForestConfig {
+    /// Number of trees to build.
     pub n_trees: usize,
+    /// Minimum samples per leaf node.
     pub min_samples_leaf: usize,
+    /// Features considered per split; `0` means `sqrt(n_features)`.
     pub n_features_split: usize,
+    /// Fraction of samples to draw per tree (without replacement unless
+    /// `bootstrap` is set).
     pub subsample_rate: f32,
+    /// Whether to sample with replacement.
     pub bootstrap: bool,
+    /// Maximum tree depth.
     pub max_depth: Option<usize>,
+    /// Optional fraction of cells to subsample per tree (overrides
+    /// `subsample_rate`).
     pub subsample_frac: Option<f32>,
 }
 
@@ -252,22 +267,18 @@ impl TreeRegressorConfig for RandomForestConfig {
 ///
 /// Stores one byte per cell per feature, with per-feature min/range metadata
 /// for reconstructing original values if needed.
-///
-/// ### Fields
-///
-/// * `data` - Quantised data
-/// * `n_cells` - Number of cells
-/// * `n_features` - Number of features
-/// * `feature_min` - Minimum value for the feature for reconstruction (not
-///   in use atm).
-/// * `feature_range` - Feature range for the feature (not in use atm).
 #[allow(dead_code)]
 pub struct DenseQuantisedStore {
-    data: Vec<u8>,
-    n_cells: usize,
+    /// Quantised data
+    pub data: Vec<u8>,
+    /// Number of cells
+    pub n_cells: usize,
+    /// Number of features
     pub n_features: usize,
-    feature_min: Vec<f32>,
-    feature_range: Vec<f32>,
+    /// Minimum value for the feature for reconstruction (not in use atm).
+    pub feature_min: Vec<f32>,
+    /// Feature range for the feature (not in use atm).
+    pub feature_range: Vec<f32>,
 }
 
 impl DenseQuantisedStore {
@@ -290,7 +301,7 @@ impl DenseQuantisedStore {
     /// initialised to `0.0`, so implicit zeros are handled correctly provided
     /// all values are non-negative. Features with range ≤ 1e-10 (effectively
     /// constant) are left at zero.
-    pub fn from_csc(mat: &CompressedSparseData<u16, f32>, n_cells: usize) -> Self {
+    pub fn from_csc(mat: &CompressedSparseData2<u16, f32>, n_cells: usize) -> Self {
         let n_features = mat.indptr.len() - 1;
         let mut data = vec![0u8; n_features * n_cells];
         let mut mins = Vec::with_capacity(n_features);
@@ -1122,6 +1133,7 @@ pub fn scenic_gene_filter(
 /// grouped into batches of `MULTI_OUTPUT_BATCH` and fitted as multi-output
 /// ensembles via `fit_multi_trees`. Batches within a chunk are parallelised
 /// across threads with Rayon.
+#[allow(clippy::too_many_arguments)]
 pub fn run_scenic_grn(
     f_path: &str,
     cell_indices: &[usize],
@@ -1144,7 +1156,7 @@ pub fn run_scenic_grn(
     });
 
     let end_reading = start_reading.elapsed();
-    let tf_data: CompressedSparseData<u16, f32> =
+    let tf_data: CompressedSparseData2<u16, f32> =
         from_gene_chunks::<u16>(&gene_chunks, cell_set.len());
     let tf_data = DenseQuantisedStore::from_csc(&tf_data, cell_set.len());
 
@@ -1310,10 +1322,10 @@ mod tests {
         let y_slice: Vec<f32> = vec![1.0, 10.0, 2.0, 20.0, 3.0, 30.0];
         let n_targets = 2;
 
-        let mut left_buf = vec![0u32; 3];
-        let mut right_buf = vec![0u32; 3];
-        let mut left_y_buf = vec![0.0f32; 6];
-        let mut right_y_buf = vec![0.0f32; 6];
+        let mut left_buf = [0u32; 3];
+        let mut right_buf = [0u32; 3];
+        let mut left_y_buf = [0.0f32; 6];
+        let mut right_y_buf = [0.0f32; 6];
 
         let threshold = 100u8;
         let mut l_idx = 0;

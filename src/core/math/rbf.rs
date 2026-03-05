@@ -278,7 +278,7 @@ mod tests {
             parse_rbf_types("inverse_quadratic"),
             Some(RbfType::InverseQuadratic)
         ));
-        assert!(matches!(parse_rbf_types("unknown"), None));
+        assert!(parse_rbf_types("unknown").is_none());
     }
 
     #[test]
