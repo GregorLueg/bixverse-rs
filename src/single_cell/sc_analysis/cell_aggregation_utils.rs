@@ -1,3 +1,5 @@
+//! Helpers around pseudo-bulking and meta-cell aggregations of single cells.
+
 use faer::Mat;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;

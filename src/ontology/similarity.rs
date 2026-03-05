@@ -1,3 +1,6 @@
+//! Methods to calculate ontological similarities (Wang or semantic similarity
+//! implemented for now)
+
 use faer::Mat;
 use once_cell::sync::Lazy;
 use petgraph::graph::{DiGraph, NodeIndex};
@@ -48,16 +51,13 @@ fn parse_onto_similarity_type(sim_type: &str) -> Option<OntoSemSimType> {
 }
 
 /// Structure to store the Ontology similarity results
-///
-/// ### Fields
-///
-/// * `t1` - Name of term 1.
-/// * `t2` - Name of term 2.
-/// * `sim` - The calculated semantic or Wang similarity
 #[derive(Clone, Debug)]
 pub struct OntoSimRes<'a, T> {
+    /// Name of term 1.
     pub t1: &'a str,
+    /// Name of term 2.
     pub t2: &'a str,
+    /// The calculated semantic or Wang similarity
     pub sim: T,
 }
 

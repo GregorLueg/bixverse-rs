@@ -1,3 +1,7 @@
+//! Differential gene expression for single cell via Mann Whitney U and AUCell
+//! type enrichment of a bag of genes, see Aibar, et al., Nat Methods,
+//! 2018.
+
 use rayon::prelude::*;
 use std::time::Instant;
 
@@ -14,25 +18,22 @@ use crate::single_cell::sc_analysis::fast_ranking::rank_csr_chunk_vec;
 ////////////////
 
 /// Structure to store the Mann Whitney U-based DGE results in
-///
-/// ### Fields
-///
-/// * `lfc` - The log folc changes
-/// * `prop1` - Proportions of cells in group 1 expressing the gene.
-/// * `prop2` - Proportions of cells in group 2 expressing the gene.
-/// * `z_scores` - The Z-scores based on the Mann-Whitney U test.
-/// * `p_vals` - The p-values from the Mann-Whitney U test.
-/// * `fdr` - FDR values given the p-values.
-/// * `genes_to_keep` - Boolean indicating if the gene was included in the
-///   analysis, i.e., passed the proportion thresholds.
 #[derive(Clone, Debug)]
 pub struct DgeMannWhitneyRes {
+    /// The calculated LFCs
     pub lfc: Vec<f32>,
+    /// Proportions of cells in group 1 expressing the gene.
     pub prop1: Vec<f32>,
+    /// Proportions of cells in group 2 expressing the gene.
     pub prop2: Vec<f32>,
+    /// The Z-scores based on the Mann-Whitney U test.
     pub z_scores: Vec<f64>,
+    /// The p-values from the Mann-Whitney U test.
     pub p_vals: Vec<f64>,
+    /// FDR values given the p-values.
     pub fdr: Vec<f64>,
+    /// Boolean indicating if the gene was included in the analysis, i.e.,
+    /// passed the proportion thresholds.
     pub genes_to_keep: Vec<bool>,
 }
 

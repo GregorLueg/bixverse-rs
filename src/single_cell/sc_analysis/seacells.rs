@@ -1,3 +1,5 @@
+//! Implementation of the SEACells from Persad, et al., Nat. Biotechnol., 2023
+
 use faer::MatRef;
 use rand::prelude::*;
 use rand::rngs::StdRng;
@@ -65,38 +67,32 @@ pub fn parse_knn_symmetrisation(s: &str) -> Option<KnnSymmetrisation> {
 ///   This can affect numerical stability, but makes runs on large data sets
 ///   feasible.
 /// * `pruning_threshold` - Values that should be pruned away.
-///
-/// **General kNN params**
-///
-/// * `k` - Number of neighbours for the kNN algorithm.
-/// * `knn_method` - Which method to use for the generation of the kNN graph.
-///   One of `"hnsw"`, `"annoy"` or `"nndescent"`
-/// * `ann_dist` - The distance metric for the approximate nearest neighbour
-///   search. For this method fixed to `"euclidean"`.
-///
-/// **Annoy**
-///
-/// * `n_tree` - Number of trees for the generation of the index
-/// * `search_budget` - Search budget during querying
-///
-/// **NN Descent**
-///
-/// * `max_iter` - Maximum iterations for the algorithm
-/// * `rho` - Sampling rate for the algorithm
-/// * `delta` - Early termination criterium
 #[derive(Clone, Debug)]
 pub struct SEACellsParams {
-    // sea cell
+    /// Number of sea cells to detect
     pub n_sea_cells: usize,
+    /// Maximum iterations for the Franke-Wolfe algorithm per matrix update.
     pub max_fw_iters: usize,
+    /// Defines the convergence threshold. Algorithm stops when
+    /// `RSS change < epsilon * RSS(0)`
     pub convergence_epsilon: f32,
+    /// Maximum iterations to run SEACells for
     pub max_iter: usize,
+    /// Minimum iterations to run SEACells for
     pub min_iter: usize,
+    /// Maximum number of cells, before defaulting to a more rapid random
+    /// selection of archetypes initially
     pub greedy_threshold: usize,
+    /// Which type of KNN graph symmetrisation to use
     pub graph_building: String,
+    /// Shall tiny values during the Franke Wolfe updates be pruned.
+    /// This can affect numerical stability, but makes runs on large data sets
+    /// feasible.
     pub pruning: bool,
+    /// Pruning threshold to apply
     pub pruning_threshold: f32,
-    // general knn params
+    /// Parameters for the various approximate nearest neighbour searches
+    /// in ann-search-rs
     pub knn_params: KnnParams,
 }
 

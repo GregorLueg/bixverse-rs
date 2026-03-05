@@ -1,3 +1,6 @@
+//! Implementation of the SuperCell approach from Bilous, et al., BMC
+//! Bioinform., 2022
+
 use crate::prelude::*;
 
 use crate::graph::community_detections::walktrap_sparse_graph;
@@ -24,11 +27,15 @@ use crate::graph::graph_structures::knn_to_sparse_graph;
 /// * `knn_params` - All of the kNN parameters
 #[derive(Clone, Debug)]
 pub struct SuperCellParams {
-    // supercell params
+    /// Walk length for the Walktrap algorithm
     pub walk_length: usize,
+    /// Graining level of data (proportion of number of single cells in the
+    /// initial dataset to the number of metacells in the final dataset)
     pub graining_factor: f64,
+    /// Which type of distance metric to use for the linkage.
     pub linkage_dist: String,
-    // knn
+    /// Parameters for the various approximate nearest neighbour searches
+    /// in ann-search-rs
     pub knn_params: KnnParams,
 }
 
