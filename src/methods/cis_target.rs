@@ -1,3 +1,6 @@
+//! Implementation of the RCisTarget algorithm from Aibar, et al., Nat Methods,
+//! 2018.
+
 use faer::MatRef;
 use rayon::prelude::*;
 
@@ -9,22 +12,19 @@ use crate::prelude::*;
 ////////////////
 
 /// Results structure for a single enriched motif
-///
-/// ### Fields
-///
-/// * `motif_idx` - Index of the motif
-/// * `nes` - Normalised enrichment score
-/// * `auc` - Area under the curve
-/// * `rank_at_max` - Rank position at maximum enrichment
-/// * `n_enriched` - Number of enriched genes
-/// * `enriched_gene_indices` - Indices of enriched genes in the leading edge
 #[derive(Debug, Clone)]
 pub struct MotifEnrichment<T> {
+    /// Index of the motif
     pub motif_idx: usize,
+    /// Normalised enrichment score
     pub nes: T,
+    /// Area under the curve
     pub auc: T,
+    /// Rank position at maximum enrichment
     pub rank_at_max: u32,
+    /// Number of enriched genes
     pub n_enriched: usize,
+    /// Indices of enriched genes in the leading edge
     pub enriched_gene_indices: Vec<usize>,
 }
 

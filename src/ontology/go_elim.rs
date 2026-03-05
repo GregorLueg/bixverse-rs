@@ -1,3 +1,6 @@
+//! Implementation of the elimination method for improved gene ontology-based
+//! enrichment. See Alexa, et al., Bioinformatics, 2006
+
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::collections::BTreeMap;
 
@@ -29,66 +32,58 @@ pub type LevelMap = FxHashMap<String, Vec<String>>;
 type GoIntermediaryRes<T> = (T, usize, Vec<i32>);
 
 /// Return structure of the `process_ontology_level()` ontology function.
-///
-/// ### Fields
-///
-/// * `go_ids` - GO term identifiers.
-/// * `pvals` - p-values for the terms.
-/// * `odds_ratio` - Calculated odds ratios for the terms.
-/// * `hits` - Number of intersecting genes with the target gene set
-/// * `gene_set_lengths` - Length of the gene set after elimination.
 #[derive(Clone, Debug)]
 pub struct GoElimLevelResults<T> {
+    /// GO term identifiers.
     pub go_ids: Vec<String>,
+    /// P-values for the terms
     pub pvals: Vec<T>,
+    /// Odds ratios for the terms.
     pub odds_ratios: Vec<T>,
+    /// Number of intersecting genes with the target gene set
     pub hits: Vec<usize>,
+    /// Length of the gene ontology term after elimination.
     pub gene_set_lengths: Vec<usize>,
 }
 
 /// Final return structure after filtering
-///
-/// ### Fields
-///
-/// * `go_ids` - GO term identifiers.
-/// * `pvals` - p-values for the terms.
-/// * `fdr` - the FDRs.
-/// * `odds_ratio` - Calculated odds ratios for the terms.
-/// * `hits` - Number of intersecting genes with the target gene set
-/// * `gene_set_lengths` - Length of the gene set after elimination.
 #[derive(Clone, Debug)]
 pub struct GoElimFinalResults<T> {
+    /// GO term identifiers.
     pub go_ids: Vec<String>,
+    /// P-values for the terms.
     pub pvals: Vec<T>,
+    /// Calculated FDRs.
     pub fdr: Vec<T>,
+    /// Odds ratios for the terms.
     pub odds_ratios: Vec<T>,
+    /// Number of intersecting genes with the target gene set
     pub hits: Vec<usize>,
+    /// Length of the gene set after elimination.
     pub gs_length: Vec<usize>,
 }
 
-/// Return structure of the `process_ontology_level_fgsea_simple()` ontology function.
-///
-/// ### Fields
-///
-/// * `go_ids` - GO term identifiers.
-/// * `es` - Enrichment Scores for the terms.
-/// * `nes` - Normalised enrichment Scores for the terms.
-/// * `size` - The sizes of the terms.
-/// * `pvals` - The p-value for the terms.
-/// * `n_more_extreme` - The number of permuted values that were larger (or smaller).
-/// * `ge_zero` - The number of permuted values that were ≥ 0.
-/// * `le_zero` - The number of permuted values that were ≤ 0.
-/// * `leading_edge` - Indices of the leading edge genes of the term.
+/// Return structure of the `process_ontology_level_fgsea_simple()` ontology
+/// function.
 #[derive(Clone, Debug)]
 pub struct GoElimLevelResultsGsea<T> {
+    /// GO term identifiers.
     pub go_ids: Vec<String>,
+    /// Enrichment Scores for the terms.
     pub es: Vec<T>,
+    /// Normalised enrichment Scores for the terms.
     pub nes: Vec<Option<T>>,
+    /// The sizes of the terms.
     pub size: Vec<usize>,
+    /// The P-value for the terms.
     pub pvals: Vec<T>,
+    /// The number of permuted values that were larger (or smaller).
     pub n_more_extreme: Vec<usize>,
+    /// The number of permuted values that were ≥ 0.
     pub ge_zero: Vec<usize>,
+    /// The number of permuted values that were ≤ 0.
     pub le_zero: Vec<usize>,
+    /// Indices of the leading edge genes of the term.
     pub leading_edge: Vec<Vec<i32>>,
 }
 
@@ -97,16 +92,13 @@ pub struct GoElimLevelResultsGsea<T> {
 ///////////////////////
 
 /// Structure for the GeneOntology data
-///
-/// ### Fields
-///
-/// * `go_to_gene` - A HashMap with the term to gene associations
-/// * `ancestors` - A (borrowed) HashMap with the term to ancestor associations.
-/// * `levels` - A (borrowed) HashMap with the ontology level to term associations.
 #[derive(Clone, Debug)]
 pub struct GeneOntology<'a> {
+    /// A HashMap with the term to gene associations
     pub go_to_gene: GeneMap,
+    /// A reference to the HashMap with the term to ancestor associations.
     pub ancestors: &'a AncestorMap,
+    /// A reference to the  HashMap with the ontology level to term associations.
     pub levels: &'a LevelMap,
 }
 
@@ -214,12 +206,9 @@ impl<'a> GeneOntology<'a> {
 //////////////////////////////
 
 /// Structure to hold random permutations for the continuous (fgsea)
-///
-/// ### Fields
-///
-/// * `random_perm` - A borrowed vector of vectors with the permutation ES.
 #[derive(Clone, Debug)]
 pub struct GeneOntologyRandomPerm<'a, T> {
+    /// A reference to the vector of vectors with the permutation ES.
     pub random_perm: &'a Vec<Vec<T>>,
 }
 

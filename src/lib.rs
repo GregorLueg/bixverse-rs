@@ -1,4 +1,5 @@
 #![allow(clippy::needless_range_loop)]
+#![warn(missing_docs)]
 
 pub mod core;
 pub mod data;

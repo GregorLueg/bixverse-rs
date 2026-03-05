@@ -1,3 +1,5 @@
+//! Various helper functions that work on vectors in Rust
+
 use num_traits::Float;
 
 use crate::prelude::BixverseFloat;

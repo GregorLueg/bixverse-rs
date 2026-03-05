@@ -92,7 +92,7 @@ pub fn scale_csc_chunk(chunk: &CscGeneChunk, no_cells: usize) -> (Vec<f32>, f32,
 ///
 /// The column means.
 pub fn sparse_csc_column_means(
-    csc: &CompressedSparseData<f32>,
+    csc: &CompressedSparseData2<f32>,
     use_second_layer: bool,
 ) -> Vec<f32> {
     assert!(
@@ -132,7 +132,7 @@ pub fn sparse_csc_column_means(
 ///
 /// The standard deviation.
 pub fn sparse_csc_column_stds(
-    csc: &CompressedSparseData<f32>,
+    csc: &CompressedSparseData2<f32>,
     col_means: &[f32],
     use_second_layer: bool,
 ) -> Vec<f32> {

@@ -1,3 +1,5 @@
+//! Various traits in bixverse
+
 use extendr_api::*;
 use faer::traits::{ComplexField, RealField};
 use faer_entity::SimpleEntity;

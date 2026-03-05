@@ -19,9 +19,10 @@ it would be good to add another testing suite here. Also, at some point,
 a Python interface to the single cell part will be written. Additionally,
 a more detailed documentation will be provided.
 
-## News
+## Updates
 
-Updates and summaries can be found [here](https://github.com/GregorLueg/bixverse-rs/docs/news.MD)
+Updates on what's happening in this crate can be found
+[here](https://github.com/GregorLueg/bixverse-rs/blob/main/docs/news.MD)
 
 ## Licence
 

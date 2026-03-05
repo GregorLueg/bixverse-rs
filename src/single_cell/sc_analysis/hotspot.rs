@@ -1,3 +1,7 @@
+//! Implementation of the HotSpot method to identify genes that vary across
+//! various potential graphs in single cell 'omics, see DeTomaso and Yosef,
+//! Cell Syst., 2021
+
 use faer::{Mat, MatRef, RowRef};
 use indexmap::IndexSet;
 use rayon::prelude::*;
@@ -625,18 +629,18 @@ pub fn fused_mul_add_simd(a: &[f32], b: &[f32], c: &[f32], out: &mut [f32]) {
 ////////////
 
 /// HotSpot parameters
-///
-/// ### Fields
-///
 /// * `model` - The model to use for modelling the GEX. Choice of
 ///   `"danb"`, `"bernoulli"` or `"normal"`.
 /// * `normalise` - Shall the data be normalised.
 /// * `knn_params` - The knnParams via the `KnnParams` structure.
 pub struct HotSpotParams {
-    // hotspot parameters
+    /// The model to use for modelling the GEX. Choice of `"danb"`,
+    /// `"bernoulli"` or `"normal"`.
     pub model: String,
+    /// Shall the data be normalised
     pub normalise: bool,
-    // knn params
+    /// Parameters for the various approximate nearest neighbour searches
+    /// in ann-search-rs
     pub knn_params: KnnParams,
 }
 
@@ -644,6 +648,7 @@ pub struct HotSpotParams {
 // Helpers //
 /////////////
 
+/// Gene expression module to use for HotSpot
 #[derive(Debug, Clone)]
 pub enum GexModel {
     /// Use depth-adjusted negative binomial model
@@ -673,32 +678,26 @@ pub fn parse_gex_model(s: &str) -> Option<GexModel> {
 }
 
 /// Structure for the gene results
-///
-/// ### Fields
-///
-/// * `gene_idx` - Gene index of the analysed gene
-/// * `c` - Geary's C statistic for this gene
-/// * `z` - Z-score for this gene
-/// * `pval` - P-value based on the Z-score
-/// * `fdr` - False discovery corrected pvals
 #[derive(Debug, Clone)]
 pub struct HotSpotGeneRes {
+    /// Gene index of the analysed gene
     pub gene_idx: Vec<usize>,
+    /// Geary's C statistic for this gene
     pub c: Vec<f64>,
+    /// Z-score for this gene
     pub z: Vec<f64>,
+    /// P-value for this gene
     pub pval: Vec<f64>,
+    /// FDR for this gene
     pub fdr: Vec<f64>,
 }
 
 /// Structure for pair-wise correlations
-///
-/// ### Fields
-///
-/// * `cor` - Symmetric matrix with cor coefficients (N_genes x N_genes)
-/// * `z_scores` - Symmetric matrix with Z scores (N_genex x N_genes)
 #[derive(Debug, Clone)]
 pub struct HotSpotPairRes {
+    /// Symmetric matrix with cor coefficients (N_genes x N_genes)
     pub cor: Mat<f32>,
+    /// Symmetric matrix with Z scores (N_genex x N_genes)
     pub z_scores: Mat<f32>,
 }
 

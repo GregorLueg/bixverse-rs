@@ -1,3 +1,6 @@
+//! Linear algebra helper functions like simple regressions and more complex
+//! solvers such as the Sylvester solver.
+
 use faer::{
     Mat, MatRef, Scale,
     linalg::solvers::{PartialPivLu, Solve},

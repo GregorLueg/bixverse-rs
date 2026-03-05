@@ -1,3 +1,6 @@
+//! Meta-cell aggregation based on the bootstrapped approach from Morabito,
+//! et al., Cell Rep. Methods, 2023
+
 use rand::prelude::IndexedRandom;
 use rand::{Rng, SeedableRng};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -9,23 +12,16 @@ use crate::prelude::*;
 ////////////////////////
 
 /// Structure for the MetaCell parameters
-///
-/// ### Fields
-///
-/// ** Meta cell params**
-///
-/// * `max_shared` - Maximum number of shared cells for the meta cell
-///   aggregation
-/// * `target_no_metacells` - Number of target meta cells.
-/// * `max_iter` - Maximum iterations for the algorithm.
-/// * `knn_params` - The knnParams via the `KnnParams` structure.
 #[derive(Clone, Debug)]
 pub struct MetaCellParams {
-    // meta cell params
+    /// Maximum number of shared cells for the meta cell aggregation
     pub max_shared: usize,
+    /// Number of target meta cells.
     pub target_no_metacells: usize,
+    /// Maximum iterations for the algorithm
     pub max_iter: usize,
-    // general knn params
+    /// Parameters for the various approximate nearest neighbour searches
+    /// in ann-search-rs
     pub knn_params: KnnParams,
 }
 

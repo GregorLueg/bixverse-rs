@@ -1,3 +1,5 @@
+//! Various helper functions that act on faer matrices
+
 use faer::{Mat, MatRef, Scale};
 use rayon::prelude::*;
 

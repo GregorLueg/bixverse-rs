@@ -1,3 +1,5 @@
+//! Utilies for batch correction methods that are shared
+
 use faer::Mat;
 use rayon::prelude::*;
 

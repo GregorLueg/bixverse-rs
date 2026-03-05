@@ -1,7 +1,9 @@
+//! Targeted SIMD implementations to accelerate specific hot loops in bixverse
+
 use std::sync::OnceLock;
 use wide::{f32x4, f32x8};
 
-// Enum for the different architectures and potential SIMD levels
+/// Enum for the different architectures and potential SIMD levels
 #[derive(Clone, Copy, Debug)]
 pub enum SimdLevel {
     /// Scalar version

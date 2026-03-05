@@ -1,3 +1,6 @@
+//! Implementations of the Gene Set Variation analysis from Hänzelmann, et al.,
+//! Bmc Bioinformatics, 2013.
+
 use faer::{ColRef, Mat, MatRef, RowRef};
 use once_cell::sync::Lazy;
 use rayon::prelude::*;

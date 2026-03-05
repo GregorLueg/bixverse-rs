@@ -1,3 +1,6 @@
+//! Contains correlation, co-variance, distance calculations and similarity
+//! types.
+
 use faer::{Mat, MatRef, Scale};
 use rayon::prelude::*;
 use rustc_hash::FxHashSet;
@@ -756,8 +759,11 @@ where
 /// Enum for the TOM function
 #[derive(Debug, Default)]
 pub enum TomType {
+    /// Original TOM formulation. Computes overlap as:
+    /// (a_ij + l_ij) / (min(k_i, k_j) + 1 - |a_ij|).
     #[default]
     Version1,
+    /// Alternative formulation. Computes overlap as 0.5 * (a_ij + l_ij / (min(k_i, k_j) + |a_ij|))
     Version2,
 }
 

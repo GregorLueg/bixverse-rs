@@ -1,4 +1,7 @@
-use ann_search_rs::{utils::dist::Dist, utils::ivf_utils::train_centroids};
+//! Implementation of the Harmony batch correction, please see Korsunsky, et
+//! al., Nat Methods, 2019
+
+use ann_search_rs::{utils::dist::Dist, utils::k_means_utils::train_centroids};
 use faer::linalg::solvers::PartialPivLu;
 use faer::{Mat, MatRef, linalg::solvers::DenseSolveCore};
 use rand::SeedableRng;
@@ -15,29 +18,26 @@ use crate::utils::matrix_utils::{flat_row_major_to_mat, mat_to_flat_row_major};
 ////////////
 
 /// Parameters for Harmony batch correction.
-///
-/// ### Fields
-///
-/// * `k`: number of clusters
-/// * `sigma`: per-cluster diversity weights (length 1 or K)
-/// * `theta`: per-variable diversity penalties (length 1 or n_variables)
-/// * `lambda`: ridge penalty (length 1, broadcast to all design matrix columns)
-/// * `block_size`: fraction of cells to update per block (0.0-1.0)
-/// * `max_iter_kmeans`: maximum k-means iterations per Harmony round
-/// * `max_iter_harmony`: maximum Harmony outer iterations
-/// * `epsilon_kmeans`: k-means convergence threshold
-/// * `epsilon_harmony`: harmony convergence threshold
-/// * `window_size`: window size for convergence checking
 pub struct HarmonyParams {
+    /// Number of clusters
     pub k: usize,
+    /// Per-cluster diversity weights (length 1 or K)
     pub sigma: Vec<f32>,
+    /// Per-variable diversity penalties (length 1 or n_variables)
     pub theta: Vec<f32>,
+    /// Ridge penalty (length 1, broadcast to all design matrix columns)
     pub lambda: Vec<f32>,
+    /// Fraction of cells to update per block (0.0-1.0)
     pub block_size: f32,
+    /// Maximum k-means iterations per Harmony round
     pub max_iter_kmeans: usize,
+    /// Maximum Harmony outer iterations
     pub max_iter_harmony: usize,
+    /// K-means clustering convergence threshold
     pub epsilon_kmeans: f32,
+    /// Harmony convergence threshold
     pub epsilon_harmony: f32,
+    /// Window size for convergence checking
     pub window_size: usize,
 }
 
@@ -63,23 +63,29 @@ impl Default for HarmonyParams {
 // Helpers //
 /////////////
 
+/// Observed and expected cluster-batch assignment counts for one batch
+/// variable.
+pub struct OEPair {
+    /// Observed counts (K x B): sum of soft assignments per cluster per level
+    pub o: Mat<f32>,
+    /// Expected counts (K x B): expected assignments under uniform mixing
+    pub e: Mat<f32>,
+}
+
 /// Batch information for a single categorical variable.
 ///
 /// Holds the mapping from cells to levels, level frequencies, and
 /// cell index lists per level for one batch variable (e.g. "sample",
 /// "technology", "donor").
-///
-/// ### Fields
-///
-/// * `batch_indices` - cell indices per level (length n_levels)
-/// * `pr_b` - level frequencies (length n_levels)
-/// * `n_levels` - number of distinct levels
-/// * `cell_to_level` - for each cell, its level in this variable (length N)
 #[derive(Debug, Clone)]
 pub struct BatchInfo {
+    /// Cell indices per level (length n_levels)
     pub batch_indices: Vec<Vec<usize>>,
+    /// Level frequencies (length n_levels)
     pub pr_b: Vec<f32>,
+    /// Number of distinct levels
     pub n_levels: usize,
+    /// For each cell, its level in this variable (length N)
     pub cell_to_level: Vec<usize>,
 }
 
@@ -246,8 +252,8 @@ pub fn initialise_r_from_dist(dist_mat: MatRef<f32>, sigma: &[f32]) -> Mat<f32> 
 ///
 /// ### Returns
 ///
-/// Tuple of (O: K x B, E: K x B)
-pub fn compute_diversity_statistics(r: MatRef<f32>, info: &BatchInfo) -> (Mat<f32>, Mat<f32>) {
+/// `OEPair` of (O: K x B, E: K x B)
+pub fn compute_diversity_statistics(r: MatRef<f32>, info: &BatchInfo) -> OEPair {
     let k = r.nrows();
     let b = info.n_levels;
 
@@ -275,7 +281,7 @@ pub fn compute_diversity_statistics(r: MatRef<f32>, info: &BatchInfo) -> (Mat<f3
         }
     }
 
-    (o, e)
+    OEPair { o, e }
 }
 
 /// Compute diversity statistics for all variables.
@@ -287,11 +293,8 @@ pub fn compute_diversity_statistics(r: MatRef<f32>, info: &BatchInfo) -> (Mat<f3
 ///
 /// ### Returns
 ///
-/// Vec of (O, E) pairs, one per variable
-pub fn compute_all_diversity_statistics(
-    r: MatRef<f32>,
-    batch_infos: &[BatchInfo],
-) -> Vec<(Mat<f32>, Mat<f32>)> {
+/// Vec of `OEPair`, one per variable
+pub fn compute_all_diversity_statistics(r: MatRef<f32>, batch_infos: &[BatchInfo]) -> Vec<OEPair> {
     batch_infos
         .iter()
         .map(|info| compute_diversity_statistics(r, info))
@@ -325,7 +328,7 @@ pub fn update_centroids_from_r(z_cos: MatRef<f32>, r: MatRef<f32>) -> Mat<f32> {
 ///
 /// * `r` - Soft assignments (K x N)
 /// * `dist_mat` - Distance matrix (K x N)
-/// * `oe_pairs` - (O, E) pairs per variable
+/// * `oe_pairs` - Observed/expected pairs per variable
 /// * `sigma` - Per-cluster weights (length K)
 /// * `theta` - Per-variable penalties (length n_variables)
 /// * `batch_infos` - Batch information per variable
@@ -336,7 +339,7 @@ pub fn update_centroids_from_r(z_cos: MatRef<f32>, r: MatRef<f32>) -> Mat<f32> {
 pub fn compute_objective(
     r: MatRef<f32>,
     dist_mat: MatRef<f32>,
-    oe_pairs: &[(Mat<f32>, Mat<f32>)],
+    oe_pairs: &[OEPair],
     sigma: &[f32],
     theta: &[f32],
     batch_infos: &[BatchInfo],
@@ -371,7 +374,7 @@ pub fn compute_objective(
     let mut cross_entropy = 0.0f32;
 
     for (var_idx, info) in batch_infos.iter().enumerate() {
-        let (ref o, ref e) = oe_pairs[var_idx];
+        let OEPair { o, e } = &oe_pairs[var_idx];
         let b = info.n_levels;
         let theta_v = theta[var_idx];
 
@@ -421,11 +424,12 @@ pub fn compute_objective(
 /// * `block_size` - Fraction of cells per update block
 /// * `seed` - Random seed for shuffling
 /// * `r_init` - Initial R matrix (K x N)
-/// * `oe_init` - Initial (O, E) pairs per variable
+/// * `oe_init` - Initial observed/expected pairs per variable
 ///
 /// ### Returns
 ///
-/// Tuple of (R: K x N, Vec of (O, E) per variable)
+/// Tuple of (R: K x N, Vec of `OEPair` per variable)
+#[allow(clippy::too_many_arguments)]
 pub fn update_r_with_diversity(
     dist_mat: MatRef<f32>,
     sigma: &[f32],
@@ -434,8 +438,8 @@ pub fn update_r_with_diversity(
     block_size: f32,
     seed: usize,
     r_init: MatRef<f32>,
-    oe_init: &[(Mat<f32>, Mat<f32>)],
-) -> (Mat<f32>, Vec<(Mat<f32>, Mat<f32>)>) {
+    oe_init: &[OEPair],
+) -> (Mat<f32>, Vec<OEPair>) {
     let k = dist_mat.nrows();
     let n = dist_mat.ncols();
     let n_vars = batch_infos.len();
@@ -466,9 +470,12 @@ pub fn update_r_with_diversity(
     update_order.shuffle(&mut rng);
 
     let mut r = r_init.to_owned();
-    let mut oe: Vec<(Mat<f32>, Mat<f32>)> = oe_init
+    let mut oe: Vec<OEPair> = oe_init
         .iter()
-        .map(|(o, e)| (o.to_owned(), e.to_owned()))
+        .map(|OEPair { o, e }| OEPair {
+            o: o.to_owned(),
+            e: e.to_owned(),
+        })
         .collect();
 
     // Block-wise updates
@@ -483,7 +490,7 @@ pub fn update_r_with_diversity(
         for &cell_idx in &update_order[idx_min..idx_max] {
             for var_idx in 0..n_vars {
                 let level = batch_infos[var_idx].cell_to_level[cell_idx];
-                let (ref mut o, ref mut e) = oe[var_idx];
+                let OEPair { o, e } = &mut oe[var_idx];
                 let pr_b = &batch_infos[var_idx].pr_b;
                 let b = batch_infos[var_idx].n_levels;
 
@@ -508,7 +515,7 @@ pub fn update_r_with_diversity(
                 let mut penalty = 1.0f32;
                 for var_idx in 0..n_vars {
                     let level = batch_infos[var_idx].cell_to_level[cell_idx];
-                    let (ref o, ref e) = oe[var_idx];
+                    let OEPair { o, e } = &oe[var_idx];
                     let theta_v = theta[var_idx];
 
                     let o_val = o[(cluster_idx, level)];
@@ -534,7 +541,7 @@ pub fn update_r_with_diversity(
         for &cell_idx in &update_order[idx_min..idx_max] {
             for var_idx in 0..n_vars {
                 let level = batch_infos[var_idx].cell_to_level[cell_idx];
-                let (ref mut o, ref mut e) = oe[var_idx];
+                let OEPair { o, e } = &mut oe[var_idx];
                 let pr_b = &batch_infos[var_idx].pr_b;
                 let b = batch_infos[var_idx].n_levels;
 
@@ -712,7 +719,7 @@ struct HarmonyState {
     z_corr: Mat<f32>,
     y: Mat<f32>,
     r: Mat<f32>,
-    oe_pairs: Vec<(Mat<f32>, Mat<f32>)>,
+    oe_pairs: Vec<OEPair>,
     objectives_kmeans: Vec<f32>,
     objectives_harmony: Vec<f32>,
 }
@@ -938,6 +945,7 @@ mod tests {
     use super::*;
     use approx::assert_relative_eq;
     use faer::mat;
+    use std::slice::from_ref;
 
     #[test]
     fn test_create_batch_info() {
@@ -1036,7 +1044,7 @@ mod tests {
 
     #[test]
     fn test_initialise_r_from_distances() {
-        let dist_data = vec![0.0, 2.0, 4.0, 4.0, 2.0, 0.0];
+        let dist_data = [0.0, 2.0, 4.0, 4.0, 2.0, 0.0];
         let dist_mat = Mat::from_fn(2, 3, |i, j| dist_data[i * 3 + j]);
         let sigma = vec![1.0, 1.0];
 
@@ -1060,7 +1068,7 @@ mod tests {
 
     #[test]
     fn test_initialise_r_different_sigmas() {
-        let dist_data = vec![1.0, 1.0, 1.0, 1.0];
+        let dist_data = [1.0, 1.0, 1.0, 1.0];
         let dist_mat = Mat::from_fn(2, 2, |i, j| dist_data[i * 2 + j]);
         let sigma = vec![0.5, 2.0];
 
@@ -1078,7 +1086,7 @@ mod tests {
             [0.2, 0.3, 0.4, 0.1, 0.5, 0.7],
         ];
 
-        let (o, e) = compute_diversity_statistics(r.as_ref(), &info);
+        let OEPair { o, e } = compute_diversity_statistics(r.as_ref(), &info);
 
         assert_eq!(o.nrows(), 2);
         assert_eq!(o.ncols(), 3);
@@ -1124,7 +1132,7 @@ mod tests {
             [0.2, 0.2, 0.2, 0.1, 0.2, 0.1, 0.2, 0.2, 0.1],
         ];
 
-        let (o, e) = compute_diversity_statistics(r.as_ref(), &info);
+        let OEPair { o, e } = compute_diversity_statistics(r.as_ref(), &info);
 
         // Property 1: O row sums equal R row sums
         for cluster_idx in 0..3 {
@@ -1222,31 +1230,28 @@ mod tests {
         let info = create_batch_info(&labels, 4);
         let sigma = vec![1.0, 1.0];
         let theta = vec![1.0];
-
         let r_uncertain = mat![[0.5, 0.5, 0.5, 0.5], [0.5, 0.5, 0.5, 0.5]];
         let dist_mat_high = mat![[1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 1.0]];
-        let oe1 = compute_all_diversity_statistics(r_uncertain.as_ref(), &[info.clone()]);
+        let oe1 = compute_all_diversity_statistics(r_uncertain.as_ref(), from_ref(&info));
         let obj1 = compute_objective(
             r_uncertain.as_ref(),
             dist_mat_high.as_ref(),
             &oe1[..],
             &sigma,
             &theta,
-            std::slice::from_ref(&info.clone()),
+            from_ref(&info),
         );
-
         let r_confident = mat![[0.9, 0.9, 0.1, 0.1], [0.1, 0.1, 0.9, 0.9]];
         let dist_mat_low = mat![[0.1, 0.1, 1.0, 1.0], [1.0, 1.0, 0.1, 0.1]];
-        let oe2 = compute_all_diversity_statistics(r_confident.as_ref(), &[info.clone()]);
+        let oe2 = compute_all_diversity_statistics(r_confident.as_ref(), from_ref(&info));
         let obj2 = compute_objective(
             r_confident.as_ref(),
             dist_mat_low.as_ref(),
             &oe2[..],
             &sigma,
             &theta,
-            std::slice::from_ref(&info.clone()),
+            from_ref(&info),
         );
-
         assert!(
             obj2 < obj1,
             "Confident R should have lower objective: {} vs {}",
@@ -1264,7 +1269,7 @@ mod tests {
 
         let r = mat![[0.8, 0.7, 0.2], [0.2, 0.3, 0.8]];
         let dist_mat = mat![[0.1, 0.2, 0.9], [0.9, 0.8, 0.1]];
-        let oe = compute_all_diversity_statistics(r.as_ref(), &[info.clone()]);
+        let oe = compute_all_diversity_statistics(r.as_ref(), from_ref(&info));
 
         let obj = compute_objective(
             r.as_ref(),
@@ -1272,7 +1277,7 @@ mod tests {
             &oe[..],
             &sigma,
             &theta,
-            std::slice::from_ref(&info.clone()),
+            from_ref(&info),
         );
 
         assert!(obj.is_finite());
@@ -1289,7 +1294,7 @@ mod tests {
 
         let r = mat![[1.0, 0.0], [0.0, 1.0]];
         let dist_mat = mat![[0.1, 0.9], [0.9, 0.1]];
-        let oe = compute_all_diversity_statistics(r.as_ref(), &[info.clone()]);
+        let oe = compute_all_diversity_statistics(r.as_ref(), from_ref(&info));
 
         let obj = compute_objective(
             r.as_ref(),
@@ -1297,7 +1302,7 @@ mod tests {
             &oe[..],
             &sigma,
             &theta,
-            std::slice::from_ref(&info.clone()),
+            from_ref(&info),
         );
 
         let expected = 0.2 * 1000.0;
@@ -1317,13 +1322,13 @@ mod tests {
 
         let r_init = mat![[0.5, 0.5, 0.5, 0.5], [0.5, 0.5, 0.5, 0.5]];
         let dist_mat = mat![[0.1, 0.1, 0.9, 0.9], [0.9, 0.9, 0.1, 0.1]];
-        let oe_init = compute_all_diversity_statistics(r_init.as_ref(), &[info.clone()]);
+        let oe_init = compute_all_diversity_statistics(r_init.as_ref(), from_ref(&info));
 
         let (r_new, oe_new) = update_r_with_diversity(
             dist_mat.as_ref(),
             &sigma,
             &theta,
-            std::slice::from_ref(&info),
+            from_ref(&info),
             0.5,
             42,
             r_init.as_ref(),
@@ -1347,8 +1352,11 @@ mod tests {
 
         // O and E should be consistent with new R
         let oe_check = compute_all_diversity_statistics(r_new.as_ref(), &[info]);
-        let (ref o_new, ref e_new) = oe_new[0];
-        let (ref o_check, ref e_check) = oe_check[0];
+        let OEPair { o: o_new, e: e_new } = &oe_new[0];
+        let OEPair {
+            o: o_check,
+            e: e_check,
+        } = &oe_check[0];
 
         for cluster_idx in 0..2 {
             for level_idx in 0..2 {
@@ -1379,13 +1387,13 @@ mod tests {
 
         let r_init = mat![[0.5, 0.5], [0.5, 0.5]];
         let dist_mat = mat![[0.1, 0.9], [0.9, 0.1]];
-        let oe_init = compute_all_diversity_statistics(r_init.as_ref(), &[info.clone()]);
+        let oe_init = compute_all_diversity_statistics(r_init.as_ref(), from_ref(&info));
 
         let (r_new, _) = update_r_with_diversity(
             dist_mat.as_ref(),
             &sigma,
             &theta,
-            std::slice::from_ref(&info),
+            from_ref(&info),
             1.0,
             42,
             r_init.as_ref(),
@@ -1405,13 +1413,13 @@ mod tests {
 
         let r_init = mat![[0.9, 0.9, 0.9, 0.9], [0.1, 0.1, 0.1, 0.1]];
         let dist_mat = mat![[0.2, 0.2, 0.2, 0.2], [0.8, 0.8, 0.8, 0.8]];
-        let oe_init = compute_all_diversity_statistics(r_init.as_ref(), &[info.clone()]);
+        let oe_init = compute_all_diversity_statistics(r_init.as_ref(), from_ref(&info));
 
         let (r_new, _) = update_r_with_diversity(
             dist_mat.as_ref(),
             &sigma,
             &theta,
-            std::slice::from_ref(&info),
+            from_ref(&info),
             0.5,
             42,
             r_init.as_ref(),
@@ -1431,14 +1439,10 @@ mod tests {
 
     #[test]
     fn test_update_r_two_variables() {
-        // 4 cells, 2 clusters, 2 variables each with 2 levels
-        // Variable 0: cells 0,1 = level 0; cells 2,3 = level 1
-        // Variable 1: cells 0,2 = level 0; cells 1,3 = level 1
         let labels0 = vec![0, 0, 1, 1];
         let labels1 = vec![0, 1, 0, 1];
         let info0 = create_batch_info(&labels0, 4);
         let info1 = create_batch_info(&labels1, 4);
-        let infos = [&info0 as &BatchInfo, &info1];
 
         let sigma = vec![1.0, 1.0];
         let theta = vec![1.0, 1.0];
@@ -1446,10 +1450,8 @@ mod tests {
         let r_init = mat![[0.5, 0.5, 0.5, 0.5], [0.5, 0.5, 0.5, 0.5]];
         let dist_mat = mat![[0.1, 0.1, 0.9, 0.9], [0.9, 0.9, 0.1, 0.1]];
 
-        let oe_init: Vec<(Mat<f32>, Mat<f32>)> = infos
-            .iter()
-            .map(|info| compute_diversity_statistics(r_init.as_ref(), info))
-            .collect();
+        let oe_init =
+            compute_all_diversity_statistics(r_init.as_ref(), &[info0.clone(), info1.clone()]);
 
         let (r_new, oe_new) = update_r_with_diversity(
             dist_mat.as_ref(),
@@ -1476,8 +1478,11 @@ mod tests {
         // O and E should match recomputation for both variables
         assert_eq!(oe_new.len(), 2);
         for (var_idx, info) in [&info0, &info1].iter().enumerate() {
-            let (ref o_new, ref e_new) = oe_new[var_idx];
-            let (o_check, e_check) = compute_diversity_statistics(r_new.as_ref(), info);
+            let OEPair { o: o_new, e: e_new } = &oe_new[var_idx];
+            let OEPair {
+                o: o_check,
+                e: e_check,
+            } = compute_diversity_statistics(r_new.as_ref(), info);
 
             for cluster_idx in 0..2 {
                 for level_idx in 0..info.n_levels {
@@ -1627,26 +1632,20 @@ mod tests {
 
     #[test]
     fn test_ridge_regression_two_variables() {
-        // 6 cells, 2 features
-        // Variable 0 (batch): 3 levels
-        // Variable 1 (sample): 2 levels
-        //
-        // Batch effect in feature 0, sample effect in feature 1
         let batch_labels = vec![0, 0, 1, 1, 2, 2];
         let sample_labels = vec![0, 1, 0, 1, 0, 1];
         let info_batch = create_batch_info(&batch_labels, 6);
         let info_sample = create_batch_info(&sample_labels, 6);
 
         let z_orig = mat![
-            [1.0, 0.0], // batch 0, sample 0
-            [1.0, 3.0], // batch 0, sample 1
-            [5.0, 0.0], // batch 1, sample 0
-            [5.0, 3.0], // batch 1, sample 1
-            [9.0, 0.0], // batch 2, sample 0
-            [9.0, 3.0], // batch 2, sample 1
+            [1.0, 0.0],
+            [1.0, 3.0],
+            [5.0, 0.0],
+            [5.0, 3.0],
+            [9.0, 0.0],
+            [9.0, 3.0],
         ];
 
-        // Hard assignment to one cluster
         let r = mat![
             [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
             [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
@@ -1659,7 +1658,6 @@ mod tests {
             0.01,
         );
 
-        // Batch effect in feature 0 should be reduced
         let batch_means_orig: Vec<f32> = (0..3)
             .map(|b| {
                 let cells = &info_batch.batch_indices[b];
@@ -1682,7 +1680,6 @@ mod tests {
             corr_spread
         );
 
-        // Sample effect in feature 1 should also be reduced
         let sample_means_orig: Vec<f32> = (0..2)
             .map(|s| {
                 let cells = &info_sample.batch_indices[s];
@@ -1708,15 +1705,11 @@ mod tests {
 
     #[test]
     fn test_ridge_regression_two_vars_design_matrix_size() {
-        // Verify the design matrix is correctly sized by checking that
-        // correction with 2 variables produces different results than
-        // correction with just one.
         let batch_labels = vec![0, 0, 1, 1];
         let sample_labels = vec![0, 1, 0, 1];
         let info_batch = create_batch_info(&batch_labels, 4);
         let info_sample = create_batch_info(&sample_labels, 4);
 
-        // Feature 0 has batch effect, feature 1 has sample effect
         let z_orig = mat![[1.0, 0.0], [1.0, 5.0], [5.0, 0.0], [5.0, 5.0],];
 
         let r = mat![[1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 0.0]];
@@ -1735,7 +1728,6 @@ mod tests {
             0.01,
         );
 
-        // Two-variable correction should differ from single-variable
         let mut any_diff = false;
         for i in 0..4 {
             for j in 0..2 {
@@ -1749,7 +1741,6 @@ mod tests {
             "Two-variable correction should differ from single-variable"
         );
 
-        // Two-variable correction should better reduce the sample effect
         let sample_diff_one: f32 = (0..4)
             .step_by(2)
             .map(|i| (z_one_var[(i, 1)] - z_one_var[(i + 1, 1)]).abs())
@@ -1769,7 +1760,6 @@ mod tests {
 
     #[test]
     fn test_objective_two_variables() {
-        // Verify objective computes correctly with two variables
         let labels0 = vec![0, 0, 1, 1];
         let labels1 = vec![0, 1, 0, 1];
         let info0 = create_batch_info(&labels0, 4);
@@ -1781,11 +1771,7 @@ mod tests {
         let r = mat![[0.8, 0.7, 0.2, 0.3], [0.2, 0.3, 0.8, 0.7]];
         let dist_mat = mat![[0.1, 0.2, 0.9, 0.8], [0.9, 0.8, 0.1, 0.2]];
 
-        let infos: Vec<&BatchInfo> = vec![&info0, &info1];
-        let oe: Vec<(Mat<f32>, Mat<f32>)> = infos
-            .iter()
-            .map(|info| compute_diversity_statistics(r.as_ref(), info))
-            .collect();
+        let oe = compute_all_diversity_statistics(r.as_ref(), &[info0.clone(), info1.clone()]);
 
         let obj = compute_objective(
             r.as_ref(),
@@ -1798,9 +1784,7 @@ mod tests {
 
         assert!(obj.is_finite());
 
-        // With two diversity penalties, objective should be larger than with
-        // one (all else equal)
-        let oe_single = vec![compute_diversity_statistics(r.as_ref(), &info0)];
+        let oe_single = compute_all_diversity_statistics(r.as_ref(), std::slice::from_ref(&info0));
         let obj_single = compute_objective(
             r.as_ref(),
             dist_mat.as_ref(),

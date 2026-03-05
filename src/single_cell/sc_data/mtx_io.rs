@@ -421,7 +421,7 @@ impl MtxReader {
 
         if verbose {
             println!(
-                "Starting to write high quality cells, genes in a cell-friendly format to disk."
+                "Starting to write cells passing quality thresholds in a cell I/O-friendly format to disk."
             )
         }
 
@@ -513,7 +513,7 @@ impl MtxReader {
             cell_indices: quality.cells_to_keep.to_vec(),
             gene_indices: quality.genes_to_keep.to_vec(),
             lib_size,
-            no_genes: nnz,
+            nnz,
         };
 
         Ok(MtxFinalData {

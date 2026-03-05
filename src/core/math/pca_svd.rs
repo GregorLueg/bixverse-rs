@@ -1,3 +1,6 @@
+//! Helper functions for Principal Component type analyses with implementations
+//! for randomised SVD on dense or sparse matrices.
+
 use faer::{Mat, MatMut, MatRef};
 use num_traits::Float;
 use rand::prelude::*;
@@ -11,16 +14,13 @@ use crate::prelude::*;
 ////////////////
 
 /// Structure for random SVD results
-///
-/// ### Fields
-///
-/// * `u` - Matrix u of the SVD decomposition
-/// * `v` - Matrix v of the SVD decomposition
-/// * `s` - Eigen vectors of the SVD decomposition
 #[derive(Clone, Debug)]
 pub struct RandomSvdResults<T> {
-    pub u: faer::Mat<T>,
-    pub v: faer::Mat<T>,
+    /// Matrix u of the SVD decomposition
+    pub u: Mat<T>,
+    /// Matrix v of the SVD decomposition
+    pub v: Mat<T>,
+    /// Eigen vectors of the SVD decomposition
     pub s: Vec<T>,
 }
 
@@ -33,11 +33,15 @@ pub struct RandomSvdResults<T> {
 /// * `s` - Eigen vectors of the SVD decomposition
 #[derive(Clone, Debug)]
 pub struct SvdResults<T> {
-    pub u: faer::Mat<T>,
-    pub v: faer::Mat<T>,
+    /// Matrix u of the SVD decomposition
+    pub u: Mat<T>,
+    /// Matrix v of the SVD decomposition
+    pub v: Mat<T>,
+    /// Eigen vectors of the SVD decomposition
     pub s: Vec<T>,
 }
 
+/// Trait to return the different matrices from the Svd Resuls
 pub trait SvdResult<T> {
     /// Returns the matrix u of the SVD decomposition
     fn u(&self) -> &faer::Mat<T>;
@@ -230,8 +234,9 @@ where
 /// ### Returns
 ///
 /// `RandomSvdResults` containing U (n×k), S (length k), and V (m×k)
+#[allow(clippy::too_many_arguments)]
 pub fn randomised_sparse_svd<T, F>(
-    matrix: &CompressedSparseData<T>,
+    matrix: &CompressedSparseData2<T>,
     rank: usize,
     seed: u64,
     use_second_layer: bool,
@@ -250,7 +255,7 @@ where
     let n_iter = n_power_iter.unwrap_or(2);
 
     let csr_owned;
-    let csr: &CompressedSparseData<T> = match matrix.cs_type {
+    let csr: &CompressedSparseData2<T> = match matrix.cs_type {
         CompressedSparseFormat::Csr => matrix,
         CompressedSparseFormat::Csc => {
             csr_owned = matrix.transform();
@@ -309,7 +314,7 @@ where
                     unsafe {
                         let ptr =
                             base.offset(i as isize * y_row_stride + col as isize * y_col_stride);
-                        *ptr = *ptr + a_val * x_scaled[(j, col)];
+                        *ptr += a_val * x_scaled[(j, col)];
                     }
                 }
             }
@@ -319,7 +324,7 @@ where
                     unsafe {
                         let ptr =
                             base.offset(i as isize * y_row_stride + col as isize * y_col_stride);
-                        *ptr = *ptr - mean_dots[col];
+                        *ptr -= mean_dots[col];
                     }
                 }
             }
@@ -394,7 +399,7 @@ where
 
     let mut q = y.qr().compute_thin_Q();
 
-    // Reuse buffers across power iterations.
+    // reuse buffers across power iterations.
     let mut z = Mat::<F>::zeros(m, sample_size);
     let mut y_new = Mat::<F>::zeros(n, sample_size);
 

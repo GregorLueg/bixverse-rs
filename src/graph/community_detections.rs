@@ -1,3 +1,5 @@
+//! Graph community detection algorithms
+
 use rand::prelude::*;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
@@ -136,6 +138,7 @@ where
 // Walktrap //
 //////////////
 
+/// Type of linkage to use for the WalkTrap community detection algorithm
 #[derive(Clone, Copy)]
 pub enum Linkage {
     /// Average Linkage

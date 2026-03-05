@@ -1,3 +1,6 @@
+//! Implementations of the PageRank algorithm for rapid identification of
+//! influential nodes in the network
+
 use petgraph::Graph;
 use petgraph::prelude::*;
 use petgraph::visit::NodeIndexable;

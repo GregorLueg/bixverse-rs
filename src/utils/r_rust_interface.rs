@@ -24,8 +24,11 @@ pub type NestedBtreeMap = BTreeMap<String, BTreeMap<String, FxHashSet<String>>>;
 /// Error handling for named numeric conversion
 #[derive(Debug)]
 pub enum NamedVecError {
+    /// Not numeric error
     NotNumeric,
+    /// No Names provided error
     NoNames,
+    /// Missing values in the data error
     MissingValues,
 }
 
@@ -369,7 +372,7 @@ pub fn r_matrix_to_faer_fp32(x: &RMatrix<f64>) -> Mat<f32> {
 /// * `ncol` - Number of columns
 /// * `nrow` - Number of rows
 /// * `cs_type` - Compressed Sparse Format type
-pub fn sparse_data_to_list<T>(sparse: CompressedSparseData<T>) -> List
+pub fn sparse_data_to_list<T>(sparse: CompressedSparseData2<T>) -> List
 where
     T: Into<Robj> + Clone + Default + Into<f64> + Sync + Add + PartialEq + Mul,
 {
@@ -408,7 +411,7 @@ where
     )
 }
 
-/// Transform an R list storing CSR/C data into CompressedSparseData
+/// Transform an R list storing CSR/C data into CompressedSparseData2
 ///
 /// ### Params
 ///
@@ -417,8 +420,8 @@ where
 ///
 /// ### Returns
 ///
-/// The CompressedSparseData Rust object with the data
-pub fn list_to_sparse_matrix<T>(r_list: List) -> CompressedSparseData<T>
+/// The CompressedSparseData2 Rust object with the data
+pub fn list_to_sparse_matrix<T>(r_list: List) -> CompressedSparseData2<T>
 where
     T: Clone + Default + TryFrom<Robj> + Into<u32>,
 {
@@ -459,7 +462,7 @@ where
         _ => panic!("Unknown format"),
     };
 
-    CompressedSparseData {
+    CompressedSparseData2 {
         data,
         indices,
         indptr,

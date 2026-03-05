@@ -1,3 +1,5 @@
+//! Synthetic data generation for bulkRNAseq
+
 use faer::{Mat, MatRef};
 use rand::prelude::*;
 use rand_distr::{Beta, Binomial, Distribution, Gamma, Normal, Poisson};
@@ -36,15 +38,12 @@ pub fn parse_sparsification(s: &str) -> Option<SparsityFunction> {
 }
 
 /// Structure for synthetic RNAseq data
-///
-/// ### Fields
-///
-/// * `count_matrix` - The synthetic counts.
-/// * `gene_modules` - A vector indicating to which gene module a gene belongs.
-///   `0` indicating background.
 #[derive(Clone, Debug)]
 pub struct SyntheticRnaSeqData<T> {
+    /// The synthetic counts generate by the function
     pub count_matrix: Mat<T>,
+    /// A vector indicating to which gene module a gene belongs. `0` indicating
+    /// background.
     pub gene_modules: Vec<usize>,
 }
 
