@@ -407,7 +407,7 @@ mod tests {
             parse_sparsification("powerdecay"),
             Some(SparsityFunction::PowerDecay)
         ));
-        assert!(matches!(parse_sparsification("unknown"), None));
+        assert!(parse_sparsification("unknown").is_none());
     }
 
     #[test]

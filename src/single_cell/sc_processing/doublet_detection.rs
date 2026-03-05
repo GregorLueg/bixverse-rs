@@ -1,3 +1,6 @@
+//! Implements the doubling detection method implemented from Python, see:
+//! https://doubletdetection.readthedocs.io/en/stable/
+
 use faer::{Mat, MatRef, concat};
 use rand::prelude::*;
 use rayon::prelude::*;
@@ -37,36 +40,6 @@ type BoostPcaRes = (Mat<f32>, Mat<f32>, Vec<f32>, Vec<f32>);
 
 /// Structure to store the Boost parameters
 ///
-/// ### Fields
-///
-/// **General parameters:**
-///
-/// * `log_transform` - Shall the counts be log-transformed
-/// * `mean_center` - Shall the data be mean-centred
-/// * `normalise_variance` - Shall the data be variance normalised
-/// * `target_size` - Optional target size. If not provided, will default to
-///   the mean library size of the cells.
-///
-/// **HVG Detection:**
-///
-/// * `min_gene_var_pctl` - Percentile threshold for highly variable genes.
-/// * `hvg_method` - Method for HVG selection. One of `"vst"`, `"mvb"`, or
-///   `"dispersion"`.
-/// * `loess_span` - Span parameter for loess fitting in VST method.
-/// * `clip_max` - Optional maximum value for clipping in variance
-///   stabilisation.
-///
-/// **Doublet Generation:**
-///
-/// * `boost_rate` - Number of doublets to simulate relative to the number of
-///   observed cells (e.g., 1.5 simulates 1.5x as many doublets).
-/// * `replace` - Whether to use replacement when sampling cell pairs.
-///
-/// **PCA:**
-///
-/// * `no_pcs` - Number of principal components to use for embedding.
-/// * `random_svd` - Whether to use randomised SVD (faster) vs exact SVD.
-///
 /// **Clustering and Iteration:**
 ///
 /// * `resolution` - Resolution parameter for Louvain clustering.
@@ -82,31 +55,44 @@ type BoostPcaRes = (Mat<f32>, Mat<f32>, Vec<f32>, Vec<f32>);
 /// * `knn_params` - The knnParams via the `KnnParams` structure.
 #[derive(Clone, Debug)]
 pub struct BoostParams {
-    // general params
+    /// Shall the counts be log-transformed
     pub log_transform: bool,
+    /// Shall the data be mean-centred
     pub mean_center: bool,
+    /// Shall the data be variance normalised
     pub normalise_variance: bool,
+    /// Optional target size. If not provided, will default to the mean library
+    /// size of the cells.
     pub target_size: Option<f32>,
-    // hvg detection
+    /// Percentile threshold for highly variable genes.
     pub min_gene_var_pctl: f32,
+    /// Method for HVG selection. One of `"vst"`, `"mvb"`, or `"dispersion"`.
     pub hvg_method: String,
+    /// Span parameter for loess fitting in VST method.
     pub loess_span: f64,
+    /// Optional maximum value for clipping in variance stabilisation.
     pub clip_max: Option<f32>,
-    // doublet generation
+    /// Number of doublets to simulate relative to the number of observed cells
+    /// (e.g., 1.5 simulates 1.5x as many doublets).
     pub boost_rate: f32,
+    /// Whether to use replacement when sampling cell pairs.
     pub replace: bool,
-    // pca
+    /// Number of principal components to use for embedding.
     pub no_pcs: usize,
+    /// Whether to use randomised SVD (faster) vs exact SVD.
     pub random_svd: bool,
-    // clustering
+    /// Resolution parameter for Louvain clustering.
     pub resolution: f32,
+    /// Number of iterations for Louvain to perform.
     pub louvain_iters: usize,
-    // iterations
+    /// Number of boosting iterations to perform.
     pub n_iters: usize,
-    // doublet calling
+    /// P-value threshold for doublet calling via voting.
     pub p_thresh: f32,
+    /// Threshold for majority voting (0-1).
     pub voter_thresh: f32,
-    // knn
+    /// Parameters for the various approximate nearest neighbour searches
+    /// in ann-search-rs
     pub knn_params: KnnParams,
 }
 
@@ -118,21 +104,17 @@ pub struct BoostParams {
 ///
 /// Contains predictions, scores, and voting statistics from the Boost
 /// algorithm.
-///
-/// ### Fields
-///
-/// * `predicted_doublets` - Boolean vector indicating which observed cells are
-///   predicted as doublets (true = doublet, false = singlet).
-/// * `doublet_scores` - Doublet scores for each observed cell, typically
-///   averaged across iterations. Higher scores indicate higher likelihood of
-///   being a doublet.
-/// * `voting_average` - Average voting fraction across iterations. Indicates
-///   the consensus across boosting iterations for each cell. Only meaningful
-///   when n_iters > 1.
 #[derive(Clone, Debug)]
 pub struct BoostResult {
+    /// Boolean vector indicating which observed cells are predicted as doublets
+    /// (true = doublet, false = singlet).
     pub predicted_doublets: Vec<bool>,
+    /// Doublet scores for each observed cell, typically averaged across
+    /// iterations. Higher scores indicate higher likelihood of being a doublet.
     pub doublet_scores: Vec<f32>,
+    /// Average voting fraction across iterations. Indicates the consensus
+    /// across boosting iterations for each cell. Only meaningful when n_iters
+    /// > 1.
     pub voting_average: Vec<f32>,
 }
 

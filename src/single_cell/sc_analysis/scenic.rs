@@ -1,7 +1,11 @@
+//! Contains the SCENIC implementation of
+
 use faer::Mat;
 use indexmap::IndexSet;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use rayon::prelude::*;
+use std::sync::mpsc;
+use std::thread;
 use std::time::Instant;
 use thousands::Separable;
 
@@ -376,46 +380,36 @@ impl DenseQuantisedStore {
 ///
 /// All allocations are done once at construction and reused across trees and
 /// nodes to avoid repeated heap allocation in the hot path.
-///
-/// ### Fields
-///
-/// * `feat_buf` - Feature index permutation buffer for partial Fisher-Yates
-///   shuffle.
-/// * `left_buf` - Temporary sample indices for the left child during
-///   partitioning.
-/// * `right_buf` - Temporary sample indices for the right child during
-///   partitioning.
-/// * `left_y_buf` - Temporary interleaved Y values for the left child; layout
-///   `[sample * n_targets + target]`.
-/// * `right_y_buf` - Temporary interleaved Y values for the right child; same
-///   layout as `left_y_buf`.
-/// * `counts` - Per-bin sample counts; layout `counts[bin]`.
-/// * `y_sums` - Per-bin, per-target Y sums; layout
-///   `y_sums[bin * n_targets + target]`.
-/// * `y_sum_sqs` - Per-bin, per-target Y sum-of-squares; same layout as
-///   `y_sums`.
-/// * `cum_counts` - Prefix-sum of `counts` over bins.
-/// * `cum_y_sums` - Prefix-sum of `y_sums` over bins; same layout as `y_sums`.
-/// * `cum_y_sum_sqs` - Prefix-sum of `y_sum_sqs` over bins; same layout as
-///   `y_sums`.
-/// * `best_y_sums_l` - Left-child Y sums captured at the best split.
-/// * `best_y_sum_sqs_l` - Left-child Y sum-of-squares captured at the best
-///   split.
-/// * `parent_vars` - Per-target parent variance scratch space.
 struct TreeBuffers {
+    /// Feature index permutation buffer for partial Fisher-Yates shuffle.
     feat_buf: Vec<usize>,
+    /// Temporary sample indices for the left child during partitioning.
     left_buf: Vec<u32>,
+    /// Temporary sample indices for the right child during partitioning.
     right_buf: Vec<u32>,
+    /// Temporary interleaved Y values for the left child; layout
+    /// `[sample * n_targets + target]`.
     left_y_buf: Vec<f32>,
+    /// Temporary interleaved Y values for the right child; same layout as
+    /// `left_y_buf`.
     right_y_buf: Vec<f32>,
+    /// Per-bin sample counts; layout `counts[bin]`.
     counts: [usize; 256],
+    /// Per-bin, per-target Y sums; layout
     y_sums: Vec<f64>,
+    /// Per-bin, per-target Y sum-of-squares; same layout as `y_sums`.
     y_sum_sqs: Vec<f64>,
+    /// Prefix-sum of `counts` over bins.
     cum_counts: [usize; 256],
+    /// Prefix-sum of `y_sums` over bins; same layout as `y_sums`.
     cum_y_sums: Vec<f64>,
+    /// Prefix-sum of `y_sum_sqs` over bins; same layout as `y_sums`.
     cum_y_sum_sqs: Vec<f64>,
+    /// Left-child Y sums captured at the best split.
     best_y_sums_l: Vec<f64>,
+    /// Left-child Y sum-of-squares captured at the best split.
     best_y_sum_sqs_l: Vec<f64>,
+    /// Per-target parent variance scratch space.
     parent_vars: Vec<f64>,
 }
 
@@ -620,9 +614,9 @@ fn evaluate_split_multi(
         *best_feature = feat;
         *best_threshold_u8 = threshold as u8;
         *best_n_left = n_left;
-        for k in 0..n_targets {
-            best_y_sums_l[k] = cum_y_sums[h_base + k];
-            best_y_sum_sqs_l[k] = cum_y_sum_sqs[h_base + k];
+        for _ in 0..n_targets {
+            best_y_sums_l.copy_from_slice(&cum_y_sums[h_base..h_base + n_targets]);
+            best_y_sum_sqs_l.copy_from_slice(&cum_y_sum_sqs[h_base..h_base + n_targets]);
         }
     }
 }
@@ -690,7 +684,7 @@ fn build_node_multi(
         total_parent_var += v;
     }
 
-    let max_depth_reached = config.max_depth().map_or(false, |d| depth >= d);
+    let max_depth_reached = config.max_depth().is_some_and(|d| depth >= d);
 
     if n < 2 * config.min_samples_leaf()
         || total_parent_var < config.min_variance()
@@ -796,11 +790,18 @@ fn build_node_multi(
         importances[imp_base + k] += weight * f64::max(0.0, reduction);
     }
 
-    let mut left_y_sums = vec![0.0f64; n_targets];
-    let mut left_y_sum_sqs = vec![0.0f64; n_targets];
+    // stack-allocated buffers: n_targets <= MULTI_OUTPUT_BATCH always holds.
+    // avoids heap allocations
+    let mut left_y_sums = [0.0f64; MULTI_OUTPUT_BATCH];
+    let mut left_y_sum_sqs = [0.0f64; MULTI_OUTPUT_BATCH];
+    let mut right_y_sums = [0.0f64; MULTI_OUTPUT_BATCH];
+    let mut right_y_sum_sqs = [0.0f64; MULTI_OUTPUT_BATCH];
+
+    left_y_sums[..n_targets].copy_from_slice(&bufs.best_y_sums_l[..n_targets]);
+    left_y_sum_sqs[..n_targets].copy_from_slice(&bufs.best_y_sum_sqs_l[..n_targets]);
     for k in 0..n_targets {
-        left_y_sums[k] = bufs.best_y_sums_l[k];
-        left_y_sum_sqs[k] = bufs.best_y_sum_sqs_l[k];
+        right_y_sums[k] = y_sums[k] - left_y_sums[k];
+        right_y_sum_sqs[k] = y_sum_sqs[k] - left_y_sum_sqs[k];
     }
 
     let tf_col = x.get_col(best_feature);
@@ -835,13 +836,6 @@ fn build_node_multi(
     y_slice[..y_left_len].copy_from_slice(&bufs.left_y_buf[..y_left_len]);
     y_slice[y_left_len..y_left_len + y_right_len].copy_from_slice(&bufs.right_y_buf[..y_right_len]);
 
-    let mut right_y_sums = vec![0.0f64; n_targets];
-    let mut right_y_sum_sqs = vec![0.0f64; n_targets];
-    for k in 0..n_targets {
-        right_y_sums[k] = y_sums[k] - left_y_sums[k];
-        right_y_sum_sqs[k] = y_sum_sqs[k] - left_y_sum_sqs[k];
-    }
-
     let (left_samples, right_samples) = sample_slice.split_at_mut(l_idx);
     let (left_y, right_y) = y_slice.split_at_mut(y_left_len);
 
@@ -849,8 +843,8 @@ fn build_node_multi(
         left_y,
         x,
         left_samples,
-        &left_y_sums,
-        &left_y_sum_sqs,
+        &left_y_sums[..n_targets],
+        &left_y_sum_sqs[..n_targets],
         n_total,
         n_targets,
         n_features_split,
@@ -864,8 +858,8 @@ fn build_node_multi(
         right_y,
         x,
         right_samples,
-        &right_y_sums,
-        &right_y_sum_sqs,
+        &right_y_sums[..n_targets],
+        &right_y_sum_sqs[..n_targets],
         n_total,
         n_targets,
         n_features_split,
@@ -1179,56 +1173,63 @@ pub fn run_scenic_grn(
         );
     }
 
-    for (chunk_idx, chunk) in gene_indices.chunks(SCENIC_GENE_CHUNK_SIZE).enumerate() {
-        if verbose {
-            println!(
-                "Processing gene chunk {}/{} ({} genes)",
-                chunk_idx + 1,
-                n_genes.div_ceil(SCENIC_GENE_CHUNK_SIZE),
-                chunk.len()
-            );
-        }
+    thread::scope(|s| {
+        let (tx, rx) = mpsc::sync_channel(2);
 
-        let start_chunk = Instant::now();
-        let mut gene_chunks_target: Vec<CscGeneChunk> = reader.read_gene_parallel(chunk);
-        gene_chunks_target.par_iter_mut().for_each(|c| {
-            c.filter_selected_cells(&cell_set);
+        let cell_set_ref = &cell_set;
+        let reader_ref = &reader;
+
+        s.spawn(move || {
+            for chunk in gene_indices.chunks(SCENIC_GENE_CHUNK_SIZE) {
+                let mut gene_chunks_target: Vec<CscGeneChunk> =
+                    reader_ref.read_gene_parallel(chunk);
+                gene_chunks_target.iter_mut().for_each(|c| {
+                    c.filter_selected_cells(cell_set_ref);
+                });
+                let sparse_columns: Vec<SparseAxis<u16, f32>> = gene_chunks_target
+                    .iter()
+                    .map(|c| c.to_sparse_axis(cell_set_ref.len()))
+                    .collect();
+                if tx.send(sparse_columns).is_err() {
+                    break;
+                }
+            }
         });
 
-        let sparse_columns: Vec<SparseAxis<u16, f32>> = gene_chunks_target
-            .iter()
-            .map(|c| c.to_sparse_axis(cell_set.len()))
-            .collect();
+        for (chunk_idx, sparse_columns) in rx.iter().enumerate() {
+            if verbose { /* progress printing */ }
+            let start_chunk = Instant::now();
 
-        let sub_batches: Vec<&[SparseAxis<u16, f32>]> =
-            sparse_columns.chunks(n_parallel_genes).collect();
+            let sub_batches: Vec<&[SparseAxis<u16, f32>]> =
+                sparse_columns.chunks(n_parallel_genes).collect();
 
-        let config: &dyn TreeRegressorConfig = match learner {
-            RegressionLearner::ExtraTrees(cfg) => cfg,
-            RegressionLearner::RandomForest(cfg) => cfg,
-        };
+            let config: &dyn TreeRegressorConfig = match learner {
+                RegressionLearner::ExtraTrees(cfg) => cfg,
+                RegressionLearner::RandomForest(cfg) => cfg,
+            };
 
-        let batch_results: Vec<Vec<Vec<f32>>> = sub_batches
-            .par_iter()
-            .enumerate()
-            .map(|(batch_idx, batch)| {
-                let batch_seed = seed.wrapping_add((chunk_idx * 1000 + batch_idx) * 2654435761);
-                fit_multi_trees(batch, &tf_data, cell_set.len(), config, batch_seed)
-            })
-            .collect();
+            let batch_results: Vec<Vec<Vec<f32>>> = sub_batches
+                .par_iter()
+                .enumerate()
+                .map(|(batch_idx, batch)| {
+                    let batch_seed = seed.wrapping_add((chunk_idx * 1000 + batch_idx) * 2654435761);
+                    fit_multi_trees(batch, &tf_data, cell_set.len(), config, batch_seed)
+                })
+                .collect();
 
-        let base = chunk_idx * SCENIC_GENE_CHUNK_SIZE;
-        for (batch_idx, batch_result) in batch_results.into_iter().enumerate() {
-            for (local_idx, imp) in batch_result.into_iter().enumerate() {
-                let global_idx = base + batch_idx * n_parallel_genes + local_idx;
-                importance_scores[global_idx] = imp;
+            let base = chunk_idx * SCENIC_GENE_CHUNK_SIZE;
+            for (batch_idx, batch_result) in batch_results.into_iter().enumerate() {
+                for (local_idx, imp) in batch_result.into_iter().enumerate() {
+                    let global_idx = base + batch_idx * n_parallel_genes + local_idx;
+                    importance_scores[global_idx] = imp;
+                }
+            }
+
+            if verbose {
+                println!("  Chunk done in {:.2?}", start_chunk.elapsed());
             }
         }
-
-        if verbose {
-            println!("  Chunk done in {:.2?}", start_chunk.elapsed());
-        }
-    }
+    });
 
     if verbose {
         println!(
@@ -1277,10 +1278,10 @@ mod tests {
         let y_slice: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
         let n_targets = 1;
 
-        let mut left_buf = vec![0u32; 4];
-        let mut right_buf = vec![0u32; 4];
-        let mut left_y_buf = vec![0.0f32; 4];
-        let mut right_y_buf = vec![0.0f32; 4];
+        let mut left_buf = [0u32; 4];
+        let mut right_buf = [0u32; 4];
+        let mut left_y_buf = [0.0f32; 4];
+        let mut right_y_buf = [0.0f32; 4];
 
         let threshold = 100u8;
         let mut l_idx = 0;
@@ -1373,23 +1374,20 @@ mod tests {
 
         bufs.build_histograms(&tf_col, &sample_slice, &y_slice, n_targets);
 
-        // Bin 0: samples 0,1 -> y=[1,2],[3,4] -> sums=[4,6], sum_sq=[10,20]
         assert_eq!(bufs.counts[0], 2);
-        assert!((bufs.y_sums[0 * n_targets + 0] - 4.0).abs() < 1e-10);
-        assert!((bufs.y_sums[0 * n_targets + 1] - 6.0).abs() < 1e-10);
-        assert!((bufs.y_sum_sqs[0 * n_targets + 0] - 10.0).abs() < 1e-10);
-        assert!((bufs.y_sum_sqs[0 * n_targets + 1] - 20.0).abs() < 1e-10);
+        assert!((bufs.y_sums[0] - 4.0).abs() < 1e-10);
+        assert!((bufs.y_sums[1] - 6.0).abs() < 1e-10);
+        assert!((bufs.y_sum_sqs[0] - 10.0).abs() < 1e-10);
+        assert!((bufs.y_sum_sqs[1] - 20.0).abs() < 1e-10);
 
-        // Bin 10: samples 3,4 -> y=[5,6],[7,8] -> sums=[12,14], sum_sq=[74,100]
         assert_eq!(bufs.counts[10], 2);
-        assert!((bufs.y_sums[10 * n_targets + 0] - 12.0).abs() < 1e-10);
+        assert!((bufs.y_sums[10 * n_targets] - 12.0).abs() < 1e-10);
         assert!((bufs.y_sums[10 * n_targets + 1] - 14.0).abs() < 1e-10);
-        assert!((bufs.y_sum_sqs[10 * n_targets + 0] - 74.0).abs() < 1e-10);
+        assert!((bufs.y_sum_sqs[10 * n_targets] - 74.0).abs() < 1e-10);
         assert!((bufs.y_sum_sqs[10 * n_targets + 1] - 100.0).abs() < 1e-10);
 
-        // Cumulative at bin 10 should include bins 0..=10
         assert_eq!(bufs.cum_counts[10], 4);
-        assert!((bufs.cum_y_sums[10 * n_targets + 0] - 16.0).abs() < 1e-10);
+        assert!((bufs.cum_y_sums[10 * n_targets] - 16.0).abs() < 1e-10);
         assert!((bufs.cum_y_sums[10 * n_targets + 1] - 20.0).abs() < 1e-10);
     }
 }

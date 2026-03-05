@@ -1,3 +1,5 @@
+//! Contains the single cell-related kNN functions
+
 use ann_search_rs::utils::KnnValidation;
 use ann_search_rs::utils::dist::Dist;
 use ann_search_rs::*;
@@ -52,53 +54,34 @@ pub fn parse_knn_method(s: &str) -> Option<KnnSearch> {
 
 /// KnnParams
 ///
-/// ### Fields
-///
-/// Below are the fields for the kNN generation via `ann-search-rs`.
-///
-/// **General**
-///
-/// * `knn_method` - Which of the kNN methods to use. One of `"annoy"`, `"hnsw"`
-///   or `"nndescent"`.
-/// * `ann_dist` - Approximate nearest neighbour distance measure. One of
-///   `"euclidean"` or `"cosine"`.
-/// * `k` - Number of neighbours to search.
-///
-/// **Annoy**
-///
-/// * `n_tree` - Number of trees for the generation of the index.
-/// * `search_budget` - Optional search budget. If not provided, will default
-///   to `k * n_trees * 20`. Good ranges for the multipler are 2 to 20.
-///
-/// **NN Descent**
-///
-/// * `delta` - Early termination criterium.
-/// * `diversify_prob` - Diversifying probability at the end of the index
-///   generation. Generates additional random edges which can improve the
-///   Recall.
-/// * `ef_budget` - Optional query budget.
-///
-/// **HNSW**
-///
-/// * `m` - Number of edges to generate per layer.
-/// * `ef_construction` - Budget during the construction of the index.
-/// * `ef_search` - Budget during the search of the index.
+/// Contains the parameters for the kNN searches used in the single cell parts
+/// of this crate
 #[derive(Clone, Debug)]
 pub struct KnnParams {
-    // general params
+    ///  Which of the kNN methods to use. One of `"annoy"`, `"hnsw"` or
+    /// `"nndescent"` are supported for now.
     pub knn_method: String,
+    /// Distance metric to use. One of `"euclidean"` or `"cosine"`.
     pub ann_dist: String,
+    /// Number of neighbours to return
     pub k: usize,
-    // annoy params
+    /// Annoy: Number of trees to build
     pub n_tree: usize,
+    /// Annoy: optional search budget. If not provided, will default to k * 20
+    /// per tree.
     pub search_budget: Option<usize>,
-    // nn descent params
+    /// NNDescent: diversification probability after generation of the graph.
     pub diversify_prob: f32,
+    /// NNDescent: convergence criterium. If less than these percentage of
+    /// neighbours have been udpated, the algorithm counts as converged.
     pub delta: f32,
+    /// NNDescent: optional beam search budget for querying.
     pub ef_budget: Option<usize>,
-    // hnsw
+    /// HNSW: connections per given layer to use
     pub m: usize,
+    /// HNSW: construction budget
     pub ef_construction: usize,
+    /// HNSW: search budget
     pub ef_search: usize,
 }
 
