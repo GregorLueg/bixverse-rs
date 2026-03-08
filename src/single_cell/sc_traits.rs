@@ -1,3 +1,6 @@
+//! Contains traits and their implementations, specifically designed for the
+//! single cell workflows in this crate.
+
 use bincode::{Decode, Encode};
 use half::f16;
 use serde::{Deserialize, Serialize};
@@ -242,7 +245,9 @@ impl F16 {
 
 /// Trait for types that can be converted to f32 and u16.
 pub trait ToF32AndU16: Copy {
+    /// Transform u16 to f32 for fast conversions
     fn to_f32(self) -> f32;
+    /// Transform f32 to u16
     fn to_u16(self) -> u16;
 }
 

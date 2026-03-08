@@ -1,3 +1,5 @@
+//! Various utility functions fro vectors
+
 use num_traits::Float;
 use rand::SeedableRng;
 use rand::prelude::SliceRandom;

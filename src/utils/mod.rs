@@ -1,3 +1,7 @@
+//! All type of utility modules with shared code that does not fit fully into
+//! other modules. Has assertion macros, structures designed for the heap,
+//! traits and their implementations, R <> Rust interface functions and more.
+
 pub mod heap_structures;
 pub mod macros;
 pub mod matrix_utils;

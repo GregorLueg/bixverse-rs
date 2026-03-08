@@ -1,5 +1,7 @@
-//! Contains the SCENIC implementation of
+//! Contains the SCENIC implementation from Aibar, et al., Nat Methods, 2017
 
+use ann_search_rs::prelude::*;
+use ann_search_rs::utils::k_means_utils::{assign_all_parallel, train_centroids};
 use faer::Mat;
 use indexmap::IndexSet;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
@@ -10,6 +12,7 @@ use std::time::Instant;
 use thousands::Separable;
 
 use crate::prelude::*;
+use crate::single_cell::sc_processing::pca::pca_on_sc_streaming;
 
 /// How many genes to test for in one go
 const SCENIC_GENE_CHUNK_SIZE: usize = 1000;
@@ -372,6 +375,96 @@ impl DenseQuantisedStore {
     }
 }
 
+////////////////////
+// Sparse targets //
+////////////////////
+
+/// Static sparse Y representation for a batch of targets.
+///
+/// Indexed by original cell ID - remains constant across all trees and nodes.
+/// Only sample index arrays are partitioned during tree building.
+pub struct SparseYBatch {
+    /// Start offset into `target_indices` and `values` for each cell. Length:
+    /// n_cells + 1. Cell `c` has entries at `offsets[c]..offsets[c + 1]`.
+    pub offsets: Vec<u32>,
+    /// Which target within the batch is non-zero (0..n_targets). Since
+    /// n_targets <= 64, u8 suffices.
+    pub target_indices: Vec<u8>,
+    /// Corresponding expression values.
+    pub values: Vec<f32>,
+}
+
+impl SparseYBatch {
+    /// Build from the sparse target columns for one batch.
+    ///
+    /// ### Params
+    ///
+    /// * `targets` - Sparse columns for each target in this batch.
+    /// * `n_cells` - Total number of cells (determines offsets length).
+    ///
+    /// ### Returns
+    ///
+    /// A `SparseYBatch` where entries are sorted by cell, then by target
+    /// index within each cell.
+    fn from_targets(targets: &[SparseAxis<u16, f32>], n_cells: usize) -> Self {
+        // count non-zeros per cell across all targets
+        let mut counts_per_cell = vec![0u32; n_cells];
+        for target in targets {
+            let (indices, _) = target.get_indices_data_2();
+            for &idx in indices {
+                counts_per_cell[idx] += 1;
+            }
+        }
+
+        // build offsets via prefix sum
+        let mut offsets = Vec::with_capacity(n_cells + 1);
+        offsets.push(0u32);
+        let mut running = 0u32;
+        for &c in &counts_per_cell {
+            running += c;
+            offsets.push(running);
+        }
+        let total_nnz = running as usize;
+
+        let mut target_indices = vec![0u8; total_nnz];
+        let mut values = vec![0.0f32; total_nnz];
+
+        // fill using a write cursor per cell
+        let mut cursor = vec![0u32; n_cells];
+        for (k, target) in targets.iter().enumerate() {
+            let (indices, data) = target.get_indices_data_2();
+            for (i, &cell) in indices.iter().enumerate() {
+                let pos = (offsets[cell] + cursor[cell]) as usize;
+                target_indices[pos] = k as u8;
+                values[pos] = data[i];
+                cursor[cell] += 1;
+            }
+        }
+
+        Self {
+            offsets,
+            target_indices,
+            values,
+        }
+    }
+
+    /// Iterate non-zero entries for a given cell.
+    ///
+    /// ### Params
+    ///
+    /// * `cell` - Cell index
+    ///
+    /// ### Returns
+    ///
+    /// Returns the target indices and values
+    #[inline(always)]
+    fn cell_entries(&self, cell: usize) -> (&[u8], &[f32]) {
+        let s = self.offsets[cell] as usize;
+        let e = self.offsets[cell + 1] as usize;
+        (&self.target_indices[s..e], &self.values[s..e])
+    }
+}
+
 ///////////////////////////////
 // Multi-output tree buffers //
 ///////////////////////////////
@@ -429,14 +522,14 @@ impl TreeBuffers {
             left_y_buf: vec![0.0; n_samples * n_targets],
             right_y_buf: vec![0.0; n_samples * n_targets],
             counts: [0usize; 256],
-            y_sums: vec![0.0f64; 256 * n_targets],
-            y_sum_sqs: vec![0.0f64; 256 * n_targets],
+            y_sums: vec![0_f64; 256 * n_targets],
+            y_sum_sqs: vec![0_f64; 256 * n_targets],
             cum_counts: [0usize; 256],
-            cum_y_sums: vec![0.0f64; 256 * n_targets],
-            cum_y_sum_sqs: vec![0.0f64; 256 * n_targets],
-            best_y_sums_l: vec![0.0f64; n_targets],
-            best_y_sum_sqs_l: vec![0.0f64; n_targets],
-            parent_vars: vec![0.0f64; n_targets],
+            cum_y_sums: vec![0_f64; 256 * n_targets],
+            cum_y_sum_sqs: vec![0_f64; 256 * n_targets],
+            best_y_sums_l: vec![0_f64; n_targets],
+            best_y_sum_sqs_l: vec![0_f64; n_targets],
+            parent_vars: vec![0_f64; n_targets],
         }
     }
 
@@ -481,6 +574,60 @@ impl TreeBuffers {
             }
         }
 
+        self.cum_counts[0] = self.counts[0];
+        self.cum_y_sums[..n_targets].copy_from_slice(&self.y_sums[..n_targets]);
+        self.cum_y_sum_sqs[..n_targets].copy_from_slice(&self.y_sum_sqs[..n_targets]);
+
+        for b in 1..256 {
+            self.cum_counts[b] = self.cum_counts[b - 1] + self.counts[b];
+            let prev = (b - 1) * n_targets;
+            let curr = b * n_targets;
+            for k in 0..n_targets {
+                self.cum_y_sums[curr + k] = self.cum_y_sums[prev + k] + self.y_sums[curr + k];
+                self.cum_y_sum_sqs[curr + k] =
+                    self.cum_y_sum_sqs[prev + k] + self.y_sum_sqs[curr + k];
+            }
+        }
+    }
+
+    /// Build histograms from sparse Y -- only touches non-zero target entries.
+    ///
+    /// Counts are accumulated for all samples (target-independent). Y sums and
+    /// sum-of-squares are accumulated only for non-zero entries; zero targets
+    /// contribute nothing and are skipped.
+    ///
+    /// * `tf_col` - Quantised feature column for all cells.
+    /// * `sample_slice` - Indices of the active samples in this node.
+    /// * `sparse_y` - Sparse representation of the targets
+    /// * `n_targets` - Number of targets in the current batch.
+    #[inline]
+    fn build_histograms_sparse(
+        &mut self,
+        tf_col: &[u8],
+        sample_slice: &[u32],
+        sparse_y: &SparseYBatch,
+        n_targets: usize,
+    ) {
+        self.counts.fill(0);
+        let hist_len = 256 * n_targets;
+        self.y_sums[..hist_len].fill(0.0);
+        self.y_sum_sqs[..hist_len].fill(0.0);
+
+        for &s in sample_slice {
+            let bin = tf_col[s as usize] as usize;
+            self.counts[bin] += 1;
+
+            let (tgt_indices, tgt_values) = sparse_y.cell_entries(s as usize);
+            let h_base = bin * n_targets;
+            for i in 0..tgt_indices.len() {
+                let k = tgt_indices[i] as usize;
+                let y = tgt_values[i] as f64;
+                self.y_sums[h_base + k] += y;
+                self.y_sum_sqs[h_base + k] += y * y;
+            }
+        }
+
+        // Cumulative sums unchanged -- same as before
         self.cum_counts[0] = self.counts[0];
         self.cum_y_sums[..n_targets].copy_from_slice(&self.y_sums[..n_targets]);
         self.cum_y_sum_sqs[..n_targets].copy_from_slice(&self.y_sum_sqs[..n_targets]);
@@ -596,7 +743,7 @@ fn evaluate_split_multi(
     let nf = n as f64;
     let h_base = threshold * n_targets;
 
-    let mut score = 0.0f64;
+    let mut score = 0_f64;
     for k in 0..n_targets {
         let y_sum_l = cum_y_sums[h_base + k];
         let y_sum_sq_l = cum_y_sum_sqs[h_base + k];
@@ -677,7 +824,7 @@ fn build_node_multi(
 ) {
     let n = sample_slice.len();
 
-    let mut total_parent_var = 0.0f64;
+    let mut total_parent_var = 0_f64;
     for k in 0..n_targets {
         let v = node_variance_f64(y_sums[k], y_sum_sqs[k], n);
         bufs.parent_vars[k] = v;
@@ -701,7 +848,7 @@ fn build_node_multi(
         bufs.feat_buf.swap(i, j);
     }
 
-    let mut best_score = 0.0f64;
+    let mut best_score = 0_f64;
     let mut best_feature = usize::MAX;
     let mut best_threshold_u8 = 0u8;
     let mut best_n_left = 0usize;
@@ -792,10 +939,10 @@ fn build_node_multi(
 
     // stack-allocated buffers: n_targets <= MULTI_OUTPUT_BATCH always holds.
     // avoids heap allocations
-    let mut left_y_sums = [0.0f64; MULTI_OUTPUT_BATCH];
-    let mut left_y_sum_sqs = [0.0f64; MULTI_OUTPUT_BATCH];
-    let mut right_y_sums = [0.0f64; MULTI_OUTPUT_BATCH];
-    let mut right_y_sum_sqs = [0.0f64; MULTI_OUTPUT_BATCH];
+    let mut left_y_sums = [0_f64; MULTI_OUTPUT_BATCH];
+    let mut left_y_sum_sqs = [0_f64; MULTI_OUTPUT_BATCH];
+    let mut right_y_sums = [0_f64; MULTI_OUTPUT_BATCH];
+    let mut right_y_sum_sqs = [0_f64; MULTI_OUTPUT_BATCH];
 
     left_y_sums[..n_targets].copy_from_slice(&bufs.best_y_sums_l[..n_targets]);
     left_y_sum_sqs[..n_targets].copy_from_slice(&bufs.best_y_sum_sqs_l[..n_targets]);
@@ -955,9 +1102,9 @@ fn fit_multi_trees(
     let mut sample_indices: Vec<u32> = vec![0; n_samples];
     let mut root_y_buf: Vec<f32> = vec![0.0; n_samples * n_targets];
     let mut bufs = TreeBuffers::new(n_features, n_samples, n_targets);
-    let mut importances = vec![0.0f64; n_features * n_targets];
-    let mut y_sums_root = vec![0.0f64; n_targets];
-    let mut y_sum_sqs_root = vec![0.0f64; n_targets];
+    let mut importances = vec![0_f64; n_features * n_targets];
+    let mut y_sums_root = vec![0_f64; n_targets];
+    let mut y_sum_sqs_root = vec![0_f64; n_targets];
 
     for tree_idx in 0..config.n_trees() {
         let mut rng =
@@ -1027,7 +1174,7 @@ fn fit_multi_trees(
     let mut result = Vec::with_capacity(n_targets);
     for k in 0..n_targets {
         let mut target_imp = Vec::with_capacity(n_features);
-        let mut total = 0.0f64;
+        let mut total = 0_f64;
         for f in 0..n_features {
             let v = importances[f * n_targets + k];
             total += v;
@@ -1038,6 +1185,225 @@ fn fit_multi_trees(
             target_imp.iter_mut().for_each(|v| *v *= inv);
         }
         result.push(target_imp);
+    }
+
+    result
+}
+
+////////////////////
+// Gene splitting //
+////////////////////
+
+/// Strategy for grouping target genes into multi-output batches
+#[derive(Clone, Debug, Default)]
+pub enum GeneBatchStrategy {
+    /// Shuffle genes randomly before chunking
+    #[default]
+    Random,
+    /// Group genes by expression correlation via SVD + k-means
+    /// Fields: (n_svd_components, n_subsampled_cells)
+    Correlated {
+        /// Number of n_svd
+        n_components: usize,
+        /// Number of cells to subsample
+        n_cells_subsample: usize,
+    },
+}
+
+/// Parse the gene batching strategy
+///
+/// ### Params
+///
+/// * `s` - String defining the gene batch strategy
+/// * `n_comp` - Number of PCs to use for the (randomised) SVD
+/// * `n_cells_subsample` - Number of cells to subsample for very large data
+///   sets
+///
+/// ### Returns
+///
+/// The GeneBatchStrategy option
+pub fn parse_gene_batch_strategy(
+    s: &str,
+    n_comp: usize,
+    n_cells_subsample: usize,
+) -> Option<GeneBatchStrategy> {
+    match s.to_lowercase().as_str() {
+        "random" => Some(GeneBatchStrategy::Random),
+        "correlated" => Some(GeneBatchStrategy::Correlated {
+            n_components: n_comp,
+            n_cells_subsample,
+        }),
+        _ => None,
+    }
+}
+
+/// Batch genes randomly
+///
+/// ### Params
+///
+/// * `gene_indices` - The genes to include
+/// * `seed` - Random seed
+///
+/// ### Returns
+///
+/// Returns the shuffled indices
+fn batch_genes_random(gene_indices: &[usize], seed: usize) -> Vec<usize> {
+    let mut indices = gene_indices.to_vec();
+    let mut rng = SmallRng::seed_from_u64(seed as u64);
+    // Fisher-Yates
+    for i in (1..indices.len()).rev() {
+        let j = rng.random_range(0..=i);
+        indices.swap(i, j);
+    }
+    indices
+}
+
+/// Subsampling of cells
+///
+/// ### Params
+///
+/// * `cell_indices` - The indices to take forward
+/// * `n_target` - Number of cells to return
+/// * `seed` - For reproducibility
+///
+/// ### Returns
+///
+/// Indices of cells to keep here
+fn subsample_cells(cell_indices: &[usize], n_target: usize, seed: usize) -> Vec<usize> {
+    if cell_indices.len() <= n_target {
+        return cell_indices.to_vec();
+    }
+    let mut indices = cell_indices.to_vec();
+    let mut rng = SmallRng::seed_from_u64(seed as u64);
+    // Partial Fisher-Yates for n_target elements
+    for i in 0..n_target {
+        let j = rng.random_range(i..indices.len());
+        indices.swap(i, j);
+    }
+    indices.truncate(n_target);
+    indices
+}
+
+/// Batch genes by correlation structure
+///
+/// Runs randomised SVD on a subset of the cells, uses the gene loadings
+/// to cluster the genes together into sensible batches of genes.
+///
+/// ### Params
+///
+/// * `f_path` - Path to the gene-based file
+/// * `gene_indices` - The genes to include
+/// * `batch_size` - Size of the batches
+/// * `n_components` - Number of components to use for the clustering
+/// * `n_cells_subsample` - Number of cells to subsample
+/// * `seed` - Seed for reproducibility
+/// * `verbose` Controls the verbosity
+///
+/// ### Returns
+///
+/// Returns gene indices reordered so that co-expressed genes are contiguous for
+/// subsequent batching
+#[allow(clippy::too_many_arguments)]
+fn batch_genes_correlated(
+    f_path: &str,
+    gene_indices: &[usize],
+    cell_indices: &[usize],
+    batch_size: usize,
+    n_components: usize,
+    n_cells_subsample: usize,
+    seed: usize,
+    verbose: bool,
+) -> Vec<usize> {
+    let n_genes = gene_indices.len();
+    let n_centroids = n_genes.div_ceil(batch_size);
+
+    let sub_cells = subsample_cells(cell_indices, n_cells_subsample, seed);
+
+    if verbose {
+        println!(
+            "Computing gene loadings: {} genes, {} subsampled cells, {} components",
+            n_genes,
+            sub_cells.len(),
+            n_components
+        );
+    }
+
+    // loadings is (n_genes, n_components)
+    // using a streaming version here to avoid memory blowing up
+    let (_, loadings, _, _) = pca_on_sc_streaming(
+        f_path,
+        &sub_cells,
+        gene_indices,
+        n_components,
+        true,
+        seed,
+        false,
+        SCENIC_GENE_CHUNK_SIZE,
+        verbose,
+    );
+
+    // flatten to row-major for k-means: gene g, component c -> [g * dim + c]
+    let dim = loadings.ncols();
+    let mut gene_loadings = vec![0.0f32; n_genes * dim];
+    for g in 0..n_genes {
+        for c in 0..dim {
+            gene_loadings[g * dim + c] = loadings[(g, c)];
+        }
+    }
+
+    if verbose {
+        println!("Clustering {} genes into {} groups", n_genes, n_centroids);
+    }
+
+    let centroids = train_centroids(
+        &gene_loadings,
+        dim,
+        n_genes,
+        n_centroids,
+        &Dist::Euclidean,
+        50,
+        seed,
+        verbose,
+    );
+
+    let centroid_norms: Vec<f32> = (0..n_centroids)
+        .map(|i| {
+            let c = &centroids[i * dim..(i + 1) * dim];
+            f32::dot_simd(c, c)
+        })
+        .collect();
+
+    let data_norms: Vec<f32> = (0..n_genes)
+        .map(|i| {
+            let v = &gene_loadings[i * dim..(i + 1) * dim];
+            f32::dot_simd(v, v)
+        })
+        .collect();
+
+    let assignments = assign_all_parallel(
+        &gene_loadings,
+        &data_norms,
+        dim,
+        n_genes,
+        &centroids,
+        &centroid_norms,
+        n_centroids,
+        &Dist::Euclidean,
+    );
+
+    let mut clusters: Vec<Vec<usize>> = vec![Vec::new(); n_centroids];
+    for (i, &cluster_id) in assignments.iter().enumerate() {
+        clusters[cluster_id].push(gene_indices[i]);
+    }
+
+    let mut rng = SmallRng::seed_from_u64(seed.wrapping_add(1) as u64);
+    let mut result = Vec::with_capacity(n_genes);
+    for cluster in &mut clusters {
+        for i in (1..cluster.len()).rev() {
+            let j = rng.random_range(0..=i);
+            cluster.swap(i, j);
+        }
+        result.extend_from_slice(cluster);
     }
 
     result
@@ -1168,7 +1534,7 @@ pub fn run_scenic_grn(
 
     if verbose {
         println!(
-            "Processing {} genes per batched Ensembl learner",
+            "Processing {} genes per batched ensemble learner",
             n_parallel_genes
         );
     }

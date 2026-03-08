@@ -1,3 +1,5 @@
+//! Implementations to generate shared nearest-neighbour graphs from kNN graphs.
+
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::time::Instant;

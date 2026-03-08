@@ -1,3 +1,5 @@
+//! Contains structures designed to be put on the heap
+
 use std::cmp::Ordering;
 
 use crate::prelude::*;

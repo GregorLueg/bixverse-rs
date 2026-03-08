@@ -1,3 +1,5 @@
+//! faer matrix transformation utils. Concantenations, row removals, etc.
+
 use faer::{Mat, MatRef, concat};
 
 use crate::prelude::*;

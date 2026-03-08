@@ -1,3 +1,6 @@
+//! Contains other metrics for single cell, for example to assess batch
+//! effects, see Büttner, et al., Nat. Methods, 2019
+
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use statrs::distribution::ChiSquared;
