@@ -1,3 +1,5 @@
+//! Various helpers to transfer between Rust and R via the rextendr interface
+
 use extendr_api::prelude::*;
 use faer::{Mat, MatRef};
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};

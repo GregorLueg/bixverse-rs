@@ -1,3 +1,6 @@
+//! Single cell-related PCA functions. Implements dense, sparse version of the
+//! normal SVD and also randomised SVD.
+
 use faer::Mat;
 use indexmap::IndexSet;
 use rayon::prelude::*;
@@ -17,9 +20,15 @@ use crate::utils::simd::*;
 #[derive(Clone, Debug)]
 pub enum SvdType {
     /// Dense SVD solving with scaling
-    Dense { randomised: bool },
+    Dense {
+        /// Shall randomised SVD be used
+        randomised: bool,
+    },
     /// Sparse SVD solving without scaling
-    Sparse { randomised: bool },
+    Sparse {
+        /// Shall randomised SVD be used
+        randomised: bool,
+    },
 }
 
 /// Default implementation for SvdType
@@ -272,6 +281,142 @@ pub fn pca_on_sc(
 
     let scaled = if return_scaled {
         Some(scaled_data)
+    } else {
+        None
+    };
+
+    (scores, loadings, s, scaled)
+}
+
+/// Calculate the PCs for single cell data using a streaming approach
+///
+/// Processes genes in batches to reduce peak memory usage. This is particularly
+/// useful when working with a large number of genes but a small cell subsample,
+/// as it avoids loading all sparse gene chunks simultaneously.
+///
+/// The dense scaled matrix is still fully held in memory for SVD, but the
+/// sparse data is loaded and discarded batch by batch.
+///
+/// ### Params
+///
+/// * `f_path` - Path to the gene-based binary file.
+/// * `cell_indices` - Slice of indices for the cells.
+/// * `gene_indices` - Slice of indices for the genes.
+/// * `no_pcs` - Number of principal components to calculate.
+/// * `random_svd` - Shall randomised singular value decomposition be used.
+/// * `seed` - Seed for randomised SVD.
+/// * `return_scaled` - Return the scaled data.
+/// * `gene_batch_size` - Number of genes to load per batch.
+/// * `verbose` - Print timing information.
+///
+/// ### Return
+///
+/// A tuple of the samples projected on the PC space, gene loadings, singular
+/// values, and optionally the scaled data.
+#[allow(clippy::too_many_arguments)]
+pub fn pca_on_sc_streaming(
+    f_path: &str,
+    cell_indices: &[usize],
+    gene_indices: &[usize],
+    no_pcs: usize,
+    random_svd: bool,
+    seed: usize,
+    return_scaled: bool,
+    gene_batch_size: usize,
+    verbose: bool,
+) -> (Mat<f32>, Mat<f32>, Vec<f32>, Option<Mat<f32>>) {
+    let start_total = Instant::now();
+
+    let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
+    let n_cells = cell_indices.len();
+    let n_genes = gene_indices.len();
+    let num_batches = n_genes.div_ceil(gene_batch_size);
+
+    let reader = ParallelSparseReader::new(f_path).unwrap();
+
+    // Pre-allocate the full dense scaled matrix - this is what SVD operates on.
+    // Sparse gene chunks are loaded and discarded batch by batch.
+    let mut scaled_matrix = Mat::<f32>::zeros(n_cells, n_genes);
+
+    let start_scaling = Instant::now();
+
+    for batch_idx in 0..num_batches {
+        if verbose {
+            println!(
+                "Scaling batch {}/{} ({} genes each)",
+                batch_idx + 1,
+                num_batches,
+                gene_batch_size
+            );
+        }
+
+        let start_gene = batch_idx * gene_batch_size;
+        let end_gene = ((batch_idx + 1) * gene_batch_size).min(n_genes);
+        let batch_gene_indices = &gene_indices[start_gene..end_gene];
+
+        let start_loading = Instant::now();
+        let mut gene_chunks = reader.read_gene_parallel(batch_gene_indices);
+        if verbose {
+            println!("  Loaded batch in: {:.2?}", start_loading.elapsed());
+        }
+
+        gene_chunks.par_iter_mut().for_each(|chunk| {
+            chunk.filter_selected_cells(&cell_set);
+        });
+
+        let batch_scaled: Vec<Vec<f32>> = gene_chunks
+            .par_iter()
+            .map(|chunk| {
+                let (scaled, _, _) = scale_csc_chunk(chunk, n_cells);
+                scaled
+            })
+            .collect();
+
+        for (local_col, scaled_col) in batch_scaled.iter().enumerate() {
+            let global_col = start_gene + local_col;
+            for (row, &val) in scaled_col.iter().enumerate() {
+                scaled_matrix[(row, global_col)] = val;
+            }
+        }
+        // gene_chunks and batch_scaled dropped here
+    }
+
+    if verbose {
+        println!("Finished scaling: {:.2?}", start_scaling.elapsed());
+    }
+
+    let start_svd = Instant::now();
+
+    let (scores, loadings, s) = if random_svd {
+        let res: RandomSvdResults<f32> =
+            randomised_svd(scaled_matrix.as_ref(), no_pcs, seed, Some(100_usize), None);
+        let loadings = res.v.submatrix(0, 0, n_genes, no_pcs).to_owned();
+        let scores = &scaled_matrix * &loadings;
+        (scores, loadings, res.s)
+    } else {
+        let res = scaled_matrix.thin_svd().unwrap();
+        let loadings = res.V().submatrix(0, 0, n_genes, no_pcs).to_owned();
+        let scores = &scaled_matrix * &loadings;
+        let s: Vec<f32> = res
+            .S()
+            .column_vector()
+            .iter()
+            .take(no_pcs)
+            .copied()
+            .collect();
+        (scores, loadings, s)
+    };
+
+    if verbose {
+        println!("Finished PCA calculations: {:.2?}", start_svd.elapsed());
+        println!(
+            "Total run time streaming PCA: {:.2?}",
+            start_total.elapsed()
+        );
+    }
+
+    let scaled = if return_scaled {
+        Some(scaled_matrix)
     } else {
         None
     };

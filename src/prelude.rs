@@ -1,3 +1,6 @@
+//! Various functions, structures, etc. to expose more broadly when using this
+//! crate in other libraries
+
 pub use crate::core::math::sparse::{
     CompressedSparseData2, CompressedSparseFormat, SparseAxis, parse_compressed_sparse_format,
 };
