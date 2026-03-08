@@ -7,6 +7,7 @@
 - Sparse SVD and sparse randomised SVD were added for single cell.
 - SIMD instructions for the single cell Hotspot method.
 - Harmony batch correction for single cell.
+- SCENIC-like approach for gene regulatory network (GRN) generation.
 
 ### Fixes
 
