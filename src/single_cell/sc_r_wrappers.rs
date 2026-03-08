@@ -6,7 +6,9 @@ use extendr_api::*;
 use crate::single_cell::sc_analysis::hdwgcna_meta_cells::MetaCellParams;
 use crate::single_cell::sc_analysis::hotspot::HotSpotParams;
 use crate::single_cell::sc_analysis::milo_r::MiloRParams;
-use crate::single_cell::sc_analysis::scenic::{ExtraTreesConfig, RandomForestConfig};
+use crate::single_cell::sc_analysis::scenic::{
+    ExtraTreesConfig, RandomForestConfig, RegressionLearner, ScenicParams,
+};
 use crate::single_cell::sc_analysis::seacells::SEACellsParams;
 use crate::single_cell::sc_analysis::super_cells::SuperCellParams;
 use crate::single_cell::sc_analysis::vision::SignatureGenes;
@@ -1106,6 +1108,97 @@ impl ExtraTreesConfig {
             n_thresholds,
             max_depth,
             subsample_frac,
+        }
+    }
+}
+
+/////////////////////
+// SCENIC - Params //
+/////////////////////
+
+impl ScenicParams {
+    /// Generate `ScenicParams` from an R list.
+    ///
+    /// The list is expected to contain fields for all top-level SCENIC
+    /// parameters plus the fields required by the chosen regression learner.
+    /// Tree configuration parameters are read from the same flat list as the
+    /// top-level parameters, following the same convention as `KnnParams` in
+    /// other parameter structs.
+    ///
+    /// The `learner_type` field selects the regression learner:
+    /// `"extratrees"` maps to `ExtraTreesConfig`, anything else (including the
+    /// default `"randomforest"`) maps to `RandomForestConfig`. Learner
+    /// parameters are then parsed from the same list via the respective
+    /// `from_r_list` implementation.
+    ///
+    /// Should values not be found within the list, parameters will default to
+    /// the values defined in `ScenicParams::default()`.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The R list with the SCENIC parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The `ScenicParams` with all parameters set.
+    pub fn from_r_list(r_list: List) -> Self {
+        let defaults = Self::default();
+        let params = r_list.clone().into_hashmap();
+
+        let min_counts = params
+            .get("min_counts")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.min_counts);
+
+        let min_cells = params
+            .get("min_cells")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.min_cells);
+
+        let gene_batch_strategy = params
+            .get("gene_batch_strategy")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or(defaults.gene_batch_strategy);
+
+        let gene_batch_size = params
+            .get("gene_batch_size")
+            .and_then(|v| v.as_integer())
+            .map(|v| Some(v as usize))
+            .unwrap_or(defaults.gene_batch_size);
+
+        let n_pcs = params
+            .get("n_pcs")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.n_pcs);
+
+        let n_subsample = params
+            .get("n_subsample")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.n_subsample);
+
+        let learner_type = params
+            .get("learner_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("randomforest");
+
+        let regression_learner = match learner_type.to_lowercase().as_str() {
+            "extratrees" => RegressionLearner::ExtraTrees(ExtraTreesConfig::from_r_list(r_list)),
+            _ => RegressionLearner::RandomForest(RandomForestConfig::from_r_list(r_list)),
+        };
+
+        Self {
+            min_counts,
+            min_cells,
+            regression_learner,
+            gene_batch_strategy,
+            gene_batch_size,
+            n_pcs,
+            n_subsample,
         }
     }
 }
