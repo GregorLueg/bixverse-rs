@@ -26,7 +26,6 @@ use crate::prelude::*;
 
 /// Structure to store QC information on cells
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct CellQuality {
     /// Indices of which cells to keep.
     pub cell_indices: Vec<usize>,
