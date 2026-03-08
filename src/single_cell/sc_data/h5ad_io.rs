@@ -2015,7 +2015,7 @@ pub fn write_h5_normalised_counts<P: AsRef<Path>>(
         println!("Step 4/4: Reconstructing raw counts and writing to binary format...");
     }
 
-    let cell_qc = match file_format {
+    let mut cell_qc = match file_format {
         CompressedSparseFormat::Csc => reconstruct_and_write_csc(
             &h5_path,
             &bin_path,
@@ -2037,6 +2037,9 @@ pub fn write_h5_normalised_counts<P: AsRef<Path>>(
         )
         .unwrap(),
     };
+
+    cell_qc.set_cell_indices(&file_quality.cells_to_keep);
+    cell_qc.set_gene_indices(&file_quality.genes_to_keep);
 
     (
         file_quality.cells_to_keep.len(),
