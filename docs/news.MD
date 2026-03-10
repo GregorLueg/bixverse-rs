@@ -1,6 +1,6 @@
 # News
 
-## 0.1.3
+## 0.1.4
 
 ### Features
 
@@ -12,6 +12,16 @@
 ### Fixes
 
 *NA*
+
+## 0.1.3
+
+### Features
+
+*NA*
+
+### Fixes
+
+- Hot fix in the auto detection in Scrublet which was broken.
 
 ## 0.1.2
 

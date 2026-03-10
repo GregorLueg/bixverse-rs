@@ -485,7 +485,8 @@ fn scale_gene_with_stats(
     (result, mean, std)
 }
 
-/// Find threshold between singlets and doublets using combined score distribution
+/// Find threshold between singlets and doublets using combined score
+/// distribution
 ///
 /// Creates a histogram of both observed and simulated scores, then finds
 /// the valley (minimum) between the two peaks (singlets vs doublets).
@@ -500,7 +501,7 @@ fn scale_gene_with_stats(
 ///
 /// Threshold score at the valley between the two modes
 fn find_threshold_min(scores: &[f32], n_bins: usize) -> f32 {
-    let (min_score, max_score) = array_max_min(scores);
+    let (max_score, min_score) = array_max_min(scores);
 
     if (max_score - min_score).abs() < 1e-6 {
         return (min_score + max_score) / 2.0;
