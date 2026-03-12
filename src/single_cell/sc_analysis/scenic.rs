@@ -19,6 +19,7 @@ use faer::Mat;
 use indexmap::IndexSet;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use rayon::prelude::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Instant;
@@ -2100,18 +2101,35 @@ pub fn run_scenic_grn(
             let col_chunks: Vec<&[SparseAxis<u16, f32>]> =
                 sparse_columns.chunks(n_multi_output).collect();
 
+            let total_batches = col_chunks.len();
+            let batches_done = AtomicUsize::new(0);
+
             let batch_results: Vec<Vec<Vec<f32>>> = col_chunks
                 .par_iter()
                 .enumerate()
                 .map(|(batch_idx, batch)| {
                     let batch_seed = seed.wrapping_add((chunk_idx * 1000 + batch_idx) * 2654435761);
-                    fit_multi_trees_sparse(batch, &tf_data, n_cells, config, batch_seed)
+                    let result =
+                        fit_multi_trees_sparse(batch, &tf_data, n_cells, config, batch_seed);
+
+                    if verbose && total_batches >= 4 {
+                        let done = batches_done.fetch_add(1, Ordering::Relaxed) + 1;
+                        let pct = done * 100 / total_batches;
+                        let prev_pct = (done - 1) * 100 / total_batches;
+                        if [25, 50, 75, 100].iter().any(|&q| prev_pct < q && pct >= q) {
+                            println!(
+                                "    Chunk {}: ~{}% of batches done ({}/{})",
+                                chunk_idx + 1,
+                                pct,
+                                done,
+                                total_batches
+                            );
+                        }
+                    }
+
+                    result
                 })
                 .collect();
-
-            // Scatter results back to original gene order
-            let total_batches = id_chunks.len();
-            let mut batches_done = 0usize;
 
             for (batch_idx, batch_result) in batch_results.into_iter().enumerate() {
                 let batch_gene_ids = id_chunks[batch_idx];
@@ -2119,21 +2137,6 @@ pub fn run_scenic_grn(
                     let gene_id = batch_gene_ids[local_idx];
                     let original_pos = gene_id_to_pos[&gene_id];
                     importance_scores[original_pos] = imp;
-                }
-                batches_done += 1;
-
-                if verbose && total_batches >= 4 {
-                    let pct = batches_done * 100 / total_batches;
-                    let prev_pct = (batches_done - 1) * 100 / total_batches;
-                    if [25, 50, 75, 100].iter().any(|&q| prev_pct < q && pct >= q) {
-                        println!(
-                            "    Chunk {}: {}% of batches done ({}/{})",
-                            chunk_idx + 1,
-                            pct,
-                            batches_done,
-                            total_batches
-                        );
-                    }
                 }
             }
 
