@@ -28,7 +28,7 @@ use crate::prelude::*;
 use crate::single_cell::sc_processing::pca::pca_on_sc_streaming;
 
 /// How many genes to test for in one go
-const SCENIC_GENE_CHUNK_SIZE: usize = 1000;
+const SCENIC_GENE_CHUNK_SIZE: usize = 1024;
 
 /// How many target genes to batch into a single multi-output tree ensemble.
 /// 64 targets * 256 bins * 16 bytes ≈ 256KB per feature histogram, fits L2
@@ -592,8 +592,6 @@ impl TreeBuffers {
             feat_buf: (0..n_features).collect(),
             left_buf: vec![0; n_samples],
             right_buf: vec![0; n_samples],
-            // These are now unused but keeping the struct compatible.
-            // If you want to be clean, split into two struct variants.
             left_y_buf: Vec::new(),
             right_y_buf: Vec::new(),
             counts: [0usize; 256],
@@ -2002,8 +2000,11 @@ pub fn run_scenic_grn(
     let start_total = Instant::now();
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
     let n_cells = cell_set.len();
+    let n_multi_output = scenic_params
+        .gene_batch_size
+        .unwrap_or(MULTI_OUTPUT_BATCH)
+        .min(MULTI_OUTPUT_BATCH);
 
-    // --- Load and quantise TF data ---
     let start_reading = Instant::now();
     let reader = ParallelSparseReader::new(f_path).unwrap();
 
@@ -2025,7 +2026,6 @@ pub fn run_scenic_grn(
         );
     }
 
-    // --- Reorder genes into sensible batches ---
     let strategy = parse_gene_batch_strategy(
         &scenic_params.gene_batch_strategy,
         scenic_params.n_pcs,
@@ -2037,14 +2037,12 @@ pub fn run_scenic_grn(
         f_path,
         gene_indices,
         cell_indices,
-        MULTI_OUTPUT_BATCH,
+        n_multi_output,
         &strategy,
         seed,
         verbose,
     );
 
-    // Map gene_id -> position in the original gene_indices slice so we can
-    // scatter results back into the right order.
     let gene_id_to_pos: std::collections::HashMap<usize, usize> = gene_indices
         .iter()
         .enumerate()
@@ -2063,14 +2061,10 @@ pub fn run_scenic_grn(
     if verbose {
         println!(
             "Running SCENIC on {} genes ({} TFs, {} cells, batches of {})",
-            n_genes, n_tfs, n_cells, MULTI_OUTPUT_BATCH,
+            n_genes, n_tfs, n_cells, n_multi_output,
         );
     }
 
-    // --- Stream gene data and fit ensembles ---
-    // Pre-split ordered_genes into read-chunks of SCENIC_GENE_CHUNK_SIZE.
-    // Within each chunk, sub-batches of MULTI_OUTPUT_BATCH are the work units
-    // for Rayon.
     thread::scope(|scope| {
         let (tx, rx) = mpsc::sync_channel::<(Vec<usize>, Vec<SparseAxis<u16, f32>>)>(2);
 
@@ -2101,10 +2095,10 @@ pub fn run_scenic_grn(
             let start_chunk = Instant::now();
 
             // Pair gene_ids with their sparse columns, then chunk into
-            // batches of MULTI_OUTPUT_BATCH
-            let id_chunks: Vec<&[usize]> = gene_ids.chunks(MULTI_OUTPUT_BATCH).collect();
+            // batches of n_multi_output
+            let id_chunks: Vec<&[usize]> = gene_ids.chunks(n_multi_output).collect();
             let col_chunks: Vec<&[SparseAxis<u16, f32>]> =
-                sparse_columns.chunks(MULTI_OUTPUT_BATCH).collect();
+                sparse_columns.chunks(n_multi_output).collect();
 
             let batch_results: Vec<Vec<Vec<f32>>> = col_chunks
                 .par_iter()
