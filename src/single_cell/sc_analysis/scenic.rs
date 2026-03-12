@@ -2110,12 +2110,30 @@ pub fn run_scenic_grn(
                 .collect();
 
             // Scatter results back to original gene order
+            let total_batches = id_chunks.len();
+            let mut batches_done = 0usize;
+
             for (batch_idx, batch_result) in batch_results.into_iter().enumerate() {
                 let batch_gene_ids = id_chunks[batch_idx];
                 for (local_idx, imp) in batch_result.into_iter().enumerate() {
                     let gene_id = batch_gene_ids[local_idx];
                     let original_pos = gene_id_to_pos[&gene_id];
                     importance_scores[original_pos] = imp;
+                }
+                batches_done += 1;
+
+                if verbose && total_batches >= 4 {
+                    let pct = batches_done * 100 / total_batches;
+                    let prev_pct = (batches_done - 1) * 100 / total_batches;
+                    if [25, 50, 75, 100].iter().any(|&q| prev_pct < q && pct >= q) {
+                        println!(
+                            "    Chunk {}: {}% of batches done ({}/{})",
+                            chunk_idx + 1,
+                            pct,
+                            batches_done,
+                            total_batches
+                        );
+                    }
                 }
             }
 
