@@ -116,7 +116,7 @@ trait TreeRegressorConfig: Sync {
     }
 
     /// Minimum node variance below which no split is attempted
-    fn min_variance(&self) -> f64 {
+    fn min_variance(&self) -> f32 {
         1e-10
     }
 
@@ -530,23 +530,23 @@ struct TreeBuffers {
     /// `left_y_buf`.
     right_y_buf: Vec<f32>,
     /// Per-bin sample counts; layout `counts[bin]`.
-    counts: [usize; 256],
+    counts: [u32; 256],
     /// Per-bin, per-target Y sums; layout
-    y_sums: Vec<f64>,
+    y_sums: Vec<f32>,
     /// Per-bin, per-target Y sum-of-squares; same layout as `y_sums`.
-    y_sum_sqs: Vec<f64>,
+    y_sum_sqs: Vec<f32>,
     /// Prefix-sum of `counts` over bins.
-    cum_counts: [usize; 256],
+    cum_counts: [u32; 256],
     /// Prefix-sum of `y_sums` over bins; same layout as `y_sums`.
-    cum_y_sums: Vec<f64>,
+    cum_y_sums: Vec<f32>,
     /// Prefix-sum of `y_sum_sqs` over bins; same layout as `y_sums`.
-    cum_y_sum_sqs: Vec<f64>,
+    cum_y_sum_sqs: Vec<f32>,
     /// Left-child Y sums captured at the best split.
-    best_y_sums_l: Vec<f64>,
+    best_y_sums_l: Vec<f32>,
     /// Left-child Y sum-of-squares captured at the best split.
-    best_y_sum_sqs_l: Vec<f64>,
+    best_y_sum_sqs_l: Vec<f32>,
     /// Per-target parent variance scratch space.
-    parent_vars: Vec<f64>,
+    parent_vars: Vec<f32>,
 }
 
 impl TreeBuffers {
@@ -565,15 +565,15 @@ impl TreeBuffers {
             right_buf: vec![0; n_samples],
             left_y_buf: vec![0.0; n_samples * n_targets],
             right_y_buf: vec![0.0; n_samples * n_targets],
-            counts: [0usize; 256],
-            y_sums: vec![0_f64; 256 * n_targets],
-            y_sum_sqs: vec![0_f64; 256 * n_targets],
-            cum_counts: [0usize; 256],
-            cum_y_sums: vec![0_f64; 256 * n_targets],
-            cum_y_sum_sqs: vec![0_f64; 256 * n_targets],
-            best_y_sums_l: vec![0_f64; n_targets],
-            best_y_sum_sqs_l: vec![0_f64; n_targets],
-            parent_vars: vec![0_f64; n_targets],
+            counts: [0; 256],
+            y_sums: vec![0_f32; 256 * n_targets],
+            y_sum_sqs: vec![0_f32; 256 * n_targets],
+            cum_counts: [0; 256],
+            cum_y_sums: vec![0_f32; 256 * n_targets],
+            cum_y_sum_sqs: vec![0_f32; 256 * n_targets],
+            best_y_sums_l: vec![0_f32; n_targets],
+            best_y_sum_sqs_l: vec![0_f32; n_targets],
+            parent_vars: vec![0_f32; n_targets],
         }
     }
 
@@ -595,15 +595,15 @@ impl TreeBuffers {
             right_buf: vec![0; n_samples],
             left_y_buf: Vec::new(),
             right_y_buf: Vec::new(),
-            counts: [0usize; 256],
-            y_sums: vec![0.0f64; 256 * n_targets],
-            y_sum_sqs: vec![0.0f64; 256 * n_targets],
-            cum_counts: [0usize; 256],
-            cum_y_sums: vec![0.0f64; 256 * n_targets],
-            cum_y_sum_sqs: vec![0.0f64; 256 * n_targets],
-            best_y_sums_l: vec![0.0f64; n_targets],
-            best_y_sum_sqs_l: vec![0.0f64; n_targets],
-            parent_vars: vec![0.0f64; n_targets],
+            counts: [0; 256],
+            y_sums: vec![0_f32; 256 * n_targets],
+            y_sum_sqs: vec![0_f32; 256 * n_targets],
+            cum_counts: [0; 256],
+            cum_y_sums: vec![0_f32; 256 * n_targets],
+            cum_y_sum_sqs: vec![0_f32; 256 * n_targets],
+            best_y_sums_l: vec![0_f32; n_targets],
+            best_y_sum_sqs_l: vec![0_f32; n_targets],
+            parent_vars: vec![0_f32; n_targets],
         }
     }
 
@@ -663,7 +663,7 @@ impl TreeBuffers {
             let y_base = i * n_targets;
             let h_base = bin * n_targets;
             for k in 0..n_targets {
-                let y = y_slice[y_base + k] as f64;
+                let y = y_slice[y_base + k];
                 self.y_sums[h_base + k] += y;
                 self.y_sum_sqs[h_base + k] += y * y;
             }
@@ -743,7 +743,7 @@ impl TreeBuffers {
             let h_base = bin * n_targets;
             for i in 0..tgt_indices.len() {
                 let k = tgt_indices[i] as usize;
-                let y = tgt_values[i] as f64;
+                let y = tgt_values[i];
                 self.y_sums[h_base + k] += y;
                 self.y_sum_sqs[h_base + k] += y * y;
             }
@@ -767,18 +767,18 @@ impl TreeBuffers {
             self.cum_y_sum_sqs[curr..curr + n_targets]
                 .copy_from_slice(&self.y_sum_sqs[curr..curr + n_targets]);
 
-            // For n_targets <= 64 this fits on the stack comfortably.
-            let mut prev_sums = [0.0f64; MULTI_OUTPUT_BATCH];
-            let mut prev_sum_sqs = [0.0f64; MULTI_OUTPUT_BATCH];
+            // for n_targets <= 64 this fits on the stack comfortably.
+            let mut prev_sums = [0_f32; MULTI_OUTPUT_BATCH];
+            let mut prev_sum_sqs = [0_f32; MULTI_OUTPUT_BATCH];
             prev_sums[..n_targets].copy_from_slice(&self.cum_y_sums[prev..prev + n_targets]);
             prev_sum_sqs[..n_targets].copy_from_slice(&self.cum_y_sum_sqs[prev..prev + n_targets]);
 
-            accumulate_f64_simd(
+            accumulate_f32_simd(
                 &mut self.cum_y_sums[curr..curr + n_targets],
                 &prev_sums[..n_targets],
                 n_targets,
             );
-            accumulate_f64_simd(
+            accumulate_f32_simd(
                 &mut self.cum_y_sum_sqs[curr..curr + n_targets],
                 &prev_sum_sqs[..n_targets],
                 n_targets,
@@ -806,12 +806,12 @@ impl TreeBuffers {
 /// The variance, clamped to `0.0`. Returns `0.0` for nodes with fewer than 2
 /// samples.
 #[inline]
-fn node_variance_f64(sum: f64, sum_sq: f64, n: usize) -> f64 {
+fn node_variance_f32(sum: f32, sum_sq: f32, n: usize) -> f32 {
     if n < 2 {
         return 0.0;
     }
-    let nf = n as f64;
-    f64::max(0.0, sum_sq / nf - (sum / nf) * (sum / nf))
+    let nf = n as f32;
+    f32::max(0.0, sum_sq / nf - (sum / nf) * (sum / nf))
 }
 
 /// Evaluate one candidate split threshold across all targets and update the
@@ -855,35 +855,35 @@ fn node_variance_f64(sum: f64, sum_sq: f64, n: usize) -> f64 {
 fn evaluate_split_multi(
     threshold: usize,
     feat: usize,
-    parent_vars: &[f64],
+    parent_vars: &[f32],
     n: usize,
-    y_sums_total: &[f64],
-    y_sum_sqs_total: &[f64],
-    cum_counts: &[usize; 256],
-    cum_y_sums: &[f64],
-    cum_y_sum_sqs: &[f64],
+    y_sums_total: &[f32],
+    y_sum_sqs_total: &[f32],
+    cum_counts: &[u32; 256],
+    cum_y_sums: &[f32],
+    cum_y_sum_sqs: &[f32],
     n_targets: usize,
-    min_samples_leaf: usize,
-    best_score: &mut f64,
+    min_samples_leaf: u32,
+    best_score: &mut f32,
     best_feature: &mut usize,
     best_threshold_u8: &mut u8,
-    best_n_left: &mut usize,
-    best_y_sums_l: &mut [f64],
-    best_y_sum_sqs_l: &mut [f64],
+    best_n_left: &mut u32,
+    best_y_sums_l: &mut [f32],
+    best_y_sum_sqs_l: &mut [f32],
 ) {
     let n_left = cum_counts[threshold];
-    let n_right = n - n_left;
+    let n_right = n as u32 - n_left;
 
     if n_left < min_samples_leaf || n_right < min_samples_leaf {
         return;
     }
 
-    let nl = n_left as f64;
-    let nr = n_right as f64;
-    let nf = n as f64;
+    let nl = n_left as f32;
+    let nr = n_right as f32;
+    let nf = n as f32;
     let h_base = threshold * n_targets;
 
-    let score = evaluate_split_score_simd(
+    let score = evaluate_split_score_f32_simd(
         parent_vars,
         y_sums_total,
         y_sum_sqs_total,
@@ -940,29 +940,29 @@ fn build_node_multi_sparse(
     sparse_y: &SparseYBatch,
     x: &DenseQuantisedStore,
     sample_slice: &mut [u32],
-    y_sums: &[f64],
-    y_sum_sqs: &[f64],
+    y_sums: &[f32],
+    y_sum_sqs: &[f32],
     n_total: usize,
     n_targets: usize,
     n_features_split: usize,
     config: &dyn TreeRegressorConfig,
     depth: usize,
-    importances: &mut [f64],
+    importances: &mut [f32],
     bufs: &mut TreeBuffers,
     rng: &mut SmallRng,
 ) {
     let n = sample_slice.len();
 
-    let mut total_parent_var = 0.0f64;
+    let mut total_parent_var = 0.0f32;
     for k in 0..n_targets {
-        let v = node_variance_f64(y_sums[k], y_sum_sqs[k], n);
+        let v = node_variance_f32(y_sums[k], y_sum_sqs[k], n);
         bufs.parent_vars[k] = v;
         total_parent_var += v;
     }
 
     let max_depth_reached = config.max_depth().is_some_and(|d| depth >= d);
     if n < 2 * config.min_samples_leaf()
-        || total_parent_var < config.min_variance()
+        || (total_parent_var) < config.min_variance()
         || max_depth_reached
     {
         return;
@@ -971,22 +971,20 @@ fn build_node_multi_sparse(
     let n_features = x.n_features;
     let k_feats = n_features_split.min(n_features);
 
-    // Partial Fisher-Yates to select k_feats random features
     for i in 0..k_feats {
         let j = rng.random_range(i..n_features);
         bufs.feat_buf.swap(i, j);
     }
 
-    let mut best_score = 0.0f64;
+    let mut best_score = 0.0f32;
     let mut best_feature = usize::MAX;
     let mut best_threshold_u8 = 0u8;
-    let mut best_n_left = 0usize;
+    let mut best_n_left = 0u32;
 
     for fi_idx in 0..k_feats {
         let feat = bufs.feat_buf[fi_idx];
         let tf_col = x.get_col(feat);
 
-        // Build histogram once per feature -- O(N) + O(bin_range * n_targets)
         let (min_bin, max_bin) =
             bufs.build_histograms_sparse(tf_col, sample_slice, sparse_y, n_targets);
 
@@ -995,8 +993,6 @@ fn build_node_multi_sparse(
         }
 
         if config.random_threshold() {
-            // ExtraTrees: evaluate n_thresholds random splits via the
-            // cumulative histogram. Each evaluation is O(n_targets), not O(N).
             for _ in 0..config.n_thresholds() {
                 let threshold = rng.random_range(min_bin..max_bin);
                 evaluate_split_multi(
@@ -1010,7 +1006,7 @@ fn build_node_multi_sparse(
                     &bufs.cum_y_sums,
                     &bufs.cum_y_sum_sqs,
                     n_targets,
-                    config.min_samples_leaf(),
+                    config.min_samples_leaf() as u32,
                     &mut best_score,
                     &mut best_feature,
                     &mut best_threshold_u8,
@@ -1020,7 +1016,6 @@ fn build_node_multi_sparse(
                 );
             }
         } else {
-            // RF: exhaustive scan over all bin thresholds
             for threshold in min_bin..max_bin {
                 evaluate_split_multi(
                     threshold,
@@ -1033,7 +1028,7 @@ fn build_node_multi_sparse(
                     &bufs.cum_y_sums,
                     &bufs.cum_y_sum_sqs,
                     n_targets,
-                    config.min_samples_leaf(),
+                    config.min_samples_leaf() as u32,
                     &mut best_score,
                     &mut best_feature,
                     &mut best_threshold_u8,
@@ -1050,10 +1045,10 @@ fn build_node_multi_sparse(
     }
 
     // Accumulate importance
-    let weight = n as f64 / n_total as f64;
-    let nl = best_n_left as f64;
-    let nr = (n - best_n_left) as f64;
-    let nf = n as f64;
+    let nl = best_n_left as f32;
+    let nr = (n as u32 - best_n_left) as f32;
+    let nf = n as f32;
+    let weight = nf / n_total as f32;
     let imp_base = best_feature * n_targets;
 
     for k in 0..n_targets {
@@ -1061,21 +1056,22 @@ fn build_node_multi_sparse(
         let y_sum_sq_l = bufs.best_y_sum_sqs_l[k];
         let y_sum_r = y_sums[k] - y_sum_l;
         let y_sum_sq_r = y_sum_sqs[k] - y_sum_sq_l;
-
-        let var_l = f64::max(0.0, y_sum_sq_l / nl - (y_sum_l / nl).powi(2));
-        let var_r = f64::max(0.0, y_sum_sq_r / nr - (y_sum_r / nr).powi(2));
+        let mean_l = y_sum_l / nl;
+        let var_l = f32::max(0.0, y_sum_sq_l / nl - mean_l * mean_l);
+        let mean_r = y_sum_r / nr;
+        let var_r = f32::max(0.0, y_sum_sq_r / nr - mean_r * mean_r);
         let reduction = bufs.parent_vars[k] - (nl / nf) * var_l - (nr / nf) * var_r;
-        importances[imp_base + k] += weight * f64::max(0.0, reduction);
+        importances[imp_base + k] += weight * f32::max(0.0, reduction);
     }
 
-    // Partition sample_slice only -- no Y copying needed
-    let mut left_y_sums = [0.0f64; MULTI_OUTPUT_BATCH];
-    let mut left_y_sum_sqs = [0.0f64; MULTI_OUTPUT_BATCH];
+    // Partition
+    let mut left_y_sums = [0.0f32; MULTI_OUTPUT_BATCH];
+    let mut left_y_sum_sqs = [0.0f32; MULTI_OUTPUT_BATCH];
     left_y_sums[..n_targets].copy_from_slice(&bufs.best_y_sums_l[..n_targets]);
     left_y_sum_sqs[..n_targets].copy_from_slice(&bufs.best_y_sum_sqs_l[..n_targets]);
 
-    let mut right_y_sums = [0.0f64; MULTI_OUTPUT_BATCH];
-    let mut right_y_sum_sqs = [0.0f64; MULTI_OUTPUT_BATCH];
+    let mut right_y_sums = [0.0f32; MULTI_OUTPUT_BATCH];
+    let mut right_y_sum_sqs = [0.0f32; MULTI_OUTPUT_BATCH];
     for k in 0..n_targets {
         right_y_sums[k] = y_sums[k] - left_y_sums[k];
         right_y_sum_sqs[k] = y_sum_sqs[k] - left_y_sum_sqs[k];
@@ -1177,22 +1173,22 @@ fn build_node_multi(
     y_slice: &mut [f32],
     x: &DenseQuantisedStore,
     sample_slice: &mut [u32],
-    y_sums: &[f64],
-    y_sum_sqs: &[f64],
+    y_sums: &[f32],
+    y_sum_sqs: &[f32],
     n_total: usize,
     n_targets: usize,
     n_features_split: usize,
     config: &dyn TreeRegressorConfig,
     depth: usize,
-    importances: &mut [f64],
+    importances: &mut [f32],
     bufs: &mut TreeBuffers,
     rng: &mut SmallRng,
 ) {
     let n = sample_slice.len();
 
-    let mut total_parent_var = 0_f64;
+    let mut total_parent_var = 0.0f32;
     for k in 0..n_targets {
-        let v = node_variance_f64(y_sums[k], y_sum_sqs[k], n);
+        let v = node_variance_f32(y_sums[k], y_sum_sqs[k], n);
         bufs.parent_vars[k] = v;
         total_parent_var += v;
     }
@@ -1214,10 +1210,10 @@ fn build_node_multi(
         bufs.feat_buf.swap(i, j);
     }
 
-    let mut best_score = 0_f64;
+    let mut best_score = 0.0f32;
     let mut best_feature = usize::MAX;
     let mut best_threshold_u8 = 0u8;
-    let mut best_n_left = 0usize;
+    let mut best_n_left = 0u32;
 
     for fi_idx in 0..k_feats {
         let feat = bufs.feat_buf[fi_idx];
@@ -1243,7 +1239,7 @@ fn build_node_multi(
                     &bufs.cum_y_sums,
                     &bufs.cum_y_sum_sqs,
                     n_targets,
-                    config.min_samples_leaf(),
+                    config.min_samples_leaf() as u32,
                     &mut best_score,
                     &mut best_feature,
                     &mut best_threshold_u8,
@@ -1265,7 +1261,7 @@ fn build_node_multi(
                     &bufs.cum_y_sums,
                     &bufs.cum_y_sum_sqs,
                     n_targets,
-                    config.min_samples_leaf(),
+                    config.min_samples_leaf() as u32,
                     &mut best_score,
                     &mut best_feature,
                     &mut best_threshold_u8,
@@ -1281,10 +1277,10 @@ fn build_node_multi(
         return;
     }
 
-    let weight = n as f64 / n_total as f64;
-    let nl = best_n_left as f64;
-    let nr = (n - best_n_left) as f64;
-    let nf = n as f64;
+    let nl = best_n_left as f32;
+    let nr = (n as u32 - best_n_left) as f32;
+    let nf = n as f32;
+    let weight = nf / n_total as f32;
     let imp_base = best_feature * n_targets;
 
     for k in 0..n_targets {
@@ -1292,20 +1288,18 @@ fn build_node_multi(
         let y_sum_sq_l = bufs.best_y_sum_sqs_l[k];
         let y_sum_r = y_sums[k] - y_sum_l;
         let y_sum_sq_r = y_sum_sqs[k] - y_sum_sq_l;
-
-        let var_l = f64::max(0.0, y_sum_sq_l / nl - (y_sum_l / nl).powi(2));
-        let var_r = f64::max(0.0, y_sum_sq_r / nr - (y_sum_r / nr).powi(2));
+        let mean_l = y_sum_l / nl;
+        let var_l = f32::max(0.0, y_sum_sq_l / nl - mean_l * mean_l);
+        let mean_r = y_sum_r / nr;
+        let var_r = f32::max(0.0, y_sum_sq_r / nr - mean_r * mean_r);
         let reduction = bufs.parent_vars[k] - (nl / nf) * var_l - (nr / nf) * var_r;
-
-        importances[imp_base + k] += weight * f64::max(0.0, reduction);
+        importances[imp_base + k] += weight * f32::max(0.0, reduction);
     }
 
-    // stack-allocated buffers: n_targets <= MULTI_OUTPUT_BATCH always holds.
-    // avoids heap allocations
-    let mut left_y_sums = [0_f64; MULTI_OUTPUT_BATCH];
-    let mut left_y_sum_sqs = [0_f64; MULTI_OUTPUT_BATCH];
-    let mut right_y_sums = [0_f64; MULTI_OUTPUT_BATCH];
-    let mut right_y_sum_sqs = [0_f64; MULTI_OUTPUT_BATCH];
+    let mut left_y_sums = [0.0f32; MULTI_OUTPUT_BATCH];
+    let mut left_y_sum_sqs = [0.0f32; MULTI_OUTPUT_BATCH];
+    let mut right_y_sums = [0.0f32; MULTI_OUTPUT_BATCH];
+    let mut right_y_sum_sqs = [0.0f32; MULTI_OUTPUT_BATCH];
 
     left_y_sums[..n_targets].copy_from_slice(&bufs.best_y_sums_l[..n_targets]);
     left_y_sum_sqs[..n_targets].copy_from_slice(&bufs.best_y_sum_sqs_l[..n_targets]);
@@ -1420,7 +1414,7 @@ fn fit_multi_trees(
     let n_features = feature_matrix.n_features;
     let n_targets = targets.len();
     let n_features_split = if config.n_features_split() == 0 {
-        ((n_features as f64).sqrt() as usize).max(1)
+        ((n_features as f32).sqrt() as usize).max(1)
     } else {
         config.n_features_split()
     };
@@ -1439,9 +1433,9 @@ fn fit_multi_trees(
     let mut sample_indices: Vec<u32> = vec![0; n_samples];
     let mut root_y_buf: Vec<f32> = vec![0.0; n_samples * n_targets];
     let mut bufs = TreeBuffers::new(n_features, n_samples, n_targets);
-    let mut importances = vec![0_f64; n_features * n_targets];
-    let mut y_sums_root = vec![0_f64; n_targets];
-    let mut y_sum_sqs_root = vec![0_f64; n_targets];
+    let mut importances = vec![0.0f32; n_features * n_targets];
+    let mut y_sums_root = vec![0.0f32; n_targets];
+    let mut y_sum_sqs_root = vec![0.0f32; n_targets];
 
     for tree_idx in 0..config.n_trees() {
         let mut rng =
@@ -1485,7 +1479,7 @@ fn fit_multi_trees(
             root_y[dst_base..dst_base + n_targets]
                 .copy_from_slice(&y_dense[src_base..src_base + n_targets]);
             for k in 0..n_targets {
-                let y = root_y[dst_base + k] as f64;
+                let y = root_y[dst_base + k];
                 y_sums_root[k] += y;
                 y_sum_sqs_root[k] += y * y;
             }
@@ -1511,19 +1505,18 @@ fn fit_multi_trees(
     let mut result = Vec::with_capacity(n_targets);
     for k in 0..n_targets {
         let mut target_imp = Vec::with_capacity(n_features);
-        let mut total = 0_f64;
+        let mut total = 0.0f32;
         for f in 0..n_features {
             let v = importances[f * n_targets + k];
             total += v;
-            target_imp.push(v as f32);
+            target_imp.push(v);
         }
         if total > 0.0 {
-            let inv = 1.0 / total as f32;
+            let inv = 1.0 / total;
             target_imp.iter_mut().for_each(|v| *v *= inv);
         }
         result.push(target_imp);
     }
-
     result
 }
 
@@ -1551,7 +1544,7 @@ fn fit_multi_trees_sparse(
     let n_features = feature_matrix.n_features;
     let n_targets = targets.len();
     let n_features_split = if config.n_features_split() == 0 {
-        ((n_features as f64).sqrt() as usize).max(1)
+        ((n_features as f32).sqrt() as usize).max(1)
     } else {
         config.n_features_split()
     };
@@ -1565,15 +1558,13 @@ fn fit_multi_trees_sparse(
             .max(2 * config.min_samples_leaf())
     };
 
-    // build once, shared across all trees
     let sparse_y = SparseYBatch::from_targets(targets, n_samples);
 
     let mut sample_indices: Vec<u32> = vec![0; n_samples];
-    // no more root_y_buf, left_y_buf, right_y_buf
     let mut bufs = TreeBuffers::new_sparse(n_features, n_samples, n_targets);
-    let mut importances = vec![0.0f64; n_features * n_targets];
-    let mut y_sums_root = vec![0.0f64; n_targets];
-    let mut y_sum_sqs_root = vec![0.0f64; n_targets];
+    let mut importances = vec![0.0f32; n_features * n_targets];
+    let mut y_sums_root = vec![0.0f32; n_targets];
+    let mut y_sum_sqs_root = vec![0.0f32; n_targets];
 
     for tree_idx in 0..config.n_trees() {
         let mut rng =
@@ -1606,14 +1597,13 @@ fn fit_multi_trees_sparse(
 
         let active = &mut sample_indices[..active_len];
 
-        // compute root sufficient statistics from sparse Y
         y_sums_root.fill(0.0);
         y_sum_sqs_root.fill(0.0);
         for &s in active.iter() {
             let (tgt_idx, tgt_val) = sparse_y.cell_entries(s as usize);
             for i in 0..tgt_idx.len() {
                 let k = tgt_idx[i] as usize;
-                let y = tgt_val[i] as f64;
+                let y = tgt_val[i];
                 y_sums_root[k] += y;
                 y_sum_sqs_root[k] += y * y;
             }
@@ -1636,18 +1626,17 @@ fn fit_multi_trees_sparse(
         );
     }
 
-    // normalise importances
     let mut result = Vec::with_capacity(n_targets);
     for k in 0..n_targets {
         let mut target_imp = Vec::with_capacity(n_features);
-        let mut total = 0.0f64;
+        let mut total = 0.0f32;
         for f in 0..n_features {
             let v = importances[f * n_targets + k];
             total += v;
-            target_imp.push(v as f32);
+            target_imp.push(v);
         }
         if total > 0.0 {
-            let inv = 1.0 / total as f32;
+            let inv = 1.0 / total;
             target_imp.iter_mut().for_each(|v| *v *= inv);
         }
         result.push(target_imp);
@@ -2481,16 +2470,16 @@ mod tests {
     #[test]
     fn node_variance_basic() {
         // values: 1, 2, 3 -> mean=2, var=2/3
-        let (sum, sum_sq) = (6.0f64, 14.0f64);
-        let v = node_variance_f64(sum, sum_sq, 3);
-        assert!((v - 2.0 / 3.0).abs() < 1e-10, "got {v}");
+        let (sum, sum_sq) = (6.0f32, 14.0f32);
+        let v = node_variance_f32(sum, sum_sq, 3);
+        assert!((v - 2.0 / 3.0).abs() < 1e-6, "got {v}");
     }
 
     #[test]
     fn node_variance_uniform() {
         // values: 3, 3, 3 -> var=0
-        let (sum, sum_sq) = (9.0f64, 27.0f64);
-        let v = node_variance_f64(sum, sum_sq, 3);
+        let (sum, sum_sq) = (9.0f32, 27.0f32);
+        let v = node_variance_f32(sum, sum_sq, 3);
         assert_eq!(v, 0.0);
     }
 
@@ -2732,9 +2721,9 @@ mod tests {
         // var_l = var([1,3]) = 1.0, var_r = var([10,12]) = 1.0
         // reduction = 19.1875 - 0.5*1.0 - 0.5*1.0 = 18.1875
         let n_targets = 1;
-        let mut cum_counts = [0usize; 256];
-        let mut cum_y_sums = vec![0.0f64; 256];
-        let mut cum_y_sum_sqs = vec![0.0f64; 256];
+        let mut cum_counts = [0u32; 256];
+        let mut cum_y_sums = vec![0.0f32; 256];
+        let mut cum_y_sum_sqs = vec![0.0f32; 256];
 
         // bin 0: count=2, sum=4, sumsq=10
         // bin 10: count=2, sum=22, sumsq=244
@@ -2752,16 +2741,16 @@ mod tests {
             }
         }
 
-        let parent_vars = vec![node_variance_f64(26.0, 254.0, 4)];
-        let y_sums_total = vec![26.0f64];
-        let y_sum_sqs_total = vec![254.0f64];
+        let parent_vars = vec![node_variance_f32(26.0, 254.0, 4)];
+        let y_sums_total = vec![26.0f32];
+        let y_sum_sqs_total = vec![254.0f32];
 
-        let mut best_score = 0.0f64;
+        let mut best_score = 0.0f32;
         let mut best_feature = usize::MAX;
         let mut best_threshold = 0u8;
-        let mut best_n_left = 0usize;
-        let mut best_ys_l = vec![0.0f64; 1];
-        let mut best_yss_l = vec![0.0f64; 1];
+        let mut best_n_left = 0u32;
+        let mut best_ys_l = vec![0.0f32; 1];
+        let mut best_yss_l = vec![0.0f32; 1];
 
         evaluate_split_multi(
             0, // threshold: bin <= 0 goes left
