@@ -8,7 +8,7 @@ use crate::single_cell::sc_analysis::hdwgcna_meta_cells::MetaCellParams;
 use crate::single_cell::sc_analysis::hotspot::HotSpotParams;
 use crate::single_cell::sc_analysis::milo_r::MiloRParams;
 use crate::single_cell::sc_analysis::scenic::{
-    ExtraTreesConfig, RandomForestConfig, RegressionLearner, ScenicParams,
+    ExtraTreesConfig, GradientBoostingConfig, RandomForestConfig, RegressionLearner, ScenicParams,
 };
 use crate::single_cell::sc_analysis::seacells::SEACellsParams;
 use crate::single_cell::sc_analysis::super_cells::SuperCellParams;
@@ -1110,6 +1110,69 @@ impl ExtraTreesConfig {
             n_thresholds,
             max_depth,
             subsample_frac,
+        }
+    }
+}
+
+impl GradientBoostingConfig {
+    /// Generate GradientBoostingConfig from an R list.
+    ///
+    /// Should values not be found within the List, the parameters will default
+    /// to the values defined in `GradientBoostingConfig::default()`.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the GradientBoosting parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The `GradientBoostingConfig` with all parameters set.
+    pub fn from_r_list(r_list: List) -> Self {
+        let defaults = Self::default();
+        let params_list = r_list.into_hashmap();
+        let n_trees_max = params_list
+            .get("n_trees_max")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.n_trees_max);
+        let learning_rate = params_list
+            .get("learning_rate")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.learning_rate);
+        let max_depth = params_list
+            .get("max_depth")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.max_depth);
+        let min_samples_leaf = params_list
+            .get("min_samples_leaf")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.min_samples_leaf);
+        let early_stop_window = params_list
+            .get("early_stop_window")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.early_stop_window);
+        let subsample_rate = params_list
+            .get("subsample_rate")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.subsample_rate);
+        let n_features_split = params_list
+            .get("n_features_split")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.n_features_split);
+        Self {
+            n_trees_max,
+            learning_rate,
+            max_depth,
+            min_samples_leaf,
+            early_stop_window,
+            subsample_rate,
+            n_features_split,
         }
     }
 }

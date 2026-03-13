@@ -151,6 +151,41 @@ where
 
         (indices, data_2)
     }
+
+    /// Construct a `SparseAxis` in CSC format from index and value vectors.
+    ///
+    /// Stores `indices` (converted to `usize`) in `self.indices`, leaves
+    /// `data` empty, and places `values` into `data_2`. Useful for building
+    /// single-target test fixtures and lightweight sparse columns where only
+    /// the float layer is needed.
+    ///
+    /// ### Params
+    ///
+    /// * `indices` - Non-zero positions (must be convertible to `usize`).
+    /// * `values` - Corresponding values, stored in `data_2`.
+    ///
+    /// ### Panics
+    ///
+    /// Panics if `indices` and `values` differ in length.
+    pub fn from_vecs_to_csc(indices: Vec<T>, values: Vec<U>) -> Self
+    where
+        T: Into<usize>,
+    {
+        assert_eq!(
+            indices.len(),
+            values.len(),
+            "indices and values must have equal length"
+        );
+        let usize_indices: Vec<usize> = indices.into_iter().map(Into::into).collect();
+        let len = usize_indices.last().map_or(0, |&i| i + 1);
+        Self {
+            indices: usize_indices,
+            data: Vec::new(),
+            data_2: Some(values),
+            cs_type: CompressedSparseFormat::Csc,
+            len,
+        }
+    }
 }
 
 /// Structure to store compressed sparse data of either type

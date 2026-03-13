@@ -13,6 +13,12 @@ use crate::utils::simd::{SimdLevel, detect_simd_level};
 //////////////////
 
 /// Element-wise f32 accumulation (scalar fallback)
+///
+/// ### Params
+///
+/// * `dst` - Destination slice (mutated in place).
+/// * `src` - Source slice to add from.
+/// * `n` - Number of elements to process.
 #[inline(always)]
 fn accumulate_f32_scalar(dst: &mut [f32], src: &[f32], n: usize) {
     for k in 0..n {
@@ -21,6 +27,12 @@ fn accumulate_f32_scalar(dst: &mut [f32], src: &[f32], n: usize) {
 }
 
 /// Element-wise f32 accumulation (128-bit: SSE2 / NEON)
+///
+/// ### Params
+///
+/// * `dst` - Destination slice (mutated in place).
+/// * `src` - Source slice to add from.
+/// * `n` - Number of elements to process.
 #[inline(always)]
 fn accumulate_f32_sse(dst: &mut [f32], src: &[f32], n: usize) {
     let chunks = n / 4;
@@ -40,6 +52,12 @@ fn accumulate_f32_sse(dst: &mut [f32], src: &[f32], n: usize) {
 }
 
 /// Element-wise f32 accumulation (256-bit: AVX2)
+///
+/// ### Params
+///
+/// * `dst` - Destination slice (mutated in place).
+/// * `src` - Source slice to add from.
+/// * `n` - Number of elements to process.
 #[inline(always)]
 fn accumulate_f32_avx2(dst: &mut [f32], src: &[f32], n: usize) {
     let chunks = n / 8;
@@ -59,6 +77,12 @@ fn accumulate_f32_avx2(dst: &mut [f32], src: &[f32], n: usize) {
 }
 
 /// Element-wise f32 accumulation (512-bit: AVX-512F)
+///
+/// ### Params
+///
+/// * `dst` - Destination slice (mutated in place).
+/// * `src` - Source slice to add from.
+/// * `n` - Number of elements to process.
 #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
 #[inline(always)]
 fn accumulate_f32_avx512(dst: &mut [f32], src: &[f32], n: usize) {
@@ -109,6 +133,23 @@ pub fn accumulate_f32_simd(dst: &mut [f32], src: &[f32], n: usize) {
 //////////////////
 
 /// Split score evaluation (scalar fallback)
+///
+/// ### Params
+///
+/// * `parent_vars` - Per-target parent node variance.
+/// * `y_sums_total` - Per-target Y sums for the full node.
+/// * `y_sum_sqs_total` - Per-target Y squared sums for the full node.
+/// * `cum_y_sums` - Cumulative Y sums at the split threshold.
+/// * `cum_y_sum_sqs` - Cumulative Y squared sums at the split threshold.
+/// * `n_targets` - Number of active targets.
+/// * `inv_nl` - 1.0 / n_left.
+/// * `inv_nr` - 1.0 / n_right.
+/// * `wl` - n_left / n.
+/// * `wr` - n_right / n.
+///
+/// ### Returns
+///
+/// Sum of per-target weighted variance reductions.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn evaluate_split_score_f32_scalar(
@@ -139,6 +180,23 @@ fn evaluate_split_score_f32_scalar(
 }
 
 /// Split score evaluation (128-bit: SSE2 / NEON)
+///
+/// ### Params
+///
+/// * `parent_vars` - Per-target parent node variance.
+/// * `y_sums_total` - Per-target Y sums for the full node.
+/// * `y_sum_sqs_total` - Per-target Y squared sums for the full node.
+/// * `cum_y_sums` - Cumulative Y sums at the split threshold.
+/// * `cum_y_sum_sqs` - Cumulative Y squared sums at the split threshold.
+/// * `n_targets` - Number of active targets.
+/// * `inv_nl` - 1.0 / n_left.
+/// * `inv_nr` - 1.0 / n_right.
+/// * `wl` - n_left / n.
+/// * `wr` - n_right / n.
+///
+/// ### Returns
+///
+/// Sum of per-target weighted variance reductions.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn evaluate_split_score_f32_sse(
@@ -198,7 +256,25 @@ fn evaluate_split_score_f32_sse(
     score
 }
 
-/// Split score evaluation (512-bit: AVX-512F)
+/// Split score evaluation (256-bit: AVX2)
+///
+/// ### Params
+///
+/// * `parent_vars` - Per-target parent node variance.
+/// * `y_sums_total` - Per-target Y sums for the full node.
+/// * `y_sum_sqs_total` - Per-target Y squared sums for the full node.
+/// * `cum_y_sums` - Cumulative Y sums at the split threshold (already offset
+///   to h_base).
+/// * `cum_y_sum_sqs` - Cumulative Y squared sums at the split threshold.
+/// * `n_targets` - Number of active targets.
+/// * `inv_nl` - 1.0 / n_left.
+/// * `inv_nr` - 1.0 / n_right.
+/// * `wl` - n_left / n.
+/// * `wr` - n_right / n.
+///
+/// ### Returns
+///
+/// Sum of per-target weighted variance reductions.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn evaluate_split_score_f32_avx2(
@@ -258,7 +334,25 @@ fn evaluate_split_score_f32_avx2(
     score
 }
 
-/// Split score evaluation (512-bit fallback)
+/// Split score evaluation (512-bit: AVX-512F)
+///
+/// ### Params
+///
+/// * `parent_vars` - Per-target parent node variance.
+/// * `y_sums_total` - Per-target Y sums for the full node.
+/// * `y_sum_sqs_total` - Per-target Y squared sums for the full node.
+/// * `cum_y_sums` - Cumulative Y sums at the split threshold (already offset
+///   to h_base).
+/// * `cum_y_sum_sqs` - Cumulative Y squared sums at the split threshold.
+/// * `n_targets` - Number of active targets.
+/// * `inv_nl` - 1.0 / n_left.
+/// * `inv_nr` - 1.0 / n_right.
+/// * `wl` - n_left / n.
+/// * `wr` - n_right / n.
+///
+/// ### Returns
+///
+/// Sum of per-target weighted variance reductions.
 #[cfg(not(all(target_arch = "x86_64", target_feature = "avx512f")))]
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
