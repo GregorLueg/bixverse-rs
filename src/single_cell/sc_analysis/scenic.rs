@@ -21,8 +21,6 @@ use rand::{Rng, SeedableRng, rngs::SmallRng};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc;
-use std::thread;
 use std::time::Instant;
 use thousands::Separable;
 
@@ -895,9 +893,10 @@ fn evaluate_split_multi(
 
 /// Recursively build a single tree node using sparse Y.
 ///
-/// The key difference from the dense version: no y_slice is passed or
-/// partitioned. Only sample_slice is partitioned in place. Y lookups go
-/// through the static SparseYBatch.
+/// Only sample_slice is partitioned in place. Y lookups go through the static
+/// SparseYBatch. Histograms are built once per candidate feature; both the
+/// ExtraTrees (random threshold) and RF (exhaustive) paths evaluate splits via
+/// the cumulative histogram in O(1) per threshold.
 ///
 /// ### Params
 ///
@@ -906,7 +905,7 @@ fn evaluate_split_multi(
 /// * `sample_slice` - Indices of the active samples; partitioned in place
 ///   around the best split.
 /// * `y_sums` - Per-target Y sums for this node.
-/// * `y_sum_sqs` - Per-target Y² sums for this node.
+/// * `y_sum_sqs` - Per-target Y squared sums for this node.
 /// * `n_total` - Total samples at the tree root (used to weight importance
 ///   contributions).
 /// * `n_targets` - Number of targets in the current batch.
@@ -953,6 +952,7 @@ fn build_node_multi_sparse(
     let n_features = x.n_features;
     let k_feats = n_features_split.min(n_features);
 
+    // Partial Fisher-Yates to select k_feats random features
     for i in 0..k_feats {
         let j = rng.random_range(i..n_features);
         bufs.feat_buf.swap(i, j);
@@ -967,6 +967,7 @@ fn build_node_multi_sparse(
         let feat = bufs.feat_buf[fi_idx];
         let tf_col = x.get_col(feat);
 
+        // Build histogram once per feature -- O(N) + O(bin_range * n_targets)
         let (min_bin, max_bin) =
             bufs.build_histograms_sparse(tf_col, sample_slice, sparse_y, n_targets);
 
@@ -975,83 +976,32 @@ fn build_node_multi_sparse(
         }
 
         if config.random_threshold() {
-            let mut min_val = 255u8;
-            let mut max_val = 0u8;
-            for &s in sample_slice.iter() {
-                let val = tf_col[s as usize];
-                if val < min_val {
-                    min_val = val;
-                }
-                if val > max_val {
-                    max_val = val;
-                }
-            }
-
-            // cannot split if all values are identical
-            if min_val == max_val {
-                continue;
-            }
-
-            // test exactly `n_thresholds` random splits (Usually 1 for ET)
+            // ExtraTrees: evaluate n_thresholds random splits via the
+            // cumulative histogram. Each evaluation is O(n_targets), not O(N).
             for _ in 0..config.n_thresholds() {
-                let threshold = rng.random_range(min_val..max_val);
-
-                let mut n_left = 0usize;
-                let mut y_sums_l = [0.0f64; MULTI_OUTPUT_BATCH];
-                let mut y_sum_sqs_l = [0.0f64; MULTI_OUTPUT_BATCH];
-
-                for &s in sample_slice.iter() {
-                    if tf_col[s as usize] <= threshold {
-                        n_left += 1;
-                        let (tgt_indices, tgt_values) = sparse_y.cell_entries(s as usize);
-                        for i in 0..tgt_indices.len() {
-                            let k = tgt_indices[i] as usize;
-                            let y = tgt_values[i] as f64;
-                            y_sums_l[k] += y;
-                            y_sum_sqs_l[k] += y * y;
-                        }
-                    }
-                }
-
-                let n_right = n - n_left;
-                if n_left < config.min_samples_leaf() || n_right < config.min_samples_leaf() {
-                    continue;
-                }
-
-                let nl = n_left as f64;
-                let nr = n_right as f64;
-                let nf = n as f64;
-                let mut score = 0.0f64;
-
-                for k in 0..n_targets {
-                    let y_sum_l = y_sums_l[k];
-                    let y_sum_sq_l = y_sum_sqs_l[k];
-                    let y_sum_r = y_sums[k] - y_sum_l;
-                    let y_sum_sq_r = y_sum_sqs[k] - y_sum_sq_l;
-
-                    let var_l = f64::max(0.0, y_sum_sq_l / nl - (y_sum_l / nl).powi(2));
-                    let var_r = f64::max(0.0, y_sum_sq_r / nr - (y_sum_r / nr).powi(2));
-
-                    score += bufs.parent_vars[k] - (nl / nf) * var_l - (nr / nf) * var_r;
-                }
-
-                if score > best_score {
-                    best_score = score;
-                    best_feature = feat;
-                    best_threshold_u8 = threshold;
-                    best_n_left = n_left;
-                    bufs.best_y_sums_l[..n_targets].copy_from_slice(&y_sums_l[..n_targets]);
-                    bufs.best_y_sum_sqs_l[..n_targets].copy_from_slice(&y_sum_sqs_l[..n_targets]);
-                }
+                let threshold = rng.random_range(min_bin..max_bin);
+                evaluate_split_multi(
+                    threshold,
+                    feat,
+                    &bufs.parent_vars,
+                    n,
+                    y_sums,
+                    y_sum_sqs,
+                    &bufs.cum_counts,
+                    &bufs.cum_y_sums,
+                    &bufs.cum_y_sum_sqs,
+                    n_targets,
+                    config.min_samples_leaf(),
+                    &mut best_score,
+                    &mut best_feature,
+                    &mut best_threshold_u8,
+                    &mut best_n_left,
+                    &mut bufs.best_y_sums_l,
+                    &mut bufs.best_y_sum_sqs_l,
+                );
             }
         } else {
-            let (min_bin, max_bin) =
-                bufs.build_histograms_sparse(tf_col, sample_slice, sparse_y, n_targets);
-
-            if min_bin == max_bin {
-                continue;
-            }
-
+            // RF: exhaustive scan over all bin thresholds
             for threshold in min_bin..max_bin {
                 evaluate_split_multi(
                     threshold,
@@ -1080,7 +1030,7 @@ fn build_node_multi_sparse(
         return;
     }
 
-    // Accumulate importance (unchanged)
+    // Accumulate importance
     let weight = n as f64 / n_total as f64;
     let nl = best_n_left as f64;
     let nr = (n - best_n_left) as f64;
@@ -1099,10 +1049,9 @@ fn build_node_multi_sparse(
         importances[imp_base + k] += weight * f64::max(0.0, reduction);
     }
 
-    // Partition sample_slice only -- no Y copying
+    // Partition sample_slice only -- no Y copying needed
     let mut left_y_sums = [0.0f64; MULTI_OUTPUT_BATCH];
     let mut left_y_sum_sqs = [0.0f64; MULTI_OUTPUT_BATCH];
-
     left_y_sums[..n_targets].copy_from_slice(&bufs.best_y_sums_l[..n_targets]);
     left_y_sum_sqs[..n_targets].copy_from_slice(&bufs.best_y_sum_sqs_l[..n_targets]);
 
@@ -2063,7 +2012,7 @@ pub fn scenic_gene_filter(
     passing
 }
 
-/// Run SCENIC GRN inference and return a TF-by-gene importance matrix
+/// Run SCENIC GRN inference and return a TF-by-gene importance matrix.
 ///
 /// ### Params
 ///
@@ -2071,9 +2020,7 @@ pub fn scenic_gene_filter(
 /// * `cell_indices` - Indices of cells to use.
 /// * `gene_indices` - Target gene indices.
 /// * `tf_indices` - Transcription factor gene indices (predictors).
-/// * `scenic_params` - Reference to the SCENIC parameters indicating the gene
-///   batch strategy, gene batch size,
-/// * `learner` - Regression learner and its configuration.
+/// * `scenic_params` - Reference to the SCENIC parameters.
 /// * `seed` - Base random seed for reproducibility.
 /// * `verbose` - Print progress and timing to stdout.
 ///
@@ -2084,12 +2031,19 @@ pub fn scenic_gene_filter(
 ///
 /// ### Implementation details
 ///
-/// TF expression data is loaded once, filtered to the selected cells, and
-/// quantised into a `DenseQuantisedStore`. Target genes are then processed in
-/// chunks of `SCENIC_GENE_CHUNK_SIZE`. Within each chunk, targets are further
-/// grouped into batches of `MULTI_OUTPUT_BATCH` and fitted as multi-output
-/// ensembles via `fit_multi_trees_sparse`. Batches within a chunk are
-/// parallelised across threads with Rayon.
+/// TF expression data is loaded once, filtered and quantised into a
+/// `DenseQuantisedStore`. Target genes are read in I/O chunks of
+/// `SCENIC_GENE_CHUNK_SIZE`, filtered and converted to sparse columns,
+/// then collected into a single flat buffer. This buffer is sliced into
+/// multi-output batches of `n_multi_output` targets each. All batches are
+/// fitted in a single `par_iter` pass, giving rayon full work-stealing
+/// flexibility across all batches rather than being constrained to the ~16
+/// batches within a single I/O chunk.
+///
+/// Memory note: all target gene sparse columns are held simultaneously. At
+/// 100k cells and 10% sparsity this is roughly 60KB per gene (~1.2GB for
+/// 20k genes). For datasets where this is prohibitive, a wave-based
+/// approach processing a few thousand genes at a time can be substituted.
 pub fn run_scenic_grn(
     f_path: &str,
     cell_indices: &[usize],
@@ -2120,10 +2074,13 @@ pub fn run_scenic_grn(
     drop(tf_chunks);
     drop(tf_csc);
 
+    let n_tfs = tf_data.n_features;
+    let n_genes = gene_indices.len();
+
     if verbose {
         println!(
             "Loaded, filtered and quantised TF data (n: {}) in: {:.2?}",
-            tf_data.n_features.separate_with_underscores(),
+            n_tfs.separate_with_underscores(),
             start_reading.elapsed()
         );
     }
@@ -2151,9 +2108,44 @@ pub fn run_scenic_grn(
         .map(|(pos, &gid)| (gid, pos))
         .collect();
 
-    let n_genes = gene_indices.len();
-    let n_tfs = tf_data.n_features;
-    let mut importance_scores: Vec<Vec<f32>> = vec![Vec::new(); n_genes];
+    let start_gene_read = Instant::now();
+    let mut all_gene_ids: Vec<usize> = Vec::with_capacity(n_genes);
+    let mut all_sparse_cols: Vec<SparseAxis<u16, f32>> = Vec::with_capacity(n_genes);
+
+    for (iter, chunk) in ordered_genes.chunks(SCENIC_GENE_CHUNK_SIZE).enumerate() {
+        let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(chunk);
+        gene_chunks.par_iter_mut().for_each(|c| {
+            c.filter_selected_cells(&cell_set);
+        });
+
+        for (i, gc) in gene_chunks.iter().enumerate() {
+            all_gene_ids.push(chunk[i]);
+            all_sparse_cols.push(gc.to_sparse_axis(n_cells));
+        }
+
+        if verbose {
+            println!(
+                "  Read gene chunk {}/{} ({} genes)",
+                iter + 1,
+                ordered_genes.len().div_ceil(SCENIC_GENE_CHUNK_SIZE),
+                all_gene_ids.len(),
+            );
+        }
+    }
+    drop(reader);
+
+    if verbose {
+        println!(
+            "Read and filtered {} target genes in {:.2?}",
+            n_genes,
+            start_gene_read.elapsed()
+        );
+    }
+
+    let id_batches: Vec<&[usize]> = all_gene_ids.chunks(n_multi_output).collect();
+    let col_batches: Vec<&[SparseAxis<u16, f32>]> =
+        all_sparse_cols.chunks(n_multi_output).collect();
+    let total_batches = col_batches.len();
 
     let config: &dyn TreeRegressorConfig = match &scenic_params.regression_learner {
         RegressionLearner::ExtraTrees(cfg) => cfg,
@@ -2162,101 +2154,290 @@ pub fn run_scenic_grn(
 
     if verbose {
         println!(
-            "Running SCENIC on {} genes ({} TFs, {} cells, batches of {})",
-            n_genes, n_tfs, n_cells, n_multi_output,
+            "Running SCENIC on {} genes ({} TFs, {} cells, {} batches of up to {})",
+            n_genes, n_tfs, n_cells, total_batches, n_multi_output,
         );
     }
 
-    thread::scope(|scope| {
-        let (tx, rx) = mpsc::sync_channel::<(Vec<usize>, Vec<SparseAxis<u16, f32>>)>(2);
+    let start_fit = Instant::now();
+    let batches_done = AtomicUsize::new(0);
 
-        let cell_set_ref = &cell_set;
-        let reader_ref = &reader;
-
-        // Producer: read and filter gene data in chunks
-        scope.spawn(move || {
-            for chunk in ordered_genes.chunks(SCENIC_GENE_CHUNK_SIZE) {
-                let gene_ids = chunk.to_vec();
-                let mut gene_chunks_target: Vec<CscGeneChunk> =
-                    reader_ref.read_gene_parallel(chunk);
-                gene_chunks_target.iter_mut().for_each(|c| {
-                    c.filter_selected_cells(cell_set_ref);
-                });
-                let sparse_columns: Vec<SparseAxis<u16, f32>> = gene_chunks_target
-                    .iter()
-                    .map(|c| c.to_sparse_axis(cell_set_ref.len()))
-                    .collect();
-                if tx.send((gene_ids, sparse_columns)).is_err() {
-                    break;
-                }
-            }
-        });
-
-        // Consumer: fit multi-output ensembles in parallel batches
-        for (chunk_idx, (gene_ids, sparse_columns)) in rx.iter().enumerate() {
-            let start_chunk = Instant::now();
-
-            // Pair gene_ids with their sparse columns, then chunk into
-            // batches of n_multi_output
-            let id_chunks: Vec<&[usize]> = gene_ids.chunks(n_multi_output).collect();
-            let col_chunks: Vec<&[SparseAxis<u16, f32>]> =
-                sparse_columns.chunks(n_multi_output).collect();
-
-            let total_batches = col_chunks.len();
-            let batches_done = AtomicUsize::new(0);
-
-            let batch_results: Vec<Vec<Vec<f32>>> = col_chunks
-                .par_iter()
-                .enumerate()
-                .map(|(batch_idx, batch)| {
-                    let batch_seed = seed.wrapping_add((chunk_idx * 1000 + batch_idx) * 2654435761);
-                    let result =
-                        fit_multi_trees_sparse(batch, &tf_data, n_cells, config, batch_seed);
-
-                    if verbose && total_batches >= 4 {
-                        let done = batches_done.fetch_add(1, Ordering::Relaxed) + 1;
-                        let pct = done * 100 / total_batches;
-                        let prev_pct = (done - 1) * 100 / total_batches;
-                        if [25, 50, 75, 100].iter().any(|&q| prev_pct < q && pct >= q) {
-                            println!(
-                                "    Chunk {}: ~{}% of batches done ({}/{})",
-                                chunk_idx + 1,
-                                pct,
-                                done,
-                                total_batches
-                            );
-                        }
-                    }
-
-                    result
-                })
-                .collect();
-
-            for (batch_idx, batch_result) in batch_results.into_iter().enumerate() {
-                let batch_gene_ids = id_chunks[batch_idx];
-                for (local_idx, imp) in batch_result.into_iter().enumerate() {
-                    let gene_id = batch_gene_ids[local_idx];
-                    let original_pos = gene_id_to_pos[&gene_id];
-                    importance_scores[original_pos] = imp;
-                }
-            }
+    let batch_results: Vec<(usize, Vec<Vec<f32>>)> = (0..total_batches)
+        .into_par_iter()
+        .map(|batch_idx| {
+            let batch_seed = seed.wrapping_add(batch_idx.wrapping_mul(2654435761));
+            let imp = fit_multi_trees_sparse(
+                col_batches[batch_idx],
+                &tf_data,
+                n_cells,
+                config,
+                batch_seed,
+            );
 
             if verbose {
-                let genes_done = ((chunk_idx + 1) * SCENIC_GENE_CHUNK_SIZE).min(n_genes);
-                println!(
-                    "  Chunk {}: {}/{} genes done in {:.2?}",
-                    chunk_idx + 1,
-                    genes_done,
-                    n_genes,
-                    start_chunk.elapsed()
-                );
+                let done = batches_done.fetch_add(1, Ordering::Relaxed) + 1;
+                let pct = done * 100 / total_batches;
+                let prev_pct = (done - 1) * 100 / total_batches;
+                if [10, 25, 50, 75, 100]
+                    .iter()
+                    .any(|&q| prev_pct < q && pct >= q)
+                {
+                    println!(
+                        "  Progress: {}% ({}/{} batches, {:.2?} elapsed)",
+                        pct,
+                        done,
+                        total_batches,
+                        start_fit.elapsed()
+                    );
+                }
             }
+
+            (batch_idx, imp)
+        })
+        .collect();
+
+    let mut importance_scores: Vec<Vec<f32>> = vec![Vec::new(); n_genes];
+
+    for (batch_idx, imp_vecs) in batch_results {
+        let batch_gene_ids = id_batches[batch_idx];
+        for (local_idx, imp) in imp_vecs.into_iter().enumerate() {
+            let gene_id = batch_gene_ids[local_idx];
+            let original_pos = gene_id_to_pos[&gene_id];
+            importance_scores[original_pos] = imp;
         }
-    });
+    }
 
     if verbose {
         println!(
             "SCENIC GRN inference complete in {:.2?}",
+            start_total.elapsed()
+        );
+    }
+
+    Mat::from_fn(n_genes, n_tfs, |i, j| {
+        if j < importance_scores[i].len() {
+            importance_scores[i][j]
+        } else {
+            0.0
+        }
+    })
+}
+
+/// Run SCENIC GRN inference in streaming mode, processing target genes in
+/// waves to bound memory usage.
+///
+/// ### Params
+///
+/// * `f_path` - Path to the sparse gene expression file.
+/// * `cell_indices` - Indices of cells to use.
+/// * `gene_indices` - Target gene indices.
+/// * `tf_indices` - Transcription factor gene indices (predictors).
+/// * `scenic_params` - Reference to the SCENIC parameters.
+/// * `seed` - Base random seed for reproducibility.
+/// * `verbose` - Print progress and timing to stdout.
+///
+/// ### Returns
+///
+/// A `Mat<f32>` of shape `(n_genes, n_tfs)` where entry `[i, j]` is the
+/// normalised importance of TF `j` for target gene `i`.
+///
+/// ### Implementation details
+///
+/// Unlike `run_scenic_grn` which loads all target gene data upfront, this
+/// version reads target genes one I/O chunk at a time
+/// (`SCENIC_GENE_CHUNK_SIZE`), slices each chunk into multi-output batches,
+/// fits all batches within the chunk in parallel, stores the results, then
+/// drops the chunk data before reading the next. Peak memory for target gene
+/// data is bounded to one chunk (~1024 genes) rather than all targets.
+///
+/// There is a minor parallelism penalty at chunk boundaries: the last wave
+/// of batches in a chunk may not fully saturate all cores. For most
+/// configurations (1024 genes / 64 per batch = 16 batches) this is
+/// acceptable. Use `run_scenic_grn` when memory permits for maximum
+/// throughput.
+pub fn run_scenic_grn_streaming(
+    f_path: &str,
+    cell_indices: &[usize],
+    gene_indices: &[usize],
+    tf_indices: &[usize],
+    scenic_params: &ScenicParams,
+    seed: usize,
+    verbose: bool,
+) -> Mat<f32> {
+    let start_total = Instant::now();
+    let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
+    let n_cells = cell_set.len();
+    let n_multi_output = scenic_params
+        .gene_batch_size
+        .unwrap_or(MULTI_OUTPUT_BATCH)
+        .min(MULTI_OUTPUT_BATCH);
+
+    let start_reading = Instant::now();
+    let reader = ParallelSparseReader::new(f_path).unwrap();
+
+    let mut tf_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(tf_indices);
+    tf_chunks.par_iter_mut().for_each(|chunk| {
+        chunk.filter_selected_cells(&cell_set);
+    });
+
+    let tf_csc: CompressedSparseData2<u16, f32> = from_gene_chunks::<u16>(&tf_chunks, n_cells);
+    let tf_data = DenseQuantisedStore::from_csc(&tf_csc, n_cells);
+    drop(tf_chunks);
+    drop(tf_csc);
+
+    let n_tfs = tf_data.n_features;
+    let n_genes = gene_indices.len();
+
+    if verbose {
+        println!(
+            "Loaded, filtered and quantised TF data (n: {}) in: {:.2?}",
+            n_tfs.separate_with_underscores(),
+            start_reading.elapsed()
+        );
+    }
+
+    let strategy = parse_gene_batch_strategy(
+        &scenic_params.gene_batch_strategy,
+        scenic_params.n_pcs,
+        scenic_params.n_subsample,
+    )
+    .unwrap_or(GeneBatchStrategy::Random);
+
+    let ordered_genes = batch_genes(
+        f_path,
+        gene_indices,
+        cell_indices,
+        n_multi_output,
+        &strategy,
+        seed,
+        verbose,
+    );
+
+    let gene_id_to_pos: FxHashMap<usize, usize> = gene_indices
+        .iter()
+        .enumerate()
+        .map(|(pos, &gid)| (gid, pos))
+        .collect();
+
+    let config: &dyn TreeRegressorConfig = match &scenic_params.regression_learner {
+        RegressionLearner::ExtraTrees(cfg) => cfg,
+        RegressionLearner::RandomForest(cfg) => cfg,
+    };
+
+    let total_io_chunks = ordered_genes.len().div_ceil(SCENIC_GENE_CHUNK_SIZE);
+    let mut importance_scores: Vec<Vec<f32>> = vec![Vec::new(); n_genes];
+    let mut global_batch_offset: usize = 0;
+
+    if verbose {
+        println!(
+            "Running SCENIC (streaming) on {} genes ({} TFs, {} cells, {} I/O chunks, batches of {})",
+            n_genes.separate_with_underscores(),
+            n_tfs.separate_with_underscores(),
+            n_cells.separate_with_underscores(),
+            total_io_chunks,
+            n_multi_output,
+        );
+    }
+
+    for (chunk_idx, io_chunk) in ordered_genes.chunks(SCENIC_GENE_CHUNK_SIZE).enumerate() {
+        let start_chunk = Instant::now();
+
+        // read and filter this chunk
+        let start_io = Instant::now();
+        let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(io_chunk);
+        gene_chunks.par_iter_mut().for_each(|c| {
+            c.filter_selected_cells(&cell_set);
+        });
+
+        let sparse_columns: Vec<SparseAxis<u16, f32>> = gene_chunks
+            .iter()
+            .map(|c| c.to_sparse_axis(n_cells))
+            .collect();
+        drop(gene_chunks);
+
+        if verbose {
+            println!(
+                "  Chunk {}/{}: loaded and filtered {} genes in {:.2?}",
+                chunk_idx + 1,
+                total_io_chunks,
+                io_chunk.len(),
+                start_io.elapsed()
+            );
+        }
+
+        // slice into multi-output batches within this chunk
+        let id_batches: Vec<&[usize]> = io_chunk.chunks(n_multi_output).collect();
+        let col_batches: Vec<&[SparseAxis<u16, f32>]> =
+            sparse_columns.chunks(n_multi_output).collect();
+        let n_batches_this_chunk = col_batches.len();
+
+        let start_fit = Instant::now();
+        let batches_done = AtomicUsize::new(0);
+
+        // fit all batches in this chunk in parallel
+        let batch_results: Vec<(usize, Vec<Vec<f32>>)> = (0..n_batches_this_chunk)
+            .into_par_iter()
+            .map(|local_batch_idx| {
+                let batch_seed = seed
+                    .wrapping_add((global_batch_offset + local_batch_idx).wrapping_mul(2654435761));
+                let imp = fit_multi_trees_sparse(
+                    col_batches[local_batch_idx],
+                    &tf_data,
+                    n_cells,
+                    config,
+                    batch_seed,
+                );
+
+                if verbose && n_batches_this_chunk >= 4 {
+                    let done = batches_done.fetch_add(1, Ordering::Relaxed) + 1;
+                    let pct = done * 100 / n_batches_this_chunk;
+                    let prev_pct = (done - 1) * 100 / n_batches_this_chunk;
+                    if [25, 50, 75, 100].iter().any(|&q| prev_pct < q && pct >= q) {
+                        println!(
+                            "    Chunk {}: ~{}% of batches done ({}/{}, {:.2?} elapsed)",
+                            chunk_idx + 1,
+                            pct,
+                            done,
+                            n_batches_this_chunk,
+                            start_fit.elapsed()
+                        );
+                    }
+                }
+
+                (local_batch_idx, imp)
+            })
+            .collect();
+
+        // scatter results
+        for (local_batch_idx, imp_vecs) in batch_results {
+            let batch_gene_ids = id_batches[local_batch_idx];
+            for (local_idx, imp) in imp_vecs.into_iter().enumerate() {
+                let gene_id = batch_gene_ids[local_idx];
+                let original_pos = gene_id_to_pos[&gene_id];
+                importance_scores[original_pos] = imp;
+            }
+        }
+
+        global_batch_offset += n_batches_this_chunk;
+
+        if verbose {
+            let genes_done = ((chunk_idx + 1) * SCENIC_GENE_CHUNK_SIZE).min(n_genes);
+            println!(
+                "  Chunk {}/{}: {}/{} genes done in {:.2?} (fit: {:.2?})",
+                chunk_idx + 1,
+                total_io_chunks,
+                genes_done,
+                n_genes,
+                start_chunk.elapsed(),
+                start_fit.elapsed()
+            );
+        }
+        // sparse_columns dropped here -- memory freed before next chunk
+    }
+
+    if verbose {
+        println!(
+            "SCENIC GRN inference (streaming) complete in {:.2?}",
             start_total.elapsed()
         );
     }
