@@ -3,11 +3,12 @@
 
 use extendr_api::*;
 
+use crate::core::math::sparse::parse_compressed_sparse_format;
 use crate::single_cell::sc_analysis::hdwgcna_meta_cells::MetaCellParams;
 use crate::single_cell::sc_analysis::hotspot::HotSpotParams;
 use crate::single_cell::sc_analysis::milo_r::MiloRParams;
 use crate::single_cell::sc_analysis::scenic::{
-    ExtraTreesConfig, RandomForestConfig, RegressionLearner, ScenicParams,
+    ExtraTreesConfig, GradientBoostingConfig, RandomForestConfig, RegressionLearner, ScenicParams,
 };
 use crate::single_cell::sc_analysis::seacells::SEACellsParams;
 use crate::single_cell::sc_analysis::super_cells::SuperCellParams;
@@ -15,6 +16,7 @@ use crate::single_cell::sc_analysis::vision::SignatureGenes;
 use crate::single_cell::sc_batch_correction::fast_mnn::FastMnnParams;
 use crate::single_cell::sc_batch_correction::harmony::HarmonyParams;
 use crate::single_cell::sc_data::data_io::MinCellQuality;
+use crate::single_cell::sc_data::h5ad_multifile_io::H5adFileTask;
 use crate::single_cell::sc_data::sc_synthetic_data::CellTypeConfig;
 use crate::single_cell::sc_processing::doublet_detection::BoostParams;
 use crate::single_cell::sc_processing::knn::KnnParams;
@@ -1112,6 +1114,69 @@ impl ExtraTreesConfig {
     }
 }
 
+impl GradientBoostingConfig {
+    /// Generate GradientBoostingConfig from an R list.
+    ///
+    /// Should values not be found within the List, the parameters will default
+    /// to the values defined in `GradientBoostingConfig::default()`.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the GradientBoosting parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The `GradientBoostingConfig` with all parameters set.
+    pub fn from_r_list(r_list: List) -> Self {
+        let defaults = Self::default();
+        let params_list = r_list.into_hashmap();
+        let n_trees_max = params_list
+            .get("n_trees_max")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.n_trees_max);
+        let learning_rate = params_list
+            .get("learning_rate")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.learning_rate);
+        let max_depth = params_list
+            .get("max_depth")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.max_depth);
+        let min_samples_leaf = params_list
+            .get("min_samples_leaf")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.min_samples_leaf);
+        let early_stop_window = params_list
+            .get("early_stop_window")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.early_stop_window);
+        let subsample_rate = params_list
+            .get("subsample_rate")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.subsample_rate);
+        let n_features_split = params_list
+            .get("n_features_split")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.n_features_split);
+        Self {
+            n_trees_max,
+            learning_rate,
+            max_depth,
+            min_samples_leaf,
+            early_stop_window,
+            subsample_rate,
+            n_features_split,
+        }
+    }
+}
+
 /////////////////////
 // SCENIC - Params //
 /////////////////////
@@ -1199,6 +1264,79 @@ impl ScenicParams {
             gene_batch_size,
             n_pcs,
             n_subsample,
+        }
+    }
+}
+
+//////////////////
+// H5adFileTask //
+//////////////////
+
+impl H5adFileTask {
+    /// Generate an H5FileTask from an R list
+    ///
+    /// Expects: exp_id, h5_path, cs_type, no_cells, no_genes,
+    /// gene_local_to_universe (integer vector, NA for unmapped genes,
+    /// 0-indexed).
+    pub fn from_r_list(r_list: List) -> Self {
+        let map = r_list.into_hashmap();
+
+        let exp_id = map
+            .get("exp_id")
+            .and_then(|v| v.as_str())
+            .expect("exp_id missing or not a string")
+            .to_string();
+
+        let h5_path = map
+            .get("h5_path")
+            .and_then(|v| v.as_str())
+            .expect("h5_path missing or not a string")
+            .to_string();
+
+        let cs_type_str = map
+            .get("cs_type")
+            .and_then(|v| v.as_str())
+            .expect("cs_type missing or not a string");
+        let cs_type =
+            parse_compressed_sparse_format(cs_type_str).expect("cs_type must be 'csr' or 'csc'");
+
+        let no_cells = map
+            .get("no_cells")
+            .and_then(|v| v.as_integer())
+            .expect("no_cells missing") as usize;
+
+        let no_genes = map
+            .get("no_genes")
+            .and_then(|v| v.as_integer())
+            .expect("no_genes missing") as usize;
+
+        let mapping_robj = map
+            .get("gene_local_to_universe")
+            .expect("gene_local_to_universe missing");
+        let mapping_raw: Vec<i32> = mapping_robj
+            .as_integer_slice()
+            .expect("gene_local_to_universe must be integer vector")
+            .to_vec();
+
+        // R NA_integer_ is i32::MIN
+        let gene_local_to_universe: Vec<Option<usize>> = mapping_raw
+            .into_iter()
+            .map(|v| {
+                if v == i32::MIN {
+                    None
+                } else {
+                    Some(v as usize)
+                }
+            })
+            .collect();
+
+        Self {
+            exp_id,
+            h5_path,
+            cs_type,
+            no_cells,
+            no_genes,
+            gene_local_to_universe,
         }
     }
 }

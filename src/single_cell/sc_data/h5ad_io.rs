@@ -1,5 +1,5 @@
 //! Contains the h5ad-related parts to do read in data from h5ad files and
-//! transform them into the binarised files for usage in bixverse-rs
+//! transform them into the binarised files for usage in bixverse-rs.
 
 use hdf5::{File, Result};
 use rayon::prelude::*;
@@ -1345,4 +1345,705 @@ pub fn write_h5_csr_streaming<P: AsRef<Path>>(
         lib_size,
         nnz,
     })
+}
+
+////////////////////////////////////
+// Special case: only norm counts //
+////////////////////////////////////
+
+//////////////////
+// QC functions //
+//////////////////
+
+/// Get the cell quality data from a CSC file (with only normalised counts)
+///
+/// This is a specialised function that will deal with cases in which authors
+/// only provide normalised counts.
+///
+/// ### Params
+///
+/// * `file_path` - Path to the h5ad file
+/// * `shape` - Tuple with `(no_cells, no_genes)`.
+/// * `lib_sizes` - Library size per cell/spot from the observations.
+/// * `cell_quality` - Structure defining the minimum quality values that are
+///   expected here.
+/// * `verbose` - Controls verbosity of the function.
+///
+/// ### Returns
+///
+/// `CellOnFileQuality` structure that contains all of the information about
+/// which cells and genes to include.
+pub fn parse_h5_normalised_quality_csc<P: AsRef<Path>>(
+    file_path: P,
+    shape: (usize, usize),
+    lib_sizes: &[f32],
+    cell_quality: &MinCellQuality,
+    verbose: bool,
+) -> hdf5::Result<CellOnFileQuality> {
+    let file_path = file_path.as_ref();
+
+    if verbose {
+        println!(
+            "  Reading CSC matrix structure (shape: {} x {})...",
+            shape.0.separate_with_underscores(),
+            shape.1.separate_with_underscores()
+        );
+    }
+
+    let file = hdf5::File::open(file_path)?;
+    let indptr: Vec<u32> = file.dataset("X/indptr")?.read_1d()?.to_vec();
+
+    // NNZ per gene is directly readable from indptr
+    let no_cells_exp_gene: Vec<usize> = (0..shape.1)
+        .map(|i| (indptr[i + 1] - indptr[i]) as usize)
+        .collect();
+
+    let genes_to_keep: Vec<usize> = (0..shape.1)
+        .filter(|&i| no_cells_exp_gene[i] >= cell_quality.min_cells)
+        .collect();
+
+    if verbose {
+        println!(
+            "  Genes passing filter: {} / {}",
+            genes_to_keep.len().separate_with_underscores(),
+            shape.1.separate_with_underscores()
+        );
+        println!("  Calculating unique genes per cell...");
+    }
+
+    // Still need unique genes per cell - requires scanning indices
+    const GENE_CHUNK_SIZE: usize = 10000;
+    let mut cell_unique_genes = vec![0usize; shape.0];
+
+    for gene_chunk in genes_to_keep.chunks(GENE_CHUNK_SIZE) {
+        let start_pos = gene_chunk
+            .iter()
+            .map(|&g| indptr[g] as usize)
+            .min()
+            .unwrap_or(0);
+        let end_pos = gene_chunk
+            .iter()
+            .map(|&g| indptr[g + 1] as usize)
+            .max()
+            .unwrap_or(0);
+
+        if start_pos >= end_pos {
+            continue;
+        }
+
+        let indices_ds = file.dataset("X/indices")?;
+        let chunk_indices: Vec<u32> = indices_ds.read_slice_1d(start_pos..end_pos)?.to_vec();
+
+        for &gene_idx in gene_chunk {
+            let gene_start = indptr[gene_idx] as usize;
+            let gene_end = indptr[gene_idx + 1] as usize;
+
+            for idx in gene_start..gene_end {
+                let local_idx = idx - start_pos;
+                let cell_idx = chunk_indices[local_idx] as usize;
+                if cell_idx < shape.0 {
+                    cell_unique_genes[cell_idx] += 1;
+                }
+            }
+        }
+    }
+
+    // QC using obs lib sizes, not summed X values
+    let cells_to_keep: Vec<usize> = (0..shape.0)
+        .filter(|&i| {
+            cell_unique_genes[i] >= cell_quality.min_unique_genes
+                && lib_sizes[i] >= cell_quality.min_lib_size as f32
+        })
+        .collect();
+
+    if verbose {
+        println!(
+            "  Cells passing filter: {} / {}",
+            cells_to_keep.len().separate_with_underscores(),
+            shape.0.separate_with_underscores()
+        );
+    }
+
+    let mut file_quality_data = CellOnFileQuality::new(cells_to_keep, genes_to_keep);
+    file_quality_data.generate_maps_sets();
+
+    Ok(file_quality_data)
+}
+
+/// Get the cell quality data from a CSR file (with only normalised counts)
+///
+/// This is a specialised function that will deal with cases in which authors
+/// only provide normalised counts.
+///
+/// ### Params
+///
+/// * `file_path` - Path to the h5ad file
+/// * `shape` - Tuple with `(no_cells, no_genes)`.
+/// * `lib_sizes` - Library size per cell/spot from the observations.
+/// * `cell_quality` - Structure defining the minimum quality values that are
+///   expected here.
+/// * `verbose` - Controls verbosity of the function.
+///
+/// ### Returns
+///
+/// `CellOnFileQuality` structure that contains all of the information about
+/// which cells and genes to include.
+pub fn parse_h5_normalised_quality_csr<P: AsRef<Path>>(
+    file_path: P,
+    shape: (usize, usize),
+    lib_sizes: &[f32],
+    cell_quality: &MinCellQuality,
+    verbose: bool,
+) -> hdf5::Result<CellOnFileQuality> {
+    let file_path = file_path.as_ref();
+
+    if verbose {
+        println!(
+            "  Reading CSR matrix structure (shape: {} x {})...",
+            shape.0.separate_with_underscores(),
+            shape.1.separate_with_underscores()
+        );
+    }
+
+    let file = hdf5::File::open(file_path)?;
+    let indptr: Vec<u32> = file.dataset("X/indptr")?.read_1d()?.to_vec();
+    let indices_ds = file.dataset("X/indices")?;
+
+    // Unique genes per cell is directly readable from indptr
+    let cell_unique_genes: Vec<usize> = (0..shape.0)
+        .map(|i| (indptr[i + 1] - indptr[i]) as usize)
+        .collect();
+
+    // Still need cells-per-gene for gene filtering - requires scanning
+    const CELL_CHUNK_SIZE: usize = 10000;
+    let mut no_cells_exp_gene = vec![0usize; shape.1];
+
+    for chunk_start in (0..shape.0).step_by(CELL_CHUNK_SIZE) {
+        let chunk_end = (chunk_start + CELL_CHUNK_SIZE).min(shape.0) - 1;
+        let data_start = indptr[chunk_start] as usize;
+        let data_end = indptr[chunk_end + 1] as usize;
+
+        if data_start >= data_end {
+            continue;
+        }
+
+        let chunk_indices: Vec<u32> = indices_ds.read_slice_1d(data_start..data_end)?.to_vec();
+
+        for cell_idx in chunk_start..=chunk_end {
+            let cell_start = indptr[cell_idx] as usize - data_start;
+            let cell_end = indptr[cell_idx + 1] as usize - data_start;
+            for local_idx in cell_start..cell_end {
+                let gene_idx = chunk_indices[local_idx] as usize;
+                if gene_idx < shape.1 {
+                    no_cells_exp_gene[gene_idx] += 1;
+                }
+            }
+        }
+    }
+
+    let genes_to_keep: Vec<usize> = (0..shape.1)
+        .filter(|&i| no_cells_exp_gene[i] >= cell_quality.min_cells)
+        .collect();
+
+    if verbose {
+        println!(
+            "  Genes passing filter: {} / {}",
+            genes_to_keep.len().separate_with_underscores(),
+            shape.1.separate_with_underscores()
+        );
+    }
+
+    // QC using obs lib sizes, not summed X values
+    let cells_to_keep: Vec<usize> = (0..shape.0)
+        .filter(|&i| {
+            cell_unique_genes[i] >= cell_quality.min_unique_genes
+                && lib_sizes[i] >= cell_quality.min_lib_size as f32
+        })
+        .collect();
+
+    if verbose {
+        println!(
+            "  Cells passing filter: {} / {}",
+            cells_to_keep.len().separate_with_underscores(),
+            shape.0.separate_with_underscores()
+        );
+    }
+
+    let mut file_quality_data = CellOnFileQuality::new(cells_to_keep, genes_to_keep);
+    file_quality_data.generate_maps_sets();
+
+    Ok(file_quality_data)
+}
+
+////////////////////////////
+// Reconstruction helpers //
+////////////////////////////
+
+/// Reconstruct a raw integer count from a log1p-normalised value
+///
+/// Reverses: norm = ln1p(x / lib_size * target_size)
+///
+/// ### Params
+///
+/// * `norm_val` - The normalised count
+/// * `lib_size` - The library size
+/// * `target_size` - The target size the authors chose
+///
+/// ### Returns
+///
+/// The reconstructed normalised counts as u16
+#[inline(always)]
+fn reconstruct_raw_count(norm_val: f32, lib_size: f32, target_size: f32) -> u16 {
+    if norm_val <= 0.0 || lib_size <= 0.0 {
+        return 0;
+    }
+    let reconstructed = norm_val.exp_m1() * lib_size / target_size;
+    reconstructed.round().clamp(0.0, u16::MAX as f32) as u16
+}
+
+/// Reconstruct raw counts from normalised CSR data and write to binary
+///
+/// Specialised function that deals with cases where authors only provide
+/// normalised counts
+///
+/// ### Params
+///
+/// * `file_path` - Path to the h5ad file.
+/// * `bin_path` - Path to the binary file.
+/// * `quality` - The quality reference.
+/// * `lib_sizes` - Vector of library sizes for reconstructing the raw counts.
+/// * `target_size` - The target size the authors chose.
+/// * `cell_qc` - MinCellQc parameters you wish to apply
+/// * `verbose` - Controls verbosity of the function
+///
+/// ### Returns
+///
+/// `CellOnFileQuality` structure that contains all of the information about
+/// which cells and genes to include.
+fn reconstruct_and_write_csr<P: AsRef<Path>>(
+    file_path: P,
+    bin_path: P,
+    quality: &CellOnFileQuality,
+    lib_sizes: &[f32],
+    target_size: f32,
+    cell_qc: &MinCellQuality,
+    verbose: bool,
+) -> std::io::Result<CellQuality> {
+    let file = hdf5::File::open(file_path)?;
+    let data_ds = file.dataset("X/data").unwrap();
+    let indices_ds = file.dataset("X/indices").unwrap();
+    let indptr_ds = file.dataset("X/indptr").unwrap();
+    let indptr_raw: Vec<u32> = indptr_ds.read_1d().unwrap().to_vec();
+
+    let mut writer = CellGeneSparseWriter::new(
+        bin_path,
+        true,
+        quality.cells_to_keep.len(),
+        quality.genes_to_keep.len(),
+    )?;
+
+    let mut lib_size_out = Vec::with_capacity(quality.cells_to_keep.len());
+    let mut nnz_out = Vec::with_capacity(quality.cells_to_keep.len());
+
+    const CELL_BATCH_SIZE: usize = 1000;
+    let total_cells = quality.cells_to_keep.len();
+    let mut cell_data: Vec<(usize, u16)> = Vec::with_capacity(10000);
+    let mut gene_indices: Vec<u16> = Vec::with_capacity(10000);
+    let mut gene_counts: Vec<u16> = Vec::with_capacity(10000);
+
+    for (batch_idx, cell_batch) in quality.cells_to_keep.chunks(CELL_BATCH_SIZE).enumerate() {
+        if verbose && batch_idx % 10 == 0 {
+            let processed = (batch_idx * CELL_BATCH_SIZE).min(total_cells);
+            println!(
+                "   Processed {} / {} cells",
+                processed.separate_with_underscores(),
+                total_cells.separate_with_underscores()
+            );
+        }
+
+        let start_pos = cell_batch
+            .iter()
+            .map(|&c| indptr_raw[c] as usize)
+            .min()
+            .unwrap_or(0);
+        let end_pos = cell_batch
+            .iter()
+            .map(|&c| indptr_raw[c + 1] as usize)
+            .max()
+            .unwrap_or(0);
+
+        if start_pos >= end_pos {
+            for &old_cell_idx in cell_batch {
+                let new_cell_idx = quality.cell_old_to_new[&old_cell_idx];
+                let empty_chunk = CsrCellChunk::from_data(
+                    &[] as &[u16],
+                    &[] as &[u16],
+                    new_cell_idx,
+                    cell_qc.target_size,
+                    true,
+                );
+                lib_size_out.push(0);
+                nnz_out.push(0);
+                writer.write_cell_chunk(empty_chunk)?;
+            }
+            continue;
+        }
+
+        let chunk_data: Vec<f32> = data_ds.read_slice_1d(start_pos..end_pos).unwrap().to_vec();
+        let chunk_indices: Vec<u32> = indices_ds
+            .read_slice_1d(start_pos..end_pos)
+            .unwrap()
+            .to_vec();
+
+        for &old_cell_idx in cell_batch {
+            let cell_start = indptr_raw[old_cell_idx] as usize;
+            let cell_end = indptr_raw[old_cell_idx + 1] as usize;
+            let lib_size = lib_sizes[old_cell_idx];
+
+            cell_data.clear();
+            gene_indices.clear();
+            gene_counts.clear();
+
+            for idx in cell_start..cell_end {
+                let local_idx = idx - start_pos;
+                let old_gene_idx = chunk_indices[local_idx] as usize;
+
+                if let Some(&new_gene_idx) = quality.gene_old_to_new.get(&old_gene_idx) {
+                    let norm_val = chunk_data[local_idx];
+                    let raw_count = reconstruct_raw_count(norm_val, lib_size, target_size);
+                    if raw_count > 0 {
+                        cell_data.push((new_gene_idx, raw_count));
+                    }
+                }
+            }
+
+            if !cell_data.is_empty() {
+                let needs_sort = cell_data.windows(2).any(|w| w[0].0 > w[1].0);
+                if needs_sort {
+                    cell_data.sort_unstable_by_key(|&(g, _)| g);
+                }
+                gene_indices.extend(cell_data.iter().map(|(g, _)| *g as u16));
+                gene_counts.extend(cell_data.iter().map(|(_, c)| *c));
+            }
+
+            let new_cell_idx = quality.cell_old_to_new[&old_cell_idx];
+            let cell_chunk = CsrCellChunk::from_data(
+                &gene_counts,
+                &gene_indices,
+                new_cell_idx,
+                cell_qc.target_size,
+                true,
+            );
+
+            let (nnz_i, lib_size_i) = cell_chunk.get_qc_info();
+            nnz_out.push(nnz_i);
+            lib_size_out.push(lib_size_i);
+
+            writer.write_cell_chunk(cell_chunk)?;
+        }
+    }
+
+    writer.finalise()?;
+
+    Ok(CellQuality {
+        cell_indices: Vec::new(),
+        gene_indices: Vec::new(),
+        lib_size: lib_size_out,
+        nnz: nnz_out,
+    })
+}
+
+/// Reconstruct raw counts from normalised CSC data and write to binary
+///
+/// Specialised function that deals with cases where authors only provide
+/// normalised counts
+///
+/// ### Params
+///
+/// * `file_path` - Path to the h5ad file.
+/// * `bin_path` - Path to the binary file.
+/// * `quality` - The quality reference.
+/// * `lib_sizes` - Vector of library sizes for reconstructing the raw counts.
+/// * `target_size` - The target size the authors chose.
+/// * `cell_qc` - MinCellQc parameters you wish to apply
+/// * `verbose` - Controls verbosity of the function
+///
+/// ### Returns
+///
+/// `CellOnFileQuality` structure that contains all of the information about
+/// which cells and genes to include.
+fn reconstruct_and_write_csc<P: AsRef<Path>>(
+    file_path: P,
+    bin_path: P,
+    quality: &CellOnFileQuality,
+    lib_sizes: &[f32],
+    target_size: f32,
+    cell_qc: &MinCellQuality,
+    verbose: bool,
+) -> std::io::Result<CellQuality> {
+    let file = hdf5::File::open(file_path)?;
+    let data_ds = file.dataset("X/data").unwrap();
+    let indices_ds = file.dataset("X/indices").unwrap();
+    let indptr_ds = file.dataset("X/indptr").unwrap();
+    let indptr_raw: Vec<u32> = indptr_ds.read_1d().unwrap().to_vec();
+
+    // Accumulate per-cell data in memory - necessary for CSR output
+    let mut cell_data: Vec<Vec<(u16, u16)>> = vec![Vec::new(); quality.cells_to_keep.len()];
+
+    const GENE_CHUNK_SIZE: usize = 5000;
+    let total_genes = quality.genes_to_keep.len();
+
+    for (chunk_idx, gene_chunk) in quality.genes_to_keep.chunks(GENE_CHUNK_SIZE).enumerate() {
+        if verbose && chunk_idx % 10 == 0 {
+            let processed = (chunk_idx * GENE_CHUNK_SIZE).min(total_genes);
+            println!(
+                "   Processed {} / {} genes",
+                processed.separate_with_underscores(),
+                total_genes.separate_with_underscores()
+            );
+        }
+
+        let start_pos = gene_chunk
+            .iter()
+            .map(|&g| indptr_raw[g] as usize)
+            .min()
+            .unwrap_or(0);
+        let end_pos = gene_chunk
+            .iter()
+            .map(|&g| indptr_raw[g + 1] as usize)
+            .max()
+            .unwrap_or(0);
+
+        if start_pos >= end_pos {
+            continue;
+        }
+
+        let chunk_data: Vec<f32> = data_ds.read_slice_1d(start_pos..end_pos).unwrap().to_vec();
+        let chunk_indices: Vec<u32> = indices_ds
+            .read_slice_1d(start_pos..end_pos)
+            .unwrap()
+            .to_vec();
+
+        for &gene_idx in gene_chunk {
+            let new_gene_idx = quality.gene_old_to_new[&gene_idx] as u16;
+            let gene_start = indptr_raw[gene_idx] as usize;
+            let gene_end = indptr_raw[gene_idx + 1] as usize;
+
+            for idx in gene_start..gene_end {
+                let local_idx = idx - start_pos;
+                let old_cell_idx = chunk_indices[local_idx] as usize;
+
+                if let Some(&new_cell_idx) = quality.cell_old_to_new.get(&old_cell_idx) {
+                    let norm_val = chunk_data[local_idx];
+                    let lib_size = lib_sizes[old_cell_idx];
+                    let raw_count = reconstruct_raw_count(norm_val, lib_size, target_size);
+                    if raw_count > 0 {
+                        cell_data[new_cell_idx].push((new_gene_idx, raw_count));
+                    }
+                }
+            }
+        }
+    }
+
+    if verbose {
+        println!(
+            "   Processed {} / {} genes (complete)",
+            total_genes.separate_with_underscores(),
+            total_genes.separate_with_underscores()
+        );
+        println!(
+            "  Writing {} cells to disk...",
+            quality.cells_to_keep.len().separate_with_underscores()
+        );
+    }
+
+    let mut writer = CellGeneSparseWriter::new(
+        bin_path,
+        true,
+        quality.cells_to_keep.len(),
+        quality.genes_to_keep.len(),
+    )?;
+    let mut lib_size_out = Vec::with_capacity(quality.cells_to_keep.len());
+    let mut nnz_out = Vec::with_capacity(quality.cells_to_keep.len());
+    let total_cells = cell_data.len();
+
+    for (cell_idx, mut data) in cell_data.into_iter().enumerate() {
+        if verbose && (cell_idx + 1) % 100000 == 0 {
+            println!(
+                "   Written {} / {} cells.",
+                (cell_idx + 1).separate_with_underscores(),
+                total_cells.separate_with_underscores()
+            );
+        }
+
+        data.sort_by_key(|(gene_idx, _)| *gene_idx);
+
+        let gene_indices: Vec<u16> = data.iter().map(|(g, _)| *g).collect();
+        let gene_counts: Vec<u16> = data.iter().map(|(_, c)| *c).collect();
+
+        let cell_chunk = CsrCellChunk::from_data(
+            &gene_counts,
+            &gene_indices,
+            cell_idx,
+            cell_qc.target_size,
+            true,
+        );
+
+        let (nnz_i, lib_size_i) = cell_chunk.get_qc_info();
+        nnz_out.push(nnz_i);
+        lib_size_out.push(lib_size_i);
+
+        writer.write_cell_chunk(cell_chunk)?;
+    }
+
+    writer.finalise()?;
+
+    Ok(CellQuality {
+        cell_indices: Vec::new(),
+        gene_indices: Vec::new(),
+        lib_size: lib_size_out,
+        nnz: nnz_out,
+    })
+}
+
+/// Writes h5ad normalised counts to disk by reconstructing raw counts
+///
+/// For datasets where only normalised counts are available in X, this function
+/// reads the library sizes from an obs column, reverses the normalisation to
+/// reconstruct integer counts, and writes them in the standard binary format.
+///
+/// Assumes normalisation was: norm = ln1p(x / lib_size * target_size)
+/// Reconstruction: x = round(expm1(norm) * lib_size / target_size)
+///
+/// ### Params
+///
+/// * `h5_path` - Path to the h5ad file
+/// * `bin_path` - Path to the binary file to write to
+/// * `cs_type` - Storage format of X: "csc" or "csr"
+/// * `no_cells` - Total number of observations
+/// * `no_genes` - Total number of variables
+/// * `obs_lib_size_col` - Name of the obs column containing total counts per cell
+/// * `target_size` - Target size used in the original normalisation (e.g. 1e4)
+/// * `cell_quality` - Minimum QC thresholds
+/// * `verbose` - Controls verbosity
+///
+/// ### Returns
+///
+/// A tuple of `(no_cells_kept, no_genes_kept, CellQuality)`
+#[allow(clippy::too_many_arguments)]
+pub fn write_h5_normalised_counts<P: AsRef<Path>>(
+    h5_path: P,
+    bin_path: P,
+    cs_type: &str,
+    no_cells: usize,
+    no_genes: usize,
+    obs_lib_size_col: &str,
+    target_size: f32,
+    cell_quality: MinCellQuality,
+    verbose: bool,
+) -> (usize, usize, CellQuality) {
+    if verbose {
+        println!(
+            "Step 1/4: Reading library sizes from obs/{}...",
+            obs_lib_size_col
+        );
+    }
+
+    let file_format = parse_compressed_sparse_format(cs_type).unwrap();
+
+    let file = hdf5::File::open(h5_path.as_ref()).unwrap();
+    let lib_size_path = format!("obs/{}", obs_lib_size_col);
+    let lib_sizes_raw: Vec<f32> = file
+        .dataset(&lib_size_path)
+        .unwrap_or_else(|_| panic!("obs column '{}' not found in h5ad file", obs_lib_size_col))
+        .read_1d()
+        .unwrap()
+        .to_vec();
+
+    assert_eq!(
+        lib_sizes_raw.len(),
+        no_cells,
+        "Library size column length ({}) does not match no_cells ({})",
+        lib_sizes_raw.len(),
+        no_cells
+    );
+
+    if verbose {
+        let max_lib = lib_sizes_raw.iter().cloned().fold(0.0f32, f32::max);
+        let min_lib = lib_sizes_raw.iter().cloned().fold(f32::INFINITY, f32::min);
+        println!(
+            "  Library sizes: min = {:.0} | max = {:.0}",
+            min_lib, max_lib
+        );
+    }
+
+    if verbose {
+        println!("Step 2/4: Calculating QC metrics...");
+    }
+
+    let file_quality = match file_format {
+        CompressedSparseFormat::Csc => parse_h5_normalised_quality_csc(
+            &h5_path,
+            (no_cells, no_genes),
+            &lib_sizes_raw,
+            &cell_quality,
+            verbose,
+        )
+        .unwrap(),
+        CompressedSparseFormat::Csr => parse_h5_normalised_quality_csr(
+            &h5_path,
+            (no_cells, no_genes),
+            &lib_sizes_raw,
+            &cell_quality,
+            verbose,
+        )
+        .unwrap(),
+    };
+
+    if verbose {
+        println!("Step 3/4: QC results:");
+        println!(
+            "  Genes passing QC: {} / {}",
+            file_quality.genes_to_keep.len().separate_with_underscores(),
+            no_genes.separate_with_underscores()
+        );
+        println!(
+            "  Cells passing QC: {} / {}",
+            file_quality.cells_to_keep.len().separate_with_underscores(),
+            no_cells.separate_with_underscores()
+        );
+        println!("Step 4/4: Reconstructing raw counts and writing to binary format...");
+    }
+
+    let mut cell_qc = match file_format {
+        CompressedSparseFormat::Csc => reconstruct_and_write_csc(
+            &h5_path,
+            &bin_path,
+            &file_quality,
+            &lib_sizes_raw,
+            target_size,
+            &cell_quality,
+            verbose,
+        )
+        .unwrap(),
+        CompressedSparseFormat::Csr => reconstruct_and_write_csr(
+            &h5_path,
+            &bin_path,
+            &file_quality,
+            &lib_sizes_raw,
+            target_size,
+            &cell_quality,
+            verbose,
+        )
+        .unwrap(),
+    };
+
+    cell_qc.set_cell_indices(&file_quality.cells_to_keep);
+    cell_qc.set_gene_indices(&file_quality.genes_to_keep);
+
+    (
+        file_quality.cells_to_keep.len(),
+        file_quality.genes_to_keep.len(),
+        cell_qc,
+    )
 }
