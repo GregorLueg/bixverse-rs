@@ -8,6 +8,8 @@
 - SIMD instructions for the single cell Hotspot method.
 - Harmony batch correction for single cell.
 - SCENIC-like approach for gene regulatory network (GRN) generation.
+- Multi-file support for reading in several h5ad files at once.
+- h5ad reader for situations where the file only has normalised counts.
 
 ### Fixes
 
