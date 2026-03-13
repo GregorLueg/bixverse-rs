@@ -66,7 +66,7 @@ pub enum RegressionLearner {
 
 impl Default for RegressionLearner {
     fn default() -> Self {
-        RegressionLearner::ExtraTrees(ExtraTreesConfig::default())
+        RegressionLearner::GradientBoosting(GradientBoostingConfig::default())
     }
 }
 
@@ -86,7 +86,7 @@ pub fn parse_regression_learner(s: &str) -> Option<RegressionLearner> {
         "rf" | "randomforest" => Some(RegressionLearner::RandomForest(
             RandomForestConfig::default(),
         )),
-        "boosted" => Some(RegressionLearner::GradientBoosting(
+        "boosted" | "grnboost2" | "lightgbm" => Some(RegressionLearner::GradientBoosting(
             GradientBoostingConfig::default(),
         )),
         _ => None,
