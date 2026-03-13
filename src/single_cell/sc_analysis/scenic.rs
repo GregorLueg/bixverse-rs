@@ -975,29 +975,83 @@ fn build_node_multi_sparse(
         }
 
         if config.random_threshold() {
+            let mut min_val = 255u8;
+            let mut max_val = 0u8;
+            for &s in sample_slice.iter() {
+                let val = tf_col[s as usize];
+                if val < min_val {
+                    min_val = val;
+                }
+                if val > max_val {
+                    max_val = val;
+                }
+            }
+
+            // cannot split if all values are identical
+            if min_val == max_val {
+                continue;
+            }
+
+            // test exactly `n_thresholds` random splits (Usually 1 for ET)
             for _ in 0..config.n_thresholds() {
-                let threshold = rng.random_range(min_bin..max_bin);
-                evaluate_split_multi(
-                    threshold,
-                    feat,
-                    &bufs.parent_vars,
-                    n,
-                    y_sums,
-                    y_sum_sqs,
-                    &bufs.cum_counts,
-                    &bufs.cum_y_sums,
-                    &bufs.cum_y_sum_sqs,
-                    n_targets,
-                    config.min_samples_leaf(),
-                    &mut best_score,
-                    &mut best_feature,
-                    &mut best_threshold_u8,
-                    &mut best_n_left,
-                    &mut bufs.best_y_sums_l,
-                    &mut bufs.best_y_sum_sqs_l,
-                );
+                let threshold = rng.random_range(min_val..max_val);
+
+                let mut n_left = 0usize;
+                let mut y_sums_l = [0.0f64; MULTI_OUTPUT_BATCH];
+                let mut y_sum_sqs_l = [0.0f64; MULTI_OUTPUT_BATCH];
+
+                for &s in sample_slice.iter() {
+                    if tf_col[s as usize] <= threshold {
+                        n_left += 1;
+                        let (tgt_indices, tgt_values) = sparse_y.cell_entries(s as usize);
+                        for i in 0..tgt_indices.len() {
+                            let k = tgt_indices[i] as usize;
+                            let y = tgt_values[i] as f64;
+                            y_sums_l[k] += y;
+                            y_sum_sqs_l[k] += y * y;
+                        }
+                    }
+                }
+
+                let n_right = n - n_left;
+                if n_left < config.min_samples_leaf() || n_right < config.min_samples_leaf() {
+                    continue;
+                }
+
+                let nl = n_left as f64;
+                let nr = n_right as f64;
+                let nf = n as f64;
+                let mut score = 0.0f64;
+
+                for k in 0..n_targets {
+                    let y_sum_l = y_sums_l[k];
+                    let y_sum_sq_l = y_sum_sqs_l[k];
+                    let y_sum_r = y_sums[k] - y_sum_l;
+                    let y_sum_sq_r = y_sum_sqs[k] - y_sum_sq_l;
+
+                    let var_l = f64::max(0.0, y_sum_sq_l / nl - (y_sum_l / nl).powi(2));
+                    let var_r = f64::max(0.0, y_sum_sq_r / nr - (y_sum_r / nr).powi(2));
+
+                    score += bufs.parent_vars[k] - (nl / nf) * var_l - (nr / nf) * var_r;
+                }
+
+                if score > best_score {
+                    best_score = score;
+                    best_feature = feat;
+                    best_threshold_u8 = threshold;
+                    best_n_left = n_left;
+                    bufs.best_y_sums_l[..n_targets].copy_from_slice(&y_sums_l[..n_targets]);
+                    bufs.best_y_sum_sqs_l[..n_targets].copy_from_slice(&y_sum_sqs_l[..n_targets]);
+                }
             }
         } else {
+            let (min_bin, max_bin) =
+                bufs.build_histograms_sparse(tf_col, sample_slice, sparse_y, n_targets);
+
+            if min_bin == max_bin {
+                continue;
+            }
+
             for threshold in min_bin..max_bin {
                 evaluate_split_multi(
                     threshold,
