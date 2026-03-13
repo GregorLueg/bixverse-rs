@@ -49,6 +49,10 @@ const SCENIC_GENE_CHUNK_SIZE: usize = 1024;
 /// comfortably.
 const MULTI_OUTPUT_BATCH: usize = 64;
 
+/// Threshold above which full-feature histogram subtraction outperforms
+/// per-node feature sampling for single-target GBM.
+const GBM_SUBTRACTION_CELL_THRESHOLD: usize = 10_000;
+
 ///////////
 // Enums //
 ///////////
@@ -2044,9 +2048,208 @@ impl GbmScratch {
     }
 }
 
+////////////////
+// GBM buffer //
+////////////////
+
+/// Reusable scratch buffers for GBM tree building (single target).
+///
+/// Histograms are scalar (256 bins, no multi-target layout), giving
+/// excellent L1 residency. Partition buffers are shared across all nodes
+/// within a tree.
+struct GbmBuffers {
+    /// Feature permutation buffer for partial Fisher-Yates.
+    feat_buf: Vec<usize>,
+    /// Partition scratch for left training samples.
+    train_left: Vec<u32>,
+    /// Partition scratch for right training samples.
+    train_right: Vec<u32>,
+    /// Partition scratch for left OOB samples.
+    oob_left: Vec<u32>,
+    /// Partition scratch for right OOB samples.
+    oob_right: Vec<u32>,
+    /// Per-bin sample counts.
+    counts: [u32; 256],
+    /// Per-bin residual sums.
+    y_sums: [f32; 256],
+    /// Per-bin residual sum-of-squares.
+    y_sum_sqs: [f32; 256],
+}
+
+impl GbmBuffers {
+    /// Allocate scratch buffers for the given problem size.
+    ///
+    /// ### Params
+    ///
+    /// * `n_features` - Number of features
+    /// * `n_samples` - Number of samples
+    ///
+    /// ### Returns
+    ///
+    /// Initialised self
+    fn new(n_features: usize, n_samples: usize) -> Self {
+        Self {
+            feat_buf: (0..n_features).collect(),
+            train_left: vec![0u32; n_samples],
+            train_right: vec![0u32; n_samples],
+            oob_left: vec![0u32; n_samples],
+            oob_right: vec![0u32; n_samples],
+            counts: [0u32; 256],
+            y_sums: [0.0f32; 256],
+            y_sum_sqs: [0.0f32; 256],
+        }
+    }
+
+    /// Build single-target histogram for one feature over the given samples.
+    ///
+    /// Returns `(min_bin, max_bin)` of the active range within the 256 bins.
+    /// Only the active range is zeroed and accumulated, avoiding a full
+    /// 256-bin clear on every call.
+    ///
+    /// ### Params
+    ///
+    /// * `tf_col` - Quantised feature column for all cells.
+    /// * `samples` - Active sample indices.
+    /// * `residuals` - Dense residual array indexed by cell id.
+    ///
+    /// ### Returns
+    ///
+    /// `(min_bin, max_bin)`
+    #[inline]
+    fn build_histogram(
+        &mut self,
+        tf_col: &[u8],
+        samples: &[u32],
+        residuals: &[f32],
+    ) -> (usize, usize) {
+        if samples.is_empty() {
+            return (0, 0);
+        }
+
+        let mut min_bin = 255u8;
+        let mut max_bin = 0u8;
+        for &s in samples {
+            let bin = tf_col[s as usize];
+            if bin < min_bin {
+                min_bin = bin;
+            }
+            if bin > max_bin {
+                max_bin = bin;
+            }
+        }
+
+        let min_b = min_bin as usize;
+        let max_b = max_bin as usize;
+
+        self.counts[min_b..=max_b].fill(0);
+        self.y_sums[min_b..=max_b].fill(0.0);
+        self.y_sum_sqs[min_b..=max_b].fill(0.0);
+
+        for &s in samples {
+            let bin = tf_col[s as usize] as usize;
+            let r = residuals[s as usize];
+            self.counts[bin] += 1;
+            self.y_sums[bin] += r;
+            self.y_sum_sqs[bin] += r * r;
+        }
+
+        (min_b, max_b)
+    }
+
+    /// Scan prefix sums over the active bin range and return the best split.
+    ///
+    /// Returns `None` if no valid split improves on variance reduction > 0.
+    ///
+    /// ### Params
+    ///
+    /// * `min_b` - Minimum active bin.
+    /// * `max_b` - Maximum active bin.
+    /// * `total_sum` - Sum of residuals in this node.
+    /// * `total_sum_sq` - Sum of squared residuals in this node.
+    /// * `n_samples` - Number of training samples in this node.
+    /// * `min_samples_leaf` - Minimum samples per child.
+    /// * `parent_var` - Pre-computed parent variance.
+    ///
+    /// ### Returns
+    ///
+    /// Option(threshold, score, n_left, y_sum_left, y_sum_sq_left)
+    #[allow(clippy::too_many_arguments)]
+    fn find_best_threshold(
+        &self,
+        min_b: usize,
+        max_b: usize,
+        total_sum: f32,
+        total_sum_sq: f32,
+        n_samples: u32,
+        min_samples_leaf: u32,
+        parent_var: f32,
+    ) -> Option<(u8, f32, u32, f32, f32)> {
+        if min_b == max_b {
+            return None;
+        }
+
+        let nf = n_samples as f32;
+        let mut best_score = 0.0f32;
+        let mut best_threshold = 0u8;
+        let mut best_n_left = 0u32;
+        let mut best_sum_l = 0.0f32;
+        let mut best_sum_sq_l = 0.0f32;
+
+        let mut cum_count = 0u32;
+        let mut cum_sum = 0.0f32;
+        let mut cum_sum_sq = 0.0f32;
+
+        for bin in min_b..max_b {
+            cum_count += self.counts[bin];
+            cum_sum += self.y_sums[bin];
+            cum_sum_sq += self.y_sum_sqs[bin];
+
+            let nl = cum_count;
+            let nr = n_samples - nl;
+            if nl < min_samples_leaf || nr < min_samples_leaf {
+                continue;
+            }
+
+            let nlf = nl as f32;
+            let nrf = nr as f32;
+            let mean_l = cum_sum / nlf;
+            let var_l = f32::max(0.0, cum_sum_sq / nlf - mean_l * mean_l);
+            let sum_r = total_sum - cum_sum;
+            let sum_sq_r = total_sum_sq - cum_sum_sq;
+            let mean_r = sum_r / nrf;
+            let var_r = f32::max(0.0, sum_sq_r / nrf - mean_r * mean_r);
+
+            let score = parent_var - (nlf / nf) * var_l - (nrf / nf) * var_r;
+            if score > best_score {
+                best_score = score;
+                best_threshold = bin as u8;
+                best_n_left = nl;
+                best_sum_l = cum_sum;
+                best_sum_sq_l = cum_sum_sq;
+            }
+        }
+
+        if best_score > 0.0 {
+            Some((
+                best_threshold,
+                best_score,
+                best_n_left,
+                best_sum_l,
+                best_sum_sq_l,
+            ))
+        } else {
+            None
+        }
+    }
+}
+
 ////////////////////
 // GBM Node Build //
 ////////////////////
+
+///////////////
+// Full hist //
+///////////////
 
 /// Apply a leaf prediction: accumulate OOB improvement then update all
 /// residuals.
@@ -2322,6 +2525,264 @@ fn build_gbm_node(
     );
 }
 
+/////////////
+// Sampled //
+/////////////
+
+/// Apply a leaf prediction: accumulate OOB improvement then update all
+/// residuals.
+///
+/// OOB improvement is computed *before* residual updates so it reflects the
+/// pre-update state. The improvement for sample s is:
+/// `2 * lr * pred * r[s] - lr^2 * pred^2`
+/// which equals `r[s]^2 - (r[s] - lr*pred)^2`.
+///
+/// ### Params
+///
+/// * `residuals` - Dense residual array (updated in place).
+/// * `train_samples` - Training sample indices in this leaf.
+/// * `oob_samples` - OOB sample indices in this leaf.
+/// * `y_sum_train` - Sum of training residuals in this leaf.
+/// * `n_train` - Number of training samples in this leaf.
+/// * `learning_rate` - Shrinkage factor.
+/// * `oob_improvement` - Accumulated OOB improvement (updated in place).
+fn apply_gbm_leaf(
+    residuals: &mut [f32],
+    train_samples: &[u32],
+    oob_samples: &[u32],
+    y_sum_train: f32,
+    n_train: usize,
+    learning_rate: f32,
+    oob_improvement: &mut f32,
+) {
+    if n_train == 0 {
+        return;
+    }
+    let pred = y_sum_train / n_train as f32;
+    let lr_pred = learning_rate * pred;
+    let lr_pred_sq = lr_pred * lr_pred;
+
+    for &s in oob_samples {
+        let r = residuals[s as usize];
+        *oob_improvement += 2.0 * lr_pred * r - lr_pred_sq;
+    }
+
+    for &s in train_samples {
+        residuals[s as usize] -= lr_pred;
+    }
+    for &s in oob_samples {
+        residuals[s as usize] -= lr_pred;
+    }
+}
+
+/// Recursively build a single GBM tree node (single target).
+///
+/// Uses the same per-node feature-sampled histogram approach as the RF/ET
+/// builders, but with dense residuals as the target and in-place residual
+/// updates at leaves. No tree structure is stored; importance and OOB
+/// improvement are the sole outputs.
+///
+/// ### Params
+///
+/// * `x` - Quantised feature store.
+/// * `residuals` - Dense residual array (updated in place at leaves).
+/// * `train_samples` - Training sample indices for this node (partitioned
+///   in place).
+/// * `oob_samples` - OOB sample indices for this node (partitioned in
+///   place).
+/// * `y_sum` - Sum of training residuals in this node.
+/// * `y_sum_sq` - Sum of squared training residuals in this node.
+/// * `n_total_train` - Total training samples at the tree root (for
+///   importance weighting).
+/// * `n_features_split` - Number of features to sample per node.
+/// * `config` - GBM configuration.
+/// * `depth` - Current tree depth.
+/// * `learning_rate` - Shrinkage factor.
+/// * `importances` - Per-feature importance accumulator.
+/// * `oob_improvement` - Accumulated OOB improvement (updated at leaves).
+/// * `bufs` - Reusable scratch buffers.
+/// * `rng` - Per-tree RNG.
+#[allow(clippy::too_many_arguments)]
+fn build_gbm_node_sampled(
+    x: &DenseQuantisedStore,
+    residuals: &mut [f32],
+    train_samples: &mut [u32],
+    oob_samples: &mut [u32],
+    y_sum: f32,
+    y_sum_sq: f32,
+    n_total_train: usize,
+    n_features_split: usize,
+    config: &GradientBoostingConfig,
+    depth: usize,
+    learning_rate: f32,
+    importances: &mut [f32],
+    oob_improvement: &mut f32,
+    bufs: &mut GbmBuffers,
+    rng: &mut SmallRng,
+) {
+    let n_train = train_samples.len();
+
+    let parent_var = node_variance_f32(y_sum, y_sum_sq, n_train);
+
+    if n_train < 2 * config.min_samples_leaf || parent_var < 1e-10 || depth >= config.max_depth {
+        apply_gbm_leaf(
+            residuals,
+            train_samples,
+            oob_samples,
+            y_sum,
+            n_train,
+            learning_rate,
+            oob_improvement,
+        );
+        return;
+    }
+
+    // feature sampling via partial Fisher-Yates
+    let n_features = x.n_features;
+    let k_feats = n_features_split.min(n_features);
+
+    for i in 0..k_feats {
+        let j = rng.random_range(i..n_features);
+        bufs.feat_buf.swap(i, j);
+    }
+
+    // search for best split across sampled features
+    let mut best_score = 0.0f32;
+    let mut best_feature = usize::MAX;
+    let mut best_threshold = 0u8;
+    let mut best_n_left = 0u32;
+    let mut best_sum_l = 0.0f32;
+    let mut best_sum_sq_l = 0.0f32;
+
+    for fi in 0..k_feats {
+        let feat = bufs.feat_buf[fi];
+        let tf_col = x.get_col(feat);
+
+        let (min_b, max_b) = bufs.build_histogram(tf_col, train_samples, residuals);
+
+        if let Some((threshold, score, n_left, sum_l, sum_sq_l)) = bufs.find_best_threshold(
+            min_b,
+            max_b,
+            y_sum,
+            y_sum_sq,
+            n_train as u32,
+            config.min_samples_leaf as u32,
+            parent_var,
+        ) && score > best_score
+        {
+            best_score = score;
+            best_feature = feat;
+            best_threshold = threshold;
+            best_n_left = n_left;
+            best_sum_l = sum_l;
+            best_sum_sq_l = sum_sq_l;
+        }
+    }
+
+    if best_feature == usize::MAX {
+        apply_gbm_leaf(
+            residuals,
+            train_samples,
+            oob_samples,
+            y_sum,
+            n_train,
+            learning_rate,
+            oob_improvement,
+        );
+        return;
+    }
+
+    // accumulate importance
+    let nl = best_n_left as f32;
+    let nr = (n_train as u32 - best_n_left) as f32;
+    let nf = n_train as f32;
+    let weight = nf / n_total_train as f32;
+
+    let mean_l = best_sum_l / nl;
+    let var_l = f32::max(0.0, best_sum_sq_l / nl - mean_l * mean_l);
+    let sum_r = y_sum - best_sum_l;
+    let sum_sq_r = y_sum_sq - best_sum_sq_l;
+    let mean_r = sum_r / nr;
+    let var_r = f32::max(0.0, sum_sq_r / nr - mean_r * mean_r);
+    let reduction = parent_var - (nl / nf) * var_l - (nr / nf) * var_r;
+    importances[best_feature] += weight * f32::max(0.0, reduction);
+
+    // partition trainings samples
+    let tf_col = x.get_col(best_feature);
+    let mut tl = 0usize;
+    let mut tr = 0usize;
+    for i in 0..n_train {
+        let s = train_samples[i];
+        if tf_col[s as usize] <= best_threshold {
+            bufs.train_left[tl] = s;
+            tl += 1;
+        } else {
+            bufs.train_right[tr] = s;
+            tr += 1;
+        }
+    }
+    train_samples[..tl].copy_from_slice(&bufs.train_left[..tl]);
+    train_samples[tl..].copy_from_slice(&bufs.train_right[..tr]);
+    let (left_train, right_train) = train_samples.split_at_mut(tl);
+
+    // partion oob
+    let n_oob = oob_samples.len();
+    let mut ol = 0usize;
+    let mut or_ = 0usize;
+    for i in 0..n_oob {
+        let s = oob_samples[i];
+        if tf_col[s as usize] <= best_threshold {
+            bufs.oob_left[ol] = s;
+            ol += 1;
+        } else {
+            bufs.oob_right[or_] = s;
+            or_ += 1;
+        }
+    }
+    oob_samples[..ol].copy_from_slice(&bufs.oob_left[..ol]);
+    oob_samples[ol..].copy_from_slice(&bufs.oob_right[..or_]);
+    let (left_oob, right_oob) = oob_samples.split_at_mut(ol);
+
+    // --- Recurse ---
+    let right_sum = y_sum - best_sum_l;
+    let right_sum_sq = y_sum_sq - best_sum_sq_l;
+
+    build_gbm_node_sampled(
+        x,
+        residuals,
+        left_train,
+        left_oob,
+        best_sum_l,
+        best_sum_sq_l,
+        n_total_train,
+        n_features_split,
+        config,
+        depth + 1,
+        learning_rate,
+        importances,
+        oob_improvement,
+        bufs,
+        rng,
+    );
+    build_gbm_node_sampled(
+        x,
+        residuals,
+        right_train,
+        right_oob,
+        right_sum,
+        right_sum_sq,
+        n_total_train,
+        n_features_split,
+        config,
+        depth + 1,
+        learning_rate,
+        importances,
+        oob_improvement,
+        bufs,
+        rng,
+    );
+}
+
 //////////////////
 // Core fitting //
 //////////////////
@@ -2345,7 +2806,7 @@ fn build_gbm_node(
 /// ### Returns
 ///
 /// Normalised importance vector of length `n_features`, summing to 1.0.
-pub fn fit_grnboost2_sparse(
+pub fn fit_grnboost2_full_hist(
     target: &SparseAxis<u16, f32>,
     feature_matrix: &DenseQuantisedStore,
     n_samples: usize,
@@ -2448,6 +2909,166 @@ pub fn fit_grnboost2_sparse(
         importances.iter_mut().for_each(|v| *v *= inv);
     }
     importances
+}
+
+/// Fit a GRNBoost2-style gradient boosted ensemble for a single target gene.
+///
+/// Builds trees sequentially, each fitting the current residuals. Each tree
+/// uses a random train/OOB split controlled by `config.subsample_rate`.
+/// Early stopping triggers when the rolling average of OOB improvements
+/// over the last `config.early_stop_window` trees drops to zero or below.
+///
+/// Per-node histogram construction uses `sqrt(n_features)` sampled features
+/// (or `config.n_features_split` if explicitly set), matching the cost
+/// profile of the RF/ET builders. No full-feature histograms or subtraction
+/// tricks are used; at typical single-cell TF counts (500-2000) and cell
+/// counts (1k-100k), the per-node scan of ~22-45 features is trivially
+/// cheap.
+///
+/// ### Params
+///
+/// * `target` - Sparse target gene expression column.
+/// * `feature_matrix` - Quantised TF feature store.
+/// * `n_samples` - Number of cells.
+/// * `config` - GBM configuration.
+/// * `seed` - Base seed for reproducibility.
+///
+/// ### Returns
+///
+/// Normalised importance vector of length `n_features`, summing to 1.0.
+pub fn fit_grnboost2_sampled(
+    target: &SparseAxis<u16, f32>,
+    feature_matrix: &DenseQuantisedStore,
+    n_samples: usize,
+    config: &GradientBoostingConfig,
+    seed: usize,
+) -> Vec<f32> {
+    let n_features = feature_matrix.n_features;
+    let n_features_split = if config.n_features_split == 0 {
+        ((n_features as f32).sqrt() as usize).max(1)
+    } else {
+        config.n_features_split
+    };
+
+    // dense residuals initialised from sparse target
+    let mut residuals = vec![0.0f32; n_samples];
+    let (indices, values) = target.get_indices_data_2();
+    for (i, &idx) in indices.iter().enumerate() {
+        residuals[idx] = values[i];
+    }
+
+    let n_train = ((n_samples as f32 * config.subsample_rate).round() as usize)
+        .max(2 * config.min_samples_leaf);
+    let n_oob = n_samples - n_train;
+
+    let mut sample_indices: Vec<u32> = (0..n_samples as u32).collect();
+    let mut importances = vec![0.0f32; n_features];
+    let mut improvement_ring = Vec::with_capacity(config.early_stop_window);
+    let mut bufs = GbmBuffers::new(n_features, n_samples);
+
+    for tree_idx in 0..config.n_trees_max {
+        let mut rng = SmallRng::seed_from_u64(
+            seed.wrapping_add(tree_idx.wrapping_mul(6364136223846793005)) as u64,
+        );
+
+        // train/oob split
+        for i in 0..n_samples {
+            sample_indices[i] = i as u32;
+        }
+        for i in 0..n_train {
+            let j = rng.random_range(i..n_samples);
+            sample_indices.swap(i, j);
+        }
+
+        let (train, oob) = sample_indices.split_at_mut(n_train);
+
+        // root sufficient stats
+        let mut y_sum = 0.0f32;
+        let mut y_sum_sq = 0.0f32;
+        for &s in train.iter() {
+            let r = residuals[s as usize];
+            y_sum += r;
+            y_sum_sq += r * r;
+        }
+
+        let mut oob_improvement = 0.0f32;
+
+        build_gbm_node_sampled(
+            feature_matrix,
+            &mut residuals,
+            train,
+            oob,
+            y_sum,
+            y_sum_sq,
+            n_train,
+            n_features_split,
+            config,
+            0,
+            config.learning_rate,
+            &mut importances,
+            &mut oob_improvement,
+            &mut bufs,
+            &mut rng,
+        );
+
+        // early stop
+        let oob_mse_improvement = if n_oob > 0 {
+            oob_improvement / n_oob as f32
+        } else {
+            0.0
+        };
+
+        if improvement_ring.len() >= config.early_stop_window {
+            improvement_ring.remove(0);
+        }
+        improvement_ring.push(oob_mse_improvement);
+
+        if improvement_ring.len() >= config.early_stop_window {
+            let avg: f32 = improvement_ring.iter().sum::<f32>() / improvement_ring.len() as f32;
+            if avg <= 0.0 {
+                break;
+            }
+        }
+    }
+
+    // Normalise importances
+    let total: f32 = importances.iter().sum();
+    if total > 0.0 {
+        let inv = 1.0 / total;
+        importances.iter_mut().for_each(|v| *v *= inv);
+    }
+    importances
+}
+
+/// Fit a GRNBoost2-style gradient boosted ensemble for a single target gene.
+///
+/// Dispatches to `fit_grnboost2_sampled` for small cell counts and
+/// `fit_grnboost2_full_hist` for large cell counts where histogram
+/// subtraction amortises the cost of evaluating all features at every node.
+///
+/// ### Params
+///
+/// * `target` - Sparse target gene expression column.
+/// * `feature_matrix` - Quantised TF feature store.
+/// * `n_samples` - Number of cells.
+/// * `config` - GBM configuration.
+/// * `seed` - Base seed for reproducibility.
+///
+/// ### Returns
+///
+/// Normalised importance vector of length `n_features`, summing to 1.0.
+pub fn fit_grnboost2_sparse(
+    target: &SparseAxis<u16, f32>,
+    feature_matrix: &DenseQuantisedStore,
+    n_samples: usize,
+    config: &GradientBoostingConfig,
+    seed: usize,
+) -> Vec<f32> {
+    if n_samples >= GBM_SUBTRACTION_CELL_THRESHOLD {
+        fit_grnboost2_full_hist(target, feature_matrix, n_samples, config, seed)
+    } else {
+        fit_grnboost2_sampled(target, feature_matrix, n_samples, config, seed)
+    }
 }
 
 ///////////////////
@@ -4238,6 +4859,25 @@ mod tests {
 
         let split = hist.find_best_split(total_sum, total_sum_sq, 4, 3, 0, &mut feat_buf, &mut rng);
         assert!(split.is_none(), "should not find a valid split");
+    }
+
+    #[test]
+    fn apply_leaf_updates_residuals_sampled() {
+        let mut residuals = vec![10.0, 20.0, 30.0, 40.0];
+        let train: Vec<u32> = vec![0, 1];
+        let oob: Vec<u32> = vec![2, 3];
+        let mut improvement = 0.0f32;
+
+        apply_gbm_leaf(&mut residuals, &train, &oob, 30.0, 2, 0.1, &mut improvement);
+
+        // pred = 15, lr_pred = 1.5
+        assert!((residuals[0] - 8.5).abs() < 1e-6);
+        assert!((residuals[1] - 18.5).abs() < 1e-6);
+        assert!((residuals[2] - 28.5).abs() < 1e-6);
+        assert!((residuals[3] - 38.5).abs() < 1e-6);
+
+        // OOB: 2*1.5*30 - 2.25 + 2*1.5*40 - 2.25 = 87.75 + 117.75 = 205.5
+        assert!((improvement - 205.5).abs() < 1e-4, "got {}", improvement);
     }
 
     #[test]
