@@ -1253,6 +1253,9 @@ impl ScenicParams {
 
         let regression_learner = match learner_type.to_lowercase().as_str() {
             "extratrees" => RegressionLearner::ExtraTrees(ExtraTreesConfig::from_r_list(r_list)),
+            "grnboost2" => {
+                RegressionLearner::GradientBoosting(GradientBoostingConfig::from_r_list(r_list))
+            }
             _ => RegressionLearner::RandomForest(RandomForestConfig::from_r_list(r_list)),
         };
 
