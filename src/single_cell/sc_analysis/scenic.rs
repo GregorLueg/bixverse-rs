@@ -19,6 +19,7 @@ use faer::Mat;
 use indexmap::IndexSet;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use rayon::prelude::*;
+use rustc_hash::FxHashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::thread;
@@ -172,7 +173,7 @@ impl Default for ExtraTreesConfig {
             min_samples_leaf: 50,
             n_features_split: 0,
             n_thresholds: 1,
-            max_depth: Some(8),
+            max_depth: Some(10),
             subsample_frac: None,
         }
     }
@@ -246,7 +247,7 @@ impl Default for RandomForestConfig {
             n_features_split: 0,
             subsample_rate: 0.632,
             bootstrap: false,
-            max_depth: Some(8),
+            max_depth: Some(10),
             subsample_frac: None,
         }
     }
@@ -631,11 +632,31 @@ impl TreeBuffers {
         sample_slice: &[u32],
         y_slice: &[f32],
         n_targets: usize,
-    ) {
-        self.counts.fill(0);
-        let hist_len = 256 * n_targets;
-        self.y_sums[..hist_len].fill(0.0);
-        self.y_sum_sqs[..hist_len].fill(0.0);
+    ) -> (usize, usize) {
+        if sample_slice.is_empty() {
+            return (0, 0);
+        }
+
+        let mut min_bin = 255u8;
+        let mut max_bin = 0u8;
+        for &s in sample_slice {
+            let bin = tf_col[s as usize];
+            if bin < min_bin {
+                min_bin = bin;
+            }
+            if bin > max_bin {
+                max_bin = bin;
+            }
+        }
+
+        let min_b = min_bin as usize;
+        let max_b = max_bin as usize;
+
+        self.counts[min_b..=max_b].fill(0);
+        let start_idx = min_b * n_targets;
+        let end_idx = (max_b + 1) * n_targets;
+        self.y_sums[start_idx..end_idx].fill(0.0);
+        self.y_sum_sqs[start_idx..end_idx].fill(0.0);
 
         for i in 0..sample_slice.len() {
             let bin = tf_col[sample_slice[i] as usize] as usize;
@@ -649,11 +670,13 @@ impl TreeBuffers {
             }
         }
 
-        self.cum_counts[0] = self.counts[0];
-        self.cum_y_sums[..n_targets].copy_from_slice(&self.y_sums[..n_targets]);
-        self.cum_y_sum_sqs[..n_targets].copy_from_slice(&self.y_sum_sqs[..n_targets]);
+        self.cum_counts[min_b] = self.counts[min_b];
+        let start_h = min_b * n_targets;
+        let next_h = (min_b + 1) * n_targets;
+        self.cum_y_sums[start_h..next_h].copy_from_slice(&self.y_sums[start_h..next_h]);
+        self.cum_y_sum_sqs[start_h..next_h].copy_from_slice(&self.y_sum_sqs[start_h..next_h]);
 
-        for b in 1..256 {
+        for b in (min_b + 1)..=max_b {
             self.cum_counts[b] = self.cum_counts[b - 1] + self.counts[b];
             let prev = (b - 1) * n_targets;
             let curr = b * n_targets;
@@ -663,6 +686,8 @@ impl TreeBuffers {
                     self.cum_y_sum_sqs[prev + k] + self.y_sum_sqs[curr + k];
             }
         }
+
+        (min_b, max_b)
     }
 
     /// Build histograms from sparse Y -- only touches non-zero target entries.
@@ -682,12 +707,35 @@ impl TreeBuffers {
         sample_slice: &[u32],
         sparse_y: &SparseYBatch,
         n_targets: usize,
-    ) {
-        self.counts.fill(0);
-        let hist_len = 256 * n_targets;
-        self.y_sums[..hist_len].fill(0.0);
-        self.y_sum_sqs[..hist_len].fill(0.0);
+    ) -> (usize, usize) {
+        if sample_slice.is_empty() {
+            return (0, 0);
+        }
 
+        // 1. Blazingly fast O(N) pre-pass to find the active bin range
+        let mut min_bin = 255u8;
+        let mut max_bin = 0u8;
+        for &s in sample_slice {
+            let bin = tf_col[s as usize];
+            if bin < min_bin {
+                min_bin = bin;
+            }
+            if bin > max_bin {
+                max_bin = bin;
+            }
+        }
+
+        let min_b = min_bin as usize;
+        let max_b = max_bin as usize;
+
+        // 2. Only zero out the dirtied slice (The Bandwidth Fix)
+        self.counts[min_b..=max_b].fill(0);
+        let start_idx = min_b * n_targets;
+        let end_idx = (max_b + 1) * n_targets;
+        self.y_sums[start_idx..end_idx].fill(0.0);
+        self.y_sum_sqs[start_idx..end_idx].fill(0.0);
+
+        // 3. Accumulate only within the active bounds
         for &s in sample_slice {
             let bin = tf_col[s as usize] as usize;
             self.counts[bin] += 1;
@@ -702,12 +750,14 @@ impl TreeBuffers {
             }
         }
 
-        // Cumulative sums unchanged -- same as before
-        self.cum_counts[0] = self.counts[0];
-        self.cum_y_sums[..n_targets].copy_from_slice(&self.y_sums[..n_targets]);
-        self.cum_y_sum_sqs[..n_targets].copy_from_slice(&self.y_sum_sqs[..n_targets]);
+        // 4. Prefix sums strictly over the active range
+        self.cum_counts[min_b] = self.counts[min_b];
+        let start_h = min_b * n_targets;
+        let next_h = (min_b + 1) * n_targets;
+        self.cum_y_sums[start_h..next_h].copy_from_slice(&self.y_sums[start_h..next_h]);
+        self.cum_y_sum_sqs[start_h..next_h].copy_from_slice(&self.y_sum_sqs[start_h..next_h]);
 
-        for b in 1..256 {
+        for b in (min_b + 1)..=max_b {
             self.cum_counts[b] = self.cum_counts[b - 1] + self.counts[b];
             let prev = (b - 1) * n_targets;
             let curr = b * n_targets;
@@ -717,6 +767,8 @@ impl TreeBuffers {
                     self.cum_y_sum_sqs[prev + k] + self.y_sum_sqs[curr + k];
             }
         }
+
+        (min_b, max_b)
     }
 }
 
@@ -915,10 +967,8 @@ fn build_node_multi_sparse(
         let feat = bufs.feat_buf[fi_idx];
         let tf_col = x.get_col(feat);
 
-        bufs.build_histograms_sparse(tf_col, sample_slice, sparse_y, n_targets);
-
-        let min_bin = bufs.counts.iter().position(|&c| c > 0).unwrap_or(0);
-        let max_bin = bufs.counts.iter().rposition(|&c| c > 0).unwrap_or(255);
+        let (min_bin, max_bin) =
+            bufs.build_histograms_sparse(tf_col, sample_slice, sparse_y, n_targets);
 
         if min_bin == max_bin {
             continue;
@@ -1151,10 +1201,7 @@ fn build_node_multi(
         let feat = bufs.feat_buf[fi_idx];
         let tf_col = x.get_col(feat);
 
-        bufs.build_histograms(tf_col, sample_slice, y_slice, n_targets);
-
-        let min_bin = bufs.counts.iter().position(|&c| c > 0).unwrap_or(0);
-        let max_bin = bufs.counts.iter().rposition(|&c| c > 0).unwrap_or(255);
+        let (min_bin, max_bin) = bufs.build_histograms(tf_col, sample_slice, y_slice, n_targets);
 
         if min_bin == max_bin {
             continue;
@@ -2044,7 +2091,7 @@ pub fn run_scenic_grn(
         verbose,
     );
 
-    let gene_id_to_pos: std::collections::HashMap<usize, usize> = gene_indices
+    let gene_id_to_pos: FxHashMap<usize, usize> = gene_indices
         .iter()
         .enumerate()
         .map(|(pos, &gid)| (gid, pos))
@@ -2369,12 +2416,6 @@ mod tests {
         let y_dense: Vec<f32> = vec![1.0, 2.0, 0.0, 0.0, 3.0, 4.0, 0.0, 0.0, 5.0, 6.0, 7.0, 8.0];
 
         // Equivalent sparse representation
-        // cell0: t0=1, t1=2
-        // cell1: empty
-        // cell2: t0=3, t1=4
-        // cell3: empty
-        // cell4: t0=5, t1=6
-        // cell5: t0=7, t1=8
         let sparse_y = SparseYBatch {
             offsets: vec![0, 2, 2, 4, 4, 6, 8],
             target_indices: vec![0, 1, 0, 1, 0, 1, 0, 1],
@@ -2384,16 +2425,29 @@ mod tests {
         let mut bufs_dense = TreeBuffers::new(n_features, n_samples, n_targets);
         let mut bufs_sparse = TreeBuffers::new_sparse(n_features, n_samples, n_targets);
 
-        bufs_dense.build_histograms(&tf_col, &sample_slice, &y_dense, n_targets);
-        bufs_sparse.build_histograms_sparse(&tf_col, &sample_slice, &sparse_y, n_targets);
+        let (min_d, max_d) =
+            bufs_dense.build_histograms(&tf_col, &sample_slice, &y_dense, n_targets);
+        let (min_s, max_s) =
+            bufs_sparse.build_histograms_sparse(&tf_col, &sample_slice, &sparse_y, n_targets);
 
-        // Counts must match exactly
-        assert_eq!(bufs_dense.counts, bufs_sparse.counts);
-        assert_eq!(bufs_dense.cum_counts, bufs_sparse.cum_counts);
+        assert_eq!(min_d, min_s);
+        assert_eq!(max_d, max_s);
 
-        // Y sums and sum_sqs must match
-        let hist_len = 256 * n_targets;
-        for i in 0..hist_len {
+        // Counts must match exactly within the active bounds
+        assert_eq!(
+            &bufs_dense.counts[min_d..=max_d],
+            &bufs_sparse.counts[min_s..=max_s]
+        );
+        assert_eq!(
+            &bufs_dense.cum_counts[min_d..=max_d],
+            &bufs_sparse.cum_counts[min_s..=max_s]
+        );
+
+        // Y sums and sum_sqs must match within the active bounds
+        let start_idx = min_d * n_targets;
+        let end_idx = (max_d + 1) * n_targets;
+
+        for i in start_idx..end_idx {
             assert!(
                 (bufs_dense.y_sums[i] - bufs_sparse.y_sums[i]).abs() < 1e-10,
                 "y_sums mismatch at {i}: dense={} sparse={}",
