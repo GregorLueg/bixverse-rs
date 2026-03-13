@@ -1,3 +1,8 @@
+//! Contains helpers for the generation of synthetic data for testing
+//! algorithms. Has the option to create single cell-like data with defined
+//! cell types, optional batch effects and different cell abundance
+//! distributions per given sample.
+
 use rand::prelude::*;
 use rand_distr::weighted::WeightedAliasIndex;
 use rand_distr::{Distribution, StandardNormal};
@@ -31,7 +36,7 @@ pub fn create_sparse_csc_data(
     genes_per_cell: (usize, usize),
     max_exp: i32,
     seed: usize,
-) -> CompressedSparseData<i32> {
+) -> CompressedSparseData2<i32> {
     let weights: Vec<f64> = (1..=ncol).map(|i| 1.0 / i as f64).collect();
     let alias = WeightedAliasIndex::new(weights).unwrap();
 
@@ -77,7 +82,7 @@ pub fn create_sparse_csc_data(
         indptr.push(indices.len());
     }
 
-    CompressedSparseData {
+    CompressedSparseData2 {
         data,
         indices,
         indptr,
@@ -108,7 +113,7 @@ pub fn create_sparse_csr_data(
     no_genes_exp: (usize, usize),
     max_exp: i32,
     seed: usize,
-) -> CompressedSparseData<i32> {
+) -> CompressedSparseData2<i32> {
     let weights: Vec<f64> = (1..=ncol).map(|i| 1.0 / i as f64).collect();
     let alias = WeightedAliasIndex::new(weights).unwrap();
 
@@ -145,7 +150,7 @@ pub fn create_sparse_csr_data(
         indptr.push(indices.len());
     }
 
-    CompressedSparseData {
+    CompressedSparseData2 {
         data,
         indices,
         indptr,
@@ -159,6 +164,7 @@ pub fn create_sparse_csr_data(
 // Specific sparse data ///
 ///////////////////////////
 
+/// Enum defining the strength of the batch effect in the synthetic data
 #[derive(Clone, Copy, Debug)]
 pub enum BatchEffectStrength {
     /// Weak batch effects
@@ -187,6 +193,8 @@ pub fn parse_batch_effect_strength(s: &str) -> Option<BatchEffectStrength> {
     }
 }
 
+/// Enum defining the sample bias, i.e., how many cells of one type are over (or
+/// underrepresented) in a given sample
 #[derive(Clone, Copy, Debug)]
 pub enum SampleBias {
     /// Even distribution of cell types across samples
@@ -216,13 +224,9 @@ pub fn parse_sample_bias(s: &str) -> Option<SampleBias> {
 }
 
 /// Structure to keep the CellTypeConfig
-///
-/// ### Fields
-///
-/// * `marker_genes` - Which indices are the marker genes for this specific
-///   cell type
 #[derive(Clone, Debug)]
 pub struct CellTypeConfig {
+    /// Indices are the marker genes for this specific cell type
     pub marker_genes: Vec<usize>,
 }
 
@@ -248,7 +252,7 @@ pub fn create_celltype_sparse_csr_data(
     n_batches: usize,
     batch_effect_strength: &str,
     seed: usize,
-) -> (CompressedSparseData<u32>, Vec<usize>, Vec<usize>) {
+) -> (CompressedSparseData2<u32>, Vec<usize>, Vec<usize>) {
     let batch_strength =
         parse_batch_effect_strength(batch_effect_strength).unwrap_or(BatchEffectStrength::Strong);
 
@@ -373,7 +377,7 @@ pub fn create_celltype_sparse_csr_data(
         indptr.push(indices.len());
     }
 
-    let csr = CompressedSparseData {
+    let csr = CompressedSparseData2 {
         data,
         indices,
         indptr,

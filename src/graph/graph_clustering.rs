@@ -1,3 +1,5 @@
+//! Graph-based clustering algorithms, namely spectral clustering
+
 use faer::{Mat, MatRef};
 use rand::prelude::*;
 
@@ -34,6 +36,8 @@ where
         .as_mut()
         .row_mut(0)
         .copy_from(data.row(rng.random_range(0..n)));
+
+    // TODO: update this to use the SIMD optimised code from ann-search-rs
 
     for i in 1..k {
         let mut distances = vec![T::infinity(); n];
@@ -147,4 +151,41 @@ where
     }
 
     kmeans(&features.as_ref(), n_clusters, max_iters, seed)
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use faer::Mat;
+
+    #[test]
+    fn test_spectral_clustering_block_diagonal() {
+        // 4x4 matrix, two distinct blocks: (0,1) and (2,3)
+        let mut sim: Mat<f64> = Mat::zeros(4, 4);
+        // Block 1
+        sim[(0, 0)] = 1.0;
+        sim[(0, 1)] = 0.9;
+        sim[(1, 0)] = 0.9;
+        sim[(1, 1)] = 1.0;
+        // Block 2
+        sim[(2, 2)] = 1.0;
+        sim[(2, 3)] = 0.9;
+        sim[(3, 2)] = 0.9;
+        sim[(3, 3)] = 1.0;
+        // Weak noise between blocks
+        sim[(0, 2)] = 0.1;
+        sim[(2, 0)] = 0.1;
+
+        // Extract 2 clusters looking at top 1 neighbor
+        let labels = spectral_clustering(&sim.as_ref(), 1, 2, 100, 42);
+
+        assert_eq!(labels.len(), 4);
+        assert_eq!(labels[0], labels[1]); // 0 and 1 are together
+        assert_eq!(labels[2], labels[3]); // 2 and 3 are together
+        assert_ne!(labels[0], labels[2]); // The blocks are distinct
+    }
 }

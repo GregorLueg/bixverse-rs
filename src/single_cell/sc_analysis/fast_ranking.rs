@@ -1,3 +1,6 @@
+//! Helpers for fast ranking of expression for differential gene expression or
+//! or AUCell type analyses.
+
 use rayon::prelude::*;
 
 use crate::prelude::*;

@@ -1,3 +1,6 @@
+//! Contains the MTX file-related parts to do read in data from mtx files and
+//! transform them into the binarised files for usage in bixverse-rs
+
 use rayon::prelude::*;
 use rustc_hash::FxHashSet;
 use std::fs::File;
@@ -16,52 +19,42 @@ use crate::single_cell::sc_data::data_io::{CellGeneSparseWriter, CellOnFileQuali
 /////////
 
 /// MTX file metadata
-///
-/// ### Fields
-///
-/// * `total_cells` - Number of cells identified in the .mtx header.
-/// * `total_genes` - Number of genes identified in the .mtx header.
-/// * `total_entries` - Number of entries identified in the .mtx header.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct MtxHeader {
+    /// Number of cells identified in the .mtx header.
     pub total_cells: usize,
+    /// Number of genes identified in the .mtx header.
     pub total_genes: usize,
+    /// Number of entries identified in the .mtx header.
     pub total_entries: usize,
 }
 
 /// MTX final data
 ///
 /// Structure to store final results after reading in the .mtx file
-///
-/// ### Fields
-///
-/// * `cell_qc` - Structure containing the information on which cells/genes to
-///   keep and library size and NNZ for cells.
-/// * `no_genes` - Number of genes that were read in.
-/// * `no_cells` - Number of cells that were read in.
 #[derive(Debug, Clone)]
 pub struct MtxFinalData {
+    /// Structure containing the information on which cells/genes to keep and
+    /// library size and NNZ for cells.
     pub cell_qc: CellQuality,
+    /// No of genes that were read in
     pub no_genes: usize,
+    /// No of cells that were read in
     pub no_cells: usize,
 }
 
 /// MTX Reader for bixverse
-///
-/// ### Fields
-///
-/// * `reader` - Buffered reader of the mtx file
-/// * `header` - The header of the mtx file
-/// * `qc_params` - The min quality parameters that genes and cells have to
-///   reach and the target library size
-/// * `cells_as_rows` - Boolean. Are the cells the rows (= true) or columns in
-///   the mtx file.
 pub struct MtxReader {
+    /// Path to the mtx file
     path: PathBuf,
+    /// Buffered reader of the mtx file
     reader: BufReader<File>,
+    /// Header of the MtxFile
     header: MtxHeader,
+    /// Cell and gene quality parameters to apply
     qc_params: MinCellQuality,
+    /// Are the cells stored as rows
     cells_as_rows: bool,
 }
 
@@ -513,7 +506,7 @@ impl MtxReader {
             cell_indices: quality.cells_to_keep.to_vec(),
             gene_indices: quality.genes_to_keep.to_vec(),
             lib_size,
-            no_genes: nnz,
+            nnz,
         };
 
         Ok(MtxFinalData {

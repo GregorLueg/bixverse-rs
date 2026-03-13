@@ -1,7 +1,11 @@
+//! Contains the single cell-related kNN functions
+
 use ann_search_rs::utils::KnnValidation;
 use ann_search_rs::utils::dist::Dist;
 use ann_search_rs::*;
 use faer::{MatRef, RowRef};
+use rayon::prelude::*;
+use rustc_hash::FxHashSet;
 use std::time::Instant;
 
 use crate::core::math::sparse::coo_to_csr;
@@ -50,55 +54,34 @@ pub fn parse_knn_method(s: &str) -> Option<KnnSearch> {
 
 /// KnnParams
 ///
-/// ### Fields
-///
-/// **General**
-///
-/// * `knn_method` - Which of the kNN methods to use. One of `"annoy"`, `"hnsw"`
-///   or `"nndescent"`.
-/// * `ann_dist` - Approximate nearest neighbour distance measure. One of
-///   `"euclidean"` or `"cosine"`.
-/// * `k` - Number of neighbours to search.
-///
-/// **Annoy**
-///
-/// * `n_tree` - Number of trees for the generation of the index.
-/// * `search_budget` - Optional search budget. If not provided, will default
-///   to `k * n_trees * 20`. Good ranges for the multipler are 2 to 20.
-///
-/// **NN Descent**
-///
-/// * `delta` - Early termination criterium.
-/// * `diversify_prob` - Diversifying probability at the end of the index
-///   generation.
-/// * `ef_budget` - Optional query budget.
-///
-/// **LSH**
-///
-/// * `bits` - Number of bits to use.
-/// * `n_tables` - Number of hash tables to use.
-/// * `max_candidates` - Optional query budget.
-///
-/// **IVF**
-///
-/// * `n_centroids` - Number of centroids to use.
-/// * `n_probes` - Number of centroids to probe.
+/// Contains the parameters for the kNN searches used in the single cell parts
+/// of this crate
 #[derive(Clone, Debug)]
 pub struct KnnParams {
-    // general params
+    ///  Which of the kNN methods to use. One of `"annoy"`, `"hnsw"` or
+    /// `"nndescent"` are supported for now.
     pub knn_method: String,
+    /// Distance metric to use. One of `"euclidean"` or `"cosine"`.
     pub ann_dist: String,
+    /// Number of neighbours to return
     pub k: usize,
-    // annoy params
+    /// Annoy: Number of trees to build
     pub n_tree: usize,
+    /// Annoy: optional search budget. If not provided, will default to k * 20
+    /// per tree.
     pub search_budget: Option<usize>,
-    // nn descent params
+    /// NNDescent: diversification probability after generation of the graph.
     pub diversify_prob: f32,
+    /// NNDescent: convergence criterium. If less than these percentage of
+    /// neighbours have been udpated, the algorithm counts as converged.
     pub delta: f32,
+    /// NNDescent: optional beam search budget for querying.
     pub ef_budget: Option<usize>,
-    // hnsw
+    /// HNSW: connections per given layer to use
     pub m: usize,
+    /// HNSW: construction budget
     pub ef_construction: usize,
+    /// HNSW: search budget
     pub ef_search: usize,
 }
 
@@ -232,7 +215,7 @@ pub fn compute_distance_knn(a: RowRef<f32>, b: RowRef<f32>, metric: &Dist) -> f3
     }
 }
 
-/// Helper function to transform kNN data into CompressedSparseData
+/// Helper function to transform kNN data into CompressedSparseData2
 ///
 /// ### Params
 ///
@@ -242,13 +225,13 @@ pub fn compute_distance_knn(a: RowRef<f32>, b: RowRef<f32>, metric: &Dist) -> f3
 ///
 /// ### Return
 ///
-/// `CompressedSparseData` in CSR format with distances to the k-nearest
+/// `CompressedSparseData2` in CSR format with distances to the k-nearest
 /// neighbours stored.
 pub fn knn_to_sparse_dist(
     knn_indices: &[Vec<usize>],
     knn_dists: &[Vec<f32>],
     n_obs: usize,
-) -> CompressedSparseData<f32> {
+) -> CompressedSparseData2<f32> {
     let mut rows = Vec::new();
     let mut cols = Vec::new();
     let mut vals = Vec::new();
@@ -679,4 +662,32 @@ pub fn generate_knn_with_dist(
     };
 
     remove_self(indices, distances)
+}
+
+///////////
+// Other //
+///////////
+
+/// Compare kNN graphs
+///
+/// ### Params
+///
+/// * `a` - The first kNN graph in form samples x neighbour indices
+/// * `b` - The second kNN graph in form samples x neighbour indices
+///
+/// ### Returns
+///
+/// Number of intersecting neighbours across the two.
+pub fn compare_knn_graphs(a: MatRef<i32>, b: MatRef<i32>) -> Vec<i32> {
+    assert_eq!(a.nrows(), b.nrows());
+
+    (0..a.nrows())
+        .into_par_iter()
+        .map(|row| {
+            let set: FxHashSet<i32> = (0..a.ncols()).map(|j| a[(row, j)]).collect();
+            (0..b.ncols())
+                .filter(|&j| set.contains(&b[(row, j)]))
+                .count() as i32
+        })
+        .collect()
 }

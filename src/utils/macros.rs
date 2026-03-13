@@ -1,3 +1,5 @@
+//! Collection of generic assertion macros for the crate
+
 ///////////////////
 // Matrix macros //
 ///////////////////

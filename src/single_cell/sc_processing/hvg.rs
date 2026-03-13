@@ -1,3 +1,5 @@
+//! Implementations of highly variable gene detections in single cell.
+
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::time::Instant;
@@ -11,18 +13,15 @@ use crate::prelude::*;
 /////////
 
 /// Structure that stores HVG information
-///
-/// ### Fields
-///
-/// * `mean` - Mean expression of the gene.
-/// * `var` - Detected variance of the gene.
-/// * `var_exp` - Expected variance of the gene.
-/// * `var_std` - Standardised variance of the gene.
 #[derive(Clone, Debug)]
 pub struct HvgRes {
+    /// Mean expression of the gene.
     pub mean: Vec<f64>,
+    /// Detected variance of the gene.
     pub var: Vec<f64>,
+    /// Expected variance of the gene.
     pub var_exp: Vec<f64>,
+    /// Standardised variance of the gene.
     pub var_std: Vec<f64>,
 }
 

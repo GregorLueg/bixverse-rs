@@ -1,53 +1,646 @@
+//! Implementation of the HotSpot method to identify genes that vary across
+//! various potential graphs in single cell 'omics, see DeTomaso and Yosef,
+//! Cell Syst., 2021
+
 use faer::{Mat, MatRef, RowRef};
 use indexmap::IndexSet;
 use rayon::prelude::*;
 use std::time::Instant;
+use wide::{f32x4, f32x8};
 
 use crate::core::math::linear_algebra::linear_regression;
 use crate::core::math::stats::{calc_fdr, inv_logit, logit, z_scores_to_pval};
 use crate::prelude::*;
+use crate::utils::simd::{SimdLevel, detect_simd_level, sum_simd_f32, sum_squares_simd_f32};
 
 /////////////
 // Hotspot //
 /////////////
+
+//////////
+// SIMD //
+//////////
+
+///////////////////////////////
+// Fused multiply-square-sum //
+///////////////////////////////
+
+/// SIMD-fused multiply-square-sum (scalar)
+///
+/// ### Params
+///
+/// * `a`: The first vector.
+/// * `b`: The second vector.
+///
+/// ### Returns
+///
+/// The product
+#[inline(always)]
+fn fused_mul_square_sum_scalar(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b.iter()).map(|(&ai, &bi)| ai * bi * bi).sum()
+}
+
+/// SIMD-fused multiply-square-sum (128-bit optimised)
+///
+/// ### Params
+///
+/// * `a`: The first vector.
+/// * `b`: The second vector.
+///
+/// ### Returns
+///
+/// The product
+#[inline(always)]
+fn fused_mul_square_sum_sse(a: &[f32], b: &[f32]) -> f32 {
+    let len = a.len();
+    let chunks = len / 4;
+    let mut acc = f32x4::ZERO;
+
+    unsafe {
+        let a_ptr = a.as_ptr();
+        let b_ptr = b.as_ptr();
+
+        for i in 0..chunks {
+            let offset = i * 4;
+            let va = f32x4::from(*(a_ptr.add(offset) as *const [f32; 4]));
+            let vb = f32x4::from(*(b_ptr.add(offset) as *const [f32; 4]));
+            acc += va * vb * vb;
+        }
+    }
+
+    let mut sum = acc.reduce_add();
+    for i in (chunks * 4)..len {
+        sum += a[i] * b[i] * b[i];
+    }
+    sum
+}
+
+/// SIMD-fused multiply-square-sum (256-bit optimised)
+///
+/// ### Params
+///
+/// * `a`: The first vector.
+/// * `b`: The second vector.
+///
+/// ### Returns
+///
+/// The product
+#[inline(always)]
+fn fused_mul_square_sum_avx2(a: &[f32], b: &[f32]) -> f32 {
+    let len = a.len();
+    let chunks = len / 8;
+    let mut acc = f32x8::ZERO;
+
+    unsafe {
+        let a_ptr = a.as_ptr();
+        let b_ptr = b.as_ptr();
+
+        for i in 0..chunks {
+            let offset = i * 8;
+            let va = f32x8::from(*(a_ptr.add(offset) as *const [f32; 8]));
+            let vb = f32x8::from(*(b_ptr.add(offset) as *const [f32; 8]));
+            acc += va * vb * vb;
+        }
+    }
+
+    let mut sum = acc.reduce_add();
+    for i in (chunks * 8)..len {
+        sum += a[i] * b[i] * b[i];
+    }
+    sum
+}
+
+/// SIMD-fused multiply-square-sum (512-bit optimised)
+///
+/// ### Params
+///
+/// * `a`: The first vector.
+/// * `b`: The second vector.
+///
+/// ### Returns
+///
+/// The product
+#[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+#[inline(always)]
+fn fused_mul_square_sum_avx512(a: &[f32], b: &[f32]) -> f32 {
+    use std::arch::x86_64::*;
+
+    let len = a.len();
+    let chunks = len / 16;
+
+    unsafe {
+        let mut acc = _mm512_setzero_ps();
+
+        for i in 0..chunks {
+            let va = _mm512_loadu_ps(a.as_ptr().add(i * 16));
+            let vb = _mm512_loadu_ps(b.as_ptr().add(i * 16));
+            let vb_sq = _mm512_mul_ps(vb, vb);
+            acc = _mm512_fmadd_ps(va, vb_sq, acc);
+        }
+
+        let mut sum = _mm512_reduce_add_ps(acc);
+        for i in (chunks * 16)..len {
+            sum += a[i] * b[i] * b[i];
+        }
+        sum
+    }
+}
+
+/// SIMD-fused multiply-square-sum (512-bit fallback)
+///
+/// ### Params
+///
+/// * `a`: The first vector.
+/// * `b`: The second vector.
+///
+/// ### Returns
+///
+/// The product
+#[cfg(not(all(target_arch = "x86_64", target_feature = "avx512f")))]
+#[inline(always)]
+fn fused_mul_square_sum_avx512(a: &[f32], b: &[f32]) -> f32 {
+    fused_mul_square_sum_avx2(a, b)
+}
+
+/// SIMD-fused multiply-square-sum - Dispatch
+///
+/// Used in compute_local_cov_max: sum(a[i] * b[i] * b[i])
+///
+/// ### Params
+///
+/// * `a`: The first vector.
+/// * `b`: The second vector.
+///
+/// ### Returns
+///
+/// The product
+#[inline]
+pub fn fused_mul_square_sum_simd(a: &[f32], b: &[f32]) -> f32 {
+    match detect_simd_level() {
+        SimdLevel::Avx512 => fused_mul_square_sum_avx512(a, b),
+        SimdLevel::Avx2 => fused_mul_square_sum_avx2(a, b),
+        SimdLevel::Sse => fused_mul_square_sum_sse(a, b),
+        SimdLevel::Scalar => fused_mul_square_sum_scalar(a, b),
+    }
+}
+
+///////////////////
+// Center values //
+///////////////////
+
+/// SIMD center the values given mu and var (scalar)
+///
+/// ### Params
+///
+/// * `vals`: The values to center.
+/// * `mu`: The mean values.
+/// * `var`: The variance values.
+#[inline(always)]
+fn center_values_scalar(vals: &mut [f32], mu: &[f32], var: &[f32]) {
+    for i in 0..vals.len() {
+        vals[i] = (vals[i] - mu[i]) / var[i].sqrt();
+    }
+}
+
+/// SIMD center the values given mu and var (128-bit)
+///
+/// ### Params
+///
+/// * `vals`: The values to center.
+/// * `mu`: The mean values.
+/// * `var`: The variance values.
+#[inline(always)]
+fn center_values_sse(vals: &mut [f32], mu: &[f32], var: &[f32]) {
+    let len = vals.len();
+    let chunks = len / 4;
+
+    unsafe {
+        let vals_ptr: *mut f32 = vals.as_mut_ptr();
+        let mu_ptr: *const f32 = mu.as_ptr();
+        let var_ptr: *const f32 = var.as_ptr();
+
+        for i in 0..chunks {
+            let offset = i * 4;
+            let v = f32x4::from(*(vals_ptr.add(offset) as *const [f32; 4]));
+            let m = f32x4::from(*(mu_ptr.add(offset) as *const [f32; 4]));
+            let va = f32x4::from(*(var_ptr.add(offset) as *const [f32; 4]));
+
+            let result = (v - m) / va.sqrt();
+            *(vals_ptr.add(offset) as *mut [f32; 4]) = result.into();
+        }
+    }
+
+    for i in (chunks * 4)..len {
+        vals[i] = (vals[i] - mu[i]) / var[i].sqrt();
+    }
+}
+
+/// SIMD center the values given mu and var (256-bit)
+///
+/// ### Params
+///
+/// * `vals`: The values to center.
+/// * `mu`: The mean values.
+/// * `var`: The variance values.
+#[inline(always)]
+fn center_values_avx2(vals: &mut [f32], mu: &[f32], var: &[f32]) {
+    let len = vals.len();
+    let chunks = len / 8;
+
+    unsafe {
+        let vals_ptr: *mut f32 = vals.as_mut_ptr();
+        let mu_ptr: *const f32 = mu.as_ptr();
+        let var_ptr: *const f32 = var.as_ptr();
+
+        for i in 0..chunks {
+            let offset = i * 8;
+            let v = f32x8::from(*(vals_ptr.add(offset) as *const [f32; 8]));
+            let m = f32x8::from(*(mu_ptr.add(offset) as *const [f32; 8]));
+            let va = f32x8::from(*(var_ptr.add(offset) as *const [f32; 8]));
+
+            let result = (v - m) / va.sqrt();
+            *(vals_ptr.add(offset) as *mut [f32; 8]) = result.into();
+        }
+    }
+
+    for i in (chunks * 8)..len {
+        vals[i] = (vals[i] - mu[i]) / var[i].sqrt();
+    }
+}
+
+/// SIMD center the values given mu and var (512-bit)
+///
+/// ### Params
+///
+/// * `vals`: The values to center.
+/// * `mu`: The mean values.
+/// * `var`: The variance values.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+#[inline(always)]
+fn center_values_avx512(vals: &mut [f32], mu: &[f32], var: &[f32]) {
+    use std::arch::x86_64::*;
+
+    let len = vals.len();
+    let chunks = len / 16;
+
+    unsafe {
+        for i in 0..chunks {
+            let offset = i * 16;
+            let v = _mm512_loadu_ps(vals.as_ptr().add(offset));
+            let m = _mm512_loadu_ps(mu.as_ptr().add(offset));
+            let va = _mm512_loadu_ps(var.as_ptr().add(offset));
+
+            let sqrt_va = _mm512_sqrt_ps(va);
+            let diff = _mm512_sub_ps(v, m);
+            let result = _mm512_div_ps(diff, sqrt_va);
+
+            _mm512_storeu_ps(vals.as_mut_ptr().add(offset), result);
+        }
+    }
+
+    for i in (chunks * 16)..len {
+        vals[i] = (vals[i] - mu[i]) / var[i].sqrt();
+    }
+}
+
+/// SIMD center the values given mu and var (512-bit fallback)
+///
+/// ### Params
+///
+/// * `vals`: The values to center.
+/// * `mu`: The mean values.
+/// * `var`: The variance values.
+#[cfg(not(all(target_arch = "x86_64", target_feature = "avx512f")))]
+#[inline(always)]
+fn center_values_avx512(vals: &mut [f32], mu: &[f32], var: &[f32]) {
+    center_values_avx2(vals, mu, var)
+}
+
+/// SIMD center the values given mu and var (dispatch)
+///
+/// ### Params
+///
+/// * `vals`: The values to center.
+/// * `mu`: The mean values.
+/// * `var`: The variance values.
+#[inline]
+pub fn center_values_simd(vals: &mut [f32], mu: &[f32], var: &[f32]) {
+    match detect_simd_level() {
+        SimdLevel::Avx512 => center_values_avx512(vals, mu, var),
+        SimdLevel::Avx2 => center_values_avx2(vals, mu, var),
+        SimdLevel::Sse => center_values_sse(vals, mu, var),
+        SimdLevel::Scalar => center_values_scalar(vals, mu, var),
+    }
+}
+
+/////////////////////////////////////
+// Element-wise operations (a * b) //
+/////////////////////////////////////
+
+/// SIMD element-wise multiplication (scalar)
+///
+/// ### Params
+///
+/// * `a`: The first input array.
+/// * `b`: The second input array.
+/// * `out`: The output array for results.
+#[inline(always)]
+fn elementwise_mul_scalar(a: &[f32], b: &[f32], out: &mut [f32]) {
+    for i in 0..a.len() {
+        out[i] = a[i] * b[i];
+    }
+}
+
+/// SIMD element-wise multiplication (128-bit)
+///
+/// ### Params
+///
+/// * `a`: The first input array.
+/// * `b`: The second input array.
+/// * `out`: The output array for results.
+#[inline(always)]
+fn elementwise_mul_sse(a: &[f32], b: &[f32], out: &mut [f32]) {
+    let len = a.len();
+    let chunks = len / 4;
+
+    unsafe {
+        let a_ptr = a.as_ptr();
+        let b_ptr = b.as_ptr();
+        let out_ptr = out.as_mut_ptr();
+
+        for i in 0..chunks {
+            let offset = i * 4;
+            let va = f32x4::from(*(a_ptr.add(offset) as *const [f32; 4]));
+            let vb = f32x4::from(*(b_ptr.add(offset) as *const [f32; 4]));
+            let result = va * vb;
+            *(out_ptr.add(offset) as *mut [f32; 4]) = result.into();
+        }
+    }
+
+    for i in (chunks * 4)..len {
+        out[i] = a[i] * b[i];
+    }
+}
+
+/// SIMD element-wise multiplication (256-bit)
+///
+/// ### Params
+///
+/// * `a`: The first input array.
+/// * `b`: The second input array.
+/// * `out`: The output array for results.
+#[inline(always)]
+fn elementwise_mul_avx2(a: &[f32], b: &[f32], out: &mut [f32]) {
+    let len = a.len();
+    let chunks = len / 8;
+
+    unsafe {
+        let a_ptr = a.as_ptr();
+        let b_ptr = b.as_ptr();
+        let out_ptr = out.as_mut_ptr();
+
+        for i in 0..chunks {
+            let offset = i * 8;
+            let va = f32x8::from(*(a_ptr.add(offset) as *const [f32; 8]));
+            let vb = f32x8::from(*(b_ptr.add(offset) as *const [f32; 8]));
+            let result = va * vb;
+            *(out_ptr.add(offset) as *mut [f32; 8]) = result.into();
+        }
+    }
+
+    for i in (chunks * 8)..len {
+        out[i] = a[i] * b[i];
+    }
+}
+
+/// SIMD element-wise multiplication (512-bit)
+///
+/// ### Params
+///
+/// * `a`: The first input array.
+/// * `b`: The second input array.
+/// * `out`: The output array for results.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+#[inline(always)]
+fn elementwise_mul_avx512(a: &[f32], b: &[f32], out: &mut [f32]) {
+    use std::arch::x86_64::*;
+
+    let len = a.len();
+    let chunks = len / 16;
+
+    unsafe {
+        for i in 0..chunks {
+            let offset = i * 16;
+            let va = _mm512_loadu_ps(a.as_ptr().add(offset));
+            let vb = _mm512_loadu_ps(b.as_ptr().add(offset));
+            let result = _mm512_mul_ps(va, vb);
+            _mm512_storeu_ps(out.as_mut_ptr().add(offset), result);
+        }
+    }
+
+    for i in (chunks * 16)..len {
+        out[i] = a[i] * b[i];
+    }
+}
+
+/// SIMD element-wise multiplication (512-bit fallback)
+///
+/// ### Params
+///
+/// * `a`: The first input array.
+/// * `b`: The second input array.
+/// * `out`: The output array for results.
+#[cfg(not(all(target_arch = "x86_64", target_feature = "avx512f")))]
+#[inline(always)]
+fn elementwise_mul_avx512(a: &[f32], b: &[f32], out: &mut [f32]) {
+    elementwise_mul_avx2(a, b, out)
+}
+
+/// SIMD element-wise multiplication (dispatch)
+///
+/// ### Params
+///
+/// * `a`: The first input array.
+/// * `b`: The second input array.
+/// * `out`: The output array for results.
+#[inline]
+pub fn elementwise_mul_simd(a: &[f32], b: &[f32], out: &mut [f32]) {
+    match detect_simd_level() {
+        SimdLevel::Avx512 => elementwise_mul_avx512(a, b, out),
+        SimdLevel::Avx2 => elementwise_mul_avx2(a, b, out),
+        SimdLevel::Sse => elementwise_mul_sse(a, b, out),
+        SimdLevel::Scalar => elementwise_mul_scalar(a, b, out),
+    }
+}
+
+///////////////////////////////////
+// Fused multiply-add: a * b + c //
+///////////////////////////////////
+
+/// SIMD fused multiply-add (scalar)
+///
+/// ### Params
+///
+/// * `a`: The first input array.
+/// * `b`: The second input array.
+/// * `c`: The third input array to add.
+/// * `out`: The output array for results.
+#[inline(always)]
+fn fused_mul_add_scalar(a: &[f32], b: &[f32], c: &[f32], out: &mut [f32]) {
+    for i in 0..a.len() {
+        out[i] = a[i] * b[i] + c[i];
+    }
+}
+
+/// SIMD fused multiply-add (128-bit)
+///
+/// ### Params
+///
+/// * `a`: The first input array.
+/// * `b`: The second input array.
+/// * `c`: The third input array to add.
+/// * `out`: The output array for results.
+#[inline(always)]
+fn fused_mul_add_sse(a: &[f32], b: &[f32], c: &[f32], out: &mut [f32]) {
+    let len = a.len();
+    let chunks = len / 4;
+
+    unsafe {
+        let a_ptr = a.as_ptr();
+        let b_ptr = b.as_ptr();
+        let c_ptr = c.as_ptr();
+        let out_ptr = out.as_mut_ptr();
+
+        for i in 0..chunks {
+            let offset = i * 4;
+            let va = f32x4::from(*(a_ptr.add(offset) as *const [f32; 4]));
+            let vb = f32x4::from(*(b_ptr.add(offset) as *const [f32; 4]));
+            let vc = f32x4::from(*(c_ptr.add(offset) as *const [f32; 4]));
+            let result = va * vb + vc;
+            *(out_ptr.add(offset) as *mut [f32; 4]) = result.into();
+        }
+    }
+
+    for i in (chunks * 4)..len {
+        out[i] = a[i] * b[i] + c[i];
+    }
+}
+
+/// SIMD fused multiply-add (256-bit)
+///
+/// ### Params
+///
+/// * `a`: The first input array.
+/// * `b`: The second input array.
+/// * `c`: The third input array to add.
+/// * `out`: The output array for results.
+#[inline(always)]
+fn fused_mul_add_avx2(a: &[f32], b: &[f32], c: &[f32], out: &mut [f32]) {
+    let len = a.len();
+    let chunks = len / 8;
+
+    unsafe {
+        let a_ptr = a.as_ptr();
+        let b_ptr = b.as_ptr();
+        let c_ptr = c.as_ptr();
+        let out_ptr = out.as_mut_ptr();
+
+        for i in 0..chunks {
+            let offset = i * 8;
+            let va = f32x8::from(*(a_ptr.add(offset) as *const [f32; 8]));
+            let vb = f32x8::from(*(b_ptr.add(offset) as *const [f32; 8]));
+            let vc = f32x8::from(*(c_ptr.add(offset) as *const [f32; 8]));
+            let result = va * vb + vc;
+            *(out_ptr.add(offset) as *mut [f32; 8]) = result.into();
+        }
+    }
+
+    for i in (chunks * 8)..len {
+        out[i] = a[i] * b[i] + c[i];
+    }
+}
+
+/// SIMD fused multiply-add (512-bit)
+///
+/// ### Params
+///
+/// * `a`: The first input array.
+/// * `b`: The second input array.
+/// * `c`: The third input array to add.
+/// * `out`: The output array for results.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+#[inline(always)]
+fn fused_mul_add_avx512(a: &[f32], b: &[f32], c: &[f32], out: &mut [f32]) {
+    use std::arch::x86_64::*;
+
+    let len = a.len();
+    let chunks = len / 16;
+
+    unsafe {
+        for i in 0..chunks {
+            let offset = i * 16;
+            let va = _mm512_loadu_ps(a.as_ptr().add(offset));
+            let vb = _mm512_loadu_ps(b.as_ptr().add(offset));
+            let vc = _mm512_loadu_ps(c.as_ptr().add(offset));
+            let result = _mm512_fmadd_ps(va, vb, vc);
+            _mm512_storeu_ps(out.as_mut_ptr().add(offset), result);
+        }
+    }
+
+    for i in (chunks * 16)..len {
+        out[i] = a[i] * b[i] + c[i];
+    }
+}
+
+/// SIMD fused multiply-add (512-bit fallback)
+///
+/// ### Params
+///
+/// * `a`: The first input array.
+/// * `b`: The second input array.
+/// * `c`: The third input array to add.
+/// * `out`: The output array for results.
+#[cfg(not(all(target_arch = "x86_64", target_feature = "avx512f")))]
+#[inline(always)]
+fn fused_mul_add_avx512(a: &[f32], b: &[f32], c: &[f32], out: &mut [f32]) {
+    fused_mul_add_avx2(a, b, c, out)
+}
+
+/// SIMD fused multiply-add (dispatch)
+///
+/// ### Params
+///
+/// * `a`: The first input array.
+/// * `b`: The second input array.
+/// * `c`: The third input array to add.
+/// * `out`: The output array for results.
+#[inline]
+pub fn fused_mul_add_simd(a: &[f32], b: &[f32], c: &[f32], out: &mut [f32]) {
+    match detect_simd_level() {
+        SimdLevel::Avx512 => fused_mul_add_avx512(a, b, c, out),
+        SimdLevel::Avx2 => fused_mul_add_avx2(a, b, c, out),
+        SimdLevel::Sse => fused_mul_add_sse(a, b, c, out),
+        SimdLevel::Scalar => fused_mul_add_scalar(a, b, c, out),
+    }
+}
 
 ////////////
 // Params //
 ////////////
 
 /// HotSpot parameters
-///
-/// ### Fields
-///
-/// **General**
-///
-/// * `knn_method` - Which of the kNN methods to use. One of `"annoy"`, `"hnsw"`
-///   or `"nndescent"`.
-/// * `ann_dist` - Approximate nearest neighbour distance measure. One of
-///   `"euclidean"` or `"cosine"`.
-/// * `k` - Number of neighbours to search
-///
-/// **Annoy**
-///
-/// * `n_tree` - Number of trees for the generation of the index
-/// * `search_budget` - Search budget during querying
-///
-/// **NN Descent**
-///
-/// * `max_iter` - Maximum iterations for the algorithm
-/// * `rho` - Sampling rate for the algorithm
-/// * `delta` - Early termination criterium
-///
-/// **HotSpot**
-///
 /// * `model` - The model to use for modelling the GEX. Choice of
 ///   `"danb"`, `"bernoulli"` or `"normal"`.
 /// * `normalise` - Shall the data be normalised.
+/// * `knn_params` - The knnParams via the `KnnParams` structure.
 pub struct HotSpotParams {
-    // hotspot parameters
+    /// The model to use for modelling the GEX. Choice of `"danb"`,
+    /// `"bernoulli"` or `"normal"`.
     pub model: String,
+    /// Shall the data be normalised
     pub normalise: bool,
-    // knn params
+    /// Parameters for the various approximate nearest neighbour searches
+    /// in ann-search-rs
     pub knn_params: KnnParams,
 }
 
@@ -55,6 +648,7 @@ pub struct HotSpotParams {
 // Helpers //
 /////////////
 
+/// Gene expression module to use for HotSpot
 #[derive(Debug, Clone)]
 pub enum GexModel {
     /// Use depth-adjusted negative binomial model
@@ -84,32 +678,26 @@ pub fn parse_gex_model(s: &str) -> Option<GexModel> {
 }
 
 /// Structure for the gene results
-///
-/// ### Fields
-///
-/// * `gene_idx` - Gene index of the analysed gene
-/// * `c` - Geary's C statistic for this gene
-/// * `z` - Z-score for this gene
-/// * `pval` - P-value based on the Z-score
-/// * `fdr` - False discovery corrected pvals
 #[derive(Debug, Clone)]
 pub struct HotSpotGeneRes {
+    /// Gene index of the analysed gene
     pub gene_idx: Vec<usize>,
+    /// Geary's C statistic for this gene
     pub c: Vec<f64>,
+    /// Z-score for this gene
     pub z: Vec<f64>,
+    /// P-value for this gene
     pub pval: Vec<f64>,
+    /// FDR for this gene
     pub fdr: Vec<f64>,
 }
 
 /// Structure for pair-wise correlations
-///
-/// ### Fields
-///
-/// * `cor` - Symmetric matrix with cor coefficients (N_genes x N_genes)
-/// * `z_scores` - Symmetric matrix with Z scores (N_genex x N_genes)
 #[derive(Debug, Clone)]
 pub struct HotSpotPairRes {
+    /// Symmetric matrix with cor coefficients (N_genes x N_genes)
     pub cor: Mat<f32>,
+    /// Symmetric matrix with Z scores (N_genex x N_genes)
     pub z_scores: Mat<f32>,
 }
 
@@ -304,11 +892,7 @@ fn local_cov_weights(vals: &[f32], neighbours: &[Vec<usize>], weights: &[Vec<f32
 ///
 /// Maximum possible local covariance
 fn compute_local_cov_max(node_degrees: &[f32], vals: &[f32]) -> f32 {
-    let mut tot = 0.0;
-    for i in 0..node_degrees.len() {
-        tot += node_degrees[i] * vals[i] * vals[i];
-    }
-    tot / 2.0
+    fused_mul_square_sum_simd(node_degrees, vals) / 2.0
 }
 
 /// Center (Z-score) the values
@@ -324,9 +908,7 @@ fn compute_local_cov_max(node_degrees: &[f32], vals: &[f32]) -> f32 {
 fn center_values(vals: &mut [f32], mu: &[f32], var: &[f32]) {
     assert_same_len!(vals, mu, var);
 
-    for i in 0..vals.len() {
-        vals[i] = (vals[i] - mu[i]) / var[i].sqrt();
-    }
+    center_values_simd(vals, mu, var);
 }
 
 //////////////////
@@ -559,7 +1141,7 @@ fn danb_model(
     n_cells: usize,
 ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let n = n_cells as f32;
-    let total: f32 = umi_counts.iter().sum();
+    let total: f32 = sum_simd_f32(umi_counts);
     let tj: f32 = gene.data_raw.iter().map(|&x| x as f32).sum();
 
     let mu: Vec<f32> = umi_counts.iter().map(|&ti| tj * ti / total).collect();
@@ -577,7 +1159,7 @@ fn danb_model(
     }
 
     let vv = sum_sq / (n - 1.0);
-    let tis_sq_sum: f32 = umi_counts.iter().map(|&ti| ti.powi(2)).sum();
+    let tis_sq_sum: f32 = sum_squares_simd_f32(umi_counts);
     let mut size = ((tj * tj) / total) * (tis_sq_sum / total) / ((n - 1.0) * vv - tj);
 
     if size < 0.0 {

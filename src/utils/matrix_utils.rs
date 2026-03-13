@@ -1,3 +1,5 @@
+//! faer matrix transformation utils. Concantenations, row removals, etc.
+
 use faer::{Mat, MatRef, concat};
 
 use crate::prelude::*;
@@ -273,4 +275,106 @@ where
     }
 
     result
+}
+
+/// Convert faer matrix to flat row-major layout
+///
+/// Helper function that is used to flatten structures into a row-major layout
+/// for certain other functions that expect flat row-major layout.
+///
+/// ### Params
+///
+/// * `mat` - Matrix in N×d layout (cells × features)
+///
+/// ### Returns
+///
+/// Flat vector containing all data in row-major order
+pub fn mat_to_flat_row_major<T>(mat: MatRef<T>) -> Vec<T>
+where
+    T: BixverseFloat,
+{
+    let n = mat.nrows();
+    let d = mat.ncols();
+    let mut flat = Vec::with_capacity(n * d);
+
+    for row in 0..n {
+        for col in 0..d {
+            flat.push(mat[(row, col)]);
+        }
+    }
+
+    flat
+}
+
+/// Convert flat row-major layout back to faer matrix
+///
+/// ### Params
+///
+/// * `flat` - Flat data in row-major order
+/// * `nrows` - Number of rows
+/// * `ncols` - Number of columns
+///
+/// ### Returns
+///
+/// Faer Mat in nrows × ncols shape
+pub fn flat_row_major_to_mat<T>(flat: &[T], nrows: usize, ncols: usize) -> Mat<T>
+where
+    T: BixverseFloat,
+{
+    assert_eq!(
+        flat.len(),
+        nrows * ncols,
+        "Flat data size doesn't match dimensions"
+    );
+
+    Mat::from_fn(nrows, ncols, |i, j| flat[i * ncols + j])
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests_matrix_utils {
+    use super::*;
+    use approx::assert_relative_eq;
+
+    #[test]
+    fn test_mat_to_flat_row_major() {
+        let mat = Mat::from_fn(2, 3, |i, j| (i * 3 + j) as f32);
+        // Mat is:
+        // [[0, 1, 2],
+        //  [3, 4, 5]]
+
+        let flat = mat_to_flat_row_major(mat.as_ref());
+        assert_eq!(flat, vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn test_flat_row_major_to_mat() {
+        let flat = vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0];
+        let mat = flat_row_major_to_mat(&flat, 2, 3);
+
+        assert_eq!(mat.nrows(), 2);
+        assert_eq!(mat.ncols(), 3);
+
+        for i in 0..2 {
+            for j in 0..3 {
+                assert_eq!(mat[(i, j)], (i * 3 + j) as f32);
+            }
+        }
+    }
+
+    #[test]
+    fn test_round_trip() {
+        let original = Mat::from_fn(3, 4, |i, j| (i as f32) * 0.5 + (j as f32) * 0.1);
+        let flat = mat_to_flat_row_major(original.as_ref());
+        let restored = flat_row_major_to_mat(&flat, 3, 4);
+
+        for i in 0..3 {
+            for j in 0..4 {
+                assert_relative_eq!(original[(i, j)], restored[(i, j)], epsilon = 1e-7);
+            }
+        }
+    }
 }

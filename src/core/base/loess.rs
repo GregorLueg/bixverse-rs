@@ -1,21 +1,21 @@
+//! Locally Estimated Scatterplot Smoothing (LOESS) implementation
+
 use rayon::prelude::*;
 
 use crate::prelude::*;
 
 /// Structure to store the Loess results
-///
-/// ### Params
-///
-/// * `fitted_vals` - The values fitted by the function.
-/// * `residuals` - The residuals.
-/// * `valid_indices` - Which index positions were valid.
 #[derive(Debug, Clone)]
 pub struct LoessRes<T> {
+    /// The values fitted by the function.
     pub fitted_vals: Vec<T>,
+    /// The residuals.
     pub residuals: Vec<T>,
+    /// Which index positions were valid.
     pub valid_indices: Vec<usize>,
 }
 
+/// Which LoessFunction to use
 #[derive(Debug, Clone)]
 pub enum LoessFunc {
     /// Linear version of the Loess function

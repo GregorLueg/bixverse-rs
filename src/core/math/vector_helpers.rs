@@ -1,3 +1,5 @@
+//! Various helper functions that work on vectors in Rust
+
 use num_traits::Float;
 
 use crate::prelude::BixverseFloat;
@@ -114,4 +116,55 @@ where
     let mean: T = x.iter().copied().sum::<T>() / n;
     let variance = x.iter().map(|&val| (val - mean).powi(2)).sum::<T>() / (n - T::one());
     variance.sqrt()
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rank_vector() {
+        let vec = vec![3.0, 1.0, 2.0, 3.0];
+        // Ranks should account for ties:
+        // sorted: 1.0 (idx 1), 2.0 (idx 2), 3.0 (idx 0), 3.0 (idx 3)
+        // ranks: 1.0 -> 1.0, 2.0 -> 2.0, 3.0 -> 3.5, 3.0 -> 3.5
+        let ranks = rank_vector(&vec);
+        assert_eq!(ranks, vec![3.5, 1.0, 2.0, 3.5]);
+
+        let empty: Vec<f64> = vec![];
+        assert_eq!(rank_vector(&empty), Vec::<f64>::new());
+    }
+
+    #[test]
+    fn test_median() {
+        let vec_odd = vec![1.0, 3.0, 2.0];
+        assert_eq!(median(&vec_odd), Some(2.0));
+
+        let vec_even = vec![1.0, 4.0, 2.0, 3.0];
+        assert_eq!(median(&vec_even), Some(2.5));
+
+        let empty: Vec<f64> = vec![];
+        assert_eq!(median(&empty), None);
+    }
+
+    #[test]
+    fn test_mad() {
+        let vec = vec![1.0, 1.0, 2.0, 2.0, 4.0, 6.0, 9.0];
+        // Median is 2.0
+        // Absolute deviations: [1.0, 1.0, 0.0, 0.0, 2.0, 4.0, 7.0]
+        // Sorted deviations: [0.0, 0.0, 1.0, 1.0, 2.0, 4.0, 7.0]
+        // MAD (median of deviations) is 1.0
+        assert_eq!(mad(&vec), Some(1.0));
+    }
+
+    #[test]
+    fn test_standard_deviation() {
+        let vec = vec![2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0];
+        let std = standard_deviation(&vec);
+        assert!((std - 2.1380899352).abs() < 1e-6);
+    }
 }

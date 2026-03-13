@@ -1,3 +1,6 @@
+//! Contains the Scrublet method for detections of doublets in single cell,
+//! see Wollock, et al., Cell Syst., 2019
+
 use faer::{Mat, MatRef, concat};
 use half::f16;
 use indexmap::IndexSet;
@@ -55,25 +58,6 @@ pub type FinalScrubletRes = (
 
 /// Structure to store the Scrublet parameters
 ///
-/// ### Fields
-///
-/// **General parameters:**
-///
-/// * `log_transform` - Shall the data be log normalised
-/// * `mean_center` - Shall the data be mean-centred
-/// * `normalise_variance` - Shall the data be variance normalised
-/// * `target_size` - Optional target size. If not provided, will default to
-///   the mean library size of the cells.
-///
-/// **HVG Detection:**
-///
-/// * `min_gene_var_pctl` - Percentile threshold for highly variable genes.
-/// * `hvg_method` - Method for HVG selection. One of `"vst"`, `"mvb"`, or
-///   `"dispersion"`.
-/// * `loess_span` - Span parameter for loess fitting in VST method.
-/// * `clip_max` - Optional maximum value for clipping in variance
-///   stabilisation.
-///
 /// **Doublet Simulation:**
 ///
 /// * `sim_doublet_ratio` - Number of doublets to simulate relative to the
@@ -100,84 +84,78 @@ pub type FinalScrubletRes = (
 /// * `knn_params` - All the parameters related to the kNN graph generation
 #[derive(Clone, Debug)]
 pub struct ScrubletParams {
-    // general params
+    /// Shall the counts be log-transformed
     pub log_transform: bool,
+    /// Shall the data be mean-centred
     pub mean_center: bool,
+    /// Shall the data be variance normalised
     pub normalise_variance: bool,
+    /// Optional target size. If not provided, will default to the mean library
+    /// size of the cells.
     pub target_size: Option<f32>,
-    // hvg detection
+    /// Percentile threshold for highly variable genes.
     pub min_gene_var_pctl: f32,
+    /// Method for HVG selection. One of `"vst"`, `"mvb"`, or `"dispersion"`.
     pub hvg_method: String,
+    /// Span parameter for loess fitting in VST method.
     pub loess_span: f64,
+    /// Optional maximum value for clipping in variance stabilisation.
     pub clip_max: Option<f32>,
-
-    // doublet generation
+    /// Number of doublets to simulate relative to the number of observed cells
+    /// (e.g., 2.0 simulates 2x as many doublets).
     pub sim_doublet_ratio: f32,
+    /// Expected doublet rate for the experiment (typically 0.05-0.10 depending
+    /// on cell loading).
     pub expected_doublet_rate: f32,
+    /// Uncertainty in the expected doublet rate.
     pub stdev_doublet_rate: f32,
-
-    // doublet calling
+    /// Number of bins for histogram-based automatic threshold detection
+    /// (typically 50-100).
     pub n_bins: usize,
+    /// Optional manual doublet score threshold. If `None`, threshold is
+    /// automatically detected from simulated doublet score distribution.
     pub manual_threshold: Option<f32>,
-
-    // pca
+    /// Number of principal components to use for embedding.
     pub no_pcs: usize,
+    /// Whether to use randomized SVD (faster) vs exact SVD.
     pub random_svd: bool,
-
-    // knn
+    /// Parameters for the various approximate nearest neighbour searches
+    /// in ann-search-rs
     pub knn_params: KnnParams,
 }
 
 /// Result structure for Scrublet doublet detection
 ///
 /// Contains predictions, scores, and statistics from the Scrublet algorithm.
-///
-/// ### Fields
-///
-/// **Predictions:**
-///
-/// * `predicted_doublets` - Boolean vector indicating which observed cells are
-///   predicted as doublets (true = doublet, false = singlet).
-///
-/// **Doublet Scores:**
-///
-/// * `doublet_scores_obs` - Doublet scores for each observed cell. Higher
-///   scores indicate higher likelihood of being a doublet.
-/// * `doublet_scores_sim` - Doublet scores for simulated doublets. Used to
-///   determine the threshold and validate detection performance.
-///
-/// **Confidence Metrics:**
-///
-/// * `doublet_errors_obs` - Standard errors for doublet scores of observed
-///   cells. Indicates uncertainty in each score.
-/// * `z_scores` - Z-scores for observed cells, calculated as
-///   `(score - threshold) / error`. Higher absolute values indicate more
-///   confident predictions.
-///
-/// **Threshold:**
-///
-/// * `threshold` - Doublet score threshold used to classify cells. Cells with
-///   scores above this value are called doublets.
-///
-/// **Detection Statistics:**
-///
-/// * `detected_doublet_rate` - Fraction of observed cells called as doublets.
-/// * `detectable_doublet_fraction` - Fraction of simulated doublets with scores
-///   above the threshold. Indicates what proportion of doublets can be
-///   detected.
-/// * `overall_doublet_rate` - Estimated overall doublet rate, calculated as
-///   `detected_doublet_rate / detectable_doublet_fraction`. Should roughly
-///   match the expected doublet rate if detection is working well.
 #[derive(Clone, Debug)]
 pub struct ScrubletResult {
+    /// Boolean vector indicating which observed cells are predicted as doublets
+    /// (true = doublet, false = singlet).
     pub predicted_doublets: Vec<bool>,
+    /// Doublet scores for each observed cell. Higher scores indicate higher
+    /// likelihood of being a doublet.
     pub doublet_scores_obs: Vec<f32>,
+    /// Doublet scores for simulated doublets. Used to determine the threshold
+    /// and validate detection performance.
     pub doublet_scores_sim: Vec<f32>,
+    /// Standard errors for doublet scores of observed cells. Indicates
+    /// uncertainty in each score.
     pub doublet_errors_obs: Vec<f32>,
+    /// Z-scores for observed cells, calculated as
+    /// `(score - threshold) / error`. Higher absolute values indicate more
+    /// confident predictions.
     pub z_scores: Vec<f32>,
+    /// Doublet score threshold used to classify cells. Cells with scores above
+    /// this value are called doublets.
     pub threshold: f32,
+    /// Fraction of observed cells called as doublets.
     pub detected_doublet_rate: f32,
+    /// Fraction of simulated doublets with scores above the threshold.
+    /// Indicates what proportion of doublets can be detected.
     pub detectable_doublet_fraction: f32,
+    /// Estimated overall doublet rate, calculated as
+    /// `detected_doublet_rate / detectable_doublet_fraction`. Should roughly
+    /// match the expected doublet rate if detection is working well.
     pub overall_doublet_rate: f32,
 }
 

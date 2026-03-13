@@ -1,3 +1,9 @@
+//! Implementation of the BBKNN approach for single cell batch correction via
+//! Polański, et al., Bioinformatics, 2019. Compared to some of the other
+//! methods, this one does not generate a batch-corrected embedding space,
+//! but a batch-corrected kNN graph for subsequent usage in clustering and
+//! visualisations.
+
 use ann_search_rs::utils::dist::{Dist, parse_ann_dist};
 use ann_search_rs::*;
 use extendr_api::List;
@@ -17,26 +23,20 @@ const SMOOTH_K_TOLERANCE: f32 = 1e-5;
 const MIN_K_DIST_SCALE: f32 = 1e-3;
 
 /// Structure to store the BBKNN pamareters
-///
-/// ### Fields
-///
-/// * `neighbours_within_batch` - How many neighbours per batch to identify
-/// * `set_op_mix_ratio` - Mixing ratio between union (1.0) and intersection
-///   (0.0).
-/// * `local_connectivity` - UMAP connectivity computation parameter, how many
-///   nearest neighbours of each cell are assumed to be fully connected.
-/// * `trim` - Trim the neighbours of each cell to these many top
-///   connectivities. May help with population independence and improve the
-///   tidiness of clustering.
-/// * `knn_params` - The KnnParams that contains all the hyperparameter for the
-///   various KnnIndices that are implemented.
 #[derive(Clone, Debug)]
 pub struct BbknnParams {
+    /// How many neighbours per batch to identify
     pub neighbours_within_batch: usize,
+    /// Mixing ratio between union (1.0) and intersection (0.0).
     pub set_op_mix_ratio: f32,
+    /// UMAP connectivity computation parameter, how many nearest neighbours of
+    /// each cell are assumed to be fully connected.
     pub local_connectivity: f32,
+    /// Trim the neighbours of each cell to these many to connectivities. May
+    /// help with population independence and improve the tidiness of clustering.
     pub trim: Option<usize>,
-    // knn parameters
+    /// Parameters for the various approximate nearest neighbour searches
+    /// in ann-search-rs
     pub knn_params: KnnParams,
 }
 
@@ -468,9 +468,9 @@ fn compute_membership_strengths(
 ///
 /// Symmetrised connectivity matrix in CSR format
 fn apply_set_operations(
-    connectivities: CompressedSparseData<f32>,
+    connectivities: CompressedSparseData2<f32>,
     set_op_mix_ratio: f32,
-) -> CompressedSparseData<f32> {
+) -> CompressedSparseData2<f32> {
     let (nrow, ncol) = connectivities.shape;
     let transpose = {
         let csc_transpose = connectivities.transform(); // A^T in CSC
@@ -521,9 +521,9 @@ fn apply_set_operations(
 ///
 /// Trimmed connectivity matrix in CSR format
 fn trim_graph(
-    mut connectivities: CompressedSparseData<f32>,
+    mut connectivities: CompressedSparseData2<f32>,
     trim: usize,
-) -> CompressedSparseData<f32> {
+) -> CompressedSparseData2<f32> {
     let n = connectivities.shape.0;
     let mut thresholds = vec![0.0f32; n];
 
@@ -583,14 +583,14 @@ fn trim_graph(
 ///
 /// ### Returns
 ///
-/// A tuple of two CompressedSparseData with `(indices, connectivities)`.
+/// A tuple of two CompressedSparseData2 with `(indices, connectivities)`.
 pub fn bbknn(
     mat: MatRef<f32>,
     batch_labels: &[usize],
     bbknn_params: &BbknnParams,
     seed: usize,
     verbose: bool,
-) -> (CompressedSparseData<f32>, CompressedSparseData<f32>) {
+) -> (CompressedSparseData2<f32>, CompressedSparseData2<f32>) {
     // parse it and worst case, I default to Annoy
     let knn_method = parse_knn_method(&bbknn_params.knn_params.knn_method).unwrap_or_default();
 

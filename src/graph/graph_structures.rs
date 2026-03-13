@@ -1,3 +1,7 @@
+//! Structures for graphs within bixverse.
+
+#![allow(dead_code)]
+
 use faer::{Mat, MatRef};
 use petgraph::Graph;
 use rayon::prelude::*;
@@ -19,10 +23,11 @@ use crate::prelude::*;
 /// * `adjacency` - Sparse CSR representation of the graph with `f16` as
 ///   weights.
 /// * `num_nodes` - Number of nodes represented in the graph.
+/// * `directed` - Whether the graph is directed or not.
 #[derive(Clone, Debug)]
 pub struct SparseGraph<T: Clone> {
     /// Adjacency matrix in CSR (symmetric for undirected graphs)
-    adjacency: CompressedSparseData<T>,
+    adjacency: CompressedSparseData2<T>,
     num_nodes: usize,
     directed: bool,
 }
@@ -31,7 +36,19 @@ impl<T> SparseGraph<T>
 where
     T: Clone + BixverseFloat + std::iter::Sum,
 {
-    pub fn new(num_nodes: usize, adjacency: CompressedSparseData<T>, directed: bool) -> Self {
+    /// Generate a new SparseGraph
+    ///
+    /// ### Params
+    ///
+    /// * `num_nodes` - Number of nodes in the graph
+    /// * `adjacency` - CompressedSparseData2 containing the adjacency
+    ///   information
+    /// * `directed` - Is this a directed or undirected graph
+    ///
+    /// ### Returns
+    ///
+    /// Initialised self
+    pub fn new(num_nodes: usize, adjacency: CompressedSparseData2<T>, directed: bool) -> Self {
         Self {
             adjacency,
             num_nodes,
@@ -463,27 +480,21 @@ where
 /////////////////////////
 
 /// NodeData structure
-///
-/// ### Fields
-///
-/// * `name` - name of the node.
-/// * `node_type` - type of the node
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // clippy is wrongly complaining here
 pub struct NodeData<'a> {
+    /// Name of the node.
     pub name: &'a str,
+    /// Type of the node
     pub node_type: &'a str,
 }
 
 /// EdgeData structure
-///
-/// ### Fields
-///
-/// * `edge_type` - type of the edge.
-/// * `weight` - weight of the edge.
 #[derive(Debug, Clone)]
 pub struct EdgeData<'a, T> {
+    /// Type of the edge.
     pub edge_type: &'a str,
+    /// Weight of the edge.
     pub weight: &'a T,
 }
 
@@ -734,4 +745,65 @@ where
     let adjacency = coo_to_csr(&rows, &cols, &vals, (n_nodes, n_nodes));
 
     SparseGraph::new(n_nodes, adjacency, false)
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::math::sparse::CompressedSparseData2;
+    use faer::Mat;
+
+    #[test]
+    fn test_sparse_graph_properties() {
+        // Simple line graph: 0 <-> 1 <-> 2
+        let data = vec![1.0, 1.0, 1.0, 1.0];
+        let indices = vec![1, 0, 2, 1]; // neighbors
+        let indptr = vec![0, 1, 3, 4]; // node offsets
+        let csr =
+            CompressedSparseData2::<f64, f64>::new_csr(&data, &indices, &indptr, None, (3, 3));
+
+        let graph = SparseGraph::new(3, csr, false);
+
+        assert_eq!(graph.get_node_degree(0), 1);
+        assert_eq!(graph.get_node_degree(1), 2);
+        assert_eq!(graph.total_weight(), 2.0); // 2 undirected edges of weight 1.0
+
+        let (n0_neighbors, n0_weights) = graph.get_neighbours(0);
+        assert_eq!(n0_neighbors, &[1]);
+        assert_eq!(n0_weights, &[1.0]);
+    }
+
+    #[test]
+    fn test_adjacency_to_laplacian() {
+        // Adjacency for 0 <-> 1
+        let mut adj: Mat<f64> = Mat::zeros(2, 2);
+        adj[(0, 1)] = 1.0;
+        adj[(1, 0)] = 1.0;
+
+        // Unnormalized Laplacian: L = D - A
+        // D is [[1, 0], [0, 1]]
+        let lap = adjacency_to_laplacian(&adj.as_ref(), false);
+
+        assert!((lap[(0, 0)] - 1.0).abs() < 1e-6);
+        assert!((lap[(1, 1)] - 1.0).abs() < 1e-6);
+        assert!((lap[(0, 1)] - (-1.0)).abs() < 1e-6);
+        assert!((lap[(1, 0)] - (-1.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_graph_from_strings() {
+        let nodes = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+        let from = vec!["A".to_string(), "B".to_string()];
+        let to = vec!["B".to_string(), "C".to_string()];
+        let weights = vec![1.5, 2.5];
+
+        let graph = graph_from_strings(&nodes, &from, &to, Some(&weights), false);
+
+        assert_eq!(graph.node_count(), 3);
+        assert_eq!(graph.edge_count(), 2);
+    }
 }

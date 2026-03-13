@@ -3,14 +3,20 @@
 
 use extendr_api::*;
 
+use crate::core::math::sparse::parse_compressed_sparse_format;
 use crate::single_cell::sc_analysis::hdwgcna_meta_cells::MetaCellParams;
 use crate::single_cell::sc_analysis::hotspot::HotSpotParams;
 use crate::single_cell::sc_analysis::milo_r::MiloRParams;
+use crate::single_cell::sc_analysis::scenic::{
+    ExtraTreesConfig, GradientBoostingConfig, RandomForestConfig, RegressionLearner, ScenicParams,
+};
 use crate::single_cell::sc_analysis::seacells::SEACellsParams;
 use crate::single_cell::sc_analysis::super_cells::SuperCellParams;
 use crate::single_cell::sc_analysis::vision::SignatureGenes;
 use crate::single_cell::sc_batch_correction::fast_mnn::FastMnnParams;
+use crate::single_cell::sc_batch_correction::harmony::HarmonyParams;
 use crate::single_cell::sc_data::data_io::MinCellQuality;
+use crate::single_cell::sc_data::h5ad_multifile_io::H5adFileTask;
 use crate::single_cell::sc_data::sc_synthetic_data::CellTypeConfig;
 use crate::single_cell::sc_processing::doublet_detection::BoostParams;
 use crate::single_cell::sc_processing::knn::KnnParams;
@@ -885,6 +891,452 @@ impl HotSpotParams {
             model,
             normalise,
             knn_params,
+        }
+    }
+}
+
+/////////////
+// Harmony //
+/////////////
+
+impl HarmonyParams {
+    /// Generate HarmonyParams from an R list.
+    ///
+    /// Should values not be found within the List, the parameters will default
+    /// to the values defined in `HarmonyParams::default()`.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the Harmony parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The `HarmonyParams` with all parameters set.
+    pub fn from_r_list(r_list: List) -> Self {
+        let defaults = Self::default();
+        let params_list = r_list.into_hashmap();
+
+        let k = params_list
+            .get("k")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.k);
+
+        let sigma = params_list
+            .get("sigma")
+            .and_then(|v| v.as_real_vector())
+            .map(|v| v.iter().map(|&x| x as f32).collect())
+            .unwrap_or(defaults.sigma);
+
+        let theta = params_list
+            .get("theta")
+            .and_then(|v| v.as_real_vector())
+            .map(|v| v.iter().map(|&x| x as f32).collect())
+            .unwrap_or(defaults.theta);
+
+        let lambda = params_list
+            .get("lambda")
+            .and_then(|v| v.as_real_vector())
+            .map(|v| v.iter().map(|&x| x as f32).collect())
+            .unwrap_or(defaults.lambda);
+
+        let block_size = params_list
+            .get("block_size")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.block_size);
+
+        let max_iter_kmeans = params_list
+            .get("max_iter_kmeans")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.max_iter_kmeans);
+
+        let max_iter_harmony = params_list
+            .get("max_iter_harmony")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.max_iter_harmony);
+
+        let epsilon_kmeans = params_list
+            .get("epsilon_kmeans")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.epsilon_kmeans);
+
+        let epsilon_harmony = params_list
+            .get("epsilon_harmony")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.epsilon_harmony);
+
+        let window_size = params_list
+            .get("window_size")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.window_size);
+
+        Self {
+            k,
+            sigma,
+            theta,
+            lambda,
+            block_size,
+            max_iter_kmeans,
+            max_iter_harmony,
+            epsilon_kmeans,
+            epsilon_harmony,
+            window_size,
+        }
+    }
+}
+
+////////////////////
+// SCENIC - Trees //
+////////////////////
+
+impl RandomForestConfig {
+    /// Generate RandomForestConfig from an R list.
+    ///
+    /// Should values not be found within the List, the parameters will default
+    /// to the values defined in `RandomForestConfig::default()`.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the RandomForest parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The `RandomForestConfig` with all parameters set.
+    pub fn from_r_list(r_list: List) -> Self {
+        let defaults = Self::default();
+        let params_list = r_list.into_hashmap();
+        let n_trees = params_list
+            .get("n_trees")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.n_trees);
+        let min_samples_leaf = params_list
+            .get("min_samples_leaf")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.min_samples_leaf);
+        let n_features_split = params_list
+            .get("n_features_split")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.n_features_split);
+        let subsample_rate = params_list
+            .get("subsample_rate")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.subsample_rate);
+        let bootstrap = params_list
+            .get("bootstrap")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.bootstrap);
+        let max_depth = params_list
+            .get("max_depth")
+            .and_then(|v| v.as_integer())
+            .map(|v| Some(v as usize))
+            .unwrap_or(defaults.max_depth);
+        let subsample_frac = params_list
+            .get("subsample_frac")
+            .and_then(|v| v.as_real())
+            .map(|v| Some(v as f32))
+            .unwrap_or(defaults.subsample_frac);
+        Self {
+            n_trees,
+            min_samples_leaf,
+            n_features_split,
+            subsample_rate,
+            bootstrap,
+            max_depth,
+            subsample_frac,
+        }
+    }
+}
+
+impl ExtraTreesConfig {
+    /// Generate ExtraTreesConfig from an R list.
+    ///
+    /// Should values not be found within the List, the parameters will default
+    /// to the values defined in `ExtraTreesConfig::default()`.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the ExtraTrees parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The `ExtraTreesConfig` with all parameters set.
+    pub fn from_r_list(r_list: List) -> Self {
+        let defaults = Self::default();
+        let params_list = r_list.into_hashmap();
+        let n_trees = params_list
+            .get("n_trees")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.n_trees);
+        let min_samples_leaf = params_list
+            .get("min_samples_leaf")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.min_samples_leaf);
+        let n_features_split = params_list
+            .get("n_features_split")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.n_features_split);
+        let n_thresholds = params_list
+            .get("n_thresholds")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.n_thresholds);
+        let max_depth = params_list
+            .get("max_depth")
+            .and_then(|v| v.as_integer())
+            .map(|v| Some(v as usize))
+            .unwrap_or(defaults.max_depth);
+        let subsample_frac = params_list
+            .get("subsample_frac")
+            .and_then(|v| v.as_real())
+            .map(|v| Some(v as f32))
+            .unwrap_or(defaults.subsample_frac);
+        Self {
+            n_trees,
+            min_samples_leaf,
+            n_features_split,
+            n_thresholds,
+            max_depth,
+            subsample_frac,
+        }
+    }
+}
+
+impl GradientBoostingConfig {
+    /// Generate GradientBoostingConfig from an R list.
+    ///
+    /// Should values not be found within the List, the parameters will default
+    /// to the values defined in `GradientBoostingConfig::default()`.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the GradientBoosting parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The `GradientBoostingConfig` with all parameters set.
+    pub fn from_r_list(r_list: List) -> Self {
+        let defaults = Self::default();
+        let params_list = r_list.into_hashmap();
+        let n_trees_max = params_list
+            .get("n_trees_max")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.n_trees_max);
+        let learning_rate = params_list
+            .get("learning_rate")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.learning_rate);
+        let max_depth = params_list
+            .get("max_depth")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.max_depth);
+        let min_samples_leaf = params_list
+            .get("min_samples_leaf")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.min_samples_leaf);
+        let early_stop_window = params_list
+            .get("early_stop_window")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.early_stop_window);
+        let subsample_rate = params_list
+            .get("subsample_rate")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.subsample_rate);
+        let n_features_split = params_list
+            .get("n_features_split")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.n_features_split);
+        Self {
+            n_trees_max,
+            learning_rate,
+            max_depth,
+            min_samples_leaf,
+            early_stop_window,
+            subsample_rate,
+            n_features_split,
+        }
+    }
+}
+
+/////////////////////
+// SCENIC - Params //
+/////////////////////
+
+impl ScenicParams {
+    /// Generate `ScenicParams` from an R list.
+    ///
+    /// The list is expected to contain fields for all top-level SCENIC
+    /// parameters plus the fields required by the chosen regression learner.
+    /// Tree configuration parameters are read from the same flat list as the
+    /// top-level parameters, following the same convention as `KnnParams` in
+    /// other parameter structs.
+    ///
+    /// The `learner_type` field selects the regression learner:
+    /// `"extratrees"` maps to `ExtraTreesConfig`, anything else (including the
+    /// default `"randomforest"`) maps to `RandomForestConfig`. Learner
+    /// parameters are then parsed from the same list via the respective
+    /// `from_r_list` implementation.
+    ///
+    /// Should values not be found within the list, parameters will default to
+    /// the values defined in `ScenicParams::default()`.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The R list with the SCENIC parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The `ScenicParams` with all parameters set.
+    pub fn from_r_list(r_list: List) -> Self {
+        let defaults = Self::default();
+        let params = r_list.clone().into_hashmap();
+
+        let min_counts = params
+            .get("min_counts")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.min_counts);
+
+        let min_cells = params
+            .get("min_cells")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.min_cells);
+
+        let gene_batch_strategy = params
+            .get("gene_batch_strategy")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or(defaults.gene_batch_strategy);
+
+        let gene_batch_size = params
+            .get("gene_batch_size")
+            .and_then(|v| v.as_integer())
+            .map(|v| Some(v as usize))
+            .unwrap_or(defaults.gene_batch_size);
+
+        let n_pcs = params
+            .get("n_pcs")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.n_pcs);
+
+        let n_subsample = params
+            .get("n_subsample")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.n_subsample);
+
+        let learner_type = params
+            .get("learner_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("randomforest");
+
+        let regression_learner = match learner_type.to_lowercase().as_str() {
+            "extratrees" => RegressionLearner::ExtraTrees(ExtraTreesConfig::from_r_list(r_list)),
+            _ => RegressionLearner::RandomForest(RandomForestConfig::from_r_list(r_list)),
+        };
+
+        Self {
+            min_counts,
+            min_cells,
+            regression_learner,
+            gene_batch_strategy,
+            gene_batch_size,
+            n_pcs,
+            n_subsample,
+        }
+    }
+}
+
+//////////////////
+// H5adFileTask //
+//////////////////
+
+impl H5adFileTask {
+    /// Generate an H5FileTask from an R list
+    ///
+    /// Expects: exp_id, h5_path, cs_type, no_cells, no_genes,
+    /// gene_local_to_universe (integer vector, NA for unmapped genes,
+    /// 0-indexed).
+    pub fn from_r_list(r_list: List) -> Self {
+        let map = r_list.into_hashmap();
+
+        let exp_id = map
+            .get("exp_id")
+            .and_then(|v| v.as_str())
+            .expect("exp_id missing or not a string")
+            .to_string();
+
+        let h5_path = map
+            .get("h5_path")
+            .and_then(|v| v.as_str())
+            .expect("h5_path missing or not a string")
+            .to_string();
+
+        let cs_type_str = map
+            .get("cs_type")
+            .and_then(|v| v.as_str())
+            .expect("cs_type missing or not a string");
+        let cs_type =
+            parse_compressed_sparse_format(cs_type_str).expect("cs_type must be 'csr' or 'csc'");
+
+        let no_cells = map
+            .get("no_cells")
+            .and_then(|v| v.as_integer())
+            .expect("no_cells missing") as usize;
+
+        let no_genes = map
+            .get("no_genes")
+            .and_then(|v| v.as_integer())
+            .expect("no_genes missing") as usize;
+
+        let mapping_robj = map
+            .get("gene_local_to_universe")
+            .expect("gene_local_to_universe missing");
+        let mapping_raw: Vec<i32> = mapping_robj
+            .as_integer_slice()
+            .expect("gene_local_to_universe must be integer vector")
+            .to_vec();
+
+        // R NA_integer_ is i32::MIN
+        let gene_local_to_universe: Vec<Option<usize>> = mapping_raw
+            .into_iter()
+            .map(|v| {
+                if v == i32::MIN {
+                    None
+                } else {
+                    Some(v as usize)
+                }
+            })
+            .collect();
+
+        Self {
+            exp_id,
+            h5_path,
+            cs_type,
+            no_cells,
+            no_genes,
+            gene_local_to_universe,
         }
     }
 }

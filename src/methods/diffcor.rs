@@ -1,3 +1,5 @@
+//! Implementation of differential correlation method based on the Fisher method
+
 use faer::Mat;
 use rayon::prelude::*;
 
@@ -9,18 +11,15 @@ use crate::prelude::*;
 ////////////////
 
 /// Structure for DiffCor results
-///
-/// ### Fields
-///
-/// * `r_a` - Correlation coefficients of a
-/// * `r_b` - Correlation coefficients of b
-/// * `z_score` - Z-scores of the differential correlation
-/// * `p_vals` - Calculated p-values from the Z-scores
 #[derive(Clone, Debug)]
 pub struct DiffCorRes<T> {
+    /// Correlation coefficients of a
     pub r_a: Vec<T>,
+    /// Correlation coefficients of b
     pub r_b: Vec<T>,
+    /// Z-scores of the differential correlation
     pub z_score: Vec<T>,
+    /// Calculated p-values from the Z-scores
     pub p_vals: Vec<T>,
 }
 

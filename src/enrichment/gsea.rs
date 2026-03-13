@@ -1,9 +1,12 @@
+//! Gene set enrichment analysis based on the work of Korotkevich, et al.,
+//! bioRxiv, 2021.
+
 use rand::distr::Uniform;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rand_distr::Distribution;
 use rayon::prelude::*;
-use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
+use rustc_hash::{FxBuildHasher, FxHashMap};
 use statrs::distribution::{Beta, ContinuousCDF};
 use statrs::function::gamma::digamma;
 use std::ops::{Add, AddAssign};
@@ -32,60 +35,51 @@ pub type MultiLevelErrRes<T> = (Vec<T>, Vec<T>);
 /////////////
 
 /// Structure to store GSEA stats
-///
-/// ### Fields
-///
-/// * `es` - Enrichment score
-/// * `leading_edge` - The index positions of the leading edge genes
-/// * `top` - Top points for plotting purposes
-/// * `bottom` - Bottom points for plotting purposes
 #[derive(Clone, Debug)]
 pub struct GseaStats<T> {
+    /// Enrichment score
     pub es: T,
+    /// The index positions of the leading edge genes
     pub leading_edge: Vec<i32>,
+    /// Top points for plotting purposes
     pub top: Vec<T>,
+    /// Bottom points for plotting purposes
     pub bottom: Vec<T>,
 }
 
 /// Structure for final GSEA results from any algorithm
-///
-/// ### Fields
-///
-/// * `es` - Enrichment score
-/// * `nes` - Normalised enrichment score
-/// * `pvals` - The p-value for this pathway based on permutations
-/// * `n_more_extreme` - The number of permutations with higher/lower ES
-/// * `le_zero` - The number of permutation ES ≤ 0
-/// * `ge_zero` - The number of permutation ES ≥ 0
-/// * `size` - The size of the pathway
 #[derive(Clone, Debug)]
 pub struct GseaResults<'a, T> {
+    /// Enrichment score
     pub es: &'a [T],
+    /// Normalised enrichment score
     pub nes: Vec<Option<T>>,
+    /// The p-value for this pathway based on permutations
     pub pvals: Vec<T>,
+    /// The number of permutations with higher/lower ES
     pub n_more_extreme: Vec<usize>,
+    /// The number of permutation ES ≤ 0
     pub le_zero: Vec<usize>,
+    /// The number of permutation ES ≥ 0
     pub ge_zero: Vec<usize>,
+    /// The size of the pathway
     pub size: &'a [usize],
 }
 
 /// Structure for results from the different GSEA permutation methods
-///
-/// ### Fields
-///
-/// * `le_es` - The number of permutations less than the score
-/// * `ge_es` - The number of permutations greater than the score
-/// * `le_zero` - The number of permutation ES ≤ 0
-/// * `ge_zero` - The number of permutation ES ≥ 0
-/// * `le_zero_sum` - The sum of permuted enrichment scores that were ≤ 0
-/// * `ge_zero_sum` - The sum of permuted enrichment scores that were ≥ 0
 #[derive(Clone, Debug)]
 pub struct GseaBatchResults<T> {
+    /// The number of permutations less than the score
     pub le_es: Vec<usize>,
+    /// The number of permutations greater than the score
     pub ge_es: Vec<usize>,
+    /// The number of permutation ES ≤ 0
     pub le_zero: Vec<usize>,
+    /// The number of permutation ES ≥ 0
     pub ge_zero: Vec<usize>,
+    /// The sum of permuted enrichment scores that were ≤ 0
     pub le_zero_sum: Vec<T>,
+    /// The sum of permuted enrichment scores that were ≥ 0
     pub ge_zero_sum: Vec<T>,
 }
 
@@ -94,16 +88,13 @@ pub struct GseaBatchResults<T> {
 ////////////
 
 /// Structure to store GSEA params
-///
-/// ### Fields
-///
-/// * `gsea_param` - The GSEA parameter, usually 1.0
-/// * `max_size` - The maximum size of the allowed pathways
-/// * `min_size` - The minimum size of the allowed pathways
 #[derive(Clone, Debug)]
 pub struct GseaParams<T> {
+    /// The GSEA parameter, usually 1.0
     pub gsea_param: T,
+    /// The maximum size of the allowed pathways
     pub max_size: usize,
+    /// The minimum size of the allowed pathways
     pub min_size: usize,
 }
 
@@ -122,32 +113,61 @@ pub struct GseaParams<T> {
 ///
 /// Enrichment score value
 fn calc_es<T: BixverseFloat>(ranks: &[T], pathway_indices: &[usize]) -> T {
-    let mut ns = T::zero();
-    for p in pathway_indices {
-        ns += ranks[*p]
-    }
     let n = ranks.len();
     let k = pathway_indices.len();
-    let mut res = T::zero();
-    let mut cur = T::zero();
+
+    // fast path for empty or saturated pathways
+    if k == 0 || k == n {
+        return T::zero();
+    }
+
+    let mut ns = T::zero();
+    for &p in pathway_indices {
+        ns += ranks[p];
+    }
+
     let q1 = T::one() / T::from_usize(n - k).unwrap();
     let q2 = T::one() / ns;
-    let mut last: i64 = -1;
-    for p in pathway_indices {
-        cur -= q1 * T::from_i64(*p as i64 - last - 1).unwrap();
-        if cur.abs() > res.abs() {
-            res = cur;
+
+    let mut res = T::zero();
+    let mut res_abs = T::zero();
+    let mut cur = T::zero();
+
+    // track the next expected index to calculate gaps using purely unsigned
+    // math
+    let mut next_expected = 0;
+
+    for &p in pathway_indices {
+        let gap = p - next_expected;
+
+        // only apply penalty and check max if there was actually a gap
+        // (misses)
+        if gap > 0 {
+            cur -= q1 * T::from_usize(gap).unwrap();
+            let cur_abs = cur.abs();
+            if cur_abs > res_abs {
+                res = cur;
+                res_abs = cur_abs;
+            }
         }
-        cur += q2 * ranks[*p];
-        if cur.abs() > res.abs() {
+
+        // Apply reward (hit)
+        cur += q2 * ranks[p];
+        let cur_abs = cur.abs();
+        if cur_abs > res_abs {
             res = cur;
+            res_abs = cur_abs;
         }
-        last = *p as i64;
+
+        next_expected = p + 1;
     }
+
     res
 }
 
-/// Calculate the positive enrichment score (based on the fgsea C++ implementation)
+/// Calculate the positive enrichment score
+///
+/// Based on the fgsea C++ implementation
 ///
 /// ### Params
 ///
@@ -158,22 +178,42 @@ fn calc_es<T: BixverseFloat>(ranks: &[T], pathway_indices: &[usize]) -> T {
 ///
 /// Positive enrichment score value
 fn calc_positive_es<T: BixverseFloat>(ranks: &[T], pathway_indices: &[usize]) -> T {
-    let mut ns = T::zero();
-    for p in pathway_indices {
-        ns += ranks[*p]
-    }
     let n = ranks.len();
     let k = pathway_indices.len();
-    let mut res = T::zero();
-    let mut cur = T::zero();
+
+    if k == 0 || k == n {
+        return T::zero();
+    }
+
+    let mut ns = T::zero();
+    for &p in pathway_indices {
+        ns += ranks[p];
+    }
+
     let q1 = T::one() / T::from_usize(n - k).unwrap();
     let q2 = T::one() / ns;
-    let mut last: i64 = -1;
-    for p in pathway_indices {
-        cur += q2 * ranks[*p] - q1 * T::from_i64(*p as i64 - last - 1).unwrap();
-        res = res.max(cur);
-        last = *p as i64;
+
+    let mut res = T::zero();
+    let mut cur = T::zero();
+    let mut next_expected = 0;
+
+    for &p in pathway_indices {
+        let gap = p - next_expected;
+
+        if gap > 0 {
+            cur -= q1 * T::from_usize(gap).unwrap();
+        }
+        cur += q2 * ranks[p];
+
+        // A simple branch generally compiles down to a fast `cmov` instruction,
+        // outperforming float-specific `.max()` trait boundaries in hot loops.
+        if cur > res {
+            res = cur;
+        }
+
+        next_expected = p + 1;
     }
+
     res
 }
 
@@ -629,32 +669,43 @@ impl<T: BixverseFloat> SampleChunks<T> {
 // ES Ruler //
 //////////////
 
+//////////////
+// ES Ruler //
+//////////////
+
 /// This is EsRuler implementation for adaptive enrichment score sampling
 ///
-/// Further structure for fgsea multi-level
-///
-/// ### Fields
-///
-/// * `ranks` - Gene ranks used for ES calculation
-/// * `sample_size` - Current sample size (may change during duplication)
-/// * `original_sample_size` - Original sample size for p-value calculation
-/// * `pathway_size` - Number of genes in the pathway
-/// * `current_samples` - Current sample sets being processed
-/// * `enrichment_scores` - Calculated enrichment scores from samples
-/// * `prob_corrector` - Probability correction factors for p-value adjustment
-/// * `chunks_number` - Number of chunks used for optimization
-/// * `chunk_last_element` - Last element index in each chunk
+/// Further structure for fgsea multi-level. This has been memory-optimized
+/// by flattening the nested vectors to improve CPU cache locality while
+/// preserving exact parity with the original C++ algorithm's MCMC steps.
 #[derive(Clone, Debug)]
 struct EsRuler<T> {
+    /// Gene ranks used for ES calculation.
     ranks: Vec<T>,
+    /// Current sample size (may change slightly during duplication).
     sample_size: usize,
+    /// Original sample size for p-value calculation.
     original_sample_size: usize,
+    /// Number of genes in the pathway.
     pathway_size: usize,
-    current_samples: Vec<Vec<usize>>,
+    /// Flattened 1D vector storing the current sample sets being processed.
+    /// To access sample `i`, we slice
+    /// `[i * pathway_size .. (i+1) * pathway_size]`.
+    current_samples: Vec<usize>,
+    /// Calculated enrichment scores from samples.
     enrichment_scores: Vec<T>,
+    /// Probability correction factors for p-value adjustment.
     prob_corrector: Vec<usize>,
+    /// Number of chunks used for optimisation.
     chunks_number: i32,
+    /// Last element index in each chunk.
     chunk_last_element: Vec<i32>,
+    /// Buffer to hold the next generation of samples without reallocating
+    next_samples: Vec<usize>,
+    /// Reusable buffers for sorting and tracking stats in duplicate_samples
+    stats_buf: Vec<(T, usize)>,
+    /// Is positive ES buffer
+    is_pos_es_buf: Vec<bool>,
 }
 
 impl<T: BixverseFloat> EsRuler<T> {
@@ -670,41 +721,81 @@ impl<T: BixverseFloat> EsRuler<T> {
     ///
     /// Initialised structure
     fn new(inp_ranks: &[T], inp_sample_size: usize, inp_pathway_size: usize) -> Self {
-        let mut current_samples: Vec<Vec<usize>> = Vec::with_capacity(inp_sample_size);
-        current_samples.resize_with(inp_sample_size, Vec::new);
-
         Self {
             ranks: inp_ranks.to_vec(),
             sample_size: inp_sample_size,
             original_sample_size: inp_sample_size,
             pathway_size: inp_pathway_size,
-            current_samples,
+            // Pre-allocate the flattened array filled with 0s
+            current_samples: vec![0; inp_sample_size * inp_pathway_size],
             enrichment_scores: Vec::new(),
             prob_corrector: Vec::new(),
             chunks_number: 0,
             chunk_last_element: Vec::new(),
+            // pre-allocate buffers
+            next_samples: Vec::with_capacity(inp_sample_size * inp_pathway_size),
+            stats_buf: vec![(T::zero(), 0); inp_sample_size],
+            is_pos_es_buf: vec![false; inp_sample_size],
         }
+    }
+
+    /// Helper to get a read-only slice for a specific sample from the flattened
+    /// array
+    ///
+    /// ### Params
+    ///
+    /// * `index` - Index position of pathway to return
+    ///
+    /// ### Returns
+    ///
+    /// The slice of pathway positions for the genes
+    #[inline(always)]
+    fn get_sample(&self, idx: usize) -> &[usize] {
+        let start = idx * self.pathway_size;
+        &self.current_samples[start..start + self.pathway_size]
+    }
+
+    /// Helper to get a mutable slice for a specific sample from the flattened
+    /// array
+    ///
+    /// ### Params
+    ///
+    /// * `index` - Index position of pathway to return
+    ///
+    /// ### Returns
+    ///
+    /// A mutable slice of pathway positions for the genes
+    #[inline(always)]
+    fn get_sample_mut(&mut self, idx: usize) -> &mut [usize] {
+        let start = idx * self.pathway_size;
+        &mut self.current_samples[start..start + self.pathway_size]
     }
 
     /// Removes samples with low ES and duplicates samples with high ES
     ///
-    /// This drives the sampling process toward higher and higher ES values
+    /// This drives the sampling process toward higher and higher ES values.
+    /// Uses a boolean mask instead of FxHashSet for faster positive ES
+    /// tracking.
     fn duplicate_samples(&mut self) {
-        let mut stats: Vec<(T, usize)> = vec![(T::zero(), 0); self.sample_size];
-        let mut pos_es_indxs: FxHashSet<usize> = FxHashSet::default();
+        self.is_pos_es_buf[..self.sample_size].fill(false);
         let mut total_pos_es_count: i32 = 0;
 
-        for (sample_id, stat) in stats.iter_mut().enumerate().take(self.sample_size) {
-            let sample_es_pos = calc_positive_es(&self.ranks, &self.current_samples[sample_id]);
-            let sample_es = calc_es(&self.ranks, &self.current_samples[sample_id]);
+        for sample_id in 0..self.sample_size {
+            // Inline slice access to avoid borrowing the entire `self`
+            let start = sample_id * self.pathway_size;
+            let sample_slice = &self.current_samples[start..start + self.pathway_size];
+
+            let sample_es_pos = calc_positive_es(&self.ranks, sample_slice);
+            let sample_es = calc_es(&self.ranks, sample_slice);
+
             if sample_es > T::zero() {
                 total_pos_es_count += 1;
-                pos_es_indxs.insert(sample_id);
+                self.is_pos_es_buf[sample_id] = true;
             }
-            *stat = (sample_es_pos, sample_id);
+            self.stats_buf[sample_id] = (sample_es_pos, sample_id);
         }
 
-        stats.sort_unstable_by(|a, b| {
+        self.stats_buf[..self.sample_size].sort_unstable_by(|a, b| {
             a.0.partial_cmp(&b.0)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.1.cmp(&b.1))
@@ -716,33 +807,48 @@ impl<T: BixverseFloat> EsRuler<T> {
 
         let mut sample_id = 0;
         while 2 * sample_id < self.sample_size {
-            self.enrichment_scores.push(stats[sample_id].0);
-            if pos_es_indxs.contains(&stats[sample_id].1) {
+            let (es_val, orig_idx) = self.stats_buf[sample_id];
+            self.enrichment_scores.push(es_val);
+            if self.is_pos_es_buf[orig_idx] {
                 total_pos_es_count -= 1;
             }
             self.prob_corrector.push(total_pos_es_count as usize);
             sample_id += 1;
         }
 
-        let mut new_sets = Vec::with_capacity(self.sample_size);
+        // clear the next_samples buffer (sets length to 0, keeps capacity)
+        self.next_samples.clear();
+
         let mut sample_id = 0;
         while 2 * sample_id < self.sample_size - 2 {
+            let target_idx = self.stats_buf[self.sample_size - 1 - sample_id].1;
+
+            // explicitly split borrows: read from current_samples, write to next_samples
+            let start = target_idx * self.pathway_size;
+            let target_slice = &self.current_samples[start..start + self.pathway_size];
+
             for _ in 0..2 {
-                new_sets
-                    .push(self.current_samples[stats[self.sample_size - 1 - sample_id].1].clone());
+                self.next_samples.extend_from_slice(target_slice);
             }
             sample_id += 1;
         }
-        new_sets.push(self.current_samples[stats[self.sample_size >> 1].1].clone());
 
-        std::mem::swap(&mut self.current_samples, &mut new_sets);
+        let median_idx = self.stats_buf[self.sample_size >> 1].1;
+        let start = median_idx * self.pathway_size;
+        let median_slice = &self.current_samples[start..start + self.pathway_size];
 
-        self.sample_size = self.current_samples.len();
+        self.next_samples.extend_from_slice(median_slice);
+
+        // swap the pointers: Instant, zero-copy, zero-allocation update
+        std::mem::swap(&mut self.current_samples, &mut self.next_samples);
+
+        self.sample_size = self.current_samples.len() / self.pathway_size;
     }
 
     /// Attempts to improve a sample by swapping genes in/out using perturbation
     ///
     /// ### Params
+    ///
     /// * `ranks` - Gene ranks
     /// * `k` - Number of genes in sample
     /// * `sample_chunks` - Sample chunks to modify
@@ -927,7 +1033,8 @@ impl<T: BixverseFloat> EsRuler<T> {
 
     /// Extends the ES distribution to include the target ES value
     ///
-    /// Uses an adaptive sampling approach to explore higher ES values
+    /// Uses an adaptive sampling approach to explore higher ES values.
+    /// Memory structure has been refactored for cache-locality.
     ///
     /// ### Params
     ///
@@ -937,11 +1044,12 @@ impl<T: BixverseFloat> EsRuler<T> {
     fn extend(&mut self, es: T, seed: u64, eps: T) {
         let mut rng = StdRng::seed_from_u64(seed);
 
+        // Bootstrap the initial random samples
         for sample_id in 0..self.sample_size {
-            self.current_samples[sample_id] =
-                combination(0, self.ranks.len() - 1, self.pathway_size, &mut rng);
-            self.current_samples[sample_id].sort();
-            let _ = calc_es(&self.ranks, &self.current_samples[sample_id]);
+            let mut sample = combination(0, self.ranks.len() - 1, self.pathway_size, &mut rng);
+            sample.sort_unstable();
+            let _ = calc_es(&self.ranks, &sample);
+            self.get_sample_mut(sample_id).copy_from_slice(&sample);
         }
 
         self.chunks_number = std::cmp::max(
@@ -959,30 +1067,31 @@ impl<T: BixverseFloat> EsRuler<T> {
             vec![SampleChunks::new(self.chunks_number as usize); self.sample_size];
 
         self.duplicate_samples();
+
         while self.enrichment_scores.last().unwrap_or(&T::zero())
             <= &(es - T::from_f64(1e-10).unwrap())
         {
             for i in 0..self.chunks_number - 1 {
                 let pos = (self.pathway_size as i32 + i) / self.chunks_number;
-                let loop_iter = 0..self.sample_size;
 
-                for j in loop_iter {
-                    tmp[j] = self.current_samples[j][pos as usize] as i32;
+                // Map from the flattened array
+                for j in 0..self.sample_size {
+                    tmp[j] = self.get_sample(j)[pos as usize] as i32;
                 }
 
                 nth_element(&mut tmp, self.sample_size / 2);
                 self.chunk_last_element[i as usize] = tmp[self.sample_size / 2];
             }
 
-            let loop_iter = 0..self.sample_size;
-            for i in loop_iter {
+            for i in 0..self.sample_size {
                 for j in 0..self.chunks_number as usize {
                     samples_chunks[i].chunk_sum[j] = T::zero();
                     samples_chunks[i].chunks[j].clear();
                 }
 
                 let mut cnt = 0;
-                for &pos in &self.current_samples[i] {
+                let current_slice = self.get_sample(i);
+                for &pos in current_slice {
                     while cnt < self.chunk_last_element.len()
                         && self.chunk_last_element[cnt] <= pos as i32
                     {
@@ -995,8 +1104,7 @@ impl<T: BixverseFloat> EsRuler<T> {
 
             let mut moves = 0;
             while moves < (self.sample_size * self.pathway_size) as i32 {
-                let loop_iter = 0..self.sample_size;
-                for sample_id in loop_iter {
+                for sample_id in 0..self.sample_size {
                     moves += self.perturbate(
                         &self.ranks,
                         self.pathway_size as i32,
@@ -1007,17 +1115,23 @@ impl<T: BixverseFloat> EsRuler<T> {
                 }
             }
 
-            let loop_iter = 0..self.sample_size;
-            for i in loop_iter {
-                self.current_samples[i].clear();
-                for j in 0..self.chunks_number as usize {
-                    self.current_samples[i]
-                        .extend(samples_chunks[i].chunks[j].iter().map(|&x| x as usize));
+            let chunks_num = self.chunks_number as usize;
+
+            // Write back to the flattened memory array
+            for i in 0..self.sample_size {
+                let mut offset = 0;
+                let dest_slice = self.get_sample_mut(i);
+                for j in 0..chunks_num {
+                    for &val in &samples_chunks[i].chunks[j] {
+                        dest_slice[offset] = val as usize;
+                        offset += 1;
+                    }
                 }
             }
 
             let prev_top_score = *self.enrichment_scores.last().unwrap_or(&T::zero());
             self.duplicate_samples();
+
             if self.enrichment_scores.last().unwrap_or(&T::zero()) <= &prev_top_score {
                 break;
             }
@@ -1717,6 +1831,7 @@ fn multilevel_error<T: BixverseFloat>(pval: &T, sample_size: &T) -> T {
 /// ### Returns
 ///
 /// Tuple of (p-value, error quality flag)
+#[allow(clippy::too_many_arguments)]
 pub fn fgsea_multilevel_helper<T: BixverseFloat>(
     enrichment_score: T,
     ranks: &[T],

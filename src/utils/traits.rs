@@ -1,3 +1,5 @@
+//! Various traits in bixverse
+
 use extendr_api::*;
 use faer::traits::{ComplexField, RealField};
 use faer_entity::SimpleEntity;
@@ -94,7 +96,12 @@ impl<T> BixverseNumeric for T where
 
 /// Converts vectors between integer types for R compatibility.
 pub trait VecConvert<U> {
+    /// Converts usize vectors into i32 for fast R transfer
     fn r_int_convert(self) -> Vec<U>;
+
+    /// Converts vectors from usize to i32, while adding one (shifting from
+    /// 0-indexed data to 1-indexed data) or vice versa from i32 to usize while
+    /// subtracting 1 (shifting from 1-indexed data to 0-indexed data).
     fn r_int_convert_shift(self) -> Vec<U>;
 }
 
@@ -154,6 +161,7 @@ impl VecConvert<usize> for &[i32] {
 
 /// Converts vectors between floating-point types for R compatibility.
 pub trait VecFloatConvert<U> {
+    /// Converts the R double vectors from/to f64 to f32
     fn r_float_convert(self) -> Vec<U>;
 }
 
@@ -189,7 +197,10 @@ impl VecFloatConvert<f32> for &[f64] {
 ///
 /// Defines how to convert faer matrices to R-compatible arrays.
 pub trait FaerRType: SimpleEntity + Copy + Clone + 'static {
+    /// Type definition to allow R conversion
     type RType: Copy + Clone;
+
+    /// Transform an faer matrix (f32/f64) into an R matrix (f64)
     fn to_r_matrix(x: faer::MatRef<Self>) -> extendr_api::RArray<Self::RType, [usize; 2]>;
 }
 

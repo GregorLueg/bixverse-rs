@@ -1,3 +1,5 @@
+//! Statistical helpers
+
 use faer::{Mat, linalg::solvers::DenseSolveCore};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -92,6 +94,7 @@ where
 // Statistical tests //
 ///////////////////////
 
+/// Test alternatives for different statistical tests
 #[derive(Clone, Debug, Default)]
 pub enum TestAlternative {
     /// Two sided test for the Z-score
@@ -304,32 +307,29 @@ where
 ////////////
 
 /// ManovaResults
-///
-/// ### Fields
-///
-/// * `sscp_between` - Between-groups SSCP matrix
-/// * `sscp_within` - Within-groups SSCP matrix
-/// * `sscp_total` - Total SSCP matrix
-/// * `df_between` - Degrees of freedom between groups
-/// * `df_within` - Degrees of freedom within groups
-/// * `df_total` - Total degrees of freedom
-/// * `n_vars` - Number of variables
-/// * `group_means` - Means for each group
-/// * `overall_mean` - Overall means
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct ManovaResult<T>
 where
     T: BixverseFloat,
 {
+    /// Between-groups SSCP matrix
     pub sscp_between: Mat<T>,
+    /// Within-groups SSCP matrix
     pub sscp_within: Mat<T>,
+    /// Total SSCP matrix
     pub sscp_total: Mat<T>,
+    /// Degrees of freedom between groups
     pub df_between: usize,
+    /// Degrees of freedom within groups
     pub df_within: usize,
+    /// Total degrees of freedom
     pub df_total: usize,
+    /// Number of variables
     pub n_vars: usize,
+    /// Means for each group
     pub group_means: Vec<Vec<T>>,
+    /// Overall means
     pub overall_mean: Vec<T>,
 }
 
@@ -442,30 +442,27 @@ where
 }
 
 /// ManovaSummary
-///
-/// ### Fields
-///
-/// * `wilks_lambda` - Wilks' lambda value
-/// * `pillai_trace` - Pillai's trace value
-/// * `df_between` - Degrees of freedom between groups
-/// * `df_within` - Degrees of freedom within groups
-/// * `f_stat_wilk` - F statistic according to Wilk
-/// * `p_val_wilk` - P-value according to Wilk
-/// * `f_stat_pillai` - F statistic according to Pillai
-/// * `p_val_pillai` - P-value according to Pillai
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct ManovaSummary<T>
 where
     T: BixverseFloat,
 {
+    /// Wilks' lambda value
     pub wilks_lambda: T,
+    /// Pillai's trace value
     pub pillai_trace: T,
+    /// Degrees of freedom between groups
     pub df_between: usize,
+    /// Degrees of freedom within groups
     pub df_within: usize,
+    /// F statistic according to Wilk
     pub f_stat_wilk: T,
+    /// P-value according to Wilk
     pub p_val_wilk: T,
+    /// F statistic according to Pillai
     pub f_stat_pillai: T,
+    /// P-value according to Pillai
     pub p_val_pillai: T,
 }
 
@@ -504,31 +501,37 @@ where
 ///////////
 
 /// AnovaSummary (based on MANOVA models)
-///
-/// ### Fields
-///
-/// * `variable_index` - Variable index
-/// * `ss_between` - Sum of squares between groups
-/// * `ss_within` - Sum of squares within groups
-/// * `ms_between` - Mean square between groups
-/// * `ms_within` - Mean square within groups
-/// * `f_stat` - F statistic
-/// * `p_val` - P-value
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct AnovaSummary<T>
 where
     T: BixverseFloat,
 {
+    /// Variable index
     pub variable_index: usize,
+    /// Sum of squares between groups
     pub ss_between: T,
+    /// Sum of squares within groups
     pub ss_within: T,
+    /// Mean square between groups
     pub ms_between: T,
+    /// Mean square within groups
     pub ms_within: T,
+    /// F statistic
     pub f_stat: T,
+    /// P-value
     pub p_val: T,
 }
 
+/// Generates from MANOVE results the AnovaSummary
+///
+/// ### Params
+///
+/// * `res` - The MANOVA result to analyse
+///
+/// ### Returns
+///
+/// A vector of AnovaSummaries
 pub fn summary_aov<T>(res: &ManovaResult<T>) -> Vec<AnovaSummary<T>>
 where
     T: BixverseFloat,
@@ -677,6 +680,7 @@ pub fn calculate_critval<T: BixverseFloat>(
 // Outliers //
 //////////////
 
+/// Type of outlier detection for MAD thresholding
 #[derive(Clone, Debug, Default)]
 pub enum OutlierDirection {
     /// Check if outlier is below OR above the thresholds
@@ -740,4 +744,84 @@ where
         })
         .collect::<Vec<bool>>();
     (res, margin)
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_logit_and_inv_logit() {
+        let p: f64 = 0.5;
+        let log_odds: f64 = logit(p);
+        assert!((log_odds - 0.0).abs() < 1e-6); // ln(0.5 / 0.5) = ln(1) = 0.0
+
+        let recovered_p = inv_logit(log_odds);
+        assert!((recovered_p - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_z_scores_to_pval() {
+        let z_scores: Vec<f64> = vec![0.0, 1.95996398454]; // ~ 95% confidence interval
+
+        let pvals_two_sided = z_scores_to_pval(&z_scores, "twosided");
+        // Z = 0 -> p = 1.0
+        assert!((pvals_two_sided[0] - 1.0).abs() < 1e-6);
+        // Z = 1.96 -> p ≈ 0.05
+        assert!((pvals_two_sided[1] - 0.05).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_calc_fdr() {
+        // Classic Benjamini-Hochberg test case
+        let pvals: Vec<f64> = vec![0.01, 0.04, 0.03];
+        // Sorted: 0.01 (idx 0), 0.03 (idx 2), 0.04 (idx 1)
+        // Adjusted tmp: 0.01*(3/1)=0.03, 0.03*(3/2)=0.045, 0.04*(3/3)=0.04
+        // Monotonic min backwards: 0.04, min(0.04, 0.045)=0.04, min(0.04, 0.03)=0.03
+        // Result: [0.03, 0.04, 0.04]
+        let fdr = calc_fdr(&pvals);
+
+        assert!((fdr[0] - 0.03).abs() < 1e-6);
+        assert!((fdr[1] - 0.04).abs() < 1e-6);
+        assert!((fdr[2] - 0.04).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_mad_outlier() {
+        let vec: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 100.0];
+        // Median is 3.0
+        // Deviations: [2.0, 1.0, 0.0, 1.0, 97.0]
+        // MAD (median of deviations) is 1.0
+        // Threshold = 3.0, so margin = 3.0
+        // Acceptable range: 3.0 ± 3.0 = [0.0, 6.0]
+        let (outliers, margin) = mad_outlier(&vec, 3.0, OutlierDirection::Both);
+
+        assert!((margin - 3.0).abs() < 1e-6);
+        assert_eq!(outliers, vec![false, false, false, false, true]); // 100.0 is an outlier
+    }
+
+    #[test]
+    fn test_parse_helpers() {
+        assert!(matches!(
+            get_test_alternative("twosided"),
+            Some(TestAlternative::TwoSided)
+        ));
+        assert!(matches!(
+            get_test_alternative("GREATER"),
+            Some(TestAlternative::Greater)
+        ));
+
+        assert!(matches!(
+            parse_outlier_type("below"),
+            Some(OutlierDirection::Below)
+        ));
+        assert!(matches!(
+            parse_outlier_type("Twosided"),
+            Some(OutlierDirection::Both)
+        ));
+    }
 }

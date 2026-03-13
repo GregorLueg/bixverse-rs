@@ -1,3 +1,5 @@
+//! Contains structures designed to be put on the heap
+
 use std::cmp::Ordering;
 
 use crate::prelude::*;
@@ -10,6 +12,7 @@ impl<T> OrderedFloat<T>
 where
     T: BixverseFloat,
 {
+    /// Returns the value stored in the OrderedFloat
     pub fn get_value(&self) -> T {
         self.0
     }

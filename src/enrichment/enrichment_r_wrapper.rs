@@ -1,3 +1,5 @@
+//! R wrappers for the enrichment methods
+
 use extendr_api::*;
 use rustc_hash::FxHashMap;
 

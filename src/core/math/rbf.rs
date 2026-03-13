@@ -1,3 +1,5 @@
+//! Radial basis function to transform distances
+
 use faer::{Mat, MatRef};
 use rayon::iter::*;
 
@@ -12,9 +14,12 @@ use crate::utils::matrix_utils::*;
 /// Enum for the RBF function
 #[derive(Debug, Default)]
 pub enum RbfType {
+    /// Gaussian radial basis function
     #[default]
     Gaussian,
+    /// Bump radial basis function
     Bump,
+    /// Inverse quadratic radial basis function
     InverseQuadratic,
 }
 
@@ -42,9 +47,8 @@ pub fn parse_rbf_types(s: &str) -> Option<RbfType> {
 
 /// Gaussian Radial Basis function
 ///
-/// Applies a Gaussian Radial Basis function on a vector of distances with the
-/// following formula:
-/// `φ(r) = e^(-(εr)²)`
+/// Applies a Gaussian Radial Basis function on distances with the formula:
+/// y = exp(-(eps * r)^2)
 ///
 /// ### Params
 ///
@@ -65,10 +69,8 @@ where
 
 /// Gaussian Radial Basis function for matrices.
 ///
-/// Applies a Gaussian Radial Basis function on a matrix of distances with the
-/// following formula:
-///
-/// `φ(r) = e^(-(εr)²)`
+/// Applies a Gaussian Radial Basis function on distances with the formula:
+/// y = exp(-(eps * r)^2)
 ///
 /// ### Params
 ///
@@ -96,12 +98,9 @@ where
 
 /// Bump Radial Basis function
 ///
-/// Applies a Bump Radial Basis function on a vector of distances with the
-/// following formula:
-/// `
-/// φ(r) = { exp(-1/(1-(εr)²)) + 1,  if εr < 1
-///        { 0,                      if εr ≥ 1
-/// `
+/// Applies a Bump Radial Basis function on distances with the formula:
+/// y = exp(-1 / (1 - (eps * r)^2) + 1)   if eps * r < 1
+/// y = 0                                 if eps * r >= 1
 ///
 /// ### Params
 ///
@@ -128,12 +127,9 @@ where
 
 /// Bump Radial Basis function for matrices
 ///
-/// Applies a Bump Radial Basis function on a matrix of distances with the
-/// following formula:
-/// `
-/// φ(r) = { exp(-1/(1-(εr)²)) + 1,  if εr < 1
-///        { 0,                      if εr ≥ 1
-/// `
+/// Applies a Bump Radial Basis function on distances with the formula:
+/// y = exp(-1 / (1 - (eps * r)^2) + 1)   if eps * r < 1
+/// y = 0                                 if eps * r >= 1
 ///
 /// ### Params
 ///
@@ -165,11 +161,9 @@ where
 
 /// Inverse quadratic RBF
 ///
-/// Applies a Inverse Quadratic Radial Basis function on a vector of distances
-/// with the following formula:
-/// `
-/// φ(r) = 1/(1 + (εr)²)
-/// `
+/// Applies an Inverse Quadratic Radial Basis function on distances with the
+/// formula:
+/// y = 1 / (1 + (eps * r)^2)
 ///
 /// ### Params
 ///
@@ -190,11 +184,9 @@ where
 
 /// Inverse quadratic RBF for matrices
 ///
-/// Applies a Inverse Quadratic Radial Basis function on a matrix of distances
-/// with the following formula:
-/// `
-/// φ(r) = 1/(1 + (εr)²)
-/// `
+/// Applies an Inverse Quadratic Radial Basis function on distances with the
+/// formula:
+/// y = 1 / (1 + (eps * r)^2)
 ///
 /// ### Params
 ///
@@ -265,4 +257,65 @@ where
         .collect();
 
     nested_vector_to_faer_mat(k_res, true)
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_rbf_types() {
+        assert!(matches!(
+            parse_rbf_types("gaussian"),
+            Some(RbfType::Gaussian)
+        ));
+        assert!(matches!(parse_rbf_types("BUMP"), Some(RbfType::Bump)));
+        assert!(matches!(
+            parse_rbf_types("inverse_quadratic"),
+            Some(RbfType::InverseQuadratic)
+        ));
+        assert!(parse_rbf_types("unknown").is_none());
+    }
+
+    #[test]
+    fn test_rbf_gaussian() {
+        let dist: Vec<f64> = vec![0.0, 1.0];
+        let eps = 1.0;
+        let res = rbf_gaussian(&dist, &eps);
+
+        // exp(-(0 * 1)^2) = 1.0
+        assert!((res[0] - 1.0).abs() < 1e-6);
+        // exp(-(1 * 1)^2) = exp(-1) ≈ 0.367879
+        assert!((res[1] - std::f64::consts::E.powi(-1)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_rbf_inverse_quadratic() {
+        let dist: Vec<f64> = vec![0.0, 1.0, 2.0];
+        let eps = 1.0;
+        let res = rbf_inverse_quadratic(&dist, &eps);
+
+        // 1 / (1 + (0*1)^2) = 1.0
+        assert!((res[0] - 1.0).abs() < 1e-6);
+        // 1 / (1 + (1*1)^2) = 0.5
+        assert!((res[1] - 0.5).abs() < 1e-6);
+        // 1 / (1 + (2*1)^2) = 0.2
+        assert!((res[2] - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_rbf_bump() {
+        let dist: Vec<f64> = vec![0.0, 2.0];
+        let eps = 1.0;
+        let res = rbf_bump(&dist, &eps);
+
+        // The implementation scales via +1 inside the exp: exp(-1/(1 - 0) + 1) = exp(0) = 1.0
+        assert!((res[0] - 1.0).abs() < 1e-6);
+        // 2.0 > 1.0/eps, should return 0.0
+        assert!((res[1] - 0.0).abs() < 1e-6);
+    }
 }

@@ -1,3 +1,20 @@
+# News
+
+## 0.1.4
+
+### Features
+
+- Sparse SVD and sparse randomised SVD were added for single cell.
+- SIMD instructions for the single cell Hotspot method.
+- Harmony batch correction for single cell.
+- SCENIC-like approach for gene regulatory network (GRN) generation.
+- Multi-file support for reading in several h5ad files at once.
+- h5ad reader for situations where the file only has normalised counts.
+
+### Fixes
+
+*NA*
+
 ## 0.1.3
 
 ### Features
@@ -23,14 +40,14 @@
 
 ### Features
 
-*NA*
+`NA`
 
 ### Fixes
 
 - Bumped the version of `ann-search-rs` to ensure consistency across packages/
   crates.
 
-## 0.1.0 (officialrelease)
+## 0.1.0 (official release)
 
 This version ported over all of the Rust code from
 [bixverse](https://github.com/GregorLueg/bixverse) as an independent crate.

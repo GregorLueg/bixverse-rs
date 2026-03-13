@@ -1,3 +1,7 @@
+//! Single cell-related QC functions. Checks for example proportion of gene sets
+//! or complexity of cells/spots based on the total percentage that the top N
+//! genes take.
+
 use rayon::prelude::*;
 use rustc_hash::FxHashSet;
 use std::time::Instant;

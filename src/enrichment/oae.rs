@@ -1,3 +1,5 @@
+//! Helpers to run hypergeometric tests for standard overenrichment analysis
+
 use rustc_hash::FxHashSet;
 
 use crate::{
@@ -9,21 +11,18 @@ use crate::{
 // Result structs //
 ////////////////////
 
-/// A type alias that can be returned by the par_iter() functions.
-///
-/// ### Fields
-///
-/// * `pval` - P-value
-/// * `fdr` - FDR
-/// * `odds_ratio` - Oddsratio
-/// * `hits` - Number of success
-/// * `gs_length` - Length of the gene set
+/// A structure to store the hypergeometric enrichment results
 #[derive(Clone, Debug)]
 pub struct HypergeomResult<T> {
+    /// P-value of the hypergeometric tests
     pub pval: Vec<T>,
+    /// FDRs of the hypergeometric tests
     pub fdr: Vec<T>,
+    /// Odds ratios of the hypergeometric tests
     pub odds_ratio: Vec<T>,
+    /// Number of intersections/success
     pub hits: Vec<usize>,
+    /// Length of the gene set
     pub gs_length: Vec<usize>,
 }
 

@@ -1,3 +1,7 @@
+//! Contains the streaming engine for bixverse single cell application. This
+//! has the structures for cells/spots and genes ready, plus various utilities,
+//! writers and readers.
+
 use bincode::{Decode, Encode, config, decode_from_slice, serde::encode_to_vec};
 use half::f16;
 use indexmap::IndexSet;
@@ -21,19 +25,16 @@ use crate::prelude::*;
 //////////////////
 
 /// Structure to store QC information on cells
-///
-/// ### Fields
-///
-/// * `cell_indices` - Indices of which cells to keep.
-/// * `lib_size` - Optional library size of the cells.
-/// * `no_genes` - Optional number of genes of the cells.
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct CellQuality {
+    /// Indices of which cells to keep.
     pub cell_indices: Vec<usize>,
+    /// Indices of which genes to keep
     pub gene_indices: Vec<usize>,
+    /// Library size of cells
     pub lib_size: Vec<usize>,
-    pub no_genes: Vec<usize>,
+    /// Number of cells expressing this gene
+    pub nnz: Vec<usize>,
 }
 
 impl CellQuality {
@@ -57,18 +58,17 @@ impl CellQuality {
 }
 
 /// Structure that stores minimum QC thresholds/info for single cell
-///
-/// ### Fields
-///
-/// * `min_unique_genes` - Minimum number of unique genes per cell/spot.
-/// * `min_lib_size` - Minimum library size per cell/spot.
-/// * `min_cells` - Minimum cells per gene.
-/// * `target_size` - Target size for normalisation.
 #[derive(Clone, Debug)]
 pub struct MinCellQuality {
+    /// Minimum number of unique genes per cell (or spot for Visium type
+    /// technology).
     pub min_unique_genes: usize,
+    /// Minimum library size per cell (or spot for Visium type technology).
     pub min_lib_size: usize,
+    /// Minimum library size per cell (or spot for Visium type technology)/
     pub min_cells: usize,
+    /// Target size for the library size normalisation (typical values 1e4 -
+    /// 1e5 single cell.
     pub target_size: f32,
 }
 
@@ -84,23 +84,19 @@ pub struct MinCellQuality {
 ///
 /// This structure is being generate after a first scan of the file on disk and
 /// defining which cells and genes to actually read in.
-///
-/// ### Fields
-///
-/// * `cells_to_keep` - Vector of indices of the cells to keep.
-/// * `genes_to_keep` - Vector of indices of the genes to keep.
-/// * `cells_to_keep_set` - HashSet of the indices to keep.
-/// * `genes_to_keep_set` - HashSet of the genes to keep.
-/// * `cell_old_to_new` - Mapping of the old indices to the new indices for the
-///   cells.
-/// * `gene_old_to_new` - Mapping of old indices to new indices for the genes.
 #[derive(Debug, Clone)]
 pub struct CellOnFileQuality {
+    /// Vector of indices of the cells to keep.
     pub cells_to_keep: Vec<usize>,
+    /// Vector of indices of the genes to keep.
     pub genes_to_keep: Vec<usize>,
+    /// HashSet of the indices to keep (for look-ups).
     pub cells_to_keep_set: FxHashSet<usize>,
+    /// HashSet of the genes to keep (for look-ups).
     pub genes_to_keep_set: FxHashSet<usize>,
+    /// Mapping of the old indices to the new indices for the cells.
     pub cell_old_to_new: FxHashMap<usize, usize>,
+    /// Mapping of old indices to new indices for the genes.
     pub gene_old_to_new: FxHashMap<usize, usize>,
 }
 
@@ -158,24 +154,21 @@ impl CellOnFileQuality {
 ///
 /// This structure is designed to store the data of a single cell in a
 /// CSR-like format optimised for rapid access on disk.
-///
-/// ### Fields
-///
-/// * `data_raw` - Array of the raw counts of this cell.
-/// * `data_norm` - Array of the normalised counts of this cell. This will do a
-///   CPM-type transformation and then calculate the ln_1p.
-/// * `library_size` - Total library size/UMI counts of the cell.
-/// * `indices` - The col indices of the genes.
-/// * `original_index` - Original (row) index of the cell.
-/// * `to_keep` - Flat if the cell should be included in certain analysis.
-///   Future feature.
 #[derive(Debug)]
 pub struct CsrCellChunk {
+    /// Vector of the raw counts of this cell. This is limited to u16, limiting
+    /// the max raw counts per gene to 65_535
     pub data_raw: Vec<u16>,
+    /// Vector of the norm counts of this cell. A lossy compression for f16 is
+    /// applied.
     pub data_norm: Vec<F16>,
+    /// Total library size/UMI counts of the cell.
     pub library_size: usize,
+    /// Index positions of the genes
     pub indices: Vec<u16>,
+    /// Original index in the data
     pub original_index: usize,
+    /// Flag if the cell should be kept. (Not used at the moment.)
     pub to_keep: bool,
 }
 
@@ -331,11 +324,11 @@ impl CsrCellChunk {
         })
     }
 
-    /// Generate a vector of Chunks from CompressedSparseData
+    /// Generate a vector of Chunks from CompressedSparseData2
     ///
     /// ### Params
     ///
-    /// * `sparse_data` - The `CompressedSparseData` (in CSR format!)
+    /// * `sparse_data` - The `CompressedSparseData2` (in CSR format!)
     /// * `min_genes` - Number of genes per cell to be included
     /// * `size_factor` - Size factor for normalisation. 1e6 -> CPM
     ///
@@ -343,7 +336,7 @@ impl CsrCellChunk {
     ///
     /// A tuple of the `Vec<CsrCellChunk>` and if the cell should be kept.
     pub fn generate_chunks_sparse_data<T, U>(
-        sparse_data: CompressedSparseData<T, U>,
+        sparse_data: CompressedSparseData2<T, U>,
         cell_qc: MinCellQuality,
     ) -> (Vec<CsrCellChunk>, CellQuality)
     where
@@ -429,7 +422,7 @@ impl CsrCellChunk {
             cell_indices: cells_to_keep,
             gene_indices: genes_to_keep,
             lib_size,
-            no_genes: nnz,
+            nnz,
         };
 
         (res, qc_data)
@@ -485,28 +478,23 @@ impl CsrCellChunk {
 ///
 /// This structure is designed to store the data of a single gene in a
 /// CSC-like format optimised for rapid access on disk.
-///
-/// ### Fields
-///
-/// * `data_raw` - Vector with the raw data.
-/// * `data_norm` - Vector with the normalised data (library size adjusted and
-///   log-normalised).
-/// * `avg_exp` - Vector with average expression.
-/// * `nnz` - Number non-zero values.
-/// * `indices` - The column indices of the data.
-/// * `original_index` - Original index of the gene.
-/// * `to_keep` - Boolean if the gene should be included into anything.
-///   Future feature.
 #[derive(Encode, Decode, Serialize, Deserialize, Debug)]
 pub struct CscGeneChunk {
+    /// Vector with the raw counts per cell/spot for this gene. The maximum
+    /// counts per gene are limited to 65_535
     pub data_raw: Vec<u16>,
+    /// Vector with normalised coutns per cell/spot for this gene. Lossy
+    /// compression to f16 is applied.
     pub data_norm: Vec<F16>,
+    /// Average expression of this gene in the data.
     pub avg_exp: F16,
+    /// Number of cells expressing this gene
     pub nnz: usize,
-    // u32 as there might be clearly more than 65_535 cells in the data
-    // 4_294_967_295 should be enough however...
+    /// Indices of the cells expressing this gene
     pub indices: Vec<u32>,
+    /// Original index from the data
     pub original_index: usize,
+    /// Flag to indicate if gene shall be kept. Not in use at the moment.
     pub to_keep: bool,
 }
 
@@ -670,9 +658,9 @@ impl CscGeneChunk {
             .map(|(pos, &cell_id)| (cell_id, pos))
             .collect();
 
-        let mut new_data_raw = Vec::new();
-        let mut new_data_norm = Vec::new();
-        let mut new_row_indices = Vec::new();
+        let mut new_data_raw = Vec::with_capacity(cells_to_keep.len());
+        let mut new_data_norm = Vec::with_capacity(cells_to_keep.len());
+        let mut new_row_indices = Vec::with_capacity(cells_to_keep.len());
 
         // tterate in cells_to_keep order (critical for PCA! tripped over this one...)
         for (new_row_idx, &cell_index) in cells_to_keep.iter().enumerate() {
@@ -711,30 +699,44 @@ impl CscGeneChunk {
 
         (self.original_index, avg)
     }
+
+    /// Transform the chunk to a sparse Axis of CSC type
+    ///
+    /// ### Params
+    ///
+    /// * `n_cells` - Number of cells represented in the data
+    ///
+    /// ### Returns
+    ///
+    /// `SparseAxis` with u16 in the main slot and f32 in the data_2 layer.
+    pub fn to_sparse_axis(&self, n_cells: usize) -> SparseAxis<u16, f32> {
+        SparseAxis::new_csc(
+            self.indices.iter().map(|x| *x as usize).collect(),
+            self.data_raw.to_vec(),
+            Some(self.data_norm.iter().map(|x| x.to_f32()).collect()),
+            n_cells,
+        )
+    }
 }
 
 /// SparseDataHeader
 ///
 /// Stores the information in terms of total cells, total genes, number of
 /// chunks in terms of cells and genes and the offset vectors
-///
-/// ### Params
-///
-/// * `total_cells` - Total number of cells in the experiment.
-/// * `total_genes` - Total number of genes in the experiemnt.
-/// * `cell_based` - Boolean. If `true` the data stores cells; if `false` the
-///   data stores genes.
-/// * `no_chunks` - No of chunks that store either cell or gene data.
-/// * `chunk_offsets` - Vector containing the offsets for the cell or gene
-///   chunks.
-/// * `index_map` - FxHashMap with the original index -> chunk info
 #[derive(Encode, Decode, Serialize, Deserialize, Clone)]
 pub struct SparseDataHeader {
+    /// Total number of cells in the experiment.
     pub total_cells: usize,
+    /// Total number of genes in the experiemnt.
     pub total_genes: usize,
+    /// Is the file written in a way for fast cell data retrieval (set to true)
+    /// or for fast gene retrieval (set to false)
     pub cell_based: bool,
+    /// Number of chunks in this file storing either the cell or gene data
     pub no_chunks: usize,
+    /// Offset vector for reading in the data
     pub chunk_offsets: Vec<u64>,
+    /// FxHashMap with the original index -> chunk info
     pub index_map: FxHashMap<usize, usize>,
 }
 
@@ -1004,9 +1006,13 @@ impl CellGeneSparseWriter {
 // Streaming reader //
 //////////////////////
 
+/// ParallelSparseReader
 pub struct ParallelSparseReader {
+    /// The file header
     header: SparseDataHeader,
+    /// Reference to the memory map for safe sharing across threads
     mmap: Arc<memmap2::Mmap>,
+    /// Start position of the chunks after the hader file
     chunks_start: u64,
 }
 
@@ -1034,6 +1040,9 @@ impl ParallelSparseReader {
             }
             opts.map(&file)?
         };
+
+        #[cfg(unix)]
+        mmap.advise(memmap2::Advice::Random)?;
 
         // Parse headers from mmap
         let file_header_bytes = &mmap[0..64];
@@ -1303,5 +1312,109 @@ impl ParallelSparseReader {
     pub fn get_all_gene_nnz(&self) -> Vec<usize> {
         let iter: Vec<usize> = (0..self.header.total_genes).collect();
         self.read_gene_nnz(&iter)
+    }
+}
+
+//////////////////////
+// Chunks to sparse //
+//////////////////////
+
+/// Converts a slice of gene chunks into a CSC sparse matrix
+///
+/// Constructs a cells × genes compressed sparse column matrix from individual
+/// gene chunks. The primary data layer contains raw counts, whilst the
+/// secondary layer contains normalised counts converted to f32 precision.
+///
+/// ### Params
+///
+/// * `chunks` - Slice of gene chunks to convert
+/// * `n_cells` - Total number of cells in the dataset
+///
+/// ### Returns
+///
+/// A CSC-formatted sparse matrix with raw counts in the primary data layer
+/// and normalised counts in the secondary data layer
+pub fn from_gene_chunks<T>(chunks: &[CscGeneChunk], n_cells: usize) -> CompressedSparseData2<T, f32>
+where
+    T: BixverseNumeric + From<u16>,
+{
+    let n_genes = chunks.len();
+    let mut data = Vec::new();
+    let mut data_2 = Vec::new();
+    let mut indices = Vec::new();
+    let mut indptr = Vec::with_capacity(n_genes + 1);
+
+    indptr.push(0);
+
+    for chunk in chunks {
+        for &val in &chunk.data_raw {
+            data.push(T::from(val));
+        }
+        for &val in &chunk.data_norm {
+            data_2.push(val.to_f32());
+        }
+        for &idx in &chunk.indices {
+            indices.push(idx as usize);
+        }
+        indptr.push(data.len());
+    }
+
+    CompressedSparseData2 {
+        data,
+        indices,
+        indptr,
+        cs_type: CompressedSparseFormat::Csc,
+        data_2: Some(data_2),
+        shape: (n_cells, n_genes),
+    }
+}
+
+/// Converts a slice of cell chunks into a CSR sparse matrix
+///
+/// Constructs a cells × genes compressed sparse row matrix from individual
+/// cell chunks. The primary data layer contains raw counts, whilst the
+/// secondary layer contains normalised counts converted to f32 precision.
+///
+/// ### Params
+///
+/// * `chunks` - Slice of cell chunks to convert
+/// * `n_genes` - Total number of genes in the dataset
+///
+/// ### Returns
+///
+/// A CSR-formatted sparse matrix with raw counts in the primary data layer
+/// and normalised counts in the secondary data layer
+pub fn from_cell_chunks<T>(chunks: &[CsrCellChunk], n_genes: usize) -> CompressedSparseData2<T, f32>
+where
+    T: BixverseNumeric + From<u16>,
+{
+    let n_cells = chunks.len();
+    let mut data = Vec::new();
+    let mut data_2 = Vec::new();
+    let mut indices = Vec::new();
+    let mut indptr = Vec::with_capacity(n_cells + 1);
+
+    indptr.push(0);
+
+    for chunk in chunks {
+        for &val in &chunk.data_raw {
+            data.push(T::from(val));
+        }
+        for &val in &chunk.data_norm {
+            data_2.push(val.to_f32());
+        }
+        for &idx in &chunk.indices {
+            indices.push(idx as usize);
+        }
+        indptr.push(data.len());
+    }
+
+    CompressedSparseData2 {
+        data,
+        indices,
+        indptr,
+        cs_type: CompressedSparseFormat::Csr,
+        data_2: Some(data_2),
+        shape: (n_cells, n_genes),
     }
 }

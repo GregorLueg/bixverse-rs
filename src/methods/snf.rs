@@ -1,3 +1,6 @@
+//! Similarity network fusion implementation based on Wang, et al., Nat Methods,
+//! 2014
+
 use faer::{Mat, MatRef};
 use rayon::prelude::*;
 use std::collections::BinaryHeap;

@@ -1,3 +1,6 @@
+//! The module scoring approach used in Seurat, originally used in Tirosh,
+//! et. al., Science, 2016
+
 use indexmap::IndexSet;
 use rand::prelude::IndexedRandom;
 use rand::rngs::StdRng;

@@ -1,3 +1,6 @@
+//! Implementation of the dual graph regularised sparse dictionary learning
+//! based on the work of Pan, et al., Cell Syst, 2022
+
 use faer::{
     ColRef, Mat, MatRef, Scale,
     linalg::solvers::{PartialPivLu, Solve},
@@ -17,26 +20,23 @@ use crate::prelude::*;
 ////////////
 
 /// Structure to store the dual graph regularised dictionary learning params
-///
-/// ### Fields
-///
-/// * `sparsity` - Sparsity constraint (max non-zero coefficients per signal)
-/// * `dict_size` - Dictionary size
-/// * `alpha` - Sample context regularisation weight
-/// * `beta` - Feature effect regularisation weight
-/// * `max_iter` - Maximum number of iterations
-/// * `k_neighbours` - Number of neighbours in the KNN graph
-/// * `admm_iter` - ADMM iterations for sparse coding
-/// * `rho` - ADMM step size
 #[derive(Debug, Clone, Default)]
 pub struct DgrdlParams<T> {
+    /// Sparsity constraint (max non-zero coefficients per signal)
     pub sparsity: usize,
+    /// Dictionary size
     pub dict_size: usize,
+    /// Sample context regularisation weight
     pub alpha: T,
+    /// Feature effect regularisation weight
     pub beta: T,
+    /// Maximum number of iterations
     pub max_iter: usize,
+    /// Number of neighbours in the KNN graph
     pub k_neighbours: usize,
+    /// ADMM iterations for sparse coding
     pub admm_iter: usize,
+    /// ADMM step size
     pub rho: T,
 }
 
@@ -69,18 +69,15 @@ where
 /////////////
 
 /// DGRDL algorithm results
-///
-/// ### Fields
-///
-/// * `dictionary` - Learned dictionary of size n x k
-/// * `coefficients` - Sparse coefficients of size k x m
-/// * `context_laplacian` - Sample context Laplacian n × n
-/// * `gene_laplacian` - Feature context laplacian of size m x m
 #[derive(Debug)]
 pub struct DgrdlResults<T> {
+    /// Learned dictionary of size n x k
     pub dictionary: Mat<T>,
+    /// Sparse coefficients of size k x m
     pub coefficients: Mat<T>,
+    /// Sample context Laplacian n × n
     pub sample_laplacian: Mat<T>,
+    /// Feature context laplacian of size m x m
     pub feature_laplacian: Mat<T>,
 }
 
@@ -89,19 +86,17 @@ pub struct DgrdlResults<T> {
 /////////////////
 
 /// DGRDL cache for hyperparameter tuning
-///
-/// ### Fields
-///
-/// * `data_hash` - Hash of the underlying data
-/// * `laplacian_cache` - HashMap of the feature and sample Laplacian matrix
-/// * `dictionary_cache` - HashMap of the dictionary cashe with (dict_size, seed)
-///   as keys
-/// * `distance_matrix` - The distance matrix of the data as a flat vector
 #[derive(Debug)]
 pub struct DgrdlCache<T> {
+    /// Hash of the underlying data
     pub data_hash: u64,
+    /// HashMap of the feature and sample Laplacian matrix to avoid
+    /// recomputations
     pub laplacian_cache: FxHashMap<usize, (Mat<T>, Mat<T>)>,
+    /// HashMap of the dictionary cashe with (dict_size, seed) as keys to avoid
+    /// recomputation
     pub dictionary_cache: FxHashMap<(usize, usize), Mat<T>>,
+    /// The distance matrix of the data as a flat vector
     pub distance_matrix: Option<Vec<T>>,
 }
 
@@ -188,27 +183,19 @@ where
 ///////////////////
 
 /// Calculate individual components of DGRDL objective function
-///
-/// Useful for hyperparameter tuning and model selection
-///
-/// ### Fields
-///
-/// * `approximation_error` - Calculates the approximation error in form of
-///   squared Frobenius norm
-/// * `feature_laplacian_objective` - Measures the similiarity of coefficients
-///   for the feature Laplacian
-/// * `sample_laplacian_objective` - Measures the smoothness of the dictionary
-///   in respect to sample Laplacian
-/// * `seed` - Random seed for reproducibility
-/// * `k_neighbours` - Number of neighbours
-/// * `dict_size` - The size of the dictionary
 #[derive(Debug, Clone)]
 pub struct DgrdlObjectives<T> {
+    /// Calculates the approximation error in form of squared Frobenius norm
     pub approximation_error: T,
+    /// Measures the similiarity of coefficients for the feature Laplacian
     pub feature_laplacian_objective: T,
+    /// Measures the smoothness of the dictionary in respect to sample Laplacian
     pub sample_laplacian_objective: T,
+    /// Random seed for reproducibility
     pub seed: usize,
+    /// Number of neighbours
     pub k_neighbours: usize,
+    /// The size of the dictionary
     pub dict_size: usize,
 }
 

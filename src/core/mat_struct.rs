@@ -1,3 +1,5 @@
+//! Helper structure to store named matrices
+
 use faer::{Mat, MatRef};
 use std::collections::BTreeMap;
 
@@ -8,16 +10,13 @@ use crate::prelude::*;
 //////////////
 
 /// Structure to store named matrices
-///
-/// ### Fields
-///
-/// * `col_names` - A BTreeMap representing the column names and the col indices
-/// * `row_names` - A BTreeMap representing the row names and the row indices
-/// * `values` - A faer matrix reference representing the matrix values.
 #[derive(Clone, Debug)]
 pub struct NamedMatrix<'a, T> {
+    /// A BTreeMap representing the column names and the col indices
     pub col_names: BTreeMap<String, usize>,
+    /// A BTreeMap representing the row names and the row indices
     pub row_names: BTreeMap<String, usize>,
+    /// A faer matrix reference representing the matrix values.
     pub values: faer::MatRef<'a, T>,
 }
 
@@ -236,9 +235,13 @@ where
     /// * `data` - The original MatRef from which you want to slice out data
     /// * `row_indices` - The row indices you want to slice out.
     /// * `col_indices` - The col indices you want to slice out.
-    pub fn new(data: MatRef<'a, T>, row_indices: &'r [usize], col_indices: &'c [usize]) -> Self {
-        let max_col_index = col_indices.iter().max().copied().unwrap_or(0);
-        let max_row_index = row_indices.iter().max().copied().unwrap_or(0);
+    pub fn new(
+        data: MatRef<'a, T>,
+        row_indices: &'r [usize],
+        col_indices: &'c [usize],
+    ) -> MatSliceView<'a, 'r, 'c, T> {
+        let max_col_index = col_indices.iter().copied().fold(0, usize::max);
+        let max_row_index = row_indices.iter().copied().fold(0, usize::max);
 
         assert!(
             max_col_index < data.ncols(),
@@ -286,5 +289,101 @@ where
         Mat::from_fn(self.nrows(), self.ncols(), |i, j| {
             *self.data.get(self.row_indices[i], self.col_indices[j])
         })
+    }
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use faer::Mat;
+    use std::collections::BTreeMap;
+
+    fn setup_named_matrix() -> (Mat<f64>, BTreeMap<String, usize>, BTreeMap<String, usize>) {
+        // 3x3 Matrix:
+        // [[0.0, 1.0, 2.0],
+        //  [3.0, 4.0, 5.0],
+        //  [6.0, 7.0, 8.0]]
+        let mat: Mat<f64> = Mat::from_fn(3, 3, |i, j| (i * 3 + j) as f64);
+
+        let mut row_names = BTreeMap::new();
+        row_names.insert("r1".to_string(), 0);
+        row_names.insert("r2".to_string(), 1);
+        row_names.insert("r3".to_string(), 2);
+
+        let mut col_names = BTreeMap::new();
+        col_names.insert("c1".to_string(), 0);
+        col_names.insert("c2".to_string(), 1);
+        col_names.insert("c3".to_string(), 2);
+
+        (mat, row_names, col_names)
+    }
+
+    #[test]
+    fn test_named_matrix_sub_mat() {
+        let (mat, row_names, col_names) = setup_named_matrix();
+        let named_mat = NamedMatrix {
+            col_names,
+            row_names,
+            values: mat.as_ref(),
+        };
+
+        // Select row 3 and row 1 (in that order), and column 2
+        let sub = named_mat
+            .get_sub_mat(Some(&["r3", "r1"]), Some(&["c2"]))
+            .unwrap();
+
+        assert_eq!(sub.nrows(), 2);
+        assert_eq!(sub.ncols(), 1);
+
+        // "r3", "c2" -> original (2, 1) -> value 7.0
+        assert!((sub[(0, 0)] - 7.0).abs() < 1e-6);
+        // "r1", "c2" -> original (0, 1) -> value 1.0
+        assert!((sub[(1, 0)] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_named_matrix_empty_selection() {
+        let (mat, row_names, col_names) = setup_named_matrix();
+        let named_mat = NamedMatrix {
+            col_names,
+            row_names,
+            values: mat.as_ref(),
+        };
+
+        let empty_rows = named_mat.get_sub_mat(Some(&[]), None);
+        assert!(empty_rows.is_none());
+
+        let invalid_rows = named_mat.get_sub_mat(Some(&["r_invalid"]), None);
+        assert!(invalid_rows.is_none());
+    }
+
+    #[test]
+    fn test_mat_slice_view() {
+        let (mat, _, _) = setup_named_matrix();
+        let r_idx = vec![0, 2]; // row 0, row 2
+        let c_idx = vec![1, 2]; // col 1, col 2
+
+        let view = MatSliceView::new(mat.as_ref(), &r_idx, &c_idx);
+        assert_eq!(view.nrows(), 2);
+        assert_eq!(view.ncols(), 2);
+
+        let owned = view.to_owned();
+        // original (0, 1) -> 1.0
+        assert!((owned[(0, 0)] - 1.0).abs() < 1e-6);
+        // original (2, 2) -> 8.0
+        assert!((owned[(1, 1)] - 8.0).abs() < 1e-6);
+    }
+
+    #[test]
+    #[should_panic(expected = "You selected indices larger than ncol.")]
+    fn test_mat_slice_view_out_of_bounds_col() {
+        let (mat, _, _) = setup_named_matrix();
+        let r_idx = vec![0];
+        let c_idx = vec![5]; // Out of bounds
+        let _view = MatSliceView::new(mat.as_ref(), &r_idx, &c_idx);
     }
 }
