@@ -2838,10 +2838,16 @@ fn run_scenic_multi_output(
         RegressionLearner::GradientBoosting(_) => unreachable!(),
     };
 
+    let learner_name = match &scenic_params.regression_learner {
+        RegressionLearner::ExtraTrees(_) => "ExtraTrees",
+        RegressionLearner::RandomForest(_) => "RandomForest",
+        RegressionLearner::GradientBoosting(_) => unreachable!(),
+    };
+
     if verbose {
         println!(
-            "Running SCENIC on {} genes ({} TFs, {} cells, {} batches of up to {})",
-            n_genes, n_tfs, n_cells, total_batches, n_multi_output,
+            "Running SCENIC ({}) on {} genes ({} TFs, {} cells, {} batches of up to {})",
+            learner_name, n_genes, n_tfs, n_cells, total_batches, n_multi_output,
         );
     }
 
@@ -2892,7 +2898,8 @@ fn run_scenic_multi_output(
 
     if verbose {
         println!(
-            "SCENIC GRN inference complete in {:.2?}",
+            "SCENIC ({}) GRN inference complete in {:.2?}",
+            learner_name,
             start_total.elapsed()
         );
     }
@@ -2946,6 +2953,16 @@ fn run_scenic_gbm(
 ) -> Mat<f32> {
     let start_gene_read = Instant::now();
     let mut all_sparse_cols: Vec<SparseAxis<u16, f32>> = Vec::with_capacity(n_genes);
+
+    if verbose {
+        println!(
+            "Running GRNBoost2 on {} genes ({} TFs, {} cells, {} I/O chunks)",
+            n_genes.separate_with_underscores(),
+            n_tfs.separate_with_underscores(),
+            n_cells.separate_with_underscores(),
+            gene_indices.len().div_ceil(SCENIC_GENE_CHUNK_SIZE),
+        );
+    }
 
     for (iter, chunk) in gene_indices.chunks(SCENIC_GENE_CHUNK_SIZE).enumerate() {
         let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(chunk);
@@ -3099,13 +3116,20 @@ fn run_scenic_multi_output_streaming(
         RegressionLearner::GradientBoosting(_) => unreachable!(),
     };
 
+    let learner_name = match &scenic_params.regression_learner {
+        RegressionLearner::ExtraTrees(_) => "ExtraTrees",
+        RegressionLearner::RandomForest(_) => "RandomForest",
+        RegressionLearner::GradientBoosting(_) => unreachable!(),
+    };
+
     let total_io_chunks = ordered_genes.len().div_ceil(SCENIC_GENE_CHUNK_SIZE);
     let mut importance_scores: Vec<Vec<f32>> = vec![Vec::new(); n_genes];
     let mut global_batch_offset: usize = 0;
 
     if verbose {
         println!(
-            "Running SCENIC (streaming) on {} genes ({} TFs, {} cells, {} I/O chunks, batches of {})",
+            "Running SCENIC ({}, streaming) on {} genes ({} TFs, {} cells, {} I/O chunks, batches of {})",
+            learner_name,
             n_genes.separate_with_underscores(),
             n_tfs.separate_with_underscores(),
             n_cells.separate_with_underscores(),
@@ -3209,7 +3233,8 @@ fn run_scenic_multi_output_streaming(
 
     if verbose {
         println!(
-            "SCENIC GRN inference (streaming) complete in {:.2?}",
+            "SCENIC ({}) GRN inference (streaming) complete in {:.2?}",
+            learner_name,
             start_total.elapsed()
         );
     }
