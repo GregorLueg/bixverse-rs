@@ -2186,10 +2186,7 @@ pub fn run_scenic_grn(
                 let done = batches_done.fetch_add(1, Ordering::Relaxed) + 1;
                 let pct = done * 100 / total_batches;
                 let prev_pct = (done - 1) * 100 / total_batches;
-                if [10, 25, 50, 75, 100]
-                    .iter()
-                    .any(|&q| prev_pct < q && pct >= q)
-                {
+                if pct / 10 > prev_pct / 10 || done == total_batches {
                     println!(
                         "  Progress: {}% ({}/{} batches, {:.2?} elapsed)",
                         pct,
