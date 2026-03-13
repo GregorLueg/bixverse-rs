@@ -26,6 +26,7 @@ use thousands::Separable;
 
 use crate::prelude::*;
 use crate::single_cell::sc_processing::pca::pca_on_sc_streaming;
+use crate::single_cell::sc_simd::*;
 
 /// How many genes to test for in one go
 const SCENIC_GENE_CHUNK_SIZE: usize = 1024;
@@ -759,11 +760,29 @@ impl TreeBuffers {
             self.cum_counts[b] = self.cum_counts[b - 1] + self.counts[b];
             let prev = (b - 1) * n_targets;
             let curr = b * n_targets;
-            for k in 0..n_targets {
-                self.cum_y_sums[curr + k] = self.cum_y_sums[prev + k] + self.y_sums[curr + k];
-                self.cum_y_sum_sqs[curr + k] =
-                    self.cum_y_sum_sqs[prev + k] + self.y_sum_sqs[curr + k];
-            }
+
+            // copy current bin values into cumulative position
+            self.cum_y_sums[curr..curr + n_targets]
+                .copy_from_slice(&self.y_sums[curr..curr + n_targets]);
+            self.cum_y_sum_sqs[curr..curr + n_targets]
+                .copy_from_slice(&self.y_sum_sqs[curr..curr + n_targets]);
+
+            // For n_targets <= 64 this fits on the stack comfortably.
+            let mut prev_sums = [0.0f64; MULTI_OUTPUT_BATCH];
+            let mut prev_sum_sqs = [0.0f64; MULTI_OUTPUT_BATCH];
+            prev_sums[..n_targets].copy_from_slice(&self.cum_y_sums[prev..prev + n_targets]);
+            prev_sum_sqs[..n_targets].copy_from_slice(&self.cum_y_sum_sqs[prev..prev + n_targets]);
+
+            accumulate_f64_simd(
+                &mut self.cum_y_sums[curr..curr + n_targets],
+                &prev_sums[..n_targets],
+                n_targets,
+            );
+            accumulate_f64_simd(
+                &mut self.cum_y_sum_sqs[curr..curr + n_targets],
+                &prev_sum_sqs[..n_targets],
+                n_targets,
+            );
         }
 
         (min_b, max_b)
@@ -864,18 +883,18 @@ fn evaluate_split_multi(
     let nf = n as f64;
     let h_base = threshold * n_targets;
 
-    let mut score = 0_f64;
-    for k in 0..n_targets {
-        let y_sum_l = cum_y_sums[h_base + k];
-        let y_sum_sq_l = cum_y_sum_sqs[h_base + k];
-        let y_sum_r = y_sums_total[k] - y_sum_l;
-        let y_sum_sq_r = y_sum_sqs_total[k] - y_sum_sq_l;
-
-        let var_l = f64::max(0.0, y_sum_sq_l / nl - (y_sum_l / nl).powi(2));
-        let var_r = f64::max(0.0, y_sum_sq_r / nr - (y_sum_r / nr).powi(2));
-
-        score += parent_vars[k] - (nl / nf) * var_l - (nr / nf) * var_r;
-    }
+    let score = evaluate_split_score_simd(
+        parent_vars,
+        y_sums_total,
+        y_sum_sqs_total,
+        &cum_y_sums[h_base..h_base + n_targets],
+        &cum_y_sum_sqs[h_base..h_base + n_targets],
+        n_targets,
+        1.0 / nl,
+        1.0 / nr,
+        nl / nf,
+        nr / nf,
+    );
 
     if score > *best_score {
         *best_score = score;
