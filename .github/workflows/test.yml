@@ -18,6 +18,14 @@ jobs:
         id: setup-r
         uses: r-lib/actions/setup-r@v2
 
+      - name: Install R shared library (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y r-base-dev
+          echo "LIBRARY_PATH=/usr/lib/R/lib:$LIBRARY_PATH" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=/usr/lib/R/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
