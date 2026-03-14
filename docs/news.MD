@@ -1,5 +1,18 @@
 # News
 
+## 0.1.5
+
+### Features
+
+- Improved Hotspot performance
+- Improved SEACells performance and reduced memory pressure
+- Thresholded GRNBoost2 pending the data set size
+
+### Fixes
+
+- Bug in the Hotspot streaming version
+- R can actually call GRNBoost2
+
 ## 0.1.4
 
 ### Features
