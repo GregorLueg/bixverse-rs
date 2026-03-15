@@ -7,6 +7,10 @@
 - Improved Hotspot performance
 - Improved SEACells performance and reduced memory pressure
 - Thresholded GRNBoost2 pending the data set size
+- IVF index added after improvements in ann-search-rs
+- Updated the files to be able to have more than u16::MAX features and deal with
+  situations where the raw counts are larger than u16::MAX. Additionally, a
+  function has been added to transform old `v2` files to `v3`.
 
 ### Fixes
 
