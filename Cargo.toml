@@ -21,7 +21,7 @@ codegen-units = 4
 
 [dependencies]
 approx = "0.5.1"
-ann-search-rs = "0.2.5"
+ann-search-rs = "0.2.6"
 bincode = { version = "2.0.1", features = ["serde"], optional = true }
 extendr-api = "0.8.1"
 faer = "0.23.2"
