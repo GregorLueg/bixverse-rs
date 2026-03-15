@@ -1,9 +1,7 @@
 //! Implementation of the miloR differential abundance approach on top of kNN
 //! graphs, see Dann, et al., Nat Biotechnol, 2022
 
-use ann_search_rs::annoy::AnnoyIndex;
-use ann_search_rs::hnsw::HnswIndex;
-use ann_search_rs::nndescent::NNDescent;
+use ann_search_rs::cpu::{annoy::AnnoyIndex, hnsw::HnswIndex, nndescent::NNDescent};
 use ann_search_rs::utils::dist::{Dist, parse_ann_dist};
 use faer::MatRef;
 use rayon::prelude::*;

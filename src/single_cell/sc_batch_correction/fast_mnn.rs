@@ -563,6 +563,45 @@ pub fn merge_two_batches(
 
             (knn_1_to_2, knn_2_to_1)
         }
+        KnnSearch::Ivf => {
+            let index_2 = build_ivf_index(
+                *data_2,
+                params.knn_params.n_list,
+                None,
+                &params.knn_params.ann_dist,
+                seed,
+                verbose,
+            );
+
+            let (knn_1_to_2, _) = query_ivf_index(
+                *data_1,
+                &index_2,
+                params.knn_params.k,
+                params.knn_params.n_list,
+                false,
+                verbose,
+            );
+
+            let index_1 = build_ivf_index(
+                *data_1,
+                params.knn_params.n_list,
+                None,
+                &params.knn_params.ann_dist,
+                seed,
+                verbose,
+            );
+
+            let (knn_2_to_1, _) = query_ivf_index(
+                *data_2,
+                &index_1,
+                params.knn_params.k,
+                params.knn_params.n_list,
+                false,
+                verbose,
+            );
+
+            (knn_1_to_2, knn_2_to_1)
+        }
     };
 
     let (mnn_1, mnn_2) = find_mutual_nns(&knn_1_to_2, &knn_2_to_1);

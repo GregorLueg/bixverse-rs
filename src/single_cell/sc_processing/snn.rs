@@ -198,10 +198,10 @@ pub fn generate_snn_limited(
             for neighbor_idx in 0..k {
                 let j = flat_knn[neighbor_idx * n_samples + i];
 
-                // Calculate sNN similarity between cell i and its neighbor j
+                // calculate sNN similarity between cell i and its neighbor j
                 let weight = match method {
                     SnnSimilarityMethod::Intersection => {
-                        // Get neighbors of both cells
+                        // get neighbors of both cells
                         let neighbors_i: FxHashSet<usize> = (0..k)
                             .map(|idx| flat_knn[idx * n_samples + i])
                             .chain(std::iter::once(i)) // include self

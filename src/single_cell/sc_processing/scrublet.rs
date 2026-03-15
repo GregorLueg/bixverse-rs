@@ -1037,6 +1037,15 @@ impl Scrublet {
                 k_adj,
                 verbose,
             ),
+            KnnSearch::Ivf => generate_knn_ivf(
+                embd.as_ref(),
+                &self.params.knn_params.ann_dist,
+                k_adj,
+                self.params.knn_params.n_list,
+                self.params.knn_params.n_list,
+                seed,
+                verbose,
+            ),
         };
 
         Ok(knn)

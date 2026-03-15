@@ -254,6 +254,17 @@ impl KnnParams {
             .and_then(|v| v.as_integer())
             .unwrap_or(100) as usize;
 
+        // ivf
+        let n_list = params_list
+            .get("n_list")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize);
+
+        let n_probe = params_list
+            .get("n_probe")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize);
+
         Self {
             knn_method,
             ann_dist,
@@ -266,6 +277,8 @@ impl KnnParams {
             m,
             ef_construction,
             ef_search,
+            n_list,
+            n_probe,
         }
     }
 }
