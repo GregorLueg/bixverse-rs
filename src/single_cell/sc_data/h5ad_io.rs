@@ -552,7 +552,6 @@ pub fn read_h5ad_x_data_csc<P: AsRef<Path>>(
     }
 
     // Process genes in chunks to reduce memory usage
-    // should think about exposing this as a function parameter... ?
     const CHUNK_SIZE: usize = 1000;
 
     for (chunk_idx, gene_chunk) in quality.genes_to_keep.chunks(CHUNK_SIZE).enumerate() {
@@ -654,7 +653,8 @@ pub fn write_h5_csc_to_csr_streaming<P: AsRef<Path>>(
     let indptr_raw: Vec<u32> = indptr_ds.read_1d()?.to_vec();
 
     // accumulate cells in memory (necessary for CSR)
-    let mut cell_data: Vec<Vec<(u16, u16)>> = vec![Vec::new(); quality.cells_to_keep.len()];
+    // (gene_index, raw_count) - gene index is u32 to support >65k features
+    let mut cell_data: Vec<Vec<(u32, u16)>> = vec![Vec::new(); quality.cells_to_keep.len()];
 
     const GENE_CHUNK_SIZE: usize = 5000;
     let total_genes = quality.genes_to_keep.len();
@@ -695,7 +695,7 @@ pub fn write_h5_csc_to_csr_streaming<P: AsRef<Path>>(
         let chunk_indices: Vec<u32> = indices_ds.read_slice_1d(start_pos..end_pos)?.to_vec();
 
         for &gene_idx in gene_chunk {
-            let new_gene_idx = quality.gene_old_to_new[&gene_idx] as u16;
+            let new_gene_idx = quality.gene_old_to_new[&gene_idx] as u32;
             let gene_start = indptr_raw[gene_idx] as usize;
             let gene_end = indptr_raw[gene_idx + 1] as usize;
 
@@ -746,7 +746,7 @@ pub fn write_h5_csc_to_csr_streaming<P: AsRef<Path>>(
 
         data.sort_by_key(|(gene_idx, _)| *gene_idx);
 
-        let gene_indices: Vec<u16> = data.iter().map(|(g, _)| *g).collect();
+        let gene_indices: Vec<u32> = data.iter().map(|(g, _)| *g).collect();
         let gene_counts: Vec<u16> = data.iter().map(|(_, c)| *c).collect();
 
         let cell_chunk =
@@ -1056,7 +1056,7 @@ pub fn parse_h5_csr_quality<P: AsRef<Path>>(
 /// * `file_path` - Path to the h5ad file.
 /// * `quality` - Information on the which cells and genes to include after a
 ///   first pass of the file.
-/// * `shape` - The final dimension of the matrix.
+/// * `verbose` - Controls verbosity of the function.
 ///
 /// ### Returns
 ///
@@ -1091,7 +1091,6 @@ pub fn read_h5ad_x_data_csr<P: AsRef<Path>>(
         );
     }
 
-    // should think about moving this into a function parameter ... ?
     const CHUNK_SIZE: usize = 1000;
 
     for (chunk_idx, cell_chunk) in quality.cells_to_keep.chunks(CHUNK_SIZE).enumerate() {
@@ -1143,7 +1142,6 @@ pub fn read_h5ad_x_data_csr<P: AsRef<Path>>(
             }
 
             // Sort by gene index to maintain consistent ordering
-            // IMPORTANT!
             cell_data.sort_by_key(|&(gene_idx, _)| gene_idx);
 
             // Add to CSC arrays
@@ -1238,7 +1236,7 @@ pub fn write_h5_csr_streaming<P: AsRef<Path>>(
 
     // Reusable buffers to avoid allocations
     let mut cell_data: Vec<(usize, u16)> = Vec::with_capacity(10000);
-    let mut gene_indices: Vec<u16> = Vec::with_capacity(10000);
+    let mut gene_indices: Vec<u32> = Vec::with_capacity(10000);
     let mut gene_counts: Vec<u16> = Vec::with_capacity(10000);
 
     for (batch_idx, cell_batch) in quality.cells_to_keep.chunks(CELL_BATCH_SIZE).enumerate() {
@@ -1272,7 +1270,7 @@ pub fn write_h5_csr_streaming<P: AsRef<Path>>(
                 let new_cell_idx = quality.cell_old_to_new[&old_cell_idx];
                 let empty_chunk = CsrCellChunk::from_data(
                     &[] as &[u16],
-                    &[] as &[u16],
+                    &[] as &[u32],
                     new_cell_idx,
                     cell_qc.target_size,
                     true,
@@ -1310,7 +1308,7 @@ pub fn write_h5_csr_streaming<P: AsRef<Path>>(
                     cell_data.sort_unstable_by_key(|&(gene_idx, _)| gene_idx);
                 }
 
-                gene_indices.extend(cell_data.iter().map(|(g, _)| *g as u16));
+                gene_indices.extend(cell_data.iter().map(|(g, _)| *g as u32));
                 gene_counts.extend(cell_data.iter().map(|(_, c)| *c));
             }
 
@@ -1618,8 +1616,7 @@ fn reconstruct_raw_count(norm_val: f32, lib_size: f32, target_size: f32) -> u16 
 ///
 /// ### Returns
 ///
-/// `CellOnFileQuality` structure that contains all of the information about
-/// which cells and genes to include.
+/// `CellQuality` structure
 fn reconstruct_and_write_csr<P: AsRef<Path>>(
     file_path: P,
     bin_path: P,
@@ -1647,8 +1644,9 @@ fn reconstruct_and_write_csr<P: AsRef<Path>>(
 
     const CELL_BATCH_SIZE: usize = 1000;
     let total_cells = quality.cells_to_keep.len();
+    // (gene_index, raw_count) - gene index as usize, count as u16
     let mut cell_data: Vec<(usize, u16)> = Vec::with_capacity(10000);
-    let mut gene_indices: Vec<u16> = Vec::with_capacity(10000);
+    let mut gene_indices: Vec<u32> = Vec::with_capacity(10000);
     let mut gene_counts: Vec<u16> = Vec::with_capacity(10000);
 
     for (batch_idx, cell_batch) in quality.cells_to_keep.chunks(CELL_BATCH_SIZE).enumerate() {
@@ -1677,7 +1675,7 @@ fn reconstruct_and_write_csr<P: AsRef<Path>>(
                 let new_cell_idx = quality.cell_old_to_new[&old_cell_idx];
                 let empty_chunk = CsrCellChunk::from_data(
                     &[] as &[u16],
-                    &[] as &[u16],
+                    &[] as &[u32],
                     new_cell_idx,
                     cell_qc.target_size,
                     true,
@@ -1722,7 +1720,7 @@ fn reconstruct_and_write_csr<P: AsRef<Path>>(
                 if needs_sort {
                     cell_data.sort_unstable_by_key(|&(g, _)| g);
                 }
-                gene_indices.extend(cell_data.iter().map(|(g, _)| *g as u16));
+                gene_indices.extend(cell_data.iter().map(|(g, _)| *g as u32));
                 gene_counts.extend(cell_data.iter().map(|(_, c)| *c));
             }
 
@@ -1770,8 +1768,7 @@ fn reconstruct_and_write_csr<P: AsRef<Path>>(
 ///
 /// ### Returns
 ///
-/// `CellOnFileQuality` structure that contains all of the information about
-/// which cells and genes to include.
+/// `CellQuality` structure
 fn reconstruct_and_write_csc<P: AsRef<Path>>(
     file_path: P,
     bin_path: P,
@@ -1788,7 +1785,8 @@ fn reconstruct_and_write_csc<P: AsRef<Path>>(
     let indptr_raw: Vec<u32> = indptr_ds.read_1d().unwrap().to_vec();
 
     // Accumulate per-cell data in memory - necessary for CSR output
-    let mut cell_data: Vec<Vec<(u16, u16)>> = vec![Vec::new(); quality.cells_to_keep.len()];
+    // (gene_index, raw_count) - gene index as u32 to support >65k features
+    let mut cell_data: Vec<Vec<(u32, u16)>> = vec![Vec::new(); quality.cells_to_keep.len()];
 
     const GENE_CHUNK_SIZE: usize = 5000;
     let total_genes = quality.genes_to_keep.len();
@@ -1825,7 +1823,7 @@ fn reconstruct_and_write_csc<P: AsRef<Path>>(
             .to_vec();
 
         for &gene_idx in gene_chunk {
-            let new_gene_idx = quality.gene_old_to_new[&gene_idx] as u16;
+            let new_gene_idx = quality.gene_old_to_new[&gene_idx] as u32;
             let gene_start = indptr_raw[gene_idx] as usize;
             let gene_end = indptr_raw[gene_idx + 1] as usize;
 
@@ -1878,7 +1876,7 @@ fn reconstruct_and_write_csc<P: AsRef<Path>>(
 
         data.sort_by_key(|(gene_idx, _)| *gene_idx);
 
-        let gene_indices: Vec<u16> = data.iter().map(|(g, _)| *g).collect();
+        let gene_indices: Vec<u32> = data.iter().map(|(g, _)| *g).collect();
         let gene_counts: Vec<u16> = data.iter().map(|(_, c)| *c).collect();
 
         let cell_chunk = CsrCellChunk::from_data(

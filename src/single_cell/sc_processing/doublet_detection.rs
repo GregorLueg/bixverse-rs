@@ -410,7 +410,7 @@ impl BoostClassifier {
                     .iter()
                     .enumerate()
                     .filter(|&(_, &gene_idx)| hvg_set.contains(&(gene_idx as usize)))
-                    .map(|(i, _)| chunk.data_raw[i] as usize)
+                    .map(|(i, _)| chunk.data_raw.get(i) as usize)
                     .sum()
             })
             .collect();
@@ -686,10 +686,10 @@ impl BoostClassifier {
         };
 
         let hvg_set: FxHashSet<usize> = hvg_genes.iter().copied().collect();
-        let gene_to_hvg_idx: FxHashMap<usize, u16> = hvg_genes
+        let gene_to_hvg_idx: FxHashMap<usize, u32> = hvg_genes
             .iter()
             .enumerate()
-            .map(|(hvg_idx, &orig_idx)| (orig_idx, hvg_idx as u16))
+            .map(|(hvg_idx, &orig_idx)| (orig_idx, hvg_idx as u32))
             .collect();
 
         let reader = ParallelSparseReader::new(&self.f_path_cell).unwrap();

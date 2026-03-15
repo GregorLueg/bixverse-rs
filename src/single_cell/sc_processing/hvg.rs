@@ -77,7 +77,7 @@ pub fn calculate_mean_var_filtered(
     // Only process cells that are in the filter
     for i in 0..gene.indices.len() {
         if cell_idx_map.contains_key(&gene.indices[i]) {
-            sum += gene.data_raw[i] as f32;
+            sum += gene.data_raw.get(i) as f32;
             nnz += 1;
         }
     }
@@ -88,7 +88,7 @@ pub fn calculate_mean_var_filtered(
     let mut sum_sq_diff = 0f32;
     for i in 0..gene.indices.len() {
         if cell_idx_map.contains_key(&gene.indices[i]) {
-            let val = gene.data_raw[i] as f32;
+            let val = gene.data_raw.get(i) as f32;
             let diff = val - mean;
             sum_sq_diff += diff * diff;
         }
@@ -132,7 +132,7 @@ pub fn calculate_std_variance_filtered(
     // Process non-zero entries that pass filter
     for i in 0..gene.indices.len() {
         if cell_idx_map.contains_key(&gene.indices[i]) {
-            let val_f32 = gene.data_raw[i] as f32;
+            let val_f32 = gene.data_raw.get(i) as f32;
             let norm = ((val_f32 - mean) / expected_sd)
                 .min(clip_max)
                 .max(-clip_max);

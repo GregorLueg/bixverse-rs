@@ -244,45 +244,61 @@ impl F16 {
 ///////////////////////
 
 /// Trait for types that can be converted to f32 and u16.
-pub trait ToF32AndU16: Copy {
+pub trait FloatAndUInt: Copy {
     /// Transform u16 to f32 for fast conversions
     fn to_f32(self) -> f32;
-    /// Transform f32 to u16
+
+    /// Transform u32/f32 to u16
     fn to_u16(self) -> u16;
+
+    /// Transform f32/u16 to u32
+    fn to_u32(self) -> u32;
 }
 
-impl ToF32AndU16 for i32 {
+impl FloatAndUInt for i32 {
     fn to_f32(self) -> f32 {
         self as f32
     }
     fn to_u16(self) -> u16 {
-        self as u16
+        self.min(u16::MAX as i32).max(0) as u16
+    }
+    fn to_u32(self) -> u32 {
+        self.max(0) as u32
     }
 }
 
-impl ToF32AndU16 for u32 {
+impl FloatAndUInt for u32 {
     fn to_f32(self) -> f32 {
         self as f32
     }
     fn to_u16(self) -> u16 {
-        self as u16
+        self.min(u16::MAX as u32) as u16
+    }
+    fn to_u32(self) -> u32 {
+        self
     }
 }
 
-impl ToF32AndU16 for usize {
+impl FloatAndUInt for usize {
     fn to_f32(self) -> f32 {
         self as f32
     }
     fn to_u16(self) -> u16 {
-        self as u16
+        self.min(u16::MAX as usize) as u16
+    }
+    fn to_u32(self) -> u32 {
+        self as u32
     }
 }
 
-impl ToF32AndU16 for u16 {
+impl FloatAndUInt for u16 {
     fn to_f32(self) -> f32 {
         self as f32
     }
     fn to_u16(self) -> u16 {
         self
+    }
+    fn to_u32(self) -> u32 {
+        self as u32
     }
 }

@@ -14,7 +14,7 @@ pub use crate::{assert_nrows, assert_same_len, assert_symmetric_mat};
 
 #[cfg(feature = "single-cell")]
 pub use crate::single_cell::sc_data::data_io::{
-    CellQuality, CscGeneChunk, CsrCellChunk, MinCellQuality, ParallelSparseReader,
+    CellQuality, CscGeneChunk, CsrCellChunk, MinCellQuality, ParallelSparseReader, RawCounts,
     from_cell_chunks, from_gene_chunks,
 };
 #[cfg(feature = "single-cell")]
@@ -27,4 +27,4 @@ pub use crate::single_cell::sc_traits::*;
 ////////////
 
 /// Version of the single cell files
-pub const SC_FILE_VERSION: u32 = 2;
+pub const SC_FILE_VERSION: u32 = 3;

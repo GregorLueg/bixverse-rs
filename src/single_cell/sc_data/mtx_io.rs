@@ -404,7 +404,8 @@ impl MtxReader {
             quality.genes_to_keep.len(),
         )?;
 
-        let mut cell_data: Vec<Vec<(u16, u16)>> = vec![Vec::new(); quality.cells_to_keep.len()];
+        // (gene_index, raw_count) - gene index as u32 to support >65k features
+        let mut cell_data: Vec<Vec<(u32, u16)>> = vec![Vec::new(); quality.cells_to_keep.len()];
         let mut line_buffer = Vec::with_capacity(64);
 
         let start_read = Instant::now();
@@ -453,7 +454,7 @@ impl MtxReader {
             }
 
             let new_cell_idx = quality.cell_old_to_new[&old_cell_idx];
-            let new_gene_idx = quality.gene_old_to_new[&old_gene_idx] as u16;
+            let new_gene_idx = quality.gene_old_to_new[&old_gene_idx] as u32;
 
             cell_data[new_cell_idx].push((new_gene_idx, value));
 
@@ -475,7 +476,7 @@ impl MtxReader {
 
             data.sort_by_key(|(gene_idx, _)| *gene_idx);
 
-            let gene_indices: Vec<u16> = data.iter().map(|(g, _)| *g).collect();
+            let gene_indices: Vec<u32> = data.iter().map(|(g, _)| *g).collect();
             let gene_counts: Vec<u16> = data.iter().map(|(_, c)| *c).collect();
 
             let total_umi: u32 = gene_counts.iter().map(|&x| x as u32).sum();
@@ -558,8 +559,6 @@ impl MtxReader {
 
         let mut boundaries = vec![(data_start, data_start)];
 
-        // idea is to chunk the data into a vector of boundaries that can
-        // be dealt with in parallel via Rayon
         for i in 1..num_chunks {
             let target_pos = data_start + (chunk_size * i as u64);
             if target_pos >= file_size {
@@ -603,7 +602,8 @@ impl MtxReader {
 /// ### Return
 ///
 /// Returns an Option of a tuple representing
-/// `<cell_index, gene_index, raw_count>`
+/// `<row_index, col_index, raw_count>` where the count is u16 (sufficient
+/// for single cell data; values exceeding u16::MAX will saturate).
 #[inline]
 fn parse_mtx_line(line: &[u8]) -> Option<(u32, u32, u16)> {
     let mut i = 0;
@@ -642,12 +642,12 @@ fn parse_mtx_line(line: &[u8]) -> Option<(u32, u32, u16)> {
         return None;
     }
 
-    // Parse third number (value)
-    let mut val = 0u16;
+    // Parse third number (value) - parse as u32 then saturate to u16
+    let mut val = 0u32;
     while i < len && line[i].is_ascii_digit() {
-        val = val * 10 + (line[i] - b'0') as u16;
+        val = val * 10 + (line[i] - b'0') as u32;
         i += 1;
     }
 
-    Some((row, col, val))
+    Some((row, col, val.min(u16::MAX as u32) as u16))
 }

@@ -1011,7 +1011,7 @@ fn create_centered_counts_gene(
     };
 
     let mut vals = vec![0_f32; n_cells];
-    for (&idx, &val) in gene.indices.iter().zip(&gene.data_raw) {
+    for (&idx, val) in gene.indices.iter().zip(gene.data_raw.iter()) {
         vals[idx as usize] = val as f32;
     }
 
@@ -1049,13 +1049,13 @@ fn danb_model(
 ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let n = n_cells as f32;
     let total: f32 = sum_simd_f32(umi_counts);
-    let tj: f32 = gene.data_raw.iter().map(|&x| x as f32).sum();
+    let tj: f32 = gene.data_raw.iter().map(|x| x as f32).sum();
 
     let mu: Vec<f32> = umi_counts.iter().map(|&ti| tj * ti / total).collect();
 
     // Build dense array for O(1) lookups
     let mut data_dense = vec![0.0f32; n_cells];
-    for (&idx, &val) in gene.indices.iter().zip(&gene.data_raw) {
+    for (&idx, val) in gene.indices.iter().zip(gene.data_raw.iter()) {
         data_dense[idx as usize] = val as f32;
     }
 
@@ -1254,7 +1254,7 @@ fn normal_model(
     n_cells: usize,
 ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let mut gene_raw = vec![0_f32; n_cells];
-    for (&idx, &val) in gene.indices.iter().zip(&gene.data_raw) {
+    for (&idx, val) in gene.indices.iter().zip(gene.data_raw.iter()) {
         gene_raw[idx as usize] = val as f32;
     }
 
@@ -1599,7 +1599,7 @@ impl<'a> Hotspot<'a> {
         };
 
         let mut vals = vec![0_f32; self.n_cells];
-        for (&idx, &val) in gene_chunk.indices.iter().zip(&gene_chunk.data_raw) {
+        for (&idx, val) in gene_chunk.indices.iter().zip(gene_chunk.data_raw.iter()) {
             vals[idx as usize] = val as f32;
         }
 

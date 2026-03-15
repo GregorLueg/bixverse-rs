@@ -146,7 +146,7 @@ fn scan_gene_nnz(task: &H5adFileTask, universe_size: usize) -> hdf5::Result<Vec<
 ///
 /// ### Returns
 ///
-/// Number of NNZ per given task/feature
+/// Vector of (unique_genes, library_size) per cell
 fn scan_cell_stats_csr(
     task: &H5adFileTask,
     gene_local_to_final: &[Option<usize>],
@@ -206,7 +206,7 @@ fn scan_cell_stats_csr(
 ///
 /// ### Returns
 ///
-/// Number of NNZ per given task/feature
+/// Vector of (unique_genes, library_size) per cell
 fn scan_cell_stats_csc(
     task: &H5adFileTask,
     gene_local_to_final: &[Option<usize>],
@@ -274,7 +274,7 @@ fn scan_cell_stats_csc(
 ///
 /// ### Returns
 ///
-/// Number of NNZ per given task/feature
+/// Vector of (unique_genes, library_size) per cell
 fn scan_cell_stats(
     task: &H5adFileTask,
     gene_local_to_final: &[Option<usize>],
@@ -343,8 +343,9 @@ fn write_h5_csr_cells(
     let mut lib_size = Vec::with_capacity(cells_to_keep.len());
     let mut nnz = Vec::with_capacity(cells_to_keep.len());
 
+    // (final_gene_index, raw_count) - gene index as usize, count as u16
     let mut cell_buf: Vec<(usize, u16)> = Vec::with_capacity(10_000);
-    let mut gene_idx_buf: Vec<u16> = Vec::with_capacity(10_000);
+    let mut gene_idx_buf: Vec<u32> = Vec::with_capacity(10_000);
     let mut count_buf: Vec<u16> = Vec::with_capacity(10_000);
 
     const BATCH_SIZE: usize = 1_000;
@@ -366,7 +367,7 @@ fn write_h5_csr_cells(
             for _ in cell_batch {
                 let empty = CsrCellChunk::from_data(
                     &[] as &[u16],
-                    &[] as &[u16],
+                    &[] as &[u32],
                     cell_offset + written,
                     target_size,
                     true,
@@ -401,7 +402,7 @@ fn write_h5_csr_cells(
                 if cell_buf.windows(2).any(|w| w[0].0 > w[1].0) {
                     cell_buf.sort_unstable_by_key(|&(g, _)| g);
                 }
-                gene_idx_buf.extend(cell_buf.iter().map(|(g, _)| *g as u16));
+                gene_idx_buf.extend(cell_buf.iter().map(|(g, _)| *g as u32));
                 count_buf.extend(cell_buf.iter().map(|(_, c)| *c));
             }
 
@@ -462,7 +463,8 @@ fn write_h5_csc_cells(
         .map(|(new, &old)| (old, new))
         .collect();
 
-    let mut cell_data: Vec<Vec<(u16, u16)>> = vec![Vec::new(); cells_to_keep.len()];
+    // (gene_index, raw_count) - gene index as u32 to support >65k features
+    let mut cell_data: Vec<Vec<(u32, u16)>> = vec![Vec::new(); cells_to_keep.len()];
 
     let genes_with_final: Vec<(usize, usize)> = gene_mapping
         .iter()
@@ -498,7 +500,7 @@ fn write_h5_csc_cells(
             for idx in gene_start..gene_end {
                 let old_cell = chunk_indices[idx] as usize;
                 if let Some(&new_cell) = cell_old_to_new.get(&old_cell) {
-                    cell_data[new_cell].push((final_gene as u16, chunk_data[idx] as u16));
+                    cell_data[new_cell].push((final_gene as u32, chunk_data[idx] as u16));
                 }
             }
         }
@@ -510,7 +512,7 @@ fn write_h5_csc_cells(
     for (i, mut data) in cell_data.into_iter().enumerate() {
         data.sort_by_key(|(g, _)| *g);
 
-        let gene_indices: Vec<u16> = data.iter().map(|(g, _)| *g).collect();
+        let gene_indices: Vec<u32> = data.iter().map(|(g, _)| *g).collect();
         let gene_counts: Vec<u16> = data.iter().map(|(_, c)| *c).collect();
 
         let chunk = CsrCellChunk::from_data(
@@ -652,14 +654,6 @@ pub fn multi_h5ad_to_file<P: AsRef<Path>>(
         .filter(|&i| universe_to_final[i].is_some())
         .collect();
     let total_genes = global_gene_indices.len();
-
-    assert!(
-        total_genes <= u16::MAX as usize,
-        "Final gene set ({}) exceeds u16 index limit ({}). \
-         Consider stricter min_cells or intersection mode.",
-        total_genes,
-        u16::MAX
-    );
 
     if verbose {
         println!(

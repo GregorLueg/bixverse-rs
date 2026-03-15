@@ -55,9 +55,9 @@ pub fn aggregate_meta_cells(
                 let mut library_size: u32 = 0;
 
                 for cell in &cells {
-                    for (idx, &count) in cell.indices.iter().zip(cell.data_raw.iter()) {
-                        *gene_counts.entry(*idx as usize).or_insert(0) += count as u32;
-                        library_size += count as u32;
+                    for (idx, count) in cell.indices.iter().zip(cell.data_raw.iter()) {
+                        *gene_counts.entry(*idx as usize).or_insert(0) += count;
+                        library_size += count;
                     }
                 }
 
@@ -239,7 +239,7 @@ pub fn get_pseudo_bulked_counts_dense(
             match bulk_type {
                 PseudoBulk::Raw => {
                     for (value, &gene_idx) in chunk.data_raw.iter().zip(chunk.indices.iter()) {
-                        result[(group_idx, gene_idx as usize)] += *value as f64;
+                        result[(group_idx, gene_idx as usize)] += value as f64;
                     }
                 }
                 PseudoBulk::Norm => {
@@ -306,7 +306,7 @@ pub fn get_pseudo_bulked_counts_sparse(
                 PseudoBulk::Raw => {
                     for (value, &gene_idx) in chunk.data_raw.iter().zip(chunk.indices.iter()) {
                         *row_data[group_idx].entry(gene_idx as usize).or_insert(0.0) +=
-                            *value as f64;
+                            value as f64;
                     }
                 }
                 PseudoBulk::Norm => {

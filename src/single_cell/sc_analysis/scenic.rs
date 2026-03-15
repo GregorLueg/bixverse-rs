@@ -483,7 +483,7 @@ impl SparseYBatch {
     ///
     /// A `SparseYBatch` where entries are sorted by cell, then by target
     /// index within each cell.
-    fn from_targets(targets: &[SparseAxis<u16, f32>], n_cells: usize) -> Self {
+    fn from_targets(targets: &[SparseAxis<u32, f32>], n_cells: usize) -> Self {
         // count non-zeros per cell across all targets
         let mut counts_per_cell = vec![0u32; n_cells];
         for target in targets {
@@ -558,7 +558,7 @@ impl SparseYBatch {
 /// Dense vector of length `n_samples * n_targets` with layout
 /// `y[sample * n_targets + target_idx]`. Absent entries default to `0.0`.
 #[allow(dead_code)]
-fn build_y_dense_multi(targets: &[SparseAxis<u16, f32>], n_samples: usize) -> Vec<f32> {
+fn build_y_dense_multi(targets: &[SparseAxis<u32, f32>], n_samples: usize) -> Vec<f32> {
     let n_targets = targets.len();
     let mut y_dense = vec![0.0f32; n_samples * n_targets];
     for (k, target) in targets.iter().enumerate() {
@@ -1468,7 +1468,7 @@ fn build_node_multi(
 /// (parallelism happens at the batch level in `run_scenic_grn`).
 #[allow(dead_code)]
 fn fit_multi_trees(
-    targets: &[SparseAxis<u16, f32>],
+    targets: &[SparseAxis<u32, f32>],
     feature_matrix: &DenseQuantisedStore,
     n_samples: usize,
     config: &dyn TreeRegressorConfig,
@@ -1598,7 +1598,7 @@ fn fit_multi_trees(
 /// One importance vector per target: `result[target_idx][feature_idx]`.
 /// Importance values are normalised to sum to 1.0 per target.
 fn fit_multi_trees_sparse(
-    targets: &[SparseAxis<u16, f32>],
+    targets: &[SparseAxis<u32, f32>],
     feature_matrix: &DenseQuantisedStore,
     n_samples: usize,
     config: &dyn TreeRegressorConfig,
@@ -2807,7 +2807,7 @@ fn build_gbm_node_sampled(
 ///
 /// Normalised importance vector of length `n_features`, summing to 1.0.
 pub fn fit_grnboost2_full_hist(
-    target: &SparseAxis<u16, f32>,
+    target: &SparseAxis<u32, f32>,
     feature_matrix: &DenseQuantisedStore,
     n_samples: usize,
     config: &GradientBoostingConfig,
@@ -2937,7 +2937,7 @@ pub fn fit_grnboost2_full_hist(
 ///
 /// Normalised importance vector of length `n_features`, summing to 1.0.
 pub fn fit_grnboost2_sampled(
-    target: &SparseAxis<u16, f32>,
+    target: &SparseAxis<u32, f32>,
     feature_matrix: &DenseQuantisedStore,
     n_samples: usize,
     config: &GradientBoostingConfig,
@@ -3058,7 +3058,7 @@ pub fn fit_grnboost2_sampled(
 ///
 /// Normalised importance vector of length `n_features`, summing to 1.0.
 pub fn fit_grnboost2_sparse(
-    target: &SparseAxis<u16, f32>,
+    target: &SparseAxis<u32, f32>,
     feature_matrix: &DenseQuantisedStore,
     n_samples: usize,
     config: &GradientBoostingConfig,
@@ -3417,7 +3417,7 @@ fn run_scenic_multi_output(
 
     let start_gene_read = Instant::now();
     let mut all_gene_ids: Vec<usize> = Vec::with_capacity(n_genes);
-    let mut all_sparse_cols: Vec<SparseAxis<u16, f32>> = Vec::with_capacity(n_genes);
+    let mut all_sparse_cols: Vec<SparseAxis<u32, f32>> = Vec::with_capacity(n_genes);
 
     for (iter, chunk) in ordered_genes.chunks(SCENIC_GENE_CHUNK_SIZE).enumerate() {
         let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(chunk);
@@ -3449,7 +3449,7 @@ fn run_scenic_multi_output(
     }
 
     let id_batches: Vec<&[usize]> = all_gene_ids.chunks(n_multi_output).collect();
-    let col_batches: Vec<&[SparseAxis<u16, f32>]> =
+    let col_batches: Vec<&[SparseAxis<u32, f32>]> =
         all_sparse_cols.chunks(n_multi_output).collect();
     let total_batches = col_batches.len();
 
@@ -3573,7 +3573,7 @@ fn run_scenic_gbm(
     start_total: Instant,
 ) -> Mat<f32> {
     let start_gene_read = Instant::now();
-    let mut all_sparse_cols: Vec<SparseAxis<u16, f32>> = Vec::with_capacity(n_genes);
+    let mut all_sparse_cols: Vec<SparseAxis<u32, f32>> = Vec::with_capacity(n_genes);
 
     if verbose {
         println!(
@@ -3769,7 +3769,7 @@ fn run_scenic_multi_output_streaming(
             c.filter_selected_cells(cell_set);
         });
 
-        let sparse_columns: Vec<SparseAxis<u16, f32>> = gene_chunks
+        let sparse_columns: Vec<SparseAxis<u32, f32>> = gene_chunks
             .iter()
             .map(|c| c.to_sparse_axis(n_cells))
             .collect();
@@ -3786,7 +3786,7 @@ fn run_scenic_multi_output_streaming(
         }
 
         let id_batches: Vec<&[usize]> = io_chunk.chunks(n_multi_output).collect();
-        let col_batches: Vec<&[SparseAxis<u16, f32>]> =
+        let col_batches: Vec<&[SparseAxis<u32, f32>]> =
             sparse_columns.chunks(n_multi_output).collect();
         let n_batches_this_chunk = col_batches.len();
 
@@ -3930,7 +3930,7 @@ fn run_scenic_gbm_streaming(
             c.filter_selected_cells(cell_set);
         });
 
-        let sparse_columns: Vec<SparseAxis<u16, f32>> = gene_chunks
+        let sparse_columns: Vec<SparseAxis<u32, f32>> = gene_chunks
             .iter()
             .map(|c| c.to_sparse_axis(n_cells))
             .collect();
@@ -4093,7 +4093,7 @@ pub fn scenic_gene_filter(
         });
 
         for gene in &gene_chunks {
-            let total_counts: u32 = gene.data_raw.iter().map(|&x| x as u32).sum();
+            let total_counts: u32 = gene.data_raw.iter().sum();
             let expressed_fraction = gene.nnz as f32 / n_cells as f32;
 
             if total_counts >= scenic_params.min_counts as u32
@@ -4943,17 +4943,23 @@ mod tests {
         // Target: 2 * (TF0 quantised value) + small noise
         // Build as a sparse axis
         let tf0_col = store.get_col(0);
-        let mut target_indices: Vec<u16> = Vec::new();
+        let mut target_indices: Vec<usize> = Vec::new();
         let mut target_values: Vec<f32> = Vec::new();
         for c in 0..n_cells {
             let val = 2.0 * tf0_col[c] as f32 + rng.random_range(-5.0..5.0f32);
             if val.abs() > 0.01 {
-                target_indices.push(c as u16);
+                target_indices.push(c);
                 target_values.push(val);
             }
         }
 
-        let target = SparseAxis::from_vecs_to_csc(target_indices, target_values);
+        let target = SparseAxis {
+            indices: target_indices.to_vec(),
+            data: Vec::new(),
+            data_2: Some(target_values),
+            cs_type: CompressedSparseFormat::Csc,
+            len: n_cells,
+        };
 
         let config = GradientBoostingConfig {
             n_trees_max: 200,
@@ -4994,7 +5000,13 @@ mod tests {
         let store = make_store(data, n_cells, n_features);
 
         // Empty target (all zeros)
-        let target = SparseAxis::from_vecs_to_csc(Vec::new(), Vec::new());
+        let target = SparseAxis {
+            indices: Vec::new(),
+            data: Vec::new(),
+            data_2: Some(Vec::new()),
+            cs_type: CompressedSparseFormat::Csc,
+            len: n_cells,
+        };
 
         let config = GradientBoostingConfig {
             n_trees_max: 500,
@@ -5023,27 +5035,29 @@ mod tests {
         let n_cells = 100;
         let n_features = 2;
         let mut rng = SmallRng::seed_from_u64(7);
-
         let mut data = vec![0u8; n_features * n_cells];
         for i in 0..data.len() {
             data[i] = rng.random_range(0..=255u8);
         }
         let store = make_store(data, n_cells, n_features);
-
-        let mut t_idx: Vec<u16> = Vec::new();
+        let mut t_idx: Vec<u32> = Vec::new();
         let mut t_val: Vec<f32> = Vec::new();
         let col = store.get_col(0);
         for c in 0..n_cells {
             let v = col[c] as f32;
             if v > 0.0 {
-                t_idx.push(c as u16);
+                t_idx.push(c as u32);
                 t_val.push(v);
             }
         }
-        let target = SparseAxis::from_vecs_to_csc(t_idx, t_val);
-
+        let target = SparseAxis {
+            indices: t_idx.iter().map(|&i| i as usize).collect(),
+            data: Vec::new(),
+            data_2: Some(t_val),
+            cs_type: CompressedSparseFormat::Csc,
+            len: n_cells,
+        };
         let config = GradientBoostingConfig::default();
-
         let a = fit_grnboost2_sparse(&target, &store, n_cells, &config, 42);
         let b = fit_grnboost2_sparse(&target, &store, n_cells, &config, 42);
         assert_eq!(a, b, "same seed should produce identical results");

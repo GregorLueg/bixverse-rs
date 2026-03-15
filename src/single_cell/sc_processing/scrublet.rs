@@ -194,22 +194,22 @@ impl CsrCellChunk {
         log_transform: bool,
         doublet_index: usize,
     ) -> Self {
-        let mut gene_counts: FxHashMap<u16, u32> = FxHashMap::default();
+        let mut gene_counts: FxHashMap<u32, u32> = FxHashMap::default();
 
         for i in 0..cell1.indices.len() {
             let gene_idx = cell1.indices[i] as usize;
             if hvg_indices.contains(&gene_idx) {
-                *gene_counts.entry(cell1.indices[i]).or_insert(0) += cell1.data_raw[i] as u32;
+                *gene_counts.entry(cell1.indices[i]).or_insert(0) += cell1.data_raw.get(i);
             }
         }
         for i in 0..cell2.indices.len() {
             let gene_idx = cell2.indices[i] as usize;
             if hvg_indices.contains(&gene_idx) {
-                *gene_counts.entry(cell2.indices[i]).or_insert(0) += cell2.data_raw[i] as u32;
+                *gene_counts.entry(cell2.indices[i]).or_insert(0) += cell2.data_raw.get(i);
             }
         }
 
-        let mut gene_vec: Vec<(u16, u32)> = gene_counts.into_iter().collect();
+        let mut gene_vec: Vec<(u32, u32)> = gene_counts.into_iter().collect();
         gene_vec.sort_unstable_by_key(|&(gene, _)| gene);
 
         let mut data_raw = Vec::with_capacity(gene_vec.len());
@@ -233,7 +233,7 @@ impl CsrCellChunk {
         }
 
         Self {
-            data_raw,
+            data_raw: RawCounts::U16(data_raw),
             data_norm,
             library_size: hvg_lib_size_combined,
             indices,
@@ -454,7 +454,7 @@ fn scale_gene_with_stats(
     let mut normalised = vec![0.0f32; n_cells];
 
     for (i, &pos) in chunk.indices.iter().enumerate() {
-        let raw_count = chunk.data_raw[i] as f32;
+        let raw_count = chunk.data_raw.get(i) as f32;
         let lib_size = hvg_library_sizes[pos as usize] as f32;
 
         normalised[pos as usize] = if log_transform {
@@ -694,7 +694,7 @@ impl Scrublet {
                     .iter()
                     .enumerate()
                     .filter(|(_, gene_idx)| hvg_set.contains(&(**gene_idx as usize)))
-                    .map(|(i, _)| chunk.data_raw[i] as usize)
+                    .map(|(i, _)| chunk.data_raw.get(i) as usize)
                     .sum()
             })
             .collect();
@@ -879,10 +879,10 @@ impl Scrublet {
             .collect();
 
         let hvg_set: FxHashSet<usize> = hvg_genes.iter().copied().collect();
-        let gene_to_hvg_idx: FxHashMap<usize, u16> = hvg_genes
+        let gene_to_hvg_idx: FxHashMap<usize, u32> = hvg_genes
             .iter()
             .enumerate()
-            .map(|(hvg_idx, &orig_idx)| (orig_idx, hvg_idx as u16))
+            .map(|(hvg_idx, &orig_idx)| (orig_idx, hvg_idx as u32))
             .collect();
 
         let reader = ParallelSparseReader::new(&self.f_path_cell).unwrap();
