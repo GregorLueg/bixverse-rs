@@ -141,7 +141,8 @@ pub fn pairwise_gene_correlations(
         .map(|(&g1, &g2)| {
             let a = &standardised[unique_genes.get_index_of(&g1).unwrap()];
             let b = &standardised[unique_genes.get_index_of(&g2).unwrap()];
-            a.iter().zip(b.iter()).map(|(x, y)| x * y).sum::<f32>() / denom
+            let cor = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum::<f32>() / denom;
+            cor.clamp(-1_f32, 1_f32) // avoid floating ops instabilities
         })
         .collect()
 }
