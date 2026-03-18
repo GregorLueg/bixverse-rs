@@ -12,6 +12,7 @@ name = "bixverse_rs"
 path = "src/lib.rs"
 
 [features]
+## Enables the single cell features in bixverse-rs
 single-cell = ["half", "bincode", "indexmap", "memmap2", "hdf5", "lz4_flex"]
 
 [profile.release]
@@ -45,3 +46,4 @@ serde = { version = "1.0", features = ["derive"] }
 statrs = "0.18.0"
 thousands = "0.2.0"
 wide = "1.1.1"
+document-features = "0.2.12"

@@ -1,30 +1,15 @@
-//! Contains the SCENIC implementation from Aibar, et al., Nat Methods, 2017.
-//! Several modifications were however implemented:
+//! SCENIC implementation from Aibar et al., Nat Methods, 2017, with the
+//! following modifications:
 //!
-//! a.) Usage of quantisation and histogram-based splitting. This reduces the
-//!     size of the predictor variables substantially.
-//! b.) Multi-output batching. The original version would create one regression
-//!     learner per given gene with the TF expression as predictors. In this
-//!     implementation genes are batched together to reduce number of learners
-//!     to be trained. This applies to the ExtraTrees and RandomForest learners
-//!     where independent trees make shared structure across targets a
-//!     reasonable approximation.
-//! c.) To ensure that sensible genes are batched together, the module provides
-//!     two methods to batch genes together. Completely random to avoid biases
-//!     of the gene index order generally speaking (fast, but potentially not
-//!     optimal). And SVD on a subset of cells (for very large data sets) with
-//!     k-means clustering on the gene loadings to put similar genes together.
-//! d.) GRNBoost2-style gradient boosted tree ensembles (Moerman, et al.,
-//!     Bioinformatics, 2019). Unlike the RF/ET learners, GBM trees are built
-//!     sequentially per target (each fitting residuals from the prior
-//!     ensemble), so multi-output batching is not used. Instead, parallelism
-//!     is exploited across targets. The implementation uses full-feature
-//!     histogram construction with parent-child subtraction (smaller child
-//!     built from scratch, larger derived by difference) to minimise
-//!     histogram cost in shallow trees. Early stopping via out-of-bag
-//!     improvement estimates prevents overfitting and aborts regressions
-//!     with little signal early, which is the primary source of speedup
-//!     over RF/ET for large gene sets.
+//! - **Quantisation and histogram-based splitting** to reduce predictor
+//!   variable size.
+//! - **Multi-output batching** for ExtraTrees and RandomForest learners,
+//!   grouping genes to reduce the number of regression learners trained.
+//! - **Gene batching strategies**: random assignment or SVD + k-means on
+//!   gene loadings to group similar genes together.
+//! - **GRNBoost2-style GBM** (Moerman et al., Bioinformatics, 2019) with
+//!   histogram-based splits, parent-child subtraction, and OOB early
+//!   stopping. Parallelism is exploited across targets rather than batching.
 
 use ann_search_rs::prelude::*;
 use ann_search_rs::utils::k_means_utils::{assign_all_parallel, train_centroids};
