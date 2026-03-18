@@ -2,7 +2,9 @@
 //! has various statistical and computational biology methods, written with
 //! performance in mind. Additionally, it now also has a first take at a single
 //! cell suite of methods and functions.
-
+//!
+//! ## Feature flags
+#![doc = document_features::document_features!()]
 #![allow(clippy::needless_range_loop)]
 #![warn(missing_docs)]
 

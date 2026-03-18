@@ -2,9 +2,11 @@
 //! various potential graphs in single cell 'omics, see DeTomaso and Yosef,
 //! Cell Syst., 2021
 
-use faer::{Mat, MatRef, RowRef};
+use faer::{Mat, MatRef};
 use indexmap::IndexSet;
 use rayon::prelude::*;
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 use std::time::Instant;
 use wide::{f32x4, f32x8};
 
@@ -930,73 +932,19 @@ fn center_values(vals: &mut [f32], mu: &[f32], var: &[f32]) {
 /// ### Returns
 ///
 /// Local covariance statistic
-fn local_cov_pair(
-    x: RowRef<f32>,
-    y: RowRef<f32>,
-    neighbours: &[Vec<usize>],
-    weights: &[Vec<f32>],
-) -> f32 {
-    let mut out = 0.0;
+fn local_cov_pair(x: &[f32], y: &[f32], neighbours: &[Vec<usize>], weights: &[Vec<f32>]) -> f32 {
+    let mut out = 0.0f32;
 
-    for i in 0..x.ncols() {
+    for (i, (neighs, ws)) in neighbours.iter().zip(weights.iter()).enumerate() {
         let xi = x[i];
         let yi = y[i];
-        if xi == 0.0 && yi == 0.0 {
-            continue;
-        }
-        for k in 0..neighbours[i].len() {
-            let j = neighbours[i][k];
-            let w_ij = weights[i][k];
 
-            let xj = x[j];
-            let yj = y[j];
-
-            out += w_ij * (xi * yj + yi * xj) / 2.0;
+        for (&j, &w) in neighs.iter().zip(ws.iter()) {
+            out += w * (xi * y[j] + yi * x[j]);
         }
     }
 
-    out
-}
-
-/// Compute local covariance for gene pairs
-///
-/// Test statistic for local pairwise autocorrelation. Calculates the weighted
-/// covariance between two genes across neighbouring cells.
-///
-/// ### Params
-///
-/// * `x` - Slice for first gene.
-/// * `y` - Slice for second gene.
-/// * `neighbours` - Neighbour indices for each cell
-/// * `weights` - Edge weights for each neighbour connection
-///
-/// ### Returns
-///
-/// Local covariance statistic
-fn local_cov_pair_vec(
-    x: &[f32],
-    y: &[f32],
-    neighbours: &[Vec<usize>],
-    weights: &[Vec<f32>],
-) -> f32 {
-    neighbours
-        .iter()
-        .zip(weights.iter())
-        .enumerate()
-        .map(|(i, (neighs, ws))| {
-            let xi = x[i];
-            let yi = y[i];
-            neighs
-                .iter()
-                .zip(ws.iter())
-                .map(|(&j, &w)| {
-                    let xj = x[j];
-                    let yj = y[j];
-                    w * (xi * yj + yi * xj) / 2.0
-                })
-                .sum::<f32>()
-        })
-        .sum()
+    out * 0.5
 }
 
 /// Compute conditional EG2 for correlation
@@ -1035,47 +983,6 @@ fn conditional_eg2(x: &[f32], neighbours: &[Vec<usize>], weights: &[Vec<f32>]) -
     t1x.iter().map(|&t| t * t).sum()
 }
 
-/// Compute maximum possible pairwise local covariance
-///
-/// Calculates the theoretical maximum for pairwise correlation normalisation.
-///
-/// ### Params
-///
-/// * `node_degrees` - Sum of edge weights for each node
-/// * `counts` - Centred gene expression matrix (genes × cells)
-///
-/// ### Returns
-///
-/// Matrix of maximum covariances (genes × genes)
-fn compute_local_cov_pairs_max(node_degrees: &[f32], counts: &Mat<f32>) -> Mat<f32> {
-    let n_genes = counts.nrows();
-
-    let gene_maxs: Vec<f32> = (0..n_genes)
-        .into_par_iter()
-        .map(|i| {
-            let row = counts.row(i);
-            let row_vec = row.iter().copied().collect::<Vec<f32>>();
-            compute_local_cov_max(node_degrees, &row_vec)
-        })
-        .collect();
-
-    let values: Vec<f32> = (0..n_genes * n_genes)
-        .into_par_iter()
-        .map(|idx| {
-            let i = idx / n_genes;
-            let j = idx % n_genes;
-            (gene_maxs[i] + gene_maxs[j]) / 2.0
-        })
-        .collect();
-
-    let mut result = Mat::zeros(n_genes, n_genes);
-    for (idx, &val) in values.iter().enumerate() {
-        result[(idx / n_genes, idx % n_genes)] = val;
-    }
-
-    result
-}
-
 /// Centre gene counts for correlation computation
 ///
 /// Standardises gene expression using the specified model, transforming to
@@ -1104,7 +1011,7 @@ fn create_centered_counts_gene(
     };
 
     let mut vals = vec![0_f32; n_cells];
-    for (&idx, &val) in gene.indices.iter().zip(&gene.data_raw) {
+    for (&idx, val) in gene.indices.iter().zip(gene.data_raw.iter()) {
         vals[idx as usize] = val as f32;
     }
 
@@ -1142,13 +1049,13 @@ fn danb_model(
 ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let n = n_cells as f32;
     let total: f32 = sum_simd_f32(umi_counts);
-    let tj: f32 = gene.data_raw.iter().map(|&x| x as f32).sum();
+    let tj: f32 = gene.data_raw.iter().map(|x| x as f32).sum();
 
     let mu: Vec<f32> = umi_counts.iter().map(|&ti| tj * ti / total).collect();
 
     // Build dense array for O(1) lookups
     let mut data_dense = vec![0.0f32; n_cells];
-    for (&idx, &val) in gene.indices.iter().zip(&gene.data_raw) {
+    for (&idx, val) in gene.indices.iter().zip(gene.data_raw.iter()) {
         data_dense[idx as usize] = val as f32;
     }
 
@@ -1347,7 +1254,7 @@ fn normal_model(
     n_cells: usize,
 ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let mut gene_raw = vec![0_f32; n_cells];
-    for (&idx, &val) in gene.indices.iter().zip(&gene.data_raw) {
+    for (&idx, val) in gene.indices.iter().zip(gene.data_raw.iter()) {
         gene_raw[idx as usize] = val as f32;
     }
 
@@ -1583,12 +1490,11 @@ impl<'a> Hotspot<'a> {
 
             let start_gene = batch_idx * GENE_BATCH_SIZE;
             let end_gene = ((batch_idx + 1) * GENE_BATCH_SIZE).min(no_genes);
-
-            let gene_indices: Vec<usize> = (start_gene..end_gene).collect();
+            let batch_gene_indices = &gene_indices[start_gene..end_gene];
 
             let start_loading = Instant::now();
 
-            let mut gene_chunks = reader.read_gene_parallel(&gene_indices);
+            let mut gene_chunks = reader.read_gene_parallel(batch_gene_indices);
 
             gene_chunks.par_iter_mut().for_each(|chunk| {
                 chunk.filter_selected_cells(&cell_set);
@@ -1628,12 +1534,12 @@ impl<'a> Hotspot<'a> {
             results.push((batch_gene_indices, batch_gaery_c, batch_z_scores));
         }
 
-        let mut gene_indices: Vec<usize> = Vec::new();
+        let mut gene_indices_out: Vec<usize> = Vec::new();
         let mut gaery_c: Vec<f64> = Vec::new();
         let mut z_scores: Vec<f64> = Vec::new();
 
         for (idx, c, z) in results {
-            gene_indices.extend(idx);
+            gene_indices_out.extend(idx);
             gaery_c.extend(c);
             z_scores.extend(z);
         }
@@ -1648,7 +1554,7 @@ impl<'a> Hotspot<'a> {
         }
 
         Ok(HotSpotGeneRes {
-            gene_idx: gene_indices,
+            gene_idx: gene_indices_out,
             c: gaery_c,
             z: z_scores,
             pval: p_vals,
@@ -1693,7 +1599,7 @@ impl<'a> Hotspot<'a> {
         };
 
         let mut vals = vec![0_f32; self.n_cells];
-        for (&idx, &val) in gene_chunk.indices.iter().zip(&gene_chunk.data_raw) {
+        for (&idx, val) in gene_chunk.indices.iter().zip(gene_chunk.data_raw.iter()) {
             vals[idx as usize] = val as f32;
         }
 
@@ -1777,32 +1683,28 @@ impl<'a> Hotspot<'a> {
                 )
             })
             .collect();
+        drop(gene_chunks);
 
         let n_genes = centered_counts.len();
-        let mut counts_mat = Mat::zeros(n_genes, self.n_cells);
-        for (i, gene_vec) in centered_counts.iter().enumerate() {
-            for (j, &val) in gene_vec.iter().enumerate() {
-                counts_mat[(i, j)] = val;
-            }
-        }
 
         if verbose {
             println!("Centered in {:.2?}", start_center.elapsed());
-            println!("Computing conditional EG2 values...");
+            println!("Computing conditional EG2 and per-gene max values...");
         }
 
         let start_eg2 = Instant::now();
-        let eg2s: Vec<f32> = (0..n_genes)
-            .into_par_iter()
-            .map(|i| {
-                let row = counts_mat.row(i);
-                let row_vec = row.iter().copied().collect::<Vec<f32>>();
-                conditional_eg2(&row_vec, self.neighbours, &self.weights)
-            })
+        let eg2s: Vec<f32> = centered_counts
+            .par_iter()
+            .map(|counts| conditional_eg2(counts, self.neighbours, &self.weights))
+            .collect();
+
+        let gene_maxs: Vec<f32> = centered_counts
+            .par_iter()
+            .map(|counts| compute_local_cov_max(&self.node_degrees, counts))
             .collect();
 
         if verbose {
-            println!("Computed EG2 in {:.2?}", start_eg2.elapsed());
+            println!("Computed EG2 and maxs in {:.2?}", start_eg2.elapsed());
             println!("Computing pairwise correlations...");
         }
 
@@ -1816,23 +1718,25 @@ impl<'a> Hotspot<'a> {
         let results: Vec<(usize, usize, f32, f32)> = pairs
             .par_iter()
             .map(|&(i, j)| {
-                let x = counts_mat.row(i);
-                let y = counts_mat.row(j);
+                let lc = local_cov_pair(
+                    &centered_counts[i],
+                    &centered_counts[j],
+                    self.neighbours,
+                    &self.weights,
+                ) * 2.0;
 
-                let lc = local_cov_pair(x, y, self.neighbours, &self.weights) * 2.0;
-
-                // Use the minimum of the two Z-scores (more conservative)
-                let eg = 0.0;
+                let lc_max = (gene_maxs[i] + gene_maxs[j]) / 2.0;
+                let normalised_lc = if lc_max > 0.0 { lc / lc_max } else { 0.0 };
 
                 let stdg_xy = eg2s[i].sqrt();
-                let z_xy = (lc - eg) / stdg_xy;
+                let z_xy = lc / stdg_xy;
 
                 let stdg_yx = eg2s[j].sqrt();
-                let z_yx = (lc - eg) / stdg_yx;
+                let z_yx = lc / stdg_yx;
 
                 let z = if z_xy.abs() < z_yx.abs() { z_xy } else { z_yx };
 
-                (i, j, lc, z)
+                (i, j, normalised_lc, z)
             })
             .collect();
 
@@ -1842,10 +1746,8 @@ impl<'a> Hotspot<'a> {
                 n_pairs,
                 start_pairs.elapsed()
             );
-            println!("Building matrices...");
         }
 
-        // generate symmetric matrices
         let mut lc_mat = Mat::zeros(n_genes, n_genes);
         let mut z_mat = Mat::zeros(n_genes, n_genes);
 
@@ -1855,13 +1757,6 @@ impl<'a> Hotspot<'a> {
                 lc_mat[(j, i)] = lc;
                 z_mat[(i, j)] = z;
                 z_mat[(j, i)] = z;
-            }
-        }
-
-        let lc_maxs = compute_local_cov_pairs_max(&self.node_degrees, &counts_mat);
-        for i in 0..n_genes {
-            for j in 0..n_genes {
-                lc_mat[(i, j)] /= lc_maxs[(i, j)];
             }
         }
 
@@ -1950,27 +1845,27 @@ impl<'a> Hotspot<'a> {
                     )
                 })
                 .collect();
+            drop(batch_i_chunks);
 
             let batch_i_eg2: Vec<f32> = batch_i_centered
                 .par_iter()
                 .map(|counts| conditional_eg2(counts, self.neighbours, &self.weights))
                 .collect();
 
-            let end_batch_i = start_batch_i.elapsed();
+            let batch_i_maxs: Vec<f32> = batch_i_centered
+                .par_iter()
+                .map(|counts| compute_local_cov_max(&self.node_degrees, counts))
+                .collect();
 
-            if verbose {
-                println!("Computed batch {} in: {:.2?}", batch_i + 1, end_batch_i);
-            }
-
-            let remaining_batches = n_batches - batch_i;
             if verbose {
                 println!(
-                    "  Computing pairs with {} remaining batches",
-                    remaining_batches
+                    "Computed batch {} in: {:.2?}",
+                    batch_i + 1,
+                    start_batch_i.elapsed()
                 );
             }
 
-            let start_remaining_batches = Instant::now();
+            let start_remaining = Instant::now();
 
             for batch_j in batch_i..n_batches {
                 let start_j = batch_j * GENE_BATCH_SIZE;
@@ -1980,36 +1875,53 @@ impl<'a> Hotspot<'a> {
                     println!("    Batch pair ({}, {})", batch_i + 1, batch_j + 1);
                 }
 
-                let (batch_j_centered, batch_j_eg2) = if batch_i == batch_j {
-                    (batch_i_centered.clone(), batch_i_eg2.clone())
-                } else {
-                    let batch_j_indices = &gene_indices[start_j..end_j];
-                    let mut batch_j_chunks = reader.read_gene_parallel(batch_j_indices);
-                    batch_j_chunks.par_iter_mut().for_each(|chunk| {
-                        chunk.filter_selected_cells(&cell_set);
-                    });
+                let is_diagonal = batch_i == batch_j;
 
-                    let centered: Vec<Vec<f32>> = batch_j_chunks
-                        .par_iter()
-                        .map(|gene| {
-                            create_centered_counts_gene(
-                                gene,
-                                self.umi_counts.as_ref().unwrap(),
-                                self.n_cells,
-                                &gex_model,
-                            )
-                        })
-                        .collect();
+                let batch_j_centered_owned: Vec<Vec<f32>>;
+                let batch_j_eg2_owned: Vec<f32>;
+                let batch_j_maxs_owned: Vec<f32>;
 
-                    let eg2: Vec<f32> = centered
-                        .par_iter()
-                        .map(|counts| conditional_eg2(counts, self.neighbours, &self.weights))
-                        .collect();
+                let (batch_j_centered, batch_j_eg2, batch_j_maxs): (&[Vec<f32>], &[f32], &[f32]) =
+                    if is_diagonal {
+                        (&batch_i_centered, &batch_i_eg2, &batch_i_maxs)
+                    } else {
+                        let batch_j_indices = &gene_indices[start_j..end_j];
+                        let mut batch_j_chunks = reader.read_gene_parallel(batch_j_indices);
+                        batch_j_chunks.par_iter_mut().for_each(|chunk| {
+                            chunk.filter_selected_cells(&cell_set);
+                        });
 
-                    (centered, eg2)
-                };
+                        batch_j_centered_owned = batch_j_chunks
+                            .par_iter()
+                            .map(|gene| {
+                                create_centered_counts_gene(
+                                    gene,
+                                    self.umi_counts.as_ref().unwrap(),
+                                    self.n_cells,
+                                    &gex_model,
+                                )
+                            })
+                            .collect();
+                        drop(batch_j_chunks);
 
-                let pairs: Vec<(usize, usize)> = if batch_i == batch_j {
+                        batch_j_eg2_owned = batch_j_centered_owned
+                            .par_iter()
+                            .map(|counts| conditional_eg2(counts, self.neighbours, &self.weights))
+                            .collect();
+
+                        batch_j_maxs_owned = batch_j_centered_owned
+                            .par_iter()
+                            .map(|counts| compute_local_cov_max(&self.node_degrees, counts))
+                            .collect();
+
+                        (
+                            &batch_j_centered_owned,
+                            &batch_j_eg2_owned,
+                            &batch_j_maxs_owned,
+                        )
+                    };
+
+                let pairs: Vec<(usize, usize)> = if is_diagonal {
                     (0..batch_i_centered.len())
                         .flat_map(|i| ((i + 1)..batch_i_centered.len()).map(move |j| (i, j)))
                         .collect()
@@ -2019,54 +1931,47 @@ impl<'a> Hotspot<'a> {
                         .collect()
                 };
 
-                let results: Vec<(usize, usize, f32, f32, f32)> = pairs
+                let results: Vec<(usize, usize, f32, f32)> = pairs
                     .par_iter()
                     .map(|&(local_i, local_j)| {
                         let x = &batch_i_centered[local_i];
                         let y = &batch_j_centered[local_j];
 
-                        let lc = local_cov_pair_vec(x, y, self.neighbours, &self.weights) * 2.0;
+                        let lc = local_cov_pair(x, y, self.neighbours, &self.weights) * 2.0;
 
-                        let max_i = compute_local_cov_max(&self.node_degrees, x);
-                        let max_j = compute_local_cov_max(&self.node_degrees, y);
-                        let lc_max = (max_i + max_j) / 2.0;
+                        let lc_max = (batch_i_maxs[local_i] + batch_j_maxs[local_j]) / 2.0;
+                        let normalised_lc = if lc_max > 0.0 { lc / lc_max } else { 0.0 };
 
-                        let eg = 0.0;
                         let stdg_xy = batch_i_eg2[local_i].sqrt();
-                        let z_xy = (lc - eg) / stdg_xy;
+                        let z_xy = lc / stdg_xy;
 
                         let stdg_yx = batch_j_eg2[local_j].sqrt();
-                        let z_yx = (lc - eg) / stdg_yx;
+                        let z_yx = lc / stdg_yx;
 
                         let z = if z_xy.abs() < z_yx.abs() { z_xy } else { z_yx };
 
                         let global_i = start_i + local_i;
                         let global_j = start_j + local_j;
 
-                        (global_i, global_j, lc, z, lc_max)
+                        (global_i, global_j, normalised_lc, z)
                     })
                     .collect();
 
-                for (i, j, lc, z, lc_max) in results {
-                    if !z.is_finite() {
-                        continue;
+                for (i, j, lc, z) in results {
+                    if z.is_finite() {
+                        lc_mat[(i, j)] = lc;
+                        lc_mat[(j, i)] = lc;
+                        z_mat[(i, j)] = z;
+                        z_mat[(j, i)] = z;
                     }
-                    let normalised_lc = if lc_max > 0.0 { lc / lc_max } else { 0.0 };
-
-                    lc_mat[(i, j)] = normalised_lc;
-                    lc_mat[(j, i)] = normalised_lc;
-                    z_mat[(i, j)] = z;
-                    z_mat[(j, i)] = z;
                 }
             }
-
-            let end_remaining_batches = start_remaining_batches.elapsed();
 
             if verbose {
                 println!(
                     "Calculated all batches for batch {} in: {:.2?}",
                     batch_i + 1,
-                    end_remaining_batches
+                    start_remaining.elapsed()
                 );
             }
         }
@@ -2086,6 +1991,9 @@ impl<'a> Hotspot<'a> {
     /// Reads and caches the total UMI count per cell for use in statistical
     /// models.
     fn populate_umi_counts(&mut self) {
+        if self.umi_counts.is_some() {
+            return;
+        }
         let reader = ParallelSparseReader::new(&self.f_path_cell).unwrap();
         let lib_sizes = reader.read_cell_library_sizes(self.cells_to_keep);
         let umi_counts = lib_sizes.iter().map(|x| *x as f32).collect::<Vec<f32>>();
@@ -2093,17 +2001,61 @@ impl<'a> Hotspot<'a> {
     }
 }
 
-/// Cluster the HotSpot Z matrix
+////////////////
+// Clustering //
+////////////////
+
+/// Entry in the merge priority queue.
+#[derive(Clone, Debug)]
+struct MergeCandidate {
+    /// Z-score between the two clusters (higher = merge first).
+    z: f64,
+    /// First cluster index (always the smaller index).
+    i: usize,
+    /// Second cluster index.
+    j: usize,
+    /// Generation stamps at insertion time. If either cluster has been
+    /// merged since this entry was created, it is stale and must be
+    /// discarded.
+    gen_i: u32,
+    gen_j: u32,
+}
+
+impl PartialEq for MergeCandidate {
+    fn eq(&self, other: &Self) -> bool {
+        self.z == other.z
+    }
+}
+
+impl Eq for MergeCandidate {}
+
+impl PartialOrd for MergeCandidate {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for MergeCandidate {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.z.partial_cmp(&other.z).unwrap_or(Ordering::Equal)
+    }
+}
+
+/// Cluster the HotSpot Z matrix using heap-accelerated agglomerative
+/// clustering.
+///
+/// Merges cluster pairs in descending Z-score order using average linkage.
+/// Stops when the best remaining Z falls below the FDR-derived threshold.
 ///
 /// ### Params
 ///
 /// * `z_mat` - Reference to the Z-score matrix.
-/// * `fdr_threshold` - Below which FDR to not cluster the genes anymore.
-/// * `min_cluster_genes` - Minimum number of genes per cluster
+/// * `fdr_threshold` - Below which FDR to stop merging.
+/// * `min_cluster_genes` - Minimum genes per cluster to assign a label.
 ///
 /// ### Returns
 ///
-/// The gene to cluster assignment. `NA`s indicate now assignment.
+/// Per-gene cluster assignment. `NaN` indicates no assignment.
 pub fn hotspot_gene_clusters(
     z_mat: MatRef<f64>,
     fdr_threshold: f64,
@@ -2122,66 +2074,103 @@ pub fn hotspot_gene_clusters(
         .min_by(|a, b| a.partial_cmp(b).unwrap())
         .unwrap_or(f64::INFINITY);
 
+    // mutable Z matrix for average-linkage updates
     let mut z = z_mat.to_owned();
 
-    let mut active: Vec<usize> = (0..n).collect();
-    let mut clusters: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
+    // per-cluster state
     let mut sizes: Vec<usize> = vec![1; n];
-
-    // Labels: None if unlabelled, Some(label_id) if labelled
+    let mut clusters: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
     let mut labels: Vec<Option<usize>> = vec![None; n];
-    let mut next_label = 0usize;
-
     let mut gene_to_cluster: Vec<usize> = (0..n).collect();
 
-    while active.len() > 1 {
-        let mut max_z = f64::NEG_INFINITY;
-        let mut max_i = 0;
-        let mut max_j = 0;
+    // generation counter per cluster; incremented on each merge so stale
+    // heap entries can be detected cheaply.
+    let mut generation: Vec<u32> = vec![0; n];
 
-        for (ai, &i) in active.iter().enumerate() {
-            for &j in active.iter().skip(ai + 1) {
-                if z[(i, j)] > max_z {
-                    max_z = z[(i, j)];
-                    max_i = i;
-                    max_j = j;
-                }
+    // track which clusters are still active
+    let mut active = vec![true; n];
+
+    let mut next_label = 0usize;
+
+    // seed the heap with all pairs above threshold
+    let mut heap = BinaryHeap::new();
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let zij = z[(i, j)];
+            if zij >= z_threshold {
+                heap.push(MergeCandidate {
+                    z: zij,
+                    i,
+                    j,
+                    gen_i: 0,
+                    gen_j: 0,
+                });
             }
         }
+    }
 
-        if max_z < z_threshold {
+    while let Some(candidate) = heap.pop() {
+        if candidate.z < z_threshold {
             break;
         }
 
-        let new_size = sizes[max_i] + sizes[max_j];
-        let both_labelled = labels[max_i].is_some() && labels[max_j].is_some();
+        let ci = candidate.i;
+        let cj = candidate.j;
 
-        for &k in &active {
-            if k != max_i && k != max_j {
-                let new_z = (z[(max_i, k)] * sizes[max_i] as f64
-                    + z[(max_j, k)] * sizes[max_j] as f64)
-                    / new_size as f64;
-                z[(max_i, k)] = new_z;
-                z[(k, max_i)] = new_z;
+        // stale entry: one or both clusters have been merged since this
+        // candidate was inserted.
+        if !active[ci]
+            || !active[cj]
+            || generation[ci] != candidate.gen_i
+            || generation[cj] != candidate.gen_j
+        {
+            continue;
+        }
+
+        // merge cj into ci
+        let new_size = sizes[ci] + sizes[cj];
+        let both_labelled = labels[ci].is_some() && labels[cj].is_some();
+
+        // average-linkage Z update and push new candidates
+        generation[ci] += 1;
+        active[cj] = false;
+
+        for k in 0..n {
+            if k == ci || k == cj || !active[k] {
+                continue;
+            }
+
+            let new_z =
+                (z[(ci, k)] * sizes[ci] as f64 + z[(cj, k)] * sizes[cj] as f64) / new_size as f64;
+            z[(ci, k)] = new_z;
+            z[(k, ci)] = new_z;
+
+            if new_z >= z_threshold {
+                heap.push(MergeCandidate {
+                    z: new_z,
+                    i: ci.min(k),
+                    j: ci.max(k),
+                    gen_i: generation[ci.min(k)],
+                    gen_j: generation[ci.max(k)],
+                });
             }
         }
 
-        let j_genes = clusters[max_j].drain(..).collect::<Vec<_>>();
-        clusters[max_i].extend(j_genes);
-        sizes[max_i] = new_size;
+        // Transfer genes from cj to ci
+        let cj_genes: Vec<usize> = clusters[cj].drain(..).collect();
+        clusters[ci].extend(cj_genes);
+        sizes[ci] = new_size;
 
-        for &gene in &clusters[max_i] {
-            gene_to_cluster[gene] = max_i;
+        for &gene in &clusters[ci] {
+            gene_to_cluster[gene] = ci;
         }
 
         if new_size >= min_cluster_genes && !both_labelled {
-            labels[max_i] = Some(next_label);
+            labels[ci] = Some(next_label);
             next_label += 1;
         } else if both_labelled {
-            labels[max_i] = None;
+            labels[ci] = None;
         }
-
-        active.retain(|&x| x != max_j);
     }
 
     let mut gene_labels = vec![f64::NAN; n];

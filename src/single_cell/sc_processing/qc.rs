@@ -55,7 +55,7 @@ pub fn get_top_genes_perc(
         let proportions: Vec<f32> = cell_chunks
             .par_iter()
             .map(|chunk| {
-                let mut gene_counts: Vec<u16> = chunk.data_raw.clone();
+                let mut gene_counts: Vec<u32> = chunk.data_raw.iter().collect();
 
                 if gene_counts.len() <= top_n {
                     1.0
@@ -122,7 +122,7 @@ pub fn get_top_genes_perc_streaming(
             let proportions: Vec<f32> = cell_chunks
                 .par_iter()
                 .map(|chunk| {
-                    let mut gene_counts: Vec<u16> = chunk.data_raw.clone();
+                    let mut gene_counts: Vec<u32> = chunk.data_raw.iter().collect();
 
                     if gene_counts.len() <= top_n {
                         1.0
@@ -180,7 +180,7 @@ pub fn get_top_genes_perc_streaming(
 /// A vector with the percentages of these genes over the total reads.
 pub fn get_gene_set_perc(
     f_path: &str,
-    gene_indices: Vec<Vec<u16>>,
+    gene_indices: Vec<Vec<u32>>,
     cell_indices: &[usize],
     verbose: bool,
 ) -> Vec<Vec<f32>> {
@@ -201,7 +201,7 @@ pub fn get_gene_set_perc(
     let mut results: Vec<Vec<f32>> = Vec::with_capacity(gene_indices.len());
 
     for gene_set in gene_indices {
-        let hash_gene_set: FxHashSet<&u16> = gene_set.iter().collect();
+        let hash_gene_set: FxHashSet<&u32> = gene_set.iter().collect();
 
         let percentage: &Vec<f32> = &cell_chunks
             .par_iter()
@@ -209,10 +209,10 @@ pub fn get_gene_set_perc(
                 let total_sum = chunk
                     .indices
                     .iter()
-                    .zip(&chunk.data_raw)
+                    .zip(chunk.data_raw.iter())
                     .filter(|(col_idx, _)| hash_gene_set.contains(col_idx))
                     .map(|(_, val)| val)
-                    .sum::<u16>() as f32;
+                    .sum::<u32>() as f32;
                 let lib_size = chunk.library_size as f32;
                 total_sum / lib_size
             })
@@ -252,7 +252,7 @@ pub fn get_gene_set_perc(
 /// A vector with the percentages of these genes over the total reads.
 pub fn get_gene_set_perc_streaming(
     f_path: &str,
-    gene_indices: Vec<Vec<u16>>,
+    gene_indices: Vec<Vec<u32>>,
     cell_indices: &[usize],
     verbose: bool,
 ) -> Vec<Vec<f32>> {
@@ -261,7 +261,7 @@ pub fn get_gene_set_perc_streaming(
     let reader = ParallelSparseReader::new(f_path).unwrap();
 
     let mut results: Vec<Vec<f32>> = vec![Vec::new(); gene_indices.len()];
-    let hash_gene_sets: Vec<FxHashSet<&u16>> =
+    let hash_gene_sets: Vec<FxHashSet<&u32>> =
         gene_indices.iter().map(|gs| gs.iter().collect()).collect();
 
     const CELL_BATCH_SIZE: usize = 100000;
@@ -279,10 +279,10 @@ pub fn get_gene_set_perc_streaming(
                     let total_sum = chunk
                         .indices
                         .iter()
-                        .zip(&chunk.data_raw)
+                        .zip(chunk.data_raw.iter())
                         .filter(|(col_idx, _)| hash_gene_set.contains(col_idx))
                         .map(|(_, val)| val)
-                        .sum::<u16>() as f32;
+                        .sum::<u32>() as f32;
                     let lib_size = chunk.library_size as f32;
                     total_sum / lib_size
                 })

@@ -254,6 +254,17 @@ impl KnnParams {
             .and_then(|v| v.as_integer())
             .unwrap_or(100) as usize;
 
+        // ivf
+        let n_list = params_list
+            .get("n_list")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize);
+
+        let n_probe = params_list
+            .get("n_probe")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize);
+
         Self {
             knn_method,
             ann_dist,
@@ -266,6 +277,8 @@ impl KnnParams {
             m,
             ef_construction,
             ef_search,
+            n_list,
+            n_probe,
         }
     }
 }
@@ -1253,6 +1266,9 @@ impl ScenicParams {
 
         let regression_learner = match learner_type.to_lowercase().as_str() {
             "extratrees" => RegressionLearner::ExtraTrees(ExtraTreesConfig::from_r_list(r_list)),
+            "grnboost2" => {
+                RegressionLearner::GradientBoosting(GradientBoostingConfig::from_r_list(r_list))
+            }
             _ => RegressionLearner::RandomForest(RandomForestConfig::from_r_list(r_list)),
         };
 

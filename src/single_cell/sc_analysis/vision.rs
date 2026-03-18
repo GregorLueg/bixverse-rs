@@ -68,7 +68,7 @@ fn calculate_vision_scores_for_cell(
 ) -> Vec<f32> {
     // helper
     let get_expr = |gene_idx: usize| -> f32 {
-        match cell.indices.binary_search(&(gene_idx as u16)) {
+        match cell.indices.binary_search(&(gene_idx as u32)) {
             Ok(pos) => cell.data_norm[pos].to_f32(),
             Err(_) => 0.0,
         }

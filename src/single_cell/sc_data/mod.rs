@@ -2,6 +2,7 @@
 //! functionalities, structures and readers.
 
 pub mod data_io;
+pub mod depracated_conversion;
 pub mod h5ad_io;
 pub mod h5ad_multifile_io;
 pub mod mtx_io;

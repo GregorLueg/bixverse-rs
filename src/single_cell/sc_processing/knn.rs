@@ -25,6 +25,8 @@ pub enum KnnSearch {
     Annoy,
     /// NNDescent
     NNDescent,
+    /// IVF
+    Ivf,
     /// Exhaustive
     Exhaustive,
 }
@@ -44,6 +46,7 @@ pub fn parse_knn_method(s: &str) -> Option<KnnSearch> {
         "hnsw" => Some(KnnSearch::Hnsw),
         "nndescent" => Some(KnnSearch::NNDescent),
         "exhaustive" => Some(KnnSearch::Exhaustive),
+        "ivf" => Some(KnnSearch::Ivf),
         _ => None,
     }
 }
@@ -83,6 +86,11 @@ pub struct KnnParams {
     pub ef_construction: usize,
     /// HNSW: search budget
     pub ef_search: usize,
+    /// IVF: number of lists/clusters. If not provided will default to `sqrt(n)`
+    pub n_list: Option<usize>,
+    /// IVF: number of lists/clusters to probe. If not provided will default to
+    /// `sqrt(n_list)`
+    pub n_probe: Option<usize>,
 }
 
 impl KnnParams {
@@ -104,6 +112,8 @@ impl KnnParams {
             m: 16,
             ef_construction: 200,
             ef_search: 100,
+            n_list: None,
+            n_probe: None,
         }
     }
 }
@@ -406,6 +416,59 @@ pub fn generate_knn_annoy(
     res
 }
 
+/// Get the kNN graph based on IVF
+///
+/// This function generates the kNN graph based via an approximate nearest
+/// neighbour search based on the IVF. The algorithm will use cluster the data
+/// via k-means and probe n_probe clusters.
+///
+/// ### Params
+///
+/// * `mat` - Matrix in which rows represent the samples and columns the
+///   respective embeddings for that sample
+/// * `dist_metric` - The distance metric to use. One of `"euclidean"` or
+///   `"cosine"`.
+/// * `no_neighbours` - Number of neighbours for the KNN graph.
+/// * `n_list` - Number of clusters/lists to generate. If None, will query
+///   `sqrt(n)`.
+/// * `n_probe` - Number of clusters/lists to query. If None, will query
+///   `sqrt(n_list)`.
+/// * `seed` - Seed for the NN Descent algorithm
+/// * `verbose` - Controls verbosity of the algorithm
+///
+/// ### Returns
+///
+/// The k-nearest neighbours based on the NNDescent algorithm. Function does not
+/// return self.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_knn_ivf(
+    mat: MatRef<f32>,
+    dist_metric: &str,
+    no_neighbours: usize,
+    n_list: Option<usize>,
+    n_probe: Option<usize>,
+    seed: usize,
+    verbose: bool,
+) -> Vec<Vec<usize>> {
+    let (res, index) = build_and_query_knn(
+        no_neighbours,
+        verbose,
+        || build_ivf_index(mat, n_list, None, dist_metric, seed, verbose),
+        |idx| query_ivf_self(idx, no_neighbours + 1, n_probe, false, verbose),
+        "IVF",
+    );
+
+    if verbose {
+        let recall = index.validate_index(no_neighbours, seed, None);
+        println!(
+            "Recall of approximate nearest neighbours search in random subset: {:.2}",
+            recall
+        );
+    }
+
+    res
+}
+
 /// Get the kNN graph based on NN-Descent
 ///
 /// This function generates the kNN graph based via an approximate nearest
@@ -658,6 +721,29 @@ pub fn generate_knn_with_dist(
             timed("Queried Exhaustive index", verbose, || {
                 query_exhaustive_index(embd, &index, k_plus_one, true, verbose)
             })
+        }
+        KnnSearch::Ivf => {
+            let index = timed("Generated IVF index", verbose, || {
+                build_ivf_index(
+                    embd,
+                    knn_params.n_list,
+                    None,
+                    &knn_params.ann_dist,
+                    seed,
+                    verbose,
+                )
+            });
+            let (indices, distances) = timed("Queried IVF index", verbose, || {
+                query_ivf_index(embd, &index, k_plus_one, knn_params.n_probe, true, verbose)
+            });
+            if verbose {
+                let recall = index.validate_index(k_plus_one, seed, None);
+                println!(
+                    "Recall of approximate nearest neighbours search in random subset: {:.2}",
+                    recall
+                );
+            };
+            (indices, distances)
         }
     };
 

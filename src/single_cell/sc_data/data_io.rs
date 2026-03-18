@@ -20,6 +20,180 @@ use std::{
 
 use crate::prelude::*;
 
+///////////////////
+// Count wrapper //
+///////////////////
+
+/// Wrapper enum for raw counts that supports both u16 and u32 storage.
+///
+/// Most single cell data sets have counts well within the u16 range (0-65,535).
+/// The u32 variant exists for edge cases such as mixed-omics data where counts
+/// can exceed this limit. The variant is selected automatically at construction
+/// time based on the data, and is encoded as a discriminant byte in the binary
+/// chunk format.
+#[derive(Encode, Decode, Serialize, Deserialize, Debug, Clone)]
+pub enum RawCounts {
+    /// Stores u16 values
+    U16(Vec<u16>),
+    /// Stores u32 values (for the rare case where a single gene exceeds the
+    /// counts here)
+    U32(Vec<u32>),
+}
+
+/// Raw count element size discriminant for the binary format.
+/// Stored as a single byte in chunk headers.
+const RAW_ELEM_U16: u8 = 2;
+const RAW_ELEM_U32: u8 = 4;
+
+impl RawCounts {
+    /// Get a single value as u32
+    ///
+    /// ### Returns
+    ///
+    /// The count as u32
+    pub fn get(&self, i: usize) -> u32 {
+        match self {
+            RawCounts::U16(v) => v[i] as u32,
+            RawCounts::U32(v) => v[i],
+        }
+    }
+
+    /// Total number of elements
+    ///
+    /// ### Returns
+    ///
+    /// The length of elements
+    pub fn len(&self) -> usize {
+        match self {
+            RawCounts::U16(v) => v.len(),
+            RawCounts::U32(v) => v.len(),
+        }
+    }
+
+    /// Whether the vector is empty
+    ///
+    /// ### Returns
+    ///
+    /// Boolean if the data is empty
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Iterator that yields all values as u32
+    ///
+    /// ### Returns
+    ///
+    /// An iterator
+    pub fn iter(&self) -> RawCountsIter<'_> {
+        RawCountsIter {
+            inner: self,
+            pos: 0,
+        }
+    }
+
+    /// Element size in bytes (2 for u16, 4 for u32)
+    ///
+    /// ### Returns
+    ///
+    /// The element size
+    pub fn elem_size(&self) -> u8 {
+        match self {
+            RawCounts::U16(_) => RAW_ELEM_U16,
+            RawCounts::U32(_) => RAW_ELEM_U32,
+        }
+    }
+
+    /// Write raw bytes to a writer
+    ///
+    /// ### Params
+    ///
+    /// * `writer` - The writer to use
+    ///
+    /// ### Returns
+    ///
+    /// The I/O result
+    pub fn write_bytes(&self, writer: &mut impl Write) -> std::io::Result<()> {
+        match self {
+            RawCounts::U16(v) => {
+                let bytes =
+                    unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 2) };
+                writer.write_all(bytes)
+            }
+            RawCounts::U32(v) => {
+                let bytes =
+                    unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 4) };
+                writer.write_all(bytes)
+            }
+        }
+    }
+
+    /// Read raw counts from a buffer given element size and count
+    ///
+    /// ### Params
+    ///
+    /// * `buffer` - The byte buffer to read from (must be positioned at the
+    ///   start of the raw count data)
+    /// * `count` - Number of elements to read
+    /// * `elem_size` - Element size in bytes (2 for u16, 4 for u32)
+    ///
+    /// ### Returns
+    ///
+    /// The `RawCounts`
+    pub fn read_from_buffer(buffer: &[u8], count: usize, elem_size: u8) -> Self {
+        match elem_size {
+            RAW_ELEM_U32 => {
+                let data = unsafe {
+                    let ptr = buffer.as_ptr() as *const u32;
+                    std::slice::from_raw_parts(ptr, count).to_vec()
+                };
+                RawCounts::U32(data)
+            }
+            _ => {
+                // Default to u16 (covers elem_size == 2 and legacy files
+                // where the discriminant byte was padding/zero)
+                let data = unsafe {
+                    let ptr = buffer.as_ptr() as *const u16;
+                    std::slice::from_raw_parts(ptr, count).to_vec()
+                };
+                RawCounts::U16(data)
+            }
+        }
+    }
+
+    /// Build RawCounts from a u32 slice, auto-selecting the variant.
+    ///
+    /// If all values fit in u16, stores as U16 for better compression.
+    /// Otherwise stores as U32.
+    pub fn from_u32_auto(data: &[u32]) -> Self {
+        if data.iter().all(|&v| v <= u16::MAX as u32) {
+            RawCounts::U16(data.iter().map(|&v| v as u16).collect())
+        } else {
+            RawCounts::U32(data.to_vec())
+        }
+    }
+}
+
+/// Structure of the RawCountsIterator
+pub struct RawCountsIter<'a> {
+    /// The reference to the row counts
+    inner: &'a RawCounts,
+    /// The position
+    pos: usize,
+}
+
+impl<'a> Iterator for RawCountsIter<'a> {
+    type Item = u32;
+    fn next(&mut self) -> Option<u32> {
+        if self.pos < self.inner.len() {
+            let val = self.inner.get(self.pos);
+            self.pos += 1;
+            Some(val)
+        } else {
+            None
+        }
+    }
+}
+
 //////////////////
 // Cell Quality //
 //////////////////
@@ -154,18 +328,22 @@ impl CellOnFileQuality {
 ///
 /// This structure is designed to store the data of a single cell in a
 /// CSR-like format optimised for rapid access on disk.
+///
+/// Raw counts are stored as a `RawCounts` enum which transparently handles
+/// both u16 and u32 storage. Gene indices are stored as u32 to support
+/// data sets with more than 65,535 features.
 #[derive(Debug)]
 pub struct CsrCellChunk {
-    /// Vector of the raw counts of this cell. This is limited to u16, limiting
-    /// the max raw counts per gene to 65_535
-    pub data_raw: Vec<u16>,
+    /// Raw counts for this cell, stored as either u16 or u32 depending on
+    /// the data range
+    pub data_raw: RawCounts,
     /// Vector of the norm counts of this cell. A lossy compression for f16 is
     /// applied.
     pub data_norm: Vec<F16>,
     /// Total library size/UMI counts of the cell.
     pub library_size: usize,
-    /// Index positions of the genes
-    pub indices: Vec<u16>,
+    /// Index positions of the genes (u32 to support >65k features)
+    pub indices: Vec<u32>,
     /// Original index in the data
     pub original_index: usize,
     /// Flag if the cell should be kept. (Not used at the moment.)
@@ -183,6 +361,7 @@ impl CsrCellChunk {
     /// * `col_idx` - The column indices where the gene is expressed.
     /// * `original_index` - Original row index in the matrix
     /// * `size_factor` - To which size to normalise to. 1e6 -> CPM normalisation.
+    /// * `to_keep` - Whether the cell passes QC
     ///
     /// ### Returns
     ///
@@ -195,8 +374,8 @@ impl CsrCellChunk {
         to_keep: bool,
     ) -> Self
     where
-        T: ToF32AndU16,
-        U: ToF32AndU16,
+        T: FloatAndUInt,
+        U: FloatAndUInt,
     {
         let data_f32 = data.iter().map(|&x| x.to_f32()).collect::<Vec<f32>>();
         let sum = data_f32.iter().sum::<f32>();
@@ -207,11 +386,15 @@ impl CsrCellChunk {
                 F16::from(f16::from_f32(norm))
             })
             .collect();
+
+        let raw_u32: Vec<u32> = data.iter().map(|&x| x.to_u32()).collect();
+        let data_raw = RawCounts::from_u32_auto(&raw_u32);
+
         Self {
-            data_raw: data.iter().map(|&x| x.to_u16()).collect::<Vec<u16>>(),
+            data_raw,
             data_norm,
             library_size: sum as usize,
-            indices: col_idx.iter().map(|&x| x.to_u16()).collect::<Vec<u16>>(),
+            indices: col_idx.iter().map(|&x| x.to_u32()).collect::<Vec<u32>>(),
             original_index,
             to_keep,
         }
@@ -219,24 +402,32 @@ impl CsrCellChunk {
 
     /// Write directly to bytes on disk
     ///
-    /// ### Params
+    /// Binary layout (header = 32 bytes):
     ///
-    /// * `writer` - Something that can write, i.e., has the implementation
-    ///   `Write`
+    /// ```text
+    /// [0..4)   data_raw_len    u32
+    /// [4..8)   data_norm_len   u32
+    /// [8..12)  indices_len     u32
+    /// [12..20) library_size    u64
+    /// [20..28) original_index  u64
+    /// [28]     to_keep         u8
+    /// [29]     raw_elem_size   u8  (2 = u16, 4 = u32)
+    /// [30..32) padding         2 bytes
+    /// ```
+    ///
+    /// Followed by:
+    /// - data_raw: `data_raw_len * raw_elem_size` bytes
+    /// - data_norm: `data_norm_len * 2` bytes
+    /// - indices: `indices_len * 4` bytes (u32)
     pub fn write_to_bytes(&self, writer: &mut impl Write) -> std::io::Result<()> {
         writer.write_all(&(self.data_raw.len() as u32).to_le_bytes())?;
         writer.write_all(&(self.data_norm.len() as u32).to_le_bytes())?;
         writer.write_all(&(self.indices.len() as u32).to_le_bytes())?;
         writer.write_all(&(self.library_size as u64).to_le_bytes())?;
         writer.write_all(&(self.original_index as u64).to_le_bytes())?;
-        // include some padding
-        writer.write_all(&[self.to_keep as u8, 0, 0, 0])?;
+        writer.write_all(&[self.to_keep as u8, self.data_raw.elem_size(), 0, 0])?;
 
-        // unsafe fun with direct write to disk
-        let data_raw_bytes = unsafe {
-            std::slice::from_raw_parts(self.data_raw.as_ptr() as *const u8, self.data_raw.len() * 2)
-        };
-        writer.write_all(data_raw_bytes)?;
+        self.data_raw.write_bytes(writer)?;
 
         let data_norm_bytes = unsafe {
             std::slice::from_raw_parts(
@@ -247,7 +438,7 @@ impl CsrCellChunk {
         writer.write_all(data_norm_bytes)?;
 
         let col_indices_bytes = unsafe {
-            std::slice::from_raw_parts(self.indices.as_ptr() as *const u8, self.indices.len() * 2)
+            std::slice::from_raw_parts(self.indices.as_ptr() as *const u8, self.indices.len() * 4)
         };
         writer.write_all(col_indices_bytes)?;
 
@@ -271,7 +462,6 @@ impl CsrCellChunk {
             ));
         }
 
-        // parse header
         let header = &buffer[0..32];
 
         let data_raw_len =
@@ -289,18 +479,20 @@ impl CsrCellChunk {
             header[27],
         ]) as usize;
         let to_keep = header[28] != 0;
+        let raw_elem_size = header[29];
 
         let data_start = 32;
-        let data_end = data_start + data_raw_len * 2;
+        let elem_size = if raw_elem_size == RAW_ELEM_U32 {
+            4usize
+        } else {
+            2usize
+        };
+        let data_end = data_start + data_raw_len * elem_size;
         let norm_end = data_end + data_norm_len * 2;
 
-        // direct transmutation for raw counts - no intermediate allocation
-        let data_raw = unsafe {
-            let ptr = buffer.as_ptr().add(data_start) as *const u16;
-            std::slice::from_raw_parts(ptr, data_raw_len).to_vec()
-        };
+        let data_raw =
+            RawCounts::read_from_buffer(&buffer[data_start..data_end], data_raw_len, raw_elem_size);
 
-        // For F16, I need to convert
         let data_norm: Vec<F16> = unsafe {
             let ptr = buffer.as_ptr().add(data_end) as *const u16;
             std::slice::from_raw_parts(ptr, data_norm_len)
@@ -310,7 +502,7 @@ impl CsrCellChunk {
         };
 
         let indices = unsafe {
-            let ptr = buffer.as_ptr().add(norm_end) as *const u16;
+            let ptr = buffer.as_ptr().add(norm_end) as *const u32;
             std::slice::from_raw_parts(ptr, col_indices_len).to_vec()
         };
 
@@ -329,8 +521,7 @@ impl CsrCellChunk {
     /// ### Params
     ///
     /// * `sparse_data` - The `CompressedSparseData2` (in CSR format!)
-    /// * `min_genes` - Number of genes per cell to be included
-    /// * `size_factor` - Size factor for normalisation. 1e6 -> CPM
+    /// * `cell_qc` - Minimum QC thresholds
     ///
     /// ### Returns
     ///
@@ -362,7 +553,6 @@ impl CsrCellChunk {
             .collect();
 
         // create index mapping: old gene index -> new gene index
-        // these f--king reindexing bugs -.-
         let mut gene_index_map = vec![None; n_genes];
         for (new_idx, &old_idx) in genes_to_keep.iter().enumerate() {
             gene_index_map[old_idx] = Some(new_idx);
@@ -430,7 +620,7 @@ impl CsrCellChunk {
 
     /// Helper function to get QC parameters for this cell
     ///
-    /// ### Reutrns
+    /// ### Returns
     ///
     /// A tuple of `(no_genes, library_size)`
     pub fn get_qc_info(&self) -> (usize, usize) {
@@ -457,16 +647,21 @@ impl CsrCellChunk {
         }
 
         let mut new_indices = Vec::new();
-        let mut new_raw = Vec::new();
         let mut new_norm = Vec::new();
+        let mut keep_positions = Vec::new();
 
         for (i, &gene_idx) in self.indices.iter().enumerate() {
             if let Some(new_gene_idx) = index_map[gene_idx as usize] {
-                new_indices.push(new_gene_idx as u16);
-                new_raw.push(self.data_raw[i]);
+                new_indices.push(new_gene_idx);
                 new_norm.push(self.data_norm[i]);
+                keep_positions.push(i);
             }
         }
+
+        let new_raw = match &self.data_raw {
+            RawCounts::U16(v) => RawCounts::U16(keep_positions.iter().map(|&p| v[p]).collect()),
+            RawCounts::U32(v) => RawCounts::U32(keep_positions.iter().map(|&p| v[p]).collect()),
+        };
 
         self.indices = new_indices;
         self.data_raw = new_raw;
@@ -474,17 +669,23 @@ impl CsrCellChunk {
     }
 }
 
+//////////////////
+// CscGeneChunk //
+//////////////////
+
 /// CscGeneChunk
 ///
 /// This structure is designed to store the data of a single gene in a
 /// CSC-like format optimised for rapid access on disk.
+///
+/// Raw counts are stored as a `RawCounts` enum (u16 or u32). Cell indices
+/// are stored as u32.
 #[derive(Encode, Decode, Serialize, Deserialize, Debug)]
 pub struct CscGeneChunk {
-    /// Vector with the raw counts per cell/spot for this gene. The maximum
-    /// counts per gene are limited to 65_535
-    pub data_raw: Vec<u16>,
-    /// Vector with normalised coutns per cell/spot for this gene. Lossy
-    /// compression to f16 is applied.
+    /// Raw counts per cell/spot for this gene, stored as either u16 or u32
+    pub data_raw: RawCounts,
+    /// Normalised counts per cell/spot for this gene. Lossy compression to
+    /// f16 is applied.
     pub data_norm: Vec<F16>,
     /// Average expression of this gene in the data.
     pub avg_exp: F16,
@@ -513,7 +714,7 @@ impl CscGeneChunk {
     ///
     /// The `CscGeneChunk` for this gene.
     pub fn from_conversion(
-        data_raw: &[u16],
+        data_raw: RawCounts,
         data_norm: &[F16],
         col_idx: &[usize],
         original_index: usize,
@@ -523,7 +724,7 @@ impl CscGeneChunk {
         let nnz = data_raw.len();
 
         Self {
-            data_raw: data_raw.to_vec(),
+            data_raw,
             data_norm: data_norm.to_vec(),
             avg_exp,
             nnz,
@@ -535,10 +736,25 @@ impl CscGeneChunk {
 
     /// Write directly to bytes on disk
     ///
-    /// ### Params
+    /// Binary layout (header = 36 bytes):
     ///
-    /// * `writer` - Something that can write, i.e., has the implementation
-    ///   `Write`
+    /// ```text
+    /// [0..4)   data_raw_len    u32
+    /// [4..8)   data_norm_len   u32
+    /// [8..12)  indices_len     u32
+    /// [12..14) avg_exp         F16 (2 bytes)
+    /// [14..16) padding         2 bytes
+    /// [16..24) nnz             u64
+    /// [24..32) original_index  u64
+    /// [32]     to_keep         u8
+    /// [33]     raw_elem_size   u8  (2 = u16, 4 = u32)
+    /// [34..36) padding         2 bytes
+    /// ```
+    ///
+    /// Followed by:
+    /// - data_raw: `data_raw_len * raw_elem_size` bytes
+    /// - data_norm: `data_norm_len * 2` bytes
+    /// - indices: `indices_len * 4` bytes (u32)
     pub fn write_to_bytes(&self, writer: &mut impl Write) -> std::io::Result<()> {
         writer.write_all(&(self.data_raw.len() as u32).to_le_bytes())?;
         writer.write_all(&(self.data_norm.len() as u32).to_le_bytes())?;
@@ -548,13 +764,9 @@ impl CscGeneChunk {
         writer.write_all(&[0, 0])?;
         writer.write_all(&(self.nnz as u64).to_le_bytes())?;
         writer.write_all(&(self.original_index as u64).to_le_bytes())?;
-        // bit padding
-        writer.write_all(&[self.to_keep as u8, 0, 0, 0])?;
+        writer.write_all(&[self.to_keep as u8, self.data_raw.elem_size(), 0, 0])?;
 
-        let data_raw_bytes = unsafe {
-            std::slice::from_raw_parts(self.data_raw.as_ptr() as *const u8, self.data_raw.len() * 2)
-        };
-        writer.write_all(data_raw_bytes)?;
+        self.data_raw.write_bytes(writer)?;
 
         let data_norm_bytes = unsafe {
             std::slice::from_raw_parts(
@@ -589,7 +801,6 @@ impl CscGeneChunk {
             ));
         }
 
-        // parse header
         let header = &buffer[0..36];
         let data_raw_len =
             u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
@@ -608,18 +819,20 @@ impl CscGeneChunk {
             header[31],
         ]) as usize;
         let to_keep = header[32] != 0;
+        let raw_elem_size = header[33];
 
         let data_start = 36;
-        let data_end = data_start + data_raw_len * 2;
+        let elem_size = if raw_elem_size == RAW_ELEM_U32 {
+            4usize
+        } else {
+            2usize
+        };
+        let data_end = data_start + data_raw_len * elem_size;
         let norm_end = data_end + data_norm_len * 2;
 
-        // direct transmutation for raw counts - no intermediate allocation
-        let data_raw = unsafe {
-            let ptr = buffer.as_ptr().add(data_start) as *const u16;
-            std::slice::from_raw_parts(ptr, data_raw_len).to_vec()
-        };
+        let data_raw =
+            RawCounts::read_from_buffer(&buffer[data_start..data_end], data_raw_len, raw_elem_size);
 
-        // For F16, I need to convert
         let data_norm = unsafe {
             let ptr = buffer.as_ptr().add(data_end) as *const u16;
             let slice = std::slice::from_raw_parts(ptr, data_norm_len);
@@ -658,21 +871,26 @@ impl CscGeneChunk {
             .map(|(pos, &cell_id)| (cell_id, pos))
             .collect();
 
-        let mut new_data_raw = Vec::with_capacity(cells_to_keep.len());
         let mut new_data_norm = Vec::with_capacity(cells_to_keep.len());
         let mut new_row_indices = Vec::with_capacity(cells_to_keep.len());
+        let mut keep_positions = Vec::new();
 
-        // tterate in cells_to_keep order (critical for PCA! tripped over this one...)
+        // iterate in cells_to_keep order (critical for PCA!)
         for (new_row_idx, &cell_index) in cells_to_keep.iter().enumerate() {
             if let Some(&pos) = cell_positions.get(&cell_index) {
-                new_data_raw.push(self.data_raw[pos]);
+                keep_positions.push(pos);
                 new_data_norm.push(self.data_norm[pos]);
                 new_row_indices.push(new_row_idx as u32);
             }
         }
 
-        let nnz = new_data_raw.len();
-        self.data_raw = new_data_raw;
+        let new_raw = match &self.data_raw {
+            RawCounts::U16(v) => RawCounts::U16(keep_positions.iter().map(|&p| v[p]).collect()),
+            RawCounts::U32(v) => RawCounts::U32(keep_positions.iter().map(|&p| v[p]).collect()),
+        };
+
+        let nnz = new_row_indices.len();
+        self.data_raw = new_raw;
         self.data_norm = new_data_norm;
         self.indices = new_row_indices;
         self.nnz = nnz;
@@ -708,11 +926,12 @@ impl CscGeneChunk {
     ///
     /// ### Returns
     ///
-    /// `SparseAxis` with u16 in the main slot and f32 in the data_2 layer.
-    pub fn to_sparse_axis(&self, n_cells: usize) -> SparseAxis<u16, f32> {
+    /// `SparseAxis` with u32 in the main slot and f32 in the data_2 layer.
+    pub fn to_sparse_axis(&self, n_cells: usize) -> SparseAxis<u32, f32> {
+        let raw_u32: Vec<u32> = self.data_raw.iter().collect();
         SparseAxis::new_csc(
             self.indices.iter().map(|x| *x as usize).collect(),
-            self.data_raw.to_vec(),
+            raw_u32,
             Some(self.data_norm.iter().map(|x| x.to_f32()).collect()),
             n_cells,
         )
@@ -1032,7 +1251,7 @@ impl ParallelSparseReader {
 
         let mmap = unsafe {
             let mut opts = MmapOptions::new();
-            // if the file size is ≤ 8 GB, it loads the full thing into memory
+            // if the file size is <= 8 GB, it loads the full thing into memory
             // otherwise lazy load
             if file_size <= 8 * 1024 * 1024 * 1024 {
                 // 8GB
@@ -1218,6 +1437,8 @@ impl ParallelSparseReader {
     /// Read only library sizes for specified cells
     ///
     /// More efficient than reading full chunks when you only need library sizes.
+    /// Reads directly from the chunk header bytes (offset 12-19) without
+    /// deserialising the full chunk.
     ///
     /// ### Params
     ///
@@ -1246,7 +1467,7 @@ impl ParallelSparseReader {
                 let compressed = &self.mmap[chunk_offset + 8..chunk_offset + 8 + compressed_size];
                 let decompressed = decompress_size_prepended(compressed).unwrap();
 
-                // library size is at bytes 12-19 of the header
+                // library size is at bytes 12-19 of the header (unchanged in v3)
                 u64::from_le_bytes([
                     decompressed[12],
                     decompressed[13],
@@ -1262,6 +1483,9 @@ impl ParallelSparseReader {
     }
 
     /// Read the NNZ for specific genes
+    ///
+    /// Reads directly from the chunk header bytes (offset 16-23) without
+    /// deserialising the full chunk.
     ///
     /// ### Params
     ///
@@ -1289,7 +1513,7 @@ impl ParallelSparseReader {
                 let compressed = &self.mmap[chunk_offset + 8..chunk_offset + 8 + compressed_size];
                 let decompressed = decompress_size_prepended(compressed).unwrap();
 
-                // NNZ is at bytes 16-23 of the header
+                // NNZ is at bytes 16-23 of the gene chunk header (unchanged in v3)
                 u64::from_le_bytes([
                     decompressed[16],
                     decompressed[17],
@@ -1321,9 +1545,11 @@ impl ParallelSparseReader {
 
 /// Converts a slice of gene chunks into a CSC sparse matrix
 ///
-/// Constructs a cells × genes compressed sparse column matrix from individual
-/// gene chunks. The primary data layer contains raw counts, whilst the
-/// secondary layer contains normalised counts converted to f32 precision.
+/// Constructs a cells x genes compressed sparse column matrix from individual
+/// gene chunks. The primary data layer contains raw counts (saturated to u16
+/// for type compatibility -- the normalised layer in data_2 is the one used
+/// by downstream analysis like PCA), whilst the secondary layer contains
+/// normalised counts converted to f32 precision.
 ///
 /// ### Params
 ///
@@ -1347,8 +1573,20 @@ where
     indptr.push(0);
 
     for chunk in chunks {
-        for &val in &chunk.data_raw {
-            data.push(T::from(val));
+        // Raw counts are pushed via From<u16>. For u32 raw counts that exceed
+        // u16::MAX this saturates, but the normalised layer (data_2) carries
+        // the actual values used by downstream analysis (PCA, module scoring).
+        match &chunk.data_raw {
+            RawCounts::U16(v) => {
+                for &val in v {
+                    data.push(T::from(val));
+                }
+            }
+            RawCounts::U32(v) => {
+                for &val in v {
+                    data.push(T::from(val.min(u16::MAX as u32) as u16));
+                }
+            }
         }
         for &val in &chunk.data_norm {
             data_2.push(val.to_f32());
@@ -1371,9 +1609,8 @@ where
 
 /// Converts a slice of cell chunks into a CSR sparse matrix
 ///
-/// Constructs a cells × genes compressed sparse row matrix from individual
-/// cell chunks. The primary data layer contains raw counts, whilst the
-/// secondary layer contains normalised counts converted to f32 precision.
+/// Constructs a cells x genes compressed sparse row matrix from individual
+/// cell chunks. Same saturation caveat as `from_gene_chunks` applies.
 ///
 /// ### Params
 ///
@@ -1397,8 +1634,17 @@ where
     indptr.push(0);
 
     for chunk in chunks {
-        for &val in &chunk.data_raw {
-            data.push(T::from(val));
+        match &chunk.data_raw {
+            RawCounts::U16(v) => {
+                for &val in v {
+                    data.push(T::from(val));
+                }
+            }
+            RawCounts::U32(v) => {
+                for &val in v {
+                    data.push(T::from(val.min(u16::MAX as u32) as u16));
+                }
+            }
         }
         for &val in &chunk.data_norm {
             data_2.push(val.to_f32());

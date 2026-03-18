@@ -67,7 +67,7 @@ fn rank_f16(vec: &[F16]) -> Vec<f32> {
 /// across genes or across cells.
 pub fn fast_csr_ranking(
     row_ptr: &[usize],
-    col_indices: &[u16],
+    col_indices: &[u32],
     data: &[F16],
     nrow: usize,
     ncol: usize,
@@ -180,7 +180,7 @@ pub fn rank_csr_chunk_vec(
 ) -> Vec<Vec<f32>> {
     let no_cells = chunk_vec.len();
     let mut all_data: Vec<Vec<F16>> = Vec::with_capacity(chunk_vec.len());
-    let mut all_indices: Vec<Vec<u16>> = Vec::with_capacity(chunk_vec.len());
+    let mut all_indices: Vec<Vec<u32>> = Vec::with_capacity(chunk_vec.len());
     let mut indptr: Vec<usize> = Vec::with_capacity(chunk_vec.len() + 1);
     let mut current_indptr = 0_usize;
 
