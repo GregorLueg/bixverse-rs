@@ -101,17 +101,22 @@ impl KnnParams {
     /// Self.
     pub fn new() -> Self {
         Self {
+            // general
             knn_method: "hnsw".to_string(),
             ann_dist: "cosine".to_string(),
+            // annoy
             k: 15,
             n_tree: 50,
             search_budget: None,
-            diversify_prob: 0.5,
+            // nndescent
+            diversify_prob: 0.0,
             delta: 0.001,
             ef_budget: None,
+            // hnsw
             m: 16,
             ef_construction: 200,
             ef_search: 100,
+            // ivf
             n_list: None,
             n_probe: None,
         }

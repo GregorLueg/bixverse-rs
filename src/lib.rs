@@ -18,3 +18,6 @@ pub mod utils;
 
 #[cfg(feature = "single-cell")]
 pub mod single_cell;
+
+#[cfg(feature = "gpu")]
+pub mod gpu;
