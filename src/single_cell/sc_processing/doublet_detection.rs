@@ -122,19 +122,21 @@ pub struct BoostResult {
 // Helpers //
 /////////////
 
-/// PCA for Boost (wrapper around pca_scrublet)
+/// PCA for Boost
 ///
-/// Computes PCA using the same methodology as Scrublet for consistency.
-/// Reuses the existing `pca_scrublet()` function by constructing compatible
-/// ScrubletParams.
+/// Computes sparse PCA using the same methodology as Scrublet for
+/// consistency. Forwards parameters from `BoostParams` to `pca_scrublet`,
+/// which performs the sparse SVD without densifying the observed cell
+/// matrix.
 ///
 /// ### Params
 ///
 /// * `f_path_gene` - Path to the gene-based binary file.
 /// * `cell_indices` - Slice of cell indices to include.
 /// * `gene_indices` - Slice of gene indices (HVG).
-/// * `library_sizes` - Library sizes for each cell (HVG only).
-/// * `target_size` - Target normalisation size.
+/// * `hvg_library_sizes` - Per-cell library sizes computed over HVG genes
+///   only. Must be in the same order as `cell_indices`.
+/// * `target_size` - Normalisation target size.
 /// * `params` - Boost parameters.
 /// * `seed` - Seed for randomised SVD.
 /// * `verbose` - Controls verbosity.
@@ -147,7 +149,7 @@ fn pca_boost(
     f_path_gene: &str,
     cell_indices: &[usize],
     gene_indices: &[usize],
-    library_sizes: &[usize],
+    hvg_library_sizes: &[usize],
     target_size: f32,
     params: &BoostParams,
     seed: usize,
@@ -157,27 +159,13 @@ fn pca_boost(
         f_path_gene,
         cell_indices,
         gene_indices,
-        library_sizes,
+        hvg_library_sizes,
         target_size,
-        // Create ScrubletParams from BoostParams for compatibility
-        &ScrubletParams {
-            log_transform: params.log_transform,
-            mean_center: params.mean_center,
-            normalise_variance: params.normalise_variance,
-            target_size: params.target_size,
-            min_gene_var_pctl: params.min_gene_var_pctl,
-            hvg_method: params.hvg_method.clone(),
-            loess_span: params.loess_span,
-            clip_max: params.clip_max,
-            sim_doublet_ratio: 0.0, // Not used in PCA
-            expected_doublet_rate: 0.0,
-            stdev_doublet_rate: 0.0,
-            no_pcs: params.no_pcs,
-            random_svd: params.random_svd,
-            n_bins: 0,
-            manual_threshold: None,
-            knn_params: KnnParams::new(),
-        },
+        params.log_transform,
+        params.mean_center,
+        params.normalise_variance,
+        params.no_pcs,
+        params.random_svd,
         seed,
         verbose,
     )

@@ -10,8 +10,10 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::time::Instant;
 
 use crate::core::math::pca_svd::*;
+use crate::core::math::sparse::sparse_svd_lanczos;
 use crate::prelude::*;
 use crate::single_cell::sc_processing::hvg::*;
+use crate::single_cell::sc_processing::pca::*;
 
 ///////////
 // Types //
@@ -313,176 +315,163 @@ pub fn scale_cell_chunks_with_stats(
     result
 }
 
-/// Calculate PCA and returns gene stats for downstream usage
+/// Calculate PCA for doublet detection methods using sparse SVD
+///
+/// Computes PCA on observed cells without densifying the full matrix. Gene
+/// chunks are re-normalised using HVG-specific library sizes (matching the
+/// Scrublet normalisation scheme), assembled into a CSC sparse matrix, and
+/// decomposed via sparse randomised SVD or Lanczos. This avoids holding
+/// an `n_cells x n_genes` dense matrix in memory, which is the primary
+/// memory bottleneck in both Scrublet and Boost.
+///
+/// The returned gene means and standard deviations are computed from the
+/// re-normalised sparse data and must be used to scale simulated doublets
+/// before projecting them into the same PC space (via
+/// `scale_cell_chunks_with_stats`).
 ///
 /// ### Params
 ///
-/// * `f_path_gene` - Path to the gene-based binary file.
-/// * `f_path_cell` - Path to the cell-based binary file.
-/// * `cell_indices` - Slice of indices for the cells.
-/// * `gene_indices` - Slice of indices for the genes.
-/// * `no_pcs` - Number of principal components to calculate
-/// * `random_svd` - Shall randomised singular value decompostion be used. This
-///   has the advantage of speed-ups, but loses precision.
-/// * `seed` - Seed for randomised SVD.
-/// * `verbose` - Boolean. Controls verbosity.
+/// * `f_path_gene` - Path to the gene-based binary file (CSC on disk).
+/// * `cell_indices` - Slice of cell indices to include in the analysis.
+/// * `gene_indices` - Slice of gene indices (HVGs) to use.
+/// * `hvg_library_sizes` - Per-cell library sizes computed over HVG genes
+///   only. Must be in the same order as `cell_indices`.
+/// * `target_size` - Normalisation target size (e.g. mean HVG library size).
+/// * `log_transform` - Whether to apply `ln(1 + x)` after size-factor
+///   normalisation.
+/// * `mean_center` - Whether to implicitly centre columns during SVD.
+/// * `normalise_variance` - Whether to implicitly scale columns to unit
+///   variance during SVD.
+/// * `no_pcs` - Number of principal components to compute.
+/// * `random_svd` - If true, use randomised sparse SVD; otherwise use
+///   Lanczos-based sparse SVD.
+/// * `seed` - Seed for reproducibility (randomised SVD and Lanczos init).
+/// * `verbose` - Controls verbosity of timing output.
 ///
-/// ### Return
+/// ### Returns
 ///
-/// A tuple of `(scores, loadings, mean exp of the gene, std of the gene)`.
+/// A `ScrubletPcaRes` tuple of `(scores, loadings, gene_means, gene_stds)`
+/// where scores is `n_cells x no_pcs`, loadings is `n_genes x no_pcs`,
+/// and means/stds are per-gene vectors for downstream doublet projection.
 #[allow(clippy::too_many_arguments)]
 pub fn pca_scrublet(
     f_path_gene: &str,
     cell_indices: &[usize],
     gene_indices: &[usize],
-    library_sizes: &[usize],
-    target_size: f32,
-    scrublet_params: &ScrubletParams,
-    seed: usize,
-    verbose: bool,
-) -> ScrubletPcaRes {
-    let start_total = Instant::now();
-    let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
-
-    let start_reading = Instant::now();
-    let gene_reader = ParallelSparseReader::new(f_path_gene).unwrap();
-    let mut gene_chunks: Vec<CscGeneChunk> = gene_reader.read_gene_parallel(gene_indices);
-    let end_reading = start_reading.elapsed();
-
-    if verbose {
-        println!("Loaded in data : {:.2?}", end_reading);
-    }
-
-    let start_scaling = Instant::now();
-    gene_chunks.par_iter_mut().for_each(|chunk| {
-        chunk.filter_selected_cells(&cell_set);
-    });
-
-    let scaled_and_stats: Vec<(Vec<f32>, f32, f32)> = gene_chunks
-        .par_iter()
-        .map(|chunk| {
-            scale_gene_with_stats(
-                chunk,
-                library_sizes,
-                target_size,
-                scrublet_params.log_transform,
-                scrublet_params.mean_center,
-                scrublet_params.normalise_variance,
-                cell_indices.len(),
-            )
-        })
-        .collect();
-
-    let num_genes = scaled_and_stats.len();
-
-    let scaled_data = Mat::from_fn(cell_indices.len(), num_genes, |row, col| {
-        scaled_and_stats[col].0[row]
-    });
-
-    let means: Vec<f32> = scaled_and_stats.iter().map(|(_, m, _)| *m).collect();
-    let stds: Vec<f32> = scaled_and_stats.iter().map(|(_, _, s)| *s).collect();
-
-    let end_scaling = start_scaling.elapsed();
-    if verbose {
-        println!("Finished scaling : {:.2?}", end_scaling);
-    }
-
-    let start_svd = Instant::now();
-    let (scores, loadings) = if scrublet_params.random_svd {
-        let res: RandomSvdResults<f32> = randomised_svd(
-            scaled_data.as_ref(),
-            scrublet_params.no_pcs,
-            seed,
-            Some(100_usize),
-            None,
-        );
-        let loadings = res
-            .v
-            .submatrix(0, 0, num_genes, scrublet_params.no_pcs)
-            .to_owned();
-        let scores = &scaled_data * &loadings;
-        (scores, loadings)
-    } else {
-        let res = scaled_data.thin_svd().unwrap();
-        let loadings = res
-            .V()
-            .submatrix(0, 0, num_genes, scrublet_params.no_pcs)
-            .to_owned();
-        let scores = &scaled_data * &loadings;
-        (scores, loadings)
-    };
-
-    let end_svd = start_svd.elapsed();
-    if verbose {
-        println!("Finished PCA calculations : {:.2?}", end_svd);
-    }
-
-    let end_total = start_total.elapsed();
-    if verbose {
-        println!("Total run time PCA detection: {:.2?}", end_total);
-    }
-
-    (scores, loadings, means, stds)
-}
-
-/// Scale gene using raw counts and library sizes
-///
-/// Can optionally, also log transform the data, but not recommended for
-/// Scrublet.
-///
-/// ### Params
-///
-/// * `chunk` - Gene chunk with raw data
-/// * `hvg_library_sizes` - Library sizes for each cell but only specifically
-///   for the HVG!
-/// * `target_size` - Target normalization size (e.g., 1e6)
-/// * `log_transform` - Shall the data be log-transformed.
-/// * `n_cells` - Total number of cells
-///
-/// ### Returns
-///
-/// Tuple of (scaled values, mean, std)
-fn scale_gene_with_stats(
-    chunk: &CscGeneChunk,
     hvg_library_sizes: &[usize],
     target_size: f32,
     log_transform: bool,
     mean_center: bool,
     normalise_variance: bool,
-    n_cells: usize,
-) -> (Vec<f32>, f32, f32) {
-    let mut normalised = vec![0.0f32; n_cells];
+    no_pcs: usize,
+    random_svd: bool,
+    seed: usize,
+    verbose: bool,
+) -> ScrubletPcaRes {
+    let start_total = Instant::now();
+    let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
+    let n_cells = cell_indices.len();
 
-    for (i, &pos) in chunk.indices.iter().enumerate() {
-        let raw_count = chunk.data_raw.get(i) as f32;
-        let lib_size = hvg_library_sizes[pos as usize] as f32;
-
-        normalised[pos as usize] = if log_transform {
-            ((raw_count / lib_size) * target_size).ln_1p()
-        } else {
-            (raw_count / lib_size) * target_size
-        };
+    let start_reading = Instant::now();
+    let reader = ParallelSparseReader::new(f_path_gene).unwrap();
+    let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(gene_indices);
+    if verbose {
+        println!("Loaded in data: {:.2?}", start_reading.elapsed());
     }
 
-    let mean = if mean_center || normalise_variance {
-        normalised.iter().sum::<f32>() / n_cells as f32
+    let start_prep = Instant::now();
+
+    // Filter to selected cells -- after this, chunk.indices are 0-based
+    // positions into cell_indices (same ordering as hvg_library_sizes).
+    gene_chunks.par_iter_mut().for_each(|chunk| {
+        chunk.filter_selected_cells(&cell_set);
+    });
+
+    // Re-normalise using HVG library sizes instead of the baked-in total
+    // library size normalisation from disk.
+    gene_chunks.par_iter_mut().for_each(|chunk| {
+        for (i, &pos) in chunk.indices.iter().enumerate() {
+            let raw_count = chunk.data_raw.get(i) as f32;
+            let lib_size = hvg_library_sizes[pos as usize] as f32;
+            let val = if log_transform {
+                ((raw_count / lib_size) * target_size).ln_1p()
+            } else {
+                (raw_count / lib_size) * target_size
+            };
+            chunk.data_norm[i] = F16::from(half::f16::from_f32(val.clamp(-65504.0, 65504.0)));
+        }
+    });
+
+    // Assemble into CSC -- remains sparse throughout
+    let csc = from_gene_chunks::<f32>(&gene_chunks, n_cells);
+    drop(gene_chunks);
+
+    // Column statistics for (a) implicit centering/scaling in SVD and
+    // (b) downstream projection of simulated doublets
+    let col_means = sparse_csc_column_means(&csc, true);
+    let col_stds = sparse_csc_column_stds(&csc, &col_means, true);
+
+    let means_for_svd = if mean_center {
+        Some(&col_means[..])
     } else {
-        0.0
+        None
     };
-    let std = if normalise_variance {
-        let variance = normalised.iter().map(|&x| (x - mean).powi(2)).sum::<f32>() / n_cells as f32;
-        variance.sqrt().max(1e-10)
+    let stds_for_svd = if normalise_variance {
+        Some(&col_stds[..])
     } else {
-        1.0
-    };
-    let result = match (mean_center, normalise_variance) {
-        (true, true) => normalised.iter().map(|&x| (x - mean) / std).collect(),
-        (true, false) => normalised.iter().map(|&x| x - mean).collect(),
-        (false, true) => normalised.iter().map(|&x| x / std).collect(),
-        (false, false) => normalised,
+        None
     };
 
-    (result, mean, std)
+    if verbose {
+        println!("Finished data preparation: {:.2?}", start_prep.elapsed());
+    }
+
+    let start_svd = Instant::now();
+
+    let (scores, loadings) = if random_svd {
+        let svd_res = randomised_sparse_svd::<f32, f32>(
+            &csc,
+            no_pcs,
+            seed as u64,
+            true,
+            Some(100_usize),
+            None,
+            means_for_svd,
+            stds_for_svd,
+        );
+        let scores = compute_pc_scores(&svd_res);
+        let scores = scores.submatrix(0, 0, n_cells, no_pcs).to_owned();
+        let loadings = svd_res
+            .v()
+            .submatrix(0, 0, gene_indices.len(), no_pcs)
+            .to_owned();
+        (scores, loadings)
+    } else {
+        let svd_res = sparse_svd_lanczos::<f32, f32, f32>(
+            &csc,
+            no_pcs,
+            seed as u64,
+            true,
+            means_for_svd,
+            stds_for_svd,
+        );
+        let scores = compute_pc_scores(&svd_res);
+        let loadings = svd_res
+            .v()
+            .submatrix(0, 0, gene_indices.len(), no_pcs)
+            .to_owned();
+        (scores, loadings)
+    };
+
+    if verbose {
+        println!("Finished PCA calculations: {:.2?}", start_svd.elapsed());
+        println!(
+            "Total run time PCA detection: {:.2?}",
+            start_total.elapsed()
+        );
+    }
+
+    (scores, loadings, col_means, col_stds)
 }
 
 /// Find threshold between singlets and doublets using combined score
@@ -954,7 +943,11 @@ impl Scrublet {
             hvg_genes,
             &self.hvg_library_sizes,
             target_size,
-            &self.params,
+            self.params.log_transform,
+            self.params.mean_center,
+            self.params.normalise_variance,
+            self.params.no_pcs,
+            self.params.random_svd,
             seed,
             verbose,
         );
