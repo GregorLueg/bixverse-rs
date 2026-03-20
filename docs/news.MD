@@ -1,5 +1,13 @@
 # News
 
+## 0.1.6
+
+### Features
+
+- Various plotting helpers for single cell (gene-based).
+- New GPU feature flag that exposes a GPU-accelerated CAGRA kNN search for
+  single cell applications.
+
 ## 0.1.5
 
 ### Features
