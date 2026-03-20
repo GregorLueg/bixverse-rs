@@ -1,5 +1,5 @@
 //! Implements the doubling detection method implemented from Python, see:
-//! https://doubletdetection.readthedocs.io/en/stable/
+//! <https://doubletdetection.readthedocs.io/en/stable/>
 
 use faer::{Mat, MatRef, concat};
 use rand::prelude::*;

@@ -243,7 +243,7 @@ impl CsrCellChunk {
     }
 }
 
-/// Scale Vec<CsrCellChunk> using pre-calculated gene means and stds
+/// Scale `Vec<CsrCellChunk>` using pre-calculated gene means and stds
 ///
 /// This ensures simulated doublets are scaled using the SAME statistics
 /// as the observed cells (critical for proper PCA projection)

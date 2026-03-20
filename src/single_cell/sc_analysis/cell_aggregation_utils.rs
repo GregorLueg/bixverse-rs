@@ -100,12 +100,12 @@ pub fn aggregate_meta_cells(
 ///
 /// ### Params
 ///
-/// * `metacells` - Vector of cell groups (metacell → [cells])
+/// * `metacells` - Vector of cell groups (metacell → `[cells]`)
 /// * `n_cells` - Total number of cells
 ///
 /// ### Returns
 ///
-/// Flat assignment vector where assignments[cell_id] = Some(metacell_id)
+/// Flat assignment vector where `assignments[cell_id] = Some(metacell_id)`
 /// or None if cell is unassigned
 pub fn metacells_to_assignments(metacells: &[&[usize]], n_cells: usize) -> Vec<Option<usize>> {
     let mut assignments = vec![None; n_cells];

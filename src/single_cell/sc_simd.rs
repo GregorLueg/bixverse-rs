@@ -151,7 +151,7 @@ fn fused_mul_square_sum_avx512(a: &[f32], b: &[f32]) -> f32 {
 
 /// SIMD-fused multiply-square-sum - Dispatch
 ///
-/// Used in compute_local_cov_max: sum(a[i] * b[i] * b[i])
+/// Used in compute_local_cov_max: `sum(a[i] * b[i] * b[i])`
 ///
 /// ### Params
 ///
