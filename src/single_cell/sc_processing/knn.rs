@@ -601,7 +601,7 @@ pub fn generate_knn_with_dist(
     seed: usize,
     verbose: bool,
 ) -> (Vec<Vec<usize>>, Option<Vec<Vec<f32>>>) {
-    // first helper function to remove self
+    // first helper
     fn remove_self(
         mut indices: Vec<Vec<usize>>,
         distances: Option<Vec<Vec<f32>>>,
