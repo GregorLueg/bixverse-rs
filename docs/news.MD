@@ -7,6 +7,7 @@
 - Various plotting helpers for single cell (gene-based).
 - New GPU feature flag that exposes a GPU-accelerated CAGRA kNN search for
   single cell applications.
+- Leverage sparse SVD for doublet detection methods
 
 ## 0.1.5
 
