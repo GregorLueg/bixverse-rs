@@ -4,7 +4,6 @@
 
 use indexmap::IndexSet;
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
 
 use crate::prelude::*;
 use crate::utils::simd::*;
@@ -209,7 +208,8 @@ pub fn extract_grouped_gene_stats(
     f_path: &str,
     cell_indices: &[usize],
     gene_indices: &[usize],
-    group_ids: &[String],
+    group_ids: &[usize],
+    group_levels: &[String],
 ) -> GroupedGeneStats {
     assert_eq!(
         cell_indices.len(),
@@ -218,28 +218,16 @@ pub fn extract_grouped_gene_stats(
     );
 
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
+    let n_groups = group_levels.len();
 
-    // build group label -> group index mapping
-    let mut group_labels: Vec<String> = Vec::new();
-    let mut group_map: FxHashMap<String, usize> = FxHashMap::default();
-    let mut cell_to_group = vec![0usize; cell_indices.len()];
-
-    for (i, label) in group_ids.iter().enumerate() {
-        let grp = match group_map.get(label) {
-            Some(&idx) => idx,
-            None => {
-                let idx = group_labels.len();
-                group_labels.push(label.clone());
-                group_map.insert(label.clone(), idx);
-                idx
-            }
-        };
-        cell_to_group[i] = grp;
-    }
-
-    let n_groups = group_labels.len();
     let mut group_sizes = vec![0usize; n_groups];
-    for &g in &cell_to_group {
+    for &g in group_ids {
+        debug_assert!(
+            g < n_groups,
+            "group_id {} out of bounds for {} levels",
+            g,
+            n_groups
+        );
         group_sizes[g] += 1;
     }
 
@@ -259,7 +247,7 @@ pub fn extract_grouped_gene_stats(
         let mut counts = vec![0usize; n_groups];
 
         for (i, &new_cell_idx) in chunk.indices.iter().enumerate() {
-            let grp = cell_to_group[new_cell_idx as usize];
+            let grp = group_ids[new_cell_idx as usize];
             sums[grp] += chunk.data_norm[i].to_f32();
             counts[grp] += 1;
         }
@@ -276,7 +264,7 @@ pub fn extract_grouped_gene_stats(
 
     GroupedGeneStats {
         gene_indices: chunks.iter().map(|c| c.original_index).collect(),
-        group_labels,
+        group_labels: group_levels.to_vec(),
         mean_expression,
         pct_expressed,
     }
