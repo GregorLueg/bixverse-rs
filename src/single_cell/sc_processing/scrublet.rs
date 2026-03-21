@@ -489,8 +489,12 @@ pub fn pca_scrublet(
 /// ### Returns
 ///
 /// Threshold score at the valley between the two modes
-fn find_threshold_min(scores: &[f32], n_bins: usize) -> f32 {
-    let (max_score, min_score) = array_max_min(scores);
+fn find_threshold_min(scores_obs: &[f32], scores_sim: &[f32], n_bins: usize) -> f32 {
+    let mut all_scores: Vec<f32> = Vec::with_capacity(scores_obs.len() + scores_sim.len());
+    all_scores.extend_from_slice(scores_obs);
+    all_scores.extend_from_slice(scores_sim);
+
+    let (max_score, min_score) = array_max_min(&all_scores);
 
     if (max_score - min_score).abs() < 1e-6 {
         return (min_score + max_score) / 2.0;
@@ -499,42 +503,44 @@ fn find_threshold_min(scores: &[f32], n_bins: usize) -> f32 {
     let bin_width = (max_score - min_score) / n_bins as f32;
     let mut hist = vec![0usize; n_bins];
 
-    for &score in scores {
+    for &score in &all_scores {
         let bin = ((score - min_score) / bin_width).floor() as usize;
         hist[bin.min(n_bins - 1)] += 1;
     }
 
-    let smoothed: Vec<f32> = moving_average(&hist, 3)
+    let smoothed: Vec<f32> = moving_average(&hist, 5)
         .into_iter()
         .map(|x| x as f32)
         .collect();
 
-    let mut max_idx = 0;
-    let mut max_val = 0.0f32;
+    // find all local maxima
+    let mut peaks: Vec<(usize, f32)> = Vec::new();
     for i in 1..(smoothed.len() - 1) {
-        if smoothed[i] > smoothed[i - 1] && smoothed[i] > smoothed[i + 1] && smoothed[i] > max_val {
-            max_val = smoothed[i];
-            max_idx = i;
+        if smoothed[i] >= smoothed[i - 1] && smoothed[i] >= smoothed[i + 1] && smoothed[i] > 0.0 {
+            peaks.push((i, smoothed[i]));
         }
     }
 
-    let mut min_idx = max_idx;
-    let mut min_val = smoothed[max_idx];
+    if peaks.len() < 2 {
+        // No clear bimodality -- fall back to median of simulated scores
+        let mut sorted_sim = scores_sim.to_vec();
+        sorted_sim.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        return sorted_sim[sorted_sim.len() / 4]; // Q1 of simulated as conservative threshold
+    }
 
-    for i in (max_idx + 1)..smoothed.len() {
+    // Take the two tallest peaks
+    peaks.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    let peak_a = peaks[0].0.min(peaks[1].0);
+    let peak_b = peaks[0].0.max(peaks[1].0);
+
+    // Find the minimum between them
+    let mut min_idx = peak_a;
+    let mut min_val = smoothed[peak_a];
+    for i in peak_a..=peak_b {
         if smoothed[i] < min_val {
             min_val = smoothed[i];
             min_idx = i;
         }
-        if smoothed[i] > min_val * 1.5 {
-            break;
-        }
-    }
-
-    if min_idx == max_idx {
-        let mut sorted = scores.to_vec();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        return sorted[sorted.len() / 2];
     }
 
     min_score + (min_idx as f32 + 0.5) * bin_width
@@ -1119,7 +1125,7 @@ impl Scrublet {
         verbose: bool,
     ) -> ScrubletResult {
         let threshold = manual_threshold.unwrap_or_else(|| {
-            let t = find_threshold_min(&doublet_scores.0, n_bins);
+            let t = find_threshold_min(&doublet_scores.0, &doublet_scores.2, n_bins);
             if verbose {
                 println!("Automatically set threshold at doublet score = {:.4}", t);
             }
