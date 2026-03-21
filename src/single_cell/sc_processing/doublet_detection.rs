@@ -1,9 +1,13 @@
-//! Implements the doubling detection method implemented from Python, see:
-//! <https://doubletdetection.readthedocs.io/en/stable/>
+//! Boost doublet detection for single cell data.
+//!
+//! Implements an iterative community-based doublet detection method inspired
+//! by the Python doubletdetection package. Each iteration simulates doublets,
+//! embeds observed and simulated cells together via PCA, clusters the combined
+//! graph with Louvain, and scores communities by synthetic doublet enrichment
+//! (hypergeometric test). Across iterations, doublets are called by majority
+//! voting on per-iteration significance.
 
-use faer::{Mat, MatRef, concat};
 use rand::prelude::*;
-use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::time::Instant;
 
@@ -11,180 +15,85 @@ use crate::core::math::stats::*;
 use crate::graph::community_detections::*;
 use crate::graph::graph_structures::*;
 use crate::prelude::*;
-use crate::single_cell::sc_processing::hvg::*;
-use crate::single_cell::sc_processing::scrublet::*;
-
-///////////
-// Types //
-///////////
-
-/// Type alias for Boost PCA results
-///
-/// (Same as ScrubletPcaRes, but f--k DRY)
-///
-/// ### Fields
-///
-/// * `0` - PCA scores
-/// * `1` - PCA loadings
-/// * `2` - Gene means
-/// * `3` - Gene standard deviations
-type BoostPcaRes = (Mat<f32>, Mat<f32>, Vec<f32>, Vec<f32>);
-
-////////////
-// Params //
-////////////
+use crate::single_cell::sc_processing::utils_doublets::*;
 
 ////////////////////////
 // Params and results //
 ////////////////////////
 
-/// Structure to store the Boost parameters
+/// Parameters for the Boost doublet detection algorithm.
 ///
-/// **Clustering and Iteration:**
-///
-/// * `resolution` - Resolution parameter for Louvain clustering.
-/// * `n_iters` - Number of boosting iterations to perform.
-///
-/// **Doublet Calling:**
-///
-/// * `p_thresh` - P-value threshold for doublet calling via voting.
-/// * `voter_thresh` - Threshold for majority voting (0-1).
-///
-/// **kNN Graph:**
-///
-/// * `knn_params` - The knnParams via the `KnnParams` structure.
+/// Controls preprocessing, simulation, clustering, iteration count and
+/// the voting-based doublet calling.
 #[derive(Clone, Debug)]
 pub struct BoostParams {
-    /// Shall the counts be log-transformed
+    /// Whether to log-transform counts after normalisation.
     pub log_transform: bool,
-    /// Shall the data be mean-centred
+    /// Whether to mean-centre genes before PCA.
     pub mean_center: bool,
-    /// Shall the data be variance normalised
+    /// Whether to scale genes to unit variance before PCA.
     pub normalise_variance: bool,
-    /// Optional target size. If not provided, will default to the mean library
-    /// size of the cells.
+    /// Optional target library size. Defaults to the mean HVG library size.
     pub target_size: Option<f32>,
-    /// Percentile threshold for highly variable genes.
+    /// Percentile threshold for HVG selection.
     pub min_gene_var_pctl: f32,
-    /// Method for HVG selection. One of `"vst"`, `"mvb"`, or `"dispersion"`.
+    /// HVG method: `"vst"`, `"mvb"`, or `"dispersion"`.
     pub hvg_method: String,
-    /// Span parameter for loess fitting in VST method.
+    /// Loess span for VST fitting.
     pub loess_span: f64,
-    /// Optional maximum value for clipping in variance stabilisation.
+    /// Optional clip max for variance stabilisation.
     pub clip_max: Option<f32>,
-    /// Number of doublets to simulate relative to the number of observed cells
-    /// (e.g., 1.5 simulates 1.5x as many doublets).
+    /// Ratio of simulated doublets to observed cells.
     pub boost_rate: f32,
-    /// Whether to use replacement when sampling cell pairs.
+    /// Whether to sample cell pairs with replacement.
     pub replace: bool,
-    /// Number of principal components to use for embedding.
+    /// Number of principal components.
     pub no_pcs: usize,
-    /// Whether to use randomised SVD (faster) vs exact SVD.
+    /// Whether to use randomised SVD.
     pub random_svd: bool,
     /// Resolution parameter for Louvain clustering.
     pub resolution: f32,
-    /// Number of iterations for Louvain to perform.
+    /// Number of Louvain iterations per clustering step.
     pub louvain_iters: usize,
-    /// Number of boosting iterations to perform.
+    /// Number of boost iterations (each generates fresh doublets).
     pub n_iters: usize,
-    /// P-value threshold for doublet calling via voting.
+    /// P-value threshold for per-iteration significance.
     pub p_thresh: f32,
-    /// Threshold for majority voting (0-1).
+    /// Fraction threshold for majority voting (0-1).
     pub voter_thresh: f32,
-    /// Parameters for the various approximate nearest neighbour searches
-    /// in ann-search-rs
+    /// Parameters for kNN construction.
     pub knn_params: KnnParams,
 }
 
-/////////////
-// Results //
-/////////////
-
-/// Result structure for Boost doublet detection
-///
-/// Contains predictions, scores, and voting statistics from the Boost
-/// algorithm.
+/// Results from the Boost doublet detection algorithm.
 #[derive(Clone, Debug)]
 pub struct BoostResult {
-    /// Boolean vector indicating which observed cells are predicted as doublets
-    /// (true = doublet, false = singlet).
+    /// Per-cell doublet predictions (`true` = doublet).
     pub predicted_doublets: Vec<bool>,
-    /// Doublet scores for each observed cell, typically averaged across
-    /// iterations. Higher scores indicate higher likelihood of being a doublet.
+    /// Doublet score per cell, averaged across iterations.
     pub doublet_scores: Vec<f32>,
-    /// Average voting fraction across iterations. Indicates the consensus
-    /// across boosting iterations for each cell. Only meaningful when n_iters
-    /// > 1.
+    /// Average voting fraction per cell across iterations.
     pub voting_average: Vec<f32>,
 }
 
-/////////////
-// Helpers //
-/////////////
+//////////////////////
+// Boost-specific   //
+//////////////////////
 
-/// PCA for Boost
+/// Score communities by synthetic doublet enrichment.
 ///
-/// Computes sparse PCA using the same methodology as Scrublet for
-/// consistency. Forwards parameters from `BoostParams` to `pca_scrublet`,
-/// which performs the sparse SVD without densifying the observed cell
-/// matrix.
+/// For each community, computes the fraction of members that are synthetic
+/// and a hypergeometric p-value testing whether synthetic cells are
+/// over-represented.
 ///
 /// ### Params
 ///
-/// * `f_path_gene` - Path to the gene-based binary file.
-/// * `cell_indices` - Slice of cell indices to include.
-/// * `gene_indices` - Slice of gene indices (HVG).
-/// * `hvg_library_sizes` - Per-cell library sizes computed over HVG genes
-///   only. Must be in the same order as `cell_indices`.
-/// * `target_size` - Normalisation target size.
-/// * `params` - Boost parameters.
-/// * `seed` - Seed for randomised SVD.
-/// * `verbose` - Controls verbosity.
+/// * `orig_communities` - Cluster assignments for observed cells.
+/// * `synth_communities` - Cluster assignments for simulated doublets.
 ///
 /// ### Returns
 ///
-/// Tuple of (PCA scores, loadings, gene means, gene standard deviations).
-#[allow(clippy::too_many_arguments)]
-fn pca_boost(
-    f_path_gene: &str,
-    cell_indices: &[usize],
-    gene_indices: &[usize],
-    hvg_library_sizes: &[usize],
-    target_size: f32,
-    params: &BoostParams,
-    seed: usize,
-    verbose: bool,
-) -> BoostPcaRes {
-    pca_scrublet(
-        f_path_gene,
-        cell_indices,
-        gene_indices,
-        hvg_library_sizes,
-        target_size,
-        params.log_transform,
-        params.mean_center,
-        params.normalise_variance,
-        params.no_pcs,
-        params.random_svd,
-        seed,
-        verbose,
-    )
-}
-
-/// Score communities based on synthetic doublet enrichment
-///
-/// Calculates enrichment of simulated doublets within each community using
-/// hypergeometric test. Communities with high synthetic doublet enrichment
-/// receive higher scores.
-///
-/// ### Params
-///
-/// * `orig_communities` - Community assignments for observed cells.
-/// * `synth_communities` - Community assignments for simulated doublets.
-///
-/// ### Returns
-///
-/// Tuple of (enrichment scores, log p-values) for each observed cell.
+/// Tuple of (enrichment_scores, log_p_values) per observed cell.
 fn score_communities(
     orig_communities: &[usize],
     synth_communities: &[usize],
@@ -199,7 +108,6 @@ fn score_communities(
         *orig_counts.entry(c).or_insert(0) += 1;
     }
 
-    // Pre-compute per-community
     let unique_comms: FxHashSet<usize> = orig_communities.iter().copied().collect();
     let mut comm_scores: FxHashMap<usize, f32> = FxHashMap::default();
     let mut comm_log_p: FxHashMap<usize, f32> = FxHashMap::default();
@@ -222,21 +130,20 @@ fn score_communities(
     (scores, log_p_values)
 }
 
-/// Predict doublets via voting across iterations
+/// Call doublets via majority voting across iterations.
 ///
-/// Uses majority voting across iterations to call doublets. A cell is called
-/// a doublet if it exceeds the voter threshold in the fraction of iterations
-/// where it was significant.
+/// A cell is called a doublet if the fraction of iterations in which its
+/// log p-value fell below `p_thresh` exceeds `voter_thresh`.
 ///
 /// ### Params
 ///
-/// * `all_log_p_values` - Log p-values for each cell across all iterations.
-/// * `p_thresh` - P-value threshold for significance in each iteration.
-/// * `voter_thresh` - Fraction threshold for majority voting (0-1).
+/// * `all_log_p_values` - Log p-values per cell, one vector per iteration.
+/// * `p_thresh` - P-value threshold for per-iteration significance.
+/// * `voter_thresh` - Fraction of iterations required for a doublet call.
 ///
 /// ### Returns
 ///
-/// Tuple of (doublet predictions, average voting fraction) for each cell.
+/// Tuple of (predictions, voting_averages) per cell.
 fn predict_voting(
     all_log_p_values: &[Vec<f32>],
     p_thresh: f32,
@@ -261,18 +168,19 @@ fn predict_voting(
     (labels, voting_avg)
 }
 
-/// Find score cutoff using largest gap heuristic
+/// Find a score cutoff using the largest-gap heuristic.
 ///
-/// For single iteration mode, identifies the threshold between singlet and
-/// doublet scores by finding the largest gap in the sorted score distribution.
+/// Sorts scores and picks the value at the largest gap, separating the
+/// low-score (singlet) and high-score (doublet) groups. Used as a fallback
+/// for single-iteration mode where voting is not meaningful.
 ///
 /// ### Params
 ///
-/// * `scores` - Community enrichment scores.
+/// * `scores` - Community enrichment scores per cell.
 ///
 /// ### Returns
 ///
-/// Threshold score value.
+/// The threshold score value.
 fn find_score_cutoff(scores: &[f32]) -> f32 {
     let mut sorted = scores.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -295,129 +203,123 @@ fn find_score_cutoff(scores: &[f32]) -> f32 {
     sorted[gap_idx]
 }
 
-//////////
-// Main //
-//////////
+////////////////////
+// Main structure //
+////////////////////
 
-/// Structure for Boost doublet detection algorithm
+/// Boost doublet detection.
 ///
-/// Implements the iterative Boost algorithm for doublet detection using
-/// community detection and voting across multiple iterations.
-///
-/// ### Fields
-///
-/// * `f_path_gene` - Path to the binarised file in CSC format.
-/// * `f_path_cell` - Path to the binarised file in CSR format.
-/// * `params` - The Boost parameters
-/// * `n_cells` - Number of observed cells.
-/// * `n_cells_sim` - Number of simulated cells (varies per iteration).
-/// * `cells_to_keep` - Indices of cells to keep/include in this analysis.
-/// * `hvg_library_sizes` - Library sizes for HVGs only, computed once at start.
+/// Iterative method that simulates doublets, clusters observed and simulated
+/// cells together via Louvain, and scores communities by synthetic enrichment.
+/// Doublets are called by majority voting across iterations.
 #[derive(Clone, Debug)]
 pub struct BoostClassifier {
+    /// Path to the gene-based binary file (CSC format).
     f_path_gene: String,
+    /// Path to the cell-based binary file (CSR format).
     f_path_cell: String,
+    /// Algorithm parameters.
     params: BoostParams,
+    /// Number of observed cells.
     n_cells: usize,
+    /// Number of simulated doublets per iteration.
     n_cells_sim: usize,
+    /// Cell indices included in this analysis.
     cells_to_keep: Vec<usize>,
+    /// Per-cell library sizes computed over HVG genes only.
     hvg_library_sizes: Vec<usize>,
 }
 
 impl BoostClassifier {
-    /// Generate a new instance
+    /// Create a new BoostClassifier instance.
     ///
     /// ### Params
     ///
-    /// * `f_path_gene` - Path to the binarised file in CSC format.
-    /// * `f_path_cell` - Path to the binarised file in CSR format.
-    /// * `params` - The Boost parameters to use.
-    /// * `cell_indices` - Slice of indices indicating which cells to keep/use.
+    /// * `f_path_gene` - Path to the gene-based binary file (CSC).
+    /// * `f_path_cell` - Path to the cell-based binary file (CSR).
+    /// * `params` - Boost parameters.
+    /// * `cell_indices` - Cell indices to include in the analysis.
+    ///
+    /// ### Returns
+    ///
+    /// Initialised `BoostClassifier`.
     pub fn new(
         f_path_gene: &str,
         f_path_cell: &str,
         params: BoostParams,
         cell_indices: &[usize],
     ) -> Self {
-        let n_cells = cell_indices.len();
-
         BoostClassifier {
             f_path_gene: f_path_gene.to_string(),
             f_path_cell: f_path_cell.to_string(),
             params,
-            n_cells,
+            n_cells: cell_indices.len(),
             n_cells_sim: 0,
             cells_to_keep: cell_indices.to_vec(),
             hvg_library_sizes: Vec::new(),
         }
     }
 
-    /// Main function to run Boost
+    /// Run the full Boost pipeline.
     ///
-    /// Executes the full Boost algorithm across all iterations, identifying
-    /// highly variable genes, simulating doublets, running PCA, building kNN
-    /// graphs, clustering, and calling doublets via voting or score cutoff.
+    /// Selects HVGs, computes library sizes, then runs `n_iters` iterations
+    /// of simulate-embed-cluster-score. Final doublet calls are made by
+    /// majority voting (multi-iteration) or largest-gap cutoff (single
+    /// iteration).
     ///
     /// ### Params
     ///
-    /// * `streaming` - Shall the data be streamed. Reduces memory pressure
-    ///   during HVG detection.
+    /// * `streaming` - Stream HVG computation to reduce memory pressure.
     /// * `seed` - Seed for reproducibility.
-    /// * `verbose` - Controls verbosity of the function.
+    /// * `verbose` - Controls verbosity.
     ///
     /// ### Returns
     ///
-    /// A `BoostResult` containing predictions and scores.
+    /// `BoostResult` with predictions, scores and voting averages.
     pub fn run_boost(&mut self, streaming: bool, seed: usize, verbose: bool) -> BoostResult {
         let start_all = Instant::now();
+
+        let hvg_opts = HvgOpts {
+            method: self.params.hvg_method.clone(),
+            loess_span: self.params.loess_span as f32,
+            clip_max: self.params.clip_max,
+            min_gene_var_pctl: self.params.min_gene_var_pctl,
+        };
 
         if verbose {
             println!("Identifying highly variable genes...");
         }
         let start_hvg = Instant::now();
-        let hvg_genes = self.get_hvg(streaming, verbose);
-        let end_hvg = start_hvg.elapsed();
+
+        let hvg_genes = select_hvg(
+            &self.f_path_gene,
+            &self.cells_to_keep,
+            &hvg_opts,
+            streaming,
+            verbose,
+        );
+
         if verbose {
             println!(
                 "Using {} highly variable genes. Done in {:.2?}",
                 hvg_genes.len(),
-                end_hvg
+                start_hvg.elapsed()
             );
         }
 
-        let cell_reader = ParallelSparseReader::new(&self.f_path_cell).unwrap();
-        let hvg_set: FxHashSet<usize> = hvg_genes.iter().copied().collect();
-
-        let hvg_library_sizes: Vec<usize> = self
-            .cells_to_keep
-            .par_iter()
-            .map(|&cell_idx| {
-                let chunk = cell_reader.read_cell(cell_idx);
-                chunk
-                    .indices
-                    .iter()
-                    .enumerate()
-                    .filter(|&(_, &gene_idx)| hvg_set.contains(&(gene_idx as usize)))
-                    .map(|(i, _)| chunk.data_raw.get(i) as usize)
-                    .sum()
-            })
-            .collect();
-
-        let target_size = self.params.target_size.unwrap_or_else(|| {
-            let sum = hvg_library_sizes.iter().sum::<usize>() as f32;
-            sum / hvg_library_sizes.len() as f32
-        });
-
-        self.hvg_library_sizes = hvg_library_sizes;
+        self.hvg_library_sizes =
+            compute_hvg_library_sizes(&self.f_path_cell, &self.cells_to_keep, &hvg_genes);
+        let target_size = resolve_target_size(self.params.target_size, &self.hvg_library_sizes);
         self.n_cells_sim = (self.n_cells as f32 * self.params.boost_rate) as usize;
 
+        // Run iterations
         let start_iters = Instant::now();
 
         let iter_results: Vec<(Vec<f32>, Vec<f32>)> = (0..self.params.n_iters)
             .map(|iter| {
                 if verbose {
                     println!(
-                        " == Running iteration {} of {} == ",
+                        " == Running iteration {} of {} ==",
                         iter + 1,
                         self.params.n_iters
                     );
@@ -426,15 +328,15 @@ impl BoostClassifier {
             })
             .collect();
 
-        let end_iters = start_iters.elapsed();
         if verbose {
             println!(
                 "Completed {} iterations in {:.2?}",
-                self.params.n_iters, end_iters
+                self.params.n_iters,
+                start_iters.elapsed()
             );
         }
 
-        // Aggregate results
+        // Aggregate
         let all_scores: Vec<Vec<f32>> = iter_results.iter().map(|(s, _)| s.clone()).collect();
         let all_log_p_values: Vec<Vec<f32>> = iter_results.iter().map(|(_, p)| p.clone()).collect();
 
@@ -445,7 +347,6 @@ impl BoostClassifier {
                 self.params.voter_thresh,
             );
 
-            // Average scores across iterations
             let avg_scores: Vec<f32> = (0..self.n_cells)
                 .map(|i| {
                     all_scores.iter().map(|iter| iter[i]).sum::<f32>() / self.params.n_iters as f32
@@ -458,7 +359,6 @@ impl BoostClassifier {
                 voting_average: voting_avg,
             }
         } else {
-            // Single iteration - use score cutoff
             let scores = &all_scores[0];
             let cutoff = find_score_cutoff(scores);
 
@@ -466,17 +366,13 @@ impl BoostClassifier {
                 println!("Score cutoff: {:.4}", cutoff);
             }
 
-            let labels: Vec<bool> = scores.iter().map(|&s| s >= cutoff).collect();
-            let voting_avg = vec![0.0; self.n_cells]; // Not meaningful for single iteration
-
             BoostResult {
-                predicted_doublets: labels,
+                predicted_doublets: scores.iter().map(|&s| s >= cutoff).collect(),
                 doublet_scores: scores.clone(),
-                voting_average: voting_avg,
+                voting_average: vec![0.0; self.n_cells],
             }
         };
 
-        let end_all = start_all.elapsed();
         if verbose {
             let n_doublets = result.predicted_doublets.iter().filter(|&&d| d).count();
             println!(
@@ -484,185 +380,137 @@ impl BoostClassifier {
                 n_doublets,
                 100.0 * n_doublets as f32 / self.n_cells as f32
             );
-            println!("Total runtime: {:.2?}", end_all);
+            println!("Total runtime: {:.2?}", start_all.elapsed());
         }
 
         result
     }
 
-    /// Execute a single Boost iteration
+    /// Execute a single Boost iteration.
     ///
-    /// Performs one complete cycle: simulating doublets, running PCA, building
-    /// kNN graph, clustering, and scoring communities based on simulated
-    /// doublet enrichment.
+    /// Simulates doublets, runs PCA, builds a kNN graph, clusters via
+    /// Louvain, and scores communities by synthetic doublet enrichment.
     ///
     /// ### Params
     ///
-    /// * `target_size` - Target library size for normalisation.
+    /// * `target_size` - Normalisation target library size.
     /// * `hvg_genes` - Indices of highly variable genes.
-    /// * `seed` - Seed for reproducibility in this iteration.
+    /// * `seed` - Seed for this iteration.
     /// * `verbose` - Controls verbosity.
     ///
     /// ### Returns
     ///
-    /// Tuple of (community scores, log p-values) for each observed cell.
-    pub fn one_iteration(
+    /// Tuple of (community_scores, log_p_values) per observed cell.
+    fn one_iteration(
         &self,
         target_size: f32,
         hvg_genes: &[usize],
         seed: usize,
         verbose: bool,
     ) -> (Vec<f32>, Vec<f32>) {
-        // Simulate doublets
-        let sim_chunks = self.simulate_doublets(target_size, hvg_genes, seed);
+        let pca_opts = PcaOpts {
+            log_transform: self.params.log_transform,
+            mean_center: self.params.mean_center,
+            normalise_variance: self.params.normalise_variance,
+            no_pcs: self.params.no_pcs,
+            random_svd: self.params.random_svd,
+        };
 
-        // Run PCA
-        let combined_pca = self.run_pca(&sim_chunks, hvg_genes, target_size, verbose, seed);
+        // Generate pairs (Boost supports with/without replacement)
+        let pairs = self.generate_pairs(seed);
 
-        // Build kNN graph
-        let knn = self
-            .build_combined_knn(combined_pca.as_ref(), seed, verbose)
-            .unwrap();
+        // Simulate
+        let sim_chunks = simulate_from_pairs(
+            &pairs,
+            &self.cells_to_keep,
+            &self.hvg_library_sizes,
+            hvg_genes,
+            &self.f_path_cell,
+            target_size,
+            self.params.log_transform,
+        );
+
+        // PCA + projection
+        let (combined_pca, _) = pca_and_project(
+            &self.f_path_gene,
+            &self.cells_to_keep,
+            hvg_genes,
+            &self.hvg_library_sizes,
+            target_size,
+            &sim_chunks,
+            &pca_opts,
+            seed,
+            verbose,
+        );
+
+        // kNN
+        let k_adj = adjusted_k(self.params.knn_params.k, self.n_cells, self.n_cells_sim);
+        if verbose {
+            println!("Using {} neighbours in the kNN generation.", k_adj);
+        }
+        let knn = dispatch_knn(
+            combined_pca.as_ref(),
+            k_adj,
+            &self.params.knn_params,
+            seed,
+            verbose,
+        );
 
         // Cluster
         let start_graph = Instant::now();
-
         let graph = knn_to_sparse_graph(&knn);
-
-        let end_graph = start_graph.elapsed();
-
         if verbose {
-            println!("Transformed kNN graph. Done in {:.2?}", end_graph);
+            println!(
+                "Transformed kNN graph. Done in {:.2?}",
+                start_graph.elapsed()
+            );
         }
 
         let start_cluster = Instant::now();
-
         let communities = louvain_sparse_graph(
             &graph,
             self.params.resolution,
             self.params.louvain_iters,
             seed,
         );
-
-        let end_cluster = start_cluster.elapsed();
-
         if verbose {
             println!(
                 "Generated communities via Louvain clustering. Done in {:.2?}",
-                end_cluster
+                start_cluster.elapsed()
             );
         }
 
-        // Split communities
+        // Score
         let orig_communities = communities[..self.n_cells].to_vec();
         let synth_communities = communities[self.n_cells..].to_vec();
 
-        // Score
-        let (scores, log_p_values) = score_communities(&orig_communities, &synth_communities);
-
-        (scores, log_p_values)
+        score_communities(&orig_communities, &synth_communities)
     }
 
-    /// Get the indices of the highly variable genes
+    /// Generate cell pairs for doublet simulation.
     ///
-    /// Identify the HVGs for subsequent PCA.
+    /// Supports both with-replacement (random pairs) and without-replacement
+    /// (shuffled pairing) modes.
     ///
     /// ### Params
     ///
-    /// * `streaming` - Shall the data be loaded in a streaming fashion. Reduces
-    ///   memory pressure
-    /// * `verbose` - Controls verbosity
-    ///
-    /// ### Returns
-    ///
-    /// Vector of indices of the HVG.
-    fn get_hvg(&self, streaming: bool, verbose: bool) -> Vec<usize> {
-        // Same as Scrublet - reuse your existing code
-        let hvg_type = parse_hvg_method(&self.params.hvg_method)
-            .ok_or_else(|| format!("Invalid HVG method: {}", &self.params.hvg_method))
-            .unwrap();
-
-        let hvg_res: HvgRes = if streaming {
-            match hvg_type {
-                HvgMethod::Vst => get_hvg_vst_streaming(
-                    &self.f_path_gene,
-                    &self.cells_to_keep,
-                    self.params.loess_span as f32,
-                    self.params.clip_max,
-                    verbose,
-                ),
-                HvgMethod::MeanVarBin => get_hvg_mvb_streaming(),
-                HvgMethod::Dispersion => get_hvg_dispersion_streaming(),
-            }
-        } else {
-            match hvg_type {
-                HvgMethod::Vst => get_hvg_vst(
-                    &self.f_path_gene,
-                    &self.cells_to_keep,
-                    self.params.loess_span as f32,
-                    self.params.clip_max,
-                    verbose,
-                ),
-                HvgMethod::MeanVarBin => get_hvg_mvb(),
-                HvgMethod::Dispersion => get_hvg_dispersion(),
-            }
-        };
-
-        let n_genes = hvg_res.mean.len() as f32;
-        let n_genes_to_take = (n_genes * (1.0 - self.params.min_gene_var_pctl)).ceil() as usize;
-
-        let mut indices: Vec<(usize, f64)> = hvg_res
-            .var_std
-            .iter()
-            .enumerate()
-            .map(|(i, &v)| (i, v))
-            .collect();
-        indices.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-        indices.truncate(n_genes_to_take);
-
-        let mut result: Vec<usize> = indices.into_iter().map(|(i, _)| i).collect();
-        result.sort_unstable();
-        result
-    }
-
-    /// Simulate doublets
-    ///
-    /// Generate artifical doublets based on the real data. The algorithm
-    /// will only construct doublets from the
-    ///
-    /// ### Params
-    ///
-    /// * `hvg_genes` - Indices of the highly variable genes.
-    /// * `target_size` - The library target size. Needs to be the same as the
-    ///   original one (in single cell typicall `1e4`).
     /// * `seed` - Seed for reproducibility.
     ///
     /// ### Returns
     ///
-    /// A `Vec<CsrCellChunk>` that contains the artificially created doublets.
-    fn simulate_doublets(
-        &self,
-        target_size: f32,
-        hvg_genes: &[usize],
-        seed: usize,
-    ) -> Vec<CsrCellChunk> {
-        let n_sim_doublets = (self.n_cells as f32 * self.params.boost_rate) as usize;
-        let mut rng = StdRng::seed_from_u64(seed as u64);
+    /// Vector of (position_a, position_b) pairs into `cells_to_keep`.
+    fn generate_pairs(&self, seed: usize) -> Vec<(usize, usize)> {
+        let n_sim = (self.n_cells as f32 * self.params.boost_rate) as usize;
 
-        let pairs: Vec<(usize, usize)> = if self.params.replace {
-            (0..n_sim_doublets)
-                .map(|_| {
-                    let i = rng.random_range(0..self.cells_to_keep.len());
-                    let j = rng.random_range(0..self.cells_to_keep.len());
-                    (i, j)
-                })
-                .collect()
+        if self.params.replace {
+            random_pairs(self.cells_to_keep.len(), n_sim, seed)
         } else {
+            let mut rng = StdRng::seed_from_u64(seed as u64);
             let mut available: Vec<usize> = (0..self.cells_to_keep.len()).collect();
             available.shuffle(&mut rng);
             available
                 .chunks(2)
-                .take(n_sim_doublets)
+                .take(n_sim)
                 .filter_map(|chunk| {
                     if chunk.len() == 2 {
                         Some((chunk[0], chunk[1]))
@@ -671,184 +519,6 @@ impl BoostClassifier {
                     }
                 })
                 .collect()
-        };
-
-        let hvg_set: FxHashSet<usize> = hvg_genes.iter().copied().collect();
-        let gene_to_hvg_idx: FxHashMap<usize, u32> = hvg_genes
-            .iter()
-            .enumerate()
-            .map(|(hvg_idx, &orig_idx)| (orig_idx, hvg_idx as u32))
-            .collect();
-
-        let reader = ParallelSparseReader::new(&self.f_path_cell).unwrap();
-
-        pairs
-            .par_iter()
-            .enumerate()
-            .map(|(doublet_idx, &(pos_i, pos_j))| {
-                let cell_idx_i = self.cells_to_keep[pos_i];
-                let cell_idx_j = self.cells_to_keep[pos_j];
-
-                let cell1 = reader.read_cell(cell_idx_i);
-                let cell2 = reader.read_cell(cell_idx_j);
-
-                let hvg_combined_lib_size =
-                    self.hvg_library_sizes[pos_i] + self.hvg_library_sizes[pos_j];
-
-                let mut doublet = CsrCellChunk::add_cells_scrublet(
-                    &cell1,
-                    &cell2,
-                    &hvg_set,
-                    hvg_combined_lib_size,
-                    target_size,
-                    self.params.log_transform,
-                    doublet_idx,
-                );
-
-                for idx in doublet.indices.iter_mut() {
-                    *idx = gene_to_hvg_idx[&(*idx as usize)];
-                }
-
-                doublet
-            })
-            .collect()
-    }
-
-    /// Run PCA
-    ///
-    /// Runs PCA prior to kNN construction.
-    ///
-    /// ### Params
-    ///
-    /// * `sim_chunks` - Slice of `CsrCellChunk` containing the simulated
-    ///   doublets.
-    /// * `hvg_genes` - The indices of the highly variable genes.
-    /// * `verbose` - Controls verbosity of the function.
-    /// * `seed` - Seed for reproducibility. Relevant when using randomised
-    ///   SVD.
-    ///
-    /// ### Returns
-    ///
-    /// The PCA scores with the top rows representing the actual data and
-    /// the bottom rows the simulated data.
-    fn run_pca(
-        &self,
-        sim_chunks: &[CsrCellChunk],
-        hvg_genes: &[usize],
-        target_size: f32,
-        verbose: bool,
-        seed: usize,
-    ) -> Mat<f32> {
-        let pca_res: BoostPcaRes = pca_boost(
-            &self.f_path_gene,
-            &self.cells_to_keep,
-            hvg_genes,
-            &self.hvg_library_sizes,
-            target_size,
-            &self.params,
-            seed,
-            verbose,
-        );
-
-        let scaled_sim = scale_cell_chunks_with_stats(
-            sim_chunks,
-            &pca_res.2,
-            &pca_res.3,
-            self.params.mean_center,
-            self.params.normalise_variance,
-            hvg_genes.len(),
-        );
-
-        let pca_sim = &scaled_sim * pca_res.1;
-        concat![[pca_res.0], [pca_sim]]
-    }
-
-    /// Generate the kNN graph
-    ///
-    /// ### Params
-    ///
-    /// * `embd` - The embedding matrix to use for the generation of the kNN
-    ///   graph. Usually the PCA of observed and simulated doublet cells.
-    /// * `seed` - Seed for reproducibility. Relevant when using randomised
-    /// * `verbose` - Controls verbosity of the function.
-    ///
-    /// ### Returns
-    ///
-    /// The kNN graph as a `Vec<Vec<usize>>`.
-    fn build_combined_knn(
-        &self,
-        embd: MatRef<f32>,
-        seed: usize,
-        verbose: bool,
-    ) -> Result<Vec<Vec<usize>>, String> {
-        let knn_method = parse_knn_method(&self.params.knn_params.knn_method).unwrap_or_default();
-
-        let k_adj = self.calculate_k_adj();
-
-        if verbose {
-            println!("Using {} neighbours in the kNN generation.", k_adj);
         }
-
-        let knn = match knn_method {
-            KnnSearch::Hnsw => generate_knn_hnsw(
-                embd.as_ref(),
-                &self.params.knn_params.ann_dist,
-                k_adj,
-                self.params.knn_params.m,
-                self.params.knn_params.ef_construction,
-                self.params.knn_params.ef_search,
-                seed,
-                verbose,
-            ),
-            KnnSearch::Annoy => generate_knn_annoy(
-                embd.as_ref(),
-                &self.params.knn_params.ann_dist,
-                k_adj,
-                self.params.knn_params.n_tree,
-                self.params.knn_params.search_budget,
-                seed,
-                verbose,
-            ),
-            KnnSearch::NNDescent => generate_knn_nndescent(
-                embd.as_ref(),
-                &self.params.knn_params.ann_dist,
-                k_adj,
-                self.params.knn_params.diversify_prob,
-                self.params.knn_params.ef_budget,
-                self.params.knn_params.delta,
-                seed,
-                verbose,
-            ),
-            KnnSearch::Exhaustive => generate_knn_exhaustive(
-                embd.as_ref(),
-                &self.params.knn_params.ann_dist,
-                k_adj,
-                verbose,
-            ),
-            KnnSearch::Ivf => generate_knn_ivf(
-                embd.as_ref(),
-                &self.params.knn_params.ann_dist,
-                k_adj,
-                self.params.knn_params.n_list,
-                self.params.knn_params.n_list,
-                seed,
-                verbose,
-            ),
-        };
-
-        Ok(knn)
-    }
-
-    /// Calculates the adjusted k based on number actual cells and simulated
-    /// cells
-    fn calculate_k_adj(&self) -> usize {
-        let k = if self.params.knn_params.k == 0 {
-            ((self.n_cells as f32).sqrt() * 0.5).round() as usize
-        } else {
-            self.params.knn_params.k
-        };
-
-        let r = self.n_cells_sim as f32 / self.n_cells as f32;
-        (k as f32 * (1.0 + r)).round() as usize
     }
 }

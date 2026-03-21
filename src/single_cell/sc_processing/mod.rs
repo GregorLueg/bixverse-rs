@@ -9,3 +9,4 @@ pub mod pca;
 pub mod qc;
 pub mod scrublet;
 pub mod snn;
+pub mod utils_doublets;
