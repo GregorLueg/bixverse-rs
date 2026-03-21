@@ -474,6 +474,89 @@ pub fn pca_scrublet(
     (scores, loadings, col_means, col_stds)
 }
 
+/// Find the doublet score threshold using Otsu's method
+///
+/// Determines the optimal threshold for separating singlets from doublets
+/// by maximising the between-class variance of the observed score
+/// distribution. This is equivalent to minimising the weighted within-class
+/// variance across all possible thresholds.
+///
+/// Otsu's method is robust to both cleanly bimodal distributions (two
+/// separated peaks) and skewed distributions (sharp singlet peak with a
+/// long doublet tail), because it does not rely on peak or valley detection.
+/// It simply finds the split point that best separates the scores into two
+/// groups with distinct means.
+///
+/// The algorithm proceeds as follows:
+///
+/// 1. Build a normalised histogram of observed scores with `n_bins` bins.
+/// 2. For each candidate threshold (bin boundary), compute the between-class
+///    variance: `w0 * w1 * (mu0 - mu1)^2`, where `w0`/`w1` are the class
+///    weights and `mu0`/`mu1` are the class means.
+/// 3. Return the bin centre that maximises this quantity.
+///
+/// ### Params
+///
+/// * `scores_obs` - Doublet scores for observed cells.
+/// * `n_bins` - Number of histogram bins (50-100 works well in practice).
+///
+/// ### Returns
+///
+/// The score threshold. Cells with scores above this value should be
+/// called as doublets.
+fn find_threshold_otsu(scores_obs: &[f32], n_bins: usize) -> f32 {
+    let (max_score, min_score) = array_max_min(scores_obs);
+
+    if (max_score - min_score).abs() < 1e-6 {
+        return (min_score + max_score) / 2.0;
+    }
+
+    let bin_width = (max_score - min_score) / n_bins as f32;
+    let mut hist = vec![0usize; n_bins];
+
+    for &score in scores_obs {
+        let bin = ((score - min_score) / bin_width).floor() as usize;
+        hist[bin.min(n_bins - 1)] += 1;
+    }
+
+    let total = scores_obs.len() as f32;
+    let prob: Vec<f32> = hist.iter().map(|&c| c as f32 / total).collect();
+
+    // Precompute cumulative sums
+    let mut w0 = 0.0f32;
+    let mut sum0 = 0.0f32;
+    let total_mean: f32 = prob.iter().enumerate().map(|(i, &p)| i as f32 * p).sum();
+
+    let mut best_variance = 0.0f32;
+    let mut best_bin = 0usize;
+
+    for i in 0..n_bins {
+        w0 += prob[i];
+        if w0 < 1e-10 {
+            continue;
+        }
+
+        let w1 = 1.0 - w0;
+        if w1 < 1e-10 {
+            break;
+        }
+
+        sum0 += i as f32 * prob[i];
+
+        let mu0 = sum0 / w0;
+        let mu1 = (total_mean - sum0) / w1;
+
+        let between_var = w0 * w1 * (mu0 - mu1).powi(2);
+
+        if between_var > best_variance {
+            best_variance = between_var;
+            best_bin = i;
+        }
+    }
+
+    min_score + (best_bin as f32 + 0.5) * bin_width
+}
+
 /// Find threshold between singlets and doublets using combined score
 /// distribution
 ///
@@ -1125,7 +1208,7 @@ impl Scrublet {
         verbose: bool,
     ) -> ScrubletResult {
         let threshold = manual_threshold.unwrap_or_else(|| {
-            let t = find_threshold_min(&doublet_scores.0, &doublet_scores.2, n_bins);
+            let t = find_threshold_otsu(&doublet_scores.0, n_bins);
             if verbose {
                 println!("Automatically set threshold at doublet score = {:.4}", t);
             }
