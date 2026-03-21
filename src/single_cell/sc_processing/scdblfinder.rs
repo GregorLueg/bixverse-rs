@@ -522,9 +522,9 @@ fn fit_gbm_classifier(
             &mut rng,
         );
 
-        // The tree subtracted lr*leaf_pred from residuals.
-        // So the tree's contribution is: pre_residuals[i] - residuals[i]
-        // Accumulate into raw predictions.
+        // the tree subtracted lr*leaf_pred from residuals.
+        // so the tree's contribution is: pre_residuals[i] - residuals[i]
+        // accumulate into raw predictions.
         for i in 0..n_samples {
             raw_preds[i] += pre_residuals[i] - residuals[i];
         }
