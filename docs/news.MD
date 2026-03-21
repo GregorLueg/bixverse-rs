@@ -8,6 +8,7 @@
 - New GPU feature flag that exposes a GPU-accelerated CAGRA kNN search for
   single cell applications.
 - Leverage sparse SVD for doublet detection methods
+- Version bump on `ann-search-rs` for KnnValidation error.
 
 ## 0.1.5
 
