@@ -1921,9 +1921,9 @@ impl NodeHistograms {
 ///
 /// Avoids repeated heap allocation during tree building. The pool is sized
 /// for the maximum recursion depth at construction time.
-struct HistogramPool {
+pub struct HistogramPool {
     /// Vector of NodeHistograms
-    histograms: Vec<NodeHistograms>,
+    pub histograms: Vec<NodeHistograms>,
     /// Free pools
     free: Vec<usize>,
 }
@@ -1940,7 +1940,7 @@ impl HistogramPool {
     /// ### Returns
     ///
     /// Initialised self
-    fn new(capacity: usize, n_features: usize) -> Self {
+    pub fn new(capacity: usize, n_features: usize) -> Self {
         let histograms = (0..capacity)
             .map(|_| NodeHistograms::new(n_features))
             .collect();
@@ -1953,7 +1953,7 @@ impl HistogramPool {
     /// ### Returns
     ///
     /// Index into `self.histograms` for the acquired histogram.
-    fn acquire(&mut self) -> usize {
+    pub fn acquire(&mut self) -> usize {
         self.free.pop().expect("histogram pool exhausted")
     }
 
@@ -1998,7 +1998,7 @@ impl HistogramPool {
 /////////////////
 
 /// Reusable scratch buffers for GBM tree building (non-histogram state).
-struct GbmScratch {
+pub struct GbmScratch {
     /// Feature permutation buffer for partial Fisher-Yates.
     feat_buf: Vec<usize>,
     /// Partition scratch for left training samples.
@@ -2022,7 +2022,7 @@ impl GbmScratch {
     /// ### Returns
     ///
     /// Initialised self
-    fn new(n_features: usize, n_samples: usize) -> Self {
+    pub fn new(n_features: usize, n_samples: usize) -> Self {
         Self {
             feat_buf: (0..n_features).collect(),
             train_left: vec![0u32; n_samples],
@@ -2314,7 +2314,7 @@ fn apply_leaf(
 /// * `scratch` - Reusable non-histogram buffers.
 /// * `rng` - Per-tree RNG.
 #[allow(clippy::too_many_arguments)]
-fn build_gbm_node(
+pub fn build_gbm_node(
     pool: &mut HistogramPool,
     node_hist_idx: usize,
     x: &DenseQuantisedStore,
