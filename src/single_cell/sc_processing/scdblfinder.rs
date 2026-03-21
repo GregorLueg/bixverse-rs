@@ -449,12 +449,13 @@ fn fit_gbm_classifier(
 
     let store = quantise_dense_features(features);
 
-    // sesiduals initialised to labels; predictions = labels - final_residuals
-    let mut residuals = labels.to_vec();
+    // accumulated raw predictions in logit space
+    let mut raw_preds = vec![0.0f32; n_samples];
+    // working residuals = negative gradient of logistic loss = y - sigmoid(f)
+    let mut residuals = vec![0.0f32; n_samples];
 
     let n_train = ((n_samples as f32 * config.subsample_rate).round() as usize)
         .max(2 * config.min_samples_leaf);
-    let n_oob = n_samples - n_train;
 
     let mut sample_indices: Vec<u32> = (0..n_samples as u32).collect();
     let mut importances = vec![0.0f32; n_features];
@@ -468,7 +469,13 @@ fn fit_gbm_classifier(
             seed.wrapping_add(tree_idx.wrapping_mul(6364136223846793005)) as u64,
         );
 
-        // train/OOB split via partial Fisher-Yates
+        // recompute pseudo-residuals (logistic negative gradient)
+        for i in 0..n_samples {
+            let p = 1.0 / (1.0 + (-raw_preds[i]).exp());
+            residuals[i] = labels[i] - p;
+        }
+
+        // train/OOB split
         for i in 0..n_samples {
             sample_indices[i] = i as u32;
         }
@@ -479,7 +486,6 @@ fn fit_gbm_classifier(
 
         let (train, oob) = sample_indices.split_at_mut(n_train);
 
-        // root histogram
         let root_idx = pool.acquire();
         pool.histograms[root_idx].build_from_samples(&store, train, &residuals);
 
@@ -490,6 +496,10 @@ fn fit_gbm_classifier(
             y_sum += r;
             y_sum_sq += r * r;
         }
+
+        // snapshot residuals before tree modifies them so we can extract what
+        // the tree actually predicted
+        let pre_residuals: Vec<f32> = residuals.clone();
 
         let mut oob_improvement = 0.0f32;
 
@@ -512,7 +522,15 @@ fn fit_gbm_classifier(
             &mut rng,
         );
 
+        // The tree subtracted lr*leaf_pred from residuals.
+        // So the tree's contribution is: pre_residuals[i] - residuals[i]
+        // Accumulate into raw predictions.
+        for i in 0..n_samples {
+            raw_preds[i] += pre_residuals[i] - residuals[i];
+        }
+
         // early stopping
+        let n_oob = n_samples - n_train;
         let oob_mse_improvement = if n_oob > 0 {
             oob_improvement / n_oob as f32
         } else {
@@ -532,12 +550,7 @@ fn fit_gbm_classifier(
         }
     }
 
-    // predictions = initial_labels - final_residuals
-    labels
-        .iter()
-        .zip(residuals.iter())
-        .map(|(&l, &r)| l - r)
-        .collect()
+    raw_preds
 }
 
 /// Apply sigmoid to convert raw GBM scores to probabilities.

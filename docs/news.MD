@@ -9,6 +9,8 @@
   single cell applications.
 - Leverage sparse SVD for doublet detection methods
 - Version bump on `ann-search-rs` for KnnValidation error.
+- Updates to the doublet detection parts: scDblFinder added, improved
+  thresholding for Scrublet and refactor of the data.
 
 ## 0.1.5
 
