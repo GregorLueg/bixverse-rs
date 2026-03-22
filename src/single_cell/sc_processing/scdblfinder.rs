@@ -100,6 +100,10 @@ pub struct ScDblFinderParams {
     /// Fraction of samples used for training each tree.
     pub subsample_rate: f32,
 
+    // -- Feature engineering --
+    /// Number of leading PCs to include as classifier features.
+    pub include_pcs: usize,
+
     // -- Thresholding --
     /// Optional manual threshold. If `None`, Otsu's method is used.
     pub manual_threshold: Option<f32>,
@@ -132,6 +136,7 @@ impl Default for ScDblFinderParams {
             min_samples_leaf: 20,
             early_stop_window: 15,
             subsample_rate: 0.8,
+            include_pcs: 19,
             manual_threshold: None,
             n_bins: 100,
         }
@@ -166,37 +171,35 @@ type ClusterAwarePairs = (Vec<(usize, usize)>, Vec<(usize, usize)>);
 // Feature engineering | pair logic //
 //////////////////////////////////////
 
+/// Compute default k values for multi-scale kNN doublet scoring.
+///
+/// Mirrors the R scDblFinder `.defaultKnnKs(k=NULL, n)` logic:
+/// `kmax = max(ceil(sqrt(n/2)), 25)`, then `unique(c(3,10,15,20,25,50,kmax)[<=kmax])`.
+fn default_knn_ks(n_obs: usize) -> Vec<usize> {
+    let kmax = ((n_obs as f32 / 2.0).sqrt().ceil() as usize).max(25);
+    let candidates = [3, 10, 15, 20, 25, 50, kmax];
+    let mut ks: Vec<usize> = candidates.iter().copied().filter(|&k| k <= kmax).collect();
+    ks.sort_unstable();
+    ks.dedup();
+    ks
+}
+
 /// Build the feature matrix for the GBM classifier.
 ///
 /// For each cell (observed or simulated), computes:
 ///
-/// 1. **pANN**: proportion of k nearest neighbours that are simulated.
+/// 1. **Multi-scale kNN ratios**: proportion of neighbours that are
+///    simulated, evaluated at each k in `k_values`. Captures doublet
+///    signal at different neighbourhood scales.
 /// 2. **Cluster neighbour proportions**: fraction of neighbours in each
-///    cluster. Produces `n_clusters` columns.
+///    cluster (at max k). Produces `n_clusters` columns.
 /// 3. **Cluster entropy**: Shannon entropy of the neighbour cluster
-///    distribution. High entropy indicates neighbours from many clusters.
+///    distribution.
 /// 4. **Library size ratio**: cell's HVG library size divided by the
-///    median. Doublets tend to have higher library sizes.
-/// 5. **Heterotypic origin**: for simulated doublets, 1.0 if parents
-///    come from different clusters, 0.0 otherwise. Always 0.0 for observed
-///    cells.
-///
-/// ### Params
-///
-/// * `knn_indices` - kNN graph, length = `n_obs + n_sim`.
-/// * `cluster_labels` - Cluster assignments, length = `n_obs + n_sim`.
-/// * `n_obs` - Number of observed cells.
-/// * `n_clusters` - Number of unique clusters.
-/// * `library_sizes` - HVG library sizes for observed cells.
-/// * `median_lib_size` - Median HVG library size across observed cells.
-/// * `sim_parent_clusters` - `(cluster_a, cluster_b)` for each simulated
-///   doublet. Length = `n_sim`.
-/// * `sim_combined_lib_sizes` - Combined parent library sizes for each
-///   simulated doublet. Length = `n_sim`.
-///
-/// ### Returns
-///
-/// Feature matrix of shape `(n_obs + n_sim, n_features)`.
+///    median.
+/// 5. **Principal components**: the first `n_pcs` columns of the combined
+///    PCA embedding, giving the classifier direct access to expression
+///    space coordinates.
 #[allow(clippy::too_many_arguments)]
 fn build_feature_matrix(
     knn_indices: &[Vec<usize>],
@@ -205,23 +208,34 @@ fn build_feature_matrix(
     n_clusters: usize,
     library_sizes: &[usize],
     median_lib_size: f32,
-    sim_parent_clusters: &[(usize, usize)],
     sim_combined_lib_sizes: &[usize],
+    combined_pca: MatRef<f32>,
+    k_values: &[usize],
+    n_pcs: usize,
 ) -> Mat<f32> {
     let n_total = knn_indices.len();
-    let n_features = n_clusters + 4;
+    let n_k = k_values.len();
+    // k_ratios + cluster_props + entropy + lib_ratio + PCs
+    let n_features = n_k + n_clusters + 2 + n_pcs;
 
     let rows: Vec<Vec<f32>> = (0..n_total)
         .into_par_iter()
         .map(|i| {
             let neighbours = &knn_indices[i];
-            let k = neighbours.len() as f32;
+            let k_max = neighbours.len();
 
-            // pANN
-            let n_sim_neigh = neighbours.iter().filter(|&&idx| idx >= n_obs).count();
-            let pann = n_sim_neigh as f32 / k;
+            // Multi-scale doublet ratios
+            let mut k_ratios = Vec::with_capacity(n_k);
+            for &k in k_values {
+                let k_use = k.min(k_max);
+                let n_sim = neighbours[..k_use]
+                    .iter()
+                    .filter(|&&idx| idx >= n_obs)
+                    .count();
+                k_ratios.push(n_sim as f32 / k_use as f32);
+            }
 
-            // cluster neighbour proportions
+            // Cluster neighbour proportions (at max k)
             let mut cluster_counts = vec![0.0f32; n_clusters];
             for &neigh in neighbours {
                 let cl = cluster_labels[neigh];
@@ -229,8 +243,9 @@ fn build_feature_matrix(
                     cluster_counts[cl] += 1.0;
                 }
             }
+            let k_f = k_max as f32;
             for c in cluster_counts.iter_mut() {
-                *c /= k;
+                *c /= k_f;
             }
 
             // Shannon entropy
@@ -240,7 +255,7 @@ fn build_feature_matrix(
                 .map(|&p| -p * p.ln())
                 .sum();
 
-            // lib size ratio
+            // Library size ratio
             let lib_ratio = if i < n_obs {
                 library_sizes[i] as f32 / median_lib_size
             } else {
@@ -248,21 +263,18 @@ fn build_feature_matrix(
                 sim_combined_lib_sizes[sim_idx] as f32 / median_lib_size
             };
 
-            // heterotypic origin
-            let heterotypic = if i >= n_obs {
-                let sim_idx = i - n_obs;
-                let (ca, cb) = sim_parent_clusters[sim_idx];
-                if ca != cb { 1.0 } else { 0.0 }
-            } else {
-                0.0
-            };
-
+            // Assemble row
             let mut row = Vec::with_capacity(n_features);
-            row.push(pann);
+            row.extend_from_slice(&k_ratios);
             row.extend_from_slice(&cluster_counts);
             row.push(entropy);
             row.push(lib_ratio);
-            row.push(heterotypic);
+
+            // PCs
+            for pc in 0..n_pcs {
+                row.push(*combined_pca.get(i, pc));
+            }
+
             row
         })
         .collect();
@@ -750,6 +762,18 @@ impl ScDblFinder {
             seed,
         );
 
+        // -- Multi-scale k values for doublet scoring --
+        let k_values = default_knn_ks(self.n_cells);
+        let k_max = *k_values.last().unwrap();
+        let n_pcs_include = self.params.include_pcs.min(self.params.no_pcs);
+
+        if verbose {
+            println!(
+                "Using k values {:?} (max {}), including {} PCs as features",
+                k_values, k_max, n_pcs_include
+            );
+        }
+
         let gbm_config = GradientBoostingConfig {
             n_trees_max: self.params.n_trees,
             learning_rate: self.params.learning_rate,
@@ -780,7 +804,7 @@ impl ScDblFinder {
             if verbose {
                 println!("Simulating cluster-aware doublets...");
             }
-            let (pairs, parent_clusters) = cluster_aware_pairs(
+            let (pairs, _parent_clusters) = cluster_aware_pairs(
                 &cluster_labels,
                 self.n_cells_sim,
                 self.params.heterotypic_bias,
@@ -818,14 +842,13 @@ impl ScDblFinder {
             let sim_pca = &scaled_sim * loadings;
             let combined_pca = concat![[obs_pca], [sim_pca]];
 
-            // 4c. kNN on combined
+            // 4c. kNN on combined at max(k_values)
             if verbose {
-                println!("Building combined kNN graph...");
+                println!("Building combined kNN graph (k={})...", k_max);
             }
-            let k_adj = adjusted_k(self.params.knn_params.k, self.n_cells, self.n_cells_sim);
             let combined_knn = dispatch_knn(
                 combined_pca.as_ref(),
-                k_adj,
+                k_max,
                 &self.params.knn_params,
                 iter_seed,
                 verbose,
@@ -851,8 +874,9 @@ impl ScDblFinder {
             }
 
             // 4e. Feature engineering
+            let n_features_total = k_values.len() + n_clusters + 2 + n_pcs_include;
             if verbose {
-                println!("Building feature matrix ({} features)...", n_clusters + 4);
+                println!("Building feature matrix ({} features)...", n_features_total);
             }
             let features = build_feature_matrix(
                 &combined_knn,
@@ -861,8 +885,10 @@ impl ScDblFinder {
                 n_clusters,
                 &self.hvg_library_sizes,
                 median_lib_size,
-                &parent_clusters,
                 &sim_combined_lib_sizes,
+                combined_pca.as_ref(),
+                &k_values,
+                n_pcs_include,
             );
 
             // 4f. Train GBM classifier
@@ -877,16 +903,24 @@ impl ScDblFinder {
             let raw_scores =
                 fit_gbm_classifier(features.as_ref(), &labels, &gbm_config, iter_seed + 100);
 
-            // 4g. Sigmoid to get probabilities, observed cells only
-            final_scores = sigmoid(&raw_scores[..self.n_cells]);
+            // 4g. Extract observed cell scores directly (no sigmoid -- L2 boosting
+            //     on 0/1 labels already produces approximate probabilities)
+            final_scores = raw_scores[..self.n_cells].to_vec();
 
             if verbose {
                 let mean_score: f32 = final_scores.iter().sum::<f32>() / final_scores.len() as f32;
+                let max_score = final_scores
+                    .iter()
+                    .cloned()
+                    .fold(f32::NEG_INFINITY, f32::max);
+                let min_score = final_scores.iter().cloned().fold(f32::INFINITY, f32::min);
                 println!(
-                    "Iteration {} done in {:.2?} (mean obs score: {:.4})",
+                    "Iteration {} done in {:.2?} (obs scores: mean={:.4}, min={:.4}, max={:.4})",
                     iter + 1,
                     start_iter.elapsed(),
-                    mean_score
+                    mean_score,
+                    min_score,
+                    max_score,
                 );
             }
 
@@ -903,6 +937,11 @@ impl ScDblFinder {
         }
 
         // -- Step 5: Threshold --
+        // Clamp scores to [0, 1] since L2 boosting can slightly overshoot
+        for s in final_scores.iter_mut() {
+            *s = s.clamp(0.0, 1.0);
+        }
+
         let threshold = self.params.manual_threshold.unwrap_or_else(|| {
             let t = find_threshold_otsu(&final_scores, self.params.n_bins);
             if verbose {

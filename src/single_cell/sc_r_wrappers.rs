@@ -661,6 +661,11 @@ impl ScDblFinderParams {
                 .get("subsample_rate")
                 .and_then(|v| v.as_real())
                 .unwrap_or(defaults.subsample_rate as f64) as f32,
+            // Feature
+            include_pcs: map
+                .get("include_pcs")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(defaults.include_pcs as i32) as usize,
             // Thresholding
             manual_threshold: map
                 .get("manual_threshold")
