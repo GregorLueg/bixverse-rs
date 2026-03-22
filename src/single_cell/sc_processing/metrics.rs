@@ -17,47 +17,93 @@ use crate::utils::simd::*;
 // kBET //
 //////////
 
+/// Results from the kBET calculation
+pub struct KbetResult {
+    /// Per-cell p-values from the chi-square test
+    pub p_values: Vec<f64>,
+    /// Per-cell chi-square statistics
+    pub chi_square_stats: Vec<f64>,
+    /// Mean chi-square statistic (effect size measure, independent of k)
+    pub mean_chi_square: f64,
+    /// Median chi-square statistic (robust to outliers)
+    pub median_chi_square: f64,
+}
+
 /// Calculate kBET-based mixing scores on kNN data
+///
+/// Uses Pearson's chi-square with Yates' continuity correction for the
+/// two-batch case (DoF = 1).
 ///
 /// ### Params
 ///
-/// * `knn_data` - KNN data. Outer vector represents the cells, while the inner
-///   vector represents
-/// * `batches` - Vector indicating the batches.
+/// * `knn_data` - KNN data. Outer vector represents the cells, inner vector
+///   the neighbour indices.
+/// * `batches` - Vector indicating the batch of each cell.
 ///
-/// ### Return
+/// ### Returns
 ///
-/// Numerical vector indicating with the p-values from the ChiSquare test
-pub fn kbet(knn_data: &Vec<Vec<usize>>, batches: &Vec<usize>) -> Vec<f64> {
+/// A `KbetResult` with per-cell p-values, chi-square statistics, and summary
+/// measures.
+pub fn kbet(knn_data: &[Vec<usize>], batches: &[usize]) -> KbetResult {
     let mut batch_counts = FxHashMap::default();
     for &batch in batches {
-        *batch_counts.entry(batch).or_insert(0) += 1;
+        *batch_counts.entry(batch).or_insert(0usize) += 1;
     }
     let total = batches.len() as f64;
     let batch_ids: Vec<usize> = batch_counts.keys().copied().collect();
-    let dof = (batch_ids.len() - 1) as f64;
+    let n_batches = batch_ids.len();
+    let dof = (n_batches - 1) as f64;
+    let use_yates = n_batches == 2;
 
-    knn_data
+    let chi_sq_dist = ChiSquared::new(dof).unwrap();
+
+    let results: Vec<(f64, f64)> = knn_data
         .par_iter()
         .map(|neighbours| {
             let k = neighbours.len() as f64;
             let mut neighbours_count = FxHashMap::default();
             for &neighbour_idx in neighbours {
-                *neighbours_count.entry(batches[neighbour_idx]).or_insert(0) += 1;
+                *neighbours_count
+                    .entry(batches[neighbour_idx])
+                    .or_insert(0usize) += 1;
             }
 
-            // Chi-square test: Σ (observed - expected)² / expected
             let mut chi_square = 0.0;
             for &batch_id in &batch_ids {
                 let expected = k * (batch_counts[&batch_id] as f64 / total);
                 let observed = *neighbours_count.get(&batch_id).unwrap_or(&0) as f64;
-                chi_square += (observed - expected).powi(2) / expected;
+                let diff = if use_yates {
+                    (observed - expected).abs() - 0.5
+                } else {
+                    observed - expected
+                };
+                chi_square += diff * diff / expected;
             }
 
-            // Compute p-value from chi-square distribution
-            1.0 - ChiSquared::new(dof).unwrap().cdf(chi_square)
+            let p_value = 1.0 - chi_sq_dist.cdf(chi_square);
+            (chi_square, p_value)
         })
-        .collect()
+        .collect();
+
+    let chi_square_stats: Vec<f64> = results.iter().map(|(c, _)| *c).collect();
+    let p_values: Vec<f64> = results.iter().map(|(_, p)| *p).collect();
+
+    let mean_chi_square = chi_square_stats.iter().sum::<f64>() / chi_square_stats.len() as f64;
+
+    let mut sorted_chi = chi_square_stats.clone();
+    sorted_chi.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+    let median_chi_square = if sorted_chi.len() % 2 == 0 {
+        (sorted_chi[sorted_chi.len() / 2 - 1] + sorted_chi[sorted_chi.len() / 2]) / 2.0
+    } else {
+        sorted_chi[sorted_chi.len() / 2]
+    };
+
+    KbetResult {
+        p_values,
+        chi_square_stats,
+        mean_chi_square,
+        median_chi_square,
+    }
 }
 
 //////////////////
