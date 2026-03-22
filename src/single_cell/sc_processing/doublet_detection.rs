@@ -330,7 +330,7 @@ impl BoostClassifier {
 
         if verbose {
             println!(
-                "Completed {} iterations in {:.2?}",
+                "Completed {} iterations in {:.2?}\n",
                 self.params.n_iters,
                 start_iters.elapsed()
             );

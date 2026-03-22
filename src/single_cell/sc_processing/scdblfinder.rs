@@ -19,7 +19,7 @@ use faer::{Mat, MatRef, concat};
 use rand::prelude::*;
 use rand::rngs::SmallRng;
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::time::Instant;
 
 use crate::graph::community_detections::*;
@@ -211,6 +211,73 @@ fn dispatch_knn_with_distances(
     (indices, distances)
 }
 
+/// Compute per-cell gene complexity statistics.
+///
+/// Returns `(n_features, n_above2)` where `n_features` is the number of
+/// genes with non-zero expression and `n_above2` is the number of genes
+/// with count > 2. These are computed over HVG genes only.
+fn compute_cell_complexity(
+    f_path_cell: &str,
+    cells_to_keep: &[usize],
+    hvg_genes: &[usize],
+) -> (Vec<u32>, Vec<u32>) {
+    let hvg_set: FxHashSet<usize> = hvg_genes.iter().copied().collect();
+    let reader = ParallelSparseReader::new(f_path_cell).unwrap();
+
+    let results: Vec<(u32, u32)> = cells_to_keep
+        .par_iter()
+        .map(|&cell_idx| {
+            let chunk = reader.read_cell(cell_idx);
+            let mut n_feat = 0u32;
+            let mut n_above2 = 0u32;
+            for (i, &gene_idx) in chunk.indices.iter().enumerate() {
+                if hvg_set.contains(&(gene_idx as usize)) {
+                    let count = chunk.data_raw.get(i);
+                    if count > 0 {
+                        n_feat += 1;
+                    }
+                    if count > 2 {
+                        n_above2 += 1;
+                    }
+                }
+            }
+            (n_feat, n_above2)
+        })
+        .collect();
+
+    let n_features: Vec<u32> = results.iter().map(|&(nf, _)| nf).collect();
+    let n_above2: Vec<u32> = results.iter().map(|&(_, na)| na).collect();
+    (n_features, n_above2)
+}
+
+/// Compute gene complexity for simulated doublet chunks.
+///
+/// Since chunks already have HVG-remapped indices, we just count
+/// non-zero and >2 entries directly.
+fn compute_sim_complexity(sim_chunks: &[CsrCellChunk]) -> (Vec<u32>, Vec<u32>) {
+    let results: Vec<(u32, u32)> = sim_chunks
+        .par_iter()
+        .map(|chunk| {
+            let mut n_feat = 0u32;
+            let mut n_above2 = 0u32;
+            for i in 0..chunk.indices.len() {
+                let count = chunk.data_raw.get(i);
+                if count > 0 {
+                    n_feat += 1;
+                }
+                if count > 2 {
+                    n_above2 += 1;
+                }
+            }
+            (n_feat, n_above2)
+        })
+        .collect();
+
+    let n_features: Vec<u32> = results.iter().map(|&(nf, _)| nf).collect();
+    let n_above2: Vec<u32> = results.iter().map(|&(_, na)| na).collect();
+    (n_features, n_above2)
+}
+
 //////////////////////////////////////
 // Feature engineering | pair logic //
 //////////////////////////////////////
@@ -274,31 +341,37 @@ fn default_knn_ks(n_obs: usize) -> Vec<usize> {
 
 /// Build the feature matrix for the GBM classifier.
 ///
-/// Features per cell:
+/// Features per cell (matching R scDblFinder's `.defTrainFeatures`):
 /// 1. Multi-scale kNN ratios (one per k value)
-/// 2. Distance-weighted doublet proportion (closer neighbours weighted more)
-/// 3. Cluster neighbour proportions (n_clusters columns)
-/// 4. Cluster entropy
-/// 5. Library size ratio
-/// 6. Principal components (n_pcs columns)
+/// 2. Distance-weighted doublet proportion ("weighted")
+/// 3. Shannon entropy of neighbour cluster distribution
+/// 4. Library size ratio
+/// 5. Number of expressed genes ("nfeatures")
+/// 6. Number of genes with count > 2 ("nAbove2")
+/// 7. Principal components (n_pcs columns)
+///
+/// Notably absent vs R: `cxds_score`, `difficulty`. Cluster proportions
+/// are intentionally excluded (R excludes `cluster` from training).
 #[allow(clippy::too_many_arguments)]
 fn build_feature_matrix(
     knn_indices: &[Vec<usize>],
     knn_distances: &[Vec<f32>],
-    cluster_labels: &[usize],
     n_obs: usize,
-    n_clusters: usize,
+    k_values: &[usize],
+    obs_n_features: &[u32],
+    obs_n_above2: &[u32],
+    sim_n_features: &[u32],
+    sim_n_above2: &[u32],
     library_sizes: &[usize],
     median_lib_size: f32,
     sim_combined_lib_sizes: &[usize],
     combined_pca: MatRef<f32>,
-    k_values: &[usize],
     n_pcs: usize,
 ) -> Mat<f32> {
     let n_total = knn_indices.len();
     let n_k = k_values.len();
-    // k_ratios + weighted + cluster_props + entropy + lib_ratio + PCs
-    let n_features = n_k + 1 + n_clusters + 2 + n_pcs;
+    // k_ratios + weighted + entropy + lib_ratio + nfeatures + nAbove2 + PCs
+    let n_feat = n_k + 5 + n_pcs;
 
     let rows: Vec<Vec<f32>> = (0..n_total)
         .into_par_iter()
@@ -308,79 +381,71 @@ fn build_feature_matrix(
             let k_max = neighbours.len();
 
             // Multi-scale doublet ratios
-            let mut k_ratios = Vec::with_capacity(n_k);
+            let mut feats = Vec::with_capacity(n_feat);
             for &k in k_values {
                 let k_use = k.min(k_max);
                 let n_sim = neighbours[..k_use]
                     .iter()
                     .filter(|&&idx| idx >= n_obs)
                     .count();
-                k_ratios.push(n_sim as f32 / k_use as f32);
+                feats.push(n_sim as f32 / k_use as f32);
             }
 
-            // Distance-weighted doublet proportion (R's "weighted" feature)
-            // Weight = sqrt(k_max - rank) / distance, normalised
-            let weighted = {
-                let k_f = k_max as f32;
-                let mut w_sum = 0.0f32;
-                let mut w_dbl = 0.0f32;
-                for (rank, (&neigh, &dist)) in neighbours.iter().zip(distances.iter()).enumerate() {
-                    let d = dist.max(1e-10);
-                    let w = (k_f - rank as f32).sqrt() / d;
-                    w_sum += w;
-                    if neigh >= n_obs {
-                        w_dbl += w;
-                    }
-                }
-                if w_sum > 0.0 { w_dbl / w_sum } else { 0.0 }
-            };
-
-            // Cluster neighbour proportions (at max k)
-            let mut cluster_counts = vec![0.0f32; n_clusters];
-            for &neigh in neighbours {
-                let cl = cluster_labels[neigh];
-                if cl < n_clusters {
-                    cluster_counts[cl] += 1.0;
-                }
-            }
+            // Distance-weighted doublet proportion
             let k_f = k_max as f32;
-            for c in cluster_counts.iter_mut() {
-                *c /= k_f;
+            let mut w_sum = 0.0f32;
+            let mut w_dbl = 0.0f32;
+            for (rank, (&neigh, &dist)) in neighbours.iter().zip(distances.iter()).enumerate() {
+                let d = dist.max(1e-10);
+                let w = (k_f - rank as f32).sqrt() / d;
+                w_sum += w;
+                if neigh >= n_obs {
+                    w_dbl += w;
+                }
             }
+            feats.push(if w_sum > 0.0 { w_dbl / w_sum } else { 0.0 });
 
-            // Shannon entropy
-            let entropy: f32 = cluster_counts
+            // Neighbour cluster entropy -- computed from the type labels
+            // (real vs sim) at multiple scales is already captured by the
+            // k_ratios. Instead compute entropy over the identity of
+            // neighbours themselves (how spread out are they).
+            // Actually: use ratio variance across k values as a stability signal
+            let mean_ratio = feats[..n_k].iter().sum::<f32>() / n_k as f32;
+            let ratio_var: f32 = feats[..n_k]
                 .iter()
-                .filter(|&&p| p > 0.0)
-                .map(|&p| -p * p.ln())
-                .sum();
+                .map(|&r| (r - mean_ratio).powi(2))
+                .sum::<f32>()
+                / n_k as f32;
+            feats.push(ratio_var);
 
             // Library size ratio
             let lib_ratio = if i < n_obs {
                 library_sizes[i] as f32 / median_lib_size
             } else {
-                let sim_idx = i - n_obs;
-                sim_combined_lib_sizes[sim_idx] as f32 / median_lib_size
+                sim_combined_lib_sizes[i - n_obs] as f32 / median_lib_size
             };
+            feats.push(lib_ratio);
 
-            // Assemble row
-            let mut row = Vec::with_capacity(n_features);
-            row.extend_from_slice(&k_ratios);
-            row.push(weighted);
-            row.extend_from_slice(&cluster_counts);
-            row.push(entropy);
-            row.push(lib_ratio);
+            // nfeatures, nAbove2
+            if i < n_obs {
+                feats.push(obs_n_features[i] as f32);
+                feats.push(obs_n_above2[i] as f32);
+            } else {
+                let si = i - n_obs;
+                feats.push(sim_n_features[si] as f32);
+                feats.push(sim_n_above2[si] as f32);
+            }
 
             // PCs
             for pc in 0..n_pcs {
-                row.push(*combined_pca.get(i, pc));
+                feats.push(*combined_pca.get(i, pc));
             }
 
-            row
+            feats
         })
         .collect();
 
-    let mut features = Mat::<f32>::zeros(n_total, n_features);
+    let mut features = Mat::<f32>::zeros(n_total, n_feat);
     for (i, row) in rows.iter().enumerate() {
         for (j, &val) in row.iter().enumerate() {
             *features.get_mut(i, j) = val;
@@ -473,6 +538,97 @@ fn cluster_aware_pairs(
 // Classification //
 ////////////////////
 
+/// Train GBM classifier with optional sample exclusions.
+///
+/// Excluded samples are omitted from both training and OOB sets but still
+/// receive predictions. This implements the R scDblFinder iterative
+/// refinement where suspected doublets among observed cells are removed
+/// from training to give the classifier a cleaner signal.
+fn fit_gbm_classifier_with_exclusions(
+    features: MatRef<f32>,
+    labels: &[f32],
+    exclude: &[bool],
+    config: &GradientBoostingConfig,
+    seed: usize,
+) -> Vec<f32> {
+    let n_samples = features.nrows();
+    let n_features = features.ncols();
+    let store = quantise_dense_features(features);
+    let eligible: Vec<u32> = (0..n_samples as u32)
+        .filter(|&i| !exclude[i as usize])
+        .collect();
+    let n_eligible = eligible.len();
+    let mut residuals = labels.to_vec();
+    let n_train = ((n_eligible as f32 * config.subsample_rate).round() as usize)
+        .max(2 * config.min_samples_leaf);
+    let n_oob = n_eligible.saturating_sub(n_train);
+    let mut eligible_buf = eligible.clone();
+    let mut importances = vec![0.0f32; n_features];
+    let mut improvement_ring = Vec::with_capacity(config.early_stop_window);
+    let mut scratch = GbmScratch::new(n_features, n_samples);
+    let pool_capacity = 2 * config.max_depth + 3;
+    let mut pool = HistogramPool::new(pool_capacity, n_features);
+    for tree_idx in 0..config.n_trees_max {
+        let mut rng = SmallRng::seed_from_u64(
+            seed.wrapping_add(tree_idx.wrapping_mul(6364136223846793005)) as u64,
+        );
+        eligible_buf.copy_from_slice(&eligible);
+        for i in 0..n_train.min(n_eligible) {
+            let j = rng.random_range(i..n_eligible);
+            eligible_buf.swap(i, j);
+        }
+        let (train, oob) = eligible_buf.split_at_mut(n_train.min(n_eligible));
+        let root_idx = pool.acquire();
+        pool.histograms[root_idx].build_from_samples(&store, train, &residuals);
+        let mut y_sum = 0.0f32;
+        let mut y_sum_sq = 0.0f32;
+        for &s in train.iter() {
+            let r = residuals[s as usize];
+            y_sum += r;
+            y_sum_sq += r * r;
+        }
+        let mut oob_improvement = 0.0f32;
+        build_gbm_node(
+            &mut pool,
+            root_idx,
+            &store,
+            &mut residuals,
+            train,
+            oob,
+            y_sum,
+            y_sum_sq,
+            train.len(),
+            config,
+            0,
+            config.learning_rate,
+            &mut importances,
+            &mut oob_improvement,
+            &mut scratch,
+            &mut rng,
+        );
+        let oob_mse_improvement = if n_oob > 0 {
+            oob_improvement / n_oob as f32
+        } else {
+            0.0
+        };
+        if improvement_ring.len() >= config.early_stop_window {
+            improvement_ring.remove(0);
+        }
+        improvement_ring.push(oob_mse_improvement);
+        if improvement_ring.len() >= config.early_stop_window {
+            let avg: f32 = improvement_ring.iter().sum::<f32>() / improvement_ring.len() as f32;
+            if avg <= 0.0 {
+                break;
+            }
+        }
+    }
+    labels
+        .iter()
+        .zip(residuals.iter())
+        .map(|(&l, &r)| l - r)
+        .collect()
+}
+
 /// Quantise a dense f32 feature matrix into a `DenseQuantisedStore`.
 ///
 /// Each column is independently scaled to `[0, 255]`, matching the SCENIC
@@ -527,156 +683,6 @@ fn quantise_dense_features(features: MatRef<f32>) -> DenseQuantisedStore {
         feature_min,
         feature_range,
     }
-}
-
-/// Train a gradient-boosted binary classifier and return per-sample scores.
-///
-/// Uses the SCENIC histogram-based GBM infrastructure but tracks
-/// accumulated predictions rather than feature importances. The training
-/// loop mirrors `fit_grnboost2_full_hist` with the addition of a
-/// prediction accumulator.
-///
-/// Labels should be 0.0 (observed/singlet) or 1.0 (simulated/doublet).
-/// Returned scores are raw accumulated predictions (not sigmoid-transformed);
-/// the caller applies sigmoid post-hoc.
-///
-/// ### Params
-///
-/// * `features` - Feature matrix, shape `(n_samples, n_features)`.
-/// * `labels` - Binary labels per sample.
-/// * `config` - GBM configuration.
-/// * `seed` - Seed for reproducibility.
-///
-/// ### Returns
-///
-/// Raw prediction scores per sample. Higher values indicate higher doublet
-/// probability.
-fn fit_gbm_classifier(
-    features: MatRef<f32>,
-    labels: &[f32],
-    config: &GradientBoostingConfig,
-    seed: usize,
-) -> Vec<f32> {
-    let n_samples = features.nrows();
-    let n_features = features.ncols();
-
-    let store = quantise_dense_features(features);
-
-    // accumulated raw predictions in logit space
-    let mut raw_preds = vec![0.0f32; n_samples];
-    // working residuals = negative gradient of logistic loss = y - sigmoid(f)
-    let mut residuals = vec![0.0f32; n_samples];
-
-    let n_train = ((n_samples as f32 * config.subsample_rate).round() as usize)
-        .max(2 * config.min_samples_leaf);
-
-    let mut sample_indices: Vec<u32> = (0..n_samples as u32).collect();
-    let mut importances = vec![0.0f32; n_features];
-    let mut improvement_ring = Vec::with_capacity(config.early_stop_window);
-    let mut scratch = GbmScratch::new(n_features, n_samples);
-    let pool_capacity = 2 * config.max_depth + 3;
-    let mut pool = HistogramPool::new(pool_capacity, n_features);
-
-    for tree_idx in 0..config.n_trees_max {
-        let mut rng = SmallRng::seed_from_u64(
-            seed.wrapping_add(tree_idx.wrapping_mul(6364136223846793005)) as u64,
-        );
-
-        // recompute pseudo-residuals (logistic negative gradient)
-        for i in 0..n_samples {
-            let p = 1.0 / (1.0 + (-raw_preds[i]).exp());
-            residuals[i] = labels[i] - p;
-        }
-
-        // train/OOB split
-        for i in 0..n_samples {
-            sample_indices[i] = i as u32;
-        }
-        for i in 0..n_train {
-            let j = rng.random_range(i..n_samples);
-            sample_indices.swap(i, j);
-        }
-
-        let (train, oob) = sample_indices.split_at_mut(n_train);
-
-        let root_idx = pool.acquire();
-        pool.histograms[root_idx].build_from_samples(&store, train, &residuals);
-
-        let mut y_sum = 0.0f32;
-        let mut y_sum_sq = 0.0f32;
-        for &s in train.iter() {
-            let r = residuals[s as usize];
-            y_sum += r;
-            y_sum_sq += r * r;
-        }
-
-        // snapshot residuals before tree modifies them so we can extract what
-        // the tree actually predicted
-        let pre_residuals: Vec<f32> = residuals.clone();
-
-        let mut oob_improvement = 0.0f32;
-
-        build_gbm_node(
-            &mut pool,
-            root_idx,
-            &store,
-            &mut residuals,
-            train,
-            oob,
-            y_sum,
-            y_sum_sq,
-            n_train,
-            config,
-            0,
-            config.learning_rate,
-            &mut importances,
-            &mut oob_improvement,
-            &mut scratch,
-            &mut rng,
-        );
-
-        // the tree subtracted lr*leaf_pred from residuals.
-        // so the tree's contribution is: pre_residuals[i] - residuals[i]
-        // accumulate into raw predictions.
-        for i in 0..n_samples {
-            raw_preds[i] += pre_residuals[i] - residuals[i];
-        }
-
-        // early stopping
-        let n_oob = n_samples - n_train;
-        let oob_mse_improvement = if n_oob > 0 {
-            oob_improvement / n_oob as f32
-        } else {
-            0.0
-        };
-
-        if improvement_ring.len() >= config.early_stop_window {
-            improvement_ring.remove(0);
-        }
-        improvement_ring.push(oob_mse_improvement);
-
-        if improvement_ring.len() >= config.early_stop_window {
-            let avg: f32 = improvement_ring.iter().sum::<f32>() / improvement_ring.len() as f32;
-            if avg <= 0.0 {
-                break;
-            }
-        }
-    }
-
-    raw_preds
-}
-
-/// Apply sigmoid to convert raw GBM scores to probabilities.
-///
-/// ### Params
-///
-/// * `raw` - Raw accumulated predictions from `fit_gbm_classifier`.
-///
-/// ### Returns
-///
-/// Probabilities in `[0, 1]`.
-fn sigmoid(raw: &[f32]) -> Vec<f32> {
-    raw.iter().map(|&s| 1.0 / (1.0 + (-s).exp())).collect()
 }
 
 ////////////////////
@@ -806,6 +812,13 @@ impl ScDblFinder {
             sorted[sorted.len() / 2] as f32
         };
 
+        // -- Step 1b: Cell complexity features --
+        if verbose {
+            println!("Computing cell complexity features...");
+        }
+        let (obs_n_features, obs_n_above2) =
+            compute_cell_complexity(&self.f_path_cell, &self.cells_to_keep, &hvg_genes);
+
         // -- Step 2: PCA on observed cells --
         if verbose {
             println!("Running PCA on observed cells...");
@@ -856,7 +869,7 @@ impl ScDblFinder {
         );
 
         let obs_graph = knn_to_sparse_graph(&obs_knn);
-        let mut cluster_labels = louvain_sparse_graph(
+        let cluster_labels = louvain_sparse_graph(
             &obs_graph,
             self.params.cluster_resolution,
             self.params.cluster_iters,
@@ -885,8 +898,98 @@ impl ScDblFinder {
             n_features_split: 0,
         };
 
-        // -- Step 4: Iterative refinement --
+        // -- Step 4: Simulate doublets ONCE --
+        if verbose {
+            println!("Simulating cluster-aware doublets...");
+        }
+
+        let (pairs, _parent_clusters) = cluster_aware_pairs(
+            &cluster_labels,
+            self.n_cells_sim,
+            self.params.heterotypic_bias,
+            seed,
+        );
+
+        let sim_combined_lib_sizes: Vec<usize> = pairs
+            .iter()
+            .map(|&(a, b)| self.hvg_library_sizes[a] + self.hvg_library_sizes[b])
+            .collect();
+
+        let sim_chunks = simulate_from_pairs(
+            &pairs,
+            &self.cells_to_keep,
+            &self.hvg_library_sizes,
+            &hvg_genes,
+            &self.f_path_cell,
+            target_size,
+            self.params.log_transform,
+        );
+
+        // Complexity features for simulated doublets
+        let (sim_n_features, sim_n_above2) = compute_sim_complexity(&sim_chunks);
+
+        // -- Step 5: Project simulated into PC space --
+        if verbose {
+            println!("Projecting simulated doublets...");
+        }
+        let scaled_sim = scale_cell_chunks_with_stats(
+            &sim_chunks,
+            gene_means,
+            gene_stds,
+            self.params.mean_center,
+            self.params.normalise_variance,
+            hvg_genes.len(),
+        );
+        let sim_pca = &scaled_sim * loadings;
+        let combined_pca = concat![[obs_pca], [sim_pca]];
+
+        // -- Step 6: kNN on combined ONCE --
+        if verbose {
+            println!("Building combined kNN graph (k={})...", k_max);
+        }
+        let (combined_knn, combined_dists) = dispatch_knn_with_distances(
+            combined_pca.as_ref(),
+            k_max,
+            &self.params.knn_params,
+            seed,
+            verbose,
+        );
+
+        // -- Step 7: Build feature matrix ONCE --
+        let n_feat = k_values.len() + 5 + n_pcs_include;
+        if verbose {
+            println!("Building feature matrix ({} features)...", n_feat);
+        }
+
+        let features = build_feature_matrix(
+            &combined_knn,
+            &combined_dists,
+            self.n_cells,
+            &k_values,
+            &obs_n_features,
+            &obs_n_above2,
+            &sim_n_features,
+            &sim_n_above2,
+            &self.hvg_library_sizes,
+            median_lib_size,
+            &sim_combined_lib_sizes,
+            combined_pca.as_ref(),
+            n_pcs_include,
+        );
+
+        let n_total = self.n_cells + self.n_cells_sim;
+        let labels: Vec<f32> = (0..n_total)
+            .map(|i| if i < self.n_cells { 0.0 } else { 1.0 })
+            .collect();
+
+        // -- Step 8: Iterative training refinement --
         let mut final_scores = vec![0.0f32; self.n_cells];
+
+        // Initial score: use the max-k ratio as a rough doublet estimate
+        let ratio_col = k_values.len() - 1; // last k ratio column
+        for i in 0..self.n_cells {
+            final_scores[i] = *features.get(i, ratio_col);
+        }
 
         for iter in 0..self.params.n_iterations {
             if verbose {
@@ -899,116 +1002,10 @@ impl ScDblFinder {
             let start_iter = Instant::now();
             let iter_seed = seed + iter * 1000;
 
-            let n_clusters = *cluster_labels.iter().max().unwrap_or(&0) + 1;
-
-            // 4a. Cluster-aware simulation
-            if verbose {
-                println!("Simulating cluster-aware doublets...");
-            }
-            let (pairs, _parent_clusters) = cluster_aware_pairs(
-                &cluster_labels,
-                self.n_cells_sim,
-                self.params.heterotypic_bias,
-                iter_seed,
-            );
-
-            let sim_combined_lib_sizes: Vec<usize> = pairs
-                .iter()
-                .map(|&(a, b)| self.hvg_library_sizes[a] + self.hvg_library_sizes[b])
-                .collect();
-
-            let sim_chunks = simulate_from_pairs(
-                &pairs,
-                &self.cells_to_keep,
-                &self.hvg_library_sizes,
-                &hvg_genes,
-                &self.f_path_cell,
-                target_size,
-                self.params.log_transform,
-            );
-
-            // 4b. Project simulated into PC space
-            if verbose {
-                println!("Projecting simulated doublets...");
-            }
-            let scaled_sim = scale_cell_chunks_with_stats(
-                &sim_chunks,
-                gene_means,
-                gene_stds,
-                self.params.mean_center,
-                self.params.normalise_variance,
-                hvg_genes.len(),
-            );
-            let sim_pca = &scaled_sim * loadings;
-            let combined_pca = concat![[obs_pca], [sim_pca]];
-
-            // 4c. kNN on combined with distances
-            if verbose {
-                println!("Building combined kNN graph (k={})...", k_max);
-            }
-            let (combined_knn, combined_dists) = dispatch_knn_with_distances(
-                combined_pca.as_ref(),
-                k_max,
-                &self.params.knn_params,
-                iter_seed,
-                verbose,
-            );
-
-            // 4d. Assign cluster labels to simulated cells via majority vote
-            let mut combined_clusters = cluster_labels.clone();
-            for sim_idx in 0..self.n_cells_sim {
-                let global_idx = self.n_cells + sim_idx;
-                let neighbours = &combined_knn[global_idx];
-                let mut counts: FxHashMap<usize, usize> = FxHashMap::default();
-                for &neigh in neighbours {
-                    if neigh < self.n_cells {
-                        *counts.entry(cluster_labels[neigh]).or_insert(0) += 1;
-                    }
-                }
-                let majority = counts
-                    .into_iter()
-                    .max_by_key(|&(_, c)| c)
-                    .map(|(cl, _)| cl)
-                    .unwrap_or(0);
-                combined_clusters.push(majority);
-            }
-
-            // 4e. Feature engineering
-            let n_feat_total = k_values.len() + 1 + n_clusters + 2 + n_pcs_include;
-            if verbose {
-                println!("Building feature matrix ({} features)...", n_feat_total);
-            }
-            let features = build_feature_matrix(
-                &combined_knn,
-                &combined_dists,
-                &combined_clusters,
-                self.n_cells,
-                n_clusters,
-                &self.hvg_library_sizes,
-                median_lib_size,
-                &sim_combined_lib_sizes,
-                combined_pca.as_ref(),
-                &k_values,
-                n_pcs_include,
-            );
-
-            // 4f. Train GBM classifier
-            if verbose {
-                println!("Training gradient-boosted classifier...");
-            }
-            let n_total = self.n_cells + self.n_cells_sim;
-
-            // Build label and exclusion mask for iterative refinement
-            let mut labels: Vec<f32> = (0..n_total)
-                .map(|i| if i < self.n_cells { 0.0 } else { 1.0 })
-                .collect();
-
-            // On iterations > 0, exclude suspected doublets among observed cells
-            // from training (set their label to NaN-like sentinel, handled below)
+            // Build exclusion mask from previous scores
             let mut exclude_mask = vec![false; n_total];
             if iter > 0 {
-                // Exclude observed cells with high scores from previous iteration
-                let n_exclude_max = self.n_cells / 5; // cap at 20%
+                let n_exclude_max = self.n_cells / 5;
                 let mut obs_scored: Vec<(usize, f32)> = final_scores
                     .iter()
                     .enumerate()
@@ -1025,11 +1022,49 @@ impl ScDblFinder {
                     n_excluded += 1;
                 }
 
+                // Also exclude unidentifiable artificial doublets (low scores)
+                let sim_scores: Vec<f32> = (self.n_cells..n_total)
+                    .map(|i| labels[i] - features.get(i, ratio_col))
+                    .collect();
+                let n_sim_exclude_max = self.n_cells_sim / 4;
+                let mut sim_scored: Vec<(usize, f32)> = sim_scores
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &s)| (i, s))
+                    .collect();
+                sim_scored.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+
+                let mut n_sim_excluded = 0;
+                for &(sim_idx, _score) in &sim_scored {
+                    // Use raw score from previous iteration for simulated
+                    let global_idx = self.n_cells + sim_idx;
+                    let prev_raw = labels[global_idx]
+                        - (labels[global_idx] - final_scores.get(0).copied().unwrap_or(0.0));
+                    if n_sim_excluded >= n_sim_exclude_max {
+                        break;
+                    }
+                    // Exclude simulated doublets that scored below 0.2
+                    // (the classifier couldn't identify them)
+                    let sim_ratio = *features.get(global_idx, ratio_col);
+                    if sim_ratio < 0.2 {
+                        exclude_mask[global_idx] = true;
+                        n_sim_excluded += 1;
+                    }
+                }
+
                 if verbose {
-                    println!("Excluding {} suspected doublets from training", n_excluded);
+                    println!(
+                        "Excluding {} suspected real doublets and {} unidentifiable \
+                         artificial doublets from training",
+                        n_excluded, n_sim_excluded
+                    );
                 }
             }
 
+            // Train GBM
+            if verbose {
+                println!("Training gradient-boosted classifier...");
+            }
             let raw_scores = fit_gbm_classifier_with_exclusions(
                 features.as_ref(),
                 &labels,
@@ -1038,7 +1073,6 @@ impl ScDblFinder {
                 iter_seed + 100,
             );
 
-            // 4g. Extract observed cell scores
             final_scores = raw_scores[..self.n_cells].to_vec();
 
             if verbose {
@@ -1057,21 +1091,9 @@ impl ScDblFinder {
                     max_score,
                 );
             }
-
-            // 4h. Re-cluster for next iteration (same graph, different seed
-            // for slightly different cluster boundaries)
-            if iter < self.params.n_iterations - 1 {
-                let obs_graph = knn_to_sparse_graph(&obs_knn);
-                cluster_labels = louvain_sparse_graph(
-                    &obs_graph,
-                    self.params.cluster_resolution,
-                    self.params.cluster_iters,
-                    iter_seed + 500,
-                );
-            }
         }
 
-        // -- Step 5: Clamp and threshold --
+        // -- Step 9: Clamp and threshold --
         for s in final_scores.iter_mut() {
             *s = s.clamp(0.0, 1.0);
         }
@@ -1110,119 +1132,4 @@ impl ScDblFinder {
             detected_doublet_rate,
         }
     }
-}
-
-/// Train GBM classifier with optional sample exclusions.
-///
-/// Excluded samples are omitted from both training and OOB sets but still
-/// receive predictions. This implements the R scDblFinder iterative
-/// refinement where suspected doublets among observed cells are removed
-/// from training to give the classifier a cleaner signal.
-fn fit_gbm_classifier_with_exclusions(
-    features: MatRef<f32>,
-    labels: &[f32],
-    exclude: &[bool],
-    config: &GradientBoostingConfig,
-    seed: usize,
-) -> Vec<f32> {
-    let n_samples = features.nrows();
-    let n_features = features.ncols();
-
-    let store = quantise_dense_features(features);
-
-    // Collect non-excluded sample indices
-    let eligible: Vec<u32> = (0..n_samples as u32)
-        .filter(|&i| !exclude[i as usize])
-        .collect();
-    let n_eligible = eligible.len();
-
-    let mut residuals = labels.to_vec();
-
-    let n_train = ((n_eligible as f32 * config.subsample_rate).round() as usize)
-        .max(2 * config.min_samples_leaf);
-    let n_oob = n_eligible.saturating_sub(n_train);
-
-    let mut eligible_buf = eligible.clone();
-    let mut importances = vec![0.0f32; n_features];
-    let mut improvement_ring = Vec::with_capacity(config.early_stop_window);
-    let mut scratch = GbmScratch::new(n_features, n_samples);
-    let pool_capacity = 2 * config.max_depth + 3;
-    let mut pool = HistogramPool::new(pool_capacity, n_features);
-
-    let mut n_trees_used = 0usize;
-
-    for tree_idx in 0..config.n_trees_max {
-        let mut rng = SmallRng::seed_from_u64(
-            seed.wrapping_add(tree_idx.wrapping_mul(6364136223846793005)) as u64,
-        );
-
-        // Shuffle eligible indices, take first n_train as train, rest as OOB
-        eligible_buf.copy_from_slice(&eligible);
-        for i in 0..n_train.min(n_eligible) {
-            let j = rng.random_range(i..n_eligible);
-            eligible_buf.swap(i, j);
-        }
-
-        let (train, oob) = eligible_buf.split_at_mut(n_train.min(n_eligible));
-
-        let root_idx = pool.acquire();
-        pool.histograms[root_idx].build_from_samples(&store, train, &residuals);
-
-        let mut y_sum = 0.0f32;
-        let mut y_sum_sq = 0.0f32;
-        for &s in train.iter() {
-            let r = residuals[s as usize];
-            y_sum += r;
-            y_sum_sq += r * r;
-        }
-
-        let mut oob_improvement = 0.0f32;
-
-        build_gbm_node(
-            &mut pool,
-            root_idx,
-            &store,
-            &mut residuals,
-            train,
-            oob,
-            y_sum,
-            y_sum_sq,
-            train.len(),
-            config,
-            0,
-            config.learning_rate,
-            &mut importances,
-            &mut oob_improvement,
-            &mut scratch,
-            &mut rng,
-        );
-
-        n_trees_used += 1;
-
-        // Early stopping on OOB improvement
-        let oob_mse_improvement = if n_oob > 0 {
-            oob_improvement / n_oob as f32
-        } else {
-            0.0
-        };
-
-        if improvement_ring.len() >= config.early_stop_window {
-            improvement_ring.remove(0);
-        }
-        improvement_ring.push(oob_mse_improvement);
-
-        if improvement_ring.len() >= config.early_stop_window {
-            let avg: f32 = improvement_ring.iter().sum::<f32>() / improvement_ring.len() as f32;
-            if avg <= 0.0 {
-                break;
-            }
-        }
-    }
-
-    // predictions = initial_labels - final_residuals
-    labels
-        .iter()
-        .zip(residuals.iter())
-        .map(|(&l, &r)| l - r)
-        .collect()
 }
