@@ -1,7 +1,12 @@
 //! Contains other metrics for single cell, for example to assess batch
 //! effects, see Büttner, et al., Nat. Methods, 2019
 
+use ann_search_rs::utils::dist::euclidean_distance_static;
+use faer::MatRef;
 use indexmap::IndexSet;
+use rand::SeedableRng;
+use rand::rngs::StdRng;
+use rand::seq::SliceRandom;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use statrs::distribution::ChiSquared;
@@ -120,46 +125,76 @@ pub struct BatchSilhouetteResult {
     pub median_asw: f32,
 }
 
-/// Compute batch silhouette width from kNN data
+/// Compute batch average silhouette width on an embedding
 ///
-/// For each cell, uses its k nearest neighbours to estimate:
-///   a = mean distance to neighbours of same batch
-///   b = min over other batches of mean distance to neighbours of that batch
+/// For each cell, computes:
+///   a = mean distance to cells of same batch
+///   b = mean distance to cells of nearest other batch
 ///   s = (b - a) / max(a, b)
+///
+/// Values near 0 indicate good mixing, near 1 indicates separation.
 ///
 /// ### Params
 ///
-/// * `knn_indices` - Neighbour indices per cell (N x k)
-/// * `knn_distances` - Neighbour distances per cell (N x k)
+/// * `embedding` - Low-dimensional embedding (N x d)
 /// * `batch_labels` - Batch assignment per cell (length N)
+/// * `subsample` - Optional max cells to use. If Some and N exceeds this,
+///   a random subsample is taken.
+/// * `seed` - Random seed for subsampling
 ///
 /// ### Returns
 ///
 /// `BatchSilhouetteResult` with per-cell and summary scores
-pub fn batch_silhouette_width_knn(
-    knn_indices: &[Vec<usize>],
-    knn_distances: &[Vec<f32>],
+pub fn batch_silhouette_width(
+    embedding: MatRef<f32>,
     batch_labels: &[usize],
+    subsample: Option<usize>,
+    seed: usize,
 ) -> BatchSilhouetteResult {
-    let n = knn_indices.len();
-    let n_batches = batch_labels.iter().max().map(|&x| x + 1).unwrap_or(0);
+    let n = embedding.nrows();
+    let d = embedding.ncols();
+    assert_eq!(batch_labels.len(), n);
 
-    assert_eq!(knn_distances.len(), n);
+    let indices: Vec<usize> = if let Some(max_n) = subsample {
+        if n > max_n {
+            let mut rng = StdRng::seed_from_u64(seed as u64);
+            let mut idx: Vec<usize> = (0..n).collect();
+            idx.shuffle(&mut rng);
+            idx.truncate(max_n);
+            idx.sort_unstable();
+            idx
+        } else {
+            (0..n).collect()
+        }
+    } else {
+        (0..n).collect()
+    };
+
+    let n_sub = indices.len();
+    let sub_labels: Vec<usize> = indices.iter().map(|&i| batch_labels[i]).collect();
+    let n_batches = sub_labels.iter().max().map(|&x| x + 1).unwrap_or(0);
     assert!(n_batches >= 2, "Need at least 2 batches for silhouette");
 
-    let per_cell: Vec<f32> = knn_indices
-        .par_iter()
-        .zip(knn_distances.par_iter())
-        .enumerate()
-        .map(|(i, (indices, distances))| {
-            let b_i = batch_labels[i];
+    // pre--extract rows as contiguous slices for SIMD
+    let rows: Vec<Vec<f32>> = indices
+        .iter()
+        .map(|&i| (0..d).map(|j| embedding[(i, j)]).collect())
+        .collect();
+
+    let per_cell: Vec<f32> = (0..n_sub)
+        .into_par_iter()
+        .map(|ii| {
+            let b_i = sub_labels[ii];
             let mut batch_sum = vec![0.0f32; n_batches];
             let mut batch_count = vec![0u32; n_batches];
 
-            for (&j, &dist) in indices.iter().zip(distances.iter()) {
-                let b_j = batch_labels[j];
-                batch_sum[b_j] += dist;
-                batch_count[b_j] += 1;
+            for jj in 0..n_sub {
+                if ii == jj {
+                    continue;
+                }
+                let dist = euclidean_distance_static(&rows[ii], &rows[jj]).sqrt();
+                batch_sum[sub_labels[jj]] += dist;
+                batch_count[sub_labels[jj]] += 1;
             }
 
             let a = if batch_count[b_i] > 0 {
@@ -179,30 +214,99 @@ pub fn batch_silhouette_width_knn(
                 }
             }
 
-            if b == f32::INFINITY {
-                // No neighbours from other batches at all
-                return 0.0;
-            }
-
             let max_ab = a.max(b);
             if max_ab > 0.0 { (b - a) / max_ab } else { 0.0 }
         })
         .collect();
 
-    let mean_asw = per_cell.iter().sum::<f32>() / n as f32;
+    let mean_asw = per_cell.iter().sum::<f32>() / n_sub as f32;
 
     let mut sorted = per_cell.clone();
     sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
-    let median_asw = if n % 2 == 0 {
-        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+    let median_asw = if n_sub % 2 == 0 {
+        (sorted[n_sub / 2 - 1] + sorted[n_sub / 2]) / 2.0
     } else {
-        sorted[n / 2]
+        sorted[n_sub / 2]
     };
 
     BatchSilhouetteResult {
         per_cell,
         mean_asw,
         median_asw,
+    }
+}
+
+//////////
+// Lisi //
+//////////
+
+/// Results from the LISI calculation
+pub struct LisiResult {
+    /// Per-cell LISI scores (range: [1, n_batches])
+    pub per_cell: Vec<f32>,
+    /// Mean LISI across all cells
+    pub mean_lisi: f32,
+    /// Median LISI across all cells
+    pub median_lisi: f32,
+}
+
+/// Compute Local Inverse Simpson's Index on batch labels
+///
+/// For each cell, computes the effective number of batches in its
+/// neighbourhood:
+///
+///   LISI = 1 / sum(p_b^2)
+///
+/// where p_b is the proportion of neighbours belonging to batch b.
+///
+/// ### Params
+///
+/// * `knn_indices` - Neighbour indices per cell
+/// * `batch_labels` - Batch assignment per cell (length N)
+///
+/// ### Returns
+///
+/// `LisiResult` with per-cell scores and summaries
+pub fn batch_lisi(knn_indices: &[Vec<usize>], batch_labels: &[usize]) -> LisiResult {
+    let n = knn_indices.len();
+    let n_batches = batch_labels.iter().max().map(|&x| x + 1).unwrap_or(0);
+
+    let per_cell: Vec<f32> = knn_indices
+        .par_iter()
+        .map(|neighbours| {
+            let k = neighbours.len() as f32;
+            let mut counts = vec![0u32; n_batches];
+
+            for &j in neighbours {
+                counts[batch_labels[j]] += 1;
+            }
+
+            let simpson: f32 = counts
+                .iter()
+                .map(|&c| {
+                    let p = c as f32 / k;
+                    p * p
+                })
+                .sum();
+
+            1.0 / simpson
+        })
+        .collect();
+
+    let mean_lisi = per_cell.iter().sum::<f32>() / n as f32;
+
+    let mut sorted = per_cell.clone();
+    sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+    let median_lisi = if n % 2 == 0 {
+        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+    } else {
+        sorted[n / 2]
+    };
+
+    LisiResult {
+        per_cell,
+        mean_lisi,
+        median_lisi,
     }
 }
 
