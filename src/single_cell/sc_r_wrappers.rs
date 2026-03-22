@@ -32,7 +32,8 @@ use crate::single_cell::sc_processing::scrublet::ScrubletParams;
 ///
 /// ### Params
 ///
-/// * `assignments` - Vector where assignments[cell_id] = Some(metacell_id) or None
+/// * `assignments` - Vector where
+///   `assignments[cell_id] = Some(metacell_id) or None`
 /// * `n_cells` - Total number of cells
 /// * `k` - Number of metacells
 ///

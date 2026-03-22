@@ -242,8 +242,8 @@ pub fn initialise_r_from_dist(dist_mat: MatRef<f32>, sigma: &[f32]) -> Mat<f32> 
 
 /// Compute observed and expected diversity statistics for one variable.
 ///
-/// O[k,b] = sum of R[k,n] for all cells n at level b
-/// E[k,b] = R_k_total * pr_b[b]
+/// `O[k,b] = sum of R[k,n]` for all cells n at level b
+/// `E[k,b] = R_k_total * pr_b[b]`
 ///
 /// ### Params
 ///
@@ -410,8 +410,7 @@ pub fn compute_objective(
 ///
 /// The diversity penalty is a product over variables:
 ///
-/// R[k,n] proportional to exp(-dist[k,n]/sigma[k])
-///     * product_v (E_v[k, b_v(n)] / (O_v[k, b_v(n)] + E_v[k, b_v(n)]))^theta_v
+/// `R[k,n] proportional to exp(-dist[k,n]/sigma[k]) * product_v (E_v[k, b_v(n)] / (O_v[k, b_v(n)] + E_v[k, b_v(n)]))^theta_v`
 ///
 /// Uses block-wise shuffling to efficiently update O and E statistics.
 ///

@@ -1337,7 +1337,7 @@ where
 ///
 /// ### Returns
 ///
-/// (eigenvalues, eigenvectors) where eigenvectors[i][j] is element j of
+/// (eigenvalues, eigenvectors) where `eigenvectors[i][j]` is element j of
 /// eigenvector i
 pub fn compute_largest_eigenpairs_lanczos<T>(
     matrix: &CompressedSparseData2<T>,

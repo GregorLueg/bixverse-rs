@@ -28,7 +28,7 @@ pub enum SparsityFunction {
 ///
 /// ### Returns
 ///
-/// Option<SparsityFunction>
+/// `Option<SparsityFunction>`
 pub fn parse_sparsification(s: &str) -> Option<SparsityFunction> {
     match s.to_lowercase().as_str() {
         "log" => Some(SparsityFunction::Logistic),

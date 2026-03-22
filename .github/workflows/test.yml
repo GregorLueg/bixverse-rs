@@ -52,8 +52,13 @@ jobs:
           rustup target add x86_64-pc-windows-gnu
           rustup default stable-x86_64-pc-windows-gnu
 
-      - name: Run tests
+      - name: Run tests (non-Windows)
+        if: runner.os != 'Windows'
         env:
           LD_LIBRARY_PATH: ${{ steps.setup-r.outputs.r-home }}/lib
           DYLD_LIBRARY_PATH: ${{ steps.setup-r.outputs.r-home }}/lib
         run: cargo test --no-default-features && cargo test --all-features
+
+      - name: Run tests (Windows)
+        if: runner.os == 'Windows'
+        run: cargo test --no-default-features && cargo test --features single-cell

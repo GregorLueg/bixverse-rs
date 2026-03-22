@@ -789,7 +789,7 @@ pub fn parse_tom_types(s: &str) -> Option<TomType> {
 /// * `tom_type` - Algorithm version (Version1 or Version2)
 ///
 /// ### Returns
-/// Symmetric TOM matrix with values in [0,1] representing topological overlap
+/// Symmetric TOM matrix with values in `[0,1]` representing topological overlap
 ///
 /// ### Mathematical Formulation
 ///
