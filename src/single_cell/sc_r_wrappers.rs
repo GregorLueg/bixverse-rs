@@ -675,6 +675,11 @@ impl ScDblFinderParams {
                 .get("n_bins")
                 .and_then(|v| v.as_integer())
                 .unwrap_or(defaults.n_bins as i32) as usize,
+            // Expected doublet rate
+            dbr_per_1k: map
+                .get("dbr_per_1k")
+                .and_then(|v| v.as_real())
+                .unwrap_or(defaults.dbr_per_1k as f64) as f32,
         }
     }
 }

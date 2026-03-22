@@ -103,6 +103,8 @@ pub struct ScDblFinderParams {
     // -- Feature engineering --
     /// Number of leading PCs to include as classifier features.
     pub include_pcs: usize,
+    /// Expected doublet rate
+    pub dbr_per_1k: f32,
 
     // -- Thresholding --
     /// Optional manual threshold. If `None`, Otsu's method is used.
@@ -130,15 +132,18 @@ impl Default for ScDblFinderParams {
             cluster_iters: 10,
             knn_params: KnnParams::default(),
             n_iterations: 3,
-            n_trees: 500,
+            // -- Aligned with R's XGBoost defaults --
+            n_trees: 200,
             max_depth: 4,
-            learning_rate: 0.05,
+            learning_rate: 0.3,
             min_samples_leaf: 20,
-            early_stop_window: 15,
-            subsample_rate: 0.8,
+            early_stop_window: 3,
+            subsample_rate: 0.75,
             include_pcs: 19,
             manual_threshold: None,
             n_bins: 100,
+            // -- Expected doublet rate --
+            dbr_per_1k: 0.008,
         }
     }
 }
@@ -167,9 +172,92 @@ pub struct ScDblFinderResult {
 /// origins.
 type ClusterAwarePairs = (Vec<(usize, usize)>, Vec<(usize, usize)>);
 
+//////////////
+// refactor //
+//////////////
+
+/// Build kNN returning both indices and distances.
+///
+/// Wraps `dispatch_knn` and a parallel distance computation from the
+/// PCA embedding.
+fn dispatch_knn_with_distances(
+    embd: MatRef<f32>,
+    k: usize,
+    knn_params: &KnnParams,
+    seed: usize,
+    verbose: bool,
+) -> (Vec<Vec<usize>>, Vec<Vec<f32>>) {
+    let indices = dispatch_knn(embd, k, knn_params, seed, verbose);
+
+    let n_dims = embd.ncols();
+    let distances: Vec<Vec<f32>> = indices
+        .par_iter()
+        .enumerate()
+        .map(|(i, neighbours)| {
+            neighbours
+                .iter()
+                .map(|&j| {
+                    let mut d2 = 0.0f32;
+                    for dim in 0..n_dims {
+                        let diff = *embd.get(i, dim) - *embd.get(j, dim);
+                        d2 += diff * diff;
+                    }
+                    d2.sqrt()
+                })
+                .collect()
+        })
+        .collect();
+
+    (indices, distances)
+}
+
 //////////////////////////////////////
 // Feature engineering | pair logic //
 //////////////////////////////////////
+
+/// Find the doublet score threshold targeting the expected doublet rate.
+///
+/// Sorts observed cell scores descending and places the threshold so that
+/// approximately `expected_dbr * n_obs` cells are called as doublets,
+/// with a tolerance band of +/- 40% around the expected rate (matching
+/// R's `dbr.sd` default).
+///
+/// Falls back to Otsu if the expected rate produces a degenerate threshold.
+fn find_threshold_expected_rate(
+    scores_obs: &[f32],
+    n_obs: usize,
+    dbr_per_1k: f32,
+    n_bins: usize,
+) -> f32 {
+    let expected_dbr = dbr_per_1k * (n_obs as f32 / 1000.0);
+    let expected_dbr = expected_dbr.min(0.5); // sanity cap
+
+    let expected_n = (expected_dbr * n_obs as f32).round() as usize;
+    if expected_n == 0 || expected_n >= n_obs {
+        return find_threshold_otsu(scores_obs, n_bins);
+    }
+
+    let mut sorted: Vec<f32> = scores_obs.to_vec();
+    sorted.sort_unstable_by(|a, b| b.partial_cmp(a).unwrap());
+
+    // Threshold sits between the expected_n-th and (expected_n+1)-th
+    // highest score
+    let idx = expected_n.min(sorted.len() - 1);
+    let threshold = if idx > 0 {
+        (sorted[idx - 1] + sorted[idx]) / 2.0
+    } else {
+        sorted[0] - 1e-6
+    };
+
+    // Sanity check: if threshold is degenerate (e.g. all scores identical),
+    // fall back to Otsu
+    let n_above = sorted.iter().filter(|&&s| s > threshold).count();
+    if n_above == 0 || n_above == n_obs {
+        return find_threshold_otsu(scores_obs, n_bins);
+    }
+
+    threshold
+}
 
 /// Compute default k values for multi-scale kNN doublet scoring.
 ///
@@ -186,23 +274,17 @@ fn default_knn_ks(n_obs: usize) -> Vec<usize> {
 
 /// Build the feature matrix for the GBM classifier.
 ///
-/// For each cell (observed or simulated), computes:
-///
-/// 1. **Multi-scale kNN ratios**: proportion of neighbours that are
-///    simulated, evaluated at each k in `k_values`. Captures doublet
-///    signal at different neighbourhood scales.
-/// 2. **Cluster neighbour proportions**: fraction of neighbours in each
-///    cluster (at max k). Produces `n_clusters` columns.
-/// 3. **Cluster entropy**: Shannon entropy of the neighbour cluster
-///    distribution.
-/// 4. **Library size ratio**: cell's HVG library size divided by the
-///    median.
-/// 5. **Principal components**: the first `n_pcs` columns of the combined
-///    PCA embedding, giving the classifier direct access to expression
-///    space coordinates.
+/// Features per cell:
+/// 1. Multi-scale kNN ratios (one per k value)
+/// 2. Distance-weighted doublet proportion (closer neighbours weighted more)
+/// 3. Cluster neighbour proportions (n_clusters columns)
+/// 4. Cluster entropy
+/// 5. Library size ratio
+/// 6. Principal components (n_pcs columns)
 #[allow(clippy::too_many_arguments)]
 fn build_feature_matrix(
     knn_indices: &[Vec<usize>],
+    knn_distances: &[Vec<f32>],
     cluster_labels: &[usize],
     n_obs: usize,
     n_clusters: usize,
@@ -215,13 +297,14 @@ fn build_feature_matrix(
 ) -> Mat<f32> {
     let n_total = knn_indices.len();
     let n_k = k_values.len();
-    // k_ratios + cluster_props + entropy + lib_ratio + PCs
-    let n_features = n_k + n_clusters + 2 + n_pcs;
+    // k_ratios + weighted + cluster_props + entropy + lib_ratio + PCs
+    let n_features = n_k + 1 + n_clusters + 2 + n_pcs;
 
     let rows: Vec<Vec<f32>> = (0..n_total)
         .into_par_iter()
         .map(|i| {
             let neighbours = &knn_indices[i];
+            let distances = &knn_distances[i];
             let k_max = neighbours.len();
 
             // Multi-scale doublet ratios
@@ -234,6 +317,23 @@ fn build_feature_matrix(
                     .count();
                 k_ratios.push(n_sim as f32 / k_use as f32);
             }
+
+            // Distance-weighted doublet proportion (R's "weighted" feature)
+            // Weight = sqrt(k_max - rank) / distance, normalised
+            let weighted = {
+                let k_f = k_max as f32;
+                let mut w_sum = 0.0f32;
+                let mut w_dbl = 0.0f32;
+                for (rank, (&neigh, &dist)) in neighbours.iter().zip(distances.iter()).enumerate() {
+                    let d = dist.max(1e-10);
+                    let w = (k_f - rank as f32).sqrt() / d;
+                    w_sum += w;
+                    if neigh >= n_obs {
+                        w_dbl += w;
+                    }
+                }
+                if w_sum > 0.0 { w_dbl / w_sum } else { 0.0 }
+            };
 
             // Cluster neighbour proportions (at max k)
             let mut cluster_counts = vec![0.0f32; n_clusters];
@@ -266,6 +366,7 @@ fn build_feature_matrix(
             // Assemble row
             let mut row = Vec::with_capacity(n_features);
             row.extend_from_slice(&k_ratios);
+            row.push(weighted);
             row.extend_from_slice(&cluster_counts);
             row.push(entropy);
             row.push(lib_ratio);
@@ -762,7 +863,7 @@ impl ScDblFinder {
             seed,
         );
 
-        // -- Multi-scale k values for doublet scoring --
+        // -- Multi-scale k values --
         let k_values = default_knn_ks(self.n_cells);
         let k_max = *k_values.last().unwrap();
         let n_pcs_include = self.params.include_pcs.min(self.params.no_pcs);
@@ -811,7 +912,6 @@ impl ScDblFinder {
                 iter_seed,
             );
 
-            // Track combined library sizes for simulated doublets
             let sim_combined_lib_sizes: Vec<usize> = pairs
                 .iter()
                 .map(|&(a, b)| self.hvg_library_sizes[a] + self.hvg_library_sizes[b])
@@ -842,11 +942,11 @@ impl ScDblFinder {
             let sim_pca = &scaled_sim * loadings;
             let combined_pca = concat![[obs_pca], [sim_pca]];
 
-            // 4c. kNN on combined at max(k_values)
+            // 4c. kNN on combined with distances
             if verbose {
                 println!("Building combined kNN graph (k={})...", k_max);
             }
-            let combined_knn = dispatch_knn(
+            let (combined_knn, combined_dists) = dispatch_knn_with_distances(
                 combined_pca.as_ref(),
                 k_max,
                 &self.params.knn_params,
@@ -874,12 +974,13 @@ impl ScDblFinder {
             }
 
             // 4e. Feature engineering
-            let n_features_total = k_values.len() + n_clusters + 2 + n_pcs_include;
+            let n_feat_total = k_values.len() + 1 + n_clusters + 2 + n_pcs_include;
             if verbose {
-                println!("Building feature matrix ({} features)...", n_features_total);
+                println!("Building feature matrix ({} features)...", n_feat_total);
             }
             let features = build_feature_matrix(
                 &combined_knn,
+                &combined_dists,
                 &combined_clusters,
                 self.n_cells,
                 n_clusters,
@@ -896,15 +997,48 @@ impl ScDblFinder {
                 println!("Training gradient-boosted classifier...");
             }
             let n_total = self.n_cells + self.n_cells_sim;
-            let labels: Vec<f32> = (0..n_total)
+
+            // Build label and exclusion mask for iterative refinement
+            let mut labels: Vec<f32> = (0..n_total)
                 .map(|i| if i < self.n_cells { 0.0 } else { 1.0 })
                 .collect();
 
-            let raw_scores =
-                fit_gbm_classifier(features.as_ref(), &labels, &gbm_config, iter_seed + 100);
+            // On iterations > 0, exclude suspected doublets among observed cells
+            // from training (set their label to NaN-like sentinel, handled below)
+            let mut exclude_mask = vec![false; n_total];
+            if iter > 0 {
+                // Exclude observed cells with high scores from previous iteration
+                let n_exclude_max = self.n_cells / 5; // cap at 20%
+                let mut obs_scored: Vec<(usize, f32)> = final_scores
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &s)| (i, s))
+                    .collect();
+                obs_scored.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
-            // 4g. Extract observed cell scores directly (no sigmoid -- L2 boosting
-            //     on 0/1 labels already produces approximate probabilities)
+                let mut n_excluded = 0;
+                for &(cell_idx, score) in &obs_scored {
+                    if score <= 0.3 || n_excluded >= n_exclude_max {
+                        break;
+                    }
+                    exclude_mask[cell_idx] = true;
+                    n_excluded += 1;
+                }
+
+                if verbose {
+                    println!("Excluding {} suspected doublets from training", n_excluded);
+                }
+            }
+
+            let raw_scores = fit_gbm_classifier_with_exclusions(
+                features.as_ref(),
+                &labels,
+                &exclude_mask,
+                &gbm_config,
+                iter_seed + 100,
+            );
+
+            // 4g. Extract observed cell scores
             final_scores = raw_scores[..self.n_cells].to_vec();
 
             if verbose {
@@ -924,7 +1058,8 @@ impl ScDblFinder {
                 );
             }
 
-            // 4h. Re-cluster for next iteration
+            // 4h. Re-cluster for next iteration (same graph, different seed
+            // for slightly different cluster boundaries)
             if iter < self.params.n_iterations - 1 {
                 let obs_graph = knn_to_sparse_graph(&obs_knn);
                 cluster_labels = louvain_sparse_graph(
@@ -936,16 +1071,20 @@ impl ScDblFinder {
             }
         }
 
-        // -- Step 5: Threshold --
-        // Clamp scores to [0, 1] since L2 boosting can slightly overshoot
+        // -- Step 5: Clamp and threshold --
         for s in final_scores.iter_mut() {
             *s = s.clamp(0.0, 1.0);
         }
 
         let threshold = self.params.manual_threshold.unwrap_or_else(|| {
-            let t = find_threshold_otsu(&final_scores, self.params.n_bins);
+            let t = find_threshold_expected_rate(
+                &final_scores,
+                self.n_cells,
+                self.params.dbr_per_1k,
+                self.params.n_bins,
+            );
             if verbose {
-                println!("Automatically set threshold at score = {:.4}", t);
+                println!("Threshold set at score = {:.4}", t);
             }
             t
         });
@@ -971,4 +1110,119 @@ impl ScDblFinder {
             detected_doublet_rate,
         }
     }
+}
+
+/// Train GBM classifier with optional sample exclusions.
+///
+/// Excluded samples are omitted from both training and OOB sets but still
+/// receive predictions. This implements the R scDblFinder iterative
+/// refinement where suspected doublets among observed cells are removed
+/// from training to give the classifier a cleaner signal.
+fn fit_gbm_classifier_with_exclusions(
+    features: MatRef<f32>,
+    labels: &[f32],
+    exclude: &[bool],
+    config: &GradientBoostingConfig,
+    seed: usize,
+) -> Vec<f32> {
+    let n_samples = features.nrows();
+    let n_features = features.ncols();
+
+    let store = quantise_dense_features(features);
+
+    // Collect non-excluded sample indices
+    let eligible: Vec<u32> = (0..n_samples as u32)
+        .filter(|&i| !exclude[i as usize])
+        .collect();
+    let n_eligible = eligible.len();
+
+    let mut residuals = labels.to_vec();
+
+    let n_train = ((n_eligible as f32 * config.subsample_rate).round() as usize)
+        .max(2 * config.min_samples_leaf);
+    let n_oob = n_eligible.saturating_sub(n_train);
+
+    let mut eligible_buf = eligible.clone();
+    let mut importances = vec![0.0f32; n_features];
+    let mut improvement_ring = Vec::with_capacity(config.early_stop_window);
+    let mut scratch = GbmScratch::new(n_features, n_samples);
+    let pool_capacity = 2 * config.max_depth + 3;
+    let mut pool = HistogramPool::new(pool_capacity, n_features);
+
+    let mut n_trees_used = 0usize;
+
+    for tree_idx in 0..config.n_trees_max {
+        let mut rng = SmallRng::seed_from_u64(
+            seed.wrapping_add(tree_idx.wrapping_mul(6364136223846793005)) as u64,
+        );
+
+        // Shuffle eligible indices, take first n_train as train, rest as OOB
+        eligible_buf.copy_from_slice(&eligible);
+        for i in 0..n_train.min(n_eligible) {
+            let j = rng.random_range(i..n_eligible);
+            eligible_buf.swap(i, j);
+        }
+
+        let (train, oob) = eligible_buf.split_at_mut(n_train.min(n_eligible));
+
+        let root_idx = pool.acquire();
+        pool.histograms[root_idx].build_from_samples(&store, train, &residuals);
+
+        let mut y_sum = 0.0f32;
+        let mut y_sum_sq = 0.0f32;
+        for &s in train.iter() {
+            let r = residuals[s as usize];
+            y_sum += r;
+            y_sum_sq += r * r;
+        }
+
+        let mut oob_improvement = 0.0f32;
+
+        build_gbm_node(
+            &mut pool,
+            root_idx,
+            &store,
+            &mut residuals,
+            train,
+            oob,
+            y_sum,
+            y_sum_sq,
+            train.len(),
+            config,
+            0,
+            config.learning_rate,
+            &mut importances,
+            &mut oob_improvement,
+            &mut scratch,
+            &mut rng,
+        );
+
+        n_trees_used += 1;
+
+        // Early stopping on OOB improvement
+        let oob_mse_improvement = if n_oob > 0 {
+            oob_improvement / n_oob as f32
+        } else {
+            0.0
+        };
+
+        if improvement_ring.len() >= config.early_stop_window {
+            improvement_ring.remove(0);
+        }
+        improvement_ring.push(oob_mse_improvement);
+
+        if improvement_ring.len() >= config.early_stop_window {
+            let avg: f32 = improvement_ring.iter().sum::<f32>() / improvement_ring.len() as f32;
+            if avg <= 0.0 {
+                break;
+            }
+        }
+    }
+
+    // predictions = initial_labels - final_residuals
+    labels
+        .iter()
+        .zip(residuals.iter())
+        .map(|(&l, &r)| l - r)
+        .collect()
 }
