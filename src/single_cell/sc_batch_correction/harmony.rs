@@ -900,8 +900,8 @@ pub fn harmony(
             println!("  Harmony objective: {:.4}", harmony_obj);
         }
 
-        if harmony_iter >= 1 {
-            let obj_old = state.objectives_harmony[harmony_iter];
+        if harmony_iter >= 2 {
+            let obj_old = state.objectives_harmony[harmony_iter - 1];
             let obj_new = state.objectives_harmony[harmony_iter + 1];
             let rel_change = (obj_old - obj_new).abs() / obj_old.abs();
 
@@ -1540,8 +1540,6 @@ mod tests {
 
         let z_orig = mat![[1.0, 2.0], [1.0, 2.0], [1.0, 2.0], [1.0, 2.0]];
         let r = mat![[1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 0.0]];
-
-        let oe = compute_all_diversity_statistics(r.as_ref(), std::slice::from_ref(&info));
 
         let z_corr = ridge_regression_correction(
             z_orig.as_ref(),
