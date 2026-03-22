@@ -585,7 +585,6 @@ pub fn ridge_regression_correction(
     r: MatRef<f32>,
     batch_infos: &[BatchInfo],
     lambda: f32,
-    oe_pairs: &[OEPair],
 ) -> Mat<f32> {
     let n = z_orig.nrows();
     let d = z_orig.ncols();
@@ -606,16 +605,6 @@ pub fn ridge_regression_correction(
     let mut z_corr = z_orig.to_owned();
 
     for cluster_idx in 0..k {
-        // Build per-cluster lambda vector: 0 for intercept,
-        // lambda * E[k, b] for batch columns
-        let mut lambda_vec = vec![0.0f32; p];
-        for (var_idx, info) in batch_infos.iter().enumerate() {
-            for level_idx in 0..info.n_levels {
-                let c = offsets[var_idx] + level_idx;
-                lambda_vec[c] = lambda * oe_pairs[var_idx].e[(cluster_idx, level_idx)];
-            }
-        }
-
         let mut design_cov = Mat::<f32>::zeros(p, p);
         let mut phi_z = Mat::<f32>::zeros(p, d);
 
@@ -629,14 +618,13 @@ pub fn ridge_regression_correction(
                 active_cols.push(offsets[var_idx] + level);
             }
 
-            // phi_z: weighted by R (first power)
+            // Weighted by R (not R^2) -- matches C++ Phi_moe * diag(R_k)
             for &c in &active_cols {
                 for feat in 0..d {
                     phi_z[(c, feat)] += r_val * z_orig[(cell_idx, feat)];
                 }
             }
 
-            // design_cov: weighted by R (first power), NOT R^2
             for (i, &ci) in active_cols.iter().enumerate() {
                 for &cj in &active_cols[i..] {
                     design_cov[(ci, cj)] += r_val;
@@ -647,16 +635,17 @@ pub fn ridge_regression_correction(
             }
         }
 
-        // Non-uniform ridge: lambda_vec on diagonal
+        // Uniform ridge on all entries including intercept
         for i in 0..p {
-            design_cov[(i, i)] += lambda_vec[i];
+            design_cov[(i, i)] += lambda;
         }
 
         let partial_piv_lu: PartialPivLu<f32> = design_cov.partial_piv_lu();
         let inv_cov = partial_piv_lu.inverse();
         let w = &inv_cov * &phi_z;
 
-        // Subtract batch columns only (skip intercept row 0)
+        // Subtract batch columns only -- intercept (row 0) is NOT
+        // subtracted, matching C++ W.row(0).zeros()
         for cell_idx in 0..n {
             let r_val = r[(cluster_idx, cell_idx)];
             for var_idx in 0..n_vars {
@@ -900,7 +889,6 @@ pub fn harmony(
             state.r.as_ref(),
             &batch_infos,
             lambda_scalar,
-            &state.oe_pairs,
         );
 
         state.z_cos = cosine_normalise(&state.z_corr);
@@ -1500,23 +1488,22 @@ mod tests {
             }
         }
     }
+
     #[test]
     fn test_ridge_regression_basic() {
         let labels = vec![0, 0, 1, 1];
         let info = create_batch_info(&labels, 4);
 
+        // Batch effect in feature 0
         let z_orig = mat![[1.0, 0.1], [1.1, 0.2], [5.0, 0.1], [5.1, 0.2],];
 
         let r = mat![[1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 0.0]];
-
-        let oe = compute_all_diversity_statistics(r.as_ref(), std::slice::from_ref(&info));
 
         let z_corr = ridge_regression_correction(
             z_orig.as_ref(),
             r.as_ref(),
             std::slice::from_ref(&info),
-            1.0,
-            &oe,
+            0.01,
         );
 
         let batch0_mean_orig = (z_orig[(0, 0)] + z_orig[(1, 0)]) / 2.0;
@@ -1561,7 +1548,6 @@ mod tests {
             r.as_ref(),
             std::slice::from_ref(&info),
             1.0,
-            &oe,
         );
 
         // With intercept + full one-hot encoding, identical data across
@@ -1602,21 +1588,14 @@ mod tests {
         let labels = vec![0, 0, 1, 1];
         let info = create_batch_info(&labels, 4);
 
-        // Large batch effect in feature 0
         let z_orig = mat![[1.0, 0.0], [1.0, 0.0], [5.0, 0.0], [5.0, 0.0]];
-
-        // Soft assignments: cluster 0 mostly captures batch 0,
-        // cluster 1 mostly captures batch 1
         let r = mat![[0.8, 0.9, 0.1, 0.2], [0.2, 0.1, 0.9, 0.8],];
-
-        let oe = compute_all_diversity_statistics(r.as_ref(), std::slice::from_ref(&info));
 
         let z_corr = ridge_regression_correction(
             z_orig.as_ref(),
             r.as_ref(),
             std::slice::from_ref(&info),
-            1.0,
-            &oe,
+            0.01,
         );
 
         let batch0_mean_orig = (z_orig[(0, 0)] + z_orig[(1, 0)]) / 2.0;
@@ -1643,14 +1622,11 @@ mod tests {
         let z_orig = mat![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]];
         let r = mat![[0.5, 0.5, 0.5], [0.5, 0.5, 0.5]];
 
-        let oe = compute_all_diversity_statistics(r.as_ref(), std::slice::from_ref(&info));
-
         let z_corr = ridge_regression_correction(
             z_orig.as_ref(),
             r.as_ref(),
             std::slice::from_ref(&info),
             0.1,
-            &oe,
         );
 
         assert_eq!(z_corr.nrows(), z_orig.nrows());
@@ -1678,10 +1654,12 @@ mod tests {
             [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         ];
 
-        let infos = [info_batch.clone(), info_sample.clone()];
-        let oe = compute_all_diversity_statistics(r.as_ref(), &infos);
-
-        let z_corr = ridge_regression_correction(z_orig.as_ref(), r.as_ref(), &infos, 1.0, &oe);
+        let z_corr = ridge_regression_correction(
+            z_orig.as_ref(),
+            r.as_ref(),
+            &[info_batch.clone(), info_sample.clone()],
+            0.01,
+        );
 
         let batch_means_orig: Vec<f32> = (0..3)
             .map(|b| {
@@ -1739,22 +1717,19 @@ mod tests {
 
         let r = mat![[1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 0.0]];
 
-        let oe_one =
-            compute_all_diversity_statistics(r.as_ref(), std::slice::from_ref(&info_batch));
-
         let z_one_var = ridge_regression_correction(
             z_orig.as_ref(),
             r.as_ref(),
             std::slice::from_ref(&info_batch),
-            1.0,
-            &oe_one,
+            0.01,
         );
 
-        let infos_two = [info_batch.clone(), info_sample.clone()];
-        let oe_two = compute_all_diversity_statistics(r.as_ref(), &infos_two);
-
-        let z_two_vars =
-            ridge_regression_correction(z_orig.as_ref(), r.as_ref(), &infos_two, 1.0, &oe_two);
+        let z_two_vars = ridge_regression_correction(
+            z_orig.as_ref(),
+            r.as_ref(),
+            &[info_batch.clone(), info_sample.clone()],
+            0.01,
+        );
 
         let mut any_diff = false;
         for i in 0..4 {
