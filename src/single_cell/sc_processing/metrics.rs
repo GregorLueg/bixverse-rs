@@ -106,6 +106,106 @@ pub fn kbet(knn_data: &[Vec<usize>], batches: &[usize]) -> KbetResult {
     }
 }
 
+///////////////////////////
+// BatchSilhouetteScores //
+///////////////////////////
+
+/// Results from batch silhouette width calculation
+pub struct BatchSilhouetteResult {
+    /// Per-cell silhouette scores in [-1, 1]
+    pub per_cell: Vec<f32>,
+    /// Mean silhouette width (closer to 0 = better mixing)
+    pub mean_asw: f32,
+    /// Median silhouette width
+    pub median_asw: f32,
+}
+
+/// Compute batch silhouette width from kNN data
+///
+/// For each cell, uses its k nearest neighbours to estimate:
+///   a = mean distance to neighbours of same batch
+///   b = min over other batches of mean distance to neighbours of that batch
+///   s = (b - a) / max(a, b)
+///
+/// ### Params
+///
+/// * `knn_indices` - Neighbour indices per cell (N x k)
+/// * `knn_distances` - Neighbour distances per cell (N x k)
+/// * `batch_labels` - Batch assignment per cell (length N)
+///
+/// ### Returns
+///
+/// `BatchSilhouetteResult` with per-cell and summary scores
+pub fn batch_silhouette_width_knn(
+    knn_indices: &[Vec<usize>],
+    knn_distances: &[Vec<f32>],
+    batch_labels: &[usize],
+) -> BatchSilhouetteResult {
+    let n = knn_indices.len();
+    let n_batches = batch_labels.iter().max().map(|&x| x + 1).unwrap_or(0);
+
+    assert_eq!(knn_distances.len(), n);
+    assert!(n_batches >= 2, "Need at least 2 batches for silhouette");
+
+    let per_cell: Vec<f32> = knn_indices
+        .par_iter()
+        .zip(knn_distances.par_iter())
+        .enumerate()
+        .map(|(i, (indices, distances))| {
+            let b_i = batch_labels[i];
+            let mut batch_sum = vec![0.0f32; n_batches];
+            let mut batch_count = vec![0u32; n_batches];
+
+            for (&j, &dist) in indices.iter().zip(distances.iter()) {
+                let b_j = batch_labels[j];
+                batch_sum[b_j] += dist;
+                batch_count[b_j] += 1;
+            }
+
+            let a = if batch_count[b_i] > 0 {
+                batch_sum[b_i] / batch_count[b_i] as f32
+            } else {
+                0.0
+            };
+
+            let mut b = f32::INFINITY;
+            for batch_idx in 0..n_batches {
+                if batch_idx == b_i || batch_count[batch_idx] == 0 {
+                    continue;
+                }
+                let mean_dist = batch_sum[batch_idx] / batch_count[batch_idx] as f32;
+                if mean_dist < b {
+                    b = mean_dist;
+                }
+            }
+
+            if b == f32::INFINITY {
+                // No neighbours from other batches at all
+                return 0.0;
+            }
+
+            let max_ab = a.max(b);
+            if max_ab > 0.0 { (b - a) / max_ab } else { 0.0 }
+        })
+        .collect();
+
+    let mean_asw = per_cell.iter().sum::<f32>() / n as f32;
+
+    let mut sorted = per_cell.clone();
+    sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+    let median_asw = if n % 2 == 0 {
+        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+    } else {
+        sorted[n / 2]
+    };
+
+    BatchSilhouetteResult {
+        per_cell,
+        mean_asw,
+        median_asw,
+    }
+}
+
 //////////////////
 // Pairwise cor //
 //////////////////
