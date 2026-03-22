@@ -1,19 +1,4 @@
-//! scDblFinder-inspired doublet detection for single cell data.
-//!
-//! Implements a cluster-aware doublet detection method inspired by Germain
-//! et al., F1000Research, 2022. Key differences from Scrublet and Boost:
-//!
-//! 1. **Cluster-aware simulation**: doublets are preferentially generated
-//!    from cells in different clusters (heterotypic), producing more
-//!    realistic synthetic doublets.
-//! 2. **Feature engineering**: instead of working purely in embedding space,
-//!    a feature matrix is constructed per cell with cluster-neighbourhood
-//!    proportions, kNN-based doublet proportion, Shannon entropy, library
-//!    size ratio, and origin pair information.
-//! 3. **Gradient-boosted classifier**: trained on engineered features to
-//!    distinguish observed cells from synthetic doublets.
-//! 4. **Iterative refinement**: cluster assignments are updated after each
-//!    round of classification, typically converging in 2-3 iterations.
+//! Work-in-progress not behaving as desired...
 
 use faer::{Mat, MatRef, concat};
 use rand::prelude::*;
@@ -1130,6 +1115,147 @@ impl ScDblFinder {
             threshold,
             cluster_labels,
             detected_doublet_rate,
+        }
+    }
+}
+
+///////
+// R //
+///////
+
+impl ScDblFinderParams {
+    /// Generate ScDblFinderParams from an R list.
+    ///
+    /// Values not found in the list fall back to the `Default` implementation.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with scDblFinder parameters.
+    ///
+    /// ### Returns
+    ///
+    /// `ScDblFinderParams` with all parameters set.
+    pub fn from_r_list(r_list: List) -> Self {
+        let knn_params = KnnParams::from_r_list(r_list.clone());
+        let map = r_list.into_hashmap();
+        let defaults = Self::default();
+
+        Self {
+            // Normalisation
+            log_transform: map
+                .get("log_transform")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(defaults.log_transform),
+            mean_center: map
+                .get("mean_center")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(defaults.mean_center),
+            normalise_variance: map
+                .get("normalise_variance")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(defaults.normalise_variance),
+            target_size: map
+                .get("target_size")
+                .and_then(|v| v.as_real())
+                .map(|x| x as f32),
+            // HVG
+            min_gene_var_pctl: map
+                .get("min_gene_var_pctl")
+                .and_then(|v| v.as_real())
+                .unwrap_or(defaults.min_gene_var_pctl as f64) as f32,
+            hvg_method: String::from(
+                map.get("hvg_method")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("vst"),
+            ),
+            loess_span: map
+                .get("loess_span")
+                .and_then(|v| v.as_real())
+                .unwrap_or(defaults.loess_span),
+            clip_max: map
+                .get("clip_max")
+                .and_then(|v| v.as_real())
+                .map(|x| x as f32),
+            // PCA
+            no_pcs: map
+                .get("no_pcs")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(defaults.no_pcs as i32) as usize,
+            random_svd: map
+                .get("random_svd")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(defaults.random_svd),
+            // Simulation
+            doublet_ratio: map
+                .get("doublet_ratio")
+                .and_then(|v| v.as_real())
+                .unwrap_or(defaults.doublet_ratio as f64) as f32,
+            heterotypic_bias: map
+                .get("heterotypic_bias")
+                .and_then(|v| v.as_real())
+                .unwrap_or(defaults.heterotypic_bias as f64) as f32,
+            // Clustering
+            cluster_resolution: map
+                .get("cluster_resolution")
+                .and_then(|v| v.as_real())
+                .unwrap_or(defaults.cluster_resolution as f64)
+                as f32,
+            cluster_iters: map
+                .get("cluster_iters")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(defaults.cluster_iters as i32) as usize,
+            // kNN
+            knn_params,
+            // Iteration
+            n_iterations: map
+                .get("n_iterations")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(defaults.n_iterations as i32) as usize,
+            // Classification
+            n_trees: map
+                .get("n_trees")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(defaults.n_trees as i32) as usize,
+            max_depth: map
+                .get("max_depth")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(defaults.max_depth as i32) as usize,
+            learning_rate: map
+                .get("learning_rate")
+                .and_then(|v| v.as_real())
+                .unwrap_or(defaults.learning_rate as f64) as f32,
+            min_samples_leaf: map
+                .get("min_samples_leaf")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(defaults.min_samples_leaf as i32) as usize,
+            early_stop_window: map
+                .get("early_stop_window")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(defaults.early_stop_window as i32)
+                as usize,
+            subsample_rate: map
+                .get("subsample_rate")
+                .and_then(|v| v.as_real())
+                .unwrap_or(defaults.subsample_rate as f64) as f32,
+            // Feature
+            include_pcs: map
+                .get("include_pcs")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(defaults.include_pcs as i32) as usize,
+            // Thresholding
+            manual_threshold: map
+                .get("manual_threshold")
+                .and_then(|v| v.as_real())
+                .map(|x| x as f32),
+            n_bins: map
+                .get("n_bins")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(defaults.n_bins as i32) as usize,
+            // Expected doublet rate
+            dbr_per_1k: map
+                .get("dbr_per_1k")
+                .and_then(|v| v.as_real())
+                .unwrap_or(defaults.dbr_per_1k as f64) as f32,
         }
     }
 }
