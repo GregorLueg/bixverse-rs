@@ -63,7 +63,7 @@ pub struct CagraParams {
 /// ### Returns
 ///
 /// Tuple of `(indices of nearest neighbours, distances to these neighbours)`
-pub fn generate_knn_with_dist(
+pub fn cagra_knn_with_dist(
     embd: MatRef<f32>,
     cagra_params: &CagraParams,
     return_dist: bool,

@@ -7,10 +7,14 @@
 - Various plotting helpers for single cell (gene-based).
 - New GPU feature flag that exposes a GPU-accelerated CAGRA kNN search for
   single cell applications.
-- Leverage sparse SVD for doublet detection methods
+- Leverage sparse SVD for doublet detection methods.
 - Version bump on `ann-search-rs` for KnnValidation error.
 - Updates to the doublet detection parts: improved thresholding for Scrublet
   and refactor of the code to extract shared elements.
+- Improved fastMNN code. Prior version was a mixture of mnnCorrect and fastMNN ->
+  refactor to pure fastMNN.
+- Fix: bug fix in the Harmony code.
+- Fix: fix numerical stability issue in the SVD code for large data sets.
 
 ## 0.1.5
 
