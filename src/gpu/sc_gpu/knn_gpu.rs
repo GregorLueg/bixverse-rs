@@ -107,7 +107,7 @@ pub fn cagra_knn_with_dist(
         cagra_params.rho,
         Some(cagra_params.refine_sweeps),
         seed,
-        false,
+        verbose,
         true,
         device.clone(),
     );

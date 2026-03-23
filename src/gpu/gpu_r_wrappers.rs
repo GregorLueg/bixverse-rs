@@ -10,9 +10,8 @@ use crate::gpu::sc_gpu::knn_gpu::CagraParams;
 ///////////
 
 impl CagraParams {
-    /// Generate the MinCellQuality params from an R list
-    ///
-    /// or default to sensible defaults
+    /// Generate the CagraParams params from an R list or default to sensible
+    /// parameters
     ///
     /// ### Params
     ///
