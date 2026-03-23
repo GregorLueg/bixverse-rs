@@ -163,9 +163,14 @@ pub fn sparse_csc_column_stds(
         .map(|j| {
             let start = csc.indptr[j];
             let end = csc.indptr[j + 1];
+            let nnz = end - start;
+            let mu = col_means[j];
             let slice = &values[start..end];
-            let sq_sum: f32 = sum_squares_simd_f32(slice);
-            let variance = (sq_sum - n_f * col_means[j] * col_means[j]) / (n_f - 1.0);
+            // Stable: sum of (x_i - mean)^2 over non-zeros
+            let ss_nonzero: f32 = slice.iter().map(|&x| (x - mu) * (x - mu)).sum();
+            // Plus (n - nnz) zeros, each contributing mean^2
+            let ss_zeros = (n - nnz) as f32 * mu * mu;
+            let variance = (ss_nonzero + ss_zeros) / (n_f - 1.0);
             variance.max(0.0).sqrt().max(f32::EPSILON)
         })
         .collect()

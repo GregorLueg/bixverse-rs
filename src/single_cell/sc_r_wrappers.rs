@@ -414,6 +414,10 @@ impl ScrubletParams {
     }
 }
 
+///////////
+// Boost //
+///////////
+
 impl BoostParams {
     /// Generate BoostParams from an R list
     ///
@@ -546,6 +550,10 @@ impl BoostParams {
     }
 }
 
+/////////////
+// FastMNN //
+/////////////
+
 impl FastMnnParams {
     /// Generate the FastMnnParams from an R list
     ///
@@ -647,7 +655,7 @@ impl MiloRParams {
 }
 
 //////////////
-// SeaCells //
+// SEACells //
 //////////////
 
 impl SEACellsParams {
