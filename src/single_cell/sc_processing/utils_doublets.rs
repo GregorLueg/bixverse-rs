@@ -311,7 +311,6 @@ pub fn pca_observed(
         chunk.filter_selected_cells(&cell_set);
     });
 
-    // re-normalise using HVG library sizes
     gene_chunks.par_iter_mut().for_each(|chunk| {
         for (i, &pos) in chunk.indices.iter().enumerate() {
             let raw_count = chunk.data_raw.get(i) as f32;
@@ -325,14 +324,11 @@ pub fn pca_observed(
         }
     });
 
-    // assemble into CSC -- remains sparse throughout
     let csc = from_gene_chunks::<f32>(&gene_chunks, n_cells);
     drop(gene_chunks);
 
-    // Column statistics for (a) implicit centering/scaling in SVD and
-    // (b) downstream projection of simulated doublets
-    let col_means = sparse_csc_column_means(&csc, true);
-    let col_stds = sparse_csc_column_stds(&csc, &col_means, true);
+    let col_means: Vec<f64> = sparse_csc_column_means(&csc, true);
+    let col_stds: Vec<f64> = sparse_csc_column_stds(&csc, &col_means, true);
 
     let means_for_svd = if mean_center {
         Some(&col_means[..])
@@ -352,7 +348,7 @@ pub fn pca_observed(
     let start_svd = Instant::now();
 
     let (scores, loadings) = if random_svd {
-        let svd_res = randomised_sparse_svd::<f32, f32>(
+        let svd_res = randomised_sparse_svd::<f32, f64>(
             &csc,
             no_pcs,
             seed as u64,
@@ -362,15 +358,14 @@ pub fn pca_observed(
             means_for_svd,
             stds_for_svd,
         );
-        let scores = compute_pc_scores(&svd_res);
-        let scores = scores.submatrix(0, 0, n_cells, no_pcs).to_owned();
-        let loadings = svd_res
-            .v()
-            .submatrix(0, 0, gene_indices.len(), no_pcs)
-            .to_owned();
+        let scores_f64 = compute_pc_scores(&svd_res);
+        let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| scores_f64[(i, j)] as f32);
+        let loadings = Mat::<f32>::from_fn(gene_indices.len(), no_pcs, |i, j| {
+            svd_res.v()[(i, j)] as f32
+        });
         (scores, loadings)
     } else {
-        let svd_res = sparse_svd_lanczos::<f32, f32, f32>(
+        let svd_res = sparse_svd_lanczos::<f32, f32, f64>(
             &csc,
             no_pcs,
             seed as u64,
@@ -378,11 +373,13 @@ pub fn pca_observed(
             means_for_svd,
             stds_for_svd,
         );
-        let scores = compute_pc_scores(&svd_res);
-        let loadings = svd_res
-            .v()
-            .submatrix(0, 0, gene_indices.len(), no_pcs)
-            .to_owned();
+        let scores_f64 = compute_pc_scores(&svd_res);
+        let scores = Mat::<f32>::from_fn(scores_f64.nrows(), scores_f64.ncols(), |i, j| {
+            scores_f64[(i, j)] as f32
+        });
+        let loadings = Mat::<f32>::from_fn(svd_res.v().nrows(), svd_res.v().ncols(), |i, j| {
+            svd_res.v()[(i, j)] as f32
+        });
         (scores, loadings)
     };
 
@@ -394,7 +391,11 @@ pub fn pca_observed(
         );
     }
 
-    (scores, loadings, col_means, col_stds)
+    // Cast means/stds back to f32 for the return type
+    let col_means_f32: Vec<f32> = col_means.iter().map(|&x| x as f32).collect();
+    let col_stds_f32: Vec<f32> = col_stds.iter().map(|&x| x as f32).collect();
+
+    (scores, loadings, col_means_f32, col_stds_f32)
 }
 
 /// Run PCA on observed cells, project simulated doublets, return combined
