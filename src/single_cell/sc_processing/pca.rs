@@ -150,7 +150,7 @@ pub fn sparse_csc_column_stds(
         "Expected CSC format"
     );
     let (n, m) = csc.shape;
-    let n_f = n as f32;
+
     let values: &[f32] = if use_second_layer {
         csc.data_2
             .as_ref()
@@ -158,20 +158,37 @@ pub fn sparse_csc_column_stds(
     } else {
         &csc.data
     };
+
     (0..m)
         .into_par_iter()
         .map(|j| {
             let start = csc.indptr[j];
             let end = csc.indptr[j + 1];
             let nnz = end - start;
-            let mu = col_means[j];
+
+            // updated
+            let mu = col_means[j] as f64;
             let slice = &values[start..end];
-            // Stable: sum of (x_i - mean)^2 over non-zeros
-            let ss_nonzero: f32 = slice.iter().map(|&x| (x - mu) * (x - mu)).sum();
-            // Plus (n - nnz) zeros, each contributing mean^2
-            let ss_zeros = (n - nnz) as f32 * mu * mu;
-            let variance = (ss_nonzero + ss_zeros) / (n_f - 1.0);
-            variance.max(0.0).sqrt().max(f32::EPSILON)
+
+            // accumulate squared differences in f64
+            let ss_nonzero: f64 = slice
+                .iter()
+                .map(|&x| {
+                    let diff = x as f64 - mu;
+                    diff * diff
+                })
+                .sum();
+
+            let ss_zeros = (n - nnz) as f64 * mu * mu;
+            let variance = (ss_nonzero + ss_zeros) / (n as f64 - 1.0);
+            let std_dev = variance.max(0.0).sqrt();
+
+            // safe guard against numerical issues
+            if std_dev < 1e-8 {
+                f32::INFINITY
+            } else {
+                std_dev as f32
+            }
         })
         .collect()
 }
