@@ -561,40 +561,27 @@ impl FastMnnParams {
     /// The `FastMnnParams` with all of the parameters.
     pub fn from_r_list(r_list: List) -> Self {
         let knn_params = KnnParams::from_r_list(r_list.clone());
-
         let fastmnn_list = r_list.into_hashmap();
-
-        let sigma = fastmnn_list
-            .get("sigma")
+        let ndist = fastmnn_list
+            .get("ndist")
             .and_then(|v| v.as_real())
-            .unwrap_or(0.1) as f32;
-
+            .unwrap_or(3.0) as f32;
         let cos_norm = fastmnn_list
             .get("cos_norm")
             .and_then(|v| v.as_logical())
             .map(|rb| rb.is_true())
             .unwrap_or(true);
-
-        let var_adj = fastmnn_list
-            .get("var_adj")
-            .and_then(|v| v.as_logical())
-            .map(|rb| rb.is_true())
-            .unwrap_or(true);
-
         let no_pcs = fastmnn_list
             .get("no_pcs")
             .and_then(|v| v.as_integer())
             .unwrap_or(30) as usize;
-
         let random_svd = fastmnn_list
             .get("random_svd")
             .and_then(|v| v.as_logical())
             .map(|rb| rb.is_true())
             .unwrap_or(true);
-
         Self {
-            sigma,
-            var_adj,
+            ndist,
             no_pcs,
             random_svd,
             cos_norm,
