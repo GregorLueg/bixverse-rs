@@ -109,8 +109,7 @@ pub fn sparse_csc_column_means(
         "Expected CSC format"
     );
     let (n, m) = csc.shape;
-    let n_f = n as f32;
-
+    let n_f = n as f64;
     let values: &[f32] = if use_second_layer {
         csc.data_2
             .as_ref()
@@ -118,13 +117,14 @@ pub fn sparse_csc_column_means(
     } else {
         &csc.data
     };
-
     (0..m)
         .into_par_iter()
         .map(|j| {
             let start = csc.indptr[j];
             let end = csc.indptr[j + 1];
-            sum_simd_f32(&values[start..end]) / n_f
+            // cast to f64 for numerical stability
+            let sum: f64 = values[start..end].iter().map(|&x| x as f64).sum();
+            (sum / n_f) as f32
         })
         .collect()
 }
