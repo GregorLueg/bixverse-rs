@@ -72,12 +72,23 @@ pub fn scale_csc_chunk(chunk: &CscGeneChunk, no_cells: usize) -> (Vec<f32>, f32,
     for (idx, &row_idx) in chunk.indices.iter().enumerate() {
         dense_data[row_idx as usize] = chunk.data_norm[idx].to_f32();
     }
-    let mean = sum_simd_f32(&dense_data) / no_cells as f32;
-    let variance = variance_simd_f32(&dense_data, mean) / (no_cells as f32 - 1.0);
-    let std_dev = variance.sqrt();
+
+    let n = no_cells as f64;
+    let sum: f64 = dense_data.iter().map(|&x| x as f64).sum();
+    let mean_f64 = sum / n;
+    let mean = mean_f64 as f32;
+
+    let variance_f64: f64 = dense_data
+        .iter()
+        .map(|&x| {
+            let d = x as f64 - mean_f64;
+            d * d
+        })
+        .sum::<f64>()
+        / (n - 1.0);
+    let std_dev = variance_f64.sqrt() as f32;
 
     let scaled = if std_dev < 1e-8 {
-        // Zero variance gene - just return centered data (all zeros after centering)
         vec![0_f32; no_cells]
     } else {
         dense_data.iter().map(|&x| (x - mean) / std_dev).collect()
