@@ -65,11 +65,11 @@ fn knn_search(
                 seed,
                 verbose,
             );
-            query_hnsw_index(query, &index, k, params.ef_search, false, verbose)
+            query_hnsw_index(query, &index, k, params.ef_search, true, verbose)
         }
         KnnSearch::Annoy => {
             let index = build_annoy_index(reference, params.ann_dist.clone(), params.n_tree, seed);
-            query_annoy_index(query, &index, k, params.search_budget, false, verbose)
+            query_annoy_index(query, &index, k, params.search_budget, true, verbose)
         }
         KnnSearch::NNDescent => {
             let index = build_nndescent_index(
@@ -84,11 +84,11 @@ fn knn_search(
                 seed,
                 verbose,
             );
-            query_nndescent_index(query, &index, k, params.ef_budget, false, verbose)
+            query_nndescent_index(query, &index, k, params.ef_budget, true, verbose)
         }
         KnnSearch::Exhaustive => {
             let index = build_exhaustive_index(reference, &params.ann_dist);
-            query_exhaustive_index(query, &index, k, false, verbose)
+            query_exhaustive_index(query, &index, k, true, verbose)
         }
         KnnSearch::Ivf => {
             let index = build_ivf_index(
@@ -99,7 +99,7 @@ fn knn_search(
                 seed,
                 verbose,
             );
-            query_ivf_index(query, &index, k, params.n_list, false, verbose)
+            query_ivf_index(query, &index, k, params.n_list, true, verbose)
         }
     };
 
