@@ -10,7 +10,6 @@ use crate::core::math::pca_svd::randomised_sparse_svd;
 use crate::core::math::pca_svd::*;
 use crate::core::math::sparse::sparse_svd_lanczos;
 use crate::prelude::*;
-use crate::utils::simd::*;
 
 /////////////
 // Helpers //
@@ -246,9 +245,22 @@ pub fn pca_on_sc(
         .collect();
 
     let num_genes = scaled_data.len();
-    let scaled_data = Mat::from_fn(cell_indices.len(), num_genes, |row, col| {
-        scaled_data[col][row]
-    });
+    let n_cells = cell_indices.len();
+
+    // Build f64 matrix for numerically stable SVD
+    let scaled_f64 =
+        Mat::<f64>::from_fn(n_cells, num_genes, |row, col| scaled_data[col][row] as f64);
+
+    // Also build f32 if needed for return or score computation
+    let scaled_f32 = if return_scaled {
+        Some(Mat::<f32>::from_fn(n_cells, num_genes, |row, col| {
+            scaled_data[col][row]
+        }))
+    } else {
+        None
+    };
+
+    drop(scaled_data);
 
     let end_scaling = start_scaling.elapsed();
 
@@ -259,23 +271,24 @@ pub fn pca_on_sc(
     let start_svd = Instant::now();
 
     let (scores, loadings, s) = if random_svd {
-        let res: RandomSvdResults<f32> =
-            randomised_svd(scaled_data.as_ref(), no_pcs, seed, Some(100_usize), None);
-        // Take first no_pcs components and compute scores as X * V
-        let loadings = res.v.submatrix(0, 0, num_genes, no_pcs).to_owned();
-        let scores = &scaled_data * &loadings;
-        (scores, loadings, res.s)
+        let res: RandomSvdResults<f64> =
+            randomised_svd(scaled_f64.as_ref(), no_pcs, seed, Some(100_usize), None);
+        let loadings = Mat::<f32>::from_fn(num_genes, no_pcs, |i, j| res.v[(i, j)] as f32);
+        let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| (res.u[(i, j)] * res.s[j]) as f32);
+        let s: Vec<f32> = res.s[..no_pcs].iter().map(|&x| x as f32).collect();
+        (scores, loadings, s)
     } else {
-        let res = scaled_data.thin_svd().unwrap();
-        // Take only the first no_pcs components
-        let loadings = res.V().submatrix(0, 0, num_genes, no_pcs).to_owned();
-        let scores = &scaled_data * &loadings;
+        let res = scaled_f64.thin_svd().unwrap();
+        let loadings = Mat::<f32>::from_fn(num_genes, no_pcs, |i, j| res.V()[(i, j)] as f32);
+        let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| {
+            (res.U()[(i, j)] * res.S().column_vector()[j]) as f32
+        });
         let s: Vec<f32> = res
             .S()
             .column_vector()
             .iter()
             .take(no_pcs)
-            .copied()
+            .map(|&x| x as f32)
             .collect();
         (scores, loadings, s)
     };
@@ -292,13 +305,7 @@ pub fn pca_on_sc(
         println!("Total run time PCA detection: {:.2?}", end_total);
     }
 
-    let scaled = if return_scaled {
-        Some(scaled_data)
-    } else {
-        None
-    };
-
-    (scores, loadings, s, scaled)
+    (scores, loadings, s, scaled_f32)
 }
 
 /// Calculate the PCs for single cell data using a streaming approach
@@ -347,9 +354,7 @@ pub fn pca_on_sc_streaming(
 
     let reader = ParallelSparseReader::new(f_path).unwrap();
 
-    // Pre-allocate the full dense scaled matrix - this is what SVD operates on.
-    // Sparse gene chunks are loaded and discarded batch by batch.
-    let mut scaled_matrix = Mat::<f32>::zeros(n_cells, n_genes);
+    let mut scaled_matrix = Mat::<f64>::zeros(n_cells, n_genes);
 
     let start_scaling = Instant::now();
 
@@ -388,10 +393,9 @@ pub fn pca_on_sc_streaming(
         for (local_col, scaled_col) in batch_scaled.iter().enumerate() {
             let global_col = start_gene + local_col;
             for (row, &val) in scaled_col.iter().enumerate() {
-                scaled_matrix[(row, global_col)] = val;
+                scaled_matrix[(row, global_col)] = val as f64;
             }
         }
-        // gene_chunks and batch_scaled dropped here
     }
 
     if verbose {
@@ -401,21 +405,24 @@ pub fn pca_on_sc_streaming(
     let start_svd = Instant::now();
 
     let (scores, loadings, s) = if random_svd {
-        let res: RandomSvdResults<f32> =
+        let res: RandomSvdResults<f64> =
             randomised_svd(scaled_matrix.as_ref(), no_pcs, seed, Some(100_usize), None);
-        let loadings = res.v.submatrix(0, 0, n_genes, no_pcs).to_owned();
-        let scores = &scaled_matrix * &loadings;
-        (scores, loadings, res.s)
+        let loadings = Mat::<f32>::from_fn(n_genes, no_pcs, |i, j| res.v[(i, j)] as f32);
+        let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| (res.u[(i, j)] * res.s[j]) as f32);
+        let s: Vec<f32> = res.s[..no_pcs].iter().map(|&x| x as f32).collect();
+        (scores, loadings, s)
     } else {
         let res = scaled_matrix.thin_svd().unwrap();
-        let loadings = res.V().submatrix(0, 0, n_genes, no_pcs).to_owned();
-        let scores = &scaled_matrix * &loadings;
+        let loadings = Mat::<f32>::from_fn(n_genes, no_pcs, |i, j| res.V()[(i, j)] as f32);
+        let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| {
+            (res.U()[(i, j)] * res.S().column_vector()[j]) as f32
+        });
         let s: Vec<f32> = res
             .S()
             .column_vector()
             .iter()
             .take(no_pcs)
-            .copied()
+            .map(|&x| x as f32)
             .collect();
         (scores, loadings, s)
     };
@@ -429,7 +436,9 @@ pub fn pca_on_sc_streaming(
     }
 
     let scaled = if return_scaled {
-        Some(scaled_matrix)
+        Some(Mat::<f32>::from_fn(n_cells, n_genes, |i, j| {
+            scaled_matrix[(i, j)] as f32
+        }))
     } else {
         None
     };
