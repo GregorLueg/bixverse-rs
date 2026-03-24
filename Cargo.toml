@@ -24,7 +24,7 @@ codegen-units = 4
 
 [dependencies]
 approx = "0.5.1"
-ann-search-rs = { version = "0.2.7", optional = true }
+ann-search-rs = { version = "0.2.8", optional = true }
 bincode = { version = "2.0.1", features = ["serde"], optional = true }
 extendr-api = "0.8.1"
 faer = "0.23.2"
@@ -45,7 +45,7 @@ statrs = "0.18.0"
 thousands = "0.2.0"
 wide = "1.1.1"
 document-features = "0.2.12"
-# os-specific compiling due to windows being windows
+# OS-specific compiling due to windows being windows
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 hdf5 = { package = "hdf5-metno", version = "0.10.1", features = [
     "static",
