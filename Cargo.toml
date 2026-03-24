@@ -14,8 +14,6 @@ path = "src/lib.rs"
 [features]
 ## Enables the single cell features in bixverse-rs
 single-cell = ["half", "bincode", "indexmap", "memmap2", "hdf5", "lz4_flex"]
-## Enables GPU-accelerated features
-gpu = ["ann-search-rs/gpu", "cubecl"]
 ## Tests for large scale diagonistics - for development only
 large_scale_diagnostics = []
 

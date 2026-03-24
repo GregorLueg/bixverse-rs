@@ -49,7 +49,6 @@ checksum = "b18b0564940c11f37a1c8aa912a13f1a7a57e79c077b90a2ae33820be35dbff8"
 dependencies = [
  "approx",
  "clap",
- "cubecl",
  "document-features",
  "faer",
  "faer-traits",
