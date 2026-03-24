@@ -6,9 +6,9 @@
 //!
 //! v3 files have:
 //! - CsrCellChunk: RawCounts enum (u16/u32), u32 gene indices, discriminant
-//!   byte at header[29]
+//!   byte at `header[29]`
 //! - CscGeneChunk: RawCounts enum (u16/u32), u32 cell indices, discriminant
-//!   byte at header[33]
+//!   byte at `header[33]`
 
 use bincode::{Decode, Encode, config, decode_from_slice};
 use lz4_flex::decompress_size_prepended;

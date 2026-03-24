@@ -199,7 +199,7 @@ fn calc_knn_weights(knn_indices: &[Vec<usize>], knn_distances: &[Vec<f32>]) -> V
 ///
 /// ### Returns
 ///
-/// A Vec<Vec<f32>> with cells x scores per gene set (pair)
+/// A `Vec<Vec<f32>>` with cells x scores per gene set (pair)
 pub fn calculate_vision(
     f_path: &str,
     gene_signs: &[SignatureGenes],
@@ -243,7 +243,7 @@ pub fn calculate_vision(
 ///
 /// ### Returns
 ///
-/// A Vec<Vec<f32>> with cells x scores per gene set (pair)
+/// A `Vec<Vec<f32>>` with cells x scores per gene set (pair)
 pub fn calculate_vision_streaming(
     f_path: &str,
     gene_signs: &[SignatureGenes],

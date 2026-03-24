@@ -339,23 +339,23 @@ where
         let (result, col_sums) = (0..n)
             .into_par_iter()
             .fold(
-                || (vec![F::zero(); m * ncols], vec![F::zero(); ncols]),
+                || (vec![0f64; m * ncols], vec![0f64; ncols]),
                 |(mut acc, mut cs), i| {
                     for col in 0..ncols {
-                        cs[col] += x[(i, col)];
+                        cs[col] += x[(i, col)].to_f64().unwrap();
                     }
                     for idx in csr.indptr[i]..csr.indptr[i + 1] {
                         let j = csr.indices[idx];
-                        let a_val = data_float[idx];
+                        let a_val = data_float[idx].to_f64().unwrap();
                         for col in 0..ncols {
-                            acc[j * ncols + col] += a_val * x[(i, col)];
+                            acc[j * ncols + col] += a_val * x[(i, col)].to_f64().unwrap();
                         }
                     }
                     (acc, cs)
                 },
             )
             .reduce(
-                || (vec![F::zero(); m * ncols], vec![F::zero(); ncols]),
+                || (vec![0f64; m * ncols], vec![0f64; ncols]),
                 |(mut a, mut cs_a), (b, cs_b)| {
                     for i in 0..a.len() {
                         a[i] += b[i];
@@ -371,12 +371,12 @@ where
             for col in 0..ncols {
                 let mut val = result[j * ncols + col];
                 if let Some(mu) = col_means {
-                    val -= mu[j] * col_sums[col];
+                    val -= mu[j].to_f64().unwrap() * col_sums[col];
                 }
                 if let Some(sd) = col_stds {
-                    val /= sd[j];
+                    val /= sd[j].to_f64().unwrap();
                 }
-                y[(j, col)] = val;
+                y[(j, col)] = F::from_f64(val).unwrap();
             }
         }
     };

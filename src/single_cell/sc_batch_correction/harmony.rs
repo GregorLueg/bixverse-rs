@@ -242,8 +242,8 @@ pub fn initialise_r_from_dist(dist_mat: MatRef<f32>, sigma: &[f32]) -> Mat<f32> 
 
 /// Compute observed and expected diversity statistics for one variable.
 ///
-/// O[k,b] = sum of R[k,n] for all cells n at level b
-/// E[k,b] = R_k_total * pr_b[b]
+/// `O[k,b] = sum of R[k,n]` for all cells n at level b
+/// `E[k,b] = R_k_total * pr_b[b]`
 ///
 /// ### Params
 ///
@@ -410,8 +410,7 @@ pub fn compute_objective(
 ///
 /// The diversity penalty is a product over variables:
 ///
-/// R[k,n] proportional to exp(-dist[k,n]/sigma[k])
-///     * product_v (E_v[k, b_v(n)] / (O_v[k, b_v(n)] + E_v[k, b_v(n)]))^theta_v
+/// `R[k,n] proportional to exp(-dist[k,n]/sigma[k]) * product_v (E_v[k, b_v(n)] / (O_v[k, b_v(n)] + E_v[k, b_v(n)]))^theta_v`
 ///
 /// Uses block-wise shuffling to efficiently update O and E statistics.
 ///
@@ -594,83 +593,66 @@ pub fn ridge_regression_correction(
 
     assert_eq!(r.ncols(), n);
 
-    // Compute design matrix dimensions and column offsets.
-    // Column 0 = intercept.
-    // For variable v, columns offset_v .. offset_v + (B_v - 2) correspond
-    // to levels 1 .. B_v - 1 (level 0 is the reference).
+    // Intercept + full one-hot per variable (matches C++ Phi_moe)
     let mut offsets = Vec::with_capacity(n_vars);
-    let mut col = 1usize;
+    let mut col = 1usize; // 0 = intercept
     for info in batch_infos {
         offsets.push(col);
-        col += info.n_levels - 1;
+        col += info.n_levels;
     }
-    let p = col; // total design matrix rows
+    let p = col;
 
     let mut z_corr = z_orig.to_owned();
 
     for cluster_idx in 0..k {
-        // For each cell, determine which design columns are active and
-        // accumulate design_cov (P x P) and phi_z (P x d).
         let mut design_cov = Mat::<f32>::zeros(p, p);
         let mut phi_z = Mat::<f32>::zeros(p, d);
 
         for cell_idx in 0..n {
             let r_val = r[(cluster_idx, cell_idx)];
-            let r2 = r_val * r_val;
 
-            // Determine active columns for this cell
-            // Column 0 (intercept) is always active
             let mut active_cols: Vec<usize> = Vec::with_capacity(1 + n_vars);
             active_cols.push(0);
-
             for var_idx in 0..n_vars {
                 let level = batch_infos[var_idx].cell_to_level[cell_idx];
-                if level >= 1 {
-                    active_cols.push(offsets[var_idx] + level - 1);
-                }
+                active_cols.push(offsets[var_idx] + level);
             }
 
-            // Accumulate phi_z
+            // Weighted by R (not R^2) -- matches C++ Phi_moe * diag(R_k)
             for &c in &active_cols {
                 for feat in 0..d {
                     phi_z[(c, feat)] += r_val * z_orig[(cell_idx, feat)];
                 }
             }
 
-            // Accumulate design_cov (symmetric outer product)
             for (i, &ci) in active_cols.iter().enumerate() {
                 for &cj in &active_cols[i..] {
-                    design_cov[(ci, cj)] += r2;
+                    design_cov[(ci, cj)] += r_val;
                     if ci != cj {
-                        design_cov[(cj, ci)] += r2;
+                        design_cov[(cj, ci)] += r_val;
                     }
                 }
             }
         }
 
-        // Add ridge penalty
+        // Uniform ridge on all entries including intercept
         for i in 0..p {
             design_cov[(i, i)] += lambda;
         }
 
-        // Solve: W = design_cov^{-1} * phi_z
         let partial_piv_lu: PartialPivLu<f32> = design_cov.partial_piv_lu();
         let inv_cov = partial_piv_lu.inverse();
         let w = &inv_cov * &phi_z;
 
-        // Apply correction: subtract deviation contributions (columns 1..P-1)
-        // For each cell, subtract R[k,n] * W[c, :] for each active
-        // non-intercept column c.
+        // Subtract batch columns only -- intercept (row 0) is NOT
+        // subtracted, matching C++ W.row(0).zeros()
         for cell_idx in 0..n {
             let r_val = r[(cluster_idx, cell_idx)];
-
             for var_idx in 0..n_vars {
                 let level = batch_infos[var_idx].cell_to_level[cell_idx];
-                if level >= 1 {
-                    let c = offsets[var_idx] + level - 1;
-                    for feat in 0..d {
-                        z_corr[(cell_idx, feat)] -= r_val * w[(c, feat)];
-                    }
+                let c = offsets[var_idx] + level;
+                for feat in 0..d {
+                    z_corr[(cell_idx, feat)] -= r_val * w[(c, feat)];
                 }
             }
         }
@@ -918,8 +900,8 @@ pub fn harmony(
             println!("  Harmony objective: {:.4}", harmony_obj);
         }
 
-        if harmony_iter >= 1 {
-            let obj_old = state.objectives_harmony[harmony_iter];
+        if harmony_iter >= 2 {
+            let obj_old = state.objectives_harmony[harmony_iter - 1];
             let obj_new = state.objectives_harmony[harmony_iter + 1];
             let rel_change = (obj_old - obj_new).abs() / obj_old.abs();
 
@@ -1563,13 +1545,18 @@ mod tests {
             z_orig.as_ref(),
             r.as_ref(),
             std::slice::from_ref(&info),
-            0.1,
+            1.0,
         );
 
+        // With intercept + full one-hot encoding, identical data across
+        // batches produces near-zero batch coefficients. The residual
+        // correction scales as ~mean / (1 + lambda * E) so it shrinks
+        // with larger lambda. With lambda=1.0 and 4 cells the change
+        // should be modest.
         for i in 0..4 {
             for j in 0..2 {
                 assert!(
-                    (z_corr[(i, j)] - z_orig[(i, j)]).abs() < 0.5,
+                    (z_corr[(i, j)] - z_orig[(i, j)]).abs() < 1.0,
                     "Cell {}, feature {}: changed from {} to {}",
                     i,
                     j,
@@ -1577,6 +1564,20 @@ mod tests {
                     z_corr[(i, j)]
                 );
             }
+        }
+
+        // More importantly: all cells should still be very close to each
+        // other (no artificial spread introduced)
+        for j in 0..2 {
+            let vals: Vec<f32> = (0..4).map(|i| z_corr[(i, j)]).collect();
+            let spread = vals.iter().cloned().fold(f32::MIN, f32::max)
+                - vals.iter().cloned().fold(f32::MAX, f32::min);
+            assert!(
+                spread < 0.5,
+                "Feature {}: correction introduced spread of {}",
+                j,
+                spread
+            );
         }
     }
 

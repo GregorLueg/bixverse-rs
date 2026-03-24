@@ -18,20 +18,92 @@ use crate::single_cell::sc_processing::pca::*;
 /// Parameters for fastMNN batch correction
 #[derive(Clone, Debug)]
 pub struct FastMnnParams {
-    /// Bandwidth of the Gaussian smoothing kernel (as proportion of space
-    /// radius after optional cosine normalisation)/
-    pub sigma: f32,
+    /// Number of median distances for tricube kernel bandwidth (default 3.0)
+    pub ndist: f32,
     /// Apply cosine normalisation before computing distances.
     pub cos_norm: bool,
-    /// Apply variance adjustment to avoid kissing effects.
-    pub var_adj: bool,
     /// Number of PCs to use for the MNN calculations
     pub no_pcs: usize,
     /// Boolean. Shall randomised SVD be used.
     pub random_svd: bool,
     /// Parameters for the various approximate nearest neighbour searches
-    /// in ann-search-rs
     pub knn_params: KnnParams,
+}
+
+/// Build index on `reference` and query `query` for k nearest neighbours.
+/// Returns (indices, distances).
+///
+/// ### Params
+///
+/// * `query` - The query data
+/// * `reference` - The reference data
+/// * `k` - Number of neighbours
+/// * `params` - The kNN parameters for all of the indices
+/// * `seed` - Seed for reproducibility
+/// * `verbose` - Boolean to control verbosity
+///
+/// ### Returns
+///
+/// The indices and distances
+fn knn_search(
+    query: MatRef<f32>,
+    reference: MatRef<f32>,
+    k: usize,
+    params: &KnnParams,
+    seed: usize,
+    verbose: bool,
+) -> (Vec<Vec<usize>>, Vec<Vec<f32>>) {
+    let knn_method: KnnSearch = parse_knn_method(&params.knn_method).unwrap_or_default();
+
+    let (indices, dist) = match knn_method {
+        KnnSearch::Hnsw => {
+            let index = build_hnsw_index(
+                reference,
+                params.m,
+                params.ef_construction,
+                &params.ann_dist,
+                seed,
+                verbose,
+            );
+            query_hnsw_index(query, &index, k, params.ef_search, true, verbose)
+        }
+        KnnSearch::Annoy => {
+            let index = build_annoy_index(reference, params.ann_dist.clone(), params.n_tree, seed);
+            query_annoy_index(query, &index, k, params.search_budget, true, verbose)
+        }
+        KnnSearch::NNDescent => {
+            let index = build_nndescent_index(
+                reference,
+                &params.ann_dist,
+                params.delta,
+                params.diversify_prob,
+                None,
+                None,
+                None,
+                None,
+                seed,
+                verbose,
+            );
+            query_nndescent_index(query, &index, k, params.ef_budget, true, verbose)
+        }
+        KnnSearch::Exhaustive => {
+            let index = build_exhaustive_index(reference, &params.ann_dist);
+            query_exhaustive_index(query, &index, k, true, verbose)
+        }
+        KnnSearch::Ivf => {
+            let index = build_ivf_index(
+                reference,
+                params.n_list,
+                None,
+                &params.ann_dist,
+                seed,
+                verbose,
+            );
+            query_ivf_index(query, &index, k, params.n_list, true, verbose)
+        }
+    };
+
+    (indices, dist.unwrap())
 }
 
 /////////////
@@ -94,16 +166,14 @@ pub fn find_mutual_nns(
 /// ### Returns
 ///
 /// Matrix of correction vectors averaged per unique cell in right batch
-/// (cells x genes)
+/// (cells x genes) and sorted indices
 pub fn compute_correction_vecs(
     data_1: &MatRef<f32>,
     data_2: &MatRef<f32>,
     mnn_1: &[usize],
     mnn_2: &[usize],
-) -> Mat<f32> {
+) -> (Mat<f32>, Vec<usize>) {
     let n_features = data_1.ncols();
-    let ncells_2 = data_2.nrows();
-
     let mut accum: FxHashMap<usize, (Vec<f32>, usize)> = FxHashMap::default();
 
     for (&idx1, &idx2) in mnn_1.iter().zip(mnn_2.iter()) {
@@ -116,543 +186,307 @@ pub fn compute_correction_vecs(
         *count += 1;
     }
 
-    let mut averaged = Mat::zeros(ncells_2, n_features);
-    for (cell_idx, (sums, count)) in accum.iter() {
+    let mut sorted_indices: Vec<usize> = accum.keys().copied().collect();
+    sorted_indices.sort_unstable();
+
+    let n_unique = sorted_indices.len();
+    let mut averaged = Mat::zeros(n_unique, n_features);
+
+    for (row, &cell_idx) in sorted_indices.iter().enumerate() {
+        let (sums, count) = &accum[&cell_idx];
         let n = *count as f32;
         for g in 0..n_features {
-            averaged[(*cell_idx, g)] = sums[g] / n;
+            averaged[(row, g)] = sums[g] / n;
         }
     }
 
-    averaged
+    (averaged, sorted_indices)
 }
 
-/// Logspace addition to avoid underflow
+/// Centre data along the batch vector direction.
+///
+/// Projects all cells onto the unit batch vector, computes mean projection,
+/// then shifts each cell so variation along the batch direction is removed.
+/// This is `.center_along_batch_vector` from the R code.
 ///
 /// ### Params
 ///
-/// * `log_a` - Logarithm of first value
-/// * `log_b` - Logarithm of second value
+/// * `data` - Cell data matrix (cells x features)
+/// * `batch_vec` - The batch direction vector (length = n_features). If the
+///   L2 norm is below 1e-15, data is returned unchanged.
 ///
 /// ### Returns
 ///
-/// Logarithm of sum of two values
-#[inline]
-fn logspace_add(log_a: f32, log_b: f32) -> f32 {
-    if log_a.is_infinite() && log_a.is_sign_negative() {
-        return log_b;
+/// Centred matrix (cells x features) with variation along `batch_vec` removed
+fn center_along_batch_vector(data: &MatRef<f32>, batch_vec: &[f32]) -> Mat<f32> {
+    let n_cells = data.nrows();
+    let n_features = data.ncols();
+
+    let l2: f32 = batch_vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if l2 < 1e-15 {
+        return data.to_owned();
     }
-    if log_b.is_infinite() && log_b.is_sign_negative() {
-        return log_a;
-    }
+    let unit_vec: Vec<f32> = batch_vec.iter().map(|x| x / l2).collect();
 
-    let max = log_a.max(log_b);
-    max + ((log_a - max).exp() + (log_b - max).exp()).ln()
-}
-
-/// Smooth correction vectors using Gaussian kernel weighted by MNN density
-///
-/// ### Params
-///
-/// * `averaged` - Averaged correction vectors (cells_with_mnn x features)
-/// * `mnn_indices` - Indices of cells that have MNN pairs
-/// * `data_2` - Data of second batch. (Cells x features.)
-/// * `sigma_2` - Bandwidth squared
-///
-/// ### Returns
-///
-/// Smoothed correction vectors for all cells (cells x features)
-pub fn smooth_gaussian_kernel_mnn(
-    averaged: &MatRef<f32>,
-    mnn_indices: &[usize],
-    data_2: &MatRef<f32>,
-    sigma_square: f32,
-) -> Mat<f32> {
-    let n_cells = data_2.nrows();
-    let n_features_dist = data_2.ncols();
-    let n_features = averaged.ncols();
-    let inv_sigma_square = 1.0 / sigma_square;
-
-    // Validate indices
-    for &idx in mnn_indices {
-        assert!(
-            idx < n_cells,
-            "mnn_indices contains {} but data_2 only has {} rows",
-            idx,
-            n_cells
-        );
-    }
-
-    let (output, log_total_prob) = (0..mnn_indices.len())
-        .into_par_iter()
-        .fold(
-            || {
-                (
-                    vec![vec![0_f32; n_features]; n_cells],
-                    vec![f32::NEG_INFINITY; n_cells],
-                )
-            },
-            |(mut output, mut log_total_prob), mnn_i| {
-                let mnn_cell_idx = mnn_indices[mnn_i];
-                let mut log_probs = vec![0_f32; n_cells];
-
-                // Compute log weights
-                for other in 0..n_cells {
-                    let mut dist_2 = 0_f32;
-                    for g in 0..n_features_dist {
-                        let diff = data_2.get(mnn_cell_idx, g) - data_2.get(other, g);
-                        dist_2 += diff * diff;
-                    }
-                    log_probs[other] = -dist_2 * inv_sigma_square;
-                }
-
-                // Compute density
-                let density = mnn_indices
-                    .iter()
-                    .map(|&idx| log_probs[idx])
-                    .fold(f32::NEG_INFINITY, logspace_add);
-
-                // Update output
-                for other in 0..n_cells {
-                    let log_weight = log_probs[other] - density;
-                    let weight = log_weight.exp();
-
-                    log_total_prob[other] = logspace_add(log_total_prob[other], log_weight);
-
-                    for g in 0..n_features {
-                        output[other][g] += averaged.get(mnn_cell_idx, g) * weight;
-                    }
-                }
-                (output, log_total_prob)
-            },
-        )
-        .reduce(
-            || {
-                (
-                    vec![vec![0_f32; n_features]; n_cells],
-                    vec![f32::NEG_INFINITY; n_cells],
-                )
-            },
-            |(mut o1, mut p1), (o2, p2)| {
-                for i in 0..n_cells {
-                    for g in 0..n_features {
-                        o1[i][g] += o2[i][g];
-                    }
-                    p1[i] = logspace_add(p1[i], p2[i]);
-                }
-                (o1, p1)
-            },
-        );
-
-    // Normalise
-    let mut result = Mat::zeros(n_cells, n_features);
+    let mut projections = vec![0.0f32; n_cells];
     for i in 0..n_cells {
-        let norm = log_total_prob[i].exp();
-        if norm > 0_f32 {
-            for g in 0..n_features {
-                result[(i, g)] = output[i][g] / norm;
-            }
+        for g in 0..n_features {
+            projections[i] += data.get(i, g) * unit_vec[g];
         }
     }
-    result
+
+    let mean_proj: f32 = projections.iter().sum::<f32>() / n_cells as f32;
+
+    Mat::from_fn(n_cells, n_features, |i, g| {
+        data.get(i, g) + (mean_proj - projections[i]) * unit_vec[g]
+    })
 }
 
-/// Compute squared distance from point to line defined by ref + t*grad
-fn sq_distance_to_line_buf(ref_point: &[f32], grad: &[f32], point: &[f32]) -> f32 {
-    let scale: f32 = ref_point
-        .iter()
-        .zip(grad.iter())
-        .zip(point.iter())
-        .map(|((r, g), p)| (r - p) * g)
-        .sum();
-
-    ref_point
-        .iter()
-        .zip(grad.iter())
-        .zip(point.iter())
-        .map(|((r, g), p)| {
-            let diff = r - p;
-            let perp = diff - scale * g;
-            perp * perp
-        })
-        .sum()
-}
-
-/// Adjust shift variance to avoid kissing effects
+/// Compute tricube-weighted correction for all cells in the target batch.
+///
+/// For each cell, finds k nearest neighbours among MNN-involved cells,
+/// computes tricube-weighted average of their correction vectors, and
+/// returns the corrected data (data + weighted_correction).
 ///
 /// ### Params
 ///
-/// * `data_1` - Reference batch (cells x genes)
-/// * `data_2` - Target batch (cells x genes)
-/// * `corrections` - Correction vectors (cells x genes)
-/// * `sigma_square` - Bandwidth squared
-/// * `restrict_1` - Optional subset of cells from batch1 (None = all)
-/// * `restrict_2` - Optional subset of cells from batch2 (None = all)
-///
-/// ### Returns
-///
-/// Scaling factors for each cell in batch_2
-pub fn adjust_shift_variance(
-    data_1: &MatRef<f32>,
-    data_2: &MatRef<f32>,
-    corrections: &MatRef<f32>,
-    sigma_square: f32,
-    restrict_1: Option<&[usize]>,
-    restrict_2: Option<&[usize]>,
-) -> Vec<f32> {
-    let n_features = data_1.ncols();
-    let n_cells2 = data_2.nrows();
-
-    assert_eq!(data_1.ncols(), n_features);
-    assert_eq!(data_2.ncols(), n_features);
-    assert_eq!(corrections.nrows(), n_cells2);
-    assert_eq!(corrections.ncols(), n_features);
-
-    let restrict_1_indices: Vec<usize> = restrict_1
-        .map(|r| r.to_vec())
-        .unwrap_or_else(|| (0..data_1.nrows()).collect());
-    let restrict_2_indices: Vec<usize> = restrict_2
-        .map(|r| r.to_vec())
-        .unwrap_or_else(|| (0..n_cells2).collect());
-
-    let inv_sigma2 = 1.0 / sigma_square;
-    let mut output = vec![1.0f32; n_cells2];
-
-    let mut grad = vec![0.0f32; n_features];
-    let mut curcell = vec![0.0f32; n_features];
-    let mut othercell = vec![0.0f32; n_features];
-    let mut distance1: Vec<(f32, f32)> = vec![(0.0, 0.0); restrict_1_indices.len()];
-
-    for cell in 0..n_cells2 {
-        for g in 0..n_features {
-            grad[g] = corrections[(cell, g)];
-        }
-
-        let l2norm: f32 = grad.iter().map(|&x| x * x).sum::<f32>().sqrt();
-
-        if l2norm < 1e-8 {
-            continue;
-        }
-
-        let inv_l2norm = 1.0 / l2norm;
-        for g in grad.iter_mut() {
-            *g *= inv_l2norm;
-        }
-
-        for g in 0..n_features {
-            curcell[g] = data_2[(cell, g)];
-        }
-
-        let curproj: f32 = grad.iter().zip(curcell.iter()).map(|(g, c)| g * c).sum();
-
-        let mut prob2 = f32::NEG_INFINITY;
-        let mut totalprob2 = f32::NEG_INFINITY;
-
-        for &same_idx in &restrict_2_indices {
-            let (log_prob, should_add) = if same_idx == cell {
-                (0.0, true)
-            } else {
-                for g in 0..n_features {
-                    othercell[g] = data_2[(same_idx, g)];
-                }
-                let samedist = sq_distance_to_line_buf(&curcell, &grad, &othercell);
-                let sameproj: f32 = grad.iter().zip(othercell.iter()).map(|(g, c)| g * c).sum();
-                (-samedist * inv_sigma2, sameproj <= curproj)
-            };
-
-            totalprob2 = logspace_add(totalprob2, log_prob);
-            if should_add {
-                prob2 = logspace_add(prob2, log_prob);
-            }
-        }
-
-        prob2 -= totalprob2;
-
-        for (idx, &other_idx) in restrict_1_indices.iter().enumerate() {
-            for g in 0..n_features {
-                othercell[g] = data_1[(other_idx, g)];
-            }
-
-            let proj: f32 = grad.iter().zip(othercell.iter()).map(|(g, c)| g * c).sum();
-            let dist = sq_distance_to_line_buf(&curcell, &grad, &othercell);
-            distance1[idx] = (proj, -dist * inv_sigma2);
-        }
-
-        if distance1.is_empty() {
-            continue;
-        }
-
-        distance1.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-
-        let totalprob1 = distance1
-            .iter()
-            .map(|(_, lw)| *lw)
-            .fold(f32::NEG_INFINITY, logspace_add);
-
-        let target = prob2 + totalprob1;
-        let mut cumulative = f32::NEG_INFINITY;
-        let mut ref_quan = distance1.last().unwrap().0;
-
-        for &(proj, log_weight) in &distance1 {
-            cumulative = logspace_add(cumulative, log_weight);
-            if cumulative >= target {
-                ref_quan = proj;
-                break;
-            }
-        }
-
-        output[cell] = (ref_quan - curproj) * inv_l2norm;
-    }
-
-    output
-}
-
-/// Merge two batches
-///
-/// ### Params
-///
-/// * `data_1` - First batch (cells x features)
-/// * `data_2` - Second batch (cells x features)
-/// * `params` - `FastMnnParams` params with all of the parameters for this
-///   run
+/// * `data` - Target batch cell coordinates (cells x features)
+/// * `corrections` - Averaged correction vectors, one row per unique MNN cell
+///   (n_unique_mnn x features)
+/// * `mnn_indices` - Row indices into `data` identifying cells that
+///   participated in MNN pairs; used to build the neighbour search reference
+/// * `k` - Number of nearest MNN neighbours to use for weighting
+/// * `ndist` - Bandwidth multiplier; bandwidth = ndist * median distance to
+///   the k neighbours
+/// * `knn_params` - Parameters controlling the approximate nearest neighbour
+///   search
 /// * `seed` - Random seed for reproducibility
-/// * `verbose` - Controls verbosity of the function
 ///
 /// ### Returns
 ///
-/// Corrected data_2 (genes x features)
+/// Corrected matrix (cells x features); each cell's coordinates shifted by
+/// its tricube-weighted average correction vector
+#[allow(clippy::too_many_arguments)]
+pub fn tricube_weighted_correction(
+    data: &MatRef<f32>,
+    corrections: &MatRef<f32>,
+    mnn_indices: &[usize],
+    k: usize,
+    ndist: f32,
+    knn_params: &KnnParams,
+    seed: usize,
+) -> Mat<f32> {
+    let n_cells = data.nrows();
+    let n_features = data.ncols();
+    let n_mnn = mnn_indices.len();
+
+    // Build sub-matrix of MNN-involved cells' coordinates
+    let mnn_data = Mat::from_fn(n_mnn, n_features, |r, c| *data.get(mnn_indices[r], c));
+
+    let safe_k = k.min(n_mnn);
+
+    // Find k nearest MNN neighbours for every cell
+    let (knn_idx, knn_dist) = knn_search(*data, mnn_data.as_ref(), safe_k, knn_params, seed, false);
+
+    // Compute tricube-weighted average corrections
+    let mut correction_out: Mat<f32> = Mat::zeros(n_cells, n_features);
+
+    for cell in 0..n_cells {
+        let dists = &knn_dist[cell];
+        let indices = &knn_idx[cell];
+
+        if dists.is_empty() {
+            continue;
+        }
+
+        // Bandwidth = ndist * median distance
+        let mut sorted_d: Vec<f32> = dists.clone();
+        sorted_d.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let median_d = if sorted_d.len() % 2 == 0 && sorted_d.len() >= 2 {
+            (sorted_d[sorted_d.len() / 2 - 1] + sorted_d[sorted_d.len() / 2]) * 0.5
+        } else {
+            sorted_d[sorted_d.len() / 2]
+        };
+
+        let bandwidth = ndist * median_d;
+
+        if bandwidth < 1e-15 {
+            // All neighbours at the same point; unweighted average of zero-distance ones
+            let zero_count = dists.iter().filter(|&&d| d < 1e-15).count();
+            if zero_count > 0 {
+                let w = 1.0 / zero_count as f32;
+                for (j, &nn) in indices.iter().enumerate() {
+                    if dists[j] < 1e-15 {
+                        for g in 0..n_features {
+                            correction_out[(cell, g)] += corrections.get(nn, g) * w;
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+
+        let mut weight_sum = 0.0f32;
+        let mut weights = vec![0.0f32; indices.len()];
+
+        for (j, &d) in dists.iter().enumerate() {
+            let ratio = d / bandwidth;
+            if ratio < 1.0 {
+                let t = 1.0 - ratio * ratio * ratio;
+                weights[j] = t * t * t;
+                weight_sum += weights[j];
+            }
+        }
+
+        if weight_sum > 0.0 {
+            let inv_w = 1.0 / weight_sum;
+            for (j, &nn) in indices.iter().enumerate() {
+                if weights[j] > 0.0 {
+                    let w = weights[j] * inv_w;
+                    for g in 0..n_features {
+                        correction_out[(cell, g)] += corrections.get(nn, g) * w;
+                    }
+                }
+            }
+        }
+    }
+
+    // Return data + correction
+    Mat::from_fn(n_cells, n_features, |i, g| {
+        data.get(i, g) + correction_out[(i, g)]
+    })
+}
+
+/// Merge two batches following the fastMNN algorithm.
+///
+/// Method
+///
+/// 1. Orthogonalise batch2 against accumulated batch vectors
+/// 2. Find MNN pairs
+/// 3. Compute average correction and overall batch vector
+/// 4. Centre both batches along the batch vector (removes variation along batch
+///    direction)
+/// 5. Recompute corrections with centred data (same MNN pairs)
+/// 6. Apply tricube-weighted correction to batch2
+/// 7. Stack and return
+///
+/// ### Params
+///
+/// * `data_1` - Left (reference) batch coordinates (cells x features)
+/// * `data_2` - Right (target) batch coordinates (cells x features)
+/// * `params` - FastMNN parameters controlling k, ndist, cosine normalisation,
+///   and the underlying kNN search
+/// * `batch_vecs` - Accumulated batch direction vectors from all prior merges;
+///   `data_2` is orthogonalised against each before MNN search, and the new
+///   batch vector is appended on return
+/// * `seed` - Random seed for reproducibility
+/// * `verbose` - If true, prints progress and MNN pair counts
+///
+/// ### Returns
+///
+/// Stacked matrix of left (centred) and corrected right batch (n_total x
+/// features)
 pub fn merge_two_batches(
     data_1: &MatRef<f32>,
     data_2: &MatRef<f32>,
     params: &FastMnnParams,
+    batch_vecs: &mut Vec<Vec<f32>>,
     seed: usize,
     verbose: bool,
 ) -> Mat<f32> {
-    let sigma_square = params.sigma * params.sigma;
+    let n_features = data_1.ncols();
 
-    let knn_method: KnnSearch = parse_knn_method(&params.knn_params.knn_method).unwrap_or_default();
+    // Step 1: Orthogonalise new batch against all previous batch vectors.
+    // In a progressive merge the left (already merged) carries previous
+    // orthogonalisations baked in, so only the right needs this.
+    let mut right = data_2.to_owned();
+    for vec in batch_vecs.iter() {
+        right = center_along_batch_vector(&right.as_ref(), vec);
+    }
 
-    let (knn_1_to_2, knn_2_to_1) = match knn_method {
-        KnnSearch::Hnsw => {
-            let index_2 = build_hnsw_index(
-                *data_2,
-                params.knn_params.m,
-                params.knn_params.ef_construction,
-                &params.knn_params.ann_dist,
-                seed,
-                verbose,
-            );
-            let (knn_1_to_2, _) = query_hnsw_index(
-                *data_1,
-                &index_2,
-                params.knn_params.k,
-                params.knn_params.ef_search,
-                false,
-                verbose,
-            );
-
-            let index_1 = build_hnsw_index(
-                *data_1,
-                params.knn_params.m,
-                params.knn_params.ef_construction,
-                &params.knn_params.ann_dist,
-                seed,
-                verbose,
-            );
-            let (knn_2_to_1, _) = query_hnsw_index(
-                *data_2,
-                &index_1,
-                params.knn_params.k,
-                params.knn_params.ef_search,
-                false,
-                verbose,
-            );
-
-            (knn_1_to_2, knn_2_to_1)
-        }
-        KnnSearch::Annoy => {
-            let index_2 = build_annoy_index(
-                *data_2,
-                params.knn_params.ann_dist.clone(),
-                params.knn_params.n_tree,
-                seed,
-            );
-            let (knn_1_to_2, _) = query_annoy_index(
-                *data_1,
-                &index_2,
-                params.knn_params.k,
-                params.knn_params.search_budget,
-                false,
-                verbose,
-            );
-
-            let index_1 = build_annoy_index(
-                *data_1,
-                params.knn_params.ann_dist.clone(),
-                params.knn_params.n_tree,
-                seed,
-            );
-            let (knn_2_to_1, _) = query_annoy_index(
-                *data_2,
-                &index_1,
-                params.knn_params.k,
-                params.knn_params.search_budget,
-                false,
-                verbose,
-            );
-
-            (knn_1_to_2, knn_2_to_1)
-        }
-        KnnSearch::NNDescent => {
-            let index_2 = build_nndescent_index(
-                *data_2,
-                &params.knn_params.ann_dist,
-                params.knn_params.delta,
-                params.knn_params.diversify_prob,
-                None,
-                None,
-                None,
-                None,
-                seed,
-                verbose,
-            );
-
-            let (knn_1_to_2, _) = query_nndescent_index(
-                *data_1,
-                &index_2,
-                params.knn_params.k,
-                params.knn_params.ef_budget,
-                false,
-                verbose,
-            );
-
-            let index_1 = build_nndescent_index(
-                *data_1,
-                &params.knn_params.ann_dist,
-                params.knn_params.delta,
-                params.knn_params.diversify_prob,
-                None,
-                None,
-                None,
-                None,
-                seed,
-                verbose,
-            );
-
-            let (knn_2_to_1, _) = query_nndescent_index(
-                *data_2,
-                &index_1,
-                params.knn_params.k,
-                params.knn_params.ef_budget,
-                false,
-                verbose,
-            );
-
-            (knn_1_to_2, knn_2_to_1)
-        }
-        KnnSearch::Exhaustive => {
-            let index_2 = build_exhaustive_index(*data_2, &params.knn_params.ann_dist);
-
-            let (knn_1_to_2, _) =
-                query_exhaustive_index(*data_1, &index_2, params.knn_params.k, false, verbose);
-
-            let index_1 = build_exhaustive_index(*data_1, &params.knn_params.ann_dist);
-
-            let (knn_2_to_1, _) =
-                query_exhaustive_index(*data_2, &index_1, params.knn_params.k, false, verbose);
-
-            (knn_1_to_2, knn_2_to_1)
-        }
-        KnnSearch::Ivf => {
-            let index_2 = build_ivf_index(
-                *data_2,
-                params.knn_params.n_list,
-                None,
-                &params.knn_params.ann_dist,
-                seed,
-                verbose,
-            );
-
-            let (knn_1_to_2, _) = query_ivf_index(
-                *data_1,
-                &index_2,
-                params.knn_params.k,
-                params.knn_params.n_list,
-                false,
-                verbose,
-            );
-
-            let index_1 = build_ivf_index(
-                *data_1,
-                params.knn_params.n_list,
-                None,
-                &params.knn_params.ann_dist,
-                seed,
-                verbose,
-            );
-
-            let (knn_2_to_1, _) = query_ivf_index(
-                *data_2,
-                &index_1,
-                params.knn_params.k,
-                params.knn_params.n_list,
-                false,
-                verbose,
-            );
-
-            (knn_1_to_2, knn_2_to_1)
-        }
-    };
+    // Step 2: Find MNN pairs
+    let (knn_1_to_2, _) = knn_search(
+        *data_1,
+        right.as_ref(),
+        params.knn_params.k,
+        &params.knn_params,
+        seed,
+        verbose,
+    );
+    let (knn_2_to_1, _) = knn_search(
+        right.as_ref(),
+        *data_1,
+        params.knn_params.k,
+        &params.knn_params,
+        seed,
+        verbose,
+    );
 
     let (mnn_1, mnn_2) = find_mutual_nns(&knn_1_to_2, &knn_2_to_1);
 
     if mnn_1.is_empty() {
         if verbose {
-            eprintln!("Warning: No MNN pairs found");
+            eprintln!("Warning: No MNN pairs found, skipping correction");
         }
-        return data_2.to_owned();
+        let n_total = data_1.nrows() + right.nrows();
+        return Mat::from_fn(n_total, n_features, |row, col| {
+            if row < data_1.nrows() {
+                *data_1.get(row, col)
+            } else {
+                *right.as_ref().get(row - data_1.nrows(), col)
+            }
+        });
     }
 
     if verbose {
         println!("Found {} MNN pairs", mnn_1.len());
     }
 
-    let averaged = compute_correction_vecs(data_1, data_2, &mnn_1, &mnn_2);
-    let mut corrections =
-        smooth_gaussian_kernel_mnn(&averaged.as_ref(), &mnn_2, data_2, sigma_square);
+    // Step 3: Compute average correction vectors and overall batch vector
+    let (averaged, _unique_mnn) = compute_correction_vecs(data_1, &right.as_ref(), &mnn_1, &mnn_2);
 
-    if params.var_adj {
-        let scaling = adjust_shift_variance(
-            data_1,
-            data_2,
-            &corrections.as_ref(),
-            sigma_square,
-            None,
-            None,
-        );
-
-        for cell in 0..corrections.nrows() {
-            for gene in 0..corrections.ncols() {
-                corrections[(cell, gene)] *= scaling[cell].max(1.0);
-            }
+    let n_unique = averaged.nrows();
+    let mut overall_batch = vec![0.0f32; n_features];
+    for g in 0..n_features {
+        for i in 0..n_unique {
+            overall_batch[g] += averaged[(i, g)];
         }
+        overall_batch[g] /= n_unique as f32;
     }
 
-    let mut corrected = data_2.to_owned();
-    for cell in 0..data_2.nrows() {
-        for gene in 0..data_2.ncols() {
-            corrected[(cell, gene)] += corrections[(cell, gene)];
-        }
-    }
+    // Step 4: Centre both batches along the overall batch vector
+    let left_centered = center_along_batch_vector(data_1, &overall_batch);
+    let right_centered = center_along_batch_vector(&right.as_ref(), &overall_batch);
 
-    let n_cells_total = data_1.nrows() + corrected.nrows();
-    let n_features = data_1.ncols();
+    // Step 5: Recompute correction vectors with centred coordinates (same MNN pairs)
+    let (re_averaged, re_unique_mnn) = compute_correction_vecs(
+        &left_centered.as_ref(),
+        &right_centered.as_ref(),
+        &mnn_1,
+        &mnn_2,
+    );
 
-    Mat::from_fn(n_cells_total, n_features, |row, col| {
-        if row < data_1.nrows() {
-            data_1[(row, col)]
+    // Step 6: Tricube-weighted correction applied to every cell in batch2
+    let right_corrected = tricube_weighted_correction(
+        &right_centered.as_ref(),
+        &re_averaged.as_ref(),
+        &re_unique_mnn,
+        params.knn_params.k,
+        params.ndist,
+        &params.knn_params,
+        seed,
+    );
+
+    // Record this batch vector for future orthogonalisation steps
+    batch_vecs.push(overall_batch);
+
+    // Step 7: Stack left (centred) and right (corrected)
+    let n_total = left_centered.nrows() + right_corrected.nrows();
+    Mat::from_fn(n_total, n_features, |row, col| {
+        if row < left_centered.nrows() {
+            left_centered[(row, col)]
         } else {
-            corrected[(row - data_1.nrows(), col)]
+            right_corrected[(row - left_centered.nrows(), col)]
         }
     })
 }
@@ -682,6 +516,7 @@ pub fn fast_mnn(
 
     let mut merged = batches[0].to_owned();
     let mut index_map = original_indices[0].clone();
+    let mut batch_vecs: Vec<Vec<f32>> = Vec::new();
     let total_batches = batches.len();
 
     for (batch_num, (batch, batch_indices)) in batches
@@ -691,14 +526,20 @@ pub fn fast_mnn(
         .enumerate()
     {
         let start = Instant::now();
-        merged = merge_two_batches(&merged.as_ref(), &batch.as_ref(), params, seed, verbose);
+        merged = merge_two_batches(
+            &merged.as_ref(),
+            &batch.as_ref(),
+            params,
+            &mut batch_vecs,
+            seed,
+            verbose,
+        );
         let elapsed = start.elapsed();
 
         if verbose {
-            let batches_merged = batch_num + 2;
             println!(
                 "Merged {} of {} batches in {:.2}s",
-                batches_merged,
+                batch_num + 2,
                 total_batches,
                 elapsed.as_secs_f64()
             );
@@ -707,7 +548,7 @@ pub fn fast_mnn(
         index_map.extend(batch_indices);
     }
 
-    (merged.to_owned(), index_map)
+    (merged, index_map)
 }
 
 /// Reorder corrected PCA back to original cell order
@@ -803,7 +644,6 @@ pub fn fast_mnn_main(
     verbose: bool,
     seed: usize,
 ) -> Mat<f32> {
-    // calculate the PCA across everything
     let pca_all = if let Some(pca) = pre_computed_pca {
         if verbose {
             println!("Using pre-computed PCA")
@@ -840,4 +680,569 @@ pub fn fast_mnn_main(
     let (corrected, index_map) = fast_mnn(pca_batches, original_indices, params, seed, verbose);
 
     reorder_to_original(&corrected, &index_map)
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_relative_eq;
+    use faer::mat;
+
+    #[test]
+    fn test_find_mutual_nns_simple() {
+        // Cell 0 in left has right neighbour 0; cell 0 in right has left neighbour 0
+        let left_knn = vec![vec![0], vec![1]];
+        let right_knn = vec![vec![0], vec![1]];
+
+        let (mnn_l, mnn_r) = find_mutual_nns(&left_knn, &right_knn);
+
+        assert_eq!(mnn_l.len(), mnn_r.len());
+        assert!(mnn_l.contains(&0));
+        assert!(mnn_r.contains(&0));
+        assert!(mnn_l.contains(&1));
+        assert!(mnn_r.contains(&1));
+    }
+
+    #[test]
+    fn test_find_mutual_nns_no_mutuals() {
+        // Left points to right 1, but right 1 points to left 1 (not 0)
+        let left_knn = vec![vec![1], vec![0]];
+        let right_knn = vec![vec![1], vec![0]];
+
+        let (mnn_l, mnn_r) = find_mutual_nns(&left_knn, &right_knn);
+
+        // left 0 -> right 1, right 1 -> left 0 => mutual
+        // left 1 -> right 0, right 0 -> left 1 => mutual
+        assert_eq!(mnn_l.len(), 2);
+        assert_eq!(mnn_r.len(), 2);
+    }
+
+    #[test]
+    fn test_find_mutual_nns_asymmetric() {
+        // Left 0 -> right 0, but right 0 -> left 1 (not 0)
+        let left_knn = vec![vec![0], vec![0]];
+        let right_knn = vec![vec![1]];
+
+        let (mnn_l, mnn_r) = find_mutual_nns(&left_knn, &right_knn);
+
+        // Only left 1 -> right 0 and right 0 -> left 1 is mutual
+        assert_eq!(mnn_l.len(), 1);
+        assert_eq!(mnn_l[0], 1);
+        assert_eq!(mnn_r[0], 0);
+    }
+
+    #[test]
+    fn test_find_mutual_nns_empty() {
+        let left_knn: Vec<Vec<usize>> = vec![vec![0]];
+        let right_knn: Vec<Vec<usize>> = vec![vec![1]]; // points to left 1 which doesn't exist in left_knn... but left 0 -> right 0
+
+        // left 0 -> right 0, right 0 -> left 1. Not mutual.
+        let (mnn_l, mnn_r) = find_mutual_nns(&left_knn, &right_knn);
+        assert!(mnn_l.is_empty());
+        assert!(mnn_r.is_empty());
+    }
+
+    #[test]
+    fn test_find_mutual_nns_multiple_neighbours() {
+        let left_knn = vec![vec![0, 1], vec![0, 1], vec![1]];
+        let right_knn = vec![vec![0, 1], vec![1, 2]];
+
+        let (mnn_l, mnn_r) = find_mutual_nns(&left_knn, &right_knn);
+
+        // left 0 -> {right 0, right 1}; right 0 -> {left 0, left 1} => (0,0) mutual
+        // left 1 -> {right 0, right 1}; right 0 -> {left 0, left 1} => (1,0) mutual
+        // left 1 -> {right 0, right 1}; right 1 -> {left 1, left 2} => (1,1) mutual
+        // left 2 -> {right 1}; right 1 -> {left 1, left 2} => (2,1) mutual
+        assert!(mnn_l.len() >= 3);
+
+        let pairs: Vec<(usize, usize)> = mnn_l
+            .iter()
+            .zip(mnn_r.iter())
+            .map(|(&l, &r)| (l, r))
+            .collect();
+        assert!(pairs.contains(&(0, 0)));
+        assert!(pairs.contains(&(1, 1)));
+        assert!(pairs.contains(&(2, 1)));
+    }
+
+    #[test]
+    fn test_correction_vecs_single_pair() {
+        let data_1 = mat![[1.0f32, 2.0, 3.0]];
+        let data_2 = mat![[0.5f32, 1.0, 1.5]];
+        let mnn_1 = vec![0];
+        let mnn_2 = vec![0];
+
+        let (averaged, indices) =
+            compute_correction_vecs(&data_1.as_ref(), &data_2.as_ref(), &mnn_1, &mnn_2);
+
+        assert_eq!(indices, vec![0]);
+        assert_eq!(averaged.nrows(), 1);
+        assert_eq!(averaged.ncols(), 3);
+        // correction = data_1[0] - data_2[0] = (0.5, 1.0, 1.5)
+        assert_relative_eq!(averaged[(0, 0)], 0.5, epsilon = 1e-6);
+        assert_relative_eq!(averaged[(0, 1)], 1.0, epsilon = 1e-6);
+        assert_relative_eq!(averaged[(0, 2)], 1.5, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn test_correction_vecs_averaging() {
+        // Two pairs map to the same cell in batch 2
+        let data_1 = mat![[2.0f32, 0.0], [4.0, 0.0],];
+        let data_2 = mat![[1.0f32, 0.0]];
+        let mnn_1 = vec![0, 1];
+        let mnn_2 = vec![0, 0];
+
+        let (averaged, indices) =
+            compute_correction_vecs(&data_1.as_ref(), &data_2.as_ref(), &mnn_1, &mnn_2);
+
+        assert_eq!(indices, vec![0]);
+        // corrections: (2-1, 0) = (1, 0) and (4-1, 0) = (3, 0), average = (2, 0)
+        assert_relative_eq!(averaged[(0, 0)], 2.0, epsilon = 1e-6);
+        assert_relative_eq!(averaged[(0, 1)], 0.0, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn test_correction_vecs_multiple_targets() {
+        let data_1 = mat![[3.0f32, 0.0], [0.0, 3.0],];
+        let data_2 = mat![[1.0f32, 0.0], [0.0, 1.0],];
+        let mnn_1 = vec![0, 1];
+        let mnn_2 = vec![0, 1];
+
+        let (averaged, indices) =
+            compute_correction_vecs(&data_1.as_ref(), &data_2.as_ref(), &mnn_1, &mnn_2);
+
+        assert_eq!(indices.len(), 2);
+        assert_eq!(averaged.nrows(), 2);
+
+        let idx_0 = indices.iter().position(|&x| x == 0).unwrap();
+        let idx_1 = indices.iter().position(|&x| x == 1).unwrap();
+        assert_relative_eq!(averaged[(idx_0, 0)], 2.0, epsilon = 1e-6);
+        assert_relative_eq!(averaged[(idx_1, 1)], 2.0, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn test_correction_vecs_zero_difference() {
+        let data = mat![[1.0f32, 2.0, 3.0]];
+        let mnn = vec![0];
+
+        let (averaged, _) = compute_correction_vecs(&data.as_ref(), &data.as_ref(), &mnn, &mnn);
+
+        for g in 0..3 {
+            assert_relative_eq!(averaged[(0, g)], 0.0, epsilon = 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_center_removes_variation_along_direction() {
+        // Two cells offset along x-axis
+        let data = mat![[0.0f32, 0.0], [4.0, 0.0],];
+        let batch_vec = vec![1.0f32, 0.0];
+
+        let centred = center_along_batch_vector(&data.as_ref(), &batch_vec);
+
+        // After centring, both cells should have the same x-coordinate (the mean = 2.0)
+        assert_relative_eq!(centred[(0, 0)], 2.0, epsilon = 1e-6);
+        assert_relative_eq!(centred[(1, 0)], 2.0, epsilon = 1e-6);
+        // y-coordinates unchanged
+        assert_relative_eq!(centred[(0, 1)], 0.0, epsilon = 1e-6);
+        assert_relative_eq!(centred[(1, 1)], 0.0, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn test_center_preserves_orthogonal_variation() {
+        let data = mat![[0.0f32, 1.0], [4.0, 3.0],];
+        let batch_vec = vec![1.0f32, 0.0];
+
+        let centred = center_along_batch_vector(&data.as_ref(), &batch_vec);
+
+        // x collapsed to mean (2.0), y untouched
+        assert_relative_eq!(centred[(0, 0)], 2.0, epsilon = 1e-6);
+        assert_relative_eq!(centred[(1, 0)], 2.0, epsilon = 1e-6);
+        assert_relative_eq!(centred[(0, 1)], 1.0, epsilon = 1e-6);
+        assert_relative_eq!(centred[(1, 1)], 3.0, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn test_center_diagonal_batch_vector() {
+        // batch_vec along (1,1), data offset along that diagonal
+        let data = mat![[0.0f32, 0.0], [2.0, 2.0],];
+        let batch_vec = vec![1.0f32, 1.0];
+
+        let centred = center_along_batch_vector(&data.as_ref(), &batch_vec);
+
+        // Projections onto unit (1/sqrt2, 1/sqrt2): 0 and 2*sqrt2
+        // Mean projection: sqrt2
+        // Both cells should end up at (1, 1)
+        assert_relative_eq!(centred[(0, 0)], 1.0, epsilon = 1e-5);
+        assert_relative_eq!(centred[(0, 1)], 1.0, epsilon = 1e-5);
+        assert_relative_eq!(centred[(1, 0)], 1.0, epsilon = 1e-5);
+        assert_relative_eq!(centred[(1, 1)], 1.0, epsilon = 1e-5);
+    }
+
+    #[test]
+    fn test_center_zero_batch_vector() {
+        let data = mat![[1.0f32, 2.0], [3.0, 4.0],];
+        let batch_vec = vec![0.0f32, 0.0];
+
+        let centred = center_along_batch_vector(&data.as_ref(), &batch_vec);
+
+        // Should return data unchanged
+        for i in 0..2 {
+            for g in 0..2 {
+                assert_relative_eq!(centred[(i, g)], data[(i, g)], epsilon = 1e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn test_center_already_centred() {
+        // Both cells have the same projection onto batch_vec
+        let data = mat![[1.0f32, 0.0], [1.0, 5.0],];
+        let batch_vec = vec![1.0f32, 0.0];
+
+        let centred = center_along_batch_vector(&data.as_ref(), &batch_vec);
+
+        for i in 0..2 {
+            for g in 0..2 {
+                assert_relative_eq!(centred[(i, g)], data[(i, g)], epsilon = 1e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn test_center_idempotent() {
+        let data = mat![[0.0f32, 1.0, 2.0], [3.0, 4.0, 5.0], [6.0, 7.0, 8.0],];
+        let batch_vec = vec![1.0f32, 0.5, -0.3];
+
+        let centred_once = center_along_batch_vector(&data.as_ref(), &batch_vec);
+        let centred_twice = center_along_batch_vector(&centred_once.as_ref(), &batch_vec);
+
+        for i in 0..3 {
+            for g in 0..3 {
+                assert_relative_eq!(centred_once[(i, g)], centred_twice[(i, g)], epsilon = 1e-5);
+            }
+        }
+    }
+
+    #[test]
+    fn test_split_pca_basic() {
+        let pca = mat![[1.0f32, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0],];
+        let batch_indices = vec![0, 1, 0, 1];
+
+        let (batches, indices) = split_pca_by_batch(&pca, &batch_indices);
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(indices.len(), 2);
+
+        assert_eq!(indices[0], vec![0, 2]);
+        assert_eq!(indices[1], vec![1, 3]);
+
+        assert_eq!(batches[0].nrows(), 2);
+        assert_relative_eq!(batches[0][(0, 0)], 1.0, epsilon = 1e-6);
+        assert_relative_eq!(batches[0][(1, 0)], 5.0, epsilon = 1e-6);
+
+        assert_eq!(batches[1].nrows(), 2);
+        assert_relative_eq!(batches[1][(0, 0)], 3.0, epsilon = 1e-6);
+        assert_relative_eq!(batches[1][(1, 0)], 7.0, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn test_split_pca_single_batch() {
+        let pca = mat![[1.0f32, 2.0], [3.0, 4.0],];
+        let batch_indices = vec![0, 0];
+
+        let (batches, indices) = split_pca_by_batch(&pca, &batch_indices);
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(indices[0], vec![0, 1]);
+        assert_eq!(batches[0].nrows(), 2);
+    }
+
+    #[test]
+    fn test_split_pca_three_batches() {
+        let pca = mat![[1.0f32], [2.0], [3.0], [4.0], [5.0], [6.0],];
+        let batch_indices = vec![2, 0, 1, 0, 2, 1];
+
+        let (batches, indices) = split_pca_by_batch(&pca, &batch_indices);
+
+        assert_eq!(batches.len(), 3);
+        assert_eq!(indices[0], vec![1, 3]);
+        assert_eq!(indices[1], vec![2, 5]);
+        assert_eq!(indices[2], vec![0, 4]);
+
+        assert_relative_eq!(batches[0][(0, 0)], 2.0, epsilon = 1e-6);
+        assert_relative_eq!(batches[0][(1, 0)], 4.0, epsilon = 1e-6);
+        assert_relative_eq!(batches[2][(0, 0)], 1.0, epsilon = 1e-6);
+        assert_relative_eq!(batches[2][(1, 0)], 5.0, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn test_reorder_identity() {
+        let data = mat![[1.0f32, 2.0], [3.0, 4.0], [5.0, 6.0],];
+        let mapping = vec![0, 1, 2];
+
+        let reordered = reorder_to_original(&data, &mapping);
+
+        for i in 0..3 {
+            for g in 0..2 {
+                assert_relative_eq!(reordered[(i, g)], data[(i, g)], epsilon = 1e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn test_reorder_reversed() {
+        let data = mat![[1.0f32, 2.0], [3.0, 4.0], [5.0, 6.0],];
+        let mapping = vec![2, 1, 0]; // output row 0 -> original 2, etc.
+
+        let reordered = reorder_to_original(&data, &mapping);
+
+        assert_relative_eq!(reordered[(0, 0)], 5.0, epsilon = 1e-6);
+        assert_relative_eq!(reordered[(1, 0)], 3.0, epsilon = 1e-6);
+        assert_relative_eq!(reordered[(2, 0)], 1.0, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn test_reorder_split_merge_roundtrip() {
+        let pca = mat![[10.0f32, 20.0], [30.0, 40.0], [50.0, 60.0], [70.0, 80.0],];
+        let batch_indices = vec![1, 0, 1, 0];
+
+        let (batches, original_indices) = split_pca_by_batch(&pca, &batch_indices);
+
+        // Simulate a merge that just stacks batches
+        let n_total = batches.iter().map(|b| b.nrows()).sum();
+        let n_features = pca.ncols();
+        let mut merged = Mat::zeros(n_total, n_features);
+        let mut index_map = Vec::new();
+        let mut row = 0;
+        for (batch, indices) in batches.iter().zip(original_indices.iter()) {
+            for i in 0..batch.nrows() {
+                for g in 0..n_features {
+                    merged[(row, g)] = batch[(i, g)];
+                }
+                row += 1;
+            }
+            index_map.extend(indices.iter().copied());
+        }
+
+        let reordered = reorder_to_original(&merged, &index_map);
+
+        for i in 0..4 {
+            for g in 0..2 {
+                assert_relative_eq!(reordered[(i, g)], pca[(i, g)], epsilon = 1e-6,);
+            }
+        }
+    }
+
+    #[test]
+    fn test_correction_vecs_symmetric() {
+        // If batches are identical, corrections should be zero
+        let data = mat![[1.0f32, 0.0], [0.0, 1.0], [1.0, 1.0],];
+        let mnn_1 = vec![0, 1, 2];
+        let mnn_2 = vec![0, 1, 2];
+
+        let (averaged, _) = compute_correction_vecs(&data.as_ref(), &data.as_ref(), &mnn_1, &mnn_2);
+
+        for i in 0..averaged.nrows() {
+            for g in 0..averaged.ncols() {
+                assert_relative_eq!(averaged[(i, g)], 0.0, epsilon = 1e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn test_overall_batch_vector_direction() {
+        // Batch 2 is shifted +2 along feature 0 relative to batch 1
+        let data_1 = mat![[0.0f32, 0.0], [0.0, 1.0], [0.0, -1.0],];
+        let data_2 = mat![[2.0f32, 0.0], [2.0, 1.0], [2.0, -1.0],];
+        let mnn_1 = vec![0, 1, 2];
+        let mnn_2 = vec![0, 1, 2];
+
+        let (averaged, _) =
+            compute_correction_vecs(&data_1.as_ref(), &data_2.as_ref(), &mnn_1, &mnn_2);
+
+        let n_features = 2;
+        let n_unique = averaged.nrows();
+        let mut overall = vec![0.0f32; n_features];
+        for g in 0..n_features {
+            for i in 0..n_unique {
+                overall[g] += averaged[(i, g)];
+            }
+            overall[g] /= n_unique as f32;
+        }
+
+        // Overall batch vector should point in -x direction (ref - target = 0 - 2 = -2)
+        assert!(
+            overall[0] < -1.5,
+            "Expected strong negative x component, got {}",
+            overall[0]
+        );
+        assert!(
+            overall[1].abs() < 1e-6,
+            "Expected near-zero y component, got {}",
+            overall[1]
+        );
+    }
+
+    #[test]
+    fn test_center_then_recompute_reduces_within_batch_spread() {
+        // Batch 1 at x~0, batch 2 at x~4, with some x-spread within each
+        let data_1 = mat![[-1.0f32, 0.0], [0.0, 1.0], [1.0, 2.0],];
+        let data_2 = mat![[3.0f32, 0.0], [4.0, 1.0], [5.0, 2.0],];
+        let mnn_1 = vec![0, 1, 2];
+        let mnn_2 = vec![0, 1, 2];
+
+        let (averaged, _) =
+            compute_correction_vecs(&data_1.as_ref(), &data_2.as_ref(), &mnn_1, &mnn_2);
+
+        let n_unique = averaged.nrows();
+        let mut overall = vec![0.0f32; 2];
+        for g in 0..2 {
+            for i in 0..n_unique {
+                overall[g] += averaged[(i, g)];
+            }
+            overall[g] /= n_unique as f32;
+        }
+
+        let left_c = center_along_batch_vector(&data_1.as_ref(), &overall);
+        let right_c = center_along_batch_vector(&data_2.as_ref(), &overall);
+
+        // Within each batch, all x-coordinates should now be equal (collapsed to batch mean)
+        let mean_x_left: f32 = (0..3).map(|i| left_c[(i, 0)]).sum::<f32>() / 3.0;
+        let mean_x_right: f32 = (0..3).map(|i| right_c[(i, 0)]).sum::<f32>() / 3.0;
+
+        for i in 0..3 {
+            assert_relative_eq!(left_c[(i, 0)], mean_x_left, epsilon = 1e-5);
+            assert_relative_eq!(right_c[(i, 0)], mean_x_right, epsilon = 1e-5);
+        }
+
+        // y-coordinates should be preserved
+        for i in 0..3 {
+            assert_relative_eq!(left_c[(i, 1)], data_1[(i, 1)], epsilon = 1e-5);
+            assert_relative_eq!(right_c[(i, 1)], data_2[(i, 1)], epsilon = 1e-5);
+        }
+    }
+
+    #[test]
+    fn test_orthogonalisation_accumulates() {
+        let vec_1 = vec![1.0f32, 0.0]; // first merge shifted along x
+
+        // Orthogonalise "batch 2" against vec_1
+        let batch_2 = mat![[6.0f32, 0.0]];
+        let orth = center_along_batch_vector(&batch_2.as_ref(), &vec_1);
+
+        // With a single cell, centring collapses to itself (mean = self)
+        // But with multiple cells it would remove x-variation
+        assert_eq!(orth.nrows(), 1);
+        // Single cell: no change expected
+        assert_relative_eq!(orth[(0, 0)], 6.0, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn test_center_multiple_cells_along_batch_vector() {
+        // 4 cells with varying x, batch vec along x
+        let data = mat![[1.0f32, 5.0], [3.0, 5.0], [5.0, 5.0], [7.0, 5.0],];
+        let batch_vec = vec![1.0f32, 0.0];
+
+        let centred = center_along_batch_vector(&data.as_ref(), &batch_vec);
+
+        // All x-coords should equal the mean (4.0)
+        for i in 0..4 {
+            assert_relative_eq!(centred[(i, 0)], 4.0, epsilon = 1e-5);
+            assert_relative_eq!(centred[(i, 1)], 5.0, epsilon = 1e-5);
+        }
+    }
+
+    #[test]
+    fn test_correction_direction_is_ref_minus_target() {
+        // Verify sign convention: correction = ref - target
+        let data_1 = mat![[10.0f32, 0.0]]; // reference
+        let data_2 = mat![[0.0f32, 0.0]]; // target
+        let mnn_1 = vec![0];
+        let mnn_2 = vec![0];
+
+        let (averaged, _) =
+            compute_correction_vecs(&data_1.as_ref(), &data_2.as_ref(), &mnn_1, &mnn_2);
+
+        // correction = 10 - 0 = 10 (positive, pointing from target towards reference)
+        assert_relative_eq!(averaged[(0, 0)], 10.0, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn test_split_and_reorder_preserves_all_data() {
+        // Property test: split then stack then reorder must reconstruct original
+        let n_cells = 10;
+        let n_features = 3;
+        let pca = Mat::from_fn(n_cells, n_features, |i, j| (i * n_features + j) as f32);
+        let batch_indices = vec![0, 2, 1, 0, 2, 1, 0, 1, 2, 0];
+
+        let (batches, original_indices) = split_pca_by_batch(&pca, &batch_indices);
+
+        let mut merged = Mat::zeros(n_cells, n_features);
+        let mut index_map = Vec::new();
+        let mut row = 0;
+        for (batch, indices) in batches.iter().zip(original_indices.iter()) {
+            for i in 0..batch.nrows() {
+                for g in 0..n_features {
+                    merged[(row, g)] = batch[(i, g)];
+                }
+                row += 1;
+            }
+            index_map.extend(indices.iter().copied());
+        }
+
+        let reordered = reorder_to_original(&merged, &index_map);
+
+        for i in 0..n_cells {
+            for g in 0..n_features {
+                assert_relative_eq!(reordered[(i, g)], pca[(i, g)], epsilon = 1e-6,);
+            }
+        }
+    }
+
+    #[test]
+    fn test_correction_vecs_indices_are_sorted() {
+        let data_1 = mat![[1.0f32, 0.0], [2.0, 0.0], [3.0, 0.0],];
+        let data_2 = mat![[0.0f32, 0.0], [0.0, 0.0], [0.0, 0.0],];
+        // Map to targets in reverse order
+        let mnn_1 = vec![0, 1, 2];
+        let mnn_2 = vec![2, 0, 1];
+
+        let (_, indices) =
+            compute_correction_vecs(&data_1.as_ref(), &data_2.as_ref(), &mnn_1, &mnn_2);
+
+        // Indices should be sorted
+        let mut sorted = indices.clone();
+        sorted.sort();
+        assert_eq!(indices, sorted);
+    }
+
+    #[test]
+    fn test_center_high_dimensional() {
+        let n_cells = 5;
+        let n_features = 10;
+        let data = Mat::from_fn(n_cells, n_features, |i, _| i as f32);
+
+        // batch_vec only in first dimension
+        let mut batch_vec = vec![0.0f32; n_features];
+        batch_vec[0] = 1.0;
+
+        let centred = center_along_batch_vector(&data.as_ref(), &batch_vec);
+
+        // All cells should have same projection onto feature 0
+        let mean_proj: f32 = (0..n_cells).map(|i| data[(i, 0)]).sum::<f32>() / n_cells as f32;
+        for i in 0..n_cells {
+            assert_relative_eq!(centred[(i, 0)], mean_proj, epsilon = 1e-5);
+        }
+        // All other features unchanged (data[i, g>0] = i for all g, which is original)
+        for i in 0..n_cells {
+            for g in 1..n_features {
+                assert_relative_eq!(centred[(i, g)], data[(i, g)], epsilon = 1e-5);
+            }
+        }
+    }
 }

@@ -103,16 +103,17 @@ pub struct SEACellsParams {
 /// Convert SEACells hard assignments to metacell format
 ///
 /// Transforms flat assignment vector (cell -> SEACell) into grouped format
-/// (SEACell -> [cells]) suitable for aggregation functions.
+/// (SEACell -> `[cells]`) suitable for aggregation functions.
 ///
 /// ### Params
 ///
-/// * `assignments` - Vector where assignments[cell_id] = seacell_id
+/// * `assignments` - Vector where `assignments[cell_id] = seacell_id`
 /// * `k` - Number of SEACells
 ///
 /// ### Returns
 ///
-/// Vector of vectors, where result[seacell_id] contains all cells assigned to that SEACell
+/// Vector of vectors, where `result[seacell_id]` contains all cells assigned to
+/// that SEACell
 pub fn assignments_to_metacells(assignments: &[usize], k: usize) -> Vec<Vec<usize>> {
     let mut metacells = vec![Vec::new(); k];
 
@@ -471,7 +472,7 @@ impl<'a> SEACells<'a> {
 
     /// Construct the kernel matrix from k-NN graph with adaptive RBF weights
     ///
-    /// Builds a sparse kernel matrix K where K[i,j] represents similarity
+    /// Builds a sparse kernel matrix K where `K[i,j]` represents similarity
     /// between cells i and j. Uses adaptive bandwidth RBF:
     ///
     /// ```exp(-dist^2/(σᵢ × σⱼ))```
