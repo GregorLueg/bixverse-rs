@@ -1,5 +1,7 @@
 //! Single cell-related PCA functions. Implements dense, sparse version of the
-//! normal SVD and also randomised SVD.
+//! normal SVD and also randomised SVD. The upcasts to f64 are needed due to
+//! nasty floating operation errors that can accumulate over time with large
+//! data sets.
 
 use faer::Mat;
 use indexmap::IndexSet;
