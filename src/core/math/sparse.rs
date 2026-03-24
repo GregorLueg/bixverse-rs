@@ -1,7 +1,6 @@
 //! Sparse matrix formats, sparse operations and helpers to transform different
 //! formats into each other.
 
-use ann_search_rs::utils::dist::SimdDistance;
 use faer::{Mat, MatRef};
 use num_traits::ToPrimitive;
 use rand::rngs::StdRng;
@@ -1259,10 +1258,10 @@ where
 /// Dot product of the two vectors
 fn dot<T>(a: &[T], b: &[T]) -> T
 where
-    T: SimdDistance,
+    T: BixverseSimd,
 {
     assert_same_len!(a, b);
-    T::dot_simd(a, b)
+    T::bxv_dot_simd(a, b)
 }
 
 /// Helper function to normalise a vector
@@ -1276,7 +1275,7 @@ where
 /// Normalised dot product of the vector `v`
 fn norm<T>(v: &[T]) -> T
 where
-    T: SimdDistance + BixverseFloat,
+    T: BixverseSimd + BixverseFloat,
 {
     let dot = dot(v, v);
     dot.sqrt()
@@ -1289,7 +1288,7 @@ where
 /// * `v` - Mutable reference of the vector to normalise
 fn normalise<T>(v: &mut [T])
 where
-    T: SimdDistance + BixverseFloat,
+    T: BixverseSimd + BixverseFloat,
 {
     let n = norm(v);
     v.par_iter_mut().for_each(|x| *x /= n);
@@ -1345,7 +1344,7 @@ pub fn compute_largest_eigenpairs_lanczos<T>(
     seed: u64,
 ) -> (Vec<f32>, Vec<Vec<f32>>)
 where
-    T: BixverseNumeric + SimdDistance + Into<f64>,
+    T: BixverseNumeric + BixverseSimd + Into<f64>,
 {
     let n = matrix.shape.0;
     let n_iter = (n_components * 2 + 10).max(n_components).min(n);
@@ -1480,9 +1479,9 @@ pub fn sparse_svd_lanczos<T, U, F>(
     col_stds: Option<&[F]>,
 ) -> SvdResults<F>
 where
-    T: BixverseNumeric + SimdDistance + Into<F> + Clone,
+    T: BixverseNumeric + BixverseSimd + Into<F> + Clone,
     U: BixverseNumeric + Into<F> + Clone,
-    F: BixverseFloat + SimdDistance + std::iter::Sum,
+    F: BixverseFloat + BixverseSimd + std::iter::Sum,
 {
     let (n, m) = matrix.shape;
     let use_ata = n > m;

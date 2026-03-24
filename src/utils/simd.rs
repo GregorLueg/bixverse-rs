@@ -1,7 +1,7 @@
 //! Targeted SIMD implementations to accelerate specific hot loops in bixverse
 
 use std::sync::OnceLock;
-use wide::{f32x4, f32x8};
+use wide::{f32x4, f32x8, f64x2, f64x4};
 
 /// Enum for the different architectures and potential SIMD levels
 #[derive(Clone, Copy, Debug)]
@@ -48,13 +48,9 @@ pub fn detect_simd_level() -> SimdLevel {
     })
 }
 
-/////////////////////////////
-// General implementations //
-/////////////////////////////
-
-/////////
-// f32 //
-/////////
+//////////////////////////////////
+// f32-specific implementations //
+//////////////////////////////////
 
 ///////////
 // Sums  //
@@ -495,5 +491,359 @@ pub fn variance_simd_f32(a: &[f32], mean: f32) -> f32 {
         SimdLevel::Avx2 => variance_avx2_f32(a, mean),
         SimdLevel::Sse => variance_sse_f32(a, mean),
         SimdLevel::Scalar => variance_scalar_f32(a, mean),
+    }
+}
+
+//////////////////////
+// General versions //
+//////////////////////
+
+/// Trait for SIMD-accelerated dot product, replacing the ann-search-rs
+/// SimdDistance dependency.
+pub trait BixverseSimd:
+    Copy + Default + std::ops::AddAssign + std::ops::Mul<Output = Self>
+{
+    /// Compute the dot product of two slices using SIMD where available.
+    ///
+    /// ### Params
+    ///
+    /// * `a` - First slice
+    /// * `b` - Second slice (must be the same length as `a`)
+    ///
+    /// ### Returns
+    ///
+    /// The dot product of `a` and `b`
+    fn bxv_dot_simd(a: &[Self], b: &[Self]) -> Self;
+}
+
+//////////////////
+// Dot products //
+//////////////////
+
+/////////
+// f32 //
+/////////
+
+/// SIMD dot product of two slices of f32 (scalar)
+///
+/// ### Params
+///
+/// * `a` - The first slice of f32 values.
+/// * `b` - The second slice of f32 values.
+///
+/// ### Returns
+///
+/// Dot product
+#[inline(always)]
+fn dot_scalar_f32(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b.iter()).map(|(&x, &y)| x * y).sum()
+}
+
+/// SIMD dot product of two slices of f32 (128-bit)
+///
+/// ### Params
+///
+/// * `a` - The first slice of f32 values.
+/// * `b` - The second slice of f32 values.
+///
+/// ### Returns
+///
+/// Dot product
+#[inline(always)]
+fn dot_sse_f32(a: &[f32], b: &[f32]) -> f32 {
+    let len = a.len();
+    let chunks = len / 4;
+    let mut acc = f32x4::ZERO;
+
+    unsafe {
+        let a_ptr = a.as_ptr();
+        let b_ptr = b.as_ptr();
+        for i in 0..chunks {
+            let va = f32x4::from(*(a_ptr.add(i * 4) as *const [f32; 4]));
+            let vb = f32x4::from(*(b_ptr.add(i * 4) as *const [f32; 4]));
+            acc += va * vb;
+        }
+    }
+
+    let mut sum = acc.reduce_add();
+    for i in (chunks * 4)..len {
+        sum += a[i] * b[i];
+    }
+    sum
+}
+
+/// SIMD dot product of two slices of f32 (256-bit)
+///
+/// ### Params
+///
+/// * `a` - The first slice of f32 values.
+/// * `b` - The second slice of f32 values.
+///
+/// ### Returns
+///
+/// Dot product
+#[inline(always)]
+fn dot_avx2_f32(a: &[f32], b: &[f32]) -> f32 {
+    let len = a.len();
+    let chunks = len / 8;
+    let mut acc = f32x8::ZERO;
+
+    unsafe {
+        let a_ptr = a.as_ptr();
+        let b_ptr = b.as_ptr();
+        for i in 0..chunks {
+            let va = f32x8::from(*(a_ptr.add(i * 8) as *const [f32; 8]));
+            let vb = f32x8::from(*(b_ptr.add(i * 8) as *const [f32; 8]));
+            acc += va * vb;
+        }
+    }
+
+    let mut sum = acc.reduce_add();
+    for i in (chunks * 8)..len {
+        sum += a[i] * b[i];
+    }
+    sum
+}
+
+/// SIMD dot product of two slices of f32 (512-bit)
+///
+/// ### Params
+///
+/// * `a` - The first slice of f32 values.
+/// * `b` - The second slice of f32 values.
+///
+/// ### Returns
+///
+/// Dot product
+#[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+#[inline(always)]
+fn dot_avx512_f32(a: &[f32], b: &[f32]) -> f32 {
+    use std::arch::x86_64::*;
+
+    let len = a.len();
+    let chunks = len / 16;
+
+    unsafe {
+        let mut acc = _mm512_setzero_ps();
+        for i in 0..chunks {
+            let va = _mm512_loadu_ps(a.as_ptr().add(i * 16));
+            let vb = _mm512_loadu_ps(b.as_ptr().add(i * 16));
+            acc = _mm512_fmadd_ps(va, vb, acc);
+        }
+
+        let mut sum = _mm512_reduce_add_ps(acc);
+        for i in (chunks * 16)..len {
+            sum += a[i] * b[i];
+        }
+        sum
+    }
+}
+
+/// SIMD dot product of two slices of f32 (512-bit fallback)
+///
+/// ### Params
+///
+/// * `a` - The first slice of f32 values.
+/// * `b` - The second slice of f32 values.
+///
+/// ### Returns
+///
+/// Dot product
+#[cfg(not(all(target_arch = "x86_64", target_feature = "avx512f")))]
+#[inline(always)]
+fn dot_avx512_f32(a: &[f32], b: &[f32]) -> f32 {
+    dot_avx2_f32(a, b)
+}
+
+/// SIMD dot product of two slices of f32 (dispatch)
+///
+/// Dispatches to the best available SIMD implementation at runtime.
+///
+/// ### Params
+///
+/// * `a` - The first slice of f32 values.
+/// * `b` - The second slice of f32 values.
+///
+/// ### Returns
+///
+/// Dot product
+#[inline]
+pub fn dot_simd_f32(a: &[f32], b: &[f32]) -> f32 {
+    match detect_simd_level() {
+        SimdLevel::Avx512 => dot_avx512_f32(a, b),
+        SimdLevel::Avx2 => dot_avx2_f32(a, b),
+        SimdLevel::Sse => dot_sse_f32(a, b),
+        SimdLevel::Scalar => dot_scalar_f32(a, b),
+    }
+}
+
+impl BixverseSimd for f32 {
+    #[inline]
+    fn bxv_dot_simd(a: &[f32], b: &[f32]) -> f32 {
+        dot_simd_f32(a, b)
+    }
+}
+
+/////////
+// f64 //
+/////////
+
+/// SIMD dot product of two slices of f64 (scalar)
+///
+/// ### Params
+///
+/// * `a` - The first slice of f64 values.
+/// * `b` - The second slice of f64 values.
+///
+/// ### Returns
+///
+/// Dot product
+#[inline(always)]
+fn dot_scalar_f64(a: &[f64], b: &[f64]) -> f64 {
+    a.iter().zip(b.iter()).map(|(&x, &y)| x * y).sum()
+}
+
+/// SIMD dot product of two slices of f64 (128-bit)
+///
+/// ### Params
+///
+/// * `a` - The first slice of f64 values.
+/// * `b` - The second slice of f64 values.
+///
+/// ### Returns
+///
+/// Dot product
+#[inline(always)]
+fn dot_sse_f64(a: &[f64], b: &[f64]) -> f64 {
+    let len = a.len();
+    let chunks = len / 2;
+    let mut acc = f64x2::ZERO;
+
+    unsafe {
+        let a_ptr = a.as_ptr();
+        let b_ptr = b.as_ptr();
+        for i in 0..chunks {
+            let va = f64x2::from(*(a_ptr.add(i * 2) as *const [f64; 2]));
+            let vb = f64x2::from(*(b_ptr.add(i * 2) as *const [f64; 2]));
+            acc += va * vb;
+        }
+    }
+
+    let mut sum = acc.reduce_add();
+    for i in (chunks * 2)..len {
+        sum += a[i] * b[i];
+    }
+    sum
+}
+
+/// SIMD dot product of two slices of f64 (256-bit)
+///
+/// ### Params
+///
+/// * `a` - The first slice of f64 values.
+/// * `b` - The second slice of f64 values.
+///
+/// ### Returns
+///
+/// Dot product
+#[inline(always)]
+fn dot_avx2_f64(a: &[f64], b: &[f64]) -> f64 {
+    let len = a.len();
+    let chunks = len / 4;
+    let mut acc = f64x4::ZERO;
+
+    unsafe {
+        let a_ptr = a.as_ptr();
+        let b_ptr = b.as_ptr();
+        for i in 0..chunks {
+            let va = f64x4::from(*(a_ptr.add(i * 4) as *const [f64; 4]));
+            let vb = f64x4::from(*(b_ptr.add(i * 4) as *const [f64; 4]));
+            acc += va * vb;
+        }
+    }
+
+    let mut sum = acc.reduce_add();
+    for i in (chunks * 4)..len {
+        sum += a[i] * b[i];
+    }
+    sum
+}
+
+/// SIMD dot product of two slices of f64 (512-bit)
+///
+/// ### Params
+///
+/// * `a` - The first slice of f64 values.
+/// * `b` - The second slice of f64 values.
+///
+/// ### Returns
+///
+/// Dot product
+#[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+#[inline(always)]
+fn dot_avx512_f64(a: &[f64], b: &[f64]) -> f64 {
+    use std::arch::x86_64::*;
+
+    let len = a.len();
+    let chunks = len / 8;
+
+    unsafe {
+        let mut acc = _mm512_setzero_pd();
+        for i in 0..chunks {
+            let va = _mm512_loadu_pd(a.as_ptr().add(i * 8));
+            let vb = _mm512_loadu_pd(b.as_ptr().add(i * 8));
+            acc = _mm512_fmadd_pd(va, vb, acc);
+        }
+
+        let mut sum = _mm512_reduce_add_pd(acc);
+        for i in (chunks * 8)..len {
+            sum += a[i] * b[i];
+        }
+        sum
+    }
+}
+
+/// SIMD dot product of two slices of f64 (512-bit fallback)
+///
+/// ### Params
+///
+/// * `a` - The first slice of f64 values.
+/// * `b` - The second slice of f64 values.
+///
+/// ### Returns
+///
+/// Dot product
+#[cfg(not(all(target_arch = "x86_64", target_feature = "avx512f")))]
+#[inline(always)]
+fn dot_avx512_f64(a: &[f64], b: &[f64]) -> f64 {
+    dot_avx2_f64(a, b)
+}
+
+/// SIMD dot product of two slices of f64 (dispatch)
+///
+/// Dispatches to the best available SIMD implementation at runtime.
+///
+/// ### Params
+///
+/// * `a` - The first slice of f64 values.
+/// * `b` - The second slice of f64 values.
+///
+/// ### Returns
+///
+/// Dot product
+#[inline]
+pub fn dot_simd_f64(a: &[f64], b: &[f64]) -> f64 {
+    match detect_simd_level() {
+        SimdLevel::Avx512 => dot_avx512_f64(a, b),
+        SimdLevel::Avx2 => dot_avx2_f64(a, b),
+        SimdLevel::Sse => dot_sse_f64(a, b),
+        SimdLevel::Scalar => dot_scalar_f64(a, b),
+    }
+}
+
+impl BixverseSimd for f64 {
+    #[inline]
+    fn bxv_dot_simd(a: &[f64], b: &[f64]) -> f64 {
+        dot_simd_f64(a, b)
     }
 }
