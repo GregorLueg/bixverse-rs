@@ -899,8 +899,8 @@ mod tests {
         let mut labels = Vec::with_capacity(n);
 
         for _ in 0..n {
-            let x: f32 = rng.gen_range(-2.0..2.0);
-            let y: f32 = rng.gen_range(-2.0..2.0);
+            let x: f32 = rng.random_range(-2.0..2.0);
+            let y: f32 = rng.random_range(-2.0..2.0);
             let is_pos = (x > 0.0) ^ (y > 0.0); // XOR quadrants
             columns[0].push(x);
             columns[1].push(y);
