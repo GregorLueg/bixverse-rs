@@ -302,7 +302,7 @@ pub fn tricube_weighted_correction(
         // Bandwidth = ndist * median distance
         let mut sorted_d: Vec<f32> = dists.clone();
         sorted_d.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let median_d = if sorted_d.len() % 2 == 0 && sorted_d.len() >= 2 {
+        let median_d = if sorted_d.len().is_multiple_of(2) && sorted_d.len() >= 2 {
             (sorted_d[sorted_d.len() / 2 - 1] + sorted_d[sorted_d.len() / 2]) * 0.5
         } else {
             sorted_d[sorted_d.len() / 2]

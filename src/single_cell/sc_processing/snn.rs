@@ -166,7 +166,8 @@ pub fn generate_snn_full(
 /// ### Params
 ///
 /// * `knn_graph` - K-nearest neighbours data as a flat vector in column-major.
-/// * `no_neighbours` - Number of neighbours in the kNN graph
+/// * `k` - Number of neighbours in the kNN graph
+/// * `n_samples` - Number of samples in the data
 /// * `pruning` - Below which Jaccard similarity to prune the edge. In this case
 ///   the weight is set to `0`.
 /// * `method` - Which similarity method to use.

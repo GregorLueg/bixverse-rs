@@ -1,7 +1,9 @@
-//! Bixverse specific single cell 'omics module. Contains all of the methods to
-//! run large scale single cell experiments locally while reducing memory
-//! pressure.
+//! Bixverse specific single cell and meta cell-specific 'omics module. Contains
+//! all of the methods to run large scale single cell experiments locally while
+//! reducing memory pressure.
 
+pub mod mc_analysis;
+pub mod mc_processing;
 pub mod sc_analysis;
 pub mod sc_batch_correction;
 pub mod sc_data;

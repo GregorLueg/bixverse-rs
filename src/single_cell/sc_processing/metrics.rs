@@ -97,7 +97,7 @@ pub fn kbet(knn_data: &[Vec<usize>], batches: &[usize]) -> KbetResult {
 
     let mut sorted_chi = chi_square_stats.clone();
     sorted_chi.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
-    let median_chi_square = if sorted_chi.len() % 2 == 0 {
+    let median_chi_square = if sorted_chi.len().is_multiple_of(2) {
         (sorted_chi[sorted_chi.len() / 2 - 1] + sorted_chi[sorted_chi.len() / 2]) / 2.0
     } else {
         sorted_chi[sorted_chi.len() / 2]
@@ -223,7 +223,7 @@ pub fn batch_silhouette_width(
 
     let mut sorted = per_cell.clone();
     sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
-    let median_asw = if n_sub % 2 == 0 {
+    let median_asw = if n_sub.is_multiple_of(2) {
         (sorted[n_sub / 2 - 1] + sorted[n_sub / 2]) / 2.0
     } else {
         sorted[n_sub / 2]
@@ -297,7 +297,7 @@ pub fn batch_lisi(knn_indices: &[Vec<usize>], batch_labels: &[usize]) -> LisiRes
 
     let mut sorted = per_cell.clone();
     sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
-    let median_lisi = if n % 2 == 0 {
+    let median_lisi = if n.is_multiple_of(2) {
         (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
     } else {
         sorted[n / 2]
