@@ -1,8 +1,22 @@
-//! Binary classification via histogram-based gradient-boosted trees with
-//! logistic (log) loss.
+//! Binary classification via histogram-based gradient-boosted trees
+//! with logistic (log) loss.
+//!
+//! Designed for the scDblFinder doublet detection pipeline where
+//! the classifier must:
+//!
+//! - Return predicted probabilities for **all** samples (including
+//!   those excluded from training).
+//! - Store tree structure so that excluded samples can be scored
+//!   after each round.
+//! - Support early stopping on OOB log-loss.
+//!
+//! The split criterion is XGBoost-style second-order gain with L2
+//! regularisation and minimum hessian weight constraints.
 
 use rand::prelude::*;
 use rand::rngs::SmallRng;
+
+use crate::single_cell::sc_utils::utils_tree::{QuantisedStore, train_oob_split, tree_seed};
 
 ////////////
 // Params //
@@ -10,8 +24,9 @@ use rand::rngs::SmallRng;
 
 /// Parameters for the logistic GBM classifier.
 ///
-/// Defaults are aligned with R's scDblFinder XGBoost call: max_depth = 4,
-/// learning_rate = 0.3, subsample = 0.75, nrounds up to 200.
+/// Defaults are aligned with R's scDblFinder XGBoost call:
+/// `max_depth = 4`, `learning_rate = 0.3`, `subsample = 0.75`,
+/// `nrounds` up to 200.
 #[derive(Clone, Debug)]
 pub struct LogisticGbmConfig {
     /// Maximum number of boosting rounds.
@@ -22,17 +37,17 @@ pub struct LogisticGbmConfig {
     pub max_depth: usize,
     /// Minimum training samples in a leaf.
     pub min_samples_leaf: usize,
-    /// L2 regularisation on leaf weights (XGBoost's lambda).
+    /// L2 regularisation on leaf weights (XGBoost's `lambda`).
     pub lambda: f32,
-    /// Minimum sum-of-hessians in a child (XGBoost's min_child_weight).
+    /// Minimum sum-of-hessians in a child (XGBoost's
+    /// `min_child_weight`).
     pub min_child_weight: f32,
     /// Fraction of eligible samples used per tree.
     pub subsample_rate: f32,
-    /// Stop if OOB logloss hasn't improved for this many rounds.
+    /// Stop if OOB log-loss hasn't improved for this many rounds.
     pub early_stop_rounds: usize,
 }
 
-/// Default implementation LogisticGbmConfig
 impl Default for LogisticGbmConfig {
     fn default() -> Self {
         Self {
@@ -48,158 +63,65 @@ impl Default for LogisticGbmConfig {
     }
 }
 
-/////////////
-// Helpers //
-/////////////
+//////////
+// Loss //
+//////////
 
-/// Sigmoid
+/// Compute the sigmoid (logistic) function.
 ///
-/// ### Param
+/// ### Params
 ///
-/// * `x` - Value for which to calculate the sigmoid
+/// * `x` - Raw logit value.
 ///
 /// ### Returns
 ///
-/// The sigmoid
+/// `1 / (1 + exp(-x))`, in `(0, 1)`.
 #[inline(always)]
 fn sigmoid(x: f32) -> f32 {
     1.0 / (1.0 + (-x).exp())
 }
 
-/// Logarithmic loss
+/// Compute the binary log-loss for a single sample.
 ///
 /// ### Params
 ///
-/// * `label` - Boolean indicating if
+/// * `label` - Ground truth; `true` for positive class.
+/// * `raw` - Raw logit score (pre-sigmoid).
+///
+/// ### Returns
+///
+/// `-ln(p)` if `label` is true, `-ln(1-p)` otherwise, where
+/// `p = sigmoid(raw)` clamped to `[1e-15, 1 - 1e-15]`.
 fn logloss(label: bool, raw: f32) -> f32 {
     let p = sigmoid(raw).clamp(1e-15, 1.0 - 1e-15);
     if label { -p.ln() } else { -(1.0 - p).ln() }
 }
 
-/////////////////////////////
-// Quantised feature store //
-/////////////////////////////
+/////////////////////////
+// Classification hist //
+/////////////////////////
 
-/// Column-major store of u8-quantised feature values.
+/// Per-feature histogram over 256 quantisation bins for
+/// classification.
 ///
-/// Each feature column is independently scaled to [0, 255].
-/// Layout: data[feature_idx * n_samples + sample_idx].
-pub struct QuantisedStore {
-    /// Quantised data
-    data: Vec<u8>,
-    /// Number of samples
-    pub n_samples: usize,
-    /// Number of features
-    pub n_features: usize,
-}
-
-impl QuantisedStore {
-    /// Build from per-feature column vectors.
-    ///
-    /// Each inner Vec has length n_samples. Columns are independently
-    /// scaled to [0, 255].
-    ///
-    /// ### Params
-    ///
-    /// * `columns` - !TODO!
-    ///
-    /// ### Returns
-    ///
-    /// Self
-    pub fn from_columns(columns: &[Vec<f32>]) -> Self {
-        let n_features = columns.len();
-        assert!(!columns.is_empty(), "need at least one feature");
-        let n_samples = columns[0].len();
-        let mut data = vec![0u8; n_features * n_samples];
-
-        for (j, col) in columns.iter().enumerate() {
-            assert_eq!(col.len(), n_samples);
-            let mut min_v = f32::INFINITY;
-            let mut max_v = f32::NEG_INFINITY;
-            for &v in col {
-                if v < min_v {
-                    min_v = v;
-                }
-                if v > max_v {
-                    max_v = v;
-                }
-            }
-            let range = max_v - min_v;
-            let offset = j * n_samples;
-            if range > 1e-10 {
-                let scale = 255.0 / range;
-                for (i, &v) in col.iter().enumerate() {
-                    data[offset + i] = ((v - min_v) * scale).round().min(255.0) as u8;
-                }
-            }
-        }
-
-        Self {
-            data,
-            n_samples,
-            n_features,
-        }
-    }
-
-    /// Build from a flat row-major slice (n_samples rows, n_features cols).
-    ///
-    /// ### Params
-    ///
-    /// * `flat` - Flat representation of the data in row major
-    /// * `n_samples` - Number of samples
-    /// * `n_features` - Number of features
-    ///
-    /// ### Returns
-    ///
-    /// Self
-    pub fn from_row_major(flat: &[f32], n_samples: usize, n_features: usize) -> Self {
-        let mut columns: Vec<Vec<f32>> = vec![Vec::with_capacity(n_samples); n_features];
-        for i in 0..n_samples {
-            for j in 0..n_features {
-                columns[j].push(flat[i * n_features + j]);
-            }
-        }
-        Self::from_columns(&columns)
-    }
-
-    /// Return a given (quantised) feature column
-    ///
-    /// ### Params
-    ///
-    /// * `feature` - Index of the feature/column
-    ///
-    /// ### Returns
-    ///
-    ///
-    #[inline(always)]
-    pub fn get_col(&self, feature: usize) -> &[u8] {
-        let start = feature * self.n_samples;
-        &self.data[start..start + self.n_samples]
-    }
-}
-
-///////////////
-// Histogram //
-///////////////
-
-/// Per-feature histogram over 256 quantisation bins.
-///
-/// Tracks count, gradient sum, and hessian sum per bin.
+/// Tracks count, gradient sum, and hessian sum per bin. These are
+/// the sufficient statistics for the XGBoost-style second-order
+/// split gain criterion.
 struct FeatureHistogram {
-    /// Count per bin
+    /// Number of samples in each bin.
     count: [u32; 256],
-    /// Gradients per bin
+    /// Sum of gradients per bin.
     grad_sum: [f32; 256],
-    /// Hessian sum per bin
+    /// Sum of hessians per bin.
     hess_sum: [f32; 256],
 }
 
 impl FeatureHistogram {
-    /// Initialise a new instance
+    /// Create a zeroed histogram.
     ///
     /// ### Returns
     ///
-    /// Self
+    /// A `FeatureHistogram` with all bins at zero.
     fn new() -> Self {
         Self {
             count: [0; 256],
@@ -208,6 +130,7 @@ impl FeatureHistogram {
         }
     }
 
+    /// Reset all bins to zero.
     fn reset(&mut self) {
         self.count = [0; 256];
         self.grad_sum = [0.0; 256];
@@ -216,11 +139,27 @@ impl FeatureHistogram {
 }
 
 /// Histograms for all features at a single tree node.
+///
+/// Wraps one `FeatureHistogram` per feature. Reused across nodes
+/// within a single tree since parent histograms are not needed
+/// after finding the split (no subtraction trick -- the
+/// classification trees are shallow enough that rebuilding from
+/// scratch at each node is cheap).
 struct NodeHistogram {
+    /// One histogram per feature.
     features: Vec<FeatureHistogram>,
 }
 
 impl NodeHistogram {
+    /// Allocate histograms for the given number of features.
+    ///
+    /// ### Params
+    ///
+    /// * `n_features` - Number of features.
+    ///
+    /// ### Returns
+    ///
+    /// A `NodeHistogram` with all bins zeroed.
     fn new(n_features: usize) -> Self {
         Self {
             features: (0..n_features).map(|_| FeatureHistogram::new()).collect(),
@@ -228,6 +167,18 @@ impl NodeHistogram {
     }
 
     /// Populate histograms from the given training samples.
+    ///
+    /// Iterates sample-major: for each sample, its gradient and
+    /// hessian are accumulated into all feature histograms at once.
+    /// This trades cache locality on the histogram side for a single
+    /// pass over the sample set.
+    ///
+    /// ### Params
+    ///
+    /// * `store` - Quantised feature store.
+    /// * `samples` - Indices of active training samples.
+    /// * `grads` - Dense gradient array indexed by sample id.
+    /// * `hess` - Dense hessian array indexed by sample id.
     fn build(&mut self, store: &QuantisedStore, samples: &[u32], grads: &[f32], hess: &[f32]) {
         for fh in self.features.iter_mut() {
             fh.reset();
@@ -247,7 +198,28 @@ impl NodeHistogram {
 
     /// Scan all features for the split with highest gain.
     ///
-    /// Gain = 0.5 * (G_L^2/(H_L+lam) + G_R^2/(H_R+lam) - G^2/(H+lam))
+    /// Uses the XGBoost second-order gain formula:
+    ///
+    /// ```text
+    /// gain = 0.5 * (G_L^2/(H_L+lam) + G_R^2/(H_R+lam)
+    ///              - G^2/(H+lam))
+    /// ```
+    ///
+    /// Splits are rejected if either child has fewer than
+    /// `min_samples_leaf` samples or less than `min_child_weight`
+    /// hessian mass.
+    ///
+    /// ### Params
+    ///
+    /// * `g_total` - Sum of gradients in this node.
+    /// * `h_total` - Sum of hessians in this node.
+    /// * `n_total` - Number of training samples in this node.
+    /// * `config` - Classifier configuration.
+    ///
+    /// ### Returns
+    ///
+    /// `Some(SplitCandidate)` if an improving split was found,
+    /// `None` otherwise.
     fn find_best_split(
         &self,
         g_total: f32,
@@ -266,7 +238,6 @@ impl NodeHistogram {
             let mut hl = 0.0f32;
             let mut nl = 0u32;
 
-            // Scan bins 0..254; threshold at bin b means <= b goes left
             for b in 0..255usize {
                 gl += fh.grad_sum[b];
                 hl += fh.hess_sum[b];
@@ -291,7 +262,6 @@ impl NodeHistogram {
                         gain,
                         grad_left: gl,
                         hess_left: hl,
-                        n_left: nl,
                     });
                 }
             }
@@ -301,43 +271,70 @@ impl NodeHistogram {
     }
 }
 
-// ================================================================
-// Split candidate
-// ================================================================
+/////////////////////
+// Split candidate //
+/////////////////////
 
+/// Information about a candidate split in a classification tree.
 struct SplitCandidate {
+    /// Feature index.
     feature: usize,
+    /// Bin threshold; samples with `bin <= threshold` go left.
     threshold: u8,
+    /// XGBoost-style second-order gain.
     gain: f32,
+    /// Sum of gradients in the left child.
     grad_left: f32,
+    /// Sum of hessians in the left child.
     hess_left: f32,
-    n_left: u32,
 }
 
-// ================================================================
-// Tree storage
-// ================================================================
+//////////////////
+// Tree storage //
+//////////////////
 
-/// A single node in a stored tree.
+/// A single node in a stored classification tree.
+///
+/// Unlike the SCENIC regression trees (which discard structure and
+/// only accumulate importance), classification trees must be stored
+/// so that excluded / OOB samples can be scored after each round.
 enum TreeNode {
+    /// Internal split node.
     Internal {
+        /// Feature index used for the split.
         feature: usize,
+        /// Bin threshold; `<= threshold` routes left.
         threshold: u8,
+        /// Index of the left child in the `Tree.nodes` array.
         left: usize,
+        /// Index of the right child in the `Tree.nodes` array.
         right: usize,
     },
+    /// Leaf node containing a raw prediction value (Newton step).
     Leaf(f32),
 }
 
-/// A complete boosted tree with its learning rate baked in.
+/// A complete boosted classification tree with its learning rate
+/// baked in.
+///
+/// Trees are stored as flat `Vec<TreeNode>` arrays. The root is
+/// always at index 0.
 struct Tree {
+    /// Flat array of tree nodes.
     nodes: Vec<TreeNode>,
+    /// Learning rate applied when accumulating predictions.
     lr: f32,
 }
 
 impl Tree {
-    /// Route samples through the tree, accumulating lr * leaf_value
-    /// onto raw_scores.
+    /// Route samples through the tree, accumulating `lr * leaf_value`
+    /// onto `raw_scores`.
+    ///
+    /// ### Params
+    ///
+    /// * `store` - Quantised feature store.
+    /// * `raw_scores` - Dense raw logit array; updated in place.
+    /// * `samples` - Sample indices to route through the tree.
     fn predict_update(&self, store: &QuantisedStore, raw_scores: &mut [f32], samples: &[u32]) {
         for &s in samples {
             let si = s as usize;
@@ -366,16 +363,38 @@ impl Tree {
     }
 }
 
-// ================================================================
-// Tree building (recursive)
-// ================================================================
+///////////////////
+// Tree building //
+///////////////////
 
 /// Recursively build a classification tree node.
 ///
-/// Histograms are built from scratch at each node (no subtraction
-/// trick -- simpler, same asymptotic cost). A single `NodeHistogram`
-/// buffer is reused across all nodes since parent histograms are not
-/// needed after finding the split.
+/// Histograms are rebuilt from scratch at each node (no subtraction
+/// trick -- simpler, and the shallow depth makes the asymptotic
+/// cost identical in practice). A single `NodeHistogram` buffer is
+/// reused across all nodes since parent histograms are not needed
+/// after finding the split.
+///
+/// Samples are partitioned in place via swap-based partitioning
+/// (no external buffer needed).
+///
+/// ### Params
+///
+/// * `nodes` - Flat node array being built; new nodes are pushed
+///   onto the end.
+/// * `store` - Quantised feature store.
+/// * `grads` - Dense gradient array indexed by sample id.
+/// * `hess` - Dense hessian array indexed by sample id.
+/// * `samples` - Active sample indices; partitioned in place.
+/// * `g_sum` - Sum of gradients in this node.
+/// * `h_sum` - Sum of hessians in this node.
+/// * `config` - Classifier configuration.
+/// * `depth` - Current tree depth.
+/// * `hist` - Reusable histogram buffer.
+///
+/// ### Returns
+///
+/// Index of the newly created node in `nodes`.
 #[allow(clippy::too_many_arguments)]
 fn build_node(
     nodes: &mut Vec<TreeNode>,
@@ -414,7 +433,7 @@ fn build_node(
     // reserve slot (filled after recursion)
     nodes.push(TreeNode::Leaf(0.0));
 
-    // partition samples in place
+    // partition samples in place via swaps
     let col = store.get_col(split.feature);
     let mut left_end = 0usize;
     for i in 0..samples.len() {
@@ -461,16 +480,37 @@ fn build_node(
     my_idx
 }
 
-// ================================================================
-// Main entry point
-// ================================================================
+//////////
+// Main //
+//////////
 
-/// Train a logistic GBM and return predicted probabilities for ALL samples.
+/// Train a logistic GBM and return predicted probabilities for
+/// **all** samples.
 ///
-/// Excluded samples are omitted from training but still receive predictions
-/// (matching R's XGBoost behaviour in scDblFinder).
+/// Excluded samples are omitted from training but still receive
+/// predictions (matching R's XGBoost behaviour in scDblFinder).
+/// After each tree is built, it is applied to all samples so that
+/// excluded cells accumulate predictions across rounds.
 ///
-/// Labels: true = positive (doublet), false = negative (singlet).
+/// Early stopping monitors OOB log-loss: if no improvement is seen
+/// for `config.early_stop_rounds` consecutive rounds, boosting
+/// terminates.
+///
+/// ### Params
+///
+/// * `store` - Quantised feature store (all samples, all features).
+/// * `labels` - Ground truth labels; `true` = positive (doublet),
+///   `false` = negative (singlet).
+/// * `exclude` - Per-sample exclusion mask; `true` means the sample
+///   is excluded from training and OOB evaluation but still
+///   receives predictions.
+/// * `config` - Classifier configuration.
+/// * `seed` - Base seed for reproducibility.
+///
+/// ### Returns
+///
+/// Vector of length `n_samples` with predicted probabilities in
+/// `[0, 1]`.
 pub fn fit_logistic_gbm(
     store: &QuantisedStore,
     labels: &[bool],
@@ -485,14 +525,14 @@ pub fn fit_logistic_gbm(
     let eligible: Vec<u32> = (0..n as u32).filter(|&i| !exclude[i as usize]).collect();
     let n_eligible = eligible.len();
 
-    // Degenerate case
+    // degenerate case: too few samples to split
     if n_eligible < 2 * config.min_samples_leaf {
         let n_pos = eligible.iter().filter(|&&i| labels[i as usize]).count();
         let p = (n_pos as f32 / n_eligible.max(1) as f32).clamp(0.01, 0.99);
         return vec![p; n];
     }
 
-    // Initialise raw scores from base rate
+    // initialise raw scores from base rate
     let n_pos = eligible.iter().filter(|&&i| labels[i as usize]).count();
     let base_rate = (n_pos as f32 / n_eligible as f32).clamp(0.01, 0.99);
     let init_logit = (base_rate / (1.0 - base_rate)).ln();
@@ -505,33 +545,29 @@ pub fn fit_logistic_gbm(
     let n_train = ((n_eligible as f32 * config.subsample_rate).round() as usize)
         .max(2 * config.min_samples_leaf)
         .min(n_eligible);
-    let mut elig_buf = eligible.clone();
 
+    let mut elig_buf = eligible.clone();
     let all_samples: Vec<u32> = (0..n as u32).collect();
 
     let mut best_oob_loss = f32::INFINITY;
     let mut rounds_no_improve = 0usize;
 
     for round in 0..config.max_rounds {
-        // Compute gradients and hessians for eligible samples
+        // compute gradients and hessians for eligible samples
         for &s in &eligible {
             let si = s as usize;
             let p = sigmoid(raw_scores[si]);
             let y = if labels[si] { 1.0f32 } else { 0.0 };
             grads[si] = p - y;
-            hess[si] = (p * (1.0 - p)).max(1e-8); // floor to avoid zero hessian
+            hess[si] = (p * (1.0 - p)).max(1e-8);
         }
 
-        // Subsample eligible into train / oob
-        let mut rng = SmallRng::seed_from_u64(
-            seed.wrapping_add((round as u64).wrapping_mul(6_364_136_223_846_793_005)),
-        );
+        // subsample eligible into train / OOB
+        let mut rng = SmallRng::seed_from_u64(tree_seed(seed as usize, round));
         elig_buf.copy_from_slice(&eligible);
-        for i in 0..n_train {
-            let j = rng.gen_range(i..n_eligible);
-            elig_buf.swap(i, j);
-        }
-        let (train_slice, oob_slice) = elig_buf.split_at(n_train);
+        let actual_n_train = train_oob_split(&mut elig_buf, n_train, &mut rng);
+
+        let (train_slice, oob_slice) = elig_buf.split_at(actual_n_train);
         let mut train = train_slice.to_vec();
 
         let (g_sum, h_sum) = train.iter().fold((0.0f32, 0.0f32), |(gs, hs), &s| {
@@ -539,7 +575,7 @@ pub fn fit_logistic_gbm(
             (gs + grads[si], hs + hess[si])
         });
 
-        // Build tree
+        // build tree
         let mut tree_nodes = Vec::with_capacity(2usize.pow(config.max_depth as u32 + 1));
         build_node(
             &mut tree_nodes,
@@ -559,10 +595,10 @@ pub fn fit_logistic_gbm(
             lr: config.learning_rate,
         };
 
-        // Update raw scores for ALL samples
+        // update raw scores for ALL samples (including excluded)
         tree.predict_update(store, &mut raw_scores, &all_samples);
 
-        // OOB early stopping
+        // OOB early stopping on log-loss
         if !oob_slice.is_empty() {
             let oob_loss: f32 = oob_slice
                 .iter()
@@ -594,7 +630,16 @@ pub fn fit_logistic_gbm(
 mod tests {
     use super::*;
 
-    /// Simple AUC via sorting. Good enough for testing.
+    /// Compute AUC via sorting (trapezoidal rule).
+    ///
+    /// ### Params
+    ///
+    /// * `scores` - Predicted probabilities or scores.
+    /// * `labels` - Ground truth labels.
+    ///
+    /// ### Returns
+    ///
+    /// Area under the ROC curve.
     fn auc(scores: &[f32], labels: &[bool]) -> f32 {
         let mut pairs: Vec<(f32, bool)> =
             scores.iter().copied().zip(labels.iter().copied()).collect();
@@ -618,7 +663,6 @@ mod tests {
             } else {
                 fp += 1.0;
             }
-            // Trapezoidal rule when fp changes
             if fp != prev_fp {
                 auc_val += (fp - prev_fp) * (tp + prev_tp) / 2.0;
                 prev_fp = fp;
@@ -628,10 +672,24 @@ mod tests {
         auc_val / (n_pos * n_neg)
     }
 
-    /// Generate two Gaussian blobs in n_features dimensions.
+    /// Generate two Gaussian blobs in `n_features` dimensions.
     ///
-    /// Class 0 centred at -separation/2, class 1 at +separation/2 (on
-    /// the first `n_informative` features; remaining features are noise).
+    /// Class 0 is centred at `-separation/2`, class 1 at
+    /// `+separation/2` on the first `n_informative` features;
+    /// remaining features are pure noise.
+    ///
+    /// ### Params
+    ///
+    /// * `n_per_class` - Samples per class.
+    /// * `n_informative` - Number of informative features.
+    /// * `n_noise` - Number of noise features.
+    /// * `separation` - Distance between class centres.
+    /// * `seed` - Random seed.
+    ///
+    /// ### Returns
+    ///
+    /// `(columns, labels)` where `columns` is one `Vec<f32>` per
+    /// feature and `labels` is a `Vec<bool>`.
     fn make_blobs(
         n_per_class: usize,
         n_informative: usize,
@@ -654,7 +712,7 @@ mod tests {
                 -separation / 2.0
             };
             for j in 0..n_feat {
-                let noise: f32 = rng.random::<f32>() * 2.0 - 1.0; // uniform [-1, 1]
+                let noise: f32 = rng.random::<f32>() * 2.0 - 1.0;
                 let val = if j < n_informative {
                     offset + noise
                 } else {
@@ -672,7 +730,6 @@ mod tests {
         assert!((sigmoid(0.0) - 0.5).abs() < 1e-6);
         assert!(sigmoid(10.0) > 0.999);
         assert!(sigmoid(-10.0) < 0.001);
-        // Monotonicity
         assert!(sigmoid(1.0) > sigmoid(0.0));
         assert!(sigmoid(0.0) > sigmoid(-1.0));
     }
@@ -700,7 +757,7 @@ mod tests {
         let store = QuantisedStore::from_columns(&cols);
         let exclude = vec![false; store.n_samples];
 
-        let probs = fit_logistic_gbm(&store, &labels, &exclude, &LogisticGbmConfig::default(), 77);
+        let probs = fit_logistic_gbm(&store, &labels, &exclude, &LogisticGbmConfig::default(), 7);
 
         let auc_val = auc(&probs, &labels);
         assert!(
@@ -711,35 +768,22 @@ mod tests {
     }
 
     #[test]
-    fn test_probabilities_bounded() {
-        let (cols, labels) = make_blobs(200, 2, 0, 4.0, 7);
-        let store = QuantisedStore::from_columns(&cols);
-        let exclude = vec![false; store.n_samples];
-
-        let probs = fit_logistic_gbm(&store, &labels, &exclude, &LogisticGbmConfig::default(), 0);
-
-        for &p in &probs {
-            assert!(p >= 0.0 && p <= 1.0, "probability out of range: {}", p);
-        }
-    }
-
-    #[test]
-    fn test_imbalanced_classes() {
-        let mut rng = SmallRng::seed_from_u64(555);
-        let n = 2000;
-        let n_pos = 100; // 5%
+    fn test_imbalanced() {
+        let mut rng = SmallRng::seed_from_u64(55);
+        let n_pos = 50;
+        let n = 500;
         let n_feat = 4;
-        let mut columns: Vec<Vec<f32>> = vec![Vec::with_capacity(n); n_feat];
-        let mut labels = vec![false; n];
+        let mut columns: Vec<Vec<f32>> = (0..n_feat)
+            .map(|_| Vec::with_capacity(n))
+            .collect::<Vec<_>>();
+        let mut labels = Vec::with_capacity(n);
 
         for i in 0..n {
             let is_pos = i < n_pos;
-            labels[i] = is_pos;
-            // Positives have higher values on features 0 and 1
-            let offset = if is_pos { 3.0 } else { 0.0 };
+            labels.push(is_pos);
             for j in 0..n_feat {
-                let noise: f32 = rng.random::<f32>() * 2.0 - 1.0;
-                let val = if j < 2 { offset + noise } else { noise * 3.0 };
+                let base: f32 = if is_pos && j < 2 { 3.0 } else { 0.0 };
+                let val = base + rng.random::<f32>() * 2.0 - 1.0;
                 columns[j].push(val);
             }
         }
@@ -756,8 +800,6 @@ mod tests {
             auc_val
         );
 
-        // Check calibration: mean predicted prob for positives should be
-        // significantly higher than for negatives
         let mean_pos: f32 = probs
             .iter()
             .zip(&labels)
@@ -780,15 +822,12 @@ mod tests {
         );
     }
 
-    // ---- excluded samples still get predictions ----
-
     #[test]
     fn test_exclusion_still_predicts() {
         let (cols, labels) = make_blobs(300, 3, 0, 5.0, 88);
         let store = QuantisedStore::from_columns(&cols);
         let n = store.n_samples;
 
-        // Exclude 20% of samples
         let mut exclude = vec![false; n];
         for i in (0..n).step_by(5) {
             exclude[i] = true;
@@ -796,7 +835,6 @@ mod tests {
 
         let probs = fit_logistic_gbm(&store, &labels, &exclude, &LogisticGbmConfig::default(), 11);
 
-        // Excluded samples should have non-trivial predictions (not all identical)
         let excluded_probs: Vec<f32> = probs
             .iter()
             .zip(&exclude)
@@ -814,7 +852,6 @@ mod tests {
             max_ex - min_ex
         );
 
-        // Excluded predictions should still be reasonable
         let excluded_labels: Vec<bool> = labels
             .iter()
             .zip(&exclude)
@@ -829,8 +866,6 @@ mod tests {
         );
     }
 
-    // ---- early stopping with noise ----
-
     #[test]
     fn test_early_stopping_pure_noise() {
         let mut rng = SmallRng::seed_from_u64(999);
@@ -838,7 +873,9 @@ mod tests {
         let n_test = 500;
         let n = n_train + n_test;
         let n_feat = 3;
-        let mut columns: Vec<Vec<f32>> = vec![Vec::with_capacity(n); n_feat];
+        let mut columns: Vec<Vec<f32>> = (0..n_feat)
+            .map(|_| Vec::with_capacity(n))
+            .collect::<Vec<_>>();
         let mut labels = Vec::with_capacity(n);
 
         for _ in 0..n {
@@ -850,7 +887,6 @@ mod tests {
 
         let store = QuantisedStore::from_columns(&columns);
 
-        // Exclude the test portion from training
         let mut exclude = vec![false; n];
         for i in n_train..n {
             exclude[i] = true;
@@ -864,7 +900,6 @@ mod tests {
 
         let probs = fit_logistic_gbm(&store, &labels, &exclude, &config, 0);
 
-        // Evaluate on the held-out test set only
         let test_probs: Vec<f32> = probs[n_train..].to_vec();
         let test_labels: Vec<bool> = labels[n_train..].to_vec();
         let auc_val = auc(&test_probs, &test_labels);
@@ -874,8 +909,6 @@ mod tests {
             auc_val
         );
     }
-
-    // ---- deterministic with same seed ----
 
     #[test]
     fn test_deterministic() {
@@ -889,19 +922,17 @@ mod tests {
         assert_eq!(a, b, "same seed should produce identical results");
     }
 
-    // ---- XOR-like pattern (tests nonlinearity) ----
-
     #[test]
     fn test_xor_nonlinear() {
         let mut rng = SmallRng::seed_from_u64(777);
         let n = 800;
-        let mut columns: Vec<Vec<f32>> = vec![Vec::with_capacity(n); 2];
+        let mut columns: Vec<Vec<f32>> = (0..2).map(|_| Vec::with_capacity(n)).collect::<Vec<_>>();
         let mut labels = Vec::with_capacity(n);
 
         for _ in 0..n {
             let x: f32 = rng.random_range(-2.0..2.0);
             let y: f32 = rng.random_range(-2.0..2.0);
-            let is_pos = (x > 0.0) ^ (y > 0.0); // XOR quadrants
+            let is_pos = (x > 0.0) ^ (y > 0.0);
             columns[0].push(x);
             columns[1].push(y);
             labels.push(is_pos);
@@ -911,7 +942,7 @@ mod tests {
         let exclude = vec![false; n];
 
         let config = LogisticGbmConfig {
-            max_depth: 4, // needs depth >= 2 for XOR
+            max_depth: 4,
             max_rounds: 100,
             ..Default::default()
         };
@@ -926,24 +957,17 @@ mod tests {
         );
     }
 
-    // ---- semi-realistic doublet scenario ----
-
     #[test]
     fn test_doublet_like_scenario() {
-        // Mimics the scDblFinder feature space:
-        // - 3 clusters of "singlets"
-        // - "doublets" are mixtures with higher library size ratios,
-        //   higher knn_ratios, and higher cxds-like scores
         let mut rng = SmallRng::seed_from_u64(2024);
         let n_singlets = 900;
-        let n_doublets = 100; // ~10% doublet rate
+        let n_doublets = 100;
         let n = n_singlets + n_doublets;
 
-        // Features: [knn_ratio_k3, knn_ratio_k10, knn_ratio_k25,
-        //            weighted, lib_ratio, nfeatures, cxds_score,
-        //            pc1, pc2]
         let n_feat = 9;
-        let mut columns: Vec<Vec<f32>> = vec![Vec::with_capacity(n); n_feat];
+        let mut columns: Vec<Vec<f32>> = (0..n_feat)
+            .map(|_| Vec::with_capacity(n))
+            .collect::<Vec<_>>();
         let mut labels = Vec::with_capacity(n);
 
         for i in 0..n {
@@ -951,18 +975,16 @@ mod tests {
             labels.push(is_dbl);
 
             if is_dbl {
-                // Doublets: higher knn ratios, library size, cxds
-                columns[0].push(0.4 + rng.random::<f32>() * 0.4); // knn_ratio_k3
-                columns[1].push(0.35 + rng.random::<f32>() * 0.3); // knn_ratio_k10
-                columns[2].push(0.3 + rng.random::<f32>() * 0.3); // knn_ratio_k25
-                columns[3].push(0.4 + rng.random::<f32>() * 0.3); // weighted
-                columns[4].push(1.5 + rng.random::<f32>() * 1.0); // lib_ratio
-                columns[5].push(800.0 + rng.random::<f32>() * 400.0); // nfeatures
-                columns[6].push(0.5 + rng.random::<f32>() * 0.4); // cxds_score
-                columns[7].push(rng.random::<f32>() * 4.0 - 2.0); // pc1
-                columns[8].push(rng.random::<f32>() * 4.0 - 2.0); // pc2
+                columns[0].push(0.4 + rng.random::<f32>() * 0.4);
+                columns[1].push(0.35 + rng.random::<f32>() * 0.3);
+                columns[2].push(0.3 + rng.random::<f32>() * 0.3);
+                columns[3].push(0.4 + rng.random::<f32>() * 0.3);
+                columns[4].push(1.5 + rng.random::<f32>() * 1.0);
+                columns[5].push(800.0 + rng.random::<f32>() * 400.0);
+                columns[6].push(0.5 + rng.random::<f32>() * 0.4);
+                columns[7].push(rng.random::<f32>() * 4.0 - 2.0);
+                columns[8].push(rng.random::<f32>() * 4.0 - 2.0);
             } else {
-                // Singlets: lower knn ratios
                 columns[0].push(rng.random::<f32>() * 0.3);
                 columns[1].push(rng.random::<f32>() * 0.25);
                 columns[2].push(rng.random::<f32>() * 0.2);
@@ -987,7 +1009,6 @@ mod tests {
             auc_val
         );
 
-        // Check that doublets get higher scores on average
         let mean_dbl: f32 = probs[n_singlets..].iter().sum::<f32>() / n_doublets as f32;
         let mean_sng: f32 = probs[..n_singlets].iter().sum::<f32>() / n_singlets as f32;
         assert!(

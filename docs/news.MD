@@ -4,7 +4,8 @@
 
 ### Features
 
--
+- scDblFinder implemented
+- Refactor out of shared tree structure between scDblFinder and SCENIC
 
 ## 0.1.6
 

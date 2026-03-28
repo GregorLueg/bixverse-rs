@@ -7,6 +7,7 @@ pub mod knn;
 pub mod metrics;
 pub mod pca;
 pub mod qc;
+pub mod scdblfinder;
 pub mod scrublet;
 pub mod snn;
 pub mod utils_doublets;

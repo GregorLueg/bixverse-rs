@@ -2043,55 +2043,6 @@ impl SampledGbmScratch {
 // Full hist //
 ///////////////
 
-/// Apply a leaf prediction: accumulate OOB improvement then update all
-/// residuals.
-///
-/// OOB improvement is computed before residual updates so it reflects the
-/// pre-update state. The per-sample improvement is:
-/// `2 * lr * pred * r[s] - lr^2 * pred^2`
-/// which equals `r[s]^2 - (r[s] - lr * pred)^2`.
-///
-/// ### Params
-///
-/// * `residuals` - Dense residual array indexed by cell id (updated in place).
-/// * `train_samples` - Training sample indices for this leaf.
-/// * `oob_samples` - OOB sample indices for this leaf.
-/// * `y_sum_train` - Sum of training residuals in this leaf.
-/// * `n_train` - Number of training samples in this leaf.
-/// * `learning_rate` - Shrinkage factor applied to the leaf prediction.
-/// * `oob_improvement` - Accumulated OOB squared-error improvement (updated
-///   in place).
-fn apply_leaf(
-    residuals: &mut [f32],
-    train_samples: &[u32],
-    oob_samples: &[u32],
-    y_sum_train: f32,
-    n_train: usize,
-    learning_rate: f32,
-    oob_improvement: &mut f32,
-) {
-    if n_train == 0 {
-        return;
-    }
-    let pred = y_sum_train / n_train as f32;
-    let lr_pred = learning_rate * pred;
-    let lr_pred_sq = lr_pred * lr_pred;
-
-    // OOB improvement (before updating OOB residuals)
-    for &s in oob_samples {
-        let r = residuals[s as usize];
-        *oob_improvement += 2.0 * lr_pred * r - lr_pred_sq;
-    }
-
-    // update residuals for ALL samples (train + OOB)
-    for &s in train_samples {
-        residuals[s as usize] -= lr_pred;
-    }
-    for &s in oob_samples {
-        residuals[s as usize] -= lr_pred;
-    }
-}
-
 /// Recursively build a single GBM tree node using histogram
 /// subtraction.
 ///
@@ -2292,52 +2243,6 @@ pub fn build_gbm_node(
 /////////////
 // Sampled //
 /////////////
-
-/// Apply a leaf prediction: accumulate OOB improvement then update all
-/// residuals.
-///
-/// OOB improvement is computed *before* residual updates so it reflects the
-/// pre-update state. The improvement for sample s is:
-/// `2 * lr * pred * r[s] - lr^2 * pred^2`
-/// which equals `r[s]^2 - (r[s] - lr*pred)^2`.
-///
-/// ### Params
-///
-/// * `residuals` - Dense residual array (updated in place).
-/// * `train_samples` - Training sample indices in this leaf.
-/// * `oob_samples` - OOB sample indices in this leaf.
-/// * `y_sum_train` - Sum of training residuals in this leaf.
-/// * `n_train` - Number of training samples in this leaf.
-/// * `learning_rate` - Shrinkage factor.
-/// * `oob_improvement` - Accumulated OOB improvement (updated in place).
-fn apply_gbm_leaf(
-    residuals: &mut [f32],
-    train_samples: &[u32],
-    oob_samples: &[u32],
-    y_sum_train: f32,
-    n_train: usize,
-    learning_rate: f32,
-    oob_improvement: &mut f32,
-) {
-    if n_train == 0 {
-        return;
-    }
-    let pred = y_sum_train / n_train as f32;
-    let lr_pred = learning_rate * pred;
-    let lr_pred_sq = lr_pred * lr_pred;
-
-    for &s in oob_samples {
-        let r = residuals[s as usize];
-        *oob_improvement += 2.0 * lr_pred * r - lr_pred_sq;
-    }
-
-    for &s in train_samples {
-        residuals[s as usize] -= lr_pred;
-    }
-    for &s in oob_samples {
-        residuals[s as usize] -= lr_pred;
-    }
-}
 
 /// Recursively build a single GBM tree node (single target,
 /// per-feature histogram scanning).
@@ -4532,7 +4437,7 @@ mod tests {
         let oob: Vec<u32> = vec![2, 3];
         let mut improvement = 0.0f32;
 
-        apply_gbm_leaf(&mut residuals, &train, &oob, 30.0, 2, 0.1, &mut improvement);
+        apply_regression_leaf(&mut residuals, &train, &oob, 30.0, 2, 0.1, &mut improvement);
 
         // pred = 15, lr_pred = 1.5
         assert!((residuals[0] - 8.5).abs() < 1e-6);
@@ -4571,7 +4476,7 @@ mod tests {
         // lr_pred = 0.1 * 15 = 1.5
         let mut improvement = 0.0f32;
 
-        apply_leaf(&mut residuals, &train, &oob, 30.0, 2, 0.1, &mut improvement);
+        apply_regression_leaf(&mut residuals, &train, &oob, 30.0, 2, 0.1, &mut improvement);
 
         // All residuals reduced by lr * pred = 1.5
         assert!((residuals[0] - 8.5).abs() < 1e-6);
