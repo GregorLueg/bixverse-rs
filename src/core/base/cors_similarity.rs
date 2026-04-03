@@ -321,7 +321,7 @@ where
 ///
 /// ### Params
 ///
-/// * `mat` - The matrix for which to calculate the L1 norm (Manhatten distance)
+/// * `mat` - The matrix for which to calculate the L1 norm (Manhattan distance)
 ///   pairwise between all columns.
 ///
 /// ### Returns

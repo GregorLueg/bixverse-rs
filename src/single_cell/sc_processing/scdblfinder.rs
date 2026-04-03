@@ -287,7 +287,7 @@ fn find_threshold_expected_rate(
     let mut sorted: Vec<f32> = scores_obs.to_vec();
     sorted.sort_unstable_by(|a, b| b.partial_cmp(a).unwrap());
 
-    // Threshold sits between the expected_n-th and (expected_n+1)-th
+    // threshold sits between the expected_n-th and (expected_n+1)-th
     // highest score
     let idx = expected_n.min(sorted.len() - 1);
     let threshold = if idx > 0 {
@@ -363,7 +363,7 @@ fn build_feature_matrix(
 
             let mut feats = Vec::with_capacity(n_feat);
 
-            // Multi-scale doublet ratios
+            // multi-scale doublet ratios
             for &k in k_values {
                 let k_use = k.min(k_max);
                 let n_sim = neighbours[..k_use]
@@ -373,7 +373,7 @@ fn build_feature_matrix(
                 feats.push(n_sim as f32 / k_use as f32);
             }
 
-            // Distance-weighted doublet proportion
+            // distance-weighted doublet proportion
             let k_f = k_max as f32;
             let mut w_sum = 0.0f32;
             let mut w_dbl = 0.0f32;
@@ -387,7 +387,7 @@ fn build_feature_matrix(
             }
             feats.push(if w_sum > 0.0 { w_dbl / w_sum } else { 0.0 });
 
-            // Ratio variance across k values
+            // ratio variance across k values
             let mean_ratio = feats[..n_k].iter().sum::<f32>() / n_k as f32;
             let ratio_var: f32 = feats[..n_k]
                 .iter()
@@ -396,7 +396,7 @@ fn build_feature_matrix(
                 / n_k as f32;
             feats.push(ratio_var);
 
-            // Library size ratio
+            // library size ratio
             let lib_ratio = if i < n_obs {
                 library_sizes[i] as f32 / median_lib_size
             } else {
@@ -790,8 +790,8 @@ impl ScDblFinder {
         };
 
         // Expected doublet rate for exclusion logic
-        let expected_dbr = self.params.dbr_per_1k * (self.n_cells as f32 / 1000.0);
-        let expected_dbr = expected_dbr.min(0.5);
+        // let expected_dbr = self.params.dbr_per_1k * (self.n_cells as f32 / 1000.0);
+        let expected_dbr = self.params.dbr_per_1k; // it's already a rate
 
         // -- Step 4: Simulate doublets ONCE --
         if verbose {

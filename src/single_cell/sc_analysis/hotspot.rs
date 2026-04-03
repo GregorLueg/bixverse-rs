@@ -684,30 +684,25 @@ fn normal_model(
 ///
 /// Main structure for computing spatial autocorrelation and gene <> gene
 /// correlations in spatially-resolved transcriptomics data.
-///
-/// ### Fields
-///
-/// * `f_path_gene` - File path to the gene-based binary file.
-/// * `f_path_cell` - File path to the cell-based binary file.
-/// * `neigbours` - Slice if the indices of the cells to include in this
-///   analysis.
-/// * `weights` - Slice of the distances to the neighbours of a given cell.
-/// * `cells_to_keep` - Slice of cells to analyse/keep in this analysis.
-/// * `node_degrees` - Pre-computed node-degree for each cell based on the
-///   weights.
-/// * `umi_counts` - Optional vector with the total UMI counts per cell
-/// * `wtot2` -
-/// * `n_cells` - Total number of cells analysed in the experiment.
 #[derive(Clone, Debug)]
 pub struct Hotspot<'a> {
+    /// File path to the gene-based binary file.
     f_path_gene: String,
+    /// File path to the cell-based binary file.
     f_path_cell: String,
+    /// Slice if the indices of the cells to include in this analysis.
     neighbours: &'a [Vec<usize>],
+    /// Slice of the distances to the neighbours of a given cell.
     weights: Vec<Vec<f32>>,
+    /// Slice of cells to analyse/keep in this analysis.
     cells_to_keep: &'a [usize],
+    /// Pre-computed node-degree for each cell based on the weights.
     node_degrees: Vec<f32>,
+    /// Optional vector with the total UMI counts per cell
     umi_counts: Option<Vec<f32>>,
+    /// Sum of squared weights
     wtot2: f32,
+    /// Total number of cells analysed in the experiment.
     n_cells: usize,
 }
 
