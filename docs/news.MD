@@ -1,5 +1,11 @@
 # News
 
+## 0.1.7
+
+### Features
+
+- Version bump for `ann-search-rs`.
+
 ## 0.1.6
 
 ### Features
