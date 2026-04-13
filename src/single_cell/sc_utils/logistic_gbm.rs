@@ -51,14 +51,14 @@ pub struct LogisticGbmConfig {
 impl Default for LogisticGbmConfig {
     fn default() -> Self {
         Self {
-            max_rounds: 200,
+            max_rounds: 50,
             learning_rate: 0.3,
             max_depth: 4,
             min_samples_leaf: 20,
             lambda: 1.0,
             min_child_weight: 1.0,
             subsample_rate: 0.75,
-            early_stop_rounds: 3,
+            early_stop_rounds: 10,
         }
     }
 }
