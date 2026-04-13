@@ -789,9 +789,9 @@ impl ScDblFinder {
             ..Default::default()
         };
 
-        // Expected doublet rate for exclusion logic
-        // let expected_dbr = self.params.dbr_per_1k * (self.n_cells as f32 / 1000.0);
-        let expected_dbr = self.params.dbr_per_1k; // it's already a rate
+        // expected doublet rate for exclusion logic
+        let expected_dbr = self.params.dbr_per_1k * (self.n_cells as f32 / 1000.0);
+        let expected_dbr = expected_dbr.min(0.5); // sanity cap
 
         // -- Step 4: Simulate doublets ONCE --
         if verbose {
