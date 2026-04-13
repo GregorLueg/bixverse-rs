@@ -1011,6 +1011,55 @@ impl ScDblFinder {
                 (iter_seed + 100) as u64,
             );
 
+            // --- Diagnostic: check if features actually separate ---
+            if verbose {
+                // kNN ratio separation (max-k column)
+                let obs_ratios: Vec<f32> = (0..self.n_cells)
+                    .map(|i| *features.get(i, max_k_col))
+                    .collect();
+                let sim_ratios: Vec<f32> = (0..self.n_cells_sim)
+                    .map(|si| *features.get(self.n_cells + si, max_k_col))
+                    .collect();
+                let obs_mean = obs_ratios.iter().sum::<f32>() / obs_ratios.len() as f32;
+                let sim_mean = sim_ratios.iter().sum::<f32>() / sim_ratios.len() as f32;
+                println!(
+                    "  kNN ratio (k=max): obs mean={:.4}, sim mean={:.4}",
+                    obs_mean, sim_mean
+                );
+
+                // cxds separation
+                let obs_cxds_mean =
+                    obs_cxds_scores.iter().sum::<f32>() / obs_cxds_scores.len() as f32;
+                let sim_cxds_mean =
+                    sim_cxds_scores.iter().sum::<f32>() / sim_cxds_scores.len() as f32;
+                println!(
+                    "  cxds: obs mean={:.4}, sim mean={:.4}",
+                    obs_cxds_mean, sim_cxds_mean
+                );
+
+                // GBM output separation
+                let obs_prob_mean = final_scores.iter().sum::<f32>() / final_scores.len() as f32;
+                let sim_prob_mean = sim_scores.iter().sum::<f32>() / sim_scores.len() as f32;
+                println!(
+                    "  GBM probs: obs mean={:.4}, sim mean={:.4}",
+                    obs_prob_mean, sim_prob_mean
+                );
+
+                // Weighted feature separation
+                let weighted_col = n_k; // weighted is right after the k ratio columns
+                let obs_w: Vec<f32> = (0..self.n_cells)
+                    .map(|i| *features.get(i, weighted_col))
+                    .collect();
+                let sim_w: Vec<f32> = (0..self.n_cells_sim)
+                    .map(|si| *features.get(self.n_cells + si, weighted_col))
+                    .collect();
+                println!(
+                    "  weighted: obs mean={:.4}, sim mean={:.4}",
+                    obs_w.iter().sum::<f32>() / obs_w.len() as f32,
+                    sim_w.iter().sum::<f32>() / sim_w.len() as f32,
+                );
+            }
+
             // Extract observed and simulated scores for next
             // iteration's exclusion logic
             final_scores.copy_from_slice(&probabilities[..self.n_cells]);
