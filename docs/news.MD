@@ -1,11 +1,19 @@
 # News
 
-## 0.1.7
+## 0.1.8
 
 ### Features
 
 - scDblFinder implemented
 - Refactor out of shared tree structure between scDblFinder and SCENIC
+- Implementation of Harmony v2
+- First methods (HVG selection and PCA) for meta cells directly
+
+## 0.1.7
+
+### Features
+
+- Version bump for `ann-search-rs`.
 
 ## 0.1.6
 

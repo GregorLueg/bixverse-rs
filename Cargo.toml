@@ -1,6 +1,10 @@
 [package]
 name = "bixverse-rs"
+<<<<<<< HEAD
 version = "0.1.8"
+=======
+version = "0.1.7"
+>>>>>>> main
 edition = "2024"
 authors = ["Gregor Lueg <gregorlueg@me.com>"]
 license = "MIT"
