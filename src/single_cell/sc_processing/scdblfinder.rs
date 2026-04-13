@@ -6,6 +6,7 @@ use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::time::Instant;
 
+use crate::core::math::pca_svd::{compute_pc_scores, randomised_svd};
 use crate::graph::community_detections::*;
 use crate::graph::graph_structures::*;
 use crate::prelude::*;
@@ -262,48 +263,112 @@ fn compute_sim_complexity(sim_chunks: &[CsrCellChunk]) -> (Vec<u32>, Vec<u32>) {
 // Feature engineering | pair logic //
 //////////////////////////////////////
 
-/// Find the doublet score threshold targeting the expected doublet rate.
+/// PCA on the combined (observed + simulated) matrix.
 ///
-/// Sorts observed cell scores descending and places the threshold so that
-/// approximately `expected_dbr * n_obs` cells are called as doublets,
-/// with a tolerance band of +/- 40% around the expected rate (matching
-/// R's `dbr.sd` default).
+/// Densifies both observed and simulated data into a single matrix,
+/// computes column-wise mean/std, centres and scales, then runs
+/// truncated SVD. Returns PC scores for all cells.
 ///
-/// Falls back to Otsu if the expected rate produces a degenerate threshold.
-fn find_threshold_expected_rate(
-    scores_obs: &[f32],
-    n_obs: usize,
-    dbr_per_1k: f32,
-    n_bins: usize,
-) -> f32 {
-    let expected_dbr = dbr_per_1k * (n_obs as f32 / 1000.0);
-    let expected_dbr = expected_dbr.min(0.5); // sanity cap
+/// This matches R's scDblFinder which runs PCA on `cbind(counts, ad)`.
+#[allow(clippy::too_many_arguments)]
+pub fn pca_combined(
+    f_path_cell: &str,
+    cells_to_keep: &[usize],
+    hvg_genes: &[usize],
+    hvg_library_sizes: &[usize],
+    target_size: f32,
+    sim_chunks: &[CsrCellChunk],
+    log_transform: bool,
+    mean_center: bool,
+    normalise_variance: bool,
+    no_pcs: usize,
+    seed: usize,
+) -> Mat<f32> {
+    let n_obs = cells_to_keep.len();
+    let n_sim = sim_chunks.len();
+    let n_total = n_obs + n_sim;
+    let n_genes = hvg_genes.len();
 
-    let expected_n = (expected_dbr * n_obs as f32).round() as usize;
-    if expected_n == 0 || expected_n >= n_obs {
-        return find_threshold_otsu(scores_obs, n_bins);
+    let hvg_set: FxHashSet<usize> = hvg_genes.iter().copied().collect();
+    let gene_to_hvg: FxHashMap<usize, usize> = hvg_genes
+        .iter()
+        .enumerate()
+        .map(|(pos, &g)| (g, pos))
+        .collect();
+
+    // Build dense combined matrix
+    let mut combined = Mat::<f32>::zeros(n_total, n_genes);
+
+    // Fill observed rows
+    let reader = ParallelSparseReader::new(f_path_cell).unwrap();
+    for (row, &cell_idx) in cells_to_keep.iter().enumerate() {
+        let chunk = reader.read_cell(cell_idx);
+        let lib = hvg_library_sizes[row] as f32;
+        for (i, &gene_idx) in chunk.indices.iter().enumerate() {
+            let gi = gene_idx as usize;
+            if let Some(&hvg_pos) = gene_to_hvg.get(&gi) {
+                let raw = chunk.data_raw.get(i) as f32;
+                let val = if log_transform {
+                    ((raw / lib) * target_size).ln_1p()
+                } else {
+                    (raw / lib) * target_size
+                };
+                *combined.get_mut(row, hvg_pos) = val;
+            }
+        }
     }
 
-    let mut sorted: Vec<f32> = scores_obs.to_vec();
-    sorted.sort_unstable_by(|a, b| b.partial_cmp(a).unwrap());
-
-    // threshold sits between the expected_n-th and (expected_n+1)-th
-    // highest score
-    let idx = expected_n.min(sorted.len() - 1);
-    let threshold = if idx > 0 {
-        (sorted[idx - 1] + sorted[idx]) / 2.0
-    } else {
-        sorted[0] - 1e-6
-    };
-
-    // Sanity check: if threshold is degenerate (e.g. all scores identical),
-    // fall back to Otsu
-    let n_above = sorted.iter().filter(|&&s| s > threshold).count();
-    if n_above == 0 || n_above == n_obs {
-        return find_threshold_otsu(scores_obs, n_bins);
+    // Fill simulated rows (already normalised and HVG-remapped)
+    for (si, chunk) in sim_chunks.iter().enumerate() {
+        let row = n_obs + si;
+        for i in 0..chunk.indices.len() {
+            let gene = chunk.indices[i] as usize;
+            let val = chunk.data_norm[i].to_f32();
+            *combined.get_mut(row, gene) = val;
+        }
     }
 
-    threshold
+    // Column means and stds
+    let mut means = vec![0.0f64; n_genes];
+    let mut vars = vec![0.0f64; n_genes];
+    let nf = n_total as f64;
+
+    for j in 0..n_genes {
+        let mut sum = 0.0f64;
+        for i in 0..n_total {
+            sum += *combined.get(i, j) as f64;
+        }
+        means[j] = sum / nf;
+    }
+
+    for j in 0..n_genes {
+        let mu = means[j];
+        let mut ss = 0.0f64;
+        for i in 0..n_total {
+            let d = *combined.get(i, j) as f64 - mu;
+            ss += d * d;
+        }
+        vars[j] = ss / (nf - 1.0);
+    }
+
+    // Centre and scale in place
+    for j in 0..n_genes {
+        let mu = if mean_center { means[j] as f32 } else { 0.0 };
+        let sd = if normalise_variance {
+            let s = vars[j].sqrt() as f32;
+            if s > 1e-10 { s } else { 1.0 }
+        } else {
+            1.0
+        };
+        for i in 0..n_total {
+            let v = combined.get_mut(i, j);
+            *v = (*v - mu) / sd;
+        }
+    }
+
+    let svd_res = randomised_svd(combined.as_ref(), no_pcs, seed, None, None);
+
+    compute_pc_scores(&svd_res)
 }
 
 /// Compute default k values for multi-scale kNN doublet scoring.
@@ -895,16 +960,19 @@ impl ScDblFinder {
         if verbose {
             println!("Projecting simulated doublets...");
         }
-        let scaled_sim = scale_cell_chunks_with_stats(
+        let combined_pca = pca_combined(
+            &self.f_path_cell,
+            &self.cells_to_keep,
+            &hvg_genes,
+            &self.hvg_library_sizes,
+            target_size,
             &sim_chunks,
-            gene_means,
-            gene_stds,
+            self.params.log_transform,
             self.params.mean_center,
             self.params.normalise_variance,
-            hvg_genes.len(),
+            self.params.no_pcs,
+            seed,
         );
-        let sim_pca = &scaled_sim * loadings;
-        let combined_pca = concat![[obs_pca], [sim_pca]];
 
         // -- Step 6: kNN on combined ONCE --
         if verbose {
