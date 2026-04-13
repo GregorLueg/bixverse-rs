@@ -945,47 +945,46 @@ impl ScDblFinder {
 
             if iter > 0 {
                 // --- Exclude suspected real doublets ---
-                // The top-scoring observed cells from the previous
-                // iteration are likely real doublets. Removing them
-                // from training gives the classifier a cleaner
-                // singlet class.
-                let n_exclude_obs = (expected_dbr * self.n_cells as f32).ceil() as usize;
-                let n_exclude_obs = n_exclude_obs.min(self.n_cells / 5);
+                // Use dbr-quantile approach: threshold at the (1 - expected_dbr)
+                // quantile of observed scores, then exclude observed cells above it.
+                // This approximates R's doubletThresholding(..., stringency=0.7).
+                let mut obs_sorted: Vec<f32> = final_scores.clone();
+                obs_sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
 
-                let mut obs_ranked: Vec<(usize, f32)> = final_scores
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &s)| (i, s))
-                    .collect();
-                obs_ranked.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                // Quantile at (1 - expected_dbr) of observed scores
+                let quantile_idx =
+                    ((1.0 - expected_dbr) * (self.n_cells - 1) as f32).round() as usize;
+                let quantile_idx = quantile_idx.min(self.n_cells - 1);
+                let exclusion_threshold = obs_sorted[quantile_idx];
 
-                let mut n_excluded = 0usize;
-                for &(obs_idx, score) in &obs_ranked {
-                    if n_excluded >= n_exclude_obs {
+                let max_exclude_obs = self.n_cells / 5; // cap at 20% like R
+                let mut n_excluded_obs = 0usize;
+                for i in 0..self.n_cells {
+                    if n_excluded_obs >= max_exclude_obs {
                         break;
                     }
-                    // Only exclude cells that actually look like
-                    // doublets (probability > 0.5)
-                    if score > 0.5 {
-                        exclude_mask[obs_idx] = true;
-                        n_excluded += 1;
-                    } else {
-                        break;
+                    if final_scores[i] > exclusion_threshold {
+                        exclude_mask[i] = true;
+                        n_excluded_obs += 1;
                     }
                 }
 
                 // --- Exclude unidentifiable artificial doublets ---
-                // Simulated doublets that the previous round scored
-                // below 0.2 are likely homotypic or otherwise
-                // indistinguishable from singlets. Keeping them in
-                // training adds noise.
+                // Use a quantile-based approach: exclude sim doublets in the
+                // bottom 10th percentile of sim scores, capped at 25%.
+                let mut sim_sorted: Vec<f32> = sim_scores.clone();
+                sim_sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+
+                let sim_excl_pctl = 0.10;
+                let sim_excl_idx = (sim_excl_pctl * (self.n_cells_sim - 1) as f32).round() as usize;
+                let sim_exclusion_threshold = sim_sorted[sim_excl_idx.min(self.n_cells_sim - 1)];
                 let n_sim_exclude_max = self.n_cells_sim / 4;
                 let mut n_sim_excluded = 0usize;
                 for si in 0..self.n_cells_sim {
                     if n_sim_excluded >= n_sim_exclude_max {
                         break;
                     }
-                    if sim_scores[si] < 0.2 {
+                    if sim_scores[si] <= sim_exclusion_threshold {
                         exclude_mask[self.n_cells + si] = true;
                         n_sim_excluded += 1;
                     }
@@ -993,9 +992,9 @@ impl ScDblFinder {
 
                 if verbose {
                     println!(
-                        "Excluding {} suspected real doublets and {} \
-                             unidentifiable artificial doublets from training",
-                        n_excluded, n_sim_excluded
+                        "Excluding {} suspected real doublets (threshold={:.4}) and \
+                             {} unidentifiable artificial doublets from training",
+                        n_excluded_obs, exclusion_threshold, n_sim_excluded
                     );
                 }
             }
