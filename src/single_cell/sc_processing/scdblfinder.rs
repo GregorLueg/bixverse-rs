@@ -553,6 +553,72 @@ fn classify_doublets(
     fit_logistic_gbm(&store, labels, exclude, config, seed)
 }
 
+/// Cost-based threshold optimisation matching R's doubletThresholding.
+///
+/// Minimises over [0, 1]:
+///   cost = deviation² + 2*(1-stringency)*FNR + 2*stringency*FPR
+///
+/// where deviation is zero within the uncertainty band [dbr-dbr_sd, dbr+dbr_sd]
+/// and FNR/FPR are computed on simulated/observed cells respectively.
+fn find_threshold_optimised(
+    obs_scores: &[f32],
+    sim_scores: &[f32],
+    dbr_per_1k: f32,
+    stringency: f32,
+) -> f32 {
+    let n_obs = obs_scores.len();
+    let n_sim = sim_scores.len();
+
+    let expected_dbr = (dbr_per_1k * (n_obs as f32 / 1000.0)).min(0.5);
+    let dbr_sd = 0.3 * expected_dbr + 0.025; // R's default
+    let expected_lo = ((expected_dbr - dbr_sd).max(0.0) * n_obs as f32) + 1.0;
+    let expected_hi = ((expected_dbr + dbr_sd).min(1.0) * n_obs as f32) + 1.0;
+
+    // Collect all unique score values as candidate thresholds
+    // (more precise than fixed bins)
+    let mut candidates: Vec<f32> = Vec::with_capacity(n_obs + n_sim);
+    candidates.extend_from_slice(obs_scores);
+    candidates.extend_from_slice(sim_scores);
+    candidates.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+    candidates.dedup();
+
+    // Thin to at most 500 candidates for speed
+    let step = (candidates.len() / 500).max(1);
+    let candidates: Vec<f32> = candidates.into_iter().step_by(step).collect();
+
+    let mut best_threshold = 0.5f32;
+    let mut best_cost = f32::INFINITY;
+
+    for &th in &candidates {
+        // Observed cells above threshold (called as doublets)
+        let n_obs_above = obs_scores.iter().filter(|&&s| s >= th).count() as f32;
+
+        // Deviation from expected count (zero within tolerance band)
+        let dev = if n_obs_above >= expected_lo && n_obs_above <= expected_hi {
+            0.0
+        } else {
+            let mid = (expected_lo + expected_hi) / 2.0;
+            ((n_obs_above - mid).abs() / mid.max(1.0)).powi(2)
+        };
+
+        // FNR: fraction of simulated doublets scored below threshold
+        let n_sim_below = sim_scores.iter().filter(|&&s| s < th).count();
+        let fnr = n_sim_below as f32 / n_sim.max(1) as f32;
+
+        // FPR: fraction of observed cells scored above threshold
+        let fpr = n_obs_above / n_obs.max(1) as f32;
+
+        let cost = dev + 2.0 * (1.0 - stringency) * fnr + 2.0 * stringency * fpr;
+
+        if cost < best_cost {
+            best_cost = cost;
+            best_threshold = th;
+        }
+    }
+
+    best_threshold
+}
+
 ////////////////////
 // Main structure //
 ////////////////////
@@ -1090,11 +1156,11 @@ impl ScDblFinder {
         }
 
         let threshold = self.params.manual_threshold.unwrap_or_else(|| {
-            let t = find_threshold_expected_rate(
+            let t = find_threshold_optimised(
                 &final_scores,
-                self.n_cells,
+                &sim_scores,
                 self.params.dbr_per_1k,
-                self.params.n_bins,
+                0.5, // balanced stringency for final call
             );
             if verbose {
                 println!("Threshold set at score = {:.4}", t);
