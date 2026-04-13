@@ -1,4 +1,5 @@
-//! Highly variable gene selection and principal component analysis (PCA).
+//! Highly variable gene selection and principal component analysis (PCA) for
+//! meta cells. Works directly on `CompressedSparseData2` structures.
 
 use faer::Mat;
 use std::borrow::Cow;
