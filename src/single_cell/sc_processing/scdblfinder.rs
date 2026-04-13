@@ -885,18 +885,48 @@ impl ScDblFinder {
         // -- Step 8: Iterative training refinement --
         let mut final_scores = vec![0.0f32; self.n_cells];
 
-        // Initial score: use the max-k ratio as a rough doublet estimate
+        // Initial score: blend of normalised cxds and max-k ratio,
+        // matching R's (cxds_score + ratio/max(ratio)) / 2
         let max_k_col = n_k - 1;
-        for i in 0..self.n_cells {
-            final_scores[i] = *features.get(i, max_k_col);
+
+        // Find max ratio across ALL cells (obs + sim) for normalisation
+        let mut max_ratio = 0.0f32;
+        for i in 0..n_total {
+            let r = *features.get(i, max_k_col);
+            if r > max_ratio {
+                max_ratio = r;
+            }
+        }
+        if max_ratio < 1e-10 {
+            max_ratio = 1.0;
         }
 
-        // We also need per-round scores for simulated doublets to
-        // decide which ones to exclude. Initialise from the same
-        // kNN ratio column.
+        // Find max cxds across all cells for normalisation
+        let mut max_cxds_obs = 0.0f32;
+        for &s in &obs_cxds_scores {
+            if s > max_cxds_obs {
+                max_cxds_obs = s;
+            }
+        }
+        let mut max_cxds_sim = 0.0f32;
+        for &s in &sim_cxds_scores {
+            if s > max_cxds_sim {
+                max_cxds_sim = s;
+            }
+        }
+        let max_cxds = max_cxds_obs.max(max_cxds_sim).max(1e-10);
+
+        for i in 0..self.n_cells {
+            let ratio_norm = *features.get(i, max_k_col) / max_ratio;
+            let cxds_norm = obs_cxds_scores[i] / max_cxds;
+            final_scores[i] = (ratio_norm + cxds_norm) / 2.0;
+        }
+
         let mut sim_scores = vec![0.0f32; self.n_cells_sim];
         for si in 0..self.n_cells_sim {
-            sim_scores[si] = *features.get(self.n_cells + si, max_k_col);
+            let ratio_norm = *features.get(self.n_cells + si, max_k_col) / max_ratio;
+            let cxds_norm = sim_cxds_scores[si] / max_cxds;
+            sim_scores[si] = (ratio_norm + cxds_norm) / 2.0;
         }
 
         for iter in 0..self.params.n_iterations {
