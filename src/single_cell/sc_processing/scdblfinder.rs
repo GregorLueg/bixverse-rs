@@ -1109,7 +1109,7 @@ impl ScDblFinder {
                 let mut sim_sorted: Vec<f32> = sim_scores.clone();
                 sim_sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
 
-                let sim_excl_pctl = 0.10;
+                let sim_excl_pctl = 0.0;
                 let sim_excl_idx = (sim_excl_pctl * (self.n_cells_sim - 1) as f32).round() as usize;
                 let sim_exclusion_threshold = sim_sorted[sim_excl_idx.min(self.n_cells_sim - 1)];
                 let n_sim_exclude_max = self.n_cells_sim / 4;
