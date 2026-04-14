@@ -492,9 +492,9 @@ fn build_node(
 /// After each tree is built, it is applied to all samples so that
 /// excluded cells accumulate predictions across rounds.
 ///
-/// Early stopping monitors OOB log-loss: if no improvement is seen
-/// for `config.early_stop_rounds` consecutive rounds, boosting
-/// terminates.
+/// Early stopping uses a **fixed** validation set (drawn once before
+/// boosting) rather than per-round OOB splits, giving a stable loss
+/// signal that prevents over-training.
 ///
 /// ### Params
 ///
@@ -502,8 +502,8 @@ fn build_node(
 /// * `labels` - Ground truth labels; `true` = positive (doublet),
 ///   `false` = negative (singlet).
 /// * `exclude` - Per-sample exclusion mask; `true` means the sample
-///   is excluded from training and OOB evaluation but still
-///   receives predictions.
+///   is excluded from training and early-stopping evaluation but
+///   still receives predictions.
 /// * `config` - Classifier configuration.
 /// * `seed` - Base seed for reproducibility.
 ///
@@ -532,7 +532,49 @@ pub fn fit_logistic_gbm(
         return vec![p; n];
     }
 
-    // initialise raw scores from base rate
+    // -- Fixed train/validation split (80/20), stratified by label --
+    let mut pos_indices: Vec<u32> = eligible
+        .iter()
+        .copied()
+        .filter(|&i| labels[i as usize])
+        .collect();
+    let mut neg_indices: Vec<u32> = eligible
+        .iter()
+        .copied()
+        .filter(|&i| !labels[i as usize])
+        .collect();
+
+    let mut split_rng = SmallRng::seed_from_u64(seed);
+    pos_indices.shuffle(&mut split_rng);
+    neg_indices.shuffle(&mut split_rng);
+
+    let n_pos_train = (pos_indices.len() as f32 * 0.8).round() as usize;
+    let n_neg_train = (neg_indices.len() as f32 * 0.8).round() as usize;
+
+    let val_pos = &pos_indices[n_pos_train..];
+    let val_neg = &neg_indices[n_neg_train..];
+    let train_pool_pos = &pos_indices[..n_pos_train];
+    let train_pool_neg = &neg_indices[..n_neg_train];
+
+    let mut train_pool: Vec<u32> = Vec::with_capacity(train_pool_pos.len() + train_pool_neg.len());
+    train_pool.extend_from_slice(train_pool_pos);
+    train_pool.extend_from_slice(train_pool_neg);
+
+    let val_set: Vec<u32> = {
+        let mut v = Vec::with_capacity(val_pos.len() + val_neg.len());
+        v.extend_from_slice(val_pos);
+        v.extend_from_slice(val_neg);
+        v
+    };
+
+    // need at least enough training samples to form a split
+    if train_pool.len() < 2 * config.min_samples_leaf || val_set.is_empty() {
+        let n_pos = eligible.iter().filter(|&&i| labels[i as usize]).count();
+        let p = (n_pos as f32 / n_eligible as f32).clamp(0.01, 0.99);
+        return vec![p; n];
+    }
+
+    // initialise raw scores from base rate (computed on full eligible set)
     let n_pos = eligible.iter().filter(|&&i| labels[i as usize]).count();
     let base_rate = (n_pos as f32 / n_eligible as f32).clamp(0.01, 0.99);
     let init_logit = (base_rate / (1.0 - base_rate)).ln();
@@ -542,19 +584,25 @@ pub fn fit_logistic_gbm(
     let mut hess = vec![0.0f32; n];
     let mut hist = NodeHistogram::new(store.n_features);
 
-    let n_train = ((n_eligible as f32 * config.subsample_rate).round() as usize)
+    // subsample size drawn from the training pool each round
+    let n_subsample = ((train_pool.len() as f32 * config.subsample_rate).round() as usize)
         .max(2 * config.min_samples_leaf)
-        .min(n_eligible);
+        .min(train_pool.len());
 
-    let mut elig_buf = eligible.clone();
     let all_samples: Vec<u32> = (0..n as u32).collect();
 
-    let mut best_oob_loss = f32::INFINITY;
+    let mut best_val_loss = f32::INFINITY;
+    #[allow(unused_variables)] // clippy being wrong here...
+    let mut best_round = 0usize;
     let mut rounds_no_improve = 0usize;
 
+    // keep a copy of raw_scores at the best validation round so we
+    // can roll back if we overshoot
+    let mut best_raw_scores = raw_scores.clone();
+
     for round in 0..config.max_rounds {
-        // compute gradients and hessians for eligible samples
-        for &s in &eligible {
+        // compute gradients and hessians for the full training pool
+        for &s in &train_pool {
             let si = s as usize;
             let p = sigmoid(raw_scores[si]);
             let y = if labels[si] { 1.0f32 } else { 0.0 };
@@ -562,15 +610,13 @@ pub fn fit_logistic_gbm(
             hess[si] = (p * (1.0 - p)).max(1e-8);
         }
 
-        // subsample eligible into train / OOB
+        // subsample from training pool for this round's tree
         let mut rng = SmallRng::seed_from_u64(tree_seed(seed as usize, round));
-        elig_buf.copy_from_slice(&eligible);
-        let actual_n_train = train_oob_split(&mut elig_buf, n_train, &mut rng);
+        let mut pool_buf = train_pool.clone();
+        let actual_n = train_oob_split(&mut pool_buf, n_subsample, &mut rng);
+        let mut train_slice = pool_buf[..actual_n].to_vec();
 
-        let (train_slice, oob_slice) = elig_buf.split_at(actual_n_train);
-        let mut train = train_slice.to_vec();
-
-        let (g_sum, h_sum) = train.iter().fold((0.0f32, 0.0f32), |(gs, hs), &s| {
+        let (g_sum, h_sum) = train_slice.iter().fold((0.0f32, 0.0f32), |(gs, hs), &s| {
             let si = s as usize;
             (gs + grads[si], hs + hess[si])
         });
@@ -582,7 +628,7 @@ pub fn fit_logistic_gbm(
             store,
             &grads,
             &hess,
-            &mut train,
+            &mut train_slice,
             g_sum,
             h_sum,
             config,
@@ -598,28 +644,29 @@ pub fn fit_logistic_gbm(
         // update raw scores for ALL samples (including excluded)
         tree.predict_update(store, &mut raw_scores, &all_samples);
 
-        // OOB early stopping on log-loss
-        if !oob_slice.is_empty() {
-            let oob_loss: f32 = oob_slice
-                .iter()
-                .map(|&s| logloss(labels[s as usize], raw_scores[s as usize]))
-                .sum::<f32>()
-                / oob_slice.len() as f32;
+        // early stopping on fixed validation set
+        let val_loss: f32 = val_set
+            .iter()
+            .map(|&s| logloss(labels[s as usize], raw_scores[s as usize]))
+            .sum::<f32>()
+            / val_set.len() as f32;
 
-            if oob_loss < best_oob_loss - 1e-6 {
-                best_oob_loss = oob_loss;
-                rounds_no_improve = 0;
-            } else {
-                rounds_no_improve += 1;
-            }
-            if rounds_no_improve >= config.early_stop_rounds {
-                break;
-            }
+        if val_loss < best_val_loss - 1e-6 {
+            best_val_loss = val_loss;
+            best_round = round;
+            rounds_no_improve = 0;
+            best_raw_scores.copy_from_slice(&raw_scores);
+        } else {
+            rounds_no_improve += 1;
+        }
+
+        if rounds_no_improve >= config.early_stop_rounds {
+            break;
         }
     }
 
-    // Return probabilities
-    raw_scores.iter().map(|&s| sigmoid(s)).collect()
+    // roll back to the best round's scores
+    best_raw_scores.iter().map(|&s| sigmoid(s)).collect()
 }
 
 ///////////

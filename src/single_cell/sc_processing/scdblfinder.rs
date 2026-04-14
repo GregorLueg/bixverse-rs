@@ -1,6 +1,6 @@
 //! Work-in-progress not behaving as desired...
 
-use faer::{Mat, MatRef, concat};
+use faer::{Mat, MatRef};
 use rand::prelude::*;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -118,7 +118,7 @@ impl Default for ScDblFinderParams {
             max_depth: 4,
             learning_rate: 0.3,
             min_samples_leaf: 20,
-            early_stop_window: 3, // now maps to early_stop_rounds
+            early_stop_window: 15, // now maps to early_stop_rounds
             subsample_rate: 0.75,
             include_pcs: 19,
             manual_threshold: None,
