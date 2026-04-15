@@ -661,15 +661,22 @@ impl ScDblFinderParams {
                 .get("min_samples_leaf")
                 .and_then(|v| v.as_integer())
                 .unwrap_or(defaults.min_samples_leaf as i32) as usize,
-            early_stop_window: map
-                .get("early_stop_window")
-                .and_then(|v| v.as_integer())
-                .unwrap_or(defaults.early_stop_window as i32)
-                as usize,
             subsample_rate: map
                 .get("subsample_rate")
                 .and_then(|v| v.as_real())
                 .unwrap_or(defaults.subsample_rate as f64) as f32,
+            cv_folds: map
+                .get("cv_folds")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(defaults.cv_folds as i32) as usize,
+            cv_early_stop: map
+                .get("cv_early_stop")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(defaults.cv_early_stop as i32) as usize,
+            se_fraction: map
+                .get("se_fraction")
+                .and_then(|v| v.as_real())
+                .unwrap_or(defaults.se_fraction as f64) as f32,
             // Feature
             include_pcs: map
                 .get("include_pcs")

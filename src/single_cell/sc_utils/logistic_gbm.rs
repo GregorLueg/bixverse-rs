@@ -9,9 +9,6 @@
 //! - Store tree structure so that excluded samples can be scored
 //!   after each round.
 //! - Support early stopping on OOB log-loss.
-//!
-//! The split criterion is XGBoost-style second-order gain with L2
-//! regularisation and minimum hessian weight constraints.
 
 use rand::prelude::*;
 use rand::rngs::SmallRng;
@@ -39,13 +36,17 @@ pub struct LogisticGbmConfig {
     pub min_samples_leaf: usize,
     /// L2 regularisation on leaf weights (XGBoost's `lambda`).
     pub lambda: f32,
-    /// Minimum sum-of-hessians in a child (XGBoost's
-    /// `min_child_weight`).
+    /// Minimum sum-of-hessians in a child (XGBoost's `min_child_weight`).
     pub min_child_weight: f32,
     /// Fraction of eligible samples used per tree.
     pub subsample_rate: f32,
-    /// Stop if OOB log-loss hasn't improved for this many rounds.
-    pub early_stop_rounds: usize,
+    /// Number of CV folds for round selection.
+    pub n_folds: usize,
+    /// Early stopping patience per CV fold.
+    pub cv_early_stop: usize,
+    /// Multiplier on std for the SE rule (0.25 matches R's
+    /// `nrounds=0.25`).
+    pub se_fraction: f32,
 }
 
 impl Default for LogisticGbmConfig {
@@ -58,7 +59,9 @@ impl Default for LogisticGbmConfig {
             lambda: 1.0,
             min_child_weight: 1.0,
             subsample_rate: 0.75,
-            early_stop_rounds: 3,
+            n_folds: 5,
+            cv_early_stop: 2,
+            se_fraction: 0.25,
         }
     }
 }
@@ -480,6 +483,389 @@ fn build_node(
     my_idx
 }
 
+/////////////////////////
+// Single boosting run //
+/////////////////////////
+
+/// Run boosting on a fixed train set, recording per-round validation
+/// loss on a fixed val set. Returns the per-round val losses.
+///
+/// `raw_scores` is modified in place. Only `train_samples` are used
+/// for gradient computation; `score_samples` are scored after each
+/// tree (for the final run this is all samples; for CV folds this
+/// is train+val only).
+///
+/// ### Params
+///
+/// * `store` - Quantised feature store.
+/// * `labels` - Ground truth labels; `true` = positive (doublet).
+/// * `train_pool` - Sample indices eligible for training; subsampled
+///   each round.
+/// * `val_set` - Sample indices used to compute validation loss.
+///   Pass an empty slice to skip validation.
+/// * `score_samples` - Sample indices that receive score updates
+///   after each tree.
+/// * `raw_scores` - Dense raw logit array; updated in place.
+/// * `config` - Classifier configuration.
+/// * `max_rounds` - Maximum number of boosting rounds to run.
+/// * `early_stop_patience` - Stop after this many rounds without
+///   improvement. Pass `0` to disable early stopping.
+/// * `seed` - Base seed for per-round RNG.
+///
+/// ### Returns
+///
+/// Per-round validation losses; length equals the number of rounds
+/// actually run (may be shorter than `max_rounds` if early stopping
+/// triggers).
+#[allow(clippy::too_many_arguments)]
+fn boost_run(
+    store: &QuantisedStore,
+    labels: &[bool],
+    train_pool: &[u32],
+    val_set: &[u32],
+    score_samples: &[u32],
+    raw_scores: &mut [f32],
+    config: &LogisticGbmConfig,
+    max_rounds: usize,
+    early_stop_patience: usize,
+    seed: u64,
+) -> Vec<f32> {
+    let n = raw_scores.len();
+    let mut grads = vec![0.0f32; n];
+    let mut hess = vec![0.0f32; n];
+    let mut hist = NodeHistogram::new(store.n_features);
+
+    let n_subsample = ((train_pool.len() as f32 * config.subsample_rate).round() as usize)
+        .max(2 * config.min_samples_leaf)
+        .min(train_pool.len());
+
+    let mut val_losses: Vec<f32> = Vec::with_capacity(max_rounds);
+    let mut best_val_loss = f32::INFINITY;
+    let mut rounds_no_improve = 0usize;
+
+    for round in 0..max_rounds {
+        for &s in train_pool {
+            let si = s as usize;
+            let p = sigmoid(raw_scores[si]);
+            let y = if labels[si] { 1.0f32 } else { 0.0 };
+            grads[si] = p - y;
+            hess[si] = (p * (1.0 - p)).max(1e-8);
+        }
+
+        let mut rng = SmallRng::seed_from_u64(tree_seed(seed as usize, round));
+        let mut pool_buf = train_pool.to_vec();
+        let actual_n = train_oob_split(&mut pool_buf, n_subsample, &mut rng);
+        let mut train_slice = pool_buf[..actual_n].to_vec();
+
+        let (g_sum, h_sum) = train_slice.iter().fold((0.0f32, 0.0f32), |(gs, hs), &s| {
+            let si = s as usize;
+            (gs + grads[si], hs + hess[si])
+        });
+
+        let mut tree_nodes = Vec::with_capacity(2usize.pow(config.max_depth as u32 + 1));
+        build_node(
+            &mut tree_nodes,
+            store,
+            &grads,
+            &hess,
+            &mut train_slice,
+            g_sum,
+            h_sum,
+            config,
+            0,
+            &mut hist,
+        );
+
+        let tree = Tree {
+            nodes: tree_nodes,
+            lr: config.learning_rate,
+        };
+
+        tree.predict_update(store, raw_scores, score_samples);
+
+        let val_loss: f32 = if val_set.is_empty() {
+            0.0
+        } else {
+            val_set
+                .iter()
+                .map(|&s| logloss(labels[s as usize], raw_scores[s as usize]))
+                .sum::<f32>()
+                / val_set.len() as f32
+        };
+        val_losses.push(val_loss);
+
+        if val_loss < best_val_loss - 1e-6 {
+            best_val_loss = val_loss;
+            rounds_no_improve = 0;
+        } else {
+            rounds_no_improve += 1;
+        }
+
+        if early_stop_patience > 0 && rounds_no_improve >= early_stop_patience {
+            break;
+        }
+    }
+
+    val_losses
+}
+
+//////////////////////////////////
+// Stratified k-fold generation //
+//////////////////////////////////
+
+/// Create stratified k-fold indices from positive and negative
+/// sample vectors.
+///
+/// ### Params
+///
+/// * `pos` - Sample indices belonging to the positive class.
+/// * `neg` - Sample indices belonging to the negative class.
+/// * `k` - Number of folds.
+/// * `rng` - Random number generator used to shuffle before
+///   assignment.
+///
+/// ### Returns
+///
+/// `(train_sets, val_sets)` each of length `k`.
+fn stratified_kfold(
+    pos: &[u32],
+    neg: &[u32],
+    k: usize,
+    rng: &mut SmallRng,
+) -> (Vec<Vec<u32>>, Vec<Vec<u32>>) {
+    let mut pos_shuffled = pos.to_vec();
+    let mut neg_shuffled = neg.to_vec();
+    pos_shuffled.shuffle(rng);
+    neg_shuffled.shuffle(rng);
+
+    let mut fold_assignments_pos = vec![0usize; pos_shuffled.len()];
+    let mut fold_assignments_neg = vec![0usize; neg_shuffled.len()];
+    for (i, fa) in fold_assignments_pos.iter_mut().enumerate() {
+        *fa = i % k;
+    }
+    for (i, fa) in fold_assignments_neg.iter_mut().enumerate() {
+        *fa = i % k;
+    }
+
+    let mut train_sets = Vec::with_capacity(k);
+    let mut val_sets = Vec::with_capacity(k);
+
+    for fold in 0..k {
+        let mut train = Vec::new();
+        let mut val = Vec::new();
+
+        for (i, &s) in pos_shuffled.iter().enumerate() {
+            if fold_assignments_pos[i] == fold {
+                val.push(s);
+            } else {
+                train.push(s);
+            }
+        }
+        for (i, &s) in neg_shuffled.iter().enumerate() {
+            if fold_assignments_neg[i] == fold {
+                val.push(s);
+            } else {
+                train.push(s);
+            }
+        }
+
+        train_sets.push(train);
+        val_sets.push(val);
+    }
+
+    (train_sets, val_sets)
+}
+
+////////////////////////
+// CV round selection //
+////////////////////////
+
+/// Run k-fold CV and return the selected number of rounds using
+/// the SE rule: pick the earliest round whose mean loss is within
+/// `se_fraction * std` of the best round's mean loss.
+///
+/// ### Params
+///
+/// * `store` - Quantised feature store.
+/// * `labels` - Ground truth labels; `true` = positive (doublet).
+/// * `eligible` - Sample indices available for training (i.e.
+///   non-excluded).
+/// * `config` - Classifier configuration.
+/// * `init_logit` - Initial raw score for all samples; typically
+///   the log-odds of the base rate.
+/// * `seed` - Base seed; fold seeds are derived from this.
+///
+/// ### Returns
+///
+/// Number of boosting rounds to use for the final model (at least
+/// `1`).
+fn cv_select_rounds(
+    store: &QuantisedStore,
+    labels: &[bool],
+    eligible: &[u32],
+    config: &LogisticGbmConfig,
+    init_logit: f32,
+    seed: u64,
+) -> usize {
+    let pos: Vec<u32> = eligible
+        .iter()
+        .copied()
+        .filter(|&i| labels[i as usize])
+        .collect();
+    let neg: Vec<u32> = eligible
+        .iter()
+        .copied()
+        .filter(|&i| !labels[i as usize])
+        .collect();
+
+    let k = config.n_folds.min(pos.len()).min(neg.len()).max(2);
+    let mut rng = SmallRng::seed_from_u64(seed);
+    let (train_sets, val_sets) = stratified_kfold(&pos, &neg, k, &mut rng);
+
+    let n = store.n_samples;
+
+    // per-fold state
+    let mut fold_raw_scores: Vec<Vec<f32>> = (0..k).map(|_| vec![init_logit; n]).collect();
+    let mut fold_grads: Vec<Vec<f32>> = (0..k).map(|_| vec![0.0f32; n]).collect();
+    let mut fold_hess: Vec<Vec<f32>> = (0..k).map(|_| vec![0.0f32; n]).collect();
+    let mut fold_hists: Vec<NodeHistogram> = (0..k)
+        .map(|_| NodeHistogram::new(store.n_features))
+        .collect();
+
+    // aggregated loss tracking
+    let mut mean_losses: Vec<f32> = Vec::with_capacity(config.max_rounds);
+    let mut std_losses: Vec<f32> = Vec::with_capacity(config.max_rounds);
+    let mut best_mean_loss = f32::INFINITY;
+    let mut rounds_no_improve = 0usize;
+
+    let n_subsample_per_fold: Vec<usize> = train_sets
+        .iter()
+        .map(|t| {
+            ((t.len() as f32 * config.subsample_rate).round() as usize)
+                .max(2 * config.min_samples_leaf)
+                .min(t.len())
+        })
+        .collect();
+
+    for round in 0..config.max_rounds {
+        let mut fold_losses = Vec::with_capacity(k);
+
+        for fold in 0..k {
+            let train = &train_sets[fold];
+            let val = &val_sets[fold];
+            let raw = &mut fold_raw_scores[fold];
+            let grads = &mut fold_grads[fold];
+            let hess = &mut fold_hess[fold];
+            let hist = &mut fold_hists[fold];
+
+            // gradients on training set
+            for &s in train.iter() {
+                let si = s as usize;
+                let p = sigmoid(raw[si]);
+                let y = if labels[si] { 1.0f32 } else { 0.0 };
+                grads[si] = p - y;
+                hess[si] = (p * (1.0 - p)).max(1e-8);
+            }
+
+            // subsample
+            let fold_seed = seed.wrapping_add(fold as u64 * 7_919);
+            let mut sub_rng = SmallRng::seed_from_u64(tree_seed(fold_seed as usize, round));
+            let mut pool_buf = train.to_vec();
+            let actual_n = train_oob_split(&mut pool_buf, n_subsample_per_fold[fold], &mut sub_rng);
+            let mut train_slice = pool_buf[..actual_n].to_vec();
+
+            let (g_sum, h_sum) = train_slice.iter().fold((0.0f32, 0.0f32), |(gs, hs), &s| {
+                let si = s as usize;
+                (gs + grads[si], hs + hess[si])
+            });
+
+            // build tree
+            let mut tree_nodes = Vec::with_capacity(2usize.pow(config.max_depth as u32 + 1));
+            build_node(
+                &mut tree_nodes,
+                store,
+                grads,
+                hess,
+                &mut train_slice,
+                g_sum,
+                h_sum,
+                config,
+                0,
+                hist,
+            );
+
+            let tree = Tree {
+                nodes: tree_nodes,
+                lr: config.learning_rate,
+            };
+
+            // score train + val for this fold
+            let mut fold_samples: Vec<u32> = Vec::with_capacity(train.len() + val.len());
+            fold_samples.extend_from_slice(train);
+            fold_samples.extend_from_slice(val);
+            tree.predict_update(store, raw, &fold_samples);
+
+            // validation loss for this fold
+            let val_loss: f32 = val
+                .iter()
+                .map(|&s| logloss(labels[s as usize], raw[s as usize]))
+                .sum::<f32>()
+                / val.len().max(1) as f32;
+
+            fold_losses.push(val_loss);
+        }
+
+        // aggregate across folds
+        let mean: f32 = fold_losses.iter().sum::<f32>() / k as f32;
+        let var: f32 = fold_losses.iter().map(|&l| (l - mean).powi(2)).sum::<f32>() / k as f32;
+        let std = var.sqrt();
+
+        mean_losses.push(mean);
+        std_losses.push(std);
+
+        // early stopping on the cross-fold mean
+        if mean < best_mean_loss - 1e-6 {
+            best_mean_loss = mean;
+            rounds_no_improve = 0;
+        } else {
+            rounds_no_improve += 1;
+        }
+
+        if rounds_no_improve >= config.cv_early_stop {
+            break;
+        }
+    }
+
+    // SE rule: best round, then earliest round within ceiling
+    let best_round = mean_losses
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+
+    let ceiling = mean_losses[best_round] + config.se_fraction * std_losses[best_round];
+
+    let selected = mean_losses
+        .iter()
+        .position(|&l| l <= ceiling)
+        .unwrap_or(best_round);
+
+    #[cfg(test)]
+    eprintln!(
+        "CV: ran {} rounds, best_round={}, best_mean_loss={:.4}, \
+             std={:.4}, ceiling={:.4}, selected={}",
+        mean_losses.len(),
+        best_round,
+        mean_losses[best_round],
+        std_losses[best_round],
+        ceiling,
+        selected + 1,
+    );
+
+    (selected + 1).max(1)
+}
+
 //////////
 // Main //
 //////////
@@ -487,14 +873,14 @@ fn build_node(
 /// Train a logistic GBM and return predicted probabilities for
 /// **all** samples.
 ///
+/// Uses k-fold cross-validation to select the number of boosting
+/// rounds, applying the SE rule (matching XGBoost's `nrounds=0.25`
+/// behaviour in R's scDblFinder). The final model trains on all
+/// eligible non-excluded samples for exactly the selected number
+/// of rounds.
+///
 /// Excluded samples are omitted from training but still receive
 /// predictions (matching R's XGBoost behaviour in scDblFinder).
-/// After each tree is built, it is applied to all samples so that
-/// excluded cells accumulate predictions across rounds.
-///
-/// Early stopping uses a **fixed** validation set (drawn once before
-/// boosting) rather than per-round OOB splits, giving a stable loss
-/// signal that prevents over-training.
 ///
 /// ### Params
 ///
@@ -502,8 +888,7 @@ fn build_node(
 /// * `labels` - Ground truth labels; `true` = positive (doublet),
 ///   `false` = negative (singlet).
 /// * `exclude` - Per-sample exclusion mask; `true` means the sample
-///   is excluded from training and early-stopping evaluation but
-///   still receives predictions.
+///   is excluded from training but still receives predictions.
 /// * `config` - Classifier configuration.
 /// * `seed` - Base seed for reproducibility.
 ///
@@ -525,148 +910,37 @@ pub fn fit_logistic_gbm(
     let eligible: Vec<u32> = (0..n as u32).filter(|&i| !exclude[i as usize]).collect();
     let n_eligible = eligible.len();
 
-    // degenerate case: too few samples to split
     if n_eligible < 2 * config.min_samples_leaf {
         let n_pos = eligible.iter().filter(|&&i| labels[i as usize]).count();
         let p = (n_pos as f32 / n_eligible.max(1) as f32).clamp(0.01, 0.99);
         return vec![p; n];
     }
 
-    // -- Fixed train/validation split (80/20), stratified by label --
-    let mut pos_indices: Vec<u32> = eligible
-        .iter()
-        .copied()
-        .filter(|&i| labels[i as usize])
-        .collect();
-    let mut neg_indices: Vec<u32> = eligible
-        .iter()
-        .copied()
-        .filter(|&i| !labels[i as usize])
-        .collect();
-
-    let mut split_rng = SmallRng::seed_from_u64(seed);
-    pos_indices.shuffle(&mut split_rng);
-    neg_indices.shuffle(&mut split_rng);
-
-    let n_pos_train = (pos_indices.len() as f32 * 0.8).round() as usize;
-    let n_neg_train = (neg_indices.len() as f32 * 0.8).round() as usize;
-
-    let val_pos = &pos_indices[n_pos_train..];
-    let val_neg = &neg_indices[n_neg_train..];
-    let train_pool_pos = &pos_indices[..n_pos_train];
-    let train_pool_neg = &neg_indices[..n_neg_train];
-
-    let mut train_pool: Vec<u32> = Vec::with_capacity(train_pool_pos.len() + train_pool_neg.len());
-    train_pool.extend_from_slice(train_pool_pos);
-    train_pool.extend_from_slice(train_pool_neg);
-
-    let val_set: Vec<u32> = {
-        let mut v = Vec::with_capacity(val_pos.len() + val_neg.len());
-        v.extend_from_slice(val_pos);
-        v.extend_from_slice(val_neg);
-        v
-    };
-
-    // need at least enough training samples to form a split
-    if train_pool.len() < 2 * config.min_samples_leaf || val_set.is_empty() {
-        let n_pos = eligible.iter().filter(|&&i| labels[i as usize]).count();
-        let p = (n_pos as f32 / n_eligible as f32).clamp(0.01, 0.99);
-        return vec![p; n];
-    }
-
-    // initialise raw scores from base rate (computed on full eligible set)
     let n_pos = eligible.iter().filter(|&&i| labels[i as usize]).count();
     let base_rate = (n_pos as f32 / n_eligible as f32).clamp(0.01, 0.99);
     let init_logit = (base_rate / (1.0 - base_rate)).ln();
+
+    // phase 1: lockstep CV to select n_rounds
+    let n_rounds = cv_select_rounds(store, labels, &eligible, config, init_logit, seed);
+
+    // phase 2: final training on all eligible for exactly n_rounds
     let mut raw_scores = vec![init_logit; n];
-
-    let mut grads = vec![0.0f32; n];
-    let mut hess = vec![0.0f32; n];
-    let mut hist = NodeHistogram::new(store.n_features);
-
-    // subsample size drawn from the training pool each round
-    let n_subsample = ((train_pool.len() as f32 * config.subsample_rate).round() as usize)
-        .max(2 * config.min_samples_leaf)
-        .min(train_pool.len());
-
     let all_samples: Vec<u32> = (0..n as u32).collect();
 
-    let mut best_val_loss = f32::INFINITY;
-    #[allow(unused_variables)] // clippy being wrong here...
-    let mut best_round = 0usize;
-    let mut rounds_no_improve = 0usize;
+    boost_run(
+        store,
+        labels,
+        &eligible,
+        &[],
+        &all_samples,
+        &mut raw_scores,
+        config,
+        n_rounds,
+        0,
+        seed,
+    );
 
-    // keep a copy of raw_scores at the best validation round so we
-    // can roll back if we overshoot
-    let mut best_raw_scores = raw_scores.clone();
-
-    for round in 0..config.max_rounds {
-        // compute gradients and hessians for the full training pool
-        for &s in &train_pool {
-            let si = s as usize;
-            let p = sigmoid(raw_scores[si]);
-            let y = if labels[si] { 1.0f32 } else { 0.0 };
-            grads[si] = p - y;
-            hess[si] = (p * (1.0 - p)).max(1e-8);
-        }
-
-        // subsample from training pool for this round's tree
-        let mut rng = SmallRng::seed_from_u64(tree_seed(seed as usize, round));
-        let mut pool_buf = train_pool.clone();
-        let actual_n = train_oob_split(&mut pool_buf, n_subsample, &mut rng);
-        let mut train_slice = pool_buf[..actual_n].to_vec();
-
-        let (g_sum, h_sum) = train_slice.iter().fold((0.0f32, 0.0f32), |(gs, hs), &s| {
-            let si = s as usize;
-            (gs + grads[si], hs + hess[si])
-        });
-
-        // build tree
-        let mut tree_nodes = Vec::with_capacity(2usize.pow(config.max_depth as u32 + 1));
-        build_node(
-            &mut tree_nodes,
-            store,
-            &grads,
-            &hess,
-            &mut train_slice,
-            g_sum,
-            h_sum,
-            config,
-            0,
-            &mut hist,
-        );
-
-        let tree = Tree {
-            nodes: tree_nodes,
-            lr: config.learning_rate,
-        };
-
-        // update raw scores for ALL samples (including excluded)
-        tree.predict_update(store, &mut raw_scores, &all_samples);
-
-        // early stopping on fixed validation set
-        let val_loss: f32 = val_set
-            .iter()
-            .map(|&s| logloss(labels[s as usize], raw_scores[s as usize]))
-            .sum::<f32>()
-            / val_set.len() as f32;
-
-        if val_loss < best_val_loss - 1e-6 {
-            best_val_loss = val_loss;
-            best_round = round;
-            rounds_no_improve = 0;
-            best_raw_scores.copy_from_slice(&raw_scores);
-        } else {
-            rounds_no_improve += 1;
-        }
-
-        if rounds_no_improve >= config.early_stop_rounds {
-            break;
-        }
-    }
-
-    // roll back to the best round's scores
-    best_raw_scores.iter().map(|&s| sigmoid(s)).collect()
+    raw_scores.iter().map(|&s| sigmoid(s)).collect()
 }
 
 ///////////
@@ -772,6 +1046,52 @@ mod tests {
         (columns, labels)
     }
 
+    /// Check that predicted probabilities are not pushed to
+    /// extremes on genuinely ambiguous data.
+    fn assert_not_bimodal(probs: &[f32], labels: &[bool]) {
+        let n = probs.len() as f32;
+        let n_extreme = probs
+            .iter()
+            .filter(|&&p| !(0.02..0.98).contains(&p))
+            .count();
+        let extreme_frac = n_extreme as f32 / n;
+        assert!(
+            extreme_frac < 0.4,
+            "too many extreme predictions ({:.1}%): model is likely overfitting",
+            100.0 * extreme_frac
+        );
+        let mean_pos: f32 = probs
+            .iter()
+            .zip(labels)
+            .filter(|&(_, &l)| l)
+            .map(|(&p, _)| p)
+            .sum::<f32>()
+            / labels.iter().filter(|&&l| l).count() as f32;
+        let mean_neg: f32 = probs
+            .iter()
+            .zip(labels)
+            .filter(|&(_, &l)| !l)
+            .map(|(&p, _)| p)
+            .sum::<f32>()
+            / labels.iter().filter(|&&l| !l).count() as f32;
+        assert!(
+            (0.0..0.98).contains(&mean_pos),
+            "positive class mean {:.4} is saturated",
+            mean_pos
+        );
+        assert!(
+            (0.02..1.0).contains(&mean_neg),
+            "negative class mean {:.4} is saturated",
+            mean_neg
+        );
+        assert!(
+            mean_pos > mean_neg,
+            "positive mean ({:.4}) should exceed negative mean ({:.4})",
+            mean_pos,
+            mean_neg,
+        );
+    }
+
     #[test]
     fn test_sigmoid_basic() {
         assert!((sigmoid(0.0) - 0.5).abs() < 1e-6);
@@ -800,7 +1120,9 @@ mod tests {
 
     #[test]
     fn test_overlapping_blobs() {
-        let (cols, labels) = make_blobs(500, 3, 5, 2.0, 123);
+        // weak signal: separation=1.0 with lots of noise features
+        // means classes heavily overlap
+        let (cols, labels) = make_blobs(500, 2, 8, 1.0, 123);
         let store = QuantisedStore::from_columns(&cols);
         let exclude = vec![false; store.n_samples];
 
@@ -808,10 +1130,28 @@ mod tests {
 
         let auc_val = auc(&probs, &labels);
         assert!(
-            auc_val > 0.70,
-            "expected AUC > 0.70 for overlapping data, got {:.4}",
+            auc_val > 0.55,
+            "expected AUC > 0.55 for weakly overlapping data, got {:.4}",
             auc_val
         );
+
+        // with heavy overlap, predictions should stay moderate
+        assert_not_bimodal(&probs, &labels);
+    }
+
+    #[test]
+    fn test_calibration_moderate_separation() {
+        // genuinely ambiguous: 1 informative feature, 6 noise, weak signal
+        let (cols, labels) = make_blobs(500, 1, 9, 0.8, 77);
+        let store = QuantisedStore::from_columns(&cols);
+        let exclude = vec![false; store.n_samples];
+
+        let probs = fit_logistic_gbm(&store, &labels, &exclude, &LogisticGbmConfig::default(), 55);
+
+        let auc_val = auc(&probs, &labels);
+        assert!(auc_val > 0.60, "expected AUC > 0.60, got {:.4}", auc_val);
+
+        assert_not_bimodal(&probs, &labels);
     }
 
     #[test]
@@ -939,13 +1279,7 @@ mod tests {
             exclude[i] = true;
         }
 
-        let config = LogisticGbmConfig {
-            max_rounds: 500,
-            early_stop_rounds: 5,
-            ..Default::default()
-        };
-
-        let probs = fit_logistic_gbm(&store, &labels, &exclude, &config, 0);
+        let probs = fit_logistic_gbm(&store, &labels, &exclude, &LogisticGbmConfig::default(), 0);
 
         let test_probs: Vec<f32> = probs[n_train..].to_vec();
         let test_labels: Vec<bool> = labels[n_train..].to_vec();
@@ -954,6 +1288,15 @@ mod tests {
             auc_val < 0.65,
             "with random labels, held-out AUC should be near chance, got {:.4}",
             auc_val
+        );
+
+        // predictions on pure noise should cluster around the base
+        // rate, not be extreme
+        let mean_pred: f32 = test_probs.iter().sum::<f32>() / test_probs.len() as f32;
+        assert!(
+            mean_pred > 0.3 && mean_pred < 0.7,
+            "pure noise predictions should be near 0.5, got mean {:.4}",
+            mean_pred
         );
     }
 
@@ -1001,6 +1344,61 @@ mod tests {
             auc_val > 0.85,
             "tree ensemble should handle XOR, got AUC {:.4}",
             auc_val
+        );
+    }
+
+    #[test]
+    fn test_cv_selects_few_rounds_on_noise() {
+        // on pure noise, CV should select very few rounds
+        let mut rng = SmallRng::seed_from_u64(12345);
+        let n = 600;
+        let n_feat = 5;
+        let mut columns: Vec<Vec<f32>> = (0..n_feat).map(|_| Vec::with_capacity(n)).collect();
+        let mut labels = Vec::with_capacity(n);
+
+        for _ in 0..n {
+            labels.push(rng.random_bool(0.5));
+            for j in 0..n_feat {
+                columns[j].push(rng.random::<f32>());
+            }
+        }
+
+        let store = QuantisedStore::from_columns(&columns);
+        let eligible: Vec<u32> = (0..n as u32).collect();
+        let config = LogisticGbmConfig::default();
+        let init_logit = 0.0f32; // balanced
+
+        let n_rounds = cv_select_rounds(&store, &labels, &eligible, &config, init_logit, 42);
+
+        assert!(
+            n_rounds <= 10,
+            "CV should select very few rounds on noise, got {}",
+            n_rounds
+        );
+    }
+
+    #[test]
+    fn test_cv_selects_more_rounds_on_signal() {
+        // on separable data, CV should allow more rounds
+        let (cols, labels) = make_blobs(400, 3, 2, 4.0, 999);
+        let store = QuantisedStore::from_columns(&cols);
+        let eligible: Vec<u32> = (0..store.n_samples as u32).collect();
+        let n_pos = labels.iter().filter(|&&l| l).count();
+        let base_rate = n_pos as f32 / labels.len() as f32;
+        let init_logit = (base_rate / (1.0 - base_rate)).ln();
+        let config = LogisticGbmConfig::default();
+
+        let n_rounds = cv_select_rounds(&store, &labels, &eligible, &config, init_logit, 42);
+
+        assert!(
+            n_rounds >= 3,
+            "CV should select at least a few rounds on separable data, got {}",
+            n_rounds
+        );
+        assert!(
+            n_rounds <= 80,
+            "CV should not select too many rounds even on separable data, got {}",
+            n_rounds
         );
     }
 
@@ -1059,10 +1457,88 @@ mod tests {
         let mean_dbl: f32 = probs[n_singlets..].iter().sum::<f32>() / n_doublets as f32;
         let mean_sng: f32 = probs[..n_singlets].iter().sum::<f32>() / n_singlets as f32;
         assert!(
-            mean_dbl > mean_sng * 3.0,
+            mean_dbl > mean_sng * 2.0,
             "doublet mean ({:.4}) should be much higher than singlet mean ({:.4})",
             mean_dbl,
             mean_sng
+        );
+    }
+
+    #[test]
+    fn test_doublet_like_not_overfit() {
+        // doublet-like but with significant overlap between classes
+        // (noise features dominate, informative features have
+        // overlapping ranges)
+        let mut rng = SmallRng::seed_from_u64(2024);
+        let n_singlets = 900;
+        let n_doublets = 100;
+        let n = n_singlets + n_doublets;
+
+        let n_feat = 9;
+        let mut columns: Vec<Vec<f32>> = (0..n_feat).map(|_| Vec::with_capacity(n)).collect();
+        let mut labels = Vec::with_capacity(n);
+
+        for i in 0..n {
+            let is_dbl = i >= n_singlets;
+            labels.push(is_dbl);
+
+            if is_dbl {
+                // weak signal: overlapping ranges on informative features
+                columns[0].push(0.15 + rng.random::<f32>() * 0.5);
+                columns[1].push(0.10 + rng.random::<f32>() * 0.4);
+                columns[2].push(0.10 + rng.random::<f32>() * 0.4);
+                // pure noise
+                columns[3].push(rng.random::<f32>());
+                columns[4].push(rng.random::<f32>() * 2.0);
+                columns[5].push(rng.random::<f32>() * 1000.0);
+                columns[6].push(rng.random::<f32>());
+                columns[7].push(rng.random::<f32>() * 4.0 - 2.0);
+                columns[8].push(rng.random::<f32>() * 4.0 - 2.0);
+            } else {
+                columns[0].push(rng.random::<f32>() * 0.4);
+                columns[1].push(rng.random::<f32>() * 0.35);
+                columns[2].push(rng.random::<f32>() * 0.3);
+                columns[3].push(rng.random::<f32>());
+                columns[4].push(rng.random::<f32>() * 2.0);
+                columns[5].push(rng.random::<f32>() * 1000.0);
+                columns[6].push(rng.random::<f32>());
+                columns[7].push(rng.random::<f32>() * 4.0 - 2.0);
+                columns[8].push(rng.random::<f32>() * 4.0 - 2.0);
+            }
+        }
+
+        let store = QuantisedStore::from_columns(&columns);
+        let exclude = vec![false; n];
+
+        let probs = fit_logistic_gbm(&store, &labels, &exclude, &LogisticGbmConfig::default(), 42);
+
+        let auc_val = auc(&probs, &labels);
+        assert!(
+            auc_val > 0.60,
+            "weakly separable doublet-like data should still discriminate somewhat, got {:.4}",
+            auc_val
+        );
+
+        // singlet predictions should NOT all be pinned near zero
+        let singlet_probs = &probs[..n_singlets];
+        let n_near_zero = singlet_probs.iter().filter(|&&p| p < 0.01).count();
+        let frac_near_zero = n_near_zero as f32 / n_singlets as f32;
+        assert!(
+            frac_near_zero < 0.8,
+            "singlet predictions are too concentrated near 0 ({:.1}%): \
+                 model is overfitting",
+            100.0 * frac_near_zero
+        );
+
+        // doublet predictions should NOT all be pinned near one
+        let doublet_probs = &probs[n_singlets..];
+        let n_near_one = doublet_probs.iter().filter(|&&p| p > 0.99).count();
+        let frac_near_one = n_near_one as f32 / n_doublets as f32;
+        assert!(
+            frac_near_one < 0.8,
+            "doublet predictions are too concentrated near 1 ({:.1}%): \
+                 model is overfitting",
+            100.0 * frac_near_one
         );
     }
 }

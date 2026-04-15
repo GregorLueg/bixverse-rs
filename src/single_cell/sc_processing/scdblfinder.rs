@@ -40,33 +40,27 @@ pub struct ScDblFinderParams {
     pub loess_span: f64,
     /// Optional clip max for variance stabilisation.
     pub clip_max: Option<f32>,
-
     // -- PCA --
     /// Number of principal components.
     pub no_pcs: usize,
     /// Whether to use randomised SVD.
     pub random_svd: bool,
-
     // -- Simulation --
     /// Ratio of simulated doublets to observed cells.
     pub doublet_ratio: f32,
     /// Fraction of pairs forced to be from different clusters (0.0-1.0).
     pub heterotypic_bias: f32,
-
     // -- Clustering --
     /// Resolution for Louvain clustering.
     pub cluster_resolution: f32,
     /// Number of Louvain iterations per clustering step.
     pub cluster_iters: usize,
-
     // -- kNN --
     /// Parameters for kNN construction.
     pub knn_params: KnnParams,
-
     // -- Iteration --
     /// Number of refinement iterations (typically 2-3).
     pub n_iterations: usize,
-
     // -- Classification --
     /// Maximum number of boosting rounds.
     pub n_trees: usize,
@@ -76,21 +70,24 @@ pub struct ScDblFinderParams {
     pub learning_rate: f32,
     /// Minimum training samples per leaf node.
     pub min_samples_leaf: usize,
-    /// Number of recent OOB improvements to average for early stopping.
-    pub early_stop_window: usize,
     /// Fraction of samples used for training each tree.
     pub subsample_rate: f32,
-
+    /// Number of CV folds for boosting round selection.
+    pub cv_folds: usize,
+    /// Early stopping patience per CV fold.
+    pub cv_early_stop: usize,
+    /// Multiplier on std for the SE rule (0.25 matches R's
+    /// `nrounds=0.25`).
+    pub se_fraction: f32,
     // -- Feature engineering --
     /// Number of leading PCs to include as classifier features.
     pub include_pcs: usize,
     /// Expected doublet rate
     pub dbr_per_1k: f32,
-
     // -- Thresholding --
-    /// Optional manual threshold. If `None`, Otsu's method is used.
+    /// Optional manual threshold. If `None`, cost-based optimisation is used.
     pub manual_threshold: Option<f32>,
-    /// Number of histogram bins for Otsu threshold detection.
+    /// Number of histogram bins for threshold detection.
     pub n_bins: usize,
 }
 
@@ -118,8 +115,10 @@ impl Default for ScDblFinderParams {
             max_depth: 4,
             learning_rate: 0.3,
             min_samples_leaf: 20,
-            early_stop_window: 15, // now maps to early_stop_rounds
             subsample_rate: 0.75,
+            cv_folds: 5,
+            cv_early_stop: 2,
+            se_fraction: 0.25,
             include_pcs: 19,
             manual_threshold: None,
             n_bins: 100,
@@ -289,7 +288,6 @@ pub fn pca_combined(
     let n_total = n_obs + n_sim;
     let n_genes = hvg_genes.len();
 
-    let hvg_set: FxHashSet<usize> = hvg_genes.iter().copied().collect();
     let gene_to_hvg: FxHashMap<usize, usize> = hvg_genes
         .iter()
         .enumerate()
@@ -846,7 +844,7 @@ impl ScDblFinder {
         }
         let start_pca = Instant::now();
 
-        let pca_res = pca_observed(
+        let (obs_pca, _, _, _) = pca_observed(
             &self.f_path_gene,
             &self.cells_to_keep,
             &hvg_genes,
@@ -860,11 +858,6 @@ impl ScDblFinder {
             seed,
             verbose,
         );
-
-        let obs_pca = &pca_res.0;
-        let loadings = &pca_res.1;
-        let gene_means = &pca_res.2;
-        let gene_stds = &pca_res.3;
 
         if verbose {
             println!("Done with PCA in {:.2?}", start_pca.elapsed());
@@ -915,8 +908,10 @@ impl ScDblFinder {
             learning_rate: self.params.learning_rate,
             max_depth: self.params.max_depth,
             min_samples_leaf: self.params.min_samples_leaf,
-            early_stop_rounds: self.params.early_stop_window,
             subsample_rate: self.params.subsample_rate,
+            n_folds: self.params.cv_folds,
+            cv_early_stop: self.params.cv_early_stop,
+            se_fraction: self.params.se_fraction,
             ..Default::default()
         };
 
