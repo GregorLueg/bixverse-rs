@@ -1183,6 +1183,30 @@ impl ScDblFinder {
             seed,
         );
 
+        // After computing combined_pca, before anything else
+        if verbose {
+            let mut pc_min = f32::INFINITY;
+            let mut pc_max = f32::NEG_INFINITY;
+            let mut pc_abs_sum = 0.0f64;
+            for i in 0..combined_pca.nrows() {
+                for j in 0..combined_pca.ncols() {
+                    let v = *combined_pca.get(i, j);
+                    if v < pc_min {
+                        pc_min = v;
+                    }
+                    if v > pc_max {
+                        pc_max = v;
+                    }
+                    pc_abs_sum += v.abs() as f64;
+                }
+            }
+            let mean_abs = pc_abs_sum / (combined_pca.nrows() * combined_pca.ncols()) as f64;
+            println!(
+                "PCA scores: min={:.2}, max={:.2}, mean|x|={:.2}",
+                pc_min, pc_max, mean_abs
+            );
+        }
+
         // -- Step 6: kNN on combined ONCE --
         if verbose {
             println!("Building combined kNN graph (k={})...", k_max);
@@ -1195,6 +1219,20 @@ impl ScDblFinder {
             generate_knn_with_dist(combined_pca.as_ref(), &knn_params, true, seed, verbose);
 
         let combined_dists = combined_dists.unwrap();
+
+        if verbose {
+            let mut all_first_dists: Vec<f32> = combined_dists.iter().map(|d| d[0]).collect();
+            all_first_dists.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let n = all_first_dists.len();
+            println!(
+                "kNN nearest distances: min={:.2}, q25={:.2}, median={:.2}, q75={:.2}, max={:.2}",
+                all_first_dists[0],
+                all_first_dists[n / 4],
+                all_first_dists[n / 2],
+                all_first_dists[3 * n / 4],
+                all_first_dists[n - 1]
+            );
+        }
 
         // -- Step 7: Build feature matrix ONCE --
         // k_ratios + weighted + ratio_var + lib_ratio + nfeatures + nAbove2 + cxds + PCs
