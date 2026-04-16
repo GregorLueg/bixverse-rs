@@ -902,6 +902,34 @@ fn find_threshold_optimised(
         }
     }
 
+    println!("Threshold optimiser:");
+    println!(
+        "  expected band: [{:.0}, {:.0}] doublets",
+        expected_lo - 1.0,
+        expected_hi - 1.0
+    );
+    println!("  selected threshold: {:.4}", best_threshold);
+    println!("  best cost: {:.4}", best_cost);
+
+    // Diagnostic: cost decomposition at a few candidate thresholds
+    for &test_t in &[0.05f32, 0.10, 0.15, 0.20, 0.30, 0.50] {
+        let n_obs_above = obs_scores.iter().filter(|&&s| s >= test_t).count() as f32;
+        let dev = if n_obs_above >= expected_lo && n_obs_above <= expected_hi {
+            0.0
+        } else {
+            let mid = (expected_lo + expected_hi) / 2.0;
+            ((n_obs_above - mid).abs() / mid.max(1.0)).powi(2)
+        };
+        let n_sim_below = sim_scores.iter().filter(|&&s| s < test_t).count();
+        let fnr = n_sim_below as f32 / n_sim.max(1) as f32;
+        let fpr = n_obs_above / n_obs.max(1) as f32;
+        let cost = dev + 2.0 * (1.0 - 0.5) * fnr + 2.0 * 0.5 * fpr;
+        println!(
+            "  t={:.2}: n_above={:.0}, dev={:.4}, fnr={:.4}, fpr={:.4}, cost={:.4}",
+            test_t, n_obs_above, dev, fnr, fpr, cost
+        );
+    }
+
     best_threshold
 }
 
