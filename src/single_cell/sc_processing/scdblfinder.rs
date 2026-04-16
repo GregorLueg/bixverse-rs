@@ -88,7 +88,7 @@ pub struct ScDblFinderParams {
     /// Number of leading PCs to include as classifier features.
     pub include_pcs: usize,
     /// Expected doublet rate
-    pub dbr_per_1k: f32,
+    pub expected_doublet_rate: Option<f32>,
 
     // -- Thresholding --
     /// Optional manual threshold. If `None`, cost-based optimisation is used.
@@ -123,7 +123,7 @@ impl Default for ScDblFinderParams {
             cv_early_stop: 2,
             se_fraction: 0.25,
             include_pcs: 19,
-            dbr_per_1k: 0.008,
+            expected_doublet_rate: None,
             manual_threshold: None,
             n_bins: 100,
         }
@@ -189,6 +189,29 @@ pub struct ScDblFinderDiagnostics {
 /// cell population and parent_cluster_labels record each pair's cluster
 /// origins.
 type ClusterAwarePairs = (Vec<(usize, usize)>, Vec<(usize, usize)>);
+
+/////////////
+// Helpers //
+/////////////
+
+/// Resolve the expected doublet rate.
+///
+/// If explicitly set, returns that value (clamped to [0.001, 0.5]).
+/// Otherwise estimates from cell count using the 10x linear model.
+///
+/// ### Params
+///
+/// * `explicit` - Option of explicit doublet rate
+///
+/// ### Returns
+///
+/// Doublet rate based on user-provided data or the 10x linear model
+fn resolve_doublet_rate(explicit: Option<f32>, n_cells: usize) -> f32 {
+    match explicit {
+        Some(r) => r.clamp(0.001, 0.5),
+        None => (0.008 * n_cells as f32 / 1000.0).clamp(0.001, 0.5),
+    }
+}
 
 //////////////
 // Features //
@@ -849,31 +872,24 @@ fn classify_doublets(
 fn find_threshold_optimised(
     obs_scores: &[f32],
     sim_scores: &[f32],
-    dbr_per_1k: f32,
+    expected_dbr: f32,
     stringency: f32,
+    verbose: bool,
 ) -> f32 {
     let n_obs = obs_scores.len();
     let n_sim = sim_scores.len();
 
-    let expected_dbr = (dbr_per_1k * (n_obs as f32 / 1000.0)).min(0.5);
-    let dbr_sd = 0.3 * expected_dbr + 0.025; // R's default
+    let dbr_sd = 0.3 * expected_dbr + 0.025;
     let expected_lo = ((expected_dbr - dbr_sd).max(0.0) * n_obs as f32) + 1.0;
     let expected_hi = ((expected_dbr + dbr_sd).min(1.0) * n_obs as f32) + 1.0;
 
-    println!(
-        "dbr_per_1k={}, n_obs={}, n_sim={}, expected_dbr={}, dbr_sd={}",
-        dbr_per_1k, n_obs, n_sim, expected_dbr, dbr_sd
-    );
-
-    // Collect all unique score values as candidate thresholds
-    // (more precise than fixed bins)
     let mut candidates: Vec<f32> = Vec::with_capacity(n_obs + n_sim);
     candidates.extend_from_slice(obs_scores);
     candidates.extend_from_slice(sim_scores);
     candidates.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
     candidates.dedup();
 
-    // Thin to at most 500 candidates for speed
+    // thin to at most 500 candidates for speed
     let step = (candidates.len() / 500).max(1);
     let candidates: Vec<f32> = candidates.into_iter().step_by(step).collect();
 
@@ -881,10 +897,10 @@ fn find_threshold_optimised(
     let mut best_cost = f32::INFINITY;
 
     for &th in &candidates {
-        // Observed cells above threshold (called as doublets)
+        // observed cells above threshold (called as doublets)
         let n_obs_above = obs_scores.iter().filter(|&&s| s >= th).count() as f32;
 
-        // Deviation from expected count (zero within tolerance band)
+        // deviation from expected count (zero within tolerance band)
         let dev = if n_obs_above >= expected_lo && n_obs_above <= expected_hi {
             0.0
         } else {
@@ -907,32 +923,16 @@ fn find_threshold_optimised(
         }
     }
 
-    println!("Threshold optimiser:");
-    println!(
-        "  expected band: [{:.0}, {:.0}] doublets",
-        expected_lo - 1.0,
-        expected_hi - 1.0
-    );
-    println!("  selected threshold: {:.4}", best_threshold);
-    println!("  best cost: {:.4}", best_cost);
-
-    // Diagnostic: cost decomposition at a few candidate thresholds
-    for &test_t in &[0.05f32, 0.10, 0.15, 0.20, 0.30, 0.50] {
-        let n_obs_above = obs_scores.iter().filter(|&&s| s >= test_t).count() as f32;
-        let dev = if n_obs_above >= expected_lo && n_obs_above <= expected_hi {
-            0.0
-        } else {
-            let mid = (expected_lo + expected_hi) / 2.0;
-            ((n_obs_above - mid).abs() / mid.max(1.0)).powi(2)
-        };
-        let n_sim_below = sim_scores.iter().filter(|&&s| s < test_t).count();
-        let fnr = n_sim_below as f32 / n_sim.max(1) as f32;
-        let fpr = n_obs_above / n_obs.max(1) as f32;
-        let cost = dev + 2.0 * (1.0 - 0.5) * fnr + 2.0 * 0.5 * fpr;
+    if verbose {
+        // diagnostic messages
+        println!("Threshold optimiser:");
         println!(
-            "  t={:.2}: n_above={:.0}, dev={:.4}, fnr={:.4}, fpr={:.4}, cost={:.4}",
-            test_t, n_obs_above, dev, fnr, fpr, cost
+            "  expected band: [{:.0}, {:.0}] doublets",
+            expected_lo - 1.0,
+            expected_hi - 1.0
         );
+        println!("  selected threshold: {:.4}", best_threshold);
+        println!("  best cost: {:.4}", best_cost);
     }
 
     best_threshold
@@ -1156,8 +1156,7 @@ impl ScDblFinder {
         };
 
         // expected doublet rate for exclusion logic
-        let expected_dbr = self.params.dbr_per_1k * (self.n_cells as f32 / 1000.0);
-        let expected_dbr = expected_dbr.min(0.5); // sanity cap
+        let expected_dbr = resolve_doublet_rate(self.params.expected_doublet_rate, self.n_cells);
 
         // -- Step 4: Simulate doublets ONCE --
         if verbose {
@@ -1399,14 +1398,10 @@ impl ScDblFinder {
             let mut exclude_mask = vec![false; n_total];
 
             if iter > 0 {
-                // --- Exclude suspected real doublets ---
-                // Use dbr-quantile approach: threshold at the (1 - expected_dbr)
-                // quantile of observed scores, then exclude observed cells above it.
-                // This approximates R's doubletThresholding(..., stringency=0.7).
                 let mut obs_sorted: Vec<f32> = final_scores.clone();
                 obs_sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
 
-                // Quantile at (1 - expected_dbr) of observed scores
+                // quantile at (1 - expected_dbr) of observed scores
                 let quantile_idx =
                     ((1.0 - expected_dbr) * (self.n_cells - 1) as f32).round() as usize;
                 let quantile_idx = quantile_idx.min(self.n_cells - 1);
@@ -1424,9 +1419,6 @@ impl ScDblFinder {
                     }
                 }
 
-                // --- Exclude unidentifiable artificial doublets ---
-                // Use a quantile-based approach: exclude sim doublets in the
-                // bottom 10th percentile of sim scores, capped at 25%.
                 let mut sim_sorted: Vec<f32> = sim_scores.clone();
                 sim_sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
 
@@ -1466,57 +1458,6 @@ impl ScDblFinder {
                 (iter_seed + 100) as u64,
             );
 
-            // --- Diagnostic: check if features actually separate ---
-            if verbose {
-                // kNN ratio separation (max-k column)
-                let obs_ratios: Vec<f32> = (0..self.n_cells)
-                    .map(|i| *features.get(i, max_k_col))
-                    .collect();
-                let sim_ratios: Vec<f32> = (0..self.n_cells_sim)
-                    .map(|si| *features.get(self.n_cells + si, max_k_col))
-                    .collect();
-                let obs_mean = obs_ratios.iter().sum::<f32>() / obs_ratios.len() as f32;
-                let sim_mean = sim_ratios.iter().sum::<f32>() / sim_ratios.len() as f32;
-                println!(
-                    "  kNN ratio (k=max): obs mean={:.4}, sim mean={:.4}",
-                    obs_mean, sim_mean
-                );
-
-                // cxds separation
-                let obs_cxds_mean =
-                    obs_cxds_scores.iter().sum::<f32>() / obs_cxds_scores.len() as f32;
-                let sim_cxds_mean =
-                    sim_cxds_scores.iter().sum::<f32>() / sim_cxds_scores.len() as f32;
-                println!(
-                    "  cxds: obs mean={:.4}, sim mean={:.4}",
-                    obs_cxds_mean, sim_cxds_mean
-                );
-
-                // GBM output separation
-                let obs_prob_mean = final_scores.iter().sum::<f32>() / final_scores.len() as f32;
-                let sim_prob_mean = sim_scores.iter().sum::<f32>() / sim_scores.len() as f32;
-                println!(
-                    "  GBM probs: obs mean={:.4}, sim mean={:.4}",
-                    obs_prob_mean, sim_prob_mean
-                );
-
-                // Weighted feature separation
-                let weighted_col = n_k; // weighted is right after the k ratio columns
-                let obs_w: Vec<f32> = (0..self.n_cells)
-                    .map(|i| *features.get(i, weighted_col))
-                    .collect();
-                let sim_w: Vec<f32> = (0..self.n_cells_sim)
-                    .map(|si| *features.get(self.n_cells + si, weighted_col))
-                    .collect();
-                println!(
-                    "  weighted: obs mean={:.4}, sim mean={:.4}",
-                    obs_w.iter().sum::<f32>() / obs_w.len() as f32,
-                    sim_w.iter().sum::<f32>() / sim_w.len() as f32,
-                );
-            }
-
-            // Extract observed and simulated scores for next
-            // iteration's exclusion logic
             final_scores.copy_from_slice(&probabilities[..self.n_cells]);
             sim_scores.copy_from_slice(&probabilities[self.n_cells..]);
 
@@ -1546,7 +1487,7 @@ impl ScDblFinder {
 
         let threshold = self.params.manual_threshold.unwrap_or_else(|| {
             let t =
-                find_threshold_optimised(&final_scores, &sim_scores, self.params.dbr_per_1k, 0.5);
+                find_threshold_optimised(&final_scores, &sim_scores, expected_dbr, 0.5, verbose);
             if verbose {
                 println!("Threshold set at score = {:.4}", t);
             }

@@ -673,10 +673,10 @@ impl ScDblFinderParams {
                 .and_then(|v| v.as_integer())
                 .unwrap_or(defaults.include_pcs as i32) as usize,
             // Expected doublet rate
-            dbr_per_1k: map
-                .get("dbr_per_1k")
+            expected_doublet_rate: map
+                .get("expected_doublet_rate")
                 .and_then(|v| v.as_real())
-                .unwrap_or(defaults.dbr_per_1k as f64) as f32,
+                .map(|x| x as f32),
             // Thresholding
             manual_threshold: map
                 .get("manual_threshold")
