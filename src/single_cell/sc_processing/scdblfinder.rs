@@ -147,6 +147,8 @@ pub struct ScDblFinderResult {
     pub cluster_labels: Vec<usize>,
     /// Fraction of observed cells called as doublets.
     pub detected_doublet_rate: f32,
+    /// Per-cell intermediate scores for comparison and debugging.
+    pub diagnostics: ScDblFinderDiagnostics,
 }
 
 /// Per-cell kNN-derived intermediate values.
@@ -155,6 +157,28 @@ struct CellKnnFeatures {
     weighted: f32,
     dist_real: f32,
     origin: Option<(usize, usize)>,
+}
+
+/// Per-cell intermediate scores for diagnostics and comparison
+/// against R's scDblFinder output.
+///
+/// All vectors are length `n_obs` (observed cells only).
+#[derive(Clone, Debug)]
+pub struct ScDblFinderDiagnostics {
+    /// Distance-weighted kNN doublet proportion.
+    pub weighted: Vec<f32>,
+    /// Raw kNN ratio at the largest k value.
+    pub ratio: Vec<f32>,
+    /// Co-expression doublet score.
+    pub cxds_score: Vec<f32>,
+    /// Distance to the nearest real neighbour.
+    pub dist_to_real: Vec<f32>,
+    /// Identification difficulty (1 - mean class-weighted score for this cell's
+    /// most likely doublet origin; 1.0 if no origin assigned).
+    pub difficulty: Vec<f32>,
+    /// Most likely parent cluster pair (canonical ordering); None for cells
+    /// with no heterotypic sim neighbours.
+    pub most_likely_origin: Vec<Option<(usize, usize)>>,
 }
 
 ///////////
@@ -572,7 +596,7 @@ fn build_feature_matrix(
     sim_cxds: &[f32],
     combined_pca: MatRef<f32>,
     n_pcs: usize,
-) -> Mat<f32> {
+) -> (Mat<f32>, Vec<CellKnnFeatures>) {
     let n_total = knn_indices.len();
     let n_k = k_values.len();
     // k_ratios + weighted + dist_real + difficulty + lib + nfeatures + nAbove2 + cxds + PCs
@@ -584,7 +608,7 @@ fn build_feature_matrix(
         .map(|d| d.first().copied().unwrap_or(0.0))
         .fold(0.0f32, f32::max);
 
-    // stage 1: per-cell kNN intermediates (parallel)
+    // -- Stage 1: per-cell kNN intermediates (parallel) --
     let stage1: Vec<CellKnnFeatures> = (0..n_total)
         .into_par_iter()
         .map(|i| {
@@ -592,7 +616,7 @@ fn build_feature_matrix(
             let distances = &knn_distances[i];
             let k_max = neighbours.len();
 
-            // multi-scale ratios
+            // Multi-scale ratios
             let mut k_ratios = Vec::with_capacity(n_k);
             for &k in k_values {
                 let k_use = k.min(k_max);
@@ -603,7 +627,7 @@ fn build_feature_matrix(
                 k_ratios.push(n_sim_nb as f32 / k_use as f32);
             }
 
-            // distance-weighted doublet proportion
+            // Distance-weighted doublet proportion
             let k_f = k_max as f32;
             let mut w_sum = 0.0f32;
             let mut w_dbl = 0.0f32;
@@ -631,15 +655,13 @@ fn build_feature_matrix(
         })
         .collect();
 
-    // stage 2: origin-keyed aggregates (cheap, serial)
+    // -- Stage 2: origin-keyed aggregates --
     let weighted_arr: Vec<f32> = stage1.iter().map(|c| c.weighted).collect();
     let origins_arr: Vec<Option<(usize, usize)>> = stage1.iter().map(|c| c.origin).collect();
 
     let class_weighted = aggregate_class_weighted(&origins_arr, &weighted_arr, n_obs);
-    // Note: origin_counts would go here if we ever want `observed` for
-    // diagnostics. Not used as a training feature (matches R exclusion).
 
-    // stage 3: assemble rows (parallel)
+    // -- Stage 3: assemble rows (parallel) --
     let rows: Vec<Vec<f32>> = (0..n_total)
         .into_par_iter()
         .map(|i| {
@@ -703,7 +725,8 @@ fn build_feature_matrix(
             *features.get_mut(i, j) = val;
         }
     }
-    features
+
+    (features, stage1)
 }
 
 /// Generate cell pairs with cluster-aware heterotypic bias.
@@ -1181,7 +1204,7 @@ impl ScDblFinder {
             println!("Building feature matrix ({} features)...", n_feat);
         }
 
-        let features = build_feature_matrix(
+        let (features, knn_intermediates) = build_feature_matrix(
             &combined_knn,
             &combined_dists,
             self.n_cells,
@@ -1198,6 +1221,40 @@ impl ScDblFinder {
             combined_pca.as_ref(),
             n_pcs_include,
         );
+
+        // extract observed-cell diagnostics
+        let obs_intermediates = &knn_intermediates[..self.n_cells];
+        let class_weighted = aggregate_class_weighted(
+            &knn_intermediates
+                .iter()
+                .map(|c| c.origin)
+                .collect::<Vec<_>>(),
+            &knn_intermediates
+                .iter()
+                .map(|c| c.weighted)
+                .collect::<Vec<_>>(),
+            self.n_cells,
+        );
+
+        let max_k_col = k_values.len() - 1;
+
+        // generate all the scores for diagnost purposes
+        let diagnostics = ScDblFinderDiagnostics {
+            weighted: obs_intermediates.iter().map(|c| c.weighted).collect(),
+            ratio: (0..self.n_cells)
+                .map(|i| *features.get(i, max_k_col))
+                .collect(),
+            cxds_score: obs_cxds_scores.clone(),
+            dist_to_real: obs_intermediates.iter().map(|c| c.dist_real).collect(),
+            difficulty: obs_intermediates
+                .iter()
+                .map(|c| match c.origin {
+                    Some(o) => 1.0 - class_weighted.get(&o).copied().unwrap_or(0.0),
+                    None => 1.0,
+                })
+                .collect(),
+            most_likely_origin: obs_intermediates.iter().map(|c| c.origin).collect(),
+        };
 
         let n_total = self.n_cells + self.n_cells_sim;
 
@@ -1439,6 +1496,7 @@ impl ScDblFinder {
             threshold,
             cluster_labels,
             detected_doublet_rate,
+            diagnostics,
         }
     }
 }
