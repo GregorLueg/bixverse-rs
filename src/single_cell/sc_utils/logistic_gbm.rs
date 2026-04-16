@@ -61,7 +61,7 @@ impl Default for LogisticGbmConfig {
             subsample_rate: 0.75,
             n_folds: 5,
             cv_early_stop: 2,
-            se_fraction: 0.25,
+            se_fraction: 1.0,
         }
     }
 }
