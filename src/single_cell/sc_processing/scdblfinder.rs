@@ -599,16 +599,13 @@ fn build_feature_matrix(
 ) -> (Mat<f32>, Vec<CellKnnFeatures>) {
     let n_total = knn_indices.len();
     let n_k = k_values.len();
-    // k_ratios + weighted + dist_real + difficulty + lib + nfeatures + nAbove2 + cxds + PCs
     let n_feat = n_k + 7 + n_pcs;
 
-    // Global max-of-nearest-distance for distance-to-real fallback
     let fallback_max_dist = knn_distances
         .iter()
         .map(|d| d.first().copied().unwrap_or(0.0))
         .fold(0.0f32, f32::max);
 
-    // -- Stage 1: per-cell kNN intermediates (parallel) --
     let stage1: Vec<CellKnnFeatures> = (0..n_total)
         .into_par_iter()
         .map(|i| {
@@ -616,7 +613,7 @@ fn build_feature_matrix(
             let distances = &knn_distances[i];
             let k_max = neighbours.len();
 
-            // Multi-scale ratios
+            // multi-scale ratios
             let mut k_ratios = Vec::with_capacity(n_k);
             for &k in k_values {
                 let k_use = k.min(k_max);
@@ -627,7 +624,7 @@ fn build_feature_matrix(
                 k_ratios.push(n_sim_nb as f32 / k_use as f32);
             }
 
-            // Distance-weighted doublet proportion
+            // distance-weighted doublet proportion
             let k_f = k_max as f32;
             let mut w_sum = 0.0f32;
             let mut w_dbl = 0.0f32;
@@ -1218,7 +1215,15 @@ impl ScDblFinder {
         let (combined_knn, combined_dists) =
             generate_knn_with_dist(combined_pca.as_ref(), &knn_params, true, seed, verbose);
 
-        let combined_dists = combined_dists.unwrap();
+        let mut combined_dists = combined_dists.unwrap();
+
+        if knn_params.ann_dist == "euclidean" {
+            combined_dists.par_iter_mut().for_each(|row| {
+                for d in row.iter_mut() {
+                    *d = d.sqrt();
+                }
+            });
+        }
 
         if verbose {
             let mut all_first_dists: Vec<f32> = combined_dists.iter().map(|d| d[0]).collect();
