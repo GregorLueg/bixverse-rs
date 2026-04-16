@@ -860,6 +860,11 @@ fn find_threshold_optimised(
     let expected_lo = ((expected_dbr - dbr_sd).max(0.0) * n_obs as f32) + 1.0;
     let expected_hi = ((expected_dbr + dbr_sd).min(1.0) * n_obs as f32) + 1.0;
 
+    println!(
+        "dbr_per_1k={}, n_obs={}, n_sim={}, expected_dbr={}, dbr_sd={}",
+        dbr_per_1k, n_obs, n_sim, expected_dbr, dbr_sd
+    );
+
     // Collect all unique score values as candidate thresholds
     // (more precise than fixed bins)
     let mut candidates: Vec<f32> = Vec::with_capacity(n_obs + n_sim);
