@@ -10,6 +10,7 @@ use crate::core::math::pca_svd::{compute_pc_scores, randomised_svd};
 use crate::graph::community_detections::*;
 use crate::graph::graph_structures::*;
 use crate::prelude::*;
+use crate::single_cell::sc_processing::knn::generate_knn_with_dist;
 use crate::single_cell::sc_processing::utils_doublets::*;
 use crate::single_cell::sc_utils::{cxds::*, logistic_gbm::*, utils_tree::*};
 
@@ -30,37 +31,40 @@ pub struct ScDblFinderParams {
     pub mean_center: bool,
     /// Whether to scale genes to unit variance before PCA.
     pub normalise_variance: bool,
-    /// Optional target library size. Defaults to the mean HVG library size.
+    /// Optional target library size. Defaults to the mean selected-gene library
+    /// size.
     pub target_size: Option<f32>,
-    /// Percentile threshold for HVG selection.
-    pub min_gene_var_pctl: f32,
-    /// HVG method: `"vst"`, `"mvb"`, or `"dispersion"`.
-    pub hvg_method: String,
-    /// Loess span for VST fitting.
-    pub loess_span: f64,
-    /// Optional clip max for variance stabilisation.
-    pub clip_max: Option<f32>,
-    // -- PCA --
-    /// Number of principal components.
-    pub no_pcs: usize,
-    /// Whether to use randomised SVD.
-    pub random_svd: bool,
+    /// Number of top-expressed genes to use as features. Matches R
+    /// scDblFinder's `nfeatures=1352`.
+    pub n_genes: usize,
+
     // -- Simulation --
     /// Ratio of simulated doublets to observed cells.
     pub doublet_ratio: f32,
     /// Fraction of pairs forced to be from different clusters (0.0-1.0).
     pub heterotypic_bias: f32,
+    /// Parameters for the doublet simulation
+    pub sim_params: ScDblSimParams,
+
+    // -- PCA --
+    /// Number of principal components.
+    pub no_pcs: usize,
+    /// Whether to use randomised SVD.
+    pub random_svd: bool,
+
     // -- Clustering --
     /// Resolution for Louvain clustering.
     pub cluster_resolution: f32,
     /// Number of Louvain iterations per clustering step.
     pub cluster_iters: usize,
+
     // -- kNN --
     /// Parameters for kNN construction.
     pub knn_params: KnnParams,
     // -- Iteration --
     /// Number of refinement iterations (typically 2-3).
     pub n_iterations: usize,
+
     // -- Classification --
     /// Maximum number of boosting rounds.
     pub n_trees: usize,
@@ -79,11 +83,13 @@ pub struct ScDblFinderParams {
     /// Multiplier on std for the SE rule (0.25 matches R's
     /// `nrounds=0.25`).
     pub se_fraction: f32,
+
     // -- Feature engineering --
     /// Number of leading PCs to include as classifier features.
     pub include_pcs: usize,
     /// Expected doublet rate
     pub dbr_per_1k: f32,
+
     // -- Thresholding --
     /// Optional manual threshold. If `None`, cost-based optimisation is used.
     pub manual_threshold: Option<f32>,
@@ -98,19 +104,16 @@ impl Default for ScDblFinderParams {
             mean_center: true,
             normalise_variance: true,
             target_size: None,
-            min_gene_var_pctl: 0.85,
-            hvg_method: "vst".to_string(),
-            loess_span: 0.3,
-            clip_max: None,
+            n_genes: 1352,
             no_pcs: 30,
             random_svd: true,
             doublet_ratio: 1.0,
             heterotypic_bias: 0.8,
+            sim_params: ScDblSimParams::default(),
             cluster_resolution: 1.0,
             cluster_iters: 10,
             knn_params: KnnParams::default(),
             n_iterations: 3,
-            // -- Aligned with R's XGBoost defaults --
             n_trees: 200,
             max_depth: 4,
             learning_rate: 0.3,
@@ -120,13 +123,16 @@ impl Default for ScDblFinderParams {
             cv_early_stop: 2,
             se_fraction: 0.25,
             include_pcs: 19,
+            dbr_per_1k: 0.008,
             manual_threshold: None,
             n_bins: 100,
-            // -- Expected doublet rate --
-            dbr_per_1k: 0.008,
         }
     }
 }
+
+///////////////////////
+// Helper structures //
+///////////////////////
 
 /// Results from scDblFinder.
 #[derive(Clone, Debug)]
@@ -143,6 +149,14 @@ pub struct ScDblFinderResult {
     pub detected_doublet_rate: f32,
 }
 
+/// Per-cell kNN-derived intermediate values.
+struct CellKnnFeatures {
+    k_ratios: Vec<f32>,
+    weighted: f32,
+    dist_real: f32,
+    origin: Option<(usize, usize)>,
+}
+
 ///////////
 // Types //
 ///////////
@@ -153,55 +167,30 @@ pub struct ScDblFinderResult {
 type ClusterAwarePairs = (Vec<(usize, usize)>, Vec<(usize, usize)>);
 
 //////////////
-// refactor //
+// Features //
 //////////////
-
-/// Build kNN returning both indices and distances.
-///
-/// Wraps `dispatch_knn` and a parallel distance computation from the
-/// PCA embedding.
-fn dispatch_knn_with_distances(
-    embd: MatRef<f32>,
-    k: usize,
-    knn_params: &KnnParams,
-    seed: usize,
-    verbose: bool,
-) -> (Vec<Vec<usize>>, Vec<Vec<f32>>) {
-    let indices = dispatch_knn(embd, k, knn_params, seed, verbose);
-
-    let n_dims = embd.ncols();
-    let distances: Vec<Vec<f32>> = indices
-        .par_iter()
-        .enumerate()
-        .map(|(i, neighbours)| {
-            neighbours
-                .iter()
-                .map(|&j| {
-                    let mut d2 = 0.0f32;
-                    for dim in 0..n_dims {
-                        let diff = *embd.get(i, dim) - *embd.get(j, dim);
-                        d2 += diff * diff;
-                    }
-                    d2.sqrt()
-                })
-                .collect()
-        })
-        .collect();
-
-    (indices, distances)
-}
 
 /// Compute per-cell gene complexity statistics.
 ///
-/// Returns `(n_features, n_above2)` where `n_features` is the number of
-/// genes with non-zero expression and `n_above2` is the number of genes
-/// with count > 2. These are computed over HVG genes only.
+/// Returns `(n_features, n_above2)` where `n_features` is the number of genes
+/// with non-zero expression and `n_above2` is the number of genes with
+/// count > 2. These are computed over selected genes only.
+///
+/// ### Params
+///
+/// * `f_path_cell` - Path to the cell-based binary file (CSR format).
+/// * `cells_to_keep` - Indices of the cells to keep
+/// * `selected_genes` - The genes to include in this analysis
+///
+/// ### Returns
+///
+/// Tuple of `(non_zero, count_above_2)`
 fn compute_cell_complexity(
     f_path_cell: &str,
     cells_to_keep: &[usize],
-    hvg_genes: &[usize],
+    selected_genes: &[usize],
 ) -> (Vec<u32>, Vec<u32>) {
-    let hvg_set: FxHashSet<usize> = hvg_genes.iter().copied().collect();
+    let selected_gene_set: FxHashSet<usize> = selected_genes.iter().copied().collect();
     let reader = ParallelSparseReader::new(f_path_cell).unwrap();
 
     let results: Vec<(u32, u32)> = cells_to_keep
@@ -211,7 +200,7 @@ fn compute_cell_complexity(
             let mut n_feat = 0u32;
             let mut n_above2 = 0u32;
             for (i, &gene_idx) in chunk.indices.iter().enumerate() {
-                if hvg_set.contains(&(gene_idx as usize)) {
+                if selected_gene_set.contains(&(gene_idx as usize)) {
                     let count = chunk.data_raw.get(i);
                     if count > 0 {
                         n_feat += 1;
@@ -227,13 +216,22 @@ fn compute_cell_complexity(
 
     let n_features: Vec<u32> = results.iter().map(|&(nf, _)| nf).collect();
     let n_above2: Vec<u32> = results.iter().map(|&(_, na)| na).collect();
+
     (n_features, n_above2)
 }
 
 /// Compute gene complexity for simulated doublet chunks.
 ///
-/// Since chunks already have HVG-remapped indices, we just count
-/// non-zero and >2 entries directly.
+/// Since chunks already have HVG-remapped indices, we just count non-zero and
+/// >2 entries directly.
+///
+/// ### Params
+///
+/// * `sim_chunks` - Slice of simulated `CsrCellChunks`
+///
+/// ### Returns
+///
+/// Tuple of `(non_zero, count_above_2)`
 fn compute_sim_complexity(sim_chunks: &[CsrCellChunk]) -> (Vec<u32>, Vec<u32>) {
     let results: Vec<(u32, u32)> = sim_chunks
         .par_iter()
@@ -258,9 +256,162 @@ fn compute_sim_complexity(sim_chunks: &[CsrCellChunk]) -> (Vec<u32>, Vec<u32>) {
     (n_features, n_above2)
 }
 
-//////////////////////////////////////
-// Feature engineering | pair logic //
-//////////////////////////////////////
+/// Canonicalise a parent-cluster pair.
+///
+/// ### Params
+///
+/// * `c_a` - Cluster identifier `a`
+/// * `c_b` - Cluster identifier `b`
+///
+/// ### Returns
+///
+/// Returns `None` for homotypic pairs (same cluster), matching R's behaviour
+/// where homotypic doublets get NA origins.
+#[inline]
+fn canonical_origin(c_a: usize, c_b: usize) -> Option<(usize, usize)> {
+    if c_a == c_b {
+        None
+    } else {
+        Some((c_a.min(c_b), c_a.max(c_b)))
+    }
+}
+
+/// Compute the most likely origin for a single cell from its kNN.
+///
+/// Mirrors R's `.getMostLikelyOrigins`:
+///   1. Tabulate origins of artificial-doublet neighbours only.
+///   2. If there's a unique most-frequent origin, return it.
+///   3. If tied on count, break ties by minimum neighbour distance
+///      within that origin group.
+///
+/// Returns `None` if no artificial heterotypic neighbours exist.
+///
+/// ### Params
+///
+/// * `neighbours` - Indices of the neighbours
+/// * `distances` - Distances to their respective neighbours
+/// * `n_obs` - Total number of observations
+/// * `parent_clusters` - Slice of the parent clusters
+///
+/// ### Returns
+///
+///
+fn cell_most_likely_origin(
+    neighbours: &[usize],
+    distances: &[f32],
+    n_obs: usize,
+    parent_clusters: &[(usize, usize)],
+) -> Option<(usize, usize)> {
+    let mut counts: FxHashMap<(usize, usize), u32> = FxHashMap::default();
+    let mut min_dists: FxHashMap<(usize, usize), f32> = FxHashMap::default();
+
+    for (&neigh, &dist) in neighbours.iter().zip(distances.iter()) {
+        if neigh < n_obs {
+            continue;
+        }
+        let (c_a, c_b) = parent_clusters[neigh - n_obs];
+        if let Some(origin) = canonical_origin(c_a, c_b) {
+            *counts.entry(origin).or_insert(0) += 1;
+            let entry = min_dists.entry(origin).or_insert(f32::INFINITY);
+            if dist < *entry {
+                *entry = dist;
+            }
+        }
+    }
+
+    if counts.is_empty() {
+        return None;
+    }
+
+    let max_count = *counts.values().max().unwrap();
+    let mut candidates: Vec<(usize, usize)> = counts
+        .iter()
+        .filter(|&(_, &c)| c == max_count)
+        .map(|(k, _)| *k)
+        .collect();
+
+    if candidates.len() == 1 {
+        return Some(candidates[0]);
+    }
+
+    // Tiebreak by minimum distance, then by tuple (for determinism)
+    candidates.sort_unstable_by(|a, b| {
+        let da = min_dists[a];
+        let db = min_dists[b];
+        da.partial_cmp(&db)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.cmp(b))
+    });
+    Some(candidates[0])
+}
+
+/// Distance from a cell to its nearest real-cell neighbour.
+///
+/// Falls back to `2 * fallback_max_dist` when no real neighbours exist in the
+/// k-nearest set, matching R's `2*md` convention.
+///
+/// ### Params
+///
+/// * `neighbours` - Slice of neighbours
+/// * `distances` - Slice of the distances to the neighbours
+/// * `n_obs` - Number of observations
+/// * `fallback_max_dist` - The fallback maximum distance
+///
+/// ### Returns
+///
+/// The distance to the nearest (real) cell neighbour
+fn cell_distance_to_nearest_real(
+    neighbours: &[usize],
+    distances: &[f32],
+    n_obs: usize,
+    fallback_max_dist: f32,
+) -> f32 {
+    for (&neigh, &dist) in neighbours.iter().zip(distances.iter()) {
+        if neigh < n_obs {
+            return dist;
+        }
+    }
+    2.0 * fallback_max_dist
+}
+
+/// Count cells assigned to each origin.
+///
+/// UNUSED FOR NOW!
+///
+/// ### Params
+///
+/// * ``
+#[allow(dead_code)]
+fn aggregate_origin_counts(origins: &[Option<(usize, usize)>]) -> FxHashMap<(usize, usize), u32> {
+    let mut counts: FxHashMap<(usize, usize), u32> = FxHashMap::default();
+    for o in origins.iter().flatten() {
+        *counts.entry(*o).or_insert(0) += 1;
+    }
+    counts
+}
+
+/// Mean weighted score per origin, computed over artificial
+/// doublets only (matching R's `split(d$weighted[w], ...)` where
+/// `w <- which(d$type=="doublet")`).
+///
+/// Used for the `difficulty` feature: difficulty[i] = 1 - class_weighted[origin[i]].
+fn aggregate_class_weighted(
+    origins: &[Option<(usize, usize)>],
+    weighted: &[f32],
+    n_obs: usize,
+) -> FxHashMap<(usize, usize), f32> {
+    let mut sums: FxHashMap<(usize, usize), (f32, u32)> = FxHashMap::default();
+    for i in n_obs..origins.len() {
+        if let Some(o) = origins[i] {
+            let entry = sums.entry(o).or_insert((0.0, 0));
+            entry.0 += weighted[i];
+            entry.1 += 1;
+        }
+    }
+    sums.into_iter()
+        .map(|(k, (s, n))| (k, s / n as f32))
+        .collect()
+}
 
 /// PCA on the combined (observed + simulated) matrix.
 ///
@@ -372,7 +523,16 @@ pub fn pca_combined(
 /// Compute default k values for multi-scale kNN doublet scoring.
 ///
 /// Mirrors the R scDblFinder `.defaultKnnKs(k=NULL, n)` logic:
-/// `kmax = max(ceil(sqrt(n/2)), 25)`, then `unique(c(3,10,15,20,25,50,kmax)[<=kmax])`.
+/// `kmax = max(ceil(sqrt(n/2)), 25)`, then
+/// `unique(c(3,10,15,20,25,50,kmax)[<=kmax])`.
+///
+/// ### Params
+///
+/// * `n_obs` - Number of observations in the data set
+///
+/// ### Returns
+///
+/// The vectors of k-neighbours to consider in the classifier
 fn default_knn_ks(n_obs: usize) -> Vec<usize> {
     let kmax = ((n_obs as f32 / 2.0).sqrt().ceil() as usize).max(25);
     let candidates = [3, 10, 15, 20, 25, 50, kmax];
@@ -387,25 +547,26 @@ fn default_knn_ks(n_obs: usize) -> Vec<usize> {
 /// Features per cell (matching R scDblFinder's `.defTrainFeatures`):
 ///
 /// 1. Multi-scale kNN ratios (one per k value)
-/// 2. Distance-weighted doublet proportion ("weighted")
-/// 3. Ratio variance across k values (stability signal)
-/// 4. Library size ratio
-/// 5. Number of expressed genes ("nfeatures")
-/// 6. Number of genes with count > 2 ("nAbove2")
-/// 7. Co-expression doublet score ("cxds_score")
-/// 8. Principal components (n_pcs columns)
+/// 2. Distance-weighted doublet proportion
+/// 3. Distance to nearest real cell
+/// 4. Identification difficulty
+/// 5. Raw library size
+/// 6. Number of expressed genes
+/// 7. Number of genes with count > 2
+/// 8. Co-expression doublet score
+/// 9. Principal components (n_pcs columns)
 #[allow(clippy::too_many_arguments)]
 fn build_feature_matrix(
     knn_indices: &[Vec<usize>],
     knn_distances: &[Vec<f32>],
     n_obs: usize,
+    parent_clusters: &[(usize, usize)],
     k_values: &[usize],
     obs_n_features: &[u32],
     obs_n_above2: &[u32],
     sim_n_features: &[u32],
     sim_n_above2: &[u32],
     library_sizes: &[usize],
-    median_lib_size: f32,
     sim_combined_lib_sizes: &[usize],
     obs_cxds: &[f32],
     sim_cxds: &[f32],
@@ -414,26 +575,32 @@ fn build_feature_matrix(
 ) -> Mat<f32> {
     let n_total = knn_indices.len();
     let n_k = k_values.len();
-    // k_ratios + weighted + ratio_var + lib_ratio + nfeatures + nAbove2 + cxds + PCs
-    let n_feat = n_k + 6 + n_pcs;
+    // k_ratios + weighted + dist_real + difficulty + lib + nfeatures + nAbove2 + cxds + PCs
+    let n_feat = n_k + 7 + n_pcs;
 
-    let rows: Vec<Vec<f32>> = (0..n_total)
+    // Global max-of-nearest-distance for distance-to-real fallback
+    let fallback_max_dist = knn_distances
+        .iter()
+        .map(|d| d.first().copied().unwrap_or(0.0))
+        .fold(0.0f32, f32::max);
+
+    // stage 1: per-cell kNN intermediates (parallel)
+    let stage1: Vec<CellKnnFeatures> = (0..n_total)
         .into_par_iter()
         .map(|i| {
             let neighbours = &knn_indices[i];
             let distances = &knn_distances[i];
             let k_max = neighbours.len();
 
-            let mut feats = Vec::with_capacity(n_feat);
-
-            // multi-scale doublet ratios
+            // multi-scale ratios
+            let mut k_ratios = Vec::with_capacity(n_k);
             for &k in k_values {
                 let k_use = k.min(k_max);
-                let n_sim = neighbours[..k_use]
+                let n_sim_nb = neighbours[..k_use]
                     .iter()
                     .filter(|&&idx| idx >= n_obs)
                     .count();
-                feats.push(n_sim as f32 / k_use as f32);
+                k_ratios.push(n_sim_nb as f32 / k_use as f32);
             }
 
             // distance-weighted doublet proportion
@@ -448,24 +615,61 @@ fn build_feature_matrix(
                     w_dbl += w;
                 }
             }
-            feats.push(if w_sum > 0.0 { w_dbl / w_sum } else { 0.0 });
+            let weighted = if w_sum > 0.0 { w_dbl / w_sum } else { 0.0 };
 
-            // ratio variance across k values
-            let mean_ratio = feats[..n_k].iter().sum::<f32>() / n_k as f32;
-            let ratio_var: f32 = feats[..n_k]
-                .iter()
-                .map(|&r| (r - mean_ratio).powi(2))
-                .sum::<f32>()
-                / n_k as f32;
-            feats.push(ratio_var);
+            let dist_real =
+                cell_distance_to_nearest_real(neighbours, distances, n_obs, fallback_max_dist);
 
-            // library size ratio
-            let lib_ratio = if i < n_obs {
-                library_sizes[i] as f32 / median_lib_size
-            } else {
-                sim_combined_lib_sizes[i - n_obs] as f32 / median_lib_size
+            let origin = cell_most_likely_origin(neighbours, distances, n_obs, parent_clusters);
+
+            CellKnnFeatures {
+                k_ratios,
+                weighted,
+                dist_real,
+                origin,
+            }
+        })
+        .collect();
+
+    // stage 2: origin-keyed aggregates (cheap, serial)
+    let weighted_arr: Vec<f32> = stage1.iter().map(|c| c.weighted).collect();
+    let origins_arr: Vec<Option<(usize, usize)>> = stage1.iter().map(|c| c.origin).collect();
+
+    let class_weighted = aggregate_class_weighted(&origins_arr, &weighted_arr, n_obs);
+    // Note: origin_counts would go here if we ever want `observed` for
+    // diagnostics. Not used as a training feature (matches R exclusion).
+
+    // stage 3: assemble rows (parallel)
+    let rows: Vec<Vec<f32>> = (0..n_total)
+        .into_par_iter()
+        .map(|i| {
+            let int = &stage1[i];
+            let mut feats = Vec::with_capacity(n_feat);
+
+            // k ratios
+            feats.extend_from_slice(&int.k_ratios);
+
+            // weighted
+            feats.push(int.weighted);
+
+            // distance to nearest real cell
+            feats.push(int.dist_real);
+
+            // difficulty (1.0 - mean class-weighted score for this origin;
+            // 1.0 when no origin available)
+            let difficulty = match int.origin {
+                Some(o) => 1.0 - class_weighted.get(&o).copied().unwrap_or(0.0),
+                None => 1.0,
             };
-            feats.push(lib_ratio);
+            feats.push(difficulty);
+
+            // raw library size (matching R's lsizes = colSums(e))
+            let lib = if i < n_obs {
+                library_sizes[i] as f32
+            } else {
+                sim_combined_lib_sizes[i - n_obs] as f32
+            };
+            feats.push(lib);
 
             // nfeatures, nAbove2
             if i < n_obs {
@@ -477,7 +681,7 @@ fn build_feature_matrix(
                 feats.push(sim_n_above2[si] as f32);
             }
 
-            // cxds score
+            // cxds
             if i < n_obs {
                 feats.push(obs_cxds[i]);
             } else {
@@ -499,7 +703,6 @@ fn build_feature_matrix(
             *features.get_mut(i, j) = val;
         }
     }
-
     features
 }
 
@@ -759,42 +962,32 @@ impl ScDblFinder {
     ///
     /// ### Params
     ///
-    /// * `streaming` - Stream HVG computation to reduce memory pressure.
     /// * `seed` - Seed for reproducibility.
     /// * `verbose` - Controls verbosity.
     ///
     /// ### Returns
     ///
     /// `ScDblFinderResult` with predictions, scores and cluster labels.
-    pub fn run(&mut self, streaming: bool, seed: usize, verbose: bool) -> ScDblFinderResult {
+    pub fn run(&mut self, seed: usize, verbose: bool) -> ScDblFinderResult {
         let start_all = Instant::now();
 
-        let hvg_opts = HvgOpts {
-            method: self.params.hvg_method.clone(),
-            loess_span: self.params.loess_span as f32,
-            clip_max: self.params.clip_max,
-            min_gene_var_pctl: self.params.min_gene_var_pctl,
-        };
-
-        // -- Step 1: HVGs and library sizes --
         if verbose {
-            println!("Identifying highly variable genes...");
+            println!("Selecting top-expressed genes...");
         }
-        let start_hvg = Instant::now();
+        let start_sel = Instant::now();
 
-        let hvg_genes = select_hvg(
+        let hvg_genes = select_top_genes(
             &self.f_path_gene,
             &self.cells_to_keep,
-            &hvg_opts,
-            streaming,
-            verbose,
+            None,
+            self.params.n_genes,
         );
 
         if verbose {
             println!(
-                "Using {} highly variable genes. Done in {:.2?}",
+                "Using {} top-expressed genes. Done in {:.2?}",
                 hvg_genes.len(),
-                start_hvg.elapsed()
+                start_sel.elapsed()
             );
         }
 
@@ -802,12 +995,6 @@ impl ScDblFinder {
             compute_hvg_library_sizes(&self.f_path_cell, &self.cells_to_keep, &hvg_genes);
         let target_size = resolve_target_size(self.params.target_size, &self.hvg_library_sizes);
         self.n_cells_sim = (self.n_cells as f32 * self.params.doublet_ratio) as usize;
-
-        let median_lib_size = {
-            let mut sorted = self.hvg_library_sizes.clone();
-            sorted.sort_unstable();
-            sorted[sorted.len() / 2] as f32
-        };
 
         // -- Step 1b: Cell complexity features --
         if verbose {
@@ -924,26 +1111,24 @@ impl ScDblFinder {
             println!("Simulating cluster-aware doublets...");
         }
 
-        let (pairs, _parent_clusters) = cluster_aware_pairs(
+        let (pairs, parent_clusters) = cluster_aware_pairs(
             &cluster_labels,
             self.n_cells_sim,
             self.params.heterotypic_bias,
             seed,
         );
 
-        let sim_combined_lib_sizes: Vec<usize> = pairs
-            .iter()
-            .map(|&(a, b)| self.hvg_library_sizes[a] + self.hvg_library_sizes[b])
-            .collect();
-
-        let sim_chunks = simulate_from_pairs(
+        let (sim_chunks, sim_combined_lib_sizes) = simulate_doublets_scdbl(
             &pairs,
             &self.cells_to_keep,
             &self.hvg_library_sizes,
+            &cluster_labels,
             &hvg_genes,
             &self.f_path_cell,
             target_size,
             self.params.log_transform,
+            &self.params.sim_params,
+            seed,
         );
 
         let (sim_n_features, sim_n_above2) = compute_sim_complexity(&sim_chunks);
@@ -973,17 +1158,19 @@ impl ScDblFinder {
         if verbose {
             println!("Building combined kNN graph (k={})...", k_max);
         }
-        let (combined_knn, combined_dists) = dispatch_knn_with_distances(
-            combined_pca.as_ref(),
-            k_max,
-            &self.params.knn_params,
-            seed,
-            verbose,
-        );
+
+        let mut knn_params = self.params.knn_params.clone();
+        knn_params.k = k_max;
+
+        let (combined_knn, combined_dists) =
+            generate_knn_with_dist(combined_pca.as_ref(), &knn_params, true, seed, verbose);
+
+        let combined_dists = combined_dists.unwrap();
 
         // -- Step 7: Build feature matrix ONCE --
         // k_ratios + weighted + ratio_var + lib_ratio + nfeatures + nAbove2 + cxds + PCs
-        let n_feat = n_k + 6 + n_pcs_include;
+        // (3) Update the build_feature_matrix call
+        let n_feat = n_k + 7 + n_pcs_include; // was n_k + 6 + n_pcs_include
         if verbose {
             println!("Building feature matrix ({} features)...", n_feat);
         }
@@ -992,13 +1179,13 @@ impl ScDblFinder {
             &combined_knn,
             &combined_dists,
             self.n_cells,
+            &parent_clusters,
             &k_values,
             &obs_n_features,
             &obs_n_above2,
             &sim_n_features,
             &sim_n_above2,
             &self.hvg_library_sizes,
-            median_lib_size,
             &sim_combined_lib_sizes,
             &obs_cxds_scores,
             &sim_cxds_scores,
@@ -1213,18 +1400,14 @@ impl ScDblFinder {
             }
         }
 
-        // -- Step 9: Clamp and threshold --
+        // step 9: clamp and threshold
         for s in final_scores.iter_mut() {
             *s = s.clamp(0.0, 1.0);
         }
 
         let threshold = self.params.manual_threshold.unwrap_or_else(|| {
-            let t = find_threshold_optimised(
-                &final_scores,
-                &sim_scores,
-                self.params.dbr_per_1k,
-                0.5, // balanced stringency for final call
-            );
+            let t =
+                find_threshold_optimised(&final_scores, &sim_scores, self.params.dbr_per_1k, 0.5);
             if verbose {
                 println!("Threshold set at score = {:.4}", t);
             }
@@ -1251,5 +1434,137 @@ impl ScDblFinder {
             cluster_labels,
             detected_doublet_rate,
         }
+    }
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_canonical_origin_homotypic_is_none() {
+        assert_eq!(canonical_origin(3, 3), None);
+    }
+
+    #[test]
+    fn test_canonical_origin_sorts_tuple() {
+        assert_eq!(canonical_origin(5, 2), Some((2, 5)));
+        assert_eq!(canonical_origin(2, 5), Some((2, 5)));
+    }
+
+    #[test]
+    fn test_origin_no_sim_neighbours() {
+        // All neighbours are real cells (indices < n_obs)
+        let neighbours = vec![0, 1, 2, 3];
+        let distances = vec![0.1, 0.2, 0.3, 0.4];
+        let parent_clusters: Vec<(usize, usize)> = vec![];
+        let n_obs = 10;
+        assert_eq!(
+            cell_most_likely_origin(&neighbours, &distances, n_obs, &parent_clusters),
+            None
+        );
+    }
+
+    #[test]
+    fn test_origin_unique_majority() {
+        // n_obs = 5, neighbours 5,6,7 are sim doublets with clusters
+        // (0,1), (0,1), (1,2)
+        let neighbours = vec![5, 6, 7, 0];
+        let distances = vec![0.1, 0.2, 0.3, 0.4];
+        let parent_clusters = vec![(0, 1), (0, 1), (1, 2)];
+        let n_obs = 5;
+        assert_eq!(
+            cell_most_likely_origin(&neighbours, &distances, n_obs, &parent_clusters),
+            Some((0, 1))
+        );
+    }
+
+    #[test]
+    fn test_origin_tiebreak_by_min_distance() {
+        // Two origins tied 2:2, (0,1) has closer min distance
+        let neighbours = vec![5, 6, 7, 8];
+        let distances = vec![0.05, 0.50, 0.10, 0.60]; // (0,1) at 0.05, (1,2) at 0.10
+        let parent_clusters = vec![(0, 1), (1, 2), (0, 1), (1, 2)];
+        let n_obs = 5;
+        assert_eq!(
+            cell_most_likely_origin(&neighbours, &distances, n_obs, &parent_clusters),
+            Some((0, 1))
+        );
+    }
+
+    #[test]
+    fn test_origin_skips_homotypic_neighbours() {
+        // Neighbour 5 has homotypic origin (should be ignored)
+        let neighbours = vec![5, 6];
+        let distances = vec![0.1, 0.9];
+        let parent_clusters = vec![(2, 2), (0, 1)];
+        let n_obs = 5;
+        assert_eq!(
+            cell_most_likely_origin(&neighbours, &distances, n_obs, &parent_clusters),
+            Some((0, 1))
+        );
+    }
+
+    #[test]
+    fn test_dist_to_real_finds_first_real() {
+        let neighbours = vec![10, 11, 2, 3]; // 2 is first real (n_obs=5)
+        let distances = vec![0.1, 0.2, 0.3, 0.4];
+        assert_eq!(
+            cell_distance_to_nearest_real(&neighbours, &distances, 5, 1.0),
+            0.3
+        );
+    }
+
+    #[test]
+    fn test_dist_to_real_fallback() {
+        // All neighbours are simulated
+        let neighbours = vec![10, 11, 12];
+        let distances = vec![0.1, 0.2, 0.3];
+        assert_eq!(
+            cell_distance_to_nearest_real(&neighbours, &distances, 5, 0.75),
+            1.5 // 2 * 0.75
+        );
+    }
+
+    #[test]
+    fn test_aggregate_origin_counts() {
+        let origins = vec![Some((0, 1)), Some((0, 1)), None, Some((1, 2)), Some((0, 1))];
+        let counts = aggregate_origin_counts(&origins);
+        assert_eq!(counts[&(0, 1)], 3);
+        assert_eq!(counts[&(1, 2)], 1);
+        assert_eq!(counts.len(), 2);
+    }
+
+    #[test]
+    fn test_aggregate_class_weighted_uses_sim_only() {
+        // n_obs = 2, so indices 0,1 are real (should NOT contribute)
+        // indices 2,3,4 are sim (should contribute)
+        let origins = vec![
+            Some((0, 1)), // real -- excluded
+            Some((0, 1)), // real -- excluded
+            Some((0, 1)), // sim
+            Some((0, 1)), // sim
+            Some((1, 2)), // sim
+        ];
+        let weighted = vec![0.9, 0.9, 0.3, 0.5, 0.7];
+        let result = aggregate_class_weighted(&origins, &weighted, 2);
+
+        // (0,1): mean of [0.3, 0.5] = 0.4
+        // (1,2): mean of [0.7] = 0.7
+        assert!((result[&(0, 1)] - 0.4).abs() < 1e-6);
+        assert!((result[&(1, 2)] - 0.7).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_aggregate_class_weighted_no_sim() {
+        // No simulated cells at all
+        let origins = vec![Some((0, 1)), Some((0, 1))];
+        let weighted = vec![0.5, 0.6];
+        let result = aggregate_class_weighted(&origins, &weighted, 2);
+        assert!(result.is_empty());
     }
 }

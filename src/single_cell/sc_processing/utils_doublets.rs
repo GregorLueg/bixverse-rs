@@ -1,7 +1,9 @@
 //! Shared infrastructure for doublet detection methods.
 
 use faer::{Mat, MatRef, concat};
+use half::f16;
 use indexmap::IndexSet;
+use rand::{Rng, RngCore, SeedableRng, rngs::StdRng};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::time::Instant;
@@ -719,4 +721,1236 @@ pub fn find_threshold_otsu(scores_obs: &[f32], n_bins: usize) -> f32 {
     }
 
     min_score + (best_bin as f32 + 0.5) * bin_width
+}
+
+/////////////////
+// scDblFinder //
+/////////////////
+
+////////////////////
+// Gene selection //
+////////////////////
+
+/// Simple overall-mean ranking path.
+///
+/// ### Params
+///
+/// * `gene_chunks` - Slice of the gene chunks for which to get the top N
+///   expressed genes.
+/// * `n_cells` - Number of total cells
+/// * `n_top` - Total number of top genes to return
+///
+/// ### Returns
+///
+/// The indices of the genes to take forward
+fn select_by_overall_mean(
+    gene_chunks: &[CscGeneChunk],
+    n_cells: usize,
+    n_top: usize,
+) -> Vec<usize> {
+    let nf = n_cells as f64;
+    let means: Vec<f64> = gene_chunks
+        .par_iter()
+        .map(|chunk| {
+            let sum: f64 = (0..chunk.indices.len())
+                .map(|i| chunk.data_raw.get(i) as f64)
+                .sum();
+            sum / nf
+        })
+        .collect();
+    top_n_indices(&means, n_top)
+}
+
+/// Per-cluster round-robin selection matching R's selFeatures.
+///
+/// ### Params
+///
+/// * `gene_chunks` - Slice of the gene chunks for which to get the top N
+///   expressed genes.
+/// * `cluster_labels` - Cluster lables <- this will be used to identify the
+///   top highly expressed genes across the clusters.
+/// * `n_top` - Total number of top genes to return
+///
+/// ### Returns
+///
+/// The indices of the genes to take forward
+fn select_by_cluster_roundrobin(
+    gene_chunks: &[CscGeneChunk],
+    cluster_labels: &[usize],
+    n_top: usize,
+) -> Vec<usize> {
+    // build a dense cluster id mapping (original label -> 0..K index)
+    let unique_clusters: Vec<usize> = {
+        let mut s: FxHashSet<usize> = FxHashSet::default();
+        for &c in cluster_labels {
+            s.insert(c);
+        }
+        let mut v: Vec<usize> = s.into_iter().collect();
+        v.sort_unstable();
+        v
+    };
+    let n_clusters = unique_clusters.len();
+
+    // degenerate case: one cluster is equivalent to no clusters
+    if n_clusters <= 1 {
+        return select_by_overall_mean(gene_chunks, cluster_labels.len(), n_top);
+    }
+
+    let cluster_idx: FxHashMap<usize, usize> = unique_clusters
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| (c, i))
+        .collect();
+
+    // compute per-gene per-cluster sums of raw counts. after
+    // filter_selected_cells, chunk.indices[i] is a position
+    // into cells_to_keep (== cluster_labels).
+    let cluster_sums: Vec<Vec<f64>> = gene_chunks
+        .par_iter()
+        .map(|chunk| {
+            let mut sums = vec![0.0f64; n_clusters];
+            for i in 0..chunk.indices.len() {
+                let pos = chunk.indices[i] as usize;
+                let c_idx = cluster_idx[&cluster_labels[pos]];
+                sums[c_idx] += chunk.data_raw.get(i) as f64;
+            }
+            sums
+        })
+        .collect();
+
+    let n_genes = gene_chunks.len();
+
+    // for each cluster, rank genes by that cluster's sum descending,
+    // take the top n_top indices. This gives us n_clusters lists.
+    let per_cluster_rankings: Vec<Vec<usize>> = (0..n_clusters)
+        .into_par_iter()
+        .map(|c_idx| {
+            let col: Vec<f64> = (0..n_genes).map(|g| cluster_sums[g][c_idx]).collect();
+            top_n_indices_ordered(&col, n_top)
+        })
+        .collect();
+
+    // round-robin flatten + dedupe + truncate to n_top
+    let mut result = roundrobin_select(&per_cluster_rankings, n_top);
+
+    // Fallback: if clusters have heavy rank overlap and we run out of
+    // unique candidates, fill from overall sum ranking. R would return
+    // NAs here; this is more robust.
+    if result.len() < n_top {
+        let totals: Vec<f64> = cluster_sums.iter().map(|sums| sums.iter().sum()).collect();
+        let fallback = top_n_indices_ordered(&totals, gene_chunks.len());
+        let mut seen: FxHashSet<usize> = result.iter().copied().collect();
+        for g in fallback {
+            if seen.insert(g) {
+                result.push(g);
+                if result.len() >= n_top {
+                    break;
+                }
+            }
+        }
+    }
+
+    result.sort_unstable();
+    result
+}
+
+/// Round-robin across per-cluster rankings, collecting unique gene indices
+/// until `n_top` are found.
+///
+/// Iterates rank 0 across all clusters, then rank 1, etc., matching R's
+/// `as.numeric(t(apply(..., 2, ...)))` column-major flattening after transpose.
+///
+/// ### Params
+///
+/// * `per_cluster_rankings` - Rank on a per cluster basis
+/// * `n_top` - Number of genes to return
+///
+/// ### Returns
+///
+fn roundrobin_select(per_cluster_rankings: &[Vec<usize>], n_top: usize) -> Vec<usize> {
+    let n_clusters = per_cluster_rankings.len();
+    let max_rank = per_cluster_rankings
+        .iter()
+        .map(|v| v.len())
+        .max()
+        .unwrap_or(0);
+
+    let mut seen: FxHashSet<usize> = FxHashSet::default();
+    let mut result: Vec<usize> = Vec::with_capacity(n_top);
+
+    for rank in 0..max_rank {
+        for c_idx in 0..n_clusters {
+            if rank < per_cluster_rankings[c_idx].len() {
+                let g = per_cluster_rankings[c_idx][rank];
+                if seen.insert(g) {
+                    result.push(g);
+                    if result.len() >= n_top {
+                        return result;
+                    }
+                }
+            }
+        }
+    }
+    result
+}
+
+/// Return the `n_top` indices of the largest values, sorted ascending by index.
+///
+/// ### Params
+///
+/// * `values` - The values for which to return the top N indices
+/// * `n_top` - Number of top genes to return
+///
+/// ### Returns
+///
+/// The indices of the selected genes.
+fn top_n_indices(values: &[f64], n_top: usize) -> Vec<usize> {
+    let mut result = top_n_indices_ordered(values, n_top);
+    result.sort_unstable();
+    result
+}
+
+/// Like `top_n_indices` but returns them in ranking order
+///
+/// Ranked descending by value, not sorted by index. Needed for the round-robin
+/// step since rank position matters.
+///
+/// ### Params
+///
+/// * `values` - The values for which to return the top N indices
+/// * `n_top` - Number of top genes to return
+///
+/// ### Returns
+///
+/// The indices of the selected genes.
+fn top_n_indices_ordered(values: &[f64], n_top: usize) -> Vec<usize> {
+    let n = values.len();
+    let k = n_top.min(n);
+    let mut indexed: Vec<(usize, f64)> = values.iter().copied().enumerate().collect();
+    indexed.sort_unstable_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    indexed.into_iter().take(k).map(|(i, _)| i).collect()
+}
+
+/////////////////////////////
+// Main selection function //
+/////////////////////////////
+
+/// Select the top `n_top` genes by mean raw expression, optionally
+/// with per-cluster round-robin selection.
+///
+/// Matches R scDblFinder's `selFeatures()` with `propMarkers=0`. Operates on
+/// RAW(!) counts -> library size implicitly drives selection, which is
+/// intentional for doublet detection.
+///
+/// ### Details
+///
+/// #### With clusters
+///
+/// For each cluster, ranks genes by that cluster's summed raw counts
+/// (descending) and takes the top `n_top`. Then round-robin through ranks,
+/// gene at rank 1 from each cluster, then rank 2, etc., deduplicating and
+/// stopping at `n_top` unique genes. This ensures each cluster contributes
+/// representative features even if its cell count is small.
+///
+/// #### Without clusters
+///
+/// Simple top-N by overall mean raw expression.
+///
+/// ### Params
+///
+/// * `f_path_gene` - Path to the gene-based binary file (CSC).
+/// * `cells_to_keep` - Cell indices to include.
+/// * `clusters` - Optional cluster labels, parallel to `cells_to_keep`. If
+///   `None`, falls back to overall mean ranking.
+/// * `n_top` - Number of genes to select.
+///
+/// ### Returns
+///
+/// Sorted ascending vector of gene indices.
+pub fn select_top_genes(
+    f_path_gene: &str,
+    cells_to_keep: &[usize],
+    clusters: Option<&[usize]>,
+    n_top: usize,
+) -> Vec<usize> {
+    let reader = ParallelSparseReader::new(f_path_gene).unwrap();
+    let n_total_genes = reader.get_header().total_genes;
+
+    if n_top >= n_total_genes {
+        return (0..n_total_genes).collect();
+    }
+    if cells_to_keep.is_empty() {
+        return (0..n_top).collect();
+    }
+
+    let cell_set: IndexSet<u32> = cells_to_keep.iter().map(|&x| x as u32).collect();
+    let all_indices: Vec<usize> = (0..n_total_genes).collect();
+    let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(&all_indices);
+
+    gene_chunks.par_iter_mut().for_each(|chunk| {
+        chunk.filter_selected_cells(&cell_set);
+    });
+
+    match clusters {
+        None => select_by_overall_mean(&gene_chunks, cells_to_keep.len(), n_top),
+        Some(labels) => {
+            assert_eq!(
+                labels.len(),
+                cells_to_keep.len(),
+                "cluster labels must be parallel to cells_to_keep",
+            );
+            select_by_cluster_roundrobin(&gene_chunks, labels, n_top)
+        }
+    }
+}
+
+////////////////////////
+// Doublet generation //
+////////////////////////
+
+/// Parameters controlling scDblFinder-style doublet simulation noise.
+#[derive(Clone, Debug)]
+pub struct ScDblSimParams {
+    /// Fraction of doublets whose counts are Poisson-resampled.
+    ///
+    /// Each non-zero count `c` is replaced by `Poisson(c)`. This adds
+    /// realistic sampling noise matching the stochastic capture process
+    /// in droplet-based scRNA-seq. Default: 0.25.
+    pub resamp_frac: f32,
+
+    /// Fraction of doublets whose total counts are halved before any
+    /// resampling.
+    ///
+    /// Real doublets share the reagent budget within a single droplet,
+    /// so their effective library size is typically less than the sum
+    /// of two singlets. Default: 0.25.
+    pub half_size_frac: f32,
+
+    /// Fraction of doublets with cluster-based size adjustment.
+    ///
+    /// The contribution of each parent cell is weighted by the average
+    /// of (a) the actual library size ratio and (b) the ratio of
+    /// cluster median library sizes. This prevents systematic bias
+    /// when combining cells from clusters with very different depths.
+    /// The total library size is preserved after reweighting.
+    /// Default: 0.25.
+    pub adjust_size_frac: f32,
+}
+
+impl Default for ScDblSimParams {
+    fn default() -> Self {
+        Self {
+            resamp_frac: 0.25,
+            half_size_frac: 0.25,
+            adjust_size_frac: 0.25,
+        }
+    }
+}
+
+/// Pre-rolled per-doublet treatment flags.
+///
+/// Generated deterministically from the master seed before parallel
+/// execution, so results are reproducible regardless of thread
+/// scheduling.
+#[derive(Clone, Debug)]
+pub struct DoubletTreatment {
+    /// Shall the size be adjusted
+    adjust_size: bool,
+    /// Shall the size be halved
+    half_size: bool,
+    /// Shall the counts be resampled via Poisson sampling
+    resamp: bool,
+    /// Per-doublet seed for Poisson resampling (ensures reproducibility
+    /// under parallel execution).
+    rng_seed: u64,
+}
+
+/////////////
+// Helpers //
+/////////////
+
+/// Sample from Poisson(lambda) using the inverse transform method.
+///
+/// O(lambda) expected time. For lambda > 500, uses the normal
+/// approximation with continuity correction to avoid excessive
+/// iteration. Both regimes are adequate for scRNA-seq count data.
+///
+/// ### Params
+///
+/// * `rng` - Random number generator
+/// * `lambda` - Lambda value
+///
+/// ### Returns
+///
+/// The poisson value for that lambda
+fn poisson_sample(rng: &mut impl Rng, lambda: f64) -> u32 {
+    if lambda <= 0.0 {
+        return 0;
+    }
+    if lambda > 500.0 {
+        // Box-Muller for normal variate
+        let u1: f64 = rng.random::<f64>().max(1e-300);
+        let u2: f64 = rng.random::<f64>();
+        let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+        let val = lambda + lambda.sqrt() * z;
+        return val.round().max(0.0) as u32;
+    }
+    let l = (-lambda).exp();
+    let mut k = 0u32;
+    let mut p = 1.0f64;
+    loop {
+        p *= rng.random::<f64>();
+        if p < l {
+            return k;
+        }
+        k += 1;
+    }
+}
+
+/// Compute median library size per cluster.
+///
+/// Returns a map from cluster label to the median selected gene library size of
+/// cells in that cluster. Used for size-adjusted doublet generation.
+///
+/// ### Params
+///
+/// * `cluster_labels` - The labels for the clusters
+/// * `selected_gene_library_sizes` - Library sizes of the selected genes
+///
+/// ### Returns
+///
+/// HashMap with clusters and their median library sizes
+fn compute_cluster_median_lib_sizes(
+    cluster_labels: &[usize],
+    selected_genes_library_sizes: &[usize],
+) -> FxHashMap<usize, f64> {
+    let mut per_cluster: FxHashMap<usize, Vec<f64>> = FxHashMap::default();
+    for (i, &cl) in cluster_labels.iter().enumerate() {
+        per_cluster
+            .entry(cl)
+            .or_default()
+            .push(selected_genes_library_sizes[i] as f64);
+    }
+    per_cluster
+        .into_iter()
+        .map(|(cl, mut sizes)| {
+            sizes.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+            let med = if sizes.len() % 2 == 0 {
+                (sizes[sizes.len() / 2 - 1] + sizes[sizes.len() / 2]) / 2.0
+            } else {
+                sizes[sizes.len() / 2]
+            };
+            (cl, med.max(1.0))
+        })
+        .collect()
+}
+
+////////////////
+// Core logic //
+////////////////
+
+/// Generate a single doublet's raw counts from two dense parent count vectors.
+///
+/// This is the testable core of the simulation pipeline. It operates on dense
+/// gene-count vectors (length = number of selected genes) and applies the full
+/// R-matching noise model from scDblFinder.
+///
+/// ### Params
+///
+/// * `parent_a` - Dense selected genes count vector for parent cell A.
+/// * `parent_b` - Dense selected genes count vector for parent cell B.
+/// * `lib_a` - Selected genes library size of parent A.
+/// * `lib_b` - Selected genes library size of parent B.
+/// * `cluster_a` - Cluster label of parent A.
+/// * `cluster_b` - Cluster label of parent B.
+/// * `cluster_medians` - Median selected gene library size per cluster.
+/// * `treatment` - Which noise treatments to apply.
+///
+/// ### Returns
+///
+/// `(counts, effective_library_size)` where `counts` is a dense
+/// vector of noise-injected raw counts.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_single_doublet(
+    parent_a: &[u32],
+    parent_b: &[u32],
+    lib_a: usize,
+    lib_b: usize,
+    cluster_a: usize,
+    cluster_b: usize,
+    cluster_medians: &FxHashMap<usize, f64>,
+    treatment: &DoubletTreatment,
+) -> (Vec<u32>, usize) {
+    let n_genes = parent_a.len();
+    debug_assert_eq!(parent_b.len(), n_genes);
+
+    let combined_lib = (lib_a + lib_b) as f64;
+    let mut counts_f64 = vec![0.0f64; n_genes];
+
+    if treatment.adjust_size {
+        // Cluster-based size adjustment (R's adjustSize logic)
+        //
+        // factor = average of:
+        //   (1) actual library size ratio: lib_a / (lib_a + lib_b)
+        //   (2) cluster median ratio: med_a / (med_a + med_b)
+        // Clamped to [0.2, 0.8].
+        //
+        // doublet = parent_a * factor + parent_b * (1 - factor)
+        // Then rescaled so total counts = lib_a + lib_b.
+        let actual_ratio = lib_a as f64 / combined_lib;
+        let med_a = cluster_medians.get(&cluster_a).copied().unwrap_or(1.0);
+        let med_b = cluster_medians.get(&cluster_b).copied().unwrap_or(1.0);
+        let cluster_ratio = med_a / (med_a + med_b);
+        let factor = ((actual_ratio + cluster_ratio) / 2.0).clamp(0.2, 0.8);
+
+        for g in 0..n_genes {
+            counts_f64[g] = parent_a[g] as f64 * factor + parent_b[g] as f64 * (1.0 - factor);
+        }
+
+        // Rescale to preserve combined library size
+        let raw_sum: f64 = counts_f64.iter().sum();
+        if raw_sum > 0.0 {
+            let scale = combined_lib / raw_sum;
+            for v in counts_f64.iter_mut() {
+                *v *= scale;
+            }
+        }
+    } else {
+        // Simple sum (no adjustment)
+        for g in 0..n_genes {
+            counts_f64[g] = parent_a[g] as f64 + parent_b[g] as f64;
+        }
+    }
+
+    // Library size halving
+    if treatment.half_size {
+        for v in counts_f64.iter_mut() {
+            *v *= 0.5;
+        }
+    }
+
+    // Poisson resampling or rounding
+    let mut rng = StdRng::seed_from_u64(treatment.rng_seed);
+    let counts: Vec<u32> = if treatment.resamp {
+        counts_f64
+            .iter()
+            .map(|&v| poisson_sample(&mut rng, v))
+            .collect()
+    } else {
+        counts_f64
+            .iter()
+            .map(|&v| v.round().max(0.0) as u32)
+            .collect()
+    };
+
+    let effective_lib: usize = counts.iter().map(|&c| c as usize).sum();
+    (counts, effective_lib)
+}
+
+impl CsrCellChunk {
+    /// Construct a chunk from pre-computed doublet simulation data.
+    ///
+    /// Unlike `from_data`, this does not recompute normalisation! The caller
+    /// has already applied the correct normalisation (with noise-injected raw
+    /// counts and the effective library size).
+    ///
+    /// ### Params
+    ///
+    /// * `indices` - Selected genes-remapped gene positions (sparse, sorted).
+    /// * `raw_counts` - Raw counts at each position (post-noise).
+    /// * `norm_values` - Pre-computed normalised values (same length
+    ///   as `indices`).
+    /// * `effective_lib_size` - Sum of raw counts after all noise
+    ///   treatments.
+    /// * `doublet_index` - Index of this doublet in the simulation batch (used
+    ///   as `original_index`).
+    ///
+    /// ### Returns
+    ///
+    /// A `CsrCellChunk` ready for downstream PCA and feature
+    /// engineering.
+    pub fn from_doublet_simulation(
+        indices: Vec<u32>,
+        raw_counts: Vec<u32>,
+        norm_values: Vec<f32>,
+        effective_lib_size: usize,
+        doublet_index: usize,
+    ) -> Self {
+        debug_assert_eq!(indices.len(), raw_counts.len());
+        debug_assert_eq!(indices.len(), norm_values.len());
+
+        let data_raw = RawCounts::from_u32_auto(&raw_counts);
+        let data_norm: Vec<F16> = norm_values
+            .iter()
+            .map(|&v| F16::from(f16::from_f32(v)))
+            .collect();
+
+        Self {
+            data_raw,
+            data_norm,
+            library_size: effective_lib_size,
+            indices,
+            original_index: doublet_index,
+            to_keep: true,
+        }
+    }
+}
+
+/// Simulate doublets with scDblFinder-style noise injection.
+///
+/// Replaces `simulate_from_pairs` in the scDblFinder pipeline. Each
+/// pair of observed cells is read from disk, their HVG counts are
+/// combined (with optional cluster-based size adjustment), then
+/// optionally halved and/or Poisson-resampled. The result is stored
+/// as sparse chunks with both raw and normalised values, ready for
+/// consumption by `pca_combined` and `build_feature_matrix`.
+///
+/// ### Params
+///
+/// * `pairs` - `(pos_a, pos_b)` tuples indexing into `cells_to_keep`.
+/// * `cells_to_keep` - Original cell indices for disk retrieval.
+/// * `hvg_library_sizes` - Per-cell HVG library sizes, parallel to
+///   `cells_to_keep`.
+/// * `cluster_labels` - Per-cell cluster labels, parallel to
+///   `cells_to_keep`.
+/// * `hvg_genes` - Sorted gene indices of selected HVGs.
+/// * `f_path_cell` - Path to the cell-based binary file (CSR).
+/// * `target_size` - Normalisation target library size.
+/// * `log_transform` - Whether to apply `ln(1 + x)` after
+///   normalisation.
+/// * `params` - Noise injection parameters.
+/// * `seed` - Master seed for reproducibility.
+///
+/// ### Returns
+///
+/// `(chunks, library_sizes)` where `chunks` contains sparse
+/// representations with noise-injected raw counts and normalised
+/// values, and `library_sizes` holds the post-noise effective HVG
+/// library size for each doublet.
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_doublets_scdbl(
+    pairs: &[(usize, usize)],
+    cells_to_keep: &[usize],
+    selected_genes_library_sizes: &[usize],
+    cluster_labels: &[usize],
+    selected_genes: &[usize],
+    f_path_cell: &str,
+    target_size: f32,
+    log_transform: bool,
+    params: &ScDblSimParams,
+    seed: usize,
+) -> (Vec<CsrCellChunk>, Vec<usize>) {
+    let n_sim = pairs.len();
+    let n_hvg = selected_genes.len();
+    let gene_to_hvg_idx: FxHashMap<usize, usize> = selected_genes
+        .iter()
+        .enumerate()
+        .map(|(pos, &orig)| (orig, pos))
+        .collect();
+
+    let cluster_medians =
+        compute_cluster_median_lib_sizes(cluster_labels, selected_genes_library_sizes);
+
+    // Pre-roll treatments deterministically
+    let mut master_rng = StdRng::seed_from_u64(seed as u64 + 0xDEAD);
+    let treatments: Vec<DoubletTreatment> = (0..n_sim)
+        .map(|_| DoubletTreatment {
+            adjust_size: master_rng.random::<f32>() < params.adjust_size_frac,
+            half_size: master_rng.random::<f32>() < params.half_size_frac,
+            resamp: master_rng.random::<f32>() < params.resamp_frac,
+            rng_seed: master_rng.next_u64(),
+        })
+        .collect();
+
+    let reader = ParallelSparseReader::new(f_path_cell).unwrap();
+
+    let results: Vec<(CsrCellChunk, usize)> = (0..n_sim)
+        .into_par_iter()
+        .map(|di| {
+            let (pos_a, pos_b) = pairs[di];
+            let cell_a = reader.read_cell(cells_to_keep[pos_a]);
+            let cell_b = reader.read_cell(cells_to_keep[pos_b]);
+
+            // Extract dense HVG count vectors
+            let mut dense_a = vec![0u32; n_hvg];
+            let mut dense_b = vec![0u32; n_hvg];
+
+            for (i, &gene_idx) in cell_a.indices.iter().enumerate() {
+                let gi = gene_idx as usize;
+                if let Some(&hvg_pos) = gene_to_hvg_idx.get(&gi) {
+                    dense_a[hvg_pos] = cell_a.data_raw.get(i);
+                }
+            }
+            for (i, &gene_idx) in cell_b.indices.iter().enumerate() {
+                let gi = gene_idx as usize;
+                if let Some(&hvg_pos) = gene_to_hvg_idx.get(&gi) {
+                    dense_b[hvg_pos] = cell_b.data_raw.get(i);
+                }
+            }
+
+            let (counts, effective_lib) = generate_single_doublet(
+                &dense_a,
+                &dense_b,
+                selected_genes_library_sizes[pos_a],
+                selected_genes_library_sizes[pos_b],
+                cluster_labels[pos_a],
+                cluster_labels[pos_b],
+                &cluster_medians,
+                &treatments[di],
+            );
+
+            // Pack sparse: collect non-zero entries
+            let lib_f32 = (effective_lib as f32).max(1.0);
+            let mut sp_indices: Vec<u32> = Vec::new();
+            let mut sp_raw: Vec<u32> = Vec::new();
+            let mut sp_norm: Vec<f32> = Vec::new();
+
+            for (g, &c) in counts.iter().enumerate() {
+                if c > 0 {
+                    sp_indices.push(g as u32);
+                    sp_raw.push(c);
+                    let normed = if log_transform {
+                        ((c as f32 / lib_f32) * target_size).ln_1p()
+                    } else {
+                        (c as f32 / lib_f32) * target_size
+                    };
+                    sp_norm.push(normed);
+                }
+            }
+
+            let chunk = CsrCellChunk::from_doublet_simulation(
+                sp_indices,
+                sp_raw,
+                sp_norm,
+                effective_lib,
+                di,
+            );
+
+            (chunk, effective_lib)
+        })
+        .collect();
+
+    let mut chunks = Vec::with_capacity(n_sim);
+    let mut lib_sizes = Vec::with_capacity(n_sim);
+    for (chunk, lib) in results {
+        chunks.push(chunk);
+        lib_sizes.push(lib);
+    }
+
+    (chunks, lib_sizes)
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    ////////////////////
+    // Feat selection //
+    ////////////////////
+
+    #[test]
+    fn test_top_n_ordered_preserves_rank_order() {
+        let values = vec![1.0, 5.0, 3.0, 2.0, 4.0];
+        // Top 3 in rank order: 5.0 (idx 1), 4.0 (idx 4), 3.0 (idx 2)
+        assert_eq!(top_n_indices_ordered(&values, 3), vec![1, 4, 2]);
+    }
+
+    #[test]
+    fn test_top_n_indices_sorts_by_index() {
+        let values = vec![1.0, 5.0, 3.0, 2.0, 4.0];
+        assert_eq!(top_n_indices(&values, 3), vec![1, 2, 4]);
+    }
+
+    #[test]
+    fn test_top_n_ordered_ties_prefer_lower_index() {
+        let values = vec![5.0, 5.0, 5.0, 1.0];
+        assert_eq!(top_n_indices_ordered(&values, 2), vec![0, 1]);
+    }
+
+    #[test]
+    fn test_roundrobin_basic() {
+        // 3 clusters, distinct top picks
+        let rankings = vec![vec![10, 20, 30], vec![11, 21, 31], vec![12, 22, 32]];
+        // Rank 0 round: 10, 11, 12
+        // Rank 1 round: 20, 21, 22
+        // Rank 2 round: 30, 31, 32
+        let result = roundrobin_select(&rankings, 5);
+        assert_eq!(result, vec![10, 11, 12, 20, 21]);
+    }
+
+    #[test]
+    fn test_roundrobin_dedupe() {
+        // Overlapping rankings
+        let rankings = vec![
+            vec![1, 2, 3, 4],
+            vec![1, 3, 5, 7], // 1 and 3 duplicate
+            vec![2, 5, 8, 9], // 2 and 5 duplicate
+        ];
+        // Rank 0: 1 (new), 1 (dup), 2 (new)
+        // Rank 1: 2 (dup), 3 (new), 5 (new)
+        // Rank 2: 3 (dup), 5 (dup), 8 (new)
+        let result = roundrobin_select(&rankings, 5);
+        assert_eq!(result, vec![1, 2, 3, 5, 8]);
+    }
+
+    #[test]
+    fn test_roundrobin_stops_at_n_top() {
+        let rankings = vec![vec![1, 2, 3], vec![4, 5, 6]];
+        let result = roundrobin_select(&rankings, 3);
+        assert_eq!(result, vec![1, 4, 2]);
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn test_roundrobin_small_per_cluster_lists() {
+        // Some clusters have fewer ranks than others
+        let rankings = vec![vec![1, 2], vec![3], vec![4, 5, 6]];
+        // Rank 0: 1, 3, 4
+        // Rank 1: 2, (skip), 5
+        // Rank 2: (skip), (skip), 6
+        let result = roundrobin_select(&rankings, 10);
+        assert_eq!(result, vec![1, 3, 4, 2, 5, 6]);
+    }
+
+    #[test]
+    fn test_roundrobin_insufficient_unique() {
+        // All clusters have the same top picks; result is smaller than n_top
+        let rankings = vec![vec![1, 2, 3], vec![1, 2, 3], vec![1, 2, 3]];
+        let result = roundrobin_select(&rankings, 10);
+        assert_eq!(result, vec![1, 2, 3]); // only 3 unique available
+    }
+
+    #[test]
+    fn test_roundrobin_empty() {
+        let rankings: Vec<Vec<usize>> = vec![];
+        let result = roundrobin_select(&rankings, 5);
+        assert_eq!(result, Vec::<usize>::new());
+    }
+
+    /////////////////
+    // Doublet gen //
+    /////////////////
+
+    /// Verify Poisson sampler produces correct mean and variance
+    /// for a range of lambda values.
+    #[test]
+    fn test_poisson_sampler_statistics() {
+        let mut rng = StdRng::seed_from_u64(42);
+        for &lambda in &[0.5, 2.0, 10.0, 50.0, 200.0, 1000.0] {
+            let n = 50_000;
+            let samples: Vec<u32> = (0..n).map(|_| poisson_sample(&mut rng, lambda)).collect();
+            let mean = samples.iter().map(|&s| s as f64).sum::<f64>() / n as f64;
+            let var = samples
+                .iter()
+                .map(|&s| {
+                    let d = s as f64 - mean;
+                    d * d
+                })
+                .sum::<f64>()
+                / n as f64;
+
+            // Poisson: E[X] = Var[X] = lambda
+            let tol = 3.0 * (lambda / n as f64).sqrt(); // ~3 SE
+            assert!(
+                (mean - lambda).abs() < lambda * 0.05 + tol,
+                "lambda={}: mean={:.2}, expected={:.2}",
+                lambda,
+                mean,
+                lambda
+            );
+            assert!(
+                (var - lambda).abs() < lambda * 0.1 + tol * lambda,
+                "lambda={}: var={:.2}, expected={:.2}",
+                lambda,
+                var,
+                lambda
+            );
+        }
+    }
+
+    #[test]
+    fn test_poisson_sampler_zero() {
+        let mut rng = StdRng::seed_from_u64(99);
+        for _ in 0..100 {
+            assert_eq!(poisson_sample(&mut rng, 0.0), 0);
+            assert_eq!(poisson_sample(&mut rng, -1.0), 0);
+        }
+    }
+
+    #[test]
+    fn test_cluster_median_lib_sizes() {
+        let clusters = vec![0, 0, 0, 1, 1, 2];
+        let lib_sizes = vec![100, 200, 300, 50, 150, 500];
+        let medians = compute_cluster_median_lib_sizes(&clusters, &lib_sizes);
+
+        assert!((medians[&0] - 200.0).abs() < 1e-6); // median of [100, 200, 300]
+        assert!((medians[&1] - 100.0).abs() < 1e-6); // median of [50, 150]
+        assert!((medians[&2] - 500.0).abs() < 1e-6); // single value
+    }
+
+    /// With all treatments disabled, output should be the exact sum
+    /// of parent counts.
+    #[test]
+    fn test_no_treatment_is_simple_sum() {
+        let parent_a = vec![0, 5, 10, 0, 3];
+        let parent_b = vec![2, 0, 7, 1, 0];
+        let cluster_medians = FxHashMap::default();
+        let treatment = DoubletTreatment {
+            adjust_size: false,
+            half_size: false,
+            resamp: false,
+            rng_seed: 0,
+        };
+
+        let (counts, lib) = generate_single_doublet(
+            &parent_a,
+            &parent_b,
+            18,
+            10,
+            0,
+            1,
+            &cluster_medians,
+            &treatment,
+        );
+
+        assert_eq!(counts, vec![2, 5, 17, 1, 3]);
+        assert_eq!(lib, 28);
+    }
+
+    /// Library size halving should produce ~0.5x the sum.
+    #[test]
+    fn test_half_size_halves_library() {
+        let parent_a = vec![10, 20, 30, 40];
+        let parent_b = vec![10, 20, 30, 40];
+        let cluster_medians = FxHashMap::default();
+
+        // Without halving
+        let no_half = DoubletTreatment {
+            adjust_size: false,
+            half_size: false,
+            resamp: false,
+            rng_seed: 0,
+        };
+        let (_, lib_full) = generate_single_doublet(
+            &parent_a,
+            &parent_b,
+            100,
+            100,
+            0,
+            0,
+            &cluster_medians,
+            &no_half,
+        );
+
+        // With halving
+        let with_half = DoubletTreatment {
+            adjust_size: false,
+            half_size: true,
+            resamp: false,
+            rng_seed: 0,
+        };
+        let (_, lib_half) = generate_single_doublet(
+            &parent_a,
+            &parent_b,
+            100,
+            100,
+            0,
+            0,
+            &cluster_medians,
+            &with_half,
+        );
+
+        assert_eq!(lib_full, 200);
+        assert_eq!(lib_half, 100); // 200 / 2 = 100
+    }
+
+    /// Poisson resampling should add noise: repeated doublets from
+    /// the same parents should NOT be identical.
+    #[test]
+    fn test_resamp_adds_noise() {
+        let parent_a = vec![10, 20, 30, 40, 50];
+        let parent_b = vec![5, 15, 25, 35, 45];
+        let cluster_medians = FxHashMap::default();
+
+        let mut all_equal = true;
+        let mut first: Option<Vec<u32>> = None;
+
+        for seed in 0..20u64 {
+            let treatment = DoubletTreatment {
+                adjust_size: false,
+                half_size: false,
+                resamp: true,
+                rng_seed: seed * 7919 + 42,
+            };
+            let (counts, _) = generate_single_doublet(
+                &parent_a,
+                &parent_b,
+                135,
+                125,
+                0,
+                0,
+                &cluster_medians,
+                &treatment,
+            );
+            if let Some(ref f) = first {
+                if &counts != f {
+                    all_equal = false;
+                    break;
+                }
+            } else {
+                first = Some(counts);
+            }
+        }
+
+        assert!(
+            !all_equal,
+            "Poisson resampling should produce different counts across seeds"
+        );
+    }
+
+    /// Poisson resampling should preserve mean counts (law of large
+    /// numbers).
+    #[test]
+    fn test_resamp_preserves_mean() {
+        let parent_a = vec![0, 10, 50, 100];
+        let parent_b = vec![5, 10, 50, 100];
+        let expected_sum = [5, 20, 100, 200];
+        let cluster_medians = FxHashMap::default();
+        let n_reps = 5000;
+
+        let mut accum = [0.0f64; 4];
+        for rep in 0..n_reps {
+            let treatment = DoubletTreatment {
+                adjust_size: false,
+                half_size: false,
+                resamp: true,
+                rng_seed: rep as u64 * 31 + 7,
+            };
+            let (counts, _) = generate_single_doublet(
+                &parent_a,
+                &parent_b,
+                160,
+                165,
+                0,
+                0,
+                &cluster_medians,
+                &treatment,
+            );
+            for (i, &c) in counts.iter().enumerate() {
+                accum[i] += c as f64;
+            }
+        }
+
+        for i in 0..4 {
+            let mean = accum[i] / n_reps as f64;
+            let expected = expected_sum[i] as f64;
+            let tol = 3.0 * (expected / n_reps as f64).sqrt().max(0.5);
+            assert!(
+                (mean - expected).abs() < expected * 0.05 + tol,
+                "gene {}: mean={:.2}, expected={:.2}",
+                i,
+                mean,
+                expected
+            );
+        }
+    }
+
+    /// Size adjustment should preserve total library size while
+    /// changing per-gene contributions.
+    #[test]
+    fn test_adjust_size_preserves_total_library() {
+        let parent_a = vec![10, 20, 30, 40];
+        let parent_b = vec![40, 30, 20, 10];
+        let lib_a = 100;
+        let lib_b = 100;
+
+        let mut cluster_medians = FxHashMap::default();
+        // Cluster 0 has 2x the median lib size of cluster 1
+        cluster_medians.insert(0, 200.0);
+        cluster_medians.insert(1, 100.0);
+
+        let treatment = DoubletTreatment {
+            adjust_size: true,
+            half_size: false,
+            resamp: false,
+            rng_seed: 0,
+        };
+
+        let (counts, lib) = generate_single_doublet(
+            &parent_a,
+            &parent_b,
+            lib_a,
+            lib_b,
+            0,
+            1,
+            &cluster_medians,
+            &treatment,
+        );
+
+        // Total should be preserved (lib_a + lib_b = 200)
+        assert_eq!(lib, lib_a + lib_b);
+
+        // With asymmetric cluster medians, gene contributions should
+        // differ from the simple sum
+        let simple_sum: Vec<u32> = parent_a
+            .iter()
+            .zip(&parent_b)
+            .map(|(&a, &b)| a + b)
+            .collect();
+        assert_ne!(
+            counts, simple_sum,
+            "adjusted counts should differ from simple sum"
+        );
+    }
+
+    /// Size adjustment mixing factor should be clamped to [0.2, 0.8].
+    #[test]
+    fn test_adjust_size_clamping() {
+        // Extreme library size ratio, but enough counts in parent_a
+        // that clamping to 0.2 produces visible contribution.
+        let parent_a = vec![100, 0, 0, 0];
+        let parent_b = vec![0, 0, 0, 10000];
+        let mut cluster_medians = FxHashMap::default();
+        cluster_medians.insert(0, 1.0);
+        cluster_medians.insert(1, 10000.0);
+
+        let treatment = DoubletTreatment {
+            adjust_size: true,
+            half_size: false,
+            resamp: false,
+            rng_seed: 0,
+        };
+
+        let (counts, lib) = generate_single_doublet(
+            &parent_a,
+            &parent_b,
+            100,
+            10000,
+            0,
+            1,
+            &cluster_medians,
+            &treatment,
+        );
+
+        // Total library size preserved
+        assert_eq!(lib, 10100);
+
+        // Without clamping, factor ≈ 0.005 and gene 0 would get ~5 counts.
+        // With clamping to 0.2, gene 0 gets: 100 * 0.2 = 20, rescaled by
+        // 10100 / (20 + 8000) ≈ 1.26, so ~25 counts.
+        assert!(
+            counts[0] > 10,
+            "clamping should give parent_a at least 20% weight; gene 0 got {}",
+            counts[0]
+        );
+
+        // Gene 3 should get the bulk
+        assert!(
+            counts[3] > counts[0],
+            "gene 3 ({}) should still dominate gene 0 ({})",
+            counts[3],
+            counts[0]
+        );
+    }
+
+    /// Over many doublets with noise, library size distribution
+    /// should NOT be a single spike at exactly 2x median.
+    #[test]
+    fn test_library_size_distribution_has_variance() {
+        let parent = vec![10, 20, 30, 40, 50]; // lib = 150
+        let cluster_medians = FxHashMap::default();
+        let params = ScDblSimParams::default();
+        let n = 1000;
+
+        let mut master_rng = StdRng::seed_from_u64(123);
+        let treatments: Vec<DoubletTreatment> = (0..n)
+            .map(|_| DoubletTreatment {
+                adjust_size: master_rng.random::<f32>() < params.adjust_size_frac,
+                half_size: master_rng.random::<f32>() < params.half_size_frac,
+                resamp: master_rng.random::<f32>() < params.resamp_frac,
+                rng_seed: master_rng.next_u64(),
+            })
+            .collect();
+
+        let lib_sizes: Vec<usize> = treatments
+            .iter()
+            .map(|t| {
+                let (_, lib) =
+                    generate_single_doublet(&parent, &parent, 150, 150, 0, 0, &cluster_medians, t);
+                lib
+            })
+            .collect();
+
+        let mean = lib_sizes.iter().sum::<usize>() as f64 / n as f64;
+        let var = lib_sizes
+            .iter()
+            .map(|&l| {
+                let d = l as f64 - mean;
+                d * d
+            })
+            .sum::<f64>()
+            / n as f64;
+
+        // Without noise, all lib sizes would be exactly 300.
+        // With noise (halving + resampling), we expect substantial
+        // variance.
+        let n_at_300 = lib_sizes.iter().filter(|&&l| l == 300).count();
+        assert!(
+            n_at_300 < n * 9 / 10,
+            "expected fewer than 90% at exactly 2x; got {}/{} at 300",
+            n_at_300,
+            n
+        );
+        assert!(
+            var > 100.0,
+            "expected substantial variance in lib sizes; got var={:.1}",
+            var
+        );
+    }
+
+    #[test]
+    fn test_deterministic_with_same_seed() {
+        let parent_a = vec![5, 10, 15, 20];
+        let parent_b = vec![8, 12, 3, 25];
+        let cluster_medians = FxHashMap::default();
+
+        let treatment = DoubletTreatment {
+            adjust_size: false,
+            half_size: true,
+            resamp: true,
+            rng_seed: 42,
+        };
+
+        let (c1, l1) = generate_single_doublet(
+            &parent_a,
+            &parent_b,
+            50,
+            48,
+            0,
+            1,
+            &cluster_medians,
+            &treatment,
+        );
+        let (c2, l2) = generate_single_doublet(
+            &parent_a,
+            &parent_b,
+            50,
+            48,
+            0,
+            1,
+            &cluster_medians,
+            &treatment,
+        );
+
+        assert_eq!(c1, c2);
+        assert_eq!(l1, l2);
+    }
 }
