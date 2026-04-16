@@ -823,6 +823,13 @@ fn cv_select_rounds(
         mean_losses.push(mean);
         std_losses.push(std);
 
+        if round < 10 || round % 10 == 0 {
+            println!(
+                "  CV round {}: mean_loss={:.5}, best={:.5}, no_improve={}",
+                round, mean, best_mean_loss, rounds_no_improve
+            );
+        }
+
         // early stopping on the cross-fold mean
         if mean < best_mean_loss - 1e-3 {
             best_mean_loss = mean;
