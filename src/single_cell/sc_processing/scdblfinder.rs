@@ -1220,7 +1220,7 @@ impl ScDblFinder {
         if knn_params.ann_dist == "euclidean" {
             combined_dists.par_iter_mut().for_each(|row| {
                 for d in row.iter_mut() {
-                    *d = d.sqrt();
+                    *d = d.max(0.0).sqrt();
                 }
             });
         }

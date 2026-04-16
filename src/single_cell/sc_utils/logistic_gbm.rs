@@ -824,7 +824,7 @@ fn cv_select_rounds(
         std_losses.push(std);
 
         // early stopping on the cross-fold mean
-        if mean < best_mean_loss - 1e-6 {
+        if mean < best_mean_loss - 1e-3 {
             best_mean_loss = mean;
             rounds_no_improve = 0;
         } else {
@@ -851,8 +851,7 @@ fn cv_select_rounds(
         .position(|&l| l <= ceiling)
         .unwrap_or(best_round);
 
-    #[cfg(test)]
-    eprintln!(
+    println!(
         "CV: ran {} rounds, best_round={}, best_mean_loss={:.4}, \
              std={:.4}, ceiling={:.4}, selected={}",
         mean_losses.len(),
