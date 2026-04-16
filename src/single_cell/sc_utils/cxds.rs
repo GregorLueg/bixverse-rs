@@ -301,66 +301,83 @@ impl CxdsModel {
             .collect()
     }
 
-    /// Compute cxds scores for simulated doublets.
-    ///
-    /// Each simulated doublet is the union of two parent cells'
-    /// expressed gene sets (a gene is expressed if either parent
-    /// expresses it).
+    /// Compute cxds scores for simulated doublets from their (noise-injected)
+    /// raw count chunks.
     ///
     /// ### Params
     ///
-    /// * `pairs` - Parent cell index pairs `(a, b)` into the
-    ///   observed cell set.
-    /// * `obs_gene_sets` - Per-observed-cell expressed gene sets.
+    /// * `sim_chunks` - Simulated doublet sparse chunks with
+    ///   HVG-remapped gene indices (i.e. chunk.indices are positions
+    ///   into the HVG array). Raw counts should be post-noise.
+    /// * `hvg_to_cxds_pos` - Map from HVG position to cxds gene
+    ///   position. Entries missing mean the gene isn't in the cxds
+    ///   gene set.
+    /// * `bin_thresh` - Binarisation threshold (raw count >= thresh
+    ///   counts as expressed). Match what was used in `fit`.
     ///
     /// ### Returns
     ///
     /// Per-doublet cxds scores.
-    pub fn score_simulated(
+    pub fn score_simulated_from_chunks(
         &self,
-        pairs: &[(usize, usize)],
-        obs_gene_sets: &[CellGeneSet],
+        sim_chunks: &[CsrCellChunk],
+        selected_genes_to_cxds_pos: &FxHashMap<usize, u16>,
+        bin_thresh: u32,
     ) -> Vec<f32> {
-        pairs
+        sim_chunks
             .par_iter()
-            .map(|&(a, b)| {
-                // Union of both parents' gene sets
-                let sa = &obs_gene_sets[a];
-                let sb = &obs_gene_sets[b];
-                let mut merged = Vec::with_capacity(sa.len() + sb.len());
-                let (mut ia, mut ib) = (0, 0);
-                while ia < sa.len() && ib < sb.len() {
-                    match sa[ia].cmp(&sb[ib]) {
-                        std::cmp::Ordering::Less => {
-                            merged.push(sa[ia]);
-                            ia += 1;
-                        }
-                        std::cmp::Ordering::Greater => {
-                            merged.push(sb[ib]);
-                            ib += 1;
-                        }
-                        std::cmp::Ordering::Equal => {
-                            merged.push(sa[ia]);
-                            ia += 1;
-                            ib += 1;
-                        }
+            .map(|chunk| {
+                // Build the cell's cxds-indexed expressed gene set
+                // from the raw counts, applying the binarisation
+                // threshold.
+                let mut expressed: Vec<u16> = Vec::new();
+                for i in 0..chunk.indices.len() {
+                    let raw = chunk.data_raw.get(i);
+                    if raw < bin_thresh {
+                        continue;
+                    }
+                    let gene_pos = chunk.indices[i] as usize;
+                    if let Some(&cxds_pos) = selected_genes_to_cxds_pos.get(&gene_pos) {
+                        expressed.push(cxds_pos);
                     }
                 }
-                merged.extend_from_slice(&sa[ia..]);
-                merged.extend_from_slice(&sb[ib..]);
+                expressed.sort_unstable();
 
-                // Score the merged set
+                // score through the pair matrix (same as score())
                 let mut total = 0.0f32;
-                let ne = merged.len();
+                let ne = expressed.len();
                 for a in 0..ne {
-                    let i = merged[a] as usize;
+                    let i = expressed[a] as usize;
                     let row = i * self.ntop;
                     for b in (a + 1)..ne {
-                        let j = merged[b] as usize;
+                        let j = expressed[b] as usize;
                         total += self.pair_scores[row + j];
                     }
                 }
                 total
+            })
+            .collect()
+    }
+
+    /// Build an selected gene-position to cxds-position lookup.
+    ///
+    /// ### Params
+    ///
+    /// * `selected_genes` - Selected gene indices (into original gene space),
+    ///   parallel to selected genes positions.
+    ///
+    /// ### Returns
+    ///
+    /// Map from selected gene position to cxds gene-set position for genes
+    /// that appear in both.
+    pub fn hvg_position_map(&self, selected_genes: &[usize]) -> FxHashMap<usize, u16> {
+        selected_genes
+            .iter()
+            .enumerate()
+            .filter_map(|(hvg_pos, orig_gene)| {
+                self.gene_map
+                    .get(orig_gene)
+                    .map(|&cxds_pos| (hvg_pos, cxds_pos))
             })
             .collect()
     }

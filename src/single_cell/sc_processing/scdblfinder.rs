@@ -976,7 +976,7 @@ impl ScDblFinder {
         }
         let start_sel = Instant::now();
 
-        let hvg_genes = select_top_genes(
+        let selected_genes = select_top_genes(
             &self.f_path_gene,
             &self.cells_to_keep,
             None,
@@ -986,13 +986,13 @@ impl ScDblFinder {
         if verbose {
             println!(
                 "Using {} top-expressed genes. Done in {:.2?}",
-                hvg_genes.len(),
+                selected_genes.len(),
                 start_sel.elapsed()
             );
         }
 
         self.hvg_library_sizes =
-            compute_hvg_library_sizes(&self.f_path_cell, &self.cells_to_keep, &hvg_genes);
+            compute_hvg_library_sizes(&self.f_path_cell, &self.cells_to_keep, &selected_genes);
         let target_size = resolve_target_size(self.params.target_size, &self.hvg_library_sizes);
         self.n_cells_sim = (self.n_cells as f32 * self.params.doublet_ratio) as usize;
 
@@ -1001,7 +1001,7 @@ impl ScDblFinder {
             println!("Computing cell complexity features...");
         }
         let (obs_n_features, obs_n_above2) =
-            compute_cell_complexity(&self.f_path_cell, &self.cells_to_keep, &hvg_genes);
+            compute_cell_complexity(&self.f_path_cell, &self.cells_to_keep, &selected_genes);
 
         // -- Step 1c: cxds model --
         if verbose {
@@ -1011,7 +1011,7 @@ impl ScDblFinder {
         let (cxds_model, obs_cxds_gene_sets) = CxdsModel::fit(
             &self.f_path_cell,
             &self.cells_to_keep,
-            &hvg_genes,
+            &selected_genes,
             CXDS_NTOP,
         );
         let obs_cxds_scores = cxds_model.score(&obs_cxds_gene_sets);
@@ -1034,7 +1034,7 @@ impl ScDblFinder {
         let (obs_pca, _, _, _) = pca_observed(
             &self.f_path_gene,
             &self.cells_to_keep,
-            &hvg_genes,
+            &selected_genes,
             &self.hvg_library_sizes,
             target_size,
             self.params.log_transform,
@@ -1123,7 +1123,7 @@ impl ScDblFinder {
             &self.cells_to_keep,
             &self.hvg_library_sizes,
             &cluster_labels,
-            &hvg_genes,
+            &selected_genes,
             &self.f_path_cell,
             target_size,
             self.params.log_transform,
@@ -1134,7 +1134,13 @@ impl ScDblFinder {
         let (sim_n_features, sim_n_above2) = compute_sim_complexity(&sim_chunks);
 
         // -- Step 4b: cxds scores for simulated doublets --
-        let sim_cxds_scores = cxds_model.score_simulated(&pairs, &obs_cxds_gene_sets);
+        // After:
+        let selected_genes_to_cxds = cxds_model.hvg_position_map(&selected_genes);
+        let sim_cxds_scores = cxds_model.score_simulated_from_chunks(
+            &sim_chunks,
+            &selected_genes_to_cxds,
+            1, // bin_thresh: match what fit() uses (raw count > 0)
+        );
 
         // -- Step 5: Project simulated into PC space --
         if verbose {
@@ -1143,7 +1149,7 @@ impl ScDblFinder {
         let combined_pca = pca_combined(
             &self.f_path_cell,
             &self.cells_to_keep,
-            &hvg_genes,
+            &selected_genes,
             &self.hvg_library_sizes,
             target_size,
             &sim_chunks,
