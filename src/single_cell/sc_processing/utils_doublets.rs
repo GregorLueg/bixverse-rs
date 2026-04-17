@@ -1045,7 +1045,7 @@ impl Default for ScDblSimParams {
     fn default() -> Self {
         Self {
             resamp_frac: 0.25,
-            half_size_frac: 0.25,
+            half_size_frac: 0.5,
             adjust_size_frac: 0.25,
         }
     }
