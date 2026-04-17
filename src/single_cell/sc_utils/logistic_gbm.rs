@@ -56,7 +56,7 @@ impl Default for LogisticGbmConfig {
             max_rounds: 200,
             learning_rate: 0.3,
             max_depth: 4,
-            min_samples_leaf: 20,
+            min_samples_leaf: 1,
             lambda: 1.0,
             min_child_weight: 1.0,
             subsample_rate: 0.75,
