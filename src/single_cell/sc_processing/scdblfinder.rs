@@ -91,6 +91,8 @@ pub struct ScDblFinderParams {
     pub include_pcs: usize,
     /// Expected doublet rate
     pub expected_doublet_rate: Option<f32>,
+    /// Return the per-cell feature matrix for inspection/debugging.
+    pub return_features: bool,
 
     // -- Thresholding --
     /// Optional manual threshold. If `None`, cost-based optimisation is used.
@@ -126,6 +128,7 @@ impl Default for ScDblFinderParams {
             se_fraction: 0.25,
             include_pcs: 19,
             expected_doublet_rate: None,
+            return_features: false,
             manual_threshold: None,
             n_bins: 100,
         }
@@ -143,14 +146,18 @@ pub struct ScDblFinderResult {
     pub predicted_doublets: Vec<bool>,
     /// Classifier probability per observed cell (0 = singlet, 1 = doublet).
     pub doublet_scores: Vec<f32>,
+    /// The weighted scores
+    pub weighted: Vec<f32>,
+    /// CXDS scores
+    pub cxds: Vec<f32>,
     /// Threshold used for doublet calling.
     pub threshold: f32,
     /// Cluster labels from the final iteration.
     pub cluster_labels: Vec<usize>,
     /// Fraction of observed cells called as doublets.
     pub detected_doublet_rate: f32,
-    /// Per-cell intermediate scores for comparison and debugging.
-    pub diagnostics: ScDblFinderDiagnostics,
+    /// Features
+    pub features: Option<FeatureTable>,
 }
 
 /// Per-cell kNN-derived intermediate values.
@@ -181,6 +188,17 @@ pub struct ScDblFinderDiagnostics {
     /// Most likely parent cluster pair (canonical ordering); None for cells
     /// with no heterotypic sim neighbours.
     pub most_likely_origin: Vec<Option<(usize, usize)>>,
+}
+
+/// Classifier features for the observed samples.
+#[derive(Clone, Debug)]
+pub struct FeatureTable {
+    /// Name of the features
+    pub feature_names: Vec<String>,
+    /// Table of the features of shape n_obs x n_features
+    pub values: Mat<f32>,
+    /// Included in training flag
+    pub include_in_training: Vec<bool>,
 }
 
 ///////////
@@ -281,6 +299,38 @@ fn update_difficulty_column(features: &mut Mat<f32>, difficulty_col: usize, diff
     for (i, &d) in difficulties.iter().enumerate() {
         *features.get_mut(i, difficulty_col) = d;
     }
+}
+
+/// Build feature name strings in the order they appear in the matrix.
+fn feature_names(k_values: &[usize], n_pcs: usize) -> Vec<String> {
+    let mut names = Vec::with_capacity(k_values.len() + 7 + n_pcs);
+    for &k in k_values {
+        names.push(format!("ratio.k{}", k));
+    }
+    names.extend(
+        [
+            "weighted",
+            "distanceToNearestReal",
+            "difficulty",
+            "lsizes",
+            "nfeatures",
+            "nAbove2",
+            "cxds_score",
+        ]
+        .iter()
+        .map(|s| s.to_string()),
+    );
+    for pc in 0..n_pcs {
+        names.push(format!("PC{}", pc + 1));
+    }
+    names
+}
+
+/// Extract the observed-cell slice of a combined (obs + sim) feature
+/// matrix into a new owned Mat.
+fn slice_obs_rows(features: MatRef<f32>, n_obs: usize) -> Mat<f32> {
+    let n_feat = features.ncols();
+    Mat::<f32>::from_fn(n_obs, n_feat, |i, j| *features.get(i, j))
 }
 
 //////////////
@@ -505,29 +555,6 @@ fn aggregate_origin_counts(origins: &[Option<(usize, usize)>]) -> FxHashMap<(usi
         *counts.entry(*o).or_insert(0) += 1;
     }
     counts
-}
-
-/// Mean weighted score per origin, computed over artificial
-/// doublets only (matching R's `split(d$weighted[w], ...)` where
-/// `w <- which(d$type=="doublet")`).
-///
-/// Used for the `difficulty` feature: difficulty[i] = 1 - class_weighted[origin[i]].
-fn aggregate_class_weighted(
-    origins: &[Option<(usize, usize)>],
-    weighted: &[f32],
-    n_obs: usize,
-) -> FxHashMap<(usize, usize), f32> {
-    let mut sums: FxHashMap<(usize, usize), (f32, u32)> = FxHashMap::default();
-    for i in n_obs..origins.len() {
-        if let Some(o) = origins[i] {
-            let entry = sums.entry(o).or_insert((0.0, 0));
-            entry.0 += weighted[i];
-            entry.1 += 1;
-        }
-    }
-    sums.into_iter()
-        .map(|(k, (s, n))| (k, s / n as f32))
-        .collect()
 }
 
 /// PCA on the combined (observed + simulated) matrix.
@@ -1341,40 +1368,7 @@ impl ScDblFinder {
             n_pcs_include,
         );
 
-        // extract observed-cell diagnostics
         let obs_intermediates = &knn_intermediates[..self.n_cells];
-        let class_weighted = aggregate_class_weighted(
-            &knn_intermediates
-                .iter()
-                .map(|c| c.origin)
-                .collect::<Vec<_>>(),
-            &knn_intermediates
-                .iter()
-                .map(|c| c.weighted)
-                .collect::<Vec<_>>(),
-            self.n_cells,
-        );
-
-        let max_k_col = k_values.len() - 1;
-
-        // generate all the scores for diagnostic purposes
-        let diagnostics = ScDblFinderDiagnostics {
-            weighted: obs_intermediates.iter().map(|c| c.weighted).collect(),
-            ratio: (0..self.n_cells)
-                .map(|i| *features.get(i, max_k_col))
-                .collect(),
-            cxds_score: obs_cxds_scores.clone(),
-            dist_to_real: obs_intermediates.iter().map(|c| c.dist_real).collect(),
-            difficulty: obs_intermediates
-                .iter()
-                .map(|c| match c.origin {
-                    Some(o) => 1.0 - class_weighted.get(&o).copied().unwrap_or(0.0),
-                    None => 1.0,
-                })
-                .collect(),
-            most_likely_origin: obs_intermediates.iter().map(|c| c.origin).collect(),
-        };
-
         let n_total = self.n_cells + self.n_cells_sim;
 
         // labels: false = observed (singlet), true = simulated (doublet)
@@ -1565,6 +1559,41 @@ impl ScDblFinder {
             *s = s.clamp(0.0, 1.0);
         }
 
+        // Capture the final-iteration training mask for the feature table.
+        // R's include.in.training reflects the last iteration's exclusion
+        // state: real cells excluded as suspected doublets, plus any
+        // permanently-flagged sims (only sim flags matter for sim rows,
+        // but we return obs-only so they're irrelevant here).
+        let feature_table = if self.params.return_features {
+            let mut include_in_training = vec![true; self.n_cells];
+            // Reconstruct the final-iter obs exclusion using the same logic
+            // as the loop -- we don't carry it out of the loop currently.
+            // If this turns out to be hot, track it inside the loop instead.
+            let mut obs_sorted = final_scores.clone();
+            obs_sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+            let quantile_idx = ((1.0 - expected_dbr) * (self.n_cells - 1) as f32).round() as usize;
+            let exclusion_threshold = obs_sorted[quantile_idx.min(self.n_cells - 1)];
+            let max_exclude_obs = self.n_cells / 5;
+            let mut n_excluded = 0usize;
+            for i in 0..self.n_cells {
+                if n_excluded >= max_exclude_obs {
+                    break;
+                }
+                if final_scores[i] > exclusion_threshold {
+                    include_in_training[i] = false;
+                    n_excluded += 1;
+                }
+            }
+
+            Some(FeatureTable {
+                feature_names: feature_names(&k_values, n_pcs_include),
+                values: slice_obs_rows(features.as_ref(), self.n_cells),
+                include_in_training,
+            })
+        } else {
+            None
+        };
+
         let threshold = self.params.manual_threshold.unwrap_or_else(|| {
             let t =
                 find_threshold_optimised(&final_scores, &sim_scores, expected_dbr, 0.5, verbose);
@@ -1590,10 +1619,12 @@ impl ScDblFinder {
         ScDblFinderResult {
             predicted_doublets,
             doublet_scores: final_scores,
+            cxds: obs_cxds_scores,
+            weighted: obs_intermediates.iter().map(|c| c.weighted).collect(),
             threshold,
             cluster_labels,
             detected_doublet_rate,
-            diagnostics,
+            features: feature_table,
         }
     }
 }
@@ -1698,34 +1729,5 @@ mod tests {
         assert_eq!(counts[&(0, 1)], 3);
         assert_eq!(counts[&(1, 2)], 1);
         assert_eq!(counts.len(), 2);
-    }
-
-    #[test]
-    fn test_aggregate_class_weighted_uses_sim_only() {
-        // n_obs = 2, so indices 0,1 are real (should NOT contribute)
-        // indices 2,3,4 are sim (should contribute)
-        let origins = vec![
-            Some((0, 1)), // real -- excluded
-            Some((0, 1)), // real -- excluded
-            Some((0, 1)), // sim
-            Some((0, 1)), // sim
-            Some((1, 2)), // sim
-        ];
-        let weighted = vec![0.9, 0.9, 0.3, 0.5, 0.7];
-        let result = aggregate_class_weighted(&origins, &weighted, 2);
-
-        // (0,1): mean of [0.3, 0.5] = 0.4
-        // (1,2): mean of [0.7] = 0.7
-        assert!((result[&(0, 1)] - 0.4).abs() < 1e-6);
-        assert!((result[&(1, 2)] - 0.7).abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_aggregate_class_weighted_no_sim() {
-        // No simulated cells at all
-        let origins = vec![Some((0, 1)), Some((0, 1))];
-        let weighted = vec![0.5, 0.6];
-        let result = aggregate_class_weighted(&origins, &weighted, 2);
-        assert!(result.is_empty());
     }
 }

@@ -672,6 +672,10 @@ impl ScDblFinderParams {
                 .get("include_pcs")
                 .and_then(|v| v.as_integer())
                 .unwrap_or(defaults.include_pcs as i32) as usize,
+            return_features: map
+                .get("return_features")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(defaults.return_features),
             // Expected doublet rate
             expected_doublet_rate: map
                 .get("expected_doublet_rate")
