@@ -1,6 +1,7 @@
 //! Work-in-progress not behaving as desired...
 
 use faer::{Mat, MatRef};
+use rand::distr::{Distribution, weighted::WeightedIndex};
 use rand::prelude::*;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -654,7 +655,7 @@ fn build_feature_matrix(
             let mut w_dbl = 0.0f32;
             for (rank, (&neigh, &dist)) in neighbours.iter().zip(distances.iter()).enumerate() {
                 let d = dist.max(1e-10);
-                let w = (k_f - rank as f32).sqrt() / d;
+                let w = (k_f - rank as f32 - 1.0).max(0.0).sqrt() / d;
                 w_sum += w;
                 if neigh >= n_obs {
                     w_dbl += w;
@@ -773,7 +774,6 @@ fn cluster_aware_pairs(
     let mut rng = StdRng::seed_from_u64(seed as u64);
     let n_cells = cluster_labels.len();
 
-    // build cluster -> cell positions
     let mut cluster_to_cells: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
     for (pos, &cl) in cluster_labels.iter().enumerate() {
         cluster_to_cells.entry(cl).or_default().push(pos);
@@ -787,36 +787,40 @@ fn cluster_aware_pairs(
     let mut pairs = Vec::with_capacity(n_sim);
     let mut parent_clusters = Vec::with_capacity(n_sim);
 
-    // heterotypic: pick two different clusters, one cell from each
-    for _ in 0..n_heterotypic {
-        if !have_multiple_clusters {
-            // degenerate case: single cluster, fall back to random
+    // Heterotypic: enumerate unordered cluster pairs, weight by s_A * s_B
+    if have_multiple_clusters && n_heterotypic > 0 {
+        let mut cluster_pairs: Vec<(usize, usize)> = Vec::new();
+        let mut weights: Vec<f64> = Vec::new();
+        for i in 0..cluster_ids.len() {
+            for j in (i + 1)..cluster_ids.len() {
+                let ca = cluster_ids[i];
+                let cb = cluster_ids[j];
+                let sa = cluster_to_cells[&ca].len() as f64;
+                let sb = cluster_to_cells[&cb].len() as f64;
+                cluster_pairs.push((ca, cb));
+                weights.push(sa * sb);
+            }
+        }
+        let dist = WeightedIndex::new(&weights).expect("invalid cluster-pair weights");
+
+        for _ in 0..n_heterotypic {
+            let (ca, cb) = cluster_pairs[dist.sample(&mut rng)];
+            let cells_a = &cluster_to_cells[&ca];
+            let cells_b = &cluster_to_cells[&cb];
+            let i = cells_a[rng.random_range(0..cells_a.len())];
+            let j = cells_b[rng.random_range(0..cells_b.len())];
+            pairs.push((i, j));
+            parent_clusters.push((ca, cb));
+        }
+    } else {
+        for _ in 0..n_heterotypic {
             let i = rng.random_range(0..n_cells);
             let j = rng.random_range(0..n_cells);
             pairs.push((i, j));
             parent_clusters.push((cluster_labels[i], cluster_labels[j]));
-            continue;
         }
-
-        let ca_idx = rng.random_range(0..cluster_ids.len());
-        let mut cb_idx = rng.random_range(0..cluster_ids.len());
-        while cb_idx == ca_idx {
-            cb_idx = rng.random_range(0..cluster_ids.len());
-        }
-
-        let ca = cluster_ids[ca_idx];
-        let cb = cluster_ids[cb_idx];
-        let cells_a = &cluster_to_cells[&ca];
-        let cells_b = &cluster_to_cells[&cb];
-
-        let i = cells_a[rng.random_range(0..cells_a.len())];
-        let j = cells_b[rng.random_range(0..cells_b.len())];
-
-        pairs.push((i, j));
-        parent_clusters.push((ca, cb));
     }
 
-    // random pairs
     for _ in 0..n_random {
         let i = rng.random_range(0..n_cells);
         let j = rng.random_range(0..n_cells);
@@ -1120,7 +1124,7 @@ impl ScDblFinder {
             obs_k,
             &self.params.knn_params,
             seed,
-            verbose,
+            false,
         );
 
         let obs_graph = knn_to_sparse_graph(&obs_knn);
@@ -1217,7 +1221,7 @@ impl ScDblFinder {
         knn_params.k = k_max;
 
         let (combined_knn, combined_dists) =
-            generate_knn_with_dist(combined_pca.as_ref(), &knn_params, true, seed, verbose);
+            generate_knn_with_dist(combined_pca.as_ref(), &knn_params, true, seed, false);
 
         let mut combined_dists = combined_dists.unwrap();
 
