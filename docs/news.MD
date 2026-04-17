@@ -7,7 +7,9 @@
 - scDblFinder implemented
 - Refactor out of shared tree structure between scDblFinder and SCENIC
 - Implementation of Harmony v2
-- First methods (HVG selection and PCA) for meta cells directly
+- First methods (HVG selection, PCA and SCENIC) for meta cells directly
+- Made the kNN validation optional and improved the distance calculation with
+  SIMD.
 
 ## 0.1.7
 

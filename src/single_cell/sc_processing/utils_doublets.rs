@@ -487,6 +487,7 @@ pub fn dispatch_knn(
             knn_params.ef_construction,
             knn_params.ef_search,
             seed,
+            false,
             verbose,
         ),
         KnnSearch::Annoy => generate_knn_annoy(
@@ -496,6 +497,7 @@ pub fn dispatch_knn(
             knn_params.n_tree,
             knn_params.search_budget,
             seed,
+            false,
             verbose,
         ),
         KnnSearch::NNDescent => generate_knn_nndescent(
@@ -506,6 +508,7 @@ pub fn dispatch_knn(
             knn_params.ef_budget,
             knn_params.delta,
             seed,
+            false,
             verbose,
         ),
         KnnSearch::Exhaustive => generate_knn_exhaustive(embd, &knn_params.ann_dist, k, verbose),
@@ -516,6 +519,7 @@ pub fn dispatch_knn(
             knn_params.n_list,
             knn_params.n_list,
             seed,
+            false,
             verbose,
         ),
     }

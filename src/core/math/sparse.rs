@@ -187,7 +187,8 @@ where
     }
 }
 
-/// Structure to store compressed sparse data of either type
+/// Structure to store compressed sparse data of either type with two data
+/// layers
 #[derive(Debug, Clone)]
 pub struct CompressedSparseData2<T, U = T>
 where

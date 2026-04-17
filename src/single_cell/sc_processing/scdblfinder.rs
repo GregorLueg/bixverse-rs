@@ -14,6 +14,7 @@ use crate::prelude::*;
 use crate::single_cell::sc_processing::knn::generate_knn_with_dist;
 use crate::single_cell::sc_processing::utils_doublets::*;
 use crate::single_cell::sc_utils::{cxds::*, logistic_gbm::*, utils_tree::*};
+use crate::utils::vec_utils::min_max_scale;
 
 ////////////////////////
 // Params and results //
@@ -1327,7 +1328,7 @@ impl ScDblFinder {
         knn_params.k = k_max;
 
         let (combined_knn, combined_dists) =
-            generate_knn_with_dist(combined_pca.as_ref(), &knn_params, true, seed, false);
+            generate_knn_with_dist(combined_pca.as_ref(), &knn_params, true, false, seed, false);
 
         let mut combined_dists = combined_dists.unwrap();
 
@@ -1561,16 +1562,8 @@ impl ScDblFinder {
             *s = s.clamp(0.0, 1.0);
         }
 
-        // Capture the final-iteration training mask for the feature table.
-        // R's include.in.training reflects the last iteration's exclusion
-        // state: real cells excluded as suspected doublets, plus any
-        // permanently-flagged sims (only sim flags matter for sim rows,
-        // but we return obs-only so they're irrelevant here).
         let feature_table = if self.params.return_features {
             let mut include_in_training = vec![true; self.n_cells];
-            // Reconstruct the final-iter obs exclusion using the same logic
-            // as the loop -- we don't carry it out of the loop currently.
-            // If this turns out to be hot, track it inside the loop instead.
             let mut obs_sorted = final_scores.clone();
             obs_sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
             let quantile_idx = ((1.0 - expected_dbr) * (self.n_cells - 1) as f32).round() as usize;
@@ -1621,7 +1614,7 @@ impl ScDblFinder {
         ScDblFinderResult {
             predicted_doublets,
             doublet_scores: final_scores,
-            cxds: obs_cxds_scores,
+            cxds: min_max_scale(&obs_cxds_scores),
             weighted: obs_intermediates.iter().map(|c| c.weighted).collect(),
             selected_genes,
             threshold,

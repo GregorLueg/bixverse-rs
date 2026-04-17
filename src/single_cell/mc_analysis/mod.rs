@@ -1,1 +1,5 @@
-//! Meta cells analysis methods.
+//! Meta cells analysis methods. These are methods that leverage the aggregated
+//! counts from the meta-cells. Focus on 'bag-of-genes' methods, such as
+//! SCENIC, etc.
+
+pub mod scenic_metacells;

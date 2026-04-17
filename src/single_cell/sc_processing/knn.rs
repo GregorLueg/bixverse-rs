@@ -1,7 +1,8 @@
-//! Contains the single cell-related kNN functions
+//! Contains the single cell-related kNN functions. Wrappers to generate
+//! the kNN graphs (with and without distances).
 
 use ann_search_rs::utils::KnnValidation;
-use ann_search_rs::utils::dist::Dist;
+use ann_search_rs::utils::dist::{Dist, SimdDistance};
 use ann_search_rs::*;
 use faer::{MatRef, RowRef};
 use rayon::prelude::*;
@@ -170,40 +171,20 @@ pub fn build_nn_map(knn_graph: &[Vec<usize>]) -> Vec<Vec<usize>> {
 pub fn compute_distance_knn(a: RowRef<f32>, b: RowRef<f32>, metric: &Dist) -> f32 {
     let ncols = a.ncols();
 
-    // fast, unsafe path for contiguous memory
     if a.col_stride() == 1 && b.col_stride() == 1 {
-        unsafe {
-            let a_ptr = a.as_ptr();
-            let b_ptr = b.as_ptr();
+        let a_slice = unsafe { std::slice::from_raw_parts(a.as_ptr(), ncols) };
+        let b_slice = unsafe { std::slice::from_raw_parts(b.as_ptr(), ncols) };
 
-            match metric {
-                Dist::Euclidean => {
-                    let mut sum = 0.0f32;
-                    for i in 0..ncols {
-                        let diff = *a_ptr.add(i) - *b_ptr.add(i);
-                        sum += diff * diff;
-                    }
-                    sum.sqrt()
-                }
-                Dist::Cosine => {
-                    let mut dot = 0.0f32;
-                    let mut norm_a = 0.0f32;
-                    let mut norm_b = 0.0f32;
-
-                    for i in 0..ncols {
-                        let av = *a_ptr.add(i);
-                        let bv = *b_ptr.add(i);
-                        dot += av * bv;
-                        norm_a += av * av;
-                        norm_b += bv * bv;
-                    }
-
-                    1.0 - (dot / (norm_a.sqrt() * norm_b.sqrt()))
-                }
+        match metric {
+            Dist::Euclidean => f32::euclidean_simd(a_slice, b_slice).sqrt(),
+            Dist::Cosine => {
+                let dot = f32::dot_simd(a_slice, b_slice);
+                let norm_a = f32::calculate_l2_norm(a_slice);
+                let norm_b = f32::calculate_l2_norm(b_slice);
+                1.0 - (dot / (norm_a * norm_b))
             }
         }
     } else {
-        // fallback
         match metric {
             Dist::Euclidean => {
                 let mut sum = 0.0f32;
@@ -217,13 +198,11 @@ pub fn compute_distance_knn(a: RowRef<f32>, b: RowRef<f32>, metric: &Dist) -> f3
                 let mut dot = 0.0f32;
                 let mut norm_a = 0.0f32;
                 let mut norm_b = 0.0f32;
-
                 for i in 0..ncols {
                     dot += a[i] * b[i];
                     norm_a += a[i] * a[i];
                     norm_b += b[i] * b[i];
                 }
-
                 1.0 - (dot / (norm_a.sqrt() * norm_b.sqrt()))
             }
         }
@@ -332,12 +311,15 @@ fn build_and_query_knn<I>(
 ///
 /// * `mat` - Matrix in which rows represent the samples and columns the
 ///   respective embeddings for that sample
+/// * `dist_metric` - Distance metric to use. One of `"euclidean"` or
+///   `"cosine"`.
 /// * `no_neighbours` - Number of neighbours for the KNN graph
 /// * `m` - Number of connections per layer (M parameter)
 /// * `ef_const` - Size of dynamic candidate list during construction
 /// * `ef_search` - Size of candidate list during search (higher = better
 ///   recall, slower)
 /// * `seed` - Seed for the HNSW algorithm
+/// * `validate_index` - Shall the index be validated with an exhaustive search.
 /// * `verbose` - Controls verbosity
 ///
 /// ### Returns
@@ -353,6 +335,7 @@ pub fn generate_knn_hnsw(
     ef_const: usize,
     ef_search: usize,
     seed: usize,
+    validate_index: bool,
     verbose: bool,
 ) -> Vec<Vec<usize>> {
     let (res, index) = build_and_query_knn(
@@ -363,7 +346,7 @@ pub fn generate_knn_hnsw(
         "HNSW",
     );
 
-    if verbose {
+    if validate_index {
         let recall = index.validate_index(no_neighbours, seed, None);
         println!(
             "Recall of approximate nearest neighbours search in random subset: {:.2}",
@@ -383,16 +366,21 @@ pub fn generate_knn_hnsw(
 ///
 /// * `mat` - Matrix in which rows represent the samples and columns the
 ///   respective embeddings for that sample
+/// * `dist_metric` - Distance metric to use. One of `"euclidean"` or
+///   `"cosine"`.
 /// * `no_neighbours` - Number of neighbours for the KNN graph.
 /// * `n_trees` - Number of trees to use for the search.
 /// * `search_budget` - Optional search budget per given query. If not provided,
 ///   it will use `k * n_trees * 20`.
 /// * `seed` - Seed for the Annoy algorithm
+/// * `validate_index` - Shall the index be validated with an exhaustive search.
+/// * `verbose` - Controls verbosity
 ///
 /// ### Returns
 ///
 /// The k-nearest neighbours based on the Annoy algorithm. Function does not
 /// return self.
+#[allow(clippy::too_many_arguments)]
 pub fn generate_knn_annoy(
     mat: MatRef<f32>,
     dist_metric: &str,
@@ -400,6 +388,7 @@ pub fn generate_knn_annoy(
     n_trees: usize,
     search_budget: Option<usize>,
     seed: usize,
+    validate_index: bool,
     verbose: bool,
 ) -> Vec<Vec<usize>> {
     let (res, index) = build_and_query_knn(
@@ -410,7 +399,7 @@ pub fn generate_knn_annoy(
         "Annoy",
     );
 
-    if verbose {
+    if validate_index {
         let recall = index.validate_index(no_neighbours, seed, None);
         println!(
             "Recall of approximate nearest neighbours search in random subset: {:.2}",
@@ -439,6 +428,7 @@ pub fn generate_knn_annoy(
 /// * `n_probe` - Number of clusters/lists to query. If None, will query
 ///   `sqrt(n_list)`.
 /// * `seed` - Seed for the NN Descent algorithm
+/// * `validate_index` - Shall the index be validated with an exhaustive search.
 /// * `verbose` - Controls verbosity of the algorithm
 ///
 /// ### Returns
@@ -453,6 +443,7 @@ pub fn generate_knn_ivf(
     n_list: Option<usize>,
     n_probe: Option<usize>,
     seed: usize,
+    validate_index: bool,
     verbose: bool,
 ) -> Vec<Vec<usize>> {
     let (res, index) = build_and_query_knn(
@@ -463,7 +454,7 @@ pub fn generate_knn_ivf(
         "IVF",
     );
 
-    if verbose {
+    if validate_index {
         let recall = index.validate_index(no_neighbours, seed, None);
         println!(
             "Recall of approximate nearest neighbours search in random subset: {:.2}",
@@ -493,6 +484,7 @@ pub fn generate_knn_ivf(
 /// * `ef_budget` - Optional query search budget.
 /// * `delta` - Early stop criterium for the algorithm.
 /// * `seed` - Seed for the NN Descent algorithm
+/// * `validate_index` - Shall the index be validated with an exhaustive search.
 /// * `verbose` - Controls verbosity of the algorithm
 ///
 /// ### Returns
@@ -508,6 +500,7 @@ pub fn generate_knn_nndescent(
     ef_budget: Option<usize>,
     delta: f32,
     seed: usize,
+    validate_index: bool,
     verbose: bool,
 ) -> Vec<Vec<usize>> {
     let (res, index) = build_and_query_knn(
@@ -531,7 +524,7 @@ pub fn generate_knn_nndescent(
         "NNDescent",
     );
 
-    if verbose {
+    if validate_index {
         let recall = index.validate_index(no_neighbours, seed, None);
         println!(
             "Recall of approximate nearest neighbours search in random subset: {:.2}",
@@ -588,6 +581,7 @@ pub fn generate_knn_exhaustive(
 /// * `knn_params` - The parameters for the approximate nearest neighbour
 ///   search.
 /// * `return_dist` - Return the distances.
+/// * `validate_index` - Shall the index be validated with an exhaustive search.
 /// * `seed` - Seed for reproducibility
 /// * `verbose` - Controls verbosity of the function.
 ///
@@ -598,10 +592,10 @@ pub fn generate_knn_with_dist(
     embd: MatRef<f32>,
     knn_params: &KnnParams,
     return_dist: bool,
+    validate_index: bool,
     seed: usize,
     verbose: bool,
 ) -> (Vec<Vec<usize>>, Option<Vec<Vec<f32>>>) {
-    // first helper
     fn remove_self(
         mut indices: Vec<Vec<usize>>,
         distances: Option<Vec<Vec<f32>>>,
@@ -618,7 +612,6 @@ pub fn generate_knn_with_dist(
         (indices, distances)
     }
 
-    // second helper function to time everything
     fn timed<T>(name: &str, verbose: bool, f: impl FnOnce() -> T) -> T {
         let start = Instant::now();
         let result = f();
@@ -646,7 +639,7 @@ pub fn generate_knn_with_dist(
                     verbose,
                 )
             });
-            if verbose {
+            if validate_index {
                 let recall = index.validate_index(k_plus_one, seed, None);
                 println!(
                     "Recall of approximate nearest neighbours search in random subset: {:.2}",
@@ -676,7 +669,7 @@ pub fn generate_knn_with_dist(
                     verbose,
                 )
             });
-            if verbose {
+            if validate_index {
                 let recall = index.validate_index(k_plus_one, seed, None);
                 println!(
                     "Recall of approximate nearest neighbours search in random subset: {:.2}",
@@ -710,7 +703,7 @@ pub fn generate_knn_with_dist(
                     verbose,
                 )
             });
-            if verbose {
+            if validate_index {
                 let recall = index.validate_index(k_plus_one, seed, None);
                 println!(
                     "Recall of approximate nearest neighbours search in random subset: {:.2}",
@@ -721,7 +714,7 @@ pub fn generate_knn_with_dist(
         }
         KnnSearch::Exhaustive => {
             let index = timed("Generated Exhaustive index", verbose, || {
-                build_exhaustive_index(embd, &knn_params.knn_method)
+                build_exhaustive_index(embd, &knn_params.ann_dist)
             });
             timed("Queried Exhaustive index", verbose, || {
                 query_exhaustive_index(embd, &index, k_plus_one, true, verbose)
@@ -741,13 +734,13 @@ pub fn generate_knn_with_dist(
             let (indices, distances) = timed("Queried IVF index", verbose, || {
                 query_ivf_index(embd, &index, k_plus_one, knn_params.n_probe, true, verbose)
             });
-            if verbose {
+            if validate_index {
                 let recall = index.validate_index(k_plus_one, seed, None);
                 println!(
                     "Recall of approximate nearest neighbours search in random subset: {:.2}",
                     recall
                 );
-            };
+            }
             (indices, distances)
         }
     };

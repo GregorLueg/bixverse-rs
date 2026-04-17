@@ -9,10 +9,14 @@ use crate::core::math::pca_svd::*;
 use crate::prelude::*;
 use crate::single_cell::sc_processing::hvg::*;
 
+/////////
+// HVG //
+/////////
+
 /// HVG selection via VST from an in-memory sparse matrix.
 ///
 /// Expects raw counts in `data` (no second layer needed). Accepts CSR or CSC
-/// input -- if CSR, it transposes internally to CSC for column-wise iteration.
+/// input -> if CSR, it transposes internally to CSC for column-wise iteration.
 ///
 /// Shape must be (cells, genes).
 ///
@@ -110,16 +114,22 @@ pub fn get_hvg_vst_from_sparse(
     }
 }
 
+/////////
+// PCA //
+/////////
+
 /// PCA on pre-selected HVGs from an in-memory sparse matrix.
 ///
-/// Expects normalised counts in `data`. Densifies, scales (zero-mean,
-/// unit-variance per gene), then runs SVD. Shape must be (cells, genes).
+/// Reads normalised counts from the `data_2` layer (raw counts in `data`
+/// are ignored). Densifies, scales (zero-mean, unit-variance per gene),
+/// then runs SVD. Shape must be (cells, genes).
 ///
 /// Uses f64 internally for numerical stability during SVD.
 ///
 /// ### Params
 ///
-/// * `matrix` - The sparse counts. Needs to have the second data layer!
+/// * `matrix` - The sparse counts. The `data_2` layer must be populated with
+///   normalised expression values.
 /// * `no_pcs` - Number of PCs to return
 /// * `random_svd` - Shall randomised SVD be used
 /// * `seed` - Random seed for the randomised SVD
@@ -127,42 +137,36 @@ pub fn get_hvg_vst_from_sparse(
 /// ### Returns
 ///
 /// Tuple of (PCA scores, PCA loadings, singular values)
-pub fn pca_on_metacells(
-    matrix: &CompressedSparseData2<f32>,
+pub fn pca_on_metacells<T: BixverseNumeric>(
+    matrix: &CompressedSparseData2<T, f32>,
     no_pcs: usize,
     random_svd: bool,
     seed: usize,
 ) -> (Mat<f32>, Mat<f32>, Vec<f32>) {
     let (n_cells, n_genes) = matrix.shape;
-
-    // ensure CSC for column-wise densification
     let csc = match matrix.cs_type {
         CompressedSparseFormat::Csc => Cow::Borrowed(matrix),
         CompressedSparseFormat::Csr => Cow::Owned(matrix.transform()),
     };
+    let vals = csc
+        .data_2
+        .as_ref()
+        .expect("pca_on_metacells requires normalised counts in data_2");
 
-    // densify and scale into f64
     let mut scaled = Mat::<f64>::zeros(n_cells, n_genes);
-
     for j in 0..n_genes {
         let start = csc.indptr[j];
         let end = csc.indptr[j + 1];
-
-        // scatter non-zeros
         for idx in start..end {
             let i = csc.indices[idx];
-            scaled[(i, j)] = csc.data[idx] as f64;
+            scaled[(i, j)] = vals[idx] as f64;
         }
-
-        // compute mean
-        let sum: f64 = (start..end).map(|idx| csc.data[idx] as f64).sum();
+        let sum: f64 = (start..end).map(|idx| vals[idx] as f64).sum();
         let mean = sum / n_cells as f64;
-
-        // compute std (n-1 denominator)
         let nnz = end - start;
         let ss_nonzero: f64 = (start..end)
             .map(|idx| {
-                let d = csc.data[idx] as f64 - mean;
+                let d = vals[idx] as f64 - mean;
                 d * d
             })
             .sum();
@@ -170,8 +174,6 @@ pub fn pca_on_metacells(
         let std_dev = ((ss_nonzero + ss_zeros) / (n_cells as f64 - 1.0))
             .max(0.0)
             .sqrt();
-
-        // scale column in-place
         if std_dev < 1e-8 {
             for i in 0..n_cells {
                 scaled[(i, j)] = 0.0;
@@ -183,7 +185,6 @@ pub fn pca_on_metacells(
         }
     }
 
-    // SVD
     let (scores, loadings, s) = if random_svd {
         let res: RandomSvdResults<f64> =
             randomised_svd(scaled.as_ref(), no_pcs, seed, Some(100_usize), None);
@@ -206,6 +207,5 @@ pub fn pca_on_metacells(
             .collect();
         (scores, loadings, s)
     };
-
     (scores, loadings, s)
 }

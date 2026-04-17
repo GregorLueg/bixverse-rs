@@ -419,11 +419,13 @@ where
 ///
 /// * `r_list` - R list that has the following elements: `indptr`, `indices`,
 ///   `data`, `nrow`, `ncol` and `format`
+/// * `populate_data_2` - Boolean. If set to `true`, the data will be also
+///   copied into data_2 of the `CompressedSparseData2`.
 ///
 /// ### Returns
 ///
 /// The CompressedSparseData2 Rust object with the data
-pub fn list_to_sparse_matrix<T>(r_list: List) -> CompressedSparseData2<T>
+pub fn list_to_sparse_matrix<T>(r_list: List, populate_data_2: bool) -> CompressedSparseData2<T>
 where
     T: Clone + Default + TryFrom<Robj> + Into<u32>,
 {
@@ -464,12 +466,18 @@ where
         _ => panic!("Unknown format"),
     };
 
+    let data_2 = if populate_data_2 {
+        None
+    } else {
+        Some(data.clone())
+    };
+
     CompressedSparseData2 {
         data,
         indices,
         indptr,
         cs_type,
-        data_2: None,
+        data_2,
         shape: (nrow, ncol),
     }
 }

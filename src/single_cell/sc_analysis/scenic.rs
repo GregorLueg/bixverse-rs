@@ -33,7 +33,7 @@ const SCENIC_GENE_CHUNK_SIZE: usize = 1024;
 /// How many target genes to batch into a single multi-output tree ensemble.
 /// 64 targets * 256 bins * 16 bytes ≈ 256KB per feature histogram, fits L2
 /// comfortably.
-const MULTI_OUTPUT_BATCH: usize = 64;
+pub const MULTI_OUTPUT_BATCH: usize = 64;
 
 /// Threshold above which full-feature histogram subtraction outperforms
 /// per-node feature sampling for single-target GBM.
@@ -88,7 +88,7 @@ pub fn parse_regression_learner(s: &str) -> Option<RegressionLearner> {
 //////////////////
 
 /// Shared configuration interface for tree-based regressors
-trait TreeRegressorConfig: Sync {
+pub trait TreeRegressorConfig: Sync {
     /// Number of trees in the ensemble
     fn n_trees(&self) -> usize;
 
@@ -1470,7 +1470,7 @@ fn fit_multi_trees(
 ///
 /// One importance vector per target: `result[target_idx][feature_idx]`.
 /// Importance values are normalised to sum to 1.0 per target.
-fn fit_multi_trees_sparse(
+pub fn fit_multi_trees_sparse(
     targets: &[SparseAxis<u32, f32>],
     feature_matrix: &QuantisedStore,
     n_samples: usize,
@@ -2709,7 +2709,7 @@ pub fn parse_gene_batch_strategy(
 /// ### Returns
 ///
 /// Returns the shuffled indices
-fn batch_genes_random(gene_indices: &[usize], seed: usize) -> Vec<usize> {
+pub fn batch_genes_random(gene_indices: &[usize], seed: usize) -> Vec<usize> {
     let mut indices = gene_indices.to_vec();
     let mut rng = SmallRng::seed_from_u64(seed as u64);
     // Fisher-Yates
@@ -2731,7 +2731,7 @@ fn batch_genes_random(gene_indices: &[usize], seed: usize) -> Vec<usize> {
 /// ### Returns
 ///
 /// Indices of cells to keep here
-fn subsample_cells(cell_indices: &[usize], n_target: usize, seed: usize) -> Vec<usize> {
+pub fn subsample_cells(cell_indices: &[usize], n_target: usize, seed: usize) -> Vec<usize> {
     if cell_indices.len() <= n_target {
         return cell_indices.to_vec();
     }
