@@ -215,6 +215,74 @@ fn resolve_doublet_rate(explicit: Option<f32>, n_cells: usize) -> f32 {
     }
 }
 
+/// Compute per-origin mean classifier score over non-excluded sims.
+///
+/// Returns (class_weighted_per_origin, mean_over_origins). The mean
+/// is used as the fallback for cells with no assignable origin.
+fn compute_class_weighted(
+    sim_scores: &[f32],
+    parent_clusters: &[(usize, usize)],
+    exclusion_mask: &[bool],
+) -> (FxHashMap<(usize, usize), f32>, f32) {
+    let mut sums: FxHashMap<(usize, usize), (f64, u32)> = FxHashMap::default();
+    for (si, &(ca, cb)) in parent_clusters.iter().enumerate() {
+        if exclusion_mask[si] {
+            continue;
+        }
+        if let Some(canon) = canonical_pair(ca, cb) {
+            let e = sums.entry(canon).or_insert((0.0, 0));
+            e.0 += sim_scores[si] as f64;
+            e.1 += 1;
+        }
+    }
+    let class_weighted: FxHashMap<(usize, usize), f32> = sums
+        .into_iter()
+        .map(|(k, (s, n))| (k, (s / n as f64) as f32))
+        .collect();
+    let mean = if class_weighted.is_empty() {
+        0.5
+    } else {
+        class_weighted.values().copied().sum::<f32>() / class_weighted.len() as f32
+    };
+    (class_weighted, mean)
+}
+
+/// Compute per-cell difficulty for all cells (obs + sim).
+///
+/// R's formula: `difficulty = 1 - class_weighted[origin]`. Cells with
+/// no assigned origin fall back to `1 - mean_class_weighted`.
+fn compute_difficulties(
+    n_obs: usize,
+    n_total: usize,
+    obs_origins: &[Option<(usize, usize)>],
+    parent_clusters: &[(usize, usize)],
+    class_weighted: &FxHashMap<(usize, usize), f32>,
+    fallback_mean: f32,
+) -> Vec<f32> {
+    let fallback = 1.0 - fallback_mean;
+    (0..n_total)
+        .map(|i| {
+            let origin = if i < n_obs {
+                obs_origins[i]
+            } else {
+                let (ca, cb) = parent_clusters[i - n_obs];
+                canonical_pair(ca, cb)
+            };
+            match origin {
+                Some(o) => class_weighted.get(&o).map_or(fallback, |&cd| 1.0 - cd),
+                None => fallback,
+            }
+        })
+        .collect()
+}
+
+/// Write a difficulty vector into the feature matrix in-place.
+fn update_difficulty_column(features: &mut Mat<f32>, difficulty_col: usize, difficulties: &[f32]) {
+    for (i, &d) in difficulties.iter().enumerate() {
+        *features.get_mut(i, difficulty_col) = d;
+    }
+}
+
 //////////////
 // Features //
 //////////////
@@ -621,10 +689,11 @@ fn build_feature_matrix(
     sim_cxds: &[f32],
     combined_pca: MatRef<f32>,
     n_pcs: usize,
-) -> (Mat<f32>, Vec<CellKnnFeatures>) {
+) -> (Mat<f32>, Vec<CellKnnFeatures>, usize) {
     let n_total = knn_indices.len();
     let n_k = k_values.len();
     let n_feat = n_k + 7 + n_pcs;
+    let difficulty_col = n_k + 2; // after k_ratios, weighted, dist_real
 
     let fallback_max_dist = knn_distances
         .iter()
@@ -677,10 +746,23 @@ fn build_feature_matrix(
         })
         .collect();
 
+    // Initial difficulty: use `weighted` as the score proxy (no classifier yet).
+    // No permanent sim exclusions on the first build.
     let weighted_arr: Vec<f32> = stage1.iter().map(|c| c.weighted).collect();
-    let origins_arr: Vec<Option<(usize, usize)>> = stage1.iter().map(|c| c.origin).collect();
+    let obs_origins: Vec<Option<(usize, usize)>> =
+        stage1.iter().take(n_obs).map(|c| c.origin).collect();
 
-    let class_weighted = aggregate_class_weighted(&origins_arr, &weighted_arr, n_obs);
+    let no_exclusions = vec![false; parent_clusters.len()];
+    let (class_weighted, mean_cw) =
+        compute_class_weighted(&weighted_arr[n_obs..], parent_clusters, &no_exclusions);
+    let difficulties = compute_difficulties(
+        n_obs,
+        n_total,
+        &obs_origins,
+        parent_clusters,
+        &class_weighted,
+        mean_cw,
+    );
 
     let rows: Vec<Vec<f32>> = (0..n_total)
         .into_par_iter()
@@ -697,13 +779,8 @@ fn build_feature_matrix(
             // distance to nearest real cell
             feats.push(int.dist_real);
 
-            // difficulty (1.0 - mean class-weighted score for this origin;
-            // 1.0 when no origin available)
-            let difficulty = match int.origin {
-                Some(o) => 1.0 - class_weighted.get(&o).copied().unwrap_or(0.0),
-                None => 1.0,
-            };
-            feats.push(difficulty);
+            // difficulty
+            feats.push(difficulties[i]);
 
             // raw library size (matching R's lsizes = colSums(e))
             let lib = if i < n_obs {
@@ -746,7 +823,7 @@ fn build_feature_matrix(
         }
     }
 
-    (features, stage1)
+    (features, stage1, difficulty_col)
 }
 
 /// Generate cell pairs with cluster-aware heterotypic bias.
@@ -1246,7 +1323,7 @@ impl ScDblFinder {
             println!(" Building feature matrix ({} features)...", n_feat);
         }
 
-        let (features, knn_intermediates) = build_feature_matrix(
+        let (mut features, knn_intermediates, difficulty_col) = build_feature_matrix(
             &combined_knn,
             &combined_dists,
             self.n_cells,
@@ -1418,6 +1495,23 @@ impl ScDblFinder {
                 (iter_seed + 100) as u64,
                 debug,
             );
+
+            let (class_weighted, mean_cw) =
+                compute_class_weighted(&sim_scores, &parent_clusters, &permanent_sim_exclusion);
+            let obs_origins: Vec<Option<(usize, usize)>> = knn_intermediates
+                .iter()
+                .take(self.n_cells)
+                .map(|c| c.origin)
+                .collect();
+            let difficulties = compute_difficulties(
+                self.n_cells,
+                n_total,
+                &obs_origins,
+                &parent_clusters,
+                &class_weighted,
+                mean_cw,
+            );
+            update_difficulty_column(&mut features, difficulty_col, &difficulties);
 
             final_scores.copy_from_slice(&probabilities[..self.n_cells]);
             sim_scores.copy_from_slice(&probabilities[self.n_cells..]);

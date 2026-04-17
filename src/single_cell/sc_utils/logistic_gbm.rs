@@ -831,7 +831,7 @@ fn cv_select_rounds(
         }
 
         // early stopping on the cross-fold mean
-        if mean < best_mean_loss - 1e-3 {
+        if mean < best_mean_loss - 5e-3 {
             best_mean_loss = mean;
             rounds_no_improve = 0;
         } else {

@@ -1466,7 +1466,7 @@ impl Default for UnrecognisableFilterParams {
 /// Canonicalise a parent cluster pair. Returns `None` for homotypic
 /// pairs (which R skips via its `grepl("+", ...)` filter).
 #[inline]
-fn canonical_pair(a: usize, b: usize) -> Option<(usize, usize)> {
+pub fn canonical_pair(a: usize, b: usize) -> Option<(usize, usize)> {
     if a == b {
         None
     } else {
