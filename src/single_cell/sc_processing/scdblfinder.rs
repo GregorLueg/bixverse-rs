@@ -61,6 +61,7 @@ pub struct ScDblFinderParams {
     // -- kNN --
     /// Parameters for kNN construction.
     pub knn_params: KnnParams,
+
     // -- Iteration --
     /// Number of refinement iterations (typically 2-3).
     pub n_iterations: usize,
@@ -492,10 +493,10 @@ pub fn pca_combined(
         .map(|(pos, &g)| (g, pos))
         .collect();
 
-    // Build dense combined matrix
+    // build dense combined matrix
     let mut combined = Mat::<f32>::zeros(n_total, n_genes);
 
-    // Fill observed rows
+    // fill observed rows
     let reader = ParallelSparseReader::new(f_path_cell).unwrap();
     for (row, &cell_idx) in cells_to_keep.iter().enumerate() {
         let chunk = reader.read_cell(cell_idx);
@@ -514,7 +515,7 @@ pub fn pca_combined(
         }
     }
 
-    // Fill simulated rows (already normalised and HVG-remapped)
+    // fill simulated rows (already normalised and HVG-remapped)
     for (si, chunk) in sim_chunks.iter().enumerate() {
         let row = n_obs + si;
         for i in 0..chunk.indices.len() {
@@ -547,7 +548,7 @@ pub fn pca_combined(
         vars[j] = ss / (nf - 1.0);
     }
 
-    // Centre and scale in place
+    // centre and scale in place
     for j in 0..n_genes {
         let mu = if mean_center { means[j] as f32 } else { 0.0 };
         let sd = if normalise_variance {
@@ -675,13 +676,11 @@ fn build_feature_matrix(
         })
         .collect();
 
-    // -- Stage 2: origin-keyed aggregates --
     let weighted_arr: Vec<f32> = stage1.iter().map(|c| c.weighted).collect();
     let origins_arr: Vec<Option<(usize, usize)>> = stage1.iter().map(|c| c.origin).collect();
 
     let class_weighted = aggregate_class_weighted(&origins_arr, &weighted_arr, n_obs);
 
-    // -- Stage 3: assemble rows (parallel) --
     let rows: Vec<Vec<f32>> = (0..n_total)
         .into_par_iter()
         .map(|i| {
@@ -847,6 +846,7 @@ fn cluster_aware_pairs(
 ///   from training but still scored.
 /// * `config` - Logistic GBM configuration.
 /// * `seed` - Random seed.
+/// * `verbose` - Controls verbosity
 ///
 /// ### Returns
 ///
@@ -857,9 +857,10 @@ fn classify_doublets(
     exclude: &[bool],
     config: &LogisticGbmConfig,
     seed: u64,
+    verbose: bool,
 ) -> Vec<f32> {
     let store = QuantisedStore::from_mat(features);
-    fit_logistic_gbm(&store, labels, exclude, config, seed)
+    fit_logistic_gbm(&store, labels, exclude, config, seed, verbose)
 }
 
 /// Cost-based threshold optimisation matching R's doubletThresholding.
@@ -961,8 +962,8 @@ pub struct ScDblFinder {
     n_cells_sim: usize,
     /// Cell indices included in this analysis.
     cells_to_keep: Vec<usize>,
-    /// Per-cell library sizes computed over HVG genes only.
-    hvg_library_sizes: Vec<usize>,
+    /// Per-cell library sizes computed over selected genes only.
+    red_library_sizes: Vec<usize>,
 }
 
 impl ScDblFinder {
@@ -991,7 +992,7 @@ impl ScDblFinder {
             n_cells: cell_indices.len(),
             n_cells_sim: 0,
             cells_to_keep: cell_indices.to_vec(),
-            hvg_library_sizes: Vec::new(),
+            red_library_sizes: Vec::new(),
         }
     }
 
@@ -999,7 +1000,7 @@ impl ScDblFinder {
     ///
     /// ### Algorithm
     ///
-    /// 1. Select HVGs, compute HVG library sizes.
+    /// 1. Select top expressed genes -> library size calculations on these.
     /// 2. Run PCA on observed cells.
     /// 3. Build kNN on observed cells, cluster via Louvain.
     /// 4. **Iteration loop** (typically 2-3 rounds):
@@ -1017,15 +1018,17 @@ impl ScDblFinder {
     ///
     /// * `seed` - Seed for reproducibility.
     /// * `verbose` - Controls verbosity.
+    /// * `debug` - Additional verbosity for debugging purposes
     ///
     /// ### Returns
     ///
     /// `ScDblFinderResult` with predictions, scores and cluster labels.
-    pub fn run(&mut self, seed: usize, verbose: bool) -> ScDblFinderResult {
+    pub fn run(&mut self, seed: usize, verbose: bool, debug: bool) -> ScDblFinderResult {
         let start_all = Instant::now();
 
         if verbose {
-            println!("Selecting top-expressed genes...");
+            println!("Running scDblFinder in Rust");
+            println!(" Selecting top-expressed genes...");
         }
         let start_sel = Instant::now();
 
@@ -1038,27 +1041,26 @@ impl ScDblFinder {
 
         if verbose {
             println!(
-                "Using {} top-expressed genes. Done in {:.2?}",
+                " Using {} top-expressed genes. Done in {:.2?}",
                 selected_genes.len(),
                 start_sel.elapsed()
             );
         }
 
-        self.hvg_library_sizes =
+        // recycling function from scrublet/doublet detection
+        self.red_library_sizes =
             compute_hvg_library_sizes(&self.f_path_cell, &self.cells_to_keep, &selected_genes);
-        let target_size = resolve_target_size(self.params.target_size, &self.hvg_library_sizes);
+        let target_size = resolve_target_size(self.params.target_size, &self.red_library_sizes);
         self.n_cells_sim = (self.n_cells as f32 * self.params.doublet_ratio) as usize;
 
-        // -- Step 1b: Cell complexity features --
         if verbose {
-            println!("Computing cell complexity features...");
+            println!(" Computing cell complexity features...");
         }
         let (obs_n_features, obs_n_above2) =
             compute_cell_complexity(&self.f_path_cell, &self.cells_to_keep, &selected_genes);
 
-        // -- Step 1c: cxds model --
         if verbose {
-            println!("Building cxds co-expression model...");
+            println!(" Building cxds co-expression model...");
         }
         let start_cxds = Instant::now();
         let (cxds_model, obs_cxds_gene_sets) = CxdsModel::fit(
@@ -1072,15 +1074,14 @@ impl ScDblFinder {
         if verbose {
             let mean_cxds: f32 = obs_cxds_scores.iter().sum::<f32>() / obs_cxds_scores.len() as f32;
             println!(
-                "cxds model built in {:.2?} (mean score: {:.2})",
+                "  cxds model built in {:.2?} (mean score: {:.2})",
                 start_cxds.elapsed(),
                 mean_cxds,
             );
         }
 
-        // -- Step 2: PCA on observed cells --
         if verbose {
-            println!("Running PCA on observed cells...");
+            println!(" Running PCA on observed cells...");
         }
         let start_pca = Instant::now();
 
@@ -1088,7 +1089,7 @@ impl ScDblFinder {
             &self.f_path_gene,
             &self.cells_to_keep,
             &selected_genes,
-            &self.hvg_library_sizes,
+            &self.red_library_sizes,
             target_size,
             self.params.log_transform,
             self.params.mean_center,
@@ -1100,13 +1101,13 @@ impl ScDblFinder {
         );
 
         if verbose {
-            println!("Done with PCA in {:.2?}", start_pca.elapsed());
+            println!("  Done with PCA in {:.2?}", start_pca.elapsed());
         }
 
-        // -- Step 3: Initial clustering --
         if verbose {
-            println!("Initial clustering of observed cells...");
+            println!(" Initial clustering of observed cells...");
         }
+        let start_clustering = Instant::now();
 
         let obs_k = if self.params.knn_params.k == 0 {
             ((self.n_cells as f32).sqrt() * 0.5).round() as usize
@@ -1130,7 +1131,15 @@ impl ScDblFinder {
             seed,
         );
 
-        // -- Multi-scale k values --
+        let end_clustering = start_clustering.elapsed();
+
+        if verbose {
+            println!(
+                "  Finished initial kNN generation and clustering in {:.2?}",
+                end_clustering
+            );
+        }
+
         let k_values = default_knn_ks(self.n_cells);
         let k_max = *k_values.last().unwrap();
         let n_k = k_values.len();
@@ -1138,30 +1147,21 @@ impl ScDblFinder {
 
         if verbose {
             println!(
-                "Using k values {:?} (max {}), including {} PCs as features",
+                " Using k values {:?} (max {}), including {} PCs as features",
                 k_values, k_max, n_pcs_include
             );
         }
 
-        let gbm_config = LogisticGbmConfig {
-            max_rounds: self.params.n_trees,
-            learning_rate: self.params.learning_rate,
-            max_depth: self.params.max_depth,
-            min_samples_leaf: self.params.min_samples_leaf,
-            subsample_rate: self.params.subsample_rate,
-            n_folds: self.params.cv_folds,
-            cv_early_stop: self.params.cv_early_stop,
-            se_fraction: self.params.se_fraction,
-            ..Default::default()
-        };
-
-        // expected doublet rate for exclusion logic
         let expected_dbr = resolve_doublet_rate(self.params.expected_doublet_rate, self.n_cells);
 
-        // -- Step 4: Simulate doublets ONCE --
         if verbose {
-            println!("Simulating cluster-aware doublets...");
+            println!(
+                " Simulating cluster-aware doublets with a heterotypic bias of {:.2}...",
+                self.params.heterotypic_bias
+            );
         }
+
+        let start_sim = Instant::now();
 
         let (pairs, parent_clusters) = cluster_aware_pairs(
             &cluster_labels,
@@ -1173,7 +1173,7 @@ impl ScDblFinder {
         let (sim_chunks, sim_combined_lib_sizes) = simulate_doublets_scdbl(
             &pairs,
             &self.cells_to_keep,
-            &self.hvg_library_sizes,
+            &self.red_library_sizes,
             &cluster_labels,
             &selected_genes,
             &self.f_path_cell,
@@ -1185,8 +1185,6 @@ impl ScDblFinder {
 
         let (sim_n_features, sim_n_above2) = compute_sim_complexity(&sim_chunks);
 
-        // -- Step 4b: cxds scores for simulated doublets --
-        // After:
         let selected_genes_to_cxds = cxds_model.hvg_position_map(&selected_genes);
         let sim_cxds_scores = cxds_model.score_simulated_from_chunks(
             &sim_chunks,
@@ -1194,15 +1192,14 @@ impl ScDblFinder {
             1, // bin_thresh: match what fit() uses (raw count > 0)
         );
 
-        // -- Step 5: Project simulated into PC space --
         if verbose {
-            println!("Projecting simulated doublets...");
+            println!(" Projecting simulated doublets...");
         }
         let combined_pca = pca_combined(
             &self.f_path_cell,
             &self.cells_to_keep,
             &selected_genes,
-            &self.hvg_library_sizes,
+            &self.red_library_sizes,
             target_size,
             &sim_chunks,
             self.params.log_transform,
@@ -1212,33 +1209,8 @@ impl ScDblFinder {
             seed,
         );
 
-        // After computing combined_pca, before anything else
         if verbose {
-            let mut pc_min = f32::INFINITY;
-            let mut pc_max = f32::NEG_INFINITY;
-            let mut pc_abs_sum = 0.0f64;
-            for i in 0..combined_pca.nrows() {
-                for j in 0..combined_pca.ncols() {
-                    let v = *combined_pca.get(i, j);
-                    if v < pc_min {
-                        pc_min = v;
-                    }
-                    if v > pc_max {
-                        pc_max = v;
-                    }
-                    pc_abs_sum += v.abs() as f64;
-                }
-            }
-            let mean_abs = pc_abs_sum / (combined_pca.nrows() * combined_pca.ncols()) as f64;
-            println!(
-                "PCA scores: min={:.2}, max={:.2}, mean|x|={:.2}",
-                pc_min, pc_max, mean_abs
-            );
-        }
-
-        // -- Step 6: kNN on combined ONCE --
-        if verbose {
-            println!("Building combined kNN graph (k={})...", k_max);
+            println!(" Building combined kNN graph (k_max={})...", k_max);
         }
 
         let mut knn_params = self.params.knn_params.clone();
@@ -1249,6 +1221,7 @@ impl ScDblFinder {
 
         let mut combined_dists = combined_dists.unwrap();
 
+        // ann-search-rs returns squared Euclideans
         if knn_params.ann_dist == "euclidean" {
             combined_dists.par_iter_mut().for_each(|row| {
                 for d in row.iter_mut() {
@@ -1257,26 +1230,16 @@ impl ScDblFinder {
             });
         }
 
-        if verbose {
-            let mut all_first_dists: Vec<f32> = combined_dists.iter().map(|d| d[0]).collect();
-            all_first_dists.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            let n = all_first_dists.len();
-            println!(
-                "kNN nearest distances: min={:.2}, q25={:.2}, median={:.2}, q75={:.2}, max={:.2}",
-                all_first_dists[0],
-                all_first_dists[n / 4],
-                all_first_dists[n / 2],
-                all_first_dists[3 * n / 4],
-                all_first_dists[n - 1]
-            );
-        }
+        let end_sim = start_sim.elapsed();
 
-        // -- Step 7: Build feature matrix ONCE --
-        // k_ratios + weighted + ratio_var + lib_ratio + nfeatures + nAbove2 + cxds + PCs
-        // (3) Update the build_feature_matrix call
-        let n_feat = n_k + 7 + n_pcs_include; // was n_k + 6 + n_pcs_include
+        // build the feature matrix
+        let n_feat = n_k + 7 + n_pcs_include;
         if verbose {
-            println!("Building feature matrix ({} features)...", n_feat);
+            println!(
+                "  Finished generation of simulated doublets, projection on PCA space and kNN generation in {:.2?}",
+                end_sim
+            );
+            println!(" Building feature matrix ({} features)...", n_feat);
         }
 
         let (features, knn_intermediates) = build_feature_matrix(
@@ -1289,7 +1252,7 @@ impl ScDblFinder {
             &obs_n_above2,
             &sim_n_features,
             &sim_n_above2,
-            &self.hvg_library_sizes,
+            &self.red_library_sizes,
             &sim_combined_lib_sizes,
             &obs_cxds_scores,
             &sim_cxds_scores,
@@ -1313,7 +1276,7 @@ impl ScDblFinder {
 
         let max_k_col = k_values.len() - 1;
 
-        // generate all the scores for diagnost purposes
+        // generate all the scores for diagnostic purposes
         let diagnostics = ScDblFinderDiagnostics {
             weighted: obs_intermediates.iter().map(|c| c.weighted).collect(),
             ratio: (0..self.n_cells)
@@ -1333,56 +1296,60 @@ impl ScDblFinder {
 
         let n_total = self.n_cells + self.n_cells_sim;
 
-        // Labels: false = observed (singlet), true = simulated (doublet)
+        // labels: false = observed (singlet), true = simulated (doublet)
         let labels: Vec<bool> = (0..n_total).map(|i| i >= self.n_cells).collect();
 
-        // -- Step 8: Iterative training refinement --
-        let mut final_scores = vec![0.0f32; self.n_cells];
+        // -- trainings loop --
 
-        // Initial score: blend of normalised cxds and max-k ratio,
-        // matching R's (cxds_score + ratio/max(ratio)) / 2
+        // initial scores: (cxds_norm + ratio_norm) / 2, matching R here
         let max_k_col = n_k - 1;
 
-        // Find max ratio across ALL cells (obs + sim) for normalisation
-        let mut max_ratio = 0.0f32;
-        for i in 0..n_total {
-            let r = *features.get(i, max_k_col);
-            if r > max_ratio {
-                max_ratio = r;
-            }
-        }
-        if max_ratio < 1e-10 {
-            max_ratio = 1.0;
-        }
+        let max_ratio = (0..n_total)
+            .map(|i| *features.get(i, max_k_col))
+            .fold(0.0f32, f32::max)
+            .max(1e-10);
 
-        // Find max cxds across all cells for normalisation
-        let mut max_cxds_obs = 0.0f32;
-        for &s in &obs_cxds_scores {
-            if s > max_cxds_obs {
-                max_cxds_obs = s;
-            }
-        }
-        let mut max_cxds_sim = 0.0f32;
-        for &s in &sim_cxds_scores {
-            if s > max_cxds_sim {
-                max_cxds_sim = s;
-            }
-        }
-        let max_cxds = max_cxds_obs.max(max_cxds_sim).max(1e-10);
+        let max_cxds = obs_cxds_scores
+            .iter()
+            .chain(sim_cxds_scores.iter())
+            .copied()
+            .fold(0.0f32, f32::max)
+            .max(1e-10);
 
-        for i in 0..self.n_cells {
-            let ratio_norm = *features.get(i, max_k_col) / max_ratio;
-            let cxds_norm = obs_cxds_scores[i] / max_cxds;
-            final_scores[i] = (ratio_norm + cxds_norm) / 2.0;
-        }
+        let mut final_scores: Vec<f32> = (0..self.n_cells)
+            .map(|i| {
+                let ratio_norm = *features.get(i, max_k_col) / max_ratio;
+                let cxds_norm = obs_cxds_scores[i] / max_cxds;
+                (ratio_norm + cxds_norm) / 2.0
+            })
+            .collect();
 
-        let mut sim_scores = vec![0.0f32; self.n_cells_sim];
-        for si in 0..self.n_cells_sim {
-            let ratio_norm = *features.get(self.n_cells + si, max_k_col) / max_ratio;
-            let cxds_norm = sim_cxds_scores[si] / max_cxds;
-            sim_scores[si] = (ratio_norm + cxds_norm) / 2.0;
-        }
+        let mut sim_scores: Vec<f32> = (0..self.n_cells_sim)
+            .map(|si| {
+                let ratio_norm = *features.get(self.n_cells + si, max_k_col) / max_ratio;
+                let cxds_norm = sim_cxds_scores[si] / max_cxds;
+                (ratio_norm + cxds_norm) / 2.0
+            })
+            .collect();
 
+        // classifier config
+        let gbm_config = LogisticGbmConfig {
+            max_rounds: self.params.n_trees,
+            learning_rate: self.params.learning_rate,
+            max_depth: self.params.max_depth,
+            min_samples_leaf: self.params.min_samples_leaf,
+            subsample_rate: self.params.subsample_rate,
+            n_folds: self.params.cv_folds,
+            cv_early_stop: self.params.cv_early_stop,
+            se_fraction: self.params.se_fraction,
+            ..Default::default()
+        };
+
+        // permanent sim exclusions from .filterUnrecognizableDoublets -> set
+        // once after iteration 0 and carried through all subsequent iterations
+        let mut permanent_sim_exclusion = vec![false; self.n_cells_sim];
+
+        // -- training loop --
         for iter in 0..self.params.n_iterations {
             if verbose {
                 println!(
@@ -1394,21 +1361,28 @@ impl ScDblFinder {
             let start_iter = Instant::now();
             let iter_seed = seed + iter * 1000;
 
-            // Build exclusion mask
+            // build exclusion mask: permanent sim exclusions + per-iter additions
             let mut exclude_mask = vec![false; n_total];
+            for (si, &perm) in permanent_sim_exclusion.iter().enumerate() {
+                if perm {
+                    exclude_mask[self.n_cells + si] = true;
+                }
+            }
 
+            let mut n_excluded_obs = 0usize;
             if iter > 0 {
-                let mut obs_sorted: Vec<f32> = final_scores.clone();
+                // Exclude top-scoring real cells (suspected doublets) from
+                // training. Quantile cut at (1 - expected_dbr) with a 20% cap
+                // to match R's behaviour of not excluding more than a third of
+                // real cells.
+                let mut obs_sorted = final_scores.clone();
                 obs_sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
 
-                // quantile at (1 - expected_dbr) of observed scores
                 let quantile_idx =
                     ((1.0 - expected_dbr) * (self.n_cells - 1) as f32).round() as usize;
-                let quantile_idx = quantile_idx.min(self.n_cells - 1);
-                let exclusion_threshold = obs_sorted[quantile_idx];
+                let exclusion_threshold = obs_sorted[quantile_idx.min(self.n_cells - 1)];
+                let max_exclude_obs = self.n_cells / 5;
 
-                let max_exclude_obs = self.n_cells / 5; // cap at 20% like R
-                let mut n_excluded_obs = 0usize;
                 for i in 0..self.n_cells {
                     if n_excluded_obs >= max_exclude_obs {
                         break;
@@ -1419,34 +1393,16 @@ impl ScDblFinder {
                     }
                 }
 
-                let mut sim_sorted: Vec<f32> = sim_scores.clone();
-                sim_sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
-
-                let sim_excl_pctl = 0.0;
-                let sim_excl_idx = (sim_excl_pctl * (self.n_cells_sim - 1) as f32).round() as usize;
-                let sim_exclusion_threshold = sim_sorted[sim_excl_idx.min(self.n_cells_sim - 1)];
-                let n_sim_exclude_max = self.n_cells_sim / 4;
-                let mut n_sim_excluded = 0usize;
-                for si in 0..self.n_cells_sim {
-                    if n_sim_excluded >= n_sim_exclude_max {
-                        break;
-                    }
-                    if sim_scores[si] <= sim_exclusion_threshold {
-                        exclude_mask[self.n_cells + si] = true;
-                        n_sim_excluded += 1;
-                    }
-                }
-
                 if verbose {
+                    let n_perm = permanent_sim_exclusion.iter().filter(|&&x| x).count();
                     println!(
-                        "Excluding {} suspected real doublets (threshold={:.4}) and \
-                             {} unidentifiable artificial doublets from training",
-                        n_excluded_obs, exclusion_threshold, n_sim_excluded
+                        "Excluding {} suspected real doublets (threshold={:.4}) \
+                         and {} permanently-flagged sims",
+                        n_excluded_obs, exclusion_threshold, n_perm
                     );
                 }
             }
 
-            // Train logistic GBM classifier
             if verbose {
                 println!("Training logistic GBM classifier...");
             }
@@ -1456,31 +1412,57 @@ impl ScDblFinder {
                 &exclude_mask,
                 &gbm_config,
                 (iter_seed + 100) as u64,
+                debug,
             );
 
             final_scores.copy_from_slice(&probabilities[..self.n_cells]);
             sim_scores.copy_from_slice(&probabilities[self.n_cells..]);
 
+            // R's .filterUnrecognizableDoublets: run once, after iter 0
+            if iter == 0 {
+                let flagged = identify_unrecognisable_origins(
+                    &final_scores,
+                    &cluster_labels,
+                    &sim_scores,
+                    &parent_clusters,
+                    &UnrecognisableFilterParams::default(),
+                );
+                let sim_mask = mark_sims_from_flagged_origins(&parent_clusters, &flagged);
+                for (si, &flag) in sim_mask.iter().enumerate() {
+                    if flag {
+                        permanent_sim_exclusion[si] = true;
+                    }
+                }
+                if verbose {
+                    let n_excl = permanent_sim_exclusion.iter().filter(|&&x| x).count();
+                    println!(
+                        "Unrecognisable filter: flagged {} origin(s), \
+                         {} sims permanently excluded",
+                        flagged.len(),
+                        n_excl,
+                    );
+                }
+            }
+
             if verbose {
-                let mean_score: f32 = final_scores.iter().sum::<f32>() / final_scores.len() as f32;
-                let max_score = final_scores
+                let mean = final_scores.iter().sum::<f32>() / final_scores.len() as f32;
+                let (mn, mx) = final_scores
                     .iter()
-                    .cloned()
-                    .fold(f32::NEG_INFINITY, f32::max);
-                let min_score = final_scores.iter().cloned().fold(f32::INFINITY, f32::min);
+                    .fold((f32::INFINITY, f32::NEG_INFINITY), |(a, b), &v| {
+                        (a.min(v), b.max(v))
+                    });
                 println!(
-                    "Iteration {} done in {:.2?} (obs scores: \
-                         mean={:.4}, min={:.4}, max={:.4})",
+                    "Iteration {} done in {:.2?} (obs scores: mean={:.4}, min={:.4}, max={:.4})",
                     iter + 1,
                     start_iter.elapsed(),
-                    mean_score,
-                    min_score,
-                    max_score,
+                    mean,
+                    mn,
+                    mx,
                 );
             }
         }
 
-        // step 9: clamp and threshold
+        // Clamp final scores to [0, 1]
         for s in final_scores.iter_mut() {
             *s = s.clamp(0.0, 1.0);
         }

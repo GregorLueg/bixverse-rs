@@ -12,6 +12,7 @@
 
 use rand::prelude::*;
 use rand::rngs::SmallRng;
+use rayon::prelude::*;
 
 use crate::single_cell::sc_utils::utils_tree::{QuantisedStore, train_oob_split, tree_seed};
 
@@ -694,11 +695,12 @@ fn stratified_kfold(
 /// * `init_logit` - Initial raw score for all samples; typically
 ///   the log-odds of the base rate.
 /// * `seed` - Base seed; fold seeds are derived from this.
+/// * `verbose` - Additional verbosity for this function. For debugging
+///   purposes.
 ///
 /// ### Returns
 ///
-/// Number of boosting rounds to use for the final model (at least
-/// `1`).
+/// Number of boosting rounds to use for the final model (at least `1`).
 fn cv_select_rounds(
     store: &QuantisedStore,
     labels: &[bool],
@@ -706,6 +708,7 @@ fn cv_select_rounds(
     config: &LogisticGbmConfig,
     init_logit: f32,
     seed: u64,
+    verbose: bool,
 ) -> usize {
     let pos: Vec<u32> = eligible
         .iter()
@@ -748,72 +751,69 @@ fn cv_select_rounds(
         .collect();
 
     for round in 0..config.max_rounds {
-        let mut fold_losses = Vec::with_capacity(k);
+        let fold_losses: Vec<f32> = fold_raw_scores
+            .par_iter_mut()
+            .zip(fold_grads.par_iter_mut())
+            .zip(fold_hess.par_iter_mut())
+            .zip(fold_hists.par_iter_mut())
+            .zip(train_sets.par_iter())
+            .zip(val_sets.par_iter())
+            .zip(n_subsample_per_fold.par_iter())
+            .enumerate()
+            .map(
+                |(fold, ((((((raw, grads), hess), hist), train), val), &n_sub))| {
+                    for &s in train.iter() {
+                        let si = s as usize;
+                        let p = sigmoid(raw[si]);
+                        let y = if labels[si] { 1.0f32 } else { 0.0 };
+                        grads[si] = p - y;
+                        hess[si] = (p * (1.0 - p)).max(1e-8);
+                    }
 
-        for fold in 0..k {
-            let train = &train_sets[fold];
-            let val = &val_sets[fold];
-            let raw = &mut fold_raw_scores[fold];
-            let grads = &mut fold_grads[fold];
-            let hess = &mut fold_hess[fold];
-            let hist = &mut fold_hists[fold];
+                    let fold_seed = seed.wrapping_add(fold as u64 * 7_919);
+                    let mut sub_rng = SmallRng::seed_from_u64(tree_seed(fold_seed as usize, round));
+                    let mut pool_buf = train.to_vec();
+                    let actual_n = train_oob_split(&mut pool_buf, n_sub, &mut sub_rng);
+                    let mut train_slice = pool_buf[..actual_n].to_vec();
 
-            // gradients on training set
-            for &s in train.iter() {
-                let si = s as usize;
-                let p = sigmoid(raw[si]);
-                let y = if labels[si] { 1.0f32 } else { 0.0 };
-                grads[si] = p - y;
-                hess[si] = (p * (1.0 - p)).max(1e-8);
-            }
+                    let (g_sum, h_sum) =
+                        train_slice.iter().fold((0.0f32, 0.0f32), |(gs, hs), &s| {
+                            let si = s as usize;
+                            (gs + grads[si], hs + hess[si])
+                        });
 
-            // subsample
-            let fold_seed = seed.wrapping_add(fold as u64 * 7_919);
-            let mut sub_rng = SmallRng::seed_from_u64(tree_seed(fold_seed as usize, round));
-            let mut pool_buf = train.to_vec();
-            let actual_n = train_oob_split(&mut pool_buf, n_subsample_per_fold[fold], &mut sub_rng);
-            let mut train_slice = pool_buf[..actual_n].to_vec();
+                    let mut tree_nodes =
+                        Vec::with_capacity(2usize.pow(config.max_depth as u32 + 1));
+                    build_node(
+                        &mut tree_nodes,
+                        store,
+                        grads,
+                        hess,
+                        &mut train_slice,
+                        g_sum,
+                        h_sum,
+                        config,
+                        0,
+                        hist,
+                    );
 
-            let (g_sum, h_sum) = train_slice.iter().fold((0.0f32, 0.0f32), |(gs, hs), &s| {
-                let si = s as usize;
-                (gs + grads[si], hs + hess[si])
-            });
+                    let tree = Tree {
+                        nodes: tree_nodes,
+                        lr: config.learning_rate,
+                    };
 
-            // build tree
-            let mut tree_nodes = Vec::with_capacity(2usize.pow(config.max_depth as u32 + 1));
-            build_node(
-                &mut tree_nodes,
-                store,
-                grads,
-                hess,
-                &mut train_slice,
-                g_sum,
-                h_sum,
-                config,
-                0,
-                hist,
-            );
+                    let mut fold_samples: Vec<u32> = Vec::with_capacity(train.len() + val.len());
+                    fold_samples.extend_from_slice(train);
+                    fold_samples.extend_from_slice(val);
+                    tree.predict_update(store, raw, &fold_samples);
 
-            let tree = Tree {
-                nodes: tree_nodes,
-                lr: config.learning_rate,
-            };
-
-            // score train + val for this fold
-            let mut fold_samples: Vec<u32> = Vec::with_capacity(train.len() + val.len());
-            fold_samples.extend_from_slice(train);
-            fold_samples.extend_from_slice(val);
-            tree.predict_update(store, raw, &fold_samples);
-
-            // validation loss for this fold
-            let val_loss: f32 = val
-                .iter()
-                .map(|&s| logloss(labels[s as usize], raw[s as usize]))
-                .sum::<f32>()
-                / val.len().max(1) as f32;
-
-            fold_losses.push(val_loss);
-        }
+                    val.iter()
+                        .map(|&s| logloss(labels[s as usize], raw[s as usize]))
+                        .sum::<f32>()
+                        / val.len().max(1) as f32
+                },
+            )
+            .collect();
 
         // aggregate across folds
         let mean: f32 = fold_losses.iter().sum::<f32>() / k as f32;
@@ -823,7 +823,7 @@ fn cv_select_rounds(
         mean_losses.push(mean);
         std_losses.push(std);
 
-        if round < 10 || round % 10 == 0 {
+        if verbose && (round < 10 || round % 10 == 0) {
             println!(
                 "  CV round {}: mean_loss={:.5}, best={:.5}, no_improve={}",
                 round, mean, best_mean_loss, rounds_no_improve
@@ -858,16 +858,18 @@ fn cv_select_rounds(
         .position(|&l| l <= ceiling)
         .unwrap_or(best_round);
 
-    println!(
-        "CV: ran {} rounds, best_round={}, best_mean_loss={:.4}, \
-             std={:.4}, ceiling={:.4}, selected={}",
-        mean_losses.len(),
-        best_round,
-        mean_losses[best_round],
-        std_losses[best_round],
-        ceiling,
-        selected + 1,
-    );
+    if verbose {
+        println!(
+            "CV: ran {} rounds, best_round={}, best_mean_loss={:.4}, \
+                 std={:.4}, ceiling={:.4}, selected={}",
+            mean_losses.len(),
+            best_round,
+            mean_losses[best_round],
+            std_losses[best_round],
+            ceiling,
+            selected + 1,
+        );
+    }
 
     (selected + 1).max(1)
 }
@@ -897,6 +899,7 @@ fn cv_select_rounds(
 ///   is excluded from training but still receives predictions.
 /// * `config` - Classifier configuration.
 /// * `seed` - Base seed for reproducibility.
+/// * `verbose` - Controls verbosity of the function.
 ///
 /// ### Returns
 ///
@@ -908,6 +911,7 @@ pub fn fit_logistic_gbm(
     exclude: &[bool],
     config: &LogisticGbmConfig,
     seed: u64,
+    verbose: bool,
 ) -> Vec<f32> {
     let n = store.n_samples;
     assert_eq!(labels.len(), n);
@@ -927,7 +931,7 @@ pub fn fit_logistic_gbm(
     let init_logit = (base_rate / (1.0 - base_rate)).ln();
 
     // phase 1: lockstep CV to select n_rounds
-    let n_rounds = cv_select_rounds(store, labels, &eligible, config, init_logit, seed);
+    let n_rounds = cv_select_rounds(store, labels, &eligible, config, init_logit, seed, verbose);
 
     // phase 2: final training on all eligible for exactly n_rounds
     let mut raw_scores = vec![init_logit; n];
@@ -1113,7 +1117,14 @@ mod tests {
         let store = QuantisedStore::from_columns(&cols);
         let exclude = vec![false; store.n_samples];
 
-        let probs = fit_logistic_gbm(&store, &labels, &exclude, &LogisticGbmConfig::default(), 99);
+        let probs = fit_logistic_gbm(
+            &store,
+            &labels,
+            &exclude,
+            &LogisticGbmConfig::default(),
+            99,
+            false,
+        );
 
         assert_eq!(probs.len(), store.n_samples);
         let auc_val = auc(&probs, &labels);
@@ -1132,7 +1143,14 @@ mod tests {
         let store = QuantisedStore::from_columns(&cols);
         let exclude = vec![false; store.n_samples];
 
-        let probs = fit_logistic_gbm(&store, &labels, &exclude, &LogisticGbmConfig::default(), 7);
+        let probs = fit_logistic_gbm(
+            &store,
+            &labels,
+            &exclude,
+            &LogisticGbmConfig::default(),
+            7,
+            false,
+        );
 
         let auc_val = auc(&probs, &labels);
         assert!(
@@ -1152,7 +1170,14 @@ mod tests {
         let store = QuantisedStore::from_columns(&cols);
         let exclude = vec![false; store.n_samples];
 
-        let probs = fit_logistic_gbm(&store, &labels, &exclude, &LogisticGbmConfig::default(), 55);
+        let probs = fit_logistic_gbm(
+            &store,
+            &labels,
+            &exclude,
+            &LogisticGbmConfig::default(),
+            55,
+            false,
+        );
 
         let auc_val = auc(&probs, &labels);
         assert!(auc_val > 0.60, "expected AUC > 0.60, got {:.4}", auc_val);
@@ -1184,7 +1209,14 @@ mod tests {
         let store = QuantisedStore::from_columns(&columns);
         let exclude = vec![false; n];
 
-        let probs = fit_logistic_gbm(&store, &labels, &exclude, &LogisticGbmConfig::default(), 42);
+        let probs = fit_logistic_gbm(
+            &store,
+            &labels,
+            &exclude,
+            &LogisticGbmConfig::default(),
+            42,
+            false,
+        );
 
         let auc_val = auc(&probs, &labels);
         assert!(
@@ -1226,7 +1258,14 @@ mod tests {
             exclude[i] = true;
         }
 
-        let probs = fit_logistic_gbm(&store, &labels, &exclude, &LogisticGbmConfig::default(), 11);
+        let probs = fit_logistic_gbm(
+            &store,
+            &labels,
+            &exclude,
+            &LogisticGbmConfig::default(),
+            11,
+            false,
+        );
 
         let excluded_probs: Vec<f32> = probs
             .iter()
@@ -1285,7 +1324,14 @@ mod tests {
             exclude[i] = true;
         }
 
-        let probs = fit_logistic_gbm(&store, &labels, &exclude, &LogisticGbmConfig::default(), 0);
+        let probs = fit_logistic_gbm(
+            &store,
+            &labels,
+            &exclude,
+            &LogisticGbmConfig::default(),
+            0,
+            false,
+        );
 
         let test_probs: Vec<f32> = probs[n_train..].to_vec();
         let test_labels: Vec<bool> = labels[n_train..].to_vec();
@@ -1312,8 +1358,22 @@ mod tests {
         let store = QuantisedStore::from_columns(&cols);
         let exclude = vec![false; store.n_samples];
 
-        let a = fit_logistic_gbm(&store, &labels, &exclude, &LogisticGbmConfig::default(), 42);
-        let b = fit_logistic_gbm(&store, &labels, &exclude, &LogisticGbmConfig::default(), 42);
+        let a = fit_logistic_gbm(
+            &store,
+            &labels,
+            &exclude,
+            &LogisticGbmConfig::default(),
+            42,
+            false,
+        );
+        let b = fit_logistic_gbm(
+            &store,
+            &labels,
+            &exclude,
+            &LogisticGbmConfig::default(),
+            42,
+            false,
+        );
 
         assert_eq!(a, b, "same seed should produce identical results");
     }
@@ -1343,7 +1403,7 @@ mod tests {
             ..Default::default()
         };
 
-        let probs = fit_logistic_gbm(&store, &labels, &exclude, &config, 13);
+        let probs = fit_logistic_gbm(&store, &labels, &exclude, &config, 13, false);
 
         let auc_val = auc(&probs, &labels);
         assert!(
@@ -1374,7 +1434,7 @@ mod tests {
         let config = LogisticGbmConfig::default();
         let init_logit = 0.0f32; // balanced
 
-        let n_rounds = cv_select_rounds(&store, &labels, &eligible, &config, init_logit, 42);
+        let n_rounds = cv_select_rounds(&store, &labels, &eligible, &config, init_logit, 42, false);
 
         assert!(
             n_rounds <= 10,
@@ -1394,7 +1454,7 @@ mod tests {
         let init_logit = (base_rate / (1.0 - base_rate)).ln();
         let config = LogisticGbmConfig::default();
 
-        let n_rounds = cv_select_rounds(&store, &labels, &eligible, &config, init_logit, 42);
+        let n_rounds = cv_select_rounds(&store, &labels, &eligible, &config, init_logit, 42, false);
 
         assert!(
             n_rounds >= 3,
@@ -1451,7 +1511,14 @@ mod tests {
         let store = QuantisedStore::from_columns(&columns);
         let exclude = vec![false; n];
 
-        let probs = fit_logistic_gbm(&store, &labels, &exclude, &LogisticGbmConfig::default(), 42);
+        let probs = fit_logistic_gbm(
+            &store,
+            &labels,
+            &exclude,
+            &LogisticGbmConfig::default(),
+            42,
+            false,
+        );
 
         let auc_val = auc(&probs, &labels);
         assert!(
@@ -1516,7 +1583,14 @@ mod tests {
         let store = QuantisedStore::from_columns(&columns);
         let exclude = vec![false; n];
 
-        let probs = fit_logistic_gbm(&store, &labels, &exclude, &LogisticGbmConfig::default(), 42);
+        let probs = fit_logistic_gbm(
+            &store,
+            &labels,
+            &exclude,
+            &LogisticGbmConfig::default(),
+            42,
+            false,
+        );
 
         let auc_val = auc(&probs, &labels);
         assert!(

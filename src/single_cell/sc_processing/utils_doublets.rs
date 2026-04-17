@@ -1444,6 +1444,144 @@ pub fn simulate_doublets_scdbl(
     (chunks, lib_sizes)
 }
 
+/// Parameters for the unrecognisable-origin filter.
+#[derive(Clone, Debug)]
+pub struct UnrecognisableFilterParams {
+    /// Minimum sims per origin to evaluate. R default: 5.
+    pub min_size: usize,
+    /// Minimum separation between sim median and the worst-case parent/global
+    /// median. R default: 0.1.
+    pub min_med_diff: f32,
+}
+
+impl Default for UnrecognisableFilterParams {
+    fn default() -> Self {
+        Self {
+            min_size: 5,
+            min_med_diff: 0.1,
+        }
+    }
+}
+
+/// Canonicalise a parent cluster pair. Returns `None` for homotypic
+/// pairs (which R skips via its `grepl("+", ...)` filter).
+#[inline]
+fn canonical_pair(a: usize, b: usize) -> Option<(usize, usize)> {
+    if a == b {
+        None
+    } else {
+        Some((a.min(b), a.max(b)))
+    }
+}
+
+/// Linear-interpolation quantile matching R's `type = 7` default.
+///
+/// Input must be sorted ascending.
+fn quantile_sorted(sorted: &[f32], p: f32) -> f32 {
+    if sorted.is_empty() {
+        return f32::NAN;
+    }
+    if sorted.len() == 1 {
+        return sorted[0];
+    }
+    let idx = p.clamp(0.0, 1.0) * (sorted.len() - 1) as f32;
+    let lo = idx.floor() as usize;
+    let hi = (lo + 1).min(sorted.len() - 1);
+    let frac = idx - lo as f32;
+    sorted[lo] * (1.0 - frac) + sorted[hi] * frac
+}
+
+/// Identify canonical origins whose simulated doublets are indistinguishable
+/// from their parent clusters' real cells.
+///
+/// Flags an origin `(A, B)` if EITHER:
+///   (a) sim 10th percentile < max(parent A 90th, parent B 90th)
+///   (b) sim median - max(global median, parent A median,
+///       parent B median) < min_med_diff
+pub fn identify_unrecognisable_origins(
+    obs_scores: &[f32],
+    obs_cluster_labels: &[usize],
+    sim_scores: &[f32],
+    sim_parent_clusters: &[(usize, usize)],
+    params: &UnrecognisableFilterParams,
+) -> FxHashSet<(usize, usize)> {
+    assert_eq!(obs_scores.len(), obs_cluster_labels.len());
+    assert_eq!(sim_scores.len(), sim_parent_clusters.len());
+
+    // Global median of observed scores
+    let global_median = {
+        let mut sorted: Vec<f32> = obs_scores.to_vec();
+        sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+        quantile_sorted(&sorted, 0.5)
+    };
+
+    // Per-cluster 50th and 90th percentiles of observed scores
+    let mut per_cluster: FxHashMap<usize, Vec<f32>> = FxHashMap::default();
+    for (i, &cl) in obs_cluster_labels.iter().enumerate() {
+        per_cluster.entry(cl).or_default().push(obs_scores[i]);
+    }
+    let mut cluster_pcts: FxHashMap<usize, (f32, f32)> = FxHashMap::default();
+    for (cl, mut scores) in per_cluster {
+        scores.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+        cluster_pcts.insert(
+            cl,
+            (quantile_sorted(&scores, 0.5), quantile_sorted(&scores, 0.9)),
+        );
+    }
+
+    // Group sim scores by canonical heterotypic origin
+    let mut sims_by_origin: FxHashMap<(usize, usize), Vec<f32>> = FxHashMap::default();
+    for (si, &(ca, cb)) in sim_parent_clusters.iter().enumerate() {
+        if let Some(canon) = canonical_pair(ca, cb) {
+            sims_by_origin
+                .entry(canon)
+                .or_default()
+                .push(sim_scores[si]);
+        }
+    }
+
+    // Evaluate predicate per origin
+    let mut flagged: FxHashSet<(usize, usize)> = FxHashSet::default();
+    for (origin, mut scores) in sims_by_origin {
+        if scores.len() < params.min_size {
+            continue;
+        }
+        scores.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+        let sim_p10 = quantile_sorted(&scores, 0.1);
+        let sim_p50 = quantile_sorted(&scores, 0.5);
+
+        let fallback = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+        let (p50_a, p90_a) = cluster_pcts.get(&origin.0).copied().unwrap_or(fallback);
+        let (p50_b, p90_b) = cluster_pcts.get(&origin.1).copied().unwrap_or(fallback);
+
+        let cond_a = sim_p10 < p90_a.max(p90_b);
+        let max_reference = global_median.max(p50_a).max(p50_b);
+        let cond_b = (sim_p50 - max_reference) < params.min_med_diff;
+
+        if cond_a || cond_b {
+            flagged.insert(origin);
+        }
+    }
+
+    flagged
+}
+
+/// Build a per-sim exclusion mask from a set of flagged canonical
+/// origins. Homotypic sims are always false (not a valid origin).
+pub fn mark_sims_from_flagged_origins(
+    sim_parent_clusters: &[(usize, usize)],
+    flagged: &FxHashSet<(usize, usize)>,
+) -> Vec<bool> {
+    sim_parent_clusters
+        .iter()
+        .map(|&(ca, cb)| {
+            canonical_pair(ca, cb)
+                .map(|c| flagged.contains(&c))
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
 ///////////
 // Tests //
 ///////////
@@ -1672,8 +1810,8 @@ mod tests {
         assert_eq!(lib_half, 100); // 200 / 2 = 100
     }
 
-    /// Poisson resampling should add noise: repeated doublets from
-    /// the same parents should NOT be identical.
+    /// Poisson resampling should add noise: repeated doublets from the same
+    /// parents should NOT be identical.
     #[test]
     fn test_resamp_adds_noise() {
         let parent_a = vec![10, 20, 30, 40, 50];
@@ -1952,5 +2090,163 @@ mod tests {
 
         assert_eq!(c1, c2);
         assert_eq!(l1, l2);
+    }
+
+    /////////////////////////////
+    // Unrecognisable doublets //
+    /////////////////////////////
+
+    #[test]
+    fn test_quantile_basic() {
+        let s = vec![0.1, 0.2, 0.3, 0.4, 0.5];
+        assert!((quantile_sorted(&s, 0.0) - 0.1).abs() < 1e-6);
+        assert!((quantile_sorted(&s, 0.5) - 0.3).abs() < 1e-6);
+        assert!((quantile_sorted(&s, 1.0) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_quantile_interpolation() {
+        let s = vec![0.0, 10.0];
+        assert!((quantile_sorted(&s, 0.5) - 5.0).abs() < 1e-6);
+        assert!((quantile_sorted(&s, 0.1) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_quantile_empty_and_single() {
+        assert!(quantile_sorted(&[], 0.5).is_nan());
+        assert_eq!(quantile_sorted(&[3.15], 0.5), 3.15);
+    }
+
+    #[test]
+    fn test_canonical_pair_ordering() {
+        assert_eq!(canonical_pair(2, 5), Some((2, 5)));
+        assert_eq!(canonical_pair(5, 2), Some((2, 5)));
+        assert_eq!(canonical_pair(3, 3), None);
+    }
+
+    #[test]
+    fn test_too_few_sims_not_flagged() {
+        // Only 4 sims for origin (0,1) -- below min_size=5
+        let obs = vec![0.1; 10];
+        let clust: Vec<usize> = (0..10).map(|i| i % 2).collect();
+        let sim = vec![0.1, 0.15, 0.2, 0.25];
+        let sp = vec![(0, 1); 4];
+        let flagged = identify_unrecognisable_origins(&obs, &clust, &sim, &sp, &Default::default());
+        assert!(flagged.is_empty());
+    }
+
+    #[test]
+    fn test_clear_separation_not_flagged() {
+        // Obs at 0.1, sim at 0.9+
+        let obs = vec![0.1; 20];
+        let clust: Vec<usize> = (0..20).map(|i| i % 2).collect();
+        let sim = vec![0.9, 0.92, 0.95, 0.97, 0.99, 0.88, 0.91, 0.94];
+        let sp = vec![(0, 1); 8];
+        let flagged = identify_unrecognisable_origins(&obs, &clust, &sim, &sp, &Default::default());
+        assert!(flagged.is_empty());
+    }
+
+    #[test]
+    fn test_cond_a_triggers_via_any_parent() {
+        // Cluster 0 has noisy real cells (90th pct = 0.96)
+        // Cluster 1 is clean
+        // Sim (0,1) 10th pct ~0.57 < 0.96 -> cond_a triggers via cluster 0
+        let obs = vec![
+            0.6, 0.7, 0.8, 0.9, 1.0, // cluster 0 high
+            0.1, 0.1, 0.1, 0.1, 0.1, // cluster 1 low
+        ];
+        let clust = vec![0, 0, 0, 0, 0, 1, 1, 1, 1, 1];
+        let sim = vec![0.5, 0.6, 0.65, 0.7, 0.75, 0.6, 0.65, 0.7];
+        let sp = vec![(0, 1); 8];
+        let flagged = identify_unrecognisable_origins(&obs, &clust, &sim, &sp, &Default::default());
+        assert!(flagged.contains(&(0, 1)));
+    }
+
+    #[test]
+    fn test_cond_b_triggers_on_median_proximity() {
+        // Designed so cond_a does NOT trigger (sim 10th > max parent 90th)
+        // but sim median is within 0.1 of worst parent median.
+        // Cluster 0: all 0.1 -> p50=0.1, p90=0.1
+        // Cluster 1: all 0.15 -> p50=0.15, p90=0.15
+        // Sim 10th ~ 0.207 > 0.15 (cond_a false)
+        // Sim 50th ~ 0.235, max ref = 0.15, diff 0.085 < 0.1 (cond_b true)
+        let obs = vec![0.1, 0.1, 0.1, 0.1, 0.1, 0.15, 0.15, 0.15, 0.15, 0.15];
+        let clust = vec![0, 0, 0, 0, 0, 1, 1, 1, 1, 1];
+        let sim = vec![0.20, 0.21, 0.22, 0.23, 0.24, 0.25, 0.26, 0.27];
+        let sp = vec![(0, 1); 8];
+        let flagged = identify_unrecognisable_origins(&obs, &clust, &sim, &sp, &Default::default());
+        assert!(flagged.contains(&(0, 1)));
+    }
+
+    #[test]
+    fn test_canonical_combines_reversed_pairs() {
+        // Alternating (0,1) and (1,0) should combine into one origin
+        // of 8 sims, triggering cond_b.
+        let obs = vec![0.1, 0.1, 0.1, 0.1, 0.1, 0.15, 0.15, 0.15, 0.15, 0.15];
+        let clust = vec![0, 0, 0, 0, 0, 1, 1, 1, 1, 1];
+        let sim = vec![0.20, 0.21, 0.22, 0.23, 0.24, 0.25, 0.26, 0.27];
+        let sp = vec![
+            (0, 1),
+            (1, 0),
+            (0, 1),
+            (1, 0),
+            (0, 1),
+            (1, 0),
+            (0, 1),
+            (1, 0),
+        ];
+        let flagged = identify_unrecognisable_origins(&obs, &clust, &sim, &sp, &Default::default());
+        assert!(flagged.contains(&(0, 1)));
+    }
+
+    #[test]
+    fn test_homotypic_ignored() {
+        // All sims have homotypic origin (0,0) -- skipped entirely
+        let obs = vec![0.1; 10];
+        let clust = vec![0; 10];
+        let sim = vec![0.1; 8];
+        let sp = vec![(0, 0); 8];
+        let flagged = identify_unrecognisable_origins(&obs, &clust, &sim, &sp, &Default::default());
+        assert!(flagged.is_empty());
+    }
+
+    #[test]
+    fn test_mixed_flagged_and_kept() {
+        // (0,1) clearly separated (kept)
+        // (2,3) overlaps cluster 2's high-scoring cells (flagged)
+        let obs = vec![
+            0.1, 0.1, 0.1, 0.1, 0.1, // cluster 0
+            0.1, 0.1, 0.1, 0.1, 0.1, // cluster 1
+            0.6, 0.7, 0.8, 0.9, 1.0, // cluster 2 (high)
+            0.1, 0.1, 0.1, 0.1, 0.1, // cluster 3
+        ];
+        let clust = vec![0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3];
+        let sim = vec![
+            0.90, 0.92, 0.95, 0.97, 0.99, 0.91, 0.93, 0.96, 0.50, 0.60, 0.65, 0.70, 0.75, 0.60,
+            0.65, 0.70,
+        ];
+        let sp: Vec<(usize, usize)> = std::iter::repeat_n((0, 1), 8)
+            .chain(std::iter::repeat_n((2, 3), 8))
+            .collect();
+        let flagged = identify_unrecognisable_origins(&obs, &clust, &sim, &sp, &Default::default());
+        assert!(flagged.contains(&(2, 3)));
+        assert!(!flagged.contains(&(0, 1)));
+    }
+
+    #[test]
+    fn test_mark_sims_from_flagged_origins_canonical() {
+        // Flagged set contains (0,1); sims with either (0,1) or (1,0)
+        // should both be marked. (2,3) is not flagged. Homotypic (5,5) false.
+        let sp = vec![(0, 1), (2, 3), (1, 0), (3, 2), (5, 5)];
+        let mut flagged = FxHashSet::default();
+        flagged.insert((0, 1));
+        let mask = mark_sims_from_flagged_origins(&sp, &flagged);
+        assert_eq!(mask, vec![true, false, true, false, false]);
+    }
+
+    #[test]
+    fn test_empty_inputs() {
+        let flagged = identify_unrecognisable_origins(&[], &[], &[], &[], &Default::default());
+        assert!(flagged.is_empty());
     }
 }
