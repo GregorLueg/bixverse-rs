@@ -156,6 +156,8 @@ pub struct ScDblFinderResult {
     pub cluster_labels: Vec<usize>,
     /// Fraction of observed cells called as doublets.
     pub detected_doublet_rate: f32,
+    /// Indices of the selected genes for ScDblFinder.
+    pub selected_genes: Vec<usize>,
     /// Features
     pub features: Option<FeatureTable>,
 }
@@ -1621,6 +1623,7 @@ impl ScDblFinder {
             doublet_scores: final_scores,
             cxds: obs_cxds_scores,
             weighted: obs_intermediates.iter().map(|c| c.weighted).collect(),
+            selected_genes,
             threshold,
             cluster_labels,
             detected_doublet_rate,
