@@ -686,10 +686,6 @@ impl ScDblFinderParams {
                 .get("manual_threshold")
                 .and_then(|v| v.as_real())
                 .map(|x| x as f32),
-            n_bins: map
-                .get("n_bins")
-                .and_then(|v| v.as_integer())
-                .unwrap_or(defaults.n_bins as i32) as usize,
         }
     }
 }

@@ -98,8 +98,6 @@ pub struct ScDblFinderParams {
     // -- Thresholding --
     /// Optional manual threshold. If `None`, cost-based optimisation is used.
     pub manual_threshold: Option<f32>,
-    /// Number of histogram bins for threshold detection.
-    pub n_bins: usize,
 }
 
 impl Default for ScDblFinderParams {
@@ -131,7 +129,6 @@ impl Default for ScDblFinderParams {
             expected_doublet_rate: None,
             return_features: false,
             manual_threshold: None,
-            n_bins: 100,
         }
     }
 }
