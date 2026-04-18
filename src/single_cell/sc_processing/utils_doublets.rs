@@ -522,6 +522,14 @@ pub fn dispatch_knn(
             false,
             verbose,
         ),
+        KnnSearch::KmKnn => generate_knn_kmknn(
+            embd,
+            &knn_params.ann_dist,
+            k,
+            knn_params.n_list,
+            seed,
+            verbose,
+        ),
     }
 }
 

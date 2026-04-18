@@ -101,6 +101,18 @@ fn knn_search(
             );
             query_ivf_index(query, &index, k, params.n_list, true, verbose)
         }
+        KnnSearch::KmKnn => {
+            let index = build_kmknn_index(
+                reference,
+                &params.ann_dist,
+                params.n_list,
+                None,
+                seed,
+                verbose,
+            );
+
+            query_kmknn_index(query, &index, k, true, verbose)
+        }
     };
 
     (indices, dist.unwrap())

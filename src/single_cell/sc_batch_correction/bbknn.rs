@@ -250,6 +250,24 @@ fn get_batch_balanced_knn(
                     verbose,
                 )
             }
+            &KnnSearch::KmKnn => {
+                let index = build_kmknn_index(
+                    sub_matrix.as_ref(),
+                    &bbknn_params.knn_params.ann_dist,
+                    bbknn_params.knn_params.n_list,
+                    None,
+                    seed,
+                    verbose,
+                );
+
+                query_kmknn_index(
+                    mat,
+                    &index,
+                    bbknn_params.neighbours_within_batch + 1,
+                    false,
+                    verbose,
+                )
+            }
         };
 
         let col_start = batch_idx * bbknn_params.neighbours_within_batch;
