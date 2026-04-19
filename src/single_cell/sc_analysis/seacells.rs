@@ -157,7 +157,7 @@ fn sparse_to_dense_csr_scaled(mat: &CompressedSparseData2<f32>, scale: f32, dens
 ///
 /// Pruned matrix.
 fn prune_and_renormalise(mat: &mut CompressedSparseData2<f32>, threshold: f32) {
-    // Remove values below threshold
+    // remove values below threshold
     let mut new_data = Vec::new();
     let mut new_indices = Vec::new();
     let mut new_indptr = vec![0];
@@ -179,10 +179,19 @@ fn prune_and_renormalise(mat: &mut CompressedSparseData2<f32>, threshold: f32) {
     mat.indices = new_indices;
     mat.indptr = new_indptr;
 
-    // Renormalise columns to maintain sum-to-1 constraint
+    // renormalise columns to maintain sum-to-1 constraint
     normalise_csr_columns_l1(mat);
 }
 
+/// Compute the trace (sum of diagonal elements) of a sparse matrix
+///
+/// ### Params
+///
+/// * `mat` - Sparse CSR matrix
+///
+/// ### Returns
+///
+/// Sum of diagonal elements `mat[i, i]`
 fn matrix_trace(mat: &CompressedSparseData2<f32>) -> f32 {
     let n = mat.shape.0.min(mat.shape.1);
     let mut trace = 0.0;
@@ -283,7 +292,7 @@ fn diffusion_map_from_kernel(
         })
         .collect();
 
-    // Symmetric normalisation: D^(-1/2) * K * D^(-1/2)
+    // symmetric normalisation: D^(-1/2) * K * D^(-1/2)
     for i in 0..kernel.shape.0 {
         let d_i_sqrt = row_sums[i].sqrt();
         for idx in kernel.indptr[i]..kernel.indptr[i + 1] {
@@ -329,10 +338,6 @@ fn determine_multiscale_space(
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
             .map(|(idx, _)| idx + 1)
             .unwrap_or(3);
-
-        // DEBUG
-        println!("Gaps: {:?}", &gaps[..gaps.len().min(10)]);
-        println!("Max gap at index: {}", max_gap_idx);
 
         max_gap_idx.max(3).min(eigenvalues.len())
     };
@@ -472,18 +477,22 @@ impl<'a> SEACells<'a> {
 
     /// Construct the kernel matrix from k-NN graph with adaptive RBF weights
     ///
-    /// Builds a sparse kernel matrix K where `K[i,j]` represents similarity
-    /// between cells i and j. Uses adaptive bandwidth RBF:
+    /// Builds a sparse symmetric kernel K where K[i,j] ∝ similarity between
+    /// cells i and j:
     ///
-    /// ```exp(-dist^2/(σᵢ × σⱼ))```
+    /// ```K[i,j] = exp(-||xᵢ - xⱼ||² / (σᵢ σⱼ))```
     ///
-    /// where σᵢ is the median distance to k nearest neighbours of cell i.
+    /// where σᵢ is the median k-NN distance for cell i (taken from the
+    /// already-squared `knn_distances` via .sqrt() at the median index).
     ///
-    /// The graph can be symmetrised using union (add edge if either direction
-    /// exists) or intersection (add edge only if both directions exist).
+    /// The graph is first symmetrised by union (edge if either direction
+    /// exists) or intersection (edge only if both directions exist); self-loops
+    /// are added before weights are computed, which guarantees K[i,i] = 1 and a
+    /// symmetric sparsity pattern. Weights are symmetric by construction since
+    /// both the distance and σᵢσⱼ are symmetric.
     ///
-    /// K^2 is never materialised. All downstream operations compute
-    /// K @ (K @ X) on the fly, bounding memory to O(nnz(K)).
+    /// K² is never materialised - downstream operations compute
+    /// K @ (K @ X), bounding memory to O(nnz(K)).
     ///
     /// ### Params
     ///
@@ -581,11 +590,15 @@ impl<'a> SEACells<'a> {
         self.kernel_mat = Some(kernel);
     }
 
-    /// Compute K^2 @ X = K @ (K @ X) for a sparse matrix X
+    /// Compute K² @ X = K @ (K @ X) for a sparse matrix X
     ///
-    /// Avoids materialising K^2 entirely. The intermediate result K @ X has
+    /// Avoids materialising K² entirely. The intermediate result K @ X has
     /// the same shape as X and remains sparse when X is sparse, keeping
-    /// memory bounded to O(nnz(K)) rather than O(nnz(K^2)).
+    /// memory bounded to O(nnz(K)).
+    ///
+    /// K² arises naturally in the FW gradients because the objective
+    /// `||K - KBA||_F²` has Kᵀ K = K² in its normal equations (K is
+    /// symmetric here).
     ///
     /// ### Params
     ///
@@ -846,13 +859,15 @@ impl<'a> SEACells<'a> {
         let kernel = self.kernel_mat.as_ref().unwrap();
         let n = kernel.shape.0;
 
-        const CHUNK_SIZE: usize = 256;
+        const INIT_CHUNK_SIZE: usize = 256;
+        const TILE: usize = 4096;
 
         let mut f = vec![0_f32; n];
         let mut g = vec![0_f32; n];
 
-        for chunk_start in (0..n).step_by(CHUNK_SIZE) {
-            let chunk_end = (chunk_start + CHUNK_SIZE).min(n);
+        // Initial f[i] = sum_j (K^2[j,i])^2, g[i] = K^2[i,i]
+        for chunk_start in (0..n).step_by(INIT_CHUNK_SIZE) {
+            let chunk_end = (chunk_start + INIT_CHUNK_SIZE).min(n);
 
             let chunk_results: Vec<(usize, Vec<f32>)> = (chunk_start..chunk_end)
                 .into_par_iter()
@@ -879,53 +894,97 @@ impl<'a> SEACells<'a> {
 
         let mut e_p = vec![0.0f32; n];
         let mut omega_new = vec![0.0f32; n];
+        let mut pl = vec![0.0f32; n];
 
         for iter in 0..n_centres {
-            let mut best_idx = 0;
-            let mut best_score = f32::MIN;
-
-            for i in 0..n {
-                if g[i] > 1e-15 {
-                    let score = f[i] / g[i];
-                    if score > best_score {
-                        best_score = score;
-                        best_idx = i;
-                    }
-                }
-            }
+            // Argmax of f / g
+            let best_idx = (0..n)
+                .into_par_iter()
+                .filter_map(|i| (g[i] > 1e-15).then(|| (i, f[i] / g[i])))
+                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+                .map(|(i, _)| i)
+                .unwrap_or(0);
 
             centres.push(best_idx);
 
+            // delta = K^2[:, p] - sum_{r<iter} omega[r][p] * omega[r]
             e_p.fill(0.0);
             e_p[best_idx] = 1.0;
-            let k2_col = self.k_squared_matvec(&e_p);
+            let mut delta = self.k_squared_matvec(&e_p);
 
-            let mut delta = k2_col.clone();
-            for i in 0..n {
-                let omega_sum: f32 = (0..iter).map(|r| omega[r][best_idx] * omega[r][i]).sum();
-                delta[i] -= omega_sum;
-            }
+            let delta_coefs: Vec<f32> = (0..iter).map(|r| omega[r][best_idx]).collect();
+            delta
+                .par_chunks_mut(TILE)
+                .enumerate()
+                .for_each(|(tile_idx, tile)| {
+                    let start = tile_idx * TILE;
+                    let end = start + tile.len();
+                    for r in 0..iter {
+                        let coef = delta_coefs[r];
+                        if coef == 0.0 {
+                            continue;
+                        }
+                        let omega_r = &omega[r][start..end];
+                        for (d, o) in tile.iter_mut().zip(omega_r.iter()) {
+                            *d -= coef * o;
+                        }
+                    }
+                });
 
             delta[best_idx] = delta[best_idx].max(0.0);
             let delta_p_sqrt = delta[best_idx].sqrt().max(1e-6);
 
-            for i in 0..n {
-                omega_new[i] = delta[i] / delta_p_sqrt;
-            }
+            omega_new
+                .par_iter_mut()
+                .zip(delta.par_iter())
+                .for_each(|(o, &d)| *o = d / delta_p_sqrt);
 
-            let omega_sq_norm: f32 = omega_new.iter().map(|&x| x * x).sum();
+            let omega_sq_norm: f32 = omega_new.par_iter().map(|&x| x * x).sum();
             let k_omega_new = self.k_squared_matvec(&omega_new);
 
-            for i in 0..n {
-                let omega_hadamard = omega_new[i] * omega_new[i];
-                let term1 = omega_sq_norm * omega_hadamard;
+            // pl[i] = sum_r <omega_r, omega_new> * omega_r[i]
+            let omega_dot_new: Vec<f32> = (0..iter)
+                .into_par_iter()
+                .map(|r| {
+                    omega[r]
+                        .iter()
+                        .zip(omega_new.iter())
+                        .map(|(a, b)| a * b)
+                        .sum::<f32>()
+                })
+                .collect();
 
-                let pl: f32 = (0..iter).map(|r| omega[r][best_idx] * omega[r][i]).sum();
-                let term2 = omega_new[i] * (k_omega_new[i] - pl);
+            pl.fill(0.0);
+            pl.par_chunks_mut(TILE)
+                .enumerate()
+                .for_each(|(tile_idx, tile)| {
+                    let start = tile_idx * TILE;
+                    let end = start + tile.len();
+                    for r in 0..iter {
+                        let coef = omega_dot_new[r];
+                        if coef == 0.0 {
+                            continue;
+                        }
+                        let omega_r = &omega[r][start..end];
+                        for (p, o) in tile.iter_mut().zip(omega_r.iter()) {
+                            *p += coef * o;
+                        }
+                    }
+                });
 
-                f[i] += -2.0 * term2 + term1;
-                g[i] += omega_hadamard;
-            }
+            // Update f and g
+            f.par_iter_mut()
+                .zip(g.par_iter_mut())
+                .zip(omega_new.par_iter())
+                .zip(k_omega_new.par_iter())
+                .zip(pl.par_iter())
+                .for_each(|((((f_i, g_i), &o_i), &k_i), &p_i)| {
+                    let omega_hadamard = o_i * o_i;
+                    let term1 = omega_sq_norm * omega_hadamard;
+                    let term2 = o_i * (k_i - p_i);
+                    *f_i += -2.0 * term2 + term1;
+                    *g_i += omega_hadamard;
+                });
 
             omega[iter].copy_from_slice(&omega_new);
         }
@@ -937,13 +996,16 @@ impl<'a> SEACells<'a> {
     ///
     /// Creates:
     ///
-    /// - B matrix: one-hot encoding of archetype cells (n × k)
-    /// - A matrix: random sparse assignments normalised to sum to 1 per cell
-    ///   (k × n)
+    /// - B matrix (n × k): one-hot encoding of archetype cells
+    /// - A matrix (k × n): sparse random assignments, column-L1-normalised
     ///
-    /// Each cell is randomly assigned to ~25% of archetypes with random weights,
-    /// then normalised. A is then updated once using Frank-Wolfe for a better
-    /// starting point.
+    /// Each cell is randomly assigned to ⌈0.25 k⌉ archetypes with uniform
+    /// random weights, then column-normalised so each cell's weights sum to 1.
+    /// A is then refined by one full Frank-Wolfe update pass against the fixed
+    /// B for a better starting point.
+    ///
+    /// Matches the Python reference, which uses the same 25%-of-k sparsity
+    /// and L1 column normalisation.
     ///
     /// ### Params
     ///
@@ -999,18 +1061,23 @@ impl<'a> SEACells<'a> {
     ///
     /// Solves:
     ///
-    /// ```min ||K^2 - K^2 @ B @ A||^2```
+    /// ```min_A ||K - K B A||_F²```
     ///
-    /// subject to A columns summing to 1.
+    /// subject to A columns summing to 1 (column-stochastic).
     ///
-    /// Computes gradient G = 2(t1 @ A - t2) where:
-    /// - t1 = B^T @ K^2 @ B  [k × k]
-    /// - t2 = B^T @ K^2      [k × n]
+    /// The gradient with respect to A is:
     ///
-    /// K^2 @ B is computed as K @ (K @ B) without materialising K^2.
+    /// ```∇_A = 2 (Bᵀ K² B A - Bᵀ K²) = 2 (t1 A - t2)```
     ///
-    /// For each cell, sets weight to 1 for the archetype with minimum gradient,
-    /// then takes a convex step: A = (1 - step) × A + step × E.
+    /// where:
+    /// - t1 = Bᵀ K² B   [k × k]
+    /// - t2 = Bᵀ K²     [k × n]
+    ///
+    /// K² @ B is computed as K @ (K @ B) without ever materialising K².
+    ///
+    /// For each cell (column), sets weight to 1 for the archetype with
+    /// minimum gradient, then takes a convex step A ← (1 - γ) A + γ E
+    /// with γ = 2/(t + 2).
     ///
     /// ### Params
     ///
@@ -1099,23 +1166,24 @@ impl<'a> SEACells<'a> {
     ///
     /// Solves:
     ///
-    /// ```min ||K^2 - K^2 @ B @ A||^2```
+    /// ```min_B ||K - K B A||_F²```
     ///
-    /// subject to B columns summing to 1.
+    /// subject to B columns summing to 1 (column-stochastic).
     ///
-    /// Computes gradient G = 2(K^2 @ B @ t1 - t2) where:
-    /// - t1 = A @ A^T  [k × k]
-    /// - t2 = K^2 @ A^T  [n × k]
+    /// The gradient with respect to B is:
     ///
-    /// K^2 @ B is recomputed each iteration as K @ (K @ B) since B changes.
-    /// Two sparse matmuls through K (nnz ~ 3M) is cheaper than one through
-    /// K^2 (nnz ~ 50-100M) at typical single-cell scale.
+    /// ```∇_B = 2 (K² B A Aᵀ - K² Aᵀ) = 2 (K² B · t1 - t2)```
     ///
-    /// Includes early stopping when the Frank-Wolfe update norm falls below
-    /// FW_TOLERANCE after a minimum of 10 iterations.
+    /// where:
+    /// - t1 = A Aᵀ     [k × k]
+    /// - t2 = K² Aᵀ    [n × k]
     ///
-    /// For each archetype, sets weight to 1 for the cell with minimum gradient,
-    /// then takes a convex step: B = (1 - step) × B + step × E.
+    /// K² @ B is recomputed each inner iteration as K @ (K @ B) because B
+    /// is what is being updated. Two matmuls through sparse K is still
+    /// cheaper than one through a materialised K² at single-cell scale.
+    ///
+    /// Includes early stopping when the Frank-Wolfe step contribution
+    /// falls below FW_TOLERANCE after a minimum of 10 iterations.
     ///
     /// ### Params
     ///
@@ -1214,9 +1282,16 @@ impl<'a> SEACells<'a> {
 
     /// Compute residual sum of squares (RSS)
     ///
-    /// Calculates Frobenius norm: ```||K - K @ B @ A||_F^2```
+    /// Returns the Frobenius norm (not squared) of the reconstruction
+    /// residual:
     ///
-    /// Note: Uses K (not K^2) for reconstruction to measure approximation quality.
+    /// ```||K - K B A||_F```
+    ///
+    /// This matches the reference Python implementation
+    /// (`np.linalg.norm` / `scipy.sparse.linalg.norm`, both of which
+    /// default to the Frobenius norm, unsquared). The convergence check
+    /// `|RSS_{i-1} - RSS_i| < ε · RSS_0` is therefore in norm units, not
+    /// squared-norm units.
     ///
     /// ### Params
     ///
@@ -1236,7 +1311,8 @@ impl<'a> SEACells<'a> {
 
     /// Fast RSS computation for small datasets (materialises reconstruction)
     ///
-    /// This version is quite fast and works well on small datasets.
+    /// Directly forms the n × n reconstruction K B A and returns the Frobenius
+    /// norm of (K - K B A). Cheap when n is small.
     ///
     /// ### Params
     ///
@@ -1260,14 +1336,16 @@ impl<'a> SEACells<'a> {
 
     /// Memory-efficient RSS computation for large datasets (uses trace trick)
     ///
-    /// Expands the Frobenius norm without materialising the (n × n) reconstruction:
+    /// Expands the squared Frobenius norm via the trace identity:
     ///
-    /// ```||K - K @ B @ A||_F^2 = ||K||_F^2 - 2 tr(K^2 B A) + tr(A A^T B^T K^2 B)```
+    /// ```||K - K B A||_F² = ||K||_F² - 2 tr(K² B A) + tr(A Aᵀ Bᵀ K² B)```
     ///
-    /// All K^2 @ X terms are computed as K @ (K @ X). The largest intermediate
-    /// matrices are (n × k), keeping memory bounded to O(nnz(K)).
+    /// Cyclic trace reordering keeps every intermediate at worst (n × k) or
+    /// (k × k); the n × n reconstruction is never formed. All K² @ X terms are
+    /// computed as K @ (K @ X).
     ///
-    /// This version is slower but does not blow up memory on large datasets.
+    /// The final `.sqrt()` converts back to the Frobenius norm to match
+    /// `compute_rss_simple`.
     ///
     /// ### Params
     ///

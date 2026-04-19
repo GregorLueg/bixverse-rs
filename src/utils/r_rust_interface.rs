@@ -427,7 +427,7 @@ where
 /// The CompressedSparseData2 Rust object with the data
 pub fn list_to_sparse_matrix<T>(r_list: List, populate_data_2: bool) -> CompressedSparseData2<T>
 where
-    T: Clone + Default + TryFrom<Robj> + Into<u32>,
+    T: Clone + Default + TryFrom<Robj>,
 {
     let r_data = r_list.into_hashmap();
 
