@@ -4,6 +4,7 @@
 use faer::Mat;
 use std::borrow::Cow;
 
+use crate::core::base::info::parse_bin_strategy_type;
 use crate::core::base::loess::LoessRegression;
 use crate::core::math::pca_svd::*;
 use crate::prelude::*;
@@ -28,7 +29,7 @@ use crate::single_cell::sc_processing::hvg::*;
 ///
 /// ### Returns
 ///
-/// The HVG result
+/// The [HvgRes]
 pub fn get_hvg_vst_from_sparse(
     matrix: &CompressedSparseData2<f32>,
     loess_span: f32,
@@ -112,6 +113,96 @@ pub fn get_hvg_vst_from_sparse(
         var_exp: loess_res.fitted_vals.r_float_convert(),
         var_std: var_standardised.r_float_convert(),
     }
+}
+
+/// Dispersion-based HVG selection from an in-memory sparse matrix.
+///
+/// Expects log-normalised data in `data` (i.e. `log1p(x/sum * size_factor)`).
+/// Back-transforms via `expm1` internally to match Seurat's
+/// `FastExpMean`/`FastLogVMR`.
+///
+/// ### Params
+///
+/// * `matrix` - The count data of the metacell
+/// * `binning` - The binning strategy to use. One of `"equal_width"` or
+///   `"equal_freq"`.
+/// * `n_bins` - Number of bins
+///
+/// ### Returns
+///
+/// The [HvgDispersionRes]
+pub fn get_hvg_dispersion_from_sparse(
+    matrix: &CompressedSparseData2<f32>,
+    binning: &str,
+    n_bins: usize,
+) -> HvgDispersionRes {
+    let csc = match matrix.cs_type {
+        CompressedSparseFormat::Csc => Cow::Borrowed(matrix),
+        CompressedSparseFormat::Csr => Cow::Owned(matrix.transform()),
+    };
+    let (n_cells, n_genes) = csc.shape;
+    let n = n_cells as f64;
+    let binning = parse_bin_strategy_type(binning).unwrap_or_default();
+
+    let mut means = Vec::with_capacity(n_genes);
+    let mut dispersions = Vec::with_capacity(n_genes);
+
+    for j in 0..n_genes {
+        let start = csc.indptr[j];
+        let end = csc.indptr[j + 1];
+        let slice = &csc.data[start..end];
+
+        // zero entries contribute expm1(0) = 0 so nonzeros suffice
+        let mut sum = 0f64;
+        let mut sum_sq = 0f64;
+        for &val in slice {
+            let v = (val as f64).exp_m1();
+            sum += v;
+            sum_sq += v * v;
+        }
+
+        let mean = sum / n;
+        let var = if n > 1.0 {
+            ((sum_sq - n * mean * mean) / (n - 1.0)).max(0.0)
+        } else {
+            0.0
+        };
+
+        let exp_mean = mean.ln_1p() as f32;
+        let log_vmr = if mean > 0.0 && var > 0.0 {
+            (var / mean).ln() as f32
+        } else {
+            f32::NAN
+        };
+
+        means.push(exp_mean);
+        dispersions.push(log_vmr);
+    }
+
+    build_disp_result(means, dispersions, binning, n_bins)
+}
+
+/// MVB HVG selection from an in-memory sparse matrix.
+///
+/// Computationally identical to `get_hvg_dispersion_from_sparse`; selection
+/// logic (mean/dispersion cutoffs vs. top-N by dispersion) lives on the R side.
+///
+/// ### Params
+///
+/// * `matrix` - The count data of the metacell
+/// * `binning` - The binning strategy to use. One of `"equal_width"` or
+///   `"equal_freq"`.
+/// * `n_bins` - Number of bins
+///
+/// ### Returns
+///
+/// The [HvgDispersionRes]
+pub fn get_hvg_mvb_from_sparse(
+    matrix: &CompressedSparseData2<f32>,
+    binning: &str,
+    n_bins: usize,
+) -> HvgDispersionRes {
+    get_hvg_dispersion_from_sparse(matrix, binning, n_bins)
 }
 
 /////////

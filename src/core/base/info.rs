@@ -135,7 +135,7 @@ where
 /////////////
 
 /// Binning strategy enum
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Copy)]
 pub enum BinningStrategy {
     /// Equal width bins (equal distance between bin edges)
     #[default]
@@ -155,8 +155,10 @@ pub enum BinningStrategy {
 /// The `BinningStrategy`.
 pub fn parse_bin_strategy_type(s: &str) -> Option<BinningStrategy> {
     match s.to_lowercase().as_str() {
-        "equal_width" => Some(BinningStrategy::EqualWidth),
-        "equal_freq" => Some(BinningStrategy::EqualFrequency),
+        "equal_width" | "equalwidth" => Some(BinningStrategy::EqualWidth),
+        "equal_frequency" | "equal_freq" | "equalfreq" | "equalfrequency" => {
+            Some(BinningStrategy::EqualFrequency)
+        }
         _ => None,
     }
 }

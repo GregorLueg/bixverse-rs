@@ -27,6 +27,7 @@ use crate::single_cell::sc_processing::utils_doublets::*;
 /// the voting-based doublet calling.
 #[derive(Clone, Debug)]
 pub struct BoostParams {
+    // -- processing --
     /// Whether to log-transform counts after normalisation.
     pub log_transform: bool,
     /// Whether to mean-centre genes before PCA.
@@ -35,6 +36,8 @@ pub struct BoostParams {
     pub normalise_variance: bool,
     /// Optional target library size. Defaults to the mean HVG library size.
     pub target_size: Option<f32>,
+
+    // -- hvg --
     /// Percentile threshold for HVG selection.
     pub min_gene_var_pctl: f32,
     /// HVG method: `"vst"`, `"mvb"`, or `"dispersion"`.
@@ -43,15 +46,24 @@ pub struct BoostParams {
     pub loess_span: f64,
     /// Optional clip max for variance stabilisation.
     pub clip_max: Option<f32>,
-    /// Ratio of simulated doublets to observed cells.
-    pub boost_rate: f32,
-    /// Whether to sample cell pairs with replacement.
-    pub replace: bool,
+    /// Binning strategy
+    pub binning_strategy: String,
+    /// Number of bins (HVG)
+    pub n_bins: usize,
+
+    // -- pca --
     /// Number of principal components.
     pub no_pcs: usize,
     /// Whether to use randomised SVD.
     pub random_svd: bool,
     /// Resolution parameter for Louvain clustering.
+
+    // -- boosted --
+    /// Ratio of simulated doublets to observed cells.
+    pub boost_rate: f32,
+    /// Whether to sample cell pairs with replacement.
+    pub replace: bool,
+    /// Louvain resolution parameter
     pub resolution: f32,
     /// Number of Louvain iterations per clustering step.
     pub louvain_iters: usize,
@@ -61,6 +73,8 @@ pub struct BoostParams {
     pub p_thresh: f32,
     /// Fraction threshold for majority voting (0-1).
     pub voter_thresh: f32,
+
+    // -- knn --
     /// Parameters for kNN construction.
     pub knn_params: KnnParams,
 }
@@ -284,6 +298,8 @@ impl BoostClassifier {
             loess_span: self.params.loess_span as f32,
             clip_max: self.params.clip_max,
             min_gene_var_pctl: self.params.min_gene_var_pctl,
+            binning_strategy: self.params.binning_strategy.clone(),
+            n_bins: self.params.n_bins,
         };
 
         if verbose {

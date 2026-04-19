@@ -355,6 +355,29 @@ impl ScrubletParams {
             .and_then(|v| v.as_real())
             .map(|x| x as f32);
 
+        let n_bins = scrublet_list
+            .get("n_bins")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(20) as usize;
+
+        let binning_strategy = std::string::String::from(
+            scrublet_list
+                .get("binning_strategy")
+                .and_then(|v| v.as_str())
+                .unwrap_or("equal_width"),
+        );
+
+        // PCA parameters
+        let no_pcs = scrublet_list
+            .get("no_pcs")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(30) as usize;
+
+        let random_svd = scrublet_list
+            .get("random_svd")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
         // Doublet simulation parameters
         let sim_doublet_ratio = scrublet_list
             .get("sim_doublet_ratio")
@@ -372,8 +395,8 @@ impl ScrubletParams {
             .unwrap_or(0.02) as f32;
 
         // Doublet calling parameters
-        let n_bins = scrublet_list
-            .get("n_bins")
+        let n_bins_hist = scrublet_list
+            .get("n_bins_hist")
             .and_then(|v| v.as_integer())
             .unwrap_or(50) as usize;
 
@@ -381,17 +404,6 @@ impl ScrubletParams {
             .get("manual_threshold")
             .and_then(|v| v.as_real())
             .map(|x| x as f32);
-
-        // PCA parameters
-        let no_pcs = scrublet_list
-            .get("no_pcs")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(30) as usize;
-
-        let random_svd = scrublet_list
-            .get("random_svd")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
 
         Self {
             // norm
@@ -404,15 +416,17 @@ impl ScrubletParams {
             hvg_method,
             loess_span,
             clip_max,
+            n_bins,
+            binning_strategy,
+            // pca
+            no_pcs,
+            random_svd,
             // doublet simulation/detection
             sim_doublet_ratio,
             expected_doublet_rate,
             stdev_doublet_rate,
-            n_bins,
+            n_bins_hist,
             manual_threshold,
-            // pca
-            no_pcs,
-            random_svd,
             // knn
             knn_params,
         }
@@ -485,6 +499,29 @@ impl BoostParams {
             .and_then(|v| v.as_real())
             .map(|x| x as f32);
 
+        let n_bins = params_list
+            .get("n_bins")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(20) as usize;
+
+        let binning_strategy = std::string::String::from(
+            params_list
+                .get("binning_strategy")
+                .and_then(|v| v.as_str())
+                .unwrap_or("equal_width"),
+        );
+
+        // pca
+        let no_pcs = params_list
+            .get("no_pcs")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(30) as usize;
+
+        let random_svd = params_list
+            .get("random_svd")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
         // doublet detection params
         let boost_rate = params_list
             .get("boost_rate")
@@ -511,17 +548,6 @@ impl BoostParams {
             .and_then(|v| v.as_integer())
             .unwrap_or(10) as usize;
 
-        // pca
-        let no_pcs = params_list
-            .get("no_pcs")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(30) as usize;
-
-        let random_svd = params_list
-            .get("random_svd")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-
         let p_thresh = params_list
             .get("p_thresh")
             .and_then(|v| v.as_real())
@@ -533,18 +559,24 @@ impl BoostParams {
             .unwrap_or(0.9) as f32;
 
         Self {
+            // processing
             log_transform,
             mean_center,
             normalise_variance,
             target_size,
+            // hvg
             min_gene_var_pctl,
             hvg_method,
             loess_span,
             clip_max,
-            boost_rate,
-            replace,
+            n_bins,
+            binning_strategy,
+            // pca
             no_pcs,
             random_svd,
+            // boosted
+            boost_rate,
+            replace,
             resolution,
             louvain_iters,
             n_iters,

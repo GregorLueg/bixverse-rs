@@ -20,14 +20,18 @@ use crate::single_cell::sc_processing::pca::*;
 
 /// Common HVG parameter bundle
 pub struct HvgOpts {
+    /// Minimum percentile for the gene variance
+    pub min_gene_var_pctl: f32,
     /// HVG method to use
     pub method: String,
     /// Loess span parameter
     pub loess_span: f32,
     /// Optional clipping parameter
     pub clip_max: Option<f32>,
-    /// Minimum percentile for the gene variance
-    pub min_gene_var_pctl: f32,
+    /// Number of bins
+    pub n_bins: usize,
+    /// Binning strategy, one of `"equal_width"` or `"equal_freq"`
+    pub binning_strategy: String,
 }
 
 /// Common PCA parameter bundle
@@ -74,44 +78,74 @@ pub fn select_hvg(
     let hvg_type = parse_hvg_method(&opts.method)
         .unwrap_or_else(|| panic!("Invalid HVG method: {}", &opts.method));
 
-    let hvg_res: HvgRes = if streaming {
-        match hvg_type {
-            HvgMethod::Vst => get_hvg_vst_streaming(
-                f_path_gene,
-                cells_to_keep,
-                opts.loess_span,
-                opts.clip_max,
-                verbose,
-            ),
-            HvgMethod::MeanVarBin => get_hvg_mvb_streaming(),
-            HvgMethod::Dispersion => get_hvg_dispersion_streaming(),
+    let sort_key: Vec<f64> = match hvg_type {
+        HvgMethod::Vst => {
+            let res = if streaming {
+                get_hvg_vst_streaming(
+                    f_path_gene,
+                    cells_to_keep,
+                    opts.loess_span,
+                    opts.clip_max,
+                    verbose,
+                )
+            } else {
+                get_hvg_vst(
+                    f_path_gene,
+                    cells_to_keep,
+                    opts.loess_span,
+                    opts.clip_max,
+                    verbose,
+                )
+            };
+            res.var_std
         }
-    } else {
-        match hvg_type {
-            HvgMethod::Vst => get_hvg_vst(
-                f_path_gene,
-                cells_to_keep,
-                opts.loess_span,
-                opts.clip_max,
-                verbose,
-            ),
-            HvgMethod::MeanVarBin => get_hvg_mvb(),
-            HvgMethod::Dispersion => get_hvg_dispersion(),
+        HvgMethod::Dispersion => {
+            let res = if streaming {
+                get_hvg_dispersion_streaming(
+                    f_path_gene,
+                    cells_to_keep,
+                    &opts.binning_strategy,
+                    opts.n_bins,
+                    verbose,
+                )
+            } else {
+                get_hvg_dispersion(
+                    f_path_gene,
+                    cells_to_keep,
+                    &opts.binning_strategy,
+                    opts.n_bins,
+                    verbose,
+                )
+            };
+            res.dispersion
+        }
+        HvgMethod::MeanVarBin => {
+            let res = if streaming {
+                get_hvg_mvb_streaming(
+                    f_path_gene,
+                    cells_to_keep,
+                    &opts.binning_strategy,
+                    opts.n_bins,
+                    verbose,
+                )
+            } else {
+                get_hvg_mvb(
+                    f_path_gene,
+                    cells_to_keep,
+                    &opts.binning_strategy,
+                    opts.n_bins,
+                    verbose,
+                )
+            };
+            res.dispersion_scaled
         }
     };
 
-    let n_genes = hvg_res.mean.len() as f32;
+    let n_genes = sort_key.len() as f32;
     let n_to_take = (n_genes * (1.0 - opts.min_gene_var_pctl)).ceil() as usize;
-
-    let mut indices: Vec<(usize, f64)> = hvg_res
-        .var_std
-        .iter()
-        .enumerate()
-        .map(|(i, &v)| (i, v))
-        .collect();
+    let mut indices: Vec<(usize, f64)> = sort_key.into_iter().enumerate().collect();
     indices.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
     indices.truncate(n_to_take);
-
     let mut result: Vec<usize> = indices.into_iter().map(|(i, _)| i).collect();
     result.sort_unstable();
     result

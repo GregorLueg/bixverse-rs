@@ -54,6 +54,7 @@ pub type FinalScrubletRes = (
 /// threshold selection.
 #[derive(Clone, Debug)]
 pub struct ScrubletParams {
+    // -- processing --
     /// Whether to log-transform counts after normalisation.
     pub log_transform: bool,
     /// Whether to mean-centre genes before PCA.
@@ -62,6 +63,8 @@ pub struct ScrubletParams {
     pub normalise_variance: bool,
     /// Optional target library size. Defaults to the mean HVG library size.
     pub target_size: Option<f32>,
+
+    // -- hvg --
     /// Percentile threshold for HVG selection.
     pub min_gene_var_pctl: f32,
     /// HVG method: `"vst"`, `"mvb"`, or `"dispersion"`.
@@ -70,6 +73,18 @@ pub struct ScrubletParams {
     pub loess_span: f64,
     /// Optional clip max for variance stabilisation.
     pub clip_max: Option<f32>,
+    /// Binning strategy
+    pub binning_strategy: String,
+    /// Number of bins for hvg
+    pub n_bins: usize,
+
+    // -- pca --
+    /// Number of principal components.
+    pub no_pcs: usize,
+    /// Whether to use randomised SVD.
+    pub random_svd: bool,
+
+    // -- scrublet --
     /// Ratio of simulated doublets to observed cells.
     pub sim_doublet_ratio: f32,
     /// Expected doublet rate (typically 0.05-0.10).
@@ -77,13 +92,11 @@ pub struct ScrubletParams {
     /// Uncertainty in the expected doublet rate.
     pub stdev_doublet_rate: f32,
     /// Number of histogram bins for Otsu threshold detection.
-    pub n_bins: usize,
+    pub n_bins_hist: usize,
     /// Optional manual threshold. If `None`, Otsu's method is used.
     pub manual_threshold: Option<f32>,
-    /// Number of principal components.
-    pub no_pcs: usize,
-    /// Whether to use randomised SVD.
-    pub random_svd: bool,
+
+    // -- knn --
     /// Parameters for kNN construction.
     pub knn_params: KnnParams,
 }
@@ -281,6 +294,8 @@ impl Scrublet {
             loess_span: self.params.loess_span as f32,
             clip_max: self.params.clip_max,
             min_gene_var_pctl: self.params.min_gene_var_pctl,
+            binning_strategy: self.params.binning_strategy.clone(),
+            n_bins: self.params.n_bins,
         };
         let pca_opts = PcaOpts {
             log_transform: self.params.log_transform,
@@ -398,7 +413,7 @@ impl Scrublet {
         let res = self.call_doublets(
             doublet_scores,
             self.params.manual_threshold,
-            self.params.n_bins,
+            self.params.n_bins_hist,
             verbose,
         );
 
