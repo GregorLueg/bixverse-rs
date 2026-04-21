@@ -467,9 +467,9 @@ where
     };
 
     let data_2 = if populate_data_2 {
-        None
-    } else {
         Some(data.clone())
+    } else {
+        None
     };
 
     CompressedSparseData2 {
