@@ -10,6 +10,7 @@
 - First methods (HVG selection, PCA and SCENIC) for meta cells directly
 - Made the kNN validation optional and improved the distance calculation with
   SIMD.
+- Proper Rust-based error handling across
 
 ## 0.1.7
 
