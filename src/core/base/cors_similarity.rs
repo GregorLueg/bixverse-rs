@@ -41,9 +41,32 @@ where
     T: BixverseFloat,
 {
     let n_rows = mat.nrows();
+    let n_cols = mat.ncols();
     let centered = scale_matrix_col(mat, false);
+    let alpha = T::from_f64(1.0 / (n_rows - 1) as f64).unwrap();
 
-    (centered.transpose() * &centered) / (n_rows - 1) as f64
+    let mut result = Mat::<T>::zeros(n_cols, n_cols);
+
+    triangular_matmul(
+        &mut result,
+        BlockStructure::TriangularLower,
+        Accum::Replace,
+        centered.transpose(),
+        BlockStructure::Rectangular,
+        &centered,
+        BlockStructure::Rectangular,
+        alpha,
+        faer_parallelism(),
+    );
+
+    // reflect lower triangle into upper
+    for j in 0..n_cols {
+        for i in 0..j {
+            result[(i, j)] = result[(j, i)];
+        }
+    }
+
+    result
 }
 
 /// Calculate the cosine similarity between columns of a matrix

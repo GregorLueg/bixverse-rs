@@ -356,14 +356,13 @@ fn compute_cell_complexity(
     f_path_cell: &str,
     cells_to_keep: &[usize],
     selected_genes: &[usize],
-) -> (Vec<u32>, Vec<u32>) {
+) -> Result<(Vec<u32>, Vec<u32>), BixverseErrors> {
     let selected_gene_set: FxHashSet<usize> = selected_genes.iter().copied().collect();
-    let reader = ParallelSparseReader::new(f_path_cell).unwrap();
-
+    let reader = ParallelSparseReader::new(f_path_cell)?;
     let results: Vec<(u32, u32)> = cells_to_keep
         .par_iter()
-        .map(|&cell_idx| {
-            let chunk = reader.read_cell(cell_idx);
+        .map(|&cell_idx| -> Result<(u32, u32), BixverseErrors> {
+            let chunk = reader.read_cell(cell_idx)?;
             let mut n_feat = 0u32;
             let mut n_above2 = 0u32;
             for (i, &gene_idx) in chunk.indices.iter().enumerate() {
@@ -377,14 +376,13 @@ fn compute_cell_complexity(
                     }
                 }
             }
-            (n_feat, n_above2)
+            Ok((n_feat, n_above2))
         })
-        .collect();
-
+        .collect::<Result<Vec<_>, _>>()?;
     let n_features: Vec<u32> = results.iter().map(|&(nf, _)| nf).collect();
     let n_above2: Vec<u32> = results.iter().map(|&(_, na)| na).collect();
 
-    (n_features, n_above2)
+    Ok((n_features, n_above2))
 }
 
 /// Compute gene complexity for simulated doublet chunks.
@@ -577,7 +575,7 @@ pub fn pca_combined(
     normalise_variance: bool,
     no_pcs: usize,
     seed: usize,
-) -> Mat<f32> {
+) -> Result<Mat<f32>, BixverseErrors> {
     let n_obs = cells_to_keep.len();
     let n_sim = sim_chunks.len();
     let n_total = n_obs + n_sim;
@@ -593,9 +591,9 @@ pub fn pca_combined(
     let mut combined = Mat::<f32>::zeros(n_total, n_genes);
 
     // fill observed rows
-    let reader = ParallelSparseReader::new(f_path_cell).unwrap();
+    let reader = ParallelSparseReader::new(f_path_cell)?;
     for (row, &cell_idx) in cells_to_keep.iter().enumerate() {
-        let chunk = reader.read_cell(cell_idx);
+        let chunk = reader.read_cell(cell_idx)?;
         let lib = hvg_library_sizes[row] as f32;
         for (i, &gene_idx) in chunk.indices.iter().enumerate() {
             let gi = gene_idx as usize;
@@ -659,9 +657,9 @@ pub fn pca_combined(
         }
     }
 
-    let svd_res = randomised_svd(combined.as_ref(), no_pcs, seed, None, None);
+    let svd_res = randomised_svd(combined.as_ref(), no_pcs, seed, None, None)?;
 
-    compute_pc_scores(&svd_res)
+    Ok(compute_pc_scores(&svd_res))
 }
 
 /// Compute default k values for multi-scale kNN doublet scoring.
@@ -1131,7 +1129,12 @@ impl ScDblFinder {
     /// ### Returns
     ///
     /// `ScDblFinderResult` with predictions, scores and cluster labels.
-    pub fn run(&mut self, seed: usize, verbose: bool, debug: bool) -> ScDblFinderResult {
+    pub fn run(
+        &mut self,
+        seed: usize,
+        verbose: bool,
+        debug: bool,
+    ) -> Result<ScDblFinderResult, BixverseErrors> {
         let start_all = Instant::now();
 
         if verbose {
@@ -1145,7 +1148,7 @@ impl ScDblFinder {
             &self.cells_to_keep,
             None,
             self.params.n_genes,
-        );
+        )?;
 
         if verbose {
             println!(
@@ -1157,7 +1160,7 @@ impl ScDblFinder {
 
         // recycling function from scrublet/doublet detection
         self.red_library_sizes =
-            compute_hvg_library_sizes(&self.f_path_cell, &self.cells_to_keep, &selected_genes);
+            compute_hvg_library_sizes(&self.f_path_cell, &self.cells_to_keep, &selected_genes)?;
         let target_size = resolve_target_size(self.params.target_size, &self.red_library_sizes);
         self.n_cells_sim = (self.n_cells as f32 * self.params.doublet_ratio) as usize;
 
@@ -1165,7 +1168,7 @@ impl ScDblFinder {
             println!(" Computing cell complexity features...");
         }
         let (obs_n_features, obs_n_above2) =
-            compute_cell_complexity(&self.f_path_cell, &self.cells_to_keep, &selected_genes);
+            compute_cell_complexity(&self.f_path_cell, &self.cells_to_keep, &selected_genes)?;
 
         if verbose {
             println!(" Building cxds co-expression model...");
@@ -1176,7 +1179,7 @@ impl ScDblFinder {
             &self.cells_to_keep,
             &selected_genes,
             CXDS_NTOP,
-        );
+        )?;
         let obs_cxds_scores = cxds_model.score(&obs_cxds_gene_sets);
 
         if verbose {
@@ -1206,7 +1209,7 @@ impl ScDblFinder {
             self.params.random_svd,
             seed,
             verbose,
-        );
+        )?;
 
         if verbose {
             println!("  Done with PCA in {:.2?}", start_pca.elapsed());
@@ -1289,7 +1292,7 @@ impl ScDblFinder {
             self.params.log_transform,
             &self.params.sim_params,
             seed,
-        );
+        )?;
 
         let (sim_n_features, sim_n_above2) = compute_sim_complexity(&sim_chunks);
 
@@ -1315,7 +1318,7 @@ impl ScDblFinder {
             self.params.normalise_variance,
             self.params.no_pcs,
             seed,
-        );
+        )?;
 
         if verbose {
             println!(" Building combined kNN graph (k_max={})...", k_max);
@@ -1608,7 +1611,7 @@ impl ScDblFinder {
             println!("Total runtime: {:.2?}", start_all.elapsed());
         }
 
-        ScDblFinderResult {
+        Ok(ScDblFinderResult {
             predicted_doublets,
             doublet_scores: final_scores,
             cxds: min_max_scale(&obs_cxds_scores),
@@ -1618,7 +1621,7 @@ impl ScDblFinder {
             cluster_labels,
             detected_doublet_rate,
             features: feature_table,
-        }
+        })
     }
 }
 

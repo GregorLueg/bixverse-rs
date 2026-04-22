@@ -290,7 +290,12 @@ impl BoostClassifier {
     /// ### Returns
     ///
     /// `BoostResult` with predictions, scores and voting averages.
-    pub fn run_boost(&mut self, streaming: bool, seed: usize, verbose: bool) -> BoostResult {
+    pub fn run_boost(
+        &mut self,
+        streaming: bool,
+        seed: usize,
+        verbose: bool,
+    ) -> Result<BoostResult, BixverseErrors> {
         let start_all = Instant::now();
 
         let hvg_opts = HvgOpts {
@@ -313,7 +318,7 @@ impl BoostClassifier {
             &hvg_opts,
             streaming,
             verbose,
-        );
+        )?;
 
         if verbose {
             println!(
@@ -324,7 +329,7 @@ impl BoostClassifier {
         }
 
         self.hvg_library_sizes =
-            compute_hvg_library_sizes(&self.f_path_cell, &self.cells_to_keep, &hvg_genes);
+            compute_hvg_library_sizes(&self.f_path_cell, &self.cells_to_keep, &hvg_genes)?;
         let target_size = resolve_target_size(self.params.target_size, &self.hvg_library_sizes);
         self.n_cells_sim = (self.n_cells as f32 * self.params.boost_rate) as usize;
 
@@ -342,7 +347,7 @@ impl BoostClassifier {
                 }
                 self.one_iteration(target_size, &hvg_genes, seed + iter, verbose)
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
 
         if verbose {
             println!(
@@ -399,7 +404,7 @@ impl BoostClassifier {
             println!("Total runtime: {:.2?}", start_all.elapsed());
         }
 
-        result
+        Ok(result)
     }
 
     /// Execute a single Boost iteration.
@@ -423,7 +428,7 @@ impl BoostClassifier {
         hvg_genes: &[usize],
         seed: usize,
         verbose: bool,
-    ) -> (Vec<f32>, Vec<f32>) {
+    ) -> Result<(Vec<f32>, Vec<f32>), BixverseErrors> {
         let pca_opts = PcaOpts {
             log_transform: self.params.log_transform,
             mean_center: self.params.mean_center,
@@ -444,7 +449,7 @@ impl BoostClassifier {
             &self.f_path_cell,
             target_size,
             self.params.log_transform,
-        );
+        )?;
 
         // PCA + projection
         let (combined_pca, _) = pca_and_project(
@@ -457,7 +462,7 @@ impl BoostClassifier {
             &pca_opts,
             seed,
             verbose,
-        );
+        )?;
 
         // kNN
         let k_adj = adjusted_k(self.params.knn_params.k, self.n_cells, self.n_cells_sim);
@@ -500,7 +505,7 @@ impl BoostClassifier {
         let orig_communities = communities[..self.n_cells].to_vec();
         let synth_communities = communities[self.n_cells..].to_vec();
 
-        score_communities(&orig_communities, &synth_communities)
+        Ok(score_communities(&orig_communities, &synth_communities))
     }
 
     /// Generate cell pairs for doublet simulation.

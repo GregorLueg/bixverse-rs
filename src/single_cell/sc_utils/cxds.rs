@@ -140,16 +140,16 @@ impl CxdsModel {
         cells_to_keep: &[usize],
         hvg_genes: &[usize],
         ntop: usize,
-    ) -> (Self, Vec<CellGeneSet>) {
+    ) -> Result<(Self, Vec<CellGeneSet>), BixverseErrors> {
         let n_cells = cells_to_keep.len();
         let hvg_set: FxHashSet<usize> = hvg_genes.iter().copied().collect();
-        let reader = ParallelSparseReader::new(f_path_cell).unwrap();
+        let reader = ParallelSparseReader::new(f_path_cell)?;
 
         let mut gene_counts: FxHashMap<usize, u32> = FxHashMap::default();
         let mut cell_hvg_indices: Vec<Vec<usize>> = Vec::with_capacity(n_cells);
 
         for &cell_idx in cells_to_keep {
-            let chunk = reader.read_cell(cell_idx);
+            let chunk = reader.read_cell(cell_idx)?;
             let mut expressed_hvgs = Vec::new();
 
             for (i, &gene_idx) in chunk.indices.iter().enumerate() {
@@ -264,7 +264,7 @@ impl CxdsModel {
             gene_map,
         };
 
-        (model, obs_gene_sets)
+        Ok((model, obs_gene_sets))
     }
 
     /// Compute cxds scores for cells given their expressed gene sets.

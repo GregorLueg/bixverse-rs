@@ -772,18 +772,18 @@ impl<'a> Hotspot<'a> {
         model: &str,
         centered: bool,
         verbose: bool,
-    ) -> Result<HotSpotGeneRes, String> {
-        let gex_model =
-            parse_gex_model(model).ok_or_else(|| format!("Invalid model type: {}", model))?;
+    ) -> Result<HotSpotGeneRes, BixverseErrors> {
+        let gex_model = parse_gex_model(model)
+            .ok_or_else(|| BixverseErrors::HotSpotWrongModel(model.to_string()))?;
 
-        self.populate_umi_counts();
+        self.populate_umi_counts()?;
 
         let cell_set: IndexSet<u32> = self.cells_to_keep.iter().map(|&x| x as u32).collect();
 
         let start_reading = Instant::now();
 
-        let reader = ParallelSparseReader::new(&self.f_path_gene).unwrap();
-        let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(gene_indices);
+        let reader = ParallelSparseReader::new(&self.f_path_gene)?;
+        let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(gene_indices)?;
 
         gene_chunks.par_iter_mut().for_each(|chunk| {
             chunk.filter_selected_cells(&cell_set);
@@ -853,7 +853,7 @@ impl<'a> Hotspot<'a> {
         model: &str,
         centered: bool,
         verbose: bool,
-    ) -> Result<HotSpotGeneRes, String> {
+    ) -> Result<HotSpotGeneRes, BixverseErrors> {
         const GENE_BATCH_SIZE: usize = 1000;
 
         let start_all = Instant::now();
@@ -861,12 +861,12 @@ impl<'a> Hotspot<'a> {
         let no_genes = gene_indices.len();
         let no_batches = no_genes.div_ceil(GENE_BATCH_SIZE);
         let cell_set: IndexSet<u32> = self.cells_to_keep.iter().map(|&x| x as u32).collect();
-        let reader = ParallelSparseReader::new(&self.f_path_gene).unwrap();
+        let reader = ParallelSparseReader::new(&self.f_path_gene)?;
 
-        let gex_model =
-            parse_gex_model(model).ok_or_else(|| format!("Invalid model type: {}", model))?;
+        let gex_model = parse_gex_model(model)
+            .ok_or_else(|| BixverseErrors::HotSpotWrongModel(model.to_string()))?;
 
-        self.populate_umi_counts();
+        self.populate_umi_counts()?;
 
         let mut results: Vec<(Vec<usize>, Vec<f64>, Vec<f64>)> = Vec::with_capacity(no_batches);
 
@@ -882,7 +882,7 @@ impl<'a> Hotspot<'a> {
 
             let start_loading = Instant::now();
 
-            let mut gene_chunks = reader.read_gene_parallel(batch_gene_indices);
+            let mut gene_chunks = reader.read_gene_parallel(batch_gene_indices)?;
 
             gene_chunks.par_iter_mut().for_each(|chunk| {
                 chunk.filter_selected_cells(&cell_set);
@@ -1034,11 +1034,11 @@ impl<'a> Hotspot<'a> {
         gene_indices: &[usize],
         model: &str,
         verbose: bool,
-    ) -> Result<HotSpotPairRes, String> {
-        let gex_model =
-            parse_gex_model(model).ok_or_else(|| format!("Invalid model type: {}", model))?;
+    ) -> Result<HotSpotPairRes, BixverseErrors> {
+        let gex_model = parse_gex_model(model)
+            .ok_or_else(|| BixverseErrors::HotSpotWrongModel(model.to_string()))?;
 
-        self.populate_umi_counts();
+        self.populate_umi_counts()?;
 
         let cell_set: IndexSet<u32> = self.cells_to_keep.iter().map(|&x| x as u32).collect();
 
@@ -1047,8 +1047,8 @@ impl<'a> Hotspot<'a> {
         }
 
         let start_loading = Instant::now();
-        let reader = ParallelSparseReader::new(&self.f_path_gene).unwrap();
-        let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(gene_indices);
+        let reader = ParallelSparseReader::new(&self.f_path_gene)?;
+        let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(gene_indices)?;
 
         gene_chunks.par_iter_mut().for_each(|chunk| {
             chunk.filter_selected_cells(&cell_set);
@@ -1179,16 +1179,16 @@ impl<'a> Hotspot<'a> {
         gene_indices: &[usize],
         model: &str,
         verbose: bool,
-    ) -> Result<HotSpotPairRes, String> {
+    ) -> Result<HotSpotPairRes, BixverseErrors> {
         const GENE_BATCH_SIZE: usize = 500;
 
-        let gex_model =
-            parse_gex_model(model).ok_or_else(|| format!("Invalid model type: {}", model))?;
+        let gex_model = parse_gex_model(model)
+            .ok_or_else(|| BixverseErrors::HotSpotWrongModel(model.to_string()))?;
 
-        self.populate_umi_counts();
+        self.populate_umi_counts()?;
 
         let cell_set: IndexSet<u32> = self.cells_to_keep.iter().map(|&x| x as u32).collect();
-        let reader = ParallelSparseReader::new(&self.f_path_gene).unwrap();
+        let reader = ParallelSparseReader::new(&self.f_path_gene)?;
 
         let n_genes = gene_indices.len();
         let n_batches = n_genes.div_ceil(GENE_BATCH_SIZE);
@@ -1217,7 +1217,7 @@ impl<'a> Hotspot<'a> {
                 );
             }
 
-            let mut batch_i_chunks = reader.read_gene_parallel(batch_i_indices);
+            let mut batch_i_chunks = reader.read_gene_parallel(batch_i_indices)?;
             batch_i_chunks.par_iter_mut().for_each(|chunk| {
                 chunk.filter_selected_cells(&cell_set);
             });
@@ -1274,7 +1274,7 @@ impl<'a> Hotspot<'a> {
                         (&batch_i_centered, &batch_i_eg2, &batch_i_maxs)
                     } else {
                         let batch_j_indices = &gene_indices[start_j..end_j];
-                        let mut batch_j_chunks = reader.read_gene_parallel(batch_j_indices);
+                        let mut batch_j_chunks = reader.read_gene_parallel(batch_j_indices)?;
                         batch_j_chunks.par_iter_mut().for_each(|chunk| {
                             chunk.filter_selected_cells(&cell_set);
                         });
@@ -1378,14 +1378,15 @@ impl<'a> Hotspot<'a> {
     ///
     /// Reads and caches the total UMI count per cell for use in statistical
     /// models.
-    fn populate_umi_counts(&mut self) {
+    fn populate_umi_counts(&mut self) -> Result<(), BixverseErrors> {
         if self.umi_counts.is_some() {
-            return;
+            return Ok(());
         }
-        let reader = ParallelSparseReader::new(&self.f_path_cell).unwrap();
-        let lib_sizes = reader.read_cell_library_sizes(self.cells_to_keep);
+        let reader = ParallelSparseReader::new(&self.f_path_cell)?;
+        let lib_sizes = reader.read_cell_library_sizes(self.cells_to_keep)?;
         let umi_counts = lib_sizes.iter().map(|x| *x as f32).collect::<Vec<f32>>();
         self.umi_counts = Some(umi_counts);
+        Ok(())
     }
 }
 

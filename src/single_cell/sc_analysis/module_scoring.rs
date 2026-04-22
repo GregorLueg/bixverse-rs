@@ -42,35 +42,29 @@ fn get_average_expression(
     f_path_gene: &str,
     cell_set: &IndexSet<u32>,
     streaming: bool,
-) -> Result<Vec<(usize, f32)>, String> {
-    let reader = ParallelSparseReader::new(f_path_gene)
-        .map_err(|e| format!("Failed to open file: {}", e))?;
+) -> Result<Vec<(usize, f32)>, BixverseErrors> {
+    let reader = ParallelSparseReader::new(f_path_gene)?;
     let total_genes = reader.get_header().total_genes;
 
     if streaming {
-        // 500 genes in one go
         const CHUNK_SIZE: usize = 500;
         let gene_indices: Vec<usize> = (0..total_genes).collect();
-
-        let results: Vec<(usize, f32)> = gene_indices
-            .chunks(CHUNK_SIZE)
-            .flat_map(|chunk| {
-                let gene_chunks = reader.read_gene_parallel(chunk);
-                gene_chunks
-                    .par_iter()
-                    .map(|gene| gene.calculate_avg_exp(cell_set))
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-
+        let mut results: Vec<(usize, f32)> = Vec::with_capacity(total_genes);
+        for chunk in gene_indices.chunks(CHUNK_SIZE) {
+            let gene_chunks = reader.read_gene_parallel(chunk)?;
+            let chunk_results: Vec<(usize, f32)> = gene_chunks
+                .par_iter()
+                .map(|gene| gene.calculate_avg_exp(cell_set))
+                .collect();
+            results.extend(chunk_results);
+        }
         Ok(results)
     } else {
-        let gene_chunks = reader.get_all_genes();
+        let gene_chunks = reader.get_all_genes()?;
         let results: Vec<(usize, f32)> = gene_chunks
             .par_iter()
             .map(|gene| gene.calculate_avg_exp(cell_set))
             .collect();
-
         Ok(results)
     }
 }
@@ -218,7 +212,7 @@ fn calculate_module_scores(
     gene_bins: &GeneBins,
     ctrl: usize,
     seed: &usize,
-) -> Result<Vec<Vec<f32>>, String> {
+) -> Result<Vec<Vec<f32>>, BixverseErrors> {
     let mut rng = StdRng::seed_from_u64(*seed as u64);
 
     let control_sets: Vec<Vec<usize>> = gene_sets
@@ -226,9 +220,8 @@ fn calculate_module_scores(
         .map(|gene_set| sample_control_genes(gene_set, gene_bins, ctrl, &mut rng))
         .collect();
 
-    let reader = ParallelSparseReader::new(f_path_cell)
-        .map_err(|e| format!("Failed to open file: {}", e))?;
-    let cell_chunks = reader.read_cells_parallel(cells_to_keep);
+    let reader = ParallelSparseReader::new(f_path_cell)?;
+    let cell_chunks = reader.read_cells_parallel(cells_to_keep)?;
 
     let all_scores: Vec<Vec<f32>> = cell_chunks
         .par_iter()
@@ -277,7 +270,7 @@ fn calculate_module_scores_streaming(
     ctrl: usize,
     seed: &usize,
     verbose: bool,
-) -> Result<Vec<Vec<f32>>, String> {
+) -> Result<Vec<Vec<f32>>, BixverseErrors> {
     const CHUNK_SIZE: usize = 50000;
 
     let mut rng = StdRng::seed_from_u64(*seed as u64);
@@ -287,8 +280,7 @@ fn calculate_module_scores_streaming(
         .map(|gene_set| sample_control_genes(gene_set, gene_bins, ctrl, &mut rng))
         .collect();
 
-    let reader = ParallelSparseReader::new(f_path_cell)
-        .map_err(|e| format!("Failed to open file: {}", e))?;
+    let reader = ParallelSparseReader::new(f_path_cell)?;
 
     let total_chunks = cells_to_keep.len().div_ceil(CHUNK_SIZE);
     let mut results: Vec<Vec<f32>> = vec![Vec::with_capacity(cells_to_keep.len()); gene_sets.len()];
@@ -296,7 +288,7 @@ fn calculate_module_scores_streaming(
     for (chunk_idx, cell_indices_chunk) in cells_to_keep.chunks(CHUNK_SIZE).enumerate() {
         let start = Instant::now();
 
-        let cell_chunks = reader.read_cells_parallel(cell_indices_chunk);
+        let cell_chunks = reader.read_cells_parallel(cell_indices_chunk)?;
 
         // Calculate scores in parallel (cells x modules)
         let chunk_scores: Vec<Vec<f32>> = cell_chunks
@@ -364,7 +356,7 @@ pub fn calculate_module_scores_main(
     streaming: bool,
     seed: usize,
     verbose: bool,
-) -> Result<Vec<Vec<f32>>, String> {
+) -> Result<Vec<Vec<f32>>, BixverseErrors> {
     let cell_set: IndexSet<u32> = cells_to_use.iter().map(|&x| x as u32).collect();
 
     let start_total = Instant::now();

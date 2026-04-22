@@ -16,9 +16,10 @@ pub struct LoessRes<T> {
 }
 
 /// Which LoessFunction to use
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum LoessFunc {
-    /// Linear version of the Loess function
+    /// Linear version of the Loess function (default)
+    #[default]
     Linear,
     /// Quadratic version of the Loess function
     Quadratic,
@@ -105,13 +106,10 @@ where
 ///////////
 
 /// Struct for performing a loess regression
-///
-/// ### Fields
-///
-/// * `span` - The span of the loess regression
-/// * `loess_type` - The type of loess regression to perform
 pub struct LoessRegression<T> {
+    /// The span of the loess regression
     span: T,
+    /// The type of loess regression to perform
     loess_type: LoessFunc,
 }
 
@@ -139,7 +137,7 @@ where
             "Only linear (1) and quadratic (2) supported"
         );
 
-        let loess_type: LoessFunc = parse_loess_fun(&degree).unwrap();
+        let loess_type: LoessFunc = parse_loess_fun(&degree).unwrap_or_default();
 
         Self { span, loess_type }
     }

@@ -222,6 +222,7 @@ where
             (mean, (m2 / (n - T::one())).sqrt())
         })
         .unzip();
+
     m2
 }
 

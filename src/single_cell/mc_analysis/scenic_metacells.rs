@@ -241,7 +241,7 @@ fn batch_genes_correlated_in_memory<T: BixverseNumeric>(
     n_cells_subsample: usize,
     seed: usize,
     verbose: bool,
-) -> Vec<usize> {
+) -> Result<Vec<usize>, BixverseErrors> {
     let n_cells = csc.shape.0;
     let n_genes = gene_indices.len();
     let n_centroids = n_genes.div_ceil(batch_size);
@@ -259,7 +259,7 @@ fn batch_genes_correlated_in_memory<T: BixverseNumeric>(
     }
 
     let sub_csc = subset_csc_for_pca(csc, &sub_cells, gene_indices);
-    let (_, loadings, _) = pca_on_metacells(&sub_csc, n_components, true, seed);
+    let (_, loadings, _) = pca_on_metacells(&sub_csc, n_components, true, seed)?;
 
     let dim = loadings.ncols();
     let mut gene_loadings = vec![0.0f32; n_genes * dim];
@@ -324,7 +324,7 @@ fn batch_genes_correlated_in_memory<T: BixverseNumeric>(
         result.extend_from_slice(cluster);
     }
 
-    result
+    Ok(result)
 }
 
 /// Dispatch gene batching for the in-memory path.
@@ -352,15 +352,15 @@ fn batch_genes_in_memory<T: BixverseNumeric>(
     strategy: &GeneBatchStrategy,
     seed: usize,
     verbose: bool,
-) -> Vec<usize> {
+) -> Result<Vec<usize>, BixverseErrors> {
     match strategy {
-        GeneBatchStrategy::Random => batch_genes_random(gene_indices, seed),
+        GeneBatchStrategy::Random => Ok(batch_genes_random(gene_indices, seed)),
         GeneBatchStrategy::Correlated {
             n_comp,
             n_cells_subsample,
         } => {
             if gene_indices.len() <= batch_size {
-                return batch_genes_random(gene_indices, seed);
+                return Ok(batch_genes_random(gene_indices, seed));
             }
             batch_genes_correlated_in_memory(
                 csc,
@@ -416,7 +416,7 @@ fn run_scenic_multi_output_in_memory<T>(
     seed: usize,
     verbose: bool,
     start_total: Instant,
-) -> Mat<f32>
+) -> Result<Mat<f32>, BixverseErrors>
 where
     T: BixverseNumeric + Copy + Into<u32>,
 {
@@ -433,7 +433,7 @@ where
     .unwrap_or(GeneBatchStrategy::Random);
 
     let ordered_genes =
-        batch_genes_in_memory(csc, gene_indices, n_multi_output, &strategy, seed, verbose);
+        batch_genes_in_memory(csc, gene_indices, n_multi_output, &strategy, seed, verbose)?;
 
     let gene_id_to_pos: FxHashMap<usize, usize> = gene_indices
         .iter()
@@ -531,13 +531,13 @@ where
         );
     }
 
-    Mat::from_fn(n_genes, n_tfs, |i, j| {
+    Ok(Mat::from_fn(n_genes, n_tfs, |i, j| {
         if j < importance_scores[i].len() {
             importance_scores[i][j]
         } else {
             0.0
         }
-    })
+    }))
 }
 
 /// GBM path for the in-memory SCENIC API.
@@ -676,7 +676,7 @@ pub fn run_scenic_grn_in_memory<T>(
     scenic_params: &ScenicParams,
     seed: usize,
     verbose: bool,
-) -> Mat<f32>
+) -> Result<Mat<f32>, BixverseErrors>
 where
     T: BixverseNumeric + Copy + Into<u32> + Sync,
 {
@@ -706,7 +706,7 @@ where
     }
 
     match &scenic_params.regression_learner {
-        RegressionLearner::GradientBoosting(gbm_config) => run_scenic_gbm_in_memory(
+        RegressionLearner::GradientBoosting(gbm_config) => Ok(run_scenic_gbm_in_memory(
             csc,
             gene_indices,
             &tf_data,
@@ -717,7 +717,7 @@ where
             seed,
             verbose,
             start_total,
-        ),
+        )),
         _ => run_scenic_multi_output_in_memory(
             csc,
             gene_indices,
@@ -970,7 +970,8 @@ mod tests {
             n_subsample: 1000,
         };
 
-        let result = run_scenic_grn_in_memory(&csc, &[3, 4], &[0, 1, 2], &params, 42, false);
+        let result =
+            run_scenic_grn_in_memory(&csc, &[3, 4], &[0, 1, 2], &params, 42, false).unwrap();
         assert_eq!(result.nrows(), 2);
         assert_eq!(result.ncols(), 3);
 
@@ -1054,7 +1055,8 @@ mod tests {
             n_subsample: 1000,
         };
 
-        let result = run_scenic_grn_in_memory(&csc, &[3, 4], &[0, 1, 2], &params, 42, false);
+        let result =
+            run_scenic_grn_in_memory(&csc, &[3, 4], &[0, 1, 2], &params, 42, false).unwrap();
         assert_eq!(result.nrows(), 2);
         assert_eq!(result.ncols(), 3);
 

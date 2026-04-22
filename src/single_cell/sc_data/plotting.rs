@@ -64,12 +64,16 @@ fn scale_and_clip(data: &mut [f32], clip: Option<f32>) {
 ///
 /// Returns a vector of length `cell_indices.len()` in the same order as
 /// `cell_indices`.
-pub fn extract_raw_counts(f_path: &str, cell_indices: &[usize], gene_index: usize) -> Vec<u32> {
+pub fn extract_raw_counts(
+    f_path: &str,
+    cell_indices: &[usize],
+    gene_index: usize,
+) -> Result<Vec<u32>, BixverseErrors> {
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
 
-    let reader = ParallelSparseReader::new(f_path).unwrap();
+    let reader = ParallelSparseReader::new(f_path)?;
     let mut chunk = reader
-        .read_gene_parallel(&[gene_index])
+        .read_gene_parallel(&[gene_index])?
         .into_iter()
         .next()
         .unwrap();
@@ -80,7 +84,7 @@ pub fn extract_raw_counts(f_path: &str, cell_indices: &[usize], gene_index: usiz
     for (i, &cell_idx) in chunk.indices.iter().enumerate() {
         dense[cell_idx as usize] = chunk.data_raw.get(i);
     }
-    dense
+    Ok(dense)
 }
 
 /// Extract normalised (log1p) counts for a single gene, dense, over given cells.
@@ -106,12 +110,12 @@ pub fn extract_norm_counts(
     gene_index: usize,
     scale: bool,
     clip: Option<f32>,
-) -> Vec<f32> {
+) -> Result<Vec<f32>, BixverseErrors> {
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
 
-    let reader = ParallelSparseReader::new(f_path).unwrap();
+    let reader = ParallelSparseReader::new(f_path)?;
     let mut chunk = reader
-        .read_gene_parallel(&[gene_index])
+        .read_gene_parallel(&[gene_index])?
         .into_iter()
         .next()
         .unwrap();
@@ -127,7 +131,7 @@ pub fn extract_norm_counts(
         scale_and_clip(&mut dense, clip);
     }
 
-    dense
+    Ok(dense)
 }
 
 /// Extract normalised (log1p) counts for a multiple genes, dense, over given
@@ -154,18 +158,18 @@ pub fn extract_norm_counts_multi(
     gene_indices: &[usize],
     scale: bool,
     clip: Option<f32>,
-) -> Vec<Vec<f32>> {
+) -> Result<Vec<Vec<f32>>, BixverseErrors> {
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
     let n = cell_indices.len();
 
-    let reader = ParallelSparseReader::new(f_path).unwrap();
-    let mut chunks = reader.read_gene_parallel(gene_indices);
+    let reader = ParallelSparseReader::new(f_path)?;
+    let mut chunks = reader.read_gene_parallel(gene_indices)?;
 
     chunks.par_iter_mut().for_each(|chunk| {
         chunk.filter_selected_cells(&cell_set);
     });
 
-    chunks
+    let res = chunks
         .par_iter()
         .map(|chunk| {
             let mut dense = vec![0.0f32; n];
@@ -177,7 +181,9 @@ pub fn extract_norm_counts_multi(
             }
             dense
         })
-        .collect()
+        .collect();
+
+    Ok(res)
 }
 
 /// Compute per-group mean expression and percent expressed for a set of genes.
@@ -210,7 +216,7 @@ pub fn extract_grouped_gene_stats(
     gene_indices: &[usize],
     group_ids: &[usize],
     group_levels: &[String],
-) -> GroupedGeneStats {
+) -> Result<GroupedGeneStats, BixverseErrors> {
     assert_eq!(
         cell_indices.len(),
         group_ids.len(),
@@ -231,8 +237,8 @@ pub fn extract_grouped_gene_stats(
         group_sizes[g] += 1;
     }
 
-    let reader = ParallelSparseReader::new(f_path).unwrap();
-    let mut chunks = reader.read_gene_parallel(gene_indices);
+    let reader = ParallelSparseReader::new(f_path)?;
+    let mut chunks = reader.read_gene_parallel(gene_indices)?;
 
     chunks.par_iter_mut().for_each(|chunk| {
         chunk.filter_selected_cells(&cell_set);
@@ -262,10 +268,10 @@ pub fn extract_grouped_gene_stats(
         }
     }
 
-    GroupedGeneStats {
+    Ok(GroupedGeneStats {
         gene_indices: chunks.iter().map(|c| c.original_index).collect(),
         group_labels: group_levels.to_vec(),
         mean_expression,
         pct_expressed,
-    }
+    })
 }

@@ -655,7 +655,7 @@ pub fn fast_mnn_main(
     params: &FastMnnParams,
     verbose: bool,
     seed: usize,
-) -> Mat<f32> {
+) -> Result<Mat<f32>, BixverseErrors> {
     let pca_all = if let Some(pca) = pre_computed_pca {
         if verbose {
             println!("Using pre-computed PCA")
@@ -674,7 +674,7 @@ pub fn fast_mnn_main(
             seed,
             false,
             verbose,
-        );
+        )?;
         pca
     };
 
@@ -691,7 +691,7 @@ pub fn fast_mnn_main(
 
     let (corrected, index_map) = fast_mnn(pca_batches, original_indices, params, seed, verbose);
 
-    reorder_to_original(&corrected, &index_map)
+    Ok(reorder_to_original(&corrected, &index_map))
 }
 
 ///////////

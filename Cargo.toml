@@ -14,7 +14,7 @@ path = "src/lib.rs"
 [features]
 ## Enables the single cell features in bixverse-rs
 single-cell = ["half", "bincode", "indexmap", "memmap2", "hdf5", "lz4_flex", "ann-search-rs"]
-## Tests for large scale diagonistics - for development only
+## Tests for large scale diagonistics - for development only!
 large_scale_diagnostics = []
 
 [profile.release]
@@ -24,7 +24,7 @@ codegen-units = 4
 
 [dependencies]
 approx = "0.5.1"
-ann-search-rs = { git = "https://github.com/GregorLueg/ann-search-rs.git", branch = "feat-usearch-hnsw", optional = true }
+ann-search-rs = { version = "0.2.14", optional = true }
 bincode = { version = "2.0.1", features = ["serde"], optional = true }
 extendr-api = "0.8.1"
 faer = "0.23.2"
@@ -49,3 +49,4 @@ statrs = "0.18.0"
 thousands = "0.2.0"
 wide = "1.1.1"
 document-features = "0.2.12"
+thiserror = "2.0.18"

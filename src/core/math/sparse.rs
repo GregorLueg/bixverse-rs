@@ -968,7 +968,6 @@ where
 pub fn normalise_csr_rows_l1<T>(csr: &mut CompressedSparseData2<T>)
 where
     T: BixverseNumeric + Into<f64>,
-    // We also need the `Sum` trait for `iter().sum()`
     T: std::iter::Sum<T>,
 {
     assert!(csr.cs_type.is_csr(), "Matrix must be in CSR format");
@@ -1305,7 +1304,7 @@ where
 /// ### Returns
 ///
 /// Tuple of `(eigenvectors, eigenvalues)`
-fn tridiag_eig<T>(alpha: &[T], beta: &[T]) -> (Vec<T>, Mat<T>)
+fn tridiag_eig<T>(alpha: &[T], beta: &[T]) -> Result<(Vec<T>, Mat<T>), BixverseErrors>
 where
     T: BixverseFloat,
 {
@@ -1320,11 +1319,13 @@ where
         }
     }
 
-    let eig = t.self_adjoint_eigen(faer::Side::Lower).unwrap();
+    let eig = t
+        .self_adjoint_eigen(faer::Side::Lower)
+        .map_err(|_| BixverseErrors::FaerEigenError)?;
     let evals = eig.S().column_vector().iter().copied().collect();
     let evecs = eig.U().to_owned();
 
-    (evals, evecs)
+    Ok((evals, evecs))
 }
 
 /// Compute largest eigenvalues and eigenvectors using Lanczos
@@ -1343,7 +1344,7 @@ pub fn compute_largest_eigenpairs_lanczos<T>(
     matrix: &CompressedSparseData2<T>,
     n_components: usize,
     seed: u64,
-) -> (Vec<f32>, Vec<Vec<f32>>)
+) -> Result<(Vec<f32>, Vec<Vec<f32>>), BixverseErrors>
 where
     T: BixverseNumeric + BixverseSimd + Into<f64>,
 {
@@ -1418,7 +1419,7 @@ where
         normalise(&mut v);
     }
 
-    let (evals, evecs) = tridiag_eig(&alpha[..n_iter], &beta[..n_iter - 1]);
+    let (evals, evecs) = tridiag_eig(&alpha[..n_iter], &beta[..n_iter - 1])?;
 
     let mut indices: Vec<usize> = (0..evals.len()).collect();
     indices.sort_by(|&i, &j| evals[j].partial_cmp(&evals[i]).unwrap());
@@ -1452,7 +1453,7 @@ where
         }
     }
 
-    (largest_evals, transposed)
+    Ok((largest_evals, transposed))
 }
 
 /////////////////
@@ -1478,7 +1479,7 @@ pub fn sparse_svd_lanczos<T, U, F>(
     use_second_layer: bool,
     col_means: Option<&[F]>,
     col_stds: Option<&[F]>,
-) -> SvdResults<F>
+) -> Result<SvdResults<F>, BixverseErrors>
 where
     T: BixverseNumeric + BixverseSimd + Into<F> + Clone,
     U: BixverseNumeric + Into<F> + Clone,
@@ -1642,7 +1643,7 @@ where
     }
 
     // eigendecomposition and reconstruction
-    let (evals, evecs) = tridiag_eig(&alpha[..n_iter], &beta[..n_iter - 1]);
+    let (evals, evecs) = tridiag_eig(&alpha[..n_iter], &beta[..n_iter - 1])?;
 
     let mut indices: Vec<usize> = (0..evals.len()).collect();
     indices.sort_by(|&i, &j| evals[j].partial_cmp(&evals[i]).unwrap());
@@ -1687,11 +1688,11 @@ where
     let u = Mat::from_fn(n, singular_values.len(), |i, j| u_vecs[j][i]);
     let v = Mat::from_fn(m, singular_values.len(), |i, j| v_vecs[j][i]);
 
-    SvdResults {
+    Ok(SvdResults {
         u,
         s: singular_values,
         v,
-    }
+    })
 }
 
 ///////////
@@ -1777,7 +1778,7 @@ mod tests {
         let csr = CompressedSparseData2::<f64, f64>::new_csr(&data, &indices, &indptr, None, shape);
 
         // Lanczos expects symmetric matrix, this one is symmetric
-        let (evals, evecs) = compute_largest_eigenpairs_lanczos(&csr, 1, 42);
+        let (evals, evecs) = compute_largest_eigenpairs_lanczos(&csr, 1, 42).unwrap();
 
         // True top eigenvalue should be exactly sum(x_i^2) = 1.0 + 4.0 = 5.0
         assert!((evals[0] - 5.0).abs() < 1e-3);
@@ -1803,7 +1804,7 @@ mod tests {
         let csr = CompressedSparseData2::<f64, f64>::new_csr(&data, &indices, &indptr, None, shape);
         let no_params: Option<&[f64]> = None;
 
-        let svd = sparse_svd_lanczos(&csr, 1, 42, false, no_params, no_params);
+        let svd = sparse_svd_lanczos(&csr, 1, 42, false, no_params, no_params).unwrap();
 
         // Test correlation with theoretical U
         let u_col = svd.u.col(0);

@@ -367,7 +367,8 @@ fn test_lanczos_orthogonality_loss() {
             false,
             no_params_means,
             no_params_stds,
-        );
+        )
+        .unwrap();
 
         // Check U orthogonality: U^T U should be ~identity
         let k = svd.s.len();
@@ -471,7 +472,7 @@ fn test_sparse_vs_dense_svd_scores() {
         // Dense: explicitly centre and scale, then randomised SVD
         let dense_cs =
             Mat::<f64>::from_fn(n, m, |i, j| (dense[(i, j)] - col_means[j]) / col_stds[j]);
-        let dense_svd = randomised_svd(dense_cs.as_ref(), 10, 42, Some(100), Some(2));
+        let dense_svd = randomised_svd(dense_cs.as_ref(), 10, 42, Some(100), Some(2)).unwrap();
         let dense_scores = compute_pc_scores(&dense_svd);
 
         // Sparse: implicit centering
@@ -484,7 +485,8 @@ fn test_sparse_vs_dense_svd_scores() {
             Some(2),
             Some(&col_means),
             Some(&col_stds),
-        );
+        )
+        .unwrap();
         let sparse_scores = compute_pc_scores(&sparse_svd);
 
         // Compare PC scores (allowing sign flips)

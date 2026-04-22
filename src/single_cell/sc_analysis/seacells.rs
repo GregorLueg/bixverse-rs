@@ -282,7 +282,7 @@ fn diffusion_map_from_kernel(
     kernel: &mut CompressedSparseData2<f32>,
     n_components: usize,
     seed: u64,
-) -> (Vec<f32>, Vec<Vec<f32>>) {
+) -> Result<(Vec<f32>, Vec<Vec<f32>>), BixverseErrors> {
     // Compute row sums (degrees)
     let row_sums: Vec<f32> = (0..kernel.shape.0)
         .map(|i| {
@@ -734,7 +734,7 @@ impl<'a> SEACells<'a> {
         knn_distances: &[Vec<f32>],
         verbose: bool,
         seed: u64,
-    ) {
+    ) -> Result<(), BixverseErrors> {
         if self.n_cells > self.params.greedy_threshold {
             if verbose {
                 println!(
@@ -745,8 +745,9 @@ impl<'a> SEACells<'a> {
             }
             self.initialise_archetypes_random(verbose, seed);
         } else {
-            self.initialise_archetypes_combined(knn_indices, knn_distances, verbose, seed);
+            self.initialise_archetypes_combined(knn_indices, knn_distances, verbose, seed)?;
         }
+        Ok(())
     }
 
     /// Fast random archetype initialisation
@@ -790,7 +791,7 @@ impl<'a> SEACells<'a> {
         knn_distances: &[Vec<f32>],
         verbose: bool,
         seed: u64,
-    ) {
+    ) -> Result<(), BixverseErrors> {
         let k = self.params.n_sea_cells;
 
         if verbose {
@@ -801,10 +802,9 @@ impl<'a> SEACells<'a> {
             compute_diffusion_kernel(knn_indices, knn_distances, self.params.knn_params.k);
 
         let (eigenvalues, eigenvectors) =
-            diffusion_map_from_kernel(&mut kernel, self.params.knn_params.k, seed);
+            diffusion_map_from_kernel(&mut kernel, self.params.knn_params.k, seed)?;
 
         let multiscale = determine_multiscale_space(&eigenvalues, &eigenvectors, Some(10));
-
         let waypoint_ix = max_min_sampling(&multiscale, k, seed);
 
         if verbose {
@@ -839,6 +839,7 @@ impl<'a> SEACells<'a> {
             .collect();
 
         self.archetypes = Some(unique_ix);
+        Ok(())
     }
 
     /// Get greedy centres via chunked K^2 column computation

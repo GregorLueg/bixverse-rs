@@ -17,6 +17,26 @@ use crate::prelude::*;
 // Helpers //
 /////////////
 
+/// Single cell related PCA result
+///
+/// ### Fields
+///
+/// * `0` - Scores
+/// * `1` - Loadings
+/// * `2` - Eigenvalues
+/// * `3` - Optional scaled values (input into the SVD)
+pub type SingleCellPcaResScaled =
+    Result<(Mat<f32>, Mat<f32>, Vec<f32>, Option<Mat<f32>>), BixverseErrors>;
+
+/// Single cell related PCA result
+///
+/// ### Fields
+///
+/// * `0` - Scores
+/// * `1` - Loadings
+/// * `2` - Eigenvalues
+pub type SingleCellPcaRes = Result<(Mat<f32>, Mat<f32>, Vec<f32>), BixverseErrors>;
+
 /// Enum representing the type of SVD to use for PCA analysis in single cell
 #[derive(Clone, Debug)]
 pub enum SvdType {
@@ -216,15 +236,15 @@ pub fn pca_on_sc(
     seed: usize,
     return_scaled: bool,
     verbose: bool,
-) -> (Mat<f32>, Mat<f32>, Vec<f32>, Option<Mat<f32>>) {
+) -> SingleCellPcaResScaled {
     let start_total = Instant::now();
 
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
 
     let start_reading = Instant::now();
 
-    let reader = ParallelSparseReader::new(f_path).unwrap();
-    let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(gene_indices);
+    let reader = ParallelSparseReader::new(f_path)?;
+    let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(gene_indices)?;
 
     let end_reading = start_reading.elapsed();
 
@@ -274,13 +294,15 @@ pub fn pca_on_sc(
 
     let (scores, loadings, s) = if random_svd {
         let res: RandomSvdResults<f64> =
-            randomised_svd(scaled_f64.as_ref(), no_pcs, seed, Some(100_usize), None);
+            randomised_svd(scaled_f64.as_ref(), no_pcs, seed, Some(100_usize), None)?;
         let loadings = Mat::<f32>::from_fn(num_genes, no_pcs, |i, j| res.v[(i, j)] as f32);
         let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| (res.u[(i, j)] * res.s[j]) as f32);
         let s: Vec<f32> = res.s[..no_pcs].iter().map(|&x| x as f32).collect();
         (scores, loadings, s)
     } else {
-        let res = scaled_f64.thin_svd().unwrap();
+        let res = scaled_f64
+            .thin_svd()
+            .map_err(|_| BixverseErrors::FaerSvdError)?;
         let loadings = Mat::<f32>::from_fn(num_genes, no_pcs, |i, j| res.V()[(i, j)] as f32);
         let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| {
             (res.U()[(i, j)] * res.S().column_vector()[j]) as f32
@@ -307,7 +329,7 @@ pub fn pca_on_sc(
         println!("Total run time PCA detection: {:.2?}", end_total);
     }
 
-    (scores, loadings, s, scaled_f32)
+    Ok((scores, loadings, s, scaled_f32))
 }
 
 /// Calculate the PCs for single cell data using a streaming approach
@@ -346,7 +368,7 @@ pub fn pca_on_sc_streaming(
     return_scaled: bool,
     gene_batch_size: usize,
     verbose: bool,
-) -> (Mat<f32>, Mat<f32>, Vec<f32>, Option<Mat<f32>>) {
+) -> SingleCellPcaResScaled {
     let start_total = Instant::now();
 
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
@@ -354,7 +376,7 @@ pub fn pca_on_sc_streaming(
     let n_genes = gene_indices.len();
     let num_batches = n_genes.div_ceil(gene_batch_size);
 
-    let reader = ParallelSparseReader::new(f_path).unwrap();
+    let reader = ParallelSparseReader::new(f_path)?;
 
     let mut scaled_matrix = Mat::<f64>::zeros(n_cells, n_genes);
 
@@ -375,7 +397,7 @@ pub fn pca_on_sc_streaming(
         let batch_gene_indices = &gene_indices[start_gene..end_gene];
 
         let start_loading = Instant::now();
-        let mut gene_chunks = reader.read_gene_parallel(batch_gene_indices);
+        let mut gene_chunks = reader.read_gene_parallel(batch_gene_indices)?;
         if verbose {
             println!("  Loaded batch in: {:.2?}", start_loading.elapsed());
         }
@@ -408,13 +430,15 @@ pub fn pca_on_sc_streaming(
 
     let (scores, loadings, s) = if random_svd {
         let res: RandomSvdResults<f64> =
-            randomised_svd(scaled_matrix.as_ref(), no_pcs, seed, Some(100_usize), None);
+            randomised_svd(scaled_matrix.as_ref(), no_pcs, seed, Some(100_usize), None)?;
         let loadings = Mat::<f32>::from_fn(n_genes, no_pcs, |i, j| res.v[(i, j)] as f32);
         let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| (res.u[(i, j)] * res.s[j]) as f32);
         let s: Vec<f32> = res.s[..no_pcs].iter().map(|&x| x as f32).collect();
         (scores, loadings, s)
     } else {
-        let res = scaled_matrix.thin_svd().unwrap();
+        let res = scaled_matrix
+            .thin_svd()
+            .map_err(|_| BixverseErrors::FaerSvdError)?;
         let loadings = Mat::<f32>::from_fn(n_genes, no_pcs, |i, j| res.V()[(i, j)] as f32);
         let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| {
             (res.U()[(i, j)] * res.S().column_vector()[j]) as f32
@@ -445,7 +469,7 @@ pub fn pca_on_sc_streaming(
         None
     };
 
-    (scores, loadings, s, scaled)
+    Ok((scores, loadings, s, scaled))
 }
 
 ////////////////
@@ -486,15 +510,15 @@ pub fn pca_on_sc_sparse(
     random_svd: bool,
     seed: usize,
     verbose: bool,
-) -> (Mat<f32>, Mat<f32>, Vec<f32>) {
+) -> SingleCellPcaRes {
     let start_total = Instant::now();
 
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
 
     let start_reading = Instant::now();
 
-    let reader = ParallelSparseReader::new(f_path).unwrap();
-    let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(gene_indices);
+    let reader = ParallelSparseReader::new(f_path)?;
+    let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(gene_indices)?;
 
     let end_reading = start_reading.elapsed();
 
@@ -533,7 +557,7 @@ pub fn pca_on_sc_sparse(
             None,
             Some(&col_means),
             Some(&col_stds),
-        );
+        )?;
         let scores_f64 = compute_pc_scores(&svd_res);
         let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| scores_f64[(i, j)] as f32);
         let loadings = Mat::<f32>::from_fn(gene_indices.len(), no_pcs, |i, j| {
@@ -549,7 +573,7 @@ pub fn pca_on_sc_sparse(
             true,
             Some(&col_means),
             Some(&col_stds),
-        );
+        )?;
         let scores_f64 = compute_pc_scores(&svd_res);
         let scores = Mat::<f32>::from_fn(scores_f64.nrows(), scores_f64.ncols(), |i, j| {
             scores_f64[(i, j)] as f32
@@ -573,5 +597,5 @@ pub fn pca_on_sc_sparse(
         println!("Total run time sparse PCA detection: {:.2?}", end_total);
     }
 
-    (scores, loadings, s)
+    Ok((scores, loadings, s))
 }

@@ -119,14 +119,17 @@ where
 /// ### Returns
 ///
 /// A vector of tuples corresponding to the top eigen pairs.
-pub fn get_top_eigenvalues<T>(matrix: &Mat<T>, top_n: usize) -> Vec<(T, Vec<T>)>
+pub fn get_top_eigenvalues<T>(
+    matrix: &Mat<T>,
+    top_n: usize,
+) -> Result<Vec<(T, Vec<T>)>, BixverseErrors>
 where
     T: BixverseFloat,
 {
     // Ensure the matrix is square
     assert_symmetric_mat!(matrix);
 
-    let eigendecomp = matrix.eigen().unwrap();
+    let eigendecomp = matrix.eigen().map_err(|_| BixverseErrors::FaerEigenError)?;
 
     let s = eigendecomp.S();
     let u = eigendecomp.U();
@@ -148,7 +151,7 @@ where
 
     let res: Vec<(T, Vec<T>)> = eigenpairs.into_iter().take(top_n).collect();
 
-    res
+    Ok(res)
 }
 
 /// Randomised SVD
@@ -183,7 +186,7 @@ pub fn randomised_svd<T>(
     seed: usize,
     oversampling: Option<usize>,
     n_power_iter: Option<usize>,
-) -> RandomSvdResults<T>
+) -> Result<RandomSvdResults<T>, BixverseErrors>
 where
     T: BixverseFloat,
 {
@@ -207,12 +210,13 @@ where
     }
 
     let b = q.transpose() * x;
-    let svd = b.thin_svd().unwrap();
-    RandomSvdResults {
+    let svd = b.thin_svd().map_err(|_| BixverseErrors::FaerSvdError)?;
+
+    Ok(RandomSvdResults {
         u: q * svd.U(),
         v: svd.V().cloned(),
         s: svd.S().column_vector().iter().copied().collect(),
-    }
+    })
 }
 
 ///////////////////////////
@@ -244,7 +248,7 @@ pub fn randomised_sparse_svd<T, F>(
     n_power_iter: Option<usize>,
     col_means: Option<&[F]>,
     col_stds: Option<&[F]>,
-) -> RandomSvdResults<F>
+) -> Result<RandomSvdResults<F>, BixverseErrors>
 where
     T: BixverseNumeric + Into<F>,
     F: BixverseFloat,
@@ -418,13 +422,13 @@ where
     sparse_matvec_at(q.as_ref(), b_t.as_mut());
     let b = b_t.transpose().to_owned();
 
-    let svd = b.thin_svd().unwrap();
+    let svd = b.thin_svd().map_err(|_| BixverseErrors::FaerSvdError)?;
 
     let u = &q * svd.U();
     let s: Vec<F> = svd.S().column_vector().iter().copied().collect();
     let v = svd.V().to_owned();
 
-    RandomSvdResults { u, s, v }
+    Ok(RandomSvdResults { u, s, v })
 }
 
 ///////////
@@ -459,7 +463,7 @@ mod tests {
             2,
             |i, j| if i == j { 3.0 - (i as f64 * 2.0) } else { 0.0 },
         );
-        let top_eigen = get_top_eigenvalues(&mat, 2);
+        let top_eigen = get_top_eigenvalues(&mat, 2).unwrap();
 
         assert_eq!(top_eigen.len(), 2);
         assert!((top_eigen[0].0 - 3.0).abs() < 1e-6);
@@ -481,7 +485,7 @@ mod tests {
         }
 
         // We only need the top 1 PC
-        let svd = randomised_svd(mat.as_ref(), 1, 42, Some(5), Some(4));
+        let svd = randomised_svd(mat.as_ref(), 1, 42, Some(5), Some(4)).unwrap();
 
         // Test U (Left Singular Vector) correlation with x
         let u_col = svd.u.col(0);
@@ -518,7 +522,8 @@ mod tests {
         let csr = CompressedSparseData2::<f64, f64>::new_csr(&data, &indices, &indptr, None, shape);
 
         let no_params: Option<&[f64]> = None;
-        let svd = randomised_sparse_svd(&csr, 1, 42, false, Some(5), Some(4), no_params, no_params);
+        let svd = randomised_sparse_svd(&csr, 1, 42, false, Some(5), Some(4), no_params, no_params)
+            .unwrap();
 
         let u_col = svd.u.col(0);
         let x_norm = (2.0_f64.powi(2) + 4.0_f64.powi(2)).sqrt(); // sqrt(20)

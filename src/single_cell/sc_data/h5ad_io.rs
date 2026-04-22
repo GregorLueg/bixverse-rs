@@ -3,7 +3,6 @@
 
 use hdf5::{File, Result};
 use rayon::prelude::*;
-use std::io::Result as IoResult;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -645,7 +644,7 @@ pub fn write_h5_csc_to_csr_streaming<P: AsRef<Path>>(
     cell_lib_sizes: &[u32],
     target_size: f32,
     verbose: bool,
-) -> IoResult<CellQuality> {
+) -> Result<CellQuality, BixverseErrors> {
     let file = File::open(file_path)?;
     let data_ds = file.dataset("X/data")?;
     let indices_ds = file.dataset("X/indices")?;
@@ -1203,7 +1202,7 @@ pub fn write_h5_csr_streaming<P: AsRef<Path>>(
     quality: &CellOnFileQuality,
     cell_qc: MinCellQuality,
     verbose: bool,
-) -> IoResult<CellQuality> {
+) -> Result<CellQuality, BixverseErrors> {
     let file = File::open(&file_path)?;
     let data_ds = file.dataset("X/data")?;
     let indices_ds = file.dataset("X/indices")?;
@@ -1625,7 +1624,7 @@ fn reconstruct_and_write_csr<P: AsRef<Path>>(
     target_size: f32,
     cell_qc: &MinCellQuality,
     verbose: bool,
-) -> std::io::Result<CellQuality> {
+) -> Result<CellQuality, BixverseErrors> {
     let file = hdf5::File::open(file_path)?;
     let data_ds = file.dataset("X/data").unwrap();
     let indices_ds = file.dataset("X/indices").unwrap();
@@ -1777,7 +1776,7 @@ fn reconstruct_and_write_csc<P: AsRef<Path>>(
     target_size: f32,
     cell_qc: &MinCellQuality,
     verbose: bool,
-) -> std::io::Result<CellQuality> {
+) -> Result<CellQuality, BixverseErrors> {
     let file = hdf5::File::open(file_path)?;
     let data_ds = file.dataset("X/data").unwrap();
     let indices_ds = file.dataset("X/indices").unwrap();

@@ -23,9 +23,6 @@ use crate::single_cell::sc_data::data_io::{
     CellGeneSparseWriter, CscGeneChunk, CsrCellChunk, RawCounts, SparseDataHeader,
 };
 
-/// Old File version
-const V2_FILE_VERSION: u32 = 2;
-
 /// v2 file header (same layout as v3, just a different version number)
 #[repr(C)]
 #[derive(Encode, Decode, Serialize, Deserialize)]
@@ -215,7 +212,7 @@ pub fn migrate_v2_to_v3<P: AsRef<Path>>(
     input_path: P,
     output_path: P,
     verbose: bool,
-) -> std::io::Result<()> {
+) -> Result<(), BixverseErrors> {
     let file = File::open(input_path.as_ref())?;
     let file_size = file.metadata()?.len();
 
@@ -239,14 +236,11 @@ pub fn migrate_v2_to_v3<P: AsRef<Path>>(
             },
         )?;
 
-    if file_header.version != V2_FILE_VERSION {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "Expected file version {}, got {}",
-                V2_FILE_VERSION, file_header.version
-            ),
-        ));
+    if file_header.version != SC_FILE_VERSION {
+        return Err(BixverseErrors::FileVersionMismatch {
+            expected: SC_FILE_VERSION,
+            found: file_header.version,
+        });
     }
 
     let cell_based = file_header.cell_based;
@@ -355,7 +349,7 @@ pub fn migrate_v2_to_v3_pair<P: AsRef<Path>>(
     gene_input: P,
     gene_output: P,
     verbose: bool,
-) -> std::io::Result<()> {
+) -> Result<(), BixverseErrors> {
     if verbose {
         println!("Migrating cell-based file...");
     }

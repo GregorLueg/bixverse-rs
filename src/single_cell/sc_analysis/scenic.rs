@@ -2775,7 +2775,7 @@ fn batch_genes_correlated(
     n_cells_subsample: usize,
     seed: usize,
     verbose: bool,
-) -> Vec<usize> {
+) -> Result<Vec<usize>, BixverseErrors> {
     let n_genes = gene_indices.len();
     let n_centroids = n_genes.div_ceil(batch_size);
 
@@ -2802,7 +2802,7 @@ fn batch_genes_correlated(
         false,
         SCENIC_GENE_CHUNK_SIZE,
         verbose,
-    );
+    )?;
 
     // flatten to row-major for k-means: gene g, component c -> [g * dim + c]
     let dim = loadings.ncols();
@@ -2868,7 +2868,7 @@ fn batch_genes_correlated(
         result.extend_from_slice(cluster);
     }
 
-    result
+    Ok(result)
 }
 
 /// Reorder gene indices into batches of `batch_size` according to the chosen
@@ -2896,9 +2896,9 @@ pub fn batch_genes(
     strategy: &GeneBatchStrategy,
     seed: usize,
     verbose: bool,
-) -> Vec<usize> {
+) -> Result<Vec<usize>, BixverseErrors> {
     match strategy {
-        GeneBatchStrategy::Random => batch_genes_random(gene_indices, seed),
+        GeneBatchStrategy::Random => Ok(batch_genes_random(gene_indices, seed)),
         GeneBatchStrategy::Correlated {
             n_comp,
             n_cells_subsample,
@@ -2906,7 +2906,7 @@ pub fn batch_genes(
             // Fewer genes than a single batch -- correlation grouping is
             // pointless, just shuffle.
             if gene_indices.len() <= batch_size {
-                return batch_genes_random(gene_indices, seed);
+                return Ok(batch_genes_random(gene_indices, seed));
             }
             batch_genes_correlated(
                 f_path,
@@ -2967,7 +2967,7 @@ fn run_scenic_multi_output(
     seed: usize,
     verbose: bool,
     start_total: Instant,
-) -> Mat<f32> {
+) -> Result<Mat<f32>, BixverseErrors> {
     let n_multi_output = scenic_params
         .gene_batch_size
         .unwrap_or(MULTI_OUTPUT_BATCH)
@@ -2988,7 +2988,7 @@ fn run_scenic_multi_output(
         &strategy,
         seed,
         verbose,
-    );
+    )?;
 
     let gene_id_to_pos: FxHashMap<usize, usize> = gene_indices
         .iter()
@@ -3001,7 +3001,7 @@ fn run_scenic_multi_output(
     let mut all_sparse_cols: Vec<SparseAxis<u32, f32>> = Vec::with_capacity(n_genes);
 
     for (iter, chunk) in ordered_genes.chunks(SCENIC_GENE_CHUNK_SIZE).enumerate() {
-        let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(chunk);
+        let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(chunk)?;
         gene_chunks.par_iter_mut().for_each(|c| {
             c.filter_selected_cells(cell_set);
         });
@@ -3106,13 +3106,13 @@ fn run_scenic_multi_output(
         );
     }
 
-    Mat::from_fn(n_genes, n_tfs, |i, j| {
+    Ok(Mat::from_fn(n_genes, n_tfs, |i, j| {
         if j < importance_scores[i].len() {
             importance_scores[i][j]
         } else {
             0.0
         }
-    })
+    }))
 }
 
 /// GBM path: single-target, parallelised across individual genes.
@@ -3152,7 +3152,7 @@ fn run_scenic_gbm(
     seed: usize,
     verbose: bool,
     start_total: Instant,
-) -> Mat<f32> {
+) -> Result<Mat<f32>, BixverseErrors> {
     let start_gene_read = Instant::now();
     let mut all_sparse_cols: Vec<SparseAxis<u32, f32>> = Vec::with_capacity(n_genes);
 
@@ -3167,7 +3167,7 @@ fn run_scenic_gbm(
     }
 
     for (iter, chunk) in gene_indices.chunks(SCENIC_GENE_CHUNK_SIZE).enumerate() {
-        let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(chunk);
+        let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(chunk)?;
         gene_chunks.par_iter_mut().for_each(|c| {
             c.filter_selected_cells(cell_set);
         });
@@ -3234,13 +3234,13 @@ fn run_scenic_gbm(
         );
     }
 
-    Mat::from_fn(n_genes, n_tfs, |i, j| {
+    Ok(Mat::from_fn(n_genes, n_tfs, |i, j| {
         if j < importance_scores[i].len() {
             importance_scores[i][j]
         } else {
             0.0
         }
-    })
+    }))
 }
 
 /// Multi-output RF/ET streaming path: read genes in I/O chunks, slice
@@ -3283,7 +3283,7 @@ fn run_scenic_multi_output_streaming(
     seed: usize,
     verbose: bool,
     start_total: Instant,
-) -> Mat<f32> {
+) -> Result<Mat<f32>, BixverseErrors> {
     let n_multi_output = scenic_params
         .gene_batch_size
         .unwrap_or(MULTI_OUTPUT_BATCH)
@@ -3304,7 +3304,7 @@ fn run_scenic_multi_output_streaming(
         &strategy,
         seed,
         verbose,
-    );
+    )?;
 
     let gene_id_to_pos: FxHashMap<usize, usize> = gene_indices
         .iter()
@@ -3345,7 +3345,7 @@ fn run_scenic_multi_output_streaming(
 
         // read and filter chunk
         let start_io = Instant::now();
-        let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(io_chunk);
+        let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(io_chunk)?;
         gene_chunks.par_iter_mut().for_each(|c| {
             c.filter_selected_cells(cell_set);
         });
@@ -3441,13 +3441,13 @@ fn run_scenic_multi_output_streaming(
         );
     }
 
-    Mat::from_fn(n_genes, n_tfs, |i, j| {
+    Ok(Mat::from_fn(n_genes, n_tfs, |i, j| {
         if j < importance_scores[i].len() {
             importance_scores[i][j]
         } else {
             0.0
         }
-    })
+    }))
 }
 
 /// GBM streaming path: read genes in I/O chunks, fit each gene
@@ -3487,7 +3487,7 @@ fn run_scenic_gbm_streaming(
     seed: usize,
     verbose: bool,
     start_total: Instant,
-) -> Mat<f32> {
+) -> Result<Mat<f32>, BixverseErrors> {
     let total_io_chunks = gene_indices.len().div_ceil(SCENIC_GENE_CHUNK_SIZE);
     let mut importance_scores: Vec<Vec<f32>> = vec![Vec::new(); n_genes];
     let mut global_gene_offset: usize = 0;
@@ -3506,7 +3506,7 @@ fn run_scenic_gbm_streaming(
         let start_chunk = Instant::now();
 
         let start_io = Instant::now();
-        let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(io_chunk);
+        let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(io_chunk)?;
         gene_chunks.par_iter_mut().for_each(|c| {
             c.filter_selected_cells(cell_set);
         });
@@ -3586,13 +3586,13 @@ fn run_scenic_gbm_streaming(
         );
     }
 
-    Mat::from_fn(n_genes, n_tfs, |i, j| {
+    Ok(Mat::from_fn(n_genes, n_tfs, |i, j| {
         if j < importance_scores[i].len() {
             importance_scores[i][j]
         } else {
             0.0
         }
-    })
+    }))
 }
 
 ////////////
@@ -3658,8 +3658,8 @@ pub fn scenic_gene_filter(
     cell_indices: &[usize],
     scenic_params: &ScenicParams,
     verbose: bool,
-) -> Vec<usize> {
-    let reader = ParallelSparseReader::new(f_path).unwrap();
+) -> Result<Vec<usize>, BixverseErrors> {
+    let reader = ParallelSparseReader::new(f_path)?;
     let total_genes = reader.get_header().total_genes;
     let all_gene_indices: Vec<usize> = (0..total_genes).collect();
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
@@ -3668,7 +3668,7 @@ pub fn scenic_gene_filter(
     let mut passing = Vec::new();
 
     for (iter, chunk) in all_gene_indices.chunks(SCENIC_GENE_CHUNK_SIZE).enumerate() {
-        let mut gene_chunks = reader.read_gene_parallel(chunk);
+        let mut gene_chunks = reader.read_gene_parallel(chunk)?;
         gene_chunks.par_iter_mut().for_each(|c| {
             c.filter_selected_cells(&cell_set);
         });
@@ -3692,7 +3692,7 @@ pub fn scenic_gene_filter(
         }
     }
 
-    passing
+    Ok(passing)
 }
 
 /// Run SCENIC GRN inference and return a TF-by-gene importance matrix.
@@ -3735,16 +3735,16 @@ pub fn run_scenic_grn(
     scenic_params: &ScenicParams,
     seed: usize,
     verbose: bool,
-) -> Mat<f32> {
+) -> Result<Mat<f32>, BixverseErrors> {
     let start_total = Instant::now();
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
     let n_cells = cell_set.len();
 
     // load and quantise TFs
     let start_reading = Instant::now();
-    let reader = ParallelSparseReader::new(f_path).unwrap();
+    let reader = ParallelSparseReader::new(f_path)?;
 
-    let mut tf_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(tf_indices);
+    let mut tf_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(tf_indices)?;
     tf_chunks.par_iter_mut().for_each(|chunk| {
         chunk.filter_selected_cells(&cell_set);
     });
@@ -3837,7 +3837,7 @@ pub fn run_scenic_grn_streaming(
     scenic_params: &ScenicParams,
     seed: usize,
     verbose: bool,
-) -> Mat<f32> {
+) -> Result<Mat<f32>, BixverseErrors> {
     let start_total = Instant::now();
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
     let n_cells = cell_set.len();
@@ -3846,7 +3846,7 @@ pub fn run_scenic_grn_streaming(
     let start_reading = Instant::now();
     let reader = ParallelSparseReader::new(f_path).unwrap();
 
-    let mut tf_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(tf_indices);
+    let mut tf_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(tf_indices)?;
     tf_chunks.par_iter_mut().for_each(|chunk| {
         chunk.filter_selected_cells(&cell_set);
     });

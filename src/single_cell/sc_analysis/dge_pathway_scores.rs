@@ -129,14 +129,14 @@ pub fn calculate_dge_grps_mann_whitney(
     min_proportion: f32,
     alternative: &str,
     verbose: bool,
-) -> Result<DgeMannWhitneyRes, String> {
+) -> Result<DgeMannWhitneyRes, BixverseErrors> {
     let start_read = Instant::now();
 
-    let reader = ParallelSparseReader::new(f_path).unwrap();
+    let reader = ParallelSparseReader::new(f_path)?;
     let no_genes = reader.get_header().total_genes;
 
-    let mut cell_chunks_1: Vec<CsrCellChunk> = reader.read_cells_parallel(grp_1_indices);
-    let mut cell_chunks_2: Vec<CsrCellChunk> = reader.read_cells_parallel(grp_2_indices);
+    let mut cell_chunks_1: Vec<CsrCellChunk> = reader.read_cells_parallel(grp_1_indices)?;
+    let mut cell_chunks_2: Vec<CsrCellChunk> = reader.read_cells_parallel(grp_2_indices)?;
 
     let end_read = start_read.elapsed();
 
@@ -365,15 +365,15 @@ pub fn calculate_aucell(
     cells_to_keep: &[usize],
     auc_type: &str,
     verbose: bool,
-) -> Result<Vec<Vec<f32>>, String> {
+) -> Result<Vec<Vec<f32>>, BixverseErrors> {
     let auc_type = parse_auc_type(auc_type)
         .ok_or_else(|| format!("Invalid AUC method: {}", auc_type))
         .unwrap();
 
     let start_read = Instant::now();
-    let reader = ParallelSparseReader::new(f_path).unwrap();
+    let reader = ParallelSparseReader::new(f_path)?;
     let no_genes = reader.get_header().total_genes;
-    let cell_chunks: Vec<CsrCellChunk> = reader.read_cells_parallel(cells_to_keep);
+    let cell_chunks: Vec<CsrCellChunk> = reader.read_cells_parallel(cells_to_keep)?;
     let total_cells = cell_chunks.len();
     let end_read = start_read.elapsed();
 
@@ -440,14 +440,14 @@ pub fn calculate_aucell_streaming(
     cells_to_keep: &[usize],
     auc_type: &str,
     verbose: bool,
-) -> Result<Vec<Vec<f32>>, String> {
+) -> Result<Vec<Vec<f32>>, BixverseErrors> {
     const CHUNK_SIZE: usize = 50000;
 
     let auc_type = parse_auc_type(auc_type)
         .ok_or_else(|| format!("Invalid AUC method: {}", auc_type))
         .unwrap();
 
-    let reader = ParallelSparseReader::new(f_path).unwrap();
+    let reader = ParallelSparseReader::new(f_path)?;
     let no_genes = reader.get_header().total_genes;
     let total_chunks = cells_to_keep.len().div_ceil(CHUNK_SIZE);
     let mut all_results: Vec<Vec<f32>> =
@@ -456,7 +456,7 @@ pub fn calculate_aucell_streaming(
     for (chunk_idx, cell_indices_chunk) in cells_to_keep.chunks(CHUNK_SIZE).enumerate() {
         let start_chunk = Instant::now();
 
-        let cell_chunks = reader.read_cells_parallel(cell_indices_chunk);
+        let cell_chunks = reader.read_cells_parallel(cell_indices_chunk)?;
         let ranks = rank_csr_chunk_vec(cell_chunks, no_genes, true);
 
         for cell_ranks in ranks {

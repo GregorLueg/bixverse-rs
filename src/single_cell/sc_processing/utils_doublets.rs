@@ -74,7 +74,7 @@ pub fn select_hvg(
     opts: &HvgOpts,
     streaming: bool,
     verbose: bool,
-) -> Vec<usize> {
+) -> Result<Vec<usize>, BixverseErrors> {
     let hvg_type = parse_hvg_method(&opts.method)
         .unwrap_or_else(|| panic!("Invalid HVG method: {}", &opts.method));
 
@@ -96,7 +96,7 @@ pub fn select_hvg(
                     opts.clip_max,
                     verbose,
                 )
-            };
+            }?;
             res.var_std
         }
         HvgMethod::Dispersion => {
@@ -116,7 +116,7 @@ pub fn select_hvg(
                     opts.n_bins,
                     verbose,
                 )
-            };
+            }?;
             res.dispersion
         }
         HvgMethod::MeanVarBin => {
@@ -136,7 +136,7 @@ pub fn select_hvg(
                     opts.n_bins,
                     verbose,
                 )
-            };
+            }?;
             res.dispersion_scaled
         }
     };
@@ -148,7 +148,8 @@ pub fn select_hvg(
     indices.truncate(n_to_take);
     let mut result: Vec<usize> = indices.into_iter().map(|(i, _)| i).collect();
     result.sort_unstable();
-    result
+
+    Ok(result)
 }
 
 /// Compute per-cell library sizes restricted to HVG genes
@@ -166,21 +167,21 @@ pub fn compute_hvg_library_sizes(
     f_path_cell: &str,
     cells_to_keep: &[usize],
     hvg_genes: &[usize],
-) -> Vec<usize> {
+) -> Result<Vec<usize>, BixverseErrors> {
     let hvg_set: FxHashSet<usize> = hvg_genes.iter().copied().collect();
-    let reader = ParallelSparseReader::new(f_path_cell).unwrap();
+    let reader = ParallelSparseReader::new(f_path_cell)?;
 
     cells_to_keep
         .par_iter()
-        .map(|&cell_idx| {
-            let chunk = reader.read_cell(cell_idx);
-            chunk
+        .map(|&cell_idx| -> Result<usize, BixverseErrors> {
+            let chunk = reader.read_cell(cell_idx)?;
+            Ok(chunk
                 .indices
                 .iter()
                 .enumerate()
                 .filter(|&(_, &gene_idx)| hvg_set.contains(&(gene_idx as usize)))
                 .map(|(i, _)| chunk.data_raw.get(i) as usize)
-                .sum()
+                .sum())
         })
         .collect()
 }
@@ -329,14 +330,14 @@ pub fn pca_observed(
     random_svd: bool,
     seed: usize,
     verbose: bool,
-) -> DoubletPcaRes {
+) -> Result<DoubletPcaRes, BixverseErrors> {
     let start_total = Instant::now();
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
     let n_cells = cell_indices.len();
 
     let start_reading = Instant::now();
-    let reader = ParallelSparseReader::new(f_path_gene).unwrap();
-    let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(gene_indices);
+    let reader = ParallelSparseReader::new(f_path_gene)?;
+    let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(gene_indices)?;
     if verbose {
         println!("Loaded in data: {:.2?}", start_reading.elapsed());
     }
@@ -393,7 +394,7 @@ pub fn pca_observed(
             None,
             means_for_svd,
             stds_for_svd,
-        );
+        )?;
         let scores_f64 = compute_pc_scores(&svd_res);
         let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| scores_f64[(i, j)] as f32);
         let loadings = Mat::<f32>::from_fn(gene_indices.len(), no_pcs, |i, j| {
@@ -408,7 +409,7 @@ pub fn pca_observed(
             true,
             means_for_svd,
             stds_for_svd,
-        );
+        )?;
         let scores_f64 = compute_pc_scores(&svd_res);
         let scores = Mat::<f32>::from_fn(scores_f64.nrows(), scores_f64.ncols(), |i, j| {
             scores_f64[(i, j)] as f32
@@ -431,7 +432,7 @@ pub fn pca_observed(
     let col_means_f32: Vec<f32> = col_means.iter().map(|&x| x as f32).collect();
     let col_stds_f32: Vec<f32> = col_stds.iter().map(|&x| x as f32).collect();
 
-    (scores, loadings, col_means_f32, col_stds_f32)
+    Ok((scores, loadings, col_means_f32, col_stds_f32))
 }
 
 /// Run PCA on observed cells, project simulated doublets, return combined
@@ -451,7 +452,7 @@ pub fn pca_and_project(
     opts: &PcaOpts,
     seed: usize,
     verbose: bool,
-) -> (Mat<f32>, DoubletPcaRes) {
+) -> Result<(Mat<f32>, DoubletPcaRes), BixverseErrors> {
     let pca_res = pca_observed(
         f_path_gene,
         cells_to_keep,
@@ -465,7 +466,7 @@ pub fn pca_and_project(
         opts.random_svd,
         seed,
         verbose,
-    );
+    )?;
 
     let scaled_sim = scale_cell_chunks_with_stats(
         sim_chunks,
@@ -479,7 +480,7 @@ pub fn pca_and_project(
     let sim_pca = &scaled_sim * &pca_res.1;
     let combined = concat![[&pca_res.0], [sim_pca]];
 
-    (combined, pca_res)
+    Ok((combined, pca_res))
 }
 
 /////////
@@ -631,7 +632,7 @@ pub fn simulate_from_pairs(
     f_path_cell: &str,
     target_size: f32,
     log_transform: bool,
-) -> Vec<CsrCellChunk> {
+) -> Result<Vec<CsrCellChunk>, BixverseErrors> {
     let hvg_set: FxHashSet<usize> = hvg_genes.iter().copied().collect();
     let gene_to_hvg_idx: FxHashMap<usize, u32> = hvg_genes
         .iter()
@@ -639,14 +640,14 @@ pub fn simulate_from_pairs(
         .map(|(hvg_idx, &orig_idx)| (orig_idx, hvg_idx as u32))
         .collect();
 
-    let reader = ParallelSparseReader::new(f_path_cell).unwrap();
+    let reader = ParallelSparseReader::new(f_path_cell)?;
 
     pairs
         .par_iter()
         .enumerate()
         .map(|(doublet_idx, &(pos_i, pos_j))| {
-            let cell1 = reader.read_cell(cells_to_keep[pos_i]);
-            let cell2 = reader.read_cell(cells_to_keep[pos_j]);
+            let cell1 = reader.read_cell(cells_to_keep[pos_i])?;
+            let cell2 = reader.read_cell(cells_to_keep[pos_j])?;
 
             let hvg_combined_lib_size = hvg_library_sizes[pos_i] + hvg_library_sizes[pos_j];
 
@@ -664,7 +665,7 @@ pub fn simulate_from_pairs(
                 *idx = gene_to_hvg_idx[&(*idx as usize)];
             }
 
-            doublet
+            Ok(doublet)
         })
         .collect()
 }
@@ -1022,34 +1023,38 @@ pub fn select_top_genes(
     cells_to_keep: &[usize],
     clusters: Option<&[usize]>,
     n_top: usize,
-) -> Vec<usize> {
-    let reader = ParallelSparseReader::new(f_path_gene).unwrap();
+) -> Result<Vec<usize>, BixverseErrors> {
+    let reader = ParallelSparseReader::new(f_path_gene)?;
     let n_total_genes = reader.get_header().total_genes;
 
     if n_top >= n_total_genes {
-        return (0..n_total_genes).collect();
+        return Ok((0..n_total_genes).collect());
     }
     if cells_to_keep.is_empty() {
-        return (0..n_top).collect();
+        return Ok((0..n_top).collect());
     }
 
     let cell_set: IndexSet<u32> = cells_to_keep.iter().map(|&x| x as u32).collect();
     let all_indices: Vec<usize> = (0..n_total_genes).collect();
-    let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(&all_indices);
+    let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(&all_indices)?;
 
     gene_chunks.par_iter_mut().for_each(|chunk| {
         chunk.filter_selected_cells(&cell_set);
     });
 
     match clusters {
-        None => select_by_overall_mean(&gene_chunks, cells_to_keep.len(), n_top),
+        None => Ok(select_by_overall_mean(
+            &gene_chunks,
+            cells_to_keep.len(),
+            n_top,
+        )),
         Some(labels) => {
             assert_eq!(
                 labels.len(),
                 cells_to_keep.len(),
                 "cluster labels must be parallel to cells_to_keep",
             );
-            select_by_cluster_roundrobin(&gene_chunks, labels, n_top)
+            Ok(select_by_cluster_roundrobin(&gene_chunks, labels, n_top))
         }
     }
 }
@@ -1389,7 +1394,7 @@ pub fn simulate_doublets_scdbl(
     log_transform: bool,
     params: &ScDblSimParams,
     seed: usize,
-) -> (Vec<CsrCellChunk>, Vec<usize>) {
+) -> Result<(Vec<CsrCellChunk>, Vec<usize>), BixverseErrors> {
     let n_sim = pairs.len();
     let n_hvg = selected_genes.len();
     let gene_to_hvg_idx: FxHashMap<usize, usize> = selected_genes
@@ -1412,19 +1417,16 @@ pub fn simulate_doublets_scdbl(
         })
         .collect();
 
-    let reader = ParallelSparseReader::new(f_path_cell).unwrap();
+    let reader = ParallelSparseReader::new(f_path_cell)?;
 
     let results: Vec<(CsrCellChunk, usize)> = (0..n_sim)
         .into_par_iter()
-        .map(|di| {
+        .map(|di| -> Result<(CsrCellChunk, usize), BixverseErrors> {
             let (pos_a, pos_b) = pairs[di];
-            let cell_a = reader.read_cell(cells_to_keep[pos_a]);
-            let cell_b = reader.read_cell(cells_to_keep[pos_b]);
-
-            // Extract dense HVG count vectors
+            let cell_a = reader.read_cell(cells_to_keep[pos_a])?;
+            let cell_b = reader.read_cell(cells_to_keep[pos_b])?;
             let mut dense_a = vec![0u32; n_hvg];
             let mut dense_b = vec![0u32; n_hvg];
-
             for (i, &gene_idx) in cell_a.indices.iter().enumerate() {
                 let gi = gene_idx as usize;
                 if let Some(&hvg_pos) = gene_to_hvg_idx.get(&gi) {
@@ -1437,7 +1439,6 @@ pub fn simulate_doublets_scdbl(
                     dense_b[hvg_pos] = cell_b.data_raw.get(i);
                 }
             }
-
             let (counts, effective_lib) = generate_single_doublet(
                 &dense_a,
                 &dense_b,
@@ -1448,13 +1449,10 @@ pub fn simulate_doublets_scdbl(
                 &cluster_medians,
                 &treatments[di],
             );
-
-            // Pack sparse: collect non-zero entries
             let lib_f32 = (effective_lib as f32).max(1.0);
             let mut sp_indices: Vec<u32> = Vec::new();
             let mut sp_raw: Vec<u32> = Vec::new();
             let mut sp_norm: Vec<f32> = Vec::new();
-
             for (g, &c) in counts.iter().enumerate() {
                 if c > 0 {
                     sp_indices.push(g as u32);
@@ -1467,7 +1465,6 @@ pub fn simulate_doublets_scdbl(
                     sp_norm.push(normed);
                 }
             }
-
             let chunk = CsrCellChunk::from_doublet_simulation(
                 sp_indices,
                 sp_raw,
@@ -1475,10 +1472,9 @@ pub fn simulate_doublets_scdbl(
                 effective_lib,
                 di,
             );
-
-            (chunk, effective_lib)
+            Ok((chunk, effective_lib))
         })
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
 
     let mut chunks = Vec::with_capacity(n_sim);
     let mut lib_sizes = Vec::with_capacity(n_sim);
@@ -1487,7 +1483,7 @@ pub fn simulate_doublets_scdbl(
         lib_sizes.push(lib);
     }
 
-    (chunks, lib_sizes)
+    Ok((chunks, lib_sizes))
 }
 
 /// Parameters for the unrecognisable-origin filter.

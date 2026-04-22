@@ -10,6 +10,7 @@
 
 pub mod core;
 pub mod enrichment;
+pub mod errors;
 pub mod graph;
 pub mod methods;
 pub mod ontology;

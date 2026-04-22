@@ -288,7 +288,7 @@ impl Scrublet {
         verbose: bool,
         return_combined_pca: bool,
         return_pairs: bool,
-    ) -> FinalScrubletRes {
+    ) -> Result<FinalScrubletRes, BixverseErrors> {
         let hvg_opts = HvgOpts {
             method: self.params.hvg_method.clone(),
             loess_span: self.params.loess_span as f32,
@@ -317,7 +317,7 @@ impl Scrublet {
             &hvg_opts,
             streaming,
             verbose,
-        );
+        )?;
 
         if verbose {
             println!(
@@ -328,7 +328,7 @@ impl Scrublet {
         }
 
         self.hvg_library_sizes =
-            compute_hvg_library_sizes(&self.f_path_cell, &self.cells_to_keep, &hvg_genes);
+            compute_hvg_library_sizes(&self.f_path_cell, &self.cells_to_keep, &hvg_genes)?;
         let target_size = resolve_target_size(self.params.target_size, &self.hvg_library_sizes);
 
         // Simulate doublets
@@ -349,7 +349,7 @@ impl Scrublet {
             &self.f_path_cell,
             target_size,
             self.params.log_transform,
-        );
+        )?;
 
         if verbose {
             println!(
@@ -375,7 +375,7 @@ impl Scrublet {
             &pca_opts,
             seed,
             verbose,
-        );
+        )?;
 
         if verbose {
             println!("Done with PCA in {:.2?}", start_pca.elapsed());
@@ -433,7 +433,7 @@ impl Scrublet {
         let pair_1_out = if return_pairs { Some(pair_1) } else { None };
         let pair_2_out = if return_pairs { Some(pair_2) } else { None };
 
-        (res, pca_out, pair_1_out, pair_2_out)
+        Ok((res, pca_out, pair_1_out, pair_2_out))
     }
 
     /// Calculate Bayesian doublet scores from the kNN graph.

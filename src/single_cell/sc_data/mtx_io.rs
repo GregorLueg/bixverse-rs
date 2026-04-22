@@ -396,7 +396,7 @@ impl MtxReader {
         bin_path: &str,
         quality: &CellOnFileQuality,
         verbose: bool,
-    ) -> IoResult<MtxFinalData> {
+    ) -> Result<MtxFinalData, BixverseErrors> {
         let mut writer = CellGeneSparseWriter::new(
             bin_path,
             true,

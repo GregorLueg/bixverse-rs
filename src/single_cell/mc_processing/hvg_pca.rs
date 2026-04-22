@@ -9,6 +9,7 @@ use crate::core::base::loess::LoessRegression;
 use crate::core::math::pca_svd::*;
 use crate::prelude::*;
 use crate::single_cell::sc_processing::hvg::*;
+use crate::single_cell::sc_processing::pca::SingleCellPcaRes;
 
 /////////
 // HVG //
@@ -233,7 +234,7 @@ pub fn pca_on_metacells<T: BixverseNumeric>(
     no_pcs: usize,
     random_svd: bool,
     seed: usize,
-) -> (Mat<f32>, Mat<f32>, Vec<f32>) {
+) -> SingleCellPcaRes {
     let (n_cells, n_genes) = matrix.shape;
     let csc = match matrix.cs_type {
         CompressedSparseFormat::Csc => Cow::Borrowed(matrix),
@@ -278,7 +279,7 @@ pub fn pca_on_metacells<T: BixverseNumeric>(
 
     let (scores, loadings, s) = if random_svd {
         let res: RandomSvdResults<f64> =
-            randomised_svd(scaled.as_ref(), no_pcs, seed, Some(100_usize), None);
+            randomised_svd(scaled.as_ref(), no_pcs, seed, Some(100_usize), None)?;
         let loadings = Mat::<f32>::from_fn(n_genes, no_pcs, |i, j| res.v[(i, j)] as f32);
         let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| (res.u[(i, j)] * res.s[j]) as f32);
         let s: Vec<f32> = res.s[..no_pcs].iter().map(|&x| x as f32).collect();
@@ -298,5 +299,6 @@ pub fn pca_on_metacells<T: BixverseNumeric>(
             .collect();
         (scores, loadings, s)
     };
-    (scores, loadings, s)
+
+    Ok((scores, loadings, s))
 }
