@@ -163,3 +163,10 @@ pub enum BixverseErrors {
     #[error("Invalid model type: {0}")]
     HotSpotWrongModel(String),
 }
+
+/// Transform into an R extendr API error
+impl From<BixverseErrors> for extendr_api::Error {
+    fn from(err: BixverseErrors) -> Self {
+        extendr_api::Error::Other(err.to_string())
+    }
+}
