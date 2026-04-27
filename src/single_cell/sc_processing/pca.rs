@@ -398,6 +398,8 @@ pub fn pca_on_sc_streaming(
                 scaled_matrix[(row, global_col)] = val as f64;
             }
         }
+
+        drop(gene_chunks);
     }
 
     if verbose {
@@ -510,7 +512,10 @@ pub fn pca_on_sc_sparse(
         chunk.filter_selected_cells(&cell_set);
     });
 
-    let csc = from_gene_chunks::<f32>(&gene_chunks, n_cells);
+    let mut csc = from_gene_chunks::<f32>(&gene_chunks, n_cells);
+
+    // throw out the raw data
+    csc.data.clear();
 
     let end_data_prep = start_data_prep.elapsed();
 
