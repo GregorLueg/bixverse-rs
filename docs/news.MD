@@ -1,5 +1,12 @@
 # News
 
+## 0.1.8
+
+### Features
+
+- Better loading in of MTX files that do not blow up during counting of cells
+  per gene.
+
 ## 0.1.7
 
 ### Features
