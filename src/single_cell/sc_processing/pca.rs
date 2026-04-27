@@ -525,7 +525,7 @@ pub fn pca_on_sc_sparse(
 
     let (scores, loadings, s) = if random_svd {
         let svd_res = randomised_sparse_svd::<f32, f64>(
-            &csc,
+            csc,
             no_pcs,
             seed as u64,
             true,

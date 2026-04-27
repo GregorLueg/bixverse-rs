@@ -476,7 +476,7 @@ fn test_sparse_vs_dense_svd_scores() {
 
         // Sparse: implicit centering
         let sparse_svd = randomised_sparse_svd::<f32, f64>(
-            &csc,
+            csc,
             10,
             42,
             false, // use data, not data_2 (we set them equal)

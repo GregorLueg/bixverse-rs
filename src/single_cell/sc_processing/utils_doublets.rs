@@ -13,6 +13,13 @@ use crate::single_cell::sc_processing::hvg::*;
 use crate::single_cell::sc_processing::pca::*;
 
 ////////////
+// Consts //
+////////////
+
+/// Maximum number of doublets to use for Scrublet and DoubletDetection
+pub const MAX_DOUBLET_K_NEIGHBOURS: usize = 150;
+
+////////////
 // Params //
 ////////////
 
@@ -150,6 +157,15 @@ pub fn compute_hvg_library_sizes(
 }
 
 /// Compute target library size (mean of HVG library sizes if not provided)
+///
+/// ### Params
+///
+/// * `explicit` -
+/// * `hvg_library_sizes` -
+///
+/// ### Returns
+///
+///
 pub fn resolve_target_size(explicit: Option<f32>, hvg_library_sizes: &[usize]) -> f32 {
     explicit.unwrap_or_else(|| {
         let sum = hvg_library_sizes.iter().sum::<usize>() as f32;
@@ -324,7 +340,11 @@ pub fn pca_observed(
         }
     });
 
-    let csc = from_gene_chunks::<f32>(&gene_chunks, n_cells);
+    let mut csc = from_gene_chunks::<f32>(&gene_chunks, n_cells);
+
+    // clear the raw counts for reduced memory pressure
+    csc.data.clear();
+
     drop(gene_chunks);
 
     let col_means: Vec<f64> = sparse_csc_column_means(&csc, true);
@@ -349,7 +369,7 @@ pub fn pca_observed(
 
     let (scores, loadings) = if random_svd {
         let svd_res = randomised_sparse_svd::<f32, f64>(
-            &csc,
+            csc,
             no_pcs,
             seed as u64,
             true,
@@ -535,7 +555,7 @@ pub fn dispatch_knn(
 /// ### Returns
 ///
 /// The adjusted k value to use for kNN construction on the combined
-/// (observed + simulated) embedding.
+/// (observed + simulated) embedding. This is clamped to `MAX_DOUBLET_K_NEIGHBOURS`.
 pub fn adjusted_k(base_k: usize, n_obs: usize, n_sim: usize) -> usize {
     let k = if base_k == 0 {
         ((n_obs as f32).sqrt() * 0.5).round() as usize
@@ -543,7 +563,9 @@ pub fn adjusted_k(base_k: usize, n_obs: usize, n_sim: usize) -> usize {
         base_k
     };
     let r = n_sim as f32 / n_obs as f32;
-    (k as f32 * (1.0 + r)).round() as usize
+    let adj_k = (k as f32 * (1.0 + r)).round() as usize;
+
+    adj_k.min(MAX_DOUBLET_K_NEIGHBOURS)
 }
 
 ////////////////////////
