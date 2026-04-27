@@ -171,10 +171,13 @@ impl MtxReader {
         let completed_chunks = Arc::new(AtomicUsize::new(0));
         let report_interval = (num_chunks / 10).max(1);
 
-        let results: Vec<_> = boundaries
+        // per-thread gene counts. MTX coordinate format guarantees each
+        // (row, col) pair appears at most once, so counts can be summed across
+        // chunks without double-counting.
+        let results: Vec<Vec<u32>> = boundaries
             .par_iter()
             .map(|&(start, end)| {
-                let mut local_gene_cells = vec![FxHashSet::default(); self.header.total_genes];
+                let mut local_gene_counts = vec![0u32; self.header.total_genes];
 
                 if let Ok(file) = File::open(&self.path) {
                     let mut reader = BufReader::with_capacity(256 * 1024, file);
@@ -207,14 +210,14 @@ impl MtxReader {
                                 if let Some((row, col, _)) =
                                     parse_mtx_line(&line_buffer[..trim_end])
                                 {
-                                    let (cell_idx, gene_idx) = if self.cells_as_rows {
-                                        ((row - 1) as usize, (col - 1) as usize)
+                                    let gene_idx = if self.cells_as_rows {
+                                        (col - 1) as usize
                                     } else {
-                                        ((col - 1) as usize, (row - 1) as usize)
+                                        (row - 1) as usize
                                     };
 
                                     if gene_idx < self.header.total_genes {
-                                        local_gene_cells[gene_idx].insert(cell_idx);
+                                        local_gene_counts[gene_idx] += 1;
                                     }
                                 }
                             }
@@ -233,25 +236,20 @@ impl MtxReader {
                     }
                 }
 
-                local_gene_cells
+                local_gene_counts
             })
             .collect();
 
-        let gene_cells: Vec<FxHashSet<usize>> = (0..self.header.total_genes)
-            .into_par_iter()
-            .map(|i| {
-                let mut merged = FxHashSet::default();
-                for local_genes in &results {
-                    merged.extend(&local_genes[i]);
-                }
-                merged
-            })
-            .collect();
-
-        // Filter genes
+        // Sum counts across threads, then filter genes.
         let genes_to_keep_set: FxHashSet<usize> = (0..self.header.total_genes)
-            .filter(|&i| gene_cells[i].len() >= self.qc_params.min_cells)
+            .into_par_iter()
+            .filter(|&i| {
+                let total: u32 = results.iter().map(|local| local[i]).sum();
+                total as usize >= self.qc_params.min_cells
+            })
             .collect();
+
+        drop(results);
 
         let first_scan_end = first_scan_time.elapsed();
 
