@@ -342,9 +342,6 @@ pub fn pca_observed(
 
     let mut csc = from_gene_chunks::<f32>(&gene_chunks, n_cells);
 
-    // clear the raw counts for reduced memory pressure
-    csc.data.clear();
-
     drop(gene_chunks);
 
     let col_means: Vec<f64> = sparse_csc_column_means(&csc, true);
