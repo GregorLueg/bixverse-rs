@@ -536,10 +536,7 @@ pub fn pca_on_sc_sparse(
         chunk.filter_selected_cells(&cell_set);
     });
 
-    let mut csc = from_gene_chunks::<f32>(&gene_chunks, n_cells);
-
-    // throw out the raw data
-    csc.data.clear();
+    let csc = from_gene_chunks::<f32>(&gene_chunks, n_cells);
 
     let end_data_prep = start_data_prep.elapsed();
 
