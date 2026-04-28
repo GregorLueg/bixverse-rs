@@ -4,7 +4,7 @@
 use rayon::prelude::*;
 use rustc_hash::FxHashSet;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Result as IoResult, Seek};
+use std::io::{BufRead, BufReader, BufWriter, Read, Result as IoResult, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -42,6 +42,18 @@ pub struct MtxFinalData {
     pub no_genes: usize,
     /// No of cells that were read in
     pub no_cells: usize,
+}
+
+/// Structure for temporary file guard
+struct TempFileGuard(Vec<PathBuf>);
+
+/// Drop implementation for this one
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        for p in &self.0 {
+            let _ = std::fs::remove_file(p);
+        }
+    }
 }
 
 /// MTX Reader for bixverse
@@ -512,6 +524,239 @@ impl MtxReader {
             cell_qc: cell_quality,
             no_genes: quality.genes_to_keep.len(),
             no_cells: quality.cells_to_keep.len(),
+        })
+    }
+
+    /// Process the mtx file and write to binarised Rust file (streaming)
+    ///
+    /// ### Params
+    ///
+    /// * `bin_path` - Where to save the binarised file.
+    /// * `quality` - Structure indicating which cells and genes to keep from
+    ///   the mtx file.
+    /// * `verbose` - Controls verbosity of the function.
+    ///
+    /// ### Returns
+    ///
+    /// The `MtxFinalData` with information how many cells were written to
+    /// file, how many genes were included in which cells did not parse
+    /// the thresholds.
+    pub fn process_mtx_and_write_bin_streaming(
+        mut self,
+        bin_path: &str,
+        quality: &CellOnFileQuality,
+        verbose: bool,
+    ) -> IoResult<MtxFinalData> {
+        let n_kept_cells = quality.cells_to_keep.len();
+        let n_kept_genes = quality.genes_to_keep.len();
+
+        if n_kept_cells == 0 {
+            let writer = CellGeneSparseWriter::new(bin_path, true, 0, n_kept_genes)?;
+            writer.finalise()?;
+            return Ok(MtxFinalData {
+                cell_qc: CellQuality {
+                    cell_indices: vec![],
+                    gene_indices: quality.genes_to_keep.to_vec(),
+                    lib_size: vec![],
+                    nnz: vec![],
+                },
+                no_genes: n_kept_genes,
+                no_cells: 0,
+            });
+        }
+
+        // Bucket layout. Cap at 128 buckets to stay well below macOS fd limits.
+        let n_buckets = n_kept_cells.div_ceil(5_000).clamp(1, 128);
+        let cells_per_bucket = n_kept_cells.div_ceil(n_buckets);
+
+        let bin_path_buf = PathBuf::from(bin_path);
+        let temp_dir = bin_path_buf
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let stem = bin_path_buf
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "mtx".into());
+
+        let temp_paths: Vec<PathBuf> = (0..n_buckets)
+            .map(|i| temp_dir.join(format!(".{}.bucket_{:04}.tmp", stem, i)))
+            .collect();
+        let _guard = TempFileGuard(temp_paths.clone());
+
+        // === Pass 1: bucket kept entries to temp files ===
+        let pass1 = Instant::now();
+        if verbose {
+            println!(
+                "Bucketing pass: {} buckets, ~{} cells/bucket",
+                n_buckets, cells_per_bucket
+            );
+        }
+
+        let mut bucket_writers: Vec<BufWriter<File>> = temp_paths
+            .iter()
+            .map(|p| File::create(p).map(|f| BufWriter::with_capacity(256 * 1024, f)))
+            .collect::<IoResult<Vec<_>>>()?;
+
+        self.reader.rewind()?;
+        Self::skip_header(&mut self.reader)?;
+
+        let mut line_buffer = Vec::with_capacity(64);
+        let mut lines_read = 0usize;
+        let report_interval = (self.header.total_entries / 10).max(1);
+
+        while {
+            line_buffer.clear();
+            self.reader.read_until(b'\n', &mut line_buffer)? > 0
+        } {
+            if line_buffer.last() == Some(&b'\n') {
+                line_buffer.pop();
+            }
+            if line_buffer.last() == Some(&b'\r') {
+                line_buffer.pop();
+            }
+            if line_buffer.is_empty() {
+                continue;
+            }
+
+            let (row, col, value) = match parse_mtx_line(&line_buffer) {
+                Some(parsed) => parsed,
+                None => continue,
+            };
+
+            let (old_cell_idx, old_gene_idx) = if self.cells_as_rows {
+                ((row - 1) as usize, (col - 1) as usize)
+            } else {
+                ((col - 1) as usize, (row - 1) as usize)
+            };
+
+            if !quality.genes_to_keep_set.contains(&old_gene_idx)
+                || !quality.cells_to_keep_set.contains(&old_cell_idx)
+            {
+                continue;
+            }
+
+            let new_cell_idx = quality.cell_old_to_new[&old_cell_idx] as u32;
+            let new_gene_idx = quality.gene_old_to_new[&old_gene_idx] as u32;
+            let bucket = (new_cell_idx as usize) / cells_per_bucket;
+
+            let mut buf = [0u8; 10];
+            buf[0..4].copy_from_slice(&new_cell_idx.to_le_bytes());
+            buf[4..8].copy_from_slice(&new_gene_idx.to_le_bytes());
+            buf[8..10].copy_from_slice(&value.to_le_bytes());
+            bucket_writers[bucket].write_all(&buf)?;
+
+            lines_read += 1;
+            if verbose && lines_read.is_multiple_of(report_interval) {
+                let progress =
+                    (lines_read as f64 / self.header.total_entries as f64 * 100.0) as usize;
+                println!("  Bucketed {}% of entries", progress);
+            }
+        }
+
+        for w in bucket_writers.iter_mut() {
+            w.flush()?;
+        }
+        drop(bucket_writers);
+
+        if verbose {
+            println!("Bucketing done: {:.2?}", pass1.elapsed());
+        }
+
+        // === Pass 2: process each bucket in cell-index order ===
+        let mut writer = CellGeneSparseWriter::new(bin_path, true, n_kept_cells, n_kept_genes)?;
+        let mut lib_size = Vec::with_capacity(n_kept_cells);
+        let mut nnz = Vec::with_capacity(n_kept_cells);
+
+        let pass2 = Instant::now();
+        if verbose {
+            println!("Writing pass: streaming buckets to output");
+        }
+
+        for (bucket_idx, temp_path) in temp_paths.iter().enumerate() {
+            let bucket_bytes = std::fs::read(temp_path)?;
+            let n_entries = bucket_bytes.len() / 10;
+
+            let mut entries: Vec<(u32, u32, u16)> = Vec::with_capacity(n_entries);
+            for i in 0..n_entries {
+                let off = i * 10;
+                let cell = u32::from_le_bytes([
+                    bucket_bytes[off],
+                    bucket_bytes[off + 1],
+                    bucket_bytes[off + 2],
+                    bucket_bytes[off + 3],
+                ]);
+                let gene = u32::from_le_bytes([
+                    bucket_bytes[off + 4],
+                    bucket_bytes[off + 5],
+                    bucket_bytes[off + 6],
+                    bucket_bytes[off + 7],
+                ]);
+                let value = u16::from_le_bytes([bucket_bytes[off + 8], bucket_bytes[off + 9]]);
+                entries.push((cell, gene, value));
+            }
+            drop(bucket_bytes);
+
+            entries.sort_unstable_by_key(|&(c, g, _)| (c, g));
+
+            let mut i = 0;
+            while i < entries.len() {
+                let cell = entries[i].0;
+                let mut j = i;
+                while j < entries.len() && entries[j].0 == cell {
+                    j += 1;
+                }
+
+                let gene_indices: Vec<u32> = entries[i..j].iter().map(|&(_, g, _)| g).collect();
+                let gene_counts: Vec<u16> = entries[i..j].iter().map(|&(_, _, v)| v).collect();
+                let total_umi: u32 = gene_counts.iter().map(|&x| x as u32).sum();
+
+                lib_size.push(total_umi as usize);
+                nnz.push(gene_counts.len());
+
+                let cell_chunk = CsrCellChunk::from_data(
+                    &gene_counts,
+                    &gene_indices,
+                    cell as usize,
+                    self.qc_params.target_size,
+                    true,
+                );
+                writer.write_cell_chunk(cell_chunk)?;
+
+                i = j;
+            }
+
+            let _ = std::fs::remove_file(temp_path);
+
+            if verbose {
+                let progress = ((bucket_idx + 1) as f64 / n_buckets as f64 * 100.0) as usize;
+                println!(
+                    "  Wrote bucket {}/{} ({}%)",
+                    bucket_idx + 1,
+                    n_buckets,
+                    progress
+                );
+            }
+        }
+
+        writer.finalise()?;
+
+        if verbose {
+            println!("Writing pass done: {:.2?}", pass2.elapsed());
+        }
+
+        let cell_quality = CellQuality {
+            cell_indices: quality.cells_to_keep.to_vec(),
+            gene_indices: quality.genes_to_keep.to_vec(),
+            lib_size,
+            nnz,
+        };
+
+        Ok(MtxFinalData {
+            cell_qc: cell_quality,
+            no_genes: n_kept_genes,
+            no_cells: n_kept_cells,
         })
     }
 

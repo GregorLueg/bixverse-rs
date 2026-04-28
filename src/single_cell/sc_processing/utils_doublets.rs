@@ -340,7 +340,7 @@ pub fn pca_observed(
         }
     });
 
-    let mut csc = from_gene_chunks::<f32>(&gene_chunks, n_cells);
+    let csc = from_gene_chunks::<f32>(&gene_chunks, n_cells);
 
     drop(gene_chunks);
 
