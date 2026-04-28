@@ -5,6 +5,7 @@ use extendr_api::*;
 use std::collections::HashMap;
 
 use crate::core::math::sparse::parse_compressed_sparse_format;
+use crate::single_cell::sc_analysis::fast_clusters::FastLouvainParams;
 use crate::single_cell::sc_analysis::{
     hdwgcna_meta_cells::MetaCellParams,
     hotspot::HotSpotParams,
@@ -724,6 +725,76 @@ impl ScDblFinderParams {
                 .get("manual_threshold")
                 .and_then(|v| v.as_real())
                 .map(|x| x as f32),
+        })
+    }
+}
+
+///////////////////////
+// FastLouvainParams //
+///////////////////////
+
+impl FastLouvainParams<f32> {
+    /// Generate the BbknnParams from a R list
+    ///
+    /// Should values not be found within the List, the parameters will default
+    /// to sensible defaults.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the BBKNN parameters.
+    ///
+    /// ### Return
+    ///
+    /// The `BbknnParams` with all of the parameters.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let knn_params = KnnParams::from_r_list(r_list.clone())?;
+        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let defaults = Self::default();
+
+        let n_centroids = params
+            .get("n_centroids")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.n_centroids);
+
+        let kmeans_iters = params
+            .get("kmeans_iters")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.kmeans_iters);
+
+        let batch_size = params
+            .get("batch_size")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.batch_size);
+
+        let louvain_iters = params
+            .get("louvain_iters")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.louvain_iters);
+
+        let drift_threshold: f32 = params
+            .get("drift_threshold")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.drift_threshold);
+
+        let lr_alpha: f32 = params
+            .get("lr_alpha")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.lr_alpha);
+
+        Ok(Self {
+            n_centroids,
+            kmeans_iters,
+            batch_size,
+            louvain_iters,
+            drift_threshold,
+            lr_alpha,
+            knn_params,
         })
     }
 }
