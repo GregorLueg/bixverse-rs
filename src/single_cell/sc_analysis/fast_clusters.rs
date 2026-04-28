@@ -37,8 +37,6 @@ pub struct FastLouvainParams<T> {
     pub knn_params: KnnParams,
 
     // -- louvain --
-    /// Louvain resolution.
-    pub resolution: f32,
     /// Number of Louvain iterations.
     pub louvain_iters: usize,
 }
@@ -60,7 +58,6 @@ where
             drift_threshold: T::from_f64(1e-4).unwrap(),
             lr_alpha: T::from_f64(1.0).unwrap(),
             knn_params: KnnParams::default(),
-            resolution: 1.0,
             louvain_iters: 10,
         }
     }
@@ -85,6 +82,9 @@ where
 /// ### Params
 ///
 /// * `data` - n_samples x n_features matrix.
+/// * `km_type` - String. Which type of k-means clustering to use. `"standard"`
+///   or `"minibatch"`.
+/// * `resolutions` - Slice of resolutions to iterate over.
 /// * `params` - Pipeline parameters.
 /// * `seed` - Seed for reproducibility.
 /// * `verbose` - Controls verbosity.
@@ -95,10 +95,11 @@ where
 pub fn fast_louvain_clusters(
     data: MatRef<f32>,
     km_type: &str,
+    resolutions: &[f32],
     params: &FastLouvainParams<f32>,
     seed: usize,
     verbose: bool,
-) -> Vec<usize> {
+) -> Vec<Vec<usize>> {
     let km_type = parse_k_means(km_type).unwrap_or_default();
 
     let (centroids, assignments) = match km_type {
@@ -132,13 +133,21 @@ pub fn fast_louvain_clusters(
     );
 
     let graph = knn_to_sparse_graph(&knn);
-    let centroid_communities =
-        louvain_sparse_graph(&graph, params.resolution, params.louvain_iters, seed);
 
-    assignments
-        .iter()
-        .map(|&c| centroid_communities[c])
-        .collect()
+    let mut results: Vec<Vec<usize>> = Vec::with_capacity(resolutions.len());
+
+    for &res in resolutions {
+        let centroid_communities = louvain_sparse_graph(&graph, res, params.louvain_iters, seed);
+
+        let membership = assignments
+            .iter()
+            .map(|&c| centroid_communities[c])
+            .collect();
+
+        results.push(membership)
+    }
+
+    results
 }
 
 ///////////
@@ -175,7 +184,6 @@ mod tests {
             n_centroids: 10,
             kmeans_iters: 20,
             knn_params: knn,
-            resolution: 0.5,
             louvain_iters: 2,
         }
     }
