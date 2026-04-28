@@ -19,7 +19,7 @@ use crate::single_cell::sc_processing::pca::*;
 ////////////
 
 /// Maximum number of doublets to use for Scrublet and DoubletDetection
-pub const MAX_DOUBLET_K_NEIGHBOURS: usize = 150;
+pub const MAX_DOUBLET_K_NEIGHBOURS: usize = 250;
 
 ////////////
 // Params //

@@ -678,7 +678,12 @@ pub fn pca_combined(
 fn default_knn_ks(n_obs: usize) -> Vec<usize> {
     let kmax = ((n_obs as f32 / 2.0).sqrt().ceil() as usize).max(25);
     let candidates = [3, 10, 15, 20, 25, 50, kmax];
-    let mut ks: Vec<usize> = candidates.iter().copied().filter(|&k| k <= kmax).collect();
+    let mut ks: Vec<usize> = candidates
+        .iter()
+        .copied()
+        .filter(|&k| k <= kmax)
+        .map(|k| k.min(MAX_DOUBLET_K_NEIGHBOURS))
+        .collect();
     ks.sort_unstable();
     ks.dedup();
     ks
