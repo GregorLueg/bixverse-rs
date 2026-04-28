@@ -120,7 +120,7 @@ impl Default for ScDblFinderParams {
             sim_params: ScDblSimParams::default(),
             cluster_resolution: 1.0,
             cluster_iters: 10,
-            fast_cluster: true,
+            fast_cluster: false,
             knn_params: KnnParams::default(),
             n_iterations: 3,
             n_trees: 200,
