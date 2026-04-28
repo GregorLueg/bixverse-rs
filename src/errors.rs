@@ -10,6 +10,11 @@ use thiserror::Error;
 /// format parsing and other errors.
 #[derive(Debug, Error)]
 pub enum BixverseErrors {
+    // -- extendr --
+    /// List to HashMap parsing error occured
+    #[error("R list parsing failed: {0}")]
+    RListParse(&'static str),
+
     // -- Math / Faer --
     /// SVD from faer failed to converge or returned no solution.
     ///

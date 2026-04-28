@@ -40,7 +40,7 @@ pub fn r_list_to_sig_genes(gs_list: List) -> extendr_api::Result<Vec<SignatureGe
                 "The lists in the gs_list could not be converted. Please check!",
             )
         })?;
-        gene_signatures.push(SignatureGenes::from_r_list(gs_list_i));
+        gene_signatures.push(SignatureGenes::from_r_list(gs_list_i)?);
     }
 
     Ok(gene_signatures)

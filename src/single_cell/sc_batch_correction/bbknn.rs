@@ -6,7 +6,6 @@
 
 use ann_search_rs::utils::dist::{Dist, parse_ann_dist};
 use ann_search_rs::*;
-use extendr_api::List;
 use faer::MatRef;
 use rayon::prelude::*;
 
@@ -38,54 +37,6 @@ pub struct BbknnParams {
     /// Parameters for the various approximate nearest neighbour searches
     /// in ann-search-rs
     pub knn_params: KnnParams,
-}
-
-impl BbknnParams {
-    /// Generate the BbknnParams from a R list
-    ///
-    /// Should values not be found within the List, the parameters will default
-    /// to sensible defaults.
-    ///
-    /// ### Params
-    ///
-    /// * `r_list` - The list with the BBKNN parameters.
-    ///
-    /// ### Return
-    ///
-    /// The `BbknnParams` with all of the parameters.
-    pub fn from_r_list(r_list: List) -> Self {
-        let knn_params = KnnParams::from_r_list(r_list.clone());
-
-        let bbknn_list = r_list.into_hashmap();
-
-        let neighbours_within_batch = bbknn_list
-            .get("neighbours_within_batch")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(3) as usize;
-
-        let set_op_mix_ratio = bbknn_list
-            .get("set_op_mix_ratio")
-            .and_then(|v| v.as_real())
-            .unwrap_or(1.0) as f32;
-
-        let local_connectivity = bbknn_list
-            .get("local_connectivity")
-            .and_then(|v| v.as_real())
-            .unwrap_or(1.0) as f32;
-
-        let trim = bbknn_list
-            .get("trim")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(10 * neighbours_within_batch as i32) as usize;
-
-        Self {
-            neighbours_within_batch,
-            set_op_mix_ratio,
-            local_connectivity,
-            trim: Some(trim),
-            knn_params,
-        }
-    }
 }
 
 ///////////////////

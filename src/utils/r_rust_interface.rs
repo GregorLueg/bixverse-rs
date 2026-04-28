@@ -3,7 +3,7 @@
 use extendr_api::prelude::*;
 use faer::{Mat, MatRef};
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::{Add, Mul};
 
 use crate::prelude::*;
@@ -335,7 +335,7 @@ pub fn r_matrix_to_vec_bool(x: &RMatrix<Rbool>) -> Vec<Vec<bool>> {
 /// ###
 ///
 /// The R matrix based on the faer matrix.
-pub fn faer_to_r_matrix<T>(x: MatRef<T>) -> extendr_api::RArray<T::RType, [usize; 2]>
+pub fn faer_to_r_matrix<T>(x: MatRef<T>) -> extendr_api::RArray<T::RType, 2>
 where
     T: FaerRType,
 {
@@ -425,11 +425,16 @@ where
 /// ### Returns
 ///
 /// The CompressedSparseData2 Rust object with the data
-pub fn list_to_sparse_matrix<T>(r_list: List, populate_data_2: bool) -> CompressedSparseData2<T>
+pub fn list_to_sparse_matrix<T>(
+    r_list: List,
+    populate_data_2: bool,
+) -> Result<CompressedSparseData2<T>, BixverseErrors>
 where
     T: Clone + Default + TryFrom<Robj>,
 {
-    let r_data = r_list.into_hashmap();
+    let r_data: HashMap<&str, Robj> = r_list
+        .try_into()
+        .map_err(|_| BixverseErrors::RListParse("not a named list"))?;
 
     let indptr: Vec<usize> = r_data
         .get("indptr")
@@ -472,12 +477,12 @@ where
         None
     };
 
-    CompressedSparseData2 {
+    Ok(CompressedSparseData2 {
         data,
         indices,
         indptr,
         cs_type,
         data_2,
         shape: (nrow, ncol),
-    }
+    })
 }

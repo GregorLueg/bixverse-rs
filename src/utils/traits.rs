@@ -201,12 +201,12 @@ pub trait FaerRType: SimpleEntity + Copy + Clone + 'static {
     type RType: Copy + Clone;
 
     /// Transform an faer matrix (f32/f64) into an R matrix (f64)
-    fn to_r_matrix(x: faer::MatRef<Self>) -> extendr_api::RArray<Self::RType, [usize; 2]>;
+    fn to_r_matrix(x: faer::MatRef<Self>) -> extendr_api::RArray<Self::RType, 2>;
 }
 
 impl FaerRType for f64 {
     type RType = f64;
-    fn to_r_matrix(x: faer::MatRef<Self>) -> extendr_api::RArray<Self, [usize; 2]> {
+    fn to_r_matrix(x: faer::MatRef<Self>) -> extendr_api::RArray<Self, 2> {
         let nrow = x.nrows();
         let ncol = x.ncols();
         RArray::new_matrix(nrow, ncol, |row, column| x[(row, column)])
@@ -215,7 +215,7 @@ impl FaerRType for f64 {
 
 impl FaerRType for i32 {
     type RType = i32;
-    fn to_r_matrix(x: faer::MatRef<Self>) -> extendr_api::RArray<Self, [usize; 2]> {
+    fn to_r_matrix(x: faer::MatRef<Self>) -> extendr_api::RArray<Self, 2> {
         let nrow = x.nrows();
         let ncol = x.ncols();
         RArray::new_matrix(nrow, ncol, |row, column| x[(row, column)])
@@ -224,7 +224,7 @@ impl FaerRType for i32 {
 
 impl FaerRType for f32 {
     type RType = f64;
-    fn to_r_matrix(x: faer::MatRef<Self>) -> extendr_api::RArray<f64, [usize; 2]> {
+    fn to_r_matrix(x: faer::MatRef<Self>) -> extendr_api::RArray<f64, 2> {
         let nrow = x.nrows();
         let ncol = x.ncols();
         RArray::new_matrix(nrow, ncol, |row, column| x[(row, column)] as f64)
