@@ -1,5 +1,6 @@
-//! The Rust implementation of a scDblFinder-like approach. Under the hood this
-//! uses the internal implementation of lightGBM.
+//! The Rust implementation of a scDblFinder-like approach, see Germain et al.,
+//! F1000Res, 2021. Under the hood this uses the internal implementation of
+//! lightGBM.
 
 use faer::{Mat, MatRef};
 use rand::distr::{Distribution, weighted::WeightedIndex};
