@@ -396,7 +396,7 @@ impl Scrublet {
             k_adj,
             &self.params.knn_params,
             seed,
-            false,
+            verbose,
         );
 
         if verbose {

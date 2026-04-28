@@ -474,7 +474,7 @@ impl BoostClassifier {
             k_adj,
             &self.params.knn_params,
             seed,
-            false,
+            verbose,
         );
 
         // Cluster

@@ -1236,7 +1236,7 @@ impl ScDblFinder {
             obs_k,
             &self.params.knn_params,
             seed,
-            false,
+            verbose,
         );
 
         let obs_graph = knn_to_sparse_graph(&obs_knn);
