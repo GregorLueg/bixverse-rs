@@ -1133,6 +1133,7 @@ impl ScDblFinder {
     /// ### Params
     ///
     /// * `seed` - Seed for reproducibility.
+    /// * `streaming` - Boolean if the genes shall be streamed in.
     /// * `verbose` - Controls verbosity.
     /// * `debug` - Additional verbosity for debugging purposes
     ///
@@ -1142,6 +1143,7 @@ impl ScDblFinder {
     pub fn run(
         &mut self,
         seed: usize,
+        streaming: bool,
         verbose: bool,
         debug: bool,
     ) -> Result<ScDblFinderResult, BixverseErrors> {
@@ -1153,12 +1155,21 @@ impl ScDblFinder {
         }
         let start_sel = Instant::now();
 
-        let selected_genes = select_top_genes(
-            &self.f_path_gene,
-            &self.cells_to_keep,
-            None,
-            self.params.n_genes,
-        )?;
+        let selected_genes = if streaming {
+            select_top_genes_streaming(
+                &self.f_path_gene,
+                &self.cells_to_keep,
+                None,
+                self.params.n_genes,
+            )?
+        } else {
+            select_top_genes(
+                &self.f_path_gene,
+                &self.cells_to_keep,
+                None,
+                self.params.n_genes,
+            )?
+        };
 
         if verbose {
             println!(

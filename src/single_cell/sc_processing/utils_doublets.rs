@@ -924,6 +924,151 @@ fn select_by_cluster_roundrobin(
     result
 }
 
+/// Per-cluster round-robin selection matching R's selFeatures.
+///
+/// A streaming version of the HVG.
+///
+/// ### Params
+///
+/// * `gene_chunks` - Slice of the gene chunks for which to get the top N
+///   expressed genes.
+/// * `cluster_labels` - Cluster lables <- this will be used to identify the
+///   top highly expressed genes across the clusters.
+/// * `n_top` - Total number of top genes to return
+///
+/// ### Returns
+///
+/// The indices of the genes to take forward
+pub fn select_top_genes_streaming(
+    f_path_gene: &str,
+    cells_to_keep: &[usize],
+    clusters: Option<&[usize]>,
+    n_top: usize,
+) -> Result<Vec<usize>, BixverseErrors> {
+    let reader = ParallelSparseReader::new(f_path_gene)?;
+    let n_total_genes = reader.get_header().total_genes;
+
+    if n_top >= n_total_genes {
+        return Ok((0..n_total_genes).collect());
+    }
+    if cells_to_keep.is_empty() {
+        return Ok((0..n_top).collect());
+    }
+
+    let cell_set: IndexSet<u32> = cells_to_keep.iter().map(|&x| x as u32).collect();
+
+    // resolve cluster setup. Single cluster -> overall-mean path.
+    let cluster_setup: Option<(&[usize], FxHashMap<usize, usize>, usize)> = match clusters {
+        Some(labels) => {
+            assert_eq!(
+                labels.len(),
+                cells_to_keep.len(),
+                "cluster labels must be parallel to cells_to_keep",
+            );
+            let mut s: FxHashSet<usize> = FxHashSet::default();
+            for &c in labels {
+                s.insert(c);
+            }
+            if s.len() <= 1 {
+                None
+            } else {
+                let mut v: Vec<usize> = s.into_iter().collect();
+                v.sort_unstable();
+                let n_clusters = v.len();
+                let map: FxHashMap<usize, usize> =
+                    v.iter().enumerate().map(|(i, &c)| (c, i)).collect();
+                Some((labels, map, n_clusters))
+            }
+        }
+        None => None,
+    };
+
+    const GENE_BATCH_SIZE: usize = 1000;
+    let num_batches = n_total_genes.div_ceil(GENE_BATCH_SIZE);
+    let n_cells = cells_to_keep.len();
+
+    let mut means: Vec<f64> = Vec::new();
+    let mut cluster_sums: Vec<Vec<f64>> = Vec::new();
+    if cluster_setup.is_some() {
+        cluster_sums.reserve(n_total_genes);
+    } else {
+        means.reserve(n_total_genes);
+    }
+
+    for batch_idx in 0..num_batches {
+        let start = batch_idx * GENE_BATCH_SIZE;
+        let end = ((batch_idx + 1) * GENE_BATCH_SIZE).min(n_total_genes);
+        let gene_indices: Vec<usize> = (start..end).collect();
+        let mut gene_chunks = reader.read_gene_parallel(&gene_indices)?;
+        gene_chunks.par_iter_mut().for_each(|chunk| {
+            chunk.filter_selected_cells(&cell_set);
+        });
+
+        if let Some((labels, cluster_idx, n_clusters)) = &cluster_setup {
+            let batch_sums: Vec<Vec<f64>> = gene_chunks
+                .par_iter()
+                .map(|chunk| {
+                    let mut sums = vec![0.0f64; *n_clusters];
+                    for i in 0..chunk.indices.len() {
+                        let pos = chunk.indices[i] as usize;
+                        let c_idx = cluster_idx[&labels[pos]];
+                        sums[c_idx] += chunk.data_raw.get(i) as f64;
+                    }
+                    sums
+                })
+                .collect();
+            cluster_sums.extend(batch_sums);
+        } else {
+            let nf = n_cells as f64;
+            let batch_means: Vec<f64> = gene_chunks
+                .par_iter()
+                .map(|chunk| {
+                    let sum: f64 = (0..chunk.indices.len())
+                        .map(|i| chunk.data_raw.get(i) as f64)
+                        .sum();
+                    sum / nf
+                })
+                .collect();
+            means.extend(batch_means);
+        }
+
+        drop(gene_chunks);
+    }
+
+    match cluster_setup {
+        None => Ok(top_n_indices(&means, n_top)),
+        Some((_, _, n_clusters)) => {
+            let n_genes = cluster_sums.len();
+            let per_cluster_rankings: Vec<Vec<usize>> = (0..n_clusters)
+                .into_par_iter()
+                .map(|c_idx| {
+                    let col: Vec<f64> = (0..n_genes).map(|g| cluster_sums[g][c_idx]).collect();
+                    top_n_indices_ordered(&col, n_top)
+                })
+                .collect();
+
+            let mut result = roundrobin_select(&per_cluster_rankings, n_top);
+
+            if result.len() < n_top {
+                let totals: Vec<f64> = cluster_sums.iter().map(|sums| sums.iter().sum()).collect();
+                let fallback = top_n_indices_ordered(&totals, n_genes);
+                let mut seen: FxHashSet<usize> = result.iter().copied().collect();
+                for g in fallback {
+                    if seen.insert(g) {
+                        result.push(g);
+                        if result.len() >= n_top {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            result.sort_unstable();
+            Ok(result)
+        }
+    }
+}
+
 /// Round-robin across per-cluster rankings, collecting unique gene indices
 /// until `n_top` are found.
 ///
