@@ -15,6 +15,7 @@ use crate::core::math::stats::*;
 use crate::graph::community_detections::*;
 use crate::graph::graph_structures::*;
 use crate::prelude::*;
+use crate::single_cell::sc_analysis::fast_clusters::*;
 use crate::single_cell::sc_processing::utils_doublets::*;
 
 ////////////////////////
@@ -63,6 +64,8 @@ pub struct BoostParams {
     pub boost_rate: f32,
     /// Whether to sample cell pairs with replacement.
     pub replace: bool,
+    /// Use fast clustering - useful on larger data sets.
+    pub fast_cluster: bool,
     /// Louvain resolution parameter
     pub resolution: f32,
     /// Number of Louvain iterations per clustering step.
@@ -469,34 +472,65 @@ impl BoostClassifier {
         if verbose {
             println!("Using {} neighbours in the kNN generation.", k_adj);
         }
-        let knn = dispatch_knn(
-            combined_pca.as_ref(),
-            k_adj,
-            &self.params.knn_params,
-            seed,
-            verbose,
-        );
 
-        // Cluster
-        let start_graph = Instant::now();
-        let graph = knn_to_sparse_graph(&knn);
-        if verbose {
-            println!(
-                "Transformed kNN graph. Done in {:.2?}",
-                start_graph.elapsed()
-            );
-        }
+        let total_cells = self.n_cells + self.n_cells_sim;
+        let use_fast = self.params.fast_cluster && total_cells >= FAST_CLUSTER_MIN_CELLS;
 
         let start_cluster = Instant::now();
-        let communities = louvain_sparse_graph(
-            &graph,
-            self.params.resolution,
-            self.params.louvain_iters,
-            seed,
-        );
+        let communities = if use_fast {
+            let n_centroids = (total_cells / 10).clamp(500, 5000);
+            let centroid_k = ((n_centroids as f32).sqrt() * 0.5).round() as usize;
+
+            let mut centroid_knn_params = self.params.knn_params.clone();
+            centroid_knn_params.k = centroid_k;
+
+            let fast_params = FastLouvainParams {
+                n_centroids,
+                kmeans_iters: 50,
+                knn_params: centroid_knn_params,
+                resolution: self.params.resolution,
+                louvain_iters: self.params.louvain_iters,
+            };
+
+            if verbose {
+                println!(
+                    "Using fast clustering with {} centroids, k={} on {} cells.",
+                    n_centroids, centroid_k, total_cells
+                );
+            }
+            fast_louvain_clusters(combined_pca.as_ref(), &fast_params, seed, verbose)
+        } else {
+            let k_adj = adjusted_k(self.params.knn_params.k, self.n_cells, self.n_cells_sim);
+            if verbose {
+                println!("Using {} neighbours in the kNN generation.", k_adj);
+            }
+            let knn = dispatch_knn(
+                combined_pca.as_ref(),
+                k_adj,
+                &self.params.knn_params,
+                seed,
+                verbose,
+            );
+
+            let start_graph = Instant::now();
+            let graph = knn_to_sparse_graph(&knn);
+            if verbose {
+                println!(
+                    "Transformed kNN graph. Done in {:.2?}",
+                    start_graph.elapsed()
+                );
+            }
+            louvain_sparse_graph(
+                &graph,
+                self.params.resolution,
+                self.params.louvain_iters,
+                seed,
+            )
+        };
+
         if verbose {
             println!(
-                "Generated communities via Louvain clustering. Done in {:.2?}",
+                "Generated communities. Done in {:.2?}",
                 start_cluster.elapsed()
             );
         }

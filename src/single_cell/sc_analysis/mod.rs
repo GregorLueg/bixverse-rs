@@ -5,6 +5,7 @@
 
 pub mod cell_aggregation_utils;
 pub mod dge_pathway_scores;
+pub mod fast_clusters;
 pub mod fast_ranking;
 pub mod hdwgcna_meta_cells;
 pub mod hotspot;

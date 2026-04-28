@@ -1,4 +1,5 @@
-//! Work-in-progress not behaving as desired...
+//! The Rust implementation of a scDblFinder-like approach. Under the hood this
+//! uses the internal implementation of lightGBM.
 
 use faer::{Mat, MatRef};
 use rand::distr::{Distribution, weighted::WeightedIndex};
@@ -11,6 +12,7 @@ use crate::core::math::pca_svd::{compute_pc_scores, randomised_svd};
 use crate::graph::community_detections::*;
 use crate::graph::graph_structures::*;
 use crate::prelude::*;
+use crate::single_cell::sc_analysis::fast_clusters::*;
 use crate::single_cell::sc_processing::knn::generate_knn_with_dist;
 use crate::single_cell::sc_processing::utils_doublets::*;
 use crate::single_cell::sc_utils::{cxds::*, logistic_gbm::*, utils_tree::*};
@@ -59,6 +61,8 @@ pub struct ScDblFinderParams {
     pub cluster_resolution: f32,
     /// Number of Louvain iterations per clustering step.
     pub cluster_iters: usize,
+    /// Use fast clustering - useful on larger data sets.
+    pub fast_cluster: bool,
 
     // -- kNN --
     /// Parameters for kNN construction.
@@ -115,6 +119,7 @@ impl Default for ScDblFinderParams {
             sim_params: ScDblSimParams::default(),
             cluster_resolution: 1.0,
             cluster_iters: 10,
+            fast_cluster: true,
             knn_params: KnnParams::default(),
             n_iterations: 3,
             n_trees: 200,
@@ -1225,27 +1230,53 @@ impl ScDblFinder {
         }
         let start_clustering = Instant::now();
 
-        let obs_k = if self.params.knn_params.k == 0 {
-            ((self.n_cells as f32).sqrt() * 0.5).round() as usize
+        let use_fast = self.params.fast_cluster && self.n_cells >= FAST_CLUSTER_MIN_CELLS;
+
+        let cluster_labels = if use_fast {
+            let n_centroids = (self.n_cells / 10).clamp(500, 5000);
+            let centroid_k = ((n_centroids as f32).sqrt() * 0.5).round() as usize;
+
+            let mut centroid_knn_params = self.params.knn_params.clone();
+            centroid_knn_params.k = centroid_k;
+
+            let fast_params = FastLouvainParams {
+                n_centroids,
+                kmeans_iters: 50,
+                knn_params: centroid_knn_params,
+                resolution: self.params.cluster_resolution,
+                louvain_iters: self.params.cluster_iters,
+            };
+            if verbose {
+                println!(
+                    "  Using fast clustering with {} centroids, k={} on {} cells.",
+                    n_centroids, centroid_k, self.n_cells
+                );
+            }
+            fast_louvain_clusters(obs_pca.as_ref(), &fast_params, seed, verbose)
         } else {
-            self.params.knn_params.k
+            let obs_k = if self.params.knn_params.k == 0 {
+                (((self.n_cells as f32).sqrt() * 0.5).round() as usize)
+                    .max(MAX_DOUBLET_K_NEIGHBOURS)
+            } else {
+                self.params.knn_params.k
+            };
+
+            let obs_knn = dispatch_knn(
+                obs_pca.as_ref(),
+                obs_k,
+                &self.params.knn_params,
+                seed,
+                verbose,
+            );
+
+            let obs_graph = knn_to_sparse_graph(&obs_knn);
+            louvain_sparse_graph(
+                &obs_graph,
+                self.params.cluster_resolution,
+                self.params.cluster_iters,
+                seed,
+            )
         };
-
-        let obs_knn = dispatch_knn(
-            obs_pca.as_ref(),
-            obs_k,
-            &self.params.knn_params,
-            seed,
-            verbose,
-        );
-
-        let obs_graph = knn_to_sparse_graph(&obs_knn);
-        let cluster_labels = louvain_sparse_graph(
-            &obs_graph,
-            self.params.cluster_resolution,
-            self.params.cluster_iters,
-            seed,
-        );
 
         let end_clustering = start_clustering.elapsed();
 
@@ -1332,8 +1363,14 @@ impl ScDblFinder {
         let mut knn_params = self.params.knn_params.clone();
         knn_params.k = k_max;
 
-        let (combined_knn, combined_dists) =
-            generate_knn_with_dist(combined_pca.as_ref(), &knn_params, true, false, seed, false);
+        let (combined_knn, combined_dists) = generate_knn_with_dist(
+            combined_pca.as_ref(),
+            &knn_params,
+            true,
+            false,
+            seed,
+            verbose,
+        );
 
         let mut combined_dists = combined_dists.unwrap();
 

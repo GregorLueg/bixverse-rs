@@ -65,8 +65,8 @@ pub fn parse_knn_method(s: &str) -> Option<KnnSearch> {
 /// of this crate
 #[derive(Clone, Debug)]
 pub struct KnnParams {
-    ///  Which of the kNN methods to use. One of `"annoy"`, `"hnsw"` or
-    /// `"nndescent"` are supported for now.
+    ///  Which of the kNN methods to use. One of `"annoy"`, `"hnsw"`, `"ivf"`,
+    /// `"kmknn"`, `"exhaustive"` or `"nndescent"` are supported for now.
     pub knn_method: String,
     /// Distance metric to use. One of `"euclidean"` or `"cosine"`.
     pub ann_dist: String,

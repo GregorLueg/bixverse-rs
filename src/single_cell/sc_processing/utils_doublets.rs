@@ -21,6 +21,10 @@ use crate::single_cell::sc_processing::pca::*;
 /// Maximum number of doublets to use for Scrublet and DoubletDetection
 pub const MAX_DOUBLET_K_NEIGHBOURS: usize = 250;
 
+/// Minimum cell count below which fast_cluster falls back to standard Louvain.
+/// Relevant for scdblfinder and doublet detection.
+pub const FAST_CLUSTER_MIN_CELLS: usize = 10_000;
+
 ////////////
 // Params //
 ////////////
