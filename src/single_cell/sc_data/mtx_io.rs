@@ -597,7 +597,6 @@ impl MtxReader {
             .collect();
         let _guard = TempFileGuard(temp_paths.clone());
 
-        // === Pass 1: bucket kept entries to temp files ===
         let pass1 = Instant::now();
         if verbose {
             println!(
@@ -676,7 +675,6 @@ impl MtxReader {
             println!("Bucketing done: {:.2?}", pass1.elapsed());
         }
 
-        // === Pass 2: process each bucket in cell-index order ===
         let mut writer = CellGeneSparseWriter::new(bin_path, true, n_kept_cells, n_kept_genes)?;
         let mut lib_size = Vec::with_capacity(n_kept_cells);
         let mut nnz = Vec::with_capacity(n_kept_cells);

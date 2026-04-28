@@ -51,7 +51,10 @@ pub struct H5adFileTask {
 /// ### Returns
 ///
 /// Number of NNZ per given task/feature
-fn scan_gene_nnz_csr(task: &H5adFileTask, universe_size: usize) -> hdf5::Result<Vec<usize>> {
+fn scan_gene_nnz_csr(
+    task: &H5adFileTask,
+    universe_size: usize,
+) -> Result<Vec<usize>, BixverseErrors> {
     let file = File::open(&task.h5_path)?;
     let indptr: Vec<u32> = file.dataset("X/indptr")?.read_1d()?.to_vec();
     let indices_ds = file.dataset("X/indices")?;
@@ -99,7 +102,10 @@ fn scan_gene_nnz_csr(task: &H5adFileTask, universe_size: usize) -> hdf5::Result<
 /// ### Returns
 ///
 /// Number of NNZ per given task/feature
-fn scan_gene_nnz_csc(task: &H5adFileTask, universe_size: usize) -> hdf5::Result<Vec<usize>> {
+fn scan_gene_nnz_csc(
+    task: &H5adFileTask,
+    universe_size: usize,
+) -> Result<Vec<usize>, BixverseErrors> {
     let file = File::open(&task.h5_path)?;
     let indptr: Vec<u32> = file.dataset("X/indptr")?.read_1d()?.to_vec();
 
@@ -124,7 +130,7 @@ fn scan_gene_nnz_csc(task: &H5adFileTask, universe_size: usize) -> hdf5::Result<
 /// ### Returns
 ///
 /// Number of NNZ per given task/feature
-fn scan_gene_nnz(task: &H5adFileTask, universe_size: usize) -> hdf5::Result<Vec<usize>> {
+fn scan_gene_nnz(task: &H5adFileTask, universe_size: usize) -> Result<Vec<usize>, BixverseErrors> {
     match task.cs_type {
         CompressedSparseFormat::Csr => scan_gene_nnz_csr(task, universe_size),
         CompressedSparseFormat::Csc => scan_gene_nnz_csc(task, universe_size),
@@ -150,7 +156,7 @@ fn scan_gene_nnz(task: &H5adFileTask, universe_size: usize) -> hdf5::Result<Vec<
 fn scan_cell_stats_csr(
     task: &H5adFileTask,
     gene_local_to_final: &[Option<usize>],
-) -> hdf5::Result<Vec<(usize, f32)>> {
+) -> Result<Vec<(usize, f32)>, BixverseErrors> {
     let file = File::open(&task.h5_path)?;
     let indptr: Vec<u32> = file.dataset("X/indptr")?.read_1d()?.to_vec();
     let data_ds = file.dataset("X/data")?;
@@ -210,7 +216,7 @@ fn scan_cell_stats_csr(
 fn scan_cell_stats_csc(
     task: &H5adFileTask,
     gene_local_to_final: &[Option<usize>],
-) -> hdf5::Result<Vec<(usize, f32)>> {
+) -> Result<Vec<(usize, f32)>, BixverseErrors> {
     let file = File::open(&task.h5_path)?;
     let indptr: Vec<u32> = file.dataset("X/indptr")?.read_1d()?.to_vec();
     let data_ds = file.dataset("X/data")?;
@@ -278,7 +284,7 @@ fn scan_cell_stats_csc(
 fn scan_cell_stats(
     task: &H5adFileTask,
     gene_local_to_final: &[Option<usize>],
-) -> hdf5::Result<Vec<(usize, f32)>> {
+) -> Result<Vec<(usize, f32)>, BixverseErrors> {
     match task.cs_type {
         CompressedSparseFormat::Csr => scan_cell_stats_csr(task, gene_local_to_final),
         CompressedSparseFormat::Csc => scan_cell_stats_csc(task, gene_local_to_final),
@@ -334,7 +340,7 @@ fn write_h5_csr_cells(
     target_size: f32,
     cell_offset: usize,
     writer: &mut CellGeneSparseWriter,
-) -> std::io::Result<H5FileQcResult> {
+) -> Result<H5FileQcResult, BixverseErrors> {
     let file = hdf5::File::open(&task.h5_path)?;
     let data_ds = file.dataset("X/data")?;
     let indices_ds = file.dataset("X/indices")?;
@@ -343,10 +349,10 @@ fn write_h5_csr_cells(
     let mut lib_size = Vec::with_capacity(cells_to_keep.len());
     let mut nnz = Vec::with_capacity(cells_to_keep.len());
 
-    // (final_gene_index, raw_count) - gene index as usize, count as u16
-    let mut cell_buf: Vec<(usize, u16)> = Vec::with_capacity(10_000);
+    // (final_gene_index, raw_count)
+    let mut cell_buf: Vec<(usize, u32)> = Vec::with_capacity(10_000);
     let mut gene_idx_buf: Vec<u32> = Vec::with_capacity(10_000);
-    let mut count_buf: Vec<u16> = Vec::with_capacity(10_000);
+    let mut count_buf: Vec<u32> = Vec::with_capacity(10_000);
 
     const BATCH_SIZE: usize = 1_000;
     let mut written = 0usize;
@@ -366,7 +372,7 @@ fn write_h5_csr_cells(
         if start_pos >= end_pos {
             for _ in cell_batch {
                 let empty = CsrCellChunk::from_data(
-                    &[] as &[u16],
+                    &[] as &[u32],
                     &[] as &[u32],
                     cell_offset + written,
                     target_size,
@@ -394,7 +400,7 @@ fn write_h5_csr_cells(
             for local_idx in start..end {
                 let old_gene = chunk_indices[local_idx] as usize;
                 if let Some(&Some(final_gene)) = gene_mapping.get(old_gene) {
-                    cell_buf.push((final_gene, chunk_data[local_idx] as u16));
+                    cell_buf.push((final_gene, chunk_data[local_idx] as u32));
                 }
             }
 
@@ -451,7 +457,7 @@ fn write_h5_csc_cells(
     target_size: f32,
     cell_offset: usize,
     writer: &mut CellGeneSparseWriter,
-) -> std::io::Result<H5FileQcResult> {
+) -> Result<H5FileQcResult, BixverseErrors> {
     let file = hdf5::File::open(&task.h5_path)?;
     let data_ds = file.dataset("X/data")?;
     let indices_ds = file.dataset("X/indices")?;
@@ -464,7 +470,7 @@ fn write_h5_csc_cells(
         .collect();
 
     // (gene_index, raw_count) - gene index as u32 to support >65k features
-    let mut cell_data: Vec<Vec<(u32, u16)>> = vec![Vec::new(); cells_to_keep.len()];
+    let mut cell_data: Vec<Vec<(u32, u32)>> = vec![Vec::new(); cells_to_keep.len()];
 
     let genes_with_final: Vec<(usize, usize)> = gene_mapping
         .iter()
@@ -500,7 +506,7 @@ fn write_h5_csc_cells(
             for idx in gene_start..gene_end {
                 let old_cell = chunk_indices[idx] as usize;
                 if let Some(&new_cell) = cell_old_to_new.get(&old_cell) {
-                    cell_data[new_cell].push((final_gene as u32, chunk_data[idx] as u16));
+                    cell_data[new_cell].push((final_gene as u32, chunk_data[idx] as u32));
                 }
             }
         }
@@ -513,7 +519,7 @@ fn write_h5_csc_cells(
         data.sort_by_key(|(g, _)| *g);
 
         let gene_indices: Vec<u32> = data.iter().map(|(g, _)| *g).collect();
-        let gene_counts: Vec<u16> = data.iter().map(|(_, c)| *c).collect();
+        let gene_counts: Vec<u32> = data.iter().map(|(_, c)| *c).collect();
 
         let chunk = CsrCellChunk::from_data(
             &gene_counts,
@@ -560,7 +566,7 @@ fn write_h5_file_cells(
     cell_offset: usize,
     writer: &mut CellGeneSparseWriter,
     verbose: bool,
-) -> std::io::Result<H5FileQcResult> {
+) -> Result<H5FileQcResult, BixverseErrors> {
     if verbose {
         println!(
             "  Writing {} ({} cells)...",
@@ -611,7 +617,7 @@ pub fn multi_h5ad_to_file<P: AsRef<Path>>(
     universe_size: usize,
     cell_qc: &MinCellQuality,
     verbose: bool,
-) -> MultiH5adResult {
+) -> Result<MultiH5adResult, BixverseErrors> {
     let total_start = Instant::now();
 
     if verbose {
@@ -628,9 +634,9 @@ pub fn multi_h5ad_to_file<P: AsRef<Path>>(
             if verbose {
                 println!("  Scanning genes in {}...", task.exp_id);
             }
-            scan_gene_nnz(task, universe_size).unwrap()
+            scan_gene_nnz(task, universe_size)
         })
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
 
     // aggregate
     let mut global_gene_nnz = vec![0usize; universe_size];
@@ -686,9 +692,9 @@ pub fn multi_h5ad_to_file<P: AsRef<Path>>(
             if verbose {
                 println!("  Scanning cells in {}...", task.exp_id);
             }
-            scan_cell_stats(task, mapping).unwrap()
+            scan_cell_stats(task, mapping)
         })
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
 
     let per_file_cells: Vec<Vec<usize>> = per_file_cell_stats
         .iter()
@@ -723,7 +729,7 @@ pub fn multi_h5ad_to_file<P: AsRef<Path>>(
         println!("Writing cells to binary...");
     }
 
-    let mut writer = CellGeneSparseWriter::new(&bin_path, true, total_cells, total_genes).unwrap();
+    let mut writer = CellGeneSparseWriter::new(&bin_path, true, total_cells, total_genes)?;
 
     let mut cell_offset = 0usize;
     let mut per_file_results = Vec::with_capacity(tasks.len());
@@ -737,24 +743,23 @@ pub fn multi_h5ad_to_file<P: AsRef<Path>>(
             cell_offset,
             &mut writer,
             verbose,
-        )
-        .unwrap();
+        )?;
 
         cell_offset += per_file_cells[file_idx].len();
         per_file_results.push(qc_result);
     }
 
-    writer.finalise().unwrap();
+    writer.finalise()?;
 
     let elapsed = total_start.elapsed();
     if verbose {
         println!("Multi-h5ad loading complete: {:.2?}", elapsed);
     }
 
-    MultiH5adResult {
+    Ok(MultiH5adResult {
         global_gene_indices,
         total_cells,
         total_genes,
         per_file: per_file_results,
-    }
+    })
 }

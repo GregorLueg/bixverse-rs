@@ -45,21 +45,22 @@ pub fn write_h5_counts<P: AsRef<Path>>(
     no_genes: usize,
     cell_quality: MinCellQuality,
     verbose: bool,
-) -> (usize, usize, CellQuality) {
+) -> Result<(usize, usize, CellQuality), BixverseErrors> {
     if verbose {
         println!(
             "Step 1/4: Analysing data structure, calculating QC metrics and identifying cells/genes to take..."
         );
     }
 
-    let file_format = parse_compressed_sparse_format(cs_type).unwrap();
+    let file_format = parse_compressed_sparse_format(cs_type)
+        .ok_or_else(|| BixverseErrors::UnknownSparseFormat(cs_type.to_string()))?;
 
     let file_quality = match file_format {
         CompressedSparseFormat::Csr => {
-            parse_h5_csr_quality(&h5_path, (no_cells, no_genes), &cell_quality, verbose).unwrap()
+            parse_h5_csr_quality(&h5_path, (no_cells, no_genes), &cell_quality, verbose)?
         }
         CompressedSparseFormat::Csc => {
-            parse_h5_csc_quality(&h5_path, (no_cells, no_genes), &cell_quality, verbose).unwrap()
+            parse_h5_csc_quality(&h5_path, (no_cells, no_genes), &cell_quality, verbose)?
         }
     };
 
@@ -78,12 +79,10 @@ pub fn write_h5_counts<P: AsRef<Path>>(
         println!("Step 3/4: Loading filtered data from h5...");
     }
 
-    let file_data: CompressedSparseData2<u16> = match file_format {
-        CompressedSparseFormat::Csr => {
-            read_h5ad_x_data_csr(&h5_path, &file_quality, verbose).unwrap()
-        }
+    let file_data: CompressedSparseData2<u32> = match file_format {
+        CompressedSparseFormat::Csr => read_h5ad_x_data_csr(&h5_path, &file_quality, verbose)?,
         CompressedSparseFormat::Csc => {
-            let data = read_h5ad_x_data_csc(&h5_path, &file_quality, verbose).unwrap();
+            let data = read_h5ad_x_data_csc(&h5_path, &file_quality, verbose)?;
             data.transpose_and_convert()
         }
     };
@@ -93,7 +92,7 @@ pub fn write_h5_counts<P: AsRef<Path>>(
     }
 
     let n_cells = file_data.indptr.len() - 1;
-    let mut writer = CellGeneSparseWriter::new(bin_path, true, no_cells, no_genes).unwrap();
+    let mut writer = CellGeneSparseWriter::new(bin_path, true, no_cells, no_genes)?;
 
     let mut lib_size = Vec::with_capacity(n_cells);
     let mut nnz = Vec::with_capacity(n_cells);
@@ -112,7 +111,7 @@ pub fn write_h5_counts<P: AsRef<Path>>(
         nnz.push(nnz_i);
         lib_size.push(lib_size_i);
 
-        writer.write_cell_chunk(cell_chunk).unwrap();
+        writer.write_cell_chunk(cell_chunk)?;
 
         if verbose && (i + 1) % 100000 == 0 {
             println!(
@@ -143,11 +142,11 @@ pub fn write_h5_counts<P: AsRef<Path>>(
         nnz,
     };
 
-    (
+    Ok((
         file_quality.cells_to_keep.len(),
         file_quality.genes_to_keep.len(),
         cell_qc,
-    )
+    ))
 }
 
 /// Function that streams the h5 counts to disk
@@ -179,19 +178,20 @@ pub fn stream_h5_counts<P: AsRef<Path>>(
     no_genes: usize,
     cell_quality: MinCellQuality,
     verbose: bool,
-) -> (usize, usize, CellQuality) {
+) -> Result<(usize, usize, CellQuality), BixverseErrors> {
     if verbose {
         println!("Step 1/3: Analysing data structure and calculating QC metrics...");
     }
 
-    let file_format = parse_compressed_sparse_format(cs_type).unwrap();
+    let file_format = parse_compressed_sparse_format(cs_type)
+        .ok_or_else(|| BixverseErrors::UnknownSparseFormat(cs_type.to_string()))?;
 
     let file_quality = match file_format {
         CompressedSparseFormat::Csr => {
-            parse_h5_csr_quality(&h5_path, (no_cells, no_genes), &cell_quality, verbose).unwrap()
+            parse_h5_csr_quality(&h5_path, (no_cells, no_genes), &cell_quality, verbose)?
         }
         CompressedSparseFormat::Csc => {
-            parse_h5_csc_quality(&h5_path, (no_cells, no_genes), &cell_quality, verbose).unwrap()
+            parse_h5_csc_quality(&h5_path, (no_cells, no_genes), &cell_quality, verbose)?
         }
     };
 
@@ -213,14 +213,12 @@ pub fn stream_h5_counts<P: AsRef<Path>>(
     let mut cell_qc = match file_format {
         CompressedSparseFormat::Csr => {
             write_h5_csr_streaming(&h5_path, &bin_path, &file_quality, cell_quality, verbose)
-                .unwrap()
         }
         CompressedSparseFormat::Csc => {
             if verbose {
                 println!("  Pass 1/2: Scanning library sizes...");
             }
-            let cell_lib_sizes = scan_h5_csc_library_sizes(&h5_path, &file_quality).unwrap();
-
+            let cell_lib_sizes = scan_h5_csc_library_sizes(&h5_path, &file_quality)?;
             if verbose {
                 println!("  Pass 2/2: Writing cells with normalisation...");
             }
@@ -232,18 +230,17 @@ pub fn stream_h5_counts<P: AsRef<Path>>(
                 cell_quality.target_size,
                 verbose,
             )
-            .unwrap()
         }
-    };
+    }?;
 
     cell_qc.set_cell_indices(&file_quality.cells_to_keep);
     cell_qc.set_gene_indices(&file_quality.genes_to_keep);
 
-    (
+    Ok((
         file_quality.cells_to_keep.len(),
         file_quality.genes_to_keep.len(),
         cell_qc,
-    )
+    ))
 }
 
 //////////////
@@ -272,7 +269,7 @@ pub fn parse_h5_csc_quality<P: AsRef<Path>>(
     shape: (usize, usize),
     cell_quality: &MinCellQuality,
     verbose: bool,
-) -> Result<CellOnFileQuality> {
+) -> Result<CellOnFileQuality, BixverseErrors> {
     let file_path = file_path.as_ref();
 
     if verbose {
@@ -458,7 +455,7 @@ pub fn parse_h5_csc_quality<P: AsRef<Path>>(
 pub fn scan_h5_csc_library_sizes<P: AsRef<Path>>(
     file_path: P,
     quality: &CellOnFileQuality,
-) -> Result<Vec<u32>> {
+) -> Result<Vec<u32>, BixverseErrors> {
     let file = File::open(file_path)?;
     let data_ds = file.dataset("X/data")?;
     let indices_ds = file.dataset("X/indices")?;
@@ -521,12 +518,12 @@ pub fn scan_h5_csc_library_sizes<P: AsRef<Path>>(
 ///
 /// ### Returns
 ///
-/// The `CompressedSparseData2` in CSR format with the counts stored as u16.
+/// The `CompressedSparseData2` in CSR format with the counts stored as u32.
 pub fn read_h5ad_x_data_csc<P: AsRef<Path>>(
     file_path: P,
     quality: &CellOnFileQuality,
     verbose: bool,
-) -> Result<CompressedSparseData2<u16>> {
+) -> Result<CompressedSparseData2<u32>, BixverseErrors> {
     let file = File::open(file_path)?;
 
     let data_ds = file.dataset("X/data")?;
@@ -536,7 +533,7 @@ pub fn read_h5ad_x_data_csc<P: AsRef<Path>>(
     // Read indptr first (small array)
     let indptr_raw: Vec<u32> = indptr_ds.read_1d()?.to_vec();
 
-    let mut new_data: Vec<u16> = Vec::new();
+    let mut new_data: Vec<u32> = Vec::new();
     let mut new_indices: Vec<usize> = Vec::new();
     let mut new_indptr: Vec<usize> = Vec::with_capacity(quality.genes_to_keep.len() + 1);
     new_indptr.push(0);
@@ -593,7 +590,7 @@ pub fn read_h5ad_x_data_csc<P: AsRef<Path>>(
                 let old_cell_idx = chunk_indices[local_idx] as usize;
 
                 if let Some(&new_cell_idx) = quality.cell_old_to_new.get(&old_cell_idx) {
-                    new_data.push(chunk_data[local_idx] as u16);
+                    new_data.push(chunk_data[local_idx] as u32);
                     new_indices.push(new_cell_idx);
                 }
             }
@@ -616,7 +613,7 @@ pub fn read_h5ad_x_data_csc<P: AsRef<Path>>(
         indices: new_indices,
         indptr: new_indptr,
         cs_type: CompressedSparseFormat::Csr,
-        data_2: None::<Vec<u16>>,
+        data_2: None::<Vec<u32>>,
         shape,
     })
 }
@@ -653,7 +650,7 @@ pub fn write_h5_csc_to_csr_streaming<P: AsRef<Path>>(
 
     // accumulate cells in memory (necessary for CSR)
     // (gene_index, raw_count) - gene index is u32 to support >65k features
-    let mut cell_data: Vec<Vec<(u32, u16)>> = vec![Vec::new(); quality.cells_to_keep.len()];
+    let mut cell_data: Vec<Vec<(u32, u32)>> = vec![Vec::new(); quality.cells_to_keep.len()];
 
     const GENE_CHUNK_SIZE: usize = 5000;
     let total_genes = quality.genes_to_keep.len();
@@ -703,7 +700,7 @@ pub fn write_h5_csc_to_csr_streaming<P: AsRef<Path>>(
                 let old_cell_idx = chunk_indices[local_idx] as usize;
 
                 if let Some(&new_cell_idx) = quality.cell_old_to_new.get(&old_cell_idx) {
-                    let raw_count = chunk_data[local_idx] as u16;
+                    let raw_count = chunk_data[local_idx] as u32;
                     cell_data[new_cell_idx].push((new_gene_idx, raw_count));
                 }
             }
@@ -746,7 +743,7 @@ pub fn write_h5_csc_to_csr_streaming<P: AsRef<Path>>(
         data.sort_by_key(|(gene_idx, _)| *gene_idx);
 
         let gene_indices: Vec<u32> = data.iter().map(|(g, _)| *g).collect();
-        let gene_counts: Vec<u16> = data.iter().map(|(_, c)| *c).collect();
+        let gene_counts: Vec<u32> = data.iter().map(|(_, c)| *c).collect();
 
         let cell_chunk =
             CsrCellChunk::from_data(&gene_counts, &gene_indices, cell_idx, target_size, true);
@@ -802,7 +799,7 @@ pub fn parse_h5_csr_quality<P: AsRef<Path>>(
     shape: (usize, usize),
     cell_quality: &MinCellQuality,
     verbose: bool,
-) -> Result<CellOnFileQuality> {
+) -> Result<CellOnFileQuality, BixverseErrors> {
     let file_path = file_path.as_ref();
 
     if verbose {
@@ -1059,12 +1056,12 @@ pub fn parse_h5_csr_quality<P: AsRef<Path>>(
 ///
 /// ### Returns
 ///
-/// The `CompressedSparseData2` in CSR format with the counts stored as u16.
+/// The `CompressedSparseData2` in CSR format with the counts stored as u32.
 pub fn read_h5ad_x_data_csr<P: AsRef<Path>>(
     file_path: P,
     quality: &CellOnFileQuality,
     verbose: bool,
-) -> Result<CompressedSparseData2<u16>> {
+) -> Result<CompressedSparseData2<u32>, BixverseErrors> {
     let file = File::open(file_path)?;
 
     let data_ds = file.dataset("X/data")?;
@@ -1074,7 +1071,7 @@ pub fn read_h5ad_x_data_csr<P: AsRef<Path>>(
     let indptr_raw: Vec<u32> = indptr_ds.read_1d()?.to_vec();
 
     // Build CSC format directly: indptr = cells, indices = genes
-    let mut new_data: Vec<u16> = Vec::new();
+    let mut new_data: Vec<u32> = Vec::new();
     let mut new_indices: Vec<usize> = Vec::new();
     let mut new_indptr: Vec<usize> = Vec::with_capacity(quality.cells_to_keep.len() + 1);
     new_indptr.push(0);
@@ -1129,14 +1126,14 @@ pub fn read_h5ad_x_data_csr<P: AsRef<Path>>(
             let cell_end = indptr_raw[old_cell_idx + 1] as usize;
 
             // Collect this cell's data with gene filtering
-            let mut cell_data: Vec<(usize, u16)> = Vec::new();
+            let mut cell_data: Vec<(usize, u32)> = Vec::new();
 
             for idx in cell_start..cell_end {
                 let local_idx = idx - start_pos;
                 let old_gene_idx = chunk_indices[local_idx] as usize;
 
                 if let Some(&new_gene_idx) = quality.gene_old_to_new.get(&old_gene_idx) {
-                    cell_data.push((new_gene_idx, chunk_data[local_idx] as u16));
+                    cell_data.push((new_gene_idx, chunk_data[local_idx] as u32));
                 }
             }
 
@@ -1171,7 +1168,7 @@ pub fn read_h5ad_x_data_csr<P: AsRef<Path>>(
         indices: new_indices,
         indptr: new_indptr,
         cs_type: CompressedSparseFormat::Csc, // Return CSC format
-        data_2: None::<Vec<u16>>,
+        data_2: None::<Vec<u32>>,
         shape,
     })
 }
@@ -1234,9 +1231,9 @@ pub fn write_h5_csr_streaming<P: AsRef<Path>>(
     let start_write = Instant::now();
 
     // Reusable buffers to avoid allocations
-    let mut cell_data: Vec<(usize, u16)> = Vec::with_capacity(10000);
+    let mut cell_data: Vec<(usize, u32)> = Vec::with_capacity(10000);
     let mut gene_indices: Vec<u32> = Vec::with_capacity(10000);
-    let mut gene_counts: Vec<u16> = Vec::with_capacity(10000);
+    let mut gene_counts: Vec<u32> = Vec::with_capacity(10000);
 
     for (batch_idx, cell_batch) in quality.cells_to_keep.chunks(CELL_BATCH_SIZE).enumerate() {
         if verbose && (batch_idx % ((num_batches / 10).max(1)) == 0 || batch_idx == num_batches - 1)
@@ -1268,7 +1265,7 @@ pub fn write_h5_csr_streaming<P: AsRef<Path>>(
                 nnz.push(0);
                 let new_cell_idx = quality.cell_old_to_new[&old_cell_idx];
                 let empty_chunk = CsrCellChunk::from_data(
-                    &[] as &[u16],
+                    &[] as &[u32],
                     &[] as &[u32],
                     new_cell_idx,
                     cell_qc.target_size,
@@ -1295,7 +1292,7 @@ pub fn write_h5_csr_streaming<P: AsRef<Path>>(
                 let old_gene_idx = chunk_indices[local_idx] as usize;
 
                 if let Some(&new_gene_idx) = quality.gene_old_to_new.get(&old_gene_idx) {
-                    let raw_val = chunk_data[local_idx] as u16;
+                    let raw_val = chunk_data[local_idx] as u32;
                     cell_data.push((new_gene_idx, raw_val));
                 }
             }
@@ -1588,14 +1585,14 @@ pub fn parse_h5_normalised_quality_csr<P: AsRef<Path>>(
 ///
 /// ### Returns
 ///
-/// The reconstructed normalised counts as u16
+/// The reconstructed normalised counts as u32
 #[inline(always)]
-fn reconstruct_raw_count(norm_val: f32, lib_size: f32, target_size: f32) -> u16 {
+fn reconstruct_raw_count(norm_val: f32, lib_size: f32, target_size: f32) -> u32 {
     if norm_val <= 0.0 || lib_size <= 0.0 {
         return 0;
     }
     let reconstructed = norm_val.exp_m1() * lib_size / target_size;
-    reconstructed.round().clamp(0.0, u16::MAX as f32) as u16
+    reconstructed.round().clamp(0.0, u32::MAX as f32) as u32
 }
 
 /// Reconstruct raw counts from normalised CSR data and write to binary
@@ -1626,10 +1623,10 @@ fn reconstruct_and_write_csr<P: AsRef<Path>>(
     verbose: bool,
 ) -> Result<CellQuality, BixverseErrors> {
     let file = hdf5::File::open(file_path)?;
-    let data_ds = file.dataset("X/data").unwrap();
-    let indices_ds = file.dataset("X/indices").unwrap();
-    let indptr_ds = file.dataset("X/indptr").unwrap();
-    let indptr_raw: Vec<u32> = indptr_ds.read_1d().unwrap().to_vec();
+    let data_ds = file.dataset("X/data")?;
+    let indices_ds = file.dataset("X/indices")?;
+    let indptr_ds = file.dataset("X/indptr")?;
+    let indptr_raw: Vec<u32> = indptr_ds.read_1d()?.to_vec();
 
     let mut writer = CellGeneSparseWriter::new(
         bin_path,
@@ -1643,10 +1640,10 @@ fn reconstruct_and_write_csr<P: AsRef<Path>>(
 
     const CELL_BATCH_SIZE: usize = 1000;
     let total_cells = quality.cells_to_keep.len();
-    // (gene_index, raw_count) - gene index as usize, count as u16
-    let mut cell_data: Vec<(usize, u16)> = Vec::with_capacity(10000);
+    // (gene_index, raw_count) - gene index as usize, count as u32
+    let mut cell_data: Vec<(usize, u32)> = Vec::with_capacity(10000);
     let mut gene_indices: Vec<u32> = Vec::with_capacity(10000);
-    let mut gene_counts: Vec<u16> = Vec::with_capacity(10000);
+    let mut gene_counts: Vec<u32> = Vec::with_capacity(10000);
 
     for (batch_idx, cell_batch) in quality.cells_to_keep.chunks(CELL_BATCH_SIZE).enumerate() {
         if verbose && batch_idx % 10 == 0 {
@@ -1673,7 +1670,7 @@ fn reconstruct_and_write_csr<P: AsRef<Path>>(
             for &old_cell_idx in cell_batch {
                 let new_cell_idx = quality.cell_old_to_new[&old_cell_idx];
                 let empty_chunk = CsrCellChunk::from_data(
-                    &[] as &[u16],
+                    &[] as &[u32],
                     &[] as &[u32],
                     new_cell_idx,
                     cell_qc.target_size,
@@ -1686,11 +1683,8 @@ fn reconstruct_and_write_csr<P: AsRef<Path>>(
             continue;
         }
 
-        let chunk_data: Vec<f32> = data_ds.read_slice_1d(start_pos..end_pos).unwrap().to_vec();
-        let chunk_indices: Vec<u32> = indices_ds
-            .read_slice_1d(start_pos..end_pos)
-            .unwrap()
-            .to_vec();
+        let chunk_data: Vec<f32> = data_ds.read_slice_1d(start_pos..end_pos)?.to_vec();
+        let chunk_indices: Vec<u32> = indices_ds.read_slice_1d(start_pos..end_pos)?.to_vec();
 
         for &old_cell_idx in cell_batch {
             let cell_start = indptr_raw[old_cell_idx] as usize;
@@ -1778,14 +1772,14 @@ fn reconstruct_and_write_csc<P: AsRef<Path>>(
     verbose: bool,
 ) -> Result<CellQuality, BixverseErrors> {
     let file = hdf5::File::open(file_path)?;
-    let data_ds = file.dataset("X/data").unwrap();
-    let indices_ds = file.dataset("X/indices").unwrap();
-    let indptr_ds = file.dataset("X/indptr").unwrap();
-    let indptr_raw: Vec<u32> = indptr_ds.read_1d().unwrap().to_vec();
+    let data_ds = file.dataset("X/data")?;
+    let indices_ds = file.dataset("X/indices")?;
+    let indptr_ds = file.dataset("X/indptr")?;
+    let indptr_raw: Vec<u32> = indptr_ds.read_1d()?.to_vec();
 
     // Accumulate per-cell data in memory - necessary for CSR output
     // (gene_index, raw_count) - gene index as u32 to support >65k features
-    let mut cell_data: Vec<Vec<(u32, u16)>> = vec![Vec::new(); quality.cells_to_keep.len()];
+    let mut cell_data: Vec<Vec<(u32, u32)>> = vec![Vec::new(); quality.cells_to_keep.len()];
 
     const GENE_CHUNK_SIZE: usize = 5000;
     let total_genes = quality.genes_to_keep.len();
@@ -1815,11 +1809,8 @@ fn reconstruct_and_write_csc<P: AsRef<Path>>(
             continue;
         }
 
-        let chunk_data: Vec<f32> = data_ds.read_slice_1d(start_pos..end_pos).unwrap().to_vec();
-        let chunk_indices: Vec<u32> = indices_ds
-            .read_slice_1d(start_pos..end_pos)
-            .unwrap()
-            .to_vec();
+        let chunk_data: Vec<f32> = data_ds.read_slice_1d(start_pos..end_pos)?.to_vec();
+        let chunk_indices: Vec<u32> = indices_ds.read_slice_1d(start_pos..end_pos)?.to_vec();
 
         for &gene_idx in gene_chunk {
             let new_gene_idx = quality.gene_old_to_new[&gene_idx] as u32;
@@ -1876,7 +1867,7 @@ fn reconstruct_and_write_csc<P: AsRef<Path>>(
         data.sort_by_key(|(gene_idx, _)| *gene_idx);
 
         let gene_indices: Vec<u32> = data.iter().map(|(g, _)| *g).collect();
-        let gene_counts: Vec<u16> = data.iter().map(|(_, c)| *c).collect();
+        let gene_counts: Vec<u32> = data.iter().map(|(_, c)| *c).collect();
 
         let cell_chunk = CsrCellChunk::from_data(
             &gene_counts,
@@ -1938,7 +1929,7 @@ pub fn write_h5_normalised_counts<P: AsRef<Path>>(
     target_size: f32,
     cell_quality: MinCellQuality,
     verbose: bool,
-) -> (usize, usize, CellQuality) {
+) -> Result<(usize, usize, CellQuality), BixverseErrors> {
     if verbose {
         println!(
             "Step 1/4: Reading library sizes from obs/{}...",
@@ -1946,15 +1937,15 @@ pub fn write_h5_normalised_counts<P: AsRef<Path>>(
         );
     }
 
-    let file_format = parse_compressed_sparse_format(cs_type).unwrap();
+    let file_format = parse_compressed_sparse_format(cs_type)
+        .ok_or_else(|| BixverseErrors::UnknownSparseFormat(cs_type.to_string()))?;
 
-    let file = hdf5::File::open(h5_path.as_ref()).unwrap();
+    let file = hdf5::File::open(h5_path.as_ref())?;
     let lib_size_path = format!("obs/{}", obs_lib_size_col);
     let lib_sizes_raw: Vec<f32> = file
         .dataset(&lib_size_path)
         .unwrap_or_else(|_| panic!("obs column '{}' not found in h5ad file", obs_lib_size_col))
-        .read_1d()
-        .unwrap()
+        .read_1d()?
         .to_vec();
 
     assert_eq!(
@@ -1985,16 +1976,14 @@ pub fn write_h5_normalised_counts<P: AsRef<Path>>(
             &lib_sizes_raw,
             &cell_quality,
             verbose,
-        )
-        .unwrap(),
+        )?,
         CompressedSparseFormat::Csr => parse_h5_normalised_quality_csr(
             &h5_path,
             (no_cells, no_genes),
             &lib_sizes_raw,
             &cell_quality,
             verbose,
-        )
-        .unwrap(),
+        )?,
     };
 
     if verbose {
@@ -2038,9 +2027,9 @@ pub fn write_h5_normalised_counts<P: AsRef<Path>>(
     cell_qc.set_cell_indices(&file_quality.cells_to_keep);
     cell_qc.set_gene_indices(&file_quality.genes_to_keep);
 
-    (
+    Ok((
         file_quality.cells_to_keep.len(),
         file_quality.genes_to_keep.len(),
         cell_qc,
-    )
+    ))
 }
