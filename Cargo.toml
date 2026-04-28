@@ -13,7 +13,7 @@ path = "src/lib.rs"
 
 [features]
 ## Enables the single cell features in bixverse-rs
-single-cell = ["half", "bincode", "indexmap", "memmap2", "hdf5", "lz4_flex", "ann-search-rs"]
+single-cell = ["half", "bincode", "indexmap", "memmap2", "hdf5", "lz4_flex"]
 ## Tests for large scale diagonistics - for development only!
 large_scale_diagnostics = []
 
@@ -24,7 +24,7 @@ codegen-units = 4
 
 [dependencies]
 approx = "0.5.1"
-ann-search-rs = { version = "0.2.14", optional = true }
+ann-search-rs = { version = "0.2.14" }
 bincode = { version = "2.0.1", features = ["serde"], optional = true }
 extendr-api = "0.9.0"
 faer = "0.23.2"

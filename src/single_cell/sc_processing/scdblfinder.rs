@@ -1257,6 +1257,7 @@ impl ScDblFinder {
                 knn_params: centroid_knn_params,
                 resolution: self.params.cluster_resolution,
                 louvain_iters: self.params.cluster_iters,
+                ..Default::default()
             };
             if verbose {
                 println!(
@@ -1264,7 +1265,7 @@ impl ScDblFinder {
                     n_centroids, centroid_k, self.n_cells
                 );
             }
-            fast_louvain_clusters(obs_pca.as_ref(), &fast_params, seed, verbose)
+            fast_louvain_clusters(obs_pca.as_ref(), "kmeans", &fast_params, seed, verbose)
         } else {
             let obs_k = if self.params.knn_params.k == 0 {
                 (((self.n_cells as f32).sqrt() * 0.5).round() as usize)
