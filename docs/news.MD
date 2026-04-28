@@ -4,7 +4,6 @@
 
 ### Features
 
-<<<<<<< HEAD
 - scDblFinder implemented
 - Refactor out of shared tree structure between scDblFinder and SCENIC
 - Implementation of Harmony v2
@@ -12,10 +11,9 @@
 - Made the kNN validation optional and improved the distance calculation with
   SIMD.
 - Proper Rust-based error handling across
-=======
 - Better loading in of MTX files that do not blow up during counting of cells
   per gene.
->>>>>>> feat-mtx
+- Faster Louvain clustering for the doublet detection methods.
 
 ## 0.1.7
 

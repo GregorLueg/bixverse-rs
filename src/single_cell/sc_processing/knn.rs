@@ -107,7 +107,7 @@ impl KnnParams {
     pub fn new() -> Self {
         Self {
             // general
-            knn_method: "hnsw".to_string(),
+            knn_method: "kmknn".to_string(),
             ann_dist: "cosine".to_string(),
             // annoy
             k: 15,

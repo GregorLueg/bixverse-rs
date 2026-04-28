@@ -535,11 +535,6 @@ impl BoostParams {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let fast_cluster = params_list
-            .get("fast_cluster")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-
         let resolution = params_list
             .get("resolution")
             .and_then(|v| v.as_real())
@@ -586,7 +581,6 @@ impl BoostParams {
             replace,
             resolution,
             louvain_iters,
-            fast_cluster,
             n_iters,
             p_thresh,
             voter_thresh,
