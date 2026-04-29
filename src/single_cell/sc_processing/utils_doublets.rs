@@ -226,7 +226,7 @@ pub fn resolve_target_size(explicit: Option<f32>, hvg_library_sizes: &[usize]) -
 /// * `1` - PCA loadings
 /// * `2` - Gene means
 /// * `3` - Gene standard deviations
-type DoubletPcaRes = (Mat<f32>, Mat<f32>, Vec<f32>, Vec<f32>);
+pub type DoubletPcaRes = (Mat<f32>, Mat<f32>, Vec<f32>, Vec<f32>);
 
 /// Scale `Vec<CsrCellChunk>` using pre-calculated gene means and stds
 ///
@@ -462,6 +462,22 @@ pub fn pca_observed(
 /// Simulated doublet chunks are scaled using the observed statistics and
 /// projected into the same PC space. Returns the vertically concatenated
 /// scores: observed on top, simulated on bottom.
+///
+/// ### Params
+///
+/// * `f_path_gene` - Path to the gene-based binary files
+/// * `cells_to_keep` - Indices of the cells to keep
+/// * `hvg_genes` - Indices of the HVG genes
+/// * `hvg_library_sizes` - Library sizes adjusted for only including HVG
+/// * `target_size` - The target size to normalise against
+/// * `sim_chunks` - Slice of simulated chunks
+/// * `opts` - The [`PcaOpts`] for this run
+/// * `seed` - Random seed
+/// * `verbose` - Verbosity of the function
+///
+/// ### Returns
+///
+/// A tuple of `(combined_scores, DoubletPcaRes)`
 #[allow(clippy::too_many_arguments)]
 pub fn pca_and_project(
     f_path_gene: &str,
@@ -502,6 +518,36 @@ pub fn pca_and_project(
     let combined = concat![[&pca_res.0], [sim_pca]];
 
     Ok((combined, pca_res))
+}
+
+/// Reproject new doublets based on existing PCA results
+///
+/// ### Params
+///
+/// * `sim_chunks` - Slice of simulated chunks
+/// * `pca_res` - The DoubletPcaRes for reprojecting the data
+/// * `opts` - The [`PcaOpts`] for this run
+///
+/// ### Returns
+///
+/// Combined scores
+pub fn reproject_doublets(
+    sim_chunks: &[CsrCellChunk],
+    pca_res: &DoubletPcaRes,
+    opts: &PcaOpts,
+) -> Mat<f32> {
+    let scaled_sim = scale_cell_chunks_with_stats(
+        sim_chunks,
+        &pca_res.2,
+        &pca_res.3,
+        opts.mean_center,
+        opts.normalise_variance,
+        pca_res.2.len(),
+    );
+
+    let sim_pca = &scaled_sim * &pca_res.1;
+
+    concat![[&pca_res.0], [sim_pca]]
 }
 
 /////////

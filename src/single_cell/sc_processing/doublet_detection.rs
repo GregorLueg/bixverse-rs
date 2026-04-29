@@ -10,7 +10,6 @@
 use rand::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::time::Instant;
-use std::usize;
 
 use crate::core::math::stats::*;
 use crate::graph::community_detections::*;
@@ -246,6 +245,8 @@ pub struct BoostClassifier {
     cells_to_keep: Vec<usize>,
     /// Per-cell library sizes computed over HVG genes only.
     hvg_library_sizes: Vec<usize>,
+    /// PCA results to avoid re-computing the HVG, PCA, etc.
+    pca_results: Option<DoubletPcaRes>,
 }
 
 impl BoostClassifier {
@@ -275,6 +276,7 @@ impl BoostClassifier {
             n_cells_sim: 0,
             cells_to_keep: cell_indices.to_vec(),
             hvg_library_sizes: Vec::new(),
+            pca_results: None,
         }
     }
 
@@ -427,7 +429,7 @@ impl BoostClassifier {
     ///
     /// Tuple of (community_scores, log_p_values) per observed cell.
     fn one_iteration(
-        &self,
+        &mut self,
         target_size: f32,
         hvg_genes: &[usize],
         seed: usize,
@@ -441,10 +443,8 @@ impl BoostClassifier {
             random_svd: self.params.random_svd,
         };
 
-        // Generate pairs (Boost supports with/without replacement)
         let pairs = self.generate_pairs(seed);
 
-        // Simulate
         let sim_chunks = simulate_from_pairs(
             &pairs,
             &self.cells_to_keep,
@@ -455,18 +455,24 @@ impl BoostClassifier {
             self.params.log_transform,
         )?;
 
-        // PCA + projection
-        let (combined_pca, _) = pca_and_project(
-            &self.f_path_gene,
-            &self.cells_to_keep,
-            hvg_genes,
-            &self.hvg_library_sizes,
-            target_size,
-            &sim_chunks,
-            &pca_opts,
-            seed,
-            verbose,
-        )?;
+        let combined_pca = match &self.pca_results {
+            Some(pca_res) => reproject_doublets(&sim_chunks, pca_res, &pca_opts),
+            None => {
+                let (combined, pca_res) = pca_and_project(
+                    &self.f_path_gene,
+                    &self.cells_to_keep,
+                    hvg_genes,
+                    &self.hvg_library_sizes,
+                    target_size,
+                    &sim_chunks,
+                    &pca_opts,
+                    seed,
+                    verbose,
+                )?;
+                self.pca_results = Some(pca_res);
+                combined
+            }
+        };
 
         // kNN
         let k_adj = adjusted_k(self.params.knn_params.k, self.n_cells, self.n_cells_sim);
