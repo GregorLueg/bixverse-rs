@@ -478,8 +478,8 @@ impl BoostClassifier {
 
         let start_cluster = Instant::now();
         let communities = if use_fast {
-            let n_centroids = ((total_cells as f32).sqrt()).ceil() as usize;
-            let centroid_k = ((n_centroids as f32).sqrt()).ceil() as usize;
+            let n_centroids = ((total_cells as f32).sqrt() * 2.0).ceil() as usize;
+            let centroid_k = ((n_centroids as f32).sqrt() * 2.0).ceil() as usize;
 
             let mut centroid_knn_params = self.params.knn_params.clone();
             centroid_knn_params.k = centroid_k;
