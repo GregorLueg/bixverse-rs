@@ -10,6 +10,7 @@
 use rand::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::time::Instant;
+use std::usize;
 
 use crate::core::math::stats::*;
 use crate::graph::community_detections::*;
@@ -478,8 +479,8 @@ impl BoostClassifier {
 
         let start_cluster = Instant::now();
         let communities = if use_fast {
-            let n_centroids = ((total_cells as f32).sqrt() * 2.0).ceil() as usize;
-            let centroid_k = ((n_centroids as f32).sqrt() * 2.0).ceil() as usize;
+            let n_centroids = (total_cells / 10).clamp(500, usize::MAX);
+            let centroid_k = ((n_centroids as f32).sqrt() * 0.5).round() as usize;
 
             let mut centroid_knn_params = self.params.knn_params.clone();
             centroid_knn_params.k = centroid_k;
