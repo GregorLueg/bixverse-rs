@@ -186,8 +186,6 @@ pub fn generate_snn_limited(
     method: SnnSimilarityMethod,
     verbose: bool,
 ) -> (Vec<usize>, Vec<f32>) {
-    // We need to use a hashmap to store unique edges (smaller_idx, larger_idx)
-    // -> weight
     let start_time = Instant::now();
 
     let edge_map: FxHashMap<(usize, usize), f32> = (0..n_samples)

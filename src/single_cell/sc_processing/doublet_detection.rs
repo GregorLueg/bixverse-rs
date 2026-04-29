@@ -492,6 +492,7 @@ impl BoostClassifier {
             &graph,
             self.params.resolution,
             self.params.louvain_iters,
+            false, // The original implementation does not create coarse communities!
             seed,
         )?;
         if verbose {

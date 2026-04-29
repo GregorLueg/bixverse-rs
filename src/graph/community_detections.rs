@@ -218,9 +218,7 @@ where
 // Main //
 //////////
 
-/// Louvain community detection
-///
-/// This version works on [`SparseGraph`].
+/// Louvain community detection on a [`SparseGraph`].
 ///
 /// ### Params
 ///
@@ -228,15 +226,19 @@ where
 /// * `resolution` - Resolution parameter for the Louvain clustering
 /// * `max_iter` - The maximum iterations to run the algorithm for. In this
 ///   case, it safeguards against degenerated graphs and should not trigger.
+/// * `multi_level` - If `true`, run the full multi-level Louvain (Phase 1 +
+///   Phase 2 aggregation, repeated). If `false`, run only one Phase 1 pass
+///   (matches Phenograph / the original doubletdetection behaviour).
 /// * `seed` - Seed for reproducibility purposes
 ///
 /// ### Returns
 ///
-/// Vector of communitiies
+/// Vector of communities
 pub fn louvain_sparse_graph<T>(
     graph: &SparseGraph<T>,
     resolution: T,
     max_iter: usize,
+    multi_level: bool,
     seed: usize,
 ) -> Result<Vec<usize>, BixverseErrors>
 where
@@ -258,7 +260,8 @@ where
     for s in node_to_super.iter_mut() {
         *s = comms[*s];
     }
-    if n_super == n_orig {
+
+    if !multi_level || n_super == n_orig {
         return Ok(node_to_super);
     }
 
@@ -767,7 +770,7 @@ mod tests {
     #[test]
     fn test_louvain_barbell() {
         let graph = build_barbell_graph();
-        let comms = louvain_sparse_graph(&graph, 1.0, 10, 42).unwrap();
+        let comms = louvain_sparse_graph(&graph, 1.0, 10, true, 42).unwrap();
 
         // 0, 1, 2 should share a community
         assert_eq!(comms[0], comms[1]);

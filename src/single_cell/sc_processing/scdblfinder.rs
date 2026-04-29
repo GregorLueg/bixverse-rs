@@ -1272,6 +1272,7 @@ impl ScDblFinder {
                 "kmeans",
                 &res,
                 &fast_params,
+                true,
                 seed,
                 verbose,
             )?;
@@ -1298,6 +1299,7 @@ impl ScDblFinder {
                 &obs_graph,
                 self.params.cluster_resolution,
                 self.params.cluster_iters,
+                true,
                 seed,
             )?
         };

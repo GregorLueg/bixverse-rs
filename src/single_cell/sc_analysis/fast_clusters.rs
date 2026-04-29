@@ -86,6 +86,9 @@ where
 ///   or `"minibatch"`.
 /// * `resolutions` - Slice of resolutions to iterate over.
 /// * `params` - Pipeline parameters.
+/// * `multi_level` - If `true`, run the full multi-level Louvain (Phase 1 +
+///   Phase 2 aggregation, repeated). If `false`, run only one Phase 1 pass
+///   (matches Phenograph / the original doubletdetection behaviour).
 /// * `seed` - Seed for reproducibility.
 /// * `verbose` - Controls verbosity.
 ///
@@ -97,6 +100,7 @@ pub fn fast_louvain_clusters(
     km_type: &str,
     resolutions: &[f32],
     params: &FastLouvainParams<f32>,
+    multi_level_louvain: bool,
     seed: usize,
     verbose: bool,
 ) -> Result<Vec<Vec<usize>>, BixverseErrors> {
@@ -138,7 +142,8 @@ pub fn fast_louvain_clusters(
     let mut results: Vec<Vec<usize>> = Vec::with_capacity(resolutions.len());
 
     for &res in resolutions {
-        let centroid_communities = louvain_sparse_graph(&graph, res, params.louvain_iters, seed)?;
+        let centroid_communities =
+            louvain_sparse_graph(&graph, res, params.louvain_iters, multi_level_louvain, seed)?;
 
         let membership = assignments
             .iter()
