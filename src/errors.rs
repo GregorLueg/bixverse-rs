@@ -30,6 +30,20 @@ pub enum BixverseErrors {
     #[error("The faer Eigen decomposition failed - please verify the data")]
     FaerEigenError,
 
+    // -- Graph based errors ---
+    /// Error for algorithms that expect undirected graphs
+    ///
+    /// For methods that expect an undirected graph, but received a directed
+    /// one.
+    #[error("The Graph is directed but needs to be undirected for this algorithm.")]
+    GraphDirectedError,
+
+    /// Error for community membership/graph node number mismatch
+    ///
+    /// In cases where the graph and the community membership do not agree.
+    #[error("The number of nodes and membership assignments in the communities do not add up.")]
+    CommunityAssignmentMismatch,
+
     // -- Binary file I/O --
     /// Wraps any `std::io::Error` encountered while reading or writing the
     /// bixverse binary sparse format.

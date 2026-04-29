@@ -1274,7 +1274,7 @@ impl ScDblFinder {
                 &fast_params,
                 seed,
                 verbose,
-            );
+            )?;
 
             membership[0].clone()
         } else {
@@ -1299,7 +1299,7 @@ impl ScDblFinder {
                 self.params.cluster_resolution,
                 self.params.cluster_iters,
                 seed,
-            )
+            )?
         };
 
         let end_clustering = start_clustering.elapsed();

@@ -1,97 +1,11 @@
 //! Graph-based clustering algorithms, namely spectral clustering
 
+use ann_search_rs::prelude::AnnSearchFloat;
 use faer::{Mat, MatRef};
-use rand::prelude::*;
 
 use crate::graph::graph_structures::{adjacency_to_laplacian, get_knn_graph_adj};
+use crate::ml::clustering::k_means::k_means_clusters;
 use crate::prelude::*;
-
-/////////////
-// Helpers //
-/////////////
-
-/// Helper function to get K-means clustering
-///
-/// ### Params
-///
-/// * `data` - The data on which to apply k-means clustering
-/// * `k` - Number of clusters
-/// * `max_iters` - Maximum number of iterations
-/// * `seed` - Random seed for reproducibility
-///
-/// ### Return
-///
-/// Vector with usizes, indicating cluster membership
-fn kmeans<T>(data: &MatRef<T>, k: usize, max_iters: usize, seed: usize) -> Vec<usize>
-where
-    T: BixverseFloat,
-{
-    let n = data.nrows();
-    let d = data.ncols();
-    let mut labels = vec![0; n];
-    let mut centroids = Mat::zeros(k, d);
-
-    let mut rng = StdRng::seed_from_u64(seed as u64);
-    centroids
-        .as_mut()
-        .row_mut(0)
-        .copy_from(data.row(rng.random_range(0..n)));
-
-    // TODO: update this to use the SIMD optimised code from ann-search-rs
-
-    for i in 1..k {
-        let mut distances = vec![T::infinity(); n];
-        for j in 0..n {
-            for c in 0..i {
-                let dist: T = (0..d)
-                    .map(|dim| (data[(j, dim)] - centroids[(c, dim)]).powi(2))
-                    .fold(T::zero(), |acc, x| acc + x);
-                distances[j] = distances[j].min(dist);
-            }
-        }
-        let idx = distances
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-            .unwrap()
-            .0;
-        centroids.as_mut().row_mut(i).copy_from(data.row(idx));
-    }
-
-    for _ in 0..max_iters {
-        for i in 0..n {
-            let mut min_dist = T::infinity();
-            for j in 0..k {
-                let dist: T = (0..d)
-                    .map(|dim| (data[(i, dim)] - centroids[(j, dim)]).powi(2))
-                    .fold(T::zero(), |acc, x| acc + x);
-                if dist < min_dist {
-                    min_dist = dist;
-                    labels[i] = j;
-                }
-            }
-        }
-
-        let mut counts = vec![0; k];
-        let mut new_centroids = Mat::zeros(k, d);
-        for i in 0..n {
-            counts[labels[i]] += 1;
-            for j in 0..d {
-                new_centroids[(labels[i], j)] += data[(i, j)];
-            }
-        }
-        for i in 0..k {
-            if counts[i] > 0 {
-                for j in 0..d {
-                    new_centroids[(i, j)] /= T::from_usize(counts[i]).unwrap();
-                }
-            }
-        }
-        centroids = new_centroids;
-    }
-
-    labels
-}
 
 ////////////////////
 // Main functions //
@@ -118,7 +32,7 @@ pub fn spectral_clustering<T>(
     seed: usize,
 ) -> Vec<usize>
 where
-    T: BixverseFloat,
+    T: BixverseFloat + AnnSearchFloat,
 {
     let adjacency = get_knn_graph_adj(similarities, k_neighbours);
 
@@ -150,7 +64,16 @@ where
         }
     }
 
-    kmeans(&features.as_ref(), n_clusters, max_iters, seed)
+    let (_, assignments) = k_means_clusters(
+        features.as_ref(),
+        "euclidean",
+        n_clusters,
+        max_iters,
+        seed,
+        false,
+    );
+
+    assignments
 }
 
 ///////////

@@ -493,7 +493,7 @@ impl BoostClassifier {
             self.params.resolution,
             self.params.louvain_iters,
             seed,
-        );
+        )?;
         if verbose {
             println!(
                 "Generated communities via Louvain clustering. Done in {:.2?}",

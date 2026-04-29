@@ -1,49 +1,50 @@
-//! Graph community detection algorithms
+//! Graph community detection algorithms. Includes Louvain and WalkTrap
+//! implementations.
 
 use rand::prelude::*;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::collections::BinaryHeap;
+use std::collections::VecDeque;
 use std::time::Instant;
 
+use crate::core::math::sparse::coo_to_csr;
 use crate::prelude::*;
 
 /////////////
 // Louvain //
 /////////////
 
-/// Louvain community detection
+/////////////
+// Helpers //
+/////////////
+
+/// One Phase 1 pass with pruning.
 ///
-/// This version works on sparse graphs
+/// Maintains a queue of dirty nodes. A node is dirty when first added or when
+/// one of its neighbours has just moved community. Drains until empty.
 ///
 /// ### Params
 ///
-/// * `graph` - Undirected sparse graph
-/// * `resolution` - Resolution parameter for the Louvain clustering
-/// * `iter` - Numbers of iterations for the algorithm
-/// * `seed` - Seed for reproducibility purposes
+/// * `graph` - The [`SparseGraph`] - must be undirected!
+/// * `resolution` - The resolution parameter to use
+/// * `max_iter` - The maximum iterations to run the algorithm for. In this
+///   case, it safeguards against degenerated graphs and should not trigger.
+/// * `rng` - The random number generator
 ///
 /// ### Returns
 ///
-/// Vector of communitiies
-pub fn louvain_sparse_graph<T>(
+/// Returns `(contiguous labels in [0, n_distinct), count)`.
+fn louvain_one_level<T>(
     graph: &SparseGraph<T>,
     resolution: T,
     max_iter: usize,
-    seed: usize,
-) -> Vec<usize>
+    rng: &mut StdRng,
+) -> (Vec<usize>, usize)
 where
-    T: BixverseFloat + Clone + std::iter::Sum,
+    T: BixverseFloat + BixverseNumeric + Clone + std::iter::Sum,
 {
-    assert!(
-        !graph.is_directed(),
-        "Louvain does not work for directed graphs!"
-    );
     let n = graph.get_node_number();
-    if n == 0 {
-        return Vec::new();
-    }
-    let mut rng = StdRng::seed_from_u64(seed as u64);
 
     let m: T = (0..n)
         .map(|i| graph.get_neighbours(i).1.iter().copied().sum::<T>())
@@ -63,60 +64,71 @@ where
     let mut neighbour_weights = vec![T::zero(); n];
     let mut comm_active = vec![false; n];
     let mut active_comms = Vec::with_capacity(256);
-    let mut node_order: Vec<u32> = (0..n as u32).collect();
 
     let epsilon = T::from_f64(1e-10).unwrap();
 
-    for _ in 0..max_iter {
-        let mut move_count = 0;
-        node_order.shuffle(&mut rng);
+    let mut initial_order: Vec<u32> = (0..n as u32).collect();
+    initial_order.shuffle(rng);
+    let mut queue: VecDeque<u32> = initial_order.into_iter().collect();
+    let mut in_queue = vec![true; n];
 
-        for &node in &node_order {
-            let node_idx = node as usize;
-            let current_comm = communities[node_idx] as usize;
-            let k_i = degrees[node_idx];
-            let k_i_scaled = k_i * res_over_two_m;
+    let max_evals = max_iter.saturating_mul(n);
+    let mut evals = 0usize;
 
-            let (neighbours, weights) = graph.get_neighbours(node_idx);
+    while let Some(node) = queue.pop_front() {
+        if evals >= max_evals {
+            break;
+        }
+        evals += 1;
 
-            for (&neighbour, &weight) in neighbours.iter().zip(weights.iter()) {
-                let comm = communities[neighbour] as usize;
-                if !comm_active[comm] {
-                    comm_active[comm] = true;
-                    active_comms.push(comm);
+        let node_idx = node as usize;
+        in_queue[node_idx] = false;
+
+        let current_comm = communities[node_idx] as usize;
+        let k_i = degrees[node_idx];
+        let k_i_scaled = k_i * res_over_two_m;
+
+        let (neighbours, weights) = graph.get_neighbours(node_idx);
+
+        for (&neighbour, &weight) in neighbours.iter().zip(weights.iter()) {
+            let comm = communities[neighbour] as usize;
+            if !comm_active[comm] {
+                comm_active[comm] = true;
+                active_comms.push(comm);
+            }
+            neighbour_weights[comm] += weight;
+        }
+
+        let mut best_comm = current_comm;
+        let mut best_delta = T::zero();
+
+        for &comm in &active_comms {
+            if comm != current_comm {
+                let delta = neighbour_weights[comm] - k_i_scaled * comm_degree_sums[comm];
+                if delta > best_delta {
+                    best_delta = delta;
+                    best_comm = comm;
                 }
-                neighbour_weights[comm] += weight;
-            }
-
-            let mut best_comm = current_comm;
-            let mut best_delta = T::zero();
-
-            for &comm in &active_comms {
-                if comm != current_comm {
-                    let delta = neighbour_weights[comm] - k_i_scaled * comm_degree_sums[comm];
-                    if delta > best_delta {
-                        best_delta = delta;
-                        best_comm = comm;
-                    }
-                }
-            }
-
-            for &comm in &active_comms {
-                neighbour_weights[comm] = T::zero();
-                comm_active[comm] = false;
-            }
-            active_comms.clear();
-
-            if best_comm != current_comm && best_delta > epsilon {
-                communities[node_idx] = best_comm as u32;
-                comm_degree_sums[current_comm] -= k_i;
-                comm_degree_sums[best_comm] += k_i;
-                move_count += 1;
             }
         }
 
-        if move_count == 0 {
-            break;
+        for &comm in &active_comms {
+            neighbour_weights[comm] = T::zero();
+            comm_active[comm] = false;
+        }
+        active_comms.clear();
+
+        if best_comm != current_comm && best_delta > epsilon {
+            communities[node_idx] = best_comm as u32;
+            comm_degree_sums[current_comm] -= k_i;
+            comm_degree_sums[best_comm] += k_i;
+
+            for &nb in neighbours {
+                if nb != node_idx && !in_queue[nb] {
+                    queue.push_back(nb as u32);
+                    in_queue[nb] = true;
+                }
+            }
         }
     }
 
@@ -131,7 +143,141 @@ where
         *c = comm_map[idx];
     }
 
-    communities.iter().map(|&c| c as usize).collect()
+    let n_distinct = label as usize;
+    (
+        communities.iter().map(|&c| c as usize).collect(),
+        n_distinct,
+    )
+}
+
+/// Aggregate fine nodes by community into a coarser graph.
+///
+/// Internal community edges become self-loops on the super-node (with weight
+/// 2x the internal edge weight, as both CSR directions accumulate). External
+/// edges sum across all member-to-member connections. Total weight m is
+/// preserved across aggregation.
+///
+/// ### Params
+///
+/// * `graph` - The [`SparseGraph`] - must be undirected!
+/// * `communities` - The community membership from the finer level.
+/// * `n_comms` - Number of communities
+///
+/// ### Returns
+///
+/// Coarsed sparse graph
+fn aggregate_graph<T>(
+    graph: &SparseGraph<T>,
+    communities: &[usize],
+    n_comms: usize,
+) -> SparseGraph<T>
+where
+    T: BixverseFloat + BixverseNumeric + Clone + std::iter::Sum,
+{
+    let mut nodes_per_comm: Vec<Vec<usize>> = vec![Vec::new(); n_comms];
+    for (i, &c) in communities.iter().enumerate() {
+        nodes_per_comm[c].push(i);
+    }
+
+    let mut acc = vec![T::zero(); n_comms];
+    let mut touched = vec![false; n_comms];
+    let mut active: Vec<usize> = Vec::with_capacity(64);
+
+    let mut rows = Vec::new();
+    let mut cols = Vec::new();
+    let mut vals = Vec::new();
+
+    for ci in 0..n_comms {
+        for &fine_i in &nodes_per_comm[ci] {
+            let (neighbours, weights) = graph.get_neighbours(fine_i);
+            for (&j, &w) in neighbours.iter().zip(weights.iter()) {
+                let cj = communities[j];
+                if !touched[cj] {
+                    touched[cj] = true;
+                    active.push(cj);
+                }
+                acc[cj] += w;
+            }
+        }
+
+        for &cj in &active {
+            rows.push(ci);
+            cols.push(cj);
+            vals.push(acc[cj]);
+            acc[cj] = T::zero();
+            touched[cj] = false;
+        }
+        active.clear();
+    }
+
+    let csr = coo_to_csr(&rows, &cols, &vals, (n_comms, n_comms));
+    SparseGraph::new(n_comms, csr, false)
+}
+
+//////////
+// Main //
+//////////
+
+/// Louvain community detection
+///
+/// This version works on [`SparseGraph`].
+///
+/// ### Params
+///
+/// * `graph` - The [`SparseGraph`]
+/// * `resolution` - Resolution parameter for the Louvain clustering
+/// * `max_iter` - The maximum iterations to run the algorithm for. In this
+///   case, it safeguards against degenerated graphs and should not trigger.
+/// * `seed` - Seed for reproducibility purposes
+///
+/// ### Returns
+///
+/// Vector of communitiies
+pub fn louvain_sparse_graph<T>(
+    graph: &SparseGraph<T>,
+    resolution: T,
+    max_iter: usize,
+    seed: usize,
+) -> Result<Vec<usize>, BixverseErrors>
+where
+    T: BixverseFloat + BixverseNumeric + Clone + std::iter::Sum,
+{
+    if graph.is_directed() {
+        return Err(BixverseErrors::GraphDirectedError);
+    }
+
+    let n_orig = graph.get_node_number();
+    if n_orig == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut rng = StdRng::seed_from_u64(seed as u64);
+    let mut node_to_super: Vec<usize> = (0..n_orig).collect();
+
+    let (comms, mut n_super) = louvain_one_level(graph, resolution, max_iter, &mut rng);
+    for s in node_to_super.iter_mut() {
+        *s = comms[*s];
+    }
+    if n_super == n_orig {
+        return Ok(node_to_super);
+    }
+
+    let mut current_graph = aggregate_graph(graph, &comms, n_super);
+
+    loop {
+        let (comms, new_n_super) =
+            louvain_one_level(&current_graph, resolution, max_iter, &mut rng);
+        for s in node_to_super.iter_mut() {
+            *s = comms[*s];
+        }
+        if new_n_super == n_super {
+            break;
+        }
+        n_super = new_n_super;
+        current_graph = aggregate_graph(&current_graph, &comms, n_super);
+    }
+
+    Ok(node_to_super)
 }
 
 //////////////
@@ -621,7 +767,7 @@ mod tests {
     #[test]
     fn test_louvain_barbell() {
         let graph = build_barbell_graph();
-        let comms = louvain_sparse_graph(&graph, 1.0, 10, 42);
+        let comms = louvain_sparse_graph(&graph, 1.0, 10, 42).unwrap();
 
         // 0, 1, 2 should share a community
         assert_eq!(comms[0], comms[1]);

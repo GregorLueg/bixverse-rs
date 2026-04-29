@@ -99,14 +99,15 @@ pub fn fast_louvain_clusters(
     params: &FastLouvainParams<f32>,
     seed: usize,
     verbose: bool,
-) -> Vec<Vec<usize>> {
+) -> Result<Vec<Vec<usize>>, BixverseErrors> {
     let km_type = parse_k_means(km_type).unwrap_or_default();
+    let n_centroids = params.n_centroids.min(data.nrows() - 1);
 
     let (centroids, assignments) = match km_type {
         KMeansType::StandardKMeans => k_means_clusters(
             data,
             &params.knn_params.ann_dist,
-            params.n_centroids,
+            n_centroids,
             params.kmeans_iters,
             seed,
             verbose,
@@ -114,7 +115,7 @@ pub fn fast_louvain_clusters(
         KMeansType::MiniBatchKMeans => train_centroids_minibatch(
             data,
             &params.knn_params.ann_dist,
-            params.n_centroids,
+            n_centroids,
             params.kmeans_iters,
             params.batch_size,
             params.drift_threshold,
@@ -137,7 +138,7 @@ pub fn fast_louvain_clusters(
     let mut results: Vec<Vec<usize>> = Vec::with_capacity(resolutions.len());
 
     for &res in resolutions {
-        let centroid_communities = louvain_sparse_graph(&graph, res, params.louvain_iters, seed);
+        let centroid_communities = louvain_sparse_graph(&graph, res, params.louvain_iters, seed)?;
 
         let membership = assignments
             .iter()
@@ -147,7 +148,7 @@ pub fn fast_louvain_clusters(
         results.push(membership)
     }
 
-    results
+    Ok(results)
 }
 
 ///////////
