@@ -561,6 +561,11 @@ impl BoostParams {
             .and_then(|v| v.as_real())
             .unwrap_or(0.9) as f32;
 
+        let fast_cluster = params_list
+            .get("fast_cluster")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
         Ok(Self {
             // processing
             log_transform,
@@ -586,6 +591,7 @@ impl BoostParams {
             p_thresh,
             voter_thresh,
             knn_params,
+            fast_cluster,
         })
     }
 }

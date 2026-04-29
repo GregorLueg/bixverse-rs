@@ -14,7 +14,7 @@
 - Better loading in of MTX files that do not blow up during counting of cells
   per gene.
 - Faster Louvain clustering for the doublet detection methods.
-- Mini batch k-means ported over into here.
+- k-means implementation (mini batch) + clustering quality methods ported over
 
 ## 0.1.7
 
