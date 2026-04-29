@@ -118,6 +118,28 @@ where
     variance.sqrt()
 }
 
+/// Calculate the mean while removing NaNs
+///
+/// ### Params
+///
+/// * `x` - The slice of floats for which to calculate the mean (while
+///   ignoring `NaN`'s)
+///
+/// ### Returns
+///
+/// The mean of the slice without `NaN`s
+pub fn mean_nan<T>(x: &[T]) -> T
+where
+    T: BixverseFloat + std::iter::Sum,
+{
+    let finite: Vec<T> = x.iter().copied().filter(|x| x.is_finite()).collect();
+    if finite.is_empty() {
+        T::nan()
+    } else {
+        finite.iter().copied().sum::<T>() / T::from_usize(finite.len()).unwrap()
+    }
+}
+
 ///////////
 // Tests //
 ///////////

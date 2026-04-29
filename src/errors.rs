@@ -10,6 +10,11 @@ use thiserror::Error;
 /// format parsing and other errors.
 #[derive(Debug, Error)]
 pub enum BixverseErrors {
+    // -- arguments --
+    /// General error for invalid arguments to a given function
+    #[error("Invalid argument: {0}")]
+    InvalidArgument(String),
+
     // -- extendr --
     /// List to HashMap parsing error occured
     #[error("R list parsing failed: {0}")]

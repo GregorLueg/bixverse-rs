@@ -1272,6 +1272,7 @@ impl ScDblFinder {
                 "kmeans",
                 &res,
                 &fast_params,
+                false,
                 true,
                 seed,
                 verbose,

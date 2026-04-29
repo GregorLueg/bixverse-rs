@@ -751,6 +751,7 @@ impl FastLouvainParams<f32> {
         let params: HashMap<&str, Robj> = r_list.try_into()?;
         let defaults = Self::default();
 
+        // k means
         let n_centroids = params
             .get("n_centroids")
             .and_then(|v| v.as_integer())
@@ -769,12 +770,6 @@ impl FastLouvainParams<f32> {
             .map(|v| v as usize)
             .unwrap_or(defaults.batch_size);
 
-        let louvain_iters = params
-            .get("louvain_iters")
-            .and_then(|v| v.as_integer())
-            .map(|v| v as usize)
-            .unwrap_or(defaults.louvain_iters);
-
         let drift_threshold: f32 = params
             .get("drift_threshold")
             .and_then(|v| v.as_real())
@@ -787,14 +782,42 @@ impl FastLouvainParams<f32> {
             .map(|v| v as f32)
             .unwrap_or(defaults.lr_alpha);
 
+        // louvain
+        let louvain_iters = params
+            .get("louvain_iters")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.louvain_iters);
+
+        // snn
+        let full_snn = params
+            .get("full_snn")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.full_snn);
+
+        let pruning = params
+            .get("pruning")
+            .and_then(|v| v.as_real())
+            .map(|x| x as f32);
+
+        let snn_similarity = std::string::String::from(
+            params
+                .get("snn_similarity")
+                .and_then(|v| v.as_str())
+                .unwrap_or("jaccard"),
+        );
+
         Ok(Self {
             n_centroids,
             kmeans_iters,
             batch_size,
-            louvain_iters,
             drift_threshold,
             lr_alpha,
+            louvain_iters,
             knn_params,
+            full_snn,
+            pruning,
+            snn_similarity,
         })
     }
 }

@@ -358,7 +358,7 @@ where
         &dist,
     );
 
-    let centroid_mat = Mat::from_fn(n_centroids, dim, |i, j| centroids[i + j * n_centroids]);
+    let centroid_mat = Mat::from_fn(n_centroids, dim, |i, j| centroids[i * dim + j]);
 
     (centroid_mat, assignments)
 }
@@ -444,7 +444,259 @@ where
         &dist,
     );
 
-    let centroid_mat = Mat::from_fn(n_centroids, dim, |i, j| centroids[i + j * n_centroids]);
+    let centroid_mat = Mat::from_fn(n_centroids, dim, |i, j| centroids[i * dim + j]);
 
     (centroid_mat, assignments)
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::SeedableRng;
+    use rand::prelude::*;
+    use rand::rngs::StdRng;
+
+    fn make_two_blobs(n_per: usize, dim: usize, separation: f32, seed: u64) -> Mat<f32> {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut buf = vec![0.0f32; 2 * n_per * dim];
+        for i in 0..(2 * n_per) {
+            let centre = if i < n_per { 0.0 } else { separation };
+            for j in 0..dim {
+                buf[i * dim + j] = centre + rng.random_range(-0.3..0.3);
+            }
+        }
+        Mat::from_fn(2 * n_per, dim, |i, j| buf[i * dim + j])
+    }
+
+    /// Each row of the returned centroid Mat must have ALL dimensions near the
+    /// same blob centre. A row/col scramble in the flat -> Mat conversion would
+    /// mix values across blobs within a single row, so per-dim checks catch it.
+    fn assert_centroid_rows_pure(centroids: &Mat<f32>, separation: f32, tol: f32) {
+        for r in 0..centroids.nrows() {
+            let target = if (centroids[(r, 0)] - 0.0).abs() < separation / 2.0 {
+                0.0
+            } else {
+                separation
+            };
+            for c in 0..centroids.ncols() {
+                let v = centroids[(r, c)];
+                assert!(
+                    (v - target).abs() < tol,
+                    "centroid[{}][{}] = {}, expected near {}",
+                    r,
+                    c,
+                    v,
+                    target
+                );
+            }
+        }
+    }
+
+    fn assert_assignments_split_blobs(assignments: &[usize], n_per: usize) {
+        let blob_a = &assignments[..n_per];
+        let blob_b = &assignments[n_per..];
+        let pure_a = blob_a.iter().filter(|&&c| c == blob_a[0]).count();
+        let pure_b = blob_b.iter().filter(|&&c| c == blob_b[0]).count();
+        assert!(
+            pure_a as f32 / n_per as f32 > 0.95,
+            "blob A purity {}",
+            pure_a
+        );
+        assert!(
+            pure_b as f32 / n_per as f32 > 0.95,
+            "blob B purity {}",
+            pure_b
+        );
+        assert_ne!(blob_a[0], blob_b[0]);
+    }
+
+    #[test]
+    fn parse_k_means_known_strings() {
+        assert!(matches!(
+            parse_k_means("standard"),
+            Some(KMeansType::StandardKMeans)
+        ));
+        assert!(matches!(
+            parse_k_means("k-means"),
+            Some(KMeansType::StandardKMeans)
+        ));
+        assert!(matches!(
+            parse_k_means("STANDARD"),
+            Some(KMeansType::StandardKMeans)
+        ));
+        assert!(matches!(
+            parse_k_means("minibatch"),
+            Some(KMeansType::MiniBatchKMeans)
+        ));
+        assert!(matches!(
+            parse_k_means("mini-batch"),
+            Some(KMeansType::MiniBatchKMeans)
+        ));
+        assert!(parse_k_means("nonsense").is_none());
+    }
+
+    #[test]
+    fn standard_centroid_rows_match_blob_centres() {
+        let n_per = 200;
+        let dim = 5;
+        let separation = 5.0f32;
+        let data = make_two_blobs(n_per, dim, separation, 42);
+
+        let (centroids, assignments) =
+            k_means_clusters(data.as_ref(), "euclidean", 2, 50, 0, false);
+
+        assert_eq!(centroids.nrows(), 2);
+        assert_eq!(centroids.ncols(), dim);
+        assert_eq!(assignments.len(), 2 * n_per);
+
+        assert_centroid_rows_pure(&centroids, separation, 0.5);
+        assert_assignments_split_blobs(&assignments, n_per);
+    }
+
+    #[test]
+    fn minibatch_centroid_rows_match_blob_centres() {
+        let n_per = 200;
+        let dim = 5;
+        let separation = 5.0f32;
+        let data = make_two_blobs(n_per, dim, separation, 42);
+
+        let (centroids, assignments) =
+            train_centroids_minibatch(data.as_ref(), "euclidean", 2, 200, 64, 1e-4, 0.75, 0, false);
+
+        assert_eq!(centroids.nrows(), 2);
+        assert_eq!(centroids.ncols(), dim);
+        assert_eq!(assignments.len(), 2 * n_per);
+
+        assert_centroid_rows_pure(&centroids, separation, 0.7);
+        assert_assignments_split_blobs(&assignments, n_per);
+    }
+
+    #[test]
+    fn standard_centroid_row_is_mean_of_assigned_points() {
+        // Independent check that the Mat row r really is the mean of points
+        // assigned to centroid r. Catches both layout scrambles and silent
+        // off-by-one errors.
+        let n_per = 200;
+        let dim = 5;
+        let data = make_two_blobs(n_per, dim, 5.0, 42);
+
+        let (centroids, assignments) =
+            k_means_clusters(data.as_ref(), "euclidean", 2, 100, 0, false);
+
+        for r in 0..centroids.nrows() {
+            let mut sum = vec![0.0f32; dim];
+            let mut count = 0usize;
+            for i in 0..(2 * n_per) {
+                if assignments[i] == r {
+                    for d in 0..dim {
+                        sum[d] += data[(i, d)];
+                    }
+                    count += 1;
+                }
+            }
+            assert!(count > 0, "centroid {} has no assignments", r);
+            for d in 0..dim {
+                let mean = sum[d] / count as f32;
+                let cent = centroids[(r, d)];
+                assert!(
+                    (mean - cent).abs() < 0.05,
+                    "centroid[{}][{}] = {}, mean of assigned = {}",
+                    r,
+                    d,
+                    cent,
+                    mean
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn standard_deterministic_with_same_seed() {
+        let data = make_two_blobs(100, 5, 5.0, 42);
+
+        let (c1, a1) = k_means_clusters(data.as_ref(), "euclidean", 5, 50, 7, false);
+        let (c2, a2) = k_means_clusters(data.as_ref(), "euclidean", 5, 50, 7, false);
+
+        assert_eq!(a1, a2);
+        for i in 0..c1.nrows() {
+            for j in 0..c1.ncols() {
+                assert!((c1[(i, j)] - c2[(i, j)]).abs() < 1e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn minibatch_deterministic_with_same_seed() {
+        let data = make_two_blobs(100, 5, 5.0, 42);
+
+        let (c1, a1) =
+            train_centroids_minibatch(data.as_ref(), "euclidean", 5, 200, 64, 1e-4, 0.75, 7, false);
+        let (c2, a2) =
+            train_centroids_minibatch(data.as_ref(), "euclidean", 5, 200, 64, 1e-4, 0.75, 7, false);
+
+        assert_eq!(a1, a2);
+        for i in 0..c1.nrows() {
+            for j in 0..c1.ncols() {
+                assert!((c1[(i, j)] - c2[(i, j)]).abs() < 1e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn assignments_in_range() {
+        let data = make_two_blobs(100, 5, 5.0, 42);
+        let k = 7;
+
+        let (_, a) = k_means_clusters(data.as_ref(), "euclidean", k, 50, 0, false);
+        assert!(a.iter().all(|&c| c < k));
+
+        let (_, a) =
+            train_centroids_minibatch(data.as_ref(), "euclidean", k, 200, 32, 1e-4, 0.75, 0, false);
+        assert!(a.iter().all(|&c| c < k));
+    }
+
+    #[test]
+    fn cosine_metric_runs_for_both_paths() {
+        // Different code path (data norms populated, centroid norms = ||c||
+        // not ||c||^2). Worth a smoke test.
+        let data = make_two_blobs(100, 5, 5.0, 42);
+
+        let (c, a) = k_means_clusters(data.as_ref(), "cosine", 2, 50, 0, false);
+        assert_eq!(c.nrows(), 2);
+        assert_eq!(a.len(), 200);
+
+        let (c, a) =
+            train_centroids_minibatch(data.as_ref(), "cosine", 2, 200, 64, 1e-4, 0.75, 0, false);
+        assert_eq!(c.nrows(), 2);
+        assert_eq!(a.len(), 200);
+    }
+
+    #[test]
+    fn recompute_centroid_norms_euclidean_is_squared() {
+        // Three centroids of dim 4: norms should be sum of squares for euclidean.
+        let centroids: Vec<f32> = vec![
+            1.0, 2.0, 2.0, 0.0, // ||.||^2 = 9
+            3.0, 0.0, 4.0, 0.0, // ||.||^2 = 25
+            1.0, 1.0, 1.0, 1.0, // ||.||^2 = 4
+        ];
+        let norms = recompute_centroid_norms(&centroids, 4, 3, &Dist::Euclidean);
+        assert!((norms[0] - 9.0).abs() < 1e-5);
+        assert!((norms[1] - 25.0).abs() < 1e-5);
+        assert!((norms[2] - 4.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn recompute_centroid_norms_cosine_is_l2() {
+        let centroids: Vec<f32> = vec![
+            3.0, 4.0, 0.0, 0.0, // ||.|| = 5
+            1.0, 1.0, 1.0, 1.0, // ||.|| = 2
+        ];
+        let norms = recompute_centroid_norms(&centroids, 4, 2, &Dist::Cosine);
+        assert!((norms[0] - 5.0).abs() < 1e-5);
+        assert!((norms[1] - 2.0).abs() < 1e-5);
+    }
 }
