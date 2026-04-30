@@ -439,7 +439,7 @@ pub fn fast_louvain_clusters_grid(
                 let mean = finite.iter().sum::<f32>() / finite.len() as f32;
                 let mut sorted = finite.clone();
                 sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                let median = if sorted.len() % 2 == 0 {
+                let median = if sorted.len().is_multiple_of(2) {
                     (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) / 2.0
                 } else {
                     sorted[sorted.len() / 2]

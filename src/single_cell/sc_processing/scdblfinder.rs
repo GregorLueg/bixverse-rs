@@ -227,11 +227,13 @@ type ClusterAwarePairs = (Vec<(usize, usize)>, Vec<(usize, usize)>);
 ///
 /// ### Params
 ///
-/// * `explicit` - Option of explicit doublet rate
+/// * `explicit` - Optional user-provided doublet rate.
+/// * `n_cells` - Number of observed cells, used for the 10x linear estimate
+///   when `explicit` is `None`.
 ///
 /// ### Returns
 ///
-/// Doublet rate based on user-provided data or the 10x linear model
+/// Doublet rate based on user-provided data or the 10x linear model.
 fn resolve_doublet_rate(explicit: Option<f32>, n_cells: usize) -> f32 {
     match explicit {
         Some(r) => r.clamp(0.001, 0.5),
@@ -241,8 +243,16 @@ fn resolve_doublet_rate(explicit: Option<f32>, n_cells: usize) -> f32 {
 
 /// Compute per-origin mean classifier score over non-excluded sims.
 ///
-/// Returns (class_weighted_per_origin, mean_over_origins). The mean
-/// is used as the fallback for cells with no assignable origin.
+/// ### Params
+///
+/// * `sim_scores` - Per-sim classifier (or proxy) score, length `n_sim`.
+/// * `parent_clusters` - Parent cluster pair for each sim, length `n_sim`.
+/// * `exclusion_mask` - If `true`, the sim is skipped, length `n_sim`.
+///
+/// ### Returns
+///
+/// Tuple of `(class_weighted_per_origin, mean_over_origins)`. The mean is
+/// used as the fallback for cells with no assignable origin.
 fn compute_class_weighted(
     sim_scores: &[f32],
     parent_clusters: &[(usize, usize)],
@@ -273,8 +283,22 @@ fn compute_class_weighted(
 
 /// Compute per-cell difficulty for all cells (obs + sim).
 ///
-/// R's formula: `difficulty = 1 - class_weighted[origin]`. Cells with
-/// no assigned origin fall back to `1 - mean_class_weighted`.
+/// R's formula: `difficulty = 1 - class_weighted[origin]`. Cells with no
+/// assigned origin fall back to `1 - mean_class_weighted`.
+///
+/// ### Params
+///
+/// * `n_obs` - Number of observed cells.
+/// * `n_total` - Total cells (`n_obs + n_sim`).
+/// * `obs_origins` - Most-likely origin per observed cell, length `n_obs`.
+/// * `parent_clusters` - Parent cluster pair per sim, length `n_sim`.
+/// * `class_weighted` - Per-origin mean classifier score.
+/// * `fallback_mean` - Mean class-weighted score; used when an origin has no
+///   entry in `class_weighted`.
+///
+/// ### Returns
+///
+/// Per-cell difficulty, length `n_total` (observed rows first, then sims).
 fn compute_difficulties(
     n_obs: usize,
     n_total: usize,
@@ -301,6 +325,12 @@ fn compute_difficulties(
 }
 
 /// Write a difficulty vector into the feature matrix in-place.
+///
+/// ### Params
+///
+/// * `features` - Mutable feature matrix of shape `(n_total, n_features)`.
+/// * `difficulty_col` - Column index of the difficulty feature.
+/// * `difficulties` - Per-cell difficulty values, length `n_total`.
 fn update_difficulty_column(features: &mut Mat<f32>, difficulty_col: usize, difficulties: &[f32]) {
     for (i, &d) in difficulties.iter().enumerate() {
         *features.get_mut(i, difficulty_col) = d;
@@ -308,6 +338,16 @@ fn update_difficulty_column(features: &mut Mat<f32>, difficulty_col: usize, diff
 }
 
 /// Build feature name strings in the order they appear in the matrix.
+///
+/// ### Params
+///
+/// * `k_values` - The k values used for multi-scale kNN ratios.
+/// * `n_pcs` - Number of leading PCs included as features.
+///
+/// ### Returns
+///
+/// Feature names in column order: `ratio.k{k}` per k, the seven fixed
+/// features, then `PC{1..=n_pcs}`.
 fn feature_names(k_values: &[usize], n_pcs: usize) -> Vec<String> {
     let mut names = Vec::with_capacity(k_values.len() + 7 + n_pcs);
     for &k in k_values {
@@ -332,8 +372,17 @@ fn feature_names(k_values: &[usize], n_pcs: usize) -> Vec<String> {
     names
 }
 
-/// Extract the observed-cell slice of a combined (obs + sim) feature
-/// matrix into a new owned Mat.
+/// Extract the observed-cell slice of a combined (obs + sim) feature matrix
+/// into a new owned `Mat`.
+///
+/// ### Params
+///
+/// * `features` - Combined feature matrix of shape `(n_total, n_feat)`.
+/// * `n_obs` - Number of leading rows (observed cells) to copy.
+///
+/// ### Returns
+///
+/// Owned matrix containing the first `n_obs` rows of `features`.
 fn slice_obs_rows(features: MatRef<f32>, n_obs: usize) -> Mat<f32> {
     let n_feat = features.ncols();
     Mat::<f32>::from_fn(n_obs, n_feat, |i, j| *features.get(i, j))
@@ -466,7 +515,10 @@ fn canonical_origin(c_a: usize, c_b: usize) -> Option<(usize, usize)> {
 ///
 /// ### Returns
 ///
-///
+/// The canonical `(c_a, c_b)` parent-cluster pair of the most common
+/// artificial-doublet neighbour, with ties broken by minimum neighbour distance
+/// (then by tuple ordering for determinism). `None` if the cell has no
+/// heterotypic sim neighbours.
 fn cell_most_likely_origin(
     neighbours: &[usize],
     distances: &[f32],
@@ -551,7 +603,11 @@ fn cell_distance_to_nearest_real(
 ///
 /// ### Params
 ///
-/// * ``
+/// * `origins` - Most-likely origin per cell; `None` entries are skipped.
+///
+/// ### Returns
+///
+/// Map from canonical parent-cluster pair to its count.
 #[allow(dead_code)]
 fn aggregate_origin_counts(origins: &[Option<(usize, usize)>]) -> FxHashMap<(usize, usize), u32> {
     let mut counts: FxHashMap<(usize, usize), u32> = FxHashMap::default();
@@ -708,6 +764,33 @@ fn default_knn_ks(n_obs: usize) -> Vec<usize> {
 /// 7. Number of genes with count > 2
 /// 8. Co-expression doublet score
 /// 9. Principal components (n_pcs columns)
+///
+/// ### Params
+///
+/// * `knn_indices` - Per-cell neighbour indices into the combined (obs + sim)
+///   population.
+/// * `knn_distances` - Per-cell neighbour distances, aligned with
+///   `knn_indices`.
+/// * `n_obs` - Number of observed cells (sims start at index `n_obs`).
+/// * `parent_clusters` - Parent cluster pair per sim.
+/// * `k_values` - k values for the multi-scale ratio features.
+/// * `obs_n_features` - Non-zero gene count per observed cell.
+/// * `obs_n_above2` - Genes with count > 2 per observed cell.
+/// * `sim_n_features` - Non-zero gene count per simulated doublet.
+/// * `sim_n_above2` - Genes with count > 2 per simulated doublet.
+/// * `library_sizes` - Per-observed-cell library size over selected genes.
+/// * `sim_combined_lib_sizes` - Per-sim library size after combination.
+/// * `obs_cxds` - CXDS score per observed cell.
+/// * `sim_cxds` - CXDS score per simulated doublet.
+/// * `combined_pca` - PC scores of shape `(n_total, n_pcs_total)`.
+/// * `n_pcs` - Number of leading PCs to include as features.
+///
+/// ### Returns
+///
+/// Tuple `(features, knn_intermediates, difficulty_col)` where `features`
+/// is the dense `(n_total, n_feat)` matrix, `knn_intermediates` holds
+/// per-cell kNN-derived values for downstream use, and `difficulty_col` is
+/// the column index of the difficulty feature.
 #[allow(clippy::too_many_arguments)]
 fn build_feature_matrix(
     knn_indices: &[Vec<usize>],
@@ -980,13 +1063,28 @@ fn classify_doublets(
     fit_logistic_gbm(&store, labels, exclude, config, seed, verbose)
 }
 
-/// Cost-based threshold optimisation matching R's doubletThresholding.
+/// Cost-based threshold optimisation matching R's `doubletThresholding`.
 ///
-/// Minimises over [0, 1]:
+/// Minimises over `[0, 1]`:
 ///   cost = deviation² + 2*(1-stringency)*FNR + 2*stringency*FPR
 ///
-/// where deviation is zero within the uncertainty band [dbr-dbr_sd, dbr+dbr_sd]
-/// and FNR/FPR are computed on simulated/observed cells respectively.
+/// where deviation is zero within the uncertainty band
+/// `[dbr - dbr_sd, dbr + dbr_sd]`, and FNR/FPR are computed on simulated /
+/// observed cells respectively.
+///
+/// ### Params
+///
+/// * `obs_scores` - Classifier probabilities for observed cells.
+/// * `sim_scores` - Classifier probabilities for simulated doublets.
+/// * `expected_dbr` - Expected doublet rate; sets the tolerance band.
+/// * `stringency` - Trade-off in `[0, 1]`: higher penalises FPR more, lower
+///   penalises FNR more.
+/// * `verbose` - Print diagnostic messages.
+///
+/// ### Returns
+///
+/// Threshold in `[0, 1]` minimising the cost function over up to 500
+/// thinned candidate cuts.
 fn find_threshold_optimised(
     obs_scores: &[f32],
     sim_scores: &[f32],
