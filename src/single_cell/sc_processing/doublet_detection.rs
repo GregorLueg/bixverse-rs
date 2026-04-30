@@ -458,6 +458,12 @@ impl BoostClassifier {
         let combined_pca = match &self.pca_results {
             Some(pca_res) => reproject_doublets(&sim_chunks, pca_res, &pca_opts),
             None => {
+                let pca_start = Instant::now();
+
+                if verbose {
+                    println!(" Generating the PCA in the first iteration");
+                }
+
                 let (combined, pca_res) = pca_and_project(
                     &self.f_path_gene,
                     &self.cells_to_keep,
@@ -470,6 +476,14 @@ impl BoostClassifier {
                     verbose,
                 )?;
                 self.pca_results = Some(pca_res);
+
+                if verbose {
+                    println!(
+                        " Finished the initial PCA in {:.2?} and storing results for subsequent iterations",
+                        pca_start.elapsed()
+                    );
+                }
+
                 combined
             }
         };
