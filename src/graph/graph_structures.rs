@@ -598,7 +598,7 @@ where
             for j in 0..n {
                 if i != j {
                     let sim = similarities[(i, j)];
-                    heap.push((OrderedFloat(sim), j));
+                    heap.push((RevOrderedFloat(sim), j));
                     if heap.len() > k {
                         heap.pop(); // Remove smallest
                     }

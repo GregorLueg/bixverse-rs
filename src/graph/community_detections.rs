@@ -506,18 +506,18 @@ where
     }
 
     let t1 = Instant::now();
-    let initial: Vec<(OrderedFloat<T>, usize, usize)> = edges
+    let initial: Vec<(RevOrderedFloat<T>, usize, usize)> = edges
         .par_iter()
         .map(|&(i, j)| {
             let qi = comm_q[i].as_ref().unwrap();
             let qj = comm_q[j].as_ref().unwrap();
             let d_sq = euclidean_distance_static(qi, qj);
             let crit = ward_criterion(d_sq, 1, 1);
-            (OrderedFloat(crit), i, j)
+            (RevOrderedFloat(crit), i, j)
         })
         .collect();
 
-    let mut heap: BinaryHeap<(OrderedFloat<T>, usize, usize)> =
+    let mut heap: BinaryHeap<(RevOrderedFloat<T>, usize, usize)> =
         BinaryHeap::with_capacity(initial.len() * 2);
     for entry in initial {
         heap.push(entry);
@@ -605,14 +605,14 @@ where
         }
 
         let new_adj_vec: Vec<usize> = new_adj.into_iter().collect();
-        let new_criteria: Vec<(OrderedFloat<T>, usize, usize)> = new_adj_vec
+        let new_criteria: Vec<(RevOrderedFloat<T>, usize, usize)> = new_adj_vec
             .par_iter()
             .map(|&k| {
                 let qc = comm_q[c].as_ref().unwrap();
                 let qk = comm_q[k].as_ref().unwrap();
                 let d_sq = euclidean_distance_static(qc, qk);
                 let crit = ward_criterion(d_sq, n_c, comm_size[k]);
-                (OrderedFloat(crit), c, k)
+                (RevOrderedFloat(crit), c, k)
             })
             .collect();
 

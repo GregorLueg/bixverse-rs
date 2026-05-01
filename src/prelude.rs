@@ -6,7 +6,7 @@ pub use crate::core::math::sparse::{
 };
 pub use crate::errors::*;
 pub use crate::graph::graph_structures::{EdgeData, NodeData, SparseGraph};
-pub use crate::utils::heap_structures::OrderedFloat;
+pub use crate::utils::heap_structures::RevOrderedFloat;
 pub use crate::utils::matrix_utils::*;
 pub use crate::utils::r_rust_interface::*;
 pub use crate::utils::simd::BixverseSimd;
