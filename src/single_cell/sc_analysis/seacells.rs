@@ -413,6 +413,115 @@ fn max_min_sampling(data: &[Vec<f32>], num_waypoints: usize, seed: u64) -> Vec<u
     waypoint_set.into_iter().collect()
 }
 
+/// Compute g = 2 * (t1·a - t2) directly into a column-major dense buffer.
+///
+/// g layout: g[j * k + i] is gradient entry at row i, column j.
+/// Parallel over rows i of the result; each thread owns a unique i, so
+/// the strided writes to g[j * k + i] across j are disjoint between threads.
+fn compute_grad_a_colmajor(
+    t1: &CompressedSparseData2<f32>,
+    a: &CompressedSparseData2<f32>,
+    t2: &CompressedSparseData2<f32>,
+    k: usize,
+    n: usize,
+    g: &mut [f32],
+) {
+    let g_addr = g.as_mut_ptr() as usize;
+
+    (0..k).into_par_iter().for_each_init(
+        || vec![0.0f32; n],
+        |row_buf, i| {
+            row_buf.fill(0.0);
+
+            // Row i of (t1·a)
+            let t1_start = t1.indptr[i];
+            let t1_end = t1.indptr[i + 1];
+            for t1_idx in t1_start..t1_end {
+                let r = t1.indices[t1_idx];
+                let t1_val = t1.data[t1_idx];
+                let a_start = a.indptr[r];
+                let a_end = a.indptr[r + 1];
+                for a_idx in a_start..a_end {
+                    let j = a.indices[a_idx];
+                    row_buf[j] += t1_val * a.data[a_idx];
+                }
+            }
+
+            // Subtract row i of t2
+            let t2_start = t2.indptr[i];
+            let t2_end = t2.indptr[i + 1];
+            for t2_idx in t2_start..t2_end {
+                let j = t2.indices[t2_idx];
+                row_buf[j] -= t2.data[t2_idx];
+            }
+
+            // Strided write into column-major g, scaled by 2.
+            // SAFETY: every thread has a unique i; writes at g[j*k + i] are
+            // disjoint across threads (different offsets per column).
+            unsafe {
+                let g_ptr = g_addr as *mut f32;
+                for j in 0..n {
+                    *g_ptr.add(j * k + i) = 2.0 * row_buf[j];
+                }
+            }
+        },
+    );
+}
+
+/// Compute g = 2 * (k2_b · t1 - t2) directly into a column-major dense buffer
+/// of shape (n, k). Layout: g[c * n + r] is row r, column c.
+///
+/// Parallel over rows r of the result; each thread owns a unique r, so
+/// strided writes to g[c * n + r] across c are disjoint between threads.
+fn compute_grad_b_colmajor(
+    k2_b: &CompressedSparseData2<f32>,
+    t1: &CompressedSparseData2<f32>,
+    t2: &CompressedSparseData2<f32>,
+    n: usize,
+    k: usize,
+    g: &mut [f32],
+) {
+    let g_addr = g.as_mut_ptr() as usize;
+
+    (0..n).into_par_iter().for_each_init(
+        || vec![0.0f32; k],
+        |row_buf, r| {
+            row_buf.fill(0.0);
+
+            // Row r of (k2_b · t1)
+            let kb_start = k2_b.indptr[r];
+            let kb_end = k2_b.indptr[r + 1];
+            for kb_idx in kb_start..kb_end {
+                let m = k2_b.indices[kb_idx];
+                let kb_val = k2_b.data[kb_idx];
+                let t1_start = t1.indptr[m];
+                let t1_end = t1.indptr[m + 1];
+                for t1_idx in t1_start..t1_end {
+                    let c = t1.indices[t1_idx];
+                    row_buf[c] += kb_val * t1.data[t1_idx];
+                }
+            }
+
+            // Subtract row r of t2
+            let t2_start = t2.indptr[r];
+            let t2_end = t2.indptr[r + 1];
+            for t2_idx in t2_start..t2_end {
+                let c = t2.indices[t2_idx];
+                row_buf[c] -= t2.data[t2_idx];
+            }
+
+            // SAFETY: each thread has a unique r; writes to g[c*n + r] across c
+            // are disjoint between threads.
+            unsafe {
+                let g_ptr = g_addr as *mut f32;
+                for c in 0..k {
+                    *g_ptr.add(c * n + r) = 2.0 * row_buf[c];
+                }
+            }
+        },
+    );
+}
+
 //////////
 // Main //
 //////////
@@ -1104,23 +1213,22 @@ impl<'a> SEACells<'a> {
         let n = a.shape.1;
         let k = a.shape.0;
 
+        // Column-major: g_dense[j * k + i]. Argmin within a column is stride-1.
         let mut g_dense = vec![0.0f32; k * n];
 
         for t in 0..self.params.max_fw_iters {
-            let t1_a = csr_matmul_csr(&t1, &a);
-            let g_mat = sparse_subtract_csr(&t1_a, &t2);
-            sparse_to_dense_csr_scaled(&g_mat, 2.0, &mut g_dense);
+            compute_grad_a_colmajor(&t1, &a, &t2, k, n, &mut g_dense);
 
             let argmins: Vec<usize> = (0..n)
                 .into_par_iter()
-                .map(|col| {
-                    let mut min_val = g_dense[col];
+                .map(|j| {
+                    let col = &g_dense[j * k..(j + 1) * k];
+                    let mut min_val = col[0];
                     let mut min_idx = 0;
-                    for row in 1..k {
-                        let val = g_dense[row * n + col];
-                        if val < min_val {
-                            min_val = val;
-                            min_idx = row;
+                    for i in 1..k {
+                        if col[i] < min_val {
+                            min_val = col[i];
+                            min_idx = i;
                         }
                     }
                     min_idx
@@ -1205,35 +1313,59 @@ impl<'a> SEACells<'a> {
         let t1 = csr_matmul_csr(a, &a_t);
         let t2 = self.k_squared_matmul(&a_t);
 
-        const FW_TOLERANCE: f32 = 1e-4;
+        const FW_REL_TOL: f32 = 1e-3;
+        const MIN_FW_ITERS: usize = 10;
 
         let mut b = b_prev.clone();
         let n = b.shape.0;
         let k = b.shape.1;
 
+        // Column-major n × k: g_dense[c * n + r]
         let mut g_dense = vec![0.0f32; n * k];
+        let mut initial_gap: f32 = 0.0;
 
         for t in 0..self.params.max_fw_iters {
             let k2_b = self.k_squared_matmul(&b);
-            let k2_b_t1 = csr_matmul_csr(&k2_b, &t1);
-            let g_mat = sparse_subtract_csr(&k2_b_t1, &t2);
-            sparse_to_dense_csr_scaled(&g_mat, 2.0, &mut g_dense);
+            compute_grad_b_colmajor(&k2_b, &t1, &t2, n, k, &mut g_dense);
 
             let argmins: Vec<usize> = (0..k)
                 .into_par_iter()
-                .map(|col| {
-                    let mut min_val = g_dense[col];
+                .map(|c| {
+                    let col = &g_dense[c * n..(c + 1) * n];
+                    let mut min_val = col[0];
                     let mut min_idx = 0;
-                    for row in 1..n {
-                        let val = g_dense[row * k + col];
-                        if val < min_val {
-                            min_val = val;
-                            min_idx = row;
+                    for r in 1..n {
+                        if col[r] < min_val {
+                            min_val = col[r];
+                            min_idx = r;
                         }
                     }
                     min_idx
                 })
                 .collect();
+
+            // FW duality gap: <G, B> - <G, E>. g_dense holds 2G; the constant
+            // factor cancels in the relative ratio, so we leave it in.
+            let g_dot_b: f32 = (0..n)
+                .into_par_iter()
+                .map(|r| {
+                    let start = b.indptr[r];
+                    let end = b.indptr[r + 1];
+                    let mut s = 0.0f32;
+                    for idx in start..end {
+                        let c = b.indices[idx];
+                        s += g_dense[c * n + r] * b.data[idx];
+                    }
+                    s
+                })
+                .sum();
+
+            let g_dot_e: f32 = (0..k).map(|c| g_dense[c * n + argmins[c]]).sum();
+
+            let fw_gap = (g_dot_b - g_dot_e).abs();
+            if t == 0 {
+                initial_gap = fw_gap.max(1e-12);
+            }
 
             let mut e_data: Vec<(usize, usize, f32)> = argmins
                 .iter()
@@ -1253,9 +1385,6 @@ impl<'a> SEACells<'a> {
                 *val *= retain;
             }
             let e_scaled = sparse_scalar_multiply_csr(&e, step_size);
-
-            let step_contribution = step_size * step_size * e_scaled.data.len() as f32;
-
             b = sparse_add_csr(&b, &e_scaled);
 
             if self.params.pruning {
@@ -1264,15 +1393,20 @@ impl<'a> SEACells<'a> {
 
             if verbose && (t + 1) % 10 == 0 {
                 println!(
-                    "  B matrix Frank-Wolfe iteration: {} / {}",
+                    "  B matrix Frank-Wolfe iteration: {} / {}, FW gap: {:.4e}",
                     t + 1,
-                    self.params.max_fw_iters
+                    self.params.max_fw_iters,
+                    fw_gap
                 );
             }
 
-            if step_contribution.sqrt() < FW_TOLERANCE && t >= 10 {
+            if fw_gap / initial_gap < FW_REL_TOL && t >= MIN_FW_ITERS {
                 if verbose {
-                    println!("  B matrix FW converged early at iteration {}", t + 1);
+                    println!(
+                        "  B matrix FW converged at iter {} (gap: {:.4e})",
+                        t + 1,
+                        fw_gap
+                    );
                 }
                 break;
             }

@@ -56,3 +56,56 @@ pub fn adjusted_rand_index(labels_true: &[usize], labels_pred: &[usize]) -> f64 
         (sum_comb_nij as f64 - expected) / denom
     }
 }
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn perfect_agreement() {
+        let labels = vec![0, 0, 1, 1, 2, 2];
+        let ari = adjusted_rand_index(&labels, &labels);
+        assert!((ari - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn complete_disagreement() {
+        let labels_true = vec![0, 0, 1, 1];
+        let labels_pred = vec![0, 1, 0, 1];
+        let ari = adjusted_rand_index(&labels_true, &labels_pred);
+        assert!(ari < 0.5);
+    }
+
+    #[test]
+    fn all_same_cluster() {
+        let labels_true = vec![0, 1, 2, 3];
+        let labels_pred = vec![0, 0, 0, 0];
+        let ari = adjusted_rand_index(&labels_true, &labels_pred);
+        assert!((ari - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn single_element() {
+        let ari = adjusted_rand_index(&[0], &[0]);
+        assert!((ari - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn known_value() {
+        // sklearn: adjusted_rand_score([0,0,1,1], [0,1,1,0]) == 0.0
+        let labels_true = vec![0, 0, 1, 1];
+        let labels_pred = vec![0, 1, 1, 0];
+        let ari = adjusted_rand_index(&labels_true, &labels_pred);
+        assert!((ari - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    #[should_panic]
+    fn mismatched_lengths() {
+        adjusted_rand_index(&[0, 1], &[0]);
+    }
+}
