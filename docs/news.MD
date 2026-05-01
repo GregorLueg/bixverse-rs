@@ -1,8 +1,12 @@
 # News
 
-## 0.1.8
+## 0.2.0
+
+Major update / release
 
 ### Features
+
+#### Single cell methods
 
 - scDblFinder implemented
 - Refactor out of shared tree structure between scDblFinder and SCENIC
@@ -10,11 +14,21 @@
 - First methods (HVG selection, PCA and SCENIC) for meta cells directly
 - Made the kNN validation optional and improved the distance calculation with
   SIMD.
-- Proper Rust-based error handling across
 - Better loading in of MTX files that do not blow up during counting of cells
   per gene.
 - Faster Louvain clustering for the doublet detection methods.
+- Fast cluster version for Louvain for single cell that allows sweeping over a
+  a set of resolutions.
+- Actual proper implementation of WalkTrap community detection and not just
+  pseudo hierarchical clustering.
+
+#### General
+
+- Proper Rust-based error handling across the crate. Less `.unwrap()`, less
+  panics!
 - k-means implementation (mini batch) + clustering quality methods ported over
+- Faster correlations, covariances and Euclidean distance calculations
+- Version bump to extendr `0.9.0` and other crates.
 
 ## 0.1.7
 

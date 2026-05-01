@@ -1143,16 +1143,9 @@ impl SuperCellParams {
             .and_then(|v| v.as_real())
             .unwrap_or(50.0);
 
-        let linkage_dist = params
-            .get("linkage_dist")
-            .and_then(|v| v.as_str())
-            .unwrap_or("average")
-            .to_string();
-
         Ok(Self {
             walk_length,
             graining_factor,
-            linkage_dist,
             knn_params,
         })
     }

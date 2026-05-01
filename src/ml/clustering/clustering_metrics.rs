@@ -19,6 +19,9 @@ use rustc_hash::FxHashMap;
 pub fn adjusted_rand_index(labels_true: &[usize], labels_pred: &[usize]) -> f64 {
     let n = labels_true.len();
     assert_eq!(n, labels_pred.len());
+    if n <= 1 {
+        return 1.0;
+    }
 
     let mut contingency: FxHashMap<(usize, usize), u64> = FxHashMap::default();
     for i in 0..n {
@@ -96,11 +99,11 @@ mod tests {
 
     #[test]
     fn known_value() {
-        // sklearn: adjusted_rand_score([0,0,1,1], [0,1,1,0]) == 0.0
+        // sklearn: adjusted_rand_score([0,0,1,1], [0,1,1,0]) == -0.5
         let labels_true = vec![0, 0, 1, 1];
         let labels_pred = vec![0, 1, 1, 0];
         let ari = adjusted_rand_index(&labels_true, &labels_pred);
-        assert!((ari - 0.0).abs() < 1e-10);
+        assert!((ari - (-0.5)).abs() < 1e-10);
     }
 
     #[test]

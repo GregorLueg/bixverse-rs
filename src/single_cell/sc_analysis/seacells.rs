@@ -1,4 +1,6 @@
-//! Implementation of the SEACells from Persad, et al., Nat. Biotechnol., 2023
+//! Implementation of the SEACells from Persad, et al., Nat. Biotechnol., 2023.
+//! Uses some optimised fused kernels to accelerate the FW iterations with
+//! better cache locality and reduced memory pressure.
 
 use faer::MatRef;
 use rand::prelude::*;
@@ -122,28 +124,6 @@ pub fn assignments_to_metacells(assignments: &[usize], k: usize) -> Vec<Vec<usiz
     }
 
     metacells
-}
-
-/// Convert sparse to dense with scaling in one pass
-///
-/// ### Params
-///
-/// * `mat` - The matrix to scale
-/// * `scale` - The scale value
-/// * `dense` - The slice to update
-fn sparse_to_dense_csr_scaled(mat: &CompressedSparseData2<f32>, scale: f32, dense: &mut [f32]) {
-    let (nrows, ncols) = mat.shape;
-    dense.fill(0.0);
-
-    for row in 0..nrows {
-        let row_start = mat.indptr[row];
-        let row_end = mat.indptr[row + 1];
-
-        for idx in row_start..row_end {
-            let col = mat.indices[idx];
-            dense[row * ncols + col] = mat.data[idx] * scale;
-        }
-    }
 }
 
 /// Helper function to prune tiny values and renormalise with L1
@@ -413,11 +393,21 @@ fn max_min_sampling(data: &[Vec<f32>], num_waypoints: usize, seed: u64) -> Vec<u
     waypoint_set.into_iter().collect()
 }
 
-/// Compute g = 2 * (t1·a - t2) directly into a column-major dense buffer.
+/// Compute gradient of A: `g = 2 * (t1 · A - t2)` into a column-major buffer
 ///
-/// g layout: g[j * k + i] is gradient entry at row i, column j.
-/// Parallel over rows i of the result; each thread owns a unique i, so
-/// the strided writes to g[j * k + i] across j are disjoint between threads.
+/// Output layout is column-major with `g[j * k + i]` at row i, column j, chosen
+/// so that the argmin scan over a column is stride-1 in memory. Parallelises
+/// over rows i; each thread owns a unique i, making the strided writes to
+/// `g[j * k + i]` across j disjoint between threads.
+///
+/// ### Params
+///
+/// * `t1` - Precomputed `Bᵀ K² B` matrix (k × k)
+/// * `a` - Current assignment matrix (k × n)
+/// * `t2` - Precomputed `Bᵀ K²` matrix (k × n)
+/// * `k` - Number of SEACells (archetypes)
+/// * `n` - Number of cells
+/// * `g` - Output buffer of length `k * n` (column-major, row = archetype)
 fn compute_grad_a_colmajor(
     t1: &CompressedSparseData2<f32>,
     a: &CompressedSparseData2<f32>,
@@ -468,11 +458,21 @@ fn compute_grad_a_colmajor(
     );
 }
 
-/// Compute g = 2 * (k2_b · t1 - t2) directly into a column-major dense buffer
-/// of shape (n, k). Layout: g[c * n + r] is row r, column c.
+/// Compute gradient of B: `g = 2 * (K² B · t1 - t2)` into a column-major buffer
 ///
-/// Parallel over rows r of the result; each thread owns a unique r, so
-/// strided writes to g[c * n + r] across c are disjoint between threads.
+/// Output layout is column-major with `g[c * n + r]` at row r, column c, chosen
+/// so that the argmin scan over a column is stride-1 in memory. Parallelises
+/// over rows r; each thread owns a unique r, making the strided writes to
+/// `g[c * n + r]` across c disjoint between threads.
+///
+/// ### Params
+///
+/// * `k2_b` - Precomputed `K² B` matrix (n × k)
+/// * `t1` - Precomputed `A Aᵀ` matrix (k × k)
+/// * `t2` - Precomputed `K² Aᵀ` matrix (n × k)
+/// * `n` - Number of cells
+/// * `k` - Number of SEACells (archetypes)
+/// * `g` - Output buffer of length `n * k` (column-major, row = cell)
 fn compute_grad_b_colmajor(
     k2_b: &CompressedSparseData2<f32>,
     t1: &CompressedSparseData2<f32>,
@@ -1393,10 +1393,9 @@ impl<'a> SEACells<'a> {
 
             if verbose && (t + 1) % 10 == 0 {
                 println!(
-                    "  B matrix Frank-Wolfe iteration: {} / {}, FW gap: {:.4e}",
+                    "  B matrix Frank-Wolfe iteration: {} / {}",
                     t + 1,
-                    self.params.max_fw_iters,
-                    fw_gap
+                    self.params.max_fw_iters
                 );
             }
 
