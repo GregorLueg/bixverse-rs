@@ -1880,8 +1880,12 @@ impl<'a> SEACells<'a> {
     /// ### Returns
     ///
     /// Vector of SEACell assignments (0 to k-1)
-    pub fn get_hard_assignments(&self) -> Vec<usize> {
-        let a = self.a.as_ref().expect("Model not fitted yet");
+    pub fn get_hard_assignments(&self) -> Result<Vec<usize>, BixverseErrors> {
+        if self.a.is_none() {
+            return Err(BixverseErrors::SEACellsModelNotFitted);
+        }
+
+        let a = self.a.as_ref().unwrap();
         let n = a.shape.1;
 
         // A is (k × n) CSR. Transposing gives (n × k) CSR, equivalent to
@@ -1906,7 +1910,7 @@ impl<'a> SEACells<'a> {
             assignments[cell] = max_arch;
         }
 
-        assignments
+        Ok(assignments)
     }
 
     /// Get RSS history
@@ -1927,10 +1931,11 @@ impl<'a> SEACells<'a> {
     /// ### Panics
     ///
     /// Panics if archetypes have not been initialised yet
-    pub fn get_archetypes(&self) -> Vec<usize> {
-        self.archetypes
-            .as_ref()
-            .expect("Archetypes not initialised yet")
-            .clone()
+    pub fn get_archetypes(&self) -> Result<Vec<usize>, BixverseErrors> {
+        if self.archetypes.is_none() {
+            return Err(BixverseErrors::SEACellsArchetypesMissing);
+        }
+
+        Ok(self.archetypes.as_ref().unwrap().clone())
     }
 }

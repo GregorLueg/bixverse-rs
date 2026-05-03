@@ -222,4 +222,8 @@ pub enum BixverseErrors {
     /// The SEACells archetypes have not yet been identified.
     #[error("SEACells: You must first initialise the Archetypes.")]
     SEACellsArchetypesMissing,
+
+    /// The SEACells archetypes have not yet been identified.
+    #[error("SEACells: The model has not been fitted yet. Please run .fit()")]
+    SEACellsModelNotFitted,
 }
