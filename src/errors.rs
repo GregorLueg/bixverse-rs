@@ -213,4 +213,13 @@ pub enum BixverseErrors {
     /// compute_similarity part.
     #[error("select_features must be called before compute_similarity!")]
     SelectFeaturesBeforeSimilariy,
+
+    // -- Seacells --
+    /// The SEACells kernel matrix has not been yet constructed.
+    #[error("SEACells: You must construct the kernel matrix first.")]
+    SEACellsKernelMatrixMissing,
+
+    /// The SEACells archetypes have not yet been identified.
+    #[error("SEACells: You must first initialise the Archetypes.")]
+    SEACellsArchetypesMissing,
 }

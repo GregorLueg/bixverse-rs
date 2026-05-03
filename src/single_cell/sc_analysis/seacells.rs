@@ -916,10 +916,17 @@ impl<'a> SEACells<'a> {
     /// ### Returns
     ///
     /// Result of K^2 @ X
-    fn k_squared_matmul(&self, x: &CompressedSparseData2<f32>) -> CompressedSparseData2<f32> {
+    fn k_squared_matmul(
+        &self,
+        x: &CompressedSparseData2<f32>,
+    ) -> Result<CompressedSparseData2<f32>, BixverseErrors> {
+        if self.kernel_mat.is_none() {
+            return Err(BixverseErrors::SEACellsKernelMatrixMissing);
+        }
+
         let k = self.kernel_mat.as_ref().unwrap();
         let kx = csr_matmul_csr(k, x);
-        csr_matmul_csr(k, &kx)
+        Ok(csr_matmul_csr(k, &kx))
     }
 
     /// Compute K^2 @ v = K @ (K @ v) for a dense vector v
@@ -952,19 +959,20 @@ impl<'a> SEACells<'a> {
     ///
     /// * `seed` - Random seed for reproducibility
     /// * `verbose` - Print progress and RSS values
-    pub fn fit(&mut self, seed: usize, verbose: bool) {
-        assert!(
-            self.kernel_mat.is_some(),
-            "Must construct kernel matrix first"
-        );
-        assert!(self.archetypes.is_some(), "Must find archetypes first");
+    pub fn fit(&mut self, seed: usize, verbose: bool) -> Result<(), BixverseErrors> {
+        if self.kernel_mat.is_none() {
+            return Err(BixverseErrors::SEACellsKernelMatrixMissing);
+        }
+        if self.archetypes.is_none() {
+            return Err(BixverseErrors::SEACellsArchetypesMissing);
+        }
 
-        self.initialise_matrices(verbose, seed as u64);
+        self.initialise_matrices(verbose, seed as u64)?;
 
         let a = self.a.as_ref().unwrap();
         let b = self.b.as_ref().unwrap();
 
-        let initial_rss = self.compute_rss(a, b);
+        let initial_rss = self.compute_rss(a, b)?;
         self.rss_history.push(initial_rss);
         self.convergence_threshold = Some(self.params.convergence_epsilon * initial_rss);
 
@@ -986,10 +994,10 @@ impl<'a> SEACells<'a> {
             let b_current = self.b.take().unwrap();
             let a_current = self.a.take().unwrap();
 
-            let a_new = self.update_a_mat(&b_current, &a_current, verbose);
-            let b_new = self.update_b_mat(&a_new, &b_current, verbose);
+            let a_new = self.update_a_mat(&b_current, &a_current, verbose)?;
+            let b_new = self.update_b_mat(&a_new, &b_current, verbose)?;
 
-            let rss = self.compute_rss(&a_new, &b_new);
+            let rss = self.compute_rss(&a_new, &b_new)?;
             self.rss_history.push(rss);
 
             self.a = Some(a_new);
@@ -1024,6 +1032,8 @@ impl<'a> SEACells<'a> {
                 self.params.max_iter
             );
         }
+
+        Ok(())
     }
 
     /// Initialise archetypes using adaptive strategy
@@ -1458,7 +1468,7 @@ impl<'a> SEACells<'a> {
     ///
     /// * `verbose` - Print initialisation message
     /// * `seed` - Random seed for A matrix initialisation
-    fn initialise_matrices(&mut self, verbose: bool, seed: u64) {
+    fn initialise_matrices(&mut self, verbose: bool, seed: u64) -> Result<(), BixverseErrors> {
         let archetypes = self.archetypes.as_ref().unwrap();
         let k = archetypes.len();
         let n = self.n_cells;
@@ -1498,10 +1508,12 @@ impl<'a> SEACells<'a> {
         let mut a = coo_to_csr(&a_rows, &a_cols, &a_vals, (k, n));
         normalise_csr_columns_l1(&mut a);
 
-        a = self.update_a_mat(&b, &a, verbose);
+        a = self.update_a_mat(&b, &a, verbose)?;
 
         self.a = Some(a);
         self.b = Some(b);
+
+        Ok(())
     }
 
     /// Update assignment matrix A using Frank-Wolfe algorithm
@@ -1540,8 +1552,8 @@ impl<'a> SEACells<'a> {
         b: &CompressedSparseData2<f32>,
         a_prev: &CompressedSparseData2<f32>,
         verbose: bool,
-    ) -> CompressedSparseData2<f32> {
-        let k2_b = self.k_squared_matmul(b);
+    ) -> Result<CompressedSparseData2<f32>, BixverseErrors> {
+        let k2_b = self.k_squared_matmul(b)?;
 
         let t2 = k2_b.transpose_and_convert();
         let t1 = csr_matmul_csr(&t2, b);
@@ -1605,7 +1617,7 @@ impl<'a> SEACells<'a> {
             }
         }
 
-        a
+        Ok(a)
     }
 
     /// Update archetype matrix B using Frank-Wolfe algorithm
@@ -1645,10 +1657,10 @@ impl<'a> SEACells<'a> {
         a: &CompressedSparseData2<f32>,
         b_prev: &CompressedSparseData2<f32>,
         verbose: bool,
-    ) -> CompressedSparseData2<f32> {
+    ) -> Result<CompressedSparseData2<f32>, BixverseErrors> {
         let a_t = a.transpose_and_convert();
         let t1 = csr_matmul_csr(a, &a_t);
-        let t2 = self.k_squared_matmul(&a_t);
+        let t2 = self.k_squared_matmul(&a_t)?;
 
         const FW_REL_TOL: f32 = 1e-3;
         const MIN_FW_ITERS: usize = 10;
@@ -1662,7 +1674,7 @@ impl<'a> SEACells<'a> {
         let mut initial_gap: f32 = 0.0;
 
         for t in 0..self.params.max_fw_iters {
-            let k2_b = self.k_squared_matmul(&b);
+            let k2_b = self.k_squared_matmul(&b)?;
             compute_grad_b_colmajor(&k2_b, &t1, &t2, n, k, &mut g_dense);
 
             let argmins: Vec<usize> = (0..k)
@@ -1748,7 +1760,7 @@ impl<'a> SEACells<'a> {
             }
         }
 
-        b
+        Ok(b)
     }
 
     /// Compute residual sum of squares (RSS)
@@ -1772,11 +1784,15 @@ impl<'a> SEACells<'a> {
     /// ### Returns
     ///
     /// RSS value (lower is better fit)
-    fn compute_rss(&self, a: &CompressedSparseData2<f32>, b: &CompressedSparseData2<f32>) -> f32 {
+    fn compute_rss(
+        &self,
+        a: &CompressedSparseData2<f32>,
+        b: &CompressedSparseData2<f32>,
+    ) -> Result<f32, BixverseErrors> {
         if self.n_cells <= 20000 {
-            self.compute_rss_simple(a, b)
+            Ok(self.compute_rss_simple(a, b))
         } else {
-            self.compute_rss_trace(a, b)
+            Ok(self.compute_rss_trace(a, b)?)
         }
     }
 
@@ -1830,12 +1846,12 @@ impl<'a> SEACells<'a> {
         &self,
         a: &CompressedSparseData2<f32>,
         b: &CompressedSparseData2<f32>,
-    ) -> f32 {
+    ) -> Result<f32, BixverseErrors> {
         // Term 1: ||K||_F^2 (cached)
         let k_frob_sq = self.k_frobenius_norm_sq.unwrap();
 
         // K^2 @ B = K @ (K @ B)  [n × k]
-        let k2_b = self.k_squared_matmul(b);
+        let k2_b = self.k_squared_matmul(b)?;
 
         // Term 2: -2 * trace(K^2 @ B @ A)
         // Reorder via cyclic property: trace(A @ K^2 @ B)  [k × k]
@@ -1853,7 +1869,7 @@ impl<'a> SEACells<'a> {
         let result = csr_matmul_csr(&a_at, &bt_k2b); // [k × k]
         let reconstruction_frob_sq = matrix_trace(&result);
 
-        (k_frob_sq - 2.0 * trace_term + reconstruction_frob_sq).sqrt()
+        Ok((k_frob_sq - 2.0 * trace_term + reconstruction_frob_sq).sqrt())
     }
 
     /// Get hard cell assignments (each cell assigned to one SEACell)
