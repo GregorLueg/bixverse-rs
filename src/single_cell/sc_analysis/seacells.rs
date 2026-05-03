@@ -75,8 +75,9 @@ pub struct SEACellsParams {
     pub pruning: bool,
     /// Pruning threshold to apply
     pub pruning_threshold: f32,
-    /// Parameters for the various approximate nearest neighbour searches
-    /// in ann-search-rs
+    /// Optional number of landmarks. If provided, it will use the Nystroem
+    /// approach during archetype generation.
+    pub n_landmarks: Option<usize>,
     // -- knn --
     /// [KnnParams] for the various approximate nearest neighbour searches
     /// in ann-search-rs

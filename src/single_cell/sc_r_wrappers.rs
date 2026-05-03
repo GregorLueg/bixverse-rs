@@ -1056,6 +1056,11 @@ impl SEACellsParams {
             .and_then(|v| v.as_real())
             .unwrap_or(1e-7) as f32;
 
+        let n_landmarks = seacells_list
+            .get("n_landmarks")
+            .and_then(|v| v.as_integer())
+            .map(|x| x as usize);
+
         Ok(Self {
             // seacell
             n_sea_cells,
@@ -1067,6 +1072,7 @@ impl SEACellsParams {
             graph_building,
             pruning,
             pruning_threshold,
+            n_landmarks,
             // knn
             knn_params,
         })
