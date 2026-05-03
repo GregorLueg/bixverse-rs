@@ -49,6 +49,11 @@ pub enum BixverseErrors {
     #[error("The number of nodes and membership assignments in the communities do not add up.")]
     CommunityAssignmentMismatch,
 
+    /// Error in situations were data_2 in [`CompressedSparseData2`] is asked for
+    /// but not available
+    #[error("data_2 slot is None but was requested")]
+    Data2NotAvailable,
+
     // -- Binary file I/O --
     /// Wraps any `std::io::Error` encountered while reading or writing the
     /// bixverse binary sparse format.
@@ -202,4 +207,10 @@ pub enum BixverseErrors {
     #[cfg(feature = "single-cell")]
     #[error("Invalid model type: {0}")]
     HotSpotWrongModel(String),
+
+    // -- Metacells2 --
+    /// User needs to have generated select_features prior to the
+    /// compute_similarity part.
+    #[error("select_features must be called before compute_similarity!")]
+    SelectFeaturesBeforeSimilariy,
 }

@@ -208,22 +208,18 @@ where
 pub type SValueCache<T> = RwLock<FxHashMap<NodeIndex, FxHashMap<NodeIndex, T>>>;
 
 /// Structure for calculating the Wang similarity on a given Ontology
-///
-/// ### Fields
-///
-/// * `term_to_idx` - HashMap between term to node index.
-/// * `idx_to_term` - The term order as a string.
-/// * `graph` - Directed Graph from parent to child.
-/// * `ancestors` - A vector containing the ancestors as HashSets.
-/// * `topo_order` - Calculated topological order.
-/// * `s_values_cache` - The `SValueCache` caching all of the S values for each
-///   node.
 pub struct WangSimOntology<T> {
+    /// HashMap between term to node index.
     term_to_idx: FxHashMap<String, NodeIndex>,
+    /// The term order as a string.
     idx_to_term: Vec<String>,
+    /// Directed Graph from parent to child.
     graph: DiGraph<String, T>,
+    /// A vector containing the ancestors as HashSets.
     ancestors: Vec<FxHashSet<NodeIndex>>,
+    /// Calculated topological order.
     topo_order: Vec<NodeIndex>,
+    /// The `SValueCache` caching all of the S values for each node.
     s_values_cache: SValueCache<T>,
 }
 

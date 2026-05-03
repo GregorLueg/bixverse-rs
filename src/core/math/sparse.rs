@@ -312,19 +312,6 @@ where
         }
     }
 
-    /// Transpose the matrix
-    #[allow(dead_code)]
-    pub fn transpose_from_h5ad(&self) -> Self {
-        CompressedSparseData2 {
-            data: self.data.clone(),
-            indices: self.indices.clone(),
-            indptr: self.indptr.clone(),
-            cs_type: self.cs_type.clone(),
-            data_2: self.data_2.clone(),
-            shape: (self.shape.1, self.shape.0),
-        }
-    }
-
     /// Generates a sparse matrix from a dense matrix
     ///
     /// ### Params

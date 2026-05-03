@@ -275,7 +275,7 @@ where
     let active_data: &[T] = if use_second_layer {
         csr.data_2
             .as_ref()
-            .expect("data_2 is None but use_second_layer is true")
+            .ok_or(BixverseErrors::Data2NotAvailable)?
             .as_slice()
     } else {
         csr.data.as_slice()

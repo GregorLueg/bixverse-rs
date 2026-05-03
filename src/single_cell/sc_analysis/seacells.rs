@@ -49,28 +49,9 @@ pub fn parse_knn_symmetrisation(s: &str) -> Option<KnnSymmetrisation> {
 ////////////
 
 /// Structure to store the SEACells parameters
-///
-/// ### Fields
-///
-/// **SEACells:**
-///
-/// * `n_sea_cells` - Number of sea cells to detect
-/// * `max_fw_iters` - Maximum iterations for the Franke-Wolfe algorithm per
-///   matrix update.
-/// * `convergence_epsilon` - Defines the convergence threshold. Algorithm stops
-///   when `RSS change < epsilon * RSS(0)`
-/// * `max_iter` - Maximum iterations to run SEACells for
-/// * `min_iter` - Minimum iterations to run SEACells for
-/// * `prune_threshold` - The threshold below which values are set to 0 to
-///   maintain sparsity and reduce memory pressure.
-/// * `greedy_threshold` - Maximum number of cells, before defaulting to a more
-///   rapid random selection of archetypes initially
-/// * `pruning` - Shall tiny values during the Franke Wolfe updates be pruned.
-///   This can affect numerical stability, but makes runs on large data sets
-///   feasible.
-/// * `pruning_threshold` - Values that should be pruned away.
 #[derive(Clone, Debug)]
 pub struct SEACellsParams {
+    // -- sea cells --
     /// Number of sea cells to detect
     pub n_sea_cells: usize,
     /// Maximum iterations for the Franke-Wolfe algorithm per matrix update.
@@ -95,6 +76,7 @@ pub struct SEACellsParams {
     pub pruning_threshold: f32,
     /// Parameters for the various approximate nearest neighbour searches
     /// in ann-search-rs
+    // -- knn --
     pub knn_params: KnnParams,
 }
 

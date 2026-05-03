@@ -22,91 +22,16 @@ use crate::prelude::*;
 use super::params::SelectParams;
 use super::pile::Pile;
 
+////////////
+// Consts //
+////////////
+
 /// Slice seed multiplier
 const SLICE_SEED_MULT: u64 = 997;
 
-/// Downsample each cell of `pile.raw` to a common UMI target.
-///
-/// The target is computed from the cell library size distribution as
-/// `min(max(min_samples, q(min_q)), q(max_q))` where `q(p)` is the linearly
-/// interpolated `p`-th quantile of `pile.umis_per_cell`. Cells already at or
-/// below the target are copied through unchanged; others are subsampled to
-/// exactly the target.
-///
-/// Populates `pile.downsampled` with the same sparsity pattern as
-/// `pile.raw`. Explicit zeros may appear where a non-zero entry was sampled
-/// to zero — downstream stages tolerate this.
-///
-/// ### Params
-///
-/// * `pile` - The pile to downsample.
-/// * `params` - Selection parameters; only the three `downsample_*` fields
-///   are read.
-/// * `rng_seed` - Pile-level seed. Per-row seed is derived as
-///   `rng_seed + row_index * 997` (matching upstream MC2).
-pub fn downsample_pile(pile: &mut Pile, params: &SelectParams, rng_seed: u64) {
-    let raw = &pile.raw;
-    let n_cells = raw.shape.0;
-
-    let mut out_data = vec![0u32; raw.data.len()];
-
-    if n_cells == 0 {
-        pile.downsampled = Some(CompressedSparseData2 {
-            data: out_data,
-            indices: raw.indices.clone(),
-            indptr: raw.indptr.clone(),
-            cs_type: CompressedSparseFormat::Csr,
-            data_2: None,
-            shape: raw.shape,
-        });
-        return;
-    }
-
-    let target = compute_downsample_target(
-        &pile.umis_per_cell,
-        params.downsample_min_samples,
-        params.downsample_min_cell_quantile,
-        params.downsample_max_cell_quantile,
-    );
-
-    let out_ptr_addr = out_data.as_mut_ptr() as usize;
-    let indptr = &raw.indptr;
-    let in_data = &raw.data;
-
-    (0..n_cells).into_par_iter().for_each(|row_index| {
-        let start = indptr[row_index];
-        let end = indptr[row_index + 1];
-        if start == end {
-            return;
-        }
-
-        let row_in = &in_data[start..end];
-        let row_seed = if rng_seed == 0 {
-            0
-        } else {
-            rng_seed.wrapping_add((row_index as u64).wrapping_mul(SLICE_SEED_MULT))
-        };
-
-        // SAFETY: `indptr` defines disjoint `[start, end)` ranges per row;
-        // `into_par_iter` over `0..n_cells` schedules each `row_index` to
-        // exactly one task, so writes through these slices never alias.
-        // Same pattern as `compute_grad_a_colmajor` in the SEACells module.
-        let row_out = unsafe {
-            std::slice::from_raw_parts_mut((out_ptr_addr as *mut u32).add(start), end - start)
-        };
-
-        downsample_row(row_in, row_out, target, row_seed);
-    });
-
-    pile.downsampled = Some(CompressedSparseData2 {
-        data: out_data,
-        indices: raw.indices.clone(),
-        indptr: raw.indptr.clone(),
-        cs_type: CompressedSparseFormat::Csr,
-        data_2: None,
-        shape: raw.shape,
-    });
-}
+/////////////
+// Helpers //
+/////////////
 
 /// Downsample a single row's non-zero counts to at most `samples` total.
 ///
@@ -149,11 +74,13 @@ fn downsample_row(input: &[u32], output: &mut [u32], samples: u32, seed: u64) {
     }
 
     let mut rng = StdRng::seed_from_u64(seed);
+    let mut remaining = total;
     for _ in 0..samples {
-        let r = rng.random_range(0..total);
+        let r = rng.random_range(0..remaining);
         let idx = random_sample(&mut tree, r);
         debug_assert!(idx < output.len(), "padded leaf reached — tree malformed");
         output[idx] += 1;
+        remaining -= 1;
     }
 }
 
@@ -320,6 +247,92 @@ fn random_sample(tree: &mut [u64], mut random: u64) -> usize {
             index_in_level += 1;
         }
     }
+}
+
+//////////
+// Main //
+//////////
+
+/// Downsample each cell of `pile.raw` to a common UMI target.
+///
+/// The target is computed from the cell library size distribution as
+/// `min(max(min_samples, q(min_q)), q(max_q))` where `q(p)` is the linearly
+/// interpolated `p`-th quantile of `pile.umis_per_cell`. Cells already at or
+/// below the target are copied through unchanged; others are subsampled to
+/// exactly the target.
+///
+/// Populates `pile.downsampled` with the same sparsity pattern as
+/// `pile.raw`. Explicit zeros may appear where a non-zero entry was sampled
+/// to zero — downstream stages tolerate this.
+///
+/// ### Params
+///
+/// * `pile` - The pile to downsample.
+/// * `params` - Selection parameters; only the three `downsample_*` fields
+///   are read.
+/// * `rng_seed` - Pile-level seed. Per-row seed is derived as
+///   `rng_seed + row_index * 997` (matching upstream MC2).
+pub fn downsample_pile(pile: &mut Pile, params: &SelectParams, rng_seed: u64) {
+    let raw = &pile.raw;
+    let n_cells = raw.shape.0;
+
+    let mut out_data = vec![0u32; raw.data.len()];
+
+    if n_cells == 0 {
+        pile.downsampled = Some(CompressedSparseData2 {
+            data: out_data,
+            indices: raw.indices.clone(),
+            indptr: raw.indptr.clone(),
+            cs_type: CompressedSparseFormat::Csr,
+            data_2: None,
+            shape: raw.shape,
+        });
+        return;
+    }
+
+    let target = compute_downsample_target(
+        &pile.umis_per_cell,
+        params.downsample_min_samples,
+        params.downsample_min_cell_quantile,
+        params.downsample_max_cell_quantile,
+    );
+
+    let out_ptr_addr = out_data.as_mut_ptr() as usize;
+    let indptr = &raw.indptr;
+    let in_data = &raw.data;
+
+    (0..n_cells).into_par_iter().for_each(|row_index| {
+        let start = indptr[row_index];
+        let end = indptr[row_index + 1];
+        if start == end {
+            return;
+        }
+
+        let row_in = &in_data[start..end];
+        let row_seed = if rng_seed == 0 {
+            0
+        } else {
+            rng_seed.wrapping_add((row_index as u64).wrapping_mul(SLICE_SEED_MULT))
+        };
+
+        // SAFETY: `indptr` defines disjoint `[start, end)` ranges per row;
+        // `into_par_iter` over `0..n_cells` schedules each `row_index` to
+        // exactly one task, so writes through these slices never alias.
+        let row_out = unsafe {
+            std::slice::from_raw_parts_mut((out_ptr_addr as *mut u32).add(start), end - start)
+        };
+
+        downsample_row(row_in, row_out, target, row_seed);
+    });
+
+    pile.downsampled = Some(CompressedSparseData2 {
+        data: out_data,
+        indices: raw.indices.clone(),
+        indptr: raw.indptr.clone(),
+        cs_type: CompressedSparseFormat::Csr,
+        data_2: None,
+        shape: raw.shape,
+    });
 }
 
 ///////////
