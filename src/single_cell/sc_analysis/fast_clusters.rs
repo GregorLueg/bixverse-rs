@@ -43,7 +43,7 @@ pub struct FastLouvainParams<T> {
     pub lr_alpha: T,
 
     // -- knn --
-    /// kNN search parameters applied to the centroids. `ann_dist` also drives
+    /// [KnnParams] parameters applied to the centroids. `ann_dist` also drives
     /// the k-means distance and `k` is the number of neighbours per centroid.
     pub knn_params: KnnParams,
 

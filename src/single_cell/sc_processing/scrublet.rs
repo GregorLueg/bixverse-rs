@@ -97,7 +97,8 @@ pub struct ScrubletParams {
     pub manual_threshold: Option<f32>,
 
     // -- knn --
-    /// Parameters for kNN construction.
+    /// [KnnParams] for the various approximate nearest neighbour searches
+    /// in ann-search-rs
     pub knn_params: KnnParams,
 }
 

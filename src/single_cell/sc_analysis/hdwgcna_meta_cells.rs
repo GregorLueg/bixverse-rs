@@ -20,7 +20,7 @@ pub struct BootstrappedMetaCellParams {
     pub target_no_metacells: usize,
     /// Maximum iterations for the algorithm
     pub max_iter: usize,
-    /// Parameters for the various approximate nearest neighbour searches in
+    /// [KnnParams] for the various approximate nearest neighbour searches in
     /// ann-search-rs
     pub knn_params: KnnParams,
 }

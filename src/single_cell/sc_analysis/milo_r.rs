@@ -35,7 +35,7 @@ pub struct MiloRParams {
     pub refinement_strategy: String,
     /// Type of kNN index to use (`"annoy"`, `"hnsw"` or `"nndescent"`)
     pub index_type: String,
-    /// Parameters for the various approximate nearest neighbour searches
+    /// [KnnParams] for the various approximate nearest neighbour searches
     /// in ann-search-rs
     pub knn_params: KnnParams,
 }

@@ -26,7 +26,8 @@ pub struct FastMnnParams {
     pub no_pcs: usize,
     /// Boolean. Shall randomised SVD be used.
     pub random_svd: bool,
-    /// Parameters for the various approximate nearest neighbour searches
+    /// [KnnParams] for the various approximate nearest neighbour searches
+    /// in ann-search-rs
     pub knn_params: KnnParams,
 }
 

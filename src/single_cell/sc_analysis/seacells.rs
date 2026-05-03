@@ -2,7 +2,8 @@
 //! Uses some optimised fused kernels to accelerate the FW iterations with
 //! better cache locality and reduced memory pressure.
 
-use faer::MatRef;
+use faer::{Mat, MatRef};
+use rand::distr::weighted::WeightedIndex;
 use rand::prelude::*;
 use rand::rngs::StdRng;
 use rayon::prelude::*;
@@ -77,6 +78,8 @@ pub struct SEACellsParams {
     /// Parameters for the various approximate nearest neighbour searches
     /// in ann-search-rs
     // -- knn --
+    /// [KnnParams] for the various approximate nearest neighbour searches
+    /// in ann-search-rs
     pub knn_params: KnnParams,
 }
 
@@ -184,14 +187,17 @@ fn matrix_trace(mat: &CompressedSparseData2<f32>) -> f32 {
 /// * `knn_indices` - kNN indices for each cell
 /// * `knn_distances` - kNN distances for each cell
 /// * `knn` - Number of nearest neighbours used
+/// * `squared_dist` - Are the distances squared (squared Euclidean for
+///   example).
 ///
 /// ### Returns
 ///
 /// Symmetric kernel matrix
-fn compute_diffusion_kernel(
+pub fn compute_diffusion_kernel(
     knn_indices: &[Vec<usize>],
     knn_distances: &[Vec<f32>],
     knn: usize,
+    squared_dist: bool,
 ) -> CompressedSparseData2<f32> {
     let n = knn_indices.len();
     let adaptive_k = (knn / 3).max(1);
@@ -212,7 +218,11 @@ fn compute_diffusion_kernel(
     for (i, neighbours) in knn_indices.iter().enumerate() {
         for (idx, &j) in neighbours.iter().enumerate() {
             // need to square root here, as I am not doing this during kNN generation
-            let dist = knn_distances[i][idx].sqrt();
+            let dist = if squared_dist {
+                knn_distances[i][idx].sqrt()
+            } else {
+                knn_distances[i][idx]
+            };
             let weight = (-dist / adaptive_std[i]).exp();
             rows.push(i);
             cols.push(j);
@@ -240,7 +250,7 @@ fn compute_diffusion_kernel(
 /// ### Returns
 ///
 /// (eigenvalues, eigenvectors) where eigenvectors is (n × n_components)
-fn diffusion_map_from_kernel(
+pub fn diffusion_map_from_kernel(
     kernel: &mut CompressedSparseData2<f32>,
     n_components: usize,
     seed: u64,
@@ -281,7 +291,7 @@ fn diffusion_map_from_kernel(
 /// ### Returns
 ///
 /// Scaled eigenvectors (n × n_eigs)
-fn determine_multiscale_space(
+pub fn determine_multiscale_space(
     eigenvalues: &[f32],
     eigenvectors: &[Vec<f32>],
     n_eigs: Option<usize>,
@@ -374,6 +384,214 @@ fn max_min_sampling(data: &[Vec<f32>], num_waypoints: usize, seed: u64) -> Vec<u
 
     waypoint_set.into_iter().collect()
 }
+
+///////////////
+// Landmarks //
+///////////////
+
+/// Density-weighted landmark selection (sample proportional to sqrt(degree))
+///
+/// ### Params
+///
+/// * `kernel` - Symmetric kernel matrix
+/// * `n_landmarks` - Number of landmarks to extract
+/// * `seed` - Random seed for reproducibility
+///
+/// ### Returns
+///
+/// Indices of the landmarks
+fn select_density_landmarks(
+    kernel: &CompressedSparseData2<f32>,
+    n_landmarks: usize,
+    seed: u64,
+) -> Vec<usize> {
+    let n = kernel.shape.0;
+    let weights: Vec<f64> = (0..n)
+        .map(|i| {
+            let s: f32 = (kernel.indptr[i]..kernel.indptr[i + 1])
+                .map(|idx| kernel.data[idx])
+                .sum();
+            (s as f64).max(0.0).sqrt()
+        })
+        .collect();
+
+    let mut rng = StdRng::seed_from_u64(seed);
+    let dist = WeightedIndex::new(&weights).expect("invalid weights for density landmarks");
+    let target = n_landmarks.min(n);
+    let mut set = FxHashSet::default();
+    while set.len() < target {
+        set.insert(dist.sample(&mut rng));
+    }
+    set.into_iter().collect()
+}
+
+/// Pairwise kNN among landmarks in PCA space (or other embeddings)
+///
+/// ### Params
+///
+/// * `pca` - The PCA embedding (or any other provided embedding)
+/// * `landmark_indices` - The landmark indices
+/// * `k` - Number of neighbours to return
+/// * `knn_params` - Reference to [KnnParams] for the (approximate) nearest
+///   neighbour searches.
+/// * `seed` - Seed for reproducibility
+/// * `verbose` - Controls verbosity
+///
+/// ### Returns
+///
+/// The `(indices, distances)`
+fn landmark_knn(
+    pca: MatRef<f32>,
+    landmark_indices: &[usize],
+    k: usize,
+    knn_params: &KnnParams,
+    seed: usize,
+    verbose: bool,
+) -> (Vec<Vec<usize>>, Vec<Vec<f32>>) {
+    let l = landmark_indices.len();
+    let dim = pca.ncols();
+
+    let landmark_mat = Mat::<f32>::from_fn(l, dim, |i, j| *pca.get(landmark_indices[i], j));
+
+    let mut params = knn_params.clone();
+    params.k = k.min(l.saturating_sub(1)).max(1);
+
+    let (indices, distances) =
+        generate_knn_with_dist(landmark_mat.as_ref(), &params, true, false, seed, verbose);
+
+    (indices, distances.expect("distances must be present"))
+}
+
+/// Row-stochastic N×L transitions in PCA space (Gaussian, adaptive bandwidth)
+///
+/// ### Params
+///
+/// * `pca` - The PCA embedding (or any other provided embedding)
+/// * `landmark_indices` - The landmark indices
+/// * `k` - Number of neighbours to return
+/// * `bandwidth_scale` - The bandwidth scale
+/// * `thresh` - The threshold
+///
+/// ### Returns
+///
+/// The landmark transition matrix
+fn build_data_to_landmark_transitions(
+    pca: MatRef<f32>,
+    landmark_indices: &[usize],
+    k: usize,
+    bandwidth_scale: f32,
+    thresh: f32,
+) -> CompressedSparseData2<f32> {
+    let n = pca.nrows();
+    let l = landmark_indices.len();
+    let dim = pca.ncols();
+    let k_used = k.min(l).max(1);
+    let bw_factor = bandwidth_scale * bandwidth_scale;
+
+    // contiguous landmark coords for cache locality
+    let landmark_coords: Vec<f32> = landmark_indices
+        .iter()
+        .flat_map(|&li| (0..dim).map(move |c| *pca.get(li, c)))
+        .collect();
+
+    let per_row: Vec<(Vec<usize>, Vec<f32>)> = (0..n)
+        .into_par_iter()
+        .map(|i| {
+            let mut dists: Vec<(usize, f32)> = (0..l)
+                .map(|li_idx| {
+                    let mut d = 0.0f32;
+                    for c in 0..dim {
+                        let diff = pca.get(i, c) - landmark_coords[li_idx * dim + c];
+                        d += diff * diff;
+                    }
+                    (li_idx, d)
+                })
+                .collect();
+
+            dists.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+            dists.truncate(k_used);
+
+            let bw_raw = dists.last().map(|&(_, d)| d).unwrap_or(0.0);
+            let bw = (bw_raw * bw_factor).max(f32::EPSILON);
+
+            let mut kept: Vec<(usize, f32)> = dists
+                .into_iter()
+                .filter_map(|(li_idx, d)| {
+                    let w = (-d / bw).exp();
+                    (w >= thresh).then_some((li_idx, w))
+                })
+                .collect();
+
+            let s: f32 = kept.iter().map(|&(_, w)| w).sum();
+            if s > 0.0 {
+                for (_, w) in &mut kept {
+                    *w /= s;
+                }
+            }
+
+            kept.sort_by_key(|&(li_idx, _)| li_idx);
+            let idx: Vec<usize> = kept.iter().map(|&(li_idx, _)| li_idx).collect();
+            let val: Vec<f32> = kept.iter().map(|&(_, w)| w).collect();
+            (idx, val)
+        })
+        .collect();
+
+    let mut rows = Vec::new();
+    let mut cols = Vec::new();
+    let mut vals = Vec::new();
+    for (cell_id, (idx, val)) in per_row.into_iter().enumerate() {
+        for (j, w) in idx.into_iter().zip(val.into_iter()) {
+            rows.push(cell_id);
+            cols.push(j);
+            vals.push(w);
+        }
+    }
+    coo_to_csr(&rows, &cols, &vals, (n, l))
+}
+
+/// Nystroem extension: y(i)[d] = (1/λ_d) · Σ_l P_nl[i,l] · y_landmark[l][d]
+///
+/// ### Params
+///
+/// * `p_nl` -
+/// * `landmark_embedding` -
+/// * `lambdas` -
+///
+/// ### Returns
+fn nystrom_extend(
+    p_nl: &CompressedSparseData2<f32>,
+    landmark_embedding: &[Vec<f32>],
+    lambdas: &[f32],
+) -> Vec<Vec<f32>> {
+    let n = p_nl.shape.0;
+    let n_dim = landmark_embedding[0].len();
+
+    (0..n)
+        .into_par_iter()
+        .map(|i| {
+            let mut row = vec![0.0f32; n_dim];
+            let start = p_nl.indptr[i];
+            let end = p_nl.indptr[i + 1];
+            for idx in start..end {
+                let l = p_nl.indices[idx];
+                let w = p_nl.data[idx];
+                for d in 0..n_dim {
+                    row[d] += w * landmark_embedding[l][d];
+                }
+            }
+            for d in 0..n_dim {
+                if lambdas[d].abs() > f32::EPSILON {
+                    row[d] /= lambdas[d];
+                }
+            }
+            row
+        })
+        .collect()
+}
+
+////////////////////
+// Matrix updates //
+////////////////////
 
 /// Compute gradient of A: `g = 2 * (t1 · A - t2)` into a column-major buffer
 ///
@@ -818,12 +1036,15 @@ impl<'a> SEACells<'a> {
     /// * `knn_indices` - k-NN indices for each cell
     /// * `knn_distances` - k-NN distances for each cell
     /// * `verbose` - Print which method is selected
+    /// * `squared_dist` - Are the distances squared (squared Euclidean for
+    ///   example).
     /// * `seed` - Random seed for initialisation
     pub fn initialise_archetypes(
         &mut self,
         knn_indices: &[Vec<usize>],
         knn_distances: &[Vec<f32>],
         verbose: bool,
+        squared_dist: bool,
         seed: u64,
     ) -> Result<(), BixverseErrors> {
         if self.n_cells > self.params.greedy_threshold {
@@ -836,7 +1057,13 @@ impl<'a> SEACells<'a> {
             }
             self.initialise_archetypes_random(verbose, seed);
         } else {
-            self.initialise_archetypes_combined(knn_indices, knn_distances, verbose, seed)?;
+            self.initialise_archetypes_combined(
+                knn_indices,
+                knn_distances,
+                squared_dist,
+                verbose,
+                seed,
+            )?;
         }
         Ok(())
     }
@@ -874,12 +1101,15 @@ impl<'a> SEACells<'a> {
     ///
     /// * `knn_indices` - k-NN indices for each cell
     /// * `knn_distances` - k-NN distances for each cell
+    /// * `squared_dist` - Are the distances squared (squared Euclidean for
+    ///   example).
     /// * `verbose` - Print selection counts
     /// * `seed` - Random seed for waypoint sampling
     fn initialise_archetypes_combined(
         &mut self,
         knn_indices: &[Vec<usize>],
         knn_distances: &[Vec<f32>],
+        squared_dist: bool,
         verbose: bool,
         seed: u64,
     ) -> Result<(), BixverseErrors> {
@@ -889,8 +1119,12 @@ impl<'a> SEACells<'a> {
             println!("Computing diffusion maps for waypoint initialisation...");
         }
 
-        let mut kernel =
-            compute_diffusion_kernel(knn_indices, knn_distances, self.params.knn_params.k);
+        let mut kernel = compute_diffusion_kernel(
+            knn_indices,
+            knn_distances,
+            self.params.knn_params.k,
+            squared_dist,
+        );
 
         let (eigenvalues, eigenvectors) =
             diffusion_map_from_kernel(&mut kernel, self.params.knn_params.k, seed)?;
@@ -930,6 +1164,127 @@ impl<'a> SEACells<'a> {
             .collect();
 
         self.archetypes = Some(unique_ix);
+        Ok(())
+    }
+
+    /// Landmark-based archetype initialisation for large datasets
+    ///
+    /// Density-samples L landmarks, builds a small L×L diffusion operator,
+    /// eigendecomposes that, then Nystroem-extends the multiscale embedding
+    /// to all N cells before max-min waypoint sampling.
+    ///
+    /// Skips greedy CSSP top-up because its initialisation phase is O(N²);
+    /// pads with random cells if waypoint dedup falls short.
+    ///
+    /// ### Params
+    ///
+    /// * `pca` - PCA/SVD matrix (n_cells × n_components)
+    /// * `knn_indices` - kNN indices for each cell
+    /// * `knn_distances` - kNN distances for each cell
+    /// * `squared_dist` - Are the distances squared (squared Euclidean for
+    ///   example).
+    /// * `n_landmarks` - Number of landmarks (typically 5-10× n_sea_cells)
+    /// * `verbose` - Print progress messages
+    /// * `seed` - Random seed for reproducibility
+    #[allow(clippy::too_many_arguments)]
+    pub fn initialise_archetypes_landmark(
+        &mut self,
+        pca: MatRef<f32>,
+        knn_indices: &[Vec<usize>],
+        knn_distances: &[Vec<f32>],
+        squared_dist: bool,
+        n_landmarks: usize,
+        verbose: bool,
+        seed: u64,
+    ) -> Result<(), BixverseErrors> {
+        let k = self.params.n_sea_cells;
+        let n = self.n_cells;
+        let knn_k = self.params.knn_params.k;
+
+        if verbose {
+            println!("Building diffusion kernel for landmark selection...");
+        }
+        let kernel = compute_diffusion_kernel(knn_indices, knn_distances, knn_k, squared_dist);
+
+        if verbose {
+            println!(
+                "Selecting {} density-weighted landmarks...",
+                n_landmarks.separate_with_underscores()
+            );
+        }
+        let landmark_indices = select_density_landmarks(&kernel, n_landmarks, seed);
+        let l = landmark_indices.len();
+
+        let k_ll = knn_k.min(l.saturating_sub(1)).max(3);
+        if verbose {
+            println!("Building landmark-landmark diffusion operator (L={})...", l);
+        }
+        let (ll_idx, ll_dist) = landmark_knn(
+            pca,
+            &landmark_indices,
+            k_ll,
+            &self.params.knn_params,
+            seed as usize,
+            verbose,
+        );
+        let squared_dist = self.params.knn_params.ann_dist == "euclidean";
+
+        let mut ll_kernel = compute_diffusion_kernel(&ll_idx, &ll_dist, k_ll, squared_dist);
+
+        let n_eigs = k_ll.min(l - 1).max(11);
+        let (evals, evecs) = diffusion_map_from_kernel(&mut ll_kernel, n_eigs, seed)?;
+
+        let landmark_multiscale = determine_multiscale_space(&evals, &evecs, Some(10));
+        let n_components = landmark_multiscale[0].len();
+        let used_lambdas: Vec<f32> = (1..=n_components).map(|i| evals[i]).collect();
+
+        if verbose {
+            println!(
+                "Building data-to-landmark transitions ({} × {})...",
+                n.separate_with_underscores(),
+                l
+            );
+        }
+        let p_nl = build_data_to_landmark_transitions(pca, &landmark_indices, knn_k, 1.0, 1e-4);
+
+        if verbose {
+            println!("Nystroem-extending multiscale embedding to full data...");
+        }
+        let multiscale = nystrom_extend(&p_nl, &landmark_multiscale, &used_lambdas);
+
+        let waypoint_ix = max_min_sampling(&multiscale, k, seed);
+        if verbose {
+            println!("Selected {} cells from waypoint init", waypoint_ix.len());
+        }
+
+        let mut seen = FxHashSet::default();
+        let mut unique_ix: Vec<usize> = waypoint_ix
+            .into_iter()
+            .filter(|&x| seen.insert(x))
+            .take(k)
+            .collect();
+
+        // Pad with random cells if waypoint dedup fell short
+        if unique_ix.len() < k {
+            if verbose {
+                println!(
+                    "Padding {} cells with random selection",
+                    k - unique_ix.len()
+                );
+            }
+            let mut rng = StdRng::seed_from_u64(seed.wrapping_add(1));
+            let mut remaining: Vec<usize> = (0..n).filter(|i| !seen.contains(i)).collect();
+            remaining.shuffle(&mut rng);
+            while unique_ix.len() < k {
+                match remaining.pop() {
+                    Some(idx) => unique_ix.push(idx),
+                    None => break,
+                }
+            }
+        }
+
+        self.archetypes = Some(unique_ix);
+
         Ok(())
     }
 

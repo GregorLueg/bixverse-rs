@@ -9,6 +9,7 @@ pub mod fast_clusters;
 pub mod fast_ranking;
 pub mod hdwgcna_meta_cells;
 pub mod hotspot;
+pub mod metacell_density;
 pub mod metacells2;
 pub mod milo_r;
 pub mod module_scoring;

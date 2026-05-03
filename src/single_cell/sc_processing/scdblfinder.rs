@@ -66,7 +66,8 @@ pub struct ScDblFinderParams {
     pub fast_cluster: bool,
 
     // -- kNN --
-    /// Parameters for kNN construction.
+    /// [KnnParams] for the various approximate nearest neighbour searches
+    /// in ann-search-rs
     pub knn_params: KnnParams,
 
     // -- Iteration --

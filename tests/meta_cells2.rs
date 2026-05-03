@@ -217,7 +217,10 @@ fn full_params() -> MetacellsParams {
             ..Default::default()
         },
         deviants: DeviantsParams::default(),
-        dissolve: DissolveParams::default(),
+        dissolve: DissolveParams {
+            min_robust_size_factor: 0.25,
+            min_convincing_gene_fold_factor: None,
+        },
         must_complete_cover: false,
         random_seed: 42,
     }

@@ -34,7 +34,7 @@ pub struct BbknnParams {
     /// Trim the neighbours of each cell to these many to connectivities. May
     /// help with population independence and improve the tidiness of clustering.
     pub trim: Option<usize>,
-    /// Parameters for the various approximate nearest neighbour searches
+    /// [KnnParams] for the various approximate nearest neighbour searches
     /// in ann-search-rs
     pub knn_params: KnnParams,
 }

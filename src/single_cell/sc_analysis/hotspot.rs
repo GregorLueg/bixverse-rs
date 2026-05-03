@@ -34,7 +34,7 @@ pub struct HotSpotParams {
     pub model: String,
     /// Shall the data be normalised
     pub normalise: bool,
-    /// Parameters for the various approximate nearest neighbour searches
+    /// [KnnParams] for the various approximate nearest neighbour searches
     /// in ann-search-rs
     pub knn_params: KnnParams,
 }

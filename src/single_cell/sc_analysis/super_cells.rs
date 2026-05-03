@@ -32,7 +32,8 @@ pub struct SuperCellParams {
     /// Graining level of data (proportion of number of single cells in the
     /// initial dataset to the number of metacells in the final dataset)
     pub graining_factor: f64,
-    /// Which type of distance metric to use for the linkage.
+    /// [KnnParams] for the various approximate nearest neighbour searches
+    /// in ann-search-rs
     pub knn_params: KnnParams,
 }
 
