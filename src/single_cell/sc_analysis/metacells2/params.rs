@@ -54,7 +54,7 @@ impl Default for MetacellsParams {
             partition: PartitionParams::default(),
             deviants: DeviantsParams::default(),
             dissolve: DissolveParams::default(),
-            target_metacell_size: 96,
+            target_metacell_size: 48,
             min_metacell_size: 12,
             target_metacell_umis: 160_000,
             must_complete_cover: false,
@@ -113,7 +113,7 @@ impl Default for SelectParams {
             min_gene_total: Some(50),
             min_gene_top3: Some(4),
             min_gene_relative_variance: Some(0.1),
-            min_genes: 30,
+            min_genes: 100,
             relative_variance_window_size: 100, // TODO: confirm against metacells.parameters
             lateral_gene_mask: None,
         }
@@ -146,7 +146,7 @@ pub struct SimilarityParams {
     pub method: SimilarityMethod,
     /// Constant added to every value before the (optional) log transform.
     /// Mainly relevant if you ever want to use plain Pearson without log.
-    pub value_regularization: f32,
+    pub value_regularisation: f32,
 }
 
 /// Default implementation for [SimilarityParams]
@@ -154,7 +154,7 @@ impl Default for SimilarityParams {
     fn default() -> Self {
         Self {
             method: SimilarityMethod::LogPearson,
-            value_regularization: 0.0,
+            value_regularisation: (1.0 / 7.0),
         }
     }
 }
@@ -185,19 +185,22 @@ pub struct MC2KnnParams {
     pub k_umis_quantile: f32,
     /// Optional floor on `k`. `None` defers entirely to the heuristic.
     pub min_knn_k: Option<usize>,
+    /// If you wish to override the kNN parameter
+    pub knn_k_override: Option<usize>,
 }
 
 /// Default implementation for [MC2KnnParams]
 impl Default for MC2KnnParams {
     fn default() -> Self {
         Self {
-            balanced_ranks_factor: 4.0,
+            balanced_ranks_factor: (10_f32).sqrt(),
             incoming_degree_factor: 3.0,
             outgoing_degree_factor: 1.0,
-            min_outgoing_degree: 1,
-            k_size_factor: 1.0,   // TODO: confirm against metacells.parameters
-            k_umis_quantile: 0.1, // TODO: confirm against metacells.parameters
-            min_knn_k: None,      // TODO: confirm against metacells.parameters
+            min_outgoing_degree: 2,
+            k_size_factor: 2.0,
+            k_umis_quantile: 0.1,
+            min_knn_k: Some(30),
+            knn_k_override: None,
         }
     }
 }
@@ -237,14 +240,14 @@ pub struct PartitionParams {
 impl Default for PartitionParams {
     fn default() -> Self {
         Self {
-            cooldown_pass: 0.03,
+            cooldown_pass: 0.02,
             cooldown_node: 0.25,
-            cooldown_phase: 0.5,
+            cooldown_phase: 0.75,
             min_split_size_factor: 2.0,
-            max_merge_size_factor: 0.25,
+            max_merge_size_factor: 0.5,
             max_split_min_cut_strength: 0.1,
             min_cut_seed_cells: 7,
-            min_seed_size_quantile: 0.05,
+            min_seed_size_quantile: 0.85,
             max_seed_size_quantile: 0.95,
         }
     }
@@ -281,10 +284,10 @@ pub struct DeviantsParams {
     /// lowly expressed to be reliably compared.
     pub min_compare_umis: f32,
     /// Quantile of the candidate's library size distribution used as a floor
-    /// for the per-cell regularisation in `log2(fraction + 1/max(library_size, floor))`.
-    /// A small positive value (e.g. 0.1) prevents extreme log values for
-    /// the lowest-coverage cells.
-    pub cells_regularization_quantile: f32,
+    /// for the per-cell regularisation in
+    /// `log2(fraction + 1/max(library_size, floor))`. A small positive value
+    /// (e.g. 0.25) prevents extreme log values for the lowest-coverage cells.
+    pub cells_regularisation_quantile: f32,
 }
 
 /// Default implementation for [DeviantsParams]
@@ -294,11 +297,11 @@ impl Default for DeviantsParams {
             min_gene_fold_factor: 3.0, // log2(8)
             max_gene_fraction: 0.03,
             max_cell_fraction: 0.25,
-            gap_skip_cells: 3,
-            max_gap_cells_count: 1,
-            max_gap_cells_fraction: 0.0,
+            gap_skip_cells: 1,
+            max_gap_cells_count: 3,
+            max_gap_cells_fraction: 0.1,
             min_compare_umis: 8.0,
-            cells_regularization_quantile: 0.1,
+            cells_regularisation_quantile: 0.25,
         }
     }
 }
@@ -342,7 +345,7 @@ mod tests {
     #[test]
     fn metacells_defaults_match_plan() {
         let p = MetacellsParams::default();
-        assert_eq!(p.target_metacell_size, 96);
+        assert_eq!(p.target_metacell_size, 48);
         assert_eq!(p.min_metacell_size, 12);
         assert_eq!(p.target_metacell_umis, 160_000);
         assert!(!p.must_complete_cover);
@@ -363,17 +366,17 @@ mod tests {
         assert_eq!(s.min_gene_total, Some(50));
         assert_eq!(s.min_gene_top3, Some(4));
         assert_eq!(s.min_gene_relative_variance, Some(0.1));
-        assert_eq!(s.min_genes, 30);
+        assert_eq!(s.min_genes, 100);
         assert!(s.lateral_gene_mask.is_none());
     }
 
     #[test]
     fn knn_defaults() {
         let k = MC2KnnParams::default();
-        assert_eq!(k.balanced_ranks_factor, 4.0);
+        assert_eq!(k.balanced_ranks_factor, (10_f32).sqrt());
         assert_eq!(k.incoming_degree_factor, 3.0);
         assert_eq!(k.outgoing_degree_factor, 1.0);
-        assert_eq!(k.min_outgoing_degree, 1);
+        assert_eq!(k.min_outgoing_degree, 2);
     }
 
     #[test]
@@ -404,6 +407,6 @@ mod tests {
         // Untouched fields hold defaults.
         assert_eq!(p.min_metacell_size, 12);
         assert_eq!(p.knn.incoming_degree_factor, 3.0);
-        assert_eq!(p.select.min_genes, 30);
+        assert_eq!(p.select.min_genes, 100);
     }
 }

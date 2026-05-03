@@ -400,7 +400,7 @@ pub fn find_deviant_cells(
         umis_per_cell,
         candidate_of_cell,
         n_candidates,
-        params.cells_regularization_quantile,
+        params.cells_regularisation_quantile,
     );
 
     // log2(fraction + reg) per (cell, gene). reg is per-cell, broadcast.
@@ -580,7 +580,7 @@ mod tests {
             max_cell_fraction: 0.5,
             max_gap_cells_count: 2,
             max_gap_cells_fraction: 0.4,
-            cells_regularization_quantile: 0.1,
+            cells_regularisation_quantile: 0.1,
             ..Default::default()
         };
         let dev = find_deviant_cells(&raw, &umis, &cand, &params);

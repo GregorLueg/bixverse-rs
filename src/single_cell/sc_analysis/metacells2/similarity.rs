@@ -40,13 +40,13 @@ use crate::prelude::*;
 /// ### Params
 ///
 /// * `dense`  - Input matrix of shape `(n_cells, n_features)`.
-/// * `params` - Similarity parameters; reads `method` and `value_regularization`.
+/// * `params` - Similarity parameters; reads `method` and `value_regularisation`.
 ///
 /// ### Returns
 ///
 /// A new `Mat<f32>` of the same shape with the transform applied.
 fn preprocess(dense: &Mat<f32>, params: &SimilarityParams) -> Mat<f32> {
-    let reg = params.value_regularization;
+    let reg = params.value_regularisation;
     match params.method {
         SimilarityMethod::LogPearson => Mat::from_fn(dense.nrows(), dense.ncols(), |i, j| {
             (dense[(i, j)] + reg + 1.0).log2()

@@ -7,8 +7,9 @@ use std::collections::HashMap;
 use crate::core::math::sparse::parse_compressed_sparse_format;
 use crate::single_cell::sc_analysis::fast_clusters::FastLouvainParams;
 use crate::single_cell::sc_analysis::{
-    hdwgcna_meta_cells::MetaCellParams,
+    hdwgcna_meta_cells::BootstrappedMetaCellParams,
     hotspot::HotSpotParams,
+    metacells2::params::*,
     milo_r::MiloRParams,
     scenic::{
         ExtraTreesConfig, GradientBoostingConfig, RandomForestConfig, RegressionLearner,
@@ -1076,7 +1077,7 @@ impl SEACellsParams {
 // MetaCells //
 ///////////////
 
-impl MetaCellParams {
+impl BootstrappedMetaCellParams {
     /// Generate the MetaCellParams from an R list
     ///
     /// ### Params
@@ -1801,6 +1802,424 @@ impl H5adFileTask {
             no_cells,
             no_genes,
             gene_local_to_universe,
+        })
+    }
+}
+
+/////////////////////////
+// MetaCells2 - Params //
+/////////////////////////
+
+//////////////////
+// SelectParams //
+//////////////////
+
+impl SelectParams {
+    /// Generate SelectParams from an R list, falling back to defaults.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let defaults = Self::default();
+
+        let downsample_min_samples = params
+            .get("downsample_min_samples")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as u32)
+            .unwrap_or(defaults.downsample_min_samples);
+
+        let downsample_min_cell_quantile = params
+            .get("downsample_min_cell_quantile")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.downsample_min_cell_quantile);
+
+        let downsample_max_cell_quantile = params
+            .get("downsample_max_cell_quantile")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.downsample_max_cell_quantile);
+
+        let min_gene_total = params
+            .get("min_gene_total")
+            .and_then(|v| v.as_integer())
+            .map(|v| Some(v as u32))
+            .unwrap_or(defaults.min_gene_total);
+
+        let min_gene_top3 = params
+            .get("min_gene_top3")
+            .and_then(|v| v.as_integer())
+            .map(|v| Some(v as u32))
+            .unwrap_or(defaults.min_gene_top3);
+
+        let min_gene_relative_variance = params
+            .get("min_gene_relative_variance")
+            .and_then(|v| v.as_real())
+            .map(|v| Some(v as f32))
+            .unwrap_or(defaults.min_gene_relative_variance);
+
+        let min_genes = params
+            .get("min_genes")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.min_genes);
+
+        let relative_variance_window_size = params
+            .get("relative_variance_window_size")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.relative_variance_window_size);
+
+        Ok(Self {
+            downsample_min_samples,
+            downsample_min_cell_quantile,
+            downsample_max_cell_quantile,
+            min_gene_total,
+            min_gene_top3,
+            min_gene_relative_variance,
+            min_genes,
+            relative_variance_window_size,
+            lateral_gene_mask: defaults.lateral_gene_mask,
+        })
+    }
+}
+
+//////////////////////
+// SimilarityParams //
+//////////////////////
+
+impl SimilarityParams {
+    /// Generate SimilarityParams from an R list, falling back to defaults.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let defaults = Self::default();
+
+        let method = params
+            .get("similarity_method")
+            .and_then(|v| v.as_str())
+            .map(|s| match s.to_lowercase().as_str() {
+                "log_pearson" | "logpearson" => SimilarityMethod::LogPearson,
+                "pearson" => SimilarityMethod::Pearson,
+                "spearman" => SimilarityMethod::Spearman,
+                _ => defaults.method,
+            })
+            .unwrap_or(defaults.method);
+
+        let value_regularisation = params
+            .get("value_regularisation")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.value_regularisation);
+
+        Ok(Self {
+            method,
+            value_regularisation,
+        })
+    }
+}
+
+////////////////////
+// MC2KnnParams   //
+////////////////////
+
+impl MC2KnnParams {
+    /// Generate MC2KnnParams from an R list, falling back to defaults.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let defaults = Self::default();
+
+        let balanced_ranks_factor = params
+            .get("balanced_ranks_factor")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.balanced_ranks_factor);
+
+        let incoming_degree_factor = params
+            .get("incoming_degree_factor")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.incoming_degree_factor);
+
+        let outgoing_degree_factor = params
+            .get("outgoing_degree_factor")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.outgoing_degree_factor);
+
+        let min_outgoing_degree = params
+            .get("min_outgoing_degree")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.min_outgoing_degree);
+
+        let k_size_factor = params
+            .get("k_size_factor")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.k_size_factor);
+
+        let k_umis_quantile = params
+            .get("k_umis_quantile")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.k_umis_quantile);
+
+        let min_knn_k = params
+            .get("min_knn_k")
+            .and_then(|v| v.as_integer())
+            .map(|v| Some(v as usize))
+            .unwrap_or(defaults.min_knn_k);
+
+        let knn_k_override = params
+            .get("knn_k_override")
+            .and_then(|v| v.as_integer())
+            .map(|v| Some(v as usize))
+            .unwrap_or(defaults.knn_k_override);
+
+        Ok(Self {
+            balanced_ranks_factor,
+            incoming_degree_factor,
+            outgoing_degree_factor,
+            min_outgoing_degree,
+            k_size_factor,
+            k_umis_quantile,
+            min_knn_k,
+            knn_k_override,
+        })
+    }
+}
+
+/////////////////////
+// PartitionParams //
+/////////////////////
+
+impl PartitionParams {
+    /// Generate PartitionParams from an R list, falling back to defaults.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let defaults = Self::default();
+
+        let cooldown_pass = params
+            .get("cooldown_pass")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.cooldown_pass);
+
+        let cooldown_node = params
+            .get("cooldown_node")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.cooldown_node);
+
+        let cooldown_phase = params
+            .get("cooldown_phase")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.cooldown_phase);
+
+        let min_split_size_factor = params
+            .get("min_split_size_factor")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.min_split_size_factor);
+
+        let max_merge_size_factor = params
+            .get("max_merge_size_factor")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.max_merge_size_factor);
+
+        let max_split_min_cut_strength = params
+            .get("max_split_min_cut_strength")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.max_split_min_cut_strength);
+
+        let min_cut_seed_cells = params
+            .get("min_cut_seed_cells")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.min_cut_seed_cells);
+
+        let min_seed_size_quantile = params
+            .get("min_seed_size_quantile")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.min_seed_size_quantile);
+
+        let max_seed_size_quantile = params
+            .get("max_seed_size_quantile")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.max_seed_size_quantile);
+
+        Ok(Self {
+            cooldown_pass,
+            cooldown_node,
+            cooldown_phase,
+            min_split_size_factor,
+            max_merge_size_factor,
+            max_split_min_cut_strength,
+            min_cut_seed_cells,
+            min_seed_size_quantile,
+            max_seed_size_quantile,
+        })
+    }
+}
+
+////////////////////
+// DeviantsParams //
+////////////////////
+
+impl DeviantsParams {
+    /// Generate DeviantsParams from an R list, falling back to defaults.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let defaults = Self::default();
+
+        let min_gene_fold_factor = params
+            .get("min_gene_fold_factor")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.min_gene_fold_factor);
+
+        let max_gene_fraction = params
+            .get("max_gene_fraction")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.max_gene_fraction);
+
+        let max_cell_fraction = params
+            .get("max_cell_fraction")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.max_cell_fraction);
+
+        let gap_skip_cells = params
+            .get("gap_skip_cells")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.gap_skip_cells);
+
+        let max_gap_cells_count = params
+            .get("max_gap_cells_count")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.max_gap_cells_count);
+
+        let max_gap_cells_fraction = params
+            .get("max_gap_cells_fraction")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.max_gap_cells_fraction);
+
+        let min_compare_umis = params
+            .get("min_compare_umis")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.min_compare_umis);
+
+        let cells_regularisation_quantile = params
+            .get("cells_regularisation_quantile")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.cells_regularisation_quantile);
+
+        Ok(Self {
+            min_gene_fold_factor,
+            max_gene_fraction,
+            max_cell_fraction,
+            gap_skip_cells,
+            max_gap_cells_count,
+            max_gap_cells_fraction,
+            min_compare_umis,
+            cells_regularisation_quantile,
+        })
+    }
+}
+
+////////////////////
+// DissolveParams //
+////////////////////
+
+impl DissolveParams {
+    /// Generate DissolveParams from an R list, falling back to defaults.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let defaults = Self::default();
+
+        let min_robust_size_factor = params
+            .get("min_robust_size_factor")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.min_robust_size_factor);
+
+        let min_convincing_gene_fold_factor = params
+            .get("min_convincing_gene_fold_factor")
+            .and_then(|v| v.as_real())
+            .map(|v| Some(v as f32))
+            .unwrap_or(defaults.min_convincing_gene_fold_factor);
+
+        Ok(Self {
+            min_robust_size_factor,
+            min_convincing_gene_fold_factor,
+        })
+    }
+}
+
+/////////////////////
+// MetacellsParams //
+/////////////////////
+
+impl MetacellsParams {
+    /// Generate MetacellsParams from a flat R list, recursively filling each
+    /// sub-struct from the same list. Falls back to defaults for any missing
+    /// field.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let select = SelectParams::from_r_list(r_list.clone())?;
+        let similarity = SimilarityParams::from_r_list(r_list.clone())?;
+        let knn = MC2KnnParams::from_r_list(r_list.clone())?;
+        let partition = PartitionParams::from_r_list(r_list.clone())?;
+        let deviants = DeviantsParams::from_r_list(r_list.clone())?;
+        let dissolve = DissolveParams::from_r_list(r_list.clone())?;
+
+        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let defaults = Self::default();
+
+        let target_metacell_size = params
+            .get("target_metacell_size")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.target_metacell_size);
+
+        let min_metacell_size = params
+            .get("min_metacell_size")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.min_metacell_size);
+
+        // u64 — read as real to dodge R's i32 limit.
+        let target_metacell_umis = params
+            .get("target_metacell_umis")
+            .and_then(|v| v.as_real())
+            .map(|v| v as u64)
+            .unwrap_or(defaults.target_metacell_umis);
+
+        let must_complete_cover = params
+            .get("must_complete_cover")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.must_complete_cover);
+
+        let random_seed = params
+            .get("random_seed")
+            .and_then(|v| v.as_real())
+            .map(|v| v as u64)
+            .unwrap_or(defaults.random_seed);
+
+        Ok(Self {
+            select,
+            similarity,
+            knn,
+            partition,
+            deviants,
+            dissolve,
+            target_metacell_size,
+            min_metacell_size,
+            target_metacell_umis,
+            must_complete_cover,
+            random_seed,
         })
     }
 }

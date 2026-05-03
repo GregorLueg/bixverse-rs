@@ -13,7 +13,7 @@ use crate::prelude::*;
 
 /// Structure for the MetaCell parameters
 #[derive(Clone, Debug)]
-pub struct MetaCellParams {
+pub struct BootstrappedMetaCellParams {
     /// Maximum number of shared cells for the meta cell aggregation
     pub max_shared: usize,
     /// Number of target meta cells.
