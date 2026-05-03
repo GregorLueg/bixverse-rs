@@ -3,7 +3,8 @@
 use ann_search_rs::prelude::AnnSearchFloat;
 use faer::{Mat, MatRef};
 
-use crate::graph::graph_structures::{adjacency_to_laplacian, get_knn_graph_adj};
+use super::graph_structures::{adjacency_to_laplacian, get_knn_graph_adj};
+
 use crate::ml::clustering::k_means::k_means_clusters;
 use crate::prelude::*;
 

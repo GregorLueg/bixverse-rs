@@ -1573,7 +1573,7 @@ impl ParallelSparseReader {
 ///
 /// Constructs a cells x genes compressed sparse column matrix from individual
 /// gene chunks. The primary data layer contains raw counts (saturated to u16
-/// for type compatibility -- the normalised layer in data_2 is the one used
+/// for type compatibility - the normalised layer in data_2 is the one used
 /// by downstream analysis like PCA), whilst the secondary layer contains
 /// normalised counts converted to f32 precision.
 ///

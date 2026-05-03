@@ -2,7 +2,7 @@
 //! et al., Cell Rep. Methods, 2023
 
 use rand::prelude::IndexedRandom;
-use rand::{Rng, SeedableRng};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::prelude::*;
@@ -20,8 +20,8 @@ pub struct MetaCellParams {
     pub target_no_metacells: usize,
     /// Maximum iterations for the algorithm
     pub max_iter: usize,
-    /// Parameters for the various approximate nearest neighbour searches
-    /// in ann-search-rs
+    /// Parameters for the various approximate nearest neighbour searches in
+    /// ann-search-rs
     pub knn_params: KnnParams,
 }
 
@@ -46,7 +46,7 @@ pub fn identify_meta_cells(
     seed: usize,
     verbose: bool,
 ) -> Vec<usize> {
-    let mut rng = rand::rngs::StdRng::seed_from_u64(seed as u64);
+    let mut rng = StdRng::seed_from_u64(seed as u64);
     let k = nn_map[0].len();
     let k2 = k * 2;
     let mut good_choices: Vec<usize> = (0..nn_map.len()).collect();
