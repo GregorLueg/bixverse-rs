@@ -1,8 +1,5 @@
 //! Initial seed assignment of cells to candidate metacells.
 //!
-//! Faithful port of upstream MC2's `_choose_seeds` (C++) and `_seeds_count_for`
-//! (Python).
-//!
 //! ### Algorithm overview
 //!
 //! 1. **Greedy seeding from connected nodes.** For every unassigned node we

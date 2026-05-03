@@ -276,6 +276,15 @@ pub struct DeviantsParams {
     /// Maximum fraction of cells beyond a gap. `0.0` means the absolute count
     /// (`max_gap_cells_count`) is used.
     pub max_gap_cells_fraction: f32,
+    /// Minimum total UMIs (summed across the two cells being compared) for a
+    /// gap to be considered. Filters out gaps caused by genes that are too
+    /// lowly expressed to be reliably compared.
+    pub min_compare_umis: f32,
+    /// Quantile of the candidate's library size distribution used as a floor
+    /// for the per-cell regularisation in `log2(fraction + 1/max(library_size, floor))`.
+    /// A small positive value (e.g. 0.1) prevents extreme log values for
+    /// the lowest-coverage cells.
+    pub cells_regularization_quantile: f32,
 }
 
 /// Default implementation for [DeviantsParams]
@@ -288,6 +297,8 @@ impl Default for DeviantsParams {
             gap_skip_cells: 3,
             max_gap_cells_count: 1,
             max_gap_cells_fraction: 0.0,
+            min_compare_umis: 8.0,
+            cells_regularization_quantile: 0.1,
         }
     }
 }

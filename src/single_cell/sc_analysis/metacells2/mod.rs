@@ -4,6 +4,9 @@
 //! into Python and C++, please refer to Ben‑Kiki, et al., Genome Biol. 2022.
 //! Due to complexity of the algorithm, this lives in its own module.
 
+pub mod candidates;
+pub mod deviants;
+pub mod dissolve;
 pub mod downsample;
 pub mod knn;
 pub mod params;

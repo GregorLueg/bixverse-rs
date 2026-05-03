@@ -17,6 +17,8 @@
 //! 3. Similarity: within-cluster mean similarity > between-cluster + margin.
 //! 4. KNN: rows L1-normalised; no self-loops; within-cluster edges dominate.
 //! 5. Seeds: every cell assigned; high per-true-cluster purity.
+#![allow(clippy::needless_range_loop)]
+#![cfg(feature = "single-cell")]
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -30,9 +32,9 @@ use bixverse_rs::single_cell::sc_analysis::metacells2::{
     compute_similarity, downsample_pile, select_features,
 };
 
-// ---------------------------------------------------------------------------
-// Fixture
-// ---------------------------------------------------------------------------
+///////////////////
+// Test fixtures //
+///////////////////
 
 const N_CLUSTERS: usize = 4;
 const CELLS_PER_CLUSTER: usize = 50;
@@ -163,9 +165,9 @@ fn fix_lambdas(rng: &mut StdRng, n: usize, lo: f64, hi: f64) -> Vec<f64> {
         .collect()
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+/////////////
+// Helpers //
+/////////////
 
 fn select_params() -> SelectParams {
     SelectParams {
@@ -189,9 +191,9 @@ fn similarity_params() -> SimilarityParams {
     SimilarityParams::default()
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+///////////
+// Tests //
+///////////
 
 #[test]
 fn stage1_downsample_caps_libraries_and_preserves_sparsity() {
@@ -208,15 +210,9 @@ fn stage1_downsample_caps_libraries_and_preserves_sparsity() {
         .as_ref()
         .expect("downsampled populated");
 
-    // Sparsity pattern: indices and indptr are identical to raw (data may
-    // contain explicit zeros where a count was sampled to nothing).
     assert_eq!(down.indices, raw_indices);
     assert_eq!(down.indptr, raw_indptr);
 
-    // Library cap: every row's total <= the configured target. We don't know
-    // the exact target without recomputing, but we can bound it from above
-    // by the median raw library (which is the max of the upper-quantile
-    // band given downsample_max_cell_quantile = 0.5).
     let mut sorted_umis = fix.pile.umis_per_cell.clone();
     sorted_umis.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let median = sorted_umis[N_CELLS / 2];
@@ -256,13 +252,10 @@ fn stage2_select_recovers_marker_genes() {
         params.min_genes
     );
 
-    // Recovery rate: fraction of selected genes that are markers.
     let marker_set: std::collections::HashSet<usize> = fix.marker_genes.iter().copied().collect();
     let n_recovered_markers = selected.iter().filter(|g| marker_set.contains(g)).count();
     let recovery_rate = n_recovered_markers as f64 / selected.len() as f64;
 
-    // Markers are 80/500 = 16% of all genes by chance. We expect substantial
-    // enrichment given how strongly cluster-specific the markers are.
     assert!(
         recovery_rate > 0.40,
         "marker recovery rate {:.3} below threshold (selected {}, markers {})",
@@ -271,9 +264,6 @@ fn stage2_select_recovers_marker_genes() {
         n_recovered_markers
     );
 
-    // Coverage: at least one marker per cluster in the selection. If a
-    // cluster's markers were all dropped, downstream clustering can't
-    // possibly recover that cluster.
     for (k, ms) in fix.cluster_markers.iter().enumerate() {
         let n_in_selection = ms.iter().filter(|g| selected.contains(g)).count();
         assert!(

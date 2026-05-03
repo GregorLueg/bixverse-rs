@@ -140,6 +140,50 @@ where
     }
 }
 
+/// Linearly interpolated quantile over a pre-sorted slice.
+///
+/// ### Params
+///
+/// * `sorted` - Sorted slice of values.
+/// * `q` - Quantile in `[0.0, 1.0]`.
+///
+/// ### Returns
+///
+/// The interpolated quantile value, or `0.0` if `sorted` is empty.
+pub fn quantile_sorted<T>(sorted: &[T], q: T) -> T
+where
+    T: BixverseFloat,
+{
+    if sorted.is_empty() {
+        return T::zero();
+    }
+    let pos = q.clamp(T::zero(), T::one()) * T::from_usize(sorted.len() - 1).unwrap();
+    let lo = pos.floor().to_usize().unwrap();
+    let hi = (lo + 1).min(sorted.len() - 1);
+    let frac = pos - T::from_usize(lo).unwrap();
+    sorted[lo] * (T::one() - frac) + sorted[hi] * frac
+}
+
+/// Linearly interpolated quantile over an unsorted slice, matching numpy's
+/// default.
+///
+/// ### Params
+///
+/// * `values` - Unsorted slice of values.
+/// * `q` - Quantile in `[0.0, 1.0]`.
+///
+/// ### Returns
+///
+/// The interpolated quantile value, or `0.0` if `values` is empty.
+pub fn quantile<T>(values: &[T], q: T) -> T
+where
+    T: BixverseFloat,
+{
+    let mut sorted: Vec<T> = values.to_vec();
+    sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    quantile_sorted(&sorted, q)
+}
+
 ///////////
 // Tests //
 ///////////

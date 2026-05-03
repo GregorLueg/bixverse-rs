@@ -1,6 +1,6 @@
 //! Differential gene expression for single cell via Mann Whitney U and AUCell
 //! type enrichment of a bag of genes, see Aibar, et al., Nat Methods,
-//! 2018.
+//! 2017.
 
 use rayon::prelude::*;
 use std::time::Instant;
