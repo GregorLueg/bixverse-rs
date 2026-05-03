@@ -3,7 +3,9 @@
 //! diffusion maps. This metrics have been ported from Persad, et al., Nat.
 //! Biotechnol., 2023.
 
-use faer::Mat;
+use ann_search_rs::utils::dist::euclidean_distance_static;
+use faer::{Mat, MatRef};
+use rayon::prelude::*;
 
 use crate::prelude::*;
 use crate::single_cell::sc_processing::knn::{KnnParams, generate_knn_with_dist};
@@ -162,4 +164,103 @@ pub fn compute_diffusion_density(
         density_distances,
         regions,
     })
+}
+
+/// Compactness per metacell: average variance across DC dimensions over
+/// the cells that constitute the metacell. Lower is better.
+///
+/// ### Params
+///
+/// * `dcs` - Diffusion components matrix (n_cells × n_dcs)
+/// * `metacells` - Per-metacell cell indices
+///
+/// ### Returns
+///
+/// One compactness value per metacell. Empty metacells yield NaN.
+pub fn compute_compactness(dcs: MatRef<f32>, metacells: &[Vec<usize>]) -> Vec<f32> {
+    let d = dcs.ncols();
+
+    metacells
+        .par_iter()
+        .map(|cells| {
+            if cells.is_empty() {
+                return f32::NAN;
+            }
+            let n = cells.len() as f32;
+
+            let mut total_var = 0.0f32;
+            for k in 0..d {
+                let mut mean = 0.0f32;
+                for &i in cells {
+                    mean += dcs[(i, k)];
+                }
+                mean /= n;
+
+                let mut var = 0.0f32;
+                for &i in cells {
+                    let diff = dcs[(i, k)] - mean;
+                    var += diff * diff;
+                }
+                total_var += var / n;
+            }
+
+            total_var / d as f32
+        })
+        .collect()
+}
+
+/// Separation per metacell: Euclidean distance from the metacell's centroid
+/// in DC space to the nearest other metacell's centroid. Higher is better.
+///
+/// ### Params
+///
+/// * `dcs` - Diffusion components matrix (n_cells × n_dcs)
+/// * `metacells` - Per-metacell cell indices
+///
+/// ### Returns
+///
+/// One separation value per metacell. Empty metacells yield NaN.
+pub fn compute_separation(dcs: MatRef<f32>, metacells: &[Vec<usize>]) -> Vec<f32> {
+    let d = dcs.ncols();
+    let k = metacells.len();
+
+    let centroids: Vec<Vec<f32>> = metacells
+        .par_iter()
+        .map(|cells| {
+            if cells.is_empty() {
+                return Vec::new();
+            }
+            let n = cells.len() as f32;
+            let mut centroid = vec![0.0f32; d];
+            for &i in cells {
+                for j in 0..d {
+                    centroid[j] += dcs[(i, j)];
+                }
+            }
+            for v in &mut centroid {
+                *v /= n;
+            }
+            centroid
+        })
+        .collect();
+
+    (0..k)
+        .into_par_iter()
+        .map(|i| {
+            if centroids[i].is_empty() {
+                return f32::NAN;
+            }
+            let mut min_dist_sq = f32::INFINITY;
+            for j in 0..k {
+                if i == j || centroids[j].is_empty() {
+                    continue;
+                }
+                let dist_sq = euclidean_distance_static(&centroids[i], &centroids[j]);
+                if dist_sq < min_dist_sq {
+                    min_dist_sq = dist_sq;
+                }
+            }
+            min_dist_sq.sqrt()
+        })
+        .collect()
 }
