@@ -159,7 +159,7 @@ where
     let (data, n, dim) = matrix_to_flat(data);
     let dist = parse_ann_dist(dist).unwrap_or_default();
 
-    let batch_size = batch_size.min(n) / 2;
+    let batch_size = batch_size.min(n);
 
     // precompute all data norms once
     let data_norms: Vec<T> = match dist {

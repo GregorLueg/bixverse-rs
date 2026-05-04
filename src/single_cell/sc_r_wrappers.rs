@@ -797,6 +797,10 @@ impl ScDblFinderParams {
                 .get("return_features")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(defaults.return_features),
+            cxds_genes: map
+                .get("cxds_genes")
+                .and_then(|v| v.as_integer())
+                .map(|x| x as usize),
             // Expected doublet rate
             expected_doublet_rate: map
                 .get("expected_doublet_rate")

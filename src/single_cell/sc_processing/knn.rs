@@ -342,6 +342,13 @@ pub fn generate_knn_hnsw(
     validate_index: bool,
     verbose: bool,
 ) -> Vec<Vec<usize>> {
+    if ef_search / no_neighbours <= 2 {
+        println!(
+            "[!WARNING!] Your 'ef_search' is set to {} for k {}. 'ef_search' should be 2 to 4x 'k'!",
+            ef_search, no_neighbours
+        )
+    }
+
     let (res, index) = build_and_query_knn(
         no_neighbours,
         verbose,
@@ -507,6 +514,13 @@ pub fn generate_knn_nndescent(
     validate_index: bool,
     verbose: bool,
 ) -> Vec<Vec<usize>> {
+    if ef_budget.is_none() && no_neighbours > 150 {
+        println!(
+            "[WARNING!] Your 'ef_budget' is set to auto ((k * 2).clamp(50, 200)) for k {}. 'ef_search' should be 2 to 4x 'k'",
+            no_neighbours
+        )
+    }
+
     let (res, index) = build_and_query_knn(
         no_neighbours,
         verbose,
@@ -705,6 +719,14 @@ pub fn generate_knn_with_dist(
                     verbose,
                 )
             });
+
+            if knn_params.ef_search / k_plus_one <= 2 {
+                println!(
+                    "[WARNING!] Your 'ef_search' is set to {} for k {}. 'ef_search' should be 2 to 4x 'k'!",
+                    knn_params.ef_search, k_plus_one
+                )
+            }
+
             let (indices, distances) = timed("Queried HNSW index", verbose, || {
                 query_hnsw_self(
                     &index,
@@ -738,6 +760,14 @@ pub fn generate_knn_with_dist(
                     verbose,
                 )
             });
+
+            if knn_params.ef_budget.is_none() && k_plus_one > 150 {
+                println!(
+                    "[WARNING!] Your 'ef_budget' is set to auto ((k * 2).clamp(50, 200)) for k {}. 'ef_search' should be 2 to 4x 'k'",
+                    k_plus_one
+                )
+            }
+
             let (indices, distances) = timed("Queried NNDescent index", verbose, || {
                 query_nndescent_self(&index, k_plus_one, knn_params.ef_budget, true, verbose)
             });

@@ -105,6 +105,8 @@ pub struct ScDblFinderParams {
     pub expected_doublet_rate: Option<f32>,
     /// Return the per-cell feature matrix for inspection/debugging.
     pub return_features: bool,
+    /// Number of cxds genes to take
+    pub cxds_genes: Option<usize>,
 
     // -- Thresholding --
     /// Optional manual threshold. If `None`, cost-based optimisation is used.
@@ -142,6 +144,7 @@ impl Default for ScDblFinderParams {
             include_pcs: 19,
             expected_doublet_rate: None,
             return_features: false,
+            cxds_genes: None,
             manual_threshold: None,
         }
     }
@@ -1305,12 +1308,14 @@ impl ScDblFinder {
         if verbose {
             println!(" Building cxds co-expression model...");
         }
+        let n_cxds = self.params.cxds_genes.unwrap_or(CXDS_NTOP);
+
         let start_cxds = Instant::now();
         let (cxds_model, obs_cxds_gene_sets) = CxdsModel::fit(
             &self.f_path_cell,
             &self.cells_to_keep,
             &selected_genes,
-            CXDS_NTOP,
+            n_cxds,
         )?;
         let obs_cxds_scores = cxds_model.score(&obs_cxds_gene_sets);
 
