@@ -533,7 +533,7 @@ impl BoostClassifier {
 
             let res = fast_louvain_clusters(
                 combined_pca.as_ref(),
-                "standard",
+                &self.params.km_type,
                 &louvain_resolutions,
                 &fast_params,
                 false,

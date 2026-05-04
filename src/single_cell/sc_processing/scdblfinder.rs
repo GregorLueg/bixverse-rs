@@ -1377,7 +1377,7 @@ impl ScDblFinder {
 
             let membership = fast_louvain_clusters(
                 obs_pca.as_ref(),
-                "kmeans",
+                &self.params.km_type,
                 &res,
                 &fast_params,
                 false,
