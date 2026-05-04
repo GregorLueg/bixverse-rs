@@ -1394,7 +1394,7 @@ impl ScDblFinder {
                 verbose,
             );
 
-            let obs_graph = knn_to_sparse_graph(&obs_knn);
+            let obs_graph = knn_to_sparse_graph(&obs_knn, true);
             louvain_sparse_graph(
                 &obs_graph,
                 self.params.cluster_resolution,

@@ -262,7 +262,7 @@ pub fn fast_louvain_clusters(
 
         snn_edges_to_sparse_graph(&snn_edges, &snn_weights, knn.len())
     } else {
-        knn_to_sparse_graph(&knn)
+        knn_to_sparse_graph(&knn, true)
     };
 
     let mut results: Vec<Vec<usize>> = Vec::with_capacity(resolutions.len());
@@ -387,7 +387,7 @@ pub fn fast_louvain_clusters_grid(
 
         snn_edges_to_sparse_graph(&snn_edges, &snn_weights, knn.len())
     } else {
-        knn_to_sparse_graph(&knn)
+        knn_to_sparse_graph(&knn, true)
     };
 
     let mut results = Vec::with_capacity(resolutions.len());

@@ -548,7 +548,7 @@ impl BoostClassifier {
             );
 
             let start_graph = Instant::now();
-            let graph = knn_to_sparse_graph(&knn);
+            let graph = knn_to_sparse_graph(&knn, true);
             if verbose {
                 println!(
                     "Transformed kNN graph. Done in {:.2?}",

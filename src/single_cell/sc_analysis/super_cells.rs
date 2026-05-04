@@ -55,6 +55,6 @@ pub fn supercell(
     no_meta_cells: usize,
     verbose: bool,
 ) -> Vec<usize> {
-    let knn_graph: SparseGraph<f32> = knn_to_sparse_graph(knn_mat);
+    let knn_graph: SparseGraph<f32> = knn_to_sparse_graph(knn_mat, true);
     walktrap_sparse_graph(&knn_graph, walk_length, no_meta_cells, verbose)
 }
