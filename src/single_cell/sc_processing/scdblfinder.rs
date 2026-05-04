@@ -1305,10 +1305,13 @@ impl ScDblFinder {
         let (obs_n_features, obs_n_above2) =
             compute_cell_complexity(&self.f_path_cell, &self.cells_to_keep, &selected_genes)?;
 
-        if verbose {
-            println!(" Building cxds co-expression model...");
-        }
         let n_cxds = self.params.cxds_genes.unwrap_or(CXDS_NTOP);
+        if verbose {
+            println!(
+                " Building cxds co-expression model with {} genes...",
+                n_cxds
+            );
+        }
 
         let start_cxds = Instant::now();
         let (cxds_model, obs_cxds_gene_sets) = CxdsModel::fit(
