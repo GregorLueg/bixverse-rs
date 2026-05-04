@@ -99,6 +99,60 @@ pub fn assignments_to_r_list(assignments: &[Option<usize>], n_cells: usize) -> L
     )
 }
 
+/// Build the R-facing assignment list from metacell membership lists.
+///
+/// Cells may appear in multiple metacells (overlap is allowed). The per-cell
+/// `assignments` field is therefore a list of integer vectors, one per cell,
+/// each containing the 1-indexed metacell IDs that cell belongs to. Cells
+/// in no metacell get an empty vector and appear in `unassigned`. This
+/// helper is needed for the bootstrapped approach of meta cell generation
+///
+/// ### Params
+///
+/// * `metacell` - A slice of the cell indices per metacell
+/// * `n_cells` - Total number of cells
+///
+/// ### Returns
+///
+/// R list in a similar structure as [assignments_to_r_list] with a difference
+/// in the assigmnents. These are now a list, not an integer vector!
+pub fn metacells_to_r_list(metacells: &[Vec<usize>], n_cells: usize) -> List {
+    let mut cell_assignments: Vec<Vec<i32>> = vec![Vec::new(); n_cells];
+    for (mc_id, cells) in metacells.iter().enumerate() {
+        for &cell_id in cells {
+            cell_assignments[cell_id].push((mc_id + 1) as i32);
+        }
+    }
+
+    let unassigned: Vec<i32> = cell_assignments
+        .iter()
+        .enumerate()
+        .filter_map(|(cell_id, mcs)| mcs.is_empty().then_some((cell_id + 1) as i32))
+        .collect();
+
+    let n_unassigned = unassigned.len();
+    let n_metacells = metacells.len();
+
+    let metacells_list: List = metacells
+        .iter()
+        .map(|cells| {
+            let r_cells: Vec<i32> = cells.iter().map(|&c| (c + 1) as i32).collect();
+            Robj::from(r_cells)
+        })
+        .collect();
+
+    let assignments_list: List = cell_assignments.into_iter().map(Robj::from).collect();
+
+    list!(
+        assignments = assignments_list,
+        metacells = metacells_list,
+        unassigned = unassigned,
+        n_metacells = n_metacells,
+        n_cells = n_cells,
+        n_unassigned = n_unassigned
+    )
+}
+
 ////////////////////
 // Param wrappers //
 ////////////////////
