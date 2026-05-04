@@ -1372,6 +1372,7 @@ impl ScDblFinder {
                 &res,
                 &fast_params,
                 false,
+                false,
                 true,
                 seed,
                 verbose,

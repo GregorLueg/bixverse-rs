@@ -500,7 +500,7 @@ impl BoostClassifier {
 
         let start_cluster = Instant::now();
         let communities = if use_fast {
-            let n_centroids = (total_cells / 10).clamp(500, usize::MAX);
+            let n_centroids = (((total_cells as f32).sqrt() * 2.0) as usize).clamp(500, usize::MAX);
             let centroid_k = ((n_centroids as f32).sqrt() * 0.5).round() as usize;
 
             let mut centroid_knn_params = self.params.knn_params.clone();
@@ -527,6 +527,7 @@ impl BoostClassifier {
                 "standard",
                 &louvain_resolutions,
                 &fast_params,
+                false,
                 false,
                 false,
                 seed,

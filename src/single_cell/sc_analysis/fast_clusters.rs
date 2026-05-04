@@ -166,6 +166,8 @@ fn flatten_knn_column_major<T: Copy>(knn: &[Vec<T>], k: usize) -> Vec<T> {
 /// * `resolutions` - Slice of resolutions to iterate over.
 /// * `params` - Pipeline parameters.
 /// * `run_snn` - Shall a shared nearest neighbour generation be run.
+/// * `same_weight` - Shall the weights of the kNN graph be set to 1.0 or shall
+///   reverse edges get higher weights.
 /// * `multi_level` - If `true`, run the full multi-level Louvain (phase 1 +
 ///   phase 2 aggregation, repeated). If `false`, run only one phase 1 pass
 ///   (matches Phenograph / the original doubletdetection behaviour).
@@ -182,6 +184,7 @@ pub fn fast_louvain_clusters(
     resolutions: &[f32],
     params: &FastLouvainParams<f32>,
     run_snn: bool,
+    same_weight: bool,
     multi_level_louvain: bool,
     seed: usize,
     verbose: bool,
@@ -262,7 +265,7 @@ pub fn fast_louvain_clusters(
 
         snn_edges_to_sparse_graph(&snn_edges, &snn_weights, knn.len())
     } else {
-        knn_to_sparse_graph(&knn, true)
+        knn_to_sparse_graph(&knn, same_weight)
     };
 
     let mut results: Vec<Vec<usize>> = Vec::with_capacity(resolutions.len());
@@ -546,6 +549,7 @@ mod tests {
             &resolutions,
             &default_params(),
             false,
+            false,
             true,
             0,
             false,
@@ -560,6 +564,7 @@ mod tests {
             "standard",
             &resolutions,
             &default_params(),
+            false,
             false,
             true,
             0,
@@ -582,6 +587,7 @@ mod tests {
             &resolutions,
             &params,
             false,
+            false,
             true,
             7,
             false,
@@ -592,6 +598,7 @@ mod tests {
             "standard",
             &resolutions,
             &params,
+            false,
             false,
             true,
             7,
@@ -614,6 +621,7 @@ mod tests {
             "standard",
             &resolutions,
             &params,
+            false,
             false,
             true,
             0,
@@ -647,6 +655,7 @@ mod tests {
             &resolutions,
             &params,
             true,
+            false,
             true,
             0,
             false,
