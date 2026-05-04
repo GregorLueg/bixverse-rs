@@ -128,7 +128,7 @@ where
 ///   euclidean)
 /// * `max_iters` - Maximum number of mini-batch iterations
 /// * `batch_size` - Number of vectors sampled per iteration. Clamped to
-///   `n` if larger.
+///   `n / 2` if larger.
 /// * `drift_threshold` - Below which centroid drift the algorithm is seen as
 ///   converged.
 /// * `lr_alpha` - Learning rate alpha decay. The original paper used `1.0`, but
@@ -159,7 +159,7 @@ where
     let (data, n, dim) = matrix_to_flat(data);
     let dist = parse_ann_dist(dist).unwrap_or_default();
 
-    let batch_size = batch_size.min(n);
+    let batch_size = batch_size.min(n) / 2;
 
     // precompute all data norms once
     let data_norms: Vec<T> = match dist {
