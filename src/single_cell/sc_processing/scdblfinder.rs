@@ -658,21 +658,21 @@ pub fn pca_combined(
         .collect();
 
     // build dense combined matrix
-    let mut combined = Mat::<f32>::zeros(n_total, n_genes);
+    let mut combined = Mat::<f64>::zeros(n_total, n_genes);
 
     // fill observed rows
     let reader = ParallelSparseReader::new(f_path_cell)?;
     for (row, &cell_idx) in cells_to_keep.iter().enumerate() {
         let chunk = reader.read_cell(cell_idx)?;
-        let lib = hvg_library_sizes[row] as f32;
+        let lib = hvg_library_sizes[row] as f64;
         for (i, &gene_idx) in chunk.indices.iter().enumerate() {
             let gi = gene_idx as usize;
             if let Some(&hvg_pos) = gene_to_hvg.get(&gi) {
-                let raw = chunk.data_raw.get(i) as f32;
+                let raw = chunk.data_raw.get(i) as f64;
                 let val = if log_transform {
-                    ((raw / lib) * target_size).ln_1p()
+                    ((raw / lib) * target_size as f64).ln_1p()
                 } else {
-                    (raw / lib) * target_size
+                    (raw / lib) * target_size as f64
                 };
                 *combined.get_mut(row, hvg_pos) = val;
             }
@@ -684,7 +684,7 @@ pub fn pca_combined(
         let row = n_obs + si;
         for i in 0..chunk.indices.len() {
             let gene = chunk.indices[i] as usize;
-            let val = chunk.data_norm[i].to_f32();
+            let val = chunk.data_norm[i].to_f32() as f64;
             *combined.get_mut(row, gene) = val;
         }
     }
@@ -697,7 +697,7 @@ pub fn pca_combined(
     for j in 0..n_genes {
         let mut sum = 0.0f64;
         for i in 0..n_total {
-            sum += *combined.get(i, j) as f64;
+            sum += *combined.get(i, j);
         }
         means[j] = sum / nf;
     }
@@ -706,7 +706,7 @@ pub fn pca_combined(
         let mu = means[j];
         let mut ss = 0.0f64;
         for i in 0..n_total {
-            let d = *combined.get(i, j) as f64 - mu;
+            let d = *combined.get(i, j) - mu;
             ss += d * d;
         }
         vars[j] = ss / (nf - 1.0);
@@ -714,9 +714,9 @@ pub fn pca_combined(
 
     // centre and scale in place
     for j in 0..n_genes {
-        let mu = if mean_center { means[j] as f32 } else { 0.0 };
+        let mu = if mean_center { means[j] } else { 0.0 };
         let sd = if normalise_variance {
-            let s = vars[j].sqrt() as f32;
+            let s = vars[j].sqrt();
             if s > 1e-10 { s } else { 1.0 }
         } else {
             1.0
@@ -729,7 +729,11 @@ pub fn pca_combined(
 
     let svd_res = randomised_svd(combined.as_ref(), no_pcs, seed, None, None)?;
 
-    Ok(compute_pc_scores(&svd_res))
+    let scores = compute_pc_scores(&svd_res);
+
+    Ok(Mat::from_fn(scores.nrows(), scores.ncols(), |i, j| {
+        scores[(i, j)] as f32
+    }))
 }
 
 /// Compute default k values for multi-scale kNN doublet scoring.
@@ -1476,7 +1480,7 @@ impl ScDblFinder {
         );
 
         if verbose {
-            println!(" Projecting simulated doublets...");
+            println!(" Running PCA across all observed and synthetic cells...");
         }
         let combined_pca = pca_combined(
             &self.f_path_cell,
