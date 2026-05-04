@@ -1351,17 +1351,19 @@ impl ScDblFinder {
         let use_fast = self.params.fast_cluster && self.n_cells >= FAST_CLUSTER_MIN_CELLS;
 
         let cluster_labels = if use_fast {
-            let n_centroids = (self.n_cells / 10).clamp(500, 5000);
+            let n_centroids = self.params.fast_cluster_params.n_centroids;
             let centroid_k = ((n_centroids as f32).sqrt() * 0.5).round() as usize;
 
             let mut centroid_knn_params = self.params.knn_params.clone();
             centroid_knn_params.k = centroid_k;
 
+            // extract some (but not all...)
             let fast_params = FastLouvainParams {
                 n_centroids,
-                kmeans_iters: 50,
                 knn_params: centroid_knn_params,
                 louvain_iters: self.params.cluster_iters,
+                batch_size: self.params.fast_cluster_params.batch_size,
+                kmeans_iters: self.params.fast_cluster_params.kmeans_iters,
                 ..Default::default()
             };
             if verbose {
