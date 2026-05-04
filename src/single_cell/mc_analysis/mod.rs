@@ -2,4 +2,5 @@
 //! counts from the meta-cells. Focus on 'bag-of-genes' methods, such as
 //! SCENIC, etc.
 
+pub mod aucell;
 pub mod scenic_metacells;

@@ -5,6 +5,10 @@ use rayon::prelude::*;
 
 use crate::prelude::*;
 
+//////////////////
+// Single cells //
+//////////////////
+
 /// Helper function to rank specifically `F16` type slices
 ///
 /// ### Params
@@ -13,7 +17,7 @@ use crate::prelude::*;
 ///
 /// ### Returns
 ///
-/// The ranked values as an f16 vector.
+/// The ranked values as an f32 vector.
 fn rank_f16(vec: &[F16]) -> Vec<f32> {
     let n = vec.len();
     if n == 0 {
@@ -206,6 +210,100 @@ pub fn rank_csr_chunk_vec(
         rank_within_rows,
     )
 }
+
+///////////////
+// MetaCells //
+///////////////
+
+/// Rank an f32 slice with average ranks for ties.
+///
+/// ### Params
+///
+/// * `vec` - Slice of `f32`
+///
+/// ### Returns
+///
+/// The ranked values as an f32 vector.
+pub fn rank_f32(vec: &[f32]) -> Vec<f32> {
+    let n = vec.len();
+    if n == 0 {
+        return Vec::new();
+    }
+
+    let mut indexed: Vec<(f32, usize)> = vec
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(i, v)| (v, i))
+        .collect();
+
+    indexed.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut ranks = vec![0.0_f32; n];
+    let mut i = 0;
+    while i < n {
+        let current = indexed[i].0;
+        let start = i;
+        while i < n && indexed[i].0 == current {
+            i += 1;
+        }
+        let avg_rank = (start + i + 1) as f32 / 2.0;
+        for j in start..i {
+            ranks[indexed[j].1] = avg_rank;
+        }
+    }
+    ranks
+}
+
+/// Rank genes within each cell for a CSR (cells x genes) layout, f32 data.
+///
+/// ### Params
+///
+/// * `indptr` - The row indices
+/// * `indices` - The column indices
+/// * `data` - The underlying normalised data
+/// * `n_cells` - Number of cells
+/// * `n_genes` - Number of genes
+pub fn rank_within_rows_f32(
+    indptr: &[usize],
+    indices: &[usize],
+    data: &[f32],
+    n_cells: usize,
+    n_genes: usize,
+) -> Vec<Vec<f32>> {
+    (0..n_cells)
+        .into_par_iter()
+        .map(|row_idx| {
+            let start = indptr[row_idx];
+            let end = indptr[row_idx + 1];
+            let num_nonzeros = end - start;
+            let num_zeros = n_genes - num_nonzeros;
+
+            if num_nonzeros == 0 {
+                let zero_rank = (1.0 + n_genes as f32) / 2.0;
+                return vec![zero_rank; n_genes];
+            }
+
+            if num_zeros == 0 {
+                return rank_f32(&data[start..end]);
+            }
+
+            let nonzero_ranks = rank_f32(&data[start..end]);
+            let zero_rank = (1.0 + num_zeros as f32) / 2.0;
+            let mut result = vec![zero_rank; n_genes];
+
+            for (i, &col) in indices[start..end].iter().enumerate() {
+                result[col] = nonzero_ranks[i] + num_zeros as f32;
+            }
+
+            result
+        })
+        .collect()
+}
+
+///////////
+// Tests //
+///////////
 
 #[cfg(test)]
 mod tests {

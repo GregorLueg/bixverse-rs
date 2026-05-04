@@ -548,7 +548,9 @@ impl BoostClassifier {
             );
 
             let start_graph = Instant::now();
-            let graph = knn_to_sparse_graph(&knn, true);
+            // for doublet detection symmetrisation is not very good... better
+            // to keep it false here
+            let graph = knn_to_sparse_graph(&knn, false);
             if verbose {
                 println!(
                     "Transformed kNN graph. Done in {:.2?}",

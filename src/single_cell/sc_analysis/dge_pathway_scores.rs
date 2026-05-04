@@ -241,12 +241,13 @@ pub fn calculate_dge_grps_mann_whitney(
 ///////////
 
 /// Enum describing the type of AUC to calculate
-#[derive(Clone, Debug)]
-enum AucType {
+#[derive(Clone, Debug, Default)]
+pub enum AucType {
+    /// AUC based on the traditional AUC/AUROC calculation
+    #[default]
+    ClassicalAuc,
     /// AUC based on the Mann-Whitney statistic
     MannWhitney,
-    /// AUC based on the traditional AUC/AUROC calculation
-    ClassicalAuc,
 }
 
 /// Parse the desired AUC type
@@ -258,7 +259,7 @@ enum AucType {
 /// ### Return
 ///
 /// The Option of the `AucType`
-fn parse_auc_type(s: &str) -> Option<AucType> {
+pub fn parse_auc_type(s: &str) -> Option<AucType> {
     match s.to_lowercase().as_str() {
         "auroc" => Some(AucType::ClassicalAuc),
         "wilcox" => Some(AucType::MannWhitney),
@@ -284,7 +285,7 @@ fn parse_auc_type(s: &str) -> Option<AucType> {
 /// ### Returns
 ///
 /// AUC for this gene set based on the Mann Whitney statistc.
-fn calculate_auc_per_cell_mw(ranks: &[f32], gene_set: &[usize]) -> f32 {
+pub fn calculate_auc_per_cell_mw(ranks: &[f32], gene_set: &[usize]) -> f32 {
     let n_genes = ranks.len();
     let n_in_set = gene_set.len();
     let n_not_in_set = n_genes - n_in_set;
@@ -314,7 +315,7 @@ fn calculate_auc_per_cell_mw(ranks: &[f32], gene_set: &[usize]) -> f32 {
 /// ### Returns
 ///
 /// AUC for this gene set based on the Mann Whitney statistc.
-fn calculate_auc_for_cell_auroc(ranks: &[f32], gene_set: &[usize]) -> f32 {
+pub fn calculate_auc_for_cell_auroc(ranks: &[f32], gene_set: &[usize]) -> f32 {
     let n_genes = ranks.len();
     let mut gene_set_ranks: Vec<f32> = gene_set.iter().map(|&idx| ranks[idx]).collect();
 
@@ -353,7 +354,8 @@ fn calculate_auc_for_cell_auroc(ranks: &[f32], gene_set: &[usize]) -> f32 {
 /// * `f_path` - File path to the cell-based binary file.
 /// * `gene_sets` - Slice of Vecs indicating the indices of the gene sets
 /// * `cells_to_keep` - Vector of indices with the cells to keep.
-/// * `auc_type` - String. One of `"auroc"` or `"wilcox`
+/// * `auc_type` - String. One of `"auroc"` or `"wilcox`. Weird strings default
+///   to AUROC calculations.
 /// * `verbose` - Controls verbosity
 ///
 /// ### Returns
@@ -366,9 +368,7 @@ pub fn calculate_aucell(
     auc_type: &str,
     verbose: bool,
 ) -> Result<Vec<Vec<f32>>, BixverseErrors> {
-    let auc_type = parse_auc_type(auc_type)
-        .ok_or_else(|| format!("Invalid AUC method: {}", auc_type))
-        .unwrap();
+    let auc_type = parse_auc_type(auc_type).unwrap_or_default();
 
     let start_read = Instant::now();
     let reader = ParallelSparseReader::new(f_path)?;
@@ -428,7 +428,8 @@ pub fn calculate_aucell(
 /// * `f_path` -  File path to the cell-based binary file.
 /// * `gene_sets` - Slice of Vecs indicating the indices of the gene sets
 /// * `cells_to_keep` - Vector of indices with the cells to keep.
-/// * `auc_type` - String. One of `"auroc"` or `"wilcox`
+/// * `auc_type` - String. One of `"auroc"` or `"wilcox`. Weird strings default
+///   to AUROC calculations.
 /// * `verbose` - Boolean. Controls the verbosity
 ///
 /// ### Returns
@@ -443,9 +444,7 @@ pub fn calculate_aucell_streaming(
 ) -> Result<Vec<Vec<f32>>, BixverseErrors> {
     const CHUNK_SIZE: usize = 50000;
 
-    let auc_type = parse_auc_type(auc_type)
-        .ok_or_else(|| format!("Invalid AUC method: {}", auc_type))
-        .unwrap();
+    let auc_type = parse_auc_type(auc_type).unwrap_or_default();
 
     let reader = ParallelSparseReader::new(f_path)?;
     let no_genes = reader.get_header().total_genes;
