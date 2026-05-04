@@ -274,7 +274,7 @@ fn relative_variance(log_norm_var: &[f32], mean: &[f32], window_size: usize) -> 
         return out;
     }
 
-    let w = if window_size % 2 == 0 {
+    let w = if window_size.is_multiple_of(2) {
         window_size + 1
     } else {
         window_size

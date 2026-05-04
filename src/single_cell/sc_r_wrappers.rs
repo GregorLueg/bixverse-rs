@@ -510,6 +510,7 @@ impl BoostParams {
     /// The `BoostParams` with all parameters set.
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let knn_params = KnnParams::from_r_list(r_list.clone())?;
+        let fast_cluster_params = FastLouvainParams::from_r_list(r_list.clone())?;
 
         let params_list: HashMap<&str, Robj> = r_list.try_into()?;
 
@@ -645,8 +646,11 @@ impl BoostParams {
             n_iters,
             p_thresh,
             voter_thresh,
+            // knn
             knn_params,
+            // fast cluster related stuff
             fast_cluster,
+            fast_cluster_params,
         })
     }
 }
@@ -669,6 +673,7 @@ impl ScDblFinderParams {
     /// `ScDblFinderParams` with all parameters set.
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let knn_params = KnnParams::from_r_list(r_list.clone())?;
+        let fast_cluster_params = FastLouvainParams::from_r_list(r_list.clone())?;
         let map: HashMap<&str, Robj> = r_list.try_into()?;
         let defaults = Self::default();
 
@@ -727,6 +732,7 @@ impl ScDblFinderParams {
                 .get("fast_cluster")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(defaults.fast_cluster),
+            fast_cluster_params,
             // kNN
             knn_params,
             // Iteration

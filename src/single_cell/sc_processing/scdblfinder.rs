@@ -64,6 +64,9 @@ pub struct ScDblFinderParams {
     pub cluster_iters: usize,
     /// Use fast clustering - useful on larger data sets.
     pub fast_cluster: bool,
+    /// [FastLouvainParams] for the fast clustering path. Gives control over
+    /// the k-means methods, batch size, etc.
+    pub fast_cluster_params: FastLouvainParams<f32>,
 
     // -- kNN --
     /// [KnnParams] for the various approximate nearest neighbour searches
@@ -122,6 +125,7 @@ impl Default for ScDblFinderParams {
             cluster_resolution: 1.0,
             cluster_iters: 10,
             fast_cluster: false,
+            fast_cluster_params: FastLouvainParams::default(),
             knn_params: KnnParams::default(),
             n_iterations: 3,
             n_trees: 200,

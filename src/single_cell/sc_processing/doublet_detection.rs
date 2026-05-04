@@ -64,8 +64,6 @@ pub struct BoostParams {
     pub boost_rate: f32,
     /// Whether to sample cell pairs with replacement.
     pub replace: bool,
-    /// Use fast clustering - useful on larger data sets.
-    pub fast_cluster: bool,
     /// Louvain resolution parameter
     pub resolution: f32,
     /// Number of Louvain iterations per clustering step.
@@ -81,6 +79,13 @@ pub struct BoostParams {
     /// [KnnParams] for the various approximate nearest neighbour searches
     /// in ann-search-rs
     pub knn_params: KnnParams,
+
+    // -- fast cluster --
+    /// Use fast clustering - useful on larger data sets.
+    pub fast_cluster: bool,
+    /// [FastLouvainParams] for the fast clustering path. Gives control over
+    /// the k-means methods, batch size, etc.
+    pub fast_cluster_params: FastLouvainParams<f32>,
 }
 
 /// Results from the Boost doublet detection algorithm.
@@ -500,7 +505,7 @@ impl BoostClassifier {
 
         let start_cluster = Instant::now();
         let communities = if use_fast {
-            let n_centroids = (((total_cells as f32).sqrt() * 2.0) as usize).clamp(500, usize::MAX);
+            let n_centroids = self.params.fast_cluster_params.n_centroids;
             let centroid_k = ((n_centroids as f32).sqrt() * 0.5).round() as usize;
 
             let mut centroid_knn_params = self.params.knn_params.clone();
