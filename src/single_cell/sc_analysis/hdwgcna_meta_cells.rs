@@ -108,23 +108,6 @@ pub fn identify_meta_cells(
 /// ### Returns
 ///
 /// The meta cell assignments
-pub fn assign_bootstrapped_meta_cells(
-    centres: &[usize],
-    nn_map: &[Vec<usize>],
-) -> Vec<Option<usize>> {
-    let mut assignments = vec![None; nn_map.len()];
-
-    for (mc_id, &c) in centres.iter().enumerate() {
-        assignments[c] = Some(mc_id);
-    }
-
-    for (mc_id, &c) in centres.iter().enumerate() {
-        for &nb in &nn_map[c] {
-            if assignments[nb].is_none() {
-                assignments[nb] = Some(mc_id);
-            }
-        }
-    }
-
-    assignments
+pub fn assign_bootstrapped_meta_cells(centres: &[usize], nn_map: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    centres.iter().map(|&c| nn_map[c].clone()).collect()
 }
