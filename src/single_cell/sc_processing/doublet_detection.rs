@@ -516,7 +516,7 @@ impl BoostClassifier {
             let fast_params = FastLouvainParams {
                 n_centroids,
                 knn_params: centroid_knn_params,
-                louvain_iters: self.params.cluster_iters,
+                louvain_iters: self.params.louvain_iters,
                 batch_size: self.params.fast_cluster_params.batch_size,
                 kmeans_iters: self.params.fast_cluster_params.kmeans_iters,
                 ..Default::default()
