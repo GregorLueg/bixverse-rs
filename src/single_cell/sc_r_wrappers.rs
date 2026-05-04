@@ -622,6 +622,13 @@ impl BoostParams {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
+        let km_type = std::string::String::from(
+            params_list
+                .get("km_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("minibatch"),
+        );
+
         Ok(Self {
             // processing
             log_transform,
@@ -651,6 +658,7 @@ impl BoostParams {
             // fast cluster related stuff
             fast_cluster,
             fast_cluster_params,
+            km_type,
         })
     }
 }
@@ -676,6 +684,12 @@ impl ScDblFinderParams {
         let fast_cluster_params = FastLouvainParams::from_r_list(r_list.clone())?;
         let map: HashMap<&str, Robj> = r_list.try_into()?;
         let defaults = Self::default();
+
+        let km_type = std::string::String::from(
+            map.get("km_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("minibatch"),
+        );
 
         Ok(Self {
             // Preprocessing
@@ -732,6 +746,7 @@ impl ScDblFinderParams {
                 .get("fast_cluster")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(defaults.fast_cluster),
+            km_type,
             fast_cluster_params,
             // kNN
             knn_params,

@@ -64,6 +64,8 @@ pub struct ScDblFinderParams {
     pub cluster_iters: usize,
     /// Use fast clustering - useful on larger data sets.
     pub fast_cluster: bool,
+    /// Which k-means clustering to use - standard or mini-batch
+    pub km_type: String,
     /// [FastLouvainParams] for the fast clustering path. Gives control over
     /// the k-means methods, batch size, etc.
     pub fast_cluster_params: FastLouvainParams<f32>,
@@ -125,6 +127,7 @@ impl Default for ScDblFinderParams {
             cluster_resolution: 1.0,
             cluster_iters: 10,
             fast_cluster: false,
+            km_type: "minibatch".to_string(),
             fast_cluster_params: FastLouvainParams::default(),
             knn_params: KnnParams::default(),
             n_iterations: 3,

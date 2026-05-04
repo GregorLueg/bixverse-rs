@@ -83,6 +83,8 @@ pub struct BoostParams {
     // -- fast cluster --
     /// Use fast clustering - useful on larger data sets.
     pub fast_cluster: bool,
+    /// Which k-means clustering to use - standard or mini-batch
+    pub km_type: String,
     /// [FastLouvainParams] for the fast clustering path. Gives control over
     /// the k-means methods, batch size, etc.
     pub fast_cluster_params: FastLouvainParams<f32>,
