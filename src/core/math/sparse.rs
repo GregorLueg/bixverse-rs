@@ -489,7 +489,7 @@ where
     ///
     /// The number of NNZ
     pub fn get_nnz(&self) -> usize {
-        self.data.len()
+        self.indices.len()
     }
 
     /// Return the second layer
