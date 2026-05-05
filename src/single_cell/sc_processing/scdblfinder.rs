@@ -1805,7 +1805,10 @@ impl ScDblFinder {
             predicted_doublets,
             doublet_scores: final_scores,
             cxds: min_max_scale(&obs_cxds_scores),
-            weighted: obs_intermediates.iter().map(|c| c.weighted).collect(),
+            weighted: obs_intermediates
+                .iter()
+                .map(|c: &CellKnnFeatures| c.weighted)
+                .collect(),
             selected_genes,
             threshold,
             cluster_labels,

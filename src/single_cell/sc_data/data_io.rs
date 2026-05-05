@@ -1355,6 +1355,23 @@ impl ParallelSparseReader {
             .expect("read_cells_parallel returned empty vec for single index"))
     }
 
+    /// Read a single cell by index
+    ///
+    /// ### Params
+    ///
+    /// * `index` - Cell index
+    ///
+    /// ### Return
+    ///
+    /// The CsrCellChunk of this cell
+    pub fn read_gene(&self, index: usize) -> Result<CscGeneChunk, BixverseErrors> {
+        Ok(self
+            .read_gene_parallel(&[index])?
+            .into_iter()
+            .next()
+            .expect("read_gene_parallel returned empty vec for single index"))
+    }
+
     /// Read in genes by indices in a multi-threaded manner
     ///
     /// ### Params
