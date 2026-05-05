@@ -325,7 +325,7 @@ fn merge_max_with_preserved(
     n: usize,
 ) -> CompressedSparseData2<f32, f32> {
     let mut entries: Vec<(usize, usize, f32)> =
-        Vec::with_capacity(pruned.data.len() + preserved.len() * 2);
+        Vec::with_capacity(pruned.indices.len() + preserved.len() * 2);
 
     for i in 0..n {
         let start = pruned.indptr[i];

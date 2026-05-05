@@ -1605,12 +1605,12 @@ where
     match matrix.cs_type {
         CompressedSparseFormat::Csr => {
             csr = matrix;
-            csc_owned = matrix.transform();
+            csc_owned = matrix.transform_single_layer(use_second_layer)?;
             csc = &csc_owned;
         }
         CompressedSparseFormat::Csc => {
             csc = matrix;
-            csr_owned = matrix.transform();
+            csr_owned = matrix.transform_single_layer(use_second_layer)?;
             csr = &csr_owned;
         }
     };
