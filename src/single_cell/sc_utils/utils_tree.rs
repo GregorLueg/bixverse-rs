@@ -55,12 +55,18 @@ impl QuantisedStore {
     /// ### Returns
     ///
     /// A fully populated `QuantisedStore`.
-    pub fn from_csc(mat: &CompressedSparseData2<u16, f32>, n_samples: usize) -> Self {
+    pub fn from_csc(
+        mat: &CompressedSparseData2<u16, f32>,
+        n_samples: usize,
+    ) -> Result<Self, BixverseErrors> {
         let n_features = mat.indptr.len() - 1;
         let mut data = vec![0u8; n_features * n_samples];
         let mut mins = Vec::with_capacity(n_features);
         let mut ranges = Vec::with_capacity(n_features);
-        let vals = mat.data_2.as_ref().unwrap();
+        let vals = mat
+            .data_2
+            .as_ref()
+            .ok_or(BixverseErrors::Data2NotAvailable)?;
 
         for j in 0..n_features {
             let s = mat.indptr[j];
@@ -93,13 +99,13 @@ impl QuantisedStore {
             }
         }
 
-        Self {
+        Ok(Self {
             data,
             n_samples,
             n_features,
             feature_min: mins,
             feature_range: ranges,
-        }
+        })
     }
 
     /// Build from per-feature column vectors.

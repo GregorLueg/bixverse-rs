@@ -135,18 +135,20 @@ pub fn scale_csc_chunk(chunk: &CscGeneChunk, no_cells: usize) -> (Vec<f32>, f32,
 pub fn sparse_csc_column_means(
     csc: &CompressedSparseData2<f32>,
     use_second_layer: bool,
-) -> Vec<f64> {
+) -> Result<Vec<f64>, BixverseErrors> {
     assert!(matches!(csc.cs_type, CompressedSparseFormat::Csc));
     let (n, m) = csc.shape;
     let n_f = n as f64;
     let values: &[f32] = if use_second_layer {
         csc.data_2
             .as_ref()
-            .expect("data_2 is None but use_second_layer is true")
+            .ok_or(BixverseErrors::Data2NotAvailable)?
+            .as_slice()
     } else {
         &csc.data
     };
-    (0..m)
+
+    let res = (0..m)
         .into_par_iter()
         .map(|j| {
             let start = csc.indptr[j];
@@ -154,7 +156,9 @@ pub fn sparse_csc_column_means(
             let sum: f64 = values[start..end].iter().map(|&x| x as f64).sum();
             sum / n_f
         })
-        .collect()
+        .collect();
+
+    Ok(res)
 }
 
 /// Calculates the standard deviation of a CSC sparse matrix chunk
@@ -172,18 +176,19 @@ pub fn sparse_csc_column_stds(
     csc: &CompressedSparseData2<f32>,
     col_means: &[f64],
     use_second_layer: bool,
-) -> Vec<f64> {
+) -> Result<Vec<f64>, BixverseErrors> {
     assert!(matches!(csc.cs_type, CompressedSparseFormat::Csc));
     let (n, m) = csc.shape;
     let n_f = n as f64;
     let values: &[f32] = if use_second_layer {
         csc.data_2
             .as_ref()
-            .expect("data_2 is None but use_second_layer is true")
+            .ok_or(BixverseErrors::Data2NotAvailable)?
+            .as_slice()
     } else {
         &csc.data
     };
-    (0..m)
+    let res = (0..m)
         .into_par_iter()
         .map(|j| {
             let start = csc.indptr[j];
@@ -202,7 +207,9 @@ pub fn sparse_csc_column_stds(
             let variance = (ss_nonzero + ss_zeros) / (n_f - 1.0);
             variance.max(0.0).sqrt().max(f64::EPSILON)
         })
-        .collect()
+        .collect();
+
+    Ok(res)
 }
 
 ///////////////
@@ -536,12 +543,12 @@ pub fn pca_on_sc_sparse(
         chunk.filter_selected_cells(&cell_set);
     });
 
-    let csc = from_gene_chunks::<f32>(&gene_chunks, n_cells);
+    let csc = from_gene_chunks::<f32>(gene_chunks, &DataLayerReturn::Norm, n_cells);
 
     let end_data_prep = start_data_prep.elapsed();
 
-    let col_means: Vec<f64> = sparse_csc_column_means(&csc, true);
-    let col_stds: Vec<f64> = sparse_csc_column_stds(&csc, &col_means, true);
+    let col_means: Vec<f64> = sparse_csc_column_means(&csc, true)?;
+    let col_stds: Vec<f64> = sparse_csc_column_stds(&csc, &col_means, true)?;
 
     if verbose {
         println!("Finished the data preparations : {:.2?}", end_data_prep);

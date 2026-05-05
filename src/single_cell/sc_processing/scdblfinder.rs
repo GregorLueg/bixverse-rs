@@ -1275,6 +1275,7 @@ impl ScDblFinder {
                 &self.cells_to_keep,
                 None,
                 self.params.n_genes,
+                verbose,
             )?
         } else {
             select_top_genes(

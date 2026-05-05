@@ -275,6 +275,20 @@ where
         transpose_sparse(self)
     }
 
+    /// Transform from CSC to CSR or vice versa, keeping only one data layer.
+    ///
+    /// ### Params
+    ///
+    /// * `use_second_layer` - If `true`, the output keeps `data_2` and `data`
+    ///   is empty. If `false`, the output keeps `data` and `data_2` is `None`.
+    ///
+    /// ### Returns
+    ///
+    /// The transformed/transposed version with only the requested layer.
+    pub fn transform_single_layer(&self, use_second_layer: bool) -> Result<Self, BixverseErrors> {
+        transpose_sparse_single_layer(self, use_second_layer)
+    }
+
     /// Transpose and convert
     ///
     /// This is a helper to deal with the h5ad madness. Takes in for example
@@ -580,6 +594,112 @@ where
         data_2: new_data2,
         shape: (nrow, ncol),
     }
+}
+
+/// Transpose a compressed sparse matrix (CSC→CSR or CSR→CSC), keeping only
+/// one of the two data layers.
+///
+/// Useful when the caller knows the other layer is dead weight (e.g. raw
+/// counts when only normalised counts are consumed downstream). Skips the
+/// scatter for the unused layer entirely.
+///
+/// ### Params
+///
+/// * `sparse_data` - The input compressed sparse matrix to be transposed.
+/// * `use_second_layer` - If `true`, only `data_2` is transposed and the
+///   output's `data` is empty. If `false`, only `data` is transposed and the
+///   output's `data_2` is `None`.
+///
+/// ### Returns
+///
+/// The transposed compressed sparse matrix with only the requested layer
+/// populated.
+pub fn transpose_sparse_single_layer<T, U>(
+    sparse_data: &CompressedSparseData2<T, U>,
+    use_second_layer: bool,
+) -> Result<CompressedSparseData2<T, U>, BixverseErrors>
+where
+    T: BixverseNumeric,
+    U: BixverseNumeric,
+{
+    let nnz = sparse_data.get_nnz();
+    let (nrow, ncol) = sparse_data.shape();
+
+    let (new_major, new_type) = match sparse_data.cs_type {
+        CompressedSparseFormat::Csc => (nrow, CompressedSparseFormat::Csr),
+        CompressedSparseFormat::Csr => (ncol, CompressedSparseFormat::Csc),
+    };
+
+    // first pass: count entries per new-major index
+    let mut new_indptr = vec![0usize; new_major + 1];
+    for &idx in &sparse_data.indices {
+        new_indptr[idx + 1] += 1;
+    }
+    for i in 0..new_major {
+        new_indptr[i + 1] += new_indptr[i];
+    }
+
+    let mut new_indices: Vec<usize> = vec![0usize; nnz];
+
+    // allocate only for the kept layer
+    let (mut new_data, mut new_data2): (Vec<T>, Option<Vec<U>>) = if use_second_layer {
+        (Vec::new(), Some(vec![U::default(); nnz]))
+    } else {
+        (vec![T::default(); nnz], None)
+    };
+
+    let old_major_len = sparse_data.indptr.len() - 1;
+
+    // second pass: scatter. Two branches to keep the inner loop tight.
+    if use_second_layer {
+        let src = sparse_data
+            .data_2
+            .as_ref()
+            .ok_or(BixverseErrors::Data2NotAvailable)?
+            .as_slice();
+        let dst = new_data2.as_mut().unwrap();
+        for major in 0..old_major_len {
+            for idx in sparse_data.indptr[major]..sparse_data.indptr[major + 1] {
+                let minor = sparse_data.indices[idx];
+                let pos = new_indptr[minor];
+                // SAFETY: pos < nnz guaranteed by the counting pass
+                unsafe {
+                    *new_indices.get_unchecked_mut(pos) = major;
+                    *dst.get_unchecked_mut(pos) = src[idx];
+                }
+                new_indptr[minor] += 1;
+            }
+        }
+    } else {
+        for major in 0..old_major_len {
+            for idx in sparse_data.indptr[major]..sparse_data.indptr[major + 1] {
+                let minor = sparse_data.indices[idx];
+                let pos = new_indptr[minor];
+                // SAFETY: pos < nnz guaranteed by the counting pass
+                unsafe {
+                    *new_indices.get_unchecked_mut(pos) = major;
+                    *new_data.get_unchecked_mut(pos) = sparse_data.data[idx];
+                }
+                new_indptr[minor] += 1;
+            }
+        }
+    }
+
+    // restore new_indptr: the scatter pass shifted every entry forward by its
+    // count, so we shift the whole array right by one position.
+    for i in (1..=new_major).rev() {
+        new_indptr[i] = new_indptr[i - 1];
+    }
+    new_indptr[0] = 0;
+
+    Ok(CompressedSparseData2 {
+        data: new_data,
+        indices: new_indices,
+        indptr: new_indptr,
+        cs_type: new_type,
+        data_2: new_data2,
+        shape: (nrow, ncol),
+    })
 }
 
 /// Transform COO stored data into CSR

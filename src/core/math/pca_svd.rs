@@ -259,16 +259,10 @@ where
     let n_iter = n_power_iter.unwrap_or(2);
 
     // consume the input: transform if needed, drop the original CSC.
-    let mut csr = match matrix.cs_type {
+    let csr = match matrix.cs_type {
         CompressedSparseFormat::Csr => matrix,
-        CompressedSparseFormat::Csc => matrix.transform(),
+        CompressedSparseFormat::Csc => matrix.transform_single_layer(use_second_layer)?,
     };
-
-    // when using normalised values, the raw layer is dead weight.
-    if use_second_layer {
-        csr.data.clear();
-        csr.data.shrink_to_fit();
-    }
 
     // pick the active data slice without materialising an f64 copy.
     // values are converted to F at access sites (free cast for f32 -> f64).

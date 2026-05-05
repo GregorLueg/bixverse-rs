@@ -381,12 +381,10 @@ pub fn pca_observed(
         }
     });
 
-    let csc = from_gene_chunks::<f32>(&gene_chunks, n_cells);
+    let csc = from_gene_chunks::<f32>(gene_chunks, &DataLayerReturn::Norm, n_cells);
 
-    drop(gene_chunks);
-
-    let col_means: Vec<f64> = sparse_csc_column_means(&csc, true);
-    let col_stds: Vec<f64> = sparse_csc_column_stds(&csc, &col_means, true);
+    let col_means: Vec<f64> = sparse_csc_column_means(&csc, true)?;
+    let col_stds: Vec<f64> = sparse_csc_column_stds(&csc, &col_means, true)?;
 
     let means_for_svd = if mean_center {
         Some(&col_means[..])
@@ -990,6 +988,7 @@ pub fn select_top_genes_streaming(
     cells_to_keep: &[usize],
     clusters: Option<&[usize]>,
     n_top: usize,
+    verbose: bool,
 ) -> Result<Vec<usize>, BixverseErrors> {
     let reader = ParallelSparseReader::new(f_path_gene)?;
     let n_total_genes = reader.get_header().total_genes;
@@ -1076,6 +1075,11 @@ pub fn select_top_genes_streaming(
                 })
                 .collect();
             means.extend(batch_means);
+        }
+
+        if verbose && batch_idx % 5 == 0 {
+            let progress = (batch_idx + 1) as f32 / num_batches as f32 * 100.0;
+            println!("  Progress: {:.1}%", progress);
         }
 
         drop(gene_chunks);

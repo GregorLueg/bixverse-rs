@@ -782,7 +782,7 @@ mod tests {
             shape: (3, 3),
         };
 
-        let full = QuantisedStore::from_csc(&csc, 3);
+        let full = QuantisedStore::from_csc(&csc, 3).unwrap();
         let subset = build_tf_quantised_store(&csc, &[0, 1, 2], 3);
 
         assert_eq!(full.n_features, subset.n_features);
@@ -803,7 +803,7 @@ mod tests {
             shape: (3, 3),
         };
 
-        let full = QuantisedStore::from_csc(&csc, 3);
+        let full = QuantisedStore::from_csc(&csc, 3).unwrap();
         let reversed = build_tf_quantised_store(&csc, &[2, 1, 0], 3);
 
         for i in 0..3 {

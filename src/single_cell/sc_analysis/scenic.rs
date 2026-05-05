@@ -3749,9 +3749,9 @@ pub fn run_scenic_grn(
         chunk.filter_selected_cells(&cell_set);
     });
 
-    let tf_csc: CompressedSparseData2<u16, f32> = from_gene_chunks::<u16>(&tf_chunks, n_cells);
-    let tf_data = QuantisedStore::from_csc(&tf_csc, n_cells);
-    drop(tf_chunks);
+    let tf_csc: CompressedSparseData2<u16, f32> =
+        from_gene_chunks::<u16>(tf_chunks, &DataLayerReturn::Norm, n_cells);
+    let tf_data = QuantisedStore::from_csc(&tf_csc, n_cells)?;
     drop(tf_csc);
 
     let n_tfs = tf_data.n_features;
@@ -3851,9 +3851,10 @@ pub fn run_scenic_grn_streaming(
         chunk.filter_selected_cells(&cell_set);
     });
 
-    let tf_csc: CompressedSparseData2<u16, f32> = from_gene_chunks::<u16>(&tf_chunks, n_cells);
-    let tf_data = QuantisedStore::from_csc(&tf_csc, n_cells);
-    drop(tf_chunks);
+    let tf_csc: CompressedSparseData2<u16, f32> =
+        from_gene_chunks::<u16>(tf_chunks, &DataLayerReturn::Norm, n_cells);
+    let tf_data = QuantisedStore::from_csc(&tf_csc, n_cells)?;
+
     drop(tf_csc);
 
     let n_tfs = tf_data.n_features;

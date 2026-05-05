@@ -1586,58 +1586,81 @@ impl ParallelSparseReader {
 // Chunks to sparse //
 //////////////////////
 
+#[derive(Clone, Debug, Copy)]
+/// Which of the data layers to return from a given chunk when transforming
+/// into a [CompressedSparseData2]
+pub enum DataLayerReturn {
+    /// Return both layers, i.e., raw and
+    BothLayers,
+    /// Return only the raw layer
+    Raw,
+    /// Return only the norm layer
+    Norm,
+}
+
 /// Converts a slice of gene chunks into a CSC sparse matrix
 ///
 /// Constructs a cells x genes compressed sparse column matrix from individual
-/// gene chunks. The primary data layer contains raw counts (saturated to u16
-/// for type compatibility - the normalised layer in data_2 is the one used
-/// by downstream analysis like PCA), whilst the secondary layer contains
-/// normalised counts converted to f32 precision.
+/// gene chunks. Depending on `data_layer`, the raw counts (saturated to u16
+/// for type compatibility) and/or the normalised counts (f32) are populated.
 ///
 /// ### Params
 ///
-/// * `chunks` - Slice of gene chunks to convert
+/// * `chunks` - Vector of gene chunks to convert
+/// * `data_layer` - Which data layer(s) to populate in the output
 /// * `n_cells` - Total number of cells in the dataset
 ///
 /// ### Returns
 ///
-/// A CSC-formatted sparse matrix with raw counts in the primary data layer
-/// and normalised counts in the secondary data layer
-pub fn from_gene_chunks<T>(chunks: &[CscGeneChunk], n_cells: usize) -> CompressedSparseData2<T, f32>
+/// A CSC-formatted sparse matrix with the requested layer(s) populated.
+pub fn from_gene_chunks<T>(
+    chunks: Vec<CscGeneChunk>,
+    data_layer: &DataLayerReturn,
+    n_cells: usize,
+) -> CompressedSparseData2<T, f32>
 where
     T: BixverseNumeric + From<u16>,
 {
     let n_genes = chunks.len();
-    let mut data = Vec::new();
-    let mut data_2 = Vec::new();
-    let mut indices = Vec::new();
-    let mut indptr = Vec::with_capacity(n_genes + 1);
+    let keep_raw = matches!(
+        data_layer,
+        DataLayerReturn::BothLayers | DataLayerReturn::Raw
+    );
+    let keep_norm = matches!(
+        data_layer,
+        DataLayerReturn::BothLayers | DataLayerReturn::Norm
+    );
 
+    let mut data: Vec<T> = Vec::new();
+    let mut data_2: Vec<f32> = Vec::new();
+    let mut indices: Vec<usize> = Vec::new();
+    let mut indptr = Vec::with_capacity(n_genes + 1);
     indptr.push(0);
 
     for chunk in chunks {
-        // Raw counts are pushed via From<u16>. For u32 raw counts that exceed
-        // u16::MAX this saturates, but the normalised layer (data_2) carries
-        // the actual values used by downstream analysis (PCA, module scoring).
-        match &chunk.data_raw {
-            RawCounts::U16(v) => {
-                for &val in v {
-                    data.push(T::from(val));
+        if keep_raw {
+            match &chunk.data_raw {
+                RawCounts::U16(v) => {
+                    for &val in v {
+                        data.push(T::from(val));
+                    }
                 }
-            }
-            RawCounts::U32(v) => {
-                for &val in v {
-                    data.push(T::from(val.min(u16::MAX as u32) as u16));
+                RawCounts::U32(v) => {
+                    for &val in v {
+                        data.push(T::from(val.min(u16::MAX as u32) as u16));
+                    }
                 }
             }
         }
-        for &val in &chunk.data_norm {
-            data_2.push(val.to_f32());
+        if keep_norm {
+            for &val in &chunk.data_norm {
+                data_2.push(val.to_f32());
+            }
         }
         for &idx in &chunk.indices {
             indices.push(idx as usize);
         }
-        indptr.push(data.len());
+        indptr.push(indices.len());
     }
 
     CompressedSparseData2 {
@@ -1645,7 +1668,7 @@ where
         indices,
         indptr,
         cs_type: CompressedSparseFormat::Csc,
-        data_2: Some(data_2),
+        data_2: if keep_norm { Some(data_2) } else { None },
         shape: (n_cells, n_genes),
     }
 }
@@ -1658,44 +1681,60 @@ where
 /// ### Params
 ///
 /// * `chunks` - Slice of cell chunks to convert
+/// * `data_layer` - Which data layer(s) to populate in the output
 /// * `n_genes` - Total number of genes in the dataset
 ///
 /// ### Returns
 ///
-/// A CSR-formatted sparse matrix with raw counts in the primary data layer
-/// and normalised counts in the secondary data layer
-pub fn from_cell_chunks<T>(chunks: &[CsrCellChunk], n_genes: usize) -> CompressedSparseData2<T, f32>
+/// A CSR-formatted sparse matrix with the requested layer(s) populated.
+pub fn from_cell_chunks<T>(
+    chunks: &[CsrCellChunk],
+    data_layer: &DataLayerReturn,
+    n_genes: usize,
+) -> CompressedSparseData2<T, f32>
 where
     T: BixverseNumeric + From<u16>,
 {
     let n_cells = chunks.len();
-    let mut data = Vec::new();
-    let mut data_2 = Vec::new();
-    let mut indices = Vec::new();
-    let mut indptr = Vec::with_capacity(n_cells + 1);
+    let keep_raw = matches!(
+        data_layer,
+        DataLayerReturn::BothLayers | DataLayerReturn::Raw
+    );
+    let keep_norm = matches!(
+        data_layer,
+        DataLayerReturn::BothLayers | DataLayerReturn::Norm
+    );
 
+    let mut data: Vec<T> = Vec::new();
+    let mut data_2: Vec<f32> = Vec::new();
+    let mut indices: Vec<usize> = Vec::new();
+    let mut indptr = Vec::with_capacity(n_cells + 1);
     indptr.push(0);
 
     for chunk in chunks {
-        match &chunk.data_raw {
-            RawCounts::U16(v) => {
-                for &val in v {
-                    data.push(T::from(val));
+        if keep_raw {
+            match &chunk.data_raw {
+                RawCounts::U16(v) => {
+                    for &val in v {
+                        data.push(T::from(val));
+                    }
                 }
-            }
-            RawCounts::U32(v) => {
-                for &val in v {
-                    data.push(T::from(val.min(u16::MAX as u32) as u16));
+                RawCounts::U32(v) => {
+                    for &val in v {
+                        data.push(T::from(val.min(u16::MAX as u32) as u16));
+                    }
                 }
             }
         }
-        for &val in &chunk.data_norm {
-            data_2.push(val.to_f32());
+        if keep_norm {
+            for &val in &chunk.data_norm {
+                data_2.push(val.to_f32());
+            }
         }
         for &idx in &chunk.indices {
             indices.push(idx as usize);
         }
-        indptr.push(data.len());
+        indptr.push(indices.len());
     }
 
     CompressedSparseData2 {
@@ -1703,7 +1742,7 @@ where
         indices,
         indptr,
         cs_type: CompressedSparseFormat::Csr,
-        data_2: Some(data_2),
+        data_2: if keep_norm { Some(data_2) } else { None },
         shape: (n_cells, n_genes),
     }
 }
