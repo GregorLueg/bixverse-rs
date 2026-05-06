@@ -57,10 +57,10 @@ impl FastLouvainResults {
     /// Union type of either `Vec<Vec<usize>>` or a vector of
     /// [FastLouvainGridResult].
     #[inline]
-    pub fn get_assignments(self) -> Either<Vec<Vec<usize>>, Vec<FastLouvainGridResult>> {
+    pub fn get_assignments(&self) -> Either<Vec<Vec<usize>>, Vec<FastLouvainGridResult>> {
         match self {
-            Self::Single { assignments, .. } => Either::Left(assignments),
-            Self::GridRes { assignments, .. } => Either::Right(assignments),
+            Self::Single { assignments, .. } => Either::Left(assignments.clone()),
+            Self::GridRes { assignments, .. } => Either::Right(assignments.clone()),
         }
     }
 
@@ -70,19 +70,19 @@ impl FastLouvainResults {
     ///
     /// Returns the centroid matrix if found; Error otherwise
     #[inline]
-    pub fn get_centroids(self) -> Result<Mat<f32>, BixverseErrors> {
+    pub fn get_centroids(&self) -> Result<Mat<f32>, BixverseErrors> {
         match self {
             Self::Single { centroids, .. } => {
                 if centroids.is_none() {
                     return Err(BixverseErrors::FastClusterNoCentroids);
                 }
-                Ok(centroids.unwrap())
+                Ok(centroids.to_owned().unwrap())
             }
             Self::GridRes { centroids, .. } => {
                 if centroids.is_none() {
                     return Err(BixverseErrors::FastClusterNoCentroids);
                 }
-                Ok(centroids.unwrap())
+                Ok(centroids.to_owned().unwrap())
             }
         }
     }
@@ -93,19 +93,19 @@ impl FastLouvainResults {
     ///
     /// Returns the k-means cluster assignment; Error otherwise
     #[inline]
-    pub fn get_k_mean_clusters(self) -> Result<Vec<usize>, BixverseErrors> {
+    pub fn get_k_mean_clusters(&self) -> Result<Vec<usize>, BixverseErrors> {
         match self {
             Self::Single { clusters, .. } => {
                 if clusters.is_none() {
                     return Err(BixverseErrors::FastClusterNoCentroids);
                 }
-                Ok(clusters.unwrap())
+                Ok(clusters.clone().unwrap())
             }
             Self::GridRes { clusters, .. } => {
                 if clusters.is_none() {
                     return Err(BixverseErrors::FastClusterNoCentroids);
                 }
-                Ok(clusters.unwrap())
+                Ok(clusters.clone().unwrap())
             }
         }
     }
