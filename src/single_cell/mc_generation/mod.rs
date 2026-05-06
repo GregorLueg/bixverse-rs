@@ -8,6 +8,7 @@
 //!   expanded in the MetaCells2 framework into Python and C++, please refer to
 //!   Ben‑Kiki, et al., Genome Biol. 2022.
 
+pub mod cell_aggregation_utils;
 pub mod hdwgcna_meta_cells;
 pub mod metacells2;
 pub mod seacells;
