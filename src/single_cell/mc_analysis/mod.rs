@@ -3,4 +3,5 @@
 //! SCENIC, etc.
 
 pub mod aucell;
+pub mod metacell_density;
 pub mod scenic_metacells;

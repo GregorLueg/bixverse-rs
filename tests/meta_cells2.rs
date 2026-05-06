@@ -8,7 +8,7 @@ use rand_distr::{Distribution, Poisson};
 use bixverse_rs::core::math::sparse::{
     CompressedSparseData2, CompressedSparseFormat, transpose_sparse,
 };
-use bixverse_rs::single_cell::sc_analysis::metacells2::{
+use bixverse_rs::single_cell::mc_generation::metacells2::{
     DeviantsParams, DissolveParams, MC2KnnParams, MetacellsParams, PartitionParams, Pile,
     SelectParams, SimilarityParams, build_knn_graph, choose_seeds, compute_candidate_metacells,
     compute_direct_metacells, compute_similarity, downsample_pile, find_deviant_cells,

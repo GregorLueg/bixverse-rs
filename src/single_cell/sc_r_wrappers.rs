@@ -5,20 +5,21 @@ use extendr_api::*;
 use std::collections::HashMap;
 
 use crate::core::math::sparse::parse_compressed_sparse_format;
+use crate::single_cell::mc_generation::{
+    hdwgcna_meta_cells::BootstrappedMetaCellParams, metacells2::params::*,
+    seacells::SEACellsParams, super_cells::SuperCellParams,
+};
 use crate::single_cell::sc_analysis::fast_clusters::FastLouvainParams;
 use crate::single_cell::sc_analysis::{
-    hdwgcna_meta_cells::BootstrappedMetaCellParams,
     hotspot::HotSpotParams,
-    metacells2::params::*,
     milo_r::MiloRParams,
     scenic::{
         ExtraTreesConfig, GradientBoostingConfig, RandomForestConfig, RegressionLearner,
         ScenicParams,
     },
-    seacells::SEACellsParams,
-    super_cells::SuperCellParams,
     vision::SignatureGenes,
 };
+
 use crate::single_cell::sc_batch_correction::{
     bbknn::BbknnParams, fast_mnn::FastMnnParams, harmony::HarmonyParams,
     harmony_v2::HarmonyParamsV2,

@@ -10,7 +10,7 @@ use rayon::prelude::*;
 use crate::prelude::*;
 use crate::single_cell::sc_processing::knn::{KnnParams, generate_knn_with_dist};
 
-use super::seacells::{
+use crate::single_cell::mc_generation::seacells::{
     compute_diffusion_kernel, determine_multiscale_space, diffusion_map_from_kernel,
 };
 
