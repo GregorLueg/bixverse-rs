@@ -1242,10 +1242,22 @@ impl SuperCellParams {
             .and_then(|v| v.as_real())
             .unwrap_or(50.0);
 
+        let use_kernel = params
+            .get("use_kernel")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+        let k_ith = params
+            .get("k_ith")
+            .and_then(|v| v.as_integer())
+            .map(|x| x as usize);
+
         Ok(Self {
             walk_length,
             graining_factor,
             knn_params,
+            use_kernel,
+            k_ith,
         })
     }
 }

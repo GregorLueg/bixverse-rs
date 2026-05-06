@@ -411,7 +411,7 @@ where
 /// ### Returns
 ///
 /// Vector of community labels, one per node
-fn finalize_labels(n: usize, parent: &[usize]) -> Vec<usize> {
+fn finalise_labels(n: usize, parent: &[usize]) -> Vec<usize> {
     let mut labels = vec![0usize; n];
     let mut label_map: FxHashMap<usize, usize> = FxHashMap::default();
     let mut next = 0usize;
@@ -549,7 +549,7 @@ where
                             walktrap_start.elapsed()
                         );
                     }
-                    return finalize_labels(n, &comm_parent);
+                    return finalise_labels(n, &comm_parent);
                 }
             }
         };
@@ -631,7 +631,7 @@ where
         );
     }
 
-    finalize_labels(n, &comm_parent)
+    finalise_labels(n, &comm_parent)
 }
 
 ///////////
