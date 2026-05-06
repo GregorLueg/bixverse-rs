@@ -7,6 +7,7 @@
 //! (hypergeometric test). Across iterations, doublets are called by majority
 //! voting on per-iteration significance.
 
+use either::Either;
 use rand::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::time::Instant;
@@ -519,6 +520,7 @@ impl BoostClassifier {
                 louvain_iters: self.params.louvain_iters,
                 batch_size: self.params.fast_cluster_params.batch_size,
                 kmeans_iters: self.params.fast_cluster_params.kmeans_iters,
+                multi_level_louvain: false,
                 ..Default::default()
             };
 
@@ -538,12 +540,19 @@ impl BoostClassifier {
                 &fast_params,
                 false,
                 false,
-                false,
                 seed,
                 verbose,
             )?;
 
-            res[0].clone()
+            // quick helper to extract the assignments
+            let get_assignments = |x: FastLouvainResults| -> Vec<Vec<usize>> {
+                match x.get_assignments() {
+                    Either::Left(v) => v,
+                    Either::Right(_) => panic!("expected Single variant"),
+                }
+            };
+
+            get_assignments(res)[0].clone()
         } else {
             let k_adj = adjusted_k(self.params.knn_params.k, self.n_cells, self.n_cells_sim);
             if verbose {

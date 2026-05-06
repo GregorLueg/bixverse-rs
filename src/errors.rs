@@ -211,19 +211,33 @@ pub enum BixverseErrors {
     // -- Metacells2 --
     /// User needs to have generated select_features prior to the
     /// compute_similarity part.
+    #[cfg(feature = "single-cell")]
     #[error("select_features must be called before compute_similarity!")]
     SelectFeaturesBeforeSimilariy,
 
     // -- Seacells --
     /// The SEACells kernel matrix has not been yet constructed.
+    #[cfg(feature = "single-cell")]
     #[error("SEACells: You must construct the kernel matrix first.")]
     SEACellsKernelMatrixMissing,
 
     /// The SEACells archetypes have not yet been identified.
+    #[cfg(feature = "single-cell")]
     #[error("SEACells: You must first initialise the Archetypes.")]
     SEACellsArchetypesMissing,
 
     /// The SEACells archetypes have not yet been identified.
+    #[cfg(feature = "single-cell")]
     #[error("SEACells: The model has not been fitted yet. Please run .fit()")]
     SEACellsModelNotFitted,
+    // -- FastCluster --
+    /// The Fast cluster results do not contain k-means cluster assignments
+    #[cfg(feature = "single-cell")]
+    #[error("The fast cluster results were generated without any k means cluster assignments")]
+    FastClusterNoKmeansAssignments,
+
+    /// The Fast cluster results do not contain k-means centroids
+    #[cfg(feature = "single-cell")]
+    #[error("The fast cluster results were generated without any centroids")]
+    FastClusterNoCentroids,
 }

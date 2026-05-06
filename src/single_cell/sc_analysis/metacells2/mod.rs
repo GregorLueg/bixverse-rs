@@ -55,7 +55,6 @@ pub use similarity::compute_similarity;
 ///
 /// * `f_path` - File path to the cell-based binary file.
 /// * `cells_to_include` - Indices of the cells to include.
-/// * `reader` - Source of cell counts; must be cell-based.
 /// * `params` - MC2 parameters.
 /// * `seed` - Master RNG seed.
 /// * `verbose` - If true, prints per-stage timing to stdout.

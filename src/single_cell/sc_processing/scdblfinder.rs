@@ -2,6 +2,7 @@
 //! F1000Res, 2021. Under the hood this uses the internal implementation of
 //! lightGBM.
 
+use either::Either;
 use faer::{Mat, MatRef};
 use rand::distr::{Distribution, weighted::WeightedIndex};
 use rand::prelude::*;
@@ -1388,19 +1389,26 @@ impl ScDblFinder {
 
             let res = vec![self.params.cluster_resolution];
 
-            let membership = fast_louvain_clusters(
+            let res = fast_louvain_clusters(
                 obs_pca.as_ref(),
                 &self.params.km_type,
                 &res,
                 &fast_params,
                 false,
                 false,
-                true,
                 seed,
                 verbose,
             )?;
 
-            membership[0].clone()
+            // quick helper to extract the assignments
+            let get_assignments = |x: FastLouvainResults| -> Vec<Vec<usize>> {
+                match x.get_assignments() {
+                    Either::Left(v) => v,
+                    Either::Right(_) => panic!("expected Single variant"),
+                }
+            };
+
+            get_assignments(res)[0].clone()
         } else {
             let obs_k = if self.params.knn_params.k == 0 {
                 (((self.n_cells as f32).sqrt() * 0.5).round() as usize)

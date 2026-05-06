@@ -835,7 +835,13 @@ impl FastLouvainParams<f32> {
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let knn_params = KnnParams::from_r_list(r_list.clone())?;
         let params: HashMap<&str, Robj> = r_list.try_into()?;
-        let defaults = Self::default();
+        let defaults: FastLouvainParams<f32> = Self::default();
+
+        // knn
+        let same_weight = params
+            .get("same_weight")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.same_weight);
 
         // k means
         let n_centroids = params
@@ -874,6 +880,10 @@ impl FastLouvainParams<f32> {
             .and_then(|v| v.as_integer())
             .map(|v| v as usize)
             .unwrap_or(defaults.louvain_iters);
+        let multi_level_louvain = params
+            .get("multi_level_louvain")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.multi_level_louvain);
 
         // snn
         let full_snn = params
@@ -904,6 +914,8 @@ impl FastLouvainParams<f32> {
             full_snn,
             pruning,
             snn_similarity,
+            multi_level_louvain,
+            same_weight,
         })
     }
 }

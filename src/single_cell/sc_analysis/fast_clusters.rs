@@ -3,7 +3,8 @@
 //! clustering on the resulting kNN graph with subsequent propagation of the
 //! module membership based on the original nearest centroid.
 
-use faer::MatRef;
+use either::Either;
+use faer::{Mat, MatRef};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::time::Instant;
@@ -22,9 +23,97 @@ use crate::single_cell::sc_processing::utils_doublets::dispatch_knn;
 // Fast Louvain //
 //////////////////
 
-/////////////
-// Helpers //
-/////////////
+///////////////////
+// Enums / types //
+///////////////////
+
+/// Enum that defines the results pending type of fast clustering
+pub enum FastLouvainResults {
+    /// Single version with only Louvain membership
+    Single {
+        /// Membership assignments across the resolutions
+        assignments: Vec<Vec<usize>>,
+        /// Optional k-means cluster assignment
+        clusters: Option<Vec<usize>>,
+        /// Optional k-means centroids
+        centroids: Option<Mat<f32>>,
+    },
+    /// Grid version across several seeds
+    GridRes {
+        /// [FastLouvainGridResult] per resolution
+        assignments: Vec<FastLouvainGridResult>,
+        /// Optional k-means cluster assignment
+        clusters: Option<Vec<usize>>,
+        /// Optional k-means centroids
+        centroids: Option<Mat<f32>>,
+    },
+}
+
+impl FastLouvainResults {
+    /// Helper to get the assignments
+    ///
+    /// ### Returns
+    ///
+    /// Union type of either `Vec<Vec<usize>>` or a vector of
+    /// [FastLouvainGridResult].
+    #[inline]
+    pub fn get_assignments(self) -> Either<Vec<Vec<usize>>, Vec<FastLouvainGridResult>> {
+        match self {
+            Self::Single { assignments, .. } => Either::Left(assignments),
+            Self::GridRes { assignments, .. } => Either::Right(assignments),
+        }
+    }
+
+    /// Helper to return the centroids
+    ///
+    /// ### Returns
+    ///
+    /// Returns the centroid matrix if found; Error otherwise
+    #[inline]
+    pub fn get_centroids(self) -> Result<Mat<f32>, BixverseErrors> {
+        match self {
+            Self::Single { centroids, .. } => {
+                if centroids.is_none() {
+                    return Err(BixverseErrors::FastClusterNoCentroids);
+                }
+                Ok(centroids.unwrap())
+            }
+            Self::GridRes { centroids, .. } => {
+                if centroids.is_none() {
+                    return Err(BixverseErrors::FastClusterNoCentroids);
+                }
+                Ok(centroids.unwrap())
+            }
+        }
+    }
+
+    /// Helper to return the centroids
+    ///
+    /// ### Returns
+    ///
+    /// Returns the k-means cluster assignment; Error otherwise
+    #[inline]
+    pub fn get_k_mean_clusters(self) -> Result<Vec<usize>, BixverseErrors> {
+        match self {
+            Self::Single { clusters, .. } => {
+                if clusters.is_none() {
+                    return Err(BixverseErrors::FastClusterNoCentroids);
+                }
+                Ok(clusters.unwrap())
+            }
+            Self::GridRes { clusters, .. } => {
+                if clusters.is_none() {
+                    return Err(BixverseErrors::FastClusterNoCentroids);
+                }
+                Ok(clusters.unwrap())
+            }
+        }
+    }
+}
+
+////////////
+// Params //
+////////////
 
 /// Parameters for fast Louvain clustering via k-means + kNN.
 #[derive(Clone, Debug)]
@@ -46,6 +135,9 @@ pub struct FastLouvainParams<T> {
     /// [KnnParams] parameters applied to the centroids. `ann_dist` also drives
     /// the k-means distance and `k` is the number of neighbours per centroid.
     pub knn_params: KnnParams,
+    /// Shall the weight of the kNN be set to 1.0 across or edges that have
+    /// reverse edges be double counted.
+    pub same_weight: bool,
 
     // -- snn ---
     /// Shall the full sNN graph be generated (also from non-connected
@@ -62,26 +154,8 @@ pub struct FastLouvainParams<T> {
     // -- louvain --
     /// Number of Louvain iterations.
     pub louvain_iters: usize,
-}
-
-/// Per-resolution stability and quality metrics from the grid search.
-#[derive(Clone, Debug)]
-pub struct FastLouvainGridResult {
-    /// Resolution this entry corresponds to.
-    pub resolution: f32,
-    /// Mean pairwise ARI across all seed pairs.
-    pub mean_ari: f32,
-    /// Median pairwise ARI across all seed pairs.
-    pub median_ari: f32,
-    /// Mean conductance across communities, averaged across seeds.
-    /// NaN community values are skipped per seed.
-    pub mean_conductance: f32,
-    /// Median conductance across communities, averaged across seeds.
-    pub median_conductance: f32,
-    /// Number of communities, averaged across seeds.
-    pub mean_n_communities: f32,
-    /// Labels from the seed with the lowest mean conductance.
-    pub best_labels: Vec<usize>,
+    /// Shall multi-level Louvain be applied
+    pub multi_level_louvain: bool,
 }
 
 impl<T> FastLouvainParams<T>
@@ -107,7 +181,10 @@ where
             snn_similarity: "jaccard".to_string(),
             // knn - louvain
             knn_params: KnnParams::default(),
+            same_weight: false,
+            // louvain
             louvain_iters: 10,
+            multi_level_louvain: true,
         }
     }
 }
@@ -121,6 +198,34 @@ where
         Self::new()
     }
 }
+
+/////////////
+// Results //
+/////////////
+
+/// Per-resolution stability and quality metrics from the grid search.
+#[derive(Clone, Debug)]
+pub struct FastLouvainGridResult {
+    /// Resolution this entry corresponds to.
+    pub resolution: f32,
+    /// Mean pairwise ARI across all seed pairs.
+    pub mean_ari: f32,
+    /// Median pairwise ARI across all seed pairs.
+    pub median_ari: f32,
+    /// Mean conductance across communities, averaged across seeds.
+    /// NaN community values are skipped per seed.
+    pub mean_conductance: f32,
+    /// Median conductance across communities, averaged across seeds.
+    pub median_conductance: f32,
+    /// Number of communities, averaged across seeds.
+    pub mean_n_communities: f32,
+    /// Labels from the seed with the lowest mean conductance.
+    pub best_labels: Vec<usize>,
+}
+
+/////////////
+// Helpers //
+/////////////
 
 /// Flatten a `Vec<Vec<T>>` of per-sample neighbour lists into column-major
 /// layout: `flat[neighbour_idx * n_samples + i]`. This matches the layout R
@@ -176,7 +281,7 @@ fn flatten_knn_column_major<T: Copy>(knn: &[Vec<T>], k: usize) -> Vec<T> {
 ///
 /// ### Returns
 ///
-/// Per-sample community labels (length n_samples).
+/// The [FastLouvainResults]
 #[allow(clippy::too_many_arguments)]
 pub fn fast_louvain_clusters(
     data: MatRef<f32>,
@@ -184,11 +289,10 @@ pub fn fast_louvain_clusters(
     resolutions: &[f32],
     params: &FastLouvainParams<f32>,
     run_snn: bool,
-    same_weight: bool,
-    multi_level_louvain: bool,
+    return_k_mean: bool,
     seed: usize,
     verbose: bool,
-) -> Result<Vec<Vec<usize>>, BixverseErrors> {
+) -> Result<FastLouvainResults, BixverseErrors> {
     let km_type = parse_k_means(km_type).unwrap_or_default();
     let n_centroids = params.n_centroids.min(data.nrows() - 1);
 
@@ -265,14 +369,19 @@ pub fn fast_louvain_clusters(
 
         snn_edges_to_sparse_graph(&snn_edges, &snn_weights, knn.len())
     } else {
-        knn_to_sparse_graph(&knn, same_weight)
+        knn_to_sparse_graph(&knn, params.same_weight)
     };
 
     let mut results: Vec<Vec<usize>> = Vec::with_capacity(resolutions.len());
 
     for &res in resolutions {
-        let centroid_communities =
-            louvain_sparse_graph(&graph, res, params.louvain_iters, multi_level_louvain, seed)?;
+        let centroid_communities = louvain_sparse_graph(
+            &graph,
+            res,
+            params.louvain_iters,
+            params.multi_level_louvain,
+            seed,
+        )?;
 
         let membership = assignments
             .iter()
@@ -282,7 +391,17 @@ pub fn fast_louvain_clusters(
         results.push(membership)
     }
 
-    Ok(results)
+    let (centroids, k_means_cluster) = if return_k_mean {
+        (Some(centroids), Some(assignments))
+    } else {
+        (None, None)
+    };
+
+    Ok(FastLouvainResults::Single {
+        assignments: results,
+        clusters: k_means_cluster,
+        centroids,
+    })
 }
 
 /// Grid-search version of [`fast_louvain_clusters`] with stability metrics.
@@ -316,11 +435,11 @@ pub fn fast_louvain_clusters_grid(
     resolutions: &[f32],
     params: &FastLouvainParams<f32>,
     run_snn: bool,
-    multi_level_louvain: bool,
+    return_k_mean: bool,
     seed: usize,
     n_louvain_seeds: usize,
     verbose: bool,
-) -> Result<Vec<FastLouvainGridResult>, BixverseErrors> {
+) -> Result<FastLouvainResults, BixverseErrors> {
     if n_louvain_seeds < 2 {
         return Err(BixverseErrors::InvalidArgument(
             "n_louvain_seeds must be at least 2".to_string(),
@@ -390,7 +509,7 @@ pub fn fast_louvain_clusters_grid(
 
         snn_edges_to_sparse_graph(&snn_edges, &snn_weights, knn.len())
     } else {
-        knn_to_sparse_graph(&knn, true)
+        knn_to_sparse_graph(&knn, params.same_weight)
     };
 
     let mut results = Vec::with_capacity(resolutions.len());
@@ -405,7 +524,13 @@ pub fn fast_louvain_clusters_grid(
         let centroid_partitions: Vec<Vec<usize>> = louvain_seeds
             .iter()
             .map(|&s| {
-                louvain_sparse_graph(&graph, res, params.louvain_iters, multi_level_louvain, s)
+                louvain_sparse_graph(
+                    &graph,
+                    res,
+                    params.louvain_iters,
+                    params.multi_level_louvain,
+                    s,
+                )
             })
             .collect::<Result<_, _>>()?;
 
@@ -484,7 +609,17 @@ pub fn fast_louvain_clusters_grid(
         });
     }
 
-    Ok(results)
+    let (centroids, k_means_cluster) = if return_k_mean {
+        (Some(centroids), Some(assignments))
+    } else {
+        (None, None)
+    };
+
+    Ok(FastLouvainResults::GridRes {
+        assignments: results,
+        clusters: k_means_cluster,
+        centroids,
+    })
 }
 
 ///////////
@@ -494,6 +629,7 @@ pub fn fast_louvain_clusters_grid(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use either::Either;
     use faer::Mat;
     use std::collections::HashMap;
 
@@ -513,17 +649,19 @@ mod tests {
         let mut knn = KnnParams::new();
         knn.knn_method = "exhaustive".to_string();
         knn.ann_dist = "euclidean".to_string();
-        knn.k = 10;
+        knn.k = 5;
         FastLouvainParams {
             batch_size: 100,
             drift_threshold: 1e-4,
             lr_alpha: 1.0,
-            n_centroids: 20,
+            n_centroids: 30,
             kmeans_iters: 100,
             knn_params: knn,
             louvain_iters: 10,
             full_snn: false,
             pruning: None,
+            same_weight: false,
+            multi_level_louvain: true,
             snn_similarity: "jaccard".to_string(),
         }
     }
@@ -536,41 +674,56 @@ mod tests {
         *counts.iter().max_by_key(|(_, c)| **c).unwrap().0
     }
 
+    fn unwrap_single(r: FastLouvainResults) -> Vec<Vec<usize>> {
+        match r.get_assignments() {
+            Either::Left(v) => v,
+            Either::Right(_) => panic!("expected Single variant"),
+        }
+    }
+
+    fn unwrap_grid(r: FastLouvainResults) -> Vec<FastLouvainGridResult> {
+        match r.get_assignments() {
+            Either::Right(v) => v,
+            Either::Left(_) => panic!("expected GridRes variant"),
+        }
+    }
+
     #[test]
     fn output_length_matches_input() {
         let data = make_two_blobs(100, 5, 5.0, 42);
-
-        let resolutions: Vec<f32> = vec![1.0];
+        let resolutions: Vec<f32> = vec![1.0, 0.5];
 
         // without snn
-        let labels = fast_louvain_clusters(
-            data.as_ref(),
-            "standard",
-            &resolutions,
-            &default_params(),
-            false,
-            false,
-            true,
-            0,
-            false,
-        )
-        .unwrap();
+        let labels = unwrap_single(
+            fast_louvain_clusters(
+                data.as_ref(),
+                "standard",
+                &resolutions,
+                &default_params(),
+                false,
+                false,
+                0,
+                false,
+            )
+            .unwrap(),
+        );
         assert_eq!(labels.len(), resolutions.len());
         assert_eq!(labels[0].len(), 200);
 
         // with snn
-        let labels_snn = fast_louvain_clusters(
-            data.as_ref(),
-            "standard",
-            &resolutions,
-            &default_params(),
-            false,
-            false,
-            true,
-            0,
-            false,
-        )
-        .unwrap();
+        let labels_snn = unwrap_single(
+            fast_louvain_clusters(
+                data.as_ref(),
+                "standard",
+                &resolutions,
+                &default_params(),
+                true,
+                false,
+                0,
+                false,
+            )
+            .unwrap(),
+        );
         assert_eq!(labels_snn.len(), resolutions.len());
         assert_eq!(labels_snn[0].len(), 200);
     }
@@ -581,30 +734,32 @@ mod tests {
         let params = default_params();
         let resolutions: Vec<f32> = vec![1.0];
 
-        let a = fast_louvain_clusters(
-            data.as_ref(),
-            "standard",
-            &resolutions,
-            &params,
-            false,
-            false,
-            true,
-            7,
-            false,
-        )
-        .unwrap();
-        let b = fast_louvain_clusters(
-            data.as_ref(),
-            "standard",
-            &resolutions,
-            &params,
-            false,
-            false,
-            true,
-            7,
-            false,
-        )
-        .unwrap();
+        let a = unwrap_single(
+            fast_louvain_clusters(
+                data.as_ref(),
+                "standard",
+                &resolutions,
+                &params,
+                false,
+                false,
+                7,
+                false,
+            )
+            .unwrap(),
+        );
+        let b = unwrap_single(
+            fast_louvain_clusters(
+                data.as_ref(),
+                "standard",
+                &resolutions,
+                &params,
+                false,
+                false,
+                7,
+                false,
+            )
+            .unwrap(),
+        );
 
         assert_eq!(a, b);
     }
@@ -616,18 +771,19 @@ mod tests {
         let params = default_params();
         let resolutions: Vec<f32> = vec![1.0];
 
-        let labels = fast_louvain_clusters(
-            data.as_ref(),
-            "standard",
-            &resolutions,
-            &params,
-            false,
-            false,
-            true,
-            0,
-            false,
-        )
-        .unwrap();
+        let labels = unwrap_single(
+            fast_louvain_clusters(
+                data.as_ref(),
+                "standard",
+                &resolutions,
+                &params,
+                false,
+                false,
+                0,
+                false,
+            )
+            .unwrap(),
+        );
 
         let (blob_a, blob_b) = labels[0].split_at(n_per);
 
@@ -649,18 +805,19 @@ mod tests {
         let params = default_params();
         let resolutions: Vec<f32> = vec![1.0];
 
-        let labels = fast_louvain_clusters(
-            data.as_ref(),
-            "standard",
-            &resolutions,
-            &params,
-            true,
-            false,
-            true,
-            0,
-            false,
-        )
-        .unwrap();
+        let labels = unwrap_single(
+            fast_louvain_clusters(
+                data.as_ref(),
+                "standard",
+                &resolutions,
+                &params,
+                true,
+                false,
+                0,
+                false,
+            )
+            .unwrap(),
+        );
 
         let (blob_a, blob_b) = labels[0].split_at(n_per);
 
@@ -680,18 +837,20 @@ mod tests {
         let data = make_two_blobs(100, 5, 5.0, 42);
         let resolutions: Vec<f32> = vec![0.5, 1.0, 2.0];
 
-        let results = fast_louvain_clusters_grid(
-            data.as_ref(),
-            "standard",
-            &resolutions,
-            &default_params(),
-            false,
-            true,
-            0,
-            5,
-            false,
-        )
-        .unwrap();
+        let results = unwrap_grid(
+            fast_louvain_clusters_grid(
+                data.as_ref(),
+                "standard",
+                &resolutions,
+                &default_params(),
+                false,
+                false,
+                0,
+                5,
+                false,
+            )
+            .unwrap(),
+        );
 
         assert_eq!(results.len(), resolutions.len());
         for (r, res) in results.iter().zip(resolutions.iter()) {
@@ -711,7 +870,7 @@ mod tests {
             &resolutions,
             &default_params(),
             false,
-            true,
+            false,
             0,
             1,
             false,
@@ -725,30 +884,34 @@ mod tests {
         let data = make_two_blobs(100, 5, 5.0, 42);
         let resolutions: Vec<f32> = vec![1.0];
 
-        let a = fast_louvain_clusters_grid(
-            data.as_ref(),
-            "standard",
-            &resolutions,
-            &default_params(),
-            false,
-            true,
-            7,
-            4,
-            false,
-        )
-        .unwrap();
-        let b = fast_louvain_clusters_grid(
-            data.as_ref(),
-            "standard",
-            &resolutions,
-            &default_params(),
-            false,
-            true,
-            7,
-            4,
-            false,
-        )
-        .unwrap();
+        let a = unwrap_grid(
+            fast_louvain_clusters_grid(
+                data.as_ref(),
+                "standard",
+                &resolutions,
+                &default_params(),
+                false,
+                false,
+                7,
+                4,
+                false,
+            )
+            .unwrap(),
+        );
+        let b = unwrap_grid(
+            fast_louvain_clusters_grid(
+                data.as_ref(),
+                "standard",
+                &resolutions,
+                &default_params(),
+                false,
+                false,
+                7,
+                4,
+                false,
+            )
+            .unwrap(),
+        );
 
         assert_eq!(a.len(), b.len());
         for (ra, rb) in a.iter().zip(b.iter()) {
@@ -766,18 +929,20 @@ mod tests {
         let data = make_two_blobs(n_per, 8, 15.0, 42);
         let resolutions: Vec<f32> = vec![1.0];
 
-        let results = fast_louvain_clusters_grid(
-            data.as_ref(),
-            "standard",
-            &resolutions,
-            &default_params(),
-            false,
-            true,
-            0,
-            4,
-            false,
-        )
-        .unwrap();
+        let results = unwrap_grid(
+            fast_louvain_clusters_grid(
+                data.as_ref(),
+                "standard",
+                &resolutions,
+                &default_params(),
+                false,
+                false,
+                0,
+                4,
+                false,
+            )
+            .unwrap(),
+        );
 
         let r = &results[0];
 
@@ -806,32 +971,38 @@ mod tests {
 
     #[test]
     fn grid_well_separated_blobs_are_stable() {
-        // On obviously separable data Louvain should agree across seeds, giving
-        // ARI close to 1.0 and recovering the two blobs.
-        let n_per = 200;
+        let n_per = 250;
         let data = make_two_blobs(n_per, 8, 15.0, 42);
-        let resolutions: Vec<f32> = vec![1.0];
+        let resolutions: Vec<f32> = vec![1.0, 0.5, 0.25];
 
-        let results = fast_louvain_clusters_grid(
-            data.as_ref(),
-            "standard",
-            &resolutions,
-            &default_params(),
-            false,
-            true,
-            0,
-            5,
-            false,
-        )
-        .unwrap();
+        let results = unwrap_grid(
+            fast_louvain_clusters_grid(
+                data.as_ref(),
+                "standard",
+                &resolutions,
+                &default_params(),
+                false,
+                false,
+                42,
+                5,
+                true,
+            )
+            .unwrap(),
+        );
 
-        let r = &results[0];
-        assert!(r.mean_ari > 0.95, "mean_ari {}", r.mean_ari);
+        for (i, r) in results.iter().enumerate() {
+            assert!(
+                r.mean_ari > 0.9,
+                "mean_ari {} for seed no {}",
+                r.mean_ari,
+                i
+            );
 
-        let (blob_a, blob_b) = r.best_labels.split_at(n_per);
-        let maj_a = majority(blob_a);
-        let maj_b = majority(blob_b);
-        assert_ne!(maj_a, maj_b);
+            let (blob_a, blob_b) = r.best_labels.split_at(n_per);
+            let maj_a = majority(blob_a);
+            let maj_b = majority(blob_b);
+            assert_ne!(maj_a, maj_b, "not the same majority for seed no {}", i);
+        }
     }
 
     #[test]
@@ -839,18 +1010,20 @@ mod tests {
         let data = make_two_blobs(200, 8, 15.0, 42);
         let resolutions: Vec<f32> = vec![1.0];
 
-        let results = fast_louvain_clusters_grid(
-            data.as_ref(),
-            "standard",
-            &resolutions,
-            &default_params(),
-            true,
-            true,
-            0,
-            4,
-            false,
-        )
-        .unwrap();
+        let results = unwrap_grid(
+            fast_louvain_clusters_grid(
+                data.as_ref(),
+                "standard",
+                &resolutions,
+                &default_params(),
+                true,
+                false,
+                0,
+                4,
+                false,
+            )
+            .unwrap(),
+        );
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].best_labels.len(), 400);

@@ -24,27 +24,28 @@ fn rank_f16(vec: &[F16]) -> Vec<f32> {
         return Vec::new();
     }
 
-    let mut indexed_values: Vec<(F16, usize)> = vec
+    // F16 bit pattern is monotonic in value for non-negative finite values
+    // (IEEE 754 sign-magnitude). Normalised counts are >= 0, so sorting by
+    // raw u16 bits matches sorting by value, with a cheaper integer compare.
+    let mut indexed: Vec<(u16, usize)> = vec
         .iter()
-        .copied()
         .enumerate()
-        .map(|(i, v)| (v, i))
+        .map(|(i, v)| (v.to_bits(), i))
         .collect();
 
-    indexed_values
-        .sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    indexed.sort_unstable_by_key(|&(bits, _)| bits);
 
     let mut ranks: Vec<f32> = vec![0.0; n];
     let mut i = 0;
     while i < n {
-        let current_value = indexed_values[i].0;
+        let current = indexed[i].0;
         let start = i;
-        while i < n && indexed_values[i].0 == current_value {
+        while i < n && indexed[i].0 == current {
             i += 1;
         }
         let avg_rank = (start + i + 1) as f32 / 2.0;
         for j in start..i {
-            ranks[indexed_values[j].1] = avg_rank;
+            ranks[indexed[j].1] = avg_rank;
         }
     }
     ranks
@@ -113,16 +114,16 @@ pub fn fast_csr_ranking(
             .collect()
     } else {
         // Rank cells within each gene - build gene-to-cells mapping first
-        let mut gene_data: Vec<Vec<(F16, usize)>> = vec![Vec::new(); ncol];
+        let mut gene_data: Vec<Vec<(u16, usize)>> = vec![Vec::new(); ncol];
 
-        // Single pass: collect all data per gene
+        // Single pass: collect all data per gene (store raw bits for fast sort)
         for row_idx in 0..nrow {
             let start = row_ptr[row_idx];
             let end = row_ptr[row_idx + 1];
 
             for i in 0..(end - start) {
                 let col_idx = col_indices[start + i] as usize;
-                gene_data[col_idx].push((data[start + i], row_idx));
+                gene_data[col_idx].push((data[start + i].to_bits(), row_idx));
             }
         }
 
@@ -138,9 +139,7 @@ pub fn fast_csr_ranking(
                     return vec![zero_rank; nrow];
                 }
 
-                values.sort_unstable_by(|a, b| {
-                    a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
-                });
+                values.sort_unstable_by_key(|&(bits, _)| bits);
 
                 let zero_rank = (1.0 + num_zeros as f32) / 2.0;
                 let mut result = vec![zero_rank; nrow];

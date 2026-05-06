@@ -160,6 +160,7 @@ dependencies = [
  "approx",
  "bincode",
  "document-features",
+ "either",
  "extendr-api",
  "faer",
  "faer-entity",
