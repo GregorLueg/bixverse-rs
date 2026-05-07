@@ -16,7 +16,6 @@ use ann_search_rs::utils::k_means_utils::*;
 use faer::Mat;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use thousands::*;
@@ -145,15 +144,12 @@ where
 /// (genes), remapping cell indices to their position in `cell_subset`.
 ///
 /// Used as a pre-processing step before `pca_on_metacells` in the
-/// correlated gene-batching strategy. Columns in the result appear in
-/// the order given by `gene_subset`; rows appear in the order given by
-/// `cell_subset`.
+/// correlated gene-batching strategy.
 ///
 /// ### Params
 ///
 /// * `csc` - Cells x genes CSC matrix.
 /// * `cell_subset` - Row indices to keep, in output row order.
-/// * `gene_subset` - Column indices to keep, in output column order.
 ///
 /// ### Returns
 ///
@@ -162,12 +158,11 @@ where
 fn subset_csc_for_pca<T: Clone>(
     csc: &CompressedSparseData2<T, f32>,
     cell_subset: &[usize],
-    gene_subset: &[usize],
 ) -> CompressedSparseData2<T, f32> {
     let n_new_cells = cell_subset.len();
-    let n_new_genes = gene_subset.len();
+    let n_genes = csc.shape.1;
 
-    let mut cell_map: FxHashMap<usize, usize> = FxHashMap::default();
+    let mut cell_map: rustc_hash::FxHashMap<usize, usize> = rustc_hash::FxHashMap::default();
     for (new_i, &old_i) in cell_subset.iter().enumerate() {
         cell_map.insert(old_i, new_i);
     }
@@ -182,7 +177,7 @@ fn subset_csc_for_pca<T: Clone>(
     let mut new_indices: Vec<usize> = Vec::new();
     let mut new_indptr: Vec<usize> = vec![0];
 
-    for &g in gene_subset {
+    for g in 0..n_genes {
         let s = csc.indptr[g];
         let e = csc.indptr[g + 1];
         for idx in s..e {
@@ -201,7 +196,7 @@ fn subset_csc_for_pca<T: Clone>(
         indptr: new_indptr,
         cs_type: CompressedSparseFormat::Csc,
         data_2: Some(new_data_2),
-        shape: (n_new_cells, n_new_genes),
+        shape: (n_new_cells, n_genes),
     }
 }
 
@@ -220,7 +215,6 @@ fn subset_csc_for_pca<T: Clone>(
 /// ### Params
 ///
 /// * `csc` - Full cells x genes CSC matrix.
-/// * `gene_indices` - Target gene indices to batch.
 /// * `batch_size` - Target batch size (drives the number of k-means
 ///   centroids).
 /// * `n_components` - PCs to compute on the subsampled matrix.
@@ -235,7 +229,6 @@ fn subset_csc_for_pca<T: Clone>(
 /// each other in the returned vector.
 fn batch_genes_correlated_in_memory<T: BixverseNumeric>(
     csc: &CompressedSparseData2<T, f32>,
-    gene_indices: &[usize],
     batch_size: usize,
     n_components: usize,
     n_cells_subsample: usize,
@@ -243,7 +236,7 @@ fn batch_genes_correlated_in_memory<T: BixverseNumeric>(
     verbose: bool,
 ) -> Result<Vec<usize>, BixverseErrors> {
     let n_cells = csc.shape.0;
-    let n_genes = gene_indices.len();
+    let n_genes = csc.shape.1;
     let n_centroids = n_genes.div_ceil(batch_size);
 
     let all_cells: Vec<usize> = (0..n_cells).collect();
@@ -258,7 +251,7 @@ fn batch_genes_correlated_in_memory<T: BixverseNumeric>(
         );
     }
 
-    let sub_csc = subset_csc_for_pca(csc, &sub_cells, gene_indices);
+    let sub_csc = subset_csc_for_pca(csc, &sub_cells);
     let (_, loadings, _) = pca_on_metacells(&sub_csc, n_components, true, seed)?;
 
     let dim = loadings.ncols();
@@ -311,7 +304,7 @@ fn batch_genes_correlated_in_memory<T: BixverseNumeric>(
 
     let mut clusters: Vec<Vec<usize>> = vec![Vec::new(); n_centroids];
     for (i, &cluster_id) in assignments.iter().enumerate() {
-        clusters[cluster_id].push(gene_indices[i]);
+        clusters[cluster_id].push(i);
     }
 
     let mut rng = SmallRng::seed_from_u64(seed.wrapping_add(1) as u64);
@@ -335,7 +328,6 @@ fn batch_genes_correlated_in_memory<T: BixverseNumeric>(
 /// ### Params
 ///
 /// * `csc` - Cells x genes CSC matrix.
-/// * `gene_indices` - Target gene indices.
 /// * `batch_size` - Target batch size.
 /// * `strategy` - Batching strategy.
 /// * `seed` - RNG seed.
@@ -347,24 +339,25 @@ fn batch_genes_correlated_in_memory<T: BixverseNumeric>(
 /// form sensible multi-output groups.
 fn batch_genes_in_memory<T: BixverseNumeric>(
     csc: &CompressedSparseData2<T, f32>,
-    gene_indices: &[usize],
     batch_size: usize,
     strategy: &GeneBatchStrategy,
     seed: usize,
     verbose: bool,
 ) -> Result<Vec<usize>, BixverseErrors> {
+    let n_genes = csc.shape.1;
+    let identity: Vec<usize> = (0..n_genes).collect();
+
     match strategy {
-        GeneBatchStrategy::Random => Ok(batch_genes_random(gene_indices, seed)),
+        GeneBatchStrategy::Random => Ok(batch_genes_random(&identity, seed)),
         GeneBatchStrategy::Correlated {
             n_comp,
             n_cells_subsample,
         } => {
-            if gene_indices.len() <= batch_size {
-                return Ok(batch_genes_random(gene_indices, seed));
+            if n_genes <= batch_size {
+                return Ok(batch_genes_random(&identity, seed));
             }
             batch_genes_correlated_in_memory(
                 csc,
-                gene_indices,
                 batch_size,
                 *n_comp,
                 *n_cells_subsample,
@@ -390,7 +383,6 @@ fn batch_genes_in_memory<T: BixverseNumeric>(
 ///
 /// * `csc` - Cells x genes CSC matrix (raw in `data`, normalised in
 ///   `data_2`).
-/// * `gene_indices` - Target gene column indices.
 /// * `tf_data` - Quantised TF feature store.
 /// * `n_cells` - Number of rows in `csc`.
 /// * `n_tfs` - Number of features in `tf_data`.
@@ -407,7 +399,6 @@ fn batch_genes_in_memory<T: BixverseNumeric>(
 #[allow(clippy::too_many_arguments)]
 fn run_scenic_multi_output_in_memory<T>(
     csc: &CompressedSparseData2<T, f32>,
-    gene_indices: &[usize],
     tf_data: &QuantisedStore,
     n_cells: usize,
     n_tfs: usize,
@@ -432,14 +423,7 @@ where
     )
     .unwrap_or(GeneBatchStrategy::Random);
 
-    let ordered_genes =
-        batch_genes_in_memory(csc, gene_indices, n_multi_output, &strategy, seed, verbose)?;
-
-    let gene_id_to_pos: FxHashMap<usize, usize> = gene_indices
-        .iter()
-        .enumerate()
-        .map(|(pos, &gid)| (gid, pos))
-        .collect();
+    let ordered_genes = batch_genes_in_memory(csc, n_multi_output, &strategy, seed, verbose)?;
 
     let start_extract = Instant::now();
     let all_sparse_cols: Vec<SparseAxis<u32, f32>> = ordered_genes
@@ -517,9 +501,7 @@ where
     for (batch_idx, imp_vecs) in batch_results {
         let batch_gene_ids = id_batches[batch_idx];
         for (local_idx, imp) in imp_vecs.into_iter().enumerate() {
-            let gene_id = batch_gene_ids[local_idx];
-            let original_pos = gene_id_to_pos[&gene_id];
-            importance_scores[original_pos] = imp;
+            importance_scores[batch_gene_ids[local_idx]] = imp;
         }
     }
 
@@ -566,7 +548,6 @@ where
 #[allow(clippy::too_many_arguments)]
 fn run_scenic_gbm_in_memory<T>(
     csc: &CompressedSparseData2<T, f32>,
-    gene_indices: &[usize],
     tf_data: &QuantisedStore,
     n_cells: usize,
     n_tfs: usize,
@@ -580,9 +561,9 @@ where
     T: Copy + Into<u32> + Sync,
 {
     let start_extract = Instant::now();
-    let all_sparse_cols: Vec<SparseAxis<u32, f32>> = gene_indices
-        .par_iter()
-        .map(|&g| extract_target_column(csc, g, n_cells))
+    let all_sparse_cols: Vec<SparseAxis<u32, f32>> = (0..n_genes)
+        .into_par_iter()
+        .map(|g| extract_target_column(csc, g, n_cells))
         .collect();
 
     if verbose {
@@ -671,7 +652,6 @@ where
 /// given by `gene_indices` and `tf_indices`.
 pub fn run_scenic_grn_in_memory<T>(
     expr_csc: &CompressedSparseData2<T, f32>,
-    gene_indices: &[usize],
     tf_indices: &[usize],
     scenic_params: &ScenicParams,
     seed: usize,
@@ -680,7 +660,6 @@ pub fn run_scenic_grn_in_memory<T>(
 where
     T: BixverseNumeric + Copy + Into<u32> + Sync,
 {
-    // tranpose if need be
     let csc_owned;
     let csc: &CompressedSparseData2<T, f32> = match expr_csc.cs_type {
         CompressedSparseFormat::Csc => expr_csc,
@@ -691,9 +670,9 @@ where
     };
 
     let start_total = Instant::now();
-    let n_cells = expr_csc.shape.0;
+    let n_cells = csc.shape.0;
+    let n_genes = csc.shape.1;
     let n_tfs = tf_indices.len();
-    let n_genes = gene_indices.len();
 
     let start_quant = Instant::now();
     let tf_data = build_tf_quantised_store(csc, tf_indices, n_cells);
@@ -708,7 +687,6 @@ where
     match &scenic_params.regression_learner {
         RegressionLearner::GradientBoosting(gbm_config) => Ok(run_scenic_gbm_in_memory(
             csc,
-            gene_indices,
             &tf_data,
             n_cells,
             n_tfs,
@@ -720,7 +698,6 @@ where
         )),
         _ => run_scenic_multi_output_in_memory(
             csc,
-            gene_indices,
             &tf_data,
             n_cells,
             n_tfs,
@@ -740,6 +717,70 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a CSC with `n_tfs` TF columns followed by `n_targets` target
+    /// columns. Target 0 is loosely driven by TF 0; the rest are noise.
+    fn build_smoke_csc(
+        n_cells: usize,
+        n_tfs: usize,
+        n_targets: usize,
+        seed: u64,
+    ) -> CompressedSparseData2<u16, f32> {
+        let mut rng = SmallRng::seed_from_u64(seed);
+        let mut data: Vec<u16> = Vec::new();
+        let mut data_2: Vec<f32> = Vec::new();
+        let mut indices: Vec<usize> = Vec::new();
+        let mut indptr: Vec<usize> = vec![0];
+
+        let mut tf0_vals = vec![0.0f32; n_cells];
+        for j in 0..n_tfs {
+            for c in 0..n_cells {
+                let v: f32 = rng.random_range(0.0..5.0);
+                if v > 1.0 {
+                    indices.push(c);
+                    data.push(v as u16);
+                    data_2.push(v);
+                    if j == 0 {
+                        tf0_vals[c] = v;
+                    }
+                }
+            }
+            indptr.push(data.len());
+        }
+
+        // target 0: driven by TF 0
+        for c in 0..n_cells {
+            let v = 2.0 * tf0_vals[c] + rng.random_range(-0.5..0.5f32);
+            if v > 1.0 {
+                indices.push(c);
+                data.push(v as u16);
+                data_2.push(v);
+            }
+        }
+        indptr.push(data.len());
+
+        // remaining targets: noise
+        for _ in 1..n_targets {
+            for c in 0..n_cells {
+                let v: f32 = rng.random_range(0.0..3.0);
+                if v > 1.0 {
+                    indices.push(c);
+                    data.push(v as u16);
+                    data_2.push(v);
+                }
+            }
+            indptr.push(data.len());
+        }
+
+        CompressedSparseData2 {
+            data,
+            indices,
+            indptr,
+            cs_type: CompressedSparseFormat::Csc,
+            data_2: Some(data_2),
+            shape: (n_cells, n_tfs + n_targets),
+        }
+    }
 
     #[test]
     fn extract_target_column_basic() {
@@ -842,8 +883,7 @@ mod tests {
     }
 
     #[test]
-    fn subset_csc_rows_and_genes() {
-        // 4 cells, 3 genes
+    fn subset_csc_rows_keeps_all_genes() {
         let csc = CompressedSparseData2 {
             data: vec![1u16, 3, 5, 2, 4],
             indices: vec![0, 2, 1, 0, 3],
@@ -853,19 +893,20 @@ mod tests {
             shape: (4, 3),
         };
 
-        // Keep cells [0, 2] (new rows 0, 1) and genes [0, 2]
-        let sub = subset_csc_for_pca(&csc, &[0, 2], &[0, 2]);
-        assert_eq!(sub.shape, (2, 2));
-        // new gene 0 (was gene 0): cells 0, 2 -> new rows 0, 1
+        let sub = subset_csc_for_pca(&csc, &[0, 2]);
+        assert_eq!(sub.shape, (2, 3));
+        // gene 0: cells 0, 2 -> new rows 0, 1
         assert_eq!(&sub.indices[sub.indptr[0]..sub.indptr[1]], &[0, 1]);
         assert_eq!(
             &sub.data_2.as_ref().unwrap()[sub.indptr[0]..sub.indptr[1]],
             &[0.1f32, 0.3]
         );
-        // new gene 1 (was gene 2): only cell 0 survives (cell 3 dropped)
-        assert_eq!(&sub.indices[sub.indptr[1]..sub.indptr[2]], &[0]);
+        // gene 1: cell 1 dropped (not in subset)
+        assert_eq!(sub.indptr[2] - sub.indptr[1], 0);
+        // gene 2: cell 0 kept, cell 3 dropped
+        assert_eq!(&sub.indices[sub.indptr[2]..sub.indptr[3]], &[0]);
         assert_eq!(
-            &sub.data_2.as_ref().unwrap()[sub.indptr[1]..sub.indptr[2]],
+            &sub.data_2.as_ref().unwrap()[sub.indptr[2]..sub.indptr[3]],
             &[0.2f32]
         );
     }
@@ -881,76 +922,15 @@ mod tests {
             shape: (3, 1),
         };
 
-        // Reverse the cell order
-        let sub = subset_csc_for_pca(&csc, &[2, 1, 0], &[0]);
+        let sub = subset_csc_for_pca(&csc, &[2, 1, 0]);
         assert_eq!(sub.shape, (3, 1));
-        // old cell 0 -> new row 2, old 1 -> new 1, old 2 -> new 0
-        // Iteration walks old indices 0, 1, 2 in order -> new indices 2, 1, 0
         assert_eq!(&sub.indices[..], &[2, 1, 0]);
         assert_eq!(sub.data_2.as_ref().unwrap(), &vec![0.1f32, 0.2, 0.3]);
     }
 
     #[test]
     fn in_memory_scenic_gbm_smoke() {
-        // 80 cells, 3 TFs + 2 targets. Target 0 is loosely driven by TF 0.
-        let n_cells = 80;
-        let n_cols = 5; // cols 0..3 = TFs, 3..5 = targets
-        let mut rng = SmallRng::seed_from_u64(7);
-
-        let mut data: Vec<u16> = Vec::new();
-        let mut data_2: Vec<f32> = Vec::new();
-        let mut indices: Vec<usize> = Vec::new();
-        let mut indptr: Vec<usize> = vec![0];
-
-        // TF columns (0..3)
-        let mut tf0_vals = vec![0.0f32; n_cells];
-        for j in 0..3 {
-            for c in 0..n_cells {
-                let v: f32 = rng.random_range(0.0..5.0);
-                if v > 1.0 {
-                    indices.push(c);
-                    data.push(v as u16);
-                    data_2.push(v);
-                    if j == 0 {
-                        tf0_vals[c] = v;
-                    }
-                }
-            }
-            indptr.push(data.len());
-        }
-
-        // Target 0: driven by TF 0
-        for c in 0..n_cells {
-            let v = 2.0 * tf0_vals[c] + rng.random_range(-0.5..0.5f32);
-            if v > 1.0 {
-                indices.push(c);
-                data.push(v as u16);
-                data_2.push(v);
-            }
-        }
-        indptr.push(data.len());
-
-        // Target 1: pure noise
-        for c in 0..n_cells {
-            let v: f32 = rng.random_range(0.0..3.0);
-            if v > 1.0 {
-                indices.push(c);
-                data.push(v as u16);
-                data_2.push(v);
-            }
-        }
-        indptr.push(data.len());
-
-        assert_eq!(indptr.len(), n_cols + 1);
-
-        let csc = CompressedSparseData2 {
-            data,
-            indices,
-            indptr,
-            cs_type: CompressedSparseFormat::Csc,
-            data_2: Some(data_2),
-            shape: (n_cells, n_cols),
-        };
+        let csc = build_smoke_csc(80, 3, 2, 7);
 
         let params = ScenicParams {
             min_counts: 0,
@@ -970,73 +950,22 @@ mod tests {
             n_subsample: 1000,
         };
 
-        let result =
-            run_scenic_grn_in_memory(&csc, &[3, 4], &[0, 1, 2], &params, 42, false).unwrap();
-        assert_eq!(result.nrows(), 2);
+        let result = run_scenic_grn_in_memory(&csc, &[0, 1, 2], &params, 42, false).unwrap();
+        // 5 columns (3 TFs + 2 targets) -> n_genes = 5, n_tfs = 3
+        assert_eq!(result.nrows(), 5);
         assert_eq!(result.ncols(), 3);
 
-        // Target 0 should lean on TF 0 more than TF 1 or TF 2.
+        // Row 3 = target 0 (driven by TF 0) should weight TF 0 highest.
         assert!(
-            result[(0, 0)] > result[(0, 1)] && result[(0, 0)] > result[(0, 2)],
+            result[(3, 0)] > result[(3, 1)] && result[(3, 0)] > result[(3, 2)],
             "TF 0 should dominate for target 0: {:?}",
-            (result[(0, 0)], result[(0, 1)], result[(0, 2)])
+            (result[(3, 0)], result[(3, 1)], result[(3, 2)])
         );
     }
 
     #[test]
     fn in_memory_scenic_extratrees_smoke() {
-        // Same setup as the GBM smoke test, exercising the multi-output path.
-        let n_cells = 80;
-        let n_cols = 5;
-        let mut rng = SmallRng::seed_from_u64(13);
-
-        let mut data: Vec<u16> = Vec::new();
-        let mut data_2: Vec<f32> = Vec::new();
-        let mut indices: Vec<usize> = Vec::new();
-        let mut indptr: Vec<usize> = vec![0];
-
-        let mut tf0_vals = vec![0.0f32; n_cells];
-        for j in 0..3 {
-            for c in 0..n_cells {
-                let v: f32 = rng.random_range(0.0..5.0);
-                if v > 1.0 {
-                    indices.push(c);
-                    data.push(v as u16);
-                    data_2.push(v);
-                    if j == 0 {
-                        tf0_vals[c] = v;
-                    }
-                }
-            }
-            indptr.push(data.len());
-        }
-        for c in 0..n_cells {
-            let v = 2.0 * tf0_vals[c] + rng.random_range(-0.5..0.5f32);
-            if v > 1.0 {
-                indices.push(c);
-                data.push(v as u16);
-                data_2.push(v);
-            }
-        }
-        indptr.push(data.len());
-        for c in 0..n_cells {
-            let v: f32 = rng.random_range(0.0..3.0);
-            if v > 1.0 {
-                indices.push(c);
-                data.push(v as u16);
-                data_2.push(v);
-            }
-        }
-        indptr.push(data.len());
-
-        let csc = CompressedSparseData2 {
-            data,
-            indices,
-            indptr,
-            cs_type: CompressedSparseFormat::Csc,
-            data_2: Some(data_2),
-            shape: (n_cells, n_cols),
-        };
+        let csc = build_smoke_csc(80, 3, 2, 13);
 
         let params = ScenicParams {
             min_counts: 0,
@@ -1055,13 +984,11 @@ mod tests {
             n_subsample: 1000,
         };
 
-        let result =
-            run_scenic_grn_in_memory(&csc, &[3, 4], &[0, 1, 2], &params, 42, false).unwrap();
-        assert_eq!(result.nrows(), 2);
+        let result = run_scenic_grn_in_memory(&csc, &[0, 1, 2], &params, 42, false).unwrap();
+        assert_eq!(result.nrows(), 5);
         assert_eq!(result.ncols(), 3);
 
-        // Each row sums to ~1 (normalised) or to 0 if no variance was reducible.
-        for i in 0..2 {
+        for i in 0..5 {
             let sum: f32 = (0..3).map(|j| result[(i, j)]).sum();
             assert!(
                 (sum - 1.0).abs() < 1e-4 || sum < 1e-6,
