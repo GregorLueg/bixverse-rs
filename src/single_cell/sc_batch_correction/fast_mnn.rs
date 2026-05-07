@@ -26,7 +26,8 @@ pub struct FastMnnParams {
     pub no_pcs: usize,
     /// Boolean. Shall randomised SVD be used.
     pub random_svd: bool,
-    /// Parameters for the various approximate nearest neighbour searches
+    /// [KnnParams] for the various approximate nearest neighbour searches
+    /// in ann-search-rs
     pub knn_params: KnnParams,
 }
 
@@ -100,6 +101,18 @@ fn knn_search(
                 verbose,
             );
             query_ivf_index(query, &index, k, params.n_list, true, verbose)
+        }
+        KnnSearch::KmKnn => {
+            let index = build_kmknn_index(
+                reference,
+                &params.ann_dist,
+                params.n_list,
+                None,
+                seed,
+                verbose,
+            );
+
+            query_kmknn_index(query, &index, k, true, verbose)
         }
     };
 
@@ -302,7 +315,7 @@ pub fn tricube_weighted_correction(
         // Bandwidth = ndist * median distance
         let mut sorted_d: Vec<f32> = dists.clone();
         sorted_d.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let median_d = if sorted_d.len() % 2 == 0 && sorted_d.len() >= 2 {
+        let median_d = if sorted_d.len().is_multiple_of(2) && sorted_d.len() >= 2 {
             (sorted_d[sorted_d.len() / 2 - 1] + sorted_d[sorted_d.len() / 2]) * 0.5
         } else {
             sorted_d[sorted_d.len() / 2]
@@ -643,7 +656,7 @@ pub fn fast_mnn_main(
     params: &FastMnnParams,
     verbose: bool,
     seed: usize,
-) -> Mat<f32> {
+) -> Result<Mat<f32>, BixverseErrors> {
     let pca_all = if let Some(pca) = pre_computed_pca {
         if verbose {
             println!("Using pre-computed PCA")
@@ -662,7 +675,7 @@ pub fn fast_mnn_main(
             seed,
             false,
             verbose,
-        );
+        )?;
         pca
     };
 
@@ -679,7 +692,7 @@ pub fn fast_mnn_main(
 
     let (corrected, index_map) = fast_mnn(pca_batches, original_indices, params, seed, verbose);
 
-    reorder_to_original(&corrected, &index_map)
+    Ok(reorder_to_original(&corrected, &index_map))
 }
 
 ///////////

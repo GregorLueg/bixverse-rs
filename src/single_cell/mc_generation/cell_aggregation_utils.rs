@@ -34,13 +34,12 @@ pub fn aggregate_meta_cells(
     metacells: &[&[usize]],
     target_size: f32,
     n_genes: usize,
-) -> CompressedSparseData2<u32, f32> {
+) -> Result<CompressedSparseData2<u32, f32>, BixverseErrors> {
     let n_metacells = metacells.len();
     let mut all_data: Vec<u32> = Vec::new();
     let mut all_data_norm: Vec<f32> = Vec::new();
     let mut all_indices: Vec<usize> = Vec::new();
     let mut all_indptr: Vec<usize> = vec![0];
-
     const CHUNK_SIZE: usize = 1000;
 
     for chunk_start in (0..n_metacells).step_by(CHUNK_SIZE) {
@@ -49,22 +48,18 @@ pub fn aggregate_meta_cells(
 
         let results: Vec<(Vec<usize>, Vec<u32>, Vec<f32>)> = chunk
             .par_iter()
-            .map(|cell_idx| {
-                let cells = reader.read_cells_parallel(cell_idx);
+            .map(|cell_idx| -> Result<_, BixverseErrors> {
+                let cells = reader.read_cells_parallel(cell_idx)?;
                 let mut gene_counts: FxHashMap<usize, u32> = FxHashMap::default();
                 let mut library_size: u32 = 0;
-
                 for cell in &cells {
                     for (idx, count) in cell.indices.iter().zip(cell.data_raw.iter()) {
                         *gene_counts.entry(*idx as usize).or_insert(0) += count;
                         library_size += count;
                     }
                 }
-
-                // sort for CSR format
                 let mut entries: Vec<(usize, u32)> = gene_counts.into_iter().collect();
                 entries.sort_by_key(|(idx, _)| *idx);
-
                 let indices: Vec<usize> = entries.iter().map(|(idx, _)| *idx).collect();
                 let raw_counts: Vec<u32> = entries.iter().map(|(_, count)| *count).collect();
                 let norm_counts: Vec<f32> = entries
@@ -74,10 +69,9 @@ pub fn aggregate_meta_cells(
                         (norm + 1.0).ln()
                     })
                     .collect();
-
-                (indices, raw_counts, norm_counts)
+                Ok((indices, raw_counts, norm_counts))
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
 
         for (indices, raw_counts, norm_counts) in results {
             all_indices.extend(indices);
@@ -87,13 +81,13 @@ pub fn aggregate_meta_cells(
         }
     }
 
-    CompressedSparseData2::new_csr(
+    Ok(CompressedSparseData2::new_csr(
         &all_data,
         &all_indices,
         &all_indptr,
         Some(&all_data_norm),
         (n_metacells, n_genes),
-    )
+    ))
 }
 
 /// Convert metacell groups to flat assignments, handling unassigned cells
@@ -224,7 +218,7 @@ pub fn get_pseudo_bulked_counts_dense(
     cell_indices: &[Vec<usize>],
     bulk_type: PseudoBulk,
     verbose: bool,
-) -> Mat<f64> {
+) -> Result<Mat<f64>, BixverseErrors> {
     let reader = ParallelSparseReader::new(f_path).unwrap();
     let n_genes = reader.get_header().total_genes;
     let n_groups = cell_indices.len();
@@ -232,7 +226,7 @@ pub fn get_pseudo_bulked_counts_dense(
 
     for (group_idx, indices) in cell_indices.iter().enumerate() {
         let start_group = Instant::now();
-        let chunks = reader.read_cells_parallel(indices);
+        let chunks = reader.read_cells_parallel(indices)?;
         let n_cells = indices.len() as f64;
 
         for chunk in chunks {
@@ -269,7 +263,7 @@ pub fn get_pseudo_bulked_counts_dense(
         }
     }
 
-    result
+    Ok(result)
 }
 
 /// Pseudo-bulk data across cells based on cell indices (sparse CSR output)
@@ -290,7 +284,7 @@ pub fn get_pseudo_bulked_counts_sparse(
     cell_indices: &[Vec<usize>],
     bulk_type: PseudoBulk,
     verbose: bool,
-) -> CompressedSparseData2<f64> {
+) -> Result<CompressedSparseData2<f64>, BixverseErrors> {
     let reader = ParallelSparseReader::new(f_path).unwrap();
     let n_genes = reader.get_header().total_genes;
     let n_groups = cell_indices.len();
@@ -298,7 +292,7 @@ pub fn get_pseudo_bulked_counts_sparse(
 
     for (group_idx, indices) in cell_indices.iter().enumerate() {
         let start_group = Instant::now();
-        let chunks = reader.read_cells_parallel(indices);
+        let chunks = reader.read_cells_parallel(indices)?;
         let n_cells = indices.len() as f64;
 
         for chunk in chunks {
@@ -352,12 +346,12 @@ pub fn get_pseudo_bulked_counts_sparse(
         indptr.push(data.len());
     }
 
-    CompressedSparseData2 {
+    Ok(CompressedSparseData2 {
         data,
         indices,
         indptr,
         cs_type: CompressedSparseFormat::Csr,
         data_2: None,
         shape: (n_groups, n_genes),
-    }
+    })
 }

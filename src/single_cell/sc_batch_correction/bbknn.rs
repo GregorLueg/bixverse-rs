@@ -6,7 +6,6 @@
 
 use ann_search_rs::utils::dist::{Dist, parse_ann_dist};
 use ann_search_rs::*;
-use extendr_api::List;
 use faer::MatRef;
 use rayon::prelude::*;
 
@@ -35,57 +34,9 @@ pub struct BbknnParams {
     /// Trim the neighbours of each cell to these many to connectivities. May
     /// help with population independence and improve the tidiness of clustering.
     pub trim: Option<usize>,
-    /// Parameters for the various approximate nearest neighbour searches
+    /// [KnnParams] for the various approximate nearest neighbour searches
     /// in ann-search-rs
     pub knn_params: KnnParams,
-}
-
-impl BbknnParams {
-    /// Generate the BbknnParams from a R list
-    ///
-    /// Should values not be found within the List, the parameters will default
-    /// to sensible defaults.
-    ///
-    /// ### Params
-    ///
-    /// * `r_list` - The list with the BBKNN parameters.
-    ///
-    /// ### Return
-    ///
-    /// The `BbknnParams` with all of the parameters.
-    pub fn from_r_list(r_list: List) -> Self {
-        let knn_params = KnnParams::from_r_list(r_list.clone());
-
-        let bbknn_list = r_list.into_hashmap();
-
-        let neighbours_within_batch = bbknn_list
-            .get("neighbours_within_batch")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(3) as usize;
-
-        let set_op_mix_ratio = bbknn_list
-            .get("set_op_mix_ratio")
-            .and_then(|v| v.as_real())
-            .unwrap_or(1.0) as f32;
-
-        let local_connectivity = bbknn_list
-            .get("local_connectivity")
-            .and_then(|v| v.as_real())
-            .unwrap_or(1.0) as f32;
-
-        let trim = bbknn_list
-            .get("trim")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(10 * neighbours_within_batch as i32) as usize;
-
-        Self {
-            neighbours_within_batch,
-            set_op_mix_ratio,
-            local_connectivity,
-            trim: Some(trim),
-            knn_params,
-        }
-    }
 }
 
 ///////////////////
@@ -246,6 +197,24 @@ fn get_batch_balanced_knn(
                     &index,
                     bbknn_params.neighbours_within_batch + 1,
                     bbknn_params.knn_params.n_probe,
+                    false,
+                    verbose,
+                )
+            }
+            &KnnSearch::KmKnn => {
+                let index = build_kmknn_index(
+                    sub_matrix.as_ref(),
+                    &bbknn_params.knn_params.ann_dist,
+                    bbknn_params.knn_params.n_list,
+                    None,
+                    seed,
+                    verbose,
+                );
+
+                query_kmknn_index(
+                    mat,
+                    &index,
+                    bbknn_params.neighbours_within_batch + 1,
                     false,
                     verbose,
                 )

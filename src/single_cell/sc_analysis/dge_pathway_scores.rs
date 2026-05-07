@@ -1,6 +1,6 @@
 //! Differential gene expression for single cell via Mann Whitney U and AUCell
 //! type enrichment of a bag of genes, see Aibar, et al., Nat Methods,
-//! 2018.
+//! 2017.
 
 use rayon::prelude::*;
 use std::time::Instant;
@@ -129,14 +129,14 @@ pub fn calculate_dge_grps_mann_whitney(
     min_proportion: f32,
     alternative: &str,
     verbose: bool,
-) -> Result<DgeMannWhitneyRes, String> {
+) -> Result<DgeMannWhitneyRes, BixverseErrors> {
     let start_read = Instant::now();
 
-    let reader = ParallelSparseReader::new(f_path).unwrap();
+    let reader = ParallelSparseReader::new(f_path)?;
     let no_genes = reader.get_header().total_genes;
 
-    let mut cell_chunks_1: Vec<CsrCellChunk> = reader.read_cells_parallel(grp_1_indices);
-    let mut cell_chunks_2: Vec<CsrCellChunk> = reader.read_cells_parallel(grp_2_indices);
+    let mut cell_chunks_1: Vec<CsrCellChunk> = reader.read_cells_parallel(grp_1_indices)?;
+    let mut cell_chunks_2: Vec<CsrCellChunk> = reader.read_cells_parallel(grp_2_indices)?;
 
     let end_read = start_read.elapsed();
 
@@ -241,12 +241,13 @@ pub fn calculate_dge_grps_mann_whitney(
 ///////////
 
 /// Enum describing the type of AUC to calculate
-#[derive(Clone, Debug)]
-enum AucType {
+#[derive(Clone, Debug, Default)]
+pub enum AucType {
+    /// AUC based on the traditional AUC/AUROC calculation
+    #[default]
+    ClassicalAuc,
     /// AUC based on the Mann-Whitney statistic
     MannWhitney,
-    /// AUC based on the traditional AUC/AUROC calculation
-    ClassicalAuc,
 }
 
 /// Parse the desired AUC type
@@ -258,7 +259,7 @@ enum AucType {
 /// ### Return
 ///
 /// The Option of the `AucType`
-fn parse_auc_type(s: &str) -> Option<AucType> {
+pub fn parse_auc_type(s: &str) -> Option<AucType> {
     match s.to_lowercase().as_str() {
         "auroc" => Some(AucType::ClassicalAuc),
         "wilcox" => Some(AucType::MannWhitney),
@@ -284,7 +285,7 @@ fn parse_auc_type(s: &str) -> Option<AucType> {
 /// ### Returns
 ///
 /// AUC for this gene set based on the Mann Whitney statistc.
-fn calculate_auc_per_cell_mw(ranks: &[f32], gene_set: &[usize]) -> f32 {
+pub fn calculate_auc_per_cell_mw(ranks: &[f32], gene_set: &[usize]) -> f32 {
     let n_genes = ranks.len();
     let n_in_set = gene_set.len();
     let n_not_in_set = n_genes - n_in_set;
@@ -314,7 +315,7 @@ fn calculate_auc_per_cell_mw(ranks: &[f32], gene_set: &[usize]) -> f32 {
 /// ### Returns
 ///
 /// AUC for this gene set based on the Mann Whitney statistc.
-fn calculate_auc_for_cell_auroc(ranks: &[f32], gene_set: &[usize]) -> f32 {
+pub fn calculate_auc_for_cell_auroc(ranks: &[f32], gene_set: &[usize]) -> f32 {
     let n_genes = ranks.len();
     let mut gene_set_ranks: Vec<f32> = gene_set.iter().map(|&idx| ranks[idx]).collect();
 
@@ -353,7 +354,8 @@ fn calculate_auc_for_cell_auroc(ranks: &[f32], gene_set: &[usize]) -> f32 {
 /// * `f_path` - File path to the cell-based binary file.
 /// * `gene_sets` - Slice of Vecs indicating the indices of the gene sets
 /// * `cells_to_keep` - Vector of indices with the cells to keep.
-/// * `auc_type` - String. One of `"auroc"` or `"wilcox`
+/// * `auc_type` - String. One of `"auroc"` or `"wilcox`. Weird strings default
+///   to AUROC calculations.
 /// * `verbose` - Controls verbosity
 ///
 /// ### Returns
@@ -365,15 +367,13 @@ pub fn calculate_aucell(
     cells_to_keep: &[usize],
     auc_type: &str,
     verbose: bool,
-) -> Result<Vec<Vec<f32>>, String> {
-    let auc_type = parse_auc_type(auc_type)
-        .ok_or_else(|| format!("Invalid AUC method: {}", auc_type))
-        .unwrap();
+) -> Result<Vec<Vec<f32>>, BixverseErrors> {
+    let auc_type = parse_auc_type(auc_type).unwrap_or_default();
 
     let start_read = Instant::now();
-    let reader = ParallelSparseReader::new(f_path).unwrap();
+    let reader = ParallelSparseReader::new(f_path)?;
     let no_genes = reader.get_header().total_genes;
-    let cell_chunks: Vec<CsrCellChunk> = reader.read_cells_parallel(cells_to_keep);
+    let cell_chunks: Vec<CsrCellChunk> = reader.read_cells_parallel(cells_to_keep)?;
     let total_cells = cell_chunks.len();
     let end_read = start_read.elapsed();
 
@@ -428,7 +428,8 @@ pub fn calculate_aucell(
 /// * `f_path` -  File path to the cell-based binary file.
 /// * `gene_sets` - Slice of Vecs indicating the indices of the gene sets
 /// * `cells_to_keep` - Vector of indices with the cells to keep.
-/// * `auc_type` - String. One of `"auroc"` or `"wilcox`
+/// * `auc_type` - String. One of `"auroc"` or `"wilcox`. Weird strings default
+///   to AUROC calculations.
 /// * `verbose` - Boolean. Controls the verbosity
 ///
 /// ### Returns
@@ -440,14 +441,12 @@ pub fn calculate_aucell_streaming(
     cells_to_keep: &[usize],
     auc_type: &str,
     verbose: bool,
-) -> Result<Vec<Vec<f32>>, String> {
+) -> Result<Vec<Vec<f32>>, BixverseErrors> {
     const CHUNK_SIZE: usize = 50000;
 
-    let auc_type = parse_auc_type(auc_type)
-        .ok_or_else(|| format!("Invalid AUC method: {}", auc_type))
-        .unwrap();
+    let auc_type = parse_auc_type(auc_type).unwrap_or_default();
 
-    let reader = ParallelSparseReader::new(f_path).unwrap();
+    let reader = ParallelSparseReader::new(f_path)?;
     let no_genes = reader.get_header().total_genes;
     let total_chunks = cells_to_keep.len().div_ceil(CHUNK_SIZE);
     let mut all_results: Vec<Vec<f32>> =
@@ -456,7 +455,7 @@ pub fn calculate_aucell_streaming(
     for (chunk_idx, cell_indices_chunk) in cells_to_keep.chunks(CHUNK_SIZE).enumerate() {
         let start_chunk = Instant::now();
 
-        let cell_chunks = reader.read_cells_parallel(cell_indices_chunk);
+        let cell_chunks = reader.read_cells_parallel(cell_indices_chunk)?;
         let ranks = rank_csr_chunk_vec(cell_chunks, no_genes, true);
 
         for cell_ranks in ranks {

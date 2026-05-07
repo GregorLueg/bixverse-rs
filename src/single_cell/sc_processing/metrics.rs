@@ -97,7 +97,7 @@ pub fn kbet(knn_data: &[Vec<usize>], batches: &[usize]) -> KbetResult {
 
     let mut sorted_chi = chi_square_stats.clone();
     sorted_chi.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
-    let median_chi_square = if sorted_chi.len() % 2 == 0 {
+    let median_chi_square = if sorted_chi.len().is_multiple_of(2) {
         (sorted_chi[sorted_chi.len() / 2 - 1] + sorted_chi[sorted_chi.len() / 2]) / 2.0
     } else {
         sorted_chi[sorted_chi.len() / 2]
@@ -223,7 +223,7 @@ pub fn batch_silhouette_width(
 
     let mut sorted = per_cell.clone();
     sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
-    let median_asw = if n_sub % 2 == 0 {
+    let median_asw = if n_sub.is_multiple_of(2) {
         (sorted[n_sub / 2 - 1] + sorted[n_sub / 2]) / 2.0
     } else {
         sorted[n_sub / 2]
@@ -297,7 +297,7 @@ pub fn batch_lisi(knn_indices: &[Vec<usize>], batch_labels: &[usize]) -> LisiRes
 
     let mut sorted = per_cell.clone();
     sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
-    let median_lisi = if n % 2 == 0 {
+    let median_lisi = if n.is_multiple_of(2) {
         (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
     } else {
         sorted[n / 2]
@@ -335,7 +335,7 @@ pub fn pairwise_gene_correlations(
     gene_indices_2: &[usize],
     cells_to_keep: &[usize],
     spearman: bool,
-) -> Vec<f32> {
+) -> Result<Vec<f32>, BixverseErrors> {
     assert_same_len!(gene_indices_1, gene_indices_2);
 
     let n_cells = cells_to_keep.len();
@@ -349,8 +349,8 @@ pub fn pairwise_gene_correlations(
     let unique_vec: Vec<usize> = unique_genes.iter().copied().collect();
 
     // Load and filter
-    let reader = ParallelSparseReader::new(f_path).unwrap();
-    let mut gene_chunks = reader.read_gene_parallel(&unique_vec);
+    let reader = ParallelSparseReader::new(f_path)?;
+    let mut gene_chunks = reader.read_gene_parallel(&unique_vec)?;
 
     gene_chunks.par_iter_mut().for_each(|chunk| {
         chunk.filter_selected_cells(&cell_set);
@@ -385,7 +385,7 @@ pub fn pairwise_gene_correlations(
     // Pairwise correlations via dot product
     let denom = n_cells as f32 - 1.0;
 
-    gene_indices_1
+    let res = gene_indices_1
         .par_iter()
         .zip(gene_indices_2.par_iter())
         .map(|(&g1, &g2)| {
@@ -394,5 +394,7 @@ pub fn pairwise_gene_correlations(
             let cor = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum::<f32>() / denom;
             cor.clamp(-1_f32, 1_f32) // avoid floating ops instabilities
         })
-        .collect()
+        .collect();
+
+    Ok(res)
 }

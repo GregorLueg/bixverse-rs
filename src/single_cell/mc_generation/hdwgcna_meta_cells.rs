@@ -2,7 +2,7 @@
 //! et al., Cell Rep. Methods, 2023
 
 use rand::prelude::IndexedRandom;
-use rand::{Rng, SeedableRng};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::prelude::*;
@@ -13,15 +13,15 @@ use crate::prelude::*;
 
 /// Structure for the MetaCell parameters
 #[derive(Clone, Debug)]
-pub struct MetaCellParams {
+pub struct BootstrappedMetaCellParams {
     /// Maximum number of shared cells for the meta cell aggregation
     pub max_shared: usize,
     /// Number of target meta cells.
     pub target_no_metacells: usize,
     /// Maximum iterations for the algorithm
     pub max_iter: usize,
-    /// Parameters for the various approximate nearest neighbour searches
-    /// in ann-search-rs
+    /// [KnnParams] for the various approximate nearest neighbour searches in
+    /// ann-search-rs
     pub knn_params: KnnParams,
 }
 
@@ -45,11 +45,10 @@ pub fn identify_meta_cells(
     max_iter: usize,
     seed: usize,
     verbose: bool,
-) -> Vec<&[usize]> {
-    let mut rng = rand::rngs::StdRng::seed_from_u64(seed as u64);
+) -> Vec<usize> {
+    let mut rng = StdRng::seed_from_u64(seed as u64);
     let k = nn_map[0].len();
     let k2 = k * 2;
-
     let mut good_choices: Vec<usize> = (0..nn_map.len()).collect();
     let mut chosen: Vec<usize> = Vec::new();
 
@@ -59,20 +58,13 @@ pub fn identify_meta_cells(
     }
 
     let mut it = 0;
-
-    // cache the HashSets to avoid regeneration during loops
     let mut set_cache: FxHashMap<usize, FxHashSet<usize>> = FxHashMap::default();
 
-    // bootstrap meta cells
     while !good_choices.is_empty() && chosen.len() < target_no && it < max_iter {
         it += 1;
-
-        // sample remaining cells
         let choice_idx = rng.random_range(0..good_choices.len());
-        let candidate = good_choices[choice_idx];
-        good_choices.remove(choice_idx);
+        let candidate = good_choices.swap_remove(choice_idx);
 
-        // check overlap with existing meta cells
         set_cache
             .entry(candidate)
             .or_insert_with(|| nn_map[candidate].iter().copied().collect());
@@ -82,17 +74,15 @@ pub fn identify_meta_cells(
             set_cache
                 .entry(existing)
                 .or_insert_with(|| nn_map[existing].iter().copied().collect());
-
-            let candidate_set = &set_cache[&candidate];
-            let existing_set = &set_cache[&existing];
-
-            let shared = k2 - candidate_set.union(existing_set).count();
+            let cs = &set_cache[&candidate];
+            let es = &set_cache[&existing];
+            let shared = k2 - cs.union(es).count();
             max_overlap = max_overlap.max(shared);
         }
 
         if verbose && it % 10000 == 0 {
             println!(
-                "Meta cell neighbour search - iter {} out of {} max iters",
+                "Meta cell neighbour search - iter {} of {} max iters",
                 it, max_iter
             );
         }
@@ -103,7 +93,21 @@ pub fn identify_meta_cells(
     }
 
     chosen
-        .iter()
-        .map(|&center| nn_map[center].as_slice())
-        .collect()
+}
+
+/// Assign cells to bootstrapped metacells with centre priority.
+///
+/// Centres always claim themselves first, so no metacell is empty. Remaining
+/// cells go to the first centre whose kNN window contains them.
+///
+/// ### Params
+///
+/// * `centres` - The center cell.
+/// * `nn_map` - The nearest neighbour map
+///
+/// ### Returns
+///
+/// The meta cell assignments
+pub fn assign_bootstrapped_meta_cells(centres: &[usize], nn_map: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    centres.iter().map(|&c| nn_map[c].clone()).collect()
 }

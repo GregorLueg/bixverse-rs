@@ -7,6 +7,7 @@
 //! (hypergeometric test). Across iterations, doublets are called by majority
 //! voting on per-iteration significance.
 
+use either::Either;
 use rand::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::time::Instant;
@@ -15,6 +16,7 @@ use crate::core::math::stats::*;
 use crate::graph::community_detections::*;
 use crate::graph::graph_structures::*;
 use crate::prelude::*;
+use crate::single_cell::sc_analysis::fast_clusters::*;
 use crate::single_cell::sc_processing::utils_doublets::*;
 
 ////////////////////////
@@ -27,6 +29,7 @@ use crate::single_cell::sc_processing::utils_doublets::*;
 /// the voting-based doublet calling.
 #[derive(Clone, Debug)]
 pub struct BoostParams {
+    // -- processing --
     /// Whether to log-transform counts after normalisation.
     pub log_transform: bool,
     /// Whether to mean-centre genes before PCA.
@@ -35,6 +38,8 @@ pub struct BoostParams {
     pub normalise_variance: bool,
     /// Optional target library size. Defaults to the mean HVG library size.
     pub target_size: Option<f32>,
+
+    // -- hvg --
     /// Percentile threshold for HVG selection.
     pub min_gene_var_pctl: f32,
     /// HVG method: `"vst"`, `"mvb"`, or `"dispersion"`.
@@ -43,15 +48,24 @@ pub struct BoostParams {
     pub loess_span: f64,
     /// Optional clip max for variance stabilisation.
     pub clip_max: Option<f32>,
-    /// Ratio of simulated doublets to observed cells.
-    pub boost_rate: f32,
-    /// Whether to sample cell pairs with replacement.
-    pub replace: bool,
+    /// Binning strategy
+    pub binning_strategy: String,
+    /// Number of bins (HVG)
+    pub n_bins: usize,
+
+    // -- pca --
     /// Number of principal components.
     pub no_pcs: usize,
     /// Whether to use randomised SVD.
     pub random_svd: bool,
     /// Resolution parameter for Louvain clustering.
+
+    // -- boosted --
+    /// Ratio of simulated doublets to observed cells.
+    pub boost_rate: f32,
+    /// Whether to sample cell pairs with replacement.
+    pub replace: bool,
+    /// Louvain resolution parameter
     pub resolution: f32,
     /// Number of Louvain iterations per clustering step.
     pub louvain_iters: usize,
@@ -61,8 +75,20 @@ pub struct BoostParams {
     pub p_thresh: f32,
     /// Fraction threshold for majority voting (0-1).
     pub voter_thresh: f32,
-    /// Parameters for kNN construction.
+
+    // -- knn --
+    /// [KnnParams] for the various approximate nearest neighbour searches
+    /// in ann-search-rs
     pub knn_params: KnnParams,
+
+    // -- fast cluster --
+    /// Use fast clustering - useful on larger data sets.
+    pub fast_cluster: bool,
+    /// Which k-means clustering to use - standard or mini-batch
+    pub km_type: String,
+    /// [FastLouvainParams] for the fast clustering path. Gives control over
+    /// the k-means methods, batch size, etc.
+    pub fast_cluster_params: FastLouvainParams<f32>,
 }
 
 /// Results from the Boost doublet detection algorithm.
@@ -228,6 +254,8 @@ pub struct BoostClassifier {
     cells_to_keep: Vec<usize>,
     /// Per-cell library sizes computed over HVG genes only.
     hvg_library_sizes: Vec<usize>,
+    /// PCA results to avoid re-computing the HVG, PCA, etc.
+    pca_results: Option<DoubletPcaRes>,
 }
 
 impl BoostClassifier {
@@ -257,6 +285,7 @@ impl BoostClassifier {
             n_cells_sim: 0,
             cells_to_keep: cell_indices.to_vec(),
             hvg_library_sizes: Vec::new(),
+            pca_results: None,
         }
     }
 
@@ -276,7 +305,12 @@ impl BoostClassifier {
     /// ### Returns
     ///
     /// `BoostResult` with predictions, scores and voting averages.
-    pub fn run_boost(&mut self, streaming: bool, seed: usize, verbose: bool) -> BoostResult {
+    pub fn run_boost(
+        &mut self,
+        streaming: bool,
+        seed: usize,
+        verbose: bool,
+    ) -> Result<BoostResult, BixverseErrors> {
         let start_all = Instant::now();
 
         let hvg_opts = HvgOpts {
@@ -284,6 +318,8 @@ impl BoostClassifier {
             loess_span: self.params.loess_span as f32,
             clip_max: self.params.clip_max,
             min_gene_var_pctl: self.params.min_gene_var_pctl,
+            binning_strategy: self.params.binning_strategy.clone(),
+            n_bins: self.params.n_bins,
         };
 
         if verbose {
@@ -297,7 +333,7 @@ impl BoostClassifier {
             &hvg_opts,
             streaming,
             verbose,
-        );
+        )?;
 
         if verbose {
             println!(
@@ -308,7 +344,7 @@ impl BoostClassifier {
         }
 
         self.hvg_library_sizes =
-            compute_hvg_library_sizes(&self.f_path_cell, &self.cells_to_keep, &hvg_genes);
+            compute_hvg_library_sizes(&self.f_path_cell, &self.cells_to_keep, &hvg_genes)?;
         let target_size = resolve_target_size(self.params.target_size, &self.hvg_library_sizes);
         self.n_cells_sim = (self.n_cells as f32 * self.params.boost_rate) as usize;
 
@@ -326,7 +362,7 @@ impl BoostClassifier {
                 }
                 self.one_iteration(target_size, &hvg_genes, seed + iter, verbose)
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
 
         if verbose {
             println!(
@@ -383,7 +419,7 @@ impl BoostClassifier {
             println!("Total runtime: {:.2?}", start_all.elapsed());
         }
 
-        result
+        Ok(result)
     }
 
     /// Execute a single Boost iteration.
@@ -402,12 +438,12 @@ impl BoostClassifier {
     ///
     /// Tuple of (community_scores, log_p_values) per observed cell.
     fn one_iteration(
-        &self,
+        &mut self,
         target_size: f32,
         hvg_genes: &[usize],
         seed: usize,
         verbose: bool,
-    ) -> (Vec<f32>, Vec<f32>) {
+    ) -> Result<(Vec<f32>, Vec<f32>), BixverseErrors> {
         let pca_opts = PcaOpts {
             log_transform: self.params.log_transform,
             mean_center: self.params.mean_center,
@@ -416,10 +452,8 @@ impl BoostClassifier {
             random_svd: self.params.random_svd,
         };
 
-        // Generate pairs (Boost supports with/without replacement)
         let pairs = self.generate_pairs(seed);
 
-        // Simulate
         let sim_chunks = simulate_from_pairs(
             &pairs,
             &self.cells_to_keep,
@@ -428,54 +462,132 @@ impl BoostClassifier {
             &self.f_path_cell,
             target_size,
             self.params.log_transform,
-        );
+        )?;
 
-        // PCA + projection
-        let (combined_pca, _) = pca_and_project(
-            &self.f_path_gene,
-            &self.cells_to_keep,
-            hvg_genes,
-            &self.hvg_library_sizes,
-            target_size,
-            &sim_chunks,
-            &pca_opts,
-            seed,
-            verbose,
-        );
+        let combined_pca = match &self.pca_results {
+            Some(pca_res) => reproject_doublets(&sim_chunks, pca_res, &pca_opts),
+            None => {
+                let pca_start = Instant::now();
+
+                if verbose {
+                    println!(" Generating the PCA in the first iteration");
+                }
+
+                let (combined, pca_res) = pca_and_project(
+                    &self.f_path_gene,
+                    &self.cells_to_keep,
+                    hvg_genes,
+                    &self.hvg_library_sizes,
+                    target_size,
+                    &sim_chunks,
+                    &pca_opts,
+                    seed,
+                    verbose,
+                )?;
+                self.pca_results = Some(pca_res);
+
+                if verbose {
+                    println!(
+                        " Finished the initial PCA in {:.2?} and storing results for subsequent iterations",
+                        pca_start.elapsed()
+                    );
+                }
+
+                combined
+            }
+        };
 
         // kNN
         let k_adj = adjusted_k(self.params.knn_params.k, self.n_cells, self.n_cells_sim);
         if verbose {
             println!("Using {} neighbours in the kNN generation.", k_adj);
         }
-        let knn = dispatch_knn(
-            combined_pca.as_ref(),
-            k_adj,
-            &self.params.knn_params,
-            seed,
-            verbose,
-        );
 
-        // Cluster
-        let start_graph = Instant::now();
-        let graph = knn_to_sparse_graph(&knn);
-        if verbose {
-            println!(
-                "Transformed kNN graph. Done in {:.2?}",
-                start_graph.elapsed()
-            );
-        }
+        let total_cells = self.n_cells + self.n_cells_sim;
+        let use_fast = self.params.fast_cluster && total_cells >= FAST_CLUSTER_MIN_CELLS;
 
         let start_cluster = Instant::now();
-        let communities = louvain_sparse_graph(
-            &graph,
-            self.params.resolution,
-            self.params.louvain_iters,
-            seed,
-        );
+        let communities = if use_fast {
+            let n_centroids = self.params.fast_cluster_params.n_centroids;
+            let centroid_k = ((n_centroids as f32).sqrt() * 0.5).round() as usize;
+
+            let mut centroid_knn_params = self.params.knn_params.clone();
+            centroid_knn_params.k = centroid_k;
+
+            let fast_params = FastLouvainParams {
+                n_centroids,
+                knn_params: centroid_knn_params,
+                louvain_iters: self.params.louvain_iters,
+                batch_size: self.params.fast_cluster_params.batch_size,
+                kmeans_iters: self.params.fast_cluster_params.kmeans_iters,
+                multi_level_louvain: false,
+                ..Default::default()
+            };
+
+            if verbose {
+                println!(
+                    "Using fast clustering with {} centroids, k={} on {} cells.",
+                    n_centroids, centroid_k, total_cells
+                );
+            }
+
+            let louvain_resolutions: Vec<f32> = vec![self.params.resolution];
+
+            let res = fast_louvain_clusters(
+                combined_pca.as_ref(),
+                &self.params.km_type,
+                &louvain_resolutions,
+                &fast_params,
+                false,
+                false,
+                seed,
+                verbose,
+            )?;
+
+            // quick helper to extract the assignments
+            let get_assignments = |x: FastLouvainResults| -> Vec<Vec<usize>> {
+                match x.get_assignments() {
+                    Either::Left(v) => v,
+                    Either::Right(_) => panic!("expected Single variant"),
+                }
+            };
+
+            get_assignments(res)[0].clone()
+        } else {
+            let k_adj = adjusted_k(self.params.knn_params.k, self.n_cells, self.n_cells_sim);
+            if verbose {
+                println!("Using {} neighbours in the kNN generation.", k_adj);
+            }
+            let knn = dispatch_knn(
+                combined_pca.as_ref(),
+                k_adj,
+                &self.params.knn_params,
+                seed,
+                verbose,
+            );
+
+            let start_graph = Instant::now();
+            // for doublet detection symmetrisation is not very good... better
+            // to keep it false here
+            let graph = knn_to_sparse_graph(&knn, false);
+            if verbose {
+                println!(
+                    "Transformed kNN graph. Done in {:.2?}",
+                    start_graph.elapsed()
+                );
+            }
+            louvain_sparse_graph(
+                &graph,
+                self.params.resolution,
+                self.params.louvain_iters,
+                false,
+                seed,
+            )?
+        };
+
         if verbose {
             println!(
-                "Generated communities via Louvain clustering. Done in {:.2?}",
+                "Generated communities. Done in {:.2?}",
                 start_cluster.elapsed()
             );
         }
@@ -484,7 +596,7 @@ impl BoostClassifier {
         let orig_communities = communities[..self.n_cells].to_vec();
         let synth_communities = communities[self.n_cells..].to_vec();
 
-        score_communities(&orig_communities, &synth_communities)
+        Ok(score_communities(&orig_communities, &synth_communities))
     }
 
     /// Generate cell pairs for doublet simulation.

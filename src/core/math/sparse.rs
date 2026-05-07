@@ -187,7 +187,8 @@ where
     }
 }
 
-/// Structure to store compressed sparse data of either type
+/// Structure to store compressed sparse data of either type with two data
+/// layers
 #[derive(Debug, Clone)]
 pub struct CompressedSparseData2<T, U = T>
 where
@@ -274,6 +275,20 @@ where
         transpose_sparse(self)
     }
 
+    /// Transform from CSC to CSR or vice versa, keeping only one data layer.
+    ///
+    /// ### Params
+    ///
+    /// * `use_second_layer` - If `true`, the output keeps `data_2` and `data`
+    ///   is empty. If `false`, the output keeps `data` and `data_2` is `None`.
+    ///
+    /// ### Returns
+    ///
+    /// The transformed/transposed version with only the requested layer.
+    pub fn transform_single_layer(&self, use_second_layer: bool) -> Result<Self, BixverseErrors> {
+        transpose_sparse_single_layer(self, use_second_layer)
+    }
+
     /// Transpose and convert
     ///
     /// This is a helper to deal with the h5ad madness. Takes in for example
@@ -308,19 +323,6 @@ where
                     shape: (self.shape.1, self.shape.0),
                 }
             }
-        }
-    }
-
-    /// Transpose the matrix
-    #[allow(dead_code)]
-    pub fn transpose_from_h5ad(&self) -> Self {
-        CompressedSparseData2 {
-            data: self.data.clone(),
-            indices: self.indices.clone(),
-            indptr: self.indptr.clone(),
-            cs_type: self.cs_type.clone(),
-            data_2: self.data_2.clone(),
-            shape: (self.shape.1, self.shape.0),
         }
     }
 
@@ -487,7 +489,7 @@ where
     ///
     /// The number of NNZ
     pub fn get_nnz(&self) -> usize {
-        self.data.len()
+        self.indices.len()
     }
 
     /// Return the second layer
@@ -592,6 +594,112 @@ where
         data_2: new_data2,
         shape: (nrow, ncol),
     }
+}
+
+/// Transpose a compressed sparse matrix (CSC→CSR or CSR→CSC), keeping only
+/// one of the two data layers.
+///
+/// Useful when the caller knows the other layer is dead weight (e.g. raw
+/// counts when only normalised counts are consumed downstream). Skips the
+/// scatter for the unused layer entirely.
+///
+/// ### Params
+///
+/// * `sparse_data` - The input compressed sparse matrix to be transposed.
+/// * `use_second_layer` - If `true`, only `data_2` is transposed and the
+///   output's `data` is empty. If `false`, only `data` is transposed and the
+///   output's `data_2` is `None`.
+///
+/// ### Returns
+///
+/// The transposed compressed sparse matrix with only the requested layer
+/// populated.
+pub fn transpose_sparse_single_layer<T, U>(
+    sparse_data: &CompressedSparseData2<T, U>,
+    use_second_layer: bool,
+) -> Result<CompressedSparseData2<T, U>, BixverseErrors>
+where
+    T: BixverseNumeric,
+    U: BixverseNumeric,
+{
+    let nnz = sparse_data.get_nnz();
+    let (nrow, ncol) = sparse_data.shape();
+
+    let (new_major, new_type) = match sparse_data.cs_type {
+        CompressedSparseFormat::Csc => (nrow, CompressedSparseFormat::Csr),
+        CompressedSparseFormat::Csr => (ncol, CompressedSparseFormat::Csc),
+    };
+
+    // first pass: count entries per new-major index
+    let mut new_indptr = vec![0usize; new_major + 1];
+    for &idx in &sparse_data.indices {
+        new_indptr[idx + 1] += 1;
+    }
+    for i in 0..new_major {
+        new_indptr[i + 1] += new_indptr[i];
+    }
+
+    let mut new_indices: Vec<usize> = vec![0usize; nnz];
+
+    // allocate only for the kept layer
+    let (mut new_data, mut new_data2): (Vec<T>, Option<Vec<U>>) = if use_second_layer {
+        (Vec::new(), Some(vec![U::default(); nnz]))
+    } else {
+        (vec![T::default(); nnz], None)
+    };
+
+    let old_major_len = sparse_data.indptr.len() - 1;
+
+    // second pass: scatter. Two branches to keep the inner loop tight.
+    if use_second_layer {
+        let src = sparse_data
+            .data_2
+            .as_ref()
+            .ok_or(BixverseErrors::Data2NotAvailable)?
+            .as_slice();
+        let dst = new_data2.as_mut().unwrap();
+        for major in 0..old_major_len {
+            for idx in sparse_data.indptr[major]..sparse_data.indptr[major + 1] {
+                let minor = sparse_data.indices[idx];
+                let pos = new_indptr[minor];
+                // SAFETY: pos < nnz guaranteed by the counting pass
+                unsafe {
+                    *new_indices.get_unchecked_mut(pos) = major;
+                    *dst.get_unchecked_mut(pos) = src[idx];
+                }
+                new_indptr[minor] += 1;
+            }
+        }
+    } else {
+        for major in 0..old_major_len {
+            for idx in sparse_data.indptr[major]..sparse_data.indptr[major + 1] {
+                let minor = sparse_data.indices[idx];
+                let pos = new_indptr[minor];
+                // SAFETY: pos < nnz guaranteed by the counting pass
+                unsafe {
+                    *new_indices.get_unchecked_mut(pos) = major;
+                    *new_data.get_unchecked_mut(pos) = sparse_data.data[idx];
+                }
+                new_indptr[minor] += 1;
+            }
+        }
+    }
+
+    // restore new_indptr: the scatter pass shifted every entry forward by its
+    // count, so we shift the whole array right by one position.
+    for i in (1..=new_major).rev() {
+        new_indptr[i] = new_indptr[i - 1];
+    }
+    new_indptr[0] = 0;
+
+    Ok(CompressedSparseData2 {
+        data: new_data,
+        indices: new_indices,
+        indptr: new_indptr,
+        cs_type: new_type,
+        data_2: new_data2,
+        shape: (nrow, ncol),
+    })
 }
 
 /// Transform COO stored data into CSR
@@ -967,7 +1075,6 @@ where
 pub fn normalise_csr_rows_l1<T>(csr: &mut CompressedSparseData2<T>)
 where
     T: BixverseNumeric + Into<f64>,
-    // We also need the `Sum` trait for `iter().sum()`
     T: std::iter::Sum<T>,
 {
     assert!(csr.cs_type.is_csr(), "Matrix must be in CSR format");
@@ -1304,7 +1411,7 @@ where
 /// ### Returns
 ///
 /// Tuple of `(eigenvectors, eigenvalues)`
-fn tridiag_eig<T>(alpha: &[T], beta: &[T]) -> (Vec<T>, Mat<T>)
+fn tridiag_eig<T>(alpha: &[T], beta: &[T]) -> Result<(Vec<T>, Mat<T>), BixverseErrors>
 where
     T: BixverseFloat,
 {
@@ -1319,11 +1426,13 @@ where
         }
     }
 
-    let eig = t.self_adjoint_eigen(faer::Side::Lower).unwrap();
+    let eig = t
+        .self_adjoint_eigen(faer::Side::Lower)
+        .map_err(|_| BixverseErrors::FaerEigenError)?;
     let evals = eig.S().column_vector().iter().copied().collect();
     let evecs = eig.U().to_owned();
 
-    (evals, evecs)
+    Ok((evals, evecs))
 }
 
 /// Compute largest eigenvalues and eigenvectors using Lanczos
@@ -1342,7 +1451,7 @@ pub fn compute_largest_eigenpairs_lanczos<T>(
     matrix: &CompressedSparseData2<T>,
     n_components: usize,
     seed: u64,
-) -> (Vec<f32>, Vec<Vec<f32>>)
+) -> Result<(Vec<f32>, Vec<Vec<f32>>), BixverseErrors>
 where
     T: BixverseNumeric + BixverseSimd + Into<f64>,
 {
@@ -1417,7 +1526,7 @@ where
         normalise(&mut v);
     }
 
-    let (evals, evecs) = tridiag_eig(&alpha[..n_iter], &beta[..n_iter - 1]);
+    let (evals, evecs) = tridiag_eig(&alpha[..n_iter], &beta[..n_iter - 1])?;
 
     let mut indices: Vec<usize> = (0..evals.len()).collect();
     indices.sort_by(|&i, &j| evals[j].partial_cmp(&evals[i]).unwrap());
@@ -1451,7 +1560,7 @@ where
         }
     }
 
-    (largest_evals, transposed)
+    Ok((largest_evals, transposed))
 }
 
 /////////////////
@@ -1477,7 +1586,7 @@ pub fn sparse_svd_lanczos<T, U, F>(
     use_second_layer: bool,
     col_means: Option<&[F]>,
     col_stds: Option<&[F]>,
-) -> SvdResults<F>
+) -> Result<SvdResults<F>, BixverseErrors>
 where
     T: BixverseNumeric + BixverseSimd + Into<F> + Clone,
     U: BixverseNumeric + Into<F> + Clone,
@@ -1496,12 +1605,12 @@ where
     match matrix.cs_type {
         CompressedSparseFormat::Csr => {
             csr = matrix;
-            csc_owned = matrix.transform();
+            csc_owned = matrix.transform_single_layer(use_second_layer)?;
             csc = &csc_owned;
         }
         CompressedSparseFormat::Csc => {
             csc = matrix;
-            csr_owned = matrix.transform();
+            csr_owned = matrix.transform_single_layer(use_second_layer)?;
             csr = &csr_owned;
         }
     };
@@ -1641,7 +1750,7 @@ where
     }
 
     // eigendecomposition and reconstruction
-    let (evals, evecs) = tridiag_eig(&alpha[..n_iter], &beta[..n_iter - 1]);
+    let (evals, evecs) = tridiag_eig(&alpha[..n_iter], &beta[..n_iter - 1])?;
 
     let mut indices: Vec<usize> = (0..evals.len()).collect();
     indices.sort_by(|&i, &j| evals[j].partial_cmp(&evals[i]).unwrap());
@@ -1686,11 +1795,11 @@ where
     let u = Mat::from_fn(n, singular_values.len(), |i, j| u_vecs[j][i]);
     let v = Mat::from_fn(m, singular_values.len(), |i, j| v_vecs[j][i]);
 
-    SvdResults {
+    Ok(SvdResults {
         u,
         s: singular_values,
         v,
-    }
+    })
 }
 
 ///////////
@@ -1776,7 +1885,7 @@ mod tests {
         let csr = CompressedSparseData2::<f64, f64>::new_csr(&data, &indices, &indptr, None, shape);
 
         // Lanczos expects symmetric matrix, this one is symmetric
-        let (evals, evecs) = compute_largest_eigenpairs_lanczos(&csr, 1, 42);
+        let (evals, evecs) = compute_largest_eigenpairs_lanczos(&csr, 1, 42).unwrap();
 
         // True top eigenvalue should be exactly sum(x_i^2) = 1.0 + 4.0 = 5.0
         assert!((evals[0] - 5.0).abs() < 1e-3);
@@ -1802,7 +1911,7 @@ mod tests {
         let csr = CompressedSparseData2::<f64, f64>::new_csr(&data, &indices, &indptr, None, shape);
         let no_params: Option<&[f64]> = None;
 
-        let svd = sparse_svd_lanczos(&csr, 1, 42, false, no_params, no_params);
+        let svd = sparse_svd_lanczos(&csr, 1, 42, false, no_params, no_params).unwrap();
 
         // Test correlation with theoretical U
         let u_col = svd.u.col(0);

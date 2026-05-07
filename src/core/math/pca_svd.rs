@@ -119,14 +119,17 @@ where
 /// ### Returns
 ///
 /// A vector of tuples corresponding to the top eigen pairs.
-pub fn get_top_eigenvalues<T>(matrix: &Mat<T>, top_n: usize) -> Vec<(T, Vec<T>)>
+pub fn get_top_eigenvalues<T>(
+    matrix: &Mat<T>,
+    top_n: usize,
+) -> Result<Vec<(T, Vec<T>)>, BixverseErrors>
 where
     T: BixverseFloat,
 {
     // Ensure the matrix is square
     assert_symmetric_mat!(matrix);
 
-    let eigendecomp = matrix.eigen().unwrap();
+    let eigendecomp = matrix.eigen().map_err(|_| BixverseErrors::FaerEigenError)?;
 
     let s = eigendecomp.S();
     let u = eigendecomp.U();
@@ -148,7 +151,7 @@ where
 
     let res: Vec<(T, Vec<T>)> = eigenpairs.into_iter().take(top_n).collect();
 
-    res
+    Ok(res)
 }
 
 /// Randomised SVD
@@ -183,7 +186,7 @@ pub fn randomised_svd<T>(
     seed: usize,
     oversampling: Option<usize>,
     n_power_iter: Option<usize>,
-) -> RandomSvdResults<T>
+) -> Result<RandomSvdResults<T>, BixverseErrors>
 where
     T: BixverseFloat,
 {
@@ -207,12 +210,13 @@ where
     }
 
     let b = q.transpose() * x;
-    let svd = b.thin_svd().unwrap();
-    RandomSvdResults {
+    let svd = b.thin_svd().map_err(|_| BixverseErrors::FaerSvdError)?;
+
+    Ok(RandomSvdResults {
         u: q * svd.U(),
         v: svd.V().cloned(),
         s: svd.S().column_vector().iter().copied().collect(),
-    }
+    })
 }
 
 ///////////////////////////
@@ -223,7 +227,7 @@ where
 ///
 /// ### Params
 ///
-/// * `matrix` - Sparse matrix (CSR or CSC)
+/// * `matrix` - Sparse matrix (CSR or CSC), consumed
 /// * `rank` - Target rank
 /// * `seed` - For reproducibility
 /// * `use_second_layer` - Whether to use the second layer of the sparse matrix
@@ -233,10 +237,10 @@ where
 ///
 /// ### Returns
 ///
-/// `RandomSvdResults` containing U (n×k), S (length k), and V (m×k)
+/// `RandomSvdResults` containing U (n x k), S (length k), and V (m x k)
 #[allow(clippy::too_many_arguments)]
 pub fn randomised_sparse_svd<T, F>(
-    matrix: &CompressedSparseData2<T>,
+    matrix: CompressedSparseData2<T>,
     rank: usize,
     seed: u64,
     use_second_layer: bool,
@@ -244,7 +248,7 @@ pub fn randomised_sparse_svd<T, F>(
     n_power_iter: Option<usize>,
     col_means: Option<&[F]>,
     col_stds: Option<&[F]>,
-) -> RandomSvdResults<F>
+) -> Result<RandomSvdResults<F>, BixverseErrors>
 where
     T: BixverseNumeric + Into<F>,
     F: BixverseFloat,
@@ -254,43 +258,50 @@ where
     let sample_size = (rank + os).min(m).min(n);
     let n_iter = n_power_iter.unwrap_or(2);
 
-    let csr_owned;
-    let csr: &CompressedSparseData2<T> = match matrix.cs_type {
+    // consume the input: transform if needed, drop the original CSC.
+    let csr = match matrix.cs_type {
         CompressedSparseFormat::Csr => matrix,
-        CompressedSparseFormat::Csc => {
-            csr_owned = matrix.transform();
-            &csr_owned
-        }
+        CompressedSparseFormat::Csc => matrix.transform_single_layer(use_second_layer)?,
     };
 
-    let data_float: Vec<F> = if use_second_layer {
+    // pick the active data slice without materialising an f64 copy.
+    // values are converted to F at access sites (free cast for f32 -> f64).
+    let active_data: &[T] = if use_second_layer {
         csr.data_2
             .as_ref()
-            .expect("data_2 is None but use_second_layer is true")
-            .iter()
-            .map(|&v| v.into())
-            .collect()
+            .ok_or(BixverseErrors::Data2NotAvailable)?
+            .as_slice()
     } else {
-        csr.data.iter().map(|&v| v.into()).collect()
+        csr.data.as_slice()
     };
 
-    // pre-divide input (m × ncols) by col_stds once, avoiding per-nonzero division.
+    // helper: read a non-zero value as f64 for stable accumulation.
+    let val_f64 = |idx: usize| -> f64 {
+        let v: F = active_data[idx].into();
+        v.to_f64().unwrap()
+    };
+
+    // pre-divide input (m x ncols) by col_stds once, avoiding per-nonzero division.
     let prescale = |x: MatRef<F>| -> Option<Mat<F>> {
         col_stds.map(|sd| Mat::from_fn(x.nrows(), x.ncols(), |i, col| x[(i, col)] / sd[i]))
     };
 
-    // expects x_scaled to already be divided by σ if applicable.
-    // y = A * x_scaled - 1 * (μᵀ * x_scaled)
+    // y = A * x_scaled - 1 * (mu^T * x_scaled)
+    // expects x_scaled to already be divided by sigma if applicable.
+    // accumulates per-row in f64 for numerical stability.
     let sparse_matvec_a = |x_scaled: MatRef<F>, y: MatMut<F>| {
         let ncols = x_scaled.ncols();
 
-        // μᵀ * x_scaled — a (1×m)*(m×ncols) product; faer handles SIMD internally.
-        let mean_dots: Vec<F> = if let Some(mu) = col_means {
-            let mu_row = MatRef::from_row_major_slice(mu, 1, m);
-            let result = mu_row * x_scaled;
-            (0..ncols).map(|col| result[(0, col)]).collect()
+        let mean_dots: Vec<f64> = if let Some(mu) = col_means {
+            (0..ncols)
+                .map(|col| {
+                    (0..m)
+                        .map(|j| mu[j].to_f64().unwrap() * x_scaled[(j, col)].to_f64().unwrap())
+                        .sum::<f64>()
+                })
+                .collect()
         } else {
-            vec![]
+            Vec::new()
         };
 
         let y_ptr = y.as_ptr_mut() as usize;
@@ -300,39 +311,33 @@ where
         (0..n).into_par_iter().for_each(|i| {
             let base = y_ptr as *mut F;
 
-            for col in 0..ncols {
-                unsafe {
-                    *base.offset(i as isize * y_row_stride + col as isize * y_col_stride) =
-                        F::zero();
-                }
-            }
+            let mut row_acc = vec![0f64; ncols];
 
             for idx in csr.indptr[i]..csr.indptr[i + 1] {
                 let j = csr.indices[idx];
-                let a_val = data_float[idx];
+                let a_val = val_f64(idx);
                 for col in 0..ncols {
-                    unsafe {
-                        let ptr =
-                            base.offset(i as isize * y_row_stride + col as isize * y_col_stride);
-                        *ptr += a_val * x_scaled[(j, col)];
-                    }
+                    row_acc[col] += a_val * x_scaled[(j, col)].to_f64().unwrap();
                 }
             }
 
             if col_means.is_some() {
                 for col in 0..ncols {
-                    unsafe {
-                        let ptr =
-                            base.offset(i as isize * y_row_stride + col as isize * y_col_stride);
-                        *ptr -= mean_dots[col];
-                    }
+                    row_acc[col] -= mean_dots[col];
+                }
+            }
+
+            for col in 0..ncols {
+                unsafe {
+                    let ptr = base.offset(i as isize * y_row_stride + col as isize * y_col_stride);
+                    *ptr = F::from_f64(row_acc[col]).unwrap();
                 }
             }
         });
     };
 
-    // y = (Aᵀx - μ * col_sumsᵀ) / σ
-    // col_sums accumulated inside the fold — no separate O(n * ncols) pass.
+    // y = (A^T x - mu * col_sums^T) / sigma
+    // col_sums accumulated inside the fold.
     let sparse_matvec_at = |x: MatRef<F>, mut y: MatMut<F>| {
         let ncols = x.ncols();
 
@@ -346,7 +351,7 @@ where
                     }
                     for idx in csr.indptr[i]..csr.indptr[i + 1] {
                         let j = csr.indices[idx];
-                        let a_val = data_float[idx].to_f64().unwrap();
+                        let a_val = val_f64(idx);
                         for col in 0..ncols {
                             acc[j * ncols + col] += a_val * x[(i, col)].to_f64().unwrap();
                         }
@@ -387,19 +392,20 @@ where
         F::from_f64(normal.sample(&mut rng)).unwrap()
     });
 
-    let omega_ref = prescale(omega.as_ref());
+    let omega_scaled = prescale(omega.as_ref());
     let mut y = Mat::<F>::zeros(n, sample_size);
     sparse_matvec_a(
-        omega_ref
+        omega_scaled
             .as_ref()
             .map(|m| m.as_ref())
             .unwrap_or(omega.as_ref()),
         y.as_mut(),
     );
+    drop(omega);
+    drop(omega_scaled);
 
     let mut q = y.qr().compute_thin_Q();
 
-    // reuse buffers across power iterations.
     let mut z = Mat::<F>::zeros(m, sample_size);
     let mut y_new = Mat::<F>::zeros(n, sample_size);
 
@@ -413,18 +419,22 @@ where
         q = y_new.qr().compute_thin_Q();
     }
 
-    // B = Qᵀ * (A - 1μᵀ) / σ = sparse_matvec_at(Q)ᵀ — no duplicate fold needed.
+    // memory dropping
+    drop(z);
+    drop(y_new);
+    drop(y);
+
     let mut b_t = Mat::<F>::zeros(m, sample_size);
     sparse_matvec_at(q.as_ref(), b_t.as_mut());
     let b = b_t.transpose().to_owned();
 
-    let svd = b.thin_svd().unwrap();
+    let svd = b.thin_svd().map_err(|_| BixverseErrors::FaerSvdError)?;
 
     let u = &q * svd.U();
     let s: Vec<F> = svd.S().column_vector().iter().copied().collect();
     let v = svd.V().to_owned();
 
-    RandomSvdResults { u, s, v }
+    Ok(RandomSvdResults { u, s, v })
 }
 
 ///////////
@@ -459,7 +469,7 @@ mod tests {
             2,
             |i, j| if i == j { 3.0 - (i as f64 * 2.0) } else { 0.0 },
         );
-        let top_eigen = get_top_eigenvalues(&mat, 2);
+        let top_eigen = get_top_eigenvalues(&mat, 2).unwrap();
 
         assert_eq!(top_eigen.len(), 2);
         assert!((top_eigen[0].0 - 3.0).abs() < 1e-6);
@@ -481,7 +491,7 @@ mod tests {
         }
 
         // We only need the top 1 PC
-        let svd = randomised_svd(mat.as_ref(), 1, 42, Some(5), Some(4));
+        let svd = randomised_svd(mat.as_ref(), 1, 42, Some(5), Some(4)).unwrap();
 
         // Test U (Left Singular Vector) correlation with x
         let u_col = svd.u.col(0);
@@ -518,7 +528,8 @@ mod tests {
         let csr = CompressedSparseData2::<f64, f64>::new_csr(&data, &indices, &indptr, None, shape);
 
         let no_params: Option<&[f64]> = None;
-        let svd = randomised_sparse_svd(&csr, 1, 42, false, Some(5), Some(4), no_params, no_params);
+        let svd = randomised_sparse_svd(csr, 1, 42, false, Some(5), Some(4), no_params, no_params)
+            .unwrap();
 
         let u_col = svd.u.col(0);
         let x_norm = (2.0_f64.powi(2) + 4.0_f64.powi(2)).sqrt(); // sqrt(20)

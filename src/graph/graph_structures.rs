@@ -598,7 +598,7 @@ where
             for j in 0..n {
                 if i != j {
                     let sim = similarities[(i, j)];
-                    heap.push((OrderedFloat(sim), j));
+                    heap.push((RevOrderedFloat(sim), j));
                     if heap.len() > k {
                         heap.pop(); // Remove smallest
                     }
@@ -695,11 +695,12 @@ where
 /// ### Params
 ///
 /// * `knn` - kNN indices. Excludes self.
+/// * `same_weight` - Shall all weights be set to 1.
 ///
 /// ### Returns
 ///
 /// Undirected sparse graph with symmetric CSR representation
-pub fn knn_to_sparse_graph<T>(knn: &[Vec<usize>]) -> SparseGraph<T>
+pub fn knn_to_sparse_graph<T>(knn: &[Vec<usize>], same_weight: bool) -> SparseGraph<T>
 where
     T: BixverseFloat + std::iter::Sum + BixverseNumeric,
 {
@@ -744,7 +745,15 @@ where
 
     let adjacency = coo_to_csr(&rows, &cols, &vals, (n_nodes, n_nodes));
 
-    SparseGraph::new(n_nodes, adjacency, false)
+    let mut graph = SparseGraph::new(n_nodes, adjacency, false);
+
+    if same_weight {
+        for elem in graph.adjacency.data.iter_mut() {
+            *elem = T::one()
+        }
+    }
+
+    graph
 }
 
 ///////////

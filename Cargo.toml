@@ -1,6 +1,6 @@
 [package]
 name = "bixverse-rs"
-version = "0.1.7"
+version = "0.2.0"
 edition = "2024"
 authors = ["Gregor Lueg <gregorlueg@me.com>"]
 license = "MIT"
@@ -13,8 +13,8 @@ path = "src/lib.rs"
 
 [features]
 ## Enables the single cell features in bixverse-rs
-single-cell = ["half", "bincode", "indexmap", "memmap2", "hdf5", "lz4_flex", "ann-search-rs"]
-## Tests for large scale diagonistics - for development only
+single-cell = ["half", "bincode", "indexmap", "memmap2", "hdf5", "lz4_flex"]
+## Tests for large scale diagonistics - for development only!
 large_scale_diagnostics = []
 
 [profile.release]
@@ -24,9 +24,9 @@ codegen-units = 4
 
 [dependencies]
 approx = "0.5.1"
-ann-search-rs = { version = "0.2.9", optional = true }
+ann-search-rs = { version = "0.2.15" }
 bincode = { version = "2.0.1", features = ["serde"], optional = true }
-extendr-api = "0.8.1"
+extendr-api = "0.9.0"
 faer = "0.23.2"
 faer-entity = "0.20.1"
 half = { version = "2.7.1", optional = true }
@@ -49,3 +49,5 @@ statrs = "0.18.0"
 thousands = "0.2.0"
 wide = "1.1.1"
 document-features = "0.2.12"
+thiserror = "2.0.18"
+either = "1.15.0"

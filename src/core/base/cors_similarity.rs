@@ -1,6 +1,8 @@
 //! Contains correlation, co-variance, distance calculations and similarity
 //! types.
 
+use faer::linalg::matmul::triangular::{BlockStructure, matmul as triangular_matmul};
+use faer::{Accum, Par};
 use faer::{Mat, MatRef, Scale};
 use rayon::prelude::*;
 use rustc_hash::FxHashSet;
@@ -10,6 +12,16 @@ use std::hash::Hash;
 use crate::core::base::info::*;
 use crate::core::math::matrix_helpers::*;
 use crate::prelude::*;
+
+/////////////
+// Helpers //
+/////////////
+
+/// Returns the faer parallelism Enum
+#[inline]
+fn faer_parallelism() -> Par {
+    Par::Rayon(std::thread::available_parallelism().unwrap())
+}
 
 ///////////////////////
 // Column matrix ops //
@@ -29,9 +41,32 @@ where
     T: BixverseFloat,
 {
     let n_rows = mat.nrows();
+    let n_cols = mat.ncols();
     let centered = scale_matrix_col(mat, false);
+    let alpha = T::from_f64(1.0 / (n_rows - 1) as f64).unwrap();
 
-    (centered.transpose() * &centered) / (n_rows - 1) as f64
+    let mut result = Mat::<T>::zeros(n_cols, n_cols);
+
+    triangular_matmul(
+        &mut result,
+        BlockStructure::TriangularLower,
+        Accum::Replace,
+        centered.transpose(),
+        BlockStructure::Rectangular,
+        &centered,
+        BlockStructure::Rectangular,
+        alpha,
+        faer_parallelism(),
+    );
+
+    // reflect lower triangle into upper
+    for j in 0..n_cols {
+        for i in 0..j {
+            result[(i, j)] = result[(j, i)];
+        }
+    }
+
+    result
 }
 
 /// Calculate the cosine similarity between columns of a matrix
@@ -48,8 +83,28 @@ where
     T: BixverseFloat,
 {
     let normalised = normalise_matrix_col_l2(mat);
+    let n = normalised.ncols();
+    let mut result = Mat::<T>::zeros(n, n);
 
-    normalised.transpose() * &normalised
+    triangular_matmul(
+        &mut result,
+        BlockStructure::TriangularLower,
+        Accum::Replace,
+        normalised.transpose(),
+        BlockStructure::Rectangular,
+        &normalised,
+        BlockStructure::Rectangular,
+        T::one(),
+        faer_parallelism(),
+    );
+
+    for j in 0..n {
+        for i in 0..j {
+            result[(i, j)] = result[(j, i)];
+        }
+    }
+
+    result
 }
 
 /// Calculate the correlation matrix
@@ -73,8 +128,31 @@ where
         mat.to_owned()
     };
     let scaled = scale_matrix_col(&mat.as_ref(), true);
+    let n = scaled.ncols();
     let nrow = T::from_usize(scaled.nrows()).unwrap();
-    Scale(T::one() / (nrow - T::one())) * (scaled.transpose() * &scaled)
+    let alpha = T::one() / (nrow - T::one());
+
+    let mut result = Mat::<T>::zeros(n, n);
+
+    triangular_matmul(
+        &mut result,
+        BlockStructure::TriangularLower,
+        Accum::Replace,
+        scaled.transpose(),
+        BlockStructure::Rectangular,
+        &scaled,
+        BlockStructure::Rectangular,
+        alpha,
+        faer_parallelism(),
+    );
+
+    for j in 0..n {
+        for i in 0..j {
+            result[(i, j)] = result[(j, i)];
+        }
+    }
+
+    result
 }
 
 /// Calculates the correlation between two matrices
@@ -292,25 +370,31 @@ where
 {
     let ncols = mat.ncols();
 
-    let gram = mat.transpose() * mat;
-    let mut col_norms_square = vec![T::zero(); ncols];
+    let mut gram = Mat::<T>::zeros(ncols, ncols);
+    triangular_matmul(
+        &mut gram,
+        BlockStructure::TriangularLower,
+        Accum::Replace,
+        mat.transpose(),
+        BlockStructure::Rectangular,
+        mat,
+        BlockStructure::Rectangular,
+        T::one(),
+        faer_parallelism(),
+    );
 
-    for i in 0..ncols {
-        col_norms_square[i] = *gram.get(i, i);
-    }
+    let col_norms_square: Vec<T> = (0..ncols).map(|i| *gram.get(i, i)).collect();
 
     let mut res: Mat<T> = Mat::zeros(ncols, ncols);
     let two = T::from_f64(2.0).unwrap();
 
     for i in 0..ncols {
-        for j in 0..ncols {
-            if i == j {
-                res[(i, j)] = T::zero();
-            } else {
-                let dist_sq = col_norms_square[i] + col_norms_square[j] - two * *gram.get(i, j);
-                let dist = dist_sq.max(T::zero()).sqrt();
-                res[(i, j)] = dist;
-            }
+        for j in (i + 1)..ncols {
+            // lower triangle of gram, so read (j, i)
+            let dist_sq = col_norms_square[i] + col_norms_square[j] - two * *gram.get(j, i);
+            let dist = dist_sq.max(T::zero()).sqrt();
+            res[(i, j)] = dist;
+            res[(j, i)] = dist;
         }
     }
 
@@ -321,7 +405,7 @@ where
 ///
 /// ### Params
 ///
-/// * `mat` - The matrix for which to calculate the L1 norm (Manhatten distance)
+/// * `mat` - The matrix for which to calculate the L1 norm (Manhattan distance)
 ///   pairwise between all columns.
 ///
 /// ### Returns
@@ -825,10 +909,22 @@ where
         col_sums(affinity_mat.as_ref())
     };
 
-    let dot_products = affinity_mat.as_ref() * affinity_mat.as_ref();
+    // affinity_mat is assumed symmetric, so A * A is symmetric.
+    // Only the upper triangle is read below (j > i), no reflection needed.
+    let mut dot_products = Mat::<T>::zeros(n, n);
+    triangular_matmul(
+        &mut dot_products,
+        BlockStructure::TriangularUpper,
+        Accum::Replace,
+        affinity_mat,
+        BlockStructure::Rectangular,
+        affinity_mat,
+        BlockStructure::Rectangular,
+        T::one(),
+        faer_parallelism(),
+    );
 
     for i in 0..n {
-        // set diagonal element to 1
         tom_mat[(i, i)] = T::one();
         for j in (i + 1)..n {
             let a_ij = affinity_mat.get(i, j);

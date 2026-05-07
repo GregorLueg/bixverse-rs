@@ -2,25 +2,35 @@
 //! the extendr interface.
 
 use extendr_api::*;
+use std::collections::HashMap;
 
 use crate::core::math::sparse::parse_compressed_sparse_format;
-use crate::single_cell::sc_analysis::hdwgcna_meta_cells::MetaCellParams;
-use crate::single_cell::sc_analysis::hotspot::HotSpotParams;
-use crate::single_cell::sc_analysis::milo_r::MiloRParams;
-use crate::single_cell::sc_analysis::scenic::{
-    ExtraTreesConfig, GradientBoostingConfig, RandomForestConfig, RegressionLearner, ScenicParams,
+use crate::single_cell::mc_generation::{
+    hdwgcna_meta_cells::BootstrappedMetaCellParams, metacells2::params::*,
+    seacells::SEACellsParams, super_cells::SuperCellParams,
 };
-use crate::single_cell::sc_analysis::seacells::SEACellsParams;
-use crate::single_cell::sc_analysis::super_cells::SuperCellParams;
-use crate::single_cell::sc_analysis::vision::SignatureGenes;
-use crate::single_cell::sc_batch_correction::fast_mnn::FastMnnParams;
-use crate::single_cell::sc_batch_correction::harmony::HarmonyParams;
+use crate::single_cell::sc_analysis::fast_clusters::FastLouvainParams;
+use crate::single_cell::sc_analysis::{
+    hotspot::HotSpotParams,
+    milo_r::MiloRParams,
+    scenic::{
+        ExtraTreesConfig, GradientBoostingConfig, RandomForestConfig, RegressionLearner,
+        ScenicParams,
+    },
+    vision::SignatureGenes,
+};
+
+use crate::single_cell::sc_batch_correction::{
+    bbknn::BbknnParams, fast_mnn::FastMnnParams, harmony::HarmonyParams,
+    harmony_v2::HarmonyParamsV2,
+};
 use crate::single_cell::sc_data::data_io::MinCellQuality;
 use crate::single_cell::sc_data::h5ad_multifile_io::H5adFileTask;
 use crate::single_cell::sc_data::sc_synthetic_data::CellTypeConfig;
-use crate::single_cell::sc_processing::doublet_detection::BoostParams;
-use crate::single_cell::sc_processing::knn::KnnParams;
-use crate::single_cell::sc_processing::scrublet::ScrubletParams;
+use crate::single_cell::sc_processing::{
+    doublet_detection::BoostParams, knn::KnnParams, scdblfinder::ScDblFinderParams,
+    scrublet::ScrubletParams, utils_doublets::ScDblSimParams,
+};
 
 /////////////
 // Helpers //
@@ -90,6 +100,60 @@ pub fn assignments_to_r_list(assignments: &[Option<usize>], n_cells: usize) -> L
     )
 }
 
+/// Build the R-facing assignment list from metacell membership lists.
+///
+/// Cells may appear in multiple metacells (overlap is allowed). The per-cell
+/// `assignments` field is therefore a list of integer vectors, one per cell,
+/// each containing the 1-indexed metacell IDs that cell belongs to. Cells
+/// in no metacell get an empty vector and appear in `unassigned`. This
+/// helper is needed for the bootstrapped approach of meta cell generation
+///
+/// ### Params
+///
+/// * `metacell` - A slice of the cell indices per metacell
+/// * `n_cells` - Total number of cells
+///
+/// ### Returns
+///
+/// R list in a similar structure as [assignments_to_r_list] with a difference
+/// in the assigmnents. These are now a list, not an integer vector!
+pub fn metacells_to_r_list(metacells: &[Vec<usize>], n_cells: usize) -> List {
+    let mut cell_assignments: Vec<Vec<i32>> = vec![Vec::new(); n_cells];
+    for (mc_id, cells) in metacells.iter().enumerate() {
+        for &cell_id in cells {
+            cell_assignments[cell_id].push((mc_id + 1) as i32);
+        }
+    }
+
+    let unassigned: Vec<i32> = cell_assignments
+        .iter()
+        .enumerate()
+        .filter_map(|(cell_id, mcs)| mcs.is_empty().then_some((cell_id + 1) as i32))
+        .collect();
+
+    let n_unassigned = unassigned.len();
+    let n_metacells = metacells.len();
+
+    let metacells_list: List = metacells
+        .iter()
+        .map(|cells| {
+            let r_cells: Vec<i32> = cells.iter().map(|&c| (c + 1) as i32).collect();
+            Robj::from(r_cells)
+        })
+        .collect();
+
+    let assignments_list: List = cell_assignments.into_iter().map(Robj::from).collect();
+
+    list!(
+        assignments = assignments_list,
+        metacells = metacells_list,
+        unassigned = unassigned,
+        n_metacells = n_metacells,
+        n_cells = n_cells,
+        n_unassigned = n_unassigned
+    )
+}
+
 ////////////////////
 // Param wrappers //
 ////////////////////
@@ -111,8 +175,8 @@ impl CellTypeConfig {
     /// ### Returns
     ///
     /// The `CellTypeConfig` based on the R list.
-    pub fn from_r_list(r_list: List) -> Self {
-        let map = r_list.into_hashmap();
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let map: HashMap<&str, Robj> = r_list.try_into()?;
 
         let marker_genes = map
             .get("marker_genes")
@@ -120,7 +184,7 @@ impl CellTypeConfig {
             .map(|v| v.iter().map(|x| *x as usize).collect())
             .unwrap_or_default();
 
-        CellTypeConfig { marker_genes }
+        Ok(CellTypeConfig { marker_genes })
     }
 }
 
@@ -140,8 +204,8 @@ impl MinCellQuality {
     /// ### Returns
     ///
     /// Self with the specified parameters.
-    pub fn from_r_list(r_list: List) -> Self {
-        let min_qc = r_list.into_hashmap();
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let min_qc: HashMap<&str, Robj> = r_list.try_into()?;
 
         let min_unique_genes = min_qc
             .get("min_unique_genes")
@@ -163,12 +227,12 @@ impl MinCellQuality {
             .and_then(|v| v.as_real())
             .unwrap_or(1e5) as f32;
 
-        MinCellQuality {
+        Ok(MinCellQuality {
             min_unique_genes,
             min_lib_size,
             min_cells,
             target_size,
-        }
+        })
     }
 }
 
@@ -189,8 +253,8 @@ impl KnnParams {
     /// ### Returns
     ///
     /// The `KnnParams` with all parameters set.
-    pub fn from_r_list(r_list: List) -> Self {
-        let params_list = r_list.into_hashmap();
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params_list: HashMap<&str, Robj> = r_list.try_into()?;
 
         // general
         let knn_method = std::string::String::from(
@@ -266,7 +330,7 @@ impl KnnParams {
             .and_then(|v| v.as_integer())
             .map(|v| v as usize);
 
-        Self {
+        Ok(Self {
             knn_method,
             ann_dist,
             k,
@@ -280,7 +344,7 @@ impl KnnParams {
             ef_search,
             n_list,
             n_probe,
-        }
+        })
     }
 }
 
@@ -301,10 +365,10 @@ impl ScrubletParams {
     /// ### Returns
     ///
     /// The `ScrubletParams` with all parameters set.
-    pub fn from_r_list(r_list: List) -> Self {
-        let knn_params = KnnParams::from_r_list(r_list.clone());
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let knn_params = KnnParams::from_r_list(r_list.clone())?;
 
-        let scrublet_list = r_list.into_hashmap();
+        let scrublet_list: HashMap<&str, Robj> = r_list.try_into()?;
 
         // General params
         let log_transform = scrublet_list
@@ -350,6 +414,29 @@ impl ScrubletParams {
             .and_then(|v| v.as_real())
             .map(|x| x as f32);
 
+        let n_bins = scrublet_list
+            .get("n_bins")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(20) as usize;
+
+        let binning_strategy = std::string::String::from(
+            scrublet_list
+                .get("binning_strategy")
+                .and_then(|v| v.as_str())
+                .unwrap_or("equal_width"),
+        );
+
+        // PCA parameters
+        let no_pcs = scrublet_list
+            .get("no_pcs")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(30) as usize;
+
+        let random_svd = scrublet_list
+            .get("random_svd")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
         // Doublet simulation parameters
         let sim_doublet_ratio = scrublet_list
             .get("sim_doublet_ratio")
@@ -367,8 +454,8 @@ impl ScrubletParams {
             .unwrap_or(0.02) as f32;
 
         // Doublet calling parameters
-        let n_bins = scrublet_list
-            .get("n_bins")
+        let n_bins_hist = scrublet_list
+            .get("n_bins_hist")
             .and_then(|v| v.as_integer())
             .unwrap_or(50) as usize;
 
@@ -377,18 +464,7 @@ impl ScrubletParams {
             .and_then(|v| v.as_real())
             .map(|x| x as f32);
 
-        // PCA parameters
-        let no_pcs = scrublet_list
-            .get("no_pcs")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(30) as usize;
-
-        let random_svd = scrublet_list
-            .get("random_svd")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-
-        Self {
+        Ok(Self {
             // norm
             log_transform,
             normalise_variance,
@@ -399,18 +475,20 @@ impl ScrubletParams {
             hvg_method,
             loess_span,
             clip_max,
+            n_bins,
+            binning_strategy,
+            // pca
+            no_pcs,
+            random_svd,
             // doublet simulation/detection
             sim_doublet_ratio,
             expected_doublet_rate,
             stdev_doublet_rate,
-            n_bins,
+            n_bins_hist,
             manual_threshold,
-            // pca
-            no_pcs,
-            random_svd,
             // knn
             knn_params,
-        }
+        })
     }
 }
 
@@ -431,10 +509,11 @@ impl BoostParams {
     /// ### Returns
     ///
     /// The `BoostParams` with all parameters set.
-    pub fn from_r_list(r_list: List) -> Self {
-        let knn_params = KnnParams::from_r_list(r_list.clone());
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let knn_params = KnnParams::from_r_list(r_list.clone())?;
+        let fast_cluster_params = FastLouvainParams::from_r_list(r_list.clone())?;
 
-        let params_list = r_list.into_hashmap();
+        let params_list: HashMap<&str, Robj> = r_list.try_into()?;
 
         // norm parameters
         let log_transform = params_list
@@ -480,6 +559,29 @@ impl BoostParams {
             .and_then(|v| v.as_real())
             .map(|x| x as f32);
 
+        let n_bins = params_list
+            .get("n_bins")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(20) as usize;
+
+        let binning_strategy = std::string::String::from(
+            params_list
+                .get("binning_strategy")
+                .and_then(|v| v.as_str())
+                .unwrap_or("equal_width"),
+        );
+
+        // pca
+        let no_pcs = params_list
+            .get("no_pcs")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(30) as usize;
+
+        let random_svd = params_list
+            .get("random_svd")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
         // doublet detection params
         let boost_rate = params_list
             .get("boost_rate")
@@ -506,17 +608,6 @@ impl BoostParams {
             .and_then(|v| v.as_integer())
             .unwrap_or(10) as usize;
 
-        // pca
-        let no_pcs = params_list
-            .get("no_pcs")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(30) as usize;
-
-        let random_svd = params_list
-            .get("random_svd")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-
         let p_thresh = params_list
             .get("p_thresh")
             .and_then(|v| v.as_real())
@@ -527,26 +618,358 @@ impl BoostParams {
             .and_then(|v| v.as_real())
             .unwrap_or(0.9) as f32;
 
-        Self {
+        let fast_cluster = params_list
+            .get("fast_cluster")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let km_type = std::string::String::from(
+            params_list
+                .get("km_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("minibatch"),
+        );
+
+        Ok(Self {
+            // processing
             log_transform,
             mean_center,
             normalise_variance,
             target_size,
+            // hvg
             min_gene_var_pctl,
             hvg_method,
             loess_span,
             clip_max,
-            boost_rate,
-            replace,
+            n_bins,
+            binning_strategy,
+            // pca
             no_pcs,
             random_svd,
+            // boosted
+            boost_rate,
+            replace,
             resolution,
             louvain_iters,
             n_iters,
             p_thresh,
             voter_thresh,
+            // knn
             knn_params,
-        }
+            // fast cluster related stuff
+            fast_cluster,
+            fast_cluster_params,
+            km_type,
+        })
+    }
+}
+
+///////////////////////
+// ScDblFinderParams //
+///////////////////////
+
+impl ScDblFinderParams {
+    /// Generate ScDblFinderParams from an R list.
+    ///
+    /// Values not found in the list fall back to the `Default` implementation.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with scDblFinder parameters.
+    ///
+    /// ### Returns
+    ///
+    /// `ScDblFinderParams` with all parameters set.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let knn_params = KnnParams::from_r_list(r_list.clone())?;
+        let fast_cluster_params = FastLouvainParams::from_r_list(r_list.clone())?;
+        let map: HashMap<&str, Robj> = r_list.try_into()?;
+        let defaults = Self::default();
+
+        let km_type = std::string::String::from(
+            map.get("km_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("minibatch"),
+        );
+
+        Ok(Self {
+            // Preprocessing
+            log_transform: map
+                .get("log_transform")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(defaults.log_transform),
+            mean_center: map
+                .get("mean_center")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(defaults.mean_center),
+            normalise_variance: map
+                .get("normalise_variance")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(defaults.normalise_variance),
+            target_size: map
+                .get("target_size")
+                .and_then(|v| v.as_real())
+                .map(|x| x as f32),
+            n_genes: map
+                .get("n_genes")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(defaults.n_genes as i32) as usize,
+            // Simulation
+            doublet_ratio: map
+                .get("doublet_ratio")
+                .and_then(|v| v.as_real())
+                .unwrap_or(defaults.doublet_ratio as f64) as f32,
+            heterotypic_bias: map
+                .get("heterotypic_bias")
+                .and_then(|v| v.as_real())
+                .unwrap_or(defaults.heterotypic_bias as f64) as f32,
+            sim_params: ScDblSimParams::default(),
+            // PCA
+            no_pcs: map
+                .get("no_pcs")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(defaults.no_pcs as i32) as usize,
+            random_svd: map
+                .get("random_svd")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(defaults.random_svd),
+            // Clustering
+            cluster_resolution: map
+                .get("cluster_resolution")
+                .and_then(|v| v.as_real())
+                .unwrap_or(defaults.cluster_resolution as f64)
+                as f32,
+            cluster_iters: map
+                .get("cluster_iters")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(defaults.cluster_iters as i32) as usize,
+            fast_cluster: map
+                .get("fast_cluster")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(defaults.fast_cluster),
+            km_type,
+            fast_cluster_params,
+            // kNN
+            knn_params,
+            // Iteration
+            n_iterations: map
+                .get("n_iterations")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(defaults.n_iterations as i32) as usize,
+            // Classification
+            n_trees: map
+                .get("n_trees")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(defaults.n_trees as i32) as usize,
+            max_depth: map
+                .get("max_depth")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(defaults.max_depth as i32) as usize,
+            learning_rate: map
+                .get("learning_rate")
+                .and_then(|v| v.as_real())
+                .unwrap_or(defaults.learning_rate as f64) as f32,
+            min_samples_leaf: map
+                .get("min_samples_leaf")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(defaults.min_samples_leaf as i32) as usize,
+            subsample_rate: map
+                .get("subsample_rate")
+                .and_then(|v| v.as_real())
+                .unwrap_or(defaults.subsample_rate as f64) as f32,
+            cv_folds: map
+                .get("cv_folds")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(defaults.cv_folds as i32) as usize,
+            cv_early_stop: map
+                .get("cv_early_stop")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(defaults.cv_early_stop as i32) as usize,
+            se_fraction: map
+                .get("se_fraction")
+                .and_then(|v| v.as_real())
+                .unwrap_or(defaults.se_fraction as f64) as f32,
+            // Feature engineering
+            include_pcs: map
+                .get("include_pcs")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(defaults.include_pcs as i32) as usize,
+            return_features: map
+                .get("return_features")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(defaults.return_features),
+            cxds_genes: map
+                .get("cxds_genes")
+                .and_then(|v| v.as_integer())
+                .map(|x| x as usize),
+            // Expected doublet rate
+            expected_doublet_rate: map
+                .get("expected_doublet_rate")
+                .and_then(|v| v.as_real())
+                .map(|x| x as f32),
+            // Thresholding
+            manual_threshold: map
+                .get("manual_threshold")
+                .and_then(|v| v.as_real())
+                .map(|x| x as f32),
+        })
+    }
+}
+
+///////////////////////
+// FastLouvainParams //
+///////////////////////
+
+impl FastLouvainParams<f32> {
+    /// Generate the BbknnParams from a R list
+    ///
+    /// Should values not be found within the List, the parameters will default
+    /// to sensible defaults.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the BBKNN parameters.
+    ///
+    /// ### Return
+    ///
+    /// The `BbknnParams` with all of the parameters.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let knn_params = KnnParams::from_r_list(r_list.clone())?;
+        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let defaults: FastLouvainParams<f32> = Self::default();
+
+        // knn
+        let same_weight = params
+            .get("same_weight")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.same_weight);
+
+        // k means
+        let n_centroids = params
+            .get("n_centroids")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.n_centroids);
+
+        let kmeans_iters = params
+            .get("kmeans_iters")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.kmeans_iters);
+
+        let batch_size = params
+            .get("batch_size")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.batch_size);
+
+        let drift_threshold: f32 = params
+            .get("drift_threshold")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.drift_threshold);
+
+        let lr_alpha: f32 = params
+            .get("lr_alpha")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.lr_alpha);
+
+        // louvain
+        let louvain_iters = params
+            .get("louvain_iters")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.louvain_iters);
+        let multi_level_louvain = params
+            .get("multi_level_louvain")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.multi_level_louvain);
+
+        // snn
+        let full_snn = params
+            .get("full_snn")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.full_snn);
+
+        let pruning = params
+            .get("pruning")
+            .and_then(|v| v.as_real())
+            .map(|x| x as f32);
+
+        let snn_similarity = std::string::String::from(
+            params
+                .get("snn_similarity")
+                .and_then(|v| v.as_str())
+                .unwrap_or("jaccard"),
+        );
+
+        Ok(Self {
+            n_centroids,
+            kmeans_iters,
+            batch_size,
+            drift_threshold,
+            lr_alpha,
+            louvain_iters,
+            knn_params,
+            full_snn,
+            pruning,
+            snn_similarity,
+            multi_level_louvain,
+            same_weight,
+        })
+    }
+}
+
+///////////
+// BBKNN //
+///////////
+
+impl BbknnParams {
+    /// Generate the BbknnParams from a R list
+    ///
+    /// Should values not be found within the List, the parameters will default
+    /// to sensible defaults.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the BBKNN parameters.
+    ///
+    /// ### Return
+    ///
+    /// The `BbknnParams` with all of the parameters.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let knn_params = KnnParams::from_r_list(r_list.clone())?;
+
+        let bbknn_list: HashMap<&str, Robj> = r_list.try_into()?;
+
+        let neighbours_within_batch = bbknn_list
+            .get("neighbours_within_batch")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(3) as usize;
+
+        let set_op_mix_ratio = bbknn_list
+            .get("set_op_mix_ratio")
+            .and_then(|v| v.as_real())
+            .unwrap_or(1.0) as f32;
+
+        let local_connectivity = bbknn_list
+            .get("local_connectivity")
+            .and_then(|v| v.as_real())
+            .unwrap_or(1.0) as f32;
+
+        let trim = bbknn_list
+            .get("trim")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(10 * neighbours_within_batch as i32) as usize;
+
+        Ok(Self {
+            neighbours_within_batch,
+            set_op_mix_ratio,
+            local_connectivity,
+            trim: Some(trim),
+            knn_params,
+        })
     }
 }
 
@@ -567,9 +990,10 @@ impl FastMnnParams {
     /// ### Return
     ///
     /// The `FastMnnParams` with all of the parameters.
-    pub fn from_r_list(r_list: List) -> Self {
-        let knn_params = KnnParams::from_r_list(r_list.clone());
-        let fastmnn_list = r_list.into_hashmap();
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let knn_params = KnnParams::from_r_list(r_list.clone())?;
+        let fastmnn_list: HashMap<&str, Robj> = r_list.try_into()?;
+
         let ndist = fastmnn_list
             .get("ndist")
             .and_then(|v| v.as_real())
@@ -588,13 +1012,13 @@ impl FastMnnParams {
             .and_then(|v| v.as_logical())
             .map(|rb| rb.is_true())
             .unwrap_or(true);
-        Self {
+        Ok(Self {
             ndist,
             no_pcs,
             random_svd,
             cos_norm,
             knn_params,
-        }
+        })
     }
 }
 
@@ -615,10 +1039,10 @@ impl MiloRParams {
     /// ### Returns
     ///
     /// The `MiloRParams` with all parameters set.
-    pub fn from_r_list(r_list: List) -> Self {
-        let knn_params = KnnParams::from_r_list(r_list.clone());
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let knn_params = KnnParams::from_r_list(r_list.clone())?;
 
-        let params_list = r_list.into_hashmap();
+        let params_list: HashMap<&str, Robj> = r_list.try_into()?;
 
         let prop = params_list
             .get("prop")
@@ -644,13 +1068,13 @@ impl MiloRParams {
                 .unwrap_or("approximate"),
         );
 
-        Self {
+        Ok(Self {
             prop,
             k_refine,
             refinement_strategy,
             index_type,
             knn_params,
-        }
+        })
     }
 }
 
@@ -671,10 +1095,10 @@ impl SEACellsParams {
     /// ### Returns
     ///
     /// The `SEACellsParams` with all parameters set.
-    pub fn from_r_list(r_list: List) -> Self {
-        let knn_params = KnnParams::from_r_list(r_list.clone());
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let knn_params = KnnParams::from_r_list(r_list.clone())?;
 
-        let seacells_list = r_list.into_hashmap();
+        let seacells_list: HashMap<&str, Robj> = r_list.try_into()?;
 
         let n_sea_cells = seacells_list
             .get("n_sea_cells")
@@ -724,7 +1148,12 @@ impl SEACellsParams {
             .and_then(|v| v.as_real())
             .unwrap_or(1e-7) as f32;
 
-        Self {
+        let n_landmarks = seacells_list
+            .get("n_landmarks")
+            .and_then(|v| v.as_integer())
+            .map(|x| x as usize);
+
+        Ok(Self {
             // seacell
             n_sea_cells,
             max_fw_iters,
@@ -735,9 +1164,10 @@ impl SEACellsParams {
             graph_building,
             pruning,
             pruning_threshold,
+            n_landmarks,
             // knn
             knn_params,
-        }
+        })
     }
 }
 
@@ -745,7 +1175,7 @@ impl SEACellsParams {
 // MetaCells //
 ///////////////
 
-impl MetaCellParams {
+impl BootstrappedMetaCellParams {
     /// Generate the MetaCellParams from an R list
     ///
     /// ### Params
@@ -755,9 +1185,9 @@ impl MetaCellParams {
     /// ### Return
     ///
     /// The `MetaCellParams` structure.
-    pub fn from_r_list(r_list: List) -> Self {
-        let knn_params = KnnParams::from_r_list(r_list.clone());
-        let meta_cell_params = r_list.into_hashmap();
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let knn_params = KnnParams::from_r_list(r_list.clone())?;
+        let meta_cell_params: HashMap<&str, Robj> = r_list.try_into()?;
 
         // meta cell
         let max_shared = meta_cell_params
@@ -773,12 +1203,12 @@ impl MetaCellParams {
             .and_then(|v| v.as_integer())
             .unwrap_or(5000) as usize;
 
-        Self {
+        Ok(Self {
             max_shared,
             target_no_metacells,
             max_iter,
             knn_params,
-        }
+        })
     }
 }
 
@@ -796,10 +1226,10 @@ impl SuperCellParams {
     /// ### Return
     ///
     /// The `SuperCellParams` structure
-    pub fn from_r_list(r_list: List) -> Self {
-        let knn_params = KnnParams::from_r_list(r_list.clone());
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let knn_params = KnnParams::from_r_list(r_list.clone())?;
 
-        let params = r_list.into_hashmap();
+        let params: HashMap<&str, Robj> = r_list.try_into()?;
 
         // supercell
         let walk_length = params
@@ -812,18 +1242,23 @@ impl SuperCellParams {
             .and_then(|v| v.as_real())
             .unwrap_or(50.0);
 
-        let linkage_dist = params
-            .get("linkage_dist")
-            .and_then(|v| v.as_str())
-            .unwrap_or("average")
-            .to_string();
+        let use_kernel = params
+            .get("use_kernel")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
 
-        Self {
+        let k_ith = params
+            .get("k_ith")
+            .and_then(|v| v.as_integer())
+            .map(|x| x as usize);
+
+        Ok(Self {
             walk_length,
             graining_factor,
-            linkage_dist,
             knn_params,
-        }
+            use_kernel,
+            k_ith,
+        })
     }
 }
 
@@ -838,8 +1273,8 @@ impl SignatureGenes {
     ///
     /// * `r_list` - An R list that is expected to have `"pos"` and `"neg"` with
     ///   0-index positions of the gene for this gene set.
-    pub fn from_r_list(r_list: List) -> Self {
-        let r_list = r_list.into_hashmap();
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let r_list: HashMap<&str, Robj> = r_list.try_into()?;
 
         let positive: Vec<usize> = r_list
             .get("pos")
@@ -857,7 +1292,7 @@ impl SignatureGenes {
             .map(|x| *x as usize)
             .collect();
 
-        Self { positive, negative }
+        Ok(Self { positive, negative })
     }
 }
 
@@ -878,10 +1313,10 @@ impl HotSpotParams {
     /// ### Returns
     ///
     /// The `HotSpotParams` with all parameters set.
-    pub fn from_r_list(r_list: List) -> Self {
-        let knn_params = KnnParams::from_r_list(r_list.clone());
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let knn_params = KnnParams::from_r_list(r_list.clone())?;
 
-        let params_list = r_list.into_hashmap();
+        let params_list: HashMap<&str, Robj> = r_list.try_into()?;
 
         // hotspot
         let model = std::string::String::from(
@@ -896,11 +1331,11 @@ impl HotSpotParams {
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
 
-        Self {
+        Ok(Self {
             model,
             normalise,
             knn_params,
-        }
+        })
     }
 }
 
@@ -921,9 +1356,9 @@ impl HarmonyParams {
     /// ### Returns
     ///
     /// The `HarmonyParams` with all parameters set.
-    pub fn from_r_list(r_list: List) -> Self {
+    pub fn from_r_list(r_list: List) -> Result<Self> {
         let defaults = Self::default();
-        let params_list = r_list.into_hashmap();
+        let params_list: HashMap<&str, Robj> = r_list.try_into()?;
 
         let k = params_list
             .get("k")
@@ -985,7 +1420,7 @@ impl HarmonyParams {
             .map(|v| v as usize)
             .unwrap_or(defaults.window_size);
 
-        Self {
+        Ok(Self {
             k,
             sigma,
             theta,
@@ -996,7 +1431,130 @@ impl HarmonyParams {
             epsilon_kmeans,
             epsilon_harmony,
             window_size,
-        }
+        })
+    }
+}
+
+//////////////////
+// Harmony (v2) //
+//////////////////
+
+impl HarmonyParamsV2 {
+    /// Generate HarmonyParamsV2 from an R list.
+    ///
+    /// Should values not be found within the List, the parameters will default
+    /// to the values defined in `HarmonyParamsV2::default()`.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the Harmony parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The `HarmonyParams` with all parameters set.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let defaults = Self::default();
+        let params_list: HashMap<&str, Robj> = r_list.try_into()?;
+
+        let k = params_list
+            .get("k")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.k);
+
+        let sigma = params_list
+            .get("sigma")
+            .and_then(|v| v.as_real_vector())
+            .map(|v| v.iter().map(|&x| x as f32).collect())
+            .unwrap_or(defaults.sigma);
+
+        let theta = params_list
+            .get("theta")
+            .and_then(|v| v.as_real_vector())
+            .map(|v| v.iter().map(|&x| x as f32).collect())
+            .unwrap_or(defaults.theta);
+
+        let lambda = params_list
+            .get("lambda")
+            .and_then(|v| v.as_real_vector())
+            .map(|v| v.iter().map(|&x| x as f32).collect())
+            .unwrap_or(defaults.lambda);
+
+        let block_size = params_list
+            .get("block_size")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.block_size);
+
+        let max_iter_kmeans = params_list
+            .get("max_iter_kmeans")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.max_iter_kmeans);
+
+        let max_iter_harmony = params_list
+            .get("max_iter_harmony")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.max_iter_harmony);
+
+        let epsilon_kmeans = params_list
+            .get("epsilon_kmeans")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.epsilon_kmeans);
+
+        let epsilon_harmony = params_list
+            .get("epsilon_harmony")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.epsilon_harmony);
+
+        let window_size = params_list
+            .get("window_size")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.window_size);
+
+        let alpha = params_list
+            .get("alpha")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.alpha);
+
+        let tau = params_list
+            .get("tau")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.tau);
+
+        let batch_proportion_cutoff = params_list
+            .get("batch_proportion_cutoff")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.batch_proportion_cutoff);
+
+        let use_dynamic_lambda = params_list
+            .get("use_dynamic_lambda")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.use_dynamic_lambda);
+
+        Ok(Self {
+            k,
+            sigma,
+            theta,
+            lambda,
+            block_size,
+            max_iter_kmeans,
+            max_iter_harmony,
+            epsilon_kmeans,
+            epsilon_harmony,
+            window_size,
+            alpha,
+            tau,
+            batch_proportion_cutoff,
+            use_dynamic_lambda,
+        })
     }
 }
 
@@ -1017,9 +1575,9 @@ impl RandomForestConfig {
     /// ### Returns
     ///
     /// The `RandomForestConfig` with all parameters set.
-    pub fn from_r_list(r_list: List) -> Self {
+    pub fn from_r_list(r_list: List) -> Result<Self> {
         let defaults = Self::default();
-        let params_list = r_list.into_hashmap();
+        let params_list: HashMap<&str, Robj> = r_list.try_into()?;
         let n_trees = params_list
             .get("n_trees")
             .and_then(|v| v.as_integer())
@@ -1054,7 +1612,8 @@ impl RandomForestConfig {
             .and_then(|v| v.as_real())
             .map(|v| Some(v as f32))
             .unwrap_or(defaults.subsample_frac);
-        Self {
+
+        Ok(Self {
             n_trees,
             min_samples_leaf,
             n_features_split,
@@ -1062,7 +1621,7 @@ impl RandomForestConfig {
             bootstrap,
             max_depth,
             subsample_frac,
-        }
+        })
     }
 }
 
@@ -1079,9 +1638,9 @@ impl ExtraTreesConfig {
     /// ### Returns
     ///
     /// The `ExtraTreesConfig` with all parameters set.
-    pub fn from_r_list(r_list: List) -> Self {
+    pub fn from_r_list(r_list: List) -> Result<Self> {
         let defaults = Self::default();
-        let params_list = r_list.into_hashmap();
+        let params_list: HashMap<&str, Robj> = r_list.try_into()?;
         let n_trees = params_list
             .get("n_trees")
             .and_then(|v| v.as_integer())
@@ -1112,14 +1671,15 @@ impl ExtraTreesConfig {
             .and_then(|v| v.as_real())
             .map(|v| Some(v as f32))
             .unwrap_or(defaults.subsample_frac);
-        Self {
+
+        Ok(Self {
             n_trees,
             min_samples_leaf,
             n_features_split,
             n_thresholds,
             max_depth,
             subsample_frac,
-        }
+        })
     }
 }
 
@@ -1136,9 +1696,9 @@ impl GradientBoostingConfig {
     /// ### Returns
     ///
     /// The `GradientBoostingConfig` with all parameters set.
-    pub fn from_r_list(r_list: List) -> Self {
+    pub fn from_r_list(r_list: List) -> Result<Self> {
         let defaults = Self::default();
-        let params_list = r_list.into_hashmap();
+        let params_list: HashMap<&str, Robj> = r_list.try_into()?;
         let n_trees_max = params_list
             .get("n_trees_max")
             .and_then(|v| v.as_integer())
@@ -1174,7 +1734,8 @@ impl GradientBoostingConfig {
             .and_then(|v| v.as_integer())
             .map(|v| v as usize)
             .unwrap_or(defaults.n_features_split);
-        Self {
+
+        Ok(Self {
             n_trees_max,
             learning_rate,
             max_depth,
@@ -1182,7 +1743,7 @@ impl GradientBoostingConfig {
             early_stop_window,
             subsample_rate,
             n_features_split,
-        }
+        })
     }
 }
 
@@ -1215,9 +1776,9 @@ impl ScenicParams {
     /// ### Returns
     ///
     /// The `ScenicParams` with all parameters set.
-    pub fn from_r_list(r_list: List) -> Self {
+    pub fn from_r_list(r_list: List) -> Result<Self> {
         let defaults = Self::default();
-        let params = r_list.clone().into_hashmap();
+        let params: HashMap<&str, Robj> = r_list.clone().try_into()?;
 
         let min_counts = params
             .get("min_counts")
@@ -1261,14 +1822,16 @@ impl ScenicParams {
             .unwrap_or("randomforest");
 
         let regression_learner = match learner_type.to_lowercase().as_str() {
-            "extratrees" => RegressionLearner::ExtraTrees(ExtraTreesConfig::from_r_list(r_list)),
-            "grnboost2" => {
-                RegressionLearner::GradientBoosting(GradientBoostingConfig::from_r_list(r_list))
+            "extratrees" => {
+                RegressionLearner::ExtraTrees(ExtraTreesConfig::from_r_list(r_list.clone())?)
             }
-            _ => RegressionLearner::RandomForest(RandomForestConfig::from_r_list(r_list)),
+            "grnboost2" => RegressionLearner::GradientBoosting(
+                GradientBoostingConfig::from_r_list(r_list.clone())?,
+            ),
+            _ => RegressionLearner::RandomForest(RandomForestConfig::from_r_list(r_list.clone())?),
         };
 
-        Self {
+        Ok(Self {
             min_counts,
             min_cells,
             regression_learner,
@@ -1276,7 +1839,7 @@ impl ScenicParams {
             gene_batch_size,
             n_pcs,
             n_subsample,
-        }
+        })
     }
 }
 
@@ -1290,8 +1853,8 @@ impl H5adFileTask {
     /// Expects: exp_id, h5_path, cs_type, no_cells, no_genes,
     /// gene_local_to_universe (integer vector, NA for unmapped genes,
     /// 0-indexed).
-    pub fn from_r_list(r_list: List) -> Self {
-        let map = r_list.into_hashmap();
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let map: HashMap<&str, Robj> = r_list.try_into()?;
 
         let exp_id = map
             .get("exp_id")
@@ -1342,13 +1905,431 @@ impl H5adFileTask {
             })
             .collect();
 
-        Self {
+        Ok(Self {
             exp_id,
             h5_path,
             cs_type,
             no_cells,
             no_genes,
             gene_local_to_universe,
-        }
+        })
+    }
+}
+
+/////////////////////////
+// MetaCells2 - Params //
+/////////////////////////
+
+//////////////////
+// SelectParams //
+//////////////////
+
+impl SelectParams {
+    /// Generate SelectParams from an R list, falling back to defaults.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let defaults = Self::default();
+
+        let downsample_min_samples = params
+            .get("downsample_min_samples")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as u32)
+            .unwrap_or(defaults.downsample_min_samples);
+
+        let downsample_min_cell_quantile = params
+            .get("downsample_min_cell_quantile")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.downsample_min_cell_quantile);
+
+        let downsample_max_cell_quantile = params
+            .get("downsample_max_cell_quantile")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.downsample_max_cell_quantile);
+
+        let min_gene_total = params
+            .get("min_gene_total")
+            .and_then(|v| v.as_integer())
+            .map(|v| Some(v as u32))
+            .unwrap_or(defaults.min_gene_total);
+
+        let min_gene_top3 = params
+            .get("min_gene_top3")
+            .and_then(|v| v.as_integer())
+            .map(|v| Some(v as u32))
+            .unwrap_or(defaults.min_gene_top3);
+
+        let min_gene_relative_variance = params
+            .get("min_gene_relative_variance")
+            .and_then(|v| v.as_real())
+            .map(|v| Some(v as f32))
+            .unwrap_or(defaults.min_gene_relative_variance);
+
+        let min_genes = params
+            .get("min_genes")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.min_genes);
+
+        let relative_variance_window_size = params
+            .get("relative_variance_window_size")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.relative_variance_window_size);
+
+        Ok(Self {
+            downsample_min_samples,
+            downsample_min_cell_quantile,
+            downsample_max_cell_quantile,
+            min_gene_total,
+            min_gene_top3,
+            min_gene_relative_variance,
+            min_genes,
+            relative_variance_window_size,
+            lateral_gene_mask: defaults.lateral_gene_mask,
+        })
+    }
+}
+
+//////////////////////
+// SimilarityParams //
+//////////////////////
+
+impl SimilarityParams {
+    /// Generate SimilarityParams from an R list, falling back to defaults.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let defaults = Self::default();
+
+        let method = params
+            .get("similarity_method")
+            .and_then(|v| v.as_str())
+            .map(|s| match s.to_lowercase().as_str() {
+                "log_pearson" | "logpearson" => SimilarityMethod::LogPearson,
+                "pearson" => SimilarityMethod::Pearson,
+                "spearman" => SimilarityMethod::Spearman,
+                _ => defaults.method,
+            })
+            .unwrap_or(defaults.method);
+
+        let value_regularisation = params
+            .get("value_regularisation")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.value_regularisation);
+
+        Ok(Self {
+            method,
+            value_regularisation,
+        })
+    }
+}
+
+////////////////////
+// MC2KnnParams   //
+////////////////////
+
+impl MC2KnnParams {
+    /// Generate MC2KnnParams from an R list, falling back to defaults.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let defaults = Self::default();
+
+        let balanced_ranks_factor = params
+            .get("balanced_ranks_factor")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.balanced_ranks_factor);
+
+        let incoming_degree_factor = params
+            .get("incoming_degree_factor")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.incoming_degree_factor);
+
+        let outgoing_degree_factor = params
+            .get("outgoing_degree_factor")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.outgoing_degree_factor);
+
+        let min_outgoing_degree = params
+            .get("min_outgoing_degree")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.min_outgoing_degree);
+
+        let k_size_factor = params
+            .get("k_size_factor")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.k_size_factor);
+
+        let k_umis_quantile = params
+            .get("k_umis_quantile")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.k_umis_quantile);
+
+        let min_knn_k = params
+            .get("min_knn_k")
+            .and_then(|v| v.as_integer())
+            .map(|v| Some(v as usize))
+            .unwrap_or(defaults.min_knn_k);
+
+        let knn_k_override = params
+            .get("knn_k_override")
+            .and_then(|v| v.as_integer())
+            .map(|v| Some(v as usize))
+            .unwrap_or(defaults.knn_k_override);
+
+        Ok(Self {
+            balanced_ranks_factor,
+            incoming_degree_factor,
+            outgoing_degree_factor,
+            min_outgoing_degree,
+            k_size_factor,
+            k_umis_quantile,
+            min_knn_k,
+            knn_k_override,
+        })
+    }
+}
+
+/////////////////////
+// PartitionParams //
+/////////////////////
+
+impl PartitionParams {
+    /// Generate PartitionParams from an R list, falling back to defaults.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let defaults = Self::default();
+
+        let cooldown_pass = params
+            .get("cooldown_pass")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.cooldown_pass);
+
+        let cooldown_node = params
+            .get("cooldown_node")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.cooldown_node);
+
+        let cooldown_phase = params
+            .get("cooldown_phase")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.cooldown_phase);
+
+        let min_split_size_factor = params
+            .get("min_split_size_factor")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.min_split_size_factor);
+
+        let max_merge_size_factor = params
+            .get("max_merge_size_factor")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.max_merge_size_factor);
+
+        let max_split_min_cut_strength = params
+            .get("max_split_min_cut_strength")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.max_split_min_cut_strength);
+
+        let min_cut_seed_cells = params
+            .get("min_cut_seed_cells")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.min_cut_seed_cells);
+
+        let min_seed_size_quantile = params
+            .get("min_seed_size_quantile")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.min_seed_size_quantile);
+
+        let max_seed_size_quantile = params
+            .get("max_seed_size_quantile")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.max_seed_size_quantile);
+
+        Ok(Self {
+            cooldown_pass,
+            cooldown_node,
+            cooldown_phase,
+            min_split_size_factor,
+            max_merge_size_factor,
+            max_split_min_cut_strength,
+            min_cut_seed_cells,
+            min_seed_size_quantile,
+            max_seed_size_quantile,
+        })
+    }
+}
+
+////////////////////
+// DeviantsParams //
+////////////////////
+
+impl DeviantsParams {
+    /// Generate DeviantsParams from an R list, falling back to defaults.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let defaults = Self::default();
+
+        let min_gene_fold_factor = params
+            .get("min_gene_fold_factor")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.min_gene_fold_factor);
+
+        let max_gene_fraction = params
+            .get("max_gene_fraction")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.max_gene_fraction);
+
+        let max_cell_fraction = params
+            .get("max_cell_fraction")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.max_cell_fraction);
+
+        let gap_skip_cells = params
+            .get("gap_skip_cells")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.gap_skip_cells);
+
+        let max_gap_cells_count = params
+            .get("max_gap_cells_count")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.max_gap_cells_count);
+
+        let max_gap_cells_fraction = params
+            .get("max_gap_cells_fraction")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.max_gap_cells_fraction);
+
+        let min_compare_umis = params
+            .get("min_compare_umis")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.min_compare_umis);
+
+        let cells_regularisation_quantile = params
+            .get("cells_regularisation_quantile")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.cells_regularisation_quantile);
+
+        Ok(Self {
+            min_gene_fold_factor,
+            max_gene_fraction,
+            max_cell_fraction,
+            gap_skip_cells,
+            max_gap_cells_count,
+            max_gap_cells_fraction,
+            min_compare_umis,
+            cells_regularisation_quantile,
+        })
+    }
+}
+
+////////////////////
+// DissolveParams //
+////////////////////
+
+impl DissolveParams {
+    /// Generate DissolveParams from an R list, falling back to defaults.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let defaults = Self::default();
+
+        let min_robust_size_factor = params
+            .get("min_robust_size_factor")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.min_robust_size_factor);
+
+        let min_convincing_gene_fold_factor = params
+            .get("min_convincing_gene_fold_factor")
+            .and_then(|v| v.as_real())
+            .map(|v| Some(v as f32))
+            .unwrap_or(defaults.min_convincing_gene_fold_factor);
+
+        Ok(Self {
+            min_robust_size_factor,
+            min_convincing_gene_fold_factor,
+        })
+    }
+}
+
+/////////////////////
+// MetacellsParams //
+/////////////////////
+
+impl MetacellsParams {
+    /// Generate MetacellsParams from a flat R list, recursively filling each
+    /// sub-struct from the same list. Falls back to defaults for any missing
+    /// field.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let select = SelectParams::from_r_list(r_list.clone())?;
+        let similarity = SimilarityParams::from_r_list(r_list.clone())?;
+        let knn = MC2KnnParams::from_r_list(r_list.clone())?;
+        let partition = PartitionParams::from_r_list(r_list.clone())?;
+        let deviants = DeviantsParams::from_r_list(r_list.clone())?;
+        let dissolve = DissolveParams::from_r_list(r_list.clone())?;
+
+        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let defaults = Self::default();
+
+        let target_metacell_size = params
+            .get("target_metacell_size")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.target_metacell_size);
+
+        let min_metacell_size = params
+            .get("min_metacell_size")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.min_metacell_size);
+
+        // u64 — read as real to dodge R's i32 limit.
+        let target_metacell_umis = params
+            .get("target_metacell_umis")
+            .and_then(|v| v.as_real())
+            .map(|v| v as u64)
+            .unwrap_or(defaults.target_metacell_umis);
+
+        let must_complete_cover = params
+            .get("must_complete_cover")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.must_complete_cover);
+
+        let random_seed = params
+            .get("random_seed")
+            .and_then(|v| v.as_real())
+            .map(|v| v as u64)
+            .unwrap_or(defaults.random_seed);
+
+        Ok(Self {
+            select,
+            similarity,
+            knn,
+            partition,
+            deviants,
+            dissolve,
+            target_metacell_size,
+            min_metacell_size,
+            target_metacell_umis,
+            must_complete_cover,
+            random_seed,
+        })
     }
 }

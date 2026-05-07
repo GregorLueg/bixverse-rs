@@ -54,6 +54,7 @@ pub type FinalScrubletRes = (
 /// threshold selection.
 #[derive(Clone, Debug)]
 pub struct ScrubletParams {
+    // -- processing --
     /// Whether to log-transform counts after normalisation.
     pub log_transform: bool,
     /// Whether to mean-centre genes before PCA.
@@ -62,6 +63,8 @@ pub struct ScrubletParams {
     pub normalise_variance: bool,
     /// Optional target library size. Defaults to the mean HVG library size.
     pub target_size: Option<f32>,
+
+    // -- hvg --
     /// Percentile threshold for HVG selection.
     pub min_gene_var_pctl: f32,
     /// HVG method: `"vst"`, `"mvb"`, or `"dispersion"`.
@@ -70,6 +73,18 @@ pub struct ScrubletParams {
     pub loess_span: f64,
     /// Optional clip max for variance stabilisation.
     pub clip_max: Option<f32>,
+    /// Binning strategy
+    pub binning_strategy: String,
+    /// Number of bins for hvg
+    pub n_bins: usize,
+
+    // -- pca --
+    /// Number of principal components.
+    pub no_pcs: usize,
+    /// Whether to use randomised SVD.
+    pub random_svd: bool,
+
+    // -- scrublet --
     /// Ratio of simulated doublets to observed cells.
     pub sim_doublet_ratio: f32,
     /// Expected doublet rate (typically 0.05-0.10).
@@ -77,14 +92,13 @@ pub struct ScrubletParams {
     /// Uncertainty in the expected doublet rate.
     pub stdev_doublet_rate: f32,
     /// Number of histogram bins for Otsu threshold detection.
-    pub n_bins: usize,
+    pub n_bins_hist: usize,
     /// Optional manual threshold. If `None`, Otsu's method is used.
     pub manual_threshold: Option<f32>,
-    /// Number of principal components.
-    pub no_pcs: usize,
-    /// Whether to use randomised SVD.
-    pub random_svd: bool,
-    /// Parameters for kNN construction.
+
+    // -- knn --
+    /// [KnnParams] for the various approximate nearest neighbour searches
+    /// in ann-search-rs
     pub knn_params: KnnParams,
 }
 
@@ -275,12 +289,14 @@ impl Scrublet {
         verbose: bool,
         return_combined_pca: bool,
         return_pairs: bool,
-    ) -> FinalScrubletRes {
+    ) -> Result<FinalScrubletRes, BixverseErrors> {
         let hvg_opts = HvgOpts {
             method: self.params.hvg_method.clone(),
             loess_span: self.params.loess_span as f32,
             clip_max: self.params.clip_max,
             min_gene_var_pctl: self.params.min_gene_var_pctl,
+            binning_strategy: self.params.binning_strategy.clone(),
+            n_bins: self.params.n_bins,
         };
         let pca_opts = PcaOpts {
             log_transform: self.params.log_transform,
@@ -302,7 +318,7 @@ impl Scrublet {
             &hvg_opts,
             streaming,
             verbose,
-        );
+        )?;
 
         if verbose {
             println!(
@@ -313,7 +329,7 @@ impl Scrublet {
         }
 
         self.hvg_library_sizes =
-            compute_hvg_library_sizes(&self.f_path_cell, &self.cells_to_keep, &hvg_genes);
+            compute_hvg_library_sizes(&self.f_path_cell, &self.cells_to_keep, &hvg_genes)?;
         let target_size = resolve_target_size(self.params.target_size, &self.hvg_library_sizes);
 
         // Simulate doublets
@@ -334,7 +350,7 @@ impl Scrublet {
             &self.f_path_cell,
             target_size,
             self.params.log_transform,
-        );
+        )?;
 
         if verbose {
             println!(
@@ -360,7 +376,7 @@ impl Scrublet {
             &pca_opts,
             seed,
             verbose,
-        );
+        )?;
 
         if verbose {
             println!("Done with PCA in {:.2?}", start_pca.elapsed());
@@ -398,7 +414,7 @@ impl Scrublet {
         let res = self.call_doublets(
             doublet_scores,
             self.params.manual_threshold,
-            self.params.n_bins,
+            self.params.n_bins_hist,
             verbose,
         );
 
@@ -418,7 +434,7 @@ impl Scrublet {
         let pair_1_out = if return_pairs { Some(pair_1) } else { None };
         let pair_2_out = if return_pairs { Some(pair_2) } else { None };
 
-        (res, pca_out, pair_1_out, pair_2_out)
+        Ok((res, pca_out, pair_1_out, pair_2_out))
     }
 
     /// Calculate Bayesian doublet scores from the kNN graph.

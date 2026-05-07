@@ -40,7 +40,7 @@ pub fn r_list_to_sig_genes(gs_list: List) -> extendr_api::Result<Vec<SignatureGe
                 "The lists in the gs_list could not be converted. Please check!",
             )
         })?;
-        gene_signatures.push(SignatureGenes::from_r_list(gs_list_i));
+        gene_signatures.push(SignatureGenes::from_r_list(gs_list_i)?);
     }
 
     Ok(gene_signatures)
@@ -205,11 +205,11 @@ pub fn calculate_vision(
     gene_signs: &[SignatureGenes],
     cells_to_keep: &[usize],
     verbose: bool,
-) -> Vec<Vec<f32>> {
+) -> Result<Vec<Vec<f32>>, BixverseErrors> {
     let start_read = Instant::now();
-    let reader = ParallelSparseReader::new(f_path).unwrap();
+    let reader = ParallelSparseReader::new(f_path)?;
     let no_genes = reader.get_header().total_genes;
-    let cell_chunks: Vec<CsrCellChunk> = reader.read_cells_parallel(cells_to_keep);
+    let cell_chunks: Vec<CsrCellChunk> = reader.read_cells_parallel(cells_to_keep)?;
     let end_read = start_read.elapsed();
 
     if verbose {
@@ -227,7 +227,8 @@ pub fn calculate_vision(
         println!("Calculated VISION scores: {:.2?}", end_signatures);
     }
 
-    signature_scores // cells x signatures
+    // cells x signatures
+    Ok(signature_scores)
 }
 
 /// Calculate VISION signature scores across a set of cells (streaming)
@@ -249,11 +250,11 @@ pub fn calculate_vision_streaming(
     gene_signs: &[SignatureGenes],
     cells_to_keep: &[usize],
     verbose: bool,
-) -> Vec<Vec<f32>> {
+) -> Result<Vec<Vec<f32>>, BixverseErrors> {
     const CHUNK_SIZE: usize = 50000;
 
     let total_chunks = cells_to_keep.len().div_ceil(CHUNK_SIZE);
-    let reader = ParallelSparseReader::new(f_path).unwrap();
+    let reader = ParallelSparseReader::new(f_path)?;
     let no_genes = reader.get_header().total_genes;
 
     let mut all_results: Vec<Vec<f32>> = Vec::with_capacity(cells_to_keep.len());
@@ -261,7 +262,7 @@ pub fn calculate_vision_streaming(
     for (chunk_idx, cell_indices_chunk) in cells_to_keep.chunks(CHUNK_SIZE).enumerate() {
         let start_chunk = Instant::now();
 
-        let cell_chunks = reader.read_cells_parallel(cell_indices_chunk);
+        let cell_chunks = reader.read_cells_parallel(cell_indices_chunk)?;
 
         let chunk_scores: Vec<Vec<f32>> = cell_chunks
             .par_iter()
@@ -283,7 +284,7 @@ pub fn calculate_vision_streaming(
         }
     }
 
-    all_results
+    Ok(all_results)
 }
 
 /// Calculate VISION local autocorrelation scores

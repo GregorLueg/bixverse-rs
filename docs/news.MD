@@ -1,5 +1,41 @@
 # News
 
+## 0.2.0
+
+Major update / release
+
+### Features
+
+#### Single cell methods
+
+- scDblFinder implemented
+- Refactor out of shared tree structure between scDblFinder and SCENIC
+- Implementation of Harmony v2
+- First methods (HVG selection, PCA, AUCell and SCENIC) for meta cells directly
+- Made the kNN validation optional and improved the distance calculation with
+  SIMD.
+- Better loading in of MTX files that do not blow up during counting of cells
+  per gene.
+- Faster, better Louvain clustering for the doublet detection methods.
+- Fast cluster version for Louvain for single cell that allows sweeping over a
+  a set of resolutions.
+- Actual proper implementation of WalkTrap community detection and not just
+  pseudo hierarchical clustering.
+- SuperCell 2.0 approach for SuperCells.
+- Reduced memory pressure for the sparse SVDs that are streaming in from binary
+  files due to discarding unneeded raw counts.
+- Faster SEACells with better cache locality.
+
+#### General
+
+- Proper Rust-based error handling across the crate. Less `.unwrap()`, less
+  panics!
+- k-means implementation (mini batch) + clustering quality methods ported over
+- Faster correlations, covariances and Euclidean distance calculations
+- Version bump to extendr `0.9.0` and other crates.
+- Some restructuring of modules: the meta cell generations live in their own
+  module now.
+
 ## 0.1.7
 
 ### Features

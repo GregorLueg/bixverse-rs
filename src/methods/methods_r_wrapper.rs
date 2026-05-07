@@ -1,7 +1,7 @@
 //! R wrapper functions for the various bioinformatics methods in this module
 
 use extendr_api::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::core::mat_struct::NamedMatrix;
 use crate::methods::cis_target::MotifEnrichment;
@@ -91,8 +91,8 @@ where
     /// ### Returns
     ///
     /// The `DgrdlParams` structure based on the R list
-    pub fn from_r_list(r_list: List) -> DgrdlParams<f64> {
-        let dgrdl_params = r_list.into_hashmap();
+    pub fn from_r_list(r_list: List) -> Result<DgrdlParams<f64>> {
+        let dgrdl_params: HashMap<&str, Robj> = r_list.try_into()?;
 
         let sparsity = dgrdl_params
             .get("sparsity")
@@ -127,7 +127,7 @@ where
             .and_then(|v| v.as_real())
             .unwrap_or(1.0);
 
-        DgrdlParams {
+        Ok(DgrdlParams {
             sparsity,
             dict_size,
             alpha,
@@ -136,7 +136,7 @@ where
             k_neighbours,
             admm_iter,
             rho,
-        }
+        })
     }
 }
 
@@ -156,8 +156,8 @@ impl<T: BixverseFloat> IcaParams<T> {
     /// ### Returns
     ///
     /// `IcaParams` parameter structure.
-    pub fn from_r_list(r_list: List) -> IcaParams<f64> {
-        let ica_params = r_list.into_hashmap();
+    pub fn from_r_list(r_list: List) -> Result<IcaParams<f64>> {
+        let ica_params: HashMap<&str, Robj> = r_list.try_into()?;
 
         let maxit = ica_params
             .get("maxit")
@@ -176,12 +176,12 @@ impl<T: BixverseFloat> IcaParams<T> {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        IcaParams {
+        Ok(IcaParams {
             maxit,
             alpha,
             tol,
             verbose,
-        }
+        })
     }
 }
 
@@ -198,7 +198,7 @@ impl<T: BixverseFloat> IcaParams<T> {
 /// ### Returns
 ///
 /// A vector of tuples with the name of the list element and the R matrix.
-pub fn r_matrix_list_to_vec(matrix_list: List) -> Vec<(String, RArray<f64, [usize; 2]>)> {
+pub fn r_matrix_list_to_vec(matrix_list: List) -> Vec<(String, RArray<f64, 2>)> {
     matrix_list
         .iter()
         .map(|(n, obj)| (n.to_string(), obj.as_matrix().unwrap()))
@@ -216,7 +216,7 @@ pub fn r_matrix_list_to_vec(matrix_list: List) -> Vec<(String, RArray<f64, [usiz
 ///
 /// A BTreeMap of `NamedMatrix` objects.
 pub fn r_matrix_vec_to_named_matrices(
-    matrix_vector: &[(String, RArray<f64, [usize; 2]>)],
+    matrix_vector: &[(String, RArray<f64, 2>)],
 ) -> BTreeMap<String, NamedMatrix<'_, f64>> {
     let mut result = BTreeMap::new();
     for (name, matrix) in matrix_vector {

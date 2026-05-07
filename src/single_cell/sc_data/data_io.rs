@@ -454,12 +454,12 @@ impl CsrCellChunk {
     /// ### Return
     ///
     /// The `CsrCellChunk`
-    pub fn read_from_buffer(buffer: &[u8]) -> std::io::Result<Self> {
+    pub fn read_from_buffer(buffer: &[u8]) -> Result<Self, BixverseErrors> {
         if buffer.len() < 32 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Buffer too small for header",
-            ));
+            return Err(BixverseErrors::ChunkBufferTooSmall {
+                expected: 32,
+                found: buffer.len(),
+            });
         }
 
         let header = &buffer[0..32];
@@ -793,12 +793,12 @@ impl CscGeneChunk {
     /// ### Return
     ///
     /// The `CscGeneChunk`
-    pub fn read_from_buffer(buffer: &[u8]) -> std::io::Result<Self> {
-        if buffer.len() < 36 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Buffer too small for header",
-            ));
+    pub fn read_from_buffer(buffer: &[u8]) -> Result<Self, BixverseErrors> {
+        if buffer.len() < 32 {
+            return Err(BixverseErrors::ChunkBufferTooSmall {
+                expected: 32,
+                found: buffer.len(),
+            });
         }
 
         let header = &buffer[0..36];
@@ -1049,12 +1049,13 @@ impl CellGeneSparseWriter {
         cell_based: bool,
         total_cells: usize,
         total_genes: usize,
-    ) -> std::io::Result<Self> {
+    ) -> Result<Self, BixverseErrors> {
         let file = File::create(path_f)?;
         let mut writer = BufWriter::with_capacity(128 * 1024 * 1024, file);
 
         let file_header = FileHeader::new(cell_based);
-        let file_header_enc = encode_to_vec(&file_header, config::standard()).unwrap();
+        let file_header_enc = encode_to_vec(&file_header, config::standard())
+            .map_err(|_| BixverseErrors::HeaderEncodeFailed)?;
         if file_header_enc.len() < 64 {
             writer.write_all(&file_header_enc)?;
             writer.write_all(&vec![0u8; 64 - file_header_enc.len()])?;
@@ -1245,16 +1246,13 @@ impl ParallelSparseReader {
     /// ### Returns
     ///
     /// Initialised `ParallelSparseReader`.
-    pub fn new(f_path: &str) -> std::io::Result<Self> {
+    pub fn new(f_path: &str) -> Result<Self, BixverseErrors> {
         let file = File::open(f_path)?;
         let file_size = file.metadata()?.len();
 
         let mmap = unsafe {
             let mut opts = MmapOptions::new();
-            // if the file size is <= 8 GB, it loads the full thing into memory
-            // otherwise lazy load
             if file_size <= 8 * 1024 * 1024 * 1024 {
-                // 8GB
                 opts.populate();
             }
             opts.map(&file)?
@@ -1263,37 +1261,29 @@ impl ParallelSparseReader {
         #[cfg(unix)]
         mmap.advise(memmap2::Advice::Random)?;
 
-        // Parse headers from mmap
         let file_header_bytes = &mmap[0..64];
-        let (file_header, _) = decode_from_slice::<FileHeader, _>(
-            file_header_bytes,
-            config::standard(),
-        )
-        .map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "File header decode failed")
-        })?;
+        let (file_header, _) =
+            decode_from_slice::<FileHeader, _>(file_header_bytes, config::standard())
+                .map_err(|_| BixverseErrors::HeaderDecodeFailed)?;
 
-        // assert that this is the right file
-        assert!(
-            file_header.version == SC_FILE_VERSION,
-            "File version mismatch: expected {}, got {}. Please check the version you are using",
-            SC_FILE_VERSION,
-            file_header.version
-        );
+        if file_header.version != SC_FILE_VERSION {
+            return Err(BixverseErrors::FileVersionMismatch {
+                expected: SC_FILE_VERSION,
+                found: file_header.version,
+            });
+        }
 
-        // Read main header
         let main_header_offset = file_header.main_header_offset as usize;
         let header_size = u64::from_le_bytes(
             mmap[main_header_offset..main_header_offset + 8]
                 .try_into()
-                .unwrap(),
+                .expect("8-byte slice by construction"),
         ) as usize;
 
         let header_bytes = &mmap[main_header_offset + 8..main_header_offset + 8 + header_size];
         let (header, _) =
-            decode_from_slice::<SparseDataHeader, _>(header_bytes, config::standard()).map_err(
-                |_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Header decode failed"),
-            )?;
+            decode_from_slice::<SparseDataHeader, _>(header_bytes, config::standard())
+                .map_err(|_| BixverseErrors::HeaderDecodeFailed)?;
 
         Ok(Self {
             header,
@@ -1311,31 +1301,39 @@ impl ParallelSparseReader {
     /// ### Returns
     ///
     /// Returns an array of `CsrCellChunk`.
-    pub fn read_cells_parallel(&self, indices: &[usize]) -> Vec<CsrCellChunk> {
-        assert!(
-            self.header.cell_based,
-            "The file is not set up for CellChunks."
-        );
+    pub fn read_cells_parallel(
+        &self,
+        indices: &[usize],
+    ) -> Result<Vec<CsrCellChunk>, BixverseErrors> {
+        if !self.header.cell_based {
+            return Err(BixverseErrors::ReaderModeMismatch {
+                actual: "gene-based",
+                requested: "cell-based",
+            });
+        }
 
         indices
             .par_iter()
             .map(|&original_index| {
-                let chunk_index = *self.header.index_map.get(&original_index).unwrap();
+                let chunk_index = *self
+                    .header
+                    .index_map
+                    .get(&original_index)
+                    .ok_or(BixverseErrors::ChunkIndexNotFound(original_index))?;
                 let chunk_offset =
                     (self.chunks_start + self.header.chunk_offsets[chunk_index]) as usize;
 
-                // read compressed size
                 let compressed_size = u64::from_le_bytes(
                     self.mmap[chunk_offset..chunk_offset + 8]
                         .try_into()
-                        .unwrap(),
+                        .expect("8-byte slice by construction"),
                 ) as usize;
 
-                // decompress
                 let compressed = &self.mmap[chunk_offset + 8..chunk_offset + 8 + compressed_size];
-                let decompressed = decompress_size_prepended(compressed).unwrap();
+                let decompressed = decompress_size_prepended(compressed)
+                    .map_err(|_| BixverseErrors::ChunkDecompressionFailed(chunk_offset as u64))?;
 
-                CsrCellChunk::read_from_buffer(&decompressed).unwrap()
+                CsrCellChunk::read_from_buffer(&decompressed)
             })
             .collect()
     }
@@ -1349,11 +1347,29 @@ impl ParallelSparseReader {
     /// ### Return
     ///
     /// The CsrCellChunk of this cell
-    pub fn read_cell(&self, index: usize) -> CsrCellChunk {
-        self.read_cells_parallel(&[index])
+    pub fn read_cell(&self, index: usize) -> Result<CsrCellChunk, BixverseErrors> {
+        Ok(self
+            .read_cells_parallel(&[index])?
             .into_iter()
             .next()
-            .unwrap()
+            .expect("read_cells_parallel returned empty vec for single index"))
+    }
+
+    /// Read a single cell by index
+    ///
+    /// ### Params
+    ///
+    /// * `index` - Cell index
+    ///
+    /// ### Return
+    ///
+    /// The CsrCellChunk of this cell
+    pub fn read_gene(&self, index: usize) -> Result<CscGeneChunk, BixverseErrors> {
+        Ok(self
+            .read_gene_parallel(&[index])?
+            .into_iter()
+            .next()
+            .expect("read_gene_parallel returned empty vec for single index"))
     }
 
     /// Read in genes by indices in a multi-threaded manner
@@ -1365,31 +1381,39 @@ impl ParallelSparseReader {
     /// ### Returns
     ///
     /// Returns an array of `CscGeneChunk`.
-    pub fn read_gene_parallel(&self, indices: &[usize]) -> Vec<CscGeneChunk> {
-        assert!(
-            !self.header.cell_based,
-            "The file is not set up for CellChunks."
-        );
+    pub fn read_gene_parallel(
+        &self,
+        indices: &[usize],
+    ) -> Result<Vec<CscGeneChunk>, BixverseErrors> {
+        if self.header.cell_based {
+            return Err(BixverseErrors::ReaderModeMismatch {
+                actual: "cell-based",
+                requested: "gene-based",
+            });
+        }
 
         indices
             .par_iter()
             .map(|&original_index| {
-                let chunk_index = *self.header.index_map.get(&original_index).unwrap();
+                let chunk_index = *self
+                    .header
+                    .index_map
+                    .get(&original_index)
+                    .ok_or(BixverseErrors::ChunkIndexNotFound(original_index))?;
                 let chunk_offset =
                     (self.chunks_start + self.header.chunk_offsets[chunk_index]) as usize;
 
-                // read compressed size
                 let compressed_size = u64::from_le_bytes(
                     self.mmap[chunk_offset..chunk_offset + 8]
                         .try_into()
-                        .unwrap(),
+                        .expect("8-byte slice by construction"),
                 ) as usize;
 
-                // decompress
                 let compressed = &self.mmap[chunk_offset + 8..chunk_offset + 8 + compressed_size];
-                let decompressed = decompress_size_prepended(compressed).unwrap();
+                let decompressed = decompress_size_prepended(compressed)
+                    .map_err(|_| BixverseErrors::ChunkDecompressionFailed(chunk_offset as u64))?;
 
-                CscGeneChunk::read_from_buffer(&decompressed).unwrap()
+                CscGeneChunk::read_from_buffer(&decompressed)
             })
             .collect()
     }
@@ -1399,9 +1423,8 @@ impl ParallelSparseReader {
     /// ### Returns
     ///
     /// Returns an array of `CsrCellChunk` containing all cells on disk.
-    pub fn get_all_cells(&self) -> Vec<CsrCellChunk> {
+    pub fn get_all_cells(&self) -> Result<Vec<CsrCellChunk>, BixverseErrors> {
         let iter: Vec<usize> = (0..self.header.total_cells).collect();
-
         self.read_cells_parallel(&iter)
     }
 
@@ -1410,9 +1433,8 @@ impl ParallelSparseReader {
     /// ### Returns
     ///
     /// Returns an array of `CscGeneChunk` containing all genes on disk.
-    pub fn get_all_genes(&self) -> Vec<CscGeneChunk> {
+    pub fn get_all_genes(&self) -> Result<Vec<CscGeneChunk>, BixverseErrors> {
         let iter: Vec<usize> = (0..self.header.total_genes).collect();
-
         self.read_gene_parallel(&iter)
     }
 
@@ -1428,8 +1450,11 @@ impl ParallelSparseReader {
     /// Read cells in a specific range
     ///
     /// Helper for memory-bounded gene generation
-    pub fn read_cells_range(&self, start: usize, end: usize) -> Vec<CsrCellChunk> {
-        assert!(self.header.cell_based, "File not cell-based");
+    pub fn read_cells_range(
+        &self,
+        start: usize,
+        end: usize,
+    ) -> Result<Vec<CsrCellChunk>, BixverseErrors> {
         let indices: Vec<usize> = (start..end).collect();
         self.read_cells_parallel(&indices)
     }
@@ -1448,27 +1473,36 @@ impl ParallelSparseReader {
     ///
     /// Vector of library sizes
     #[allow(dead_code)]
-    pub fn read_cell_library_sizes(&self, indices: &[usize]) -> Vec<usize> {
-        assert!(self.header.cell_based, "File not cell-based");
+    pub fn read_cell_library_sizes(&self, indices: &[usize]) -> Result<Vec<usize>, BixverseErrors> {
+        if !self.header.cell_based {
+            return Err(BixverseErrors::ReaderModeMismatch {
+                actual: "gene-based",
+                requested: "cell-based",
+            });
+        }
 
         indices
             .par_iter()
             .map(|&original_index| {
-                let chunk_index = *self.header.index_map.get(&original_index).unwrap();
+                let chunk_index = *self
+                    .header
+                    .index_map
+                    .get(&original_index)
+                    .ok_or(BixverseErrors::ChunkIndexNotFound(original_index))?;
                 let chunk_offset =
                     (self.chunks_start + self.header.chunk_offsets[chunk_index]) as usize;
 
                 let compressed_size = u64::from_le_bytes(
                     self.mmap[chunk_offset..chunk_offset + 8]
                         .try_into()
-                        .unwrap(),
+                        .expect("8-byte slice by construction"),
                 ) as usize;
 
                 let compressed = &self.mmap[chunk_offset + 8..chunk_offset + 8 + compressed_size];
-                let decompressed = decompress_size_prepended(compressed).unwrap();
+                let decompressed = decompress_size_prepended(compressed)
+                    .map_err(|_| BixverseErrors::ChunkDecompressionFailed(chunk_offset as u64))?;
 
-                // library size is at bytes 12-19 of the header (unchanged in v3)
-                u64::from_le_bytes([
+                Ok(u64::from_le_bytes([
                     decompressed[12],
                     decompressed[13],
                     decompressed[14],
@@ -1477,7 +1511,7 @@ impl ParallelSparseReader {
                     decompressed[17],
                     decompressed[18],
                     decompressed[19],
-                ]) as usize
+                ]) as usize)
             })
             .collect()
     }
@@ -1494,27 +1528,36 @@ impl ParallelSparseReader {
     /// ### Returns
     ///
     /// Vector of number of NNZ genes.
-    pub fn read_gene_nnz(&self, indices: &[usize]) -> Vec<usize> {
-        assert!(!self.header.cell_based, "File not gene-based");
+    pub fn read_gene_nnz(&self, indices: &[usize]) -> Result<Vec<usize>, BixverseErrors> {
+        if self.header.cell_based {
+            return Err(BixverseErrors::ReaderModeMismatch {
+                actual: "cell-based",
+                requested: "gene-based",
+            });
+        }
 
         indices
             .par_iter()
             .map(|&original_index| {
-                let chunk_index = *self.header.index_map.get(&original_index).unwrap();
+                let chunk_index = *self
+                    .header
+                    .index_map
+                    .get(&original_index)
+                    .ok_or(BixverseErrors::ChunkIndexNotFound(original_index))?;
                 let chunk_offset =
                     (self.chunks_start + self.header.chunk_offsets[chunk_index]) as usize;
 
                 let compressed_size = u64::from_le_bytes(
                     self.mmap[chunk_offset..chunk_offset + 8]
                         .try_into()
-                        .unwrap(),
+                        .expect("8-byte slice by construction"),
                 ) as usize;
 
                 let compressed = &self.mmap[chunk_offset + 8..chunk_offset + 8 + compressed_size];
-                let decompressed = decompress_size_prepended(compressed).unwrap();
+                let decompressed = decompress_size_prepended(compressed)
+                    .map_err(|_| BixverseErrors::ChunkDecompressionFailed(chunk_offset as u64))?;
 
-                // NNZ is at bytes 16-23 of the gene chunk header (unchanged in v3)
-                u64::from_le_bytes([
+                Ok(u64::from_le_bytes([
                     decompressed[16],
                     decompressed[17],
                     decompressed[18],
@@ -1523,7 +1566,7 @@ impl ParallelSparseReader {
                     decompressed[21],
                     decompressed[22],
                     decompressed[23],
-                ]) as usize
+                ]) as usize)
             })
             .collect()
     }
@@ -1533,7 +1576,7 @@ impl ParallelSparseReader {
     /// ### Returns
     ///
     /// Vector of NNZ values for all genes
-    pub fn get_all_gene_nnz(&self) -> Vec<usize> {
+    pub fn get_all_gene_nnz(&self) -> Result<Vec<usize>, BixverseErrors> {
         let iter: Vec<usize> = (0..self.header.total_genes).collect();
         self.read_gene_nnz(&iter)
     }
@@ -1543,58 +1586,81 @@ impl ParallelSparseReader {
 // Chunks to sparse //
 //////////////////////
 
+#[derive(Clone, Debug, Copy)]
+/// Which of the data layers to return from a given chunk when transforming
+/// into a [CompressedSparseData2]
+pub enum DataLayerReturn {
+    /// Return both layers, i.e., raw and
+    BothLayers,
+    /// Return only the raw layer
+    Raw,
+    /// Return only the norm layer
+    Norm,
+}
+
 /// Converts a slice of gene chunks into a CSC sparse matrix
 ///
 /// Constructs a cells x genes compressed sparse column matrix from individual
-/// gene chunks. The primary data layer contains raw counts (saturated to u16
-/// for type compatibility -- the normalised layer in data_2 is the one used
-/// by downstream analysis like PCA), whilst the secondary layer contains
-/// normalised counts converted to f32 precision.
+/// gene chunks. Depending on `data_layer`, the raw counts (saturated to u16
+/// for type compatibility) and/or the normalised counts (f32) are populated.
 ///
 /// ### Params
 ///
-/// * `chunks` - Slice of gene chunks to convert
+/// * `chunks` - Vector of gene chunks to convert
+/// * `data_layer` - Which data layer(s) to populate in the output
 /// * `n_cells` - Total number of cells in the dataset
 ///
 /// ### Returns
 ///
-/// A CSC-formatted sparse matrix with raw counts in the primary data layer
-/// and normalised counts in the secondary data layer
-pub fn from_gene_chunks<T>(chunks: &[CscGeneChunk], n_cells: usize) -> CompressedSparseData2<T, f32>
+/// A CSC-formatted sparse matrix with the requested layer(s) populated.
+pub fn from_gene_chunks<T>(
+    chunks: Vec<CscGeneChunk>,
+    data_layer: &DataLayerReturn,
+    n_cells: usize,
+) -> CompressedSparseData2<T, f32>
 where
     T: BixverseNumeric + From<u16>,
 {
     let n_genes = chunks.len();
-    let mut data = Vec::new();
-    let mut data_2 = Vec::new();
-    let mut indices = Vec::new();
-    let mut indptr = Vec::with_capacity(n_genes + 1);
+    let keep_raw = matches!(
+        data_layer,
+        DataLayerReturn::BothLayers | DataLayerReturn::Raw
+    );
+    let keep_norm = matches!(
+        data_layer,
+        DataLayerReturn::BothLayers | DataLayerReturn::Norm
+    );
 
+    let mut data: Vec<T> = Vec::new();
+    let mut data_2: Vec<f32> = Vec::new();
+    let mut indices: Vec<usize> = Vec::new();
+    let mut indptr = Vec::with_capacity(n_genes + 1);
     indptr.push(0);
 
     for chunk in chunks {
-        // Raw counts are pushed via From<u16>. For u32 raw counts that exceed
-        // u16::MAX this saturates, but the normalised layer (data_2) carries
-        // the actual values used by downstream analysis (PCA, module scoring).
-        match &chunk.data_raw {
-            RawCounts::U16(v) => {
-                for &val in v {
-                    data.push(T::from(val));
+        if keep_raw {
+            match &chunk.data_raw {
+                RawCounts::U16(v) => {
+                    for &val in v {
+                        data.push(T::from(val));
+                    }
                 }
-            }
-            RawCounts::U32(v) => {
-                for &val in v {
-                    data.push(T::from(val.min(u16::MAX as u32) as u16));
+                RawCounts::U32(v) => {
+                    for &val in v {
+                        data.push(T::from(val.min(u16::MAX as u32) as u16));
+                    }
                 }
             }
         }
-        for &val in &chunk.data_norm {
-            data_2.push(val.to_f32());
+        if keep_norm {
+            for &val in &chunk.data_norm {
+                data_2.push(val.to_f32());
+            }
         }
         for &idx in &chunk.indices {
             indices.push(idx as usize);
         }
-        indptr.push(data.len());
+        indptr.push(indices.len());
     }
 
     CompressedSparseData2 {
@@ -1602,7 +1668,7 @@ where
         indices,
         indptr,
         cs_type: CompressedSparseFormat::Csc,
-        data_2: Some(data_2),
+        data_2: if keep_norm { Some(data_2) } else { None },
         shape: (n_cells, n_genes),
     }
 }
@@ -1615,44 +1681,60 @@ where
 /// ### Params
 ///
 /// * `chunks` - Slice of cell chunks to convert
+/// * `data_layer` - Which data layer(s) to populate in the output
 /// * `n_genes` - Total number of genes in the dataset
 ///
 /// ### Returns
 ///
-/// A CSR-formatted sparse matrix with raw counts in the primary data layer
-/// and normalised counts in the secondary data layer
-pub fn from_cell_chunks<T>(chunks: &[CsrCellChunk], n_genes: usize) -> CompressedSparseData2<T, f32>
+/// A CSR-formatted sparse matrix with the requested layer(s) populated.
+pub fn from_cell_chunks<T>(
+    chunks: &[CsrCellChunk],
+    data_layer: &DataLayerReturn,
+    n_genes: usize,
+) -> CompressedSparseData2<T, f32>
 where
     T: BixverseNumeric + From<u16>,
 {
     let n_cells = chunks.len();
-    let mut data = Vec::new();
-    let mut data_2 = Vec::new();
-    let mut indices = Vec::new();
-    let mut indptr = Vec::with_capacity(n_cells + 1);
+    let keep_raw = matches!(
+        data_layer,
+        DataLayerReturn::BothLayers | DataLayerReturn::Raw
+    );
+    let keep_norm = matches!(
+        data_layer,
+        DataLayerReturn::BothLayers | DataLayerReturn::Norm
+    );
 
+    let mut data: Vec<T> = Vec::new();
+    let mut data_2: Vec<f32> = Vec::new();
+    let mut indices: Vec<usize> = Vec::new();
+    let mut indptr = Vec::with_capacity(n_cells + 1);
     indptr.push(0);
 
     for chunk in chunks {
-        match &chunk.data_raw {
-            RawCounts::U16(v) => {
-                for &val in v {
-                    data.push(T::from(val));
+        if keep_raw {
+            match &chunk.data_raw {
+                RawCounts::U16(v) => {
+                    for &val in v {
+                        data.push(T::from(val));
+                    }
                 }
-            }
-            RawCounts::U32(v) => {
-                for &val in v {
-                    data.push(T::from(val.min(u16::MAX as u32) as u16));
+                RawCounts::U32(v) => {
+                    for &val in v {
+                        data.push(T::from(val.min(u16::MAX as u32) as u16));
+                    }
                 }
             }
         }
-        for &val in &chunk.data_norm {
-            data_2.push(val.to_f32());
+        if keep_norm {
+            for &val in &chunk.data_norm {
+                data_2.push(val.to_f32());
+            }
         }
         for &idx in &chunk.indices {
             indices.push(idx as usize);
         }
-        indptr.push(data.len());
+        indptr.push(indices.len());
     }
 
     CompressedSparseData2 {
@@ -1660,7 +1742,7 @@ where
         indices,
         indptr,
         cs_type: CompressedSparseFormat::Csr,
-        data_2: Some(data_2),
+        data_2: if keep_norm { Some(data_2) } else { None },
         shape: (n_cells, n_genes),
     }
 }

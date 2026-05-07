@@ -94,7 +94,7 @@ pub fn prepare_whitening<T: BixverseFloat>(
     rank: usize,
     oversampling: Option<usize>,
     n_power_iter: Option<usize>,
-) -> (Mat<T>, Mat<T>) {
+) -> Result<(Mat<T>, Mat<T>), BixverseErrors> {
     let n = x.nrows();
 
     let centered = scale_matrix_col(&x, false);
@@ -105,7 +105,7 @@ pub fn prepare_whitening<T: BixverseFloat>(
     let v = Scale(n_recip) * (centered * centered.transpose());
 
     let k = if fast_svd {
-        let svd_res = randomised_svd(v.as_ref(), rank, seed, oversampling, n_power_iter);
+        let svd_res = randomised_svd(v.as_ref(), rank, seed, oversampling, n_power_iter)?;
         let s: Vec<T> = svd_res.s.iter().map(|x| x.sqrt().recip()).collect();
         let d = faer_diagonal_from_vec(s);
         d * svd_res.u.transpose()
@@ -123,7 +123,7 @@ pub fn prepare_whitening<T: BixverseFloat>(
         d * u_t
     };
 
-    (centered.cloned(), k)
+    Ok((centered.cloned(), k))
 }
 
 /// Helper function to update the mixing matrix for ICA
@@ -135,9 +135,9 @@ pub fn prepare_whitening<T: BixverseFloat>(
 /// ### Returns
 ///
 /// The updated mixing matrix.
-fn update_mix_mat<T: BixverseFloat>(w: MatRef<T>) -> faer::Mat<T> {
+fn update_mix_mat<T: BixverseFloat>(w: MatRef<T>) -> Result<Mat<T>, BixverseErrors> {
     // SVD
-    let svd_res = w.thin_svd().unwrap();
+    let svd_res = w.thin_svd().map_err(|_| BixverseErrors::FaerEigenError)?;
 
     let s = svd_res.S();
     let u = svd_res.U();
@@ -148,7 +148,7 @@ fn update_mix_mat<T: BixverseFloat>(w: MatRef<T>) -> faer::Mat<T> {
         .collect::<Vec<_>>();
     let d = faer_diagonal_from_vec(s);
 
-    u * d * u.transpose() * w
+    Ok(u * d * u.transpose() * w)
 }
 
 /// Generate a random mixing matrix
@@ -162,7 +162,7 @@ fn update_mix_mat<T: BixverseFloat>(w: MatRef<T>) -> faer::Mat<T> {
 /// ### Returns
 ///
 /// Mixing matrix of dimensions `n_comp` x `n_comp`
-fn create_w_init<T: BixverseFloat>(n_comp: usize, seed: u64) -> faer::Mat<T> {
+fn create_w_init<T: BixverseFloat>(n_comp: usize, seed: u64) -> Mat<T> {
     let mut rng = StdRng::seed_from_u64(seed);
     let normal = Normal::new(0.0, 1.0).unwrap();
     let vec_size = n_comp.pow(2);
@@ -207,7 +207,7 @@ impl<T: BixverseFloat> IcaCvData<T> {
         num_folds: usize,
         seed: usize,
         rank: Option<usize>,
-    ) -> IcaCvData<T> {
+    ) -> Result<IcaCvData<T>, BixverseErrors> {
         let no_samples = x.nrows();
         let no_features = x.ncols();
         let mut indices: Vec<usize> = (0..no_samples).collect();
@@ -243,16 +243,14 @@ impl<T: BixverseFloat> IcaCvData<T> {
                     .cloned()
                     .collect();
                 let mut x_i = Mat::<T>::zeros(train_indices.len(), no_features);
-
                 for (new_row, old_row) in train_indices.iter().enumerate() {
                     for j in 0..no_features {
                         x_i[(new_row, j)] = x[(*old_row, j)];
                     }
                 }
-
                 prepare_whitening(x_i.as_ref(), true, seed + 1, svd_rank, None, None)
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
 
         let mut pre_white_matrices = Vec::with_capacity(num_folds);
         let mut k_matrices = Vec::with_capacity(num_folds);
@@ -262,10 +260,10 @@ impl<T: BixverseFloat> IcaCvData<T> {
             k_matrices.push(k_i);
         }
 
-        Self {
+        Ok(Self {
             pre_white_matrices,
             k_matrices,
-        }
+        })
     }
 }
 
@@ -295,9 +293,9 @@ pub fn fast_ica_logcosh<T: BixverseFloat>(
     alpha: T,
     maxit: usize,
     verbose: bool,
-) -> IcaRes<T> {
+) -> Result<IcaRes<T>, BixverseErrors> {
     let p = x.ncols();
-    let mut w = update_mix_mat(w_init);
+    let mut w = update_mix_mat(w_init)?;
     let mut lim = vec![T::from_f64(1000.0).unwrap(); maxit];
 
     let mut it = 0;
@@ -330,7 +328,7 @@ pub fn fast_ica_logcosh<T: BixverseFloat>(
 
         let v2 = faer_diagonal_from_vec(row_means_vec) * w.clone();
 
-        let w1 = update_mix_mat((v1 - v2).as_ref());
+        let w1 = update_mix_mat((v1 - v2).as_ref())?;
 
         let w1_up = w1.clone() * w.transpose();
 
@@ -356,7 +354,7 @@ pub fn fast_ica_logcosh<T: BixverseFloat>(
 
     let min_tol = array_min(&lim);
 
-    (w, min_tol)
+    Ok((w, min_tol))
 }
 
 /// Fast ICA implementation based on exp algorithm.
@@ -379,9 +377,9 @@ pub fn fast_ica_exp<T: BixverseFloat>(
     tol: T,
     maxit: usize,
     verbose: bool,
-) -> IcaRes<T> {
+) -> Result<IcaRes<T>, BixverseErrors> {
     let p = x.ncols();
-    let mut w = update_mix_mat(w_init);
+    let mut w = update_mix_mat(w_init)?;
     let mut lim = vec![T::from_f64(1000.0).unwrap(); maxit];
 
     let mut it = 0;
@@ -414,7 +412,7 @@ pub fn fast_ica_exp<T: BixverseFloat>(
 
         let v2 = faer_diagonal_from_vec(row_means_vec) * w.clone();
 
-        let w1 = update_mix_mat((v1 - v2).as_ref());
+        let w1 = update_mix_mat((v1 - v2).as_ref())?;
 
         let w1_up = w1.clone() * w.transpose();
 
@@ -440,7 +438,7 @@ pub fn fast_ica_exp<T: BixverseFloat>(
 
     let min_tol = array_min(&lim);
 
-    (w, min_tol)
+    Ok((w, min_tol))
 }
 
 ////////////////////
@@ -476,7 +474,7 @@ pub fn stabilised_ica_iters<T: BixverseFloat>(
     ica_type: &str,
     ica_params: IcaParams<T>,
     random_seed: usize,
-) -> (Mat<T>, Vec<bool>) {
+) -> Result<(Mat<T>, Vec<bool>), BixverseErrors> {
     // generate the random w_inits
     let w_inits: Vec<Mat<T>> = (0..no_iters)
         .map(|iter| create_w_init(no_comp, (random_seed + iter) as u64))
@@ -505,7 +503,7 @@ pub fn stabilised_ica_iters<T: BixverseFloat>(
                 ica_params.verbose,
             ),
         })
-        .collect();
+        .collect::<Result<Vec<(Mat<T>, T)>, BixverseErrors>>()?;
 
     let mut convergence = Vec::new();
     let mut a_matrices = Vec::new();
@@ -529,7 +527,7 @@ pub fn stabilised_ica_iters<T: BixverseFloat>(
 
     let s_combined = colbind_matrices(&s_matrices);
 
-    (s_combined, convergence)
+    Ok((s_combined, convergence))
 }
 
 /// Run stabilised ICA iterations over the CV-like data
@@ -562,12 +560,12 @@ pub fn stabilised_ica_cv<T: BixverseFloat>(
     ica_params: IcaParams<T>,
     ica_cv_data: Option<IcaCvData<T>>,
     seed: usize,
-) -> (Mat<T>, Vec<bool>) {
-    // Generate cross-validation data if not provided
+) -> Result<(Mat<T>, Vec<bool>), BixverseErrors> {
+    // generate cross-validation data if not provided
     let cv_data = match ica_cv_data {
-        Some(data) => data, // Use the provided data
-        None => IcaCvData::create_from_data(x, no_folds, seed, Some(no_comp)), // Generate new data
-    };
+        Some(data) => Ok(data), // Use the provided data
+        None => IcaCvData::create_from_data(x, no_folds, seed, Some(no_comp)),
+    }?;
 
     // Iterate through bootstrapped samples
     let cv_res: Vec<(Mat<T>, Vec<bool>)> = cv_data
@@ -575,7 +573,7 @@ pub fn stabilised_ica_cv<T: BixverseFloat>(
         .par_iter()
         .zip(cv_data.pre_white_matrices)
         .map(|(k_i, x_i)| {
-            let (s_i, converged_i) = stabilised_ica_iters(
+            stabilised_ica_iters(
                 x_i.as_ref(),
                 k_i.as_ref(),
                 no_comp,
@@ -583,11 +581,9 @@ pub fn stabilised_ica_cv<T: BixverseFloat>(
                 ica_type,
                 ica_params.clone(),
                 seed + 2,
-            );
-
-            (s_i, converged_i)
+            )
         })
-        .collect();
+        .collect::<Result<Vec<(Mat<T>, Vec<bool>)>, BixverseErrors>>()?;
 
     let mut s_final = Vec::new();
     let mut converged_final = Vec::new();
@@ -600,5 +596,5 @@ pub fn stabilised_ica_cv<T: BixverseFloat>(
     let s_final = colbind_matrices(&s_final);
     let converged_final = flatten_vector(converged_final);
 
-    (s_final, converged_final)
+    Ok((s_final, converged_final))
 }

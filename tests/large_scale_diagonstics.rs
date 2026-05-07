@@ -136,8 +136,8 @@ fn test_implicit_vs_explicit_centering() {
         let (csc, dense) = make_test_matrix(n, m, 0.1, 123);
 
         // Compute means and stds from the CSC
-        let col_means = sparse_csc_column_means(&csc, false);
-        let col_stds = sparse_csc_column_stds(&csc, &col_means, false);
+        let col_means = sparse_csc_column_means(&csc, false).unwrap();
+        let col_stds = sparse_csc_column_stds(&csc, &col_means, false).unwrap();
 
         // Build explicit centered+scaled dense matrix
         let dense_cs =
@@ -206,8 +206,8 @@ fn test_implicit_vs_explicit_transpose_matvec() {
         let m = 500;
         let (csc, dense) = make_test_matrix(n, m, 0.1, 456);
 
-        let col_means = sparse_csc_column_means(&csc, false);
-        let col_stds = sparse_csc_column_stds(&csc, &col_means, false);
+        let col_means = sparse_csc_column_means(&csc, false).unwrap();
+        let col_stds = sparse_csc_column_stds(&csc, &col_means, false).unwrap();
 
         let dense_cs =
             Mat::<f64>::from_fn(n, m, |i, j| (dense[(i, j)] - col_means[j]) / col_stds[j]);
@@ -265,8 +265,8 @@ fn test_gram_symmetry() {
         let m = 500;
         let (csc, _dense) = make_test_matrix(n, m, 0.1, 789);
 
-        let col_means = sparse_csc_column_means(&csc, false);
-        let col_stds = sparse_csc_column_stds(&csc, &col_means, false);
+        let col_means = sparse_csc_column_means(&csc, false).unwrap();
+        let col_stds = sparse_csc_column_stds(&csc, &col_means, false).unwrap();
 
         let csr = transpose_sparse(&csc);
         let data_csr_f: Vec<f64> = csr.data.iter().map(|&v| v as f64).collect();
@@ -353,8 +353,8 @@ fn test_lanczos_orthogonality_loss() {
     for &n in &[1000, 10_000, 100_000] {
         let m = 500;
         let (csc, _) = make_test_matrix(n, m, 0.1, 321);
-        let col_means = sparse_csc_column_means(&csc, false);
-        let col_stds = sparse_csc_column_stds(&csc, &col_means, false);
+        let col_means = sparse_csc_column_means(&csc, false).unwrap();
+        let col_stds = sparse_csc_column_stds(&csc, &col_means, false).unwrap();
 
         let no_params_means: Option<&[f64]> = Some(&col_means);
         let no_params_stds: Option<&[f64]> = Some(&col_stds);
@@ -367,7 +367,8 @@ fn test_lanczos_orthogonality_loss() {
             false,
             no_params_means,
             no_params_stds,
-        );
+        )
+        .unwrap();
 
         // Check U orthogonality: U^T U should be ~identity
         let k = svd.s.len();
@@ -465,18 +466,18 @@ fn test_sparse_vs_dense_svd_scores() {
         let m = 500;
         let (csc, dense) = make_test_matrix(n, m, 0.1, 555);
 
-        let col_means = sparse_csc_column_means(&csc, false);
-        let col_stds = sparse_csc_column_stds(&csc, &col_means, false);
+        let col_means = sparse_csc_column_means(&csc, false).unwrap();
+        let col_stds = sparse_csc_column_stds(&csc, &col_means, false).unwrap();
 
         // Dense: explicitly centre and scale, then randomised SVD
         let dense_cs =
             Mat::<f64>::from_fn(n, m, |i, j| (dense[(i, j)] - col_means[j]) / col_stds[j]);
-        let dense_svd = randomised_svd(dense_cs.as_ref(), 10, 42, Some(100), Some(2));
+        let dense_svd = randomised_svd(dense_cs.as_ref(), 10, 42, Some(100), Some(2)).unwrap();
         let dense_scores = compute_pc_scores(&dense_svd);
 
         // Sparse: implicit centering
         let sparse_svd = randomised_sparse_svd::<f32, f64>(
-            &csc,
+            csc,
             10,
             42,
             false, // use data, not data_2 (we set them equal)
@@ -484,7 +485,8 @@ fn test_sparse_vs_dense_svd_scores() {
             Some(2),
             Some(&col_means),
             Some(&col_stds),
-        );
+        )
+        .unwrap();
         let sparse_scores = compute_pc_scores(&sparse_svd);
 
         // Compare PC scores (allowing sign flips)

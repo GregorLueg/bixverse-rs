@@ -34,12 +34,12 @@ pub fn get_top_genes_perc(
     top_n_values: &[usize],
     cell_indices: &[usize],
     verbose: bool,
-) -> Vec<Vec<f32>> {
+) -> Result<Vec<Vec<f32>>, BixverseErrors> {
     let start_reading = Instant::now();
 
-    let reader = ParallelSparseReader::new(f_path).unwrap();
+    let reader = ParallelSparseReader::new(f_path)?;
 
-    let cell_chunks = reader.read_cells_parallel(cell_indices);
+    let cell_chunks = reader.read_cells_parallel(cell_indices)?;
 
     let end_read = start_reading.elapsed();
 
@@ -79,7 +79,7 @@ pub fn get_top_genes_perc(
         );
     }
 
-    results
+    Ok(results)
 }
 
 /// Calculates the cumulative proportion of the top X genes
@@ -103,10 +103,10 @@ pub fn get_top_genes_perc_streaming(
     top_n_values: &[usize],
     cell_indices: &[usize],
     verbose: bool,
-) -> Vec<Vec<f32>> {
+) -> Result<Vec<Vec<f32>>, BixverseErrors> {
     let start_total = Instant::now();
 
-    let reader = ParallelSparseReader::new(f_path).unwrap();
+    let reader = ParallelSparseReader::new(f_path)?;
 
     let mut results: Vec<Vec<f32>> = vec![Vec::new(); top_n_values.len()];
 
@@ -116,7 +116,7 @@ pub fn get_top_genes_perc_streaming(
         let batch_end = (batch_start + CELL_BATCH_SIZE).min(cell_indices.len());
         let cell_batch = &cell_indices[batch_start..batch_end];
 
-        let cell_chunks = reader.read_cells_parallel(cell_batch);
+        let cell_chunks = reader.read_cells_parallel(cell_batch)?;
 
         for (top_idx, &top_n) in top_n_values.iter().enumerate() {
             let proportions: Vec<f32> = cell_chunks
@@ -155,7 +155,7 @@ pub fn get_top_genes_perc_streaming(
         );
     }
 
-    results
+    Ok(results)
 }
 
 ///////////////////////////////
@@ -183,12 +183,12 @@ pub fn get_gene_set_perc(
     gene_indices: Vec<Vec<u32>>,
     cell_indices: &[usize],
     verbose: bool,
-) -> Vec<Vec<f32>> {
+) -> Result<Vec<Vec<f32>>, BixverseErrors> {
     let start_reading = Instant::now();
 
-    let reader = ParallelSparseReader::new(f_path).unwrap();
+    let reader = ParallelSparseReader::new(f_path)?;
 
-    let cell_chunks = reader.read_cells_parallel(cell_indices);
+    let cell_chunks = reader.read_cells_parallel(cell_indices)?;
 
     let end_read = start_reading.elapsed();
 
@@ -230,7 +230,7 @@ pub fn get_gene_set_perc(
         );
     }
 
-    results
+    Ok(results)
 }
 
 /// Calculates the percentage within the gene set(s)
@@ -255,10 +255,10 @@ pub fn get_gene_set_perc_streaming(
     gene_indices: Vec<Vec<u32>>,
     cell_indices: &[usize],
     verbose: bool,
-) -> Vec<Vec<f32>> {
+) -> Result<Vec<Vec<f32>>, BixverseErrors> {
     let start_total = Instant::now();
 
-    let reader = ParallelSparseReader::new(f_path).unwrap();
+    let reader = ParallelSparseReader::new(f_path)?;
 
     let mut results: Vec<Vec<f32>> = vec![Vec::new(); gene_indices.len()];
     let hash_gene_sets: Vec<FxHashSet<&u32>> =
@@ -270,7 +270,7 @@ pub fn get_gene_set_perc_streaming(
         let batch_end = (batch_start + CELL_BATCH_SIZE).min(cell_indices.len());
         let cell_batch = &cell_indices[batch_start..batch_end];
 
-        let cell_chunks = reader.read_cells_parallel(cell_batch);
+        let cell_chunks = reader.read_cells_parallel(cell_batch)?;
 
         for (gs_idx, hash_gene_set) in hash_gene_sets.iter().enumerate() {
             let percentage: &Vec<f32> = &cell_chunks
@@ -308,5 +308,5 @@ pub fn get_gene_set_perc_streaming(
         );
     }
 
-    results
+    Ok(results)
 }
