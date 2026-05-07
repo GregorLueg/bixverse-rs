@@ -401,7 +401,7 @@ fn max_min_sampling(data: &[Vec<f32>], num_waypoints: usize, seed: u64) -> Vec<u
 /// ### Returns
 ///
 /// Indices of the landmarks
-fn select_density_landmarks(
+pub fn select_density_landmarks(
     kernel: &CompressedSparseData2<f32>,
     n_landmarks: usize,
     seed: u64,
@@ -441,7 +441,7 @@ fn select_density_landmarks(
 /// ### Returns
 ///
 /// The `(indices, distances)`
-fn landmark_knn(
+pub fn landmark_knn(
     pca: MatRef<f32>,
     landmark_indices: &[usize],
     k: usize,
@@ -476,7 +476,7 @@ fn landmark_knn(
 /// ### Returns
 ///
 /// The landmark transition matrix
-fn build_data_to_landmark_transitions(
+pub fn build_data_to_landmark_transitions(
     pca: MatRef<f32>,
     landmark_indices: &[usize],
     k: usize,
