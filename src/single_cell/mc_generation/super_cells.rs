@@ -41,8 +41,8 @@ pub struct SuperCellParams {
     /// Graining level of data (proportion of number of single cells in the
     /// initial dataset to the number of metacells in the final dataset)
     pub graining_factor: f64,
-    /// [KnnParams] for the various approximate nearest neighbour searches
-    /// in ann-search-rs
+    /// [`crate::prelude::KnnParams`] for the various approximate nearest
+    /// neighbour searches in ann-search-rs
     pub knn_params: KnnParams,
     /// Shall a kernel be applied as in SuperCell 2.0, see Hérault, et al.,
     /// bioRxiv, 2026

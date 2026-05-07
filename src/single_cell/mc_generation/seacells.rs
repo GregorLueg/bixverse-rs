@@ -787,7 +787,7 @@ impl<'a> SEACells<'a> {
 
     /// Construct the kernel matrix from k-NN graph with adaptive RBF weights
     ///
-    /// Builds a sparse symmetric kernel K where K[i,j] ∝ similarity between
+    /// Builds a sparse symmetric kernel K where `K[i,j] ∝ similarity` between
     /// cells i and j:
     ///
     /// ```K[i,j] = exp(-||xᵢ - xⱼ||² / (σᵢ σⱼ))```
@@ -797,9 +797,9 @@ impl<'a> SEACells<'a> {
     ///
     /// The graph is first symmetrised by union (edge if either direction
     /// exists) or intersection (edge only if both directions exist); self-loops
-    /// are added before weights are computed, which guarantees K[i,i] = 1 and a
-    /// symmetric sparsity pattern. Weights are symmetric by construction since
-    /// both the distance and σᵢσⱼ are symmetric.
+    /// are added before weights are computed, which guarantees `K[i,i] = 1` and
+    /// a symmetric sparsity pattern. Weights are symmetric by construction
+    /// since both the distance and σᵢσⱼ are symmetric.
     ///
     /// K² is never materialised - downstream operations compute
     /// K @ (K @ X), bounding memory to O(nnz(K)).

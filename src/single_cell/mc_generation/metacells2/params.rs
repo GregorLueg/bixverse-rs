@@ -19,7 +19,7 @@ pub struct MetacellsParams {
     /// The [SimilarityParams] for the MetaCell similarity
     pub similarity: SimilarityParams,
     /// The [MC2KnnParams] - these are MetaCell2-specific parameters that are
-    /// different from [`KnnParams`].
+    /// different from [`crate::prelude::KnnParams`].
     pub knn: MC2KnnParams,
     /// The [PartitionParams] that defines how to partition the cells into the
     /// meta cells.

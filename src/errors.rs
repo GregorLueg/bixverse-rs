@@ -49,8 +49,8 @@ pub enum BixverseErrors {
     #[error("The number of nodes and membership assignments in the communities do not add up.")]
     CommunityAssignmentMismatch,
 
-    /// Error in situations were data_2 in [`CompressedSparseData2`] is asked for
-    /// but not available
+    /// Error in situations were data_2 in [`crate::prelude::CompressedSparseData2`]
+    /// is asked for but not available
     #[error("data_2 slot is None but was requested")]
     Data2NotAvailable,
 

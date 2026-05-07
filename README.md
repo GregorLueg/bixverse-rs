@@ -14,10 +14,24 @@ all the core functionality extracted out.
 
 ## Roadmap
 
-The functions are being heavily tested within the bixverse package, but
-it would be good to add another testing suite here. Also, at some point,
-a Python interface to the single cell part will be written. Additionally,
-a more detailed documentation will be provided.
+### Methods
+
+Slowly, but surely increase the number of methods that are implemented here. The
+next targets would be
+
+- NMF (and sparse versions of that)
+- Palantir for single-cell trajectories, see [Setty, et al.](https://www.nature.com/articles/s41587-019-0068-4)
+- NicheNet, see [Browaeys et al.](https://www.nature.com/articles/s41592-019-0667-5)
+
+### GPU accelerations
+
+Some of the matrix algebra in the package could benefit from GPU accelerations.
+This will be a longer term project...
+
+### Python interface
+
+Specifically, interfaces with the single cell binary files to support deep
+learning via the establised libraries here.
 
 ## Updates
 
