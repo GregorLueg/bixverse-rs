@@ -155,8 +155,14 @@ where
     T: BixverseFloat + std::iter::Sum + BixverseNumeric + SimdDistance,
 {
     let knn_graph: SparseGraph<T> = if params.use_kernel {
+        if verbose {
+            println!("Using the kernel approach like in SuperCell 2.0")
+        }
         knn_to_sparse_graph_kernel(knn_indices, knn_dist, squared_dist, params.k_ith)
     } else {
+        if verbose {
+            println!("Using the original version of SuperCell on the kNN graph")
+        }
         knn_to_sparse_graph(knn_indices, true)
     };
     walktrap_sparse_graph(&knn_graph, params.walk_length, no_meta_cells, verbose)
