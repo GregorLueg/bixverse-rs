@@ -230,6 +230,7 @@ pub enum BixverseErrors {
     #[cfg(feature = "single-cell")]
     #[error("SEACells: The model has not been fitted yet. Please run .fit()")]
     SEACellsModelNotFitted,
+
     // -- FastCluster --
     /// The Fast cluster results do not contain k-means cluster assignments
     #[cfg(feature = "single-cell")]
@@ -240,4 +241,21 @@ pub enum BixverseErrors {
     #[cfg(feature = "single-cell")]
     #[error("The fast cluster results were generated without any centroids")]
     FastClusterNoCentroids,
+
+    // -- MELD --
+    /// If the user provides a label which is out-of-range of the expected
+    /// number of groups
+    #[cfg(feature = "single-cell")]
+    #[error("MELD: label {label} out of range for n_groups={n_groups}.")]
+    MELDLabelOutOfRange {
+        /// The label which is out of range
+        label: usize,
+        /// The number of expected groups
+        n_groups: usize,
+    },
+
+    /// If the user asks for less than two Chebyshev coefficients
+    #[cfg(feature = "single-cell")]
+    #[error("MELD: Need at least 2 Chebyshev coefficients")]
+    MELDChebyshevCoefTooLow,
 }

@@ -111,14 +111,14 @@ where
 /// Mini-batch k-means (Sculley 2010)
 ///
 /// Trains centroids using random mini-batches with a decaying learning
-/// rate (`eta = 1 / count[c]`). Each iteration samples `batch_size`
-/// vectors without replacement, assigns them to the nearest centroid,
-/// and applies an incremental mean update. A full assignment pass seeds
-/// the per-centroid counts after initialisation to stabilise early
-/// updates. Convergence is checked via maximum centroid drift.
+/// rate (`eta = 1 / count[c]`). Each iteration samples `batch_size` vectors
+/// without replacement, assigns them to the nearest centroid, and applies an
+/// incremental mean update. A full assignment pass seeds the per-centroid
+/// counts after initialisation to stabilise early updates. Convergence is
+/// checked via maximum centroid drift.
 ///
-/// After training, a final full-dataset assignment pass produces the
-/// returned assignments.
+/// After training, a final full-dataset assignment pass produces the returned
+/// assignments.
 ///
 /// ### Params
 ///
@@ -131,16 +131,13 @@ where
 ///   `n / 2` if larger.
 /// * `drift_threshold` - Below which centroid drift the algorithm is seen as
 ///   converged.
-/// * `lr_alpha` - Learning rate alpha decay. The original paper used `1.0`, but
-///   `0.75` yields better convergence.
+/// * `lr_alpha` - Learning rate alpha decay. The original paper used `1.0`.
 /// * `seed` - Random seed for reproducibility
 /// * `verbose` - Print convergence diagnostics
 ///
 /// ### Returns
 ///
-/// Tuple of (centroids, assignments) where centroids is a `Vec<T>` of
-/// length `n_centroids * dim` (row-major) and assignments is a `Vec<usize>`
-/// of length `n` with the nearest centroid index for each vector.
+/// Tuple of (centroids, assignments)
 #[allow(clippy::too_many_arguments)]
 pub fn train_centroids_minibatch<T>(
     data: MatRef<T>,
