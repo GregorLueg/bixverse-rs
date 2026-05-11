@@ -24,9 +24,10 @@ use crate::single_cell::sc_batch_correction::{
     bbknn::BbknnParams, fast_mnn::FastMnnParams, harmony::HarmonyParams,
     harmony_v2::HarmonyParamsV2,
 };
-use crate::single_cell::sc_data::data_io::MinCellQuality;
-use crate::single_cell::sc_data::h5ad_multifile_io::H5adFileTask;
-use crate::single_cell::sc_data::sc_synthetic_data::CellTypeConfig;
+use crate::single_cell::sc_data::{
+    bin_merge_io::BinMergeTask, data_io::MinCellQuality, h5ad_multifile_io::H5adFileTask,
+    sc_synthetic_data::CellTypeConfig,
+};
 use crate::single_cell::sc_processing::{
     doublet_detection::BoostParams, knn::KnnParams, scdblfinder::ScDblFinderParams,
     scrublet::ScrubletParams, utils_doublets::ScDblSimParams,
@@ -1848,49 +1849,50 @@ impl ScenicParams {
 //////////////////
 
 impl H5adFileTask {
-    /// Generate an H5FileTask from an R list
+    /// Generate an H5adFileTask from an R list
     ///
     /// Expects: exp_id, h5_path, cs_type, no_cells, no_genes,
     /// gene_local_to_universe (integer vector, NA for unmapped genes,
     /// 0-indexed).
-    pub fn from_r_list(r_list: List) -> Result<Self> {
+    pub fn from_r_list(r_list: List) -> extendr_api::Result<Self> {
         let map: HashMap<&str, Robj> = r_list.try_into()?;
 
         let exp_id = map
             .get("exp_id")
             .and_then(|v| v.as_str())
-            .expect("exp_id missing or not a string")
+            .ok_or_else(|| Error::Other("exp_id missing or not a string".into()))?
             .to_string();
 
         let h5_path = map
             .get("h5_path")
             .and_then(|v| v.as_str())
-            .expect("h5_path missing or not a string")
+            .ok_or_else(|| Error::Other("h5_path missing or not a string".into()))?
             .to_string();
 
         let cs_type_str = map
             .get("cs_type")
             .and_then(|v| v.as_str())
-            .expect("cs_type missing or not a string");
-        let cs_type =
-            parse_compressed_sparse_format(cs_type_str).expect("cs_type must be 'csr' or 'csc'");
+            .ok_or_else(|| Error::Other("cs_type missing or not a string".into()))?;
+        let cs_type = parse_compressed_sparse_format(cs_type_str)
+            .ok_or_else(|| Error::Other("cs_type must be 'csr' or 'csc'".into()))?;
 
         let no_cells = map
             .get("no_cells")
             .and_then(|v| v.as_integer())
-            .expect("no_cells missing") as usize;
+            .ok_or_else(|| Error::Other("no_cells missing or not an integer".into()))?
+            as usize;
 
         let no_genes = map
             .get("no_genes")
             .and_then(|v| v.as_integer())
-            .expect("no_genes missing") as usize;
+            .ok_or_else(|| Error::Other("no_genes missing or not an integer".into()))?
+            as usize;
 
-        let mapping_robj = map
+        let mapping_raw: Vec<i32> = map
             .get("gene_local_to_universe")
-            .expect("gene_local_to_universe missing");
-        let mapping_raw: Vec<i32> = mapping_robj
+            .ok_or_else(|| Error::Other("gene_local_to_universe missing".into()))?
             .as_integer_slice()
-            .expect("gene_local_to_universe must be integer vector")
+            .ok_or_else(|| Error::Other("gene_local_to_universe must be an integer vector".into()))?
             .to_vec();
 
         // R NA_integer_ is i32::MIN
@@ -1911,6 +1913,62 @@ impl H5adFileTask {
             cs_type,
             no_cells,
             no_genes,
+            gene_local_to_universe,
+        })
+    }
+}
+
+//////////////////
+// BinMergeTask //
+//////////////////
+
+impl BinMergeTask {
+    /// Generate a BinMergeTask from an R list
+    ///
+    /// Expects: exp_id, bin_cells_path, cells_to_keep (0-indexed integer
+    /// vector), gene_local_to_universe (integer vector, NA for unmapped
+    /// genes, 0-indexed).
+    pub fn from_r_list(r_list: List) -> extendr_api::Result<Self> {
+        let map: HashMap<&str, Robj> = r_list.try_into()?;
+
+        let exp_id = map
+            .get("exp_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::Other("exp_id missing or not a string".into()))?
+            .to_string();
+
+        let bin_cells_path = map
+            .get("bin_cells_path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::Other("bin_cells_path missing or not a string".into()))?
+            .to_string();
+
+        let cells_to_keep: Vec<usize> = map
+            .get("cells_to_keep")
+            .ok_or_else(|| Error::Other("cells_to_keep missing".into()))?
+            .as_integer_slice()
+            .ok_or_else(|| Error::Other("cells_to_keep must be an integer vector".into()))?
+            .iter()
+            .map(|&x| x as usize)
+            .collect();
+
+        let mapping_raw: Vec<i32> = map
+            .get("gene_local_to_universe")
+            .ok_or_else(|| Error::Other("gene_local_to_universe missing".into()))?
+            .as_integer_slice()
+            .ok_or_else(|| Error::Other("gene_local_to_universe must be an integer vector".into()))?
+            .to_vec();
+
+        // R NA_integer_ is i32::MIN
+        let gene_local_to_universe: Vec<Option<u32>> = mapping_raw
+            .into_iter()
+            .map(|v| if v == i32::MIN { None } else { Some(v as u32) })
+            .collect();
+
+        Ok(Self {
+            exp_id,
+            bin_cells_path,
+            cells_to_keep,
             gene_local_to_universe,
         })
     }

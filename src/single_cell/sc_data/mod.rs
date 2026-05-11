@@ -1,6 +1,7 @@
 //! This module contains all of the single cell streamining-related
 //! functionalities, structures and readers.
 
+pub mod bin_merge_io;
 pub mod data_io;
 pub mod depracated_conversion;
 pub mod h5ad_io;
