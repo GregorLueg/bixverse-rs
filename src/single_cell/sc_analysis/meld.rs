@@ -11,7 +11,6 @@ use std::time::Instant;
 use thousands::Separable;
 
 use crate::core::math::sparse::*;
-use crate::core::math::sparse::*;
 use crate::prelude::*;
 use crate::single_cell::mc_generation::seacells::{
     build_data_to_landmark_transitions, compute_diffusion_kernel, landmark_knn,
@@ -452,4 +451,268 @@ fn chebyshev_apply_columns(
         })
         .collect();
     Mat::from_fn(n, p, |i, j| columns[j][i])
+}
+
+//////////
+// Main //
+//////////
+
+/// Run MELD on the full N x N graph.
+///
+/// ### Params
+///
+/// * `knn_indices` - kNN indices (without self).
+/// * `knn_distances` - kNN distances (matching `knn_indices`).
+/// * `labels` - Per-cell category labels in `0..n_groups`.
+/// * `n_groups` - Number of unique groups (>= 2).
+/// * `squared_dist` - Whether `knn_distances` are squared (e.g. squared
+///   Euclidean from the kNN search).
+/// * `params` - [`MeldParams`].
+/// * `seed` - Seed for Lanczos lmax estimation.
+/// * `verbose` - Print timing.
+///
+/// ### Returns
+///
+/// `Mat<f32>` of shape `(n_cells, n_groups)` containing per-condition density
+/// estimates for each cell.
+#[allow(clippy::too_many_arguments)]
+pub fn meld(
+    knn_indices: &[Vec<usize>],
+    knn_distances: &[Vec<f32>],
+    labels: &[usize],
+    n_groups: usize,
+    squared_dist: bool,
+    params: &MeldParams,
+    seed: u64,
+    verbose: bool,
+) -> Result<Mat<f32>, BixverseErrors> {
+    let n = knn_indices.len();
+    if labels.len() != n {
+        return Err(BixverseErrors::MELDLabelUnequalsSamples);
+    }
+    if n_groups < 2 {
+        return Err(BixverseErrors::MELDOnlyOneGroup);
+    }
+
+    let start = Instant::now();
+    let knn_k = knn_indices[0].len();
+
+    if verbose {
+        println!(
+            "MELD: building kernel adjacency from kNN ({} cells)...",
+            n.separate_with_underscores()
+        );
+    }
+    let adj = compute_diffusion_kernel(knn_indices, knn_distances, knn_k, squared_dist);
+    if verbose {
+        println!(" Done in {:.2?}", start.elapsed())
+    }
+
+    if verbose {
+        println!("MELD: building Laplacian...");
+    }
+    let lap = match params.lap_type {
+        LaplacianType::Combinatorial => build_combinatorial_laplacian(&adj),
+        LaplacianType::Normalised => build_normalised_laplacian(&adj),
+    };
+    drop(adj);
+    if verbose {
+        println!(" Done in {:.2?}", start.elapsed())
+    }
+
+    if verbose {
+        println!("MELD: estimating largest Laplacian eigenvalue...");
+    }
+    let lmax = estimate_lmax(&lap, seed)?;
+    if verbose {
+        println!("MELD: lmax = {:.4}", lmax);
+    }
+    if verbose {
+        println!(" Done in {:.2?}", start.elapsed())
+    }
+
+    let coeffs = chebyshev_coefficients(
+        params.filter,
+        params.beta,
+        params.offset,
+        params.order,
+        lmax,
+        params.chebyshev_order,
+    )?;
+
+    let indicators = build_indicator_matrix(labels, n_groups, params.normalise_indicators)?;
+
+    if verbose {
+        println!(
+            "MELD: applying Chebyshev filter (order={}) to {} signals...",
+            params.chebyshev_order, n_groups
+        );
+    }
+    let densities = chebyshev_apply_columns(&lap, &coeffs, lmax, indicators.as_ref());
+    if verbose {
+        println!(" Done in {:.2?}", start.elapsed())
+    }
+
+    if verbose {
+        println!("MELD: done in {:.2?}", start.elapsed());
+    }
+
+    Ok(densities)
+}
+
+/// Run MELD with a landmark approximation, suitable for 100k-1M cells.
+///
+/// Picks `n_landmarks` density-weighted landmarks, builds an L x L landmark
+/// graph, runs the Chebyshev MELD filter on the landmark Laplacian, and
+/// projects the filtered landmark densities back to all cells via the
+/// data-to-landmark transition matrix.
+///
+/// ### Params
+///
+/// * `embedding` - Embedding `(n_cells x n_components)`.
+/// * `knn_indices` - kNN indices for the full data (without self).
+/// * `knn_distances` - kNN distances for the full data.
+/// * `labels` - Per-cell category labels in `0..n_groups`.
+/// * `n_groups` - Number of unique groups (>= 2).
+/// * `squared_dist` - Whether `knn_distances` are squared.
+/// * `n_landmarks` - Number of landmarks. Aim for 1k-10k at million-scale.
+/// * `params` - [`MeldParams`]. The landmark Laplacian has a different
+///   spectrum to the full one, so `beta` may need re-tuning.
+/// * `seed` - Seed.
+/// * `verbose` - Print timing.
+///
+/// ### Returns
+///
+/// `Mat<f32>` of shape `(n_cells, n_groups)` containing per-condition density
+/// estimates for each cell.
+#[allow(clippy::too_many_arguments)]
+pub fn meld_landmark(
+    embedding: MatRef<f32>,
+    knn_indices: &[Vec<usize>],
+    knn_distances: &[Vec<f32>],
+    labels: &[usize],
+    n_groups: usize,
+    squared_dist: bool,
+    n_landmarks: usize,
+    params: &MeldParams,
+    seed: u64,
+    verbose: bool,
+) -> Result<Mat<f32>, BixverseErrors> {
+    let n = knn_indices.len();
+    if labels.len() != n {
+        return Err(BixverseErrors::MELDLabelUnequalsSamples);
+    }
+    if embedding.nrows() != n {
+        return Err(BixverseErrors::MELDEmbeddingUnequalsSamples);
+    }
+    if n_groups < 2 {
+        return Err(BixverseErrors::MELDOnlyOneGroup);
+    }
+
+    let knn_k = knn_indices[0].len();
+    let t0 = Instant::now();
+
+    if verbose {
+        println!(
+            "MELD landmark: building kernel for landmark selection ({} cells)...",
+            n.separate_with_underscores()
+        );
+    }
+    let full_kernel = compute_diffusion_kernel(knn_indices, knn_distances, knn_k, squared_dist);
+
+    if verbose {
+        println!(
+            "MELD landmark: selecting {} density-weighted landmarks...",
+            n_landmarks
+        );
+    }
+    let landmark_indices = select_density_landmarks(&full_kernel, n_landmarks, seed);
+    let l = landmark_indices.len();
+    drop(full_kernel);
+
+    let k_ll = params.knn_params.k.min(l.saturating_sub(1)).max(3);
+    if verbose {
+        println!(
+            "MELD landmark: building landmark-landmark kNN (L={}, k={})...",
+            l, k_ll
+        );
+    }
+    let (ll_idx, ll_dist) = landmark_knn(
+        embedding,
+        &landmark_indices,
+        k_ll,
+        &params.knn_params,
+        seed as usize,
+        verbose,
+    );
+
+    let ll_squared = params.knn_params.ann_dist == "euclidean";
+    let ll_kernel = compute_diffusion_kernel(&ll_idx, &ll_dist, k_ll, ll_squared);
+
+    if verbose {
+        println!("MELD landmark: building landmark Laplacian...");
+    }
+    let ll_lap = match params.lap_type {
+        LaplacianType::Combinatorial => build_combinatorial_laplacian(&ll_kernel),
+        LaplacianType::Normalised => build_normalised_laplacian(&ll_kernel),
+    };
+    drop(ll_kernel);
+
+    let lmax = estimate_lmax(&ll_lap, seed)?;
+    if verbose {
+        println!("MELD landmark: landmark lmax = {:.4}", lmax);
+    }
+
+    if verbose {
+        println!("MELD landmark: building data-to-landmark transitions...");
+    }
+    let p_nl = build_data_to_landmark_transitions(embedding, &landmark_indices, knn_k, 1.0, 1e-4);
+    let p_ln = p_nl.transpose_and_convert();
+
+    let coeffs = chebyshev_coefficients(
+        params.filter,
+        params.beta,
+        params.offset,
+        params.order,
+        lmax,
+        params.chebyshev_order,
+    )?;
+
+    // Aggregate per-cell indicators to landmarks: s_l = P_nl^T s_n  (L x p).
+    let indicators = build_indicator_matrix(labels, n_groups, params.normalise_indicators)?;
+    let landmark_signals: Vec<Vec<f32>> = (0..n_groups)
+        .into_par_iter()
+        .map(|j| {
+            let col: Vec<f32> = (0..n).map(|i| *indicators.get(i, j)).collect();
+            csr_matvec(&p_ln, &col)
+        })
+        .collect();
+
+    if verbose {
+        println!(
+            "MELD landmark: filtering {} signals on landmark graph (order={})...",
+            n_groups, params.chebyshev_order
+        );
+    }
+    let landmark_filtered: Vec<Vec<f32>> = landmark_signals
+        .into_par_iter()
+        .map(|sig| chebyshev_apply(&ll_lap, &coeffs, lmax, &sig))
+        .collect();
+
+    // Project back to cells: density_n = P_nl s_l_filt  (N x p).
+    if verbose {
+        println!("MELD landmark: projecting back to full data...");
+    }
+    let cell_densities: Vec<Vec<f32>> = landmark_filtered
+        .into_par_iter()
+        .map(|sig| csr_matvec(&p_nl, &sig))
+        .collect();
+
+    let densities = Mat::from_fn(n, n_groups, |i, j| cell_densities[j][i]);
+
+    if verbose {
+        println!("MELD landmark: done in {:.2?}", t0.elapsed());
+    }
+
+    Ok(densities)
 }

@@ -258,4 +258,19 @@ pub enum BixverseErrors {
     #[cfg(feature = "single-cell")]
     #[error("MELD: Need at least 2 Chebyshev coefficients")]
     MELDChebyshevCoefTooLow,
+
+    /// Error if labels and number of cells are not equal
+    #[cfg(feature = "single-cell")]
+    #[error("MELD: The labels are not equal to the number of cells")]
+    MELDLabelUnequalsSamples,
+
+    /// Error of n_groups < 2
+    #[cfg(feature = "single-cell")]
+    #[error("MELD: lables needs two groups minimum")]
+    MELDOnlyOneGroup,
+
+    /// Error if embedding rows do not match the kNN
+    #[cfg(feature = "single-cell")]
+    #[error("MELD: Embedding rows unequals samples")]
+    MELDEmbeddingUnequalsSamples,
 }
