@@ -1010,20 +1010,20 @@ impl FileHeader {
 ///
 /// Implementation of a structure for writing in a streamed manner two different
 /// types of sparse stored data.
-///
-/// ### Params
-///
-/// * `header` - The header of the file.
-/// * `writer` - BufWriter to the file.
-/// * `chunks_start_pos` - The current position of the chunks.
-/// * `cell_based` - Boolean indicating if the writer is designed to write in
-///   an efficient manner for cells.
 pub struct CellGeneSparseWriter {
+    /// The header of the file.
     header: SparseDataHeader,
+    /// Buffered writer to the file.
     writer: BufWriter<File>,
+    /// The current position of the chunks.
     chunks_start_pos: u64,
+    /// Boolean indicating if the writer is designed to write in an efficient
+    /// manner for cells.
     cell_based: bool,
+    /// The chunks written since the last flush
     chunks_since_flush: usize,
+    /// The frequency of flushing. When set to cells will do so every 100_000
+    /// cells; otherwise every 1000 genes.
     flush_frequency: usize,
 }
 

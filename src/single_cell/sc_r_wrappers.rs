@@ -26,7 +26,7 @@ use crate::single_cell::sc_batch_correction::{
 };
 use crate::single_cell::sc_data::{
     bin_merge_io::BinMergeTask, data_io::MinCellQuality, h5ad_multifile_io::H5adFileTask,
-    sc_synthetic_data::CellTypeConfig,
+    mtx_multifile_io::MtxFileTask, sc_synthetic_data::CellTypeConfig,
 };
 use crate::single_cell::sc_processing::{
     doublet_detection::BoostParams, knn::KnnParams, scdblfinder::ScDblFinderParams,
@@ -1970,6 +1970,67 @@ impl BinMergeTask {
             bin_cells_path,
             cells_to_keep,
             gene_local_to_universe,
+        })
+    }
+}
+
+/////////////////
+// MtxFileTask //
+/////////////////
+
+impl MtxFileTask {
+    /// Generate an MtxFileTask from an R list
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The R list to converted to [MtxFileTask].
+    ///
+    /// ### Returns
+    ///
+    /// Self.
+    pub fn from_r_list(r_list: List) -> extendr_api::Result<Self> {
+        let map: HashMap<&str, Robj> = r_list.try_into()?;
+
+        let exp_id = map
+            .get("exp_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::Other("exp_id missing or not a string".into()))?
+            .to_string();
+
+        let mtx_path = map
+            .get("mtx_path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::Other("mtx_path missing or not a string".into()))?
+            .to_string();
+
+        let cells_as_rows = map
+            .get("cells_as_rows")
+            .and_then(|v| v.as_bool())
+            .ok_or_else(|| Error::Other("cells_as_rows missing or not a boolean".into()))?;
+
+        let mapping_raw: Vec<i32> = map
+            .get("gene_local_to_universe")
+            .ok_or_else(|| Error::Other("gene_local_to_universe missing".into()))?
+            .as_integer_slice()
+            .ok_or_else(|| Error::Other("gene_local_to_universe must be an integer vector".into()))?
+            .to_vec();
+
+        let gene_local_to_universe: Vec<Option<usize>> = mapping_raw
+            .into_iter()
+            .map(|v| {
+                if v == i32::MIN {
+                    None
+                } else {
+                    Some(v as usize)
+                }
+            })
+            .collect();
+
+        Ok(Self {
+            exp_id,
+            mtx_path,
+            gene_local_to_universe,
+            cells_as_rows,
         })
     }
 }
