@@ -1,6 +1,6 @@
 [package]
 name = "bixverse-rs"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 authors = ["Gregor Lueg <gregorlueg@me.com>"]
 license = "MIT"
@@ -16,6 +16,8 @@ path = "src/lib.rs"
 single-cell = ["half", "bincode", "indexmap", "memmap2", "hdf5", "lz4_flex"]
 ## Tests for large scale diagonistics - for development only!
 large_scale_diagnostics = []
+## Enables multi-modal single cell analysis (requires single-cell)
+multi-modal = ["single-cell"]
 
 [profile.release]
 opt-level = 3

@@ -1,5 +1,14 @@
 # News
 
+## 0.2.1
+
+### Features
+
+- Multi file support for MTX reading (several 10x experiments to ingest).
+- MELD implementation from Burkhardt, et al., Nat Biotechnol, 2021.
+- Merging single cell binary files
+- Weighted nearest neighbour graph method behind a new feature gate.
+
 ## 0.2.0
 
 Major update / release
