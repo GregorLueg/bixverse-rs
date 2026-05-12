@@ -11,13 +11,24 @@ use crate::prelude::*;
 ///////////
 
 /// SNN similarity method
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, Debug)]
 pub enum SnnSimilarityMethod {
     /// This will calculate the Jaccard similarity as weight
     #[default]
     Intersection,
     /// This will calculate the Rank version as a weight
     Rank,
+}
+
+/// Type of shared nearest neighbour graph to create
+#[derive(Clone, Copy, Default, Debug)]
+pub enum SnnType {
+    /// Creates connections between nodes that share nearest neighbours
+    #[default]
+    FullConnection,
+    /// Creates only connections between nodes that are also connected in the
+    /// kNN graph
+    LimitedConnection,
 }
 
 /// Helper function to get the type of sNN similarity
@@ -28,11 +39,28 @@ pub enum SnnSimilarityMethod {
 ///
 /// ### Returns
 ///
-/// Option of the SnnSimilarityMethod
+/// Option of the [SnnSimilarityMethod]
 pub fn parse_snn_similiarity_method(s: &str) -> Option<SnnSimilarityMethod> {
     match s.to_lowercase().as_str() {
         "jaccard" => Some(SnnSimilarityMethod::Intersection),
         "rank" => Some(SnnSimilarityMethod::Rank),
+        _ => None,
+    }
+}
+
+/// Helper function to get the type of sNN graph construction
+///
+/// ### Params
+///
+/// * `s` - Type of sNN graph to create
+///
+/// ### Returns
+///
+/// Option of the [SnnType]
+pub fn parse_snn_type(s: &str) -> Option<SnnType> {
+    match s.to_lowercase().as_str() {
+        "full" => Some(SnnType::FullConnection),
+        "limited" => Some(SnnType::LimitedConnection),
         _ => None,
     }
 }

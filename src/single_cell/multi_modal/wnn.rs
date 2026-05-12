@@ -62,6 +62,46 @@ pub struct ModalityInput<'a> {
     pub knn_distances: &'a [Vec<f32>],
 }
 
+impl<'a> ModalityInput<'a> {
+    /// Generate a new Modality input instance
+    ///
+    /// ### Params
+    ///
+    /// * `embedding` - The embedding that was used to generate the kNN graph
+    /// * `knn_indices` - The indices of the kNN graph
+    /// * `knn_distances` - The distances of the kNN graph
+    ///
+    /// ### Returns
+    ///
+    /// Returns the [ModalityInput].
+    pub fn new(
+        embedding: MatRef<'a, f32>,
+        knn_indices: &'a [Vec<usize>],
+        knn_distances: &'a [Vec<f32>],
+    ) -> Self {
+        Self {
+            embedding,
+            knn_distances,
+            knn_indices,
+        }
+    }
+}
+
+/// Per-modality, per-cell quantities computed during WNN phase 1.
+#[derive(Clone)]
+struct ModalityCellStats {
+    /// Distance to the nearest non-self kNN neighbour.
+    nearest: Vec<f32>,
+    /// Distance from each cell to the within-modality neighbour centroid,
+    /// offset by `nearest` and floored at zero.
+    within_dist: Vec<f32>,
+    /// Distance from each cell to the cross-modality neighbour centroid,
+    /// offset by `nearest` and floored at zero.
+    cross_dist: Vec<f32>,
+    /// Per-cell kernel bandwidth.
+    sigma: Vec<f32>,
+}
+
 /// WNN output.
 pub struct WnnResult {
     /// The indices of the weighted nearest neighbour graph
@@ -90,6 +130,9 @@ pub struct WnnParams {
     pub sigma_idx: usize,
     /// `SnnFarthest` only: kNN size used to build the SNN graph. Default k_nn.
     pub s_nn: usize,
+    /// sNN type: build a limited version only considering edges that exists
+    /// in the kNN
+    pub snn_type: SnnType,
     /// Multiplier on sigma.
     pub sd_scale: f32,
     /// Kernel exponent power.
@@ -109,6 +152,7 @@ impl Default for WnnParams {
             sigma_method: SigmaMethod::SnnFarthest,
             sigma_idx: 19,
             s_nn: 20,
+            snn_type: SnnType::FullConnection,
             sd_scale: 1.0,
             kernel_power: 1.0,
             cross_const: 1e-4,
@@ -186,6 +230,8 @@ fn mean_of_rows(mat: MatRef<f32>, indices: &[usize]) -> Vec<f32> {
 /// The Euclidean distance as `f32`.
 #[inline]
 fn euclid(a: &[f32], b: &[f32]) -> f32 {
+    // square root has to be happen here, as ann-search-rs returns squared
+    // euclidean
     f32::euclidean_simd(a, b).sqrt()
 }
 
@@ -208,24 +254,36 @@ fn euclid(a: &[f32], b: &[f32]) -> f32 {
 fn build_snn_for_sigma(
     knn_indices: &[Vec<usize>],
     s_nn: usize,
+    snn_type: SnnType,
     n_cells: usize,
     verbose: bool,
 ) -> SparseGraph<f32> {
-    // generate_snn_full needs column-major flat input
+    // generate_snn_full needs column-major flat input!
     let mut flat = vec![0usize; s_nn * n_cells];
     for i in 0..n_cells {
         for j in 0..s_nn {
             flat[j * n_cells + i] = knn_indices[i][j];
         }
     }
-    let (edges, weights) = generate_snn_full(
-        &flat,
-        s_nn,
-        n_cells,
-        0.0,
-        SnnSimilarityMethod::Intersection,
-        verbose,
-    );
+    let (edges, weights) = match snn_type {
+        SnnType::FullConnection => generate_snn_full(
+            &flat,
+            s_nn,
+            n_cells,
+            0.0,
+            SnnSimilarityMethod::Intersection,
+            verbose,
+        ),
+        SnnType::LimitedConnection => generate_snn_limited(
+            &flat,
+            s_nn,
+            n_cells,
+            0.0,
+            SnnSimilarityMethod::Intersection,
+            verbose,
+        ),
+    };
+
     snn_edges_to_sparse_graph(&edges, &weights, n_cells)
 }
 
@@ -315,40 +373,68 @@ pub fn compute_wnn(
     modalities: [ModalityInput<'_>; 2],
     params: &WnnParams,
     verbose: bool,
-) -> WnnResult {
+) -> Result<WnnResult, BixverseErrors> {
+    // input checks
     let n_cells = modalities[0].embedding.nrows();
-    assert_eq!(
-        n_cells,
-        modalities[1].embedding.nrows(),
-        "both modalities must have the same number of cells"
-    );
-    assert!(params.k_nn <= params.knn_range);
-    assert!(params.sigma_idx < params.knn_range);
-    assert!(params.s_nn <= params.knn_range);
+    if n_cells != modalities[1].embedding.nrows() {
+        return Err(BixverseErrors::WNNModalitySampleMismatch);
+    }
+    if params.k_nn > params.knn_range {
+        return Err(BixverseErrors::WNNKnnLargerThanKnnRange);
+    }
+    if params.sigma_idx >= params.knn_range {
+        return Err(BixverseErrors::WNNSigmaIdxOutOfRange);
+    }
+    if params.s_nn > params.knn_range {
+        return Err(BixverseErrors::WNNSnnLargerThanKnnRange);
+    }
 
     for (r, m) in modalities.iter().enumerate() {
-        assert_eq!(m.knn_indices.len(), n_cells, "modality {r} knn row count");
-        assert_eq!(
-            m.knn_distances.len(),
-            n_cells,
-            "modality {r} knn dist row count"
-        );
+        if m.knn_indices.len() != n_cells {
+            return Err(BixverseErrors::WNNKnnRowCountMismatch {
+                modality: r,
+                expected: n_cells,
+                found: m.knn_indices.len(),
+            });
+        }
+        if m.knn_distances.len() != n_cells {
+            return Err(BixverseErrors::WNNKnnDistRowCountMismatch {
+                modality: r,
+                expected: n_cells,
+                found: m.knn_distances.len(),
+            });
+        }
         if !m.knn_indices.is_empty() {
-            assert!(
-                m.knn_indices[0].len() >= params.knn_range,
-                "modality {r} needs >= knn_range neighbours per cell"
-            );
-            assert!(m.knn_distances[0].len() >= params.knn_range);
+            if m.knn_indices[0].len() < params.knn_range {
+                return Err(BixverseErrors::WNNInsufficientNeighbours {
+                    modality: r,
+                    expected: params.knn_range,
+                    found: m.knn_indices[0].len(),
+                });
+            }
+            if m.knn_distances[0].len() < params.knn_range {
+                return Err(BixverseErrors::WNNInsufficientNeighbours {
+                    modality: r,
+                    expected: params.knn_range,
+                    found: m.knn_distances[0].len(),
+                });
+            }
         }
     }
 
-    // Build SNNs up-front if needed
+    // build SNNs up-front if needed
     let snn_graphs: Option<Vec<SparseGraph<f32>>> = match params.sigma_method {
         SigmaMethod::SnnFarthest => {
             let t = Instant::now();
             let g: Vec<_> = (0..2)
                 .map(|r| {
-                    build_snn_for_sigma(modalities[r].knn_indices, params.s_nn, n_cells, false)
+                    build_snn_for_sigma(
+                        modalities[r].knn_indices,
+                        params.s_nn,
+                        params.snn_type,
+                        n_cells,
+                        verbose,
+                    )
                 })
                 .collect();
             if verbose {
@@ -359,11 +445,11 @@ pub fn compute_wnn(
         SigmaMethod::SigmaIdx => None,
     };
 
-    // ---- Phase 1: per-cell quantities + modality weights ----
+    // phase 1: per-cell quantities + modality weights
     let t_phase1 = Instant::now();
     let k_nn = params.k_nn;
 
-    let per_modality: Vec<(Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>)> = (0..2)
+    let per_modality: Vec<ModalityCellStats> = (0..2)
         .map(|r| {
             let m = &modalities[r];
             let m_other = &modalities[1 - r];
@@ -404,27 +490,29 @@ pub fn compute_wnn(
                 })
                 .collect();
 
-            let mut nearest = Vec::with_capacity(n_cells);
-            let mut within = Vec::with_capacity(n_cells);
-            let mut cross = Vec::with_capacity(n_cells);
-            let mut sigma = Vec::with_capacity(n_cells);
+            let mut stats = ModalityCellStats {
+                nearest: Vec::with_capacity(n_cells),
+                within_dist: Vec::with_capacity(n_cells),
+                cross_dist: Vec::with_capacity(n_cells),
+                sigma: Vec::with_capacity(n_cells),
+            };
             for (n, w, c, s) in rows {
-                nearest.push(n);
-                within.push(w);
-                cross.push(c);
-                sigma.push(s);
+                stats.nearest.push(n);
+                stats.within_dist.push(w);
+                stats.cross_dist.push(c);
+                stats.sigma.push(s);
             }
-            (nearest, within, cross, sigma)
+            stats
         })
         .collect();
 
     let scores: Vec<Vec<f32>> = (0..2)
         .map(|r| {
-            let (_n, within, cross, sigma) = &per_modality[r];
+            let s = &per_modality[r];
             (0..n_cells)
                 .map(|i| {
-                    let kw = (-within[i] / sigma[i]).exp();
-                    let kc = (-cross[i] / sigma[i]).exp();
+                    let kw = (-s.within_dist[i] / s.sigma[i]).exp();
+                    let kc = (-s.cross_dist[i] / s.sigma[i]).exp();
                     (kw / (kc + params.cross_const)).clamp(0.0, 200.0)
                 })
                 .collect()
@@ -444,7 +532,7 @@ pub fn compute_wnn(
         println!("WNN: modality weights in {:.2?}", t_phase1.elapsed());
     }
 
-    // ---- Phase 2: WNN graph construction ----
+    // phase 2: WNN graph construction
     let t_phase2 = Instant::now();
     let kernel_power = params.kernel_power;
 
@@ -466,10 +554,10 @@ pub fn compute_wnn(
             let row_i_0 = row_to_vec(modalities[0].embedding, i);
             let row_i_1 = row_to_vec(modalities[1].embedding, i);
 
-            let nearest_0 = per_modality[0].0[i];
-            let nearest_1 = per_modality[1].0[i];
-            let sigma_0 = per_modality[0].3[i];
-            let sigma_1 = per_modality[1].3[i];
+            let nearest_0 = per_modality[0].nearest[i];
+            let nearest_1 = per_modality[1].nearest[i];
+            let sigma_0 = per_modality[0].sigma[i];
+            let sigma_1 = per_modality[1].sigma[i];
             let w0 = weights[0][i];
             let w1 = weights[1][i];
 
@@ -512,9 +600,314 @@ pub fn compute_wnn(
 
     let (wnn_indices, wnn_distances): (Vec<_>, Vec<_>) = wnn.into_iter().unzip();
 
-    WnnResult {
+    Ok(WnnResult {
         wnn_indices,
         wnn_distances,
         modality_weights: weights,
+    })
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use faer::Mat;
+
+    const EPS: f32 = 1e-5;
+
+    fn approx_eq(a: f32, b: f32, eps: f32) -> bool {
+        (a - b).abs() < eps
+    }
+
+    #[test]
+    fn parse_sigma_method_known_and_unknown() {
+        assert!(matches!(
+            parse_sigma_method("snn"),
+            Some(SigmaMethod::SnnFarthest)
+        ));
+        assert!(matches!(
+            parse_sigma_method("SNN"),
+            Some(SigmaMethod::SnnFarthest)
+        ));
+        assert!(matches!(
+            parse_sigma_method("sigma"),
+            Some(SigmaMethod::SigmaIdx)
+        ));
+        assert!(parse_sigma_method("nope").is_none());
+    }
+
+    #[test]
+    fn row_to_vec_copies_correct_values() {
+        // mat[i, j] = i * 10 + j
+        let mat = Mat::from_fn(3, 4, |i, j| (i * 10 + j) as f32);
+        let row1 = row_to_vec(mat.as_ref(), 1);
+        assert_eq!(row1, vec![10.0, 11.0, 12.0, 13.0]);
+        let row2 = row_to_vec(mat.as_ref(), 2);
+        assert_eq!(row2, vec![20.0, 21.0, 22.0, 23.0]);
+    }
+
+    #[test]
+    fn mean_of_rows_known_centroid() {
+        // rows: [0, 0, 0], [2, 4, 6], [4, 8, 12]
+        let mat = Mat::from_fn(3, 3, |i, j| (i * (j + 1) * 2) as f32);
+        let mean_all = mean_of_rows(mat.as_ref(), &[0, 1, 2]);
+        // column means: 0+2+4=6/3=2, 0+4+8=12/3=4, 0+6+12=18/3=6
+        assert_eq!(mean_all, vec![2.0, 4.0, 6.0]);
+
+        // subset
+        let mean_sub = mean_of_rows(mat.as_ref(), &[1, 2]);
+        assert_eq!(mean_sub, vec![3.0, 6.0, 9.0]);
+    }
+
+    #[test]
+    fn euclid_known_distance() {
+        let a = [3.0, 4.0];
+        let b = [0.0, 0.0];
+        // |(3,4)| = 5
+        assert!(approx_eq(euclid(&a, &b), 5.0, EPS));
+
+        let c = [1.0, 2.0, 3.0];
+        let d = [1.0, 2.0, 3.0];
+        assert!(approx_eq(euclid(&c, &d), 0.0, EPS));
+    }
+
+    ///////////////////////////
+    // SNN bandwidth helpers //
+    ///////////////////////////
+
+    /// Build a tight 4-cell, 2D fixture where the kNN structure is obvious.
+    /// Layout: cells 0,1,2 cluster near origin; cell 3 sits far away.
+    /// k=2 nearest non-self for each cell.
+    fn small_fixture() -> (Mat<f32>, Vec<Vec<usize>>, Vec<Vec<f32>>) {
+        let coords = [[0.0_f32, 0.0], [0.1, 0.0], [0.0, 0.1], [10.0, 10.0]];
+        let mat = Mat::from_fn(4, 2, |i, j| coords[i][j]);
+
+        // hand-rolled kNN (self removed, k=2 -> 2 entries per cell)
+        // distances from each cell to all others:
+        //   0 -> 1: 0.1,   0 -> 2: 0.1,   0 -> 3: ~14.14
+        //   1 -> 0: 0.1,   1 -> 2: ~0.1414, 1 -> 3: ~14.14
+        //   2 -> 0: 0.1,   2 -> 1: ~0.1414, 2 -> 3: ~14.14
+        //   3 -> 0: ~14.14, 3 -> 1: ~14.14, 3 -> 2: ~14.14
+        let knn_indices = vec![vec![1, 2], vec![0, 2], vec![0, 1], vec![0, 1]];
+        let d_diag = (0.01_f32 + 0.01).sqrt(); // ~0.1414
+        let d_far = (100.0_f32 + 100.0).sqrt(); // ~14.14
+        let knn_distances = vec![
+            vec![0.1, 0.1],
+            vec![0.1, d_diag],
+            vec![0.1, d_diag],
+            vec![d_far, d_far],
+        ];
+        (mat, knn_indices, knn_distances)
+    }
+
+    #[test]
+    fn sigma_from_snn_floors_when_empty() {
+        // empty SNN graph -> floor
+        let (mat, _, _) = small_fixture();
+        let empty_csr = CompressedSparseData2 {
+            data: vec![],
+            indices: vec![],
+            indptr: vec![0; 5],
+            cs_type: CompressedSparseFormat::Csr,
+            data_2: None,
+            shape: (4, 4),
+        };
+        let snn = SparseGraph::new(4, empty_csr, false);
+        let s = sigma_from_snn(&snn, mat.as_ref(), 0, 0.1, 2, 1.0, 1e-8);
+        assert!(approx_eq(s, 1e-8, EPS));
+    }
+
+    #[test]
+    fn sigma_from_snn_known_value() {
+        // Build a tiny SNN by hand: cell 0 connects to cells 1, 2, 3 with
+        // weights 0.5, 0.5, 0.1. With k_far = 2, the smallest-weight pick is
+        // cell 3 (w=0.1); ties at the 2nd smallest are 0.5 each, so cells 1
+        // AND 2 also enter the selection (Seurat tie behaviour). Three cells
+        // selected: 3, 1, 2. nearest = 0.1 (cell 0 is at origin).
+        // distances in embedding:
+        //   d(0, 3) = sqrt(200) ~14.1421
+        //   d(0, 1) = 0.1
+        //   d(0, 2) = 0.1
+        // sigma = mean(max(0, d - nearest)) * sd_scale
+        //   = mean(14.1421 - 0.1, 0, 0) * 1
+        //   = mean(14.0421, 0, 0) = 4.6807
+        let (mat, _, _) = small_fixture();
+        let csr = CompressedSparseData2 {
+            data: vec![0.5, 0.5, 0.1],
+            indices: vec![1, 2, 3],
+            indptr: vec![0, 3, 3, 3, 3],
+            cs_type: CompressedSparseFormat::Csr,
+            data_2: None,
+            shape: (4, 4),
+        };
+        let snn = SparseGraph::new(4, csr, false);
+        let s = sigma_from_snn(&snn, mat.as_ref(), 0, 0.1, 2, 1.0, 1e-8);
+        let expected = (14.0421 + 0.0 + 0.0) / 3.0;
+        assert!(
+            approx_eq(s, expected, 1e-2),
+            "expected ~{expected}, got {s}"
+        );
+    }
+
+    #[test]
+    fn build_snn_for_sigma_full_vs_limited_density() {
+        // tiny dataset: full SNN should never have fewer edges than limited
+        let (_, knn, _) = small_fixture();
+        let snn_full = build_snn_for_sigma(&knn, 2, SnnType::FullConnection, 4, false);
+        let snn_lim = build_snn_for_sigma(&knn, 2, SnnType::LimitedConnection, 4, false);
+
+        let total_degree = |g: &SparseGraph<f32>| -> usize {
+            (0..g.get_node_number()).map(|i| g.get_node_degree(i)).sum()
+        };
+
+        assert!(total_degree(&snn_full) >= total_degree(&snn_lim));
+    }
+
+    //////////////////////
+    // end-to-end tests //
+    //////////////////////
+
+    /// Two modalities = identical embeddings on the small fixture.
+    /// Expected: modality weights ~0.5/0.5 per cell because within and cross
+    /// imputes are identical, so within_dist == cross_dist and the score
+    /// ratio collapses to 1 in both modalities -> equal softmax outputs.
+    #[test]
+    fn compute_wnn_identical_modalities_balanced_weights() {
+        let (mat, knn, dist) = small_fixture();
+        let mod_a = ModalityInput::new(mat.as_ref(), &knn, &dist);
+        let mod_b = ModalityInput::new(mat.as_ref(), &knn, &dist);
+
+        let params = WnnParams {
+            k_nn: 2,
+            knn_range: 2,
+            sigma_method: SigmaMethod::SigmaIdx,
+            sigma_idx: 1,
+            s_nn: 2,
+            snn_type: SnnType::FullConnection,
+            sd_scale: 1.0,
+            kernel_power: 1.0,
+            cross_const: 1e-4,
+            sigma_floor: 1e-8,
+        };
+
+        let res = compute_wnn([mod_a, mod_b], &params, false)
+            .expect("WNN failed on identical modality fixture");
+
+        // shape checks
+        assert_eq!(res.wnn_indices.len(), 4);
+        assert_eq!(res.wnn_distances.len(), 4);
+        assert_eq!(res.modality_weights.len(), 2);
+        assert_eq!(res.modality_weights[0].len(), 4);
+        assert_eq!(res.modality_weights[1].len(), 4);
+
+        for i in 0..4 {
+            assert_eq!(res.wnn_indices[i].len(), params.k_nn);
+            assert_eq!(res.wnn_distances[i].len(), params.k_nn);
+        }
+
+        // balanced weights when modalities are identical
+        for i in 0..4 {
+            let w0 = res.modality_weights[0][i];
+            let w1 = res.modality_weights[1][i];
+            assert!(approx_eq(w0, 0.5, 1e-4), "cell {i}: w0={w0}, expected ~0.5");
+            assert!(approx_eq(w1, 0.5, 1e-4));
+            assert!(approx_eq(w0 + w1, 1.0, 1e-4));
+        }
+
+        // distances in [0, 1] range (pseudo-distance = sqrt((1-aff)/2))
+        for cell_dists in &res.wnn_distances {
+            for &d in cell_dists {
+                assert!(
+                    (0.0_f32..1.0_f32).contains(&d),
+                    "distance out of [0, 1]: {d}"
+                );
+            }
+        }
+    }
+
+    /// Modality weights always sum to 1 per cell (softmax property).
+    #[test]
+    fn compute_wnn_modality_weights_sum_to_one() {
+        let (mat, knn, dist) = small_fixture();
+
+        // second modality: rotate coords to give a different but valid
+        // embedding (keeps the same kNN layout for simplicity)
+        let mat_b = Mat::from_fn(4, 2, |i, j| {
+            let v = mat[(i, j)];
+            // swap columns
+            if j == 0 {
+                mat[(i, 1)]
+            } else {
+                v - mat[(i, 0)] + mat[(i, 1)]
+            }
+        });
+
+        let mod_a = ModalityInput::new(mat.as_ref(), &knn, &dist);
+        let mod_b = ModalityInput::new(mat_b.as_ref(), &knn, &dist);
+
+        let params = WnnParams {
+            k_nn: 2,
+            knn_range: 2,
+            sigma_method: SigmaMethod::SigmaIdx,
+            sigma_idx: 1,
+            s_nn: 2,
+            ..Default::default()
+        };
+
+        let res = compute_wnn([mod_a, mod_b], &params, false)
+            .expect("WNN failed on rotated modality fixture");
+
+        for i in 0..4 {
+            let s = res.modality_weights[0][i] + res.modality_weights[1][i];
+            assert!(
+                approx_eq(s, 1.0, 1e-4),
+                "cell {i} weights do not sum to 1: {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn compute_wnn_errors_on_cell_count_mismatch() {
+        let (mat_a, knn, dist) = small_fixture();
+        let mat_b = Mat::from_fn(3, 2, |_, _| 0.0_f32); // different n_cells
+
+        // knn and dist are size 4 but mat_b is size 3
+        let mod_a = ModalityInput::new(mat_a.as_ref(), &knn, &dist);
+        let mod_b = ModalityInput::new(mat_b.as_ref(), &knn, &dist);
+
+        let params = WnnParams {
+            k_nn: 2,
+            knn_range: 2,
+            sigma_idx: 1,
+            s_nn: 2,
+            ..Default::default()
+        };
+
+        let res = compute_wnn([mod_a, mod_b], &params, false);
+        assert!(matches!(
+            res,
+            Err(BixverseErrors::WNNModalitySampleMismatch)
+        ));
+    }
+
+    #[test]
+    fn compute_wnn_errors_on_bad_k_nn() {
+        let (mat, knn, dist) = small_fixture();
+        let mod_a = ModalityInput::new(mat.as_ref(), &knn, &dist);
+        let mod_b = ModalityInput::new(mat.as_ref(), &knn, &dist);
+
+        let params = WnnParams {
+            k_nn: 10, // larger than knn_range
+            knn_range: 2,
+            sigma_idx: 1,
+            s_nn: 2,
+            ..Default::default()
+        };
+
+        let res = compute_wnn([mod_a, mod_b], &params, false);
+        assert!(matches!(res, Err(BixverseErrors::WNNKnnLargerThanKnnRange)));
     }
 }

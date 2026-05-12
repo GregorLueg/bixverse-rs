@@ -273,4 +273,64 @@ pub enum BixverseErrors {
     #[cfg(feature = "single-cell")]
     #[error("MELD: Embedding rows unequals samples")]
     MELDEmbeddingUnequalsSamples,
+
+    /// Error if the modalities do not have the same number of cells
+    #[cfg(feature = "multi-modal")]
+    #[error("WNN: Both modalities need to have the same cell numbers.")]
+    WNNModalitySampleMismatch,
+
+    /// Error if k_nn > knn_range
+    #[cfg(feature = "multi-modal")]
+    #[error("WNN: k_nn must be <= knn_range")]
+    WNNKnnLargerThanKnnRange,
+
+    /// Error if sigma_idx >= knn_range
+    #[cfg(feature = "multi-modal")]
+    #[error("WNN: sigma_idx must be < knn_range")]
+    WNNSigmaIdxOutOfRange,
+
+    /// Error if s_nn > knn_range
+    #[cfg(feature = "multi-modal")]
+    #[error("WNN: s_nn must be <= knn_range")]
+    WNNSnnLargerThanKnnRange,
+
+    /// Error if a modality's kNN row count does not match n_cells
+    #[cfg(feature = "multi-modal")]
+    #[error("WNN: modality {modality} kNN row count {found} does not match n_cells {expected}")]
+    WNNKnnRowCountMismatch {
+        /// 0 or 1
+        modality: usize,
+        /// Expected count
+        expected: usize,
+        /// Found count
+        found: usize,
+    },
+
+    /// Error if a modality's kNN distance row count does not match n_cells
+    #[cfg(feature = "multi-modal")]
+    #[error(
+        "WNN: modality {modality} kNN distance row count {found} does not match n_cells {expected}"
+    )]
+    WNNKnnDistRowCountMismatch {
+        /// 0 or 1
+        modality: usize,
+        /// Expected count
+        expected: usize,
+        /// Found count
+        found: usize,
+    },
+
+    /// Error if a modality has fewer than knn_range neighbours per cell
+    #[cfg(feature = "multi-modal")]
+    #[error(
+        "WNN: modality {modality} needs at least {expected} neighbours per cell, found {found}"
+    )]
+    WNNInsufficientNeighbours {
+        /// 0 or 1
+        modality: usize,
+        /// knn_range
+        expected: usize,
+        /// Actual neighbour count in row 0
+        found: usize,
+    },
 }
