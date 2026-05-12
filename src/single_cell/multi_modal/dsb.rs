@@ -119,7 +119,7 @@ pub struct DsbResult {
 /// DSB parameters.
 #[derive(Clone, Debug)]
 pub struct DsbParams {
-    /// Run Step II (cell-to-cell technical noise removal).
+    /// Run second step (cell-to-cell technical noise removal).
     pub denoise_counts: bool,
     /// Include isotype controls in the noise matrix.
     pub use_isotype_controls: bool,
@@ -128,7 +128,7 @@ pub struct DsbParams {
     /// Pseudocount added before log transform. DSB recommends 10 for the
     /// EmptyDroplets variant and 1 for ModelNegative.
     pub pseudocount: f64,
-    /// k-means iterations for Step II per-cell background estimation.
+    /// k-means iterations for second step per-cell background estimation.
     pub kmeans_iters: usize,
     /// Optional quantile clipping per protein column: (low, high), both in
     /// [0, 1]. None disables clipping.
