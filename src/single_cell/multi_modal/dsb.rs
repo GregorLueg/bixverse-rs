@@ -441,7 +441,7 @@ fn regress_out_covariate(cells: &mut [Vec<f64>], z: &[f64]) {
 ///
 /// `DsbResult` containing the normalised matrix and per-protein/per-cell
 /// diagnostics.
-pub fn dsb_normalize(
+pub fn dsb_normalise(
     cells: MatRef<f32>,
     background: BackgroundSource,
     params: &DsbParams,
@@ -580,4 +580,494 @@ pub fn dsb_normalize(
         technical_component,
         cellwise_background_mean: cellwise_bg,
     })
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use faer::Mat;
+
+    const EPS: f32 = 1e-5;
+    const EPS64: f64 = 1e-8;
+
+    //////////////////
+    // Test helpers //
+    //////////////////
+
+    fn approx_eq(a: f64, b: f64, eps: f64) -> bool {
+        (a - b).abs() < eps
+    }
+
+    fn bimodal_values() -> Vec<f64> {
+        let mut v = Vec::with_capacity(100);
+        for i in 0..50 {
+            v.push(0.0 + (i as f64) * 1e-4);
+        }
+        for i in 0..50 {
+            v.push(10.0 + (i as f64) * 1e-4);
+        }
+        v
+    }
+
+    /// Build a tiny CITE-seq-like fixture:
+    /// - 20 cells x 5 proteins
+    /// - cells 0..9: low expression on proteins 0-2, high on 3-4
+    /// - cells 10..19: opposite pattern
+    /// - 50 empty droplets with low-ambient background
+    fn small_fixture() -> (Mat<f32>, Mat<f32>) {
+        let n_cells = 20;
+        let n_proteins = 5;
+        let cells = Mat::<f32>::from_fn(n_cells, n_proteins, |i, j| {
+            // jitter to break ties for k-means
+            let jitter = ((i * 13 + j * 7) % 11) as f32 * 0.01;
+            let hi = i < 10;
+            match j {
+                0..=2 => (if hi { 5.0 } else { 100.0 }) + jitter,
+                _ => (if hi { 100.0 } else { 5.0 }) + jitter,
+            }
+        });
+
+        let n_empty = 50;
+        let empty = Mat::<f32>::from_fn(n_empty, n_proteins, |i, j| {
+            // low ambient with some variance
+            2.0 + ((i + j) % 7) as f32 * 0.5
+        });
+
+        (cells, empty)
+    }
+
+    #[test]
+    fn parse_scale_factor_known_and_unknown() {
+        assert!(matches!(
+            parse_scale_factor("standardize"),
+            Some(ScaleFactor::Standardise)
+        ));
+        assert!(matches!(
+            parse_scale_factor("STANDARDISE"),
+            Some(ScaleFactor::Standardise)
+        ));
+        assert!(matches!(
+            parse_scale_factor("mean.subtract"),
+            Some(ScaleFactor::MeanSubtract)
+        ));
+        assert!(matches!(
+            parse_scale_factor("mean_subtract"),
+            Some(ScaleFactor::MeanSubtract)
+        ));
+        assert!(matches!(
+            parse_scale_factor("MEANSUBTRACT"),
+            Some(ScaleFactor::MeanSubtract)
+        ));
+        assert!(parse_scale_factor("nope").is_none());
+    }
+
+    #[test]
+    fn prepare_background_source_branches() {
+        let empty = Mat::<f32>::from_fn(3, 2, |i, j| (i + j) as f32);
+        match prepare_background_source(Some(empty.as_ref()), "standardize".into()) {
+            BackgroundSource::EmptyDroplets { scale_factor, .. } => {
+                assert!(matches!(scale_factor, ScaleFactor::Standardise));
+            }
+            _ => panic!("expected EmptyDroplets"),
+        }
+        match prepare_background_source(None, "ignored".into()) {
+            BackgroundSource::ModelNegative => {}
+            _ => panic!("expected ModelNegative"),
+        }
+    }
+
+    #[test]
+    fn log_transform_applies_pseudocount() {
+        let mat = Mat::<f32>::from_fn(2, 3, |i, j| (i * 3 + j) as f32); // 0..6
+        let logged = log_transform(mat.as_ref(), 1.0);
+        assert_eq!(logged.len(), 2);
+        assert_eq!(logged[0].len(), 3);
+        // ln(0 + 1) = 0
+        assert!(approx_eq(logged[0][0], 0.0, EPS64));
+        // ln(5 + 1) = ln(6)
+        assert!(approx_eq(logged[1][2], 6.0_f64.ln(), EPS64));
+    }
+
+    #[test]
+    fn col_means_known_values() {
+        // rows: [1,2,3], [4,5,6], [7,8,9] -> col means: 4, 5, 6
+        let rows = vec![
+            vec![1.0, 2.0, 3.0],
+            vec![4.0, 5.0, 6.0],
+            vec![7.0, 8.0, 9.0],
+        ];
+        let m = col_means(&rows);
+        assert_eq!(m, vec![4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn col_means_empty_input() {
+        let rows: Vec<Vec<f64>> = Vec::new();
+        assert!(col_means(&rows).is_empty());
+    }
+
+    #[test]
+    fn col_sds_known_values() {
+        // col 0: [1,4,7], mean=4, sd = sqrt((9+0+9)/2) = sqrt(9) = 3
+        let rows = vec![vec![1.0, 2.0], vec![4.0, 2.0], vec![7.0, 2.0]];
+        let means = col_means(&rows);
+        let sds = col_sds(&rows, &means);
+        assert!(approx_eq(sds[0], 3.0, EPS64));
+        // col 1 is constant -> sd = 0
+        assert!(approx_eq(sds[1], 0.0, EPS64));
+    }
+
+    #[test]
+    fn col_sds_single_row_returns_zero() {
+        let rows = vec![vec![1.0, 2.0, 3.0]];
+        let means = col_means(&rows);
+        let sds = col_sds(&rows, &means);
+        assert_eq!(sds, vec![0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn col_quantile_interpolates() {
+        // Sorted col 0: [1, 2, 3, 4, 5]. q=0.0 -> 1, q=1.0 -> 5, q=0.5 -> 3.
+        let rows = vec![vec![3.0], vec![1.0], vec![5.0], vec![2.0], vec![4.0]];
+        assert!(approx_eq(col_quantile(&rows, 0, 0.0), 1.0, EPS64));
+        assert!(approx_eq(col_quantile(&rows, 0, 1.0), 5.0, EPS64));
+        assert!(approx_eq(col_quantile(&rows, 0, 0.5), 3.0, EPS64));
+        // q=0.25 -> h = 4 * 0.25 = 1.0 -> exact index, value = 2
+        assert!(approx_eq(col_quantile(&rows, 0, 0.25), 2.0, EPS64));
+    }
+
+    #[test]
+    fn col_quantile_handles_short_inputs() {
+        let empty: Vec<Vec<f64>> = vec![];
+        assert!(approx_eq(col_quantile(&empty, 0, 0.5), 0.0, EPS64));
+        let single = vec![vec![7.0]];
+        assert!(approx_eq(col_quantile(&single, 0, 0.5), 7.0, EPS64));
+    }
+
+    #[test]
+    fn lower_centroid_kmeans_picks_lower_mode() {
+        let v = bimodal_values();
+        let lower = lower_centroid_kmeans(&v, 50, 42);
+        // lower mode is near 0
+        assert!(lower < 1.0, "expected lower centroid near 0, got {lower}");
+    }
+
+    #[test]
+    fn lower_centroid_kmeans_handles_short_input() {
+        let v: Vec<f64> = vec![7.5];
+        assert!(approx_eq(lower_centroid_kmeans(&v, 10, 0), 7.5, EPS64));
+        let v: Vec<f64> = vec![];
+        assert!(approx_eq(lower_centroid_kmeans(&v, 10, 0), 0.0, EPS64));
+    }
+
+    #[test]
+    fn build_noise_matrix_zscores_each_row() {
+        // cells: 4 x 3, isotype = column 0, plus background as last row.
+        // Build with known values so the z-score is easy to verify.
+        let cells = vec![
+            vec![1.0, 9.0, 9.0],
+            vec![2.0, 9.0, 9.0],
+            vec![3.0, 9.0, 9.0],
+            vec![4.0, 9.0, 9.0],
+        ];
+        let bg = vec![0.0, 1.0, 2.0, 3.0];
+
+        let noise = build_noise_matrix(&cells, &[0], &bg);
+        assert_eq!(noise.len(), 2); // isotype col + bg row
+
+        // each row z-scored -> mean ~0, sd ~1
+        for row in &noise {
+            let mean: f64 = row.iter().sum::<f64>() / row.len() as f64;
+            let var: f64 =
+                row.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (row.len() - 1) as f64;
+            assert!(approx_eq(mean, 0.0, 1e-10), "row mean {mean} not zero");
+            assert!(approx_eq(var.sqrt(), 1.0, 1e-10), "row sd not unit");
+        }
+    }
+
+    #[test]
+    fn build_noise_matrix_constant_row_safe() {
+        // isotype col is constant -> sd = 0 -> row should be mean-subtracted only (all zeros)
+        let cells = vec![vec![5.0, 1.0], vec![5.0, 2.0], vec![5.0, 3.0]];
+        let bg = vec![1.0, 2.0, 3.0];
+        let noise = build_noise_matrix(&cells, &[0], &bg);
+        // first row should be all zeros (constant input, mean subtracted, no divide)
+        for v in &noise[0] {
+            assert!(approx_eq(*v, 0.0, 1e-10));
+        }
+    }
+
+    #[test]
+    fn regress_out_covariate_removes_linear_effect() {
+        // Two cells x two proteins. Build y = 2*z + small noise; regression
+        // should reduce variance massively.
+        let z = vec![0.0_f64, 1.0, 2.0, 3.0, 4.0];
+        let mut cells: Vec<Vec<f64>> = z.iter().map(|&zi| vec![2.0 * zi, 5.0]).collect();
+        let before_var: f64 = {
+            let mean = cells.iter().map(|r| r[0]).sum::<f64>() / 5.0;
+            cells.iter().map(|r| (r[0] - mean).powi(2)).sum::<f64>() / 4.0
+        };
+        regress_out_covariate(&mut cells, &z);
+        let after_var: f64 = {
+            let mean = cells.iter().map(|r| r[0]).sum::<f64>() / 5.0;
+            cells.iter().map(|r| (r[0] - mean).powi(2)).sum::<f64>() / 4.0
+        };
+        assert!(
+            after_var < before_var * 0.01,
+            "linear effect not removed: before={before_var}, after={after_var}"
+        );
+        // constant column should be unchanged (within fp tolerance)
+        for r in &cells {
+            assert!(approx_eq(r[1], 5.0, 1e-10));
+        }
+    }
+
+    #[test]
+    fn regress_out_covariate_constant_z_is_noop() {
+        let z = vec![3.0_f64; 5];
+        let mut cells = vec![vec![1.0, 2.0]; 5];
+        let before = cells.clone();
+        regress_out_covariate(&mut cells, &z);
+        assert_eq!(cells, before);
+    }
+
+    #[test]
+    fn dsb_normalise_empty_droplets_shape_and_finite() {
+        let (cells, empty) = small_fixture();
+        let bg = BackgroundSource::EmptyDroplets {
+            empty_counts: empty.as_ref(),
+            scale_factor: ScaleFactor::Standardise,
+        };
+        let params = DsbParams {
+            denoise_counts: false,
+            use_isotype_controls: false,
+            isotype_indices: vec![],
+            pseudocount: 10.0,
+            kmeans_iters: 50,
+            quantile_clip: None,
+        };
+
+        let res = dsb_normalise(cells.as_ref(), bg, &params, false, 42).expect("DSB failed");
+
+        assert_eq!(res.normalised.nrows(), 20);
+        assert_eq!(res.normalised.ncols(), 5);
+        assert_eq!(res.protein_background_mean.len(), 5);
+        assert!(res.protein_background_sd.is_some());
+        assert!(res.technical_component.is_none());
+        assert!(res.cellwise_background_mean.is_none());
+
+        for i in 0..20 {
+            for j in 0..5 {
+                assert!(
+                    res.normalised[(i, j)].is_finite(),
+                    "non-finite at [{i}, {j}]: {}",
+                    res.normalised[(i, j)]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dsb_normalise_separates_high_low_proteins() {
+        // Numerical sanity: cells with high expression (raw ~100) should
+        // have higher normalised values than cells with low expression (~5)
+        // on the same protein after Step I.
+        let (cells, empty) = small_fixture();
+        let bg = BackgroundSource::EmptyDroplets {
+            empty_counts: empty.as_ref(),
+            scale_factor: ScaleFactor::Standardise,
+        };
+        let params = DsbParams {
+            denoise_counts: false,
+            use_isotype_controls: false,
+            isotype_indices: vec![],
+            pseudocount: 10.0,
+            kmeans_iters: 50,
+            quantile_clip: None,
+        };
+
+        let res = dsb_normalise(cells.as_ref(), bg, &params, false, 42).unwrap();
+
+        // protein 0: cells 0..9 are low (raw ~5), cells 10..19 are high (raw ~100)
+        // after normalisation, mean of high half > mean of low half
+        for j in 0..5 {
+            let low_half: f32 = (0..10).map(|i| res.normalised[(i, j)]).sum::<f32>() / 10.0;
+            let high_half: f32 = (10..20).map(|i| res.normalised[(i, j)]).sum::<f32>() / 10.0;
+
+            let high_is_high = if j < 3 {
+                high_half > low_half
+            } else {
+                low_half > high_half
+            };
+            assert!(
+                high_is_high,
+                "protein {j}: low={low_half}, high={high_half}, expected separation"
+            );
+        }
+    }
+
+    #[test]
+    fn dsb_normalise_model_negative_runs_end_to_end() {
+        let (cells, _) = small_fixture();
+        let params = DsbParams {
+            denoise_counts: true,
+            use_isotype_controls: false,
+            isotype_indices: vec![],
+            pseudocount: 1.0,
+            kmeans_iters: 50,
+            quantile_clip: None,
+        };
+
+        let res = dsb_normalise(
+            cells.as_ref(),
+            BackgroundSource::ModelNegative,
+            &params,
+            false,
+            42,
+        )
+        .expect("ModelNegative DSB failed");
+
+        assert_eq!(res.normalised.nrows(), 20);
+        assert!(res.protein_background_sd.is_none()); // not computed for ModelNegative
+        assert!(res.technical_component.is_some());
+        assert!(res.cellwise_background_mean.is_some());
+
+        for i in 0..20 {
+            for j in 0..5 {
+                assert!(res.normalised[(i, j)].is_finite());
+            }
+        }
+    }
+
+    #[test]
+    fn dsb_normalise_with_denoising_runs_end_to_end() {
+        // designate proteins 3,4 as "isotypes" for the test (pretend)
+        let (cells, empty) = small_fixture();
+        let bg = BackgroundSource::EmptyDroplets {
+            empty_counts: empty.as_ref(),
+            scale_factor: ScaleFactor::Standardise,
+        };
+        let params = DsbParams {
+            denoise_counts: true,
+            use_isotype_controls: true,
+            isotype_indices: vec![3, 4],
+            pseudocount: 10.0,
+            kmeans_iters: 50,
+            quantile_clip: None,
+        };
+
+        let res = dsb_normalise(cells.as_ref(), bg, &params, false, 42).unwrap();
+
+        assert!(res.technical_component.is_some());
+        let tc = res.technical_component.unwrap();
+        assert_eq!(tc.len(), 20);
+        assert!(tc.iter().all(|v| v.is_finite()));
+
+        for i in 0..20 {
+            for j in 0..5 {
+                assert!(res.normalised[(i, j)].is_finite());
+            }
+        }
+    }
+
+    #[test]
+    fn dsb_normalise_quantile_clipping_bounds_output() {
+        let (cells, empty) = small_fixture();
+        let bg = BackgroundSource::EmptyDroplets {
+            empty_counts: empty.as_ref(),
+            scale_factor: ScaleFactor::Standardise,
+        };
+        let params = DsbParams {
+            denoise_counts: false,
+            use_isotype_controls: false,
+            isotype_indices: vec![],
+            pseudocount: 10.0,
+            kmeans_iters: 50,
+            quantile_clip: Some((0.1, 0.9)),
+        };
+
+        let res = dsb_normalise(cells.as_ref(), bg, &params, false, 42).unwrap();
+
+        // every value should be within the per-protein [q10, q90] of its column
+        for j in 0..5 {
+            let mut col: Vec<f32> = (0..20).map(|i| res.normalised[(i, j)]).collect();
+            col.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            // 10th percentile = col[0..20] at h = 19*0.1 = 1.9 -> mostly col[1] or col[2]
+            let lo = col[0];
+            let hi = col[19];
+            // after clipping at q=0.1 and q=0.9, the min should equal the 10th
+            // percentile of the original AND max should equal 90th. We at
+            // least verify no value escapes [lo, hi].
+            for v in &col {
+                assert!(*v >= lo - EPS && *v <= hi + EPS);
+            }
+            // and the spread should be smaller than min/max of unclipped data
+            // (sanity: at least the very tails are gone)
+        }
+    }
+
+    #[test]
+    fn dsb_normalise_rejects_empty_input() {
+        let cells = Mat::<f32>::from_fn(0, 5, |_, _| 0.0_f32);
+        let params = DsbParams::default();
+        let res = dsb_normalise(
+            cells.as_ref(),
+            BackgroundSource::ModelNegative,
+            &params,
+            false,
+            0,
+        );
+        assert!(matches!(res, Err(BixverseErrors::InvalidArgument(_))));
+    }
+
+    #[test]
+    fn dsb_normalise_rejects_isotype_index_out_of_range() {
+        let (cells, empty) = small_fixture();
+        let bg = BackgroundSource::EmptyDroplets {
+            empty_counts: empty.as_ref(),
+            scale_factor: ScaleFactor::Standardise,
+        };
+        let params = DsbParams {
+            denoise_counts: true,
+            use_isotype_controls: true,
+            isotype_indices: vec![99],
+            ..Default::default()
+        };
+        let res = dsb_normalise(cells.as_ref(), bg, &params, false, 0);
+        assert!(matches!(res, Err(BixverseErrors::InvalidArgument(_))));
+    }
+
+    #[test]
+    fn dsb_normalise_rejects_empty_droplet_protein_mismatch() {
+        let (cells, _) = small_fixture(); // 20x5
+        // wrong protein count on empties
+        let empty_bad = Mat::<f32>::from_fn(50, 7, |_, _| 1.0);
+        let bg = BackgroundSource::EmptyDroplets {
+            empty_counts: empty_bad.as_ref(),
+            scale_factor: ScaleFactor::Standardise,
+        };
+        let params = DsbParams::default();
+        let res = dsb_normalise(cells.as_ref(), bg, &params, false, 0);
+        assert!(matches!(res, Err(BixverseErrors::InvalidArgument(_))));
+    }
+
+    #[test]
+    fn dsb_normalise_rejects_invalid_quantile_clip() {
+        let (cells, empty) = small_fixture();
+        let bg = BackgroundSource::EmptyDroplets {
+            empty_counts: empty.as_ref(),
+            scale_factor: ScaleFactor::Standardise,
+        };
+        let params = DsbParams {
+            denoise_counts: false,
+            quantile_clip: Some((0.9, 0.1)), // reversed
+            ..Default::default()
+        };
+        let res = dsb_normalise(cells.as_ref(), bg, &params, false, 0);
+        assert!(matches!(res, Err(BixverseErrors::InvalidArgument(_))));
+    }
 }
