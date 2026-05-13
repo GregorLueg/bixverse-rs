@@ -26,6 +26,8 @@ pub struct FastMnnParams {
     pub no_pcs: usize,
     /// Boolean. Shall randomised SVD be used.
     pub random_svd: bool,
+    /// Shall sparse SVD be utilised -> reduces memory pressure
+    pub sparse_svd: bool,
     /// [KnnParams] for the various approximate nearest neighbour searches
     /// in ann-search-rs
     pub knn_params: KnnParams,
@@ -666,17 +668,32 @@ pub fn fast_mnn_main(
         if verbose {
             println!("Re-computing PCA")
         }
-        let (pca, _, _, _) = pca_on_sc(
-            f_path,
-            cell_indices,
-            gene_indices,
-            params.no_pcs,
-            params.random_svd,
-            seed,
-            false,
-            verbose,
-        )?;
-        pca
+        if params.sparse_svd {
+            let (pca, _, _) = pca_on_sc_sparse(
+                f_path,
+                cell_indices,
+                gene_indices,
+                params.no_pcs,
+                params.random_svd,
+                seed,
+                verbose,
+            )?;
+
+            pca
+        } else {
+            let (pca, _, _, _) = pca_on_sc(
+                f_path,
+                cell_indices,
+                gene_indices,
+                params.no_pcs,
+                params.random_svd,
+                seed,
+                false,
+                verbose,
+            )?;
+
+            pca
+        }
     };
 
     let (mut pca_batches, original_indices) = split_pca_by_batch(&pca_all, batch_indices);

@@ -1010,13 +1010,19 @@ impl FastMnnParams {
             .unwrap_or(30) as usize;
         let random_svd = fastmnn_list
             .get("random_svd")
-            .and_then(|v| v.as_logical())
-            .map(|rb| rb.is_true())
+            .and_then(|v| v.as_bool())
             .unwrap_or(true);
+
+        let sparse_svd = fastmnn_list
+            .get("sparse_svd")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
         Ok(Self {
             ndist,
             no_pcs,
             random_svd,
+            sparse_svd,
             cos_norm,
             knn_params,
         })
