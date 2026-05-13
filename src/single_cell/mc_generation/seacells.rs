@@ -436,7 +436,8 @@ pub fn select_density_landmarks(
 /// * `knn_params` - Reference to [KnnParams] for the (approximate) nearest
 ///   neighbour searches.
 /// * `seed` - Seed for reproducibility
-/// * `verbose` - Controls verbosity
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -447,8 +448,10 @@ pub fn landmark_knn(
     k: usize,
     knn_params: &KnnParams,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> (Vec<Vec<usize>>, Vec<Vec<f32>>) {
+    let verbosity = parse_verbosity_level(verbose);
+
     let l = landmark_indices.len();
     let dim = pca.ncols();
 
@@ -457,8 +460,14 @@ pub fn landmark_knn(
     let mut params = knn_params.clone();
     params.k = k.min(l.saturating_sub(1)).max(1);
 
-    let (indices, distances) =
-        generate_knn_with_dist(landmark_mat.as_ref(), &params, true, false, seed, verbose);
+    let (indices, distances) = generate_knn_with_dist(
+        landmark_mat.as_ref(),
+        &params,
+        true,
+        false,
+        seed,
+        verbosity.detailed_verbosity(),
+    );
 
     (indices, distances.expect("distances must be present"))
 }
@@ -809,18 +818,21 @@ impl<'a> SEACells<'a> {
     /// * `pca` - PCA/SVD matrix (n_cells × n_components)
     /// * `knn_indices` - k-NN indices for each cell
     /// * `knn_distances` - k-NN distances for each cell
-    /// * `verbose` - Print progress messages
+    /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+    ///   detailed verbosity.
     pub fn construct_kernel_mat(
         &mut self,
         pca: MatRef<f32>,
         knn_indices: &[Vec<usize>],
         knn_distances: &[Vec<f32>],
-        verbose: bool,
+        verbose: usize,
     ) {
+        let verbosity = parse_verbosity_level(verbose);
+
         let n = pca.nrows();
         let k = knn_indices[0].len();
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Computing adaptive bandwidth RBF kernel...");
         }
 
@@ -880,7 +892,7 @@ impl<'a> SEACells<'a> {
             vals.push(val);
         }
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(
                 "Built kernel with {} non-zeros",
                 vals.len().separate_with_underscores()
@@ -890,8 +902,8 @@ impl<'a> SEACells<'a> {
         let kernel = coo_to_csr(&rows, &cols, &vals, (n, n));
 
         if self.n_cells > 20000 {
-            if verbose {
-                println!("Pre-computing kernel Frobenius norm...");
+            if verbosity.detailed_verbosity() {
+                println!(" Pre-computing kernel Frobenius norm...");
             }
             let k_frob = frobenius_norm(&kernel);
             self.k_frobenius_norm_sq = Some(k_frob * k_frob);
@@ -959,8 +971,11 @@ impl<'a> SEACells<'a> {
     /// ### Params
     ///
     /// * `seed` - Random seed for reproducibility
-    /// * `verbose` - Print progress and RSS values
-    pub fn fit(&mut self, seed: usize, verbose: bool) -> Result<(), BixverseErrors> {
+    /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+    ///   detailed verbosity.
+    pub fn fit(&mut self, seed: usize, verbose: usize) -> Result<(), BixverseErrors> {
+        let verbosity = parse_verbosity_level(verbose);
+
         if self.kernel_mat.is_none() {
             return Err(BixverseErrors::SEACellsKernelMatrixMissing);
         }
@@ -977,7 +992,7 @@ impl<'a> SEACells<'a> {
         self.rss_history.push(initial_rss);
         self.convergence_threshold = Some(self.params.convergence_epsilon * initial_rss);
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Initial RSS: {:.6}", initial_rss);
             println!(
                 "Convergence threshold: {:.6}",
@@ -1006,7 +1021,7 @@ impl<'a> SEACells<'a> {
 
             let iter_duration = iter_start.elapsed();
 
-            if verbose {
+            if verbosity.normal_verbosity() {
                 println!(
                     "Iteration {}: RSS = {:.6}, Time = {:.2}s",
                     n_iter,
@@ -1019,7 +1034,7 @@ impl<'a> SEACells<'a> {
                 let rss_diff = (self.rss_history[n_iter - 1] - self.rss_history[n_iter]).abs();
                 if rss_diff < self.convergence_threshold.unwrap() && n_iter >= self.params.min_iter
                 {
-                    if verbose {
+                    if verbosity.normal_verbosity() {
                         println!("Converged after {} iterations!", n_iter);
                     }
                     converged = true;
@@ -1027,7 +1042,7 @@ impl<'a> SEACells<'a> {
             }
         }
 
-        if !converged && verbose {
+        if !converged && verbosity.normal_verbosity() {
             println!(
                 "Warning: Algorithm did not converge after {} iterations",
                 self.params.max_iter
@@ -1046,7 +1061,8 @@ impl<'a> SEACells<'a> {
     ///
     /// * `knn_indices` - k-NN indices for each cell
     /// * `knn_distances` - k-NN distances for each cell
-    /// * `verbose` - Print which method is selected
+    /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+    ///   detailed verbosity.
     /// * `squared_dist` - Are the distances squared (squared Euclidean for
     ///   example).
     /// * `seed` - Random seed for initialisation
@@ -1054,12 +1070,14 @@ impl<'a> SEACells<'a> {
         &mut self,
         knn_indices: &[Vec<usize>],
         knn_distances: &[Vec<f32>],
-        verbose: bool,
+        verbose: usize,
         squared_dist: bool,
         seed: u64,
     ) -> Result<(), BixverseErrors> {
+        let verbosity = parse_verbosity_level(verbose);
+
         if self.n_cells > self.params.greedy_threshold {
-            if verbose {
+            if verbosity.normal_verbosity() {
                 println!(
                     "Dataset large (n={}), using fast random init (threshold: {})",
                     self.n_cells.separate_with_underscores(),
@@ -1086,16 +1104,19 @@ impl<'a> SEACells<'a> {
     ///
     /// ### Params
     ///
-    /// * `verbose` - Print number of archetypes selected
+    /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+    ///   detailed verbosity.
     /// * `seed` - Random seed for reproducibility
-    fn initialise_archetypes_random(&mut self, verbose: bool, seed: u64) {
+    fn initialise_archetypes_random(&mut self, verbose: usize, seed: u64) {
+        let verbosity = parse_verbosity_level(verbose);
+
         let mut rng = StdRng::seed_from_u64(seed);
         let mut indices: Vec<usize> = (0..self.n_cells).collect();
         indices.shuffle(&mut rng);
 
         let archetypes: Vec<usize> = indices.into_iter().take(self.params.n_sea_cells).collect();
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Selected {} random archetypes", archetypes.len());
         }
 
@@ -1114,19 +1135,21 @@ impl<'a> SEACells<'a> {
     /// * `knn_distances` - k-NN distances for each cell
     /// * `squared_dist` - Are the distances squared (squared Euclidean for
     ///   example).
-    /// * `verbose` - Print selection counts
+    /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+    ///   detailed verbosity.
     /// * `seed` - Random seed for waypoint sampling
     fn initialise_archetypes_combined(
         &mut self,
         knn_indices: &[Vec<usize>],
         knn_distances: &[Vec<f32>],
         squared_dist: bool,
-        verbose: bool,
+        verbose: usize,
         seed: u64,
     ) -> Result<(), BixverseErrors> {
+        let verbosity = parse_verbosity_level(verbose);
         let k = self.params.n_sea_cells;
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Computing diffusion maps for waypoint initialisation...");
         }
 
@@ -1143,7 +1166,7 @@ impl<'a> SEACells<'a> {
         let multiscale = determine_multiscale_space(&eigenvalues, &eigenvectors, Some(10));
         let waypoint_ix = max_min_sampling(&multiscale, k, seed);
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(
                 "Selecting {} cells from waypoint initialisation.",
                 waypoint_ix.len()
@@ -1152,12 +1175,12 @@ impl<'a> SEACells<'a> {
 
         let from_greedy = k.saturating_sub(waypoint_ix.len());
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Initialising residual matrix using greedy column selection");
         }
         let greedy_ix = self.get_greedy_centres(from_greedy + 10);
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(
                 "Selecting {} cells from greedy initialisation.",
                 from_greedy
@@ -1195,7 +1218,8 @@ impl<'a> SEACells<'a> {
     /// * `squared_dist` - Are the distances squared (squared Euclidean for
     ///   example).
     /// * `n_landmarks` - Number of landmarks (typically 5-10× n_sea_cells)
-    /// * `verbose` - Print progress messages
+    /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+    ///   detailed verbosity.
     /// * `seed` - Random seed for reproducibility
     #[allow(clippy::too_many_arguments)]
     pub fn initialise_archetypes_landmark(
@@ -1205,19 +1229,21 @@ impl<'a> SEACells<'a> {
         knn_distances: &[Vec<f32>],
         squared_dist: bool,
         n_landmarks: usize,
-        verbose: bool,
+        verbose: usize,
         seed: u64,
     ) -> Result<(), BixverseErrors> {
+        let verbosity = parse_verbosity_level(verbose);
+
         let k = self.params.n_sea_cells;
         let n = self.n_cells;
         let knn_k = self.params.knn_params.k;
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Building diffusion kernel for landmark selection...");
         }
         let kernel = compute_diffusion_kernel(knn_indices, knn_distances, knn_k, squared_dist);
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(
                 "Selecting {} density-weighted landmarks...",
                 n_landmarks.separate_with_underscores()
@@ -1227,7 +1253,7 @@ impl<'a> SEACells<'a> {
         let l = landmark_indices.len();
 
         let k_ll = knn_k.min(l.saturating_sub(1)).max(3);
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Building landmark-landmark diffusion operator (L={})...", l);
         }
         let (ll_idx, ll_dist) = landmark_knn(
@@ -1249,7 +1275,7 @@ impl<'a> SEACells<'a> {
         let n_components = landmark_multiscale[0].len();
         let used_lambdas: Vec<f32> = (1..=n_components).map(|i| evals[i]).collect();
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(
                 "Building data-to-landmark transitions ({} × {})...",
                 n.separate_with_underscores(),
@@ -1258,13 +1284,13 @@ impl<'a> SEACells<'a> {
         }
         let p_nl = build_data_to_landmark_transitions(pca, &landmark_indices, knn_k, 1.0, 1e-4);
 
-        if verbose {
+        if verbosity.detailed_verbosity() {
             println!("Nystroem-extending multiscale embedding to full data...");
         }
         let multiscale = nystrom_extend(&p_nl, &landmark_multiscale, &used_lambdas);
 
         let waypoint_ix = max_min_sampling(&multiscale, k, seed);
-        if verbose {
+        if verbosity.detailed_verbosity() {
             println!("Selected {} cells from waypoint init", waypoint_ix.len());
         }
 
@@ -1277,7 +1303,7 @@ impl<'a> SEACells<'a> {
 
         // Pad with random cells if waypoint dedup fell short
         if unique_ix.len() < k {
-            if verbose {
+            if verbosity.normal_verbosity() {
                 println!(
                     "Padding {} cells with random selection",
                     k - unique_ix.len()
@@ -1467,14 +1493,17 @@ impl<'a> SEACells<'a> {
     ///
     /// ### Params
     ///
-    /// * `verbose` - Print initialisation message
+    /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+    ///   detailed verbosity.
     /// * `seed` - Random seed for A matrix initialisation
-    fn initialise_matrices(&mut self, verbose: bool, seed: u64) -> Result<(), BixverseErrors> {
+    fn initialise_matrices(&mut self, verbose: usize, seed: u64) -> Result<(), BixverseErrors> {
+        let verbosity = parse_verbosity_level(verbose);
+
         let archetypes = self.archetypes.as_ref().unwrap();
         let k = archetypes.len();
         let n = self.n_cells;
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Initialising A and B matrices...");
         }
 
@@ -1543,7 +1572,8 @@ impl<'a> SEACells<'a> {
     ///
     /// * `b` - Current archetype matrix
     /// * `a_prev` - Previous assignment matrix
-    /// * `verbose` - Print Frank-Wolfe iteration progress
+    /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+    ///   detailed verbosity.
     ///
     /// ### Returns
     ///
@@ -1552,8 +1582,10 @@ impl<'a> SEACells<'a> {
         &self,
         b: &CompressedSparseData2<f32>,
         a_prev: &CompressedSparseData2<f32>,
-        verbose: bool,
+        verbose: usize,
     ) -> Result<CompressedSparseData2<f32>, BixverseErrors> {
+        let verbosity = parse_verbosity_level(verbose);
+
         let k2_b = self.k_squared_matmul(b)?;
 
         let t2 = k2_b.transpose_and_convert();
@@ -1609,7 +1641,7 @@ impl<'a> SEACells<'a> {
                 prune_and_renormalise(&mut a, self.params.pruning_threshold);
             }
 
-            if verbose && (t + 1) % 10 == 0 {
+            if verbosity.detailed_verbosity() && (t + 1) % 10 == 0 {
                 println!(
                     "  A matrix Frank-Wolfe iteration: {} / {}",
                     t + 1,
@@ -1648,7 +1680,8 @@ impl<'a> SEACells<'a> {
     ///
     /// * `a` - Current assignment matrix
     /// * `b_prev` - Previous archetype matrix
-    /// * `verbose` - Print Frank-Wolfe iteration progress
+    /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+    ///   detailed verbosity.
     ///
     /// ### Returns
     ///
@@ -1657,8 +1690,10 @@ impl<'a> SEACells<'a> {
         &self,
         a: &CompressedSparseData2<f32>,
         b_prev: &CompressedSparseData2<f32>,
-        verbose: bool,
+        verbose: usize,
     ) -> Result<CompressedSparseData2<f32>, BixverseErrors> {
+        let verbosity = parse_verbosity_level(verbose);
+
         let a_t = a.transpose_and_convert();
         let t1 = csr_matmul_csr(a, &a_t);
         let t2 = self.k_squared_matmul(&a_t)?;
@@ -1741,7 +1776,7 @@ impl<'a> SEACells<'a> {
                 prune_and_renormalise(&mut b, self.params.pruning_threshold);
             }
 
-            if verbose && (t + 1) % 10 == 0 {
+            if verbosity.detailed_verbosity() && (t + 1) % 10 == 0 {
                 println!(
                     "  B matrix Frank-Wolfe iteration: {} / {}",
                     t + 1,
@@ -1750,7 +1785,7 @@ impl<'a> SEACells<'a> {
             }
 
             if fw_gap / initial_gap < FW_REL_TOL && t >= MIN_FW_ITERS {
-                if verbose {
+                if verbosity.detailed_verbosity() {
                     println!(
                         "  B matrix FW converged at iter {} (gap: {:.4e})",
                         t + 1,

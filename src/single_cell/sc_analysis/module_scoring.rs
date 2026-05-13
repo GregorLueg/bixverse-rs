@@ -339,7 +339,8 @@ fn calculate_module_scores_streaming(
 /// * `ctrl` - Number of control genes to use.
 /// * `streaming` - Shall streaming be used. Useful for larger data sets.
 /// * `seed` - Seed for reproducibility.
-/// * `verbose` - Controls verbosity of the function.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+///   detailed verbosity.
 ///
 /// ### Returns
 ///
@@ -355,13 +356,15 @@ pub fn calculate_module_scores_main(
     ctrl: usize,
     streaming: bool,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<Vec<Vec<f32>>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let cell_set: IndexSet<u32> = cells_to_use.iter().map(|&x| x as u32).collect();
 
     let start_total = Instant::now();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("Calculating the average expression across the cells.")
     }
 
@@ -371,7 +374,7 @@ pub fn calculate_module_scores_main(
 
     let end_evg_exp = start_avg_exp.elapsed();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Finished the calculation of the avg gene expression in {:.2?}",
             end_evg_exp
@@ -391,7 +394,7 @@ pub fn calculate_module_scores_main(
             &gene_bins,
             ctrl,
             &seed,
-            verbose,
+            verbosity.detailed_verbosity(),
         )
     } else {
         calculate_module_scores(
@@ -407,7 +410,7 @@ pub fn calculate_module_scores_main(
     let end_modules = start_modules.elapsed();
     let end_total = start_total.elapsed();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Finished the calculation of the modules in {:.2?}",
             end_modules

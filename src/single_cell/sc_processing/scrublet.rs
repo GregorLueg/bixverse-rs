@@ -275,7 +275,8 @@ impl Scrublet {
     ///
     /// * `streaming` - Stream HVG computation to reduce memory pressure.
     /// * `seed` - Seed for reproducibility.
-    /// * `verbose` - Controls verbosity.
+    /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+    ///   detailed verbosity.
     /// * `return_combined_pca` - Whether to return the combined PCA embedding.
     /// * `return_pairs` - Whether to return the parent indices of each doublet.
     ///
@@ -286,10 +287,12 @@ impl Scrublet {
         &mut self,
         streaming: bool,
         seed: usize,
-        verbose: bool,
+        verbose: usize,
         return_combined_pca: bool,
         return_pairs: bool,
     ) -> Result<FinalScrubletRes, BixverseErrors> {
+        let verbosity = parse_verbosity_level(verbose);
+
         let hvg_opts = HvgOpts {
             method: self.params.hvg_method.clone(),
             loess_span: self.params.loess_span as f32,
@@ -306,7 +309,7 @@ impl Scrublet {
             random_svd: self.params.random_svd,
         };
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Identifying highly variable genes...");
         }
         let start_all = Instant::now();
@@ -320,7 +323,7 @@ impl Scrublet {
             verbose,
         )?;
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(
                 "Using {} highly variable genes. Done in {:.2?}",
                 hvg_genes.len(),
@@ -333,7 +336,7 @@ impl Scrublet {
         let target_size = resolve_target_size(self.params.target_size, &self.hvg_library_sizes);
 
         // Simulate doublets
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Simulating doublets...");
         }
         let start_sim = Instant::now();
@@ -352,7 +355,7 @@ impl Scrublet {
             self.params.log_transform,
         )?;
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(
                 "Simulated {} doublets. Done in {:.2?}",
                 sim_chunks.len(),
@@ -361,10 +364,9 @@ impl Scrublet {
         }
 
         // PCA + projection
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Running PCA...");
         }
-        let start_pca = Instant::now();
 
         let (combined_pca, _) = pca_and_project(
             &self.f_path_gene,
@@ -378,18 +380,14 @@ impl Scrublet {
             verbose,
         )?;
 
-        if verbose {
-            println!("Done with PCA in {:.2?}", start_pca.elapsed());
-        }
-
         // kNN
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Building kNN graph...");
         }
         let start_knn = Instant::now();
 
         let k_adj = adjusted_k(self.params.knn_params.k, self.n_cells, self.n_cells_sim);
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Using {} neighbours in the kNN generation.", k_adj);
         }
         let knn_indices = dispatch_knn(
@@ -397,15 +395,15 @@ impl Scrublet {
             k_adj,
             &self.params.knn_params,
             seed,
-            verbose,
+            verbosity.detailed_verbosity(),
         );
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Done with kNN generation in {:.2?}", start_knn.elapsed());
         }
 
         // Scoring and calling
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Calculating doublet scores...");
         }
         let start_score = Instant::now();
@@ -418,7 +416,7 @@ impl Scrublet {
             verbose,
         );
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(
                 "Done with doublet scoring and calling {:.2?}",
                 start_score.elapsed()
@@ -501,7 +499,8 @@ impl Scrublet {
     /// * `doublet_scores` - Output from `calculate_doublet_scores`.
     /// * `manual_threshold` - Optional override for the automatic threshold.
     /// * `n_bins` - Number of bins for Otsu histogram.
-    /// * `verbose` - Controls verbosity.
+    /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+    ///   detailed verbosity.
     ///
     /// ### Returns
     ///
@@ -511,11 +510,13 @@ impl Scrublet {
         doublet_scores: ScrubletDoubletScores,
         manual_threshold: Option<f32>,
         n_bins: usize,
-        verbose: bool,
+        verbose: usize,
     ) -> ScrubletResult {
+        let verbosity = parse_verbosity_level(verbose);
+
         let threshold = manual_threshold.unwrap_or_else(|| {
             let t = find_threshold_otsu(&doublet_scores.0, n_bins);
-            if verbose {
+            if verbosity.normal_verbosity() {
                 println!("Automatically set threshold at doublet score = {:.4}", t);
             }
             t
@@ -546,7 +547,7 @@ impl Scrublet {
             0.0
         };
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(
                 "Detected doublet rate = {:.1}%",
                 100.0 * detected_doublet_rate

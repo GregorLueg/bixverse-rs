@@ -195,7 +195,8 @@ fn calc_knn_weights(knn_indices: &[Vec<usize>], knn_distances: &[Vec<f32>]) -> V
 /// * `f_path` -  File path to the cell-based binary file.
 /// * `signatures` - Slice of `SignatureGenes` to calculate the scores for
 /// * `cells_to_keep` - Vector of indices with the cells to keep.
-/// * `verbose` - Controls verbosity of the function
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -204,15 +205,17 @@ pub fn calculate_vision(
     f_path: &str,
     gene_signs: &[SignatureGenes],
     cells_to_keep: &[usize],
-    verbose: bool,
+    verbose: usize,
 ) -> Result<Vec<Vec<f32>>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let start_read = Instant::now();
     let reader = ParallelSparseReader::new(f_path)?;
     let no_genes = reader.get_header().total_genes;
     let cell_chunks: Vec<CsrCellChunk> = reader.read_cells_parallel(cells_to_keep)?;
     let end_read = start_read.elapsed();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("Loaded in data: {:.2?}", end_read);
     }
 
@@ -223,7 +226,7 @@ pub fn calculate_vision(
         .collect();
     let end_signatures = start_signatures.elapsed();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("Calculated VISION scores: {:.2?}", end_signatures);
     }
 
@@ -240,7 +243,8 @@ pub fn calculate_vision(
 /// * `f_path` -  File path to the cell-based binary file.
 /// * `signatures` - Slice of `SignatureGenes` to calculate the scores for
 /// * `cells_to_keep` - Vector of indices with the cells to keep.
-/// * `verbose` - Controls verbosity of the function
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -249,9 +253,11 @@ pub fn calculate_vision_streaming(
     f_path: &str,
     gene_signs: &[SignatureGenes],
     cells_to_keep: &[usize],
-    verbose: bool,
+    verbose: usize,
 ) -> Result<Vec<Vec<f32>>, BixverseErrors> {
     const CHUNK_SIZE: usize = 50000;
+
+    let verbosity = parse_verbosity_level(verbose);
 
     let total_chunks = cells_to_keep.len().div_ceil(CHUNK_SIZE);
     let reader = ParallelSparseReader::new(f_path)?;
@@ -271,7 +277,7 @@ pub fn calculate_vision_streaming(
 
         all_results.extend(chunk_scores);
 
-        if verbose {
+        if verbosity.detailed_verbosity() {
             let elapsed = start_chunk.elapsed();
             let pct_complete = ((chunk_idx + 1) as f32 / total_chunks as f32) * 100.0;
             println!(
@@ -299,7 +305,8 @@ pub fn calculate_vision_streaming(
 ///   gene set belongs.
 /// * `knn_indices` - KNN indices from embedding (cells x k)
 /// * `knn_distances` - KNN squared distances (cells x k)
-/// * `verbose` - Print progress
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -310,13 +317,15 @@ pub fn calc_autocorr_with_clusters(
     cluster_membership: &[usize],
     knn_indices: Vec<Vec<usize>>,
     knn_distances: Vec<Vec<f32>>,
-    verbose: bool,
+    verbose: usize,
 ) -> (Vec<f64>, Vec<f64>) {
+    let verbosity = parse_verbosity_level(verbose);
+
     let start = Instant::now();
 
     let knn_weights = calc_knn_weights(&knn_indices, &knn_distances);
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("Computed KNN weights: {:.2?}", start.elapsed());
     }
 
@@ -337,7 +346,7 @@ pub fn calc_autocorr_with_clusters(
         })
         .collect();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("Calculated pathway consistency: {:.2?}", start.elapsed());
     }
 
@@ -376,7 +385,7 @@ pub fn calc_autocorr_with_clusters(
         })
         .collect();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("Calculated p-values: {:.2?}", start.elapsed());
     }
 

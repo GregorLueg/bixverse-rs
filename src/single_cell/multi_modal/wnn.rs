@@ -246,7 +246,8 @@ fn euclid(a: &[f32], b: &[f32]) -> f32 {
 /// * `knn_indices` - Per-cell KNN index lists.
 /// * `s_nn` - Number of neighbours to use for SNN construction.
 /// * `n_cells` - Total number of cells.
-/// * `verbose` - Print timing information.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -256,7 +257,7 @@ fn build_snn_for_sigma(
     s_nn: usize,
     snn_type: SnnType,
     n_cells: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> SparseGraph<f32> {
     // generate_snn_full needs column-major flat input!
     let mut flat = vec![0usize; s_nn * n_cells];
@@ -363,7 +364,8 @@ fn sigma_from_snn(
 /// * `modalities` - Array of exactly two `ModalityInput` structs, each
 ///   carrying an embedding matrix, KNN indices, and KNN distances.
 /// * `params` - Algorithm hyperparameters; see `WnnParams`.
-/// * `verbose` - Print timing information.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -372,8 +374,10 @@ fn sigma_from_snn(
 pub fn compute_wnn(
     modalities: [ModalityInput<'_>; 2],
     params: &WnnParams,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<WnnResult, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     // input checks
     let n_cells = modalities[0].embedding.nrows();
     if n_cells != modalities[1].embedding.nrows() {
@@ -437,7 +441,7 @@ pub fn compute_wnn(
                     )
                 })
                 .collect();
-            if verbose {
+            if verbosity.normal_verbosity() {
                 println!("WNN: per-modality SNN built in {:.2?}", t.elapsed());
             }
             Some(g)
@@ -528,7 +532,7 @@ pub fn compute_wnn(
         weights[1][i] = e1 / s;
     }
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("WNN: modality weights in {:.2?}", t_phase1.elapsed());
     }
 
@@ -594,7 +598,7 @@ pub fn compute_wnn(
         })
         .collect();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("WNN: graph constructed in {:.2?}", t_phase2.elapsed());
     }
 
@@ -756,8 +760,8 @@ mod tests {
     fn build_snn_for_sigma_full_vs_limited_density() {
         // tiny dataset: full SNN should never have fewer edges than limited
         let (_, knn, _) = small_fixture();
-        let snn_full = build_snn_for_sigma(&knn, 2, SnnType::FullConnection, 4, false);
-        let snn_lim = build_snn_for_sigma(&knn, 2, SnnType::LimitedConnection, 4, false);
+        let snn_full = build_snn_for_sigma(&knn, 2, SnnType::FullConnection, 4, 0);
+        let snn_lim = build_snn_for_sigma(&knn, 2, SnnType::LimitedConnection, 4, 0);
 
         let total_degree = |g: &SparseGraph<f32>| -> usize {
             (0..g.get_node_number()).map(|i| g.get_node_degree(i)).sum()
@@ -793,7 +797,7 @@ mod tests {
             sigma_floor: 1e-8,
         };
 
-        let res = compute_wnn([mod_a, mod_b], &params, false)
+        let res = compute_wnn([mod_a, mod_b], &params, 0)
             .expect("WNN failed on identical modality fixture");
 
         // shape checks
@@ -857,7 +861,7 @@ mod tests {
             ..Default::default()
         };
 
-        let res = compute_wnn([mod_a, mod_b], &params, false)
+        let res = compute_wnn([mod_a, mod_b], &params, 0)
             .expect("WNN failed on rotated modality fixture");
 
         for i in 0..4 {
@@ -886,7 +890,7 @@ mod tests {
             ..Default::default()
         };
 
-        let res = compute_wnn([mod_a, mod_b], &params, false);
+        let res = compute_wnn([mod_a, mod_b], &params, 0);
         assert!(matches!(
             res,
             Err(BixverseErrors::WNNModalitySampleMismatch)
@@ -907,7 +911,7 @@ mod tests {
             ..Default::default()
         };
 
-        let res = compute_wnn([mod_a, mod_b], &params, false);
+        let res = compute_wnn([mod_a, mod_b], &params, 0);
         assert!(matches!(res, Err(BixverseErrors::WNNKnnLargerThanKnnRange)));
     }
 }

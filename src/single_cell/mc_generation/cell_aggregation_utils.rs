@@ -208,7 +208,8 @@ pub fn parse_pseudo_bulk(s: &str) -> Option<PseudoBulk> {
 /// * `cell_indices` - Slice of indices to pseudo-bulk.
 /// * `bulk_type` - Whether to pseudo-bulk raw (sum) or normalised (average)
 ///   counts.
-/// * `verbose` - Controls verbosity of the function.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -217,8 +218,10 @@ pub fn get_pseudo_bulked_counts_dense(
     f_path: &str,
     cell_indices: &[Vec<usize>],
     bulk_type: PseudoBulk,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<Mat<f64>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let reader = ParallelSparseReader::new(f_path).unwrap();
     let n_genes = reader.get_header().total_genes;
     let n_groups = cell_indices.len();
@@ -250,7 +253,7 @@ pub fn get_pseudo_bulked_counts_dense(
             }
         }
 
-        if verbose && (group_idx + 1) % 10 == 0 {
+        if verbosity.normal_verbosity() && (group_idx + 1) % 10 == 0 {
             let elapsed = start_group.elapsed();
             let pct_complete = ((group_idx + 1) as f32 / n_groups as f32) * 100.0;
             println!(
@@ -274,7 +277,8 @@ pub fn get_pseudo_bulked_counts_dense(
 /// * `cell_indices` - Slice of indices to pseudo-bulk.
 /// * `bulk_type` - Whether to pseudo-bulk raw (sum) or normalised (average)
 ///   counts.
-/// * `verbose` - Controls verbosity of the function.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -283,8 +287,10 @@ pub fn get_pseudo_bulked_counts_sparse(
     f_path: &str,
     cell_indices: &[Vec<usize>],
     bulk_type: PseudoBulk,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<CompressedSparseData2<f64>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let reader = ParallelSparseReader::new(f_path).unwrap();
     let n_genes = reader.get_header().total_genes;
     let n_groups = cell_indices.len();
@@ -318,7 +324,7 @@ pub fn get_pseudo_bulked_counts_sparse(
             }
         }
 
-        if verbose && (group_idx + 1) % 10 == 0 {
+        if verbosity.normal_verbosity() && (group_idx + 1) % 10 == 0 {
             let elapsed = start_group.elapsed();
             let pct_complete = ((group_idx + 1) as f32 / n_groups as f32) * 100.0;
             println!(

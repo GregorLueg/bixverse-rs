@@ -435,7 +435,8 @@ fn regress_out_covariate(cells: &mut [Vec<f64>], z: &[f64]) {
 /// * `cells` - n_cells x n_proteins matrix of raw ADT counts (f32).
 /// * `background` - source for Step I background estimation.
 /// * `params` - algorithm hyperparameters.
-/// * `verbose` - print progress.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -445,9 +446,11 @@ pub fn dsb_normalise(
     cells: MatRef<f32>,
     background: BackgroundSource,
     params: &DsbParams,
-    verbose: bool,
+    verbose: usize,
     seed: usize,
 ) -> Result<DsbResult, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let n_cells = cells.nrows();
     let n_proteins = cells.ncols();
 
@@ -505,7 +508,7 @@ pub fn dsb_normalise(
             }
         }
         BackgroundSource::ModelNegative => {
-            if verbose {
+            if verbosity.normal_verbosity() {
                 println!("DSB: estimating per-protein background via k-means (no empty drops)");
             }
             // 2-component k-means per protein column, take lower mean
@@ -531,7 +534,7 @@ pub fn dsb_normalise(
     let mut cellwise_bg: Option<Vec<f64>> = None;
 
     if params.denoise_counts {
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("DSB: Step II - estimating per-cell background");
         }
         let bg = cellwise_background_means(&cell_log, params.kmeans_iters, seed);
@@ -851,7 +854,7 @@ mod tests {
             quantile_clip: None,
         };
 
-        let res = dsb_normalise(cells.as_ref(), bg, &params, false, 42).expect("DSB failed");
+        let res = dsb_normalise(cells.as_ref(), bg, &params, 0, 42).expect("DSB failed");
 
         assert_eq!(res.normalised.nrows(), 20);
         assert_eq!(res.normalised.ncols(), 5);
@@ -890,7 +893,7 @@ mod tests {
             quantile_clip: None,
         };
 
-        let res = dsb_normalise(cells.as_ref(), bg, &params, false, 42).unwrap();
+        let res = dsb_normalise(cells.as_ref(), bg, &params, 0, 42).unwrap();
 
         // protein 0: cells 0..9 are low (raw ~5), cells 10..19 are high (raw ~100)
         // after normalisation, mean of high half > mean of low half
@@ -926,7 +929,7 @@ mod tests {
             cells.as_ref(),
             BackgroundSource::ModelNegative,
             &params,
-            false,
+            0,
             42,
         )
         .expect("ModelNegative DSB failed");
@@ -960,7 +963,7 @@ mod tests {
             quantile_clip: None,
         };
 
-        let res = dsb_normalise(cells.as_ref(), bg, &params, false, 42).unwrap();
+        let res = dsb_normalise(cells.as_ref(), bg, &params, 0, 42).unwrap();
 
         assert!(res.technical_component.is_some());
         let tc = res.technical_component.unwrap();
@@ -990,7 +993,7 @@ mod tests {
             quantile_clip: Some((0.1, 0.9)),
         };
 
-        let res = dsb_normalise(cells.as_ref(), bg, &params, false, 42).unwrap();
+        let res = dsb_normalise(cells.as_ref(), bg, &params, 0, 42).unwrap();
 
         // every value should be within the per-protein [q10, q90] of its column
         for j in 0..5 {
@@ -1018,7 +1021,7 @@ mod tests {
             cells.as_ref(),
             BackgroundSource::ModelNegative,
             &params,
-            false,
+            0,
             0,
         );
         assert!(matches!(res, Err(BixverseErrors::InvalidArgument(_))));
@@ -1037,7 +1040,7 @@ mod tests {
             isotype_indices: vec![99],
             ..Default::default()
         };
-        let res = dsb_normalise(cells.as_ref(), bg, &params, false, 0);
+        let res = dsb_normalise(cells.as_ref(), bg, &params, 0, 0);
         assert!(matches!(res, Err(BixverseErrors::InvalidArgument(_))));
     }
 
@@ -1051,7 +1054,7 @@ mod tests {
             scale_factor: ScaleFactor::Standardise,
         };
         let params = DsbParams::default();
-        let res = dsb_normalise(cells.as_ref(), bg, &params, false, 0);
+        let res = dsb_normalise(cells.as_ref(), bg, &params, 0, 0);
         assert!(matches!(res, Err(BixverseErrors::InvalidArgument(_))));
     }
 
@@ -1067,7 +1070,7 @@ mod tests {
             quantile_clip: Some((0.9, 0.1)), // reversed
             ..Default::default()
         };
-        let res = dsb_normalise(cells.as_ref(), bg, &params, false, 0);
+        let res = dsb_normalise(cells.as_ref(), bg, &params, 0, 0);
         assert!(matches!(res, Err(BixverseErrors::InvalidArgument(_))));
     }
 }

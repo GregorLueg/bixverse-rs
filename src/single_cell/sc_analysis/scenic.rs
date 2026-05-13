@@ -2759,7 +2759,8 @@ pub fn subsample_cells(cell_indices: &[usize], n_target: usize, seed: usize) -> 
 /// * `n_components` - Number of components to use for the clustering
 /// * `n_cells_subsample` - Number of cells to subsample
 /// * `seed` - Seed for reproducibility
-/// * `verbose` Controls the verbosity
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -2774,14 +2775,16 @@ fn batch_genes_correlated(
     n_components: usize,
     n_cells_subsample: usize,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<Vec<usize>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let n_genes = gene_indices.len();
     let n_centroids = n_genes.div_ceil(batch_size);
 
     let sub_cells = subsample_cells(cell_indices, n_cells_subsample, seed);
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Computing gene loadings: {} genes, {} subsampled cells, {} components",
             n_genes,
@@ -2813,7 +2816,7 @@ fn batch_genes_correlated(
         }
     }
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("Clustering {} genes into {} groups", n_genes, n_centroids);
     }
 
@@ -2825,7 +2828,7 @@ fn batch_genes_correlated(
         &Dist::Euclidean,
         50,
         seed,
-        verbose,
+        verbosity.detailed_verbosity(),
     );
 
     let centroid_norms: Vec<f32> = (0..n_centroids)
@@ -2882,7 +2885,8 @@ fn batch_genes_correlated(
 /// * `batch_size` - Target batch size (MULTI_OUTPUT_BATCH).
 /// * `strategy` - Batching strategy.
 /// * `seed` - RNG seed.
-/// * `verbose` - Print progress.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -2895,7 +2899,7 @@ pub fn batch_genes(
     batch_size: usize,
     strategy: &GeneBatchStrategy,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<Vec<usize>, BixverseErrors> {
     match strategy {
         GeneBatchStrategy::Random => Ok(batch_genes_random(gene_indices, seed)),
@@ -2945,7 +2949,8 @@ pub fn batch_genes(
 /// * `n_genes` - Number of target genes.
 /// * `scenic_params` - SCENIC configuration.
 /// * `seed` - Base random seed.
-/// * `verbose` - Print progress to stdout.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 /// * `start_total` - Timer from the top-level call for elapsed reporting.
 ///
 /// ### Returns
@@ -2965,9 +2970,11 @@ fn run_scenic_multi_output(
     n_genes: usize,
     scenic_params: &ScenicParams,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
     start_total: Instant,
 ) -> Result<Mat<f32>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let n_multi_output = scenic_params
         .gene_batch_size
         .unwrap_or(MULTI_OUTPUT_BATCH)
@@ -3011,7 +3018,7 @@ fn run_scenic_multi_output(
             all_sparse_cols.push(gc.to_sparse_axis(n_cells));
         }
 
-        if verbose {
+        if verbosity.detailed_verbosity() {
             println!(
                 "  Read gene chunk {}/{} ({} genes)",
                 iter + 1,
@@ -3021,7 +3028,7 @@ fn run_scenic_multi_output(
         }
     }
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Read and filtered {} target genes in {:.2?}",
             n_genes,
@@ -3046,7 +3053,7 @@ fn run_scenic_multi_output(
         RegressionLearner::GradientBoosting(_) => unreachable!(),
     };
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Running SCENIC ({}) on {} genes ({} TFs, {} cells, {} batches of up to {})",
             learner_name, n_genes, n_tfs, n_cells, total_batches, n_multi_output,
@@ -3068,7 +3075,7 @@ fn run_scenic_multi_output(
                 batch_seed,
             );
 
-            if verbose {
+            if verbosity.normal_verbosity() {
                 let done = batches_done.fetch_add(1, Ordering::Relaxed) + 1;
                 let pct = done * 100 / total_batches;
                 let prev_pct = (done - 1) * 100 / total_batches;
@@ -3098,7 +3105,7 @@ fn run_scenic_multi_output(
         }
     }
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "SCENIC ({}) GRN inference complete in {:.2?}",
             learner_name,
@@ -3132,7 +3139,8 @@ fn run_scenic_multi_output(
 /// * `n_genes` - Number of target genes.
 /// * `config` - GBM configuration.
 /// * `seed` - Base random seed.
-/// * `verbose` - Print progress to stdout.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 /// * `start_total` - Timer from the top-level call for elapsed reporting.
 ///
 /// ### Returns
@@ -3150,13 +3158,15 @@ fn run_scenic_gbm(
     n_genes: usize,
     config: &GradientBoostingConfig,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
     start_total: Instant,
 ) -> Result<Mat<f32>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let start_gene_read = Instant::now();
     let mut all_sparse_cols: Vec<SparseAxis<u32, f32>> = Vec::with_capacity(n_genes);
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Running GRNBoost2 on {} genes ({} TFs, {} cells, {} I/O chunks)",
             n_genes.separate_with_underscores(),
@@ -3176,7 +3186,7 @@ fn run_scenic_gbm(
             all_sparse_cols.push(gc.to_sparse_axis(n_cells));
         }
 
-        if verbose {
+        if verbosity.detailed_verbosity() {
             println!(
                 "  Read gene chunk {}/{} ({} genes)",
                 iter + 1,
@@ -3186,7 +3196,7 @@ fn run_scenic_gbm(
         }
     }
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Read and filtered {} target genes in {:.2?}",
             n_genes,
@@ -3208,7 +3218,7 @@ fn run_scenic_gbm(
             let gene_seed = seed.wrapping_add(gene_idx.wrapping_mul(2654435761));
             let imp = fit_grnboost2_sparse(target, tf_data, n_cells, config, gene_seed);
 
-            if verbose {
+            if verbosity.normal_verbosity() {
                 let done = genes_done.fetch_add(1, Ordering::Relaxed) + 1;
                 let pct = done * 100 / n_genes;
                 let prev_pct = (done - 1) * 100 / n_genes;
@@ -3227,7 +3237,7 @@ fn run_scenic_gbm(
         })
         .collect();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "GRNBoost2 GRN inference complete in {:.2?}",
             start_total.elapsed()
@@ -3261,7 +3271,8 @@ fn run_scenic_gbm(
 /// * `n_genes` - Number of target genes.
 /// * `scenic_params` - SCENIC configuration.
 /// * `seed` - Base random seed.
-/// * `verbose` - Print progress to stdout.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 /// * `start_total` - Timer from the top-level call for elapsed reporting.
 ///
 /// ### Returns
@@ -3281,9 +3292,11 @@ fn run_scenic_multi_output_streaming(
     n_genes: usize,
     scenic_params: &ScenicParams,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
     start_total: Instant,
 ) -> Result<Mat<f32>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let n_multi_output = scenic_params
         .gene_batch_size
         .unwrap_or(MULTI_OUTPUT_BATCH)
@@ -3328,7 +3341,7 @@ fn run_scenic_multi_output_streaming(
     let mut importance_scores: Vec<Vec<f32>> = vec![Vec::new(); n_genes];
     let mut global_batch_offset: usize = 0;
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Running SCENIC ({}, streaming) on {} genes ({} TFs, {} cells, {} I/O chunks, batches of {})",
             learner_name,
@@ -3356,7 +3369,7 @@ fn run_scenic_multi_output_streaming(
             .collect();
         drop(gene_chunks);
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(
                 "  Chunk {}/{}: loaded and filtered {} genes in {:.2?}",
                 chunk_idx + 1,
@@ -3387,7 +3400,7 @@ fn run_scenic_multi_output_streaming(
                     batch_seed,
                 );
 
-                if verbose && n_batches_this_chunk >= 4 {
+                if verbosity.detailed_verbosity() && n_batches_this_chunk >= 4 {
                     let done = batches_done.fetch_add(1, Ordering::Relaxed) + 1;
                     let pct = done * 100 / n_batches_this_chunk;
                     let prev_pct = (done - 1) * 100 / n_batches_this_chunk;
@@ -3418,7 +3431,7 @@ fn run_scenic_multi_output_streaming(
 
         global_batch_offset += n_batches_this_chunk;
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             let genes_done = ((chunk_idx + 1) * SCENIC_GENE_CHUNK_SIZE).min(n_genes);
             println!(
                 "  Chunk {}/{}: {}/{} genes done in {:.2?} (fit: {:.2?})",
@@ -3433,7 +3446,7 @@ fn run_scenic_multi_output_streaming(
         // sparse_columns dropped here
     }
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "SCENIC ({}) GRN inference (streaming) complete in {:.2?}",
             learner_name,
@@ -3467,7 +3480,8 @@ fn run_scenic_multi_output_streaming(
 /// * `n_genes` - Number of target genes.
 /// * `config` - GBM configuration.
 /// * `seed` - Base random seed.
-/// * `verbose` - Print progress to stdout.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 /// * `start_total` - Timer from the top-level call for elapsed reporting.
 ///
 /// ### Returns
@@ -3485,14 +3499,16 @@ fn run_scenic_gbm_streaming(
     n_genes: usize,
     config: &GradientBoostingConfig,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
     start_total: Instant,
 ) -> Result<Mat<f32>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let total_io_chunks = gene_indices.len().div_ceil(SCENIC_GENE_CHUNK_SIZE);
     let mut importance_scores: Vec<Vec<f32>> = vec![Vec::new(); n_genes];
     let mut global_gene_offset: usize = 0;
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Running GRNBoost2 (streaming) on {} genes ({} TFs, {} cells, {} I/O chunks)",
             n_genes.separate_with_underscores(),
@@ -3517,7 +3533,7 @@ fn run_scenic_gbm_streaming(
             .collect();
         drop(gene_chunks);
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(
                 "  Chunk {}/{}: loaded and filtered {} genes in {:.2?}",
                 chunk_idx + 1,
@@ -3539,7 +3555,7 @@ fn run_scenic_gbm_streaming(
                     seed.wrapping_add((global_gene_offset + local_idx).wrapping_mul(2654435761));
                 let imp = fit_grnboost2_sparse(target, tf_data, n_cells, config, gene_seed);
 
-                if verbose && n_genes_this_chunk >= 4 {
+                if verbosity.detailed_verbosity() && n_genes_this_chunk >= 4 {
                     let done = genes_done.fetch_add(1, Ordering::Relaxed) + 1;
                     let pct = done * 100 / n_genes_this_chunk;
                     let prev_pct = (done - 1) * 100 / n_genes_this_chunk;
@@ -3565,7 +3581,7 @@ fn run_scenic_gbm_streaming(
 
         global_gene_offset += n_genes_this_chunk;
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(
                 "  Chunk {}/{}: {}/{} genes done in {:.2?} (fit: {:.2?})",
                 chunk_idx + 1,
@@ -3579,7 +3595,7 @@ fn run_scenic_gbm_streaming(
         // sparse_columns dropped here
     }
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "GRNBoost2 GRN inference (streaming) complete in {:.2?}",
             start_total.elapsed()
@@ -3648,7 +3664,8 @@ impl Default for ScenicParams {
 /// * `scenic_params` - Reference to the SCENIC parameters indicating minimum
 ///   couts per gene and minimum proportions of cells expressing a gene to
 ///   be included.
-/// * `verbose` - Controls verbosity of the function.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -3657,8 +3674,10 @@ pub fn scenic_gene_filter(
     f_path: &str,
     cell_indices: &[usize],
     scenic_params: &ScenicParams,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<Vec<usize>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let reader = ParallelSparseReader::new(f_path)?;
     let total_genes = reader.get_header().total_genes;
     let all_gene_indices: Vec<usize> = (0..total_genes).collect();
@@ -3683,7 +3702,7 @@ pub fn scenic_gene_filter(
                 passing.push(gene.original_index);
             }
         }
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(
                 "Processed chunk {} out of {} for SCENIC inclusion criteria.",
                 iter + 1,
@@ -3705,7 +3724,8 @@ pub fn scenic_gene_filter(
 /// * `tf_indices` - Transcription factor gene indices (predictors).
 /// * `scenic_params` - Reference to the SCENIC parameters.
 /// * `seed` - Base random seed for reproducibility.
-/// * `verbose` - Print progress and timing to stdout.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -3734,8 +3754,10 @@ pub fn run_scenic_grn(
     tf_indices: &[usize],
     scenic_params: &ScenicParams,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<Mat<f32>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let start_total = Instant::now();
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
     let n_cells = cell_set.len();
@@ -3757,7 +3779,7 @@ pub fn run_scenic_grn(
     let n_tfs = tf_data.n_features;
     let n_genes = gene_indices.len();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Loaded, filtered and quantised TF data (n: {}) in: {:.2?}",
             n_tfs.separate_with_underscores(),
@@ -3808,7 +3830,8 @@ pub fn run_scenic_grn(
 /// * `tf_indices` - Transcription factor gene indices (predictors).
 /// * `scenic_params` - Reference to the SCENIC parameters.
 /// * `seed` - Base random seed for reproducibility.
-/// * `verbose` - Print progress and timing to stdout.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -3836,8 +3859,10 @@ pub fn run_scenic_grn_streaming(
     tf_indices: &[usize],
     scenic_params: &ScenicParams,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<Mat<f32>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let start_total = Instant::now();
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
     let n_cells = cell_set.len();
@@ -3860,7 +3885,7 @@ pub fn run_scenic_grn_streaming(
     let n_tfs = tf_data.n_features;
     let n_genes = gene_indices.len();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Loaded, filtered and quantised TF data (n: {}) in: {:.2?}",
             n_tfs.separate_with_underscores(),
@@ -4271,8 +4296,6 @@ mod tests {
         sorted.dedup();
         assert_eq!(sorted.len(), 100);
     }
-
-    // ---- NodeHistograms ----
 
     #[test]
     fn node_hist_build_from_samples() {

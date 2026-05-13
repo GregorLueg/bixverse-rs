@@ -117,7 +117,8 @@ fn mann_whitney_u_test(ranks1: &[f32], ranks2: &[f32]) -> f64 {
 ///   expressed in at least one of the two groups.
 /// * `alternative` - The test alternative. One of `"twosided"`, `"greater"`,
 ///   or `"less"`
-/// * `verbose` - Boolean. Controls the verbosity of the function.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -128,8 +129,10 @@ pub fn calculate_dge_grps_mann_whitney(
     grp_2_indices: &[usize],
     min_proportion: f32,
     alternative: &str,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<DgeMannWhitneyRes, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let start_read = Instant::now();
 
     let reader = ParallelSparseReader::new(f_path)?;
@@ -140,7 +143,7 @@ pub fn calculate_dge_grps_mann_whitney(
 
     let end_read = start_read.elapsed();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("Loaded in data: {:.2?}", end_read);
     }
 
@@ -179,7 +182,7 @@ pub fn calculate_dge_grps_mann_whitney(
 
     let end_ranking = start_ranking.elapsed();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("Finished the ranking across cells: {:.2?}", end_ranking);
     }
 
@@ -217,7 +220,7 @@ pub fn calculate_dge_grps_mann_whitney(
 
     let end_calculations = start_calculations.elapsed();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("Finished DGE calculations: {:.2?}", end_calculations);
     }
 
@@ -356,7 +359,8 @@ pub fn calculate_auc_for_cell_auroc(ranks: &[f32], gene_set: &[usize]) -> f32 {
 /// * `cells_to_keep` - Vector of indices with the cells to keep.
 /// * `auc_type` - String. One of `"auroc"` or `"wilcox`. Weird strings default
 ///   to AUROC calculations.
-/// * `verbose` - Controls verbosity
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -366,8 +370,10 @@ pub fn calculate_aucell(
     gene_sets: &[Vec<usize>],
     cells_to_keep: &[usize],
     auc_type: &str,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<Vec<Vec<f32>>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let auc_type = parse_auc_type(auc_type).unwrap_or_default();
 
     let start_read = Instant::now();
@@ -377,7 +383,7 @@ pub fn calculate_aucell(
     let total_cells = cell_chunks.len();
     let end_read = start_read.elapsed();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("Loaded in data: {:.2?}", end_read);
     }
 
@@ -385,7 +391,7 @@ pub fn calculate_aucell(
     let ranks = rank_csr_chunk_vec(cell_chunks, no_genes, true);
     let end_ranking = start_ranking.elapsed();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("Ranked gene expression within cells {:.2?}", end_ranking);
     }
 
@@ -407,7 +413,7 @@ pub fn calculate_aucell(
     }
     let end_auc = start_auc.elapsed();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("Calulated AUCs {:.2?}", end_auc);
     }
 
@@ -430,7 +436,8 @@ pub fn calculate_aucell(
 /// * `cells_to_keep` - Vector of indices with the cells to keep.
 /// * `auc_type` - String. One of `"auroc"` or `"wilcox`. Weird strings default
 ///   to AUROC calculations.
-/// * `verbose` - Boolean. Controls the verbosity
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -440,8 +447,10 @@ pub fn calculate_aucell_streaming(
     gene_sets: &[Vec<usize>],
     cells_to_keep: &[usize],
     auc_type: &str,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<Vec<Vec<f32>>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     const CHUNK_SIZE: usize = 50000;
 
     let auc_type = parse_auc_type(auc_type).unwrap_or_default();
@@ -468,7 +477,7 @@ pub fn calculate_aucell_streaming(
             }
         }
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             let elapsed = start_chunk.elapsed();
             let pct_complete = ((chunk_idx + 1) as f32 / total_chunks as f32) * 100.0;
             println!(

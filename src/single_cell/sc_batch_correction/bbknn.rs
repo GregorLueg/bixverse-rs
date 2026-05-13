@@ -58,7 +58,8 @@ pub struct BbknnParams {
 /// * `bbknn_params` - `BbknnParams` with the parameters for the BBKNN batch
 ///   correction.
 /// * `seed` - Random seed.
-/// * `verbose` - Controls verbosity.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -69,8 +70,10 @@ fn get_batch_balanced_knn(
     knn_method: &KnnSearch,
     bbknn_params: &BbknnParams,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> (Vec<Vec<usize>>, Vec<Vec<f32>>) {
+    let verbosity = parse_verbosity_level(verbose);
+
     let n_cells = mat.nrows();
 
     // get unique batches
@@ -91,7 +94,7 @@ fn get_batch_balanced_knn(
     let col_indices: Vec<usize> = (0..mat.ncols()).collect();
 
     for (batch_idx, &batch) in unique_batches.iter().enumerate() {
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(
                 "Processing batch {} / {}: {}",
                 batch_idx + 1,
@@ -125,7 +128,7 @@ fn get_batch_balanced_knn(
                     bbknn_params.neighbours_within_batch + 1,
                     bbknn_params.knn_params.search_budget,
                     false,
-                    verbose,
+                    verbosity.detailed_verbosity(),
                 )
             }
             KnnSearch::Hnsw => {
@@ -136,7 +139,7 @@ fn get_batch_balanced_knn(
                     bbknn_params.knn_params.ef_construction,
                     &bbknn_params.knn_params.ann_dist,
                     seed,
-                    verbose,
+                    verbosity.detailed_verbosity(),
                 );
                 query_hnsw_index(
                     mat,
@@ -144,7 +147,7 @@ fn get_batch_balanced_knn(
                     bbknn_params.neighbours_within_batch + 1,
                     bbknn_params.knn_params.ef_search,
                     true,
-                    verbose,
+                    verbosity.detailed_verbosity(),
                 )
             }
             KnnSearch::NNDescent => {
@@ -158,7 +161,7 @@ fn get_batch_balanced_knn(
                     None,
                     None,
                     seed,
-                    verbose,
+                    verbosity.detailed_verbosity(),
                 );
 
                 query_nndescent_index(
@@ -167,7 +170,7 @@ fn get_batch_balanced_knn(
                     bbknn_params.neighbours_within_batch + 1,
                     bbknn_params.knn_params.ef_budget,
                     false,
-                    verbose,
+                    verbosity.detailed_verbosity(),
                 )
             }
             &KnnSearch::Exhaustive => {
@@ -179,7 +182,7 @@ fn get_batch_balanced_knn(
                     &index,
                     bbknn_params.neighbours_within_batch + 1,
                     false,
-                    verbose,
+                    verbosity.detailed_verbosity(),
                 )
             }
             &KnnSearch::Ivf => {
@@ -189,7 +192,7 @@ fn get_batch_balanced_knn(
                     None,
                     &bbknn_params.knn_params.ann_dist,
                     seed,
-                    verbose,
+                    verbosity.detailed_verbosity(),
                 );
 
                 query_ivf_index(
@@ -198,7 +201,7 @@ fn get_batch_balanced_knn(
                     bbknn_params.neighbours_within_batch + 1,
                     bbknn_params.knn_params.n_probe,
                     false,
-                    verbose,
+                    verbosity.detailed_verbosity(),
                 )
             }
             &KnnSearch::KmKnn => {
@@ -208,7 +211,7 @@ fn get_batch_balanced_knn(
                     bbknn_params.knn_params.n_list,
                     None,
                     seed,
-                    verbose,
+                    verbosity.detailed_verbosity(),
                 );
 
                 query_kmknn_index(
@@ -216,7 +219,7 @@ fn get_batch_balanced_knn(
                     &index,
                     bbknn_params.neighbours_within_batch + 1,
                     false,
-                    verbose,
+                    verbosity.detailed_verbosity(),
                 )
             }
         };
@@ -567,7 +570,8 @@ fn trim_graph(
 /// * `bbknn_params` - `BbknnParams` with the parameters for the BBKNN batch
 ///   correction.
 /// * `seed` - Random seed.
-/// * `verbose` - Controls verbosity.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -577,12 +581,14 @@ pub fn bbknn(
     batch_labels: &[usize],
     bbknn_params: &BbknnParams,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> (CompressedSparseData2<f32>, CompressedSparseData2<f32>) {
+    let verbosity = parse_verbosity_level(verbose);
+
     // parse it and worst case, I default to Annoy
     let knn_method = parse_knn_method(&bbknn_params.knn_params.knn_method).unwrap_or_default();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("BBKNN: generating the batch balanced kNN values.")
     }
 
@@ -593,7 +599,7 @@ pub fn bbknn(
     // 2. Sort the distance by KNN
     sort_knn_by_distance(&mut knn_indices, &mut knn_dists);
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("BBKNN: Calculating UMAP-based connectivities and removing weak connections.")
     }
 
@@ -615,7 +621,7 @@ pub fn bbknn(
     // 4. Apply set operations
     connectivities = apply_set_operations(connectivities, bbknn_params.set_op_mix_ratio);
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("BBKNN: Finalising data.")
     }
 

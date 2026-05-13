@@ -8,8 +8,10 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rayon::prelude::*;
+use std::time::Instant;
 use thousands::*;
 
+use crate::prelude::parse_verbosity_level;
 use crate::single_cell::sc_batch_correction::batch_utils::cosine_normalise;
 use crate::utils::matrix_utils::{flat_row_major_to_mat, mat_to_flat_row_major};
 
@@ -151,7 +153,8 @@ pub fn create_batch_infos(all_labels: &[Vec<usize>], n_cells: usize) -> Vec<Batc
 /// * `k` - Number of clusters
 /// * `max_iter` - Maximum k-means iterations
 /// * `seed` - Random seed
-/// * `verbose` - Print progress
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -161,18 +164,28 @@ pub fn run_kmeans_cosine(
     k: usize,
     max_iter: usize,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> Mat<f32> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let n = data_cos.nrows();
     let d = data_cos.ncols();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("Running k-means: {} cells, {} dims, {} clusters", n, d, k);
     }
 
     let data_flat = mat_to_flat_row_major(data_cos);
-    let centroids_flat =
-        train_centroids(&data_flat, d, n, k, &Dist::Cosine, max_iter, seed, verbose);
+    let centroids_flat = train_centroids(
+        &data_flat,
+        d,
+        n,
+        k,
+        &Dist::Cosine,
+        max_iter,
+        seed,
+        verbosity.detailed_verbosity(),
+    );
     let centroids = flat_row_major_to_mat(&centroids_flat, k, d);
 
     cosine_normalise(&centroids)
@@ -730,7 +743,8 @@ struct HarmonyState {
 /// * `batch_labels` - one label slice per variable, each of length N
 /// * `params` - Harmony hyperparameters
 /// * `seed` - Random seed
-/// * `verbose` - Print progress
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -740,8 +754,12 @@ pub fn harmony(
     batch_labels: &[Vec<usize>],
     params: &HarmonyParams,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> Mat<f32> {
+    let verbosity = parse_verbosity_level(verbose);
+
+    let start = Instant::now();
+
     let n = pca.nrows();
     let d = pca.ncols();
     let n_vars = batch_labels.len();
@@ -750,7 +768,7 @@ pub fn harmony(
 
     let batch_infos = create_batch_infos(batch_labels, n);
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Harmony: {} cells, {} dims, {} variable(s), {} clusters",
             n.separate_with_underscores(),
@@ -786,7 +804,7 @@ pub fn harmony(
     let z_orig = pca.to_owned();
     let z_cos = cosine_normalise(&z_orig);
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("Running initial k-means...");
     }
 
@@ -822,13 +840,15 @@ pub fn harmony(
         objectives_harmony: vec![initial_obj],
     };
 
-    if verbose {
+    if verbosity.normal_verbosity() {
+        println!(" Initial data preparation done in {:.2?}", start.elapsed());
         println!("Initial objective: {:.4}", initial_obj);
     }
 
     for harmony_iter in 0..params.max_iter_harmony {
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("\n=== Harmony iteration {} ===", harmony_iter + 1);
+            println!("  Running k-means clustering...");
         }
 
         for kmeans_iter in 0..params.max_iter_kmeans {
@@ -861,7 +881,7 @@ pub fn harmony(
 
             state.objectives_kmeans.push(obj);
 
-            if verbose && kmeans_iter % 5 == 0 {
+            if verbosity.detailed_verbosity() && kmeans_iter % 5 == 0 {
                 println!("  K-means iter {}: obj = {:.4}", kmeans_iter + 1, obj);
             }
 
@@ -872,7 +892,7 @@ pub fn harmony(
                     params.epsilon_kmeans,
                 );
                 if converged {
-                    if verbose {
+                    if verbosity.detailed_verbosity() {
                         println!("  K-means converged at iteration {}", kmeans_iter + 1);
                     }
                     break;
@@ -880,7 +900,7 @@ pub fn harmony(
             }
         }
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("  Applying ridge regression correction...");
         }
 
@@ -896,8 +916,9 @@ pub fn harmony(
         let harmony_obj = *state.objectives_kmeans.last().unwrap();
         state.objectives_harmony.push(harmony_obj);
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("  Harmony objective: {:.4}", harmony_obj);
+            println!("   Finished iteration in {:.2?}", start.elapsed());
         }
 
         if harmony_iter >= 2 {
@@ -906,7 +927,7 @@ pub fn harmony(
             let rel_change = (obj_old - obj_new).abs() / obj_old.abs();
 
             if rel_change < params.epsilon_harmony {
-                if verbose {
+                if verbosity.normal_verbosity() {
                     println!("\nHarmony converged at iteration {}", harmony_iter + 1);
                     println!("  Final objective: {:.4}", obj_new);
                 }
@@ -914,6 +935,8 @@ pub fn harmony(
             }
         }
     }
+
+    println!(" Finished Harmony {:.2?}", start.elapsed());
 
     state.z_corr
 }
@@ -982,7 +1005,7 @@ mod tests {
         let mat = Mat::from_fn(20, 3, |i, j| data[i][j]);
         let mat_cos = cosine_normalise(&mat);
 
-        let centroids = run_kmeans_cosine(mat_cos.as_ref(), 2, 25, 42, false);
+        let centroids = run_kmeans_cosine(mat_cos.as_ref(), 2, 25, 42, 0);
 
         assert_eq!(centroids.nrows(), 2);
         assert_eq!(centroids.ncols(), 3);

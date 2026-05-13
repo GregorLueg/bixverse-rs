@@ -138,7 +138,8 @@ where
 /// * `squared_dist` - If the distance is squared (for example Euclidean
 ///   squared).
 /// * `no_meta_cells` - Number of communities, i.e., metacells to identify
-/// * `verbose` - Controls the verbosity of the function
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -149,21 +150,28 @@ pub fn supercell<T>(
     params: &SuperCellParams,
     squared_dist: bool,
     no_meta_cells: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> Vec<usize>
 where
     T: BixverseFloat + std::iter::Sum + BixverseNumeric + SimdDistance,
 {
+    let verbosity = parse_verbosity_level(verbose);
+
     let knn_graph: SparseGraph<T> = if params.use_kernel {
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Using the kernel approach like in SuperCell 2.0")
         }
         knn_to_sparse_graph_kernel(knn_indices, knn_dist, squared_dist, params.k_ith)
     } else {
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Using the original version of SuperCell on the kNN graph")
         }
         knn_to_sparse_graph(knn_indices, true)
     };
-    walktrap_sparse_graph(&knn_graph, params.walk_length, no_meta_cells, verbose)
+    walktrap_sparse_graph(
+        &knn_graph,
+        params.walk_length,
+        no_meta_cells,
+        verbosity.detailed_verbosity(),
+    )
 }

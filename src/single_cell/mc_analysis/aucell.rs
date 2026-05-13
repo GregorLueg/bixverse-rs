@@ -24,7 +24,8 @@ use crate::single_cell::sc_analysis::fast_ranking::rank_within_rows_f32;
 ///   `data_2` must contain normalised counts.
 /// * `gene_sets` - Slice of Vecs of gene indices into the matrix columns.
 /// * `auc_type` - One of `"auroc"` or `"wilcox"`.
-/// * `verbose` - Controls verbosity.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -33,11 +34,13 @@ pub fn calculate_aucell_metacells<T>(
     matrix: &CompressedSparseData2<T, f32>,
     gene_sets: &[Vec<usize>],
     auc_type: &str,
-    verbose: bool,
-) -> Vec<Vec<f32>>
+    verbose: usize,
+) -> Result<Vec<Vec<f32>>, BixverseErrors>
 where
     T: BixverseNumeric,
 {
+    let verbosity = parse_verbosity_level(verbose);
+
     let auc_type = parse_auc_type(auc_type).unwrap_or_default();
 
     let csr = match matrix.cs_type {
@@ -49,11 +52,11 @@ where
     let data_2 = csr
         .data_2
         .as_ref()
-        .expect("calculate_aucell_metacells requires normalised counts in data_2");
+        .ok_or(BixverseErrors::Data2NotAvailable)?;
 
     let start_ranking = Instant::now();
     let ranks = rank_within_rows_f32(&csr.indptr, &csr.indices, data_2, n_cells, n_genes);
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Ranked gene expression within metacells: {:.2?}",
             start_ranking.elapsed()
@@ -77,9 +80,9 @@ where
         }
     }
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("Calculated AUCs: {:.2?}", start_auc.elapsed());
     }
 
-    all_results
+    Ok(all_results)
 }

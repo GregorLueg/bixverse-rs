@@ -469,7 +469,8 @@ fn chebyshev_apply_columns(
 ///   Euclidean from the kNN search).
 /// * `params` - [`MeldParams`].
 /// * `seed` - Seed for Lanczos lmax estimation.
-/// * `verbose` - Print timing.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -484,8 +485,10 @@ pub fn meld(
     squared_dist: bool,
     params: &MeldParams,
     seed: u64,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<Mat<f32>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let n = knn_indices.len();
     if labels.len() != n {
         return Err(BixverseErrors::MELDLabelUnequalsSamples);
@@ -497,18 +500,18 @@ pub fn meld(
     let start = Instant::now();
     let knn_k = knn_indices[0].len();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "MELD: building kernel adjacency from kNN ({} cells)...",
             n.separate_with_underscores()
         );
     }
     let adj = compute_diffusion_kernel(knn_indices, knn_distances, knn_k, squared_dist);
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(" Done in {:.2?}", start.elapsed())
     }
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("MELD: building Laplacian...");
     }
     let lap = match params.lap_type {
@@ -516,18 +519,18 @@ pub fn meld(
         LaplacianType::Normalised => build_normalised_laplacian(&adj),
     };
     drop(adj);
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(" Done in {:.2?}", start.elapsed())
     }
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("MELD: estimating largest Laplacian eigenvalue...");
     }
     let lmax = estimate_lmax(&lap, seed)?;
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("MELD: lmax = {:.4}", lmax);
     }
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(" Done in {:.2?}", start.elapsed())
     }
 
@@ -542,18 +545,18 @@ pub fn meld(
 
     let indicators = build_indicator_matrix(labels, n_groups, params.normalise_indicators)?;
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "MELD: applying Chebyshev filter (order={}) to {} signals...",
             params.chebyshev_order, n_groups
         );
     }
     let densities = chebyshev_apply_columns(&lap, &coeffs, lmax, indicators.as_ref());
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(" Done in {:.2?}", start.elapsed())
     }
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("MELD: done in {:.2?}", start.elapsed());
     }
 
@@ -579,7 +582,8 @@ pub fn meld(
 /// * `params` - [`MeldParams`]. The landmark Laplacian has a different
 ///   spectrum to the full one, so `beta` may need re-tuning.
 /// * `seed` - Seed.
-/// * `verbose` - Print timing.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -596,8 +600,10 @@ pub fn meld_landmark(
     n_landmarks: usize,
     params: &MeldParams,
     seed: u64,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<Mat<f32>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let n = knn_indices.len();
     if labels.len() != n {
         return Err(BixverseErrors::MELDLabelUnequalsSamples);
@@ -612,7 +618,7 @@ pub fn meld_landmark(
     let knn_k = knn_indices[0].len();
     let t0 = Instant::now();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "MELD landmark: building kernel for landmark selection ({} cells)...",
             n.separate_with_underscores()
@@ -620,7 +626,7 @@ pub fn meld_landmark(
     }
     let full_kernel = compute_diffusion_kernel(knn_indices, knn_distances, knn_k, squared_dist);
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "MELD landmark: selecting {} density-weighted landmarks...",
             n_landmarks
@@ -631,7 +637,7 @@ pub fn meld_landmark(
     drop(full_kernel);
 
     let k_ll = params.knn_params.k.min(l.saturating_sub(1)).max(3);
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "MELD landmark: building landmark-landmark kNN (L={}, k={})...",
             l, k_ll
@@ -649,7 +655,7 @@ pub fn meld_landmark(
     let ll_squared = params.knn_params.ann_dist == "euclidean";
     let ll_kernel = compute_diffusion_kernel(&ll_idx, &ll_dist, k_ll, ll_squared);
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("MELD landmark: building landmark Laplacian...");
     }
     let ll_lap = match params.lap_type {
@@ -659,11 +665,11 @@ pub fn meld_landmark(
     drop(ll_kernel);
 
     let lmax = estimate_lmax(&ll_lap, seed)?;
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("MELD landmark: landmark lmax = {:.4}", lmax);
     }
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("MELD landmark: building data-to-landmark transitions...");
     }
     let p_nl = build_data_to_landmark_transitions(embedding, &landmark_indices, knn_k, 1.0, 1e-4);
@@ -688,7 +694,7 @@ pub fn meld_landmark(
         })
         .collect();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "MELD landmark: filtering {} signals on landmark graph (order={})...",
             n_groups, params.chebyshev_order
@@ -700,7 +706,7 @@ pub fn meld_landmark(
         .collect();
 
     // Project back to cells: density_n = P_nl s_l_filt  (N x p).
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("MELD landmark: projecting back to full data...");
     }
     let cell_densities: Vec<Vec<f32>> = landmark_filtered
@@ -710,7 +716,7 @@ pub fn meld_landmark(
 
     let densities = Mat::from_fn(n, n_groups, |i, j| cell_densities[j][i]);
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("MELD landmark: done in {:.2?}", t0.elapsed());
     }
 

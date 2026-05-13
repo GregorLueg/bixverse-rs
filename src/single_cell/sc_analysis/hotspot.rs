@@ -760,7 +760,8 @@ impl<'a> Hotspot<'a> {
     /// * `gene_indices` - Indices of genes to analyse
     /// * `model` - Statistical model to use ("danb", "bernoulli", or "normal")
     /// * `centered` - Whether to centre the data before computing statistics
-    /// * `verbose` - Whether to print progress information
+    /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+    ///   detailed verbosity.
     ///
     /// ### Returns
     ///
@@ -771,8 +772,10 @@ impl<'a> Hotspot<'a> {
         gene_indices: &[usize],
         model: &str,
         centered: bool,
-        verbose: bool,
+        verbose: usize,
     ) -> Result<HotSpotGeneRes, BixverseErrors> {
+        let verbosity = parse_verbosity_level(verbose);
+
         let gex_model = parse_gex_model(model)
             .ok_or_else(|| BixverseErrors::HotSpotWrongModel(model.to_string()))?;
 
@@ -791,7 +794,7 @@ impl<'a> Hotspot<'a> {
 
         let end_reading = start_reading.elapsed();
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Loaded in data: {:.2?}", end_reading);
         }
 
@@ -816,7 +819,7 @@ impl<'a> Hotspot<'a> {
 
         let end_calculations = start_calculation.elapsed();
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Finsished the calculations: {:.2?}", end_calculations);
         }
 
@@ -841,7 +844,8 @@ impl<'a> Hotspot<'a> {
     /// * `gene_indices` - Indices of genes to analyse
     /// * `model` - Statistical model to use ("danb", "bernoulli", or "normal")
     /// * `centered` - Whether to centre the data before computing statistics
-    /// * `verbose` - Whether to print progress information
+    /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+    ///   detailed verbosity.
     ///
     /// ### Returns
     ///
@@ -852,8 +856,10 @@ impl<'a> Hotspot<'a> {
         gene_indices: &[usize],
         model: &str,
         centered: bool,
-        verbose: bool,
+        verbose: usize,
     ) -> Result<HotSpotGeneRes, BixverseErrors> {
+        let verbosity = parse_verbosity_level(verbose);
+
         const GENE_BATCH_SIZE: usize = 1000;
 
         let start_all = Instant::now();
@@ -871,7 +877,7 @@ impl<'a> Hotspot<'a> {
         let mut results: Vec<(Vec<usize>, Vec<f64>, Vec<f64>)> = Vec::with_capacity(no_batches);
 
         for batch_idx in 0..no_batches {
-            if verbose && batch_idx % 5 == 0 {
+            if verbosity.normal_verbosity() && batch_idx % 5 == 0 {
                 let progress = (batch_idx + 1) as f32 / no_batches as f32 * 100.0;
                 println!("  Progress: {:.1}%", progress);
             }
@@ -890,7 +896,7 @@ impl<'a> Hotspot<'a> {
 
             let end_loading = start_loading.elapsed();
 
-            if verbose {
+            if verbosity.detailed_verbosity() {
                 println!("   Loaded batch in: {:.2?}.", end_loading);
             }
 
@@ -915,7 +921,7 @@ impl<'a> Hotspot<'a> {
 
             let end_calc = start_calc.elapsed();
 
-            if verbose {
+            if verbosity.detailed_verbosity() {
                 println!("   Finished calculations in: {:.2?}.", end_calc);
             }
 
@@ -937,7 +943,7 @@ impl<'a> Hotspot<'a> {
 
         let end_total = start_all.elapsed();
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Finished the full run in : {:.2?}.", end_total);
         }
 
@@ -1024,7 +1030,8 @@ impl<'a> Hotspot<'a> {
     ///
     /// * `gene_indices` - Indices of genes to analyse
     /// * `model` - Statistical model to use ("danb", "bernoulli", or "normal")
-    /// * `verbose` - Whether to print progress information
+    /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+    ///   detailed verbosity.
     ///
     /// ### Returns
     ///
@@ -1033,8 +1040,10 @@ impl<'a> Hotspot<'a> {
         &mut self,
         gene_indices: &[usize],
         model: &str,
-        verbose: bool,
+        verbose: usize,
     ) -> Result<HotSpotPairRes, BixverseErrors> {
+        let verbosity = parse_verbosity_level(verbose);
+
         let gex_model = parse_gex_model(model)
             .ok_or_else(|| BixverseErrors::HotSpotWrongModel(model.to_string()))?;
 
@@ -1042,7 +1051,7 @@ impl<'a> Hotspot<'a> {
 
         let cell_set: IndexSet<u32> = self.cells_to_keep.iter().map(|&x| x as u32).collect();
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Loading {} genes...", gene_indices.len());
         }
 
@@ -1054,7 +1063,7 @@ impl<'a> Hotspot<'a> {
             chunk.filter_selected_cells(&cell_set);
         });
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Loaded data in {:.2?}", start_loading.elapsed());
             println!("Centering gene expression...");
         }
@@ -1075,7 +1084,7 @@ impl<'a> Hotspot<'a> {
 
         let n_genes = centered_counts.len();
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Centered in {:.2?}", start_center.elapsed());
             println!("Computing conditional EG2 and per-gene max values...");
         }
@@ -1091,7 +1100,7 @@ impl<'a> Hotspot<'a> {
             .map(|counts| compute_local_cov_max(&self.node_degrees, counts))
             .collect();
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Computed EG2 and maxs in {:.2?}", start_eg2.elapsed());
             println!("Computing pairwise correlations...");
         }
@@ -1128,7 +1137,7 @@ impl<'a> Hotspot<'a> {
             })
             .collect();
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(
                 "Computed {} pairs in {:.2?}",
                 n_pairs,
@@ -1148,7 +1157,7 @@ impl<'a> Hotspot<'a> {
             }
         }
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Done!");
         }
 
@@ -1169,7 +1178,8 @@ impl<'a> Hotspot<'a> {
     ///
     /// * `gene_indices` - Indices of genes to analyse
     /// * `model` - Statistical model to use ("danb", "bernoulli", or "normal")
-    /// * `verbose` - Whether to print progress information
+    /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+    ///   detailed verbosity.
     ///
     /// ### Returns
     ///
@@ -1178,8 +1188,10 @@ impl<'a> Hotspot<'a> {
         &mut self,
         gene_indices: &[usize],
         model: &str,
-        verbose: bool,
+        verbose: usize,
     ) -> Result<HotSpotPairRes, BixverseErrors> {
+        let verbosity = parse_verbosity_level(verbose);
+
         const GENE_BATCH_SIZE: usize = 500;
 
         let gex_model = parse_gex_model(model)
@@ -1196,7 +1208,7 @@ impl<'a> Hotspot<'a> {
         let mut lc_mat = Mat::zeros(n_genes, n_genes);
         let mut z_mat = Mat::zeros(n_genes, n_genes);
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Processing {} genes in {} batches", n_genes, n_batches);
         }
 
@@ -1207,7 +1219,7 @@ impl<'a> Hotspot<'a> {
             let end_i = ((batch_i + 1) * GENE_BATCH_SIZE).min(n_genes);
             let batch_i_indices = &gene_indices[start_i..end_i];
 
-            if verbose {
+            if verbosity.normal_verbosity() {
                 println!(
                     "\nProcessing batch {} / {} (genes {}-{})",
                     batch_i + 1,
@@ -1245,7 +1257,7 @@ impl<'a> Hotspot<'a> {
                 .map(|counts| compute_local_cov_max(&self.node_degrees, counts))
                 .collect();
 
-            if verbose {
+            if verbosity.normal_verbosity() {
                 println!(
                     "Computed batch {} in: {:.2?}",
                     batch_i + 1,
@@ -1259,7 +1271,7 @@ impl<'a> Hotspot<'a> {
                 let start_j = batch_j * GENE_BATCH_SIZE;
                 let end_j = ((batch_j + 1) * GENE_BATCH_SIZE).min(n_genes);
 
-                if verbose {
+                if verbosity.detailed_verbosity() {
                     println!("    Batch pair ({}, {})", batch_i + 1, batch_j + 1);
                 }
 
@@ -1355,7 +1367,7 @@ impl<'a> Hotspot<'a> {
                 }
             }
 
-            if verbose {
+            if verbosity.normal_verbosity() {
                 println!(
                     "Calculated all batches for batch {} in: {:.2?}",
                     batch_i + 1,
@@ -1364,7 +1376,7 @@ impl<'a> Hotspot<'a> {
             }
         }
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Done!");
         }
 

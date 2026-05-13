@@ -1062,7 +1062,8 @@ fn cluster_aware_pairs(
 ///   from training but still scored.
 /// * `config` - Logistic GBM configuration.
 /// * `seed` - Random seed.
-/// * `verbose` - Controls verbosity
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+///   detailed verbosity.
 ///
 /// ### Returns
 ///
@@ -1095,7 +1096,8 @@ fn classify_doublets(
 /// * `expected_dbr` - Expected doublet rate; sets the tolerance band.
 /// * `stringency` - Trade-off in `[0, 1]`: higher penalises FPR more, lower
 ///   penalises FNR more.
-/// * `verbose` - Print diagnostic messages.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+///   detailed verbosity.
 ///
 /// ### Returns
 ///
@@ -1106,8 +1108,10 @@ fn find_threshold_optimised(
     sim_scores: &[f32],
     expected_dbr: f32,
     stringency: f32,
-    verbose: bool,
+    verbose: usize,
 ) -> f32 {
+    let verbosity = parse_verbosity_level(verbose);
+
     let n_obs = obs_scores.len();
     let n_sim = sim_scores.len();
 
@@ -1155,7 +1159,7 @@ fn find_threshold_optimised(
         }
     }
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         // diagnostic messages
         println!("Threshold optimiser:");
         println!(
@@ -1249,8 +1253,8 @@ impl ScDblFinder {
     ///
     /// * `seed` - Seed for reproducibility.
     /// * `streaming` - Boolean if the genes shall be streamed in.
-    /// * `verbose` - Controls verbosity.
-    /// * `debug` - Additional verbosity for debugging purposes
+    /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+    ///   detailed verbosity.
     ///
     /// ### Returns
     ///
@@ -1259,12 +1263,13 @@ impl ScDblFinder {
         &mut self,
         seed: usize,
         streaming: bool,
-        verbose: bool,
-        debug: bool,
+        verbose: usize,
     ) -> Result<ScDblFinderResult, BixverseErrors> {
+        let verbosity = parse_verbosity_level(verbose);
+
         let start_all = Instant::now();
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Running scDblFinder in Rust");
             println!(" Selecting top-expressed genes...");
         }
@@ -1276,7 +1281,7 @@ impl ScDblFinder {
                 &self.cells_to_keep,
                 None,
                 self.params.n_genes,
-                verbose,
+                verbosity.detailed_verbosity(),
             )?
         } else {
             select_top_genes(
@@ -1287,7 +1292,7 @@ impl ScDblFinder {
             )?
         };
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(
                 " Using {} top-expressed genes. Done in {:.2?}",
                 selected_genes.len(),
@@ -1301,14 +1306,14 @@ impl ScDblFinder {
         let target_size = resolve_target_size(self.params.target_size, &self.red_library_sizes);
         self.n_cells_sim = (self.n_cells as f32 * self.params.doublet_ratio) as usize;
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(" Computing cell complexity features...");
         }
         let (obs_n_features, obs_n_above2) =
             compute_cell_complexity(&self.f_path_cell, &self.cells_to_keep, &selected_genes)?;
 
         let n_cxds = self.params.cxds_genes.unwrap_or(CXDS_NTOP);
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(
                 " Building cxds co-expression model with {} genes...",
                 n_cxds
@@ -1324,7 +1329,7 @@ impl ScDblFinder {
         )?;
         let obs_cxds_scores = cxds_model.score(&obs_cxds_gene_sets);
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             let mean_cxds: f32 = obs_cxds_scores.iter().sum::<f32>() / obs_cxds_scores.len() as f32;
             println!(
                 "  cxds model built in {:.2?} (mean score: {:.2})",
@@ -1333,10 +1338,9 @@ impl ScDblFinder {
             );
         }
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(" Running PCA on observed cells...");
         }
-        let start_pca = Instant::now();
 
         let (obs_pca, _, _, _) = pca_observed(
             &self.f_path_gene,
@@ -1353,11 +1357,7 @@ impl ScDblFinder {
             verbose,
         )?;
 
-        if verbose {
-            println!("  Done with PCA in {:.2?}", start_pca.elapsed());
-        }
-
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(" Initial clustering of observed cells...");
         }
         let start_clustering = Instant::now();
@@ -1380,7 +1380,7 @@ impl ScDblFinder {
                 kmeans_iters: self.params.fast_cluster_params.kmeans_iters,
                 ..Default::default()
             };
-            if verbose {
+            if verbosity.normal_verbosity() {
                 println!(
                     "  Using fast clustering with {} centroids, k={} on {} cells.",
                     n_centroids, centroid_k, self.n_cells
@@ -1422,7 +1422,7 @@ impl ScDblFinder {
                 obs_k,
                 &self.params.knn_params,
                 seed,
-                verbose,
+                verbosity.detailed_verbosity(),
             );
 
             let obs_graph = knn_to_sparse_graph(&obs_knn, true);
@@ -1437,7 +1437,7 @@ impl ScDblFinder {
 
         let end_clustering = start_clustering.elapsed();
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(
                 "  Finished initial kNN generation and clustering in {:.2?}",
                 end_clustering
@@ -1449,7 +1449,7 @@ impl ScDblFinder {
         let n_k = k_values.len();
         let n_pcs_include = self.params.include_pcs.min(self.params.no_pcs);
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(
                 " Using k values {:?} (max {}), including {} PCs as features",
                 k_values, k_max, n_pcs_include
@@ -1458,7 +1458,7 @@ impl ScDblFinder {
 
         let expected_dbr = resolve_doublet_rate(self.params.expected_doublet_rate, self.n_cells);
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(
                 " Simulating cluster-aware doublets with a heterotypic bias of {:.2}...",
                 self.params.heterotypic_bias
@@ -1496,7 +1496,7 @@ impl ScDblFinder {
             1, // bin_thresh: match what fit() uses (raw count > 0)
         );
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(" Running PCA across all observed and synthetic cells...");
         }
         let combined_pca = pca_combined(
@@ -1513,7 +1513,7 @@ impl ScDblFinder {
             seed,
         )?;
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(" Building combined kNN graph (k_max={})...", k_max);
         }
 
@@ -1526,7 +1526,7 @@ impl ScDblFinder {
             true,
             false,
             seed,
-            verbose,
+            verbosity.detailed_verbosity(),
         );
 
         let mut combined_dists = combined_dists.unwrap();
@@ -1544,7 +1544,7 @@ impl ScDblFinder {
 
         // build the feature matrix
         let n_feat = n_k + 7 + n_pcs_include;
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(
                 "  Finished generation of simulated doublets, projection on PCA space and kNN generation in {:.2?}",
                 end_sim
@@ -1626,9 +1626,8 @@ impl ScDblFinder {
         // once after iteration 0 and carried through all subsequent iterations
         let mut permanent_sim_exclusion = vec![false; self.n_cells_sim];
 
-        // -- training loop --
         for iter in 0..self.params.n_iterations {
-            if verbose {
+            if verbosity.normal_verbosity() {
                 println!(
                     " == Iteration {} of {} ==",
                     iter + 1,
@@ -1670,7 +1669,7 @@ impl ScDblFinder {
                     }
                 }
 
-                if verbose {
+                if verbosity.detailed_verbosity() {
                     let n_perm = permanent_sim_exclusion.iter().filter(|&&x| x).count();
                     println!(
                         "Excluding {} suspected real doublets (threshold={:.4}) \
@@ -1680,7 +1679,7 @@ impl ScDblFinder {
                 }
             }
 
-            if verbose {
+            if verbosity.normal_verbosity() {
                 println!("Training logistic GBM classifier...");
             }
             let probabilities = classify_doublets(
@@ -1689,7 +1688,7 @@ impl ScDblFinder {
                 &exclude_mask,
                 &gbm_config,
                 (iter_seed + 100) as u64,
-                debug,
+                verbosity.detailed_verbosity(),
             );
 
             let (class_weighted, mean_cw) =
@@ -1727,7 +1726,7 @@ impl ScDblFinder {
                         permanent_sim_exclusion[si] = true;
                     }
                 }
-                if verbose {
+                if verbosity.detailed_verbosity() {
                     let n_excl = permanent_sim_exclusion.iter().filter(|&&x| x).count();
                     println!(
                         "Unrecognisable filter: flagged {} origin(s), \
@@ -1738,7 +1737,7 @@ impl ScDblFinder {
                 }
             }
 
-            if verbose {
+            if verbosity.normal_verbosity() {
                 let mean = final_scores.iter().sum::<f32>() / final_scores.len() as f32;
                 let (mn, mx) = final_scores
                     .iter()
@@ -1791,7 +1790,7 @@ impl ScDblFinder {
         let threshold = self.params.manual_threshold.unwrap_or_else(|| {
             let t =
                 find_threshold_optimised(&final_scores, &sim_scores, expected_dbr, 0.5, verbose);
-            if verbose {
+            if verbosity.normal_verbosity() {
                 println!("Threshold set at score = {:.4}", t);
             }
             t
@@ -1801,7 +1800,7 @@ impl ScDblFinder {
         let n_doublets = predicted_doublets.iter().filter(|&&d| d).count();
         let detected_doublet_rate = n_doublets as f32 / self.n_cells as f32;
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(
                 "Detected {} doublets ({:.1}%)",
                 n_doublets,

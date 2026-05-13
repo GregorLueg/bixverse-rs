@@ -13,8 +13,10 @@ use faer::{Mat, MatRef, linalg::solvers::DenseSolveCore};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
+use std::time::Instant;
 use thousands::*;
 
+use crate::prelude::parse_verbosity_level;
 use crate::single_cell::sc_batch_correction::batch_utils::cosine_normalise;
 
 use super::harmony::{
@@ -632,7 +634,8 @@ pub fn ridge_regression_correction_v2(
 /// * `batch_labels` - one label slice per variable, each of length N
 /// * `params` - Harmony v2 hyperparameters
 /// * `seed` - Random seed
-/// * `verbose` - Print progress
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -642,8 +645,12 @@ pub fn harmony_v2(
     batch_labels: &[Vec<usize>],
     params: &HarmonyParamsV2,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> Mat<f32> {
+    let start = Instant::now();
+
+    let verbosity = parse_verbosity_level(verbose);
+
     let n = pca.nrows();
     let d = pca.ncols();
     let n_vars = batch_labels.len();
@@ -652,7 +659,7 @@ pub fn harmony_v2(
 
     let batch_infos = create_batch_infos(batch_labels, n);
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Harmony v2: {} cells, {} dims, {} variable(s), {} clusters",
             n.separate_with_underscores(),
@@ -688,7 +695,7 @@ pub fn harmony_v2(
     let theta_expanded = expand_theta(&theta, &batch_infos, params.k, params.tau);
     let lambda_scalar = params.lambda[0];
 
-    if verbose && params.tau > 0.0 {
+    if verbosity.normal_verbosity() && params.tau > 0.0 {
         for (var_idx, levels) in theta_expanded.iter().enumerate() {
             println!(
                 "  Theta (var {}): min={:.4}, max={:.4}",
@@ -703,7 +710,8 @@ pub fn harmony_v2(
     let mut z_cos = cosine_normalise(&z_orig);
 
     // initial k-means with more iterations for good seeding
-    if verbose {
+    if verbosity.normal_verbosity() {
+        println!(" Initial data preparation done in {:.2?}", start.elapsed());
         println!("Running initial k-means...");
     }
 
@@ -726,13 +734,14 @@ pub fn harmony_v2(
     let mut objectives_harmony: Vec<f32> = vec![initial_obj];
     let mut z_corr = pca.to_owned();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("Initial objective: {:.4}", initial_obj);
     }
 
     for harmony_iter in 0..params.max_iter_harmony {
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("\n=== Harmony v2 iteration {} ===", harmony_iter + 1);
+            println!("  Running k-means clustering...");
         }
 
         // inner loop: refine R with diversity penalty, distances fixed
@@ -761,7 +770,7 @@ pub fn harmony_v2(
             );
             objectives_kmeans.push(obj);
 
-            if verbose {
+            if verbosity.detailed_verbosity() {
                 println!("  K-means iter {}: obj = {:.4}", kmeans_iter + 1, obj);
             }
 
@@ -772,7 +781,7 @@ pub fn harmony_v2(
                     params.epsilon_kmeans,
                 )
             {
-                if verbose {
+                if verbosity.detailed_verbosity() {
                     println!("  K-means converged at iteration {}", kmeans_iter + 1);
                 }
                 break;
@@ -780,7 +789,7 @@ pub fn harmony_v2(
         }
 
         // ridge regression with batch pruning
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("  Applying ridge regression correction...");
         }
 
@@ -808,8 +817,9 @@ pub fn harmony_v2(
         let harmony_obj = *objectives_kmeans.last().unwrap();
         objectives_harmony.push(harmony_obj);
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("  Harmony objective: {:.4}", harmony_obj);
+            println!("   Finished iteration in {:.2?}", start.elapsed());
         }
 
         // convergence: relative change between successive harmony objectives.
@@ -820,13 +830,15 @@ pub fn harmony_v2(
             let obj_new = objectives_harmony[objectives_harmony.len() - 1];
             let rel_change = (obj_old - obj_new) / obj_old.abs();
             if rel_change < params.epsilon_harmony {
-                if verbose {
+                if verbosity.normal_verbosity() {
                     println!("\nHarmony v2 converged at iteration {}", harmony_iter + 1);
                 }
                 break;
             }
         }
     }
+
+    println!(" Finished Harmony {:.2?}", start.elapsed());
 
     z_corr
 }

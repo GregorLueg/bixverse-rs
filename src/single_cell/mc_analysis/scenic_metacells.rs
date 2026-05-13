@@ -221,7 +221,8 @@ fn subset_csc_for_pca<T: Clone>(
 /// * `n_cells_subsample` - Maximum cells to use for the PCA. If the
 ///   full set is smaller, all cells are used.
 /// * `seed` - RNG seed.
-/// * `verbose` - Whether to print timing and progress.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -233,8 +234,10 @@ fn batch_genes_correlated_in_memory<T: BixverseNumeric>(
     n_components: usize,
     n_cells_subsample: usize,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<Vec<usize>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let n_cells = csc.shape.0;
     let n_genes = csc.shape.1;
     let n_centroids = n_genes.div_ceil(batch_size);
@@ -242,7 +245,7 @@ fn batch_genes_correlated_in_memory<T: BixverseNumeric>(
     let all_cells: Vec<usize> = (0..n_cells).collect();
     let sub_cells = subsample_cells(&all_cells, n_cells_subsample.min(n_cells), seed);
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Computing gene loadings: {} genes, {} subsampled cells, {} components",
             n_genes,
@@ -262,7 +265,7 @@ fn batch_genes_correlated_in_memory<T: BixverseNumeric>(
         }
     }
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("Clustering {} genes into {} groups", n_genes, n_centroids);
     }
 
@@ -274,7 +277,7 @@ fn batch_genes_correlated_in_memory<T: BixverseNumeric>(
         &Dist::Euclidean,
         50,
         seed,
-        verbose,
+        verbosity.detailed_verbosity(),
     );
 
     let centroid_norms: Vec<f32> = (0..n_centroids)
@@ -331,7 +334,8 @@ fn batch_genes_correlated_in_memory<T: BixverseNumeric>(
 /// * `batch_size` - Target batch size.
 /// * `strategy` - Batching strategy.
 /// * `seed` - RNG seed.
-/// * `verbose` - Whether to print progress.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -342,7 +346,7 @@ fn batch_genes_in_memory<T: BixverseNumeric>(
     batch_size: usize,
     strategy: &GeneBatchStrategy,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<Vec<usize>, BixverseErrors> {
     let n_genes = csc.shape.1;
     let identity: Vec<usize> = (0..n_genes).collect();
@@ -389,7 +393,8 @@ fn batch_genes_in_memory<T: BixverseNumeric>(
 /// * `n_genes` - Number of target genes.
 /// * `scenic_params` - SCENIC configuration.
 /// * `seed` - Base random seed.
-/// * `verbose` - Print progress to stdout.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 /// * `start_total` - Timer from the top-level call for elapsed reporting.
 ///
 /// ### Returns
@@ -405,12 +410,14 @@ fn run_scenic_multi_output_in_memory<T>(
     n_genes: usize,
     scenic_params: &ScenicParams,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
     start_total: Instant,
 ) -> Result<Mat<f32>, BixverseErrors>
 where
     T: BixverseNumeric + Copy + Into<u32>,
 {
+    let verbosity = parse_verbosity_level(verbose);
+
     let n_multi_output = scenic_params
         .gene_batch_size
         .unwrap_or(MULTI_OUTPUT_BATCH)
@@ -431,7 +438,7 @@ where
         .map(|&g| extract_target_column(csc, g, n_cells))
         .collect();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Extracted {} target columns in {:.2?}",
             n_genes,
@@ -456,7 +463,7 @@ where
         RegressionLearner::GradientBoosting(_) => unreachable!(),
     };
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Running SCENIC ({}, in-memory) on {} genes ({} TFs, {} cells, {} batches of up to {})",
             learner_name, n_genes, n_tfs, n_cells, total_batches, n_multi_output,
@@ -478,7 +485,7 @@ where
                 batch_seed,
             );
 
-            if verbose {
+            if verbosity.normal_verbosity() {
                 let done = batches_done.fetch_add(1, Ordering::Relaxed) + 1;
                 let pct = done * 100 / total_batches;
                 let prev_pct = (done - 1) * 100 / total_batches;
@@ -505,7 +512,7 @@ where
         }
     }
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "SCENIC ({}, in-memory) GRN inference complete in {:.2?}",
             learner_name,
@@ -538,7 +545,8 @@ where
 /// * `n_genes` - Number of target genes.
 /// * `config` - GBM configuration.
 /// * `seed` - Base random seed.
-/// * `verbose` - Print progress to stdout.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 /// * `start_total` - Timer from the top-level call for elapsed reporting.
 ///
 /// ### Returns
@@ -554,19 +562,21 @@ fn run_scenic_gbm_in_memory<T>(
     n_genes: usize,
     config: &GradientBoostingConfig,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
     start_total: Instant,
 ) -> Mat<f32>
 where
     T: Copy + Into<u32> + Sync,
 {
+    let verbosity = parse_verbosity_level(verbose);
+
     let start_extract = Instant::now();
     let all_sparse_cols: Vec<SparseAxis<u32, f32>> = (0..n_genes)
         .into_par_iter()
         .map(|g| extract_target_column(csc, g, n_cells))
         .collect();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Extracted {} target columns in {:.2?}",
             n_genes,
@@ -588,7 +598,7 @@ where
             let gene_seed = seed.wrapping_add(gene_idx.wrapping_mul(2654435761));
             let imp = fit_grnboost2_sparse(target, tf_data, n_cells, config, gene_seed);
 
-            if verbose {
+            if verbosity.normal_verbosity() {
                 let done = genes_done.fetch_add(1, Ordering::Relaxed) + 1;
                 let pct = done * 100 / n_genes;
                 let prev_pct = (done - 1) * 100 / n_genes;
@@ -607,7 +617,7 @@ where
         })
         .collect();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "GRNBoost2 (in-memory) GRN inference complete in {:.2?}",
             start_total.elapsed()
@@ -643,7 +653,8 @@ where
 /// * `tf_indices` - Transcription factor column indices (predictors).
 /// * `scenic_params` - SCENIC configuration (learner, batching, etc.).
 /// * `seed` - Base random seed for reproducibility.
-/// * `verbose` - Print progress to stdout.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -655,11 +666,13 @@ pub fn run_scenic_grn_in_memory<T>(
     tf_indices: &[usize],
     scenic_params: &ScenicParams,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<Mat<f32>, BixverseErrors>
 where
     T: BixverseNumeric + Copy + Into<u32> + Sync,
 {
+    let verbosity = parse_verbosity_level(verbose);
+
     let csc_owned;
     let csc: &CompressedSparseData2<T, f32> = match expr_csc.cs_type {
         CompressedSparseFormat::Csc => expr_csc,
@@ -676,7 +689,7 @@ where
 
     let start_quant = Instant::now();
     let tf_data = build_tf_quantised_store(csc, tf_indices, n_cells);
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Quantised TF store (n: {}) in: {:.2?}",
             n_tfs.separate_with_underscores(),
@@ -950,7 +963,7 @@ mod tests {
             n_subsample: 1000,
         };
 
-        let result = run_scenic_grn_in_memory(&csc, &[0, 1, 2], &params, 42, false).unwrap();
+        let result = run_scenic_grn_in_memory(&csc, &[0, 1, 2], &params, 42, 0).unwrap();
         // 5 columns (3 TFs + 2 targets) -> n_genes = 5, n_tfs = 3
         assert_eq!(result.nrows(), 5);
         assert_eq!(result.ncols(), 3);
@@ -984,7 +997,7 @@ mod tests {
             n_subsample: 1000,
         };
 
-        let result = run_scenic_grn_in_memory(&csc, &[0, 1, 2], &params, 42, false).unwrap();
+        let result = run_scenic_grn_in_memory(&csc, &[0, 1, 2], &params, 42, 0).unwrap();
         assert_eq!(result.nrows(), 5);
         assert_eq!(result.ncols(), 3);
 

@@ -319,7 +319,8 @@ fn find_nearest_with_index(
 /// * `knn_params` - Parameters for distance calculation
 /// * `strategy` - Refinement strategy to use
 /// * `knn_index` - Optional kNN index for index-based strategy
-/// * `verbose` - Whether to print progress messages
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+///   detailed verbosity.
 ///
 /// ### Returns
 ///
@@ -333,9 +334,11 @@ pub fn refine_sampling_with_strategy(
     knn_params: &KnnParams,
     strategy: &RefinementStrategy,
     knn_index: Option<&KnnIndex>,
-    verbose: bool,
+    verbose: usize,
 ) -> Vec<usize> {
-    if verbose {
+    let verbosity = parse_verbosity_level(verbose);
+
+    if verbosity.normal_verbosity() {
         println!("Running refined sampling");
     }
 
