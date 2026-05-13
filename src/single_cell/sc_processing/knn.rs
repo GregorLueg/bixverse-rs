@@ -324,8 +324,7 @@ fn build_and_query_knn<I>(
 ///   recall, slower)
 /// * `seed` - Seed for the HNSW algorithm
 /// * `validate_index` - Shall the index be validated with an exhaustive search.
-/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
-///   verbosity.
+/// * `verbose` - Controls verbosity
 ///
 /// ### Returns
 ///

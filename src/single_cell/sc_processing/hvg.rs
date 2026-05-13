@@ -1345,11 +1345,12 @@ pub fn get_hvg_dispersion_batch_aware(
     batch_labels: &[usize],
     binning: &str,
     n_bins: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<Vec<HvgDispersionRes>, BixverseErrors> {
     let start_total = Instant::now();
 
     let binning = parse_bin_strategy_type(binning).unwrap_or_default();
+    let verbosity = parse_verbosity_level(verbose);
 
     let n_batches = *batch_labels.iter().max().unwrap() + 1;
     let mut batch_cell_maps: Vec<FxHashMap<u32, u32>> = vec![FxHashMap::default(); n_batches];
@@ -1360,14 +1361,14 @@ pub fn get_hvg_dispersion_batch_aware(
         batch_sizes[batch] += 1;
     }
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("Processing {} batches", n_batches);
     }
 
     let start_read = Instant::now();
     let reader = ParallelSparseReader::new(f_path)?;
     let mut gene_chunks: Vec<CscGeneChunk> = reader.get_all_genes()?;
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("Loaded data: {:.2?}", start_read.elapsed());
     }
 
@@ -1390,7 +1391,7 @@ pub fn get_hvg_dispersion_batch_aware(
         let res = build_disp_result(means, dispersions, binning, n_bins);
         out.push(res);
 
-        if verbose {
+        if verbosity.detailed_verbosity() {
             println!(
                 "Batch {}/{}: {:.2?}",
                 batch_idx + 1,
@@ -1400,7 +1401,7 @@ pub fn get_hvg_dispersion_batch_aware(
         }
     }
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Total runtime batch-aware HVG dispersion: {:.2?}",
             start_total.elapsed()
@@ -1433,9 +1434,11 @@ pub fn get_hvg_dispersion_batch_aware_streaming(
     batch_labels: &[usize],
     binning: &str,
     n_bins: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<Vec<HvgDispersionRes>, BixverseErrors> {
     let start_total = Instant::now();
+
+    let verbosity = parse_verbosity_level(verbose);
 
     let binning = parse_bin_strategy_type(binning).unwrap_or_default();
 
@@ -1452,7 +1455,7 @@ pub fn get_hvg_dispersion_batch_aware_streaming(
         batch_sizes[batch] += 1;
     }
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("Processing {} batches", n_batches);
         println!(
             "Calculating dispersion stats for {} genes...",
@@ -1467,7 +1470,7 @@ pub fn get_hvg_dispersion_batch_aware_streaming(
     let mut batch_dispersions: Vec<Vec<f32>> = vec![Vec::with_capacity(no_genes); n_batches];
 
     for chunk_idx in 0..num_batches {
-        if verbose && chunk_idx % 5 == 0 {
+        if verbosity.detailed_verbosity() && chunk_idx % 5 == 0 {
             let progress = (chunk_idx + 1) as f32 / num_batches as f32 * 100.0;
             println!("  Progress: {:.1}%", progress);
         }
@@ -1505,7 +1508,7 @@ pub fn get_hvg_dispersion_batch_aware_streaming(
         .map(|(means, dispersions)| build_disp_result(means, dispersions, binning, n_bins))
         .collect();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Total runtime batch-aware streaming HVG dispersion: {:.2?}",
             start_total.elapsed()
@@ -1538,7 +1541,7 @@ pub fn get_hvg_mvb_batch_aware(
     batch_labels: &[usize],
     binning: &str,
     n_bins: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<Vec<HvgDispersionRes>, BixverseErrors> {
     get_hvg_dispersion_batch_aware(f_path, cell_indices, batch_labels, binning, n_bins, verbose)
 }
@@ -1566,7 +1569,7 @@ pub fn get_hvg_mvb_batch_aware_streaming(
     batch_labels: &[usize],
     binning: &str,
     n_bins: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<Vec<HvgDispersionRes>, BixverseErrors> {
     get_hvg_dispersion_batch_aware_streaming(
         f_path,
