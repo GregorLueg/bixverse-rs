@@ -6,6 +6,7 @@ use faer::{Mat, MatRef};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::time::Instant;
+use thousands::Separable;
 
 use crate::prelude::*;
 use crate::single_cell::sc_batch_correction::batch_utils::cosine_normalise;
@@ -488,7 +489,10 @@ pub fn merge_two_batches(
     }
 
     if verbosity.normal_verbosity() {
-        println!("Found {} MNN pairs", mnn_1.len());
+        println!(
+            "Found {} MNN pairs",
+            mnn_1.len().separate_with_underscores()
+        );
     }
 
     // Step 3: Compute average correction vectors and overall batch vector

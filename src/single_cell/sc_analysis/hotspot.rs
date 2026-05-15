@@ -12,7 +12,7 @@ use std::time::Instant;
 use crate::core::math::linear_algebra::linear_regression;
 use crate::core::math::stats::{calc_fdr, inv_logit, logit, z_scores_to_pval};
 use crate::prelude::*;
-use crate::single_cell::sc_simd::{center_values_simd, fused_mul_square_sum_simd};
+use crate::single_cell::sc_utils::simd::*;
 use crate::utils::simd::{sum_simd_f32, sum_squares_simd_f32};
 
 /////////////

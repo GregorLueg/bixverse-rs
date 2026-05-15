@@ -260,7 +260,7 @@ pub fn pca_on_sc(
     let end_reading = start_reading.elapsed();
 
     if verbosity.normal_verbosity() {
-        println!("Loaded in data : {:.2?}", end_reading);
+        println!("PCA: Loaded in data in {:.2?}", end_reading);
     }
 
     let start_scaling = Instant::now();
@@ -298,7 +298,7 @@ pub fn pca_on_sc(
     let end_scaling = start_scaling.elapsed();
 
     if verbosity.normal_verbosity() {
-        println!("Finished scaling : {:.2?}", end_scaling);
+        println!("PCA: Finished scaling in {:.2?}", end_scaling);
     }
 
     let start_svd = Instant::now();
@@ -331,13 +331,13 @@ pub fn pca_on_sc(
     let end_svd = start_svd.elapsed();
 
     if verbosity.normal_verbosity() {
-        println!("Finished PCA calculations : {:.2?}", end_svd);
+        println!("PCA: Finished calculations in {:.2?}", end_svd);
     }
 
     let end_total = start_total.elapsed();
 
     if verbosity.normal_verbosity() {
-        println!("Total run time PCA detection: {:.2?}", end_total);
+        println!("PCA: Total run time -> {:.2?}", end_total);
     }
 
     Ok((scores, loadings, s, scaled_f32))
@@ -399,7 +399,7 @@ pub fn pca_on_sc_streaming(
     for batch_idx in 0..num_batches {
         if verbosity.normal_verbosity() {
             println!(
-                "Scaling batch {}/{} ({} genes each)",
+                "PCA (streaming): Scaling batch {}/{} ({} genes each)",
                 batch_idx + 1,
                 num_batches,
                 gene_batch_size
@@ -439,7 +439,10 @@ pub fn pca_on_sc_streaming(
     }
 
     if verbosity.normal_verbosity() {
-        println!("Finished scaling: {:.2?}", start_scaling.elapsed());
+        println!(
+            "PCA (streaming): finished scaling in {:.2?}",
+            start_scaling.elapsed()
+        );
     }
 
     let start_svd = Instant::now();
@@ -470,9 +473,12 @@ pub fn pca_on_sc_streaming(
     };
 
     if verbosity.normal_verbosity() {
-        println!("Finished PCA calculations: {:.2?}", start_svd.elapsed());
         println!(
-            "Total run time streaming PCA: {:.2?}",
+            "PCA (streaming): finished calculations in {:.2?}",
+            start_svd.elapsed()
+        );
+        println!(
+            "PCA (streaming): total run time -> {:.2?}",
             start_total.elapsed()
         );
     }
@@ -543,7 +549,7 @@ pub fn pca_on_sc_sparse(
     let end_reading = start_reading.elapsed();
 
     if verbosity.normal_verbosity() {
-        println!("Loaded in data : {:.2?}", end_reading);
+        println!("Sparse PCA: Loaded in data in {:.2?}", end_reading);
     }
 
     let start_data_prep = Instant::now();
@@ -562,7 +568,10 @@ pub fn pca_on_sc_sparse(
     let col_stds: Vec<f64> = sparse_csc_column_stds(&csc, &col_means, true)?;
 
     if verbosity.normal_verbosity() {
-        println!("Finished the data preparations : {:.2?}", end_data_prep);
+        println!(
+            "Sparse PCA: finished the data preparations in {:.2?}",
+            end_data_prep
+        );
     }
 
     let start_svd = Instant::now();
@@ -608,13 +617,13 @@ pub fn pca_on_sc_sparse(
     let end_svd = start_svd.elapsed();
 
     if verbosity.normal_verbosity() {
-        println!("Finished sparse PCA calculations : {:.2?}", end_svd);
+        println!("Sparse PCA: finished calculations in {:.2?}", end_svd);
     }
 
     let end_total = start_total.elapsed();
 
     if verbosity.normal_verbosity() {
-        println!("Total run time sparse PCA detection: {:.2?}", end_total);
+        println!("Sparse PCA: total run time -> {:.2?}", end_total);
     }
 
     Ok((scores, loadings, s))

@@ -4,4 +4,5 @@
 
 pub mod cxds;
 pub mod logistic_gbm;
+pub mod simd;
 pub mod utils_tree;

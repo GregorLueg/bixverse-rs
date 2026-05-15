@@ -451,7 +451,7 @@ pub fn get_hvg_vst(
     let end_read = start_read.elapsed();
 
     if verbosity.normal_verbosity() {
-        println!("Load in data: {:.2?}", end_read);
+        println!("HVG (VST): Load in data in {:.2?}", end_read);
     }
 
     let start_gene_stats = Instant::now();
@@ -464,7 +464,10 @@ pub fn get_hvg_vst(
     let end_gene_stats = start_gene_stats.elapsed();
 
     if verbosity.normal_verbosity() {
-        println!("Calculated gene statistics: {:.2?}", end_gene_stats);
+        println!(
+            "HVG (VST): Calculated gene statistics in {:.2?}",
+            end_gene_stats
+        );
     }
 
     let start_loess = Instant::now();
@@ -481,7 +484,7 @@ pub fn get_hvg_vst(
     let end_loess = start_loess.elapsed();
 
     if verbosity.normal_verbosity() {
-        println!("Fitted Loess: {:.2?}", end_loess);
+        println!("HVG (VST): Fitted Loess in {:.2?}", end_loess);
     }
 
     let start_standard = Instant::now();
@@ -506,13 +509,13 @@ pub fn get_hvg_vst(
     let end_standard = start_standard.elapsed();
 
     if verbosity.normal_verbosity() {
-        println!("Standardised variance: {:.2?}", end_standard);
+        println!("HVG (VST): Standardised variance in {:.2?}", end_standard);
     }
 
     let total = start_total.elapsed();
 
     if verbosity.normal_verbosity() {
-        println!("Total run time HVG detection: {:.2?}", total);
+        println!("HVG (VST): Total run time -> {:.2?}", total);
     }
 
     // transform to f64 for R
@@ -568,7 +571,7 @@ pub fn get_hvg_vst_streaming(
 
     if verbosity.normal_verbosity() {
         println!(
-            "Pass 1/2: Calculating mean and variance for {} genes...",
+            "HVG (VST, streaming): Pass 1/2 -> Calculating mean and variance for {} genes...",
             no_genes.separate_with_underscores()
         );
     }
@@ -643,7 +646,7 @@ pub fn get_hvg_vst_streaming(
 
     if verbosity.normal_verbosity() {
         println!("  Fitted Loess: {:.2?}", end_loess);
-        println!("Pass 2/2: Calculating standardised variance...");
+        println!("HVG (VST, streaming): Pass 2/2 -> Calculating standardised variance...");
     }
 
     // second pass -> calculate standardised variance in batches
@@ -708,7 +711,7 @@ pub fn get_hvg_vst_streaming(
     let total = start_total.elapsed();
 
     if verbosity.normal_verbosity() {
-        println!("Total run time HVG detection: {:.2?}", total);
+        println!("HVG (VST, streaming): Total run time -> {:.2?}", total);
     }
 
     // transform to f64 for R
@@ -764,7 +767,10 @@ pub fn get_hvg_dispersion(
         .collect();
 
     if verbosity.normal_verbosity() {
-        println!("Load in data: {:.2?}", start_read.elapsed());
+        println!(
+            "HVG (dispersion): Load in data in {:.2?}",
+            start_read.elapsed()
+        );
     }
 
     let start_stats = Instant::now();
@@ -774,7 +780,10 @@ pub fn get_hvg_dispersion(
         .collect();
 
     if verbosity.normal_verbosity() {
-        println!("Calculated gene statistics: {:.2?}", start_stats.elapsed());
+        println!(
+            "HVG (dispersion): Calculated gene statistics in {:.2?}",
+            start_stats.elapsed()
+        );
     }
 
     let (means, dispersions): (Vec<f32>, Vec<f32>) = results.into_iter().unzip();
@@ -782,9 +791,12 @@ pub fn get_hvg_dispersion(
     let start_bin = Instant::now();
     let res = build_disp_result(means, dispersions, binning, n_bins);
     if verbosity.normal_verbosity() {
-        println!("Binning and scaling: {:.2?}", start_bin.elapsed());
         println!(
-            "Total run time HVG dispersion: {:.2?}",
+            "HVG (dispersion): Binning and scaling in {:.2?}",
+            start_bin.elapsed()
+        );
+        println!(
+            "HVG (dispersion): Total run time -> {:.2?}",
             start_total.elapsed()
         );
     }
@@ -833,7 +845,7 @@ pub fn get_hvg_dispersion_streaming(
 
     if verbosity.normal_verbosity() {
         println!(
-            "Calculating dispersion stats for {} genes...",
+            "HVG (dispersion, streaming): Calculating dispersion stats for {} genes...",
             no_genes.separate_with_underscores()
         );
     }
@@ -873,9 +885,12 @@ pub fn get_hvg_dispersion_streaming(
     let res = build_disp_result(means, dispersions, binning, n_bins);
 
     if verbosity.normal_verbosity() {
-        println!("Binning and scaling: {:.2?}", start_bin.elapsed());
         println!(
-            "Total run time HVG dispersion: {:.2?}",
+            "HVG (dispersion, streaming): Binning and scaling in {:.2?}",
+            start_bin.elapsed()
+        );
+        println!(
+            "HVG (dispersion, streaming): Total run time -> {:.2?}",
             start_total.elapsed()
         );
     }
@@ -989,8 +1004,11 @@ pub fn get_hvg_vst_batch_aware(
     let end_setup = start_setup.elapsed();
 
     if verbosity.normal_verbosity() {
-        println!("Setup batch maps: {:.2?}", end_setup);
-        println!("Processing {} batches", n_batches);
+        println!(
+            "HVG (VST, batch-aware): Setup batch maps in {:.2?}",
+            end_setup
+        );
+        println!(" Processing {} batches", n_batches);
     }
 
     // load data
@@ -1000,7 +1018,7 @@ pub fn get_hvg_vst_batch_aware(
     let end_read = start_read.elapsed();
 
     if verbosity.normal_verbosity() {
-        println!("Loaded data: {:.2?}", end_read);
+        println!("HVG (VST, batch-aware): Loaded data in {:.2?}", end_read);
     }
 
     // Calculate the gene statistics
@@ -1029,7 +1047,10 @@ pub fn get_hvg_vst_batch_aware(
     let end_pass_1 = start_pass_1.elapsed();
 
     if verbosity.normal_verbosity() {
-        println!("Calculated gene statistics per batch: {:.2?}", end_pass_1);
+        println!(
+            "HVG (VST, batch-aware): Calculated gene statistics per batch in {:.2?}",
+            end_pass_1
+        );
     }
 
     // fit loess per batch
@@ -1053,7 +1074,10 @@ pub fn get_hvg_vst_batch_aware(
     let end_loess = start_loess.elapsed();
 
     if verbosity.normal_verbosity() {
-        println!("Fitted loess per batch: {:.2?}", end_loess);
+        println!(
+            "HVG (VST, batch-aware): Fitted loess per batch in {:.2?}",
+            end_loess
+        );
     }
 
     // standardise variance
@@ -1086,7 +1110,7 @@ pub fn get_hvg_vst_batch_aware(
 
     if verbosity.normal_verbosity() {
         println!(
-            "Calculated standardised variance per batch: {:.2?}",
+            "HVG (VST, batch-aware): Calculated standardised variance per batch in {:.2?}",
             end_pass_2
         );
     }
@@ -1094,7 +1118,7 @@ pub fn get_hvg_vst_batch_aware(
     let total = start_total.elapsed();
 
     if verbosity.normal_verbosity() {
-        println!("Total runtime batch-aware HVG: {:.2?}", total);
+        println!("HVG (VST, batch-aware): Total runtime -> {:.2?}", total);
     }
 
     let res = batch_means
@@ -1163,14 +1187,17 @@ pub fn get_hvg_vst_batch_aware_streaming(
     let end_setup = start_setup.elapsed();
 
     if verbosity.normal_verbosity() {
-        println!("Setup batch maps: {:.2?}", end_setup);
-        println!("Processing {} batches", n_batches);
+        println!(
+            "HVG (VST, streaming, batch-aware): Setup batch maps in {:.2?}",
+            end_setup
+        );
+        println!(" Processing {} batches", n_batches);
     }
 
     // Pass 1: Calculate mean and variance per batch
     if verbosity.normal_verbosity() {
         println!(
-            "Pass 1/2: Calculating mean and variance for {} genes...",
+            "HVG (VST, streaming, batch-aware): Pass 1/2 -> Calculating mean and variance for {} genes...",
             no_genes.separate_with_underscores()
         );
     }
@@ -1242,7 +1269,9 @@ pub fn get_hvg_vst_batch_aware_streaming(
 
     if verbosity.normal_verbosity() {
         println!("  Fitted loess per batch: {:.2?}", end_loess);
-        println!("Pass 2/2: Calculating standardised variance...");
+        println!(
+            "HVG (VST, streaming, batch-aware): Pass 2/2 -> Calculating standardised variance..."
+        );
     }
 
     // Pass 2: Calculate standardised variance per batch
@@ -1298,7 +1327,10 @@ pub fn get_hvg_vst_batch_aware_streaming(
     let total = start_total.elapsed();
 
     if verbosity.normal_verbosity() {
-        println!("Total runtime batch-aware HVG: {:.2?}", total);
+        println!(
+            "HVG (VST, streaming, batch-aware): Total runtime -> {:.2?}",
+            total
+        );
     }
 
     // Build results per batch
@@ -1362,14 +1394,20 @@ pub fn get_hvg_dispersion_batch_aware(
     }
 
     if verbosity.normal_verbosity() {
-        println!("Processing {} batches", n_batches);
+        println!(
+            "HVG (Dispersion, batch-aware): Processing {} batches",
+            n_batches
+        );
     }
 
     let start_read = Instant::now();
     let reader = ParallelSparseReader::new(f_path)?;
     let mut gene_chunks: Vec<CscGeneChunk> = reader.get_all_genes()?;
     if verbosity.normal_verbosity() {
-        println!("Loaded data: {:.2?}", start_read.elapsed());
+        println!(
+            "HVG (Dispersion, batch-aware): Loaded data in {:.2?}",
+            start_read.elapsed()
+        );
     }
 
     let mut out = Vec::with_capacity(n_batches);
@@ -1393,7 +1431,7 @@ pub fn get_hvg_dispersion_batch_aware(
 
         if verbosity.detailed_verbosity() {
             println!(
-                "Batch {}/{}: {:.2?}",
+                " Batch {}/{}: {:.2?}",
                 batch_idx + 1,
                 n_batches,
                 start_batch.elapsed()
@@ -1403,7 +1441,7 @@ pub fn get_hvg_dispersion_batch_aware(
 
     if verbosity.normal_verbosity() {
         println!(
-            "Total runtime batch-aware HVG dispersion: {:.2?}",
+            "HVG (Dispersion, batch-aware): Total runtime -> {:.2?}",
             start_total.elapsed()
         );
     }
@@ -1456,9 +1494,12 @@ pub fn get_hvg_dispersion_batch_aware_streaming(
     }
 
     if verbosity.normal_verbosity() {
-        println!("Processing {} batches", n_batches);
         println!(
-            "Calculating dispersion stats for {} genes...",
+            "HVG (Dispersion, batch-aware, streaming): Processing {} batches",
+            n_batches
+        );
+        println!(
+            " Calculating dispersion stats for {} genes...",
             no_genes.separate_with_underscores()
         );
     }
@@ -1510,7 +1551,7 @@ pub fn get_hvg_dispersion_batch_aware_streaming(
 
     if verbosity.normal_verbosity() {
         println!(
-            "Total runtime batch-aware streaming HVG dispersion: {:.2?}",
+            "HVG (Dispersion, batch-aware, streaming): Total runtime -> {:.2?}",
             start_total.elapsed()
         );
     }

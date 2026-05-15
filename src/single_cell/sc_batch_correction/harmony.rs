@@ -172,7 +172,12 @@ pub fn run_kmeans_cosine(
     let d = data_cos.ncols();
 
     if verbosity.normal_verbosity() {
-        println!("Running k-means: {} cells, {} dims, {} clusters", n, d, k);
+        println!(
+            " Running k-means: {} cells, {} dims, {} clusters",
+            n.separate_with_underscores(),
+            d,
+            k
+        );
     }
 
     let data_flat = mat_to_flat_row_major(data_cos);

@@ -24,7 +24,7 @@ use thousands::Separable;
 
 use crate::prelude::*;
 use crate::single_cell::sc_processing::pca::pca_on_sc_streaming;
-use crate::single_cell::sc_simd::*;
+use crate::single_cell::sc_utils::simd::*;
 use crate::single_cell::sc_utils::utils_tree::*;
 
 /// How many genes to test for in one go
