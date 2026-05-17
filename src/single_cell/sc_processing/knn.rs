@@ -180,17 +180,18 @@ pub fn compute_distance_knn(a: RowRef<f32>, b: RowRef<f32>, metric: &Dist) -> f3
         let b_slice = unsafe { std::slice::from_raw_parts(b.as_ptr(), ncols) };
 
         match metric {
-            Dist::Euclidean => f32::euclidean_simd(a_slice, b_slice).sqrt(),
+            Dist::SquaredEuclidean => f32::euclidean_simd(a_slice, b_slice).sqrt(),
             Dist::Cosine => {
                 let dot = f32::dot_simd(a_slice, b_slice);
                 let norm_a = f32::calculate_l2_norm(a_slice);
                 let norm_b = f32::calculate_l2_norm(b_slice);
                 1.0 - (dot / (norm_a * norm_b))
             }
+            Dist::Manhattan => unreachable!(),
         }
     } else {
         match metric {
-            Dist::Euclidean => {
+            Dist::SquaredEuclidean => {
                 let mut sum = 0.0f32;
                 for i in 0..ncols {
                     let diff = a[i] - b[i];
@@ -209,6 +210,7 @@ pub fn compute_distance_knn(a: RowRef<f32>, b: RowRef<f32>, metric: &Dist) -> f3
                 }
                 1.0 - (dot / (norm_a.sqrt() * norm_b.sqrt()))
             }
+            Dist::Manhattan => unreachable!(),
         }
     }
 }
@@ -341,7 +343,7 @@ pub fn generate_knn_hnsw(
     seed: usize,
     validate_index: bool,
     verbose: bool,
-) -> Vec<Vec<usize>> {
+) -> Result<Vec<Vec<usize>>, BixverseErrors> {
     if ef_search / no_neighbours <= 2 {
         println!(
             "[!WARNING!] Your 'ef_search' is set to {} for k {}. 'ef_search' should be 2 to 4x 'k'!",
@@ -353,19 +355,19 @@ pub fn generate_knn_hnsw(
         no_neighbours,
         verbose,
         || build_hnsw_index(mat, m, ef_const, dist_metric, seed, verbose),
-        |idx| query_hnsw_self(idx, no_neighbours + 1, ef_search, false, true),
+        |idx| query_hnsw_self(idx, no_neighbours + 1, ef_search, false, true)?,
         "HNSW",
     );
 
     if validate_index && verbose {
-        let recall = index.validate_index(no_neighbours, seed, None);
+        let recall = index.validate_index(no_neighbours, seed, None)?;
         println!(
             "Recall of approximate nearest neighbours search in random subset: {:.2}",
             recall
         );
     }
 
-    res
+    Ok(res)
 }
 
 /// Get the kNN graph based on Annoy
@@ -401,24 +403,24 @@ pub fn generate_knn_annoy(
     seed: usize,
     validate_index: bool,
     verbose: bool,
-) -> Vec<Vec<usize>> {
+) -> Result<Vec<Vec<usize>>, BixverseErrors> {
     let (res, index) = build_and_query_knn(
         no_neighbours,
         verbose,
-        || build_annoy_index(mat, dist_metric.to_string(), n_trees, seed),
-        |idx| query_annoy_self(idx, no_neighbours + 1, search_budget, false, verbose),
+        || build_annoy_index(mat, dist_metric, n_trees, seed)?,
+        |idx| query_annoy_self(idx, no_neighbours + 1, search_budget, false, verbose)?,
         "Annoy",
     );
 
     if validate_index && verbose {
-        let recall = index.validate_index(no_neighbours, seed, None);
+        let recall = index.validate_index(no_neighbours, seed, None)?;
         println!(
             "Recall of approximate nearest neighbours search in random subset: {:.2}",
             recall
         );
     }
 
-    res
+    Ok(res)
 }
 
 /// Get the kNN graph based on IVF
@@ -456,24 +458,24 @@ pub fn generate_knn_ivf(
     seed: usize,
     validate_index: bool,
     verbose: bool,
-) -> Vec<Vec<usize>> {
+) -> Result<Vec<Vec<usize>>, BixverseErrors> {
     let (res, index) = build_and_query_knn(
         no_neighbours,
         verbose,
-        || build_ivf_index(mat, n_list, None, dist_metric, seed, verbose),
-        |idx| query_ivf_self(idx, no_neighbours + 1, n_probe, false, verbose),
+        || build_ivf_index(mat, n_list, None, dist_metric, seed, verbose)?,
+        |idx| query_ivf_self(idx, no_neighbours + 1, n_probe, false, verbose)?,
         "IVF",
     );
 
     if validate_index && verbose {
-        let recall = index.validate_index(no_neighbours, seed, None);
+        let recall = index.validate_index(no_neighbours, seed, None)?;
         println!(
             "Recall of approximate nearest neighbours search in random subset: {:.2}",
             recall
         );
     }
 
-    res
+    Ok(res)
 }
 
 /// Get the kNN graph based on NN-Descent
@@ -513,7 +515,7 @@ pub fn generate_knn_nndescent(
     seed: usize,
     validate_index: bool,
     verbose: bool,
-) -> Vec<Vec<usize>> {
+) -> Result<Vec<Vec<usize>>, BixverseErrors> {
     if ef_budget.is_none() && no_neighbours > 150 {
         println!(
             "[WARNING!] Your 'ef_budget' is set to auto ((k * 2).clamp(50, 200)) for k {}. 'ef_search' should be 2 to 4x 'k'",
@@ -536,21 +538,21 @@ pub fn generate_knn_nndescent(
                 None,
                 seed,
                 verbose,
-            )
+            )?
         },
-        |idx| query_nndescent_self(idx, no_neighbours + 1, ef_budget, false, verbose),
+        |idx| query_nndescent_self(idx, no_neighbours + 1, ef_budget, false, verbose)?,
         "NNDescent",
     );
 
     if validate_index && verbose {
-        let recall = index.validate_index(no_neighbours, seed, None);
+        let recall = index.validate_index(no_neighbours, seed, None)?;
         println!(
             "Recall of approximate nearest neighbours search in random subset: {:.2}",
             recall
         );
     }
 
-    res
+    Ok(res)
 }
 
 /// Get the kNN graph based on an exhaustive search
@@ -573,15 +575,16 @@ pub fn generate_knn_exhaustive(
     dist_metric: &str,
     no_neighbours: usize,
     verbose: bool,
-) -> Vec<Vec<usize>> {
+) -> Result<Vec<Vec<usize>>, BixverseErrors> {
     let (res, _) = build_and_query_knn(
         no_neighbours,
         verbose,
         || build_exhaustive_index(mat, dist_metric),
-        |idx| query_exhaustive_self(idx, no_neighbours + 1, false, verbose),
+        |idx| query_exhaustive_self(idx, no_neighbours + 1, false, verbose)?,
         "exhaustive linear search",
     );
-    res
+
+    Ok(res)
 }
 
 /// Get the kNN graph based on KmKnn
@@ -615,16 +618,16 @@ pub fn generate_knn_kmknn(
     n_list: Option<usize>,
     seed: usize,
     verbose: bool,
-) -> Vec<Vec<usize>> {
+) -> Result<Vec<Vec<usize>>, BixverseErrors> {
     let (res, _) = build_and_query_knn(
         no_neighbours,
         verbose,
-        || build_kmknn_index(mat, dist_metric, n_list, None, seed, verbose),
-        |idx| query_kmknn_self(idx, no_neighbours + 1, false, verbose),
+        || build_kmknn_index(mat, dist_metric, n_list, None, seed, verbose)?,
+        |idx| query_kmknn_self(idx, no_neighbours + 1, false, verbose)?,
         "KmKnn",
     );
 
-    res
+    Ok(res)
 }
 
 ///////////////////
@@ -656,7 +659,7 @@ pub fn generate_knn_with_dist(
     validate_index: bool,
     seed: usize,
     verbose: bool,
-) -> (Vec<Vec<usize>>, Option<Vec<Vec<f32>>>) {
+) -> Result<(Vec<Vec<usize>>, Option<Vec<Vec<f32>>>), BixverseErrors> {
     fn remove_self(
         mut indices: Vec<Vec<usize>>,
         distances: Option<Vec<Vec<f32>>>,
@@ -688,8 +691,8 @@ pub fn generate_knn_with_dist(
     let (indices, distances) = match knn_method {
         KnnSearch::Annoy => {
             let index = timed("Generated Annoy index", verbose, || {
-                build_annoy_index(embd, knn_params.ann_dist.clone(), knn_params.n_tree, seed)
-            });
+                build_annoy_index(embd, &knn_params.ann_dist, knn_params.n_tree, seed)
+            })?;
             let (indices, distances) = timed("Queried Annoy index", verbose, || {
                 query_annoy_self(
                     &index,
@@ -697,10 +700,10 @@ pub fn generate_knn_with_dist(
                     knn_params.search_budget,
                     return_dist,
                     verbose,
-                )
-            });
+
+            })?;
             if validate_index && verbose {
-                let recall = index.validate_index(k_plus_one, seed, None);
+                let recall = index.validate_index(k_plus_one, seed, None)?;
                 println!(
                     "Recall of approximate nearest neighbours search in random subset: {:.2}",
                     recall
@@ -735,9 +738,9 @@ pub fn generate_knn_with_dist(
                     return_dist,
                     verbose,
                 )
-            });
+            })?;
             if validate_index && verbose {
-                let recall = index.validate_index(k_plus_one, seed, None);
+                let recall = index.validate_index(k_plus_one, seed, None)?;
                 println!(
                     "Recall of approximate nearest neighbours search in random subset: {:.2}",
                     recall
@@ -759,7 +762,7 @@ pub fn generate_knn_with_dist(
                     seed,
                     verbose,
                 )
-            });
+            })?;
 
             if knn_params.ef_budget.is_none() && k_plus_one > 150 {
                 println!(
@@ -770,9 +773,9 @@ pub fn generate_knn_with_dist(
 
             let (indices, distances) = timed("Queried NNDescent index", verbose, || {
                 query_nndescent_self(&index, k_plus_one, knn_params.ef_budget, true, verbose)
-            });
+            })?;
             if validate_index && verbose {
-                let recall = index.validate_index(k_plus_one, seed, None);
+                let recall = index.validate_index(k_plus_one, seed, None)?;
                 println!(
                     "Recall of approximate nearest neighbours search in random subset: {:.2}",
                     recall
@@ -785,7 +788,7 @@ pub fn generate_knn_with_dist(
                 build_exhaustive_index(embd, &knn_params.ann_dist)
             });
             timed("Queried Exhaustive index", verbose, || {
-                query_exhaustive_self(&index, k_plus_one, true, verbose)
+                query_exhaustive_self(&index, k_plus_one, true, verbose)?
             })
         }
         KnnSearch::KmKnn => {
@@ -798,10 +801,10 @@ pub fn generate_knn_with_dist(
                     seed,
                     verbose,
                 )
-            });
+            })?;
             timed("Queried KmKnn index", verbose, || {
                 query_kmknn_self(&index, k_plus_one, true, verbose)
-            })
+            })?
         }
         KnnSearch::Ivf => {
             let index = timed("Generated IVF index", verbose, || {
@@ -813,12 +816,12 @@ pub fn generate_knn_with_dist(
                     seed,
                     verbose,
                 )
-            });
+            })?;
             let (indices, distances) = timed("Queried IVF index", verbose, || {
                 query_ivf_self(&index, k_plus_one, knn_params.n_probe, true, verbose)
-            });
+            })?;
             if validate_index && verbose {
-                let recall = index.validate_index(k_plus_one, seed, None);
+                let recall = index.validate_index(k_plus_one, seed, None)?;
                 println!(
                     "Recall of approximate nearest neighbours search in random subset: {:.2}",
                     recall
@@ -828,7 +831,7 @@ pub fn generate_knn_with_dist(
         }
     };
 
-    remove_self(indices, distances)
+    Ok(remove_self(indices, distances))
 }
 
 ///////////

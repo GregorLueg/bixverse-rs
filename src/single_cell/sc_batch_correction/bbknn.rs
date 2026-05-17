@@ -71,7 +71,7 @@ fn get_batch_balanced_knn(
     bbknn_params: &BbknnParams,
     seed: usize,
     verbose: usize,
-) -> (Vec<Vec<usize>>, Vec<Vec<f32>>) {
+) -> Result<(Vec<Vec<usize>>, Vec<Vec<f32>>), BixverseErrors> {
     let verbosity = parse_verbosity_level(verbose);
 
     let n_cells = mat.nrows();
@@ -118,10 +118,10 @@ fn get_batch_balanced_knn(
                 // annoy path with updated functions
                 let index = build_annoy_index(
                     sub_matrix.as_ref(),
-                    bbknn_params.knn_params.ann_dist.clone(),
+                    &bbknn_params.knn_params.ann_dist,
                     bbknn_params.knn_params.n_tree,
                     seed,
-                );
+                )?;
                 query_annoy_index(
                     mat,
                     &index,
@@ -129,7 +129,7 @@ fn get_batch_balanced_knn(
                     bbknn_params.knn_params.search_budget,
                     false,
                     verbosity.detailed_verbosity(),
-                )
+                )?
             }
             KnnSearch::Hnsw => {
                 // hnsw path with updated functions
@@ -148,7 +148,7 @@ fn get_batch_balanced_knn(
                     bbknn_params.knn_params.ef_search,
                     true,
                     verbosity.detailed_verbosity(),
-                )
+                )?
             }
             KnnSearch::NNDescent => {
                 let index = build_nndescent_index(
@@ -162,7 +162,7 @@ fn get_batch_balanced_knn(
                     None,
                     seed,
                     verbosity.detailed_verbosity(),
-                );
+                )?;
 
                 query_nndescent_index(
                     mat,
@@ -171,7 +171,7 @@ fn get_batch_balanced_knn(
                     bbknn_params.knn_params.ef_budget,
                     false,
                     verbosity.detailed_verbosity(),
-                )
+                )?
             }
             &KnnSearch::Exhaustive => {
                 let index =
@@ -183,7 +183,7 @@ fn get_batch_balanced_knn(
                     bbknn_params.neighbours_within_batch + 1,
                     false,
                     verbosity.detailed_verbosity(),
-                )
+                )?
             }
             &KnnSearch::Ivf => {
                 let index = build_ivf_index(
@@ -193,7 +193,7 @@ fn get_batch_balanced_knn(
                     &bbknn_params.knn_params.ann_dist,
                     seed,
                     verbosity.detailed_verbosity(),
-                );
+                )?;
 
                 query_ivf_index(
                     mat,
@@ -202,7 +202,7 @@ fn get_batch_balanced_knn(
                     bbknn_params.knn_params.n_probe,
                     false,
                     verbosity.detailed_verbosity(),
-                )
+                )?
             }
             &KnnSearch::KmKnn => {
                 let index = build_kmknn_index(
@@ -212,7 +212,7 @@ fn get_batch_balanced_knn(
                     None,
                     seed,
                     verbosity.detailed_verbosity(),
-                );
+                )?;
 
                 query_kmknn_index(
                     mat,
@@ -220,7 +220,7 @@ fn get_batch_balanced_knn(
                     bbknn_params.neighbours_within_batch + 1,
                     false,
                     verbosity.detailed_verbosity(),
-                )
+                )?
             }
         };
 
@@ -248,7 +248,7 @@ fn get_batch_balanced_knn(
         }
     }
 
-    (all_indices, all_distances)
+    Ok((all_indices, all_distances))
 }
 
 /// Helper to calculate smooth kNN distances
@@ -582,7 +582,7 @@ pub fn bbknn(
     bbknn_params: &BbknnParams,
     seed: usize,
     verbose: usize,
-) -> (CompressedSparseData2<f32>, CompressedSparseData2<f32>) {
+) -> Result<(CompressedSparseData2<f32>, CompressedSparseData2<f32>), BixverseErrors> {
     let verbosity = parse_verbosity_level(verbose);
 
     // parse it and worst case, I default to Annoy
@@ -594,7 +594,7 @@ pub fn bbknn(
 
     // 1. Get batch-balanced k-NN
     let (mut knn_indices, mut knn_dists) =
-        get_batch_balanced_knn(mat, batch_labels, &knn_method, bbknn_params, seed, verbose);
+        get_batch_balanced_knn(mat, batch_labels, &knn_method, bbknn_params, seed, verbose)?;
 
     // 2. Sort the distance by KNN
     sort_knn_by_distance(&mut knn_indices, &mut knn_dists);
@@ -635,5 +635,5 @@ pub fn bbknn(
         connectivities = trim_graph(connectivities, trim_val);
     }
 
-    (dist, connectivities)
+    Ok((dist, connectivities))
 }

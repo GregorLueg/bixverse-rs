@@ -17,7 +17,7 @@
 use faer::{Mat, MatRef};
 use rayon::prelude::*;
 
-use crate::ml::clustering::k_means::k_means_clusters;
+use crate::ml::clustering::k_means::*;
 use crate::prelude::*;
 
 ////////////////////
@@ -235,18 +235,32 @@ fn col_sds(rows: &[Vec<f64>], means: &[f64]) -> Vec<f64> {
 /// ### Returns
 ///
 /// The lower k-means centroid
-fn lower_centroid_kmeans(values: &[f64], n_iters: usize, seed: usize) -> f64 {
+fn lower_centroid_kmeans(
+    values: &[f64],
+    n_iters: usize,
+    seed: usize,
+) -> Result<f64, BixverseErrors> {
     let n = values.len();
     if n < 2 {
-        return values.first().copied().unwrap_or(0.0);
+        return Ok(values.first().copied().unwrap_or(0.0));
     }
     // wrap as N x 1 f32 Mat for k_means_clusters
     let m = Mat::<f32>::from_fn(n, 1, |i, _| values[i] as f32);
-    let (centroids, _assignments) =
-        k_means_clusters(m.as_ref(), "euclidean", 2, n_iters, seed, false);
+
+    let k_means_params = KMeansParamsWrappers::new(n_iters, None, None);
+
+    let (centroids, _assignments) = k_means_clusters(
+        m.as_ref(),
+        "euclidean",
+        2,
+        Some(k_means_params),
+        seed,
+        false,
+    )?;
     let c0 = centroids[(0, 0)] as f64;
     let c1 = centroids[(1, 0)] as f64;
-    c0.min(c1)
+
+    Ok(c0.min(c1))
 }
 
 /// Per-protein quantile via sort and interp.
@@ -293,7 +307,11 @@ fn col_quantile(rows: &[Vec<f64>], j: usize, q: f64) -> f64 {
 /// ### Returns
 ///
 /// The cell-wise background means
-fn cellwise_background_means(cells: &[Vec<f64>], n_iters: usize, seed: usize) -> Vec<f64> {
+fn cellwise_background_means(
+    cells: &[Vec<f64>],
+    n_iters: usize,
+    seed: usize,
+) -> Result<Vec<f64>, BixverseErrors> {
     cells
         .par_iter()
         .enumerate()
@@ -518,7 +536,7 @@ pub fn dsb_normalise(
                     let col: Vec<f64> = cell_log.iter().map(|r| r[j]).collect();
                     lower_centroid_kmeans(&col, params.kmeans_iters, seed.wrapping_add(j))
                 })
-                .collect();
+                .collect::<Result<Vec<f64>, _>>()?;
 
             cell_log.par_iter_mut().for_each(|row| {
                 for j in 0..n_proteins {
@@ -537,7 +555,7 @@ pub fn dsb_normalise(
         if verbosity.normal_verbosity() {
             println!("DSB: Step II - estimating per-cell background");
         }
-        let bg = cellwise_background_means(&cell_log, params.kmeans_iters, seed);
+        let bg = cellwise_background_means(&cell_log, params.kmeans_iters, seed)?;
 
         let noise_vec = if params.use_isotype_controls && !params.isotype_indices.is_empty() {
             let noise_rows = build_noise_matrix(&cell_log, &params.isotype_indices, &bg);
@@ -754,7 +772,7 @@ mod tests {
     #[test]
     fn lower_centroid_kmeans_picks_lower_mode() {
         let v = bimodal_values();
-        let lower = lower_centroid_kmeans(&v, 50, 42);
+        let lower = lower_centroid_kmeans(&v, 50, 42).unwrap();
         // lower mode is near 0
         assert!(lower < 1.0, "expected lower centroid near 0, got {lower}");
     }
@@ -762,9 +780,17 @@ mod tests {
     #[test]
     fn lower_centroid_kmeans_handles_short_input() {
         let v: Vec<f64> = vec![7.5];
-        assert!(approx_eq(lower_centroid_kmeans(&v, 10, 0), 7.5, EPS64));
+        assert!(approx_eq(
+            lower_centroid_kmeans(&v, 10, 0).unwrap(),
+            7.5,
+            EPS64
+        ));
         let v: Vec<f64> = vec![];
-        assert!(approx_eq(lower_centroid_kmeans(&v, 10, 0), 0.0, EPS64));
+        assert!(approx_eq(
+            lower_centroid_kmeans(&v, 10, 0).unwrap(),
+            0.0,
+            EPS64
+        ));
     }
 
     #[test]

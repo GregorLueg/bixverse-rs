@@ -3,6 +3,7 @@
 //! clustering on the resulting kNN graph with subsequent propagation of the
 //! module membership based on the original nearest centroid.
 
+use ann_search_rs::prelude::*;
 use either::Either;
 use faer::{Mat, MatRef};
 use rand::rngs::StdRng;
@@ -125,6 +126,12 @@ pub struct FastLouvainParams<T> {
     pub kmeans_iters: usize,
     /// Batch size for mini-batch k-means
     pub batch_size: usize,
+    /// The path you wish to take for the Lloyd part (for example force
+    /// Hamerly).
+    pub kmeans_path: Option<LloydPath>,
+    /// The initialisation you want to use (for example force random
+    /// initialisation)
+    pub kmeans_init: Option<KMeansInit>,
     /// Drift threshold for mini batch k-means
     pub drift_threshold: T,
     /// Learning rate exponent for mini batch k-means:
@@ -172,6 +179,8 @@ where
             // kmeans
             n_centroids: 1000,
             kmeans_iters: 100,
+            kmeans_path: None,
+            kmeans_init: None,
             batch_size: 4096,
             drift_threshold: T::from_f64(1e-4).unwrap(),
             lr_alpha: T::from_f64(1.0).unwrap(),
@@ -186,6 +195,17 @@ where
             louvain_iters: 10,
             multi_level_louvain: true,
         }
+    }
+
+    /// Returns the stored k-means parameters
+    ///
+    /// Helper function to extract the parameters
+    ///
+    /// ### Returns
+    ///
+    /// The [KMeansParamsWrappers]
+    pub fn get_kmeans_params(&self) -> KMeansParamsWrappers {
+        KMeansParamsWrappers::new(self.kmeans_iters, self.kmeans_init, self.kmeans_path)
     }
 }
 
@@ -304,10 +324,10 @@ pub fn fast_louvain_clusters(
             data,
             &params.knn_params.ann_dist,
             n_centroids,
-            params.kmeans_iters,
+            Some(params.get_kmeans_params()),
             seed,
             verbosity.detailed_verbosity(),
-        ),
+        )?,
         KMeansType::MiniBatchKMeans => train_centroids_minibatch(
             data,
             &params.knn_params.ann_dist,
@@ -460,10 +480,10 @@ pub fn fast_louvain_clusters_grid(
             data,
             &params.knn_params.ann_dist,
             n_centroids,
-            params.kmeans_iters,
+            Some(params.get_kmeans_params()),
             seed,
             verbosity.detailed_verbosity(),
-        ),
+        )?,
         KMeansType::MiniBatchKMeans => train_centroids_minibatch(
             data,
             &params.knn_params.ann_dist,
@@ -662,6 +682,8 @@ mod tests {
             lr_alpha: 1.0,
             n_centroids: 30,
             kmeans_iters: 100,
+            kmeans_init: None,
+            kmeans_path: None,
             knn_params: knn,
             louvain_iters: 10,
             full_snn: false,

@@ -35,6 +35,11 @@ pub enum BixverseErrors {
     #[error("The faer Eigen decomposition failed - please verify the data")]
     FaerEigenError,
 
+    // -- ann-search-rs --
+    /// Propagate errors from the ann-search-rs crate
+    #[error("Error from the ann-search-rs crate: {0}")]
+    AnnSearchRsError(#[from] ann_search_rs::errors::AnnSearchErrors),
+
     // -- Graph based errors ---
     /// Error for algorithms that expect undirected graphs
     ///

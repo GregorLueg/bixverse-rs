@@ -57,7 +57,7 @@ fn knn_search(
     params: &KnnParams,
     seed: usize,
     verbose: usize,
-) -> (Vec<Vec<usize>>, Vec<Vec<f32>>) {
+) -> Result<(Vec<Vec<usize>>, Vec<Vec<f32>>), BixverseErrors> {
     let verbosity = parse_verbosity_level(verbose);
 
     let knn_method: KnnSearch = parse_knn_method(&params.knn_method).unwrap_or_default();
@@ -79,10 +79,10 @@ fn knn_search(
                 params.ef_search,
                 true,
                 verbosity.detailed_verbosity(),
-            )
+            )?
         }
         KnnSearch::Annoy => {
-            let index = build_annoy_index(reference, params.ann_dist.clone(), params.n_tree, seed);
+            let index = build_annoy_index(reference, &params.ann_dist, params.n_tree, seed)?;
             query_annoy_index(
                 query,
                 &index,
@@ -90,7 +90,7 @@ fn knn_search(
                 params.search_budget,
                 true,
                 verbosity.detailed_verbosity(),
-            )
+            )?
         }
         KnnSearch::NNDescent => {
             let index = build_nndescent_index(
@@ -104,7 +104,7 @@ fn knn_search(
                 None,
                 seed,
                 verbosity.detailed_verbosity(),
-            );
+            )?;
             query_nndescent_index(
                 query,
                 &index,
@@ -112,11 +112,11 @@ fn knn_search(
                 params.ef_budget,
                 true,
                 verbosity.detailed_verbosity(),
-            )
+            )?
         }
         KnnSearch::Exhaustive => {
             let index = build_exhaustive_index(reference, &params.ann_dist);
-            query_exhaustive_index(query, &index, k, true, verbosity.detailed_verbosity())
+            query_exhaustive_index(query, &index, k, true, verbosity.detailed_verbosity())?
         }
         KnnSearch::Ivf => {
             let index = build_ivf_index(
@@ -126,7 +126,7 @@ fn knn_search(
                 &params.ann_dist,
                 seed,
                 verbosity.detailed_verbosity(),
-            );
+            )?;
             query_ivf_index(
                 query,
                 &index,
@@ -134,7 +134,7 @@ fn knn_search(
                 params.n_list,
                 true,
                 verbosity.detailed_verbosity(),
-            )
+            )?
         }
         KnnSearch::KmKnn => {
             let index = build_kmknn_index(
@@ -144,13 +144,13 @@ fn knn_search(
                 None,
                 seed,
                 verbosity.detailed_verbosity(),
-            );
+            )?;
 
-            query_kmknn_index(query, &index, k, true, verbosity.detailed_verbosity())
+            query_kmknn_index(query, &index, k, true, verbosity.detailed_verbosity())?
         }
     };
 
-    (indices, dist.unwrap())
+    Ok((indices, dist.unwrap()))
 }
 
 /////////////
@@ -322,7 +322,7 @@ pub fn tricube_weighted_correction(
     ndist: f32,
     knn_params: &KnnParams,
     seed: usize,
-) -> Mat<f32> {
+) -> Result<Mat<f32>, BixverseErrors> {
     let n_cells = data.nrows();
     let n_features = data.ncols();
     let n_mnn = mnn_indices.len();
@@ -333,7 +333,7 @@ pub fn tricube_weighted_correction(
     let safe_k = k.min(n_mnn);
 
     // find k nearest MNN neighbours for every cell
-    let (knn_idx, knn_dist) = knn_search(*data, mnn_data.as_ref(), safe_k, knn_params, seed, 0);
+    let (knn_idx, knn_dist) = knn_search(*data, mnn_data.as_ref(), safe_k, knn_params, seed, 0)?;
 
     // compute tricube-weighted average corrections
     let mut correction_out: Mat<f32> = Mat::zeros(n_cells, n_features);
@@ -399,9 +399,9 @@ pub fn tricube_weighted_correction(
     }
 
     // Return data + correction
-    Mat::from_fn(n_cells, n_features, |i, g| {
+    Ok(Mat::from_fn(n_cells, n_features, |i, g| {
         data.get(i, g) + correction_out[(i, g)]
-    })
+    }))
 }
 
 /// Merge two batches following the fastMNN algorithm.
@@ -441,7 +441,7 @@ pub fn merge_two_batches(
     batch_vecs: &mut Vec<Vec<f32>>,
     seed: usize,
     verbose: usize,
-) -> Mat<f32> {
+) -> Result<Mat<f32>, BixverseErrors> {
     let verbosity = parse_verbosity_level(verbose);
 
     let n_features = data_1.ncols();
@@ -462,7 +462,7 @@ pub fn merge_two_batches(
         &params.knn_params,
         seed,
         verbose,
-    );
+    )?;
     let (knn_2_to_1, _) = knn_search(
         right.as_ref(),
         *data_1,
@@ -470,7 +470,7 @@ pub fn merge_two_batches(
         &params.knn_params,
         seed,
         verbose,
-    );
+    )?;
 
     let (mnn_1, mnn_2) = find_mutual_nns(&knn_1_to_2, &knn_2_to_1);
 
@@ -479,13 +479,13 @@ pub fn merge_two_batches(
             eprintln!("Warning: No MNN pairs found, skipping correction");
         }
         let n_total = data_1.nrows() + right.nrows();
-        return Mat::from_fn(n_total, n_features, |row, col| {
+        return Ok(Mat::from_fn(n_total, n_features, |row, col| {
             if row < data_1.nrows() {
                 *data_1.get(row, col)
             } else {
                 *right.as_ref().get(row - data_1.nrows(), col)
             }
-        });
+        }));
     }
 
     if verbosity.normal_verbosity() {
@@ -528,20 +528,21 @@ pub fn merge_two_batches(
         params.ndist,
         &params.knn_params,
         seed,
-    );
+    )?;
 
     // Record this batch vector for future orthogonalisation steps
     batch_vecs.push(overall_batch);
 
     // Step 7: Stack left (centred) and right (corrected)
     let n_total = left_centered.nrows() + right_corrected.nrows();
-    Mat::from_fn(n_total, n_features, |row, col| {
+
+    Ok(Mat::from_fn(n_total, n_features, |row, col| {
         if row < left_centered.nrows() {
             left_centered[(row, col)]
         } else {
             right_corrected[(row - left_centered.nrows(), col)]
         }
-    })
+    }))
 }
 
 /// Fast MNN with cell order tracking
@@ -565,7 +566,7 @@ pub fn fast_mnn(
     params: &FastMnnParams,
     seed: usize,
     verbose: usize,
-) -> (Mat<f32>, Vec<usize>) {
+) -> Result<(Mat<f32>, Vec<usize>), BixverseErrors> {
     assert_eq!(batches.len(), original_indices.len());
 
     let verbosity = parse_verbosity_level(verbose);
@@ -589,7 +590,7 @@ pub fn fast_mnn(
             &mut batch_vecs,
             seed,
             verbose,
-        );
+        )?;
         let elapsed = start.elapsed();
 
         if verbosity.normal_verbosity() {
@@ -604,7 +605,7 @@ pub fn fast_mnn(
         index_map.extend(batch_indices);
     }
 
-    (merged, index_map)
+    Ok((merged, index_map))
 }
 
 /// Reorder corrected PCA back to original cell order
@@ -751,7 +752,7 @@ pub fn fast_mnn_main(
         }
     }
 
-    let (corrected, index_map) = fast_mnn(pca_batches, original_indices, params, seed, verbose);
+    let (corrected, index_map) = fast_mnn(pca_batches, original_indices, params, seed, verbose)?;
 
     Ok(reorder_to_original(&corrected, &index_map))
 }

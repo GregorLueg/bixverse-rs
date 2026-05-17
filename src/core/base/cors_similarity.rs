@@ -18,6 +18,10 @@ use crate::prelude::*;
 /////////////
 
 /// Returns the faer parallelism Enum
+///
+/// ### Returns
+///
+/// The [Par] enum for faer.
 #[inline]
 fn faer_parallelism() -> Par {
     Par::Rayon(std::thread::available_parallelism().unwrap())

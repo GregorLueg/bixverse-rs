@@ -75,27 +75,46 @@ impl KnnIndex {
         knn_params: &KnnParams,
         seed: usize,
         verbose: bool,
-    ) -> Self {
+    ) -> Result<Self, BixverseErrors> {
         match index_type {
             KnnIndexType::AnnoyIndex => {
                 let dist = ann_search_rs::utils::dist::parse_ann_dist(&knn_params.ann_dist)
-                    .unwrap_or_default();
+                    .unwrap_or_else(|| {
+                        println!("[WARNING] Weird string used for distance metric. Using default squared Euclidean distance");
+                        Dist::default()
+                    });
 
-                KnnIndex::Annoy(AnnoyIndex::new(embd, knn_params.n_tree, dist, seed))
+                Ok(KnnIndex::Annoy(AnnoyIndex::new(
+                    embd,
+                    knn_params.n_tree,
+                    dist,
+                    seed,
+                )?))
             }
-            KnnIndexType::HnswIndex => KnnIndex::Hnsw(HnswIndex::build(
-                embd,
-                knn_params.m,
-                knn_params.ef_construction,
-                &knn_params.ann_dist,
-                seed,
-                verbose,
-            )),
+            KnnIndexType::HnswIndex => {
+                let dist = ann_search_rs::utils::dist::parse_ann_dist(&knn_params.ann_dist)
+                    .unwrap_or_else(|| {
+                        println!("[WARNING] Weird string used for distance metric. Using default squared Euclidean distance");
+                        Dist::default()
+                    });
+
+                Ok(KnnIndex::Hnsw(HnswIndex::build(
+                    embd,
+                    knn_params.m,
+                    knn_params.ef_construction,
+                    &dist,
+                    seed,
+                    verbose,
+                )))
+            }
             KnnIndexType::NNDescentIndex => {
                 let dist = ann_search_rs::utils::dist::parse_ann_dist(&knn_params.ann_dist)
-                    .unwrap_or_default();
+                    .unwrap_or_else(|| {
+                        println!("[WARNING] Weird string used for distance metric. Using default squared Euclidean distance");
+                        Dist::default()
+                    });
 
-                KnnIndex::NNDescent(NNDescent::new(
+                Ok(KnnIndex::NNDescent(NNDescent::new(
                     embd,
                     dist,
                     None,
@@ -106,7 +125,7 @@ impl KnnIndex {
                     knn_params.diversify_prob,
                     seed,
                     verbose,
-                ))
+                )?))
             }
         }
     }
@@ -127,11 +146,11 @@ impl KnnIndex {
         query_point: &[f32],
         knn_params: &KnnParams,
         k: usize,
-    ) -> (Vec<usize>, Vec<f32>) {
+    ) -> Result<(Vec<usize>, Vec<f32>), BixverseErrors> {
         match self {
-            KnnIndex::Annoy(index) => index.query(query_point, k, knn_params.search_budget),
-            KnnIndex::Hnsw(index) => index.query(query_point, k, knn_params.ef_search),
-            KnnIndex::NNDescent(index) => index.query(query_point, k, None),
+            KnnIndex::Annoy(index) => Ok(index.query(query_point, k, knn_params.search_budget)?),
+            KnnIndex::Hnsw(index) => Ok(index.query(query_point, k, knn_params.ef_search)?),
+            KnnIndex::NNDescent(index) => Ok(index.query(query_point, k, None)?),
         }
     }
 }
@@ -301,10 +320,10 @@ fn find_nearest_with_index(
     index: &KnnIndex,
     knn_params: &KnnParams,
     median_point: &[f32],
-) -> usize {
-    let (indices, _) = index.query_single(median_point, knn_params, 1);
+) -> Result<usize, BixverseErrors> {
+    let (indices, _) = index.query_single(median_point, knn_params, 1)?;
 
-    indices[0]
+    Ok(indices[0])
 }
 
 /// Refine neighbourhood sampling by shifting indices towards local median
@@ -335,7 +354,7 @@ pub fn refine_sampling_with_strategy(
     strategy: &RefinementStrategy,
     knn_index: Option<&KnnIndex>,
     verbose: usize,
-) -> Vec<usize> {
+) -> Result<Vec<usize>, BixverseErrors> {
     let verbosity = parse_verbosity_level(verbose);
 
     if verbosity.normal_verbosity() {
@@ -364,7 +383,7 @@ pub fn refine_sampling_with_strategy(
             }
             RefinementStrategy::IndexBased => {
                 if let Some(index) = knn_index {
-                    find_nearest_with_index(index, knn_params, &median_point)
+                    find_nearest_with_index(index, knn_params, &median_point)?
                 } else {
                     // Fallback to brute force
                     find_nearest_bruteforce(embd, &median_point, &dist_metric)
@@ -375,7 +394,7 @@ pub fn refine_sampling_with_strategy(
         refined.push(best_idx);
     }
 
-    refined
+    Ok(refined)
 }
 
 /// Compute distances to the k-th nearest neighbour for each index cell
@@ -404,7 +423,7 @@ pub fn compute_kth_distances_from_matrix(
             compute_distance_knn(
                 embd.row(cell_idx),
                 embd.row(kth_neighbour),
-                &Dist::Euclidean,
+                &Dist::SquaredEuclidean,
             ) as f64
         })
         .collect()

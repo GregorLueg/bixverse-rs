@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use thousands::Separable;
 
+use crate::ml::clustering::k_means::*;
 use crate::prelude::*;
 use crate::single_cell::sc_processing::pca::pca_on_sc_streaming;
 use crate::single_cell::sc_utils::simd::*;
@@ -2820,16 +2821,18 @@ fn batch_genes_correlated(
         println!("Clustering {} genes into {} groups", n_genes, n_centroids);
     }
 
+    let k_means_params = KMeansParamsWrappers::new(50, None, None);
+
     let centroids = train_centroids(
         &gene_loadings,
         dim,
         n_genes,
         n_centroids,
-        &Dist::Euclidean,
-        50,
+        &Dist::SquaredEuclidean,
+        Some(k_means_params.get_data()),
         seed,
         verbosity.detailed_verbosity(),
-    );
+    )?;
 
     let centroid_norms: Vec<f32> = (0..n_centroids)
         .map(|i| {
@@ -2853,7 +2856,7 @@ fn batch_genes_correlated(
         &centroids,
         &centroid_norms,
         n_centroids,
-        &Dist::Euclidean,
+        &Dist::SquaredEuclidean,
     );
 
     let mut clusters: Vec<Vec<usize>> = vec![Vec::new(); n_centroids];
