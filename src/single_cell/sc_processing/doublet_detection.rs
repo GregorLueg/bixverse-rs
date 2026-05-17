@@ -525,7 +525,7 @@ impl BoostClassifier {
                 knn_params: centroid_knn_params,
                 louvain_iters: self.params.louvain_iters,
                 batch_size: self.params.fast_cluster_params.batch_size,
-                kmeans_iters: self.params.fast_cluster_params.kmeans_iters,
+                kmeans_params: self.params.fast_cluster_params.kmeans_params.clone(),
                 multi_level_louvain: false,
                 ..Default::default()
             };
@@ -570,7 +570,7 @@ impl BoostClassifier {
                 &self.params.knn_params,
                 seed,
                 verbosity.detailed_verbosity(),
-            );
+            )?;
 
             let start_graph = Instant::now();
             // for doublet detection symmetrisation is not very good... better

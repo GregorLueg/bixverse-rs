@@ -396,7 +396,7 @@ impl Scrublet {
             &self.params.knn_params,
             seed,
             verbosity.detailed_verbosity(),
-        );
+        )?;
 
         if verbosity.normal_verbosity() {
             println!("Done with kNN generation in {:.2?}", start_knn.elapsed());

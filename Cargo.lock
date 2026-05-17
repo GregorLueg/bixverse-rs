@@ -165,6 +165,7 @@ dependencies = [
  "extendr-api",
  "faer",
  "faer-entity",
+ "fmt",
  "half",
  "hdf5-metno",
  "indexmap",
@@ -689,6 +690,12 @@ name = "fixedbitset"
 version = "0.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99"
+
+[[package]]
+name = "fmt"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09904adae26440d46daeacb5ed7922fee69d43ebf84d31e078cd49652cecd718"
 
 [[package]]
 name = "foldhash"

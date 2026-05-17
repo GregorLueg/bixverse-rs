@@ -71,7 +71,7 @@ fn get_batch_balanced_knn(
     bbknn_params: &BbknnParams,
     seed: usize,
     verbose: usize,
-) -> Result<(Vec<Vec<usize>>, Vec<Vec<f32>>), BixverseErrors> {
+) -> ScKnnResults {
     let verbosity = parse_verbosity_level(verbose);
 
     let n_cells = mat.nrows();

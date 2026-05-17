@@ -5,6 +5,7 @@ use extendr_api::*;
 use std::collections::HashMap;
 
 use crate::core::math::sparse::parse_compressed_sparse_format;
+use crate::ml::clustering::k_means::KMeansParamsWrappers;
 use crate::single_cell::mc_generation::{
     hdwgcna_meta_cells::BootstrappedMetaCellParams, metacells2::params::*,
     seacells::SEACellsParams, super_cells::SuperCellParams,
@@ -836,6 +837,7 @@ impl FastLouvainParams<f32> {
     /// The `BbknnParams` with all of the parameters.
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let knn_params = KnnParams::from_r_list(r_list.clone())?;
+        let kmeans_params = KMeansParamsWrappers::from_r_list(r_list.clone())?;
         let params: HashMap<&str, Robj> = r_list.try_into()?;
         let defaults: FastLouvainParams<f32> = Self::default();
 
@@ -851,12 +853,6 @@ impl FastLouvainParams<f32> {
             .and_then(|v| v.as_integer())
             .map(|v| v as usize)
             .unwrap_or(defaults.n_centroids);
-
-        let kmeans_iters = params
-            .get("kmeans_iters")
-            .and_then(|v| v.as_integer())
-            .map(|v| v as usize)
-            .unwrap_or(defaults.kmeans_iters);
 
         let batch_size = params
             .get("batch_size")
@@ -907,7 +903,7 @@ impl FastLouvainParams<f32> {
 
         Ok(Self {
             n_centroids,
-            kmeans_iters,
+            kmeans_params,
             batch_size,
             drift_threshold,
             lr_alpha,
@@ -1365,6 +1361,7 @@ impl HarmonyParams {
     /// The `HarmonyParams` with all parameters set.
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let defaults = Self::default();
+        let kmeans_params = KMeansParamsWrappers::from_r_list(r_list.clone())?;
         let params_list: HashMap<&str, Robj> = r_list.try_into()?;
 
         let k = params_list
@@ -1438,6 +1435,7 @@ impl HarmonyParams {
             epsilon_kmeans,
             epsilon_harmony,
             window_size,
+            kmeans_params,
         })
     }
 }
@@ -1461,6 +1459,7 @@ impl HarmonyParamsV2 {
     /// The `HarmonyParams` with all parameters set.
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let defaults = Self::default();
+        let kmeans_params = KMeansParamsWrappers::from_r_list(r_list.clone())?;
         let params_list: HashMap<&str, Robj> = r_list.try_into()?;
 
         let k = params_list
@@ -1561,6 +1560,7 @@ impl HarmonyParamsV2 {
             tau,
             batch_proportion_cutoff,
             use_dynamic_lambda,
+            kmeans_params,
         })
     }
 }

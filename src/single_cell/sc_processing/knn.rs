@@ -12,6 +12,16 @@ use std::time::Instant;
 use crate::core::math::sparse::coo_to_csr;
 use crate::prelude::*;
 
+///////////
+// Types //
+///////////
+
+/// Single cell Knn results with optional distances
+pub type ScKnnOptionVersion = Result<(Vec<Vec<usize>>, Option<Vec<Vec<f32>>>), BixverseErrors>;
+
+/// Single cell Knn results with distances
+pub type ScKnnResults = Result<(Vec<Vec<usize>>, Vec<Vec<f32>>), BixverseErrors>;
+
 //////////
 // Enum //
 //////////
@@ -271,21 +281,21 @@ pub fn knn_to_sparse_dist(
 /// ### Returns
 ///
 /// The kNN graph
-fn build_and_query_knn<I>(
+fn build_and_query_knn<I, E>(
     no_neighbours: usize,
     verbose: bool,
-    build_index: impl FnOnce() -> I,
-    query_index: impl FnOnce(&I) -> (Vec<Vec<usize>>, Option<Vec<Vec<f32>>>),
+    build_index: impl FnOnce() -> Result<I, E>,
+    query_index: impl FnOnce(&I) -> Result<(Vec<Vec<usize>>, Option<Vec<Vec<f32>>>), E>,
     index_name: &str,
-) -> (Vec<Vec<usize>>, I) {
+) -> Result<(Vec<Vec<usize>>, I), E> {
     let start = Instant::now();
-    let index = build_index();
+    let index = build_index()?;
     if verbose {
         println!("Generated {} index: {:.2?}", index_name, start.elapsed());
     }
 
     let start = Instant::now();
-    let (indices, _) = query_index(&index);
+    let (indices, _) = query_index(&index)?;
 
     let res: Vec<Vec<usize>> = indices
         .into_iter()
@@ -305,7 +315,7 @@ fn build_and_query_knn<I>(
         );
     }
 
-    (res, index)
+    Ok((res, index))
 }
 
 /// Get the kNN graph based on HNSW
@@ -354,10 +364,19 @@ pub fn generate_knn_hnsw(
     let (res, index) = build_and_query_knn(
         no_neighbours,
         verbose,
-        || build_hnsw_index(mat, m, ef_const, dist_metric, seed, verbose),
-        |idx| query_hnsw_self(idx, no_neighbours + 1, ef_search, false, true)?,
+        || {
+            Ok(build_hnsw_index(
+                mat,
+                m,
+                ef_const,
+                dist_metric,
+                seed,
+                verbose,
+            ))
+        },
+        |idx| query_hnsw_self(idx, no_neighbours + 1, ef_search, false, true),
         "HNSW",
-    );
+    )?;
 
     if validate_index && verbose {
         let recall = index.validate_index(no_neighbours, seed, None)?;
@@ -407,10 +426,10 @@ pub fn generate_knn_annoy(
     let (res, index) = build_and_query_knn(
         no_neighbours,
         verbose,
-        || build_annoy_index(mat, dist_metric, n_trees, seed)?,
-        |idx| query_annoy_self(idx, no_neighbours + 1, search_budget, false, verbose)?,
+        || build_annoy_index(mat, dist_metric, n_trees, seed),
+        |idx| query_annoy_self(idx, no_neighbours + 1, search_budget, false, verbose),
         "Annoy",
-    );
+    )?;
 
     if validate_index && verbose {
         let recall = index.validate_index(no_neighbours, seed, None)?;
@@ -462,10 +481,10 @@ pub fn generate_knn_ivf(
     let (res, index) = build_and_query_knn(
         no_neighbours,
         verbose,
-        || build_ivf_index(mat, n_list, None, dist_metric, seed, verbose)?,
-        |idx| query_ivf_self(idx, no_neighbours + 1, n_probe, false, verbose)?,
+        || build_ivf_index(mat, n_list, None, dist_metric, seed, verbose),
+        |idx| query_ivf_self(idx, no_neighbours + 1, n_probe, false, verbose),
         "IVF",
-    );
+    )?;
 
     if validate_index && verbose {
         let recall = index.validate_index(no_neighbours, seed, None)?;
@@ -538,11 +557,11 @@ pub fn generate_knn_nndescent(
                 None,
                 seed,
                 verbose,
-            )?
+            )
         },
-        |idx| query_nndescent_self(idx, no_neighbours + 1, ef_budget, false, verbose)?,
+        |idx| query_nndescent_self(idx, no_neighbours + 1, ef_budget, false, verbose),
         "NNDescent",
-    );
+    )?;
 
     if validate_index && verbose {
         let recall = index.validate_index(no_neighbours, seed, None)?;
@@ -579,10 +598,10 @@ pub fn generate_knn_exhaustive(
     let (res, _) = build_and_query_knn(
         no_neighbours,
         verbose,
-        || build_exhaustive_index(mat, dist_metric),
-        |idx| query_exhaustive_self(idx, no_neighbours + 1, false, verbose)?,
+        || Ok(build_exhaustive_index(mat, dist_metric)),
+        |idx| query_exhaustive_self(idx, no_neighbours + 1, false, verbose),
         "exhaustive linear search",
-    );
+    )?;
 
     Ok(res)
 }
@@ -622,10 +641,10 @@ pub fn generate_knn_kmknn(
     let (res, _) = build_and_query_knn(
         no_neighbours,
         verbose,
-        || build_kmknn_index(mat, dist_metric, n_list, None, seed, verbose)?,
-        |idx| query_kmknn_self(idx, no_neighbours + 1, false, verbose)?,
+        || build_kmknn_index(mat, dist_metric, n_list, None, seed, verbose),
+        |idx| query_kmknn_self(idx, no_neighbours + 1, false, verbose),
         "KmKnn",
-    );
+    )?;
 
     Ok(res)
 }
@@ -659,7 +678,7 @@ pub fn generate_knn_with_dist(
     validate_index: bool,
     seed: usize,
     verbose: bool,
-) -> Result<(Vec<Vec<usize>>, Option<Vec<Vec<f32>>>), BixverseErrors> {
+) -> ScKnnOptionVersion {
     fn remove_self(
         mut indices: Vec<Vec<usize>>,
         distances: Option<Vec<Vec<f32>>>,
@@ -700,7 +719,7 @@ pub fn generate_knn_with_dist(
                     knn_params.search_budget,
                     return_dist,
                     verbose,
-
+                )
             })?;
             if validate_index && verbose {
                 let recall = index.validate_index(k_plus_one, seed, None)?;
@@ -788,8 +807,8 @@ pub fn generate_knn_with_dist(
                 build_exhaustive_index(embd, &knn_params.ann_dist)
             });
             timed("Queried Exhaustive index", verbose, || {
-                query_exhaustive_self(&index, k_plus_one, true, verbose)?
-            })
+                query_exhaustive_self(&index, k_plus_one, true, verbose)
+            })?
         }
         KnnSearch::KmKnn => {
             let index = timed("Generated KmKnn index", verbose, || {

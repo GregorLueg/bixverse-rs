@@ -1,6 +1,7 @@
 //! Contains correlation, co-variance, distance calculations and similarity
 //! types.
 
+use ann_search_rs::utils::dist::SimdDistance;
 use faer::linalg::matmul::triangular::{BlockStructure, matmul as triangular_matmul};
 use faer::{Accum, Par};
 use faer::{Mat, MatRef, Scale};
@@ -417,9 +418,9 @@ where
 /// The distance matrix based on the L1 Norm.
 pub fn column_pairwise_l1_norm<T>(mat: &MatRef<T>) -> Mat<T>
 where
-    T: BixverseFloat,
+    T: BixverseFloat + SimdDistance,
 {
-    let (nrows, ncols) = mat.shape();
+    let (_, ncols) = mat.shape();
     let mut res: Mat<T> = Mat::zeros(ncols, ncols);
 
     let pairs: Vec<(usize, usize)> = (0..ncols)
@@ -429,34 +430,12 @@ where
     let results: Vec<(usize, usize, T)> = pairs
         .par_iter()
         .map(|&(i, j)| {
-            let col_i = mat.col(i);
-            let col_j = mat.col(j);
+            let col_i: Vec<T> = mat.col(i).iter().cloned().collect();
+            let col_j: Vec<T> = mat.col(j).iter().cloned().collect();
 
-            let mut sum_abs = T::zero();
+            let dist = T::manhattan_simd(&col_i, &col_j);
 
-            // manual unrolling in elements of 4
-            // could implement SIMD instructions for better performance
-            let mut k = 0_usize;
-
-            while k + 3 < nrows {
-                unsafe {
-                    sum_abs += (*col_i.get_unchecked(k) - *col_j.get_unchecked(k)).abs();
-                    sum_abs += (*col_i.get_unchecked(k + 1) - *col_j.get_unchecked(k + 1)).abs();
-                    sum_abs += (*col_i.get_unchecked(k + 2) - *col_j.get_unchecked(k + 2)).abs();
-                    sum_abs += (*col_i.get_unchecked(k + 3) - *col_j.get_unchecked(k + 3)).abs();
-                }
-                k += 4;
-            }
-
-            // remaining elements
-            while k < nrows {
-                unsafe {
-                    sum_abs += (*col_i.get_unchecked(k) - *col_j.get_unchecked(k)).abs();
-                }
-                k += 1;
-            }
-
-            (i, j, sum_abs)
+            (i, j, dist)
         })
         .collect();
 
@@ -480,9 +459,9 @@ where
 /// The Canberra distance matrix between all columns.
 pub fn column_pairwise_canberra_dist<T>(mat: &MatRef<T>) -> Mat<T>
 where
-    T: BixverseFloat,
+    T: BixverseFloat + SimdDistance,
 {
-    let (nrows, ncols) = mat.shape();
+    let (_, ncols) = mat.shape();
     let mut res: Mat<T> = Mat::zeros(ncols, ncols);
 
     let pairs: Vec<(usize, usize)> = (0..ncols)
@@ -492,24 +471,12 @@ where
     let results: Vec<(usize, usize, T)> = pairs
         .par_iter()
         .map(|&(i, j)| {
-            let col_i = mat.col(i);
-            let col_j = mat.col(j);
+            let col_i: Vec<T> = mat.col(i).iter().cloned().collect();
+            let col_j: Vec<T> = mat.col(j).iter().cloned().collect();
 
-            let mut sum_canberra = T::zero();
-            for k in 0..nrows {
-                let val_i = *col_i.get(k);
-                let val_j = *col_j.get(k);
+            let dist = T::canberra_simd(&col_i, &col_j);
 
-                let abs_i = val_i.abs();
-                let abs_j = val_j.abs();
-                let denom = abs_i + abs_j;
-
-                if denom > T::from_f32(f32::EPSILON).unwrap() {
-                    sum_canberra += (val_i - val_j).abs() / denom;
-                }
-            }
-
-            (i, j, sum_canberra)
+            (i, j, dist)
         })
         .collect();
 

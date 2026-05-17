@@ -650,7 +650,7 @@ pub fn meld_landmark(
         &params.knn_params,
         seed as usize,
         verbose,
-    );
+    )?;
 
     let ll_squared = params.knn_params.ann_dist == "euclidean";
     let ll_kernel = compute_diffusion_kernel(&ll_idx, &ll_dist, k_ll, ll_squared);

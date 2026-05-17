@@ -3,7 +3,6 @@
 //! clustering on the resulting kNN graph with subsequent propagation of the
 //! module membership based on the original nearest centroid.
 
-use ann_search_rs::prelude::*;
 use either::Either;
 use faer::{Mat, MatRef};
 use rand::rngs::StdRng;
@@ -122,21 +121,15 @@ pub struct FastLouvainParams<T> {
     // -- k means --
     /// Number of k-means centroids.
     pub n_centroids: usize,
-    /// Number of k-means iterations.
-    pub kmeans_iters: usize,
     /// Batch size for mini-batch k-means
     pub batch_size: usize,
-    /// The path you wish to take for the Lloyd part (for example force
-    /// Hamerly).
-    pub kmeans_path: Option<LloydPath>,
-    /// The initialisation you want to use (for example force random
-    /// initialisation)
-    pub kmeans_init: Option<KMeansInit>,
     /// Drift threshold for mini batch k-means
     pub drift_threshold: T,
     /// Learning rate exponent for mini batch k-means:
     /// `eta = m / count[c]^lr_alpha`
     pub lr_alpha: T,
+    /// k-means parameters, see [KMeansParamsWrappers]
+    pub kmeans_params: KMeansParamsWrappers,
 
     // -- knn --
     /// [KnnParams] parameters applied to the centroids. `ann_dist` also drives
@@ -178,12 +171,10 @@ where
         Self {
             // kmeans
             n_centroids: 1000,
-            kmeans_iters: 100,
-            kmeans_path: None,
-            kmeans_init: None,
             batch_size: 4096,
             drift_threshold: T::from_f64(1e-4).unwrap(),
             lr_alpha: T::from_f64(1.0).unwrap(),
+            kmeans_params: KMeansParamsWrappers::default(),
             // snn
             full_snn: false,
             pruning: None,
@@ -205,7 +196,7 @@ where
     ///
     /// The [KMeansParamsWrappers]
     pub fn get_kmeans_params(&self) -> KMeansParamsWrappers {
-        KMeansParamsWrappers::new(self.kmeans_iters, self.kmeans_init, self.kmeans_path)
+        self.kmeans_params.clone()
     }
 }
 
@@ -332,7 +323,7 @@ pub fn fast_louvain_clusters(
             data,
             &params.knn_params.ann_dist,
             n_centroids,
-            params.kmeans_iters,
+            params.kmeans_params.clone().get_data().iters,
             params.batch_size,
             params.drift_threshold,
             params.lr_alpha,
@@ -347,7 +338,7 @@ pub fn fast_louvain_clusters(
         &params.knn_params,
         seed,
         verbosity.detailed_verbosity(),
-    );
+    )?;
 
     let graph = if run_snn {
         let pruning = params
@@ -488,7 +479,7 @@ pub fn fast_louvain_clusters_grid(
             data,
             &params.knn_params.ann_dist,
             n_centroids,
-            params.kmeans_iters,
+            params.kmeans_params.clone().get_data().iters,
             params.batch_size,
             params.drift_threshold,
             params.lr_alpha,
@@ -503,7 +494,7 @@ pub fn fast_louvain_clusters_grid(
         &params.knn_params,
         seed,
         verbosity.detailed_verbosity(),
-    );
+    )?;
 
     let graph = if run_snn {
         let pruning = params
@@ -681,9 +672,7 @@ mod tests {
             drift_threshold: 1e-4,
             lr_alpha: 1.0,
             n_centroids: 30,
-            kmeans_iters: 100,
-            kmeans_init: None,
-            kmeans_path: None,
+            kmeans_params: KMeansParamsWrappers::default(),
             knn_params: knn,
             louvain_iters: 10,
             full_snn: false,

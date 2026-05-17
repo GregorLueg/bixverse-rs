@@ -5,7 +5,7 @@ use faer::{Mat, MatRef};
 
 use super::graph_structures::{adjacency_to_laplacian, get_knn_graph_adj};
 
-use crate::ml::clustering::k_means::k_means_clusters;
+use crate::ml::clustering::k_means::*;
 use crate::prelude::*;
 
 ////////////////////
@@ -29,9 +29,9 @@ pub fn spectral_clustering<T>(
     similarities: &MatRef<T>,
     k_neighbours: usize,
     n_clusters: usize,
-    max_iters: usize,
+    kmeans_params: Option<KMeansParamsWrappers>,
     seed: usize,
-) -> Vec<usize>
+) -> Result<Vec<usize>, BixverseErrors>
 where
     T: BixverseFloat + AnnSearchFloat,
 {
@@ -69,12 +69,12 @@ where
         features.as_ref(),
         "euclidean",
         n_clusters,
-        max_iters,
+        kmeans_params,
         seed,
         false,
-    );
+    )?;
 
-    assignments
+    Ok(assignments)
 }
 
 ///////////
@@ -105,7 +105,7 @@ mod tests {
         sim[(2, 0)] = 0.1;
 
         // Extract 2 clusters looking at top 1 neighbor
-        let labels = spectral_clustering(&sim.as_ref(), 1, 2, 100, 42);
+        let labels = spectral_clustering(&sim.as_ref(), 1, 2, None, 42).unwrap();
 
         assert_eq!(labels.len(), 4);
         assert_eq!(labels[0], labels[1]); // 0 and 1 are together

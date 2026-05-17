@@ -11,7 +11,9 @@ use rayon::prelude::*;
 use std::time::Instant;
 use thousands::*;
 
+use crate::ml::clustering::k_means::KMeansParamsWrappers;
 use crate::prelude::parse_verbosity_level;
+use crate::prelude::*;
 use crate::single_cell::sc_batch_correction::batch_utils::cosine_normalise;
 use crate::utils::matrix_utils::{flat_row_major_to_mat, mat_to_flat_row_major};
 
@@ -31,7 +33,7 @@ pub struct HarmonyParams {
     pub lambda: Vec<f32>,
     /// Fraction of cells to update per block (0.0-1.0)
     pub block_size: f32,
-    /// Maximum k-means iterations per Harmony round
+    /// Maximum iterations for the k-means clustering
     pub max_iter_kmeans: usize,
     /// Maximum Harmony outer iterations
     pub max_iter_harmony: usize,
@@ -41,6 +43,8 @@ pub struct HarmonyParams {
     pub epsilon_harmony: f32,
     /// Window size for convergence checking
     pub window_size: usize,
+    /// K-mean parameters, see [KMeansParamsWrappers]
+    pub kmeans_params: KMeansParamsWrappers,
 }
 
 /// Default implementation for HarmonyParams
@@ -57,6 +61,7 @@ impl Default for HarmonyParams {
             epsilon_kmeans: 1e-5,
             epsilon_harmony: 1e-4,
             window_size: 3,
+            kmeans_params: KMeansParamsWrappers::new(30, None, None),
         }
     }
 }
@@ -162,10 +167,10 @@ pub fn create_batch_infos(all_labels: &[Vec<usize>], n_cells: usize) -> Vec<Batc
 pub fn run_kmeans_cosine(
     data_cos: MatRef<f32>,
     k: usize,
-    max_iter: usize,
+    kmeans_params: KMeansParamsWrappers,
     seed: usize,
     verbose: usize,
-) -> Mat<f32> {
+) -> Result<Mat<f32>, BixverseErrors> {
     let verbosity = parse_verbosity_level(verbose);
 
     let n = data_cos.nrows();
@@ -187,13 +192,13 @@ pub fn run_kmeans_cosine(
         n,
         k,
         &Dist::Cosine,
-        max_iter,
+        Some(kmeans_params.get_data()),
         seed,
         verbosity.detailed_verbosity(),
-    );
+    )?;
     let centroids = flat_row_major_to_mat(&centroids_flat, k, d);
 
-    cosine_normalise(&centroids)
+    Ok(cosine_normalise(&centroids))
 }
 
 /// Compute cosine distances between centroids and data.
@@ -760,7 +765,7 @@ pub fn harmony(
     params: &HarmonyParams,
     seed: usize,
     verbose: usize,
-) -> Mat<f32> {
+) -> Result<Mat<f32>, BixverseErrors> {
     let verbosity = parse_verbosity_level(verbose);
 
     let start = Instant::now();
@@ -816,10 +821,10 @@ pub fn harmony(
     let y = run_kmeans_cosine(
         z_cos.as_ref(),
         params.k,
-        params.max_iter_kmeans,
+        params.kmeans_params.clone(),
         seed,
         verbose,
-    );
+    )?;
 
     let dist_mat = compute_cosine_distances(y.as_ref(), z_cos.as_ref());
     let r = initialise_r_from_dist(dist_mat.as_ref(), &sigma);
@@ -943,7 +948,7 @@ pub fn harmony(
 
     println!(" Finished Harmony {:.2?}", start.elapsed());
 
-    state.z_corr
+    Ok(state.z_corr)
 }
 
 ///////////
@@ -1010,7 +1015,8 @@ mod tests {
         let mat = Mat::from_fn(20, 3, |i, j| data[i][j]);
         let mat_cos = cosine_normalise(&mat);
 
-        let centroids = run_kmeans_cosine(mat_cos.as_ref(), 2, 25, 42, 0);
+        let centroids =
+            run_kmeans_cosine(mat_cos.as_ref(), 2, KMeansParamsWrappers::default(), 42, 0).unwrap();
 
         assert_eq!(centroids.nrows(), 2);
         assert_eq!(centroids.ncols(), 3);

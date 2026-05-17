@@ -57,7 +57,7 @@ fn knn_search(
     params: &KnnParams,
     seed: usize,
     verbose: usize,
-) -> Result<(Vec<Vec<usize>>, Vec<Vec<f32>>), BixverseErrors> {
+) -> ScKnnResults {
     let verbosity = parse_verbosity_level(verbose);
 
     let knn_method: KnnSearch = parse_knn_method(&params.knn_method).unwrap_or_default();

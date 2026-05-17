@@ -16,7 +16,9 @@ use rand::seq::SliceRandom;
 use std::time::Instant;
 use thousands::*;
 
+use crate::ml::clustering::k_means::KMeansParamsWrappers;
 use crate::prelude::parse_verbosity_level;
+use crate::prelude::*;
 use crate::single_cell::sc_batch_correction::batch_utils::cosine_normalise;
 
 use super::harmony::{
@@ -58,6 +60,8 @@ pub struct HarmonyParamsV2 {
     pub batch_proportion_cutoff: f32,
     /// Whether to estimate lambda dynamically per cluster
     pub use_dynamic_lambda: bool,
+    /// K-mean parameters, see [KMeansParamsWrappers]
+    pub kmeans_params: KMeansParamsWrappers,
 }
 
 impl Default for HarmonyParamsV2 {
@@ -77,6 +81,7 @@ impl Default for HarmonyParamsV2 {
             tau: 0.0,
             batch_proportion_cutoff: 1e-5,
             use_dynamic_lambda: false,
+            kmeans_params: KMeansParamsWrappers::default(),
         }
     }
 }
@@ -646,7 +651,7 @@ pub fn harmony_v2(
     params: &HarmonyParamsV2,
     seed: usize,
     verbose: usize,
-) -> Mat<f32> {
+) -> Result<Mat<f32>, BixverseErrors> {
     let start = Instant::now();
 
     let verbosity = parse_verbosity_level(verbose);
@@ -715,7 +720,13 @@ pub fn harmony_v2(
         println!("Running initial k-means...");
     }
 
-    let mut y = run_kmeans_cosine(z_cos.as_ref(), params.k, 25, seed, verbose);
+    let mut y = run_kmeans_cosine(
+        z_cos.as_ref(),
+        params.k,
+        params.kmeans_params.clone(),
+        seed,
+        verbose,
+    )?;
 
     let mut dist_mat = compute_cosine_distances(y.as_ref(), z_cos.as_ref());
     let mut r = initialise_r_from_dist(dist_mat.as_ref(), &sigma);
@@ -840,7 +851,7 @@ pub fn harmony_v2(
 
     println!(" Finished Harmony {:.2?}", start.elapsed());
 
-    z_corr
+    Ok(z_corr)
 }
 
 ///////////

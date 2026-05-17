@@ -1377,7 +1377,7 @@ impl ScDblFinder {
                 knn_params: centroid_knn_params,
                 louvain_iters: self.params.cluster_iters,
                 batch_size: self.params.fast_cluster_params.batch_size,
-                kmeans_iters: self.params.fast_cluster_params.kmeans_iters,
+                kmeans_params: self.params.fast_cluster_params.kmeans_params.clone(),
                 ..Default::default()
             };
             if verbosity.normal_verbosity() {
@@ -1423,7 +1423,7 @@ impl ScDblFinder {
                 &self.params.knn_params,
                 seed,
                 verbosity.detailed_verbosity(),
-            );
+            )?;
 
             let obs_graph = knn_to_sparse_graph(&obs_knn, true);
             louvain_sparse_graph(
@@ -1527,7 +1527,7 @@ impl ScDblFinder {
             false,
             seed,
             verbosity.detailed_verbosity(),
-        );
+        )?;
 
         let mut combined_dists = combined_dists.unwrap();
 

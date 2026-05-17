@@ -580,7 +580,7 @@ pub fn dispatch_knn(
     knn_params: &KnnParams,
     seed: usize,
     verbose: bool,
-) -> Vec<Vec<usize>> {
+) -> Result<Vec<Vec<usize>>, BixverseErrors> {
     let method = parse_knn_method(&knn_params.knn_method).unwrap_or_default();
 
     match method {

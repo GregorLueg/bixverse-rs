@@ -449,7 +449,7 @@ pub fn landmark_knn(
     knn_params: &KnnParams,
     seed: usize,
     verbose: usize,
-) -> (Vec<Vec<usize>>, Vec<Vec<f32>>) {
+) -> ScKnnResults {
     let verbosity = parse_verbosity_level(verbose);
 
     let l = landmark_indices.len();
@@ -467,9 +467,9 @@ pub fn landmark_knn(
         false,
         seed,
         verbosity.detailed_verbosity(),
-    );
+    )?;
 
-    (indices, distances.expect("distances must be present"))
+    Ok((indices, distances.expect("distances must be present")))
 }
 
 /// Row-stochastic N×L transitions in PCA space (Gaussian, adaptive bandwidth)
@@ -1263,7 +1263,7 @@ impl<'a> SEACells<'a> {
             &self.params.knn_params,
             seed as usize,
             verbose,
-        );
+        )?;
         let squared_dist = self.params.knn_params.ann_dist == "euclidean";
 
         let mut ll_kernel = compute_diffusion_kernel(&ll_idx, &ll_dist, k_ll, squared_dist);

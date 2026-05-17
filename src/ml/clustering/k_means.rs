@@ -8,6 +8,7 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rayon::prelude::*;
+use std::fmt::Debug;
 
 use crate::prelude::*;
 
@@ -52,6 +53,17 @@ pub fn parse_k_means(s: &str) -> Option<KMeansType> {
 /// `0` - The [KMeansTrainingParams].
 pub struct KMeansParamsWrappers(KMeansTrainingParams);
 
+/// Clone implementation
+impl Clone for KMeansParamsWrappers {
+    fn clone(&self) -> Self {
+        Self(KMeansTrainingParams {
+            iters: self.0.iters,
+            init: self.0.init,
+            path: self.0.path,
+        })
+    }
+}
+
 impl KMeansParamsWrappers {
     /// Generate a wrapped instance around the k-means clustering
     ///
@@ -86,6 +98,55 @@ impl KMeansParamsWrappers {
 impl Default for KMeansParamsWrappers {
     fn default() -> Self {
         Self::new(100, None, None)
+    }
+}
+
+/// Parse the initialisation parameters
+///
+/// ### Params
+///
+/// * `s` String to parse
+///
+/// ### Returns
+///
+/// The Option of the [KMeansInit]
+pub fn parse_kmeans_init(s: &str) -> Option<KMeansInit> {
+    match s.to_lowercase().as_str() {
+        "random" => Some(KMeansInit::Random),
+        "parallel" | "plusplus" => Some(KMeansInit::KMeansParallel),
+        _ => None,
+    }
+}
+
+/// Parse the method details
+///
+/// ### Params
+///
+/// * `gemm` - Shall GEMM acceleration be used. This option will use faer under
+///   the hood and can accelerate the calculations in high dimensional data.
+/// * `hamerly` - Shall Hamerly's algorithm be used. Can provide strong
+///   acceleration with large N and/or large number of centroids.
+///
+/// ### Returns
+///
+/// The [LloydPath]
+pub fn parse_kmean_path(gemm: bool, hamerly: bool) -> LloydPath {
+    match (gemm, hamerly) {
+        (true, false) => LloydPath::GemmLloyd,
+        (true, true) => LloydPath::HamerlyGemm,
+        (false, true) => LloydPath::HamerlySimd,
+        (false, false) => LloydPath::ParallelLloyd,
+    }
+}
+
+/// Debug implementation
+impl std::fmt::Debug for KMeansParamsWrappers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KMeansParamsWrapper")
+            .field("iters", &self.0.iters)
+            .field("init", &self.0.init)
+            .field("path", &self.0.path)
+            .finish()
     }
 }
 

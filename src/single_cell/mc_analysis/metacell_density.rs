@@ -150,7 +150,7 @@ pub fn compute_diffusion_density(
         false,
         seed as usize,
         verbosity.detailed_verbosity(),
-    );
+    )?;
     let dc_distances = dc_distances.expect("distances must be returned");
 
     // k_density-th NN distance per cell. fold(max) is robust to whichever order
