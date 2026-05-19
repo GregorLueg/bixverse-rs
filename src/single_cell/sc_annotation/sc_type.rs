@@ -43,7 +43,7 @@ pub struct SctypeRes {
 }
 
 /// Structure for the cluster assignment
-pub struct ClusterAssignment {
+pub struct ScTypeClusterAssignment {
     /// Cluster index
     pub cluster: usize,
     /// Final cell type annotation
@@ -279,11 +279,11 @@ pub fn run_sctype(
 ///
 /// ### Returns
 ///
-/// A Vec of [ClusterAssignment].
+/// A Vec of [ScTypeClusterAssignment].
 pub fn assign_clusters(
     res: &SctypeRes,
     cluster_labels: &[usize],
-) -> Result<Vec<ClusterAssignment>, BixverseErrors> {
+) -> Result<Vec<ScTypeClusterAssignment>, BixverseErrors> {
     if cluster_labels.len() != res.n_cells {
         return Err(BixverseErrors::ScTypeClusterAssignmentNotEqualNCells {
             n_cells: res.n_cells,
@@ -330,7 +330,7 @@ pub fn assign_clusters(
             res.cell_types[best_idx].clone()
         };
 
-        out.push(ClusterAssignment {
+        out.push(ScTypeClusterAssignment {
             cluster: cl,
             cell_type,
             score: best_score,
