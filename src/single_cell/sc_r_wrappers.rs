@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 use crate::core::math::sparse::parse_compressed_sparse_format;
 use crate::ml::clustering::k_means::KMeansParamsWrappers;
+use crate::prelude::{VecConvert, VecFloatConvert};
 use crate::single_cell::mc_generation::{
     hdwgcna_meta_cells::BootstrappedMetaCellParams, metacells2::params::*,
     seacells::SEACellsParams, super_cells::SuperCellParams,
@@ -21,6 +22,7 @@ use crate::single_cell::sc_analysis::{
     vision::SignatureGenes,
 };
 
+use crate::single_cell::sc_annotation::sc_type::{CellTypeMarkers, SctypeRes};
 use crate::single_cell::sc_batch_correction::{
     bbknn::BbknnParams, fast_mnn::FastMnnParams, harmony::HarmonyParams,
     harmony_v2::HarmonyParamsV2,
@@ -2464,6 +2466,94 @@ impl MetacellsParams {
             target_metacell_umis,
             must_complete_cover,
             random_seed,
+        })
+    }
+}
+
+////////////
+// ScType //
+////////////
+
+impl CellTypeMarkers {
+    /// Generate a [CellTypeMarkers] from an R list
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The R list from which to parse the cell markers
+    ///
+    /// ### Returns
+    ///
+    /// The [CellTypeMarkers] or Error
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let data: HashMap<&str, Robj> = r_list.try_into()?;
+
+        let cell_type = data
+            .get("cell_type")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::Other("cell_type missing or not a string".into()))?
+            .to_string();
+
+        let positive_indices: Vec<usize> = data
+            .get("positive_indices")
+            .and_then(|v| v.as_integer_vector())
+            .map(|v| v.r_int_convert())
+            .unwrap_or_default();
+
+        let negative_indices: Vec<usize> = data
+            .get("negative_indices")
+            .and_then(|v| v.as_integer_vector())
+            .map(|v| v.r_int_convert())
+            .unwrap_or_default();
+
+        Ok(Self {
+            cell_type,
+            positive_indices,
+            negative_indices,
+        })
+    }
+}
+
+impl SctypeRes {
+    /// Generate a [SctypeRes] from an R list
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The R list from which to parse the ScType results
+    ///
+    /// ### Returns
+    ///
+    /// The [SctypeRes] or Error
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let data: HashMap<&str, Robj> = r_list.try_into()?;
+
+        let cell_types = data
+            .get("cell_types")
+            .and_then(|v| v.as_string_vector())
+            .ok_or_else(|| Error::Other("cell_types missing or not a string vector".into()))?;
+
+        let scores = data
+            .get("scores")
+            .and_then(|v| v.as_real_vector())
+            .ok_or_else(|| Error::Other("scores missing or not a real vector".into()))?
+            .r_float_convert();
+
+        let n_cells: usize = data
+            .get("n_cells")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .ok_or_else(|| Error::Other("n_cells missing or not an integer".into()))?;
+
+        let n_cell_types: usize = data
+            .get("n_cell_types")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .ok_or_else(|| Error::Other("n_cell_types missing or not an integer".into()))?;
+
+        Ok(Self {
+            cell_types,
+            scores,
+            n_cells,
+            n_cell_types,
         })
     }
 }

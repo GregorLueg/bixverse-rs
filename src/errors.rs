@@ -284,6 +284,19 @@ pub enum BixverseErrors {
     #[error("MELD: Embedding rows unequals samples")]
     MELDEmbeddingUnequalsSamples,
 
+    // -- sctype --
+    /// Error when number of cluster assignment != the number of cells
+    #[error(
+        "SCType: The number of cells ({n_cells}) and cluster assignments length ({n_cluster_assignment}) is not the same."
+    )]
+    ScTypeClusterAssignmentNotEqualNCells {
+        /// Number of cells
+        n_cells: usize,
+        /// Number of cluster assignments
+        n_cluster_assignment: usize,
+    },
+
+    // -- wnn --
     /// Error if the modalities do not have the same number of cells
     #[cfg(feature = "multi-modal")]
     #[error("WNN: Both modalities need to have the same cell numbers.")]
