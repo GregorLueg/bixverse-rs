@@ -8,8 +8,9 @@ use std::path::Path;
 use std::time::Instant;
 use thousands::Separable;
 
+use super::data_io::*;
+use super::h5ad_io::*;
 use crate::prelude::*;
-use crate::single_cell::sc_data::data_io::*;
 
 //////////////////
 // H5File tasks //
@@ -29,6 +30,8 @@ pub struct H5adFileTask {
     pub no_genes: usize,
     /// file-local gene idx -> universe gene idx; None if gene not in universe
     pub gene_local_to_universe: Vec<Option<usize>>,
+    /// Raw count storage
+    pub raw_slot: RawDataSlot,
 }
 
 //////////////////
@@ -56,8 +59,14 @@ fn scan_gene_nnz_csr(
     universe_size: usize,
 ) -> Result<Vec<usize>, BixverseErrors> {
     let file = File::open(&task.h5_path)?;
-    let indptr: Vec<u32> = file.dataset("X/indptr")?.read_1d()?.to_vec();
-    let indices_ds = file.dataset("X/indices")?;
+
+    check_h5ad_is_raw(&file, &task.raw_slot, None)?;
+
+    let indptr: Vec<u32> = file
+        .dataset(task.raw_slot.get_indptr())?
+        .read_1d()?
+        .to_vec();
+    let indices_ds = file.dataset(task.raw_slot.get_indices())?;
 
     let mut gene_nnz = vec![0usize; universe_size];
 
@@ -107,7 +116,13 @@ fn scan_gene_nnz_csc(
     universe_size: usize,
 ) -> Result<Vec<usize>, BixverseErrors> {
     let file = File::open(&task.h5_path)?;
-    let indptr: Vec<u32> = file.dataset("X/indptr")?.read_1d()?.to_vec();
+
+    check_h5ad_is_raw(&file, &task.raw_slot, None)?;
+
+    let indptr: Vec<u32> = file
+        .dataset(task.raw_slot.get_indptr())?
+        .read_1d()?
+        .to_vec();
 
     let mut gene_nnz = vec![0usize; universe_size];
 
@@ -158,9 +173,15 @@ fn scan_cell_stats_csr(
     gene_local_to_final: &[Option<usize>],
 ) -> Result<Vec<(usize, f32)>, BixverseErrors> {
     let file = File::open(&task.h5_path)?;
-    let indptr: Vec<u32> = file.dataset("X/indptr")?.read_1d()?.to_vec();
-    let data_ds = file.dataset("X/data")?;
-    let indices_ds = file.dataset("X/indices")?;
+
+    check_h5ad_is_raw(&file, &task.raw_slot, None)?;
+
+    let indptr: Vec<u32> = file
+        .dataset(task.raw_slot.get_indptr())?
+        .read_1d()?
+        .to_vec();
+    let data_ds = file.dataset(task.raw_slot.get_data())?;
+    let indices_ds = file.dataset(task.raw_slot.get_indices())?;
 
     let mut cell_stats = Vec::with_capacity(task.no_cells);
 
@@ -218,9 +239,15 @@ fn scan_cell_stats_csc(
     gene_local_to_final: &[Option<usize>],
 ) -> Result<Vec<(usize, f32)>, BixverseErrors> {
     let file = File::open(&task.h5_path)?;
-    let indptr: Vec<u32> = file.dataset("X/indptr")?.read_1d()?.to_vec();
-    let data_ds = file.dataset("X/data")?;
-    let indices_ds = file.dataset("X/indices")?;
+
+    check_h5ad_is_raw(&file, &task.raw_slot, None)?;
+
+    let indptr: Vec<u32> = file
+        .dataset(task.raw_slot.get_indptr())?
+        .read_1d()?
+        .to_vec();
+    let data_ds = file.dataset(task.raw_slot.get_data())?;
+    let indices_ds = file.dataset(task.raw_slot.get_indices())?;
 
     let mut cell_unique = vec![0usize; task.no_cells];
     let mut cell_lib_size = vec![0.0f32; task.no_cells];
@@ -342,9 +369,15 @@ fn write_h5_csr_cells(
     writer: &mut CellGeneSparseWriter,
 ) -> Result<H5FileQcResult, BixverseErrors> {
     let file = hdf5::File::open(&task.h5_path)?;
-    let data_ds = file.dataset("X/data")?;
-    let indices_ds = file.dataset("X/indices")?;
-    let indptr: Vec<u32> = file.dataset("X/indptr")?.read_1d()?.to_vec();
+
+    check_h5ad_is_raw(&file, &task.raw_slot, None)?;
+
+    let data_ds = file.dataset(task.raw_slot.get_data())?;
+    let indices_ds = file.dataset(task.raw_slot.get_indices())?;
+    let indptr: Vec<u32> = file
+        .dataset(task.raw_slot.get_indptr())?
+        .read_1d()?
+        .to_vec();
 
     let mut lib_size = Vec::with_capacity(cells_to_keep.len());
     let mut nnz = Vec::with_capacity(cells_to_keep.len());
@@ -459,9 +492,15 @@ fn write_h5_csc_cells(
     writer: &mut CellGeneSparseWriter,
 ) -> Result<H5FileQcResult, BixverseErrors> {
     let file = hdf5::File::open(&task.h5_path)?;
-    let data_ds = file.dataset("X/data")?;
-    let indices_ds = file.dataset("X/indices")?;
-    let indptr: Vec<u32> = file.dataset("X/indptr")?.read_1d()?.to_vec();
+
+    check_h5ad_is_raw(&file, &task.raw_slot, None)?;
+
+    let data_ds = file.dataset(task.raw_slot.get_data())?;
+    let indices_ds = file.dataset(task.raw_slot.get_indices())?;
+    let indptr: Vec<u32> = file
+        .dataset(task.raw_slot.get_indptr())?
+        .read_1d()?
+        .to_vec();
 
     let cell_old_to_new: FxHashMap<usize, usize> = cells_to_keep
         .iter()

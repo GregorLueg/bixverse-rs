@@ -70,6 +70,11 @@ pub enum BixverseErrors {
     #[error("I/O error on binary file: {0}")]
     BinaryIo(#[from] io::Error),
 
+    /// Error if counts do not seem to be raw counts during i/o
+    #[cfg(feature = "single-cell")]
+    #[error("The counts you are trying to load in do not seem to be raw counts")]
+    NotRawCounts,
+
     /// Bincode failed to encode the `FileHeader` or `SparseDataHeader`.
     ///
     /// Practically unreachable for the fixed-layout headers used here, but

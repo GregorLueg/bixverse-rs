@@ -25,9 +25,11 @@ use crate::single_cell::sc_batch_correction::{
     bbknn::BbknnParams, fast_mnn::FastMnnParams, harmony::HarmonyParams,
     harmony_v2::HarmonyParamsV2,
 };
+use crate::single_cell::sc_data::h5ad_io::RawDataSlot;
 use crate::single_cell::sc_data::{
-    bin_merge_io::BinMergeTask, data_io::MinCellQuality, h5ad_multifile_io::H5adFileTask,
-    mtx_multifile_io::MtxFileTask, sc_synthetic_data::CellTypeConfig,
+    bin_merge_io::BinMergeTask, data_io::MinCellQuality, h5ad_io::parse_raw_slot,
+    h5ad_multifile_io::H5adFileTask, mtx_multifile_io::MtxFileTask,
+    sc_synthetic_data::CellTypeConfig,
 };
 use crate::single_cell::sc_processing::{
     doublet_detection::BoostParams, knn::KnnParams, scdblfinder::ScDblFinderParams,
@@ -1863,6 +1865,12 @@ impl H5adFileTask {
     pub fn from_r_list(r_list: List) -> extendr_api::Result<Self> {
         let map: HashMap<&str, Robj> = r_list.try_into()?;
 
+        let raw_slot: RawDataSlot = map
+            .get("raw_slot")
+            .and_then(|v| v.as_str())
+            .and_then(parse_raw_slot)
+            .unwrap_or_default();
+
         let exp_id = map
             .get("exp_id")
             .and_then(|v| v.as_str())
@@ -1920,6 +1928,7 @@ impl H5adFileTask {
             no_cells,
             no_genes,
             gene_local_to_universe,
+            raw_slot,
         })
     }
 }
