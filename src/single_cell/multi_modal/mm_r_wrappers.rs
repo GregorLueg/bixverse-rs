@@ -4,6 +4,7 @@
 use extendr_api::{List, Robj};
 use std::collections::HashMap;
 
+use crate::single_cell::sc_processing::knn::KnnParams;
 use crate::{
     prelude::VecConvert,
     single_cell::{multi_modal::wnn::parse_sigma_method, sc_processing::snn::parse_snn_type},
@@ -27,6 +28,7 @@ impl WnnParams {
     ///
     /// The [WnnParams]
     pub fn from_r_list(r_list: List) -> Result<Self, extendr_api::Error> {
+        let knn_params = KnnParams::from_r_list(r_list.clone())?;
         let params: HashMap<&str, Robj> = r_list.try_into()?;
         let defaults = Self::default();
 
@@ -101,6 +103,7 @@ impl WnnParams {
             kernel_power,
             cross_const,
             sigma_floor,
+            knn_params,
         })
     }
 }

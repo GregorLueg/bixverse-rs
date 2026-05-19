@@ -22,7 +22,7 @@ impl KMeansParamsWrappers {
         let iters = params_list
             .get("k_means_iter")
             .and_then(|v| v.as_integer())
-            .unwrap_or(100) as usize;
+            .unwrap_or(30) as usize;
 
         let init = params_list
             .get("k_means_init")

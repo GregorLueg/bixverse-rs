@@ -141,6 +141,9 @@ pub struct WnnParams {
     pub cross_const: f32,
     /// Min sigma value (avoids div by zero).
     pub sigma_floor: f32,
+    /// [KnnParams] for the various approximate nearest neighbour searches in
+    /// ann-search-rs
+    pub knn_params: KnnParams,
 }
 
 /// Default implementation
@@ -157,6 +160,7 @@ impl Default for WnnParams {
             kernel_power: 1.0,
             cross_const: 1e-4,
             sigma_floor: 1e-8,
+            knn_params: KnnParams::default(),
         }
     }
 }
@@ -795,6 +799,7 @@ mod tests {
             kernel_power: 1.0,
             cross_const: 1e-4,
             sigma_floor: 1e-8,
+            knn_params: KnnParams::default(),
         };
 
         let res = compute_wnn([mod_a, mod_b], &params, 0)
