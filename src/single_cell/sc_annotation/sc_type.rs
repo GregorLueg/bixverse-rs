@@ -16,6 +16,9 @@ use crate::single_cell::sc_processing::pca::scale_csc_chunk;
 /// The batch size for the genes
 const GENE_BATCH_SIZE: usize = 100;
 
+/// Minimum weight a given marker can have
+const WEIGHT_FLOOR: f32 = 0.1;
+
 ////////////////
 // Structures //
 ////////////////
@@ -60,18 +63,22 @@ pub struct ScTypeClusterAssignment {
 
 /// Per-gene marker sensitivity from the positive marker sets.
 ///
-/// Genes occurring in many cell types get a low score (down to 0), genes
-/// occurring in only one cell type get 1. Genes absent from every positive set
-/// are not in the map; callers should default to 1.0.
+/// Genes occurring in many cell types get a low score (down to `weight_floor`),
+/// genes occurring in only one cell type get 1. Genes absent from every
+/// positive set are not in the map; callers should default to 1.0.
 ///
 /// ### Params
 ///
 /// * `markers` - Slice of [CellTypeMarkers]
+/// * `weight_floor` - The lowest weight that can be assigned to a given marker.
 ///
 /// ### Returns
 ///
 /// A FxHashMap with gene index and sensitivity
-fn compute_marker_sensitivity(markers: &[CellTypeMarkers]) -> FxHashMap<usize, f32> {
+fn compute_marker_sensitivity(
+    markers: &[CellTypeMarkers],
+    weight_floor: f32,
+) -> FxHashMap<usize, f32> {
     let mut counts: FxHashMap<usize, usize> = FxHashMap::default();
     for m in markers {
         for &g in &m.positive_indices {
@@ -84,7 +91,10 @@ fn compute_marker_sensitivity(markers: &[CellTypeMarkers]) -> FxHashMap<usize, f
     }
     counts
         .into_iter()
-        .map(|(g, c)| (g, (n_ct - c as f32) / (n_ct - 1.0)))
+        .map(|(g, c)| {
+            let w = (n_ct - c as f32) / (n_ct - 1.0);
+            (g, w.max(weight_floor))
+        })
         .collect()
 }
 
@@ -99,8 +109,12 @@ fn compute_marker_sensitivity(markers: &[CellTypeMarkers]) -> FxHashMap<usize, f
 /// * `f_path` - Path to the gene-based binary file
 /// * `cell_indices` - HashSet with the cell indices to keep.
 /// * `markers` - A slice of [CellTypeMarkers].
+/// * `use_sensitivity` - Boolean. If set up, common cell type markers are down
+///   weighted.
 /// * `gene_batch_size` - Optional gene batch size. If not provided, defaults
 ///   to [GENE_BATCH_SIZE].
+/// * `weight_floor` - Optional weight floor. If not provided, defaults to
+///   [WEIGHT_FLOOR]
 /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
 ///   verbosity.
 ///
@@ -111,12 +125,15 @@ pub fn run_sctype(
     f_path: &str,
     cell_indices: &[usize],
     markers: &[CellTypeMarkers],
+    use_sensitivity: bool,
     gene_batch_size: Option<usize>,
+    weight_floor: Option<f32>,
     verbose: usize,
 ) -> Result<SctypeRes, BixverseErrors> {
     let verbosity = parse_verbosity_level(verbose);
     let start_total = Instant::now();
 
+    let weight_floor = weight_floor.unwrap_or(WEIGHT_FLOOR);
     let gene_batch_size = gene_batch_size.unwrap_or(GENE_BATCH_SIZE);
 
     let reader = ParallelSparseReader::new(f_path)?;
@@ -124,7 +141,11 @@ pub fn run_sctype(
     let no_cells = cell_set.len();
     let n_cell_types = markers.len();
 
-    let sensitivity = compute_marker_sensitivity(markers);
+    let sensitivity = if use_sensitivity {
+        compute_marker_sensitivity(markers, weight_floor)
+    } else {
+        FxHashMap::default()
+    };
 
     let mut gene_to_ct_pos: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
     let mut gene_to_ct_neg: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
