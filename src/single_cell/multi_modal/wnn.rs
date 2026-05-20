@@ -521,7 +521,7 @@ pub fn compute_wnn(
                 .map(|i| {
                     let kw = (-s.within_dist[i] / s.sigma[i]).exp();
                     let kc = (-s.cross_dist[i] / s.sigma[i]).exp();
-                    (kw / (kc + params.cross_const)).clamp(0.0, 200.0)
+                    kw / (kc + params.cross_const)
                 })
                 .collect()
         })
@@ -529,8 +529,9 @@ pub fn compute_wnn(
 
     let mut weights = vec![vec![0.0f32; n_cells]; 2];
     for i in 0..n_cells {
-        let e0 = scores[0][i].exp();
-        let e1 = scores[1][i].exp();
+        let m = scores[0][i].max(scores[1][i]);
+        let e0 = (scores[0][i] - m).exp();
+        let e1 = (scores[1][i] - m).exp();
         let s = e0 + e1;
         weights[0][i] = e0 / s;
         weights[1][i] = e1 / s;
