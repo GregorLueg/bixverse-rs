@@ -83,7 +83,7 @@ impl RawDataSlot {
 ///
 /// ### Returns
 ///
-///
+/// An option of the [RawDataSlot] to use subsequently.
 pub fn parse_raw_slot(s: &str) -> Option<RawDataSlot> {
     match s.to_lowercase().as_str() {
         "x" | "X" => Some(RawDataSlot::DataX),

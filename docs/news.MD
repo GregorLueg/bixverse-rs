@@ -10,6 +10,7 @@
 - New feature gate `multi-modal`:
   * Weighted nearest neighbour graph method behind a new feature gate.
   * DSB normalisation for CITE Seq ADT
+- First annotation helpers... ScType implemented
 
 ## 0.2.0
 

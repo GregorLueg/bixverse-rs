@@ -2539,13 +2539,13 @@ impl SctypeRes {
 
         let n_cells: usize = data
             .get("n_cells")
-            .and_then(|v| v.as_integer())
+            .and_then(|v| v.as_real())
             .map(|v| v as usize)
             .ok_or_else(|| Error::Other("n_cells missing or not an integer".into()))?;
 
         let n_cell_types: usize = data
             .get("n_cell_types")
-            .and_then(|v| v.as_integer())
+            .and_then(|v| v.as_real())
             .map(|v| v as usize)
             .ok_or_else(|| Error::Other("n_cell_types missing or not an integer".into()))?;
 
