@@ -1,4 +1,5 @@
-//! Contains structures designed to be put on the heap
+//! Contains structures designed to be put on the heap. One key application is
+//! checking distances via the [RevOrderedFloat].
 
 use std::cmp::Ordering;
 

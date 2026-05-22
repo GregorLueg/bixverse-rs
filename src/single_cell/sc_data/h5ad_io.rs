@@ -32,6 +32,8 @@ pub enum RawDataSlot {
     DataX,
     /// Alternative assumption that raw counts are stored in `ad.raw.X`
     RawX,
+    /// Alternative assumption that raw counts are stored in `ad.layers.counts`
+    LayerCounts,
 }
 
 impl RawDataSlot {
@@ -45,6 +47,7 @@ impl RawDataSlot {
         match self {
             RawDataSlot::DataX => "X/indptr",
             RawDataSlot::RawX => "raw/X/indptr",
+            RawDataSlot::LayerCounts => "layer/counts/indptr",
         }
     }
 
@@ -58,6 +61,7 @@ impl RawDataSlot {
         match self {
             RawDataSlot::DataX => "X/indices",
             RawDataSlot::RawX => "raw/X/indices",
+            RawDataSlot::LayerCounts => "layer/counts/indices",
         }
     }
 
@@ -71,6 +75,7 @@ impl RawDataSlot {
         match self {
             RawDataSlot::DataX => "X/data",
             RawDataSlot::RawX => "raw/X/data",
+            RawDataSlot::LayerCounts => "layer/counts/data",
         }
     }
 }
