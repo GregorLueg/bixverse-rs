@@ -18,7 +18,7 @@ use crate::single_cell::sc_data::data_io::{CellGeneSparseWriter, CellOnFileQuali
 ////////////
 
 /// Number of data entries to check
-const N_CHECK: usize = 10;
+const N_CHECK: usize = 100;
 
 ///////////////////
 // Raw data slot //
@@ -137,7 +137,7 @@ pub fn check_h5ad_is_raw(
     let n_check = n_check.unwrap_or(N_CHECK);
 
     let data: Vec<f32> = file
-        .dataset(raw_slot.get_indptr())?
+        .dataset(raw_slot.get_data())?
         .read_slice(0..n_check)?
         .to_vec();
 

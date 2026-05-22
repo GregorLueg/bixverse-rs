@@ -13,6 +13,42 @@ use std::time::Instant;
 use crate::core::math::sparse::coo_to_csr;
 use crate::prelude::*;
 
+/////////////////////
+// General helpers //
+/////////////////////
+
+/// Helper function to remap communities by size
+///
+/// The non-determinism due to threading etc. can be a huge annoyance in
+/// single cell. This function remaps the clusters by size, ensuring more (not
+/// complete) reproducibility.
+///
+/// ### Params
+///
+/// * `labels` - The membership labels
+///
+/// ### Returns
+///
+/// Remapped labels with `0` -> biggest community by membership, `1` -> second
+/// biggest, etc.
+fn remap_communities_by_size(labels: &[usize]) -> Vec<usize> {
+    let n = labels.len();
+    let mut counts: FxHashMap<usize, usize> = FxHashMap::default();
+    for &l in labels {
+        *counts.entry(l).or_insert(0) += 1;
+    }
+
+    let mut sorted: Vec<(usize, usize)> = counts.into_iter().collect();
+    sorted.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+
+    let mut remap: FxHashMap<usize, usize> = FxHashMap::default();
+    for (new_label, (old_label, _)) in sorted.into_iter().enumerate() {
+        remap.insert(old_label, new_label);
+    }
+
+    (0..n).map(|i| remap[&labels[i]]).collect()
+}
+
 /////////////
 // Louvain //
 /////////////
@@ -264,7 +300,7 @@ where
     }
 
     if !multi_level || n_super == n_orig {
-        return Ok(node_to_super);
+        return Ok(remap_communities_by_size(&node_to_super));
     }
 
     let mut current_graph = aggregate_graph(graph, &comms, n_super);
@@ -282,7 +318,7 @@ where
         current_graph = aggregate_graph(&current_graph, &comms, n_super);
     }
 
-    Ok(node_to_super)
+    Ok(remap_communities_by_size(&node_to_super))
 }
 
 //////////////
@@ -631,7 +667,9 @@ where
         );
     }
 
-    finalise_labels(n, &comm_parent)
+    let labels = finalise_labels(n, &comm_parent);
+
+    remap_communities_by_size(&labels)
 }
 
 ///////////

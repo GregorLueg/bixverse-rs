@@ -946,7 +946,9 @@ pub fn harmony(
         }
     }
 
-    println!(" Finished Harmony {:.2?}", start.elapsed());
+    if verbosity.normal_verbosity() {
+        println!(" Finished Harmony {:.2?}", start.elapsed());
+    }
 
     Ok(state.z_corr)
 }
