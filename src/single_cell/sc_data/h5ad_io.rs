@@ -93,7 +93,7 @@ pub fn parse_raw_slot(s: &str) -> Option<RawDataSlot> {
     match s.to_lowercase().as_str() {
         "x" | "X" => Some(RawDataSlot::DataX),
         "raw" | "raw.x" => Some(RawDataSlot::RawX),
-        "ayers.counts" => Some(RawDataSlot::LayerCounts),
+        "layers.counts" => Some(RawDataSlot::LayerCounts),
         _ => None,
     }
 }
