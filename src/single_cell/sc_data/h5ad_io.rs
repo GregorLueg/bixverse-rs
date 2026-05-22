@@ -47,7 +47,7 @@ impl RawDataSlot {
         match self {
             RawDataSlot::DataX => "X/indptr",
             RawDataSlot::RawX => "raw/X/indptr",
-            RawDataSlot::LayerCounts => "layer/counts/indptr",
+            RawDataSlot::LayerCounts => "layers/counts/indptr",
         }
     }
 
@@ -61,7 +61,7 @@ impl RawDataSlot {
         match self {
             RawDataSlot::DataX => "X/indices",
             RawDataSlot::RawX => "raw/X/indices",
-            RawDataSlot::LayerCounts => "layer/counts/indices",
+            RawDataSlot::LayerCounts => "layers/counts/indices",
         }
     }
 
@@ -75,7 +75,7 @@ impl RawDataSlot {
         match self {
             RawDataSlot::DataX => "X/data",
             RawDataSlot::RawX => "raw/X/data",
-            RawDataSlot::LayerCounts => "layer/counts/data",
+            RawDataSlot::LayerCounts => "layers/counts/data",
         }
     }
 }
