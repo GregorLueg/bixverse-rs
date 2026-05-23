@@ -39,7 +39,7 @@ fn remap_communities_by_size(labels: &[usize]) -> Vec<usize> {
     }
 
     let mut sorted: Vec<(usize, usize)> = counts.into_iter().collect();
-    sorted.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+    sorted.sort_unstable_by_key(|a| std::cmp::Reverse(a.1));
 
     let mut remap: FxHashMap<usize, usize> = FxHashMap::default();
     for (new_label, (old_label, _)) in sorted.into_iter().enumerate() {

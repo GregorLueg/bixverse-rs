@@ -339,7 +339,7 @@ fn merge_max_with_preserved(
         entries.push((j, i, v));
     }
 
-    entries.sort_unstable_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+    entries.sort_unstable_by_key(|a| (a.0, a.1));
 
     // dedup keeping max value within each (row, col) group.
     let mut deduped: Vec<(usize, usize, f32)> = Vec::with_capacity(entries.len());

@@ -578,7 +578,7 @@ pub fn fast_mnn(
 
     for (batch_num, (batch, batch_indices)) in batches
         .into_iter()
-        .zip(original_indices.into_iter())
+        .zip(original_indices)
         .skip(1)
         .enumerate()
     {

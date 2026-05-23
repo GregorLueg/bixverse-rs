@@ -499,15 +499,13 @@ fn solve_lu(design_cov: &Mat<f32>, phi_z: &Mat<f32>) -> Mat<f32> {
 /// Ridge regression correction with batch pruning, arrowhead optimisation, and
 /// optional dynamic lambda.
 ///
-/// For each cluster k:
-///
-/// 1. Computes average soft assignment per level: `O[k,b] / N_b`
-/// 2. Prunes levels below `batch_proportion_cutoff`
-/// 3. Skips covariates with fewer than 2 qualifying levels (nothing to
-///    correct with a single level)
-/// 4. Builds a reduced design matrix from qualifying levels
-/// 5. Solves via arrowhead inversion (single active covariate) or LU
-/// 6. Subtracts batch corrections weighted by R
+/// The K per-cluster regressions are independent and are solved in parallel.
+/// Each cluster prunes low-occupancy levels, builds a reduced design matrix
+/// from the qualifying levels, and solves via arrowhead inversion (single
+/// active covariate) or LU. The batch corrections are then subtracted in a
+/// single pass that is parallel over cells, summing every cluster's
+/// contribution per cell. A per-variable `level -> column` lookup avoids
+/// rescanning the column map for every cell.
 ///
 /// ### Params
 ///
@@ -538,104 +536,136 @@ pub fn ridge_regression_correction_v2(
     let n = z_orig.nrows();
     let d = z_orig.ncols();
     let k = r.nrows();
+    let n_vars = batch_infos.len();
 
-    let mut z_corr = z_orig.to_owned();
+    let o_refs: Vec<MatRef<f32>> = oe_pairs.iter().map(|p| p.o.as_ref()).collect();
+    let e_refs: Vec<MatRef<f32>> = oe_pairs.iter().map(|p| p.e.as_ref()).collect();
 
-    for cluster_idx in 0..k {
-        // batch pruning: determine active (var, level) pairs
-        // col_map[i] = (var_idx, level_idx) for design column (1 + i)
-        let mut col_map: Vec<(usize, usize)> = Vec::new();
-        let mut n_active_vars = 0usize;
+    // Phase 1 (parallel over clusters): solve each cluster's regression.
+    // For each cluster we keep its per-variable level->column lookup and the
+    // solved weights W (p x d). Clusters with nothing to correct return None.
+    type Solution = (Vec<Vec<i32>>, Mat<f32>);
+    let solutions: Vec<Option<Solution>> = (0..k)
+        .into_par_iter()
+        .map(|cluster_idx| {
+            // batch pruning: column map and per-variable level->column lookup
+            let mut col_map: Vec<(usize, usize)> = Vec::new();
+            let mut level_to_col: Vec<Vec<i32>> = batch_infos
+                .iter()
+                .map(|info| vec![-1i32; info.n_levels])
+                .collect();
+            let mut n_active_vars = 0usize;
 
-        for (var_idx, info) in batch_infos.iter().enumerate() {
-            let mut passing: Vec<usize> = Vec::new();
-            for level_idx in 0..info.n_levels {
-                let n_cells_level = info.batch_indices[level_idx].len() as f32;
-                if n_cells_level == 0.0 {
-                    continue;
+            for (var_idx, info) in batch_infos.iter().enumerate() {
+                let mut passing: Vec<usize> = Vec::new();
+                for level_idx in 0..info.n_levels {
+                    let n_cells_level = info.batch_indices[level_idx].len();
+                    if n_cells_level == 0 {
+                        continue;
+                    }
+                    let avg_r = o_refs[var_idx][(cluster_idx, level_idx)] / n_cells_level as f32;
+                    if avg_r > batch_proportion_cutoff {
+                        passing.push(level_idx);
+                    }
                 }
-                let avg_r = oe_pairs[var_idx].o[(cluster_idx, level_idx)] / n_cells_level;
-                if avg_r > batch_proportion_cutoff {
-                    passing.push(level_idx);
-                }
-            }
-            if passing.len() > 1 {
-                n_active_vars += 1;
-                for &level_idx in &passing {
-                    col_map.push((var_idx, level_idx));
-                }
-            }
-        }
-
-        if col_map.is_empty() {
-            continue;
-        }
-
-        let p = 1 + col_map.len();
-        let mut design_cov = Mat::<f32>::zeros(p, p);
-        let mut phi_z = Mat::<f32>::zeros(p, d);
-
-        for cell_idx in 0..n {
-            let r_val = r[(cluster_idx, cell_idx)];
-
-            let mut active_cols: Vec<usize> = Vec::with_capacity(1 + batch_infos.len());
-            active_cols.push(0);
-            for (col_offset, &(var_idx, level_idx)) in col_map.iter().enumerate() {
-                if batch_infos[var_idx].cell_to_level[cell_idx] == level_idx {
-                    active_cols.push(1 + col_offset);
-                }
-            }
-
-            for &c in &active_cols {
-                for feat in 0..d {
-                    phi_z[(c, feat)] += r_val * z_orig[(cell_idx, feat)];
-                }
-            }
-
-            for (i, &ci) in active_cols.iter().enumerate() {
-                for &cj in &active_cols[i..] {
-                    design_cov[(ci, cj)] += r_val;
-                    if ci != cj {
-                        design_cov[(cj, ci)] += r_val;
+                if passing.len() > 1 {
+                    n_active_vars += 1;
+                    for &level_idx in &passing {
+                        level_to_col[var_idx][level_idx] = (1 + col_map.len()) as i32;
+                        col_map.push((var_idx, level_idx));
                     }
                 }
             }
-        }
 
-        // lambda on batch columns only (intercept at col 0 gets no penalty)
-        if use_dynamic_lambda {
-            for (col_offset, &(var_idx, level_idx)) in col_map.iter().enumerate() {
-                let e_val = oe_pairs[var_idx].e[(cluster_idx, level_idx)];
-                design_cov[(1 + col_offset, 1 + col_offset)] += alpha * e_val;
+            if col_map.is_empty() {
+                return None;
             }
-        } else {
-            for i in 1..p {
-                design_cov[(i, i)] += lambda;
-            }
-        }
 
-        // solve: arrowhead for single active covariate, LU otherwise
-        let w = if n_active_vars == 1 {
-            solve_arrowhead(&design_cov, &phi_z).unwrap_or_else(|| solve_lu(&design_cov, &phi_z))
-        } else {
-            solve_lu(&design_cov, &phi_z)
-        };
+            let p = 1 + col_map.len();
+            let mut design_cov = Mat::<f32>::zeros(p, p);
+            let mut phi_z = Mat::<f32>::zeros(p, d);
+            let mut active: Vec<usize> = Vec::with_capacity(1 + n_vars);
 
-        // subtract batch corrections (intercept row 0 is not subtracted)
-        for cell_idx in 0..n {
-            let r_val = r[(cluster_idx, cell_idx)];
-            for (col_offset, &(var_idx, level_idx)) in col_map.iter().enumerate() {
-                if batch_infos[var_idx].cell_to_level[cell_idx] == level_idx {
-                    let c = 1 + col_offset;
+            for cell_idx in 0..n {
+                let r_val = r[(cluster_idx, cell_idx)];
+
+                active.clear();
+                active.push(0);
+                for var_idx in 0..n_vars {
+                    let level = batch_infos[var_idx].cell_to_level[cell_idx];
+                    let c = level_to_col[var_idx][level];
+                    if c >= 0 {
+                        active.push(c as usize);
+                    }
+                }
+
+                for &c in &active {
                     for feat in 0..d {
-                        z_corr[(cell_idx, feat)] -= r_val * w[(c, feat)];
+                        phi_z[(c, feat)] += r_val * z_orig[(cell_idx, feat)];
+                    }
+                }
+
+                for (i, &ci) in active.iter().enumerate() {
+                    for &cj in &active[i..] {
+                        design_cov[(ci, cj)] += r_val;
+                        if ci != cj {
+                            design_cov[(cj, ci)] += r_val;
+                        }
                     }
                 }
             }
-        }
-    }
 
-    z_corr
+            // lambda on batch columns only (intercept at col 0 gets no penalty)
+            if use_dynamic_lambda {
+                for (col_offset, &(var_idx, level_idx)) in col_map.iter().enumerate() {
+                    let e_val = e_refs[var_idx][(cluster_idx, level_idx)];
+                    design_cov[(1 + col_offset, 1 + col_offset)] += alpha * e_val;
+                }
+            } else {
+                for i in 1..p {
+                    design_cov[(i, i)] += lambda;
+                }
+            }
+
+            let w = if n_active_vars == 1 {
+                solve_arrowhead(&design_cov, &phi_z)
+                    .unwrap_or_else(|| solve_lu(&design_cov, &phi_z))
+            } else {
+                solve_lu(&design_cov, &phi_z)
+            };
+
+            Some((level_to_col, w))
+        })
+        .collect();
+
+    // Phase 2 (parallel over cells): subtract every cluster's batch correction.
+    // Built row-major so each cell writes a contiguous row; intercept (row 0 of
+    // each W) is never subtracted.
+    let mut out = vec![0.0f32; n * d];
+    out.par_chunks_mut(d)
+        .enumerate()
+        .for_each(|(cell_idx, row)| {
+            for feat in 0..d {
+                row[feat] = z_orig[(cell_idx, feat)];
+            }
+            for cluster_idx in 0..k {
+                if let Some((level_to_col, w)) = &solutions[cluster_idx] {
+                    let r_val = r[(cluster_idx, cell_idx)];
+                    for var_idx in 0..n_vars {
+                        let level = batch_infos[var_idx].cell_to_level[cell_idx];
+                        let c = level_to_col[var_idx][level];
+                        if c >= 0 {
+                            let c = c as usize;
+                            for feat in 0..d {
+                                row[feat] -= r_val * w[(c, feat)];
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+    Mat::from_fn(n, d, |i, j| out[i * d + j])
 }
 
 //////////////////

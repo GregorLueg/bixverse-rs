@@ -550,7 +550,7 @@ pub fn build_data_to_landmark_transitions(
     let mut cols = Vec::new();
     let mut vals = Vec::new();
     for (cell_id, (idx, val)) in per_row.into_iter().enumerate() {
-        for (j, w) in idx.into_iter().zip(val.into_iter()) {
+        for (j, w) in idx.into_iter().zip(val) {
             rows.push(cell_id);
             cols.push(j);
             vals.push(w);

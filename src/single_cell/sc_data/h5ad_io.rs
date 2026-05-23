@@ -468,11 +468,11 @@ pub fn parse_h5_csc_quality<P: AsRef<Path>>(
     if verbose {
         let max_expr = no_cells_exp_gene.iter().max().unwrap_or(&0);
         let min_expr = no_cells_exp_gene.iter().min().unwrap_or(&0);
-        let avg_expr = if shape.1 > 0 {
-            no_cells_exp_gene.iter().sum::<usize>() / shape.1
-        } else {
-            0
-        };
+        let avg_expr = no_cells_exp_gene
+            .iter()
+            .sum::<usize>()
+            .checked_div(shape.1)
+            .unwrap_or(0);
         println!(
             "  Gene expression stats: min = {} | max = {} | avg = {} cells per gene",
             min_expr.separate_with_underscores(),
@@ -1089,11 +1089,11 @@ pub fn parse_h5_csr_quality<P: AsRef<Path>>(
     if verbose {
         let max_expr = no_cells_exp_gene.iter().max().unwrap_or(&0);
         let min_expr = no_cells_exp_gene.iter().min().unwrap_or(&0);
-        let avg_expr = if shape.1 > 0 {
-            no_cells_exp_gene.iter().sum::<usize>() / shape.1
-        } else {
-            0
-        };
+        let avg_expr = no_cells_exp_gene
+            .iter()
+            .sum::<usize>()
+            .checked_div(shape.1)
+            .unwrap_or(0);
 
         println!(
             "  Gene expression stats: min = {} | max = {} | avg = {} cells per gene",

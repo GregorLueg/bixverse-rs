@@ -1220,7 +1220,7 @@ mod tests {
         CompressedSparseData2<f32, f32>,
     ) {
         let mut sorted: Vec<(usize, usize, f32)> = edges.to_vec();
-        sorted.sort_unstable_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+        sorted.sort_unstable_by_key(|a| (a.0, a.1));
 
         let mut data = Vec::new();
         let mut indices = Vec::new();
