@@ -183,7 +183,7 @@ fn balance_threshold_and_preserve(
 
     let mut preserved = Vec::with_capacity(n);
     for (i, (cols, vals, (bc, bv))) in per_row.into_iter().enumerate() {
-        for (c, v) in cols.into_iter().zip(vals.into_iter()) {
+        for (c, v) in cols.into_iter().zip(vals) {
             indices.push(c);
             data.push(v);
         }

@@ -1,4 +1,7 @@
-//! Errors in bixverse
+//! Errors in bixverse. Contains all the various errors that can be returned by
+//! the crate.
+
+use ann_search_rs::utils::dist::Dist;
 #[cfg(feature = "single-cell")]
 use std::io;
 use thiserror::Error;
@@ -39,6 +42,11 @@ pub enum BixverseErrors {
     /// Propagate errors from the ann-search-rs crate
     #[error("Error from the ann-search-rs crate: {0}")]
     AnnSearchRsError(#[from] ann_search_rs::errors::AnnSearchErrors),
+
+    // -- distances --
+    /// Distance type not supported
+    #[error("Distance metric '{0}' is not supported for this method.")]
+    DistanceNotSupported(Dist),
 
     // -- Graph based errors ---
     /// Error for algorithms that expect undirected graphs
