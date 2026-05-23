@@ -599,13 +599,14 @@ pub fn update_r_with_diversity(
 /// variables jointly.
 ///
 /// For each cluster k, constructs a joint design matrix with an intercept
-/// and deviation columns for each non-reference level of each variable:
+/// and a full one-hot block per variable:
 ///
-///   Phi = [intercept | var0_level1 ... var0_levelB0-1 | var1_level1 ... ]
+///   Phi = [intercept | var0_level0 ... var0_levelB0-1 | var1_level0 ... ]
 ///
-/// The design matrix has P = 1 + sum_v (B_v - 1) rows. Ridge regression
-/// estimates batch effects, which are subtracted from the data weighted
-/// by soft cluster assignments.
+/// The K per-cluster regressions are independent and solved in parallel; the
+/// batch corrections are then subtracted in a single pass parallel over cells.
+/// A contiguous `d x N` copy of the (immutable) original embedding gives each
+/// cell's features adjacent in memory during accumulation and subtraction.
 ///
 /// ### Params
 ///
@@ -630,7 +631,8 @@ pub fn ridge_regression_correction(
 
     assert_eq!(r.ncols(), n);
 
-    // Intercept + full one-hot per variable (matches C++ Phi_moe)
+    // Intercept + full one-hot per variable (matches C++ Phi_moe). Column
+    // layout is fixed across clusters, so offsets are computed once.
     let mut offsets = Vec::with_capacity(n_vars);
     let mut col = 1usize; // 0 = intercept
     for info in batch_infos {
@@ -639,63 +641,79 @@ pub fn ridge_regression_correction(
     }
     let p = col;
 
-    let mut z_corr = z_orig.to_owned();
+    // Contiguous d x N copy so a cell's features are adjacent in memory.
+    let zt = Mat::<f32>::from_fn(d, n, |feat, cell| z_orig[(cell, feat)]);
+    let zt = zt.as_ref();
 
-    for cluster_idx in 0..k {
-        let mut design_cov = Mat::<f32>::zeros(p, p);
-        let mut phi_z = Mat::<f32>::zeros(p, d);
+    // Phase 1 (parallel over clusters): solve each cluster's regression.
+    let weights: Vec<Mat<f32>> = (0..k)
+        .into_par_iter()
+        .map(|cluster_idx| {
+            let mut design_cov = Mat::<f32>::zeros(p, p);
+            let mut phi_z = Mat::<f32>::zeros(p, d);
+            let mut active: Vec<usize> = Vec::with_capacity(1 + n_vars);
 
-        for cell_idx in 0..n {
-            let r_val = r[(cluster_idx, cell_idx)];
+            for cell_idx in 0..n {
+                let r_val = r[(cluster_idx, cell_idx)];
 
-            let mut active_cols: Vec<usize> = Vec::with_capacity(1 + n_vars);
-            active_cols.push(0);
-            for var_idx in 0..n_vars {
-                let level = batch_infos[var_idx].cell_to_level[cell_idx];
-                active_cols.push(offsets[var_idx] + level);
-            }
-
-            // Weighted by R (not R^2) -- matches C++ Phi_moe * diag(R_k)
-            for &c in &active_cols {
-                for feat in 0..d {
-                    phi_z[(c, feat)] += r_val * z_orig[(cell_idx, feat)];
+                active.clear();
+                active.push(0);
+                for var_idx in 0..n_vars {
+                    let level = batch_infos[var_idx].cell_to_level[cell_idx];
+                    active.push(offsets[var_idx] + level);
                 }
-            }
 
-            for (i, &ci) in active_cols.iter().enumerate() {
-                for &cj in &active_cols[i..] {
-                    design_cov[(ci, cj)] += r_val;
-                    if ci != cj {
-                        design_cov[(cj, ci)] += r_val;
+                // Weighted by R (not R^2) -- matches C++ Phi_moe * diag(R_k)
+                for &c in &active {
+                    for feat in 0..d {
+                        phi_z[(c, feat)] += r_val * zt[(feat, cell_idx)];
+                    }
+                }
+
+                for (i, &ci) in active.iter().enumerate() {
+                    for &cj in &active[i..] {
+                        design_cov[(ci, cj)] += r_val;
+                        if ci != cj {
+                            design_cov[(cj, ci)] += r_val;
+                        }
                     }
                 }
             }
-        }
 
-        // Uniform ridge on all entries including intercept
-        for i in 0..p {
-            design_cov[(i, i)] += lambda;
-        }
+            // Uniform ridge on all entries including intercept
+            for i in 0..p {
+                design_cov[(i, i)] += lambda;
+            }
 
-        let partial_piv_lu: PartialPivLu<f32> = design_cov.partial_piv_lu();
-        let inv_cov = partial_piv_lu.inverse();
-        let w = &inv_cov * &phi_z;
+            let partial_piv_lu: PartialPivLu<f32> = design_cov.partial_piv_lu();
+            let inv_cov = partial_piv_lu.inverse();
+            &inv_cov * &phi_z
+        })
+        .collect();
 
-        // Subtract batch columns only -- intercept (row 0) is NOT
-        // subtracted, matching C++ W.row(0).zeros()
-        for cell_idx in 0..n {
-            let r_val = r[(cluster_idx, cell_idx)];
-            for var_idx in 0..n_vars {
-                let level = batch_infos[var_idx].cell_to_level[cell_idx];
-                let c = offsets[var_idx] + level;
-                for feat in 0..d {
-                    z_corr[(cell_idx, feat)] -= r_val * w[(c, feat)];
+    // Phase 2 (parallel over cells): subtract each cluster's batch correction.
+    // Intercept (row 0 of each W) is never subtracted.
+    let mut out = vec![0.0f32; n * d];
+    out.par_chunks_mut(d)
+        .enumerate()
+        .for_each(|(cell_idx, row)| {
+            for feat in 0..d {
+                row[feat] = zt[(feat, cell_idx)];
+            }
+            for cluster_idx in 0..k {
+                let w = &weights[cluster_idx];
+                let r_val = r[(cluster_idx, cell_idx)];
+                for var_idx in 0..n_vars {
+                    let level = batch_infos[var_idx].cell_to_level[cell_idx];
+                    let c = offsets[var_idx] + level;
+                    for feat in 0..d {
+                        row[feat] -= r_val * w[(c, feat)];
+                    }
                 }
             }
-        }
-    }
+        });
 
-    z_corr
+    Mat::from_fn(n, d, |i, j| out[i * d + j])
 }
 
 /// Compute column-normalised base assignments `exp(-dist / sigma)`.
