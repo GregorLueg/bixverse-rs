@@ -345,7 +345,9 @@ pub fn update_centroids_from_r(z_cos: MatRef<f32>, r: MatRef<f32>) -> Mat<f32> {
 /// Compute Harmony objective function for convergence checking.
 ///
 /// Objective = kmeans_error + entropy + cross_entropy, where the
-/// cross-entropy term sums over all batch variables.
+/// cross-entropy term sums over all batch variables. The cell-wise sums are
+/// reduced in parallel; results therefore differ from a serial reduction at
+/// the level of floating-point rounding only.
 ///
 /// ### Params
 ///
@@ -379,29 +381,29 @@ pub fn compute_objective(
 
     let norm_const = 2000.0 / n as f32;
 
-    // K-means error + entropy
-    let mut kmeans_error = 0.0f32;
-    let mut entropy = 0.0f32;
-
-    for cell_idx in 0..n {
-        for cluster_idx in 0..k {
-            let r_val = r[(cluster_idx, cell_idx)];
-            kmeans_error += r_val * dist_mat[(cluster_idx, cell_idx)];
-            if r_val > 0.0 {
-                entropy += r_val * r_val.ln() * sigma[cluster_idx];
+    // K-means error + entropy, reduced in parallel over cells.
+    let kmeans_plus_entropy: f32 = (0..n)
+        .into_par_iter()
+        .map(|cell_idx| {
+            let mut acc = 0.0f32;
+            for cluster_idx in 0..k {
+                let r_val = r[(cluster_idx, cell_idx)];
+                acc += r_val * dist_mat[(cluster_idx, cell_idx)];
+                if r_val > 0.0 {
+                    acc += r_val * r_val.ln() * sigma[cluster_idx];
+                }
             }
-        }
-    }
+            acc
+        })
+        .sum();
 
-    // Cross-entropy: sum over all variables
+    // Cross-entropy: sum over variables, parallel over cells within each.
     let mut cross_entropy = 0.0f32;
-
     for (var_idx, info) in batch_infos.iter().enumerate() {
         let OEPair { o, e } = &oe_pairs[var_idx];
         let b = info.n_levels;
         let theta_v = theta[var_idx];
 
-        // Precompute log-ratio table for this variable
         let mut log_ratio = vec![0.0f32; k * b];
         for cluster_idx in 0..k {
             for level_idx in 0..b {
@@ -413,20 +415,23 @@ pub fn compute_objective(
             }
         }
 
-        for (level_idx, cell_indices) in info.batch_indices.iter().enumerate() {
-            for &cell_idx in cell_indices {
+        let ce_v: f32 = (0..n)
+            .into_par_iter()
+            .map(|cell_idx| {
+                let level = info.cell_to_level[cell_idx];
+                let mut acc = 0.0f32;
                 for cluster_idx in 0..k {
                     let r_val = r[(cluster_idx, cell_idx)];
-                    cross_entropy += r_val
-                        * sigma[cluster_idx]
-                        * theta_v
-                        * log_ratio[cluster_idx * b + level_idx];
+                    acc +=
+                        r_val * sigma[cluster_idx] * theta_v * log_ratio[cluster_idx * b + level];
                 }
-            }
-        }
+                acc
+            })
+            .sum();
+        cross_entropy += ce_v;
     }
 
-    (kmeans_error + entropy + cross_entropy) * norm_const
+    (kmeans_plus_entropy + cross_entropy) * norm_const
 }
 
 /// Update soft assignments with diversity penalties across all batch variables.
@@ -435,7 +440,12 @@ pub fn compute_objective(
 ///
 /// `R[k,n] proportional to exp(-dist[k,n]/sigma[k]) * product_v (E_v[k, b_v(n)] / (O_v[k, b_v(n)] + E_v[k, b_v(n)]))^theta_v`
 ///
-/// Uses block-wise shuffling to efficiently update O and E statistics.
+/// Uses block-wise shuffling to update statistics incrementally. The expected
+/// counts `E` are rank-1 (`E[k,b] = r_sum[k] * pr_b[b]`) and are only read at a
+/// cell's own level during the update, so instead of maintaining the full
+/// K x B matrix per cell (O(N*K*B)) we track only the per-cluster mass
+/// `r_sum` (O(N*K)) and rebuild `E` once at the end. The per-block R recompute
+/// is parallel over cells.
 ///
 /// ### Params
 ///
@@ -470,23 +480,9 @@ pub fn update_r_with_diversity(
     assert_eq!(theta.len(), n_vars);
     assert_eq!(oe_init.len(), n_vars);
 
-    // Precompute base scaled distances: exp(-dist / sigma), column-normalised
-    let mut scale_dist = Mat::zeros(k, n);
-    for cell_idx in 0..n {
-        let mut col_sum = 0.0f32;
-        for cluster_idx in 0..k {
-            let val = (-dist_mat[(cluster_idx, cell_idx)] / sigma[cluster_idx]).exp();
-            scale_dist[(cluster_idx, cell_idx)] = val;
-            col_sum += val;
-        }
-        if col_sum > 0.0 {
-            for cluster_idx in 0..k {
-                scale_dist[(cluster_idx, cell_idx)] /= col_sum;
-            }
-        }
-    }
+    let scale_dist = compute_scaled_distances(dist_mat, sigma);
+    let scale_dist = scale_dist.as_ref();
 
-    // Shuffled update order
     let mut rng = StdRng::seed_from_u64(seed as u64);
     let mut update_order: Vec<usize> = (0..n).collect();
     update_order.shuffle(&mut rng);
@@ -500,80 +496,98 @@ pub fn update_r_with_diversity(
         })
         .collect();
 
-    // Block-wise updates
+    // E is rank-1; track only per-cluster mass of the currently-included cells.
+    let mut r_sum = vec![0.0f32; k];
+    for cell_idx in 0..n {
+        for cluster_idx in 0..k {
+            r_sum[cluster_idx] += r[(cluster_idx, cell_idx)];
+        }
+    }
+
     let n_blocks = (1.0 / block_size).ceil() as usize;
     let cells_per_block = (n as f32 * block_size) as usize;
 
     for block_idx in 0..n_blocks {
         let idx_min = block_idx * cells_per_block;
         let idx_max = ((block_idx + 1) * cells_per_block).min(n);
+        let block = &update_order[idx_min..idx_max];
 
-        // Step 1: remove block cells from O and E for all variables
-        for &cell_idx in &update_order[idx_min..idx_max] {
-            for var_idx in 0..n_vars {
-                let level = batch_infos[var_idx].cell_to_level[cell_idx];
-                let OEPair { o, e } = &mut oe[var_idx];
-                let pr_b = &batch_infos[var_idx].pr_b;
-                let b = batch_infos[var_idx].n_levels;
-
-                for cluster_idx in 0..k {
-                    let r_val = r[(cluster_idx, cell_idx)];
-                    o[(cluster_idx, level)] -= r_val;
-                    for b_idx in 0..b {
-                        e[(cluster_idx, b_idx)] -= r_val * pr_b[b_idx];
-                    }
-                }
-            }
-        }
-
-        // Step 2: recompute R for block cells with diversity penalty
-        for &cell_idx in &update_order[idx_min..idx_max] {
-            let mut new_col_sum = 0.0f32;
-
+        // Step 1: remove block cells from O and r_sum (E is derived).
+        for &cell_idx in block {
             for cluster_idx in 0..k {
-                let base = scale_dist[(cluster_idx, cell_idx)];
-
-                // Product of penalties across all variables
-                let mut penalty = 1.0f32;
-                for var_idx in 0..n_vars {
-                    let level = batch_infos[var_idx].cell_to_level[cell_idx];
-                    let OEPair { o, e } = &oe[var_idx];
-                    let theta_v = theta[var_idx];
-
-                    let o_val = o[(cluster_idx, level)];
-                    let e_val = e[(cluster_idx, level)];
-                    if o_val + e_val > 0.0 {
-                        penalty *= (e_val / (o_val + e_val)).powf(theta_v);
-                    }
-                }
-
-                let new_r = base * penalty;
-                r[(cluster_idx, cell_idx)] = new_r;
-                new_col_sum += new_r;
+                r_sum[cluster_idx] -= r[(cluster_idx, cell_idx)];
             }
-
-            if new_col_sum > 0.0 {
+            for var_idx in 0..n_vars {
+                let level = batch_infos[var_idx].cell_to_level[cell_idx];
+                let o = &mut oe[var_idx].o;
                 for cluster_idx in 0..k {
-                    r[(cluster_idx, cell_idx)] /= new_col_sum;
+                    o[(cluster_idx, level)] -= r[(cluster_idx, cell_idx)];
                 }
             }
         }
 
-        // Step 3: add block cells back to O and E for all variables
-        for &cell_idx in &update_order[idx_min..idx_max] {
+        // Step 2: recompute R for block cells (read-only on O/r_sum -> parallel).
+        let new_cols: Vec<Vec<f32>> = {
+            let o_refs: Vec<MatRef<f32>> = oe.iter().map(|p| p.o.as_ref()).collect();
+            block
+                .par_iter()
+                .map(|&cell_idx| {
+                    let mut col = vec![0.0f32; k];
+                    let mut col_sum = 0.0f32;
+                    for cluster_idx in 0..k {
+                        let base = scale_dist[(cluster_idx, cell_idx)];
+                        let mut penalty = 1.0f32;
+                        for var_idx in 0..n_vars {
+                            let level = batch_infos[var_idx].cell_to_level[cell_idx];
+                            let o_val = o_refs[var_idx][(cluster_idx, level)];
+                            let e_val = r_sum[cluster_idx] * batch_infos[var_idx].pr_b[level];
+                            if o_val + e_val > 0.0 {
+                                penalty *= (e_val / (o_val + e_val)).powf(theta[var_idx]);
+                            }
+                        }
+                        let new_r = base * penalty;
+                        col[cluster_idx] = new_r;
+                        col_sum += new_r;
+                    }
+                    if col_sum > 0.0 {
+                        for v in col.iter_mut() {
+                            *v /= col_sum;
+                        }
+                    }
+                    col
+                })
+                .collect()
+        };
+
+        for (i, &cell_idx) in block.iter().enumerate() {
+            for cluster_idx in 0..k {
+                r[(cluster_idx, cell_idx)] = new_cols[i][cluster_idx];
+            }
+        }
+
+        // Step 3: add block cells back to O and r_sum.
+        for &cell_idx in block {
+            for cluster_idx in 0..k {
+                r_sum[cluster_idx] += r[(cluster_idx, cell_idx)];
+            }
             for var_idx in 0..n_vars {
                 let level = batch_infos[var_idx].cell_to_level[cell_idx];
-                let OEPair { o, e } = &mut oe[var_idx];
-                let pr_b = &batch_infos[var_idx].pr_b;
-                let b = batch_infos[var_idx].n_levels;
-
+                let o = &mut oe[var_idx].o;
                 for cluster_idx in 0..k {
-                    let r_val = r[(cluster_idx, cell_idx)];
-                    o[(cluster_idx, level)] += r_val;
-                    for b_idx in 0..b {
-                        e[(cluster_idx, b_idx)] += r_val * pr_b[b_idx];
-                    }
+                    o[(cluster_idx, level)] += r[(cluster_idx, cell_idx)];
                 }
+            }
+        }
+    }
+
+    // Rebuild E = r_sum (outer) pr_b for each variable.
+    for (var_idx, info) in batch_infos.iter().enumerate() {
+        let b = info.n_levels;
+        let e = &mut oe[var_idx].e;
+        for cluster_idx in 0..k {
+            let rs = r_sum[cluster_idx];
+            for level_idx in 0..b {
+                e[(cluster_idx, level_idx)] = rs * info.pr_b[level_idx];
             }
         }
     }
@@ -682,6 +696,48 @@ pub fn ridge_regression_correction(
     }
 
     z_corr
+}
+
+/// Compute column-normalised base assignments `exp(-dist / sigma)`.
+///
+/// This is the diversity-free soft assignment used as the base for the
+/// penalised R update. It is identical for every block within a round, and
+/// (in v2) for every inner iteration within a Harmony round, so it is hoisted
+/// out and computed once. Parallel over cells.
+///
+/// ### Params
+///
+/// * `dist_mat` - Distance matrix (K x N)
+/// * `sigma` - Per-cluster diversity weights (length K)
+///
+/// ### Returns
+///
+/// Column-normalised base assignment matrix (K x N), columns sum to 1
+pub fn compute_scaled_distances(dist_mat: MatRef<f32>, sigma: &[f32]) -> Mat<f32> {
+    let k = dist_mat.nrows();
+    let n = dist_mat.ncols();
+    assert_eq!(sigma.len(), k, "sigma length must match number of clusters");
+
+    let columns: Vec<Vec<f32>> = (0..n)
+        .into_par_iter()
+        .map(|cell_idx| {
+            let mut col = vec![0.0f32; k];
+            let mut col_sum = 0.0f32;
+            for cluster_idx in 0..k {
+                let val = (-dist_mat[(cluster_idx, cell_idx)] / sigma[cluster_idx]).exp();
+                col[cluster_idx] = val;
+                col_sum += val;
+            }
+            if col_sum > 0.0 {
+                for v in col.iter_mut() {
+                    *v /= col_sum;
+                }
+            }
+            col
+        })
+        .collect();
+
+    Mat::from_fn(k, n, |i, j| columns[j][i])
 }
 
 /////////////

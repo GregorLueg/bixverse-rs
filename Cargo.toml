@@ -18,6 +18,8 @@ single-cell = ["half", "bincode", "indexmap", "memmap2", "hdf5", "lz4_flex"]
 large_scale_diagnostics = []
 ## Enables multi-modal single cell analysis (requires single-cell)
 multi-modal = ["single-cell"]
+## Enable GPU-accelerated algorithms and methods
+gpu = ["cubecl", "ann-search-rs/gpu"]
 
 [profile.release]
 opt-level = 3
@@ -26,7 +28,7 @@ codegen-units = 4
 
 [dependencies]
 approx = "0.5.1"
-ann-search-rs = { version = "0.3.1" }
+ann-search-rs = { git = "https://github.com/GregorLueg/ann-search-rs", branch = "feat-turboquant-attempt2" }
 bincode = { version = "2.0.1", features = ["serde"], optional = true }
 either = "1.15.0"
 extendr-api = "0.9.0"
@@ -54,6 +56,7 @@ thiserror = "2.0.18"
 thousands = "0.2.0"
 wide = "1.4.0"
 document-features = "0.2.12"
+cubecl = { version = "0.10.0", features = ["wgpu", "cpu"], optional = true }
 
 
 [package.metadata.docs.rs]

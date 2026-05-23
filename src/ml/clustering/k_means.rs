@@ -510,7 +510,13 @@ where
 {
     let kmeans_params = kmeans_params.unwrap_or_default();
     let (data_flat, n, dim) = matrix_to_flat(data);
-    let dist = parse_ann_dist(dist).unwrap_or_default();
+    let dist = parse_ann_dist(dist).unwrap_or_else(|| {
+        println!(
+            "Unknown string provided ({:?}). Defaulting to Squared Euclidean",
+            dist
+        );
+        Dist::default()
+    });
 
     let norms = if dist == Dist::Cosine {
         (0..n)
