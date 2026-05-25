@@ -3,7 +3,7 @@
 use extendr_api::*;
 use std::collections::HashMap;
 
-use super::k_means_gpu::KMeansGpuParams;
+use crate::gpu::ml::k_means_gpu::KMeansGpuParams;
 use crate::ml::clustering::k_means::parse_kmeans_init;
 
 /////////////////////
