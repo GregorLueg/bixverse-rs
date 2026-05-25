@@ -131,6 +131,15 @@ impl GraphCsr {
     ///
     /// Iterates the non-zero (canonical) entries of `weights` and scatters each
     /// into both endpoints' rows. Zero-weight reciprocal entries are dropped.
+    ///
+    /// ### Params
+    ///
+    /// * `neighbours` - Neighbour indices for each node
+    /// * `weights` - Non-redundant edge weights for each neighbour connection
+    ///
+    /// ### Returns
+    ///
+    /// A new `GraphCsr` with symmetric edges in CSR layout.
     fn from_non_redundant(neighbours: &[Vec<usize>], weights: &[Vec<f32>]) -> Self {
         let n = neighbours.len();
         let mut rows: Vec<Vec<(u32, f32)>> = vec![Vec::new(); n];
@@ -165,12 +174,28 @@ impl GraphCsr {
         }
     }
 
+    /// Number of nodes in the graph
+    ///
+    /// ### Returns
+    ///
+    /// The number of nodes.
     #[inline]
     fn n_nodes(&self) -> usize {
         self.offsets.len() - 1
     }
 
-    /// Sparse mat-vec: `out = W_sym @ c`. `out` and `c` are length n_nodes.
+    /// Sparse matrix-vector product: `out = W_sym @ c`
+    ///
+    /// Multiplies the symmetric CSR graph by a dense vector.
+    ///
+    /// ### Params
+    ///
+    /// * `c` - Input vector of length `n_nodes`
+    /// * `out` - Output vector of length `n_nodes`, written in place
+    ///
+    /// ### Returns
+    ///
+    /// Nothing; writes result into `out`.
     fn spmv(&self, c: &[f32], out: &mut [f32]) {
         for i in 0..self.n_nodes() {
             let start = self.offsets[i];
@@ -380,7 +405,7 @@ fn compute_local_cov_max(node_degrees: &[f32], vals: &[f32]) -> f32 {
 
 /// Center (Z-score) the values
 ///
-/// Transforms values to have zero means and unit variance of one using the
+/// Transforms values to have zero mean and unit variance using the
 /// provided stats.
 ///
 /// ### Params
@@ -388,6 +413,10 @@ fn compute_local_cov_max(node_degrees: &[f32], vals: &[f32]) -> f32 {
 /// * `vals` - Mutable reference to the values to scale
 /// * `mu` - The mean values
 /// * `var` - The variance of the values
+///
+/// ### Returns
+///
+/// Nothing; modifies `vals` in place.
 fn center_values(vals: &mut [f32], mu: &[f32], var: &[f32]) {
     assert_same_len!(vals, mu, var);
 
@@ -750,9 +779,9 @@ impl<'a> Hotspot<'a> {
     ///   cell.
     /// * `weights` - Slice of the distances to the neighbours of a given cell.
     ///
-    /// ### Return
+    /// ### Returns
     ///
-    /// `Result` with the initialised `Hotspot` (reading the cell file can fail).
+    /// `Result` with the initialised `Hotspot`
     pub fn new(
         f_path_gene: String,
         f_path_cell: String,
@@ -1409,7 +1438,26 @@ impl<'a> Hotspot<'a> {
         })
     }
 
-    /// Write one symmetric pair entry (normalised lc and z) into the outputs.
+    /// Write one symmetric pair entry into the output matrices
+    ///
+    /// Normalises the local covariance and computes the Z-score for a gene
+    /// pair, writing both values symmetrically into `lc_mat` and `z_mat`.
+    ///
+    /// ### Params
+    ///
+    /// * `lc_mat` - Mutable reference to the local covariance matrix
+    /// * `z_mat` - Mutable reference to the Z-score matrix
+    /// * `gi` - Row/column index of the first gene
+    /// * `gj` - Row/column index of the second gene
+    /// * `lc` - Raw local covariance value for this pair
+    /// * `eg2_i` - Expected squared covariance for gene `i`
+    /// * `eg2_j` - Expected squared covariance for gene `j`
+    /// * `max_i` - Maximum possible local covariance for gene `i`
+    /// * `max_j` - Maximum possible local covariance for gene `j`
+    ///
+    /// ### Returns
+    ///
+    /// Nothing; modifies `lc_mat` and `z_mat` in place.
     #[allow(clippy::too_many_arguments)]
     fn write_pair(
         lc_mat: &mut Mat<f32>,
