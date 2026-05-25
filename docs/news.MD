@@ -2,6 +2,8 @@
 
 ## 0.2.1
 
+Major update / release
+
 ### Features
 
 - Multi file support for MTX reading (several 10x experiments to ingest).
@@ -11,6 +13,9 @@
   * Weighted nearest neighbour graph method behind a new feature gate.
   * DSB normalisation for CITE Seq ADT
 - First annotation helpers... ScType implemented
+- Improved Harmony with increased speed
+- h5ad ingest automatically recognises where raw counts are being stored
+- Updates to various package editions
 
 ## 0.2.0
 
