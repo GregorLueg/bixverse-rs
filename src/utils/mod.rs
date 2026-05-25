@@ -10,6 +10,7 @@ pub mod simd;
 pub mod traits;
 pub mod vec_utils;
 
+use faer::Par;
 use rustc_hash::{FxBuildHasher, FxHashSet};
 
 ///////////////////
@@ -31,4 +32,10 @@ pub fn string_vec_to_set(x: &[String]) -> FxHashSet<&String> {
         set.insert(s);
     }
     set
+}
+
+/// Returns the faer parallelism enum (all available cores via Rayon).
+#[inline]
+pub fn faer_parallelism() -> Par {
+    Par::Rayon(std::thread::available_parallelism().unwrap())
 }

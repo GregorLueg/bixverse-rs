@@ -2,8 +2,8 @@
 //! types.
 
 use ann_search_rs::utils::dist::SimdDistance;
+use faer::Accum;
 use faer::linalg::matmul::triangular::{BlockStructure, matmul as triangular_matmul};
-use faer::{Accum, Par};
 use faer::{Mat, MatRef, Scale};
 use rayon::prelude::*;
 use rustc_hash::FxHashSet;
@@ -13,20 +13,7 @@ use std::hash::Hash;
 use crate::core::base::info::*;
 use crate::core::math::matrix_helpers::*;
 use crate::prelude::*;
-
-/////////////
-// Helpers //
-/////////////
-
-/// Returns the faer parallelism Enum
-///
-/// ### Returns
-///
-/// The [Par] enum for faer.
-#[inline]
-fn faer_parallelism() -> Par {
-    Par::Rayon(std::thread::available_parallelism().unwrap())
-}
+use crate::utils::faer_parallelism;
 
 ///////////////////////
 // Column matrix ops //

@@ -14,6 +14,7 @@ use crate::single_cell::mc_generation::{
 use crate::single_cell::sc_analysis::fast_clusters::FastLouvainParams;
 use crate::single_cell::sc_analysis::{
     hotspot::HotSpotParams,
+    meld::{MeldParams, parse_lap_type, parse_meld_filter},
     milo_r::MiloRParams,
     scenic::{
         ExtraTreesConfig, GradientBoostingConfig, RandomForestConfig, RegressionLearner,
@@ -2554,6 +2555,80 @@ impl SctypeRes {
             scores,
             n_cells,
             n_cell_types,
+        })
+    }
+}
+
+//////////
+// MELD //
+//////////
+
+impl MeldParams {
+    /// Generate MeldParams from an R list, falling back to defaults.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The R list from which to parse the arguments
+    ///
+    /// ### Returns
+    ///
+    /// The populated [MeldParams]
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let knn_params = KnnParams::from_r_list(r_list.clone())?;
+
+        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let defaults = Self::default();
+
+        let beta = params
+            .get("beta")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.beta);
+
+        let offset = params
+            .get("offset")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.offset);
+
+        let order = params
+            .get("order")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.order);
+
+        let filter = params
+            .get("filter")
+            .and_then(|v| v.as_str())
+            .and_then(parse_meld_filter)
+            .unwrap_or(defaults.filter);
+
+        let chebyshev_order = params
+            .get("chebyshev_order")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.chebyshev_order);
+
+        let lap_type = params
+            .get("lap_type")
+            .and_then(|v| v.as_str())
+            .and_then(parse_lap_type)
+            .unwrap_or(defaults.lap_type);
+
+        let normalise_indicators = params
+            .get("normalise_indicators")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.normalise_indicators);
+
+        Ok(Self {
+            beta,
+            offset,
+            order,
+            filter,
+            chebyshev_order,
+            lap_type,
+            normalise_indicators,
+            knn_params,
         })
     }
 }
