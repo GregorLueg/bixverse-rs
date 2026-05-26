@@ -866,78 +866,8 @@ pub fn centroid_norms_l2<F: Float>(
     }
 }
 
-/// Per-centroid squared L2 drift between consecutive centroid snapshots.
-///
-/// One workgroup per centroid; thread 0 accumulates the squared element-wise
-/// differences across the full row. Used to detect convergence without reading
-/// back the full centroid matrix.
-///
-/// ### Params
-///
-/// * `old_cents` - Centroid vectors before the update `[k, dim]`
-/// * `new_cents` - Centroid vectors after the update `[k, dim]`
-/// * `drift_sq` - Output per-centroid squared drift `[k]`, written by thread 0
-/// * `k` - Number of centroids
-/// * `dim` - Embedding dimensionality (comptime)
-///
-/// ### Grid mapping
-///
-/// * `CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X` -> centroid index
-/// * Only `UNIT_POS_X == 0` writes output
-
-/// Reduce a vector of per-centroid squared drifts to its maximum.
-///
-/// Single-thread serial scan over `k` values. The result is written to
-/// `out[0]` and read back to the host as a single scalar; taking `sqrt` on
-/// the host converts squared drift to L2 drift. Serial cost is negligible
-/// because `k` is small relative to `n`.
-///
-/// ### Params
-///
-/// * `values` - Per-centroid squared drifts `[k]` produced by `centroid_drift_sq`
-/// * `out` - Single-element output buffer `[1]` receiving the maximum value
-/// * `k` - Number of centroids
-///
-/// ### Grid mapping
-///
-/// * Single cube, single thread (`UNIT_POS_X == 0`)
-
-/// Element-wise copy of a flat float buffer.
-///
-/// One thread per element. Used to snapshot the centroid matrix before an
-/// in-place update so that drift can be computed device-side without a host
-/// readback.
-///
-/// ### Params
-///
-/// * `src` - Source buffer `[n_elems]`
-/// * `dst` - Destination buffer `[n_elems]`, written in place
-/// * `n_elems` - Total number of elements to copy
-///
-/// ### Grid mapping
-///
-/// * `ABSOLUTE_POS_X` -> element index
-
-/// Per-centroid L2 norm of the centroid matrix.
-///
-/// One workgroup per centroid; thread 0 accumulates the sum of squares across
-/// the full row and writes its square root. Kept device-side so that cosine
-/// assignment never requires a host readback of the centroid matrix between
-/// iterations.
-///
-/// ### Params
-///
-/// * `centroids` - Centroid vectors `[k, dim]`
-/// * `norms` - Output L2 norms `[k]`, written by thread 0 of each workgroup
-/// * `k` - Number of centroids
-/// * `dim` - Embedding dimensionality (comptime)
-///
-/// ### Grid mapping
-///
-/// * `CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X` -> centroid index
-/// * Only `UNIT_POS_X == 0` writes output
-
-/// One Lloyd's iteration entirely on device: assign, rebuild CSR, update centroids.
+/// One Lloyd's iteration entirely on device: assign, rebuild CSR, update
+/// centroids.
 ///
 /// Runs `flash_assign_device` to compute hard assignments, `build_csr_gpu` to
 /// sort point indices into cluster segments, and `segmented_update` to recompute
