@@ -26,7 +26,7 @@ impl KMeansGpuParams {
         let iters = params_list
             .get("k_means_iter")
             .and_then(|v| v.as_integer())
-            .unwrap_or(30) as usize;
+            .unwrap_or(50) as usize;
 
         let init = params_list
             .get("k_means_init")
@@ -38,6 +38,11 @@ impl KMeansGpuParams {
             .and_then(|v| v.as_real())
             .unwrap_or(1e-5);
 
-        Ok(Self::new(iters, init, tol))
+        let fixed = params_list
+            .get("fixed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+        Ok(Self::new(iters, init, tol, fixed))
     }
 }
