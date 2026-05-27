@@ -600,6 +600,8 @@ where
 
     let (gx, gy) = grid_2d((n as u32).div_ceil(WORKGROUP_SIZE_X));
 
+    let start = Instant::now();
+
     unsafe {
         histogram_clusters::launch_unchecked::<R>(
             client,
@@ -609,7 +611,12 @@ where
             counts.clone().into_tensor_arg(),
             n as u32,
         );
+    }
 
+    client.sync();
+    println!("  histogram: {:.2?}", start.elapsed());
+
+    unsafe {
         exclusive_scan_offsets::launch_unchecked::<R>(
             client,
             CubeCount::Static(1, 1, 1),
@@ -619,7 +626,12 @@ where
             cursor.clone().into_tensor_arg(),
             k as u32,
         );
+    }
 
+    client.sync();
+    println!("  scan: {:.2?}", start.elapsed());
+
+    unsafe {
         scatter_csr::launch_unchecked::<R>(
             client,
             CubeCount::Static(gx, gy, 1),
@@ -630,6 +642,9 @@ where
             n as u32,
         );
     }
+
+    client.sync();
+    println!("  scatter: {:.2?}", start.elapsed());
 
     (all_indices, offsets)
 }

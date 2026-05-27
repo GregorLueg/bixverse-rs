@@ -19,7 +19,7 @@ large_scale_diagnostics = []
 ## Enables multi-modal single cell analysis (requires single-cell)
 multi-modal = ["single-cell"]
 ## Enable GPU-accelerated algorithms and methods
-gpu = ["cubecl", "ann-search-rs/gpu"]
+gpu = ["cubecl", "ann-search-rs/gpu", "half"]
 
 [profile.release]
 opt-level = 3
