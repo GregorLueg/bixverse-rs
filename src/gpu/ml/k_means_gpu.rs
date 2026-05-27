@@ -794,6 +794,12 @@ pub fn segmented_centroid_update<F: Float>(
     }
 }
 
+/// Force host to wait for all GPU work submitted so far. cubecl's `sync` only
+/// flushes; a buffer readback is the only thing that guarantees a real fence.
+fn gpu_fence<R: Runtime>(client: &ComputeClient<R>, scratch: &GpuTensor<R, u32>) {
+    let _ = scratch.clone().read(client).unwrap();
+}
+
 /// Recompute centroids in place from a CSR layout.
 ///
 /// Wraps `segmented_centroid_update`. Empty clusters retain their current
@@ -1220,19 +1226,20 @@ fn lloyd_step<T, R>(
     counts: &GpuTensor<R, u32>,
     offsets: &GpuTensor<R, u32>,
     all_indices: &GpuTensor<R, u32>,
+    fence_scratch: &GpuTensor<R, u32>,
 ) where
     R: Runtime,
     T: Float + Sum + cubecl::CubeElement + num_traits::Float + num_traits::FromPrimitive,
 {
-    // let start = Instant::now();
+    let start = Instant::now();
 
     flash_assign_device(
         client, data_gpu, cent_gpu, pnorm_gpu, cnorm_gpu, assign_gpu, n, k, dim, metric, bk,
     );
 
-    // client.sync();
+    gpu_fence(client, fence_scratch);
 
-    // println!("Flash assign took {:.2?}", start.elapsed());
+    println!("Flash assign took {:.2?}", start.elapsed());
 
     build_csr_gpu_privatized::<R>(
         assign_gpu,
@@ -1246,13 +1253,13 @@ fn lloyd_step<T, R>(
         client,
     );
 
-    // client.sync();
-    // println!("CSR GPU privatised {:.2?}", start.elapsed());
+    gpu_fence(client, fence_scratch);
+    println!("CSR GPU privatised {:.2?}", start.elapsed());
 
-    segmented_update::<R, T>(data_gpu, all_indices, offsets, cent_gpu, k, dim, client);
+    segmented_update::<R, T>(data_gpu, &all_indices, &offsets, cent_gpu, k, dim, client);
 
-    // client.sync();
-    // println!("Segmented update in {:.2?}", start.elapsed());
+    gpu_fence(client, fence_scratch);
+    println!("Segmented update in {:.2?}", start.elapsed());
 
     if *metric == Dist::Cosine {
         let (gx, gy) = grid_2d(k as u32);
@@ -1381,6 +1388,8 @@ where
         println!("  ... moved data to GPU: {:.2?}", start.elapsed());
     }
 
+    let fence_scratch = GpuTensor::<R, u32>::from_slice(&[0u32], vec![1], &client);
+
     let pnorm_gpu = if dist == Dist::Cosine {
         let pnorms: Vec<T> = (0..n)
             .map(|i| T::calculate_l2_norm(&data_padded[i * dim_padded..(i + 1) * dim_padded]))
@@ -1449,6 +1458,7 @@ where
                 &counts,
                 &offsets,
                 &all_indices,
+                &fence_scratch,
             );
         }
     } else {
@@ -1483,6 +1493,7 @@ where
                 &counts,
                 &offsets,
                 &all_indices,
+                &fence_scratch,
             );
 
             // Zeroed single-element atomic counter, recreated per iter (same
