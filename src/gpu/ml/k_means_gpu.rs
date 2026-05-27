@@ -129,53 +129,28 @@ pub fn flash_assign_euclidean<F: Float, N: Size>(
     #[comptime] bk: usize,
     #[comptime] rn: usize,
 ) {
-    let lanes = LINE_SIZE;
-    let dim_scalars = dim_lines * lanes;
     let tx = UNIT_POS_X as usize;
     let wg = WORKGROUP_SIZE_X as usize;
+    let two = F::new(2.0);
 
-    // ---------------------------------------------------------------------
-    // LESSON 1 (the big one): arithmetic intensity via register blocking.
-    //
-    // Your original kernel ran one thread per point. Each thread, for every
-    // cached centroid, re-read `dim_scalars` values from shared memory to
-    // produce a single distance. The centroid values in SMEM were therefore
-    // touched once per point, and the inner loop was a single dependency
-    // chain on `sum` -- no instruction-level parallelism to hide latency.
-    //
-    // Now each thread owns `rn` points held in registers. A centroid value
-    // pulled from SMEM is reused `rn` times (once per owned point) before we
-    // move on, and the `rn` distance accumulators form `rn` independent FMA
-    // chains. That is ~rn x fewer SMEM loads and loop-control instructions
-    // per distance computed, plus much better ILP. This is the hand-rolled,
-    // tensor-core-free version of what flashlib's BLOCK_N tiling gets for
-    // free from `tl.dot`. It is the most important idea in the whole file.
-    // ---------------------------------------------------------------------
     let thread_idx = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * WORKGROUP_SIZE_X + UNIT_POS_X;
     let p0 = thread_idx as usize * rn;
 
-    // Load this thread's `rn` points into registers once. Inactive lanes
-    // (p0 + r >= n_samples) read point 0 (harmless) and never write a result.
-    let mut p = Array::<F>::new(rn * dim_scalars);
+    let mut p = Array::<Vector<F, N>>::new(rn * dim_lines);
     #[unroll]
     for r in 0..rn {
         let pid = p0 + r;
         let p_base = if (pid as u32) < n_samples {
             pid * dim_lines
         } else {
-            #[allow(clippy::useless_conversion)] // needs to happen to compile
             0usize.into()
         };
         for i in 0..dim_lines {
-            let pl = data[p_base + i];
-            #[unroll]
-            for lane in 0..lanes {
-                p[r * dim_scalars + i * lanes + lane] = pl[lane];
-            }
+            p[r * dim_lines + i] = data[p_base + i];
         }
     }
 
-    let mut s_cent = SharedMemory::<F>::new(bk * dim_scalars);
+    let mut s_cent = SharedMemory::<Vector<F, N>>::new(bk * dim_lines);
 
     let mut best_dist = Array::<F>::new(rn);
     let mut best_idx = Array::<u32>::new(rn);
@@ -191,60 +166,46 @@ pub fn flash_assign_euclidean<F: Float, N: Size>(
     while tile < n_tiles {
         let tile_c0 = tile * bk as u32;
 
-        // Cooperative load of up to `bk` centroids into scalar shared memory.
-        // Unchanged, and still shared by the whole workgroup -- but its cost
-        // is now amortised over rn x more distance work (LESSON 1), and over
-        // more centroids per tile because bk is larger now (LESSON 3 below).
-        let total_elems = bk * dim_scalars;
+        let total_lines = bk * dim_lines;
         let mut load_idx = tx;
-        while load_idx < total_elems {
-            let c_local = load_idx / dim_scalars;
-            let elem = load_idx % dim_scalars;
+        while load_idx < total_lines {
+            let c_local = load_idx / dim_lines;
+            let line = load_idx % dim_lines;
             let c_global = tile_c0 + c_local as u32;
             if c_global < k {
-                let line_idx = elem / lanes;
-                let lane = elem % lanes;
-                let cl = centroids[c_global as usize * dim_lines + line_idx];
-                s_cent[load_idx] = cl[lane];
+                s_cent[load_idx] = centroids[c_global as usize * dim_lines + line];
             } else {
-                s_cent[load_idx] = F::new(0.0);
+                s_cent[load_idx] = Vector::<F, N>::new(F::new(0.0));
             }
             load_idx += wg;
         }
         sync_cube();
 
-        // Scan the cached tile, online argmin for all rn owned points.
         let mut c_local = 0u32;
         while c_local < bk as u32 {
             let c_global = tile_c0 + c_local;
             if c_global < k {
-                let cbase = c_local as usize * dim_scalars;
-                let mut sum = Array::<F>::new(rn);
+                let cbase = c_local as usize * dim_lines;
+                let mut csq = F::new(0.0);
+                let mut dot = Array::<F>::new(rn);
                 #[unroll]
                 for r in 0..rn {
-                    sum[r] = F::new(0.0);
+                    dot[r] = F::new(0.0);
                 }
-                // One SMEM read of `cval` feeds rn independent accumulators.
-                // (NOTE / LESSON 2: this is still scalar math -- we explode the
-                // Vector<F, N> lines into scalars on load. The next layer of
-                // speed-up is to keep the point and the cached centroid as
-                // Line<F> and do vectorised FMA + a horizontal reduction here,
-                // which folds LINE_SIZE elements per instruction. I left that
-                // out on purpose; see the note I sent with this file.)
-                for e in 0..dim_scalars {
-                    let cval = s_cent[cbase + e];
+                for i in 0..dim_lines {
+                    let cl = s_cent[cbase + i];
+                    csq = csq + cl.dot(cl); // ||c||^2, inline, no race
                     #[unroll]
                     for r in 0..rn {
-                        let diff = p[r * dim_scalars + e] - cval;
-                        let acc = sum[r];
-                        sum[r] = acc + diff * diff;
+                        let acc = dot[r];
+                        dot[r] = acc + p[r * dim_lines + i].dot(cl);
                     }
                 }
                 #[unroll]
                 for r in 0..rn {
-                    let s = sum[r];
-                    if s < best_dist[r] {
-                        best_dist[r] = s;
+                    let score = csq - two * dot[r]; // argmin(||c||^2 - 2<x,c>)
+                    if score < best_dist[r] {
+                        best_dist[r] = score;
                         best_idx[r] = c_global;
                     }
                 }
@@ -252,7 +213,6 @@ pub fn flash_assign_euclidean<F: Float, N: Size>(
             c_local += 1u32;
         }
         sync_cube();
-
         tile += 1u32;
     }
 
@@ -300,17 +260,13 @@ pub fn flash_assign_cosine<F: Float, N: Size>(
     #[comptime] bk: usize,
     #[comptime] rn: usize,
 ) {
-    let lanes = LINE_SIZE;
-    let dim_scalars = dim_lines * lanes;
     let tx = UNIT_POS_X as usize;
     let wg = WORKGROUP_SIZE_X as usize;
 
-    // Same register blocking as the Euclidean kernel: rn points per thread,
-    // one SMEM centroid read reused rn times. See LESSON 1 there.
     let thread_idx = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * WORKGROUP_SIZE_X + UNIT_POS_X;
     let p0 = thread_idx as usize * rn;
 
-    let mut p = Array::<F>::new(rn * dim_scalars);
+    let mut p = Array::<Vector<F, N>>::new(rn * dim_lines);
     let mut pnorm = Array::<F>::new(rn);
     #[unroll]
     for r in 0..rn {
@@ -318,21 +274,15 @@ pub fn flash_assign_cosine<F: Float, N: Size>(
         let safe = if (pid as u32) < n_samples {
             pid
         } else {
-            #[allow(clippy::useless_conversion)] // needs to happen to compile
             0usize.into()
         };
-        let p_base = safe * dim_lines;
         for i in 0..dim_lines {
-            let pl = data[p_base + i];
-            #[unroll]
-            for lane in 0..lanes {
-                p[r * dim_scalars + i * lanes + lane] = pl[lane];
-            }
+            p[r * dim_lines + i] = data[safe * dim_lines + i];
         }
         pnorm[r] = point_norms[safe];
     }
 
-    let mut s_cent = SharedMemory::<F>::new(bk * dim_scalars);
+    let mut s_cent = SharedMemory::<Vector<F, N>>::new(bk * dim_lines);
 
     let mut best_dist = Array::<F>::new(rn);
     let mut best_idx = Array::<u32>::new(rn);
@@ -348,19 +298,16 @@ pub fn flash_assign_cosine<F: Float, N: Size>(
     while tile < n_tiles {
         let tile_c0 = tile * bk as u32;
 
-        let total_elems = bk * dim_scalars;
+        let total_lines = bk * dim_lines;
         let mut load_idx = tx;
-        while load_idx < total_elems {
-            let c_local = load_idx / dim_scalars;
-            let elem = load_idx % dim_scalars;
+        while load_idx < total_lines {
+            let c_local = load_idx / dim_lines;
+            let line = load_idx % dim_lines;
             let c_global = tile_c0 + c_local as u32;
             if c_global < k {
-                let line_idx = elem / lanes;
-                let lane = elem % lanes;
-                let cl = centroids[c_global as usize * dim_lines + line_idx];
-                s_cent[load_idx] = cl[lane];
+                s_cent[load_idx] = centroids[c_global as usize * dim_lines + line];
             } else {
-                s_cent[load_idx] = F::new(0.0);
+                s_cent[load_idx] = Vector::<F, N>::new(F::new(0.0));
             }
             load_idx += wg;
         }
@@ -370,18 +317,18 @@ pub fn flash_assign_cosine<F: Float, N: Size>(
         while c_local < bk as u32 {
             let c_global = tile_c0 + c_local;
             if c_global < k {
-                let cbase = c_local as usize * dim_scalars;
+                let cbase = c_local as usize * dim_lines;
                 let mut dot = Array::<F>::new(rn);
                 #[unroll]
                 for r in 0..rn {
                     dot[r] = F::new(0.0);
                 }
-                for e in 0..dim_scalars {
-                    let cval = s_cent[cbase + e];
+                for i in 0..dim_lines {
+                    let cl = s_cent[cbase + i];
                     #[unroll]
                     for r in 0..rn {
                         let acc = dot[r];
-                        dot[r] = acc + p[r * dim_scalars + e] * cval;
+                        dot[r] = acc + p[r * dim_lines + i].dot(cl);
                     }
                 }
                 let cnorm = centroid_norms[c_global as usize];
@@ -397,7 +344,6 @@ pub fn flash_assign_cosine<F: Float, N: Size>(
             c_local += 1u32;
         }
         sync_cube();
-
         tile += 1u32;
     }
 
