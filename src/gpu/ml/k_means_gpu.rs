@@ -157,6 +157,7 @@ pub fn flash_assign_euclidean<F: Float, N: Size>(
     // Load this thread's `rn` points into registers once. Inactive lanes
     // (p0 + r >= n_samples) read point 0 (harmless) and never write a result.
     let mut p = Array::<F>::new(rn * dim_scalars);
+    #[unroll]
     for r in 0..rn {
         let pid = p0 + r;
         let p_base = if (pid as u32) < n_samples {
@@ -178,6 +179,7 @@ pub fn flash_assign_euclidean<F: Float, N: Size>(
 
     let mut best_dist = Array::<F>::new(rn);
     let mut best_idx = Array::<u32>::new(rn);
+    #[unroll]
     for r in 0..rn {
         best_dist[r] = F::new(f32::MAX);
         best_idx[r] = 0u32;
@@ -218,6 +220,7 @@ pub fn flash_assign_euclidean<F: Float, N: Size>(
             if c_global < k {
                 let cbase = c_local as usize * dim_scalars;
                 let mut sum = Array::<F>::new(rn);
+                #[unroll]
                 for r in 0..rn {
                     sum[r] = F::new(0.0);
                 }
@@ -230,12 +233,14 @@ pub fn flash_assign_euclidean<F: Float, N: Size>(
                 // out on purpose; see the note I sent with this file.)
                 for e in 0..dim_scalars {
                     let cval = s_cent[cbase + e];
+                    #[unroll]
                     for r in 0..rn {
                         let diff = p[r * dim_scalars + e] - cval;
                         let acc = sum[r];
                         sum[r] = acc + diff * diff;
                     }
                 }
+                #[unroll]
                 for r in 0..rn {
                     let s = sum[r];
                     if s < best_dist[r] {
@@ -251,6 +256,7 @@ pub fn flash_assign_euclidean<F: Float, N: Size>(
         tile += 1u32;
     }
 
+    #[unroll]
     for r in 0..rn {
         let pid = p0 + r;
         if (pid as u32) < n_samples {
@@ -306,6 +312,7 @@ pub fn flash_assign_cosine<F: Float, N: Size>(
 
     let mut p = Array::<F>::new(rn * dim_scalars);
     let mut pnorm = Array::<F>::new(rn);
+    #[unroll]
     for r in 0..rn {
         let pid = p0 + r;
         let safe = if (pid as u32) < n_samples {
@@ -329,6 +336,7 @@ pub fn flash_assign_cosine<F: Float, N: Size>(
 
     let mut best_dist = Array::<F>::new(rn);
     let mut best_idx = Array::<u32>::new(rn);
+    #[unroll]
     for r in 0..rn {
         best_dist[r] = F::new(f32::MAX);
         best_idx[r] = 0u32;
@@ -364,17 +372,20 @@ pub fn flash_assign_cosine<F: Float, N: Size>(
             if c_global < k {
                 let cbase = c_local as usize * dim_scalars;
                 let mut dot = Array::<F>::new(rn);
+                #[unroll]
                 for r in 0..rn {
                     dot[r] = F::new(0.0);
                 }
                 for e in 0..dim_scalars {
                     let cval = s_cent[cbase + e];
+                    #[unroll]
                     for r in 0..rn {
                         let acc = dot[r];
                         dot[r] = acc + p[r * dim_scalars + e] * cval;
                     }
                 }
                 let cnorm = centroid_norms[c_global as usize];
+                #[unroll]
                 for r in 0..rn {
                     let dist = F::new(1.0) - dot[r] / (pnorm[r] * cnorm);
                     if dist < best_dist[r] {
@@ -390,6 +401,7 @@ pub fn flash_assign_cosine<F: Float, N: Size>(
         tile += 1u32;
     }
 
+    #[unroll]
     for r in 0..rn {
         let pid = p0 + r;
         if (pid as u32) < n_samples {
