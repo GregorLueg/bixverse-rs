@@ -842,6 +842,162 @@ pub fn segmented_update<R, T>(
     }
 }
 
+#[cube(launch_unchecked)]
+pub fn flash_assign_euclidean_smem<F: Float, N: Size>(
+    data: &Tensor<Vector<F, N>>,
+    centroids: &Tensor<Vector<F, N>>,
+    assignments: &mut Tensor<u32>,
+    n_samples: u32,
+    k: u32,
+    #[comptime] dim_lines: usize,
+) {
+    let lanes = LINE_SIZE;
+    let dim_scalars = dim_lines * lanes;
+    let tx = UNIT_POS_X as usize;
+    let wg = WORKGROUP_SIZE_X as usize;
+
+    let point_idx = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) as usize;
+    if point_idx >= n_samples as usize {
+        terminate!();
+    }
+
+    // Point cached in SMEM (cooperative load by all wg threads).
+    let mut s_point = SharedMemory::<F>::new(dim_scalars);
+    let p_base = point_idx * dim_lines;
+    let mut load_idx: usize = tx;
+    while load_idx < dim_scalars {
+        let line_idx = load_idx / lanes;
+        let lane = load_idx % lanes;
+        let pl = data[p_base + line_idx];
+        s_point[load_idx] = pl[lane];
+        load_idx += wg;
+    }
+    sync_cube();
+
+    // Stride centroids; one scalar argmin per thread.
+    let mut best_dist = F::new(f32::MAX);
+    let mut best_idx = 0u32;
+    let mut c = tx as u32;
+    while c < k {
+        let mut sum = F::new(0.0);
+        for i in 0..dim_lines {
+            let c_line = centroids[c as usize * dim_lines + i];
+            let s_off = i * lanes;
+            #[unroll]
+            for lane in 0..lanes {
+                let diff = s_point[s_off + lane] - c_line[lane];
+                sum += diff * diff;
+            }
+        }
+        if sum < best_dist {
+            best_dist = sum;
+            best_idx = c;
+        }
+        c += wg as u32;
+    }
+
+    // Cross-thread argmin: thread 0 picks the winner.
+    let mut s_dist = SharedMemory::<F>::new(32usize);
+    let mut s_idx = SharedMemory::<u32>::new(32usize);
+    s_dist[tx] = best_dist;
+    s_idx[tx] = best_idx;
+    sync_cube();
+
+    if tx == 0usize {
+        let mut bd = s_dist[0];
+        let mut bi = s_idx[0];
+        let mut t = 1u32;
+        while t < wg as u32 {
+            let d = s_dist[t as usize];
+            if d < bd {
+                bd = d;
+                bi = s_idx[t as usize];
+            }
+            t += 1u32;
+        }
+        assignments[point_idx] = bi;
+    }
+}
+
+#[cube(launch_unchecked)]
+pub fn flash_assign_cosine_smem<F: Float, N: Size>(
+    data: &Tensor<Vector<F, N>>,
+    centroids: &Tensor<Vector<F, N>>,
+    point_norms: &Tensor<F>,
+    centroid_norms: &Tensor<F>,
+    assignments: &mut Tensor<u32>,
+    n_samples: u32,
+    k: u32,
+    #[comptime] dim_lines: usize,
+) {
+    let lanes = LINE_SIZE;
+    let dim_scalars = dim_lines * lanes;
+    let tx = UNIT_POS_X as usize;
+    let wg = WORKGROUP_SIZE_X as usize;
+
+    let point_idx = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) as usize;
+    if point_idx >= n_samples as usize {
+        terminate!();
+    }
+
+    let mut s_point = SharedMemory::<F>::new(dim_scalars);
+    let p_base = point_idx * dim_lines;
+    let mut load_idx = tx;
+    while load_idx < dim_scalars {
+        let line_idx = load_idx / lanes;
+        let lane = load_idx % lanes;
+        let pl = data[p_base + line_idx];
+        s_point[load_idx] = pl[lane];
+        load_idx += wg;
+    }
+    sync_cube();
+
+    let pnorm = point_norms[point_idx];
+
+    let mut best_dist = F::new(f32::MAX);
+    let mut best_idx = 0u32;
+    let mut c = tx as u32;
+    while c < k {
+        let mut dot = F::new(0.0);
+        for i in 0..dim_lines {
+            let c_line = centroids[c as usize * dim_lines + i];
+            let s_off = i * lanes;
+            #[unroll]
+            for lane in 0..lanes {
+                dot += s_point[s_off + lane] * c_line[lane];
+            }
+        }
+        let cnorm = centroid_norms[c as usize];
+        let dist = F::new(1.0) - dot / (pnorm * cnorm);
+        if dist < best_dist {
+            best_dist = dist;
+            best_idx = c;
+        }
+        c += wg as u32;
+    }
+
+    let mut s_dist = SharedMemory::<F>::new(32usize);
+    let mut s_idx = SharedMemory::<u32>::new(32usize);
+    s_dist[tx] = best_dist;
+    s_idx[tx] = best_idx;
+    sync_cube();
+
+    if tx == 0usize {
+        let mut bd = s_dist[0];
+        let mut bi = s_idx[0];
+        let mut t = 1u32;
+        while t < wg as u32 {
+            let d = s_dist[t as usize];
+            if d < bd {
+                bd = d;
+                bi = s_idx[t as usize];
+            }
+            t += 1u32;
+        }
+        assignments[point_idx] = bi;
+    }
+}
+
 /// Launch FlashAssign into a device-resident assignment buffer.
 ///
 /// Internal to the driver loop. Dispatches either `flash_assign_euclidean` or
@@ -875,24 +1031,19 @@ fn flash_assign_device<T, R>(
     k: usize,
     dim: usize,
     metric: &Dist,
-    bk: usize,
 ) where
     R: Runtime,
     T: Float + Sum + cubecl::CubeElement + num_traits::Float + num_traits::FromPrimitive,
 {
     let vec_size = LINE_SIZE;
     let dim_lines = dim / vec_size;
-    // `bk` is supplied by the caller (computed once via assign_tile_params);
-    // rn is derived here from the same dim so the two always agree.
-    let (rn, _bk_unused) = assign_tile_params(dim);
-    let n_threads = n.div_ceil(rn);
-    let (gx, gy) = grid_2d((n_threads as u32).div_ceil(WORKGROUP_SIZE_X));
+    let (gx, gy) = grid_2d(n as u32);
     let count = CubeCount::Static(gx, gy, 1);
     let cdim = CubeDim::new_1d(WORKGROUP_SIZE_X);
 
     match *metric {
         Dist::SquaredEuclidean => unsafe {
-            flash_assign_euclidean::launch_unchecked::<T, R>(
+            flash_assign_euclidean_smem::launch_unchecked::<T, R>(
                 client,
                 count,
                 cdim,
@@ -903,12 +1054,10 @@ fn flash_assign_device<T, R>(
                 n as u32,
                 k as u32,
                 dim_lines,
-                bk,
-                rn,
             );
         },
         Dist::Cosine => unsafe {
-            flash_assign_cosine::launch_unchecked::<T, R>(
+            flash_assign_cosine_smem::launch_unchecked::<T, R>(
                 client,
                 count,
                 cdim,
@@ -921,8 +1070,6 @@ fn flash_assign_device<T, R>(
                 n as u32,
                 k as u32,
                 dim_lines,
-                bk,
-                rn,
             );
         },
         Dist::Manhattan => unreachable!(),
@@ -1220,7 +1367,6 @@ fn lloyd_step<T, R>(
     k: usize,
     dim: usize,
     metric: &Dist,
-    bk: usize,
     cube_count: usize,
     privatized_counts: &GpuTensor<R, u32>,
     counts: &GpuTensor<R, u32>,
@@ -1234,7 +1380,7 @@ fn lloyd_step<T, R>(
     let start = Instant::now();
 
     flash_assign_device(
-        client, data_gpu, cent_gpu, pnorm_gpu, cnorm_gpu, assign_gpu, n, k, dim, metric, bk,
+        client, data_gpu, cent_gpu, pnorm_gpu, cnorm_gpu, assign_gpu, n, k, dim, metric,
     );
 
     gpu_fence(client, fence_scratch);
@@ -1452,7 +1598,6 @@ where
                 n_centroids,
                 dim_padded,
                 &dist,
-                bk,
                 cube_count,
                 &privatized_counts,
                 &counts,
@@ -1487,7 +1632,6 @@ where
                 n_centroids,
                 dim_padded,
                 &dist,
-                bk,
                 cube_count,
                 &privatized_counts,
                 &counts,
@@ -1547,7 +1691,6 @@ where
         n_centroids,
         dim_padded,
         &dist,
-        bk,
     );
     let assignments: Vec<usize> = assign_gpu
         .read(&client)?
