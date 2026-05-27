@@ -1220,7 +1220,7 @@ fn lloyd_step<T, R>(
         client, data_gpu, cent_gpu, pnorm_gpu, cnorm_gpu, assign_gpu, n, k, dim, metric, bk,
     );
 
-    let (idx_gpu, off_gpu) = build_csr_gpu::<R>(assign_gpu, n, k, client);
+    let (idx_gpu, off_gpu) = build_csr_gpu_privatized::<R>(assign_gpu, n, k, client);
     segmented_update::<R, T>(data_gpu, &idx_gpu, &off_gpu, cent_gpu, k, dim, client);
 
     if *metric == Dist::Cosine {
