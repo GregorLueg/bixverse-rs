@@ -15,6 +15,7 @@ use ann_search_rs::utils::{k_means_utils::*, matrix_to_flat};
 use cubecl::prelude::*;
 use faer::{Mat, MatRef};
 use std::iter::Sum;
+use std::time::Instant;
 
 use crate::errors::BixverseErrors;
 use crate::prelude::*;
@@ -1008,6 +1009,8 @@ where
     R: Runtime,
     T: AnnSearchGpuFloat + AnnSearchFloat + BixverseFloat + Sum + cubecl::CubeElement,
 {
+    let start = Instant::now();
+
     let params = kmeans_params.unwrap_or_default();
     let dist = parse_ann_dist(dist).unwrap_or_else(|| {
         println!(
@@ -1059,11 +1062,19 @@ where
         }
     };
 
+    if verbose {
+        println!("  Moving data to GPU.");
+    }
+
     let client = R::client(&device);
     let data_gpu = GpuTensor::<R, T>::from_slice(&data_padded, vec![n, dim_padded], &client);
     let cent_gpu =
         GpuTensor::<R, T>::from_slice(&centroids, vec![n_centroids, dim_padded], &client);
     let assign_gpu = GpuTensor::<R, u32>::empty(vec![n], &client);
+
+    if verbose {
+        println!("  ... moved data to GPU: {:.2?}", start.elapsed());
+    }
 
     let pnorm_gpu = if dist == Dist::Cosine {
         let pnorms: Vec<T> = (0..n)
@@ -1102,13 +1113,13 @@ where
     if params.fixed {
         // No convergence check, no per-iteration readback: submit every
         // iteration back-to-back.
+        if verbose {
+            println!(
+                "    Dispatching the {:?} iters to the GPU kernel.",
+                params.iters
+            )
+        }
         for _ in 0..params.iters {
-            if verbose {
-                println!(
-                    "    Dispatching the {:?} iters to the GPU kernel.",
-                    params.iters
-                )
-            }
             lloyd_step(
                 &client,
                 &data_gpu,
@@ -1213,6 +1224,13 @@ where
 
     let final_cents = cent_gpu.clone().read(&client)?;
     let centroid_mat = Mat::from_fn(n_centroids, dim, |i, j| final_cents[i * dim_padded + j]);
+
+    if verbose {
+        println!(
+            "Finished GPU-accelerated k-means in {:.2?}.",
+            start.elapsed()
+        );
+    }
 
     Ok((centroid_mat, assignments))
 }
