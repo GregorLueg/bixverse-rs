@@ -67,10 +67,41 @@ impl Default for KMeansGpuParams {
 // Helpers //
 /////////////
 
+/// Pick the assign-kernel tile parameters from the (padded) dimensionality.
+///
+/// Returns `(rn, bk)`:
+///
+/// * `rn` - points each thread owns (register-blocking factor). Higher `rn`
+///   means more arithmetic per shared-memory load (good), but each thread
+///   holds `rn * dim_scalars` scalars in registers, so we taper it down as
+///   `dim_scalars` grows to avoid register spills on modest GPUs. These
+///   cut-offs are deliberately conservative starting points -- profile and
+///   retune for your hardware.
+/// * `bk` - centroids cached in shared memory per tile. The SMEM footprint is
+///   `bk * dim_scalars * 4` bytes (f32). We target roughly 32 KiB and never go
+///   below the previous fixed value of 16, so this is a strict improvement on
+///   small/medium `dim` and a no-op on large `dim`.
+///
+/// `dim_scalars` here equals the padded `dim` (it is `dim_lines * LINE_SIZE`).
+fn assign_tile_params(dim_scalars: usize) -> (usize, usize) {
+    let d = dim_scalars.max(1);
+    let rn = if d <= 64 {
+        4
+    } else if d <= 256 {
+        2
+    } else {
+        1
+    };
+    // 8192 f32 == 32 KiB. clamp(16, 64) keeps us within a conservative SMEM
+    // budget while never regressing below the original bk = 16.
+    let bk = (8192 / d).clamp(16, 64);
+    (rn, bk)
+}
+
 /// Online-argmin Euclidean assignment.
 ///
-/// One thread per point; centroids are streamed through shared memory in
-/// tiles of `bk`. No N x K materialisation.
+/// Each thread owns `rn` consecutive points (register blocking); centroids are
+/// streamed through shared memory in tiles of `bk`. No N x K materialisation.
 ///
 /// ### Params
 ///
@@ -81,11 +112,12 @@ impl Default for KMeansGpuParams {
 /// * `k` - Number of centroids
 /// * `dim_lines` - Number of `Vector<F, N>` elements per vector row (comptime)
 /// * `bk` - Number of centroids to cache per shared-memory tile (comptime)
+/// * `rn` - Number of points each thread processes (comptime)
 ///
 /// ### Grid mapping
 ///
 /// * `(CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * WORKGROUP_SIZE_X + UNIT_POS_X`
-///   -> point index
+///   -> thread index; thread owns points `[thread_idx * rn .. + rn)`
 #[cube(launch_unchecked)]
 pub fn flash_assign_euclidean<F: Float, N: Size>(
     data: &Tensor<Vector<F, N>>,
@@ -95,34 +127,61 @@ pub fn flash_assign_euclidean<F: Float, N: Size>(
     k: u32,
     #[comptime] dim_lines: usize,
     #[comptime] bk: usize,
+    #[comptime] rn: usize,
 ) {
     let lanes = LINE_SIZE;
     let dim_scalars = dim_lines * lanes;
-    let point_idx = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * WORKGROUP_SIZE_X + UNIT_POS_X;
     let tx = UNIT_POS_X as usize;
     let wg = WORKGROUP_SIZE_X as usize;
 
-    // Read this thread's point into registers once. Inactive threads read
-    // point 0 (harmless) and simply never write a result.
-    let p_base: usize = if point_idx < n_samples {
-        point_idx as usize * dim_lines
-    } else {
-        #[allow(clippy::useless_conversion)]
-        0_usize.into()
-    };
-    let mut p = Array::<F>::new(dim_scalars);
-    for i in 0..dim_lines {
-        let pl = data[p_base + i];
-        #[unroll]
-        for lane in 0..lanes {
-            p[i * lanes + lane] = pl[lane];
+    // ---------------------------------------------------------------------
+    // LESSON 1 (the big one): arithmetic intensity via register blocking.
+    //
+    // Your original kernel ran one thread per point. Each thread, for every
+    // cached centroid, re-read `dim_scalars` values from shared memory to
+    // produce a single distance. The centroid values in SMEM were therefore
+    // touched once per point, and the inner loop was a single dependency
+    // chain on `sum` -- no instruction-level parallelism to hide latency.
+    //
+    // Now each thread owns `rn` points held in registers. A centroid value
+    // pulled from SMEM is reused `rn` times (once per owned point) before we
+    // move on, and the `rn` distance accumulators form `rn` independent FMA
+    // chains. That is ~rn x fewer SMEM loads and loop-control instructions
+    // per distance computed, plus much better ILP. This is the hand-rolled,
+    // tensor-core-free version of what flashlib's BLOCK_N tiling gets for
+    // free from `tl.dot`. It is the most important idea in the whole file.
+    // ---------------------------------------------------------------------
+    let thread_idx = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * WORKGROUP_SIZE_X + UNIT_POS_X;
+    let p0 = thread_idx as usize * rn;
+
+    // Load this thread's `rn` points into registers once. Inactive lanes
+    // (p0 + r >= n_samples) read point 0 (harmless) and never write a result.
+    let mut p = Array::<F>::new(rn * dim_scalars);
+    for r in 0..rn {
+        let pid = p0 + r;
+        let p_base = if (pid as u32) < n_samples {
+            pid * dim_lines
+        } else {
+            #[allow(clippy::useless_conversion)] // needs to happen to compile
+            0usize.into()
+        };
+        for i in 0..dim_lines {
+            let pl = data[p_base + i];
+            #[unroll]
+            for lane in 0..lanes {
+                p[r * dim_scalars + i * lanes + lane] = pl[lane];
+            }
         }
     }
 
     let mut s_cent = SharedMemory::<F>::new(bk * dim_scalars);
 
-    let mut best_dist = F::new(f32::MAX);
-    let mut best_idx = 0u32;
+    let mut best_dist = Array::<F>::new(rn);
+    let mut best_idx = Array::<u32>::new(rn);
+    for r in 0..rn {
+        best_dist[r] = F::new(f32::MAX);
+        best_idx[r] = 0u32;
+    }
 
     #[allow(clippy::manual_div_ceil)]
     let n_tiles = (k + bk as u32 - 1u32) / bk as u32;
@@ -131,6 +190,9 @@ pub fn flash_assign_euclidean<F: Float, N: Size>(
         let tile_c0 = tile * bk as u32;
 
         // Cooperative load of up to `bk` centroids into scalar shared memory.
+        // Unchanged, and still shared by the whole workgroup -- but its cost
+        // is now amortised over rn x more distance work (LESSON 1), and over
+        // more centroids per tile because bk is larger now (LESSON 3 below).
         let total_elems = bk * dim_scalars;
         let mut load_idx = tx;
         while load_idx < total_elems {
@@ -149,20 +211,37 @@ pub fn flash_assign_euclidean<F: Float, N: Size>(
         }
         sync_cube();
 
-        // Scan the cached tile, online argmin.
+        // Scan the cached tile, online argmin for all rn owned points.
         let mut c_local = 0u32;
         while c_local < bk as u32 {
             let c_global = tile_c0 + c_local;
             if c_global < k {
                 let cbase = c_local as usize * dim_scalars;
-                let mut sum = F::new(0.0);
-                for e in 0..dim_scalars {
-                    let diff = p[e] - s_cent[cbase + e];
-                    sum += diff * diff;
+                let mut sum = Array::<F>::new(rn);
+                for r in 0..rn {
+                    sum[r] = F::new(0.0);
                 }
-                if sum < best_dist {
-                    best_dist = sum;
-                    best_idx = c_global;
+                // One SMEM read of `cval` feeds rn independent accumulators.
+                // (NOTE / LESSON 2: this is still scalar math -- we explode the
+                // Vector<F, N> lines into scalars on load. The next layer of
+                // speed-up is to keep the point and the cached centroid as
+                // Line<F> and do vectorised FMA + a horizontal reduction here,
+                // which folds LINE_SIZE elements per instruction. I left that
+                // out on purpose; see the note I sent with this file.)
+                for e in 0..dim_scalars {
+                    let cval = s_cent[cbase + e];
+                    for r in 0..rn {
+                        let diff = p[r * dim_scalars + e] - cval;
+                        let acc = sum[r];
+                        sum[r] = acc + diff * diff;
+                    }
+                }
+                for r in 0..rn {
+                    let s = sum[r];
+                    if s < best_dist[r] {
+                        best_dist[r] = s;
+                        best_idx[r] = c_global;
+                    }
                 }
             }
             c_local += 1u32;
@@ -172,8 +251,11 @@ pub fn flash_assign_euclidean<F: Float, N: Size>(
         tile += 1u32;
     }
 
-    if point_idx < n_samples {
-        assignments[point_idx as usize] = best_idx;
+    for r in 0..rn {
+        let pid = p0 + r;
+        if (pid as u32) < n_samples {
+            assignments[pid] = best_idx[r];
+        }
     }
 }
 
@@ -193,11 +275,12 @@ pub fn flash_assign_euclidean<F: Float, N: Size>(
 /// * `k` - Number of centroids
 /// * `dim_lines` - Number of `Vector<F, N>` elements per vector row (comptime)
 /// * `bk` - Number of centroids to cache per shared-memory tile (comptime)
+/// * `rn` - Number of points each thread processes (comptime)
 ///
 /// ### Grid mapping
 ///
 /// * `(CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * WORKGROUP_SIZE_X + UNIT_POS_X`
-///   -> point index
+///   -> thread index; thread owns points `[thread_idx * rn .. + rn)`
 #[cube(launch_unchecked)]
 pub fn flash_assign_cosine<F: Float, N: Size>(
     data: &Tensor<Vector<F, N>>,
@@ -209,34 +292,47 @@ pub fn flash_assign_cosine<F: Float, N: Size>(
     k: u32,
     #[comptime] dim_lines: usize,
     #[comptime] bk: usize,
+    #[comptime] rn: usize,
 ) {
     let lanes = LINE_SIZE;
     let dim_scalars = dim_lines * lanes;
-    let point_idx = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * WORKGROUP_SIZE_X + UNIT_POS_X;
     let tx = UNIT_POS_X as usize;
     let wg = WORKGROUP_SIZE_X as usize;
 
-    let safe_idx = if point_idx < n_samples {
-        point_idx as usize
-    } else {
-        #[allow(clippy::useless_conversion)]
-        0usize.into()
-    };
-    let p_base = safe_idx * dim_lines;
-    let mut p = Array::<F>::new(dim_scalars);
-    for i in 0..dim_lines {
-        let pl = data[p_base + i];
-        #[unroll]
-        for lane in 0..lanes {
-            p[i * lanes + lane] = pl[lane];
+    // Same register blocking as the Euclidean kernel: rn points per thread,
+    // one SMEM centroid read reused rn times. See LESSON 1 there.
+    let thread_idx = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * WORKGROUP_SIZE_X + UNIT_POS_X;
+    let p0 = thread_idx as usize * rn;
+
+    let mut p = Array::<F>::new(rn * dim_scalars);
+    let mut pnorm = Array::<F>::new(rn);
+    for r in 0..rn {
+        let pid = p0 + r;
+        let safe = if (pid as u32) < n_samples {
+            pid
+        } else {
+            #[allow(clippy::useless_conversion)] // needs to happen to compile
+            0usize.into()
+        };
+        let p_base = safe * dim_lines;
+        for i in 0..dim_lines {
+            let pl = data[p_base + i];
+            #[unroll]
+            for lane in 0..lanes {
+                p[r * dim_scalars + i * lanes + lane] = pl[lane];
+            }
         }
+        pnorm[r] = point_norms[safe];
     }
-    let pnorm = point_norms[safe_idx];
 
     let mut s_cent = SharedMemory::<F>::new(bk * dim_scalars);
 
-    let mut best_dist = F::new(f32::MAX);
-    let mut best_idx = 0u32;
+    let mut best_dist = Array::<F>::new(rn);
+    let mut best_idx = Array::<u32>::new(rn);
+    for r in 0..rn {
+        best_dist[r] = F::new(f32::MAX);
+        best_idx[r] = 0u32;
+    }
 
     #[allow(clippy::manual_div_ceil)]
     let n_tiles = (k + bk as u32 - 1u32) / bk as u32;
@@ -267,15 +363,24 @@ pub fn flash_assign_cosine<F: Float, N: Size>(
             let c_global = tile_c0 + c_local;
             if c_global < k {
                 let cbase = c_local as usize * dim_scalars;
-                let mut dot = F::new(0.0);
+                let mut dot = Array::<F>::new(rn);
+                for r in 0..rn {
+                    dot[r] = F::new(0.0);
+                }
                 for e in 0..dim_scalars {
-                    dot += p[e] * s_cent[cbase + e];
+                    let cval = s_cent[cbase + e];
+                    for r in 0..rn {
+                        let acc = dot[r];
+                        dot[r] = acc + p[r * dim_scalars + e] * cval;
+                    }
                 }
                 let cnorm = centroid_norms[c_global as usize];
-                let dist = F::new(1.0) - dot / (pnorm * cnorm);
-                if dist < best_dist {
-                    best_dist = dist;
-                    best_idx = c_global;
+                for r in 0..rn {
+                    let dist = F::new(1.0) - dot[r] / (pnorm[r] * cnorm);
+                    if dist < best_dist[r] {
+                        best_dist[r] = dist;
+                        best_idx[r] = c_global;
+                    }
                 }
             }
             c_local += 1u32;
@@ -285,8 +390,11 @@ pub fn flash_assign_cosine<F: Float, N: Size>(
         tile += 1u32;
     }
 
-    if point_idx < n_samples {
-        assignments[point_idx as usize] = best_idx;
+    for r in 0..rn {
+        let pid = p0 + r;
+        if (pid as u32) < n_samples {
+            assignments[pid] = best_idx[r];
+        }
     }
 }
 
@@ -325,13 +433,16 @@ where
     let client = R::client(&device);
     let vec_size = LINE_SIZE;
     let dim_lines = dim / vec_size;
-    let bk = 16usize;
+    // `dim` is the padded dim here, so dim == dim_scalars.
+    let (rn, bk) = assign_tile_params(dim);
 
     let data_gpu = GpuTensor::<R, T>::from_slice(data, vec![n, dim], &client);
     let cent_gpu = GpuTensor::<R, T>::from_slice(centroids, vec![k, dim], &client);
     let assign_gpu = GpuTensor::<R, u32>::empty(vec![n], &client);
 
-    let (gx, gy) = grid_2d((n as u32).div_ceil(WORKGROUP_SIZE_X));
+    // Each thread now owns `rn` points, so we launch ceil(n / rn) threads.
+    let n_threads = n.div_ceil(rn);
+    let (gx, gy) = grid_2d((n_threads as u32).div_ceil(WORKGROUP_SIZE_X));
     let count = CubeCount::Static(gx, gy, 1);
     let cdim = CubeDim::new_2d(WORKGROUP_SIZE_X, 1);
 
@@ -349,6 +460,7 @@ where
                 k as u32,
                 dim_lines,
                 bk,
+                rn,
             );
         },
         Dist::Cosine => {
@@ -385,6 +497,7 @@ where
                     k as u32,
                     dim_lines,
                     bk,
+                    rn,
                 );
             }
         }
@@ -688,7 +801,11 @@ fn flash_assign_device<T, R>(
 {
     let vec_size = LINE_SIZE;
     let dim_lines = dim / vec_size;
-    let (gx, gy) = grid_2d((n as u32).div_ceil(WORKGROUP_SIZE_X));
+    // `bk` is supplied by the caller (computed once via assign_tile_params);
+    // rn is derived here from the same dim so the two always agree.
+    let (rn, _bk_unused) = assign_tile_params(dim);
+    let n_threads = n.div_ceil(rn);
+    let (gx, gy) = grid_2d((n_threads as u32).div_ceil(WORKGROUP_SIZE_X));
     let count = CubeCount::Static(gx, gy, 1);
     let cdim = CubeDim::new_1d(WORKGROUP_SIZE_X);
 
@@ -706,6 +823,7 @@ fn flash_assign_device<T, R>(
                 k as u32,
                 dim_lines,
                 bk,
+                rn,
             );
         },
         Dist::Cosine => unsafe {
@@ -723,6 +841,7 @@ fn flash_assign_device<T, R>(
                 k as u32,
                 dim_lines,
                 bk,
+                rn,
             );
         },
         Dist::Manhattan => unreachable!(),
@@ -1045,7 +1164,10 @@ where
         GpuTensor::<R, T>::from_slice(&[T::one()], vec![1], &client)
     };
 
-    let bk = 16usize;
+    // bk (SMEM centroid tile) is chosen from the padded dim; rn (register
+    // blocking) is derived from the same dim inside flash_assign_device, so
+    // the two stay consistent. See assign_tile_params for the budget logic.
+    let (_rn, bk) = assign_tile_params(dim_padded);
 
     if verbose {
         println!(
@@ -1488,6 +1610,39 @@ mod tests {
         .unwrap();
 
         assert_eq!(got, vec![0]);
+    }
+
+    /// Stresses the register-blocking path directly: n is deliberately not a
+    /// multiple of the rn factor (so the per-thread tail guard fires) and k
+    /// spans several bk shared-memory tiles. Must still match the CPU argmin.
+    #[test]
+    fn test_flash_assign_register_blocking_ragged() {
+        let Some(device) = try_device() else { return };
+        let n = 1023usize; // coprime-ish with any rn in {1,2,4}
+        let k = 200usize; // spans multiple bk tiles
+        let dim = 32usize; // rn = 4 for this dim
+
+        let data: Vec<f32> = (0..n * dim)
+            .map(|i| ((i * 31 + 7) % 97) as f32 * 0.05)
+            .collect();
+        let cents: Vec<f32> = (0..k * dim)
+            .map(|i| ((i * 19 + 11) % 89) as f32 * 0.05)
+            .collect();
+
+        let got = flash_assign::<f32, WgpuRuntime>(
+            &data,
+            dim,
+            n,
+            &cents,
+            k,
+            &Dist::SquaredEuclidean,
+            device,
+        )
+        .unwrap();
+        let want = cpu_assign_euclidean(&data, &cents, n, k, dim);
+
+        assert_eq!(got.len(), n);
+        assert_eq!(got, want);
     }
 
     #[test]
