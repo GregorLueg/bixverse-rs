@@ -1224,15 +1224,15 @@ fn lloyd_step<T, R>(
     R: Runtime,
     T: Float + Sum + cubecl::CubeElement + num_traits::Float + num_traits::FromPrimitive,
 {
-    let start = Instant::now();
+    // let start = Instant::now();
 
     flash_assign_device(
         client, data_gpu, cent_gpu, pnorm_gpu, cnorm_gpu, assign_gpu, n, k, dim, metric, bk,
     );
 
-    client.sync();
+    // client.sync();
 
-    println!("Flash assign took {:.2?}", start.elapsed());
+    // println!("Flash assign took {:.2?}", start.elapsed());
 
     build_csr_gpu_privatized::<R>(
         assign_gpu,
@@ -1246,13 +1246,13 @@ fn lloyd_step<T, R>(
         client,
     );
 
-    client.sync();
-    println!("CSR GPU privatised {:.2?}", start.elapsed());
+    // client.sync();
+    // println!("CSR GPU privatised {:.2?}", start.elapsed());
 
-    segmented_update::<R, T>(data_gpu, &all_indices, &offsets, cent_gpu, k, dim, client);
+    segmented_update::<R, T>(data_gpu, all_indices, offsets, cent_gpu, k, dim, client);
 
-    client.sync();
-    println!("Segmented update in {:.2?}", start.elapsed());
+    // client.sync();
+    // println!("Segmented update in {:.2?}", start.elapsed());
 
     if *metric == Dist::Cosine {
         let (gx, gy) = grid_2d(k as u32);
