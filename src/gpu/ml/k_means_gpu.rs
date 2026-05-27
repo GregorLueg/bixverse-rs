@@ -653,7 +653,6 @@ where
 pub fn filter_centroid_update<F: Float>(
     data: &Tensor<F>,
     assignments: &Tensor<u32>,
-    counts: &Tensor<u32>,
     centroids: &mut Tensor<F>,
     n: u32,
     k: u32,
@@ -665,14 +664,8 @@ pub fn filter_centroid_update<F: Float>(
         terminate!();
     }
 
-    let count = counts[cluster as usize];
-    if count == 0u32 {
-        terminate!();
-    }
-
     let tx = UNIT_POS_X as usize;
     let wg = WORKGROUP_SIZE_X as usize;
-    let inv_count = F::new(1.0) / F::cast_from(count);
     let cent_base = cluster as usize * dim;
 
     let mut acc = Array::<F>::new(dim_per_thread);
@@ -680,9 +673,11 @@ pub fn filter_centroid_update<F: Float>(
         acc[r] = F::new(0.0);
     }
 
+    let mut count: u32 = 0u32;
     let mut i = 0u32;
     while i < n {
         if assignments[i as usize] == cluster {
+            count += 1u32;
             let row = i as usize * dim;
             for r in 0..dim_per_thread {
                 let e = tx + r * wg;
@@ -694,10 +689,13 @@ pub fn filter_centroid_update<F: Float>(
         i += 1u32;
     }
 
-    for r in 0..dim_per_thread {
-        let e = tx + r * wg;
-        if e < dim {
-            centroids[cent_base + e] = acc[r] * inv_count;
+    if count > 0u32 {
+        let inv_count = F::new(1.0) / F::cast_from(count);
+        for r in 0..dim_per_thread {
+            let e = tx + r * wg;
+            if e < dim {
+                centroids[cent_base + e] = acc[r] * inv_count;
+            }
         }
     }
 }
@@ -705,7 +703,6 @@ pub fn filter_centroid_update<F: Float>(
 pub fn filter_update<R, T>(
     data: &GpuTensor<R, T>,
     assignments: &GpuTensor<R, u32>,
-    counts: &GpuTensor<R, u32>,
     centroids: &GpuTensor<R, T>,
     n: usize,
     k: usize,
@@ -724,7 +721,6 @@ pub fn filter_update<R, T>(
             CubeDim::new_1d(WORKGROUP_SIZE_X),
             data.clone().into_tensor_arg(),
             assignments.clone().into_tensor_arg(),
-            counts.clone().into_tensor_arg(),
             centroids.clone().into_tensor_arg(),
             n as u32,
             k as u32,
@@ -1046,20 +1042,7 @@ fn lloyd_step<T, R>(
         client, data_gpu, cent_gpu, pnorm_gpu, cnorm_gpu, assign_gpu, n, k, dim, metric, bk,
     );
 
-    let counts = GpuTensor::<R, u32>::from_slice(&vec![0u32; k], vec![k], client);
-    let (gx, gy) = grid_2d((n as u32).div_ceil(WORKGROUP_SIZE_X));
-    unsafe {
-        histogram_clusters::launch_unchecked::<R>(
-            client,
-            CubeCount::Static(gx, gy, 1),
-            CubeDim::new_1d(WORKGROUP_SIZE_X),
-            assign_gpu.clone().into_tensor_arg(),
-            counts.clone().into_tensor_arg(),
-            n as u32,
-        );
-    }
-
-    filter_update::<R, T>(data_gpu, assign_gpu, &counts, cent_gpu, n, k, dim, client);
+    filter_update::<R, T>(data_gpu, assign_gpu, cent_gpu, n, k, dim, client);
 
     if *metric == Dist::Cosine {
         let (cgx, cgy) = grid_2d(k as u32);

@@ -14,4 +14,4 @@ pub enum Quantisation {
     F16,
 }
 
-pub fn quantise_data() {}
+pub fn quantise_data<T>() {}
