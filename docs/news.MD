@@ -6,6 +6,8 @@ Major update / release
 
 ### Features
 
+#### Single cells:
+
 - Multi file support for MTX reading (several 10x experiments to ingest).
 - MELD implementation from Burkhardt, et al., Nat Biotechnol, 2021.
 - Merging single cell binary files
@@ -16,6 +18,11 @@ Major update / release
 - Improved Harmony (version 1 and 2) and HotSpot with increased speed
 - h5ad ingest automatically recognises where raw counts are being stored
 - Updates to various package editions
+
+#### GPU-accelerated methods:
+
+- First implementation of GPU-accelerated method:
+  * k-means clustering
 
 ## 0.2.0
 

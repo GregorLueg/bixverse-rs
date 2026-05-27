@@ -998,6 +998,184 @@ pub fn centroid_norms_l2<F: Float>(
     }
 }
 
+#[cube(launch_unchecked)]
+pub fn histogram_clusters_privatized(
+    assignments: &Tensor<u32>,
+    privatized_counts: &mut Tensor<Atomic<u32>>,
+    n: u32,
+    k: u32,
+) {
+    let r = CUBE_POS_X;
+    let tx = UNIT_POS_X;
+    let wg = WORKGROUP_SIZE_X;
+
+    let total_threads = wg * CUBE_COUNT_X;
+    let mut i = r * wg + tx;
+
+    while i < n {
+        let c = assignments[i as usize];
+        let idx = r * k + c;
+        Atomic::fetch_add(&privatized_counts[idx as usize], 1u32);
+        i += total_threads;
+    }
+}
+
+#[cube(launch_unchecked)]
+pub fn scan_columns_and_sum(
+    privatized_counts: &mut Tensor<u32>,
+    counts: &mut Tensor<u32>,
+    k: u32,
+    cube_count: u32,
+) {
+    let c = ABSOLUTE_POS_X;
+    if c >= k {
+        terminate!();
+    }
+
+    let mut acc = 0u32;
+    let mut r = 0u32;
+    while r < cube_count {
+        let idx = r * k + c;
+        let val = privatized_counts[idx as usize];
+        privatized_counts[idx as usize] = acc; // Overwrite with local block prefix sum
+        acc += val;
+        r += 1u32;
+    }
+    counts[c as usize] = acc;
+}
+
+#[cube(launch_unchecked)]
+pub fn merge_offsets_to_cursors(
+    privatized_counts: &mut Tensor<u32>,
+    offsets: &Tensor<u32>,
+    k: u32,
+    cube_count: u32,
+) {
+    let idx = ABSOLUTE_POS_X as usize;
+    let total_elements = (cube_count * k) as usize;
+    if idx < total_elements {
+        let c = (idx as u32) % k;
+        privatized_counts[idx] += offsets[c as usize];
+    }
+}
+
+#[cube(launch_unchecked)]
+pub fn scatter_csr_privatized(
+    assignments: &Tensor<u32>,
+    privatized_cursors: &mut Tensor<Atomic<u32>>,
+    all_indices: &mut Tensor<u32>,
+    n: u32,
+    k: u32,
+) {
+    let r = CUBE_POS_X;
+    let tx = UNIT_POS_X;
+    let wg = WORKGROUP_SIZE_X;
+
+    let total_threads = wg * CUBE_COUNT_X;
+    let mut i = r * wg + tx;
+
+    while i < n {
+        let c = assignments[i as usize];
+        let idx = r * k + c;
+        let pos = Atomic::fetch_add(&privatized_cursors[idx as usize], 1u32);
+        all_indices[pos as usize] = i;
+        i += total_threads;
+    }
+}
+
+#[cube(launch_unchecked)]
+pub fn exclusive_scan_offsets_2(counts: &Tensor<u32>, offsets: &mut Tensor<u32>, k: u32) {
+    if UNIT_POS_X == 0u32 {
+        offsets[0] = 0u32;
+        let mut acc = 0u32;
+        let mut c = 0u32;
+        while c < k {
+            acc += counts[c as usize];
+            offsets[(c + 1u32) as usize] = acc;
+            c += 1u32;
+        }
+    }
+}
+
+pub fn build_csr_gpu_privatized<R>(
+    assignments: &GpuTensor<R, u32>,
+    n: usize,
+    k: usize,
+    client: &ComputeClient<R>,
+) -> (GpuTensor<R, u32>, GpuTensor<R, u32>)
+where
+    R: Runtime,
+{
+    // Fix a uniform workgroup count to saturate the hardware compute engines
+    let cube_count = 512usize;
+
+    let privatized_counts =
+        GpuTensor::<R, u32>::from_slice(&vec![0u32; cube_count * k], vec![cube_count, k], client);
+    let counts = GpuTensor::<R, u32>::from_slice(&vec![0u32; k], vec![k], client);
+    let offsets = GpuTensor::<R, u32>::from_slice(&vec![0u32; k + 1], vec![k + 1], client);
+    let all_indices = GpuTensor::<R, u32>::empty(vec![n], client);
+
+    unsafe {
+        // Step 1: Privatized Histogram
+        histogram_clusters_privatized::launch_unchecked::<R>(
+            client,
+            CubeCount::Static(cube_count as u32, 1, 1),
+            CubeDim::new_1d(WORKGROUP_SIZE_X),
+            assignments.clone().into_tensor_arg(),
+            privatized_counts.clone().into_tensor_arg(),
+            n as u32,
+            k as u32,
+        );
+
+        // Step 2: Parallel Column Scan
+        scan_columns_and_sum::launch_unchecked::<R>(
+            client,
+            CubeCount::Static(k.div_ceil(256) as u32, 1, 1),
+            CubeDim::new_1d(256),
+            privatized_counts.clone().into_tensor_arg(),
+            counts.clone().into_tensor_arg(),
+            k as u32,
+            cube_count as u32,
+        );
+
+        // Step 3: Global Offset Prefix Scan
+        exclusive_scan_offsets_2::launch_unchecked::<R>(
+            client,
+            CubeCount::Static(1, 1, 1),
+            CubeDim::new_1d(1),
+            counts.clone().into_tensor_arg(),
+            offsets.clone().into_tensor_arg(),
+            k as u32,
+        );
+
+        // Step 4: Transform Local Counts to Global Cursors
+        let total_elements = cube_count * k;
+        merge_offsets_to_cursors::launch_unchecked::<R>(
+            client,
+            CubeCount::Static(total_elements.div_ceil(256) as u32, 1, 1),
+            CubeDim::new_1d(256),
+            privatized_counts.clone().into_tensor_arg(),
+            offsets.clone().into_tensor_arg(),
+            k as u32,
+            cube_count as u32,
+        );
+
+        // Step 5: Contention-Free Index Scatter
+        scatter_csr_privatized::launch_unchecked::<R>(
+            client,
+            CubeCount::Static(cube_count as u32, 1, 1),
+            CubeDim::new_1d(WORKGROUP_SIZE_X),
+            assignments.clone().into_tensor_arg(),
+            privatized_counts.clone().into_tensor_arg(),
+            all_indices.clone().into_tensor_arg(),
+            n as u32,
+            k as u32,
+        );
+    }
+
+    (all_indices, offsets)
+}
+
 /// One Lloyd's iteration entirely on device: assign, rebuild CSR, update
 /// centroids.
 ///
@@ -1042,14 +1220,15 @@ fn lloyd_step<T, R>(
         client, data_gpu, cent_gpu, pnorm_gpu, cnorm_gpu, assign_gpu, n, k, dim, metric, bk,
     );
 
-    filter_update::<R, T>(data_gpu, assign_gpu, cent_gpu, n, k, dim, client);
+    let (idx_gpu, off_gpu) = build_csr_gpu::<R>(assign_gpu, n, k, client);
+    segmented_update::<R, T>(data_gpu, &idx_gpu, &off_gpu, cent_gpu, k, dim, client);
 
     if *metric == Dist::Cosine {
-        let (cgx, cgy) = grid_2d(k as u32);
+        let (gx, gy) = grid_2d(k as u32);
         unsafe {
             centroid_norms_l2::launch_unchecked::<T, R>(
                 client,
-                CubeCount::Static(cgx, cgy, 1),
+                CubeCount::Static(gx, gy, 1),
                 CubeDim::new_1d(1),
                 cent_gpu.clone().into_tensor_arg(),
                 cnorm_gpu.clone().into_tensor_arg(),
