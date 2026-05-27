@@ -1009,12 +1009,22 @@ pub fn histogram_clusters_privatized(
     let tx = UNIT_POS_X;
     let wg = WORKGROUP_SIZE_X;
 
+    // 1. Cooperative Inline Zeroing:
+    // Threads in this workgroup clear their designated chunk of the shared row
+    let mut c = tx;
+    while c < k {
+        let idx = r * k + c;
+        Atomic::fetch_and(&privatized_counts[idx as usize], 0u32);
+        c += wg;
+    }
+    sync_cube(); // Enforce a barrier so no thread counts until everything is zeroed
+
+    // 2. Standard Privatized Counting Pass
     let total_threads = wg * CUBE_COUNT_X;
     let mut i = r * wg + tx;
-
     while i < n {
-        let c = assignments[i as usize];
-        let idx = r * k + c;
+        let chunk_c = assignments[i as usize];
+        let idx = r * k + chunk_c;
         Atomic::fetch_add(&privatized_counts[idx as usize], 1u32);
         i += total_threads;
     }
@@ -1101,22 +1111,17 @@ pub fn build_csr_gpu_privatized<R>(
     assignments: &GpuTensor<R, u32>,
     n: usize,
     k: usize,
+    cube_count: usize,
+    privatized_counts: &GpuTensor<R, u32>,
+    counts: &GpuTensor<R, u32>,
+    offsets: &GpuTensor<R, u32>,
+    all_indices: &GpuTensor<R, u32>,
     client: &ComputeClient<R>,
-) -> (GpuTensor<R, u32>, GpuTensor<R, u32>)
-where
+) where
     R: Runtime,
 {
-    // Fix a uniform workgroup count to saturate the hardware compute engines
-    let cube_count = 512usize;
-
-    let privatized_counts =
-        GpuTensor::<R, u32>::from_slice(&vec![0u32; cube_count * k], vec![cube_count, k], client);
-    let counts = GpuTensor::<R, u32>::from_slice(&vec![0u32; k], vec![k], client);
-    let offsets = GpuTensor::<R, u32>::from_slice(&vec![0u32; k + 1], vec![k + 1], client);
-    let all_indices = GpuTensor::<R, u32>::empty(vec![n], client);
-
     unsafe {
-        // Step 1: Privatized Histogram
+        // Step 1: Privatized Histogram (Now handles its own zeroing)
         histogram_clusters_privatized::launch_unchecked::<R>(
             client,
             CubeCount::Static(cube_count as u32, 1, 1),
@@ -1172,8 +1177,6 @@ where
             k as u32,
         );
     }
-
-    (all_indices, offsets)
 }
 
 /// One Lloyd's iteration entirely on device: assign, rebuild CSR, update
@@ -1212,6 +1215,11 @@ fn lloyd_step<T, R>(
     dim: usize,
     metric: &Dist,
     bk: usize,
+    cube_count: usize,
+    privatized_counts: &GpuTensor<R, u32>,
+    counts: &GpuTensor<R, u32>,
+    offsets: &GpuTensor<R, u32>,
+    all_indices: &GpuTensor<R, u32>,
 ) where
     R: Runtime,
     T: Float + Sum + cubecl::CubeElement + num_traits::Float + num_traits::FromPrimitive,
@@ -1226,12 +1234,22 @@ fn lloyd_step<T, R>(
 
     println!("Flash assign took {:.2?}", start.elapsed());
 
-    let (idx_gpu, off_gpu) = build_csr_gpu_privatized::<R>(assign_gpu, n, k, client);
+    build_csr_gpu_privatized::<R>(
+        assign_gpu,
+        n,
+        k,
+        cube_count,
+        privatized_counts,
+        counts,
+        offsets,
+        all_indices,
+        client,
+    );
 
     client.sync();
     println!("CSR GPU privatised {:.2?}", start.elapsed());
 
-    segmented_update::<R, T>(data_gpu, &idx_gpu, &off_gpu, cent_gpu, k, dim, client);
+    segmented_update::<R, T>(data_gpu, &all_indices, &offsets, cent_gpu, k, dim, client);
 
     client.sync();
     println!("Segmented update in {:.2?}", start.elapsed());
@@ -1397,6 +1415,13 @@ where
         );
     }
 
+    let cube_count = 512usize;
+
+    let privatized_counts = GpuTensor::<R, u32>::empty(vec![cube_count, n_centroids], &client);
+    let counts = GpuTensor::<R, u32>::empty(vec![n_centroids], &client);
+    let offsets = GpuTensor::<R, u32>::empty(vec![n_centroids + 1], &client);
+    let all_indices = GpuTensor::<R, u32>::empty(vec![n], &client);
+
     if params.fixed {
         // No convergence check, no per-iteration readback: submit every
         // iteration back-to-back.
@@ -1419,6 +1444,11 @@ where
                 dim_padded,
                 &dist,
                 bk,
+                cube_count,
+                &privatized_counts,
+                &counts,
+                &offsets,
+                &all_indices,
             );
         }
     } else {
@@ -1448,6 +1478,11 @@ where
                 dim_padded,
                 &dist,
                 bk,
+                cube_count,
+                &privatized_counts,
+                &counts,
+                &offsets,
+                &all_indices,
             );
 
             // Zeroed single-element atomic counter, recreated per iter (same
