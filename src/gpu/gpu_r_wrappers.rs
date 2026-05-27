@@ -33,16 +33,11 @@ impl KMeansGpuParams {
             .and_then(|v| v.as_str())
             .and_then(parse_kmeans_init);
 
-        let tol = params_list
-            .get("tol")
-            .and_then(|v| v.as_real())
-            .unwrap_or(1e-5);
-
         let fixed = params_list
             .get("fixed")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
 
-        Ok(Self::new(iters, init, tol, fixed))
+        Ok(Self::new(iters, init, fixed))
     }
 }

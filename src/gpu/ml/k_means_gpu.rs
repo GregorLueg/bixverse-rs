@@ -30,8 +30,6 @@ pub struct KMeansGpuParams {
     pub iters: usize,
     /// Optional initialisation strategy. `None` picks based on `n_centroids`.
     pub init: Option<KMeansInit>,
-    /// Convergence threshold on maximum per-centroid drift (L2).
-    pub tol: f64,
     /// Fixed number of iterations
     pub fixed: bool,
 }
@@ -43,23 +41,17 @@ impl KMeansGpuParams {
     ///
     /// * `iters` - Number of iterations
     /// * `init` - Optional initialisation
-    /// * `tol` - Tolerance parameter
     /// * `fixed - Shall the algorithm be run for a fixed set of iterations
     ///   or shall convergence be checked.
-    pub fn new(iters: usize, init: Option<KMeansInit>, tol: f64, fixed: bool) -> Self {
-        Self {
-            iters,
-            init,
-            tol,
-            fixed,
-        }
+    pub fn new(iters: usize, init: Option<KMeansInit>, fixed: bool) -> Self {
+        Self { iters, init, fixed }
     }
 }
 
 /// Default implementation for [KMeansGpuParams]
 impl Default for KMeansGpuParams {
     fn default() -> Self {
-        Self::new(50, None, 1e-5, true)
+        Self::new(50, None, true)
     }
 }
 
@@ -129,32 +121,36 @@ pub fn flash_assign_euclidean<F: Float, N: Size>(
     #[comptime] bk: usize,
     #[comptime] rn: usize,
 ) {
+    let lanes = LINE_SIZE;
+    let dim_scalars = dim_lines * lanes;
     let tx = UNIT_POS_X as usize;
     let wg = WORKGROUP_SIZE_X as usize;
-    let two = F::new(2.0);
 
     let thread_idx = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * WORKGROUP_SIZE_X + UNIT_POS_X;
     let p0 = thread_idx as usize * rn;
 
-    let mut p = Array::<Vector<F, N>>::new(rn * dim_lines);
-    #[unroll]
+    let mut p = Array::<F>::new(rn * dim_scalars);
     for r in 0..rn {
         let pid = p0 + r;
         let p_base = if (pid as u32) < n_samples {
             pid * dim_lines
         } else {
+            #[allow(clippy::useless_conversion)] // cubecl needs this
             0usize.into()
         };
         for i in 0..dim_lines {
-            p[r * dim_lines + i] = data[p_base + i];
+            let pl = data[p_base + i];
+            #[unroll]
+            for lane in 0..lanes {
+                p[r * dim_scalars + i * lanes + lane] = pl[lane];
+            }
         }
     }
 
-    let mut s_cent = SharedMemory::<Vector<F, N>>::new(bk * dim_lines);
+    let mut s_cent = SharedMemory::<F>::new(bk * dim_scalars);
 
     let mut best_dist = Array::<F>::new(rn);
     let mut best_idx = Array::<u32>::new(rn);
-    #[unroll]
     for r in 0..rn {
         best_dist[r] = F::new(f32::MAX);
         best_idx[r] = 0u32;
@@ -166,16 +162,19 @@ pub fn flash_assign_euclidean<F: Float, N: Size>(
     while tile < n_tiles {
         let tile_c0 = tile * bk as u32;
 
-        let total_lines = bk * dim_lines;
+        let total_elems = bk * dim_scalars;
         let mut load_idx = tx;
-        while load_idx < total_lines {
-            let c_local = load_idx / dim_lines;
-            let line = load_idx % dim_lines;
+        while load_idx < total_elems {
+            let c_local = load_idx / dim_scalars;
+            let elem = load_idx % dim_scalars;
             let c_global = tile_c0 + c_local as u32;
             if c_global < k {
-                s_cent[load_idx] = centroids[c_global as usize * dim_lines + line];
+                let line_idx = elem / lanes;
+                let lane = elem % lanes;
+                let cl = centroids[c_global as usize * dim_lines + line_idx];
+                s_cent[load_idx] = cl[lane];
             } else {
-                s_cent[load_idx] = Vector::<F, N>::new(F::new(0.0));
+                s_cent[load_idx] = F::new(0.0);
             }
             load_idx += wg;
         }
@@ -185,27 +184,24 @@ pub fn flash_assign_euclidean<F: Float, N: Size>(
         while c_local < bk as u32 {
             let c_global = tile_c0 + c_local;
             if c_global < k {
-                let cbase = c_local as usize * dim_lines;
-                let mut csq = F::new(0.0);
-                let mut dot = Array::<F>::new(rn);
-                #[unroll]
+                let cbase = c_local as usize * dim_scalars;
+                let mut sum = Array::<F>::new(rn);
                 for r in 0..rn {
-                    dot[r] = F::new(0.0);
+                    sum[r] = F::new(0.0);
                 }
-                for i in 0..dim_lines {
-                    let cl = s_cent[cbase + i];
-                    csq = csq + cl.dot(cl); // ||c||^2, inline, no race
-                    #[unroll]
+
+                for e in 0..dim_scalars {
+                    let cval = s_cent[cbase + e];
                     for r in 0..rn {
-                        let acc = dot[r];
-                        dot[r] = acc + p[r * dim_lines + i].dot(cl);
+                        let diff = p[r * dim_scalars + e] - cval;
+                        let acc = sum[r];
+                        sum[r] = acc + diff * diff;
                     }
                 }
-                #[unroll]
                 for r in 0..rn {
-                    let score = csq - two * dot[r]; // argmin(||c||^2 - 2<x,c>)
-                    if score < best_dist[r] {
-                        best_dist[r] = score;
+                    let s = sum[r];
+                    if s < best_dist[r] {
+                        best_dist[r] = s;
                         best_idx[r] = c_global;
                     }
                 }
@@ -213,10 +209,10 @@ pub fn flash_assign_euclidean<F: Float, N: Size>(
             c_local += 1u32;
         }
         sync_cube();
+
         tile += 1u32;
     }
 
-    #[unroll]
     for r in 0..rn {
         let pid = p0 + r;
         if (pid as u32) < n_samples {
@@ -260,33 +256,39 @@ pub fn flash_assign_cosine<F: Float, N: Size>(
     #[comptime] bk: usize,
     #[comptime] rn: usize,
 ) {
+    let lanes = LINE_SIZE;
+    let dim_scalars = dim_lines * lanes;
     let tx = UNIT_POS_X as usize;
     let wg = WORKGROUP_SIZE_X as usize;
 
     let thread_idx = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * WORKGROUP_SIZE_X + UNIT_POS_X;
     let p0 = thread_idx as usize * rn;
 
-    let mut p = Array::<Vector<F, N>>::new(rn * dim_lines);
+    let mut p = Array::<F>::new(rn * dim_scalars);
     let mut pnorm = Array::<F>::new(rn);
-    #[unroll]
     for r in 0..rn {
         let pid = p0 + r;
         let safe = if (pid as u32) < n_samples {
             pid
         } else {
+            #[allow(clippy::useless_conversion)] // cubecl needs this
             0usize.into()
         };
+        let p_base = safe * dim_lines;
         for i in 0..dim_lines {
-            p[r * dim_lines + i] = data[safe * dim_lines + i];
+            let pl = data[p_base + i];
+            #[unroll]
+            for lane in 0..lanes {
+                p[r * dim_scalars + i * lanes + lane] = pl[lane];
+            }
         }
         pnorm[r] = point_norms[safe];
     }
 
-    let mut s_cent = SharedMemory::<Vector<F, N>>::new(bk * dim_lines);
+    let mut s_cent = SharedMemory::<F>::new(bk * dim_scalars);
 
     let mut best_dist = Array::<F>::new(rn);
     let mut best_idx = Array::<u32>::new(rn);
-    #[unroll]
     for r in 0..rn {
         best_dist[r] = F::new(f32::MAX);
         best_idx[r] = 0u32;
@@ -298,16 +300,19 @@ pub fn flash_assign_cosine<F: Float, N: Size>(
     while tile < n_tiles {
         let tile_c0 = tile * bk as u32;
 
-        let total_lines = bk * dim_lines;
+        let total_elems = bk * dim_scalars;
         let mut load_idx = tx;
-        while load_idx < total_lines {
-            let c_local = load_idx / dim_lines;
-            let line = load_idx % dim_lines;
+        while load_idx < total_elems {
+            let c_local = load_idx / dim_scalars;
+            let elem = load_idx % dim_scalars;
             let c_global = tile_c0 + c_local as u32;
             if c_global < k {
-                s_cent[load_idx] = centroids[c_global as usize * dim_lines + line];
+                let line_idx = elem / lanes;
+                let lane = elem % lanes;
+                let cl = centroids[c_global as usize * dim_lines + line_idx];
+                s_cent[load_idx] = cl[lane];
             } else {
-                s_cent[load_idx] = Vector::<F, N>::new(F::new(0.0));
+                s_cent[load_idx] = F::new(0.0);
             }
             load_idx += wg;
         }
@@ -317,22 +322,19 @@ pub fn flash_assign_cosine<F: Float, N: Size>(
         while c_local < bk as u32 {
             let c_global = tile_c0 + c_local;
             if c_global < k {
-                let cbase = c_local as usize * dim_lines;
+                let cbase = c_local as usize * dim_scalars;
                 let mut dot = Array::<F>::new(rn);
-                #[unroll]
                 for r in 0..rn {
                     dot[r] = F::new(0.0);
                 }
-                for i in 0..dim_lines {
-                    let cl = s_cent[cbase + i];
-                    #[unroll]
+                for e in 0..dim_scalars {
+                    let cval = s_cent[cbase + e];
                     for r in 0..rn {
                         let acc = dot[r];
-                        dot[r] = acc + p[r * dim_lines + i].dot(cl);
+                        dot[r] = acc + p[r * dim_scalars + e] * cval;
                     }
                 }
                 let cnorm = centroid_norms[c_global as usize];
-                #[unroll]
                 for r in 0..rn {
                     let dist = F::new(1.0) - dot[r] / (pnorm[r] * cnorm);
                     if dist < best_dist[r] {
@@ -344,10 +346,10 @@ pub fn flash_assign_cosine<F: Float, N: Size>(
             c_local += 1u32;
         }
         sync_cube();
+
         tile += 1u32;
     }
 
-    #[unroll]
     for r in 0..rn {
         let pid = p0 + r;
         if (pid as u32) < n_samples {
@@ -737,9 +739,27 @@ pub fn segmented_update<R, T>(
     }
 }
 
-/// Launch FlashAssign into a device-resident assignment buffer. Internal to the
-/// driver loop; assumes `dim` is already padded to a multiple of LINE_SIZE and
-/// all tensors live on `client`'s device.
+/// Launch FlashAssign into a device-resident assignment buffer.
+///
+/// Internal to the driver loop. Dispatches either `flash_assign_euclidean` or
+/// `flash_assign_cosine` depending on `metric`. Assumes `dim` is already
+/// padded to a multiple of `LINE_SIZE` and all tensors reside on `client`'s
+/// device. `bk` and `rn` must be derived from the same `dim` via
+/// `assign_tile_params` to keep tile and register budgets consistent.
+///
+/// ### Params
+///
+/// * `client` - CubeCL compute client for the target device
+/// * `data_gpu` - Data points already on device `[n, dim]`
+/// * `cent_gpu` - Centroid vectors `[k, dim]`
+/// * `pnorm_gpu` - Pre-computed point L2 norms `[n]`; ignored for Euclidean
+/// * `cnorm_gpu` - Pre-computed centroid L2 norms `[k]`; ignored for Euclidean
+/// * `assign_gpu` - Output assignment indices `[n]`, overwritten in place
+/// * `n` - Number of data points
+/// * `k` - Number of centroids
+/// * `dim` - Embedding dimensionality (must be a multiple of `LINE_SIZE`)
+/// * `metric` - Distance metric (`SquaredEuclidean` or `Cosine`)
+/// * `bk` - Number of centroids to cache per shared-memory tile in FlashAssign
 #[allow(clippy::too_many_arguments)]
 fn flash_assign_device<T, R>(
     client: &ComputeClient<R>,
@@ -806,101 +826,39 @@ fn flash_assign_device<T, R>(
     }
 }
 
-/// Per-centroid squared L2 drift between consecutive centroid snapshots.
+/// Count how many points changed cluster between two assignment snapshots.
 ///
-/// One workgroup per centroid; thread 0 accumulates the squared element-wise
-/// differences across the full row. Used to detect convergence without reading
-/// back the full centroid matrix.
+/// One thread per point; atomically increments `changed[0]` when a point's
+/// current assignment differs from its previous one. `changed` must be
+/// zero-initialised before launch. This is the convergence signal for the
+/// driver: once the partition stops changing the centroids are stable, and
+/// unlike centroid drift it reaches zero exactly (the cosine path's drift
+/// never does, due to fp32 renormalisation noise).
 ///
 /// ### Params
 ///
-/// * `old_cents` - Centroid vectors before the update `[k, dim]`
-/// * `new_cents` - Centroid vectors after the update `[k, dim]`
-/// * `drift_sq` - Output per-centroid squared drift `[k]`, written by thread 0
-/// * `k` - Number of centroids
-/// * `dim` - Embedding dimensionality (comptime)
+/// * `curr` - Current assignment indices `[n]`
+/// * `prev` - Previous assignment indices `[n]`
+/// * `changed` - Single-element atomic counter `[1]`, incremented in place
+/// * `n` - Total number of data points
 ///
 /// ### Grid mapping
 ///
-/// * `CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X` -> centroid index
-/// * Only `UNIT_POS_X == 0` writes output
+/// * `ABSOLUTE_POS_X` -> point index
 #[cube(launch_unchecked)]
-pub fn centroid_drift_sq<F: Float>(
-    old_cents: &Tensor<F>,
-    new_cents: &Tensor<F>,
-    drift_sq: &mut Tensor<F>,
-    k: u32,
-    #[comptime] dim: usize,
+pub fn count_changed(
+    curr: &Tensor<u32>,
+    prev: &Tensor<u32>,
+    changed: &mut Tensor<Atomic<u32>>,
+    n: u32,
 ) {
-    let c = CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X;
-    if c >= k {
-        terminate!();
-    }
-    if UNIT_POS_X == 0u32 {
-        let base = c as usize * dim;
-        let mut acc = F::new(0.0);
-        for e in 0..dim {
-            let d = new_cents[base + e] - old_cents[base + e];
-            acc += d * d;
-        }
-        drift_sq[c as usize] = acc;
-    }
-}
-
-/// Reduce a vector of per-centroid squared drifts to its maximum.
-///
-/// Single-thread serial scan over `k` values. The result is written to
-/// `out[0]` and read back to the host as a single scalar; taking `sqrt` on
-/// the host converts squared drift to L2 drift. Serial cost is negligible
-/// because `k` is small relative to `n`.
-///
-/// ### Params
-///
-/// * `values` - Per-centroid squared drifts `[k]` produced by `centroid_drift_sq`
-/// * `out` - Single-element output buffer `[1]` receiving the maximum value
-/// * `k` - Number of centroids
-///
-/// ### Grid mapping
-///
-/// * Single cube, single thread (`UNIT_POS_X == 0`)
-#[cube(launch_unchecked)]
-pub fn max_reduce<F: Float>(values: &Tensor<F>, out: &mut Tensor<F>, k: u32) {
-    if UNIT_POS_X == 0u32 {
-        let mut m = F::new(0.0);
-        let mut i = 0u32;
-        while i < k {
-            let v = values[i as usize];
-            if v > m {
-                m = v;
-            }
-            i += 1u32;
-        }
-        out[0] = m;
-    }
-}
-
-/// Element-wise copy of a flat float buffer.
-///
-/// One thread per element. Used to snapshot the centroid matrix before an
-/// in-place update so that drift can be computed device-side without a host
-/// readback.
-///
-/// ### Params
-///
-/// * `src` - Source buffer `[n_elems]`
-/// * `dst` - Destination buffer `[n_elems]`, written in place
-/// * `n_elems` - Total number of elements to copy
-///
-/// ### Grid mapping
-///
-/// * `ABSOLUTE_POS_X` -> element index
-#[cube(launch_unchecked)]
-pub fn copy_f<F: Float>(src: &Tensor<F>, dst: &mut Tensor<F>, n_elems: u32) {
     let i = ABSOLUTE_POS_X;
-    if i >= n_elems {
+    if i >= n {
         terminate!();
     }
-    dst[i as usize] = src[i as usize];
+    if curr[i as usize] != prev[i as usize] {
+        Atomic::fetch_add(&changed[0], 1u32);
+    }
 }
 
 /// Per-centroid L2 norm of the centroid matrix.
@@ -1015,9 +973,12 @@ fn lloyd_step<T, R>(
 /// Device-resident Lloyd's loop: FlashAssign for assignment, counting-sort CSR
 /// plus segmented reduction for the update. Initialisation runs on the host
 /// (reusing `fast_random_init` / `kmeans_parallel_init`) and is uploaded once.
-/// Convergence is detected via maximum per-centroid drift, not assignment
-/// stability, so near-equidistant points that flip between equal centroids do
-/// not stall termination.
+/// Convergence is detected via assignment stability: the loop stops once the
+/// number of points changing cluster between iterations drops to a small floor.
+/// This terminates the cosine path too, where fp32 renormalisation noise keeps
+/// per-centroid drift pinned at a tiny non-zero value indefinitely. A small
+/// non-zero floor absorbs near-equidistant points that flip between equally
+/// good centroids without stalling termination.
 ///
 /// ### Params
 ///
@@ -1133,7 +1094,7 @@ where
             if params.fixed {
                 "fixed"
             } else {
-                "drift-checked"
+                "assignment-checked"
             }
         );
     }
@@ -1141,7 +1102,13 @@ where
     if params.fixed {
         // No convergence check, no per-iteration readback: submit every
         // iteration back-to-back.
-        for iter in 0..params.iters {
+        for _ in 0..params.iters {
+            if verbose {
+                println!(
+                    "    Dispatching the {:?} iters to the GPU kernel.",
+                    params.iters
+                )
+            }
             lloyd_step(
                 &client,
                 &data_gpu,
@@ -1155,32 +1122,21 @@ where
                 &dist,
                 bk,
             );
-            if verbose && (iter + 1) % 10 == 0 {
-                println!("    Iteration {} complete", iter + 1);
-            }
         }
     } else {
-        // Device-side drift; only a single f32 is read back per iteration.
-        let old_cent_gpu = GpuTensor::<R, T>::empty(vec![n_centroids, dim_padded], &client);
-        let drift_sq_gpu = GpuTensor::<R, T>::empty(vec![n_centroids], &client);
-        let drift_max_gpu = GpuTensor::<R, T>::empty(vec![1], &client);
+        // a change flor
+        let change_floor = (n / 10_000).max(1) as u32;
 
-        let n_cent_elems = (n_centroids * dim_padded) as u32;
-        let (copy_gx, copy_gy) = grid_2d(n_cent_elems.div_ceil(WORKGROUP_SIZE_X));
-        let (drift_gx, drift_gy) = grid_2d(n_centroids as u32);
+        let assign_alt_gpu = GpuTensor::<R, u32>::empty(vec![n], &client);
+        let (cnt_gx, cnt_gy) = grid_2d((n as u32).div_ceil(WORKGROUP_SIZE_X));
 
         for iter in 0..params.iters {
-            // Snapshot pre-update centroids for the drift comparison.
-            unsafe {
-                copy_f::launch_unchecked::<T, R>(
-                    &client,
-                    CubeCount::Static(copy_gx, copy_gy, 1),
-                    CubeDim::new_1d(WORKGROUP_SIZE_X),
-                    cent_gpu.clone().into_tensor_arg(),
-                    old_cent_gpu.clone().into_tensor_arg(),
-                    n_cent_elems,
-                );
-            }
+            // `cur` receives this iteration's assignments; `prev` holds last.
+            let (cur, prev) = if iter % 2 == 0 {
+                (&assign_gpu, &assign_alt_gpu)
+            } else {
+                (&assign_alt_gpu, &assign_gpu)
+            };
 
             lloyd_step(
                 &client,
@@ -1188,7 +1144,7 @@ where
                 &cent_gpu,
                 &pnorm_gpu,
                 &cnorm_gpu,
-                &assign_gpu,
+                cur,
                 n,
                 n_centroids,
                 dim_padded,
@@ -1196,44 +1152,39 @@ where
                 bk,
             );
 
+            // Zeroed single-element atomic counter, recreated per iter (same
+            // pattern as the CSR counters in build_csr_gpu).
+            let changed_gpu = GpuTensor::<R, u32>::from_slice(&[0u32], vec![1], &client);
             unsafe {
-                centroid_drift_sq::launch_unchecked::<T, R>(
+                count_changed::launch_unchecked::<R>(
                     &client,
-                    CubeCount::Static(drift_gx, drift_gy, 1),
-                    CubeDim::new_1d(1),
-                    old_cent_gpu.clone().into_tensor_arg(),
-                    cent_gpu.clone().into_tensor_arg(),
-                    drift_sq_gpu.clone().into_tensor_arg(),
-                    n_centroids as u32,
-                    dim_padded,
-                );
-                max_reduce::launch_unchecked::<T, R>(
-                    &client,
-                    CubeCount::Static(1, 1, 1),
-                    CubeDim::new_1d(1),
-                    drift_sq_gpu.clone().into_tensor_arg(),
-                    drift_max_gpu.clone().into_tensor_arg(),
-                    n_centroids as u32,
+                    CubeCount::Static(cnt_gx, cnt_gy, 1),
+                    CubeDim::new_1d(WORKGROUP_SIZE_X),
+                    cur.clone().into_tensor_arg(),
+                    prev.clone().into_tensor_arg(),
+                    changed_gpu.clone().into_tensor_arg(),
+                    n as u32,
                 );
             }
+            let changed = changed_gpu.read(&client)?[0];
 
-            // sqrt(max squared drift) == max L2 drift; sqrt is monotonic.
-            let max_drift = drift_max_gpu.clone().read(&client)?[0]
-                .to_f64()
-                .unwrap()
-                .sqrt();
-
-            if max_drift <= params.tol {
+            // Iteration 0 has no meaningful `prev` (uninitialised buffer), so
+            // only test convergence from the second iteration onward.
+            if iter > 0 && changed <= change_floor {
                 if verbose {
-                    println!("    Converged at iteration {}", iter + 1);
+                    println!(
+                        "    Converged at iteration {} ({} assignments changed)",
+                        iter + 1,
+                        changed
+                    );
                 }
                 break;
             }
             if verbose && (iter + 1) % 10 == 0 {
                 println!(
-                    "    Iteration {} complete (max drift {:.6})",
+                    "    Iteration {} complete ({} assignments changed)",
                     iter + 1,
-                    max_drift
+                    changed
                 );
             }
         }
