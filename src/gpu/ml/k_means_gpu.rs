@@ -649,6 +649,91 @@ where
     (all_indices, offsets)
 }
 
+#[cube(launch_unchecked)]
+pub fn filter_centroid_update<F: Float>(
+    data: &Tensor<F>,
+    assignments: &Tensor<u32>,
+    counts: &Tensor<u32>,
+    centroids: &mut Tensor<F>,
+    n: u32,
+    k: u32,
+    #[comptime] dim: usize,
+    #[comptime] dim_per_thread: usize,
+) {
+    let cluster = CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X;
+    if cluster >= k {
+        terminate!();
+    }
+
+    let count = counts[cluster as usize];
+    if count == 0u32 {
+        terminate!();
+    }
+
+    let tx = UNIT_POS_X as usize;
+    let wg = WORKGROUP_SIZE_X as usize;
+    let inv_count = F::new(1.0) / F::cast_from(count);
+    let cent_base = cluster as usize * dim;
+
+    let mut acc = Array::<F>::new(dim_per_thread);
+    for r in 0..dim_per_thread {
+        acc[r] = F::new(0.0);
+    }
+
+    let mut i = 0u32;
+    while i < n {
+        if assignments[i as usize] == cluster {
+            let row = i as usize * dim;
+            for r in 0..dim_per_thread {
+                let e = tx + r * wg;
+                if e < dim {
+                    acc[r] += data[row + e];
+                }
+            }
+        }
+        i += 1u32;
+    }
+
+    for r in 0..dim_per_thread {
+        let e = tx + r * wg;
+        if e < dim {
+            centroids[cent_base + e] = acc[r] * inv_count;
+        }
+    }
+}
+
+pub fn filter_update<R, T>(
+    data: &GpuTensor<R, T>,
+    assignments: &GpuTensor<R, u32>,
+    counts: &GpuTensor<R, u32>,
+    centroids: &GpuTensor<R, T>,
+    n: usize,
+    k: usize,
+    dim: usize,
+    client: &ComputeClient<R>,
+) where
+    R: Runtime,
+    T: Float + cubecl::CubeElement + num_traits::Float,
+{
+    let dim_per_thread = dim.div_ceil(WORKGROUP_SIZE_X as usize);
+    let (gx, gy) = grid_2d(k as u32);
+    unsafe {
+        filter_centroid_update::launch_unchecked::<T, R>(
+            client,
+            CubeCount::Static(gx, gy, 1),
+            CubeDim::new_1d(WORKGROUP_SIZE_X),
+            data.clone().into_tensor_arg(),
+            assignments.clone().into_tensor_arg(),
+            counts.clone().into_tensor_arg(),
+            centroids.clone().into_tensor_arg(),
+            n as u32,
+            k as u32,
+            dim,
+            dim_per_thread,
+        );
+    }
+}
+
 /// Recompute centroids as the mean of assigned points via segmented reduction
 /// over the CSR layout.
 ///
@@ -957,34 +1042,31 @@ fn lloyd_step<T, R>(
     R: Runtime,
     T: Float + Sum + cubecl::CubeElement + num_traits::Float + num_traits::FromPrimitive,
 {
-    let start = Instant::now();
-
     flash_assign_device(
         client, data_gpu, cent_gpu, pnorm_gpu, cnorm_gpu, assign_gpu, n, k, dim, metric, bk,
     );
 
-    client.sync();
+    let counts = GpuTensor::<R, u32>::from_slice(&vec![0u32; k], vec![k], client);
+    let (gx, gy) = grid_2d((n as u32).div_ceil(WORKGROUP_SIZE_X));
+    unsafe {
+        histogram_clusters::launch_unchecked::<R>(
+            client,
+            CubeCount::Static(gx, gy, 1),
+            CubeDim::new_1d(WORKGROUP_SIZE_X),
+            assign_gpu.clone().into_tensor_arg(),
+            counts.clone().into_tensor_arg(),
+            n as u32,
+        );
+    }
 
-    println!("Flash assign takes: {:.2?}", start.elapsed());
-
-    let (idx_gpu, off_gpu) = build_csr_gpu::<R>(assign_gpu, n, k, client);
-
-    client.sync();
-
-    println!("Build CSR takes: {:.2?}", start.elapsed());
-
-    segmented_update::<R, T>(data_gpu, &idx_gpu, &off_gpu, cent_gpu, k, dim, client);
-
-    client.sync();
-
-    println!("Segmented updates takes: {:.2?}", start.elapsed());
+    filter_update::<R, T>(data_gpu, assign_gpu, &counts, cent_gpu, n, k, dim, client);
 
     if *metric == Dist::Cosine {
-        let (gx, gy) = grid_2d(k as u32);
+        let (cgx, cgy) = grid_2d(k as u32);
         unsafe {
             centroid_norms_l2::launch_unchecked::<T, R>(
                 client,
-                CubeCount::Static(gx, gy, 1),
+                CubeCount::Static(cgx, cgy, 1),
                 CubeDim::new_1d(1),
                 cent_gpu.clone().into_tensor_arg(),
                 cnorm_gpu.clone().into_tensor_arg(),
