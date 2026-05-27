@@ -942,12 +942,27 @@ fn lloyd_step<T, R>(
     R: Runtime,
     T: Float + Sum + cubecl::CubeElement + num_traits::Float + num_traits::FromPrimitive,
 {
+    let start = Instant::now();
+
     flash_assign_device(
         client, data_gpu, cent_gpu, pnorm_gpu, cnorm_gpu, assign_gpu, n, k, dim, metric, bk,
     );
 
+    client.sync();
+
+    println!("Flash assign takes: {:.2?}", start.elapsed());
+
     let (idx_gpu, off_gpu) = build_csr_gpu::<R>(assign_gpu, n, k, client);
+
+    client.sync();
+
+    println!("Build CSR takes: {:.2?}", start.elapsed());
+
     segmented_update::<R, T>(data_gpu, &idx_gpu, &off_gpu, cent_gpu, k, dim, client);
+
+    client.sync();
+
+    println!("Segmented updates takes: {:.2?}", start.elapsed());
 
     if *metric == Dist::Cosine {
         let (gx, gy) = grid_2d(k as u32);
