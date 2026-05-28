@@ -594,7 +594,7 @@ pub fn meld(
         println!("MELD: done in {:.2?}", start.elapsed());
     }
 
-    Ok(l1_normalise(densities))
+    Ok(l1_normalise(&densities))
 }
 
 /// Run MELD with a landmark approximation, suitable for 100k-1M cells.
@@ -754,5 +754,5 @@ pub fn meld_landmark(
         println!("MELD landmark: done in {:.2?}", t0.elapsed());
     }
 
-    Ok(l1_normalise(densities))
+    Ok(l1_normalise(&densities))
 }
