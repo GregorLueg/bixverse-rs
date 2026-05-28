@@ -38,6 +38,11 @@ impl KMeansGpuParams {
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
 
-        Ok(Self::new(iters, init, fixed))
+        let quantise_to_f16 = params_list
+            .get("quantise")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        Ok(Self::new(iters, init, fixed, quantise_to_f16))
     }
 }

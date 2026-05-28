@@ -4,6 +4,16 @@
 //!
 //! Re-uses the GPU infrastructure from `ann-search-rs` with `"gpu"` feature
 //! enabled to avoid code duplication.
+//!
+//! ### Mixed precision
+//!
+//! The data-touching kernels are generic on a storage type `S` and an
+//! accumulator type `A`. With `S == A` (the default) the kernel runs at native
+//! precision. With `S == half::f16, A == f32` the input data is held on the
+//! GPU at half precision but every cast, distance, and reduction happens in
+//! fp32, so accumulation drift is bounded by the fp32 path. This is opt-in
+//! via `KMeansGpuParams::quantise_to_f16` and requires a wgpu adapter that
+//! exposes the `shader-f16` feature.
 
 #![allow(missing_docs)]
 
@@ -18,7 +28,6 @@ use std::iter::Sum;
 use std::time::Instant;
 
 use crate::errors::BixverseErrors;
-use crate::prelude::*;
 
 ////////////
 // Params //
@@ -31,8 +40,13 @@ pub struct KMeansGpuParams {
     pub iters: usize,
     /// Optional initialisation strategy. `None` picks based on `n_centroids`.
     pub init: Option<KMeansInit>,
-    /// Fixed number of iterations
+    /// Fixed number of iterations.
     pub fixed: bool,
+    /// Hold the data buffer on the GPU at fp16. Centroids and accumulators
+    /// stay at the caller's precision. Halves data-buffer memory and improves
+    /// effective bandwidth on the assignment kernels for large `dim`. Requires
+    /// `shader-f16` on the wgpu adapter; the caller type `T` should be f32.
+    pub quantise_to_f16: bool,
 }
 
 impl KMeansGpuParams {
@@ -44,15 +58,21 @@ impl KMeansGpuParams {
     /// * `init` - Optional initialisation
     /// * `fixed` - Shall the algorithm be run for a fixed set of iterations
     ///   or shall convergence be checked.
-    pub fn new(iters: usize, init: Option<KMeansInit>, fixed: bool) -> Self {
-        Self { iters, init, fixed }
+    /// * `quantise_to_f16` - Quantise the data buffer to fp16 on the GPU
+    pub fn new(iters: usize, init: Option<KMeansInit>, fixed: bool, quantise_to_f16: bool) -> Self {
+        Self {
+            iters,
+            init,
+            fixed,
+            quantise_to_f16,
+        }
     }
 }
 
 /// Default implementation for [KMeansGpuParams]
 impl Default for KMeansGpuParams {
     fn default() -> Self {
-        Self::new(50, None, true)
+        Self::new(50, None, true, false)
     }
 }
 
@@ -62,29 +82,36 @@ impl Default for KMeansGpuParams {
 
 /// One-point-per-workgroup Euclidean argmin kernel.
 ///
-/// Each workgroup cooperatively loads one point into shared memory; threads
-/// then stride across centroids with each thread owning every `wg`-th centroid.
-/// Thread 0 performs a serial argmin over the per-thread candidates stored in
-/// shared memory and writes the winning centroid index. No N x K
-/// materialisation.
+/// Each workgroup cooperatively loads one point into shared memory, casting
+/// from storage precision `S` to accumulator precision `A` on the way in.
+/// Threads then stride across centroids with each thread owning every `wg`-th
+/// centroid. All distance arithmetic happens in `A`. Thread 0 performs a
+/// serial argmin over the per-thread candidates stored in shared memory and
+/// writes the winning centroid index. No N x K materialisation.
+///
+/// ### Type parameters
+///
+/// * `S` - Storage type of the data buffer (e.g. `f16`)
+/// * `A` - Accumulator type for distance and reduction (e.g. `f32`); also the
+///   element type of the centroid buffer
 ///
 /// ### Params
 ///
-/// * `data` - Data points `[n_samples, dim / N]` as `Vector<F, N>`
-/// * `centroids` - Centroid vectors `[k, dim / N]` as `Vector<F, N>`
+/// * `data` - Data points `[n_samples, dim / N]` as `Vector<S, N>`
+/// * `centroids` - Centroid vectors `[k, dim / N]` as `Vector<A, N>`
 /// * `assignments` - Output assignment indices `[n_samples]`
 /// * `n_samples` - Total number of data points
 /// * `k` - Number of centroids
-/// * `dim_lines` - Number of `Vector<F, N>` elements per vector row (comptime)
+/// * `dim_lines` - Number of `Vector<_, N>` elements per vector row (comptime)
 ///
 /// ### Grid mapping
 ///
 /// * `CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X` -> point index; one workgroup
 ///   per point
 #[cube(launch_unchecked)]
-pub fn flash_assign_euclidean_smem<F: Float, N: Size>(
-    data: &Tensor<Vector<F, N>>,
-    centroids: &Tensor<Vector<F, N>>,
+pub fn flash_assign_euclidean_smem<S: Float, A: Float, N: Size>(
+    data: &Tensor<Vector<S, N>>,
+    centroids: &Tensor<Vector<A, N>>,
     assignments: &mut Tensor<u32>,
     n_samples: u32,
     k: u32,
@@ -100,25 +127,25 @@ pub fn flash_assign_euclidean_smem<F: Float, N: Size>(
         terminate!();
     }
 
-    // Point cached in SMEM (cooperative load by all wg threads).
-    let mut s_point = SharedMemory::<F>::new(dim_scalars);
+    // Point cached in SMEM at accumulator precision; cast S -> A on load.
+    let mut s_point = SharedMemory::<A>::new(dim_scalars);
     let p_base = point_idx * dim_lines;
     let mut load_idx: usize = tx;
     while load_idx < dim_scalars {
         let line_idx = load_idx / lanes;
         let lane = load_idx % lanes;
         let pl = data[p_base + line_idx];
-        s_point[load_idx] = pl[lane];
+        s_point[load_idx] = A::cast_from(pl[lane]);
         load_idx += wg;
     }
     sync_cube();
 
     // Stride centroids; one scalar argmin per thread.
-    let mut best_dist = F::new(f32::MAX);
+    let mut best_dist = A::new(f32::MAX);
     let mut best_idx = 0u32;
     let mut c = tx as u32;
     while c < k {
-        let mut sum = F::new(0.0);
+        let mut sum = A::new(0.0);
         for i in 0..dim_lines {
             let c_line = centroids[c as usize * dim_lines + i];
             let s_off = i * lanes;
@@ -136,7 +163,7 @@ pub fn flash_assign_euclidean_smem<F: Float, N: Size>(
     }
 
     // Cross-thread argmin: thread 0 picks the winner.
-    let mut s_dist = SharedMemory::<F>::new(32usize);
+    let mut s_dist = SharedMemory::<A>::new(32usize);
     let mut s_idx = SharedMemory::<u32>::new(32usize);
     s_dist[tx] = best_dist;
     s_idx[tx] = best_idx;
@@ -160,33 +187,41 @@ pub fn flash_assign_euclidean_smem<F: Float, N: Size>(
 
 /// One-point-per-workgroup cosine argmin kernel.
 ///
-/// Each workgroup cooperatively loads one point into shared memory; threads
-/// then stride across centroids with each thread owning every `wg`-th centroid.
-/// Thread 0 performs a serial argmin over the per-thread candidates stored in
-/// shared memory and writes the winning centroid index. Minimises
+/// Each workgroup cooperatively loads one point into shared memory, casting
+/// from storage precision `S` to accumulator precision `A` on the way in.
+/// Threads then stride across centroids with each thread owning every `wg`-th
+/// centroid. Norms and the resulting distance live in `A`. Thread 0 performs
+/// a serial argmin over the per-thread candidates stored in shared memory and
+/// writes the winning centroid index. Minimises
 /// `1 - dot(x, c) / (||x|| * ||c||)` using precomputed norms.
+///
+/// ### Type parameters
+///
+/// * `S` - Storage type of the data buffer (e.g. `f16`)
+/// * `A` - Accumulator type for dot products and the final distance (e.g.
+///   `f32`); also the element type of the centroid and norm buffers
 ///
 /// ### Params
 ///
-/// * `data` - Data points `[n_samples, dim / N]` as `Vector<F, N>`
-/// * `centroids` - Centroid vectors `[k, dim / N]` as `Vector<F, N>`
-/// * `point_norms` - Pre-computed L2 norms `[n_samples]`
-/// * `centroid_norms` - Pre-computed L2 norms `[k]`
+/// * `data` - Data points `[n_samples, dim / N]` as `Vector<S, N>`
+/// * `centroids` - Centroid vectors `[k, dim / N]` as `Vector<A, N>`
+/// * `point_norms` - Pre-computed L2 norms `[n_samples]` in `A`
+/// * `centroid_norms` - Pre-computed L2 norms `[k]` in `A`
 /// * `assignments` - Output assignment indices `[n_samples]`
 /// * `n_samples` - Total number of data points
 /// * `k` - Number of centroids
-/// * `dim_lines` - Number of `Vector<F, N>` elements per vector row (comptime)
+/// * `dim_lines` - Number of `Vector<_, N>` elements per vector row (comptime)
 ///
 /// ### Grid mapping
 ///
 /// * `CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X` -> point index; one workgroup
 ///   per point
 #[cube(launch_unchecked)]
-pub fn flash_assign_cosine_smem<F: Float, N: Size>(
-    data: &Tensor<Vector<F, N>>,
-    centroids: &Tensor<Vector<F, N>>,
-    point_norms: &Tensor<F>,
-    centroid_norms: &Tensor<F>,
+pub fn flash_assign_cosine_smem<S: Float, A: Float, N: Size>(
+    data: &Tensor<Vector<S, N>>,
+    centroids: &Tensor<Vector<A, N>>,
+    point_norms: &Tensor<A>,
+    centroid_norms: &Tensor<A>,
     assignments: &mut Tensor<u32>,
     n_samples: u32,
     k: u32,
@@ -202,25 +237,25 @@ pub fn flash_assign_cosine_smem<F: Float, N: Size>(
         terminate!();
     }
 
-    let mut s_point = SharedMemory::<F>::new(dim_scalars);
+    let mut s_point = SharedMemory::<A>::new(dim_scalars);
     let p_base = point_idx * dim_lines;
     let mut load_idx = tx;
     while load_idx < dim_scalars {
         let line_idx = load_idx / lanes;
         let lane = load_idx % lanes;
         let pl = data[p_base + line_idx];
-        s_point[load_idx] = pl[lane];
+        s_point[load_idx] = A::cast_from(pl[lane]);
         load_idx += wg;
     }
     sync_cube();
 
     let pnorm = point_norms[point_idx];
 
-    let mut best_dist = F::new(f32::MAX);
+    let mut best_dist = A::new(f32::MAX);
     let mut best_idx = 0u32;
     let mut c = tx as u32;
     while c < k {
-        let mut dot = F::new(0.0);
+        let mut dot = A::new(0.0);
         for i in 0..dim_lines {
             let c_line = centroids[c as usize * dim_lines + i];
             let s_off = i * lanes;
@@ -230,7 +265,7 @@ pub fn flash_assign_cosine_smem<F: Float, N: Size>(
             }
         }
         let cnorm = centroid_norms[c as usize];
-        let dist = F::new(1.0) - dot / (pnorm * cnorm);
+        let dist = A::new(1.0) - dot / (pnorm * cnorm);
         if dist < best_dist {
             best_dist = dist;
             best_idx = c;
@@ -238,7 +273,7 @@ pub fn flash_assign_cosine_smem<F: Float, N: Size>(
         c += wg as u32;
     }
 
-    let mut s_dist = SharedMemory::<F>::new(32usize);
+    let mut s_dist = SharedMemory::<A>::new(32usize);
     let mut s_idx = SharedMemory::<u32>::new(32usize);
     s_dist[tx] = best_dist;
     s_idx[tx] = best_idx;
@@ -268,25 +303,35 @@ pub fn flash_assign_cosine_smem<F: Float, N: Size>(
 /// already padded to a multiple of `LINE_SIZE` and all tensors reside on
 /// `client`'s device.
 ///
+/// ### Type parameters
+///
+/// * `S` - Storage type of the data buffer
+/// * `A` - Accumulator type for distance arithmetic; also the type of the
+///   centroid and norm buffers. When `S == A` this is the standard
+///   single-precision path; when `S == f16, A == f32` it is the quantised
+///   mixed-precision path.
+///
 /// ### Params
 ///
 /// * `client` - CubeCL compute client for the target device
-/// * `data_gpu` - Data points already on device `[n, dim]`
-/// * `cent_gpu` - Centroid vectors `[k, dim]`
-/// * `pnorm_gpu` - Pre-computed point L2 norms `[n]`; ignored for Euclidean
-/// * `cnorm_gpu` - Pre-computed centroid L2 norms `[k]`; ignored for Euclidean
+/// * `data_gpu` - Data points already on device `[n, dim]` in `S`
+/// * `cent_gpu` - Centroid vectors `[k, dim]` in `A`
+/// * `pnorm_gpu` - Pre-computed point L2 norms `[n]` in `A`; ignored for
+///   Euclidean
+/// * `cnorm_gpu` - Pre-computed centroid L2 norms `[k]` in `A`; ignored for
+///   Euclidean
 /// * `assign_gpu` - Output assignment indices `[n]`, overwritten in place
 /// * `n` - Number of data points
 /// * `k` - Number of centroids
 /// * `dim` - Embedding dimensionality (must be a multiple of `LINE_SIZE`)
 /// * `metric` - Distance metric (`SquaredEuclidean` or `Cosine`)
 #[allow(clippy::too_many_arguments)]
-fn flash_assign_device<T, R>(
+fn flash_assign_device<S, A, R>(
     client: &ComputeClient<R>,
-    data_gpu: &GpuTensor<R, T>,
-    cent_gpu: &GpuTensor<R, T>,
-    pnorm_gpu: &GpuTensor<R, T>,
-    cnorm_gpu: &GpuTensor<R, T>,
+    data_gpu: &GpuTensor<R, S>,
+    cent_gpu: &GpuTensor<R, A>,
+    pnorm_gpu: &GpuTensor<R, A>,
+    cnorm_gpu: &GpuTensor<R, A>,
     assign_gpu: &GpuTensor<R, u32>,
     n: usize,
     k: usize,
@@ -294,7 +339,8 @@ fn flash_assign_device<T, R>(
     metric: &Dist,
 ) where
     R: Runtime,
-    T: Float + Sum + cubecl::CubeElement + num_traits::Float + num_traits::FromPrimitive,
+    S: Float + cubecl::CubeElement,
+    A: Float + cubecl::CubeElement,
 {
     let vec_size = LINE_SIZE;
     let dim_lines = dim / vec_size;
@@ -304,7 +350,7 @@ fn flash_assign_device<T, R>(
 
     match *metric {
         Dist::SquaredEuclidean => unsafe {
-            flash_assign_euclidean_smem::launch_unchecked::<T, R>(
+            flash_assign_euclidean_smem::launch_unchecked::<S, A, R>(
                 client,
                 count,
                 cdim,
@@ -318,7 +364,7 @@ fn flash_assign_device<T, R>(
             );
         },
         Dist::Cosine => unsafe {
-            flash_assign_cosine_smem::launch_unchecked::<T, R>(
+            flash_assign_cosine_smem::launch_unchecked::<S, A, R>(
                 client,
                 count,
                 cdim,
@@ -366,17 +412,16 @@ pub fn histogram_clusters_privatised(
     let tx = UNIT_POS_X;
     let wg = WORKGROUP_SIZE_X;
 
-    // 1. Cooperative Inline Zeroing:
-    // Threads in this workgroup clear their designated chunk of the shared row
+    // 1. Cooperative inline zeroing: threads clear their chunk of the row.
     let mut c = tx;
     while c < k {
         let idx = r * k + c;
         Atomic::fetch_and(&privatised_counts[idx as usize], 0u32);
         c += wg;
     }
-    sync_cube(); // Enforce a barrier so no thread counts until everything is zeroed
+    sync_cube();
 
-    // 2. Standard privatised Counting Pass
+    // 2. Standard privatised counting pass.
     let total_threads = wg * CUBE_COUNT_X;
     let mut i = r * wg + tx;
     while i < n {
@@ -423,7 +468,7 @@ pub fn scan_columns_and_sum(
     while r < cube_count {
         let idx = r * k + c;
         let val = privatised_counts[idx as usize];
-        privatised_counts[idx as usize] = acc; // Overwrite with local block prefix sum
+        privatised_counts[idx as usize] = acc;
         acc += val;
         r += 1u32;
     }
@@ -500,8 +545,9 @@ pub fn merge_offsets_to_cursors(
 /// ### Params
 ///
 /// * `assignments` - Hard assignment indices `[n]`
-/// * `privatised_cursors` - Atomic per-workgroup write cursors `[cube_count * k]`,
-///   seeded by `merge_offsets_to_cursors` and atomically advanced in place
+/// * `privatised_cursors` - Atomic per-workgroup write cursors
+///   `[cube_count * k]`, seeded by `merge_offsets_to_cursors` and atomically
+///   advanced in place
 /// * `all_indices` - Output point indices in CSR order `[n]`
 /// * `n` - Total number of data points
 /// * `k` - Number of clusters
@@ -568,7 +614,6 @@ pub fn build_csr_gpu_privatised<R>(
     R: Runtime,
 {
     unsafe {
-        // Step 1: privatised Histogram (handles its own zeroing)
         histogram_clusters_privatised::launch_unchecked::<R>(
             client,
             CubeCount::Static(cube_count as u32, 1, 1),
@@ -579,7 +624,6 @@ pub fn build_csr_gpu_privatised<R>(
             k as u32,
         );
 
-        // Step 2: Parallel Column Scan
         scan_columns_and_sum::launch_unchecked::<R>(
             client,
             CubeCount::Static(k.div_ceil(256) as u32, 1, 1),
@@ -590,7 +634,6 @@ pub fn build_csr_gpu_privatised<R>(
             cube_count as u32,
         );
 
-        // Step 3: Global Offset Prefix Scan
         exclusive_scan_offsets_2::launch_unchecked::<R>(
             client,
             CubeCount::Static(1, 1, 1),
@@ -600,7 +643,6 @@ pub fn build_csr_gpu_privatised<R>(
             k as u32,
         );
 
-        // Step 4: Transform Local Counts to Global Cursors
         let total_elements = cube_count * k;
         merge_offsets_to_cursors::launch_unchecked::<R>(
             client,
@@ -612,7 +654,6 @@ pub fn build_csr_gpu_privatised<R>(
             cube_count as u32,
         );
 
-        // Step 5: Contention-Free Index Scatter
         scatter_csr_privatised::launch_unchecked::<R>(
             client,
             CubeCount::Static(cube_count as u32, 1, 1),
@@ -631,18 +672,26 @@ pub fn build_csr_gpu_privatised<R>(
 ///
 /// One workgroup per cluster. Thread `tx` owns output dimensions
 /// `tx, tx + wg, ...` and accumulates them over the cluster's segment.
-/// Atomic-free.
+/// Data is loaded from storage precision `S` and cast to accumulator
+/// precision `A` element-by-element; the running sum and the divide-by-count
+/// both happen in `A`, so accumulation drift is bounded by the `A` path even
+/// when `S` is fp16. Atomic-free.
+///
+/// ### Type parameters
+///
+/// * `S` - Storage type of the data buffer
+/// * `A` - Accumulator and centroid type
 ///
 /// ### Params
 ///
-/// * `data` - Flattened data points `[n, dim]`
+/// * `data` - Flattened data points `[n, dim]` in `S`
 /// * `all_indices` - Point indices in CSR order `[n]` from
 ///   `build_csr_gpu_privatised`
 /// * `offsets` - Exclusive prefix sums `[k + 1]` from
 ///   `build_csr_gpu_privatised`; cluster `c` occupies
 ///   `all_indices[offsets[c]..offsets[c+1]]`
-/// * `centroids` - Centroid vectors `[k, dim]`, updated in place; empty
-///   clusters retain their prior value
+/// * `centroids` - Centroid vectors `[k, dim]` in `A`, updated in place;
+///   empty clusters retain their prior value
 /// * `k` - Number of clusters
 /// * `dim` - Embedding dimensionality (comptime)
 ///
@@ -651,11 +700,11 @@ pub fn build_csr_gpu_privatised<R>(
 /// * `CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X` -> cluster index
 /// * `UNIT_POS_X` -> dimension stride offset within the cluster's centroid row
 #[cube(launch_unchecked)]
-pub fn segmented_centroid_update<F: Float>(
-    data: &Tensor<F>,
+pub fn segmented_centroid_update<S: Float, A: Float>(
+    data: &Tensor<S>,
     all_indices: &Tensor<u32>,
     offsets: &Tensor<u32>,
-    centroids: &mut Tensor<F>,
+    centroids: &mut Tensor<A>,
     k: u32,
     #[comptime] dim: usize,
 ) {
@@ -675,16 +724,16 @@ pub fn segmented_centroid_update<F: Float>(
         terminate!();
     }
 
-    let inv_count = F::new(1.0) / F::cast_from(count);
+    let inv_count = A::new(1.0) / A::cast_from(count);
     let cent_base = cluster as usize * dim;
 
     let mut e = tx;
     while e < dim {
-        let mut acc = F::new(0.0);
+        let mut acc = A::new(0.0);
         let mut p = 0u32;
         while p < count {
             let global = all_indices[(seg_start + p) as usize];
-            acc += data[global as usize * dim + e];
+            acc += A::cast_from(data[global as usize * dim + e]);
             p += 1u32;
         }
         centroids[cent_base + e] = acc * inv_count;
@@ -697,32 +746,38 @@ pub fn segmented_centroid_update<F: Float>(
 /// Wraps `segmented_centroid_update`. Empty clusters retain their current
 /// value.
 ///
+/// ### Type parameters
+///
+/// * `S` - Storage type of the data buffer
+/// * `A` - Accumulator and centroid type
+///
 /// ### Params
 ///
-/// * `data` - Data points already on device `[n, dim]`
+/// * `data` - Data points already on device `[n, dim]` in `S`
 /// * `all_indices` - Point indices in CSR order `[n]` from
 ///   `build_csr_gpu_privatised`
 /// * `offsets` - Exclusive prefix sums `[k + 1]` from
 ///   `build_csr_gpu_privatised`
-/// * `centroids` - Centroid vectors `[k, dim]`, updated in place
+/// * `centroids` - Centroid vectors `[k, dim]` in `A`, updated in place
 /// * `k` - Number of clusters
 /// * `dim` - Embedding dimensionality
 /// * `client` - CubeCL compute client for the target device
-pub fn segmented_update<R, T>(
-    data: &GpuTensor<R, T>,
+pub fn segmented_update<R, S, A>(
+    data: &GpuTensor<R, S>,
     all_indices: &GpuTensor<R, u32>,
     offsets: &GpuTensor<R, u32>,
-    centroids: &GpuTensor<R, T>,
+    centroids: &GpuTensor<R, A>,
     k: usize,
     dim: usize,
     client: &ComputeClient<R>,
 ) where
     R: Runtime,
-    T: Float + cubecl::CubeElement + num_traits::Float,
+    S: Float + cubecl::CubeElement,
+    A: Float + cubecl::CubeElement,
 {
     let (gx, gy) = grid_2d(k as u32);
     unsafe {
-        segmented_centroid_update::launch_unchecked::<T, R>(
+        segmented_centroid_update::launch_unchecked::<S, A, R>(
             client,
             CubeCount::Static(gx, gy, 1),
             CubeDim::new_1d(WORKGROUP_SIZE_X),
@@ -776,7 +831,7 @@ pub fn count_changed(
 /// One workgroup per centroid; thread 0 accumulates the sum of squares across
 /// the full row and writes its square root. Kept device-side so that cosine
 /// assignment never requires a host readback of the centroid matrix between
-/// iterations.
+/// iterations. Operates entirely in the centroid precision (`A` in the driver).
 ///
 /// ### Params
 ///
@@ -822,14 +877,20 @@ pub fn centroid_norms_l2<F: Float>(
 /// exit. Pre-allocated scratch buffers are passed in to avoid per-iteration
 /// allocation.
 ///
+/// ### Type parameters
+///
+/// * `S` - Storage type of the data buffer
+/// * `A` - Accumulator type; also the type of centroids and norms
+///
 /// ### Params
 ///
 /// * `client` - CubeCL compute client for the target device
-/// * `data_gpu` - Data points already on device `[n, dim]`
-/// * `cent_gpu` - Centroid vectors `[k, dim]`, updated in place
-/// * `pnorm_gpu` - Pre-computed point L2 norms `[n]`; ignored for Euclidean
-/// * `cnorm_gpu` - Pre-computed centroid L2 norms `[k]`, refreshed on exit for
-///   cosine; ignored for Euclidean
+/// * `data_gpu` - Data points already on device `[n, dim]` in `S`
+/// * `cent_gpu` - Centroid vectors `[k, dim]` in `A`, updated in place
+/// * `pnorm_gpu` - Pre-computed point L2 norms `[n]` in `A`; ignored for
+///   Euclidean
+/// * `cnorm_gpu` - Pre-computed centroid L2 norms `[k]` in `A`, refreshed on
+///   exit for cosine; ignored for Euclidean
 /// * `assign_gpu` - Output assignment indices `[n]`, overwritten each call
 /// * `n` - Number of data points
 /// * `k` - Number of centroids
@@ -840,15 +901,13 @@ pub fn centroid_norms_l2<F: Float>(
 /// * `counts` - Pre-allocated cluster size buffer `[k]`
 /// * `offsets` - Pre-allocated offset buffer `[k + 1]`
 /// * `all_indices` - Pre-allocated CSR index buffer `[n]`
-/// * `fence_scratch` - Single-element buffer used as a GPU fence; see
-///   `gpu_fence`
 #[allow(clippy::too_many_arguments)]
-fn lloyd_step<T, R>(
+fn lloyd_step<S, A, R>(
     client: &ComputeClient<R>,
-    data_gpu: &GpuTensor<R, T>,
-    cent_gpu: &GpuTensor<R, T>,
-    pnorm_gpu: &GpuTensor<R, T>,
-    cnorm_gpu: &GpuTensor<R, T>,
+    data_gpu: &GpuTensor<R, S>,
+    cent_gpu: &GpuTensor<R, A>,
+    pnorm_gpu: &GpuTensor<R, A>,
+    cnorm_gpu: &GpuTensor<R, A>,
     assign_gpu: &GpuTensor<R, u32>,
     n: usize,
     k: usize,
@@ -861,9 +920,10 @@ fn lloyd_step<T, R>(
     all_indices: &GpuTensor<R, u32>,
 ) where
     R: Runtime,
-    T: Float + Sum + cubecl::CubeElement + num_traits::Float + num_traits::FromPrimitive,
+    S: Float + cubecl::CubeElement,
+    A: Float + cubecl::CubeElement,
 {
-    flash_assign_device(
+    flash_assign_device::<S, A, R>(
         client, data_gpu, cent_gpu, pnorm_gpu, cnorm_gpu, assign_gpu, n, k, dim, metric,
     );
 
@@ -879,12 +939,12 @@ fn lloyd_step<T, R>(
         client,
     );
 
-    segmented_update::<R, T>(data_gpu, all_indices, offsets, cent_gpu, k, dim, client);
+    segmented_update::<R, S, A>(data_gpu, all_indices, offsets, cent_gpu, k, dim, client);
 
     if *metric == Dist::Cosine {
         let (gx, gy) = grid_2d(k as u32);
         unsafe {
-            centroid_norms_l2::launch_unchecked::<T, R>(
+            centroid_norms_l2::launch_unchecked::<A, R>(
                 client,
                 CubeCount::Static(gx, gy, 1),
                 CubeDim::new_1d(1),
@@ -897,6 +957,173 @@ fn lloyd_step<T, R>(
     }
 }
 
+/// Run the device-resident Lloyd's loop and read back the final state.
+///
+/// All assignment-side buffers (`assign_gpu`, the CSR scratch) are allocated
+/// internally. The caller provides the data tensor in storage precision `S`
+/// and the centroid plus norm tensors in accumulator precision `A`; the loop
+/// returns the final assignments and the centroid buffer in `A`.
+///
+/// Bifurcates on `params.fixed`: fixed mode submits every iteration back-to-
+/// back with no readback; assignment-checked mode allocates an alternate
+/// assignment buffer, double-buffers between the two, and reads back a
+/// single-element change counter each iteration to test convergence.
+///
+/// ### Type parameters
+///
+/// * `S` - Storage type of the data buffer (`T` on the unquantised path,
+///   `half::f16` on the quantised path)
+/// * `A` - Accumulator and centroid type (`T` on both paths)
+#[allow(clippy::too_many_arguments)]
+fn run_kmeans_loop<S, A, R>(
+    client: &ComputeClient<R>,
+    data_gpu: &GpuTensor<R, S>,
+    cent_gpu: &GpuTensor<R, A>,
+    pnorm_gpu: &GpuTensor<R, A>,
+    cnorm_gpu: &GpuTensor<R, A>,
+    n: usize,
+    n_centroids: usize,
+    dim_padded: usize,
+    dist: &Dist,
+    params: &KMeansGpuParams,
+    verbose: bool,
+) -> Result<(Vec<usize>, Vec<A>), BixverseErrors>
+where
+    R: Runtime,
+    S: Float + cubecl::CubeElement,
+    A: Float + cubecl::CubeElement,
+{
+    let assign_gpu = GpuTensor::<R, u32>::empty(vec![n], client);
+
+    let cube_count = 512usize;
+    let privatised_counts = GpuTensor::<R, u32>::empty(vec![cube_count, n_centroids], client);
+    let counts = GpuTensor::<R, u32>::empty(vec![n_centroids], client);
+    let offsets = GpuTensor::<R, u32>::empty(vec![n_centroids + 1], client);
+    let all_indices = GpuTensor::<R, u32>::empty(vec![n], client);
+
+    if params.fixed {
+        if verbose {
+            println!(
+                "    Dispatching the {:?} iters to the GPU kernel.",
+                params.iters
+            )
+        }
+        for _ in 0..params.iters {
+            lloyd_step::<S, A, R>(
+                client,
+                data_gpu,
+                cent_gpu,
+                pnorm_gpu,
+                cnorm_gpu,
+                &assign_gpu,
+                n,
+                n_centroids,
+                dim_padded,
+                dist,
+                cube_count,
+                &privatised_counts,
+                &counts,
+                &offsets,
+                &all_indices,
+            );
+        }
+    } else {
+        // A change floor to absorb near-equidistant points that flip between
+        // equally good centroids without stalling termination.
+        let change_floor = (n / 10_000).max(1) as u32;
+
+        let assign_alt_gpu = GpuTensor::<R, u32>::empty(vec![n], client);
+        let (cnt_gx, cnt_gy) = grid_2d((n as u32).div_ceil(WORKGROUP_SIZE_X));
+
+        for iter in 0..params.iters {
+            // `cur` receives this iteration's assignments; `prev` holds last.
+            let (cur, prev) = if iter % 2 == 0 {
+                (&assign_gpu, &assign_alt_gpu)
+            } else {
+                (&assign_alt_gpu, &assign_gpu)
+            };
+
+            lloyd_step::<S, A, R>(
+                client,
+                data_gpu,
+                cent_gpu,
+                pnorm_gpu,
+                cnorm_gpu,
+                cur,
+                n,
+                n_centroids,
+                dim_padded,
+                dist,
+                cube_count,
+                &privatised_counts,
+                &counts,
+                &offsets,
+                &all_indices,
+            );
+
+            // Zeroed single-element atomic counter, recreated per iter.
+            let changed_gpu = GpuTensor::<R, u32>::from_slice(&[0u32], vec![1], client);
+            unsafe {
+                count_changed::launch_unchecked::<R>(
+                    client,
+                    CubeCount::Static(cnt_gx, cnt_gy, 1),
+                    CubeDim::new_1d(WORKGROUP_SIZE_X),
+                    cur.clone().into_tensor_arg(),
+                    prev.clone().into_tensor_arg(),
+                    changed_gpu.clone().into_tensor_arg(),
+                    n as u32,
+                );
+            }
+            let changed = changed_gpu.read(client)?[0];
+
+            // Iteration 0 has no meaningful `prev` (uninitialised buffer), so
+            // only test convergence from the second iteration onward.
+            if iter > 0 && changed <= change_floor {
+                if verbose {
+                    println!(
+                        "    Converged at iteration {} ({} assignments changed)",
+                        iter + 1,
+                        changed
+                    );
+                }
+                break;
+            }
+            if verbose && (iter + 1) % 10 == 0 {
+                println!(
+                    "    Iteration {} complete ({} assignments changed)",
+                    iter + 1,
+                    changed
+                );
+            }
+        }
+    }
+
+    // Final assignment against the converged centroids. cnorm_gpu is already
+    // consistent with cent_gpu (refreshed at the end of the last lloyd_step).
+    flash_assign_device::<S, A, R>(
+        client,
+        data_gpu,
+        cent_gpu,
+        pnorm_gpu,
+        cnorm_gpu,
+        &assign_gpu,
+        n,
+        n_centroids,
+        dim_padded,
+        dist,
+    );
+
+    let assignments: Vec<usize> = assign_gpu
+        .read(client)?
+        .into_iter()
+        .map(|x| x as usize)
+        .collect();
+
+    let final_cents = cent_gpu.clone().read(client)?;
+
+    Ok((assignments, final_cents))
+}
+
 //////////
 // Main //
 //////////
@@ -906,12 +1133,21 @@ fn lloyd_step<T, R>(
 /// Device-resident Lloyd's loop: FlashAssign for assignment, privatised
 /// counting-sort CSR plus segmented reduction for the update. Initialisation
 /// runs on the host (reusing `fast_random_init` / `kmeans_parallel_init`) and
-/// is uploaded once. Convergence is detected via assignment stability: the loop
-/// stops once the number of points changing cluster between iterations drops to
-/// a small floor. This terminates the cosine path too, where fp32
+/// is uploaded once. Convergence is detected via assignment stability: the
+/// loop stops once the number of points changing cluster between iterations
+/// drops to a small floor. This terminates the cosine path too, where fp32
 /// renormalisation noise keeps per-centroid drift pinned at a tiny non-zero
 /// value indefinitely. A small non-zero floor absorbs near-equidistant points
 /// that flip between equally good centroids without stalling termination.
+///
+/// ### Mixed precision
+///
+/// With `params.quantise_to_f16 == true` the data buffer is converted to
+/// `half::f16` host-side and uploaded as fp16; centroids, norms, distance
+/// accumulators and centroid sums all stay in `T`. The kernels cast back to
+/// `T` element-by-element on load, so accumulation drift is bounded by the
+/// `T` path. Requires `shader-f16` on the wgpu adapter; pre-normalise or
+/// rescale wide-range inputs before opting in.
 ///
 /// ### Params
 ///
@@ -939,7 +1175,7 @@ pub fn k_means_clusters_gpu<T, R>(
 ) -> Result<(Mat<T>, Vec<usize>), BixverseErrors>
 where
     R: Runtime,
-    T: AnnSearchGpuFloat + AnnSearchFloat + BixverseFloat + Sum + cubecl::CubeElement,
+    T: cubecl::prelude::Float + cubecl::CubeElement + num_traits::Float + Sum + AnnSearchFloat,
 {
     let start = Instant::now();
 
@@ -999,14 +1235,10 @@ where
     }
 
     let client = R::client(&device);
-    let data_gpu = GpuTensor::<R, T>::from_slice(&data_padded, vec![n, dim_padded], &client);
+
+    // Centroids and norms always live in T on the GPU.
     let cent_gpu =
         GpuTensor::<R, T>::from_slice(&centroids, vec![n_centroids, dim_padded], &client);
-    let assign_gpu = GpuTensor::<R, u32>::empty(vec![n], &client);
-
-    if verbose {
-        println!("  ... moved data to GPU: {:.2?}", start.elapsed());
-    }
 
     let pnorm_gpu = if dist == Dist::Cosine {
         let pnorms: Vec<T> = (0..n)
@@ -1028,142 +1260,70 @@ where
 
     if verbose {
         println!(
-            "  Running Lloyd's iterations (GPU, {})",
+            "  Running Lloyd's iterations (GPU, {}, {})",
             if params.fixed {
                 "fixed"
             } else {
                 "assignment-checked"
+            },
+            if params.quantise_to_f16 {
+                "fp16 data / fp32 accum"
+            } else {
+                "native precision"
             }
         );
     }
 
-    let cube_count = 512usize;
+    // Bifurcation point. Both branches share the centroid, norm and CSR
+    // machinery; they differ only in the storage precision of `data_gpu`,
+    // which propagates through the generic kernels.
+    let (assignments, final_cents) = if params.quantise_to_f16 {
+        let data_f16: Vec<half::f16> = data_padded
+            .iter()
+            .map(|x| half::f16::from_f32(x.to_f32().unwrap_or(0.0)))
+            .collect();
+        let data_gpu =
+            GpuTensor::<R, half::f16>::from_slice(&data_f16, vec![n, dim_padded], &client);
 
-    let privatised_counts = GpuTensor::<R, u32>::empty(vec![cube_count, n_centroids], &client);
-    let counts = GpuTensor::<R, u32>::empty(vec![n_centroids], &client);
-    let offsets = GpuTensor::<R, u32>::empty(vec![n_centroids + 1], &client);
-    let all_indices = GpuTensor::<R, u32>::empty(vec![n], &client);
-
-    if params.fixed {
-        // No convergence check, no per-iteration readback: submit every
-        // iteration back-to-back.
         if verbose {
-            println!(
-                "    Dispatching the {:?} iters to the GPU kernel.",
-                params.iters
-            )
+            println!("  ... moved data to GPU (fp16): {:.2?}", start.elapsed());
         }
-        for _ in 0..params.iters {
-            lloyd_step(
-                &client,
-                &data_gpu,
-                &cent_gpu,
-                &pnorm_gpu,
-                &cnorm_gpu,
-                &assign_gpu,
-                n,
-                n_centroids,
-                dim_padded,
-                &dist,
-                cube_count,
-                &privatised_counts,
-                &counts,
-                &offsets,
-                &all_indices,
-            );
-        }
+
+        run_kmeans_loop::<half::f16, T, R>(
+            &client,
+            &data_gpu,
+            &cent_gpu,
+            &pnorm_gpu,
+            &cnorm_gpu,
+            n,
+            n_centroids,
+            dim_padded,
+            &dist,
+            &params,
+            verbose,
+        )?
     } else {
-        // A change floor to absorb near-equidistant points that flip between
-        // equally good centroids without stalling termination.
-        let change_floor = (n / 10_000).max(1) as u32;
+        let data_gpu = GpuTensor::<R, T>::from_slice(&data_padded, vec![n, dim_padded], &client);
 
-        let assign_alt_gpu = GpuTensor::<R, u32>::empty(vec![n], &client);
-        let (cnt_gx, cnt_gy) = grid_2d((n as u32).div_ceil(WORKGROUP_SIZE_X));
-
-        for iter in 0..params.iters {
-            // `cur` receives this iteration's assignments; `prev` holds last.
-            let (cur, prev) = if iter % 2 == 0 {
-                (&assign_gpu, &assign_alt_gpu)
-            } else {
-                (&assign_alt_gpu, &assign_gpu)
-            };
-
-            lloyd_step(
-                &client,
-                &data_gpu,
-                &cent_gpu,
-                &pnorm_gpu,
-                &cnorm_gpu,
-                cur,
-                n,
-                n_centroids,
-                dim_padded,
-                &dist,
-                cube_count,
-                &privatised_counts,
-                &counts,
-                &offsets,
-                &all_indices,
-            );
-
-            // Zeroed single-element atomic counter, recreated per iter.
-            let changed_gpu = GpuTensor::<R, u32>::from_slice(&[0u32], vec![1], &client);
-            unsafe {
-                count_changed::launch_unchecked::<R>(
-                    &client,
-                    CubeCount::Static(cnt_gx, cnt_gy, 1),
-                    CubeDim::new_1d(WORKGROUP_SIZE_X),
-                    cur.clone().into_tensor_arg(),
-                    prev.clone().into_tensor_arg(),
-                    changed_gpu.clone().into_tensor_arg(),
-                    n as u32,
-                );
-            }
-            let changed = changed_gpu.read(&client)?[0];
-
-            // Iteration 0 has no meaningful `prev` (uninitialised buffer), so
-            // only test convergence from the second iteration onward.
-            if iter > 0 && changed <= change_floor {
-                if verbose {
-                    println!(
-                        "    Converged at iteration {} ({} assignments changed)",
-                        iter + 1,
-                        changed
-                    );
-                }
-                break;
-            }
-            if verbose && (iter + 1) % 10 == 0 {
-                println!(
-                    "    Iteration {} complete ({} assignments changed)",
-                    iter + 1,
-                    changed
-                );
-            }
+        if verbose {
+            println!("  ... moved data to GPU: {:.2?}", start.elapsed());
         }
-    }
 
-    // Final assignment against the converged centroids. cnorm_gpu is already
-    // consistent with cent_gpu (refreshed at the end of the last lloyd_step).
-    flash_assign_device(
-        &client,
-        &data_gpu,
-        &cent_gpu,
-        &pnorm_gpu,
-        &cnorm_gpu,
-        &assign_gpu,
-        n,
-        n_centroids,
-        dim_padded,
-        &dist,
-    );
-    let assignments: Vec<usize> = assign_gpu
-        .read(&client)?
-        .into_iter()
-        .map(|x| x as usize)
-        .collect();
+        run_kmeans_loop::<T, T, R>(
+            &client,
+            &data_gpu,
+            &cent_gpu,
+            &pnorm_gpu,
+            &cnorm_gpu,
+            n,
+            n_centroids,
+            dim_padded,
+            &dist,
+            &params,
+            verbose,
+        )?
+    };
 
-    let final_cents = cent_gpu.clone().read(&client)?;
     let centroid_mat = Mat::from_fn(n_centroids, dim, |i, j| final_cents[i * dim_padded + j]);
 
     if verbose {
@@ -1285,7 +1445,7 @@ mod tests {
             &all_indices,
             &client,
         );
-        segmented_update::<WgpuRuntime, f32>(
+        segmented_update::<WgpuRuntime, f32, f32>(
             &data_gpu,
             &all_indices,
             &offsets,
