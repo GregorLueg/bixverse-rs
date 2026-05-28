@@ -160,31 +160,24 @@ fn calculate_cell_module_score(
     gene_set: &[usize],
     control_set: &[usize],
 ) -> f32 {
-    let mut expr_map: FxHashMap<usize, f32> =
-        FxHashMap::with_capacity_and_hasher(cell.indices.len(), Default::default());
+    // leverage a binary search look up here
+    let lookup = |idx: usize| -> f32 {
+        match cell.indices.binary_search(&(idx as u32)) {
+            Ok(pos) => cell.data_norm[pos].to_f32(),
+            Err(_) => 0.0,
+        }
+    };
 
-    for (&idx, &val) in cell.indices.iter().zip(cell.data_norm.iter()) {
-        expr_map.insert(idx as usize, val.to_f32());
-    }
-
-    let gene_sum: f32 = gene_set
-        .iter()
-        .map(|&idx| *expr_map.get(&idx).unwrap_or(&0.0))
-        .sum();
     let gene_mean = if gene_set.is_empty() {
         0.0
     } else {
-        gene_sum / gene_set.len() as f32
+        gene_set.iter().map(|&idx| lookup(idx)).sum::<f32>() / gene_set.len() as f32
     };
 
-    let ctrl_sum: f32 = control_set
-        .iter()
-        .map(|&idx| *expr_map.get(&idx).unwrap_or(&0.0))
-        .sum();
     let ctrl_mean = if control_set.is_empty() {
         0.0
     } else {
-        ctrl_sum / control_set.len() as f32
+        control_set.iter().map(|&idx| lookup(idx)).sum::<f32>() / control_set.len() as f32
     };
 
     gene_mean - ctrl_mean
