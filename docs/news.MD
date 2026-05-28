@@ -15,15 +15,15 @@ Major update / release
   * Weighted nearest neighbour graph method behind a new feature gate.
   * DSB normalisation for CITE Seq ADT
 - First annotation helpers... ScType implemented
-- Improved Harmony (version 1 and 2), HotSpot and module scoring with increased
-  speed.
+- Improved Harmony (version 1 and 2) and HotSpot with increased speed
 - h5ad ingest automatically recognises where raw counts are being stored
 - Updates to various package editions
+- SEACells and SuperCells that are actually memory efficient
 
 #### GPU-accelerated methods:
 
 - First implementation of GPU-accelerated method:
-  * k-means clustering
+  * k-means clustering -> to be integrated in the future in some of methods
 
 ## 0.2.0
 
