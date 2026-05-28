@@ -448,6 +448,7 @@ where
             b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
         });
         v.truncate(k);
+        v.shrink_to_fit(); // important... I need to reduce the allocations here...
     }
     v.sort_unstable_by_key(|&(idx, _)| idx);
     v
@@ -651,13 +652,12 @@ where
     let walktrap_start = Instant::now();
 
     if verbose {
-        if max_support.is_some() {
-            println!(
+        match max_support {
+            Some(ms) => println!(
                 "Calculating walk probabilities with max support of {:?}.",
-                max_support.unwrap()
-            )
-        } else {
-            println!("Calculating walk probabilities.")
+                ms
+            ),
+            None => println!("Calculating walk probabilities."),
         }
     }
 
