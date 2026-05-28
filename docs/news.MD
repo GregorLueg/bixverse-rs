@@ -18,7 +18,8 @@ Major update / release
 - Improved Harmony (version 1 and 2) and HotSpot with increased speed
 - h5ad ingest automatically recognises where raw counts are being stored
 - Updates to various package editions
-- SEACells and SuperCells that are actually memory efficient
+- SEACells and SuperCells that are actually memory efficient. Run on a million
+  cells in a ~20 GB memory pressure range.
 
 #### GPU-accelerated methods:
 
