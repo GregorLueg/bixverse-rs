@@ -1,8 +1,6 @@
 //! Graph community detection algorithms. Includes Louvain and WalkTrap
 //! implementations.
 
-use ann_search_rs::prelude::SimdDistance;
-use ann_search_rs::utils::dist::euclidean_distance_static;
 use rand::prelude::*;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -325,15 +323,123 @@ where
 // Walktrap //
 //////////////
 
-/// Compute random-walk probability vectors for all nodes
+/// Squared Euclidean distance between two index-sorted sparse vectors.
+///
+/// Iterates over the union of indices in a single pass; missing indices are
+/// treated as zero.
+///
+/// ### Params
+///
+/// * `a` - First index-sorted sparse vector as `(index, value)` pairs
+/// * `b` - Second index-sorted sparse vector as `(index, value)` pairs
+///
+/// ### Returns
+///
+/// Squared Euclidean distance between the two vectors
+fn sparse_sq_dist<T>(a: &[(usize, T)], b: &[(usize, T)]) -> T
+where
+    T: BixverseFloat,
+{
+    let mut acc = T::zero();
+    let mut i = 0;
+    let mut j = 0;
+    while i < a.len() && j < b.len() {
+        let (ai, av) = a[i];
+        let (bi, bv) = b[j];
+        if ai == bi {
+            let d = av - bv;
+            acc += d * d;
+            i += 1;
+            j += 1;
+        } else if ai < bi {
+            acc += av * av;
+            i += 1;
+        } else {
+            acc += bv * bv;
+            j += 1;
+        }
+    }
+    while i < a.len() {
+        let v = a[i].1;
+        acc += v * v;
+        i += 1;
+    }
+    while j < b.len() {
+        let v = b[j].1;
+        acc += v * v;
+        j += 1;
+    }
+    acc
+}
+
+/// Weighted average of two index-sorted sparse vectors:
+/// `(n_a · a + n_b · b) / (n_a + n_b)`, returned index-sorted.
+///
+/// Iterates over the union of indices in a single pass; missing indices are
+/// treated as zero.
+///
+/// ### Params
+///
+/// * `a` - First index-sorted sparse vector as `(index, value)` pairs
+/// * `b` - Second index-sorted sparse vector as `(index, value)` pairs
+/// * `n_a` - Weight (typically community size) for vector `a`
+/// * `n_b` - Weight (typically community size) for vector `b`
+///
+/// ### Returns
+///
+/// Merged index-sorted sparse vector
+fn merge_sparse_vecs<T>(
+    a: &[(usize, T)],
+    b: &[(usize, T)],
+    n_a: usize,
+    n_b: usize,
+) -> Vec<(usize, T)>
+where
+    T: BixverseFloat,
+{
+    let na = T::from_usize(n_a).unwrap();
+    let nb = T::from_usize(n_b).unwrap();
+    let nc = na + nb;
+    let mut out = Vec::with_capacity(a.len() + b.len());
+    let mut i = 0;
+    let mut j = 0;
+    while i < a.len() && j < b.len() {
+        let (ai, av) = a[i];
+        let (bi, bv) = b[j];
+        if ai == bi {
+            out.push((ai, (na * av + nb * bv) / nc));
+            i += 1;
+            j += 1;
+        } else if ai < bi {
+            out.push((ai, na * av / nc));
+            i += 1;
+        } else {
+            out.push((bi, nb * bv / nc));
+            j += 1;
+        }
+    }
+    while i < a.len() {
+        let (ai, av) = a[i];
+        out.push((ai, na * av / nc));
+        i += 1;
+    }
+    while j < b.len() {
+        let (bi, bv) = b[j];
+        out.push((bi, nb * bv / nc));
+        j += 1;
+    }
+    out
+}
+
+/// Compute random-walk probability vectors for all nodes (sparse)
 ///
 /// For each node i, simulates a `walk_length`-step random walk starting at i
-/// and records the landing probabilities. The resulting vector is then scaled
-/// by the inverse square root of each node's degree, matching the Walktrap
-/// normalisation from Pons & Latapy 2005.
+/// and records the landing probabilities, scaled by the inverse square root of
+/// each node's degree (Pons & Latapy 2005). Probabilities are propagated through
+/// hashmaps so only reached nodes are stored.
 ///
 /// Transition probabilities are weight-proportional: `p(i→j) = w(i,j) / deg(i)`.
-/// Isolated nodes (zero degree) yield an all-zero probability vector.
+/// Isolated nodes (zero degree) yield an effectively zero vector.
 ///
 /// ### Params
 ///
@@ -342,9 +448,9 @@ where
 ///
 /// ### Returns
 ///
-/// Flat row-major buffer of shape `(n × n)` where row i holds the scaled
-/// landing probabilities `q[i, j] = P(walk from i lands at j) / sqrt(deg(j))`
-fn compute_walk_probabilities<T>(graph: &SparseGraph<T>, walk_length: usize) -> Vec<T>
+/// One index-sorted sparse vector per node, where entry `(j, v)` holds
+/// `v = P(walk from i lands at j) / sqrt(deg(j))`.
+fn compute_walk_probabilities<T>(graph: &SparseGraph<T>, walk_length: usize) -> Vec<Vec<(usize, T)>>
 where
     T: BixverseFloat + std::iter::Sum + Send + Sync,
 {
@@ -380,31 +486,30 @@ where
         })
         .collect();
 
-    let mut q_flat: Vec<T> = vec![T::zero(); n * n];
-    q_flat.par_chunks_mut(n).enumerate().for_each(|(i, row)| {
-        let mut probs = vec![T::zero(); n];
-        let mut new_probs = vec![T::zero(); n];
-        probs[i] = T::one();
-        for _ in 0..walk_length {
-            for p in new_probs.iter_mut() {
-                *p = T::zero();
-            }
-            for node in 0..n {
-                let p = probs[node];
-                if p > epsilon {
-                    for &(nb, tp) in &transition_probs[node] {
-                        new_probs[nb] += p * tp;
+    (0..n)
+        .into_par_iter()
+        .map(|i| {
+            let mut probs: FxHashMap<usize, T> = FxHashMap::default();
+            probs.insert(i, T::one());
+            for _ in 0..walk_length {
+                let mut next: FxHashMap<usize, T> = FxHashMap::default();
+                for (&node, &p) in &probs {
+                    if p > epsilon {
+                        for &(nb, tp) in &transition_probs[node] {
+                            *next.entry(nb).or_insert_with(T::zero) += p * tp;
+                        }
                     }
                 }
+                probs = next;
             }
-            std::mem::swap(&mut probs, &mut new_probs);
-        }
-        for k in 0..n {
-            row[k] = probs[k] * inv_sqrt_deg[k];
-        }
-    });
-
-    q_flat
+            let mut row: Vec<(usize, T)> = probs
+                .into_iter()
+                .map(|(k, p)| (k, p * inv_sqrt_deg[k]))
+                .collect();
+            row.sort_unstable_by_key(|&(k, _)| k);
+            row
+        })
+        .collect()
 }
 
 /// Compute Ward's linkage criterion between two communities
@@ -468,13 +573,13 @@ fn finalise_labels(n: usize, parent: &[usize]) -> Vec<usize> {
 
 /// Walktrap community detection (Pons & Latapy 2005)
 ///
-/// Identifies communities by agglomerative clustering of random-walk probs
+/// Identifies communities by agglomerative clustering of random-walk probability
 /// vectors. Nodes that tend to co-occur on short random walks are grouped
 /// together.
 ///
 /// Algorithm outline:
 ///
-/// 1. Compute scaled walk-probability vectors for all nodes
+/// 1. Compute scaled walk-probability vectors for all nodes (sparse)
 /// 2. Initialise each node as its own community
 /// 3. Greedily merge the adjacent pair with the smallest Ward criterion
 ///    until `num_clusters` communities remain
@@ -500,7 +605,7 @@ pub fn walktrap_sparse_graph<T>(
     verbose: bool,
 ) -> Vec<usize>
 where
-    T: BixverseFloat + std::iter::Sum + Send + Sync + SimdDistance,
+    T: BixverseFloat + std::iter::Sum + Send + Sync,
 {
     let n = graph.get_node_number();
     if n == 0 {
@@ -513,15 +618,12 @@ where
     let walktrap_start = Instant::now();
 
     let t0 = Instant::now();
-    let q_flat = compute_walk_probabilities(graph, walk_length);
+    let q = compute_walk_probabilities(graph, walk_length);
     if verbose {
         println!("Calculated walk probabilities: {:.2?}", t0.elapsed());
     }
 
-    let mut comm_q: Vec<Option<Vec<T>>> = (0..n)
-        .map(|i| Some(q_flat[i * n..(i + 1) * n].to_vec()))
-        .collect();
-    drop(q_flat);
+    let mut comm_q: Vec<Option<Vec<(usize, T)>>> = q.into_iter().map(Some).collect();
 
     let mut comm_size: Vec<usize> = vec![1; n];
     let mut active: Vec<bool> = vec![true; n];
@@ -547,7 +649,7 @@ where
         .map(|&(i, j)| {
             let qi = comm_q[i].as_ref().unwrap();
             let qj = comm_q[j].as_ref().unwrap();
-            let d_sq = euclidean_distance_static(qi, qj);
+            let d_sq = sparse_sq_dist(qi, qj);
             let crit = ward_criterion(d_sq, 1, 1);
             (RevOrderedFloat(crit), i, j)
         })
@@ -593,18 +695,12 @@ where
         let n_a = comm_size[a];
         let n_b = comm_size[b];
         let n_c = n_a + n_b;
-        let na_t = T::from_usize(n_a).unwrap();
-        let nb_t = T::from_usize(n_b).unwrap();
-        let nc_t = T::from_usize(n_c).unwrap();
 
-        let mut new_q = vec![T::zero(); n];
-        {
+        let new_q = {
             let qa = comm_q[a].as_ref().unwrap();
             let qb = comm_q[b].as_ref().unwrap();
-            for k in 0..n {
-                new_q[k] = (na_t * qa[k] + nb_t * qb[k]) / nc_t;
-            }
-        }
+            merge_sparse_vecs(qa, qb, n_a, n_b)
+        };
 
         let mut new_adj: FxHashSet<usize> = FxHashSet::default();
         for &k in &adj[a] {
@@ -646,7 +742,7 @@ where
             .map(|&k| {
                 let qc = comm_q[c].as_ref().unwrap();
                 let qk = comm_q[k].as_ref().unwrap();
-                let d_sq = euclidean_distance_static(qc, qk);
+                let d_sq = sparse_sq_dist(qc, qk);
                 let crit = ward_criterion(d_sq, n_c, comm_size[k]);
                 (RevOrderedFloat(crit), c, k)
             })
