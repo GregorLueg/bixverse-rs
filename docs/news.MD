@@ -15,7 +15,8 @@ Major update / release
   * Weighted nearest neighbour graph method behind a new feature gate.
   * DSB normalisation for CITE Seq ADT
 - First annotation helpers... ScType implemented
-- Improved Harmony (version 1 and 2) and HotSpot with increased speed
+- Improved Harmony (version 1 and 2), HotSpot and module scoring with increased
+  speed.
 - h5ad ingest automatically recognises where raw counts are being stored
 - Updates to various package editions
 

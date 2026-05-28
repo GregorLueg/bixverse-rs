@@ -453,6 +453,40 @@ fn chebyshev_apply_columns(
     Mat::from_fn(n, p, |i, j| columns[j][i])
 }
 
+/// Apply L1 normalisation to each row.
+///
+/// Normalises each row (cell) to unit L1 norm, turning per-condition MELD
+/// densities into per-cell condition probabilities that sum to 1. Rows with
+/// near-zero norm are left as zeros to avoid division by zero.
+///
+/// ### Params
+///
+/// * `mat` - The matrix to row-normalise (cells x conditions)
+///
+/// ### Returns
+///
+/// Per-row L1-normalised data
+fn l1_normalise(mat: &Mat<f32>) -> Mat<f32> {
+    let nrows = mat.nrows();
+    let ncols = mat.ncols();
+
+    // compute norms once per row (in parallel)
+    let norms: Vec<f32> = (0..nrows)
+        .into_par_iter()
+        .map(|row| mat.get(row, ..).norm_l1())
+        .collect();
+
+    // create normalised matrix
+    Mat::from_fn(nrows, ncols, |row, col| {
+        let norm = norms[row];
+        if norm > 1e-8 {
+            mat[(row, col)] / norm
+        } else {
+            0.0 // Zero-norm row stays zero
+        }
+    })
+}
+
 //////////
 // Main //
 //////////
@@ -560,7 +594,7 @@ pub fn meld(
         println!("MELD: done in {:.2?}", start.elapsed());
     }
 
-    Ok(densities)
+    Ok(l1_normalise(densities))
 }
 
 /// Run MELD with a landmark approximation, suitable for 100k-1M cells.
@@ -720,5 +754,5 @@ pub fn meld_landmark(
         println!("MELD landmark: done in {:.2?}", t0.elapsed());
     }
 
-    Ok(densities)
+    Ok(l1_normalise(densities))
 }

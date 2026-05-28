@@ -284,7 +284,7 @@ pub enum BixverseErrors {
 
     /// Error of n_groups < 2
     #[cfg(feature = "single-cell")]
-    #[error("MELD: lables needs two groups minimum")]
+    #[error("MELD: labels needs two groups minimum")]
     MELDOnlyOneGroup,
 
     /// Error if embedding rows do not match the kNN
