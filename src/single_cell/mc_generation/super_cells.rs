@@ -41,14 +41,18 @@ pub struct SuperCellParams {
     /// Graining level of data (proportion of number of single cells in the
     /// initial dataset to the number of metacells in the final dataset)
     pub graining_factor: f64,
-    /// [`crate::prelude::KnnParams`] for the various approximate nearest
-    /// neighbour searches in ann-search-rs
-    pub knn_params: KnnParams,
     /// Shall a kernel be applied as in SuperCell 2.0, see Hérault, et al.,
     /// bioRxiv, 2026
     pub use_kernel: bool,
     /// Optional choice for k_ith neighbour to use
     pub k_ith: Option<usize>,
+    /// Optional cap on stored support per walk-probability vector. `None` keeps
+    /// vectors exact (memory grows with reachable support); `Some(k)` keeps the
+    /// top-`k` entries by mass, bounding memory at ~`k * n_nodes`.
+    pub max_support: Option<usize>,
+    /// [`crate::prelude::KnnParams`] for the various approximate nearest
+    /// neighbour searches in ann-search-rs
+    pub knn_params: KnnParams,
 }
 
 /////////////
@@ -172,6 +176,7 @@ where
         &knn_graph,
         params.walk_length,
         no_meta_cells,
+        params.max_support,
         verbosity.detailed_verbosity(),
     )
 }

@@ -431,6 +431,28 @@ where
     out
 }
 
+/// Index-sort a sparse vector, optionally keeping only its `k` largest-value
+/// entries first.
+///
+/// `None` leaves the support untruncated. `Some(k)` keeps the top-`k` entries by
+/// mass (the dropped tail holds negligible walk mass), bounding stored support
+/// at `k` per community vector.
+fn finalise_sparse_vec<T>(mut v: Vec<(usize, T)>, max_support: Option<usize>) -> Vec<(usize, T)>
+where
+    T: BixverseFloat,
+{
+    if let Some(k) = max_support
+        && v.len() > k
+    {
+        v.select_nth_unstable_by(k, |a, b| {
+            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        v.truncate(k);
+    }
+    v.sort_unstable_by_key(|&(idx, _)| idx);
+    v
+}
+
 /// Compute random-walk probability vectors for all nodes (sparse)
 ///
 /// For each node i, simulates a `walk_length`-step random walk starting at i
@@ -445,12 +467,19 @@ where
 ///
 /// * `graph` - Sparse weighted graph
 /// * `walk_length` - Number of steps per random walk
+/// * `max_support` - Optional usize. If provided, the only the top max support
+///   entries are kept and the detail is removed. This can help with large
+///   memory data sets.
 ///
 /// ### Returns
 ///
 /// One index-sorted sparse vector per node, where entry `(j, v)` holds
 /// `v = P(walk from i lands at j) / sqrt(deg(j))`.
-fn compute_walk_probabilities<T>(graph: &SparseGraph<T>, walk_length: usize) -> Vec<Vec<(usize, T)>>
+fn compute_walk_probabilities<T>(
+    graph: &SparseGraph<T>,
+    walk_length: usize,
+    max_support: Option<usize>,
+) -> Vec<Vec<(usize, T)>>
 where
     T: BixverseFloat + std::iter::Sum + Send + Sync,
 {
@@ -502,12 +531,11 @@ where
                 }
                 probs = next;
             }
-            let mut row: Vec<(usize, T)> = probs
+            let row: Vec<(usize, T)> = probs
                 .into_iter()
                 .map(|(k, p)| (k, p * inv_sqrt_deg[k]))
                 .collect();
-            row.sort_unstable_by_key(|&(k, _)| k);
-            row
+            finalise_sparse_vec(row, max_support)
         })
         .collect()
 }
@@ -593,6 +621,10 @@ fn finalise_labels(n: usize, parent: &[usize]) -> Vec<usize> {
 /// * `graph` - Sparse weighted graph to cluster
 /// * `walk_length` - Number of steps for the random walks
 /// * `num_clusters` - Target number of communities to return
+/// * `max_support` - Optional usize. If provided, the only the top max support
+///   entries are kept and the detail is removed. This can help with large
+///   memory data sets and the tail tends to hold neglible mass. This becomes
+///   an approximation in this case.
 /// * `verbose` - Print timing information for each stage
 ///
 /// ### Returns
@@ -602,6 +634,7 @@ pub fn walktrap_sparse_graph<T>(
     graph: &SparseGraph<T>,
     walk_length: usize,
     num_clusters: usize,
+    max_support: Option<usize>,
     verbose: bool,
 ) -> Vec<usize>
 where
@@ -617,10 +650,21 @@ where
 
     let walktrap_start = Instant::now();
 
-    let t0 = Instant::now();
-    let q = compute_walk_probabilities(graph, walk_length);
     if verbose {
-        println!("Calculated walk probabilities: {:.2?}", t0.elapsed());
+        if max_support.is_some() {
+            println!(
+                "Calculating walk probabilities with max support of {:?}.",
+                max_support.unwrap()
+            )
+        } else {
+            println!("Calculating walk probabilities.")
+        }
+    }
+
+    let t0 = Instant::now();
+    let q = compute_walk_probabilities(graph, walk_length, max_support);
+    if verbose {
+        println!(" ... done in {:.2?}", t0.elapsed());
     }
 
     let mut comm_q: Vec<Option<Vec<(usize, T)>>> = q.into_iter().map(Some).collect();
@@ -655,13 +699,17 @@ where
         })
         .collect();
 
+    if verbose {
+        println!("Computing initial distances.")
+    }
+
     let mut heap: BinaryHeap<(RevOrderedFloat<T>, usize, usize)> =
         BinaryHeap::with_capacity(initial.len() * 2);
     for entry in initial {
         heap.push(entry);
     }
     if verbose {
-        println!("Computed initial distances: {:.2?}", t1.elapsed());
+        println!(" ... done in {:.2?}", t1.elapsed());
     }
 
     let t2 = Instant::now();
@@ -836,7 +884,7 @@ mod tests {
     #[test]
     fn test_walktrap_barbell() {
         let graph = build_barbell_graph();
-        let comms = walktrap_sparse_graph(&graph, 3, 2, false);
+        let comms = walktrap_sparse_graph(&graph, 3, 2, None, false);
         assert_eq!(comms[0], comms[1]);
         assert_eq!(comms[1], comms[2]);
         assert_eq!(comms[3], comms[4]);
@@ -847,7 +895,7 @@ mod tests {
     #[test]
     fn test_walktrap_two_cliques() {
         let graph = build_two_cliques_graph();
-        let comms = walktrap_sparse_graph(&graph, 4, 2, false);
+        let comms = walktrap_sparse_graph(&graph, 4, 2, None, false);
         for i in 1..4 {
             assert_eq!(comms[i], comms[0]);
         }

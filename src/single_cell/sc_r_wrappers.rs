@@ -1259,6 +1259,10 @@ impl SuperCellParams {
             .get("k_ith")
             .and_then(|v| v.as_integer())
             .map(|x| x as usize);
+        let max_support = params
+            .get("max_support")
+            .and_then(|v| v.as_integer())
+            .map(|x| x as usize);
 
         Ok(Self {
             walk_length,
@@ -1266,6 +1270,7 @@ impl SuperCellParams {
             knn_params,
             use_kernel,
             k_ith,
+            max_support,
         })
     }
 }
