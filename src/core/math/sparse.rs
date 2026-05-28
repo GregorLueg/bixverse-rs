@@ -1247,29 +1247,31 @@ where
         }
     }
 
-    /// Extract accumulated values as sorted index-value pairs and reset the accumulator
+    /// Drain accumulated values into caller-provided buffers and reset the
+    /// accumulator.
+    ///
+    /// ### Params
+    ///
+    /// * `indices_out` - Buffer to append active indices into
+    /// * `data_out` - Buffer to append accumulated values into
     ///
     /// ### Returns
     ///
-    /// Vector of (index, value) pairs sorted by index
+    /// Number of entries written
     #[inline]
-    fn extract_sorted(&mut self) -> Vec<(usize, T)> {
+    fn extract_into(&mut self, indices_out: &mut Vec<usize>, data_out: &mut Vec<T>) -> usize {
         self.indices.sort_unstable();
-        let result: Vec<(usize, T)> = unsafe {
-            self.indices
-                .iter()
-                .map(|&i| (i, *self.values.get_unchecked(i)))
-                .collect()
-        };
-        // Reset for next use
+        let n = self.indices.len();
         unsafe {
-            for &idx in &self.indices {
-                *self.flags.get_unchecked_mut(idx) = false;
-                *self.values.get_unchecked_mut(idx) = T::default();
+            for &i in &self.indices {
+                indices_out.push(i);
+                data_out.push(*self.values.get_unchecked(i));
+                *self.flags.get_unchecked_mut(i) = false;
+                *self.values.get_unchecked_mut(i) = T::default();
             }
         }
         self.indices.clear();
-        result
+        n
     }
 }
 
@@ -1296,57 +1298,67 @@ where
     let nrows = a.shape.0;
     let ncols = b.shape.1;
 
-    let row_results: Vec<Vec<(usize, T)>> = (0..nrows)
+    const CHUNK: usize = 256;
+    let n_chunks = nrows.div_ceil(CHUNK);
+
+    let chunks: Vec<(Vec<usize>, Vec<T>, Vec<usize>)> = (0..n_chunks)
         .into_par_iter()
-        .map(|i| {
-            let mut acc = SparseAccumulator::new(ncols);
+        .map_init(
+            || SparseAccumulator::new(ncols),
+            |acc, chunk_idx| {
+                let start = chunk_idx * CHUNK;
+                let end = ((chunk_idx + 1) * CHUNK).min(nrows);
 
-            unsafe {
-                let a_indptr = a.indptr.as_ptr();
-                let a_indices = a.indices.as_ptr();
-                let a_data = a.data.as_ptr();
-                let b_indptr = b.indptr.as_ptr();
-                let b_indices = b.indices.as_ptr();
-                let b_data = b.data.as_ptr();
+                let mut idx_buf = Vec::new();
+                let mut data_buf = Vec::new();
+                let mut lengths = Vec::with_capacity(end - start);
 
-                let a_start = *a_indptr.add(i);
-                let a_end = *a_indptr.add(i + 1);
-
-                for a_idx in a_start..a_end {
-                    let k = *a_indices.add(a_idx);
-                    let a_val = *a_data.add(a_idx);
-
-                    let b_start = *b_indptr.add(k);
-                    let b_end = *b_indptr.add(k + 1);
-
-                    for b_idx in b_start..b_end {
-                        let j = *b_indices.add(b_idx);
-                        let b_val = *b_data.add(b_idx);
-                        acc.add(j, a_val * b_val);
+                for i in start..end {
+                    for a_idx in a.indptr[i]..a.indptr[i + 1] {
+                        let k = a.indices[a_idx];
+                        let a_val = a.data[a_idx];
+                        for b_idx in b.indptr[k]..b.indptr[k + 1] {
+                            unsafe {
+                                acc.add(b.indices[b_idx], a_val * b.data[b_idx]);
+                            }
+                        }
                     }
+                    lengths.push(acc.extract_into(&mut idx_buf, &mut data_buf));
                 }
-            }
 
-            acc.extract_sorted()
-        })
+                (idx_buf, data_buf, lengths)
+            },
+        )
         .collect();
 
-    // direct CSR construction
-    let total_nnz: usize = row_results.iter().map(|r| r.len()).sum();
-    let mut data = Vec::with_capacity(total_nnz);
-    let mut indices = Vec::with_capacity(total_nnz);
+    let total_nnz: usize = chunks.iter().map(|(i, _, _)| i.len()).sum();
+
     let mut indptr = Vec::with_capacity(nrows + 1);
     indptr.push(0);
-
-    for row in row_results {
-        for (col, val) in row {
-            data.push(val);
-            indices.push(col);
+    let mut running = 0usize;
+    for (_, _, lengths) in &chunks {
+        for &len in lengths {
+            running += len;
+            indptr.push(running);
         }
-        indptr.push(data.len());
     }
 
-    CompressedSparseData2::new_csr(&data, &indices, &indptr, None, (nrows, ncols))
+    let mut indices = Vec::with_capacity(total_nnz);
+    let mut data = Vec::with_capacity(total_nnz);
+    for (idx_buf, data_buf, _) in chunks {
+        indices.extend(idx_buf);
+        data.extend(data_buf);
+    }
+
+    // Build directly rather than via new_csr, which would .to_vec() the lot.
+    CompressedSparseData2 {
+        data,
+        indices,
+        indptr,
+        cs_type: CompressedSparseFormat::Csr,
+        data_2: None,
+        shape: (nrows, ncols),
+    }
 }
 
 /////////////////////////////////////

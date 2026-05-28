@@ -603,133 +603,158 @@ fn nystrom_extend(
 // Matrix updates //
 ////////////////////
 
-/// Compute gradient of A: `g = 2 * (t1 · A - t2)` into a column-major buffer
-///
-/// Output layout is column-major with `g[j * k + i]` at row i, column j, chosen
-/// so that the argmin scan over a column is stride-1 in memory. Parallelises
-/// over rows i; each thread owns a unique i, making the strided writes to
-/// `g[j * k + i]` across j disjoint between threads.
+/// Per-cell Frank-Wolfe argmins for the A update, one gradient column at a
+/// time so the full k × n gradient is never materialised. The factor of 2 in
+/// the true gradient is dropped: irrelevant to an argmin.
 ///
 /// ### Params
 ///
-/// * `t1` - Precomputed `Bᵀ K² B` matrix (k × k)
-/// * `a` - Current assignment matrix (k × n)
-/// * `t2` - Precomputed `Bᵀ K²` matrix (k × n)
-/// * `k` - Number of SEACells (archetypes)
+/// * `t1` - k × k matrix Bᵀ K² B (symmetric)
+/// * `a` - k × n current assignment matrix
+/// * `k2_b` - n × k matrix K² B (rows are columns of t2)
+/// * `k` - Number of archetypes
 /// * `n` - Number of cells
-/// * `g` - Output buffer of length `k * n` (column-major, row = archetype)
-fn compute_grad_a_colmajor(
-    t1: &CompressedSparseData2<f32>,
-    a: &CompressedSparseData2<f32>,
-    t2: &CompressedSparseData2<f32>,
+///
+/// ### Returns
+///
+/// Vector of length n with the argmin archetype index for each cell
+fn fw_argmins_a(
+    t1: &CompressedSparseData2<f32>,   // k × k, Bᵀ K² B (symmetric)
+    a: &CompressedSparseData2<f32>,    // k × n, current A
+    k2_b: &CompressedSparseData2<f32>, // n × k, K² B (rows are t2's columns)
     k: usize,
     n: usize,
-    g: &mut [f32],
-) {
-    let g_addr = g.as_mut_ptr() as usize;
+) -> Vec<usize> {
+    let a_t = a.transpose_and_convert(); // n × k: row j is column j of A
 
-    (0..k).into_par_iter().for_each_init(
-        || vec![0.0f32; n],
-        |row_buf, i| {
-            row_buf.fill(0.0);
+    const CHUNK: usize = 256;
+    let n_chunks = n.div_ceil(CHUNK);
 
-            // Row i of (t1·a)
-            let t1_start = t1.indptr[i];
-            let t1_end = t1.indptr[i + 1];
-            for t1_idx in t1_start..t1_end {
-                let r = t1.indices[t1_idx];
-                let t1_val = t1.data[t1_idx];
-                let a_start = a.indptr[r];
-                let a_end = a.indptr[r + 1];
-                for a_idx in a_start..a_end {
-                    let j = a.indices[a_idx];
-                    row_buf[j] += t1_val * a.data[a_idx];
+    let chunks: Vec<Vec<usize>> = (0..n_chunks)
+        .into_par_iter()
+        .map_init(
+            || vec![0.0f32; k],
+            |buf, chunk_idx| {
+                let start = chunk_idx * CHUNK;
+                let end = ((chunk_idx + 1) * CHUNK).min(n);
+                let mut out = Vec::with_capacity(end - start);
+
+                for j in start..end {
+                    buf.fill(0.0);
+
+                    for ai in a_t.indptr[j]..a_t.indptr[j + 1] {
+                        let r = a_t.indices[ai];
+                        let w = a_t.data[ai];
+                        for ti in t1.indptr[r]..t1.indptr[r + 1] {
+                            buf[t1.indices[ti]] += w * t1.data[ti];
+                        }
+                    }
+                    for ki in k2_b.indptr[j]..k2_b.indptr[j + 1] {
+                        buf[k2_b.indices[ki]] -= k2_b.data[ki];
+                    }
+
+                    let mut min_val = buf[0];
+                    let mut min_idx = 0;
+                    for i in 1..k {
+                        if buf[i] < min_val {
+                            min_val = buf[i];
+                            min_idx = i;
+                        }
+                    }
+                    out.push(min_idx);
                 }
-            }
+                out
+            },
+        )
+        .collect();
 
-            // Subtract row i of t2
-            let t2_start = t2.indptr[i];
-            let t2_end = t2.indptr[i + 1];
-            for t2_idx in t2_start..t2_end {
-                let j = t2.indices[t2_idx];
-                row_buf[j] -= t2.data[t2_idx];
-            }
-
-            // Strided write into column-major g, scaled by 2.
-            // SAFETY: every thread has a unique i; writes at g[j*k + i] are
-            // disjoint across threads (different offsets per column).
-            unsafe {
-                let g_ptr = g_addr as *mut f32;
-                for j in 0..n {
-                    *g_ptr.add(j * k + i) = 2.0 * row_buf[j];
-                }
-            }
-        },
-    );
+    chunks.into_iter().flatten().collect()
 }
 
-/// Compute gradient of B: `g = 2 * (K² B · t1 - t2)` into a column-major buffer
-///
-/// Output layout is column-major with `g[c * n + r]` at row r, column c, chosen
-/// so that the argmin scan over a column is stride-1 in memory. Parallelises
-/// over rows r; each thread owns a unique r, making the strided writes to
-/// `g[c * n + r]` across c disjoint between threads.
+/// Per-archetype Frank-Wolfe argmins and FW duality gap for the B update,
+/// one gradient column at a time. Factor of 2 dropped: cancels in the gap
+/// ratio, irrelevant to the argmin.
 ///
 /// ### Params
 ///
-/// * `k2_b` - Precomputed `K² B` matrix (n × k)
-/// * `t1` - Precomputed `A Aᵀ` matrix (k × k)
-/// * `t2` - Precomputed `K² Aᵀ` matrix (n × k)
+/// * `k2_b_t` - k × n matrix, rows are columns of K² B
+/// * `t1` - k × k matrix A Aᵀ (symmetric)
+/// * `t2_t` - k × n matrix, rows are columns of K² Aᵀ
+/// * `b_t` - k × n matrix, rows are columns of B
 /// * `n` - Number of cells
-/// * `k` - Number of SEACells (archetypes)
-/// * `g` - Output buffer of length `n * k` (column-major, row = cell)
-fn compute_grad_b_colmajor(
-    k2_b: &CompressedSparseData2<f32>,
-    t1: &CompressedSparseData2<f32>,
-    t2: &CompressedSparseData2<f32>,
+/// * `k` - Number of archetypes
+///
+/// ### Returns
+///
+/// Tuple of argmin archetype index per archetype and the absolute FW duality
+/// gap
+fn fw_argmins_b(
+    k2_b_t: &CompressedSparseData2<f32>, // k × n, rows are columns of K²B
+    t1: &CompressedSparseData2<f32>,     // k × k, A Aᵀ (symmetric)
+    t2_t: &CompressedSparseData2<f32>,   // k × n, rows are columns of K²Aᵀ
+    b_t: &CompressedSparseData2<f32>,    // k × n, rows are columns of B
     n: usize,
     k: usize,
-    g: &mut [f32],
-) {
-    let g_addr = g.as_mut_ptr() as usize;
+) -> (Vec<usize>, f32) {
+    const CHUNK: usize = 64;
+    let n_chunks = k.div_ceil(CHUNK);
 
-    (0..n).into_par_iter().for_each_init(
-        || vec![0.0f32; k],
-        |row_buf, r| {
-            row_buf.fill(0.0);
+    let chunks: Vec<(Vec<usize>, f32, f32)> = (0..n_chunks)
+        .into_par_iter()
+        .map_init(
+            || vec![0.0f32; n],
+            |buf, chunk_idx| {
+                let start = chunk_idx * CHUNK;
+                let end = ((chunk_idx + 1) * CHUNK).min(k);
+                let mut amins = Vec::with_capacity(end - start);
+                let mut g_dot_b = 0.0f32;
+                let mut g_dot_e = 0.0f32;
 
-            // Row r of (k2_b · t1)
-            let kb_start = k2_b.indptr[r];
-            let kb_end = k2_b.indptr[r + 1];
-            for kb_idx in kb_start..kb_end {
-                let m = k2_b.indices[kb_idx];
-                let kb_val = k2_b.data[kb_idx];
-                let t1_start = t1.indptr[m];
-                let t1_end = t1.indptr[m + 1];
-                for t1_idx in t1_start..t1_end {
-                    let c = t1.indices[t1_idx];
-                    row_buf[c] += kb_val * t1.data[t1_idx];
+                for c in start..end {
+                    buf.fill(0.0);
+
+                    // (K²B · t1)[:, c] = sum_m t1[m,c] * (K²B)[:, m]
+                    for ti in t1.indptr[c]..t1.indptr[c + 1] {
+                        let m = t1.indices[ti];
+                        let tmc = t1.data[ti];
+                        for ki in k2_b_t.indptr[m]..k2_b_t.indptr[m + 1] {
+                            buf[k2_b_t.indices[ki]] += tmc * k2_b_t.data[ki];
+                        }
+                    }
+                    for si in t2_t.indptr[c]..t2_t.indptr[c + 1] {
+                        buf[t2_t.indices[si]] -= t2_t.data[si];
+                    }
+
+                    let mut min_val = buf[0];
+                    let mut min_idx = 0;
+                    for r in 1..n {
+                        if buf[r] < min_val {
+                            min_val = buf[r];
+                            min_idx = r;
+                        }
+                    }
+                    amins.push(min_idx);
+                    g_dot_e += min_val;
+
+                    for bi in b_t.indptr[c]..b_t.indptr[c + 1] {
+                        g_dot_b += b_t.data[bi] * buf[b_t.indices[bi]];
+                    }
                 }
-            }
+                (amins, g_dot_b, g_dot_e)
+            },
+        )
+        .collect();
 
-            // Subtract row r of t2
-            let t2_start = t2.indptr[r];
-            let t2_end = t2.indptr[r + 1];
-            for t2_idx in t2_start..t2_end {
-                let c = t2.indices[t2_idx];
-                row_buf[c] -= t2.data[t2_idx];
-            }
+    let mut argmins = Vec::with_capacity(k);
+    let mut g_dot_b = 0.0f32;
+    let mut g_dot_e = 0.0f32;
+    for (amins, gb, ge) in chunks {
+        argmins.extend(amins);
+        g_dot_b += gb;
+        g_dot_e += ge;
+    }
 
-            // SAFETY: each thread has a unique r; writes to g[c*n + r] across c
-            // are disjoint between threads.
-            unsafe {
-                let g_ptr = g_addr as *mut f32;
-                for c in 0..k {
-                    *g_ptr.add(c * n + r) = 2.0 * row_buf[c];
-                }
-            }
-        },
-    );
+    (argmins, (g_dot_b - g_dot_e).abs())
 }
 
 //////////
@@ -1519,7 +1544,8 @@ impl<'a> SEACells<'a> {
 
         let b = coo_to_csr(&b_rows, &b_cols, &b_vals, (n, k));
 
-        let archetypes_per_cell = (k as f32 * 0.25).ceil() as usize;
+        // changed compared to the original Python
+        let archetypes_per_cell = 10.min(k);
         let mut rng = StdRng::seed_from_u64(seed);
 
         let mut a_rows = Vec::new();
@@ -1587,35 +1613,16 @@ impl<'a> SEACells<'a> {
         let verbosity = parse_verbosity_level(verbose);
 
         let k2_b = self.k_squared_matmul(b)?;
-
         let t2 = k2_b.transpose_and_convert();
         let t1 = csr_matmul_csr(&t2, b);
+        drop(t2);
 
         let mut a = a_prev.clone();
         let n = a.shape.1;
         let k = a.shape.0;
 
-        // Column-major: g_dense[j * k + i]. Argmin within a column is stride-1.
-        let mut g_dense = vec![0.0f32; k * n];
-
         for t in 0..self.params.max_fw_iters {
-            compute_grad_a_colmajor(&t1, &a, &t2, k, n, &mut g_dense);
-
-            let argmins: Vec<usize> = (0..n)
-                .into_par_iter()
-                .map(|j| {
-                    let col = &g_dense[j * k..(j + 1) * k];
-                    let mut min_val = col[0];
-                    let mut min_idx = 0;
-                    for i in 1..k {
-                        if col[i] < min_val {
-                            min_val = col[i];
-                            min_idx = i;
-                        }
-                    }
-                    min_idx
-                })
-                .collect();
+            let argmins = fw_argmins_a(&t1, &a, &k2_b, k, n);
 
             let mut e_data: Vec<(usize, usize, f32)> = argmins
                 .iter()
@@ -1694,60 +1701,27 @@ impl<'a> SEACells<'a> {
     ) -> Result<CompressedSparseData2<f32>, BixverseErrors> {
         let verbosity = parse_verbosity_level(verbose);
 
+        const FW_REL_TOL: f32 = 1e-3;
+        const MIN_FW_ITERS: usize = 10;
+
         let a_t = a.transpose_and_convert();
         let t1 = csr_matmul_csr(a, &a_t);
         let t2 = self.k_squared_matmul(&a_t)?;
-
-        const FW_REL_TOL: f32 = 1e-3;
-        const MIN_FW_ITERS: usize = 10;
+        let t2_t = t2.transpose_and_convert();
+        drop(t2);
 
         let mut b = b_prev.clone();
         let n = b.shape.0;
         let k = b.shape.1;
-
-        // Column-major n × k: g_dense[c * n + r]
-        let mut g_dense = vec![0.0f32; n * k];
         let mut initial_gap: f32 = 0.0;
 
         for t in 0..self.params.max_fw_iters {
             let k2_b = self.k_squared_matmul(&b)?;
-            compute_grad_b_colmajor(&k2_b, &t1, &t2, n, k, &mut g_dense);
+            let k2_b_t = k2_b.transpose_and_convert();
+            drop(k2_b);
+            let b_t = b.transpose_and_convert();
 
-            let argmins: Vec<usize> = (0..k)
-                .into_par_iter()
-                .map(|c| {
-                    let col = &g_dense[c * n..(c + 1) * n];
-                    let mut min_val = col[0];
-                    let mut min_idx = 0;
-                    for r in 1..n {
-                        if col[r] < min_val {
-                            min_val = col[r];
-                            min_idx = r;
-                        }
-                    }
-                    min_idx
-                })
-                .collect();
-
-            // FW duality gap: <G, B> - <G, E>. g_dense holds 2G; the constant
-            // factor cancels in the relative ratio, so we leave it in.
-            let g_dot_b: f32 = (0..n)
-                .into_par_iter()
-                .map(|r| {
-                    let start = b.indptr[r];
-                    let end = b.indptr[r + 1];
-                    let mut s = 0.0f32;
-                    for idx in start..end {
-                        let c = b.indices[idx];
-                        s += g_dense[c * n + r] * b.data[idx];
-                    }
-                    s
-                })
-                .sum();
-
-            let g_dot_e: f32 = (0..k).map(|c| g_dense[c * n + argmins[c]]).sum();
-
-            let fw_gap = (g_dot_b - g_dot_e).abs();
+            let (argmins, fw_gap) = fw_argmins_b(&k2_b_t, &t1, &t2_t, &b_t, n, k);
             if t == 0 {
                 initial_gap = fw_gap.max(1e-12);
             }
