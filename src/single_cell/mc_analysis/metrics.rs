@@ -24,8 +24,8 @@ use crate::utils::simd::*;
 /// ### Returns
 ///
 /// Vector of correlations, one per pair.
-pub fn pairwise_gene_correlations_in_memory(
-    matrix: &CompressedSparseData2<u32, f32>,
+pub fn pairwise_gene_correlations_in_memory<T: BixverseNumeric>(
+    matrix: &CompressedSparseData2<T, f32>,
     gene_indices_1: &[usize],
     gene_indices_2: &[usize],
     spearman: bool,
