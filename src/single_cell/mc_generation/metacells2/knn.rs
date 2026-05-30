@@ -193,8 +193,8 @@ fn balance_threshold_and_preserve(
 
     let sparse = CompressedSparseData2 {
         data,
-        indices,
-        indptr,
+        indices: indices.index_cast(),
+        indptr: indptr.index_cast(),
         cs_type: CompressedSparseFormat::Csr,
         data_2: None,
         shape: (n, n),
@@ -223,11 +223,11 @@ fn prune_per_row(
     let n_rows = mat.shape.0;
 
     // collect surviving (col, val) pairs per row, sorted by column.
-    let per_row: Vec<Vec<(usize, f32)>> = (0..n_rows)
+    let per_row: Vec<Vec<(u32, f32)>> = (0..n_rows)
         .into_par_iter()
         .map(|i| {
-            let start = mat.indptr[i];
-            let end = mat.indptr[i + 1];
+            let start = mat.indptr[i] as usize;
+            let end = mat.indptr[i + 1] as usize;
             let nnz = end - start;
             if nnz <= degree {
                 return mat.indices[start..end]
@@ -237,7 +237,7 @@ fn prune_per_row(
                     .collect();
             }
 
-            let mut buf: Vec<(usize, f32)> = mat.indices[start..end]
+            let mut buf: Vec<(u32, f32)> = mat.indices[start..end]
                 .iter()
                 .copied()
                 .zip(mat.data[start..end].iter().copied())
@@ -266,7 +266,7 @@ fn prune_per_row(
             indices.push(c);
             data.push(v);
         }
-        indptr.push(data.len());
+        indptr.push(data.len() as u32);
     }
 
     CompressedSparseData2 {
@@ -328,10 +328,10 @@ fn merge_max_with_preserved(
         Vec::with_capacity(pruned.indices.len() + preserved.len() * 2);
 
     for i in 0..n {
-        let start = pruned.indptr[i];
-        let end = pruned.indptr[i + 1];
+        let start = pruned.indptr[i] as usize;
+        let end = pruned.indptr[i + 1] as usize;
         for idx in start..end {
-            entries.push((i, pruned.indices[idx], pruned.data[idx]));
+            entries.push((i, pruned.indices[idx] as usize, pruned.data[idx]));
         }
     }
     for &(i, j, v) in preserved {
@@ -358,7 +358,7 @@ fn merge_max_with_preserved(
     let cols: Vec<usize> = deduped.iter().map(|e| e.1).collect();
     let vals: Vec<f32> = deduped.iter().map(|e| e.2).collect();
 
-    coo_to_csr_presorted(&rows, &cols, &vals, (n, n))
+    coo_to_csr_presorted(&rows.index_cast(), &cols.index_cast(), &vals, (n, n))
 }
 
 /// L1-normalise each row in place so that each row sums to 1.
@@ -377,8 +377,8 @@ fn weigh_rows_l1(mut mat: CompressedSparseData2<f32, f32>) -> CompressedSparseDa
     debug_assert!(mat.cs_type.is_csr());
     let n_rows = mat.shape.0;
     for i in 0..n_rows {
-        let start = mat.indptr[i];
-        let end = mat.indptr[i + 1];
+        let start = mat.indptr[i] as usize;
+        let end = mat.indptr[i + 1] as usize;
         let sum: f32 = mat.data[start..end].iter().sum();
         if sum > 0.0 {
             for v in &mut mat.data[start..end] {

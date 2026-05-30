@@ -396,8 +396,8 @@ pub fn snn_edges_to_sparse_graph(
 
     let adjacency = CompressedSparseData2 {
         data,
-        indices,
-        indptr,
+        indices: indices.index_cast(),
+        indptr: indptr.index_cast(),
         cs_type: CompressedSparseFormat::Csr,
         data_2: None,
         shape: (n_nodes, n_nodes),

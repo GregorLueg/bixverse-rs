@@ -90,6 +90,40 @@ impl<T> BixverseNumeric for T where
 {
 }
 
+///////////////////
+// Index casting //
+///////////////////
+
+/// Casts index vectors between `usize` and `u32` (memory-width conversion).
+pub trait VecIndexCast<U> {
+    /// Casts the index vector element-wise to the target integer type.
+    fn index_cast(self) -> Vec<U>;
+}
+
+impl VecIndexCast<u32> for Vec<usize> {
+    fn index_cast(self) -> Vec<u32> {
+        self.into_iter().map(|x| x as u32).collect()
+    }
+}
+
+impl VecIndexCast<u32> for &[usize] {
+    fn index_cast(self) -> Vec<u32> {
+        self.iter().map(|&x| x as u32).collect()
+    }
+}
+
+impl VecIndexCast<usize> for Vec<u32> {
+    fn index_cast(self) -> Vec<usize> {
+        self.into_iter().map(|x| x as usize).collect()
+    }
+}
+
+impl VecIndexCast<usize> for &[u32] {
+    fn index_cast(self) -> Vec<usize> {
+        self.iter().map(|&x| x as usize).collect()
+    }
+}
+
 ////////////////////
 // R vector stuff //
 ////////////////////

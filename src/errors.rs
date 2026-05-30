@@ -48,7 +48,7 @@ pub enum BixverseErrors {
     #[error("Distance metric '{0}' is not supported for this method.")]
     DistanceNotSupported(Dist),
 
-    // -- Graph based errors ---
+    // -- graph based errors ---
     /// Error for algorithms that expect undirected graphs
     ///
     /// For methods that expect an undirected graph, but received a directed
@@ -62,10 +62,24 @@ pub enum BixverseErrors {
     #[error("The number of nodes and membership assignments in the communities do not add up.")]
     CommunityAssignmentMismatch,
 
+    // -- sparse erros --
     /// Error in situations were data_2 in [`crate::prelude::CompressedSparseData2`]
     /// is asked for but not available
     #[error("data_2 slot is None but was requested")]
     Data2NotAvailable,
+
+    /// Error if the slice index is out of bounds
+    #[error("The slice index ({index}) is out of bounds (length: {len})")]
+    SliceIndexOutOfBounds {
+        /// The chosen index
+        index: usize,
+        /// The actual length
+        len: usize,
+    },
+
+    /// Error if the slice index is duplicated
+    #[error("You provided a duplicated slice index {0}")]
+    DuplicateSliceIndex(usize),
 
     // -- Binary file I/O --
     /// Wraps any `std::io::Error` encountered while reading or writing the
@@ -157,6 +171,17 @@ pub enum BixverseErrors {
         /// What the caller requested: "cell-based" or "gene-based".
         requested: &'static str,
     },
+
+    /// If serialisation of the [crate::prelude::CompressedSparseData2] to disk failed
+    #[cfg(feature = "single-cell")]
+    #[error("Serialisation to meta cell CompressedSparseData2 format on disk failed")]
+    SerialisationFailed,
+
+    /// If deserialisation of the [crate::prelude::CompressedSparseData2] from disk
+    /// failed
+    #[cfg(feature = "single-cell")]
+    #[error("Serialisation to meta cell CompressedSparseData2 format on disk failed")]
+    DeserialisationFailed,
 
     // -- HDF5 / h5ad --
     /// Wraps any error from the `hdf5` crate.

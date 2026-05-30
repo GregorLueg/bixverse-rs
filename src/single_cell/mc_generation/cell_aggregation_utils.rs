@@ -83,8 +83,8 @@ pub fn aggregate_meta_cells(
 
     Ok(CompressedSparseData2::new_csr(
         &all_data,
-        &all_indices,
-        &all_indptr,
+        &all_indices.index_cast(),
+        &all_indptr.index_cast(),
         Some(&all_data_norm),
         (n_metacells, n_genes),
     ))
@@ -354,8 +354,8 @@ pub fn get_pseudo_bulked_counts_sparse(
 
     Ok(CompressedSparseData2 {
         data,
-        indices,
-        indptr,
+        indices: indices.index_cast(),
+        indptr: indptr.index_cast(),
         cs_type: CompressedSparseFormat::Csr,
         data_2: None,
         shape: (n_groups, n_genes),

@@ -52,11 +52,11 @@ fn compute_initial_connectivity(
         if seed_of_cells[node] >= 0 {
             continue;
         }
-        let start = incoming.indptr[node];
-        let end = incoming.indptr[node + 1];
+        let start = incoming.indptr[node] as usize;
+        let end = incoming.indptr[node + 1] as usize;
         let mut c = 0i32;
         for idx in start..end {
-            if seed_of_cells[incoming.indices[idx]] < 0 {
+            if seed_of_cells[incoming.indices[idx] as usize] < 0 {
                 c += 1;
             }
         }
@@ -160,14 +160,14 @@ fn claim_seed(
     seed_of_cells: &mut [i32],
     connectivity: &mut [i32],
 ) {
-    let in_start = incoming.indptr[seed_node];
-    let in_end = incoming.indptr[seed_node + 1];
+    let in_start = incoming.indptr[seed_node] as usize;
+    let in_end = incoming.indptr[seed_node + 1] as usize;
 
     // Filter incoming neighbours to those still unassigned.
-    let mut neighbours: Vec<(usize, f32)> = (in_start..in_end)
+    let mut neighbours: Vec<(u32, f32)> = (in_start..in_end)
         .filter_map(|idx| {
             let other = incoming.indices[idx];
-            if seed_of_cells[other] < 0 {
+            if seed_of_cells[other as usize] < 0 {
                 Some((other, incoming.data[idx]))
             } else {
                 None
@@ -191,15 +191,20 @@ fn claim_seed(
 
     // Assign the top neighbours.
     for &(node, _) in &neighbours {
-        seed_of_cells[node] = seed_id as i32;
-        connectivity[node] = 0;
+        seed_of_cells[node as usize] = seed_id as i32;
+        connectivity[node as usize] = 0;
     }
 
     // Decrement connectivity for every node that pointed into the claimed
     // set (one decrement per claimed node, per pointing-out edge).
     decrement_connectivity_for_outgoing_into(outgoing, seed_node, seed_of_cells, connectivity);
     for &(node, _) in &neighbours {
-        decrement_connectivity_for_outgoing_into(outgoing, node, seed_of_cells, connectivity);
+        decrement_connectivity_for_outgoing_into(
+            outgoing,
+            node as usize,
+            seed_of_cells,
+            connectivity,
+        );
     }
 }
 
@@ -225,10 +230,10 @@ fn decrement_connectivity_for_outgoing_into(
     seed_of_cells: &[i32],
     connectivity: &mut [i32],
 ) {
-    let start = outgoing.indptr[origin];
-    let end = outgoing.indptr[origin + 1];
+    let start = outgoing.indptr[origin] as usize;
+    let end = outgoing.indptr[origin + 1] as usize;
     for idx in start..end {
-        let other = outgoing.indices[idx];
+        let other = outgoing.indices[idx] as usize;
         if seed_of_cells[other] < 0 {
             connectivity[other] = (connectivity[other] - 1).max(0);
         }
@@ -384,10 +389,10 @@ fn try_connect_node(
 
     for (mat, sign_label) in [(incoming, "in"), (outgoing, "out")] {
         let _ = sign_label; // distinguishing only for clarity; logic identical
-        let start = mat.indptr[node];
-        let end = mat.indptr[node + 1];
+        let start = mat.indptr[node] as usize;
+        let end = mat.indptr[node + 1] as usize;
         for idx in start..end {
-            let other = mat.indices[idx];
+            let other = mat.indices[idx] as usize;
             let other_seed = seed_of_cells[other];
             if other_seed >= 0 {
                 let w = (mat.data[idx] as f64) / (seed_sizes[other_seed as usize] as f64);
@@ -627,8 +632,8 @@ mod tests {
 
         let outgoing = CompressedSparseData2 {
             data,
-            indices,
-            indptr,
+            indices: indices.index_cast(),
+            indptr: indptr.index_cast(),
             cs_type: CompressedSparseFormat::Csr,
             data_2: None,
             shape: (n, n),

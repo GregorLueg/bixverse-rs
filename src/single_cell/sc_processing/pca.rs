@@ -151,8 +151,8 @@ pub fn sparse_csc_column_means(
     let res = (0..m)
         .into_par_iter()
         .map(|j| {
-            let start = csc.indptr[j];
-            let end = csc.indptr[j + 1];
+            let start = csc.indptr[j] as usize;
+            let end = csc.indptr[j + 1] as usize;
             let sum: f64 = values[start..end].iter().map(|&x| x as f64).sum();
             sum / n_f
         })
@@ -191,8 +191,8 @@ pub fn sparse_csc_column_stds(
     let res = (0..m)
         .into_par_iter()
         .map(|j| {
-            let start = csc.indptr[j];
-            let end = csc.indptr[j + 1];
+            let start = csc.indptr[j] as usize;
+            let end = csc.indptr[j + 1] as usize;
             let nnz = end - start;
             let mu = col_means[j];
             let slice = &values[start..end];

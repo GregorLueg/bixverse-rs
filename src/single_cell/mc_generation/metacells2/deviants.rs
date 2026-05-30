@@ -58,10 +58,10 @@ fn build_dense_views(
         let lib = umis_per_cell[cell];
         let inv_lib = if lib > 0.0 { 1.0 / lib } else { 0.0 };
         let row_base = cell * n_genes;
-        let start = raw_umis.indptr[cell];
-        let end = raw_umis.indptr[cell + 1];
+        let start = raw_umis.indptr[cell] as usize;
+        let end = raw_umis.indptr[cell + 1] as usize;
         for idx in start..end {
-            let g = raw_umis.indices[idx];
+            let g = raw_umis.indices[idx] as usize;
             let u = raw_umis.data[idx] as f32;
             umi[row_base + g] = u;
             frac[row_base + g] = u * inv_lib;
@@ -510,8 +510,8 @@ mod tests {
         }
         CompressedSparseData2 {
             data,
-            indices,
-            indptr,
+            indices: indices.index_cast(),
+            indptr: indptr.index_cast(),
             cs_type: CompressedSparseFormat::Csr,
             data_2: None,
             shape: (rows.len(), n_genes),

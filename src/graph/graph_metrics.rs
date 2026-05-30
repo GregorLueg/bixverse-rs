@@ -99,7 +99,7 @@ mod tests {
             cols.push(u);
             vals.push(w);
         }
-        let csr = coo_to_csr(&rows, &cols, &vals, (n, n));
+        let csr = coo_to_csr(&rows.index_cast(), &cols.index_cast(), &vals, (n, n));
         SparseGraph::new(n, csr, false)
     }
 
@@ -107,7 +107,7 @@ mod tests {
         let rows: Vec<usize> = edges.iter().map(|e| e.0).collect();
         let cols: Vec<usize> = edges.iter().map(|e| e.1).collect();
         let vals: Vec<f64> = edges.iter().map(|e| e.2).collect();
-        let csr = coo_to_csr(&rows, &cols, &vals, (n, n));
+        let csr = coo_to_csr(&rows.index_cast(), &cols.index_cast(), &vals, (n, n));
         SparseGraph::new(n, csr, true)
     }
 

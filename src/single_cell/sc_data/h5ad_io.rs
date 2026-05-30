@@ -252,8 +252,8 @@ pub fn write_h5_counts<P: AsRef<Path>>(
     let mut nnz = Vec::with_capacity(n_cells);
 
     for i in 0..n_cells {
-        let start_i = file_data.indptr[i];
-        let end_i = file_data.indptr[i + 1];
+        let start_i = file_data.indptr[i] as usize;
+        let end_i = file_data.indptr[i + 1] as usize;
 
         let cell_data = &file_data.data[start_i..end_i];
         let cell_indices = &file_data.indices[start_i..end_i];
@@ -800,8 +800,8 @@ pub fn read_h5ad_x_data_csc<P: AsRef<Path>>(
 
     Ok(CompressedSparseData2 {
         data: new_data,
-        indices: new_indices,
-        indptr: new_indptr,
+        indices: new_indices.index_cast(),
+        indptr: new_indptr.index_cast(),
         cs_type: CompressedSparseFormat::Csr,
         data_2: None::<Vec<u32>>,
         shape,
@@ -1369,8 +1369,8 @@ pub fn read_h5ad_x_data_csr<P: AsRef<Path>>(
 
     Ok(CompressedSparseData2 {
         data: new_data,
-        indices: new_indices,
-        indptr: new_indptr,
+        indices: new_indices.index_cast(),
+        indptr: new_indptr.index_cast(),
         cs_type: CompressedSparseFormat::Csc, // Return CSC format
         data_2: None::<Vec<u32>>,
         shape,

@@ -159,7 +159,7 @@ where
             comm_degree_sums[current_comm] -= k_i;
             comm_degree_sums[best_comm] += k_i;
 
-            for &nb in neighbours {
+            for nb in neighbours {
                 if nb != node_idx && !in_queue[nb] {
                     queue.push_back(nb as u32);
                     in_queue[nb] = true;
@@ -246,7 +246,12 @@ where
         active.clear();
     }
 
-    let csr = coo_to_csr(&rows, &cols, &vals, (n_comms, n_comms));
+    let csr = coo_to_csr(
+        &rows.index_cast(),
+        &cols.index_cast(),
+        &vals,
+        (n_comms, n_comms),
+    );
     SparseGraph::new(n_comms, csr, false)
 }
 
@@ -677,7 +682,7 @@ where
     let mut edges: Vec<(usize, usize)> = Vec::new();
     for i in 0..n {
         let (neighbours, _) = graph.get_neighbours(i);
-        for &j in neighbours {
+        for j in neighbours {
             if i != j {
                 adj[i].insert(j);
                 if i < j {
@@ -865,8 +870,14 @@ mod tests {
             }
             indptr.push(indices.len());
         }
-        let csr =
-            CompressedSparseData2::<f64, f64>::new_csr(&data, &indices, &indptr, None, (8, 8));
+
+        let csr = CompressedSparseData2::<f64, f64>::new_csr(
+            &data,
+            &indices.index_cast(),
+            &indptr.index_cast(),
+            None,
+            (8, 8),
+        );
         SparseGraph::new(8, csr, false)
     }
 
