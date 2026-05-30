@@ -1573,14 +1573,20 @@ pub fn csr_matmul_csr<T>(
 where
     T: BixverseNumeric,
 {
+    let ncol_a = a.shape().1;
+    let nrow_b = b.shape().0;
+
     if !a.cs_type.is_csr() {
         return Err(BixverseErrors::SparseMatrixMustBeCsr);
     }
     if !b.cs_type.is_csr() {
         return Err(BixverseErrors::SparseMatrixMustBeCsr);
     }
-    if a.shape != b.shape {
-        return Err(BixverseErrors::ShapeMismatchSparse);
+    if ncol_a != nrow_b {
+        return Err(BixverseErrors::SparseMatrixMultiplication {
+            n_col_a: ncol_a,
+            n_row_b: nrow_b,
+        });
     }
 
     let nrows = a.shape.0;
