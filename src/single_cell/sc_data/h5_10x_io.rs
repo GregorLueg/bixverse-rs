@@ -97,6 +97,32 @@ impl TenxVersion {
             TenxVersion::V3 => Some("matrix/features/feature_type"),
         }
     }
+
+    /// Returns the feature name path
+    ///
+    /// ### Returns
+    ///
+    /// `feature name` path from the h5 file
+    #[inline]
+    pub fn get_feature_name(&self) -> Option<&str> {
+        match self {
+            TenxVersion::V2 => Some("gene_names"),
+            TenxVersion::V3 => Some("matrix/features/name"),
+        }
+    }
+
+    /// Returns the barcodes path
+    ///
+    /// ### Returns
+    ///
+    /// `barcodes` path from the h5 file
+    #[inline]
+    pub fn get_barcodes(&self) -> &str {
+        match self {
+            TenxVersion::V2 => "barcodes",
+            TenxVersion::V3 => "matrix/barcodes",
+        }
+    }
 }
 
 /// Read a fixed-length string dataset into owned Strings
@@ -128,7 +154,7 @@ where
 /// ### Returns
 ///
 /// The strings as a `Vec<String>`.
-fn read_string_dataset(ds: &Dataset) -> Result<Vec<String>, BixverseErrors> {
+pub fn read_string_dataset(ds: &Dataset) -> Result<Vec<String>, BixverseErrors> {
     let strings = match ds.dtype()?.to_descriptor()? {
         TypeDescriptor::VarLenUnicode => ds
             .read_raw::<VarLenUnicode>()?
@@ -233,7 +259,7 @@ pub fn detect_tenx_version<P: AsRef<Path>>(file_path: P) -> Result<TenxVersion, 
 /// ### Returns
 ///
 /// The final tenx version
-fn resolve_tenx_version<P: AsRef<Path>>(
+pub fn resolve_tenx_version<P: AsRef<Path>>(
     file_path: P,
     version: Option<TenxVersion>,
 ) -> Result<TenxVersion, BixverseErrors> {

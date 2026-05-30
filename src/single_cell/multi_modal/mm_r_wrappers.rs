@@ -10,7 +10,7 @@ use crate::{
     single_cell::{multi_modal::wnn::parse_sigma_method, sc_processing::snn::parse_snn_type},
 };
 
-use super::{dsb::DsbParams, wnn::WnnParams};
+use super::{adt::dsb::DsbParams, wnn::WnnParams};
 
 ///////////////
 // WnnParams //
