@@ -54,6 +54,10 @@ where
 // Sparse structures //
 ///////////////////////
 
+///////////
+// Enums //
+///////////
+
 /// Type to describe the CompressedSparseFormat
 #[derive(Debug, Clone, Copy)]
 pub enum CompressedSparseFormat {
@@ -100,6 +104,10 @@ pub fn parse_compressed_sparse_format(s: &str) -> Option<CompressedSparseFormat>
         _ => None,
     }
 }
+
+////////////////
+// SparseAxis //
+////////////////
 
 /// Generate structure to store sparse rows or columns
 pub struct SparseAxis<T, U = T> {
@@ -186,6 +194,10 @@ where
         }
     }
 }
+
+///////////////////////////
+// CompressedSparseData2 //
+///////////////////////////
 
 /// Structure to store compressed sparse data with two potential data layers.
 /// Think for example in single cell raw counts and normalised counts.

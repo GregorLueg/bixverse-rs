@@ -48,6 +48,16 @@ pub enum BixverseErrors {
     #[error("Distance metric '{0}' is not supported for this method.")]
     DistanceNotSupported(Dist),
 
+    // -- sparse --
+    /// Error if wrong sparse format has been provided
+    #[error("Wrong sparse format. Expected {expected}; got {found}")]
+    WrongSparseFormat {
+        /// Expected format
+        expected: String,
+        /// Got format
+        found: String,
+    },
+
     // -- graph based errors ---
     /// Error for algorithms that expect undirected graphs
     ///

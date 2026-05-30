@@ -4,4 +4,5 @@
 
 pub mod aucell;
 pub mod metacell_density;
+pub mod metrics;
 pub mod scenic_metacells;
