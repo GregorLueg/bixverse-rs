@@ -461,7 +461,7 @@ fn compute_membership_strengths(
 fn apply_set_operations(
     connectivities: CompressedSparseData2<f32>,
     set_op_mix_ratio: f32,
-) -> CompressedSparseData2<f32> {
+) -> Result<CompressedSparseData2<f32>, BixverseErrors> {
     let (nrow, ncol) = connectivities.shape;
     let transpose = {
         let csc_transpose = connectivities.transform(); // A^T in CSC
@@ -485,18 +485,18 @@ fn apply_set_operations(
     };
 
     // Element-wise multiply: A .* A^T
-    let prod = sparse_multiply_elementwise_csr(&connectivities, &transpose);
+    let prod = sparse_multiply_elementwise_csr(&connectivities, &transpose)?;
 
     // set_op_mix_ratio * (A + A^T - A.*A^T) + (1 - set_op_mix_ratio) * (A.*A^T)
-    let union_part = sparse_add_csr(&connectivities, &transpose);
-    let union_part = sparse_subtract_csr(&union_part, &prod);
+    let union_part = sparse_add_csr(&connectivities, &transpose)?;
+    let union_part = sparse_subtract_csr(&union_part, &prod)?;
     let union_part = sparse_scalar_multiply_csr(&union_part, set_op_mix_ratio);
 
     let intersect_part = sparse_scalar_multiply_csr(&prod, 1.0 - set_op_mix_ratio);
 
-    let res = sparse_add_csr(&union_part, &intersect_part);
+    let res = sparse_add_csr(&union_part, &intersect_part)?;
 
-    eliminate_zeros_csr(res)
+    Ok(eliminate_zeros_csr(res))
 }
 
 /// Trim weak edges from connectivity graph
@@ -626,7 +626,7 @@ pub fn bbknn(
     );
 
     // 4. Apply set operations
-    connectivities = apply_set_operations(connectivities, bbknn_params.set_op_mix_ratio);
+    connectivities = apply_set_operations(connectivities, bbknn_params.set_op_mix_ratio)?;
 
     if verbosity.normal_verbosity() {
         println!("BBKNN: Finalising data.")

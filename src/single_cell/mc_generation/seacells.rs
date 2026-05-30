@@ -199,7 +199,7 @@ pub fn compute_diffusion_kernel(
     knn_distances: &[Vec<f32>],
     knn: usize,
     squared_dist: bool,
-) -> CompressedSparseData2<f32> {
+) -> Result<CompressedSparseData2<f32>, BixverseErrors> {
     let n = knn_indices.len();
     let adaptive_k = (knn / 3).max(1);
 
@@ -236,7 +236,9 @@ pub fn compute_diffusion_kernel(
     // symmetrise: kernel = W + W^T
     let w_t = w.transpose_and_convert();
 
-    sparse_add_csr(&w, &w_t)
+    let res = sparse_add_csr(&w, &w_t)?;
+
+    Ok(res)
 }
 
 /// Compute diffusion maps from kernel matrix
@@ -963,8 +965,10 @@ impl<'a> SEACells<'a> {
         }
 
         let k = self.kernel_mat.as_ref().unwrap();
-        let kx = csr_matmul_csr(k, x);
-        Ok(csr_matmul_csr(k, &kx))
+        let kx = csr_matmul_csr(k, x)?;
+        let res = csr_matmul_csr(k, &kx)?;
+
+        Ok(res)
     }
 
     /// Compute K^2 @ v = K @ (K @ v) for a dense vector v
@@ -1183,7 +1187,7 @@ impl<'a> SEACells<'a> {
             knn_distances,
             self.params.knn_params.k,
             squared_dist,
-        );
+        )?;
 
         let (eigenvalues, eigenvectors) =
             diffusion_map_from_kernel(&mut kernel, self.params.knn_params.k, seed)?;
@@ -1266,7 +1270,7 @@ impl<'a> SEACells<'a> {
         if verbosity.normal_verbosity() {
             println!("Building diffusion kernel for landmark selection...");
         }
-        let kernel = compute_diffusion_kernel(knn_indices, knn_distances, knn_k, squared_dist);
+        let kernel = compute_diffusion_kernel(knn_indices, knn_distances, knn_k, squared_dist)?;
 
         if verbosity.normal_verbosity() {
             println!(
@@ -1291,7 +1295,7 @@ impl<'a> SEACells<'a> {
         )?;
         let squared_dist = self.params.knn_params.ann_dist == "euclidean";
 
-        let mut ll_kernel = compute_diffusion_kernel(&ll_idx, &ll_dist, k_ll, squared_dist);
+        let mut ll_kernel = compute_diffusion_kernel(&ll_idx, &ll_dist, k_ll, squared_dist)?;
 
         let n_eigs = k_ll.min(l - 1).max(11);
         let (evals, evecs) = diffusion_map_from_kernel(&mut ll_kernel, n_eigs, seed)?;
@@ -1615,7 +1619,7 @@ impl<'a> SEACells<'a> {
 
         let k2_b = self.k_squared_matmul(b)?;
         let t2 = k2_b.transpose_and_convert();
-        let t1 = csr_matmul_csr(&t2, b);
+        let t1 = csr_matmul_csr(&t2, b)?;
         drop(t2);
 
         let mut a = a_prev.clone();
@@ -1644,7 +1648,7 @@ impl<'a> SEACells<'a> {
                 *val *= retain;
             }
             let e_scaled = sparse_scalar_multiply_csr(&e, step_size);
-            a = sparse_add_csr(&a, &e_scaled);
+            a = sparse_add_csr(&a, &e_scaled)?;
 
             if self.params.pruning {
                 prune_and_renormalise(&mut a, self.params.pruning_threshold);
@@ -1707,7 +1711,7 @@ impl<'a> SEACells<'a> {
         const MIN_FW_ITERS: usize = 10;
 
         let a_t = a.transpose_and_convert();
-        let t1 = csr_matmul_csr(a, &a_t);
+        let t1 = csr_matmul_csr(a, &a_t)?;
         let t2 = self.k_squared_matmul(&a_t)?;
         let t2_t = t2.transpose_and_convert();
         drop(t2);
@@ -1747,7 +1751,7 @@ impl<'a> SEACells<'a> {
                 *val *= retain;
             }
             let e_scaled = sparse_scalar_multiply_csr(&e, step_size);
-            b = sparse_add_csr(&b, &e_scaled);
+            b = sparse_add_csr(&b, &e_scaled)?;
 
             if self.params.pruning {
                 prune_and_renormalise(&mut b, self.params.pruning_threshold);
@@ -1803,7 +1807,7 @@ impl<'a> SEACells<'a> {
         b: &CompressedSparseData2<f32>,
     ) -> Result<f32, BixverseErrors> {
         if self.n_cells <= 20000 {
-            Ok(self.compute_rss_simple(a, b))
+            Ok(self.compute_rss_simple(a, b)?)
         } else {
             Ok(self.compute_rss_trace(a, b)?)
         }
@@ -1826,12 +1830,13 @@ impl<'a> SEACells<'a> {
         &self,
         a: &CompressedSparseData2<f32>,
         b: &CompressedSparseData2<f32>,
-    ) -> f32 {
+    ) -> Result<f32, BixverseErrors> {
         let k_mat = self.kernel_mat.as_ref().unwrap();
-        let k_b = csr_matmul_csr(k_mat, b);
-        let reconstruction = csr_matmul_csr(&k_b, a);
-        let diff = sparse_subtract_csr(k_mat, &reconstruction);
-        frobenius_norm(&diff)
+        let k_b = csr_matmul_csr(k_mat, b)?;
+        let reconstruction = csr_matmul_csr(&k_b, a)?;
+        let diff = sparse_subtract_csr(k_mat, &reconstruction)?;
+
+        Ok(frobenius_norm(&diff))
     }
 
     /// Memory-efficient RSS computation for large datasets (uses trace trick)
@@ -1868,18 +1873,18 @@ impl<'a> SEACells<'a> {
 
         // Term 2: -2 * trace(K^2 @ B @ A)
         // Reorder via cyclic property: trace(A @ K^2 @ B)  [k × k]
-        let a_k2b = csr_matmul_csr(a, &k2_b);
+        let a_k2b = csr_matmul_csr(a, &k2_b)?;
         let trace_term = matrix_trace(&a_k2b);
 
         // Term 3: trace(A^T @ B^T @ K^2 @ B @ A)
         // Reorder via cyclic property: trace(A @ A^T @ B^T @ K^2 @ B)
         let a_t = a.transpose_and_convert();
-        let a_at = csr_matmul_csr(a, &a_t); // [k × k]
+        let a_at = csr_matmul_csr(a, &a_t)?; // [k × k]
 
         let b_t = b.transpose_and_convert();
-        let bt_k2b = csr_matmul_csr(&b_t, &k2_b); // [k × k]
+        let bt_k2b = csr_matmul_csr(&b_t, &k2_b)?; // [k × k]
 
-        let result = csr_matmul_csr(&a_at, &bt_k2b); // [k × k]
+        let result = csr_matmul_csr(&a_at, &bt_k2b)?; // [k × k]
         let reconstruction_frob_sq = matrix_trace(&result);
 
         Ok((k_frob_sq - 2.0 * trace_term + reconstruction_frob_sq).sqrt())

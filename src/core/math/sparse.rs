@@ -152,11 +152,14 @@ where
     /// ### Returns
     ///
     /// A tuple of `(indices, data_2)`
-    pub fn get_indices_data_2(&self) -> (&[usize], &[U]) {
+    pub fn get_indices_data_2(&self) -> Result<(&[usize], &[U]), BixverseErrors> {
         let indices = &self.indices;
-        let data_2 = self.data_2.as_ref().expect("target gene requires data_2");
+        let data_2 = self
+            .data_2
+            .as_ref()
+            .ok_or(BixverseErrors::Data2NotAvailable)?;
 
-        (indices, data_2)
+        Ok((indices, data_2))
     }
 
     /// Construct a `SparseAxis` in CSC format from index and value vectors.
@@ -174,24 +177,27 @@ where
     /// ### Panics
     ///
     /// Panics if `indices` and `values` differ in length.
-    pub fn from_vecs_to_csc(indices: Vec<T>, values: Vec<U>) -> Self
+    pub fn from_vecs_to_csc(indices: Vec<T>, values: Vec<U>) -> Result<Self, BixverseErrors>
     where
         T: Into<usize>,
     {
-        assert_eq!(
-            indices.len(),
-            values.len(),
-            "indices and values must have equal length"
-        );
+        if indices.len() != values.len() {
+            return Err(BixverseErrors::DimensionMisMatchSparse {
+                indices_len: indices.len(),
+                data_len: values.len(),
+            });
+        }
+
         let usize_indices: Vec<usize> = indices.into_iter().map(Into::into).collect();
         let len = usize_indices.last().map_or(0, |&i| i + 1);
-        Self {
+
+        Ok(Self {
             indices: usize_indices,
             data: Vec::new(),
             data_2: Some(values),
             cs_type: CompressedSparseFormat::Csc,
             len,
-        }
+        })
     }
 }
 
@@ -1094,12 +1100,19 @@ where
 pub fn sparse_add_csr<T>(
     a: &CompressedSparseData2<T>,
     b: &CompressedSparseData2<T>,
-) -> CompressedSparseData2<T>
+) -> Result<CompressedSparseData2<T>, BixverseErrors>
 where
     T: BixverseNumeric + Into<f64> + Add<Output = T>,
 {
-    assert_eq!(a.shape, b.shape);
-    assert!(a.cs_type.is_csr() && b.cs_type.is_csr());
+    if !a.cs_type.is_csr() {
+        return Err(BixverseErrors::SparseMatrixMustBeCsr);
+    }
+    if !b.cs_type.is_csr() {
+        return Err(BixverseErrors::SparseMatrixMustBeCsr);
+    }
+    if a.shape != b.shape {
+        return Err(BixverseErrors::ShapeMismatchSparse);
+    }
 
     const EPSILON: f32 = 1e-9;
     let n_rows = a.shape.0;
@@ -1141,7 +1154,7 @@ where
         }
     }
 
-    coo_to_csr_presorted(&rows, &cols, &vals, a.shape)
+    Ok(coo_to_csr_presorted(&rows, &cols, &vals, a.shape))
 }
 
 /// Scalar multiplication of CSR matrix
@@ -1180,12 +1193,19 @@ where
 pub fn sparse_subtract_csr<T>(
     a: &CompressedSparseData2<T>,
     b: &CompressedSparseData2<T>,
-) -> CompressedSparseData2<T>
+) -> Result<CompressedSparseData2<T>, BixverseErrors>
 where
     T: BixverseNumeric + Into<f64>,
 {
-    assert_eq!(a.shape, b.shape);
-    assert!(a.cs_type.is_csr() && b.cs_type.is_csr());
+    if !a.cs_type.is_csr() {
+        return Err(BixverseErrors::SparseMatrixMustBeCsr);
+    }
+    if !b.cs_type.is_csr() {
+        return Err(BixverseErrors::SparseMatrixMustBeCsr);
+    }
+    if a.shape != b.shape {
+        return Err(BixverseErrors::ShapeMismatchSparse);
+    }
 
     const EPSILON: f32 = 1e-9;
     let n_rows = a.shape.0;
@@ -1227,7 +1247,7 @@ where
         }
     }
 
-    coo_to_csr_presorted(&rows, &cols, &vals, a.shape)
+    Ok(coo_to_csr_presorted(&rows, &cols, &vals, a.shape))
 }
 
 /// Element-wise sparse multiplication
@@ -1243,13 +1263,21 @@ where
 pub fn sparse_multiply_elementwise_csr<T>(
     a: &CompressedSparseData2<T>,
     b: &CompressedSparseData2<T>,
-) -> CompressedSparseData2<T>
+) -> Result<CompressedSparseData2<T>, BixverseErrors>
 where
     T: BixverseNumeric,
     <T as std::ops::Add>::Output: std::cmp::PartialEq<T>,
 {
-    assert_eq!(a.shape, b.shape);
-    assert!(a.cs_type.is_csr() && b.cs_type.is_csr());
+    if !a.cs_type.is_csr() {
+        return Err(BixverseErrors::SparseMatrixMustBeCsr);
+    }
+    if !b.cs_type.is_csr() {
+        return Err(BixverseErrors::SparseMatrixMustBeCsr);
+    }
+    if a.shape != b.shape {
+        return Err(BixverseErrors::ShapeMismatchSparse);
+    }
+
     let n_rows = a.shape.0;
     let mut rows: Vec<u32> = Vec::new();
     let mut cols: Vec<u32> = Vec::new();
@@ -1283,7 +1311,8 @@ where
             }
         }
     }
-    coo_to_csr(&rows, &cols, &vals, a.shape)
+
+    Ok(coo_to_csr(&rows, &cols, &vals, a.shape))
 }
 
 /// Normalises the columns of a CSR matrix to a sum of 1 (L1 norm)
@@ -1320,12 +1349,14 @@ where
 ///
 /// * `csr` - Mutable reference to the CSR matrix (modified in-place)
 #[allow(dead_code)]
-pub fn normalise_csr_rows_l1<T>(csr: &mut CompressedSparseData2<T>)
+pub fn normalise_csr_rows_l1<T>(csr: &mut CompressedSparseData2<T>) -> Result<(), BixverseErrors>
 where
     T: BixverseNumeric + Into<f64>,
     T: std::iter::Sum<T>,
 {
-    assert!(csr.cs_type.is_csr(), "Matrix must be in CSR format");
+    if !csr.cs_type.is_csr() {
+        return Err(BixverseErrors::SparseMatrixMustBeCsr);
+    }
 
     let nrows = csr.shape.0;
 
@@ -1348,6 +1379,8 @@ where
             );
         }
     }
+
+    Ok(())
 }
 
 /// Compute Frobenius norm of sparse matrix
@@ -1536,12 +1569,19 @@ where
 pub fn csr_matmul_csr<T>(
     a: &CompressedSparseData2<T>,
     b: &CompressedSparseData2<T>,
-) -> CompressedSparseData2<T>
+) -> Result<CompressedSparseData2<T>, BixverseErrors>
 where
     T: BixverseNumeric,
 {
-    assert!(a.cs_type.is_csr() && b.cs_type.is_csr());
-    assert_eq!(a.shape.1, b.shape.0, "Dimension mismatch");
+    if !a.cs_type.is_csr() {
+        return Err(BixverseErrors::SparseMatrixMustBeCsr);
+    }
+    if !b.cs_type.is_csr() {
+        return Err(BixverseErrors::SparseMatrixMustBeCsr);
+    }
+    if a.shape != b.shape {
+        return Err(BixverseErrors::ShapeMismatchSparse);
+    }
 
     let nrows = a.shape.0;
     let ncols = b.shape.1;
@@ -1599,14 +1639,14 @@ where
     }
 
     // Build directly rather than via new_csr, which would .to_vec() the lot.
-    CompressedSparseData2 {
+    Ok(CompressedSparseData2 {
         data,
         indices,
         indptr,
         cs_type: CompressedSparseFormat::Csr,
         data_2: None,
         shape: (nrows, ncols),
-    }
+    })
 }
 
 /////////////////////////////////////
@@ -2111,7 +2151,7 @@ mod tests {
             None,
             shape,
         );
-        let c = sparse_add_csr(&a, &b);
+        let c = sparse_add_csr(&a, &b).unwrap();
 
         assert_eq!(c.data, vec![1.0, 3.0, 6.0]);
         assert_eq!(c.indices, vec![0, 1, 1]);

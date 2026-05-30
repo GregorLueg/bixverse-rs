@@ -91,6 +91,34 @@ pub enum BixverseErrors {
     #[error("You provided a duplicated slice index {0}")]
     DuplicateSliceIndex(usize),
 
+    /// Error for sparse multiplication dimension mismatches
+    #[error(
+        "The dimensions of the matrix do not support sparse multiplication (matrix a n_col: {n_col_a}; matrix b n_row: {n_row_b})"
+    )]
+    SparseMatrixMultiplication {
+        /// Number of columns in matrix a
+        n_col_a: usize,
+        /// Number of rows in matrix b
+        n_row_b: usize,
+    },
+
+    /// Dimension mismatch error during construction
+    #[error("The indices (len: {indices_len}) and data (len: {data_len}) need to have same length")]
+    DimensionMisMatchSparse {
+        /// Length indices
+        indices_len: usize,
+        /// Length data
+        data_len: usize,
+    },
+
+    /// Error if there is a dimension mismatch in terms of the two matrices
+    #[error("The shape of the two sparse matrices must be the same.")]
+    ShapeMismatchSparse,
+
+    /// Error if the [crate::prelude::CompressedSparseData2] is not in CSR.
+    #[error("The SparseCompressedData2 must be in CSR format")]
+    SparseMatrixMustBeCsr,
+
     // -- Binary file I/O --
     /// Wraps any `std::io::Error` encountered while reading or writing the
     /// bixverse binary sparse format.

@@ -541,7 +541,7 @@ pub fn meld(
             n.separate_with_underscores()
         );
     }
-    let adj = compute_diffusion_kernel(knn_indices, knn_distances, knn_k, squared_dist);
+    let adj = compute_diffusion_kernel(knn_indices, knn_distances, knn_k, squared_dist)?;
     if verbosity.normal_verbosity() {
         println!(" Done in {:.2?}", start.elapsed())
     }

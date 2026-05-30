@@ -482,7 +482,7 @@ where
                 n_cells,
                 config,
                 batch_seed,
-            );
+            )?;
 
             if verbosity.normal_verbosity() {
                 let done = batches_done.fetch_add(1, Ordering::Relaxed) + 1;
@@ -499,9 +499,9 @@ where
                 }
             }
 
-            (batch_idx, imp)
+            Ok((batch_idx, imp))
         })
-        .collect();
+        .collect::<Result<Vec<_>, BixverseErrors>>()?;
 
     let mut importance_scores: Vec<Vec<f32>> = vec![Vec::new(); n_genes];
     for (batch_idx, imp_vecs) in batch_results {
@@ -519,13 +519,15 @@ where
         );
     }
 
-    Ok(Mat::from_fn(n_genes, n_tfs, |i, j| {
+    let res = Mat::from_fn(n_genes, n_tfs, |i, j| {
         if j < importance_scores[i].len() {
             importance_scores[i][j]
         } else {
             0.0
         }
-    }))
+    });
+
+    Ok(res)
 }
 
 /// GBM path for the in-memory SCENIC API.
@@ -563,7 +565,7 @@ fn run_scenic_gbm_in_memory<T>(
     seed: usize,
     verbose: usize,
     start_total: Instant,
-) -> Mat<f32>
+) -> Result<Mat<f32>, BixverseErrors>
 where
     T: Copy + Into<u32> + Sync,
 {
@@ -595,7 +597,7 @@ where
         .enumerate()
         .map(|(gene_idx, target)| {
             let gene_seed = seed.wrapping_add(gene_idx.wrapping_mul(2654435761));
-            let imp = fit_grnboost2_sparse(target, tf_data, n_cells, config, gene_seed);
+            let imp = fit_grnboost2_sparse(target, tf_data, n_cells, config, gene_seed)?;
 
             if verbosity.normal_verbosity() {
                 let done = genes_done.fetch_add(1, Ordering::Relaxed) + 1;
@@ -612,9 +614,9 @@ where
                 }
             }
 
-            imp
+            Ok(imp)
         })
-        .collect();
+        .collect::<Result<Vec<_>, BixverseErrors>>()?;
 
     if verbosity.normal_verbosity() {
         println!(
@@ -623,13 +625,15 @@ where
         );
     }
 
-    Mat::from_fn(n_genes, n_tfs, |i, j| {
+    let res = Mat::from_fn(n_genes, n_tfs, |i, j| {
         if j < importance_scores[i].len() {
             importance_scores[i][j]
         } else {
             0.0
         }
-    })
+    });
+
+    Ok(res)
 }
 
 /// Run SCENIC GRN inference on an in-memory cells x genes CSC matrix.
@@ -707,7 +711,7 @@ where
             seed,
             verbose,
             start_total,
-        )),
+        )?),
         _ => run_scenic_multi_output_in_memory(
             csc,
             &tf_data,

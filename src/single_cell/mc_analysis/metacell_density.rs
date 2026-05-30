@@ -125,7 +125,7 @@ pub fn compute_diffusion_density(
     if verbosity.normal_verbosity() {
         println!("Building diffusion kernel...");
     }
-    let mut kernel = compute_diffusion_kernel(knn_indices, knn_distances, knn_k, squared_dist);
+    let mut kernel = compute_diffusion_kernel(knn_indices, knn_distances, knn_k, squared_dist)?;
 
     if verbosity.normal_verbosity() {
         println!("Computing top {} diffusion components...", n_dcs);
