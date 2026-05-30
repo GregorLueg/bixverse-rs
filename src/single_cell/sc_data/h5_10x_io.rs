@@ -2,7 +2,7 @@
 //! to the bixverse binarised format. Other modalities (e.g. Antibody Capture)
 //! are filtered out here.
 
-use hdf5::{File, types::VarLenAscii};
+use hdf5::{File, types::VarLenUnicode};
 use rayon::prelude::*;
 use rustc_hash::FxHashSet;
 use std::path::Path;
@@ -290,7 +290,7 @@ fn validate_feature_types_tenx<P: AsRef<Path>>(
         .expect("validate_feature_types_tenx called on a version without feature types");
 
     let feature_type_ds = file.dataset(ft_path)?;
-    let feature_types_raw: Vec<VarLenAscii> = feature_type_ds.read_raw()?;
+    let feature_types_raw: Vec<VarLenUnicode> = feature_type_ds.read_raw()?;
 
     let feature_types: Vec<String> = feature_types_raw
         .iter()
