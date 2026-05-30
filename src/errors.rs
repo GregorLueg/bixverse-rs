@@ -237,6 +237,11 @@ pub enum BixverseErrors {
         found: String,
     },
 
+    /// Error if the h5 string type cannot be read
+    #[cfg(feature = "single-cell")]
+    #[error("h5: Unexpected str type identified: {0}")]
+    H5UnexpectedStringType(String),
+
     // -- HDF5 / h5ad --
     /// Wraps any error from the `hdf5` crate.
     ///

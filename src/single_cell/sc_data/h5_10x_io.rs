@@ -2,7 +2,10 @@
 //! to the bixverse binarised format. Other modalities (e.g. Antibody Capture)
 //! are filtered out here.
 
-use hdf5::{File, types::VarLenUnicode};
+use hdf5::{
+    Dataset, File,
+    types::{FixedAscii, FixedUnicode, TypeDescriptor, VarLenAscii, VarLenUnicode},
+};
 use rayon::prelude::*;
 use rustc_hash::FxHashSet;
 use std::path::Path;
@@ -94,6 +97,68 @@ impl TenxVersion {
             TenxVersion::V3 => Some("matrix/features/feature_type"),
         }
     }
+}
+
+/// Read a fixed-length string dataset into owned Strings
+///
+/// ### Params
+///
+/// * `ds` - The h5ad data set
+fn read_fixed<T>(ds: &Dataset) -> hdf5::Result<Vec<String>>
+where
+    T: hdf5::H5Type + AsRef<str>,
+{
+    Ok(ds
+        .read_raw::<T>()?
+        .iter()
+        .map(|s| s.as_ref().trim_end_matches('\0').trim().to_string())
+        .collect())
+}
+
+/// Read a 1-D HDF5 string dataset regardless of on-disk encoding
+///
+/// CellRanger files written by h5py use variable-length UTF-8; older or
+/// non-h5py files may use fixed-length or ASCII. This inspects the datatype
+/// and dispatches to the matching Rust string type.
+///
+/// ### Params
+///
+/// * `ds` - The string dataset to read
+///
+/// ### Returns
+///
+/// The strings as a `Vec<String>`.
+fn read_string_dataset(ds: &Dataset) -> Result<Vec<String>, BixverseErrors> {
+    let strings = match ds.dtype()?.to_descriptor()? {
+        TypeDescriptor::VarLenUnicode => ds
+            .read_raw::<VarLenUnicode>()?
+            .iter()
+            .map(|s| s.as_str().to_string())
+            .collect(),
+        TypeDescriptor::VarLenAscii => ds
+            .read_raw::<VarLenAscii>()?
+            .iter()
+            .map(|s| s.as_str().to_string())
+            .collect(),
+        TypeDescriptor::FixedUnicode(n) => match n {
+            ..=15 => read_fixed::<FixedUnicode<15>>(ds)?,
+            16..=31 => read_fixed::<FixedUnicode<31>>(ds)?,
+            _ => read_fixed::<FixedUnicode<63>>(ds)?,
+        },
+        TypeDescriptor::FixedAscii(n) => match n {
+            ..=15 => read_fixed::<FixedAscii<15>>(ds)?,
+            16..=31 => read_fixed::<FixedAscii<31>>(ds)?,
+            _ => read_fixed::<FixedAscii<63>>(ds)?,
+        },
+        other => {
+            return Err(BixverseErrors::H5UnexpectedStringType(format!(
+                "{:?}",
+                other
+            )));
+        }
+    };
+
+    Ok(strings)
 }
 
 /// Parse a 10x version string
@@ -290,11 +355,9 @@ fn validate_feature_types_tenx<P: AsRef<Path>>(
         .expect("validate_feature_types_tenx called on a version without feature types");
 
     let feature_type_ds = file.dataset(ft_path)?;
-    let feature_types_raw: Vec<VarLenUnicode> = feature_type_ds.read_raw()?;
-
-    let feature_types: Vec<String> = feature_types_raw
+    let feature_types: Vec<String> = read_string_dataset(&feature_type_ds)?
         .iter()
-        .map(|ft| ft.as_str().trim().to_string())
+        .map(|s| s.trim().to_string())
         .collect();
 
     let unique_types: FxHashSet<&str> = feature_types.iter().map(|s| s.as_str()).collect();
