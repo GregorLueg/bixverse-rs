@@ -119,6 +119,10 @@ pub enum BixverseErrors {
     #[error("The SparseCompressedData2 must be in CSR format")]
     SparseMatrixMustBeCsr,
 
+    /// Error if the [crate::prelude::CompressedSparseData2] is not in Csc.
+    #[error("The SparseCompressedData2 must be in CSC format")]
+    SparseMatrixMustBeCsc,
+
     // -- Binary file I/O --
     /// Wraps any `std::io::Error` encountered while reading or writing the
     /// bixverse binary sparse format.

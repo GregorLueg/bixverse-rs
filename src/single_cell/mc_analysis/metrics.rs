@@ -32,11 +32,8 @@ pub fn pairwise_gene_correlations_in_memory<T: BixverseNumeric>(
 ) -> Result<Vec<f32>, BixverseErrors> {
     assert_same_len!(gene_indices_1, gene_indices_2);
 
-    if !matches!(matrix.cs_type, CompressedSparseFormat::Csc) {
-        return Err(BixverseErrors::WrongSparseFormat {
-            expected: "csc".to_string(),
-            found: "csr".to_string(),
-        });
+    if !matrix.cs_type.is_csc() {
+        return Err(BixverseErrors::SparseMatrixMustBeCsc);
     }
 
     let data_norm = matrix
