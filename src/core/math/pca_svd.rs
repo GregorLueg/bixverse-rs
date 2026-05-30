@@ -314,8 +314,9 @@ where
             let mut row_acc = vec![0f64; ncols];
 
             for idx in csr.indptr[i]..csr.indptr[i + 1] {
-                let j = csr.indices[idx];
-                let a_val = val_f64(idx);
+                let j = csr.indices[idx as usize] as usize;
+                let idx_usize = idx as usize;
+                let a_val = val_f64(idx_usize);
                 for col in 0..ncols {
                     row_acc[col] += a_val * x_scaled[(j, col)].to_f64().unwrap();
                 }
@@ -350,8 +351,10 @@ where
                         cs[col] += x[(i, col)].to_f64().unwrap();
                     }
                     for idx in csr.indptr[i]..csr.indptr[i + 1] {
-                        let j = csr.indices[idx];
-                        let a_val = val_f64(idx);
+                        let idx_usize = idx as usize;
+
+                        let j = csr.indices[idx_usize] as usize;
+                        let a_val = val_f64(idx_usize);
                         for col in 0..ncols {
                             acc[j * ncols + col] += a_val * x[(i, col)].to_f64().unwrap();
                         }

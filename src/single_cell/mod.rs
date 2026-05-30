@@ -3,6 +3,7 @@
 //! reducing memory pressure.
 
 pub mod mc_analysis;
+pub mod mc_data;
 pub mod mc_generation;
 pub mod mc_processing;
 pub mod sc_analysis;

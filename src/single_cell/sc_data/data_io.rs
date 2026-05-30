@@ -540,10 +540,10 @@ impl CsrCellChunk {
         // count how many cells express each gene
         let mut no_cells_exp_gene = vec![0usize; n_genes];
         for i in 0..n_cells {
-            let start_i = sparse_data.indptr[i];
-            let end_i = sparse_data.indptr[i + 1];
+            let start_i = sparse_data.indptr[i] as usize;
+            let end_i = sparse_data.indptr[i + 1] as usize;
             for &gene_idx in &sparse_data.indices[start_i..end_i] {
-                no_cells_exp_gene[gene_idx] += 1;
+                no_cells_exp_gene[gene_idx as usize] += 1;
             }
         }
 
@@ -562,14 +562,14 @@ impl CsrCellChunk {
         let results: Vec<_> = (0..n_cells)
             .into_par_iter()
             .map(|i| {
-                let start_i = sparse_data.indptr[i];
-                let end_i = sparse_data.indptr[i + 1];
+                let start_i = sparse_data.indptr[i] as usize;
+                let end_i = sparse_data.indptr[i + 1] as usize;
 
                 let mut filtered_data = Vec::new();
                 let mut filtered_indices = Vec::new();
 
                 for idx in start_i..end_i {
-                    let old_gene_idx = sparse_data.indices[idx];
+                    let old_gene_idx = sparse_data.indices[idx] as usize;
                     if let Some(new_gene_idx) = gene_index_map[old_gene_idx] {
                         filtered_data.push(sparse_data.data[idx].clone().into());
                         filtered_indices.push(new_gene_idx);
@@ -960,23 +960,20 @@ pub struct SparseDataHeader {
 }
 
 /// Fixed-size file header that points to the main header location
-///
-/// ### Params
-///
-/// * `magic` - Magic string as bytes to recognise the file
-/// * `version` - Version of the file
-/// * `main_header_offset` - Offset of the main header, i.e., 64 bytes
-/// * `_reserved_1` - 32 additional reserved bytes for the future
-/// * `_reserved_2` - 4 additional reserved bytes for the future
 #[repr(C)]
 #[derive(Encode, Decode, Serialize, Deserialize)]
 struct FileHeader {
+    /// Magic string as bytes to recognise the file
     magic: [u8; 8],
+    /// Version of the file
     version: u32,
+    /// Offset of the main header, i.e., 64 bytes
     main_header_offset: u64,
+    /// Is cell-based (CSR format)
     cell_based: bool,
-    // Needs to be split into two arrays to get to 64 bytes
+    /// 32 additional reserved bytes for the future
     _reserved_1: [u8; 32],
+    /// 3 additional reserved bytes for the future
     _reserved_2: [u8; 3],
 }
 
@@ -1665,8 +1662,8 @@ where
 
     CompressedSparseData2 {
         data,
-        indices,
-        indptr,
+        indices: indices.index_cast(),
+        indptr: indptr.index_cast(),
         cs_type: CompressedSparseFormat::Csc,
         data_2: if keep_norm { Some(data_2) } else { None },
         shape: (n_cells, n_genes),
@@ -1739,8 +1736,8 @@ where
 
     CompressedSparseData2 {
         data,
-        indices,
-        indptr,
+        indices: indices.index_cast(),
+        indptr: indptr.index_cast(),
         cs_type: CompressedSparseFormat::Csr,
         data_2: if keep_norm { Some(data_2) } else { None },
         shape: (n_cells, n_genes),

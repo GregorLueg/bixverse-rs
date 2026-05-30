@@ -129,8 +129,8 @@ fn prune_and_renormalise(mat: &mut CompressedSparseData2<f32>, threshold: f32) {
     let mut new_indptr = vec![0];
 
     for row in 0..mat.shape.0 {
-        let start = mat.indptr[row];
-        let end = mat.indptr[row + 1];
+        let start = mat.indptr[row] as usize;
+        let end = mat.indptr[row + 1] as usize;
 
         for idx in start..end {
             if mat.data[idx].abs() > threshold {
@@ -138,7 +138,7 @@ fn prune_and_renormalise(mat: &mut CompressedSparseData2<f32>, threshold: f32) {
                 new_indices.push(mat.indices[idx]);
             }
         }
-        new_indptr.push(new_data.len());
+        new_indptr.push(new_data.len() as u32);
     }
 
     mat.data = new_data;
@@ -163,11 +163,11 @@ fn matrix_trace(mat: &CompressedSparseData2<f32>) -> f32 {
     let mut trace = 0.0;
 
     for i in 0..n {
-        let row_start = mat.indptr[i];
-        let row_end = mat.indptr[i + 1];
+        let row_start = mat.indptr[i] as usize;
+        let row_end = mat.indptr[i + 1] as usize;
 
         for idx in row_start..row_end {
-            if mat.indices[idx] == i {
+            if mat.indices[idx] == i as u32 {
                 trace += mat.data[idx];
                 break;
             }
@@ -199,7 +199,7 @@ pub fn compute_diffusion_kernel(
     knn_distances: &[Vec<f32>],
     knn: usize,
     squared_dist: bool,
-) -> CompressedSparseData2<f32> {
+) -> Result<CompressedSparseData2<f32>, BixverseErrors> {
     let n = knn_indices.len();
     let adaptive_k = (knn / 3).max(1);
 
@@ -231,12 +231,14 @@ pub fn compute_diffusion_kernel(
         }
     }
 
-    let w = coo_to_csr(&rows, &cols, &vals, (n, n));
+    let w = coo_to_csr(&rows.index_cast(), &cols.index_cast(), &vals, (n, n));
 
     // symmetrise: kernel = W + W^T
     let w_t = w.transpose_and_convert();
 
-    sparse_add_csr(&w, &w_t)
+    let res = sparse_add_csr(&w, &w_t)?;
+
+    Ok(res)
 }
 
 /// Compute diffusion maps from kernel matrix
@@ -260,7 +262,7 @@ pub fn diffusion_map_from_kernel(
     let row_sums: Vec<f32> = (0..kernel.shape.0)
         .map(|i| {
             (kernel.indptr[i]..kernel.indptr[i + 1])
-                .map(|idx| kernel.data[idx])
+                .map(|idx| kernel.data[idx as usize])
                 .sum()
         })
         .collect();
@@ -269,9 +271,9 @@ pub fn diffusion_map_from_kernel(
     for i in 0..kernel.shape.0 {
         let d_i_sqrt = row_sums[i].sqrt();
         for idx in kernel.indptr[i]..kernel.indptr[i + 1] {
-            let j = kernel.indices[idx];
+            let j = kernel.indices[idx as usize] as usize;
             let d_j_sqrt = row_sums[j].sqrt();
-            kernel.data[idx] /= d_i_sqrt * d_j_sqrt;
+            kernel.data[idx as usize] /= d_i_sqrt * d_j_sqrt;
         }
     }
 
@@ -410,7 +412,7 @@ pub fn select_density_landmarks(
     let weights: Vec<f64> = (0..n)
         .map(|i| {
             let s: f32 = (kernel.indptr[i]..kernel.indptr[i + 1])
-                .map(|idx| kernel.data[idx])
+                .map(|idx| kernel.data[idx as usize])
                 .sum();
             (s as f64).max(0.0).sqrt()
         })
@@ -556,7 +558,7 @@ pub fn build_data_to_landmark_transitions(
             vals.push(w);
         }
     }
-    coo_to_csr(&rows, &cols, &vals, (n, l))
+    coo_to_csr(&rows.index_cast(), &cols.index_cast(), &vals, (n, l))
 }
 
 /// Nystroem extension: y(i)[d] = (1/λ_d) · Σ_l P_nl[i,l] · y_landmark[l][d]
@@ -580,10 +582,10 @@ fn nystrom_extend(
         .into_par_iter()
         .map(|i| {
             let mut row = vec![0.0f32; n_dim];
-            let start = p_nl.indptr[i];
-            let end = p_nl.indptr[i + 1];
+            let start = p_nl.indptr[i] as usize;
+            let end = p_nl.indptr[i + 1] as usize;
             for idx in start..end {
-                let l = p_nl.indices[idx];
+                let l = p_nl.indices[idx] as usize;
                 let w = p_nl.data[idx];
                 for d in 0..n_dim {
                     row[d] += w * landmark_embedding[l][d];
@@ -642,15 +644,15 @@ fn fw_argmins_a(
                 for j in start..end {
                     buf.fill(0.0);
 
-                    for ai in a_t.indptr[j]..a_t.indptr[j + 1] {
-                        let r = a_t.indices[ai];
+                    for ai in a_t.indptr[j] as usize..a_t.indptr[j + 1] as usize {
+                        let r = a_t.indices[ai] as usize;
                         let w = a_t.data[ai];
-                        for ti in t1.indptr[r]..t1.indptr[r + 1] {
-                            buf[t1.indices[ti]] += w * t1.data[ti];
+                        for ti in t1.indptr[r] as usize..t1.indptr[r + 1] as usize {
+                            buf[t1.indices[ti] as usize] += w * t1.data[ti];
                         }
                     }
-                    for ki in k2_b.indptr[j]..k2_b.indptr[j + 1] {
-                        buf[k2_b.indices[ki]] -= k2_b.data[ki];
+                    for ki in k2_b.indptr[j] as usize..k2_b.indptr[j + 1] as usize {
+                        buf[k2_b.indices[ki] as usize] -= k2_b.data[ki];
                     }
 
                     let mut min_val = buf[0];
@@ -714,15 +716,15 @@ fn fw_argmins_b(
                     buf.fill(0.0);
 
                     // (K²B · t1)[:, c] = sum_m t1[m,c] * (K²B)[:, m]
-                    for ti in t1.indptr[c]..t1.indptr[c + 1] {
-                        let m = t1.indices[ti];
+                    for ti in t1.indptr[c] as usize..t1.indptr[c + 1] as usize {
+                        let m = t1.indices[ti] as usize;
                         let tmc = t1.data[ti];
-                        for ki in k2_b_t.indptr[m]..k2_b_t.indptr[m + 1] {
-                            buf[k2_b_t.indices[ki]] += tmc * k2_b_t.data[ki];
+                        for ki in k2_b_t.indptr[m] as usize..k2_b_t.indptr[m + 1] as usize {
+                            buf[k2_b_t.indices[ki] as usize] += tmc * k2_b_t.data[ki];
                         }
                     }
-                    for si in t2_t.indptr[c]..t2_t.indptr[c + 1] {
-                        buf[t2_t.indices[si]] -= t2_t.data[si];
+                    for si in t2_t.indptr[c] as usize..t2_t.indptr[c + 1] as usize {
+                        buf[t2_t.indices[si] as usize] -= t2_t.data[si];
                     }
 
                     let mut min_val = buf[0];
@@ -736,8 +738,8 @@ fn fw_argmins_b(
                     amins.push(min_idx);
                     g_dot_e += min_val;
 
-                    for bi in b_t.indptr[c]..b_t.indptr[c + 1] {
-                        g_dot_b += b_t.data[bi] * buf[b_t.indices[bi]];
+                    for bi in b_t.indptr[c] as usize..b_t.indptr[c + 1] as usize {
+                        g_dot_b += b_t.data[bi] * buf[b_t.indices[bi] as usize];
                     }
                 }
                 (amins, g_dot_b, g_dot_e)
@@ -924,7 +926,7 @@ impl<'a> SEACells<'a> {
             );
         }
 
-        let kernel = coo_to_csr(&rows, &cols, &vals, (n, n));
+        let kernel = coo_to_csr(&rows.index_cast(), &cols.index_cast(), &vals, (n, n));
 
         if self.n_cells > 20000 {
             if verbosity.detailed_verbosity() {
@@ -963,8 +965,10 @@ impl<'a> SEACells<'a> {
         }
 
         let k = self.kernel_mat.as_ref().unwrap();
-        let kx = csr_matmul_csr(k, x);
-        Ok(csr_matmul_csr(k, &kx))
+        let kx = csr_matmul_csr(k, x)?;
+        let res = csr_matmul_csr(k, &kx)?;
+
+        Ok(res)
     }
 
     /// Compute K^2 @ v = K @ (K @ v) for a dense vector v
@@ -1183,7 +1187,7 @@ impl<'a> SEACells<'a> {
             knn_distances,
             self.params.knn_params.k,
             squared_dist,
-        );
+        )?;
 
         let (eigenvalues, eigenvectors) =
             diffusion_map_from_kernel(&mut kernel, self.params.knn_params.k, seed)?;
@@ -1266,7 +1270,7 @@ impl<'a> SEACells<'a> {
         if verbosity.normal_verbosity() {
             println!("Building diffusion kernel for landmark selection...");
         }
-        let kernel = compute_diffusion_kernel(knn_indices, knn_distances, knn_k, squared_dist);
+        let kernel = compute_diffusion_kernel(knn_indices, knn_distances, knn_k, squared_dist)?;
 
         if verbosity.normal_verbosity() {
             println!(
@@ -1291,7 +1295,7 @@ impl<'a> SEACells<'a> {
         )?;
         let squared_dist = self.params.knn_params.ann_dist == "euclidean";
 
-        let mut ll_kernel = compute_diffusion_kernel(&ll_idx, &ll_dist, k_ll, squared_dist);
+        let mut ll_kernel = compute_diffusion_kernel(&ll_idx, &ll_dist, k_ll, squared_dist)?;
 
         let n_eigs = k_ll.min(l - 1).max(11);
         let (evals, evecs) = diffusion_map_from_kernel(&mut ll_kernel, n_eigs, seed)?;
@@ -1383,7 +1387,8 @@ impl<'a> SEACells<'a> {
                 .map(|i| {
                     let mut row_i = vec![0_f32; n];
                     for idx in kernel.indptr[i]..kernel.indptr[i + 1] {
-                        row_i[kernel.indices[idx]] = kernel.data[idx];
+                        let idx_usize = idx as usize;
+                        row_i[kernel.indices[idx_usize] as usize] = kernel.data[idx_usize];
                     }
                     let k2_col_i = csr_matvec(kernel, &row_i);
                     (i, k2_col_i)
@@ -1542,7 +1547,7 @@ impl<'a> SEACells<'a> {
             b_vals.push(1_f32);
         }
 
-        let b = coo_to_csr(&b_rows, &b_cols, &b_vals, (n, k));
+        let b = coo_to_csr(&b_rows.index_cast(), &b_cols.index_cast(), &b_vals, (n, k));
 
         // changed compared to the original Python
         let archetypes_per_cell = 10.min(k);
@@ -1561,7 +1566,7 @@ impl<'a> SEACells<'a> {
             }
         }
 
-        let mut a = coo_to_csr(&a_rows, &a_cols, &a_vals, (k, n));
+        let mut a = coo_to_csr(&a_rows.index_cast(), &a_cols.index_cast(), &a_vals, (k, n));
         normalise_csr_columns_l1(&mut a);
 
         a = self.update_a_mat(&b, &a, verbose)?;
@@ -1614,7 +1619,7 @@ impl<'a> SEACells<'a> {
 
         let k2_b = self.k_squared_matmul(b)?;
         let t2 = k2_b.transpose_and_convert();
-        let t1 = csr_matmul_csr(&t2, b);
+        let t1 = csr_matmul_csr(&t2, b)?;
         drop(t2);
 
         let mut a = a_prev.clone();
@@ -1634,7 +1639,8 @@ impl<'a> SEACells<'a> {
             let e_rows: Vec<usize> = e_data.iter().map(|&(r, _, _)| r).collect();
             let e_cols: Vec<usize> = e_data.iter().map(|&(_, c, _)| c).collect();
             let e_vals: Vec<f32> = e_data.iter().map(|&(_, _, v)| v).collect();
-            let e = coo_to_csr_presorted(&e_rows, &e_cols, &e_vals, (k, n));
+            let e =
+                coo_to_csr_presorted(&e_rows.index_cast(), &e_cols.index_cast(), &e_vals, (k, n));
 
             let step_size = 2.0 / (t as f32 + 2.0);
             let retain = 1.0 - step_size;
@@ -1642,7 +1648,7 @@ impl<'a> SEACells<'a> {
                 *val *= retain;
             }
             let e_scaled = sparse_scalar_multiply_csr(&e, step_size);
-            a = sparse_add_csr(&a, &e_scaled);
+            a = sparse_add_csr(&a, &e_scaled)?;
 
             if self.params.pruning {
                 prune_and_renormalise(&mut a, self.params.pruning_threshold);
@@ -1705,7 +1711,7 @@ impl<'a> SEACells<'a> {
         const MIN_FW_ITERS: usize = 10;
 
         let a_t = a.transpose_and_convert();
-        let t1 = csr_matmul_csr(a, &a_t);
+        let t1 = csr_matmul_csr(a, &a_t)?;
         let t2 = self.k_squared_matmul(&a_t)?;
         let t2_t = t2.transpose_and_convert();
         drop(t2);
@@ -1736,7 +1742,8 @@ impl<'a> SEACells<'a> {
             let e_rows: Vec<usize> = e_data.iter().map(|&(r, _, _)| r).collect();
             let e_cols: Vec<usize> = e_data.iter().map(|&(_, c, _)| c).collect();
             let e_vals: Vec<f32> = e_data.iter().map(|&(_, _, v)| v).collect();
-            let e = coo_to_csr_presorted(&e_rows, &e_cols, &e_vals, (n, k));
+            let e =
+                coo_to_csr_presorted(&e_rows.index_cast(), &e_cols.index_cast(), &e_vals, (n, k));
 
             let step_size = 2.0 / (t as f32 + 2.0);
             let retain = 1.0 - step_size;
@@ -1744,7 +1751,7 @@ impl<'a> SEACells<'a> {
                 *val *= retain;
             }
             let e_scaled = sparse_scalar_multiply_csr(&e, step_size);
-            b = sparse_add_csr(&b, &e_scaled);
+            b = sparse_add_csr(&b, &e_scaled)?;
 
             if self.params.pruning {
                 prune_and_renormalise(&mut b, self.params.pruning_threshold);
@@ -1800,7 +1807,7 @@ impl<'a> SEACells<'a> {
         b: &CompressedSparseData2<f32>,
     ) -> Result<f32, BixverseErrors> {
         if self.n_cells <= 20000 {
-            Ok(self.compute_rss_simple(a, b))
+            Ok(self.compute_rss_simple(a, b)?)
         } else {
             Ok(self.compute_rss_trace(a, b)?)
         }
@@ -1823,12 +1830,13 @@ impl<'a> SEACells<'a> {
         &self,
         a: &CompressedSparseData2<f32>,
         b: &CompressedSparseData2<f32>,
-    ) -> f32 {
+    ) -> Result<f32, BixverseErrors> {
         let k_mat = self.kernel_mat.as_ref().unwrap();
-        let k_b = csr_matmul_csr(k_mat, b);
-        let reconstruction = csr_matmul_csr(&k_b, a);
-        let diff = sparse_subtract_csr(k_mat, &reconstruction);
-        frobenius_norm(&diff)
+        let k_b = csr_matmul_csr(k_mat, b)?;
+        let reconstruction = csr_matmul_csr(&k_b, a)?;
+        let diff = sparse_subtract_csr(k_mat, &reconstruction)?;
+
+        Ok(frobenius_norm(&diff))
     }
 
     /// Memory-efficient RSS computation for large datasets (uses trace trick)
@@ -1865,18 +1873,18 @@ impl<'a> SEACells<'a> {
 
         // Term 2: -2 * trace(K^2 @ B @ A)
         // Reorder via cyclic property: trace(A @ K^2 @ B)  [k × k]
-        let a_k2b = csr_matmul_csr(a, &k2_b);
+        let a_k2b = csr_matmul_csr(a, &k2_b)?;
         let trace_term = matrix_trace(&a_k2b);
 
         // Term 3: trace(A^T @ B^T @ K^2 @ B @ A)
         // Reorder via cyclic property: trace(A @ A^T @ B^T @ K^2 @ B)
         let a_t = a.transpose_and_convert();
-        let a_at = csr_matmul_csr(a, &a_t); // [k × k]
+        let a_at = csr_matmul_csr(a, &a_t)?; // [k × k]
 
         let b_t = b.transpose_and_convert();
-        let bt_k2b = csr_matmul_csr(&b_t, &k2_b); // [k × k]
+        let bt_k2b = csr_matmul_csr(&b_t, &k2_b)?; // [k × k]
 
-        let result = csr_matmul_csr(&a_at, &bt_k2b); // [k × k]
+        let result = csr_matmul_csr(&a_at, &bt_k2b)?; // [k × k]
         let reconstruction_frob_sq = matrix_trace(&result);
 
         Ok((k_frob_sq - 2.0 * trace_term + reconstruction_frob_sq).sqrt())
@@ -1912,9 +1920,11 @@ impl<'a> SEACells<'a> {
             let mut max_val = f32::NEG_INFINITY;
             let mut max_arch = 0;
             for idx in start..end {
-                if a_csc.data[idx] > max_val {
-                    max_val = a_csc.data[idx];
-                    max_arch = a_csc.indices[idx];
+                let idx_usize = idx as usize;
+
+                if a_csc.data[idx_usize] > max_val {
+                    max_val = a_csc.data[idx_usize];
+                    max_arch = a_csc.indices[idx_usize] as usize;
                 }
             }
             assignments[cell] = max_arch;

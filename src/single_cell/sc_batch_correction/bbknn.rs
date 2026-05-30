@@ -461,7 +461,7 @@ fn compute_membership_strengths(
 fn apply_set_operations(
     connectivities: CompressedSparseData2<f32>,
     set_op_mix_ratio: f32,
-) -> CompressedSparseData2<f32> {
+) -> Result<CompressedSparseData2<f32>, BixverseErrors> {
     let (nrow, ncol) = connectivities.shape;
     let transpose = {
         let csc_transpose = connectivities.transform(); // A^T in CSC
@@ -472,6 +472,8 @@ fn apply_set_operations(
 
         for col in 0..csc_transpose.indptr.len() - 1 {
             for idx in csc_transpose.indptr[col]..csc_transpose.indptr[col + 1] {
+                let idx = idx as usize;
+
                 let row = csc_transpose.indices[idx];
                 // For A^T: swap row/col to get proper CSR representation
                 coo_rows.push(col);
@@ -479,22 +481,22 @@ fn apply_set_operations(
                 coo_vals.push(csc_transpose.data[idx]);
             }
         }
-        coo_to_csr(&coo_rows, &coo_cols, &coo_vals, (ncol, nrow))
+        coo_to_csr(&coo_rows.index_cast(), &coo_cols, &coo_vals, (ncol, nrow))
     };
 
     // Element-wise multiply: A .* A^T
-    let prod = sparse_multiply_elementwise_csr(&connectivities, &transpose);
+    let prod = sparse_multiply_elementwise_csr(&connectivities, &transpose)?;
 
     // set_op_mix_ratio * (A + A^T - A.*A^T) + (1 - set_op_mix_ratio) * (A.*A^T)
-    let union_part = sparse_add_csr(&connectivities, &transpose);
-    let union_part = sparse_subtract_csr(&union_part, &prod);
+    let union_part = sparse_add_csr(&connectivities, &transpose)?;
+    let union_part = sparse_subtract_csr(&union_part, &prod)?;
     let union_part = sparse_scalar_multiply_csr(&union_part, set_op_mix_ratio);
 
     let intersect_part = sparse_scalar_multiply_csr(&prod, 1.0 - set_op_mix_ratio);
 
-    let res = sparse_add_csr(&union_part, &intersect_part);
+    let res = sparse_add_csr(&union_part, &intersect_part)?;
 
-    eliminate_zeros_csr(res)
+    Ok(eliminate_zeros_csr(res))
 }
 
 /// Trim weak edges from connectivity graph
@@ -521,8 +523,8 @@ fn trim_graph(
     // compute thresholds
 
     for i in 0..n {
-        let row_start = connectivities.indptr[i];
-        let row_end = connectivities.indptr[i + 1];
+        let row_start = connectivities.indptr[i] as usize;
+        let row_end = connectivities.indptr[i + 1] as usize;
         let row_data = &connectivities.data[row_start..row_end];
 
         if row_data.len() <= trim {
@@ -537,8 +539,8 @@ fn trim_graph(
     // Apply trimming twice (row then column)
     for _ in 0..2 {
         for i in 0..n {
-            let row_start = connectivities.indptr[i];
-            let row_end = connectivities.indptr[i + 1];
+            let row_start = connectivities.indptr[i] as usize;
+            let row_end = connectivities.indptr[i + 1] as usize;
 
             for j in row_start..row_end {
                 if connectivities.data[j] < thresholds[i] {
@@ -616,10 +618,15 @@ pub fn bbknn(
     let (rows, cols, vals) = compute_membership_strengths(&knn_indices, &knn_dists, &sigmas, &rhos);
     let n_obs = mat.nrows();
 
-    let mut connectivities = coo_to_csr(&rows, &cols, &vals, (n_obs, n_obs));
+    let mut connectivities = coo_to_csr(
+        &rows.index_cast(),
+        &cols.index_cast(),
+        &vals,
+        (n_obs, n_obs),
+    );
 
     // 4. Apply set operations
-    connectivities = apply_set_operations(connectivities, bbknn_params.set_op_mix_ratio);
+    connectivities = apply_set_operations(connectivities, bbknn_params.set_op_mix_ratio)?;
 
     if verbosity.normal_verbosity() {
         println!("BBKNN: Finalising data.")

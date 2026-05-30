@@ -6,12 +6,16 @@ Major update / release
 
 ### Features
 
+#### General
+
+- Better error handling
+
 #### Single cells:
 
 - Multi file support for MTX reading (several 10x experiments to ingest).
 - MELD implementation from Burkhardt, et al., Nat Biotechnol, 2021.
 - Merging single cell binary files
-- New feature gate `multi-modal`:
+- New feature gate `"multi-modal"`:
   * Weighted nearest neighbour graph method behind a new feature gate.
   * DSB normalisation for CITE Seq ADT
 - First annotation helpers... ScType implemented
@@ -23,7 +27,8 @@ Major update / release
 
 #### GPU-accelerated methods:
 
-- First implementation of GPU-accelerated method:
+- First implementation of GPU-accelerated method (behind the feature gate
+  `"gpu"`):
   * k-means clustering -> to be integrated in the future in some of methods
 
 ## 0.2.0

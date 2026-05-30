@@ -259,7 +259,12 @@ pub fn knn_to_sparse_dist(
         }
     }
 
-    coo_to_csr(&rows, &cols, &vals, (n_obs, n_obs))
+    coo_to_csr(
+        &rows.index_cast(),
+        &cols.index_cast(),
+        &vals,
+        (n_obs, n_obs),
+    )
 }
 
 ////////////////////

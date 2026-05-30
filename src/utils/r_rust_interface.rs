@@ -480,8 +480,8 @@ where
 
     Ok(CompressedSparseData2 {
         data,
-        indices,
-        indptr,
+        indices: indices.index_cast(),
+        indptr: indptr.index_cast(),
         cs_type,
         data_2,
         shape: (nrow, ncol),

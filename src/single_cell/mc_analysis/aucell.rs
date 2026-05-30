@@ -55,7 +55,9 @@ where
         .ok_or(BixverseErrors::Data2NotAvailable)?;
 
     let start_ranking = Instant::now();
-    let ranks = rank_within_rows_f32(&csr.indptr, &csr.indices, data_2, n_cells, n_genes);
+    let indptr_usize = csr.indptr.as_slice().index_cast();
+    let indices_usize = csr.indices.as_slice().index_cast();
+    let ranks = rank_within_rows_f32(&indptr_usize, &indices_usize, data_2, n_cells, n_genes);
     if verbosity.normal_verbosity() {
         println!(
             "Ranked gene expression within metacells: {:.2?}",

@@ -155,7 +155,7 @@ fn sum_columns_csr(mat: &CompressedSparseData2<u32, f32>) -> Vec<u32> {
     let n_cols = mat.shape.1;
     let mut sums = vec![0u32; n_cols];
     for (idx, &col) in mat.indices.iter().enumerate() {
-        sums[col] = sums[col].saturating_add(mat.data[idx]);
+        sums[col as usize] = sums[col as usize].saturating_add(mat.data[idx]);
     }
     sums
 }
@@ -185,8 +185,8 @@ fn top_n_per_column(mat: &CompressedSparseData2<u32, f32>, n: usize) -> Vec<u32>
     (0..n_genes)
         .into_par_iter()
         .map(|col| {
-            let start = csc_indptr[col];
-            let end = csc_indptr[col + 1];
+            let start = csc_indptr[col] as usize;
+            let end = csc_indptr[col + 1] as usize;
             let nnz = end - start;
             if nnz < n {
                 return 0u32;
@@ -222,8 +222,8 @@ fn mean_and_log_norm_var(mat: &CompressedSparseData2<u32, f32>) -> (Vec<f32>, Ve
     let mut sum_sq = vec![0.0f64; n_cols];
     for (idx, &col) in mat.indices.iter().enumerate() {
         let v = mat.data[idx] as f64;
-        sum[col] += v;
-        sum_sq[col] += v * v;
+        sum[col as usize] += v;
+        sum_sq[col as usize] += v * v;
     }
 
     let mut mean = vec![0.0f32; n_cols];
@@ -407,10 +407,10 @@ fn extract_dense_columns(csr: &CompressedSparseData2<u32, f32>, selected: &[usiz
 
     let mut dense = Mat::<f32>::zeros(n_rows, n_sel);
     for row in 0..n_rows {
-        let start = csr.indptr[row];
-        let end = csr.indptr[row + 1];
+        let start = csr.indptr[row] as usize;
+        let end = csr.indptr[row + 1] as usize;
         for idx in start..end {
-            if let Some(pos) = gene_to_pos[csr.indices[idx]] {
+            if let Some(pos) = gene_to_pos[csr.indices[idx] as usize] {
                 dense[(row, pos)] = csr.data[idx] as f32;
             }
         }

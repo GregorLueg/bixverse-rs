@@ -84,8 +84,8 @@ pub fn create_sparse_csc_data(
 
     CompressedSparseData2 {
         data,
-        indices,
-        indptr,
+        indices: indices.index_cast(),
+        indptr: indptr.index_cast(),
         cs_type: CompressedSparseFormat::Csc,
         data_2: None::<Vec<i32>>,
         shape: (nrow, ncol),
@@ -152,8 +152,8 @@ pub fn create_sparse_csr_data(
 
     CompressedSparseData2 {
         data,
-        indices,
-        indptr,
+        indices: indices.index_cast(),
+        indptr: indptr.index_cast(),
         cs_type: CompressedSparseFormat::Csr,
         data_2: None::<Vec<i32>>,
         shape: (nrow, ncol),
@@ -379,8 +379,8 @@ pub fn create_celltype_sparse_csr_data(
 
     let csr = CompressedSparseData2 {
         data,
-        indices,
-        indptr,
+        indices: indices.index_cast(),
+        indptr: indptr.index_cast(),
         cs_type: CompressedSparseFormat::Csr,
         data_2: None::<Vec<u32>>,
         shape: (nrow, ncol),

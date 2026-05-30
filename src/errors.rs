@@ -48,7 +48,17 @@ pub enum BixverseErrors {
     #[error("Distance metric '{0}' is not supported for this method.")]
     DistanceNotSupported(Dist),
 
-    // -- Graph based errors ---
+    // -- sparse --
+    /// Error if wrong sparse format has been provided
+    #[error("Wrong sparse format. Expected {expected}; got {found}")]
+    WrongSparseFormat {
+        /// Expected format
+        expected: String,
+        /// Got format
+        found: String,
+    },
+
+    // -- graph based errors ---
     /// Error for algorithms that expect undirected graphs
     ///
     /// For methods that expect an undirected graph, but received a directed
@@ -62,10 +72,56 @@ pub enum BixverseErrors {
     #[error("The number of nodes and membership assignments in the communities do not add up.")]
     CommunityAssignmentMismatch,
 
+    // -- sparse erros --
     /// Error in situations were data_2 in [`crate::prelude::CompressedSparseData2`]
     /// is asked for but not available
     #[error("data_2 slot is None but was requested")]
     Data2NotAvailable,
+
+    /// Error if the slice index is out of bounds
+    #[error("The slice index ({index}) is out of bounds (length: {len})")]
+    SliceIndexOutOfBounds {
+        /// The chosen index
+        index: usize,
+        /// The actual length
+        len: usize,
+    },
+
+    /// Error if the slice index is duplicated
+    #[error("You provided a duplicated slice index {0}")]
+    DuplicateSliceIndex(usize),
+
+    /// Error for sparse multiplication dimension mismatches
+    #[error(
+        "The dimensions of the matrix do not support sparse multiplication (matrix a n_col: {n_col_a}; matrix b n_row: {n_row_b})"
+    )]
+    SparseMatrixMultiplication {
+        /// Number of columns in matrix a
+        n_col_a: usize,
+        /// Number of rows in matrix b
+        n_row_b: usize,
+    },
+
+    /// Dimension mismatch error during construction
+    #[error("The indices (len: {indices_len}) and data (len: {data_len}) need to have same length")]
+    DimensionMisMatchSparse {
+        /// Length indices
+        indices_len: usize,
+        /// Length data
+        data_len: usize,
+    },
+
+    /// Error if there is a dimension mismatch in terms of the two matrices
+    #[error("The shape of the two sparse matrices must be the same.")]
+    ShapeMismatchSparse,
+
+    /// Error if the [crate::prelude::CompressedSparseData2] is not in CSR.
+    #[error("The SparseCompressedData2 must be in CSR format")]
+    SparseMatrixMustBeCsr,
+
+    /// Error if the [crate::prelude::CompressedSparseData2] is not in Csc.
+    #[error("The SparseCompressedData2 must be in CSC format")]
+    SparseMatrixMustBeCsc,
 
     // -- Binary file I/O --
     /// Wraps any `std::io::Error` encountered while reading or writing the
@@ -157,6 +213,17 @@ pub enum BixverseErrors {
         /// What the caller requested: "cell-based" or "gene-based".
         requested: &'static str,
     },
+
+    /// If serialisation of the [crate::prelude::CompressedSparseData2] to disk failed
+    #[cfg(feature = "single-cell")]
+    #[error("Serialisation to meta cell CompressedSparseData2 format on disk failed")]
+    SerialisationFailed,
+
+    /// If deserialisation of the [crate::prelude::CompressedSparseData2] from disk
+    /// failed
+    #[cfg(feature = "single-cell")]
+    #[error("Serialisation to meta cell CompressedSparseData2 format on disk failed")]
+    DeserialisationFailed,
 
     // -- HDF5 / h5ad --
     /// Wraps any error from the `hdf5` crate.

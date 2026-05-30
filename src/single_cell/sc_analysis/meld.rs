@@ -189,7 +189,7 @@ fn compute_degrees(adj: &CompressedSparseData2<f32>) -> Vec<f32> {
     (0..adj.shape.0)
         .map(|i| {
             (adj.indptr[i]..adj.indptr[i + 1])
-                .map(|idx| adj.data[idx])
+                .map(|idx| adj.data[idx as usize])
                 .sum::<f32>()
         })
         .collect()
@@ -219,18 +219,20 @@ fn build_combinatorial_laplacian(adj: &CompressedSparseData2<f32>) -> Compressed
         let diag_pos = vals.len() - 1;
 
         for idx in adj.indptr[i]..adj.indptr[i + 1] {
-            let j = adj.indices[idx];
+            let idx_usize = idx as usize;
+
+            let j = adj.indices[idx_usize] as usize;
             if j == i {
-                vals[diag_pos] -= adj.data[idx];
+                vals[diag_pos] -= adj.data[idx_usize];
             } else {
                 rows.push(i);
                 cols.push(j);
-                vals.push(-adj.data[idx]);
+                vals.push(-adj.data[idx_usize]);
             }
         }
     }
 
-    coo_to_csr(&rows, &cols, &vals, (n, n))
+    coo_to_csr(&rows.index_cast(), &cols.index_cast(), &vals, (n, n))
 }
 
 /// Build the symmetric normalised Laplacian `L = I - D^(-1/2) A D^(-1/2)` as
@@ -262,8 +264,10 @@ fn build_normalised_laplacian(adj: &CompressedSparseData2<f32>) -> CompressedSpa
         let diag_pos = vals.len() - 1;
 
         for idx in adj.indptr[i]..adj.indptr[i + 1] {
-            let j = adj.indices[idx];
-            let scaled = adj.data[idx] * inv_sqrt_d[i] * inv_sqrt_d[j];
+            let idx_usize = idx as usize;
+
+            let j = adj.indices[idx_usize] as usize;
+            let scaled = adj.data[idx_usize] * inv_sqrt_d[i] * inv_sqrt_d[j];
             if j == i {
                 vals[diag_pos] -= scaled;
             } else {
@@ -274,7 +278,7 @@ fn build_normalised_laplacian(adj: &CompressedSparseData2<f32>) -> CompressedSpa
         }
     }
 
-    coo_to_csr(&rows, &cols, &vals, (n, n))
+    coo_to_csr(&rows.index_cast(), &cols.index_cast(), &vals, (n, n))
 }
 
 /// Estimate the largest eigenvalue of a sparse symmetric matrix via Lanczos.
@@ -537,7 +541,7 @@ pub fn meld(
             n.separate_with_underscores()
         );
     }
-    let adj = compute_diffusion_kernel(knn_indices, knn_distances, knn_k, squared_dist);
+    let adj = compute_diffusion_kernel(knn_indices, knn_distances, knn_k, squared_dist)?;
     if verbosity.normal_verbosity() {
         println!(" Done in {:.2?}", start.elapsed())
     }

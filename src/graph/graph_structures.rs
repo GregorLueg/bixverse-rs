@@ -66,11 +66,11 @@ where
     ///
     /// Tuple of `(neighbour_indices, edge_weights)`
     #[inline]
-    pub fn get_neighbours(&self, node: usize) -> (&[usize], &[T]) {
-        let start = self.adjacency.indptr[node];
-        let end = self.adjacency.indptr[node + 1];
+    pub fn get_neighbours(&self, node: usize) -> (Vec<usize>, &[T]) {
+        let start = self.adjacency.indptr[node] as usize;
+        let end = self.adjacency.indptr[node + 1] as usize;
         (
-            &self.adjacency.indices[start..end],
+            self.adjacency.indices[start..end].index_cast(),
             &self.adjacency.data[start..end],
         )
     }
@@ -86,7 +86,7 @@ where
     /// The node degree for this node.
     #[inline]
     pub fn get_node_degree(&self, node: usize) -> usize {
-        self.adjacency.indptr[node + 1] - self.adjacency.indptr[node]
+        (self.adjacency.indptr[node + 1] - self.adjacency.indptr[node]) as usize
     }
 
     /// Get total weight
@@ -435,8 +435,8 @@ where
         }
 
         let coarse_csr = coo_to_csr(
-            &deduped_rows,
-            &deduped_cols,
+            &deduped_rows.index_cast(),
+            &deduped_cols.index_cast(),
             &deduped_vals,
             (num_coarse, num_coarse),
         );
@@ -743,7 +743,12 @@ where
         vals.push(weight);
     }
 
-    let adjacency = coo_to_csr(&rows, &cols, &vals, (n_nodes, n_nodes));
+    let adjacency = coo_to_csr(
+        &rows.index_cast(),
+        &cols.index_cast(),
+        &vals,
+        (n_nodes, n_nodes),
+    );
 
     let mut graph = SparseGraph::new(n_nodes, adjacency, false);
 

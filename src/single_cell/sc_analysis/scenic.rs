@@ -361,11 +361,14 @@ impl SparseYBatch {
     ///
     /// A `SparseYBatch` where entries are sorted by cell, then by target
     /// index within each cell.
-    fn from_targets(targets: &[SparseAxis<u32, f32>], n_cells: usize) -> Self {
+    fn from_targets(
+        targets: &[SparseAxis<u32, f32>],
+        n_cells: usize,
+    ) -> Result<Self, BixverseErrors> {
         // count non-zeros per cell across all targets
         let mut counts_per_cell = vec![0u32; n_cells];
         for target in targets {
-            let (indices, _) = target.get_indices_data_2();
+            let (indices, _) = target.get_indices_data_2()?;
             for &idx in indices {
                 counts_per_cell[idx] += 1;
             }
@@ -387,7 +390,7 @@ impl SparseYBatch {
         // fill using a write cursor per cell
         let mut cursor = vec![0u32; n_cells];
         for (k, target) in targets.iter().enumerate() {
-            let (indices, data) = target.get_indices_data_2();
+            let (indices, data) = target.get_indices_data_2()?;
             for (i, &cell) in indices.iter().enumerate() {
                 let pos = (offsets[cell] + cursor[cell]) as usize;
                 target_indices[pos] = k as u8;
@@ -396,11 +399,11 @@ impl SparseYBatch {
             }
         }
 
-        Self {
+        Ok(Self {
             offsets,
             target_indices,
             values,
-        }
+        })
     }
 
     /// Iterate non-zero entries for a given cell.
@@ -436,16 +439,20 @@ impl SparseYBatch {
 /// Dense vector of length `n_samples * n_targets` with layout
 /// `y[sample * n_targets + target_idx]`. Absent entries default to `0.0`.
 #[allow(dead_code)]
-fn build_y_dense_multi(targets: &[SparseAxis<u32, f32>], n_samples: usize) -> Vec<f32> {
+fn build_y_dense_multi(
+    targets: &[SparseAxis<u32, f32>],
+    n_samples: usize,
+) -> Result<Vec<f32>, BixverseErrors> {
     let n_targets = targets.len();
     let mut y_dense = vec![0.0f32; n_samples * n_targets];
     for (k, target) in targets.iter().enumerate() {
-        let (y_indices, y_data) = target.get_indices_data_2();
+        let (y_indices, y_data) = target.get_indices_data_2()?;
         for (i, &idx) in y_indices.iter().enumerate() {
             y_dense[idx * n_targets + k] = y_data[i];
         }
     }
-    y_dense
+
+    Ok(y_dense)
 }
 
 ///////////////////////////////
@@ -1373,7 +1380,7 @@ fn fit_multi_trees(
     n_samples: usize,
     config: &dyn TreeRegressorConfig,
     seed: usize,
-) -> Vec<Vec<f32>> {
+) -> Result<Vec<Vec<f32>>, BixverseErrors> {
     let n_features = feature_matrix.n_features;
     let n_targets = targets.len();
     let n_features_split = resolve_n_features_split(config.n_features_split(), n_features);
@@ -1387,7 +1394,7 @@ fn fit_multi_trees(
             .max(2 * config.min_samples_leaf())
     };
 
-    let y_dense = build_y_dense_multi(targets, n_samples);
+    let y_dense = build_y_dense_multi(targets, n_samples)?;
 
     let mut sample_indices: Vec<u32> = vec![0; n_samples];
     let mut root_y_buf: Vec<f32> = vec![0.0; n_samples * n_targets];
@@ -1453,7 +1460,11 @@ fn fit_multi_trees(
         );
     }
 
-    extract_and_normalise_multi_importances(&importances, n_features, n_targets)
+    Ok(extract_and_normalise_multi_importances(
+        &importances,
+        n_features,
+        n_targets,
+    ))
 }
 
 /// Fit a tree ensemble for a batch of target genes simultaneously
@@ -1477,7 +1488,7 @@ pub fn fit_multi_trees_sparse(
     n_samples: usize,
     config: &dyn TreeRegressorConfig,
     seed: usize,
-) -> Vec<Vec<f32>> {
+) -> Result<Vec<Vec<f32>>, BixverseErrors> {
     let n_features = feature_matrix.n_features;
     let n_targets = targets.len();
     let n_features_split = resolve_n_features_split(config.n_features_split(), n_features);
@@ -1491,7 +1502,7 @@ pub fn fit_multi_trees_sparse(
             .max(2 * config.min_samples_leaf())
     };
 
-    let sparse_y = SparseYBatch::from_targets(targets, n_samples);
+    let sparse_y = SparseYBatch::from_targets(targets, n_samples)?;
 
     let mut sample_indices: Vec<u32> = vec![0; n_samples];
     let mut bufs = TreeBuffers::new_sparse(n_features, n_samples, n_targets);
@@ -1551,7 +1562,11 @@ pub fn fit_multi_trees_sparse(
         );
     }
 
-    extract_and_normalise_multi_importances(&importances, n_features, n_targets)
+    Ok(extract_and_normalise_multi_importances(
+        &importances,
+        n_features,
+        n_targets,
+    ))
 }
 
 /////////
@@ -2453,12 +2468,12 @@ pub fn fit_grnboost2_full_hist(
     n_samples: usize,
     config: &GradientBoostingConfig,
     seed: usize,
-) -> Vec<f32> {
+) -> Result<Vec<f32>, BixverseErrors> {
     let n_features = feature_matrix.n_features;
     let pool_capacity = 2 * config.max_depth + 3;
 
     let mut residuals = vec![0.0f32; n_samples];
-    let (indices, values) = target.get_indices_data_2();
+    let (indices, values) = target.get_indices_data_2()?;
     for (i, &idx) in indices.iter().enumerate() {
         residuals[idx] = values[i];
     }
@@ -2523,7 +2538,8 @@ pub fn fit_grnboost2_full_hist(
     }
 
     normalise_importances(&mut importances);
-    importances
+
+    Ok(importances)
 }
 
 /// Fit a GRNBoost2-style gradient boosted ensemble for a single
@@ -2551,12 +2567,12 @@ pub fn fit_grnboost2_sampled(
     n_samples: usize,
     config: &GradientBoostingConfig,
     seed: usize,
-) -> Vec<f32> {
+) -> Result<Vec<f32>, BixverseErrors> {
     let n_features = feature_matrix.n_features;
     let n_features_split = resolve_n_features_split(config.n_features_split, n_features);
 
     let mut residuals = vec![0.0f32; n_samples];
-    let (indices, values) = target.get_indices_data_2();
+    let (indices, values) = target.get_indices_data_2()?;
     for (i, &idx) in indices.iter().enumerate() {
         residuals[idx] = values[i];
     }
@@ -2616,7 +2632,8 @@ pub fn fit_grnboost2_sampled(
     }
 
     normalise_importances(&mut importances);
-    importances
+
+    Ok(importances)
 }
 
 /// Fit a GRNBoost2-style gradient boosted ensemble for a single
@@ -2645,7 +2662,7 @@ pub fn fit_grnboost2_sparse(
     n_samples: usize,
     config: &GradientBoostingConfig,
     seed: usize,
-) -> Vec<f32> {
+) -> Result<Vec<f32>, BixverseErrors> {
     if n_samples >= GBM_SUBTRACTION_CELL_THRESHOLD {
         fit_grnboost2_full_hist(target, feature_matrix, n_samples, config, seed)
     } else {
@@ -3076,7 +3093,7 @@ fn run_scenic_multi_output(
                 n_cells,
                 config,
                 batch_seed,
-            );
+            )?;
 
             if verbosity.normal_verbosity() {
                 let done = batches_done.fetch_add(1, Ordering::Relaxed) + 1;
@@ -3093,9 +3110,9 @@ fn run_scenic_multi_output(
                 }
             }
 
-            (batch_idx, imp)
+            Ok((batch_idx, imp))
         })
-        .collect();
+        .collect::<Result<Vec<_>, BixverseErrors>>()?;
 
     let mut importance_scores: Vec<Vec<f32>> = vec![Vec::new(); n_genes];
 
@@ -3219,7 +3236,7 @@ fn run_scenic_gbm(
         .enumerate()
         .map(|(gene_idx, target)| {
             let gene_seed = seed.wrapping_add(gene_idx.wrapping_mul(2654435761));
-            let imp = fit_grnboost2_sparse(target, tf_data, n_cells, config, gene_seed);
+            let imp = fit_grnboost2_sparse(target, tf_data, n_cells, config, gene_seed)?;
 
             if verbosity.normal_verbosity() {
                 let done = genes_done.fetch_add(1, Ordering::Relaxed) + 1;
@@ -3236,9 +3253,9 @@ fn run_scenic_gbm(
                 }
             }
 
-            imp
+            Ok(imp)
         })
-        .collect();
+        .collect::<Result<Vec<_>, BixverseErrors>>()?;
 
     if verbosity.normal_verbosity() {
         println!(
@@ -3401,7 +3418,7 @@ fn run_scenic_multi_output_streaming(
                     n_cells,
                     config,
                     batch_seed,
-                );
+                )?;
 
                 if verbosity.detailed_verbosity() && n_batches_this_chunk >= 4 {
                     let done = batches_done.fetch_add(1, Ordering::Relaxed) + 1;
@@ -3419,9 +3436,9 @@ fn run_scenic_multi_output_streaming(
                     }
                 }
 
-                (local_batch_idx, imp)
+                Ok((local_batch_idx, imp))
             })
-            .collect();
+            .collect::<Result<Vec<_>, BixverseErrors>>()?;
 
         for (local_batch_idx, imp_vecs) in batch_results {
             let batch_gene_ids = id_batches[local_batch_idx];
@@ -3556,7 +3573,7 @@ fn run_scenic_gbm_streaming(
             .map(|(local_idx, target)| {
                 let gene_seed =
                     seed.wrapping_add((global_gene_offset + local_idx).wrapping_mul(2654435761));
-                let imp = fit_grnboost2_sparse(target, tf_data, n_cells, config, gene_seed);
+                let imp = fit_grnboost2_sparse(target, tf_data, n_cells, config, gene_seed)?;
 
                 if verbosity.detailed_verbosity() && n_genes_this_chunk >= 4 {
                     let done = genes_done.fetch_add(1, Ordering::Relaxed) + 1;
@@ -3574,9 +3591,9 @@ fn run_scenic_gbm_streaming(
                     }
                 }
 
-                imp
+                Ok(imp)
             })
-            .collect();
+            .collect::<Result<Vec<_>, BixverseErrors>>()?;
 
         for (local_idx, imp) in chunk_results.into_iter().enumerate() {
             importance_scores[global_gene_offset + local_idx] = imp;
@@ -4567,7 +4584,7 @@ mod tests {
             n_features_split: 0,
         };
 
-        let imp = fit_grnboost2_sparse(&target, &store, n_cells, &config, 42);
+        let imp = fit_grnboost2_sparse(&target, &store, n_cells, &config, 42).unwrap();
 
         assert_eq!(imp.len(), n_features);
         // TF0 should have the highest importance
@@ -4614,7 +4631,7 @@ mod tests {
             n_features_split: 0,
         };
 
-        let imp = fit_grnboost2_sparse(&target, &store, n_cells, &config, 0);
+        let imp = fit_grnboost2_sparse(&target, &store, n_cells, &config, 0).unwrap();
 
         // With zero target, importances should all be zero (no variance to
         // reduce) or the function should terminate quickly.
@@ -4654,8 +4671,8 @@ mod tests {
             len: n_cells,
         };
         let config = GradientBoostingConfig::default();
-        let a = fit_grnboost2_sparse(&target, &store, n_cells, &config, 42);
-        let b = fit_grnboost2_sparse(&target, &store, n_cells, &config, 42);
+        let a = fit_grnboost2_sparse(&target, &store, n_cells, &config, 42).unwrap();
+        let b = fit_grnboost2_sparse(&target, &store, n_cells, &config, 42).unwrap();
         assert_eq!(a, b, "same seed should produce identical results");
     }
 

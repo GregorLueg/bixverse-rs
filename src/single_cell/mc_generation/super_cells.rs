@@ -123,7 +123,7 @@ where
         vals.push(w);
     }
 
-    let adjacency = coo_to_csr(&rows, &cols, &vals, (n, n));
+    let adjacency = coo_to_csr(&rows.index_cast(), &cols.index_cast(), &vals, (n, n));
     SparseGraph::new(n, adjacency, false)
 }
 
