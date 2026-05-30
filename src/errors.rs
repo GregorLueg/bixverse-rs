@@ -225,6 +225,18 @@ pub enum BixverseErrors {
     #[error("Serialisation to meta cell CompressedSparseData2 format on disk failed")]
     DeserialisationFailed,
 
+    /// Error for h5 ingestion if feature type is not found
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "The requested feature type ({requested}) was not found. On file found features are {found}"
+    )]
+    FeatureTypeNotFound {
+        /// Requested feature type
+        requested: String,
+        /// Found feature types
+        found: String,
+    },
+
     // -- HDF5 / h5ad --
     /// Wraps any error from the `hdf5` crate.
     ///
