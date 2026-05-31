@@ -24,6 +24,7 @@ Major update / release
 - Updates to various package editions
 - SEACells and SuperCells that are actually memory efficient. Run on a million
   cells in a ~20 GB memory pressure range.
+- Improved batching for SCENIC
 
 #### GPU-accelerated methods:
 
