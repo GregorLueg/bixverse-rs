@@ -211,7 +211,7 @@ pub fn parse_tenx_version(s: &str) -> Option<TenxVersion> {
 /// ### Params
 ///
 /// * `file_path` - Path to the h5 file
-/// * `version` - The [TenxVersion]
+/// * `version` - The optional [TenxVersion]
 ///
 /// ### Returns
 ///

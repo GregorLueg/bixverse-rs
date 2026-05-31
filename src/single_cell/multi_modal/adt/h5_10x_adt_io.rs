@@ -1,4 +1,6 @@
-//! Helper functions to specifically extract ADT counts from the
+//! Helper functions to specifically extract ADT counts from the h5 file.
+//! Can be theoretically used for other modalities, but it does return dense
+//! data!
 
 use hdf5::File;
 use std::path::Path;
