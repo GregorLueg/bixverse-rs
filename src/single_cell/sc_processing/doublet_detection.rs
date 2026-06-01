@@ -300,7 +300,8 @@ impl BoostClassifier {
     ///
     /// * `streaming` - Stream HVG computation to reduce memory pressure.
     /// * `seed` - Seed for reproducibility.
-    /// * `verbose` - Controls verbosity.
+    /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+    ///   detailed verbosity.
     ///
     /// ### Returns
     ///
@@ -309,8 +310,10 @@ impl BoostClassifier {
         &mut self,
         streaming: bool,
         seed: usize,
-        verbose: bool,
+        verbose: usize,
     ) -> Result<BoostResult, BixverseErrors> {
+        let verbosity = parse_verbosity_level(verbose);
+
         let start_all = Instant::now();
 
         let hvg_opts = HvgOpts {
@@ -322,7 +325,7 @@ impl BoostClassifier {
             n_bins: self.params.n_bins,
         };
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Identifying highly variable genes...");
         }
         let start_hvg = Instant::now();
@@ -335,7 +338,7 @@ impl BoostClassifier {
             verbose,
         )?;
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(
                 "Using {} highly variable genes. Done in {:.2?}",
                 hvg_genes.len(),
@@ -353,7 +356,7 @@ impl BoostClassifier {
 
         let iter_results: Vec<(Vec<f32>, Vec<f32>)> = (0..self.params.n_iters)
             .map(|iter| {
-                if verbose {
+                if verbosity.normal_verbosity() {
                     println!(
                         " == Running iteration {} of {} ==",
                         iter + 1,
@@ -364,7 +367,7 @@ impl BoostClassifier {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(
                 "Completed {} iterations in {:.2?}\n",
                 self.params.n_iters,
@@ -398,7 +401,7 @@ impl BoostClassifier {
             let scores = &all_scores[0];
             let cutoff = find_score_cutoff(scores);
 
-            if verbose {
+            if verbosity.normal_verbosity() {
                 println!("Score cutoff: {:.4}", cutoff);
             }
 
@@ -409,7 +412,7 @@ impl BoostClassifier {
             }
         };
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             let n_doublets = result.predicted_doublets.iter().filter(|&&d| d).count();
             println!(
                 "Detected {} doublets ({:.1}%)",
@@ -432,7 +435,8 @@ impl BoostClassifier {
     /// * `target_size` - Normalisation target library size.
     /// * `hvg_genes` - Indices of highly variable genes.
     /// * `seed` - Seed for this iteration.
-    /// * `verbose` - Controls verbosity.
+    /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+    ///   detailed verbosity.
     ///
     /// ### Returns
     ///
@@ -442,8 +446,10 @@ impl BoostClassifier {
         target_size: f32,
         hvg_genes: &[usize],
         seed: usize,
-        verbose: bool,
+        verbose: usize,
     ) -> Result<(Vec<f32>, Vec<f32>), BixverseErrors> {
+        let verbosity = parse_verbosity_level(verbose);
+
         let pca_opts = PcaOpts {
             log_transform: self.params.log_transform,
             mean_center: self.params.mean_center,
@@ -469,7 +475,7 @@ impl BoostClassifier {
             None => {
                 let pca_start = Instant::now();
 
-                if verbose {
+                if verbosity.normal_verbosity() {
                     println!(" Generating the PCA in the first iteration");
                 }
 
@@ -486,7 +492,7 @@ impl BoostClassifier {
                 )?;
                 self.pca_results = Some(pca_res);
 
-                if verbose {
+                if verbosity.normal_verbosity() {
                     println!(
                         " Finished the initial PCA in {:.2?} and storing results for subsequent iterations",
                         pca_start.elapsed()
@@ -499,7 +505,7 @@ impl BoostClassifier {
 
         // kNN
         let k_adj = adjusted_k(self.params.knn_params.k, self.n_cells, self.n_cells_sim);
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Using {} neighbours in the kNN generation.", k_adj);
         }
 
@@ -519,12 +525,12 @@ impl BoostClassifier {
                 knn_params: centroid_knn_params,
                 louvain_iters: self.params.louvain_iters,
                 batch_size: self.params.fast_cluster_params.batch_size,
-                kmeans_iters: self.params.fast_cluster_params.kmeans_iters,
+                kmeans_params: self.params.fast_cluster_params.kmeans_params.clone(),
                 multi_level_louvain: false,
                 ..Default::default()
             };
 
-            if verbose {
+            if verbosity.normal_verbosity() {
                 println!(
                     "Using fast clustering with {} centroids, k={} on {} cells.",
                     n_centroids, centroid_k, total_cells
@@ -555,7 +561,7 @@ impl BoostClassifier {
             get_assignments(res)[0].clone()
         } else {
             let k_adj = adjusted_k(self.params.knn_params.k, self.n_cells, self.n_cells_sim);
-            if verbose {
+            if verbosity.normal_verbosity() {
                 println!("Using {} neighbours in the kNN generation.", k_adj);
             }
             let knn = dispatch_knn(
@@ -563,14 +569,14 @@ impl BoostClassifier {
                 k_adj,
                 &self.params.knn_params,
                 seed,
-                verbose,
-            );
+                verbosity.detailed_verbosity(),
+            )?;
 
             let start_graph = Instant::now();
             // for doublet detection symmetrisation is not very good... better
             // to keep it false here
             let graph = knn_to_sparse_graph(&knn, false);
-            if verbose {
+            if verbosity.normal_verbosity() {
                 println!(
                     "Transformed kNN graph. Done in {:.2?}",
                     start_graph.elapsed()
@@ -585,7 +591,7 @@ impl BoostClassifier {
             )?
         };
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(
                 "Generated communities. Done in {:.2?}",
                 start_cluster.elapsed()

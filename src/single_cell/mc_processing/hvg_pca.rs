@@ -51,8 +51,8 @@ pub fn get_hvg_vst_from_sparse(
     let mut vars = Vec::with_capacity(n_genes);
 
     for j in 0..n_genes {
-        let start = csc.indptr[j];
-        let end = csc.indptr[j + 1];
+        let start = csc.indptr[j] as usize;
+        let end = csc.indptr[j + 1] as usize;
         let nnz = end - start;
         let slice = &csc.data[start..end];
 
@@ -78,8 +78,8 @@ pub fn get_hvg_vst_from_sparse(
     let mut var_standardised = Vec::with_capacity(n_genes);
 
     for j in 0..n_genes {
-        let start = csc.indptr[j];
-        let end = csc.indptr[j + 1];
+        let start = csc.indptr[j] as usize;
+        let end = csc.indptr[j + 1] as usize;
         let nnz = end - start;
         let slice = &csc.data[start..end];
 
@@ -149,8 +149,8 @@ pub fn get_hvg_dispersion_from_sparse(
     let mut dispersions = Vec::with_capacity(n_genes);
 
     for j in 0..n_genes {
-        let start = csc.indptr[j];
-        let end = csc.indptr[j + 1];
+        let start = csc.indptr[j] as usize;
+        let end = csc.indptr[j + 1] as usize;
         let slice = &csc.data[start..end];
 
         // zero entries contribute expm1(0) = 0 so nonzeros suffice
@@ -247,10 +247,10 @@ pub fn pca_on_metacells<T: BixverseNumeric>(
 
     let mut scaled = Mat::<f64>::zeros(n_cells, n_genes);
     for j in 0..n_genes {
-        let start = csc.indptr[j];
-        let end = csc.indptr[j + 1];
+        let start = csc.indptr[j] as usize;
+        let end = csc.indptr[j + 1] as usize;
         for idx in start..end {
-            let i = csc.indices[idx];
+            let i = csc.indices[idx] as usize;
             scaled[(i, j)] = vals[idx] as f64;
         }
         let sum: f64 = (start..end).map(|idx| vals[idx] as f64).sum();

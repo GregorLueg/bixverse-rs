@@ -5,9 +5,9 @@ use rayon::prelude::*;
 
 use crate::prelude::BixverseFloat;
 
-////////////////
-// Infotheory //
-////////////////
+/////////////////
+// Info theory //
+/////////////////
 
 /// Calculate the mutual information between two column references
 ///

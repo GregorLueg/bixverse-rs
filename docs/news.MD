@@ -1,5 +1,37 @@
 # News
 
+## 0.3.0
+
+Major update / release
+
+### Features
+
+#### General
+
+- Better error handling
+
+#### Single cells:
+
+- Multi file support for MTX reading (several 10x experiments to ingest).
+- MELD implementation from Burkhardt, et al., Nat Biotechnol, 2021.
+- Merging single cell binary files
+- New feature gate `"multi-modal"`:
+  * Weighted nearest neighbour graph method behind a new feature gate.
+  * DSB normalisation for CITE Seq ADT
+- First annotation helpers... ScType implemented
+- Improved Harmony (version 1 and 2) and HotSpot with increased speed
+- h5ad ingest automatically recognises where raw counts are being stored
+- Updates to various package editions
+- SEACells and SuperCells that are actually memory efficient. Run on a million
+  cells in a ~20 GB memory pressure range.
+- Improved batching for SCENIC
+
+#### GPU-accelerated methods:
+
+- First implementation of GPU-accelerated method (behind the feature gate
+  `"gpu"`):
+  * k-means clustering -> to be integrated in the future in some of methods
+
 ## 0.2.0
 
 Major update / release

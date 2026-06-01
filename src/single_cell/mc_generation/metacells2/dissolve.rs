@@ -40,10 +40,10 @@ fn sum_per_gene(
         if !pred(candidate_of_cell[cell]) {
             continue;
         }
-        let start = raw_umis.indptr[cell];
-        let end = raw_umis.indptr[cell + 1];
+        let start = raw_umis.indptr[cell] as usize;
+        let end = raw_umis.indptr[cell + 1] as usize;
         for idx in start..end {
-            let g = raw_umis.indices[idx];
+            let g = raw_umis.indices[idx] as usize;
             sums[g] += raw_umis.data[idx] as f64;
         }
     }
@@ -147,10 +147,10 @@ pub fn dissolve_metacells(
         let mut keep_this = false;
         let mut candidate_per_gene = vec![0.0_f64; n_genes];
         for &cell in &cell_indices {
-            let start = raw_umis.indptr[cell];
-            let end = raw_umis.indptr[cell + 1];
+            let start = raw_umis.indptr[cell] as usize;
+            let end = raw_umis.indptr[cell + 1] as usize;
             for idx in start..end {
-                let g = raw_umis.indices[idx];
+                let g = raw_umis.indices[idx] as usize;
                 candidate_per_gene[g] += raw_umis.data[idx] as f64;
             }
         }
@@ -200,7 +200,7 @@ pub fn dissolve_metacells(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::math::sparse::CompressedSparseFormat;
+    use crate::{core::math::sparse::CompressedSparseFormat, prelude::VecIndexCast};
 
     fn make_raw(rows: Vec<Vec<(usize, u32)>>, n_genes: usize) -> CompressedSparseData2<u32, f32> {
         let mut data = Vec::new();
@@ -215,8 +215,8 @@ mod tests {
         }
         CompressedSparseData2 {
             data,
-            indices,
-            indptr,
+            indices: indices.index_cast(),
+            indptr: indptr.index_cast(),
             cs_type: CompressedSparseFormat::Csr,
             data_2: None,
             shape: (rows.len(), n_genes),

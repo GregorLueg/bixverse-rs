@@ -3,166 +3,21 @@
 //! cell types, optional batch effects and different cell abundance
 //! distributions per given sample.
 
+use std::f64;
+
 use rand::prelude::*;
-use rand_distr::weighted::WeightedAliasIndex;
-use rand_distr::{Distribution, StandardNormal};
+use rand_distr::StandardNormal;
 use rustc_hash::FxHashMap;
 
 use crate::prelude::*;
 
-/////////////////////////
-// Random sparse data ///
-/////////////////////////
+////////////////////////////////
+// Synthetic single cell data //
+////////////////////////////////
 
-/// Create weighted sparse data resembling single cell counts in CSC
-///
-/// ### Params
-///
-/// * `nrow` - Number of rows (cells)
-/// * `ncol` - Number of columns (genes)
-/// * `n_cells` - Total no of cells
-/// * `no_genes_exp` - Tuple representing the minimum number and the maximum
-///   number of genes expressed per cell
-/// * `max_exp` - Maximum expression a given gene can reach. Expression values
-///   will be between `1..max_exp`
-/// * `seed` - Seed for reproducibility purposes
-///
-/// ### Returns
-///
-/// The `CscData` type with the synthetic data.
-pub fn create_sparse_csc_data(
-    nrow: usize,
-    ncol: usize,
-    genes_per_cell: (usize, usize),
-    max_exp: i32,
-    seed: usize,
-) -> CompressedSparseData2<i32> {
-    let weights: Vec<f64> = (1..=ncol).map(|i| 1.0 / i as f64).collect();
-    let alias = WeightedAliasIndex::new(weights).unwrap();
-
-    // Imitate what's going on the the CSR
-    let mut gene_data: Vec<Vec<(usize, i32)>> = vec![Vec::new(); ncol];
-
-    for cell_idx in 0..nrow {
-        let mut rng = StdRng::seed_from_u64(seed as u64 + cell_idx as u64);
-        let no_genes_expressed = rng.random_range(genes_per_cell.0..=genes_per_cell.1);
-
-        let mut temp_vec = Vec::with_capacity(genes_per_cell.1);
-
-        for _ in 0..no_genes_expressed {
-            let gene_idx = alias.sample(&mut rng);
-            let count = rng.random_range(1..=max_exp);
-            temp_vec.push((gene_idx, count));
-        }
-
-        temp_vec.sort_unstable_by_key(|(gene_idx, _)| *gene_idx);
-
-        for (gene_idx, count) in temp_vec {
-            gene_data[gene_idx].push((cell_idx, count));
-        }
-    }
-
-    // generate the CSC structure
-    let estimated_total: usize = gene_data.iter().map(|v| v.len()).sum();
-    let mut indptr = Vec::with_capacity(ncol + 1);
-    let mut indices = Vec::with_capacity(estimated_total);
-    let mut data = Vec::with_capacity(estimated_total);
-    indptr.push(0);
-
-    for gene_idx in 0..ncol {
-        // Sort cells for this gene
-        gene_data[gene_idx].sort_unstable_by_key(|(cell_idx, _)| *cell_idx);
-
-        // Add ALL data for this gene (including duplicates from same cell)
-        for (cell_idx, count) in &gene_data[gene_idx] {
-            indices.push(*cell_idx);
-            data.push(*count);
-        }
-
-        indptr.push(indices.len());
-    }
-
-    CompressedSparseData2 {
-        data,
-        indices,
-        indptr,
-        cs_type: CompressedSparseFormat::Csc,
-        data_2: None::<Vec<i32>>,
-        shape: (nrow, ncol),
-    }
-}
-
-/// Create weighted sparse data resembling single cell counts in CSR format
-///
-/// ### Params
-///
-/// * `nrow` - Number of rows (cells)
-/// * `ncol` - Number of columns (genes)
-/// * `no_genes_exp` - Tuple representing the min and max number of genes expressed
-///   per cell
-/// * `max_exp` - Maximum expression a given gene can reach. Expression values will
-///   be between `1..max_exp`
-/// * `seed` - Seed for reproducibility purposes
-///
-/// ### Returns
-///
-/// The `CsrData` type with the synthetic data (cells as rows, genes as columns).
-pub fn create_sparse_csr_data(
-    nrow: usize,
-    ncol: usize,
-    no_genes_exp: (usize, usize),
-    max_exp: i32,
-    seed: usize,
-) -> CompressedSparseData2<i32> {
-    let weights: Vec<f64> = (1..=ncol).map(|i| 1.0 / i as f64).collect();
-    let alias = WeightedAliasIndex::new(weights).unwrap();
-
-    let avg_genes = (no_genes_exp.0 + no_genes_exp.1) / 2;
-    let estimated_total = ncol * avg_genes;
-
-    let mut indptr = Vec::with_capacity(ncol + 1);
-    let mut indices = Vec::with_capacity(estimated_total);
-    let mut data = Vec::with_capacity(estimated_total);
-    indptr.push(0);
-
-    let mut temp_vec = Vec::with_capacity(no_genes_exp.1);
-
-    for cell_idx in 0..nrow {
-        let mut rng = StdRng::seed_from_u64(seed as u64 + cell_idx as u64);
-        let no_genes_expressed = rng.random_range(no_genes_exp.0..=no_genes_exp.1);
-
-        temp_vec.clear();
-
-        for _ in 0..no_genes_expressed {
-            let gene_idx = alias.sample(&mut rng);
-            let count = rng.random_range(1..=max_exp);
-            temp_vec.push((gene_idx, count));
-        }
-
-        // Sort by gene index
-        temp_vec.sort_unstable_by_key(|(gene_idx, _)| *gene_idx);
-
-        for (gene_idx, count) in temp_vec.iter() {
-            indices.push(*gene_idx);
-            data.push(*count);
-        }
-
-        indptr.push(indices.len());
-    }
-
-    CompressedSparseData2 {
-        data,
-        indices,
-        indptr,
-        cs_type: CompressedSparseFormat::Csr,
-        data_2: None::<Vec<i32>>,
-        shape: (nrow, ncol),
-    }
-}
-
-///////////////////////////
-// Specific sparse data ///
-///////////////////////////
+///////////
+// Enums //
+///////////
 
 /// Enum defining the strength of the batch effect in the synthetic data
 #[derive(Clone, Copy, Debug)]
@@ -229,6 +84,10 @@ pub struct CellTypeConfig {
     /// Indices are the marker genes for this specific cell type
     pub marker_genes: Vec<usize>,
 }
+
+////////////////////
+// Main functions //
+////////////////////
 
 /// Helper function to create synthetic data with specific cell types
 ///
@@ -379,8 +238,8 @@ pub fn create_celltype_sparse_csr_data(
 
     let csr = CompressedSparseData2 {
         data,
-        indices,
-        indptr,
+        indices: indices.index_cast(),
+        indptr: indptr.index_cast(),
         cs_type: CompressedSparseFormat::Csr,
         data_2: None::<Vec<u32>>,
         shape: (nrow, ncol),
@@ -480,6 +339,130 @@ pub fn generate_sample_labels(
 
     sample_labels
 }
+
+/// Helper function to create synthetic ADT (protein) counts
+///
+/// Produces a dense cells x proteins matrix of raw ADT counts with the
+/// structure CLR and DSB normalisation care about: every protein carries an
+/// ambient background, marker proteins are additionally elevated in their
+/// target cell type, and isotype controls only ever carry background. A
+/// per-cell size factor models capture efficiency and an optional per-batch
+/// per-protein multiplier models staining differences across batches.
+///
+/// Cell type and batch assignment use the same formulas as
+/// [create_celltype_sparse_csr_data], so labels line up cell-for-cell when the
+/// two are generated with matching `nrow`, number of cell types and
+/// `n_batches`.
+///
+/// ### Params
+///
+/// * `nrow` - Number of rows (cells).
+/// * `n_proteins` - Number of columns (proteins) in the panel.
+/// * `cell_type_configs` - Marker protein column indices per cell type.
+/// * `isotype_controls` - Column indices of the isotype controls.
+/// * `n_batches` - Number of batches to introduce.
+/// * `batch_effect_strength` - Strength of the per-batch staining effect.
+/// * `seed` - Integer for reproducibility.
+///
+/// ### Returns
+///
+/// A tuple `(counts, cell_type_labels, batch_labels)` where `counts` is a
+/// row-major dense matrix of length `nrow * n_proteins`.
+pub fn create_adt_synthetic_data(
+    nrow: usize,
+    n_proteins: usize,
+    cell_type_configs: Vec<CellTypeConfig>,
+    isotype_controls: Vec<usize>,
+    n_batches: usize,
+    batch_effect_strength: &str,
+    seed: usize,
+) -> (Vec<u32>, Vec<usize>, Vec<usize>) {
+    let batch_strength =
+        parse_batch_effect_strength(batch_effect_strength).unwrap_or(BatchEffectStrength::Strong);
+
+    let n_cell_types = cell_type_configs.len();
+
+    let batch_spread = match batch_strength {
+        BatchEffectStrength::Weak => 0.1,
+        BatchEffectStrength::Medium => 0.3,
+        BatchEffectStrength::Strong => 0.6,
+    };
+
+    let mut param_rng = StdRng::seed_from_u64(seed as u64);
+
+    // per-protein parameters
+    let mut bg_mean = vec![0.0; n_proteins];
+    let mut signal_mean = vec![0.0; n_proteins];
+    let mut dispersion = vec![0.0; n_proteins];
+    for p in 0..n_proteins {
+        bg_mean[p] = 1.0 + param_rng.random::<f64>() * 9.0; // ambient 1-10
+        signal_mean[p] = 300.0 + param_rng.random::<f64>() * 1700.0; // specific 300-2000 (markers only)
+        dispersion[p] = 3.0 + param_rng.random::<f64>() * 12.0; // NB size r
+    }
+
+    // per-batch per-protein staining multiplier (batch 0 == 1.0)
+    let mut batch_mult = vec![vec![1.0; n_proteins]; n_batches.max(1)];
+    for b in 1..n_batches {
+        for p in 0..n_proteins {
+            let u: f64 = param_rng.random();
+            batch_mult[b][p] = (1.0 + (u * 2.0 - 1.0) * batch_spread).max(0.05);
+        }
+    }
+
+    // marker protein -> owning cell type
+    let mut marker_to_celltype = FxHashMap::default();
+    for (ct_idx, config) in cell_type_configs.iter().enumerate() {
+        for &protein_idx in &config.marker_genes {
+            marker_to_celltype.insert(protein_idx, ct_idx);
+        }
+    }
+    // isotypes carry background only; never let them act as markers
+    for &iso in &isotype_controls {
+        marker_to_celltype.remove(&iso);
+    }
+
+    let mut counts = vec![0u32; nrow * n_proteins];
+    let mut cell_type_labels = Vec::with_capacity(nrow);
+    let mut batch_labels = Vec::with_capacity(nrow);
+
+    for cell_idx in 0..nrow {
+        let mut rng = StdRng::seed_from_u64(seed as u64 + cell_idx as u64);
+        let cell_type = cell_idx % n_cell_types;
+        let batch = (cell_idx * n_batches) / nrow;
+
+        cell_type_labels.push(cell_type);
+        batch_labels.push(batch);
+
+        // per-cell capture efficiency
+        let z: f64 = rng.sample(StandardNormal);
+        let size_factor = (0.3 * z).exp();
+
+        let row = cell_idx * n_proteins;
+        for p in 0..n_proteins {
+            let mut mu = bg_mean[p];
+
+            if let Some(&marker_ct) = marker_to_celltype.get(&p)
+                && marker_ct == cell_type
+            {
+                mu += signal_mean[p];
+            }
+
+            mu *= size_factor;
+            mu *= batch_mult[batch][p];
+
+            let r = dispersion[p];
+            let scale = mu / r;
+            let lambda = gamma_sample(&mut rng, r, scale);
+            counts[row + p] = poisson_sample(&mut rng, lambda);
+        }
+    }
+
+    (counts, cell_type_labels, batch_labels)
+}
+
+/////////////
+// Helpers //
+/////////////
 
 /// Helper function to sample from a Gamma distribution
 ///

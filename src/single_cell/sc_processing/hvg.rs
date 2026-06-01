@@ -41,8 +41,10 @@ pub struct HvgDispersionRes {
 }
 
 /// Enum for the different methods
+#[derive(Debug, Clone, Copy, Default)]
 pub enum HvgMethod {
     /// Variance stabilising transformation
+    #[default]
     Vst,
     /// Binned version by average expression
     MeanVarBin,
@@ -415,7 +417,8 @@ pub fn calculate_std_variance_filtered(
 /// * `cell_indices` - HashSet with the cell indices to keep.
 /// * `loess_span` - Span parameter for the loess function
 /// * `clip_max` - Optional clip max parameter
-/// * `verbose` - If verbose, returns the timings of the function.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -425,8 +428,10 @@ pub fn get_hvg_vst(
     cell_indices: &[usize],
     loess_span: f32,
     clip_max: Option<f32>,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<HvgRes, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let start_total = Instant::now();
 
     // Get data
@@ -445,8 +450,8 @@ pub fn get_hvg_vst(
 
     let end_read = start_read.elapsed();
 
-    if verbose {
-        println!("Load in data: {:.2?}", end_read);
+    if verbosity.normal_verbosity() {
+        println!("HVG (VST): Load in data in {:.2?}", end_read);
     }
 
     let start_gene_stats = Instant::now();
@@ -458,8 +463,11 @@ pub fn get_hvg_vst(
 
     let end_gene_stats = start_gene_stats.elapsed();
 
-    if verbose {
-        println!("Calculated gene statistics: {:.2?}", end_gene_stats);
+    if verbosity.normal_verbosity() {
+        println!(
+            "HVG (VST): Calculated gene statistics in {:.2?}",
+            end_gene_stats
+        );
     }
 
     let start_loess = Instant::now();
@@ -475,8 +483,8 @@ pub fn get_hvg_vst(
 
     let end_loess = start_loess.elapsed();
 
-    if verbose {
-        println!("Fitted Loess: {:.2?}", end_loess);
+    if verbosity.normal_verbosity() {
+        println!("HVG (VST): Fitted Loess in {:.2?}", end_loess);
     }
 
     let start_standard = Instant::now();
@@ -500,14 +508,14 @@ pub fn get_hvg_vst(
 
     let end_standard = start_standard.elapsed();
 
-    if verbose {
-        println!("Standardised variance: {:.2?}", end_standard);
+    if verbosity.normal_verbosity() {
+        println!("HVG (VST): Standardised variance in {:.2?}", end_standard);
     }
 
     let total = start_total.elapsed();
 
-    if verbose {
-        println!("Total run time HVG detection: {:.2?}", total);
+    if verbosity.normal_verbosity() {
+        println!("HVG (VST): Total run time -> {:.2?}", total);
     }
 
     // transform to f64 for R
@@ -533,7 +541,8 @@ pub fn get_hvg_vst(
 /// * `cell_indices` - Slice with the cell indices to keep.
 /// * `loess_span` - Span parameter for the loess function
 /// * `clip_max` - Optional clip max parameter
-/// * `verbose` - If verbose, returns the timings of the function.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -543,8 +552,10 @@ pub fn get_hvg_vst_streaming(
     cell_indices: &[usize],
     loess_span: f32,
     clip_max: Option<f32>,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<HvgRes, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let start_total = Instant::now();
 
     let reader = ParallelSparseReader::new(f_path)?;
@@ -558,9 +569,9 @@ pub fn get_hvg_vst_streaming(
         .map(|(new_idx, &old_idx)| (old_idx as u32, new_idx as u32))
         .collect();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
-            "Pass 1/2: Calculating mean and variance for {} genes...",
+            "HVG (VST, streaming): Pass 1/2 -> Calculating mean and variance for {} genes...",
             no_genes.separate_with_underscores()
         );
     }
@@ -575,7 +586,7 @@ pub fn get_hvg_vst_streaming(
     let mut vars = Vec::with_capacity(no_genes);
 
     for batch_idx in 0..num_batches {
-        if verbose && batch_idx % 5 == 0 {
+        if verbosity.detailed_verbosity() && batch_idx % 5 == 0 {
             let progress = (batch_idx + 1) as f32 / num_batches as f32 * 100.0;
             println!("  Progress: {:.1}%", progress);
         }
@@ -590,7 +601,7 @@ pub fn get_hvg_vst_streaming(
 
         let end_loading = start_loading.elapsed();
 
-        if verbose {
+        if verbosity.detailed_verbosity() {
             println!("   Loaded batch in: {:.2?}.", end_loading);
         }
 
@@ -603,7 +614,7 @@ pub fn get_hvg_vst_streaming(
 
         let end_batch = start_batch.elapsed();
 
-        if verbose {
+        if verbosity.detailed_verbosity() {
             println!("   Finished calculations in: {:.2?}.", end_batch);
         }
 
@@ -617,7 +628,7 @@ pub fn get_hvg_vst_streaming(
 
     let end_pass1 = start_pass1.elapsed();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("  Calculated gene statistics: {:.2?}", end_pass1);
     }
 
@@ -633,9 +644,9 @@ pub fn get_hvg_vst_streaming(
 
     let end_loess = start_loess.elapsed();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("  Fitted Loess: {:.2?}", end_loess);
-        println!("Pass 2/2: Calculating standardised variance...");
+        println!("HVG (VST, streaming): Pass 2/2 -> Calculating standardised variance...");
     }
 
     // second pass -> calculate standardised variance in batches
@@ -644,7 +655,7 @@ pub fn get_hvg_vst_streaming(
     let mut var_standardised = Vec::with_capacity(no_genes);
 
     for batch_idx in 0..num_batches {
-        if verbose && batch_idx % 5 == 0 {
+        if verbosity.detailed_verbosity() && batch_idx % 5 == 0 {
             let progress = (batch_idx + 1) as f32 / num_batches as f32 * 100.0;
             println!("  Progress: {:.1}%", progress);
         }
@@ -676,7 +687,7 @@ pub fn get_hvg_vst_streaming(
 
         let end_batch = start_batch.elapsed();
 
-        if verbose {
+        if verbosity.detailed_verbosity() {
             println!(
                 "   Finished calculating standardised variance in: {:.2?}.",
                 end_batch
@@ -690,7 +701,7 @@ pub fn get_hvg_vst_streaming(
 
     let end_pass2 = start_pass2.elapsed();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "  Calculated standardised variance total: {:.2?}",
             end_pass2
@@ -699,8 +710,8 @@ pub fn get_hvg_vst_streaming(
 
     let total = start_total.elapsed();
 
-    if verbose {
-        println!("Total run time HVG detection: {:.2?}", total);
+    if verbosity.normal_verbosity() {
+        println!("HVG (VST, streaming): Total run time -> {:.2?}", total);
     }
 
     // transform to f64 for R
@@ -725,7 +736,8 @@ pub fn get_hvg_vst_streaming(
 /// * `binning` - The binning strategy to use. One of
 ///   `"equal_width"` or `"equal_freq"`
 /// * `n_bins` - The number of bins to use
-/// * `verbose` - Controls verbosity
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -735,8 +747,10 @@ pub fn get_hvg_dispersion(
     cell_indices: &[usize],
     binning: &str,
     n_bins: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<HvgDispersionRes, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let start_total = Instant::now();
 
     let binning = parse_bin_strategy_type(binning).unwrap_or_default();
@@ -752,8 +766,11 @@ pub fn get_hvg_dispersion(
         .map(|(new_idx, &old_idx)| (old_idx as u32, new_idx as u32))
         .collect();
 
-    if verbose {
-        println!("Load in data: {:.2?}", start_read.elapsed());
+    if verbosity.normal_verbosity() {
+        println!(
+            "HVG (dispersion): Load in data in {:.2?}",
+            start_read.elapsed()
+        );
     }
 
     let start_stats = Instant::now();
@@ -762,18 +779,24 @@ pub fn get_hvg_dispersion(
         .map(|chunk| calculate_disp_stats_filtered(chunk, &cell_idx_map, no_cells))
         .collect();
 
-    if verbose {
-        println!("Calculated gene statistics: {:.2?}", start_stats.elapsed());
+    if verbosity.normal_verbosity() {
+        println!(
+            "HVG (dispersion): Calculated gene statistics in {:.2?}",
+            start_stats.elapsed()
+        );
     }
 
     let (means, dispersions): (Vec<f32>, Vec<f32>) = results.into_iter().unzip();
 
     let start_bin = Instant::now();
     let res = build_disp_result(means, dispersions, binning, n_bins);
-    if verbose {
-        println!("Binning and scaling: {:.2?}", start_bin.elapsed());
+    if verbosity.normal_verbosity() {
         println!(
-            "Total run time HVG dispersion: {:.2?}",
+            "HVG (dispersion): Binning and scaling in {:.2?}",
+            start_bin.elapsed()
+        );
+        println!(
+            "HVG (dispersion): Total run time -> {:.2?}",
             start_total.elapsed()
         );
     }
@@ -790,7 +813,8 @@ pub fn get_hvg_dispersion(
 /// * `binning` - The binning strategy to use. One of
 ///   `"equal_width"` or `"equal_freq"`
 /// * `n_bins` - The number of bins to use
-/// * `verbose` - Controls verbosity
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -800,8 +824,10 @@ pub fn get_hvg_dispersion_streaming(
     cell_indices: &[usize],
     binning: &str,
     n_bins: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<HvgDispersionRes, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let start_total = Instant::now();
 
     let binning = parse_bin_strategy_type(binning).unwrap_or_default();
@@ -817,9 +843,9 @@ pub fn get_hvg_dispersion_streaming(
         .map(|(new_idx, &old_idx)| (old_idx as u32, new_idx as u32))
         .collect();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
-            "Calculating dispersion stats for {} genes...",
+            "HVG (dispersion, streaming): Calculating dispersion stats for {} genes...",
             no_genes.separate_with_underscores()
         );
     }
@@ -831,7 +857,7 @@ pub fn get_hvg_dispersion_streaming(
     let mut dispersions = Vec::with_capacity(no_genes);
 
     for batch_idx in 0..num_batches {
-        if verbose && batch_idx % 5 == 0 {
+        if verbosity.detailed_verbosity() && batch_idx % 5 == 0 {
             let progress = (batch_idx + 1) as f32 / num_batches as f32 * 100.0;
             println!("  Progress: {:.1}%", progress);
         }
@@ -858,10 +884,13 @@ pub fn get_hvg_dispersion_streaming(
     let start_bin = Instant::now();
     let res = build_disp_result(means, dispersions, binning, n_bins);
 
-    if verbose {
-        println!("Binning and scaling: {:.2?}", start_bin.elapsed());
+    if verbosity.normal_verbosity() {
         println!(
-            "Total run time HVG dispersion: {:.2?}",
+            "HVG (dispersion, streaming): Binning and scaling in {:.2?}",
+            start_bin.elapsed()
+        );
+        println!(
+            "HVG (dispersion, streaming): Total run time -> {:.2?}",
             start_total.elapsed()
         );
     }
@@ -880,7 +909,8 @@ pub fn get_hvg_dispersion_streaming(
 /// * `binning` - The binning strategy to use. One of
 ///   `"equal_width"` or `"equal_freq"`
 /// * `n_bins` - The number of bins to use
-/// * `verbose` - Controls verbosity
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -890,7 +920,7 @@ pub fn get_hvg_mvb(
     cell_indices: &[usize],
     binning: &str,
     n_bins: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<HvgDispersionRes, BixverseErrors> {
     get_hvg_dispersion(f_path, cell_indices, binning, n_bins, verbose)
 }
@@ -906,7 +936,8 @@ pub fn get_hvg_mvb(
 /// * `binning` - The binning strategy to use. One of
 ///   `"equal_width"` or `"equal_freq"`
 /// * `n_bins` - The number of bins to use
-/// * `verbose` - Controls verbosity
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -916,7 +947,7 @@ pub fn get_hvg_mvb_streaming(
     cell_indices: &[usize],
     binning: &str,
     n_bins: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<HvgDispersionRes, BixverseErrors> {
     get_hvg_dispersion_streaming(f_path, cell_indices, binning, n_bins, verbose)
 }
@@ -940,7 +971,8 @@ pub fn get_hvg_mvb_streaming(
 /// * `batch_labels` - Batch assignment for each cell (same length as cell_indices)
 /// * `loess_span` - Span parameter for the loess function
 /// * `clip_max` - Optional clip max parameter
-/// * `verbose` - If verbose, prints timing information
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -951,8 +983,10 @@ pub fn get_hvg_vst_batch_aware(
     batch_labels: &[usize],
     loess_span: f32,
     clip_max: Option<f32>,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<Vec<HvgRes>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let start_total = Instant::now();
 
     // batch cell maps
@@ -969,9 +1003,12 @@ pub fn get_hvg_vst_batch_aware(
 
     let end_setup = start_setup.elapsed();
 
-    if verbose {
-        println!("Setup batch maps: {:.2?}", end_setup);
-        println!("Processing {} batches", n_batches);
+    if verbosity.normal_verbosity() {
+        println!(
+            "HVG (VST, batch-aware): Setup batch maps in {:.2?}",
+            end_setup
+        );
+        println!(" Processing {} batches", n_batches);
     }
 
     // load data
@@ -980,8 +1017,8 @@ pub fn get_hvg_vst_batch_aware(
     let mut gene_chunks: Vec<CscGeneChunk> = reader.get_all_genes()?;
     let end_read = start_read.elapsed();
 
-    if verbose {
-        println!("Loaded data: {:.2?}", end_read);
+    if verbosity.normal_verbosity() {
+        println!("HVG (VST, batch-aware): Loaded data in {:.2?}", end_read);
     }
 
     // Calculate the gene statistics
@@ -1009,8 +1046,11 @@ pub fn get_hvg_vst_batch_aware(
 
     let end_pass_1 = start_pass_1.elapsed();
 
-    if verbose {
-        println!("Calculated gene statistics per batch: {:.2?}", end_pass_1);
+    if verbosity.normal_verbosity() {
+        println!(
+            "HVG (VST, batch-aware): Calculated gene statistics per batch in {:.2?}",
+            end_pass_1
+        );
     }
 
     // fit loess per batch
@@ -1033,8 +1073,11 @@ pub fn get_hvg_vst_batch_aware(
 
     let end_loess = start_loess.elapsed();
 
-    if verbose {
-        println!("Fitted loess per batch: {:.2?}", end_loess);
+    if verbosity.normal_verbosity() {
+        println!(
+            "HVG (VST, batch-aware): Fitted loess per batch in {:.2?}",
+            end_loess
+        );
     }
 
     // standardise variance
@@ -1065,17 +1108,17 @@ pub fn get_hvg_vst_batch_aware(
 
     let end_pass_2 = start_pass_2.elapsed();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
-            "Calculated standardised variance per batch: {:.2?}",
+            "HVG (VST, batch-aware): Calculated standardised variance per batch in {:.2?}",
             end_pass_2
         );
     }
 
     let total = start_total.elapsed();
 
-    if verbose {
-        println!("Total runtime batch-aware HVG: {:.2?}", total);
+    if verbosity.normal_verbosity() {
+        println!("HVG (VST, batch-aware): Total runtime -> {:.2?}", total);
     }
 
     let res = batch_means
@@ -1107,7 +1150,8 @@ pub fn get_hvg_vst_batch_aware(
 ///   indices)
 /// * `loess_span` - Span parameter for the loess function
 /// * `clip_max` - Optional clip max parameter
-/// * `verbose` - If verbose, prints timing information
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -1118,8 +1162,10 @@ pub fn get_hvg_vst_batch_aware_streaming(
     batch_labels: &[usize],
     loess_span: f32,
     clip_max: Option<f32>,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<Vec<HvgRes>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let start_total = Instant::now();
 
     let reader = ParallelSparseReader::new(f_path)?;
@@ -1140,15 +1186,18 @@ pub fn get_hvg_vst_batch_aware_streaming(
 
     let end_setup = start_setup.elapsed();
 
-    if verbose {
-        println!("Setup batch maps: {:.2?}", end_setup);
-        println!("Processing {} batches", n_batches);
+    if verbosity.normal_verbosity() {
+        println!(
+            "HVG (VST, streaming, batch-aware): Setup batch maps in {:.2?}",
+            end_setup
+        );
+        println!(" Processing {} batches", n_batches);
     }
 
     // Pass 1: Calculate mean and variance per batch
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
-            "Pass 1/2: Calculating mean and variance for {} genes...",
+            "HVG (VST, streaming, batch-aware): Pass 1/2 -> Calculating mean and variance for {} genes...",
             no_genes.separate_with_underscores()
         );
     }
@@ -1161,7 +1210,7 @@ pub fn get_hvg_vst_batch_aware_streaming(
     let mut batch_vars: Vec<Vec<f32>> = vec![Vec::with_capacity(no_genes); n_batches];
 
     for chunk_idx in 0..num_batches {
-        if verbose && chunk_idx % 5 == 0 {
+        if verbosity.detailed_verbosity() && chunk_idx % 5 == 0 {
             let progress = (chunk_idx + 1) as f32 / num_batches as f32 * 100.0;
             println!("  Progress: {:.1}%", progress);
         }
@@ -1194,7 +1243,7 @@ pub fn get_hvg_vst_batch_aware_streaming(
 
     let end_pass1 = start_pass1.elapsed();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("  Calculated gene statistics per batch: {:.2?}", end_pass1);
     }
 
@@ -1218,9 +1267,11 @@ pub fn get_hvg_vst_batch_aware_streaming(
 
     let end_loess = start_loess.elapsed();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("  Fitted loess per batch: {:.2?}", end_loess);
-        println!("Pass 2/2: Calculating standardised variance...");
+        println!(
+            "HVG (VST, streaming, batch-aware): Pass 2/2 -> Calculating standardised variance..."
+        );
     }
 
     // Pass 2: Calculate standardised variance per batch
@@ -1229,7 +1280,7 @@ pub fn get_hvg_vst_batch_aware_streaming(
     let mut batch_std_vars: Vec<Vec<f32>> = vec![Vec::with_capacity(no_genes); n_batches];
 
     for chunk_idx in 0..num_batches {
-        if verbose && chunk_idx % 5 == 0 {
+        if verbosity.detailed_verbosity() && chunk_idx % 5 == 0 {
             let progress = (chunk_idx + 1) as f32 / num_batches as f32 * 100.0;
             println!("  Progress: {:.1}%", progress);
         }
@@ -1266,7 +1317,7 @@ pub fn get_hvg_vst_batch_aware_streaming(
 
     let end_pass2 = start_pass2.elapsed();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "  Calculated standardised variance per batch: {:.2?}",
             end_pass2
@@ -1275,8 +1326,11 @@ pub fn get_hvg_vst_batch_aware_streaming(
 
     let total = start_total.elapsed();
 
-    if verbose {
-        println!("Total runtime batch-aware HVG: {:.2?}", total);
+    if verbosity.normal_verbosity() {
+        println!(
+            "HVG (VST, streaming, batch-aware): Total runtime -> {:.2?}",
+            total
+        );
     }
 
     // Build results per batch
@@ -1311,7 +1365,8 @@ pub fn get_hvg_vst_batch_aware_streaming(
 /// * `binning` - The binning strategy to use. One of
 ///   `"equal_width"` or `"equal_freq"`
 /// * `n_bins` - Number of bins
-/// * `verbose` - Controls verbosity
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -1322,11 +1377,12 @@ pub fn get_hvg_dispersion_batch_aware(
     batch_labels: &[usize],
     binning: &str,
     n_bins: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<Vec<HvgDispersionRes>, BixverseErrors> {
     let start_total = Instant::now();
 
     let binning = parse_bin_strategy_type(binning).unwrap_or_default();
+    let verbosity = parse_verbosity_level(verbose);
 
     let n_batches = *batch_labels.iter().max().unwrap() + 1;
     let mut batch_cell_maps: Vec<FxHashMap<u32, u32>> = vec![FxHashMap::default(); n_batches];
@@ -1337,15 +1393,21 @@ pub fn get_hvg_dispersion_batch_aware(
         batch_sizes[batch] += 1;
     }
 
-    if verbose {
-        println!("Processing {} batches", n_batches);
+    if verbosity.normal_verbosity() {
+        println!(
+            "HVG (Dispersion, batch-aware): Processing {} batches",
+            n_batches
+        );
     }
 
     let start_read = Instant::now();
     let reader = ParallelSparseReader::new(f_path)?;
     let mut gene_chunks: Vec<CscGeneChunk> = reader.get_all_genes()?;
-    if verbose {
-        println!("Loaded data: {:.2?}", start_read.elapsed());
+    if verbosity.normal_verbosity() {
+        println!(
+            "HVG (Dispersion, batch-aware): Loaded data in {:.2?}",
+            start_read.elapsed()
+        );
     }
 
     let mut out = Vec::with_capacity(n_batches);
@@ -1367,9 +1429,9 @@ pub fn get_hvg_dispersion_batch_aware(
         let res = build_disp_result(means, dispersions, binning, n_bins);
         out.push(res);
 
-        if verbose {
+        if verbosity.detailed_verbosity() {
             println!(
-                "Batch {}/{}: {:.2?}",
+                " Batch {}/{}: {:.2?}",
                 batch_idx + 1,
                 n_batches,
                 start_batch.elapsed()
@@ -1377,9 +1439,9 @@ pub fn get_hvg_dispersion_batch_aware(
         }
     }
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
-            "Total runtime batch-aware HVG dispersion: {:.2?}",
+            "HVG (Dispersion, batch-aware): Total runtime -> {:.2?}",
             start_total.elapsed()
         );
     }
@@ -1398,7 +1460,8 @@ pub fn get_hvg_dispersion_batch_aware(
 /// * `binning` - The binning strategy to use. One of
 ///   `"equal_width"` or `"equal_freq"`
 /// * `n_bins` - Number of bins
-/// * `verbose` - Controls verbosity
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -1409,9 +1472,11 @@ pub fn get_hvg_dispersion_batch_aware_streaming(
     batch_labels: &[usize],
     binning: &str,
     n_bins: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<Vec<HvgDispersionRes>, BixverseErrors> {
     let start_total = Instant::now();
+
+    let verbosity = parse_verbosity_level(verbose);
 
     let binning = parse_bin_strategy_type(binning).unwrap_or_default();
 
@@ -1428,10 +1493,13 @@ pub fn get_hvg_dispersion_batch_aware_streaming(
         batch_sizes[batch] += 1;
     }
 
-    if verbose {
-        println!("Processing {} batches", n_batches);
+    if verbosity.normal_verbosity() {
         println!(
-            "Calculating dispersion stats for {} genes...",
+            "HVG (Dispersion, batch-aware, streaming): Processing {} batches",
+            n_batches
+        );
+        println!(
+            " Calculating dispersion stats for {} genes...",
             no_genes.separate_with_underscores()
         );
     }
@@ -1443,7 +1511,7 @@ pub fn get_hvg_dispersion_batch_aware_streaming(
     let mut batch_dispersions: Vec<Vec<f32>> = vec![Vec::with_capacity(no_genes); n_batches];
 
     for chunk_idx in 0..num_batches {
-        if verbose && chunk_idx % 5 == 0 {
+        if verbosity.detailed_verbosity() && chunk_idx % 5 == 0 {
             let progress = (chunk_idx + 1) as f32 / num_batches as f32 * 100.0;
             println!("  Progress: {:.1}%", progress);
         }
@@ -1481,9 +1549,9 @@ pub fn get_hvg_dispersion_batch_aware_streaming(
         .map(|(means, dispersions)| build_disp_result(means, dispersions, binning, n_bins))
         .collect();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
-            "Total runtime batch-aware streaming HVG dispersion: {:.2?}",
+            "HVG (Dispersion, batch-aware, streaming): Total runtime -> {:.2?}",
             start_total.elapsed()
         );
     }
@@ -1502,7 +1570,8 @@ pub fn get_hvg_dispersion_batch_aware_streaming(
 /// * `binning` - The binning strategy to use. One of
 ///   `"equal_width"` or `"equal_freq"`
 /// * `n_bins` - Number of bins
-/// * `verbose` - Controls verbosity
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -1513,7 +1582,7 @@ pub fn get_hvg_mvb_batch_aware(
     batch_labels: &[usize],
     binning: &str,
     n_bins: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<Vec<HvgDispersionRes>, BixverseErrors> {
     get_hvg_dispersion_batch_aware(f_path, cell_indices, batch_labels, binning, n_bins, verbose)
 }
@@ -1529,7 +1598,8 @@ pub fn get_hvg_mvb_batch_aware(
 /// * `binning` - The binning strategy to use. One of
 ///   `"equal_width"` or `"equal_freq"`
 /// * `n_bins` - Number of bins
-/// * `verbose` - Controls verbosity
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -1540,7 +1610,7 @@ pub fn get_hvg_mvb_batch_aware_streaming(
     batch_labels: &[usize],
     binning: &str,
     n_bins: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<Vec<HvgDispersionRes>, BixverseErrors> {
     get_hvg_dispersion_batch_aware_streaming(
         f_path,

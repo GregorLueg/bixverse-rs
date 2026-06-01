@@ -58,7 +58,8 @@ pub struct BbknnParams {
 /// * `bbknn_params` - `BbknnParams` with the parameters for the BBKNN batch
 ///   correction.
 /// * `seed` - Random seed.
-/// * `verbose` - Controls verbosity.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -69,8 +70,10 @@ fn get_batch_balanced_knn(
     knn_method: &KnnSearch,
     bbknn_params: &BbknnParams,
     seed: usize,
-    verbose: bool,
-) -> (Vec<Vec<usize>>, Vec<Vec<f32>>) {
+    verbose: usize,
+) -> ScKnnResults {
+    let verbosity = parse_verbosity_level(verbose);
+
     let n_cells = mat.nrows();
 
     // get unique batches
@@ -91,7 +94,7 @@ fn get_batch_balanced_knn(
     let col_indices: Vec<usize> = (0..mat.ncols()).collect();
 
     for (batch_idx, &batch) in unique_batches.iter().enumerate() {
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(
                 "Processing batch {} / {}: {}",
                 batch_idx + 1,
@@ -115,18 +118,18 @@ fn get_batch_balanced_knn(
                 // annoy path with updated functions
                 let index = build_annoy_index(
                     sub_matrix.as_ref(),
-                    bbknn_params.knn_params.ann_dist.clone(),
+                    &bbknn_params.knn_params.ann_dist,
                     bbknn_params.knn_params.n_tree,
                     seed,
-                );
+                )?;
                 query_annoy_index(
                     mat,
                     &index,
                     bbknn_params.neighbours_within_batch + 1,
                     bbknn_params.knn_params.search_budget,
                     false,
-                    verbose,
-                )
+                    verbosity.detailed_verbosity(),
+                )?
             }
             KnnSearch::Hnsw => {
                 // hnsw path with updated functions
@@ -136,7 +139,7 @@ fn get_batch_balanced_knn(
                     bbknn_params.knn_params.ef_construction,
                     &bbknn_params.knn_params.ann_dist,
                     seed,
-                    verbose,
+                    verbosity.detailed_verbosity(),
                 );
                 query_hnsw_index(
                     mat,
@@ -144,8 +147,8 @@ fn get_batch_balanced_knn(
                     bbknn_params.neighbours_within_batch + 1,
                     bbknn_params.knn_params.ef_search,
                     true,
-                    verbose,
-                )
+                    verbosity.detailed_verbosity(),
+                )?
             }
             KnnSearch::NNDescent => {
                 let index = build_nndescent_index(
@@ -158,8 +161,8 @@ fn get_batch_balanced_knn(
                     None,
                     None,
                     seed,
-                    verbose,
-                );
+                    verbosity.detailed_verbosity(),
+                )?;
 
                 query_nndescent_index(
                     mat,
@@ -167,8 +170,8 @@ fn get_batch_balanced_knn(
                     bbknn_params.neighbours_within_batch + 1,
                     bbknn_params.knn_params.ef_budget,
                     false,
-                    verbose,
-                )
+                    verbosity.detailed_verbosity(),
+                )?
             }
             &KnnSearch::Exhaustive => {
                 let index =
@@ -179,8 +182,8 @@ fn get_batch_balanced_knn(
                     &index,
                     bbknn_params.neighbours_within_batch + 1,
                     false,
-                    verbose,
-                )
+                    verbosity.detailed_verbosity(),
+                )?
             }
             &KnnSearch::Ivf => {
                 let index = build_ivf_index(
@@ -189,8 +192,8 @@ fn get_batch_balanced_knn(
                     None,
                     &bbknn_params.knn_params.ann_dist,
                     seed,
-                    verbose,
-                );
+                    verbosity.detailed_verbosity(),
+                )?;
 
                 query_ivf_index(
                     mat,
@@ -198,8 +201,8 @@ fn get_batch_balanced_knn(
                     bbknn_params.neighbours_within_batch + 1,
                     bbknn_params.knn_params.n_probe,
                     false,
-                    verbose,
-                )
+                    verbosity.detailed_verbosity(),
+                )?
             }
             &KnnSearch::KmKnn => {
                 let index = build_kmknn_index(
@@ -208,16 +211,16 @@ fn get_batch_balanced_knn(
                     bbknn_params.knn_params.n_list,
                     None,
                     seed,
-                    verbose,
-                );
+                    verbosity.detailed_verbosity(),
+                )?;
 
                 query_kmknn_index(
                     mat,
                     &index,
                     bbknn_params.neighbours_within_batch + 1,
                     false,
-                    verbose,
-                )
+                    verbosity.detailed_verbosity(),
+                )?
             }
         };
 
@@ -245,7 +248,7 @@ fn get_batch_balanced_knn(
         }
     }
 
-    (all_indices, all_distances)
+    Ok((all_indices, all_distances))
 }
 
 /// Helper to calculate smooth kNN distances
@@ -458,7 +461,7 @@ fn compute_membership_strengths(
 fn apply_set_operations(
     connectivities: CompressedSparseData2<f32>,
     set_op_mix_ratio: f32,
-) -> CompressedSparseData2<f32> {
+) -> Result<CompressedSparseData2<f32>, BixverseErrors> {
     let (nrow, ncol) = connectivities.shape;
     let transpose = {
         let csc_transpose = connectivities.transform(); // A^T in CSC
@@ -469,6 +472,8 @@ fn apply_set_operations(
 
         for col in 0..csc_transpose.indptr.len() - 1 {
             for idx in csc_transpose.indptr[col]..csc_transpose.indptr[col + 1] {
+                let idx = idx as usize;
+
                 let row = csc_transpose.indices[idx];
                 // For A^T: swap row/col to get proper CSR representation
                 coo_rows.push(col);
@@ -476,22 +481,22 @@ fn apply_set_operations(
                 coo_vals.push(csc_transpose.data[idx]);
             }
         }
-        coo_to_csr(&coo_rows, &coo_cols, &coo_vals, (ncol, nrow))
+        coo_to_csr(&coo_rows.index_cast(), &coo_cols, &coo_vals, (ncol, nrow))
     };
 
     // Element-wise multiply: A .* A^T
-    let prod = sparse_multiply_elementwise_csr(&connectivities, &transpose);
+    let prod = sparse_multiply_elementwise_csr(&connectivities, &transpose)?;
 
     // set_op_mix_ratio * (A + A^T - A.*A^T) + (1 - set_op_mix_ratio) * (A.*A^T)
-    let union_part = sparse_add_csr(&connectivities, &transpose);
-    let union_part = sparse_subtract_csr(&union_part, &prod);
+    let union_part = sparse_add_csr(&connectivities, &transpose)?;
+    let union_part = sparse_subtract_csr(&union_part, &prod)?;
     let union_part = sparse_scalar_multiply_csr(&union_part, set_op_mix_ratio);
 
     let intersect_part = sparse_scalar_multiply_csr(&prod, 1.0 - set_op_mix_ratio);
 
-    let res = sparse_add_csr(&union_part, &intersect_part);
+    let res = sparse_add_csr(&union_part, &intersect_part)?;
 
-    eliminate_zeros_csr(res)
+    Ok(eliminate_zeros_csr(res))
 }
 
 /// Trim weak edges from connectivity graph
@@ -518,8 +523,8 @@ fn trim_graph(
     // compute thresholds
 
     for i in 0..n {
-        let row_start = connectivities.indptr[i];
-        let row_end = connectivities.indptr[i + 1];
+        let row_start = connectivities.indptr[i] as usize;
+        let row_end = connectivities.indptr[i + 1] as usize;
         let row_data = &connectivities.data[row_start..row_end];
 
         if row_data.len() <= trim {
@@ -534,8 +539,8 @@ fn trim_graph(
     // Apply trimming twice (row then column)
     for _ in 0..2 {
         for i in 0..n {
-            let row_start = connectivities.indptr[i];
-            let row_end = connectivities.indptr[i + 1];
+            let row_start = connectivities.indptr[i] as usize;
+            let row_end = connectivities.indptr[i + 1] as usize;
 
             for j in row_start..row_end {
                 if connectivities.data[j] < thresholds[i] {
@@ -567,7 +572,8 @@ fn trim_graph(
 /// * `bbknn_params` - `BbknnParams` with the parameters for the BBKNN batch
 ///   correction.
 /// * `seed` - Random seed.
-/// * `verbose` - Controls verbosity.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -577,23 +583,25 @@ pub fn bbknn(
     batch_labels: &[usize],
     bbknn_params: &BbknnParams,
     seed: usize,
-    verbose: bool,
-) -> (CompressedSparseData2<f32>, CompressedSparseData2<f32>) {
+    verbose: usize,
+) -> Result<(CompressedSparseData2<f32>, CompressedSparseData2<f32>), BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     // parse it and worst case, I default to Annoy
     let knn_method = parse_knn_method(&bbknn_params.knn_params.knn_method).unwrap_or_default();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("BBKNN: generating the batch balanced kNN values.")
     }
 
     // 1. Get batch-balanced k-NN
     let (mut knn_indices, mut knn_dists) =
-        get_batch_balanced_knn(mat, batch_labels, &knn_method, bbknn_params, seed, verbose);
+        get_batch_balanced_knn(mat, batch_labels, &knn_method, bbknn_params, seed, verbose)?;
 
     // 2. Sort the distance by KNN
     sort_knn_by_distance(&mut knn_indices, &mut knn_dists);
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("BBKNN: Calculating UMAP-based connectivities and removing weak connections.")
     }
 
@@ -610,12 +618,17 @@ pub fn bbknn(
     let (rows, cols, vals) = compute_membership_strengths(&knn_indices, &knn_dists, &sigmas, &rhos);
     let n_obs = mat.nrows();
 
-    let mut connectivities = coo_to_csr(&rows, &cols, &vals, (n_obs, n_obs));
+    let mut connectivities = coo_to_csr(
+        &rows.index_cast(),
+        &cols.index_cast(),
+        &vals,
+        (n_obs, n_obs),
+    );
 
     // 4. Apply set operations
-    connectivities = apply_set_operations(connectivities, bbknn_params.set_op_mix_ratio);
+    connectivities = apply_set_operations(connectivities, bbknn_params.set_op_mix_ratio)?;
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("BBKNN: Finalising data.")
     }
 
@@ -629,5 +642,5 @@ pub fn bbknn(
         connectivities = trim_graph(connectivities, trim_val);
     }
 
-    (dist, connectivities)
+    Ok((dist, connectivities))
 }

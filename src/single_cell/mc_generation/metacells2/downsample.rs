@@ -302,8 +302,8 @@ pub fn downsample_pile(pile: &mut Pile, params: &SelectParams, rng_seed: u64) {
     let in_data = &raw.data;
 
     (0..n_cells).into_par_iter().for_each(|row_index| {
-        let start = indptr[row_index];
-        let end = indptr[row_index + 1];
+        let start = indptr[row_index] as usize;
+        let end = indptr[row_index + 1] as usize;
         if start == end {
             return;
         }

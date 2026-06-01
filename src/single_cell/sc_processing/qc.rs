@@ -23,7 +23,8 @@ use crate::prelude::*;
 ///   data
 /// * `top_n_values` - Slice of top N values to calculate (e.g., &[10, 50, 100])
 /// * `cell_indices` - Vector of cell positions to use.
-/// * `verbose` - Controls verbosity of the function.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -33,8 +34,10 @@ pub fn get_top_genes_perc(
     f_path: &str,
     top_n_values: &[usize],
     cell_indices: &[usize],
-    verbose: bool,
+    verbose: usize,
 ) -> Result<Vec<Vec<f32>>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let start_reading = Instant::now();
 
     let reader = ParallelSparseReader::new(f_path)?;
@@ -43,7 +46,7 @@ pub fn get_top_genes_perc(
 
     let end_read = start_reading.elapsed();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("Load in data: {:.2?}", end_read);
     }
 
@@ -72,7 +75,7 @@ pub fn get_top_genes_perc(
 
     let end_calculations = start_calculations.elapsed();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Finished the top genes proportion calculations: {:.2?}",
             end_calculations
@@ -92,7 +95,8 @@ pub fn get_top_genes_perc(
 ///   data
 /// * `top_n_values` - Slice of top N values to calculate (e.g., &[10, 50, 100])
 /// * `cell_indices` - Vector of cell positions to use.
-/// * `verbose` - Controls verbosity of the function.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -102,8 +106,10 @@ pub fn get_top_genes_perc_streaming(
     f_path: &str,
     top_n_values: &[usize],
     cell_indices: &[usize],
-    verbose: bool,
+    verbose: usize,
 ) -> Result<Vec<Vec<f32>>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let start_total = Instant::now();
 
     let reader = ParallelSparseReader::new(f_path)?;
@@ -111,6 +117,10 @@ pub fn get_top_genes_perc_streaming(
     let mut results: Vec<Vec<f32>> = vec![Vec::new(); top_n_values.len()];
 
     const CELL_BATCH_SIZE: usize = 100000;
+
+    if verbosity.normal_verbosity() {
+        println!("Using a streaming approach for top gene percentage calculations.");
+    }
 
     for batch_start in (0..cell_indices.len()).step_by(CELL_BATCH_SIZE) {
         let batch_end = (batch_start + CELL_BATCH_SIZE).min(cell_indices.len());
@@ -137,7 +147,7 @@ pub fn get_top_genes_perc_streaming(
             results[top_idx].extend(proportions);
         }
 
-        if verbose && batch_start % (CELL_BATCH_SIZE * 5) == 0 {
+        if verbosity.detailed_verbosity() && batch_start % (CELL_BATCH_SIZE * 5) == 0 {
             let progress = ((batch_start + 1) as f32 / cell_indices.len() as f32) * 100.0;
             println!(
                 " Reading cells and calculating proportions: {:.1}%",
@@ -148,7 +158,7 @@ pub fn get_top_genes_perc_streaming(
 
     let end_total = start_total.elapsed();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Finished the top genes proportion calculations: {:.2?}",
             end_total
@@ -173,7 +183,8 @@ pub fn get_top_genes_perc_streaming(
 ///   data
 /// * `gene_indices` - Vector of index positions of the genes of interest
 /// * `cell_indices` - Vector of cell positions to use.
-/// * `verbose` - Controls verbosity of the function.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -182,8 +193,10 @@ pub fn get_gene_set_perc(
     f_path: &str,
     gene_indices: Vec<Vec<u32>>,
     cell_indices: &[usize],
-    verbose: bool,
+    verbose: usize,
 ) -> Result<Vec<Vec<f32>>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let start_reading = Instant::now();
 
     let reader = ParallelSparseReader::new(f_path)?;
@@ -192,7 +205,7 @@ pub fn get_gene_set_perc(
 
     let end_read = start_reading.elapsed();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("Load in data: {:.2?}", end_read);
     }
 
@@ -223,7 +236,7 @@ pub fn get_gene_set_perc(
 
     let end_calculations = start_calculations.elapsed();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Finished the gene set proportion calculations: {:.2?}",
             end_calculations
@@ -245,7 +258,8 @@ pub fn get_gene_set_perc(
 ///   data
 /// * `gene_indices` - Vector of index positions of the genes of interest
 /// * `cell_indices` - Vector of cell positions to use.
-/// * `verbose` - Controls verbosity of the function.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -254,8 +268,10 @@ pub fn get_gene_set_perc_streaming(
     f_path: &str,
     gene_indices: Vec<Vec<u32>>,
     cell_indices: &[usize],
-    verbose: bool,
+    verbose: usize,
 ) -> Result<Vec<Vec<f32>>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let start_total = Instant::now();
 
     let reader = ParallelSparseReader::new(f_path)?;
@@ -265,6 +281,10 @@ pub fn get_gene_set_perc_streaming(
         gene_indices.iter().map(|gs| gs.iter().collect()).collect();
 
     const CELL_BATCH_SIZE: usize = 100000;
+
+    if verbosity.normal_verbosity() {
+        println!("Using a streaming approach for gene set percentage calculation.");
+    }
 
     for batch_start in (0..cell_indices.len()).step_by(CELL_BATCH_SIZE) {
         let batch_end = (batch_start + CELL_BATCH_SIZE).min(cell_indices.len());
@@ -290,7 +310,7 @@ pub fn get_gene_set_perc_streaming(
             results[gs_idx].extend(percentage);
         }
 
-        if verbose && batch_start % (CELL_BATCH_SIZE * 5) == 0 {
+        if verbosity.detailed_verbosity() && batch_start % (CELL_BATCH_SIZE * 5) == 0 {
             let progress = ((batch_start + 1) as f32 / cell_indices.len() as f32) * 100.0;
             println!(
                 " Reading cells and calculating proportions: {:.1}%",
@@ -301,7 +321,7 @@ pub fn get_gene_set_perc_streaming(
 
     let end_total = start_total.elapsed();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Finished the gene set proportion calculations: {:.2?}",
             end_total

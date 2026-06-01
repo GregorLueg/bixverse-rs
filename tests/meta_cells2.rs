@@ -1,6 +1,7 @@
 #![allow(clippy::needless_range_loop)]
 #![cfg(feature = "single-cell")]
 
+use bixverse_rs::prelude::VecIndexCast;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rand_distr::{Distribution, Poisson};
@@ -96,8 +97,8 @@ fn build_fixture() -> Fixture {
 
     let raw = CompressedSparseData2 {
         data,
-        indices,
-        indptr,
+        indices: indices.index_cast(),
+        indptr: indptr.index_cast(),
         cs_type: CompressedSparseFormat::Csr,
         data_2: None,
         shape: (N_CELLS, N_GENES),
@@ -106,7 +107,7 @@ fn build_fixture() -> Fixture {
     let umis_per_cell: Vec<f32> = (0..N_CELLS)
         .map(|i| {
             let s: u64 = (raw.indptr[i]..raw.indptr[i + 1])
-                .map(|idx| raw.data[idx] as u64)
+                .map(|idx| raw.data[idx as usize] as u64)
                 .sum();
             s as f32
         })
@@ -255,7 +256,7 @@ fn stage1_downsample_caps_libraries_and_preserves_sparsity() {
 
     for i in 0..N_CELLS {
         let row_sum: u64 = (down.indptr[i]..down.indptr[i + 1])
-            .map(|idx| down.data[idx] as u64)
+            .map(|idx| down.data[idx as usize] as u64)
             .sum();
         assert!(
             row_sum <= target_upper,
@@ -367,8 +368,8 @@ fn stage4_knn_graph_is_normalised_and_clusters_dominate() {
 
     // row L1 normalisation and no self-loops.
     for i in 0..N_CELLS {
-        let start = graph.indptr[i];
-        let end = graph.indptr[i + 1];
+        let start = graph.indptr[i] as usize;
+        let end = graph.indptr[i + 1] as usize;
         let row_sum: f32 = graph.data[start..end].iter().sum();
         assert!(
             (row_sum - 1.0).abs() < 1e-4 || row_sum == 0.0,
@@ -378,7 +379,7 @@ fn stage4_knn_graph_is_normalised_and_clusters_dominate() {
         );
         for idx in start..end {
             assert!(
-                graph.indices[idx] != i,
+                graph.indices[idx] != i as u32,
                 "self-loop at row {} (idx {})",
                 i,
                 idx
@@ -396,11 +397,12 @@ fn stage4_knn_graph_is_normalised_and_clusters_dominate() {
         let start = graph.indptr[i];
         let end = graph.indptr[i + 1];
         for idx in start..end {
+            let idx = idx as usize;
             let j = graph.indices[idx];
             let w = graph.data[idx] as f64;
             weight_total += w;
             count_total += 1;
-            if fix.true_cluster[i] == fix.true_cluster[j] {
+            if fix.true_cluster[i] == fix.true_cluster[j as usize] {
                 weight_within += w;
                 count_within += 1;
             }

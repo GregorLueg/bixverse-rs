@@ -74,7 +74,8 @@ pub struct PcaOpts {
 /// * `cells_to_keep` - Indices of the cells to include in this analysis.
 /// * `opts` - Hvg parameters
 /// * `streaming` - Shall the data be streamed (reduces memory pressure)
-/// * `verbose` - Controls verbosity of the function
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -84,10 +85,9 @@ pub fn select_hvg(
     cells_to_keep: &[usize],
     opts: &HvgOpts,
     streaming: bool,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<Vec<usize>, BixverseErrors> {
-    let hvg_type = parse_hvg_method(&opts.method)
-        .unwrap_or_else(|| panic!("Invalid HVG method: {}", &opts.method));
+    let hvg_type = parse_hvg_method(&opts.method).unwrap_or_default();
 
     let sort_key: Vec<f64> = match hvg_type {
         HvgMethod::Vst => {
@@ -329,7 +329,8 @@ pub fn scale_cell_chunks_with_stats(
 /// * `random_svd` - If true, use randomised sparse SVD; otherwise use
 ///   Lanczos-based sparse SVD.
 /// * `seed` - Seed for reproducibility (randomised SVD and Lanczos init).
-/// * `verbose` - Controls verbosity of timing output.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -349,8 +350,10 @@ pub fn pca_observed(
     no_pcs: usize,
     random_svd: bool,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<DoubletPcaRes, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let start_total = Instant::now();
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
     let n_cells = cell_indices.len();
@@ -358,7 +361,7 @@ pub fn pca_observed(
     let start_reading = Instant::now();
     let reader = ParallelSparseReader::new(f_path_gene)?;
     let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(gene_indices)?;
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("Loaded in data: {:.2?}", start_reading.elapsed());
     }
 
@@ -397,7 +400,7 @@ pub fn pca_observed(
         None
     };
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("Finished data preparation: {:.2?}", start_prep.elapsed());
     }
 
@@ -439,7 +442,7 @@ pub fn pca_observed(
         (scores, loadings)
     };
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("Finished PCA calculations: {:.2?}", start_svd.elapsed());
         println!(
             "Total run time PCA detection: {:.2?}",
@@ -471,7 +474,8 @@ pub fn pca_observed(
 /// * `sim_chunks` - Slice of simulated chunks
 /// * `opts` - The [`PcaOpts`] for this run
 /// * `seed` - Random seed
-/// * `verbose` - Verbosity of the function
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -486,7 +490,7 @@ pub fn pca_and_project(
     sim_chunks: &[CsrCellChunk],
     opts: &PcaOpts,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<(Mat<f32>, DoubletPcaRes), BixverseErrors> {
     let pca_res = pca_observed(
         f_path_gene,
@@ -564,7 +568,8 @@ pub fn reproject_doublets(
 /// * `knn_params` - Parameters for the various kNN approximate nearest
 ///   neighbour searches
 /// * `seed` - Seed for reproducibility
-/// * `verbose` - Controls verbosity
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -575,7 +580,7 @@ pub fn dispatch_knn(
     knn_params: &KnnParams,
     seed: usize,
     verbose: bool,
-) -> Vec<Vec<usize>> {
+) -> Result<Vec<Vec<usize>>, BixverseErrors> {
     let method = parse_knn_method(&knn_params.knn_method).unwrap_or_default();
 
     match method {

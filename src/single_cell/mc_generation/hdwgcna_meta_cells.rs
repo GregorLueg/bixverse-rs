@@ -34,6 +34,8 @@ pub struct BootstrappedMetaCellParams {
 /// * `target_no` - Target number of meta cells
 /// * `max_iter` - Maximum iterations for the algorithm
 /// * `seed` - seed for reproducibility purposes
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -44,8 +46,10 @@ pub fn identify_meta_cells(
     target_no: usize,
     max_iter: usize,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> Vec<usize> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let mut rng = StdRng::seed_from_u64(seed as u64);
     let k = nn_map[0].len();
     let k2 = k * 2;
@@ -80,7 +84,7 @@ pub fn identify_meta_cells(
             max_overlap = max_overlap.max(shared);
         }
 
-        if verbose && it % 10000 == 0 {
+        if verbosity.normal_verbosity() && it % 10000 == 0 {
             println!(
                 "Meta cell neighbour search - iter {} of {} max iters",
                 it, max_iter

@@ -69,8 +69,8 @@ impl QuantisedStore {
             .ok_or(BixverseErrors::Data2NotAvailable)?;
 
         for j in 0..n_features {
-            let s = mat.indptr[j];
-            let e = mat.indptr[j + 1];
+            let s = mat.indptr[j] as usize;
+            let e = mat.indptr[j + 1] as usize;
             let col_indices = &mat.indices[s..e];
             let col_vals = &vals[s..e];
 
@@ -92,7 +92,7 @@ impl QuantisedStore {
             if range > 1e-10 {
                 let scale = 255.0 / range;
                 for i in 0..col_indices.len() {
-                    let cell_idx = col_indices[i];
+                    let cell_idx = col_indices[i] as usize;
                     let val = col_vals[i];
                     data[offset + cell_idx] = ((val - min_v) * scale).round() as u8;
                 }

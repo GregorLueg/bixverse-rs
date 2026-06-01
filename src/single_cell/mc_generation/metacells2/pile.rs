@@ -121,8 +121,8 @@ fn assemble_pile_csr(chunks: &[CsrCellChunk], n_genes: usize) -> CompressedSpars
 
     CompressedSparseData2 {
         data,
-        indices,
-        indptr,
+        indices: indices.index_cast(),
+        indptr: indptr.index_cast(),
         cs_type: CompressedSparseFormat::Csr,
         data_2: None,
         shape: (n_cells, n_genes),
@@ -143,7 +143,7 @@ fn sum_rows_csr(mat: &CompressedSparseData2<u32, f32>) -> Vec<f32> {
     let mut sums = vec![0.0f32; n_rows];
     for i in 0..n_rows {
         let s: u64 = (mat.indptr[i]..mat.indptr[i + 1])
-            .map(|idx| mat.data[idx] as u64)
+            .map(|idx| mat.data[idx as usize] as u64)
             .sum();
         sums[i] = s as f32;
     }
@@ -166,8 +166,8 @@ mod tests {
     ) -> CompressedSparseData2<u32, f32> {
         CompressedSparseData2 {
             data,
-            indices,
-            indptr,
+            indices: indices.index_cast(),
+            indptr: indptr.index_cast(),
             cs_type: CompressedSparseFormat::Csr,
             data_2: None,
             shape,

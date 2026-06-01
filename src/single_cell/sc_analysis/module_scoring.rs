@@ -160,31 +160,24 @@ fn calculate_cell_module_score(
     gene_set: &[usize],
     control_set: &[usize],
 ) -> f32 {
-    let mut expr_map: FxHashMap<usize, f32> =
-        FxHashMap::with_capacity_and_hasher(cell.indices.len(), Default::default());
+    // leverage a binary search look up here
+    let lookup = |idx: usize| -> f32 {
+        match cell.indices.binary_search(&(idx as u32)) {
+            Ok(pos) => cell.data_norm[pos].to_f32(),
+            Err(_) => 0.0,
+        }
+    };
 
-    for (&idx, &val) in cell.indices.iter().zip(cell.data_norm.iter()) {
-        expr_map.insert(idx as usize, val.to_f32());
-    }
-
-    let gene_sum: f32 = gene_set
-        .iter()
-        .map(|&idx| *expr_map.get(&idx).unwrap_or(&0.0))
-        .sum();
     let gene_mean = if gene_set.is_empty() {
         0.0
     } else {
-        gene_sum / gene_set.len() as f32
+        gene_set.iter().map(|&idx| lookup(idx)).sum::<f32>() / gene_set.len() as f32
     };
 
-    let ctrl_sum: f32 = control_set
-        .iter()
-        .map(|&idx| *expr_map.get(&idx).unwrap_or(&0.0))
-        .sum();
     let ctrl_mean = if control_set.is_empty() {
         0.0
     } else {
-        ctrl_sum / control_set.len() as f32
+        control_set.iter().map(|&idx| lookup(idx)).sum::<f32>() / control_set.len() as f32
     };
 
     gene_mean - ctrl_mean
@@ -339,7 +332,8 @@ fn calculate_module_scores_streaming(
 /// * `ctrl` - Number of control genes to use.
 /// * `streaming` - Shall streaming be used. Useful for larger data sets.
 /// * `seed` - Seed for reproducibility.
-/// * `verbose` - Controls verbosity of the function.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+///   detailed verbosity.
 ///
 /// ### Returns
 ///
@@ -355,13 +349,15 @@ pub fn calculate_module_scores_main(
     ctrl: usize,
     streaming: bool,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<Vec<Vec<f32>>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let cell_set: IndexSet<u32> = cells_to_use.iter().map(|&x| x as u32).collect();
 
     let start_total = Instant::now();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("Calculating the average expression across the cells.")
     }
 
@@ -371,7 +367,7 @@ pub fn calculate_module_scores_main(
 
     let end_evg_exp = start_avg_exp.elapsed();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Finished the calculation of the avg gene expression in {:.2?}",
             end_evg_exp
@@ -391,7 +387,7 @@ pub fn calculate_module_scores_main(
             &gene_bins,
             ctrl,
             &seed,
-            verbose,
+            verbosity.detailed_verbosity(),
         )
     } else {
         calculate_module_scores(
@@ -407,7 +403,7 @@ pub fn calculate_module_scores_main(
     let end_modules = start_modules.elapsed();
     let end_total = start_total.elapsed();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Finished the calculation of the modules in {:.2?}",
             end_modules

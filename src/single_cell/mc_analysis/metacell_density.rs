@@ -100,7 +100,8 @@ fn classify_density_regions(dist: &[f32]) -> Vec<DensityRegion> {
 /// * `k_density` - Neighbour rank for the density estimate (paper uses `150`)
 /// * `knn_params` - Parameters for the DC-space kNN search
 /// * `seed` - RNG seed
-/// * `verbose` - Print progress messages
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -115,23 +116,25 @@ pub fn compute_diffusion_density(
     k_density: usize,
     knn_params: &KnnParams,
     seed: u64,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<DiffusionDensity, BixverseErrors> {
     let n = knn_indices.len();
 
-    if verbose {
+    let verbosity = parse_verbosity_level(verbose);
+
+    if verbosity.normal_verbosity() {
         println!("Building diffusion kernel...");
     }
-    let mut kernel = compute_diffusion_kernel(knn_indices, knn_distances, knn_k, squared_dist);
+    let mut kernel = compute_diffusion_kernel(knn_indices, knn_distances, knn_k, squared_dist)?;
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("Computing top {} diffusion components...", n_dcs);
     }
     let (evals, evecs) = diffusion_map_from_kernel(&mut kernel, n_dcs + 1, seed)?;
     let dcs = determine_multiscale_space(&evals, &evecs, Some(n_dcs + 1));
     let dim = dcs[0].len();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("Running kNN on DC embedding (k = {})...", k_density);
     }
     let dc_mat = Mat::<f32>::from_fn(n, dim, |i, j| dcs[i][j]);
@@ -146,8 +149,8 @@ pub fn compute_diffusion_density(
         true,
         false,
         seed as usize,
-        verbose,
-    );
+        verbosity.detailed_verbosity(),
+    )?;
     let dc_distances = dc_distances.expect("distances must be returned");
 
     // k_density-th NN distance per cell. fold(max) is robust to whichever order

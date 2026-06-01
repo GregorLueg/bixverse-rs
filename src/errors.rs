@@ -1,4 +1,7 @@
-//! Errors in bixverse
+//! Errors in bixverse. Contains all the various errors that can be returned by
+//! the crate.
+
+use ann_search_rs::utils::dist::Dist;
 #[cfg(feature = "single-cell")]
 use std::io;
 use thiserror::Error;
@@ -35,7 +38,27 @@ pub enum BixverseErrors {
     #[error("The faer Eigen decomposition failed - please verify the data")]
     FaerEigenError,
 
-    // -- Graph based errors ---
+    // -- ann-search-rs --
+    /// Propagate errors from the ann-search-rs crate
+    #[error("Error from the ann-search-rs crate: {0}")]
+    AnnSearchRsError(#[from] ann_search_rs::errors::AnnSearchErrors),
+
+    // -- distances --
+    /// Distance type not supported
+    #[error("Distance metric '{0}' is not supported for this method.")]
+    DistanceNotSupported(Dist),
+
+    // -- sparse --
+    /// Error if wrong sparse format has been provided
+    #[error("Wrong sparse format. Expected {expected}; got {found}")]
+    WrongSparseFormat {
+        /// Expected format
+        expected: String,
+        /// Got format
+        found: String,
+    },
+
+    // -- graph based errors ---
     /// Error for algorithms that expect undirected graphs
     ///
     /// For methods that expect an undirected graph, but received a directed
@@ -49,10 +72,56 @@ pub enum BixverseErrors {
     #[error("The number of nodes and membership assignments in the communities do not add up.")]
     CommunityAssignmentMismatch,
 
+    // -- sparse erros --
     /// Error in situations were data_2 in [`crate::prelude::CompressedSparseData2`]
     /// is asked for but not available
     #[error("data_2 slot is None but was requested")]
     Data2NotAvailable,
+
+    /// Error if the slice index is out of bounds
+    #[error("The slice index ({index}) is out of bounds (length: {len})")]
+    SliceIndexOutOfBounds {
+        /// The chosen index
+        index: usize,
+        /// The actual length
+        len: usize,
+    },
+
+    /// Error if the slice index is duplicated
+    #[error("You provided a duplicated slice index {0}")]
+    DuplicateSliceIndex(usize),
+
+    /// Error for sparse multiplication dimension mismatches
+    #[error(
+        "The dimensions of the matrix do not support sparse multiplication (matrix a n_col: {n_col_a}; matrix b n_row: {n_row_b})"
+    )]
+    SparseMatrixMultiplication {
+        /// Number of columns in matrix a
+        n_col_a: usize,
+        /// Number of rows in matrix b
+        n_row_b: usize,
+    },
+
+    /// Dimension mismatch error during construction
+    #[error("The indices (len: {indices_len}) and data (len: {data_len}) need to have same length")]
+    DimensionMisMatchSparse {
+        /// Length indices
+        indices_len: usize,
+        /// Length data
+        data_len: usize,
+    },
+
+    /// Error if there is a dimension mismatch in terms of the two matrices
+    #[error("The shape of the two sparse matrices must be the same.")]
+    ShapeMismatchSparse,
+
+    /// Error if the [crate::prelude::CompressedSparseData2] is not in CSR.
+    #[error("The SparseCompressedData2 must be in CSR format")]
+    SparseMatrixMustBeCsr,
+
+    /// Error if the [crate::prelude::CompressedSparseData2] is not in Csc.
+    #[error("The SparseCompressedData2 must be in CSC format")]
+    SparseMatrixMustBeCsc,
 
     // -- Binary file I/O --
     /// Wraps any `std::io::Error` encountered while reading or writing the
@@ -64,6 +133,11 @@ pub enum BixverseErrors {
     #[cfg(feature = "single-cell")]
     #[error("I/O error on binary file: {0}")]
     BinaryIo(#[from] io::Error),
+
+    /// Error if counts do not seem to be raw counts during i/o
+    #[cfg(feature = "single-cell")]
+    #[error("The counts you are trying to load in do not seem to be raw counts")]
+    NotRawCounts,
 
     /// Bincode failed to encode the `FileHeader` or `SparseDataHeader`.
     ///
@@ -139,6 +213,34 @@ pub enum BixverseErrors {
         /// What the caller requested: "cell-based" or "gene-based".
         requested: &'static str,
     },
+
+    /// If serialisation of the [crate::prelude::CompressedSparseData2] to disk failed
+    #[cfg(feature = "single-cell")]
+    #[error("Serialisation to meta cell CompressedSparseData2 format on disk failed")]
+    SerialisationFailed,
+
+    /// If deserialisation of the [crate::prelude::CompressedSparseData2] from disk
+    /// failed
+    #[cfg(feature = "single-cell")]
+    #[error("Serialisation to meta cell CompressedSparseData2 format on disk failed")]
+    DeserialisationFailed,
+
+    /// Error for h5 ingestion if feature type is not found
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "The requested feature type ({requested}) was not found. On file found features are {found}"
+    )]
+    FeatureTypeNotFound {
+        /// Requested feature type
+        requested: String,
+        /// Found feature types
+        found: String,
+    },
+
+    /// Error if the h5 string type cannot be read
+    #[cfg(feature = "single-cell")]
+    #[error("h5: Unexpected str type identified: {0}")]
+    H5UnexpectedStringType(String),
 
     // -- HDF5 / h5ad --
     /// Wraps any error from the `hdf5` crate.
@@ -230,6 +332,7 @@ pub enum BixverseErrors {
     #[cfg(feature = "single-cell")]
     #[error("SEACells: The model has not been fitted yet. Please run .fit()")]
     SEACellsModelNotFitted,
+
     // -- FastCluster --
     /// The Fast cluster results do not contain k-means cluster assignments
     #[cfg(feature = "single-cell")]
@@ -240,4 +343,109 @@ pub enum BixverseErrors {
     #[cfg(feature = "single-cell")]
     #[error("The fast cluster results were generated without any centroids")]
     FastClusterNoCentroids,
+
+    // -- MELD --
+    /// If the user provides a label which is out-of-range of the expected
+    /// number of groups
+    #[cfg(feature = "single-cell")]
+    #[error("MELD: label {label} out of range for n_groups={n_groups}.")]
+    MELDLabelOutOfRange {
+        /// The label which is out of range
+        label: usize,
+        /// The number of expected groups
+        n_groups: usize,
+    },
+
+    /// If the user asks for less than two Chebyshev coefficients
+    #[cfg(feature = "single-cell")]
+    #[error("MELD: Need at least 2 Chebyshev coefficients")]
+    MELDChebyshevCoefTooLow,
+
+    /// Error if labels and number of cells are not equal
+    #[cfg(feature = "single-cell")]
+    #[error("MELD: The labels are not equal to the number of cells")]
+    MELDLabelUnequalsSamples,
+
+    /// Error of n_groups < 2
+    #[cfg(feature = "single-cell")]
+    #[error("MELD: labels needs two groups minimum")]
+    MELDOnlyOneGroup,
+
+    /// Error if embedding rows do not match the kNN
+    #[cfg(feature = "single-cell")]
+    #[error("MELD: Embedding rows unequals samples")]
+    MELDEmbeddingUnequalsSamples,
+
+    // -- sctype --
+    /// Error when number of cluster assignment != the number of cells
+    #[error(
+        "SCType: The number of cells ({n_cells}) and cluster assignments length ({n_cluster_assignment}) is not the same."
+    )]
+    ScTypeClusterAssignmentNotEqualNCells {
+        /// Number of cells
+        n_cells: usize,
+        /// Number of cluster assignments
+        n_cluster_assignment: usize,
+    },
+
+    // -- wnn --
+    /// Error if the modalities do not have the same number of cells
+    #[cfg(feature = "multi-modal")]
+    #[error("WNN: Both modalities need to have the same cell numbers.")]
+    WNNModalitySampleMismatch,
+
+    /// Error if k_nn > knn_range
+    #[cfg(feature = "multi-modal")]
+    #[error("WNN: k_nn must be <= knn_range")]
+    WNNKnnLargerThanKnnRange,
+
+    /// Error if sigma_idx >= knn_range
+    #[cfg(feature = "multi-modal")]
+    #[error("WNN: sigma_idx must be < knn_range")]
+    WNNSigmaIdxOutOfRange,
+
+    /// Error if s_nn > knn_range
+    #[cfg(feature = "multi-modal")]
+    #[error("WNN: s_nn must be <= knn_range")]
+    WNNSnnLargerThanKnnRange,
+
+    /// Error if a modality's kNN row count does not match n_cells
+    #[cfg(feature = "multi-modal")]
+    #[error("WNN: modality {modality} kNN row count {found} does not match n_cells {expected}")]
+    WNNKnnRowCountMismatch {
+        /// 0 or 1
+        modality: usize,
+        /// Expected count
+        expected: usize,
+        /// Found count
+        found: usize,
+    },
+
+    /// Error if a modality's kNN distance row count does not match n_cells
+    #[cfg(feature = "multi-modal")]
+    #[error(
+        "WNN: modality {modality} kNN distance row count {found} does not match n_cells {expected}"
+    )]
+    WNNKnnDistRowCountMismatch {
+        /// 0 or 1
+        modality: usize,
+        /// Expected count
+        expected: usize,
+        /// Found count
+        found: usize,
+    },
+
+    /// Error if a modality has fewer than knn_range neighbours per cell
+    #[cfg(feature = "multi-modal")]
+    #[error(
+        "WNN: modality {modality} needs at least {expected} neighbours per cell, found {found}"
+    )]
+    WNNInsufficientNeighbours {
+        /// 0 or 1
+        modality: usize,
+        /// knn_range
+        expected: usize,
+        /// Actual neighbour count in row 0
+        found: usize,
+    },
 }

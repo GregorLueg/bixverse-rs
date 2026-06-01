@@ -1,6 +1,7 @@
 //! Similarity network fusion implementation based on Wang, et al., Nat Methods,
 //! 2014
 
+use ann_search_rs::prelude::SimdDistance;
 use faer::{Mat, MatRef};
 use rayon::prelude::*;
 use std::collections::BinaryHeap;
@@ -294,7 +295,7 @@ pub fn make_affinity_continuous<T>(
     normalise: bool,
 ) -> Mat<T>
 where
-    T: BixverseFloat + std::iter::Sum,
+    T: BixverseFloat + std::iter::Sum + SimdDistance,
 {
     let dist_type = parse_distance_type(distance_type).unwrap_or_default();
 

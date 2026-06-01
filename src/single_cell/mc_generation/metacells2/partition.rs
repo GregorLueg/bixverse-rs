@@ -194,7 +194,7 @@ fn initial_incoming_scale(incoming: &CompressedSparseData2<f32, f32>) -> f64 {
     let mut acc = 0.0f64;
     for i in 0..n {
         let s: f64 = (incoming.indptr[i]..incoming.indptr[i + 1])
-            .map(|idx| incoming.data[idx] as f64)
+            .map(|idx| incoming.data[idx as usize] as f64)
             .sum();
         if s > 0.0 {
             acc += s.log2();
@@ -283,10 +283,10 @@ fn initial_score_table(
 
     for src in 0..n {
         let src_p = partition_of_nodes[src];
-        let start = outgoing.indptr[src];
-        let end = outgoing.indptr[src + 1];
+        let start = outgoing.indptr[src] as usize;
+        let end = outgoing.indptr[src + 1] as usize;
         for idx in start..end {
-            let dst = outgoing.indices[idx];
+            let dst = outgoing.indices[idx] as usize;
             let w = outgoing.data[idx] as f64;
             let dst_p = partition_of_nodes[dst];
 
@@ -712,10 +712,10 @@ impl<'a> OptimizePartitions<'a> {
         }
 
         // walk neighbours via merged outgoing/incoming traversal.
-        let out_start = self.outgoing.indptr[node_index];
-        let out_end = self.outgoing.indptr[node_index + 1];
-        let in_start = self.incoming.indptr[node_index];
-        let in_end = self.incoming.indptr[node_index + 1];
+        let out_start = self.outgoing.indptr[node_index] as usize;
+        let out_end = self.outgoing.indptr[node_index + 1] as usize;
+        let in_start = self.incoming.indptr[node_index] as usize;
+        let in_end = self.incoming.indptr[node_index + 1] as usize;
 
         let mut op = out_start;
         let mut ip = in_start;
@@ -1006,10 +1006,10 @@ impl<'a> OptimizePartitions<'a> {
         to_cold_diff: f64,
     ) {
         // Update neighbour scores in from_p / to_p.
-        let out_start = self.outgoing.indptr[node_index];
-        let out_end = self.outgoing.indptr[node_index + 1];
-        let in_start = self.incoming.indptr[node_index];
-        let in_end = self.incoming.indptr[node_index + 1];
+        let out_start = self.outgoing.indptr[node_index] as usize;
+        let out_end = self.outgoing.indptr[node_index + 1] as usize;
+        let in_start = self.incoming.indptr[node_index] as usize;
+        let in_end = self.incoming.indptr[node_index + 1] as usize;
 
         let mut op = out_start;
         let mut ip = in_start;
@@ -1208,7 +1208,7 @@ pub fn score_partitions(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::math::sparse::CompressedSparseFormat;
+    use crate::{core::math::sparse::CompressedSparseFormat, prelude::VecIndexCast};
 
     /// Builds a simple weighted graph from edge list. Returns
     /// (outgoing CSR, incoming CSR) for a graph of `n` nodes.
@@ -1220,7 +1220,7 @@ mod tests {
         CompressedSparseData2<f32, f32>,
     ) {
         let mut sorted: Vec<(usize, usize, f32)> = edges.to_vec();
-        sorted.sort_unstable_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+        sorted.sort_unstable_by_key(|a| (a.0, a.1));
 
         let mut data = Vec::new();
         let mut indices = Vec::new();
@@ -1235,8 +1235,8 @@ mod tests {
         }
         let outgoing = CompressedSparseData2 {
             data,
-            indices,
-            indptr,
+            indices: indices.index_cast(),
+            indptr: indptr.index_cast(),
             cs_type: CompressedSparseFormat::Csr,
             data_2: None,
             shape: (n, n),

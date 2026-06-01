@@ -452,10 +452,10 @@ fn stoer_wagner(
     let mut weight = vec![vec![0.0f64; n]; n];
     let mut total_weight = 0.0f64;
     for (local_i, &global_i) in cells.iter().enumerate() {
-        let start = outgoing.indptr[global_i];
-        let end = outgoing.indptr[global_i + 1];
+        let start = outgoing.indptr[global_i] as usize;
+        let end = outgoing.indptr[global_i + 1] as usize;
         for idx in start..end {
-            let global_j = outgoing.indices[idx];
+            let global_j = outgoing.indices[idx] as usize;
             let local_j = local_of_global[global_j];
             if local_j < 0 {
                 continue;
@@ -914,7 +914,7 @@ mod tests {
         CompressedSparseData2<f32, f32>,
     ) {
         let mut sorted: Vec<(usize, usize, f32)> = edges.to_vec();
-        sorted.sort_unstable_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+        sorted.sort_unstable_by_key(|a| (a.0, a.1));
         let mut data = Vec::new();
         let mut indices = Vec::new();
         let mut indptr = vec![0usize; n + 1];
@@ -928,8 +928,8 @@ mod tests {
         }
         let outgoing = CompressedSparseData2 {
             data,
-            indices,
-            indptr,
+            indices: indices.index_cast(),
+            indptr: indptr.index_cast(),
             cs_type: CompressedSparseFormat::Csr,
             data_2: None,
             shape: (n, n),

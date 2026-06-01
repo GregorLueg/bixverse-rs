@@ -3,6 +3,7 @@
 
 use bixverse_rs::core::math::pca_svd::*;
 use bixverse_rs::core::math::sparse::*;
+use bixverse_rs::prelude::VecIndexCast;
 use bixverse_rs::single_cell::sc_processing::pca::*;
 
 use faer::Mat;
@@ -39,8 +40,8 @@ fn make_test_matrix(
 
     let csc = CompressedSparseData2 {
         data: values.clone(),
-        indices: row_indices,
-        indptr,
+        indices: row_indices.index_cast(),
+        indptr: indptr.index_cast(),
         cs_type: CompressedSparseFormat::Csc,
         data_2: Some(values), // same data in both layers for testing
         shape: (n, m),
@@ -83,22 +84,22 @@ fn test_transpose_data2_consistency() {
         // Also verify: for each column j, CSC data_2 values match
         // the corresponding CSR data_2 values (different order but same set)
         for j in 0..m {
-            let csc_start = csc.indptr[j];
-            let csc_end = csc.indptr[j + 1];
+            let csc_start = csc.indptr[j] as usize;
+            let csc_end = csc.indptr[j + 1] as usize;
             let mut csc_pairs: Vec<(usize, f32)> = csc.indices[csc_start..csc_end]
                 .iter()
                 .zip(orig_d2[csc_start..csc_end].iter())
-                .map(|(&i, &v)| (i, v))
+                .map(|(&i, &v)| (i as usize, v))
                 .collect();
             csc_pairs.sort_by_key(|&(i, _)| i);
 
             // Gather same column from CSR
             let mut csr_pairs: Vec<(usize, f32)> = Vec::new();
             for i in 0..n {
-                let csr_start = csr.indptr[i];
-                let csr_end = csr.indptr[i + 1];
+                let csr_start = csr.indptr[i] as usize;
+                let csr_end = csr.indptr[i + 1] as usize;
                 for idx in csr_start..csr_end {
-                    if csr.indices[idx] == j {
+                    if csr.indices[idx] == j as u32 {
                         let csr_d2 = csr.data_2.as_ref().unwrap();
                         csr_pairs.push((i, csr_d2[idx]));
                     }
@@ -175,8 +176,9 @@ fn test_implicit_vs_explicit_centering() {
         for i in 0..n {
             let mut sum = 0.0f64;
             for idx in csr.indptr[i]..csr.indptr[i + 1] {
+                let idx = idx as usize;
                 let j = csr.indices[idx];
-                sum += data_csr_f[idx] * x_scaled[j];
+                sum += data_csr_f[idx] * x_scaled[j as usize];
             }
             sum -= mean_dot;
             y_implicit[i] = sum;
@@ -231,8 +233,9 @@ fn test_implicit_vs_explicit_transpose_matvec() {
         for j in 0..m {
             let mut sum = 0.0f64;
             for idx in csc.indptr[j]..csc.indptr[j + 1] {
+                let idx = idx as usize;
                 let i = csc.indices[idx];
-                sum += data_csc_f[idx] * x[i];
+                sum += data_csc_f[idx] * x[i as usize];
             }
             sum -= col_means[j] * x_sum;
             sum /= col_stds[j];
@@ -291,8 +294,9 @@ fn test_gram_symmetry() {
             for i in 0..n {
                 let mut sum = 0.0;
                 for idx in csr.indptr[i]..csr.indptr[i + 1] {
+                    let idx = idx as usize;
                     let j = csr.indices[idx];
-                    sum += data_csr_f[idx] * x_scaled[j];
+                    sum += data_csr_f[idx] * x_scaled[j as usize];
                 }
                 y[i] = sum - mean_dot;
             }
@@ -306,8 +310,9 @@ fn test_gram_symmetry() {
             for j in 0..m {
                 let mut sum = 0.0;
                 for idx in csc.indptr[j]..csc.indptr[j + 1] {
+                    let idx = idx as usize;
                     let i = csc.indices[idx];
-                    sum += data_csc_f[idx] * x[i];
+                    sum += data_csc_f[idx] * x[i as usize];
                 }
                 y[j] = (sum - col_means[j] * x_sum) / col_stds[j];
             }
@@ -431,8 +436,9 @@ fn test_lanczos_orthogonality_loss() {
             for i in 0..n {
                 let mut sum = 0.0;
                 for idx in csr.indptr[i]..csr.indptr[i + 1] {
+                    let idx = idx as usize;
                     let j = csr.indices[idx];
-                    sum += data_csr_f[idx] * v_scaled[j];
+                    sum += data_csr_f[idx] * v_scaled[j as usize];
                 }
                 av[i] = sum - mean_dot;
             }

@@ -41,14 +41,18 @@ pub struct SuperCellParams {
     /// Graining level of data (proportion of number of single cells in the
     /// initial dataset to the number of metacells in the final dataset)
     pub graining_factor: f64,
-    /// [`crate::prelude::KnnParams`] for the various approximate nearest
-    /// neighbour searches in ann-search-rs
-    pub knn_params: KnnParams,
     /// Shall a kernel be applied as in SuperCell 2.0, see Hérault, et al.,
     /// bioRxiv, 2026
     pub use_kernel: bool,
     /// Optional choice for k_ith neighbour to use
     pub k_ith: Option<usize>,
+    /// Optional cap on stored support per walk-probability vector. `None` keeps
+    /// vectors exact (memory grows with reachable support); `Some(k)` keeps the
+    /// top-`k` entries by mass, bounding memory at ~`k * n_nodes`.
+    pub max_support: Option<usize>,
+    /// [`crate::prelude::KnnParams`] for the various approximate nearest
+    /// neighbour searches in ann-search-rs
+    pub knn_params: KnnParams,
 }
 
 /////////////
@@ -119,7 +123,7 @@ where
         vals.push(w);
     }
 
-    let adjacency = coo_to_csr(&rows, &cols, &vals, (n, n));
+    let adjacency = coo_to_csr(&rows.index_cast(), &cols.index_cast(), &vals, (n, n));
     SparseGraph::new(n, adjacency, false)
 }
 
@@ -138,7 +142,8 @@ where
 /// * `squared_dist` - If the distance is squared (for example Euclidean
 ///   squared).
 /// * `no_meta_cells` - Number of communities, i.e., metacells to identify
-/// * `verbose` - Controls the verbosity of the function
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -149,21 +154,29 @@ pub fn supercell<T>(
     params: &SuperCellParams,
     squared_dist: bool,
     no_meta_cells: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> Vec<usize>
 where
     T: BixverseFloat + std::iter::Sum + BixverseNumeric + SimdDistance,
 {
+    let verbosity = parse_verbosity_level(verbose);
+
     let knn_graph: SparseGraph<T> = if params.use_kernel {
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Using the kernel approach like in SuperCell 2.0")
         }
         knn_to_sparse_graph_kernel(knn_indices, knn_dist, squared_dist, params.k_ith)
     } else {
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Using the original version of SuperCell on the kNN graph")
         }
         knn_to_sparse_graph(knn_indices, true)
     };
-    walktrap_sparse_graph(&knn_graph, params.walk_length, no_meta_cells, verbose)
+    walktrap_sparse_graph(
+        &knn_graph,
+        params.walk_length,
+        no_meta_cells,
+        params.max_support,
+        verbosity.detailed_verbosity(),
+    )
 }

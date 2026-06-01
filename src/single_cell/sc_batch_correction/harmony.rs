@@ -8,8 +8,12 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rayon::prelude::*;
+use std::time::Instant;
 use thousands::*;
 
+use crate::ml::clustering::k_means::KMeansParamsWrappers;
+use crate::prelude::parse_verbosity_level;
+use crate::prelude::*;
 use crate::single_cell::sc_batch_correction::batch_utils::cosine_normalise;
 use crate::utils::matrix_utils::{flat_row_major_to_mat, mat_to_flat_row_major};
 
@@ -29,7 +33,7 @@ pub struct HarmonyParams {
     pub lambda: Vec<f32>,
     /// Fraction of cells to update per block (0.0-1.0)
     pub block_size: f32,
-    /// Maximum k-means iterations per Harmony round
+    /// Maximum iterations for the k-means clustering
     pub max_iter_kmeans: usize,
     /// Maximum Harmony outer iterations
     pub max_iter_harmony: usize,
@@ -39,6 +43,8 @@ pub struct HarmonyParams {
     pub epsilon_harmony: f32,
     /// Window size for convergence checking
     pub window_size: usize,
+    /// K-mean parameters, see [KMeansParamsWrappers]
+    pub kmeans_params: KMeansParamsWrappers,
 }
 
 /// Default implementation for HarmonyParams
@@ -55,6 +61,7 @@ impl Default for HarmonyParams {
             epsilon_kmeans: 1e-5,
             epsilon_harmony: 1e-4,
             window_size: 3,
+            kmeans_params: KMeansParamsWrappers::new(30, None, None),
         }
     }
 }
@@ -151,7 +158,8 @@ pub fn create_batch_infos(all_labels: &[Vec<usize>], n_cells: usize) -> Vec<Batc
 /// * `k` - Number of clusters
 /// * `max_iter` - Maximum k-means iterations
 /// * `seed` - Random seed
-/// * `verbose` - Print progress
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -159,23 +167,38 @@ pub fn create_batch_infos(all_labels: &[Vec<usize>], n_cells: usize) -> Vec<Batc
 pub fn run_kmeans_cosine(
     data_cos: MatRef<f32>,
     k: usize,
-    max_iter: usize,
+    kmeans_params: KMeansParamsWrappers,
     seed: usize,
-    verbose: bool,
-) -> Mat<f32> {
+    verbose: usize,
+) -> Result<Mat<f32>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let n = data_cos.nrows();
     let d = data_cos.ncols();
 
-    if verbose {
-        println!("Running k-means: {} cells, {} dims, {} clusters", n, d, k);
+    if verbosity.normal_verbosity() {
+        println!(
+            " Running k-means: {} cells, {} dims, {} clusters",
+            n.separate_with_underscores(),
+            d,
+            k
+        );
     }
 
     let data_flat = mat_to_flat_row_major(data_cos);
-    let centroids_flat =
-        train_centroids(&data_flat, d, n, k, &Dist::Cosine, max_iter, seed, verbose);
+    let centroids_flat = train_centroids(
+        &data_flat,
+        d,
+        n,
+        k,
+        &Dist::Cosine,
+        Some(kmeans_params.get_data()),
+        seed,
+        verbosity.detailed_verbosity(),
+    )?;
     let centroids = flat_row_major_to_mat(&centroids_flat, k, d);
 
-    cosine_normalise(&centroids)
+    Ok(cosine_normalise(&centroids))
 }
 
 /// Compute cosine distances between centroids and data.
@@ -322,7 +345,9 @@ pub fn update_centroids_from_r(z_cos: MatRef<f32>, r: MatRef<f32>) -> Mat<f32> {
 /// Compute Harmony objective function for convergence checking.
 ///
 /// Objective = kmeans_error + entropy + cross_entropy, where the
-/// cross-entropy term sums over all batch variables.
+/// cross-entropy term sums over all batch variables. The cell-wise sums are
+/// reduced in parallel; results therefore differ from a serial reduction at
+/// the level of floating-point rounding only.
 ///
 /// ### Params
 ///
@@ -356,29 +381,29 @@ pub fn compute_objective(
 
     let norm_const = 2000.0 / n as f32;
 
-    // K-means error + entropy
-    let mut kmeans_error = 0.0f32;
-    let mut entropy = 0.0f32;
-
-    for cell_idx in 0..n {
-        for cluster_idx in 0..k {
-            let r_val = r[(cluster_idx, cell_idx)];
-            kmeans_error += r_val * dist_mat[(cluster_idx, cell_idx)];
-            if r_val > 0.0 {
-                entropy += r_val * r_val.ln() * sigma[cluster_idx];
+    // K-means error + entropy, reduced in parallel over cells.
+    let kmeans_plus_entropy: f32 = (0..n)
+        .into_par_iter()
+        .map(|cell_idx| {
+            let mut acc = 0.0f32;
+            for cluster_idx in 0..k {
+                let r_val = r[(cluster_idx, cell_idx)];
+                acc += r_val * dist_mat[(cluster_idx, cell_idx)];
+                if r_val > 0.0 {
+                    acc += r_val * r_val.ln() * sigma[cluster_idx];
+                }
             }
-        }
-    }
+            acc
+        })
+        .sum();
 
-    // Cross-entropy: sum over all variables
+    // Cross-entropy: sum over variables, parallel over cells within each.
     let mut cross_entropy = 0.0f32;
-
     for (var_idx, info) in batch_infos.iter().enumerate() {
         let OEPair { o, e } = &oe_pairs[var_idx];
         let b = info.n_levels;
         let theta_v = theta[var_idx];
 
-        // Precompute log-ratio table for this variable
         let mut log_ratio = vec![0.0f32; k * b];
         for cluster_idx in 0..k {
             for level_idx in 0..b {
@@ -390,20 +415,23 @@ pub fn compute_objective(
             }
         }
 
-        for (level_idx, cell_indices) in info.batch_indices.iter().enumerate() {
-            for &cell_idx in cell_indices {
+        let ce_v: f32 = (0..n)
+            .into_par_iter()
+            .map(|cell_idx| {
+                let level = info.cell_to_level[cell_idx];
+                let mut acc = 0.0f32;
                 for cluster_idx in 0..k {
                     let r_val = r[(cluster_idx, cell_idx)];
-                    cross_entropy += r_val
-                        * sigma[cluster_idx]
-                        * theta_v
-                        * log_ratio[cluster_idx * b + level_idx];
+                    acc +=
+                        r_val * sigma[cluster_idx] * theta_v * log_ratio[cluster_idx * b + level];
                 }
-            }
-        }
+                acc
+            })
+            .sum();
+        cross_entropy += ce_v;
     }
 
-    (kmeans_error + entropy + cross_entropy) * norm_const
+    (kmeans_plus_entropy + cross_entropy) * norm_const
 }
 
 /// Update soft assignments with diversity penalties across all batch variables.
@@ -412,7 +440,12 @@ pub fn compute_objective(
 ///
 /// `R[k,n] proportional to exp(-dist[k,n]/sigma[k]) * product_v (E_v[k, b_v(n)] / (O_v[k, b_v(n)] + E_v[k, b_v(n)]))^theta_v`
 ///
-/// Uses block-wise shuffling to efficiently update O and E statistics.
+/// Uses block-wise shuffling to update statistics incrementally. The expected
+/// counts `E` are rank-1 (`E[k,b] = r_sum[k] * pr_b[b]`) and are only read at a
+/// cell's own level during the update, so instead of maintaining the full
+/// K x B matrix per cell (O(N*K*B)) we track only the per-cluster mass
+/// `r_sum` (O(N*K)) and rebuild `E` once at the end. The per-block R recompute
+/// is parallel over cells.
 ///
 /// ### Params
 ///
@@ -447,23 +480,9 @@ pub fn update_r_with_diversity(
     assert_eq!(theta.len(), n_vars);
     assert_eq!(oe_init.len(), n_vars);
 
-    // Precompute base scaled distances: exp(-dist / sigma), column-normalised
-    let mut scale_dist = Mat::zeros(k, n);
-    for cell_idx in 0..n {
-        let mut col_sum = 0.0f32;
-        for cluster_idx in 0..k {
-            let val = (-dist_mat[(cluster_idx, cell_idx)] / sigma[cluster_idx]).exp();
-            scale_dist[(cluster_idx, cell_idx)] = val;
-            col_sum += val;
-        }
-        if col_sum > 0.0 {
-            for cluster_idx in 0..k {
-                scale_dist[(cluster_idx, cell_idx)] /= col_sum;
-            }
-        }
-    }
+    let scale_dist = compute_scaled_distances(dist_mat, sigma);
+    let scale_dist = scale_dist.as_ref();
 
-    // Shuffled update order
     let mut rng = StdRng::seed_from_u64(seed as u64);
     let mut update_order: Vec<usize> = (0..n).collect();
     update_order.shuffle(&mut rng);
@@ -477,80 +496,98 @@ pub fn update_r_with_diversity(
         })
         .collect();
 
-    // Block-wise updates
+    // E is rank-1; track only per-cluster mass of the currently-included cells.
+    let mut r_sum = vec![0.0f32; k];
+    for cell_idx in 0..n {
+        for cluster_idx in 0..k {
+            r_sum[cluster_idx] += r[(cluster_idx, cell_idx)];
+        }
+    }
+
     let n_blocks = (1.0 / block_size).ceil() as usize;
     let cells_per_block = (n as f32 * block_size) as usize;
 
     for block_idx in 0..n_blocks {
         let idx_min = block_idx * cells_per_block;
         let idx_max = ((block_idx + 1) * cells_per_block).min(n);
+        let block = &update_order[idx_min..idx_max];
 
-        // Step 1: remove block cells from O and E for all variables
-        for &cell_idx in &update_order[idx_min..idx_max] {
-            for var_idx in 0..n_vars {
-                let level = batch_infos[var_idx].cell_to_level[cell_idx];
-                let OEPair { o, e } = &mut oe[var_idx];
-                let pr_b = &batch_infos[var_idx].pr_b;
-                let b = batch_infos[var_idx].n_levels;
-
-                for cluster_idx in 0..k {
-                    let r_val = r[(cluster_idx, cell_idx)];
-                    o[(cluster_idx, level)] -= r_val;
-                    for b_idx in 0..b {
-                        e[(cluster_idx, b_idx)] -= r_val * pr_b[b_idx];
-                    }
-                }
-            }
-        }
-
-        // Step 2: recompute R for block cells with diversity penalty
-        for &cell_idx in &update_order[idx_min..idx_max] {
-            let mut new_col_sum = 0.0f32;
-
+        // Step 1: remove block cells from O and r_sum (E is derived).
+        for &cell_idx in block {
             for cluster_idx in 0..k {
-                let base = scale_dist[(cluster_idx, cell_idx)];
-
-                // Product of penalties across all variables
-                let mut penalty = 1.0f32;
-                for var_idx in 0..n_vars {
-                    let level = batch_infos[var_idx].cell_to_level[cell_idx];
-                    let OEPair { o, e } = &oe[var_idx];
-                    let theta_v = theta[var_idx];
-
-                    let o_val = o[(cluster_idx, level)];
-                    let e_val = e[(cluster_idx, level)];
-                    if o_val + e_val > 0.0 {
-                        penalty *= (e_val / (o_val + e_val)).powf(theta_v);
-                    }
-                }
-
-                let new_r = base * penalty;
-                r[(cluster_idx, cell_idx)] = new_r;
-                new_col_sum += new_r;
+                r_sum[cluster_idx] -= r[(cluster_idx, cell_idx)];
             }
-
-            if new_col_sum > 0.0 {
+            for var_idx in 0..n_vars {
+                let level = batch_infos[var_idx].cell_to_level[cell_idx];
+                let o = &mut oe[var_idx].o;
                 for cluster_idx in 0..k {
-                    r[(cluster_idx, cell_idx)] /= new_col_sum;
+                    o[(cluster_idx, level)] -= r[(cluster_idx, cell_idx)];
                 }
             }
         }
 
-        // Step 3: add block cells back to O and E for all variables
-        for &cell_idx in &update_order[idx_min..idx_max] {
+        // Step 2: recompute R for block cells (read-only on O/r_sum -> parallel).
+        let new_cols: Vec<Vec<f32>> = {
+            let o_refs: Vec<MatRef<f32>> = oe.iter().map(|p| p.o.as_ref()).collect();
+            block
+                .par_iter()
+                .map(|&cell_idx| {
+                    let mut col = vec![0.0f32; k];
+                    let mut col_sum = 0.0f32;
+                    for cluster_idx in 0..k {
+                        let base = scale_dist[(cluster_idx, cell_idx)];
+                        let mut penalty = 1.0f32;
+                        for var_idx in 0..n_vars {
+                            let level = batch_infos[var_idx].cell_to_level[cell_idx];
+                            let o_val = o_refs[var_idx][(cluster_idx, level)];
+                            let e_val = r_sum[cluster_idx] * batch_infos[var_idx].pr_b[level];
+                            if o_val + e_val > 0.0 {
+                                penalty *= (e_val / (o_val + e_val)).powf(theta[var_idx]);
+                            }
+                        }
+                        let new_r = base * penalty;
+                        col[cluster_idx] = new_r;
+                        col_sum += new_r;
+                    }
+                    if col_sum > 0.0 {
+                        for v in col.iter_mut() {
+                            *v /= col_sum;
+                        }
+                    }
+                    col
+                })
+                .collect()
+        };
+
+        for (i, &cell_idx) in block.iter().enumerate() {
+            for cluster_idx in 0..k {
+                r[(cluster_idx, cell_idx)] = new_cols[i][cluster_idx];
+            }
+        }
+
+        // Step 3: add block cells back to O and r_sum.
+        for &cell_idx in block {
+            for cluster_idx in 0..k {
+                r_sum[cluster_idx] += r[(cluster_idx, cell_idx)];
+            }
             for var_idx in 0..n_vars {
                 let level = batch_infos[var_idx].cell_to_level[cell_idx];
-                let OEPair { o, e } = &mut oe[var_idx];
-                let pr_b = &batch_infos[var_idx].pr_b;
-                let b = batch_infos[var_idx].n_levels;
-
+                let o = &mut oe[var_idx].o;
                 for cluster_idx in 0..k {
-                    let r_val = r[(cluster_idx, cell_idx)];
-                    o[(cluster_idx, level)] += r_val;
-                    for b_idx in 0..b {
-                        e[(cluster_idx, b_idx)] += r_val * pr_b[b_idx];
-                    }
+                    o[(cluster_idx, level)] += r[(cluster_idx, cell_idx)];
                 }
+            }
+        }
+    }
+
+    // Rebuild E = r_sum (outer) pr_b for each variable.
+    for (var_idx, info) in batch_infos.iter().enumerate() {
+        let b = info.n_levels;
+        let e = &mut oe[var_idx].e;
+        for cluster_idx in 0..k {
+            let rs = r_sum[cluster_idx];
+            for level_idx in 0..b {
+                e[(cluster_idx, level_idx)] = rs * info.pr_b[level_idx];
             }
         }
     }
@@ -562,13 +599,14 @@ pub fn update_r_with_diversity(
 /// variables jointly.
 ///
 /// For each cluster k, constructs a joint design matrix with an intercept
-/// and deviation columns for each non-reference level of each variable:
+/// and a full one-hot block per variable:
 ///
-///   Phi = [intercept | var0_level1 ... var0_levelB0-1 | var1_level1 ... ]
+///   Phi = [intercept | var0_level0 ... var0_levelB0-1 | var1_level0 ... ]
 ///
-/// The design matrix has P = 1 + sum_v (B_v - 1) rows. Ridge regression
-/// estimates batch effects, which are subtracted from the data weighted
-/// by soft cluster assignments.
+/// The K per-cluster regressions are independent and solved in parallel; the
+/// batch corrections are then subtracted in a single pass parallel over cells.
+/// A contiguous `d x N` copy of the (immutable) original embedding gives each
+/// cell's features adjacent in memory during accumulation and subtraction.
 ///
 /// ### Params
 ///
@@ -593,7 +631,8 @@ pub fn ridge_regression_correction(
 
     assert_eq!(r.ncols(), n);
 
-    // Intercept + full one-hot per variable (matches C++ Phi_moe)
+    // Intercept + full one-hot per variable (matches C++ Phi_moe). Column
+    // layout is fixed across clusters, so offsets are computed once.
     let mut offsets = Vec::with_capacity(n_vars);
     let mut col = 1usize; // 0 = intercept
     for info in batch_infos {
@@ -602,63 +641,121 @@ pub fn ridge_regression_correction(
     }
     let p = col;
 
-    let mut z_corr = z_orig.to_owned();
+    // Contiguous d x N copy so a cell's features are adjacent in memory.
+    let zt = Mat::<f32>::from_fn(d, n, |feat, cell| z_orig[(cell, feat)]);
+    let zt = zt.as_ref();
 
-    for cluster_idx in 0..k {
-        let mut design_cov = Mat::<f32>::zeros(p, p);
-        let mut phi_z = Mat::<f32>::zeros(p, d);
+    // Phase 1 (parallel over clusters): solve each cluster's regression.
+    let weights: Vec<Mat<f32>> = (0..k)
+        .into_par_iter()
+        .map(|cluster_idx| {
+            let mut design_cov = Mat::<f32>::zeros(p, p);
+            let mut phi_z = Mat::<f32>::zeros(p, d);
+            let mut active: Vec<usize> = Vec::with_capacity(1 + n_vars);
 
-        for cell_idx in 0..n {
-            let r_val = r[(cluster_idx, cell_idx)];
+            for cell_idx in 0..n {
+                let r_val = r[(cluster_idx, cell_idx)];
 
-            let mut active_cols: Vec<usize> = Vec::with_capacity(1 + n_vars);
-            active_cols.push(0);
-            for var_idx in 0..n_vars {
-                let level = batch_infos[var_idx].cell_to_level[cell_idx];
-                active_cols.push(offsets[var_idx] + level);
-            }
-
-            // Weighted by R (not R^2) -- matches C++ Phi_moe * diag(R_k)
-            for &c in &active_cols {
-                for feat in 0..d {
-                    phi_z[(c, feat)] += r_val * z_orig[(cell_idx, feat)];
+                active.clear();
+                active.push(0);
+                for var_idx in 0..n_vars {
+                    let level = batch_infos[var_idx].cell_to_level[cell_idx];
+                    active.push(offsets[var_idx] + level);
                 }
-            }
 
-            for (i, &ci) in active_cols.iter().enumerate() {
-                for &cj in &active_cols[i..] {
-                    design_cov[(ci, cj)] += r_val;
-                    if ci != cj {
-                        design_cov[(cj, ci)] += r_val;
+                // Weighted by R (not R^2) -- matches C++ Phi_moe * diag(R_k)
+                for &c in &active {
+                    for feat in 0..d {
+                        phi_z[(c, feat)] += r_val * zt[(feat, cell_idx)];
+                    }
+                }
+
+                for (i, &ci) in active.iter().enumerate() {
+                    for &cj in &active[i..] {
+                        design_cov[(ci, cj)] += r_val;
+                        if ci != cj {
+                            design_cov[(cj, ci)] += r_val;
+                        }
                     }
                 }
             }
-        }
 
-        // Uniform ridge on all entries including intercept
-        for i in 0..p {
-            design_cov[(i, i)] += lambda;
-        }
+            // Uniform ridge on all entries including intercept
+            for i in 0..p {
+                design_cov[(i, i)] += lambda;
+            }
 
-        let partial_piv_lu: PartialPivLu<f32> = design_cov.partial_piv_lu();
-        let inv_cov = partial_piv_lu.inverse();
-        let w = &inv_cov * &phi_z;
+            let partial_piv_lu: PartialPivLu<f32> = design_cov.partial_piv_lu();
+            let inv_cov = partial_piv_lu.inverse();
+            &inv_cov * &phi_z
+        })
+        .collect();
 
-        // Subtract batch columns only -- intercept (row 0) is NOT
-        // subtracted, matching C++ W.row(0).zeros()
-        for cell_idx in 0..n {
-            let r_val = r[(cluster_idx, cell_idx)];
-            for var_idx in 0..n_vars {
-                let level = batch_infos[var_idx].cell_to_level[cell_idx];
-                let c = offsets[var_idx] + level;
-                for feat in 0..d {
-                    z_corr[(cell_idx, feat)] -= r_val * w[(c, feat)];
+    // Phase 2 (parallel over cells): subtract each cluster's batch correction.
+    // Intercept (row 0 of each W) is never subtracted.
+    let mut out = vec![0.0f32; n * d];
+    out.par_chunks_mut(d)
+        .enumerate()
+        .for_each(|(cell_idx, row)| {
+            for feat in 0..d {
+                row[feat] = zt[(feat, cell_idx)];
+            }
+            for cluster_idx in 0..k {
+                let w = &weights[cluster_idx];
+                let r_val = r[(cluster_idx, cell_idx)];
+                for var_idx in 0..n_vars {
+                    let level = batch_infos[var_idx].cell_to_level[cell_idx];
+                    let c = offsets[var_idx] + level;
+                    for feat in 0..d {
+                        row[feat] -= r_val * w[(c, feat)];
+                    }
                 }
             }
-        }
-    }
+        });
 
-    z_corr
+    Mat::from_fn(n, d, |i, j| out[i * d + j])
+}
+
+/// Compute column-normalised base assignments `exp(-dist / sigma)`.
+///
+/// This is the diversity-free soft assignment used as the base for the
+/// penalised R update. It is identical for every block within a round, and
+/// (in v2) for every inner iteration within a Harmony round, so it is hoisted
+/// out and computed once. Parallel over cells.
+///
+/// ### Params
+///
+/// * `dist_mat` - Distance matrix (K x N)
+/// * `sigma` - Per-cluster diversity weights (length K)
+///
+/// ### Returns
+///
+/// Column-normalised base assignment matrix (K x N), columns sum to 1
+pub fn compute_scaled_distances(dist_mat: MatRef<f32>, sigma: &[f32]) -> Mat<f32> {
+    let k = dist_mat.nrows();
+    let n = dist_mat.ncols();
+    assert_eq!(sigma.len(), k, "sigma length must match number of clusters");
+
+    let columns: Vec<Vec<f32>> = (0..n)
+        .into_par_iter()
+        .map(|cell_idx| {
+            let mut col = vec![0.0f32; k];
+            let mut col_sum = 0.0f32;
+            for cluster_idx in 0..k {
+                let val = (-dist_mat[(cluster_idx, cell_idx)] / sigma[cluster_idx]).exp();
+                col[cluster_idx] = val;
+                col_sum += val;
+            }
+            if col_sum > 0.0 {
+                for v in col.iter_mut() {
+                    *v /= col_sum;
+                }
+            }
+            col
+        })
+        .collect();
+
+    Mat::from_fn(k, n, |i, j| columns[j][i])
 }
 
 /////////////
@@ -730,7 +827,8 @@ struct HarmonyState {
 /// * `batch_labels` - one label slice per variable, each of length N
 /// * `params` - Harmony hyperparameters
 /// * `seed` - Random seed
-/// * `verbose` - Print progress
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -740,8 +838,12 @@ pub fn harmony(
     batch_labels: &[Vec<usize>],
     params: &HarmonyParams,
     seed: usize,
-    verbose: bool,
-) -> Mat<f32> {
+    verbose: usize,
+) -> Result<Mat<f32>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
+    let start = Instant::now();
+
     let n = pca.nrows();
     let d = pca.ncols();
     let n_vars = batch_labels.len();
@@ -750,7 +852,7 @@ pub fn harmony(
 
     let batch_infos = create_batch_infos(batch_labels, n);
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Harmony: {} cells, {} dims, {} variable(s), {} clusters",
             n.separate_with_underscores(),
@@ -786,17 +888,17 @@ pub fn harmony(
     let z_orig = pca.to_owned();
     let z_cos = cosine_normalise(&z_orig);
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("Running initial k-means...");
     }
 
     let y = run_kmeans_cosine(
         z_cos.as_ref(),
         params.k,
-        params.max_iter_kmeans,
+        params.kmeans_params.clone(),
         seed,
         verbose,
-    );
+    )?;
 
     let dist_mat = compute_cosine_distances(y.as_ref(), z_cos.as_ref());
     let r = initialise_r_from_dist(dist_mat.as_ref(), &sigma);
@@ -822,13 +924,15 @@ pub fn harmony(
         objectives_harmony: vec![initial_obj],
     };
 
-    if verbose {
+    if verbosity.normal_verbosity() {
+        println!(" Initial data preparation done in {:.2?}", start.elapsed());
         println!("Initial objective: {:.4}", initial_obj);
     }
 
     for harmony_iter in 0..params.max_iter_harmony {
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("\n=== Harmony iteration {} ===", harmony_iter + 1);
+            println!("  Running k-means clustering...");
         }
 
         for kmeans_iter in 0..params.max_iter_kmeans {
@@ -861,7 +965,7 @@ pub fn harmony(
 
             state.objectives_kmeans.push(obj);
 
-            if verbose && kmeans_iter % 5 == 0 {
+            if verbosity.detailed_verbosity() && kmeans_iter % 5 == 0 {
                 println!("  K-means iter {}: obj = {:.4}", kmeans_iter + 1, obj);
             }
 
@@ -872,7 +976,7 @@ pub fn harmony(
                     params.epsilon_kmeans,
                 );
                 if converged {
-                    if verbose {
+                    if verbosity.detailed_verbosity() {
                         println!("  K-means converged at iteration {}", kmeans_iter + 1);
                     }
                     break;
@@ -880,7 +984,7 @@ pub fn harmony(
             }
         }
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("  Applying ridge regression correction...");
         }
 
@@ -896,8 +1000,9 @@ pub fn harmony(
         let harmony_obj = *state.objectives_kmeans.last().unwrap();
         state.objectives_harmony.push(harmony_obj);
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("  Harmony objective: {:.4}", harmony_obj);
+            println!("   Finished iteration in {:.2?}", start.elapsed());
         }
 
         if harmony_iter >= 2 {
@@ -906,7 +1011,7 @@ pub fn harmony(
             let rel_change = (obj_old - obj_new).abs() / obj_old.abs();
 
             if rel_change < params.epsilon_harmony {
-                if verbose {
+                if verbosity.normal_verbosity() {
                     println!("\nHarmony converged at iteration {}", harmony_iter + 1);
                     println!("  Final objective: {:.4}", obj_new);
                 }
@@ -915,7 +1020,11 @@ pub fn harmony(
         }
     }
 
-    state.z_corr
+    if verbosity.normal_verbosity() {
+        println!(" Finished Harmony {:.2?}", start.elapsed());
+    }
+
+    Ok(state.z_corr)
 }
 
 ///////////
@@ -982,7 +1091,8 @@ mod tests {
         let mat = Mat::from_fn(20, 3, |i, j| data[i][j]);
         let mat_cos = cosine_normalise(&mat);
 
-        let centroids = run_kmeans_cosine(mat_cos.as_ref(), 2, 25, 42, false);
+        let centroids =
+            run_kmeans_cosine(mat_cos.as_ref(), 2, KMeansParamsWrappers::default(), 42, 0).unwrap();
 
         assert_eq!(centroids.nrows(), 2);
         assert_eq!(centroids.ncols(), 3);

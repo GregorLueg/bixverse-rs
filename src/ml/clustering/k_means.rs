@@ -8,12 +8,15 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rayon::prelude::*;
+use std::fmt::Debug;
 
 use crate::prelude::*;
 
-/////////////
-// Helpers //
-/////////////
+use ann_search_rs::prelude::KMeansTrainingParams;
+
+////////////////////
+// Enums / Params //
+////////////////////
 
 #[derive(Clone, Debug, Copy, Default)]
 /// Type of K means clustering to run
@@ -43,6 +46,114 @@ pub fn parse_k_means(s: &str) -> Option<KMeansType> {
     }
 }
 
+/// Wrapper around the [KMeansTrainingParams]
+///
+/// ### Fields
+///
+/// `0` - The [KMeansTrainingParams].
+pub struct KMeansParamsWrappers(KMeansTrainingParams);
+
+/// Clone implementation
+impl Clone for KMeansParamsWrappers {
+    fn clone(&self) -> Self {
+        Self(KMeansTrainingParams {
+            iters: self.0.iters,
+            init: self.0.init,
+            path: self.0.path,
+        })
+    }
+}
+
+impl KMeansParamsWrappers {
+    /// Generate a wrapped instance around the k-means clustering
+    ///
+    /// ### Params
+    ///
+    /// * `iters` - Number of iterations to run the clustering algorithm for
+    /// * `init` - Optional specification of the [KMeansInit] for better
+    ///   control
+    /// * `path` - The Lloyd's path you want to use, see [LloydPath] for better
+    ///   control
+    ///
+    /// ### Returns
+    ///
+    /// [KMeansTrainingParams]
+    pub fn new(iters: usize, init: Option<KMeansInit>, path: Option<LloydPath>) -> Self {
+        let internal_params = KMeansTrainingParams::new(iters, init, path);
+
+        Self(internal_params)
+    }
+
+    /// Returns the parameters and consumes self
+    ///
+    /// ### Returns
+    ///
+    /// The [KMeansTrainingParams]
+    pub fn get_data(self) -> KMeansTrainingParams {
+        self.0
+    }
+}
+
+/// Default implementation for [KMeansParamsWrappers]
+impl Default for KMeansParamsWrappers {
+    fn default() -> Self {
+        Self::new(100, None, None)
+    }
+}
+
+/// Parse the initialisation parameters
+///
+/// ### Params
+///
+/// * `s` String to parse
+///
+/// ### Returns
+///
+/// The Option of the [KMeansInit]
+pub fn parse_kmeans_init(s: &str) -> Option<KMeansInit> {
+    match s.to_lowercase().as_str() {
+        "random" => Some(KMeansInit::Random),
+        "parallel" | "plusplus" => Some(KMeansInit::KMeansParallel),
+        _ => None,
+    }
+}
+
+/// Parse the method details
+///
+/// ### Params
+///
+/// * `gemm` - Shall GEMM acceleration be used. This option will use faer under
+///   the hood and can accelerate the calculations in high dimensional data.
+/// * `hamerly` - Shall Hamerly's algorithm be used. Can provide strong
+///   acceleration with large N and/or large number of centroids.
+///
+/// ### Returns
+///
+/// The [LloydPath]
+pub fn parse_kmean_path(gemm: bool, hamerly: bool) -> LloydPath {
+    match (gemm, hamerly) {
+        (true, false) => LloydPath::GemmLloyd,
+        (true, true) => LloydPath::HamerlyGemm,
+        (false, true) => LloydPath::HamerlySimd,
+        (false, false) => LloydPath::ParallelLloyd,
+    }
+}
+
+/// Debug implementation
+impl std::fmt::Debug for KMeansParamsWrappers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KMeansParamsWrapper")
+            .field("iters", &self.0.iters)
+            .field("init", &self.0.init)
+            .field("path", &self.0.path)
+            .finish()
+    }
+}
+
+/////////////
+// Helpers //
+/////////////
+
 /// Recompute centroid norms for the assignment path
 ///
 /// Computes the norm representation expected by `gemm_assign_full` and
@@ -67,8 +178,9 @@ where
         .map(|c| {
             let cent = &centroids[c * dim..(c + 1) * dim];
             match metric {
-                Dist::Euclidean => T::dot_simd(cent, cent),
+                Dist::SquaredEuclidean => T::dot_simd(cent, cent),
                 Dist::Cosine => T::calculate_l2_norm(cent),
+                Dist::Manhattan => unreachable!(),
             }
         })
         .collect()
@@ -100,7 +212,8 @@ where
             .into_par_iter()
             .map(|i| T::calculate_l2_norm(&data[i * dim..(i + 1) * dim]))
             .collect(),
-        Dist::Euclidean => Vec::new(),
+        Dist::SquaredEuclidean => Vec::new(),
+        Dist::Manhattan => unreachable!(),
     }
 }
 
@@ -111,14 +224,14 @@ where
 /// Mini-batch k-means (Sculley 2010)
 ///
 /// Trains centroids using random mini-batches with a decaying learning
-/// rate (`eta = 1 / count[c]`). Each iteration samples `batch_size`
-/// vectors without replacement, assigns them to the nearest centroid,
-/// and applies an incremental mean update. A full assignment pass seeds
-/// the per-centroid counts after initialisation to stabilise early
-/// updates. Convergence is checked via maximum centroid drift.
+/// rate (`eta = 1 / count[c]`). Each iteration samples `batch_size` vectors
+/// without replacement, assigns them to the nearest centroid, and applies an
+/// incremental mean update. A full assignment pass seeds the per-centroid
+/// counts after initialisation to stabilise early updates. Convergence is
+/// checked via maximum centroid drift.
 ///
-/// After training, a final full-dataset assignment pass produces the
-/// returned assignments.
+/// After training, a final full-dataset assignment pass produces the returned
+/// assignments.
 ///
 /// ### Params
 ///
@@ -131,16 +244,13 @@ where
 ///   `n / 2` if larger.
 /// * `drift_threshold` - Below which centroid drift the algorithm is seen as
 ///   converged.
-/// * `lr_alpha` - Learning rate alpha decay. The original paper used `1.0`, but
-///   `0.75` yields better convergence.
+/// * `lr_alpha` - Learning rate alpha decay. The original paper used `1.0`.
 /// * `seed` - Random seed for reproducibility
 /// * `verbose` - Print convergence diagnostics
 ///
 /// ### Returns
 ///
-/// Tuple of (centroids, assignments) where centroids is a `Vec<T>` of
-/// length `n_centroids * dim` (row-major) and assignments is a `Vec<usize>`
-/// of length `n` with the nearest centroid index for each vector.
+/// Tuple of (centroids, assignments)
 #[allow(clippy::too_many_arguments)]
 pub fn train_centroids_minibatch<T>(
     data: MatRef<T>,
@@ -163,7 +273,7 @@ where
 
     // precompute all data norms once
     let data_norms: Vec<T> = match dist {
-        Dist::Euclidean => (0..n)
+        Dist::SquaredEuclidean => (0..n)
             .into_par_iter()
             .map(|i| {
                 let v = &data[i * dim..(i + 1) * dim];
@@ -174,6 +284,7 @@ where
             .into_par_iter()
             .map(|i| T::calculate_l2_norm(&data[i * dim..(i + 1) * dim]))
             .collect(),
+        Dist::Manhattan => unreachable!(),
     };
 
     // initialise centroids
@@ -187,10 +298,11 @@ where
             println!("  Initialising centroids via k-means||");
         }
         let init_norms: Vec<T> = match dist {
-            Dist::Euclidean => (0..n)
+            Dist::SquaredEuclidean => (0..n)
                 .map(|i| T::calculate_l2_norm(&data[i * dim..(i + 1) * dim]))
                 .collect(),
             Dist::Cosine => data_norms.clone(),
+            Dist::Manhattan => unreachable!(),
         };
         kmeans_parallel_init(&data, &init_norms, dim, n, n_centroids, &dist, seed)
     };
@@ -313,8 +425,9 @@ where
         for &c in &touched {
             let cent = &centroids[c * dim..(c + 1) * dim];
             centroid_norms[c] = match dist {
-                Dist::Euclidean => T::dot_simd(cent, cent),
+                Dist::SquaredEuclidean => T::dot_simd(cent, cent),
                 Dist::Cosine => T::calculate_l2_norm(cent),
+                Dist::Manhattan => unreachable!(),
             };
         }
 
@@ -388,15 +501,22 @@ pub fn k_means_clusters<T>(
     data: MatRef<T>,
     dist: &str,
     n_centroids: usize,
-    n_iters: usize,
+    kmeans_params: Option<KMeansParamsWrappers>,
     seed: usize,
     verbose: bool,
-) -> (Mat<T>, Vec<usize>)
+) -> Result<(Mat<T>, Vec<usize>), AnnSearchErrors>
 where
     T: BixverseFloat + AnnSearchFloat,
 {
+    let kmeans_params = kmeans_params.unwrap_or_default();
     let (data_flat, n, dim) = matrix_to_flat(data);
-    let dist = parse_ann_dist(dist).unwrap_or_default();
+    let dist = parse_ann_dist(dist).unwrap_or_else(|| {
+        println!(
+            "Unknown string provided ({:?}). Defaulting to Squared Euclidean",
+            dist
+        );
+        Dist::default()
+    });
 
     let norms = if dist == Dist::Cosine {
         (0..n)
@@ -416,10 +536,10 @@ where
         n,
         n_centroids,
         &dist,
-        n_iters,
+        Some(kmeans_params.0),
         seed,
         verbose,
-    );
+    )?;
 
     let centroids_norm = if dist == Dist::Cosine {
         (0..n_centroids)
@@ -446,7 +566,7 @@ where
 
     let centroid_mat = Mat::from_fn(n_centroids, dim, |i, j| centroids[i * dim + j]);
 
-    (centroid_mat, assignments)
+    Ok((centroid_mat, assignments))
 }
 
 ///////////
@@ -547,7 +667,7 @@ mod tests {
         let data = make_two_blobs(n_per, dim, separation, 42);
 
         let (centroids, assignments) =
-            k_means_clusters(data.as_ref(), "euclidean", 2, 50, 0, false);
+            k_means_clusters(data.as_ref(), "euclidean", 2, None, 0, false).unwrap();
 
         assert_eq!(centroids.nrows(), 2);
         assert_eq!(centroids.ncols(), dim);
@@ -585,7 +705,7 @@ mod tests {
         let data = make_two_blobs(n_per, dim, 5.0, 42);
 
         let (centroids, assignments) =
-            k_means_clusters(data.as_ref(), "euclidean", 2, 100, 0, false);
+            k_means_clusters(data.as_ref(), "euclidean", 2, None, 0, false).unwrap();
 
         for r in 0..centroids.nrows() {
             let mut sum = vec![0.0f32; dim];
@@ -618,8 +738,8 @@ mod tests {
     fn standard_deterministic_with_same_seed() {
         let data = make_two_blobs(100, 5, 5.0, 42);
 
-        let (c1, a1) = k_means_clusters(data.as_ref(), "euclidean", 5, 50, 7, false);
-        let (c2, a2) = k_means_clusters(data.as_ref(), "euclidean", 5, 50, 7, false);
+        let (c1, a1) = k_means_clusters(data.as_ref(), "euclidean", 5, None, 7, false).unwrap();
+        let (c2, a2) = k_means_clusters(data.as_ref(), "euclidean", 5, None, 7, false).unwrap();
 
         assert_eq!(a1, a2);
         for i in 0..c1.nrows() {
@@ -651,7 +771,7 @@ mod tests {
         let data = make_two_blobs(100, 5, 5.0, 42);
         let k = 7;
 
-        let (_, a) = k_means_clusters(data.as_ref(), "euclidean", k, 50, 0, false);
+        let (_, a) = k_means_clusters(data.as_ref(), "euclidean", k, None, 0, false).unwrap();
         assert!(a.iter().all(|&c| c < k));
 
         let (_, a) =
@@ -665,7 +785,7 @@ mod tests {
         // not ||c||^2). Worth a smoke test.
         let data = make_two_blobs(100, 5, 5.0, 42);
 
-        let (c, a) = k_means_clusters(data.as_ref(), "cosine", 2, 50, 0, false);
+        let (c, a) = k_means_clusters(data.as_ref(), "cosine", 2, None, 0, false).unwrap();
         assert_eq!(c.nrows(), 2);
         assert_eq!(a.len(), 200);
 
@@ -683,7 +803,7 @@ mod tests {
             3.0, 0.0, 4.0, 0.0, // ||.||^2 = 25
             1.0, 1.0, 1.0, 1.0, // ||.||^2 = 4
         ];
-        let norms = recompute_centroid_norms(&centroids, 4, 3, &Dist::Euclidean);
+        let norms = recompute_centroid_norms(&centroids, 4, 3, &Dist::SquaredEuclidean);
         assert!((norms[0] - 9.0).abs() < 1e-5);
         assert!((norms[1] - 25.0).abs() < 1e-5);
         assert!((norms[2] - 4.0).abs() < 1e-5);

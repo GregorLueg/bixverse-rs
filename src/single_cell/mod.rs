@@ -3,13 +3,17 @@
 //! reducing memory pressure.
 
 pub mod mc_analysis;
+pub mod mc_data;
 pub mod mc_generation;
 pub mod mc_processing;
 pub mod sc_analysis;
+pub mod sc_annotation;
 pub mod sc_batch_correction;
 pub mod sc_data;
 pub mod sc_processing;
 pub mod sc_r_wrappers;
-pub mod sc_simd;
 pub mod sc_traits;
 pub mod sc_utils;
+
+#[cfg(feature = "multi-modal")]
+pub mod multi_modal;

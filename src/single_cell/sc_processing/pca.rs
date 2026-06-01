@@ -151,8 +151,8 @@ pub fn sparse_csc_column_means(
     let res = (0..m)
         .into_par_iter()
         .map(|j| {
-            let start = csc.indptr[j];
-            let end = csc.indptr[j + 1];
+            let start = csc.indptr[j] as usize;
+            let end = csc.indptr[j + 1] as usize;
             let sum: f64 = values[start..end].iter().map(|&x| x as f64).sum();
             sum / n_f
         })
@@ -191,8 +191,8 @@ pub fn sparse_csc_column_stds(
     let res = (0..m)
         .into_par_iter()
         .map(|j| {
-            let start = csc.indptr[j];
-            let end = csc.indptr[j + 1];
+            let start = csc.indptr[j] as usize;
+            let end = csc.indptr[j + 1] as usize;
             let nnz = end - start;
             let mu = col_means[j];
             let slice = &values[start..end];
@@ -228,6 +228,8 @@ pub fn sparse_csc_column_stds(
 ///   has the advantage of speed-ups, but loses precision.
 /// * `return_scaled` - Return the scaled data.
 /// * `seed` - Seed for randomised SVD.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Return
 ///
@@ -242,8 +244,10 @@ pub fn pca_on_sc(
     random_svd: bool,
     seed: usize,
     return_scaled: bool,
-    verbose: bool,
+    verbose: usize,
 ) -> SingleCellPcaResScaled {
+    let verbosity = parse_verbosity_level(verbose);
+
     let start_total = Instant::now();
 
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
@@ -255,8 +259,8 @@ pub fn pca_on_sc(
 
     let end_reading = start_reading.elapsed();
 
-    if verbose {
-        println!("Loaded in data : {:.2?}", end_reading);
+    if verbosity.normal_verbosity() {
+        println!("PCA: Loaded in data in {:.2?}", end_reading);
     }
 
     let start_scaling = Instant::now();
@@ -293,8 +297,8 @@ pub fn pca_on_sc(
 
     let end_scaling = start_scaling.elapsed();
 
-    if verbose {
-        println!("Finished scaling : {:.2?}", end_scaling);
+    if verbosity.normal_verbosity() {
+        println!("PCA: Finished scaling in {:.2?}", end_scaling);
     }
 
     let start_svd = Instant::now();
@@ -326,14 +330,14 @@ pub fn pca_on_sc(
 
     let end_svd = start_svd.elapsed();
 
-    if verbose {
-        println!("Finished PCA calculations : {:.2?}", end_svd);
+    if verbosity.normal_verbosity() {
+        println!("PCA: Finished calculations in {:.2?}", end_svd);
     }
 
     let end_total = start_total.elapsed();
 
-    if verbose {
-        println!("Total run time PCA detection: {:.2?}", end_total);
+    if verbosity.normal_verbosity() {
+        println!("PCA: Total run time -> {:.2?}", end_total);
     }
 
     Ok((scores, loadings, s, scaled_f32))
@@ -358,7 +362,8 @@ pub fn pca_on_sc(
 /// * `seed` - Seed for randomised SVD.
 /// * `return_scaled` - Return the scaled data.
 /// * `gene_batch_size` - Number of genes to load per batch.
-/// * `verbose` - Print timing information.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Return
 ///
@@ -374,8 +379,10 @@ pub fn pca_on_sc_streaming(
     seed: usize,
     return_scaled: bool,
     gene_batch_size: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> SingleCellPcaResScaled {
+    let verbosity = parse_verbosity_level(verbose);
+
     let start_total = Instant::now();
 
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
@@ -390,9 +397,9 @@ pub fn pca_on_sc_streaming(
     let start_scaling = Instant::now();
 
     for batch_idx in 0..num_batches {
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(
-                "Scaling batch {}/{} ({} genes each)",
+                "PCA (streaming): Scaling batch {}/{} ({} genes each)",
                 batch_idx + 1,
                 num_batches,
                 gene_batch_size
@@ -405,7 +412,7 @@ pub fn pca_on_sc_streaming(
 
         let start_loading = Instant::now();
         let mut gene_chunks = reader.read_gene_parallel(batch_gene_indices)?;
-        if verbose {
+        if verbosity.detailed_verbosity() {
             println!("  Loaded batch in: {:.2?}", start_loading.elapsed());
         }
 
@@ -431,8 +438,11 @@ pub fn pca_on_sc_streaming(
         drop(gene_chunks);
     }
 
-    if verbose {
-        println!("Finished scaling: {:.2?}", start_scaling.elapsed());
+    if verbosity.normal_verbosity() {
+        println!(
+            "PCA (streaming): finished scaling in {:.2?}",
+            start_scaling.elapsed()
+        );
     }
 
     let start_svd = Instant::now();
@@ -462,10 +472,13 @@ pub fn pca_on_sc_streaming(
         (scores, loadings, s)
     };
 
-    if verbose {
-        println!("Finished PCA calculations: {:.2?}", start_svd.elapsed());
+    if verbosity.normal_verbosity() {
         println!(
-            "Total run time streaming PCA: {:.2?}",
+            "PCA (streaming): finished calculations in {:.2?}",
+            start_svd.elapsed()
+        );
+        println!(
+            "PCA (streaming): total run time -> {:.2?}",
             start_total.elapsed()
         );
     }
@@ -505,6 +518,8 @@ pub fn pca_on_sc_streaming(
 /// * `random_svd` - Shall randomised sparse singular value decompostion be
 ///   used. This has the advantage of speed-ups, but loses precision.
 /// * `seed` - Seed for randomised SVD.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Return
 ///
@@ -518,8 +533,10 @@ pub fn pca_on_sc_sparse(
     no_pcs: usize,
     random_svd: bool,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> SingleCellPcaRes {
+    let verbosity = parse_verbosity_level(verbose);
+
     let start_total = Instant::now();
 
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
@@ -531,8 +548,8 @@ pub fn pca_on_sc_sparse(
 
     let end_reading = start_reading.elapsed();
 
-    if verbose {
-        println!("Loaded in data : {:.2?}", end_reading);
+    if verbosity.normal_verbosity() {
+        println!("Sparse PCA: Loaded in data in {:.2?}", end_reading);
     }
 
     let start_data_prep = Instant::now();
@@ -550,8 +567,11 @@ pub fn pca_on_sc_sparse(
     let col_means: Vec<f64> = sparse_csc_column_means(&csc, true)?;
     let col_stds: Vec<f64> = sparse_csc_column_stds(&csc, &col_means, true)?;
 
-    if verbose {
-        println!("Finished the data preparations : {:.2?}", end_data_prep);
+    if verbosity.normal_verbosity() {
+        println!(
+            "Sparse PCA: finished the data preparations in {:.2?}",
+            end_data_prep
+        );
     }
 
     let start_svd = Instant::now();
@@ -596,14 +616,14 @@ pub fn pca_on_sc_sparse(
 
     let end_svd = start_svd.elapsed();
 
-    if verbose {
-        println!("Finished sparse PCA calculations : {:.2?}", end_svd);
+    if verbosity.normal_verbosity() {
+        println!("Sparse PCA: finished calculations in {:.2?}", end_svd);
     }
 
     let end_total = start_total.elapsed();
 
-    if verbose {
-        println!("Total run time sparse PCA detection: {:.2?}", end_total);
+    if verbosity.normal_verbosity() {
+        println!("Sparse PCA: total run time -> {:.2?}", end_total);
     }
 
     Ok((scores, loadings, s))

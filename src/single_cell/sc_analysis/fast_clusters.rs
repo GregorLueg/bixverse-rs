@@ -121,8 +121,6 @@ pub struct FastLouvainParams<T> {
     // -- k means --
     /// Number of k-means centroids.
     pub n_centroids: usize,
-    /// Number of k-means iterations.
-    pub kmeans_iters: usize,
     /// Batch size for mini-batch k-means
     pub batch_size: usize,
     /// Drift threshold for mini batch k-means
@@ -130,6 +128,8 @@ pub struct FastLouvainParams<T> {
     /// Learning rate exponent for mini batch k-means:
     /// `eta = m / count[c]^lr_alpha`
     pub lr_alpha: T,
+    /// k-means parameters, see [KMeansParamsWrappers]
+    pub kmeans_params: KMeansParamsWrappers,
 
     // -- knn --
     /// [KnnParams] parameters applied to the centroids. `ann_dist` also drives
@@ -171,10 +171,10 @@ where
         Self {
             // kmeans
             n_centroids: 1000,
-            kmeans_iters: 100,
             batch_size: 4096,
             drift_threshold: T::from_f64(1e-4).unwrap(),
             lr_alpha: T::from_f64(1.0).unwrap(),
+            kmeans_params: KMeansParamsWrappers::default(),
             // snn
             full_snn: false,
             pruning: None,
@@ -186,6 +186,17 @@ where
             louvain_iters: 10,
             multi_level_louvain: true,
         }
+    }
+
+    /// Returns the stored k-means parameters
+    ///
+    /// Helper function to extract the parameters
+    ///
+    /// ### Returns
+    ///
+    /// The [KMeansParamsWrappers]
+    pub fn get_kmeans_params(&self) -> KMeansParamsWrappers {
+        self.kmeans_params.clone()
     }
 }
 
@@ -277,7 +288,8 @@ fn flatten_knn_column_major<T: Copy>(knn: &[Vec<T>], k: usize) -> Vec<T> {
 ///   phase 2 aggregation, repeated). If `false`, run only one phase 1 pass
 ///   (matches Phenograph / the original doubletdetection behaviour).
 /// * `seed` - Seed for reproducibility.
-/// * `verbose` - Controls verbosity.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -291,8 +303,10 @@ pub fn fast_louvain_clusters(
     run_snn: bool,
     return_k_mean: bool,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<FastLouvainResults, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let km_type = parse_k_means(km_type).unwrap_or_default();
     let n_centroids = params.n_centroids.min(data.nrows() - 1);
 
@@ -301,20 +315,20 @@ pub fn fast_louvain_clusters(
             data,
             &params.knn_params.ann_dist,
             n_centroids,
-            params.kmeans_iters,
+            Some(params.get_kmeans_params()),
             seed,
-            verbose,
-        ),
+            verbosity.detailed_verbosity(),
+        )?,
         KMeansType::MiniBatchKMeans => train_centroids_minibatch(
             data,
             &params.knn_params.ann_dist,
             n_centroids,
-            params.kmeans_iters,
+            params.kmeans_params.clone().get_data().iters,
             params.batch_size,
             params.drift_threshold,
             params.lr_alpha,
             seed,
-            verbose,
+            verbosity.detailed_verbosity(),
         ),
     };
 
@@ -323,8 +337,8 @@ pub fn fast_louvain_clusters(
         params.knn_params.k,
         &params.knn_params,
         seed,
-        verbose,
-    );
+        verbosity.detailed_verbosity(),
+    )?;
 
     let graph = if run_snn {
         let pruning = params
@@ -333,7 +347,7 @@ pub fn fast_louvain_clusters(
 
         let start = Instant::now();
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(" Running the sNN graph as {}...", &params.snn_similarity)
         }
 
@@ -363,7 +377,7 @@ pub fn fast_louvain_clusters(
 
         let end = start.elapsed();
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(" Finished the sNN generation in {:.2?}...", end)
         }
 
@@ -423,7 +437,8 @@ pub fn fast_louvain_clusters(
 /// * `seed` - Seed for k-means and kNN (the shared graph).
 /// * `louvain_seeds` - Seeds to vary Louvain over. Must contain at least 2
 ///   entries to produce ARI.
-/// * `verbose` - Controls verbosity.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -438,8 +453,10 @@ pub fn fast_louvain_clusters_grid(
     return_k_mean: bool,
     seed: usize,
     n_louvain_seeds: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<FastLouvainResults, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     if n_louvain_seeds < 2 {
         return Err(BixverseErrors::InvalidArgument(
             "n_louvain_seeds must be at least 2".to_string(),
@@ -454,20 +471,20 @@ pub fn fast_louvain_clusters_grid(
             data,
             &params.knn_params.ann_dist,
             n_centroids,
-            params.kmeans_iters,
+            Some(params.get_kmeans_params()),
             seed,
-            verbose,
-        ),
+            verbosity.detailed_verbosity(),
+        )?,
         KMeansType::MiniBatchKMeans => train_centroids_minibatch(
             data,
             &params.knn_params.ann_dist,
             n_centroids,
-            params.kmeans_iters,
+            params.kmeans_params.clone().get_data().iters,
             params.batch_size,
             params.drift_threshold,
             params.lr_alpha,
             seed,
-            verbose,
+            verbosity.detailed_verbosity(),
         ),
     };
 
@@ -476,8 +493,8 @@ pub fn fast_louvain_clusters_grid(
         params.knn_params.k,
         &params.knn_params,
         seed,
-        verbose,
-    );
+        verbosity.detailed_verbosity(),
+    )?;
 
     let graph = if run_snn {
         let pruning = params
@@ -655,7 +672,7 @@ mod tests {
             drift_threshold: 1e-4,
             lr_alpha: 1.0,
             n_centroids: 30,
-            kmeans_iters: 100,
+            kmeans_params: KMeansParamsWrappers::default(),
             knn_params: knn,
             louvain_iters: 10,
             full_snn: false,
@@ -703,7 +720,7 @@ mod tests {
                 false,
                 false,
                 0,
-                false,
+                0,
             )
             .unwrap(),
         );
@@ -720,7 +737,7 @@ mod tests {
                 true,
                 false,
                 0,
-                false,
+                0,
             )
             .unwrap(),
         );
@@ -743,7 +760,7 @@ mod tests {
                 false,
                 false,
                 7,
-                false,
+                0,
             )
             .unwrap(),
         );
@@ -756,7 +773,7 @@ mod tests {
                 false,
                 false,
                 7,
-                false,
+                0,
             )
             .unwrap(),
         );
@@ -780,7 +797,7 @@ mod tests {
                 false,
                 false,
                 0,
-                false,
+                0,
             )
             .unwrap(),
         );
@@ -814,7 +831,7 @@ mod tests {
                 true,
                 false,
                 0,
-                false,
+                0,
             )
             .unwrap(),
         );
@@ -847,7 +864,7 @@ mod tests {
                 false,
                 0,
                 5,
-                false,
+                0,
             )
             .unwrap(),
         );
@@ -873,7 +890,7 @@ mod tests {
             false,
             0,
             1,
-            false,
+            0,
         );
 
         assert!(result.is_err());
@@ -894,7 +911,7 @@ mod tests {
                 false,
                 7,
                 4,
-                false,
+                0,
             )
             .unwrap(),
         );
@@ -908,7 +925,7 @@ mod tests {
                 false,
                 7,
                 4,
-                false,
+                0,
             )
             .unwrap(),
         );
@@ -939,7 +956,7 @@ mod tests {
                 false,
                 0,
                 4,
-                false,
+                0,
             )
             .unwrap(),
         );
@@ -985,7 +1002,7 @@ mod tests {
                 false,
                 42,
                 5,
-                true,
+                0,
             )
             .unwrap(),
         );
@@ -1020,7 +1037,7 @@ mod tests {
                 false,
                 0,
                 4,
-                false,
+                0,
             )
             .unwrap(),
         );

@@ -11,13 +11,24 @@ use crate::prelude::*;
 ///////////
 
 /// SNN similarity method
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, Debug)]
 pub enum SnnSimilarityMethod {
     /// This will calculate the Jaccard similarity as weight
     #[default]
     Intersection,
     /// This will calculate the Rank version as a weight
     Rank,
+}
+
+/// Type of shared nearest neighbour graph to create
+#[derive(Clone, Copy, Default, Debug)]
+pub enum SnnType {
+    /// Creates connections between nodes that share nearest neighbours
+    #[default]
+    FullConnection,
+    /// Creates only connections between nodes that are also connected in the
+    /// kNN graph
+    LimitedConnection,
 }
 
 /// Helper function to get the type of sNN similarity
@@ -28,11 +39,28 @@ pub enum SnnSimilarityMethod {
 ///
 /// ### Returns
 ///
-/// Option of the SnnSimilarityMethod
+/// Option of the [SnnSimilarityMethod]
 pub fn parse_snn_similiarity_method(s: &str) -> Option<SnnSimilarityMethod> {
     match s.to_lowercase().as_str() {
         "jaccard" => Some(SnnSimilarityMethod::Intersection),
         "rank" => Some(SnnSimilarityMethod::Rank),
+        _ => None,
+    }
+}
+
+/// Helper function to get the type of sNN graph construction
+///
+/// ### Params
+///
+/// * `s` - Type of sNN graph to create
+///
+/// ### Returns
+///
+/// Option of the [SnnType]
+pub fn parse_snn_type(s: &str) -> Option<SnnType> {
+    match s.to_lowercase().as_str() {
+        "full" => Some(SnnType::FullConnection),
+        "limited" => Some(SnnType::LimitedConnection),
         _ => None,
     }
 }
@@ -54,7 +82,8 @@ pub fn parse_snn_similiarity_method(s: &str) -> Option<SnnSimilarityMethod> {
 /// * `pruning` - Below which Jaccard similarity to prune the edge. In this case
 ///   the weight is set to `0`.
 /// * `method` - Which similarity method to use
-/// * `verbose` - Controls verbosity of the function.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -67,8 +96,10 @@ pub fn generate_snn_full(
     n_samples: usize,
     pruning: f32,
     method: SnnSimilarityMethod,
-    verbose: bool,
+    verbose: usize,
 ) -> (Vec<usize>, Vec<f32>) {
+    let verbosity = parse_verbosity_level(verbose);
+
     let mut reverse_mappings: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n_samples];
 
     let start_time = Instant::now();
@@ -153,7 +184,7 @@ pub fn generate_snn_full(
 
     let end_snn = start_time.elapsed();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("Transformed kNN into a full sNN graph: {:.2?}", end_snn);
     }
 
@@ -173,7 +204,8 @@ pub fn generate_snn_full(
 /// * `pruning` - Below which Jaccard similarity to prune the edge. In this case
 ///   the weight is set to `0`.
 /// * `method` - Which similarity method to use.
-/// * `verbose` - Controls verbosity of the function.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -186,8 +218,10 @@ pub fn generate_snn_limited(
     n_samples: usize,
     pruning: f32,
     method: SnnSimilarityMethod,
-    verbose: bool,
+    verbose: usize,
 ) -> (Vec<usize>, Vec<f32>) {
+    let verbosity = parse_verbosity_level(verbose);
+
     let start_time = Instant::now();
 
     let edge_map: FxHashMap<(usize, usize), f32> = (0..n_samples)
@@ -287,7 +321,7 @@ pub fn generate_snn_limited(
 
     let end_snn = start_time.elapsed();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("Transformed kNN into an sNN graph: {:.2?}", end_snn);
     }
 
@@ -362,8 +396,8 @@ pub fn snn_edges_to_sparse_graph(
 
     let adjacency = CompressedSparseData2 {
         data,
-        indices,
-        indptr,
+        indices: indices.index_cast(),
+        indptr: indptr.index_cast(),
         cs_type: CompressedSparseFormat::Csr,
         data_2: None,
         shape: (n_nodes, n_nodes),
@@ -399,13 +433,11 @@ mod tests {
             .collect()
     }
 
-    // ---- sNN tests ----
-
     #[test]
     fn snn_full_jaccard_known_weights() {
         let (knn, k, n) = small_knn();
         let (edges, weights) =
-            generate_snn_full(&knn, k, n, 0.0, SnnSimilarityMethod::Intersection, false);
+            generate_snn_full(&knn, k, n, 0.0, SnnSimilarityMethod::Intersection, 0);
         let m = edge_map(&edges, &weights);
 
         // all C(4,2)=6 pairs share at least one neighbour
@@ -425,9 +457,9 @@ mod tests {
     fn snn_pruning() {
         let (knn, k, n) = small_knn();
         let (_, w_unpruned) =
-            generate_snn_full(&knn, k, n, 0.0, SnnSimilarityMethod::Intersection, false);
+            generate_snn_full(&knn, k, n, 0.0, SnnSimilarityMethod::Intersection, 0);
         let (_, w_pruned) =
-            generate_snn_full(&knn, k, n, 0.6, SnnSimilarityMethod::Intersection, false);
+            generate_snn_full(&knn, k, n, 0.6, SnnSimilarityMethod::Intersection, 0);
 
         assert!(w_pruned.len() < w_unpruned.len());
         assert!(w_pruned.iter().all(|&w| w >= 0.6));
@@ -436,9 +468,8 @@ mod tests {
     #[test]
     fn snn_limited_is_subset_of_full() {
         let (knn, k, n) = small_knn();
-        let (fe, fw) = generate_snn_full(&knn, k, n, 0.0, SnnSimilarityMethod::Intersection, false);
-        let (le, lw) =
-            generate_snn_limited(&knn, k, n, 0.0, SnnSimilarityMethod::Intersection, false);
+        let (fe, fw) = generate_snn_full(&knn, k, n, 0.0, SnnSimilarityMethod::Intersection, 0);
+        let (le, lw) = generate_snn_limited(&knn, k, n, 0.0, SnnSimilarityMethod::Intersection, 0);
 
         let full = edge_map(&fe, &fw);
         let lim = edge_map(&le, &lw);
@@ -456,7 +487,7 @@ mod tests {
     fn snn_rank_weights_valid() {
         let (knn, k, n) = small_knn();
         for f in [generate_snn_full, generate_snn_limited] {
-            let (_, weights) = f(&knn, k, n, 0.0, SnnSimilarityMethod::Rank, false);
+            let (_, weights) = f(&knn, k, n, 0.0, SnnSimilarityMethod::Rank, 0);
             assert!(!weights.is_empty());
             assert!(weights.iter().all(|&w| w > 0.0 && w <= 1.0));
         }
@@ -549,7 +580,7 @@ mod tests {
     fn helper_end_to_end() {
         let (knn, k, n) = small_knn();
         let (edges, weights) =
-            generate_snn_full(&knn, k, n, 0.0, SnnSimilarityMethod::Intersection, false);
+            generate_snn_full(&knn, k, n, 0.0, SnnSimilarityMethod::Intersection, 0);
         let g = snn_edges_to_sparse_graph(&edges, &weights, n);
 
         let total_degree: usize = (0..n).map(|i| g.get_node_degree(i)).sum();

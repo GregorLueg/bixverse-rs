@@ -2,6 +2,7 @@
 
 use extendr_api::prelude::*;
 use faer::{Mat, MatRef};
+use num_traits::NumCast;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, HashMap};
 use std::ops::{Add, Mul};
@@ -430,7 +431,7 @@ pub fn list_to_sparse_matrix<T>(
     populate_data_2: bool,
 ) -> Result<CompressedSparseData2<T>, BixverseErrors>
 where
-    T: Clone + Default + TryFrom<Robj>,
+    T: Clone + Default + NumCast,
 {
     let r_data: HashMap<&str, Robj> = r_list
         .try_into()
@@ -458,7 +459,7 @@ where
         .as_real_slice()
         .unwrap()
         .iter()
-        .map(|&x| T::try_from(Robj::from(x)).ok().unwrap())
+        .map(|&x| T::from(x).unwrap())
         .collect();
 
     let nrow = r_data.get("nrow").and_then(|v| v.as_integer()).unwrap() as usize;
@@ -479,8 +480,8 @@ where
 
     Ok(CompressedSparseData2 {
         data,
-        indices,
-        indptr,
+        indices: indices.index_cast(),
+        indptr: indptr.index_cast(),
         cs_type,
         data_2,
         shape: (nrow, ncol),

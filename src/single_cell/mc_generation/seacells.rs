@@ -129,8 +129,8 @@ fn prune_and_renormalise(mat: &mut CompressedSparseData2<f32>, threshold: f32) {
     let mut new_indptr = vec![0];
 
     for row in 0..mat.shape.0 {
-        let start = mat.indptr[row];
-        let end = mat.indptr[row + 1];
+        let start = mat.indptr[row] as usize;
+        let end = mat.indptr[row + 1] as usize;
 
         for idx in start..end {
             if mat.data[idx].abs() > threshold {
@@ -138,7 +138,7 @@ fn prune_and_renormalise(mat: &mut CompressedSparseData2<f32>, threshold: f32) {
                 new_indices.push(mat.indices[idx]);
             }
         }
-        new_indptr.push(new_data.len());
+        new_indptr.push(new_data.len() as u32);
     }
 
     mat.data = new_data;
@@ -163,11 +163,11 @@ fn matrix_trace(mat: &CompressedSparseData2<f32>) -> f32 {
     let mut trace = 0.0;
 
     for i in 0..n {
-        let row_start = mat.indptr[i];
-        let row_end = mat.indptr[i + 1];
+        let row_start = mat.indptr[i] as usize;
+        let row_end = mat.indptr[i + 1] as usize;
 
         for idx in row_start..row_end {
-            if mat.indices[idx] == i {
+            if mat.indices[idx] == i as u32 {
                 trace += mat.data[idx];
                 break;
             }
@@ -199,7 +199,7 @@ pub fn compute_diffusion_kernel(
     knn_distances: &[Vec<f32>],
     knn: usize,
     squared_dist: bool,
-) -> CompressedSparseData2<f32> {
+) -> Result<CompressedSparseData2<f32>, BixverseErrors> {
     let n = knn_indices.len();
     let adaptive_k = (knn / 3).max(1);
 
@@ -231,12 +231,14 @@ pub fn compute_diffusion_kernel(
         }
     }
 
-    let w = coo_to_csr(&rows, &cols, &vals, (n, n));
+    let w = coo_to_csr(&rows.index_cast(), &cols.index_cast(), &vals, (n, n));
 
     // symmetrise: kernel = W + W^T
     let w_t = w.transpose_and_convert();
 
-    sparse_add_csr(&w, &w_t)
+    let res = sparse_add_csr(&w, &w_t)?;
+
+    Ok(res)
 }
 
 /// Compute diffusion maps from kernel matrix
@@ -260,7 +262,7 @@ pub fn diffusion_map_from_kernel(
     let row_sums: Vec<f32> = (0..kernel.shape.0)
         .map(|i| {
             (kernel.indptr[i]..kernel.indptr[i + 1])
-                .map(|idx| kernel.data[idx])
+                .map(|idx| kernel.data[idx as usize])
                 .sum()
         })
         .collect();
@@ -269,9 +271,9 @@ pub fn diffusion_map_from_kernel(
     for i in 0..kernel.shape.0 {
         let d_i_sqrt = row_sums[i].sqrt();
         for idx in kernel.indptr[i]..kernel.indptr[i + 1] {
-            let j = kernel.indices[idx];
+            let j = kernel.indices[idx as usize] as usize;
             let d_j_sqrt = row_sums[j].sqrt();
-            kernel.data[idx] /= d_i_sqrt * d_j_sqrt;
+            kernel.data[idx as usize] /= d_i_sqrt * d_j_sqrt;
         }
     }
 
@@ -401,7 +403,7 @@ fn max_min_sampling(data: &[Vec<f32>], num_waypoints: usize, seed: u64) -> Vec<u
 /// ### Returns
 ///
 /// Indices of the landmarks
-fn select_density_landmarks(
+pub fn select_density_landmarks(
     kernel: &CompressedSparseData2<f32>,
     n_landmarks: usize,
     seed: u64,
@@ -410,7 +412,7 @@ fn select_density_landmarks(
     let weights: Vec<f64> = (0..n)
         .map(|i| {
             let s: f32 = (kernel.indptr[i]..kernel.indptr[i + 1])
-                .map(|idx| kernel.data[idx])
+                .map(|idx| kernel.data[idx as usize])
                 .sum();
             (s as f64).max(0.0).sqrt()
         })
@@ -436,19 +438,22 @@ fn select_density_landmarks(
 /// * `knn_params` - Reference to [KnnParams] for the (approximate) nearest
 ///   neighbour searches.
 /// * `seed` - Seed for reproducibility
-/// * `verbose` - Controls verbosity
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
 /// The `(indices, distances)`
-fn landmark_knn(
+pub fn landmark_knn(
     pca: MatRef<f32>,
     landmark_indices: &[usize],
     k: usize,
     knn_params: &KnnParams,
     seed: usize,
-    verbose: bool,
-) -> (Vec<Vec<usize>>, Vec<Vec<f32>>) {
+    verbose: usize,
+) -> ScKnnResults {
+    let verbosity = parse_verbosity_level(verbose);
+
     let l = landmark_indices.len();
     let dim = pca.ncols();
 
@@ -457,10 +462,16 @@ fn landmark_knn(
     let mut params = knn_params.clone();
     params.k = k.min(l.saturating_sub(1)).max(1);
 
-    let (indices, distances) =
-        generate_knn_with_dist(landmark_mat.as_ref(), &params, true, false, seed, verbose);
+    let (indices, distances) = generate_knn_with_dist(
+        landmark_mat.as_ref(),
+        &params,
+        true,
+        false,
+        seed,
+        verbosity.detailed_verbosity(),
+    )?;
 
-    (indices, distances.expect("distances must be present"))
+    Ok((indices, distances.expect("distances must be present")))
 }
 
 /// Row-stochastic N×L transitions in PCA space (Gaussian, adaptive bandwidth)
@@ -476,7 +487,7 @@ fn landmark_knn(
 /// ### Returns
 ///
 /// The landmark transition matrix
-fn build_data_to_landmark_transitions(
+pub fn build_data_to_landmark_transitions(
     pca: MatRef<f32>,
     landmark_indices: &[usize],
     k: usize,
@@ -541,13 +552,13 @@ fn build_data_to_landmark_transitions(
     let mut cols = Vec::new();
     let mut vals = Vec::new();
     for (cell_id, (idx, val)) in per_row.into_iter().enumerate() {
-        for (j, w) in idx.into_iter().zip(val.into_iter()) {
+        for (j, w) in idx.into_iter().zip(val) {
             rows.push(cell_id);
             cols.push(j);
             vals.push(w);
         }
     }
-    coo_to_csr(&rows, &cols, &vals, (n, l))
+    coo_to_csr(&rows.index_cast(), &cols.index_cast(), &vals, (n, l))
 }
 
 /// Nystroem extension: y(i)[d] = (1/λ_d) · Σ_l P_nl[i,l] · y_landmark[l][d]
@@ -571,10 +582,10 @@ fn nystrom_extend(
         .into_par_iter()
         .map(|i| {
             let mut row = vec![0.0f32; n_dim];
-            let start = p_nl.indptr[i];
-            let end = p_nl.indptr[i + 1];
+            let start = p_nl.indptr[i] as usize;
+            let end = p_nl.indptr[i + 1] as usize;
             for idx in start..end {
-                let l = p_nl.indices[idx];
+                let l = p_nl.indices[idx] as usize;
                 let w = p_nl.data[idx];
                 for d in 0..n_dim {
                     row[d] += w * landmark_embedding[l][d];
@@ -594,133 +605,158 @@ fn nystrom_extend(
 // Matrix updates //
 ////////////////////
 
-/// Compute gradient of A: `g = 2 * (t1 · A - t2)` into a column-major buffer
-///
-/// Output layout is column-major with `g[j * k + i]` at row i, column j, chosen
-/// so that the argmin scan over a column is stride-1 in memory. Parallelises
-/// over rows i; each thread owns a unique i, making the strided writes to
-/// `g[j * k + i]` across j disjoint between threads.
+/// Per-cell Frank-Wolfe argmins for the A update, one gradient column at a
+/// time so the full k × n gradient is never materialised. The factor of 2 in
+/// the true gradient is dropped: irrelevant to an argmin.
 ///
 /// ### Params
 ///
-/// * `t1` - Precomputed `Bᵀ K² B` matrix (k × k)
-/// * `a` - Current assignment matrix (k × n)
-/// * `t2` - Precomputed `Bᵀ K²` matrix (k × n)
-/// * `k` - Number of SEACells (archetypes)
+/// * `t1` - k × k matrix Bᵀ K² B (symmetric)
+/// * `a` - k × n current assignment matrix
+/// * `k2_b` - n × k matrix K² B (rows are columns of t2)
+/// * `k` - Number of archetypes
 /// * `n` - Number of cells
-/// * `g` - Output buffer of length `k * n` (column-major, row = archetype)
-fn compute_grad_a_colmajor(
-    t1: &CompressedSparseData2<f32>,
-    a: &CompressedSparseData2<f32>,
-    t2: &CompressedSparseData2<f32>,
+///
+/// ### Returns
+///
+/// Vector of length n with the argmin archetype index for each cell
+fn fw_argmins_a(
+    t1: &CompressedSparseData2<f32>,   // k × k, Bᵀ K² B (symmetric)
+    a: &CompressedSparseData2<f32>,    // k × n, current A
+    k2_b: &CompressedSparseData2<f32>, // n × k, K² B (rows are t2's columns)
     k: usize,
     n: usize,
-    g: &mut [f32],
-) {
-    let g_addr = g.as_mut_ptr() as usize;
+) -> Vec<usize> {
+    let a_t = a.transpose_and_convert(); // n × k: row j is column j of A
 
-    (0..k).into_par_iter().for_each_init(
-        || vec![0.0f32; n],
-        |row_buf, i| {
-            row_buf.fill(0.0);
+    const CHUNK: usize = 256;
+    let n_chunks = n.div_ceil(CHUNK);
 
-            // Row i of (t1·a)
-            let t1_start = t1.indptr[i];
-            let t1_end = t1.indptr[i + 1];
-            for t1_idx in t1_start..t1_end {
-                let r = t1.indices[t1_idx];
-                let t1_val = t1.data[t1_idx];
-                let a_start = a.indptr[r];
-                let a_end = a.indptr[r + 1];
-                for a_idx in a_start..a_end {
-                    let j = a.indices[a_idx];
-                    row_buf[j] += t1_val * a.data[a_idx];
+    let chunks: Vec<Vec<usize>> = (0..n_chunks)
+        .into_par_iter()
+        .map_init(
+            || vec![0.0f32; k],
+            |buf, chunk_idx| {
+                let start = chunk_idx * CHUNK;
+                let end = ((chunk_idx + 1) * CHUNK).min(n);
+                let mut out = Vec::with_capacity(end - start);
+
+                for j in start..end {
+                    buf.fill(0.0);
+
+                    for ai in a_t.indptr[j] as usize..a_t.indptr[j + 1] as usize {
+                        let r = a_t.indices[ai] as usize;
+                        let w = a_t.data[ai];
+                        for ti in t1.indptr[r] as usize..t1.indptr[r + 1] as usize {
+                            buf[t1.indices[ti] as usize] += w * t1.data[ti];
+                        }
+                    }
+                    for ki in k2_b.indptr[j] as usize..k2_b.indptr[j + 1] as usize {
+                        buf[k2_b.indices[ki] as usize] -= k2_b.data[ki];
+                    }
+
+                    let mut min_val = buf[0];
+                    let mut min_idx = 0;
+                    for i in 1..k {
+                        if buf[i] < min_val {
+                            min_val = buf[i];
+                            min_idx = i;
+                        }
+                    }
+                    out.push(min_idx);
                 }
-            }
+                out
+            },
+        )
+        .collect();
 
-            // Subtract row i of t2
-            let t2_start = t2.indptr[i];
-            let t2_end = t2.indptr[i + 1];
-            for t2_idx in t2_start..t2_end {
-                let j = t2.indices[t2_idx];
-                row_buf[j] -= t2.data[t2_idx];
-            }
-
-            // Strided write into column-major g, scaled by 2.
-            // SAFETY: every thread has a unique i; writes at g[j*k + i] are
-            // disjoint across threads (different offsets per column).
-            unsafe {
-                let g_ptr = g_addr as *mut f32;
-                for j in 0..n {
-                    *g_ptr.add(j * k + i) = 2.0 * row_buf[j];
-                }
-            }
-        },
-    );
+    chunks.into_iter().flatten().collect()
 }
 
-/// Compute gradient of B: `g = 2 * (K² B · t1 - t2)` into a column-major buffer
-///
-/// Output layout is column-major with `g[c * n + r]` at row r, column c, chosen
-/// so that the argmin scan over a column is stride-1 in memory. Parallelises
-/// over rows r; each thread owns a unique r, making the strided writes to
-/// `g[c * n + r]` across c disjoint between threads.
+/// Per-archetype Frank-Wolfe argmins and FW duality gap for the B update,
+/// one gradient column at a time. Factor of 2 dropped: cancels in the gap
+/// ratio, irrelevant to the argmin.
 ///
 /// ### Params
 ///
-/// * `k2_b` - Precomputed `K² B` matrix (n × k)
-/// * `t1` - Precomputed `A Aᵀ` matrix (k × k)
-/// * `t2` - Precomputed `K² Aᵀ` matrix (n × k)
+/// * `k2_b_t` - k × n matrix, rows are columns of K² B
+/// * `t1` - k × k matrix A Aᵀ (symmetric)
+/// * `t2_t` - k × n matrix, rows are columns of K² Aᵀ
+/// * `b_t` - k × n matrix, rows are columns of B
 /// * `n` - Number of cells
-/// * `k` - Number of SEACells (archetypes)
-/// * `g` - Output buffer of length `n * k` (column-major, row = cell)
-fn compute_grad_b_colmajor(
-    k2_b: &CompressedSparseData2<f32>,
-    t1: &CompressedSparseData2<f32>,
-    t2: &CompressedSparseData2<f32>,
+/// * `k` - Number of archetypes
+///
+/// ### Returns
+///
+/// Tuple of argmin archetype index per archetype and the absolute FW duality
+/// gap
+fn fw_argmins_b(
+    k2_b_t: &CompressedSparseData2<f32>, // k × n, rows are columns of K²B
+    t1: &CompressedSparseData2<f32>,     // k × k, A Aᵀ (symmetric)
+    t2_t: &CompressedSparseData2<f32>,   // k × n, rows are columns of K²Aᵀ
+    b_t: &CompressedSparseData2<f32>,    // k × n, rows are columns of B
     n: usize,
     k: usize,
-    g: &mut [f32],
-) {
-    let g_addr = g.as_mut_ptr() as usize;
+) -> (Vec<usize>, f32) {
+    const CHUNK: usize = 64;
+    let n_chunks = k.div_ceil(CHUNK);
 
-    (0..n).into_par_iter().for_each_init(
-        || vec![0.0f32; k],
-        |row_buf, r| {
-            row_buf.fill(0.0);
+    let chunks: Vec<(Vec<usize>, f32, f32)> = (0..n_chunks)
+        .into_par_iter()
+        .map_init(
+            || vec![0.0f32; n],
+            |buf, chunk_idx| {
+                let start = chunk_idx * CHUNK;
+                let end = ((chunk_idx + 1) * CHUNK).min(k);
+                let mut amins = Vec::with_capacity(end - start);
+                let mut g_dot_b = 0.0f32;
+                let mut g_dot_e = 0.0f32;
 
-            // Row r of (k2_b · t1)
-            let kb_start = k2_b.indptr[r];
-            let kb_end = k2_b.indptr[r + 1];
-            for kb_idx in kb_start..kb_end {
-                let m = k2_b.indices[kb_idx];
-                let kb_val = k2_b.data[kb_idx];
-                let t1_start = t1.indptr[m];
-                let t1_end = t1.indptr[m + 1];
-                for t1_idx in t1_start..t1_end {
-                    let c = t1.indices[t1_idx];
-                    row_buf[c] += kb_val * t1.data[t1_idx];
+                for c in start..end {
+                    buf.fill(0.0);
+
+                    // (K²B · t1)[:, c] = sum_m t1[m,c] * (K²B)[:, m]
+                    for ti in t1.indptr[c] as usize..t1.indptr[c + 1] as usize {
+                        let m = t1.indices[ti] as usize;
+                        let tmc = t1.data[ti];
+                        for ki in k2_b_t.indptr[m] as usize..k2_b_t.indptr[m + 1] as usize {
+                            buf[k2_b_t.indices[ki] as usize] += tmc * k2_b_t.data[ki];
+                        }
+                    }
+                    for si in t2_t.indptr[c] as usize..t2_t.indptr[c + 1] as usize {
+                        buf[t2_t.indices[si] as usize] -= t2_t.data[si];
+                    }
+
+                    let mut min_val = buf[0];
+                    let mut min_idx = 0;
+                    for r in 1..n {
+                        if buf[r] < min_val {
+                            min_val = buf[r];
+                            min_idx = r;
+                        }
+                    }
+                    amins.push(min_idx);
+                    g_dot_e += min_val;
+
+                    for bi in b_t.indptr[c] as usize..b_t.indptr[c + 1] as usize {
+                        g_dot_b += b_t.data[bi] * buf[b_t.indices[bi] as usize];
+                    }
                 }
-            }
+                (amins, g_dot_b, g_dot_e)
+            },
+        )
+        .collect();
 
-            // Subtract row r of t2
-            let t2_start = t2.indptr[r];
-            let t2_end = t2.indptr[r + 1];
-            for t2_idx in t2_start..t2_end {
-                let c = t2.indices[t2_idx];
-                row_buf[c] -= t2.data[t2_idx];
-            }
+    let mut argmins = Vec::with_capacity(k);
+    let mut g_dot_b = 0.0f32;
+    let mut g_dot_e = 0.0f32;
+    for (amins, gb, ge) in chunks {
+        argmins.extend(amins);
+        g_dot_b += gb;
+        g_dot_e += ge;
+    }
 
-            // SAFETY: each thread has a unique r; writes to g[c*n + r] across c
-            // are disjoint between threads.
-            unsafe {
-                let g_ptr = g_addr as *mut f32;
-                for c in 0..k {
-                    *g_ptr.add(c * n + r) = 2.0 * row_buf[c];
-                }
-            }
-        },
-    );
+    (argmins, (g_dot_b - g_dot_e).abs())
 }
 
 //////////
@@ -809,18 +845,21 @@ impl<'a> SEACells<'a> {
     /// * `pca` - PCA/SVD matrix (n_cells × n_components)
     /// * `knn_indices` - k-NN indices for each cell
     /// * `knn_distances` - k-NN distances for each cell
-    /// * `verbose` - Print progress messages
+    /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+    ///   detailed verbosity.
     pub fn construct_kernel_mat(
         &mut self,
         pca: MatRef<f32>,
         knn_indices: &[Vec<usize>],
         knn_distances: &[Vec<f32>],
-        verbose: bool,
+        verbose: usize,
     ) {
+        let verbosity = parse_verbosity_level(verbose);
+
         let n = pca.nrows();
         let k = knn_indices[0].len();
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Computing adaptive bandwidth RBF kernel...");
         }
 
@@ -880,18 +919,18 @@ impl<'a> SEACells<'a> {
             vals.push(val);
         }
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(
                 "Built kernel with {} non-zeros",
                 vals.len().separate_with_underscores()
             );
         }
 
-        let kernel = coo_to_csr(&rows, &cols, &vals, (n, n));
+        let kernel = coo_to_csr(&rows.index_cast(), &cols.index_cast(), &vals, (n, n));
 
         if self.n_cells > 20000 {
-            if verbose {
-                println!("Pre-computing kernel Frobenius norm...");
+            if verbosity.detailed_verbosity() {
+                println!(" Pre-computing kernel Frobenius norm...");
             }
             let k_frob = frobenius_norm(&kernel);
             self.k_frobenius_norm_sq = Some(k_frob * k_frob);
@@ -926,8 +965,10 @@ impl<'a> SEACells<'a> {
         }
 
         let k = self.kernel_mat.as_ref().unwrap();
-        let kx = csr_matmul_csr(k, x);
-        Ok(csr_matmul_csr(k, &kx))
+        let kx = csr_matmul_csr(k, x)?;
+        let res = csr_matmul_csr(k, &kx)?;
+
+        Ok(res)
     }
 
     /// Compute K^2 @ v = K @ (K @ v) for a dense vector v
@@ -959,8 +1000,11 @@ impl<'a> SEACells<'a> {
     /// ### Params
     ///
     /// * `seed` - Random seed for reproducibility
-    /// * `verbose` - Print progress and RSS values
-    pub fn fit(&mut self, seed: usize, verbose: bool) -> Result<(), BixverseErrors> {
+    /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+    ///   detailed verbosity.
+    pub fn fit(&mut self, seed: usize, verbose: usize) -> Result<(), BixverseErrors> {
+        let verbosity = parse_verbosity_level(verbose);
+
         if self.kernel_mat.is_none() {
             return Err(BixverseErrors::SEACellsKernelMatrixMissing);
         }
@@ -977,7 +1021,7 @@ impl<'a> SEACells<'a> {
         self.rss_history.push(initial_rss);
         self.convergence_threshold = Some(self.params.convergence_epsilon * initial_rss);
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Initial RSS: {:.6}", initial_rss);
             println!(
                 "Convergence threshold: {:.6}",
@@ -1006,7 +1050,7 @@ impl<'a> SEACells<'a> {
 
             let iter_duration = iter_start.elapsed();
 
-            if verbose {
+            if verbosity.normal_verbosity() {
                 println!(
                     "Iteration {}: RSS = {:.6}, Time = {:.2}s",
                     n_iter,
@@ -1019,7 +1063,7 @@ impl<'a> SEACells<'a> {
                 let rss_diff = (self.rss_history[n_iter - 1] - self.rss_history[n_iter]).abs();
                 if rss_diff < self.convergence_threshold.unwrap() && n_iter >= self.params.min_iter
                 {
-                    if verbose {
+                    if verbosity.normal_verbosity() {
                         println!("Converged after {} iterations!", n_iter);
                     }
                     converged = true;
@@ -1027,7 +1071,7 @@ impl<'a> SEACells<'a> {
             }
         }
 
-        if !converged && verbose {
+        if !converged && verbosity.normal_verbosity() {
             println!(
                 "Warning: Algorithm did not converge after {} iterations",
                 self.params.max_iter
@@ -1046,7 +1090,8 @@ impl<'a> SEACells<'a> {
     ///
     /// * `knn_indices` - k-NN indices for each cell
     /// * `knn_distances` - k-NN distances for each cell
-    /// * `verbose` - Print which method is selected
+    /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+    ///   detailed verbosity.
     /// * `squared_dist` - Are the distances squared (squared Euclidean for
     ///   example).
     /// * `seed` - Random seed for initialisation
@@ -1054,12 +1099,14 @@ impl<'a> SEACells<'a> {
         &mut self,
         knn_indices: &[Vec<usize>],
         knn_distances: &[Vec<f32>],
-        verbose: bool,
+        verbose: usize,
         squared_dist: bool,
         seed: u64,
     ) -> Result<(), BixverseErrors> {
+        let verbosity = parse_verbosity_level(verbose);
+
         if self.n_cells > self.params.greedy_threshold {
-            if verbose {
+            if verbosity.normal_verbosity() {
                 println!(
                     "Dataset large (n={}), using fast random init (threshold: {})",
                     self.n_cells.separate_with_underscores(),
@@ -1086,16 +1133,19 @@ impl<'a> SEACells<'a> {
     ///
     /// ### Params
     ///
-    /// * `verbose` - Print number of archetypes selected
+    /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+    ///   detailed verbosity.
     /// * `seed` - Random seed for reproducibility
-    fn initialise_archetypes_random(&mut self, verbose: bool, seed: u64) {
+    fn initialise_archetypes_random(&mut self, verbose: usize, seed: u64) {
+        let verbosity = parse_verbosity_level(verbose);
+
         let mut rng = StdRng::seed_from_u64(seed);
         let mut indices: Vec<usize> = (0..self.n_cells).collect();
         indices.shuffle(&mut rng);
 
         let archetypes: Vec<usize> = indices.into_iter().take(self.params.n_sea_cells).collect();
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Selected {} random archetypes", archetypes.len());
         }
 
@@ -1114,19 +1164,21 @@ impl<'a> SEACells<'a> {
     /// * `knn_distances` - k-NN distances for each cell
     /// * `squared_dist` - Are the distances squared (squared Euclidean for
     ///   example).
-    /// * `verbose` - Print selection counts
+    /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+    ///   detailed verbosity.
     /// * `seed` - Random seed for waypoint sampling
     fn initialise_archetypes_combined(
         &mut self,
         knn_indices: &[Vec<usize>],
         knn_distances: &[Vec<f32>],
         squared_dist: bool,
-        verbose: bool,
+        verbose: usize,
         seed: u64,
     ) -> Result<(), BixverseErrors> {
+        let verbosity = parse_verbosity_level(verbose);
         let k = self.params.n_sea_cells;
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Computing diffusion maps for waypoint initialisation...");
         }
 
@@ -1135,7 +1187,7 @@ impl<'a> SEACells<'a> {
             knn_distances,
             self.params.knn_params.k,
             squared_dist,
-        );
+        )?;
 
         let (eigenvalues, eigenvectors) =
             diffusion_map_from_kernel(&mut kernel, self.params.knn_params.k, seed)?;
@@ -1143,7 +1195,7 @@ impl<'a> SEACells<'a> {
         let multiscale = determine_multiscale_space(&eigenvalues, &eigenvectors, Some(10));
         let waypoint_ix = max_min_sampling(&multiscale, k, seed);
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(
                 "Selecting {} cells from waypoint initialisation.",
                 waypoint_ix.len()
@@ -1152,12 +1204,12 @@ impl<'a> SEACells<'a> {
 
         let from_greedy = k.saturating_sub(waypoint_ix.len());
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Initialising residual matrix using greedy column selection");
         }
         let greedy_ix = self.get_greedy_centres(from_greedy + 10);
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(
                 "Selecting {} cells from greedy initialisation.",
                 from_greedy
@@ -1195,7 +1247,8 @@ impl<'a> SEACells<'a> {
     /// * `squared_dist` - Are the distances squared (squared Euclidean for
     ///   example).
     /// * `n_landmarks` - Number of landmarks (typically 5-10× n_sea_cells)
-    /// * `verbose` - Print progress messages
+    /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+    ///   detailed verbosity.
     /// * `seed` - Random seed for reproducibility
     #[allow(clippy::too_many_arguments)]
     pub fn initialise_archetypes_landmark(
@@ -1205,19 +1258,21 @@ impl<'a> SEACells<'a> {
         knn_distances: &[Vec<f32>],
         squared_dist: bool,
         n_landmarks: usize,
-        verbose: bool,
+        verbose: usize,
         seed: u64,
     ) -> Result<(), BixverseErrors> {
+        let verbosity = parse_verbosity_level(verbose);
+
         let k = self.params.n_sea_cells;
         let n = self.n_cells;
         let knn_k = self.params.knn_params.k;
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Building diffusion kernel for landmark selection...");
         }
-        let kernel = compute_diffusion_kernel(knn_indices, knn_distances, knn_k, squared_dist);
+        let kernel = compute_diffusion_kernel(knn_indices, knn_distances, knn_k, squared_dist)?;
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(
                 "Selecting {} density-weighted landmarks...",
                 n_landmarks.separate_with_underscores()
@@ -1227,7 +1282,7 @@ impl<'a> SEACells<'a> {
         let l = landmark_indices.len();
 
         let k_ll = knn_k.min(l.saturating_sub(1)).max(3);
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Building landmark-landmark diffusion operator (L={})...", l);
         }
         let (ll_idx, ll_dist) = landmark_knn(
@@ -1237,10 +1292,10 @@ impl<'a> SEACells<'a> {
             &self.params.knn_params,
             seed as usize,
             verbose,
-        );
+        )?;
         let squared_dist = self.params.knn_params.ann_dist == "euclidean";
 
-        let mut ll_kernel = compute_diffusion_kernel(&ll_idx, &ll_dist, k_ll, squared_dist);
+        let mut ll_kernel = compute_diffusion_kernel(&ll_idx, &ll_dist, k_ll, squared_dist)?;
 
         let n_eigs = k_ll.min(l - 1).max(11);
         let (evals, evecs) = diffusion_map_from_kernel(&mut ll_kernel, n_eigs, seed)?;
@@ -1249,7 +1304,7 @@ impl<'a> SEACells<'a> {
         let n_components = landmark_multiscale[0].len();
         let used_lambdas: Vec<f32> = (1..=n_components).map(|i| evals[i]).collect();
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(
                 "Building data-to-landmark transitions ({} × {})...",
                 n.separate_with_underscores(),
@@ -1258,13 +1313,13 @@ impl<'a> SEACells<'a> {
         }
         let p_nl = build_data_to_landmark_transitions(pca, &landmark_indices, knn_k, 1.0, 1e-4);
 
-        if verbose {
+        if verbosity.detailed_verbosity() {
             println!("Nystroem-extending multiscale embedding to full data...");
         }
         let multiscale = nystrom_extend(&p_nl, &landmark_multiscale, &used_lambdas);
 
         let waypoint_ix = max_min_sampling(&multiscale, k, seed);
-        if verbose {
+        if verbosity.detailed_verbosity() {
             println!("Selected {} cells from waypoint init", waypoint_ix.len());
         }
 
@@ -1277,7 +1332,7 @@ impl<'a> SEACells<'a> {
 
         // Pad with random cells if waypoint dedup fell short
         if unique_ix.len() < k {
-            if verbose {
+            if verbosity.normal_verbosity() {
                 println!(
                     "Padding {} cells with random selection",
                     k - unique_ix.len()
@@ -1332,7 +1387,8 @@ impl<'a> SEACells<'a> {
                 .map(|i| {
                     let mut row_i = vec![0_f32; n];
                     for idx in kernel.indptr[i]..kernel.indptr[i + 1] {
-                        row_i[kernel.indices[idx]] = kernel.data[idx];
+                        let idx_usize = idx as usize;
+                        row_i[kernel.indices[idx_usize] as usize] = kernel.data[idx_usize];
                     }
                     let k2_col_i = csr_matvec(kernel, &row_i);
                     (i, k2_col_i)
@@ -1467,14 +1523,17 @@ impl<'a> SEACells<'a> {
     ///
     /// ### Params
     ///
-    /// * `verbose` - Print initialisation message
+    /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+    ///   detailed verbosity.
     /// * `seed` - Random seed for A matrix initialisation
-    fn initialise_matrices(&mut self, verbose: bool, seed: u64) -> Result<(), BixverseErrors> {
+    fn initialise_matrices(&mut self, verbose: usize, seed: u64) -> Result<(), BixverseErrors> {
+        let verbosity = parse_verbosity_level(verbose);
+
         let archetypes = self.archetypes.as_ref().unwrap();
         let k = archetypes.len();
         let n = self.n_cells;
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!("Initialising A and B matrices...");
         }
 
@@ -1488,9 +1547,10 @@ impl<'a> SEACells<'a> {
             b_vals.push(1_f32);
         }
 
-        let b = coo_to_csr(&b_rows, &b_cols, &b_vals, (n, k));
+        let b = coo_to_csr(&b_rows.index_cast(), &b_cols.index_cast(), &b_vals, (n, k));
 
-        let archetypes_per_cell = (k as f32 * 0.25).ceil() as usize;
+        // changed compared to the original Python
+        let archetypes_per_cell = 10.min(k);
         let mut rng = StdRng::seed_from_u64(seed);
 
         let mut a_rows = Vec::new();
@@ -1506,7 +1566,7 @@ impl<'a> SEACells<'a> {
             }
         }
 
-        let mut a = coo_to_csr(&a_rows, &a_cols, &a_vals, (k, n));
+        let mut a = coo_to_csr(&a_rows.index_cast(), &a_cols.index_cast(), &a_vals, (k, n));
         normalise_csr_columns_l1(&mut a);
 
         a = self.update_a_mat(&b, &a, verbose)?;
@@ -1543,7 +1603,8 @@ impl<'a> SEACells<'a> {
     ///
     /// * `b` - Current archetype matrix
     /// * `a_prev` - Previous assignment matrix
-    /// * `verbose` - Print Frank-Wolfe iteration progress
+    /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+    ///   detailed verbosity.
     ///
     /// ### Returns
     ///
@@ -1552,38 +1613,21 @@ impl<'a> SEACells<'a> {
         &self,
         b: &CompressedSparseData2<f32>,
         a_prev: &CompressedSparseData2<f32>,
-        verbose: bool,
+        verbose: usize,
     ) -> Result<CompressedSparseData2<f32>, BixverseErrors> {
-        let k2_b = self.k_squared_matmul(b)?;
+        let verbosity = parse_verbosity_level(verbose);
 
+        let k2_b = self.k_squared_matmul(b)?;
         let t2 = k2_b.transpose_and_convert();
-        let t1 = csr_matmul_csr(&t2, b);
+        let t1 = csr_matmul_csr(&t2, b)?;
+        drop(t2);
 
         let mut a = a_prev.clone();
         let n = a.shape.1;
         let k = a.shape.0;
 
-        // Column-major: g_dense[j * k + i]. Argmin within a column is stride-1.
-        let mut g_dense = vec![0.0f32; k * n];
-
         for t in 0..self.params.max_fw_iters {
-            compute_grad_a_colmajor(&t1, &a, &t2, k, n, &mut g_dense);
-
-            let argmins: Vec<usize> = (0..n)
-                .into_par_iter()
-                .map(|j| {
-                    let col = &g_dense[j * k..(j + 1) * k];
-                    let mut min_val = col[0];
-                    let mut min_idx = 0;
-                    for i in 1..k {
-                        if col[i] < min_val {
-                            min_val = col[i];
-                            min_idx = i;
-                        }
-                    }
-                    min_idx
-                })
-                .collect();
+            let argmins = fw_argmins_a(&t1, &a, &k2_b, k, n);
 
             let mut e_data: Vec<(usize, usize, f32)> = argmins
                 .iter()
@@ -1595,7 +1639,8 @@ impl<'a> SEACells<'a> {
             let e_rows: Vec<usize> = e_data.iter().map(|&(r, _, _)| r).collect();
             let e_cols: Vec<usize> = e_data.iter().map(|&(_, c, _)| c).collect();
             let e_vals: Vec<f32> = e_data.iter().map(|&(_, _, v)| v).collect();
-            let e = coo_to_csr_presorted(&e_rows, &e_cols, &e_vals, (k, n));
+            let e =
+                coo_to_csr_presorted(&e_rows.index_cast(), &e_cols.index_cast(), &e_vals, (k, n));
 
             let step_size = 2.0 / (t as f32 + 2.0);
             let retain = 1.0 - step_size;
@@ -1603,13 +1648,13 @@ impl<'a> SEACells<'a> {
                 *val *= retain;
             }
             let e_scaled = sparse_scalar_multiply_csr(&e, step_size);
-            a = sparse_add_csr(&a, &e_scaled);
+            a = sparse_add_csr(&a, &e_scaled)?;
 
             if self.params.pruning {
                 prune_and_renormalise(&mut a, self.params.pruning_threshold);
             }
 
-            if verbose && (t + 1) % 10 == 0 {
+            if verbosity.detailed_verbosity() && (t + 1) % 10 == 0 {
                 println!(
                     "  A matrix Frank-Wolfe iteration: {} / {}",
                     t + 1,
@@ -1648,7 +1693,8 @@ impl<'a> SEACells<'a> {
     ///
     /// * `a` - Current assignment matrix
     /// * `b_prev` - Previous archetype matrix
-    /// * `verbose` - Print Frank-Wolfe iteration progress
+    /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+    ///   detailed verbosity.
     ///
     /// ### Returns
     ///
@@ -1657,62 +1703,31 @@ impl<'a> SEACells<'a> {
         &self,
         a: &CompressedSparseData2<f32>,
         b_prev: &CompressedSparseData2<f32>,
-        verbose: bool,
+        verbose: usize,
     ) -> Result<CompressedSparseData2<f32>, BixverseErrors> {
-        let a_t = a.transpose_and_convert();
-        let t1 = csr_matmul_csr(a, &a_t);
-        let t2 = self.k_squared_matmul(&a_t)?;
+        let verbosity = parse_verbosity_level(verbose);
 
         const FW_REL_TOL: f32 = 1e-3;
         const MIN_FW_ITERS: usize = 10;
 
+        let a_t = a.transpose_and_convert();
+        let t1 = csr_matmul_csr(a, &a_t)?;
+        let t2 = self.k_squared_matmul(&a_t)?;
+        let t2_t = t2.transpose_and_convert();
+        drop(t2);
+
         let mut b = b_prev.clone();
         let n = b.shape.0;
         let k = b.shape.1;
-
-        // Column-major n × k: g_dense[c * n + r]
-        let mut g_dense = vec![0.0f32; n * k];
         let mut initial_gap: f32 = 0.0;
 
         for t in 0..self.params.max_fw_iters {
             let k2_b = self.k_squared_matmul(&b)?;
-            compute_grad_b_colmajor(&k2_b, &t1, &t2, n, k, &mut g_dense);
+            let k2_b_t = k2_b.transpose_and_convert();
+            drop(k2_b);
+            let b_t = b.transpose_and_convert();
 
-            let argmins: Vec<usize> = (0..k)
-                .into_par_iter()
-                .map(|c| {
-                    let col = &g_dense[c * n..(c + 1) * n];
-                    let mut min_val = col[0];
-                    let mut min_idx = 0;
-                    for r in 1..n {
-                        if col[r] < min_val {
-                            min_val = col[r];
-                            min_idx = r;
-                        }
-                    }
-                    min_idx
-                })
-                .collect();
-
-            // FW duality gap: <G, B> - <G, E>. g_dense holds 2G; the constant
-            // factor cancels in the relative ratio, so we leave it in.
-            let g_dot_b: f32 = (0..n)
-                .into_par_iter()
-                .map(|r| {
-                    let start = b.indptr[r];
-                    let end = b.indptr[r + 1];
-                    let mut s = 0.0f32;
-                    for idx in start..end {
-                        let c = b.indices[idx];
-                        s += g_dense[c * n + r] * b.data[idx];
-                    }
-                    s
-                })
-                .sum();
-
-            let g_dot_e: f32 = (0..k).map(|c| g_dense[c * n + argmins[c]]).sum();
-
-            let fw_gap = (g_dot_b - g_dot_e).abs();
+            let (argmins, fw_gap) = fw_argmins_b(&k2_b_t, &t1, &t2_t, &b_t, n, k);
             if t == 0 {
                 initial_gap = fw_gap.max(1e-12);
             }
@@ -1727,7 +1742,8 @@ impl<'a> SEACells<'a> {
             let e_rows: Vec<usize> = e_data.iter().map(|&(r, _, _)| r).collect();
             let e_cols: Vec<usize> = e_data.iter().map(|&(_, c, _)| c).collect();
             let e_vals: Vec<f32> = e_data.iter().map(|&(_, _, v)| v).collect();
-            let e = coo_to_csr_presorted(&e_rows, &e_cols, &e_vals, (n, k));
+            let e =
+                coo_to_csr_presorted(&e_rows.index_cast(), &e_cols.index_cast(), &e_vals, (n, k));
 
             let step_size = 2.0 / (t as f32 + 2.0);
             let retain = 1.0 - step_size;
@@ -1735,13 +1751,13 @@ impl<'a> SEACells<'a> {
                 *val *= retain;
             }
             let e_scaled = sparse_scalar_multiply_csr(&e, step_size);
-            b = sparse_add_csr(&b, &e_scaled);
+            b = sparse_add_csr(&b, &e_scaled)?;
 
             if self.params.pruning {
                 prune_and_renormalise(&mut b, self.params.pruning_threshold);
             }
 
-            if verbose && (t + 1) % 10 == 0 {
+            if verbosity.detailed_verbosity() && (t + 1) % 10 == 0 {
                 println!(
                     "  B matrix Frank-Wolfe iteration: {} / {}",
                     t + 1,
@@ -1750,7 +1766,7 @@ impl<'a> SEACells<'a> {
             }
 
             if fw_gap / initial_gap < FW_REL_TOL && t >= MIN_FW_ITERS {
-                if verbose {
+                if verbosity.detailed_verbosity() {
                     println!(
                         "  B matrix FW converged at iter {} (gap: {:.4e})",
                         t + 1,
@@ -1791,7 +1807,7 @@ impl<'a> SEACells<'a> {
         b: &CompressedSparseData2<f32>,
     ) -> Result<f32, BixverseErrors> {
         if self.n_cells <= 20000 {
-            Ok(self.compute_rss_simple(a, b))
+            Ok(self.compute_rss_simple(a, b)?)
         } else {
             Ok(self.compute_rss_trace(a, b)?)
         }
@@ -1814,12 +1830,13 @@ impl<'a> SEACells<'a> {
         &self,
         a: &CompressedSparseData2<f32>,
         b: &CompressedSparseData2<f32>,
-    ) -> f32 {
+    ) -> Result<f32, BixverseErrors> {
         let k_mat = self.kernel_mat.as_ref().unwrap();
-        let k_b = csr_matmul_csr(k_mat, b);
-        let reconstruction = csr_matmul_csr(&k_b, a);
-        let diff = sparse_subtract_csr(k_mat, &reconstruction);
-        frobenius_norm(&diff)
+        let k_b = csr_matmul_csr(k_mat, b)?;
+        let reconstruction = csr_matmul_csr(&k_b, a)?;
+        let diff = sparse_subtract_csr(k_mat, &reconstruction)?;
+
+        Ok(frobenius_norm(&diff))
     }
 
     /// Memory-efficient RSS computation for large datasets (uses trace trick)
@@ -1856,18 +1873,18 @@ impl<'a> SEACells<'a> {
 
         // Term 2: -2 * trace(K^2 @ B @ A)
         // Reorder via cyclic property: trace(A @ K^2 @ B)  [k × k]
-        let a_k2b = csr_matmul_csr(a, &k2_b);
+        let a_k2b = csr_matmul_csr(a, &k2_b)?;
         let trace_term = matrix_trace(&a_k2b);
 
         // Term 3: trace(A^T @ B^T @ K^2 @ B @ A)
         // Reorder via cyclic property: trace(A @ A^T @ B^T @ K^2 @ B)
         let a_t = a.transpose_and_convert();
-        let a_at = csr_matmul_csr(a, &a_t); // [k × k]
+        let a_at = csr_matmul_csr(a, &a_t)?; // [k × k]
 
         let b_t = b.transpose_and_convert();
-        let bt_k2b = csr_matmul_csr(&b_t, &k2_b); // [k × k]
+        let bt_k2b = csr_matmul_csr(&b_t, &k2_b)?; // [k × k]
 
-        let result = csr_matmul_csr(&a_at, &bt_k2b); // [k × k]
+        let result = csr_matmul_csr(&a_at, &bt_k2b)?; // [k × k]
         let reconstruction_frob_sq = matrix_trace(&result);
 
         Ok((k_frob_sq - 2.0 * trace_term + reconstruction_frob_sq).sqrt())
@@ -1903,9 +1920,11 @@ impl<'a> SEACells<'a> {
             let mut max_val = f32::NEG_INFINITY;
             let mut max_arch = 0;
             for idx in start..end {
-                if a_csc.data[idx] > max_val {
-                    max_val = a_csc.data[idx];
-                    max_arch = a_csc.indices[idx];
+                let idx_usize = idx as usize;
+
+                if a_csc.data[idx_usize] > max_val {
+                    max_val = a_csc.data[idx_usize];
+                    max_arch = a_csc.indices[idx_usize] as usize;
                 }
             }
             assignments[cell] = max_arch;

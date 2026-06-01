@@ -22,9 +22,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use thousands::Separable;
 
+use crate::ml::clustering::k_means::*;
 use crate::prelude::*;
 use crate::single_cell::sc_processing::pca::pca_on_sc_streaming;
-use crate::single_cell::sc_simd::*;
+use crate::single_cell::sc_utils::simd::*;
 use crate::single_cell::sc_utils::utils_tree::*;
 
 /// How many genes to test for in one go
@@ -360,11 +361,14 @@ impl SparseYBatch {
     ///
     /// A `SparseYBatch` where entries are sorted by cell, then by target
     /// index within each cell.
-    fn from_targets(targets: &[SparseAxis<u32, f32>], n_cells: usize) -> Self {
+    fn from_targets(
+        targets: &[SparseAxis<u32, f32>],
+        n_cells: usize,
+    ) -> Result<Self, BixverseErrors> {
         // count non-zeros per cell across all targets
         let mut counts_per_cell = vec![0u32; n_cells];
         for target in targets {
-            let (indices, _) = target.get_indices_data_2();
+            let (indices, _) = target.get_indices_data_2()?;
             for &idx in indices {
                 counts_per_cell[idx] += 1;
             }
@@ -386,7 +390,7 @@ impl SparseYBatch {
         // fill using a write cursor per cell
         let mut cursor = vec![0u32; n_cells];
         for (k, target) in targets.iter().enumerate() {
-            let (indices, data) = target.get_indices_data_2();
+            let (indices, data) = target.get_indices_data_2()?;
             for (i, &cell) in indices.iter().enumerate() {
                 let pos = (offsets[cell] + cursor[cell]) as usize;
                 target_indices[pos] = k as u8;
@@ -395,11 +399,11 @@ impl SparseYBatch {
             }
         }
 
-        Self {
+        Ok(Self {
             offsets,
             target_indices,
             values,
-        }
+        })
     }
 
     /// Iterate non-zero entries for a given cell.
@@ -435,16 +439,20 @@ impl SparseYBatch {
 /// Dense vector of length `n_samples * n_targets` with layout
 /// `y[sample * n_targets + target_idx]`. Absent entries default to `0.0`.
 #[allow(dead_code)]
-fn build_y_dense_multi(targets: &[SparseAxis<u32, f32>], n_samples: usize) -> Vec<f32> {
+fn build_y_dense_multi(
+    targets: &[SparseAxis<u32, f32>],
+    n_samples: usize,
+) -> Result<Vec<f32>, BixverseErrors> {
     let n_targets = targets.len();
     let mut y_dense = vec![0.0f32; n_samples * n_targets];
     for (k, target) in targets.iter().enumerate() {
-        let (y_indices, y_data) = target.get_indices_data_2();
+        let (y_indices, y_data) = target.get_indices_data_2()?;
         for (i, &idx) in y_indices.iter().enumerate() {
             y_dense[idx * n_targets + k] = y_data[i];
         }
     }
-    y_dense
+
+    Ok(y_dense)
 }
 
 ///////////////////////////////
@@ -1372,7 +1380,7 @@ fn fit_multi_trees(
     n_samples: usize,
     config: &dyn TreeRegressorConfig,
     seed: usize,
-) -> Vec<Vec<f32>> {
+) -> Result<Vec<Vec<f32>>, BixverseErrors> {
     let n_features = feature_matrix.n_features;
     let n_targets = targets.len();
     let n_features_split = resolve_n_features_split(config.n_features_split(), n_features);
@@ -1386,7 +1394,7 @@ fn fit_multi_trees(
             .max(2 * config.min_samples_leaf())
     };
 
-    let y_dense = build_y_dense_multi(targets, n_samples);
+    let y_dense = build_y_dense_multi(targets, n_samples)?;
 
     let mut sample_indices: Vec<u32> = vec![0; n_samples];
     let mut root_y_buf: Vec<f32> = vec![0.0; n_samples * n_targets];
@@ -1452,7 +1460,11 @@ fn fit_multi_trees(
         );
     }
 
-    extract_and_normalise_multi_importances(&importances, n_features, n_targets)
+    Ok(extract_and_normalise_multi_importances(
+        &importances,
+        n_features,
+        n_targets,
+    ))
 }
 
 /// Fit a tree ensemble for a batch of target genes simultaneously
@@ -1476,7 +1488,7 @@ pub fn fit_multi_trees_sparse(
     n_samples: usize,
     config: &dyn TreeRegressorConfig,
     seed: usize,
-) -> Vec<Vec<f32>> {
+) -> Result<Vec<Vec<f32>>, BixverseErrors> {
     let n_features = feature_matrix.n_features;
     let n_targets = targets.len();
     let n_features_split = resolve_n_features_split(config.n_features_split(), n_features);
@@ -1490,7 +1502,7 @@ pub fn fit_multi_trees_sparse(
             .max(2 * config.min_samples_leaf())
     };
 
-    let sparse_y = SparseYBatch::from_targets(targets, n_samples);
+    let sparse_y = SparseYBatch::from_targets(targets, n_samples)?;
 
     let mut sample_indices: Vec<u32> = vec![0; n_samples];
     let mut bufs = TreeBuffers::new_sparse(n_features, n_samples, n_targets);
@@ -1550,7 +1562,11 @@ pub fn fit_multi_trees_sparse(
         );
     }
 
-    extract_and_normalise_multi_importances(&importances, n_features, n_targets)
+    Ok(extract_and_normalise_multi_importances(
+        &importances,
+        n_features,
+        n_targets,
+    ))
 }
 
 /////////
@@ -2452,12 +2468,12 @@ pub fn fit_grnboost2_full_hist(
     n_samples: usize,
     config: &GradientBoostingConfig,
     seed: usize,
-) -> Vec<f32> {
+) -> Result<Vec<f32>, BixverseErrors> {
     let n_features = feature_matrix.n_features;
     let pool_capacity = 2 * config.max_depth + 3;
 
     let mut residuals = vec![0.0f32; n_samples];
-    let (indices, values) = target.get_indices_data_2();
+    let (indices, values) = target.get_indices_data_2()?;
     for (i, &idx) in indices.iter().enumerate() {
         residuals[idx] = values[i];
     }
@@ -2522,7 +2538,8 @@ pub fn fit_grnboost2_full_hist(
     }
 
     normalise_importances(&mut importances);
-    importances
+
+    Ok(importances)
 }
 
 /// Fit a GRNBoost2-style gradient boosted ensemble for a single
@@ -2550,12 +2567,12 @@ pub fn fit_grnboost2_sampled(
     n_samples: usize,
     config: &GradientBoostingConfig,
     seed: usize,
-) -> Vec<f32> {
+) -> Result<Vec<f32>, BixverseErrors> {
     let n_features = feature_matrix.n_features;
     let n_features_split = resolve_n_features_split(config.n_features_split, n_features);
 
     let mut residuals = vec![0.0f32; n_samples];
-    let (indices, values) = target.get_indices_data_2();
+    let (indices, values) = target.get_indices_data_2()?;
     for (i, &idx) in indices.iter().enumerate() {
         residuals[idx] = values[i];
     }
@@ -2615,7 +2632,8 @@ pub fn fit_grnboost2_sampled(
     }
 
     normalise_importances(&mut importances);
-    importances
+
+    Ok(importances)
 }
 
 /// Fit a GRNBoost2-style gradient boosted ensemble for a single
@@ -2644,7 +2662,7 @@ pub fn fit_grnboost2_sparse(
     n_samples: usize,
     config: &GradientBoostingConfig,
     seed: usize,
-) -> Vec<f32> {
+) -> Result<Vec<f32>, BixverseErrors> {
     if n_samples >= GBM_SUBTRACTION_CELL_THRESHOLD {
         fit_grnboost2_full_hist(target, feature_matrix, n_samples, config, seed)
     } else {
@@ -2697,6 +2715,50 @@ pub fn parse_gene_batch_strategy(
         }),
         _ => None,
     }
+}
+
+/// Chunk a flat gene list into batches of at most `batch_size`.
+///
+/// ### Params
+///
+/// * `genes` - Indices of the genes
+/// * `batch_size` - Maximum batch size
+///
+/// ### Returns
+///
+/// A vector of batches, each containing at most `batch_size` gene indices
+fn chunk_into_batches(genes: &[usize], batch_size: usize) -> Vec<Vec<usize>> {
+    genes.chunks(batch_size).map(|c| c.to_vec()).collect()
+}
+
+/// Group consecutive batches into I/O reads of at most `max_genes` genes,
+/// never splitting a batch across reads. Returns [start, end) batch indices.
+///
+/// ### Params
+///
+/// * `batches` - Slice of gene batches to group
+/// * `max_genes` - Maximum number of genes per I/O group
+///
+/// ### Returns
+///
+/// Half-open `[start, end)` index ranges into `batches`, each covering at
+/// most `max_genes` genes without splitting a batch across groups
+fn group_batches_for_io(batches: &[Vec<usize>], max_genes: usize) -> Vec<(usize, usize)> {
+    let mut groups = Vec::new();
+    let mut start = 0usize;
+    let mut count = 0usize;
+    for (i, b) in batches.iter().enumerate() {
+        if count > 0 && count + b.len() > max_genes {
+            groups.push((start, i));
+            start = i;
+            count = 0;
+        }
+        count += b.len();
+    }
+    if start < batches.len() {
+        groups.push((start, batches.len()));
+    }
+    groups
 }
 
 /// Batch genes randomly
@@ -2759,7 +2821,8 @@ pub fn subsample_cells(cell_indices: &[usize], n_target: usize, seed: usize) -> 
 /// * `n_components` - Number of components to use for the clustering
 /// * `n_cells_subsample` - Number of cells to subsample
 /// * `seed` - Seed for reproducibility
-/// * `verbose` Controls the verbosity
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -2774,14 +2837,16 @@ fn batch_genes_correlated(
     n_components: usize,
     n_cells_subsample: usize,
     seed: usize,
-    verbose: bool,
-) -> Result<Vec<usize>, BixverseErrors> {
+    verbose: usize,
+) -> Result<Vec<Vec<usize>>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let n_genes = gene_indices.len();
     let n_centroids = n_genes.div_ceil(batch_size);
 
     let sub_cells = subsample_cells(cell_indices, n_cells_subsample, seed);
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Computing gene loadings: {} genes, {} subsampled cells, {} components",
             n_genes,
@@ -2813,20 +2878,22 @@ fn batch_genes_correlated(
         }
     }
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!("Clustering {} genes into {} groups", n_genes, n_centroids);
     }
+
+    let k_means_params = KMeansParamsWrappers::new(50, None, None);
 
     let centroids = train_centroids(
         &gene_loadings,
         dim,
         n_genes,
         n_centroids,
-        &Dist::Euclidean,
-        50,
+        &Dist::SquaredEuclidean,
+        Some(k_means_params.get_data()),
         seed,
-        verbose,
-    );
+        verbosity.detailed_verbosity(),
+    )?;
 
     let centroid_norms: Vec<f32> = (0..n_centroids)
         .map(|i| {
@@ -2850,7 +2917,7 @@ fn batch_genes_correlated(
         &centroids,
         &centroid_norms,
         n_centroids,
-        &Dist::Euclidean,
+        &Dist::SquaredEuclidean,
     );
 
     let mut clusters: Vec<Vec<usize>> = vec![Vec::new(); n_centroids];
@@ -2859,16 +2926,22 @@ fn batch_genes_correlated(
     }
 
     let mut rng = SmallRng::seed_from_u64(seed.wrapping_add(1) as u64);
-    let mut result = Vec::with_capacity(n_genes);
+    let mut batches: Vec<Vec<usize>> = Vec::with_capacity(n_centroids);
     for cluster in &mut clusters {
+        if cluster.is_empty() {
+            continue;
+        }
         for i in (1..cluster.len()).rev() {
             let j = rng.random_range(0..=i);
             cluster.swap(i, j);
         }
-        result.extend_from_slice(cluster);
+        // split into <= batch_size pieces so a batch never straddles a cluster
+        for chunk in cluster.chunks(batch_size) {
+            batches.push(chunk.to_vec());
+        }
     }
 
-    Ok(result)
+    Ok(batches)
 }
 
 /// Reorder gene indices into batches of `batch_size` according to the chosen
@@ -2882,12 +2955,13 @@ fn batch_genes_correlated(
 /// * `batch_size` - Target batch size (MULTI_OUTPUT_BATCH).
 /// * `strategy` - Batching strategy.
 /// * `seed` - RNG seed.
-/// * `verbose` - Print progress.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
-/// Gene indices reordered so that consecutive chunks of `batch_size` form
-/// sensible multi-output groups.
+/// The gene indices partitioned into batches of at most `batch_size`,
+/// ordered according to the chosen strategy
 pub fn batch_genes(
     f_path: &str,
     gene_indices: &[usize],
@@ -2895,18 +2969,22 @@ pub fn batch_genes(
     batch_size: usize,
     strategy: &GeneBatchStrategy,
     seed: usize,
-    verbose: bool,
-) -> Result<Vec<usize>, BixverseErrors> {
+    verbose: usize,
+) -> Result<Vec<Vec<usize>>, BixverseErrors> {
     match strategy {
-        GeneBatchStrategy::Random => Ok(batch_genes_random(gene_indices, seed)),
+        GeneBatchStrategy::Random => Ok(chunk_into_batches(
+            &batch_genes_random(gene_indices, seed),
+            batch_size,
+        )),
         GeneBatchStrategy::Correlated {
             n_comp,
             n_cells_subsample,
         } => {
-            // Fewer genes than a single batch -- correlation grouping is
-            // pointless, just shuffle.
             if gene_indices.len() <= batch_size {
-                return Ok(batch_genes_random(gene_indices, seed));
+                return Ok(chunk_into_batches(
+                    &batch_genes_random(gene_indices, seed),
+                    batch_size,
+                ));
             }
             batch_genes_correlated(
                 f_path,
@@ -2914,8 +2992,6 @@ pub fn batch_genes(
                 cell_indices,
                 batch_size,
                 *n_comp,
-                // subsample_cells already handles the case where
-                // cell_indices.len() <= n_cells_subsample, but be explicit
                 (*n_cells_subsample).min(cell_indices.len()),
                 seed,
                 verbose,
@@ -2945,7 +3021,8 @@ pub fn batch_genes(
 /// * `n_genes` - Number of target genes.
 /// * `scenic_params` - SCENIC configuration.
 /// * `seed` - Base random seed.
-/// * `verbose` - Print progress to stdout.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 /// * `start_total` - Timer from the top-level call for elapsed reporting.
 ///
 /// ### Returns
@@ -2965,9 +3042,11 @@ fn run_scenic_multi_output(
     n_genes: usize,
     scenic_params: &ScenicParams,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
     start_total: Instant,
 ) -> Result<Mat<f32>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let n_multi_output = scenic_params
         .gene_batch_size
         .unwrap_or(MULTI_OUTPUT_BATCH)
@@ -2980,7 +3059,7 @@ fn run_scenic_multi_output(
     )
     .unwrap_or(GeneBatchStrategy::Random);
 
-    let ordered_genes = batch_genes(
+    let batches = batch_genes(
         f_path,
         gene_indices,
         cell_indices,
@@ -2989,6 +3068,7 @@ fn run_scenic_multi_output(
         seed,
         verbose,
     )?;
+    let ordered_genes: Vec<usize> = batches.iter().flatten().copied().collect();
 
     let gene_id_to_pos: FxHashMap<usize, usize> = gene_indices
         .iter()
@@ -2997,7 +3077,6 @@ fn run_scenic_multi_output(
         .collect();
 
     let start_gene_read = Instant::now();
-    let mut all_gene_ids: Vec<usize> = Vec::with_capacity(n_genes);
     let mut all_sparse_cols: Vec<SparseAxis<u32, f32>> = Vec::with_capacity(n_genes);
 
     for (iter, chunk) in ordered_genes.chunks(SCENIC_GENE_CHUNK_SIZE).enumerate() {
@@ -3006,22 +3085,21 @@ fn run_scenic_multi_output(
             c.filter_selected_cells(cell_set);
         });
 
-        for (i, gc) in gene_chunks.iter().enumerate() {
-            all_gene_ids.push(chunk[i]);
+        for gc in gene_chunks.iter() {
             all_sparse_cols.push(gc.to_sparse_axis(n_cells));
         }
 
-        if verbose {
+        if verbosity.detailed_verbosity() {
             println!(
                 "  Read gene chunk {}/{} ({} genes)",
                 iter + 1,
                 ordered_genes.len().div_ceil(SCENIC_GENE_CHUNK_SIZE),
-                all_gene_ids.len(),
+                all_sparse_cols.len(),
             );
         }
     }
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Read and filtered {} target genes in {:.2?}",
             n_genes,
@@ -3029,9 +3107,13 @@ fn run_scenic_multi_output(
         );
     }
 
-    let id_batches: Vec<&[usize]> = all_gene_ids.chunks(n_multi_output).collect();
-    let col_batches: Vec<&[SparseAxis<u32, f32>]> =
-        all_sparse_cols.chunks(n_multi_output).collect();
+    // Slice by cluster-bounded batches, not by fixed n_multi_output.
+    let mut col_batches: Vec<&[SparseAxis<u32, f32>]> = Vec::with_capacity(batches.len());
+    let mut offset = 0usize;
+    for b in &batches {
+        col_batches.push(&all_sparse_cols[offset..offset + b.len()]);
+        offset += b.len();
+    }
     let total_batches = col_batches.len();
 
     let config: &dyn TreeRegressorConfig = match &scenic_params.regression_learner {
@@ -3046,7 +3128,7 @@ fn run_scenic_multi_output(
         RegressionLearner::GradientBoosting(_) => unreachable!(),
     };
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Running SCENIC ({}) on {} genes ({} TFs, {} cells, {} batches of up to {})",
             learner_name, n_genes, n_tfs, n_cells, total_batches, n_multi_output,
@@ -3066,9 +3148,9 @@ fn run_scenic_multi_output(
                 n_cells,
                 config,
                 batch_seed,
-            );
+            )?;
 
-            if verbose {
+            if verbosity.normal_verbosity() {
                 let done = batches_done.fetch_add(1, Ordering::Relaxed) + 1;
                 let pct = done * 100 / total_batches;
                 let prev_pct = (done - 1) * 100 / total_batches;
@@ -3083,14 +3165,14 @@ fn run_scenic_multi_output(
                 }
             }
 
-            (batch_idx, imp)
+            Ok((batch_idx, imp))
         })
-        .collect();
+        .collect::<Result<Vec<_>, BixverseErrors>>()?;
 
     let mut importance_scores: Vec<Vec<f32>> = vec![Vec::new(); n_genes];
 
     for (batch_idx, imp_vecs) in batch_results {
-        let batch_gene_ids = id_batches[batch_idx];
+        let batch_gene_ids = &batches[batch_idx];
         for (local_idx, imp) in imp_vecs.into_iter().enumerate() {
             let gene_id = batch_gene_ids[local_idx];
             let original_pos = gene_id_to_pos[&gene_id];
@@ -3098,7 +3180,7 @@ fn run_scenic_multi_output(
         }
     }
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "SCENIC ({}) GRN inference complete in {:.2?}",
             learner_name,
@@ -3132,7 +3214,8 @@ fn run_scenic_multi_output(
 /// * `n_genes` - Number of target genes.
 /// * `config` - GBM configuration.
 /// * `seed` - Base random seed.
-/// * `verbose` - Print progress to stdout.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 /// * `start_total` - Timer from the top-level call for elapsed reporting.
 ///
 /// ### Returns
@@ -3150,13 +3233,15 @@ fn run_scenic_gbm(
     n_genes: usize,
     config: &GradientBoostingConfig,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
     start_total: Instant,
 ) -> Result<Mat<f32>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let start_gene_read = Instant::now();
     let mut all_sparse_cols: Vec<SparseAxis<u32, f32>> = Vec::with_capacity(n_genes);
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Running GRNBoost2 on {} genes ({} TFs, {} cells, {} I/O chunks)",
             n_genes.separate_with_underscores(),
@@ -3176,7 +3261,7 @@ fn run_scenic_gbm(
             all_sparse_cols.push(gc.to_sparse_axis(n_cells));
         }
 
-        if verbose {
+        if verbosity.detailed_verbosity() {
             println!(
                 "  Read gene chunk {}/{} ({} genes)",
                 iter + 1,
@@ -3186,7 +3271,7 @@ fn run_scenic_gbm(
         }
     }
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Read and filtered {} target genes in {:.2?}",
             n_genes,
@@ -3206,9 +3291,9 @@ fn run_scenic_gbm(
         .enumerate()
         .map(|(gene_idx, target)| {
             let gene_seed = seed.wrapping_add(gene_idx.wrapping_mul(2654435761));
-            let imp = fit_grnboost2_sparse(target, tf_data, n_cells, config, gene_seed);
+            let imp = fit_grnboost2_sparse(target, tf_data, n_cells, config, gene_seed)?;
 
-            if verbose {
+            if verbosity.normal_verbosity() {
                 let done = genes_done.fetch_add(1, Ordering::Relaxed) + 1;
                 let pct = done * 100 / n_genes;
                 let prev_pct = (done - 1) * 100 / n_genes;
@@ -3223,11 +3308,11 @@ fn run_scenic_gbm(
                 }
             }
 
-            imp
+            Ok(imp)
         })
-        .collect();
+        .collect::<Result<Vec<_>, BixverseErrors>>()?;
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "GRNBoost2 GRN inference complete in {:.2?}",
             start_total.elapsed()
@@ -3261,7 +3346,8 @@ fn run_scenic_gbm(
 /// * `n_genes` - Number of target genes.
 /// * `scenic_params` - SCENIC configuration.
 /// * `seed` - Base random seed.
-/// * `verbose` - Print progress to stdout.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 /// * `start_total` - Timer from the top-level call for elapsed reporting.
 ///
 /// ### Returns
@@ -3281,9 +3367,11 @@ fn run_scenic_multi_output_streaming(
     n_genes: usize,
     scenic_params: &ScenicParams,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
     start_total: Instant,
 ) -> Result<Mat<f32>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let n_multi_output = scenic_params
         .gene_batch_size
         .unwrap_or(MULTI_OUTPUT_BATCH)
@@ -3296,7 +3384,7 @@ fn run_scenic_multi_output_streaming(
     )
     .unwrap_or(GeneBatchStrategy::Random);
 
-    let ordered_genes = batch_genes(
+    let batches = batch_genes(
         f_path,
         gene_indices,
         cell_indices,
@@ -3305,6 +3393,7 @@ fn run_scenic_multi_output_streaming(
         seed,
         verbose,
     )?;
+    let io_groups = group_batches_for_io(&batches, SCENIC_GENE_CHUNK_SIZE);
 
     let gene_id_to_pos: FxHashMap<usize, usize> = gene_indices
         .iter()
@@ -3324,11 +3413,12 @@ fn run_scenic_multi_output_streaming(
         RegressionLearner::GradientBoosting(_) => unreachable!(),
     };
 
-    let total_io_chunks = ordered_genes.len().div_ceil(SCENIC_GENE_CHUNK_SIZE);
+    let total_io_chunks = io_groups.len();
     let mut importance_scores: Vec<Vec<f32>> = vec![Vec::new(); n_genes];
     let mut global_batch_offset: usize = 0;
+    let mut genes_processed: usize = 0;
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Running SCENIC ({}, streaming) on {} genes ({} TFs, {} cells, {} I/O chunks, batches of {})",
             learner_name,
@@ -3340,12 +3430,14 @@ fn run_scenic_multi_output_streaming(
         );
     }
 
-    for (chunk_idx, io_chunk) in ordered_genes.chunks(SCENIC_GENE_CHUNK_SIZE).enumerate() {
+    for (chunk_idx, &(g_start, g_end)) in io_groups.iter().enumerate() {
         let start_chunk = Instant::now();
+        let group = &batches[g_start..g_end];
+        let io_chunk: Vec<usize> = group.iter().flatten().copied().collect();
 
         // read and filter chunk
         let start_io = Instant::now();
-        let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(io_chunk)?;
+        let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(&io_chunk)?;
         gene_chunks.par_iter_mut().for_each(|c| {
             c.filter_selected_cells(cell_set);
         });
@@ -3356,7 +3448,7 @@ fn run_scenic_multi_output_streaming(
             .collect();
         drop(gene_chunks);
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(
                 "  Chunk {}/{}: loaded and filtered {} genes in {:.2?}",
                 chunk_idx + 1,
@@ -3366,10 +3458,15 @@ fn run_scenic_multi_output_streaming(
             );
         }
 
-        let id_batches: Vec<&[usize]> = io_chunk.chunks(n_multi_output).collect();
-        let col_batches: Vec<&[SparseAxis<u32, f32>]> =
-            sparse_columns.chunks(n_multi_output).collect();
-        let n_batches_this_chunk = col_batches.len();
+        // offsets into sparse_columns for each batch in this group
+        let mut col_offsets = Vec::with_capacity(group.len() + 1);
+        let mut off = 0usize;
+        col_offsets.push(0);
+        for b in group {
+            off += b.len();
+            col_offsets.push(off);
+        }
+        let n_batches_this_chunk = group.len();
 
         let start_fit = Instant::now();
         let batches_done = AtomicUsize::new(0);
@@ -3379,15 +3476,11 @@ fn run_scenic_multi_output_streaming(
             .map(|local_batch_idx| {
                 let batch_seed = seed
                     .wrapping_add((global_batch_offset + local_batch_idx).wrapping_mul(2654435761));
-                let imp = fit_multi_trees_sparse(
-                    col_batches[local_batch_idx],
-                    tf_data,
-                    n_cells,
-                    config,
-                    batch_seed,
-                );
+                let cols =
+                    &sparse_columns[col_offsets[local_batch_idx]..col_offsets[local_batch_idx + 1]];
+                let imp = fit_multi_trees_sparse(cols, tf_data, n_cells, config, batch_seed)?;
 
-                if verbose && n_batches_this_chunk >= 4 {
+                if verbosity.detailed_verbosity() && n_batches_this_chunk >= 4 {
                     let done = batches_done.fetch_add(1, Ordering::Relaxed) + 1;
                     let pct = done * 100 / n_batches_this_chunk;
                     let prev_pct = (done - 1) * 100 / n_batches_this_chunk;
@@ -3403,12 +3496,12 @@ fn run_scenic_multi_output_streaming(
                     }
                 }
 
-                (local_batch_idx, imp)
+                Ok((local_batch_idx, imp))
             })
-            .collect();
+            .collect::<Result<Vec<_>, BixverseErrors>>()?;
 
         for (local_batch_idx, imp_vecs) in batch_results {
-            let batch_gene_ids = id_batches[local_batch_idx];
+            let batch_gene_ids = &group[local_batch_idx];
             for (local_idx, imp) in imp_vecs.into_iter().enumerate() {
                 let gene_id = batch_gene_ids[local_idx];
                 let original_pos = gene_id_to_pos[&gene_id];
@@ -3417,14 +3510,14 @@ fn run_scenic_multi_output_streaming(
         }
 
         global_batch_offset += n_batches_this_chunk;
+        genes_processed += io_chunk.len();
 
-        if verbose {
-            let genes_done = ((chunk_idx + 1) * SCENIC_GENE_CHUNK_SIZE).min(n_genes);
+        if verbosity.normal_verbosity() {
             println!(
                 "  Chunk {}/{}: {}/{} genes done in {:.2?} (fit: {:.2?})",
                 chunk_idx + 1,
                 total_io_chunks,
-                genes_done,
+                genes_processed,
                 n_genes,
                 start_chunk.elapsed(),
                 start_fit.elapsed()
@@ -3433,7 +3526,7 @@ fn run_scenic_multi_output_streaming(
         // sparse_columns dropped here
     }
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "SCENIC ({}) GRN inference (streaming) complete in {:.2?}",
             learner_name,
@@ -3467,7 +3560,8 @@ fn run_scenic_multi_output_streaming(
 /// * `n_genes` - Number of target genes.
 /// * `config` - GBM configuration.
 /// * `seed` - Base random seed.
-/// * `verbose` - Print progress to stdout.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 /// * `start_total` - Timer from the top-level call for elapsed reporting.
 ///
 /// ### Returns
@@ -3485,14 +3579,16 @@ fn run_scenic_gbm_streaming(
     n_genes: usize,
     config: &GradientBoostingConfig,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
     start_total: Instant,
 ) -> Result<Mat<f32>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let total_io_chunks = gene_indices.len().div_ceil(SCENIC_GENE_CHUNK_SIZE);
     let mut importance_scores: Vec<Vec<f32>> = vec![Vec::new(); n_genes];
     let mut global_gene_offset: usize = 0;
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Running GRNBoost2 (streaming) on {} genes ({} TFs, {} cells, {} I/O chunks)",
             n_genes.separate_with_underscores(),
@@ -3517,7 +3613,7 @@ fn run_scenic_gbm_streaming(
             .collect();
         drop(gene_chunks);
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(
                 "  Chunk {}/{}: loaded and filtered {} genes in {:.2?}",
                 chunk_idx + 1,
@@ -3537,9 +3633,9 @@ fn run_scenic_gbm_streaming(
             .map(|(local_idx, target)| {
                 let gene_seed =
                     seed.wrapping_add((global_gene_offset + local_idx).wrapping_mul(2654435761));
-                let imp = fit_grnboost2_sparse(target, tf_data, n_cells, config, gene_seed);
+                let imp = fit_grnboost2_sparse(target, tf_data, n_cells, config, gene_seed)?;
 
-                if verbose && n_genes_this_chunk >= 4 {
+                if verbosity.detailed_verbosity() && n_genes_this_chunk >= 4 {
                     let done = genes_done.fetch_add(1, Ordering::Relaxed) + 1;
                     let pct = done * 100 / n_genes_this_chunk;
                     let prev_pct = (done - 1) * 100 / n_genes_this_chunk;
@@ -3555,9 +3651,9 @@ fn run_scenic_gbm_streaming(
                     }
                 }
 
-                imp
+                Ok(imp)
             })
-            .collect();
+            .collect::<Result<Vec<_>, BixverseErrors>>()?;
 
         for (local_idx, imp) in chunk_results.into_iter().enumerate() {
             importance_scores[global_gene_offset + local_idx] = imp;
@@ -3565,7 +3661,7 @@ fn run_scenic_gbm_streaming(
 
         global_gene_offset += n_genes_this_chunk;
 
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(
                 "  Chunk {}/{}: {}/{} genes done in {:.2?} (fit: {:.2?})",
                 chunk_idx + 1,
@@ -3579,7 +3675,7 @@ fn run_scenic_gbm_streaming(
         // sparse_columns dropped here
     }
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "GRNBoost2 GRN inference (streaming) complete in {:.2?}",
             start_total.elapsed()
@@ -3648,7 +3744,8 @@ impl Default for ScenicParams {
 /// * `scenic_params` - Reference to the SCENIC parameters indicating minimum
 ///   couts per gene and minimum proportions of cells expressing a gene to
 ///   be included.
-/// * `verbose` - Controls verbosity of the function.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -3657,8 +3754,10 @@ pub fn scenic_gene_filter(
     f_path: &str,
     cell_indices: &[usize],
     scenic_params: &ScenicParams,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<Vec<usize>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let reader = ParallelSparseReader::new(f_path)?;
     let total_genes = reader.get_header().total_genes;
     let all_gene_indices: Vec<usize> = (0..total_genes).collect();
@@ -3683,7 +3782,7 @@ pub fn scenic_gene_filter(
                 passing.push(gene.original_index);
             }
         }
-        if verbose {
+        if verbosity.normal_verbosity() {
             println!(
                 "Processed chunk {} out of {} for SCENIC inclusion criteria.",
                 iter + 1,
@@ -3705,7 +3804,8 @@ pub fn scenic_gene_filter(
 /// * `tf_indices` - Transcription factor gene indices (predictors).
 /// * `scenic_params` - Reference to the SCENIC parameters.
 /// * `seed` - Base random seed for reproducibility.
-/// * `verbose` - Print progress and timing to stdout.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -3734,8 +3834,10 @@ pub fn run_scenic_grn(
     tf_indices: &[usize],
     scenic_params: &ScenicParams,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<Mat<f32>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let start_total = Instant::now();
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
     let n_cells = cell_set.len();
@@ -3757,7 +3859,7 @@ pub fn run_scenic_grn(
     let n_tfs = tf_data.n_features;
     let n_genes = gene_indices.len();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Loaded, filtered and quantised TF data (n: {}) in: {:.2?}",
             n_tfs.separate_with_underscores(),
@@ -3808,7 +3910,8 @@ pub fn run_scenic_grn(
 /// * `tf_indices` - Transcription factor gene indices (predictors).
 /// * `scenic_params` - Reference to the SCENIC parameters.
 /// * `seed` - Base random seed for reproducibility.
-/// * `verbose` - Print progress and timing to stdout.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -3836,8 +3939,10 @@ pub fn run_scenic_grn_streaming(
     tf_indices: &[usize],
     scenic_params: &ScenicParams,
     seed: usize,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<Mat<f32>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let start_total = Instant::now();
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
     let n_cells = cell_set.len();
@@ -3860,7 +3965,7 @@ pub fn run_scenic_grn_streaming(
     let n_tfs = tf_data.n_features;
     let n_genes = gene_indices.len();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "Loaded, filtered and quantised TF data (n: {}) in: {:.2?}",
             n_tfs.separate_with_underscores(),
@@ -4272,8 +4377,6 @@ mod tests {
         assert_eq!(sorted.len(), 100);
     }
 
-    // ---- NodeHistograms ----
-
     #[test]
     fn node_hist_build_from_samples() {
         // 4 cells, 2 features
@@ -4541,7 +4644,7 @@ mod tests {
             n_features_split: 0,
         };
 
-        let imp = fit_grnboost2_sparse(&target, &store, n_cells, &config, 42);
+        let imp = fit_grnboost2_sparse(&target, &store, n_cells, &config, 42).unwrap();
 
         assert_eq!(imp.len(), n_features);
         // TF0 should have the highest importance
@@ -4588,7 +4691,7 @@ mod tests {
             n_features_split: 0,
         };
 
-        let imp = fit_grnboost2_sparse(&target, &store, n_cells, &config, 0);
+        let imp = fit_grnboost2_sparse(&target, &store, n_cells, &config, 0).unwrap();
 
         // With zero target, importances should all be zero (no variance to
         // reduce) or the function should terminate quickly.
@@ -4628,8 +4731,8 @@ mod tests {
             len: n_cells,
         };
         let config = GradientBoostingConfig::default();
-        let a = fit_grnboost2_sparse(&target, &store, n_cells, &config, 42);
-        let b = fit_grnboost2_sparse(&target, &store, n_cells, &config, 42);
+        let a = fit_grnboost2_sparse(&target, &store, n_cells, &config, 42).unwrap();
+        let b = fit_grnboost2_sparse(&target, &store, n_cells, &config, 42).unwrap();
         assert_eq!(a, b, "same seed should produce identical results");
     }
 

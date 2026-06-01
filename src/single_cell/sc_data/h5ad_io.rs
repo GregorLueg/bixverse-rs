@@ -2,6 +2,7 @@
 //! transform them into the binarised files for usage in bixverse-rs.
 
 use hdf5::{File, Result};
+use num_traits::Float;
 use rayon::prelude::*;
 use std::path::Path;
 use std::sync::Arc;
@@ -11,6 +12,145 @@ use thousands::Separable;
 
 use crate::prelude::*;
 use crate::single_cell::sc_data::data_io::{CellGeneSparseWriter, CellOnFileQuality};
+
+////////////
+// Consts //
+////////////
+
+/// Number of data entries to check
+const N_CHECK: usize = 100;
+
+///////////////////
+// Raw data slot //
+///////////////////
+
+/// Enum describing in which of the slots the raw counts are stored
+#[derive(Clone, Debug, Default, Copy)]
+pub enum RawDataSlot {
+    /// Default assumption that raw counts are stored `ad.X`
+    #[default]
+    DataX,
+    /// Alternative assumption that raw counts are stored in `ad.raw.X`
+    RawX,
+    /// Alternative assumption that raw counts are stored in `ad.layers.counts`
+    LayerCounts,
+}
+
+impl RawDataSlot {
+    /// Returns the indptr path
+    ///
+    /// ### Returns
+    ///
+    /// `indptr` path from the h5ad file
+    #[inline]
+    pub fn get_indptr(&self) -> &str {
+        match self {
+            RawDataSlot::DataX => "X/indptr",
+            RawDataSlot::RawX => "raw/X/indptr",
+            RawDataSlot::LayerCounts => "layers/counts/indptr",
+        }
+    }
+
+    /// Returns the indices path
+    ///
+    /// ### Returns
+    ///
+    /// `indices` path from the h5ad file
+    #[inline]
+    pub fn get_indices(&self) -> &str {
+        match self {
+            RawDataSlot::DataX => "X/indices",
+            RawDataSlot::RawX => "raw/X/indices",
+            RawDataSlot::LayerCounts => "layers/counts/indices",
+        }
+    }
+
+    /// Returns the data path
+    ///
+    /// ### Returns
+    ///
+    /// `data` path from the h5ad file
+    #[inline]
+    pub fn get_data(&self) -> &str {
+        match self {
+            RawDataSlot::DataX => "X/data",
+            RawDataSlot::RawX => "raw/X/data",
+            RawDataSlot::LayerCounts => "layers/counts/data",
+        }
+    }
+}
+
+/// Parse where the raw counts are stored
+///
+/// ### Params
+///
+/// * `s` - String to parse
+///
+/// ### Returns
+///
+/// An option of the [RawDataSlot] to use subsequently.
+pub fn parse_raw_slot(s: &str) -> Option<RawDataSlot> {
+    match s.to_lowercase().as_str() {
+        "x" | "X" => Some(RawDataSlot::DataX),
+        "raw" | "raw.x" => Some(RawDataSlot::RawX),
+        "layers.counts" => Some(RawDataSlot::LayerCounts),
+        _ => None,
+    }
+}
+
+/// Helper function to check if data is likely raw data
+///
+/// ### Params
+///
+/// * `data` - Numeric vector to test
+/// * `n_check` - Number of values to check
+///
+/// ### Returns
+///
+/// Nothing if okay, Err if not.
+pub fn check_is_raw<T>(data: &[T], n_check: Option<usize>) -> Result<(), BixverseErrors>
+where
+    T: Float,
+{
+    let n_check = n_check.unwrap_or(N_CHECK);
+
+    let res = data.iter().take(n_check).all(|x| x.fract() == T::zero());
+
+    if res {
+        Ok(())
+    } else {
+        Err(BixverseErrors::NotRawCounts)
+    }
+}
+
+/// Check raw data in h5ad
+///
+/// ### Params
+///
+/// * `file` - The h5ad file reference
+/// * `raw_slot` - The slot for the raw data
+/// * `n_check` - Optional number of entries to check. If not provided, defaults
+///   to [N_CHECK].
+///
+/// ### Returns
+///
+/// Nothing if okay, Err if not.
+pub fn check_h5ad_is_raw(
+    file: &File,
+    raw_slot: &RawDataSlot,
+    n_check: Option<usize>,
+) -> Result<(), BixverseErrors> {
+    let n_check = n_check.unwrap_or(N_CHECK);
+
+    let data: Vec<f32> = file
+        .dataset(raw_slot.get_data())?
+        .read_slice(0..n_check)?
+        .to_vec();
+
+    check_is_raw(&data, Some(n_check))?;
+
+    Ok(())
+}
 
 /////////////
 // Writers //
@@ -32,11 +172,14 @@ use crate::single_cell::sc_data::data_io::{CellGeneSparseWriter, CellOnFileQuali
 /// * `no_genes` - Total number of vars in the data.
 /// * `cell_quality` - Structure containing information on the desired minimum
 ///   cell and gene quality + target size for library normalisation.
+/// * `raw_slot` - Where to find the raw counts in the h5ad object, see
+///   [RawDataSlot]
 /// * `verbose` - Controls verbosity of the function.
 ///
 /// ### Returns
 ///
 /// A tuple with `(no_cells, no_genes, cell quality metrics)`
+#[allow(clippy::too_many_arguments)]
 pub fn write_h5_counts<P: AsRef<Path>>(
     h5_path: P,
     bin_path: P,
@@ -44,6 +187,7 @@ pub fn write_h5_counts<P: AsRef<Path>>(
     no_cells: usize,
     no_genes: usize,
     cell_quality: MinCellQuality,
+    raw_slot: RawDataSlot,
     verbose: bool,
 ) -> Result<(usize, usize, CellQuality), BixverseErrors> {
     if verbose {
@@ -56,12 +200,20 @@ pub fn write_h5_counts<P: AsRef<Path>>(
         .ok_or_else(|| BixverseErrors::UnknownSparseFormat(cs_type.to_string()))?;
 
     let file_quality = match file_format {
-        CompressedSparseFormat::Csr => {
-            parse_h5_csr_quality(&h5_path, (no_cells, no_genes), &cell_quality, verbose)?
-        }
-        CompressedSparseFormat::Csc => {
-            parse_h5_csc_quality(&h5_path, (no_cells, no_genes), &cell_quality, verbose)?
-        }
+        CompressedSparseFormat::Csr => parse_h5_csr_quality(
+            &h5_path,
+            (no_cells, no_genes),
+            &raw_slot,
+            &cell_quality,
+            verbose,
+        )?,
+        CompressedSparseFormat::Csc => parse_h5_csc_quality(
+            &h5_path,
+            (no_cells, no_genes),
+            &cell_quality,
+            &raw_slot,
+            verbose,
+        )?,
     };
 
     if verbose {
@@ -80,9 +232,11 @@ pub fn write_h5_counts<P: AsRef<Path>>(
     }
 
     let file_data: CompressedSparseData2<u32> = match file_format {
-        CompressedSparseFormat::Csr => read_h5ad_x_data_csr(&h5_path, &file_quality, verbose)?,
+        CompressedSparseFormat::Csr => {
+            read_h5ad_x_data_csr(&h5_path, &file_quality, &raw_slot, verbose)?
+        }
         CompressedSparseFormat::Csc => {
-            let data = read_h5ad_x_data_csc(&h5_path, &file_quality, verbose)?;
+            let data = read_h5ad_x_data_csc(&h5_path, &file_quality, &raw_slot, verbose)?;
             data.transpose_and_convert()
         }
     };
@@ -98,8 +252,8 @@ pub fn write_h5_counts<P: AsRef<Path>>(
     let mut nnz = Vec::with_capacity(n_cells);
 
     for i in 0..n_cells {
-        let start_i = file_data.indptr[i];
-        let end_i = file_data.indptr[i + 1];
+        let start_i = file_data.indptr[i] as usize;
+        let end_i = file_data.indptr[i + 1] as usize;
 
         let cell_data = &file_data.data[start_i..end_i];
         let cell_indices = &file_data.indices[start_i..end_i];
@@ -165,11 +319,14 @@ pub fn write_h5_counts<P: AsRef<Path>>(
 /// * `no_genes` - Total number of vars in the data.
 /// * `cell_quality` - Structure containing information on the desired minimum
 ///   cell and gene quality + target size for library normalisation.
+/// * `raw_slot` - Where to find the raw counts in the h5ad object, see
+///   [RawDataSlot]
 /// * `verbose` - Controls verbosity of the function.
 ///
 /// ### Returns
 ///
 /// A tuple with `(no_cells, no_genes, cell quality metrics)`
+#[allow(clippy::too_many_arguments)]
 pub fn stream_h5_counts<P: AsRef<Path>>(
     h5_path: P,
     bin_path: P,
@@ -177,6 +334,7 @@ pub fn stream_h5_counts<P: AsRef<Path>>(
     no_cells: usize,
     no_genes: usize,
     cell_quality: MinCellQuality,
+    raw_slot: RawDataSlot,
     verbose: bool,
 ) -> Result<(usize, usize, CellQuality), BixverseErrors> {
     if verbose {
@@ -187,12 +345,20 @@ pub fn stream_h5_counts<P: AsRef<Path>>(
         .ok_or_else(|| BixverseErrors::UnknownSparseFormat(cs_type.to_string()))?;
 
     let file_quality = match file_format {
-        CompressedSparseFormat::Csr => {
-            parse_h5_csr_quality(&h5_path, (no_cells, no_genes), &cell_quality, verbose)?
-        }
-        CompressedSparseFormat::Csc => {
-            parse_h5_csc_quality(&h5_path, (no_cells, no_genes), &cell_quality, verbose)?
-        }
+        CompressedSparseFormat::Csr => parse_h5_csr_quality(
+            &h5_path,
+            (no_cells, no_genes),
+            &raw_slot,
+            &cell_quality,
+            verbose,
+        )?,
+        CompressedSparseFormat::Csc => parse_h5_csc_quality(
+            &h5_path,
+            (no_cells, no_genes),
+            &cell_quality,
+            &raw_slot,
+            verbose,
+        )?,
     };
 
     if verbose {
@@ -211,14 +377,19 @@ pub fn stream_h5_counts<P: AsRef<Path>>(
     }
 
     let mut cell_qc = match file_format {
-        CompressedSparseFormat::Csr => {
-            write_h5_csr_streaming(&h5_path, &bin_path, &file_quality, cell_quality, verbose)
-        }
+        CompressedSparseFormat::Csr => write_h5_csr_streaming(
+            &h5_path,
+            &bin_path,
+            &file_quality,
+            cell_quality,
+            &raw_slot,
+            verbose,
+        ),
         CompressedSparseFormat::Csc => {
             if verbose {
                 println!("  Pass 1/2: Scanning library sizes...");
             }
-            let cell_lib_sizes = scan_h5_csc_library_sizes(&h5_path, &file_quality)?;
+            let cell_lib_sizes = scan_h5_csc_library_sizes(&h5_path, &file_quality, &raw_slot)?;
             if verbose {
                 println!("  Pass 2/2: Writing cells with normalisation...");
             }
@@ -226,6 +397,7 @@ pub fn stream_h5_counts<P: AsRef<Path>>(
                 &h5_path,
                 &bin_path,
                 &file_quality,
+                &raw_slot,
                 &cell_lib_sizes,
                 cell_quality.target_size,
                 verbose,
@@ -258,6 +430,8 @@ pub fn stream_h5_counts<P: AsRef<Path>>(
 /// * `shape` - Tuple with `(no_cells, no_genes)`.
 /// * `cell_quality` - Structure defining the minimum quality values that are
 ///   expected here.
+/// * `raw_slot` - Where to find the raw counts in the h5ad object, see
+///   [RawDataSlot]
 /// * `verbose` - Controls verbosity of the function.
 ///
 /// ### Returns
@@ -268,6 +442,7 @@ pub fn parse_h5_csc_quality<P: AsRef<Path>>(
     file_path: P,
     shape: (usize, usize),
     cell_quality: &MinCellQuality,
+    raw_slot: &RawDataSlot,
     verbose: bool,
 ) -> Result<CellOnFileQuality, BixverseErrors> {
     let file_path = file_path.as_ref();
@@ -281,7 +456,9 @@ pub fn parse_h5_csc_quality<P: AsRef<Path>>(
     }
 
     let file = File::open(file_path)?;
-    let indptr: Vec<u32> = file.dataset("X/indptr")?.read_1d()?.to_vec();
+    let indptr: Vec<u32> = file.dataset(raw_slot.get_indptr())?.read_1d()?.to_vec();
+
+    check_h5ad_is_raw(&file, raw_slot, None)?;
 
     let mut no_cells_exp_gene: Vec<usize> = Vec::with_capacity(shape.1);
     for i in 0..shape.1 {
@@ -291,11 +468,11 @@ pub fn parse_h5_csc_quality<P: AsRef<Path>>(
     if verbose {
         let max_expr = no_cells_exp_gene.iter().max().unwrap_or(&0);
         let min_expr = no_cells_exp_gene.iter().min().unwrap_or(&0);
-        let avg_expr = if shape.1 > 0 {
-            no_cells_exp_gene.iter().sum::<usize>() / shape.1
-        } else {
-            0
-        };
+        let avg_expr = no_cells_exp_gene
+            .iter()
+            .sum::<usize>()
+            .checked_div(shape.1)
+            .unwrap_or(0);
         println!(
             "  Gene expression stats: min = {} | max = {} | avg = {} cells per gene",
             min_expr.separate_with_underscores(),
@@ -335,8 +512,10 @@ pub fn parse_h5_csc_quality<P: AsRef<Path>>(
                 return (local_unique, local_lib_size);
             };
 
-            let (Ok(data_ds), Ok(indices_ds)) = (file.dataset("X/data"), file.dataset("X/indices"))
-            else {
+            let (Ok(data_ds), Ok(indices_ds)) = (
+                file.dataset(raw_slot.get_data()),
+                file.dataset(raw_slot.get_indices()),
+            ) else {
                 return (local_unique, local_lib_size);
             };
 
@@ -448,6 +627,8 @@ pub fn parse_h5_csc_quality<P: AsRef<Path>>(
 /// * `file_path` - Path to the h5ad file.
 /// * `quality` - Information on the which cells and genes to include after a
 ///   first pass of the file.
+/// * `raw_slot` - Where to find the raw counts in the h5ad object, see
+///   [RawDataSlot]
 ///
 /// ### Returns
 ///
@@ -455,11 +636,15 @@ pub fn parse_h5_csc_quality<P: AsRef<Path>>(
 pub fn scan_h5_csc_library_sizes<P: AsRef<Path>>(
     file_path: P,
     quality: &CellOnFileQuality,
+    raw_slot: &RawDataSlot,
 ) -> Result<Vec<u32>, BixverseErrors> {
     let file = File::open(file_path)?;
-    let data_ds = file.dataset("X/data")?;
-    let indices_ds = file.dataset("X/indices")?;
-    let indptr_ds = file.dataset("X/indptr")?;
+
+    check_h5ad_is_raw(&file, raw_slot, None)?;
+
+    let data_ds = file.dataset(raw_slot.get_data())?;
+    let indices_ds = file.dataset(raw_slot.get_indices())?;
+    let indptr_ds = file.dataset(raw_slot.get_indptr())?;
     let indptr_raw: Vec<u32> = indptr_ds.read_1d()?.to_vec();
 
     // Only track library sizes - very light in terms of memory
@@ -514,6 +699,8 @@ pub fn scan_h5_csc_library_sizes<P: AsRef<Path>>(
 /// * `file_path` - Path to the h5ad file.
 /// * `quality` - Information on the which cells and genes to include after a
 ///   first pass of the file.
+/// * `raw_slot` - Where to find the raw counts in the h5ad object, see
+///   [RawDataSlot]
 /// * `verbose` - Controls verbosity of the function.
 ///
 /// ### Returns
@@ -522,13 +709,16 @@ pub fn scan_h5_csc_library_sizes<P: AsRef<Path>>(
 pub fn read_h5ad_x_data_csc<P: AsRef<Path>>(
     file_path: P,
     quality: &CellOnFileQuality,
+    raw_slot: &RawDataSlot,
     verbose: bool,
 ) -> Result<CompressedSparseData2<u32>, BixverseErrors> {
     let file = File::open(file_path)?;
 
-    let data_ds = file.dataset("X/data")?;
-    let indices_ds = file.dataset("X/indices")?;
-    let indptr_ds = file.dataset("X/indptr")?;
+    check_h5ad_is_raw(&file, raw_slot, None)?;
+
+    let data_ds = file.dataset(raw_slot.get_data())?;
+    let indices_ds = file.dataset(raw_slot.get_indices())?;
+    let indptr_ds = file.dataset(raw_slot.get_indptr())?;
 
     // Read indptr first (small array)
     let indptr_raw: Vec<u32> = indptr_ds.read_1d()?.to_vec();
@@ -610,8 +800,8 @@ pub fn read_h5ad_x_data_csc<P: AsRef<Path>>(
 
     Ok(CompressedSparseData2 {
         data: new_data,
-        indices: new_indices,
-        indptr: new_indptr,
+        indices: new_indices.index_cast(),
+        indptr: new_indptr.index_cast(),
         cs_type: CompressedSparseFormat::Csr,
         data_2: None::<Vec<u32>>,
         shape,
@@ -626,6 +816,8 @@ pub fn read_h5ad_x_data_csc<P: AsRef<Path>>(
 /// * `bin_path` - Path to the binary file on disk to write to.
 /// * `quality` - Information on the which cells and genes to include after a
 ///   first pass of the file.
+/// * `raw_slot` - Where to find the raw counts in the h5ad object, see
+///   [RawDataSlot]
 /// * `cell_lib_sizes` - Vector with the pre-calculated library sizes, see
 ///   scan_h5_csc_library_sizes().
 /// * `target_size` - Target size for the library normalisation.
@@ -638,14 +830,15 @@ pub fn write_h5_csc_to_csr_streaming<P: AsRef<Path>>(
     file_path: P,
     bin_path: P,
     quality: &CellOnFileQuality,
+    raw_slot: &RawDataSlot,
     cell_lib_sizes: &[u32],
     target_size: f32,
     verbose: bool,
 ) -> Result<CellQuality, BixverseErrors> {
     let file = File::open(file_path)?;
-    let data_ds = file.dataset("X/data")?;
-    let indices_ds = file.dataset("X/indices")?;
-    let indptr_ds = file.dataset("X/indptr")?;
+    let data_ds = file.dataset(raw_slot.get_data())?;
+    let indices_ds = file.dataset(raw_slot.get_indices())?;
+    let indptr_ds = file.dataset(raw_slot.get_indptr())?;
     let indptr_raw: Vec<u32> = indptr_ds.read_1d()?.to_vec();
 
     // accumulate cells in memory (necessary for CSR)
@@ -788,6 +981,8 @@ pub fn write_h5_csc_to_csr_streaming<P: AsRef<Path>>(
 /// * `shape` - Tuple with `(no_cells, no_genes)`.
 /// * `cell_quality` - Structure defining the minimum quality values that are
 ///   expected here.
+/// * `raw_slot` - Where to find the raw counts in the h5ad object, see
+///   [RawDataSlot].
 /// * `verbose` - Controls verbosity of the function.
 ///
 /// ### Returns
@@ -797,6 +992,7 @@ pub fn write_h5_csc_to_csr_streaming<P: AsRef<Path>>(
 pub fn parse_h5_csr_quality<P: AsRef<Path>>(
     file_path: P,
     shape: (usize, usize),
+    raw_slot: &RawDataSlot,
     cell_quality: &MinCellQuality,
     verbose: bool,
 ) -> Result<CellOnFileQuality, BixverseErrors> {
@@ -811,7 +1007,10 @@ pub fn parse_h5_csr_quality<P: AsRef<Path>>(
     }
 
     let file = File::open(file_path)?;
-    let indptr: Vec<u32> = file.dataset("X/indptr")?.read_1d()?.to_vec();
+
+    check_h5ad_is_raw(&file, raw_slot, None)?;
+
+    let indptr: Vec<u32> = file.dataset(raw_slot.get_indptr())?.read_1d()?.to_vec();
 
     const CELL_CHUNK_SIZE: usize = 10000;
     let chunks: Vec<usize> = (0..shape.0).step_by(CELL_CHUNK_SIZE).collect();
@@ -834,7 +1033,7 @@ pub fn parse_h5_csr_quality<P: AsRef<Path>>(
                 return local_counts;
             };
 
-            let Ok(indices_ds) = file.dataset("X/indices") else {
+            let Ok(indices_ds) = file.dataset(raw_slot.get_indices()) else {
                 return local_counts;
             };
 
@@ -890,11 +1089,11 @@ pub fn parse_h5_csr_quality<P: AsRef<Path>>(
     if verbose {
         let max_expr = no_cells_exp_gene.iter().max().unwrap_or(&0);
         let min_expr = no_cells_exp_gene.iter().min().unwrap_or(&0);
-        let avg_expr = if shape.1 > 0 {
-            no_cells_exp_gene.iter().sum::<usize>() / shape.1
-        } else {
-            0
-        };
+        let avg_expr = no_cells_exp_gene
+            .iter()
+            .sum::<usize>()
+            .checked_div(shape.1)
+            .unwrap_or(0);
 
         println!(
             "  Gene expression stats: min = {} | max = {} | avg = {} cells per gene",
@@ -939,8 +1138,10 @@ pub fn parse_h5_csr_quality<P: AsRef<Path>>(
                 return (local_unique, local_lib_size);
             };
 
-            let (Ok(data_ds), Ok(indices_ds)) = (file.dataset("X/data"), file.dataset("X/indices"))
-            else {
+            let (Ok(data_ds), Ok(indices_ds)) = (
+                file.dataset(raw_slot.get_data()),
+                file.dataset(raw_slot.get_indices()),
+            ) else {
                 return (local_unique, local_lib_size);
             };
 
@@ -1009,7 +1210,7 @@ pub fn parse_h5_csr_quality<P: AsRef<Path>>(
         let min_lib = cell_lib_size.iter().fold(f32::INFINITY, |a, &b| a.min(b));
 
         println!(
-            "  Cell stats: genes per cell: min = {} | max={}",
+            "  Cell stats: genes per cell: min = {} | max = {}",
             min_genes.separate_with_underscores(),
             max_genes.separate_with_underscores()
         );
@@ -1052,6 +1253,8 @@ pub fn parse_h5_csr_quality<P: AsRef<Path>>(
 /// * `file_path` - Path to the h5ad file.
 /// * `quality` - Information on the which cells and genes to include after a
 ///   first pass of the file.
+/// * `raw_slot` - Where to find the raw counts in the h5ad object, see
+///   [RawDataSlot].
 /// * `verbose` - Controls verbosity of the function.
 ///
 /// ### Returns
@@ -1060,13 +1263,14 @@ pub fn parse_h5_csr_quality<P: AsRef<Path>>(
 pub fn read_h5ad_x_data_csr<P: AsRef<Path>>(
     file_path: P,
     quality: &CellOnFileQuality,
+    raw_slot: &RawDataSlot,
     verbose: bool,
 ) -> Result<CompressedSparseData2<u32>, BixverseErrors> {
     let file = File::open(file_path)?;
 
-    let data_ds = file.dataset("X/data")?;
-    let indices_ds = file.dataset("X/indices")?;
-    let indptr_ds = file.dataset("X/indptr")?;
+    let data_ds = file.dataset(raw_slot.get_data())?;
+    let indices_ds = file.dataset(raw_slot.get_indices())?;
+    let indptr_ds = file.dataset(raw_slot.get_indptr())?;
 
     let indptr_raw: Vec<u32> = indptr_ds.read_1d()?.to_vec();
 
@@ -1165,8 +1369,8 @@ pub fn read_h5ad_x_data_csr<P: AsRef<Path>>(
 
     Ok(CompressedSparseData2 {
         data: new_data,
-        indices: new_indices,
-        indptr: new_indptr,
+        indices: new_indices.index_cast(),
+        indptr: new_indptr.index_cast(),
         cs_type: CompressedSparseFormat::Csc, // Return CSC format
         data_2: None::<Vec<u32>>,
         shape,
@@ -1187,6 +1391,8 @@ pub fn read_h5ad_x_data_csr<P: AsRef<Path>>(
 ///   first pass of the file.
 /// * `cell_qc` - Structure containing the information on which minimum criteria
 ///   cells and genes need to pass.
+/// * `raw_slot` - Where to find the raw counts in the h5ad object, see
+///   [RawDataSlot].
 /// * `verbose` - Controls verbosity of the function
 ///
 /// ### Returns
@@ -1198,12 +1404,13 @@ pub fn write_h5_csr_streaming<P: AsRef<Path>>(
     bin_path: P,
     quality: &CellOnFileQuality,
     cell_qc: MinCellQuality,
+    raw_slot: &RawDataSlot,
     verbose: bool,
 ) -> Result<CellQuality, BixverseErrors> {
     let file = File::open(&file_path)?;
-    let data_ds = file.dataset("X/data")?;
-    let indices_ds = file.dataset("X/indices")?;
-    let indptr_ds = file.dataset("X/indptr")?;
+    let data_ds = file.dataset(raw_slot.get_data())?;
+    let indices_ds = file.dataset(raw_slot.get_indices())?;
+    let indptr_ds = file.dataset(raw_slot.get_indptr())?;
     let indptr_raw: Vec<u32> = indptr_ds.read_1d()?.to_vec();
 
     let mut writer = CellGeneSparseWriter::new(

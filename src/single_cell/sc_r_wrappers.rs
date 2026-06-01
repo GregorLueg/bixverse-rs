@@ -5,6 +5,8 @@ use extendr_api::*;
 use std::collections::HashMap;
 
 use crate::core::math::sparse::parse_compressed_sparse_format;
+use crate::ml::clustering::k_means::KMeansParamsWrappers;
+use crate::prelude::{VecConvert, VecFloatConvert};
 use crate::single_cell::mc_generation::{
     hdwgcna_meta_cells::BootstrappedMetaCellParams, metacells2::params::*,
     seacells::SEACellsParams, super_cells::SuperCellParams,
@@ -12,6 +14,7 @@ use crate::single_cell::mc_generation::{
 use crate::single_cell::sc_analysis::fast_clusters::FastLouvainParams;
 use crate::single_cell::sc_analysis::{
     hotspot::HotSpotParams,
+    meld::{MeldParams, parse_lap_type, parse_meld_filter},
     milo_r::MiloRParams,
     scenic::{
         ExtraTreesConfig, GradientBoostingConfig, RandomForestConfig, RegressionLearner,
@@ -20,13 +23,17 @@ use crate::single_cell::sc_analysis::{
     vision::SignatureGenes,
 };
 
+use crate::single_cell::sc_annotation::sc_type::{CellTypeMarkers, SctypeRes};
 use crate::single_cell::sc_batch_correction::{
     bbknn::BbknnParams, fast_mnn::FastMnnParams, harmony::HarmonyParams,
     harmony_v2::HarmonyParamsV2,
 };
-use crate::single_cell::sc_data::data_io::MinCellQuality;
-use crate::single_cell::sc_data::h5ad_multifile_io::H5adFileTask;
-use crate::single_cell::sc_data::sc_synthetic_data::CellTypeConfig;
+use crate::single_cell::sc_data::h5ad_io::RawDataSlot;
+use crate::single_cell::sc_data::{
+    bin_merge_io::BinMergeTask, data_io::MinCellQuality, h5ad_io::parse_raw_slot,
+    h5ad_multifile_io::H5adFileTask, mtx_multifile_io::MtxFileTask,
+    sc_synthetic_data::CellTypeConfig,
+};
 use crate::single_cell::sc_processing::{
     doublet_detection::BoostParams, knn::KnnParams, scdblfinder::ScDblFinderParams,
     scrublet::ScrubletParams, utils_doublets::ScDblSimParams,
@@ -835,6 +842,7 @@ impl FastLouvainParams<f32> {
     /// The `BbknnParams` with all of the parameters.
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let knn_params = KnnParams::from_r_list(r_list.clone())?;
+        let kmeans_params = KMeansParamsWrappers::from_r_list(r_list.clone())?;
         let params: HashMap<&str, Robj> = r_list.try_into()?;
         let defaults: FastLouvainParams<f32> = Self::default();
 
@@ -850,12 +858,6 @@ impl FastLouvainParams<f32> {
             .and_then(|v| v.as_integer())
             .map(|v| v as usize)
             .unwrap_or(defaults.n_centroids);
-
-        let kmeans_iters = params
-            .get("kmeans_iters")
-            .and_then(|v| v.as_integer())
-            .map(|v| v as usize)
-            .unwrap_or(defaults.kmeans_iters);
 
         let batch_size = params
             .get("batch_size")
@@ -906,7 +908,7 @@ impl FastLouvainParams<f32> {
 
         Ok(Self {
             n_centroids,
-            kmeans_iters,
+            kmeans_params,
             batch_size,
             drift_threshold,
             lr_alpha,
@@ -1009,13 +1011,19 @@ impl FastMnnParams {
             .unwrap_or(30) as usize;
         let random_svd = fastmnn_list
             .get("random_svd")
-            .and_then(|v| v.as_logical())
-            .map(|rb| rb.is_true())
+            .and_then(|v| v.as_bool())
             .unwrap_or(true);
+
+        let sparse_svd = fastmnn_list
+            .get("sparse_svd")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
         Ok(Self {
             ndist,
             no_pcs,
             random_svd,
+            sparse_svd,
             cos_norm,
             knn_params,
         })
@@ -1251,6 +1259,10 @@ impl SuperCellParams {
             .get("k_ith")
             .and_then(|v| v.as_integer())
             .map(|x| x as usize);
+        let max_support = params
+            .get("max_support")
+            .and_then(|v| v.as_integer())
+            .map(|x| x as usize);
 
         Ok(Self {
             walk_length,
@@ -1258,6 +1270,7 @@ impl SuperCellParams {
             knn_params,
             use_kernel,
             k_ith,
+            max_support,
         })
     }
 }
@@ -1358,6 +1371,7 @@ impl HarmonyParams {
     /// The `HarmonyParams` with all parameters set.
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let defaults = Self::default();
+        let kmeans_params = KMeansParamsWrappers::from_r_list(r_list.clone())?;
         let params_list: HashMap<&str, Robj> = r_list.try_into()?;
 
         let k = params_list
@@ -1431,6 +1445,7 @@ impl HarmonyParams {
             epsilon_kmeans,
             epsilon_harmony,
             window_size,
+            kmeans_params,
         })
     }
 }
@@ -1454,6 +1469,7 @@ impl HarmonyParamsV2 {
     /// The `HarmonyParams` with all parameters set.
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let defaults = Self::default();
+        let kmeans_params = KMeansParamsWrappers::from_r_list(r_list.clone())?;
         let params_list: HashMap<&str, Robj> = r_list.try_into()?;
 
         let k = params_list
@@ -1554,6 +1570,7 @@ impl HarmonyParamsV2 {
             tau,
             batch_proportion_cutoff,
             use_dynamic_lambda,
+            kmeans_params,
         })
     }
 }
@@ -1848,49 +1865,56 @@ impl ScenicParams {
 //////////////////
 
 impl H5adFileTask {
-    /// Generate an H5FileTask from an R list
+    /// Generate an H5adFileTask from an R list
     ///
     /// Expects: exp_id, h5_path, cs_type, no_cells, no_genes,
     /// gene_local_to_universe (integer vector, NA for unmapped genes,
     /// 0-indexed).
-    pub fn from_r_list(r_list: List) -> Result<Self> {
+    pub fn from_r_list(r_list: List) -> extendr_api::Result<Self> {
         let map: HashMap<&str, Robj> = r_list.try_into()?;
+
+        let raw_slot: RawDataSlot = map
+            .get("raw_slot")
+            .and_then(|v| v.as_str())
+            .and_then(parse_raw_slot)
+            .unwrap_or_default();
 
         let exp_id = map
             .get("exp_id")
             .and_then(|v| v.as_str())
-            .expect("exp_id missing or not a string")
+            .ok_or_else(|| Error::Other("exp_id missing or not a string".into()))?
             .to_string();
 
         let h5_path = map
             .get("h5_path")
             .and_then(|v| v.as_str())
-            .expect("h5_path missing or not a string")
+            .ok_or_else(|| Error::Other("h5_path missing or not a string".into()))?
             .to_string();
 
         let cs_type_str = map
             .get("cs_type")
             .and_then(|v| v.as_str())
-            .expect("cs_type missing or not a string");
-        let cs_type =
-            parse_compressed_sparse_format(cs_type_str).expect("cs_type must be 'csr' or 'csc'");
+            .ok_or_else(|| Error::Other("cs_type missing or not a string".into()))?;
+        let cs_type = parse_compressed_sparse_format(cs_type_str)
+            .ok_or_else(|| Error::Other("cs_type must be 'csr' or 'csc'".into()))?;
 
         let no_cells = map
             .get("no_cells")
             .and_then(|v| v.as_integer())
-            .expect("no_cells missing") as usize;
+            .ok_or_else(|| Error::Other("no_cells missing or not an integer".into()))?
+            as usize;
 
         let no_genes = map
             .get("no_genes")
             .and_then(|v| v.as_integer())
-            .expect("no_genes missing") as usize;
+            .ok_or_else(|| Error::Other("no_genes missing or not an integer".into()))?
+            as usize;
 
-        let mapping_robj = map
+        let mapping_raw: Vec<i32> = map
             .get("gene_local_to_universe")
-            .expect("gene_local_to_universe missing");
-        let mapping_raw: Vec<i32> = mapping_robj
+            .ok_or_else(|| Error::Other("gene_local_to_universe missing".into()))?
             .as_integer_slice()
-            .expect("gene_local_to_universe must be integer vector")
+            .ok_or_else(|| Error::Other("gene_local_to_universe must be an integer vector".into()))?
             .to_vec();
 
         // R NA_integer_ is i32::MIN
@@ -1912,6 +1936,124 @@ impl H5adFileTask {
             no_cells,
             no_genes,
             gene_local_to_universe,
+            raw_slot,
+        })
+    }
+}
+
+//////////////////
+// BinMergeTask //
+//////////////////
+
+impl BinMergeTask {
+    /// Generate a BinMergeTask from an R list
+    ///
+    /// Expects: exp_id, bin_cells_path, cells_to_keep (0-indexed integer
+    /// vector), gene_local_to_universe (integer vector, NA for unmapped
+    /// genes, 0-indexed).
+    pub fn from_r_list(r_list: List) -> extendr_api::Result<Self> {
+        let map: HashMap<&str, Robj> = r_list.try_into()?;
+
+        let exp_id = map
+            .get("exp_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::Other("exp_id missing or not a string".into()))?
+            .to_string();
+
+        let bin_cells_path = map
+            .get("bin_cells_path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::Other("bin_cells_path missing or not a string".into()))?
+            .to_string();
+
+        let cells_to_keep: Vec<usize> = map
+            .get("cells_to_keep")
+            .ok_or_else(|| Error::Other("cells_to_keep missing".into()))?
+            .as_integer_slice()
+            .ok_or_else(|| Error::Other("cells_to_keep must be an integer vector".into()))?
+            .iter()
+            .map(|&x| x as usize)
+            .collect();
+
+        let mapping_raw: Vec<i32> = map
+            .get("gene_local_to_universe")
+            .ok_or_else(|| Error::Other("gene_local_to_universe missing".into()))?
+            .as_integer_slice()
+            .ok_or_else(|| Error::Other("gene_local_to_universe must be an integer vector".into()))?
+            .to_vec();
+
+        // R NA_integer_ is i32::MIN
+        let gene_local_to_universe: Vec<Option<u32>> = mapping_raw
+            .into_iter()
+            .map(|v| if v == i32::MIN { None } else { Some(v as u32) })
+            .collect();
+
+        Ok(Self {
+            exp_id,
+            bin_cells_path,
+            cells_to_keep,
+            gene_local_to_universe,
+        })
+    }
+}
+
+/////////////////
+// MtxFileTask //
+/////////////////
+
+impl MtxFileTask {
+    /// Generate an MtxFileTask from an R list
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The R list to converted to [MtxFileTask].
+    ///
+    /// ### Returns
+    ///
+    /// Self.
+    pub fn from_r_list(r_list: List) -> extendr_api::Result<Self> {
+        let map: HashMap<&str, Robj> = r_list.try_into()?;
+
+        let exp_id = map
+            .get("exp_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::Other("exp_id missing or not a string".into()))?
+            .to_string();
+
+        let mtx_path = map
+            .get("mtx_path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::Other("mtx_path missing or not a string".into()))?
+            .to_string();
+
+        let cells_as_rows = map
+            .get("cells_as_rows")
+            .and_then(|v| v.as_bool())
+            .ok_or_else(|| Error::Other("cells_as_rows missing or not a boolean".into()))?;
+
+        let mapping_raw: Vec<i32> = map
+            .get("gene_local_to_universe")
+            .ok_or_else(|| Error::Other("gene_local_to_universe missing".into()))?
+            .as_integer_slice()
+            .ok_or_else(|| Error::Other("gene_local_to_universe must be an integer vector".into()))?
+            .to_vec();
+
+        let gene_local_to_universe: Vec<Option<usize>> = mapping_raw
+            .into_iter()
+            .map(|v| {
+                if v == i32::MIN {
+                    None
+                } else {
+                    Some(v as usize)
+                }
+            })
+            .collect();
+
+        Ok(Self {
+            exp_id,
+            mtx_path,
+            gene_local_to_universe,
+            cells_as_rows,
         })
     }
 }
@@ -2330,6 +2472,168 @@ impl MetacellsParams {
             target_metacell_umis,
             must_complete_cover,
             random_seed,
+        })
+    }
+}
+
+////////////
+// ScType //
+////////////
+
+impl CellTypeMarkers {
+    /// Generate a [CellTypeMarkers] from an R list
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The R list from which to parse the cell markers
+    ///
+    /// ### Returns
+    ///
+    /// The [CellTypeMarkers] or Error
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let data: HashMap<&str, Robj> = r_list.try_into()?;
+
+        let cell_type = data
+            .get("cell_type")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::Other("cell_type missing or not a string".into()))?
+            .to_string();
+
+        let positive_indices: Vec<usize> = data
+            .get("positive_indices")
+            .and_then(|v| v.as_integer_vector())
+            .map(|v| v.r_int_convert())
+            .unwrap_or_default();
+
+        let negative_indices: Vec<usize> = data
+            .get("negative_indices")
+            .and_then(|v| v.as_integer_vector())
+            .map(|v| v.r_int_convert())
+            .unwrap_or_default();
+
+        Ok(Self {
+            cell_type,
+            positive_indices,
+            negative_indices,
+        })
+    }
+}
+
+impl SctypeRes {
+    /// Generate a [SctypeRes] from an R list
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The R list from which to parse the ScType results
+    ///
+    /// ### Returns
+    ///
+    /// The [SctypeRes] or Error
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let data: HashMap<&str, Robj> = r_list.try_into()?;
+
+        let cell_types = data
+            .get("cell_types")
+            .and_then(|v| v.as_string_vector())
+            .ok_or_else(|| Error::Other("cell_types missing or not a string vector".into()))?;
+
+        let scores = data
+            .get("scores")
+            .and_then(|v| v.as_real_vector())
+            .ok_or_else(|| Error::Other("scores missing or not a real vector".into()))?
+            .r_float_convert();
+
+        let n_cells: usize = data
+            .get("n_cells")
+            .and_then(|v| v.as_real())
+            .map(|v| v as usize)
+            .ok_or_else(|| Error::Other("n_cells missing or not an integer".into()))?;
+
+        let n_cell_types: usize = data
+            .get("n_cell_types")
+            .and_then(|v| v.as_real())
+            .map(|v| v as usize)
+            .ok_or_else(|| Error::Other("n_cell_types missing or not an integer".into()))?;
+
+        Ok(Self {
+            cell_types,
+            scores,
+            n_cells,
+            n_cell_types,
+        })
+    }
+}
+
+//////////
+// MELD //
+//////////
+
+impl MeldParams {
+    /// Generate MeldParams from an R list, falling back to defaults.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The R list from which to parse the arguments
+    ///
+    /// ### Returns
+    ///
+    /// The populated [MeldParams]
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let knn_params = KnnParams::from_r_list(r_list.clone())?;
+
+        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let defaults = Self::default();
+
+        let beta = params
+            .get("beta")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.beta);
+
+        let offset = params
+            .get("offset")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.offset);
+
+        let order = params
+            .get("order")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.order);
+
+        let filter = params
+            .get("filter")
+            .and_then(|v| v.as_str())
+            .and_then(parse_meld_filter)
+            .unwrap_or(defaults.filter);
+
+        let chebyshev_order = params
+            .get("chebyshev_order")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.chebyshev_order);
+
+        let lap_type = params
+            .get("lap_type")
+            .and_then(|v| v.as_str())
+            .and_then(parse_lap_type)
+            .unwrap_or(defaults.lap_type);
+
+        let normalise_indicators = params
+            .get("normalise_indicators")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.normalise_indicators);
+
+        Ok(Self {
+            beta,
+            offset,
+            order,
+            filter,
+            chebyshev_order,
+            lap_type,
+            normalise_indicators,
+            knn_params,
         })
     }
 }
