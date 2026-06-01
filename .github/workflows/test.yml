@@ -1,4 +1,4 @@
-name: Test the bixverse-rs package
+name: Test the package
 
 on:
   push:
