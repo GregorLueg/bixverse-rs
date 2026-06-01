@@ -61,6 +61,6 @@ jobs:
 
       - name: Publish to crates.io
         if: steps.check_tag.outputs.exists == 'false'
-        run: cargo publish --features binary,gpu,quantised
+        run: cargo publish --features single-cell,multi-modal,gpu
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
