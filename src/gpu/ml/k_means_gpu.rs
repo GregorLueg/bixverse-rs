@@ -87,15 +87,16 @@ impl Default for KMeansGpuParams {
 /// tightest of the wgpu backends). `wg_size` shrinks with dim to limit the
 /// per-thread private-memory footprint of the point array
 /// (`wg_size * dim_padded * 4 B` per workgroup).
-fn assign_launch_params(dim_padded: usize) -> (u32, usize) {
+fn assign_k_tile(dim_padded: usize) -> usize {
+    // k_tile * dim_padded * 4 B kept around 16 KiB to leave headroom in a
+    // conservative 32 KiB threadgroup-memory budget.
     match dim_padded {
-        0..=64 => (256, 32),
-        65..=128 => (256, 16),
-        129..=256 => (128, 16),
-        257..=512 => (64, 8),
-        513..=1024 => (64, 4),
-        1025..=2048 => (32, 2),
-        _ => (32, 1),
+        0..=64 => 32,
+        65..=256 => 16,
+        257..=512 => 8,
+        513..=1024 => 4,
+        1025..=2048 => 2,
+        _ => 1,
     }
 }
 
@@ -326,11 +327,11 @@ fn flash_assign_device<S, A, R>(
 {
     let vec_size = LINE_SIZE;
     let dim_lines = dim / vec_size;
-    let (wg_size, k_tile) = assign_launch_params(dim);
-    let n_workgroups = (n as u32).div_ceil(wg_size);
+    let k_tile = assign_k_tile(dim);
+    let n_workgroups = (n as u32).div_ceil(WORKGROUP_SIZE_X);
     let (gx, gy) = grid_2d(n_workgroups);
     let count = CubeCount::Static(gx, gy, 1);
-    let cdim = CubeDim::new_1d(wg_size);
+    let cdim = CubeDim::new_1d(WORKGROUP_SIZE_X);
 
     match *metric {
         Dist::SquaredEuclidean => unsafe {
