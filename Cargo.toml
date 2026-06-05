@@ -23,7 +23,7 @@ large_scale_diagnostics = []
 ## Enables multi-modal single cell analysis (requires single-cell)
 multi-modal = ["single-cell"]
 ## Enable GPU-accelerated algorithms and methods
-gpu = ["cubecl", "ann-search-rs/gpu", "half"]
+gpu = ["cubecl", "ann-search-rs/gpu", "half", "cubek"]
 
 #####################
 # Compilation flags #
@@ -69,6 +69,7 @@ thousands = "0.2.0"
 wide = "1.4.0"
 document-features = "0.2.12"
 cubecl = { version = "0.10.0", features = ["wgpu", "cpu"], optional = true }
+cubek = { version = "0.2.0", features = ["matmul"], optional = true }
 
 #################
 # Documentation #

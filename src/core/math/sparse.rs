@@ -67,6 +67,16 @@ pub enum CompressedSparseFormat {
     Csr,
 }
 
+/// Display implementation for [CompressedSparseFormat]
+impl std::fmt::Display for CompressedSparseFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CompressedSparseFormat::Csc => write!(f, "CSC"),
+            CompressedSparseFormat::Csr => write!(f, "CSR"),
+        }
+    }
+}
+
 impl CompressedSparseFormat {
     /// Returns boolean if it's CSC
     ///
@@ -219,7 +229,8 @@ where
     pub indices: Vec<u32>,
     /// The indptr of the data points
     pub indptr: Vec<u32>,
-    /// Enum defining if the data is stored in CSC or CSR
+    /// Enum defining if the data is stored in CSC or CSR, see
+    /// [CompressedSparseFormat]
     pub cs_type: CompressedSparseFormat,
     /// Optional second data slot for a different layer of the data (for
     /// example raw and normalised counts)
