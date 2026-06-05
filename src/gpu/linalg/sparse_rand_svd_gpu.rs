@@ -306,3 +306,195 @@ where
         v: v_mat,
     })
 }
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+    use faer::Mat;
+
+    fn try_device() -> Option<WgpuDevice> {
+        let device = WgpuDevice::DefaultDevice;
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            WgpuRuntime::client(&device);
+        }))
+        .ok()
+        .map(|_| device)
+    }
+
+    // Same MP_TYPE as in the cholesky tests; replace with the concrete
+    // MatmulPrecision impl.
+
+    /////////////
+    // Helpers //
+    /////////////
+
+    fn dense_to_csc(a: &[f32], n: usize, m: usize) -> (Vec<f32>, Vec<u32>, Vec<u32>) {
+        let mut values = Vec::new();
+        let mut indices = Vec::new();
+        let mut indptr = vec![0u32];
+        for j in 0..m {
+            for i in 0..n {
+                let v = a[i * m + j];
+                if v != 0.0 {
+                    values.push(v);
+                    indices.push(i as u32);
+                }
+            }
+            indptr.push(values.len() as u32);
+        }
+        (values, indices, indptr)
+    }
+
+    fn build_dense(n: usize, m: usize) -> Vec<f32> {
+        // Deterministic, structurally sparse but full column rank.
+        (0..n * m)
+            .map(|k| {
+                let i = k / m;
+                let j = k % m;
+                if (i + 2 * j).is_multiple_of(5) {
+                    ((i * 7 + j * 13 + 3) % 19) as f32 * 0.3 + 0.5
+                } else {
+                    0.0
+                }
+            })
+            .collect()
+    }
+
+    ///////////
+    // Tests //
+    ///////////
+
+    // GPU randomised SVD top singular values must match the dense ground
+    // truth from faer to randomised-SVD tolerance.
+    #[test]
+    fn test_randomised_sparse_svd_gpu_singular_values() {
+        let Some(device) = try_device() else { return };
+
+        let (n, m, n_components) = (60usize, 20usize, 3usize);
+        let a_dense = build_dense(n, m);
+
+        let (values, indices, indptr) = dense_to_csc(&a_dense, n, m);
+        let csc = CompressedSparseData2::<f32, f32>::new_csc(
+            &values,
+            &indices,
+            &indptr,
+            Some(&values),
+            (n, m),
+        );
+
+        let mu = vec![0.0f32; m];
+        let sigma = vec![1.0f32; m];
+
+        let svd = randomised_sparse_svd_gpu::<WgpuRuntime, f32, f32>(
+            &csc,
+            &mu,
+            &sigma,
+            n_components,
+            Some(RandSvdGpuParams::new(2, 8)),
+            42,
+            device,
+            false,
+        )
+        .unwrap();
+
+        let a_mat = Mat::<f32>::from_fn(n, m, |i, j| a_dense[i * m + j]);
+        let true_svd = a_mat.thin_svd().unwrap();
+        let true_s = true_svd.S();
+
+        for i in 0..n_components {
+            let want = true_s[i];
+            let got = svd.s[i];
+            let rel = (got - want).abs() / want.abs();
+            assert!(
+                rel < 1e-3,
+                "singular value {}: got {}, want {}, rel err {}",
+                i,
+                got,
+                want,
+                rel
+            );
+        }
+
+        // Singular values must be non-negative and weakly decreasing.
+        for i in 0..n_components {
+            assert!(svd.s[i] >= 0.0, "negative singular value at {}", i);
+            if i > 0 {
+                assert!(svd.s[i - 1] >= svd.s[i], "not sorted at {}", i);
+            }
+        }
+    }
+
+    #[test]
+    fn test_randomised_sparse_svd_gpu_csr_input_rejected() {
+        let Some(device) = try_device() else { return };
+
+        let (n, m) = (10usize, 4usize);
+        let a_dense = build_dense(n, m);
+
+        // Build CSR instead of CSC.
+        let mut values = Vec::new();
+        let mut indices = Vec::new();
+        let mut indptr = vec![0u32];
+        for i in 0..n {
+            for j in 0..m {
+                let v = a_dense[i * m + j];
+                if v != 0.0 {
+                    values.push(v);
+                    indices.push(j as u32);
+                }
+            }
+            indptr.push(values.len() as u32);
+        }
+        let csr = CompressedSparseData2::<f32, f32>::new_csr(
+            &values,
+            &indices,
+            &indptr,
+            Some(&values),
+            (n, m),
+        );
+
+        let mu = vec![0.0f32; m];
+        let sigma = vec![1.0f32; m];
+
+        let res = randomised_sparse_svd_gpu::<WgpuRuntime, f32, f32>(
+            &csr, &mu, &sigma, 2, None, 42, device, false,
+        );
+        assert!(matches!(
+            res,
+            Err(BixverseErrors::SparseLayoutMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn test_randomised_sparse_svd_gpu_dim_mismatch_rejected() {
+        let Some(device) = try_device() else { return };
+
+        let (n, m) = (10usize, 4usize);
+        let a_dense = build_dense(n, m);
+        let (values, indices, indptr) = dense_to_csc(&a_dense, n, m);
+        let csc = CompressedSparseData2::<f32, f32>::new_csc(
+            &values,
+            &indices,
+            &indptr,
+            Some(&values),
+            (n, m),
+        );
+
+        // Wrong length for col_means / col_stds.
+        let mu = vec![0.0f32; m + 1];
+        let sigma = vec![1.0f32; m + 1];
+
+        let res = randomised_sparse_svd_gpu::<WgpuRuntime, f32, f32>(
+            &csc, &mu, &sigma, 2, None, 42, device, false,
+        );
+        assert!(matches!(
+            res,
+            Err(BixverseErrors::DimensionMisMatchSparse { .. })
+        ));
+    }
+}

@@ -523,7 +523,7 @@ pub fn pca_on_sc_streaming(
 ///
 /// ### Return
 ///
-/// A tuple of the samples projected on thePC space, gene loadings and singular
+/// A tuple of the samples projected on the PC space, gene loadings and singular
 /// values.
 #[allow(clippy::too_many_arguments)]
 pub fn pca_on_sc_sparse(

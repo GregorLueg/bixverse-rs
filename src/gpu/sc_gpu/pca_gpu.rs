@@ -1,0 +1,137 @@
+//! Single cell-related GPU-accelerated SVD functions. Interface to a
+//! GPU-accelerated sparse, randomised version to calculate rapidly PCAs and
+//! leverage the GPU for the multiplication operations. Assumes that the host
+//! has enough GPU memory.
+
+use cubecl::Runtime;
+use indexmap::IndexSet;
+use rayon::prelude::*;
+use std::time::Instant;
+
+use crate::core::math::pca_svd::*;
+use crate::gpu::linalg::sparse_rand_svd_gpu::{RandSvdGpuParams, randomised_sparse_svd_gpu};
+use crate::prelude::*;
+use crate::single_cell::sc_processing::pca::*;
+
+/////////////////////////////////
+// Sparse randomised PCA (GPU) //
+/////////////////////////////////
+
+/// Calculate the PCs for single cell data (sparse)
+///
+/// This version does NOT scale the data and avoids densifying the data at any
+/// point, avoiding holding a large matrix in memory. This comes at the cost of
+/// the first principal component being largely driven by average gene
+/// expression, but makes analysing large datasets actually tractable. For
+/// the non random version a sparse SVD Lanczos algorithm is used. For the
+/// randomised version, it uses the randomised SVD approach in which the dense
+/// matrix is of much smaller size than the potentially massive scaled, dense
+/// data.
+///
+/// ### Params
+///
+/// * `f_path` - Path to the gene-based binary file.
+/// * `cell_indices` - Slice of indices for the cells.
+/// * `gene_indices` - Slice of indices for the genes.
+/// * `no_pcs` - Number of principal components to calculate
+/// * `random_svd` - Shall randomised sparse singular value decompostion be
+///   used. This has the advantage of speed-ups, but loses precision.
+/// * `seed` - Seed for randomised SVD.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
+///
+/// ### Return
+///
+/// A tuple of the samples projected on the PC space, gene loadings and singular
+/// values.
+#[allow(clippy::too_many_arguments)]
+pub fn pca_on_sc_sparse_gpu<R>(
+    f_path: &str,
+    cell_indices: &[usize],
+    gene_indices: &[usize],
+    no_pcs: usize,
+    seed: usize,
+    device: R::Device,
+    verbose: usize,
+) -> SingleCellPcaRes
+where
+    R: Runtime,
+{
+    let verbosity = parse_verbosity_level(verbose);
+
+    let start_total = Instant::now();
+
+    let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
+
+    let start_reading = Instant::now();
+
+    let reader = ParallelSparseReader::new(f_path)?;
+    let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(gene_indices)?;
+
+    let end_reading = start_reading.elapsed();
+
+    if verbosity.normal_verbosity() {
+        println!(
+            "Sparse (GPU-accelerated) PCA: Loaded in data in {:.2?}",
+            end_reading
+        );
+    }
+
+    let start_data_prep = Instant::now();
+
+    let n_cells = cell_set.len();
+
+    gene_chunks.par_iter_mut().for_each(|chunk| {
+        chunk.filter_selected_cells(&cell_set);
+    });
+
+    let csc: CompressedSparseData2<f32> =
+        from_gene_chunks::<f32>(gene_chunks, &DataLayerReturn::Norm, n_cells);
+
+    let end_data_prep = start_data_prep.elapsed();
+
+    let col_means: Vec<f64> = sparse_csc_column_means(&csc, true)?;
+    let col_stds: Vec<f64> = sparse_csc_column_stds(&csc, &col_means, true)?;
+
+    // down cast here to avoid trait bound chaos
+    let col_means: Vec<f32> = col_means.iter().map(|x| *x as f32).collect();
+    let col_std: Vec<f32> = col_stds.iter().map(|x| *x as f32).collect();
+
+    if verbosity.normal_verbosity() {
+        println!(
+            "Sparse PCA: finished the data preparations in {:.2?}",
+            end_data_prep
+        );
+    }
+
+    let start_svd = Instant::now();
+
+    let svd_params = RandSvdGpuParams::new(2, 100);
+
+    let svd_res = randomised_sparse_svd_gpu::<R, f32, f32>(
+        &csc,
+        &col_means,
+        &col_std,
+        no_pcs,
+        Some(svd_params),
+        seed as u64,
+        device,
+        verbosity.normal_verbosity(),
+    )?;
+
+    let scores = compute_pc_scores(&svd_res);
+
+    let end_svd = start_svd.elapsed();
+
+    if verbosity.normal_verbosity() {
+        println!("Sparse PCA: finished calculations in {:.2?}", end_svd);
+    }
+
+    let end_total = start_total.elapsed();
+
+    if verbosity.normal_verbosity() {
+        println!("Sparse PCA: total run time -> {:.2?}", end_total);
+    }
+
+    Ok((scores, svd_res.v().to_owned(), svd_res.s().to_owned()))
+}
