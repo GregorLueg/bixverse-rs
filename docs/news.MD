@@ -2,6 +2,12 @@
 
 ## 0.3.0
 
+### Features
+
+#### GPU-accelerated methods:
+
+## 0.3.0
+
 Major update / release
 
 ### Features

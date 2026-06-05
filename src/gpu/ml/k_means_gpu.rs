@@ -77,147 +77,140 @@ impl Default for KMeansGpuParams {
 }
 
 /////////////
+// Helpers //
+/////////////
+
+/// Pick workgroup size and centroid SMEM tile width from the padded dim.
+///
+/// `k_tile * dim_padded * 4 B` stays at or under ~16 KiB to leave headroom
+/// inside a conservative 32 KiB threadgroup budget (Apple silicon is the
+/// tightest of the wgpu backends). `wg_size` shrinks with dim to limit the
+/// per-thread private-memory footprint of the point array
+/// (`wg_size * dim_padded * 4 B` per workgroup).
+fn assign_launch_params(dim_padded: usize) -> (u32, usize) {
+    match dim_padded {
+        0..=64 => (256, 32),
+        65..=128 => (256, 16),
+        129..=256 => (128, 16),
+        257..=512 => (64, 8),
+        513..=1024 => (64, 4),
+        1025..=2048 => (32, 2),
+        _ => (32, 1),
+    }
+}
+
+/////////////
 // Kernels //
 /////////////
 
-/// One-point-per-workgroup Euclidean argmin kernel.
+//////////////////
+// Flash Assign //
+//////////////////
+
+/// One-thread-per-point Euclidean argmin with centroid tiling in SMEM.
 ///
-/// Each workgroup cooperatively loads one point into shared memory, casting
-/// from storage precision `S` to accumulator precision `A` on the way in.
-/// Threads then stride across centroids with each thread owning every `wg`-th
-/// centroid. All distance arithmetic happens in `A`. Thread 0 performs a
-/// serial argmin over the per-thread candidates stored in shared memory and
-/// writes the winning centroid index. No N x K materialisation.
-///
-/// ### Type parameters
-///
-/// * `S` - Storage type of the data buffer (e.g. `f16`)
-/// * `A` - Accumulator type for distance and reduction (e.g. `f32`); also the
-///   element type of the centroid buffer
-///
-/// ### Params
-///
-/// * `data` - Data points `[n_samples, dim / N]` as `Vector<S, N>`
-/// * `centroids` - Centroid vectors `[k, dim / N]` as `Vector<A, N>`
-/// * `assignments` - Output assignment indices `[n_samples]`
-/// * `n_samples` - Total number of data points
-/// * `k` - Number of centroids
-/// * `dim_lines` - Number of `Vector<_, N>` elements per vector row (comptime)
-///
-/// ### Grid mapping
-///
-/// * `CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X` -> point index; one workgroup
-///   per point
+/// Each workgroup owns `WORKGROUP_SIZE_X` consecutive points; the centroid
+/// matrix is streamed through shared memory in tiles of `k_tile`. The point
+/// is cast from storage precision `S` to accumulator precision `A` once on
+/// load; all distance arithmetic runs in `A`.
 #[cube(launch_unchecked)]
-pub fn flash_assign_euclidean_smem<S: Float, A: Float, N: Size>(
+pub fn flash_assign_euclidean_tiled<S: Float, A: Float, N: Size>(
     data: &Tensor<Vector<S, N>>,
     centroids: &Tensor<Vector<A, N>>,
     assignments: &mut Tensor<u32>,
     n_samples: u32,
     k: u32,
     #[comptime] dim_lines: usize,
+    #[comptime] k_tile: usize,
 ) {
     let lanes = LINE_SIZE;
     let dim_scalars = dim_lines * lanes;
-    let tx = UNIT_POS_X as usize;
-    let wg = WORKGROUP_SIZE_X as usize;
+    let tx = UNIT_POS_X;
+    let wg = WORKGROUP_SIZE_X;
 
-    let point_idx = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) as usize;
-    if point_idx >= n_samples as usize {
-        terminate!();
+    let point_idx = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * wg + tx;
+    let active = point_idx < n_samples;
+    // Inactive lanes still cooperate in the SMEM tile load; gate the
+    // final write so they don't clobber anything.
+    let p_idx_safe = if active {
+        point_idx
+    } else {
+        #[allow(clippy::useless_conversion)]
+        0u32.into()
+    };
+    let p_base = p_idx_safe as usize * dim_lines;
+
+    let mut p = Array::<A>::new(dim_scalars);
+    for i in 0..dim_lines {
+        let pl = data[p_base + i];
+        #[unroll]
+        for lane in 0..lanes {
+            p[i * lanes + lane] = A::cast_from(pl[lane]);
+        }
     }
 
-    // Point cached in SMEM at accumulator precision; cast S -> A on load.
-    let mut s_point = SharedMemory::<A>::new(dim_scalars);
-    let p_base = point_idx * dim_lines;
-    let mut load_idx: usize = tx;
-    while load_idx < dim_scalars {
-        let line_idx = load_idx / lanes;
-        let lane = load_idx % lanes;
-        let pl = data[p_base + line_idx];
-        s_point[load_idx] = A::cast_from(pl[lane]);
-        load_idx += wg;
-    }
-    sync_cube();
+    let mut s_cents = SharedMemory::<A>::new(k_tile * dim_scalars);
 
-    // Stride centroids; one scalar argmin per thread.
     let mut best_dist = A::new(f32::MAX);
     let mut best_idx = 0u32;
-    let mut c = tx as u32;
-    while c < k {
-        let mut sum = A::new(0.0);
-        for i in 0..dim_lines {
-            let c_line = centroids[c as usize * dim_lines + i];
-            let s_off = i * lanes;
-            #[unroll]
-            for lane in 0..lanes {
-                let diff = s_point[s_off + lane] - c_line[lane];
-                sum += diff * diff;
+
+    let kt = k_tile as u32;
+    let n_tiles = k.div_ceil(kt);
+    let mut tile = 0u32;
+    while tile < n_tiles {
+        let tile_c0 = tile * kt;
+
+        // Cooperative tile load. Centroids past `k` get zero-padded; the
+        // distance compute below skips them via `c_global < k`.
+        let total_elems = k_tile * dim_scalars;
+        let mut load_idx = tx as usize;
+        while load_idx < total_elems {
+            let c_local = load_idx / dim_scalars;
+            let elem = load_idx % dim_scalars;
+            let c_global = tile_c0 + c_local as u32;
+            if c_global < k {
+                let line_idx = elem / lanes;
+                let lane = elem % lanes;
+                let cl = centroids[c_global as usize * dim_lines + line_idx];
+                s_cents[load_idx] = cl[lane];
+            } else {
+                s_cents[load_idx] = A::new(0.0);
             }
+            load_idx += wg as usize;
         }
-        if sum < best_dist {
-            best_dist = sum;
-            best_idx = c;
+        sync_cube();
+
+        let mut c_local = 0u32;
+        while c_local < kt {
+            let c_global = tile_c0 + c_local;
+            if c_global < k {
+                let cbase = c_local as usize * dim_scalars;
+                let mut sum = A::new(0.0);
+                for e in 0..dim_scalars {
+                    let diff = p[e] - s_cents[cbase + e];
+                    sum += diff * diff;
+                }
+                if sum < best_dist {
+                    best_dist = sum;
+                    best_idx = c_global;
+                }
+            }
+            c_local += 1u32;
         }
-        c += wg as u32;
+        sync_cube();
+
+        tile += 1u32;
     }
 
-    // Cross-thread argmin: thread 0 picks the winner.
-    let mut s_dist = SharedMemory::<A>::new(32usize);
-    let mut s_idx = SharedMemory::<u32>::new(32usize);
-    s_dist[tx] = best_dist;
-    s_idx[tx] = best_idx;
-    sync_cube();
-
-    if tx == 0usize {
-        let mut bd = s_dist[0];
-        let mut bi = s_idx[0];
-        let mut t = 1u32;
-        while t < wg as u32 {
-            let d = s_dist[t as usize];
-            if d < bd {
-                bd = d;
-                bi = s_idx[t as usize];
-            }
-            t += 1u32;
-        }
-        assignments[point_idx] = bi;
+    if active {
+        assignments[point_idx as usize] = best_idx;
     }
 }
 
-/// One-point-per-workgroup cosine argmin kernel.
-///
-/// Each workgroup cooperatively loads one point into shared memory, casting
-/// from storage precision `S` to accumulator precision `A` on the way in.
-/// Threads then stride across centroids with each thread owning every `wg`-th
-/// centroid. Norms and the resulting distance live in `A`. Thread 0 performs
-/// a serial argmin over the per-thread candidates stored in shared memory and
-/// writes the winning centroid index. Minimises
-/// `1 - dot(x, c) / (||x|| * ||c||)` using precomputed norms.
-///
-/// ### Type parameters
-///
-/// * `S` - Storage type of the data buffer (e.g. `f16`)
-/// * `A` - Accumulator type for dot products and the final distance (e.g.
-///   `f32`); also the element type of the centroid and norm buffers
-///
-/// ### Params
-///
-/// * `data` - Data points `[n_samples, dim / N]` as `Vector<S, N>`
-/// * `centroids` - Centroid vectors `[k, dim / N]` as `Vector<A, N>`
-/// * `point_norms` - Pre-computed L2 norms `[n_samples]` in `A`
-/// * `centroid_norms` - Pre-computed L2 norms `[k]` in `A`
-/// * `assignments` - Output assignment indices `[n_samples]`
-/// * `n_samples` - Total number of data points
-/// * `k` - Number of centroids
-/// * `dim_lines` - Number of `Vector<_, N>` elements per vector row (comptime)
-///
-/// ### Grid mapping
-///
-/// * `CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X` -> point index; one workgroup
-///   per point
+/// Cosine analogue of `flash_assign_euclidean_tiled`. Uses precomputed L2
+/// norms; minimises `1 - dot(x, c) / (||x|| * ||c||)`.
 #[cube(launch_unchecked)]
-pub fn flash_assign_cosine_smem<S: Float, A: Float, N: Size>(
+pub fn flash_assign_cosine_tiled<S: Float, A: Float, N: Size>(
     data: &Tensor<Vector<S, N>>,
     centroids: &Tensor<Vector<A, N>>,
     point_norms: &Tensor<A>,
@@ -226,105 +219,94 @@ pub fn flash_assign_cosine_smem<S: Float, A: Float, N: Size>(
     n_samples: u32,
     k: u32,
     #[comptime] dim_lines: usize,
+    #[comptime] k_tile: usize,
 ) {
     let lanes = LINE_SIZE;
     let dim_scalars = dim_lines * lanes;
-    let tx = UNIT_POS_X as usize;
-    let wg = WORKGROUP_SIZE_X as usize;
+    let tx = UNIT_POS_X;
+    let wg = WORKGROUP_SIZE_X;
 
-    let point_idx = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) as usize;
-    if point_idx >= n_samples as usize {
-        terminate!();
+    let point_idx = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * wg + tx;
+    let active = point_idx < n_samples;
+    let p_idx_safe = if active {
+        point_idx
+    } else {
+        #[allow(clippy::useless_conversion)]
+        0u32.into()
+    };
+    let p_base = p_idx_safe as usize * dim_lines;
+
+    let mut p = Array::<A>::new(dim_scalars);
+    for i in 0..dim_lines {
+        let pl = data[p_base + i];
+        #[unroll]
+        for lane in 0..lanes {
+            p[i * lanes + lane] = A::cast_from(pl[lane]);
+        }
     }
+    let pnorm = point_norms[p_idx_safe as usize];
 
-    let mut s_point = SharedMemory::<A>::new(dim_scalars);
-    let p_base = point_idx * dim_lines;
-    let mut load_idx = tx;
-    while load_idx < dim_scalars {
-        let line_idx = load_idx / lanes;
-        let lane = load_idx % lanes;
-        let pl = data[p_base + line_idx];
-        s_point[load_idx] = A::cast_from(pl[lane]);
-        load_idx += wg;
-    }
-    sync_cube();
-
-    let pnorm = point_norms[point_idx];
+    let mut s_cents = SharedMemory::<A>::new(k_tile * dim_scalars);
 
     let mut best_dist = A::new(f32::MAX);
     let mut best_idx = 0u32;
-    let mut c = tx as u32;
-    while c < k {
-        let mut dot = A::new(0.0);
-        for i in 0..dim_lines {
-            let c_line = centroids[c as usize * dim_lines + i];
-            let s_off = i * lanes;
-            #[unroll]
-            for lane in 0..lanes {
-                dot += s_point[s_off + lane] * c_line[lane];
+
+    let kt = k_tile as u32;
+    let n_tiles = k.div_ceil(kt);
+    let mut tile = 0u32;
+    while tile < n_tiles {
+        let tile_c0 = tile * kt;
+
+        let total_elems = k_tile * dim_scalars;
+        let mut load_idx = tx as usize;
+        while load_idx < total_elems {
+            let c_local = load_idx / dim_scalars;
+            let elem = load_idx % dim_scalars;
+            let c_global = tile_c0 + c_local as u32;
+            if c_global < k {
+                let line_idx = elem / lanes;
+                let lane = elem % lanes;
+                let cl = centroids[c_global as usize * dim_lines + line_idx];
+                s_cents[load_idx] = cl[lane];
+            } else {
+                s_cents[load_idx] = A::new(0.0);
             }
+            load_idx += wg as usize;
         }
-        let cnorm = centroid_norms[c as usize];
-        let dist = A::new(1.0) - dot / (pnorm * cnorm);
-        if dist < best_dist {
-            best_dist = dist;
-            best_idx = c;
+        sync_cube();
+
+        let mut c_local = 0u32;
+        while c_local < kt {
+            let c_global = tile_c0 + c_local;
+            if c_global < k {
+                let cbase = c_local as usize * dim_scalars;
+                let mut dot = A::new(0.0);
+                for e in 0..dim_scalars {
+                    dot += p[e] * s_cents[cbase + e];
+                }
+                let cnorm = centroid_norms[c_global as usize];
+                let dist = A::new(1.0) - dot / (pnorm * cnorm);
+                if dist < best_dist {
+                    best_dist = dist;
+                    best_idx = c_global;
+                }
+            }
+            c_local += 1u32;
         }
-        c += wg as u32;
+        sync_cube();
+
+        tile += 1u32;
     }
 
-    let mut s_dist = SharedMemory::<A>::new(32usize);
-    let mut s_idx = SharedMemory::<u32>::new(32usize);
-    s_dist[tx] = best_dist;
-    s_idx[tx] = best_idx;
-    sync_cube();
-
-    if tx == 0usize {
-        let mut bd = s_dist[0];
-        let mut bi = s_idx[0];
-        let mut t = 1u32;
-        while t < wg as u32 {
-            let d = s_dist[t as usize];
-            if d < bd {
-                bd = d;
-                bi = s_idx[t as usize];
-            }
-            t += 1u32;
-        }
-        assignments[point_idx] = bi;
+    if active {
+        assignments[point_idx as usize] = best_idx;
     }
 }
 
 /// Dispatch the assignment kernel and write results into a device-resident
 /// buffer.
 ///
-/// Internal to the driver loop. Dispatches either `flash_assign_euclidean_smem`
-/// or `flash_assign_cosine_smem` depending on `metric`. Assumes `dim` is
-/// already padded to a multiple of `LINE_SIZE` and all tensors reside on
-/// `client`'s device.
-///
-/// ### Type parameters
-///
-/// * `S` - Storage type of the data buffer
-/// * `A` - Accumulator type for distance arithmetic; also the type of the
-///   centroid and norm buffers. When `S == A` this is the standard
-///   single-precision path; when `S == f16, A == f32` it is the quantised
-///   mixed-precision path.
-///
-/// ### Params
-///
-/// * `client` - CubeCL compute client for the target device
-/// * `data_gpu` - Data points already on device `[n, dim]` in `S`
-/// * `cent_gpu` - Centroid vectors `[k, dim]` in `A`
-/// * `pnorm_gpu` - Pre-computed point L2 norms `[n]` in `A`; ignored for
-///   Euclidean
-/// * `cnorm_gpu` - Pre-computed centroid L2 norms `[k]` in `A`; ignored for
-///   Euclidean
-/// * `assign_gpu` - Output assignment indices `[n]`, overwritten in place
-/// * `n` - Number of data points
-/// * `k` - Number of centroids
-/// * `dim` - Embedding dimensionality (must be a multiple of `LINE_SIZE`)
-/// * `metric` - Distance metric (`SquaredEuclidean` or `Cosine`)
+/// TO: update
 #[allow(clippy::too_many_arguments)]
 fn flash_assign_device<S, A, R>(
     client: &ComputeClient<R>,
@@ -344,13 +326,15 @@ fn flash_assign_device<S, A, R>(
 {
     let vec_size = LINE_SIZE;
     let dim_lines = dim / vec_size;
-    let (gx, gy) = grid_2d(n as u32);
+    let (wg_size, k_tile) = assign_launch_params(dim);
+    let n_workgroups = (n as u32).div_ceil(wg_size);
+    let (gx, gy) = grid_2d(n_workgroups);
     let count = CubeCount::Static(gx, gy, 1);
-    let cdim = CubeDim::new_1d(WORKGROUP_SIZE_X);
+    let cdim = CubeDim::new_1d(wg_size);
 
     match *metric {
         Dist::SquaredEuclidean => unsafe {
-            flash_assign_euclidean_smem::launch_unchecked::<S, A, R>(
+            flash_assign_euclidean_tiled::launch_unchecked::<S, A, R>(
                 client,
                 count,
                 cdim,
@@ -361,10 +345,11 @@ fn flash_assign_device<S, A, R>(
                 n as u32,
                 k as u32,
                 dim_lines,
+                k_tile,
             );
         },
         Dist::Cosine => unsafe {
-            flash_assign_cosine_smem::launch_unchecked::<S, A, R>(
+            flash_assign_cosine_tiled::launch_unchecked::<S, A, R>(
                 client,
                 count,
                 cdim,
@@ -377,11 +362,16 @@ fn flash_assign_device<S, A, R>(
                 n as u32,
                 k as u32,
                 dim_lines,
+                k_tile,
             );
         },
         Dist::Manhattan => unreachable!(),
     }
 }
+
+//////////////////////////
+// Privatised histogram //
+//////////////////////////
 
 /// Privatised histogram of cluster sizes.
 ///
