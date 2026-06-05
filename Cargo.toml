@@ -11,6 +11,10 @@ description = "A Rust library with various utilities for computational biology a
 name = "bixverse_rs"
 path = "src/lib.rs"
 
+############
+# Features #
+############
+
 [features]
 ## Enables the single cell features in bixverse-rs
 single-cell = ["half", "bincode", "indexmap", "memmap2", "hdf5", "lz4_flex"]
@@ -21,10 +25,18 @@ multi-modal = ["single-cell"]
 ## Enable GPU-accelerated algorithms and methods
 gpu = ["cubecl", "ann-search-rs/gpu", "half"]
 
+#####################
+# Compilation flags #
+#####################
+
 [profile.release]
 opt-level = 3
 lto = "thin"
 codegen-units = 4
+
+################
+# Dependencies #
+################
 
 [dependencies]
 approx = "0.5.1"
@@ -58,6 +70,18 @@ wide = "1.4.0"
 document-features = "0.2.12"
 cubecl = { version = "0.10.0", features = ["wgpu", "cpu"], optional = true }
 
+#################
+# Documentation #
+#################
 
 [package.metadata.docs.rs]
 features = ["single-cell", "multi-modal"]
+
+###########
+# Benches #
+###########
+
+[[bench]]
+name = "gpu_k_means_bench"
+harness = false
+required-features = ["gpu"]

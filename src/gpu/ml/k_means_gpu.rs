@@ -30,6 +30,13 @@ use std::time::Instant;
 use crate::errors::BixverseErrors;
 
 ////////////
+// Consts //
+////////////
+
+/// Workgroup size during the assignments
+const ASSIGN_WG: u32 = 128;
+
+////////////
 // Params //
 ////////////
 
@@ -123,11 +130,12 @@ pub fn flash_assign_euclidean_tiled<S: Float, A: Float, N: Size>(
     k: u32,
     #[comptime] dim_lines: usize,
     #[comptime] k_tile: usize,
+    #[comptime] wg_size: u32,
 ) {
     let lanes = LINE_SIZE;
     let dim_scalars = dim_lines * lanes;
     let tx = UNIT_POS_X;
-    let wg = WORKGROUP_SIZE_X;
+    let wg = wg_size;
 
     let point_idx = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * wg + tx;
     let active = point_idx < n_samples;
@@ -221,11 +229,12 @@ pub fn flash_assign_cosine_tiled<S: Float, A: Float, N: Size>(
     k: u32,
     #[comptime] dim_lines: usize,
     #[comptime] k_tile: usize,
+    #[comptime] wg_size: u32,
 ) {
     let lanes = LINE_SIZE;
     let dim_scalars = dim_lines * lanes;
     let tx = UNIT_POS_X;
-    let wg = WORKGROUP_SIZE_X;
+    let wg = wg_size;
 
     let point_idx = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * wg + tx;
     let active = point_idx < n_samples;
@@ -328,10 +337,10 @@ fn flash_assign_device<S, A, R>(
     let vec_size = LINE_SIZE;
     let dim_lines = dim / vec_size;
     let k_tile = assign_k_tile(dim);
-    let n_workgroups = (n as u32).div_ceil(WORKGROUP_SIZE_X);
+    let n_workgroups = (n as u32).div_ceil(ASSIGN_WG);
     let (gx, gy) = grid_2d(n_workgroups);
     let count = CubeCount::Static(gx, gy, 1);
-    let cdim = CubeDim::new_1d(WORKGROUP_SIZE_X);
+    let cdim = CubeDim::new_1d(ASSIGN_WG);
 
     match *metric {
         Dist::SquaredEuclidean => unsafe {
@@ -347,6 +356,7 @@ fn flash_assign_device<S, A, R>(
                 k as u32,
                 dim_lines,
                 k_tile,
+                ASSIGN_WG,
             );
         },
         Dist::Cosine => unsafe {
@@ -364,6 +374,7 @@ fn flash_assign_device<S, A, R>(
                 k as u32,
                 dim_lines,
                 k_tile,
+                ASSIGN_WG,
             );
         },
         Dist::Manhattan => unreachable!(),
