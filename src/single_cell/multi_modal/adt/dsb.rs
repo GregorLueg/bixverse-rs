@@ -385,7 +385,9 @@ fn pc1_scores(noise_rows: &[Vec<f64>]) -> Result<Vec<f64>, BixverseErrors> {
     // build the matrix: rows = cells (samples), cols = covariates,
     let mat = Mat::<f64>::from_fn(n_cells, n_cov, |i, j| noise_rows[j][i]);
 
-    let svd = mat.thin_svd().map_err(|_| BixverseErrors::FaerSvdError)?;
+    let svd = mat
+        .thin_svd()
+        .map_err(|e| BixverseErrors::FaerSvdError(format!("{e:?}")))?;
     let u = svd.U();
     let s = svd.S();
 

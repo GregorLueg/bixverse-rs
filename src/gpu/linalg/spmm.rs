@@ -250,15 +250,43 @@ pub fn dense_column_sum<A: Float>(
     shared[tx as usize] = acc;
     sync_cube();
 
-    let mut stride = REDUCE_SMEM / 2u32;
-    while stride > 0u32 {
-        if tx < stride {
-            let other = shared[(tx + stride) as usize];
-            shared[tx as usize] += other;
-        }
-        sync_cube();
-        stride /= 2u32;
+    // Pairwise tree reduction for REDUCE_WG = 128. If REDUCE_WG changes,
+    // update the unrolled steps to match.
+    if tx < 64u32 {
+        let other = shared[(tx + 64u32) as usize];
+        shared[tx as usize] += other;
     }
+    sync_cube();
+    if tx < 32u32 {
+        let other = shared[(tx + 32u32) as usize];
+        shared[tx as usize] += other;
+    }
+    sync_cube();
+    if tx < 16u32 {
+        let other = shared[(tx + 16u32) as usize];
+        shared[tx as usize] += other;
+    }
+    sync_cube();
+    if tx < 8u32 {
+        let other = shared[(tx + 8u32) as usize];
+        shared[tx as usize] += other;
+    }
+    sync_cube();
+    if tx < 4u32 {
+        let other = shared[(tx + 4u32) as usize];
+        shared[tx as usize] += other;
+    }
+    sync_cube();
+    if tx < 2u32 {
+        let other = shared[(tx + 2u32) as usize];
+        shared[tx as usize] += other;
+    }
+    sync_cube();
+    if tx < 1u32 {
+        let other = shared[(tx + 1u32) as usize];
+        shared[tx as usize] += other;
+    }
+    sync_cube();
 
     if tx == 0u32 {
         out[col as usize] = shared[0];
@@ -312,15 +340,43 @@ pub fn dense_column_weighted_sum<A: Float>(
     shared[tx as usize] = acc;
     sync_cube();
 
-    let mut stride = REDUCE_SMEM / 2u32;
-    while stride > 0u32 {
-        if tx < stride {
-            let other = shared[(tx + stride) as usize];
-            shared[tx as usize] += other;
-        }
-        sync_cube();
-        stride /= 2u32;
+    // Pairwise tree reduction for REDUCE_WG = 128. If REDUCE_WG changes,
+    // update the unrolled steps to match.
+    if tx < 64u32 {
+        let other = shared[(tx + 64u32) as usize];
+        shared[tx as usize] += other;
     }
+    sync_cube();
+    if tx < 32u32 {
+        let other = shared[(tx + 32u32) as usize];
+        shared[tx as usize] += other;
+    }
+    sync_cube();
+    if tx < 16u32 {
+        let other = shared[(tx + 16u32) as usize];
+        shared[tx as usize] += other;
+    }
+    sync_cube();
+    if tx < 8u32 {
+        let other = shared[(tx + 8u32) as usize];
+        shared[tx as usize] += other;
+    }
+    sync_cube();
+    if tx < 4u32 {
+        let other = shared[(tx + 4u32) as usize];
+        shared[tx as usize] += other;
+    }
+    sync_cube();
+    if tx < 2u32 {
+        let other = shared[(tx + 2u32) as usize];
+        shared[tx as usize] += other;
+    }
+    sync_cube();
+    if tx < 1u32 {
+        let other = shared[(tx + 1u32) as usize];
+        shared[tx as usize] += other;
+    }
+    sync_cube();
 
     if tx == 0u32 {
         out[col as usize] = shared[0];
@@ -516,5 +572,420 @@ pub fn launch_dense_column_weighted_sum<R, A>(
             s_width as u32,
             REDUCE_WG,
         );
+    }
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+
+    fn try_device() -> Option<WgpuDevice> {
+        let device = WgpuDevice::DefaultDevice;
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            WgpuRuntime::client(&device);
+        }))
+        .ok()
+        .map(|_| device)
+    }
+
+    /////////////
+    // Helpers //
+    /////////////
+
+    fn dense_to_csr(a: &[f32], n: usize, m: usize) -> (Vec<f32>, Vec<u32>, Vec<u32>) {
+        let mut values = Vec::new();
+        let mut indices = Vec::new();
+        let mut indptr = vec![0u32];
+        for i in 0..n {
+            for j in 0..m {
+                let v = a[i * m + j];
+                if v != 0.0 {
+                    values.push(v);
+                    indices.push(j as u32);
+                }
+            }
+            indptr.push(values.len() as u32);
+        }
+        (values, indices, indptr)
+    }
+
+    fn dense_to_csc(a: &[f32], n: usize, m: usize) -> (Vec<f32>, Vec<u32>, Vec<u32>) {
+        let mut values = Vec::new();
+        let mut indices = Vec::new();
+        let mut indptr = vec![0u32];
+        for j in 0..m {
+            for i in 0..n {
+                let v = a[i * m + j];
+                if v != 0.0 {
+                    values.push(v);
+                    indices.push(i as u32);
+                }
+            }
+            indptr.push(values.len() as u32);
+        }
+        (values, indices, indptr)
+    }
+
+    fn cpu_spmm_csr_forward(
+        a: &[f32],
+        x: &[f32],
+        correction: &[f32],
+        n: usize,
+        m: usize,
+        s: usize,
+    ) -> Vec<f32> {
+        let mut y = vec![0.0f32; n * s];
+        for i in 0..n {
+            for col in 0..s {
+                let mut acc = 0.0f32;
+                for j in 0..m {
+                    acc += a[i * m + j] * x[j * s + col];
+                }
+                y[i * s + col] = acc - correction[col];
+            }
+        }
+        y
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn cpu_spmm_csc_transpose(
+        a: &[f32],
+        q: &[f32],
+        q_sum: &[f32],
+        mu: &[f32],
+        sigma: &[f32],
+        n: usize,
+        m: usize,
+        s: usize,
+    ) -> Vec<f32> {
+        let mut z = vec![0.0f32; m * s];
+        for j in 0..m {
+            for col in 0..s {
+                let mut acc = 0.0f32;
+                for i in 0..n {
+                    acc += a[i * m + j] * q[i * s + col];
+                }
+                z[j * s + col] = (acc - mu[j] * q_sum[col]) / sigma[j];
+            }
+        }
+        z
+    }
+
+    fn cpu_column_sum(matrix: &[f32], n_rows: usize, s: usize) -> Vec<f32> {
+        let mut out = vec![0.0f32; s];
+        for i in 0..n_rows {
+            for col in 0..s {
+                out[col] += matrix[i * s + col];
+            }
+        }
+        out
+    }
+
+    fn cpu_column_weighted_sum(w: &[f32], matrix: &[f32], n_rows: usize, s: usize) -> Vec<f32> {
+        let mut out = vec![0.0f32; s];
+        for i in 0..n_rows {
+            for col in 0..s {
+                out[col] += w[i] * matrix[i * s + col];
+            }
+        }
+        out
+    }
+
+    fn assert_vec_close(got: &[f32], want: &[f32], tol: f32) {
+        assert_eq!(got.len(), want.len());
+        for j in 0..got.len() {
+            assert!(
+                (got[j] - want[j]).abs() < tol,
+                "elem {}: {} != {} (diff {})",
+                j,
+                got[j],
+                want[j],
+                (got[j] - want[j]).abs()
+            );
+        }
+    }
+
+    fn run_column_sum(
+        matrix: &[f32],
+        n_rows: usize,
+        s_width: usize,
+        device: &WgpuDevice,
+    ) -> Vec<f32> {
+        let client = WgpuRuntime::client(device);
+        let m_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(matrix, vec![n_rows, s_width], &client);
+        let out_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(
+            &vec![0.0f32; s_width],
+            vec![s_width],
+            &client,
+        );
+        launch_dense_column_sum(&m_gpu, &out_gpu, n_rows, s_width, &client);
+        out_gpu.read(&client).unwrap()
+    }
+
+    fn run_column_weighted_sum(
+        weights: &[f32],
+        matrix: &[f32],
+        n_rows: usize,
+        s_width: usize,
+        device: &WgpuDevice,
+    ) -> Vec<f32> {
+        let client = WgpuRuntime::client(device);
+        let w_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(weights, vec![n_rows], &client);
+        let m_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(matrix, vec![n_rows, s_width], &client);
+        let out_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(
+            &vec![0.0f32; s_width],
+            vec![s_width],
+            &client,
+        );
+        launch_dense_column_weighted_sum(&w_gpu, &m_gpu, &out_gpu, n_rows, s_width, &client);
+        out_gpu.read(&client).unwrap()
+    }
+
+    fn run_spmm_csr_forward(
+        a: &[f32],
+        x: &[f32],
+        correction: &[f32],
+        n: usize,
+        m: usize,
+        s: usize,
+        device: &WgpuDevice,
+    ) -> Vec<f32> {
+        let client = WgpuRuntime::client(device);
+        let (values, indices, indptr) = dense_to_csr(a, n, m);
+        let sparse = GpuCompressedSparseData::<WgpuRuntime, f32>::from_parts(
+            &values,
+            &indices,
+            &indptr,
+            CompressedSparseFormat::Csr,
+            (n, m),
+            &client,
+        );
+        let x_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(x, vec![m, s], &client);
+        let corr_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(correction, vec![s], &client);
+        let y_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; n * s], vec![n, s], &client);
+
+        launch_spmm_csr_forward(&sparse, &x_gpu, &corr_gpu, &y_gpu, s, &client).unwrap();
+        y_gpu.read(&client).unwrap()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_spmm_csc_transpose(
+        a: &[f32],
+        q: &[f32],
+        q_sum: &[f32],
+        mu: &[f32],
+        sigma: &[f32],
+        n: usize,
+        m: usize,
+        s: usize,
+        device: &WgpuDevice,
+    ) -> Vec<f32> {
+        let client = WgpuRuntime::client(device);
+        let (values, indices, indptr) = dense_to_csc(a, n, m);
+        let sparse = GpuCompressedSparseData::<WgpuRuntime, f32>::from_parts(
+            &values,
+            &indices,
+            &indptr,
+            CompressedSparseFormat::Csc,
+            (n, m),
+            &client,
+        );
+        let q_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(q, vec![n, s], &client);
+        let qsum_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(q_sum, vec![s], &client);
+        let mu_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(mu, vec![m], &client);
+        let sigma_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(sigma, vec![m], &client);
+        let z_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; m * s], vec![m, s], &client);
+
+        launch_spmm_csc_transpose(
+            &sparse, &q_gpu, &qsum_gpu, &mu_gpu, &sigma_gpu, &z_gpu, s, &client,
+        )
+        .unwrap();
+        z_gpu.read(&client).unwrap()
+    }
+
+    ///////////
+    // Tests //
+    ///////////
+
+    #[test]
+    fn test_dense_column_sum() {
+        let Some(device) = try_device() else { return };
+        let (n, s) = (250, 16);
+        let matrix: Vec<f32> = (0..n * s)
+            .map(|i| ((i * 7 + 3) % 23) as f32 * 0.1)
+            .collect();
+
+        let got = run_column_sum(&matrix, n, s, &device);
+        let want = cpu_column_sum(&matrix, n, s);
+
+        assert_vec_close(&got, &want, 1e-3);
+    }
+
+    #[test]
+    fn test_dense_column_weighted_sum() {
+        let Some(device) = try_device() else { return };
+        let (n, s) = (250, 16);
+        let matrix: Vec<f32> = (0..n * s)
+            .map(|i| ((i * 7 + 3) % 23) as f32 * 0.1)
+            .collect();
+        let weights: Vec<f32> = (0..n).map(|i| ((i * 11 + 5) % 17) as f32 * 0.05).collect();
+
+        let got = run_column_weighted_sum(&weights, &matrix, n, s, &device);
+        let want = cpu_column_weighted_sum(&weights, &matrix, n, s);
+
+        assert_vec_close(&got, &want, 1e-3);
+    }
+
+    #[test]
+    fn test_spmm_csr_forward() {
+        let Some(device) = try_device() else { return };
+        let (n, m, s) = (100, 60, 16);
+        let a: Vec<f32> = (0..n * m)
+            .map(|i| {
+                if i % 5 == 0 {
+                    ((i * 7 + 3) % 23) as f32 * 0.2
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let x: Vec<f32> = (0..m * s)
+            .map(|i| ((i * 11 + 5) % 19) as f32 * 0.1)
+            .collect();
+        let correction: Vec<f32> = (0..s).map(|i| (i as f32) * 0.05).collect();
+
+        let got = run_spmm_csr_forward(&a, &x, &correction, n, m, s, &device);
+        let want = cpu_spmm_csr_forward(&a, &x, &correction, n, m, s);
+
+        assert_vec_close(&got, &want, 1e-3);
+    }
+
+    #[test]
+    fn test_spmm_csc_transpose() {
+        let Some(device) = try_device() else { return };
+        let (n, m, s) = (120, 50, 16);
+        let a: Vec<f32> = (0..n * m)
+            .map(|i| {
+                if i % 5 == 0 {
+                    ((i * 7 + 3) % 23) as f32 * 0.2
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let q: Vec<f32> = (0..n * s)
+            .map(|i| ((i * 11 + 5) % 19) as f32 * 0.1)
+            .collect();
+        let q_sum = cpu_column_sum(&q, n, s);
+        let mu: Vec<f32> = (0..m).map(|j| ((j * 13 + 1) % 11) as f32 * 0.1).collect();
+        let sigma: Vec<f32> = (0..m)
+            .map(|j| 0.5 + ((j * 5 + 2) % 7) as f32 * 0.1)
+            .collect();
+
+        let got = run_spmm_csc_transpose(&a, &q, &q_sum, &mu, &sigma, n, m, s, &device);
+        let want = cpu_spmm_csc_transpose(&a, &q, &q_sum, &mu, &sigma, n, m, s);
+
+        assert_vec_close(&got, &want, 1e-3);
+    }
+
+    // Empty rows must emit -correction[col] verbatim.
+    #[test]
+    fn test_spmm_csr_forward_empty_row() {
+        let Some(device) = try_device() else { return };
+        let (n, m, s) = (8, 4, 4);
+        let mut a = vec![0.0f32; n * m];
+        a[1] = 1.5;
+        a[7 * m + 3] = -2.0;
+        let x: Vec<f32> = (0..m * s).map(|i| (i + 1) as f32 * 0.1).collect();
+        let correction: Vec<f32> = (0..s).map(|i| (i + 1) as f32 * 0.25).collect();
+
+        let got = run_spmm_csr_forward(&a, &x, &correction, n, m, s, &device);
+        let want = cpu_spmm_csr_forward(&a, &x, &correction, n, m, s);
+        assert_vec_close(&got, &want, 1e-6);
+
+        for i in 1..7 {
+            for col in 0..s {
+                assert!(
+                    (got[i * s + col] + correction[col]).abs() < 1e-6,
+                    "empty row {} col {} not equal to -correction",
+                    i,
+                    col
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_spmm_csr_forward_layout_mismatch() {
+        let Some(device) = try_device() else { return };
+        let client = WgpuRuntime::client(&device);
+        let (n, m, s) = (4, 3, 2);
+        let mut a = vec![0.0f32; n * m];
+        a[0] = 1.0;
+        let (values, indices, indptr) = dense_to_csc(&a, n, m);
+        let sparse = GpuCompressedSparseData::<WgpuRuntime, f32>::from_parts(
+            &values,
+            &indices,
+            &indptr,
+            CompressedSparseFormat::Csc,
+            (n, m),
+            &client,
+        );
+        let x_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; m * s], vec![m, s], &client);
+        let corr_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; s], vec![s], &client);
+        let y_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; n * s], vec![n, s], &client);
+
+        let res = launch_spmm_csr_forward(&sparse, &x_gpu, &corr_gpu, &y_gpu, s, &client);
+        assert!(matches!(
+            res,
+            Err(BixverseErrors::SparseLayoutMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn test_spmm_csc_transpose_layout_mismatch() {
+        let Some(device) = try_device() else { return };
+        let client = WgpuRuntime::client(&device);
+        let (n, m, s) = (4, 3, 2);
+        let mut a = vec![0.0f32; n * m];
+        a[0] = 1.0;
+        let (values, indices, indptr) = dense_to_csr(&a, n, m);
+        let sparse = GpuCompressedSparseData::<WgpuRuntime, f32>::from_parts(
+            &values,
+            &indices,
+            &indptr,
+            CompressedSparseFormat::Csr,
+            (n, m),
+            &client,
+        );
+        let q_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; n * s], vec![n, s], &client);
+        let qsum_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; s], vec![s], &client);
+        let mu_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; m], vec![m], &client);
+        let sigma_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![1.0f32; m], vec![m], &client);
+        let z_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; m * s], vec![m, s], &client);
+
+        let res = launch_spmm_csc_transpose(
+            &sparse, &q_gpu, &qsum_gpu, &mu_gpu, &sigma_gpu, &z_gpu, s, &client,
+        );
+        assert!(matches!(
+            res,
+            Err(BixverseErrors::SparseLayoutMismatch { .. })
+        ));
     }
 }

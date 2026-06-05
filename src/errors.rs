@@ -30,8 +30,8 @@ pub enum BixverseErrors {
     ///
     /// Typically caused by ill-conditioned or degenerate input (e.g. all-zero
     /// rows, NaNs, rank-deficient matrices beyond the requested rank).
-    #[error("The faer SVD failed - please verify the data")]
-    FaerSvdError,
+    #[error("The faer SVD failed: {0}")]
+    FaerSvdError(String),
 
     /// Eigen decomposition from faer failed.
     ///
@@ -39,6 +39,10 @@ pub enum BixverseErrors {
     /// solver, or numerical breakdown on degenerate input.
     #[error("The faer Eigen decomposition failed - please verify the data")]
     FaerEigenError,
+
+    /// Cholesky decomposition from faer failed.
+    #[error("The faer Cholesky failed: {0}")]
+    FaerCholeskyError(#[from] faer::linalg::solvers::LltError),
 
     // -- ann-search-rs --
     /// Propagate errors from the ann-search-rs crate
@@ -469,4 +473,8 @@ pub enum BixverseErrors {
         found: usize,
     },
     // -- gpu --
+    /// A GPU cubecl matrix multiplication error from the cubek crate
+    #[cfg(feature = "gpu")]
+    #[error("GPU: A matrix multiplication occurred: {0}")]
+    GpuMatmul(String),
 }

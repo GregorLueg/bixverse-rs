@@ -61,9 +61,9 @@ checksum = "4b46cbb362ab8752921c97e041f5e366ee6297bd428a31275b9fcf1e380f7299"
 
 [[package]]
 name = "ann-search-rs"
-version = "0.4.1"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e56ec304e8e675921e8a8c2fcb4a4d4546970664644c2a74a42b423d9739a9c"
+checksum = "d7ef031197610b27056fac2f20f3e6e64c5bae5efd23f27f319d37f63bb5e8a1"
 dependencies = [
  "approx",
  "clap",
@@ -308,6 +308,7 @@ dependencies = [
  "extendr-api",
  "faer",
  "faer-entity",
+ "faer-traits",
  "fmt",
  "half",
  "hdf5-metno",

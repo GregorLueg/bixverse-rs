@@ -3,4 +3,5 @@
 
 pub mod cholesky_gpu;
 pub mod sparse_gpu;
+pub mod sparse_rand_svd_gpu;
 pub mod spmm;
