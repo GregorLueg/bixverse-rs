@@ -11,7 +11,7 @@ use crate::ml::clustering::k_means::parse_kmeans_init;
 /////////////////////
 
 impl KMeansGpuParams {
-    /// Parse the [KMeansParamsWrappers] from a list
+    /// Parse the [KMeansGpuParams] from a list
     ///
     /// ### Params
     ///
@@ -19,7 +19,7 @@ impl KMeansGpuParams {
     ///
     /// ### Returns
     ///
-    /// The [KMeansParamsWrappers] populated by the R list.
+    /// The [KMeansGpuParams] populated by the R list.
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let params_list: HashMap<&str, Robj> = r_list.try_into()?;
 

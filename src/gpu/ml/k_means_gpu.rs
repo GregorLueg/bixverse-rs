@@ -27,7 +27,7 @@ use faer::{Mat, MatRef};
 use std::iter::Sum;
 use std::time::Instant;
 
-use crate::errors::BixverseErrors;
+use crate::prelude::*;
 
 ////////////
 // Consts //
@@ -89,13 +89,17 @@ impl Default for KMeansGpuParams {
 
 /// Pick the centroid SMEM tile width from the padded dimension.
 ///
-/// Keeps `k_tile * dim_padded * 4 B` at or under ~16 KiB to leave headroom
-/// in a conservative 32 KiB threadgroup budget (Apple Silicon is the
-/// tightest wgpu backend).
+/// Keeps `k_tile * dim_padded * 4 B` at or under ~16 KiB to leave headroom in a
+/// conservative 32 KiB threadgroup budget (Apple Silicon is the tightest wgpu
+/// backend).
 ///
 /// ### Params
 ///
 /// * `dim_padded` - Padded vector dimension (must be a power of two)
+///
+/// ### Returns
+///
+/// `k tile`
 fn assign_k_tile(dim_padded: usize) -> usize {
     // k_tile * dim_padded * 4 B kept around 16 KiB to leave headroom in a
     // conservative 32 KiB threadgroup-memory budget.
@@ -431,7 +435,7 @@ fn flash_assign_device<S, A, R>(
                 ASSIGN_WG,
             );
         },
-        Dist::Manhattan => unreachable!(),
+        Dist::Manhattan => unreachable!("Manhattan distance is not supported!"),
     }
 }
 
