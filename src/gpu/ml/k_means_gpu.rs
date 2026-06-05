@@ -87,13 +87,15 @@ impl Default for KMeansGpuParams {
 // Helpers //
 /////////////
 
-/// Pick workgroup size and centroid SMEM tile width from the padded dim.
+/// Pick the centroid SMEM tile width from the padded dimension.
 ///
-/// `k_tile * dim_padded * 4 B` stays at or under ~16 KiB to leave headroom
-/// inside a conservative 32 KiB threadgroup budget (Apple silicon is the
-/// tightest of the wgpu backends). `wg_size` shrinks with dim to limit the
-/// per-thread private-memory footprint of the point array
-/// (`wg_size * dim_padded * 4 B` per workgroup).
+/// Keeps `k_tile * dim_padded * 4 B` at or under ~16 KiB to leave headroom
+/// in a conservative 32 KiB threadgroup budget (Apple Silicon is the
+/// tightest wgpu backend).
+///
+/// ### Params
+///
+/// * `dim_padded` - Padded vector dimension (must be a power of two)
 fn assign_k_tile(dim_padded: usize) -> usize {
     // k_tile * dim_padded * 4 B kept around 16 KiB to leave headroom in a
     // conservative 32 KiB threadgroup-memory budget.
@@ -121,6 +123,22 @@ fn assign_k_tile(dim_padded: usize) -> usize {
 /// matrix is streamed through shared memory in tiles of `k_tile`. The point
 /// is cast from storage precision `S` to accumulator precision `A` once on
 /// load; all distance arithmetic runs in `A`.
+///
+/// ### Params
+///
+/// * `data` - Input data vectors `[n, dim]` in storage precision `S`
+/// * `centroids` - Centroid matrix `[k, dim]` in accumulator precision `A`
+/// * `assignments` - Output hard assignment indices `[n]`
+/// * `n_samples` - Total number of data points
+/// * `k` - Number of clusters
+/// * `dim_lines` - Vectorised dimension (`dim / LINE_SIZE`); comptime
+/// * `k_tile` - Number of centroids per SMEM tile; comptime
+/// * `wg_size` - Workgroup size; comptime
+///
+/// ### Grid mapping
+///
+/// * `(CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * wg_size + UNIT_POS_X` -> point
+///   index
 #[cube(launch_unchecked)]
 pub fn flash_assign_euclidean_tiled<S: Float, A: Float, N: Size>(
     data: &Tensor<Vector<S, N>>,
@@ -216,8 +234,26 @@ pub fn flash_assign_euclidean_tiled<S: Float, A: Float, N: Size>(
     }
 }
 
-/// Cosine analogue of `flash_assign_euclidean_tiled`. Uses precomputed L2
+/// Cosine analogue of [`flash_assign_euclidean_tiled`]. Uses precomputed L2
 /// norms; minimises `1 - dot(x, c) / (||x|| * ||c||)`.
+///
+/// ### Params
+///
+/// * `data` - Input data vectors `[n, dim]` in storage precision `S`
+/// * `centroids` - Centroid matrix `[k, dim]` in accumulator precision `A`
+/// * `point_norms` - Precomputed L2 norms of each data point `[n]`
+/// * `centroid_norms` - Precomputed L2 norms of each centroid `[k]`
+/// * `assignments` - Output hard assignment indices `[n]`
+/// * `n_samples` - Total number of data points
+/// * `k` - Number of clusters
+/// * `dim_lines` - Vectorised dimension (`dim / LINE_SIZE`); comptime
+/// * `k_tile` - Number of centroids per SMEM tile; comptime
+/// * `wg_size` - Workgroup size; comptime
+///
+/// ### Grid mapping
+///
+/// * `(CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * wg_size + UNIT_POS_X` -> point
+///   index
 #[cube(launch_unchecked)]
 pub fn flash_assign_cosine_tiled<S: Float, A: Float, N: Size>(
     data: &Tensor<Vector<S, N>>,
@@ -313,10 +349,28 @@ pub fn flash_assign_cosine_tiled<S: Float, A: Float, N: Size>(
     }
 }
 
-/// Dispatch the assignment kernel and write results into a device-resident
-/// buffer.
+/// Dispatch the appropriate assignment kernel and write results into a
+/// device-resident buffer. Selects between [`flash_assign_euclidean_tiled`]
+/// and [`flash_assign_cosine_tiled`] based on `metric`.
 ///
-/// TO: update
+/// ### Type params
+///
+/// * `S` - Storage precision of the data buffer
+/// * `A` - Accumulator precision for distance arithmetic
+/// * `R` - CubeCL runtime
+///
+/// ### Params
+///
+/// * `client` - CubeCL compute client
+/// * `data_gpu` - Input data `[n, dim]` in storage precision `S`
+/// * `cent_gpu` - Centroid matrix `[k, dim]` in accumulator precision `A`
+/// * `pnorm_gpu` - Precomputed point L2 norms `[n]`; only used for cosine
+/// * `cnorm_gpu` - Precomputed centroid L2 norms `[k]`; only used for cosine
+/// * `assign_gpu` - Output assignment indices `[n]`
+/// * `n` - Number of data points
+/// * `k` - Number of clusters
+/// * `dim` - Vector dimension (unpadded)
+/// * `metric` - Distance metric; `Manhattan` is not supported
 #[allow(clippy::too_many_arguments)]
 fn flash_assign_device<S, A, R>(
     client: &ComputeClient<R>,

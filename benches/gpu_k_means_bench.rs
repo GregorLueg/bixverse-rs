@@ -3,19 +3,15 @@
 //! Each variant is self-contained: kernel function plus launcher. They all
 //! consume the same prepared GpuTensor inputs so the comparison is fair.
 //!
-//! The four variants isolate one knob each:
+//! Variants:
 //!
-//! * `v1_baseline` - current production design. WG=32, SMEM-tiled centroids,
-//!   scalar inner loop. Reference point.
-//! * `v2_wide_wg` - V1 but with WG=128. Tests whether more centroid reuse per
-//!   SMEM tile load helps (one loaded scalar feeds 128 points instead of 32).
-//! * `v3_no_smem` - WG=32, no SMEM tile, centroids streamed from global into
-//!   registers per inner step. Tests whether the SMEM tile is actually
-//!   carrying its weight on Apple Silicon (where L2 may absorb the centroid
-//!   traffic for K*dim < a few MiB).
-//! * `V3_RN4` - WG=32, SMEM-tiled, but each thread owns 4 points
-//!   (register-blocking). Tests whether the 4 independent FMA chains expose
-//!   enough ILP to overcome the per-thread private-memory cost.
+//! * `v1_baseline` - WG=32, SMEM-tiled centroids, scalar inner loop.
+//! * `v2_wide_wg` - WG=128, otherwise identical to V1.
+//! * `v3_rn` - WG=32, SMEM-tiled, register-blocked (rn points per
+//!   thread, dim-aware via `rn_for`).
+//! * `v4_vec` - WG=128, NO SMEM, vectorised inner arithmetic via
+//!   Vector<F, N>. Conflates two changes (drop SMEM, vectorise); see comments
+//!   on the kernel.
 //!
 //! Run with: cargo bench --bench gpu_kmeans_assign_kernels --features gpu
 
@@ -41,13 +37,13 @@ struct AssignShape {
 
 const SHAPES: &[AssignShape] = &[
     AssignShape {
-        n: 100_000,
-        k: 1270,
+        n: 10_000,
+        k: 400,
         dim: 128,
     },
     AssignShape {
-        n: 100_000,
-        k: 1270,
+        n: 10_000,
+        k: 400,
         dim: 512,
     },
 ];
@@ -64,13 +60,24 @@ fn k_tile_for(dim: usize) -> usize {
     }
 }
 
+/// Dim-aware register-blocking factor. Keeps per-thread private memory
+/// (`rn * dim * 4 B`) below the register-spill threshold on Apple GPUs.
+/// At dim>256 collapses to rn=1, which makes V3 equivalent to V1 - informative
+/// only at low/mid dim.
+fn rn_for(dim: usize) -> usize {
+    match dim {
+        0..=128 => 4,
+        129..=256 => 2,
+        _ => 1,
+    }
+}
+
 /////////////
 // Kernels //
 /////////////
 
 // V1: baseline - one thread per point, WG=32, SMEM tile of k_tile centroids,
-// scalar inner loop. Replica of current flash_assign_euclidean_tiled (f32 only,
-// no S/A split for simplicity).
+// scalar inner loop.
 #[cube(launch_unchecked)]
 fn assign_v1_baseline<F: Float, N: Size>(
     data: &Tensor<Vector<F, N>>,
@@ -162,8 +169,7 @@ fn assign_v1_baseline<F: Float, N: Size>(
 }
 
 // V2: same as V1 but with comptime wg_size in place of WORKGROUP_SIZE_X.
-// Launch site sets CubeDim::new_1d(wg_size). Strictly the same arithmetic
-// as V1 — only the workgroup width changes.
+// Strictly the same arithmetic as V1 - only the workgroup width changes.
 #[cube(launch_unchecked)]
 fn assign_v2_wide_wg<F: Float, N: Size>(
     data: &Tensor<Vector<F, N>>,
@@ -254,11 +260,11 @@ fn assign_v2_wide_wg<F: Float, N: Size>(
     }
 }
 
-// V4: register-blocked. Each thread owns rn=4 points; one centroid scalar
-// pulled from SMEM feeds 4 independent accumulators. Same SMEM tiling and
-// WG=32 as V1.
+// V3: register-blocked. Each thread owns rn points; one centroid scalar
+// pulled from SMEM feeds rn independent accumulators. SMEM tiling and WG=32
+// as V1. `rn` is comptime so the launcher monomorphises per rn value.
 #[cube(launch_unchecked)]
-fn assign_v3_rn4<F: Float, N: Size>(
+fn assign_v3_rn<F: Float, N: Size>(
     data: &Tensor<Vector<F, N>>,
     centroids: &Tensor<Vector<F, N>>,
     assignments: &mut Tensor<u32>,
@@ -367,6 +373,79 @@ fn assign_v3_rn4<F: Float, N: Size>(
     }
 }
 
+// V4: vectorised inner arithmetic. WG=128, NO SMEM tile, centroids read
+// directly from global memory as Vector<F, N> per inner step.
+//
+// The conflated knobs: drops SMEM AND vectorises arithmetic. Done together
+// because:
+//   (a) SharedMemory<Vector<F, N>> silently broadcasts lane 0 in cubecl on
+//       wgpu, per the comment in dist_gpu.rs - so vectorised SMEM is broken.
+//   (b) The Vector source doesn't expose a "construct from N scalars" API,
+//       so we can't read 4 SMEM scalars and re-pack into a Vector for the
+//       inner FMA.
+//
+// If V4 wins, a follow-up experiment is needed to disambiguate which knob
+// did the work. The L2 caches centroids at dim=128 (635 KiB) cleanly; at
+// dim=512 (2.5 MiB) it depends on Apple's per-shader-core L2 partition.
+//
+// SPECULATION FLAG: not yet compiled. Relies on:
+//   * Vector<F, N> - Vector<F, N> producing a vector subtract
+//   * Vector<F, N> * Vector<F, N> producing a vector multiply
+//   * Array<Vector<F, N>>::new(dim_lines) being valid
+// If any of these fail at compile time, the fix is local to this kernel.
+#[cube(launch_unchecked)]
+fn assign_v4_vec<F: Float, N: Size>(
+    data: &Tensor<Vector<F, N>>,
+    centroids: &Tensor<Vector<F, N>>,
+    assignments: &mut Tensor<u32>,
+    n_samples: u32,
+    k: u32,
+    #[comptime] dim_lines: usize,
+    #[comptime] wg_size: u32,
+) {
+    let tx = UNIT_POS_X;
+    let point_idx = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * wg_size + tx;
+    if point_idx >= n_samples {
+        terminate!();
+    }
+    let p_base = point_idx as usize * dim_lines;
+
+    // Point held in private memory as Vector<F, N>; no scalar explode.
+    let mut p = Array::<Vector<F, N>>::new(dim_lines);
+    for i in 0..dim_lines {
+        p[i] = data[p_base + i];
+    }
+
+    let mut best_dist = F::new(f32::MAX);
+    let mut best_idx = 0u32;
+
+    let mut c = 0u32;
+    while c < k {
+        let cbase = c as usize * dim_lines;
+        let mut sum = F::new(0.0);
+
+        // Inner loop: one Vector subtract and one Vector multiply per
+        // dim_line; horizontal reduce via lane extraction at the end.
+        for i in 0..dim_lines {
+            let c_vec = centroids[cbase + i];
+            let diff = p[i] - c_vec;
+            let sq = diff * diff;
+            #[unroll]
+            for lane in 0..LINE_SIZE {
+                sum += sq[lane];
+            }
+        }
+
+        if sum < best_dist {
+            best_dist = sum;
+            best_idx = c;
+        }
+        c += 1u32;
+    }
+
+    assignments[point_idx as usize] = best_idx;
+}
+
 ///////////////////////
 // Bench input/setup //
 ///////////////////////
@@ -398,7 +477,7 @@ fn make_input<R: Runtime>(shape: AssignShape, client: &ComputeClient<R>) -> Assi
 /////////////////////
 
 const V2_WG: u32 = 128;
-const V3_RN: usize = 4;
+const V4_WG: u32 = 128;
 
 ///////////////
 // Version 1 //
@@ -527,25 +606,65 @@ impl<R: Runtime> Benchmark for V3Bench<R> {
     fn execute(&self, input: Self::Input) -> Result<(), String> {
         let dim_lines = self.shape.dim / LINE_SIZE;
         let k_tile = k_tile_for(self.shape.dim);
-        let n_threads = self.shape.n.div_ceil(V3_RN) as u32;
+        let rn = rn_for(self.shape.dim);
+        let n_threads = self.shape.n.div_ceil(rn) as u32;
         let n_workgroups = n_threads.div_ceil(WORKGROUP_SIZE_X);
         let (gx, gy) = grid_2d(n_workgroups);
+        let count = CubeCount::Static(gx, gy, 1);
+        let cdim = CubeDim::new_1d(WORKGROUP_SIZE_X);
 
-        unsafe {
-            assign_v3_rn4::launch_unchecked::<f32, R>(
-                &self.client,
-                CubeCount::Static(gx, gy, 1),
-                CubeDim::new_1d(WORKGROUP_SIZE_X),
-                LINE_SIZE,
-                input.data.into_tensor_arg(),
-                input.cents.into_tensor_arg(),
-                input.assignments.into_tensor_arg(),
-                self.shape.n as u32,
-                self.shape.k as u32,
-                dim_lines,
-                k_tile,
-                V3_RN,
-            );
+        // `rn` is comptime in the kernel; the launcher dispatches per rn value
+        // so each gets its own monomorphisation.
+        match rn {
+            4 => unsafe {
+                assign_v3_rn::launch_unchecked::<f32, R>(
+                    &self.client,
+                    count,
+                    cdim,
+                    LINE_SIZE,
+                    input.data.into_tensor_arg(),
+                    input.cents.into_tensor_arg(),
+                    input.assignments.into_tensor_arg(),
+                    self.shape.n as u32,
+                    self.shape.k as u32,
+                    dim_lines,
+                    k_tile,
+                    4,
+                );
+            },
+            2 => unsafe {
+                assign_v3_rn::launch_unchecked::<f32, R>(
+                    &self.client,
+                    count,
+                    cdim,
+                    LINE_SIZE,
+                    input.data.into_tensor_arg(),
+                    input.cents.into_tensor_arg(),
+                    input.assignments.into_tensor_arg(),
+                    self.shape.n as u32,
+                    self.shape.k as u32,
+                    dim_lines,
+                    k_tile,
+                    2,
+                );
+            },
+            1 => unsafe {
+                assign_v3_rn::launch_unchecked::<f32, R>(
+                    &self.client,
+                    count,
+                    cdim,
+                    LINE_SIZE,
+                    input.data.into_tensor_arg(),
+                    input.cents.into_tensor_arg(),
+                    input.assignments.into_tensor_arg(),
+                    self.shape.n as u32,
+                    self.shape.k as u32,
+                    dim_lines,
+                    k_tile,
+                    1,
+                );
+            },
+            _ => unreachable!("rn_for returned unsupported value {}", rn),
         }
         Ok(())
     }
@@ -553,7 +672,62 @@ impl<R: Runtime> Benchmark for V3Bench<R> {
     fn name(&self) -> String {
         format!(
             "v3_rn{}_wg32_n{}_k{}_d{}",
-            V3_RN, self.shape.n, self.shape.k, self.shape.dim
+            rn_for(self.shape.dim),
+            self.shape.n,
+            self.shape.k,
+            self.shape.dim
+        )
+    }
+
+    fn sync(&self) {
+        future::block_on(self.client.sync()).expect("sync failed");
+    }
+}
+
+///////////////
+// Version 4 //
+///////////////
+
+struct V4Bench<R: Runtime> {
+    shape: AssignShape,
+    client: ComputeClient<R>,
+}
+
+impl<R: Runtime> Benchmark for V4Bench<R> {
+    type Input = AssignInput<R>;
+    type Output = ();
+
+    fn prepare(&self) -> Self::Input {
+        make_input(self.shape, &self.client)
+    }
+
+    fn execute(&self, input: Self::Input) -> Result<(), String> {
+        let dim_lines = self.shape.dim / LINE_SIZE;
+        let n_workgroups = (self.shape.n as u32).div_ceil(V4_WG);
+        let (gx, gy) = grid_2d(n_workgroups);
+
+        unsafe {
+            assign_v4_vec::launch_unchecked::<f32, R>(
+                &self.client,
+                CubeCount::Static(gx, gy, 1),
+                CubeDim::new_1d(V4_WG),
+                LINE_SIZE,
+                input.data.into_tensor_arg(),
+                input.cents.into_tensor_arg(),
+                input.assignments.into_tensor_arg(),
+                self.shape.n as u32,
+                self.shape.k as u32,
+                dim_lines,
+                V4_WG,
+            );
+        }
+        Ok(())
+    }
+
+    fn name(&self) -> String {
+        format!(
+            "v4_vec_wg{}_n{}_k{}_d{}",
+            V4_WG, self.shape.n, self.shape.k, self.shape.dim
         )
     }
 
@@ -593,6 +767,10 @@ fn run_suite<R: Runtime>(device: &R::Device) {
             shape,
             client: client.clone(),
         };
+        let v4 = V4Bench::<R> {
+            shape,
+            client: client.clone(),
+        };
 
         println!("{}", v1.name());
         println!("{:?}\n", v1.run(TimingMethod::System));
@@ -602,6 +780,9 @@ fn run_suite<R: Runtime>(device: &R::Device) {
 
         println!("{}", v3.name());
         println!("{:?}\n", v3.run(TimingMethod::System));
+
+        println!("{}", v4.name());
+        println!("{:?}\n", v4.run(TimingMethod::System));
     }
 }
 
