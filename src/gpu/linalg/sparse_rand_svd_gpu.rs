@@ -111,7 +111,8 @@ impl Default for RandSvdGpuParams {
 ///   10 oversampling
 /// * `seed` - Seed for the random projection
 /// * `device` - CubeCL runtime device
-/// * `verbose` - Print timing checkpoints
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -131,13 +132,15 @@ pub fn randomised_sparse_svd_gpu<R, T, MP>(
     params: Option<RandSvdGpuParams>,
     seed: u64,
     device: R::Device,
-    verbose: bool,
+    verbose: usize,
 ) -> Result<SvdResults<T>, BixverseErrors>
 where
     R: Runtime,
     T: cubecl::prelude::Float + cubecl::CubeElement + BixverseFloat,
     MP: MatmulPrecision,
 {
+    let verbosity = parse_verbosity_level(verbose);
+
     let start = Instant::now();
     let params = params.unwrap_or_default();
 
@@ -159,13 +162,13 @@ where
 
     // -- Host prep --
 
-    if verbose {
+    if verbosity.detailed_verbosity() {
         println!("  Building CSR view of A (host)");
     }
 
     let csr_host = transpose_sparse_single_layer(&data, true)?;
 
-    if verbose {
+    if verbosity.detailed_verbosity() {
         println!("    Host prep done: {:.2?}", start.elapsed());
     }
 
@@ -198,7 +201,7 @@ where
         .collect();
     let omega_gpu = GpuTensor::<R, T>::from_slice(&omega_scaled, vec![m, s], &client);
 
-    if verbose {
+    if verbosity.detailed_verbosity() {
         println!("    GPU Upload done: {:.2?}", start.elapsed());
     }
 
@@ -219,7 +222,7 @@ where
 
     cholesky_qr2::<R, T, MP>(&client, &y_buf, &q_buf, n, s)?;
 
-    if verbose {
+    if verbosity.detailed_verbosity() {
         println!("    Initial sketch + QR done: {:.2?}", start.elapsed());
     }
 
@@ -239,7 +242,7 @@ where
         // QR -> new Q in q_buf
         cholesky_qr2::<R, T, MP>(&client, &y_buf, &q_buf, n, s)?;
 
-        if verbose {
+        if verbosity.detailed_verbosity() {
             println!(
                 "    Power iter {}/{} done: {:.2?}",
                 iter + 1,
@@ -257,7 +260,7 @@ where
         &csc_gpu, &q_buf, &q_sum_buf, &mu_gpu, &sigma_gpu, &z_buf, s, &client,
     )?;
 
-    if verbose {
+    if verbosity.detailed_verbosity() {
         println!("    Final B^T computed: {:.2?}", start.elapsed());
     }
 
@@ -290,7 +293,7 @@ where
     )?;
     let u_host = u_gpu.read(&client)?;
 
-    if verbose {
+    if verbosity.detailed_verbosity() {
         println!(
             "    Host SVD + U reconstruction done: {:.2?}",
             start.elapsed()
@@ -302,7 +305,7 @@ where
     let v_mat = Mat::<T>::from_fn(m, n_components, |i, j| u_z[(i, j)]);
     let s_vec: Vec<T> = (0..n_components).map(|i| svd.S()[i]).collect();
 
-    if verbose {
+    if verbosity.normal_verbosity() {
         println!(
             "  Finished randomised sparse SVD (GPU) in {:.2?}",
             start.elapsed()
@@ -407,7 +410,7 @@ mod tests {
             Some(RandSvdGpuParams::new(2, 8)),
             42,
             device,
-            false,
+            0,
         )
         .unwrap();
 
@@ -471,7 +474,7 @@ mod tests {
         let sigma = vec![1.0f32; m];
 
         let res = randomised_sparse_svd_gpu::<WgpuRuntime, f32, f32>(
-            csr, &mu, &sigma, 2, None, 42, device, false,
+            csr, &mu, &sigma, 2, None, 42, device, 0,
         );
         assert!(matches!(
             res,
@@ -499,7 +502,7 @@ mod tests {
         let sigma = vec![1.0f32; m + 1];
 
         let res = randomised_sparse_svd_gpu::<WgpuRuntime, f32, f32>(
-            csc, &mu, &sigma, 2, None, 42, device, false,
+            csc, &mu, &sigma, 2, None, 42, device, 0,
         );
         assert!(matches!(
             res,
