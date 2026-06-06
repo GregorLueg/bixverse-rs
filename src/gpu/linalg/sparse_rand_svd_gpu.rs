@@ -187,15 +187,11 @@ where
     drop(csr_host);
     drop(data);
 
-    // Omega is m x s, pre-scaled by 1/sigma column-wise so the forward
-    // SpMM only needs the mean correction (no per-output sigma divide).
-    // Uniform [-0.5, 0.5] matches the existing Lanczos initialisation
-    // style; Gaussian works equally well for the random projection.
     let mut rng = StdRng::seed_from_u64(seed);
     let omega_scaled: Vec<T> = (0..m * s)
         .map(|i| {
             let j = i / s;
-            let u = rng.random::<f64>() - 0.5;
+            let u = rng.random::<f64>();
             T::from(u).unwrap() / col_stds[j]
         })
         .collect();
