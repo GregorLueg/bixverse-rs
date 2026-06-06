@@ -69,7 +69,7 @@ where
 
     if verbosity.normal_verbosity() {
         println!(
-            "Sparse (GPU-accelerated) PCA: Loaded in data in {:.2?}",
+            "Sparse PCA (GPU-accelerated): Loaded in data in {:.2?}",
             end_reading
         );
     }
@@ -96,7 +96,7 @@ where
 
     if verbosity.normal_verbosity() {
         println!(
-            "Sparse PCA: finished the data preparations in {:.2?}",
+            "Sparse PCA (GPU-accelerated): finished the data preparations in {:.2?}",
             end_data_prep
         );
     }
@@ -113,7 +113,7 @@ where
         Some(svd_params),
         seed as u64,
         device,
-        verbosity.normal_verbosity(),
+        verbose,
     )?;
 
     let scores = compute_pc_scores(&svd_res);
@@ -121,13 +121,19 @@ where
     let end_svd = start_svd.elapsed();
 
     if verbosity.normal_verbosity() {
-        println!("Sparse PCA: finished calculations in {:.2?}", end_svd);
+        println!(
+            "Sparse PCA (GPU-accelerated): finished calculations in {:.2?}",
+            end_svd
+        );
     }
 
     let end_total = start_total.elapsed();
 
     if verbosity.normal_verbosity() {
-        println!("Sparse PCA: total run time -> {:.2?}", end_total);
+        println!(
+            "Sparse PCA (GPU-accelerated): total run time -> {:.2?}",
+            end_total
+        );
     }
 
     Ok((scores, svd_res.v().to_owned(), svd_res.s().to_owned()))
