@@ -277,6 +277,9 @@ pub fn pca_on_sc(
         })
         .collect();
 
+    // manual drop
+    drop(gene_chunks);
+
     let num_genes = scaled_data.len();
     let n_cells = cell_indices.len();
 
