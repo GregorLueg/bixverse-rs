@@ -17,16 +17,12 @@ use crate::single_cell::sc_processing::pca::*;
 // Sparse randomised PCA (GPU) //
 /////////////////////////////////
 
-/// Calculate the PCs for single cell data (sparse)
+/// Calculate randomised SVD in sparse on GPU
 ///
-/// This version does NOT scale the data and avoids densifying the data at any
-/// point, avoiding holding a large matrix in memory. This comes at the cost of
-/// the first principal component being largely driven by average gene
-/// expression, but makes analysing large datasets actually tractable. For
-/// the non random version a sparse SVD Lanczos algorithm is used. For the
-/// randomised version, it uses the randomised SVD approach in which the dense
-/// matrix is of much smaller size than the potentially massive scaled, dense
-/// data.
+/// This version will stream in the data from disk, calculate the gene
+/// expression means and standard deviations and leverage GPU-accelerated
+/// matrix operations to calculate a randomised sparse SVD from the data while
+/// scaling the data during the process.
 ///
 /// ### Params
 ///
@@ -37,6 +33,7 @@ use crate::single_cell::sc_processing::pca::*;
 /// * `random_svd` - Shall randomised sparse singular value decompostion be
 ///   used. This has the advantage of speed-ups, but loses precision.
 /// * `seed` - Seed for randomised SVD.
+/// * `device` - CubeCL runtime device
 /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
 ///   verbosity.
 ///
