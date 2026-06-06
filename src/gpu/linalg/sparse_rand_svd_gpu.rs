@@ -117,9 +117,14 @@ impl Default for RandSvdGpuParams {
 ///
 /// `SvdResults<T>` with `u` of shape `[n, n_components]`, `s` of length
 /// `n_components`, and `v` of shape `[m, n_components]`.
+///
+/// ### Notes
+///
+/// The current implementation will always run PCA on the data_2 layer, i.e.,
+/// the normalised counts
 #[allow(clippy::too_many_arguments)]
 pub fn randomised_sparse_svd_gpu<R, T, MP>(
-    data: &CompressedSparseData2<T, T>,
+    data: CompressedSparseData2<T, T>,
     col_means: &[T],
     col_stds: &[T],
     n_components: usize,
@@ -158,7 +163,7 @@ where
         println!("  Building CSR view of A (host)");
     }
 
-    let csr_host = transpose_sparse_single_layer(data, true)?;
+    let csr_host = transpose_sparse_single_layer(&data, true)?;
 
     if verbose {
         println!("    Host prep done: {:.2?}", start.elapsed());
@@ -171,9 +176,13 @@ where
     let csr_gpu =
         GpuCompressedSparseData::<R, T>::from_compressed_sparse_data_2(&csr_host, true, &client)?;
     let csc_gpu =
-        GpuCompressedSparseData::<R, T>::from_compressed_sparse_data_2(data, true, &client)?;
+        GpuCompressedSparseData::<R, T>::from_compressed_sparse_data_2(&data, true, &client)?;
     let mu_gpu = GpuTensor::<R, T>::from_slice(col_means, vec![m], &client);
     let sigma_gpu = GpuTensor::<R, T>::from_slice(col_stds, vec![m], &client);
+
+    // drop the CPU parts
+    drop(csr_host);
+    drop(data);
 
     // Omega is m x s, pre-scaled by 1/sigma column-wise so the forward
     // SpMM only needs the mean correction (no per-output sigma divide).
@@ -391,7 +400,7 @@ mod tests {
         let sigma = vec![1.0f32; m];
 
         let svd = randomised_sparse_svd_gpu::<WgpuRuntime, f32, f32>(
-            &csc,
+            csc,
             &mu,
             &sigma,
             n_components,
@@ -462,7 +471,7 @@ mod tests {
         let sigma = vec![1.0f32; m];
 
         let res = randomised_sparse_svd_gpu::<WgpuRuntime, f32, f32>(
-            &csr, &mu, &sigma, 2, None, 42, device, false,
+            csr, &mu, &sigma, 2, None, 42, device, false,
         );
         assert!(matches!(
             res,
@@ -490,7 +499,7 @@ mod tests {
         let sigma = vec![1.0f32; m + 1];
 
         let res = randomised_sparse_svd_gpu::<WgpuRuntime, f32, f32>(
-            &csc, &mu, &sigma, 2, None, 42, device, false,
+            csc, &mu, &sigma, 2, None, 42, device, false,
         );
         assert!(matches!(
             res,

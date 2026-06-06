@@ -106,7 +106,7 @@ where
     let svd_params = RandSvdGpuParams::new(2, 100);
 
     let svd_res = randomised_sparse_svd_gpu::<R, f32, f32>(
-        &csc,
+        csc,
         &col_means,
         &col_std,
         no_pcs,
