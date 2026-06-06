@@ -796,6 +796,8 @@ pub fn harmony_v2(
             println!("  Running k-means clustering...");
         }
 
+        let start_iter = Instant::now();
+
         // distances are fixed across the inner loop, so the base assignments
         // are computed once per round here rather than inside each update.
         let scale_dist = compute_scaled_distances(dist_mat.as_ref(), &sigma);
@@ -874,7 +876,11 @@ pub fn harmony_v2(
 
         if verbosity.normal_verbosity() {
             println!("  Harmony objective: {:.4}", harmony_obj);
-            println!("   Finished iteration in {:.2?}", start.elapsed());
+            println!(
+                "   Finished iteration in {:.2?} / Total runtime {:2.?}",
+                start_iter.elapsed(),
+                start.elapsed()
+            );
         }
 
         if harmony_iter >= 1 {

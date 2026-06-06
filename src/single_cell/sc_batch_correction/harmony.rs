@@ -935,6 +935,8 @@ pub fn harmony(
             println!("  Running k-means clustering...");
         }
 
+        let start_iter = Instant::now();
+
         for kmeans_iter in 0..params.max_iter_kmeans {
             state.y = update_centroids_from_r(state.z_cos.as_ref(), state.r.as_ref());
 
@@ -1002,7 +1004,11 @@ pub fn harmony(
 
         if verbosity.normal_verbosity() {
             println!("  Harmony objective: {:.4}", harmony_obj);
-            println!("   Finished iteration in {:.2?}", start.elapsed());
+            println!(
+                "   Finished iteration in {:.2?} / Total runtime {:2.?}",
+                start_iter.elapsed(),
+                start.elapsed()
+            );
         }
 
         if harmony_iter >= 2 {
