@@ -277,6 +277,9 @@ pub fn pca_on_sc(
         })
         .collect();
 
+    // manual drop
+    drop(gene_chunks);
+
     let num_genes = scaled_data.len();
     let n_cells = cell_indices.len();
 
@@ -313,7 +316,7 @@ pub fn pca_on_sc(
     } else {
         let res = scaled_f64
             .thin_svd()
-            .map_err(|_| BixverseErrors::FaerSvdError)?;
+            .map_err(|e| BixverseErrors::FaerSvdError(format!("{e:?}")))?;
         let loadings = Mat::<f32>::from_fn(num_genes, no_pcs, |i, j| res.V()[(i, j)] as f32);
         let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| {
             (res.U()[(i, j)] * res.S().column_vector()[j]) as f32
@@ -457,7 +460,7 @@ pub fn pca_on_sc_streaming(
     } else {
         let res = scaled_matrix
             .thin_svd()
-            .map_err(|_| BixverseErrors::FaerSvdError)?;
+            .map_err(|e| BixverseErrors::FaerSvdError(format!("{e:?}")))?;
         let loadings = Mat::<f32>::from_fn(n_genes, no_pcs, |i, j| res.V()[(i, j)] as f32);
         let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| {
             (res.U()[(i, j)] * res.S().column_vector()[j]) as f32
@@ -523,7 +526,7 @@ pub fn pca_on_sc_streaming(
 ///
 /// ### Return
 ///
-/// A tuple of the samples projected on thePC space, gene loadings and singular
+/// A tuple of the samples projected on the PC space, gene loadings and singular
 /// values.
 #[allow(clippy::too_many_arguments)]
 pub fn pca_on_sc_sparse(

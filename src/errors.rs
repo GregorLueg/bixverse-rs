@@ -6,6 +6,8 @@ use ann_search_rs::utils::dist::Dist;
 use std::io;
 use thiserror::Error;
 
+use crate::prelude::*;
+
 /// All error variants that can occur across bixverse operations.
 ///
 /// Errors are grouped by subsystem: faer-backed linear algebra, binary file
@@ -28,8 +30,8 @@ pub enum BixverseErrors {
     ///
     /// Typically caused by ill-conditioned or degenerate input (e.g. all-zero
     /// rows, NaNs, rank-deficient matrices beyond the requested rank).
-    #[error("The faer SVD failed - please verify the data")]
-    FaerSvdError,
+    #[error("The faer SVD failed: {0}")]
+    FaerSvdError(String),
 
     /// Eigen decomposition from faer failed.
     ///
@@ -37,6 +39,10 @@ pub enum BixverseErrors {
     /// solver, or numerical breakdown on degenerate input.
     #[error("The faer Eigen decomposition failed - please verify the data")]
     FaerEigenError,
+
+    /// Cholesky decomposition from faer failed.
+    #[error("The faer Cholesky failed: {0}")]
+    FaerCholeskyError(#[from] faer::linalg::solvers::LltError),
 
     // -- ann-search-rs --
     /// Propagate errors from the ann-search-rs crate
@@ -122,6 +128,24 @@ pub enum BixverseErrors {
     /// Error if the [crate::prelude::CompressedSparseData2] is not in Csc.
     #[error("The SparseCompressedData2 must be in CSC format")]
     SparseMatrixMustBeCsc,
+
+    /// General error for sparse matrix format mismatches
+    #[error("Expected this compressed sparse format {expected}; got {got}.")]
+    SparseLayoutMismatch {
+        /// The expected [CompressedSparseFormat] enum.
+        expected: CompressedSparseFormat,
+        /// The provided [CompressedSparseFormat] enum.
+        got: CompressedSparseFormat,
+    },
+
+    /// Shape mismatch problem for matrices
+    #[error("Expected this shape {expected:?}; got {got:?}.")]
+    ShapeMismatch {
+        /// Expected shape
+        expected: (usize, usize),
+        /// Provided shape
+        got: (usize, usize),
+    },
 
     // -- Binary file I/O --
     /// Wraps any `std::io::Error` encountered while reading or writing the
@@ -448,4 +472,9 @@ pub enum BixverseErrors {
         /// Actual neighbour count in row 0
         found: usize,
     },
+    // -- gpu --
+    /// A GPU cubecl matrix multiplication error from the cubek crate
+    #[cfg(feature = "gpu")]
+    #[error("GPU: A matrix multiplication occurred: {0}")]
+    GpuMatmul(String),
 }

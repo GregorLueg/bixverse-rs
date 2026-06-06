@@ -7,6 +7,7 @@ use rand::prelude::*;
 use rand_distr::Normal;
 use rayon::prelude::*;
 
+use super::*;
 use crate::prelude::*;
 
 ////////////////
@@ -192,9 +193,9 @@ where
 {
     let ncol = x.ncols();
     let nrow = x.nrows();
-    let os = oversampling.unwrap_or(10);
+    let os = oversampling.unwrap_or(DEFAULT_OVERSAMPLING_RAND_SVD);
     let sample_size = (rank + os).min(ncol.min(nrow));
-    let n_iter = n_power_iter.unwrap_or(2);
+    let n_iter = n_power_iter.unwrap_or(DEFAULT_N_POWER_ITERS_RAND_SVD);
 
     let mut rng = StdRng::seed_from_u64(seed as u64);
     let normal = Normal::new(0.0, 1.0).unwrap();
@@ -210,7 +211,9 @@ where
     }
 
     let b = q.transpose() * x;
-    let svd = b.thin_svd().map_err(|_| BixverseErrors::FaerSvdError)?;
+    let svd = b
+        .thin_svd()
+        .map_err(|e| BixverseErrors::FaerSvdError(format!("{e:?}")))?;
 
     Ok(RandomSvdResults {
         u: q * svd.U(),
@@ -254,9 +257,9 @@ where
     F: BixverseFloat,
 {
     let (n, m) = matrix.shape;
-    let os = oversampling.unwrap_or(10);
+    let os = oversampling.unwrap_or(DEFAULT_OVERSAMPLING_RAND_SVD);
     let sample_size = (rank + os).min(m).min(n);
-    let n_iter = n_power_iter.unwrap_or(2);
+    let n_iter = n_power_iter.unwrap_or(DEFAULT_N_POWER_ITERS_RAND_SVD);
 
     // consume the input: transform if needed, drop the original CSC.
     let csr = match matrix.cs_type {
@@ -431,7 +434,9 @@ where
     sparse_matvec_at(q.as_ref(), b_t.as_mut());
     let b = b_t.transpose().to_owned();
 
-    let svd = b.thin_svd().map_err(|_| BixverseErrors::FaerSvdError)?;
+    let svd = b
+        .thin_svd()
+        .map_err(|e| BixverseErrors::FaerSvdError(format!("{e:?}")))?;
 
     let u = &q * svd.U();
     let s: Vec<F> = svd.S().column_vector().iter().copied().collect();
