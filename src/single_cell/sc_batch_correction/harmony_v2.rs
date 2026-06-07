@@ -107,7 +107,7 @@ impl Default for HarmonyParamsV2 {
 /// ### Returns
 ///
 /// Nested Vec: `[var_idx][level_idx] -> f32` theta value
-fn expand_theta(theta: &[f32], batch_infos: &[BatchInfo], k: usize, tau: f32) -> Vec<Vec<f32>> {
+pub fn expand_theta(theta: &[f32], batch_infos: &[BatchInfo], k: usize, tau: f32) -> Vec<Vec<f32>> {
     batch_infos
         .iter()
         .enumerate()
@@ -143,7 +143,7 @@ fn expand_theta(theta: &[f32], batch_infos: &[BatchInfo], k: usize, tau: f32) ->
 /// ### Returns
 ///
 /// Whether convergence is reached
-fn check_convergence(objectives: &[f32], window_size: usize, epsilon: f32) -> bool {
+pub fn check_convergence(objectives: &[f32], window_size: usize, epsilon: f32) -> bool {
     let n = objectives.len();
     if n < 2 * window_size {
         return false;
@@ -418,7 +418,7 @@ pub fn update_r_with_diversity_v2(
 ///
 /// `Some(W)` (p x d) on success, `None` if the Schur complement is
 /// degenerate (caller should fall back to LU)
-fn solve_arrowhead(design_cov: &Mat<f32>, phi_z: &Mat<f32>) -> Option<Mat<f32>> {
+pub fn solve_arrowhead(design_cov: &Mat<f32>, phi_z: &Mat<f32>) -> Option<Mat<f32>> {
     let p = design_cov.nrows();
     let d = phi_z.ncols();
 
@@ -482,7 +482,7 @@ fn solve_arrowhead(design_cov: &Mat<f32>, phi_z: &Mat<f32>) -> Option<Mat<f32>> 
 /// ### Returns
 ///
 /// W (p x d)
-fn solve_lu(design_cov: &Mat<f32>, phi_z: &Mat<f32>) -> Mat<f32> {
+pub fn solve_lu(design_cov: &Mat<f32>, phi_z: &Mat<f32>) -> Mat<f32> {
     let p = design_cov.nrows();
     let d = phi_z.ncols();
 

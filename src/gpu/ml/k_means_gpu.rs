@@ -27,14 +27,15 @@ use faer::{Mat, MatRef};
 use std::iter::Sum;
 use std::time::Instant;
 
+use crate::gpu::WORKGROUP_128;
 use crate::prelude::*;
 
 ////////////
 // Consts //
 ////////////
 
-/// Workgroup size during the assignments
-const ASSIGN_WG: u32 = 128;
+// /// Workgroup size during the assignments
+// const ASSIGN_WG: u32 = 128;
 
 ////////////
 // Params //
@@ -395,10 +396,10 @@ fn flash_assign_device<S, A, R>(
     let vec_size = LINE_SIZE;
     let dim_lines = dim / vec_size;
     let k_tile = assign_k_tile(dim);
-    let n_workgroups = (n as u32).div_ceil(ASSIGN_WG);
+    let n_workgroups = (n as u32).div_ceil(WORKGROUP_128);
     let (gx, gy) = grid_2d(n_workgroups);
     let count = CubeCount::Static(gx, gy, 1);
-    let cdim = CubeDim::new_1d(ASSIGN_WG);
+    let cdim = CubeDim::new_1d(WORKGROUP_128);
 
     match *metric {
         Dist::SquaredEuclidean => unsafe {
@@ -414,7 +415,7 @@ fn flash_assign_device<S, A, R>(
                 k as u32,
                 dim_lines,
                 k_tile,
-                ASSIGN_WG,
+                WORKGROUP_128,
             );
         },
         Dist::Cosine => unsafe {
@@ -432,7 +433,7 @@ fn flash_assign_device<S, A, R>(
                 k as u32,
                 dim_lines,
                 k_tile,
-                ASSIGN_WG,
+                WORKGROUP_128,
             );
         },
         Dist::Manhattan => unreachable!("Manhattan distance is not supported!"),

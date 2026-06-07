@@ -89,7 +89,6 @@ fn wrap_handle<R: Runtime>(
 ///
 /// ### Params
 ///
-/// * `client` - CubeCL compute client
 /// * `a_handle` - Raw handle for A
 /// * `a_logical_shape` - Shape of A as seen by the matmul (post-transpose
 ///   if `a_transposed` is true)
@@ -98,6 +97,7 @@ fn wrap_handle<R: Runtime>(
 /// * `b_logical_shape` - Shape of B (B is never transposed)
 /// * `c_handle` - Raw handle for C
 /// * `c_shape` - Shape of C
+/// * `client` - CubeCL compute client
 ///
 /// ### Returns
 ///
@@ -108,7 +108,6 @@ fn wrap_handle<R: Runtime>(
 /// * `GpuMatmul` if cubek's `launch_ref` fails.
 #[allow(clippy::too_many_arguments)]
 pub fn dense_gemm<R, MP>(
-    client: &ComputeClient<R>,
     a_handle: &Handle,
     a_logical_shape: [usize; 2],
     a_transposed: bool,
@@ -116,6 +115,7 @@ pub fn dense_gemm<R, MP>(
     b_logical_shape: [usize; 2],
     c_handle: &Handle,
     c_shape: [usize; 2],
+    client: &ComputeClient<R>,
 ) -> Result<(), BixverseErrors>
 where
     R: Runtime,
@@ -224,7 +224,6 @@ where
     // First step: G = input^T * input on the GPU. Both operands share the input
     // handle; the lhs has its strides swapped to express the transpose.
     dense_gemm::<R, MP>(
-        client,
         input.handle(),
         [s, n],
         true, // transpose to get input^T as lhs
@@ -232,6 +231,7 @@ where
         [n, s],
         g_scratch.handle(),
         [s, s],
+        client,
     )?;
 
     // Second step: Read G back to the host. (Minor matrix, should be fine ...)
@@ -245,7 +245,6 @@ where
 
     // Last step output = input * R^{-1}.
     dense_gemm::<R, MP>(
-        client,
         input.handle(),
         [n, s],
         false,
@@ -253,6 +252,7 @@ where
         [s, s],
         output.handle(),
         [n, s],
+        client,
     )?;
 
     Ok(())

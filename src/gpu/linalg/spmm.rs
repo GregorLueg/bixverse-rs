@@ -50,23 +50,9 @@ use ann_search_rs::gpu::tensor::GpuTensor;
 use ann_search_rs::gpu::*;
 use cubecl::prelude::*;
 
+use crate::gpu::WORKGROUP_128;
 use crate::gpu::linalg::sparse_gpu::GpuCompressedSparseData;
 use crate::prelude::*;
-
-////////////
-// Consts //
-////////////
-
-/// Workgroup size for the SpMM kernels.
-const SPMM_WG: u32 = 128;
-
-/// Workgroup size for the reduction kernels. Must be a power of two.
-const REDUCE_WG: u32 = 128;
-
-/// Shared-memory size for the reduction kernels. Must equal `REDUCE_WG`;
-/// kept as a separate constant because the cubecl macro does not expand
-/// comptime function parameters inside `SharedMemory::new` calls.
-const REDUCE_SMEM: u32 = REDUCE_WG;
 
 /////////////
 // Kernels //
@@ -246,7 +232,7 @@ pub fn dense_column_sum<A: Float>(
         i += wg_size;
     }
 
-    let mut shared = SharedMemory::<A>::new(REDUCE_SMEM as usize);
+    let mut shared = SharedMemory::<A>::new(WORKGROUP_128 as usize);
     shared[tx as usize] = acc;
     sync_cube();
 
@@ -336,7 +322,7 @@ pub fn dense_column_weighted_sum<A: Float>(
         i += wg_size;
     }
 
-    let mut shared = SharedMemory::<A>::new(REDUCE_SMEM as usize);
+    let mut shared = SharedMemory::<A>::new(WORKGROUP_128 as usize);
     shared[tx as usize] = acc;
     sync_cube();
 
@@ -435,7 +421,7 @@ where
         spmm_csr_forward::launch_unchecked::<S, A, R>(
             client,
             CubeCount::Static(gx, gy, 1),
-            CubeDim::new_1d(SPMM_WG),
+            CubeDim::new_1d(WORKGROUP_128),
             sparse.indptr.clone().into_tensor_arg(),
             sparse.indices.clone().into_tensor_arg(),
             sparse.values.clone().into_tensor_arg(),
@@ -444,7 +430,7 @@ where
             y.clone().into_tensor_arg(),
             n as u32,
             s_width as u32,
-            SPMM_WG,
+            WORKGROUP_128,
         );
     }
 
@@ -501,7 +487,7 @@ where
         spmm_csc_transpose::launch_unchecked::<S, A, R>(
             client,
             CubeCount::Static(gx, gy, 1),
-            CubeDim::new_1d(SPMM_WG),
+            CubeDim::new_1d(WORKGROUP_128),
             sparse.indptr.clone().into_tensor_arg(),
             sparse.indices.clone().into_tensor_arg(),
             sparse.values.clone().into_tensor_arg(),
@@ -512,7 +498,7 @@ where
             z.clone().into_tensor_arg(),
             m as u32,
             s_width as u32,
-            SPMM_WG,
+            WORKGROUP_128,
         );
     }
 
@@ -536,12 +522,12 @@ pub fn launch_dense_column_sum<R, A>(
         dense_column_sum::launch_unchecked::<A, R>(
             client,
             CubeCount::Static(gx, gy, 1),
-            CubeDim::new_1d(REDUCE_WG),
+            CubeDim::new_1d(WORKGROUP_128),
             matrix.clone().into_tensor_arg(),
             out.clone().into_tensor_arg(),
             n_rows as u32,
             s_width as u32,
-            REDUCE_WG,
+            WORKGROUP_128,
         );
     }
 }
@@ -564,13 +550,13 @@ pub fn launch_dense_column_weighted_sum<R, A>(
         dense_column_weighted_sum::launch_unchecked::<A, R>(
             client,
             CubeCount::Static(gx, gy, 1),
-            CubeDim::new_1d(REDUCE_WG),
+            CubeDim::new_1d(WORKGROUP_128),
             weights.clone().into_tensor_arg(),
             matrix.clone().into_tensor_arg(),
             out.clone().into_tensor_arg(),
             n_rows as u32,
             s_width as u32,
-            REDUCE_WG,
+            WORKGROUP_128,
         );
     }
 }

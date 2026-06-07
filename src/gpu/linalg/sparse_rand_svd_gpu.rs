@@ -278,7 +278,6 @@ where
 
     let u_gpu = GpuTensor::<R, T>::empty(vec![n, n_components], &client);
     dense_gemm::<R, MP>(
-        &client,
         q_buf.handle(),
         [n, s],
         false,
@@ -286,6 +285,7 @@ where
         [s, n_components],
         u_gpu.handle(),
         [n, n_components],
+        &client,
     )?;
     let u_host = u_gpu.read(&client)?;
 

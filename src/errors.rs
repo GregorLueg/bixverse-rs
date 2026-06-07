@@ -472,9 +472,15 @@ pub enum BixverseErrors {
         /// Actual neighbour count in row 0
         found: usize,
     },
+
     // -- gpu --
     /// A GPU cubecl matrix multiplication error from the cubek crate
     #[cfg(feature = "gpu")]
     #[error("GPU: A matrix multiplication occurred: {0}")]
     GpuMatmul(String),
+    // -- gpu / single cell --
+    /// GPU Harmony only supports one co-variate for now (based on Arrowhead)
+    #[cfg(feature = "gpu")]
+    #[error("Harmony GPU: Only a single co-variate is supported for the GPU path")]
+    GpuHarmonySupportsSingleCovariateOnly,
 }
