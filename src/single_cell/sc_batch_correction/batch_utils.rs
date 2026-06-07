@@ -36,6 +36,30 @@ pub fn cosine_normalise(mat: &Mat<f32>) -> Mat<f32> {
     })
 }
 
+/// Process the batch labels
+///
+/// Deduplicates the batch labels and returns the number of unique batches
+///
+/// ### Params
+///
+/// * `batch_labels` - The batch labels (length is n_cells)
+///
+/// ### Returns
+///
+/// A tuple of `(unique_batch_labels, n_batch_labels)`
+pub fn process_batch_labels(batch_labels: &[usize]) -> (Vec<usize>, usize) {
+    let unique_batches: Vec<usize> = {
+        let mut batches: Vec<_> = batch_labels.to_vec();
+        batches.sort_unstable();
+        batches.dedup();
+        batches
+    };
+
+    let n_batches = unique_batches.len();
+
+    (unique_batches, n_batches)
+}
+
 ///////////
 // Tests //
 //////////

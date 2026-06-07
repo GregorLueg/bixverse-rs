@@ -318,6 +318,14 @@ pub enum BixverseErrors {
         /// Which field failed: "row", "col", or "value".
         field: &'static str,
     },
+    // -- Batch --
+    /// Need at least two batches for this method
+    #[cfg(feature = "single-cell")]
+    #[error("You need at least two batches. Provided {n_batches} batches.")]
+    NeedAtLeastTwoBatches {
+        /// Number of provided batches
+        n_batches: usize,
+    },
 
     // -- Format parsing --
     /// The `cs_type` string did not match a known sparse format.
