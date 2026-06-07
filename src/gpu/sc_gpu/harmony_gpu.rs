@@ -819,7 +819,7 @@ where
 
     if verbosity.normal_verbosity() {
         println!(
-            "Finished the GPU-accelerated Harmony (version2) in {:.2?}",
+            "Finished the GPU-accelerated Harmony (version 2) in {:.2?}",
             start.elapsed()
         )
     }
