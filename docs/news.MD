@@ -1,10 +1,13 @@
 # News
 
-## 0.3.0
+## 0.3.1
 
 ### Features
 
 #### GPU-accelerated methods:
+
+- Sparse, randomised SVD for single cell
+- Harmony (version 2) on GPU.
 
 ## 0.3.0
 

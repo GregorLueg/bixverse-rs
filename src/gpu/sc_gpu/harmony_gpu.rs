@@ -798,7 +798,7 @@ where
                 harmony_obj
             );
             println!(
-                "   Finished iteration in {:.2?} / Total runtime {:2.?}",
+                "   Finished iteration in {:.2?} / Total runtime {:.2?}",
                 start_iter.elapsed(),
                 start.elapsed()
             );
@@ -815,6 +815,13 @@ where
                 break;
             }
         }
+    }
+
+    if verbosity.normal_verbosity() {
+        println!(
+            "Finished the GPU-accelerated Harmony (version2) in {:.2?}",
+            start.elapsed()
+        )
     }
 
     let z_corr_host = z_corr_gpu.clone().read(&client)?;
