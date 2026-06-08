@@ -384,6 +384,25 @@ where
 
     let scaled = scale_matrix_col_gpu(&data_gpu, n_rows, n_cols, scale_sd, &client);
 
+    // 1. Confirm scaled is correct before the GEMM.
+    let scaled_dbg = scaled.clone().read(&client)?;
+    let nz = scaled_dbg
+        .iter()
+        .filter(|&&x| x.to_f32().unwrap_or(0.0).abs() > 1e-12)
+        .count();
+    let col0_sumsq: f32 = (0..n_rows)
+        .map(|i| {
+            let v = scaled_dbg[i * n_cols].to_f32().unwrap_or(0.0);
+            v * v
+        })
+        .sum();
+    println!(
+        "scaled: {} non-zero / {}, col 0 sum-of-squares = {} (expect ~1)",
+        nz,
+        n_rows * n_cols,
+        col0_sumsq
+    );
+
     let result = GpuTensor::<R, F>::empty(vec![n_cols, n_cols], &client);
 
     // S is [n_rows, n_cols] row-major; S^T view is [n_cols, n_rows] with
