@@ -19,5 +19,8 @@ pub const WORKGROUP_64: u32 = 64;
 /// Larger work group version with 128
 pub const WORKGROUP_128: u32 = 128;
 
+/// Even larger work group version with 256
+pub const WORKGROUP_256: u32 = 256;
+
 /// Very large work group version with 512
 pub const WORKGROUP_512: u32 = 512;

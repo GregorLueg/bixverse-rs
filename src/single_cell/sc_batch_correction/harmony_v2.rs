@@ -191,57 +191,54 @@ pub fn compute_objective_v2(
 ) -> f32 {
     let k = r.nrows();
     let n = r.ncols();
+    let n_vars = batch_infos.len();
     let norm_const = 2000.0 / n as f32;
 
-    let kmeans_plus_entropy: f32 = (0..n)
+    // precompute log_ratio per variable (small K x B tables).
+    let log_ratios: Vec<Vec<f32>> = batch_infos
+        .iter()
+        .enumerate()
+        .map(|(var_idx, info)| {
+            let b = info.n_levels;
+            let OEPair { o, e } = &oe_pairs[var_idx];
+            let mut lr = vec![0.0f32; k * b];
+            for cluster in 0..k {
+                for level in 0..b {
+                    let o_val = o[(cluster, level)];
+                    let e_val = e[(cluster, level)];
+                    lr[cluster * b + level] = ((o_val + e_val + 1.0) / (2.0 * e_val + 1.0)).ln();
+                }
+            }
+            lr
+        })
+        .collect();
+
+    // single fused sweep over cells: kmeans + entropy + all variables'
+    // cross-entropy in one go...
+    let total: f32 = (0..n)
         .into_par_iter()
-        .map(|cell_idx| {
+        .map(|cell| {
             let mut acc = 0.0f32;
-            for cluster_idx in 0..k {
-                let r_val = r[(cluster_idx, cell_idx)];
-                acc += r_val * dist_mat[(cluster_idx, cell_idx)];
+            for cluster in 0..k {
+                let r_val = r[(cluster, cell)];
+                let s_k = sigma[cluster];
+                acc += r_val * dist_mat[(cluster, cell)];
                 if r_val > 0.0 {
-                    acc += r_val * r_val.ln() * sigma[cluster_idx];
+                    acc += r_val * r_val.ln() * s_k;
+                }
+                for var_idx in 0..n_vars {
+                    let info = &batch_infos[var_idx];
+                    let level = info.cell_to_level[cell];
+                    let theta_l = theta_expanded[var_idx][level];
+                    let lr = log_ratios[var_idx][cluster * info.n_levels + level];
+                    acc += r_val * s_k * theta_l * lr;
                 }
             }
             acc
         })
         .sum();
 
-    let mut cross_entropy = 0.0f32;
-    for (var_idx, info) in batch_infos.iter().enumerate() {
-        let OEPair { o, e } = &oe_pairs[var_idx];
-        let b = info.n_levels;
-
-        let mut log_ratio = vec![0.0f32; k * b];
-        for cluster_idx in 0..k {
-            for level_idx in 0..b {
-                let o_val = o[(cluster_idx, level_idx)];
-                let e_val = e[(cluster_idx, level_idx)];
-                log_ratio[cluster_idx * b + level_idx] =
-                    ((o_val + e_val + 1.0) / (2.0 * e_val + 1.0)).ln();
-            }
-        }
-
-        let theta_levels = &theta_expanded[var_idx];
-        let ce_v: f32 = (0..n)
-            .into_par_iter()
-            .map(|cell_idx| {
-                let level = info.cell_to_level[cell_idx];
-                let theta_l = theta_levels[level];
-                let mut acc = 0.0f32;
-                for cluster_idx in 0..k {
-                    let r_val = r[(cluster_idx, cell_idx)];
-                    acc +=
-                        r_val * sigma[cluster_idx] * theta_l * log_ratio[cluster_idx * b + level];
-                }
-                acc
-            })
-            .sum();
-        cross_entropy += ce_v;
-    }
-
-    (kmeans_plus_entropy + cross_entropy) * norm_const
+    total * norm_const
 }
 
 ///////////////////
@@ -311,12 +308,16 @@ pub fn update_r_with_diversity_v2(
     let n_blocks = (1.0 / block_size).ceil() as usize;
     let cells_per_block = (n as f32 * block_size) as usize;
 
+    // re-used across blocks; sized to the largest block.
+    let mut new_cols_flat = vec![0.0f32; cells_per_block * k];
+
     for block_idx in 0..n_blocks {
         let idx_min = block_idx * cells_per_block;
         let idx_max = ((block_idx + 1) * cells_per_block).min(n);
         let block = &update_order[idx_min..idx_max];
+        let block_len = block.len();
 
-        // step 1: remove block cells from O and r_sum
+        // step 1: remove block cells from O and r_sum.
         for &cell_idx in block {
             for cluster_idx in 0..k {
                 r_sum[cluster_idx] -= r[(cluster_idx, cell_idx)];
@@ -330,13 +331,14 @@ pub fn update_r_with_diversity_v2(
             }
         }
 
-        // step 2: recompute R with stabilised penalty (parallel over cells)
-        let new_cols: Vec<Vec<f32>> = {
+        // step 2: recompute R for block cells into a pre-allocated flat buffer.
+        {
             let o_refs: Vec<MatRef<f32>> = oe.iter().map(|p| p.o.as_ref()).collect();
-            block
-                .par_iter()
-                .map(|&cell_idx| {
-                    let mut col = vec![0.0f32; k];
+            new_cols_flat[..block_len * k]
+                .par_chunks_mut(k)
+                .enumerate()
+                .for_each(|(i, col)| {
+                    let cell_idx = block[i];
                     let mut col_sum = 0.0f32;
                     for cluster_idx in 0..k {
                         let base = scale_dist[(cluster_idx, cell_idx)];
@@ -357,18 +359,16 @@ pub fn update_r_with_diversity_v2(
                             *v /= col_sum;
                         }
                     }
-                    col
-                })
-                .collect()
-        };
+                });
+        }
 
         for (i, &cell_idx) in block.iter().enumerate() {
             for cluster_idx in 0..k {
-                r[(cluster_idx, cell_idx)] = new_cols[i][cluster_idx];
+                r[(cluster_idx, cell_idx)] = new_cols_flat[i * k + cluster_idx];
             }
         }
 
-        // step 3: add block cells back to O and r_sum
+        // step 3: add block cells back to O and r_sum.
         for &cell_idx in block {
             for cluster_idx in 0..k {
                 r_sum[cluster_idx] += r[(cluster_idx, cell_idx)];
@@ -383,7 +383,7 @@ pub fn update_r_with_diversity_v2(
         }
     }
 
-    // rebuild E = r_sum (outer) pr_b for each variable
+    // rebuild E = r_sum (outer) pr_b for each variable.
     for (var_idx, info) in batch_infos.iter().enumerate() {
         let b = info.n_levels;
         let e = &mut oe[var_idx].e;
@@ -496,16 +496,181 @@ pub fn solve_lu(design_cov: &Mat<f32>, phi_z: &Mat<f32>) -> Mat<f32> {
     Mat::<f32>::from_fn(p, d, |i, j| w_f64[(i, j)] as f32)
 }
 
-/// Ridge regression correction with batch pruning, arrowhead optimisation, and
-/// optional dynamic lambda.
+/// Single-covariate fast path.
 ///
-/// The K per-cluster regressions are independent and are solved in parallel.
-/// Each cluster prunes low-occupancy levels, builds a reduced design matrix
-/// from the qualifying levels, and solves via arrowhead inversion (single
-/// active covariate) or LU. The batch corrections are then subtracted in a
-/// single pass that is parallel over cells, summing every cluster's
-/// contribution per cell. A per-variable `level -> column` lookup avoids
-/// rescanning the column map for every cell.
+/// One pass over cells builds the weighted segmented sum `S[level, cluster, :]`;
+/// each cluster's arrowhead system is then assembled from `S`, `O`, and `r_sum`
+/// without any further cell scan. Mirrors the GPU formulation in `harmony_gpu`.
+///
+/// ### Params
+///
+/// * `z_orig` - Original (uncorrected) data (N x d)
+/// * `r` - Soft assignments (K x N)
+/// * `info` - Batch information for the single covariate
+/// * `oe` - Observed/expected pair (used for pruning and dynamic lambda)
+/// * `lambda` - Fixed ridge penalty (used when `use_dynamic_lambda` is false)
+/// * `alpha` - Dynamic lambda multiplier: `lambda_kb = alpha * E_kb`
+/// * `use_dynamic_lambda` - Whether to use dynamic or fixed lambda
+/// * `batch_proportion_cutoff` - Minimum `O[k,b] / N_b` to include a level
+///
+/// ### Returns
+///
+/// Corrected data (N x d)
+#[allow(clippy::too_many_arguments)]
+fn ridge_regression_correction_v2_single(
+    z_orig: MatRef<f32>,
+    r: MatRef<f32>,
+    info: &BatchInfo,
+    oe: &OEPair,
+    lambda: f32,
+    alpha: f32,
+    use_dynamic_lambda: bool,
+    batch_proportion_cutoff: f32,
+) -> Mat<f32> {
+    let n = z_orig.nrows();
+    let d = z_orig.ncols();
+    let k = r.nrows();
+    let b = info.n_levels;
+
+    // Step 1: weighted segmented sum S in row-major [b * k * d], single cell sweep.
+    let s: Vec<f32> = (0..n)
+        .into_par_iter()
+        .fold(
+            || vec![0.0f32; b * k * d],
+            |mut acc, cell| {
+                let level = info.cell_to_level[cell];
+                for cluster in 0..k {
+                    let r_val = r[(cluster, cell)];
+                    let base = (level * k + cluster) * d;
+                    for feat in 0..d {
+                        acc[base + feat] += r_val * z_orig[(cell, feat)];
+                    }
+                }
+                acc
+            },
+        )
+        .reduce(
+            || vec![0.0f32; b * k * d],
+            |mut a, b_local| {
+                for i in 0..a.len() {
+                    a[i] += b_local[i];
+                }
+                a
+            },
+        );
+
+    let r_sum: Vec<f32> = (0..k)
+        .map(|cluster| (0..b).map(|level| oe.o[(cluster, level)]).sum::<f32>())
+        .collect();
+
+    // Step 2: per-cluster arrowhead solve (parallel; tiny systems).
+    type Solution = (Vec<usize>, Mat<f32>);
+    let solutions: Vec<Option<Solution>> = (0..k)
+        .into_par_iter()
+        .map(|cluster| {
+            let mut passing: Vec<usize> = Vec::new();
+            for level in 0..b {
+                let n_cells = info.batch_indices[level].len();
+                if n_cells == 0 {
+                    continue;
+                }
+                let avg_r = oe.o[(cluster, level)] / n_cells as f32;
+                if avg_r > batch_proportion_cutoff {
+                    passing.push(level);
+                }
+            }
+            if passing.len() <= 1 {
+                return None;
+            }
+
+            let p = 1 + passing.len();
+            let mut design = Mat::<f32>::zeros(p, p);
+            let mut phi_z = Mat::<f32>::zeros(p, d);
+
+            // Intercept: r_sum at (0,0); phi_z[0] = sum_l S[l, cluster, :]
+            design[(0, 0)] = r_sum[cluster];
+            for level in 0..b {
+                let base = (level * k + cluster) * d;
+                for feat in 0..d {
+                    phi_z[(0, feat)] += s[base + feat];
+                }
+            }
+
+            // Arrowhead arms for passing levels
+            for (col_off, &level) in passing.iter().enumerate() {
+                let cc = 1 + col_off;
+                let o_val = oe.o[(cluster, level)];
+                design[(0, cc)] = o_val;
+                design[(cc, 0)] = o_val;
+                design[(cc, cc)] = o_val;
+                let base = (level * k + cluster) * d;
+                for feat in 0..d {
+                    phi_z[(cc, feat)] = s[base + feat];
+                }
+            }
+
+            // Ridge penalty on batch diagonal (intercept unpenalised)
+            if use_dynamic_lambda {
+                for (col_off, &level) in passing.iter().enumerate() {
+                    let e_val = oe.e[(cluster, level)];
+                    design[(1 + col_off, 1 + col_off)] += alpha * e_val;
+                }
+            } else {
+                for i in 1..p {
+                    design[(i, i)] += lambda;
+                }
+            }
+
+            let w = solve_arrowhead(&design, &phi_z).unwrap_or_else(|| solve_lu(&design, &phi_z));
+
+            Some((passing, w))
+        })
+        .collect();
+
+    // Per-cluster level -> column lookup for the apply step.
+    let lookups: Vec<Vec<i32>> = solutions
+        .iter()
+        .map(|sol| {
+            let mut lookup = vec![-1i32; b];
+            if let Some((passing, _)) = sol {
+                for (pos, &level) in passing.iter().enumerate() {
+                    lookup[level] = (1 + pos) as i32;
+                }
+            }
+            lookup
+        })
+        .collect();
+
+    // Step 3: apply correction, parallel over cells.
+    let mut out = vec![0.0f32; n * d];
+    out.par_chunks_mut(d).enumerate().for_each(|(cell, row)| {
+        for feat in 0..d {
+            row[feat] = z_orig[(cell, feat)];
+        }
+        let level = info.cell_to_level[cell];
+        for cluster in 0..k {
+            let c = lookups[cluster][level];
+            if c >= 0
+                && let Some((_, w)) = &solutions[cluster]
+            {
+                let r_val = r[(cluster, cell)];
+                let c = c as usize;
+                for feat in 0..d {
+                    row[feat] -= r_val * w[(c, feat)];
+                }
+            }
+        }
+    });
+
+    Mat::from_fn(n, d, |i, j| out[i * d + j])
+}
+
+/// Multi-covariate fallback.
+///
+/// Builds a joint design matrix across all covariates per cluster. Active
+/// columns span every qualifying level from every variable; off-diagonal
+/// covariance blocks are filled in a single cell sweep. Systems with exactly
+/// one active variable are solved via arrowhead inversion; all others use LU.
 ///
 /// ### Params
 ///
@@ -523,7 +688,7 @@ pub fn solve_lu(design_cov: &Mat<f32>, phi_z: &Mat<f32>) -> Mat<f32> {
 ///
 /// Corrected data (N x d)
 #[allow(clippy::too_many_arguments)]
-pub fn ridge_regression_correction_v2(
+fn ridge_regression_correction_v2_multi(
     z_orig: MatRef<f32>,
     r: MatRef<f32>,
     batch_infos: &[BatchInfo],
@@ -541,14 +706,10 @@ pub fn ridge_regression_correction_v2(
     let o_refs: Vec<MatRef<f32>> = oe_pairs.iter().map(|p| p.o.as_ref()).collect();
     let e_refs: Vec<MatRef<f32>> = oe_pairs.iter().map(|p| p.e.as_ref()).collect();
 
-    // Phase 1 (parallel over clusters): solve each cluster's regression.
-    // For each cluster we keep its per-variable level->column lookup and the
-    // solved weights W (p x d). Clusters with nothing to correct return None.
     type Solution = (Vec<Vec<i32>>, Mat<f32>);
     let solutions: Vec<Option<Solution>> = (0..k)
         .into_par_iter()
         .map(|cluster_idx| {
-            // batch pruning: column map and per-variable level->column lookup
             let mut col_map: Vec<(usize, usize)> = Vec::new();
             let mut level_to_col: Vec<Vec<i32>> = batch_infos
                 .iter()
@@ -615,7 +776,6 @@ pub fn ridge_regression_correction_v2(
                 }
             }
 
-            // lambda on batch columns only (intercept at col 0 gets no penalty)
             if use_dynamic_lambda {
                 for (col_offset, &(var_idx, level_idx)) in col_map.iter().enumerate() {
                     let e_val = e_refs[var_idx][(cluster_idx, level_idx)];
@@ -638,9 +798,6 @@ pub fn ridge_regression_correction_v2(
         })
         .collect();
 
-    // Phase 2 (parallel over cells): subtract every cluster's batch correction.
-    // Built row-major so each cell writes a contiguous row; intercept (row 0 of
-    // each W) is never subtracted.
     let mut out = vec![0.0f32; n * d];
     out.par_chunks_mut(d)
         .enumerate()
@@ -666,6 +823,68 @@ pub fn ridge_regression_correction_v2(
         });
 
     Mat::from_fn(n, d, |i, j| out[i * d + j])
+}
+
+/// Ridge regression correction with batch pruning, arrowhead optimisation, and
+/// optional dynamic lambda.
+///
+/// The K per-cluster regressions are independent and are solved in parallel.
+/// Each cluster prunes low-occupancy levels, builds a reduced design matrix
+/// from the qualifying levels, and solves via arrowhead inversion (single
+/// active covariate) or LU. The batch corrections are then subtracted in a
+/// single pass that is parallel over cells, summing every cluster's
+/// contribution per cell. A per-variable `level -> column` lookup avoids
+/// rescanning the column map for every cell.
+///
+/// ### Params
+///
+/// * `z_orig` - Original (uncorrected) data (N x d)
+/// * `r` - Soft assignments (K x N)
+/// * `batch_infos` - Batch information per variable
+/// * `oe_pairs` - Observed/expected pairs per variable (used for pruning
+///   and dynamic lambda)
+/// * `lambda` - Fixed ridge penalty (used when `use_dynamic_lambda` is false)
+/// * `alpha` - Dynamic lambda multiplier: `lambda_kb = alpha * E_kb`
+/// * `use_dynamic_lambda` - Whether to use dynamic or fixed lambda
+/// * `batch_proportion_cutoff` - Minimum `O[k,b] / N_b` to include a level
+///
+/// ### Returns
+///
+/// Corrected data (N x d)
+#[allow(clippy::too_many_arguments)]
+pub fn ridge_regression_correction_v2(
+    z_orig: MatRef<f32>,
+    r: MatRef<f32>,
+    batch_infos: &[BatchInfo],
+    oe_pairs: &[OEPair],
+    lambda: f32,
+    alpha: f32,
+    use_dynamic_lambda: bool,
+    batch_proportion_cutoff: f32,
+) -> Mat<f32> {
+    if batch_infos.len() == 1 {
+        ridge_regression_correction_v2_single(
+            z_orig,
+            r,
+            &batch_infos[0],
+            &oe_pairs[0],
+            lambda,
+            alpha,
+            use_dynamic_lambda,
+            batch_proportion_cutoff,
+        )
+    } else {
+        ridge_regression_correction_v2_multi(
+            z_orig,
+            r,
+            batch_infos,
+            oe_pairs,
+            lambda,
+            alpha,
+            use_dynamic_lambda,
+            batch_proportion_cutoff,
+        )
+    }
 }
 
 //////////////////

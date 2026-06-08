@@ -793,7 +793,7 @@ where
 
         if verbosity.normal_verbosity() {
             println!(
-                "GPU Harmony v2: iteration {} objective {:.4}",
+                "  GPU Harmony v2: iteration {} objective {:.4}",
                 harmony_iter + 1,
                 harmony_obj
             );
@@ -810,7 +810,10 @@ where
             let rel_change = (obj_old - obj_new) / obj_old.abs();
             if rel_change < params.epsilon_harmony {
                 if verbosity.normal_verbosity() {
-                    println!("GPU Harmony v2 converged at iteration {}", harmony_iter + 1);
+                    println!(
+                        " GPU Harmony v2 converged at iteration {}",
+                        harmony_iter + 1
+                    );
                 }
                 break;
             }

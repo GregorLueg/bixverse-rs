@@ -4,6 +4,10 @@
 
 ### Features
 
+#### Single cells
+
+- Improved verbosity on harmony and better performance
+
 #### GPU-accelerated methods:
 
 - Sparse, randomised SVD for single cell

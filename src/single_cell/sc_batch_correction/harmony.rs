@@ -239,28 +239,21 @@ pub fn initialise_r_from_dist(dist_mat: MatRef<f32>, sigma: &[f32]) -> Mat<f32> 
     let n = dist_mat.ncols();
     assert_eq!(sigma.len(), k, "sigma length must match number of clusters");
 
-    let columns: Vec<_> = (0..n)
-        .into_par_iter()
-        .map(|cell_idx| {
-            let mut col_sum = 0.0f32;
-            let mut col = vec![0.0f32; k];
+    // pre-allocation trick also here...
+    let mut flat = vec![0.0f32; n * k];
+    flat.par_chunks_mut(k).enumerate().for_each(|(cell, col)| {
+        let mut col_sum = 0.0f32;
+        for cluster in 0..k {
+            let val = (-dist_mat[(cluster, cell)] / sigma[cluster]).exp();
+            col[cluster] = val;
+            col_sum += val;
+        }
+        for v in col.iter_mut() {
+            *v /= col_sum;
+        }
+    });
 
-            for cluster_idx in 0..k {
-                let dist = dist_mat[(cluster_idx, cell_idx)];
-                let val = (-dist / sigma[cluster_idx]).exp();
-                col[cluster_idx] = val;
-                col_sum += val;
-            }
-
-            for cluster_idx in 0..k {
-                col[cluster_idx] /= col_sum;
-            }
-
-            col
-        })
-        .collect();
-
-    Mat::from_fn(k, n, |i, j| columns[j][i])
+    Mat::from_fn(k, n, |cluster, cell| flat[cell * k + cluster])
 }
 
 /// Compute observed and expected diversity statistics for one variable.
@@ -278,31 +271,43 @@ pub fn initialise_r_from_dist(dist_mat: MatRef<f32>, sigma: &[f32]) -> Mat<f32> 
 /// `OEPair` of (O: K x B, E: K x B)
 pub fn compute_diversity_statistics(r: MatRef<f32>, info: &BatchInfo) -> OEPair {
     let k = r.nrows();
+    let n = r.ncols();
     let b = info.n_levels;
 
-    let mut o = Mat::zeros(k, b);
+    // per-cell scatter with thread-local accumulators -> small reduce
+    // should be faster... ?
+    let o_flat: Vec<f32> = (0..n)
+        .into_par_iter()
+        .fold(
+            || vec![0.0f32; b * k],
+            |mut acc, cell| {
+                let level = info.cell_to_level[cell];
+                for cluster in 0..k {
+                    acc[level * k + cluster] += r[(cluster, cell)];
+                }
+                acc
+            },
+        )
+        .reduce(
+            || vec![0.0f32; b * k],
+            |mut a, b_local| {
+                for i in 0..a.len() {
+                    a[i] += b_local[i];
+                }
+                a
+            },
+        );
 
-    for (level_idx, cell_indices) in info.batch_indices.iter().enumerate() {
-        for &cell_idx in cell_indices {
-            for cluster_idx in 0..k {
-                o[(cluster_idx, level_idx)] += r[(cluster_idx, cell_idx)];
-            }
-        }
-    }
+    let o = Mat::from_fn(k, b, |cluster, level| o_flat[level * k + cluster]);
 
     let mut row_sums = vec![0.0f32; k];
-    for cluster_idx in 0..k {
-        for level_idx in 0..b {
-            row_sums[cluster_idx] += o[(cluster_idx, level_idx)];
+    for level in 0..b {
+        for cluster in 0..k {
+            row_sums[cluster] += o_flat[level * k + cluster];
         }
     }
 
-    let mut e = Mat::zeros(k, b);
-    for cluster_idx in 0..k {
-        for level_idx in 0..b {
-            e[(cluster_idx, level_idx)] = row_sums[cluster_idx] * info.pr_b[level_idx];
-        }
-    }
+    let e = Mat::from_fn(k, b, |cluster, level| row_sums[cluster] * info.pr_b[level]);
 
     OEPair { o, e }
 }
@@ -736,26 +741,23 @@ pub fn compute_scaled_distances(dist_mat: MatRef<f32>, sigma: &[f32]) -> Mat<f32
     let n = dist_mat.ncols();
     assert_eq!(sigma.len(), k, "sigma length must match number of clusters");
 
-    let columns: Vec<Vec<f32>> = (0..n)
-        .into_par_iter()
-        .map(|cell_idx| {
-            let mut col = vec![0.0f32; k];
-            let mut col_sum = 0.0f32;
-            for cluster_idx in 0..k {
-                let val = (-dist_mat[(cluster_idx, cell_idx)] / sigma[cluster_idx]).exp();
-                col[cluster_idx] = val;
-                col_sum += val;
+    // pre-allocation and then filling it
+    let mut flat = vec![0.0f32; n * k];
+    flat.par_chunks_mut(k).enumerate().for_each(|(cell, col)| {
+        let mut col_sum = 0.0f32;
+        for cluster in 0..k {
+            let val = (-dist_mat[(cluster, cell)] / sigma[cluster]).exp();
+            col[cluster] = val;
+            col_sum += val;
+        }
+        if col_sum > 0.0 {
+            for v in col.iter_mut() {
+                *v /= col_sum;
             }
-            if col_sum > 0.0 {
-                for v in col.iter_mut() {
-                    *v /= col_sum;
-                }
-            }
-            col
-        })
-        .collect();
+        }
+    });
 
-    Mat::from_fn(k, n, |i, j| columns[j][i])
+    Mat::from_fn(k, n, |cluster, cell| flat[cell * k + cluster])
 }
 
 /////////////
