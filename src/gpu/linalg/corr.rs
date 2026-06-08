@@ -1,5 +1,6 @@
 //! GPU-accelerated correlations and co-variance calculations, leveraging the
-//! fast GEMM on the GPU.
+//! fast GEMM on the GPU. Should be faster than the faer stuff on very large
+//! data sets.
 
 #![allow(missing_docs)]
 
@@ -388,4 +389,255 @@ where
     Ok(Mat::from_fn(n_cols, n_cols, |i, j| {
         result_flat[i * n_cols + j]
     }))
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+
+    fn try_device() -> Option<WgpuDevice> {
+        let device = WgpuDevice::DefaultDevice;
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            WgpuRuntime::client(&device);
+        }))
+        .ok()
+        .map(|_| device)
+    }
+
+    fn assert_mat_close(got: &Mat<f32>, want: &Mat<f32>, tol: f32) {
+        assert_eq!(got.nrows(), want.nrows());
+        assert_eq!(got.ncols(), want.ncols());
+        for i in 0..got.nrows() {
+            for j in 0..got.ncols() {
+                assert!(
+                    (got[(i, j)] - want[(i, j)]).abs() < tol,
+                    "({},{}) got {} want {} diff {}",
+                    i,
+                    j,
+                    got[(i, j)],
+                    want[(i, j)],
+                    (got[(i, j)] - want[(i, j)]).abs()
+                );
+            }
+        }
+    }
+
+    /////////////
+    // Helpers //
+    /////////////
+
+    fn cpu_col_means(data: &[f32], n: usize, d: usize) -> Vec<f32> {
+        let mut means = vec![0.0f32; d];
+        for i in 0..n {
+            for j in 0..d {
+                means[j] += data[i * d + j];
+            }
+        }
+        for j in 0..d {
+            means[j] /= n as f32;
+        }
+        means
+    }
+
+    fn cpu_pearson(data: &[f32], n: usize, d: usize) -> Mat<f32> {
+        let means = cpu_col_means(data, n, d);
+        let mut stds = vec![0.0f32; d];
+        for i in 0..n {
+            for j in 0..d {
+                let diff = data[i * d + j] - means[j];
+                stds[j] += diff * diff;
+            }
+        }
+        for j in 0..d {
+            stds[j] = (stds[j] / (n - 1) as f32).sqrt().max(1e-10);
+        }
+        let inv_sqrt_nm1 = 1.0 / ((n - 1) as f32).sqrt();
+        let mut scaled = vec![0.0f32; n * d];
+        for i in 0..n {
+            for j in 0..d {
+                scaled[i * d + j] = (data[i * d + j] - means[j]) * inv_sqrt_nm1 / stds[j];
+            }
+        }
+        Mat::from_fn(d, d, |a, b| {
+            (0..n)
+                .map(|i| scaled[i * d + a] * scaled[i * d + b])
+                .sum::<f32>()
+        })
+    }
+
+    fn cpu_covariance(data: &[f32], n: usize, d: usize) -> Mat<f32> {
+        let means = cpu_col_means(data, n, d);
+        let inv_sqrt_nm1 = 1.0 / ((n - 1) as f32).sqrt();
+        let mut scaled = vec![0.0f32; n * d];
+        for i in 0..n {
+            for j in 0..d {
+                scaled[i * d + j] = (data[i * d + j] - means[j]) * inv_sqrt_nm1;
+            }
+        }
+        Mat::from_fn(d, d, |a, b| {
+            (0..n)
+                .map(|i| scaled[i * d + a] * scaled[i * d + b])
+                .sum::<f32>()
+        })
+    }
+
+    fn cpu_rank_cols(data: &[f32], n: usize, d: usize) -> Vec<f32> {
+        let mut ranked = vec![0.0f32; n * d];
+        for j in 0..d {
+            let mut col: Vec<(usize, f32)> = (0..n).map(|i| (i, data[i * d + j])).collect();
+            col.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+            let mut i = 0;
+            while i < n {
+                let val = col[i].1;
+                let mut end = i + 1;
+                while end < n && col[end].1 == val {
+                    end += 1;
+                }
+                // 1-based average rank for the tied block
+                let avg_rank = (i + end + 1) as f32 / 2.0;
+                for k in i..end {
+                    ranked[col[k].0 * d + j] = avg_rank;
+                }
+                i = end;
+            }
+        }
+        ranked
+    }
+
+    fn cpu_spearman(data: &[f32], n: usize, d: usize) -> Mat<f32> {
+        let ranked = cpu_rank_cols(data, n, d);
+        cpu_pearson(&ranked, n, d)
+    }
+
+    //////////////////
+    // Actual tests //
+    //////////////////
+
+    #[test]
+    fn test_pearson_matches_cpu() {
+        let Some(device) = try_device() else { return };
+        let (n, d) = (80, 6);
+        let data: Vec<f32> = (0..n * d)
+            .map(|i| ((i * 7 + 3) % 23) as f32 * 0.2 - 1.0)
+            .collect();
+        let mat = Mat::from_fn(n, d, |i, j| data[i * d + j]);
+
+        let got = column_pairwise_cor_gpu::<f32, WgpuRuntime, f32>(
+            mat.as_ref(),
+            GpuCorCov::Pearson,
+            device,
+        )
+        .unwrap();
+
+        assert_mat_close(&got, &cpu_pearson(&data, n, d), 1e-4);
+    }
+
+    #[test]
+    fn test_covariance_matches_cpu() {
+        let Some(device) = try_device() else { return };
+        let (n, d) = (80, 6);
+        let data: Vec<f32> = (0..n * d)
+            .map(|i| ((i * 11 + 5) % 17) as f32 * 0.3 - 2.0)
+            .collect();
+        let mat = Mat::from_fn(n, d, |i, j| data[i * d + j]);
+
+        let got = column_pairwise_cor_gpu::<f32, WgpuRuntime, f32>(
+            mat.as_ref(),
+            GpuCorCov::Covariance,
+            device,
+        )
+        .unwrap();
+
+        assert_mat_close(&got, &cpu_covariance(&data, n, d), 1e-4);
+    }
+
+    #[test]
+    fn test_spearman_matches_cpu() {
+        let Some(device) = try_device() else { return };
+        let (n, d) = (60, 5);
+        let data: Vec<f32> = (0..n * d)
+            .map(|i| ((i * 13 + 7) % 19) as f32 * 0.5)
+            .collect();
+        let mat = Mat::from_fn(n, d, |i, j| data[i * d + j]);
+
+        let got = column_pairwise_cor_gpu::<f32, WgpuRuntime, f32>(
+            mat.as_ref(),
+            GpuCorCov::Spearman,
+            device,
+        )
+        .unwrap();
+
+        assert_mat_close(&got, &cpu_spearman(&data, n, d), 1e-4);
+    }
+
+    // Pearson diagonal must be ~1.
+    #[test]
+    fn test_pearson_diagonal_ones() {
+        let Some(device) = try_device() else { return };
+        let (n, d) = (100, 8);
+        let data: Vec<f32> = (0..n * d)
+            .map(|i| ((i * 9 + 1) % 31) as f32 * 0.1)
+            .collect();
+        let mat = Mat::from_fn(n, d, |i, j| data[i * d + j]);
+
+        let got = column_pairwise_cor_gpu::<f32, WgpuRuntime, f32>(
+            mat.as_ref(),
+            GpuCorCov::Pearson,
+            device,
+        )
+        .unwrap();
+
+        for j in 0..d {
+            assert!(
+                (got[(j, j)] - 1.0).abs() < 1e-4,
+                "diagonal[{}] = {} != 1.0",
+                j,
+                got[(j, j)]
+            );
+        }
+    }
+
+    // All three variants must produce a symmetric matrix.
+    #[test]
+    fn test_output_symmetric() {
+        let Some(device) = try_device() else { return };
+        let (n, d) = (80, 6);
+        let data: Vec<f32> = (0..n * d)
+            .map(|i| ((i * 7 + 5) % 13) as f32 * 0.4)
+            .collect();
+
+        for cor_type in [
+            GpuCorCov::Pearson,
+            GpuCorCov::Covariance,
+            GpuCorCov::Spearman,
+        ] {
+            let mat = Mat::from_fn(n, d, |i, j| data[i * d + j]);
+            let got = column_pairwise_cor_gpu::<f32, WgpuRuntime, f32>(
+                mat.as_ref(),
+                cor_type,
+                device.clone(),
+            )
+            .unwrap();
+
+            for i in 0..d {
+                for j in 0..d {
+                    assert!(
+                        (got[(i, j)] - got[(j, i)]).abs() < 1e-5,
+                        "not symmetric at ({},{}) vs ({},{}): {} vs {}",
+                        i,
+                        j,
+                        j,
+                        i,
+                        got[(i, j)],
+                        got[(j, i)]
+                    );
+                }
+            }
+        }
+    }
 }

@@ -12,6 +12,7 @@
 
 - Sparse, randomised SVD for single cell
 - Harmony (version 2) on GPU.
+- GPU-accelerated covariance and correlations (column-wise).
 
 ## 0.3.0
 
