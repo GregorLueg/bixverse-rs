@@ -10,6 +10,7 @@ use ann_search_rs::utils::matrix_to_flat;
 use cubecl::prelude::*;
 use cubek::matmul::definition::MatmulPrecision;
 use faer::{Mat, MatRef};
+use std::time::Instant;
 
 use crate::core::math::matrix_helpers::rank_matrix_col;
 use crate::gpu::linalg::cholesky_gpu::dense_gemm;
@@ -337,6 +338,7 @@ where
 /// * `mat` - Input matrix (N x d)
 /// * `cor_type` - Correlation or covariance variant to compute
 /// * `device` - CubeCL device to run on
+/// * `verbose` - Controls verbosity of the function
 ///
 /// ### Returns
 ///
@@ -346,16 +348,23 @@ pub fn column_pairwise_cor_gpu<F, R, MP>(
     mat: MatRef<F>,
     cor_type: GpuCorCov,
     device: R::Device,
+    verbose: bool,
 ) -> Result<Mat<F>, BixverseErrors>
 where
     R: Runtime,
     F: Float + cubecl::CubeElement + BixverseFloat,
     MP: MatmulPrecision,
 {
+    let start = Instant::now();
+
     let mat = match cor_type {
         GpuCorCov::Spearman => rank_matrix_col(&mat),
         _ => mat.to_owned(),
     };
+
+    if verbose {
+        println!("Moving data to GPU...")
+    }
 
     let scale_sd = !matches!(cor_type, GpuCorCov::Covariance);
 
@@ -367,6 +376,12 @@ where
     let client = R::client(&device);
 
     let data_gpu = GpuTensor::<R, F>::from_slice(&data_flat, vec![n_rows, n_cols], &client);
+
+    if verbose {
+        println!(" ... done in {:.2?}", start.elapsed());
+        println!("Starting calculations...");
+    }
+
     let scaled = scale_matrix_col_gpu(&data_gpu, n_rows, n_cols, scale_sd, &client);
 
     let result = GpuTensor::<R, F>::empty(vec![n_cols, n_cols], &client);
@@ -385,6 +400,10 @@ where
     )?;
 
     let result_flat = result.read(&client)?;
+
+    if verbose {
+        println!(" ... done in {:.2?}", start.elapsed());
+    }
 
     Ok(Mat::from_fn(n_cols, n_cols, |i, j| {
         result_flat[i * n_cols + j]
@@ -531,6 +550,7 @@ mod tests {
             mat.as_ref(),
             GpuCorCov::Pearson,
             device,
+            false,
         )
         .unwrap();
 
@@ -550,6 +570,7 @@ mod tests {
             mat.as_ref(),
             GpuCorCov::Covariance,
             device,
+            false,
         )
         .unwrap();
 
@@ -569,6 +590,7 @@ mod tests {
             mat.as_ref(),
             GpuCorCov::Spearman,
             device,
+            false,
         )
         .unwrap();
 
@@ -589,6 +611,7 @@ mod tests {
             mat.as_ref(),
             GpuCorCov::Pearson,
             device,
+            false,
         )
         .unwrap();
 
@@ -621,6 +644,7 @@ mod tests {
                 mat.as_ref(),
                 cor_type,
                 device.clone(),
+                false,
             )
             .unwrap();
 
