@@ -1096,7 +1096,7 @@ pub fn harmony_v2(
         if verbosity.normal_verbosity() {
             println!("  Harmony objective: {:.4}", harmony_obj);
             println!(
-                "   Finished iteration in {:.2?} / Total runtime {:2.?}",
+                "   Finished iteration in {:.2?} / Total runtime {:.2?}",
                 start_iter.elapsed(),
                 start.elapsed()
             );
