@@ -4,6 +4,7 @@ use extendr_api::*;
 use std::collections::HashMap;
 
 use crate::gpu::ml::k_means_gpu::KMeansGpuParams;
+#[cfg(feature = "single-cell")]
 use crate::gpu::sc_gpu::harmony_gpu::HarmonyParamsV2Gpu;
 use crate::ml::clustering::k_means::parse_kmeans_init;
 
@@ -52,6 +53,7 @@ impl KMeansGpuParams {
 // HarmonyParamsV2Gpu //
 ////////////////////////
 
+#[cfg(feature = "single-cell")]
 impl HarmonyParamsV2Gpu {
     /// Generate HarmonyParamsV2Gpu from an R list.
     ///

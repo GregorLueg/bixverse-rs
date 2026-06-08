@@ -115,6 +115,7 @@ pub fn dense_gemm<R, MP>(
     b_logical_shape: [usize; 2],
     c_handle: &Handle,
     c_shape: [usize; 2],
+    strategy: Option<Strategy>,
     client: &ComputeClient<R>,
 ) -> Result<(), BixverseErrors>
 where
@@ -122,13 +123,14 @@ where
     MP: MatmulPrecision,
 {
     let mut dtypes = MatmulElems::new_deprecated::<MP>();
+    let strategy = strategy.unwrap_or(Strategy::Auto);
 
     let a_tensor = wrap_handle::<R>(a_handle, a_logical_shape, a_transposed, dtypes.lhs_global);
     let b_tensor = wrap_handle::<R>(b_handle, b_logical_shape, false, dtypes.rhs_global);
     let c_tensor = wrap_handle::<R>(c_handle, c_shape, false, dtypes.acc_global);
 
     launch_ref(
-        &Strategy::Auto,
+        &strategy,
         client,
         InputBinding::Normal(a_tensor.binding(), dtypes.lhs_global),
         InputBinding::Normal(b_tensor.binding(), dtypes.rhs_global),
@@ -231,6 +233,7 @@ where
         [n, s],
         g_scratch.handle(),
         [s, s],
+        None,
         client,
     )?;
 
@@ -252,6 +255,7 @@ where
         [s, s],
         output.handle(),
         [n, s],
+        None,
         client,
     )?;
 

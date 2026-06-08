@@ -9,6 +9,7 @@ use ann_search_rs::gpu::*;
 use ann_search_rs::utils::matrix_to_flat;
 use cubecl::prelude::*;
 use cubek::matmul::definition::MatmulPrecision;
+use cubek::matmul::launch::Strategy;
 use faer::{Mat, MatRef};
 use std::time::Instant;
 
@@ -384,37 +385,23 @@ where
 
     let scaled = scale_matrix_col_gpu(&data_gpu, n_rows, n_cols, scale_sd, &client);
 
-    // 1. Confirm scaled is correct before the GEMM.
-    let scaled_dbg = scaled.clone().read(&client)?;
-    let nz = scaled_dbg
-        .iter()
-        .filter(|&&x| x.to_f32().unwrap_or(0.0).abs() > 1e-12)
-        .count();
-    let col0_sumsq: f32 = (0..n_rows)
-        .map(|i| {
-            let v = scaled_dbg[i * n_cols].to_f32().unwrap_or(0.0);
-            v * v
-        })
-        .sum();
-    println!(
-        "scaled: {} non-zero / {}, col 0 sum-of-squares = {} (expect ~1)",
-        nz,
-        n_rows * n_cols,
-        col0_sumsq
-    );
-
     let result = GpuTensor::<R, F>::empty(vec![n_cols, n_cols], &client);
+
+    let scaled_host = scaled.clone().read(&client)?;
+    let scaled_b = GpuTensor::<R, F>::from_slice(&scaled_host, vec![n_rows, n_cols], &client);
 
     // S is [n_rows, n_cols] row-major; S^T view is [n_cols, n_rows] with
     // swapped strides (handled by `a_transposed = true` in dense_gemm).
     dense_gemm::<R, MP>(
-        scaled.handle(), // <-- see question below
+        scaled.handle(),
         [n_cols, n_rows],
         true,
-        scaled.handle(),
+        scaled_b.handle(),
         [n_rows, n_cols],
         result.handle(),
         [n_cols, n_cols],
+        // otherwise, this can blow up on Apple devices
+        Some(Strategy::DoubleUnit(Default::default())),
         &client,
     )?;
 

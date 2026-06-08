@@ -296,6 +296,7 @@ where
         [n, dim],
         y_out.handle(),
         [k, dim],
+        None,
         client,
     )?;
 

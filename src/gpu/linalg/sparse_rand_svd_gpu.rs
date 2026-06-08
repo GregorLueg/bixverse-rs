@@ -285,6 +285,7 @@ where
         [s, n_components],
         u_gpu.handle(),
         [n, n_components],
+        None,
         &client,
     )?;
     let u_host = u_gpu.read(&client)?;
