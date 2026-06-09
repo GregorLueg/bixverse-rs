@@ -6,7 +6,7 @@
 
 #### Single cells
 
-- Improved verbosity on harmony and better performance
+- Improved verbosity on Harmony and better performance (version 1 and 2).
 
 #### GPU-accelerated methods:
 

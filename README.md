@@ -21,16 +21,19 @@ next targets would be
 
 - [ ] NMF for dense and sparse data
 - [ ] Palantir for single-cell trajectories, see
-  [Setty, et al.](https://www.nature.com/articles/s41587-019-0068-4)
+  [Setty, et al.](https://www.nature.com/articles/s41587-019-0068-4).
+- [ ] Slingshot for single-cell trajectories, see
+  [Street, et al.](https://link.springer.com/article/10.1186/s12864-018-4772-0).
 - [ ] NicheNet for single cell, see
-  [Browaeys et al.](https://www.nature.com/articles/s41592-019-0667-5)
+  [Browaeys et al.](https://www.nature.com/articles/s41592-019-0667-5).
 
 ### GPU accelerations
 
 - [x] GPU-accelerated sparse, randomised SVD
 - [x] GPU-accelerated Harmony
 - [ ] GPU-accelerated BBKNN version
-- [ ] GPU-accelerated correlations
+- [x] GPU-accelerated correlations (Metal does not have the absolute greatest
+  performance here unfortunately...)
 
 ### Python interface
 
