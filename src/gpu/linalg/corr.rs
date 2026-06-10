@@ -387,16 +387,14 @@ where
 
     let result = GpuTensor::<R, F>::empty(vec![n_cols, n_cols], &client);
 
-    let scaled_host = scaled.clone().read(&client)?;
-    let scaled_b = GpuTensor::<R, F>::from_slice(&scaled_host, vec![n_rows, n_cols], &client);
-
     // S is [n_rows, n_cols] row-major; S^T view is [n_cols, n_rows] with
     // swapped strides (handled by `a_transposed = true` in dense_gemm).
+    // Both inputs are read-only, so the same buffer is passed twice.
     dense_gemm::<R, MP>(
         scaled.handle(),
         [n_cols, n_rows],
         true,
-        scaled_b.handle(),
+        scaled.handle(),
         [n_rows, n_cols],
         result.handle(),
         [n_cols, n_cols],
