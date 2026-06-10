@@ -5,7 +5,6 @@
 
 use cubecl::Runtime;
 use indexmap::IndexSet;
-use rayon::prelude::*;
 use std::time::Instant;
 
 use crate::core::math::pca_svd::*;
@@ -63,7 +62,8 @@ where
     let start_reading = Instant::now();
 
     let reader = ParallelSparseReader::new(f_path)?;
-    let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(gene_indices)?;
+    let gene_chunks: Vec<CscGeneChunk> =
+        reader.read_gene_parallel_filtered(gene_indices, &cell_set)?;
 
     let end_reading = start_reading.elapsed();
 
@@ -77,10 +77,6 @@ where
     let start_data_prep = Instant::now();
 
     let n_cells = cell_set.len();
-
-    gene_chunks.par_iter_mut().for_each(|chunk| {
-        chunk.filter_selected_cells(&cell_set);
-    });
 
     let csc: CompressedSparseData2<f32> =
         from_gene_chunks::<f32>(gene_chunks, &DataLayerReturn::Norm, n_cells);

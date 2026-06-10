@@ -360,16 +360,13 @@ pub fn pca_observed(
 
     let start_reading = Instant::now();
     let reader = ParallelSparseReader::new(f_path_gene)?;
-    let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(gene_indices)?;
+    let mut gene_chunks: Vec<CscGeneChunk> =
+        reader.read_gene_parallel_filtered(gene_indices, &cell_set)?;
     if verbosity.normal_verbosity() {
         println!("Loaded in data: {:.2?}", start_reading.elapsed());
     }
 
     let start_prep = Instant::now();
-
-    gene_chunks.par_iter_mut().for_each(|chunk| {
-        chunk.filter_selected_cells(&cell_set);
-    });
 
     gene_chunks.par_iter_mut().for_each(|chunk| {
         for (i, &pos) in chunk.indices.iter().enumerate() {

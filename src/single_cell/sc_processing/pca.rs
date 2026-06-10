@@ -255,7 +255,8 @@ pub fn pca_on_sc(
     let start_reading = Instant::now();
 
     let reader = ParallelSparseReader::new(f_path)?;
-    let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(gene_indices)?;
+    let gene_chunks: Vec<CscGeneChunk> =
+        reader.read_gene_parallel_filtered(gene_indices, &cell_set)?;
 
     let end_reading = start_reading.elapsed();
 
@@ -264,10 +265,6 @@ pub fn pca_on_sc(
     }
 
     let start_scaling = Instant::now();
-
-    gene_chunks.par_iter_mut().for_each(|chunk| {
-        chunk.filter_selected_cells(&cell_set);
-    });
 
     let scaled_data: Vec<Vec<f32>> = gene_chunks
         .par_iter()
@@ -414,14 +411,10 @@ pub fn pca_on_sc_streaming(
         let batch_gene_indices = &gene_indices[start_gene..end_gene];
 
         let start_loading = Instant::now();
-        let mut gene_chunks = reader.read_gene_parallel(batch_gene_indices)?;
+        let gene_chunks = reader.read_gene_parallel_filtered(batch_gene_indices, &cell_set)?;
         if verbosity.detailed_verbosity() {
             println!("  Loaded batch in: {:.2?}", start_loading.elapsed());
         }
-
-        gene_chunks.par_iter_mut().for_each(|chunk| {
-            chunk.filter_selected_cells(&cell_set);
-        });
 
         let batch_scaled: Vec<Vec<f32>> = gene_chunks
             .par_iter()
@@ -547,7 +540,8 @@ pub fn pca_on_sc_sparse(
     let start_reading = Instant::now();
 
     let reader = ParallelSparseReader::new(f_path)?;
-    let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(gene_indices)?;
+    let gene_chunks: Vec<CscGeneChunk> =
+        reader.read_gene_parallel_filtered(gene_indices, &cell_set)?;
 
     let end_reading = start_reading.elapsed();
 
@@ -558,10 +552,6 @@ pub fn pca_on_sc_sparse(
     let start_data_prep = Instant::now();
 
     let n_cells = cell_set.len();
-
-    gene_chunks.par_iter_mut().for_each(|chunk| {
-        chunk.filter_selected_cells(&cell_set);
-    });
 
     let csc = from_gene_chunks::<f32>(gene_chunks, &DataLayerReturn::Norm, n_cells);
 

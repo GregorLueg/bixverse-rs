@@ -1415,6 +1415,59 @@ impl ParallelSparseReader {
             .collect()
     }
 
+    /// Read in genes by indices in a multi-threaded manner
+    ///
+    /// And filter the genes by `cells_to_keep` in parallel.
+    ///
+    /// ### Params
+    ///
+    /// * `indices` - Slice of index positions of the genes to retrieve
+    ///
+    /// ### Returns
+    ///
+    /// Returns an array of `CscGeneChunk`.
+    pub fn read_gene_parallel_filtered(
+        &self,
+        indices: &[usize],
+        cells_to_keep: &IndexSet<u32>,
+    ) -> Result<Vec<CscGeneChunk>, BixverseErrors> {
+        if self.header.cell_based {
+            return Err(BixverseErrors::ReaderModeMismatch {
+                actual: "cell-based",
+                requested: "gene-based",
+            });
+        }
+
+        indices
+            .par_iter()
+            .map(|&original_index| {
+                let chunk_index = *self
+                    .header
+                    .index_map
+                    .get(&original_index)
+                    .ok_or(BixverseErrors::ChunkIndexNotFound(original_index))?;
+                let chunk_offset =
+                    (self.chunks_start + self.header.chunk_offsets[chunk_index]) as usize;
+
+                let compressed_size = u64::from_le_bytes(
+                    self.mmap[chunk_offset..chunk_offset + 8]
+                        .try_into()
+                        .expect("8-byte slice by construction"),
+                ) as usize;
+
+                let compressed = &self.mmap[chunk_offset + 8..chunk_offset + 8 + compressed_size];
+                let decompressed = decompress_size_prepended(compressed)
+                    .map_err(|_| BixverseErrors::ChunkDecompressionFailed(chunk_offset as u64))?;
+
+                let mut chunk = CscGeneChunk::read_from_buffer(&decompressed)?;
+
+                chunk.filter_selected_cells(cells_to_keep);
+
+                Ok(chunk)
+            })
+            .collect()
+    }
+
     /// Return all cells
     ///
     /// ### Returns
