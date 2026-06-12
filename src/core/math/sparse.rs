@@ -1892,6 +1892,10 @@ where
 /// * `n_components` - Number of singular values/vectors to compute
 /// * `seed` - For reproducibility
 /// * `use_second_layer` - If true, use data_2 instead of data
+/// * `col_means` - Optional column means for implicit mean centering
+/// * `col_stds` - Optional column sds for implicit variance normalising
+/// * `row_offsets` - Additional offsets (for example for CLR-type PCA in single
+///   cell).
 ///
 /// ### Returns
 ///
@@ -1903,6 +1907,7 @@ pub fn sparse_svd_lanczos<T, U, F>(
     use_second_layer: bool,
     col_means: Option<&[F]>,
     col_stds: Option<&[F]>,
+    row_offsets: Option<&[F]>,
 ) -> Result<SvdResults<F>, BixverseErrors>
 where
     T: BixverseNumeric + BixverseSimd + Into<F> + Clone,
@@ -1962,6 +1967,11 @@ where
         } else {
             F::zero()
         };
+        let x_sum: F = if row_offsets.is_some() {
+            x_scaled.iter().copied().sum()
+        } else {
+            F::zero()
+        };
 
         y.par_iter_mut().enumerate().for_each(|(i, yi)| {
             let mut sum = F::zero();
@@ -1972,13 +1982,20 @@ where
             if col_means.is_some() {
                 sum -= mean_dot;
             }
+            if let Some(off) = row_offsets {
+                sum -= off[i] * x_sum;
+            }
             *yi = sum;
         });
     };
 
-    // matrix-vector product for A^T (using CSC for memory contiguity)
     let matvec_at = |x: &[F], y: &mut [F]| {
         let x_sum: F = x.iter().copied().sum();
+        let m_dot_x: F = if let Some(off) = row_offsets {
+            off.iter().zip(x.iter()).map(|(&m_i, &xi)| m_i * xi).sum()
+        } else {
+            F::zero()
+        };
 
         y.par_iter_mut().enumerate().for_each(|(j, yj)| {
             let mut sum = F::zero();
@@ -1988,6 +2005,9 @@ where
             }
             if let Some(mu) = col_means {
                 sum -= mu[j] * x_sum;
+            }
+            if row_offsets.is_some() {
+                sum -= m_dot_x;
             }
             if let Some(sd) = col_stds {
                 sum /= sd[j];
@@ -2227,7 +2247,7 @@ mod tests {
         let csr = CompressedSparseData2::<f64, f64>::new_csr(&data, &indices, &indptr, None, shape);
         let no_params: Option<&[f64]> = None;
 
-        let svd = sparse_svd_lanczos(&csr, 1, 42, false, no_params, no_params).unwrap();
+        let svd = sparse_svd_lanczos(&csr, 1, 42, false, no_params, no_params, None).unwrap();
 
         // Test correlation with theoretical U
         let u_col = svd.u.col(0);

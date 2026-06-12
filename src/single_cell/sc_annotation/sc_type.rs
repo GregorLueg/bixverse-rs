@@ -220,7 +220,7 @@ pub fn run_sctype(
         let z_per_gene: Vec<(usize, Vec<f32>)> = chunks
             .par_iter()
             .map(|chunk| {
-                let (z, _, _) = scale_csc_chunk(chunk, no_cells);
+                let (z, _, _) = scale_csc_chunk(chunk, no_cells, true, true, None);
                 (chunk.original_index, z)
             })
             .collect();

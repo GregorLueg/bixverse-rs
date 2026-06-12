@@ -24,6 +24,7 @@ use crate::ml::clustering::k_means::KMeansParamsWrappers;
 use crate::prelude::*;
 use crate::single_cell::mc_processing::hvg_pca::pca_on_metacells;
 use crate::single_cell::sc_analysis::scenic::*;
+use crate::single_cell::sc_processing::pca::SingleCellPcaParams;
 use crate::single_cell::sc_utils::utils_tree::QuantisedStore;
 
 /////////////
@@ -251,8 +252,11 @@ fn batch_genes_correlated_in_memory<T: BixverseNumeric>(
         );
     }
 
+    // Default to standard PCA here... Anwyay just used to group genes
+    let pca_params = SingleCellPcaParams::new(true, true, true, false, 1e5);
+
     let sub_csc = subset_csc_for_pca(csc, &sub_cells);
-    let (_, loadings, _) = pca_on_metacells(&sub_csc, n_components, true, seed)?;
+    let (_, loadings, _) = pca_on_metacells(&sub_csc, n_components, &pca_params, None, seed)?;
 
     let dim = loadings.ncols();
     let mut gene_loadings = vec![0.0f32; n_genes * dim];

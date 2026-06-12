@@ -1566,6 +1566,59 @@ impl ParallelSparseReader {
             .collect()
     }
 
+    /// Compute the shifted CLR per-cell offsets freshly from raw counts.
+    ///
+    /// The offset for cell i is `m_i = (1/D) * sum_j log1p(x_ij / s_i)`, where
+    /// D is the total gene count and s_i is the cell's library size. Size
+    /// factor is fixed at 1, independent of any size factor used during the
+    /// original normalisation. Cells are read in batches to bound peak
+    /// memory.
+    ///
+    /// ### Params
+    ///
+    /// * `indices` - Cell indices to compute offsets for
+    /// * `batch_size` - Number of cells to load per batch (100_000 is a
+    ///   sensible default for typical single cell data sets)
+    ///
+    /// ### Returns
+    ///
+    /// Vector of CLR offsets in the same order as `indices`.
+    pub fn get_clr_offsets(
+        &self,
+        indices: &[usize],
+        batch_size: Option<usize>,
+    ) -> Result<Vec<f64>, BixverseErrors> {
+        if !self.header.cell_based {
+            return Err(BixverseErrors::ReaderModeMismatch {
+                actual: "gene-based",
+                requested: "cell-based",
+            });
+        }
+        let batch_size = batch_size.unwrap_or(CELL_BATCH_SIZE);
+
+        let n_genes = self.header.total_genes as f64;
+        let mut offsets = Vec::with_capacity(indices.len());
+
+        for batch in indices.chunks(batch_size) {
+            let cells = self.read_cells_parallel(batch)?;
+            let batch_offsets: Vec<f64> = cells
+                .par_iter()
+                .map(|chunk| {
+                    let inv_s = 1.0_f64 / chunk.library_size as f64;
+                    let sum: f64 = chunk
+                        .data_raw
+                        .iter()
+                        .map(|c| (c as f64 * inv_s).ln_1p())
+                        .sum();
+                    sum / n_genes
+                })
+                .collect();
+            offsets.extend_from_slice(&batch_offsets);
+        }
+
+        Ok(offsets)
+    }
+
     /// Read the NNZ for specific genes
     ///
     /// Reads directly from the chunk header bytes (offset 16-23) without
