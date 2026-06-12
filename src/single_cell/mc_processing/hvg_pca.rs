@@ -9,7 +9,7 @@ use crate::core::base::loess::LoessRegression;
 use crate::core::math::pca_svd::*;
 use crate::prelude::*;
 use crate::single_cell::sc_processing::hvg::*;
-use crate::single_cell::sc_processing::pca::SingleCellPcaRes;
+use crate::single_cell::sc_processing::pca::{SingleCellPcaParams, SingleCellPcaRes};
 
 /////////
 // HVG //
@@ -213,29 +213,48 @@ pub fn get_hvg_mvb_from_sparse(
 /// PCA on pre-selected HVGs from an in-memory sparse matrix.
 ///
 /// Reads normalised counts from the `data_2` layer (raw counts in `data`
-/// are ignored). Densifies, scales (zero-mean, unit-variance per gene),
-/// then runs SVD. Shape must be (cells, genes).
+/// are ignored). Densifies, optionally applies the shifted CLR
+/// transformation, scales according to `params_pca`, then runs SVD.
+/// Shape must be (cells, genes). Uses f64 internally for numerical
+/// stability during SVD.
 ///
-/// Uses f64 internally for numerical stability during SVD.
+/// When `params_pca.clr` is true, `clr_offsets` must be provided and must
+/// have been computed against the full gene panel (not the HVG subset),
+/// since the row-mean of `log1p(u_ij)` cannot be reconstructed from a
+/// gene subset alone.
 ///
 /// ### Params
 ///
-/// * `matrix` - The sparse counts. The `data_2` layer must be populated with
-///   normalised expression values.
-/// * `no_pcs` - Number of PCs to return
-/// * `random_svd` - Shall randomised SVD be used
-/// * `seed` - Random seed for the randomised SVD
+/// * `matrix` - The sparse counts. The `data_2` layer must be populated
+///   with `log1p(u * sf)` normalised values.
+/// * `no_pcs` - Number of PCs to return.
+/// * `params_pca` - PCA parameters, see [SingleCellPcaParams].
+/// * `clr_offsets` - Per-cell CLR offsets, required if `params_pca.clr`
+///   is true. Length must equal the number of cells.
+/// * `seed` - Random seed for the randomised SVD.
 ///
 /// ### Returns
 ///
-/// Tuple of (PCA scores, PCA loadings, singular values)
+/// Tuple of (PCA scores, PCA loadings, singular values).
 pub fn pca_on_metacells<T: BixverseNumeric>(
     matrix: &CompressedSparseData2<T, f32>,
     no_pcs: usize,
-    random_svd: bool,
+    params_pca: &SingleCellPcaParams,
+    clr_offsets: Option<&[f64]>,
     seed: usize,
 ) -> SingleCellPcaRes {
     let (n_cells, n_genes) = matrix.shape;
+
+    if params_pca.clr
+        && let Some(offs) = clr_offsets
+        && offs.len() != n_cells
+    {
+        return Err(BixverseErrors::OffsetsLengthDoesNotMatchNCells {
+            len_offset: offs.len(),
+            n_cells,
+        });
+    }
+
     let csc = match matrix.cs_type {
         CompressedSparseFormat::Csc => Cow::Borrowed(matrix),
         CompressedSparseFormat::Csr => Cow::Owned(matrix.transform()),
@@ -245,39 +264,68 @@ pub fn pca_on_metacells<T: BixverseNumeric>(
         .as_ref()
         .expect("pca_on_metacells requires normalised counts in data_2");
 
+    let vals_active: Cow<[f32]> = if params_pca.clr {
+        let sf_inv = 1.0_f32 / params_pca.size_factor;
+        let transformed: Vec<f32> = vals
+            .iter()
+            .map(|&v| (v.exp_m1() * sf_inv).ln_1p())
+            .collect();
+        Cow::Owned(transformed)
+    } else {
+        Cow::Borrowed(vals.as_slice())
+    };
+
+    let row_offsets = if params_pca.clr { clr_offsets } else { None };
+
     let mut scaled = Mat::<f64>::zeros(n_cells, n_genes);
+
     for j in 0..n_genes {
         let start = csc.indptr[j] as usize;
         let end = csc.indptr[j + 1] as usize;
+        let mut col = vec![0.0_f64; n_cells];
         for idx in start..end {
             let i = csc.indices[idx] as usize;
-            scaled[(i, j)] = vals[idx] as f64;
+            col[i] = vals_active[idx] as f64;
         }
-        let sum: f64 = (start..end).map(|idx| vals[idx] as f64).sum();
-        let mean = sum / n_cells as f64;
-        let nnz = end - start;
-        let ss_nonzero: f64 = (start..end)
-            .map(|idx| {
-                let d = vals[idx] as f64 - mean;
-                d * d
-            })
-            .sum();
-        let ss_zeros = (n_cells - nnz) as f64 * mean * mean;
-        let std_dev = ((ss_nonzero + ss_zeros) / (n_cells as f64 - 1.0))
-            .max(0.0)
-            .sqrt();
-        if std_dev < 1e-8 {
+        if let Some(off) = row_offsets {
             for i in 0..n_cells {
-                scaled[(i, j)] = 0.0;
+                col[i] -= off[i];
             }
+        }
+
+        let need_mean = params_pca.mean_center || params_pca.normalise_variance;
+        let mean = if need_mean {
+            col.iter().sum::<f64>() / n_cells as f64
         } else {
-            for i in 0..n_cells {
-                scaled[(i, j)] = (scaled[(i, j)] - mean) / std_dev;
+            0.0
+        };
+        let std_dev = if params_pca.normalise_variance {
+            let var: f64 = col
+                .iter()
+                .map(|&x| {
+                    let d = x - mean;
+                    d * d
+                })
+                .sum::<f64>()
+                / (n_cells as f64 - 1.0);
+            var.max(0.0).sqrt()
+        } else {
+            1.0
+        };
+
+        for i in 0..n_cells {
+            let mut v = col[i];
+            if params_pca.mean_center {
+                v -= mean;
             }
+            if params_pca.normalise_variance {
+                v = if std_dev < 1e-8 { 0.0 } else { v / std_dev };
+            }
+            scaled[(i, j)] = v;
         }
     }
 
-    let (scores, loadings, s) = if random_svd {
+    let (scores, loadings, s) = if params_pca.randomised {
         let res: RandomSvdResults<f64> =
             randomised_svd(scaled.as_ref(), no_pcs, seed, Some(100_usize), None)?;
         let loadings = Mat::<f32>::from_fn(n_genes, no_pcs, |i, j| res.v[(i, j)] as f32);
@@ -285,7 +333,9 @@ pub fn pca_on_metacells<T: BixverseNumeric>(
         let s: Vec<f32> = res.s[..no_pcs].iter().map(|&x| x as f32).collect();
         (scores, loadings, s)
     } else {
-        let res = scaled.thin_svd().unwrap();
+        let res = scaled
+            .thin_svd()
+            .map_err(|e| BixverseErrors::FaerSvdError(format!("{e:?}")))?;
         let loadings = Mat::<f32>::from_fn(n_genes, no_pcs, |i, j| res.V()[(i, j)] as f32);
         let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| {
             (res.U()[(i, j)] * res.S().column_vector()[j]) as f32
