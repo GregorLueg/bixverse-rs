@@ -237,6 +237,10 @@ where
 ///   for SVD calculation.
 /// * `oversampling` - Additional samples (default 10)
 /// * `n_power_iter` - Power iterations for accuracy (default 2)
+/// * `col_means` - Optional column means for implicit mean centering
+/// * `col_stds` - Optional column sds for implicit variance normalising
+/// * `row_offsets` - Additional offsets (for example for CLR-type PCA in single
+///   cell).
 ///
 /// ### Returns
 ///
@@ -251,6 +255,7 @@ pub fn randomised_sparse_svd<T, F>(
     n_power_iter: Option<usize>,
     col_means: Option<&[F]>,
     col_stds: Option<&[F]>,
+    row_offsets: Option<&[F]>,
 ) -> Result<RandomSvdResults<F>, BixverseErrors>
 where
     T: BixverseNumeric + Into<F>,
@@ -307,13 +312,24 @@ where
             Vec::new()
         };
 
+        let x_sums: Vec<f64> = if row_offsets.is_some() {
+            (0..ncols)
+                .map(|col| {
+                    (0..m)
+                        .map(|j| x_scaled[(j, col)].to_f64().unwrap())
+                        .sum::<f64>()
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         let y_ptr = y.as_ptr_mut() as usize;
         let y_row_stride = y.row_stride();
         let y_col_stride = y.col_stride();
 
         (0..n).into_par_iter().for_each(|i| {
             let base = y_ptr as *mut F;
-
             let mut row_acc = vec![0f64; ncols];
 
             for idx in csr.indptr[i]..csr.indptr[i + 1] {
@@ -331,6 +347,13 @@ where
                 }
             }
 
+            if let Some(off) = row_offsets {
+                let m_i = off[i].to_f64().unwrap();
+                for col in 0..ncols {
+                    row_acc[col] -= m_i * x_sums[col];
+                }
+            }
+
             for col in 0..ncols {
                 unsafe {
                     let ptr = base.offset(i as isize * y_row_stride + col as isize * y_col_stride);
@@ -340,10 +363,20 @@ where
         });
     };
 
-    // y = (A^T x - mu * col_sums^T) / sigma
-    // col_sums accumulated inside the fold.
     let sparse_matvec_at = |x: MatRef<F>, mut y: MatMut<F>| {
         let ncols = x.ncols();
+
+        let m_dot_x: Vec<f64> = if let Some(off) = row_offsets {
+            (0..ncols)
+                .map(|col| {
+                    (0..n)
+                        .map(|i| off[i].to_f64().unwrap() * x[(i, col)].to_f64().unwrap())
+                        .sum::<f64>()
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         let (result, col_sums) = (0..n)
             .into_par_iter()
@@ -355,7 +388,6 @@ where
                     }
                     for idx in csr.indptr[i]..csr.indptr[i + 1] {
                         let idx_usize = idx as usize;
-
                         let j = csr.indices[idx_usize] as usize;
                         let a_val = val_f64(idx_usize);
                         for col in 0..ncols {
@@ -383,6 +415,9 @@ where
                 let mut val = result[j * ncols + col];
                 if let Some(mu) = col_means {
                     val -= mu[j].to_f64().unwrap() * col_sums[col];
+                }
+                if row_offsets.is_some() {
+                    val -= m_dot_x[col];
                 }
                 if let Some(sd) = col_stds {
                     val /= sd[j].to_f64().unwrap();
@@ -536,8 +571,18 @@ mod tests {
         let csr = CompressedSparseData2::<f64, f64>::new_csr(&data, &indices, &indptr, None, shape);
 
         let no_params: Option<&[f64]> = None;
-        let svd = randomised_sparse_svd(csr, 1, 42, false, Some(5), Some(4), no_params, no_params)
-            .unwrap();
+        let svd = randomised_sparse_svd(
+            csr,
+            1,
+            42,
+            false,
+            Some(5),
+            Some(4),
+            no_params,
+            no_params,
+            None,
+        )
+        .unwrap();
 
         let u_col = svd.u.col(0);
         let x_norm = (2.0_f64.powi(2) + 4.0_f64.powi(2)).sqrt(); // sqrt(20)

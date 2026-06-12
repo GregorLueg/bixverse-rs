@@ -24,7 +24,7 @@ use thousands::Separable;
 
 use crate::ml::clustering::k_means::*;
 use crate::prelude::*;
-use crate::single_cell::sc_processing::pca::pca_on_sc_streaming;
+use crate::single_cell::sc_processing::pca::{SingleCellPcaParams, pca_on_sc_streaming};
 use crate::single_cell::sc_utils::simd::*;
 use crate::single_cell::sc_utils::utils_tree::*;
 
@@ -2855,6 +2855,8 @@ fn batch_genes_correlated(
         );
     }
 
+    let pca_params = SingleCellPcaParams::new(true, true, true, false, 1e4);
+
     // loadings is (n_genes, n_components)
     // using a streaming version here to avoid memory blowing up
     let (_, loadings, _, _) = pca_on_sc_streaming(
@@ -2862,7 +2864,8 @@ fn batch_genes_correlated(
         &sub_cells,
         gene_indices,
         n_components,
-        true,
+        &pca_params,
+        None,
         seed,
         false,
         SCENIC_GENE_CHUNK_SIZE,

@@ -384,7 +384,6 @@ where
     }
 
     let scaled = scale_matrix_col_gpu(&data_gpu, n_rows, n_cols, scale_sd, &client);
-
     let result = GpuTensor::<R, F>::empty(vec![n_cols, n_cols], &client);
 
     // S is [n_rows, n_cols] row-major; S^T view is [n_cols, n_rows] with

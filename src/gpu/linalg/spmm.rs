@@ -88,6 +88,8 @@ pub fn spmm_csr_forward<S: Float, A: Float>(
     values: &Tensor<S>,
     x: &Tensor<A>,
     correction: &Tensor<A>,
+    row_offsets: &Tensor<A>,
+    x_sum: &Tensor<A>,
     y: &mut Tensor<A>,
     n_rows: u32,
     s_width: u32,
@@ -103,6 +105,8 @@ pub fn spmm_csr_forward<S: Float, A: Float>(
     let seg_start = indptr[row as usize];
     let seg_end = indptr[(row + 1u32) as usize];
 
+    let m_row = row_offsets[row as usize];
+
     let mut col = tx;
     while col < s_width {
         let mut acc = A::new(0.0);
@@ -114,6 +118,7 @@ pub fn spmm_csr_forward<S: Float, A: Float>(
             idx += 1u32;
         }
         acc -= correction[col as usize];
+        acc -= m_row * x_sum[col as usize];
         y[row as usize * s_width as usize + col as usize] = acc;
         col += wg_size;
     }
@@ -157,6 +162,7 @@ pub fn spmm_csc_transpose<S: Float, A: Float>(
     q_sum: &Tensor<A>,
     mu: &Tensor<A>,
     sigma: &Tensor<A>,
+    m_dot_q: &Tensor<A>,
     z: &mut Tensor<A>,
     m_rows: u32,
     s_width: u32,
@@ -186,6 +192,7 @@ pub fn spmm_csc_transpose<S: Float, A: Float>(
             idx += 1u32;
         }
         acc -= mu_j * q_sum[col as usize];
+        acc -= m_dot_q[col as usize];
         acc /= sigma_j;
         z[row as usize * s_width as usize + col as usize] = acc;
         col += wg_size;
@@ -398,6 +405,8 @@ pub fn launch_spmm_csr_forward<R, S, A>(
     sparse: &GpuCompressedSparseData<R, S>,
     x: &GpuTensor<R, A>,
     correction: &GpuTensor<R, A>,
+    row_offsets: &GpuTensor<R, A>,
+    x_sum: &GpuTensor<R, A>,
     y: &GpuTensor<R, A>,
     s_width: usize,
     client: &ComputeClient<R>,
@@ -427,6 +436,8 @@ where
             sparse.values.clone().into_tensor_arg(),
             x.clone().into_tensor_arg(),
             correction.clone().into_tensor_arg(),
+            row_offsets.clone().into_tensor_arg(),
+            x_sum.clone().into_tensor_arg(),
             y.clone().into_tensor_arg(),
             n as u32,
             s_width as u32,
@@ -464,6 +475,7 @@ pub fn launch_spmm_csc_transpose<R, S, A>(
     q_sum: &GpuTensor<R, A>,
     mu: &GpuTensor<R, A>,
     sigma: &GpuTensor<R, A>,
+    m_dot_q: &GpuTensor<R, A>,
     z: &GpuTensor<R, A>,
     s_width: usize,
     client: &ComputeClient<R>,
@@ -495,6 +507,7 @@ where
             q_sum.clone().into_tensor_arg(),
             mu.clone().into_tensor_arg(),
             sigma.clone().into_tensor_arg(),
+            m_dot_q.clone().into_tensor_arg(),
             z.clone().into_tensor_arg(),
             m as u32,
             s_width as u32,

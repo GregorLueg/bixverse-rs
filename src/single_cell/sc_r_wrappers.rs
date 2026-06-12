@@ -11,8 +11,8 @@ use crate::single_cell::mc_generation::{
     hdwgcna_meta_cells::BootstrappedMetaCellParams, metacells2::params::*,
     seacells::SEACellsParams, super_cells::SuperCellParams,
 };
-use crate::single_cell::sc_analysis::fast_clusters::FastLouvainParams;
 use crate::single_cell::sc_analysis::{
+    fast_clusters::FastLouvainParams,
     hotspot::HotSpotParams,
     meld::{MeldParams, parse_lap_type, parse_meld_filter},
     milo_r::MiloRParams,
@@ -36,8 +36,8 @@ use crate::single_cell::sc_data::{
     sc_synthetic_data::CellTypeConfig,
 };
 use crate::single_cell::sc_processing::{
-    doublet_detection::BoostParams, knn::KnnParams, scdblfinder::ScDblFinderParams,
-    scrublet::ScrubletParams, utils_doublets::ScDblSimParams,
+    doublet_detection::BoostParams, knn::KnnParams, pca::SingleCellPcaParams,
+    scdblfinder::ScDblFinderParams, scrublet::ScrubletParams, utils_doublets::ScDblSimParams,
 };
 
 /////////////
@@ -924,6 +924,62 @@ impl FastLouvainParams<f32> {
     }
 }
 
+/////////
+// PCA //
+/////////
+
+impl SingleCellPcaParams {
+    /// Generate the [SingleCellPcaParams] from an R list.
+    ///
+    /// Should values not be found within the List, the parameters will default
+    /// to sensible defaults.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the BBKNN parameters.
+    ///
+    /// ### Return
+    ///
+    /// The [SingleCellPcaParams] with all of the parameters.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let defaults = SingleCellPcaParams::default();
+
+        let mean_center = params
+            .get("mean_center")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.mean_center);
+
+        let normalise_variance = params
+            .get("normalise_variance")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.normalise_variance);
+
+        let randomised = params
+            .get("randomised")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.randomised);
+
+        let clr = params
+            .get("clr")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.clr);
+
+        let size_factor = params
+            .get("size_factor")
+            .and_then(|v| v.as_real())
+            .unwrap_or(1e4) as f32;
+
+        Ok(Self {
+            mean_center,
+            normalise_variance,
+            randomised,
+            clr,
+            size_factor,
+        })
+    }
+}
+
 ///////////
 // BBKNN //
 ///////////
@@ -995,6 +1051,7 @@ impl FastMnnParams {
     /// The `FastMnnParams` with all of the parameters.
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let knn_params = KnnParams::from_r_list(r_list.clone())?;
+        let pca_params = SingleCellPcaParams::from_r_list(r_list.clone())?;
         let fastmnn_list: HashMap<&str, Robj> = r_list.try_into()?;
 
         let ndist = fastmnn_list
@@ -1027,6 +1084,7 @@ impl FastMnnParams {
             sparse_svd,
             cos_norm,
             knn_params,
+            pca_params,
         })
     }
 }

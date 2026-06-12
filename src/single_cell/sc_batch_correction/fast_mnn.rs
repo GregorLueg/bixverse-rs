@@ -33,6 +33,9 @@ pub struct FastMnnParams {
     /// [KnnParams] for the various approximate nearest neighbour searches
     /// in ann-search-rs
     pub knn_params: KnnParams,
+    /// [SingleCellPcaParams] specifying the to-be-applied normalisations and
+    /// if the randomised path should be taken.
+    pub pca_params: SingleCellPcaParams,
 }
 
 /// Build index on `reference` and query `query` for k nearest neighbours.
@@ -699,6 +702,7 @@ pub fn fast_mnn_main(
     gene_indices: &[usize],
     batch_indices: &[usize],
     pre_computed_pca: Option<Mat<f32>>,
+    clr_offsets: Option<&[f64]>,
     params: &FastMnnParams,
     verbose: usize,
     seed: usize,
@@ -725,7 +729,8 @@ pub fn fast_mnn_main(
                 cell_indices,
                 gene_indices,
                 params.no_pcs,
-                params.random_svd,
+                &params.pca_params,
+                clr_offsets,
                 seed,
                 verbose,
             )?;
@@ -737,7 +742,8 @@ pub fn fast_mnn_main(
                 cell_indices,
                 gene_indices,
                 params.no_pcs,
-                params.random_svd,
+                &params.pca_params,
+                clr_offsets,
                 seed,
                 false,
                 verbose,

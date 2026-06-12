@@ -52,6 +52,7 @@ use crate::gpu::linalg::spmm::{
     launch_spmm_csr_forward,
 };
 use crate::prelude::*;
+use crate::single_cell::sc_processing::pca::SingleCellPcaParams;
 
 ////////////
 // Params //
@@ -128,6 +129,7 @@ pub fn randomised_sparse_svd_gpu<R, T, MP>(
     data: CompressedSparseData2<T, T>,
     col_means: &[T],
     col_stds: &[T],
+    row_offsets: Option<&[T]>,
     n_components: usize,
     params: Option<RandSvdGpuParams>,
     seed: u64,
@@ -140,7 +142,6 @@ where
     MP: MatmulPrecision,
 {
     let verbosity = parse_verbosity_level(verbose);
-
     let start = Instant::now();
     let params = params.unwrap_or_default();
 
@@ -157,25 +158,23 @@ where
             data_len: m,
         });
     }
+    if let Some(off) = row_offsets {
+        if off.len() != n {
+            return Err(BixverseErrors::DimensionMisMatchSparse {
+                indices_len: off.len(),
+                data_len: n,
+            });
+        }
+    }
 
+    let use_clr = row_offsets.is_some();
     let s = n_components + params.oversampling;
 
     // -- Host prep --
-
-    if verbosity.detailed_verbosity() {
-        println!("  Building CSR view of A (host)");
-    }
-
     let csr_host = transpose_sparse_single_layer(&data, true)?;
 
-    if verbosity.detailed_verbosity() {
-        println!("    Host prep done: {:.2?}", start.elapsed());
-    }
-
     // -- GPU upload --
-
     let client = R::client(&device);
-
     let csr_gpu =
         GpuCompressedSparseData::<R, T>::from_compressed_sparse_data_2(&csr_host, true, &client)?;
     let csc_gpu =
@@ -183,7 +182,12 @@ where
     let mu_gpu = GpuTensor::<R, T>::from_slice(col_means, vec![m], &client);
     let sigma_gpu = GpuTensor::<R, T>::from_slice(col_stds, vec![m], &client);
 
-    // drop the CPU parts
+    let zero_n = vec![T::from(0.0).unwrap(); n];
+    let row_offsets_gpu = match row_offsets {
+        Some(off) => GpuTensor::<R, T>::from_slice(off, vec![n], &client),
+        None => GpuTensor::<R, T>::from_slice(&zero_n, vec![n], &client),
+    };
+
     drop(csr_host);
     drop(data);
 
@@ -197,45 +201,75 @@ where
         .collect();
     let omega_gpu = GpuTensor::<R, T>::from_slice(&omega_scaled, vec![m, s], &client);
 
-    if verbosity.detailed_verbosity() {
-        println!("    GPU Upload done: {:.2?}", start.elapsed());
-    }
-
-    // Two [n, s] buffers used as Y (SpMM output) and Q (QR output). The
-    // initial Y goes into y_buf; CholeskyQR2 writes Q into q_buf. Each
-    // power iteration writes a new Y into y_buf and a new Q into q_buf.
+    // Workspace buffers. x_sum and m_dot_q are zero-initialised so they
+    // contribute no correction when CLR is off.
     let y_buf = GpuTensor::<R, T>::empty(vec![n, s], &client);
     let q_buf = GpuTensor::<R, T>::empty(vec![n, s], &client);
     let z_buf = GpuTensor::<R, T>::empty(vec![m, s], &client);
     let c_buf = GpuTensor::<R, T>::empty(vec![s], &client);
     let q_sum_buf = GpuTensor::<R, T>::empty(vec![s], &client);
+    let zero_s = vec![T::from(0.0).unwrap(); s];
+    let x_sum_buf = GpuTensor::<R, T>::from_slice(&zero_s, vec![s], &client);
+    let m_dot_q_buf = GpuTensor::<R, T>::from_slice(&zero_s, vec![s], &client);
 
-    // c = mu^T * Omega_scaled, then Y = A * Omega_scaled - 1 * c^T
+    // -- Initial sketch --
     launch_dense_column_weighted_sum::<R, T>(&mu_gpu, &omega_gpu, &c_buf, m, s, &client);
-    launch_spmm_csr_forward::<R, T, T>(&csr_gpu, &omega_gpu, &c_buf, &y_buf, s, &client)?;
-
-    // -- First QR --
+    if use_clr {
+        launch_dense_column_sum::<R, T>(&omega_gpu, &x_sum_buf, m, s, &client);
+    }
+    launch_spmm_csr_forward::<R, T, T>(
+        &csr_gpu,
+        &omega_gpu,
+        &c_buf,
+        &row_offsets_gpu,
+        &x_sum_buf,
+        &y_buf,
+        s,
+        &client,
+    )?;
 
     cholesky_qr2::<R, T, MP>(&client, &y_buf, &q_buf, n, s)?;
 
-    if verbosity.detailed_verbosity() {
-        println!("    Initial sketch + QR done: {:.2?}", start.elapsed());
-    }
-
     // -- Power iters --
-
     for iter in 0..params.n_power_iters {
-        // Z = (A^T Q - mu * q_sum^T) / sigma
         launch_dense_column_sum::<R, T>(&q_buf, &q_sum_buf, n, s, &client);
+        if use_clr {
+            launch_dense_column_weighted_sum::<R, T>(
+                &row_offsets_gpu,
+                &q_buf,
+                &m_dot_q_buf,
+                n,
+                s,
+                &client,
+            );
+        }
         launch_spmm_csc_transpose::<R, T, T>(
-            &csc_gpu, &q_buf, &q_sum_buf, &mu_gpu, &sigma_gpu, &z_buf, s, &client,
+            &csc_gpu,
+            &q_buf,
+            &q_sum_buf,
+            &mu_gpu,
+            &sigma_gpu,
+            &m_dot_q_buf,
+            &z_buf,
+            s,
+            &client,
         )?;
 
-        // Y_new = A * Z - 1 * c^T
         launch_dense_column_weighted_sum::<R, T>(&mu_gpu, &z_buf, &c_buf, m, s, &client);
-        launch_spmm_csr_forward::<R, T, T>(&csr_gpu, &z_buf, &c_buf, &y_buf, s, &client)?;
+        if use_clr {
+            launch_dense_column_sum::<R, T>(&z_buf, &x_sum_buf, m, s, &client);
+        }
+        launch_spmm_csr_forward::<R, T, T>(
+            &csr_gpu,
+            &z_buf,
+            &c_buf,
+            &row_offsets_gpu,
+            &x_sum_buf,
+            &y_buf,
+            s,
+            &client,
+        )?;
 
-        // QR -> new Q in q_buf
         cholesky_qr2::<R, T, MP>(&client, &y_buf, &q_buf, n, s)?;
 
         if verbosity.detailed_verbosity() {
@@ -248,17 +282,29 @@ where
         }
     }
 
-    // -- final Z --
-
-    // One last A^T Q with corrections to produce B^T (shape m x s).
+    // -- Final Z --
     launch_dense_column_sum::<R, T>(&q_buf, &q_sum_buf, n, s, &client);
-    launch_spmm_csc_transpose::<R, T, T>(
-        &csc_gpu, &q_buf, &q_sum_buf, &mu_gpu, &sigma_gpu, &z_buf, s, &client,
-    )?;
-
-    if verbosity.detailed_verbosity() {
-        println!("    Final B^T computed: {:.2?}", start.elapsed());
+    if use_clr {
+        launch_dense_column_weighted_sum::<R, T>(
+            &row_offsets_gpu,
+            &q_buf,
+            &m_dot_q_buf,
+            n,
+            s,
+            &client,
+        );
     }
+    launch_spmm_csc_transpose::<R, T, T>(
+        &csc_gpu,
+        &q_buf,
+        &q_sum_buf,
+        &mu_gpu,
+        &sigma_gpu,
+        &m_dot_q_buf,
+        &z_buf,
+        s,
+        &client,
+    )?;
 
     // -- final svd --
 
@@ -403,6 +449,7 @@ mod tests {
             csc,
             &mu,
             &sigma,
+            None,
             n_components,
             Some(RandSvdGpuParams::new(2, 8)),
             42,
@@ -471,7 +518,7 @@ mod tests {
         let sigma = vec![1.0f32; m];
 
         let res = randomised_sparse_svd_gpu::<WgpuRuntime, f32, f32>(
-            csr, &mu, &sigma, 2, None, 42, device, 0,
+            csr, &mu, &sigma, None, 2, None, 42, device, 0,
         );
         assert!(matches!(
             res,
@@ -499,7 +546,7 @@ mod tests {
         let sigma = vec![1.0f32; m + 1];
 
         let res = randomised_sparse_svd_gpu::<WgpuRuntime, f32, f32>(
-            csc, &mu, &sigma, 2, None, 42, device, 0,
+            csc, &mu, &sigma, None, 2, None, 42, device, 0,
         );
         assert!(matches!(
             res,
