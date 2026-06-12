@@ -336,6 +336,26 @@ pub enum BixverseErrors {
     #[error("Unknown compressed sparse format: '{0}' (expected 'csc' or 'csr')")]
     UnknownSparseFormat(String),
 
+    // -- PCA --
+    /// Error if user wants CLR-normalised PCA, but did not provide the offsets
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "You did not provide the offsets needed for using the CLR-normalised PCA in single cell."
+    )]
+    OffsetsNotProvidedForClrPCA,
+
+    /// Error if user wants CLR-normalised PCA, but did not provide the offsets
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "The provided offsets have length {len_offset}; n_cells is {n_cells}. Length mismatch."
+    )]
+    OffsetsLengthDoesNotMatchNCells {
+        /// Length of the offsets
+        len_offset: usize,
+        /// Number of cells provided
+        n_cells: usize,
+    },
+
     // -- Hotspot --
     /// Invalid model chosen for Hotspot
     #[cfg(feature = "single-cell")]

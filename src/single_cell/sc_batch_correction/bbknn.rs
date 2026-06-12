@@ -591,7 +591,6 @@ pub fn bbknn(
     verbose: usize,
 ) -> Result<(CompressedSparseData2<f32>, CompressedSparseData2<f32>), BixverseErrors> {
     let verbosity = parse_verbosity_level(verbose);
-
     let (_, n_batches) = process_batch_labels(batch_labels);
 
     if n_batches == 1 {

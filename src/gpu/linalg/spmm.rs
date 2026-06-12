@@ -4,13 +4,11 @@
 //! Both directions of the operator A appearing in randomised SVD are
 //! supported:
 //!
-//! * [`spmm_csr_forward`] computes `Y = A * X - 1 * c^T` where `c` is a
-//!   precomputed correction vector. The sparse matrix is held as CSR of A;
-//!   the dense RHS X is row-major `[m, s]`; the output Y is row-major
-//!   `[n, s]`.
-//! * [`spmm_csc_transpose`] computes `Z = (A^T * Q - mu * q_sum^T) / sigma`
-//!   using CSC of A (structurally a CSR of A^T). The dense RHS Q is
-//!   row-major `[n, s]`; the output Z is row-major `[m, s]`.
+//! * [`spmm_csr_forward`] computes `Y = A * X - 1 * c^T - r * x_sum^T` where
+//!   `c` is a precomputed correction vector and `r` is a per-row offset vector.
+//! * [`spmm_csc_transpose`] computes
+//!   `Z = (A^T * Q - mu * q_sum^T - 1 * d^T) / sigma` where `d` is a
+//!   precomputed column offset vector.
 //!
 //! Two small reduction kernels precompute the correction vectors:
 //!
@@ -401,6 +399,7 @@ pub fn dense_column_weighted_sum<A: Float>(
 /// ### Errors
 ///
 /// * `GpuSparseLayoutMismatch` if `sparse.cs_type` is not CSR.
+#[allow(clippy::too_many_arguments)]
 pub fn launch_spmm_csr_forward<R, S, A>(
     sparse: &GpuCompressedSparseData<R, S>,
     x: &GpuTensor<R, A>,
@@ -630,10 +629,13 @@ mod tests {
         (values, indices, indptr)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn cpu_spmm_csr_forward(
         a: &[f32],
         x: &[f32],
         correction: &[f32],
+        row_offsets: &[f32],
+        x_sum: &[f32],
         n: usize,
         m: usize,
         s: usize,
@@ -645,7 +647,7 @@ mod tests {
                 for j in 0..m {
                     acc += a[i * m + j] * x[j * s + col];
                 }
-                y[i * s + col] = acc - correction[col];
+                y[i * s + col] = acc - correction[col] - row_offsets[i] * x_sum[col];
             }
         }
         y
@@ -658,6 +660,7 @@ mod tests {
         q_sum: &[f32],
         mu: &[f32],
         sigma: &[f32],
+        m_dot_q: &[f32],
         n: usize,
         m: usize,
         s: usize,
@@ -669,7 +672,7 @@ mod tests {
                 for i in 0..n {
                     acc += a[i * m + j] * q[i * s + col];
                 }
-                z[j * s + col] = (acc - mu[j] * q_sum[col]) / sigma[j];
+                z[j * s + col] = (acc - mu[j] * q_sum[col] - m_dot_q[col]) / sigma[j];
             }
         }
         z
@@ -747,10 +750,13 @@ mod tests {
         out_gpu.read(&client).unwrap()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run_spmm_csr_forward(
         a: &[f32],
         x: &[f32],
         correction: &[f32],
+        row_offsets: &[f32],
+        x_sum: &[f32],
         n: usize,
         m: usize,
         s: usize,
@@ -768,10 +774,23 @@ mod tests {
         );
         let x_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(x, vec![m, s], &client);
         let corr_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(correction, vec![s], &client);
+        let row_offsets_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(row_offsets, vec![n], &client);
+        let x_sum_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(x_sum, vec![s], &client);
         let y_gpu =
             GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; n * s], vec![n, s], &client);
 
-        launch_spmm_csr_forward(&sparse, &x_gpu, &corr_gpu, &y_gpu, s, &client).unwrap();
+        launch_spmm_csr_forward(
+            &sparse,
+            &x_gpu,
+            &corr_gpu,
+            &row_offsets_gpu,
+            &x_sum_gpu,
+            &y_gpu,
+            s,
+            &client,
+        )
+        .unwrap();
         y_gpu.read(&client).unwrap()
     }
 
@@ -782,6 +801,7 @@ mod tests {
         q_sum: &[f32],
         mu: &[f32],
         sigma: &[f32],
+        m_dot_q: &[f32],
         n: usize,
         m: usize,
         s: usize,
@@ -801,11 +821,20 @@ mod tests {
         let qsum_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(q_sum, vec![s], &client);
         let mu_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(mu, vec![m], &client);
         let sigma_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(sigma, vec![m], &client);
+        let m_dot_q_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(m_dot_q, vec![s], &client);
         let z_gpu =
             GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; m * s], vec![m, s], &client);
 
         launch_spmm_csc_transpose(
-            &sparse, &q_gpu, &qsum_gpu, &mu_gpu, &sigma_gpu, &z_gpu, s, &client,
+            &sparse,
+            &q_gpu,
+            &qsum_gpu,
+            &mu_gpu,
+            &sigma_gpu,
+            &m_dot_q_gpu,
+            &z_gpu,
+            s,
+            &client,
         )
         .unwrap();
         z_gpu.read(&client).unwrap()
@@ -861,9 +890,11 @@ mod tests {
             .map(|i| ((i * 11 + 5) % 19) as f32 * 0.1)
             .collect();
         let correction: Vec<f32> = (0..s).map(|i| (i as f32) * 0.05).collect();
+        let row_offsets = vec![0.0f32; n];
+        let x_sum = vec![0.0f32; s];
 
-        let got = run_spmm_csr_forward(&a, &x, &correction, n, m, s, &device);
-        let want = cpu_spmm_csr_forward(&a, &x, &correction, n, m, s);
+        let got = run_spmm_csr_forward(&a, &x, &correction, &row_offsets, &x_sum, n, m, s, &device);
+        let want = cpu_spmm_csr_forward(&a, &x, &correction, &row_offsets, &x_sum, n, m, s);
 
         assert_vec_close(&got, &want, 1e-3);
     }
@@ -889,9 +920,10 @@ mod tests {
         let sigma: Vec<f32> = (0..m)
             .map(|j| 0.5 + ((j * 5 + 2) % 7) as f32 * 0.1)
             .collect();
+        let m_dot_q = vec![0.0f32; s];
 
-        let got = run_spmm_csc_transpose(&a, &q, &q_sum, &mu, &sigma, n, m, s, &device);
-        let want = cpu_spmm_csc_transpose(&a, &q, &q_sum, &mu, &sigma, n, m, s);
+        let got = run_spmm_csc_transpose(&a, &q, &q_sum, &mu, &sigma, &m_dot_q, n, m, s, &device);
+        let want = cpu_spmm_csc_transpose(&a, &q, &q_sum, &mu, &sigma, &m_dot_q, n, m, s);
 
         assert_vec_close(&got, &want, 1e-3);
     }
@@ -906,9 +938,11 @@ mod tests {
         a[7 * m + 3] = -2.0;
         let x: Vec<f32> = (0..m * s).map(|i| (i + 1) as f32 * 0.1).collect();
         let correction: Vec<f32> = (0..s).map(|i| (i + 1) as f32 * 0.25).collect();
+        let row_offsets = vec![0.0f32; n];
+        let x_sum = vec![0.0f32; s];
 
-        let got = run_spmm_csr_forward(&a, &x, &correction, n, m, s, &device);
-        let want = cpu_spmm_csr_forward(&a, &x, &correction, n, m, s);
+        let got = run_spmm_csr_forward(&a, &x, &correction, &row_offsets, &x_sum, n, m, s, &device);
+        let want = cpu_spmm_csr_forward(&a, &x, &correction, &row_offsets, &x_sum, n, m, s);
         assert_vec_close(&got, &want, 1e-6);
 
         for i in 1..7 {
@@ -946,7 +980,16 @@ mod tests {
         let y_gpu =
             GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; n * s], vec![n, s], &client);
 
-        let res = launch_spmm_csr_forward(&sparse, &x_gpu, &corr_gpu, &y_gpu, s, &client);
+        let res = launch_spmm_csr_forward(
+            &sparse,
+            &x_gpu,
+            &corr_gpu,
+            &GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; n], vec![n], &client),
+            &GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; s], vec![s], &client),
+            &y_gpu,
+            s,
+            &client,
+        );
         assert!(matches!(
             res,
             Err(BixverseErrors::SparseLayoutMismatch { .. })
@@ -980,7 +1023,15 @@ mod tests {
             GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; m * s], vec![m, s], &client);
 
         let res = launch_spmm_csc_transpose(
-            &sparse, &q_gpu, &qsum_gpu, &mu_gpu, &sigma_gpu, &z_gpu, s, &client,
+            &sparse,
+            &q_gpu,
+            &qsum_gpu,
+            &mu_gpu,
+            &sigma_gpu,
+            &GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; s], vec![s], &client),
+            &z_gpu,
+            s,
+            &client,
         );
         assert!(matches!(
             res,

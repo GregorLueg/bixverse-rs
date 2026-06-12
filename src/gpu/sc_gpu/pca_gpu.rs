@@ -5,11 +5,13 @@
 
 use cubecl::Runtime;
 use indexmap::IndexSet;
+use rayon::prelude::*;
 use std::time::Instant;
 
 use crate::core::math::pca_svd::*;
 use crate::gpu::linalg::sparse_rand_svd_gpu::{RandSvdGpuParams, randomised_sparse_svd_gpu};
 use crate::prelude::*;
+use crate::single_cell::sc_processing::pca::SingleCellPcaParams;
 use crate::single_cell::sc_processing::pca::*;
 
 /////////////////////////////////
@@ -46,6 +48,8 @@ pub fn pca_on_sc_sparse_gpu<R>(
     cell_indices: &[usize],
     gene_indices: &[usize],
     no_pcs: usize,
+    clr_offsets: Option<&[f32]>,
+    params_pca: &SingleCellPcaParams,
     seed: usize,
     device: R::Device,
     verbose: usize,
@@ -53,6 +57,19 @@ pub fn pca_on_sc_sparse_gpu<R>(
 where
     R: Runtime,
 {
+    if params_pca.clr && clr_offsets.is_none() {
+        return Err(BixverseErrors::OffsetsNotProvidedForClrPCA);
+    }
+    if params_pca.clr
+        && let Some(offs) = clr_offsets
+        && offs.len() != cell_indices.len()
+    {
+        return Err(BixverseErrors::OffsetsLengthDoesNotMatchNCells {
+            len_offset: offs.len(),
+            n_cells: cell_indices.len(),
+        });
+    }
+
     let verbosity = parse_verbosity_level(verbose);
 
     let start_total = Instant::now();
@@ -62,8 +79,20 @@ where
     let start_reading = Instant::now();
 
     let reader = ParallelSparseReader::new(f_path)?;
-    let gene_chunks: Vec<CscGeneChunk> =
+    let mut gene_chunks: Vec<CscGeneChunk> =
         reader.read_gene_parallel_filtered(gene_indices, &cell_set)?;
+
+    if params_pca.clr {
+        gene_chunks
+            .par_iter_mut()
+            .for_each(|chunk| chunk.transform_to_clr(params_pca.size_factor));
+    }
+
+    let row_offsets_f64: Option<Vec<f64>> = if params_pca.clr {
+        Some(clr_offsets.unwrap().iter().map(|&x| x as f64).collect())
+    } else {
+        None
+    };
 
     let end_reading = start_reading.elapsed();
 
@@ -83,8 +112,19 @@ where
 
     let end_data_prep = start_data_prep.elapsed();
 
-    let col_means: Vec<f64> = sparse_csc_column_means(&csc, true)?;
-    let col_stds: Vec<f64> = sparse_csc_column_stds(&csc, &col_means, true)?;
+    let real_col_means: Vec<f64> = sparse_csc_column_means(&csc, true, row_offsets_f64.as_deref())?;
+
+    let col_stds: Vec<f64> = if params_pca.normalise_variance {
+        sparse_csc_column_stds(&csc, &real_col_means, true, row_offsets_f64.as_deref())?
+    } else {
+        vec![1.0; real_col_means.len()]
+    };
+
+    let col_means: Vec<f64> = if params_pca.mean_center {
+        real_col_means
+    } else {
+        vec![0.0; col_stds.len()]
+    };
 
     // down cast here to avoid trait bound chaos
     let col_means: Vec<f32> = col_means.iter().map(|x| *x as f32).collect();
@@ -105,6 +145,7 @@ where
         csc,
         &col_means,
         &col_std,
+        clr_offsets,
         no_pcs,
         Some(svd_params),
         seed as u64,
