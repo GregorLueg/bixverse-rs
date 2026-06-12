@@ -4,6 +4,7 @@
 //! data sets.
 
 use faer::Mat;
+use half::f16;
 use indexmap::IndexSet;
 use rayon::prelude::*;
 use std::time::Instant;
@@ -13,9 +14,9 @@ use crate::core::math::pca_svd::*;
 use crate::core::math::sparse::sparse_svd_lanczos;
 use crate::prelude::*;
 
-/////////////
-// Helpers //
-/////////////
+///////////
+// Types //
+///////////
 
 /// Single cell related PCA result
 ///
@@ -37,43 +38,94 @@ pub type SingleCellPcaResScaled =
 /// * `2` - Eigenvalues
 pub type SingleCellPcaRes = Result<(Mat<f32>, Mat<f32>, Vec<f32>), BixverseErrors>;
 
-/// Enum representing the type of SVD to use for PCA analysis in single cell
+////////////
+// Params //
+////////////
+
+/// Parameters for the main single cell PCA around normalisations and if the
+/// randomised, approximate path shall be used.
 #[derive(Clone, Debug)]
-pub enum SvdType {
-    /// Dense SVD solving with scaling
-    Dense {
-        /// Shall randomised SVD be used
-        randomised: bool,
-    },
-    /// Sparse SVD solving without scaling
-    Sparse {
-        /// Shall randomised SVD be used
-        randomised: bool,
-    },
+pub struct SingleCellPcaParams {
+    /// Mean center the data
+    pub mean_center: bool,
+    /// Normalise the variance
+    pub normalise_variance: bool,
+    /// Shall an approximate, randomised SVD be used
+    pub randomised: bool,
+    /// Apply the CLR transformation
+    pub clr: bool,
+    /// Size factor
+    pub size_factor: f32,
 }
 
-/// Default implementation for SvdType
-impl Default for SvdType {
-    fn default() -> SvdType {
-        SvdType::Dense { randomised: true }
+impl SingleCellPcaParams {
+    /// Generate a new instance of [SingleCellPcaParams]
+    ///
+    /// ### Params
+    ///
+    /// * `mean_center` - Shall the data be mean centered
+    /// * `normalise_variance` - Shall the variance be normalised
+    /// * `randomised` - Shall fast approximate randomised SVD be used
+    /// * `clr` - Shall the CLR transformation be used, see Booeshaghi, et al.,
+    ///   bioRxive, 2026.
+    /// * `size_factor` - The used size factor for preparing everything for the
+    ///   clr transformation
+    ///
+    /// ### Returns
+    ///
+    /// Initialised self.
+    pub fn new(
+        mean_center: bool,
+        normalise_variance: bool,
+        randomised: bool,
+        clr: bool,
+        size_factor: f32,
+    ) -> Self {
+        Self {
+            mean_center,
+            normalise_variance,
+            randomised,
+            clr,
+            size_factor,
+        }
     }
 }
 
-/// Parse the SVD type to use
-///
-/// ### Params
-///
-/// * `s` - The string representation of the SVD type
-/// * `randomised` - Whether to use randomised SVD
-///
-/// ### Returns
-///
-/// An Option containing the parsed SVD type, or None if the input is invalid
-pub fn parse_svd_type(s: &str, randomised: bool) -> Option<SvdType> {
-    match s.to_lowercase().as_str() {
-        "dense" => Some(SvdType::Dense { randomised }),
-        "sparse" => Some(SvdType::Sparse { randomised }),
-        _ => None,
+/// Default implementation for [SingleCellPcaParams]
+impl Default for SingleCellPcaParams {
+    fn default() -> Self {
+        Self {
+            mean_center: false,
+            normalise_variance: false,
+            randomised: true,
+            clr: true,
+            size_factor: 1e4,
+        }
+    }
+}
+
+/////////////
+// Helpers //
+/////////////
+
+impl CscGeneChunk {
+    /// Convert the normalised counts from the `log1p(u * sf)` scale to the
+    /// `log1p(u)` scale, enabling downstream use of the shifted CLR (PFlog1pPF)
+    /// transformation. Mutates `data_norm` in place and refreshes `avg_exp`.
+    ///
+    /// ### Params
+    ///
+    /// * `size_factor` - The size factor used in the original normalisation
+    ///   (e.g. 1e4 for CP10k).
+    pub fn transform_to_clr(&mut self, size_factor: f32) {
+        let sf_inv = 1.0_f32 / size_factor;
+        let mut new_sum = 0.0_f32;
+        for v in self.data_norm.iter_mut() {
+            let new_val = (v.to_f32().exp_m1() * sf_inv).ln_1p();
+            new_sum += new_val;
+            *v = F16::from(f16::from_f32(new_val));
+        }
+        self.avg_exp = F16::from(f16::from_f32(new_sum));
     }
 }
 
@@ -83,51 +135,95 @@ pub fn parse_svd_type(s: &str, randomised: bool) -> Option<SvdType> {
 ///
 /// * `chunk` - The CscGeneChunk for which to scale the data
 /// * `no_cells` - Number of cells represented
+/// * `mean_center` - Boolean. Shall the mean be subtracted (mean = 0).
+/// * `normalise_variance` - Boolean. Shall the genes be scaled to unit
+///   variance.
+/// * `row_offsets` - Optional per-row offsets used by the shifted CLR
+///   transformation.
 ///
 /// ### Returns
 ///
-/// A densified, scaled vector per gene basis.
-#[inline]
-pub fn scale_csc_chunk(chunk: &CscGeneChunk, no_cells: usize) -> (Vec<f32>, f32, f32) {
+/// Tuple of (densified vector, mean, standard deviation). The latter two will
+/// be 0.0 pending if you set `mean_center=true` and/or
+/// `normalise_variance=true`.
+pub fn scale_csc_chunk(
+    chunk: &CscGeneChunk,
+    no_cells: usize,
+    mean_center: bool,
+    normalise_variance: bool,
+    row_offsets: Option<&[f64]>,
+) -> (Vec<f32>, f32, f32) {
     let mut dense_data = vec![0_f32; no_cells];
     for (idx, &row_idx) in chunk.indices.iter().enumerate() {
         dense_data[row_idx as usize] = chunk.data_norm[idx].to_f32();
     }
 
+    if let Some(off) = row_offsets {
+        for i in 0..no_cells {
+            dense_data[i] -= off[i] as f32;
+        }
+    }
+
     let n = no_cells as f64;
-    let sum: f64 = dense_data.iter().map(|&x| x as f64).sum();
-    let mean_f64 = sum / n;
-    let mean = mean_f64 as f32;
 
-    let variance_f64: f64 = dense_data
-        .iter()
-        .map(|&x| {
-            let d = x as f64 - mean_f64;
-            d * d
-        })
-        .sum::<f64>()
-        / (n - 1.0);
-    let std_dev = variance_f64.sqrt() as f32;
-
-    let scaled = if std_dev < 1e-8 {
-        vec![0_f32; no_cells]
-    } else {
-        dense_data.iter().map(|&x| (x - mean) / std_dev).collect()
-    };
-
-    (scaled, mean, std_dev)
+    match (mean_center, normalise_variance) {
+        (false, false) => (dense_data, 0.0, 0.0),
+        (true, false) => {
+            let mean = (dense_data.iter().map(|&x| x as f64).sum::<f64>() / n) as f32;
+            let scaled = dense_data.iter().map(|&x| x - mean).collect();
+            (scaled, mean, 0.0)
+        }
+        (false, true) => {
+            let mean_f64 = dense_data.iter().map(|&x| x as f64).sum::<f64>() / n;
+            let mean = mean_f64 as f32;
+            let std_dev = (dense_data
+                .iter()
+                .map(|&x| {
+                    let d = x as f64 - mean_f64;
+                    d * d
+                })
+                .sum::<f64>()
+                / (n - 1.0))
+                .sqrt() as f32;
+            let scaled = if std_dev < 1e-8 {
+                vec![0_f32; no_cells]
+            } else {
+                dense_data.iter().map(|&x| x / std_dev).collect()
+            };
+            (scaled, mean, std_dev)
+        }
+        (true, true) => {
+            let mean_f64 = dense_data.iter().map(|&x| x as f64).sum::<f64>() / n;
+            let mean = mean_f64 as f32;
+            let std_dev = (dense_data
+                .iter()
+                .map(|&x| {
+                    let d = x as f64 - mean_f64;
+                    d * d
+                })
+                .sum::<f64>()
+                / (n - 1.0))
+                .sqrt() as f32;
+            let scaled = if std_dev < 1e-8 {
+                vec![0_f32; no_cells]
+            } else {
+                dense_data.iter().map(|&x| (x - mean) / std_dev).collect()
+            };
+            (scaled, mean, std_dev)
+        }
+    }
 }
 
 /// Compute column means from a CSC sparse matrix using SIMD-accelerated
-/// summation.
-///
-/// Divides the sum of non-zero values per column by `n_rows`,
-/// accounting for structural zeros.
+/// summation. When `row_offsets` is provided, returns column means of the
+/// row-offset-corrected (CLR) matrix, i.e. `μ_j(A) - mean(offsets)`.
 ///
 /// ### Params
 ///
 /// * `csc` - The CSC sparse matrix.
 /// * `use_second_layer` - Whether to use the second layer of data.
+/// * `row_offsets` - Optional per-row offsets used by the shifted CLR
+///   transformation.
 ///
 /// ### Returns
 ///
@@ -135,8 +231,12 @@ pub fn scale_csc_chunk(chunk: &CscGeneChunk, no_cells: usize) -> (Vec<f32>, f32,
 pub fn sparse_csc_column_means(
     csc: &CompressedSparseData2<f32>,
     use_second_layer: bool,
+    row_offsets: Option<&[f64]>,
 ) -> Result<Vec<f64>, BixverseErrors> {
-    assert!(matches!(csc.cs_type, CompressedSparseFormat::Csc));
+    if !csc.cs_type.is_csc() {
+        return Err(BixverseErrors::SparseMatrixMustBeCsc);
+    }
+
     let (n, m) = csc.shape;
     let n_f = n as f64;
     let values: &[f32] = if use_second_layer {
@@ -147,6 +247,10 @@ pub fn sparse_csc_column_means(
     } else {
         &csc.data
     };
+
+    let m_bar = row_offsets
+        .map(|off| off.iter().sum::<f64>() / n_f)
+        .unwrap_or(0.0);
 
     let res = (0..m)
         .into_par_iter()
@@ -154,30 +258,39 @@ pub fn sparse_csc_column_means(
             let start = csc.indptr[j] as usize;
             let end = csc.indptr[j + 1] as usize;
             let sum: f64 = values[start..end].iter().map(|&x| x as f64).sum();
-            sum / n_f
+            sum / n_f - m_bar
         })
         .collect();
 
     Ok(res)
 }
 
-/// Calculates the standard deviation of a CSC sparse matrix chunk
+/// Calculate column standard deviations of a CSC sparse matrix. When
+/// `row_offsets` is provided, returns standard deviations of the
+/// row-offset-corrected (CLR) matrix. `col_means` must be on the same
+/// scale (i.e. computed with the same `row_offsets`).
 ///
 /// ### Params
 ///
 /// * `csc` - The CSC sparse matrix.
-/// * `col_means` - The column means.
+/// * `col_means` - The column means (CLR-adjusted if `row_offsets` is set).
 /// * `use_second_layer` - Whether to use the second layer of data.
+/// * `row_offsets` - Optional per-row offsets used by the shifted CLR
+///   transformation.
 ///
 /// ### Returns
 ///
-/// The standard deviation.
+/// The standard deviations.
 pub fn sparse_csc_column_stds(
     csc: &CompressedSparseData2<f32>,
     col_means: &[f64],
     use_second_layer: bool,
+    row_offsets: Option<&[f64]>,
 ) -> Result<Vec<f64>, BixverseErrors> {
-    assert!(matches!(csc.cs_type, CompressedSparseFormat::Csc));
+    if !csc.cs_type.is_csc() {
+        return Err(BixverseErrors::SparseMatrixMustBeCsc);
+    }
+
     let (n, m) = csc.shape;
     let n_f = n as f64;
     let values: &[f32] = if use_second_layer {
@@ -188,23 +301,50 @@ pub fn sparse_csc_column_stds(
     } else {
         &csc.data
     };
+
+    let (m_bar, var_m, m_centered) = if let Some(off) = row_offsets {
+        let m_bar = off.iter().sum::<f64>() / n_f;
+        let m_centered: Vec<f64> = off.iter().map(|&v| v - m_bar).collect();
+        let var_m = m_centered.iter().map(|&v| v * v).sum::<f64>() / (n_f - 1.0);
+        (m_bar, var_m, Some(m_centered))
+    } else {
+        (0.0, 0.0, None)
+    };
+
     let res = (0..m)
         .into_par_iter()
         .map(|j| {
             let start = csc.indptr[j] as usize;
             let end = csc.indptr[j + 1] as usize;
             let nnz = end - start;
-            let mu = col_means[j];
+
+            // col_means[j] is μ_j(CLR) = μ_j(A) - m_bar; recover μ_j(A).
+            let mu_a = col_means[j] + m_bar;
+
             let slice = &values[start..end];
+            let indices = &csc.indices[start..end];
+
             let ss_nonzero: f64 = slice
                 .iter()
                 .map(|&x| {
-                    let d = x as f64 - mu;
+                    let d = x as f64 - mu_a;
                     d * d
                 })
                 .sum();
-            let ss_zeros = (n - nnz) as f64 * mu * mu;
-            let variance = (ss_nonzero + ss_zeros) / (n_f - 1.0);
+            let ss_zeros = (n - nnz) as f64 * mu_a * mu_a;
+            let var_a = (ss_nonzero + ss_zeros) / (n_f - 1.0);
+
+            let variance = if let Some(mc) = &m_centered {
+                let cov_term: f64 = slice
+                    .iter()
+                    .zip(indices.iter())
+                    .map(|(&x, &i)| x as f64 * mc[i as usize])
+                    .sum();
+                var_a - (2.0 / (n_f - 1.0)) * cov_term + var_m
+            } else {
+                var_a
+            };
+
             variance.max(0.0).sqrt().max(f64::EPSILON)
         })
         .collect();
@@ -224,8 +364,11 @@ pub fn sparse_csc_column_stds(
 /// * `cell_indices` - Slice of indices for the cells.
 /// * `gene_indices` - Slice of indices for the genes.
 /// * `no_pcs` - Number of principal components to calculate
-/// * `random_svd` - Shall randomised singular value decompostion be used. This
-///   has the advantage of speed-ups, but loses precision.
+/// * `params_pca` - The parameters for this single cell PCA run, see
+///   [SingleCellPcaParams].
+/// * `params_pca` - Parameters for this PCA run, see [SingleCellPcaParams]
+/// * `clr_offsets` - Pre-computed CLR offsets if you want to use the CLR
+///   transformation here.
 /// * `return_scaled` - Return the scaled data.
 /// * `seed` - Seed for randomised SVD.
 /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
@@ -241,7 +384,8 @@ pub fn pca_on_sc(
     cell_indices: &[usize],
     gene_indices: &[usize],
     no_pcs: usize,
-    random_svd: bool,
+    params_pca: &SingleCellPcaParams,
+    clr_offsets: Option<&[f64]>,
     seed: usize,
     return_scaled: bool,
     verbose: usize,
@@ -255,8 +399,14 @@ pub fn pca_on_sc(
     let start_reading = Instant::now();
 
     let reader = ParallelSparseReader::new(f_path)?;
-    let gene_chunks: Vec<CscGeneChunk> =
+    let mut gene_chunks: Vec<CscGeneChunk> =
         reader.read_gene_parallel_filtered(gene_indices, &cell_set)?;
+
+    if params_pca.clr {
+        gene_chunks
+            .par_iter_mut()
+            .for_each(|chunk| chunk.transform_to_clr(params_pca.size_factor));
+    }
 
     let end_reading = start_reading.elapsed();
 
@@ -269,7 +419,13 @@ pub fn pca_on_sc(
     let scaled_data: Vec<Vec<f32>> = gene_chunks
         .par_iter()
         .map(|chunk| {
-            let (scaled, _, _) = scale_csc_chunk(chunk, cell_indices.len());
+            let (scaled, _, _) = scale_csc_chunk(
+                chunk,
+                cell_indices.len(),
+                params_pca.mean_center,
+                params_pca.normalise_variance,
+                clr_offsets,
+            );
             scaled
         })
         .collect();
@@ -303,7 +459,7 @@ pub fn pca_on_sc(
 
     let start_svd = Instant::now();
 
-    let (scores, loadings, s) = if random_svd {
+    let (scores, loadings, s) = if params_pca.randomised {
         let res: RandomSvdResults<f64> =
             randomised_svd(scaled_f64.as_ref(), no_pcs, seed, Some(100_usize), None)?;
         let loadings = Mat::<f32>::from_fn(num_genes, no_pcs, |i, j| res.v[(i, j)] as f32);
@@ -358,7 +514,11 @@ pub fn pca_on_sc(
 /// * `cell_indices` - Slice of indices for the cells.
 /// * `gene_indices` - Slice of indices for the genes.
 /// * `no_pcs` - Number of principal components to calculate.
-/// * `random_svd` - Shall randomised singular value decomposition be used.
+/// * `params_pca` - The parameters for this single cell PCA run, see
+///   [SingleCellPcaParams].
+/// * `params_pca` - Parameters for this PCA run, see [SingleCellPcaParams]
+/// * `clr_offsets` - Pre-computed CLR offsets if you want to use the CLR
+///   transformation here.
 /// * `seed` - Seed for randomised SVD.
 /// * `return_scaled` - Return the scaled data.
 /// * `gene_batch_size` - Number of genes to load per batch.
@@ -375,7 +535,8 @@ pub fn pca_on_sc_streaming(
     cell_indices: &[usize],
     gene_indices: &[usize],
     no_pcs: usize,
-    random_svd: bool,
+    params_pca: &SingleCellPcaParams,
+    clr_offsets: Option<&[f64]>,
     seed: usize,
     return_scaled: bool,
     gene_batch_size: usize,
@@ -411,7 +572,14 @@ pub fn pca_on_sc_streaming(
         let batch_gene_indices = &gene_indices[start_gene..end_gene];
 
         let start_loading = Instant::now();
-        let gene_chunks = reader.read_gene_parallel_filtered(batch_gene_indices, &cell_set)?;
+        let mut gene_chunks = reader.read_gene_parallel_filtered(batch_gene_indices, &cell_set)?;
+
+        if params_pca.clr {
+            gene_chunks
+                .par_iter_mut()
+                .for_each(|chunk| chunk.transform_to_clr(params_pca.size_factor));
+        }
+
         if verbosity.detailed_verbosity() {
             println!("  Loaded batch in: {:.2?}", start_loading.elapsed());
         }
@@ -419,7 +587,13 @@ pub fn pca_on_sc_streaming(
         let batch_scaled: Vec<Vec<f32>> = gene_chunks
             .par_iter()
             .map(|chunk| {
-                let (scaled, _, _) = scale_csc_chunk(chunk, n_cells);
+                let (scaled, _, _) = scale_csc_chunk(
+                    chunk,
+                    n_cells,
+                    params_pca.mean_center,
+                    params_pca.normalise_variance,
+                    clr_offsets,
+                );
                 scaled
             })
             .collect();
@@ -443,7 +617,7 @@ pub fn pca_on_sc_streaming(
 
     let start_svd = Instant::now();
 
-    let (scores, loadings, s) = if random_svd {
+    let (scores, loadings, s) = if params_pca.randomised {
         let res: RandomSvdResults<f64> =
             randomised_svd(scaled_matrix.as_ref(), no_pcs, seed, Some(100_usize), None)?;
         let loadings = Mat::<f32>::from_fn(n_genes, no_pcs, |i, j| res.v[(i, j)] as f32);
@@ -511,8 +685,10 @@ pub fn pca_on_sc_streaming(
 /// * `cell_indices` - Slice of indices for the cells.
 /// * `gene_indices` - Slice of indices for the genes.
 /// * `no_pcs` - Number of principal components to calculate
-/// * `random_svd` - Shall randomised sparse singular value decompostion be
-///   used. This has the advantage of speed-ups, but loses precision.
+/// * `params_pca` - The parameters for this single cell PCA run, see
+///   [SingleCellPcaParams].
+/// * `clr_offsets` - Pre-computed CLR offsets if you want to use the CLR
+///   transformation here.
 /// * `seed` - Seed for randomised SVD.
 /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
 ///   verbosity.
@@ -527,7 +703,8 @@ pub fn pca_on_sc_sparse(
     cell_indices: &[usize],
     gene_indices: &[usize],
     no_pcs: usize,
-    random_svd: bool,
+    params_pca: &SingleCellPcaParams,
+    clr_offsets: Option<&[f64]>,
     seed: usize,
     verbose: usize,
 ) -> SingleCellPcaRes {
@@ -540,8 +717,14 @@ pub fn pca_on_sc_sparse(
     let start_reading = Instant::now();
 
     let reader = ParallelSparseReader::new(f_path)?;
-    let gene_chunks: Vec<CscGeneChunk> =
+    let mut gene_chunks: Vec<CscGeneChunk> =
         reader.read_gene_parallel_filtered(gene_indices, &cell_set)?;
+
+    if params_pca.clr {
+        gene_chunks
+            .par_iter_mut()
+            .for_each(|chunk| chunk.transform_to_clr(params_pca.size_factor));
+    }
 
     let end_reading = start_reading.elapsed();
 
@@ -557,8 +740,8 @@ pub fn pca_on_sc_sparse(
 
     let end_data_prep = start_data_prep.elapsed();
 
-    let col_means: Vec<f64> = sparse_csc_column_means(&csc, true)?;
-    let col_stds: Vec<f64> = sparse_csc_column_stds(&csc, &col_means, true)?;
+    let col_means: Vec<f64> = sparse_csc_column_means(&csc, true, clr_offsets)?;
+    let col_stds: Vec<f64> = sparse_csc_column_stds(&csc, &col_means, true, clr_offsets)?;
 
     if verbosity.normal_verbosity() {
         println!(
@@ -569,7 +752,7 @@ pub fn pca_on_sc_sparse(
 
     let start_svd = Instant::now();
 
-    let (scores, loadings, s) = if random_svd {
+    let (scores, loadings, s) = if params_pca.randomised {
         let svd_res = randomised_sparse_svd::<f32, f64>(
             csc,
             no_pcs,
@@ -579,6 +762,7 @@ pub fn pca_on_sc_sparse(
             None,
             Some(&col_means),
             Some(&col_stds),
+            clr_offsets,
         )?;
         let scores_f64 = compute_pc_scores(&svd_res);
         let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| scores_f64[(i, j)] as f32);
@@ -595,6 +779,7 @@ pub fn pca_on_sc_sparse(
             true,
             Some(&col_means),
             Some(&col_stds),
+            clr_offsets,
         )?;
         let scores_f64 = compute_pc_scores(&svd_res);
         let scores = Mat::<f32>::from_fn(scores_f64.nrows(), scores_f64.ncols(), |i, j| {

@@ -459,7 +459,7 @@ pub fn pairwise_gene_correlations(
                     dense.iter().map(|&x| (x - mean) / std).collect()
                 }
             } else {
-                let (scaled, _, _) = scale_csc_chunk(chunk, n_cells);
+                let (scaled, _, _) = scale_csc_chunk(chunk, n_cells, true, true, None);
                 scaled
             }
         })

@@ -383,8 +383,8 @@ pub fn pca_observed(
 
     let csc = from_gene_chunks::<f32>(gene_chunks, &DataLayerReturn::Norm, n_cells);
 
-    let col_means: Vec<f64> = sparse_csc_column_means(&csc, true)?;
-    let col_stds: Vec<f64> = sparse_csc_column_stds(&csc, &col_means, true)?;
+    let col_means: Vec<f64> = sparse_csc_column_means(&csc, true, None)?;
+    let col_stds: Vec<f64> = sparse_csc_column_stds(&csc, &col_means, true, None)?;
 
     let means_for_svd = if mean_center {
         Some(&col_means[..])
@@ -413,6 +413,7 @@ pub fn pca_observed(
             None,
             means_for_svd,
             stds_for_svd,
+            None,
         )?;
         let scores_f64 = compute_pc_scores(&svd_res);
         let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| scores_f64[(i, j)] as f32);
@@ -428,6 +429,7 @@ pub fn pca_observed(
             true,
             means_for_svd,
             stds_for_svd,
+            None,
         )?;
         let scores_f64 = compute_pc_scores(&svd_res);
         let scores = Mat::<f32>::from_fn(scores_f64.nrows(), scores_f64.ncols(), |i, j| {
