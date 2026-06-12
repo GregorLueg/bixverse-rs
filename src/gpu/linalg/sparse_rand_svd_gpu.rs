@@ -52,7 +52,6 @@ use crate::gpu::linalg::spmm::{
     launch_spmm_csr_forward,
 };
 use crate::prelude::*;
-use crate::single_cell::sc_processing::pca::SingleCellPcaParams;
 
 ////////////
 // Params //
@@ -158,13 +157,13 @@ where
             data_len: m,
         });
     }
-    if let Some(off) = row_offsets {
-        if off.len() != n {
-            return Err(BixverseErrors::DimensionMisMatchSparse {
-                indices_len: off.len(),
-                data_len: n,
-            });
-        }
+    if let Some(off) = row_offsets
+        && off.len() != n
+    {
+        return Err(BixverseErrors::DimensionMisMatchSparse {
+            indices_len: off.len(),
+            data_len: n,
+        });
     }
 
     let use_clr = row_offsets.is_some();

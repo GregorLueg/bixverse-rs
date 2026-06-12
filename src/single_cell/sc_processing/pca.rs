@@ -390,6 +390,19 @@ pub fn pca_on_sc(
     return_scaled: bool,
     verbose: usize,
 ) -> SingleCellPcaResScaled {
+    if params_pca.clr && clr_offsets.is_none() {
+        return Err(BixverseErrors::OffsetsNotProvidedForClrPCA);
+    }
+    if params_pca.clr
+        && let Some(offs) = clr_offsets
+        && offs.len() != cell_indices.len()
+    {
+        return Err(BixverseErrors::OffsetsLengthDoesNotMatchNCells {
+            len_offset: offs.len(),
+            n_cells: cell_indices.len(),
+        });
+    }
+
     let verbosity = parse_verbosity_level(verbose);
 
     let start_total = Instant::now();
@@ -542,6 +555,18 @@ pub fn pca_on_sc_streaming(
     gene_batch_size: usize,
     verbose: usize,
 ) -> SingleCellPcaResScaled {
+    if params_pca.clr && clr_offsets.is_none() {
+        return Err(BixverseErrors::OffsetsNotProvidedForClrPCA);
+    }
+    if params_pca.clr
+        && let Some(offs) = clr_offsets
+        && offs.len() != cell_indices.len()
+    {
+        return Err(BixverseErrors::OffsetsLengthDoesNotMatchNCells {
+            len_offset: offs.len(),
+            n_cells: cell_indices.len(),
+        });
+    }
     let verbosity = parse_verbosity_level(verbose);
 
     let start_total = Instant::now();
@@ -708,6 +733,19 @@ pub fn pca_on_sc_sparse(
     seed: usize,
     verbose: usize,
 ) -> SingleCellPcaRes {
+    if params_pca.clr && clr_offsets.is_none() {
+        return Err(BixverseErrors::OffsetsNotProvidedForClrPCA);
+    }
+    if params_pca.clr
+        && let Some(offs) = clr_offsets
+        && offs.len() != cell_indices.len()
+    {
+        return Err(BixverseErrors::OffsetsLengthDoesNotMatchNCells {
+            len_offset: offs.len(),
+            n_cells: cell_indices.len(),
+        });
+    }
+
     let verbosity = parse_verbosity_level(verbose);
 
     let start_total = Instant::now();
