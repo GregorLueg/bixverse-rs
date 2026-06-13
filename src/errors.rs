@@ -356,6 +356,26 @@ pub enum BixverseErrors {
         n_cells: usize,
     },
 
+    // -- NMF --
+    /// NMF Rank is too large for the NNDSVD initialisation
+    #[error(
+        "The requested NMF ({requested}) rank is too large for NNDSVD initialisation (available: {available})."
+    )]
+    NmfRankTooLarge {
+        /// Requested rank
+        requested: usize,
+        /// Maximum available rank
+        available: usize,
+    },
+
+    /// Error if NMF values are not finite
+    #[error("The NMF values are not finite")]
+    NmfNonFinite,
+
+    /// Error if NMF values are negative
+    #[error("Negative values were discovered for NMF. Please check the inputs.")]
+    NmfNonNegativeViolated,
+
     // -- Hotspot --
     /// Invalid model chosen for Hotspot
     #[cfg(feature = "single-cell")]

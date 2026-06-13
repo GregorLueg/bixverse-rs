@@ -7,7 +7,6 @@ use rayon::prelude::*;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use statrs::distribution::{DiscreteCDF, Poisson};
 use std::cell::RefCell;
-use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::core::math::{matrix_helpers::rank_matrix_col, vector_helpers::standard_deviation};
@@ -165,11 +164,6 @@ fn fast_poisson_cdf(lambda: f64, k: u64) -> f64 {
 ///
 /// Vector of log-odds transformed KCDF values: -ln((1 - left_tail) / left_tail)
 /// where left_tail is the cumulative probability.
-///
-/// ### Performance Optimizations
-///
-/// - SIMD-friendly loop unrolling (processes 4 elements at once)
-/// - Unsafe memory access for maximum speed in hot loops
 fn row_kernel_density<T>(
     density_row: RowRef<T>,
     test_row: RowRef<T>,
@@ -182,55 +176,55 @@ where
     let n_test = test_row.ncols();
     let n_density = density_row.ncols();
     let mut results = Vec::with_capacity(n_test);
-    let density_len_inv = T::one() / T::from_usize(n_density).unwrap();
-    let zero = T::zero();
+    let density_len_inv = 1.0_f64 / n_density as f64;
+
+    let density_f64: Vec<f64> = density_row.iter().map(|&x| x.to_f64().unwrap()).collect();
 
     if use_gaussian {
         for test_val in test_row.iter() {
-            let mut left_tail = T::zero();
             let test_val_f64 = test_val.to_f64().unwrap();
+            let mut left_tail = 0.0_f64;
 
             let mut i = 0;
             while i + 4 <= n_density {
                 unsafe {
-                    let d1 = density_row.get_unchecked(i).to_f64().unwrap();
-                    let d2 = density_row.get_unchecked(i + 1).to_f64().unwrap();
-                    let d3 = density_row.get_unchecked(i + 2).to_f64().unwrap();
-                    let d4 = density_row.get_unchecked(i + 3).to_f64().unwrap();
+                    let d1 = *density_f64.get_unchecked(i);
+                    let d2 = *density_f64.get_unchecked(i + 1);
+                    let d3 = *density_f64.get_unchecked(i + 2);
+                    let d4 = *density_f64.get_unchecked(i + 3);
 
-                    left_tail += T::from_f64(fast_normal_cdf(test_val_f64, d1, bandwidth)).unwrap();
-                    left_tail += T::from_f64(fast_normal_cdf(test_val_f64, d2, bandwidth)).unwrap();
-                    left_tail += T::from_f64(fast_normal_cdf(test_val_f64, d3, bandwidth)).unwrap();
-                    left_tail += T::from_f64(fast_normal_cdf(test_val_f64, d4, bandwidth)).unwrap();
+                    left_tail += fast_normal_cdf(test_val_f64, d1, bandwidth);
+                    left_tail += fast_normal_cdf(test_val_f64, d2, bandwidth);
+                    left_tail += fast_normal_cdf(test_val_f64, d3, bandwidth);
+                    left_tail += fast_normal_cdf(test_val_f64, d4, bandwidth);
                 }
                 i += 4;
             }
 
             while i < n_density {
                 unsafe {
-                    let d = density_row.get_unchecked(i).to_f64().unwrap();
-                    left_tail += T::from_f64(fast_normal_cdf(test_val_f64, d, bandwidth)).unwrap();
+                    let d = *density_f64.get_unchecked(i);
+                    left_tail += fast_normal_cdf(test_val_f64, d, bandwidth);
                 }
                 i += 1;
             }
 
-            left_tail = left_tail * density_len_inv;
-            let one_minus_tail = T::one() - left_tail;
-            let ratio = one_minus_tail / left_tail.max(T::from_f64(1e-15).unwrap());
-            results.push(-ratio.ln());
+            left_tail *= density_len_inv;
+            let ratio = (1.0 - left_tail) / left_tail.max(1e-15);
+            results.push(T::from_f64(-ratio.ln()).unwrap());
         }
     } else {
         for test_val in test_row.iter() {
-            let test_val_u64 = (*test_val).max(zero).to_f64().unwrap() as u64;
-            let mut left_tail = T::zero();
+            let test_val_u64 = test_val.to_f64().unwrap().max(0.0) as u64;
+            let mut left_tail = 0.0_f64;
 
             let mut i = 0;
             while i + 4 <= n_density {
                 unsafe {
-                    let d1 = density_row.get_unchecked(i).to_f64().unwrap();
-                    let d2 = density_row.get_unchecked(i + 1).to_f64().unwrap();
-                    let d3 = density_row.get_unchecked(i + 2).to_f64().unwrap();
-                    let d4 = density_row.get_unchecked(i + 3).to_f64().unwrap();
+                    let d1 = *density_f64.get_unchecked(i);
+                    let d2 = *density_f64.get_unchecked(i + 1);
+                    let d3 = *density_f64.get_unchecked(i + 2);
+                    let d4 = *density_f64.get_unchecked(i + 3);
 
                     let lambda1 = d1 + POISSON_BANDWIDTH;
                     let lambda2 = d2 + POISSON_BANDWIDTH;
@@ -238,16 +232,16 @@ where
                     let lambda4 = d4 + POISSON_BANDWIDTH;
 
                     if lambda1 > 0.0 {
-                        left_tail += T::from_f64(fast_poisson_cdf(lambda1, test_val_u64)).unwrap();
+                        left_tail += fast_poisson_cdf(lambda1, test_val_u64);
                     }
                     if lambda2 > 0.0 {
-                        left_tail += T::from_f64(fast_poisson_cdf(lambda2, test_val_u64)).unwrap();
+                        left_tail += fast_poisson_cdf(lambda2, test_val_u64);
                     }
                     if lambda3 > 0.0 {
-                        left_tail += T::from_f64(fast_poisson_cdf(lambda3, test_val_u64)).unwrap();
+                        left_tail += fast_poisson_cdf(lambda3, test_val_u64);
                     }
                     if lambda4 > 0.0 {
-                        left_tail += T::from_f64(fast_poisson_cdf(lambda4, test_val_u64)).unwrap();
+                        left_tail += fast_poisson_cdf(lambda4, test_val_u64);
                     }
                 }
                 i += 4;
@@ -255,19 +249,18 @@ where
 
             while i < n_density {
                 unsafe {
-                    let d = density_row.get_unchecked(i).to_f64().unwrap();
+                    let d = *density_f64.get_unchecked(i);
                     let lambda = d + POISSON_BANDWIDTH;
                     if lambda > 0.0 {
-                        left_tail += T::from_f64(fast_poisson_cdf(lambda, test_val_u64)).unwrap();
+                        left_tail += fast_poisson_cdf(lambda, test_val_u64);
                     }
                 }
                 i += 1;
             }
 
-            left_tail = left_tail * density_len_inv;
-            let one_minus_tail = T::one() - left_tail;
-            let ratio = one_minus_tail / left_tail.max(T::from_f64(1e-15).unwrap());
-            results.push(-ratio.ln());
+            left_tail *= density_len_inv;
+            let ratio = (1.0 - left_tail) / left_tail.max(1e-15);
+            results.push(T::from_f64(-ratio.ln()).unwrap());
         }
     }
 
@@ -646,6 +639,10 @@ fn ssgsea_fast_random_walk<T: BixverseFloat>(
 // Main functions //
 ////////////////////
 
+//////////
+// GSVA //
+//////////
+
 /// GSVA
 ///
 /// Follows the algorithm described in the paper and implemented in the C code.
@@ -695,50 +692,48 @@ pub fn gsva<T: BixverseFloat>(
         println!("Step 1 - Kernel density estimation: {:.2?}", kcdf_time);
     }
 
-    let result_mutex = Mutex::new(&mut result);
     let start_parallel = Instant::now();
 
-    (0..n_samples).into_par_iter().for_each(|sample_idx| {
-        let sample_start = Instant::now();
+    result
+        .par_col_iter_mut()
+        .enumerate()
+        .for_each(|(sample_idx, mut col)| {
+            let sample_start = Instant::now();
 
-        let extract_start = Instant::now();
-        let sample_kcdf: Vec<T> = kcdf_matrix.col(sample_idx).iter().copied().collect();
-        let extract_time = extract_start.elapsed();
+            let extract_start = Instant::now();
+            let sample_kcdf: Vec<T> = kcdf_matrix.col(sample_idx).iter().copied().collect();
+            let extract_time = extract_start.elapsed();
 
-        let rank_start = Instant::now();
-        let (decreasing_order, rank_stats) = order_rankstat(&sample_kcdf);
-        let rank_time = rank_start.elapsed();
+            let rank_start = Instant::now();
+            let (decreasing_order, rank_stats) = order_rankstat(&sample_kcdf);
+            let rank_time = rank_start.elapsed();
 
-        let score_start = Instant::now();
-        let scores = gsva_score_genesets(
-            gene_sets,
-            &decreasing_order,
-            &rank_stats,
-            tau,
-            max_diff,
-            abs_rank,
-        );
-        let score_time = score_start.elapsed();
-
-        let store_start = Instant::now();
-        {
-            let mut result_guard = result_mutex.lock().unwrap();
-            for (gene_set_idx, &score) in scores.iter().enumerate() {
-                result_guard[(gene_set_idx, sample_idx)] = score;
-            }
-        }
-        let store_time = store_start.elapsed();
-
-        let sample_total = sample_start.elapsed();
-
-        if print_timings & (sample_idx < 5 || sample_idx % 100 == 0 || sample_idx >= n_samples - 5)
-        {
-            println!(
-                "Sample {}: total={:.2?}, extract={:.2?}, rank={:.2?}, score={:.2?}, store={:.2?}",
-                sample_idx, sample_total, extract_time, rank_time, score_time, store_time
+            let score_start = Instant::now();
+            let scores = gsva_score_genesets(
+                gene_sets,
+                &decreasing_order,
+                &rank_stats,
+                tau,
+                max_diff,
+                abs_rank,
             );
-        }
-    });
+            let score_time = score_start.elapsed();
+
+            for (gene_set_idx, &score) in scores.iter().enumerate() {
+                col[gene_set_idx] = score;
+            }
+
+            let sample_total = sample_start.elapsed();
+
+            if print_timings
+                && (sample_idx < 5 || sample_idx % 100 == 0 || sample_idx >= n_samples - 5)
+            {
+                println!(
+                    "Sample {}: total={:.2?}, extract={:.2?}, rank={:.2?}, score={:.2?}",
+                    sample_idx, sample_total, extract_time, rank_time, score_time
+                );
+            }
+        });
 
     let parallel_time = start_parallel.elapsed();
     let total_time = start_total.elapsed();
@@ -758,6 +753,10 @@ pub fn gsva<T: BixverseFloat>(
     result
 }
 
+////////////
+// ssGSEA //
+////////////
+
 /// ssGSEA
 ///
 /// Translation from the original R code into Rust with performance
@@ -769,7 +768,7 @@ pub fn gsva<T: BixverseFloat>(
 /// * `gene_sets` - Vector of gene sets as index vectors
 /// * `alpha` - The exponent defining the weight of the tail in the random walk
 ///   performed by ssGSEA.
-/// * `normalisations` - Shall the extract score be normalised.
+/// * `normalisation` - Shall the extract score be normalised.
 /// * `print_timings` - Enable detailed performance output
 ///
 /// ### Returns
@@ -779,7 +778,7 @@ pub fn ssgsea<T: BixverseFloat>(
     expression_matrix: &MatRef<T>,
     gene_sets: &[Vec<usize>],
     alpha: f64,
-    normalization: bool,
+    normalisation: bool,
     print_timings: bool,
 ) -> Mat<T> {
     let start_total = Instant::now();
@@ -812,53 +811,57 @@ pub fn ssgsea<T: BixverseFloat>(
     let start_scoring = Instant::now();
     let mut result: Mat<T> = Mat::zeros(gene_sets.len(), n_samples);
 
-    let result_mutex = Mutex::new(&mut result);
+    result
+        .par_col_iter_mut()
+        .enumerate()
+        .for_each(|(sample_idx, mut col)| {
+            let sample_start = Instant::now();
 
-    (0..n_samples).into_par_iter().for_each(|sample_idx| {
-        let sample_start = Instant::now();
+            let ranking_start = Instant::now();
+            let sample_ranks: Vec<T> = ranks.col(sample_idx).iter().copied().collect();
+            let mut gene_ranking: Vec<usize> = (0..n_genes).collect();
 
-        let ranking_start = Instant::now();
-        let sample_ranks: Vec<T> = ranks.col(sample_idx).iter().copied().collect();
-        let mut gene_ranking: Vec<usize> = (0..n_genes).collect();
+            gene_ranking
+                .sort_unstable_by(|&a, &b| sample_ranks[b].partial_cmp(&sample_ranks[a]).unwrap());
+            let ranking_time = ranking_start.elapsed();
 
-        gene_ranking
-            .sort_unstable_by(|&a, &b| sample_ranks[b].partial_cmp(&sample_ranks[a]).unwrap());
-        let ranking_time = ranking_start.elapsed();
+            let score_start = Instant::now();
 
-        let score_start = Instant::now();
-
-        let mut rank_lookup = FxHashMap::with_capacity_and_hasher(n_genes, FxBuildHasher);
-        for (rank_pos, &gene_idx) in gene_ranking.iter().enumerate() {
-            rank_lookup.insert(gene_idx, rank_pos);
-        }
-
-        let rank_weights_col = rank_weights.col(sample_idx);
-
-        let scores: Vec<T> = gene_sets
-            .iter()
-            .map(|gene_set| {
-                ssgsea_fast_random_walk(gene_set, &rank_lookup, &gene_ranking, &rank_weights_col)
-            })
-            .collect();
-        let score_end = score_start.elapsed();
-
-        {
-            let mut result_guard = result_mutex.lock().unwrap();
-            for (gene_set_idx, &score) in scores.iter().enumerate() {
-                result_guard[(gene_set_idx, sample_idx)] = score;
+            let mut rank_lookup = FxHashMap::with_capacity_and_hasher(n_genes, FxBuildHasher);
+            for (rank_pos, &gene_idx) in gene_ranking.iter().enumerate() {
+                rank_lookup.insert(gene_idx, rank_pos);
             }
-        }
 
-        let sample_total = sample_start.elapsed();
+            let rank_weights_col = rank_weights.col(sample_idx);
 
-        if print_timings & (sample_idx < 5 || sample_idx % 100 == 0 || sample_idx >= n_samples - 5)
-        {
-            println!(
-                "Sample {}: total={:.2?}, ranking={:.2?}, scoring={:.2?}",
-                sample_idx, sample_total, ranking_time, score_end
-            );
-        }
-    });
+            let scores: Vec<T> = gene_sets
+                .iter()
+                .map(|gene_set| {
+                    ssgsea_fast_random_walk(
+                        gene_set,
+                        &rank_lookup,
+                        &gene_ranking,
+                        &rank_weights_col,
+                    )
+                })
+                .collect();
+            let score_end = score_start.elapsed();
+
+            for (gene_set_idx, &score) in scores.iter().enumerate() {
+                col[gene_set_idx] = score;
+            }
+
+            let sample_total = sample_start.elapsed();
+
+            if print_timings
+                && (sample_idx < 5 || sample_idx % 100 == 0 || sample_idx >= n_samples - 5)
+            {
+                println!(
+                    "Sample {}: total={:.2?}, ranking={:.2?}, scoring={:.2?}",
+                    sample_idx, sample_total, ranking_time, score_end
+                );
+            }
+        });
 
     let scoring_time = start_scoring.elapsed();
 
@@ -869,7 +872,7 @@ pub fn ssgsea<T: BixverseFloat>(
         );
     }
 
-    if normalization {
+    if normalisation {
         let start_norm = Instant::now();
 
         let mut min_score = T::infinity();

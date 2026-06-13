@@ -7,7 +7,7 @@ use num_traits::float::TotalOrder;
 use num_traits::{Float, FromPrimitive, ToPrimitive};
 
 use std::fmt::Display;
-use std::ops::{Add, AddAssign, Div, DivAssign, Mul, Sub, SubAssign};
+use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Sub, SubAssign};
 
 ///////////////////
 // Numeric trait //
@@ -26,6 +26,7 @@ pub trait BixverseFloat:
     + AddAssign
     + DivAssign
     + SubAssign
+    + MulAssign
     + Div
     + Display
     + Sub
@@ -47,6 +48,7 @@ impl<T> BixverseFloat for T where
         + AddAssign
         + DivAssign
         + SubAssign
+        + MulAssign
         + Div
         + Display
         + Sub
