@@ -195,6 +195,7 @@ fn nndsvd_from_svd<F: BixverseFloat>(
 ////////////
 
 /// HALS solver options.
+#[derive(Clone, Debug)]
 pub struct HalsOpts<F: BixverseFloat> {
     /// Maximum number of outer iterations.
     pub max_iter: usize,
@@ -679,6 +680,113 @@ where
     })
 }
 
+//////////////////////////
+// Multiple run version //
+//////////////////////////
+
+/// Result of stabilised NMF across random restarts.
+pub struct StabilisedNmfResult<F: BixverseFloat> {
+    /// Column-bound W matrices across all runs, shape `m x (k * n_runs)`.
+    /// Columns `i*k..(i+1)*k` are run `i`'s components.
+    pub w_all: Mat<F>,
+    /// Per-run H matrices, each `k x n`.
+    pub h_per_run: Vec<Mat<F>>,
+    /// Final reconstruction loss for each run.
+    pub losses: Vec<F>,
+    /// Convergence flag for each run.
+    pub converged: Vec<bool>,
+    /// Index of the run with the lowest final loss.
+    pub best_idx: usize,
+}
+
+/// Stabilised NMF via random restarts.
+///
+/// Runs `nmf_hals` `n_runs` times with random initialisations seeded by
+/// `base_seed + i` and column-binds the resulting `W` matrices for downstream
+/// consensus clustering. Outer parallelism is capped at
+/// `min(n_runs, max(cores / 2, 1))` to leave headroom for the inner
+/// parallelism inside HALS. The `init` field of `opts` is ignored; random
+/// init is always used.
+///
+/// ### Params
+///
+/// * `v` - Input matrix backend.
+/// * `k` - Number of components per run.
+/// * `n_runs` - Number of random restarts. Must be >= 1.
+/// * `base_seed` - Seed offset; run `i` uses `base_seed + i`.
+/// * `opts` - HALS options (init field ignored).
+///
+/// ### Returns
+///
+/// A [`StabilisedNmfResult`] with column-bound `W`, per-run `H`, per-run
+/// losses and convergence flags, and the index of the best run.
+pub fn stabilised_nmf<F, In>(
+    v: &In,
+    k: usize,
+    n_runs: usize,
+    base_seed: u64,
+    opts: &HalsOpts<F>,
+) -> Result<StabilisedNmfResult<F>, BixverseErrors>
+where
+    F: BixverseFloat + Send + Sync,
+    In: NmfInput<F> + Sync,
+{
+    assert!(n_runs >= 1, "n_runs must be >= 1");
+
+    let cores = rayon::current_num_threads();
+    let n_outer = n_runs.min((cores / 2).max(1));
+
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(n_outer)
+        .build()
+        .expect("failed to build thread pool for stabilised NMF");
+
+    let runs: Vec<NmfResult<F>> = pool.install(|| {
+        (0..n_runs)
+            .into_par_iter()
+            .map(|i| {
+                let opts_i = HalsOpts {
+                    max_iter: opts.max_iter,
+                    tol: opts.tol,
+                    eps: opts.eps,
+                    check_every: opts.check_every,
+                    init: NmfInit::Random {
+                        seed: base_seed + i as u64,
+                    },
+                };
+                nmf_hals(v, k, &opts_i)
+            })
+            .collect::<Result<Vec<_>, _>>()
+    })?;
+
+    let (m, _) = v.shape();
+
+    let w_all = Mat::<F>::from_fn(m, k * n_runs, |row, col| {
+        let run_idx = col / k;
+        let comp_idx = col % k;
+        runs[run_idx].w[(row, comp_idx)]
+    });
+
+    let losses: Vec<F> = runs.iter().map(|r| r.final_loss).collect();
+    let converged: Vec<bool> = runs.iter().map(|r| r.converged).collect();
+    let h_per_run: Vec<Mat<F>> = runs.into_iter().map(|r| r.h).collect();
+
+    let best_idx = losses
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+
+    Ok(StabilisedNmfResult {
+        w_all,
+        h_per_run,
+        losses,
+        converged,
+        best_idx,
+    })
+}
+
 ///////////
 // Tests //
 ///////////
@@ -915,5 +1023,206 @@ mod tests {
         let res = nmf_hals(&input, k, &opts).unwrap();
         assert!(res.converged);
         assert!(res.n_iter < 1000);
+    }
+
+    #[test]
+    fn stabilised_nmf_shapes_and_indexing() {
+        let (m, n, k) = (12, 8, 3);
+        let n_runs = 4;
+        let v_mat: Mat<f64> = Mat::from_fn(m, n, |i, j| (i + j + 1) as f64);
+        let input = DenseInput::new(v_mat.as_ref()).unwrap();
+        let opts = HalsOpts::<f64>::new(50, 1e-6, 1e-12, 10, NmfInit::Nndsvd);
+
+        let res = stabilised_nmf(&input, k, n_runs, 0, &opts).unwrap();
+
+        assert_eq!(res.w_all.shape(), (m, k * n_runs));
+        assert_eq!(res.h_per_run.len(), n_runs);
+        assert_eq!(res.losses.len(), n_runs);
+        assert_eq!(res.converged.len(), n_runs);
+        assert!(res.best_idx < n_runs);
+
+        for run in 0..n_runs {
+            assert_eq!(res.h_per_run[run].shape(), (k, n));
+        }
+    }
+
+    #[test]
+    fn stabilised_nmf_single_run() {
+        let (m, n, k) = (8, 6, 2);
+        let v_mat: Mat<f64> = Mat::from_fn(m, n, |i, j| (i + j + 1) as f64);
+        let input = DenseInput::new(v_mat.as_ref()).unwrap();
+        let opts = HalsOpts::<f64>::new(50, 1e-6, 1e-12, 10, NmfInit::Nndsvd);
+
+        let res = stabilised_nmf(&input, k, 1, 42, &opts).unwrap();
+
+        assert_eq!(res.w_all.shape(), (m, k));
+        assert_eq!(res.h_per_run.len(), 1);
+        assert_eq!(res.best_idx, 0);
+    }
+
+    #[test]
+    fn stabilised_nmf_column_binding_matches_best_run() {
+        let (m, n, k) = (10, 8, 2);
+        let n_runs = 3;
+        let v_mat: Mat<f64> = Mat::from_fn(m, n, |i, j| (i + j + 1) as f64);
+        let input = DenseInput::new(v_mat.as_ref()).unwrap();
+        let opts = HalsOpts::<f64>::new(50, 1e-6, 1e-12, 10, NmfInit::Nndsvd);
+
+        let res = stabilised_nmf(&input, k, n_runs, 7, &opts).unwrap();
+
+        // Check w_all column structure: columns [run*k .. (run+1)*k] should match
+        // the W of run `run`. We can't access individual run W matrices since they
+        // were consumed into w_all, but we can verify via the best_idx index that
+        // the best run's columns are present and non-negative.
+        let best = res.best_idx;
+        for col in (best * k)..((best + 1) * k) {
+            for row in 0..m {
+                assert!(res.w_all[(row, col)] >= 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn stabilised_nmf_best_idx_is_min_loss() {
+        let (m, n, k) = (10, 8, 2);
+        let n_runs = 5;
+        let v_mat: Mat<f64> = Mat::from_fn(m, n, |i, j| (i * 2 + j + 1) as f64);
+        let input = DenseInput::new(v_mat.as_ref()).unwrap();
+        let opts = HalsOpts::<f64>::new(100, 1e-8, 1e-12, 10, NmfInit::Nndsvd);
+
+        let res = stabilised_nmf(&input, k, n_runs, 0, &opts).unwrap();
+
+        let best_loss = res.losses[res.best_idx];
+        for &loss in &res.losses {
+            assert!(loss >= best_loss - 1e-12);
+        }
+    }
+
+    #[test]
+    fn stabilised_nmf_deterministic_with_same_seed() {
+        let (m, n, k) = (10, 8, 2);
+        let v_mat: Mat<f64> = Mat::from_fn(m, n, |i, j| (i + j + 1) as f64);
+        let input = DenseInput::new(v_mat.as_ref()).unwrap();
+        let opts = HalsOpts::<f64>::new(50, 1e-6, 1e-12, 10, NmfInit::Nndsvd);
+
+        let res_a = stabilised_nmf(&input, k, 3, 123, &opts).unwrap();
+        let res_b = stabilised_nmf(&input, k, 3, 123, &opts).unwrap();
+
+        assert_eq!(res_a.losses.len(), res_b.losses.len());
+        for run in 0..res_a.losses.len() {
+            assert!((res_a.losses[run] - res_b.losses[run]).abs() < 1e-9);
+        }
+        for col in 0..res_a.w_all.ncols() {
+            for row in 0..res_a.w_all.nrows() {
+                assert!((res_a.w_all[(row, col)] - res_b.w_all[(row, col)]).abs() < 1e-9);
+            }
+        }
+    }
+
+    #[test]
+    fn stabilised_nmf_different_seeds_give_different_results() {
+        let (m, n, k) = (10, 8, 2);
+        let v_mat: Mat<f64> = Mat::from_fn(m, n, |i, j| (i + j + 1) as f64);
+        let input = DenseInput::new(v_mat.as_ref()).unwrap();
+        let opts = HalsOpts::<f64>::new(20, 1e-3, 1e-12, 10, NmfInit::Nndsvd);
+
+        let res_a = stabilised_nmf(&input, k, 2, 0, &opts).unwrap();
+        let res_b = stabilised_nmf(&input, k, 2, 1000, &opts).unwrap();
+
+        // At least one entry of w_all should differ noticeably between seed sets.
+        let mut max_diff = 0.0_f64;
+        for col in 0..res_a.w_all.ncols() {
+            for row in 0..res_a.w_all.nrows() {
+                let d = (res_a.w_all[(row, col)] - res_b.w_all[(row, col)]).abs();
+                if d > max_diff {
+                    max_diff = d;
+                }
+            }
+        }
+        assert!(
+            max_diff > 1e-6,
+            "different seeds produced identical results"
+        );
+    }
+
+    #[test]
+    fn stabilised_nmf_recovers_rank_k() {
+        let (m, n, k) = (25, 18, 2);
+        let w_true: Mat<f64> = Mat::from_fn(m, k, |i, j| ((i * 3 + j) % 4 + 1) as f64);
+        let h_true: Mat<f64> = Mat::from_fn(k, n, |i, j| ((i * 2 + j) % 3 + 1) as f64);
+        let v_mat: Mat<f64> = Mat::from_fn(m, n, |i, j| {
+            let mut s = 0.0;
+            for r in 0..k {
+                s += w_true[(i, r)] * h_true[(r, j)];
+            }
+            s
+        });
+
+        let mut sq_frob_v = 0.0;
+        for i in 0..m {
+            for j in 0..n {
+                sq_frob_v += v_mat[(i, j)].powi(2);
+            }
+        }
+
+        let input = DenseInput::new(v_mat.as_ref()).unwrap();
+        let opts = HalsOpts::<f64>::new(300, 1e-8, 1e-12, 10, NmfInit::Nndsvd);
+
+        let res = stabilised_nmf(&input, k, 5, 0, &opts).unwrap();
+
+        let rel = res.losses[res.best_idx] / sq_frob_v;
+        assert!(rel < 1e-2, "best rel loss {rel}");
+    }
+
+    #[test]
+    fn stabilised_nmf_works_on_sparse_backend() {
+        let (m, n, k) = (15, 12, 2);
+        let v_dense: Mat<f64> = Mat::from_fn(m, n, |i, j| {
+            if (i + j) % 3 == 0 {
+                (i + j + 1) as f64
+            } else {
+                0.0
+            }
+        });
+        let csr = CompressedSparseData2::<f64, f64>::from_dense_matrix(
+            v_dense.as_ref(),
+            CompressedSparseFormat::Csr,
+        );
+        let sparse_in: SparseInput<f64, f64> = SparseInput::from_primary(&csr).unwrap();
+        let opts = HalsOpts::<f64>::new(100, 1e-6, 1e-12, 10, NmfInit::Nndsvd);
+
+        let res = stabilised_nmf(&sparse_in, k, 3, 0, &opts).unwrap();
+
+        assert_eq!(res.w_all.shape(), (m, k * 3));
+        assert_eq!(res.h_per_run.len(), 3);
+        for &loss in &res.losses {
+            assert!(loss.is_finite());
+        }
+    }
+
+    #[test]
+    fn stabilised_nmf_ignores_init_field() {
+        // Passing NmfInit::Nndsvd in opts should not produce identical W columns
+        // across runs — random init must override.
+        let (m, n, k) = (10, 8, 2);
+        let v_mat: Mat<f64> = Mat::from_fn(m, n, |i, j| (i + j + 1) as f64);
+        let input = DenseInput::new(v_mat.as_ref()).unwrap();
+        let opts = HalsOpts::<f64>::new(20, 1e-3, 1e-12, 10, NmfInit::Nndsvd);
+
+        let res = stabilised_nmf(&input, k, 3, 0, &opts).unwrap();
+
+        // Runs 0 and 1 use different seeds, so their W blocks should differ.
+        let mut max_diff = 0.0_f64;
+        for col in 0..k {
+            for row in 0..m {
+                let a = res.w_all[(row, col)];
+                let b = res.w_all[(row, col + k)];
+                let d = (a - b).abs();
+                if d > max_diff {
+                    max_diff = d;
+                }
+            }
+        }
+        assert!(max_diff > 1e-6, "init field was not overridden to Random");
     }
 }

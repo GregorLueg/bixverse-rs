@@ -11,6 +11,27 @@ use crate::core::mat_struct::NamedMatrix;
 use crate::prelude::*;
 use crate::utils::vec_utils::{array_max, flatten_vector};
 
+/////////////
+// Helpers //
+/////////////
+
+/// Identify the k-th largest values
+///
+/// ### Params
+///
+/// * `values` - The slice of numerics to look at
+/// * `k` - The k-th values to check
+///
+/// ### Returns
+///
+/// The k-th largest value
+fn kth_largest<T: BixverseFloat>(values: &[T], k: usize) -> T {
+    let mut sorted: Vec<T> = values.to_vec();
+    sorted.sort_by(|a, b| b.partial_cmp(a).unwrap());
+    let idx = k.saturating_sub(1).min(sorted.len().saturating_sub(1));
+    sorted[idx]
+}
+
 /// Structure for an Rbh triplet Result
 #[derive(Clone, Debug)]
 pub struct RbhTripletStruc<'a, T> {
@@ -64,6 +85,7 @@ pub struct RbhResult<T> {
 pub fn calculate_rbh_set<'a, T>(
     origin_modules: &'a BTreeMap<String, FxHashSet<String>>,
     target_modules: &'a BTreeMap<String, FxHashSet<String>>,
+    k: usize,
     overlap_coefficient: bool,
     min_similarity: T,
 ) -> Vec<RbhTripletStruc<'a, T>>
@@ -99,19 +121,19 @@ where
 
         let sim_mat = Mat::from_fn(nrow, ncol, |i, j| mat_data[j + i * ncol]);
 
-        let row_maxima: Vec<&T> = sim_mat
+        let row_thresholds: Vec<T> = sim_mat
             .row_iter()
             .map(|x| {
-                let row: Vec<&T> = x.iter().collect();
-                array_max(&row)
+                let row: Vec<T> = x.iter().copied().collect();
+                kth_largest(&row, k)
             })
             .collect();
 
-        let col_maxima: Vec<&T> = sim_mat
-            .col_iter()
+        let col_thresholds: Vec<T> = sim_mat
+            .row_iter()
             .map(|x| {
-                let col: Vec<&T> = x.iter().collect();
-                array_max(&col)
+                let row: Vec<T> = x.iter().copied().collect();
+                kth_largest(&row, k)
             })
             .collect();
 
@@ -120,7 +142,7 @@ where
         for r in 0..nrow {
             for c in 0..ncol {
                 let value = sim_mat[(r, c)];
-                if value == *row_maxima[r] && value == *col_maxima[c] {
+                if value >= row_thresholds[r] && value >= col_thresholds[c] {
                     let triplet = RbhTripletStruc {
                         t1: names_origin[r],
                         t2: names_targets[c],
@@ -165,6 +187,7 @@ where
 pub fn calculate_rbh_cor<'a, T>(
     x1: &'a NamedMatrix<'a, T>,
     x2: &'a NamedMatrix<'a, T>,
+    k: usize,
     spearman: bool,
 ) -> Vec<RbhTripletStruc<'a, T>>
 where
@@ -195,19 +218,19 @@ where
 
     zip!(correlations.as_mut()).for_each(|unzip!(x)| *x = x.abs());
 
-    let row_maxima: Vec<&T> = correlations
+    let row_thresholds: Vec<T> = correlations
         .row_iter()
         .map(|x| {
-            let row: Vec<&T> = x.iter().collect();
-            array_max(&row)
+            let row: Vec<T> = x.iter().copied().collect();
+            kth_largest(&row, k)
         })
         .collect();
 
-    let col_maxima: Vec<&T> = correlations
+    let col_thresholds: Vec<T> = correlations
         .col_iter()
         .map(|x| {
-            let col: Vec<&T> = x.iter().collect();
-            array_max(&col)
+            let col: Vec<T> = x.iter().copied().collect();
+            kth_largest(&col, k)
         })
         .collect();
 
@@ -218,7 +241,7 @@ where
     for r in 0..nrow {
         for c in 0..ncol {
             let value = correlations[(r, c)];
-            if value == *row_maxima[r] && value == *col_maxima[c] {
+            if value >= row_thresholds[r] && value >= col_thresholds[c] {
                 let triplet = RbhTripletStruc {
                     t1: names_targets[r],
                     t2: names_origin[c],
@@ -237,5 +260,143 @@ where
             t2: "NA",
             sim: T::zero(),
         }]
+    }
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn module(items: &[&str]) -> FxHashSet<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn modules(pairs: &[(&str, &[&str])]) -> BTreeMap<String, FxHashSet<String>> {
+        pairs
+            .iter()
+            .map(|(n, it)| (n.to_string(), module(it)))
+            .collect()
+    }
+
+    /// Helper used by the k-best tests below.
+    ///
+    /// Built so that the resulting Jaccard matrix is:
+    /// ```text
+    ///        X       Y      Z
+    /// A    1.0    0.091   0.0
+    /// B   0.333    0.2   0.333
+    /// C    0.0    0.333   1.0
+    /// ```
+    /// At k = 1 only (A,X) and (C,Z) are reciprocal; at k = 2 the set grows
+    /// to include (B,X), (B,Z) and (C,Y).
+    fn three_by_three_modules() -> (
+        BTreeMap<String, FxHashSet<String>>,
+        BTreeMap<String, FxHashSet<String>>,
+    ) {
+        let origin = modules(&[
+            ("A", &["1", "2", "3", "4", "5", "6"]),
+            ("B", &["4", "5", "6", "7", "8", "9"]),
+            ("C", &["7", "8", "9", "10", "11", "12"]),
+        ]);
+        let target = modules(&[
+            ("X", &["1", "2", "3", "4", "5", "6"]),
+            ("Y", &["6", "7", "10", "11", "13", "14"]),
+            ("Z", &["7", "8", "9", "10", "11", "12"]),
+        ]);
+        (origin, target)
+    }
+
+    fn pair_set<T>(result: &[RbhTripletStruc<T>]) -> FxHashSet<(String, String)> {
+        result
+            .iter()
+            .map(|r| (r.t1.to_string(), r.t2.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn k1_identifies_clear_reciprocal_hits() {
+        let origin = modules(&[("A", &["g1", "g2", "g3"]), ("B", &["g4", "g5", "g6"])]);
+        let target = modules(&[("X", &["g1", "g2", "g3"]), ("Y", &["g4", "g5", "g6"])]);
+
+        let result = calculate_rbh_set(&origin, &target, 1, false, 0.0_f64);
+
+        assert_eq!(result.len(), 2);
+        let pairs = pair_set(&result);
+        assert!(pairs.contains(&("A".into(), "X".into())));
+        assert!(pairs.contains(&("B".into(), "Y".into())));
+        for r in &result {
+            assert!((r.sim - 1.0).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn k1_excludes_non_reciprocal_hits() {
+        let (origin, target) = three_by_three_modules();
+
+        let result = calculate_rbh_set(&origin, &target, 1, false, 0.0_f64);
+
+        let pairs = pair_set(&result);
+        let expected: FxHashSet<(String, String)> =
+            [("A".into(), "X".into()), ("C".into(), "Z".into())]
+                .into_iter()
+                .collect();
+        assert_eq!(pairs, expected);
+    }
+
+    #[test]
+    fn k2_includes_pairs_missed_by_k1() {
+        let (origin, target) = three_by_three_modules();
+
+        let result = calculate_rbh_set(&origin, &target, 2, false, 0.0_f64);
+
+        let pairs = pair_set(&result);
+        let expected: FxHashSet<(String, String)> = [
+            ("A".into(), "X".into()),
+            ("B".into(), "X".into()),
+            ("B".into(), "Z".into()),
+            ("C".into(), "Y".into()),
+            ("C".into(), "Z".into()),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(pairs, expected);
+    }
+
+    #[test]
+    fn k_at_least_as_large_as_dim_returns_all_pairs() {
+        let (origin, target) = three_by_three_modules();
+
+        let result = calculate_rbh_set(&origin, &target, 5, false, 0.0_f64);
+
+        assert_eq!(result.len(), 9);
+    }
+
+    #[test]
+    fn returns_na_when_max_below_threshold() {
+        let origin = modules(&[("A", &["g1", "g2"])]);
+        let target = modules(&[("X", &["g3", "g4"])]);
+
+        let result = calculate_rbh_set(&origin, &target, 1, false, 0.5_f64);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].t1, "NA");
+        assert_eq!(result[0].t2, "NA");
+        assert_eq!(result[0].sim, 0.0);
+    }
+
+    #[test]
+    fn overlap_coefficient_differs_from_jaccard() {
+        let origin = modules(&[("A", &["g1"])]);
+        let target = modules(&[("X", &["g1", "g2", "g3", "g4"])]);
+
+        let jaccard = calculate_rbh_set(&origin, &target, 1, false, 0.0_f64);
+        let overlap = calculate_rbh_set(&origin, &target, 1, true, 0.0_f64);
+
+        assert!((jaccard[0].sim - 0.25).abs() < 1e-12);
+        assert!((overlap[0].sim - 1.0).abs() < 1e-12);
     }
 }
