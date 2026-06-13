@@ -23,9 +23,9 @@ pub struct DiffCorRes<T> {
     pub p_vals: Vec<T>,
 }
 
-///////////
-// Other //
-///////////
+//////////
+// Main //
+//////////
 
 /// Calculate differential correlations
 ///
