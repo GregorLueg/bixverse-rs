@@ -95,10 +95,10 @@ impl SingleCellPcaParams {
 impl Default for SingleCellPcaParams {
     fn default() -> Self {
         Self {
-            mean_center: false,
-            normalise_variance: false,
+            mean_center: true,
+            normalise_variance: true,
             randomised: true,
-            clr: true,
+            clr: false,
             size_factor: 1e4,
         }
     }
