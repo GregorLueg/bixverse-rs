@@ -173,13 +173,12 @@ where
     let row_names_1: FxHashSet<String> = x1.row_names.keys().cloned().collect();
     let row_names_2: FxHashSet<String> = x2.row_names.keys().cloned().collect();
 
-    // Now these references will live as long as 'a because they reference x1 and x2
     let names_targets: Vec<&str> = x1.col_names.keys().map(|s| s.as_str()).collect();
     let names_origin: Vec<&str> = x2.col_names.keys().map(|s| s.as_str()).collect();
 
     let intersecting_rows: Vec<String> = row_names_1.intersection(&row_names_2).cloned().collect();
 
-    // Early return if there are no intersecting rows
+    // early return if there are no intersecting rows
     if intersecting_rows.is_empty() {
         return vec![RbhTripletStruc {
             t1: "NA",
