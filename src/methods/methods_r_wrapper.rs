@@ -7,6 +7,7 @@ use crate::core::mat_struct::NamedMatrix;
 use crate::methods::cis_target::MotifEnrichment;
 use crate::methods::dgrdl::DgrdlParams;
 use crate::methods::ica::IcaParams;
+use crate::methods::nmf_hals::{HalsOpts, parse_nmf_init};
 use crate::prelude::*;
 
 ///////////////
@@ -225,4 +226,61 @@ pub fn r_matrix_vec_to_named_matrices(
     }
 
     result
+}
+
+/////////////
+// HalsOpt //
+/////////////
+
+impl<T> HalsOpts<T>
+where
+    T: BixverseFloat,
+{
+    /// Generate [HalsOpts] from R list
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The List from which to extract the parameters. If
+    ///   parameters are not found, defaults to sensible defaults.
+    /// * `seed` - Seed for random initialisation of NMF
+    ///
+    /// ### Returns
+    ///
+    /// The [HalsOpts]
+    pub fn from_r_list(r_list: List, seed: usize) -> Result<HalsOpts<T>> {
+        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let defaults: HalsOpts<T> = HalsOpts::default();
+
+        let max_iter = params
+            .get("max_iter")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.max_iter);
+
+        let check_every = params
+            .get("check_every")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.check_every);
+
+        let tol = params
+            .get("tol")
+            .and_then(|v| v.as_real())
+            .map(|v| T::from_f64(v).unwrap())
+            .unwrap_or(defaults.tol);
+
+        let eps = params
+            .get("eps")
+            .and_then(|v| v.as_real())
+            .map(|v| T::from_f64(v).unwrap())
+            .unwrap_or(defaults.eps);
+
+        let nmf_init = params
+            .get("nmf_init")
+            .and_then(|v| v.as_str())
+            .and_then(|v| parse_nmf_init(v, seed))
+            .unwrap_or(defaults.init);
+
+        Ok(HalsOpts::new(max_iter, tol, eps, check_every, nmf_init))
+    }
 }

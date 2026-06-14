@@ -32,6 +32,25 @@ fn kth_largest<T: BixverseFloat>(values: &[T], k: usize) -> T {
     sorted[idx]
 }
 
+/// Helper to get the names by index order
+///
+/// ### Params
+///
+/// * `names` - The BTreeMap containing string to index information
+///
+/// ### Returns
+///
+/// The names by index order
+fn names_by_index(names: &BTreeMap<String, usize>) -> Vec<&str> {
+    let mut pairs: Vec<(&str, usize)> = names.iter().map(|(k, &v)| (k.as_str(), v)).collect();
+    pairs.sort_by_key(|(_, idx)| *idx);
+    pairs.into_iter().map(|(k, _)| k).collect()
+}
+
+////////////////
+// Structures //
+////////////////
+
 /// Structure for an Rbh triplet Result
 #[derive(Clone, Debug)]
 pub struct RbhTripletStruc<'a, T> {
@@ -65,9 +84,10 @@ pub struct RbhResult<T> {
 
 /// Calculates the reciprocal best hits based on set similarities.
 ///
-/// Function will calculate the set similarities (Jaccard or Overlap coefficient)
-/// between all of the gene sets between the two data sets and calculate the
-/// reciprocal best hits based on this similarity matrix.
+/// Function will calculate the set similarities (Jaccard or Overlap
+/// coefficient) between all of the gene sets between the two data sets and
+/// calculate the reciprocal best hits based on this similarity matrix.
+/// Option to return reciprocal k-best hits.
 ///
 /// ### Params
 ///
@@ -75,6 +95,8 @@ pub struct RbhResult<T> {
 ///   the origin data set.
 /// * `target_modules` - A BTreeMap containing the identified modules of the
 ///   the target data set.
+/// * `k` - Top k hits to consider. If `k=1` this becomes the reciprocal best
+///   hit.
 /// * `overlap_coefficient` - Shall the overlap coefficient be used instead of
 ///   Jaccard similarity.
 /// * `min_similarity` - Minimum similarity to be returned
@@ -130,7 +152,7 @@ where
             .collect();
 
         let col_thresholds: Vec<T> = sim_mat
-            .row_iter()
+            .col_iter()
             .map(|x| {
                 let row: Vec<T> = x.iter().copied().collect();
                 kth_largest(&row, k)
@@ -172,13 +194,16 @@ where
 
 /// Calculate the RBH based on correlation of two NamedMatrices
 ///
-/// The function will intersect into shared features and calculate the correlation
-/// matrix and subsequently reciprocal best hits based on the absolute correlation.
+/// The function will intersect into shared features and calculate the
+/// correlation matrix and subsequently reciprocal best hits based on the
+/// absolute correlation. Option to return reciprocal k-best hits.
 ///
 /// ### Params
 ///
 /// * `x1` - `NamedMatrix` of the origin data
 /// * `x2` - `NamedMatrix` of the target data
+/// * `k` - Top k hits to consider. If `k=1` this becomes the reciprocal best
+///   hit.
 /// * `spearman` - Shall Spearman correlations be used.
 ///
 /// ### Returns
@@ -196,8 +221,8 @@ where
     let row_names_1: FxHashSet<String> = x1.row_names.keys().cloned().collect();
     let row_names_2: FxHashSet<String> = x2.row_names.keys().cloned().collect();
 
-    let names_targets: Vec<&str> = x1.col_names.keys().map(|s| s.as_str()).collect();
-    let names_origin: Vec<&str> = x2.col_names.keys().map(|s| s.as_str()).collect();
+    let names_targets: Vec<&str> = names_by_index(&x1.col_names);
+    let names_origin: Vec<&str> = names_by_index(&x2.col_names);
 
     let intersecting_rows: Vec<String> = row_names_1.intersection(&row_names_2).cloned().collect();
 
@@ -270,6 +295,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /////////
+    // Set //
+    /////////
 
     fn module(items: &[&str]) -> FxHashSet<String> {
         items.iter().map(|s| s.to_string()).collect()
@@ -398,5 +427,189 @@ mod tests {
 
         assert!((jaccard[0].sim - 0.25).abs() < 1e-12);
         assert!((overlap[0].sim - 1.0).abs() < 1e-12);
+    }
+
+    //////////////////
+    // Correlations //
+    //////////////////
+
+    fn mat_from_rows(rows: &[&[f64]]) -> Mat<f64> {
+        let nrow = rows.len();
+        let ncol = rows[0].len();
+        Mat::from_fn(nrow, ncol, |i, j| rows[i][j])
+    }
+
+    fn build_named<'a>(
+        values: &'a Mat<f64>,
+        row_names: &[&str],
+        col_names: &[&str],
+    ) -> NamedMatrix<'a, f64> {
+        NamedMatrix {
+            col_names: col_names
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (s.to_string(), i))
+                .collect(),
+            row_names: row_names
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (s.to_string(), i))
+                .collect(),
+            values: values.as_ref(),
+        }
+    }
+
+    /// Two named matrices designed so the Pearson correlation matrix after `abs()` is:
+    /// ```text
+    ///         X       Y
+    /// A     1.000   0.944
+    /// B     0.944   1.000
+    /// ```
+    /// At k = 1 only (A,X) and (B,Y) are reciprocal; at k = 2 every entry passes both
+    /// thresholds (the 2nd-largest in each row and column is 0.944), so all 4 pairs return.
+    fn two_by_two_cor_setup() -> (Mat<f64>, Mat<f64>) {
+        let m1 = mat_from_rows(&[&[1.0, 1.0], &[2.0, 1.0], &[3.0, 2.0], &[4.0, 3.0]]);
+        let m2 = m1.clone();
+        (m1, m2)
+    }
+
+    #[test]
+    fn cor_k1_identifies_perfect_pairs() {
+        let (m1, m2) = two_by_two_cor_setup();
+        let x1 = build_named(&m1, &["g1", "g2", "g3", "g4"], &["A", "B"]);
+        let x2 = build_named(&m2, &["g1", "g2", "g3", "g4"], &["X", "Y"]);
+
+        let result = calculate_rbh_cor(&x1, &x2, 1, false);
+
+        let pairs: FxHashSet<(String, String)> = result
+            .iter()
+            .map(|r| (r.t1.to_string(), r.t2.to_string()))
+            .collect();
+        let expected: FxHashSet<(String, String)> =
+            [("A".into(), "X".into()), ("B".into(), "Y".into())]
+                .into_iter()
+                .collect();
+        assert_eq!(pairs, expected);
+
+        for r in &result {
+            assert!((r.sim - 1.0).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn cor_k2_returns_all_pairs_in_2x2() {
+        let (m1, m2) = two_by_two_cor_setup();
+        let x1 = build_named(&m1, &["g1", "g2", "g3", "g4"], &["A", "B"]);
+        let x2 = build_named(&m2, &["g1", "g2", "g3", "g4"], &["X", "Y"]);
+
+        let result = calculate_rbh_cor(&x1, &x2, 2, false);
+
+        assert_eq!(result.len(), 4);
+    }
+
+    #[test]
+    fn cor_uses_absolute_correlation() {
+        // m2 = -m1, so cor(A,X) = cor(B,Y) = -1; after abs they should still pair.
+        let m1 = mat_from_rows(&[&[1.0, 1.0], &[2.0, 1.0], &[3.0, 2.0], &[4.0, 3.0]]);
+        let m2 = mat_from_rows(&[&[-1.0, -1.0], &[-2.0, -1.0], &[-3.0, -2.0], &[-4.0, -3.0]]);
+        let x1 = build_named(&m1, &["g1", "g2", "g3", "g4"], &["A", "B"]);
+        let x2 = build_named(&m2, &["g1", "g2", "g3", "g4"], &["X", "Y"]);
+
+        let result = calculate_rbh_cor(&x1, &x2, 1, false);
+
+        let pairs: FxHashSet<(String, String)> = result
+            .iter()
+            .map(|r| (r.t1.to_string(), r.t2.to_string()))
+            .collect();
+        assert!(pairs.contains(&("A".into(), "X".into())));
+        assert!(pairs.contains(&("B".into(), "Y".into())));
+
+        for r in &result {
+            let p = (r.t1, r.t2);
+            if p == ("A", "X") || p == ("B", "Y") {
+                assert!((r.sim - 1.0).abs() < 1e-10);
+            }
+        }
+    }
+
+    #[test]
+    fn cor_no_row_intersection_returns_na() {
+        let m1 = mat_from_rows(&[&[1.0], &[2.0]]);
+        let m2 = mat_from_rows(&[&[1.0], &[2.0]]);
+        let x1 = build_named(&m1, &["g1", "g2"], &["A"]);
+        let x2 = build_named(&m2, &["g3", "g4"], &["X"]);
+
+        let result = calculate_rbh_cor(&x1, &x2, 1, false);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].t1, "NA");
+        assert_eq!(result[0].t2, "NA");
+        assert_eq!(result[0].sim, 0.0);
+    }
+
+    #[test]
+    fn cor_uses_only_intersecting_rows() {
+        // x1 has g1..g4; x2 has g2..g5. Shared rows are {g2, g3, g4}.
+        // On those shared rows: A=[2,3,4], B=[4,2,3], X=A, Y=B.
+        // After abs: cor matrix is [[1.0, 0.5],[0.5, 1.0]], so k=1 yields (A,X),(B,Y).
+        // g1 and g5 carry junk values that would distort the cors if they leaked in.
+        let m1 = mat_from_rows(&[&[1.0, 1.0], &[2.0, 4.0], &[3.0, 2.0], &[4.0, 3.0]]);
+        let m2 = mat_from_rows(&[&[2.0, 4.0], &[3.0, 2.0], &[4.0, 3.0], &[99.0, -99.0]]);
+        let x1 = build_named(&m1, &["g1", "g2", "g3", "g4"], &["A", "B"]);
+        let x2 = build_named(&m2, &["g2", "g3", "g4", "g5"], &["X", "Y"]);
+
+        let result = calculate_rbh_cor(&x1, &x2, 1, false);
+
+        let pairs: FxHashSet<(String, String)> = result
+            .iter()
+            .map(|r| (r.t1.to_string(), r.t2.to_string()))
+            .collect();
+        let expected: FxHashSet<(String, String)> =
+            [("A".into(), "X".into()), ("B".into(), "Y".into())]
+                .into_iter()
+                .collect();
+        assert_eq!(pairs, expected);
+    }
+
+    #[test]
+    fn cor_respects_non_alphabetical_column_order() {
+        let m1 = mat_from_rows(&[&[1.0, 1.0], &[2.0, 1.0], &[3.0, 2.0], &[4.0, 3.0]]);
+        let m2 = mat_from_rows(&[&[1.0, 1.0], &[1.0, 2.0], &[2.0, 3.0], &[3.0, 4.0]]);
+
+        let x1 = NamedMatrix {
+            col_names: [("Z".to_string(), 0), ("A".to_string(), 1)]
+                .into_iter()
+                .collect(),
+            row_names: ["g1", "g2", "g3", "g4"]
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (s.to_string(), i))
+                .collect(),
+            values: m1.as_ref(),
+        };
+        let x2 = NamedMatrix {
+            col_names: [("A".to_string(), 0), ("Z".to_string(), 1)]
+                .into_iter()
+                .collect(),
+            row_names: ["g1", "g2", "g3", "g4"]
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (s.to_string(), i))
+                .collect(),
+            values: m2.as_ref(),
+        };
+
+        let result = calculate_rbh_cor(&x1, &x2, 1, false);
+
+        // correct alignment yields Z<->Z and A<->A, both at correlation 1.0.
+        let pairs: FxHashSet<(String, String)> = result
+            .iter()
+            .map(|r| (r.t1.to_string(), r.t2.to_string()))
+            .collect();
+        assert!(pairs.contains(&("Z".into(), "Z".into())));
+        assert!(pairs.contains(&("A".into(), "A".into())));
+        for r in &result {
+            assert!((r.sim - 1.0).abs() < 1e-10);
+        }
     }
 }

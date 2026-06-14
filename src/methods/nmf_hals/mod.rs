@@ -14,6 +14,7 @@ use crate::prelude::*;
 use crate::utils::faer_parallelism;
 
 pub mod dense;
+pub mod nmf_preprocessing;
 pub mod sparse;
 
 ////////////////////
@@ -233,13 +234,17 @@ impl<F: BixverseFloat> HalsOpts<F> {
             init,
         }
     }
+}
 
-    /// Generate default parameters
-    pub fn defaults() -> Self {
+impl<T> Default for HalsOpts<T>
+where
+    T: BixverseFloat,
+{
+    fn default() -> Self {
         Self {
             max_iter: 250,
-            tol: F::from_f64(1e-4).unwrap(),
-            eps: F::from_f64(1e-10).unwrap(),
+            tol: T::from_f64(1e-4).unwrap(),
+            eps: T::from_f64(1e-10).unwrap(),
             check_every: 10,
             init: NmfInit::Nndsvd,
         }
@@ -584,18 +589,27 @@ fn compute_objective<F: BixverseFloat + Send + Sync>(
 /// * `v` - Input matrix backend.
 /// * `k` - Number of components.
 /// * `opts` - Solver options; see [`HalsOpts`].
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
 /// An [`NmfResult`] containing W, H, the final reconstruction loss, the iter
 /// count, and whether the relative tolerance was met.
-pub fn nmf_hals<F, In>(v: &In, k: usize, opts: &HalsOpts<F>) -> Result<NmfResult<F>, BixverseErrors>
+pub fn nmf_hals<F, In>(
+    v: &In,
+    k: usize,
+    opts: &HalsOpts<F>,
+    verbose: usize,
+) -> Result<NmfResult<F>, BixverseErrors>
 where
     F: BixverseFloat + Send + Sync,
     In: NmfInput<F> + Sync,
 {
     let (m, n) = v.shape();
     let sq_frob = v.sq_frob();
+
+    let verbosity = parse_verbosity_level(verbose);
 
     let (mut w, mut h) = match &opts.init {
         NmfInit::Nndsvd => {
@@ -614,6 +628,7 @@ where
     let mut last_loss = F::infinity();
     let mut converged = false;
     let mut n_iter = 0usize;
+    let mut n_checks = 0usize;
 
     for iter in 0..opts.max_iter {
         n_iter = iter + 1;
@@ -643,6 +658,17 @@ where
             final_loss = loss;
 
             if n_iter > opts.check_every {
+                n_checks += 1;
+
+                if n_checks.is_multiple_of(3) && verbosity.normal_verbosity() {
+                    println!(
+                        "  NMF: Iteration {} out of {} - current loss: {:.2?}",
+                        iter + 1,
+                        opts.max_iter,
+                        loss
+                    );
+                }
+
                 let denom = if sq_frob > F::one() {
                     sq_frob
                 } else {
@@ -651,6 +677,10 @@ where
                 let rel = (last_loss - loss).abs() / denom;
                 if rel < opts.tol {
                     converged = true;
+                    if verbosity.normal_verbosity() {
+                        println!("  NMF converged successfully after {} iters", iter + 1)
+                    };
+
                     break;
                 }
             }
@@ -715,6 +745,8 @@ pub struct StabilisedNmfResult<F: BixverseFloat> {
 /// * `n_runs` - Number of random restarts. Must be >= 1.
 /// * `base_seed` - Seed offset; run `i` uses `base_seed + i`.
 /// * `opts` - HALS options (init field ignored).
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -726,6 +758,7 @@ pub fn stabilised_nmf<F, In>(
     n_runs: usize,
     base_seed: u64,
     opts: &HalsOpts<F>,
+    verbose: usize,
 ) -> Result<StabilisedNmfResult<F>, BixverseErrors>
 where
     F: BixverseFloat + Send + Sync,
@@ -733,6 +766,7 @@ where
 {
     assert!(n_runs >= 1, "n_runs must be >= 1");
 
+    let verbosity = parse_verbosity_level(verbose);
     let cores = rayon::current_num_threads();
     let n_outer = n_runs.min((cores / 2).max(1));
 
@@ -754,7 +788,15 @@ where
                         seed: base_seed + i as u64,
                     },
                 };
-                nmf_hals(v, k, &opts_i)
+                let inner_verbose = verbose.saturating_sub(1);
+
+                let res = nmf_hals(v, k, &opts_i, inner_verbose);
+
+                if verbosity.normal_verbosity() {
+                    println!(" Finished stabilised NMF run: {}", i + 1);
+                }
+
+                res
             })
             .collect::<Result<Vec<_>, _>>()
     })?;
@@ -933,7 +975,7 @@ mod tests {
 
         let input = DenseInput::new(v_mat.as_ref()).unwrap();
         let opts = HalsOpts::<f64>::new(400, 1e-9, 1e-12, 5, NmfInit::Nndsvd);
-        let res = nmf_hals(&input, k, &opts).unwrap();
+        let res = nmf_hals(&input, k, &opts, 0).unwrap();
 
         let rel = res.final_loss / sq_frob_v;
         assert!(rel < 1e-3, "rel loss {rel}");
@@ -964,7 +1006,7 @@ mod tests {
 
         let input = DenseInput::new(v_mat.as_ref()).unwrap();
         let opts = HalsOpts::<f64>::new(100, 1e-8, 1e-12, 10, NmfInit::Random { seed: 7 });
-        let res = nmf_hals(&input, k, &opts).unwrap();
+        let res = nmf_hals(&input, k, &opts, 0).unwrap();
         assert!(res.final_loss.is_finite());
         assert!(res.final_loss < sq_frob_v);
         assert_eq!(res.w.shape(), (m, k));
@@ -1004,7 +1046,7 @@ mod tests {
         let sparse_in: SparseInput<f64, f64> = SparseInput::from_primary(&csr).unwrap();
 
         let opts = HalsOpts::<f64>::new(400, 1e-9, 1e-12, 10, NmfInit::Nndsvd);
-        let res = nmf_hals(&sparse_in, k, &opts).unwrap();
+        let res = nmf_hals(&sparse_in, k, &opts, 0).unwrap();
 
         let rel = res.final_loss / sq_frob_v;
         assert!(rel < 1e-2, "rel loss {rel}");
@@ -1020,7 +1062,7 @@ mod tests {
         });
         let input = DenseInput::new(v_mat.as_ref()).unwrap();
         let opts = HalsOpts::<f64>::new(1000, 1e-6, 1e-12, 5, NmfInit::Nndsvd);
-        let res = nmf_hals(&input, k, &opts).unwrap();
+        let res = nmf_hals(&input, k, &opts, 0).unwrap();
         assert!(res.converged);
         assert!(res.n_iter < 1000);
     }
@@ -1033,7 +1075,7 @@ mod tests {
         let input = DenseInput::new(v_mat.as_ref()).unwrap();
         let opts = HalsOpts::<f64>::new(50, 1e-6, 1e-12, 10, NmfInit::Nndsvd);
 
-        let res = stabilised_nmf(&input, k, n_runs, 0, &opts).unwrap();
+        let res = stabilised_nmf(&input, k, n_runs, 0, &opts, 0).unwrap();
 
         assert_eq!(res.w_all.shape(), (m, k * n_runs));
         assert_eq!(res.h_per_run.len(), n_runs);
@@ -1053,7 +1095,7 @@ mod tests {
         let input = DenseInput::new(v_mat.as_ref()).unwrap();
         let opts = HalsOpts::<f64>::new(50, 1e-6, 1e-12, 10, NmfInit::Nndsvd);
 
-        let res = stabilised_nmf(&input, k, 1, 42, &opts).unwrap();
+        let res = stabilised_nmf(&input, k, 1, 42, &opts, 0).unwrap();
 
         assert_eq!(res.w_all.shape(), (m, k));
         assert_eq!(res.h_per_run.len(), 1);
@@ -1068,7 +1110,7 @@ mod tests {
         let input = DenseInput::new(v_mat.as_ref()).unwrap();
         let opts = HalsOpts::<f64>::new(50, 1e-6, 1e-12, 10, NmfInit::Nndsvd);
 
-        let res = stabilised_nmf(&input, k, n_runs, 7, &opts).unwrap();
+        let res = stabilised_nmf(&input, k, n_runs, 7, &opts, 0).unwrap();
 
         // Check w_all column structure: columns [run*k .. (run+1)*k] should match
         // the W of run `run`. We can't access individual run W matrices since they
@@ -1090,7 +1132,7 @@ mod tests {
         let input = DenseInput::new(v_mat.as_ref()).unwrap();
         let opts = HalsOpts::<f64>::new(100, 1e-8, 1e-12, 10, NmfInit::Nndsvd);
 
-        let res = stabilised_nmf(&input, k, n_runs, 0, &opts).unwrap();
+        let res = stabilised_nmf(&input, k, n_runs, 0, &opts, 0).unwrap();
 
         let best_loss = res.losses[res.best_idx];
         for &loss in &res.losses {
@@ -1105,8 +1147,8 @@ mod tests {
         let input = DenseInput::new(v_mat.as_ref()).unwrap();
         let opts = HalsOpts::<f64>::new(50, 1e-6, 1e-12, 10, NmfInit::Nndsvd);
 
-        let res_a = stabilised_nmf(&input, k, 3, 123, &opts).unwrap();
-        let res_b = stabilised_nmf(&input, k, 3, 123, &opts).unwrap();
+        let res_a = stabilised_nmf(&input, k, 3, 123, &opts, 0).unwrap();
+        let res_b = stabilised_nmf(&input, k, 3, 123, &opts, 0).unwrap();
 
         assert_eq!(res_a.losses.len(), res_b.losses.len());
         for run in 0..res_a.losses.len() {
@@ -1126,8 +1168,8 @@ mod tests {
         let input = DenseInput::new(v_mat.as_ref()).unwrap();
         let opts = HalsOpts::<f64>::new(20, 1e-3, 1e-12, 10, NmfInit::Nndsvd);
 
-        let res_a = stabilised_nmf(&input, k, 2, 0, &opts).unwrap();
-        let res_b = stabilised_nmf(&input, k, 2, 1000, &opts).unwrap();
+        let res_a = stabilised_nmf(&input, k, 2, 0, &opts, 0).unwrap();
+        let res_b = stabilised_nmf(&input, k, 2, 1000, &opts, 0).unwrap();
 
         // At least one entry of w_all should differ noticeably between seed sets.
         let mut max_diff = 0.0_f64;
@@ -1168,7 +1210,7 @@ mod tests {
         let input = DenseInput::new(v_mat.as_ref()).unwrap();
         let opts = HalsOpts::<f64>::new(300, 1e-8, 1e-12, 10, NmfInit::Nndsvd);
 
-        let res = stabilised_nmf(&input, k, 5, 0, &opts).unwrap();
+        let res = stabilised_nmf(&input, k, 5, 0, &opts, 0).unwrap();
 
         let rel = res.losses[res.best_idx] / sq_frob_v;
         assert!(rel < 1e-2, "best rel loss {rel}");
@@ -1191,7 +1233,7 @@ mod tests {
         let sparse_in: SparseInput<f64, f64> = SparseInput::from_primary(&csr).unwrap();
         let opts = HalsOpts::<f64>::new(100, 1e-6, 1e-12, 10, NmfInit::Nndsvd);
 
-        let res = stabilised_nmf(&sparse_in, k, 3, 0, &opts).unwrap();
+        let res = stabilised_nmf(&sparse_in, k, 3, 0, &opts, 0).unwrap();
 
         assert_eq!(res.w_all.shape(), (m, k * 3));
         assert_eq!(res.h_per_run.len(), 3);
@@ -1209,7 +1251,7 @@ mod tests {
         let input = DenseInput::new(v_mat.as_ref()).unwrap();
         let opts = HalsOpts::<f64>::new(20, 1e-3, 1e-12, 10, NmfInit::Nndsvd);
 
-        let res = stabilised_nmf(&input, k, 3, 0, &opts).unwrap();
+        let res = stabilised_nmf(&input, k, 3, 0, &opts, 0).unwrap();
 
         // Runs 0 and 1 use different seeds, so their W blocks should differ.
         let mut max_diff = 0.0_f64;
