@@ -16,6 +16,7 @@ pub enum SimdLevel {
     Avx512,
 }
 
+/// SIMD level static generated once
 static SIMD_LEVEL: OnceLock<SimdLevel> = OnceLock::new();
 
 /// Function to detect which SIMD implementation to use
@@ -52,154 +53,13 @@ pub fn detect_simd_level() -> SimdLevel {
 // f32-specific implementations //
 //////////////////////////////////
 
-///////////
-// Sums  //
-///////////
+//////////
+// Sums //
+//////////
 
-/// SIMD sum of a slice of f32 (scalar)
-///
-/// ### Params
-///
-/// * `a` - The slice of f32 values to sum.
-///
-/// ### Returns
-///
-/// Sum
-#[inline(always)]
-fn sum_scalar_f32(a: &[f32]) -> f32 {
-    a.iter().sum()
-}
-
-/// SIMD sum of a slice of f32 (128-bit)
-///
-/// ### Params
-///
-/// * `a` - The slice of f32 values to sum.
-///
-/// ### Returns
-///
-/// Sum
-#[inline(always)]
-fn sum_sse_f32(a: &[f32]) -> f32 {
-    let len = a.len();
-    let chunks = len / 4;
-    let mut acc = f32x4::ZERO;
-
-    unsafe {
-        let a_ptr = a.as_ptr();
-        for i in 0..chunks {
-            let va = f32x4::from(*(a_ptr.add(i * 4) as *const [f32; 4]));
-            acc += va;
-        }
-    }
-
-    let mut sum = acc.reduce_add();
-    for i in (chunks * 4)..len {
-        sum += a[i];
-    }
-    sum
-}
-
-/// SIMD sum of a slice of f32 (256-bit)
-///
-/// ### Params
-///
-/// * `a` - The slice of f32 values to sum.
-///
-/// ### Returns
-///
-/// Sum
-#[inline(always)]
-fn sum_avx2_f32(a: &[f32]) -> f32 {
-    let len = a.len();
-    let chunks = len / 8;
-    let mut acc = f32x8::ZERO;
-
-    unsafe {
-        let a_ptr = a.as_ptr();
-        for i in 0..chunks {
-            let va = f32x8::from(*(a_ptr.add(i * 8) as *const [f32; 8]));
-            acc += va;
-        }
-    }
-
-    let mut sum = acc.reduce_add();
-    for i in (chunks * 8)..len {
-        sum += a[i];
-    }
-    sum
-}
-
-/// SIMD sum of a slice of f32 (512-bit)
-///
-/// ### Params
-///
-/// * `a` - The slice of f32 values to sum.
-///
-/// ### Returns
-///
-/// Sum
-#[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
-#[inline(always)]
-fn sum_avx512_f32(a: &[f32]) -> f32 {
-    use std::arch::x86_64::*;
-
-    let len = a.len();
-    let chunks = len / 16;
-
-    unsafe {
-        let mut acc = _mm512_setzero_ps();
-
-        for i in 0..chunks {
-            let va = _mm512_loadu_ps(a.as_ptr().add(i * 16));
-            acc = _mm512_add_ps(acc, va);
-        }
-
-        let mut sum = _mm512_reduce_add_ps(acc);
-        for i in (chunks * 16)..len {
-            sum += a[i];
-        }
-        sum
-    }
-}
-
-/// SIMD sum of a slice of f32 (512-bit fallback)
-///
-/// ### Params
-///
-/// * `a` - The slice of f32 values to sum.
-///
-/// ### Returns
-///
-/// Sum
-#[cfg(not(all(target_arch = "x86_64", target_feature = "avx512f")))]
-#[inline(always)]
-fn sum_avx512_f32(a: &[f32]) -> f32 {
-    sum_avx2_f32(a)
-}
-
-/// SIMD sum of a slice of f32 (dispatch)
-///
-/// ### Params
-///
-/// * `a` - The slice of f32 values to sum.
-///
-/// ### Returns
-///
-/// Sum
-#[inline]
-pub fn sum_simd_f32(a: &[f32]) -> f32 {
-    match detect_simd_level() {
-        SimdLevel::Avx512 => sum_avx512_f32(a),
-        SimdLevel::Avx2 => sum_avx2_f32(a),
-        SimdLevel::Sse => sum_sse_f32(a),
-        SimdLevel::Scalar => sum_scalar_f32(a),
-    }
-}
-
-//////////////////
-// Sum squares  //
-//////////////////
+/////////////////
+// Sum squares //
+/////////////////
 
 /// SIMD squared sum of a slice of f32 (scalar)
 ///
@@ -342,158 +202,6 @@ pub fn sum_squares_simd_f32(a: &[f32]) -> f32 {
     }
 }
 
-//////////////
-// Variance //
-//////////////
-
-/// SIMD variance of a slice of f32 (scalar)
-///
-/// ### Params
-///
-/// * `a` - The slice of f32 values to calculate variance for.
-/// * `mean` - The mean of the values in `a`.
-///
-/// ### Returns
-///
-/// Variance
-#[inline(always)]
-fn variance_scalar_f32(a: &[f32], mean: f32) -> f32 {
-    a.iter().map(|&x| (x - mean).powi(2)).sum::<f32>()
-}
-
-/// SIMD variance of a slice of f32 (128-bit)
-///
-/// ### Params
-///
-/// * `a` - The slice of f32 values to calculate variance for.
-/// * `mean` - The mean of the values in `a`.
-///
-/// ### Returns
-///
-/// Variance
-#[inline(always)]
-fn variance_sse_f32(a: &[f32], mean: f32) -> f32 {
-    let len = a.len();
-    let chunks = len / 4;
-    let mut acc = f32x4::ZERO;
-    let mean_vec = f32x4::splat(mean);
-    unsafe {
-        let a_ptr = a.as_ptr();
-        for i in 0..chunks {
-            let va = f32x4::from(*(a_ptr.add(i * 4) as *const [f32; 4]));
-            let diff = va - mean_vec;
-            acc += diff * diff;
-        }
-    }
-    let mut sum = acc.reduce_add();
-    for i in (chunks * 4)..len {
-        let diff = a[i] - mean;
-        sum += diff * diff;
-    }
-    sum
-}
-
-/// SIMD variance of a slice of f32 (256-bit)
-///
-/// ### Params
-///
-/// * `a` - The slice of f32 values to calculate variance for.
-/// * `mean` - The mean of the values in `a`.
-///
-/// ### Returns
-///
-/// Variance
-#[inline(always)]
-fn variance_avx2_f32(a: &[f32], mean: f32) -> f32 {
-    let len = a.len();
-    let chunks = len / 8;
-    let mut acc = f32x8::ZERO;
-    let mean_vec = f32x8::splat(mean);
-    unsafe {
-        let a_ptr = a.as_ptr();
-        for i in 0..chunks {
-            let va = f32x8::from(*(a_ptr.add(i * 8) as *const [f32; 8]));
-            let diff = va - mean_vec;
-            acc += diff * diff;
-        }
-    }
-    let mut sum = acc.reduce_add();
-    for i in (chunks * 8)..len {
-        let diff = a[i] - mean;
-        sum += diff * diff;
-    }
-    sum
-}
-
-/// SIMD variance of a slice of f32 (512-bit)
-///
-/// ### Params
-///
-/// * `a` - The slice of f32 values to calculate variance for.
-/// * `mean` - The mean of the values in `a`.
-///
-/// ### Returns
-///
-/// Variance
-#[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
-#[inline(always)]
-fn variance_avx512_f32(a: &[f32], mean: f32) -> f32 {
-    use std::arch::x86_64::*;
-    let len = a.len();
-    let chunks = len / 16;
-    unsafe {
-        let mut acc = _mm512_setzero_ps();
-        let mean_vec = _mm512_set1_ps(mean);
-        for i in 0..chunks {
-            let va = _mm512_loadu_ps(a.as_ptr().add(i * 16));
-            let diff = _mm512_sub_ps(va, mean_vec);
-            acc = _mm512_fmadd_ps(diff, diff, acc);
-        }
-        let mut sum = _mm512_reduce_add_ps(acc);
-        for i in (chunks * 16)..len {
-            let diff = a[i] - mean;
-            sum += diff * diff;
-        }
-        sum
-    }
-}
-
-/// SIMD variance of a slice of f32 (512-bit fallback)
-///
-/// ### Params
-///
-/// * `a` - The slice of f32 values to calculate variance for.
-/// * `mean` - The mean of the values in `a`.
-///
-/// ### Returns
-///
-/// Variance
-#[cfg(not(all(target_arch = "x86_64", target_feature = "avx512f")))]
-#[inline(always)]
-fn variance_avx512_f32(a: &[f32], mean: f32) -> f32 {
-    variance_avx2_f32(a, mean)
-}
-
-/// SIMD variance of a slice of f32 (dispatch)
-///
-/// ### Params
-///
-/// * `a` - The slice of f32 values to calculate variance for.
-/// * `mean` - The mean of the values in `a`.
-///
-/// ### Returns
-///
-/// Variance
-#[inline]
-pub fn variance_simd_f32(a: &[f32], mean: f32) -> f32 {
-    match detect_simd_level() {
-        SimdLevel::Avx512 => variance_avx512_f32(a, mean),
-        SimdLevel::Avx2 => variance_avx2_f32(a, mean),
-        SimdLevel::Sse => variance_sse_f32(a, mean),
-        SimdLevel::Scalar => variance_scalar_f32(a, mean),
-    }
-}
-
 //////////////////////
 // General versions //
 //////////////////////
@@ -514,6 +222,64 @@ pub trait BixverseSimd:
     ///
     /// The dot product of `a` and `b`
     fn bxv_dot_simd(a: &[Self], b: &[Self]) -> Self;
+
+    /// Compute the sum over a slice with SIMD
+    ///
+    /// ### Params
+    ///
+    /// * `a` - Slice for which to calculate the sum
+    ///
+    /// ### Returns
+    ///
+    /// The sum of the vector
+    fn bxv_sum(x: &[Self]) -> Self;
+
+    /// Sum of squared deviations from the mean
+    ///
+    /// ### Params
+    ///
+    /// * `x` - Vector for which to calculate the squared deviations from the
+    ///   mean.
+    /// * `mean` - The mean.
+    ///
+    /// ### Returns
+    ///
+    /// The sum of the squared deviations.
+    fn bxv_sum_squared_deviation(x: &[Self], mean: Self) -> Self;
+}
+
+impl BixverseSimd for f32 {
+    #[inline]
+    fn bxv_dot_simd(a: &[f32], b: &[f32]) -> f32 {
+        dot_simd_f32(a, b)
+    }
+
+    #[inline]
+    fn bxv_sum(x: &[f32]) -> f32 {
+        sum_simd_f32(x)
+    }
+
+    #[inline]
+    fn bxv_sum_squared_deviation(x: &[f32], mean: f32) -> f32 {
+        sum_squared_dev_simd_f32(x, mean)
+    }
+}
+
+impl BixverseSimd for f64 {
+    #[inline]
+    fn bxv_dot_simd(a: &[f64], b: &[f64]) -> f64 {
+        dot_simd_f64(a, b)
+    }
+
+    #[inline]
+    fn bxv_sum(x: &[f64]) -> f64 {
+        sum_simd_f64(x)
+    }
+
+    #[inline]
+    fn bxv_sum_squared_deviation(x: &[f64], mean: f64) -> f64 {
+        sum_squared_dev_simd_f64(x, mean)
+    }
 }
 
 //////////////////
@@ -677,13 +443,6 @@ pub fn dot_simd_f32(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
-impl BixverseSimd for f32 {
-    #[inline]
-    fn bxv_dot_simd(a: &[f32], b: &[f32]) -> f32 {
-        dot_simd_f32(a, b)
-    }
-}
-
 /////////
 // f64 //
 /////////
@@ -841,9 +600,612 @@ pub fn dot_simd_f64(a: &[f64], b: &[f64]) -> f64 {
     }
 }
 
-impl BixverseSimd for f64 {
-    #[inline]
-    fn bxv_dot_simd(a: &[f64], b: &[f64]) -> f64 {
-        dot_simd_f64(a, b)
+//////////
+// Sums //
+//////////
+
+/////////
+// f32 //
+/////////
+
+/// SIMD sum of a slice of f32 (scalar)
+///
+/// ### Params
+///
+/// * `a` - The slice of f32 values to sum.
+///
+/// ### Returns
+///
+/// Sum
+#[inline(always)]
+fn sum_scalar_f32(a: &[f32]) -> f32 {
+    a.iter().sum()
+}
+
+/// SIMD sum of a slice of f32 (128-bit)
+///
+/// ### Params
+///
+/// * `a` - The slice of f32 values to sum.
+///
+/// ### Returns
+///
+/// Sum
+#[inline(always)]
+fn sum_sse_f32(a: &[f32]) -> f32 {
+    let len = a.len();
+    let chunks = len / 4;
+    let mut acc = f32x4::ZERO;
+
+    unsafe {
+        let a_ptr = a.as_ptr();
+        for i in 0..chunks {
+            let va = f32x4::from(*(a_ptr.add(i * 4) as *const [f32; 4]));
+            acc += va;
+        }
+    }
+
+    let mut sum = acc.reduce_add();
+    for i in (chunks * 4)..len {
+        sum += a[i];
+    }
+    sum
+}
+
+/// SIMD sum of a slice of f32 (256-bit)
+///
+/// ### Params
+///
+/// * `a` - The slice of f32 values to sum.
+///
+/// ### Returns
+///
+/// Sum
+#[inline(always)]
+fn sum_avx2_f32(a: &[f32]) -> f32 {
+    let len = a.len();
+    let chunks = len / 8;
+    let mut acc = f32x8::ZERO;
+
+    unsafe {
+        let a_ptr = a.as_ptr();
+        for i in 0..chunks {
+            let va = f32x8::from(*(a_ptr.add(i * 8) as *const [f32; 8]));
+            acc += va;
+        }
+    }
+
+    let mut sum = acc.reduce_add();
+    for i in (chunks * 8)..len {
+        sum += a[i];
+    }
+    sum
+}
+
+/// SIMD sum of a slice of f32 (512-bit)
+///
+/// ### Params
+///
+/// * `a` - The slice of f32 values to sum.
+///
+/// ### Returns
+///
+/// Sum
+#[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+#[inline(always)]
+fn sum_avx512_f32(a: &[f32]) -> f32 {
+    use std::arch::x86_64::*;
+
+    let len = a.len();
+    let chunks = len / 16;
+
+    unsafe {
+        let mut acc = _mm512_setzero_ps();
+
+        for i in 0..chunks {
+            let va = _mm512_loadu_ps(a.as_ptr().add(i * 16));
+            acc = _mm512_add_ps(acc, va);
+        }
+
+        let mut sum = _mm512_reduce_add_ps(acc);
+        for i in (chunks * 16)..len {
+            sum += a[i];
+        }
+        sum
+    }
+}
+
+/// SIMD sum of a slice of f32 (512-bit fallback)
+///
+/// ### Params
+///
+/// * `a` - The slice of f32 values to sum.
+///
+/// ### Returns
+///
+/// Sum
+#[cfg(not(all(target_arch = "x86_64", target_feature = "avx512f")))]
+#[inline(always)]
+fn sum_avx512_f32(a: &[f32]) -> f32 {
+    sum_avx2_f32(a)
+}
+
+/// SIMD sum of a slice of f32 (dispatch)
+///
+/// ### Params
+///
+/// * `a` - The slice of f32 values to sum.
+///
+/// ### Returns
+///
+/// Sum
+#[inline]
+pub fn sum_simd_f32(a: &[f32]) -> f32 {
+    match detect_simd_level() {
+        SimdLevel::Avx512 => sum_avx512_f32(a),
+        SimdLevel::Avx2 => sum_avx2_f32(a),
+        SimdLevel::Sse => sum_sse_f32(a),
+        SimdLevel::Scalar => sum_scalar_f32(a),
+    }
+}
+
+/////////
+// f64 //
+/////////
+
+/// SIMD sum of a slice of f64 (scalar)
+///
+/// ### Params
+///
+/// * `a` - The slice of f64 values to sum.
+///
+/// ### Returns
+///
+/// Sum
+#[inline(always)]
+fn sum_scalar_f64(a: &[f64]) -> f64 {
+    a.iter().sum()
+}
+
+/// SIMD sum of a slice of f64 (128-bit)
+///
+/// ### Params
+///
+/// * `a` - The slice of f64 values to sum.
+///
+/// ### Returns
+///
+/// Sum
+#[inline(always)]
+fn sum_sse_f64(a: &[f64]) -> f64 {
+    let len = a.len();
+    let chunks = len / 2;
+    let mut acc = f64x2::ZERO;
+
+    unsafe {
+        let a_ptr = a.as_ptr();
+        for i in 0..chunks {
+            let va = f64x2::from(*(a_ptr.add(i * 2) as *const [f64; 2]));
+            acc += va;
+        }
+    }
+
+    let mut sum = acc.reduce_add();
+    for i in (chunks * 2)..len {
+        sum += a[i];
+    }
+    sum
+}
+
+/// SIMD sum of a slice of f64 (256-bit)
+///
+/// ### Params
+///
+/// * `a` - The slice of f64 values to sum.
+///
+/// ### Returns
+///
+/// Sum
+#[inline(always)]
+fn sum_avx2_f64(a: &[f64]) -> f64 {
+    let len = a.len();
+    let chunks = len / 4;
+    let mut acc = f64x4::ZERO;
+
+    unsafe {
+        let a_ptr = a.as_ptr();
+        for i in 0..chunks {
+            let va = f64x4::from(*(a_ptr.add(i * 4) as *const [f64; 4]));
+            acc += va;
+        }
+    }
+
+    let mut sum = acc.reduce_add();
+    for i in (chunks * 4)..len {
+        sum += a[i];
+    }
+    sum
+}
+
+/// SIMD sum of a slice of f64 (512-bit)
+///
+/// ### Params
+///
+/// * `a` - The slice of f64 values to sum.
+///
+/// ### Returns
+///
+/// Sum
+#[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+#[inline(always)]
+fn sum_avx512_f64(a: &[f64]) -> f64 {
+    use std::arch::x86_64::*;
+
+    let len = a.len();
+    let chunks = len / 8;
+
+    unsafe {
+        let mut acc = _mm512_setzero_pd();
+
+        for i in 0..chunks {
+            let va = _mm512_loadu_pd(a.as_ptr().add(i * 8));
+            acc = _mm512_add_pd(acc, va);
+        }
+
+        let mut sum = _mm512_reduce_add_pd(acc);
+        for i in (chunks * 8)..len {
+            sum += a[i];
+        }
+        sum
+    }
+}
+
+/// SIMD sum of a slice of f64 (512-bit fallback)
+///
+/// ### Params
+///
+/// * `a` - The slice of f64 values to sum.
+///
+/// ### Returns
+///
+/// Sum
+#[cfg(not(all(target_arch = "x86_64", target_feature = "avx512f")))]
+#[inline(always)]
+fn sum_avx512_f64(a: &[f64]) -> f64 {
+    sum_avx2_f64(a)
+}
+
+/// SIMD sum of a slice of f64 (dispatch)
+///
+/// ### Params
+///
+/// * `a` - The slice of f64 values to sum.
+///
+/// ### Returns
+///
+/// Sum
+#[inline]
+pub fn sum_simd_f64(a: &[f64]) -> f64 {
+    match detect_simd_level() {
+        SimdLevel::Avx512 => sum_avx512_f64(a),
+        SimdLevel::Avx2 => sum_avx2_f64(a),
+        SimdLevel::Sse => sum_sse_f64(a),
+        SimdLevel::Scalar => sum_scalar_f64(a),
+    }
+}
+
+//////////////
+// Variance //
+//////////////
+
+/////////
+// f32 //
+/////////
+
+/// SIMD sum of squared deviations of a slice of f32 (scalar)
+///
+/// ### Params
+///
+/// * `a` - The slice of f32 values to calculate variance for.
+/// * `mean` - The mean of the values in `a`.
+///
+/// ### Returns
+///
+/// Variance
+#[inline(always)]
+fn sum_squared_dev_scalar_f32(a: &[f32], mean: f32) -> f32 {
+    a.iter().map(|&x| (x - mean).powi(2)).sum::<f32>()
+}
+
+/// SIMD sum of squared deviations of a slice of f32 (128-bit)
+///
+/// ### Params
+///
+/// * `a` - The slice of f32 values to calculate variance for.
+/// * `mean` - The mean of the values in `a`.
+///
+/// ### Returns
+///
+/// Variance
+#[inline(always)]
+fn sum_squared_dev_sse_f32(a: &[f32], mean: f32) -> f32 {
+    let len = a.len();
+    let chunks = len / 4;
+    let mut acc = f32x4::ZERO;
+    let mean_vec = f32x4::splat(mean);
+    unsafe {
+        let a_ptr = a.as_ptr();
+        for i in 0..chunks {
+            let va = f32x4::from(*(a_ptr.add(i * 4) as *const [f32; 4]));
+            let diff = va - mean_vec;
+            acc += diff * diff;
+        }
+    }
+    let mut sum = acc.reduce_add();
+    for i in (chunks * 4)..len {
+        let diff = a[i] - mean;
+        sum += diff * diff;
+    }
+    sum
+}
+
+/// SIMD sum of squared deviations of a slice of f32 (256-bit)
+///
+/// ### Params
+///
+/// * `a` - The slice of f32 values to calculate variance for.
+/// * `mean` - The mean of the values in `a`.
+///
+/// ### Returns
+///
+/// Variance
+#[inline(always)]
+fn sum_squared_dev_avx2_f32(a: &[f32], mean: f32) -> f32 {
+    let len = a.len();
+    let chunks = len / 8;
+    let mut acc = f32x8::ZERO;
+    let mean_vec = f32x8::splat(mean);
+    unsafe {
+        let a_ptr = a.as_ptr();
+        for i in 0..chunks {
+            let va = f32x8::from(*(a_ptr.add(i * 8) as *const [f32; 8]));
+            let diff = va - mean_vec;
+            acc += diff * diff;
+        }
+    }
+    let mut sum = acc.reduce_add();
+    for i in (chunks * 8)..len {
+        let diff = a[i] - mean;
+        sum += diff * diff;
+    }
+    sum
+}
+
+/// SIMD sum of squared deviations of a slice of f32 (512-bit)
+///
+/// ### Params
+///
+/// * `a` - The slice of f32 values to calculate variance for.
+/// * `mean` - The mean of the values in `a`.
+///
+/// ### Returns
+///
+/// Variance
+#[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+#[inline(always)]
+fn sum_squared_dev_avx512_f32(a: &[f32], mean: f32) -> f32 {
+    use std::arch::x86_64::*;
+    let len = a.len();
+    let chunks = len / 16;
+    unsafe {
+        let mut acc = _mm512_setzero_ps();
+        let mean_vec = _mm512_set1_ps(mean);
+        for i in 0..chunks {
+            let va = _mm512_loadu_ps(a.as_ptr().add(i * 16));
+            let diff = _mm512_sub_ps(va, mean_vec);
+            acc = _mm512_fmadd_ps(diff, diff, acc);
+        }
+        let mut sum = _mm512_reduce_add_ps(acc);
+        for i in (chunks * 16)..len {
+            let diff = a[i] - mean;
+            sum += diff * diff;
+        }
+        sum
+    }
+}
+
+/// SIMD sum of squared deviations of a slice of f32 (512-bit fallback)
+///
+/// ### Params
+///
+/// * `a` - The slice of f32 values to calculate variance for.
+/// * `mean` - The mean of the values in `a`.
+///
+/// ### Returns
+///
+/// Variance
+#[cfg(not(all(target_arch = "x86_64", target_feature = "avx512f")))]
+#[inline(always)]
+fn sum_squared_dev_avx512_f32(a: &[f32], mean: f32) -> f32 {
+    sum_squared_dev_avx2_f32(a, mean)
+}
+
+/// SIMD sum of squared deviations of a slice of f32 (dispatch)
+///
+/// ### Params
+///
+/// * `a` - The slice of f32 values to calculate variance for.
+/// * `mean` - The mean of the values in `a`.
+///
+/// ### Returns
+///
+/// Variance
+#[inline]
+pub fn sum_squared_dev_simd_f32(a: &[f32], mean: f32) -> f32 {
+    match detect_simd_level() {
+        SimdLevel::Avx512 => sum_squared_dev_avx512_f32(a, mean),
+        SimdLevel::Avx2 => sum_squared_dev_avx2_f32(a, mean),
+        SimdLevel::Sse => sum_squared_dev_sse_f32(a, mean),
+        SimdLevel::Scalar => sum_squared_dev_scalar_f32(a, mean),
+    }
+}
+
+/////////
+// f64 //
+/////////
+
+/// SIMD sum of squared deviations of a slice of f64 (scalar)
+///
+/// ### Params
+///
+/// * `a` - The slice of f64 values to calculate variance for.
+/// * `mean` - The mean of the values in `a`.
+///
+/// ### Returns
+///
+/// Sum of squared deviations from the mean
+#[inline(always)]
+fn sum_squared_dev_scalar_f64(a: &[f64], mean: f64) -> f64 {
+    a.iter().map(|&x| (x - mean).powi(2)).sum::<f64>()
+}
+
+/// SIMD sum of squared deviations of a slice of f64 (128-bit)
+///
+/// ### Params
+///
+/// * `a` - The slice of f64 values to calculate variance for.
+/// * `mean` - The mean of the values in `a`.
+///
+/// ### Returns
+///
+/// Sum of squared deviations from the mean
+#[inline(always)]
+fn sum_squared_dev_sse_f64(a: &[f64], mean: f64) -> f64 {
+    let len = a.len();
+    let chunks = len / 2;
+    let mut acc = f64x2::ZERO;
+    let mean_vec = f64x2::splat(mean);
+
+    unsafe {
+        let a_ptr = a.as_ptr();
+        for i in 0..chunks {
+            let va = f64x2::from(*(a_ptr.add(i * 2) as *const [f64; 2]));
+            let diff = va - mean_vec;
+            acc += diff * diff;
+        }
+    }
+
+    let mut sum = acc.reduce_add();
+    for i in (chunks * 2)..len {
+        let diff = a[i] - mean;
+        sum += diff * diff;
+    }
+    sum
+}
+
+/// SIMD sum of squared deviations of a slice of f64 (256-bit)
+///
+/// ### Params
+///
+/// * `a` - The slice of f64 values to calculate variance for.
+/// * `mean` - The mean of the values in `a`.
+///
+/// ### Returns
+///
+/// Sum of squared deviations from the mean
+#[inline(always)]
+fn sum_squared_dev_avx2_f64(a: &[f64], mean: f64) -> f64 {
+    let len = a.len();
+    let chunks = len / 4;
+    let mut acc = f64x4::ZERO;
+    let mean_vec = f64x4::splat(mean);
+
+    unsafe {
+        let a_ptr = a.as_ptr();
+        for i in 0..chunks {
+            let va = f64x4::from(*(a_ptr.add(i * 4) as *const [f64; 4]));
+            let diff = va - mean_vec;
+            acc += diff * diff;
+        }
+    }
+
+    let mut sum = acc.reduce_add();
+    for i in (chunks * 4)..len {
+        let diff = a[i] - mean;
+        sum += diff * diff;
+    }
+    sum
+}
+
+/// SIMD sum of squared deviations of a slice of f64 (512-bit)
+///
+/// ### Params
+///
+/// * `a` - The slice of f64 values to calculate variance for.
+/// * `mean` - The mean of the values in `a`.
+///
+/// ### Returns
+///
+/// Sum of squared deviations from the mean
+#[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+#[inline(always)]
+fn sum_squared_dev_avx512_f64(a: &[f64], mean: f64) -> f64 {
+    use std::arch::x86_64::*;
+
+    let len = a.len();
+    let chunks = len / 8;
+
+    unsafe {
+        let mut acc = _mm512_setzero_pd();
+        let mean_vec = _mm512_set1_pd(mean);
+
+        for i in 0..chunks {
+            let va = _mm512_loadu_pd(a.as_ptr().add(i * 8));
+            let diff = _mm512_sub_pd(va, mean_vec);
+            acc = _mm512_fmadd_pd(diff, diff, acc);
+        }
+
+        let mut sum = _mm512_reduce_add_pd(acc);
+        for i in (chunks * 8)..len {
+            let diff = a[i] - mean;
+            sum += diff * diff;
+        }
+        sum
+    }
+}
+
+/// SIMD sum of squared deviations of a slice of f64 (512-bit fallback)
+///
+/// ### Params
+///
+/// * `a` - The slice of f64 values to calculate variance for.
+/// * `mean` - The mean of the values in `a`.
+///
+/// ### Returns
+///
+/// Sum of squared deviations from the mean
+#[cfg(not(all(target_arch = "x86_64", target_feature = "avx512f")))]
+#[inline(always)]
+fn sum_squared_dev_avx512_f64(a: &[f64], mean: f64) -> f64 {
+    sum_squared_dev_avx2_f64(a, mean)
+}
+
+/// SIMD sum of squared deviations of a slice of f64 (dispatch)
+///
+/// ### Params
+///
+/// * `a` - The slice of f64 values to calculate variance for.
+/// * `mean` - The mean of the values in `a`.
+///
+/// ### Returns
+///
+/// Sum of squared deviations from the mean
+#[inline]
+pub fn sum_squared_dev_simd_f64(a: &[f64], mean: f64) -> f64 {
+    match detect_simd_level() {
+        SimdLevel::Avx512 => sum_squared_dev_avx512_f64(a, mean),
+        SimdLevel::Avx2 => sum_squared_dev_avx2_f64(a, mean),
+        SimdLevel::Sse => sum_squared_dev_sse_f64(a, mean),
+        SimdLevel::Scalar => sum_squared_dev_scalar_f64(a, mean),
     }
 }

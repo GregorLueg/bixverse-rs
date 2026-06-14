@@ -451,7 +451,7 @@ pub fn pairwise_gene_correlations(
                 }
                 let dense = rank_vector(&dense);
                 let mean = sum_simd_f32(&dense) / n_cells as f32;
-                let var = variance_simd_f32(&dense, mean) / (n_cells as f32 - 1.0);
+                let var = sum_squared_dev_simd_f32(&dense, mean) / (n_cells as f32 - 1.0);
                 let std = var.sqrt();
                 if std < 1e-8 {
                     vec![0_f32; n_cells]

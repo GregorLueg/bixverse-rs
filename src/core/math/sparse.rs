@@ -512,6 +512,24 @@ where
         self.shape
     }
 
+    /// Return the number of rows
+    ///
+    /// ### Returns
+    ///
+    /// Number of rows
+    pub fn nrows(&self) -> usize {
+        self.shape.0
+    }
+
+    /// Return the number of columns
+    ///
+    /// ### Returns
+    ///
+    /// Number of columns
+    pub fn ncols(&self) -> usize {
+        self.shape.1
+    }
+
     /// Returns the NNZ
     ///
     /// ### Returns
@@ -805,9 +823,6 @@ where
         new_indices.set_len(nnz);
     }
 
-    // Reuse new_indptr as the write cursor — we'll restore it afterwards.
-    // Work on a mutable window so we don't need a separate `next` vec.
-    // We iterate old major indices and scatter into new positions.
     let old_major_len = sparse_data.indptr.len() - 1;
     for major in 0..old_major_len {
         for idx in sparse_data.indptr[major]..sparse_data.indptr[major + 1] {
@@ -1036,10 +1051,6 @@ where
 
     CompressedSparseData2::new_csr(&data, &indices, &indptr, None, shape)
 }
-
-///////////////////
-// Fix from here //
-///////////////////
 
 /// Optimised COO to CSR - assumes input is already sorted by (row, col)
 ///
@@ -1359,7 +1370,6 @@ where
 /// ### Params
 ///
 /// * `csr` - Mutable reference to the CSR matrix (modified in-place)
-#[allow(dead_code)]
 pub fn normalise_csr_rows_l1<T>(csr: &mut CompressedSparseData2<T>) -> Result<(), BixverseErrors>
 where
     T: BixverseNumeric + Into<f64>,
@@ -1655,7 +1665,7 @@ where
         data.extend(data_buf);
     }
 
-    // Build directly rather than via new_csr, which would .to_vec() the lot.
+    // build directly rather than via new_csr, which would .to_vec() the lot.
     Ok(CompressedSparseData2 {
         data,
         indices,
@@ -1666,9 +1676,107 @@ where
     })
 }
 
-/////////////////////////////////////
-// Lanczos Eigenvalue calculations //
-/////////////////////////////////////
+///////////////////////
+// Sparse statistics //
+///////////////////////
+
+/// Calculate the column means for CSC [CompressedSparseData2]
+///
+/// ### Params
+///
+/// * `csc` - The [CompressedSparseData2] (needs to have floats)
+/// * `use_second_layer` - Use the second data layer
+///
+/// ### Returns
+///
+/// The column means
+pub fn sparse_col_means_csc<T>(
+    csc: &CompressedSparseData2<T>,
+    use_second_layer: bool,
+) -> Result<Vec<T>, BixverseErrors>
+where
+    T: BixverseFloat + BixverseSimd,
+{
+    if csc.cs_type.is_csr() {
+        return Err(BixverseErrors::SparseMatrixMustBeCsc);
+    }
+
+    let active_data: &[T] = if use_second_layer {
+        csc.data_2
+            .as_ref()
+            .ok_or(BixverseErrors::Data2NotAvailable)?
+            .as_slice()
+    } else {
+        csc.data.as_slice()
+    };
+
+    let (nrows, ncols) = csc.shape();
+    let nrows_t = T::from_usize(nrows).unwrap();
+    let mut col_means: Vec<T> = Vec::with_capacity(ncols);
+
+    for j in 0..ncols {
+        let start = csc.indptr[j] as usize;
+        let end = csc.indptr[j + 1] as usize;
+        let sum = T::bxv_sum(&active_data[start..end]);
+        col_means.push(sum / nrows_t);
+    }
+
+    Ok(col_means)
+}
+
+/// Calculate the column standard deviations for CSC [CompressedSparseData2]
+///
+/// ### Params
+///
+/// * `csc` - The [CompressedSparseData2] (needs to have floats)
+/// * `use_second_layer` - Use the second data layer
+///
+/// ### Returns
+///
+/// The column standard deviations
+pub fn sparse_col_sds_csc<T>(
+    csc: &CompressedSparseData2<T>,
+    use_second_layer: bool,
+) -> Result<Vec<T>, BixverseErrors>
+where
+    T: BixverseFloat + BixverseSimd,
+{
+    if csc.cs_type.is_csr() {
+        return Err(BixverseErrors::SparseMatrixMustBeCsc);
+    }
+
+    let active_data: &[T] = if use_second_layer {
+        csc.data_2
+            .as_ref()
+            .ok_or(BixverseErrors::Data2NotAvailable)?
+            .as_slice()
+    } else {
+        csc.data.as_slice()
+    };
+
+    let (nrows, ncols) = csc.shape();
+    let nrows_t = T::from_usize(nrows).unwrap();
+    let denom = nrows_t - T::one();
+    let mut col_sds: Vec<T> = Vec::with_capacity(ncols);
+
+    for j in 0..ncols {
+        let start = csc.indptr[j] as usize;
+        let end = csc.indptr[j + 1] as usize;
+        let col_slice = &active_data[start..end];
+        let implicit_zeros = T::from_usize(nrows - (end - start)).unwrap();
+
+        let mean = T::bxv_sum(col_slice) / nrows_t;
+        let ssd_nonzero = T::bxv_sum_squared_deviation(col_slice, mean);
+        let ssd_total = ssd_nonzero + implicit_zeros * mean * mean;
+        col_sds.push((ssd_total / denom).sqrt());
+    }
+
+    Ok(col_sds)
+}
+
+////////////////////////
+// Lanczos Eigenvalue //
+////////////////////////
 
 /// Helper function for dot product of two vectors
 ///
