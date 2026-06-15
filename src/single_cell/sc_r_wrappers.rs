@@ -2125,7 +2125,7 @@ impl TenxFileTask {
     ///
     /// Expects: exp_id, h5_path, version ("v2"/"v3"), no_cells, no_genes,
     /// gene_local_to_universe (integer vector, NA for unmapped / non-gene
-    /// features, 0-indexed).
+    /// features, 0-indexed), feature_type (optional string).
     ///
     /// ### Params
     ///
@@ -2136,46 +2136,38 @@ impl TenxFileTask {
     /// Self.
     pub fn from_r_list(r_list: List) -> extendr_api::Result<Self> {
         let map: HashMap<&str, Robj> = r_list.try_into()?;
-
         let exp_id = map
             .get("exp_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| Error::Other("exp_id missing or not a string".into()))?
             .to_string();
-
         let h5_path = map
             .get("h5_path")
             .and_then(|v| v.as_str())
             .ok_or_else(|| Error::Other("h5_path missing or not a string".into()))?
             .to_string();
-
         let version_str = map
             .get("version")
             .and_then(|v| v.as_str())
             .ok_or_else(|| Error::Other("version missing or not a string".into()))?;
         let version = parse_tenx_version(version_str)
             .ok_or_else(|| Error::Other("version must be 'v2' or 'v3'".into()))?;
-
         let no_cells = map
             .get("no_cells")
             .and_then(|v| v.as_integer())
             .ok_or_else(|| Error::Other("no_cells missing or not an integer".into()))?
             as usize;
-
         let no_genes = map
             .get("no_genes")
             .and_then(|v| v.as_integer())
             .ok_or_else(|| Error::Other("no_genes missing or not an integer".into()))?
             as usize;
-
         let mapping_raw: Vec<i32> = map
             .get("gene_local_to_universe")
             .ok_or_else(|| Error::Other("gene_local_to_universe missing".into()))?
             .as_integer_slice()
             .ok_or_else(|| Error::Other("gene_local_to_universe must be an integer vector".into()))?
             .to_vec();
-
-        // R NA_integer_ is i32::MIN
         let gene_local_to_universe: Vec<Option<usize>> = mapping_raw
             .into_iter()
             .map(|v| {
@@ -2186,12 +2178,10 @@ impl TenxFileTask {
                 }
             })
             .collect();
-
         let feature_type = map
             .get("feature_type")
             .and_then(|v| v.as_str())
             .map(|v| v.to_string());
-
         Ok(Self {
             exp_id,
             h5_path,
