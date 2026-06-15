@@ -24,7 +24,8 @@
 
 #### Fixes
 
-- `f64` overflow problem with mitch when using large data sets.
+- `f64` overflow problem with mitch when using large data sets. This is now
+  fixed and regression tests are in place.
 
 ## 0.3.0
 
