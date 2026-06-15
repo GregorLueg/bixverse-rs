@@ -338,106 +338,105 @@ impl<T> ManovaResult<T>
 where
     T: BixverseFloat + std::iter::Sum,
 {
-    /// Calculate Wilks' Lambda statistic
+    /// Non-zero eigenvalue of E⁻¹H for two-group MANOVA.
+    ///
+    /// For rank-1 H, the unique non-zero generalised eigenvalue equals
+    /// trace(`E^-1 x H`), avoiding `det(E) / det(E+H)` which overflows f64 for
+    /// moderately large `p (entries of E scale ~ n^3 / 12` for ranked data).
     ///
     /// ### Returns
     ///
-    /// Function will return the Wilks' Lambda
+    /// The eigenvalue as `T`, clamped to zero to handle numerical noise.
+    fn rank1_eigenvalue(&self) -> T {
+        debug_assert_eq!(
+            self.df_between, 1,
+            "rank1_eigenvalue assumes two-group MANOVA (df_between == 1)"
+        );
+        let e_inv = self.sscp_within.partial_piv_lu().inverse();
+        let prod = &e_inv * &self.sscp_between;
+        let trace: T = prod.diagonal().column_vector().iter().copied().sum::<T>();
+        // Numerical noise can make this slightly negative for ill-conditioned E.
+        trace.max(T::zero())
+    }
+
+    /// Wilks' Lambda for two-group MANOVA.
+    ///
+    /// Λ = 1 / (1 + λ), where λ is the rank-1 eigenvalue of E⁻¹H.
+    ///
+    /// ### Returns
+    ///
+    /// Wilks' Λ as `T`.
     pub fn wilks_lambda(&self) -> T {
-        let w_plus_b = &self.sscp_within + &self.sscp_between;
-        let det_w = self.sscp_within.determinant();
-        let det_total = w_plus_b.determinant();
-        det_w / det_total
+        let lambda = self.rank1_eigenvalue();
+        T::one() / (T::one() + lambda)
     }
 
-    /// Calculate Pillai's trace statistic
+    /// Pillai's trace for two-group MANOVA.
+    ///
+    /// V = λ / (1 + λ), where λ is the rank-1 eigenvalue of `E^-1 x H`.
     ///
     /// ### Returns
     ///
-    /// Function will return Pillai's trace
+    /// Pillai's V as `T`.
     pub fn pillai_trace(&self) -> T {
-        let w_plus_b = &self.sscp_within + &self.sscp_between;
-        let w_plus_b_pu = w_plus_b.partial_piv_lu();
-        let w_plus_in = w_plus_b_pu.inverse();
-        let h_times_inv = &self.sscp_between * w_plus_in;
-
-        h_times_inv
-            .diagonal()
-            .column_vector()
-            .iter()
-            .copied()
-            .sum::<T>()
+        let lambda = self.rank1_eigenvalue();
+        lambda / (T::one() + lambda)
     }
 
-    /// Get F-statistic and p-value for Wilks' Lambda
+    /// Exact F-test for two-group MANOVA (Hotelling's T^2 form).
     ///
-    /// ### Returns
+    /// F = ((n - p - 1) / p) * λ,   df = (p, n - p - 1)
     ///
-    /// A tuple with the F statistic and p-value according to Wilks'
-    pub fn wilks_f_test(&self) -> (T, T) {
-        let lambda = self.wilks_lambda();
+    /// Returns (NaN, 1.0) when the inputs are degenerate
+    /// (n - p - 1 <= 0, non-finite eigenvalue, etc.).
+    fn two_group_f_test(&self) -> (T, T) {
+        let lambda = self.rank1_eigenvalue();
         let p = T::from_usize(self.n_vars).unwrap();
-        let q = T::from_usize(self.df_between).unwrap();
-        let one = T::one();
-        let two = T::from_usize(2).unwrap();
+        let n = T::from_usize(self.df_within + self.df_between + 1).unwrap();
+        let df2 = n - p - T::one();
 
-        // special case for n_vars == 2
-        if self.n_vars == 2 {
-            let df1 = two * q;
-            let df2 = two * (T::from_usize(self.df_within).unwrap() - one);
-            let f_stat = ((one - lambda.sqrt()) / lambda.sqrt()) * (df2 / df1);
-
-            let f_dist = FisherSnedecor::new(df1.to_f64().unwrap(), df2.to_f64().unwrap()).unwrap();
-            let p_value = T::from_f64(1.0 - f_dist.cdf(f_stat.to_f64().unwrap())).unwrap();
-            return (f_stat, p_value);
+        if !lambda.is_finite() || df2 <= T::zero() {
+            return (T::nan(), T::one());
         }
 
-        let n = T::from_usize(self.df_within + self.df_between + 1).unwrap();
-        let five = T::from_usize(5).unwrap();
+        let f_stat = (df2 / p) * lambda;
 
-        let t = ((p * p + q * q - five).max(T::zero())).sqrt();
-        let w = n - (p + q + one) / two;
-        let df1 = p * q;
-        let df2 = w * t - (p * q - two) / two;
+        let df1_f64 = p.to_f64().unwrap();
+        let df2_f64 = df2.to_f64().unwrap();
+        let f_f64 = f_stat.to_f64().unwrap();
 
-        let lambda_root = if t > one {
-            lambda.powf(one / t)
-        } else {
-            lambda
+        if !f_f64.is_finite() || f_f64 < 0.0 {
+            return (f_stat, T::one());
+        }
+
+        let f_dist = match FisherSnedecor::new(df1_f64, df2_f64) {
+            Ok(d) => d,
+            Err(_) => return (f_stat, T::one()),
         };
-
-        let f_stat = ((one - lambda_root) / lambda_root) * (df2 / df1);
-
-        let f_dist = FisherSnedecor::new(df1.to_f64().unwrap(), df2.to_f64().unwrap()).unwrap();
-        let p_value = T::from_f64(1.0 - f_dist.cdf(f_stat.to_f64().unwrap())).unwrap();
-
+        let p_value = T::from_f64(1.0 - f_dist.cdf(f_f64)).unwrap();
         (f_stat, p_value)
     }
 
-    /// Get F-statistic and p-value for Pillai's trace
+    /// F-statistic and p-value derived from Wilks' Lambda.
     ///
-    /// (Version used in R)
+    /// For two-group MANOVA this coincides with the Pillai F-test.
     ///
     /// ### Returns
     ///
-    /// A tuple with the F statistic and p-value according to Pillai
+    /// A tuple of `(f_stat, p_value)` as `(T, T)`.
+    pub fn wilks_f_test(&self) -> (T, T) {
+        self.two_group_f_test()
+    }
+
+    /// F-statistic and p-value derived from Pillai's trace.
+    ///
+    /// For two-group MANOVA this coincides with the Wilks F-test.
+    ///
+    /// ### Returns
+    ///
+    /// A tuple of `(f_stat, p_value)` as `(T, T)`.
     pub fn pillai_f_test(&self) -> (T, T) {
-        let pillai = self.pillai_trace();
-        let p = T::from_usize(self.n_vars).unwrap();
-        let q = T::from_usize(self.df_between).unwrap();
-        let n = T::from_usize(self.df_within).unwrap();
-        let one = T::one();
-
-        // F approximation for Pillai's trace
-        let df1 = p * q;
-        let df2 = q * (n - p + one);
-
-        let f_stat = (pillai / (q - pillai)) * (df2 / df1);
-
-        let f_dist = FisherSnedecor::new(df1.to_f64().unwrap(), df2.to_f64().unwrap()).unwrap();
-        let p_value = T::from_f64(1.0 - f_dist.cdf(f_stat.to_f64().unwrap())).unwrap();
-
-        (f_stat, p_value)
+        self.two_group_f_test()
     }
 }
 
@@ -537,20 +536,32 @@ where
     T: BixverseFloat,
 {
     let mut aov_res = Vec::with_capacity(res.n_vars);
+    let df_between_t = T::from_usize(res.df_between).unwrap();
+    let df_within_t = T::from_usize(res.df_within).unwrap();
+
+    let f_dist = FisherSnedecor::new(
+        df_between_t.to_f64().unwrap(),
+        df_within_t.to_f64().unwrap(),
+    )
+    .ok();
 
     for var_idx in 0..res.n_vars {
         let ss_between = res.sscp_between[(var_idx, var_idx)];
         let ss_within = res.sscp_within[(var_idx, var_idx)];
-        let ms_between = ss_between / T::from_usize(res.df_between).unwrap();
-        let ms_within = ss_within / T::from_usize(res.df_within).unwrap();
-        let f_stat = ms_between / ms_within;
+        let ms_between = ss_between / df_between_t;
+        let ms_within = ss_within / df_within_t;
 
-        let f_dist = FisherSnedecor::new(
-            T::from_usize(res.df_between).unwrap().to_f64().unwrap(),
-            T::from_usize(res.df_within).unwrap().to_f64().unwrap(),
-        )
-        .unwrap();
-        let pval = T::from_f64(1.0 - f_dist.cdf(f_stat.to_f64().unwrap())).unwrap();
+        let (f_stat, p_val) = if ms_within <= T::zero() {
+            (T::nan(), T::one())
+        } else {
+            let f = ms_between / ms_within;
+            let f_f64 = f.to_f64().unwrap();
+            let pv = match (&f_dist, f_f64.is_finite() && f_f64 >= 0.0) {
+                (Some(d), true) => T::from_f64(1.0 - d.cdf(f_f64)).unwrap(),
+                _ => T::one(),
+            };
+            (f, pv)
+        };
 
         aov_res.push(AnovaSummary {
             variable_index: var_idx,
@@ -559,7 +570,7 @@ where
             ms_between,
             ms_within,
             f_stat,
-            p_val: pval,
+            p_val,
         });
     }
 
