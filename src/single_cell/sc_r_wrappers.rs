@@ -31,9 +31,8 @@ use crate::single_cell::sc_batch_correction::{
 use crate::single_cell::sc_data::h5ad_io::RawDataSlot;
 use crate::single_cell::sc_data::{
     bin_merge_io::BinMergeTask, data_io::MinCellQuality, h5_10x_io::parse_tenx_version,
-    h5_10x_multifile_io::TenxFileTask, h5ad_io::parse_raw_slot,
-    h5ad_multifile_io::H5adFileTask, mtx_multifile_io::MtxFileTask,
-    sc_synthetic_data::CellTypeConfig,
+    h5_10x_multifile_io::TenxFileTask, h5ad_io::parse_raw_slot, h5ad_multifile_io::H5adFileTask,
+    mtx_multifile_io::MtxFileTask, sc_synthetic_data::CellTypeConfig,
 };
 use crate::single_cell::sc_processing::{
     doublet_detection::BoostParams, knn::KnnParams, pca::SingleCellPcaParams,
@@ -2188,6 +2187,11 @@ impl TenxFileTask {
             })
             .collect();
 
+        let feature_type = map
+            .get("feature_type")
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string());
+
         Ok(Self {
             exp_id,
             h5_path,
@@ -2195,6 +2199,7 @@ impl TenxFileTask {
             no_cells,
             no_genes,
             gene_local_to_universe,
+            feature_type,
         })
     }
 }
