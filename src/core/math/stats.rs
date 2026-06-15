@@ -835,4 +835,130 @@ mod tests {
             Some(OutlierDirection::Both)
         ));
     }
+
+    #[test]
+    fn test_manova_two_group_analytic() {
+        // Group 0: rows 0, 1; Group 1: rows 2, 3
+        // x = [[1, 4], [2, 1], [5, 7], [6, 3]]
+        //
+        // Hand-computed:
+        //   sscp_within = [[1.0, -3.5], [-3.5, 12.5]]
+        //   d = mean_1 - mean_0 = [4.0, 2.5]
+        //   c = n1*n2/n = 1
+        //   lambda = c * d' * E^-1 * d = 1105
+        //   Wilks = 1/1106, Pillai = 1105/1106, Wilks + Pillai = 1
+        //   F = ((n - p - 1)/p) * lambda = (1/2)*1105 = 552.5, df = (2, 1)
+        let mat = Mat::from_fn(4, 2, |i, j| match (i, j) {
+            (0, 0) => 1.0f64,
+            (0, 1) => 4.0,
+            (1, 0) => 2.0,
+            (1, 1) => 1.0,
+            (2, 0) => 5.0,
+            (2, 1) => 7.0,
+            (3, 0) => 6.0,
+            (3, 1) => 3.0,
+            _ => unreachable!(),
+        });
+        let res = crate::enrichment::mitch::manova_mitch(mat.as_ref(), &[2, 3]);
+
+        let wilks = res.wilks_lambda();
+        let pillai = res.pillai_trace();
+        let recovered_lambda = (1.0 - wilks) / wilks;
+
+        assert!((recovered_lambda - 1105.0).abs() < 1e-6);
+        assert!((wilks + pillai - 1.0).abs() < 1e-12);
+        assert!((wilks - 1.0 / 1106.0).abs() < 1e-9);
+        assert!((pillai - 1105.0 / 1106.0).abs() < 1e-9);
+
+        let (f_w, _) = res.wilks_f_test();
+        let (f_p, p_p) = res.pillai_f_test();
+        assert!((f_w - 552.5).abs() < 1e-6);
+        assert!((f_p - 552.5).abs() < 1e-6);
+        assert!((0.0..=1.0).contains(&p_p));
+    }
+
+    #[test]
+    fn test_manova_no_overflow_large_p() {
+        // Regression test: previously panicked via det() overflow → NaN →
+        // FisherSnedecor::cdf XOutOfRange. Mimics Mitch ranked-data magnitudes
+        // (n ~ 3000, sscp diagonals ~ n^3/12 ~ 2e9).
+        let p = 80;
+        let n_total = 2949usize;
+        let sigma = (n_total as f64).powi(3) / 12.0;
+
+        let sscp_within = Mat::from_fn(p, p, |i, j| if i == j { sigma } else { sigma * 0.3 });
+        // Small between-group signal; H entries ~ sigma * 1e-3
+        let sscp_between = Mat::from_fn(
+            p,
+            p,
+            |i, j| {
+                if i == j { sigma * 1.5e-3 } else { sigma * 5e-4 }
+            },
+        );
+        let sscp_total = &sscp_within + &sscp_between;
+
+        let res = ManovaResult::<f64> {
+            sscp_between,
+            sscp_within,
+            sscp_total,
+            df_between: 1,
+            df_within: n_total - 2,
+            df_total: n_total - 1,
+            n_vars: p,
+            group_means: vec![vec![0.0; p], vec![0.0; p]],
+            overall_mean: vec![0.0; p],
+        };
+
+        let wilks = res.wilks_lambda();
+        let pillai = res.pillai_trace();
+        let (f_w, p_w) = res.wilks_f_test();
+        let (f_p, p_p) = res.pillai_f_test();
+
+        assert!(wilks.is_finite() && wilks > 0.0 && wilks <= 1.0);
+        assert!((0.0..1.0).contains(&pillai) && pillai.is_finite());
+        assert!((wilks + pillai - 1.0).abs() < 1e-9);
+        assert!(f_w.is_finite() && f_w >= 0.0);
+        assert!(f_p.is_finite() && f_p >= 0.0);
+        assert!((0.0..=1.0).contains(&p_w));
+        assert!((0.0..=1.0).contains(&p_p));
+        // Wilks and Pillai F-tests are identical for two groups.
+        assert!((f_w - f_p).abs() < 1e-9);
+        assert!((p_w - p_p).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_summary_aov_constant_column() {
+        // ss_within == 0 used to feed NaN into FisherSnedecor and panic.
+        let p = 2;
+        let sscp_within = Mat::from_fn(p, p, |i, j| {
+            if i == 0 && j == 0 {
+                0.0
+            } else if i == j {
+                10.0
+            } else {
+                0.0
+            }
+        });
+        let sscp_between = Mat::from_fn(p, p, |i, j| if i == j { 5.0 } else { 0.0 });
+        let sscp_total = &sscp_within + &sscp_between;
+
+        let res = ManovaResult::<f64> {
+            sscp_between,
+            sscp_within,
+            sscp_total,
+            df_between: 1,
+            df_within: 10,
+            df_total: 11,
+            n_vars: p,
+            group_means: vec![vec![0.0; p], vec![0.0; p]],
+            overall_mean: vec![0.0; p],
+        };
+
+        let aov = summary_aov(&res);
+        assert_eq!(aov.len(), 2);
+        assert!(aov[0].f_stat.is_nan());
+        assert!((aov[0].p_val - 1.0).abs() < 1e-12);
+        assert!(aov[1].f_stat.is_finite() && aov[1].f_stat > 0.0);
+        assert!((0.0..=1.0).contains(&aov[1].p_val));
+    }
 }
