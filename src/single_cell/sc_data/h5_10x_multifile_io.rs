@@ -4,10 +4,13 @@
 //!
 //! 10x stores the matrix as `genes x cells` in CSC, with `indptr` over cells
 //! and `indices` holding gene rows, so each cell's entries are contiguous and
-//! can be processed per-cell exactly like the h5ad CSR path. Modality filtering
-//! (V3 "Gene Expression") is expected to be reflected in `gene_local_to_universe`
-//! by the caller (non-gene features map to `None`), keeping this loader
-//! symmetric with the mtx and h5ad ones.
+//! can be processed per-cell exactly like the h5ad CSR path.
+//!
+//! V3 modality filtering (default "Gene Expression") is applied internally by
+//! reading the per-file `feature_type` dataset and masking out non-target
+//! features. Callers therefore only need to supply `gene_local_to_universe`
+//! based on feature identifiers; non-gene modalities (e.g. Antibody Capture)
+//! are dropped automatically.
 
 use hdf5::File;
 use rayon::prelude::*;
@@ -19,7 +22,7 @@ use thousands::Separable;
 
 use crate::prelude::*;
 use crate::single_cell::sc_data::data_io::*;
-use crate::single_cell::sc_data::h5_10x_io::TenxVersion;
+use crate::single_cell::sc_data::h5_10x_io::{TenxVersion, validate_feature_types_tenx};
 
 ////////////////
 // File tasks //
@@ -37,9 +40,15 @@ pub struct TenxFileTask {
     pub no_cells: usize,
     /// Number of features (rows, incl. non-gene modalities) in this file
     pub no_genes: usize,
-    /// file-local gene idx -> universe gene idx; `None` if the feature is not
-    /// in the (intersected) universe, which also excludes non-gene modalities
+    /// file-local feature idx -> universe gene idx; `None` if the feature is
+    /// not in the (intersected) universe. V3 modality filtering is applied
+    /// internally by the loader; callers may map all features here regardless
+    /// of modality.
     pub gene_local_to_universe: Vec<Option<usize>>,
+    /// Target modality for V3 files (e.g. "Gene Expression", "Antibody
+    /// Capture"). Defaults to "Gene Expression" when `None`. Ignored for V2,
+    /// which is single-modality.
+    pub feature_type: Option<String>,
 }
 
 /// Per-file QC output returned to the caller
@@ -76,21 +85,70 @@ const CELL_CHUNK_SIZE: usize = 10_000;
 /// Number of kept cells buffered per HDF5 slice while writing a single file.
 const CELL_BATCH_SIZE: usize = 1_000;
 
-/// Scan a single 10x file for per-universe-gene NNZ counts.
+/// Build the effective file-local -> universe mapping for a single task.
 ///
-/// Reads `indptr` once, then streams `indices` in cell-sized chunks, mapping
-/// each file-local gene index onto the universe. Features absent from the
-/// universe (including non-gene modalities) are skipped.
+/// For V3, reads `matrix/features/feature_type` and zeroes out the mapping for
+/// features whose modality does not match `task.feature_type` (default
+/// "Gene Expression"). For V2 the caller's mapping is returned unchanged.
 ///
 /// ### Params
 ///
 /// * `task` - The file task descriptor
+///
+/// ### Returns
+///
+/// The effective mapping: file-local feature idx -> universe gene idx, with
+/// non-target modalities replaced by `None`.
+fn build_effective_mapping(task: &TenxFileTask) -> Result<Vec<Option<usize>>, BixverseErrors> {
+    match task.version {
+        TenxVersion::V2 => Ok(task.gene_local_to_universe.clone()),
+        TenxVersion::V3 => {
+            let target = task.feature_type.as_deref();
+            let valid = validate_feature_types_tenx(&task.h5_path, task.version, target)?;
+            let mut mask = vec![false; task.no_genes];
+            for i in valid {
+                if i < task.no_genes {
+                    mask[i] = true;
+                }
+            }
+            Ok(task
+                .gene_local_to_universe
+                .iter()
+                .enumerate()
+                .map(|(local, opt)| {
+                    if mask.get(local).copied().unwrap_or(false) {
+                        *opt
+                    } else {
+                        None
+                    }
+                })
+                .collect())
+        }
+    }
+}
+
+/// Scan a single 10x file for per-universe-gene NNZ counts.
+///
+/// Reads `indptr` once, then streams `indices` in cell-sized chunks, mapping
+/// each file-local feature index onto the universe via the precomputed
+/// effective mapping. Features outside the universe (incl. non-target V3
+/// modalities) are skipped.
+///
+/// ### Params
+///
+/// * `task` - The file task descriptor
+/// * `gene_local_to_universe` - Effective mapping for this file (modality
+///   filter already applied)
 /// * `universe_size` - Total number of genes in the shared universe
 ///
 /// ### Returns
 ///
 /// Per-universe-gene NNZ counts
-fn scan_gene_nnz(task: &TenxFileTask, universe_size: usize) -> Result<Vec<usize>, BixverseErrors> {
+fn scan_gene_nnz(
+    task: &TenxFileTask,
+    gene_local_to_universe: &[Option<usize>],
+    universe_size: usize,
+) -> Result<Vec<usize>, BixverseErrors> {
     let file = File::open(&task.h5_path)?;
     let indptr: Vec<usize> = file.dataset(task.version.get_indptr())?.read_1d()?.to_vec();
     let indices_ds = file.dataset(task.version.get_indices())?;
@@ -112,7 +170,7 @@ fn scan_gene_nnz(task: &TenxFileTask, universe_size: usize) -> Result<Vec<usize>
             let end = indptr[cell_idx + 1] - data_start;
             for local_idx in start..end {
                 let local_gene = chunk_indices[local_idx];
-                if let Some(&Some(u_idx)) = task.gene_local_to_universe.get(local_gene) {
+                if let Some(&Some(u_idx)) = gene_local_to_universe.get(local_gene) {
                     gene_nnz[u_idx] += 1;
                 }
             }
@@ -131,8 +189,8 @@ fn scan_gene_nnz(task: &TenxFileTask, universe_size: usize) -> Result<Vec<usize>
 /// ### Params
 ///
 /// * `task` - The file task descriptor
-/// * `gene_local_to_final` - Mapping from file-local gene index to final gene
-///   index
+/// * `gene_local_to_final` - Mapping from file-local feature index to final
+///   gene index (composed with the modality filter and global gene QC)
 ///
 /// ### Returns
 ///
@@ -190,8 +248,8 @@ fn scan_cell_stats(
 ///
 /// * `task` - The file task descriptor
 /// * `cells_to_keep` - File-local 0-indexed cell indices to include
-/// * `gene_local_to_final` - Mapping from file-local gene index to final gene
-///   index
+/// * `gene_local_to_final` - Mapping from file-local feature index to final
+///   gene index (composed with the modality filter and global gene QC)
 /// * `target_size` - Target library size for normalisation
 /// * `cell_offset` - Global cell offset for this file's cells in the unified
 ///   output
@@ -310,11 +368,13 @@ fn write_tenx_file_cells(
 
 /// Load multiple 10x CellRanger h5 files into a single binary.
 ///
-/// 1. Parallel per-file scan of gene NNZ against the intersected universe
-/// 2. Apply global `min_cells` to determine the final gene set
-/// 3. Parallel per-file scan of cell stats against the final gene set
-/// 4. Apply per-cell `min_unique_genes` / `min_lib_size`
-/// 5. Stream kept cells into the unified binary
+/// 1. Resolve per-file V3 modality filters into effective local - >universe
+///    maps
+/// 2. Parallel per-file scan of gene NNZ against the intersected universe
+/// 3. Apply global `min_cells` to determine the final gene set
+/// 4. Parallel per-file scan of cell stats against the final gene set
+/// 5. Apply per-cell `min_unique_genes` / `min_lib_size`
+/// 6. Stream kept cells into the unified binary
 ///
 /// ### Params
 ///
@@ -338,15 +398,43 @@ pub fn multi_10x_h5_to_file<P: AsRef<Path>>(
     let total_start = Instant::now();
 
     if verbose {
+        println!(
+            "Resolving modality filters across {} 10x files...",
+            tasks.len()
+        );
+    }
+
+    let effective_mappings: Vec<Vec<Option<usize>>> = tasks
+        .par_iter()
+        .map(build_effective_mapping)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if verbose {
+        for (task, mapping) in tasks.iter().zip(effective_mappings.iter()) {
+            let kept = mapping.iter().filter(|o| o.is_some()).count();
+            let in_universe = task
+                .gene_local_to_universe
+                .iter()
+                .filter(|o| o.is_some())
+                .count();
+            println!(
+                "  {}: {} / {} features kept after modality filter",
+                task.exp_id,
+                kept.separate_with_underscores(),
+                in_universe.separate_with_underscores()
+            );
+        }
         println!("Scan 1/2: gene NNZ across {} 10x files...", tasks.len());
     }
+
     let completed = Arc::new(AtomicUsize::new(0));
     let report_interval = (tasks.len() / 10).max(1);
 
     let per_file_nnz: Vec<Vec<usize>> = tasks
         .par_iter()
-        .map(|task| {
-            let res = scan_gene_nnz(task, universe_size);
+        .zip(effective_mappings.par_iter())
+        .map(|(task, mapping)| {
+            let res = scan_gene_nnz(task, mapping, universe_size);
             if verbose {
                 let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
                 if done.is_multiple_of(report_interval) || done == tasks.len() {
@@ -385,11 +473,10 @@ pub fn multi_10x_h5_to_file<P: AsRef<Path>>(
         );
     }
 
-    let composed: Vec<Vec<Option<usize>>> = tasks
+    let composed: Vec<Vec<Option<usize>>> = effective_mappings
         .iter()
-        .map(|t| {
-            t.gene_local_to_universe
-                .iter()
+        .map(|m| {
+            m.iter()
                 .map(|opt| opt.and_then(|u| universe_to_final[u]))
                 .collect()
         })
