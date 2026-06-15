@@ -34,7 +34,7 @@ pub struct GroupedGeneStats {
 fn scale_and_clip(data: &mut [f32], clip: Option<f32>) {
     let n = data.len() as f32;
     let mean = sum_simd_f32(data) / n;
-    let var = variance_simd_f32(data, mean) / n;
+    let var = sum_squared_dev_simd_f32(data, mean) / n;
     let sd = var.sqrt();
     if sd > 1e-8 {
         for x in data.iter_mut() {
