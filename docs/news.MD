@@ -4,15 +4,27 @@
 
 ### Features
 
+#### General
+
+- NMF implementation that is exposed to both dense (for example RNAseq) and
+  sparse data sets (for example single cell transcriptomics).
+
 #### Single cells
 
 - Improved verbosity on Harmony and better performance (version 1 and 2).
+- Multi file support for h5 reading from 10x genomics
+- PFlogPF normalisation prior to PCAs enabled for single cells, see
+  [Booeshaghi et al.](https://www.biorxiv.org/content/10.1101/2022.05.06.490859v3)
 
 #### GPU-accelerated methods:
 
 - Sparse, randomised SVD for single cell
 - Harmony (version 2) on GPU.
 - GPU-accelerated covariance and correlations (column-wise).
+
+#### Fixes
+
+- `f64` overflow problem with mitch when using large data sets.
 
 ## 0.3.0
 
@@ -44,7 +56,7 @@ Major update / release
 
 - First implementation of GPU-accelerated method (behind the feature gate
   `"gpu"`):
-  * k-means clustering -> to be integrated in the future in some of methods
+  * k-means clustering -> to be integrated in the future in some of the methods
 
 ## 0.2.0
 
