@@ -527,7 +527,8 @@ fn normalise_w_cols<F: BixverseFloat>(w: &mut Mat<F>, h: &mut Mat<F>) {
 ///
 /// Evaluates `||V - WH||_F^2` via the expansion
 /// `||V||_F^2 - 2<W^T V, H> + <W^T W, H H^T>`,
-/// avoiding materialising W H.
+/// avoiding materialising W H. Always in `f64` to avoid issues with
+/// catastrophic cancellation.
 ///
 /// ### Params
 ///
@@ -550,27 +551,27 @@ fn compute_objective<F: BixverseFloat + Send + Sync>(
     let k = h.nrows();
     let n = h.ncols();
 
-    let inner_ha = (0..n)
+    let inner_ha: f64 = (0..n)
         .into_par_iter()
         .with_min_len(64)
         .map(|j| {
-            let mut acc = F::zero();
+            let mut acc = 0f64;
             for r in 0..k {
-                acc += h[(r, j)] * a[(r, j)];
+                acc += h[(r, j)].to_f64().unwrap() * a[(r, j)].to_f64().unwrap();
             }
             acc
         })
-        .reduce(|| F::zero(), |x, y| x + y);
+        .reduce(|| 0f64, |x, y| x + y);
 
-    let mut inner_bd = F::zero();
+    let mut inner_bd = 0f64;
     for j in 0..k {
         for i in 0..k {
-            inner_bd += b[(i, j)] * d[(i, j)];
+            inner_bd += b[(i, j)].to_f64().unwrap() * d[(i, j)].to_f64().unwrap();
         }
     }
 
-    let two = F::from_f64(2.0).unwrap();
-    sq_frob_v - two * inner_ha + inner_bd
+    let result = sq_frob_v.to_f64().unwrap() - 2.0 * inner_ha + inner_bd;
+    F::from_f64(result.max(0.0)).unwrap()
 }
 
 //////////
