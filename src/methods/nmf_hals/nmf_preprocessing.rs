@@ -29,7 +29,10 @@ pub enum NmfPreprocessing {
 ///
 /// ### Params
 ///
-/// * `s` - String to parse
+/// * `s` - String to parse. `"none"` -> leave data as is; `"sd" | "scaling"`
+///   -> divide the respective features by their standard deviation; `"sqrt_sd"`
+///   -> divide the respective features by the square root of their standard
+///   deviation.
 ///
 /// ### Returns
 ///
