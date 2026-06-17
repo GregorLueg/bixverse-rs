@@ -100,77 +100,89 @@ pub fn generate_snn_full(
 ) -> (Vec<usize>, Vec<f32>) {
     let verbosity = parse_verbosity_level(verbose);
 
-    let mut reverse_mappings: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n_samples];
-
     let start_time = Instant::now();
+
+    let knn_rm: Vec<usize> = {
+        let mut v = vec![0usize; n_samples * k];
+        for i in 0..n_samples {
+            for nb in 0..k {
+                v[i * k + nb] = flat_knn[nb * n_samples + i];
+            }
+        }
+        v
+    };
+
+    let mut reverse_mappings: Vec<Vec<(usize, usize)>> =
+        (0..n_samples).map(|_| Vec::with_capacity(k + 1)).collect();
 
     for i in 0..n_samples {
         reverse_mappings[i].push((i, 0));
-
-        for neighbor_idx in 0..k {
-            let neighbor = flat_knn[neighbor_idx * n_samples + i];
-            reverse_mappings[neighbor].push((i, neighbor_idx + 1));
+    }
+    for nb in 0..k {
+        for i in 0..n_samples {
+            let neighbor = flat_knn[nb * n_samples + i];
+            reverse_mappings[neighbor].push((i, nb + 1));
         }
     }
 
     let results: Vec<(usize, usize, f32)> = (0..n_samples)
         .into_par_iter()
-        .flat_map(|j| {
-            let mut scores = vec![0.0f32; n_samples];
-            let mut added = Vec::new();
+        .map_init(
+            || (vec![0.0f32; n_samples], Vec::<usize>::with_capacity(64)),
+            |(scores, added), j| {
+                added.clear();
 
-            for i in 0..=k {
-                let cur_neighbor = if i == 0 {
-                    j
-                } else {
-                    flat_knn[(i - 1) * n_samples + j]
-                };
+                for i in 0..=k {
+                    let cur_neighbor = if i == 0 { j } else { knn_rm[j * k + (i - 1)] };
 
-                for &(othernode, other_rank) in &reverse_mappings[cur_neighbor] {
-                    if othernode < j {
-                        match method {
-                            SnnSimilarityMethod::Rank => {
-                                let combined_rank = (i + other_rank) as f32;
-                                if scores[othernode] == 0.0 {
-                                    scores[othernode] = combined_rank;
-                                    added.push(othernode);
-                                } else if combined_rank < scores[othernode] {
-                                    scores[othernode] = combined_rank;
+                    for &(othernode, other_rank) in &reverse_mappings[cur_neighbor] {
+                        if othernode < j {
+                            match method {
+                                SnnSimilarityMethod::Rank => {
+                                    let combined_rank = (i + other_rank) as f32;
+                                    if scores[othernode] == 0.0 {
+                                        scores[othernode] = combined_rank;
+                                        added.push(othernode);
+                                    } else if combined_rank < scores[othernode] {
+                                        scores[othernode] = combined_rank;
+                                    }
                                 }
-                            }
-                            SnnSimilarityMethod::Intersection => {
-                                if scores[othernode] == 0.0 {
-                                    added.push(othernode);
+                                SnnSimilarityMethod::Intersection => {
+                                    if scores[othernode] == 0.0 {
+                                        added.push(othernode);
+                                    }
+                                    scores[othernode] += 1.0;
                                 }
-                                scores[othernode] += 1.0;
                             }
                         }
                     }
                 }
-            }
 
-            added
-                .into_iter()
-                .filter_map(|othernode| {
-                    let weight = match method {
-                        SnnSimilarityMethod::Rank => {
-                            let preliminary = k as f32 - scores[othernode] / 2.0;
-                            let raw_weight = preliminary.max(1e-6);
-                            raw_weight / k as f32
-                        }
-                        SnnSimilarityMethod::Intersection => {
-                            scores[othernode] / (2.0 * (k as f32 + 1.0) - scores[othernode])
-                        }
-                    };
+                let out: Vec<(usize, usize, f32)> = added
+                    .iter()
+                    .filter_map(|&othernode| {
+                        let weight = match method {
+                            SnnSimilarityMethod::Rank => {
+                                let preliminary = k as f32 - scores[othernode] / 2.0;
+                                let raw_weight = preliminary.max(1e-6);
+                                raw_weight / k as f32
+                            }
+                            SnnSimilarityMethod::Intersection => {
+                                scores[othernode] / (2.0 * (k as f32 + 1.0) - scores[othernode])
+                            }
+                        };
+                        (weight >= pruning).then_some((j, othernode, weight))
+                    })
+                    .collect();
 
-                    if weight >= pruning {
-                        Some((j, othernode, weight))
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
-        })
+                for &othernode in added.iter() {
+                    scores[othernode] = 0.0;
+                }
+
+                out
+            },
+        )
+        .flatten()
         .collect();
 
     let mut edges = Vec::with_capacity(results.len() * 2);
