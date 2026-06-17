@@ -629,7 +629,6 @@ where
     let mut last_loss = F::infinity();
     let mut converged = false;
     let mut n_iter = 0usize;
-    let mut n_checks = 0usize;
 
     for iter in 0..opts.max_iter {
         n_iter = iter + 1;
@@ -659,9 +658,7 @@ where
             final_loss = loss;
 
             if n_iter > opts.check_every {
-                n_checks += 1;
-
-                if n_checks.is_multiple_of(3) && verbosity.normal_verbosity() {
+                if verbosity.normal_verbosity() {
                     println!(
                         "  NMF: Iteration {} out of {} - current loss: {:.2?}",
                         iter + 1,
