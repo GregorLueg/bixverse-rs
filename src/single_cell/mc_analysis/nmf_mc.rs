@@ -93,7 +93,7 @@ pub fn nmf_single_run_mc(
 ///
 /// [NmfResult] or respective errors if something went wrong.
 #[allow(clippy::too_many_arguments)]
-pub fn nmf_multiple_run_sc(
+pub fn nmf_multiple_run_mc(
     data: CompressedSparseData2<f32>,
     k: usize,
     preprocessing: &str,
