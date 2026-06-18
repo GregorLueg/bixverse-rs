@@ -925,7 +925,7 @@ pub fn harmony_v2_with_state(
 
     assert!(n_vars >= 1, "At least one batch variable required");
 
-    let batch_infos = create_batch_infos(batch_labels, n);
+    let batch_infos = create_batch_infos(batch_labels, n)?;
 
     if verbosity.normal_verbosity() {
         println!(
@@ -989,7 +989,7 @@ pub fn harmony_v2_with_state(
     )?;
 
     let mut dist_mat = compute_cosine_distances(y.as_ref(), z_cos.as_ref());
-    let mut r = initialise_r_from_dist(dist_mat.as_ref(), &sigma);
+    let mut r = initialise_r_from_dist(dist_mat.as_ref(), &sigma)?;
     let mut oe_pairs = compute_all_diversity_statistics(r.as_ref(), &batch_infos);
 
     let initial_obj = compute_objective_v2(
@@ -1019,7 +1019,7 @@ pub fn harmony_v2_with_state(
 
         // distances are fixed across the inner loop, so the base assignments
         // are computed once per round here rather than inside each update.
-        let scale_dist = compute_scaled_distances(dist_mat.as_ref(), &sigma);
+        let scale_dist = compute_scaled_distances(dist_mat.as_ref(), &sigma)?;
 
         // inner loop: refine R with diversity penalty, distances fixed
         for kmeans_iter in 0..params.max_iter_kmeans {
@@ -1087,7 +1087,7 @@ pub fn harmony_v2_with_state(
         dist_mat = compute_cosine_distances(y.as_ref(), z_cos.as_ref());
 
         // re-initialise R from new distances (diversity applied in next inner loop)
-        r = initialise_r_from_dist(dist_mat.as_ref(), &sigma);
+        r = initialise_r_from_dist(dist_mat.as_ref(), &sigma)?;
         oe_pairs = compute_all_diversity_statistics(r.as_ref(), &batch_infos);
 
         let harmony_obj = *objectives_kmeans.last().unwrap();
@@ -1165,7 +1165,7 @@ mod tests {
     #[test]
     fn test_expand_theta_tau_zero() {
         let labels = vec![0, 0, 1, 1, 1];
-        let info = create_batch_info(&labels, 5);
+        let info = create_batch_info(&labels, 5).unwrap();
         let result = expand_theta(&[2.0], &[info], 10, 0.0);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].len(), 2);
@@ -1176,7 +1176,7 @@ mod tests {
     #[test]
     fn test_expand_theta_tau_positive() {
         let labels = vec![0, 0, 1, 1, 1, 1, 1, 1, 1, 1];
-        let info = create_batch_info(&labels, 10);
+        let info = create_batch_info(&labels, 10).unwrap();
         let result = expand_theta(&[2.0], &[info], 5, 5.0);
 
         // Level 0 has 2 cells, level 1 has 8 cells
@@ -1197,8 +1197,8 @@ mod tests {
     fn test_expand_theta_multiple_variables() {
         let labels0 = vec![0, 0, 1, 1];
         let labels1 = vec![0, 1, 2, 0];
-        let info0 = create_batch_info(&labels0, 4);
-        let info1 = create_batch_info(&labels1, 4);
+        let info0 = create_batch_info(&labels0, 4).unwrap();
+        let info1 = create_batch_info(&labels1, 4).unwrap();
         let result = expand_theta(&[2.0, 3.0], &[info0, info1], 10, 0.0);
 
         assert_eq!(result.len(), 2);
@@ -1228,7 +1228,7 @@ mod tests {
     #[test]
     fn test_objective_v2_finite_and_positive() {
         let labels = vec![0, 0, 1];
-        let info = create_batch_info(&labels, 3);
+        let info = create_batch_info(&labels, 3).unwrap();
         let sigma = vec![1.0, 1.0];
         let theta_expanded = vec![vec![1.0, 1.0]];
 
@@ -1252,7 +1252,7 @@ mod tests {
     #[test]
     fn test_objective_v2_decreases_with_better_assignments() {
         let labels = vec![0, 0, 1, 1];
-        let info = create_batch_info(&labels, 4);
+        let info = create_batch_info(&labels, 4).unwrap();
         let sigma = vec![1.0, 1.0];
         let theta_expanded = vec![vec![1.0, 1.0]];
 
@@ -1291,7 +1291,7 @@ mod tests {
     #[test]
     fn test_objective_v2_zero_theta_no_cross_entropy() {
         let labels = vec![0, 1];
-        let info = create_batch_info(&labels, 2);
+        let info = create_batch_info(&labels, 2).unwrap();
         let sigma = vec![1.0, 1.0];
         let theta_expanded = vec![vec![0.0, 0.0]];
 
@@ -1322,8 +1322,8 @@ mod tests {
     fn test_objective_v2_two_variables() {
         let labels0 = vec![0, 0, 1, 1];
         let labels1 = vec![0, 1, 1, 0]; // asymmetric w.r.t. clusters
-        let info0 = create_batch_info(&labels0, 4);
-        let info1 = create_batch_info(&labels1, 4);
+        let info0 = create_batch_info(&labels0, 4).unwrap();
+        let info1 = create_batch_info(&labels1, 4).unwrap();
 
         let sigma = vec![1.0, 1.0];
         let theta_expanded = vec![vec![1.0, 1.0], vec![1.0, 1.0]];
@@ -1366,7 +1366,7 @@ mod tests {
     fn test_objective_v2_stabilised_near_zero_o() {
         // Scenario where v1 formula would be unstable: O_kb near zero
         let labels = vec![0, 0, 0, 0, 1];
-        let info = create_batch_info(&labels, 5);
+        let info = create_batch_info(&labels, 5).unwrap();
         let sigma = vec![1.0, 1.0];
         let theta_expanded = vec![vec![2.0, 2.0]];
 
@@ -1397,14 +1397,14 @@ mod tests {
     #[test]
     fn test_update_r_v2_columns_sum_to_one() {
         let labels = vec![0, 0, 1, 1];
-        let info = create_batch_info(&labels, 4);
+        let info = create_batch_info(&labels, 4).unwrap();
         let sigma = vec![1.0, 1.0];
         let theta_expanded = vec![vec![1.0, 1.0]];
 
         let r_init = mat![[0.5, 0.5, 0.5, 0.5], [0.5, 0.5, 0.5, 0.5]];
         let dist_mat = mat![[0.1, 0.1, 0.9, 0.9], [0.9, 0.9, 0.1, 0.1]];
         let oe_init = compute_all_diversity_statistics(r_init.as_ref(), from_ref(&info));
-        let scale_dist = compute_scaled_distances(dist_mat.as_ref(), &sigma);
+        let scale_dist = compute_scaled_distances(dist_mat.as_ref(), &sigma).unwrap();
 
         let (r_new, _) = update_r_with_diversity_v2(
             scale_dist.as_ref(),
@@ -1430,14 +1430,14 @@ mod tests {
     #[test]
     fn test_update_r_v2_follows_distances() {
         let labels = vec![0, 0, 1, 1];
-        let info = create_batch_info(&labels, 4);
+        let info = create_batch_info(&labels, 4).unwrap();
         let sigma = vec![1.0, 1.0];
         let theta_expanded = vec![vec![1.0, 1.0]];
 
         let r_init = mat![[0.5, 0.5, 0.5, 0.5], [0.5, 0.5, 0.5, 0.5]];
         let dist_mat = mat![[0.1, 0.1, 0.9, 0.9], [0.9, 0.9, 0.1, 0.1]];
         let oe_init = compute_all_diversity_statistics(r_init.as_ref(), from_ref(&info));
-        let scale_dist = compute_scaled_distances(dist_mat.as_ref(), &sigma);
+        let scale_dist = compute_scaled_distances(dist_mat.as_ref(), &sigma).unwrap();
 
         let (r_new, _) = update_r_with_diversity_v2(
             scale_dist.as_ref(),
@@ -1458,14 +1458,14 @@ mod tests {
     #[test]
     fn test_update_r_v2_oe_consistency() {
         let labels = vec![0, 0, 1, 1];
-        let info = create_batch_info(&labels, 4);
+        let info = create_batch_info(&labels, 4).unwrap();
         let sigma = vec![1.0, 1.0];
         let theta_expanded = vec![vec![1.0, 1.0]];
 
         let r_init = mat![[0.5, 0.5, 0.5, 0.5], [0.5, 0.5, 0.5, 0.5]];
         let dist_mat = mat![[0.1, 0.1, 0.9, 0.9], [0.9, 0.9, 0.1, 0.1]];
         let oe_init = compute_all_diversity_statistics(r_init.as_ref(), from_ref(&info));
-        let scale_dist = compute_scaled_distances(dist_mat.as_ref(), &sigma);
+        let scale_dist = compute_scaled_distances(dist_mat.as_ref(), &sigma).unwrap();
 
         let (r_new, oe_new) = update_r_with_diversity_v2(
             scale_dist.as_ref(),
@@ -1498,14 +1498,14 @@ mod tests {
     #[test]
     fn test_update_r_v2_no_diversity_penalty() {
         let labels = vec![0, 0];
-        let info = create_batch_info(&labels, 2);
+        let info = create_batch_info(&labels, 2).unwrap();
         let sigma = vec![1.0, 1.0];
         let theta_expanded = vec![vec![0.0]];
 
         let r_init = mat![[0.5, 0.5], [0.5, 0.5]];
         let dist_mat = mat![[0.1, 0.9], [0.9, 0.1]];
         let oe_init = compute_all_diversity_statistics(r_init.as_ref(), from_ref(&info));
-        let scale_dist = compute_scaled_distances(dist_mat.as_ref(), &sigma);
+        let scale_dist = compute_scaled_distances(dist_mat.as_ref(), &sigma).unwrap();
 
         let (r_new, _) = update_r_with_diversity_v2(
             scale_dist.as_ref(),
@@ -1525,8 +1525,8 @@ mod tests {
     fn test_update_r_v2_two_variables() {
         let labels0 = vec![0, 0, 1, 1];
         let labels1 = vec![0, 1, 0, 1];
-        let info0 = create_batch_info(&labels0, 4);
-        let info1 = create_batch_info(&labels1, 4);
+        let info0 = create_batch_info(&labels0, 4).unwrap();
+        let info1 = create_batch_info(&labels1, 4).unwrap();
         let sigma = vec![1.0, 1.0];
         let theta_expanded = vec![vec![1.0, 1.0], vec![1.0, 1.0]];
 
@@ -1534,7 +1534,7 @@ mod tests {
         let dist_mat = mat![[0.1, 0.1, 0.9, 0.9], [0.9, 0.9, 0.1, 0.1]];
         let oe_init =
             compute_all_diversity_statistics(r_init.as_ref(), &[info0.clone(), info1.clone()]);
-        let scale_dist = compute_scaled_distances(dist_mat.as_ref(), &sigma);
+        let scale_dist = compute_scaled_distances(dist_mat.as_ref(), &sigma).unwrap();
 
         let (r_new, oe_new) = update_r_with_diversity_v2(
             scale_dist.as_ref(),
@@ -1618,7 +1618,7 @@ mod tests {
     #[test]
     fn test_ridge_v2_reduces_batch_effect() {
         let labels = vec![0, 0, 1, 1];
-        let info = create_batch_info(&labels, 4);
+        let info = create_batch_info(&labels, 4).unwrap();
 
         let z_orig = mat![[1.0, 0.1], [1.1, 0.2], [5.0, 0.1], [5.1, 0.2]];
         let r = mat![[1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 0.0]];
@@ -1653,7 +1653,7 @@ mod tests {
     #[test]
     fn test_ridge_v2_preserves_dimensions() {
         let labels = vec![0, 1, 2];
-        let info = create_batch_info(&labels, 3);
+        let info = create_batch_info(&labels, 3).unwrap();
 
         let z_orig = mat![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]];
         let r = mat![[0.5, 0.5, 0.5], [0.5, 0.5, 0.5]];
@@ -1679,7 +1679,7 @@ mod tests {
         // If only one level passes the cutoff for a variable, that variable
         // should be skipped entirely (nothing to correct).
         let labels = vec![0, 0, 0, 0, 1]; // level 1 has only 1 cell
-        let info = create_batch_info(&labels, 5);
+        let info = create_batch_info(&labels, 5).unwrap();
 
         let z_orig = mat![[1.0, 0.0], [1.0, 0.0], [1.0, 0.0], [1.0, 0.0], [5.0, 0.0],];
 
@@ -1718,7 +1718,7 @@ mod tests {
     #[test]
     fn test_ridge_v2_soft_assignments() {
         let labels = vec![0, 0, 1, 1];
-        let info = create_batch_info(&labels, 4);
+        let info = create_batch_info(&labels, 4).unwrap();
 
         let z_orig = mat![[1.0, 0.0], [1.0, 0.0], [5.0, 0.0], [5.0, 0.0]];
         let r = mat![[0.8, 0.9, 0.1, 0.2], [0.2, 0.1, 0.9, 0.8]];
@@ -1753,7 +1753,7 @@ mod tests {
     #[test]
     fn test_ridge_v2_dynamic_lambda() {
         let labels = vec![0, 0, 1, 1];
-        let info = create_batch_info(&labels, 4);
+        let info = create_batch_info(&labels, 4).unwrap();
 
         let z_orig = mat![[1.0, 0.1], [1.1, 0.2], [5.0, 0.1], [5.1, 0.2]];
         let r = mat![[1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 0.0]];
@@ -1800,8 +1800,8 @@ mod tests {
     fn test_ridge_v2_two_variables() {
         let batch_labels = vec![0, 0, 1, 1, 2, 2];
         let sample_labels = vec![0, 1, 0, 1, 0, 1];
-        let info_batch = create_batch_info(&batch_labels, 6);
-        let info_sample = create_batch_info(&sample_labels, 6);
+        let info_batch = create_batch_info(&batch_labels, 6).unwrap();
+        let info_sample = create_batch_info(&sample_labels, 6).unwrap();
 
         let z_orig = mat![
             [1.0, 0.0],
@@ -1882,7 +1882,7 @@ mod tests {
         // Indirect test: single covariate should produce the same result
         // whether arrowhead or LU is used (we test they agree)
         let labels = vec![0, 0, 0, 1, 1, 1];
-        let info = create_batch_info(&labels, 6);
+        let info = create_batch_info(&labels, 6).unwrap();
 
         let z_orig = mat![
             [1.0, 0.5],
@@ -1922,7 +1922,7 @@ mod tests {
     #[test]
     fn test_ridge_v2_no_correction_when_all_pruned() {
         let labels = vec![0, 1];
-        let info = create_batch_info(&labels, 2);
+        let info = create_batch_info(&labels, 2).unwrap();
 
         let z_orig = mat![[1.0, 2.0], [5.0, 6.0]];
 

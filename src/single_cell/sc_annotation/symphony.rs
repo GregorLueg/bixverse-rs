@@ -556,13 +556,13 @@ pub fn symphony_map_query(
     let z_pca_cos = cosine_normalise(&z_pca);
     let dist = compute_cosine_distances(reference.centroids.as_ref(), z_pca_cos.as_ref());
     let sigma_vec = vec![params.sigma; k];
-    let r_query = initialise_r_from_dist(dist.as_ref(), &sigma_vec);
+    let r_query = initialise_r_from_dist(dist.as_ref(), &sigma_vec)?;
 
     // 4. MoE correction with cached reference terms.
     let z_corr = if batch_labels_query.is_empty() {
         z_pca.clone()
     } else {
-        let batch_infos = create_batch_infos(batch_labels_query, n_q);
+        let batch_infos = create_batch_infos(batch_labels_query, n_q)?;
         moe_correct_query(
             z_pca.as_ref(),
             r_query.as_ref(),
@@ -616,7 +616,7 @@ mod tests {
             [0.1, 0.1, 0.1, 0.9, 0.9, 0.9]
         ];
         let labels = vec![0, 0, 0, 1, 1, 1];
-        let batch_infos = vec![create_batch_info(&labels, 6)];
+        let batch_infos = vec![create_batch_info(&labels, 6).unwrap()];
         (z_pca, r, batch_infos)
     }
 
@@ -699,7 +699,7 @@ mod tests {
         let z_pca = mat![[0.1_f32, 0.2], [0.1, 0.2], [0.1, 0.2], [0.1, 0.2]];
         let r = mat![[1.0_f32, 1.0, 1.0, 1.0]];
         let labels = vec![0, 0, 1, 1];
-        let batch_infos = vec![create_batch_info(&labels, 4)];
+        let batch_infos = vec![create_batch_info(&labels, 4).unwrap()];
         let nr = vec![4.0_f32];
         // C = sum_i R[k,i] * z[i,:] under the matching distribution.
         let c = mat![[0.4_f32, 0.8]];
@@ -730,8 +730,8 @@ mod tests {
         let labels_v1 = vec![0, 0, 1, 1]; // feature 0 batch effect
         let labels_v2 = vec![0, 1, 0, 1]; // feature 1 batch effect
         let batch_infos = vec![
-            create_batch_info(&labels_v1, 4),
-            create_batch_info(&labels_v2, 4),
+            create_batch_info(&labels_v1, 4).unwrap(),
+            create_batch_info(&labels_v2, 4).unwrap(),
         ];
         let nr = vec![10.0_f32];
         let c = mat![[0.0_f32, 0.0]];
