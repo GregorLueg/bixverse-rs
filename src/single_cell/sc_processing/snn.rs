@@ -1,7 +1,7 @@
 //! Implementations to generate shared nearest-neighbour graphs from kNN graphs.
 
 use rayon::prelude::*;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use std::time::Instant;
 
 use crate::prelude::*;
@@ -233,93 +233,114 @@ pub fn generate_snn_limited(
     verbose: usize,
 ) -> (Vec<usize>, Vec<f32>) {
     let verbosity = parse_verbosity_level(verbose);
-
     let start_time = Instant::now();
+
+    let knn_rm: Vec<usize> = {
+        let mut v = vec![0usize; n_samples * k];
+        for r in 0..k {
+            let col_offset = r * n_samples;
+            for c in 0..n_samples {
+                v[c * k + r] = flat_knn[col_offset + c];
+            }
+        }
+        v
+    };
+
+    let attached: Vec<Vec<(usize, u32)>> = (0..n_samples)
+        .into_par_iter()
+        .map(|c| {
+            let mut v: Vec<(usize, u32)> = Vec::with_capacity(k + 1);
+            v.push((c, 0));
+            let row_start = c * k;
+            for r in 0..k {
+                v.push((knn_rm[row_start + r], (r + 1) as u32));
+            }
+            v.sort_unstable_by_key(|&(node, _)| node);
+            v
+        })
+        .collect();
 
     let edge_map: FxHashMap<(usize, usize), f32> = (0..n_samples)
         .into_par_iter()
-        .flat_map(|i| {
-            let mut edges = Vec::new();
+        .fold(FxHashMap::<(usize, usize), f32>::default, |mut acc, i| {
+            let ai = &attached[i];
+            let row_start = i * k;
 
-            // only consider edges to this cell's k nearest neighbors
-            for neighbor_idx in 0..k {
-                let j = flat_knn[neighbor_idx * n_samples + i];
+            for r in 0..k {
+                let j = knn_rm[row_start + r];
+                let aj = &attached[j];
 
-                // calculate sNN similarity between cell i and its neighbor j
                 let weight = match method {
                     SnnSimilarityMethod::Intersection => {
-                        // get neighbors of both cells
-                        let neighbors_i: FxHashSet<usize> = (0..k)
-                            .map(|idx| flat_knn[idx * n_samples + i])
-                            .chain(std::iter::once(i)) // include self
-                            .collect();
-
-                        let neighbors_j: FxHashSet<usize> = (0..k)
-                            .map(|idx| flat_knn[idx * n_samples + j])
-                            .chain(std::iter::once(j)) // include self
-                            .collect();
-
-                        let intersection_count =
-                            neighbors_i.intersection(&neighbors_j).count() as f32;
-                        intersection_count / (2.0 * (k as f32 + 1.0) - intersection_count)
-                        // Jaccard
+                        let (mut pi, mut pj) = (0usize, 0usize);
+                        let mut count: u32 = 0;
+                        while pi < ai.len() && pj < aj.len() {
+                            let ni = ai[pi].0;
+                            let nj = aj[pj].0;
+                            if ni == nj {
+                                count += 1;
+                                pi += 1;
+                                pj += 1;
+                            } else if ni < nj {
+                                pi += 1;
+                            } else {
+                                pj += 1;
+                            }
+                        }
+                        let c = count as f32;
+                        c / (2.0 * (k as f32 + 1.0) - c)
                     }
                     SnnSimilarityMethod::Rank => {
-                        // build ranks i
-                        let mut ranks_i = FxHashMap::default();
-                        ranks_i.insert(i, 0); // self at rank 0
-                        for (rank, neighbor) in
-                            (0..k).map(|idx| flat_knn[idx * n_samples + i]).enumerate()
-                        {
-                            ranks_i.insert(neighbor, rank + 1);
+                        let (mut pi, mut pj) = (0usize, 0usize);
+                        let mut min_combined: u32 = 2 * (k as u32);
+                        while pi < ai.len() && pj < aj.len() {
+                            let (ni, ri) = ai[pi];
+                            let (nj, rj) = aj[pj];
+                            if ni == nj {
+                                let combined = ri + rj;
+                                if combined < min_combined {
+                                    min_combined = combined;
+                                }
+                                pi += 1;
+                                pj += 1;
+                            } else if ni < nj {
+                                pi += 1;
+                            } else {
+                                pj += 1;
+                            }
                         }
-
-                        // build ranks j
-                        let mut ranks_j = FxHashMap::default();
-                        ranks_j.insert(j, 0); // self at rank 0
-                        for (rank, neighbor) in
-                            (0..k).map(|idx| flat_knn[idx * n_samples + j]).enumerate()
-                        {
-                            ranks_j.insert(neighbor, rank + 1);
-                        }
-
-                        // find minimum combined rank of shared neighbors
-                        let min_combined_rank = ranks_i
-                            .keys()
-                            .filter(|&neighbor| ranks_j.contains_key(neighbor))
-                            .map(|neighbor| ranks_i[neighbor] + ranks_j[neighbor])
-                            .min()
-                            .unwrap_or(2 * k)
-                            as f32;
-
-                        let preliminary = k as f32 - min_combined_rank / 2.0;
-                        let raw_weight = preliminary.max(1e-6);
-
-                        raw_weight / k as f32
+                        let preliminary = k as f32 - min_combined as f32 / 2.0;
+                        preliminary.max(1e-6) / k as f32
                     }
                 };
 
                 if weight >= pruning {
-                    // Store edge with smaller index first to ensure uniqueness
                     let edge_key = if i < j { (i, j) } else { (j, i) };
-                    edges.push((edge_key, weight));
+                    acc.entry(edge_key)
+                        .and_modify(|w| {
+                            if weight > *w {
+                                *w = weight
+                            }
+                        })
+                        .or_insert(weight);
                 }
             }
-
-            edges
-        })
-        .collect::<Vec<_>>()
-        .into_iter()
-        .fold(FxHashMap::default(), |mut acc, (edge_key, weight)| {
-            // Keep the maximum weight if we see the same edge multiple times
-            acc.entry(edge_key)
-                .and_modify(|existing_weight| {
-                    if weight > *existing_weight {
-                        *existing_weight = weight;
-                    }
-                })
-                .or_insert(weight);
             acc
+        })
+        .reduce(FxHashMap::<(usize, usize), f32>::default, |mut a, mut b| {
+            if a.len() < b.len() {
+                std::mem::swap(&mut a, &mut b);
+            }
+            for (key, v) in b {
+                a.entry(key)
+                    .and_modify(|w| {
+                        if v > *w {
+                            *w = v
+                        }
+                    })
+                    .or_insert(v);
+            }
+            a
         });
 
     let mut edges = Vec::with_capacity(edge_map.len() * 2);
