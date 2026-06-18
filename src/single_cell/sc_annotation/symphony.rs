@@ -6,6 +6,7 @@
 //! corrects them via a closed-form mixture-of-experts ridge regression that
 //! depends only on the cached terms, not on the reference cells.
 
+use ann_search_rs::*;
 use faer::linalg::solvers::{DenseSolveCore, PartialPivLu};
 use faer::{Mat, MatRef};
 use indexmap::IndexSet;
@@ -253,10 +254,6 @@ fn moe_correct_query(
     let p = col;
 
     // Phase 1 (parallel over clusters): solve each cluster's regression.
-    //
-    // Accumulators and LU solve are in f64 to guard against rounding drift
-    // over many query cells. The apply phase below stays in f32 since each
-    // cell's contribution is a bounded small sum.
     let weights: Vec<Mat<f32>> = (0..k)
         .into_par_iter()
         .map(|cluster| {
@@ -289,13 +286,13 @@ fn moe_correct_query(
                 }
             }
 
-            // Reference compression injections.
+            // reference compression injections.
             design_cov[(0, 0)] += nr[cluster] as f64;
             for feat in 0..d {
                 phi_z[(0, feat)] += c[(cluster, feat)] as f64;
             }
 
-            // Ridge: identity on batch terms, intercept unpenalised.
+            // ridge: identity on batch terms, intercept unpenalised.
             for i in 1..p {
                 design_cov[(i, i)] += lambda as f64;
             }
@@ -307,9 +304,7 @@ fn moe_correct_query(
         })
         .collect();
 
-    // Phase 2 (parallel over cells): subtract each cluster's batch correction.
-    // Intercept (column 0 of design) is never subtracted, matching Symphony R
-    // where beta.row(0) is zeroed before applying.
+    // Phase 2: subtract each cluster's batch correction.
     let mut out = vec![0.0f32; n_q * d];
     out.par_chunks_mut(d).enumerate().for_each(|(cell, row)| {
         for feat in 0..d {
@@ -582,6 +577,275 @@ pub fn symphony_map_query(
         z_corr,
         r: r_query,
     })
+}
+
+/// As [symphony_map_query], but takes pre-extracted reference fields
+/// instead of a full [SymphonyReference]. Useful for callers that hold
+/// only a slim subset of the reference.
+///
+/// ### Params
+///
+/// * `f_path_query` - Path to the query gene-based sparse binary file.
+/// * `cell_indices_query` - Query cell indices.
+/// * `ref_gene_means` - Per-HVG mean of the normalised reference data.
+/// * `ref_gene_sds` - Per-HVG standard deviation of the normalised reference data.
+/// * `ref_loadings` - PCA gene loadings from the reference (n_hvgs x d).
+/// * `ref_centroids` - Cosine-normalised reference centroids (K x d).
+/// * `ref_nr` - Reference cluster sizes, i.e. row-sums of the reference `r` (length K).
+/// * `ref_c` - Cached `R * Z_corr` compression term from the reference (K x d).
+/// * `ref_to_query_gene_map` - For each reference HVG slot, the corresponding
+///   gene index in the query file, or `None` if the HVG is absent from the
+///   query (a zero column is filled in for that slot). Caller resolves gene
+///   identities upstream.
+/// * `batch_labels_query` - Per-batch-variable label slices for the query.
+///   Pass an empty slice to skip batch correction (z_corr = z_pca).
+/// * `params` - Mapping parameters (sigma, lambda).
+/// * `verbose` - Verbosity (0 silent, 1 normal, 2 detailed).
+///
+/// ### Returns
+///
+/// A [SymphonyQuery] with the projected scores (`z_pca`), the MoE-corrected
+/// embedding (`z_corr`), and the K x N_q soft assignment matrix (`r`)
+/// against the reference centroids.
+#[allow(clippy::too_many_arguments)]
+pub fn symphony_map_query_parts(
+    f_path_query: &str,
+    cell_indices_query: &[usize],
+    ref_gene_means: &[f32],
+    ref_gene_sds: &[f32],
+    ref_loadings: MatRef<f32>,
+    ref_centroids: MatRef<f32>,
+    ref_nr: &[f32],
+    ref_c: MatRef<f32>,
+    ref_to_query_gene_map: &[Option<usize>],
+    batch_labels_query: &[Vec<usize>],
+    params: &SymphonyMapParams,
+    verbose: usize,
+) -> Result<SymphonyQuery, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+    let start = Instant::now();
+
+    let n_hvgs = ref_gene_means.len();
+    assert_eq!(ref_to_query_gene_map.len(), n_hvgs);
+    assert_eq!(ref_gene_sds.len(), n_hvgs);
+    assert_eq!(ref_loadings.nrows(), n_hvgs);
+    for (i, labels) in batch_labels_query.iter().enumerate() {
+        assert_eq!(
+            labels.len(),
+            cell_indices_query.len(),
+            "batch_labels_query[{}] length must equal cell_indices_query.len()",
+            i
+        );
+    }
+
+    let n_q = cell_indices_query.len();
+    let k = ref_centroids.nrows();
+
+    if verbosity.normal_verbosity() {
+        let n_present = ref_to_query_gene_map.iter().filter(|x| x.is_some()).count();
+        println!(
+            "Symphony query mapping: {} cells, {}/{} HVGs present in query",
+            n_q, n_present, n_hvgs
+        );
+    }
+
+    let scaled = build_scaled_query_matrix(
+        f_path_query,
+        cell_indices_query,
+        ref_to_query_gene_map,
+        ref_gene_means,
+        ref_gene_sds,
+    )?;
+
+    let z_pca: Mat<f32> = scaled.as_ref() * ref_loadings;
+
+    let z_pca_cos = cosine_normalise(&z_pca);
+    let dist = compute_cosine_distances(ref_centroids, z_pca_cos.as_ref());
+    let sigma_vec = vec![params.sigma; k];
+    let r_query = initialise_r_from_dist(dist.as_ref(), &sigma_vec)?;
+
+    let z_corr = if batch_labels_query.is_empty() {
+        z_pca.clone()
+    } else {
+        let batch_infos = create_batch_infos(batch_labels_query, n_q)?;
+        moe_correct_query(
+            z_pca.as_ref(),
+            r_query.as_ref(),
+            &batch_infos,
+            ref_nr,
+            ref_c,
+            params.lambda,
+        )
+    };
+
+    if verbosity.normal_verbosity() {
+        println!("Symphony query mapped in {:.2?}", start.elapsed());
+    }
+
+    Ok(SymphonyQuery {
+        z_pca,
+        z_corr,
+        r: r_query,
+    })
+}
+
+///////////////////////
+// Label propagation //
+///////////////////////
+
+/// Cross-query version of [generate_knn_with_dist]: builds the index on
+/// `reference`, queries `query` against it. Does not strip self-matches.
+///
+/// Used for reference -> query label transfer.
+///
+/// ### Params
+///
+/// * `reference` - The reference embedding to index (N_ref x d).
+/// * `query` - The query embedding to search against the index (N_q x d).
+/// * `knn_params` - KNN parameters (method, k, and method-specific settings),
+///   see [KnnParams].
+/// * `seed` - Seed.
+/// * `verbose` - Verbosity.
+///
+/// ### Returns
+///
+/// A [ScKnnResults] holding, for each query cell, the indices of its k
+/// nearest reference neighbours and their distances.
+pub fn generate_knn_cross_with_dist(
+    reference: MatRef<f32>,
+    query: MatRef<f32>,
+    knn_params: &KnnParams,
+    seed: usize,
+    verbose: bool,
+) -> ScKnnResults {
+    fn timed<T>(name: &str, verbose: bool, f: impl FnOnce() -> T) -> T {
+        let start = Instant::now();
+        let result = f();
+        if verbose {
+            println!("{}: {:.2?}", name, start.elapsed());
+        }
+        result
+    }
+
+    let knn_method = parse_knn_method(&knn_params.knn_method).unwrap_or_default();
+    let k = knn_params.k;
+
+    let (indices, distances) = match knn_method {
+        KnnSearch::Annoy => {
+            let index = timed("Generated Annoy index", verbose, || {
+                build_annoy_index(reference, &knn_params.ann_dist, knn_params.n_tree, seed)
+            })?;
+            timed("Queried Annoy index", verbose, || {
+                query_annoy_index(query, &index, k, knn_params.search_budget, true, verbose)
+            })?
+        }
+        KnnSearch::Hnsw => {
+            let index = timed("Generated HNSW index", verbose, || {
+                build_hnsw_index(
+                    reference,
+                    knn_params.m,
+                    knn_params.ef_construction,
+                    &knn_params.ann_dist,
+                    seed,
+                    verbose,
+                )
+            });
+            timed("Queried HNSW index", verbose, || {
+                query_hnsw_index(query, &index, k, knn_params.ef_search, true, verbose)
+            })?
+        }
+        KnnSearch::NNDescent => {
+            let index = timed("Generated NNDescent index", verbose, || {
+                build_nndescent_index(
+                    reference,
+                    &knn_params.ann_dist,
+                    knn_params.delta,
+                    knn_params.diversify_prob,
+                    None,
+                    None,
+                    None,
+                    None,
+                    seed,
+                    verbose,
+                )
+            })?;
+            timed("Queried NNDescent index", verbose, || {
+                query_nndescent_index(query, &index, k, knn_params.ef_budget, true, verbose)
+            })?
+        }
+        KnnSearch::Exhaustive => {
+            let index = timed("Generated Exhaustive index", verbose, || {
+                build_exhaustive_index(reference, &knn_params.ann_dist)
+            });
+            timed("Queried Exhaustive index", verbose, || {
+                query_exhaustive_index(query, &index, k, true, verbose)
+            })?
+        }
+        KnnSearch::KmKnn => {
+            let index = timed("Generated KmKnn index", verbose, || {
+                build_kmknn_index(
+                    reference,
+                    &knn_params.ann_dist,
+                    knn_params.n_list,
+                    None,
+                    seed,
+                    verbose,
+                )
+            })?;
+            timed("Queried KmKnn index", verbose, || {
+                query_kmknn_index(query, &index, k, true, verbose)
+            })?
+        }
+        KnnSearch::Ivf => {
+            let index = timed("Generated IVF index", verbose, || {
+                build_ivf_index(
+                    reference,
+                    knn_params.n_list,
+                    None,
+                    &knn_params.ann_dist,
+                    seed,
+                    verbose,
+                )
+            })?;
+            timed("Queried IVF index", verbose, || {
+                query_ivf_index(query, &index, k, knn_params.n_probe, true, verbose)
+            })?
+        }
+    };
+
+    // we passed return_dist = true above so distances are always Some
+    Ok((indices, distances.expect("requested distances")))
+}
+
+/// Majority-vote label transfer from a kNN graph. Ties broken by lowest
+/// label index. Confidence is the winning label's vote share.
+///
+/// ### Params
+///
+/// * `knn_indices` - For each query cell, the indices of its k reference
+///   neighbours.
+/// * `reference_labels` - Integer-encoded labels per reference cell.
+/// * `n_labels` - Total number of distinct labels.
+///
+/// ### Returns
+///
+/// Tuple of `(predicted_label, confidence)` per query cell.
+pub fn knn_majority_vote(
+    knn_indices: &[Vec<usize>],
+    reference_labels: &[usize],
+    n_labels: usize,
+) -> (Vec<usize>, Vec<f32>) {
+    knn_indices
+        .par_iter()
+        .map(|neighbours| {
+            let mut counts = vec![0u32; n_labels];
+            for &nb in neighbours {
+                counts[reference_labels[nb]] += 1;
+            }
+            let (best, &count) = counts.iter().enumerate().max_by_key(|(_, c)| **c).unwrap();
+            (best, count as f32 / neighbours.len() as f32)
+        })
+        .unzip()
 }
 
 ///////////
