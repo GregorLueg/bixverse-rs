@@ -79,6 +79,14 @@ pub struct OEPair {
     pub e: Mat<f32>,
 }
 
+/// Harmony results (batch-corrected embedding + soft assignments)
+pub struct HarmonyResult {
+    /// Corrected embedding
+    pub z_corr: Mat<f32>,
+    /// Soft assignments
+    pub r: Mat<f32>,
+}
+
 /// Batch information for a single categorical variable.
 ///
 /// Holds the mapping from cells to levels, level frequencies, and
@@ -793,15 +801,26 @@ fn check_convergence(objectives: &[f32], window_size: usize, epsilon: f32) -> bo
     rel_change < epsilon
 }
 
-/// Harmony state
+/// Mutable state carried across Harmony outer iterations.
 struct HarmonyState {
+    /// Original PCA embedding, never mutated (N x d)
     z_orig: Mat<f32>,
+    /// Cosine-normalised view of the current `z_corr`, refreshed once per outer
+    /// iteration and consumed by distance computation (N x d)
     z_cos: Mat<f32>,
+    /// Current corrected embedding (N x d)
     z_corr: Mat<f32>,
+    /// Current cluster centroids, cosine-normalised (K x d)
     y: Mat<f32>,
+    /// Current soft cluster assignments, columns sum to 1 (K x N)
     r: Mat<f32>,
+    /// Observed/expected diversity statistics, one entry per batch variable
     oe_pairs: Vec<OEPair>,
+    /// Objective trace from the inner k-means refinement loop, used for
+    /// inner-loop convergence checks
     objectives_kmeans: Vec<f32>,
+    /// Objective trace at the end of each outer Harmony iteration, used for
+    /// outer-loop convergence checks
     objectives_harmony: Vec<f32>,
 }
 
@@ -810,18 +829,6 @@ struct HarmonyState {
 /// Each element of `batch_labels` is a slice of length N giving the level
 /// assignments for one categorical variable. For example, to correct for
 /// both sample and technology:
-///
-/// ```ignore
-/// let sample_labels = vec![0, 0, 1, 1, 2, 2];
-/// let tech_labels   = vec![0, 1, 0, 1, 0, 1];
-/// let corrected = harmony(
-///     pca.as_ref(),
-///     &[&sample_labels, &tech_labels],
-///     &params,
-///     42,
-///     true,
-/// );
-/// ```
 ///
 /// ### Params
 ///
@@ -834,14 +841,14 @@ struct HarmonyState {
 ///
 /// ### Returns
 ///
-/// Corrected PCA embedding (N x d)
-pub fn harmony(
+/// Returns the [HarmonyResult]
+pub fn harmony_with_state(
     pca: MatRef<f32>,
     batch_labels: &[Vec<usize>],
     params: &HarmonyParams,
     seed: usize,
     verbose: usize,
-) -> Result<Mat<f32>, BixverseErrors> {
+) -> Result<HarmonyResult, BixverseErrors> {
     let verbosity = parse_verbosity_level(verbose);
 
     let start = Instant::now();
@@ -1032,7 +1039,38 @@ pub fn harmony(
         println!(" Finished Harmony {:.2?}", start.elapsed());
     }
 
-    Ok(state.z_corr)
+    Ok(HarmonyResult {
+        z_corr: state.z_corr,
+        r: state.r,
+    })
+}
+
+/// Run Harmony batch correction with one or more batch variables.
+///
+/// Each element of `batch_labels` is a slice of length N giving the level
+/// assignments for one categorical variable. For example, to correct for
+/// both sample and technology:
+///
+/// ### Params
+///
+/// * `pca` - PCA embedding (N x d)
+/// * `batch_labels` - one label slice per variable, each of length N
+/// * `params` - Harmony hyperparameters
+/// * `seed` - Random seed
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
+///
+/// ### Returns
+///
+/// Corrected PCA embedding (N x d)
+pub fn harmony(
+    pca: MatRef<f32>,
+    batch_labels: &[Vec<usize>],
+    params: &HarmonyParams,
+    seed: usize,
+    verbose: usize,
+) -> Result<Mat<f32>, BixverseErrors> {
+    Ok(harmony_with_state(pca, batch_labels, params, seed, verbose)?.z_corr)
 }
 
 ///////////

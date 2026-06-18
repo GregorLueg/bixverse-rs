@@ -23,7 +23,7 @@ use crate::prelude::*;
 use crate::single_cell::sc_batch_correction::batch_utils::cosine_normalise;
 
 use super::harmony::{
-    BatchInfo, OEPair, compute_all_diversity_statistics, compute_cosine_distances,
+    BatchInfo, HarmonyResult, OEPair, compute_all_diversity_statistics, compute_cosine_distances,
     compute_scaled_distances, create_batch_infos, initialise_r_from_dist, run_kmeans_cosine,
     update_centroids_from_r,
 };
@@ -908,13 +908,13 @@ pub fn ridge_regression_correction_v2(
 /// ### Returns
 ///
 /// Corrected PCA embedding (N x d)
-pub fn harmony_v2(
+pub fn harmony_v2_with_state(
     pca: MatRef<f32>,
     batch_labels: &[Vec<usize>],
     params: &HarmonyParamsV2,
     seed: usize,
     verbose: usize,
-) -> Result<Mat<f32>, BixverseErrors> {
+) -> Result<HarmonyResult, BixverseErrors> {
     let start = Instant::now();
 
     let verbosity = parse_verbosity_level(verbose);
@@ -1119,7 +1119,34 @@ pub fn harmony_v2(
         println!(" Finished Harmony {:.2?}", start.elapsed());
     }
 
-    Ok(z_corr)
+    Ok(HarmonyResult { z_corr, r })
+}
+
+/// Run Harmony v2 batch correction.
+///
+/// The outer loop alternates between diversity-penalised soft clustering
+/// (with fixed distances per round) and batch-pruned ridge regression.
+///
+/// ### Params
+///
+/// * `pca` - PCA embedding (N x d)
+/// * `batch_labels` - one label slice per variable, each of length N
+/// * `params` - Harmony v2 hyperparameters
+/// * `seed` - Random seed
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
+///
+/// ### Returns
+///
+/// Corrected PCA embedding (N x d)
+pub fn harmony_v2(
+    pca: MatRef<f32>,
+    batch_labels: &[Vec<usize>],
+    params: &HarmonyParamsV2,
+    seed: usize,
+    verbose: usize,
+) -> Result<Mat<f32>, BixverseErrors> {
+    Ok(harmony_v2_with_state(pca, batch_labels, params, seed, verbose)?.z_corr)
 }
 
 ///////////
