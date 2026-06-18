@@ -23,7 +23,10 @@ use crate::single_cell::sc_analysis::{
     vision::SignatureGenes,
 };
 
-use crate::single_cell::sc_annotation::sc_type::{CellTypeMarkers, SctypeRes};
+use crate::single_cell::sc_annotation::{
+    sc_type::{CellTypeMarkers, SctypeRes},
+    symphony::SymphonyMapParams,
+};
 use crate::single_cell::sc_batch_correction::{
     bbknn::BbknnParams, fast_mnn::FastMnnParams, harmony::HarmonyParams,
     harmony_v2::HarmonyParamsV2,
@@ -1630,6 +1633,46 @@ impl HarmonyParamsV2 {
             use_dynamic_lambda,
             kmeans_params,
         })
+    }
+}
+
+//////////////
+// Symphomy //
+//////////////
+
+/////////////////////
+// Symphony params //
+/////////////////////
+
+impl SymphonyMapParams {
+    /// Generate [SymphonyMapParams] from an R list.
+    ///
+    /// Should values not be found within the list, parameters will default
+    /// to sensible defaults based on Symphony R conventions.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the Symphony mapping parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The [SymphonyMapParams] with all parameters set.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params_list: HashMap<&str, Robj> = r_list.try_into()?;
+        let defaults = SymphonyMapParams::default();
+
+        let sigma = params_list
+            .get("sigma")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.sigma);
+        let lambda = params_list
+            .get("lambda")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.lambda);
+
+        Ok(Self { sigma, lambda })
     }
 }
 
