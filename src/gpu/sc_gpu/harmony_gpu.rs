@@ -570,7 +570,7 @@ where
         return Err(BixverseErrors::GpuHarmonySupportsSingleCovariateOnly);
     }
 
-    let batch_infos = create_batch_infos(batch_labels, n);
+    let batch_infos = create_batch_infos(batch_labels, n)?;
     let info = &batch_infos[0];
     let b = info.n_levels;
 
@@ -897,7 +897,7 @@ mod tests_harmony_gpu {
     fn test_solve_ridge_arrowhead_host_single_passing_returns_zero() {
         let (n, k, b, d) = (4, 2, 2, 3);
         let labels = vec![0usize, 0, 1, 1];
-        let info = create_batch_info(&labels, n);
+        let info = create_batch_info(&labels, n).unwrap();
 
         let r_cpu = faer::mat![
             [0.9f32, 0.9, 1e-7, 1e-7],
@@ -943,7 +943,7 @@ mod tests_harmony_gpu {
         // ridge_regression_correction_v2 (which uses arrowhead internally).
         let (n, k, d) = (12, 3, 4);
         let labels: Vec<usize> = (0..n).map(|i| i % 3).collect(); // 3 levels
-        let info = create_batch_info(&labels, n);
+        let info = create_batch_info(&labels, n).unwrap();
         let b = info.n_levels;
 
         // R: dense, no near-zero rows, columns sum to 1.
@@ -1045,7 +1045,7 @@ mod tests_harmony_gpu {
 
         let (n, k, d) = (16, 4, 6);
         let labels: Vec<usize> = (0..n).map(|i| i % 3).collect();
-        let info = create_batch_info(&labels, n);
+        let info = create_batch_info(&labels, n).unwrap();
         let b = info.n_levels;
 
         // Build a dense, row-normalised R (cols sum to 1 in CPU layout)

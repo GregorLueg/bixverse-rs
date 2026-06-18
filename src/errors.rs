@@ -326,6 +326,21 @@ pub enum BixverseErrors {
         /// Number of provided batches
         n_batches: usize,
     },
+    // -- Harmony --
+    /// Label length and number of cells do not match for Harmony
+    #[error(
+        "Harmony: The labels length ({label_length}) does not match the number of cells ({n_cells})"
+    )]
+    HarmonyLabelLenghtUnequalNcells {
+        /// Provided label length
+        label_length: usize,
+        /// Number of cells
+        n_cells: usize,
+    },
+
+    /// Sigma length is not equal to the number of clusters
+    #[error("Harmony: sigma length must match number of clusters")]
+    HarmonySigmaLengthUnequalCluster,
 
     // -- Format parsing --
     /// The `cs_type` string did not match a known sparse format.

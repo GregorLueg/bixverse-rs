@@ -36,7 +36,41 @@ pub type SingleCellPcaResScaled =
 /// * `0` - Scores
 /// * `1` - Loadings
 /// * `2` - Eigenvalues
+/// * `3` - Optional scaled values (input into the SVD)
+/// * `4` - The feature means
+/// * `5` - The feature SDs
+pub type SingleCellPcaResScaledStats = Result<
+    (
+        Mat<f32>,
+        Mat<f32>,
+        Vec<f32>,
+        Option<Mat<f32>>,
+        Vec<f32>,
+        Vec<f32>,
+    ),
+    BixverseErrors,
+>;
+
+/// Single cell related PCA result
+///
+/// ### Fields
+///
+/// * `0` - Scores
+/// * `1` - Loadings
+/// * `2` - Eigenvalues
 pub type SingleCellPcaRes = Result<(Mat<f32>, Mat<f32>, Vec<f32>), BixverseErrors>;
+
+/// Single cell related PCA result
+///
+/// ### Fields
+///
+/// * `0` - Scores
+/// * `1` - Loadings
+/// * `2` - Eigenvalues
+/// * `3` - The feature means
+/// * `4` - The feature SDs
+pub type SingleCellPcaResStats =
+    Result<(Mat<f32>, Mat<f32>, Vec<f32>, Vec<f32>, Vec<f32>), BixverseErrors>;
 
 ////////////
 // Params //
@@ -356,7 +390,7 @@ pub fn sparse_csc_column_stds(
 // Dense PCA //
 ///////////////
 
-/// Calculate the PCs for single cell data
+/// Worker for dense PCA
 ///
 /// ### Params
 ///
@@ -376,10 +410,9 @@ pub fn sparse_csc_column_stds(
 ///
 /// ### Return
 ///
-/// A tuple of the samples projected on thePC space, gene loadings and singular
-/// values.
+/// The [SingleCellPcaResScaledStats]
 #[allow(clippy::too_many_arguments)]
-pub fn pca_on_sc(
+fn dense_pca(
     f_path: &str,
     cell_indices: &[usize],
     gene_indices: &[usize],
@@ -389,7 +422,7 @@ pub fn pca_on_sc(
     seed: usize,
     return_scaled: bool,
     verbose: usize,
-) -> SingleCellPcaResScaled {
+) -> SingleCellPcaResScaledStats {
     if params_pca.clr && clr_offsets.is_none() {
         return Err(BixverseErrors::OffsetsNotProvidedForClrPCA);
     }
@@ -429,19 +462,27 @@ pub fn pca_on_sc(
 
     let start_scaling = Instant::now();
 
-    let scaled_data: Vec<Vec<f32>> = gene_chunks
+    let scaled_data: Vec<(Vec<f32>, f32, f32)> = gene_chunks
         .par_iter()
         .map(|chunk| {
-            let (scaled, _, _) = scale_csc_chunk(
+            let (scaled, mean, sd) = scale_csc_chunk(
                 chunk,
                 cell_indices.len(),
                 params_pca.mean_center,
                 params_pca.normalise_variance,
                 clr_offsets,
             );
-            scaled
+            (scaled, mean, sd)
         })
         .collect();
+
+    let mut feature_means = Vec::with_capacity(scaled_data.len());
+    let mut feature_sds = Vec::with_capacity(scaled_data.len());
+
+    for (_, mean, sd) in scaled_data.iter() {
+        feature_means.push(*mean);
+        feature_sds.push(*sd);
+    }
 
     // manual drop
     drop(gene_chunks);
@@ -450,13 +491,14 @@ pub fn pca_on_sc(
     let n_cells = cell_indices.len();
 
     // Build f64 matrix for numerically stable SVD
-    let scaled_f64 =
-        Mat::<f64>::from_fn(n_cells, num_genes, |row, col| scaled_data[col][row] as f64);
+    let scaled_f64 = Mat::<f64>::from_fn(n_cells, num_genes, |row, col| {
+        scaled_data[col].0[row] as f64
+    });
 
     // Also build f32 if needed for return or score computation
     let scaled_f32 = if return_scaled {
         Some(Mat::<f32>::from_fn(n_cells, num_genes, |row, col| {
-            scaled_data[col][row]
+            scaled_data[col].0[row]
         }))
     } else {
         None
@@ -509,8 +551,113 @@ pub fn pca_on_sc(
         println!("PCA: Total run time -> {:.2?}", end_total);
     }
 
+    Ok((scores, loadings, s, scaled_f32, feature_means, feature_sds))
+}
+
+/// Calculate the PCs for single cell data
+///
+/// This uses a dense path under the hood that can be faster than the implicit
+/// centering, scaling via matrix algebra.
+///
+/// ### Params
+///
+/// * `f_path` - Path to the gene-based binary file.
+/// * `cell_indices` - Slice of indices for the cells.
+/// * `gene_indices` - Slice of indices for the genes.
+/// * `no_pcs` - Number of principal components to calculate
+/// * `params_pca` - The parameters for this single cell PCA run, see
+///   [SingleCellPcaParams].
+/// * `params_pca` - Parameters for this PCA run, see [SingleCellPcaParams]
+/// * `clr_offsets` - Pre-computed CLR offsets if you want to use the CLR
+///   transformation here.
+/// * `return_scaled` - Return the scaled data.
+/// * `seed` - Seed for randomised SVD.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
+///
+/// ### Return
+///
+/// The [SingleCellPcaResScaled]
+#[allow(clippy::too_many_arguments)]
+pub fn pca_on_sc(
+    f_path: &str,
+    cell_indices: &[usize],
+    gene_indices: &[usize],
+    no_pcs: usize,
+    params_pca: &SingleCellPcaParams,
+    clr_offsets: Option<&[f64]>,
+    seed: usize,
+    return_scaled: bool,
+    verbose: usize,
+) -> SingleCellPcaResScaled {
+    let (scores, loadings, s, scaled_f32, _, _) = dense_pca(
+        f_path,
+        cell_indices,
+        gene_indices,
+        no_pcs,
+        params_pca,
+        clr_offsets,
+        seed,
+        return_scaled,
+        verbose,
+    )?;
+
     Ok((scores, loadings, s, scaled_f32))
 }
+
+/// Calculate the PCs for single cell data (with stats)
+///
+/// This uses a dense path under the hood that can be faster than the implicit
+/// centering, scaling via matrix algebra. Additionally, it returns the
+/// feature means and standard deviations for downstream consumption.
+///
+/// ### Params
+///
+/// * `f_path` - Path to the gene-based binary file.
+/// * `cell_indices` - Slice of indices for the cells.
+/// * `gene_indices` - Slice of indices for the genes.
+/// * `no_pcs` - Number of principal components to calculate
+/// * `params_pca` - The parameters for this single cell PCA run, see
+///   [SingleCellPcaParams].
+/// * `params_pca` - Parameters for this PCA run, see [SingleCellPcaParams]
+/// * `clr_offsets` - Pre-computed CLR offsets if you want to use the CLR
+///   transformation here.
+/// * `seed` - Seed for randomised SVD.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
+///
+/// ### Return
+///
+/// The [SingleCellPcaResScaled]
+#[allow(clippy::too_many_arguments)]
+pub fn pca_on_sc_stats(
+    f_path: &str,
+    cell_indices: &[usize],
+    gene_indices: &[usize],
+    no_pcs: usize,
+    params_pca: &SingleCellPcaParams,
+    clr_offsets: Option<&[f64]>,
+    seed: usize,
+    verbose: usize,
+) -> SingleCellPcaResStats {
+    let (scores, loadings, s, _, feature_means, feature_sds) = dense_pca(
+        f_path,
+        cell_indices,
+        gene_indices,
+        no_pcs,
+        params_pca,
+        clr_offsets,
+        seed,
+        false,
+        verbose,
+    )?;
+
+    Ok((scores, loadings, s, feature_means, feature_sds))
+}
+
+///////////////////////
+// Streaming version //
+///////////////////////
 
 /// Calculate the PCs for single cell data using a streaming approach
 ///
@@ -693,16 +840,7 @@ pub fn pca_on_sc_streaming(
 // Sparse PCA //
 ////////////////
 
-/// Calculate the PCs for single cell data (sparse)
-///
-/// This version does NOT scale the data and avoids densifying the data at any
-/// point, avoiding holding a large matrix in memory. This comes at the cost of
-/// the first principal component being largely driven by average gene
-/// expression, but makes analysing large datasets actually tractable. For
-/// the non random version a sparse SVD Lanczos algorithm is used. For the
-/// randomised version, it uses the randomised SVD approach in which the dense
-/// matrix is of much smaller size than the potentially massive scaled, dense
-/// data.
+/// Worker for sparse PCA
 ///
 /// ### Params
 ///
@@ -720,10 +858,9 @@ pub fn pca_on_sc_streaming(
 ///
 /// ### Return
 ///
-/// A tuple of the samples projected on the PC space, gene loadings and singular
-/// values.
+/// The [SingleCellPcaResStats]
 #[allow(clippy::too_many_arguments)]
-pub fn pca_on_sc_sparse(
+fn sparse_pca(
     f_path: &str,
     cell_indices: &[usize],
     gene_indices: &[usize],
@@ -732,7 +869,7 @@ pub fn pca_on_sc_sparse(
     clr_offsets: Option<&[f64]>,
     seed: usize,
     verbose: usize,
-) -> SingleCellPcaRes {
+) -> SingleCellPcaResStats {
     if params_pca.clr && clr_offsets.is_none() {
         return Err(BixverseErrors::OffsetsNotProvidedForClrPCA);
     }
@@ -842,5 +979,102 @@ pub fn pca_on_sc_sparse(
         println!("Sparse PCA: total run time -> {:.2?}", end_total);
     }
 
+    let col_means = col_means.iter().map(|x| *x as f32).collect();
+    let col_stds = col_stds.iter().map(|x| *x as f32).collect();
+
+    Ok((scores, loadings, s, col_means, col_stds))
+}
+
+/// Calculate the PCs for single cell data (sparse)
+///
+/// This version does NOT scale the data and avoids densifying the data at any
+/// point, avoiding holding a large matrix in memory.
+///
+/// ### Params
+///
+/// * `f_path` - Path to the gene-based binary file.
+/// * `cell_indices` - Slice of indices for the cells.
+/// * `gene_indices` - Slice of indices for the genes.
+/// * `no_pcs` - Number of principal components to calculate
+/// * `params_pca` - The parameters for this single cell PCA run, see
+///   [SingleCellPcaParams].
+/// * `clr_offsets` - Pre-computed CLR offsets if you want to use the CLR
+///   transformation here.
+/// * `seed` - Seed for randomised SVD.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
+///
+/// ### Return
+///
+/// The [SingleCellPcaRes]
+#[allow(clippy::too_many_arguments)]
+pub fn pca_on_sc_sparse(
+    f_path: &str,
+    cell_indices: &[usize],
+    gene_indices: &[usize],
+    no_pcs: usize,
+    params_pca: &SingleCellPcaParams,
+    clr_offsets: Option<&[f64]>,
+    seed: usize,
+    verbose: usize,
+) -> SingleCellPcaRes {
+    let (scores, loadings, s, _, _) = sparse_pca(
+        f_path,
+        cell_indices,
+        gene_indices,
+        no_pcs,
+        params_pca,
+        clr_offsets,
+        seed,
+        verbose,
+    )?;
+
     Ok((scores, loadings, s))
+}
+
+/// Calculate the PCs for single cell data (sparse)
+///
+/// This version does NOT scale the data and avoids densifying the data at any
+/// point, avoiding holding a large matrix in memory.
+///
+/// ### Params
+///
+/// * `f_path` - Path to the gene-based binary file.
+/// * `cell_indices` - Slice of indices for the cells.
+/// * `gene_indices` - Slice of indices for the genes.
+/// * `no_pcs` - Number of principal components to calculate
+/// * `params_pca` - The parameters for this single cell PCA run, see
+///   [SingleCellPcaParams].
+/// * `clr_offsets` - Pre-computed CLR offsets if you want to use the CLR
+///   transformation here.
+/// * `seed` - Seed for randomised SVD.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
+///
+/// ### Return
+///
+/// The [SingleCellPcaResStats]
+#[allow(clippy::too_many_arguments)]
+pub fn pca_on_sc_sparse_stats(
+    f_path: &str,
+    cell_indices: &[usize],
+    gene_indices: &[usize],
+    no_pcs: usize,
+    params_pca: &SingleCellPcaParams,
+    clr_offsets: Option<&[f64]>,
+    seed: usize,
+    verbose: usize,
+) -> SingleCellPcaResStats {
+    let res = sparse_pca(
+        f_path,
+        cell_indices,
+        gene_indices,
+        no_pcs,
+        params_pca,
+        clr_offsets,
+        seed,
+        verbose,
+    )?;
+
+    Ok(res)
 }
