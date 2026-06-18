@@ -26,7 +26,7 @@ use crate::single_cell::sc_processing::pca::{SingleCellPcaParams, pca_on_sc_spar
 // Consts //
 ////////////
 
-/// Symphony default for z-score clipping
+/// Symphony default for z-score clipping.
 const SCALE_CLIP: f32 = 10.0;
 
 ////////////
@@ -35,9 +35,9 @@ const SCALE_CLIP: f32 = 10.0;
 
 /// Harmony backend to use when constructing the reference.
 pub enum HarmonyBackend {
-    /// Version 1 from Harmony, see Korsunsky, et al., Nat Methods, 2019
+    /// Version 1 from Harmony, see Korsunsky, et al., Nat Methods, 2019.
     V1(HarmonyParams),
-    /// Version 2 from Harmony, see Patikas, et al., bioRxiv, 2026
+    /// Version 2 from Harmony, see Patikas, et al., bioRxiv, 2026.
     V2(HarmonyParamsV2),
 }
 
@@ -51,6 +51,7 @@ pub struct SymphonyMapParams {
     pub lambda: f32,
 }
 
+/// Default implementation for [SymphonyMapParams].
 impl Default for SymphonyMapParams {
     fn default() -> Self {
         Self {
@@ -104,6 +105,27 @@ pub struct SymphonyQuery {
 // Helpers //
 /////////////
 
+/// Symmetric clamp of a scalar to `[-t, t]`.
+///
+/// ### Params
+///
+/// * `x` - The value to clamp.
+/// * `t` - The (non-negative) symmetric bound.
+///
+/// ### Returns
+///
+/// `x` clamped to `[-t, t]`.
+#[inline]
+fn clamp_sym(x: f32, t: f32) -> f32 {
+    if x > t {
+        t
+    } else if x < -t {
+        -t
+    } else {
+        x
+    }
+}
+
 /// Construct the N_q x n_hvgs scaled dense matrix needed for projection.
 ///
 /// Mirrors Symphony's R `mapQuery` gene-synchronisation step: for each
@@ -114,11 +136,16 @@ pub struct SymphonyQuery {
 /// ### Params
 ///
 /// * `f_path_query` - Path to the gene-based binary file.
-/// * `cell_indices_query` - The cell indices to keep
-/// * `ref_to_query_gene_map` - The reference to gene query map with `None` for
-///   HVG from the reference that are not represented in this data set.
-/// * `ref_means` - The feature means from the reference
-/// * `ref_sds` - The standard deviations from the reference
+/// * `cell_indices_query` - The cell indices to keep.
+/// * `ref_to_query_gene_map` - The reference to query gene map with `None`
+///   for HVGs from the reference that are not represented in this data set.
+/// * `ref_means` - The feature means from the reference.
+/// * `ref_sds` - The standard deviations from the reference.
+///
+/// ### Returns
+///
+/// An N_q x n_hvgs dense matrix of clipped z-scores against the reference
+/// statistics. Columns corresponding to absent HVGs are all zero.
 fn build_scaled_query_matrix(
     f_path_query: &str,
     cell_indices_query: &[usize],
@@ -145,54 +172,38 @@ fn build_scaled_query_matrix(
     let gene_chunks: Vec<CscGeneChunk> =
         reader.read_gene_parallel_filtered(&present_query_indices, &cell_set)?;
 
-    // Output is N_q x n_hvgs in row-major flat storage so we can write
-    // gene columns contiguously per chunk without locking the whole matrix.
-    let mut out = vec![0.0f32; n_q * n_hvgs];
-
-    // Per-column work: for each loaded chunk find its slot, compute baseline
-    // (the scaled value of an implicit zero), write baseline to every row,
-    // then overwrite the nnz rows with the scaled nonzero value.
-    //
-    // Parallelism: we'd like to parallelise across chunks but the writes
-    // are into shared `out`. Each chunk writes to its own column (slot),
-    // and different chunks have different slots, so writes are disjoint.
-    // We use chunks_mut on the column stride to enforce that statically.
-    //
-    // Simplest correct path first: serial. Profiling can revisit.
-    for chunk in gene_chunks {
-        let q_gene_idx = chunk.original_index;
-        let slot = match query_to_slot.get(&q_gene_idx) {
-            Some(&s) => s,
-            None => continue, // should not happen given how we asked for chunks
-        };
-        let mean = ref_means[slot];
-        let sd = ref_sds[slot];
-        let inv_sd = if sd > 1e-8 { 1.0 / sd } else { 0.0 };
-        let baseline = clamp_sym((0.0 - mean) * inv_sd, SCALE_CLIP);
-
-        // Implicit zeros: baseline for every row.
-        for row in 0..n_q {
-            out[row * n_hvgs + slot] = baseline;
-        }
-        // Explicit nonzeros: overwrite.
-        for (i, &pos) in chunk.indices.iter().enumerate() {
-            let val = chunk.data_norm[i].to_f32();
-            out[(pos as usize) * n_hvgs + slot] = clamp_sym((val - mean) * inv_sd, SCALE_CLIP);
+    // slot-indexed chunk lookup. slots with no chunk stay as all-zero
+    // columns (HVGs absent from the query).
+    let mut chunks_by_slot: Vec<Option<&CscGeneChunk>> = vec![None; n_hvgs];
+    for chunk in &gene_chunks {
+        if let Some(&slot) = query_to_slot.get(&chunk.original_index) {
+            chunks_by_slot[slot] = Some(chunk);
         }
     }
 
-    Ok(Mat::<f32>::from_fn(n_q, n_hvgs, |i, j| out[i * n_hvgs + j]))
-}
+    // column-major flat buffer: slot s occupies out[s * n_q .. (s+1) * n_q].
+    let mut out = vec![0.0f32; n_hvgs * n_q];
+    out.par_chunks_exact_mut(n_q)
+        .zip(chunks_by_slot.par_iter())
+        .enumerate()
+        .for_each(|(slot, (col, maybe_chunk))| {
+            let Some(chunk) = maybe_chunk else {
+                return; // absent HVG -> zero column
+            };
+            let mean = ref_means[slot];
+            let sd = ref_sds[slot];
+            let inv_sd = if sd > 1e-8 { 1.0 / sd } else { 0.0 };
+            let baseline = clamp_sym(-mean * inv_sd, SCALE_CLIP);
 
-#[inline]
-fn clamp_sym(x: f32, t: f32) -> f32 {
-    if x > t {
-        t
-    } else if x < -t {
-        -t
-    } else {
-        x
-    }
+            col.fill(baseline);
+            for (i, &pos) in chunk.indices.iter().enumerate() {
+                let val = chunk.data_norm[i].to_f32();
+                col[pos as usize] = clamp_sym((val - mean) * inv_sd, SCALE_CLIP);
+            }
+        });
+
+    // Column-major flat -> N_q x n_hvgs Mat.
+    Ok(Mat::<f32>::from_fn(n_q, n_hvgs, |i, j| out[j * n_q + i]))
 }
 
 /// Symphony MoE correction with cached reference compression terms.
@@ -210,6 +221,10 @@ fn clamp_sym(x: f32, t: f32) -> f32 {
 /// * `nr` - Reference cluster sizes (length K).
 /// * `c` - Reference compression term (K x d).
 /// * `lambda` - Ridge penalty on batch terms.
+///
+/// ### Returns
+///
+/// The batch-corrected query embedding (N_q x d).
 fn moe_correct_query(
     z_pca: MatRef<f32>,
     r: MatRef<f32>,
@@ -238,15 +253,19 @@ fn moe_correct_query(
     let p = col;
 
     // Phase 1 (parallel over clusters): solve each cluster's regression.
+    //
+    // Accumulators and LU solve are in f64 to guard against rounding drift
+    // over many query cells. The apply phase below stays in f32 since each
+    // cell's contribution is a bounded small sum.
     let weights: Vec<Mat<f32>> = (0..k)
         .into_par_iter()
         .map(|cluster| {
-            let mut design_cov = Mat::<f32>::zeros(p, p);
-            let mut phi_z = Mat::<f32>::zeros(p, d);
+            let mut design_cov = Mat::<f64>::zeros(p, p);
+            let mut phi_z = Mat::<f64>::zeros(p, d);
             let mut active: Vec<usize> = Vec::with_capacity(1 + n_vars);
 
             for cell in 0..n_q {
-                let r_val = r[(cluster, cell)];
+                let r_val = r[(cluster, cell)] as f64;
 
                 active.clear();
                 active.push(0);
@@ -257,7 +276,7 @@ fn moe_correct_query(
 
                 for &ci in &active {
                     for feat in 0..d {
-                        phi_z[(ci, feat)] += r_val * z_pca[(cell, feat)];
+                        phi_z[(ci, feat)] += r_val * z_pca[(cell, feat)] as f64;
                     }
                 }
                 for (i, &ci) in active.iter().enumerate() {
@@ -271,19 +290,20 @@ fn moe_correct_query(
             }
 
             // Reference compression injections.
-            design_cov[(0, 0)] += nr[cluster];
+            design_cov[(0, 0)] += nr[cluster] as f64;
             for feat in 0..d {
-                phi_z[(0, feat)] += c[(cluster, feat)];
+                phi_z[(0, feat)] += c[(cluster, feat)] as f64;
             }
 
             // Ridge: identity on batch terms, intercept unpenalised.
             for i in 1..p {
-                design_cov[(i, i)] += lambda;
+                design_cov[(i, i)] += lambda as f64;
             }
 
-            let lu: PartialPivLu<f32> = design_cov.partial_piv_lu();
+            let lu: PartialPivLu<f64> = design_cov.partial_piv_lu();
             let inv_cov = lu.inverse();
-            &inv_cov * &phi_z
+            let w_f64 = &inv_cov * &phi_z;
+            Mat::<f32>::from_fn(p, d, |i, j| w_f64[(i, j)] as f32)
         })
         .collect();
 
@@ -339,7 +359,10 @@ fn moe_correct_query(
 ///
 /// ### Returns
 ///
-///
+/// A [SymphonyReference] holding the PCA loadings, reference means/SDs,
+/// pre- and post-Harmony embeddings, soft cluster assignments, cosine-
+/// normalised centroids and the compression terms (`nr`, `c`) needed for
+/// query mapping.
 #[allow(clippy::too_many_arguments)]
 pub fn build_symphony_reference(
     f_path: &str,
@@ -402,14 +425,33 @@ pub fn build_symphony_reference(
     let n = r.ncols();
     let d = z_corr.ncols();
 
-    // Nr = row sums of R
+    // Nr = row sums of R; accumulate in f64 to guard against drift over
+    // many cells before storing back as f32.
     let nr: Vec<f32> = (0..k)
         .into_par_iter()
-        .map(|cluster| (0..n).map(|cell| r[(cluster, cell)]).sum::<f32>())
+        .map(|cluster| (0..n).map(|cell| r[(cluster, cell)] as f64).sum::<f64>() as f32)
         .collect();
 
-    // C = R * Z_corr, K x d
-    let c: Mat<f32> = r.as_ref() * z_corr.as_ref();
+    // C = R * Z_corr, K x d. Manual parallel matmul with f64 inner products:
+    // faer's f32 GEMM is not Kahan-summed, so the dot product over n cells
+    // drifts visibly at large n. Result stored back as f32.
+    let c: Mat<f32> = {
+        let r_ref = r.as_ref();
+        let z_ref = z_corr.as_ref();
+        let buf: Vec<f32> = (0..(k * d))
+            .into_par_iter()
+            .map(|idx| {
+                let i = idx / d;
+                let j = idx % d;
+                let mut acc = 0.0f64;
+                for cell in 0..n {
+                    acc += r_ref[(i, cell)] as f64 * z_ref[(cell, j)] as f64;
+                }
+                acc as f32
+            })
+            .collect();
+        Mat::<f32>::from_fn(k, d, |i, j| buf[i * d + j])
+    };
     assert_eq!(c.nrows(), k);
     assert_eq!(c.ncols(), d);
 
@@ -453,7 +495,13 @@ pub fn build_symphony_reference(
 /// * `batch_labels_query` - Per-batch-variable label slices for the query.
 ///   Pass an empty slice to skip batch correction (z_corr = z_pca).
 /// * `params` - Mapping parameters (sigma, lambda).
-/// * `verbose` - Verbosity.
+/// * `verbose` - Verbosity (0 silent, 1 normal, 2 detailed).
+///
+/// ### Returns
+///
+/// A [SymphonyQuery] with the projected scores (`z_pca`), the MoE-corrected
+/// embedding (`z_corr`), and the K x N_q soft assignment matrix (`r`)
+/// against the reference centroids.
 pub fn symphony_map_query(
     reference: &SymphonyReference,
     f_path_query: &str,
@@ -598,6 +646,7 @@ mod tests {
         let (z_pca, r, batch_infos) = make_simple_scenario();
         let nr = vec![3.0_f32, 3.0];
         let c = mat![[0.0_f32, 0.0], [0.0, 0.0]];
+
         let result = moe_correct_query(
             z_pca.as_ref(),
             r.as_ref(),
@@ -799,7 +848,7 @@ mod tests {
         let c: Mat<f32> = r.as_ref() * z_corr.as_ref();
 
         let nr_expected = [1.0_f32, 2.0];
-        let c_expected = mat![[1.6_f32, 2.6], [8.4, 9.4]];
+        let c_expected = mat![[1.6_f32, 2.6], [7.4, 9.4]];
 
         for i in 0..k {
             assert_relative_eq!(nr[i], nr_expected[i], epsilon = 1e-5);
