@@ -122,12 +122,6 @@ pub fn generate_snn_full(
             reverse_mappings[neighbor].push((i, nb + 1));
         }
     }
-    for nb in 0..k {
-        for i in 0..n_samples {
-            let neighbor = flat_knn[nb * n_samples + i];
-            reverse_mappings[neighbor].push((i, nb + 1));
-        }
-    }
 
     let results: Vec<(usize, usize, f32)> = (0..n_samples)
         .into_par_iter()
