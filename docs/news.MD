@@ -1,5 +1,9 @@
 # News
 
+## 0.4.0
+
+Skunk works for spatial transcriptomics stuff
+
 ## 0.3.1
 
 ### Features
