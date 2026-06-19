@@ -4,6 +4,10 @@
 
 Skunk works for spatial transcriptomics stuff
 
+## 0.3.2
+
+Skunk works for spatial transcriptomics stuff
+
 ## 0.3.1
 
 Another big one
