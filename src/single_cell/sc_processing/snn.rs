@@ -117,6 +117,10 @@ pub fn generate_snn_full(
 
     for i in 0..n_samples {
         reverse_mappings[i].push((i, 0));
+        for nb in 0..k {
+            let neighbor = flat_knn[nb * n_samples + i];
+            reverse_mappings[neighbor].push((i, nb + 1));
+        }
     }
     for nb in 0..k {
         for i in 0..n_samples {
