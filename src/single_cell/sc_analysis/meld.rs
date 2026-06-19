@@ -15,6 +15,18 @@ use crate::prelude::*;
 use crate::single_cell::mc_generation::seacells::compute_diffusion_kernel;
 
 ///////////
+// Types //
+///////////
+
+/// MELD results
+///
+/// ### Fields
+///
+/// * `0` - Raw scores
+/// * `1` - Normalised scores (negative clamped away)
+pub type MeldResult = Result<(Mat<f32>, Mat<f32>), BixverseErrors>;
+
+///////////
 // Enums //
 ///////////
 
@@ -471,19 +483,17 @@ fn l1_normalise(mat: &Mat<f32>) -> Mat<f32> {
     let nrows = mat.nrows();
     let ncols = mat.ncols();
 
-    // compute norms once per row (in parallel)
     let norms: Vec<f32> = (0..nrows)
         .into_par_iter()
-        .map(|row| mat.get(row, ..).norm_l1())
+        .map(|row| (0..ncols).map(|col| mat[(row, col)].max(0.0)).sum::<f32>())
         .collect();
 
-    // create normalised matrix
     Mat::from_fn(nrows, ncols, |row, col| {
         let norm = norms[row];
         if norm > 1e-8 {
-            mat[(row, col)] / norm
+            mat[(row, col)].max(0.0) / norm
         } else {
-            0.0 // Zero-norm row stays zero
+            0.0
         }
     })
 }
@@ -521,7 +531,7 @@ pub fn meld(
     params: &MeldParams,
     seed: u64,
     verbose: usize,
-) -> Result<Mat<f32>, BixverseErrors> {
+) -> MeldResult {
     let verbosity = parse_verbosity_level(verbose);
 
     let n = knn_indices.len();
@@ -595,5 +605,5 @@ pub fn meld(
         println!("MELD: done in {:.2?}", start.elapsed());
     }
 
-    Ok(l1_normalise(&densities))
+    Ok((densities.clone(), l1_normalise(&densities)))
 }
