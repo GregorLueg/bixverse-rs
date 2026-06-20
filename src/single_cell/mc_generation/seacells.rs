@@ -980,9 +980,9 @@ impl<'a> SEACells<'a> {
     /// ### Returns
     ///
     /// Result of K^2 @ v as a dense vector
-    fn k_squared_matvec(&self, v: &[f32]) -> Vec<f32> {
+    fn k_squared_matvec(&self, v: &[f32]) -> Result<Vec<f32>, BixverseErrors> {
         let k = self.kernel_mat.as_ref().unwrap();
-        let kv = csr_matvec(k, v);
+        let kv = csr_matvec(k, v)?;
         csr_matvec(k, &kv)
     }
 
@@ -1207,7 +1207,7 @@ impl<'a> SEACells<'a> {
         if verbosity.normal_verbosity() {
             println!("Initialising residual matrix using greedy column selection");
         }
-        let greedy_ix = self.get_greedy_centres(from_greedy + 10);
+        let greedy_ix = self.get_greedy_centres(from_greedy + 10)?;
 
         if verbosity.normal_verbosity() {
             println!(
@@ -1368,7 +1368,7 @@ impl<'a> SEACells<'a> {
     /// ### Returns
     ///
     /// Vector of selected cell indices
-    fn get_greedy_centres(&self, n_centres: usize) -> Vec<usize> {
+    fn get_greedy_centres(&self, n_centres: usize) -> Result<Vec<usize>, BixverseErrors> {
         let kernel = self.kernel_mat.as_ref().unwrap();
         let n = kernel.shape.0;
 
@@ -1381,7 +1381,6 @@ impl<'a> SEACells<'a> {
         // Initial f[i] = sum_j (K^2[j,i])^2, g[i] = K^2[i,i]
         for chunk_start in (0..n).step_by(INIT_CHUNK_SIZE) {
             let chunk_end = (chunk_start + INIT_CHUNK_SIZE).min(n);
-
             let chunk_results: Vec<(usize, Vec<f32>)> = (chunk_start..chunk_end)
                 .into_par_iter()
                 .map(|i| {
@@ -1390,11 +1389,10 @@ impl<'a> SEACells<'a> {
                         let idx_usize = idx as usize;
                         row_i[kernel.indices[idx_usize] as usize] = kernel.data[idx_usize];
                     }
-                    let k2_col_i = csr_matvec(kernel, &row_i);
-                    (i, k2_col_i)
+                    let k2_col_i = csr_matvec(kernel, &row_i)?;
+                    Ok((i, k2_col_i))
                 })
-                .collect();
-
+                .collect::<Result<Vec<(usize, Vec<f32>)>, BixverseErrors>>()?;
             for (i, k2_col_i) in chunk_results {
                 g[i] = k2_col_i[i];
                 for j in 0..n {
@@ -1424,7 +1422,7 @@ impl<'a> SEACells<'a> {
             // delta = K^2[:, p] - sum_{r<iter} omega[r][p] * omega[r]
             e_p.fill(0.0);
             e_p[best_idx] = 1.0;
-            let mut delta = self.k_squared_matvec(&e_p);
+            let mut delta = self.k_squared_matvec(&e_p)?;
 
             let delta_coefs: Vec<f32> = (0..iter).map(|r| omega[r][best_idx]).collect();
             delta
@@ -1454,7 +1452,7 @@ impl<'a> SEACells<'a> {
                 .for_each(|(o, &d)| *o = d / delta_p_sqrt);
 
             let omega_sq_norm: f32 = omega_new.par_iter().map(|&x| x * x).sum();
-            let k_omega_new = self.k_squared_matvec(&omega_new);
+            let k_omega_new = self.k_squared_matvec(&omega_new)?;
 
             // pl[i] = sum_r <omega_r, omega_new> * omega_r[i]
             let omega_dot_new: Vec<f32> = (0..iter)
@@ -1503,7 +1501,7 @@ impl<'a> SEACells<'a> {
             omega[iter].copy_from_slice(&omega_new);
         }
 
-        centres
+        Ok(centres)
     }
 
     /// Initialise A and B matrices

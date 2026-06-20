@@ -397,7 +397,7 @@ fn chebyshev_apply(
     coeffs: &[f32],
     lmax: f32,
     signal: &[f32],
-) -> Vec<f32> {
+) -> Result<Vec<f32>, BixverseErrors> {
     let n = signal.len();
     let n_coeffs = coeffs.len();
     let a = lmax / 2.0;
@@ -406,7 +406,7 @@ fn chebyshev_apply(
 
     let mut t_old = signal.to_vec();
 
-    let lv = csr_matvec(lap, signal);
+    let lv = csr_matvec(lap, signal)?;
     let mut t_cur: Vec<f32> = lv
         .iter()
         .zip(signal.iter())
@@ -418,7 +418,7 @@ fn chebyshev_apply(
         .collect();
 
     for k in 2..n_coeffs {
-        let lt = csr_matvec(lap, &t_cur);
+        let lt = csr_matvec(lap, &t_cur)?;
         let mut t_new = vec![0.0_f32; n];
         for i in 0..n {
             t_new[i] = 2.0 * (lt[i] - a * t_cur[i]) * inv_b - t_old[i];
@@ -427,7 +427,7 @@ fn chebyshev_apply(
         t_old = std::mem::replace(&mut t_cur, t_new);
     }
 
-    result
+    Ok(result)
 }
 
 /// Apply a Chebyshev filter to all columns of an `N x p` signal in parallel.
@@ -453,7 +453,7 @@ fn chebyshev_apply_columns(
     coeffs: &[f32],
     lmax: f32,
     signal: MatRef<f32>,
-) -> Mat<f32> {
+) -> Result<Mat<f32>, BixverseErrors> {
     let n = signal.nrows();
     let p = signal.ncols();
     let columns: Vec<Vec<f32>> = (0..p)
@@ -462,8 +462,8 @@ fn chebyshev_apply_columns(
             let col: Vec<f32> = (0..n).map(|i| *signal.get(i, j)).collect();
             chebyshev_apply(lap, coeffs, lmax, &col)
         })
-        .collect();
-    Mat::from_fn(n, p, |i, j| columns[j][i])
+        .collect::<Result<Vec<_>, BixverseErrors>>()?;
+    Ok(Mat::from_fn(n, p, |i, j| columns[j][i]))
 }
 
 /// Apply L1 normalisation to each row.
@@ -596,7 +596,7 @@ pub fn meld(
             params.chebyshev_order, n_groups
         );
     }
-    let densities = chebyshev_apply_columns(&lap, &coeffs, lmax, indicators.as_ref());
+    let densities = chebyshev_apply_columns(&lap, &coeffs, lmax, indicators.as_ref())?;
     if verbosity.normal_verbosity() {
         println!(" Done in {:.2?}", start.elapsed())
     }
