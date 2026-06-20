@@ -2,6 +2,8 @@
 
 ## 0.3.1
 
+Another big one
+
 ### Features
 
 #### General
@@ -15,6 +17,7 @@
 - Multi file support for h5 reading from 10x genomics
 - PFlogPF normalisation prior to PCAs enabled for single cells, see
   [Booeshaghi et al.](https://www.biorxiv.org/content/10.1101/2022.05.06.490859v3)
+- NicheNet, see [Browaeys et al.](https://www.nature.com/articles/s41592-019-0667-5).
 
 #### GPU-accelerated methods:
 
