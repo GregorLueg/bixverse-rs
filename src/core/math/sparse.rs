@@ -1463,23 +1463,27 @@ where
     coo_to_csr(&rows, &cols, &vals, mat.shape)
 }
 
-/// Sparse matrix-vector multiplication
+/// Sparse matrix @ dense vector: `M @ v`.
 ///
-/// Multiply a sparse CSR matrix with a vector
-///
-/// ### Params
-///
-/// * `mat` - The Compressed Sparse matrix in CSR format
-/// * `vec` - The Vector to multiply with
+/// Computes `result[i] = sum_j M[i, j] * v[j]` by iterating CSR rows.
 ///
 /// ### Params
 ///
-/// The resulting vector
-pub fn csr_matvec<T>(mat: &CompressedSparseData2<T>, vec: &[T]) -> Vec<T>
+/// * `mat` - CSR matrix of shape `(m, n)`.
+/// * `vec` - Dense vector of length `n`.
+///
+/// ### Returns
+///
+/// Dense vector of length `m`. Errors if `mat` is not CSR.
+pub fn csr_matvec<T>(mat: &CompressedSparseData2<T>, vec: &[T]) -> Result<Vec<T>, BixverseErrors>
 where
     T: BixverseNumeric,
     <T as std::ops::Add>::Output: std::cmp::PartialEq<T>,
 {
+    if !mat.cs_type.is_csr() {
+        return Err(BixverseErrors::SparseMatrixMustBeCsr);
+    }
+
     let mut result = vec![T::default(); mat.shape.0];
     for i in 0..mat.shape.0 {
         let row_start = mat.indptr[i] as usize;
@@ -1490,7 +1494,47 @@ where
         }
         result[i] = sum;
     }
-    result
+
+    Ok(result)
+}
+
+/// Dense vector @ sparse matrix: `v @ M`.
+///
+/// Computes `result[j] = sum_i v[i] * M[i, j]` by iterating CSR rows of `M`
+/// and scattering scaled row contributions into the output. Treats `v` as a
+/// row vector.
+///
+/// ### Params
+///
+/// * `vec` - Dense vector of length `m`.
+/// * `mat` - CSR matrix of shape `(m, n)`.
+///
+/// ### Returns
+///
+/// Dense vector of length `n`. Errors if `mat` is not CSR.
+pub fn csr_vecmat<T>(vec: &[T], mat: &CompressedSparseData2<T>) -> Result<Vec<T>, BixverseErrors>
+where
+    T: BixverseNumeric,
+{
+    if !mat.cs_type.is_csr() {
+        return Err(BixverseErrors::SparseMatrixMustBeCsr);
+    }
+
+    let n_cols = mat.ncols();
+    let mut out = vec![T::default(); n_cols];
+    for (j, &vj) in vec.iter().enumerate() {
+        if vj == T::default() {
+            continue;
+        }
+        let gs = mat.indptr[j] as usize;
+        let ge = mat.indptr[j + 1] as usize;
+        for q in gs..ge {
+            let t = mat.indices[q] as usize;
+            out[t] += vj * mat.data[q];
+        }
+    }
+
+    Ok(out)
 }
 
 /// Sparse accumulator for efficient sparse matrix multiplication
@@ -1674,6 +1718,86 @@ where
         data_2: None,
         shape: (nrows, ncols),
     })
+}
+
+/////////////////////////////
+// Sparse dense operations //
+/////////////////////////////
+
+/// Sparse CSR @ sparse CSR -> dense
+///
+/// Parallel over output rows. For cases where you assume that the resulting
+/// matrix will become dense.
+///
+/// ### Params
+///
+/// * `a` - First matrix
+/// * `b` - Second matrix
+///
+/// ### Returns
+///
+/// Dense matrix product of both CSR matrices
+pub fn csr_sparse_matmul_dense<T>(
+    a: &CompressedSparseData2<T>,
+    b: &CompressedSparseData2<T>,
+) -> Result<Mat<T>, BixverseErrors>
+where
+    T: BixverseFloat + Send + Sync + Default,
+{
+    let ncol_a = a.shape().1;
+    let nrow_b = b.shape().0;
+
+    if !a.cs_type.is_csr() {
+        return Err(BixverseErrors::SparseMatrixMustBeCsr);
+    }
+    if !b.cs_type.is_csr() {
+        return Err(BixverseErrors::SparseMatrixMustBeCsr);
+    }
+    if ncol_a != nrow_b {
+        return Err(BixverseErrors::SparseMatrixMultiplication {
+            n_col_a: ncol_a,
+            n_row_b: nrow_b,
+        });
+    }
+
+    let n_rows = a.nrows();
+    let n_cols = b.ncols();
+    let m_indptr = &a.indptr;
+    let m_indices = &a.indices;
+    let m_data = &a.data;
+    let g_indptr = &b.indptr;
+    let g_indices = &b.indices;
+    let g_data = &b.data;
+
+    let dense_rows: Vec<Vec<T>> = (0..n_rows)
+        .into_par_iter()
+        .map(|i| {
+            let mut row = vec![T::zero(); n_cols];
+            let rs = m_indptr[i] as usize;
+            let re = m_indptr[i + 1] as usize;
+            for p in rs..re {
+                let j = m_indices[p] as usize;
+                let w = m_data[p];
+                let gs = g_indptr[j] as usize;
+                let ge = g_indptr[j + 1] as usize;
+                for q in gs..ge {
+                    let t = g_indices[q] as usize;
+                    row[t] += w * g_data[q];
+                }
+            }
+            row
+        })
+        .collect();
+
+    // this part can be sequential...
+    let mut out = Mat::zeros(n_rows, n_cols);
+    for (i, row) in dense_rows.into_iter().enumerate() {
+        for (j, v) in row.into_iter().enumerate() {
+            out[(i, j)] = v;
+        }
+    }
+
+    Ok(out)
 }
 
 ///////////////////////
@@ -2313,7 +2437,7 @@ mod tests {
             (2, 2),
         );
         let vec = vec![2.0, 1.0];
-        let result = csr_matvec(&a, &vec);
+        let result = csr_matvec(&a, &vec).unwrap();
         assert_eq!(result, vec![4.0, 3.0]);
     }
 
