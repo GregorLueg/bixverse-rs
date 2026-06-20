@@ -10,6 +10,7 @@ pub mod hotspot;
 pub mod meld;
 pub mod milo_r;
 pub mod module_scoring;
+pub mod nichenet;
 pub mod nmf_sc;
 pub mod scenic;
 pub mod vision;

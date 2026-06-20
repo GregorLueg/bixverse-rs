@@ -1229,7 +1229,7 @@ pub struct ParallelSparseReader {
     header: SparseDataHeader,
     /// Reference to the memory map for safe sharing across threads
     mmap: Arc<memmap2::Mmap>,
-    /// Start position of the chunks after the hader file
+    /// Start position of the chunks after the header file
     chunks_start: u64,
 }
 
@@ -1302,7 +1302,7 @@ impl ParallelSparseReader {
         &self,
         indices: &[usize],
     ) -> Result<Vec<CsrCellChunk>, BixverseErrors> {
-        if !self.header.cell_based {
+        if !self.is_cell_based() {
             return Err(BixverseErrors::ReaderModeMismatch {
                 actual: "gene-based",
                 requested: "cell-based",
@@ -1382,7 +1382,7 @@ impl ParallelSparseReader {
         &self,
         indices: &[usize],
     ) -> Result<Vec<CscGeneChunk>, BixverseErrors> {
-        if self.header.cell_based {
+        if !self.is_gene_based() {
             return Err(BixverseErrors::ReaderModeMismatch {
                 actual: "cell-based",
                 requested: "gene-based",
@@ -1431,7 +1431,7 @@ impl ParallelSparseReader {
         indices: &[usize],
         cells_to_keep: &IndexSet<u32>,
     ) -> Result<Vec<CscGeneChunk>, BixverseErrors> {
-        if self.header.cell_based {
+        if !self.is_gene_based() {
             return Err(BixverseErrors::ReaderModeMismatch {
                 actual: "cell-based",
                 requested: "gene-based",
@@ -1524,7 +1524,7 @@ impl ParallelSparseReader {
     /// Vector of library sizes
     #[allow(dead_code)]
     pub fn read_cell_library_sizes(&self, indices: &[usize]) -> Result<Vec<usize>, BixverseErrors> {
-        if !self.header.cell_based {
+        if !self.is_cell_based() {
             return Err(BixverseErrors::ReaderModeMismatch {
                 actual: "gene-based",
                 requested: "cell-based",
@@ -1588,7 +1588,7 @@ impl ParallelSparseReader {
         indices: &[usize],
         batch_size: Option<usize>,
     ) -> Result<Vec<f64>, BixverseErrors> {
-        if !self.header.cell_based {
+        if !self.is_cell_based() {
             return Err(BixverseErrors::ReaderModeMismatch {
                 actual: "gene-based",
                 requested: "cell-based",
@@ -1632,7 +1632,7 @@ impl ParallelSparseReader {
     ///
     /// Vector of number of NNZ genes.
     pub fn read_gene_nnz(&self, indices: &[usize]) -> Result<Vec<usize>, BixverseErrors> {
-        if self.header.cell_based {
+        if !self.is_gene_based() {
             return Err(BixverseErrors::ReaderModeMismatch {
                 actual: "cell-based",
                 requested: "gene-based",
@@ -1682,6 +1682,24 @@ impl ParallelSparseReader {
     pub fn get_all_gene_nnz(&self) -> Result<Vec<usize>, BixverseErrors> {
         let iter: Vec<usize> = (0..self.header.total_genes).collect();
         self.read_gene_nnz(&iter)
+    }
+
+    /// Is the reader connected to a cell-based file?
+    ///
+    /// ### Returns
+    ///
+    /// Bool
+    pub fn is_cell_based(&self) -> bool {
+        self.header.cell_based
+    }
+
+    /// Is the reader connected to a gene-based file?
+    ///
+    /// ### Returns
+    ///
+    /// Bool
+    pub fn is_gene_based(&self) -> bool {
+        !self.header.cell_based
     }
 }
 
