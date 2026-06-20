@@ -435,3 +435,81 @@ where
 
     Ok(out)
 }
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hub_correct_h_zero_is_identity() {
+        let to = vec![0u32, 1, 1, 2];
+        let w = vec![1.0_f64, 2.0, 3.0, 4.0];
+        assert_eq!(hub_correct(&to, &w, 3, 0.0), w);
+    }
+
+    #[test]
+    fn hub_correct_divides_by_indegree() {
+        // indegrees: 0 -> 1, 1 -> 2, 2 -> 1
+        let to = vec![0u32, 1, 1, 2];
+        let w = vec![1.0_f64, 2.0, 3.0, 4.0];
+        assert_eq!(hub_correct(&to, &w, 3, 1.0), vec![1.0, 1.0, 1.5, 4.0]);
+    }
+
+    #[test]
+    fn hub_correct_power_applied() {
+        // node 1 has indegree 2; h=2 -> divide by 4
+        let to = vec![1u32, 1];
+        let w = vec![8.0_f64, 4.0];
+        assert_eq!(hub_correct(&to, &w, 2, 2.0), vec![2.0, 1.0]);
+    }
+
+    #[test]
+    fn harmonic_combine_basic() {
+        let mut p = Mat::<f64>::zeros(1, 2);
+        p[(0, 0)] = 2.0;
+        p[(0, 1)] = 4.0;
+        let mut s = Mat::<f64>::zeros(1, 2);
+        s[(0, 0)] = 2.0;
+        s[(0, 1)] = 4.0;
+        harmonic_combine_in_place(&mut p, &s);
+        assert!((p[(0, 0)] - 1.0).abs() < 1e-12);
+        assert!((p[(0, 1)] - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn harmonic_combine_replaces_zero_with_min_positive() {
+        // primary min positive = 3; (0,0) zero gets replaced by 3
+        let mut p = Mat::<f64>::zeros(1, 2);
+        p[(0, 0)] = 0.0;
+        p[(0, 1)] = 3.0;
+        let mut s = Mat::<f64>::zeros(1, 2);
+        s[(0, 0)] = 6.0;
+        s[(0, 1)] = 6.0;
+        harmonic_combine_in_place(&mut p, &s);
+        // 1/(1/3 + 1/6) = 2 for both cells
+        assert!((p[(0, 0)] - 2.0).abs() < 1e-12);
+        assert!((p[(0, 1)] - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn subtract_baseline_clamps_negatives() {
+        let mut m = Mat::<f64>::zeros(2, 3);
+        m[(0, 0)] = 0.0;
+        m[(0, 1)] = 1.0;
+        m[(0, 2)] = 2.0;
+        m[(1, 0)] = 1.0;
+        m[(1, 1)] = 2.0;
+        m[(1, 2)] = 3.0;
+        subtract_baseline_clamp(&mut m, &[1.0, 1.0, 1.0]);
+        assert_eq!(m[(0, 0)], 0.0); // -1 clamped
+        assert_eq!(m[(0, 1)], 0.0);
+        assert_eq!(m[(0, 2)], 1.0);
+        assert_eq!(m[(1, 0)], 0.0);
+        assert_eq!(m[(1, 1)], 1.0);
+        assert_eq!(m[(1, 2)], 2.0);
+    }
+}

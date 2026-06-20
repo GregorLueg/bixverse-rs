@@ -251,3 +251,97 @@ where
         spearman,
     }
 }
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auroc_perfect_ranking() {
+        // positives hold the top ranks
+        let ranks = vec![1.0_f64, 2.0, 3.0, 4.0];
+        let pos = vec![2usize, 3];
+        assert!((auroc_from_ranks(&ranks, &pos, 2, 2) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn auroc_inverse_ranking() {
+        let ranks = vec![1.0_f64, 2.0, 3.0, 4.0];
+        let pos = vec![0usize, 1];
+        assert!(auroc_from_ranks(&ranks, &pos, 2, 2).abs() < 1e-12);
+    }
+
+    #[test]
+    fn auroc_partial() {
+        // positives at ranks 1, 3 -> u = 4 - 3 = 1 -> auroc = 0.25
+        let ranks = vec![1.0_f64, 2.0, 3.0, 4.0];
+        let pos = vec![0usize, 2];
+        assert!((auroc_from_ranks(&ranks, &pos, 2, 2) - 0.25).abs() < 1e-12);
+    }
+
+    #[test]
+    fn auroc_degenerate_returns_nan() {
+        let ranks = vec![1.0_f64, 2.0];
+        assert!(auroc_from_ranks(&ranks, &[], 0, 2).is_nan());
+        assert!(auroc_from_ranks(&ranks, &[0, 1], 2, 0).is_nan());
+    }
+
+    #[test]
+    fn aupr_perfect_ranking() {
+        let pred = vec![4.0_f64, 3.0, 2.0, 1.0];
+        let response = vec![true, true, false, false];
+        assert!((aupr_value(&pred, &response, 2) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn aupr_degenerate_returns_nan() {
+        let pred = vec![1.0_f64, 2.0];
+        assert!(aupr_value(&pred, &[true, true], 2).is_nan());
+        assert!(aupr_value(&pred, &[false, false], 0).is_nan());
+    }
+
+    #[test]
+    fn pearson_perfect_positive() {
+        let x = vec![1.0_f64, 2.0, 3.0, 4.0];
+        let y = vec![2.0_f64, 4.0, 6.0, 8.0];
+        assert!((pearson_generic(&x, &y) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn pearson_perfect_negative() {
+        let x = vec![1.0_f64, 2.0, 3.0, 4.0];
+        let y = vec![4.0_f64, 3.0, 2.0, 1.0];
+        assert!((pearson_generic(&x, &y) + 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn pearson_zero_variance_returns_nan() {
+        let x = vec![1.0_f64, 1.0, 1.0];
+        let y = vec![1.0_f64, 2.0, 3.0];
+        assert!(pearson_generic(&x, &y).is_nan());
+    }
+
+    #[test]
+    fn ligand_activity_perfect_separation() {
+        // single ligand, positives ranked above negatives
+        let mut pred = Mat::<f64>::zeros(1, 4);
+        pred[(0, 0)] = 4.0;
+        pred[(0, 1)] = 3.0;
+        pred[(0, 2)] = 2.0;
+        pred[(0, 3)] = 1.0;
+        let response = vec![true, true, false, false];
+        let s = ligand_activity_scores(&pred, &response);
+        assert!((s.auroc[0] - 1.0).abs() < 1e-12);
+        assert!((s.aupr[0] - 1.0).abs() < 1e-12);
+        // aupr_random = 2/4 = 0.5
+        assert!((s.aupr_corrected[0] - 0.5).abs() < 1e-12);
+        // Pearson/Spearman are not 1.0 here because the response has ties,
+        // but they should be strongly positive.
+        assert!(s.pearson[0] > 0.0);
+        assert!(s.spearman[0] > 0.0);
+    }
+}
