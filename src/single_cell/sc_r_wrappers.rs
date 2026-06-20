@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use crate::core::math::sparse::parse_compressed_sparse_format;
 use crate::ml::clustering::k_means::KMeansParamsWrappers;
-use crate::prelude::{VecConvert, VecFloatConvert};
+use crate::prelude::{BixverseFloat, VecConvert, VecFloatConvert};
 use crate::single_cell::mc_generation::{
     hdwgcna_meta_cells::BootstrappedMetaCellParams, metacells2::params::*,
     seacells::SEACellsParams, super_cells::SuperCellParams,
@@ -16,6 +16,7 @@ use crate::single_cell::sc_analysis::{
     hotspot::HotSpotParams,
     meld::{MeldParams, parse_lap_type, parse_meld_filter},
     milo_r::MiloRParams,
+    nichenet::ligand_regulatory_potential::LigandTargetParams,
     scenic::{
         ExtraTreesConfig, GradientBoostingConfig, RandomForestConfig, RegressionLearner,
         ScenicParams,
@@ -2233,6 +2234,79 @@ impl TenxFileTask {
             no_genes,
             gene_local_to_universe,
             feature_type,
+        })
+    }
+}
+
+//////////////
+// NicheNet //
+//////////////
+
+impl<T> LigandTargetParams<T>
+where
+    T: BixverseFloat,
+{
+    /// Generate the [LigandTargetParams] from an R list
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The R list to convert to [LigandTargetParams].
+    ///
+    /// ### Returns
+    ///
+    /// Self.
+    pub fn from_r_list(r_list: List) -> extendr_api::Result<Self> {
+        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let defaults = LigandTargetParams::default();
+
+        let lr_sig_hub = params
+            .get("lr_sig_hub")
+            .and_then(|x| x.as_real())
+            .and_then(|x| T::from_f64(x))
+            .unwrap_or(defaults.lr_sig_hub);
+        let gr_hub = params
+            .get("gr_hub")
+            .and_then(|x| x.as_real())
+            .and_then(|x| T::from_f64(x))
+            .unwrap_or(defaults.gr_hub);
+        let ltf_cutoff = params
+            .get("ltf_cutoff")
+            .and_then(|x| x.as_real())
+            .and_then(|x| T::from_f64(x))
+            .unwrap_or(defaults.ltf_cutoff);
+        let damping_factor = params
+            .get("damping_factor")
+            .and_then(|x| x.as_real())
+            .and_then(|x| T::from_f64(x))
+            .unwrap_or(defaults.damping_factor);
+        let tol = params
+            .get("tol")
+            .and_then(|x| x.as_real())
+            .and_then(|x| T::from_f64(x))
+            .unwrap_or(defaults.tol);
+        let max_iter = params
+            .get("max_iter")
+            .and_then(|x| x.as_integer())
+            .map(|x| x as usize)
+            .unwrap_or(defaults.max_iter);
+        let topology_correction = params
+            .get("topology_correction")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(defaults.topology_correction);
+        let secondary_targets = params
+            .get("secondary_targets")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(defaults.secondary_targets);
+
+        Ok(Self {
+            lr_sig_hub,
+            gr_hub,
+            ltf_cutoff,
+            damping_factor,
+            max_iter,
+            tol,
+            secondary_targets,
+            topology_correction,
         })
     }
 }

@@ -119,7 +119,7 @@ where
         })
         .collect();
 
-    // 4. assemble into Mat<T>
+    // 4. assemble into matrices
     let mut mean_mat = Mat::zeros(n_genes, n_clusters);
     let mut frac_mat = Mat::zeros(n_genes, n_clusters);
     for (i, (mean_row, frac_row)) in aggregated.into_iter().enumerate() {
