@@ -8,7 +8,7 @@
 //! summaries of the same alignment between a ligand's target potential
 //! vector and the gene set membership vector.
 
-use faer::Mat;
+use faer::MatRef;
 use rayon::prelude::*;
 
 use crate::core::math::vector_helpers::rank_vector;
@@ -176,7 +176,10 @@ fn pearson_generic<T: BixverseFloat + std::iter::Sum>(x: &[T], y: &[T]) -> T {
 /// Degenerate cases (no positives, no negatives, zero-variance prediction)
 /// return `T::nan()` for the affected metric. Other returns the
 /// [LigandActivityScores].
-pub fn ligand_activity_scores<T>(predictions: &Mat<T>, response: &[bool]) -> LigandActivityScores<T>
+pub fn ligand_activity_scores<T>(
+    predictions: &MatRef<T>,
+    response: &[bool],
+) -> LigandActivityScores<T>
 where
     T: BixverseFloat + std::iter::Sum + Send + Sync,
 {
@@ -259,6 +262,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use faer::Mat;
 
     #[test]
     fn auroc_perfect_ranking() {
@@ -334,7 +338,7 @@ mod tests {
         pred[(0, 2)] = 2.0;
         pred[(0, 3)] = 1.0;
         let response = vec![true, true, false, false];
-        let s = ligand_activity_scores(&pred, &response);
+        let s = ligand_activity_scores(&pred.as_ref(), &response);
         assert!((s.auroc[0] - 1.0).abs() < 1e-12);
         assert!((s.aupr[0] - 1.0).abs() < 1e-12);
         // aupr_random = 2/4 = 0.5
