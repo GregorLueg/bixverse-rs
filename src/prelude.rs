@@ -15,6 +15,8 @@ pub use crate::utils::vec_utils::*;
 pub use crate::{assert_nrows, assert_same_len, assert_symmetric_mat};
 
 #[cfg(feature = "single-cell")]
+pub use crate::single_cell::CELL_BATCH_SIZE;
+#[cfg(feature = "single-cell")]
 pub use crate::single_cell::sc_data::data_io::{
     CellQuality, CscGeneChunk, CsrCellChunk, DataLayerReturn, MinCellQuality, ParallelSparseReader,
     RawCounts, from_cell_chunks, from_gene_chunks,

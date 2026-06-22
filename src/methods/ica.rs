@@ -110,7 +110,9 @@ pub fn prepare_whitening<T: BixverseFloat>(
         let d = faer_diagonal_from_vec(s);
         d * svd_res.u.transpose()
     } else {
-        let svd_res = v.thin_svd().unwrap();
+        let svd_res = v
+            .thin_svd()
+            .map_err(|e| BixverseErrors::FaerSvdError(format!("{e:?}")))?;
         let s = svd_res
             .S()
             .column_vector()
@@ -137,7 +139,9 @@ pub fn prepare_whitening<T: BixverseFloat>(
 /// The updated mixing matrix.
 fn update_mix_mat<T: BixverseFloat>(w: MatRef<T>) -> Result<Mat<T>, BixverseErrors> {
     // SVD
-    let svd_res = w.thin_svd().map_err(|_| BixverseErrors::FaerEigenError)?;
+    let svd_res = w
+        .thin_svd()
+        .map_err(|e| BixverseErrors::FaerSvdError(format!("{e:?}")))?;
 
     let s = svd_res.S();
     let u = svd_res.U();

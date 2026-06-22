@@ -79,6 +79,14 @@ pub struct OEPair {
     pub e: Mat<f32>,
 }
 
+/// Harmony results (batch-corrected embedding + soft assignments)
+pub struct HarmonyResult {
+    /// Corrected embedding
+    pub z_corr: Mat<f32>,
+    /// Soft assignments
+    pub r: Mat<f32>,
+}
+
 /// Batch information for a single categorical variable.
 ///
 /// Holds the mapping from cells to levels, level frequencies, and
@@ -107,8 +115,13 @@ pub struct BatchInfo {
 ///
 /// `BatchInfo` with level frequencies, cell indices per level, and
 /// reverse lookup
-pub fn create_batch_info(labels: &[usize], n_cells: usize) -> BatchInfo {
-    assert_eq!(labels.len(), n_cells, "labels length must match n_cells");
+pub fn create_batch_info(labels: &[usize], n_cells: usize) -> Result<BatchInfo, BixverseErrors> {
+    if labels.len() != n_cells {
+        return Err(BixverseErrors::HarmonyLabelLenghtUnequalNcells {
+            label_length: labels.len(),
+            n_cells,
+        });
+    }
 
     let n_levels = labels.iter().max().map(|&x| x + 1).unwrap_or(0);
 
@@ -122,12 +135,12 @@ pub fn create_batch_info(labels: &[usize], n_cells: usize) -> BatchInfo {
         .map(|cells| cells.len() as f32 / n_cells as f32)
         .collect();
 
-    BatchInfo {
+    Ok(BatchInfo {
         batch_indices,
         pr_b,
         n_levels,
         cell_to_level: labels.to_vec(),
-    }
+    })
 }
 
 /// Create batch information for multiple categorical variables.
@@ -140,7 +153,10 @@ pub fn create_batch_info(labels: &[usize], n_cells: usize) -> BatchInfo {
 /// ### Returns
 ///
 /// Vec of `BatchInfo`, one per variable
-pub fn create_batch_infos(all_labels: &[Vec<usize>], n_cells: usize) -> Vec<BatchInfo> {
+pub fn create_batch_infos(
+    all_labels: &[Vec<usize>],
+    n_cells: usize,
+) -> Result<Vec<BatchInfo>, BixverseErrors> {
     all_labels
         .iter()
         .map(|labels| create_batch_info(labels, n_cells))
@@ -234,33 +250,31 @@ pub fn compute_cosine_distances(centroids: MatRef<f32>, data_cos: MatRef<f32>) -
 /// ### Returns
 ///
 /// Soft assignment matrix R (K x N), columns sum to 1
-pub fn initialise_r_from_dist(dist_mat: MatRef<f32>, sigma: &[f32]) -> Mat<f32> {
+pub fn initialise_r_from_dist(
+    dist_mat: MatRef<f32>,
+    sigma: &[f32],
+) -> Result<Mat<f32>, BixverseErrors> {
     let k = dist_mat.nrows();
     let n = dist_mat.ncols();
-    assert_eq!(sigma.len(), k, "sigma length must match number of clusters");
+    if sigma.len() != k {
+        return Err(BixverseErrors::HarmonySigmaLengthUnequalCluster);
+    }
 
-    let columns: Vec<_> = (0..n)
-        .into_par_iter()
-        .map(|cell_idx| {
-            let mut col_sum = 0.0f32;
-            let mut col = vec![0.0f32; k];
+    // pre-allocation trick also here...
+    let mut flat = vec![0.0f32; n * k];
+    flat.par_chunks_mut(k).enumerate().for_each(|(cell, col)| {
+        let mut col_sum = 0.0f32;
+        for cluster in 0..k {
+            let val = (-dist_mat[(cluster, cell)] / sigma[cluster]).exp();
+            col[cluster] = val;
+            col_sum += val;
+        }
+        for v in col.iter_mut() {
+            *v /= col_sum;
+        }
+    });
 
-            for cluster_idx in 0..k {
-                let dist = dist_mat[(cluster_idx, cell_idx)];
-                let val = (-dist / sigma[cluster_idx]).exp();
-                col[cluster_idx] = val;
-                col_sum += val;
-            }
-
-            for cluster_idx in 0..k {
-                col[cluster_idx] /= col_sum;
-            }
-
-            col
-        })
-        .collect();
-
-    Mat::from_fn(k, n, |i, j| columns[j][i])
+    Ok(Mat::from_fn(k, n, |cluster, cell| flat[cell * k + cluster]))
 }
 
 /// Compute observed and expected diversity statistics for one variable.
@@ -278,31 +292,43 @@ pub fn initialise_r_from_dist(dist_mat: MatRef<f32>, sigma: &[f32]) -> Mat<f32> 
 /// `OEPair` of (O: K x B, E: K x B)
 pub fn compute_diversity_statistics(r: MatRef<f32>, info: &BatchInfo) -> OEPair {
     let k = r.nrows();
+    let n = r.ncols();
     let b = info.n_levels;
 
-    let mut o = Mat::zeros(k, b);
+    // per-cell scatter with thread-local accumulators -> small reduce
+    // should be faster... ?
+    let o_flat: Vec<f32> = (0..n)
+        .into_par_iter()
+        .fold(
+            || vec![0.0f32; b * k],
+            |mut acc, cell| {
+                let level = info.cell_to_level[cell];
+                for cluster in 0..k {
+                    acc[level * k + cluster] += r[(cluster, cell)];
+                }
+                acc
+            },
+        )
+        .reduce(
+            || vec![0.0f32; b * k],
+            |mut a, b_local| {
+                for i in 0..a.len() {
+                    a[i] += b_local[i];
+                }
+                a
+            },
+        );
 
-    for (level_idx, cell_indices) in info.batch_indices.iter().enumerate() {
-        for &cell_idx in cell_indices {
-            for cluster_idx in 0..k {
-                o[(cluster_idx, level_idx)] += r[(cluster_idx, cell_idx)];
-            }
-        }
-    }
+    let o = Mat::from_fn(k, b, |cluster, level| o_flat[level * k + cluster]);
 
     let mut row_sums = vec![0.0f32; k];
-    for cluster_idx in 0..k {
-        for level_idx in 0..b {
-            row_sums[cluster_idx] += o[(cluster_idx, level_idx)];
+    for level in 0..b {
+        for cluster in 0..k {
+            row_sums[cluster] += o_flat[level * k + cluster];
         }
     }
 
-    let mut e = Mat::zeros(k, b);
-    for cluster_idx in 0..k {
-        for level_idx in 0..b {
-            e[(cluster_idx, level_idx)] = row_sums[cluster_idx] * info.pr_b[level_idx];
-        }
-    }
+    let e = Mat::from_fn(k, b, |cluster, level| row_sums[cluster] * info.pr_b[level]);
 
     OEPair { o, e }
 }
@@ -471,7 +497,7 @@ pub fn update_r_with_diversity(
     seed: usize,
     r_init: MatRef<f32>,
     oe_init: &[OEPair],
-) -> (Mat<f32>, Vec<OEPair>) {
+) -> Result<(Mat<f32>, Vec<OEPair>), BixverseErrors> {
     let k = dist_mat.nrows();
     let n = dist_mat.ncols();
     let n_vars = batch_infos.len();
@@ -480,7 +506,7 @@ pub fn update_r_with_diversity(
     assert_eq!(theta.len(), n_vars);
     assert_eq!(oe_init.len(), n_vars);
 
-    let scale_dist = compute_scaled_distances(dist_mat, sigma);
+    let scale_dist = compute_scaled_distances(dist_mat, sigma)?;
     let scale_dist = scale_dist.as_ref();
 
     let mut rng = StdRng::seed_from_u64(seed as u64);
@@ -592,7 +618,7 @@ pub fn update_r_with_diversity(
         }
     }
 
-    (r, oe)
+    Ok((r, oe))
 }
 
 /// Apply per-cluster ridge regression to remove batch effects from multiple
@@ -731,31 +757,33 @@ pub fn ridge_regression_correction(
 /// ### Returns
 ///
 /// Column-normalised base assignment matrix (K x N), columns sum to 1
-pub fn compute_scaled_distances(dist_mat: MatRef<f32>, sigma: &[f32]) -> Mat<f32> {
+pub fn compute_scaled_distances(
+    dist_mat: MatRef<f32>,
+    sigma: &[f32],
+) -> Result<Mat<f32>, BixverseErrors> {
     let k = dist_mat.nrows();
     let n = dist_mat.ncols();
-    assert_eq!(sigma.len(), k, "sigma length must match number of clusters");
+    if sigma.len() != k {
+        return Err(BixverseErrors::HarmonySigmaLengthUnequalCluster);
+    }
 
-    let columns: Vec<Vec<f32>> = (0..n)
-        .into_par_iter()
-        .map(|cell_idx| {
-            let mut col = vec![0.0f32; k];
-            let mut col_sum = 0.0f32;
-            for cluster_idx in 0..k {
-                let val = (-dist_mat[(cluster_idx, cell_idx)] / sigma[cluster_idx]).exp();
-                col[cluster_idx] = val;
-                col_sum += val;
+    // pre-allocation and then filling it
+    let mut flat = vec![0.0f32; n * k];
+    flat.par_chunks_mut(k).enumerate().for_each(|(cell, col)| {
+        let mut col_sum = 0.0f32;
+        for cluster in 0..k {
+            let val = (-dist_mat[(cluster, cell)] / sigma[cluster]).exp();
+            col[cluster] = val;
+            col_sum += val;
+        }
+        if col_sum > 0.0 {
+            for v in col.iter_mut() {
+                *v /= col_sum;
             }
-            if col_sum > 0.0 {
-                for v in col.iter_mut() {
-                    *v /= col_sum;
-                }
-            }
-            col
-        })
-        .collect();
+        }
+    });
 
-    Mat::from_fn(k, n, |i, j| columns[j][i])
+    Ok(Mat::from_fn(k, n, |cluster, cell| flat[cell * k + cluster]))
 }
 
 /////////////
@@ -791,15 +819,26 @@ fn check_convergence(objectives: &[f32], window_size: usize, epsilon: f32) -> bo
     rel_change < epsilon
 }
 
-/// Harmony state
+/// Mutable state carried across Harmony outer iterations.
 struct HarmonyState {
+    /// Original PCA embedding, never mutated (N x d)
     z_orig: Mat<f32>,
+    /// Cosine-normalised view of the current `z_corr`, refreshed once per outer
+    /// iteration and consumed by distance computation (N x d)
     z_cos: Mat<f32>,
+    /// Current corrected embedding (N x d)
     z_corr: Mat<f32>,
+    /// Current cluster centroids, cosine-normalised (K x d)
     y: Mat<f32>,
+    /// Current soft cluster assignments, columns sum to 1 (K x N)
     r: Mat<f32>,
+    /// Observed/expected diversity statistics, one entry per batch variable
     oe_pairs: Vec<OEPair>,
+    /// Objective trace from the inner k-means refinement loop, used for
+    /// inner-loop convergence checks
     objectives_kmeans: Vec<f32>,
+    /// Objective trace at the end of each outer Harmony iteration, used for
+    /// outer-loop convergence checks
     objectives_harmony: Vec<f32>,
 }
 
@@ -808,18 +847,6 @@ struct HarmonyState {
 /// Each element of `batch_labels` is a slice of length N giving the level
 /// assignments for one categorical variable. For example, to correct for
 /// both sample and technology:
-///
-/// ```ignore
-/// let sample_labels = vec![0, 0, 1, 1, 2, 2];
-/// let tech_labels   = vec![0, 1, 0, 1, 0, 1];
-/// let corrected = harmony(
-///     pca.as_ref(),
-///     &[&sample_labels, &tech_labels],
-///     &params,
-///     42,
-///     true,
-/// );
-/// ```
 ///
 /// ### Params
 ///
@@ -832,14 +859,14 @@ struct HarmonyState {
 ///
 /// ### Returns
 ///
-/// Corrected PCA embedding (N x d)
-pub fn harmony(
+/// Returns the [HarmonyResult]
+pub fn harmony_with_state(
     pca: MatRef<f32>,
     batch_labels: &[Vec<usize>],
     params: &HarmonyParams,
     seed: usize,
     verbose: usize,
-) -> Result<Mat<f32>, BixverseErrors> {
+) -> Result<HarmonyResult, BixverseErrors> {
     let verbosity = parse_verbosity_level(verbose);
 
     let start = Instant::now();
@@ -850,7 +877,7 @@ pub fn harmony(
 
     assert!(n_vars >= 1, "At least one batch variable required");
 
-    let batch_infos = create_batch_infos(batch_labels, n);
+    let batch_infos = create_batch_infos(batch_labels, n)?;
 
     if verbosity.normal_verbosity() {
         println!(
@@ -901,7 +928,7 @@ pub fn harmony(
     )?;
 
     let dist_mat = compute_cosine_distances(y.as_ref(), z_cos.as_ref());
-    let r = initialise_r_from_dist(dist_mat.as_ref(), &sigma);
+    let r = initialise_r_from_dist(dist_mat.as_ref(), &sigma)?;
     let oe_pairs = compute_all_diversity_statistics(r.as_ref(), &batch_infos);
 
     let initial_obj = compute_objective(
@@ -935,6 +962,8 @@ pub fn harmony(
             println!("  Running k-means clustering...");
         }
 
+        let start_iter = Instant::now();
+
         for kmeans_iter in 0..params.max_iter_kmeans {
             state.y = update_centroids_from_r(state.z_cos.as_ref(), state.r.as_ref());
 
@@ -949,7 +978,7 @@ pub fn harmony(
                 seed + harmony_iter * 1000 + kmeans_iter,
                 state.r.as_ref(),
                 &state.oe_pairs,
-            );
+            )?;
 
             state.r = r_new;
             state.oe_pairs = oe_new;
@@ -1002,7 +1031,11 @@ pub fn harmony(
 
         if verbosity.normal_verbosity() {
             println!("  Harmony objective: {:.4}", harmony_obj);
-            println!("   Finished iteration in {:.2?}", start.elapsed());
+            println!(
+                "   Finished iteration in {:.2?} / Total runtime {:.2?}",
+                start_iter.elapsed(),
+                start.elapsed()
+            );
         }
 
         if harmony_iter >= 2 {
@@ -1024,7 +1057,38 @@ pub fn harmony(
         println!(" Finished Harmony {:.2?}", start.elapsed());
     }
 
-    Ok(state.z_corr)
+    Ok(HarmonyResult {
+        z_corr: state.z_corr,
+        r: state.r,
+    })
+}
+
+/// Run Harmony batch correction with one or more batch variables.
+///
+/// Each element of `batch_labels` is a slice of length N giving the level
+/// assignments for one categorical variable. For example, to correct for
+/// both sample and technology:
+///
+/// ### Params
+///
+/// * `pca` - PCA embedding (N x d)
+/// * `batch_labels` - one label slice per variable, each of length N
+/// * `params` - Harmony hyperparameters
+/// * `seed` - Random seed
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
+///
+/// ### Returns
+///
+/// Corrected PCA embedding (N x d)
+pub fn harmony(
+    pca: MatRef<f32>,
+    batch_labels: &[Vec<usize>],
+    params: &HarmonyParams,
+    seed: usize,
+    verbose: usize,
+) -> Result<Mat<f32>, BixverseErrors> {
+    Ok(harmony_with_state(pca, batch_labels, params, seed, verbose)?.z_corr)
 }
 
 ///////////
@@ -1041,7 +1105,7 @@ mod tests {
     #[test]
     fn test_create_batch_info() {
         let labels = vec![0, 0, 1, 1, 2, 0];
-        let info = create_batch_info(&labels, 6);
+        let info = create_batch_info(&labels, 6).unwrap();
 
         assert_eq!(info.n_levels, 3);
         assert!((info.pr_b[0] - 0.5).abs() < 1e-6);
@@ -1056,7 +1120,7 @@ mod tests {
     #[test]
     fn test_create_batch_info_single_level() {
         let labels = vec![0, 0, 0];
-        let info = create_batch_info(&labels, 3);
+        let info = create_batch_info(&labels, 3).unwrap();
 
         assert_eq!(info.n_levels, 1);
         assert_eq!(info.pr_b, vec![1.0]);
@@ -1067,7 +1131,7 @@ mod tests {
     fn test_create_batch_infos_multiple() {
         let var0 = vec![0, 0, 1, 1];
         let var1 = vec![0, 1, 0, 1];
-        let infos = create_batch_infos(&[var0, var1], 4);
+        let infos = create_batch_infos(&[var0, var1], 4).unwrap();
 
         assert_eq!(infos.len(), 2);
         assert_eq!(infos[0].n_levels, 2);
@@ -1140,7 +1204,7 @@ mod tests {
         let dist_mat = Mat::from_fn(2, 3, |i, j| dist_data[i * 3 + j]);
         let sigma = vec![1.0, 1.0];
 
-        let r = initialise_r_from_dist(dist_mat.as_ref(), &sigma);
+        let r = initialise_r_from_dist(dist_mat.as_ref(), &sigma).unwrap();
 
         assert_eq!(r.nrows(), 2);
         assert_eq!(r.ncols(), 3);
@@ -1164,14 +1228,14 @@ mod tests {
         let dist_mat = Mat::from_fn(2, 2, |i, j| dist_data[i * 2 + j]);
         let sigma = vec![0.5, 2.0];
 
-        let r = initialise_r_from_dist(dist_mat.as_ref(), &sigma);
+        let r = initialise_r_from_dist(dist_mat.as_ref(), &sigma).unwrap();
         assert!(r[(1, 0)] > r[(0, 0)]);
     }
 
     #[test]
     fn test_compute_diversity_statistics_simple() {
         let labels = vec![0, 0, 1, 1, 1, 2];
-        let info = create_batch_info(&labels, 6);
+        let info = create_batch_info(&labels, 6).unwrap();
 
         let r = mat![
             [0.8, 0.7, 0.6, 0.9, 0.5, 0.3],
@@ -1216,7 +1280,7 @@ mod tests {
     #[test]
     fn test_diversity_statistics_properties() {
         let labels = vec![0, 0, 0, 1, 1, 2, 2, 2, 2];
-        let info = create_batch_info(&labels, 9);
+        let info = create_batch_info(&labels, 9).unwrap();
 
         let r = mat![
             [0.5, 0.6, 0.4, 0.7, 0.3, 0.8, 0.2, 0.5, 0.6],
@@ -1319,7 +1383,7 @@ mod tests {
     #[test]
     fn test_compute_objective_decreases() {
         let labels = vec![0, 0, 1, 1];
-        let info = create_batch_info(&labels, 4);
+        let info = create_batch_info(&labels, 4).unwrap();
         let sigma = vec![1.0, 1.0];
         let theta = vec![1.0];
         let r_uncertain = mat![[0.5, 0.5, 0.5, 0.5], [0.5, 0.5, 0.5, 0.5]];
@@ -1355,7 +1419,7 @@ mod tests {
     #[test]
     fn test_compute_objective_components() {
         let labels = vec![0, 0, 1];
-        let info = create_batch_info(&labels, 3);
+        let info = create_batch_info(&labels, 3).unwrap();
         let sigma = vec![1.0, 1.0];
         let theta = vec![1.0];
 
@@ -1380,7 +1444,7 @@ mod tests {
     #[test]
     fn test_objective_zero_entropy() {
         let labels = vec![0, 1];
-        let info = create_batch_info(&labels, 2);
+        let info = create_batch_info(&labels, 2).unwrap();
         let sigma = vec![1.0, 1.0];
         let theta = vec![0.0]; // no diversity penalty
 
@@ -1408,7 +1472,7 @@ mod tests {
     #[test]
     fn test_update_r_basic() {
         let labels = vec![0, 0, 1, 1];
-        let info = create_batch_info(&labels, 4);
+        let info = create_batch_info(&labels, 4).unwrap();
         let sigma = vec![1.0, 1.0];
         let theta = vec![1.0];
 
@@ -1425,7 +1489,8 @@ mod tests {
             42,
             r_init.as_ref(),
             &oe_init[..],
-        );
+        )
+        .unwrap();
 
         for cell_idx in 0..4 {
             let col_sum: f32 = (0..2).map(|k| r_new[(k, cell_idx)]).sum();
@@ -1473,7 +1538,7 @@ mod tests {
     #[test]
     fn test_update_r_no_diversity_penalty() {
         let labels = vec![0, 0];
-        let info = create_batch_info(&labels, 2);
+        let info = create_batch_info(&labels, 2).unwrap();
         let sigma = vec![1.0, 1.0];
         let theta = vec![0.0];
 
@@ -1490,7 +1555,8 @@ mod tests {
             42,
             r_init.as_ref(),
             &oe_init[..],
-        );
+        )
+        .unwrap();
 
         assert!(r_new[(0, 0)] > 0.6);
         assert!(r_new[(1, 1)] > 0.6);
@@ -1499,7 +1565,7 @@ mod tests {
     #[test]
     fn test_update_r_diversity_correction() {
         let labels = vec![0, 0, 0, 1];
-        let info = create_batch_info(&labels, 4);
+        let info = create_batch_info(&labels, 4).unwrap();
         let sigma = vec![1.0, 1.0];
         let theta = vec![2.0]; // strong penalty
 
@@ -1516,7 +1582,8 @@ mod tests {
             42,
             r_init.as_ref(),
             &oe_init[..],
-        );
+        )
+        .unwrap();
 
         for cell_idx in 0..4 {
             let col_sum: f32 = (0..2).map(|k| r_new[(k, cell_idx)]).sum();
@@ -1533,8 +1600,8 @@ mod tests {
     fn test_update_r_two_variables() {
         let labels0 = vec![0, 0, 1, 1];
         let labels1 = vec![0, 1, 0, 1];
-        let info0 = create_batch_info(&labels0, 4);
-        let info1 = create_batch_info(&labels1, 4);
+        let info0 = create_batch_info(&labels0, 4).unwrap();
+        let info1 = create_batch_info(&labels1, 4).unwrap();
 
         let sigma = vec![1.0, 1.0];
         let theta = vec![1.0, 1.0];
@@ -1554,7 +1621,8 @@ mod tests {
             42,
             r_init.as_ref(),
             &oe_init,
-        );
+        )
+        .unwrap();
 
         // Columns should still sum to 1
         for cell_idx in 0..4 {
@@ -1602,7 +1670,7 @@ mod tests {
     #[test]
     fn test_ridge_regression_basic() {
         let labels = vec![0, 0, 1, 1];
-        let info = create_batch_info(&labels, 4);
+        let info = create_batch_info(&labels, 4).unwrap();
 
         // Batch effect in feature 0
         let z_orig = mat![[1.0, 0.1], [1.1, 0.2], [5.0, 0.1], [5.1, 0.2],];
@@ -1646,7 +1714,7 @@ mod tests {
     #[test]
     fn test_ridge_regression_no_correction_needed() {
         let labels = vec![0, 0, 1, 1];
-        let info = create_batch_info(&labels, 4);
+        let info = create_batch_info(&labels, 4).unwrap();
 
         let z_orig = mat![[1.0, 2.0], [1.0, 2.0], [1.0, 2.0], [1.0, 2.0]];
         let r = mat![[1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 0.0]];
@@ -1694,7 +1762,7 @@ mod tests {
     #[test]
     fn test_ridge_regression_soft_assignments() {
         let labels = vec![0, 0, 1, 1];
-        let info = create_batch_info(&labels, 4);
+        let info = create_batch_info(&labels, 4).unwrap();
 
         let z_orig = mat![[1.0, 0.0], [1.0, 0.0], [5.0, 0.0], [5.0, 0.0]];
         let r = mat![[0.8, 0.9, 0.1, 0.2], [0.2, 0.1, 0.9, 0.8],];
@@ -1725,7 +1793,7 @@ mod tests {
     #[test]
     fn test_ridge_regression_preserves_dimensions() {
         let labels = vec![0, 1, 2];
-        let info = create_batch_info(&labels, 3);
+        let info = create_batch_info(&labels, 3).unwrap();
 
         let z_orig = mat![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]];
         let r = mat![[0.5, 0.5, 0.5], [0.5, 0.5, 0.5]];
@@ -1745,8 +1813,8 @@ mod tests {
     fn test_ridge_regression_two_variables() {
         let batch_labels = vec![0, 0, 1, 1, 2, 2];
         let sample_labels = vec![0, 1, 0, 1, 0, 1];
-        let info_batch = create_batch_info(&batch_labels, 6);
-        let info_sample = create_batch_info(&sample_labels, 6);
+        let info_batch = create_batch_info(&batch_labels, 6).unwrap();
+        let info_sample = create_batch_info(&sample_labels, 6).unwrap();
 
         let z_orig = mat![
             [1.0, 0.0],
@@ -1818,8 +1886,8 @@ mod tests {
     fn test_ridge_regression_two_vars_design_matrix_size() {
         let batch_labels = vec![0, 0, 1, 1];
         let sample_labels = vec![0, 1, 0, 1];
-        let info_batch = create_batch_info(&batch_labels, 4);
-        let info_sample = create_batch_info(&sample_labels, 4);
+        let info_batch = create_batch_info(&batch_labels, 4).unwrap();
+        let info_sample = create_batch_info(&sample_labels, 4).unwrap();
 
         let z_orig = mat![[1.0, 0.0], [1.0, 5.0], [5.0, 0.0], [5.0, 5.0],];
 
@@ -1873,8 +1941,8 @@ mod tests {
     fn test_objective_two_variables() {
         let labels0 = vec![0, 0, 1, 1];
         let labels1 = vec![0, 1, 0, 1];
-        let info0 = create_batch_info(&labels0, 4);
-        let info1 = create_batch_info(&labels1, 4);
+        let info0 = create_batch_info(&labels0, 4).unwrap();
+        let info1 = create_batch_info(&labels1, 4).unwrap();
 
         let sigma = vec![1.0, 1.0];
         let theta = vec![1.0, 1.0];

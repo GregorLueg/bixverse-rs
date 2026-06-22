@@ -12,6 +12,7 @@ use rayon::prelude::*;
 use crate::core::mat_struct::MatSliceView;
 use crate::core::math::sparse::*;
 use crate::prelude::*;
+use crate::single_cell::sc_batch_correction::batch_utils::process_batch_labels;
 
 ///////////
 // BBKNN //
@@ -87,6 +88,10 @@ fn get_batch_balanced_knn(
     let dist_metric: Dist = parse_ann_dist(&bbknn_params.knn_params.ann_dist).unwrap_or_default();
 
     let n_batches = unique_batches.len();
+
+    if n_batches == 1 {
+        return Err(BixverseErrors::NeedAtLeastTwoBatches { n_batches });
+    }
 
     let mut all_indices = vec![vec![0; bbknn_params.neighbours_within_batch * n_batches]; n_cells];
     let mut all_distances =
@@ -586,8 +591,13 @@ pub fn bbknn(
     verbose: usize,
 ) -> Result<(CompressedSparseData2<f32>, CompressedSparseData2<f32>), BixverseErrors> {
     let verbosity = parse_verbosity_level(verbose);
+    let (_, n_batches) = process_batch_labels(batch_labels);
 
-    // parse it and worst case, I default to Annoy
+    if n_batches == 1 {
+        return Err(BixverseErrors::NeedAtLeastTwoBatches { n_batches });
+    }
+
+    // parse and worst case KmkNnn
     let knn_method = parse_knn_method(&bbknn_params.knn_params.knn_method).unwrap_or_default();
 
     if verbosity.normal_verbosity() {

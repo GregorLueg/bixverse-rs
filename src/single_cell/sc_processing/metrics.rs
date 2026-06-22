@@ -4,13 +4,15 @@
 use ann_search_rs::utils::dist::euclidean_distance_static;
 use faer::MatRef;
 use indexmap::IndexSet;
-use rand::SeedableRng;
-use rand::rngs::StdRng;
-use rand::seq::SliceRandom;
+use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
-use statrs::distribution::ChiSquared;
-use statrs::distribution::ContinuousCDF;
+use statrs::distribution::{ChiSquared, ContinuousCDF};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+use thousands::*;
 
 use crate::assert_same_len;
 use crate::core::math::vector_helpers::rank_vector;
@@ -44,12 +46,17 @@ pub struct KbetResult {
 /// * `knn_data` - KNN data. Outer vector represents the cells, inner vector
 ///   the neighbour indices.
 /// * `batches` - Vector indicating the batch of each cell.
+/// * `verbose` - Controls verbosity of the function.
 ///
 /// ### Returns
 ///
 /// A `KbetResult` with per-cell p-values, chi-square statistics, and summary
 /// measures.
-pub fn kbet(knn_data: &[Vec<usize>], batches: &[usize]) -> KbetResult {
+pub fn kbet(
+    knn_data: &[Vec<usize>],
+    batches: &[usize],
+    verbose: bool,
+) -> Result<KbetResult, BixverseErrors> {
     let mut batch_counts = FxHashMap::default();
     for &batch in batches {
         *batch_counts.entry(batch).or_insert(0usize) += 1;
@@ -57,10 +64,21 @@ pub fn kbet(knn_data: &[Vec<usize>], batches: &[usize]) -> KbetResult {
     let total = batches.len() as f64;
     let batch_ids: Vec<usize> = batch_counts.keys().copied().collect();
     let n_batches = batch_ids.len();
+
+    if n_batches == 1 {
+        return Err(BixverseErrors::NeedAtLeastTwoBatches { n_batches });
+    }
+
     let dof = (n_batches - 1) as f64;
     let use_yates = n_batches == 2;
+    let n = knn_data.len();
+
+    if verbose {
+        println!("Running kBET on {} samples", n.separate_with_underscores())
+    }
 
     let chi_sq_dist = ChiSquared::new(dof).unwrap();
+    let counter = Arc::new(AtomicUsize::new(0));
 
     let results: Vec<(f64, f64)> = knn_data
         .par_iter()
@@ -85,6 +103,17 @@ pub fn kbet(knn_data: &[Vec<usize>], batches: &[usize]) -> KbetResult {
                 chi_square += diff * diff / expected;
             }
 
+            if verbose {
+                let count = counter.fetch_add(1, Ordering::Relaxed) + 1;
+                if count.is_multiple_of(100_000) {
+                    println!(
+                        " kBET: processed {} / {} cells.",
+                        count.separate_with_underscores(),
+                        n.separate_with_underscores()
+                    );
+                }
+            }
+
             let p_value = 1.0 - chi_sq_dist.cdf(chi_square);
             (chi_square, p_value)
         })
@@ -103,12 +132,12 @@ pub fn kbet(knn_data: &[Vec<usize>], batches: &[usize]) -> KbetResult {
         sorted_chi[sorted_chi.len() / 2]
     };
 
-    KbetResult {
+    Ok(KbetResult {
         p_values,
         chi_square_stats,
         mean_chi_square,
         median_chi_square,
-    }
+    })
 }
 
 ///////////////////////////
@@ -141,6 +170,7 @@ pub struct BatchSilhouetteResult {
 /// * `subsample` - Optional max cells to use. If Some and N exceeds this,
 ///   a random subsample is taken.
 /// * `seed` - Random seed for subsampling
+/// * `verbose` - Controls verbosity of the function.
 ///
 /// ### Returns
 ///
@@ -150,7 +180,8 @@ pub fn batch_silhouette_width(
     batch_labels: &[usize],
     subsample: Option<usize>,
     seed: usize,
-) -> BatchSilhouetteResult {
+    verbose: bool,
+) -> Result<BatchSilhouetteResult, BixverseErrors> {
     let n = embedding.nrows();
     let d = embedding.ncols();
     assert_eq!(batch_labels.len(), n);
@@ -173,13 +204,25 @@ pub fn batch_silhouette_width(
     let n_sub = indices.len();
     let sub_labels: Vec<usize> = indices.iter().map(|&i| batch_labels[i]).collect();
     let n_batches = sub_labels.iter().max().map(|&x| x + 1).unwrap_or(0);
-    assert!(n_batches >= 2, "Need at least 2 batches for silhouette");
 
-    // pre--extract rows as contiguous slices for SIMD
+    if n_batches == 1 {
+        return Err(BixverseErrors::NeedAtLeastTwoBatches { n_batches });
+    }
+
+    if verbose {
+        println!(
+            "Running batch silhouette calculations on {} samples.",
+            n_sub.separate_with_underscores()
+        )
+    }
+
+    // pre-extract rows as contiguous slices for SIMD
     let rows: Vec<Vec<f32>> = indices
         .iter()
         .map(|&i| (0..d).map(|j| embedding[(i, j)]).collect())
         .collect();
+
+    let counter = Arc::new(AtomicUsize::new(0));
 
     let per_cell: Vec<f32> = (0..n_sub)
         .into_par_iter()
@@ -214,6 +257,17 @@ pub fn batch_silhouette_width(
                 }
             }
 
+            if verbose {
+                let count = counter.fetch_add(1, Ordering::Relaxed) + 1;
+                if count.is_multiple_of(100_000) {
+                    println!(
+                        " Batch silhouette calculations: processed {} / {} cells.",
+                        count.separate_with_underscores(),
+                        n_sub.separate_with_underscores()
+                    );
+                }
+            }
+
             let max_ab = a.max(b);
             if max_ab > 0.0 { (b - a) / max_ab } else { 0.0 }
         })
@@ -229,11 +283,11 @@ pub fn batch_silhouette_width(
         sorted[n_sub / 2]
     };
 
-    BatchSilhouetteResult {
+    Ok(BatchSilhouetteResult {
         per_cell,
         mean_asw,
         median_asw,
-    }
+    })
 }
 
 //////////
@@ -263,13 +317,31 @@ pub struct LisiResult {
 ///
 /// * `knn_indices` - Neighbour indices per cell
 /// * `batch_labels` - Batch assignment per cell (length N)
+/// * `verbose` - Controls verbosity of the function.
 ///
 /// ### Returns
 ///
 /// `LisiResult` with per-cell scores and summaries
-pub fn batch_lisi(knn_indices: &[Vec<usize>], batch_labels: &[usize]) -> LisiResult {
+pub fn batch_lisi(
+    knn_indices: &[Vec<usize>],
+    batch_labels: &[usize],
+    verbose: bool,
+) -> Result<LisiResult, BixverseErrors> {
     let n = knn_indices.len();
     let n_batches = batch_labels.iter().max().map(|&x| x + 1).unwrap_or(0);
+
+    if n_batches == 1 {
+        return Err(BixverseErrors::NeedAtLeastTwoBatches { n_batches });
+    }
+
+    if verbose {
+        println!(
+            "Running LISI calculations on {} samples.",
+            n.separate_with_underscores()
+        )
+    }
+
+    let counter = Arc::new(AtomicUsize::new(0));
 
     let per_cell: Vec<f32> = knn_indices
         .par_iter()
@@ -289,6 +361,17 @@ pub fn batch_lisi(knn_indices: &[Vec<usize>], batch_labels: &[usize]) -> LisiRes
                 })
                 .sum();
 
+            if verbose {
+                let count = counter.fetch_add(1, Ordering::Relaxed) + 1;
+                if count.is_multiple_of(100_000) {
+                    println!(
+                        " LISI calculations: processed {} / {} cells.",
+                        count.separate_with_underscores(),
+                        n.separate_with_underscores()
+                    );
+                }
+            }
+
             1.0 / simpson
         })
         .collect();
@@ -303,11 +386,11 @@ pub fn batch_lisi(knn_indices: &[Vec<usize>], batch_labels: &[usize]) -> LisiRes
         sorted[n / 2]
     };
 
-    LisiResult {
+    Ok(LisiResult {
         per_cell,
         mean_lisi,
         median_lisi,
-    }
+    })
 }
 
 //////////////////
@@ -368,7 +451,7 @@ pub fn pairwise_gene_correlations(
                 }
                 let dense = rank_vector(&dense);
                 let mean = sum_simd_f32(&dense) / n_cells as f32;
-                let var = variance_simd_f32(&dense, mean) / (n_cells as f32 - 1.0);
+                let var = sum_squared_dev_simd_f32(&dense, mean) / (n_cells as f32 - 1.0);
                 let std = var.sqrt();
                 if std < 1e-8 {
                     vec![0_f32; n_cells]
@@ -376,13 +459,13 @@ pub fn pairwise_gene_correlations(
                     dense.iter().map(|&x| (x - mean) / std).collect()
                 }
             } else {
-                let (scaled, _, _) = scale_csc_chunk(chunk, n_cells);
+                let (scaled, _, _) = scale_csc_chunk(chunk, n_cells, true, true, None);
                 scaled
             }
         })
         .collect();
 
-    // Pairwise correlations via dot product
+    // pairwise correlations via dot product
     let denom = n_cells as f32 - 1.0;
 
     let res = gene_indices_1

@@ -1,5 +1,5 @@
 [![CI](https://github.com/GregorLueg/bixverse-rs/actions/workflows/test.yml/badge.svg)](https://github.com/GregorLueg/bixverse-rs/actions/workflows/test.yml)
-[![Crates.io](https://img.shields.io/crates/v/bixverse-rs.svg)](https://crates.io/crates/bixverse-rs)
+[![Crates.io Version](https://img.shields.io/crates/v/bixverse-rs.svg)](https://crates.io/crates/bixverse-rs)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 # bixverse-rs
@@ -19,19 +19,26 @@ all the core functionality extracted out.
 Slowly, but surely increase the number of methods that are implemented here. The
 next targets would be
 
-- NMF (and sparse versions of that)
-- Palantir for single-cell trajectories, see [Setty, et al.](https://www.nature.com/articles/s41587-019-0068-4)
-- NicheNet, see [Browaeys et al.](https://www.nature.com/articles/s41592-019-0667-5)
+- [ ] NMF for dense and sparse data
+- [ ] Palantir for single-cell trajectories, see
+  [Setty, et al.](https://www.nature.com/articles/s41587-019-0068-4).
+- [ ] Slingshot for single-cell trajectories, see
+  [Street, et al.](https://link.springer.com/article/10.1186/s12864-018-4772-0).
+- [x] NicheNet for single cell, see
+  [Browaeys et al.](https://www.nature.com/articles/s41592-019-0667-5).
 
 ### GPU accelerations
 
-Some of the matrix algebra in the package could benefit from GPU accelerations.
-This will be a longer term project...
+- [x] GPU-accelerated sparse, randomised SVD
+- [x] GPU-accelerated Harmony
+- [ ] GPU-accelerated BBKNN version
+- [x] GPU-accelerated correlations (Metal does not have the absolute greatest
+  performance here unfortunately...)
 
 ### Python interface
 
-Specifically, interfaces with the single cell binary files to support deep
-learning via the establised libraries here.
+- [ ] Data loader to pull in the counts from the binary files to expose the data
+  to Python-based deep learning frameworks (JAX, PyTorch).
 
 ## Updates
 

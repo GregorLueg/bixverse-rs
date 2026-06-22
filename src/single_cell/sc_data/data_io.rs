@@ -1229,7 +1229,7 @@ pub struct ParallelSparseReader {
     header: SparseDataHeader,
     /// Reference to the memory map for safe sharing across threads
     mmap: Arc<memmap2::Mmap>,
-    /// Start position of the chunks after the hader file
+    /// Start position of the chunks after the header file
     chunks_start: u64,
 }
 
@@ -1302,7 +1302,7 @@ impl ParallelSparseReader {
         &self,
         indices: &[usize],
     ) -> Result<Vec<CsrCellChunk>, BixverseErrors> {
-        if !self.header.cell_based {
+        if !self.is_cell_based() {
             return Err(BixverseErrors::ReaderModeMismatch {
                 actual: "gene-based",
                 requested: "cell-based",
@@ -1382,7 +1382,7 @@ impl ParallelSparseReader {
         &self,
         indices: &[usize],
     ) -> Result<Vec<CscGeneChunk>, BixverseErrors> {
-        if self.header.cell_based {
+        if !self.is_gene_based() {
             return Err(BixverseErrors::ReaderModeMismatch {
                 actual: "cell-based",
                 requested: "gene-based",
@@ -1411,6 +1411,59 @@ impl ParallelSparseReader {
                     .map_err(|_| BixverseErrors::ChunkDecompressionFailed(chunk_offset as u64))?;
 
                 CscGeneChunk::read_from_buffer(&decompressed)
+            })
+            .collect()
+    }
+
+    /// Read in genes by indices in a multi-threaded manner
+    ///
+    /// And filter the genes by `cells_to_keep` in parallel.
+    ///
+    /// ### Params
+    ///
+    /// * `indices` - Slice of index positions of the genes to retrieve
+    ///
+    /// ### Returns
+    ///
+    /// Returns an array of `CscGeneChunk`.
+    pub fn read_gene_parallel_filtered(
+        &self,
+        indices: &[usize],
+        cells_to_keep: &IndexSet<u32>,
+    ) -> Result<Vec<CscGeneChunk>, BixverseErrors> {
+        if !self.is_gene_based() {
+            return Err(BixverseErrors::ReaderModeMismatch {
+                actual: "cell-based",
+                requested: "gene-based",
+            });
+        }
+
+        indices
+            .par_iter()
+            .map(|&original_index| {
+                let chunk_index = *self
+                    .header
+                    .index_map
+                    .get(&original_index)
+                    .ok_or(BixverseErrors::ChunkIndexNotFound(original_index))?;
+                let chunk_offset =
+                    (self.chunks_start + self.header.chunk_offsets[chunk_index]) as usize;
+
+                let compressed_size = u64::from_le_bytes(
+                    self.mmap[chunk_offset..chunk_offset + 8]
+                        .try_into()
+                        .expect("8-byte slice by construction"),
+                ) as usize;
+
+                let compressed = &self.mmap[chunk_offset + 8..chunk_offset + 8 + compressed_size];
+                let decompressed = decompress_size_prepended(compressed)
+                    .map_err(|_| BixverseErrors::ChunkDecompressionFailed(chunk_offset as u64))?;
+
+                let mut chunk = CscGeneChunk::read_from_buffer(&decompressed)?;
+
+                chunk.filter_selected_cells(cells_to_keep);
+
+                Ok(chunk)
             })
             .collect()
     }
@@ -1471,7 +1524,7 @@ impl ParallelSparseReader {
     /// Vector of library sizes
     #[allow(dead_code)]
     pub fn read_cell_library_sizes(&self, indices: &[usize]) -> Result<Vec<usize>, BixverseErrors> {
-        if !self.header.cell_based {
+        if !self.is_cell_based() {
             return Err(BixverseErrors::ReaderModeMismatch {
                 actual: "gene-based",
                 requested: "cell-based",
@@ -1513,6 +1566,59 @@ impl ParallelSparseReader {
             .collect()
     }
 
+    /// Compute the shifted CLR per-cell offsets freshly from raw counts.
+    ///
+    /// The offset for cell i is `m_i = (1/D) * sum_j log1p(x_ij / s_i)`, where
+    /// D is the total gene count and s_i is the cell's library size. Size
+    /// factor is fixed at 1, independent of any size factor used during the
+    /// original normalisation. Cells are read in batches to bound peak
+    /// memory.
+    ///
+    /// ### Params
+    ///
+    /// * `indices` - Cell indices to compute offsets for
+    /// * `batch_size` - Number of cells to load per batch (100_000 is a
+    ///   sensible default for typical single cell data sets)
+    ///
+    /// ### Returns
+    ///
+    /// Vector of CLR offsets in the same order as `indices`.
+    pub fn get_clr_offsets(
+        &self,
+        indices: &[usize],
+        batch_size: Option<usize>,
+    ) -> Result<Vec<f64>, BixverseErrors> {
+        if !self.is_cell_based() {
+            return Err(BixverseErrors::ReaderModeMismatch {
+                actual: "gene-based",
+                requested: "cell-based",
+            });
+        }
+        let batch_size = batch_size.unwrap_or(CELL_BATCH_SIZE);
+
+        let n_genes = self.header.total_genes as f64;
+        let mut offsets = Vec::with_capacity(indices.len());
+
+        for batch in indices.chunks(batch_size) {
+            let cells = self.read_cells_parallel(batch)?;
+            let batch_offsets: Vec<f64> = cells
+                .par_iter()
+                .map(|chunk| {
+                    let inv_s = 1.0_f64 / chunk.library_size as f64;
+                    let sum: f64 = chunk
+                        .data_raw
+                        .iter()
+                        .map(|c| (c as f64 * inv_s).ln_1p())
+                        .sum();
+                    sum / n_genes
+                })
+                .collect();
+            offsets.extend_from_slice(&batch_offsets);
+        }
+
+        Ok(offsets)
+    }
+
     /// Read the NNZ for specific genes
     ///
     /// Reads directly from the chunk header bytes (offset 16-23) without
@@ -1526,7 +1632,7 @@ impl ParallelSparseReader {
     ///
     /// Vector of number of NNZ genes.
     pub fn read_gene_nnz(&self, indices: &[usize]) -> Result<Vec<usize>, BixverseErrors> {
-        if self.header.cell_based {
+        if !self.is_gene_based() {
             return Err(BixverseErrors::ReaderModeMismatch {
                 actual: "cell-based",
                 requested: "gene-based",
@@ -1576,6 +1682,24 @@ impl ParallelSparseReader {
     pub fn get_all_gene_nnz(&self) -> Result<Vec<usize>, BixverseErrors> {
         let iter: Vec<usize> = (0..self.header.total_genes).collect();
         self.read_gene_nnz(&iter)
+    }
+
+    /// Is the reader connected to a cell-based file?
+    ///
+    /// ### Returns
+    ///
+    /// Bool
+    pub fn is_cell_based(&self) -> bool {
+        self.header.cell_based
+    }
+
+    /// Is the reader connected to a gene-based file?
+    ///
+    /// ### Returns
+    ///
+    /// Bool
+    pub fn is_gene_based(&self) -> bool {
+        !self.header.cell_based
     }
 }
 

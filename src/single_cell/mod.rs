@@ -3,7 +3,6 @@
 //! reducing memory pressure.
 
 pub mod mc_analysis;
-pub mod mc_data;
 pub mod mc_generation;
 pub mod mc_processing;
 pub mod sc_analysis;
@@ -17,3 +16,6 @@ pub mod sc_utils;
 
 #[cfg(feature = "multi-modal")]
 pub mod multi_modal;
+
+/// How many cells to read in per given batch - global constant
+pub const CELL_BATCH_SIZE: usize = 50_000;

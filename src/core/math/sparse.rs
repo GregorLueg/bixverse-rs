@@ -67,6 +67,16 @@ pub enum CompressedSparseFormat {
     Csr,
 }
 
+/// Display implementation for [CompressedSparseFormat]
+impl std::fmt::Display for CompressedSparseFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CompressedSparseFormat::Csc => write!(f, "CSC"),
+            CompressedSparseFormat::Csr => write!(f, "CSR"),
+        }
+    }
+}
+
 impl CompressedSparseFormat {
     /// Returns boolean if it's CSC
     ///
@@ -219,7 +229,8 @@ where
     pub indices: Vec<u32>,
     /// The indptr of the data points
     pub indptr: Vec<u32>,
-    /// Enum defining if the data is stored in CSC or CSR
+    /// Enum defining if the data is stored in CSC or CSR, see
+    /// [CompressedSparseFormat]
     pub cs_type: CompressedSparseFormat,
     /// Optional second data slot for a different layer of the data (for
     /// example raw and normalised counts)
@@ -499,6 +510,24 @@ where
     /// A tuple of `(nrow, ncol)`
     pub fn shape(&self) -> (usize, usize) {
         self.shape
+    }
+
+    /// Return the number of rows
+    ///
+    /// ### Returns
+    ///
+    /// Number of rows
+    pub fn nrows(&self) -> usize {
+        self.shape.0
+    }
+
+    /// Return the number of columns
+    ///
+    /// ### Returns
+    ///
+    /// Number of columns
+    pub fn ncols(&self) -> usize {
+        self.shape.1
     }
 
     /// Returns the NNZ
@@ -794,9 +823,6 @@ where
         new_indices.set_len(nnz);
     }
 
-    // Reuse new_indptr as the write cursor — we'll restore it afterwards.
-    // Work on a mutable window so we don't need a separate `next` vec.
-    // We iterate old major indices and scatter into new positions.
     let old_major_len = sparse_data.indptr.len() - 1;
     for major in 0..old_major_len {
         for idx in sparse_data.indptr[major]..sparse_data.indptr[major + 1] {
@@ -1025,10 +1051,6 @@ where
 
     CompressedSparseData2::new_csr(&data, &indices, &indptr, None, shape)
 }
-
-///////////////////
-// Fix from here //
-///////////////////
 
 /// Optimised COO to CSR - assumes input is already sorted by (row, col)
 ///
@@ -1348,7 +1370,6 @@ where
 /// ### Params
 ///
 /// * `csr` - Mutable reference to the CSR matrix (modified in-place)
-#[allow(dead_code)]
 pub fn normalise_csr_rows_l1<T>(csr: &mut CompressedSparseData2<T>) -> Result<(), BixverseErrors>
 where
     T: BixverseNumeric + Into<f64>,
@@ -1442,23 +1463,27 @@ where
     coo_to_csr(&rows, &cols, &vals, mat.shape)
 }
 
-/// Sparse matrix-vector multiplication
+/// Sparse matrix @ dense vector: `M @ v`.
 ///
-/// Multiply a sparse CSR matrix with a vector
-///
-/// ### Params
-///
-/// * `mat` - The Compressed Sparse matrix in CSR format
-/// * `vec` - The Vector to multiply with
+/// Computes `result[i] = sum_j M[i, j] * v[j]` by iterating CSR rows.
 ///
 /// ### Params
 ///
-/// The resulting vector
-pub fn csr_matvec<T>(mat: &CompressedSparseData2<T>, vec: &[T]) -> Vec<T>
+/// * `mat` - CSR matrix of shape `(m, n)`.
+/// * `vec` - Dense vector of length `n`.
+///
+/// ### Returns
+///
+/// Dense vector of length `m`. Errors if `mat` is not CSR.
+pub fn csr_matvec<T>(mat: &CompressedSparseData2<T>, vec: &[T]) -> Result<Vec<T>, BixverseErrors>
 where
     T: BixverseNumeric,
     <T as std::ops::Add>::Output: std::cmp::PartialEq<T>,
 {
+    if !mat.cs_type.is_csr() {
+        return Err(BixverseErrors::SparseMatrixMustBeCsr);
+    }
+
     let mut result = vec![T::default(); mat.shape.0];
     for i in 0..mat.shape.0 {
         let row_start = mat.indptr[i] as usize;
@@ -1469,7 +1494,47 @@ where
         }
         result[i] = sum;
     }
-    result
+
+    Ok(result)
+}
+
+/// Dense vector @ sparse matrix: `v @ M`.
+///
+/// Computes `result[j] = sum_i v[i] * M[i, j]` by iterating CSR rows of `M`
+/// and scattering scaled row contributions into the output. Treats `v` as a
+/// row vector.
+///
+/// ### Params
+///
+/// * `vec` - Dense vector of length `m`.
+/// * `mat` - CSR matrix of shape `(m, n)`.
+///
+/// ### Returns
+///
+/// Dense vector of length `n`. Errors if `mat` is not CSR.
+pub fn csr_vecmat<T>(vec: &[T], mat: &CompressedSparseData2<T>) -> Result<Vec<T>, BixverseErrors>
+where
+    T: BixverseNumeric,
+{
+    if !mat.cs_type.is_csr() {
+        return Err(BixverseErrors::SparseMatrixMustBeCsr);
+    }
+
+    let n_cols = mat.ncols();
+    let mut out = vec![T::default(); n_cols];
+    for (j, &vj) in vec.iter().enumerate() {
+        if vj == T::default() {
+            continue;
+        }
+        let gs = mat.indptr[j] as usize;
+        let ge = mat.indptr[j + 1] as usize;
+        for q in gs..ge {
+            let t = mat.indices[q] as usize;
+            out[t] += vj * mat.data[q];
+        }
+    }
+
+    Ok(out)
 }
 
 /// Sparse accumulator for efficient sparse matrix multiplication
@@ -1644,7 +1709,7 @@ where
         data.extend(data_buf);
     }
 
-    // Build directly rather than via new_csr, which would .to_vec() the lot.
+    // build directly rather than via new_csr, which would .to_vec() the lot.
     Ok(CompressedSparseData2 {
         data,
         indices,
@@ -1655,9 +1720,187 @@ where
     })
 }
 
-/////////////////////////////////////
-// Lanczos Eigenvalue calculations //
-/////////////////////////////////////
+/////////////////////////////
+// Sparse dense operations //
+/////////////////////////////
+
+/// Sparse CSR @ sparse CSR -> dense
+///
+/// Parallel over output rows. For cases where you assume that the resulting
+/// matrix will become dense.
+///
+/// ### Params
+///
+/// * `a` - First matrix
+/// * `b` - Second matrix
+///
+/// ### Returns
+///
+/// Dense matrix product of both CSR matrices
+pub fn csr_sparse_matmul_dense<T>(
+    a: &CompressedSparseData2<T>,
+    b: &CompressedSparseData2<T>,
+) -> Result<Mat<T>, BixverseErrors>
+where
+    T: BixverseFloat + Send + Sync + Default,
+{
+    let ncol_a = a.shape().1;
+    let nrow_b = b.shape().0;
+
+    if !a.cs_type.is_csr() {
+        return Err(BixverseErrors::SparseMatrixMustBeCsr);
+    }
+    if !b.cs_type.is_csr() {
+        return Err(BixverseErrors::SparseMatrixMustBeCsr);
+    }
+    if ncol_a != nrow_b {
+        return Err(BixverseErrors::SparseMatrixMultiplication {
+            n_col_a: ncol_a,
+            n_row_b: nrow_b,
+        });
+    }
+
+    let n_rows = a.nrows();
+    let n_cols = b.ncols();
+    let m_indptr = &a.indptr;
+    let m_indices = &a.indices;
+    let m_data = &a.data;
+    let g_indptr = &b.indptr;
+    let g_indices = &b.indices;
+    let g_data = &b.data;
+
+    let dense_rows: Vec<Vec<T>> = (0..n_rows)
+        .into_par_iter()
+        .map(|i| {
+            let mut row = vec![T::zero(); n_cols];
+            let rs = m_indptr[i] as usize;
+            let re = m_indptr[i + 1] as usize;
+            for p in rs..re {
+                let j = m_indices[p] as usize;
+                let w = m_data[p];
+                let gs = g_indptr[j] as usize;
+                let ge = g_indptr[j + 1] as usize;
+                for q in gs..ge {
+                    let t = g_indices[q] as usize;
+                    row[t] += w * g_data[q];
+                }
+            }
+            row
+        })
+        .collect();
+
+    // this part can be sequential...
+    let mut out = Mat::zeros(n_rows, n_cols);
+    for (i, row) in dense_rows.into_iter().enumerate() {
+        for (j, v) in row.into_iter().enumerate() {
+            out[(i, j)] = v;
+        }
+    }
+
+    Ok(out)
+}
+
+///////////////////////
+// Sparse statistics //
+///////////////////////
+
+/// Calculate the column means for CSC [CompressedSparseData2]
+///
+/// ### Params
+///
+/// * `csc` - The [CompressedSparseData2] (needs to have floats)
+/// * `use_second_layer` - Use the second data layer
+///
+/// ### Returns
+///
+/// The column means
+pub fn sparse_col_means_csc<T>(
+    csc: &CompressedSparseData2<T>,
+    use_second_layer: bool,
+) -> Result<Vec<T>, BixverseErrors>
+where
+    T: BixverseFloat + BixverseSimd,
+{
+    if csc.cs_type.is_csr() {
+        return Err(BixverseErrors::SparseMatrixMustBeCsc);
+    }
+
+    let active_data: &[T] = if use_second_layer {
+        csc.data_2
+            .as_ref()
+            .ok_or(BixverseErrors::Data2NotAvailable)?
+            .as_slice()
+    } else {
+        csc.data.as_slice()
+    };
+
+    let (nrows, ncols) = csc.shape();
+    let nrows_t = T::from_usize(nrows).unwrap();
+    let mut col_means: Vec<T> = Vec::with_capacity(ncols);
+
+    for j in 0..ncols {
+        let start = csc.indptr[j] as usize;
+        let end = csc.indptr[j + 1] as usize;
+        let sum = T::bxv_sum(&active_data[start..end]);
+        col_means.push(sum / nrows_t);
+    }
+
+    Ok(col_means)
+}
+
+/// Calculate the column standard deviations for CSC [CompressedSparseData2]
+///
+/// ### Params
+///
+/// * `csc` - The [CompressedSparseData2] (needs to have floats)
+/// * `use_second_layer` - Use the second data layer
+///
+/// ### Returns
+///
+/// The column standard deviations
+pub fn sparse_col_sds_csc<T>(
+    csc: &CompressedSparseData2<T>,
+    use_second_layer: bool,
+) -> Result<Vec<T>, BixverseErrors>
+where
+    T: BixverseFloat + BixverseSimd,
+{
+    if csc.cs_type.is_csr() {
+        return Err(BixverseErrors::SparseMatrixMustBeCsc);
+    }
+
+    let active_data: &[T] = if use_second_layer {
+        csc.data_2
+            .as_ref()
+            .ok_or(BixverseErrors::Data2NotAvailable)?
+            .as_slice()
+    } else {
+        csc.data.as_slice()
+    };
+
+    let (nrows, ncols) = csc.shape();
+    let nrows_t = T::from_usize(nrows).unwrap();
+    let denom = nrows_t - T::one();
+    let mut col_sds: Vec<T> = Vec::with_capacity(ncols);
+
+    for j in 0..ncols {
+        let start = csc.indptr[j] as usize;
+        let end = csc.indptr[j + 1] as usize;
+        let col_slice = &active_data[start..end];
+        let implicit_zeros = T::from_usize(nrows - (end - start)).unwrap();
+
+        let mean = T::bxv_sum(col_slice) / nrows_t;
+        let ssd_nonzero = T::bxv_sum_squared_deviation(col_slice, mean);
+        let ssd_total = ssd_nonzero + implicit_zeros * mean * mean;
+        col_sds.push((ssd_total / denom).sqrt());
+    }
+
+    Ok(col_sds)
+}
+
+////////////////////////
+// Lanczos Eigenvalue //
+////////////////////////
 
 /// Helper function for dot product of two vectors
 ///
@@ -1881,6 +2124,10 @@ where
 /// * `n_components` - Number of singular values/vectors to compute
 /// * `seed` - For reproducibility
 /// * `use_second_layer` - If true, use data_2 instead of data
+/// * `col_means` - Optional column means for implicit mean centering
+/// * `col_stds` - Optional column sds for implicit variance normalising
+/// * `row_offsets` - Additional offsets (for example for CLR-type PCA in single
+///   cell).
 ///
 /// ### Returns
 ///
@@ -1892,6 +2139,7 @@ pub fn sparse_svd_lanczos<T, U, F>(
     use_second_layer: bool,
     col_means: Option<&[F]>,
     col_stds: Option<&[F]>,
+    row_offsets: Option<&[F]>,
 ) -> Result<SvdResults<F>, BixverseErrors>
 where
     T: BixverseNumeric + BixverseSimd + Into<F> + Clone,
@@ -1951,6 +2199,11 @@ where
         } else {
             F::zero()
         };
+        let x_sum: F = if row_offsets.is_some() {
+            x_scaled.iter().copied().sum()
+        } else {
+            F::zero()
+        };
 
         y.par_iter_mut().enumerate().for_each(|(i, yi)| {
             let mut sum = F::zero();
@@ -1961,13 +2214,20 @@ where
             if col_means.is_some() {
                 sum -= mean_dot;
             }
+            if let Some(off) = row_offsets {
+                sum -= off[i] * x_sum;
+            }
             *yi = sum;
         });
     };
 
-    // matrix-vector product for A^T (using CSC for memory contiguity)
     let matvec_at = |x: &[F], y: &mut [F]| {
         let x_sum: F = x.iter().copied().sum();
+        let m_dot_x: F = if let Some(off) = row_offsets {
+            off.iter().zip(x.iter()).map(|(&m_i, &xi)| m_i * xi).sum()
+        } else {
+            F::zero()
+        };
 
         y.par_iter_mut().enumerate().for_each(|(j, yj)| {
             let mut sum = F::zero();
@@ -1977,6 +2237,9 @@ where
             }
             if let Some(mu) = col_means {
                 sum -= mu[j] * x_sum;
+            }
+            if row_offsets.is_some() {
+                sum -= m_dot_x;
             }
             if let Some(sd) = col_stds {
                 sum /= sd[j];
@@ -2174,7 +2437,7 @@ mod tests {
             (2, 2),
         );
         let vec = vec![2.0, 1.0];
-        let result = csr_matvec(&a, &vec);
+        let result = csr_matvec(&a, &vec).unwrap();
         assert_eq!(result, vec![4.0, 3.0]);
     }
 
@@ -2216,7 +2479,7 @@ mod tests {
         let csr = CompressedSparseData2::<f64, f64>::new_csr(&data, &indices, &indptr, None, shape);
         let no_params: Option<&[f64]> = None;
 
-        let svd = sparse_svd_lanczos(&csr, 1, 42, false, no_params, no_params).unwrap();
+        let svd = sparse_svd_lanczos(&csr, 1, 42, false, no_params, no_params, None).unwrap();
 
         // Test correlation with theoretical U
         let u_col = svd.u.col(0);

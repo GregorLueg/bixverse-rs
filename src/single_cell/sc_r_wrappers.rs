@@ -6,16 +6,17 @@ use std::collections::HashMap;
 
 use crate::core::math::sparse::parse_compressed_sparse_format;
 use crate::ml::clustering::k_means::KMeansParamsWrappers;
-use crate::prelude::{VecConvert, VecFloatConvert};
+use crate::prelude::{BixverseFloat, VecConvert, VecFloatConvert};
 use crate::single_cell::mc_generation::{
     hdwgcna_meta_cells::BootstrappedMetaCellParams, metacells2::params::*,
     seacells::SEACellsParams, super_cells::SuperCellParams,
 };
-use crate::single_cell::sc_analysis::fast_clusters::FastLouvainParams;
 use crate::single_cell::sc_analysis::{
+    fast_clusters::FastLouvainParams,
     hotspot::HotSpotParams,
     meld::{MeldParams, parse_lap_type, parse_meld_filter},
     milo_r::MiloRParams,
+    nichenet::ligand_regulatory_potential::LigandTargetParams,
     scenic::{
         ExtraTreesConfig, GradientBoostingConfig, RandomForestConfig, RegressionLearner,
         ScenicParams,
@@ -23,20 +24,23 @@ use crate::single_cell::sc_analysis::{
     vision::SignatureGenes,
 };
 
-use crate::single_cell::sc_annotation::sc_type::{CellTypeMarkers, SctypeRes};
+use crate::single_cell::sc_annotation::{
+    sc_type::{CellTypeMarkers, SctypeRes},
+    symphony::SymphonyMapParams,
+};
 use crate::single_cell::sc_batch_correction::{
     bbknn::BbknnParams, fast_mnn::FastMnnParams, harmony::HarmonyParams,
     harmony_v2::HarmonyParamsV2,
 };
 use crate::single_cell::sc_data::h5ad_io::RawDataSlot;
 use crate::single_cell::sc_data::{
-    bin_merge_io::BinMergeTask, data_io::MinCellQuality, h5ad_io::parse_raw_slot,
-    h5ad_multifile_io::H5adFileTask, mtx_multifile_io::MtxFileTask,
-    sc_synthetic_data::CellTypeConfig,
+    bin_merge_io::BinMergeTask, data_io::MinCellQuality, h5_10x_io::parse_tenx_version,
+    h5_10x_multifile_io::TenxFileTask, h5ad_io::parse_raw_slot, h5ad_multifile_io::H5adFileTask,
+    mtx_multifile_io::MtxFileTask, sc_synthetic_data::CellTypeConfig,
 };
 use crate::single_cell::sc_processing::{
-    doublet_detection::BoostParams, knn::KnnParams, scdblfinder::ScDblFinderParams,
-    scrublet::ScrubletParams, utils_doublets::ScDblSimParams,
+    doublet_detection::BoostParams, knn::KnnParams, pca::SingleCellPcaParams,
+    scdblfinder::ScDblFinderParams, scrublet::ScrubletParams, utils_doublets::ScDblSimParams,
 };
 
 /////////////
@@ -923,6 +927,62 @@ impl FastLouvainParams<f32> {
     }
 }
 
+/////////
+// PCA //
+/////////
+
+impl SingleCellPcaParams {
+    /// Generate the [SingleCellPcaParams] from an R list.
+    ///
+    /// Should values not be found within the List, the parameters will default
+    /// to sensible defaults.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the BBKNN parameters.
+    ///
+    /// ### Return
+    ///
+    /// The [SingleCellPcaParams] with all of the parameters.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let defaults = SingleCellPcaParams::default();
+
+        let mean_center = params
+            .get("mean_center")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.mean_center);
+
+        let normalise_variance = params
+            .get("normalise_variance")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.normalise_variance);
+
+        let randomised = params
+            .get("randomised")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.randomised);
+
+        let clr = params
+            .get("clr")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.clr);
+
+        let size_factor = params
+            .get("size_factor")
+            .and_then(|v| v.as_real())
+            .unwrap_or(1e4) as f32;
+
+        Ok(Self {
+            mean_center,
+            normalise_variance,
+            randomised,
+            clr,
+            size_factor,
+        })
+    }
+}
+
 ///////////
 // BBKNN //
 ///////////
@@ -994,6 +1054,7 @@ impl FastMnnParams {
     /// The `FastMnnParams` with all of the parameters.
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let knn_params = KnnParams::from_r_list(r_list.clone())?;
+        let pca_params = SingleCellPcaParams::from_r_list(r_list.clone())?;
         let fastmnn_list: HashMap<&str, Robj> = r_list.try_into()?;
 
         let ndist = fastmnn_list
@@ -1026,6 +1087,7 @@ impl FastMnnParams {
             sparse_svd,
             cos_norm,
             knn_params,
+            pca_params,
         })
     }
 }
@@ -1575,6 +1637,46 @@ impl HarmonyParamsV2 {
     }
 }
 
+//////////////
+// Symphomy //
+//////////////
+
+/////////////////////
+// Symphony params //
+/////////////////////
+
+impl SymphonyMapParams {
+    /// Generate [SymphonyMapParams] from an R list.
+    ///
+    /// Should values not be found within the list, parameters will default
+    /// to sensible defaults based on Symphony R conventions.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the Symphony mapping parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The [SymphonyMapParams] with all parameters set.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params_list: HashMap<&str, Robj> = r_list.try_into()?;
+        let defaults = SymphonyMapParams::default();
+
+        let sigma = params_list
+            .get("sigma")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.sigma);
+        let lambda = params_list
+            .get("lambda")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.lambda);
+
+        Ok(Self { sigma, lambda })
+    }
+}
+
 ////////////////////
 // SCENIC - Trees //
 ////////////////////
@@ -2054,6 +2156,157 @@ impl MtxFileTask {
             mtx_path,
             gene_local_to_universe,
             cells_as_rows,
+        })
+    }
+}
+
+//////////////////
+// TenxFileTask //
+//////////////////
+
+impl TenxFileTask {
+    /// Generate a TenxFileTask from an R list
+    ///
+    /// Expects: exp_id, h5_path, version ("v2"/"v3"), no_cells, no_genes,
+    /// gene_local_to_universe (integer vector, NA for unmapped / non-gene
+    /// features, 0-indexed), feature_type (optional string).
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The R list to convert to [TenxFileTask].
+    ///
+    /// ### Returns
+    ///
+    /// Self.
+    pub fn from_r_list(r_list: List) -> extendr_api::Result<Self> {
+        let map: HashMap<&str, Robj> = r_list.try_into()?;
+        let exp_id = map
+            .get("exp_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::Other("exp_id missing or not a string".into()))?
+            .to_string();
+        let h5_path = map
+            .get("h5_path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::Other("h5_path missing or not a string".into()))?
+            .to_string();
+        let version_str = map
+            .get("version")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::Other("version missing or not a string".into()))?;
+        let version = parse_tenx_version(version_str)
+            .ok_or_else(|| Error::Other("version must be 'v2' or 'v3'".into()))?;
+        let no_cells = map
+            .get("no_cells")
+            .and_then(|v| v.as_integer())
+            .ok_or_else(|| Error::Other("no_cells missing or not an integer".into()))?
+            as usize;
+        let no_genes = map
+            .get("no_genes")
+            .and_then(|v| v.as_integer())
+            .ok_or_else(|| Error::Other("no_genes missing or not an integer".into()))?
+            as usize;
+        let mapping_raw: Vec<i32> = map
+            .get("gene_local_to_universe")
+            .ok_or_else(|| Error::Other("gene_local_to_universe missing".into()))?
+            .as_integer_slice()
+            .ok_or_else(|| Error::Other("gene_local_to_universe must be an integer vector".into()))?
+            .to_vec();
+        let gene_local_to_universe: Vec<Option<usize>> = mapping_raw
+            .into_iter()
+            .map(|v| {
+                if v == i32::MIN {
+                    None
+                } else {
+                    Some(v as usize)
+                }
+            })
+            .collect();
+        let feature_type = map
+            .get("feature_type")
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string());
+        Ok(Self {
+            exp_id,
+            h5_path,
+            version,
+            no_cells,
+            no_genes,
+            gene_local_to_universe,
+            feature_type,
+        })
+    }
+}
+
+//////////////
+// NicheNet //
+//////////////
+
+impl<T> LigandTargetParams<T>
+where
+    T: BixverseFloat,
+{
+    /// Generate the [LigandTargetParams] from an R list
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The R list to convert to [LigandTargetParams].
+    ///
+    /// ### Returns
+    ///
+    /// Self.
+    pub fn from_r_list(r_list: List) -> extendr_api::Result<Self> {
+        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let defaults = LigandTargetParams::default();
+
+        let lr_sig_hub = params
+            .get("lr_sig_hub")
+            .and_then(|x| x.as_real())
+            .and_then(|x| T::from_f64(x))
+            .unwrap_or(defaults.lr_sig_hub);
+        let gr_hub = params
+            .get("gr_hub")
+            .and_then(|x| x.as_real())
+            .and_then(|x| T::from_f64(x))
+            .unwrap_or(defaults.gr_hub);
+        let ltf_cutoff = params
+            .get("ltf_cutoff")
+            .and_then(|x| x.as_real())
+            .and_then(|x| T::from_f64(x))
+            .unwrap_or(defaults.ltf_cutoff);
+        let damping_factor = params
+            .get("damping_factor")
+            .and_then(|x| x.as_real())
+            .and_then(|x| T::from_f64(x))
+            .unwrap_or(defaults.damping_factor);
+        let tol = params
+            .get("tol")
+            .and_then(|x| x.as_real())
+            .and_then(|x| T::from_f64(x))
+            .unwrap_or(defaults.tol);
+        let max_iter = params
+            .get("max_iter")
+            .and_then(|x| x.as_integer())
+            .map(|x| x as usize)
+            .unwrap_or(defaults.max_iter);
+        let topology_correction = params
+            .get("topology_correction")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(defaults.topology_correction);
+        let secondary_targets = params
+            .get("secondary_targets")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(defaults.secondary_targets);
+
+        Ok(Self {
+            lr_sig_hub,
+            gr_hub,
+            ltf_cutoff,
+            damping_factor,
+            max_iter,
+            tol,
+            secondary_targets,
+            topology_correction,
         })
     }
 }

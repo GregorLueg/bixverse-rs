@@ -23,7 +23,7 @@ use crate::prelude::*;
 use crate::single_cell::sc_batch_correction::batch_utils::cosine_normalise;
 
 use super::harmony::{
-    BatchInfo, OEPair, compute_all_diversity_statistics, compute_cosine_distances,
+    BatchInfo, HarmonyResult, OEPair, compute_all_diversity_statistics, compute_cosine_distances,
     compute_scaled_distances, create_batch_infos, initialise_r_from_dist, run_kmeans_cosine,
     update_centroids_from_r,
 };
@@ -107,7 +107,7 @@ impl Default for HarmonyParamsV2 {
 /// ### Returns
 ///
 /// Nested Vec: `[var_idx][level_idx] -> f32` theta value
-fn expand_theta(theta: &[f32], batch_infos: &[BatchInfo], k: usize, tau: f32) -> Vec<Vec<f32>> {
+pub fn expand_theta(theta: &[f32], batch_infos: &[BatchInfo], k: usize, tau: f32) -> Vec<Vec<f32>> {
     batch_infos
         .iter()
         .enumerate()
@@ -143,7 +143,7 @@ fn expand_theta(theta: &[f32], batch_infos: &[BatchInfo], k: usize, tau: f32) ->
 /// ### Returns
 ///
 /// Whether convergence is reached
-fn check_convergence(objectives: &[f32], window_size: usize, epsilon: f32) -> bool {
+pub fn check_convergence(objectives: &[f32], window_size: usize, epsilon: f32) -> bool {
     let n = objectives.len();
     if n < 2 * window_size {
         return false;
@@ -191,57 +191,54 @@ pub fn compute_objective_v2(
 ) -> f32 {
     let k = r.nrows();
     let n = r.ncols();
+    let n_vars = batch_infos.len();
     let norm_const = 2000.0 / n as f32;
 
-    let kmeans_plus_entropy: f32 = (0..n)
+    // precompute log_ratio per variable (small K x B tables).
+    let log_ratios: Vec<Vec<f32>> = batch_infos
+        .iter()
+        .enumerate()
+        .map(|(var_idx, info)| {
+            let b = info.n_levels;
+            let OEPair { o, e } = &oe_pairs[var_idx];
+            let mut lr = vec![0.0f32; k * b];
+            for cluster in 0..k {
+                for level in 0..b {
+                    let o_val = o[(cluster, level)];
+                    let e_val = e[(cluster, level)];
+                    lr[cluster * b + level] = ((o_val + e_val + 1.0) / (2.0 * e_val + 1.0)).ln();
+                }
+            }
+            lr
+        })
+        .collect();
+
+    // single fused sweep over cells: kmeans + entropy + all variables'
+    // cross-entropy in one go...
+    let total: f32 = (0..n)
         .into_par_iter()
-        .map(|cell_idx| {
+        .map(|cell| {
             let mut acc = 0.0f32;
-            for cluster_idx in 0..k {
-                let r_val = r[(cluster_idx, cell_idx)];
-                acc += r_val * dist_mat[(cluster_idx, cell_idx)];
+            for cluster in 0..k {
+                let r_val = r[(cluster, cell)];
+                let s_k = sigma[cluster];
+                acc += r_val * dist_mat[(cluster, cell)];
                 if r_val > 0.0 {
-                    acc += r_val * r_val.ln() * sigma[cluster_idx];
+                    acc += r_val * r_val.ln() * s_k;
+                }
+                for var_idx in 0..n_vars {
+                    let info = &batch_infos[var_idx];
+                    let level = info.cell_to_level[cell];
+                    let theta_l = theta_expanded[var_idx][level];
+                    let lr = log_ratios[var_idx][cluster * info.n_levels + level];
+                    acc += r_val * s_k * theta_l * lr;
                 }
             }
             acc
         })
         .sum();
 
-    let mut cross_entropy = 0.0f32;
-    for (var_idx, info) in batch_infos.iter().enumerate() {
-        let OEPair { o, e } = &oe_pairs[var_idx];
-        let b = info.n_levels;
-
-        let mut log_ratio = vec![0.0f32; k * b];
-        for cluster_idx in 0..k {
-            for level_idx in 0..b {
-                let o_val = o[(cluster_idx, level_idx)];
-                let e_val = e[(cluster_idx, level_idx)];
-                log_ratio[cluster_idx * b + level_idx] =
-                    ((o_val + e_val + 1.0) / (2.0 * e_val + 1.0)).ln();
-            }
-        }
-
-        let theta_levels = &theta_expanded[var_idx];
-        let ce_v: f32 = (0..n)
-            .into_par_iter()
-            .map(|cell_idx| {
-                let level = info.cell_to_level[cell_idx];
-                let theta_l = theta_levels[level];
-                let mut acc = 0.0f32;
-                for cluster_idx in 0..k {
-                    let r_val = r[(cluster_idx, cell_idx)];
-                    acc +=
-                        r_val * sigma[cluster_idx] * theta_l * log_ratio[cluster_idx * b + level];
-                }
-                acc
-            })
-            .sum();
-        cross_entropy += ce_v;
-    }
-
-    (kmeans_plus_entropy + cross_entropy) * norm_const
+    total * norm_const
 }
 
 ///////////////////
@@ -311,12 +308,16 @@ pub fn update_r_with_diversity_v2(
     let n_blocks = (1.0 / block_size).ceil() as usize;
     let cells_per_block = (n as f32 * block_size) as usize;
 
+    // re-used across blocks; sized to the largest block.
+    let mut new_cols_flat = vec![0.0f32; cells_per_block * k];
+
     for block_idx in 0..n_blocks {
         let idx_min = block_idx * cells_per_block;
         let idx_max = ((block_idx + 1) * cells_per_block).min(n);
         let block = &update_order[idx_min..idx_max];
+        let block_len = block.len();
 
-        // step 1: remove block cells from O and r_sum
+        // step 1: remove block cells from O and r_sum.
         for &cell_idx in block {
             for cluster_idx in 0..k {
                 r_sum[cluster_idx] -= r[(cluster_idx, cell_idx)];
@@ -330,13 +331,14 @@ pub fn update_r_with_diversity_v2(
             }
         }
 
-        // step 2: recompute R with stabilised penalty (parallel over cells)
-        let new_cols: Vec<Vec<f32>> = {
+        // step 2: recompute R for block cells into a pre-allocated flat buffer.
+        {
             let o_refs: Vec<MatRef<f32>> = oe.iter().map(|p| p.o.as_ref()).collect();
-            block
-                .par_iter()
-                .map(|&cell_idx| {
-                    let mut col = vec![0.0f32; k];
+            new_cols_flat[..block_len * k]
+                .par_chunks_mut(k)
+                .enumerate()
+                .for_each(|(i, col)| {
+                    let cell_idx = block[i];
                     let mut col_sum = 0.0f32;
                     for cluster_idx in 0..k {
                         let base = scale_dist[(cluster_idx, cell_idx)];
@@ -357,18 +359,16 @@ pub fn update_r_with_diversity_v2(
                             *v /= col_sum;
                         }
                     }
-                    col
-                })
-                .collect()
-        };
+                });
+        }
 
         for (i, &cell_idx) in block.iter().enumerate() {
             for cluster_idx in 0..k {
-                r[(cluster_idx, cell_idx)] = new_cols[i][cluster_idx];
+                r[(cluster_idx, cell_idx)] = new_cols_flat[i * k + cluster_idx];
             }
         }
 
-        // step 3: add block cells back to O and r_sum
+        // step 3: add block cells back to O and r_sum.
         for &cell_idx in block {
             for cluster_idx in 0..k {
                 r_sum[cluster_idx] += r[(cluster_idx, cell_idx)];
@@ -383,7 +383,7 @@ pub fn update_r_with_diversity_v2(
         }
     }
 
-    // rebuild E = r_sum (outer) pr_b for each variable
+    // rebuild E = r_sum (outer) pr_b for each variable.
     for (var_idx, info) in batch_infos.iter().enumerate() {
         let b = info.n_levels;
         let e = &mut oe[var_idx].e;
@@ -418,7 +418,7 @@ pub fn update_r_with_diversity_v2(
 ///
 /// `Some(W)` (p x d) on success, `None` if the Schur complement is
 /// degenerate (caller should fall back to LU)
-fn solve_arrowhead(design_cov: &Mat<f32>, phi_z: &Mat<f32>) -> Option<Mat<f32>> {
+pub fn solve_arrowhead(design_cov: &Mat<f32>, phi_z: &Mat<f32>) -> Option<Mat<f32>> {
     let p = design_cov.nrows();
     let d = phi_z.ncols();
 
@@ -482,7 +482,7 @@ fn solve_arrowhead(design_cov: &Mat<f32>, phi_z: &Mat<f32>) -> Option<Mat<f32>> 
 /// ### Returns
 ///
 /// W (p x d)
-fn solve_lu(design_cov: &Mat<f32>, phi_z: &Mat<f32>) -> Mat<f32> {
+pub fn solve_lu(design_cov: &Mat<f32>, phi_z: &Mat<f32>) -> Mat<f32> {
     let p = design_cov.nrows();
     let d = phi_z.ncols();
 
@@ -496,16 +496,181 @@ fn solve_lu(design_cov: &Mat<f32>, phi_z: &Mat<f32>) -> Mat<f32> {
     Mat::<f32>::from_fn(p, d, |i, j| w_f64[(i, j)] as f32)
 }
 
-/// Ridge regression correction with batch pruning, arrowhead optimisation, and
-/// optional dynamic lambda.
+/// Single-covariate fast path.
 ///
-/// The K per-cluster regressions are independent and are solved in parallel.
-/// Each cluster prunes low-occupancy levels, builds a reduced design matrix
-/// from the qualifying levels, and solves via arrowhead inversion (single
-/// active covariate) or LU. The batch corrections are then subtracted in a
-/// single pass that is parallel over cells, summing every cluster's
-/// contribution per cell. A per-variable `level -> column` lookup avoids
-/// rescanning the column map for every cell.
+/// One pass over cells builds the weighted segmented sum `S[level, cluster, :]`;
+/// each cluster's arrowhead system is then assembled from `S`, `O`, and `r_sum`
+/// without any further cell scan. Mirrors the GPU formulation in `harmony_gpu`.
+///
+/// ### Params
+///
+/// * `z_orig` - Original (uncorrected) data (N x d)
+/// * `r` - Soft assignments (K x N)
+/// * `info` - Batch information for the single covariate
+/// * `oe` - Observed/expected pair (used for pruning and dynamic lambda)
+/// * `lambda` - Fixed ridge penalty (used when `use_dynamic_lambda` is false)
+/// * `alpha` - Dynamic lambda multiplier: `lambda_kb = alpha * E_kb`
+/// * `use_dynamic_lambda` - Whether to use dynamic or fixed lambda
+/// * `batch_proportion_cutoff` - Minimum `O[k,b] / N_b` to include a level
+///
+/// ### Returns
+///
+/// Corrected data (N x d)
+#[allow(clippy::too_many_arguments)]
+fn ridge_regression_correction_v2_single(
+    z_orig: MatRef<f32>,
+    r: MatRef<f32>,
+    info: &BatchInfo,
+    oe: &OEPair,
+    lambda: f32,
+    alpha: f32,
+    use_dynamic_lambda: bool,
+    batch_proportion_cutoff: f32,
+) -> Mat<f32> {
+    let n = z_orig.nrows();
+    let d = z_orig.ncols();
+    let k = r.nrows();
+    let b = info.n_levels;
+
+    // Step 1: weighted segmented sum S in row-major [b * k * d], single cell sweep.
+    let s: Vec<f32> = (0..n)
+        .into_par_iter()
+        .fold(
+            || vec![0.0f32; b * k * d],
+            |mut acc, cell| {
+                let level = info.cell_to_level[cell];
+                for cluster in 0..k {
+                    let r_val = r[(cluster, cell)];
+                    let base = (level * k + cluster) * d;
+                    for feat in 0..d {
+                        acc[base + feat] += r_val * z_orig[(cell, feat)];
+                    }
+                }
+                acc
+            },
+        )
+        .reduce(
+            || vec![0.0f32; b * k * d],
+            |mut a, b_local| {
+                for i in 0..a.len() {
+                    a[i] += b_local[i];
+                }
+                a
+            },
+        );
+
+    let r_sum: Vec<f32> = (0..k)
+        .map(|cluster| (0..b).map(|level| oe.o[(cluster, level)]).sum::<f32>())
+        .collect();
+
+    // Step 2: per-cluster arrowhead solve (parallel; tiny systems).
+    type Solution = (Vec<usize>, Mat<f32>);
+    let solutions: Vec<Option<Solution>> = (0..k)
+        .into_par_iter()
+        .map(|cluster| {
+            let mut passing: Vec<usize> = Vec::new();
+            for level in 0..b {
+                let n_cells = info.batch_indices[level].len();
+                if n_cells == 0 {
+                    continue;
+                }
+                let avg_r = oe.o[(cluster, level)] / n_cells as f32;
+                if avg_r > batch_proportion_cutoff {
+                    passing.push(level);
+                }
+            }
+            if passing.len() <= 1 {
+                return None;
+            }
+
+            let p = 1 + passing.len();
+            let mut design = Mat::<f32>::zeros(p, p);
+            let mut phi_z = Mat::<f32>::zeros(p, d);
+
+            // Intercept: r_sum at (0,0); phi_z[0] = sum_l S[l, cluster, :]
+            design[(0, 0)] = r_sum[cluster];
+            for level in 0..b {
+                let base = (level * k + cluster) * d;
+                for feat in 0..d {
+                    phi_z[(0, feat)] += s[base + feat];
+                }
+            }
+
+            // Arrowhead arms for passing levels
+            for (col_off, &level) in passing.iter().enumerate() {
+                let cc = 1 + col_off;
+                let o_val = oe.o[(cluster, level)];
+                design[(0, cc)] = o_val;
+                design[(cc, 0)] = o_val;
+                design[(cc, cc)] = o_val;
+                let base = (level * k + cluster) * d;
+                for feat in 0..d {
+                    phi_z[(cc, feat)] = s[base + feat];
+                }
+            }
+
+            // Ridge penalty on batch diagonal (intercept unpenalised)
+            if use_dynamic_lambda {
+                for (col_off, &level) in passing.iter().enumerate() {
+                    let e_val = oe.e[(cluster, level)];
+                    design[(1 + col_off, 1 + col_off)] += alpha * e_val;
+                }
+            } else {
+                for i in 1..p {
+                    design[(i, i)] += lambda;
+                }
+            }
+
+            let w = solve_arrowhead(&design, &phi_z).unwrap_or_else(|| solve_lu(&design, &phi_z));
+
+            Some((passing, w))
+        })
+        .collect();
+
+    // Per-cluster level -> column lookup for the apply step.
+    let lookups: Vec<Vec<i32>> = solutions
+        .iter()
+        .map(|sol| {
+            let mut lookup = vec![-1i32; b];
+            if let Some((passing, _)) = sol {
+                for (pos, &level) in passing.iter().enumerate() {
+                    lookup[level] = (1 + pos) as i32;
+                }
+            }
+            lookup
+        })
+        .collect();
+
+    // Step 3: apply correction, parallel over cells.
+    let mut out = vec![0.0f32; n * d];
+    out.par_chunks_mut(d).enumerate().for_each(|(cell, row)| {
+        for feat in 0..d {
+            row[feat] = z_orig[(cell, feat)];
+        }
+        let level = info.cell_to_level[cell];
+        for cluster in 0..k {
+            let c = lookups[cluster][level];
+            if c >= 0
+                && let Some((_, w)) = &solutions[cluster]
+            {
+                let r_val = r[(cluster, cell)];
+                let c = c as usize;
+                for feat in 0..d {
+                    row[feat] -= r_val * w[(c, feat)];
+                }
+            }
+        }
+    });
+
+    Mat::from_fn(n, d, |i, j| out[i * d + j])
+}
+
+/// Multi-covariate fallback.
+///
+/// Builds a joint design matrix across all covariates per cluster. Active
+/// columns span every qualifying level from every variable; off-diagonal
+/// covariance blocks are filled in a single cell sweep. Systems with exactly
+/// one active variable are solved via arrowhead inversion; all others use LU.
 ///
 /// ### Params
 ///
@@ -523,7 +688,7 @@ fn solve_lu(design_cov: &Mat<f32>, phi_z: &Mat<f32>) -> Mat<f32> {
 ///
 /// Corrected data (N x d)
 #[allow(clippy::too_many_arguments)]
-pub fn ridge_regression_correction_v2(
+fn ridge_regression_correction_v2_multi(
     z_orig: MatRef<f32>,
     r: MatRef<f32>,
     batch_infos: &[BatchInfo],
@@ -541,14 +706,10 @@ pub fn ridge_regression_correction_v2(
     let o_refs: Vec<MatRef<f32>> = oe_pairs.iter().map(|p| p.o.as_ref()).collect();
     let e_refs: Vec<MatRef<f32>> = oe_pairs.iter().map(|p| p.e.as_ref()).collect();
 
-    // Phase 1 (parallel over clusters): solve each cluster's regression.
-    // For each cluster we keep its per-variable level->column lookup and the
-    // solved weights W (p x d). Clusters with nothing to correct return None.
     type Solution = (Vec<Vec<i32>>, Mat<f32>);
     let solutions: Vec<Option<Solution>> = (0..k)
         .into_par_iter()
         .map(|cluster_idx| {
-            // batch pruning: column map and per-variable level->column lookup
             let mut col_map: Vec<(usize, usize)> = Vec::new();
             let mut level_to_col: Vec<Vec<i32>> = batch_infos
                 .iter()
@@ -615,7 +776,6 @@ pub fn ridge_regression_correction_v2(
                 }
             }
 
-            // lambda on batch columns only (intercept at col 0 gets no penalty)
             if use_dynamic_lambda {
                 for (col_offset, &(var_idx, level_idx)) in col_map.iter().enumerate() {
                     let e_val = e_refs[var_idx][(cluster_idx, level_idx)];
@@ -638,9 +798,6 @@ pub fn ridge_regression_correction_v2(
         })
         .collect();
 
-    // Phase 2 (parallel over cells): subtract every cluster's batch correction.
-    // Built row-major so each cell writes a contiguous row; intercept (row 0 of
-    // each W) is never subtracted.
     let mut out = vec![0.0f32; n * d];
     out.par_chunks_mut(d)
         .enumerate()
@@ -668,6 +825,68 @@ pub fn ridge_regression_correction_v2(
     Mat::from_fn(n, d, |i, j| out[i * d + j])
 }
 
+/// Ridge regression correction with batch pruning, arrowhead optimisation, and
+/// optional dynamic lambda.
+///
+/// The K per-cluster regressions are independent and are solved in parallel.
+/// Each cluster prunes low-occupancy levels, builds a reduced design matrix
+/// from the qualifying levels, and solves via arrowhead inversion (single
+/// active covariate) or LU. The batch corrections are then subtracted in a
+/// single pass that is parallel over cells, summing every cluster's
+/// contribution per cell. A per-variable `level -> column` lookup avoids
+/// rescanning the column map for every cell.
+///
+/// ### Params
+///
+/// * `z_orig` - Original (uncorrected) data (N x d)
+/// * `r` - Soft assignments (K x N)
+/// * `batch_infos` - Batch information per variable
+/// * `oe_pairs` - Observed/expected pairs per variable (used for pruning
+///   and dynamic lambda)
+/// * `lambda` - Fixed ridge penalty (used when `use_dynamic_lambda` is false)
+/// * `alpha` - Dynamic lambda multiplier: `lambda_kb = alpha * E_kb`
+/// * `use_dynamic_lambda` - Whether to use dynamic or fixed lambda
+/// * `batch_proportion_cutoff` - Minimum `O[k,b] / N_b` to include a level
+///
+/// ### Returns
+///
+/// Corrected data (N x d)
+#[allow(clippy::too_many_arguments)]
+pub fn ridge_regression_correction_v2(
+    z_orig: MatRef<f32>,
+    r: MatRef<f32>,
+    batch_infos: &[BatchInfo],
+    oe_pairs: &[OEPair],
+    lambda: f32,
+    alpha: f32,
+    use_dynamic_lambda: bool,
+    batch_proportion_cutoff: f32,
+) -> Mat<f32> {
+    if batch_infos.len() == 1 {
+        ridge_regression_correction_v2_single(
+            z_orig,
+            r,
+            &batch_infos[0],
+            &oe_pairs[0],
+            lambda,
+            alpha,
+            use_dynamic_lambda,
+            batch_proportion_cutoff,
+        )
+    } else {
+        ridge_regression_correction_v2_multi(
+            z_orig,
+            r,
+            batch_infos,
+            oe_pairs,
+            lambda,
+            alpha,
+            use_dynamic_lambda,
+            batch_proportion_cutoff,
+        )
+    }
+}
+
 //////////////////
 // Harmony (v2) //
 //////////////////
@@ -689,13 +908,13 @@ pub fn ridge_regression_correction_v2(
 /// ### Returns
 ///
 /// Corrected PCA embedding (N x d)
-pub fn harmony_v2(
+pub fn harmony_v2_with_state(
     pca: MatRef<f32>,
     batch_labels: &[Vec<usize>],
     params: &HarmonyParamsV2,
     seed: usize,
     verbose: usize,
-) -> Result<Mat<f32>, BixverseErrors> {
+) -> Result<HarmonyResult, BixverseErrors> {
     let start = Instant::now();
 
     let verbosity = parse_verbosity_level(verbose);
@@ -706,7 +925,7 @@ pub fn harmony_v2(
 
     assert!(n_vars >= 1, "At least one batch variable required");
 
-    let batch_infos = create_batch_infos(batch_labels, n);
+    let batch_infos = create_batch_infos(batch_labels, n)?;
 
     if verbosity.normal_verbosity() {
         println!(
@@ -770,7 +989,7 @@ pub fn harmony_v2(
     )?;
 
     let mut dist_mat = compute_cosine_distances(y.as_ref(), z_cos.as_ref());
-    let mut r = initialise_r_from_dist(dist_mat.as_ref(), &sigma);
+    let mut r = initialise_r_from_dist(dist_mat.as_ref(), &sigma)?;
     let mut oe_pairs = compute_all_diversity_statistics(r.as_ref(), &batch_infos);
 
     let initial_obj = compute_objective_v2(
@@ -796,9 +1015,11 @@ pub fn harmony_v2(
             println!("  Running k-means clustering...");
         }
 
+        let start_iter = Instant::now();
+
         // distances are fixed across the inner loop, so the base assignments
         // are computed once per round here rather than inside each update.
-        let scale_dist = compute_scaled_distances(dist_mat.as_ref(), &sigma);
+        let scale_dist = compute_scaled_distances(dist_mat.as_ref(), &sigma)?;
 
         // inner loop: refine R with diversity penalty, distances fixed
         for kmeans_iter in 0..params.max_iter_kmeans {
@@ -866,7 +1087,7 @@ pub fn harmony_v2(
         dist_mat = compute_cosine_distances(y.as_ref(), z_cos.as_ref());
 
         // re-initialise R from new distances (diversity applied in next inner loop)
-        r = initialise_r_from_dist(dist_mat.as_ref(), &sigma);
+        r = initialise_r_from_dist(dist_mat.as_ref(), &sigma)?;
         oe_pairs = compute_all_diversity_statistics(r.as_ref(), &batch_infos);
 
         let harmony_obj = *objectives_kmeans.last().unwrap();
@@ -874,7 +1095,11 @@ pub fn harmony_v2(
 
         if verbosity.normal_verbosity() {
             println!("  Harmony objective: {:.4}", harmony_obj);
-            println!("   Finished iteration in {:.2?}", start.elapsed());
+            println!(
+                "   Finished iteration in {:.2?} / Total runtime {:.2?}",
+                start_iter.elapsed(),
+                start.elapsed()
+            );
         }
 
         if harmony_iter >= 1 {
@@ -894,7 +1119,34 @@ pub fn harmony_v2(
         println!(" Finished Harmony {:.2?}", start.elapsed());
     }
 
-    Ok(z_corr)
+    Ok(HarmonyResult { z_corr, r })
+}
+
+/// Run Harmony v2 batch correction.
+///
+/// The outer loop alternates between diversity-penalised soft clustering
+/// (with fixed distances per round) and batch-pruned ridge regression.
+///
+/// ### Params
+///
+/// * `pca` - PCA embedding (N x d)
+/// * `batch_labels` - one label slice per variable, each of length N
+/// * `params` - Harmony v2 hyperparameters
+/// * `seed` - Random seed
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
+///
+/// ### Returns
+///
+/// Corrected PCA embedding (N x d)
+pub fn harmony_v2(
+    pca: MatRef<f32>,
+    batch_labels: &[Vec<usize>],
+    params: &HarmonyParamsV2,
+    seed: usize,
+    verbose: usize,
+) -> Result<Mat<f32>, BixverseErrors> {
+    Ok(harmony_v2_with_state(pca, batch_labels, params, seed, verbose)?.z_corr)
 }
 
 ///////////
@@ -913,7 +1165,7 @@ mod tests {
     #[test]
     fn test_expand_theta_tau_zero() {
         let labels = vec![0, 0, 1, 1, 1];
-        let info = create_batch_info(&labels, 5);
+        let info = create_batch_info(&labels, 5).unwrap();
         let result = expand_theta(&[2.0], &[info], 10, 0.0);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].len(), 2);
@@ -924,7 +1176,7 @@ mod tests {
     #[test]
     fn test_expand_theta_tau_positive() {
         let labels = vec![0, 0, 1, 1, 1, 1, 1, 1, 1, 1];
-        let info = create_batch_info(&labels, 10);
+        let info = create_batch_info(&labels, 10).unwrap();
         let result = expand_theta(&[2.0], &[info], 5, 5.0);
 
         // Level 0 has 2 cells, level 1 has 8 cells
@@ -945,8 +1197,8 @@ mod tests {
     fn test_expand_theta_multiple_variables() {
         let labels0 = vec![0, 0, 1, 1];
         let labels1 = vec![0, 1, 2, 0];
-        let info0 = create_batch_info(&labels0, 4);
-        let info1 = create_batch_info(&labels1, 4);
+        let info0 = create_batch_info(&labels0, 4).unwrap();
+        let info1 = create_batch_info(&labels1, 4).unwrap();
         let result = expand_theta(&[2.0, 3.0], &[info0, info1], 10, 0.0);
 
         assert_eq!(result.len(), 2);
@@ -976,7 +1228,7 @@ mod tests {
     #[test]
     fn test_objective_v2_finite_and_positive() {
         let labels = vec![0, 0, 1];
-        let info = create_batch_info(&labels, 3);
+        let info = create_batch_info(&labels, 3).unwrap();
         let sigma = vec![1.0, 1.0];
         let theta_expanded = vec![vec![1.0, 1.0]];
 
@@ -1000,7 +1252,7 @@ mod tests {
     #[test]
     fn test_objective_v2_decreases_with_better_assignments() {
         let labels = vec![0, 0, 1, 1];
-        let info = create_batch_info(&labels, 4);
+        let info = create_batch_info(&labels, 4).unwrap();
         let sigma = vec![1.0, 1.0];
         let theta_expanded = vec![vec![1.0, 1.0]];
 
@@ -1039,7 +1291,7 @@ mod tests {
     #[test]
     fn test_objective_v2_zero_theta_no_cross_entropy() {
         let labels = vec![0, 1];
-        let info = create_batch_info(&labels, 2);
+        let info = create_batch_info(&labels, 2).unwrap();
         let sigma = vec![1.0, 1.0];
         let theta_expanded = vec![vec![0.0, 0.0]];
 
@@ -1070,8 +1322,8 @@ mod tests {
     fn test_objective_v2_two_variables() {
         let labels0 = vec![0, 0, 1, 1];
         let labels1 = vec![0, 1, 1, 0]; // asymmetric w.r.t. clusters
-        let info0 = create_batch_info(&labels0, 4);
-        let info1 = create_batch_info(&labels1, 4);
+        let info0 = create_batch_info(&labels0, 4).unwrap();
+        let info1 = create_batch_info(&labels1, 4).unwrap();
 
         let sigma = vec![1.0, 1.0];
         let theta_expanded = vec![vec![1.0, 1.0], vec![1.0, 1.0]];
@@ -1114,7 +1366,7 @@ mod tests {
     fn test_objective_v2_stabilised_near_zero_o() {
         // Scenario where v1 formula would be unstable: O_kb near zero
         let labels = vec![0, 0, 0, 0, 1];
-        let info = create_batch_info(&labels, 5);
+        let info = create_batch_info(&labels, 5).unwrap();
         let sigma = vec![1.0, 1.0];
         let theta_expanded = vec![vec![2.0, 2.0]];
 
@@ -1145,14 +1397,14 @@ mod tests {
     #[test]
     fn test_update_r_v2_columns_sum_to_one() {
         let labels = vec![0, 0, 1, 1];
-        let info = create_batch_info(&labels, 4);
+        let info = create_batch_info(&labels, 4).unwrap();
         let sigma = vec![1.0, 1.0];
         let theta_expanded = vec![vec![1.0, 1.0]];
 
         let r_init = mat![[0.5, 0.5, 0.5, 0.5], [0.5, 0.5, 0.5, 0.5]];
         let dist_mat = mat![[0.1, 0.1, 0.9, 0.9], [0.9, 0.9, 0.1, 0.1]];
         let oe_init = compute_all_diversity_statistics(r_init.as_ref(), from_ref(&info));
-        let scale_dist = compute_scaled_distances(dist_mat.as_ref(), &sigma);
+        let scale_dist = compute_scaled_distances(dist_mat.as_ref(), &sigma).unwrap();
 
         let (r_new, _) = update_r_with_diversity_v2(
             scale_dist.as_ref(),
@@ -1178,14 +1430,14 @@ mod tests {
     #[test]
     fn test_update_r_v2_follows_distances() {
         let labels = vec![0, 0, 1, 1];
-        let info = create_batch_info(&labels, 4);
+        let info = create_batch_info(&labels, 4).unwrap();
         let sigma = vec![1.0, 1.0];
         let theta_expanded = vec![vec![1.0, 1.0]];
 
         let r_init = mat![[0.5, 0.5, 0.5, 0.5], [0.5, 0.5, 0.5, 0.5]];
         let dist_mat = mat![[0.1, 0.1, 0.9, 0.9], [0.9, 0.9, 0.1, 0.1]];
         let oe_init = compute_all_diversity_statistics(r_init.as_ref(), from_ref(&info));
-        let scale_dist = compute_scaled_distances(dist_mat.as_ref(), &sigma);
+        let scale_dist = compute_scaled_distances(dist_mat.as_ref(), &sigma).unwrap();
 
         let (r_new, _) = update_r_with_diversity_v2(
             scale_dist.as_ref(),
@@ -1206,14 +1458,14 @@ mod tests {
     #[test]
     fn test_update_r_v2_oe_consistency() {
         let labels = vec![0, 0, 1, 1];
-        let info = create_batch_info(&labels, 4);
+        let info = create_batch_info(&labels, 4).unwrap();
         let sigma = vec![1.0, 1.0];
         let theta_expanded = vec![vec![1.0, 1.0]];
 
         let r_init = mat![[0.5, 0.5, 0.5, 0.5], [0.5, 0.5, 0.5, 0.5]];
         let dist_mat = mat![[0.1, 0.1, 0.9, 0.9], [0.9, 0.9, 0.1, 0.1]];
         let oe_init = compute_all_diversity_statistics(r_init.as_ref(), from_ref(&info));
-        let scale_dist = compute_scaled_distances(dist_mat.as_ref(), &sigma);
+        let scale_dist = compute_scaled_distances(dist_mat.as_ref(), &sigma).unwrap();
 
         let (r_new, oe_new) = update_r_with_diversity_v2(
             scale_dist.as_ref(),
@@ -1246,14 +1498,14 @@ mod tests {
     #[test]
     fn test_update_r_v2_no_diversity_penalty() {
         let labels = vec![0, 0];
-        let info = create_batch_info(&labels, 2);
+        let info = create_batch_info(&labels, 2).unwrap();
         let sigma = vec![1.0, 1.0];
         let theta_expanded = vec![vec![0.0]];
 
         let r_init = mat![[0.5, 0.5], [0.5, 0.5]];
         let dist_mat = mat![[0.1, 0.9], [0.9, 0.1]];
         let oe_init = compute_all_diversity_statistics(r_init.as_ref(), from_ref(&info));
-        let scale_dist = compute_scaled_distances(dist_mat.as_ref(), &sigma);
+        let scale_dist = compute_scaled_distances(dist_mat.as_ref(), &sigma).unwrap();
 
         let (r_new, _) = update_r_with_diversity_v2(
             scale_dist.as_ref(),
@@ -1273,8 +1525,8 @@ mod tests {
     fn test_update_r_v2_two_variables() {
         let labels0 = vec![0, 0, 1, 1];
         let labels1 = vec![0, 1, 0, 1];
-        let info0 = create_batch_info(&labels0, 4);
-        let info1 = create_batch_info(&labels1, 4);
+        let info0 = create_batch_info(&labels0, 4).unwrap();
+        let info1 = create_batch_info(&labels1, 4).unwrap();
         let sigma = vec![1.0, 1.0];
         let theta_expanded = vec![vec![1.0, 1.0], vec![1.0, 1.0]];
 
@@ -1282,7 +1534,7 @@ mod tests {
         let dist_mat = mat![[0.1, 0.1, 0.9, 0.9], [0.9, 0.9, 0.1, 0.1]];
         let oe_init =
             compute_all_diversity_statistics(r_init.as_ref(), &[info0.clone(), info1.clone()]);
-        let scale_dist = compute_scaled_distances(dist_mat.as_ref(), &sigma);
+        let scale_dist = compute_scaled_distances(dist_mat.as_ref(), &sigma).unwrap();
 
         let (r_new, oe_new) = update_r_with_diversity_v2(
             scale_dist.as_ref(),
@@ -1366,7 +1618,7 @@ mod tests {
     #[test]
     fn test_ridge_v2_reduces_batch_effect() {
         let labels = vec![0, 0, 1, 1];
-        let info = create_batch_info(&labels, 4);
+        let info = create_batch_info(&labels, 4).unwrap();
 
         let z_orig = mat![[1.0, 0.1], [1.1, 0.2], [5.0, 0.1], [5.1, 0.2]];
         let r = mat![[1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 0.0]];
@@ -1401,7 +1653,7 @@ mod tests {
     #[test]
     fn test_ridge_v2_preserves_dimensions() {
         let labels = vec![0, 1, 2];
-        let info = create_batch_info(&labels, 3);
+        let info = create_batch_info(&labels, 3).unwrap();
 
         let z_orig = mat![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]];
         let r = mat![[0.5, 0.5, 0.5], [0.5, 0.5, 0.5]];
@@ -1427,7 +1679,7 @@ mod tests {
         // If only one level passes the cutoff for a variable, that variable
         // should be skipped entirely (nothing to correct).
         let labels = vec![0, 0, 0, 0, 1]; // level 1 has only 1 cell
-        let info = create_batch_info(&labels, 5);
+        let info = create_batch_info(&labels, 5).unwrap();
 
         let z_orig = mat![[1.0, 0.0], [1.0, 0.0], [1.0, 0.0], [1.0, 0.0], [5.0, 0.0],];
 
@@ -1466,7 +1718,7 @@ mod tests {
     #[test]
     fn test_ridge_v2_soft_assignments() {
         let labels = vec![0, 0, 1, 1];
-        let info = create_batch_info(&labels, 4);
+        let info = create_batch_info(&labels, 4).unwrap();
 
         let z_orig = mat![[1.0, 0.0], [1.0, 0.0], [5.0, 0.0], [5.0, 0.0]];
         let r = mat![[0.8, 0.9, 0.1, 0.2], [0.2, 0.1, 0.9, 0.8]];
@@ -1501,7 +1753,7 @@ mod tests {
     #[test]
     fn test_ridge_v2_dynamic_lambda() {
         let labels = vec![0, 0, 1, 1];
-        let info = create_batch_info(&labels, 4);
+        let info = create_batch_info(&labels, 4).unwrap();
 
         let z_orig = mat![[1.0, 0.1], [1.1, 0.2], [5.0, 0.1], [5.1, 0.2]];
         let r = mat![[1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 0.0]];
@@ -1548,8 +1800,8 @@ mod tests {
     fn test_ridge_v2_two_variables() {
         let batch_labels = vec![0, 0, 1, 1, 2, 2];
         let sample_labels = vec![0, 1, 0, 1, 0, 1];
-        let info_batch = create_batch_info(&batch_labels, 6);
-        let info_sample = create_batch_info(&sample_labels, 6);
+        let info_batch = create_batch_info(&batch_labels, 6).unwrap();
+        let info_sample = create_batch_info(&sample_labels, 6).unwrap();
 
         let z_orig = mat![
             [1.0, 0.0],
@@ -1630,7 +1882,7 @@ mod tests {
         // Indirect test: single covariate should produce the same result
         // whether arrowhead or LU is used (we test they agree)
         let labels = vec![0, 0, 0, 1, 1, 1];
-        let info = create_batch_info(&labels, 6);
+        let info = create_batch_info(&labels, 6).unwrap();
 
         let z_orig = mat![
             [1.0, 0.5],
@@ -1670,7 +1922,7 @@ mod tests {
     #[test]
     fn test_ridge_v2_no_correction_when_all_pruned() {
         let labels = vec![0, 1];
-        let info = create_batch_info(&labels, 2);
+        let info = create_batch_info(&labels, 2).unwrap();
 
         let z_orig = mat![[1.0, 2.0], [5.0, 6.0]];
 

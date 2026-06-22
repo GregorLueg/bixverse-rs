@@ -739,7 +739,9 @@ impl MtxReader {
 
             let _ = std::fs::remove_file(temp_path);
 
-            if verbose {
+            if verbose
+                && ((bucket_idx + 1) % (n_buckets / 10).max(1) == 0 || bucket_idx + 1 == n_buckets)
+            {
                 let progress = ((bucket_idx + 1) as f64 / n_buckets as f64 * 100.0) as usize;
                 println!(
                     "  Wrote bucket {}/{} ({}%)",

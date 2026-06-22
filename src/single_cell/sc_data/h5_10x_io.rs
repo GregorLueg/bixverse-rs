@@ -370,7 +370,7 @@ pub fn stream_h5_tenx_counts<P: AsRef<Path>>(
 /// ### Returns
 ///
 /// Row indices of the features matching the target modality.
-fn validate_feature_types_tenx<P: AsRef<Path>>(
+pub fn validate_feature_types_tenx<P: AsRef<Path>>(
     file_path: P,
     version: TenxVersion,
     target_feature_type: Option<&str>,

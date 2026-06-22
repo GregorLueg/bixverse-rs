@@ -6,6 +6,8 @@ use ann_search_rs::utils::dist::Dist;
 use std::io;
 use thiserror::Error;
 
+use crate::prelude::*;
+
 /// All error variants that can occur across bixverse operations.
 ///
 /// Errors are grouped by subsystem: faer-backed linear algebra, binary file
@@ -28,8 +30,8 @@ pub enum BixverseErrors {
     ///
     /// Typically caused by ill-conditioned or degenerate input (e.g. all-zero
     /// rows, NaNs, rank-deficient matrices beyond the requested rank).
-    #[error("The faer SVD failed - please verify the data")]
-    FaerSvdError,
+    #[error("The faer SVD failed: {0}")]
+    FaerSvdError(String),
 
     /// Eigen decomposition from faer failed.
     ///
@@ -37,6 +39,10 @@ pub enum BixverseErrors {
     /// solver, or numerical breakdown on degenerate input.
     #[error("The faer Eigen decomposition failed - please verify the data")]
     FaerEigenError,
+
+    /// Cholesky decomposition from faer failed.
+    #[error("The faer Cholesky failed: {0}")]
+    FaerCholeskyError(#[from] faer::linalg::solvers::LltError),
 
     // -- ann-search-rs --
     /// Propagate errors from the ann-search-rs crate
@@ -122,6 +128,24 @@ pub enum BixverseErrors {
     /// Error if the [crate::prelude::CompressedSparseData2] is not in Csc.
     #[error("The SparseCompressedData2 must be in CSC format")]
     SparseMatrixMustBeCsc,
+
+    /// General error for sparse matrix format mismatches
+    #[error("Expected this compressed sparse format {expected}; got {got}.")]
+    SparseLayoutMismatch {
+        /// The expected [CompressedSparseFormat] enum.
+        expected: CompressedSparseFormat,
+        /// The provided [CompressedSparseFormat] enum.
+        got: CompressedSparseFormat,
+    },
+
+    /// Shape mismatch problem for matrices
+    #[error("Expected this shape {expected:?}; got {got:?}.")]
+    ShapeMismatch {
+        /// Expected shape
+        expected: (usize, usize),
+        /// Provided shape
+        got: (usize, usize),
+    },
 
     // -- Binary file I/O --
     /// Wraps any `std::io::Error` encountered while reading or writing the
@@ -294,6 +318,29 @@ pub enum BixverseErrors {
         /// Which field failed: "row", "col", or "value".
         field: &'static str,
     },
+    // -- Batch --
+    /// Need at least two batches for this method
+    #[cfg(feature = "single-cell")]
+    #[error("You need at least two batches. Provided {n_batches} batches.")]
+    NeedAtLeastTwoBatches {
+        /// Number of provided batches
+        n_batches: usize,
+    },
+    // -- Harmony --
+    /// Label length and number of cells do not match for Harmony
+    #[error(
+        "Harmony: The labels length ({label_length}) does not match the number of cells ({n_cells})"
+    )]
+    HarmonyLabelLenghtUnequalNcells {
+        /// Provided label length
+        label_length: usize,
+        /// Number of cells
+        n_cells: usize,
+    },
+
+    /// Sigma length is not equal to the number of clusters
+    #[error("Harmony: sigma length must match number of clusters")]
+    HarmonySigmaLengthUnequalCluster,
 
     // -- Format parsing --
     /// The `cs_type` string did not match a known sparse format.
@@ -303,6 +350,46 @@ pub enum BixverseErrors {
     #[cfg(feature = "single-cell")]
     #[error("Unknown compressed sparse format: '{0}' (expected 'csc' or 'csr')")]
     UnknownSparseFormat(String),
+
+    // -- PCA --
+    /// Error if user wants CLR-normalised PCA, but did not provide the offsets
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "You did not provide the offsets needed for using the CLR-normalised PCA in single cell."
+    )]
+    OffsetsNotProvidedForClrPCA,
+
+    /// Error if user wants CLR-normalised PCA, but did not provide the offsets
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "The provided offsets have length {len_offset}; n_cells is {n_cells}. Length mismatch."
+    )]
+    OffsetsLengthDoesNotMatchNCells {
+        /// Length of the offsets
+        len_offset: usize,
+        /// Number of cells provided
+        n_cells: usize,
+    },
+
+    // -- NMF --
+    /// NMF Rank is too large for the NNDSVD initialisation
+    #[error(
+        "The requested NMF ({requested}) rank is too large for NNDSVD initialisation (available: {available})."
+    )]
+    NmfRankTooLarge {
+        /// Requested rank
+        requested: usize,
+        /// Maximum available rank
+        available: usize,
+    },
+
+    /// Error if NMF values are not finite
+    #[error("The NMF values are not finite")]
+    NmfNonFinite,
+
+    /// Error if NMF values are negative
+    #[error("Negative values were discovered for NMF. Please check the inputs.")]
+    NmfNonNegativeViolated,
 
     // -- Hotspot --
     /// Invalid model chosen for Hotspot
@@ -448,4 +535,15 @@ pub enum BixverseErrors {
         /// Actual neighbour count in row 0
         found: usize,
     },
+
+    // -- gpu --
+    /// A GPU cubecl matrix multiplication error from the cubek crate
+    #[cfg(feature = "gpu")]
+    #[error("GPU: A matrix multiplication occurred: {0}")]
+    GpuMatmul(String),
+    // -- gpu / single cell --
+    /// GPU Harmony only supports one co-variate for now (based on Arrowhead)
+    #[cfg(feature = "gpu")]
+    #[error("Harmony GPU: Only a single co-variate is supported for the GPU path")]
+    GpuHarmonySupportsSingleCovariateOnly,
 }
