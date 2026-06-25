@@ -1,5 +1,13 @@
 # News
 
+## 0.3.2
+
+### Features
+
+#### Single cells
+
+- H5Ad reading in for DENSE formats in single cell
+
 ## 0.3.1
 
 Another big one
