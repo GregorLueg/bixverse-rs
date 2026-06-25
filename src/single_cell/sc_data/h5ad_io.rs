@@ -21,15 +21,6 @@ use crate::single_cell::sc_data::data_io::{CellGeneSparseWriter, CellOnFileQuali
 /// Number of data entries to check
 const N_CHECK: usize = 100;
 
-///////////
-// Types //
-///////////
-
-/// Per chunk results of shape:
-///
-/// `(per-gene nnz counts, per-cell stats as (orig_idx, lib_size, unique))`
-type DenseChunkQcResults = (Vec<usize>, Vec<(usize, f32, usize)>);
-
 /////////////////
 // h5ad format //
 /////////////////
@@ -1739,40 +1730,117 @@ pub fn parse_h5_dense_row_quality<P: AsRef<Path>>(
     let num_chunks = chunk_starts.len();
 
     if verbose {
-        println!("First pass - dense scan for gene/cell stats:");
+        println!("First pass - gene expression statistics:");
     }
 
     let first_pass_time = Instant::now();
     let completed_chunks = Arc::new(AtomicUsize::new(0));
     let report_interval = (num_chunks / 10).max(1);
 
-    // Per-chunk: (per-gene nnz counts, per-cell stats as (orig_idx, lib_size, unique))
-    let per_chunk: Vec<DenseChunkQcResults> = chunk_starts
+    // Pass 1: per-gene nnz across all cells
+    let gene_counts: Vec<Vec<usize>> = chunk_starts
+        .par_iter()
+        .map(|&chunk_start| -> Result<Vec<usize>, BixverseErrors> {
+            let mut local_counts = vec![0usize; shape.1];
+
+            let file = File::open(file_path)?;
+            let ds = file.dataset(raw_slot.get_dense_path())?;
+
+            let chunk_end = (chunk_start + CELL_CHUNK_SIZE).min(shape.0);
+            let block: Array2<f32> = ds.read_slice_2d(s![chunk_start..chunk_end, 0..shape.1])?;
+
+            for row in block.outer_iter() {
+                for (gene_idx, &val) in row.iter().enumerate() {
+                    if val != 0.0 {
+                        local_counts[gene_idx] += 1;
+                    }
+                }
+            }
+
+            if verbose {
+                let completed = completed_chunks.fetch_add(1, Ordering::Relaxed) + 1;
+                if completed.is_multiple_of(report_interval) || completed == num_chunks {
+                    let progress =
+                        ((completed as f64 / num_chunks as f64 * 10.0).round() as usize) * 10;
+                    println!(
+                        "  Processed {}% of chunks ({}/{})",
+                        progress, completed, num_chunks
+                    );
+                }
+            }
+
+            Ok(local_counts)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut no_cells_exp_gene = vec![0usize; shape.1];
+    for local_counts in gene_counts {
+        for (i, c) in local_counts.into_iter().enumerate() {
+            no_cells_exp_gene[i] += c;
+        }
+    }
+
+    if verbose {
+        let max_expr = no_cells_exp_gene.iter().max().unwrap_or(&0);
+        let min_expr = no_cells_exp_gene.iter().min().unwrap_or(&0);
+        let avg_expr = no_cells_exp_gene
+            .iter()
+            .sum::<usize>()
+            .checked_div(shape.1)
+            .unwrap_or(0);
+        println!(
+            "  Gene expression stats: min = {} | max = {} | avg = {} cells per gene",
+            min_expr.separate_with_underscores(),
+            max_expr.separate_with_underscores(),
+            avg_expr.separate_with_underscores()
+        );
+    }
+
+    let genes_to_keep: Vec<usize> = (0..shape.1)
+        .filter(|&i| no_cells_exp_gene[i] >= cell_quality.min_cells)
+        .collect();
+
+    if verbose {
+        println!("First pass done: {:.2?}", first_pass_time.elapsed());
+        println!(
+            "  Genes passing filter: {} / {}",
+            genes_to_keep.len().separate_with_underscores(),
+            shape.1.separate_with_underscores()
+        );
+        println!("Second pass - cell statistics over kept genes:");
+    }
+
+    let mut genes_to_keep_lookup = vec![false; shape.1];
+    for &g in &genes_to_keep {
+        genes_to_keep_lookup[g] = true;
+    }
+
+    let second_pass_time = Instant::now();
+    let completed_chunks = Arc::new(AtomicUsize::new(0));
+
+    // Pass 2: per-cell stats restricted to kept genes
+    let cell_stats: Vec<(Vec<usize>, Vec<f32>)> = chunk_starts
         .par_iter()
         .map(
-            |&chunk_start| -> Result<DenseChunkQcResults, BixverseErrors> {
-                let mut gene_counts = vec![0usize; shape.1];
-                let mut cell_stats: Vec<(usize, f32, usize)> = Vec::new();
+            |&chunk_start| -> Result<(Vec<usize>, Vec<f32>), BixverseErrors> {
+                let chunk_end = (chunk_start + CELL_CHUNK_SIZE).min(shape.0);
+                let n = chunk_end - chunk_start;
+                let mut local_unique = vec![0usize; n];
+                let mut local_lib_size = vec![0.0f32; n];
 
                 let file = File::open(file_path)?;
                 let ds = file.dataset(raw_slot.get_dense_path())?;
 
-                let chunk_end = (chunk_start + CELL_CHUNK_SIZE).min(shape.0);
                 let block: Array2<f32> =
                     ds.read_slice_2d(s![chunk_start..chunk_end, 0..shape.1])?;
 
                 for (local_row, row) in block.outer_iter().enumerate() {
-                    let original_idx = chunk_start + local_row;
-                    let mut unique = 0usize;
-                    let mut lib_size = 0.0f32;
                     for (gene_idx, &val) in row.iter().enumerate() {
-                        if val != 0.0 {
-                            unique += 1;
-                            lib_size += val;
-                            gene_counts[gene_idx] += 1;
+                        if val != 0.0 && genes_to_keep_lookup[gene_idx] {
+                            local_unique[local_row] += 1;
+                            local_lib_size[local_row] += val;
                         }
                     }
-                    cell_stats.push((original_idx, lib_size, unique));
                 }
 
                 if verbose {
@@ -1787,59 +1855,44 @@ pub fn parse_h5_dense_row_quality<P: AsRef<Path>>(
                     }
                 }
 
-                Ok((gene_counts, cell_stats))
+                Ok((local_unique, local_lib_size))
             },
         )
         .collect::<Result<Vec<_>, _>>()?;
 
-    let mut no_cells_exp_gene = vec![0usize; shape.1];
-    let mut all_cell_stats: Vec<(usize, f32, usize)> = Vec::with_capacity(shape.0);
-    for (gc, mut cs) in per_chunk {
-        for (i, c) in gc.into_iter().enumerate() {
-            no_cells_exp_gene[i] += c;
+    let mut cell_unique_genes = vec![0usize; shape.0];
+    let mut cell_lib_size = vec![0.0f32; shape.0];
+
+    for (chunk_idx, (local_unique, local_lib)) in cell_stats.into_iter().enumerate() {
+        let chunk_start = chunk_starts[chunk_idx];
+        for (i, (u, l)) in local_unique.into_iter().zip(local_lib).enumerate() {
+            cell_unique_genes[chunk_start + i] = u;
+            cell_lib_size[chunk_start + i] = l;
         }
-        all_cell_stats.append(&mut cs);
     }
 
     if verbose {
-        let avg = no_cells_exp_gene
-            .iter()
-            .sum::<usize>()
-            .checked_div(shape.1)
-            .unwrap_or(0);
+        let max_genes = cell_unique_genes.iter().max().unwrap_or(&0);
+        let min_genes = cell_unique_genes.iter().min().unwrap_or(&0);
+        let max_lib = cell_lib_size.iter().fold(0.0f32, |a, &b| a.max(b));
+        let min_lib = cell_lib_size.iter().fold(f32::INFINITY, |a, &b| a.min(b));
         println!(
-            "  Gene expression stats: min = {} | max = {} | avg = {} cells per gene",
-            no_cells_exp_gene
-                .iter()
-                .min()
-                .unwrap_or(&0)
-                .separate_with_underscores(),
-            no_cells_exp_gene
-                .iter()
-                .max()
-                .unwrap_or(&0)
-                .separate_with_underscores(),
-            avg.separate_with_underscores()
+            "  Cell stats: genes per cell: min = {} | max = {}",
+            min_genes.separate_with_underscores(),
+            max_genes.separate_with_underscores()
         );
-        println!("  First pass complete in {:.2?}", first_pass_time.elapsed());
+        println!(
+            "  Cell stats: library size: min = {:.1} | max = {:.1}",
+            min_lib, max_lib
+        );
+        println!("Second pass done: {:.2?}", second_pass_time.elapsed());
     }
 
-    // QC thresholds
-    let genes_to_keep: Vec<usize> = no_cells_exp_gene
-        .iter()
-        .enumerate()
-        .filter(|&(_, &c)| c >= cell_quality.min_cells)
-        .map(|(i, _)| i)
-        .collect();
-
-    // keep order matched to original cell index
-    all_cell_stats.sort_unstable_by_key(|&(idx, _, _)| idx);
-    let cells_to_keep: Vec<usize> = all_cell_stats
-        .iter()
-        .filter(|(_, lib, unique)| {
-            *unique >= cell_quality.min_unique_genes && *lib >= cell_quality.min_lib_size as f32
+    let cells_to_keep: Vec<usize> = (0..shape.0)
+        .filter(|&i| {
+            cell_unique_genes[i] >= cell_quality.min_unique_genes
+                && cell_lib_size[i] >= cell_quality.min_lib_size as f32
         })
-        .map(|(idx, _, _)| *idx)
         .collect();
 
     let mut quality = CellOnFileQuality::new(cells_to_keep, genes_to_keep);
