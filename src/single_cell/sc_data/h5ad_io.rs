@@ -28,7 +28,7 @@ const N_CHECK: usize = 100;
 /// Per chunk results of shape:
 ///
 /// `(per-gene nnz counts, per-cell stats as (orig_idx, lib_size, unique))`
-type DenseChunkQcResults = Vec<(Vec<usize>, Vec<(usize, f32, usize)>)>;
+type DenseChunkQcResults = (Vec<usize>, Vec<(usize, f32, usize)>);
 
 /////////////////
 // h5ad format //
@@ -1747,54 +1747,50 @@ pub fn parse_h5_dense_row_quality<P: AsRef<Path>>(
     let report_interval = (num_chunks / 10).max(1);
 
     // Per-chunk: (per-gene nnz counts, per-cell stats as (orig_idx, lib_size, unique))
-    let per_chunk: DenseChunkQcResults = chunk_starts
+    let per_chunk: Vec<DenseChunkQcResults> = chunk_starts
         .par_iter()
-        .map(|&chunk_start| {
-            let mut gene_counts = vec![0usize; shape.1];
-            let mut cell_stats: Vec<(usize, f32, usize)> = Vec::new();
+        .map(
+            |&chunk_start| -> Result<DenseChunkQcResults, BixverseErrors> {
+                let mut gene_counts = vec![0usize; shape.1];
+                let mut cell_stats: Vec<(usize, f32, usize)> = Vec::new();
 
-            let Ok(file) = File::open(file_path) else {
-                return (gene_counts, cell_stats);
-            };
-            let Ok(ds) = file.dataset(raw_slot.get_dense_path()) else {
-                return (gene_counts, cell_stats);
-            };
+                let file = File::open(file_path)?;
+                let ds = file.dataset(raw_slot.get_dense_path())?;
 
-            let chunk_end = (chunk_start + CELL_CHUNK_SIZE).min(shape.0);
-            let block: Array2<f32> = match ds.read_slice_2d(s![chunk_start..chunk_end, ..]) {
-                Ok(b) => b,
-                Err(_) => return (gene_counts, cell_stats),
-            };
+                let chunk_end = (chunk_start + CELL_CHUNK_SIZE).min(shape.0);
+                let block: Array2<f32> =
+                    ds.read_slice_2d(s![chunk_start..chunk_end, 0..shape.1])?;
 
-            for (local_row, row) in block.outer_iter().enumerate() {
-                let original_idx = chunk_start + local_row;
-                let mut unique = 0usize;
-                let mut lib_size = 0.0f32;
-                for (gene_idx, &val) in row.iter().enumerate() {
-                    if val != 0.0 {
-                        unique += 1;
-                        lib_size += val;
-                        gene_counts[gene_idx] += 1;
+                for (local_row, row) in block.outer_iter().enumerate() {
+                    let original_idx = chunk_start + local_row;
+                    let mut unique = 0usize;
+                    let mut lib_size = 0.0f32;
+                    for (gene_idx, &val) in row.iter().enumerate() {
+                        if val != 0.0 {
+                            unique += 1;
+                            lib_size += val;
+                            gene_counts[gene_idx] += 1;
+                        }
+                    }
+                    cell_stats.push((original_idx, lib_size, unique));
+                }
+
+                if verbose {
+                    let completed = completed_chunks.fetch_add(1, Ordering::Relaxed) + 1;
+                    if completed.is_multiple_of(report_interval) || completed == num_chunks {
+                        let progress =
+                            ((completed as f64 / num_chunks as f64 * 10.0).round() as usize) * 10;
+                        println!(
+                            "  Processed {}% of chunks ({}/{})",
+                            progress, completed, num_chunks
+                        );
                     }
                 }
-                cell_stats.push((original_idx, lib_size, unique));
-            }
 
-            if verbose {
-                let completed = completed_chunks.fetch_add(1, Ordering::Relaxed) + 1;
-                if completed.is_multiple_of(report_interval) || completed == num_chunks {
-                    let progress =
-                        ((completed as f64 / num_chunks as f64 * 10.0).round() as usize) * 10;
-                    println!(
-                        "  Processed {}% of chunks ({}/{})",
-                        progress, completed, num_chunks
-                    );
-                }
-            }
-
-            (gene_counts, cell_stats)
-        })
-        .collect();
+                Ok((gene_counts, cell_stats))
+            },
+        )
+        .collect::<Result<Vec<_>, _>>()?;
 
     let mut no_cells_exp_gene = vec![0usize; shape.1];
     let mut all_cell_stats: Vec<(usize, f32, usize)> = Vec::with_capacity(shape.0);
