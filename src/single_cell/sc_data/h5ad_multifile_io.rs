@@ -2,6 +2,7 @@
 //! and write all cells into a single binary file.
 
 use hdf5::File;
+use ndarray::{Array2, s};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::path::Path;
@@ -23,7 +24,7 @@ pub struct H5adFileTask {
     /// Path to the h5ad file
     pub h5_path: String,
     /// Type of storage in this specific h5ad file
-    pub cs_type: CompressedSparseFormat,
+    pub cs_type: H5ADFormat,
     /// Number of cells/spots in this h5ad file
     pub no_cells: usize,
     /// Number of genes/features in this h5ad file
@@ -135,6 +136,44 @@ fn scan_gene_nnz_csc(
     Ok(gene_nnz)
 }
 
+/// Per-task gene nnz scan for `dense_row`.
+///
+/// ### Params
+///
+/// * `task` - The H5adFileTask
+/// * `universe_size` - Total number of features in this universe
+///
+/// ### Returns
+///
+/// Number of NNZ per given task/feature
+pub fn scan_gene_nnz_dense_row(
+    task: &H5adFileTask,
+    universe_size: usize,
+) -> Result<Vec<usize>, BixverseErrors> {
+    let file = File::open(&task.h5_path)?;
+    check_h5ad_dense_is_raw(&file, &task.raw_slot, None)?;
+
+    let ds = file.dataset(task.raw_slot.get_dense_path())?;
+    let mut gene_nnz = vec![0usize; universe_size];
+
+    const CHUNK_SIZE: usize = 10_000;
+    for chunk_start in (0..task.no_cells).step_by(CHUNK_SIZE) {
+        let chunk_end = (chunk_start + CHUNK_SIZE).min(task.no_cells);
+        let block: Array2<f32> = ds.read_slice_2d(s![chunk_start..chunk_end, 0..task.no_genes])?;
+        for row in block.outer_iter() {
+            for (gene_idx, &val) in row.iter().enumerate() {
+                if val != 0.0
+                    && let Some(&Some(u_idx)) = task.gene_local_to_universe.get(gene_idx)
+                {
+                    gene_nnz[u_idx] += 1;
+                }
+            }
+        }
+    }
+
+    Ok(gene_nnz)
+}
+
 /// Scan per given task the number of NNZ for the features
 ///
 /// ### Params
@@ -147,8 +186,10 @@ fn scan_gene_nnz_csc(
 /// Number of NNZ per given task/feature
 fn scan_gene_nnz(task: &H5adFileTask, universe_size: usize) -> Result<Vec<usize>, BixverseErrors> {
     match task.cs_type {
-        CompressedSparseFormat::Csr => scan_gene_nnz_csr(task, universe_size),
-        CompressedSparseFormat::Csc => scan_gene_nnz_csc(task, universe_size),
+        H5ADFormat::Csr => scan_gene_nnz_csr(task, universe_size),
+        H5ADFormat::Csc => scan_gene_nnz_csc(task, universe_size),
+        H5ADFormat::DenseRow => scan_gene_nnz_dense_row(task, universe_size),
+        H5ADFormat::DenseCol => dense_col_not_supported(),
     }
 }
 
@@ -296,6 +337,49 @@ fn scan_cell_stats_csc(
     Ok(cell_unique.into_iter().zip(cell_lib_size).collect())
 }
 
+/// Per-task cell stats scan for `dense_row`.
+///
+/// ### Params
+///
+/// * `task` - The H5adFileTask
+/// * `gene_local_to_final` - Genes to include
+///
+/// ### Returns
+///
+/// Vector of (unique_genes, library_size) per cell
+pub fn scan_cell_stats_dense_row(
+    task: &H5adFileTask,
+    gene_local_to_final: &[Option<usize>],
+) -> Result<Vec<(usize, f32)>, BixverseErrors> {
+    let file = File::open(&task.h5_path)?;
+    check_h5ad_dense_is_raw(&file, &task.raw_slot, None)?;
+
+    let ds = file.dataset(task.raw_slot.get_dense_path())?;
+    let mut cell_stats: Vec<(usize, f32)> = Vec::with_capacity(task.no_cells);
+
+    const CHUNK_SIZE: usize = 10_000;
+    for chunk_start in (0..task.no_cells).step_by(CHUNK_SIZE) {
+        let chunk_end = (chunk_start + CHUNK_SIZE).min(task.no_cells);
+        let block: Array2<f32> = ds.read_slice_2d(s![chunk_start..chunk_end, 0..task.no_genes])?;
+        for row in block.outer_iter() {
+            let mut unique = 0usize;
+            let mut lib_size = 0.0f32;
+            for (gene_idx, &val) in row.iter().enumerate() {
+                if val == 0.0 {
+                    continue;
+                }
+                if let Some(&Some(_)) = gene_local_to_final.get(gene_idx) {
+                    unique += 1;
+                    lib_size += val;
+                }
+            }
+            cell_stats.push((unique, lib_size));
+        }
+    }
+
+    Ok(cell_stats)
+}
+
 /// Scan per given task the cell/spot quality measures
 ///
 /// Dispatches to the respective helper
@@ -313,8 +397,10 @@ fn scan_cell_stats(
     gene_local_to_final: &[Option<usize>],
 ) -> Result<Vec<(usize, f32)>, BixverseErrors> {
     match task.cs_type {
-        CompressedSparseFormat::Csr => scan_cell_stats_csr(task, gene_local_to_final),
-        CompressedSparseFormat::Csc => scan_cell_stats_csc(task, gene_local_to_final),
+        H5ADFormat::Csr => scan_cell_stats_csr(task, gene_local_to_final),
+        H5ADFormat::Csc => scan_cell_stats_csc(task, gene_local_to_final),
+        H5ADFormat::DenseRow => scan_cell_stats_dense_row(task, gene_local_to_final),
+        H5ADFormat::DenseCol => dense_col_not_supported(),
     }
 }
 
@@ -582,6 +668,93 @@ fn write_h5_csc_cells(
     })
 }
 
+/// Per-task writer for `dense_row`.
+///
+/// ### Params
+///
+/// * `task` - The H5adFileTask
+/// * `cells_to_keep` - Which cells to keep from this file
+/// * `gene_mapping` - Informations on the gene mapping
+/// * `target_size` - The target size to normalise to
+/// * `cell_offset` - Current offset in the binary file
+/// * `writer` - The CellGeneSparseWriter to write to the binary file
+///
+/// ### Returns
+///
+/// An H5FileQcResult
+pub fn write_h5_dense_row_cells(
+    task: &H5adFileTask,
+    cells_to_keep: &[usize],
+    gene_mapping: &[Option<usize>],
+    target_size: f32,
+    cell_offset: usize,
+    writer: &mut CellGeneSparseWriter,
+) -> Result<H5FileQcResult, BixverseErrors> {
+    let file = File::open(&task.h5_path)?;
+    check_h5ad_dense_is_raw(&file, &task.raw_slot, None)?;
+
+    let ds = file.dataset(task.raw_slot.get_dense_path())?;
+    let no_genes_total = ds.shape().get(1).copied().unwrap_or(0);
+
+    let mut lib_size = Vec::with_capacity(cells_to_keep.len());
+    let mut nnz = Vec::with_capacity(cells_to_keep.len());
+
+    let mut gene_idx_buf: Vec<u32> = Vec::with_capacity(1024);
+    let mut count_buf: Vec<u32> = Vec::with_capacity(1024);
+
+    const BATCH_SIZE: usize = 1_000;
+    let mut written = 0usize;
+
+    let _t = Instant::now();
+
+    for cell_batch in cells_to_keep.chunks(BATCH_SIZE) {
+        let row_start = *cell_batch.iter().min().unwrap();
+        let row_end = *cell_batch.iter().max().unwrap() + 1;
+        let block: Array2<f32> = ds.read_slice_2d(s![row_start..row_end, 0..no_genes_total])?;
+
+        for &old_cell in cell_batch {
+            let row = block.row(old_cell - row_start);
+
+            gene_idx_buf.clear();
+            count_buf.clear();
+
+            for (gene_idx, &val) in row.iter().enumerate() {
+                if val == 0.0 {
+                    continue;
+                }
+                if let Some(&Some(final_gene)) = gene_mapping.get(gene_idx) {
+                    gene_idx_buf.push(final_gene as u32);
+                    count_buf.push(val as u32);
+                }
+            }
+
+            let chunk = CsrCellChunk::from_data(
+                &count_buf,
+                &gene_idx_buf,
+                cell_offset + written,
+                target_size,
+                true,
+            );
+
+            let (nnz_i, lib_i) = chunk.get_qc_info();
+            nnz.push(nnz_i);
+            lib_size.push(lib_i);
+            writer.write_cell_chunk(chunk)?;
+            written += 1;
+        }
+    }
+
+    // Suppress unused warning if you don't want the timing block.
+    let _ = task.no_genes.separate_with_underscores();
+
+    Ok(H5FileQcResult {
+        exp_id: task.exp_id.clone(),
+        cells_to_keep: cells_to_keep.to_vec(),
+        lib_size,
+        nnz,
+    })
+}
+
 /// Write the cells from an H5adFileTask (dispatch to respective helper)
 ///
 /// ### Params
@@ -614,7 +787,7 @@ fn write_h5_file_cells(
         );
     }
     match task.cs_type {
-        CompressedSparseFormat::Csr => write_h5_csr_cells(
+        H5ADFormat::Csr => write_h5_csr_cells(
             task,
             cells_to_keep,
             gene_mapping,
@@ -622,7 +795,7 @@ fn write_h5_file_cells(
             cell_offset,
             writer,
         ),
-        CompressedSparseFormat::Csc => write_h5_csc_cells(
+        H5ADFormat::Csc => write_h5_csc_cells(
             task,
             cells_to_keep,
             gene_mapping,
@@ -630,6 +803,15 @@ fn write_h5_file_cells(
             cell_offset,
             writer,
         ),
+        H5ADFormat::DenseRow => write_h5_dense_row_cells(
+            task,
+            cells_to_keep,
+            gene_mapping,
+            target_size,
+            cell_offset,
+            writer,
+        ),
+        H5ADFormat::DenseCol => dense_col_not_supported(),
     }
 }
 

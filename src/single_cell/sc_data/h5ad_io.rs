@@ -2,6 +2,7 @@
 //! transform them into the binarised files for usage in bixverse-rs.
 
 use hdf5::{File, Result};
+use ndarray::{Array2, s};
 use num_traits::Float;
 use rayon::prelude::*;
 use std::path::Path;
@@ -19,6 +20,51 @@ use crate::single_cell::sc_data::data_io::{CellGeneSparseWriter, CellOnFileQuali
 
 /// Number of data entries to check
 const N_CHECK: usize = 100;
+
+///////////
+// Types //
+///////////
+
+/// Per chunk results of shape:
+///
+/// `(per-gene nnz counts, per-cell stats as (orig_idx, lib_size, unique))`
+type DenseChunkQcResults = Vec<(Vec<usize>, Vec<(usize, f32, usize)>)>;
+
+/////////////////
+// h5ad format //
+/////////////////
+
+/// The format in which the H5AD counts were stored (because the field is
+/// insane and stores them in so many ways...)
+pub enum H5ADFormat {
+    /// CSR type format.
+    Csr,
+    /// CSC type format
+    Csc,
+    /// Dense (row major)
+    DenseRow,
+    /// Dense (col major)
+    DenseCol,
+}
+
+/// Parse the h5ad save format
+///
+/// ### Param
+///
+/// * `s` - The string to parse
+///
+/// ### Returns
+///
+/// The [H5ADFormat]
+pub fn parse_h5ad_format(s: &str) -> Option<H5ADFormat> {
+    match s.to_lowercase().as_str() {
+        "csr" => Some(H5ADFormat::Csr),
+        "csc" => Some(H5ADFormat::Csc),
+        "dense_row" => Some(H5ADFormat::DenseRow),
+        "dense_col" => Some(H5ADFormat::DenseCol),
+        _ => None,
+    }
+}
 
 ///////////////////
 // Raw data slot //
@@ -76,6 +122,20 @@ impl RawDataSlot {
             RawDataSlot::DataX => "X/data",
             RawDataSlot::RawX => "raw/X/data",
             RawDataSlot::LayerCounts => "layers/counts/data",
+        }
+    }
+
+    /// Get the dense path
+    ///
+    /// ### Returns
+    ///
+    /// The path to the dense array
+    #[inline]
+    pub fn get_dense_path(&self) -> &str {
+        match self {
+            RawDataSlot::DataX => "X",
+            RawDataSlot::RawX => "raw/X",
+            RawDataSlot::LayerCounts => "layers/counts",
         }
     }
 }
@@ -152,6 +212,49 @@ pub fn check_h5ad_is_raw(
     Ok(())
 }
 
+/// Sanity-check that a dense slot looks like raw counts.
+///
+/// ### Params
+///
+/// * `file` - The h5ad file reference
+/// * `raw_slot` - The slot for the raw data
+/// * `n_check` - Optional number of entries to check. If not provided, defaults
+///   to [N_CHECK].
+///
+/// ### Returns
+///
+/// Nothing if okay, Err if not.
+pub fn check_h5ad_dense_is_raw(
+    file: &File,
+    raw_slot: &RawDataSlot,
+    n_check: Option<usize>,
+) -> Result<(), BixverseErrors> {
+    let n_check = n_check.unwrap_or(100);
+
+    let ds = file.dataset(raw_slot.get_dense_path())?;
+    let shape = ds.shape();
+    if shape.len() != 2 {
+        return Ok(());
+    }
+
+    let rows = shape[0];
+    let cols = shape[1];
+    if rows == 0 || cols == 0 {
+        return Ok(());
+    }
+
+    let take_cols = cols.min(n_check.max(1));
+    let take_rows = n_check.div_ceil(take_cols).min(rows).max(1);
+
+    let block = ds.read_slice_2d((0..take_rows, 0..take_cols))?;
+    let nonzeros: Vec<f32> = block.iter().copied().filter(|&v| v != 0.0).collect();
+    if nonzeros.is_empty() {
+        return Ok(());
+    }
+    let n = nonzeros.len().min(n_check);
+    check_is_raw(&nonzeros[..n], Some(n))
+}
+
 /////////////
 // Writers //
 /////////////
@@ -166,8 +269,8 @@ pub fn check_h5ad_is_raw(
 ///
 /// * `h5_path` - Path to the h5 object.
 /// * `bin_path` - Path to the binarised object on disk to write to
-/// * `cs_type` - Was the h5ad data stored in "csc" or "csr". Important! h5ad
-///   stores data in genes x cells; bixverse stores in cells x genes!
+/// * `h5ad_format` - Was the h5ad data stored in: "csc", "csr", "dense_row",
+///   or "dense_col".
 /// * `no_cells` - Total number of obversations in the data.
 /// * `no_genes` - Total number of vars in the data.
 /// * `cell_quality` - Structure containing information on the desired minimum
@@ -183,7 +286,7 @@ pub fn check_h5ad_is_raw(
 pub fn write_h5_counts<P: AsRef<Path>>(
     h5_path: P,
     bin_path: P,
-    cs_type: &str,
+    h5ad_format: &str,
     no_cells: usize,
     no_genes: usize,
     cell_quality: MinCellQuality,
@@ -196,24 +299,32 @@ pub fn write_h5_counts<P: AsRef<Path>>(
         );
     }
 
-    let file_format = parse_compressed_sparse_format(cs_type)
-        .ok_or_else(|| BixverseErrors::UnknownSparseFormat(cs_type.to_string()))?;
+    let file_format = parse_h5ad_format(h5ad_format)
+        .ok_or_else(|| BixverseErrors::UnsupportH5ADFormat(h5ad_format.to_string()))?;
 
     let file_quality = match file_format {
-        CompressedSparseFormat::Csr => parse_h5_csr_quality(
+        H5ADFormat::Csr => parse_h5_csr_quality(
             &h5_path,
             (no_cells, no_genes),
             &raw_slot,
             &cell_quality,
             verbose,
         )?,
-        CompressedSparseFormat::Csc => parse_h5_csc_quality(
+        H5ADFormat::Csc => parse_h5_csc_quality(
             &h5_path,
             (no_cells, no_genes),
             &cell_quality,
             &raw_slot,
             verbose,
         )?,
+        H5ADFormat::DenseRow => parse_h5_dense_row_quality(
+            &h5_path,
+            (no_cells, no_genes),
+            &raw_slot,
+            &cell_quality,
+            verbose,
+        )?,
+        H5ADFormat::DenseCol => return dense_col_not_supported(),
     };
 
     if verbose {
@@ -232,13 +343,15 @@ pub fn write_h5_counts<P: AsRef<Path>>(
     }
 
     let file_data: CompressedSparseData2<u32> = match file_format {
-        CompressedSparseFormat::Csr => {
-            read_h5ad_x_data_csr(&h5_path, &file_quality, &raw_slot, verbose)?
-        }
-        CompressedSparseFormat::Csc => {
+        H5ADFormat::Csr => read_h5ad_x_data_csr(&h5_path, &file_quality, &raw_slot, verbose)?,
+        H5ADFormat::Csc => {
             let data = read_h5ad_x_data_csc(&h5_path, &file_quality, &raw_slot, verbose)?;
             data.transpose_and_convert()
         }
+        H5ADFormat::DenseRow => {
+            read_h5ad_x_data_dense_row(&h5_path, &file_quality, &raw_slot, verbose)?
+        }
+        H5ADFormat::DenseCol => return dense_col_not_supported(),
     };
 
     if verbose {
@@ -313,8 +426,8 @@ pub fn write_h5_counts<P: AsRef<Path>>(
 ///
 /// * `h5_path` - Path to the h5 object.
 /// * `bin_path` - Path to the binarised object on disk to write to
-/// * `cs_type` - Was the h5ad data stored in "csc" or "csr". Important! h5ad
-///   stores data in genes x cells; bixverse stores in cells x genes!
+/// * `h5ad_format` - Was the h5ad data stored in: "csc", "csr", "dense_row",
+///   or "dense_col".
 /// * `no_cells` - Total number of obversations in the data.
 /// * `no_genes` - Total number of vars in the data.
 /// * `cell_quality` - Structure containing information on the desired minimum
@@ -330,7 +443,7 @@ pub fn write_h5_counts<P: AsRef<Path>>(
 pub fn stream_h5_counts<P: AsRef<Path>>(
     h5_path: P,
     bin_path: P,
-    cs_type: &str,
+    h5ad_format: &str,
     no_cells: usize,
     no_genes: usize,
     cell_quality: MinCellQuality,
@@ -341,24 +454,32 @@ pub fn stream_h5_counts<P: AsRef<Path>>(
         println!("Step 1/3: Analysing data structure and calculating QC metrics...");
     }
 
-    let file_format = parse_compressed_sparse_format(cs_type)
-        .ok_or_else(|| BixverseErrors::UnknownSparseFormat(cs_type.to_string()))?;
+    let file_format = parse_h5ad_format(h5ad_format)
+        .ok_or_else(|| BixverseErrors::UnsupportH5ADFormat(h5ad_format.to_string()))?;
 
     let file_quality = match file_format {
-        CompressedSparseFormat::Csr => parse_h5_csr_quality(
+        H5ADFormat::Csr => parse_h5_csr_quality(
             &h5_path,
             (no_cells, no_genes),
             &raw_slot,
             &cell_quality,
             verbose,
         )?,
-        CompressedSparseFormat::Csc => parse_h5_csc_quality(
+        H5ADFormat::Csc => parse_h5_csc_quality(
             &h5_path,
             (no_cells, no_genes),
             &cell_quality,
             &raw_slot,
             verbose,
         )?,
+        H5ADFormat::DenseRow => parse_h5_dense_row_quality(
+            &h5_path,
+            (no_cells, no_genes),
+            &raw_slot,
+            &cell_quality,
+            verbose,
+        )?,
+        H5ADFormat::DenseCol => return dense_col_not_supported(),
     };
 
     if verbose {
@@ -377,7 +498,7 @@ pub fn stream_h5_counts<P: AsRef<Path>>(
     }
 
     let mut cell_qc = match file_format {
-        CompressedSparseFormat::Csr => write_h5_csr_streaming(
+        H5ADFormat::Csr => write_h5_csr_streaming(
             &h5_path,
             &bin_path,
             &file_quality,
@@ -385,7 +506,7 @@ pub fn stream_h5_counts<P: AsRef<Path>>(
             &raw_slot,
             verbose,
         ),
-        CompressedSparseFormat::Csc => {
+        H5ADFormat::Csc => {
             if verbose {
                 println!("  Pass 1/2: Scanning library sizes...");
             }
@@ -403,6 +524,15 @@ pub fn stream_h5_counts<P: AsRef<Path>>(
                 verbose,
             )
         }
+        H5ADFormat::DenseRow => write_h5_dense_row_streaming(
+            &h5_path,
+            &bin_path,
+            &file_quality,
+            cell_quality,
+            &raw_slot,
+            verbose,
+        ),
+        H5ADFormat::DenseCol => return dense_col_not_supported(),
     }?;
 
     cell_qc.set_cell_indices(&file_quality.cells_to_keep);
@@ -1538,6 +1668,408 @@ pub fn write_h5_csr_streaming<P: AsRef<Path>>(
 
     if verbose {
         println!("  Writing complete in {:.2?}", end_write);
+    }
+
+    Ok(CellQuality {
+        cell_indices: Vec::new(),
+        gene_indices: Vec::new(),
+        lib_size,
+        nnz,
+    })
+}
+
+/////////////////////////
+// Special case: dense //
+/////////////////////////
+
+/// Error helper for unsupported `DENSE_COL`.
+///
+/// ### Returns
+///
+/// Returns an [BixverseErrors::UnsupportH5ADFormat]
+pub fn dense_col_not_supported<T>() -> Result<T, BixverseErrors> {
+    Err(BixverseErrors::UnsupportH5ADFormat(
+        "dense_col ingestion is not yet implemented".to_string(),
+    ))
+}
+
+/// First-pass QC scan for `DENSE_ROW` (cells-as-rows) storage.
+///
+/// Reads contiguous row-chunks in parallel; per chunk it tracks per-cell
+/// `(lib_size, unique_genes)` and per-gene `nnz`. Applies the `MinCellQuality`
+/// thresholds to produce a `CellOnFileQuality`.
+///
+/// ### Params
+///
+/// * `file_path` - Path to the h5ad file.
+/// * `shape` - Array shape
+/// * `raw_slot` - Where to find the raw counts in the h5ad object, see
+///   [RawDataSlot].
+/// * `cell_quality` - Information on the which cells and genes to include after
+///   a first pass of the file.
+/// * `verbose` - Controls verbosity of the function
+///
+/// ### Returns
+///
+/// The [CellOnFileQuality]
+pub fn parse_h5_dense_row_quality<P: AsRef<Path>>(
+    file_path: P,
+    shape: (usize, usize),
+    raw_slot: &RawDataSlot,
+    cell_quality: &MinCellQuality,
+    verbose: bool,
+) -> Result<CellOnFileQuality, BixverseErrors> {
+    let file_path = file_path.as_ref();
+
+    if verbose {
+        println!(
+            "  Reading dense (row-major) matrix structure (shape: {} x {} )...",
+            shape.0.separate_with_underscores(),
+            shape.1.separate_with_underscores()
+        );
+    }
+
+    {
+        let file = File::open(file_path)?;
+        check_h5ad_dense_is_raw(&file, raw_slot, None)?;
+    }
+
+    const CELL_CHUNK_SIZE: usize = 10_000;
+    let chunk_starts: Vec<usize> = (0..shape.0).step_by(CELL_CHUNK_SIZE).collect();
+    let num_chunks = chunk_starts.len();
+
+    if verbose {
+        println!("First pass - dense scan for gene/cell stats:");
+    }
+
+    let first_pass_time = Instant::now();
+    let completed_chunks = Arc::new(AtomicUsize::new(0));
+    let report_interval = (num_chunks / 10).max(1);
+
+    // Per-chunk: (per-gene nnz counts, per-cell stats as (orig_idx, lib_size, unique))
+    let per_chunk: DenseChunkQcResults = chunk_starts
+        .par_iter()
+        .map(|&chunk_start| {
+            let mut gene_counts = vec![0usize; shape.1];
+            let mut cell_stats: Vec<(usize, f32, usize)> = Vec::new();
+
+            let Ok(file) = File::open(file_path) else {
+                return (gene_counts, cell_stats);
+            };
+            let Ok(ds) = file.dataset(raw_slot.get_dense_path()) else {
+                return (gene_counts, cell_stats);
+            };
+
+            let chunk_end = (chunk_start + CELL_CHUNK_SIZE).min(shape.0);
+            let block: Array2<f32> = match ds.read_slice_2d(s![chunk_start..chunk_end, ..]) {
+                Ok(b) => b,
+                Err(_) => return (gene_counts, cell_stats),
+            };
+
+            for (local_row, row) in block.outer_iter().enumerate() {
+                let original_idx = chunk_start + local_row;
+                let mut unique = 0usize;
+                let mut lib_size = 0.0f32;
+                for (gene_idx, &val) in row.iter().enumerate() {
+                    if val != 0.0 {
+                        unique += 1;
+                        lib_size += val;
+                        gene_counts[gene_idx] += 1;
+                    }
+                }
+                cell_stats.push((original_idx, lib_size, unique));
+            }
+
+            if verbose {
+                let completed = completed_chunks.fetch_add(1, Ordering::Relaxed) + 1;
+                if completed.is_multiple_of(report_interval) || completed == num_chunks {
+                    let progress =
+                        ((completed as f64 / num_chunks as f64 * 10.0).round() as usize) * 10;
+                    println!(
+                        "  Processed {}% of chunks ({}/{})",
+                        progress, completed, num_chunks
+                    );
+                }
+            }
+
+            (gene_counts, cell_stats)
+        })
+        .collect();
+
+    let mut no_cells_exp_gene = vec![0usize; shape.1];
+    let mut all_cell_stats: Vec<(usize, f32, usize)> = Vec::with_capacity(shape.0);
+    for (gc, mut cs) in per_chunk {
+        for (i, c) in gc.into_iter().enumerate() {
+            no_cells_exp_gene[i] += c;
+        }
+        all_cell_stats.append(&mut cs);
+    }
+
+    if verbose {
+        let avg = no_cells_exp_gene
+            .iter()
+            .sum::<usize>()
+            .checked_div(shape.1)
+            .unwrap_or(0);
+        println!(
+            "  Gene expression stats: min = {} | max = {} | avg = {} cells per gene",
+            no_cells_exp_gene
+                .iter()
+                .min()
+                .unwrap_or(&0)
+                .separate_with_underscores(),
+            no_cells_exp_gene
+                .iter()
+                .max()
+                .unwrap_or(&0)
+                .separate_with_underscores(),
+            avg.separate_with_underscores()
+        );
+        println!("  First pass complete in {:.2?}", first_pass_time.elapsed());
+    }
+
+    // QC thresholds
+    let genes_to_keep: Vec<usize> = no_cells_exp_gene
+        .iter()
+        .enumerate()
+        .filter(|&(_, &c)| c >= cell_quality.min_cells)
+        .map(|(i, _)| i)
+        .collect();
+
+    // keep order matched to original cell index
+    all_cell_stats.sort_unstable_by_key(|&(idx, _, _)| idx);
+    let cells_to_keep: Vec<usize> = all_cell_stats
+        .iter()
+        .filter(|(_, lib, unique)| {
+            *unique >= cell_quality.min_unique_genes && *lib >= cell_quality.min_lib_size as f32
+        })
+        .map(|(idx, _, _)| *idx)
+        .collect();
+
+    let mut quality = CellOnFileQuality::new(cells_to_keep, genes_to_keep);
+    quality.generate_maps_sets();
+    Ok(quality)
+}
+
+/// Helper function that reads in full data from a dense, row-major (cells x
+/// genes) h5ad file.
+///
+/// Mirrors [read_h5ad_x_data_csr] but reads contiguous row-blocks from the
+/// dense dataset and filters non-zeros on the fly.
+///
+/// ### Params
+///
+/// * `file_path` - Path to the h5ad file.
+/// * `quality` - Information on the which cells and genes to include after a
+///   first pass of the file.
+/// * `raw_slot` - Where to find the raw counts in the h5ad object, see
+///   [RawDataSlot].
+/// * `verbose` - Controls verbosity of the function.
+///
+/// ### Returns
+///
+/// The `CompressedSparseData2` with the counts stored as u32.
+pub fn read_h5ad_x_data_dense_row<P: AsRef<Path>>(
+    file_path: P,
+    quality: &CellOnFileQuality,
+    raw_slot: &RawDataSlot,
+    verbose: bool,
+) -> Result<CompressedSparseData2<u32>, BixverseErrors> {
+    let file = File::open(file_path)?;
+    let ds = file.dataset(raw_slot.get_dense_path())?;
+    let no_genes_total = ds.shape().get(1).copied().unwrap_or(0);
+
+    let mut new_data: Vec<u32> = Vec::new();
+    let mut new_indices: Vec<usize> = Vec::new();
+    let mut new_indptr: Vec<usize> = Vec::with_capacity(quality.cells_to_keep.len() + 1);
+    new_indptr.push(0);
+
+    let total_cells = quality.cells_to_keep.len();
+
+    let start_write = Instant::now();
+
+    if verbose {
+        println!(
+            "  Processing {} cells in chunks (dense row-major)...",
+            total_cells.separate_with_underscores()
+        );
+    }
+
+    const CHUNK_SIZE: usize = 1000;
+
+    for (chunk_idx, cell_chunk) in quality.cells_to_keep.chunks(CHUNK_SIZE).enumerate() {
+        if verbose && chunk_idx % 100 == 0 {
+            let processed = chunk_idx * CHUNK_SIZE;
+            println!(
+                "   Processed {} / {} cells",
+                processed.min(total_cells).separate_with_underscores(),
+                total_cells.separate_with_underscores()
+            );
+        }
+
+        let row_start = *cell_chunk.iter().min().unwrap();
+        let row_end = *cell_chunk.iter().max().unwrap() + 1;
+        let block = ds.read_slice_2d::<f32, _>((row_start..row_end, 0..no_genes_total))?;
+
+        for &old_cell_idx in cell_chunk {
+            let row = block.row(old_cell_idx - row_start);
+
+            // Dense iteration already yields ascending gene_idx; no sort needed.
+            for (gene_idx, &val) in row.iter().enumerate() {
+                if val == 0.0 {
+                    continue;
+                }
+                if let Some(&new_gene_idx) = quality.gene_old_to_new.get(&gene_idx) {
+                    new_data.push(val as u32);
+                    new_indices.push(new_gene_idx);
+                }
+            }
+
+            new_indptr.push(new_data.len());
+        }
+    }
+
+    let end_write = start_write.elapsed();
+
+    if verbose {
+        println!(
+            "   Processed {} / {} cells (complete) in {:.2?}.",
+            total_cells.separate_with_underscores(),
+            total_cells.separate_with_underscores(),
+            end_write
+        );
+    }
+
+    let shape = (quality.genes_to_keep.len(), quality.cells_to_keep.len());
+
+    Ok(CompressedSparseData2 {
+        data: new_data,
+        indices: new_indices.index_cast(),
+        indptr: new_indptr.index_cast(),
+        cs_type: CompressedSparseFormat::Csc,
+        data_2: None::<Vec<u32>>,
+        shape,
+    })
+}
+
+/// Write the dense row-major h5 in a streaming fashion on disk
+///
+/// Iterates kept cells in row-chunks, scans non-zeros, drops entries pointing
+/// at filtered genes, remaps gene indices via `quality.gene_old_to_new`, and
+/// emits a `CsrCellChunk` per kept cell.
+///
+/// ### Params
+///
+/// * `file_path` - Path to the h5ad file
+/// * `bin_path` - Path to the to-be-written binary file for the cell data
+/// * `quality` - Information on the which cells and genes to include after a
+///   first pass of the file.
+/// * `cell_qc` - Structure containing the information on which minimum criteria
+///   cells and genes need to pass.
+/// * `raw_slot` - Where to find the raw counts in the h5ad object, see
+///   [RawDataSlot].
+/// * `verbose` - Controls verbosity of the function
+///
+/// ### Returns
+///
+/// The [CellQuality] or errors
+pub fn write_h5_dense_row_streaming<P: AsRef<Path>>(
+    file_path: P,
+    bin_path: P,
+    quality: &CellOnFileQuality,
+    cell_qc: MinCellQuality,
+    raw_slot: &RawDataSlot,
+    verbose: bool,
+) -> Result<CellQuality, BixverseErrors> {
+    let file = File::open(&file_path)?;
+    let ds = file.dataset(raw_slot.get_dense_path())?;
+    let no_genes_total = ds.shape().get(1).copied().unwrap_or(0);
+
+    let mut writer = CellGeneSparseWriter::new(
+        bin_path,
+        true,
+        quality.cells_to_keep.len(),
+        quality.genes_to_keep.len(),
+    )?;
+
+    let mut lib_size = Vec::with_capacity(quality.cells_to_keep.len());
+    let mut nnz = Vec::with_capacity(quality.cells_to_keep.len());
+
+    const CELL_BATCH_SIZE: usize = 1000;
+    let total_cells = quality.cells_to_keep.len();
+    let num_batches = total_cells.div_ceil(CELL_BATCH_SIZE);
+
+    if verbose {
+        println!(
+            "  Processing {} cells in batches of {}...",
+            total_cells.separate_with_underscores(),
+            CELL_BATCH_SIZE.separate_with_underscores()
+        );
+    }
+
+    let start_write = Instant::now();
+
+    let mut gene_indices_buf: Vec<u32> = Vec::with_capacity(1024);
+    let mut gene_counts_buf: Vec<u32> = Vec::with_capacity(1024);
+
+    for (batch_idx, cell_batch) in quality.cells_to_keep.chunks(CELL_BATCH_SIZE).enumerate() {
+        if verbose
+            && (batch_idx.is_multiple_of((num_batches / 10).max(1)) || batch_idx == num_batches - 1)
+        {
+            let progress = ((batch_idx as f64 / num_batches as f64 * 10.0).round() as usize) * 10;
+            let processed = (batch_idx + 1) * CELL_BATCH_SIZE;
+            println!(
+                "  Processed {}% ({} / {} cells)",
+                progress,
+                processed.min(total_cells).separate_with_underscores(),
+                total_cells.separate_with_underscores()
+            );
+        }
+
+        // Batched read: span = [min(batch), max(batch)+1]. Kept cells should be
+        // sorted (they came from an ordered scan), but be defensive.
+        let row_start = *cell_batch.iter().min().unwrap();
+        let row_end = *cell_batch.iter().max().unwrap() + 1;
+        let block: Array2<f32> = ds.read_slice_2d(s![row_start..row_end, 0..no_genes_total])?;
+
+        for &old_cell_idx in cell_batch {
+            let local_row = old_cell_idx - row_start;
+            let row = block.row(local_row);
+
+            gene_indices_buf.clear();
+            gene_counts_buf.clear();
+
+            for (gene_idx, &val) in row.iter().enumerate() {
+                if val == 0.0 {
+                    continue;
+                }
+                if let Some(&new_gene_idx) = quality.gene_old_to_new.get(&gene_idx) {
+                    gene_indices_buf.push(new_gene_idx as u32);
+                    gene_counts_buf.push(val as u32);
+                }
+            }
+
+            let new_cell_idx = quality.cell_old_to_new[&old_cell_idx];
+            let cell_chunk = CsrCellChunk::from_data(
+                &gene_counts_buf,
+                &gene_indices_buf,
+                new_cell_idx,
+                cell_qc.target_size,
+                true,
+            );
+
+            let (nnz_i, lib_size_i) = cell_chunk.get_qc_info();
+            nnz.push(nnz_i);
+            lib_size.push(lib_size_i);
+
+            writer.write_cell_chunk(cell_chunk)?;
+        }
+    }
+
+    writer.finalise()?;
+
+    if verbose {
+        println!("  Writing complete in {:.2?}", start_write.elapsed());
     }
 
     Ok(CellQuality {

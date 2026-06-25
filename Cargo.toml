@@ -1,6 +1,6 @@
 [package]
 name = "bixverse-rs"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 authors = ["Gregor Lueg <gregorlueg@me.com>"]
 license = "MIT"
@@ -17,7 +17,7 @@ path = "src/lib.rs"
 
 [features]
 ## Enables the single cell features in bixverse-rs
-single-cell = ["half", "bincode", "indexmap", "memmap2", "hdf5", "lz4_flex"]
+single-cell = ["half", "bincode", "indexmap", "memmap2", "hdf5", "lz4_flex", "ndarray"]
 ## Tests for large scale diagonistics - for development only!
 large_scale_diagnostics = []
 ## Enables multi-modal single cell analysis (requires single-cell)
@@ -71,6 +71,7 @@ wide = "1.4.0"
 document-features = "0.2.12"
 cubecl = { version = "0.10.0", features = ["wgpu", "cpu"], optional = true }
 cubek = { version = "0.2.0", features = ["matmul"], optional = true }
+ndarray = { version = "0.16.1", optional = true }
 
 #################
 # Documentation #

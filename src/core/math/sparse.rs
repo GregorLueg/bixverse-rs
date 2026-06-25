@@ -320,10 +320,6 @@ where
 
     /// Transpose and convert
     ///
-    /// This is a helper to deal with the h5ad madness. Takes in for example
-    /// a genes x cell CSR matrix from h5ad and transforms it into a cell x
-    /// genes CSR matrix which bixverse expects. Same for CSC.
-    ///
     /// ### Returns
     ///
     /// The transformed/transposed version

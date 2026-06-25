@@ -4,7 +4,6 @@
 use extendr_api::*;
 use std::collections::HashMap;
 
-use crate::core::math::sparse::parse_compressed_sparse_format;
 use crate::ml::clustering::k_means::KMeansParamsWrappers;
 use crate::prelude::{BixverseFloat, VecConvert, VecFloatConvert};
 use crate::single_cell::mc_generation::{
@@ -23,6 +22,7 @@ use crate::single_cell::sc_analysis::{
     },
     vision::SignatureGenes,
 };
+use crate::single_cell::sc_data::h5ad_io::parse_h5ad_format;
 
 use crate::single_cell::sc_annotation::{
     sc_type::{CellTypeMarkers, SctypeRes},
@@ -1997,7 +1997,7 @@ impl H5adFileTask {
             .get("cs_type")
             .and_then(|v| v.as_str())
             .ok_or_else(|| Error::Other("cs_type missing or not a string".into()))?;
-        let cs_type = parse_compressed_sparse_format(cs_type_str)
+        let cs_type = parse_h5ad_format(cs_type_str)
             .ok_or_else(|| Error::Other("cs_type must be 'csr' or 'csc'".into()))?;
 
         let no_cells = map
