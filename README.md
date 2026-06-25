@@ -19,7 +19,7 @@ all the core functionality extracted out.
 Slowly, but surely increase the number of methods that are implemented here. The
 next targets would be
 
-- [ ] NMF for dense and sparse data
+- [x] NMF for dense and sparse data
 - [ ] Palantir for single-cell trajectories, see
   [Setty, et al.](https://www.nature.com/articles/s41587-019-0068-4).
 - [ ] Slingshot for single-cell trajectories, see
