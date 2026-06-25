@@ -315,6 +315,7 @@ dependencies = [
  "indexmap",
  "lz4_flex",
  "memmap2",
+ "ndarray",
  "num-traits",
  "once_cell",
  "petgraph",

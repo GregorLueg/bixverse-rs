@@ -276,6 +276,10 @@ pub enum BixverseErrors {
     #[error("HDF5 error: {0}")]
     Hdf5(#[from] hdf5::Error),
 
+    /// Provide custom error message for unsupported file formats.
+    #[error("Unknown or unsupported h5ad format: {0}")]
+    UnsupportH5ADFormat(String),
+
     /// A named `obs` column was requested but does not exist in the h5ad.
     ///
     /// Primarily raised by `write_h5_normalised_counts` when the caller
