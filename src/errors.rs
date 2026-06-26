@@ -540,6 +540,52 @@ pub enum BixverseErrors {
         found: usize,
     },
 
+    // -- spatial --
+    /// Spatial graph node count does not match the per-sample spot count.
+    #[cfg(feature = "spatial")]
+    #[error("Spatial: graph has {graph_nodes} nodes but {n_spots} spots were provided")]
+    SpatialGraphSpotMismatch {
+        /// Number of nodes in the per-sample spatial graph.
+        graph_nodes: usize,
+        /// Length of `spots_to_keep` (per-sample spot count).
+        n_spots: usize,
+    },
+
+    /// Per-sample coordinate count does not match the per-sample spot count.
+    #[cfg(feature = "spatial")]
+    #[error("Spatial: got {n_coords} coordinates but {n_spots} spots were provided")]
+    SpatialCoordSpotMismatch {
+        /// Number of coordinate pairs supplied.
+        n_coords: usize,
+        /// Length of `spots_to_keep`.
+        n_spots: usize,
+    },
+
+    /// Neighbourhood enrichment labels do not match the graph node count.
+    #[cfg(feature = "spatial")]
+    #[error("Spatial: labels length {n_labels} does not match graph node count {n_nodes}")]
+    NhoodLabelLengthMismatch {
+        /// Length of the labels slice.
+        n_labels: usize,
+        /// Number of graph nodes.
+        n_nodes: usize,
+    },
+
+    /// Encountered a label code outside `0..label_levels.len()`.
+    #[cfg(feature = "spatial")]
+    #[error("Spatial: label code {code} >= number of levels {n_levels}")]
+    NhoodLabelOutOfRange {
+        /// Offending code.
+        code: u32,
+        /// Number of label levels declared.
+        n_levels: usize,
+    },
+
+    /// `n_permutations == 0` for neighbourhood enrichment.
+    #[cfg(feature = "spatial")]
+    #[error("Spatial: n_permutations must be >= 1")]
+    NhoodZeroPermutations,
+
     // -- gpu --
     /// A GPU cubecl matrix multiplication error from the cubek crate
     #[cfg(feature = "gpu")]
