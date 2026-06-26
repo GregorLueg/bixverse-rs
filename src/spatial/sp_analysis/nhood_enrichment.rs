@@ -34,21 +34,17 @@ use crate::prelude::*;
 pub struct NhoodEnrichmentParams {
     /// Number of permutations. Default 1000.
     pub n_permutations: usize,
-    /// RNG seed for reproducibility. Permutation `k` uses
-    /// `StdRng::seed_from_u64(seed.wrapping_add(k as u64))` so the result is
-    /// independent of thread scheduling.
-    pub seed: u64,
     /// Average `Z` with `Zᵀ` at the end. Default `true`. Has no effect on the
     /// numerical result while the count rule is the symmetric one above, but
     /// kept for explicit downstream control.
     pub symmetrise: bool,
 }
 
+/// Default implementation for [NhoodEnrichmentParams]
 impl Default for NhoodEnrichmentParams {
     fn default() -> Self {
         Self {
             n_permutations: 1000,
-            seed: 0,
             symmetrise: true,
         }
     }
@@ -76,9 +72,168 @@ pub struct NhoodEnrichmentRes {
     pub z_scores: Mat<f64>,
 }
 
-//////////////
-// Entry pt //
-//////////////
+/////////////
+// Helpers //
+/////////////
+
+/// Build the symmetric K×K edge-count matrix from a pre-collected edge list.
+///
+/// Each undirected edge contributes once to a diagonal entry (`a == b`) or
+/// to both off-diagonal entries (`a != b`), keeping the matrix symmetric.
+///
+/// ### Params
+///
+/// * `edges` - Upper-triangle edge list as `(node_i, node_j)` pairs.
+/// * `labels` - Label code per node.
+/// * `k` - Number of label levels.
+///
+/// ### Returns
+///
+/// Flat row-major count vector of length `k * k`.
+fn count_edges_by_label(edges: &[(u32, u32)], labels: &[u32], k: usize) -> Vec<u64> {
+    let mut counts = vec![0_u64; k * k];
+    for &(i, j) in edges {
+        let a = labels[i as usize] as usize;
+        let b = labels[j as usize] as usize;
+        counts[a * k + b] += 1;
+        if a != b {
+            counts[b * k + a] += 1;
+        }
+    }
+    counts
+}
+
+/// Per-thread permutation accumulator.
+///
+/// Owns all scratch buffers reused across permutations within a rayon fold,
+/// avoiding repeated allocation.
+struct PermAcc {
+    /// Number of label levels.
+    k: usize,
+    /// Shuffle buffer; reset to the original labels before each permutation.
+    shuffle: Vec<u32>,
+    /// Per-permutation count matrix, cleared each iteration. Length: `k * k`.
+    counts: Vec<u64>,
+    /// Running sum of per-cell counts across permutations. Length: `k * k`.
+    sum: Vec<f64>,
+    /// Running sum of per-cell counts squared. Length: `k * k`.
+    sum_sq: Vec<f64>,
+}
+
+impl PermAcc {
+    /// Allocate a fully initialised accumulator for a rayon fold worker.
+    ///
+    /// ### Params
+    ///
+    /// * `k` - Number of label levels.
+    /// * `init_labels` - Original label assignment, copied into the shuffle
+    ///   buffer.
+    ///
+    /// ### Returns
+    ///
+    /// Zeroed accumulator with shuffle buffer seeded from `init_labels`.
+    fn new(k: usize, init_labels: &[u32]) -> Self {
+        Self {
+            k,
+            shuffle: init_labels.to_vec(),
+            counts: vec![0_u64; k * k],
+            sum: vec![0.0_f64; k * k],
+            sum_sq: vec![0.0_f64; k * k],
+        }
+    }
+
+    /// Allocate an empty accumulator used as the rayon reduce identity.
+    ///
+    /// The shuffle and counts buffers are left empty; only the sum accumulators
+    /// are allocated and zeroed.
+    ///
+    /// ### Params
+    ///
+    /// * `k` - Number of label levels.
+    ///
+    /// ### Returns
+    ///
+    /// Zero-sum accumulator with no shuffle or count scratch.
+    fn empty(k: usize) -> Self {
+        Self {
+            k,
+            shuffle: Vec::new(),
+            counts: Vec::new(),
+            sum: vec![0.0_f64; k * k],
+            sum_sq: vec![0.0_f64; k * k],
+        }
+    }
+
+    /// Run a single permutation and accumulate its counts.
+    ///
+    /// Resets the shuffle buffer to `init_labels`, draws a fresh deterministic
+    /// shuffle keyed on `seed + perm_idx`, counts edges, then adds to the
+    /// running sum and sum-of-squares.
+    ///
+    /// ### Params
+    ///
+    /// * `perm_idx` - Index of this permutation; combined with `seed` to derive
+    ///   the per-permutation RNG.
+    /// * `seed` - Base RNG seed from [`NhoodEnrichmentParams`].
+    /// * `edges` - Upper-triangle edge list as `(node_i, node_j)` pairs.
+    /// * `init_labels` - Original label assignment to shuffle from.
+    fn run_one(&mut self, perm_idx: usize, seed: u64, edges: &[(u32, u32)], init_labels: &[u32]) {
+        let k = self.k;
+
+        // Reset to the original assignment so the per-perm shuffle is a fresh
+        // permutation of `init_labels` and independent of prior iterations.
+        self.shuffle.copy_from_slice(init_labels);
+        let mut rng = StdRng::seed_from_u64(seed.wrapping_add(perm_idx as u64));
+        self.shuffle.shuffle(&mut rng);
+
+        for c in self.counts.iter_mut() {
+            *c = 0;
+        }
+        for &(i, j) in edges {
+            let a = self.shuffle[i as usize] as usize;
+            let b = self.shuffle[j as usize] as usize;
+            self.counts[a * k + b] += 1;
+            if a != b {
+                self.counts[b * k + a] += 1;
+            }
+        }
+
+        for idx in 0..(k * k) {
+            let v = self.counts[idx] as f64;
+            self.sum[idx] += v;
+            self.sum_sq[idx] += v * v;
+        }
+    }
+
+    /// Merge another accumulator's running totals into this one.
+    ///
+    /// Used as the rayon reduce step to combine per-thread accumulators.
+    ///
+    /// ### Params
+    ///
+    /// * `other` - Accumulator to merge; must have the same `k`.
+    fn merge_from(&mut self, other: &PermAcc) {
+        debug_assert_eq!(self.sum.len(), other.sum.len());
+        for idx in 0..self.sum.len() {
+            self.sum[idx] += other.sum[idx];
+            self.sum_sq[idx] += other.sum_sq[idx];
+        }
+    }
+
+    /// Consume the accumulator and return the running totals.
+    ///
+    /// ### Returns
+    ///
+    /// Tuple of `(sum, sum_sq)`, each a flat row-major vector of length
+    /// `k * k`.
+    fn into_running_totals(self) -> (Vec<f64>, Vec<f64>) {
+        (self.sum, self.sum_sq)
+    }
+}
+
+//////////
+// Main //
+//////////
 
 /// Compute neighbourhood-enrichment Z-scores on `graph` with `labels`.
 ///
@@ -87,14 +242,21 @@ pub struct NhoodEnrichmentRes {
 /// * `graph` - Per-sample symmetric spatial graph.
 /// * `labels` - One label code per node (`labels.len() == graph.n_nodes()`).
 ///   Codes must lie in `0..label_levels.len()`.
-/// * `label_levels` - Human-readable name per code (kept in the result for
-///   downstream display).
+/// * `label_levels` - Human-readable name per code, kept in the result for
+///   downstream display.
 /// * `params` - Permutation count, seed, symmetrise toggle.
+/// * `seed` - Random seed for reproducibility
+///
+/// ### Returns
+///
+/// `Result<NhoodEnrichmentRes>` with observed counts, permutation mean and
+/// standard deviation, and Z-scores.
 pub fn compute_nhood_enrichment(
     graph: &GraphCsr,
     labels: &[u32],
     label_levels: &[String],
     params: &NhoodEnrichmentParams,
+    seed: usize,
 ) -> Result<NhoodEnrichmentRes, BixverseErrors> {
     let n_nodes = graph.n_nodes();
     if labels.len() != n_nodes {
@@ -109,10 +271,7 @@ pub fn compute_nhood_enrichment(
     let k = label_levels.len();
     for &code in labels {
         if (code as usize) >= k {
-            return Err(BixverseErrors::NhoodLabelOutOfRange {
-                code,
-                n_levels: k,
-            });
+            return Err(BixverseErrors::NhoodLabelOutOfRange { code, n_levels: k });
         }
     }
 
@@ -124,7 +283,7 @@ pub fn compute_nhood_enrichment(
     // major) K*K vectors. Permutation k uses a fresh deterministic RNG so the
     // final sums are independent of thread scheduling.
     let n_perm = params.n_permutations;
-    let seed = params.seed;
+    let seed = seed as u64;
     let init_labels = labels.to_vec();
 
     let (sum, sum_sq) = (0..n_perm)
@@ -190,106 +349,6 @@ pub fn compute_nhood_enrichment(
     })
 }
 
-///////////////
-// Internals //
-///////////////
-
-/// Symmetric K×K edge-count pass, flat row-major.
-fn count_edges_by_label(edges: &[(u32, u32)], labels: &[u32], k: usize) -> Vec<u64> {
-    let mut counts = vec![0_u64; k * k];
-    for &(i, j) in edges {
-        let a = labels[i as usize] as usize;
-        let b = labels[j as usize] as usize;
-        counts[a * k + b] += 1;
-        if a != b {
-            counts[b * k + a] += 1;
-        }
-    }
-    counts
-}
-
-/// Per-thread permutation accumulator. Owns the shuffle scratch buffer and
-/// the per-perm count buffer so they are reused across permutations within
-/// the rayon fold.
-struct PermAcc {
-    k: usize,
-    /// Reusable shuffle buffer; cloned from the original labels at init.
-    shuffle: Vec<u32>,
-    /// Reusable per-perm count matrix (cleared each iteration).
-    counts: Vec<u64>,
-    /// Running sum of per-cell counts across permutations.
-    sum: Vec<f64>,
-    /// Running sum of per-cell counts squared.
-    sum_sq: Vec<f64>,
-}
-
-impl PermAcc {
-    fn new(k: usize, init_labels: &[u32]) -> Self {
-        Self {
-            k,
-            shuffle: init_labels.to_vec(),
-            counts: vec![0_u64; k * k],
-            sum: vec![0.0_f64; k * k],
-            sum_sq: vec![0.0_f64; k * k],
-        }
-    }
-
-    fn empty(k: usize) -> Self {
-        Self {
-            k,
-            shuffle: Vec::new(),
-            counts: Vec::new(),
-            sum: vec![0.0_f64; k * k],
-            sum_sq: vec![0.0_f64; k * k],
-        }
-    }
-
-    fn run_one(
-        &mut self,
-        perm_idx: usize,
-        seed: u64,
-        edges: &[(u32, u32)],
-        init_labels: &[u32],
-    ) {
-        let k = self.k;
-        // Reset to the original assignment so the per-perm shuffle is a fresh
-        // permutation of `init_labels` and independent of prior iterations.
-        self.shuffle.copy_from_slice(init_labels);
-        let mut rng = StdRng::seed_from_u64(seed.wrapping_add(perm_idx as u64));
-        self.shuffle.shuffle(&mut rng);
-
-        for c in self.counts.iter_mut() {
-            *c = 0;
-        }
-        for &(i, j) in edges {
-            let a = self.shuffle[i as usize] as usize;
-            let b = self.shuffle[j as usize] as usize;
-            self.counts[a * k + b] += 1;
-            if a != b {
-                self.counts[b * k + a] += 1;
-            }
-        }
-
-        for idx in 0..(k * k) {
-            let v = self.counts[idx] as f64;
-            self.sum[idx] += v;
-            self.sum_sq[idx] += v * v;
-        }
-    }
-
-    fn merge_from(&mut self, other: &PermAcc) {
-        debug_assert_eq!(self.sum.len(), other.sum.len());
-        for idx in 0..self.sum.len() {
-            self.sum[idx] += other.sum[idx];
-            self.sum_sq[idx] += other.sum_sq[idx];
-        }
-    }
-
-    fn into_running_totals(self) -> (Vec<f64>, Vec<f64>) {
-        (self.sum, self.sum_sq)
-    }
-}
-
 ///////////
 // Tests //
 ///////////
@@ -324,9 +383,9 @@ mod tests {
             &levels,
             &NhoodEnrichmentParams {
                 n_permutations: 10,
-                seed: 42,
                 symmetrise: false,
             },
+            0,
         )
         .unwrap();
 
@@ -348,11 +407,10 @@ mod tests {
 
         let params = NhoodEnrichmentParams {
             n_permutations: 200,
-            seed: 12345,
             symmetrise: true,
         };
-        let r1 = compute_nhood_enrichment(&graph, &labels, &levels, &params).unwrap();
-        let r2 = compute_nhood_enrichment(&graph, &labels, &levels, &params).unwrap();
+        let r1 = compute_nhood_enrichment(&graph, &labels, &levels, &params, 42).unwrap();
+        let r2 = compute_nhood_enrichment(&graph, &labels, &levels, &params, 42).unwrap();
 
         for a in 0..2 {
             for b in 0..2 {
@@ -361,7 +419,10 @@ mod tests {
                 if z1.is_nan() || z2.is_nan() {
                     assert!(z1.is_nan() && z2.is_nan(), "NaN mismatch at ({a},{b})");
                 } else {
-                    assert!((z1 - z2).abs() < 1e-12, "Z mismatch at ({a},{b}): {z1} vs {z2}");
+                    assert!(
+                        (z1 - z2).abs() < 1e-12,
+                        "Z mismatch at ({a},{b}): {z1} vs {z2}"
+                    );
                 }
             }
         }
@@ -379,10 +440,9 @@ mod tests {
 
         let params = NhoodEnrichmentParams {
             n_permutations: 500,
-            seed: 7,
             symmetrise: true,
         };
-        let res = compute_nhood_enrichment(&graph, &labels, &levels, &params).unwrap();
+        let res = compute_nhood_enrichment(&graph, &labels, &levels, &params, 7).unwrap();
 
         for a in 0..3 {
             assert!(
@@ -408,6 +468,7 @@ mod tests {
             &labels,
             &levels,
             &NhoodEnrichmentParams::default(),
+            2,
         )
         .unwrap_err();
         match err {
@@ -430,6 +491,7 @@ mod tests {
             &labels,
             &levels,
             &NhoodEnrichmentParams::default(),
+            2,
         )
         .unwrap_err();
         match err {
@@ -448,11 +510,10 @@ mod tests {
         let levels = vec!["A".to_string(), "B".to_string()];
         let params = NhoodEnrichmentParams {
             n_permutations: 0,
-            seed: 0,
             symmetrise: true,
         };
 
-        let err = compute_nhood_enrichment(&graph, &labels, &levels, &params).unwrap_err();
+        let err = compute_nhood_enrichment(&graph, &labels, &levels, &params, 0).unwrap_err();
         assert!(matches!(err, BixverseErrors::NhoodZeroPermutations));
     }
 
@@ -466,10 +527,9 @@ mod tests {
 
         let params = NhoodEnrichmentParams {
             n_permutations: 50,
-            seed: 1,
             symmetrise: true,
         };
-        let res = compute_nhood_enrichment(&graph, &labels, &levels, &params).unwrap();
+        let res = compute_nhood_enrichment(&graph, &labels, &levels, &params, 1).unwrap();
 
         for a in 0..2 {
             for b in 0..2 {

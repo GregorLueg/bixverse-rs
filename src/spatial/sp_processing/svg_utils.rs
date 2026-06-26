@@ -7,16 +7,29 @@ use crate::single_cell::sc_data::data_io::CscGeneChunk;
 ////////////
 
 /// Which expression layer to read from a [`CscGeneChunk`].
-///
-/// `CscGeneChunk` carries both raw counts (`data_raw`) and normalised counts
-/// (`data_norm`). This enum picks one. Moran's I supports either; SPARK-X is
-/// forced to raw (scale-invariant per gene).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Assay {
     /// Use raw counts from `CscGeneChunk::data_raw`.
     Raw,
     /// Use normalised counts from `CscGeneChunk::data_norm`.
     Norm,
+}
+
+/// Parse the assay type
+///
+/// ### Params
+///
+/// * `s` - The string to parse
+///
+/// ### Returns
+///
+/// The Option of [Assay]
+pub fn parse_assay_type(s: &str) -> Option<Assay> {
+    match s.to_lowercase().as_str() {
+        "raw" => Some(Assay::Raw),
+        "norm" | "normalised" => Some(Assay::Norm),
+        _ => None,
+    }
 }
 
 /// Common parameters for SVG detection methods.
@@ -26,11 +39,10 @@ pub struct SpatialSvgParams {
     pub assay: Assay,
 }
 
+/// Default implementation
 impl Default for SpatialSvgParams {
     fn default() -> Self {
-        Self {
-            assay: Assay::Norm,
-        }
+        Self { assay: Assay::Norm }
     }
 }
 
@@ -73,6 +85,14 @@ pub fn materialise_gene_dense(chunk: &CscGeneChunk, assay: Assay, out: &mut [f32
 ///
 /// Used by Moran's I: the centred vector is the input to the quadratic form,
 /// and `sum_sq` is the denominator of the test statistic.
+///
+/// ### Params
+///
+/// * `vals` - Mutable reference to the values
+///
+/// ### Returns
+///
+/// Tuple of `(mean, sum_sq)`
 pub fn center_inplace(vals: &mut [f32]) -> (f32, f32) {
     let n = vals.len();
     if n == 0 {
