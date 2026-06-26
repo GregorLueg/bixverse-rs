@@ -26,7 +26,9 @@ use crate::core::math::stats::{calc_fdr, z_scores_to_pval};
 use crate::graph::spatial_graph::{GraphCsr, graph_weight_moments};
 use crate::prelude::*;
 use crate::single_cell::sc_data::data_io::{CscGeneChunk, ParallelSparseReader};
-use crate::spatial::svg::shared::{SpatialSvgParams, center_inplace, materialise_gene_dense};
+use crate::spatial::sp_processing::svg_utils::{
+    SpatialSvgParams, center_inplace, materialise_gene_dense,
+};
 
 /////////////
 // Results //
@@ -58,17 +60,13 @@ pub struct MoranIRes {
 ////////////
 
 /// Per-sample Moran's I driver.
-///
-/// Mirrors the shape of `single_cell::sc_analysis::hotspot::Hotspot`. Precom
-/// putes everything that depends only on `(graph, n_spots)`; per-gene work is
-/// streamed from disk via `ParallelSparseReader`.
 #[derive(Clone, Debug)]
 pub struct MoransI<'a> {
     /// File path to the gene-based binary file.
     f_path_gene: String,
     /// Per-sample symmetric CSR graph.
     graph: GraphCsr,
-    /// Global spot indices to keep (R-side per-sample selection).
+    /// Global spot indices to keep.
     spots_to_keep: &'a [usize],
     /// Run parameters (assay choice).
     params: SpatialSvgParams,
@@ -122,7 +120,9 @@ impl<'a> MoransI<'a> {
         let n = n_spots as f64;
 
         let e_i = -1.0 / (n - 1.0);
-        // Cliff-Ord normality variance: matches spdep::moran.test(..., randomisation = FALSE)
+
+        // Cliff-Ord normality variance:
+        // matches spdep::moran.test(..., randomisation = FALSE)
         // Var[I] = (N^2 S1 - N S2 + 3 S0^2) / (S0^2 (N^2 - 1)) - E[I]^2
         let denom = s0 * s0 * (n * n - 1.0);
         let var_i = if denom > 0.0 && n > 1.0 {
@@ -147,24 +147,40 @@ impl<'a> MoransI<'a> {
     }
 
     /// Spot count for this sample.
+    ///
+    /// ### Returns
+    ///
+    /// Number of spots
     #[inline]
     pub fn n_spots(&self) -> usize {
         self.n_spots
     }
 
     /// Expected value of I under the normality null.
+    ///
+    /// ### Returns
+    ///
+    /// Expected I
     #[inline]
     pub fn e_i(&self) -> f64 {
         self.e_i
     }
 
     /// Variance of I under the normality null.
+    ///
+    /// ### Returns
+    ///
+    /// Expected variance of I
     #[inline]
     pub fn var_i(&self) -> f64 {
         self.var_i
     }
 
-    /// Spots in this sample (passthrough of the slice given to `new`).
+    /// Spots in this sample
+    ///
+    /// ### Returns
+    ///
+    /// Slice of spots to keep
     #[inline]
     pub fn spots_to_keep(&self) -> &[usize] {
         self.spots_to_keep
@@ -180,6 +196,10 @@ impl<'a> MoransI<'a> {
     ///
     /// * `gene_indices` - On-disk gene indices to test.
     /// * `verbose` - 0 silent, 1 normal, 2 detailed.
+    ///
+    /// ### Returns
+    ///
+    /// The [MoranIRes].
     pub fn compute_all_genes(
         &self,
         gene_indices: &[usize],
@@ -195,7 +215,11 @@ impl<'a> MoransI<'a> {
             .par_iter_mut()
             .for_each(|chunk| chunk.filter_selected_cells(&self.spot_set));
         if verbosity.normal_verbosity() {
-            println!("Moran's I: loaded {} gene chunks in {:.2?}", gene_chunks.len(), start_load.elapsed());
+            println!(
+                "Moran's I: loaded {} gene chunks in {:.2?}",
+                gene_chunks.len(),
+                start_load.elapsed()
+            );
         }
 
         let start_calc = Instant::now();
@@ -207,7 +231,10 @@ impl<'a> MoransI<'a> {
             )
             .collect();
         if verbosity.normal_verbosity() {
-            println!("Moran's I: per-gene calculations in {:.2?}", start_calc.elapsed());
+            println!(
+                "Moran's I: per-gene calculations in {:.2?}",
+                start_calc.elapsed()
+            );
         }
 
         let res = self.finalise(per_gene);
@@ -277,31 +304,49 @@ impl<'a> MoransI<'a> {
         if verbosity.normal_verbosity() {
             println!("Moran's I (streaming): total {:.2?}", start_all.elapsed());
         }
+
         Ok(res)
     }
 
-    /////////////
-    // Internals
-    /////////////
+    ///////////////
+    // Internals //
+    ///////////////
 
     /// Compute I for a single (already filtered) gene chunk into `scratch`.
-    fn compute_single_gene(&self, chunk: &CscGeneChunk, scratch: &mut Vec<f32>) -> (usize, f64) {
+    ///
+    /// ### Params
+    ///
+    /// * `chunk` - The [CscGeneChunk]
+    /// * `scratch` - Slice of scratch buffer
+    ///
+    /// ### Returns
+    ///
+    /// Tuple of `(chunk_idx, Moran's I)`
+    fn compute_single_gene(&self, chunk: &CscGeneChunk, scratch: &mut [f32]) -> (usize, f64) {
         materialise_gene_dense(chunk, self.params.assay, scratch);
-        let (_mean, sum_sq) = center_inplace(scratch);
+        let (_, sum_sq) = center_inplace(scratch);
 
         if sum_sq <= 0.0 {
-            // Constant gene: undefined I; emit NaN. Per design we keep the
-            // gene in the output and let NaN propagate to the p-value.
+            // Constant gene: undefined I; emit NaN
             return (chunk.original_index, f64::NAN);
         }
 
         let num = self.graph.quadratic_form(scratch) as f64;
         let n = self.n_spots as f64;
         let i = (n / self.w_sym_total) * (num / sum_sq as f64);
+
         (chunk.original_index, i)
     }
 
     /// Compose the final result from the per-gene tuples.
+    ///
+    /// ### Params
+    ///
+    /// * `per_gene` - Vector of Moran's I results
+    ///
+    /// ### Returns
+    ///
+    /// The final [MoranIRes].
     fn finalise(&self, per_gene: Vec<(usize, f64)>) -> MoranIRes {
         let n_kept = per_gene.len();
         let mut gene_idx = Vec::with_capacity(n_kept);
@@ -342,6 +387,7 @@ impl<'a> MoransI<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::spatial_graph::make_weights_non_redundant;
 
     // Build a small graph in the canonical (neighbours, weights) form used by
     // R-side callers; both directions present so the redundancy collapse path
@@ -363,8 +409,8 @@ mod tests {
     }
 
     fn build_graph() -> GraphCsr {
-        let (neigh, mut w) = small_graph_data();
-        let nr = crate::graph::spatial_graph::make_weights_non_redundant(&neigh, &mut w);
+        let (neigh, w) = small_graph_data();
+        let nr = make_weights_non_redundant(&neigh, &w);
         GraphCsr::from_non_redundant(&neigh, &nr)
     }
 
@@ -427,6 +473,7 @@ mod tests {
         // The constructor uses /dev/null as a stand-in path; new() doesn't
         // touch the file (file access is in compute_all_genes), so the
         // construction must succeed and yield the expected scalar moments.
+
         let _ = mi; // silence "unused"
 
         let expected_e: f64 = -1.0 / 3.0;
@@ -440,7 +487,8 @@ mod tests {
         let (s0, s1, s2) = graph_weight_moments(&graph);
         let n = 4.0_f64;
         let e_i = -1.0 / (n - 1.0);
-        let expected = (n * n * s1 - n * s2 + 3.0 * s0 * s0) / (s0 * s0 * (n * n - 1.0)) - e_i * e_i;
+        let expected =
+            (n * n * s1 - n * s2 + 3.0 * s0 * s0) / (s0 * s0 * (n * n - 1.0)) - e_i * e_i;
 
         let (neigh, mut w) = small_graph_data();
         let spots = vec![0_usize, 1, 2, 3];
@@ -491,8 +539,8 @@ mod tests {
         // Linear chain 0-1-2-3 with unit weights — x = [1, 1, -1, -1] is
         // strongly positively autocorrelated (neighbours mostly agree).
         let neigh = vec![vec![1], vec![0, 2], vec![1, 3], vec![2]];
-        let mut w = vec![vec![1.0_f32], vec![1.0, 1.0], vec![1.0, 1.0], vec![1.0]];
-        let nr = crate::graph::spatial_graph::make_weights_non_redundant(&neigh, &mut w);
+        let w = vec![vec![1.0_f32], vec![1.0, 1.0], vec![1.0, 1.0], vec![1.0]];
+        let nr = make_weights_non_redundant(&neigh, &w);
         let graph = GraphCsr::from_non_redundant(&neigh, &nr);
 
         let x: [f32; 4] = [1.0, 1.0, -1.0, -1.0];
@@ -504,8 +552,8 @@ mod tests {
     fn alternating_signal_yields_negative_i() {
         // Linear chain with alternating signs — neighbours always disagree.
         let neigh = vec![vec![1], vec![0, 2], vec![1, 3], vec![2]];
-        let mut w = vec![vec![1.0_f32], vec![1.0, 1.0], vec![1.0, 1.0], vec![1.0]];
-        let nr = crate::graph::spatial_graph::make_weights_non_redundant(&neigh, &mut w);
+        let w = vec![vec![1.0_f32], vec![1.0, 1.0], vec![1.0, 1.0], vec![1.0]];
+        let nr = make_weights_non_redundant(&neigh, &w);
         let graph = GraphCsr::from_non_redundant(&neigh, &nr);
 
         let x: [f32; 4] = [1.0, -1.0, 1.0, -1.0];

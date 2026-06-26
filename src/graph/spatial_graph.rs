@@ -9,21 +9,10 @@
 //!    zero on the reciprocal entry).
 //! 2. [`GraphCsr::from_non_redundant`] scatters those canonical entries into
 //!    both rows, producing a symmetric CSR matrix.
-//!
-//! Downstream code consumes the symmetric CSR. Convenience helpers cover the
-//! operations used across the spatial methods:
-//!
-//! - [`GraphCsr::spmv`] / [`GraphCsr::spmv_sq`] - sparse mat-vec against
-//!   `W_sym` and `W_sym²`.
-//! - [`GraphCsr::quadratic_form`] - fused `cᵀ W_sym c` for Moran's I and the
-//!   HotSpot pair statistic.
-//! - [`GraphCsr::iter_edges_upper`] - undirected edge iterator (each pair
-//!   yielded once with `i < j`), used by neighbourhood enrichment.
-//! - [`compute_node_degree`] - sum of incident weights per node.
 
-///////////////////
-// Graph struct  //
-///////////////////
+//////////////
+// GraphCsr //
+//////////////
 
 /// Symmetric graph in CSR layout shared across spatial methods.
 ///
@@ -96,31 +85,52 @@ impl GraphCsr {
     }
 
     /// Number of nodes in the graph.
+    ///
+    /// ### Returns
+    ///
+    /// Number of nodes
     #[inline]
     pub fn n_nodes(&self) -> usize {
         self.offsets.len() - 1
     }
 
-    /// Number of (directed) entries in the CSR. Each undirected edge with
-    /// non-zero weight contributes 2 entries.
+    /// Number of (directed) entries in the CSR.
+    ///
+    /// Each undirected edge with non-zero weight contributes 2 entries.
+    ///
+    /// ### Returns
+    ///
+    /// Number of non-zero weights
     #[inline]
     pub fn nnz(&self) -> usize {
         self.indices.len()
     }
 
     /// Read-only access to the row offsets (length `n_nodes + 1`).
+    ///
+    /// ### Returns
+    ///
+    /// Slice of offsets
     #[inline]
     pub fn offsets(&self) -> &[usize] {
         &self.offsets
     }
 
     /// Read-only access to the column indices.
+    ///
+    /// ### Returns
+    ///
+    /// Slice of indices
     #[inline]
     pub fn indices(&self) -> &[u32] {
         &self.indices
     }
 
     /// Read-only access to the edge weights.
+    ///
+    /// ### Returns
+    ///
+    /// Slice of weights
     #[inline]
     pub fn weights(&self) -> &[f32] {
         &self.weights
@@ -128,6 +138,10 @@ impl GraphCsr {
 
     /// Sum of all stored edge weights. For a symmetric CSR this is `2 * S0`
     /// in Cliff-Ord notation (each undirected edge counted twice).
+    ///
+    /// ### Returns
+    ///
+    /// The weighted sum
     pub fn weight_sum(&self) -> f64 {
         let mut s = 0.0_f64;
         for &w in &self.weights {
@@ -186,6 +200,14 @@ impl GraphCsr {
     /// are already promoted to `f64` (Moran's I path keeps the gene chunk in
     /// `f32` and only the reduction needs to be in `f64`; this helper is for
     /// callers who promote earlier).
+    ///
+    /// ### Params
+    ///
+    /// * `c` - Input vector of length `n_nodes`
+    ///
+    /// ### Returns
+    ///
+    /// The scalar `cᵀ W_sym c` as `f64`
     pub fn quadratic_form_f64(&self, c: &[f64]) -> f64 {
         let mut total = 0.0_f64;
         for i in 0..self.n_nodes() {
@@ -235,9 +257,9 @@ impl GraphCsr {
     }
 }
 
-////////////////////
-// Free helpers   //
-////////////////////
+/////////////
+// Helpers //
+/////////////
 
 /// Compute Cliff-Ord-style graph weight sums used by Moran's I analytical
 /// variance.
@@ -252,6 +274,14 @@ impl GraphCsr {
 /// contributes `(2 w)^2 = 4 w^2` to the un-halved s1 sum; with both directions
 /// stored that is `4 w^2` per directed entry, and `s1` ends up as
 /// `2 * sum_directed w^2` (equivalently `4 * sum_upper w^2`).
+///
+/// ### Params
+///
+/// * `graph` - The [GraphCsr]
+///
+/// ### Returns
+///
+/// Tuple of `(s0, s1, s2)`
 pub fn graph_weight_moments(graph: &GraphCsr) -> (f64, f64, f64) {
     let weights = graph.weights();
     let offsets = graph.offsets();
