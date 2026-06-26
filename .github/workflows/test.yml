@@ -55,11 +55,11 @@ jobs:
         env:
           LD_LIBRARY_PATH: ${{ steps.setup-r.outputs.r-home }}/lib
           DYLD_LIBRARY_PATH: ${{ steps.setup-r.outputs.r-home }}/lib
-        run: cargo test --no-default-features && cargo test --features single-cell,multi-modal
+        run: cargo test --no-default-features && cargo test --features single-cell,multi-modal,spatial
 
       - name: Run tests (Windows)
         if: runner.os == 'Windows'
-        run: cargo test --no-default-features && cargo test --features single-cell,multi-modal
+        run: cargo test --no-default-features && cargo test --features single-cell,multi-modal,spatial
 
   test-gpu:
     name: Test GPU on ${{ matrix.os }}
@@ -94,4 +94,4 @@ jobs:
         env:
           LD_LIBRARY_PATH: ${{ steps.setup-r.outputs.r-home }}/lib
           DYLD_LIBRARY_PATH: ${{ steps.setup-r.outputs.r-home }}/lib
-        run: cargo test --features gpu
+        run: cargo test --features gpu,single-cell
