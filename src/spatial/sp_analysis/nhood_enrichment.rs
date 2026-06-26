@@ -33,7 +33,7 @@ use crate::prelude::*;
 #[derive(Debug, Clone)]
 pub struct NhoodEnrichmentParams {
     /// Number of permutations. Default 1000.
-    pub n_permutations: usize,
+    pub n_perm: usize,
     /// Average `Z` with `Zᵀ` at the end. Default `true`. Has no effect on the
     /// numerical result while the count rule is the symmetric one above, but
     /// kept for explicit downstream control.
@@ -44,7 +44,7 @@ pub struct NhoodEnrichmentParams {
 impl Default for NhoodEnrichmentParams {
     fn default() -> Self {
         Self {
-            n_permutations: 1000,
+            n_perm: 1000,
             symmetrise: true,
         }
     }
@@ -265,7 +265,7 @@ pub fn compute_nhood_enrichment(
             n_nodes,
         });
     }
-    if params.n_permutations == 0 {
+    if params.n_perm == 0 {
         return Err(BixverseErrors::NhoodZeroPermutations);
     }
     let k = label_levels.len();
@@ -282,7 +282,7 @@ pub fn compute_nhood_enrichment(
     // Permutation accumulators: sum and sum-of-squares per cell, flat (row-
     // major) K*K vectors. Permutation k uses a fresh deterministic RNG so the
     // final sums are independent of thread scheduling.
-    let n_perm = params.n_permutations;
+    let n_perm = params.n_perm;
     let seed = seed as u64;
     let init_labels = labels.to_vec();
 
@@ -382,7 +382,7 @@ mod tests {
             &labels,
             &levels,
             &NhoodEnrichmentParams {
-                n_permutations: 10,
+                n_perm: 10,
                 symmetrise: false,
             },
             0,
@@ -406,7 +406,7 @@ mod tests {
         let levels = vec!["A".to_string(), "B".to_string()];
 
         let params = NhoodEnrichmentParams {
-            n_permutations: 200,
+            n_perm: 200,
             symmetrise: true,
         };
         let r1 = compute_nhood_enrichment(&graph, &labels, &levels, &params, 42).unwrap();
@@ -439,7 +439,7 @@ mod tests {
         let levels = vec!["A".to_string(), "B".to_string(), "C".to_string()];
 
         let params = NhoodEnrichmentParams {
-            n_permutations: 500,
+            n_perm: 500,
             symmetrise: true,
         };
         let res = compute_nhood_enrichment(&graph, &labels, &levels, &params, 7).unwrap();
@@ -509,7 +509,7 @@ mod tests {
         let labels = vec![0_u32, 1, 0, 1];
         let levels = vec!["A".to_string(), "B".to_string()];
         let params = NhoodEnrichmentParams {
-            n_permutations: 0,
+            n_perm: 0,
             symmetrise: true,
         };
 
@@ -526,7 +526,7 @@ mod tests {
         let levels = vec!["A".to_string(), "B".to_string()];
 
         let params = NhoodEnrichmentParams {
-            n_permutations: 50,
+            n_perm: 50,
             symmetrise: true,
         };
         let res = compute_nhood_enrichment(&graph, &labels, &levels, &params, 1).unwrap();

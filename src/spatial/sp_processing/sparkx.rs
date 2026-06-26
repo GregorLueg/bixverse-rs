@@ -70,8 +70,6 @@ pub struct SparkXParams {
     /// Sub-sample size for pairwise-distance bandwidth estimation. Default
     /// 1000. Skipped when `kernels` is non-empty.
     pub bandwidth_subsample: usize,
-    /// Seed for landmark selection and bandwidth sub-sampling.
-    pub seed: u64,
 }
 
 /// Default implementation
@@ -81,7 +79,6 @@ impl Default for SparkXParams {
             kernels: Vec::new(),
             n_landmarks: 20,
             bandwidth_subsample: 1000,
-            seed: 42,
         }
     }
 }
@@ -949,6 +946,7 @@ impl<'a> SparkX<'a> {
         spots_to_keep: &'a [usize],
         coordinates: &[(f32, f32)],
         params: SparkXParams,
+        seed: usize,
     ) -> Result<Self, BixverseErrors> {
         let n_spots = spots_to_keep.len();
         if coordinates.len() != n_spots {
@@ -964,7 +962,7 @@ impl<'a> SparkX<'a> {
         }
 
         let kernels = if params.kernels.is_empty() {
-            default_kernel_bank(coordinates, params.bandwidth_subsample, params.seed)
+            default_kernel_bank(coordinates, params.bandwidth_subsample, seed as u64)
         } else {
             params.kernels.clone()
         };
@@ -976,7 +974,7 @@ impl<'a> SparkX<'a> {
 
         let phis: Result<Vec<KernelFactor>, BixverseErrors> = kernels
             .iter()
-            .map(|k| build_kernel_factor(*k, coordinates, params.n_landmarks, params.seed))
+            .map(|k| build_kernel_factor(*k, coordinates, params.n_landmarks, seed as u64))
             .collect();
         let phis = phis?;
 
@@ -1532,6 +1530,7 @@ mod tests {
             &spots,
             &coords,
             SparkXParams::default(),
+            42,
         )
         .unwrap_err();
         match err {
@@ -1552,6 +1551,7 @@ mod tests {
             &spots,
             &coords,
             SparkXParams::default(),
+            7,
         )
         .unwrap_err();
         match err {

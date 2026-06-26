@@ -832,18 +832,18 @@ impl ScDblFinderParams {
 ///////////////////////
 
 impl FastLouvainParams<f32> {
-    /// Generate the BbknnParams from a R list
+    /// Generate the FastLouvainParams from a R list
     ///
     /// Should values not be found within the List, the parameters will default
     /// to sensible defaults.
     ///
     /// ### Params
     ///
-    /// * `r_list` - The list with the BBKNN parameters.
+    /// * `r_list` - The list with the FastLouvainParams parameters.
     ///
     /// ### Return
     ///
-    /// The `BbknnParams` with all of the parameters.
+    /// The `FastLouvainParams` with all of the parameters.
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let knn_params = KnnParams::from_r_list(r_list.clone())?;
         let kmeans_params = KMeansParamsWrappers::from_r_list(r_list.clone())?;
