@@ -364,6 +364,7 @@ where
         GpuCorCov::Spearman => rank_matrix_col(&mat),
         _ => mat.to_owned(),
     };
+
     if verbose {
         println!("rank: {:.2?}", t.elapsed());
     }
@@ -381,9 +382,14 @@ where
     }
 
     let t = Instant::now();
+    let _warm = GpuTensor::<R, F>::from_slice(&data_flat, vec![n_rows, n_cols], &client);
+    if verbose {
+        println!("upload 1: {:.2?}", t.elapsed());
+    }
+    let t = Instant::now();
     let data_gpu = GpuTensor::<R, F>::from_slice(&data_flat, vec![n_rows, n_cols], &client);
     if verbose {
-        println!("upload: {:.2?}", t.elapsed());
+        println!("upload 2: {:.2?}", t.elapsed());
     }
 
     let scaled = scale_matrix_col_gpu(&data_gpu, n_rows, n_cols, scale_sd, &client);
