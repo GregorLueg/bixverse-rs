@@ -357,30 +357,33 @@ where
     MP: MatmulPrecision,
 {
     let start = Instant::now();
+    let scale_sd = !matches!(cor_type, GpuCorCov::Covariance);
 
+    let t = Instant::now();
     let mat = match cor_type {
         GpuCorCov::Spearman => rank_matrix_col(&mat),
         _ => mat.to_owned(),
     };
-
     if verbose {
-        println!("Moving data to GPU...")
+        println!("rank: {:.2?}", t.elapsed());
     }
 
-    let scale_sd = !matches!(cor_type, GpuCorCov::Covariance);
-
+    let t = Instant::now();
     let (data_flat, n_rows, n_cols) = matrix_to_flat(mat.as_ref());
-
-    // manual drop at this point
-    drop(mat);
-
-    let client = R::client(&device);
-
-    let data_gpu = GpuTensor::<R, F>::from_slice(&data_flat, vec![n_rows, n_cols], &client);
-
     if verbose {
-        println!(" ... done in {:.2?}", start.elapsed());
-        println!("Starting calculations...");
+        println!("flat: {:.2?}", t.elapsed());
+    }
+
+    let t = Instant::now();
+    let client = R::client(&device);
+    if verbose {
+        println!("client: {:.2?}", t.elapsed());
+    }
+
+    let t = Instant::now();
+    let data_gpu = GpuTensor::<R, F>::from_slice(&data_flat, vec![n_rows, n_cols], &client);
+    if verbose {
+        println!("upload: {:.2?}", t.elapsed());
     }
 
     let scaled = scale_matrix_col_gpu(&data_gpu, n_rows, n_cols, scale_sd, &client);
