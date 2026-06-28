@@ -4,9 +4,20 @@
 
 Skunk works for spatial transcriptomics stuff
 
+## 0.3.3
+
+### Fix
+
+- Guard against too much oversampling in the single cell randomised, sparse SVD
+  with GPU-acceleration.
+
 ## 0.3.2
 
-Skunk works for spatial transcriptomics stuff
+### Features
+
+#### Single cells
+
+- H5Ad reading in for DENSE formats in single cell
 
 ## 0.3.1
 
