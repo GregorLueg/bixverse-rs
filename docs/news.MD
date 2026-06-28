@@ -1,5 +1,12 @@
 # News
 
+## 0.3.3
+
+### Fix
+
+- Guard against too much oversampling in the single cell randomised, sparse SVD
+  with GPU-acceleration.
+
 ## 0.3.2
 
 ### Features
