@@ -1,5 +1,11 @@
 # News
 
+## 0.3.4
+
+### Features
+
+- Added E-Distance calculations for perturbation experiments
+
 ## 0.3.3
 
 ### Fix
