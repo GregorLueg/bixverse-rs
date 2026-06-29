@@ -273,7 +273,7 @@ where
         return None;
     }
     let median_val = median(vec)?;
-    let mad_val = mad(vec)?;
+    let mad_val = mad(vec, Some(T::from_f64(MAD_SCALE).unwrap()))?;
     if mad_val == T::zero() {
         return Some(vec![T::zero(); vec.len()]);
     }
