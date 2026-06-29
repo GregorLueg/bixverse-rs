@@ -233,6 +233,10 @@ pub fn edistance_from_pairwise<T: BixverseFloat>(d: MatRef<T>, mask: &[bool]) ->
 /// * `path` - Memory/compute trade-off, see [`PermutationPath`].
 /// * `n_perms` - Number of label permutations to draw.
 /// * `seed` - RNG seed.
+///
+/// ### Results
+///
+/// The [PermutationTestResult]
 pub fn permutation_test_two_groups<T>(
     x: MatRef<T>,
     y: MatRef<T>,
