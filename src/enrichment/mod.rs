@@ -8,3 +8,4 @@ pub mod gsea;
 pub mod gsva;
 pub mod mitch;
 pub mod oae;
+pub mod singscore;

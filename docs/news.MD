@@ -4,6 +4,18 @@
 
 Skunk works for spatial transcriptomics stuff
 
+## 0.3.5
+
+### Features
+
+- Implemented singscore from Foroutan et al., BMC Bioinform., 2018
+
+## 0.3.4
+
+### Features
+
+- Added E-Distance calculations for perturbation experiments
+
 ## 0.3.3
 
 ### Fix

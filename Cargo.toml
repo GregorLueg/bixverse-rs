@@ -44,6 +44,9 @@ codegen-units = 4
 approx = "0.5.1"
 ann-search-rs = { version = "0.4.3" }
 bincode = { version = "2.0.1", features = ["serde"], optional = true }
+cubecl = { version = "0.10.0", features = ["wgpu", "cpu"], optional = true }
+cubek = { version = "0.2.0", features = ["matmul"], optional = true }
+document-features = "0.2.12"
 either = "1.15.0"
 extendr-api = "0.9.0"
 faer = "0.23.2"
@@ -58,6 +61,7 @@ hdf5 = { package = "hdf5-metno", version = "0.10.1", features = [
 indexmap = { version = "2.13.0", optional = true }
 lz4_flex = { version = "0.12.0", optional = true }
 memmap2 = { version = "0.9.9", optional = true }
+ndarray = { version = "0.16.1", optional = true }
 num-traits = "0.2.19"
 once_cell = "1.21.3"
 petgraph = "0.8.3"
@@ -70,10 +74,6 @@ statrs = "0.18.0"
 thiserror = "2.0.18"
 thousands = "0.2.0"
 wide = "1.4.0"
-document-features = "0.2.12"
-cubecl = { version = "0.10.0", features = ["wgpu", "cpu"], optional = true }
-cubek = { version = "0.2.0", features = ["matmul"], optional = true }
-ndarray = { version = "0.16.1", optional = true }
 
 #################
 # Documentation #
