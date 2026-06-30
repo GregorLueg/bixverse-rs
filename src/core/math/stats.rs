@@ -741,7 +741,7 @@ where
         Some(m) => m,
         None => return (vec![], T::zero()),
     };
-    let mad_val = match mad(x) {
+    let mad_val = match mad(x, None) {
         Some(m) => m,
         None => return (vec![], T::zero()),
     };
