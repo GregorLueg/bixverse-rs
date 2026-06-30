@@ -26,23 +26,6 @@ pub enum SingscoreRankType {
     Stable,
 }
 
-/// Parse the Singscore ranking type to use
-///
-/// ### Params
-///
-/// * `s` - String to parse. One of `"standard"` or `"stable"`.
-///
-/// ### Returns
-///
-/// Option for [SingscoreRankType]
-pub fn parse_singscore_ranktype(s: &str) -> Option<SingscoreRankType> {
-    match s.to_lowercase().as_str() {
-        "standard" => Some(SingscoreRankType::Standard),
-        "stable" => Some(SingscoreRankType::Stable),
-        _ => None,
-    }
-}
-
 //////////////////
 // Result types //
 //////////////////

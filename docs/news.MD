@@ -1,5 +1,11 @@
 # News
 
+## 0.3.5
+
+### Features
+
+- Implemented singscore from Foroutan et al., BMC Bioinform., 2018
+
 ## 0.3.4
 
 ### Features
