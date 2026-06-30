@@ -463,11 +463,20 @@ mod tests {
 
     #[test]
     fn test_robust_scale_basic() {
-        // median = 3, MAD = median(|1,0,2,1,2|) = median of deviations from 3
+        // median = 3, raw MAD = median(|2,0,1,2,1|) = 1, scaled MAD = 1 * MAD_SCALE
         // values: [1, 3, 2, 5, 4] -> sorted [1,2,3,4,5], median = 3
-        // deviations: [2, 0, 1, 2, 1] -> sorted [0,1,1,2,2], MAD = 1
+        // deviations: [-2, 0, -1, 2, 1] / MAD_SCALE
         let result = robust_scale(&[1.0_f64, 3.0, 2.0, 5.0, 4.0]).unwrap();
-        assert!(vec_approx_eq(&result, &[-2.0, 0.0, -1.0, 2.0, 1.0]));
+        assert!(vec_approx_eq(
+            &result,
+            &[
+                -1.3489795003921634,
+                0.0,
+                -0.6744897501960817,
+                1.3489795003921634,
+                0.6744897501960817
+            ]
+        ));
     }
 
     #[test]

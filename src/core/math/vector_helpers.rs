@@ -8,8 +8,7 @@ use crate::prelude::BixverseFloat;
 // Consts //
 ////////////
 
-/// MAD scaling constant. R's `mad()` applies this factor by default; the local
-/// `mad()` helper does not, so it's applied at the call site to match upstream.
+/// MAD scaling constant. R's `mad()` applies this factor by default.
 pub const MAD_SCALE: f64 = 1.482_602_218_505_602;
 
 ///////////////
