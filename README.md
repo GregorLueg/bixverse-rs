@@ -43,7 +43,7 @@ next targets would be
 ## Updates
 
 Updates on what's happening in this crate can be found
-[here](https://github.com/GregorLueg/bixverse-rs/blob/main/docs/news.MD)
+[here](https://github.com/GregorLueg/bixverse-rs/blob/main/CHANGELOG.md)
 
 ## Licence
 
