@@ -294,6 +294,7 @@ where
         true, // storage [n, k] read as logical [k, n]
         z_cos.handle(),
         [n, dim],
+        false,
         y_out.handle(),
         [k, dim],
         None,

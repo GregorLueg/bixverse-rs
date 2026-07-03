@@ -6,7 +6,6 @@
 
 use ann_search_rs::gpu::tensor::GpuTensor;
 use ann_search_rs::gpu::*;
-use ann_search_rs::utils::matrix_to_flat;
 use cubecl::prelude::*;
 use cubek::matmul::definition::MatmulPrecision;
 use cubek::matmul::launch::Strategy;
@@ -66,7 +65,7 @@ pub fn parse_gpu_cor(s: &str) -> Option<GpuCorCov> {
 ///
 /// ### Params
 ///
-/// * `data` - Input matrix `[n_rows, n_cols]` row-major in `F`
+/// * `data` - Input matrix `[n_cols, n_rows]` row-major in `F`
 /// * `means` - Output column means `[n_cols]`
 /// * `inv_scales` - Output inverse scales `[n_cols]`; `1/(std * sqrt(n-1))`
 ///   when `scale_sd`, else `1/sqrt(n-1)`
@@ -88,18 +87,20 @@ pub fn column_stats<F: Float>(
     n_cols: u32,
     #[comptime] scale_sd: bool,
 ) {
-    let col = CUBE_POS_X;
-    if col >= n_cols {
+    let feat = CUBE_POS_X;
+    if feat >= n_cols {
         terminate!();
     }
     let tx = UNIT_POS_X;
     let mut shared = SharedMemory::<F>::new(WORKGROUP_128 as usize);
 
+    let base = feat * n_rows;
+
     // Pass 1: sum -> mean.
     let mut local_sum = F::new(0.0);
     let mut i = tx;
     while i < n_rows {
-        local_sum += data[(i * n_cols + col) as usize];
+        local_sum += data[(base + i) as usize];
         i += WORKGROUP_128;
     }
     shared[tx as usize] = local_sum;
@@ -148,7 +149,7 @@ pub fn column_stats<F: Float>(
     let mut local_sumsq = F::new(0.0);
     let mut j = tx;
     while j < n_rows {
-        let d = data[(j * n_cols + col) as usize] - mean;
+        let d = data[(base + j) as usize] - mean;
         local_sumsq += d * d;
         j += WORKGROUP_128;
     }
@@ -195,14 +196,14 @@ pub fn column_stats<F: Float>(
     if tx == 0u32 {
         let nm1 = n - F::new(1.0);
         let inv_sqrt_nm1 = F::new(1.0) / F::sqrt(nm1);
-        means[col as usize] = mean;
+        means[feat as usize] = mean;
         if scale_sd {
             let std = F::sqrt(shared[0] / nm1);
             let eps = F::new(1e-10);
             let safe_std = if std < eps { F::new(1.0) } else { std };
-            inv_scales[col as usize] = inv_sqrt_nm1 / safe_std;
+            inv_scales[feat as usize] = inv_sqrt_nm1 / safe_std;
         } else {
-            inv_scales[col as usize] = inv_sqrt_nm1;
+            inv_scales[feat as usize] = inv_sqrt_nm1;
         }
     }
 }
@@ -216,7 +217,7 @@ pub fn column_stats<F: Float>(
 ///
 /// ### Params
 ///
-/// * `data` - Input matrix `[n_rows, n_cols]` row-major in `F`
+/// * `data` - Input matrix `[n_cols, n_rows]` row-major in `F`
 /// * `means` - Column means `[n_cols]` (from [`column_stats`])
 /// * `inv_scales` - Column inverse scales `[n_cols]` (from [`column_stats`])
 /// * `out` - Output matrix `[n_rows, n_cols]` row-major in `F`
@@ -244,10 +245,10 @@ pub fn apply_centre_scale<F: Float>(
     if idx >= total {
         terminate!();
     }
-    let col = idx % n_cols;
+    let feat = idx / n_rows;
     let v = data[idx as usize];
-    let m = means[col as usize];
-    let s = inv_scales[col as usize];
+    let m = means[feat as usize];
+    let s = inv_scales[feat as usize];
     out[idx as usize] = (v - m) * s;
 }
 
@@ -360,17 +361,19 @@ where
     let scale_sd = !matches!(cor_type, GpuCorCov::Covariance);
 
     let t = Instant::now();
-    let mat = match cor_type {
-        GpuCorCov::Spearman => rank_matrix_col(&mat),
-        _ => mat.to_owned(),
-    };
+    let ranked = matches!(cor_type, GpuCorCov::Spearman).then(|| rank_matrix_col(&mat));
+    let mat = ranked.as_ref().map(|m| m.as_ref()).unwrap_or(mat);
 
     if verbose {
         println!("rank: {:.2?}", t.elapsed());
     }
 
     let t = Instant::now();
-    let (data_flat, n_rows, n_cols) = matrix_to_flat(mat.as_ref());
+    let (n_rows, n_cols) = (mat.nrows(), mat.ncols());
+    let mut data_flat: Vec<F> = Vec::with_capacity(n_rows * n_cols);
+    for j in 0..n_cols {
+        data_flat.extend(mat.col(j).iter().cloned());
+    }
     if verbose {
         println!("flat: {:.2?}", t.elapsed());
     }
@@ -384,15 +387,11 @@ where
     let t = Instant::now();
     let _warm = GpuTensor::<R, F>::from_slice(&data_flat, vec![n_rows, n_cols], &client);
 
-    let _ = client.sync();
-
     if verbose {
         println!("upload 1: {:.2?}", t.elapsed());
     }
     let t = Instant::now();
     let data_gpu = GpuTensor::<R, F>::from_slice(&data_flat, vec![n_rows, n_cols], &client);
-
-    let _ = client.sync();
 
     if verbose {
         println!("upload 2: {:.2?}", t.elapsed());
@@ -407,12 +406,12 @@ where
     dense_gemm::<R, MP>(
         scaled.handle(),
         [n_cols, n_rows],
-        true,
+        false,
         scaled.handle(),
         [n_rows, n_cols],
+        true,
         result.handle(),
         [n_cols, n_cols],
-        // otherwise, this can blow up on Apple devices
         Some(Strategy::DoubleUnit(Default::default())),
         &client,
     )?;
