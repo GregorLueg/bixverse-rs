@@ -48,6 +48,11 @@ pub enum BixverseErrors {
     #[error("The faer Cholesky failed: {0}")]
     FaerCholeskyError(#[from] faer::linalg::solvers::LltError),
 
+    // -- statrs --
+    /// Beta distribution construction failed
+    #[error("Beta distribution error: {0}")]
+    BetaDistribution(String),
+
     // -- ann-search-rs --
     /// Propagate errors from the ann-search-rs crate
     #[error("Error from the ann-search-rs crate: {0}")]
