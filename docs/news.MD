@@ -1,5 +1,16 @@
 # News
 
+## 0.3.6
+
+### Features
+
+- Speed improvements to the fgsea multi-level implementation removing
+  unnecessary computations and allocations.
+
+### Fix
+
+- Fixed an edge case in the multi-level implementation that caused panics.
+
 ## 0.3.5
 
 ### Features
