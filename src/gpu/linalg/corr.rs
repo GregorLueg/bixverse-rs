@@ -360,49 +360,25 @@ where
     let start = Instant::now();
     let scale_sd = !matches!(cor_type, GpuCorCov::Covariance);
 
-    let t = Instant::now();
     let ranked = matches!(cor_type, GpuCorCov::Spearman).then(|| rank_matrix_col(&mat));
     let mat = ranked.as_ref().map(|m| m.as_ref()).unwrap_or(mat);
 
-    if verbose {
-        println!("rank: {:.2?}", t.elapsed());
-    }
-
-    let t = Instant::now();
     let (n_rows, n_cols) = (mat.nrows(), mat.ncols());
     let mut data_flat: Vec<F> = Vec::with_capacity(n_rows * n_cols);
     for j in 0..n_cols {
         data_flat.extend(mat.col(j).iter().cloned());
     }
-    if verbose {
-        println!("flat: {:.2?}", t.elapsed());
-    }
-
-    let t = Instant::now();
     let client = R::client(&device);
-    if verbose {
-        println!("client: {:.2?}", t.elapsed());
-    }
 
-    let t = Instant::now();
-    let _warm = GpuTensor::<R, F>::from_slice(&data_flat, vec![n_rows, n_cols], &client);
-
-    if verbose {
-        println!("upload 1: {:.2?}", t.elapsed());
-    }
-    let t = Instant::now();
     let data_gpu = GpuTensor::<R, F>::from_slice(&data_flat, vec![n_rows, n_cols], &client);
 
     if verbose {
-        println!("upload 2: {:.2?}", t.elapsed());
+        println!("Upload to GPU done: {:.2?}", start.elapsed());
     }
 
     let scaled = scale_matrix_col_gpu(&data_gpu, n_rows, n_cols, scale_sd, &client);
     let result = GpuTensor::<R, F>::empty(vec![n_cols, n_cols], &client);
 
-    // S is [n_rows, n_cols] row-major; S^T view is [n_cols, n_rows] with
-    // swapped strides (handled by `a_transposed = true` in dense_gemm).
-    // Both inputs are read-only, so the same buffer is passed twice.
     dense_gemm::<R, MP>(
         scaled.handle(),
         [n_cols, n_rows],
