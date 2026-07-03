@@ -4,6 +4,17 @@ use num_traits::Float;
 
 use crate::prelude::BixverseFloat;
 
+////////////
+// Consts //
+////////////
+
+/// MAD scaling constant. R's `mad()` applies this factor by default.
+pub const MAD_SCALE: f64 = 1.482_602_218_505_602;
+
+///////////////
+// Functions //
+///////////////
+
 /// Generate the rank of a vector with tie correction.
 ///
 /// ### Params
@@ -83,11 +94,13 @@ where
 /// ### Params
 ///
 /// * `x` - Slice for which to calculate the MAD for
+/// * `scale` - Optional scaling factor. Pass `Some(1.4826)` for consistency with
+///   the standard deviation under normality (R's default). `None` returns the raw MAD.
 ///
 /// ### Results
 ///
-/// The MAD of the slice.
-pub fn mad<T>(x: &[T]) -> Option<T>
+/// The (optionally scaled) MAD of the slice.
+pub fn mad<T>(x: &[T], scale: Option<T>) -> Option<T>
 where
     T: BixverseFloat,
 {
@@ -96,7 +109,11 @@ where
     }
     let median_val = median(x)?;
     let deviations: Vec<T> = x.iter().map(|&val| (val - median_val).abs()).collect();
-    median(&deviations)
+    let raw = median(&deviations)?;
+    Some(match scale {
+        Some(k) => raw * k,
+        None => raw,
+    })
 }
 
 /// Standard deviation
@@ -224,7 +241,7 @@ mod tests {
         // Absolute deviations: [1.0, 1.0, 0.0, 0.0, 2.0, 4.0, 7.0]
         // Sorted deviations: [0.0, 0.0, 1.0, 1.0, 2.0, 4.0, 7.0]
         // MAD (median of deviations) is 1.0
-        assert_eq!(mad(&vec), Some(1.0));
+        assert_eq!(mad(&vec, None), Some(1.0));
     }
 
     #[test]

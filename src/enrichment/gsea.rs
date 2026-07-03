@@ -2,7 +2,7 @@
 //! bioRxiv, 2021.
 
 use rand::distr::Uniform;
-use rand::rngs::StdRng;
+use rand::rngs::{SmallRng, StdRng};
 use rand::{Rng, SeedableRng};
 use rand_distr::Distribution;
 use rayon::prelude::*;
@@ -102,7 +102,7 @@ pub struct GseaParams<T> {
 // Helpers //
 /////////////
 
-/// Calculate the enrichment score (based on the fgsea C++ implementation)
+/// Calculate both the signed ES and the positive-only ES in a single pass.
 ///
 /// ### Params
 ///
@@ -111,14 +111,13 @@ pub struct GseaParams<T> {
 ///
 /// ### Returns
 ///
-/// Enrichment score value
-fn calc_es<T: BixverseFloat>(ranks: &[T], pathway_indices: &[usize]) -> T {
+/// Returns `(es, positive_es)`.
+fn calc_es_both<T: BixverseFloat>(ranks: &[T], pathway_indices: &[usize]) -> (T, T) {
     let n = ranks.len();
     let k = pathway_indices.len();
 
-    // fast path for empty or saturated pathways
     if k == 0 || k == n {
-        return T::zero();
+        return (T::zero(), T::zero());
     }
 
     let mut ns = T::zero();
@@ -131,17 +130,13 @@ fn calc_es<T: BixverseFloat>(ranks: &[T], pathway_indices: &[usize]) -> T {
 
     let mut res = T::zero();
     let mut res_abs = T::zero();
+    let mut res_pos = T::zero();
     let mut cur = T::zero();
-
-    // track the next expected index to calculate gaps using purely unsigned
-    // math
     let mut next_expected = 0;
 
     for &p in pathway_indices {
         let gap = p - next_expected;
 
-        // only apply penalty and check max if there was actually a gap
-        // (misses)
         if gap > 0 {
             cur -= q1 * T::from_usize(gap).unwrap();
             let cur_abs = cur.abs();
@@ -149,72 +144,23 @@ fn calc_es<T: BixverseFloat>(ranks: &[T], pathway_indices: &[usize]) -> T {
                 res = cur;
                 res_abs = cur_abs;
             }
+            // no positive-branch check needed: a miss can only decrease `cur`
         }
 
-        // Apply reward (hit)
         cur += q2 * ranks[p];
         let cur_abs = cur.abs();
         if cur_abs > res_abs {
             res = cur;
             res_abs = cur_abs;
         }
-
-        next_expected = p + 1;
-    }
-
-    res
-}
-
-/// Calculate the positive enrichment score
-///
-/// Based on the fgsea C++ implementation
-///
-/// ### Params
-///
-/// * `ranks` - Gene ranks array
-/// * `pathway_indices` - Indices of genes in the pathway
-///
-/// # Returns
-///
-/// Positive enrichment score value
-fn calc_positive_es<T: BixverseFloat>(ranks: &[T], pathway_indices: &[usize]) -> T {
-    let n = ranks.len();
-    let k = pathway_indices.len();
-
-    if k == 0 || k == n {
-        return T::zero();
-    }
-
-    let mut ns = T::zero();
-    for &p in pathway_indices {
-        ns += ranks[p];
-    }
-
-    let q1 = T::one() / T::from_usize(n - k).unwrap();
-    let q2 = T::one() / ns;
-
-    let mut res = T::zero();
-    let mut cur = T::zero();
-    let mut next_expected = 0;
-
-    for &p in pathway_indices {
-        let gap = p - next_expected;
-
-        if gap > 0 {
-            cur -= q1 * T::from_usize(gap).unwrap();
-        }
-        cur += q2 * ranks[p];
-
-        // A simple branch generally compiles down to a fast `cmov` instruction,
-        // outperforming float-specific `.max()` trait boundaries in hot loops.
-        if cur > res {
-            res = cur;
+        if cur > res_pos {
+            res_pos = cur;
         }
 
         next_expected = p + 1;
     }
 
-    res
+    (res, res_pos)
 }
 
 /// Generate k random numbers from [a, b] inclusive range using Fisher-Yates shuffle
@@ -239,16 +185,11 @@ fn combination(a: usize, b: usize, k: usize, rng: &mut impl Rng) -> Vec<usize> {
         panic!("k cannot be greater than range size n");
     }
 
-    let mut indices: Vec<usize> = (a..=b).collect();
-
-    for i in 0..k {
-        let j = rng.random_range(i..n);
-        indices.swap(i, j);
-    }
-
-    let mut result: Vec<usize> = indices.into_iter().take(k).collect();
+    let mut result: Vec<usize> = rand::seq::index::sample(rng, n, k)
+        .into_iter()
+        .map(|i| i + a)
+        .collect();
     result.sort_unstable();
-
     result
 }
 
@@ -398,14 +339,10 @@ pub fn create_random_gs_indices(
             let adjusted_universe = universe_length - 1;
             let actual_len = std::cmp::min(max_len, adjusted_universe);
 
-            let mut indices: Vec<usize> = (0..adjusted_universe).collect();
-
-            for i in 0..actual_len {
-                let j = rng.random_range(i..indices.len());
-                indices.swap(i, j);
-            }
-
-            indices.truncate(actual_len);
+            let mut indices: Vec<usize> =
+                rand::seq::index::sample(&mut rng, adjusted_universe, actual_len)
+                    .into_iter()
+                    .collect();
 
             if one_indexed {
                 indices.iter_mut().for_each(|x| *x += 1);
@@ -785,8 +722,7 @@ impl<T: BixverseFloat> EsRuler<T> {
             let start = sample_id * self.pathway_size;
             let sample_slice = &self.current_samples[start..start + self.pathway_size];
 
-            let sample_es_pos = calc_positive_es(&self.ranks, sample_slice);
-            let sample_es = calc_es(&self.ranks, sample_slice);
+            let (sample_es, sample_es_pos) = calc_es_both(&self.ranks, sample_slice);
 
             if sample_es > T::zero() {
                 total_pos_es_count += 1;
@@ -865,7 +801,7 @@ impl<T: BixverseFloat> EsRuler<T> {
         k: i32,
         sample_chunks: &mut SampleChunks<T>,
         bound: T,
-        rng: &mut StdRng,
+        rng: &mut SmallRng,
     ) -> i32 {
         let pert_prmtr = T::from_f64(0.1).unwrap();
         let n = ranks.len() as i32;
@@ -1042,13 +978,11 @@ impl<T: BixverseFloat> EsRuler<T> {
     /// * `seed` - Random seed
     /// * `eps` - Precision parameter (0.0 for no precision requirement)
     fn extend(&mut self, es: T, seed: u64, eps: T) {
-        let mut rng = StdRng::seed_from_u64(seed);
+        let mut rng = SmallRng::seed_from_u64(seed);
 
         // Bootstrap the initial random samples
         for sample_id in 0..self.sample_size {
-            let mut sample = combination(0, self.ranks.len() - 1, self.pathway_size, &mut rng);
-            sample.sort_unstable();
-            let _ = calc_es(&self.ranks, &sample);
+            let sample = combination(0, self.ranks.len() - 1, self.pathway_size, &mut rng);
             self.get_sample_mut(sample_id).copy_from_slice(&sample);
         }
 
@@ -1869,7 +1803,7 @@ pub fn calc_simple_and_multi_error<T: BixverseFloat>(
     n_more_extreme: &[usize],
     nperm: usize,
     sample_size: usize,
-) -> MultiLevelErrRes<T> {
+) -> Result<MultiLevelErrRes<T>, BixverseErrors> {
     let no_tests = n_more_extreme.len();
     let n_more_extreme_f: Vec<T> = n_more_extreme
         .iter()
@@ -1877,30 +1811,34 @@ pub fn calc_simple_and_multi_error<T: BixverseFloat>(
         .collect();
     let nperm_f = T::from_usize(nperm).unwrap();
     let sample_size_f = T::from_usize(sample_size).unwrap();
-
     let mut left_border = Vec::with_capacity(no_tests);
     let mut right_border = Vec::with_capacity(no_tests);
     let mut crude_est = Vec::with_capacity(no_tests);
     for n in &n_more_extreme_f {
+        // n == 0: Beta(0, nperm+1) invalid; distribution concentrates at 0
         if n > &T::zero() {
             let beta = Beta::new(
                 n.to_f64().unwrap(),
                 (nperm_f - *n + T::one()).to_f64().unwrap(),
             )
-            .unwrap();
+            .map_err(|e| BixverseErrors::BetaDistribution(format!("{:?}", e)))?;
             left_border.push(T::from_f64(beta.inverse_cdf(0.025).log2()).unwrap());
         } else {
             left_border.push(T::neg_infinity());
         }
-        let beta = Beta::new(
-            (*n + T::one()).to_f64().unwrap(),
-            (nperm_f - *n).to_f64().unwrap(),
-        )
-        .unwrap();
-        right_border.push(T::from_f64(beta.inverse_cdf(1.0 - 0.025).log2()).unwrap());
+        // n == nperm: Beta(nperm+1, 0) invalid; distribution concentrates at 1, log2(1) = 0
+        if n < &nperm_f {
+            let beta = Beta::new(
+                (*n + T::one()).to_f64().unwrap(),
+                (nperm_f - *n).to_f64().unwrap(),
+            )
+            .map_err(|e| BixverseErrors::BetaDistribution(format!("{:?}", e)))?;
+            right_border.push(T::from_f64(beta.inverse_cdf(1.0 - 0.025).log2()).unwrap());
+        } else {
+            right_border.push(T::zero());
+        }
         crude_est.push(((*n + T::one()) / (nperm_f + T::one())).log2());
     }
-
     let mut simple_err = Vec::with_capacity(no_tests);
     for i in 0..no_tests {
         simple_err.push(
@@ -1908,7 +1846,6 @@ pub fn calc_simple_and_multi_error<T: BixverseFloat>(
                 * (crude_est[i] - left_border[i]).max(right_border[i] - crude_est[i]),
         );
     }
-
     let multi_err: Vec<T> = n_more_extreme_f
         .iter()
         .map(|n| {
@@ -1916,6 +1853,5 @@ pub fn calc_simple_and_multi_error<T: BixverseFloat>(
             multilevel_error(&pval, &sample_size_f)
         })
         .collect();
-
-    (simple_err, multi_err)
+    Ok((simple_err, multi_err))
 }

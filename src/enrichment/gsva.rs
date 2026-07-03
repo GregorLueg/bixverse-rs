@@ -12,6 +12,41 @@ use std::time::Instant;
 use crate::core::math::{matrix_helpers::rank_matrix_col, vector_helpers::standard_deviation};
 use crate::prelude::BixverseFloat;
 
+///////////
+// Enums //
+///////////
+
+/// Kernel type for GSVA's kernel cumulative distribution function step.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum GsvaKernel {
+    /// Gaussian kernel, for continuous expression data (e.g. log-CPM, microarray)
+    #[default]
+    Gaussian,
+    /// Poisson kernel, for integer count data (e.g. raw RNA-seq counts)
+    Poisson,
+    /// No kernel; rank expression values directly. Use when data is already
+    /// on a comparable scale across genes (pre-normalised, z-scored, etc.)
+    None,
+}
+
+/// Parse the GSVA kernel to use
+///
+/// ### Params
+///
+/// * `s` - The string to parse. One of `"gaussian"`, `"poisson"` or `"none"`.
+///
+/// ### Returns
+///
+/// The Option of the [GsvaKernel]
+pub fn parse_gsva_kernel(s: &str) -> Option<GsvaKernel> {
+    match s.to_lowercase().as_str() {
+        "gaussian" => Some(GsvaKernel::Gaussian),
+        "poisson" => Some(GsvaKernel::Poisson),
+        "none" => Some(GsvaKernel::None),
+        _ => None,
+    }
+}
+
 /////////////
 // Globals //
 /////////////
@@ -666,7 +701,7 @@ fn ssgsea_fast_random_walk<T: BixverseFloat>(
 pub fn gsva<T: BixverseFloat>(
     expression_matrix: &MatRef<T>,
     gene_sets: &[Vec<usize>],
-    use_gaussian: bool,
+    kernel: GsvaKernel,
     tau: f64,
     max_diff: bool,
     abs_rank: bool,
@@ -685,11 +720,18 @@ pub fn gsva<T: BixverseFloat>(
     }
 
     let start_kcdf = Instant::now();
-    let kcdf_matrix = matrix_kernel_density(expression_matrix, expression_matrix, use_gaussian);
+    let kcdf_matrix = match kernel {
+        GsvaKernel::Gaussian => matrix_kernel_density(expression_matrix, expression_matrix, true),
+        GsvaKernel::Poisson => matrix_kernel_density(expression_matrix, expression_matrix, false),
+        GsvaKernel::None => expression_matrix.to_owned(),
+    };
     let kcdf_time = start_kcdf.elapsed();
 
     if print_timings {
-        println!("Step 1 - Kernel density estimation: {:.2?}", kcdf_time);
+        match kernel {
+            GsvaKernel::None => println!("Step 1 - KCDF skipped: {:.2?}", kcdf_time),
+            _ => println!("Step 1 - Kernel density estimation: {:.2?}", kcdf_time),
+        }
     }
 
     let start_parallel = Instant::now();

@@ -226,6 +226,39 @@ where
     m2
 }
 
+/////////////////////////
+// Matrix manipulation //
+/////////////////////////
+
+/// Stack two matrices
+///
+/// ### Params
+///
+/// * `x` - First matrix
+/// * `y` - Second matrix
+///
+/// ### Returns
+///
+/// Stacked matrix
+pub fn stack_rows<T: BixverseFloat>(x: MatRef<T>, y: MatRef<T>) -> Mat<T> {
+    faer::concat![[x], [y]]
+}
+
+/// Subset rows
+///
+/// ### Params
+///
+/// * `x` - The matrix to subset
+/// * `idx` - The row indices
+///
+/// ### Returns
+///
+/// The subsetted matrix
+pub fn subset_rows<T: BixverseFloat>(x: MatRef<T>, idx: &[usize]) -> Mat<T> {
+    let d = x.ncols();
+    Mat::from_fn(idx.len(), d, |i, j| *x.get(idx[i], j))
+}
+
 ///////////
 // Tests //
 ///////////

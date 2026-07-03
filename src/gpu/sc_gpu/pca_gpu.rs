@@ -139,7 +139,10 @@ where
 
     let start_svd = Instant::now();
 
-    let svd_params = RandSvdGpuParams::new(2, 100);
+    // safe guard against degenerate cases
+    let max_s = std::cmp::min(cell_indices.len(), gene_indices.len()).saturating_sub(1);
+    let oversampling = std::cmp::min(100, max_s.saturating_sub(no_pcs));
+    let svd_params = RandSvdGpuParams::new(2, oversampling);
 
     let svd_res = randomised_sparse_svd_gpu::<R, f32, f32>(
         csc,

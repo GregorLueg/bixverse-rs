@@ -383,11 +383,17 @@ where
 
     let t = Instant::now();
     let _warm = GpuTensor::<R, F>::from_slice(&data_flat, vec![n_rows, n_cols], &client);
+
+    let _ = client.sync();
+
     if verbose {
         println!("upload 1: {:.2?}", t.elapsed());
     }
     let t = Instant::now();
     let data_gpu = GpuTensor::<R, F>::from_slice(&data_flat, vec![n_rows, n_cols], &client);
+
+    let _ = client.sync();
+
     if verbose {
         println!("upload 2: {:.2?}", t.elapsed());
     }

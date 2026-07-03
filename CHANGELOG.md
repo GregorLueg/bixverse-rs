@@ -1,5 +1,35 @@
 # News
 
+## 0.3.6
+
+### Features
+
+- Speed improvements to the fgsea multi-level implementation removing
+  unnecessary computations and allocations.
+
+### Fix
+
+- Fixed an edge case in the multi-level implementation that caused panics.
+
+## 0.3.5
+
+### Features
+
+- Implemented singscore from Foroutan et al., BMC Bioinform., 2018
+
+## 0.3.4
+
+### Features
+
+- Added E-Distance calculations for perturbation experiments
+
+## 0.3.3
+
+### Fix
+
+- Guard against too much oversampling in the single cell randomised, sparse SVD
+  with GPU-acceleration.
+
 ## 0.3.2
 
 ### Features

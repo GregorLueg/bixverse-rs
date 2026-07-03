@@ -5,3 +5,5 @@
 pub mod cors_similarity;
 pub mod info;
 pub mod loess;
+pub mod pert_dist;
+pub mod pert_dist_perm;

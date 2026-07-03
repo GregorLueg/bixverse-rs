@@ -20,6 +20,10 @@ pub enum BixverseErrors {
     #[error("Invalid argument: {0}")]
     InvalidArgument(String),
 
+    /// Error for wrong integer parameters
+    #[error("Parameter {0} must be a positive non-zero integer.")]
+    MustBePositive(String),
+
     // -- extendr --
     /// List to HashMap parsing error occured
     #[error("R list parsing failed: {0}")]
@@ -43,6 +47,11 @@ pub enum BixverseErrors {
     /// Cholesky decomposition from faer failed.
     #[error("The faer Cholesky failed: {0}")]
     FaerCholeskyError(#[from] faer::linalg::solvers::LltError),
+
+    // -- statrs --
+    /// Beta distribution construction failed
+    #[error("Beta distribution error: {0}")]
+    BetaDistribution(String),
 
     // -- ann-search-rs --
     /// Propagate errors from the ann-search-rs crate
@@ -77,6 +86,31 @@ pub enum BixverseErrors {
     /// In cases where the graph and the community membership do not agree.
     #[error("The number of nodes and membership assignments in the communities do not add up.")]
     CommunityAssignmentMismatch,
+
+    // -- matrix algebra errors --
+    /// Error if the feature dimensions are not the same
+    #[error("The feature dimensions between the two matrices are unequal! x: {dim_x}, y: {dim_y}")]
+    NonMatchingFeatureDim {
+        /// Feature dimensions matrix x
+        dim_x: usize,
+        /// Feature dimensions matrix y
+        dim_y: usize,
+    },
+
+    /// Label length and number of cells do not match for Harmony
+    #[error(
+        "The labels length ({label_length}) does not match the number of samples ({n_samples})"
+    )]
+    NumberLabelsNotEqualSampleNumber {
+        /// Provided label length
+        label_length: usize,
+        /// Number of cells
+        n_samples: usize,
+    },
+
+    /// If the reference is out of range
+    #[error("The provided reference is out of range")]
+    ReferenceOutOfRange,
 
     // -- sparse erros --
     /// Error in situations were data_2 in [`crate::prelude::CompressedSparseData2`]
@@ -331,17 +365,6 @@ pub enum BixverseErrors {
         n_batches: usize,
     },
     // -- Harmony --
-    /// Label length and number of cells do not match for Harmony
-    #[error(
-        "Harmony: The labels length ({label_length}) does not match the number of cells ({n_cells})"
-    )]
-    HarmonyLabelLenghtUnequalNcells {
-        /// Provided label length
-        label_length: usize,
-        /// Number of cells
-        n_cells: usize,
-    },
-
     /// Sigma length is not equal to the number of clusters
     #[error("Harmony: sigma length must match number of clusters")]
     HarmonySigmaLengthUnequalCluster,
