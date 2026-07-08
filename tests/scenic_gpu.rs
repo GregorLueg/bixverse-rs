@@ -16,7 +16,9 @@
 #![cfg(all(feature = "gpu", feature = "single-cell"))]
 #![allow(clippy::needless_range_loop, clippy::field_reassign_with_default)]
 
-use bixverse_rs::gpu::sc_gpu::scenic_gpu::fit_extra_trees_gpu_single;
+use bixverse_rs::gpu::sc_gpu::scenic_gpu::{
+    fit_extra_trees_gpu_single, fit_multi_trees_gpu,
+};
 use bixverse_rs::prelude::*;
 use bixverse_rs::single_cell::sc_analysis::scenic::{
     ExtraTreesConfig, SparseYBatch, fit_multi_trees_sparse,
@@ -301,5 +303,306 @@ fn extra_trees_gpu_matches_cpu_top10() {
         cpu_gpu_mean + 0.05 >= cpu_cpu_mean,
         "cpu-gpu top-{TOP_K} overlap {cpu_gpu_mean:.2} materially worse than \
          cpu-cpu seed-variance baseline {cpu_cpu_mean:.2}"
+    );
+}
+
+/////////////////////////
+// Phase 2 test harness //
+/////////////////////////
+
+const P2_N_SAMPLES: usize = 10_000;
+const P2_N_FEATURES: usize = 500;
+const P2_N_TARGETS: usize = 20;
+const P2_N_TREES: usize = 500;
+// Concentrating signal in fewer informative features gives ExtraTrees at 500
+// trees enough leverage to converge tightly. With 40 informative features
+// spread across 500-feature space, even CPU-vs-CPU at 500 trees only agrees
+// on ~0.58 Pearson (measured). Ten informative features let both paths
+// consistently rank the informative block at the top of importance.
+const P2_INFORMATIVE: usize = 10;
+const P2_SPARSITY: f32 = 0.5;
+
+fn make_p2_quantised(seed: u64) -> QuantisedStore {
+    let mut rng = SmallRng::seed_from_u64(seed);
+    let data: Vec<u8> = (0..P2_N_SAMPLES * P2_N_FEATURES)
+        .map(|_| rng.random())
+        .collect();
+    QuantisedStore::from_raw(data, P2_N_SAMPLES, P2_N_FEATURES)
+}
+
+fn make_p2_targets(x: &QuantisedStore, seed: u64) -> Vec<SparseAxis<u32, f32>> {
+    let mut rng = SmallRng::seed_from_u64(seed);
+
+    // per-target weights on informative features 0..P2_INFORMATIVE, seeded
+    // off a fixed constant so target structure is stable across seed changes
+    let mut weight_rng = SmallRng::seed_from_u64(0xF00D_BABE);
+    let mut weights = vec![vec![0.0f32; P2_INFORMATIVE]; P2_N_TARGETS];
+    for w_row in weights.iter_mut() {
+        for w in w_row.iter_mut() {
+            // Larger baseline weight = stronger signal per informative
+            // feature; ExtraTrees needs signal amplitude well above noise to
+            // agree seed-to-seed on which features to rank at the top.
+            *w = weight_rng.random::<f32>() + 1.0;
+        }
+    }
+
+    let feats: Vec<&[u8]> = (0..P2_INFORMATIVE).map(|f| x.get_col(f)).collect();
+
+    let mut cols_indices: Vec<Vec<usize>> = vec![Vec::new(); P2_N_TARGETS];
+    let mut cols_values: Vec<Vec<f32>> = vec![Vec::new(); P2_N_TARGETS];
+    for c in 0..P2_N_SAMPLES {
+        for t in 0..P2_N_TARGETS {
+            if rng.random::<f32>() < P2_SPARSITY {
+                let mut signal = 0.0f32;
+                for f in 0..P2_INFORMATIVE {
+                    signal += weights[t][f] * (feats[f][c] as f32 / 255.0);
+                }
+                let noise: f32 = rng.random::<f32>() * 0.05;
+                cols_indices[t].push(c);
+                cols_values[t].push(signal + noise + 0.01);
+            }
+        }
+    }
+    cols_indices
+        .into_iter()
+        .zip(cols_values)
+        .map(|(idx, vs)| SparseAxis::<u32, f32>::new_csc(idx, Vec::new(), Some(vs), P2_N_SAMPLES))
+        .collect()
+}
+
+fn pearson(a: &[f32], b: &[f32]) -> f32 {
+    let n = a.len() as f32;
+    let ma = a.iter().sum::<f32>() / n;
+    let mb = b.iter().sum::<f32>() / n;
+    let mut num = 0.0f32;
+    let mut da = 0.0f32;
+    let mut db = 0.0f32;
+    for i in 0..a.len() {
+        let xa = a[i] - ma;
+        let xb = b[i] - mb;
+        num += xa * xb;
+        da += xa * xa;
+        db += xb * xb;
+    }
+    if da <= 0.0 || db <= 0.0 {
+        0.0
+    } else {
+        num / (da * db).sqrt()
+    }
+}
+
+/// Phase 2 CPU-vs-CPU baseline at the same scale: is 500 trees enough for
+/// the CPU ExtraTrees ensemble to converge, or does it still have material
+/// seed variance? Any GPU-vs-CPU comparison is bounded by this baseline.
+#[test]
+#[ignore]
+fn phase2_cpu_baseline() {
+    let seed_a = 20260708u64;
+    let seed_b = seed_a.wrapping_add(0xBEEF);
+    let x = make_p2_quantised(seed_a);
+    let axes = make_p2_targets(&x, seed_a.wrapping_add(1));
+
+    let mut cfg = ExtraTreesConfig::default();
+    cfg.n_trees = P2_N_TREES;
+    cfg.max_depth = Some(10);
+    cfg.min_samples_leaf = 50;
+    cfg.n_features_split = 0;
+    cfg.n_thresholds = 1;
+
+    let cpu_a = fit_multi_trees_sparse(&axes, &x, P2_N_SAMPLES, &cfg, seed_a as usize)
+        .expect("CPU A fit failed");
+    let cpu_b = fit_multi_trees_sparse(&axes, &x, P2_N_SAMPLES, &cfg, seed_b as usize)
+        .expect("CPU B fit failed");
+
+    let mut per_target: Vec<f32> = Vec::with_capacity(P2_N_TARGETS);
+    for t in 0..P2_N_TARGETS {
+        per_target.push(pearson(&cpu_a[t], &cpu_b[t]));
+    }
+    let mean_corr = per_target.iter().sum::<f32>() / per_target.len() as f32;
+    eprintln!(
+        "Phase 2 CPU baseline (n_trees={P2_N_TREES}): mean pearson r = {mean_corr:.3} \
+         (per-target: {per_target:?})"
+    );
+}
+
+/// Phase 2 acceptance: 500-tree ExtraTrees on 10k * 500 * 20 synthetic data,
+/// per-target Pearson correlation vs CPU averaged over targets must clear 0.95.
+///
+/// Runs in ~60s on macOS Metal under `cargo test --release`. Under a debug
+/// build the CPU comparison dominates (~500s just for CPU-side fit_multi_trees_sparse),
+/// so this test is only sensibly run in release. n_trees can be dropped to
+/// e.g. 100 if CI-runtime budget is tighter (CPU-vs-CPU baseline at n_trees=100
+/// still clears ~0.99 Pearson with the current synthetic data).
+#[test]
+fn phase2_multi_tree_pearson() {
+    let Some(device) = try_device() else {
+        eprintln!("scenic_gpu (Phase 2): no wgpu device available -- skipping");
+        return;
+    };
+
+    let seed_base = 20260708u64;
+    let x = make_p2_quantised(seed_base);
+    let axes = make_p2_targets(&x, seed_base.wrapping_add(1));
+
+    let mut cfg = ExtraTreesConfig::default();
+    cfg.n_trees = P2_N_TREES;
+    cfg.max_depth = Some(10);
+    cfg.min_samples_leaf = 50;
+    cfg.n_features_split = 0; // -> sqrt(500) = 22
+    cfg.n_thresholds = 1;
+
+    let t_cpu = std::time::Instant::now();
+    let cpu = fit_multi_trees_sparse(&axes, &x, P2_N_SAMPLES, &cfg, seed_base as usize)
+        .expect("CPU fit failed");
+    let cpu_secs = t_cpu.elapsed().as_secs_f32();
+
+    let t_gpu = std::time::Instant::now();
+    let gpu = fit_multi_trees_gpu::<WgpuRuntime>(
+        &axes,
+        &x,
+        P2_N_SAMPLES,
+        &cfg,
+        seed_base as usize,
+        device.clone(),
+    )
+    .expect("GPU fit failed");
+    let gpu_secs = t_gpu.elapsed().as_secs_f32();
+
+    assert_eq!(cpu.len(), P2_N_TARGETS);
+    assert_eq!(gpu.len(), P2_N_TARGETS);
+
+    let mut per_target: Vec<f32> = Vec::with_capacity(P2_N_TARGETS);
+    for t in 0..P2_N_TARGETS {
+        assert_eq!(cpu[t].len(), P2_N_FEATURES);
+        assert_eq!(gpu[t].len(), P2_N_FEATURES);
+        per_target.push(pearson(&cpu[t], &gpu[t]));
+    }
+    let mean_corr = per_target.iter().sum::<f32>() / per_target.len() as f32;
+
+    eprintln!(
+        "Phase 2 ({}k * {} feats * {} targets * {} trees): \
+         cpu {cpu_secs:.1}s, gpu {gpu_secs:.1}s, mean pearson r = {mean_corr:.3} \
+         (per-target: {:?})",
+        P2_N_SAMPLES / 1000,
+        P2_N_FEATURES,
+        P2_N_TARGETS,
+        P2_N_TREES,
+        per_target
+    );
+
+    assert!(
+        mean_corr >= 0.95,
+        "Phase 2 mean per-target Pearson r = {mean_corr:.3} < 0.95 floor \
+         (per-target: {per_target:?})"
+    );
+}
+
+/// Multi-batch determinism: running one call whose internal chunking
+/// produces 3 batches must give byte-identical per-target output to
+/// calling `fit_multi_trees_gpu` once per internal batch. Confirms reset
+/// semantics for the reused wave state and the tree-seed stream.
+///
+/// The GPU driver chunks targets at `MULTI_OUTPUT_BATCH = 64`, so 130
+/// targets produce three internal batches of (64, 64, 2). We compare
+/// against three standalone calls with the same 64/64/2 splits: each
+/// standalone call sees the same `n_targets_in_batch` and therefore the
+/// same per-tree multi-output scoring, so the trees and importances match.
+#[test]
+fn phase2_multi_batch_determinism() {
+    let Some(device) = try_device() else {
+        eprintln!("scenic_gpu (Phase 2 multi-batch): no wgpu device -- skipping");
+        return;
+    };
+
+    // 130 targets -> chunks(64) yields batches of 64, 64, 2
+    const MB_N_SAMPLES: usize = 2_000;
+    const MB_N_FEATURES: usize = 100;
+    const MB_TARGETS: usize = 130;
+    const MB_N_TREES: usize = 50;
+    const MB_BATCH: usize = 64;
+
+    let x = {
+        let mut rng = SmallRng::seed_from_u64(31415);
+        let data: Vec<u8> = (0..MB_N_SAMPLES * MB_N_FEATURES)
+            .map(|_| rng.random())
+            .collect();
+        QuantisedStore::from_raw(data, MB_N_SAMPLES, MB_N_FEATURES)
+    };
+    let axes = {
+        let mut rng = SmallRng::seed_from_u64(27182);
+        let mut cols_indices: Vec<Vec<usize>> = vec![Vec::new(); MB_TARGETS];
+        let mut cols_values: Vec<Vec<f32>> = vec![Vec::new(); MB_TARGETS];
+        for c in 0..MB_N_SAMPLES {
+            for t in 0..MB_TARGETS {
+                if rng.random::<f32>() < 0.3 {
+                    let signal = x.get_col(t % 10)[c] as f32 / 255.0;
+                    let noise: f32 = rng.random::<f32>() * 0.05;
+                    cols_indices[t].push(c);
+                    cols_values[t].push(signal + noise);
+                }
+            }
+        }
+        cols_indices
+            .into_iter()
+            .zip(cols_values)
+            .map(|(idx, vs)| {
+                SparseAxis::<u32, f32>::new_csc(idx, Vec::new(), Some(vs), MB_N_SAMPLES)
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let mut cfg = ExtraTreesConfig::default();
+    cfg.n_trees = MB_N_TREES;
+    cfg.max_depth = Some(6);
+    cfg.min_samples_leaf = 20;
+    cfg.n_features_split = 0;
+    cfg.n_thresholds = 1;
+
+    let combined = fit_multi_trees_gpu::<WgpuRuntime>(
+        &axes,
+        &x,
+        MB_N_SAMPLES,
+        &cfg,
+        42,
+        device.clone(),
+    )
+    .expect("combined GPU fit failed");
+
+    // Standalone calls with the same chunk sizes as the internal split. Same
+    // seed means each chunk sees the same tree-seed stream. Same
+    // n_targets_in_batch means the same multi-output scoring, hence the
+    // same trees.
+    let mut split = Vec::with_capacity(MB_TARGETS);
+    for chunk in axes.chunks(MB_BATCH) {
+        let part = fit_multi_trees_gpu::<WgpuRuntime>(
+            chunk,
+            &x,
+            MB_N_SAMPLES,
+            &cfg,
+            42,
+            device.clone(),
+        )
+        .expect("chunked GPU fit failed");
+        for v in part {
+            split.push(v);
+        }
+    }
+
+    assert_eq!(combined.len(), split.len());
+    let mut max_diff = 0.0f32;
+    for t in 0..combined.len() {
+        assert_eq!(combined[t].len(), split[t].len());
+        for f in 0..combined[t].len() {
+            let d = (combined[t][f] - split[t][f]).abs();
+            if d > max_diff {
+                max_diff = d;
+            }
+        }
+    }
+    eprintln!("phase2_multi_batch_determinism: max per-feature diff = {max_diff:.2e}");
+    assert!(
+        max_diff < 1e-5,
+        "combined batch fit differs from chunked by max {max_diff:.2e} -- \
+         batch grouping is affecting per-tree output"
     );
 }

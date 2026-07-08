@@ -361,7 +361,7 @@ impl SparseYBatch {
     ///
     /// A `SparseYBatch` where entries are sorted by cell, then by target
     /// index within each cell.
-    fn from_targets(
+    pub fn from_targets(
         targets: &[SparseAxis<u32, f32>],
         n_cells: usize,
     ) -> Result<Self, BixverseErrors> {
