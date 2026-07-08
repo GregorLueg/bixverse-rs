@@ -139,6 +139,20 @@ Extend `tests/scenic_gpu.rs` with an RF case. Reuse the ET tolerance and dataset
 
 Criterion benches. No hard test assertions on speedup — just documented numbers. If GPU consistently loses on the 10k-cell workload, we accept that and let the dispatch shim (Phase 5) route small workloads to CPU.
 
+### Phase 4a measurements (2026-07-08, macOS wgpu default adapter — Metal)
+
+Shape fixed: 1_000 TFs, 64 targets, 250 trees, `max_depth = 10`, `min_samples_leaf = 50`. Median of 3 timed runs after 1 warmup. `SKIP_ABOVE_SECS = 300s` — shapes whose warmup exceeded 5 min were skipped rather than measured. Bench binary hand-rolled (not Criterion) — `benches/gpu_scenic_bench.rs`.
+
+| Cells | ET CPU | ET GPU | ET speedup | RF CPU | RF GPU | RF speedup |
+|-------|--------|--------|-----------:|--------|--------|-----------:|
+| 10k   | 34.7s  | 59.4s  | 0.58x      | 24.9s  | 48.0s  | 0.52x      |
+| 25k   | 84.0s  | 195.8s | 0.43x      | 64.8s  | 75.8s  | 0.85x      |
+| 50k   | 157.1s | 256.0s | 0.61x      | 125.0s | 181.7s | 0.69x      |
+| 75k   | 234.5s | skip   | –          | 198.1s | 291.2s | 0.68x      |
+| 100k  | skip   | skip   | –          | 296.7s | skip   | –          |
+
+**Takeaway**: GPU is losing at every measured shape. Trend is not "GPU pulls ahead at larger scale" — the ratios are noisy and not monotonically improving. RF fares slightly better than ET on GPU (25k RF hits 0.85x — closest to parity). 75k and 100k GPU points were skipped because warmup alone exceeded 5 min, which is itself a signal that GPU is genuinely bad at those scales, not just marginally slow. Metal atomic contention is a plausible root cause but not proven; Phase 4b tuning should target the largest identified levers (per-level host readback, `evaluate_splits_et` thread utilisation, `evaluate_splits_rf` threshold-range scan) before deciding whether to try larger cell counts or accept GPU as a niche fallback.
+
 ---
 
 ## Phase 5 — Integration

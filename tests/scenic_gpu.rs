@@ -19,6 +19,7 @@
 use bixverse_rs::gpu::sc_gpu::scenic_gpu::{
     fit_extra_trees_gpu_single, fit_multi_trees_gpu,
 };
+use bixverse_rs::gpu::sc_gpu::scenic_gpu_params::ScenicGpuParams;
 use bixverse_rs::prelude::*;
 use bixverse_rs::single_cell::sc_analysis::scenic::{
     ExtraTreesConfig, RandomForestConfig, SparseYBatch, fit_multi_trees_sparse,
@@ -246,6 +247,7 @@ fn extra_trees_gpu_matches_cpu_top10() {
             &cfg,
             seed as usize,
             device.clone(),
+            &ScenicGpuParams::default(),
         )
         .expect("GPU fit failed");
 
@@ -464,6 +466,7 @@ fn phase2_multi_tree_pearson() {
         &cfg,
         seed_base as usize,
         device.clone(),
+        &ScenicGpuParams::default(),
     )
     .expect("GPU fit failed");
     let gpu_secs = t_gpu.elapsed().as_secs_f32();
@@ -565,6 +568,7 @@ fn phase2_multi_batch_determinism() {
         &cfg,
         42,
         device.clone(),
+        &ScenicGpuParams::default(),
     )
     .expect("combined GPU fit failed");
 
@@ -581,6 +585,7 @@ fn phase2_multi_batch_determinism() {
             &cfg,
             42,
             device.clone(),
+            &ScenicGpuParams::default(),
         )
         .expect("chunked GPU fit failed");
         for v in part {
@@ -648,6 +653,7 @@ fn phase3_random_forest_pearson() {
         &cfg,
         seed_base as usize,
         device.clone(),
+        &ScenicGpuParams::default(),
     )
     .expect("GPU RF fit failed");
     let gpu_secs = t_gpu.elapsed().as_secs_f32();
@@ -702,6 +708,7 @@ fn phase3_rf_bootstrap_pearson() {
         &cfg,
         seed_base as usize,
         device.clone(),
+        &ScenicGpuParams::default(),
     )
     .expect("GPU RF+bootstrap fit failed");
     let gpu_secs = t_gpu.elapsed().as_secs_f32();
@@ -784,6 +791,7 @@ fn phase3_et_still_works() {
         &cfg,
         7u32 as usize,
         device.clone(),
+        &ScenicGpuParams::default(),
     )
     .expect("ET GPU fit failed");
 

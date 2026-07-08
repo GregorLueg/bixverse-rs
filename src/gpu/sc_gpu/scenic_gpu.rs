@@ -41,6 +41,7 @@ use cubecl::prelude::*;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 
 use crate::gpu::WORKGROUP_128;
+use crate::gpu::sc_gpu::scenic_gpu_params::ScenicGpuParams;
 use crate::prelude::*;
 use crate::single_cell::sc_analysis::scenic::*;
 use crate::single_cell::sc_utils::utils_tree::*;
@@ -55,12 +56,8 @@ const N_BINS: u32 = 256;
 /// Sentinel node id for "not in any active node" / "leaf child".
 const INVALID_NODE: u32 = u32::MAX;
 
-/// Byte budget for a single wave's histogram + cumulative tensors. Sized to
-/// leave headroom on an 8 GB adapter after feature data and other static
-/// uploads. Halves-until-fit uses this as the ceiling.
-const WAVE_BYTE_BUDGET: usize = 4 * 1024 * 1024 * 1024;
-
-/// Default wave size. Halved until the batch fits the byte budget.
+/// Default wave size. Halved until the batch fits the caller's byte budget
+/// (see [`ScenicGpuParams::wave_byte_budget`]).
 const DEFAULT_WAVE_SIZE: usize = 8;
 
 /////////////
@@ -1711,7 +1708,7 @@ fn wave_byte_cost(
     (counts_slots * 2 * 4) + (sums_slots * 4 * 4)
 }
 
-/// Pick a wave size that fits under [`WAVE_BYTE_BUDGET`], halving from the
+/// Pick a wave size that fits under `wave_byte_budget`, halving from the
 /// default until it does. Returns `Err` if even wave=1 busts the budget --
 /// caller should surface as an actionable error rather than OOM-ing at
 /// allocation time.
@@ -1720,20 +1717,21 @@ fn pick_wave_size(
     k_feats: usize,
     n_targets: usize,
     n_trees_target: usize,
+    wave_byte_budget: usize,
 ) -> Result<usize, BixverseErrors> {
     let mut w = DEFAULT_WAVE_SIZE.min(n_trees_target.max(1));
     while w > 1 {
-        if wave_byte_cost(w, max_active_nodes, k_feats, n_targets) <= WAVE_BYTE_BUDGET {
+        if wave_byte_cost(w, max_active_nodes, k_feats, n_targets) <= wave_byte_budget {
             return Ok(w);
         }
         w /= 2;
     }
-    if wave_byte_cost(1, max_active_nodes, k_feats, n_targets) > WAVE_BYTE_BUDGET {
+    if wave_byte_cost(1, max_active_nodes, k_feats, n_targets) > wave_byte_budget {
         return Err(BixverseErrors::InvalidArgument(format!(
             "GPU SCENIC: even wave_size=1 exceeds the {} MB VRAM budget \
              (nodes={}, k_feats={}, n_targets={}). Reduce max_depth or \
              n_features_split.",
-            WAVE_BYTE_BUDGET / (1024 * 1024),
+            wave_byte_budget / (1024 * 1024),
             max_active_nodes,
             k_feats,
             n_targets,
@@ -2047,6 +2045,7 @@ fn run_wave_bfs<R: Runtime>(
 ///   false; RF is Phase 3), all other knobs come through `TreeRegressorConfig`
 /// * `seed` - Base seed; per-tree seed is `tree_seed(seed, tree_idx)`
 /// * `device` - Runtime device
+/// * `params` - GPU-side runtime knobs (currently just the wave VRAM budget)
 ///
 /// ### Returns
 ///
@@ -2059,6 +2058,7 @@ pub fn fit_multi_trees_gpu<R: Runtime>(
     config: &dyn TreeRegressorConfig,
     seed: usize,
     device: R::Device,
+    params: &ScenicGpuParams,
 ) -> Result<Vec<Vec<f32>>, BixverseErrors> {
     let n_features = feature_matrix.n_features;
     let n_targets_total = targets.len();
@@ -2106,7 +2106,13 @@ pub fn fit_multi_trees_gpu<R: Runtime>(
         let sparse_y = SparseYBatch::from_targets(chunk, n_samples)?;
         let sy_gpu = SparseYGpu::upload(&sparse_y, n_samples, &client);
 
-        let wave_size = pick_wave_size(max_active_nodes, k_feats, batch_n_targets, n_trees)?;
+        let wave_size = pick_wave_size(
+            max_active_nodes,
+            k_feats,
+            batch_n_targets,
+            n_trees,
+            params.wave_byte_budget,
+        )?;
         let state = WaveState::allocate(
             &client,
             wave_size,
@@ -2238,6 +2244,7 @@ pub fn fit_extra_trees_gpu_single<R: Runtime>(
     config: &ExtraTreesConfig,
     seed: usize,
     device: R::Device,
+    params: &ScenicGpuParams,
 ) -> Result<Vec<Vec<f32>>, BixverseErrors> {
     // Rebuild the target list from `sparse_y` so we can go through the
     // multi-batch driver. This is only used by tests -- the loss of the
@@ -2264,7 +2271,7 @@ pub fn fit_extra_trees_gpu_single<R: Runtime>(
     // Force `n_trees = 1` while preserving the caller's other knobs.
     let mut cfg = config.clone();
     cfg.n_trees = 1;
-    fit_multi_trees_gpu::<R>(&axes, feature_matrix, n_samples, &cfg, seed, device)
+    fit_multi_trees_gpu::<R>(&axes, feature_matrix, n_samples, &cfg, seed, device, params)
 }
 
 /////////////
