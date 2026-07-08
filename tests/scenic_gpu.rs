@@ -21,7 +21,7 @@ use bixverse_rs::gpu::sc_gpu::scenic_gpu::{
 };
 use bixverse_rs::prelude::*;
 use bixverse_rs::single_cell::sc_analysis::scenic::{
-    ExtraTreesConfig, SparseYBatch, fit_multi_trees_sparse,
+    ExtraTreesConfig, RandomForestConfig, SparseYBatch, fit_multi_trees_sparse,
 };
 use bixverse_rs::single_cell::sc_utils::utils_tree::QuantisedStore;
 
@@ -604,5 +604,200 @@ fn phase2_multi_batch_determinism() {
         max_diff < 1e-5,
         "combined batch fit differs from chunked by max {max_diff:.2e} -- \
          batch grouping is affecting per-tree output"
+    );
+}
+
+////////////////////////
+// Phase 3 tests (RF) //
+////////////////////////
+
+/// Phase 3 acceptance: 250-tree RandomForest (no bootstrap, subsample_rate=0.632)
+/// on the Phase 2 synthetic harness. Assert mean per-target Pearson r >= 0.95.
+///
+/// RF is more expensive than ET per split (exhaustive threshold scan over
+/// ~254 candidates per feature vs 1 random threshold), so the tree count is
+/// left at the CPU RF default of 250 rather than ET's 500. Run under
+/// `cargo test --release` -- debug mode is dominated by CPU-side RF.
+#[test]
+fn phase3_random_forest_pearson() {
+    let Some(device) = try_device() else {
+        eprintln!("scenic_gpu (Phase 3 RF): no wgpu device available -- skipping");
+        return;
+    };
+
+    let seed_base = 20260709u64;
+    let x = make_p2_quantised(seed_base);
+    let axes = make_p2_targets(&x, seed_base.wrapping_add(1));
+
+    let mut cfg = RandomForestConfig::default();
+    cfg.max_depth = Some(10);
+    cfg.min_samples_leaf = 50;
+    cfg.n_features_split = 0;
+    // n_trees, subsample_rate=0.632, bootstrap=false stay at defaults
+
+    let t_cpu = std::time::Instant::now();
+    let cpu = fit_multi_trees_sparse(&axes, &x, P2_N_SAMPLES, &cfg, seed_base as usize)
+        .expect("CPU RF fit failed");
+    let cpu_secs = t_cpu.elapsed().as_secs_f32();
+
+    let t_gpu = std::time::Instant::now();
+    let gpu = fit_multi_trees_gpu::<WgpuRuntime>(
+        &axes,
+        &x,
+        P2_N_SAMPLES,
+        &cfg,
+        seed_base as usize,
+        device.clone(),
+    )
+    .expect("GPU RF fit failed");
+    let gpu_secs = t_gpu.elapsed().as_secs_f32();
+
+    let mut per_target: Vec<f32> = Vec::with_capacity(P2_N_TARGETS);
+    for t in 0..P2_N_TARGETS {
+        per_target.push(pearson(&cpu[t], &gpu[t]));
+    }
+    let mean_corr = per_target.iter().sum::<f32>() / per_target.len() as f32;
+
+    eprintln!(
+        "Phase 3 RF (n_trees={}): cpu {cpu_secs:.1}s, gpu {gpu_secs:.1}s, \
+         mean pearson r = {mean_corr:.3} (per-target: {per_target:?})",
+        cfg.n_trees
+    );
+
+    assert!(
+        mean_corr >= 0.95,
+        "Phase 3 RF (no-bootstrap) mean per-target Pearson r = {mean_corr:.3} < 0.95"
+    );
+}
+
+/// Phase 3 bootstrap variant: same RF config but with bootstrap-with-replacement
+/// enabled. Assert the same 0.95 tolerance.
+#[test]
+fn phase3_rf_bootstrap_pearson() {
+    let Some(device) = try_device() else {
+        eprintln!("scenic_gpu (Phase 3 RF+bootstrap): no wgpu device -- skipping");
+        return;
+    };
+
+    let seed_base = 20260710u64;
+    let x = make_p2_quantised(seed_base);
+    let axes = make_p2_targets(&x, seed_base.wrapping_add(1));
+
+    let mut cfg = RandomForestConfig::default();
+    cfg.max_depth = Some(10);
+    cfg.min_samples_leaf = 50;
+    cfg.n_features_split = 0;
+    cfg.bootstrap = true;
+
+    let t_cpu = std::time::Instant::now();
+    let cpu = fit_multi_trees_sparse(&axes, &x, P2_N_SAMPLES, &cfg, seed_base as usize)
+        .expect("CPU RF+bootstrap fit failed");
+    let cpu_secs = t_cpu.elapsed().as_secs_f32();
+
+    let t_gpu = std::time::Instant::now();
+    let gpu = fit_multi_trees_gpu::<WgpuRuntime>(
+        &axes,
+        &x,
+        P2_N_SAMPLES,
+        &cfg,
+        seed_base as usize,
+        device.clone(),
+    )
+    .expect("GPU RF+bootstrap fit failed");
+    let gpu_secs = t_gpu.elapsed().as_secs_f32();
+
+    let mut per_target: Vec<f32> = Vec::with_capacity(P2_N_TARGETS);
+    for t in 0..P2_N_TARGETS {
+        per_target.push(pearson(&cpu[t], &gpu[t]));
+    }
+    let mean_corr = per_target.iter().sum::<f32>() / per_target.len() as f32;
+
+    eprintln!(
+        "Phase 3 RF+bootstrap (n_trees={}): cpu {cpu_secs:.1}s, gpu {gpu_secs:.1}s, \
+         mean pearson r = {mean_corr:.3} (per-target: {per_target:?})",
+        cfg.n_trees
+    );
+
+    assert!(
+        mean_corr >= 0.95,
+        "Phase 3 RF+bootstrap mean per-target Pearson r = {mean_corr:.3} < 0.95"
+    );
+}
+
+/// ET path still works after the RF dispatch was added. Uses the smallest
+/// ET config that exercises the dispatch code path -- one wave, one batch,
+/// short trees. Non-zero importances plus a positive CPU-vs-GPU Pearson are
+/// enough to confirm nothing broke in the dispatch.
+#[test]
+fn phase3_et_still_works() {
+    let Some(device) = try_device() else {
+        eprintln!("scenic_gpu (Phase 3 ET sanity): no wgpu device -- skipping");
+        return;
+    };
+
+    const ET_SAMPLES: usize = 1_000;
+    const ET_FEATURES: usize = 80;
+    const ET_TARGETS: usize = 4;
+    const ET_INFORMATIVE: usize = 8;
+
+    let mut rng_x = SmallRng::seed_from_u64(0xABCD_1234);
+    let data: Vec<u8> = (0..ET_SAMPLES * ET_FEATURES)
+        .map(|_| rng_x.random())
+        .collect();
+    let x = QuantisedStore::from_raw(data, ET_SAMPLES, ET_FEATURES);
+
+    let mut rng_y = SmallRng::seed_from_u64(0x1234_ABCD);
+    let mut cols_indices: Vec<Vec<usize>> = vec![Vec::new(); ET_TARGETS];
+    let mut cols_values: Vec<Vec<f32>> = vec![Vec::new(); ET_TARGETS];
+    for c in 0..ET_SAMPLES {
+        for t in 0..ET_TARGETS {
+            if rng_y.random::<f32>() < 0.5 {
+                let mut signal = 0.0f32;
+                for f in 0..ET_INFORMATIVE {
+                    signal += (x.get_col(f)[c] as f32 / 255.0) * 1.5;
+                }
+                let noise: f32 = rng_y.random::<f32>() * 0.05;
+                cols_indices[t].push(c);
+                cols_values[t].push(signal + noise);
+            }
+        }
+    }
+    let axes: Vec<SparseAxis<u32, f32>> = cols_indices
+        .into_iter()
+        .zip(cols_values)
+        .map(|(idx, vs)| SparseAxis::<u32, f32>::new_csc(idx, Vec::new(), Some(vs), ET_SAMPLES))
+        .collect();
+
+    let mut cfg = ExtraTreesConfig::default();
+    cfg.n_trees = 50;
+    cfg.max_depth = Some(6);
+    cfg.min_samples_leaf = 20;
+    cfg.n_features_split = 0;
+    cfg.n_thresholds = 1;
+
+    let cpu = fit_multi_trees_sparse(&axes, &x, ET_SAMPLES, &cfg, 7u32 as usize)
+        .expect("ET CPU fit failed");
+    let gpu = fit_multi_trees_gpu::<WgpuRuntime>(
+        &axes,
+        &x,
+        ET_SAMPLES,
+        &cfg,
+        7u32 as usize,
+        device.clone(),
+    )
+    .expect("ET GPU fit failed");
+
+    let mut per_target: Vec<f32> = Vec::with_capacity(ET_TARGETS);
+    for t in 0..ET_TARGETS {
+        per_target.push(pearson(&cpu[t], &gpu[t]));
+    }
+    let mean_corr = per_target.iter().sum::<f32>() / per_target.len() as f32;
+    eprintln!("phase3_et_still_works: mean pearson r = {mean_corr:.3} ({per_target:?})");
+
+    // ET at 50 trees is still noisy; we're checking the dispatch didn't
+    // silently break ET (mean must be materially above zero).
+    assert!(
+        mean_corr >= 0.4,
+        "ET dispatch appears broken after RF was added: mean pearson r = {mean_corr:.3}"
     );
 }
