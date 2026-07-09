@@ -1,5 +1,12 @@
 # News
 
+## 0.3.7
+
+### Fix
+
+- Bumped to `ann-search-rs = "0.4.4"` to ensure the IVF kNN search always
+  returns k neighbours.
+
 ## 0.3.6
 
 ### Features
