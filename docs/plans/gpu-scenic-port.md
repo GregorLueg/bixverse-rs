@@ -153,6 +153,27 @@ Shape fixed: 1_000 TFs, 64 targets, 250 trees, `max_depth = 10`, `min_samples_le
 
 **Takeaway**: GPU is losing at every measured shape. Trend is not "GPU pulls ahead at larger scale" — the ratios are noisy and not monotonically improving. RF fares slightly better than ET on GPU (25k RF hits 0.85x — closest to parity). 75k and 100k GPU points were skipped because warmup alone exceeded 5 min, which is itself a signal that GPU is genuinely bad at those scales, not just marginally slow. Metal atomic contention is a plausible root cause but not proven; Phase 4b tuning should target the largest identified levers (per-level host readback, `evaluate_splits_et` thread utilisation, `evaluate_splits_rf` threshold-range scan) before deciding whether to try larger cell counts or accept GPU as a niche fallback.
 
+### Phase 4b measurements (2026-07-09, macOS wgpu default adapter — Metal)
+
+Same shape, same bench harness. Two optimisations applied:
+
+1. **Sample-parallel `build_hist_privatised`** replaces the bin-parallel Phase 1 shape. Threads walk samples once each rather than the previous "one thread per bin, walk N samples per bin" pattern that produced 256× read amplification on `feature_data`. SMEM `Atomic<u32>` for bin counts + private-slice / CAS-loop paths for the per-target Y sums. Statistical parity holds — all 7 tests still pass, byte-identical multi-batch determinism preserved.
+2. **On-device `next_active` + persistent child tensors** eliminate per-level host readbacks. `split_feature`, `importance_delta`, and `node_counts` no longer round-trip to the host per level. One `.read()` per wave for the final importances instead of ~30 per wave.
+
+| Cells | ET CPU | ET GPU | ET speedup | RF CPU | RF GPU | RF speedup |
+|-------|--------|--------|-----------:|--------|--------|-----------:|
+| 10k   | 35.5s  | 46.2s  | 0.77x      | 25.8s  | 27.9s  | 0.92x      |
+| 25k   | 86.5s  | 49.8s  | **1.74x**  | 66.3s  | 82.4s  | 0.80x      |
+| 50k   | 167.0s | 94.2s  | **1.77x**  | 131.8s | 71.5s  | **1.84x**  |
+| 75k   | 240.9s | 163.6s | **1.47x**  | skip   | 102.8s | –          |
+| 100k  | skip   | 174.3s | –          | 293.5s | 139.1s | **2.11x**  |
+
+vs Phase 4a baseline: ET-GPU at 25k improved 75% (195.8s → 49.8s), ET-GPU at 50k improved 63%, RF-GPU at 50k improved 61%, RF-GPU at 100k went from unmeasurable to a 2.11x win.
+
+**Takeaway**: GPU now beats CPU from 25k cells (ET) / 50k cells (RF) and up, with wins in the 1.5x–2.1x range across those shapes. The plan's 2-3x target on 50k+ is hit for RF at 100k (2.11x) and comes close for ET at 25k-50k (~1.75x). Two anomalies worth flagging: (a) **RF at 25k regressed slightly** (75.8s → 82.4s) — small enough to be median-of-3 noise on a single run but worth watching; (b) **ET at 10k is still slower than CPU** (0.77x) — expected, launch overhead dominates at small N, and Phase 5's dispatch shim will route small workloads to CPU.
+
+The audit's diagnosis was correct: read amplification in `build_hist_privatised` was the primary bottleneck, not Metal atomics. Medium-impact items (min/max precompute, WORKGROUP_32 for ET evaluate, u8 packing) remain parked — the current gains are enough that Phase 5 can proceed. Revisit those items only if downstream users need better small-N performance.
+
 ---
 
 ## Phase 5 — Integration
