@@ -17,9 +17,8 @@
 #![allow(clippy::needless_range_loop, clippy::field_reassign_with_default)]
 
 use bixverse_rs::gpu::sc_gpu::scenic_gpu::{
-    fit_extra_trees_gpu_single, fit_multi_trees_gpu,
+    ScenicGpuParams, fit_extra_trees_gpu_single, fit_multi_trees_gpu,
 };
-use bixverse_rs::gpu::sc_gpu::scenic_gpu_params::ScenicGpuParams;
 use bixverse_rs::prelude::*;
 use bixverse_rs::single_cell::sc_analysis::scenic::{
     ExtraTreesConfig, RandomForestConfig, SparseYBatch, fit_multi_trees_sparse,
@@ -56,10 +55,7 @@ fn make_toy_quantised(seed: u64) -> QuantisedStore {
 /// first `N_INFORMATIVE` feature columns with target-specific weights, plus
 /// light noise. That guarantees that features 0..N_INFORMATIVE are the true
 /// top drivers of every target.
-fn make_toy_targets(
-    x: &QuantisedStore,
-    seed: u64,
-) -> (SparseYBatch, Vec<SparseAxis<u32, f32>>) {
+fn make_toy_targets(x: &QuantisedStore, seed: u64) -> (SparseYBatch, Vec<SparseAxis<u32, f32>>) {
     let mut rng = SmallRng::seed_from_u64(seed);
 
     let mut cols_indices: Vec<Vec<usize>> = vec![Vec::new(); N_TARGETS];
@@ -142,7 +138,11 @@ fn make_toy_targets(
 
 fn top_k_indices(imp: &[f32], k: usize) -> Vec<usize> {
     let mut idx: Vec<usize> = (0..imp.len()).collect();
-    idx.sort_unstable_by(|&a, &b| imp[b].partial_cmp(&imp[a]).unwrap_or(std::cmp::Ordering::Equal));
+    idx.sort_unstable_by(|&a, &b| {
+        imp[b]
+            .partial_cmp(&imp[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     idx.truncate(k);
     idx
 }
@@ -206,7 +206,10 @@ fn cpu_baseline_seed_variance() {
 
         let a_sum = sum_importances(&cpu_a);
         let b_sum = sum_importances(&cpu_b);
-        overlaps.push(overlap(&top_k_indices(&a_sum, TOP_K), &top_k_indices(&b_sum, TOP_K)));
+        overlaps.push(overlap(
+            &top_k_indices(&a_sum, TOP_K),
+            &top_k_indices(&b_sum, TOP_K),
+        ));
     }
     let mean_ov = overlaps.iter().sum::<usize>() as f32 / (overlaps.len() * TOP_K) as f32;
     eprintln!("cpu_baseline: mean top-{TOP_K} overlap = {mean_ov:.2} (per seed: {overlaps:?})");

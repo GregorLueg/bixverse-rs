@@ -16,11 +16,35 @@ use ann_search_rs::gpu::tensor::GpuTensor;
 use cubecl::prelude::*;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 
-use crate::gpu::sc_gpu::scenic_gpu_params::ScenicGpuParams;
 use crate::gpu::{WORKGROUP_32, WORKGROUP_128};
 use crate::prelude::*;
 use crate::single_cell::sc_analysis::scenic::*;
 use crate::single_cell::sc_utils::utils_tree::*;
+
+////////////
+// Params //
+////////////
+
+/// Parameters for the GPU multi-tree SCENIC driver.
+pub struct ScenicGpuParams {
+    /// VRAM ceiling (bytes) for the per-wave histogram + cumulative tensors.
+    /// The wave scheduler halves the wave size from 8 until its byte cost
+    /// fits under this budget; an error is returned only when a single-tree
+    /// wave still busts it.
+    ///
+    /// Default: 4 GiB. Shrink on 8 GB adapters that host other workloads;
+    /// raise on 16 GB+ adapters to keep the wave at 8.
+    pub wave_byte_budget: usize,
+}
+
+/// Default implementation.
+impl Default for ScenicGpuParams {
+    fn default() -> Self {
+        Self {
+            wave_byte_budget: 4 * 1024 * 1024 * 1024,
+        }
+    }
+}
 
 ////////////
 // Consts //
