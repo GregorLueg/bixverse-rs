@@ -1,5 +1,64 @@
 # GPU port: SCENIC RF/ExtraTrees regression
 
+## Status snapshot (2026-07-09)
+
+Phases 1-4 complete and merged into `feat-faster-gpu`. Style pass applied. Phase 5 (dispatch shim + R wrapper) is the remaining work.
+
+### GPU speedup vs CPU (macOS/Metal, 1k TFs × 64 targets × 250 trees)
+
+| Cells | ET  | RF  |
+|-------|----:|----:|
+| 10k   | 1.53x | 1.34x |
+| 25k   | 1.73x | 1.63x |
+| 50k   | 1.77x | 1.84x |
+| 75k   | 1.47x | *    |
+| 100k  | *     | 2.11x |
+
+\* CPU baseline exceeded the 300s per-iteration skip threshold at that shape, so speedup ratio is not defined; GPU wall-clock itself is available in the Phase 4b/4c tables further down.
+
+GPU beats CPU at every measured shape from 10k up. The plan's 2-3x target on 50k+ is hit for RF at 100k (2.11x) and comes close for ET/RF at 50k (~1.77-1.84x).
+
+### Statistical parity
+
+7 integration tests pass:
+- ET and RF per-target Pearson correlation vs CPU ≥ 0.95 (measured: 0.988–0.993)
+- Multi-batch determinism: byte-identical vs standalone batches
+- RF bootstrap Pearson ≥ 0.95 (measured 0.976)
+
+### Entry points for review
+
+- **Driver + kernels**: `src/gpu/sc_gpu/scenic_gpu.rs` (~1900 lines). Public entry `fit_multi_trees_gpu` mirrors the CPU `fit_multi_trees_sparse` signature.
+- **Tuning params**: `src/gpu/sc_gpu/scenic_gpu_params.rs` (`ScenicGpuParams::wave_byte_budget`, default 4 GiB).
+- **Tests**: `tests/scenic_gpu.rs`.
+- **Bench**: `benches/gpu_scenic_bench.rs`. Run with `cargo bench --features gpu,single-cell --bench gpu_scenic_bench`. Hand-rolled median-of-3 with a 300s skip threshold — not Criterion (Criterion's minimum 10 samples would push CPU RF at 50k+ into hours).
+
+### What each Phase delivered
+
+- **Phase 1** — single-tree ET prototype, level-BFS driver, six-kernel skeleton.
+- **Phase 2** — wave scheduler, on-device PRNG, multi-batch loop, `fit_multi_trees_gpu` public entry.
+- **Phase 3** — RandomForest path (exhaustive-threshold split-eval kernel, bootstrap-with-replacement sample-multiplicity tensor).
+- **Phase 4a** — bench harness + first measurement pass. Confirmed GPU losing at every shape.
+- **Phase 4b** — sample-parallel histogram build (kills 256x read amplification, primary bottleneck) + on-device `next_active` kernel (eliminates per-level host readbacks).
+- **Phase 4c** — per-slot min/max precompute + `evaluate_splits_et` shrunk to WORKGROUP_32.
+- **Style pass** — docs and comment tidy on `scenic_gpu.rs`. No behaviour changes.
+
+### Remaining work (Phase 5)
+
+- Dispatch shim in `run_scenic_multi_output` / `run_scenic_multi_output_streaming` to call `fit_multi_trees_gpu` when the `gpu` feature is available. Small-N regression risk is negligible now (GPU wins from 10k up).
+- R wrapper in `src/gpu/gpu_r_wrappers.rs` via extendr.
+- CI check that `cargo test --features gpu,single-cell,multi-modal` runs green.
+
+### Parked (audit items 5-8, do only if a workload actually needs them)
+
+- u8-packed `feature_data` (4 samples per u32) — 4x bandwidth cut but only compounds on top of item 1
+- comptime `use_multiplicity` skip when subsample_rate = 1.0
+- Hoist Fisher-Yates + multiplicity buffers to wave scope
+- Parallel prefix on the counts scan in `merge_hist` / `prefix_sum_bins`
+
+Current gains are enough; revisit only if downstream users need it.
+
+---
+
 ## Goal
 
 Port the multi-output ExtraTrees + RandomForest regression from `single_cell/sc_analysis/scenic.rs` to run on GPU via cubecl, feature-gated behind `gpu`. Reuse GPU primitives from `ann-search-rs` (`GpuTensor`, `grid_2d`, workgroup helpers) as the CPU-side code reuses its SIMD/kNN/k-means primitives.
