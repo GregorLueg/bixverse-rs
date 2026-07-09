@@ -1,4 +1,4 @@
-//! Phase 4a: CPU vs GPU wall-clock for SCENIC multi-tree regression.
+//! CPU vs GPU wall-clock for SCENIC multi-tree regression.
 //!
 //! Bench matrix: cell counts {10k, 25k, 50k, 75k, 100k} x learner {ET, RF} x
 //! backend {CPU, GPU}, with 1_000 TFs, 64 targets (one batch), 250 trees,
@@ -10,10 +10,6 @@
 //!
 //! Wave VRAM budget is bumped to 12 GiB so wave=1 fits even at 100k cells;
 //! at the default 4 GiB `pick_wave_size` errors past 50k cells.
-//!
-//! Not a criterion harness -- criterion's minimum 10 samples pushes CPU RF at
-//! 50k+ into hours. Plain `Instant` timing with 1 warmup + 3 measured iters,
-//! reports median wall-clock per shape.
 //!
 //! Run with:
 //! ```
@@ -135,9 +131,9 @@ fn try_device() -> Option<WgpuDevice> {
     .map(|_| device)
 }
 
-/////////////
-// Timing  //
-/////////////
+////////////
+// Timing //
+////////////
 
 fn label(cells: usize) -> String {
     format!("{}k", cells / 1000)
@@ -175,8 +171,7 @@ fn run_cpu(
 ) {
     println!("  {id}: running (CPU)...");
     match median_of_3(|| {
-        fit_multi_trees_sparse(axes, x, n_samples, config, SEED)
-            .expect("CPU fit failed");
+        fit_multi_trees_sparse(axes, x, n_samples, config, SEED).expect("CPU fit failed");
     }) {
         Some(t) => println!("  {id}: {t:.2}s"),
         None => println!("  {id}: SKIPPED (warmup > {SKIP_ABOVE_SECS:.0}s)"),
