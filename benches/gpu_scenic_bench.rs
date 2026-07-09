@@ -21,8 +21,7 @@
 
 use std::time::Instant;
 
-use bixverse_rs::gpu::sc_gpu::scenic_gpu::fit_multi_trees_gpu;
-use bixverse_rs::gpu::sc_gpu::scenic_gpu_params::ScenicGpuParams;
+use bixverse_rs::gpu::sc_gpu::scenic_gpu::{ScenicGpuParams, fit_multi_trees_gpu};
 use bixverse_rs::prelude::*;
 use bixverse_rs::single_cell::sc_analysis::scenic::{
     ExtraTreesConfig, RandomForestConfig, TreeRegressorConfig, fit_multi_trees_sparse,
