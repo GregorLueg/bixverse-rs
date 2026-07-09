@@ -174,6 +174,26 @@ vs Phase 4a baseline: ET-GPU at 25k improved 75% (195.8s → 49.8s), ET-GPU at 5
 
 The audit's diagnosis was correct: read amplification in `build_hist_privatised` was the primary bottleneck, not Metal atomics. Medium-impact items (min/max precompute, WORKGROUP_32 for ET evaluate, u8 packing) remain parked — the current gains are enough that Phase 5 can proceed. Revisit those items only if downstream users need better small-N performance.
 
+### Phase 4c measurements (2026-07-09, same adapter)
+
+Items 3 and 4 from the audit table:
+
+3. **Per-slot `min_bin` / `max_bin` precompute.** Folded into `merge_hist`'s existing 256-bin counts scan. `evaluate_splits_et` and `evaluate_splits_rf` read the two u32s at the top instead of re-scanning 512 bins per candidate. Eliminated ~15_872 redundant reads per node per level for ET; slightly fewer for RF.
+4. **Shrink `evaluate_splits_et` to `WORKGROUP_32`.** ET's inner kernel had ~24% thread utilisation at `k_feats ≈ √n_features ≈ 31, n_thresholds = 1`; the shrink to warp-width brings that to ~97%. Argmax reduction shrinks from 8 stages to 5. `evaluate_splits_rf` stays at `WORKGROUP_128` — its `k_feats × 255` candidate space saturates 128 threads already.
+
+Re-benched at 10k + 25k only (items 3 and 4 mainly affect small-N; skipping 50k+ saves hours):
+
+| Cells | ET CPU | ET GPU | ET speedup | RF CPU | RF GPU | RF speedup |
+|-------|--------|--------|-----------:|--------|--------|-----------:|
+| 10k   | 34.3s  | **22.5s**  | **1.53x**  | 26.0s  | **19.4s**  | **1.34x**  |
+| 25k   | 86.0s  | 49.8s  | 1.73x      | 66.4s  | **40.7s**  | **1.63x**  |
+
+vs Phase 4b at same shapes: ET-GPU-10k improved 51% (46.2s → 22.5s), RF-GPU-10k improved 31%, RF-GPU-25k improved 51% (fixed the Phase 4b regression at 82.4s). ET-GPU-25k unchanged (item 4 helps at small N only, and item 3's ET-25k share was already realised by Phase 4b's kernel).
+
+**Takeaway**: GPU now beats CPU at every measured shape, including 10k. The Phase 4b anomaly at RF-25k (82.4s vs baseline 75.8s) turned out to be a genuine cost from the unbounded threshold scan and was fully recovered by item 3. Item 3 delivered more than the audit predicted — the "RF benefits less" call was too conservative because RF's threshold loop absorbs the min/max scan cost only partially. Combined ET / RF wins at 10k are 1.53× and 1.34× respectively; at 25k, 1.73× and 1.63×. Phase 5 dispatch shim now has a defensible "always route to GPU when GPU feature is available" default.
+
+Remaining items 5-8 from the audit (u8 packing, comptime multiplicity skip, buffer hoisting, parallel prefix on counts) stay parked — no shape currently needs them.
+
 ---
 
 ## Phase 5 — Integration

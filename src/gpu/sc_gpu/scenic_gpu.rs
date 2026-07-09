@@ -40,7 +40,7 @@ use ann_search_rs::gpu::tensor::GpuTensor;
 use cubecl::prelude::*;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 
-use crate::gpu::WORKGROUP_128;
+use crate::gpu::{WORKGROUP_32, WORKGROUP_128};
 use crate::gpu::sc_gpu::scenic_gpu_params::ScenicGpuParams;
 use crate::prelude::*;
 use crate::single_cell::sc_analysis::scenic::*;
@@ -337,8 +337,17 @@ pub fn merge_hist(
 
 /// Inclusive prefix sum over 256 bins per (tree, node, slot). One workgroup
 /// per (slot, node, tree), `WORKGROUP_128` wide. Thread 0 runs the counts
-/// scan; thread `tx` owns targets `tx, tx+wg, ...` for y-sum scans. Each
-/// scan only touches its own history so no cross-thread ordering is needed.
+/// scan and, in the same pass, computes the per-slot informative bin range
+/// `[min_bin, max_bin]` (first and last bins with nonzero counts) into
+/// `slot_min_bin` / `slot_max_bin` (item 3). Downstream
+/// `evaluate_splits_*` read these two u32s per slot instead of rescanning
+/// all 256 bins per candidate.
+///
+/// Thread `tx` owns targets `tx, tx+wg, ...` for y-sum scans. Each scan only
+/// touches its own history so no cross-thread ordering is needed.
+///
+/// Empty-slot encoding: `min_bin = 0, max_bin = 0` when the slot has no
+/// samples in any bin. `evaluate_splits_*` reject via `max_bin > min_bin`.
 ///
 /// `hist_y_sums` and `hist_y_sum_sqs` are u32-typed (f32 bits written by
 /// [`build_hist_privatised`] via atomic CAS); reads reinterpret via
@@ -352,6 +361,8 @@ pub fn prefix_sum_bins(
     cum_counts: &mut Tensor<u32>,
     cum_y_sums: &mut Tensor<f32>,
     cum_y_sum_sqs: &mut Tensor<f32>,
+    slot_min_bin: &mut Tensor<u32>,
+    slot_max_bin: &mut Tensor<u32>,
     wave_size: u32,
     n_active_nodes: u32,
     k_feats: u32,
@@ -372,19 +383,47 @@ pub fn prefix_sum_bins(
     }
 
     let tx = UNIT_POS_X;
-    let count_base =
-        (((tree * n_active_nodes + node) * k_feats + slot) * N_BINS) as usize;
+    let slot_flat = ((tree * n_active_nodes + node) * k_feats + slot) as usize;
+    let count_base = slot_flat * N_BINS as usize;
     let sum_base =
         ((((tree * n_active_nodes + node) * k_feats + slot) * N_BINS) * n_targets) as usize;
 
     if tx == 0u32 {
-        cum_counts[count_base] = hist_counts[count_base];
+        // Fused: inclusive prefix sum + per-slot min/max informative bin
+        // scan. Both run in one 256-iter loop so we don't pay two passes.
+        let mut min_b: u32 = 0u32;
+        let mut has_min: u32 = 0u32;
+        let mut max_b: u32 = 0u32;
+
+        let first = hist_counts[count_base];
+        cum_counts[count_base] = first;
+        if first > 0u32 {
+            min_b = 0u32;
+            has_min = 1u32;
+            max_b = 0u32;
+        }
         let mut b: u32 = 1u32;
         while b < N_BINS {
             let prev = count_base + (b - 1u32) as usize;
             let curr = count_base + b as usize;
-            cum_counts[curr] = cum_counts[prev] + hist_counts[curr];
+            let hc = hist_counts[curr];
+            cum_counts[curr] = cum_counts[prev] + hc;
+            if hc > 0u32 {
+                if has_min == 0u32 {
+                    min_b = b;
+                    has_min = 1u32;
+                }
+                max_b = b;
+            }
             b += 1u32;
+        }
+
+        if has_min == 1u32 {
+            slot_min_bin[slot_flat] = min_b;
+            slot_max_bin[slot_flat] = max_b;
+        } else {
+            slot_min_bin[slot_flat] = 0u32;
+            slot_max_bin[slot_flat] = 0u32;
         }
     }
 
@@ -440,6 +479,8 @@ pub fn evaluate_splits_et(
     node_y_sum_sqs: &Tensor<f32>,
     node_features: &Tensor<u32>,
     tree_seeds: &Tensor<u32>,
+    slot_min_bin: &Tensor<u32>,
+    slot_max_bin: &Tensor<u32>,
     split_feature: &mut Tensor<u32>,
     split_threshold: &mut Tensor<u32>,
     split_n_left: &mut Tensor<u32>,
@@ -525,89 +566,69 @@ pub fn evaluate_splits_et(
         let sum_base =
             ((((tree * n_active_nodes + node) * k_feats + slot) * N_BINS) * n_targets) as usize;
 
-        let mut min_bin: u32 = 0u32;
-        let mut has_min: u32 = 0u32;
-        let mut b: u32 = 0u32;
-        while b < N_BINS {
-            if cum_counts[count_base + b as usize] > 0u32 {
-                if has_min == 0u32 {
-                    min_bin = b;
-                    has_min = 1u32;
+        // Item 3: precomputed per-slot informative range (populated in
+        // prefix_sum_bins). Empty slots have min_bin == max_bin == 0.
+        let slot_flat = ((tree * n_active_nodes + node) * k_feats + slot) as usize;
+        let min_bin = slot_min_bin[slot_flat];
+        let max_bin = slot_max_bin[slot_flat];
+
+        if max_bin > min_bin {
+            let mut seed_mix = tree_seed_val;
+            seed_mix = hash_mix(seed_mix ^ level);
+            seed_mix = hash_mix(seed_mix ^ node);
+            seed_mix = hash_mix(seed_mix ^ slot);
+            seed_mix = hash_mix(seed_mix ^ ti);
+            // shift threshold hash off the feature-draw hash so the two
+            // don't correlate; XOR with a fixed salt is cheap.
+            seed_mix = hash_mix(seed_mix ^ 2654435769u32);
+            let range = max_bin - min_bin;
+            let thr = min_bin + (seed_mix % range);
+
+            let n_left = cum_counts[count_base + thr as usize];
+            let n_right = n - n_left;
+
+            let ok_left = n_left >= min_samples_leaf;
+            let ok_right = n_right >= min_samples_leaf;
+            if ok_left && ok_right {
+                let nl = f32::cast_from(n_left);
+                let nr = f32::cast_from(n_right);
+                let inv_nl = 1f32 / nl;
+                let inv_nr = 1f32 / nr;
+                let wl = nl / nf;
+                let wr = nr / nf;
+
+                let mut score: f32 = 0f32;
+                let bin_base = sum_base + (thr * n_targets) as usize;
+                let mut k: u32 = 0u32;
+                while k < n_targets {
+                    let sy = node_y_sums[stats_base + k as usize];
+                    let ssq = node_y_sum_sqs[stats_base + k as usize];
+                    let mean_p = sy / nf;
+                    let var_p = ssq / nf - mean_p * mean_p;
+
+                    let syl = cum_y_sums[bin_base + k as usize];
+                    let ssyl = cum_y_sum_sqs[bin_base + k as usize];
+                    let mean_l = syl * inv_nl;
+                    let var_l = ssyl * inv_nl - mean_l * mean_l;
+
+                    let syr = sy - syl;
+                    let ssyr = ssq - ssyl;
+                    let mean_r = syr * inv_nr;
+                    let var_r = ssyr * inv_nr - mean_r * mean_r;
+
+                    let vp = f32::max(var_p, 0f32);
+                    let vl = f32::max(var_l, 0f32);
+                    let vr = f32::max(var_r, 0f32);
+                    score += vp - wl * vl - wr * vr;
+                    k += 1u32;
                 }
-            }
-            b += 1u32;
-        }
-        let mut max_bin = min_bin;
-        let mut prev_c = 0u32;
-        let mut b2: u32 = 0u32;
-        while b2 < N_BINS {
-            let cc = cum_counts[count_base + b2 as usize];
-            if cc > prev_c {
-                max_bin = b2;
-            }
-            prev_c = cc;
-            b2 += 1u32;
-        }
 
-        if has_min == 1u32 {
-            if max_bin > min_bin {
-                let mut seed_mix = tree_seed_val;
-                seed_mix = hash_mix(seed_mix ^ level);
-                seed_mix = hash_mix(seed_mix ^ node);
-                seed_mix = hash_mix(seed_mix ^ slot);
-                seed_mix = hash_mix(seed_mix ^ ti);
-                // shift threshold hash off the feature-draw hash so the two
-                // don't correlate; XOR with a fixed salt is cheap.
-                seed_mix = hash_mix(seed_mix ^ 2654435769u32);
-                let range = max_bin - min_bin;
-                let thr = min_bin + (seed_mix % range);
-
-                let n_left = cum_counts[count_base + thr as usize];
-                let n_right = n - n_left;
-
-                let ok_left = n_left >= min_samples_leaf;
-                let ok_right = n_right >= min_samples_leaf;
-                if ok_left && ok_right {
-                    let nl = f32::cast_from(n_left);
-                    let nr = f32::cast_from(n_right);
-                    let inv_nl = 1f32 / nl;
-                    let inv_nr = 1f32 / nr;
-                    let wl = nl / nf;
-                    let wr = nr / nf;
-
-                    let mut score: f32 = 0f32;
-                    let bin_base = sum_base + (thr * n_targets) as usize;
-                    let mut k: u32 = 0u32;
-                    while k < n_targets {
-                        let sy = node_y_sums[stats_base + k as usize];
-                        let ssq = node_y_sum_sqs[stats_base + k as usize];
-                        let mean_p = sy / nf;
-                        let var_p = ssq / nf - mean_p * mean_p;
-
-                        let syl = cum_y_sums[bin_base + k as usize];
-                        let ssyl = cum_y_sum_sqs[bin_base + k as usize];
-                        let mean_l = syl * inv_nl;
-                        let var_l = ssyl * inv_nl - mean_l * mean_l;
-
-                        let syr = sy - syl;
-                        let ssyr = ssq - ssyl;
-                        let mean_r = syr * inv_nr;
-                        let var_r = ssyr * inv_nr - mean_r * mean_r;
-
-                        let vp = f32::max(var_p, 0f32);
-                        let vl = f32::max(var_l, 0f32);
-                        let vr = f32::max(var_r, 0f32);
-                        score += vp - wl * vl - wr * vr;
-                        k += 1u32;
-                    }
-
-                    if score > best_score {
-                        best_score = score;
-                        best_slot = slot;
-                        best_thr = thr;
-                        best_n_left = n_left;
-                        best_valid = 1u32;
-                    }
+                if score > best_score {
+                    best_score = score;
+                    best_slot = slot;
+                    best_thr = thr;
+                    best_n_left = n_left;
+                    best_valid = 1u32;
                 }
             }
         }
@@ -615,12 +636,12 @@ pub fn evaluate_splits_et(
         c += wg_size;
     }
 
-    // -- argmax reduction --
-    let mut s_score = SharedMemory::<f32>::new(WORKGROUP_128 as usize);
-    let mut s_slot = SharedMemory::<u32>::new(WORKGROUP_128 as usize);
-    let mut s_thr = SharedMemory::<u32>::new(WORKGROUP_128 as usize);
-    let mut s_nl = SharedMemory::<u32>::new(WORKGROUP_128 as usize);
-    let mut s_valid = SharedMemory::<u32>::new(WORKGROUP_128 as usize);
+    // -- argmax reduction (item 4: 32-wide, 5 halving stages 16→8→4→2→1) --
+    let mut s_score = SharedMemory::<f32>::new(WORKGROUP_32 as usize);
+    let mut s_slot = SharedMemory::<u32>::new(WORKGROUP_32 as usize);
+    let mut s_thr = SharedMemory::<u32>::new(WORKGROUP_32 as usize);
+    let mut s_nl = SharedMemory::<u32>::new(WORKGROUP_32 as usize);
+    let mut s_valid = SharedMemory::<u32>::new(WORKGROUP_32 as usize);
 
     s_score[tx as usize] = best_score;
     s_slot[tx as usize] = best_slot;
@@ -629,40 +650,6 @@ pub fn evaluate_splits_et(
     s_valid[tx as usize] = best_valid;
     sync_cube();
 
-    if tx < 64u32 {
-        let mate = tx + 64u32;
-        let take = argmax_takes_mate(
-            s_valid[tx as usize],
-            s_score[tx as usize],
-            s_valid[mate as usize],
-            s_score[mate as usize],
-        );
-        if take == 1u32 {
-            s_score[tx as usize] = s_score[mate as usize];
-            s_slot[tx as usize] = s_slot[mate as usize];
-            s_thr[tx as usize] = s_thr[mate as usize];
-            s_nl[tx as usize] = s_nl[mate as usize];
-            s_valid[tx as usize] = s_valid[mate as usize];
-        }
-    }
-    sync_cube();
-    if tx < 32u32 {
-        let mate = tx + 32u32;
-        let take = argmax_takes_mate(
-            s_valid[tx as usize],
-            s_score[tx as usize],
-            s_valid[mate as usize],
-            s_score[mate as usize],
-        );
-        if take == 1u32 {
-            s_score[tx as usize] = s_score[mate as usize];
-            s_slot[tx as usize] = s_slot[mate as usize];
-            s_thr[tx as usize] = s_thr[mate as usize];
-            s_nl[tx as usize] = s_nl[mate as usize];
-            s_valid[tx as usize] = s_valid[mate as usize];
-        }
-    }
-    sync_cube();
     if tx < 16u32 {
         let mate = tx + 16u32;
         let take = argmax_takes_mate(
@@ -819,6 +806,8 @@ pub fn evaluate_splits_rf(
     node_y_sums: &Tensor<f32>,
     node_y_sum_sqs: &Tensor<f32>,
     node_features: &Tensor<u32>,
+    slot_min_bin: &Tensor<u32>,
+    slot_max_bin: &Tensor<u32>,
     split_feature: &mut Tensor<u32>,
     split_threshold: &mut Tensor<u32>,
     split_n_left: &mut Tensor<u32>,
@@ -900,6 +889,19 @@ pub fn evaluate_splits_rf(
         let slot = c / thresholds_per_slot;
         let thr = c % thresholds_per_slot;
 
+        // Item 3: skip thresholds outside the slot's informative range. Below
+        // `min_bin` all cum_counts are 0 (n_left = 0). At or above `max_bin`
+        // every sample sits on the left (n_right = 0). Both cases would be
+        // gated out by the min_samples_leaf check below anyway, so this is
+        // a pure early-out that avoids the target-loop scoring cost.
+        // (cubecl has no `continue` — the rest of the body sits under a
+        // single `if in_range` guard instead.)
+        let slot_flat = ((tree * n_active_nodes + node) * k_feats + slot) as usize;
+        let min_bin = slot_min_bin[slot_flat];
+        let max_bin = slot_max_bin[slot_flat];
+        let in_range = max_bin > min_bin && thr >= min_bin && thr < max_bin;
+
+        if in_range {
         let count_base =
             (((tree * n_active_nodes + node) * k_feats + slot) * N_BINS) as usize;
         let sum_base =
@@ -952,11 +954,12 @@ pub fn evaluate_splits_rf(
                 best_valid = 1u32;
             }
         }
+        }
 
         c += wg_size;
     }
 
-    // -- argmax reduction (identical to ET) --
+    // -- argmax reduction (WORKGROUP_128 — RF's 7905 candidates saturate it) --
     let mut s_score = SharedMemory::<f32>::new(WORKGROUP_128 as usize);
     let mut s_slot = SharedMemory::<u32>::new(WORKGROUP_128 as usize);
     let mut s_thr = SharedMemory::<u32>::new(WORKGROUP_128 as usize);
@@ -1458,6 +1461,8 @@ fn launch_prefix_sum<R: Runtime>(
     cum_counts: &GpuTensor<R, u32>,
     cum_y_sums: &GpuTensor<R, f32>,
     cum_y_sum_sqs: &GpuTensor<R, f32>,
+    slot_min_bin: &GpuTensor<R, u32>,
+    slot_max_bin: &GpuTensor<R, u32>,
     wave_size: usize,
     n_active_nodes: usize,
     k_feats: usize,
@@ -1474,6 +1479,8 @@ fn launch_prefix_sum<R: Runtime>(
             cum_counts.clone().into_tensor_arg(),
             cum_y_sums.clone().into_tensor_arg(),
             cum_y_sum_sqs.clone().into_tensor_arg(),
+            slot_min_bin.clone().into_tensor_arg(),
+            slot_max_bin.clone().into_tensor_arg(),
             wave_size as u32,
             n_active_nodes as u32,
             k_feats as u32,
@@ -1494,6 +1501,8 @@ fn launch_evaluate_splits_et<R: Runtime>(
     node_y_sum_sqs: &GpuTensor<R, f32>,
     node_features: &GpuTensor<R, u32>,
     tree_seeds: &GpuTensor<R, u32>,
+    slot_min_bin: &GpuTensor<R, u32>,
+    slot_max_bin: &GpuTensor<R, u32>,
     split_feature: &GpuTensor<R, u32>,
     split_threshold: &GpuTensor<R, u32>,
     split_n_left: &GpuTensor<R, u32>,
@@ -1509,10 +1518,13 @@ fn launch_evaluate_splits_et<R: Runtime>(
 ) {
     let (gx, gy) = grid_2d((n_active_nodes as u32).max(1));
     unsafe {
+        // Item 4: WORKGROUP_32 for ET. At bench shape k_feats*n_thresholds =
+        // ~31 candidates → 32-wide workgroup saturates cleanly. RF stays
+        // at WORKGROUP_128 (k_feats * 255 ≈ 7905 candidates).
         evaluate_splits_et::launch_unchecked::<R>(
             client,
             CubeCount::Static(gx, gy, wave_size as u32),
-            CubeDim::new_1d(WORKGROUP_128),
+            CubeDim::new_1d(WORKGROUP_32),
             cum_counts.clone().into_tensor_arg(),
             cum_y_sums.clone().into_tensor_arg(),
             cum_y_sum_sqs.clone().into_tensor_arg(),
@@ -1521,6 +1533,8 @@ fn launch_evaluate_splits_et<R: Runtime>(
             node_y_sum_sqs.clone().into_tensor_arg(),
             node_features.clone().into_tensor_arg(),
             tree_seeds.clone().into_tensor_arg(),
+            slot_min_bin.clone().into_tensor_arg(),
+            slot_max_bin.clone().into_tensor_arg(),
             split_feature.clone().into_tensor_arg(),
             split_threshold.clone().into_tensor_arg(),
             split_n_left.clone().into_tensor_arg(),
@@ -1533,7 +1547,7 @@ fn launch_evaluate_splits_et<R: Runtime>(
             n_thresholds as u32,
             min_samples_leaf as u32,
             level,
-            WORKGROUP_128,
+            WORKGROUP_32,
         );
     }
 }
@@ -1548,6 +1562,8 @@ fn launch_evaluate_splits_rf<R: Runtime>(
     node_y_sums: &GpuTensor<R, f32>,
     node_y_sum_sqs: &GpuTensor<R, f32>,
     node_features: &GpuTensor<R, u32>,
+    slot_min_bin: &GpuTensor<R, u32>,
+    slot_max_bin: &GpuTensor<R, u32>,
     split_feature: &GpuTensor<R, u32>,
     split_threshold: &GpuTensor<R, u32>,
     split_n_left: &GpuTensor<R, u32>,
@@ -1572,6 +1588,8 @@ fn launch_evaluate_splits_rf<R: Runtime>(
             node_y_sums.clone().into_tensor_arg(),
             node_y_sum_sqs.clone().into_tensor_arg(),
             node_features.clone().into_tensor_arg(),
+            slot_min_bin.clone().into_tensor_arg(),
+            slot_max_bin.clone().into_tensor_arg(),
             split_feature.clone().into_tensor_arg(),
             split_threshold.clone().into_tensor_arg(),
             split_n_left.clone().into_tensor_arg(),
@@ -1731,6 +1749,12 @@ struct WaveState<R: Runtime> {
     cum_counts: GpuTensor<R, u32>,
     cum_y_sums: GpuTensor<R, f32>,
     cum_y_sum_sqs: GpuTensor<R, f32>,
+    // per-slot informative bin range (item 3). Populated by
+    // `prefix_sum_bins`, read by `evaluate_splits_et` / `_rf` to avoid the
+    // per-candidate 512-read min/max scan and to skip out-of-range RF
+    // thresholds.
+    slot_min_bin: GpuTensor<R, u32>,
+    slot_max_bin: GpuTensor<R, u32>,
     // per-node stats
     node_counts: GpuTensor<R, u32>,
     node_y_sums: GpuTensor<R, f32>,
@@ -1779,6 +1803,14 @@ impl<R: Runtime> WaveState<R> {
             cum_counts: GpuTensor::empty(vec![hist_counts_len], client),
             cum_y_sums: GpuTensor::empty(vec![hist_sums_len], client),
             cum_y_sum_sqs: GpuTensor::empty(vec![hist_sums_len], client),
+            slot_min_bin: GpuTensor::empty(
+                vec![wave_size * max_active_nodes * k_feats],
+                client,
+            ),
+            slot_max_bin: GpuTensor::empty(
+                vec![wave_size * max_active_nodes * k_feats],
+                client,
+            ),
             node_counts: GpuTensor::empty(vec![wave_size * max_active_nodes], client),
             node_y_sums: GpuTensor::empty(vec![node_stats_len], client),
             node_y_sum_sqs: GpuTensor::empty(vec![node_stats_len], client),
@@ -2009,6 +2041,8 @@ fn run_wave_bfs<R: Runtime>(
             &state.cum_counts,
             &state.cum_y_sums,
             &state.cum_y_sum_sqs,
+            &state.slot_min_bin,
+            &state.slot_max_bin,
             wave_size,
             n_active_nodes,
             k_feats,
@@ -2028,6 +2062,8 @@ fn run_wave_bfs<R: Runtime>(
                 &state.node_y_sum_sqs,
                 &state.node_features,
                 tree_seeds,
+                &state.slot_min_bin,
+                &state.slot_max_bin,
                 &state.split_feature,
                 &state.split_threshold,
                 &state.split_n_left,
@@ -2051,6 +2087,8 @@ fn run_wave_bfs<R: Runtime>(
                 &state.node_y_sums,
                 &state.node_y_sum_sqs,
                 &state.node_features,
+                &state.slot_min_bin,
+                &state.slot_max_bin,
                 &state.split_feature,
                 &state.split_threshold,
                 &state.split_n_left,
