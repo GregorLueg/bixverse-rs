@@ -8,7 +8,6 @@
 //! `gpu/ml/k_means_gpu.rs::segmented_centroid_update` and the SMEM tree
 //! reduction from `gpu/sc_gpu/kernels/harmony_kernels.rs::objective_partials`.
 
-#![allow(missing_docs)]
 #![cfg(all(feature = "single-cell", feature = "gpu"))]
 
 use ann_search_rs::gpu::grid_2d;
@@ -65,6 +64,10 @@ const INVALID_NODE: u32 = u32::MAX;
 /// * `CUBE_POS_X + CUBE_POS_Y * CUBE_COUNT_X` -> node index
 /// * `CUBE_POS_Z` -> tree_in_wave
 /// * `UNIT_POS_X` -> feature-slot stride offset
+///
+/// ### Returns
+///
+/// Feature ids written into `node_features[tree * n_active_nodes * k_feats + ...]` in place.
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
 pub fn sample_node_features(
@@ -107,6 +110,19 @@ pub fn sample_node_features(
 /// observed old value matches our compare value. Cubecl's
 /// `compare_exchange_weak` is defined on `Atomic<u32>` only, hence the u32
 /// storage of what the caller conceptually treats as f32.
+///
+/// ### Workgroup
+///
+/// Inlined into the calling kernel; no dedicated workgroup.
+///
+/// ### Params
+///
+/// * `ptr` - Atomic u32 slot holding the current f32 value in bit-reinterpreted form
+/// * `delta` - f32 addend to apply
+///
+/// ### Returns
+///
+/// `()` — the updated f32 value is stored back into `ptr` in place.
 #[cube]
 #[allow(clippy::assign_op_pattern)]
 fn atomic_add_f32_bits(ptr: &Atomic<u32>, delta: f32) {
@@ -168,6 +184,11 @@ fn atomic_add_f32_bits(ptr: &Atomic<u32>, delta: f32) {
 /// * `CUBE_POS_Y` -> node index (max 65535, so `grid_2d` is not needed here)
 /// * `CUBE_POS_Z` -> tree_in_wave
 /// * `UNIT_POS_X` -> sample stripe (thread `tx` walks `s = tx, tx+wg, ...`)
+///
+/// ### Returns
+///
+/// Histogram counts and Y-stat accumulations written into `hist_counts`,
+/// `hist_y_sums`, and `hist_y_sum_sqs` in place.
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
 pub fn build_hist_privatised(
@@ -290,6 +311,11 @@ pub fn build_hist_privatised(
 /// * `CUBE_POS_X + CUBE_POS_Y * CUBE_COUNT_X` -> node index
 /// * `CUBE_POS_Z` -> tree_in_wave
 /// * `UNIT_POS_X` -> target stride offset for the y-sum scan
+///
+/// ### Returns
+///
+/// Per-node totals written into `node_counts`, `node_y_sums`, and
+/// `node_y_sum_sqs` in place.
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
 pub fn merge_hist(
@@ -393,6 +419,12 @@ pub fn merge_hist(
 /// * `CUBE_POS_Y` -> node index
 /// * `CUBE_POS_Z` -> tree_in_wave
 /// * `UNIT_POS_X` -> target stride offset for the y-sum scans
+///
+/// ### Returns
+///
+/// Inclusive prefix sums written into `cum_counts`, `cum_y_sums`, and
+/// `cum_y_sum_sqs`; per-slot informative bin ranges written into
+/// `slot_min_bin` and `slot_max_bin`.
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
 pub fn prefix_sum_bins(
@@ -488,6 +520,18 @@ pub fn prefix_sum_bins(
 
 /// Cheap on-device hash for feature/threshold selection. Multiplies wrap in
 /// shader arithmetic (WGSL and SPIR-V both define `*` on `u32` mod 2^32).
+///
+/// ### Workgroup
+///
+/// Inlined into the calling kernel; no dedicated workgroup.
+///
+/// ### Params
+///
+/// * `x` - Input u32 seed value to mix
+///
+/// ### Returns
+///
+/// A pseudorandom u32 derived from `x` via three xor-shift-multiply rounds.
 #[cube]
 #[allow(clippy::assign_op_pattern)]
 fn hash_mix(x: u32) -> u32 {
@@ -543,6 +587,12 @@ fn hash_mix(x: u32) -> u32 {
 /// * `CUBE_POS_X + CUBE_POS_Y * CUBE_COUNT_X` -> node index
 /// * `CUBE_POS_Z` -> tree_in_wave
 /// * `UNIT_POS_X` -> candidate stride offset (`slot * n_thresholds + thr_idx`)
+///
+/// ### Returns
+///
+/// Winning split written into `split_feature`, `split_threshold`, and
+/// `split_n_left`; left-child Y stats into `split_y_sums_l` and
+/// `split_y_sum_sqs_l`. Nodes with no valid split get `split_feature = u32::MAX`.
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments, clippy::collapsible_if)]
 pub fn evaluate_splits_et(
@@ -844,6 +894,21 @@ pub fn evaluate_splits_et(
 
 /// Argmax reduction decision: returns 1 iff mate slot should overwrite
 /// current slot. Ties resolve to the lower-indexed thread (strict `>`).
+///
+/// ### Workgroup
+///
+/// Inlined into the calling kernel's SMEM reduction; no dedicated workgroup.
+///
+/// ### Params
+///
+/// * `cur_valid` - 1 if the current slot holds a valid candidate, 0 otherwise
+/// * `cur_score` - Variance-reduction score for the current slot
+/// * `mate_valid` - 1 if the mate slot holds a valid candidate, 0 otherwise
+/// * `mate_score` - Variance-reduction score for the mate slot
+///
+/// ### Returns
+///
+/// 1 if the mate slot should replace the current slot, 0 to keep the current.
 #[cube]
 fn argmax_takes_mate(cur_valid: u32, cur_score: f32, mate_valid: u32, mate_score: f32) -> u32 {
     let mut take: u32 = 0u32;
@@ -903,6 +968,12 @@ fn argmax_takes_mate(cur_valid: u32, cur_score: f32, mate_valid: u32, mate_score
 /// * `CUBE_POS_X + CUBE_POS_Y * CUBE_COUNT_X` -> node index
 /// * `CUBE_POS_Z` -> tree_in_wave
 /// * `UNIT_POS_X` -> candidate stride offset (`slot * (N_BINS - 1) + thr`)
+///
+/// ### Returns
+///
+/// Winning split written into `split_feature`, `split_threshold`, and
+/// `split_n_left`; left-child Y stats into `split_y_sums_l` and
+/// `split_y_sum_sqs_l`. Nodes with no valid split get `split_feature = u32::MAX`.
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments, clippy::collapsible_if)]
 pub fn evaluate_splits_rf(
@@ -1253,6 +1324,12 @@ pub fn evaluate_splits_rf(
 /// * `CUBE_POS_X * WORKGROUP_128 + UNIT_POS_X + CUBE_POS_Y * CUBE_COUNT_X *
 ///   WORKGROUP_128` -> sample index
 /// * `CUBE_POS_Z` -> tree_in_wave
+///
+/// ### Returns
+///
+/// `sample_to_node` updated in place to each sample's child node id for the
+/// next level; samples at leaves or with an invalid parent are set to
+/// `INVALID_NODE`.
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
 pub fn reassign_samples(
@@ -1333,6 +1410,11 @@ pub fn reassign_samples(
 /// * `CUBE_POS_X + CUBE_POS_Y * CUBE_COUNT_X` -> node index
 /// * `CUBE_POS_Z` -> tree_in_wave
 /// * `UNIT_POS_X` -> target stride offset
+///
+/// ### Returns
+///
+/// `batch_importances` atomically updated in place; each valid split's
+/// weighted variance reduction is CAS-added to the feature's importance slot.
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
 pub fn accumulate_importance(
@@ -1429,6 +1511,11 @@ pub fn accumulate_importance(
 ///
 /// * `CUBE_POS_X` -> tree_in_wave
 /// * Single thread per workgroup (`UNIT_POS_X == 0`)
+///
+/// ### Returns
+///
+/// `left_child_id` and `right_child_id` written for each internal node;
+/// leaves and phantom nodes (no samples) emit `INVALID_NODE`.
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
 pub fn compute_child_ids(
@@ -1489,6 +1576,11 @@ pub fn compute_child_ids(
 /// * `CUBE_POS_X * WORKGROUP_128 + UNIT_POS_X + CUBE_POS_Y * CUBE_COUNT_X *
 ///   WORKGROUP_128` -> sample index
 /// * `CUBE_POS_Z` -> tree_in_wave
+///
+/// ### Returns
+///
+/// `sample_to_node` written to 0 (root) for samples with `multiplicity > 0`,
+/// and `INVALID_NODE` for unselected samples.
 #[cube(launch_unchecked)]
 pub fn init_sample_to_node(
     sample_multiplicity: &Tensor<u32>,
@@ -1516,7 +1608,28 @@ pub fn init_sample_to_node(
 // Launch wrappers //
 /////////////////////
 
-/// Dispatch [`sample_node_features`]. One workgroup per (node, tree).
+/// Dispatch [`sample_node_features`] over `(n_active_nodes, 1, wave_size)`
+/// workgroups.
+///
+/// ### Workgroup
+///
+/// `CubeDim::new_1d(WORKGROUP_128)` — 128 threads per workgroup, each owning
+/// feature slots `tx, tx+128, ...`.
+///
+/// ### Params
+///
+/// * `client` - CubeCL compute client
+/// * `tree_seeds` - Per-tree base seed `[wave_size]`
+/// * `node_features` - Output feature ids `[wave_size, n_active_nodes, k_feats]`
+/// * `wave_size` - Trees in wave
+/// * `n_active_nodes` - Active nodes at this level
+/// * `k_feats` - Features per node
+/// * `n_features` - Total feature count (draw range)
+/// * `level` - Depth being processed
+///
+/// ### Returns
+///
+/// `()` — kernel is dispatched asynchronously via the client command queue.
 #[allow(clippy::too_many_arguments)]
 fn launch_sample_features<R: Runtime>(
     client: &ComputeClient<R>,
@@ -1545,7 +1658,36 @@ fn launch_sample_features<R: Runtime>(
     }
 }
 
-/// Dispatch [`build_hist_privatised`]. One workgroup per (slot, node, tree).
+/// Dispatch [`build_hist_privatised`] over `(k_feats, n_active_nodes, wave_size)`
+/// workgroups.
+///
+/// ### Workgroup
+///
+/// `CubeDim::new_1d(WORKGROUP_128)` — 128 threads per workgroup, each striding
+/// over samples `tx, tx+128, ...`.
+///
+/// ### Params
+///
+/// * `client` - CubeCL compute client
+/// * `feature_data` - Quantised bins `[n_features, n_samples]` (u8 as u32)
+/// * `sy_offsets` - Sparse Y offsets `[n_samples + 1]`
+/// * `sy_target_indices` - Sparse Y target ids `[nnz]` (u8 as u32)
+/// * `sy_values` - Sparse Y values `[nnz]`
+/// * `sample_to_node` - Per-tree sample assignment `[wave_size, n_samples]`
+/// * `sample_multiplicity` - Per-tree sample multiplier `[wave_size, n_samples]`
+/// * `node_features` - Selected feature ids `[wave_size, n_active_nodes, k_feats]`
+/// * `hist_counts` - Output counts `[wave_size, n_active_nodes, k_feats, N_BINS]`
+/// * `hist_y_sums` - Output Y sums as u32 f32 bits, same layout with trailing `n_targets`
+/// * `hist_y_sum_sqs` - Output Y sum-of-squares, same layout as `hist_y_sums`
+/// * `n_samples` - Number of samples
+/// * `wave_size` - Trees in wave
+/// * `n_active_nodes` - Active nodes at this level
+/// * `k_feats` - Features per node
+/// * `n_targets` - Targets in batch
+///
+/// ### Returns
+///
+/// `()` — kernel is dispatched asynchronously via the client command queue.
 #[allow(clippy::too_many_arguments)]
 fn launch_build_hist<R: Runtime>(
     client: &ComputeClient<R>,
@@ -1590,7 +1732,31 @@ fn launch_build_hist<R: Runtime>(
     }
 }
 
-/// Dispatch [`merge_hist`]. One workgroup per (node, tree).
+/// Dispatch [`merge_hist`] over `(gx, gy, wave_size)` workgroups, where
+/// `(gx, gy)` is the `grid_2d` decomposition of `n_active_nodes`.
+///
+/// ### Workgroup
+///
+/// `CubeDim::new_1d(WORKGROUP_128)` — 128 threads per workgroup; thread 0
+/// scans counts, threads `tx` own targets `tx, tx+128, ...` for y-sum totals.
+///
+/// ### Params
+///
+/// * `client` - CubeCL compute client
+/// * `hist_counts` - Per-slot histogram counts `[wave_size, n_active_nodes, k_feats, N_BINS]`
+/// * `hist_y_sums` - Per-slot Y sums, u32 f32 bits, same layout with trailing `n_targets`
+/// * `hist_y_sum_sqs` - Per-slot Y sum-of-squares, same layout as `hist_y_sums`
+/// * `node_counts` - Output per-node sample totals `[wave_size, n_active_nodes]`
+/// * `node_y_sums` - Output per-node Y sums `[wave_size, n_active_nodes, n_targets]`
+/// * `node_y_sum_sqs` - Output per-node Y sum-of-squares, same layout as `node_y_sums`
+/// * `wave_size` - Trees in wave
+/// * `n_active_nodes` - Active nodes at this level
+/// * `k_feats` - Features per node
+/// * `n_targets` - Targets in batch
+///
+/// ### Returns
+///
+/// `()` — kernel is dispatched asynchronously via the client command queue.
 #[allow(clippy::too_many_arguments)]
 fn launch_merge_hist<R: Runtime>(
     client: &ComputeClient<R>,
@@ -1626,7 +1792,34 @@ fn launch_merge_hist<R: Runtime>(
     }
 }
 
-/// Dispatch [`prefix_sum_bins`]. One workgroup per (slot, node, tree).
+/// Dispatch [`prefix_sum_bins`] over `(k_feats, n_active_nodes, wave_size)`
+/// workgroups.
+///
+/// ### Workgroup
+///
+/// `CubeDim::new_1d(WORKGROUP_128)` — 128 threads per workgroup; thread 0
+/// runs the fused count prefix sum and bin-range scan, threads `tx` own
+/// targets `tx, tx+128, ...` for the y-sum prefix sums.
+///
+/// ### Params
+///
+/// * `client` - CubeCL compute client
+/// * `hist_counts` - Per-slot histogram counts `[wave_size, n_active_nodes, k_feats, N_BINS]`
+/// * `hist_y_sums` - Per-slot Y sums, u32 f32 bits, same layout with trailing `n_targets`
+/// * `hist_y_sum_sqs` - Per-slot Y sum-of-squares, same layout as `hist_y_sums`
+/// * `cum_counts` - Output inclusive prefix-sum counts, same layout as `hist_counts`
+/// * `cum_y_sums` - Output inclusive prefix-sum Y sums, native f32
+/// * `cum_y_sum_sqs` - Output inclusive prefix-sum Y sum-of-squares, native f32
+/// * `slot_min_bin` - Output first informative bin per slot `[wave_size, n_active_nodes, k_feats]`
+/// * `slot_max_bin` - Output last informative bin per slot, same layout as `slot_min_bin`
+/// * `wave_size` - Trees in wave
+/// * `n_active_nodes` - Active nodes at this level
+/// * `k_feats` - Features per node
+/// * `n_targets` - Targets in batch
+///
+/// ### Returns
+///
+/// `()` — kernel is dispatched asynchronously via the client command queue.
 #[allow(clippy::too_many_arguments)]
 fn launch_prefix_sum<R: Runtime>(
     client: &ComputeClient<R>,
@@ -1665,12 +1858,48 @@ fn launch_prefix_sum<R: Runtime>(
     }
 }
 
-/// Dispatch [`evaluate_splits_et`]. One workgroup per (node, tree).
+/// Dispatch [`evaluate_splits_et`] over `(gx, gy, wave_size)` workgroups,
+/// where `(gx, gy)` is the `grid_2d` decomposition of `n_active_nodes`.
 ///
 /// Uses `WORKGROUP_32`, not `WORKGROUP_128`: at bench shape
 /// `k_feats * n_thresholds` is ~31 candidates, so a 32-wide workgroup
 /// saturates cleanly. [`launch_evaluate_splits_rf`] stays at `WORKGROUP_128`
 /// (`k_feats * 255` is ~7905 candidates).
+///
+/// ### Workgroup
+///
+/// `CubeDim::new_1d(WORKGROUP_32)` — 32 threads per workgroup, 5-stage SMEM
+/// argmax (16→8→4→2→1).
+///
+/// ### Params
+///
+/// * `client` - CubeCL compute client
+/// * `cum_counts` - Inclusive prefix-sum counts from [`launch_prefix_sum`]
+/// * `cum_y_sums` - Inclusive prefix-sum Y sums from [`launch_prefix_sum`]
+/// * `cum_y_sum_sqs` - Inclusive prefix-sum Y sum-of-squares from [`launch_prefix_sum`]
+/// * `node_counts` - Per-node sample totals from [`launch_merge_hist`]
+/// * `node_y_sums` - Per-node Y sums from [`launch_merge_hist`]
+/// * `node_y_sum_sqs` - Per-node Y sum-of-squares from [`launch_merge_hist`]
+/// * `node_features` - Selected feature ids from [`launch_sample_features`]
+/// * `tree_seeds` - Per-tree base seed `[wave_size]`
+/// * `slot_min_bin` - First informative bin per slot from [`launch_prefix_sum`]
+/// * `slot_max_bin` - Last informative bin per slot from [`launch_prefix_sum`]
+/// * `split_feature` - Output winning feature id per node, or `u32::MAX` if no valid split
+/// * `split_threshold` - Output winning threshold bin per node
+/// * `split_n_left` - Output left-child sample count per node
+/// * `split_y_sums_l` - Output left-child Y sums per (node, target)
+/// * `split_y_sum_sqs_l` - Output left-child Y sum-of-squares per (node, target)
+/// * `wave_size` - Trees in wave
+/// * `n_active_nodes` - Active nodes at this level
+/// * `k_feats` - Features per node
+/// * `n_targets` - Targets in batch
+/// * `n_thresholds` - Random thresholds drawn per feature slot
+/// * `min_samples_leaf` - Minimum samples required on both sides of a split
+/// * `level` - Depth being processed
+///
+/// ### Returns
+///
+/// `()` — kernel is dispatched asynchronously via the client command queue.
 #[allow(clippy::too_many_arguments)]
 fn launch_evaluate_splits_et<R: Runtime>(
     client: &ComputeClient<R>,
@@ -1730,7 +1959,41 @@ fn launch_evaluate_splits_et<R: Runtime>(
     }
 }
 
-/// Dispatch [`evaluate_splits_rf`]. One workgroup per (node, tree).
+/// Dispatch [`evaluate_splits_rf`] over `(gx, gy, wave_size)` workgroups,
+/// where `(gx, gy)` is the `grid_2d` decomposition of `n_active_nodes`.
+///
+/// ### Workgroup
+///
+/// `CubeDim::new_1d(WORKGROUP_128)` — 128 threads per workgroup, 7-stage SMEM
+/// argmax (64→32→16→8→4→2→1) matching the larger `k_feats * 255` candidate
+/// space.
+///
+/// ### Params
+///
+/// * `client` - CubeCL compute client
+/// * `cum_counts` - Inclusive prefix-sum counts from [`launch_prefix_sum`]
+/// * `cum_y_sums` - Inclusive prefix-sum Y sums from [`launch_prefix_sum`]
+/// * `cum_y_sum_sqs` - Inclusive prefix-sum Y sum-of-squares from [`launch_prefix_sum`]
+/// * `node_counts` - Per-node sample totals from [`launch_merge_hist`]
+/// * `node_y_sums` - Per-node Y sums from [`launch_merge_hist`]
+/// * `node_y_sum_sqs` - Per-node Y sum-of-squares from [`launch_merge_hist`]
+/// * `node_features` - Selected feature ids from [`launch_sample_features`]
+/// * `slot_min_bin` - First informative bin per slot from [`launch_prefix_sum`]
+/// * `slot_max_bin` - Last informative bin per slot from [`launch_prefix_sum`]
+/// * `split_feature` - Output winning feature id per node, or `u32::MAX` if no valid split
+/// * `split_threshold` - Output winning threshold bin per node
+/// * `split_n_left` - Output left-child sample count per node
+/// * `split_y_sums_l` - Output left-child Y sums per (node, target)
+/// * `split_y_sum_sqs_l` - Output left-child Y sum-of-squares per (node, target)
+/// * `wave_size` - Trees in wave
+/// * `n_active_nodes` - Active nodes at this level
+/// * `k_feats` - Features per node
+/// * `n_targets` - Targets in batch
+/// * `min_samples_leaf` - Minimum samples required on both sides of a split
+///
+/// ### Returns
+///
+/// `()` — kernel is dispatched asynchronously via the client command queue.
 #[allow(clippy::too_many_arguments)]
 fn launch_evaluate_splits_rf<R: Runtime>(
     client: &ComputeClient<R>,
@@ -1784,8 +2047,32 @@ fn launch_evaluate_splits_rf<R: Runtime>(
     }
 }
 
-/// Dispatch [`reassign_samples`]. One workgroup per stripe of samples, per
-/// tree.
+/// Dispatch [`reassign_samples`] over `(gx, gy, wave_size)` workgroups, where
+/// `(gx, gy)` is the `grid_2d` decomposition of the sample-block count
+/// `ceil(n_samples / WORKGROUP_128)`.
+///
+/// ### Workgroup
+///
+/// `CubeDim::new_1d(WORKGROUP_128)` — 128 threads per workgroup, one thread
+/// per sample.
+///
+/// ### Params
+///
+/// * `client` - CubeCL compute client
+/// * `feature_data` - Quantised bins `[n_features, n_samples]` (u8 as u32)
+/// * `split_feature` - Winning feature id per node from `evaluate_splits_*`
+/// * `split_threshold` - Winning threshold bin per node
+/// * `left_child_id` - Left child id per node from [`launch_compute_child_ids`]
+/// * `right_child_id` - Right child id per node from [`launch_compute_child_ids`]
+/// * `sample_to_node` - Per-tree sample assignment `[wave_size, n_samples]`, updated in place
+/// * `n_samples` - Number of samples
+/// * `n_features` - Total feature count
+/// * `wave_size` - Trees in wave
+/// * `n_active_nodes` - Active nodes at this level
+///
+/// ### Returns
+///
+/// `()` — kernel is dispatched asynchronously via the client command queue.
 #[allow(clippy::too_many_arguments)]
 fn launch_reassign<R: Runtime>(
     client: &ComputeClient<R>,
@@ -1821,7 +2108,35 @@ fn launch_reassign<R: Runtime>(
     }
 }
 
-/// Dispatch [`accumulate_importance`]. One workgroup per (node, tree).
+/// Dispatch [`accumulate_importance`] over `(gx, gy, wave_size)` workgroups,
+/// where `(gx, gy)` is the `grid_2d` decomposition of `n_active_nodes`.
+///
+/// ### Workgroup
+///
+/// `CubeDim::new_1d(WORKGROUP_128)` — 128 threads per workgroup; thread `tx`
+/// owns targets `tx, tx+128, ...` for the per-target variance-reduction
+/// computation and CAS-loop atomic add into `batch_importances`.
+///
+/// ### Params
+///
+/// * `client` - CubeCL compute client
+/// * `node_counts` - Per-node sample totals from [`launch_merge_hist`]
+/// * `node_y_sums` - Per-node Y sums from [`launch_merge_hist`]
+/// * `node_y_sum_sqs` - Per-node Y sum-of-squares from [`launch_merge_hist`]
+/// * `split_feature` - Winning feature id per node from `evaluate_splits_*`
+/// * `split_n_left` - Left-child sample count per node
+/// * `split_y_sums_l` - Left-child Y sums per (node, target)
+/// * `split_y_sum_sqs_l` - Left-child Y sum-of-squares per (node, target)
+/// * `batch_importances` - Output `[n_features, n_targets]` atomic accumulator,
+///   f32 bits stored as u32
+/// * `wave_size` - Trees in wave
+/// * `n_active_nodes` - Active nodes at this level
+/// * `n_targets` - Targets in batch
+/// * `n_total` - Total sample count for node-weight normalisation
+///
+/// ### Returns
+///
+/// `()` — kernel is dispatched asynchronously via the client command queue.
 #[allow(clippy::too_many_arguments)]
 fn launch_accumulate_importance<R: Runtime>(
     client: &ComputeClient<R>,
@@ -1861,7 +2176,27 @@ fn launch_accumulate_importance<R: Runtime>(
     }
 }
 
-/// Dispatch [`compute_child_ids`]. One workgroup per tree, single thread.
+/// Dispatch [`compute_child_ids`] over `(wave_size, 1, 1)` workgroups, one
+/// thread per workgroup.
+///
+/// ### Workgroup
+///
+/// `CubeDim::new_1d(1)` — single thread per workgroup; the serial node scan is
+/// cheap and avoids needing an atomic counter for the next-child-id cursor.
+///
+/// ### Params
+///
+/// * `client` - CubeCL compute client
+/// * `split_feature` - Winning feature id per node from `evaluate_splits_*`
+/// * `node_counts` - Per-node sample totals from [`launch_merge_hist`]
+/// * `left_child_id` - Output left child id per node `[wave_size, n_active_nodes]`
+/// * `right_child_id` - Output right child id per node, same layout
+/// * `wave_size` - Trees in wave
+/// * `n_active_nodes` - Active nodes at this level
+///
+/// ### Returns
+///
+/// `()` — kernel is dispatched asynchronously via the client command queue.
 #[allow(clippy::too_many_arguments)]
 fn launch_compute_child_ids<R: Runtime>(
     client: &ComputeClient<R>,
@@ -1887,7 +2222,26 @@ fn launch_compute_child_ids<R: Runtime>(
     }
 }
 
-/// Dispatch [`init_sample_to_node`]. One thread per (sample, tree).
+/// Dispatch [`init_sample_to_node`] over `(gx, gy, wave_size)` workgroups,
+/// where `(gx, gy)` is the `grid_2d` decomposition of the sample-block count
+/// `ceil(n_samples / WORKGROUP_128)`.
+///
+/// ### Workgroup
+///
+/// `CubeDim::new_1d(WORKGROUP_128)` — 128 threads per workgroup, one thread
+/// per sample.
+///
+/// ### Params
+///
+/// * `client` - CubeCL compute client
+/// * `sample_multiplicity` - Per-tree sample multiplier `[wave_size, n_samples]`
+/// * `sample_to_node` - Output per-tree sample assignment `[wave_size, n_samples]`
+/// * `n_samples` - Number of samples
+/// * `wave_size` - Trees in wave
+///
+/// ### Returns
+///
+/// `()` — kernel is dispatched asynchronously via the client command queue.
 fn launch_init_sample_to_node<R: Runtime>(
     client: &ComputeClient<R>,
     sample_multiplicity: &GpuTensor<R, u32>,
@@ -1919,51 +2273,87 @@ fn launch_init_sample_to_node<R: Runtime>(
 /// nodes; kernels only touch the prefix indexed by the current level's
 /// `n_active_nodes`.
 struct WaveState<R: Runtime> {
-    // per-tree sample assignment
+    /// Per-tree sample assignment `[wave_size, n_samples]`. 0 = root; `INVALID_NODE`
+    /// for unselected or leaf-reached samples.
     sample_to_node: GpuTensor<R, u32>,
-    // draw / feature selection
+    /// Selected feature ids per (tree, node, slot) `[wave_size, max_active_nodes, k_feats]`.
     node_features: GpuTensor<R, u32>,
-    // histogram buffers. y_sums / y_sum_sqs store f32 bits as u32 so
-    // `build_hist_privatised` can `Atomic<u32>::compare_exchange_weak` on
-    // them (WGSL has no native atomic f32). Downstream kernels reinterpret
-    // via `f32::from_bits`.
+    /// Raw histogram counts `[wave_size, max_active_nodes, k_feats, N_BINS]`.
     hist_counts: GpuTensor<R, u32>,
+    /// Raw histogram Y sums, f32 bits stored as u32 for atomic CAS.
+    /// Layout `[wave_size, max_active_nodes, k_feats, N_BINS, n_targets]`.
+    /// WGSL has no native atomic f32; `build_hist_privatised` uses CAS-loop
+    /// via `Atomic<u32>`. Downstream kernels reinterpret via `f32::from_bits`.
     hist_y_sums: GpuTensor<R, u32>,
+    /// Raw histogram Y sum-of-squares, same layout and encoding as `hist_y_sums`.
     hist_y_sum_sqs: GpuTensor<R, u32>,
+    /// Inclusive prefix-sum counts from `prefix_sum_bins`, same layout as `hist_counts`.
     cum_counts: GpuTensor<R, u32>,
+    /// Inclusive prefix-sum Y sums from `prefix_sum_bins`, native f32.
+    /// Layout `[wave_size, max_active_nodes, k_feats, N_BINS, n_targets]`.
     cum_y_sums: GpuTensor<R, f32>,
+    /// Inclusive prefix-sum Y sum-of-squares from `prefix_sum_bins`, same layout as `cum_y_sums`.
     cum_y_sum_sqs: GpuTensor<R, f32>,
-    // per-slot informative bin range. Populated by `prefix_sum_bins`, read
-    // by `evaluate_splits_et` / `_rf` to avoid the per-candidate 512-read
-    // min/max scan and to skip out-of-range RF thresholds.
+    /// First informative bin per slot `[wave_size, max_active_nodes, k_feats]`. Populated
+    /// by `prefix_sum_bins`; read by `evaluate_splits_et` / `_rf` to skip
+    /// empty out-of-range thresholds without a per-candidate 256-bin rescan.
     slot_min_bin: GpuTensor<R, u32>,
+    /// Last informative bin per slot, same layout as `slot_min_bin`.
     slot_max_bin: GpuTensor<R, u32>,
-    // per-node stats
+    /// Per-node sample totals `[wave_size, max_active_nodes]` from `merge_hist`.
     node_counts: GpuTensor<R, u32>,
+    /// Per-node Y sums `[wave_size, max_active_nodes, n_targets]` from `merge_hist`.
     node_y_sums: GpuTensor<R, f32>,
+    /// Per-node Y sum-of-squares from `merge_hist`, same layout as `node_y_sums`.
     node_y_sum_sqs: GpuTensor<R, f32>,
-    // per-node split decisions
+    /// Winning feature id per node `[wave_size, max_active_nodes]`; `INVALID_NODE`
+    /// for leaves and phantom nodes.
     split_feature: GpuTensor<R, u32>,
+    /// Winning threshold bin per node, same layout as `split_feature`.
     split_threshold: GpuTensor<R, u32>,
+    /// Left-child sample count per node, same layout as `split_feature`.
     split_n_left: GpuTensor<R, u32>,
+    /// Left-child Y sums per (node, target) `[wave_size, max_active_nodes, n_targets]`.
     split_y_sums_l: GpuTensor<R, f32>,
+    /// Left-child Y sum-of-squares, same layout as `split_y_sums_l`.
     split_y_sum_sqs_l: GpuTensor<R, f32>,
-    // persistent per-node child ids, populated by `compute_child_ids` on
-    // device; consumed by `reassign_samples`. Replaces an earlier per-level
-    // host allocation + upload.
+    /// Left child id per node `[wave_size, max_active_nodes]`. Populated on device
+    /// by `compute_child_ids`; consumed by `reassign_samples`. `INVALID_NODE`
+    /// for leaves and phantom nodes.
     left_child_id: GpuTensor<R, u32>,
+    /// Right child id per node, same layout as `left_child_id`.
     right_child_id: GpuTensor<R, u32>,
-    // per-batch shape
+    /// Trees in the current wave.
     wave_size: usize,
+    /// Upper bound on active nodes at any level; controls the buffer prefix
+    /// kernels are allowed to touch.
     max_active_nodes: usize,
+    /// Number of samples.
     n_samples: usize,
+    /// Features drawn per node.
     k_feats: usize,
+    /// Targets in the current batch.
     n_targets: usize,
 }
 
 impl<R: Runtime> WaveState<R> {
     /// Allocate a fresh [`WaveState`] sized for `wave_size` trees and
-    /// `max_active_nodes` active nodes per level.
+    /// `max_active_nodes` active nodes per level. Buffers are uninitialised;
+    /// kernels zero the slices they own before use.
+    ///
+    /// ### Params
+    ///
+    /// * `client` - CubeCL compute client for buffer allocation
+    /// * `wave_size` - Trees in wave
+    /// * `max_active_nodes` - Upper bound on active nodes at any level; see
+    ///   [`viable_max_active_nodes`]
+    /// * `n_samples` - Number of samples
+    /// * `k_feats` - Features drawn per node
+    /// * `n_targets` - Targets in the current batch
+    ///
+    /// ### Returns
+    ///
+    /// A `WaveState` with all GPU tensors allocated and uninitialised.
     fn allocate(
         client: &ComputeClient<R>,
         wave_size: usize,
@@ -2131,6 +2521,17 @@ struct SparseYGpu<R: Runtime> {
 impl<R: Runtime> SparseYGpu<R> {
     /// Upload a host [`SparseYBatch`] to device. `nnz == 0` uploads a
     /// single dummy zero element so downstream tensors are never empty.
+    ///
+    /// ### Params
+    ///
+    /// * `sy` - Host sparse Y batch to upload (CSR by sample)
+    /// * `n_samples` - Number of samples; sets the `offsets` tensor length to
+    ///   `n_samples + 1`
+    /// * `client` - CubeCL compute client for buffer allocation and upload
+    ///
+    /// ### Returns
+    ///
+    /// A `SparseYGpu` with all three tensors resident on device.
     fn upload(sy: &SparseYBatch, n_samples: usize, client: &ComputeClient<R>) -> Self {
         let offsets = GpuTensor::<R, u32>::from_slice(&sy.offsets, vec![n_samples + 1], client);
         let target_indices_u32: Vec<u32> = sy.target_indices.iter().map(|&i| i as u32).collect();
@@ -2676,6 +3077,14 @@ pub fn fit_extra_trees_gpu_single<R: Runtime>(
 /////////////
 
 /// Infer the number of targets by scanning the sparse Y target index array.
+///
+/// ### Params
+///
+/// * `sy` - Sparse Y batch; `target_indices` holds the u8 target column ids
+///
+/// ### Returns
+///
+/// `max(target_indices) + 1`, or `1` when `target_indices` is empty.
 fn sparse_y_infer_n_targets(sy: &SparseYBatch) -> usize {
     let mut max = 0u32;
     for &t in &sy.target_indices {
