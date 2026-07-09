@@ -2854,7 +2854,8 @@ fn run_wave_bfs<R: Runtime>(
 ///
 /// ### Errors
 ///
-/// * Propagates sparse-Y construction failures from [`SparseYBatch::from_targets`]
+/// * Propagates sparse-Y construction failures from
+///   [`SparseYBatch::from_targets`]
 /// * `InvalidArgument` from [`pick_wave_size`] if even `wave_size = 1` busts
 ///   `params.wave_byte_budget`
 /// * Propagates GPU read-back errors from the per-batch importance readback
