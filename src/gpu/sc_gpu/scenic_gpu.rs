@@ -41,7 +41,7 @@ pub struct ScenicGpuParams {
     /// fits under this budget; an error is returned only when a single-tree
     /// wave still busts it.
     ///
-    /// Default: 4 GiB. Shrink on 8 GB adapters that host other workloads;
+    /// Default: 4 GB. Shrink on 8 GB adapters that host other workloads;
     /// raise on 16 GB+ adapters to keep the wave at 8.
     pub wave_byte_budget: usize,
 }
@@ -74,8 +74,9 @@ const INVALID_NODE: u32 = u32::MAX;
 // Kernels //
 /////////////
 
-/// Draw `k_feats` feature ids per (tree, node) into `node_features`. One
-/// workgroup per (node, tree), `WORKGROUP_128` wide. Thread `tx` owns slots
+/// Draw `k_feats` feature ids per (tree, node) into `node_features`.
+///
+/// One workgroup per (node, tree), `WORKGROUP_128` wide. Thread `tx` owns slots
 /// `tx, tx+wg, ...` and independently hashes `(tree_seed, level, node, slot)`
 /// into a feature id in `[0, n_features)`. Duplicates within a node's k_feats
 /// are allowed -- at k_feats << n_features they are rare and the algorithm
@@ -140,11 +141,10 @@ pub fn sample_node_features(
     }
 }
 
-/// CAS-loop atomic f32 add on a `Atomic<u32>` slot holding f32 bits. WGSL
-/// has no native atomic f32 op; we bit-reinterpret and retry until the
-/// observed old value matches our compare value. Cubecl's
-/// `compare_exchange_weak` is defined on `Atomic<u32>` only, hence the u32
-/// storage of what the caller conceptually treats as f32.
+/// CAS-loop atomic f32 add on a `Atomic<u32>` slot holding f32 bits.
+///
+/// WGSL has no native atomic f32 op; we bit-reinterpret and retry until the
+/// observed old value matches our compare value.
 ///
 /// ### Workgroup
 ///
@@ -177,20 +177,13 @@ fn atomic_add_f32_bits(ptr: &Atomic<u32>, delta: f32) {
 }
 
 /// Build per-(tree, node, feature-slot) histograms, sample-parallel with
-/// atomic accumulation into a per-workgroup private histogram slice. One
-/// workgroup per (slot, node, tree), `WORKGROUP_128` wide. Each thread strides
-/// over samples `s = tx, tx+wg, ...`; every active sample bumps its owning
-/// bin. Since each workgroup owns its own histogram slice
+/// atomic accumulation into a per-workgroup private histogram slice.
+///
+/// One workgroup per (slot, node, tree), `WORKGROUP_128` wide. Each thread
+/// strides over samples `s = tx, tx+wg, ...`; every active sample bumps its
+/// owning bin. Since each workgroup owns its own histogram slice
 /// `[wave, node, slot, bin, target]`, atomics contend only *within* a
 /// workgroup, never across workgroups.
-///
-/// Y-sum accumulation goes through a CAS-loop on `Atomic<u32>` treating the
-/// stored bits as f32 (WGSL has no native atomic f32). Counts are
-/// `Atomic::fetch_add` on `Atomic<u32>` which lowers natively.
-///
-/// Compared to a bin-per-thread design (one thread per bin walks all N
-/// samples per bin), this cuts `feature_data` reads by roughly 256x: each
-/// sample is read once instead of once per owned bin per workgroup.
 ///
 /// ### Params
 ///
@@ -409,10 +402,11 @@ pub fn merge_hist(
     }
 }
 
-/// Inclusive prefix sum over 256 bins per (tree, node, slot). One workgroup
-/// per (slot, node, tree), `WORKGROUP_128` wide. Thread 0 runs the counts
-/// scan and, in the same pass, computes the per-slot informative bin range
-/// `[min_bin, max_bin]` (first and last bins with nonzero counts) into
+/// Inclusive prefix sum over 256 bins per (tree, node, slot).
+///
+/// One workgroug per (slot, node, tree), `WORKGROUP_128` wide. Thread 0 runs
+/// the counts scan and, in the same pass, computes the per-slot informative bin
+/// range `[min_bin, max_bin]` (first and last bins with nonzero counts) into
 /// `slot_min_bin` / `slot_max_bin`. Downstream `evaluate_splits_*` read
 /// these two u32s per slot instead of rescanning all 256 bins per candidate.
 ///
@@ -581,8 +575,10 @@ fn hash_mix(x: u32) -> u32 {
     h
 }
 
-/// Evaluate ExtraTrees random-threshold splits. One workgroup per (node,
-/// tree), `WORKGROUP_128` wide. Thread `tx` handles candidates
+/// Evaluate ExtraTrees random-threshold splits.
+///
+/// One workgroup per (node, tree), `WORKGROUP_128` wide. Thread `tx` handles
+/// candidates
 /// `tx, tx+wg, ...` (candidate `c` decodes as `slot = c / n_thresholds`,
 /// `thr_idx = c % n_thresholds`), keeps its running best in registers, then
 /// participates in a manually-unrolled SMEM tree argmax (128 -> 64 -> ...
@@ -930,12 +926,8 @@ pub fn evaluate_splits_et(
     }
 }
 
-/// Argmax reduction decision: returns 1 iff mate slot should overwrite
-/// current slot. Ties resolve to the lower-indexed thread (strict `>`).
-///
-/// ### Workgroup
-///
-/// Inlined into the calling kernel's SMEM reduction; no dedicated workgroup.
+/// Argmax reduction decision: returns 1 iff mate slot should overwrite current
+/// slot. Ties resolve to the lower-indexed thread (strict `>`).
 ///
 /// ### Params
 ///
@@ -947,6 +939,10 @@ pub fn evaluate_splits_et(
 /// ### Returns
 ///
 /// 1 if the mate slot should replace the current slot, 0 to keep the current.
+///
+/// ### Workgroup
+///
+/// Inlined into the calling kernel's SMEM reduction; no dedicated workgroup.
 #[cube]
 fn argmax_takes_mate(cur_valid: u32, cur_score: f32, mate_valid: u32, mate_score: f32) -> u32 {
     let mut take: u32 = 0u32;
@@ -2318,10 +2314,11 @@ fn launch_init_sample_to_node<R: Runtime>(
 // Wave state //
 ////////////////
 
-/// All wave-sized GPU tensors. Allocated once per batch, reused across all
-/// waves in the batch. Sized for `wave_size` trees and `viable_max` active
-/// nodes; kernels only touch the prefix indexed by the current level's
-/// `n_active_nodes`.
+/// All wave-sized GPU tensors.
+///
+/// Allocated once per batch, reused across all waves in the batch. Sized for
+/// `wave_size` trees and `viable_max` active nodes; kernels only touch the
+/// prefix indexed by the current level's `n_active_nodes`.
 struct WaveState<R: Runtime> {
     /// Per-tree sample assignment `[wave_size, n_samples]`. 0 = root;
     /// `INVALID_NODE` for unselected or leaf-reached samples.
@@ -2911,10 +2908,6 @@ pub fn fit_multi_trees_gpu<R: Runtime>(
     let n_thresholds = config.n_thresholds().max(1);
     let max_active_nodes = viable_max_active_nodes(max_depth, n_samples, min_samples_leaf);
 
-    // Effective per-tree sample budget, matching CPU's fit_multi_trees_sparse
-    // (scenic.rs). subsample_frac takes precedence over subsample_rate;
-    // subsample_rate >= 1.0 means "use all". Result is clamped to at least
-    // 2 * min_samples_leaf so a tree can always try a root split.
     let n_sub = if let Some(frac) = config.subsample_frac() {
         ((n_samples as f32 * frac).round() as usize).max(2 * min_samples_leaf)
     } else if config.subsample_rate() >= 1.0 {
@@ -3393,7 +3386,12 @@ where
             gpu_params,
         )?;
 
-        write_batch_into_importances(imp, &batches[batch_idx], &gene_id_to_pos, &mut importance_scores);
+        write_batch_into_importances(
+            imp,
+            &batches[batch_idx],
+            &gene_id_to_pos,
+            &mut importance_scores,
+        );
 
         if verbosity.normal_verbosity() {
             let done = batch_idx + 1;
@@ -3432,9 +3430,6 @@ where
 /// chunks and dispatches each in-chunk batch serially to
 /// [`fit_multi_trees_gpu`]. Bounds peak host memory to one chunk of sparse
 /// columns (roughly `SCENIC_GENE_CHUNK_SIZE` targets).
-///
-/// GBM is a GPU non-goal; passing a `GradientBoosting` learner yields
-/// [`BixverseErrors::GpuNotSupportedForLearner`].
 ///
 /// ### Params
 ///
@@ -3566,8 +3561,9 @@ where
         let batches_done = AtomicUsize::new(0);
 
         for local_batch_idx in 0..n_batches_this_chunk {
-            let batch_seed = seed
-                .wrapping_add((global_batch_offset + local_batch_idx).wrapping_mul(BATCH_SEED_STRIDE));
+            let batch_seed = seed.wrapping_add(
+                (global_batch_offset + local_batch_idx).wrapping_mul(BATCH_SEED_STRIDE),
+            );
             let cols =
                 &sparse_columns[col_offsets[local_batch_idx]..col_offsets[local_batch_idx + 1]];
             let imp = fit_multi_trees_gpu::<R>(
@@ -3580,7 +3576,12 @@ where
                 gpu_params,
             )?;
 
-            write_batch_into_importances(imp, &group[local_batch_idx], &gene_id_to_pos, &mut importance_scores);
+            write_batch_into_importances(
+                imp,
+                &group[local_batch_idx],
+                &gene_id_to_pos,
+                &mut importance_scores,
+            );
 
             if verbosity.detailed_verbosity() && n_batches_this_chunk >= 4 {
                 let done = batches_done.fetch_add(1, Ordering::Relaxed) + 1;

@@ -849,7 +849,11 @@ fn write_synthetic_scenic_file(path: &str) {
 
     // Sample once per (cell, TF) so every target uses the same TF profile.
     let mut tf_cell_vals: Vec<Vec<f32>> = (0..RT_TFS)
-        .map(|_| (0..RT_CELLS).map(|_| rng.random_range(0.0..10.0f32)).collect())
+        .map(|_| {
+            (0..RT_CELLS)
+                .map(|_| rng.random_range(0.0..10.0f32))
+                .collect()
+        })
         .collect();
 
     for tf in 0..RT_TFS {
@@ -945,8 +949,16 @@ fn run_scenic_grn_gpu_roundtrip() {
 
     let params = scenic_params_for_roundtrip();
 
-    let cpu = run_scenic_grn(&path_str.to_string(), &cell_indices, &gene_indices, &tf_indices, &params, 42, 0)
-        .expect("CPU run_scenic_grn failed");
+    let cpu = run_scenic_grn(
+        path_str,
+        &cell_indices,
+        &gene_indices,
+        &tf_indices,
+        &params,
+        42,
+        0,
+    )
+    .expect("CPU run_scenic_grn failed");
 
     let gpu = run_scenic_grn_gpu::<WgpuRuntime>(
         path_str,
@@ -989,8 +1001,16 @@ fn run_scenic_grn_streaming_gpu_roundtrip() {
 
     let params = scenic_params_for_roundtrip();
 
-    let cpu = run_scenic_grn(&path_str.to_string(), &cell_indices, &gene_indices, &tf_indices, &params, 42, 0)
-        .expect("CPU baseline failed");
+    let cpu = run_scenic_grn(
+        path_str,
+        &cell_indices,
+        &gene_indices,
+        &tf_indices,
+        &params,
+        42,
+        0,
+    )
+    .expect("CPU baseline failed");
 
     let gpu = run_scenic_grn_streaming_gpu::<WgpuRuntime>(
         path_str,
@@ -1115,7 +1135,8 @@ fn run_scenic_grn_in_memory_gpu_rejects_gbm() {
     let tf_indices: Vec<usize> = (0..RT_TFS).collect();
 
     let mut params = scenic_params_for_roundtrip();
-    params.regression_learner = RegressionLearner::GradientBoosting(GradientBoostingConfig::default());
+    params.regression_learner =
+        RegressionLearner::GradientBoosting(GradientBoostingConfig::default());
 
     let err = run_scenic_grn_in_memory_gpu::<WgpuRuntime, u16>(
         &csc,
@@ -1153,7 +1174,8 @@ fn run_scenic_grn_gpu_rejects_gbm() {
     let gene_indices: Vec<usize> = (RT_TFS..RT_TOTAL_GENES).collect();
 
     let mut params = scenic_params_for_roundtrip();
-    params.regression_learner = RegressionLearner::GradientBoosting(GradientBoostingConfig::default());
+    params.regression_learner =
+        RegressionLearner::GradientBoosting(GradientBoostingConfig::default());
 
     let err = run_scenic_grn_gpu::<WgpuRuntime>(
         path_str,
