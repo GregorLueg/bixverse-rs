@@ -14,10 +14,19 @@
 use ann_search_rs::gpu::grid_2d;
 use ann_search_rs::gpu::tensor::GpuTensor;
 use cubecl::prelude::*;
+use faer::Mat;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
+use rayon::prelude::*;
+use rustc_hash::FxHashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
+use thousands::Separable;
 
 use crate::gpu::{WORKGROUP_32, WORKGROUP_128};
 use crate::prelude::*;
+use crate::single_cell::mc_analysis::scenic_metacells::{
+    batch_genes_in_memory, build_tf_quantised_store, extract_target_column,
+};
 use crate::single_cell::sc_analysis::scenic::*;
 use crate::single_cell::sc_utils::utils_tree::*;
 
@@ -3147,4 +3156,656 @@ fn sparse_y_infer_n_targets(sy: &SparseYBatch) -> usize {
         }
     }
     (max as usize) + 1
+}
+
+/////////////////////////
+// Top-level GPU entry //
+/////////////////////////
+
+/// Knuth's multiplicative constant. Mixes a per-batch counter into the base
+/// seed so that adjacent batches get well-separated tree seeds, matching the
+/// CPU per-batch stride in `run_scenic_multi_output` and
+/// `run_scenic_multi_output_streaming`.
+const BATCH_SEED_STRIDE: usize = 2_654_435_761;
+
+/// Human-readable name of the SCENIC regression learner. Used for both error
+/// messages when the caller picks a learner the GPU path does not implement
+/// and for driver-side verbose printouts.
+///
+/// ### Params
+///
+/// * `learner` - Reference to the configured learner.
+///
+/// ### Returns
+///
+/// A static string naming the learner variant.
+fn learner_name(learner: &RegressionLearner) -> &'static str {
+    match learner {
+        RegressionLearner::ExtraTrees(_) => "ExtraTrees",
+        RegressionLearner::RandomForest(_) => "RandomForest",
+        RegressionLearner::GradientBoosting(_) => "GradientBoosting",
+    }
+}
+
+/// Return a shared reference to the concrete tree config the multi-output
+/// path expects. The GBM arm is unreachable in practice: every caller checks
+/// for `RegressionLearner::GradientBoosting` and short-circuits with
+/// `GpuNotSupportedForLearner` before calling this. The panic exists purely
+/// to guard the local invariant.
+///
+/// ### Params
+///
+/// * `params` - SCENIC parameters, guaranteed non-GBM by the caller.
+///
+/// ### Returns
+///
+/// Trait object over the tree regressor config.
+fn tree_config_of(params: &ScenicParams) -> &dyn TreeRegressorConfig {
+    match &params.regression_learner {
+        RegressionLearner::ExtraTrees(cfg) => cfg,
+        RegressionLearner::RandomForest(cfg) => cfg,
+        RegressionLearner::GradientBoosting(_) => {
+            unreachable!("GBM must be rejected before reaching tree_config_of")
+        }
+    }
+}
+
+/// Scatter one batch's per-target importance vectors into the caller's
+/// full-length `importance_scores` accumulator. Cluster-aware batching may
+/// present genes in a different order to `gene_indices`, so the gene id map
+/// is used to look up each target's canonical row.
+///
+/// ### Params
+///
+/// * `batch_imps` - Per-target importance vectors from `fit_multi_trees_gpu`,
+///   one inner `Vec<f32>` of length `n_features` per target in the batch.
+/// * `batch_gene_ids` - Original gene ids for each target in the batch, in
+///   the same order as `batch_imps`.
+/// * `gene_id_to_pos` - Map from a gene id to its row index in
+///   `importance_scores`.
+/// * `importance_scores` - Full-length accumulator, indexed by original
+///   `gene_indices` position; written in place.
+fn write_batch_into_importances(
+    batch_imps: Vec<Vec<f32>>,
+    batch_gene_ids: &[usize],
+    gene_id_to_pos: &FxHashMap<usize, usize>,
+    importance_scores: &mut [Vec<f32>],
+) {
+    for (local_idx, imp) in batch_imps.into_iter().enumerate() {
+        let gene_id = batch_gene_ids[local_idx];
+        let original_pos = gene_id_to_pos[&gene_id];
+        importance_scores[original_pos] = imp;
+    }
+}
+
+/// GPU equivalent of [`run_scenic_grn`]: reads all target-gene columns up
+/// front, runs cluster-aware gene batching, and dispatches each batch
+/// serially to [`fit_multi_trees_gpu`]. Returns the same
+/// `(n_genes, n_tfs)` importance matrix as the CPU function.
+///
+/// Batches are dispatched serially rather than via rayon: the wave scheduler
+/// inside [`fit_multi_trees_gpu`] already saturates the device on one batch,
+/// so concurrent host-side batch launches would just contend for VRAM.
+///
+/// GBM is a GPU non-goal; passing a `GradientBoosting` learner yields
+/// [`BixverseErrors::GpuNotSupportedForLearner`]. Fall back to
+/// `run_scenic_grn` for that path.
+///
+/// ### Params
+///
+/// * `f_path` - Path to the sparse gene expression file.
+/// * `cell_indices` - Indices of cells to use.
+/// * `gene_indices` - Target gene indices.
+/// * `tf_indices` - Transcription factor gene indices (predictors).
+/// * `scenic_params` - Reference to the SCENIC parameters.
+/// * `gpu_params` - GPU-side runtime knobs (wave VRAM budget).
+/// * `seed` - Base random seed for reproducibility.
+/// * `device` - CubeCL runtime device.
+/// * `verbose` - `0` -> silent, `1` -> normal, `2` -> detailed.
+///
+/// ### Returns
+///
+/// A `Mat<f32>` of shape `(n_genes, n_tfs)` where entry `[i, j]` is the
+/// normalised importance of TF `j` for target gene `i`.
+///
+/// ### References
+///
+/// Aibar et al., Nat Methods, 2017.
+#[allow(clippy::too_many_arguments)]
+pub fn run_scenic_grn_gpu<R>(
+    f_path: &str,
+    cell_indices: &[usize],
+    gene_indices: &[usize],
+    tf_indices: &[usize],
+    scenic_params: &ScenicParams,
+    gpu_params: &ScenicGpuParams,
+    seed: usize,
+    device: R::Device,
+    verbose: usize,
+) -> Result<Mat<f32>, BixverseErrors>
+where
+    R: Runtime,
+{
+    if matches!(
+        scenic_params.regression_learner,
+        RegressionLearner::GradientBoosting(_)
+    ) {
+        return Err(BixverseErrors::GpuNotSupportedForLearner {
+            learner: learner_name(&scenic_params.regression_learner),
+        });
+    }
+
+    let verbosity = parse_verbosity_level(verbose);
+    let setup = scenic_common_setup(f_path, cell_indices, tf_indices, verbose)?;
+    let n_genes = gene_indices.len();
+
+    let n_multi_output = scenic_params
+        .gene_batch_size
+        .unwrap_or(MULTI_OUTPUT_BATCH)
+        .min(MULTI_OUTPUT_BATCH);
+
+    let strategy = parse_gene_batch_strategy(
+        &scenic_params.gene_batch_strategy,
+        scenic_params.n_pcs,
+        scenic_params.n_subsample,
+    )
+    .unwrap_or(GeneBatchStrategy::Random);
+
+    let batches = batch_genes(
+        f_path,
+        gene_indices,
+        cell_indices,
+        n_multi_output,
+        &strategy,
+        seed,
+        verbose,
+    )?;
+    let ordered_genes: Vec<usize> = batches.iter().flatten().copied().collect();
+
+    let gene_id_to_pos: FxHashMap<usize, usize> = gene_indices
+        .iter()
+        .enumerate()
+        .map(|(pos, &gid)| (gid, pos))
+        .collect();
+
+    let start_gene_read = Instant::now();
+    let mut all_sparse_cols: Vec<SparseAxis<u32, f32>> = Vec::with_capacity(n_genes);
+
+    for (iter, chunk) in ordered_genes.chunks(SCENIC_GENE_CHUNK_SIZE).enumerate() {
+        let mut gene_chunks: Vec<CscGeneChunk> = setup.reader.read_gene_parallel(chunk)?;
+        gene_chunks.par_iter_mut().for_each(|c| {
+            c.filter_selected_cells(&setup.cell_set);
+        });
+
+        for gc in gene_chunks.iter() {
+            all_sparse_cols.push(gc.to_sparse_axis(setup.n_cells));
+        }
+
+        if verbosity.detailed_verbosity() {
+            println!(
+                "  Read gene chunk {}/{} ({} genes)",
+                iter + 1,
+                ordered_genes.len().div_ceil(SCENIC_GENE_CHUNK_SIZE),
+                all_sparse_cols.len(),
+            );
+        }
+    }
+
+    if verbosity.normal_verbosity() {
+        println!(
+            "Read and filtered {} target genes in {:.2?}",
+            n_genes,
+            start_gene_read.elapsed()
+        );
+    }
+
+    // Cluster-bounded batch slices over the flattened column vector.
+    let mut col_batches: Vec<&[SparseAxis<u32, f32>]> = Vec::with_capacity(batches.len());
+    let mut offset = 0usize;
+    for b in &batches {
+        col_batches.push(&all_sparse_cols[offset..offset + b.len()]);
+        offset += b.len();
+    }
+    let total_batches = col_batches.len();
+
+    let learner_name = learner_name(&scenic_params.regression_learner);
+    let config = tree_config_of(scenic_params);
+
+    if verbosity.normal_verbosity() {
+        println!(
+            "Running SCENIC GPU ({}) on {} genes ({} TFs, {} cells, {} batches of up to {})",
+            learner_name, n_genes, setup.n_tfs, setup.n_cells, total_batches, n_multi_output,
+        );
+    }
+
+    let start_fit = Instant::now();
+    let mut importance_scores: Vec<Vec<f32>> = vec![Vec::new(); n_genes];
+
+    for (batch_idx, cols) in col_batches.iter().enumerate() {
+        let batch_seed = seed.wrapping_add(batch_idx.wrapping_mul(BATCH_SEED_STRIDE));
+        let imp = fit_multi_trees_gpu::<R>(
+            cols,
+            &setup.tf_data,
+            setup.n_cells,
+            config,
+            batch_seed,
+            device.clone(),
+            gpu_params,
+        )?;
+
+        write_batch_into_importances(imp, &batches[batch_idx], &gene_id_to_pos, &mut importance_scores);
+
+        if verbosity.normal_verbosity() {
+            let done = batch_idx + 1;
+            let pct = done * 100 / total_batches;
+            let prev_pct = batch_idx * 100 / total_batches;
+            if pct / 10 > prev_pct / 10 || done == total_batches {
+                println!(
+                    "  Progress: {}% ({}/{} batches, {:.2?} elapsed)",
+                    pct,
+                    done,
+                    total_batches,
+                    start_fit.elapsed()
+                );
+            }
+        }
+    }
+
+    if verbosity.normal_verbosity() {
+        println!(
+            "SCENIC GPU ({}) GRN inference complete in {:.2?}",
+            learner_name,
+            setup.start_total.elapsed()
+        );
+    }
+
+    Ok(Mat::from_fn(n_genes, setup.n_tfs, |i, j| {
+        if j < importance_scores[i].len() {
+            importance_scores[i][j]
+        } else {
+            0.0
+        }
+    }))
+}
+
+/// GPU equivalent of [`run_scenic_grn_streaming`]: reads target genes in I/O
+/// chunks and dispatches each in-chunk batch serially to
+/// [`fit_multi_trees_gpu`]. Bounds peak host memory to one chunk of sparse
+/// columns (roughly `SCENIC_GENE_CHUNK_SIZE` targets).
+///
+/// GBM is a GPU non-goal; passing a `GradientBoosting` learner yields
+/// [`BixverseErrors::GpuNotSupportedForLearner`].
+///
+/// ### Params
+///
+/// See [`run_scenic_grn_gpu`]. Identical signature and semantics apart from
+/// the memory bound.
+///
+/// ### Returns
+///
+/// A `Mat<f32>` of shape `(n_genes, n_tfs)` where entry `[i, j]` is the
+/// normalised importance of TF `j` for target gene `i`.
+///
+/// ### References
+///
+/// Aibar et al., Nat Methods, 2017.
+#[allow(clippy::too_many_arguments)]
+pub fn run_scenic_grn_streaming_gpu<R>(
+    f_path: &str,
+    cell_indices: &[usize],
+    gene_indices: &[usize],
+    tf_indices: &[usize],
+    scenic_params: &ScenicParams,
+    gpu_params: &ScenicGpuParams,
+    seed: usize,
+    device: R::Device,
+    verbose: usize,
+) -> Result<Mat<f32>, BixverseErrors>
+where
+    R: Runtime,
+{
+    if matches!(
+        scenic_params.regression_learner,
+        RegressionLearner::GradientBoosting(_)
+    ) {
+        return Err(BixverseErrors::GpuNotSupportedForLearner {
+            learner: learner_name(&scenic_params.regression_learner),
+        });
+    }
+
+    let verbosity = parse_verbosity_level(verbose);
+    let setup = scenic_common_setup(f_path, cell_indices, tf_indices, verbose)?;
+    let n_genes = gene_indices.len();
+
+    let n_multi_output = scenic_params
+        .gene_batch_size
+        .unwrap_or(MULTI_OUTPUT_BATCH)
+        .min(MULTI_OUTPUT_BATCH);
+
+    let strategy = parse_gene_batch_strategy(
+        &scenic_params.gene_batch_strategy,
+        scenic_params.n_pcs,
+        scenic_params.n_subsample,
+    )
+    .unwrap_or(GeneBatchStrategy::Random);
+
+    let batches = batch_genes(
+        f_path,
+        gene_indices,
+        cell_indices,
+        n_multi_output,
+        &strategy,
+        seed,
+        verbose,
+    )?;
+    let io_groups = group_batches_for_io(&batches, SCENIC_GENE_CHUNK_SIZE);
+
+    let gene_id_to_pos: FxHashMap<usize, usize> = gene_indices
+        .iter()
+        .enumerate()
+        .map(|(pos, &gid)| (gid, pos))
+        .collect();
+
+    let learner_name = learner_name(&scenic_params.regression_learner);
+    let config = tree_config_of(scenic_params);
+
+    let total_io_chunks = io_groups.len();
+    let mut importance_scores: Vec<Vec<f32>> = vec![Vec::new(); n_genes];
+    let mut global_batch_offset: usize = 0;
+    let mut genes_processed: usize = 0;
+
+    if verbosity.normal_verbosity() {
+        println!(
+            "Running SCENIC GPU ({}, streaming) on {} genes ({} TFs, {} cells, {} I/O chunks, batches of {})",
+            learner_name,
+            n_genes.separate_with_underscores(),
+            setup.n_tfs.separate_with_underscores(),
+            setup.n_cells.separate_with_underscores(),
+            total_io_chunks,
+            n_multi_output,
+        );
+    }
+
+    for (chunk_idx, &(g_start, g_end)) in io_groups.iter().enumerate() {
+        let start_chunk = Instant::now();
+        let group = &batches[g_start..g_end];
+        let io_chunk: Vec<usize> = group.iter().flatten().copied().collect();
+
+        let start_io = Instant::now();
+        let mut gene_chunks: Vec<CscGeneChunk> = setup.reader.read_gene_parallel(&io_chunk)?;
+        gene_chunks.par_iter_mut().for_each(|c| {
+            c.filter_selected_cells(&setup.cell_set);
+        });
+
+        let sparse_columns: Vec<SparseAxis<u32, f32>> = gene_chunks
+            .iter()
+            .map(|c| c.to_sparse_axis(setup.n_cells))
+            .collect();
+        drop(gene_chunks);
+
+        if verbosity.normal_verbosity() {
+            println!(
+                "  Chunk {}/{}: loaded and filtered {} genes in {:.2?}",
+                chunk_idx + 1,
+                total_io_chunks,
+                io_chunk.len(),
+                start_io.elapsed()
+            );
+        }
+
+        let mut col_offsets = Vec::with_capacity(group.len() + 1);
+        let mut off = 0usize;
+        col_offsets.push(0);
+        for b in group {
+            off += b.len();
+            col_offsets.push(off);
+        }
+        let n_batches_this_chunk = group.len();
+
+        let start_fit = Instant::now();
+        let batches_done = AtomicUsize::new(0);
+
+        for local_batch_idx in 0..n_batches_this_chunk {
+            let batch_seed = seed
+                .wrapping_add((global_batch_offset + local_batch_idx).wrapping_mul(BATCH_SEED_STRIDE));
+            let cols =
+                &sparse_columns[col_offsets[local_batch_idx]..col_offsets[local_batch_idx + 1]];
+            let imp = fit_multi_trees_gpu::<R>(
+                cols,
+                &setup.tf_data,
+                setup.n_cells,
+                config,
+                batch_seed,
+                device.clone(),
+                gpu_params,
+            )?;
+
+            write_batch_into_importances(imp, &group[local_batch_idx], &gene_id_to_pos, &mut importance_scores);
+
+            if verbosity.detailed_verbosity() && n_batches_this_chunk >= 4 {
+                let done = batches_done.fetch_add(1, Ordering::Relaxed) + 1;
+                let pct = done * 100 / n_batches_this_chunk;
+                let prev_pct = (done - 1) * 100 / n_batches_this_chunk;
+                if [25, 50, 75, 100].iter().any(|&q| prev_pct < q && pct >= q) {
+                    println!(
+                        "    Chunk {}: ~{}% of batches done ({}/{}, {:.2?} elapsed)",
+                        chunk_idx + 1,
+                        pct,
+                        done,
+                        n_batches_this_chunk,
+                        start_fit.elapsed()
+                    );
+                }
+            }
+        }
+
+        global_batch_offset += n_batches_this_chunk;
+        genes_processed += io_chunk.len();
+
+        if verbosity.normal_verbosity() {
+            println!(
+                "  Chunk {}/{}: {}/{} genes done in {:.2?} (fit: {:.2?})",
+                chunk_idx + 1,
+                total_io_chunks,
+                genes_processed,
+                n_genes,
+                start_chunk.elapsed(),
+                start_fit.elapsed()
+            );
+        }
+    }
+
+    if verbosity.normal_verbosity() {
+        println!(
+            "SCENIC GPU ({}) GRN inference (streaming) complete in {:.2?}",
+            learner_name,
+            setup.start_total.elapsed()
+        );
+    }
+
+    Ok(Mat::from_fn(n_genes, setup.n_tfs, |i, j| {
+        if j < importance_scores[i].len() {
+            importance_scores[i][j]
+        } else {
+            0.0
+        }
+    }))
+}
+
+/// GPU equivalent of
+/// [`run_scenic_grn_in_memory`](crate::single_cell::mc_analysis::scenic_metacells::run_scenic_grn_in_memory):
+/// runs SCENIC GRN inference against an in-memory cells x genes CSC matrix,
+/// dispatching per-batch fits to [`fit_multi_trees_gpu`]. Intended for the
+/// meta-cell pipeline where the count matrix already fits comfortably in
+/// memory and no streaming layer is needed.
+///
+/// Batches are dispatched serially: as in [`run_scenic_grn_gpu`], the wave
+/// scheduler inside [`fit_multi_trees_gpu`] already saturates the device.
+///
+/// GBM has no GPU implementation; passing a `GradientBoosting` learner yields
+/// [`BixverseErrors::GpuNotSupportedForLearner`]. Use `run_scenic_grn_in_memory`
+/// for that path.
+///
+/// ### Params
+///
+/// * `expr_csc` - Cells x genes CSC (raw in `data`, normalised in `data_2`).
+///   CSR inputs are transformed to CSC internally.
+/// * `tf_indices` - Column indices of the TFs (predictors).
+/// * `scenic_params` - SCENIC configuration.
+/// * `gpu_params` - GPU-side runtime knobs (wave VRAM budget).
+/// * `seed` - Base random seed.
+/// * `device` - CubeCL runtime device.
+/// * `verbose` - `0` -> silent, `1` -> normal, `2` -> detailed.
+///
+/// ### Returns
+///
+/// A `Mat<f32>` of shape `(n_genes, n_tfs)` where entry `[i, j]` is the
+/// normalised importance of TF `j` for target gene `i`.
+///
+/// ### References
+///
+/// Aibar et al., Nat Methods, 2017.
+#[allow(clippy::too_many_arguments)]
+pub fn run_scenic_grn_in_memory_gpu<R, T>(
+    expr_csc: &CompressedSparseData2<T, f32>,
+    tf_indices: &[usize],
+    scenic_params: &ScenicParams,
+    gpu_params: &ScenicGpuParams,
+    seed: usize,
+    device: R::Device,
+    verbose: usize,
+) -> Result<Mat<f32>, BixverseErrors>
+where
+    R: Runtime,
+    T: BixverseNumeric + Copy + Into<u32> + Sync,
+{
+    if matches!(
+        scenic_params.regression_learner,
+        RegressionLearner::GradientBoosting(_)
+    ) {
+        return Err(BixverseErrors::GpuNotSupportedForLearner {
+            learner: learner_name(&scenic_params.regression_learner),
+        });
+    }
+
+    let verbosity = parse_verbosity_level(verbose);
+
+    let csc_owned;
+    let csc: &CompressedSparseData2<T, f32> = match expr_csc.cs_type {
+        CompressedSparseFormat::Csc => expr_csc,
+        CompressedSparseFormat::Csr => {
+            csc_owned = expr_csc.transform();
+            &csc_owned
+        }
+    };
+
+    let start_total = Instant::now();
+    let n_cells = csc.shape.0;
+    let n_genes = csc.shape.1;
+    let n_tfs = tf_indices.len();
+
+    let start_quant = Instant::now();
+    let tf_data = build_tf_quantised_store(csc, tf_indices, n_cells);
+    if verbosity.normal_verbosity() {
+        println!(
+            "Quantised TF store (n: {}) in: {:.2?}",
+            n_tfs.separate_with_underscores(),
+            start_quant.elapsed()
+        );
+    }
+
+    let n_multi_output = scenic_params
+        .gene_batch_size
+        .unwrap_or(MULTI_OUTPUT_BATCH)
+        .min(MULTI_OUTPUT_BATCH);
+
+    let strategy = parse_gene_batch_strategy(
+        &scenic_params.gene_batch_strategy,
+        scenic_params.n_pcs,
+        scenic_params.n_subsample,
+    )
+    .unwrap_or(GeneBatchStrategy::Random);
+
+    let ordered_genes = batch_genes_in_memory(csc, n_multi_output, &strategy, seed, verbose)?;
+
+    let start_extract = Instant::now();
+    let all_sparse_cols: Vec<SparseAxis<u32, f32>> = ordered_genes
+        .par_iter()
+        .map(|&g| extract_target_column(csc, g, n_cells))
+        .collect();
+
+    if verbosity.normal_verbosity() {
+        println!(
+            "Extracted {} target columns in {:.2?}",
+            n_genes,
+            start_extract.elapsed()
+        );
+    }
+
+    let id_batches: Vec<&[usize]> = ordered_genes.chunks(n_multi_output).collect();
+    let col_batches: Vec<&[SparseAxis<u32, f32>]> =
+        all_sparse_cols.chunks(n_multi_output).collect();
+    let total_batches = col_batches.len();
+
+    let learner_name = learner_name(&scenic_params.regression_learner);
+    let config = tree_config_of(scenic_params);
+
+    if verbosity.normal_verbosity() {
+        println!(
+            "Running SCENIC GPU ({}, in-memory) on {} genes ({} TFs, {} cells, {} batches of up to {})",
+            learner_name, n_genes, n_tfs, n_cells, total_batches, n_multi_output,
+        );
+    }
+
+    let start_fit = Instant::now();
+    let mut importance_scores: Vec<Vec<f32>> = vec![Vec::new(); n_genes];
+
+    for (batch_idx, cols) in col_batches.iter().enumerate() {
+        let batch_seed = seed.wrapping_add(batch_idx.wrapping_mul(BATCH_SEED_STRIDE));
+        let imp = fit_multi_trees_gpu::<R>(
+            cols,
+            &tf_data,
+            n_cells,
+            config,
+            batch_seed,
+            device.clone(),
+            gpu_params,
+        )?;
+
+        let batch_gene_ids = id_batches[batch_idx];
+        for (local_idx, imp_vec) in imp.into_iter().enumerate() {
+            importance_scores[batch_gene_ids[local_idx]] = imp_vec;
+        }
+
+        if verbosity.normal_verbosity() {
+            let done = batch_idx + 1;
+            let pct = done * 100 / total_batches;
+            let prev_pct = batch_idx * 100 / total_batches;
+            if pct / 10 > prev_pct / 10 || done == total_batches {
+                println!(
+                    "  Progress: {}% ({}/{} batches, {:.2?} elapsed)",
+                    pct,
+                    done,
+                    total_batches,
+                    start_fit.elapsed()
+                );
+            }
+        }
+    }
+
+    if verbosity.normal_verbosity() {
+        println!(
+            "SCENIC GPU ({}, in-memory) GRN inference complete in {:.2?}",
+            learner_name,
+            start_total.elapsed()
+        );
+    }
+
+    Ok(Mat::from_fn(n_genes, n_tfs, |i, j| {
+        if j < importance_scores[i].len() {
+            importance_scores[i][j]
+        } else {
+            0.0
+        }
+    }))
 }

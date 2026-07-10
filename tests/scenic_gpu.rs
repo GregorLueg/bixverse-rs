@@ -17,12 +17,17 @@
 #![allow(clippy::needless_range_loop, clippy::field_reassign_with_default)]
 
 use bixverse_rs::gpu::sc_gpu::scenic_gpu::{
-    ScenicGpuParams, fit_extra_trees_gpu_single, fit_multi_trees_gpu,
+    ScenicGpuParams, fit_extra_trees_gpu_single, fit_multi_trees_gpu, run_scenic_grn_gpu,
+    run_scenic_grn_in_memory_gpu, run_scenic_grn_streaming_gpu,
 };
 use bixverse_rs::prelude::*;
+use bixverse_rs::single_cell::mc_analysis::scenic_metacells::run_scenic_grn_in_memory;
 use bixverse_rs::single_cell::sc_analysis::scenic::{
-    ExtraTreesConfig, RandomForestConfig, SparseYBatch, fit_multi_trees_sparse,
+    ExtraTreesConfig, GradientBoostingConfig, RandomForestConfig, RegressionLearner, ScenicParams,
+    SparseYBatch, fit_multi_trees_sparse, run_scenic_grn,
 };
+use bixverse_rs::single_cell::sc_data::data_io::CellGeneSparseWriter;
+use bixverse_rs::single_cell::sc_traits::F16;
 use bixverse_rs::single_cell::sc_utils::utils_tree::QuantisedStore;
 
 use cubecl::Runtime;
@@ -811,4 +816,364 @@ fn phase3_et_still_works() {
         mean_corr >= 0.4,
         "ET dispatch appears broken after RF was added: mean pearson r = {mean_corr:.3}"
     );
+}
+
+// -----------------------------------------------------------------------------
+// Phase 5: top-level entry-point round-trip
+//
+// End-to-end plumbing check for `run_scenic_grn_gpu` and
+// `run_scenic_grn_streaming_gpu`. Writes a small synthetic sparse expression
+// file, runs both GPU entry points against the CPU `run_scenic_grn`, and asserts
+// per-target Pearson >= 0.85 on average. The threshold is lower than the fit
+// kernel's per-target 0.95 because Phase 5 also introduces batch-genes
+// randomisation on top of the fit noise -- what we're testing is that the file
+// I/O, batching and matrix assembly wire up correctly, not the fit itself.
+// -----------------------------------------------------------------------------
+
+const RT_CELLS: usize = 200;
+const RT_TFS: usize = 12;
+const RT_TARGETS: usize = 20;
+const RT_TOTAL_GENES: usize = RT_TFS + RT_TARGETS;
+
+/// Write a small synthetic gene-based sparse expression file.
+///
+/// The signal is deliberately strong: for each target `t`, TF `t % RT_TFS`
+/// drives the expression; other TFs contribute noise. That ensures the top TF
+/// per target is stable across seeds so per-target Pearson clears the
+/// threshold in reasonable wall-clock.
+fn write_synthetic_scenic_file(path: &str) {
+    let mut writer =
+        CellGeneSparseWriter::new(path, false, RT_CELLS, RT_TOTAL_GENES).expect("writer new");
+
+    let mut rng = SmallRng::seed_from_u64(0xA5A5);
+
+    // Sample once per (cell, TF) so every target uses the same TF profile.
+    let mut tf_cell_vals: Vec<Vec<f32>> = (0..RT_TFS)
+        .map(|_| (0..RT_CELLS).map(|_| rng.random_range(0.0..10.0f32)).collect())
+        .collect();
+
+    for tf in 0..RT_TFS {
+        write_gene_chunk_from_dense(&mut writer, tf, &tf_cell_vals[tf]);
+    }
+
+    for tg in 0..RT_TARGETS {
+        let driver_tf = tg % RT_TFS;
+        let vals: Vec<f32> = (0..RT_CELLS)
+            .map(|c| {
+                let driver = tf_cell_vals[driver_tf][c];
+                let noise: f32 = rng.random_range(-1.0..1.0);
+                (2.0 * driver + noise).max(0.0)
+            })
+            .collect();
+        write_gene_chunk_from_dense(&mut writer, RT_TFS + tg, &vals);
+    }
+
+    // Prevent needless-move lint on tf_cell_vals.
+    tf_cell_vals.clear();
+
+    writer.finalise().expect("writer finalise");
+}
+
+fn write_gene_chunk_from_dense(writer: &mut CellGeneSparseWriter, gene_id: usize, vals: &[f32]) {
+    let mut data_raw: Vec<u16> = Vec::new();
+    let mut data_norm: Vec<F16> = Vec::new();
+    let mut indices: Vec<usize> = Vec::new();
+    for (cell_idx, &v) in vals.iter().enumerate() {
+        if v <= 0.0 {
+            continue;
+        }
+        let raw = v.round().clamp(0.0, u16::MAX as f32) as u16;
+        if raw == 0 {
+            continue;
+        }
+        data_raw.push(raw);
+        data_norm.push(F16::from(half::f16::from_f32(v.ln_1p())));
+        indices.push(cell_idx);
+    }
+    let raw = RawCounts::U16(data_raw);
+    let chunk = CscGeneChunk::from_conversion(raw, &data_norm, &indices, gene_id, true);
+    writer.write_gene_chunk(chunk).expect("write chunk");
+}
+
+fn pearson_per_target(cpu: faer::MatRef<f32>, gpu: faer::MatRef<f32>) -> Vec<f32> {
+    let n_targets = cpu.nrows();
+    let n_features = cpu.ncols();
+    assert_eq!(n_targets, gpu.nrows());
+    assert_eq!(n_features, gpu.ncols());
+    (0..n_targets)
+        .map(|t| {
+            let a: Vec<f32> = (0..n_features).map(|j| *cpu.get(t, j)).collect();
+            let b: Vec<f32> = (0..n_features).map(|j| *gpu.get(t, j)).collect();
+            pearson(&a, &b)
+        })
+        .collect()
+}
+
+fn scenic_params_for_roundtrip() -> ScenicParams {
+    let mut cfg = ExtraTreesConfig::default();
+    cfg.n_trees = 100;
+    cfg.max_depth = Some(6);
+    cfg.min_samples_leaf = 20;
+    cfg.n_features_split = 0;
+    cfg.n_thresholds = 1;
+
+    ScenicParams {
+        min_counts: 0,
+        min_cells: 0.0,
+        regression_learner: RegressionLearner::ExtraTrees(cfg),
+        gene_batch_strategy: "random".to_string(),
+        gene_batch_size: Some(8),
+        n_pcs: 5,
+        n_subsample: RT_CELLS,
+    }
+}
+
+#[test]
+fn run_scenic_grn_gpu_roundtrip() {
+    let Some(device) = try_device() else {
+        eprintln!("skipping: no GPU device available");
+        return;
+    };
+
+    let path = std::env::temp_dir().join("bixverse_scenic_gpu_roundtrip.bin");
+    let path_str = path.to_str().unwrap();
+    write_synthetic_scenic_file(path_str);
+
+    let cell_indices: Vec<usize> = (0..RT_CELLS).collect();
+    let tf_indices: Vec<usize> = (0..RT_TFS).collect();
+    let gene_indices: Vec<usize> = (RT_TFS..RT_TOTAL_GENES).collect();
+
+    let params = scenic_params_for_roundtrip();
+
+    let cpu = run_scenic_grn(&path_str.to_string(), &cell_indices, &gene_indices, &tf_indices, &params, 42, 0)
+        .expect("CPU run_scenic_grn failed");
+
+    let gpu = run_scenic_grn_gpu::<WgpuRuntime>(
+        path_str,
+        &cell_indices,
+        &gene_indices,
+        &tf_indices,
+        &params,
+        &ScenicGpuParams::default(),
+        42,
+        device,
+        0,
+    )
+    .expect("GPU run_scenic_grn_gpu failed");
+
+    let corrs = pearson_per_target(cpu.as_ref(), gpu.as_ref());
+    let mean = corrs.iter().sum::<f32>() / corrs.len() as f32;
+    eprintln!("run_scenic_grn_gpu_roundtrip mean pearson: {mean:.3} ({corrs:?})");
+    assert!(
+        mean >= 0.85,
+        "mean per-target Pearson {mean:.3} below 0.85 threshold: {corrs:?}"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn run_scenic_grn_streaming_gpu_roundtrip() {
+    let Some(device) = try_device() else {
+        eprintln!("skipping: no GPU device available");
+        return;
+    };
+
+    let path = std::env::temp_dir().join("bixverse_scenic_gpu_streaming_roundtrip.bin");
+    let path_str = path.to_str().unwrap();
+    write_synthetic_scenic_file(path_str);
+
+    let cell_indices: Vec<usize> = (0..RT_CELLS).collect();
+    let tf_indices: Vec<usize> = (0..RT_TFS).collect();
+    let gene_indices: Vec<usize> = (RT_TFS..RT_TOTAL_GENES).collect();
+
+    let params = scenic_params_for_roundtrip();
+
+    let cpu = run_scenic_grn(&path_str.to_string(), &cell_indices, &gene_indices, &tf_indices, &params, 42, 0)
+        .expect("CPU baseline failed");
+
+    let gpu = run_scenic_grn_streaming_gpu::<WgpuRuntime>(
+        path_str,
+        &cell_indices,
+        &gene_indices,
+        &tf_indices,
+        &params,
+        &ScenicGpuParams::default(),
+        42,
+        device,
+        0,
+    )
+    .expect("GPU streaming failed");
+
+    let corrs = pearson_per_target(cpu.as_ref(), gpu.as_ref());
+    let mean = corrs.iter().sum::<f32>() / corrs.len() as f32;
+    eprintln!("run_scenic_grn_streaming_gpu_roundtrip mean pearson: {mean:.3} ({corrs:?})");
+    assert!(
+        mean >= 0.85,
+        "mean per-target Pearson {mean:.3} below 0.85 threshold: {corrs:?}"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Build a small in-memory CSC for the meta-cell round-trip. Same design as
+/// the disk fixture: TF `t % RT_TFS` drives target `t` so the top-TF-per-target
+/// signal is stable and the Pearson threshold clears in seconds.
+fn build_synthetic_scenic_csc() -> CompressedSparseData2<u16, f32> {
+    let mut rng = SmallRng::seed_from_u64(0xC0FFEE);
+    let mut data: Vec<u16> = Vec::new();
+    let mut data_2: Vec<f32> = Vec::new();
+    let mut indices: Vec<usize> = Vec::new();
+    let mut indptr: Vec<usize> = vec![0];
+
+    // TF cell profiles, retained so target columns can be derived from them.
+    let mut tf_cell_vals: Vec<Vec<f32>> = vec![vec![0.0f32; RT_CELLS]; RT_TFS];
+    for tf in 0..RT_TFS {
+        for c in 0..RT_CELLS {
+            let v: f32 = rng.random_range(0.0..10.0);
+            if v > 0.5 {
+                indices.push(c);
+                data.push(v as u16);
+                data_2.push(v);
+                tf_cell_vals[tf][c] = v;
+            }
+        }
+        indptr.push(data.len());
+    }
+
+    for tg in 0..RT_TARGETS {
+        let driver_tf = tg % RT_TFS;
+        for c in 0..RT_CELLS {
+            let driver = tf_cell_vals[driver_tf][c];
+            let noise: f32 = rng.random_range(-1.0..1.0);
+            let v = (2.0 * driver + noise).max(0.0);
+            if v > 0.5 {
+                indices.push(c);
+                data.push(v as u16);
+                data_2.push(v);
+            }
+        }
+        indptr.push(data.len());
+    }
+
+    CompressedSparseData2 {
+        data,
+        indices: indices.index_cast(),
+        indptr: indptr.index_cast(),
+        cs_type: CompressedSparseFormat::Csc,
+        data_2: Some(data_2),
+        shape: (RT_CELLS, RT_TOTAL_GENES),
+    }
+}
+
+#[test]
+fn run_scenic_grn_in_memory_gpu_roundtrip() {
+    let Some(device) = try_device() else {
+        eprintln!("skipping: no GPU device available");
+        return;
+    };
+
+    let csc = build_synthetic_scenic_csc();
+    let tf_indices: Vec<usize> = (0..RT_TFS).collect();
+
+    let params = scenic_params_for_roundtrip();
+
+    let cpu = run_scenic_grn_in_memory(&csc, &tf_indices, &params, 42, 0)
+        .expect("CPU run_scenic_grn_in_memory failed");
+
+    let gpu = run_scenic_grn_in_memory_gpu::<WgpuRuntime, u16>(
+        &csc,
+        &tf_indices,
+        &params,
+        &ScenicGpuParams::default(),
+        42,
+        device,
+        0,
+    )
+    .expect("GPU run_scenic_grn_in_memory_gpu failed");
+
+    // CPU returns (n_total_genes, n_tfs) — restrict to the target rows.
+    let cpu_targets = cpu.as_ref().submatrix(RT_TFS, 0, RT_TARGETS, RT_TFS);
+    let gpu_targets = gpu.as_ref().submatrix(RT_TFS, 0, RT_TARGETS, RT_TFS);
+    let corrs = pearson_per_target(cpu_targets, gpu_targets);
+    let mean = corrs.iter().sum::<f32>() / corrs.len() as f32;
+    eprintln!("run_scenic_grn_in_memory_gpu_roundtrip mean pearson: {mean:.3} ({corrs:?})");
+    assert!(
+        mean >= 0.85,
+        "mean per-target Pearson {mean:.3} below 0.85 threshold: {corrs:?}"
+    );
+}
+
+#[test]
+fn run_scenic_grn_in_memory_gpu_rejects_gbm() {
+    let Some(device) = try_device() else {
+        eprintln!("skipping: no GPU device available");
+        return;
+    };
+
+    let csc = build_synthetic_scenic_csc();
+    let tf_indices: Vec<usize> = (0..RT_TFS).collect();
+
+    let mut params = scenic_params_for_roundtrip();
+    params.regression_learner = RegressionLearner::GradientBoosting(GradientBoostingConfig::default());
+
+    let err = run_scenic_grn_in_memory_gpu::<WgpuRuntime, u16>(
+        &csc,
+        &tf_indices,
+        &params,
+        &ScenicGpuParams::default(),
+        42,
+        device,
+        0,
+    )
+    .expect_err("expected GpuNotSupportedForLearner");
+
+    match err {
+        BixverseErrors::GpuNotSupportedForLearner { learner } => {
+            assert_eq!(learner, "GradientBoosting");
+        }
+        other => panic!("unexpected error variant: {other:?}"),
+    }
+}
+
+#[test]
+fn run_scenic_grn_gpu_rejects_gbm() {
+    let Some(device) = try_device() else {
+        eprintln!("skipping: no GPU device available");
+        return;
+    };
+
+    // File does not need to exist -- the GBM check runs before any I/O.
+    let path = std::env::temp_dir().join("bixverse_scenic_gpu_gbm_reject.bin");
+    let path_str = path.to_str().unwrap();
+    write_synthetic_scenic_file(path_str);
+
+    let cell_indices: Vec<usize> = (0..RT_CELLS).collect();
+    let tf_indices: Vec<usize> = (0..RT_TFS).collect();
+    let gene_indices: Vec<usize> = (RT_TFS..RT_TOTAL_GENES).collect();
+
+    let mut params = scenic_params_for_roundtrip();
+    params.regression_learner = RegressionLearner::GradientBoosting(GradientBoostingConfig::default());
+
+    let err = run_scenic_grn_gpu::<WgpuRuntime>(
+        path_str,
+        &cell_indices,
+        &gene_indices,
+        &tf_indices,
+        &params,
+        &ScenicGpuParams::default(),
+        42,
+        device,
+        0,
+    )
+    .expect_err("expected GpuNotSupportedForLearner");
+
+    match err {
+        BixverseErrors::GpuNotSupportedForLearner { learner } => {
+            assert_eq!(learner, "GradientBoosting");
+        }
+        other => panic!("unexpected error variant: {other:?}"),
+    }
+
+    let _ = std::fs::remove_file(&path);
 }

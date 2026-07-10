@@ -1,8 +1,16 @@
 # GPU port: SCENIC RF/ExtraTrees regression
 
-## Status snapshot (2026-07-09)
+## Status snapshot (2026-07-10)
 
-Phases 1-4 complete and merged into `feat-faster-gpu`. Style pass applied. Phase 5 (dispatch shim + R wrapper) is the remaining work.
+Phases 1-5 complete. Phase 5 landed as **dedicated top-level GPU entry points**:
+
+- `run_scenic_grn_gpu` — GPU sibling of `run_scenic_grn` (disk, in-memory target columns).
+- `run_scenic_grn_streaming_gpu` — GPU sibling of `run_scenic_grn_streaming` (disk, I/O-chunked target columns).
+- `run_scenic_grn_in_memory_gpu` — GPU sibling of `run_scenic_grn_in_memory` (meta-cell path, matrix already in memory).
+
+All three follow the pattern established by `pca_on_sc_sparse_gpu` in `pca_gpu.rs` — CPU entry points untouched, GPU exposed as its own function. GBM configs are rejected via `BixverseErrors::GpuNotSupportedForLearner` — CPU-only by design. Round-trip parity is anchored against the CPU siblings: mean per-target Pearson ≥ 0.85 in `tests/scenic_gpu.rs::run_scenic_grn_gpu_roundtrip`, `run_scenic_grn_streaming_gpu_roundtrip`, and `run_scenic_grn_in_memory_gpu_roundtrip`.
+
+R wrapper for the CPU + GPU SCENIC entry points is still to be done, deferred to a separate PR that adds both CPU and GPU R surfaces from one place.
 
 ### GPU speedup vs CPU (macOS/Metal, 1k TFs × 64 targets × 250 trees)
 
@@ -28,7 +36,7 @@ GPU beats CPU at every measured shape from 10k up. The plan's 2-3x target on 50k
 ### Entry points for review
 
 - **Driver + kernels**: `src/gpu/sc_gpu/scenic_gpu.rs` (~1900 lines). Public entry `fit_multi_trees_gpu` mirrors the CPU `fit_multi_trees_sparse` signature.
-- **Tuning params**: `src/gpu/sc_gpu/scenic_gpu_params.rs` (`ScenicGpuParams::wave_byte_budget`, default 4 GiB).
+- **Tuning params**: `ScenicGpuParams::wave_byte_budget` (default 4 GiB) lives at the top of `src/gpu/sc_gpu/scenic_gpu.rs`.
 - **Tests**: `tests/scenic_gpu.rs`.
 - **Bench**: `benches/gpu_scenic_bench.rs`. Run with `cargo bench --features gpu,single-cell --bench gpu_scenic_bench`. Hand-rolled median-of-3 with a 300s skip threshold — not Criterion (Criterion's minimum 10 samples would push CPU RF at 50k+ into hours).
 
@@ -42,11 +50,19 @@ GPU beats CPU at every measured shape from 10k up. The plan's 2-3x target on 50k
 - **Phase 4c** — per-slot min/max precompute + `evaluate_splits_et` shrunk to WORKGROUP_32.
 - **Style pass** — docs and comment tidy on `scenic_gpu.rs`. No behaviour changes.
 
-### Remaining work (Phase 5)
+### Remaining work (Phase 5 — revised)
 
-- Dispatch shim in `run_scenic_multi_output` / `run_scenic_multi_output_streaming` to call `fit_multi_trees_gpu` when the `gpu` feature is available. Small-N regression risk is negligible now (GPU wins from 10k up).
-- R wrapper in `src/gpu/gpu_r_wrappers.rs` via extendr.
-- CI check that `cargo test --features gpu,single-cell,multi-modal` runs green.
+Design pivot: expose the GPU path as two dedicated top-level functions rather than hiding it behind a `cfg`-gated dispatch inside the CPU entry points. Callers pick CPU vs GPU explicitly; the CPU functions stay unchanged. This mirrors `pca_on_sc_sparse_gpu` (in `pca_gpu.rs`) and keeps compute location legible.
+
+- `pub fn run_scenic_grn_gpu<R: Runtime>` — GPU equivalent of `run_scenic_grn` (in-memory target-column layout). Lives in `src/gpu/sc_gpu/scenic_gpu.rs`.
+- `pub fn run_scenic_grn_streaming_gpu<R: Runtime>` — GPU equivalent of `run_scenic_grn_streaming` (I/O-chunk streaming layout). Same file.
+- Both take `device: R::Device` and `gpu_params: &ScenicGpuParams` in addition to the CPU signature.
+- **GBM**: not ported; the GBM arm returns `BixverseErrors::GpuNotSupportedForLearner` — caller must switch to the CPU function for `RegressionLearner::GradientBoosting`. Consistent with the plan's non-goal.
+- **Shared setup**: factor the duplicated "reader open → TF read/filter/quantise → parse strategy → batch_genes" prelude in `scenic.rs` into a single `pub(crate) fn scenic_common_setup` and reuse from CPU + GPU entry points. Pure refactor of the CPU code; existing SCENIC tests act as the parity check.
+- **Wave semantics inside a batch stay unchanged**: `fit_multi_trees_gpu` already saturates the device on one batch, so both new entry points call it **serially** per batch. No concurrent-batch GPU dispatch.
+- **Tests**: extend `tests/scenic_gpu.rs` with two round-trip tests (write synthetic sparse file via `CellGeneSparseWriter`, compare `run_scenic_grn_gpu` / `run_scenic_grn_streaming_gpu` per-target Pearson vs `run_scenic_grn` — same ≥ 0.95 tolerance as existing GPU parity tests).
+- **R wrapper**: deferred. The CPU `run_scenic_grn*` functions are not yet exposed to R either — only the parameter converters exist in `sc_r_wrappers.rs`. R exposure belongs with that separate CPU-side effort so both surfaces land together.
+- **CI**: `cargo test --features gpu,single-cell,multi-modal` remains the gate for merge.
 
 ### Parked (audit items 5-8, do only if a workload actually needs them)
 
@@ -255,27 +271,47 @@ Remaining items 5-8 from the audit (u8 packing, comptime multiplicity skip, buff
 
 ---
 
-## Phase 5 — Integration
+## Phase 5 — Integration (revised: top-level GPU entry points)
 
-**Aim:** Make the GPU path reachable from the existing SCENIC entry points, callable from R.
+**Aim:** Expose the GPU tree fit as two dedicated top-level SCENIC entry points, so callers pick CPU vs GPU explicitly. No hidden dispatch inside `run_scenic_multi_output(_streaming)`.
+
+### Design pivot vs the original Phase 5
+
+The earlier draft (dispatch shim + size threshold + R-side force-CPU flag) added indirection for questionable gain: it hid where compute happens and required a runtime cutoff nobody's data actually supports. The revised shape:
+
+- **CPU entry points untouched.** `run_scenic_grn` and `run_scenic_grn_streaming` stay as-is (aside from a pure refactor of shared setup — see below).
+- **Three new GPU entry points** in `src/gpu/sc_gpu/scenic_gpu.rs`, mirroring the CPU shape:
+  - `pub fn run_scenic_grn_gpu<R: Runtime>` — disk-backed, target columns loaded up front (mirrors `run_scenic_grn`).
+  - `pub fn run_scenic_grn_streaming_gpu<R: Runtime>` — disk-backed, I/O-chunk streaming layout (mirrors `run_scenic_grn_streaming`).
+  - `pub fn run_scenic_grn_in_memory_gpu<R: Runtime, T>` — in-memory CSC (mirrors `run_scenic_grn_in_memory`; drives the meta-cell workflow).
+  - All three take `device: R::Device` and `gpu_params: &ScenicGpuParams` on top of the CPU signature.
+- **Same pattern as `pca_on_sc_sparse_gpu`** in `pca_gpu.rs` — proven convention in this crate.
+- **GBM arm errors.** Both GPU functions return `BixverseErrors::GpuNotSupportedForLearner { learner: "GradientBoosting" }` when handed a GBM config. Callers stay on CPU for GBM. Matches the plan's non-goal explicitly and puts the choice at the call site rather than hiding a silent fallback.
+- **Shared setup extracted.** The identical prelude (open reader → read TFs → filter → quantise → parse batching strategy → `batch_genes`) currently duplicated across all four `run_scenic_*` functions moves into one `pub(crate) fn scenic_common_setup` in `scenic.rs`. Pure refactor of the CPU code; existing SCENIC tests act as the parity guard.
+- **Wave-level GPU work unchanged.** Inside a batch, `fit_multi_trees_gpu` already saturates the device. Both new entry points call it **serially per batch**; no concurrent-batch GPU dispatch.
 
 ### Deliverables
 
-- Dispatch shim in `run_scenic_multi_output` / `run_scenic_multi_output_streaming`: when `gpu` feature is compiled in AND workload passes a size threshold, call `fit_multi_trees_gpu` instead of `fit_multi_trees_sparse`
-- Size threshold documented and configurable via `ScenicParams`
-- R wrapper for the GPU dispatch in `gpu/gpu_r_wrappers.rs`
-- CI passes with `cargo test --features gpu,single-cell,multi-modal`
+1. `pub(crate) fn scenic_common_setup(...)` extracted in `src/single_cell/sc_analysis/scenic.rs`; existing four callers rewired.
+2. `BixverseErrors::GpuNotSupportedForLearner { learner: &'static str }` added, feature-gated `#[cfg(feature = "gpu")]` (matches existing gpu-gated variants around `errors.rs:568-573`).
+3. `pub fn run_scenic_grn_gpu<R: Runtime>` added to `src/gpu/sc_gpu/scenic_gpu.rs`.
+4. `pub fn run_scenic_grn_streaming_gpu<R: Runtime>` added to same file.
+5. `pub fn run_scenic_grn_in_memory_gpu<R: Runtime, T>` added to same file. `extract_target_column`, `build_tf_quantised_store`, `batch_genes_in_memory` in `mc_analysis/scenic_metacells.rs` bumped to `pub(crate)` for cross-module reuse.
+6. Round-trip tests added to `tests/scenic_gpu.rs`: synthetic disk file (via `CellGeneSparseWriter`) and synthetic in-memory CSC, each fed through both the CPU sibling and its GPU entry point, per-target Pearson asserted ≥ 0.85.
 
 ### Acceptance criteria
 
-- [ ] `run_scenic_grn` unchanged from R's perspective; GPU is transparent behind feature flag
-- [ ] R wrapper exposes a way to force CPU path (for debugging / when GPU adapter is unavailable)
-- [ ] CI GPU job (already exists — `test-gpu` in `.github/workflows/test.yml`) runs the SCENIC GPU tests
-- [ ] No unexpected regressions in existing GPU tests (`tests/gpu_corr.rs`, `benches/gpu_k_means_bench.rs`)
+- [ ] Existing scenic tests pass unchanged after the `scenic_common_setup` extraction (pure refactor).
+- [ ] `cargo build --features gpu,single-cell` compiles the two new entry points cleanly.
+- [ ] GBM config triggers `GpuNotSupportedForLearner` (asserted in a small unit test).
+- [ ] Round-trip integration tests: per-target Pearson correlation vs `run_scenic_grn` ≥ 0.95, same threshold as existing GPU parity tests.
+- [ ] `cargo test --features gpu,single-cell,multi-modal` runs green.
+- [ ] No regression in existing GPU tests (`tests/scenic_gpu.rs`, `tests/gpu_corr.rs`).
 
-### Test approach
+### Deferred (explicitly out of this phase)
 
-Existing SCENIC CPU integration tests run through the dispatch shim with the GPU feature enabled; confirm they still pass (accepting statistical drift). Add one R wrapper smoke test if extendr test infrastructure supports it.
+- **R wrappers.** The CPU `run_scenic_grn*` functions are not yet exposed to R either — `sc_r_wrappers.rs` only carries parameter converters. R exposure belongs with that separate CPU-side effort so both CPU and GPU surfaces land together, from one PR, in one place.
+- **Dispatch shim.** Not needed with dedicated entry points. If a future consumer wants one, it's a thin wrapper over the two functions.
 
 ---
 

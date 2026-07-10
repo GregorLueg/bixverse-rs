@@ -29,7 +29,7 @@ use crate::single_cell::sc_utils::simd::*;
 use crate::single_cell::sc_utils::utils_tree::*;
 
 /// How many genes to test for in one go
-const SCENIC_GENE_CHUNK_SIZE: usize = 1024;
+pub(crate) const SCENIC_GENE_CHUNK_SIZE: usize = 1024;
 
 /// How many target genes to batch into a single multi-output tree ensemble.
 /// 64 targets * 256 bins * 16 bytes ≈ 256KB per feature histogram, fits L2
@@ -2743,7 +2743,7 @@ fn chunk_into_batches(genes: &[usize], batch_size: usize) -> Vec<Vec<usize>> {
 ///
 /// Half-open `[start, end)` index ranges into `batches`, each covering at
 /// most `max_genes` genes without splitting a batch across groups
-fn group_batches_for_io(batches: &[Vec<usize>], max_genes: usize) -> Vec<(usize, usize)> {
+pub(crate) fn group_batches_for_io(batches: &[Vec<usize>], max_genes: usize) -> Vec<(usize, usize)> {
     let mut groups = Vec::new();
     let mut start = 0usize;
     let mut count = 0usize;
@@ -3738,6 +3738,92 @@ impl Default for ScenicParams {
 // Main //
 //////////
 
+/// Shared setup produced by [`scenic_common_setup`]: the artefacts every
+/// top-level SCENIC entry point needs before dispatching on the regression
+/// learner.
+///
+/// ### Fields
+///
+/// * `reader` - Open reader over the sparse expression file.
+/// * `cell_set` - Active cell IDs, deduplicated and preserved in input order.
+/// * `tf_data` - Quantised TF feature store (`u8` columns, column-major).
+/// * `n_cells` - Number of active cells.
+/// * `n_tfs` - Number of TFs (features).
+/// * `start_total` - Wall-clock timer started at the top of the call.
+pub(crate) struct ScenicSetup {
+    /// Open reader over the sparse expression file.
+    pub reader: ParallelSparseReader,
+    /// Active cell IDs, deduplicated and preserved in input order.
+    pub cell_set: IndexSet<u32>,
+    /// Quantised TF feature store (`u8` columns, column-major).
+    pub tf_data: QuantisedStore,
+    /// Number of active cells.
+    pub n_cells: usize,
+    /// Number of TFs (features).
+    pub n_tfs: usize,
+    /// Wall-clock timer started at the top of the call.
+    pub start_total: Instant,
+}
+
+/// Perform the prelude shared by every top-level SCENIC entry point: open the
+/// reader, build the cell set, read + filter + quantise the TF columns, and
+/// print a timing line.
+///
+/// ### Params
+///
+/// * `f_path` - Path to the sparse gene expression file.
+/// * `cell_indices` - Indices of the active cells.
+/// * `tf_indices` - Transcription-factor gene indices.
+/// * `verbose` - `0` -> silent, `1` -> normal, `2` -> detailed.
+///
+/// ### Returns
+///
+/// A populated [`ScenicSetup`] on success.
+pub(crate) fn scenic_common_setup(
+    f_path: &str,
+    cell_indices: &[usize],
+    tf_indices: &[usize],
+    verbose: usize,
+) -> Result<ScenicSetup, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
+    let start_total = Instant::now();
+    let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
+    let n_cells = cell_set.len();
+
+    let start_reading = Instant::now();
+    let reader = ParallelSparseReader::new(f_path)?;
+
+    let mut tf_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(tf_indices)?;
+    tf_chunks.par_iter_mut().for_each(|chunk| {
+        chunk.filter_selected_cells(&cell_set);
+    });
+
+    let tf_csc: CompressedSparseData2<u16, f32> =
+        from_gene_chunks::<u16>(tf_chunks, &DataLayerReturn::Norm, n_cells);
+    let tf_data = QuantisedStore::from_csc(&tf_csc, n_cells)?;
+    drop(tf_csc);
+
+    let n_tfs = tf_data.n_features;
+
+    if verbosity.normal_verbosity() {
+        println!(
+            "Loaded, filtered and quantised TF data (n: {}) in: {:.2?}",
+            n_tfs.separate_with_underscores(),
+            start_reading.elapsed()
+        );
+    }
+
+    Ok(ScenicSetup {
+        reader,
+        cell_set,
+        tf_data,
+        n_cells,
+        n_tfs,
+        start_total,
+    })
+}
+
 /// Filter genes by minimum total counts and minimum expressed-cell fraction
 ///
 /// ### Params
@@ -3839,65 +3925,37 @@ pub fn run_scenic_grn(
     seed: usize,
     verbose: usize,
 ) -> Result<Mat<f32>, BixverseErrors> {
-    let verbosity = parse_verbosity_level(verbose);
-
-    let start_total = Instant::now();
-    let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
-    let n_cells = cell_set.len();
-
-    // load and quantise TFs
-    let start_reading = Instant::now();
-    let reader = ParallelSparseReader::new(f_path)?;
-
-    let mut tf_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(tf_indices)?;
-    tf_chunks.par_iter_mut().for_each(|chunk| {
-        chunk.filter_selected_cells(&cell_set);
-    });
-
-    let tf_csc: CompressedSparseData2<u16, f32> =
-        from_gene_chunks::<u16>(tf_chunks, &DataLayerReturn::Norm, n_cells);
-    let tf_data = QuantisedStore::from_csc(&tf_csc, n_cells)?;
-    drop(tf_csc);
-
-    let n_tfs = tf_data.n_features;
+    let setup = scenic_common_setup(f_path, cell_indices, tf_indices, verbose)?;
     let n_genes = gene_indices.len();
-
-    if verbosity.normal_verbosity() {
-        println!(
-            "Loaded, filtered and quantised TF data (n: {}) in: {:.2?}",
-            n_tfs.separate_with_underscores(),
-            start_reading.elapsed()
-        );
-    }
 
     match &scenic_params.regression_learner {
         RegressionLearner::GradientBoosting(gbm_config) => run_scenic_gbm(
-            &reader,
-            &cell_set,
+            &setup.reader,
+            &setup.cell_set,
             gene_indices,
-            &tf_data,
-            n_cells,
-            n_tfs,
+            &setup.tf_data,
+            setup.n_cells,
+            setup.n_tfs,
             n_genes,
             gbm_config,
             seed,
             verbose,
-            start_total,
+            setup.start_total,
         ),
         _ => run_scenic_multi_output(
             f_path,
-            &reader,
-            &cell_set,
+            &setup.reader,
+            &setup.cell_set,
             cell_indices,
             gene_indices,
-            &tf_data,
-            n_cells,
-            n_tfs,
+            &setup.tf_data,
+            setup.n_cells,
+            setup.n_tfs,
             n_genes,
             scenic_params,
             seed,
             verbose,
-            start_total,
+            setup.start_total,
         ),
     }
 }
@@ -3944,66 +4002,37 @@ pub fn run_scenic_grn_streaming(
     seed: usize,
     verbose: usize,
 ) -> Result<Mat<f32>, BixverseErrors> {
-    let verbosity = parse_verbosity_level(verbose);
-
-    let start_total = Instant::now();
-    let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
-    let n_cells = cell_set.len();
-
-    // load and quantise the TFs
-    let start_reading = Instant::now();
-    let reader = ParallelSparseReader::new(f_path).unwrap();
-
-    let mut tf_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(tf_indices)?;
-    tf_chunks.par_iter_mut().for_each(|chunk| {
-        chunk.filter_selected_cells(&cell_set);
-    });
-
-    let tf_csc: CompressedSparseData2<u16, f32> =
-        from_gene_chunks::<u16>(tf_chunks, &DataLayerReturn::Norm, n_cells);
-    let tf_data = QuantisedStore::from_csc(&tf_csc, n_cells)?;
-
-    drop(tf_csc);
-
-    let n_tfs = tf_data.n_features;
+    let setup = scenic_common_setup(f_path, cell_indices, tf_indices, verbose)?;
     let n_genes = gene_indices.len();
-
-    if verbosity.normal_verbosity() {
-        println!(
-            "Loaded, filtered and quantised TF data (n: {}) in: {:.2?}",
-            n_tfs.separate_with_underscores(),
-            start_reading.elapsed()
-        );
-    }
 
     match &scenic_params.regression_learner {
         RegressionLearner::GradientBoosting(gbm_config) => run_scenic_gbm_streaming(
-            &reader,
-            &cell_set,
+            &setup.reader,
+            &setup.cell_set,
             gene_indices,
-            &tf_data,
-            n_cells,
-            n_tfs,
+            &setup.tf_data,
+            setup.n_cells,
+            setup.n_tfs,
             n_genes,
             gbm_config,
             seed,
             verbose,
-            start_total,
+            setup.start_total,
         ),
         _ => run_scenic_multi_output_streaming(
             f_path,
-            &reader,
-            &cell_set,
+            &setup.reader,
+            &setup.cell_set,
             cell_indices,
             gene_indices,
-            &tf_data,
-            n_cells,
-            n_tfs,
+            &setup.tf_data,
+            setup.n_cells,
+            setup.n_tfs,
             n_genes,
             scenic_params,
             seed,
             verbose,
-            start_total,
+            setup.start_total,
         ),
     }
 }
