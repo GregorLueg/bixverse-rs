@@ -2,6 +2,8 @@
 
 Reference doc for the SCENIC GPU implementation. Phases 1-5 delivered on `feat-faster-gpu`. GBM stays on CPU by design. This doc keeps the perf measurements and design notes worth referencing when touching the GPU tree code in future.
 
+> **Caveat (2026-07-11):** the speedup table below measures a single 64-target batch. It does not model the real SCENIC workload, which processes thousands of target genes across tens of batches. On Apple Silicon the CPU driver fans batches across cores via rayon; the GPU driver processes them sequentially. Result: at 1000 TFs x 4000 targets x 10k cells, CPU end-to-end is **~230s (ET) / ~180s (RF)** while GPU end-to-end is **~1640s (ET) / ~1240s (RF)**. GPU loses by 3-7x on realistic shapes. See `docs/plans/elegant-bubbling-waffle.md` for the diagnosis and the Phase B mitigation that made GPU measurable at all (feature-upload amortisation + deferred importance readbacks). Kernel-level per-batch numbers below are still accurate.
+
 ## Entry points
 
 - **Fit driver**: `fit_multi_trees_gpu` in `src/gpu/sc_gpu/scenic_gpu.rs` — multi-tree, multi-batch, ET or RF via `TreeRegressorConfig::random_threshold()`.
