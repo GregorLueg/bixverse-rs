@@ -18,7 +18,6 @@ use faer::Mat;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use thousands::Separable;
 
@@ -2857,49 +2856,64 @@ fn run_wave_bfs<R: Runtime>(
 // Public entry //
 //////////////////
 
-/// Multi-tree, multi-batch ExtraTrees or RandomForest regression fit on GPU.
+/// Fit a sequence of pre-sliced gene batches on GPU, sharing one feature
+/// upload across every batch and deferring importance readbacks to the end
+/// of the call.
 ///
-/// Mirrors [`fit_multi_trees_sparse`] (see `scenic.rs`), differing only in the
-/// explicit `R: Runtime` and `device` parameters that a GPU entry requires.
-/// Splits `targets` into batches of at most `MULTI_OUTPUT_BATCH = 64`, drives
-/// the wave scheduler over all trees for each batch, and returns per-target
-/// normalised importance vectors.
+/// This is the workhorse the top-level SCENIC GPU drivers call once with
+/// their full list of cluster-aware batches. Each batch runs its own wave
+/// loop, but the ~`n_features * n_samples` u32 feature tensor is uploaded
+/// exactly once and every batch's importance tensor stays resident on
+/// device until every wave has been submitted. Only then do we walk the
+/// stashed handles and `.read()` them one by one, so host prep for later
+/// batches overlaps with the GPU chewing on earlier ones.
+///
+/// [`fit_multi_trees_gpu`] wraps this with a single-batch chunking pass for
+/// backward compatibility with existing tests and the bench.
 ///
 /// ### Params
 ///
-/// * `targets` - Sparse target expression columns
-/// * `feature_matrix` - Quantised u8 features, column-major
-/// * `n_samples` - Total sample count
+/// * `batches` - One slice of `SparseAxis` targets per batch. Batch sizes
+///   need not be uniform; each is fed to the wave scheduler independently.
+/// * `batch_seeds` - Per-batch base seed. Must have the same length as
+///   `batches`. Tree seeds within a wave use `tree_seed(batch_seed[i], t)`.
+/// * `feature_matrix` - Quantised u8 features, column-major. Uploaded once.
+/// * `n_samples` - Total sample count.
 /// * `config` - Tree configuration; `config.random_threshold()` selects the
-///   ExtraTrees or RandomForest split kernel and `bootstrap()` is honoured,
-///   all other knobs come through `TreeRegressorConfig`
-/// * `seed` - Base seed; per-tree seed is `tree_seed(seed, tree_idx)`
-/// * `device` - Runtime device
-/// * `params` - GPU-side runtime knobs (currently just the wave VRAM budget)
+///   ExtraTrees or RandomForest split kernel and `bootstrap()` is honoured.
+/// * `device` - Runtime device.
+/// * `params` - GPU-side runtime knobs (currently just the wave VRAM budget).
 ///
 /// ### Returns
 ///
-/// One importance vector per target: `result[target_idx][feature_idx]`, each
+/// One importance vector per target, flat, in the order `batches.iter()
+/// .flatten()`. Each inner vector has `n_features` entries and is
 /// normalised to sum to 1.0.
 ///
 /// ### Errors
 ///
+/// * Panics (debug) if `batches.len() != batch_seeds.len()`.
 /// * Propagates sparse-Y construction failures from
-///   [`SparseYBatch::from_targets`]
+///   [`SparseYBatch::from_targets`].
 /// * `InvalidArgument` from [`pick_wave_size`] if even `wave_size = 1` busts
-///   `params.wave_byte_budget`
-/// * Propagates GPU read-back errors from the per-batch importance readback
-pub fn fit_multi_trees_gpu<R: Runtime>(
-    targets: &[SparseAxis<u32, f32>],
+///   `params.wave_byte_budget` on any batch.
+/// * Propagates GPU read-back errors from the deferred importance readback.
+pub fn fit_scenic_batches_gpu<R: Runtime>(
+    batches: &[&[SparseAxis<u32, f32>]],
+    batch_seeds: &[usize],
     feature_matrix: &QuantisedStore,
     n_samples: usize,
     config: &dyn TreeRegressorConfig,
-    seed: usize,
     device: R::Device,
     params: &ScenicGpuParams,
 ) -> Result<Vec<Vec<f32>>, BixverseErrors> {
+    debug_assert_eq!(
+        batches.len(),
+        batch_seeds.len(),
+        "fit_scenic_batches_gpu: batches.len() must equal batch_seeds.len()"
+    );
+
     let n_features = feature_matrix.n_features;
-    let n_targets_total = targets.len();
     let n_trees = config.n_trees();
     let n_features_split = resolve_n_features_split(config.n_features_split(), n_features);
     let k_feats = n_features_split.min(n_features).max(1);
@@ -2918,21 +2932,36 @@ pub fn fit_multi_trees_gpu<R: Runtime>(
     let subsample_needed = n_sub < n_samples;
     let bootstrap = config.bootstrap();
 
+    let n_targets_total: usize = batches.iter().map(|b| b.len()).sum();
     let mut result: Vec<Vec<f32>> = vec![Vec::new(); n_targets_total];
 
-    if n_targets_total == 0 || n_trees == 0 {
+    if batches.is_empty() || n_targets_total == 0 || n_trees == 0 {
         return Ok(result);
     }
 
     let client = R::client(&device);
 
-    // upload feature bins once for the whole call
+    // Single feature upload amortised across every batch. Old code re-did
+    // this per fit call; drivers called it once per cluster batch, so the
+    // ~n_features * n_samples * 4 bytes went up N_batches times.
     let feature_bins_u32: Vec<u32> = feature_matrix.data.iter().map(|&b| b as u32).collect();
     let feature_data_gpu =
         GpuTensor::<R, u32>::from_slice(&feature_bins_u32, vec![n_features * n_samples], &client);
 
-    for (batch_idx, chunk) in targets.chunks(MULTI_OUTPUT_BATCH).enumerate() {
+    // Per-batch importance tensor handles, kept alive until the deferred
+    // readback pass. Each entry is (flat_target_offset, batch_n_targets,
+    // importance_gpu). Small in VRAM (n_features * batch_n_targets * 4
+    // bytes) so N handles across a whole run add up to a few tens of MB
+    // even for hundreds of batches.
+    let mut deferred: Vec<(usize, usize, GpuTensor<R, u32>)> = Vec::with_capacity(batches.len());
+
+    let mut flat_offset = 0usize;
+    for (chunk, &batch_seed) in batches.iter().zip(batch_seeds.iter()) {
         let batch_n_targets = chunk.len();
+        if batch_n_targets == 0 {
+            continue;
+        }
+
         let sparse_y = SparseYBatch::from_targets(chunk, n_samples)?;
         let sy_gpu = SparseYGpu::upload(&sparse_y, n_samples, &client);
 
@@ -2953,9 +2982,8 @@ pub fn fit_multi_trees_gpu<R: Runtime>(
         );
 
         // Interleaved [n_features, batch_n_targets] importances, accumulated
-        // atomically on device across all trees in this batch. f32 bits
-        // stored as u32 so `accumulate_importance` can CAS-add. Zeroed once
-        // here; every wave adds to it, host reads once at end of batch.
+        // atomically on device across every tree in this batch. f32 bits
+        // stored as u32 so `accumulate_importance` can CAS-add.
         let batch_importances_gpu = GpuTensor::<R, u32>::from_slice(
             &vec![0u32; n_features * batch_n_targets],
             vec![n_features * batch_n_targets],
@@ -2966,23 +2994,22 @@ pub fn fit_multi_trees_gpu<R: Runtime>(
         while tree_idx < n_trees {
             let this_wave = std::cmp::min(wave_size, n_trees - tree_idx);
 
-            // per-tree seeds for this wave
             let seeds_host: Vec<u32> = (tree_idx..tree_idx + this_wave)
-                .map(|t| tree_seed(seed, t) as u32)
+                .map(|t| tree_seed(batch_seed, t) as u32)
                 .collect();
             let tree_seeds_gpu =
                 GpuTensor::<R, u32>::from_slice(&seeds_host, vec![this_wave], &client);
 
-            // Per-tree sample multiplicity for this wave. For bootstrap we
-            // draw n_sub samples with replacement (mult in {0, 1, 2, ...});
-            // for non-bootstrap subsample we do Fisher-Yates and take the
-            // first n_sub (mult in {0, 1}); for the no-subsample path all
-            // samples get mult 1. RNG is seeded off `tree_seed(seed, t)`
-            // exactly like the CPU path.
+            // Per-tree sample multiplicity for this wave. Bootstrap draws
+            // n_sub with replacement (mult in {0, 1, 2, ...}); non-bootstrap
+            // subsample is Fisher-Yates and takes the first n_sub (mult in
+            // {0, 1}); no-subsample path fills 1s. RNG seeded off
+            // `tree_seed(batch_seed, t)` matching the CPU path.
             let mut mult_host = vec![0u32; this_wave * n_samples];
             if subsample_needed {
                 for w in 0..this_wave {
-                    let mut rng = SmallRng::seed_from_u64(tree_seed(seed, tree_idx + w));
+                    let mut rng =
+                        SmallRng::seed_from_u64(tree_seed(batch_seed, tree_idx + w));
                     let row_base = w * n_samples;
                     if bootstrap {
                         for _ in 0..n_sub {
@@ -2990,8 +3017,6 @@ pub fn fit_multi_trees_gpu<R: Runtime>(
                             mult_host[row_base + idx] += 1;
                         }
                     } else {
-                        // Fisher-Yates via init_and_split; buf[..n_sub] holds
-                        // the n_sub chosen indices without replacement.
                         let mut buf: Vec<u32> = vec![0u32; n_samples];
                         init_and_split(&mut buf, n_samples, n_sub, &mut rng);
                         for i in 0..n_sub {
@@ -3006,10 +3031,9 @@ pub fn fit_multi_trees_gpu<R: Runtime>(
             let mult_gpu =
                 GpuTensor::<R, u32>::from_slice(&mult_host, vec![this_wave * n_samples], &client);
 
-            // If the terminal wave is smaller than `wave_size`, we reuse the
-            // over-provisioned `state` and only run the first `this_wave`
-            // slots of it. Kernels gate on the `wave_size` param passed to
-            // each launch, so the tail slots stay untouched.
+            // Terminal-wave reuse: kernels gate on the `wave_size` param, so
+            // an over-provisioned `state` is safe. Only when `this_wave` does
+            // not match do we allocate a smaller shadow state.
             let effective_state = if this_wave == wave_size {
                 None
             } else {
@@ -3043,26 +3067,77 @@ pub fn fit_multi_trees_gpu<R: Runtime>(
             tree_idx += this_wave;
         }
 
-        // Single readback per batch. Bits stored as u32, reinterpreted as f32.
-        let importances_bits = batch_importances_gpu.clone().read(&client)?;
-        let batch_importances: Vec<f32> = importances_bits
-            .iter()
-            .map(|&b| f32::from_bits(b))
-            .collect();
+        // Stash the importance handle; no .read() here. The .read() below
+        // flushes the queue at that point, so later batches keep submitting
+        // kernels while we wait on the first one.
+        deferred.push((flat_offset, batch_n_targets, batch_importances_gpu));
+        flat_offset += batch_n_targets;
+    }
 
-        for (k, target_offset) in (0..batch_n_targets)
-            .zip(batch_idx * MULTI_OUTPUT_BATCH..batch_idx * MULTI_OUTPUT_BATCH + batch_n_targets)
-        {
+    for (target_offset, batch_n_targets, imp_gpu) in deferred {
+        let bits = imp_gpu.read(&client)?;
+        let batch_imp: Vec<f32> = bits.iter().map(|&b| f32::from_bits(b)).collect();
+        for k in 0..batch_n_targets {
             let mut per_target = vec![0.0f32; n_features];
             for f in 0..n_features {
-                per_target[f] = batch_importances[f * batch_n_targets + k];
+                per_target[f] = batch_imp[f * batch_n_targets + k];
             }
             normalise_importances(&mut per_target);
-            result[target_offset] = per_target;
+            result[target_offset + k] = per_target;
         }
     }
 
     Ok(result)
+}
+
+/// Multi-tree, multi-batch ExtraTrees or RandomForest regression fit on GPU.
+///
+/// Backward-compatible wrapper around [`fit_scenic_batches_gpu`]: chunks
+/// `targets` into `MULTI_OUTPUT_BATCH`-sized batches, uses `seed` for every
+/// batch (matching the pre-Phase-B semantics where a single call's internal
+/// batches all shared one base seed), and forwards to the batch-aware entry.
+///
+/// New callers (top-level GPU drivers) should skip this and call
+/// [`fit_scenic_batches_gpu`] directly with their own cluster-aware batch
+/// slices and per-batch seeds.
+///
+/// ### Params
+///
+/// * `targets` - Sparse target expression columns.
+/// * `feature_matrix` - Quantised u8 features, column-major.
+/// * `n_samples` - Total sample count.
+/// * `config` - Tree configuration.
+/// * `seed` - Base seed shared by every internal batch.
+/// * `device` - Runtime device.
+/// * `params` - GPU-side runtime knobs.
+///
+/// ### Returns
+///
+/// One importance vector per target: `result[target_idx][feature_idx]`, each
+/// normalised to sum to 1.0.
+pub fn fit_multi_trees_gpu<R: Runtime>(
+    targets: &[SparseAxis<u32, f32>],
+    feature_matrix: &QuantisedStore,
+    n_samples: usize,
+    config: &dyn TreeRegressorConfig,
+    seed: usize,
+    device: R::Device,
+    params: &ScenicGpuParams,
+) -> Result<Vec<Vec<f32>>, BixverseErrors> {
+    if targets.is_empty() {
+        return Ok(Vec::new());
+    }
+    let batches: Vec<&[SparseAxis<u32, f32>]> = targets.chunks(MULTI_OUTPUT_BATCH).collect();
+    let batch_seeds: Vec<usize> = vec![seed; batches.len()];
+    fit_scenic_batches_gpu::<R>(
+        &batches,
+        &batch_seeds,
+        feature_matrix,
+        n_samples,
+        config,
+        device,
+        params,
+    )
 }
 
 /// Backward-compatible single-tree entry used by the early single-tree
@@ -3203,42 +3278,14 @@ fn tree_config_of(params: &ScenicParams) -> &dyn TreeRegressorConfig {
     }
 }
 
-/// Scatter one batch's per-target importance vectors into the caller's
-/// full-length `importance_scores` accumulator. Cluster-aware batching may
-/// present genes in a different order to `gene_indices`, so the gene id map
-/// is used to look up each target's canonical row.
-///
-/// ### Params
-///
-/// * `batch_imps` - Per-target importance vectors from `fit_multi_trees_gpu`,
-///   one inner `Vec<f32>` of length `n_features` per target in the batch.
-/// * `batch_gene_ids` - Original gene ids for each target in the batch, in
-///   the same order as `batch_imps`.
-/// * `gene_id_to_pos` - Map from a gene id to its row index in
-///   `importance_scores`.
-/// * `importance_scores` - Full-length accumulator, indexed by original
-///   `gene_indices` position; written in place.
-fn write_batch_into_importances(
-    batch_imps: Vec<Vec<f32>>,
-    batch_gene_ids: &[usize],
-    gene_id_to_pos: &FxHashMap<usize, usize>,
-    importance_scores: &mut [Vec<f32>],
-) {
-    for (local_idx, imp) in batch_imps.into_iter().enumerate() {
-        let gene_id = batch_gene_ids[local_idx];
-        let original_pos = gene_id_to_pos[&gene_id];
-        importance_scores[original_pos] = imp;
-    }
-}
-
 /// GPU equivalent of [`run_scenic_grn`]: reads all target-gene columns up
-/// front, runs cluster-aware gene batching, and dispatches each batch
-/// serially to [`fit_multi_trees_gpu`]. Returns the same
+/// front, runs cluster-aware gene batching, and hands the whole batch list
+/// to [`fit_scenic_batches_gpu`] in one call. Returns the same
 /// `(n_genes, n_tfs)` importance matrix as the CPU function.
 ///
-/// Batches are dispatched serially rather than via rayon: the wave scheduler
-/// inside [`fit_multi_trees_gpu`] already saturates the device on one batch,
-/// so concurrent host-side batch launches would just contend for VRAM.
+/// The single fit call amortises the feature-tensor upload across every
+/// batch and defers per-batch importance readbacks until after all waves
+/// have been submitted to the queue.
 ///
 /// GBM is a GPU non-goal; passing a `GradientBoosting` learner yields
 /// [`BixverseErrors::GpuNotSupportedForLearner`]. Fall back to
@@ -3372,48 +3419,33 @@ where
     }
 
     let start_fit = Instant::now();
+    let batch_seeds: Vec<usize> = (0..total_batches)
+        .map(|i| seed.wrapping_add(i.wrapping_mul(BATCH_SEED_STRIDE)))
+        .collect();
+
+    let flat_imp = fit_scenic_batches_gpu::<R>(
+        &col_batches,
+        &batch_seeds,
+        &setup.tf_data,
+        setup.n_cells,
+        config,
+        device,
+        gpu_params,
+    )?;
+
+    let flat_gene_ids: Vec<usize> = batches.iter().flatten().copied().collect();
     let mut importance_scores: Vec<Vec<f32>> = vec![Vec::new(); n_genes];
-
-    for (batch_idx, cols) in col_batches.iter().enumerate() {
-        let batch_seed = seed.wrapping_add(batch_idx.wrapping_mul(BATCH_SEED_STRIDE));
-        let imp = fit_multi_trees_gpu::<R>(
-            cols,
-            &setup.tf_data,
-            setup.n_cells,
-            config,
-            batch_seed,
-            device.clone(),
-            gpu_params,
-        )?;
-
-        write_batch_into_importances(
-            imp,
-            &batches[batch_idx],
-            &gene_id_to_pos,
-            &mut importance_scores,
-        );
-
-        if verbosity.normal_verbosity() {
-            let done = batch_idx + 1;
-            let pct = done * 100 / total_batches;
-            let prev_pct = batch_idx * 100 / total_batches;
-            if pct / 10 > prev_pct / 10 || done == total_batches {
-                println!(
-                    "  Progress: {}% ({}/{} batches, {:.2?} elapsed)",
-                    pct,
-                    done,
-                    total_batches,
-                    start_fit.elapsed()
-                );
-            }
-        }
+    for (imp, gene_id) in flat_imp.into_iter().zip(flat_gene_ids.iter()) {
+        let pos = gene_id_to_pos[gene_id];
+        importance_scores[pos] = imp;
     }
 
     if verbosity.normal_verbosity() {
         println!(
-            "SCENIC GPU ({}) GRN inference complete in {:.2?}",
+            "SCENIC GPU ({}) GRN inference complete in {:.2?} (fit {:.2?})",
             learner_name,
-            setup.start_total.elapsed()
+            setup.start_total.elapsed(),
+            start_fit.elapsed()
         );
     }
 
@@ -3427,9 +3459,9 @@ where
 }
 
 /// GPU equivalent of [`run_scenic_grn_streaming`]: reads target genes in I/O
-/// chunks and dispatches each in-chunk batch serially to
-/// [`fit_multi_trees_gpu`]. Bounds peak host memory to one chunk of sparse
-/// columns (roughly `SCENIC_GENE_CHUNK_SIZE` targets).
+/// chunks and dispatches every in-chunk batch through a single
+/// [`fit_scenic_batches_gpu`] call. Bounds peak host memory to one chunk of
+/// sparse columns (roughly `SCENIC_GENE_CHUNK_SIZE` targets).
 ///
 /// ### Params
 ///
@@ -3558,50 +3590,43 @@ where
         let n_batches_this_chunk = group.len();
 
         let start_fit = Instant::now();
-        let batches_done = AtomicUsize::new(0);
 
-        for local_batch_idx in 0..n_batches_this_chunk {
-            let batch_seed = seed.wrapping_add(
-                (global_batch_offset + local_batch_idx).wrapping_mul(BATCH_SEED_STRIDE),
-            );
-            let cols =
-                &sparse_columns[col_offsets[local_batch_idx]..col_offsets[local_batch_idx + 1]];
-            let imp = fit_multi_trees_gpu::<R>(
-                cols,
-                &setup.tf_data,
-                setup.n_cells,
-                config,
-                batch_seed,
-                device.clone(),
-                gpu_params,
-            )?;
+        let chunk_col_batches: Vec<&[SparseAxis<u32, f32>]> = (0..n_batches_this_chunk)
+            .map(|i| &sparse_columns[col_offsets[i]..col_offsets[i + 1]])
+            .collect();
+        let chunk_batch_seeds: Vec<usize> = (0..n_batches_this_chunk)
+            .map(|i| {
+                seed.wrapping_add((global_batch_offset + i).wrapping_mul(BATCH_SEED_STRIDE))
+            })
+            .collect();
 
-            write_batch_into_importances(
-                imp,
-                &group[local_batch_idx],
-                &gene_id_to_pos,
-                &mut importance_scores,
-            );
+        let flat_imp = fit_scenic_batches_gpu::<R>(
+            &chunk_col_batches,
+            &chunk_batch_seeds,
+            &setup.tf_data,
+            setup.n_cells,
+            config,
+            device.clone(),
+            gpu_params,
+        )?;
 
-            if verbosity.detailed_verbosity() && n_batches_this_chunk >= 4 {
-                let done = batches_done.fetch_add(1, Ordering::Relaxed) + 1;
-                let pct = done * 100 / n_batches_this_chunk;
-                let prev_pct = (done - 1) * 100 / n_batches_this_chunk;
-                if [25, 50, 75, 100].iter().any(|&q| prev_pct < q && pct >= q) {
-                    println!(
-                        "    Chunk {}: ~{}% of batches done ({}/{}, {:.2?} elapsed)",
-                        chunk_idx + 1,
-                        pct,
-                        done,
-                        n_batches_this_chunk,
-                        start_fit.elapsed()
-                    );
-                }
-            }
+        let chunk_flat_gene_ids: Vec<usize> = group.iter().flatten().copied().collect();
+        for (imp, gene_id) in flat_imp.into_iter().zip(chunk_flat_gene_ids.iter()) {
+            let pos = gene_id_to_pos[gene_id];
+            importance_scores[pos] = imp;
         }
 
         global_batch_offset += n_batches_this_chunk;
         genes_processed += io_chunk.len();
+
+        if verbosity.detailed_verbosity() {
+            println!(
+                "    Chunk {}: fit {} batches in {:.2?}",
+                chunk_idx + 1,
+                n_batches_this_chunk,
+                start_fit.elapsed()
+            );
+        }
 
         if verbosity.normal_verbosity() {
             println!(
@@ -3636,12 +3661,13 @@ where
 /// GPU equivalent of
 /// [`run_scenic_grn_in_memory`](crate::single_cell::mc_analysis::scenic_metacells::run_scenic_grn_in_memory):
 /// runs SCENIC GRN inference against an in-memory cells x genes CSC matrix,
-/// dispatching per-batch fits to [`fit_multi_trees_gpu`]. Intended for the
-/// meta-cell pipeline where the count matrix already fits comfortably in
-/// memory and no streaming layer is needed.
+/// handing every cluster-aware batch to [`fit_scenic_batches_gpu`] in one
+/// call. Intended for the meta-cell pipeline where the count matrix already
+/// fits comfortably in memory and no streaming layer is needed.
 ///
-/// Batches are dispatched serially: as in [`run_scenic_grn_gpu`], the wave
-/// scheduler inside [`fit_multi_trees_gpu`] already saturates the device.
+/// The single fit call amortises the feature-tensor upload across every
+/// batch and defers per-batch importance readbacks until after all waves
+/// have been submitted to the queue.
 ///
 /// GBM has no GPU implementation; passing a `GradientBoosting` learner yields
 /// [`BixverseErrors::GpuNotSupportedForLearner`]. Use `run_scenic_grn_in_memory`
@@ -3759,46 +3785,32 @@ where
     }
 
     let start_fit = Instant::now();
+    let batch_seeds: Vec<usize> = (0..total_batches)
+        .map(|i| seed.wrapping_add(i.wrapping_mul(BATCH_SEED_STRIDE)))
+        .collect();
+
+    let flat_imp = fit_scenic_batches_gpu::<R>(
+        &col_batches,
+        &batch_seeds,
+        &tf_data,
+        n_cells,
+        config,
+        device,
+        gpu_params,
+    )?;
+
+    let flat_gene_ids: Vec<usize> = id_batches.iter().flat_map(|b| b.iter().copied()).collect();
     let mut importance_scores: Vec<Vec<f32>> = vec![Vec::new(); n_genes];
-
-    for (batch_idx, cols) in col_batches.iter().enumerate() {
-        let batch_seed = seed.wrapping_add(batch_idx.wrapping_mul(BATCH_SEED_STRIDE));
-        let imp = fit_multi_trees_gpu::<R>(
-            cols,
-            &tf_data,
-            n_cells,
-            config,
-            batch_seed,
-            device.clone(),
-            gpu_params,
-        )?;
-
-        let batch_gene_ids = id_batches[batch_idx];
-        for (local_idx, imp_vec) in imp.into_iter().enumerate() {
-            importance_scores[batch_gene_ids[local_idx]] = imp_vec;
-        }
-
-        if verbosity.normal_verbosity() {
-            let done = batch_idx + 1;
-            let pct = done * 100 / total_batches;
-            let prev_pct = batch_idx * 100 / total_batches;
-            if pct / 10 > prev_pct / 10 || done == total_batches {
-                println!(
-                    "  Progress: {}% ({}/{} batches, {:.2?} elapsed)",
-                    pct,
-                    done,
-                    total_batches,
-                    start_fit.elapsed()
-                );
-            }
-        }
+    for (imp, &gene_id) in flat_imp.into_iter().zip(flat_gene_ids.iter()) {
+        importance_scores[gene_id] = imp;
     }
 
     if verbosity.normal_verbosity() {
         println!(
-            "SCENIC GPU ({}, in-memory) GRN inference complete in {:.2?}",
+            "SCENIC GPU ({}, in-memory) GRN inference complete in {:.2?} (fit {:.2?})",
             learner_name,
-            start_total.elapsed()
+            start_total.elapsed(),
+            start_fit.elapsed()
         );
     }
 
