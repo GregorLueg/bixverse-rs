@@ -46,38 +46,48 @@ use crate::prelude::BixverseFloat;
 /// Shape of the Gamma prior on per-gene mean expression. Combined with the
 /// scale below, gives a mean of ~50 counts and a heavy right tail.
 const DEFAULT_MEAN_EXP_SHAPE: f64 = 5.0;
+
 /// Scale of the Gamma prior on per-gene mean expression.
 const DEFAULT_MEAN_EXP_SCALE: f64 = 10.0;
+
 /// Intercept of the NB dispersion trend `disp = 1 / (a + b * mean)`.
 const DEFAULT_DISP_INTERCEPT: f64 = 0.2;
+
 /// Slope of the NB dispersion trend.
 const DEFAULT_DISP_SLOPE: f64 = 0.3;
+
 /// Per-gene per-sample noise std on the latent log-signal.
 const DEFAULT_NOISE_STD: f64 = 0.3;
+
 /// Std of the Normal latent factor. Kept below 1 so even hub genes stay in a
-/// workable log-signal range — otherwise `exp(z)` spans too many orders of
-/// magnitude, the marginal-mean rescale concentrates mass on a single sample,
-/// and the linear correlation between the hub and the rest of the module
-/// collapses.
+/// workable log-signal range.
 const DEFAULT_NORMAL_FACTOR_STD: f64 = 0.3;
+
 /// Shape of the Gamma latent factor used for the non-negative variant. With
 /// scale = 0.3, mean = 0.6 and mode = 0.3 — non-negative, unimodal, mild tail.
 const DEFAULT_GAMMA_FACTOR_SHAPE: f64 = 2.0;
+
 /// Scale of the Gamma latent factor for the non-negative variant.
 const DEFAULT_GAMMA_FACTOR_SCALE: f64 = 0.3;
+
 /// Scale of the Laplace latent factor for the non-Gaussian variant.
 /// `b = 0.3` gives std ≈ 0.42, comparable to the Normal factor default.
 const DEFAULT_LAPLACE_FACTOR_SCALE: f64 = 0.3;
+
 /// LogNormal location for hub-style loadings. `mu = 0` gives median loading 1.
 const DEFAULT_LOADING_LN_MU: f64 = 0.0;
+
 /// LogNormal scale for hub-style loadings. `sigma = 0.7` gives q99 loading of
 /// about 5, so a hub's log-signal std is `~5 * factor_std ≈ 1.5` — clean exp
 /// range, tail heavy enough to drive a hub-degree gradient.
 const DEFAULT_LOADING_LN_SIGMA: f64 = 0.7;
+
 /// Fraction of module genes flagged as hubs (top X% by loading).
 const DEFAULT_HUB_PERCENTILE: f64 = 0.1;
+
 /// Reference library size for the sequencing-depth dropout.
 const DEFAULT_TARGET_LIB_SIZE: f64 = 20_000.0;
+
 /// LogNormal scale for per-sample size factors (Splatter default region).
 const DEFAULT_CAPTURE_SIGMA: f64 = 0.5;
 
@@ -85,12 +95,8 @@ const DEFAULT_CAPTURE_SIGMA: f64 = 0.5;
 // Generator enums //
 /////////////////////
 
-/// Shared config for LogNormal-loading variants (all except [`BulkDataGenerator::Modular`]).
-///
-/// ### Fields
-///
-/// The tail of the LogNormal drives hub behaviour: bigger `sigma` = heavier
-/// tail = a few module genes with much larger loadings than the rest.
+/// Shared config for LogNormal-loading variants (all except
+/// [`BulkDataGenerator::Modular`]).
 #[derive(Clone, Debug)]
 pub struct LoadingLogNormal<T: BixverseFloat> {
     /// LogNormal location parameter for the loading distribution.
@@ -113,8 +119,6 @@ impl<T: BixverseFloat> Default for LoadingLogNormal<T> {
 
 /// Config for [`BulkDataGenerator::Modular`].
 ///
-/// ### Fields
-///
 /// Uses a Beta(5, 2) loading distribution (mean ~0.71, narrow) and a Normal
 /// factor. No hubs.
 #[derive(Clone, Debug)]
@@ -132,8 +136,6 @@ impl<T: BixverseFloat> Default for ModularConfig<T> {
 }
 
 /// Config for [`BulkDataGenerator::HubModular`].
-///
-/// ### Fields
 ///
 /// LogNormal loadings + Normal factor. Heavy-tailed loading gives a hub /
 /// non-hub degree gradient after correlation thresholding — useful for
@@ -184,14 +186,13 @@ impl<T: BixverseFloat> Default for NonNegativeFactorConfig<T> {
 
 /// Config for [`BulkDataGenerator::NonGaussianFactor`].
 ///
-/// ### Fields
-///
-/// LogNormal loadings + Laplace factor. Laplace is symmetric heavy-tailed —
-/// non-Gaussian by construction — which is the identifiability condition ICA
+/// LogNormal loadings + Laplace factor. Laplace is symmetric heavy-tailed -
+/// non-Gaussian by construction - which is the identifiability condition ICA
 /// needs on the source signals.
 #[derive(Clone, Debug)]
 pub struct NonGaussianFactorConfig<T: BixverseFloat> {
-    /// Laplace scale (`b`) of the factor. Std of Laplace(0, b) is `b * sqrt(2)`.
+    /// Laplace scale (`b`) of the factor. Std of Laplace(0, b) is
+    /// `b * sqrt(2)`.
     pub factor_scale: T,
     /// LogNormal loading config.
     pub loading: LoadingLogNormal<T>,
@@ -208,9 +209,6 @@ impl<T: BixverseFloat> Default for NonGaussianFactorConfig<T> {
 
 /// Topology + factor / loading distribution to inject into the module
 /// structure.
-///
-/// Each variant carries its own config so downstream code and R-side
-/// dispatch can forward a single parameter struct.
 #[derive(Clone, Debug)]
 pub enum BulkDataGenerator<T: BixverseFloat> {
     /// Beta(5, 2) loadings, Normal factor. Homogeneous within-module
@@ -235,6 +233,9 @@ impl<T: BixverseFloat> Default for BulkDataGenerator<T> {
 
 impl<T: BixverseFloat> BulkDataGenerator<T> {
     /// Access the shared LogNormal loading config, if the variant has one.
+    ///
+    /// ### Returns
+    ///
     /// [`BulkDataGenerator::Modular`] returns `None` (Beta loadings).
     fn loading(&self) -> Option<&LoadingLogNormal<T>> {
         match self {
@@ -246,6 +247,10 @@ impl<T: BixverseFloat> BulkDataGenerator<T> {
     }
 
     /// Human-readable label for logs and error messages.
+    ///
+    /// ### Returns
+    ///
+    /// The respective String.
     fn label(&self) -> &'static str {
         match self {
             BulkDataGenerator::Modular(_) => "modular",
@@ -270,9 +275,9 @@ impl<T: BixverseFloat> BulkDataGenerator<T> {
 pub fn parse_bulk_data_generator<T: BixverseFloat>(s: &str) -> Option<BulkDataGenerator<T>> {
     match s.to_lowercase().as_str() {
         "modular" => Some(BulkDataGenerator::Modular(ModularConfig::default())),
-        "hub_modular" | "hubmodular" | "hub-modular" => Some(BulkDataGenerator::HubModular(
-            HubModularConfig::default(),
-        )),
+        "hub_modular" | "hubmodular" | "hub-modular" => {
+            Some(BulkDataGenerator::HubModular(HubModularConfig::default()))
+        }
         "non_negative_factor" | "nonnegative" | "nmf" => Some(
             BulkDataGenerator::NonNegativeFactor(NonNegativeFactorConfig::default()),
         ),
@@ -317,14 +322,8 @@ pub fn parse_dropout_strategy(s: &str) -> Option<DropoutStrategy> {
 /// Parameters for [`generate_bulk_rnaseq`].
 ///
 /// The generator variant lives inside [`SyntheticRnaSeqParams::generator`];
-/// everything else — dimensions, module layout, the NB count model, noise —
-/// is shared across variants.
-///
-/// ### Fields
-///
-/// See per-field docs. The [`Default`] impl gives 100 samples, 2000 genes,
-/// five modules of decreasing size and [`BulkDataGenerator::HubModular`]
-/// with its defaults.
+/// everything else, dimensions, module layout, the NB count model, noise, is
+/// shared across variants.
 #[derive(Clone, Debug)]
 pub struct SyntheticRnaSeqParams<T: BixverseFloat> {
     /// Number of samples (columns) in the count matrix.
@@ -593,7 +592,9 @@ where
         params.mean_exp_gamma_scale.to_f64().unwrap(),
     )
     .map_err(|e| BixverseErrors::InvalidArgument(format!("gamma(mean) init: {e}")))?;
-    let mean_exp: Vec<f64> = (0..num_genes).map(|_| gamma_mean.sample(&mut rng)).collect();
+    let mean_exp: Vec<f64> = (0..num_genes)
+        .map(|_| gamma_mean.sample(&mut rng))
+        .collect();
     let disp_intercept = params.disp_intercept.to_f64().unwrap();
     let disp_slope = params.disp_slope.to_f64().unwrap();
     let dispersion: Vec<f64> = mean_exp
@@ -619,9 +620,8 @@ where
     // faer Mat is column-major; storing as (n_modules, n_samples) means each
     // sample is a column. We keep a Vec<Vec<f64>> for cheap per-thread reads
     // in the parallel gene loop, then copy into a Mat<T> at the end.
-    let module_factor_vecs =
-        draw_factors(num_modules, num_samples, &params.generator, &mut rng)
-            .map_err(|e| BixverseErrors::InvalidArgument(format!("factor draw: {e}")))?;
+    let module_factor_vecs = draw_factors(num_modules, num_samples, &params.generator, &mut rng)
+        .map_err(|e| BixverseErrors::InvalidArgument(format!("factor draw: {e}")))?;
 
     // ---- per-gene loadings ------------------------------------------------
     let loadings_f64 = draw_loadings(&gene_modules, num_genes, &params.generator, &mut rng)?;
@@ -788,7 +788,11 @@ fn draw_factors<T: BixverseFloat>(
         BulkDataGenerator::NonGaussianFactor(c) => {
             let b = c.factor_scale.to_f64().unwrap();
             for _ in 0..num_modules {
-                out.push((0..num_samples).map(|_| laplace_sample(0.0, b, rng)).collect());
+                out.push(
+                    (0..num_samples)
+                        .map(|_| laplace_sample(0.0, b, rng))
+                        .collect(),
+                );
             }
         }
     }
@@ -1394,7 +1398,10 @@ mod tests {
                 }
             }
         }
-        assert!(in_sum / in_n as f64 > 0.1, "non-negative variant not producing correlation");
+        assert!(
+            in_sum / in_n as f64 > 0.1,
+            "non-negative variant not producing correlation"
+        );
     }
 
     // ---- non-Gaussian factor variant ---------------------------------
@@ -1489,7 +1496,10 @@ mod tests {
             }
         }
         let mean = in_sum / in_n as f64;
-        assert!(mean > 0.0, "within-module mean corr {mean} not positive after dropout");
+        assert!(
+            mean > 0.0,
+            "within-module mean corr {mean} not positive after dropout"
+        );
     }
 
     #[test]
