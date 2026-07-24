@@ -30,7 +30,7 @@ use crate::single_cell::sc_annotation::{
 };
 use crate::single_cell::sc_batch_correction::{
     bbknn::BbknnParams, fast_mnn::FastMnnParams, harmony::HarmonyParams,
-    harmony_v2::HarmonyParamsV2,
+    harmony_v2::HarmonyParamsV2, seurat_cca::SeuratCcaParams, seurat_rpca::SeuratRpcaParams,
 };
 use crate::single_cell::sc_data::h5ad_io::RawDataSlot;
 use crate::single_cell::sc_data::{
@@ -1086,6 +1086,150 @@ impl FastMnnParams {
             random_svd,
             sparse_svd,
             cos_norm,
+            knn_params,
+            pca_params,
+        })
+    }
+}
+
+/////////////////
+// Seurat CCA //
+/////////////////
+
+impl SeuratCcaParams {
+    /// Generate the SeuratCcaParams from an R list
+    ///
+    /// Should values not be found within the list, the parameters will
+    /// default to the values in `SeuratCcaParams::default()` (Seurat v3
+    /// defaults).
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the Seurat CCA parameters, plus nested
+    ///   `knn_params` and PCA fields consumed by [KnnParams::from_r_list]
+    ///   and [SingleCellPcaParams::from_r_list].
+    ///
+    /// ### Returns
+    ///
+    /// The `SeuratCcaParams` with all of the parameters.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let knn_params = KnnParams::from_r_list(r_list.clone())?;
+        let pca_params = SingleCellPcaParams::from_r_list(r_list.clone())?;
+        let cca_list: HashMap<&str, Robj> = r_list.try_into()?;
+
+        let num_cc = cca_list
+            .get("num_cc")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(30) as usize;
+        let dims = cca_list
+            .get("dims")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(30) as usize;
+        let k_anchor = cca_list
+            .get("k_anchor")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(5) as usize;
+        let k_filter = cca_list
+            .get("k_filter")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(200) as usize;
+        let k_score = cca_list
+            .get("k_score")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(30) as usize;
+        let k_weight = cca_list
+            .get("k_weight")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(100) as usize;
+        let n_top_features = cca_list
+            .get("n_top_features")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(200) as usize;
+        let l2_norm = cca_list
+            .get("l2_norm")
+            .and_then(|v| v.as_logical())
+            .map(|rb| rb.is_true())
+            .unwrap_or(true);
+        let sd = cca_list
+            .get("sd")
+            .and_then(|v| v.as_real())
+            .unwrap_or(1.0) as f32;
+
+        Ok(Self {
+            num_cc,
+            dims,
+            k_anchor,
+            k_filter,
+            k_score,
+            k_weight,
+            n_top_features,
+            l2_norm,
+            sd,
+            knn_params,
+            pca_params,
+        })
+    }
+}
+
+//////////////////
+// Seurat rPCA //
+//////////////////
+
+impl SeuratRpcaParams {
+    /// Generate the SeuratRpcaParams from an R list
+    ///
+    /// Should values not be found within the list, the parameters will
+    /// default to the values in `SeuratRpcaParams::default()`. Note that
+    /// rPCA does not use `num_cc`, `k_filter`, or `n_top_features` (the
+    /// gene-space FilterAnchors step is CCA-only in Seurat).
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the Seurat rPCA parameters, plus nested
+    ///   `knn_params` and PCA fields consumed by [KnnParams::from_r_list]
+    ///   and [SingleCellPcaParams::from_r_list].
+    ///
+    /// ### Returns
+    ///
+    /// The `SeuratRpcaParams` with all of the parameters.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let knn_params = KnnParams::from_r_list(r_list.clone())?;
+        let pca_params = SingleCellPcaParams::from_r_list(r_list.clone())?;
+        let rpca_list: HashMap<&str, Robj> = r_list.try_into()?;
+
+        let dims = rpca_list
+            .get("dims")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(30) as usize;
+        let k_anchor = rpca_list
+            .get("k_anchor")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(5) as usize;
+        let k_score = rpca_list
+            .get("k_score")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(30) as usize;
+        let k_weight = rpca_list
+            .get("k_weight")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(100) as usize;
+        let l2_norm = rpca_list
+            .get("l2_norm")
+            .and_then(|v| v.as_logical())
+            .map(|rb| rb.is_true())
+            .unwrap_or(true);
+        let sd = rpca_list
+            .get("sd")
+            .and_then(|v| v.as_real())
+            .unwrap_or(1.0) as f32;
+
+        Ok(Self {
+            dims,
+            k_anchor,
+            k_score,
+            k_weight,
+            l2_norm,
+            sd,
             knn_params,
             pca_params,
         })
