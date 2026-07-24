@@ -1,5 +1,17 @@
 # News
 
+## 0.3.8
+
+### Features
+
+- Updated synthetic data set generation for bulk RNAseq.
+- Attempt at a GPU-accelerated SCENIC version. Individual tree-building is
+  faster; however, parallelised CPU smokes GPU (at least on Apple Silicon).
+- Faster GPU correlations.
+- Implementation of two additional batch correction methods:
+  * Seurat rPCA batch correction.
+  * Seurat CCA batch correction.
+
 ## 0.3.7
 
 ### Fix
