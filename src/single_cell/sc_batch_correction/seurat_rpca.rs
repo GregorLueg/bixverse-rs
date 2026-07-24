@@ -11,18 +11,15 @@ use rustc_hash::FxHashMap;
 use std::time::Instant;
 use thousands::Separable;
 
+use crate::core::math::pca_svd::randomised_svd;
 use crate::prelude::*;
-use crate::single_cell::sc_batch_correction::batch_utils::{
-    batch_knn_search, cosine_normalise, process_batch_labels,
-};
+use crate::single_cell::sc_batch_correction::batch_utils::{batch_knn_search, cosine_normalise};
 use crate::single_cell::sc_batch_correction::fast_mnn::{reorder_to_original, split_pca_by_batch};
 use crate::single_cell::sc_batch_correction::seurat_anchors::{
     AnchorSet, build_sample_tree, find_anchor_pairs, score_anchors, tree_merge_embeddings,
 };
 use crate::single_cell::sc_batch_correction::seurat_cca::load_hvg_standardised;
-use crate::single_cell::sc_processing::pca::{
-    SingleCellPcaParams, pca_on_sc, pca_on_sc_sparse,
-};
+use crate::single_cell::sc_processing::pca::{SingleCellPcaParams, pca_on_sc, pca_on_sc_sparse};
 
 ////////////
 // Params //
@@ -79,6 +76,48 @@ impl Default for SeuratRpcaParams {
 // rPCA anchor space //
 ///////////////////////
 
+/// Compute a per-batch PCA directly on per-cell-standardised HVG
+/// expression so both loadings and scores live in the same regime as
+/// the projected data used by [project_into_basis]. This is the fix for
+/// the mismatched-scaling issue: Seurat's `ReciprocalProject`
+/// (`integration.R:502-594`) projects `scale.data` through loadings
+/// computed on the same `scale.data`. Using `pca_on_sc*` here would
+/// return loadings from a different scaling regime and the projections
+/// wouldn't sit in the same space as the batch's own scores.
+///
+/// The SVD is done via [randomised_svd] on the standardised `(n_hvg,
+/// n_cells)` matrix directly. Left singular vectors `U` are the gene-space
+/// loadings; scores are `V * diag(S)` in cell space.
+///
+/// ### Params
+///
+/// * `x_standardised` - Per-cell standardised HVG matrix, `(n_hvg,
+///   n_cells)`
+/// * `dims` - Number of principal components to retain
+/// * `seed` - Random seed for the SVD sketch
+///
+/// ### Returns
+///
+/// `(scores, loadings)` where `scores` is `(n_cells, dims)` and
+/// `loadings` is `(n_hvg, dims)`.
+fn per_batch_pca_standardised(
+    x_standardised: MatRef<f32>,
+    dims: usize,
+    seed: usize,
+) -> Result<(Mat<f32>, Mat<f32>), BixverseErrors> {
+    let n_hvg = x_standardised.nrows();
+    let n_cells = x_standardised.ncols();
+    let effective = dims.min(n_hvg).min(n_cells);
+    let svd = randomised_svd(x_standardised, effective, seed, None, None)?;
+
+    // Truncate to `effective` columns (randomised SVD may return more due
+    // to oversampling).
+    let keep = effective.min(svd.s.len()).min(svd.u.ncols()).min(svd.v.ncols());
+    let loadings = Mat::from_fn(n_hvg, keep, |i, j| svd.u[(i, j)]);
+    let scores = Mat::from_fn(n_cells, keep, |i, j| svd.v[(i, j)] * svd.s[j]);
+    Ok((scores, loadings))
+}
+
 /// Cross-project batch B's standardised HVG expression into batch A's PCA
 /// basis. Returns `(n_cells_b, dims)` and, if requested, L2-normalised per
 /// row so it lives in the same cosine space as batch A's own PCA scores.
@@ -105,9 +144,19 @@ fn project_into_basis(loadings_a: MatRef<f32>, x_b: MatRef<f32>, l2_norm: bool) 
     }
 }
 
-/// Take a per-batch PCA scores matrix, optionally L2-normalise its rows.
-/// Used to put a batch's own scores in the same cosine space as
-/// projected embeddings for anchor kNN.
+/// Take a per-batch PCA scores matrix and optionally L2-normalise its
+/// rows so the batch's own scores sit in the same cosine space as
+/// cross-projected embeddings for anchor kNN.
+///
+/// ### Params
+///
+/// * `scores` - Per-batch PCA scores, `(n_cells, dims)`
+/// * `l2_norm` - Whether to L2-normalise each row
+///
+/// ### Returns
+///
+/// `(n_cells, dims)` matrix, cloned regardless of `l2_norm` so the
+/// caller can freely consume it.
 fn normalise_own_scores(scores: &Mat<f32>, l2_norm: bool) -> Mat<f32> {
     if l2_norm {
         cosine_normalise(scores)
@@ -125,6 +174,7 @@ type AnchorPairsScored = (Vec<(u32, u32)>, Vec<f32>);
 
 /// Find and score anchor pairs for a single batch pair in the rPCA path.
 ///
+/// Runs Seurat's four cross-basis kNN queries:
 /// - `nnaa`: batch-A self kNN in A's own basis
 /// - `nnbb`: batch-B self kNN in B's own basis
 /// - `nnab`: batch-A queries projected into B's basis, find nearest
@@ -132,7 +182,24 @@ type AnchorPairsScored = (Vec<(u32, u32)>, Vec<f32>);
 /// - `nnba`: batch-B queries projected into A's basis, find nearest
 ///   batch-A cells in A's basis
 ///
-/// Downstream MNN → score follows [super::seurat_anchors].
+/// Extracts MNN pairs via [find_anchor_pairs] and scores them via
+/// [score_anchors]. Unlike CCA, no gene-space filter step runs (matches
+/// Seurat's `FilterAnchors` being CCA-only).
+///
+/// ### Params
+///
+/// * `a_in_a` - Batch A in its own PCA basis, `(n_a, dims)`
+/// * `b_in_b` - Batch B in its own PCA basis, `(n_b, dims)`
+/// * `a_in_b` - Batch A projected into batch-B basis, `(n_a, dims)`
+/// * `b_in_a` - Batch B projected into batch-A basis, `(n_b, dims)`
+/// * `params` - Method parameters
+/// * `knn_params` - kNN backend parameters
+/// * `seed` - Random seed for the kNN backend
+/// * `verbose` - `0` silent, `1` normal, `2` detailed
+///
+/// ### Returns
+///
+/// `(pairs, scores)`. Empty when no MNN survives.
 #[allow(clippy::too_many_arguments)]
 fn find_rpca_anchors_for_pair(
     a_in_a: MatRef<f32>,
@@ -222,15 +289,19 @@ pub fn seurat_rpca_integration(
     let verbosity = parse_verbosity_level(verbose);
     let start_total = Instant::now();
 
-    let (_, n_batches) = process_batch_labels(batch_indices);
-    if n_batches < 2 {
-        return Err(BixverseErrors::NeedAtLeastTwoBatches { n_batches });
-    }
     if batch_indices.len() != cell_indices.len() {
         return Err(BixverseErrors::NumberLabelsNotEqualSampleNumber {
             label_length: batch_indices.len(),
             n_samples: cell_indices.len(),
         });
+    }
+
+    // n_batches = max_label + 1 to stay consistent with split_pca_by_batch.
+    // Empty slots (non-contiguous labels) are caught below by the
+    // per-batch minimum-cell check.
+    let n_batches = batch_indices.iter().copied().max().unwrap_or(0) + 1;
+    if n_batches < 2 {
+        return Err(BixverseErrors::NeedAtLeastTwoBatches { n_batches });
     }
 
     let min_cells = params.k_anchor.max(params.k_score) + 1;
@@ -248,6 +319,10 @@ pub fn seurat_rpca_integration(
         }
     }
 
+    if params.pca_params.clr && clr_offsets.is_none() {
+        return Err(BixverseErrors::OffsetsNotProvidedForClrPCA);
+    }
+
     // Base union PCA — used only for the merge-space embedding.
     let pca_scores = if let Some(scores) = pre_computed_pca {
         if verbosity.normal_verbosity() {
@@ -257,9 +332,6 @@ pub fn seurat_rpca_integration(
     } else {
         if verbosity.normal_verbosity() {
             println!("Computing base union PCA");
-        }
-        if params.pca_params.clr && clr_offsets.is_none() {
-            return Err(BixverseErrors::OffsetsNotProvidedForClrPCA);
         }
         if params.pca_params.randomised {
             let (sc, _load, _s, _) = pca_on_sc(
@@ -291,13 +363,15 @@ pub fn seurat_rpca_integration(
 
     let reader = ParallelSparseReader::new(f_path)?;
 
-    // Per-batch PCAs — rPCA needs each batch's own basis.
+    // Cache per-batch standardised HVG expression: loaded once, reused
+    // for per-batch PCA and every cross-projection. Memory: for large
+    // datasets this dominates ~ n_batches * n_hvg * avg_n_cells * 4B
+    // (e.g. 5 batches * 2000 * 20k * 4B ≈ 800 MB), still much smaller
+    // than Seurat's full-expression correction pipeline.
     if verbosity.normal_verbosity() {
-        println!("Computing per-batch PCAs ({n_batches} batches)");
+        println!("Loading per-batch standardised HVG expression");
     }
-
-    let mut per_batch_pca_scores: Vec<Mat<f32>> = Vec::with_capacity(n_batches);
-    let mut per_batch_loadings: Vec<Mat<f32>> = Vec::with_capacity(n_batches);
+    let mut per_batch_standardised: Vec<Mat<f32>> = Vec::with_capacity(n_batches);
     for b in 0..n_batches {
         let cells_b: Vec<usize> = per_batch_positions[b]
             .iter()
@@ -306,33 +380,28 @@ pub fn seurat_rpca_integration(
         let clr_b: Option<Vec<f64>> = clr_offsets.map(|offs| {
             per_batch_positions[b].iter().map(|&row| offs[row]).collect()
         });
+        let x = load_hvg_standardised(
+            &reader,
+            &cells_b,
+            gene_indices,
+            clr_b.as_deref(),
+            params.pca_params.clr,
+            params.pca_params.size_factor,
+        )?;
+        per_batch_standardised.push(x);
+    }
 
-        let (sc, load) = if params.pca_params.randomised {
-            let (sc, load, _s, _) = pca_on_sc(
-                f_path,
-                &cells_b,
-                gene_indices,
-                params.dims,
-                &params.pca_params,
-                clr_b.as_deref(),
-                seed,
-                false,
-                verbose,
-            )?;
-            (sc, load)
-        } else {
-            let (sc, load, _s) = pca_on_sc_sparse(
-                f_path,
-                &cells_b,
-                gene_indices,
-                params.dims,
-                &params.pca_params,
-                clr_b.as_deref(),
-                seed,
-                verbose,
-            )?;
-            (sc, load)
-        };
+    // Per-batch PCAs computed on the same standardised data used for
+    // projection so loadings and projected embeddings live in the same
+    // regime (fixes the mismatched-scaling defect).
+    if verbosity.normal_verbosity() {
+        println!("Computing per-batch PCAs ({n_batches} batches)");
+    }
+    let mut per_batch_pca_scores: Vec<Mat<f32>> = Vec::with_capacity(n_batches);
+    let mut per_batch_loadings: Vec<Mat<f32>> = Vec::with_capacity(n_batches);
+    for b in 0..n_batches {
+        let (sc, load) =
+            per_batch_pca_standardised(per_batch_standardised[b].as_ref(), params.dims, seed)?;
         per_batch_pca_scores.push(sc);
         per_batch_loadings.push(load);
     }
@@ -348,38 +417,6 @@ pub fn seurat_rpca_integration(
                 println!("rPCA: finding anchors for batch pair ({a}, {b})");
             }
 
-            let cells_a: Vec<usize> = per_batch_positions[a]
-                .iter()
-                .map(|&row| cell_indices[row])
-                .collect();
-            let cells_b: Vec<usize> = per_batch_positions[b]
-                .iter()
-                .map(|&row| cell_indices[row])
-                .collect();
-            let clr_a = clr_offsets.map(|offs| -> Vec<f64> {
-                per_batch_positions[a].iter().map(|&row| offs[row]).collect()
-            });
-            let clr_b = clr_offsets.map(|offs| -> Vec<f64> {
-                per_batch_positions[b].iter().map(|&row| offs[row]).collect()
-            });
-
-            let x_a = load_hvg_standardised(
-                &reader,
-                &cells_a,
-                gene_indices,
-                clr_a.as_deref(),
-                params.pca_params.clr,
-                params.pca_params.size_factor,
-            )?;
-            let x_b = load_hvg_standardised(
-                &reader,
-                &cells_b,
-                gene_indices,
-                clr_b.as_deref(),
-                params.pca_params.clr,
-                params.pca_params.size_factor,
-            )?;
-
             // Truncate loadings to `dims` used for anchoring.
             let dims_use = params.dims.min(per_batch_loadings[a].ncols())
                 .min(per_batch_loadings[b].ncols());
@@ -394,10 +431,19 @@ pub fn seurat_rpca_integration(
 
             let a_in_a = normalise_own_scores(&per_batch_pca_scores[a], params.l2_norm);
             let b_in_b = normalise_own_scores(&per_batch_pca_scores[b], params.l2_norm);
-            let a_in_b = project_into_basis(load_b_trunc.as_ref(), x_a.as_ref(), params.l2_norm);
-            let b_in_a = project_into_basis(load_a_trunc.as_ref(), x_b.as_ref(), params.l2_norm);
-            drop(x_a);
-            drop(x_b);
+            // Reuse the cached standardised HVG matrices — same regime as
+            // the per-batch loadings above, so projected embeddings sit
+            // in the same space as the batch's own scores.
+            let a_in_b = project_into_basis(
+                load_b_trunc.as_ref(),
+                per_batch_standardised[a].as_ref(),
+                params.l2_norm,
+            );
+            let b_in_a = project_into_basis(
+                load_a_trunc.as_ref(),
+                per_batch_standardised[b].as_ref(),
+                params.l2_norm,
+            );
 
             // Restrict own-basis embeddings to `dims_use` columns too.
             let a_in_a = Mat::from_fn(a_in_a.nrows(), dims_use, |i, j| a_in_a[(i, j)]);
@@ -434,6 +480,13 @@ pub fn seurat_rpca_integration(
             );
         }
     }
+
+    // Free the per-batch standardised cache before the merge — we're
+    // done with it, and the union PCA scores + per-batch loadings are
+    // enough for tree_merge_embeddings.
+    drop(per_batch_standardised);
+    drop(per_batch_loadings);
+    drop(per_batch_pca_scores);
 
     let merge_order = build_sample_tree(&anchor_counts);
 

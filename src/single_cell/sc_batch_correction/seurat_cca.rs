@@ -17,7 +17,7 @@ use thousands::Separable;
 use crate::core::math::pca_svd::randomised_svd_matfree;
 use crate::prelude::*;
 use crate::single_cell::sc_batch_correction::batch_utils::{
-    batch_knn_search, cosine_normalise, process_batch_labels, standardise_per_column,
+    batch_knn_search, cosine_normalise, standardise_per_column,
 };
 use crate::single_cell::sc_batch_correction::fast_mnn::{reorder_to_original, split_pca_by_batch};
 use crate::single_cell::sc_batch_correction::seurat_anchors::{
@@ -328,9 +328,29 @@ type AnchorPairsScored = (Vec<(u32, u32)>, Vec<f32>);
 
 /// Find and score anchor pairs for a single batch pair in the CCA path.
 ///
-/// Runs four kNN queries in the shared CC space, extracts MNN pairs,
-/// optionally filters them in gene-expression space, then scores the
-/// survivors by shared neighbourhood.
+/// Runs the four Seurat kNN queries in the shared L2-normalised CC space
+/// (`nnaa`, `nnbb`, `nnab`, `nnba` with `k = max(k_anchor, k_score)`),
+/// extracts MNN pairs via [find_anchor_pairs], optionally filters them
+/// in gene-expression space via [filter_anchor_pairs], then scores the
+/// survivors via [score_anchors] on the merged neighbourhood.
+///
+/// ### Params
+///
+/// * `cc_a` - Batch-A rows of the CC embedding, `(n_a, dims)`
+/// * `cc_b` - Batch-B rows of the CC embedding, `(n_b, dims)`
+/// * `filter_a` - Optional L2-normalised top-loading-gene expression for
+///   batch A, `(n_a, n_top_features)`. When `Some`, `FilterAnchors` runs.
+/// * `filter_b` - Same for batch B
+/// * `params` - Method parameters
+/// * `knn_params` - kNN backend parameters
+/// * `seed` - Random seed for the kNN backend
+/// * `verbose` - `0` silent, `1` normal, `2` detailed
+///
+/// ### Returns
+///
+/// `(pairs, scores)` where `pairs[i] = (a, b)` are indices into batch A
+/// / batch B and `scores[i]` is the rescaled shared-neighbour score.
+/// Both are empty when no MNN survives.
 #[allow(clippy::too_many_arguments)]
 fn find_cca_anchors_for_pair(
     cc_a: MatRef<f32>,
@@ -436,15 +456,19 @@ pub fn seurat_cca_integration(
     let verbosity = parse_verbosity_level(verbose);
     let start_total = Instant::now();
 
-    let (_, n_batches) = process_batch_labels(batch_indices);
-    if n_batches < 2 {
-        return Err(BixverseErrors::NeedAtLeastTwoBatches { n_batches });
-    }
     if batch_indices.len() != cell_indices.len() {
         return Err(BixverseErrors::NumberLabelsNotEqualSampleNumber {
             label_length: batch_indices.len(),
             n_samples: cell_indices.len(),
         });
+    }
+
+    // n_batches = max_label + 1 to stay consistent with split_pca_by_batch.
+    // Empty slots (non-contiguous labels) are caught below by the
+    // per-batch minimum-cell check.
+    let n_batches = batch_indices.iter().copied().max().unwrap_or(0) + 1;
+    if n_batches < 2 {
+        return Err(BixverseErrors::NeedAtLeastTwoBatches { n_batches });
     }
 
     let min_cells = params.k_anchor.max(params.k_score) + 1;

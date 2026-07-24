@@ -226,11 +226,27 @@ pub fn score_anchors(
     rescale_scores(&raw)
 }
 
-/// Rescale raw counts to `[0, 1]` via `(x - q_0.01) / (q_0.9 - q_0.01)` and
-/// clamp to `[0, 1]`. Isolated to make the mapping easy to test.
+/// Rescale raw shared-neighbour counts to `[0, 1]` via
+/// `(x - q_0.01) / (q_0.9 - q_0.01)`, clamped to `[0, 1]`.
+///
+/// Degenerate cases are treated as "trust all pairs equally": when there
+/// is a single pair, or when the 1st and 90th percentiles coincide
+/// (uniform counts), every anchor is returned with score `1.0`. Returning
+/// zeros in this case would silently cancel the downstream correction.
+///
+/// ### Params
+///
+/// * `raw` - Raw shared-neighbour counts, one per anchor pair
+///
+/// ### Returns
+///
+/// Rescaled scores in `[0, 1]`, length matches `raw`.
 fn rescale_scores(raw: &[u32]) -> Vec<f32> {
     if raw.is_empty() {
         return Vec::new();
+    }
+    if raw.len() == 1 {
+        return vec![1.0];
     }
 
     let mut sorted: Vec<f32> = raw.iter().map(|&x| x as f32).collect();
@@ -238,14 +254,28 @@ fn rescale_scores(raw: &[u32]) -> Vec<f32> {
 
     let q01 = quantile_sorted(&sorted, 0.01);
     let q90 = quantile_sorted(&sorted, 0.90);
-    let denom = (q90 - q01).max(1e-12);
+    let range = q90 - q01;
+    if range < 1e-12 {
+        return vec![1.0; raw.len()];
+    }
 
     raw.iter()
-        .map(|&x| ((x as f32 - q01) / denom).clamp(0.0, 1.0))
+        .map(|&x| ((x as f32 - q01) / range).clamp(0.0, 1.0))
         .collect()
 }
 
 /// Linear-interpolation quantile on a slice already sorted ascending.
+/// Mirrors R's default `quantile(type = 7)` used inside Seurat's
+/// `ScoreAnchors` rescale step.
+///
+/// ### Params
+///
+/// * `sorted` - Values in ascending order. Empty slice returns 0.
+/// * `q` - Quantile in `[0, 1]`
+///
+/// ### Returns
+///
+/// Interpolated quantile value.
 fn quantile_sorted(sorted: &[f32], q: f32) -> f32 {
     if sorted.is_empty() {
         return 0.0;
@@ -264,39 +294,11 @@ fn quantile_sorted(sorted: &[f32], q: f32) -> f32 {
 // Weights //
 ////////////
 
-/// Aggregated per-unique-query-anchor state used by [find_weights] and
-/// [apply_correction]. Grouping by unique query cell keeps the sparse
-/// weight matrix `n_unique x n_query` instead of `n_pairs x n_query`, and
-/// under Seurat's algebra the per-pair and per-unique formulations agree
-/// when normalisation is applied per query cell (all pairs sharing a query
-/// cell see identical kernel weights against any other query cell, so
-/// the summed-score aggregation preserves the same `W^T @ Delta` product).
+/// Build Seurat's per-anchor-pair integration matrix.
 ///
-/// ### Fields
-///
-/// * `unique_query_cells` - Distinct query cells (indices into batch B)
-///   present in any anchor pair, sorted ascending
-/// * `delta` - Per-unique-cell mean correction in embedding space, weighted
-///   by anchor score, shape `(n_unique, dims)`
-/// * `agg_score` - Summed anchor score per unique query cell, used as the
-///   score multiplier inside the Gaussian kernel
-#[derive(Clone, Debug)]
-pub struct AnchorAggregates {
-    /// Unique batch-B cell indices that appear in any anchor pair
-    pub unique_query_cells: Vec<u32>,
-    /// Score-weighted mean of `ref_embed[r] - query_embed[q]` per unique q
-    pub delta: Mat<f32>,
-    /// Sum of anchor scores at each unique q
-    pub agg_score: Vec<f32>,
-}
-
-/// Aggregate anchor pairs by unique query cell.
-///
-/// For each unique query cell `q`, compute:
-///   - `delta[q] = sum_a score_a * (ref_embed[r_a] - query_embed[q]) / sum_a score_a`
-///   - `agg_score[q] = sum_a score_a`
-///
-/// where the sum is over anchor pairs `(r_a, q_a)` with `q_a = q`.
+/// Row `i` of the returned matrix is `ref_embed[r_i] - query_embed[q_i]`
+/// for anchor pair `i = (r_i, q_i)`. Shape `(n_pairs, dims)`. Feeds
+/// [apply_correction] as `Delta` in `corrected = query - W^T @ Delta`.
 ///
 /// ### Params
 ///
@@ -306,84 +308,54 @@ pub struct AnchorAggregates {
 ///
 /// ### Returns
 ///
-/// [AnchorAggregates] ready to feed into [find_weights] and [apply_correction].
-pub fn aggregate_anchors(
+/// Dense integration matrix, one row per anchor pair.
+pub fn build_integration_matrix(
     anchors: &AnchorSet,
     ref_embed: MatRef<f32>,
     query_embed: MatRef<f32>,
-) -> AnchorAggregates {
+) -> Mat<f32> {
     let dims = ref_embed.ncols();
-
-    // Group anchor indices by query cell.
-    let mut buckets: Vec<(u32, Vec<usize>)> = {
-        let mut by_q: rustc_hash::FxHashMap<u32, Vec<usize>> = rustc_hash::FxHashMap::default();
-        for (i, &(_r, q)) in anchors.pairs.iter().enumerate() {
-            by_q.entry(q).or_default().push(i);
-        }
-        by_q.into_iter().collect()
-    };
-    buckets.sort_by_key(|(q, _)| *q);
-
-    let n_unique = buckets.len();
-    let mut delta = Mat::<f32>::zeros(n_unique, dims);
-    let mut agg_score = vec![0.0_f32; n_unique];
-    let mut unique_query_cells = Vec::with_capacity(n_unique);
-
-    for (row, (q, pair_idx)) in buckets.into_iter().enumerate() {
-        unique_query_cells.push(q);
-        let qi = q as usize;
-        let mut score_sum = 0.0_f32;
-        for &i in &pair_idx {
-            let (r, _q) = anchors.pairs[i];
-            let s = anchors.scores[i].max(0.0);
-            score_sum += s;
-            for d in 0..dims {
-                delta[(row, d)] += s * (ref_embed[(r as usize, d)] - query_embed[(qi, d)]);
-            }
-        }
-        let denom = score_sum.max(1e-12);
-        for d in 0..dims {
-            delta[(row, d)] /= denom;
-        }
-        agg_score[row] = score_sum;
-    }
-
-    AnchorAggregates {
-        unique_query_cells,
-        delta,
-        agg_score,
-    }
+    let n_pairs = anchors.pairs.len();
+    Mat::from_fn(n_pairs, dims, |i, d| {
+        let (r, q) = anchors.pairs[i];
+        ref_embed[(r as usize, d)] - query_embed[(q as usize, d)]
+    })
 }
 
-/// Compute the sparse Gaussian-kernel weight matrix of every query cell
-/// against every unique anchor cell in the current embedding.
+/// Compute the sparse per-pair Gaussian-kernel weight matrix.
 ///
-/// For each query cell `c`, find its `k_weight` nearest anchor query cells,
-/// then weight each near anchor `q` by
-/// `w = 1 - exp(- d_cq * agg_score[q] / (2 / sd)^2)`. Weights are
-/// column-normalised so each query cell's column sums to 1.
+/// Matches Seurat's `FindWeightsC` (`src/integration.cpp:47-51`) exactly:
+///   1. For each query cell `c`, find its `k_weight` nearest anchor
+///      query cells in the current embedding.
+///   2. Per-row-normalise the distances: `d_norm = 1 - d / d_max` so
+///      values live in `[0, 1]` with `1 = closest` (Seurat's R-side
+///      transform, `integration.R:4620`).
+///   3. For every anchor pair `p` whose query end is that near unique
+///      cell, push `w[p, c] = 1 - exp(- d_norm * score_p / (2/sd)^2)`.
+///      Multiple pairs sharing the same query cell each get their own
+///      row entry with their own score.
+///   4. Column-normalise so each query cell's column sums to 1.
 ///
-/// Returns a CSC sparse matrix with shape `(n_unique_anchors, n_query)` and
-/// at most `k_weight` non-zeros per column.
+/// The output is a CSC matrix of shape `(n_pairs, n_query)` with at most
+/// `k_weight * pairs_per_shared_cell_max` non-zeros per column.
 ///
 /// ### Params
 ///
-/// * `query_embed` - Query batch embedding, `(n_query, dims)`, in the
-///   current merge-space (post any prior corrections)
-/// * `aggregates` - [AnchorAggregates] from [aggregate_anchors]
+/// * `query_embed` - Query batch embedding in the current merge-space,
+///   `(n_query, dims)`
+/// * `anchors` - The anchor set for this batch pair
 /// * `k_weight` - Neighbours per query cell (Seurat default 100)
-/// * `sd` - Kernel bandwidth divisor (Seurat default 1.0). The kernel scale
-///   is `(2 / sd)^2`.
+/// * `sd` - Kernel bandwidth divisor (Seurat default 1.0); the kernel
+///   scale is `(2 / sd)^2`
 /// * `knn_params` - kNN backend parameters
-/// * `seed` - Random seed
+/// * `seed` - Random seed for the kNN backend
 ///
 /// ### Returns
 ///
-/// CSC sparse matrix of shape `(n_unique_anchors, n_query)` with each
-/// column normalised to sum to 1.
+/// CSC sparse matrix `(n_pairs, n_query)`, column-normalised.
 pub fn find_weights(
     query_embed: MatRef<f32>,
-    aggregates: &AnchorAggregates,
+    anchors: &AnchorSet,
     k_weight: usize,
     sd: f32,
     knn_params: &KnnParams,
@@ -392,12 +364,36 @@ pub fn find_weights(
     use crate::single_cell::sc_batch_correction::batch_utils::batch_knn_search;
 
     let n_query = query_embed.nrows();
-    let n_unique = aggregates.unique_query_cells.len();
+    let n_pairs = anchors.pairs.len();
 
-    // Build the anchor-cells embedding by row-gathering query_embed at the
-    // unique anchor cell indices.
+    // Unique query anchor cells + per-cell list of pair indices sharing it.
+    // Sorted ascending on the unique cell id for reproducibility.
+    let (unique_query_cells, pairs_per_unique): (Vec<u32>, Vec<Vec<u32>>) = {
+        let mut by_q: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
+        for (i, &(_r, q)) in anchors.pairs.iter().enumerate() {
+            by_q.entry(q).or_default().push(i as u32);
+        }
+        let mut items: Vec<(u32, Vec<u32>)> = by_q.into_iter().collect();
+        items.sort_by_key(|(q, _)| *q);
+        items.into_iter().unzip()
+    };
+    let n_unique = unique_query_cells.len();
+
+    if n_unique == 0 || n_pairs == 0 {
+        // No anchors → empty (n_pairs, n_query) CSC.
+        return Ok(CompressedSparseData2 {
+            data: Vec::new(),
+            indices: Vec::new(),
+            indptr: vec![0_u32; n_query + 1],
+            cs_type: CompressedSparseFormat::Csc,
+            data_2: None,
+            shape: (n_pairs, n_query),
+        });
+    }
+
+    // Anchor-cell embedding by row-gathering query_embed at unique cells.
     let anchor_embed = Mat::from_fn(n_unique, query_embed.ncols(), |i, j| {
-        query_embed[(aggregates.unique_query_cells[i] as usize, j)]
+        query_embed[(unique_query_cells[i] as usize, j)]
     });
 
     let safe_k = k_weight.min(n_unique);
@@ -406,19 +402,32 @@ pub fn find_weights(
 
     let kernel_denom = (2.0_f32 / sd.max(1e-6)).powi(2);
 
-    // Assemble per-column entries.
+    // Per-column sparse entries: (pair_index, weight).
     let per_col: Vec<Vec<(u32, f32)>> = (0..n_query)
         .into_par_iter()
         .map(|c| {
+            let d_max = nn_dist[c].iter().copied().fold(0.0_f32, f32::max);
+            // If all neighbours are at zero distance, treat every unique
+            // cell as maximally close: skip the divide-by-zero and use
+            // d_norm = 1.
+            let d_max_inv = if d_max > 0.0 { 1.0 / d_max } else { 0.0 };
+
             let mut entries: Vec<(u32, f32)> = Vec::with_capacity(safe_k);
             let mut total = 0.0_f32;
-            for (&idx, &d) in nn_idx[c].iter().zip(nn_dist[c].iter()) {
-                let score = aggregates.agg_score[idx].max(0.0);
-                let arg = d * score / kernel_denom;
-                let w = 1.0 - (-arg).exp();
-                if w > 0.0 {
-                    entries.push((idx as u32, w));
-                    total += w;
+            for (&unique_idx, &d) in nn_idx[c].iter().zip(nn_dist[c].iter()) {
+                let d_norm = if d_max > 0.0 {
+                    1.0 - d * d_max_inv
+                } else {
+                    1.0
+                };
+                for &p in pairs_per_unique[unique_idx].iter() {
+                    let score = anchors.scores[p as usize].max(0.0);
+                    let arg = d_norm * score / kernel_denom;
+                    let w = 1.0 - (-arg).exp();
+                    if w > 0.0 {
+                        entries.push((p, w));
+                        total += w;
+                    }
                 }
             }
             if total > 0.0 {
@@ -432,7 +441,7 @@ pub fn find_weights(
         })
         .collect();
 
-    // Pack into CSC (columns = query cells, rows = unique anchor cells).
+    // Pack per-column entries into CSC.
     let mut data: Vec<f32> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
     let mut indptr: Vec<u32> = Vec::with_capacity(n_query + 1);
@@ -451,30 +460,31 @@ pub fn find_weights(
         indptr,
         cs_type: CompressedSparseFormat::Csc,
         data_2: None,
-        shape: (n_unique, n_query),
+        shape: (n_pairs, n_query),
     })
 }
 
-///////////////
+////////////////
 // Correction //
-///////////////
+////////////////
 
 /// Apply Seurat's anchor-based correction to a query embedding.
 ///
-/// Computes `corrected = query_embed - W^T @ delta` where `W` is CSC
-/// `(n_unique_anchors, n_query)` and `delta` is dense
-/// `(n_unique_anchors, dims)`. Reference cells are untouched by this
-/// function; the caller is responsible for concatenating them post-hoc.
+/// Computes `corrected = query_embed - W^T @ Delta` where `W` is the CSC
+/// weight matrix from [find_weights], shape `(n_pairs, n_query)`, and
+/// `Delta` is the per-pair integration matrix from
+/// [build_integration_matrix], shape `(n_pairs, dims)`. Reference cells
+/// are untouched here; the caller concatenates them post-hoc.
 ///
 /// ### Params
 ///
 /// * `query_embed` - Query embedding, `(n_query, dims)`
-/// * `weights` - CSC weight matrix from [find_weights]
-/// * `delta` - Per-unique-anchor mean correction, from [aggregate_anchors]
+/// * `weights` - CSC weight matrix, `(n_pairs, n_query)`
+/// * `delta` - Per-anchor-pair integration matrix, `(n_pairs, dims)`
 ///
 /// ### Returns
 ///
-/// Corrected query embedding, same shape as input.
+/// Corrected query embedding, same shape as `query_embed`.
 pub fn apply_correction(
     query_embed: MatRef<f32>,
     weights: &CompressedSparseData2<f32>,
@@ -485,7 +495,7 @@ pub fn apply_correction(
 
     let mut out = Mat::<f32>::zeros(n_query, dims);
 
-    // Iterate over CSC columns in parallel — one column = one query cell.
+    // One CSC column = one query cell; parallelise across cells.
     let cols: Vec<Vec<f32>> = (0..n_query)
         .into_par_iter()
         .map(|c| {
@@ -738,21 +748,21 @@ pub fn tree_merge_embeddings(
                 scores: translated_scores,
                 batch_pair: (ref_id, query_id),
             };
-            let aggregates =
-                aggregate_anchors(&anchor_set, ref_group.embed.as_ref(), query_group.embed.as_ref());
+            let delta = build_integration_matrix(
+                &anchor_set,
+                ref_group.embed.as_ref(),
+                query_group.embed.as_ref(),
+            );
             let weights = find_weights(
                 query_group.embed.as_ref(),
-                &aggregates,
+                &anchor_set,
                 k_weight,
                 sd,
                 knn_params,
                 seed,
             )?;
-            let corrected = apply_correction(
-                query_group.embed.as_ref(),
-                &weights,
-                aggregates.delta.as_ref(),
-            );
+            let corrected =
+                apply_correction(query_group.embed.as_ref(), &weights, delta.as_ref());
             stack_vertical(&ref_group.embed, &corrected)
         };
 
@@ -776,6 +786,17 @@ pub fn tree_merge_embeddings(
     Ok((survivor.embed, survivor.union_cell_indices))
 }
 
+/// Concatenate two matrices vertically (`top` on top, `bottom` underneath).
+/// Both must have the same number of columns; this is asserted.
+///
+/// ### Params
+///
+/// * `top` - Upper block
+/// * `bottom` - Lower block
+///
+/// ### Returns
+///
+/// New `(top.nrows() + bottom.nrows(), top.ncols())` matrix.
 fn stack_vertical(top: &Mat<f32>, bottom: &Mat<f32>) -> Mat<f32> {
     assert_eq!(top.ncols(), bottom.ncols());
     let n_top = top.nrows();
@@ -862,30 +883,34 @@ mod tests {
     }
 
     #[test]
-    fn test_aggregate_anchors_dedup() {
-        // Two anchors share the same query cell.
+    fn test_build_integration_matrix_per_pair() {
+        // Two anchors: (r=0, q=5) with score 0.4, (r=1, q=5) with score 0.9.
+        // Under the per-pair formulation, integration matrix rows are
+        // ref_embed[r_i] - query_embed[q_i]; both use the SAME query cell
+        // 5 here so both rows subtract query_embed[5, :].
         let anchors = AnchorSet {
             pairs: vec![(0, 5), (1, 5)],
-            scores: vec![1.0, 1.0],
+            scores: vec![0.4, 0.9],
             batch_pair: (0, 1),
         };
         let ref_e: Mat<f32> = Mat::from_fn(2, 3, |i, j| (i * 3 + j) as f32);
-        let query_e: Mat<f32> = Mat::from_fn(6, 3, |_, _| 0.0);
-        let agg = aggregate_anchors(&anchors, ref_e.as_ref(), query_e.as_ref());
-        assert_eq!(agg.unique_query_cells, vec![5]);
-        // delta = mean of ref rows 0 and 1 minus query row 5 (all zeros)
+        let query_e: Mat<f32> = Mat::from_fn(6, 3, |_, j| 0.1 * j as f32);
+
+        let delta = build_integration_matrix(&anchors, ref_e.as_ref(), query_e.as_ref());
+        assert_eq!(delta.nrows(), 2);
+        assert_eq!(delta.ncols(), 3);
         for d in 0..3 {
-            let want = 0.5 * (ref_e[(0, d)] + ref_e[(1, d)]);
-            assert_relative_eq!(agg.delta[(0, d)], want, epsilon = 1e-6);
+            assert_relative_eq!(delta[(0, d)], ref_e[(0, d)] - query_e[(5, d)], epsilon = 1e-6);
+            assert_relative_eq!(delta[(1, d)], ref_e[(1, d)] - query_e[(5, d)], epsilon = 1e-6);
         }
-        assert_relative_eq!(agg.agg_score[0], 2.0);
     }
 
     #[test]
     fn test_apply_correction_identity_when_weights_zero() {
+        // Empty CSC weight matrix (shape n_pairs x n_query = 2 x 4).
+        // apply_correction should return the query embedding unchanged.
         let query: Mat<f32> = Mat::from_fn(4, 3, |i, j| (i as f32) + 0.1 * j as f32);
         let delta: Mat<f32> = Mat::from_fn(2, 3, |_, _| 5.0);
-        // Empty weight matrix (all zero) — shape (2, 4).
         let weights = CompressedSparseData2 {
             data: Vec::<f32>::new(),
             indices: Vec::<u32>::new(),
@@ -918,6 +943,163 @@ mod tests {
         assert_eq!(merges.len(), 2);
         assert_eq!(merges[0], (0, 1));
         assert_eq!(merges[1], (0, 2));
+    }
+
+    #[test]
+    fn test_rescale_scores_single_and_uniform() {
+        // Regression test for the silent-no-op case: a single anchor pair,
+        // or all-equal counts, should be treated as fully-trusted (score 1.0)
+        // rather than rescaled to 0.
+        assert_eq!(rescale_scores(&[7]), vec![1.0]);
+        assert_eq!(rescale_scores(&[5, 5, 5, 5]), vec![1.0; 4]);
+    }
+
+    #[test]
+    fn test_find_weights_close_anchor_wins() {
+        // Regression test for kernel direction: close anchors must get
+        // higher weight than farther anchors. Before the per-row
+        // `1 - d / d_max` transform, raw L2 distances flipped the
+        // ordering — far anchors dominated.
+        //
+        // Seurat's transform makes `d_norm = 0` for the k-th neighbour so
+        // its weight is exactly zero. We use three anchor cells and
+        // check the two non-zero survivors: close > middle. The far one
+        // is expected to drop out.
+        let anchors = AnchorSet {
+            pairs: vec![(0, 1), (1, 2), (2, 3)],
+            scores: vec![1.0, 1.0, 1.0],
+            batch_pair: (0, 1),
+        };
+        let query_embed = Mat::from_fn(4, 1, |i, _| match i {
+            0 => 0.0_f32,
+            1 => 1.0,
+            2 => 5.0,
+            3 => 100.0,
+            _ => 0.0,
+        });
+        let knn_params = KnnParams {
+            knn_method: "exhaustive".to_string(),
+            ann_dist: "euclidean".to_string(),
+            ..KnnParams::default()
+        };
+        let weights =
+            find_weights(query_embed.as_ref(), &anchors, 3, 1.0, &knn_params, 42).unwrap();
+
+        assert_eq!(weights.shape, (3, 4));
+        let start = weights.indptr[0] as usize;
+        let end = weights.indptr[1] as usize;
+        let col0: Vec<(u32, f32)> = (start..end)
+            .map(|i| (weights.indices[i], weights.data[i]))
+            .collect();
+        // Two anchors should survive (nearest two of three); the k-th
+        // (furthest, x=100) normalises to weight 0 and is filtered out.
+        assert_eq!(col0.len(), 2, "expected two non-zero anchor weights, got {col0:?}");
+        let close = col0.iter().find(|(i, _)| *i == 0).unwrap().1;
+        let middle = col0.iter().find(|(i, _)| *i == 1).unwrap().1;
+        assert!(
+            close > middle,
+            "close anchor weight {close} must exceed middle anchor weight {middle}"
+        );
+        assert!(col0.iter().all(|(i, _)| *i != 2), "far anchor should have zero weight");
+    }
+
+    #[test]
+    fn test_find_weights_columns_sum_to_one() {
+        // Every query-cell column with any non-zero entries must sum to 1
+        // (column-stochastic invariant). Mix of scores catches per-pair
+        // normalisation bugs.
+        let anchors = AnchorSet {
+            pairs: vec![(0, 1), (1, 2), (2, 3)],
+            scores: vec![0.5, 0.7, 0.9],
+            batch_pair: (0, 1),
+        };
+        let query_embed = Mat::from_fn(4, 2, |i, j| i as f32 + j as f32 * 0.1);
+        let knn_params = KnnParams {
+            knn_method: "exhaustive".to_string(),
+            ann_dist: "euclidean".to_string(),
+            ..KnnParams::default()
+        };
+        let weights =
+            find_weights(query_embed.as_ref(), &anchors, 3, 1.0, &knn_params, 42).unwrap();
+        for c in 0..4 {
+            let start = weights.indptr[c] as usize;
+            let end = weights.indptr[c + 1] as usize;
+            if end > start {
+                let total: f32 = weights.data[start..end].iter().sum();
+                assert!(
+                    (total - 1.0).abs() < 1e-4,
+                    "column {c} sums to {total}, expected 1.0"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_tree_merge_exercises_flip_branch() {
+        // With 3 batches merged in order (0, 2) then (0, 1), the second
+        // merge sees group 0 = {batch 0, batch 2} vs query group = {batch 1}.
+        // When iterating batch pairs inside, `b_r = 2, b_q = 1` triggers
+        // the canonical-key flip (b_r > b_q). Confirms the flip branch
+        // resolves anchor indices correctly without panicking.
+        let e0 = Mat::from_fn(3, 2, |i, j| if j == 0 { i as f32 * 0.1 } else { 0.0 });
+        let e1 = Mat::from_fn(3, 2, |i, j| if j == 0 { 10.0 + i as f32 * 0.1 } else { 0.0 });
+        let e2 = Mat::from_fn(3, 2, |i, j| if j == 0 { 0.05 + i as f32 * 0.1 } else { 0.0 });
+
+        let mut anchors_by_pair: FxHashMap<(usize, usize), AnchorSet> = FxHashMap::default();
+        anchors_by_pair.insert(
+            (0, 1),
+            AnchorSet {
+                pairs: vec![(0, 0)],
+                scores: vec![1.0],
+                batch_pair: (0, 1),
+            },
+        );
+        anchors_by_pair.insert(
+            (0, 2),
+            AnchorSet {
+                pairs: vec![(0, 0), (1, 1), (2, 2)],
+                scores: vec![1.0, 1.0, 1.0],
+                batch_pair: (0, 2),
+            },
+        );
+        anchors_by_pair.insert(
+            (1, 2),
+            AnchorSet {
+                pairs: vec![(0, 0)],
+                scores: vec![1.0],
+                batch_pair: (1, 2),
+            },
+        );
+
+        // Force merge order (0, 2) then (0, 1) via anchor counts.
+        let counts = vec![vec![0, 1, 3], vec![1, 0, 1], vec![3, 1, 0]];
+        let merge_order = build_sample_tree(&counts);
+        assert_eq!(merge_order[0], (0, 2));
+
+        let knn_params = KnnParams {
+            knn_method: "exhaustive".to_string(),
+            ann_dist: "euclidean".to_string(),
+            ..KnnParams::default()
+        };
+        let (out, index_map) = tree_merge_embeddings(
+            vec![e0, e1, e2],
+            vec![vec![0, 1, 2], vec![3, 4, 5], vec![6, 7, 8]],
+            &anchors_by_pair,
+            &merge_order,
+            3,
+            1.0,
+            &knn_params,
+            42,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out.nrows(), 9);
+        assert_eq!(out.ncols(), 2);
+        assert_eq!(index_map.len(), 9);
+        // Sanity: index_map covers each union cell exactly once.
+        let mut sorted = index_map.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, (0..9).collect::<Vec<_>>());
     }
 
     #[test]
