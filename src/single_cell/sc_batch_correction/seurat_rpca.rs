@@ -1,10 +1,9 @@
 //! Seurat reciprocal-PCA (rPCA) anchor-based batch correction.
 //!
-//! Same anchor pipeline as [super::seurat_cca] but with a cheaper
-//! per-pair anchor space: each batch keeps its own PCA basis, and the
-//! other batch's HVG expression is projected into it. Cross-batch kNN
-//! queries then live in these projected bases. Anchor filtering
-//! (`FilterAnchors`) is CCA-only in Seurat and is skipped here.
+//! Same anchor pipeline as [super::seurat_cca] but with a cheaper per-pair
+//! anchor space: each batch keeps its own PCA basis, and the other batch's HVG
+//! expression is projected into it. Cross-batch kNN queries then live in these
+//! projected bases. Anchor filtering is CCA-only in Seurat and is skipped here.
 
 use faer::{Mat, MatRef};
 use rustc_hash::FxHashMap;
@@ -21,22 +20,18 @@ use crate::single_cell::sc_batch_correction::seurat_anchors::{
 use crate::single_cell::sc_batch_correction::seurat_cca::load_hvg_standardised;
 use crate::single_cell::sc_processing::pca::{SingleCellPcaParams, pca_on_sc, pca_on_sc_sparse};
 
+///////////
+// Types //
+///////////
+
+/// Anchor pairs plus their per-pair scores, one score per pair.
+type AnchorPairsScored = (Vec<(u32, u32)>, Vec<f32>);
+
 ////////////
 // Params //
 ////////////
 
 /// Parameters for Seurat rPCA integration.
-///
-/// ### Fields
-///
-/// * `dims` - PC dimensions used for anchor kNN queries
-/// * `k_anchor` - Neighbours per cell for MNN anchor detection
-/// * `k_score` - Neighbours per cell in shared-neighbour scoring
-/// * `k_weight` - Neighbours per query cell for kernel weighting
-/// * `l2_norm` - L2-normalise projected embeddings per cell
-/// * `sd` - Kernel bandwidth divisor
-/// * `knn_params` - Backend for all kNN queries
-/// * `pca_params` - Base PCA params (also used for per-batch PCAs)
 #[derive(Clone, Debug)]
 pub struct SeuratRpcaParams {
     /// PC dimensions for anchor kNN queries
@@ -76,14 +71,9 @@ impl Default for SeuratRpcaParams {
 // rPCA anchor space //
 ///////////////////////
 
-/// Compute a per-batch PCA directly on per-cell-standardised HVG
-/// expression so both loadings and scores live in the same regime as
-/// the projected data used by [project_into_basis]. This is the fix for
-/// the mismatched-scaling issue: Seurat's `ReciprocalProject`
-/// (`integration.R:502-594`) projects `scale.data` through loadings
-/// computed on the same `scale.data`. Using `pca_on_sc*` here would
-/// return loadings from a different scaling regime and the projections
-/// wouldn't sit in the same space as the batch's own scores.
+/// Compute a per-batch PCA directly on per-cell-standardised HVG expression so
+/// both loadings and scores live in the same regime as the projected data used
+/// by [project_into_basis].
 ///
 /// The SVD is done via [randomised_svd] on the standardised `(n_hvg,
 /// n_cells)` matrix directly. Left singular vectors `U` are the gene-space
@@ -112,7 +102,10 @@ fn per_batch_pca_standardised(
 
     // Truncate to `effective` columns (randomised SVD may return more due
     // to oversampling).
-    let keep = effective.min(svd.s.len()).min(svd.u.ncols()).min(svd.v.ncols());
+    let keep = effective
+        .min(svd.s.len())
+        .min(svd.u.ncols())
+        .min(svd.v.ncols());
     let loadings = Mat::from_fn(n_hvg, keep, |i, j| svd.u[(i, j)]);
     let scores = Mat::from_fn(n_cells, keep, |i, j| svd.v[(i, j)] * svd.s[j]);
     Ok((scores, loadings))
@@ -144,9 +137,9 @@ fn project_into_basis(loadings_a: MatRef<f32>, x_b: MatRef<f32>, l2_norm: bool) 
     }
 }
 
-/// Take a per-batch PCA scores matrix and optionally L2-normalise its
-/// rows so the batch's own scores sit in the same cosine space as
-/// cross-projected embeddings for anchor kNN.
+/// Take a per-batch PCA scores matrix and optionally L2-normalise its rows so
+/// the batch's own scores sit in the same cosine space as cross-projected
+/// embeddings for anchor kNN.
 ///
 /// ### Params
 ///
@@ -165,12 +158,9 @@ fn normalise_own_scores(scores: &Mat<f32>, l2_norm: bool) -> Mat<f32> {
     }
 }
 
-///////////////////////////
+////////////////////////////
 // Per-pair anchor finder //
-///////////////////////////
-
-/// Anchor pairs plus their per-pair scores, one score per pair.
-type AnchorPairsScored = (Vec<(u32, u32)>, Vec<f32>);
+////////////////////////////
 
 /// Find and score anchor pairs for a single batch pair in the rPCA path.
 ///
@@ -244,12 +234,12 @@ fn find_rpca_anchors_for_pair(
 
 /// Perform Seurat rPCA batch integration on single-cell data.
 ///
-/// Computes a per-batch PCA on HVGs, cross-projects standardised HVG
-/// expression of each batch into every other batch's basis, extracts
-/// anchors via MNN in these projected spaces, scores them, then applies
-/// Seurat's kernel-weighted correction on the union PCA embedding in
-/// tree-merge order derived from pairwise anchor counts. The corrected
-/// embedding is returned in the original cell order.
+/// Computes a per-batch PCA on HVGs, cross-projects standardised HVG expression
+/// of each batch into every other batch's basis, extracts anchors via MNN in
+/// these projected spaces, scores them, then applies Seurat's kernel-weighted
+/// correction on the union PCA embedding in tree-merge order derived from
+/// pairwise anchor counts. The corrected embedding is returned in the original
+/// cell order.
 ///
 /// Unlike CCA, no anchor gene-space filter is applied (matches Seurat).
 ///
@@ -364,10 +354,10 @@ pub fn seurat_rpca_integration(
     let reader = ParallelSparseReader::new(f_path)?;
 
     // Cache per-batch standardised HVG expression: loaded once, reused
-    // for per-batch PCA and every cross-projection. Memory: for large
-    // datasets this dominates ~ n_batches * n_hvg * avg_n_cells * 4B
-    // (e.g. 5 batches * 2000 * 20k * 4B ≈ 800 MB), still much smaller
-    // than Seurat's full-expression correction pipeline.
+    // for per-batch PCA and every cross-projection.
+    //
+    // TODO: maybe worth thinking about off-loading data to disk
+    // temporarily ... ?
     if verbosity.normal_verbosity() {
         println!("Loading per-batch standardised HVG expression");
     }
@@ -378,7 +368,10 @@ pub fn seurat_rpca_integration(
             .map(|&row| cell_indices[row])
             .collect();
         let clr_b: Option<Vec<f64>> = clr_offsets.map(|offs| {
-            per_batch_positions[b].iter().map(|&row| offs[row]).collect()
+            per_batch_positions[b]
+                .iter()
+                .map(|&row| offs[row])
+                .collect()
         });
         let x = load_hvg_standardised(
             &reader,
@@ -391,9 +384,6 @@ pub fn seurat_rpca_integration(
         per_batch_standardised.push(x);
     }
 
-    // Per-batch PCAs computed on the same standardised data used for
-    // projection so loadings and projected embeddings live in the same
-    // regime (fixes the mismatched-scaling defect).
     if verbosity.normal_verbosity() {
         println!("Computing per-batch PCAs ({n_batches} batches)");
     }
@@ -418,22 +408,20 @@ pub fn seurat_rpca_integration(
             }
 
             // Truncate loadings to `dims` used for anchoring.
-            let dims_use = params.dims.min(per_batch_loadings[a].ncols())
+            let dims_use = params
+                .dims
+                .min(per_batch_loadings[a].ncols())
                 .min(per_batch_loadings[b].ncols());
-            let load_a_trunc =
-                Mat::from_fn(per_batch_loadings[a].nrows(), dims_use, |i, j| {
-                    per_batch_loadings[a][(i, j)]
-                });
-            let load_b_trunc =
-                Mat::from_fn(per_batch_loadings[b].nrows(), dims_use, |i, j| {
-                    per_batch_loadings[b][(i, j)]
-                });
+            let load_a_trunc = Mat::from_fn(per_batch_loadings[a].nrows(), dims_use, |i, j| {
+                per_batch_loadings[a][(i, j)]
+            });
+            let load_b_trunc = Mat::from_fn(per_batch_loadings[b].nrows(), dims_use, |i, j| {
+                per_batch_loadings[b][(i, j)]
+            });
 
             let a_in_a = normalise_own_scores(&per_batch_pca_scores[a], params.l2_norm);
             let b_in_b = normalise_own_scores(&per_batch_pca_scores[b], params.l2_norm);
-            // Reuse the cached standardised HVG matrices — same regime as
-            // the per-batch loadings above, so projected embeddings sit
-            // in the same space as the batch's own scores.
+
             let a_in_b = project_into_basis(
                 load_b_trunc.as_ref(),
                 per_batch_standardised[a].as_ref(),
@@ -445,7 +433,7 @@ pub fn seurat_rpca_integration(
                 params.l2_norm,
             );
 
-            // Restrict own-basis embeddings to `dims_use` columns too.
+            // restrict own-basis embeddings to `dims_use` columns too.
             let a_in_a = Mat::from_fn(a_in_a.nrows(), dims_use, |i, j| a_in_a[(i, j)]);
             let b_in_b = Mat::from_fn(b_in_b.nrows(), dims_use, |i, j| b_in_b[(i, j)]);
 
@@ -481,9 +469,7 @@ pub fn seurat_rpca_integration(
         }
     }
 
-    // Free the per-batch standardised cache before the merge — we're
-    // done with it, and the union PCA scores + per-batch loadings are
-    // enough for tree_merge_embeddings.
+    // drop everything unneeded
     drop(per_batch_standardised);
     drop(per_batch_loadings);
     drop(per_batch_pca_scores);
@@ -508,10 +494,7 @@ pub fn seurat_rpca_integration(
     let corrected = reorder_to_original(&merged, &index_map);
 
     if verbosity.normal_verbosity() {
-        println!(
-            "rPCA integration complete in {:.2?}",
-            start_total.elapsed()
-        );
+        println!("rPCA integration complete in {:.2?}", start_total.elapsed());
     }
 
     Ok(corrected)

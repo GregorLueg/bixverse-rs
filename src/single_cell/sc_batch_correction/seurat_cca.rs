@@ -28,25 +28,18 @@ use crate::single_cell::sc_processing::pca::{
     SingleCellPcaParams, pca_on_sc, pca_on_sc_sparse, scale_csc_chunk,
 };
 
+///////////
+// Types //
+///////////
+
+/// Anchor pairs plus their per-pair scores, one score per pair.
+type AnchorPairsScored = (Vec<(u32, u32)>, Vec<f32>);
+
 ////////////
 // Params //
 ////////////
 
 /// Parameters for Seurat CCA integration.
-///
-/// ### Fields
-///
-/// * `num_cc` - Number of canonical correlation dimensions to compute
-/// * `dims` - CC dimensions used for anchor kNN queries (`<= num_cc`)
-/// * `k_anchor` - Neighbours per cell for MNN anchor detection
-/// * `k_filter` - Neighbours per cell in the gene-space filter
-/// * `k_score` - Neighbours per cell in shared-neighbour scoring
-/// * `k_weight` - Neighbours per query cell for kernel weighting
-/// * `n_top_features` - Top-loading genes for [filter_anchor_pairs]
-/// * `l2_norm` - Whether to L2-normalise the CC embedding
-/// * `sd` - Kernel bandwidth divisor for weighting (Seurat default 1.0)
-/// * `knn_params` - Backend for all kNN queries
-/// * `pca_params` - Base PCA params (used when no pre-computed PCA is passed)
 #[derive(Clone, Debug)]
 pub struct SeuratCcaParams {
     /// Number of canonical correlation dimensions
@@ -73,6 +66,7 @@ pub struct SeuratCcaParams {
     pub pca_params: SingleCellPcaParams,
 }
 
+/// Defaults
 impl Default for SeuratCcaParams {
     fn default() -> Self {
         Self {
@@ -95,10 +89,9 @@ impl Default for SeuratCcaParams {
 // Loaders //
 /////////////
 
-/// Load log-normalised HVG expression for a set of cells and standardise
-/// each cell (column) to mean 0, sd 1 across features. Rows are HVGs in
-/// the order of `hvg_indices`; columns follow the order of
-/// `batch_cell_indices`.
+/// Load log-normalised HVG expression for a set of cells and standardise each
+/// cell (column) to mean 0, sd 1 across features. Rows are HVGs in the order of
+/// `hvg_indices`; columns follow the order of `batch_cell_indices`.
 ///
 /// ### Params
 ///
@@ -144,9 +137,9 @@ pub(crate) fn load_hvg_standardised(
     Ok(standardise_per_column(mat.as_ref()))
 }
 
-/// Load L2-normalised (per cell) expression on a fixed feature subset for
-/// the gene-space anchor filter. Rows are cells, columns are the filter
-/// features. Each row is normalised to unit L2.
+/// Load L2-normalised (per cell) expression on a fixed feature subset for the
+/// gene-space anchor filter. Rows are cells, columns are the filter features.
+/// Each row is normalised to unit L2.
 ///
 /// ### Params
 ///
@@ -196,8 +189,8 @@ fn load_filter_expression(
 // CCA anchor space //
 //////////////////////
 
-/// Build a shared canonical-correlation embedding for two standardised
-/// batches via matrix-free randomised SVD of `M = X1^T @ X2`.
+/// Build a shared canonical-correlation embedding for two standardised batches
+/// via matrix-free randomised SVD of `M = X1^T @ X2`.
 ///
 /// `M` is never materialised: [randomised_svd_matfree] takes closures that
 /// factor the matvecs through `X1` and `X2`. Memory stays
@@ -241,12 +234,15 @@ fn build_cca_anchor_space(
 
     let svd = randomised_svd_matfree(n_a, n_b, num_cc, seed, None, None, apply, apply_t)?;
 
-    // Truncate to num_cc columns (matfree may return more due to oversampling).
-    let keep = num_cc.min(svd.s.len()).min(svd.u.ncols()).min(svd.v.ncols());
+    // truncate to num_cc columns (matfree may return more due to oversampling).
+    let keep = num_cc
+        .min(svd.s.len())
+        .min(svd.u.ncols())
+        .min(svd.v.ncols());
     let mut cc_a = Mat::from_fn(n_a, keep, |i, j| svd.u[(i, j)]);
     let mut cc_b = Mat::from_fn(n_b, keep, |i, j| svd.v[(i, j)]);
 
-    // Sign convention: force the first non-zero entry of each column of the
+    // sign convention: force the first non-zero entry of each column of the
     // concatenated embedding to be positive (matches Seurat's flip).
     for k in 0..keep {
         let mut pivot = 0.0_f32;
@@ -282,10 +278,10 @@ fn build_cca_anchor_space(
     Ok((cc_a, cc_b))
 }
 
-/// Pick the top-`n_top` genes by maximum absolute PCA loading across the
-/// first `dims` components. Used to prime [load_filter_expression] for the
-/// gene-space anchor filter. Falls back to the number of available genes
-/// when `n_top` exceeds them.
+/// Pick the top-`n_top` genes by maximum absolute PCA loading across the first
+/// `dims` components. Used to prime [load_filter_expression] for the gene-space
+/// anchor filter. Falls back to the number of available genes when `n_top`
+/// exceeds them.
 ///
 /// ### Params
 ///
@@ -319,20 +315,17 @@ fn top_loading_gene_positions(loadings: MatRef<f32>, dims: usize, n_top: usize) 
     kept
 }
 
-///////////////////////////
+////////////////////////////
 // Per-pair anchor finder //
-///////////////////////////
-
-/// Anchor pairs plus their per-pair scores, one score per pair.
-type AnchorPairsScored = (Vec<(u32, u32)>, Vec<f32>);
+////////////////////////////
 
 /// Find and score anchor pairs for a single batch pair in the CCA path.
 ///
 /// Runs the four Seurat kNN queries in the shared L2-normalised CC space
-/// (`nnaa`, `nnbb`, `nnab`, `nnba` with `k = max(k_anchor, k_score)`),
-/// extracts MNN pairs via [find_anchor_pairs], optionally filters them
-/// in gene-expression space via [filter_anchor_pairs], then scores the
-/// survivors via [score_anchors] on the merged neighbourhood.
+/// (`nnaa`, `nnbb`, `nnab`, `nnba` with `k = max(k_anchor, k_score)`), extracts
+/// MNN pairs via [find_anchor_pairs], optionally filters them in
+/// gene-expression space via [filter_anchor_pairs], then scores the survivors
+/// via [score_anchors] on the merged neighbourhood.
 ///
 /// ### Params
 ///
@@ -406,18 +399,17 @@ fn find_cca_anchors_for_pair(
 
 /// Perform Seurat CCA batch integration on single-cell data.
 ///
-/// Computes a shared CCA embedding for every batch pair, extracts and
-/// scores anchors, then applies Seurat's kernel-weighted correction on
-/// the union PCA embedding in tree-merge order derived from the pairwise
-/// anchor counts. The corrected embedding is returned in the original
-/// cell order.
+/// Computes a shared CCA embedding for every batch pair, extracts and scores
+/// anchors, then applies Seurat's kernel-weighted correction on the union PCA
+/// embedding in tree-merge order derived from the pairwise anchor counts. The
+/// corrected embedding is returned in the original cell order.
 ///
-/// This port skips Seurat's per-gene `ScaleData` step and works directly
-/// from the per-cell standardised log-normalised HVG expression. In
-/// practice this produces close-to-identical anchor structure at
-/// significantly reduced memory: `M = X1^T @ X2` is never materialised
-/// (matrix-free randomised SVD) and the correction runs on the embedding
-/// (dims x cells), not on full log-expression.
+/// This port skips Seurat's per-gene `ScaleData` step and works directly from
+/// the per-cell standardised log-normalised HVG expression. In practice this
+/// produces close-to-identical anchor structure at significantly reduced
+/// memory: `M = X1^T @ X2` is never materialised (matrix-free randomised SVD)
+/// and the correction runs on the embedding (dims x cells), not on full
+/// log-expression.
 ///
 /// ### Params
 ///
@@ -541,15 +533,10 @@ pub fn seurat_cca_integration(
 
     // Top-loading genes (positions into gene_indices) for the gene-space
     // filter. Absolute file gene indices are `gene_indices[pos]`.
-    let top_positions = top_loading_gene_positions(
-        pca_loadings.as_ref(),
-        params.dims,
-        params.n_top_features,
-    );
-    let top_absolute_genes: Vec<usize> = top_positions
-        .iter()
-        .map(|&pos| gene_indices[pos])
-        .collect();
+    let top_positions =
+        top_loading_gene_positions(pca_loadings.as_ref(), params.dims, params.n_top_features);
+    let top_absolute_genes: Vec<usize> =
+        top_positions.iter().map(|&pos| gene_indices[pos]).collect();
 
     let reader = ParallelSparseReader::new(f_path)?;
 
@@ -575,10 +562,16 @@ pub fn seurat_cca_integration(
                 .collect();
 
             let clr_a = clr_offsets.map(|offs| -> Vec<f64> {
-                per_batch_positions[a].iter().map(|&row| offs[row]).collect()
+                per_batch_positions[a]
+                    .iter()
+                    .map(|&row| offs[row])
+                    .collect()
             });
             let clr_b = clr_offsets.map(|offs| -> Vec<f64> {
-                per_batch_positions[b].iter().map(|&row| offs[row]).collect()
+                per_batch_positions[b]
+                    .iter()
+                    .map(|&row| offs[row])
+                    .collect()
             });
 
             let x1 = load_hvg_standardised(
@@ -690,10 +683,7 @@ pub fn seurat_cca_integration(
     let corrected = reorder_to_original(&merged, &index_map);
 
     if verbosity.normal_verbosity() {
-        println!(
-            "CCA integration complete in {:.2?}",
-            start_total.elapsed()
-        );
+        println!("CCA integration complete in {:.2?}", start_total.elapsed());
     }
 
     Ok(corrected)

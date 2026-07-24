@@ -1,16 +1,15 @@
 //! Shared primitives for Seurat-style anchor-based batch correction.
 //!
-//! This module holds everything that is common to the CCA and rPCA
-//! integration paths: the anchor set representation, mutual-nearest-neighbour
-//! anchor extraction, shared-neighbour scoring, Gaussian-kernel weight
-//! computation, correction application on an embedding, and the greedy
-//! hierarchical merge tree.
+//! This module holds everything that is common to the CCA and rPCA integration
+//! paths: the anchor set representation, mutual-nearest-neighbour anchor
+//! extraction, shared-neighbour scoring, Gaussian-kernel weight computation,
+//! correction application on an embedding, and the greedy hierarchical merge
+//! tree.
 //!
 //! CCA and rPCA differ only in how the shared low-dimensional space between
 //! a batch pair is constructed. Once that space (or spaces, for rPCA) is
 //! available, callers issue four kNN queries themselves and hand the
-//! neighbour lists here. Keeps this module free of the CCA/rPCA-specific
-//! math.
+//! neighbour lists here.
 //!
 //! References: Stuart et al., Cell, 2019 (Seurat v3).
 
@@ -18,7 +17,7 @@ use faer::{Mat, MatRef};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::core::math::sparse::{CompressedSparseData2, CompressedSparseFormat};
+use crate::core::math::vector_helpers::quantile_sorted;
 use crate::prelude::*;
 
 ///////////////
@@ -71,8 +70,8 @@ impl AnchorSet {
 /// * `nnab` - For each cell in batch A, its neighbours in batch B (row length
 ///   >= `k_anchor`; only the first `k_anchor` are consulted)
 /// * `nnba` - Symmetric for batch B
-/// * `k_anchor` - Neighbours to consider per side. Rows shorter than
-///   `k_anchor` are consulted in full.
+/// * `k_anchor` - Neighbours to consider per side. Rows shorter than `k_anchor`
+///   are consulted in full.
 ///
 /// ### Returns
 ///
@@ -114,9 +113,9 @@ pub fn find_anchor_pairs(
     pairs
 }
 
-//////////////
+///////////////
 // Filtering //
-//////////////
+///////////////
 
 /// Filter anchor pairs by an additional cross-batch kNN graph.
 ///
@@ -156,9 +155,9 @@ pub fn filter_anchor_pairs(
         .collect()
 }
 
-////////////
+/////////////
 // Scoring //
-////////////
+/////////////
 
 /// Score every anchor pair by the number of shared neighbours it induces on
 /// the merged batch-A + batch-B neighbourhood graph, then rescale to `[0, 1]`
@@ -229,10 +228,10 @@ pub fn score_anchors(
 /// Rescale raw shared-neighbour counts to `[0, 1]` via
 /// `(x - q_0.01) / (q_0.9 - q_0.01)`, clamped to `[0, 1]`.
 ///
-/// Degenerate cases are treated as "trust all pairs equally": when there
-/// is a single pair, or when the 1st and 90th percentiles coincide
-/// (uniform counts), every anchor is returned with score `1.0`. Returning
-/// zeros in this case would silently cancel the downstream correction.
+/// Degenerate cases are treated as "trust all pairs equally": when there is a
+/// single pair, or when the 1st and 90th percentiles coincide (uniform counts),
+/// every anchor is returned with score `1.0`. Returning zeros in this case
+/// would silently cancel the downstream correction.
 ///
 /// ### Params
 ///
@@ -264,35 +263,9 @@ fn rescale_scores(raw: &[u32]) -> Vec<f32> {
         .collect()
 }
 
-/// Linear-interpolation quantile on a slice already sorted ascending.
-/// Mirrors R's default `quantile(type = 7)` used inside Seurat's
-/// `ScoreAnchors` rescale step.
-///
-/// ### Params
-///
-/// * `sorted` - Values in ascending order. Empty slice returns 0.
-/// * `q` - Quantile in `[0, 1]`
-///
-/// ### Returns
-///
-/// Interpolated quantile value.
-fn quantile_sorted(sorted: &[f32], q: f32) -> f32 {
-    if sorted.is_empty() {
-        return 0.0;
-    }
-    if sorted.len() == 1 {
-        return sorted[0];
-    }
-    let pos = q * (sorted.len() as f32 - 1.0);
-    let lo = pos.floor() as usize;
-    let hi = (lo + 1).min(sorted.len() - 1);
-    let frac = pos - lo as f32;
-    sorted[lo] * (1.0 - frac) + sorted[hi] * frac
-}
-
-////////////
+/////////////
 // Weights //
-////////////
+/////////////
 
 /// Build Seurat's per-anchor-pair integration matrix.
 ///
@@ -324,16 +297,17 @@ pub fn build_integration_matrix(
 
 /// Compute the sparse per-pair Gaussian-kernel weight matrix.
 ///
-/// Matches Seurat's `FindWeightsC` (`src/integration.cpp:47-51`) exactly:
-///   1. For each query cell `c`, find its `k_weight` nearest anchor
-///      query cells in the current embedding.
-///   2. Per-row-normalise the distances: `d_norm = 1 - d / d_max` so
-///      values live in `[0, 1]` with `1 = closest` (Seurat's R-side
-///      transform, `integration.R:4620`).
-///   3. For every anchor pair `p` whose query end is that near unique
-///      cell, push `w[p, c] = 1 - exp(- d_norm * score_p / (2/sd)^2)`.
-///      Multiple pairs sharing the same query cell each get their own
-///      row entry with their own score.
+/// Matches Seurat's `FindWeightsC` exactly:
+///
+///   1. For each query cell `c`, find its `k_weight` nearest anchor query
+///      cells in the current embedding.
+///   2. Per-row-normalise the distances: `d_norm = 1 - d / d_max` so values
+///      live in `[0, 1]` with `1 = closest` (Seurat's R-side transform,
+///      `integration.R:4620`).
+///   3. For every anchor pair `p` whose query end is that near unique cell,
+///      push `w[p, c] = 1 - exp(- d_norm * score_p / (2/sd)^2)`. Multiple pairs
+///      sharing the same query cell each get their own row entry with their own
+///      score.
 ///   4. Column-normalise so each query cell's column sums to 1.
 ///
 /// The output is a CSC matrix of shape `(n_pairs, n_query)` with at most
@@ -397,8 +371,14 @@ pub fn find_weights(
     });
 
     let safe_k = k_weight.min(n_unique);
-    let (nn_idx, nn_dist) =
-        batch_knn_search(query_embed, anchor_embed.as_ref(), safe_k, knn_params, seed, 0)?;
+    let (nn_idx, nn_dist) = batch_knn_search(
+        query_embed,
+        anchor_embed.as_ref(),
+        safe_k,
+        knn_params,
+        seed,
+        0,
+    )?;
 
     let kernel_denom = (2.0_f32 / sd.max(1e-6)).powi(2);
 
@@ -528,11 +508,11 @@ pub fn apply_correction(
 
 /// Greedy hierarchical merge order from a pairwise anchor-count matrix.
 ///
-/// At each step, pick the currently-active batch pair with the highest
-/// anchor count and merge them (query into reference). The merged group
-/// keeps the reference batch id; anchor counts of the merged group against
-/// each remaining group are updated as `min(count[ref, k], count[query, k])`
-/// (Seurat convention keeps small groups from dominating).
+/// At each step, pick the currently-active batch pair with the highest anchor
+/// count and merge them (query into reference). The merged group keeps the
+/// reference batch id; anchor counts of the merged group against each remaining
+/// group are updated as `min(count[ref, k], count[query, k])` (Seurat
+/// convention keeps small groups from dominating).
 ///
 /// ### Params
 ///
@@ -596,28 +576,30 @@ pub fn build_sample_tree(anchor_counts: &[Vec<u32>]) -> Vec<(usize, usize)> {
 // Tree merge //
 ////////////////
 
-/// One active group during the tree merge. Starts as a single batch and
-/// absorbs query groups as merges proceed. Origin tracking lets us translate
-/// original per-batch anchor pairs to the current row layout after any
-/// number of prior merges.
+/// One active group during the tree merge.
 ///
-/// ### Fields
-///
-/// * `embed` - Current embedding, rows are cells in the current merge order
-/// * `origin` - For each row, the `(original_batch, original_index_in_batch)`
-/// * `union_cell_indices` - For each row, the caller-supplied "union" cell
-///   index used to reorder back into the original input order
+/// Starts as a single batch and absorbs query groups as merges proceed. Origin
+/// tracking lets us translate original per-batch anchor pairs to the current
+/// row layout after any number of prior merges.
 #[derive(Clone, Debug)]
 struct MergeGroup {
+    /// Current embedding, rows are cells in the current merge order
     embed: Mat<f32>,
+    /// For each row, the `(original_batch, original_index_in_batch)`
     origin: Vec<(u16, u32)>,
+    /// For each row, the caller-supplied "union" cell index used to reorder
+    /// back into the original input order
     union_cell_indices: Vec<usize>,
 }
 
 impl MergeGroup {
     fn new_leaf(batch_id: u16, embed: Mat<f32>, union_indices: &[usize]) -> Self {
         let n = embed.nrows();
-        assert_eq!(union_indices.len(), n, "union_indices length must match embed rows");
+        assert_eq!(
+            union_indices.len(),
+            n,
+            "union_indices length must match embed rows"
+        );
         let origin = (0..n).map(|i| (batch_id, i as u32)).collect();
         Self {
             embed,
@@ -761,8 +743,7 @@ pub fn tree_merge_embeddings(
                 knn_params,
                 seed,
             )?;
-            let corrected =
-                apply_correction(query_group.embed.as_ref(), &weights, delta.as_ref());
+            let corrected = apply_correction(query_group.embed.as_ref(), &weights, delta.as_ref());
             stack_vertical(&ref_group.embed, &corrected)
         };
 
@@ -900,8 +881,16 @@ mod tests {
         assert_eq!(delta.nrows(), 2);
         assert_eq!(delta.ncols(), 3);
         for d in 0..3 {
-            assert_relative_eq!(delta[(0, d)], ref_e[(0, d)] - query_e[(5, d)], epsilon = 1e-6);
-            assert_relative_eq!(delta[(1, d)], ref_e[(1, d)] - query_e[(5, d)], epsilon = 1e-6);
+            assert_relative_eq!(
+                delta[(0, d)],
+                ref_e[(0, d)] - query_e[(5, d)],
+                epsilon = 1e-6
+            );
+            assert_relative_eq!(
+                delta[(1, d)],
+                ref_e[(1, d)] - query_e[(5, d)],
+                epsilon = 1e-6
+            );
         }
     }
 
@@ -934,11 +923,7 @@ mod tests {
         //   0-2: 10
         //   1-2: 5
         // Expected merge order: (0, 1), then (0, 2)
-        let counts = vec![
-            vec![0_u32, 100, 10],
-            vec![100, 0, 5],
-            vec![10, 5, 0],
-        ];
+        let counts = vec![vec![0_u32, 100, 10], vec![100, 0, 5], vec![10, 5, 0]];
         let merges = build_sample_tree(&counts);
         assert_eq!(merges.len(), 2);
         assert_eq!(merges[0], (0, 1));
@@ -993,14 +978,21 @@ mod tests {
             .collect();
         // Two anchors should survive (nearest two of three); the k-th
         // (furthest, x=100) normalises to weight 0 and is filtered out.
-        assert_eq!(col0.len(), 2, "expected two non-zero anchor weights, got {col0:?}");
+        assert_eq!(
+            col0.len(),
+            2,
+            "expected two non-zero anchor weights, got {col0:?}"
+        );
         let close = col0.iter().find(|(i, _)| *i == 0).unwrap().1;
         let middle = col0.iter().find(|(i, _)| *i == 1).unwrap().1;
         assert!(
             close > middle,
             "close anchor weight {close} must exceed middle anchor weight {middle}"
         );
-        assert!(col0.iter().all(|(i, _)| *i != 2), "far anchor should have zero weight");
+        assert!(
+            col0.iter().all(|(i, _)| *i != 2),
+            "far anchor should have zero weight"
+        );
     }
 
     #[test]
@@ -1042,8 +1034,16 @@ mod tests {
         // the canonical-key flip (b_r > b_q). Confirms the flip branch
         // resolves anchor indices correctly without panicking.
         let e0 = Mat::from_fn(3, 2, |i, j| if j == 0 { i as f32 * 0.1 } else { 0.0 });
-        let e1 = Mat::from_fn(3, 2, |i, j| if j == 0 { 10.0 + i as f32 * 0.1 } else { 0.0 });
-        let e2 = Mat::from_fn(3, 2, |i, j| if j == 0 { 0.05 + i as f32 * 0.1 } else { 0.0 });
+        let e1 = Mat::from_fn(
+            3,
+            2,
+            |i, j| if j == 0 { 10.0 + i as f32 * 0.1 } else { 0.0 },
+        );
+        let e2 = Mat::from_fn(
+            3,
+            2,
+            |i, j| if j == 0 { 0.05 + i as f32 * 0.1 } else { 0.0 },
+        );
 
         let mut anchors_by_pair: FxHashMap<(usize, usize), AnchorSet> = FxHashMap::default();
         anchors_by_pair.insert(
@@ -1107,11 +1107,7 @@ mod tests {
         // Two batches merge first, then the merged-vs-remaining count is
         // min of the two contributing counts. With only three batches the
         // second merge is forced regardless of that update.
-        let counts = vec![
-            vec![0_u32, 50, 20],
-            vec![50, 0, 5],
-            vec![20, 5, 0],
-        ];
+        let counts = vec![vec![0_u32, 50, 20], vec![50, 0, 5], vec![20, 5, 0]];
         let merges = build_sample_tree(&counts);
         assert_eq!(merges, vec![(0, 1), (0, 2)]);
     }

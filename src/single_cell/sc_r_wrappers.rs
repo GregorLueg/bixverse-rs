@@ -1092,9 +1092,9 @@ impl FastMnnParams {
     }
 }
 
-/////////////////
+////////////////
 // Seurat CCA //
-/////////////////
+////////////////
 
 impl SeuratCcaParams {
     /// Generate the SeuratCcaParams from an R list
@@ -1150,10 +1150,7 @@ impl SeuratCcaParams {
             .and_then(|v| v.as_logical())
             .map(|rb| rb.is_true())
             .unwrap_or(true);
-        let sd = cca_list
-            .get("sd")
-            .and_then(|v| v.as_real())
-            .unwrap_or(1.0) as f32;
+        let sd = cca_list.get("sd").and_then(|v| v.as_real()).unwrap_or(1.0) as f32;
 
         Ok(Self {
             num_cc,
@@ -1171,9 +1168,9 @@ impl SeuratCcaParams {
     }
 }
 
-//////////////////
+/////////////////
 // Seurat rPCA //
-//////////////////
+/////////////////
 
 impl SeuratRpcaParams {
     /// Generate the SeuratRpcaParams from an R list
@@ -1218,10 +1215,7 @@ impl SeuratRpcaParams {
             .and_then(|v| v.as_logical())
             .map(|rb| rb.is_true())
             .unwrap_or(true);
-        let sd = rpca_list
-            .get("sd")
-            .and_then(|v| v.as_real())
-            .unwrap_or(1.0) as f32;
+        let sd = rpca_list.get("sd").and_then(|v| v.as_real()).unwrap_or(1.0) as f32;
 
         Ok(Self {
             dims,
