@@ -573,4 +573,15 @@ pub enum BixverseErrors {
     #[cfg(feature = "gpu")]
     #[error("Harmony GPU: Only a single co-variate is supported for the GPU path")]
     GpuHarmonySupportsSingleCovariateOnly,
+    /// Selected SCENIC regression learner has no GPU implementation. Only the
+    /// tree-based learners (ExtraTrees, RandomForest) are ported; GRNBoost2 /
+    /// gradient boosting stays on CPU by design.
+    #[cfg(feature = "gpu")]
+    #[error(
+        "SCENIC GPU: the {learner} regression learner has no GPU path; use the CPU entry point (run_scenic_grn / run_scenic_grn_streaming / run_scenic_grn_in_memory)"
+    )]
+    GpuNotSupportedForLearner {
+        /// Name of the requested regression learner.
+        learner: &'static str,
+    },
 }

@@ -50,7 +50,7 @@ use crate::single_cell::sc_utils::utils_tree::QuantisedStore;
 /// ### Returns
 ///
 /// A `SparseAxis<u32, f32>` representing the gene column.
-fn extract_target_column<T: Copy + Into<u32>>(
+pub(crate) fn extract_target_column<T: Copy + Into<u32>>(
     csc: &CompressedSparseData2<T, f32>,
     gene: usize,
     n_cells: usize,
@@ -85,7 +85,7 @@ fn extract_target_column<T: Copy + Into<u32>>(
 ///
 /// A `QuantisedStore` with `tf_indices.len()` features in column-major
 /// layout, ready for the SCENIC tree fitters.
-fn build_tf_quantised_store<T>(
+pub(crate) fn build_tf_quantised_store<T>(
     csc: &CompressedSparseData2<T, f32>,
     tf_indices: &[usize],
     n_cells: usize,
@@ -344,7 +344,7 @@ fn batch_genes_correlated_in_memory<T: BixverseNumeric>(
 ///
 /// Gene indices reordered so that consecutive chunks of `batch_size`
 /// form sensible multi-output groups.
-fn batch_genes_in_memory<T: BixverseNumeric>(
+pub(crate) fn batch_genes_in_memory<T: BixverseNumeric>(
     csc: &CompressedSparseData2<T, f32>,
     batch_size: usize,
     strategy: &GeneBatchStrategy,

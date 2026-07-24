@@ -328,6 +328,7 @@ where
         false,
         v_z_gpu.handle(),
         [s, n_components],
+        false,
         u_gpu.handle(),
         [n, n_components],
         None,
