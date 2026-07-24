@@ -1,7 +1,6 @@
 //! Implementation of the (fast)MNN approach from Haghverdi, et al, Nat
 //! Biotechnol, 2018
 
-use ann_search_rs::*;
 use faer::{Mat, MatRef};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -9,6 +8,7 @@ use std::time::Instant;
 use thousands::Separable;
 
 use crate::prelude::*;
+use crate::single_cell::sc_batch_correction::batch_utils::batch_knn_search;
 use crate::single_cell::sc_batch_correction::batch_utils::cosine_normalise;
 use crate::single_cell::sc_batch_correction::batch_utils::process_batch_labels;
 use crate::single_cell::sc_processing::pca::*;
@@ -36,125 +36,6 @@ pub struct FastMnnParams {
     /// [SingleCellPcaParams] specifying the to-be-applied normalisations and
     /// if the randomised path should be taken.
     pub pca_params: SingleCellPcaParams,
-}
-
-/// Build index on `reference` and query `query` for k nearest neighbours.
-/// Returns (indices, distances).
-///
-/// ### Params
-///
-/// * `query` - The query data
-/// * `reference` - The reference data
-/// * `k` - Number of neighbours
-/// * `params` - The kNN parameters for all of the indices
-/// * `seed` - Seed for reproducibility
-/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
-///   verbosity.
-///
-/// ### Returns
-///
-/// The indices and distances
-fn knn_search(
-    query: MatRef<f32>,
-    reference: MatRef<f32>,
-    k: usize,
-    params: &KnnParams,
-    seed: usize,
-    verbose: usize,
-) -> ScKnnResults {
-    let verbosity = parse_verbosity_level(verbose);
-
-    let knn_method: KnnSearch = parse_knn_method(&params.knn_method).unwrap_or_default();
-
-    let (indices, dist) = match knn_method {
-        KnnSearch::Hnsw => {
-            let index = build_hnsw_index(
-                reference,
-                params.m,
-                params.ef_construction,
-                &params.ann_dist,
-                seed,
-                verbosity.detailed_verbosity(),
-            );
-            query_hnsw_index(
-                query,
-                &index,
-                k,
-                params.ef_search,
-                true,
-                verbosity.detailed_verbosity(),
-            )?
-        }
-        KnnSearch::Annoy => {
-            let index = build_annoy_index(reference, &params.ann_dist, params.n_tree, seed)?;
-            query_annoy_index(
-                query,
-                &index,
-                k,
-                params.search_budget,
-                true,
-                verbosity.detailed_verbosity(),
-            )?
-        }
-        KnnSearch::NNDescent => {
-            let index = build_nndescent_index(
-                reference,
-                &params.ann_dist,
-                params.delta,
-                params.diversify_prob,
-                None,
-                None,
-                None,
-                None,
-                seed,
-                verbosity.detailed_verbosity(),
-            )?;
-            query_nndescent_index(
-                query,
-                &index,
-                k,
-                params.ef_budget,
-                true,
-                verbosity.detailed_verbosity(),
-            )?
-        }
-        KnnSearch::Exhaustive => {
-            let index = build_exhaustive_index(reference, &params.ann_dist);
-            query_exhaustive_index(query, &index, k, true, verbosity.detailed_verbosity())?
-        }
-        KnnSearch::Ivf => {
-            let index = build_ivf_index(
-                reference,
-                params.n_list,
-                None,
-                &params.ann_dist,
-                seed,
-                verbosity.detailed_verbosity(),
-            )?;
-            query_ivf_index(
-                query,
-                &index,
-                k,
-                params.n_list,
-                true,
-                verbosity.detailed_verbosity(),
-            )?
-        }
-        KnnSearch::KmKnn => {
-            let index = build_kmknn_index(
-                reference,
-                &params.ann_dist,
-                params.n_list,
-                None,
-                seed,
-                verbosity.detailed_verbosity(),
-            )?;
-
-            query_kmknn_index(query, &index, k, true, verbosity.detailed_verbosity())?
-        }
-    };
-
-    Ok((indices, dist.unwrap()))
 }
 
 /////////////
@@ -337,7 +218,8 @@ pub fn tricube_weighted_correction(
     let safe_k = k.min(n_mnn);
 
     // find k nearest MNN neighbours for every cell
-    let (knn_idx, knn_dist) = knn_search(*data, mnn_data.as_ref(), safe_k, knn_params, seed, 0)?;
+    let (knn_idx, knn_dist) =
+        batch_knn_search(*data, mnn_data.as_ref(), safe_k, knn_params, seed, 0)?;
 
     // compute tricube-weighted average corrections
     let mut correction_out: Mat<f32> = Mat::zeros(n_cells, n_features);
@@ -459,7 +341,7 @@ pub fn merge_two_batches(
     }
 
     // Step 2: Find MNN pairs
-    let (knn_1_to_2, _) = knn_search(
+    let (knn_1_to_2, _) = batch_knn_search(
         *data_1,
         right.as_ref(),
         params.knn_params.k,
@@ -467,7 +349,7 @@ pub fn merge_two_batches(
         seed,
         verbose,
     )?;
-    let (knn_2_to_1, _) = knn_search(
+    let (knn_2_to_1, _) = batch_knn_search(
         right.as_ref(),
         *data_1,
         params.knn_params.k,

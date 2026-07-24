@@ -222,6 +222,85 @@ where
     })
 }
 
+///////////////////////////////////
+// Matrix-free randomised SVD    //
+///////////////////////////////////
+
+/// Randomised SVD for a linear operator `M` defined only through its
+/// matrix-vector product closures. Used by anchor-based batch correction
+/// (Seurat-CCA) where `M = X1^T @ X2` would materialise an N1 x N2 dense
+/// intermediate; factoring through `M @ V = X1^T @ (X2 @ V)` keeps memory at
+/// `O((N1 + N2) * (rank + oversampling))`.
+///
+/// ### Params
+///
+/// * `n_rows` - Rows of the implicit operator `M`
+/// * `n_cols` - Columns of the implicit operator `M`
+/// * `rank` - Target number of singular triples
+/// * `seed` - Random seed for the Gaussian sketch
+/// * `oversampling` - Extra samples on top of `rank`. Defaults to
+///   [DEFAULT_OVERSAMPLING_RAND_SVD]
+/// * `n_power_iter` - Power iterations. Defaults to
+///   [DEFAULT_N_POWER_ITERS_RAND_SVD]
+/// * `apply` - Closure computing `M @ V` for a block `V` of shape
+///   `(n_cols, k)`, returning `(n_rows, k)`
+/// * `apply_t` - Closure computing `M^T @ U` for a block `U` of shape
+///   `(n_rows, k)`, returning `(n_cols, k)`
+///
+/// ### Returns
+///
+/// [RandomSvdResults] with `u: (n_rows, rank+os)`, `v: (n_cols, rank+os)`
+/// and `s` singular values. Consumers should truncate to `rank` themselves.
+#[allow(clippy::too_many_arguments)]
+pub fn randomised_svd_matfree<T, FA, FT>(
+    n_rows: usize,
+    n_cols: usize,
+    rank: usize,
+    seed: usize,
+    oversampling: Option<usize>,
+    n_power_iter: Option<usize>,
+    apply: FA,
+    apply_t: FT,
+) -> Result<RandomSvdResults<T>, BixverseErrors>
+where
+    T: BixverseFloat,
+    FA: Fn(MatRef<T>) -> Mat<T>,
+    FT: Fn(MatRef<T>) -> Mat<T>,
+{
+    let os = oversampling.unwrap_or(DEFAULT_OVERSAMPLING_RAND_SVD);
+    let sample_size = (rank + os).min(n_cols.min(n_rows));
+    let n_iter = n_power_iter.unwrap_or(DEFAULT_N_POWER_ITERS_RAND_SVD);
+
+    let mut rng = StdRng::seed_from_u64(seed as u64);
+    let normal = Normal::new(0.0, 1.0).unwrap();
+    let omega = Mat::from_fn(n_cols, sample_size, |_, _| {
+        T::from_f64(normal.sample(&mut rng)).unwrap()
+    });
+
+    let y = apply(omega.as_ref());
+    let mut q = y.qr().compute_thin_Q();
+
+    for _ in 0..n_iter {
+        let z = apply_t(q.as_ref());
+        q = apply(z.as_ref()).qr().compute_thin_Q();
+    }
+
+    // B = Q^T @ M has shape (sample_size, n_cols). We only have M^T @ Q,
+    // so form B via its transpose: (M^T @ Q).T = Q^T @ M.
+    let bt = apply_t(q.as_ref());
+    let b = bt.transpose().to_owned();
+
+    let svd = b
+        .thin_svd()
+        .map_err(|e| BixverseErrors::FaerSvdError(format!("{e:?}")))?;
+
+    Ok(RandomSvdResults {
+        u: q * svd.U(),
+        v: svd.V().cloned(),
+        s: svd.S().column_vector().iter().copied().collect(),
+    })
+}
+
 ///////////////////////////
 // Sparse randomised SVD //
 ///////////////////////////
@@ -555,6 +634,51 @@ mod tests {
         // The absolute correlation should be > 0.999 (allowing for sign flips)
         assert!(dot_u.abs() > 0.999);
         assert!(dot_v.abs() > 0.999);
+    }
+
+    #[test]
+    fn test_randomised_svd_matfree_matches_dense() {
+        // Build A = X1^T @ X2 explicitly, then compare matfree(X1, X2) SVD
+        // to dense SVD of A.
+        let n_hvg = 5;
+        let n1 = 6;
+        let n2 = 4;
+        let rank = 2;
+
+        let x1: Mat<f64> = Mat::from_fn(n_hvg, n1, |i, j| ((i + 1) as f64 * 0.3 + j as f64).sin());
+        let x2: Mat<f64> = Mat::from_fn(n_hvg, n2, |i, j| ((j + 2) as f64 * 0.7 + i as f64).cos());
+
+        let a = x1.transpose() * &x2;
+        let dense = randomised_svd(a.as_ref(), rank, 42, Some(5), Some(4)).unwrap();
+
+        let apply = |v: MatRef<f64>| -> Mat<f64> { x1.transpose() * (&x2 * v) };
+        let apply_t = |u: MatRef<f64>| -> Mat<f64> { x2.transpose() * (&x1 * u) };
+        let matfree =
+            randomised_svd_matfree(n1, n2, rank, 42, Some(5), Some(4), apply, apply_t).unwrap();
+
+        // Compare singular values (matfree may return more than rank; truncate).
+        for k in 0..rank {
+            assert!(
+                (dense.s[k] - matfree.s[k]).abs() < 1e-6,
+                "singular value {k}: dense {} vs matfree {}",
+                dense.s[k],
+                matfree.s[k]
+            );
+        }
+
+        // Absolute correlation of top singular vectors (up to sign).
+        for k in 0..rank {
+            let mut dot_u = 0.0_f64;
+            for i in 0..n1 {
+                dot_u += dense.u[(i, k)] * matfree.u[(i, k)];
+            }
+            let mut dot_v = 0.0_f64;
+            for j in 0..n2 {
+                dot_v += dense.v[(j, k)] * matfree.v[(j, k)];
+            }
+            assert!(dot_u.abs() > 0.999, "u[{k}] |dot| = {}", dot_u.abs());
+            assert!(dot_v.abs() > 0.999, "v[{k}] |dot| = {}", dot_v.abs());
+        }
     }
 
     #[test]

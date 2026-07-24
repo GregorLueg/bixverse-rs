@@ -1,7 +1,10 @@
 //! Utilies for batch correction methods that are shared
 
-use faer::Mat;
+use ann_search_rs::*;
+use faer::{Mat, MatRef};
 use rayon::prelude::*;
+
+use crate::prelude::*;
 
 /// Apply cosine normalisation (L2 normalisation) to each row
 ///
@@ -58,6 +61,169 @@ pub fn process_batch_labels(batch_labels: &[usize]) -> (Vec<usize>, usize) {
     let n_batches = unique_batches.len();
 
     (unique_batches, n_batches)
+}
+
+/// Standardise a features x cells matrix per column: each cell has mean 0
+/// and standard deviation 1 across features. Matches Seurat's `Standardize`
+/// C++ helper used inside `RunCCA` prior to the cross-covariance step.
+///
+/// ### Params
+///
+/// * `mat` - Input matrix, `features x cells`. Not modified.
+///
+/// ### Returns
+///
+/// New matrix with the same shape, per-column standardised. Columns whose
+/// standard deviation is below `1e-15` are returned as zeros (matches
+/// Seurat's guard against constant columns).
+pub fn standardise_per_column(mat: MatRef<f32>) -> Mat<f32> {
+    let n_features = mat.nrows();
+    let n_cells = mat.ncols();
+
+    let stats: Vec<(f32, f32)> = (0..n_cells)
+        .into_par_iter()
+        .map(|col| {
+            let mut sum = 0.0_f32;
+            for row in 0..n_features {
+                sum += *mat.get(row, col);
+            }
+            let mean = sum / n_features as f32;
+            let mut ss = 0.0_f32;
+            for row in 0..n_features {
+                let d = *mat.get(row, col) - mean;
+                ss += d * d;
+            }
+            let sd = (ss / (n_features as f32 - 1.0).max(1.0)).sqrt();
+            (mean, sd)
+        })
+        .collect();
+
+    Mat::from_fn(n_features, n_cells, |row, col| {
+        let (mean, sd) = stats[col];
+        if sd > 1e-15 {
+            (*mat.get(row, col) - mean) / sd
+        } else {
+            0.0
+        }
+    })
+}
+
+/// Build an index on `reference` and query `query` for the k nearest
+/// neighbours. Dispatches over the [KnnSearch] backend chosen through
+/// [KnnParams].
+///
+/// ### Params
+///
+/// * `query` - Query cells x features
+/// * `reference` - Reference cells x features
+/// * `k` - Number of neighbours
+/// * `params` - kNN backend parameters
+/// * `seed` - Random seed
+/// * `verbose` - `0` silent, `1` normal, `2` detailed
+///
+/// ### Returns
+///
+/// `(indices, distances)` where `indices[i]` are the k nearest reference
+/// neighbours of query cell `i`.
+pub fn batch_knn_search(
+    query: MatRef<f32>,
+    reference: MatRef<f32>,
+    k: usize,
+    params: &KnnParams,
+    seed: usize,
+    verbose: usize,
+) -> ScKnnResults {
+    let verbosity = parse_verbosity_level(verbose);
+    let knn_method: KnnSearch = parse_knn_method(&params.knn_method).unwrap_or_default();
+
+    let (indices, dist) = match knn_method {
+        KnnSearch::Hnsw => {
+            let index = build_hnsw_index(
+                reference,
+                params.m,
+                params.ef_construction,
+                &params.ann_dist,
+                seed,
+                verbosity.detailed_verbosity(),
+            );
+            query_hnsw_index(
+                query,
+                &index,
+                k,
+                params.ef_search,
+                true,
+                verbosity.detailed_verbosity(),
+            )?
+        }
+        KnnSearch::Annoy => {
+            let index = build_annoy_index(reference, &params.ann_dist, params.n_tree, seed)?;
+            query_annoy_index(
+                query,
+                &index,
+                k,
+                params.search_budget,
+                true,
+                verbosity.detailed_verbosity(),
+            )?
+        }
+        KnnSearch::NNDescent => {
+            let index = build_nndescent_index(
+                reference,
+                &params.ann_dist,
+                params.delta,
+                params.diversify_prob,
+                None,
+                None,
+                None,
+                None,
+                seed,
+                verbosity.detailed_verbosity(),
+            )?;
+            query_nndescent_index(
+                query,
+                &index,
+                k,
+                params.ef_budget,
+                true,
+                verbosity.detailed_verbosity(),
+            )?
+        }
+        KnnSearch::Exhaustive => {
+            let index = build_exhaustive_index(reference, &params.ann_dist);
+            query_exhaustive_index(query, &index, k, true, verbosity.detailed_verbosity())?
+        }
+        KnnSearch::Ivf => {
+            let index = build_ivf_index(
+                reference,
+                params.n_list,
+                None,
+                &params.ann_dist,
+                seed,
+                verbosity.detailed_verbosity(),
+            )?;
+            query_ivf_index(
+                query,
+                &index,
+                k,
+                params.n_list,
+                true,
+                verbosity.detailed_verbosity(),
+            )?
+        }
+        KnnSearch::KmKnn => {
+            let index = build_kmknn_index(
+                reference,
+                &params.ann_dist,
+                params.n_list,
+                None,
+                seed,
+                verbosity.detailed_verbosity(),
+            )?;
+            query_kmknn_index(query, &index, k, true, verbosity.detailed_verbosity())?
+        }
+    };
+
+    Ok((indices, dist.unwrap()))
 }
 
 ///////////
