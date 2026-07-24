@@ -269,9 +269,12 @@ fn rescale_scores(raw: &[u32]) -> Vec<f32> {
 
 /// Build Seurat's per-anchor-pair integration matrix.
 ///
-/// Row `i` of the returned matrix is `ref_embed[r_i] - query_embed[q_i]`
+/// Row `i` of the returned matrix is `query_embed[q_i] - ref_embed[r_i]`
 /// for anchor pair `i = (r_i, q_i)`. Shape `(n_pairs, dims)`. Feeds
-/// [apply_correction] as `Delta` in `corrected = query - W^T @ Delta`.
+/// [apply_correction] as `Delta` in `corrected = query - W^T @ Delta`, so
+/// the correction moves query cells towards their anchored reference cells
+/// (matches Seurat's `FindIntegrationMatrix`, which subtracts the reference
+/// from the query, not the other way round).
 ///
 /// ### Params
 ///
@@ -291,7 +294,7 @@ pub fn build_integration_matrix(
     let n_pairs = anchors.pairs.len();
     Mat::from_fn(n_pairs, dims, |i, d| {
         let (r, q) = anchors.pairs[i];
-        ref_embed[(r as usize, d)] - query_embed[(q as usize, d)]
+        query_embed[(q as usize, d)] - ref_embed[(r as usize, d)]
     })
 }
 
@@ -867,8 +870,8 @@ mod tests {
     fn test_build_integration_matrix_per_pair() {
         // Two anchors: (r=0, q=5) with score 0.4, (r=1, q=5) with score 0.9.
         // Under the per-pair formulation, integration matrix rows are
-        // ref_embed[r_i] - query_embed[q_i]; both use the SAME query cell
-        // 5 here so both rows subtract query_embed[5, :].
+        // query_embed[q_i] - ref_embed[r_i]; both use the SAME query cell
+        // 5 here so both rows start from query_embed[5, :].
         let anchors = AnchorSet {
             pairs: vec![(0, 5), (1, 5)],
             scores: vec![0.4, 0.9],
@@ -883,12 +886,12 @@ mod tests {
         for d in 0..3 {
             assert_relative_eq!(
                 delta[(0, d)],
-                ref_e[(0, d)] - query_e[(5, d)],
+                query_e[(5, d)] - ref_e[(0, d)],
                 epsilon = 1e-6
             );
             assert_relative_eq!(
                 delta[(1, d)],
-                ref_e[(1, d)] - query_e[(5, d)],
+                query_e[(5, d)] - ref_e[(1, d)],
                 epsilon = 1e-6
             );
         }
