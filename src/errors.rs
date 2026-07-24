@@ -364,6 +364,30 @@ pub enum BixverseErrors {
         /// Number of provided batches
         n_batches: usize,
     },
+
+    /// Anchor finding produced no pairs between two batches
+    #[cfg(feature = "single-cell")]
+    #[error("No anchors found between batches {batch_a} and {batch_b}.")]
+    NoAnchorsFound {
+        /// Reference batch index
+        batch_a: usize,
+        /// Query batch index
+        batch_b: usize,
+    },
+
+    /// A batch has too few cells for the requested anchor search
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Batch {batch} has {n_cells} cells, needs at least {required} for anchor finding."
+    )]
+    TooFewCellsForAnchor {
+        /// Batch index
+        batch: usize,
+        /// Cells in the batch
+        n_cells: usize,
+        /// Minimum required
+        required: usize,
+    },
     // -- Harmony --
     /// Sigma length is not equal to the number of clusters
     #[error("Harmony: sigma length must match number of clusters")]
