@@ -1,9 +1,9 @@
 # SCENIC on GPU
 
-Short version: **ExtraTrees on GPU beats the CPU by 3.7x end to end and is the
-path worth using. RandomForest is now 4.8x faster than one CPU core, up from
-1.2x, but still short of the ~8x the rayon fan-out gives the CPU end to end.**
-GBM is a GPU non-goal.
+Short version: **ExtraTrees on GPU beats the CPU end to end and is the path
+worth using. RandomForest got 4.5x faster and now runs at cell counts where it
+used to refuse, but it still loses end to end and should stay on CPU.** GBM is a
+GPU non-goal.
 
 This file replaces `docs/archive/scenic_gpu_experiment.md`, which concluded the
 whole thing was a hardware loss on Apple Silicon. That conclusion was wrong, and
@@ -13,68 +13,66 @@ are easy to repeat.
 ## Current numbers
 
 M1 Max (8 P-cores + 2 E, 32 GPU cores, 400 GB/s unified). `gpu_scenic_bench`,
-10k cells, 1000 TFs, 250 trees, `max_depth = 10`, `min_samples_leaf = 50`.
+10k cells, 1000 TFs, 250 trees, `max_depth = 10`, `min_samples_leaf = 50`,
+**`SPARSITY = 0.2`** throughout. Everything below is one run of the current
+bench, so every row is comparable to every other.
 
 End-to-end, 4000 target genes in ~63 batches:
 
 | learner | CPU | GPU | result |
 |---------|----:|----:|--------|
-| ET | 236.46s | 64.44s | **GPU 3.67x faster** |
-| RF | 187.39s | 1131.63s | GPU 6.0x slower |
+| ET | 110.40s | 58.31s | **GPU 1.89x faster** |
+| RF | 87.62s | 251.35s | GPU 2.87x slower |
 
-Single 64-target batch:
+Single 64-target batch against one CPU core:
 
 | learner | CPU (1 core) | GPU | ratio |
 |---------|-------------:|----:|------:|
-| ET | 33.80s | 1.03s | **32.8x** |
-| RF | 24.55s | 19.24s | 1.28x |
+| ET | 23.28s | 1.11s | **21.0x** |
+| RF | 17.81s | 3.57s | 4.99x |
 
-**These are measured at 50% target density, which flatters the GPU.** The
-benches now default to `SPARSITY = 0.2`, the dense end of realistic single-cell
-data. At 0.2 the same shape gives:
+**The bar is the rayon fan-out.** `fit_multi_trees_sparse` is sequential over
+trees while the e2e driver fans out over gene batches, so the GPU has to beat one
+core by whatever that fan-out is worth before the e2e comparison can flip.
+Measured here: `63 x 23.28 / 110.40 = 13.3x` for ET, `63 x 17.81 / 87.62 = 12.8x`
+for RF. ET clears it comfortably. **RF at 4.99x is 2.6x short, which is exactly
+the 2.87x it loses by end to end.**
 
-| cell | @0.5 | @0.2 |
-|---|---:|---:|
-| `et_32t` | 28.33x | **19.62x** |
-| `et_multibatch` | 27.76x | **18.93x** |
-| `rf_32t` | 1.29x | 1.17x (now **4.83x**, see below) |
+RF is cheaper than ET on CPU because `RandomForestConfig` defaults to
+`subsample_rate = 0.632`, so each tree sees 63% of the cells while ET uses all of
+them. Worth remembering when comparing the two.
+
+### Density matters, and the older numbers here were taken at 0.5
+
+A previous revision recorded ET at 3.67x and RF at 6.0x slower end to end, from
+runs at 50% target density. Those are not comparable to the table above. GPU wall
+clock is essentially density-independent, while the CPU (and the old RF histogram
+build) does work per nonzero, so dropping to 0.2 speeds the CPU up and leaves the
+GPU where it was. ET's e2e win moving 3.67x -> 1.89x is that effect, not a
+regression. Metacells are denser than raw cells and sit nearer the top of the
+range.
 
 ### RandomForest after the fused rewrite
 
-The `rf` rows above are the pre-rewrite numbers, kept because the e2e matrix has
-not been re-run. Per-batch, at `SPARSITY = 0.2`:
-
-| cell | before | after |
+| | before | after |
 |---|---:|---:|
-| `rf_8t` | 1.16x | **3.75x** |
-| `rf_32t` | 1.18x | **4.83x** |
-| `rf_multibatch` | 1.18x | **4.63x** |
+| `rf_32t` vs one core | 1.18x | **4.83x** |
+| `rf_multibatch` vs one core | 1.18x | **4.63x** |
+| e2e GPU | 1131.63s @0.5 | **251.35s @0.2** |
 | wave size | 8 | **32** |
 | wave VRAM | 6.10 GiB | **0.010 GiB** |
 
-The VRAM collapse matters as much as the speed. RandomForest used to need ~8.4 GB
-at wave 1 at 1M cells and would refuse to run; it now scales like ExtraTrees.
+The GPU side got 4.5x faster and the per-batch ratio 4.1x better. It still loses
+end to end, so **RandomForest stays CPU-preferred** and the recommendation at the
+top of this file is unchanged.
+
+The VRAM collapse is arguably the more useful outcome. RandomForest needed ~8.4 GB
+at wave 1 at 1M cells and would refuse to run; it now scales like ExtraTrees, so
+the learner is at least available at large cell counts.
 
 Fidelity is unchanged: `phase3_random_forest_pearson` 0.987 against a 0.988
 baseline, `phase3_rf_bootstrap_pearson` 0.975 against 0.976, both floored at
 0.95. The 0.001 is the cost of coarsening the GPU's bin axis.
-
-The GPU wall clock is *identical* at both densities (0.15s for `et_32t`); it is
-the CPU that gets faster. That is structural: the ET path reads `n_targets`
-dense values per matched sample regardless of how many are nonzero, so its cost
-is density-independent, while both CPU paths and the RF histogram build do work
-per nonzero. Expect the e2e ET win to be ~2.5x at 0.2 rather than the 3.67x
-measured at 0.5. Metacells are denser than raw cells, so the metacell path sits
-nearer the top of that range.
-
-The CPU e2e driver fans out over gene batches with rayon while
-`fit_multi_trees_sparse` is sequential over trees, so the fan-out is worth about
-9.1x and that is the bar the GPU has to clear per batch. ET clears it three
-times over; RF is now within about 2x of it rather than 8x.
-
-RF is cheaper than ET on CPU because `RandomForestConfig` defaults to
-`subsample_rate = 0.632`, so each tree sees 63% of the cells, while ET uses all
-of them. Worth remembering when comparing the two.
 
 ## How the ExtraTrees path works
 

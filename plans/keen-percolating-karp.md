@@ -26,8 +26,15 @@ unchanged, RF 0.987 against a 0.988 baseline, RF+bootstrap 0.975 against 0.976.
 | RF wave VRAM | 6.10 GiB | **0.010 GiB** |
 | `phase3_random_forest_pearson` GPU | 5.9s | **2.0s** |
 
-The 8.25x break-even against the rayon fan-out is not reached. What remains is in
-"What is left" at the bottom.
+**End to end it still loses.** Full `gpu_scenic_bench` at 20% density: RF
+251.35s GPU against 87.62s CPU, i.e. 2.87x slower, down from 6.0x. The GPU side
+went 1131.63s -> 251.35s but the bar moved too: the measured rayon fan-out at
+this density is **12.8x**, not the 8.25x quoted from the old 50%-density
+baseline. RF needs 12.8x per batch and has 4.99x.
+
+So the shipping recommendation is unchanged: RandomForest stays CPU-preferred.
+What did change is that it now runs at 1M cells instead of refusing. Remaining
+levers are in "What is left" at the bottom.
 
 ### What the first measurements settled
 
