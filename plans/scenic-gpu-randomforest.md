@@ -3,7 +3,7 @@
 ## Context
 
 ExtraTrees on GPU now beats the CPU 3.67x end to end (see `docs/scenic_gpu.md`
-and `plans/okay-let-s-plan-the-breezy-fiddle.md`). RandomForest is untouched and
+and `plans/scenic-gpu-extratrees.md`). RandomForest is untouched and
 loses 6.0x. This plan covers whether and how to close that.
 
 **Read the honest assessment first, before the steps.** RF is a much harder

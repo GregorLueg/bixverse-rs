@@ -1,4 +1,7 @@
-# SCENIC GPU: make the ET path actually fast
+# SCENIC GPU: ExtraTrees
+
+Done. Kept as a record; the live overview is `docs/scenic_gpu.md` and the
+remaining work is in `plans/scenic-gpu-randomforest.md`.
 
 Status: **ExtraTrees done. 1.49x -> 28.33x per batch, and end-to-end it went
 from 7.2x slower than the CPU to 3.67x faster. RandomForest untouched.**
