@@ -104,7 +104,18 @@ would need each of the 64 target-threads to test every sample for membership,
 which is the `n_samples * n_targets` redundancy that made the first ET rewrite
 slow.
 
-Reuse the scan from `accumulate_split_stats_et`; it is the same code shape.
+**Start by reading `accumulate_split_stats_et` in
+`src/gpu/sc_gpu/scenic_gpu.rs`.** Its `use_plane` branch is this exact pattern,
+already working and gated: block loop, per-thread hit test, `plane_exclusive_sum`
+plus `plane_sum` into `s_ptot`, offset by the totals of the planes below, scatter
+into `s_id` / `s_mult`, drain over `cnt`. Step 2 is that loop with two changes:
+carry the sample's bin into the compacted tile alongside its id and multiplicity,
+and have the drain accumulate into `hist[bin, k]` rather than into a register.
+Do not re-derive it; the ordering of the two `sync_cube()` calls and the
+`lane == 0` guard on the `s_ptot` write are both load-bearing.
+
+`plane_compact_viable` already exists for the launch-side gate, as does the
+portable non-compacted fallback, so both can be reused as they stand.
 
 Expected: this is the uncertain one. CAS loops under contention typically cost
 2-5x a plain read-modify-write, so 57% to somewhere in 15-30%.
@@ -196,11 +207,10 @@ decision.
 Independent of the speed work, and arguably more urgent if anyone wants to run
 1M-cell datasets.
 
-- **`feature_data_gpu` is u8 widened to u32**: `4 * n_features` bytes per cell,
-  so 4 GB at 1000 TFs and 1M cells, exactly the per-binding limit on an M1 Max.
-  `pick_wave_size` does not check it, so crossing it fails silently through
-  `launch_unchecked`. Pack 4 bins per u32 for 4x headroom and a 1 GB rather than
-  4 GB host allocation. Bigger cards raise the limit but not the waste.
+- ~~`feature_data_gpu` is u8 widened to u32~~. **Done.** Now packed four bins
+  per u32 via `feature_bin`, so `n_features` bytes per cell rather than
+  `4 * n_features`, and `fit_scenic_batches_gpu` checks it against
+  `max_page_size` with an actionable error instead of failing silently.
 - **RF's wave tensors do not scale.** At 1M cells `max_active_nodes` saturates
   at the depth cap (1024) and RF needs ~8.4 GB at **wave 1**, against ET's
   ~530 MB at wave 32. RF will refuse to run at large cell counts long before ET

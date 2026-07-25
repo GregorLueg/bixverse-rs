@@ -13,12 +13,11 @@
 //! each other. That is what "statistical parity" means for this workload,
 //! per the plan's "sanity floor, not precision target" wording.
 
-#![allow(clippy::needless_range_loop)]
-#![cfg(all(
-    feature = "single-cell",
-    feature = "large_scale_diagnostics",
-    feature = "gpu"
-))]
+#![allow(clippy::needless_range_loop, clippy::field_reassign_with_default)]
+// Helpers feeding the `large_scale_diagnostics` tests are unused when that
+// feature is off. Not worth cfg-ing each one individually in a test file.
+#![allow(dead_code)]
+#![cfg(all(feature = "single-cell", feature = "gpu"))]
 
 use bixverse_rs::gpu::sc_gpu::scenic_gpu::{
     ScenicGpuParams, fit_extra_trees_gpu_single, fit_multi_trees_gpu, run_scenic_grn_gpu,
@@ -26,9 +25,11 @@ use bixverse_rs::gpu::sc_gpu::scenic_gpu::{
 };
 use bixverse_rs::prelude::*;
 use bixverse_rs::single_cell::mc_analysis::scenic_metacells::run_scenic_grn_in_memory;
+#[cfg(feature = "large_scale_diagnostics")]
+use bixverse_rs::single_cell::sc_analysis::scenic::RandomForestConfig;
 use bixverse_rs::single_cell::sc_analysis::scenic::{
-    ExtraTreesConfig, GradientBoostingConfig, RandomForestConfig, RegressionLearner, ScenicParams,
-    SparseYBatch, fit_multi_trees_sparse, run_scenic_grn,
+    ExtraTreesConfig, GradientBoostingConfig, RegressionLearner, ScenicParams, SparseYBatch,
+    fit_multi_trees_sparse, run_scenic_grn,
 };
 use bixverse_rs::single_cell::sc_data::data_io::CellGeneSparseWriter;
 use bixverse_rs::single_cell::sc_traits::F16;
@@ -448,6 +449,9 @@ fn phase2_cpu_baseline() {
 /// e.g. 100 if CI-runtime budget is tighter (CPU-vs-CPU baseline at n_trees=100
 /// still clears ~0.99 Pearson with the current synthetic data).
 #[test]
+// 10k-40k sample fits against a sequential CPU baseline. Minutes on a GH
+// runner, where the Linux GPU job falls back to lavapipe software Vulkan.
+#[cfg(feature = "large_scale_diagnostics")]
 fn phase2_multi_tree_pearson() {
     let Some(device) = try_device() else {
         eprintln!("scenic_gpu (Phase 2): no wgpu device available -- skipping");
@@ -636,6 +640,8 @@ fn phase2_multi_batch_determinism() {
 /// left at the CPU RF default of 250 rather than ET's 500. Run under
 /// `cargo test --release` -- debug mode is dominated by CPU-side RF.
 #[test]
+// 250-tree RandomForest fit against a sequential CPU baseline. Same reason.
+#[cfg(feature = "large_scale_diagnostics")]
 fn phase3_random_forest_pearson() {
     let Some(device) = try_device() else {
         eprintln!("scenic_gpu (Phase 3 RF): no wgpu device available -- skipping");
@@ -691,6 +697,8 @@ fn phase3_random_forest_pearson() {
 /// Phase 3 bootstrap variant: same RF config but with bootstrap-with-replacement
 /// enabled. Assert the same 0.95 tolerance.
 #[test]
+// As above, bootstrap variant.
+#[cfg(feature = "large_scale_diagnostics")]
 fn phase3_rf_bootstrap_pearson() {
     let Some(device) = try_device() else {
         eprintln!("scenic_gpu (Phase 3 RF+bootstrap): no wgpu device -- skipping");

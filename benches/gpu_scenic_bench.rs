@@ -327,9 +327,13 @@ fn kernel_matrix(device: &WgpuDevice) {
         let x = make_features_kernel(n, SEED as u64 + n as u64);
         let axes = make_targets_kernel(&x, n, SEED as u64 + n as u64 + 1);
 
+        // CPU rows first, then GPU. Interleaving them lets a long GPU run heat
+        // the package and thermally throttle the CPU measurement that follows,
+        // which is how an earlier run of this bench produced an RF CPU baseline
+        // 2.3x slower than it reproduces at.
         run_kernel_cpu(n, &x, &axes, &et, &format!("et_cpu_{l}"));
-        run_kernel_gpu(n, &x, &axes, &et, device, &format!("et_gpu_{l}"));
         run_kernel_cpu(n, &x, &axes, &rf, &format!("rf_cpu_{l}"));
+        run_kernel_gpu(n, &x, &axes, &et, device, &format!("et_gpu_{l}"));
         run_kernel_gpu(n, &x, &axes, &rf, device, &format!("rf_gpu_{l}"));
         println!();
     }
@@ -402,9 +406,10 @@ fn end_to_end_matrix(device: &WgpuDevice) {
 
         let csc = make_csc_e2e(n, SEED as u64 + n as u64 + 2);
 
+        // CPU rows first; see the note in kernel_matrix.
         run_e2e_cpu(&csc, &et_params, &format!("et_e2e_cpu_{l}"));
-        run_e2e_gpu(&csc, &et_params, device, &format!("et_e2e_gpu_{l}"));
         run_e2e_cpu(&csc, &rf_params, &format!("rf_e2e_cpu_{l}"));
+        run_e2e_gpu(&csc, &et_params, device, &format!("et_e2e_gpu_{l}"));
         run_e2e_gpu(&csc, &rf_params, device, &format!("rf_e2e_gpu_{l}"));
         println!();
     }

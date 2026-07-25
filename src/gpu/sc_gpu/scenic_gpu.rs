@@ -263,7 +263,6 @@ pub fn build_hist_privatised(
     let count_base = (((tree * n_active_nodes + node) * k_feats + slot) * N_BINS) as usize;
     let sum_base =
         ((((tree * n_active_nodes + node) * k_feats + slot) * N_BINS) * n_targets) as usize;
-    let feat_base = (feat * n_samples) as usize;
     let s2n_base = (tree * n_samples) as usize;
 
     // Cooperative zero of this workgroup's private histogram slice. Threads
@@ -292,7 +291,7 @@ pub fn build_hist_privatised(
         if sample_to_node[s2n_base + s as usize] == node {
             let mult = sample_multiplicity[s2n_base + s as usize];
             if mult > 0u32 {
-                let bin = feature_data[feat_base + s as usize];
+                let bin = feature_bin(feature_data, feat * n_samples + s);
                 Atomic::fetch_add(&hist_counts[count_base + bin as usize], mult);
                 let mult_f = f32::cast_from(mult);
                 let bin_base = sum_base + (bin * n_targets) as usize;
@@ -552,6 +551,35 @@ pub fn prefix_sum_bins(
         }
         k += wg_size;
     }
+}
+
+/// Read one quantised bin out of the packed feature tensor.
+///
+/// `feature_data` holds four u8 bins per u32 word, indexed by the flat
+/// `feature * n_samples + sample` position. Packing is worth 4x on both the
+/// device tensor and the host staging buffer: unpacked, a 1000-TF by 1M-cell
+/// matrix is 4 GB, which is exactly the per-binding limit on an M1 Max, and it
+/// costs a 4 GB host allocation to widen u8 to u32 besides.
+///
+/// Consecutive samples share a word, so threads walking samples still touch
+/// each cache line once.
+///
+/// ### Workgroup
+///
+/// Inlined into the calling kernel; no dedicated workgroup.
+///
+/// ### Params
+///
+/// * `feature_data` - Packed bins, four per u32 word
+/// * `idx` - Flat `feature * n_samples + sample` index of the wanted bin
+///
+/// ### Returns
+///
+/// The bin value in `[0, N_BINS)`.
+#[cube]
+fn feature_bin(feature_data: &Tensor<u32>, idx: u32) -> u32 {
+    let word = feature_data[(idx / 4u32) as usize];
+    (word >> ((idx % 4u32) * 8u32)) & 255u32
 }
 
 /// Cheap on-device hash for feature/threshold selection. Multiplies wrap in
@@ -1088,7 +1116,6 @@ pub fn scan_slot_bin_range(
     }
 
     let feat = node_features[slot_flat];
-    let feat_base = (feat * n_samples) as usize;
     let s2n_base = (tree * n_samples) as usize;
 
     // N_BINS is the "nothing seen" sentinel for the min. The max seeds at 0,
@@ -1103,7 +1130,7 @@ pub fn scan_slot_bin_range(
     while s < n_samples {
         if sample_to_node[s2n_base + s as usize] == node {
             if sample_multiplicity[s2n_base + s as usize] > 0u32 {
-                let b = feature_data[feat_base + s as usize];
+                let b = feature_bin(feature_data, feat * n_samples + s);
                 if b < lo {
                     lo = b;
                 }
@@ -1270,7 +1297,6 @@ pub fn accumulate_split_stats_et(
     let thr = min_bin + (seed_mix % (max_bin - min_bin));
 
     let feat = node_features[slot_flat];
-    let feat_base = (feat * n_samples) as usize;
     let s2n_base = (tree * n_samples) as usize;
 
     let mut s_sum = SharedMemory::<f32>::new(WORKGROUP_128 as usize);
@@ -1306,7 +1332,7 @@ pub fn accumulate_split_stats_et(
                 if sample_to_node[s2n_base + s as usize] == node {
                     let m = sample_multiplicity[s2n_base + s as usize];
                     if m > 0u32 {
-                        if feature_data[feat_base + s as usize] <= thr {
+                        if feature_bin(feature_data, feat * n_samples + s) <= thr {
                             hit = 1u32;
                             mult = m;
                         }
@@ -1385,7 +1411,7 @@ pub fn accumulate_split_stats_et(
                 if sample_to_node[s2n_base + s as usize] == node {
                     let mult = sample_multiplicity[s2n_base + s as usize];
                     if mult > 0u32 {
-                        if feature_data[feat_base + s as usize] <= thr {
+                        if feature_bin(feature_data, feat * n_samples + s) <= thr {
                             let mf = f32::cast_from(mult);
                             let y = y_dense[(s * n_targets + k) as usize];
                             acc_s += mf * y;
@@ -1827,6 +1853,14 @@ pub fn reassign_samples(
     if node == INVALID_NODE {
         terminate!();
     }
+    // viable_max_active_nodes bounds a level at n_samples / (2 *
+    // min_samples_leaf), which counts splits rather than nodes at a level, so a
+    // sufficiently balanced tree can be handed a child id past the buffer. Drop
+    // those samples rather than reading out of range.
+    if node >= n_active_nodes {
+        sample_to_node[s2n_idx] = INVALID_NODE;
+        terminate!();
+    }
 
     let node_flat = (tree * n_active_nodes + node) as usize;
     let feat = split_feature[node_flat];
@@ -1840,7 +1874,7 @@ pub fn reassign_samples(
     }
 
     let thr = split_threshold[node_flat];
-    let bin = feature_data[(feat * n_samples + s) as usize];
+    let bin = feature_bin(feature_data, feat * n_samples + s);
     if bin <= thr {
         sample_to_node[s2n_idx] = left_child_id[node_flat];
     } else {
@@ -3653,17 +3687,21 @@ fn upload_dense_y<R: Runtime>(
     sy: &SparseYBatch,
     n_samples: usize,
     n_targets: usize,
+    scratch: &mut Vec<f32>,
     client: &ComputeClient<R>,
 ) -> GpuTensor<R, f32> {
-    let mut dense = vec![0.0f32; n_samples * n_targets];
+    // Reuse the caller's allocation across batches. At 1M cells this buffer is
+    // 256 MB, and a 63-batch run would otherwise allocate and free it 63 times.
+    scratch.clear();
+    scratch.resize(n_samples * n_targets, 0.0);
     for s in 0..n_samples {
         let lo = sy.offsets[s] as usize;
         let hi = sy.offsets[s + 1] as usize;
         for j in lo..hi {
-            dense[s * n_targets + sy.target_indices[j] as usize] = sy.values[j];
+            scratch[s * n_targets + sy.target_indices[j] as usize] = sy.values[j];
         }
     }
-    GpuTensor::<R, f32>::from_slice(&dense, vec![n_samples * n_targets], client)
+    GpuTensor::<R, f32>::from_slice(scratch, vec![n_samples * n_targets], client)
 }
 
 impl<R: Runtime> SparseYGpu<R> {
@@ -3746,7 +3784,7 @@ impl<R: Runtime> SparseYGpu<R> {
 fn run_wave_bfs<R: Runtime>(
     client: &ComputeClient<R>,
     feature_data_gpu: &GpuTensor<R, u32>,
-    sy_gpu: &SparseYGpu<R>,
+    sy_gpu: Option<&SparseYGpu<R>>,
     y_dense_gpu: &GpuTensor<R, f32>,
     state: &WaveState<R>,
     sample_multiplicity_gpu: &GpuTensor<R, u32>,
@@ -3907,12 +3945,14 @@ fn run_wave_bfs<R: Runtime>(
                 min_samples_leaf,
             );
         } else {
+            // Present whenever use_et is false, which is the only path here.
+            let sy = sy_gpu.expect("RandomForest path requires the sparse Y upload");
             launch_build_hist(
                 client,
                 feature_data_gpu,
-                &sy_gpu.offsets,
-                &sy_gpu.target_indices,
-                &sy_gpu.values,
+                &sy.offsets,
+                &sy.target_indices,
+                &sy.values,
                 &state.sample_to_node,
                 sample_multiplicity_gpu,
                 &state.node_features,
@@ -4152,12 +4192,30 @@ pub fn fit_scenic_batches_gpu<R: Runtime>(
 
     let client = R::client(&device);
 
-    // Single feature upload amortised across every batch. Old code re-did
-    // this per fit call; drivers called it once per cluster batch, so the
-    // ~n_features * n_samples * 4 bytes went up N_batches times.
-    let feature_bins_u32: Vec<u32> = feature_matrix.data.iter().map(|&b| b as u32).collect();
-    let feature_data_gpu =
-        GpuTensor::<R, u32>::from_slice(&feature_bins_u32, vec![n_features * n_samples], &client);
+    // Single feature upload amortised across every batch, packed four u8 bins
+    // per u32 word. Widening to u32 instead would cost 4 GB on both host and
+    // device at 1000 TFs by 1M cells, which is the per-binding limit on an M1
+    // Max; `feature_bin` unpacks on the device side.
+    let n_bins_total = n_features * n_samples;
+    let n_words = n_bins_total.div_ceil(4);
+    let max_binding = client.properties().memory.max_page_size as usize;
+    if n_words * 4 > max_binding {
+        return Err(BixverseErrors::InvalidArgument(format!(
+            "GPU SCENIC: the packed feature tensor needs {} MB but the device \
+             accepts at most {} MB per binding (n_features={}, n_samples={}). \
+             Subsample cells or reduce the TF set.",
+            n_words * 4 / (1024 * 1024),
+            max_binding / (1024 * 1024),
+            n_features,
+            n_samples,
+        )));
+    }
+    let mut packed = vec![0u32; n_words];
+    for (i, &b) in feature_matrix.data.iter().enumerate() {
+        packed[i / 4] |= (b as u32) << ((i % 4) * 8);
+    }
+    let feature_data_gpu = GpuTensor::<R, u32>::from_slice(&packed, vec![n_words], &client);
+    drop(packed);
 
     // Per-batch importance tensor handles, kept alive until the deferred
     // readback pass. Each entry is (flat_target_offset, batch_n_targets,
@@ -4165,6 +4223,9 @@ pub fn fit_scenic_batches_gpu<R: Runtime>(
     // bytes) so N handles across a whole run add up to a few tens of MB
     // even for hundreds of batches.
     let mut deferred: Vec<(usize, usize, GpuTensor<R, u32>)> = Vec::with_capacity(batches.len());
+
+    // Reused across batches by upload_dense_y.
+    let mut dense_scratch: Vec<f32> = Vec::new();
 
     let mut flat_offset = 0usize;
     for (chunk, &batch_seed) in batches.iter().zip(batch_seeds.iter()) {
@@ -4174,8 +4235,20 @@ pub fn fit_scenic_batches_gpu<R: Runtime>(
         }
 
         let sparse_y = SparseYBatch::from_targets(chunk, n_samples)?;
-        let sy_gpu = SparseYGpu::upload(&sparse_y, n_samples, &client);
-        let y_dense_gpu = upload_dense_y(&sparse_y, n_samples, batch_n_targets, &client);
+        // The ExtraTrees path reads only the dense form, so skip the CSR
+        // upload entirely there rather than shipping it for nothing.
+        let sy_gpu = if use_et {
+            None
+        } else {
+            Some(SparseYGpu::upload(&sparse_y, n_samples, &client))
+        };
+        let y_dense_gpu = upload_dense_y(
+            &sparse_y,
+            n_samples,
+            batch_n_targets,
+            &mut dense_scratch,
+            &client,
+        );
 
         let wave_size = pick_wave_size(
             max_active_nodes,
@@ -4269,7 +4342,7 @@ pub fn fit_scenic_batches_gpu<R: Runtime>(
             run_wave_bfs(
                 &client,
                 &feature_data_gpu,
-                &sy_gpu,
+                sy_gpu.as_ref(),
                 &y_dense_gpu,
                 use_state,
                 &mult_gpu,

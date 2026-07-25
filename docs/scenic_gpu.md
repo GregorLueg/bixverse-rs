@@ -171,19 +171,21 @@ fit.
 | tensor | bytes per cell | at 1M cells |
 |---|---:|---:|
 | dense Y (per batch, freed after) | 256 | 256 MB |
-| `feature_data_gpu`, u8 widened to u32 | `4 * n_features` | **4 GB** at 1000 TFs |
+| `feature_data_gpu`, four bins per u32 word | `n_features` | 1 GB at 1000 TFs |
 | ET wave tensors, wave 32 | n/a, node-bound | ~530 MB |
 | RF wave tensors, wave 1 | n/a, node-bound | ~8.4 GB |
 
 Two things follow.
 
-**`feature_data_gpu` is the binding that breaks first.** At 1000 TFs and 1M
-cells it is exactly 4 GB, which is the per-binding limit on this machine, and
-`pick_wave_size` does not check it, so crossing it fails the silent
-`launch_unchecked` way. It also costs a 4 GB *host* allocation purely to widen
-u8 to u32. Packing 4 bins per u32 gives 4x headroom and cuts the host
-allocation to 1 GB. This was investigated for performance during the ET work and
-correctly rejected (the sample scan is free); it is still wanted for **capacity**.
+**`feature_data_gpu` is the binding that breaks first**, which is why it is
+packed four bins per u32 word and unpacked on device by `feature_bin`. Unpacked
+it would be 4 GB at 1000 TFs and 1M cells, exactly the per-binding limit on this
+machine, plus a 4 GB host allocation to do the widening. Packing buys 4x on
+both. `fit_scenic_batches_gpu` also checks the packed size against
+`max_page_size` up front, because otherwise crossing it fails the silent
+`launch_unchecked` way. Note this was investigated for *performance* during the
+ET work and correctly rejected, since the sample scan is free; it earns its keep
+on capacity alone.
 
 **On larger systems this is mostly fine for ET and not for RF.** Datacentre
 cards have far higher per-binding limits, so a 1M-cell run with the u32 feature
