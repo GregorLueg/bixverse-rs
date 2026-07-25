@@ -188,10 +188,13 @@ fn atomic_add_f32_bits(ptr: &Atomic<u32>, delta: f32) {
 /// atomic accumulation into a per-workgroup private histogram slice.
 ///
 /// One workgroup per (slot, node, tree), `WORKGROUP_128` wide. Each thread
-/// strides over samples `s = tx, tx+wg, ...`; every active sample bumps its
-/// owning bin. Since each workgroup owns its own histogram slice
-/// `[wave, node, slot, bin, target]`, atomics contend only *within* a
+/// strides over the node's *gathered* samples `j = lo+tx, lo+tx+wg, ...`; every
+/// one of them bumps its owning bin. Since each workgroup owns its own histogram
+/// slice `[wave, node, slot, bin, target]`, atomics contend only *within* a
 /// workgroup, never across workgroups.
+///
+/// The gather (see [`scatter_node_samples`]) is what makes the sample loop
+/// proportional to the node's population rather than to `n_samples`.
 ///
 /// ### Params
 ///
@@ -199,8 +202,9 @@ fn atomic_add_f32_bits(ptr: &Atomic<u32>, delta: f32) {
 /// * `sy_offsets` - Sparse Y offsets `[n_samples + 1]`
 /// * `sy_target_indices` - Sparse Y target ids `[nnz]` (u8 as u32)
 /// * `sy_values` - Sparse Y values `[nnz]`
-/// * `sample_to_node` - Per-tree sample assignment `[wave_size, n_samples]`
-/// * `sample_multiplicity` - Per-tree sample multiplier `[wave_size, n_samples]`
+/// * `node_sample_offsets` - Node slice bounds `[wave_size, n_active_nodes + 1]`
+/// * `node_sample_ids` - Gathered sample ids `[wave_size, n_samples]`
+/// * `node_sample_mults` - Gathered multiplicities, same layout
 /// * `node_features` - Selected feature ids per (tree, node)
 ///   `[wave_size, n_active_nodes, k_feats]`
 /// * `hist_counts` - Output counts as atomic u32
@@ -234,8 +238,9 @@ pub fn build_hist_privatised(
     sy_offsets: &Tensor<u32>,
     sy_target_indices: &Tensor<u32>,
     sy_values: &Tensor<f32>,
-    sample_to_node: &Tensor<u32>,
-    sample_multiplicity: &Tensor<u32>,
+    node_sample_offsets: &Tensor<u32>,
+    node_sample_ids: &Tensor<u32>,
+    node_sample_mults: &Tensor<u32>,
     node_features: &Tensor<u32>,
     hist_counts: &mut Tensor<Atomic<u32>>,
     hist_y_sums: &mut Tensor<Atomic<u32>>,
@@ -266,7 +271,6 @@ pub fn build_hist_privatised(
     let count_base = (((tree * n_active_nodes + node) * k_feats + slot) * N_BINS) as usize;
     let sum_base =
         ((((tree * n_active_nodes + node) * k_feats + slot) * N_BINS) * n_targets) as usize;
-    let s2n_base = (tree * n_samples) as usize;
 
     // Cooperative zero of this workgroup's private histogram slice. Threads
     // stride over the N_BINS counts and the N_BINS * n_targets sum slots.
@@ -284,34 +288,37 @@ pub fn build_hist_privatised(
     }
     sync_cube();
 
-    // Sample-parallel accumulation. Each thread walks its stripe of samples,
-    // atomically bumping the bin owned by that sample. Multiplicity 0 samples
-    // (bootstrap unselected, or subsample rejected) skip cleanly; sample_to_node
-    // set to INVALID_NODE for those (see init_sample_to_node) also fails the
-    // node-match test.
-    let mut s: u32 = tx;
-    while s < n_samples {
-        if sample_to_node[s2n_base + s as usize] == node {
-            let mult = sample_multiplicity[s2n_base + s as usize];
-            if mult > 0u32 {
-                let bin = feature_bin(feature_data, feat * n_samples + s);
-                Atomic::fetch_add(&hist_counts[count_base + bin as usize], mult);
-                let mult_f = f32::cast_from(mult);
-                let bin_base = sum_base + (bin * n_targets) as usize;
-                let off_s = sy_offsets[s as usize];
-                let off_e = sy_offsets[(s + 1u32) as usize];
-                let mut j = off_s;
-                while j < off_e {
-                    let k = sy_target_indices[j as usize];
-                    let v = sy_values[j as usize];
-                    let mv = mult_f * v;
-                    atomic_add_f32_bits(&hist_y_sums[bin_base + k as usize], mv);
-                    atomic_add_f32_bits(&hist_y_sum_sqs[bin_base + k as usize], mv * v);
-                    j += 1u32;
-                }
-            }
+    // Sample-parallel accumulation over the node's own samples, gathered by
+    // scatter_node_samples. Walking the gathered slice rather than testing all
+    // n_samples for membership is the whole point: at depth a node holds ~63 of
+    // 10,000, and the membership test used to run once per feature slot per node
+    // per tree. Everything in the slice is live by construction, so there is no
+    // multiplicity or node check left to do here.
+    let obase = (tree * (n_active_nodes + 1u32)) as usize;
+    let lo = node_sample_offsets[obase + node as usize];
+    let hi = node_sample_offsets[obase + (node + 1u32) as usize];
+    let gbase = (tree * n_samples) as usize;
+
+    let mut j: u32 = lo + tx;
+    while j < hi {
+        let s = node_sample_ids[gbase + j as usize];
+        let mult = node_sample_mults[gbase + j as usize];
+        let bin = feature_bin(feature_data, feat * n_samples + s);
+        Atomic::fetch_add(&hist_counts[count_base + bin as usize], mult);
+        let mult_f = f32::cast_from(mult);
+        let bin_base = sum_base + (bin * n_targets) as usize;
+        let off_s = sy_offsets[s as usize];
+        let off_e = sy_offsets[(s + 1u32) as usize];
+        let mut c = off_s;
+        while c < off_e {
+            let k = sy_target_indices[c as usize];
+            let v = sy_values[c as usize];
+            let mv = mult_f * v;
+            atomic_add_f32_bits(&hist_y_sums[bin_base + k as usize], mv);
+            atomic_add_f32_bits(&hist_y_sum_sqs[bin_base + k as usize], mv * v);
+            c += 1u32;
         }
-        s += wg_size;
+        j += wg_size;
     }
 }
 
@@ -2330,6 +2337,231 @@ pub fn init_sample_to_node(
     }
 }
 
+///////////////////////
+// Per-node gather   //
+///////////////////////
+
+// Three kernels that turn `sample_to_node` into a per-node contiguous list, so
+// the RandomForest histogram build can walk a node's own samples instead of
+// testing all `n_samples` for membership. At depth that test is 158x wasteful:
+// a node holding ~63 samples is found by scanning 10,000, once per feature slot
+// per node per tree.
+//
+// The counter doubles as the scatter cursor. `scan_node_offsets` zeroes each
+// count as it folds it into the offsets, `scatter_node_samples` bumps it back
+// up to the total, and `zero_node_sample_counts` clears it again next level.
+
+/// Zero the per-node sample counters ahead of [`count_node_samples`].
+///
+/// ### Params
+///
+/// * `node_sample_counts` - Counters to clear `[wave_size, n_active_nodes]`
+/// * `wave_size` - Trees in wave
+/// * `n_active_nodes` - Active nodes at level
+/// * `wg_size` - Workgroup width (comptime)
+///
+/// ### Grid mapping
+///
+/// * `CUBE_POS_X` -> tree_in_wave
+/// * `UNIT_POS_X` -> node stride offset
+///
+/// ### Returns
+///
+/// `node_sample_counts` zeroed over the `n_active_nodes` prefix.
+#[cube(launch_unchecked)]
+pub fn zero_node_sample_counts(
+    node_sample_counts: &mut Tensor<Atomic<u32>>,
+    wave_size: u32,
+    n_active_nodes: u32,
+    #[comptime] wg_size: u32,
+) {
+    let tree = CUBE_POS_X;
+    if tree >= wave_size {
+        terminate!();
+    }
+    let base = (tree * n_active_nodes) as usize;
+    let mut n: u32 = UNIT_POS_X;
+    while n < n_active_nodes {
+        Atomic::store(&node_sample_counts[base + n as usize], 0u32);
+        n += wg_size;
+    }
+}
+
+/// Count how many live samples each node holds.
+///
+/// A sample is live when its node is in range and its multiplicity is nonzero.
+/// `INVALID_NODE` is `u32::MAX`, so the single `node < n_active_nodes` test
+/// rejects unselected samples and out-of-range child ids together.
+///
+/// ### Params
+///
+/// * `sample_to_node` - Per-tree sample assignment `[wave_size, n_samples]`
+/// * `sample_multiplicity` - Per-tree sample multiplicity, same layout
+/// * `node_sample_counts` - Output counters `[wave_size, n_active_nodes]`
+/// * `n_samples` - Number of samples
+/// * `wave_size` - Trees in wave
+/// * `n_active_nodes` - Active nodes at level
+///
+/// ### Grid mapping
+///
+/// * `CUBE_POS_X * WORKGROUP_128 + UNIT_POS_X + CUBE_POS_Y * CUBE_COUNT_X *
+///   WORKGROUP_128` -> sample index
+/// * `CUBE_POS_Z` -> tree_in_wave
+///
+/// ### Returns
+///
+/// `node_sample_counts` atomically incremented once per live sample.
+#[cube(launch_unchecked)]
+#[allow(clippy::collapsible_if)]
+pub fn count_node_samples(
+    sample_to_node: &Tensor<u32>,
+    sample_multiplicity: &Tensor<u32>,
+    node_sample_counts: &mut Tensor<Atomic<u32>>,
+    n_samples: u32,
+    wave_size: u32,
+    n_active_nodes: u32,
+) {
+    let s = CUBE_POS_X * WORKGROUP_128 + UNIT_POS_X + CUBE_POS_Y * CUBE_COUNT_X * WORKGROUP_128;
+    let tree = CUBE_POS_Z;
+    if s >= n_samples {
+        terminate!();
+    }
+    if tree >= wave_size {
+        terminate!();
+    }
+    let idx = (tree * n_samples + s) as usize;
+    let node = sample_to_node[idx];
+    if node < n_active_nodes {
+        if sample_multiplicity[idx] > 0u32 {
+            Atomic::fetch_add(
+                &node_sample_counts[(tree * n_active_nodes + node) as usize],
+                1u32,
+            );
+        }
+    }
+}
+
+/// Exclusive prefix sum of the per-node counts, one thread per tree.
+///
+/// Also resets each count to zero on the way past, so
+/// [`scatter_node_samples`] can use it as a per-node write cursor.
+///
+/// Serial over at most `max_active_nodes` (1024) entries and launched once per
+/// level, which puts it in the same class as the other node-bookkeeping
+/// kernels: collectively 0.1% of GPU time.
+///
+/// ### Params
+///
+/// * `node_sample_counts` - Per-node counts, zeroed in place `[wave_size,
+///   n_active_nodes]`
+/// * `node_sample_offsets` - Output exclusive prefix `[wave_size,
+///   n_active_nodes + 1]`
+/// * `wave_size` - Trees in wave
+/// * `n_active_nodes` - Active nodes at level
+///
+/// ### Grid mapping
+///
+/// * `CUBE_POS_X` -> tree_in_wave
+/// * Single thread per workgroup (`UNIT_POS_X == 0`)
+///
+/// ### Returns
+///
+/// `node_sample_offsets` holds the node's slice bounds; `node_sample_counts`
+/// is left zeroed.
+#[cube(launch_unchecked)]
+pub fn scan_node_offsets(
+    node_sample_counts: &mut Tensor<Atomic<u32>>,
+    node_sample_offsets: &mut Tensor<u32>,
+    wave_size: u32,
+    n_active_nodes: u32,
+) {
+    let tree = CUBE_POS_X;
+    if tree >= wave_size {
+        terminate!();
+    }
+    if UNIT_POS_X != 0u32 {
+        terminate!();
+    }
+    let cbase = (tree * n_active_nodes) as usize;
+    let obase = (tree * (n_active_nodes + 1u32)) as usize;
+    node_sample_offsets[obase] = 0u32;
+    let mut run: u32 = 0u32;
+    let mut n: u32 = 0u32;
+    while n < n_active_nodes {
+        let c = Atomic::load(&node_sample_counts[cbase + n as usize]);
+        Atomic::store(&node_sample_counts[cbase + n as usize], 0u32);
+        run += c;
+        node_sample_offsets[obase + (n + 1u32) as usize] = run;
+        n += 1u32;
+    }
+}
+
+/// Scatter live sample ids into their node's slice.
+///
+/// Within a node the order is whatever the atomic cursor hands out, so it
+/// varies run to run. That makes the f32 summation order in the consumer
+/// nondeterministic, which is a property the pipeline already has via the
+/// CAS-loop atomic in [`accumulate_importance`].
+///
+/// ### Params
+///
+/// * `sample_to_node` - Per-tree sample assignment `[wave_size, n_samples]`
+/// * `sample_multiplicity` - Per-tree sample multiplicity, same layout
+/// * `node_sample_offsets` - Node slice bounds from [`scan_node_offsets`]
+/// * `node_sample_counts` - Per-node write cursor, zeroed on entry
+/// * `node_sample_ids` - Output sample ids `[wave_size, n_samples]`
+/// * `node_sample_mults` - Output multiplicities, same layout
+/// * `n_samples` - Number of samples
+/// * `wave_size` - Trees in wave
+/// * `n_active_nodes` - Active nodes at level
+///
+/// ### Grid mapping
+///
+/// * `CUBE_POS_X * WORKGROUP_128 + UNIT_POS_X + CUBE_POS_Y * CUBE_COUNT_X *
+///   WORKGROUP_128` -> sample index
+/// * `CUBE_POS_Z` -> tree_in_wave
+///
+/// ### Returns
+///
+/// `node_sample_ids` and `node_sample_mults` filled over each node's slice.
+#[cube(launch_unchecked)]
+#[allow(clippy::too_many_arguments)]
+pub fn scatter_node_samples(
+    sample_to_node: &Tensor<u32>,
+    sample_multiplicity: &Tensor<u32>,
+    node_sample_offsets: &Tensor<u32>,
+    node_sample_counts: &mut Tensor<Atomic<u32>>,
+    node_sample_ids: &mut Tensor<u32>,
+    node_sample_mults: &mut Tensor<u32>,
+    n_samples: u32,
+    wave_size: u32,
+    n_active_nodes: u32,
+) {
+    let s = CUBE_POS_X * WORKGROUP_128 + UNIT_POS_X + CUBE_POS_Y * CUBE_COUNT_X * WORKGROUP_128;
+    let tree = CUBE_POS_Z;
+    if s >= n_samples {
+        terminate!();
+    }
+    if tree >= wave_size {
+        terminate!();
+    }
+    let idx = (tree * n_samples + s) as usize;
+    let node = sample_to_node[idx];
+    if node < n_active_nodes {
+        let mult = sample_multiplicity[idx];
+        if mult > 0u32 {
+            let slot = Atomic::fetch_add(
+                &node_sample_counts[(tree * n_active_nodes + node) as usize],
+                1u32,
+            );
+            let pos = node_sample_offsets[(tree * (n_active_nodes + 1u32) + node) as usize] + slot;
+            let out = (tree * n_samples + pos) as usize;
+            node_sample_ids[out] = s;
+            node_sample_mults[out] = mult;
+        }
+    }
+}
+
 /////////////////////
 // Launch wrappers //
 /////////////////////
@@ -2415,14 +2647,104 @@ fn launch_sample_features<R: Runtime>(
 ///
 /// `()` — kernel is dispatched asynchronously via the client command queue.
 #[allow(clippy::too_many_arguments)]
+/// Dispatch the three per-node gather kernels in order.
+///
+/// They are always run as a unit and each depends on the previous, so they get
+/// one wrapper rather than three. Cheap by construction: two sample-wide passes
+/// and one serial scan over at most `max_active_nodes` entries per tree.
+///
+/// ### Workgroup
+///
+/// `WORKGROUP_128` for the zero and the two sample passes; the offset scan is
+/// one thread per tree, matching [`compute_child_ids`].
+///
+/// ### Params
+///
+/// * `client` - CubeCL compute client
+/// * `sample_to_node` - Per-tree sample assignment `[wave_size, n_samples]`
+/// * `sample_multiplicity` - Per-tree sample multiplier, same layout
+/// * `node_sample_counts` - Scratch counters `[wave_size, n_active_nodes]`
+/// * `node_sample_offsets` - Output slice bounds `[wave_size, n_active_nodes + 1]`
+/// * `node_sample_ids` - Output sample ids `[wave_size, n_samples]`
+/// * `node_sample_mults` - Output multiplicities, same layout
+/// * `n_samples` - Number of samples
+/// * `wave_size` - Trees in wave
+/// * `n_active_nodes` - Active nodes at level
+///
+/// ### Returns
+///
+/// `()` — kernels are dispatched asynchronously via the client command queue.
+fn launch_gather_node_samples<R: Runtime>(
+    client: &ComputeClient<R>,
+    sample_to_node: &GpuTensor<R, u32>,
+    sample_multiplicity: &GpuTensor<R, u32>,
+    node_sample_counts: &GpuTensor<R, u32>,
+    node_sample_offsets: &GpuTensor<R, u32>,
+    node_sample_ids: &GpuTensor<R, u32>,
+    node_sample_mults: &GpuTensor<R, u32>,
+    n_samples: usize,
+    wave_size: usize,
+    n_active_nodes: usize,
+) {
+    let n_wgs = (n_samples as u32).div_ceil(WORKGROUP_128);
+    let (gx, gy) = grid_2d(n_wgs.max(1));
+    unsafe {
+        zero_node_sample_counts::launch_unchecked::<R>(
+            client,
+            CubeCount::Static(wave_size as u32, 1, 1),
+            CubeDim::new_1d(WORKGROUP_128),
+            node_sample_counts.clone().into_tensor_arg(),
+            wave_size as u32,
+            n_active_nodes as u32,
+            WORKGROUP_128,
+        );
+        count_node_samples::launch_unchecked::<R>(
+            client,
+            CubeCount::Static(gx, gy, wave_size as u32),
+            CubeDim::new_1d(WORKGROUP_128),
+            sample_to_node.clone().into_tensor_arg(),
+            sample_multiplicity.clone().into_tensor_arg(),
+            node_sample_counts.clone().into_tensor_arg(),
+            n_samples as u32,
+            wave_size as u32,
+            n_active_nodes as u32,
+        );
+        scan_node_offsets::launch_unchecked::<R>(
+            client,
+            CubeCount::Static(wave_size as u32, 1, 1),
+            CubeDim::new_1d(1),
+            node_sample_counts.clone().into_tensor_arg(),
+            node_sample_offsets.clone().into_tensor_arg(),
+            wave_size as u32,
+            n_active_nodes as u32,
+        );
+        scatter_node_samples::launch_unchecked::<R>(
+            client,
+            CubeCount::Static(gx, gy, wave_size as u32),
+            CubeDim::new_1d(WORKGROUP_128),
+            sample_to_node.clone().into_tensor_arg(),
+            sample_multiplicity.clone().into_tensor_arg(),
+            node_sample_offsets.clone().into_tensor_arg(),
+            node_sample_counts.clone().into_tensor_arg(),
+            node_sample_ids.clone().into_tensor_arg(),
+            node_sample_mults.clone().into_tensor_arg(),
+            n_samples as u32,
+            wave_size as u32,
+            n_active_nodes as u32,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn launch_build_hist<R: Runtime>(
     client: &ComputeClient<R>,
     feature_data: &GpuTensor<R, u32>,
     sy_offsets: &GpuTensor<R, u32>,
     sy_target_indices: &GpuTensor<R, u32>,
     sy_values: &GpuTensor<R, f32>,
-    sample_to_node: &GpuTensor<R, u32>,
-    sample_multiplicity: &GpuTensor<R, u32>,
+    node_sample_offsets: &GpuTensor<R, u32>,
+    node_sample_ids: &GpuTensor<R, u32>,
+    node_sample_mults: &GpuTensor<R, u32>,
     node_features: &GpuTensor<R, u32>,
     hist_counts: &GpuTensor<R, u32>,
     hist_y_sums: &GpuTensor<R, u32>,
@@ -2442,8 +2764,9 @@ fn launch_build_hist<R: Runtime>(
             sy_offsets.clone().into_tensor_arg(),
             sy_target_indices.clone().into_tensor_arg(),
             sy_values.clone().into_tensor_arg(),
-            sample_to_node.clone().into_tensor_arg(),
-            sample_multiplicity.clone().into_tensor_arg(),
+            node_sample_offsets.clone().into_tensor_arg(),
+            node_sample_ids.clone().into_tensor_arg(),
+            node_sample_mults.clone().into_tensor_arg(),
             node_features.clone().into_tensor_arg(),
             hist_counts.clone().into_tensor_arg(),
             hist_y_sums.clone().into_tensor_arg(),
@@ -3344,6 +3667,18 @@ struct WaveState<R: Runtime> {
     slot_min_bin: GpuTensor<R, u32>,
     /// Last informative bin per slot, same layout as `slot_min_bin`.
     slot_max_bin: GpuTensor<R, u32>,
+    /// Scratch counters for the per-node gather `[wave_size,
+    /// max_active_nodes]`. Doubles as the scatter write cursor. RandomForest
+    /// only; stubbed to length 1 on the ExtraTrees path.
+    node_sample_counts: GpuTensor<R, u32>,
+    /// Per-node slice bounds into `node_sample_ids` `[wave_size,
+    /// max_active_nodes + 1]`. RandomForest only.
+    node_sample_offsets: GpuTensor<R, u32>,
+    /// Sample ids grouped by owning node `[wave_size, n_samples]`. Only the
+    /// live prefix of each node's slice is meaningful. RandomForest only.
+    node_sample_ids: GpuTensor<R, u32>,
+    /// Multiplicities parallel to `node_sample_ids`. RandomForest only.
+    node_sample_mults: GpuTensor<R, u32>,
     /// Per-node sample totals `[wave_size, max_active_nodes]`. Written by
     /// `merge_hist` at level 0 and by `propagate_child_stats` thereafter.
     /// Ping-pongs with `node_counts_alt` on level parity.
@@ -3457,6 +3792,18 @@ impl<R: Runtime> WaveState<R> {
             1
         };
         let cand_stats_len = if use_et { cand_len * n_targets } else { 1 };
+        // The per-node gather feeds the RandomForest histogram build only.
+        let gather_node_len = if use_et {
+            1
+        } else {
+            wave_size * max_active_nodes
+        };
+        let gather_offset_len = if use_et {
+            1
+        } else {
+            wave_size * (max_active_nodes + 1)
+        };
+        let gather_id_len = if use_et { 1 } else { wave_size * n_samples };
 
         Self {
             sample_to_node: GpuTensor::empty(vec![wave_size * n_samples], client),
@@ -3469,6 +3816,10 @@ impl<R: Runtime> WaveState<R> {
             cum_y_sum_sqs: GpuTensor::empty(vec![hist_sums_len], client),
             slot_min_bin: GpuTensor::empty(vec![wave_size * max_active_nodes * k_feats], client),
             slot_max_bin: GpuTensor::empty(vec![wave_size * max_active_nodes * k_feats], client),
+            node_sample_counts: GpuTensor::empty(vec![gather_node_len], client),
+            node_sample_offsets: GpuTensor::empty(vec![gather_offset_len], client),
+            node_sample_ids: GpuTensor::empty(vec![gather_id_len], client),
+            node_sample_mults: GpuTensor::empty(vec![gather_id_len], client),
             node_counts: GpuTensor::empty(vec![wave_size * max_active_nodes], client),
             node_y_sums: GpuTensor::empty(vec![node_stats_len], client),
             node_y_sum_sqs: GpuTensor::empty(vec![node_stats_len], client),
@@ -3972,14 +4323,32 @@ fn run_wave_bfs<R: Runtime>(
         } else {
             // Present whenever use_et is false, which is the only path here.
             let sy = sy_gpu.expect("RandomForest path requires the sparse Y upload");
+
+            // Group this level's live samples by owning node, so the histogram
+            // build walks each node's own slice instead of testing all
+            // n_samples once per (slot, node, tree).
+            launch_gather_node_samples(
+                client,
+                &state.sample_to_node,
+                sample_multiplicity_gpu,
+                &state.node_sample_counts,
+                &state.node_sample_offsets,
+                &state.node_sample_ids,
+                &state.node_sample_mults,
+                n_samples,
+                wave_size,
+                n_active_nodes,
+            );
+
             launch_build_hist(
                 client,
                 feature_data_gpu,
                 &sy.offsets,
                 &sy.target_indices,
                 &sy.values,
-                &state.sample_to_node,
-                sample_multiplicity_gpu,
+                &state.node_sample_offsets,
+                &state.node_sample_ids,
+                &state.node_sample_mults,
                 &state.node_features,
                 &state.hist_counts,
                 &state.hist_y_sums,
