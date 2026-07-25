@@ -580,9 +580,16 @@ fn hash_mix(x: u32) -> u32 {
 /// candidates
 /// `tx, tx+wg, ...` (candidate `c` decodes as `slot = c / n_thresholds`,
 /// `thr_idx = c % n_thresholds`), keeps its running best in registers, then
-/// participates in a manually-unrolled SMEM tree argmax (128 -> 64 -> ...
-/// -> 1). Thread 0 writes the winning split; all threads then fan out again on
-/// the target dim to copy the winning bin's left-child Y stats.
+/// reduces to a single winner. Thread 0 writes the winning split; all threads
+/// then fan out again on the target dim to copy the winning bin's left-child
+/// Y stats.
+///
+/// The reduction has two paths, selected by the comptime `use_plane` flag.
+/// When the launcher can prove `CUBE_DIM == PLANE_DIM` it uses `plane_max` /
+/// `plane_min` / `plane_shuffle`, which needs neither shared memory nor
+/// barriers. Otherwise it falls back to a manually-unrolled SMEM tree argmax
+/// (16 -> 8 -> 4 -> 2 -> 1). Both resolve ties to the lowest lane, so the two
+/// paths agree bit for bit.
 ///
 /// ### Params
 ///
@@ -613,6 +620,9 @@ fn hash_mix(x: u32) -> u32 {
 /// * `min_samples_leaf` - Minimum samples required on both sides of a split
 /// * `level` - Depth being processed
 /// * `wg_size` - Workgroup width (comptime)
+/// * `use_plane` - Take the plane-primitive argmax rather than the SMEM
+///   ladder (comptime). Only valid when `CUBE_DIM == PLANE_DIM`; see
+///   [`plane_argmax_viable`]
 ///
 /// ### Grid mapping
 ///
@@ -626,8 +636,14 @@ fn hash_mix(x: u32) -> u32 {
 /// `split_n_left`; left-child Y stats into `split_y_sums_l` and
 /// `split_y_sum_sqs_l`. Nodes with no valid split get
 /// `split_feature = u32::MAX`.
+// `winner_*` are seeded before the comptime branch so both reduction paths can
+// assign them; the seed values are dead on every path.
 #[cube(launch_unchecked)]
-#[allow(clippy::too_many_arguments, clippy::collapsible_if)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::collapsible_if,
+    unused_assignments
+)]
 pub fn evaluate_splits_et(
     cum_counts: &Tensor<u32>,
     cum_y_sums: &Tensor<f32>,
@@ -652,6 +668,7 @@ pub fn evaluate_splits_et(
     min_samples_leaf: u32,
     level: u32,
     #[comptime] wg_size: u32,
+    #[comptime] use_plane: bool,
 ) {
     let node = CUBE_POS_X + CUBE_POS_Y * CUBE_COUNT_X;
     let tree = CUBE_POS_Z;
@@ -793,110 +810,150 @@ pub fn evaluate_splits_et(
         c += wg_size;
     }
 
-    // argmax reduction (32-wide, 5 halving stages 16 -> 8 -> 4 -> 2 -> 1)
+    // argmax reduction. SMEM is declared unconditionally (cubecl wants
+    // allocations at kernel scope) but goes unused on the plane path; 640
+    // bytes of dead threadgroup memory is not worth branching around.
     let mut s_score = SharedMemory::<f32>::new(WORKGROUP_32 as usize);
     let mut s_slot = SharedMemory::<u32>::new(WORKGROUP_32 as usize);
     let mut s_thr = SharedMemory::<u32>::new(WORKGROUP_32 as usize);
     let mut s_nl = SharedMemory::<u32>::new(WORKGROUP_32 as usize);
     let mut s_valid = SharedMemory::<u32>::new(WORKGROUP_32 as usize);
 
-    s_score[tx as usize] = best_score;
-    s_slot[tx as usize] = best_slot;
-    s_thr[tx as usize] = best_thr;
-    s_nl[tx as usize] = best_n_left;
-    s_valid[tx as usize] = best_valid;
-    sync_cube();
+    let mut winner_valid: u32 = 0u32;
+    let mut winner_slot: u32 = 0u32;
+    let mut winner_thr: u32 = 0u32;
+    let mut winner_n_left: u32 = 0u32;
 
-    if tx < 16u32 {
-        let mate = tx + 16u32;
-        let take = argmax_takes_mate(
-            s_valid[tx as usize],
-            s_score[tx as usize],
-            s_valid[mate as usize],
-            s_score[mate as usize],
-        );
-        if take == 1u32 {
-            s_score[tx as usize] = s_score[mate as usize];
-            s_slot[tx as usize] = s_slot[mate as usize];
-            s_thr[tx as usize] = s_thr[mate as usize];
-            s_nl[tx as usize] = s_nl[mate as usize];
-            s_valid[tx as usize] = s_valid[mate as usize];
-        }
-    }
-    sync_cube();
-    if tx < 8u32 {
-        let mate = tx + 8u32;
-        let take = argmax_takes_mate(
-            s_valid[tx as usize],
-            s_score[tx as usize],
-            s_valid[mate as usize],
-            s_score[mate as usize],
-        );
-        if take == 1u32 {
-            s_score[tx as usize] = s_score[mate as usize];
-            s_slot[tx as usize] = s_slot[mate as usize];
-            s_thr[tx as usize] = s_thr[mate as usize];
-            s_nl[tx as usize] = s_nl[mate as usize];
-            s_valid[tx as usize] = s_valid[mate as usize];
-        }
-    }
-    sync_cube();
-    if tx < 4u32 {
-        let mate = tx + 4u32;
-        let take = argmax_takes_mate(
-            s_valid[tx as usize],
-            s_score[tx as usize],
-            s_valid[mate as usize],
-            s_score[mate as usize],
-        );
-        if take == 1u32 {
-            s_score[tx as usize] = s_score[mate as usize];
-            s_slot[tx as usize] = s_slot[mate as usize];
-            s_thr[tx as usize] = s_thr[mate as usize];
-            s_nl[tx as usize] = s_nl[mate as usize];
-            s_valid[tx as usize] = s_valid[mate as usize];
-        }
-    }
-    sync_cube();
-    if tx < 2u32 {
-        let mate = tx + 2u32;
-        let take = argmax_takes_mate(
-            s_valid[tx as usize],
-            s_score[tx as usize],
-            s_valid[mate as usize],
-            s_score[mate as usize],
-        );
-        if take == 1u32 {
-            s_score[tx as usize] = s_score[mate as usize];
-            s_slot[tx as usize] = s_slot[mate as usize];
-            s_thr[tx as usize] = s_thr[mate as usize];
-            s_nl[tx as usize] = s_nl[mate as usize];
-            s_valid[tx as usize] = s_valid[mate as usize];
-        }
-    }
-    sync_cube();
-    if tx < 1u32 {
-        let mate = tx + 1u32;
-        let take = argmax_takes_mate(
-            s_valid[tx as usize],
-            s_score[tx as usize],
-            s_valid[mate as usize],
-            s_score[mate as usize],
-        );
-        if take == 1u32 {
-            s_score[tx as usize] = s_score[mate as usize];
-            s_slot[tx as usize] = s_slot[mate as usize];
-            s_thr[tx as usize] = s_thr[mate as usize];
-            s_nl[tx as usize] = s_nl[mate as usize];
-            s_valid[tx as usize] = s_valid[mate as usize];
-        }
-    }
-    sync_cube();
+    if use_plane {
+        // Single-plane argmax: no SMEM, no barriers. The caller guarantees
+        // CUBE_DIM == PLANE_DIM, so one plane_max spans the whole workgroup.
+        //
+        // `best_score` doubles as the validity flag: the candidate update
+        // guard is `score > best_score` seeded at 0.0, so a lane with
+        // best_valid == 1 always holds a strictly positive score, and an
+        // invalid lane always holds exactly 0.0.
+        let winner_score = plane_max(best_score);
 
-    let winner_valid = s_valid[0];
-    let winner_slot = s_slot[0];
-    let winner_thr = s_thr[0];
-    let winner_n_left = s_nl[0];
+        // Rank trick to recover the argmax lane: every lane holding the
+        // winning score publishes its lane id, everyone else publishes
+        // PLANE_DIM, and plane_min picks the lowest. This resolves ties to
+        // the lowest lane, matching the strict `>` in argmax_takes_mate that
+        // the SMEM ladder below relies on. Preserving that tie-break is what
+        // keeps the output identical between the two paths.
+        let mut rank: u32 = PLANE_DIM;
+        if best_valid == 1u32 && best_score == winner_score {
+            rank = UNIT_POS_PLANE;
+        }
+        let winner_lane = plane_min(rank);
+
+        let mut src: u32 = 0u32;
+        if winner_lane < PLANE_DIM {
+            src = winner_lane;
+            winner_valid = 1u32;
+        }
+        winner_slot = plane_shuffle(best_slot, src);
+        winner_thr = plane_shuffle(best_thr, src);
+        winner_n_left = plane_shuffle(best_n_left, src);
+    } else {
+        // Portable fallback: 5 halving stages 16 -> 8 -> 4 -> 2 -> 1.
+        s_score[tx as usize] = best_score;
+        s_slot[tx as usize] = best_slot;
+        s_thr[tx as usize] = best_thr;
+        s_nl[tx as usize] = best_n_left;
+        s_valid[tx as usize] = best_valid;
+        sync_cube();
+
+        if tx < 16u32 {
+            let mate = tx + 16u32;
+            let take = argmax_takes_mate(
+                s_valid[tx as usize],
+                s_score[tx as usize],
+                s_valid[mate as usize],
+                s_score[mate as usize],
+            );
+            if take == 1u32 {
+                s_score[tx as usize] = s_score[mate as usize];
+                s_slot[tx as usize] = s_slot[mate as usize];
+                s_thr[tx as usize] = s_thr[mate as usize];
+                s_nl[tx as usize] = s_nl[mate as usize];
+                s_valid[tx as usize] = s_valid[mate as usize];
+            }
+        }
+        sync_cube();
+        if tx < 8u32 {
+            let mate = tx + 8u32;
+            let take = argmax_takes_mate(
+                s_valid[tx as usize],
+                s_score[tx as usize],
+                s_valid[mate as usize],
+                s_score[mate as usize],
+            );
+            if take == 1u32 {
+                s_score[tx as usize] = s_score[mate as usize];
+                s_slot[tx as usize] = s_slot[mate as usize];
+                s_thr[tx as usize] = s_thr[mate as usize];
+                s_nl[tx as usize] = s_nl[mate as usize];
+                s_valid[tx as usize] = s_valid[mate as usize];
+            }
+        }
+        sync_cube();
+        if tx < 4u32 {
+            let mate = tx + 4u32;
+            let take = argmax_takes_mate(
+                s_valid[tx as usize],
+                s_score[tx as usize],
+                s_valid[mate as usize],
+                s_score[mate as usize],
+            );
+            if take == 1u32 {
+                s_score[tx as usize] = s_score[mate as usize];
+                s_slot[tx as usize] = s_slot[mate as usize];
+                s_thr[tx as usize] = s_thr[mate as usize];
+                s_nl[tx as usize] = s_nl[mate as usize];
+                s_valid[tx as usize] = s_valid[mate as usize];
+            }
+        }
+        sync_cube();
+        if tx < 2u32 {
+            let mate = tx + 2u32;
+            let take = argmax_takes_mate(
+                s_valid[tx as usize],
+                s_score[tx as usize],
+                s_valid[mate as usize],
+                s_score[mate as usize],
+            );
+            if take == 1u32 {
+                s_score[tx as usize] = s_score[mate as usize];
+                s_slot[tx as usize] = s_slot[mate as usize];
+                s_thr[tx as usize] = s_thr[mate as usize];
+                s_nl[tx as usize] = s_nl[mate as usize];
+                s_valid[tx as usize] = s_valid[mate as usize];
+            }
+        }
+        sync_cube();
+        if tx < 1u32 {
+            let mate = tx + 1u32;
+            let take = argmax_takes_mate(
+                s_valid[tx as usize],
+                s_score[tx as usize],
+                s_valid[mate as usize],
+                s_score[mate as usize],
+            );
+            if take == 1u32 {
+                s_score[tx as usize] = s_score[mate as usize];
+                s_slot[tx as usize] = s_slot[mate as usize];
+                s_thr[tx as usize] = s_thr[mate as usize];
+                s_nl[tx as usize] = s_nl[mate as usize];
+                s_valid[tx as usize] = s_valid[mate as usize];
+            }
+        }
+        sync_cube();
+
+        winner_valid = s_valid[0];
+        winner_slot = s_slot[0];
+        winner_thr = s_thr[0];
+        winner_n_left = s_nl[0];
+    }
 
     if tx == 0u32 {
         if winner_valid == 1u32 {
@@ -1995,8 +2052,32 @@ fn launch_evaluate_splits_et<R: Runtime>(
             min_samples_leaf as u32,
             level,
             WORKGROUP_32,
+            plane_argmax_viable(client, WORKGROUP_32),
         );
     }
+}
+
+/// Whether a `wg_size`-wide workgroup is guaranteed to be exactly one plane on
+/// this device, which is the precondition for the plane-primitive argmax in
+/// [`evaluate_splits_et`].
+///
+/// Both the min and max reported plane size must equal the workgroup width. If
+/// the device reports a range (some backends do), a workgroup could straddle
+/// two planes and a bare `plane_max` would silently reduce over only part of
+/// the candidate set. Apple Silicon reports 32/32, so the plane path is taken
+/// there.
+///
+/// ### Params
+///
+/// * `client` - CubeCL compute client, queried for hardware properties
+/// * `wg_size` - Workgroup width the kernel will be launched at
+///
+/// ### Returns
+///
+/// `true` when the plane path is safe, `false` to take the SMEM fallback.
+fn plane_argmax_viable<R: Runtime>(client: &ComputeClient<R>, wg_size: u32) -> bool {
+    let hw = &client.properties().hardware;
+    hw.plane_size_min == wg_size && hw.plane_size_max == wg_size
 }
 
 /// Dispatch [`evaluate_splits_rf`] over `(gx, gy, wave_size)` workgroups,
