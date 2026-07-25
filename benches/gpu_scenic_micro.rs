@@ -42,8 +42,9 @@
 use std::time::Instant;
 
 use bixverse_rs::gpu::sc_gpu::scenic_gpu::{
-    ScenicGpuParams, fit_multi_trees_gpu, pick_wave_size, viable_max_active_nodes, wave_byte_cost,
-    wave_byte_cost_et,
+    ScenicGpuParams, WaveLayout, fit_multi_trees_gpu, fused_rf_smem_bytes, pick_gpu_bins,
+    pick_wave_size, viable_max_active_nodes, wave_byte_cost, wave_byte_cost_et,
+    wave_byte_cost_rf_fused,
 };
 use bixverse_rs::prelude::*;
 use bixverse_rs::single_cell::sc_analysis::scenic::{
@@ -438,59 +439,50 @@ fn report_shape(n_samples: usize, device: &WgpuDevice) {
     let nodes = viable_max_active_nodes(MAX_DEPTH, n_samples, MIN_SAMPLES_LEAF);
     let gib = |b: usize| b as f64 / (1024.0 * 1024.0 * 1024.0);
 
-    let wave_rf = pick_wave_size(
-        nodes,
-        k_feats,
-        N_TARGETS,
-        TREES_MULTI_WAVE,
-        WAVE_BUDGET,
-        1,
-        false,
-        max_binding,
-    )
-    .expect("shape busts the wave budget at wave_size = 1");
-    let wave_et = pick_wave_size(
-        nodes,
-        k_feats,
-        N_TARGETS,
-        TREES_MULTI_WAVE,
-        WAVE_BUDGET,
-        1,
-        true,
-        max_binding,
-    )
-    .expect("shape busts the wave budget at wave_size = 1");
+    let wave = |layout| {
+        pick_wave_size(
+            nodes,
+            k_feats,
+            N_TARGETS,
+            TREES_MULTI_WAVE,
+            WAVE_BUDGET,
+            1,
+            layout,
+            n_samples,
+            max_binding,
+        )
+        .expect("shape busts the wave budget at wave_size = 1")
+    };
+    let wave_et = wave(WaveLayout::ExtraTrees);
+    let wave_rf_hist = wave(WaveLayout::RandomForestHist);
+    let wave_rf_fused = wave(WaveLayout::RandomForestFused);
+    let fused_bytes = fused_rf_smem_bytes();
+    let fused_ok = fused_bytes <= max_smem;
 
     println!(
         "  shape: {n_samples} cells, {N_FEATURES} TFs, {N_TARGETS} targets, \
          k_feats {k_feats}, max_active_nodes {nodes}"
     );
     println!(
-        "  wave:  et size {wave_et} ({:.3} GiB) | rf size {wave_rf} ({:.2} GiB) | \
-         budget {:.0} GiB | max binding {:.2} GiB",
+        "  wave:  et {wave_et} ({:.3} GiB) | rf-fused {wave_rf_fused} ({:.3} GiB) | \
+         rf-hist {wave_rf_hist} ({:.2} GiB) | budget {:.0} GiB | max binding {:.2} GiB",
         gib(wave_byte_cost_et(wave_et, nodes, k_feats, N_TARGETS, 1)),
-        gib(wave_byte_cost(wave_rf, nodes, k_feats, N_TARGETS)),
+        gib(wave_byte_cost_rf_fused(
+            wave_rf_fused,
+            nodes,
+            k_feats,
+            N_TARGETS,
+            n_samples
+        )),
+        gib(wave_byte_cost(wave_rf_hist, nodes, k_feats, N_TARGETS)),
         gib(WAVE_BUDGET),
         gib(max_binding),
     );
-
-    // Forward-looking: the planned RF rewrite keeps the per-slot histogram in
-    // threadgroup memory, which only works if a coarsened bin axis fits. Print
-    // the budget now so the viability is visible before the kernel exists.
-    //
-    // Counts and the per-bin score array are part of the ask, not just the sums,
-    // and the compaction scratch on top. Comparing the sums alone says 128 bins
-    // fits in 32768 B at exactly 32768 B, which is wrong by every byte of the
-    // rest.
-    let smem_need = |bins: usize| bins * N_TARGETS * 4 + bins * 4 + bins * 4 + 1024;
-    let verdict = |n: usize| if n <= max_smem { "fits" } else { "busts" };
     println!(
-        "  smem:  device {max_smem} B | fused hist at {N_TARGETS} targets: \
-         64 bins {} B ({}), 128 bins {} B ({})",
-        smem_need(64),
-        verdict(smem_need(64)),
-        smem_need(128),
-        verdict(smem_need(128)),
+        "  fused: {} ({fused_bytes} B smem vs {max_smem} B device), {} gpu bins at \
+         {N_TARGETS} targets",
+        if fused_ok { "active" } else { "UNAVAILABLE" },
+        pick_gpu_bins(N_TARGETS),
     );
 }
 

@@ -73,6 +73,20 @@ const DEFAULT_WAVE_SIZE: usize = 32;
 /// than 4, so 32 slots is a generous ceiling at 128 bytes of shared memory.
 const MAX_PLANES_PER_CUBE: u32 = 32;
 
+/// Float slots reserved for the fused RandomForest histogram in threadgroup
+/// memory.
+///
+/// Rows are padded to `n_targets + 1`, so this bounds
+/// `n_bins_gpu * (n_targets + 1)` rather than `n_bins_gpu * n_targets`. The pad
+/// exists because the scoring phase gives consecutive threads consecutive bins:
+/// at an unpadded stride of 64 every one of them resolves to the same bank and
+/// the pass serialises 32 ways.
+///
+/// 4352 is the smallest value covering all four cases [`pick_gpu_bins`] returns
+/// (256x9, 256x17, 128x33, 64x65) and costs 17 KB of the 32 KB an M1 Max
+/// reports.
+const SMEM_HIST_SLOTS: u32 = 4352;
+
 /// Sentinel for "no node" / "no valid split" / "no child" in the u32-typed
 /// device buffers (`split_feature`, `sample_to_node`, `left_child_id`,
 /// `right_child_id`).
@@ -1132,6 +1146,465 @@ pub fn finalise_split_stats_rf(
     let out = node_flat * n_targets as usize + tx as usize;
     split_y_sums_l[out] = acc_s;
     split_y_sum_sqs_l[out] = acc_q;
+}
+
+//////////////////////////
+// RandomForest, fused  //
+//////////////////////////
+
+// One kernel replacing build_hist_privatised + prefix_sum_bins +
+// evaluate_splits_rf, which between them are 91% of RandomForest GPU time. The
+// histogram lives in threadgroup memory and is never written to DRAM, the
+// prefix sum is a register carry, and the threshold sweep reads the result
+// while it is still in shared memory.
+//
+// Two things buy the shared-memory budget. The sum-of-squares histogram drops
+// out of the search algebraically (see the score note on
+// `build_score_rf_fused`), and the bin axis is coarsened to whatever fits.
+// Neither touches the shared `QuantisedStore`, which stays at 256 u8 bins.
+
+/// Finest bin count whose padded histogram fits [`SMEM_HIST_SLOTS`].
+///
+/// The GPU is free to bin more coarsely than the shared `QuantisedStore`,
+/// because the winning threshold is widened back into fine bin space before
+/// anything downstream sees it. Coarsening only where the budget forces it
+/// means small-target batches keep the full 256 bins for free: at 8 targets
+/// this returns 256, at 32 it returns 128, at the production 64 it returns 64.
+///
+/// ### Params
+///
+/// * `n_targets` - Targets in the batch
+///
+/// ### Returns
+///
+/// A power-of-two bin count in `1..=N_BINS`.
+pub fn pick_gpu_bins(n_targets: usize) -> u32 {
+    let mut bins = N_BINS;
+    while bins > 1 && (bins as usize) * (n_targets + 1) > SMEM_HIST_SLOTS as usize {
+        bins /= 2;
+    }
+    bins
+}
+
+/// Shared-memory bytes [`build_score_rf_fused`] asks for, independent of shape.
+///
+/// Everything it declares is comptime-sized, so the ask does not vary with
+/// `n_targets` or the bin count.
+pub fn fused_rf_smem_bytes() -> usize {
+    (SMEM_HIST_SLOTS as usize * 4)
+        + (N_BINS as usize * 4)
+        + (WORKGROUP_128 as usize * 4 * 4)
+        + (2 * 4)
+}
+
+/// Whether this device can run [`build_score_rf_fused`].
+///
+/// An oversized `SharedMemory` allocation is rejected when the pipeline is
+/// compiled, and that happens on a cubecl background thread where the error
+/// does not reach the caller. Check it host-side and fall back to the DRAM
+/// histogram path rather than find out by getting zeros back.
+///
+/// ### Params
+///
+/// * `client` - CubeCL compute client
+///
+/// ### Returns
+///
+/// `true` when the device's threadgroup-memory budget covers
+/// [`fused_rf_smem_bytes`].
+fn fused_rf_viable<R: Runtime>(client: &ComputeClient<R>) -> bool {
+    client.properties().hardware.max_shared_memory_size >= fused_rf_smem_bytes()
+}
+
+/// Build a slot's histogram in shared memory, sweep every threshold, and emit
+/// that slot's best split.
+///
+/// One workgroup per (slot, node, tree), `WORKGROUP_128` wide, in five phases:
+/// zero the shared histogram, accumulate the node's gathered samples into it,
+/// prefix-sum it along bins in place, score one candidate bin per thread, then
+/// argmax across threads. Nothing reaches DRAM but the four small per-slot
+/// outputs.
+///
+/// **Accumulation needs no atomics.** Every thread walks the *same* sample and
+/// thread `k` owns target `k`, so no two threads ever touch the same histogram
+/// column. That is what removes the ~1.4e9 CAS retry loops the DRAM path pays.
+///
+/// **The score drops the sum-of-squares histogram.** Expanding the objective,
+/// `Σ_k (wl·vl_k + wr·vr_k) = Q/n − (1/n)(S_L/nl + S_R/nr)` with
+/// `S_L = Σ_k syl_k²`, `S_R = Σ_k (sy_k − syl_k)²` and `Q = Σ_k ssq_k` a node
+/// constant. So `argmax` over thresholds only needs `G = S_L/nl + S_R/nr`, and
+/// `hist_y_sum_sqs` never has to exist. This is cuML's standard MSE
+/// formulation.
+///
+/// Two consequences worth being explicit about. The algebraic form does not
+/// clamp the per-target child variances at zero the way the CPU does, so results
+/// differ wherever f32 cancellation drives one negative. And `best_score > 0` is
+/// an *acceptance* gate on the CPU, not just a tie-break, so the winner's true
+/// score is reconstructed as `P − Q/n + G/n` before that gate is applied;
+/// `argmax G` alone would silently accept zero-gain splits at every node where
+/// no positive split exists.
+///
+/// ### Params
+///
+/// * `feature_data` - Quantised bins `[n_features, n_samples]` (u8 as u32)
+/// * `y_dense` - Dense Y `[n_samples, n_targets]`, target contiguous
+/// * `node_sample_offsets` - Node slice bounds `[wave_size, n_active_nodes + 1]`
+/// * `node_sample_ids` - Gathered sample ids `[wave_size, n_samples]`
+/// * `node_sample_mults` - Gathered multiplicities, same layout
+/// * `node_features` - Selected feature ids per (tree, node, slot)
+/// * `node_counts` - Per-node sample totals `[wave_size, n_active_nodes]`
+/// * `node_y_sums` - Per-node Y sums `[wave_size, n_active_nodes, n_targets]`
+/// * `node_y_sum_sqs` - Per-node Y sums-of-squares, same layout
+/// * `slot_best_score` - Output reconstructed score per slot
+/// * `slot_best_thr` - Output threshold per slot, widened to *fine* bin space
+/// * `slot_best_n_left` - Output left-child count per slot
+/// * `slot_best_valid` - Output 1 when the slot proposes a split, else 0
+/// * `n_samples` - Number of samples
+/// * `wave_size` - Trees in wave
+/// * `n_active_nodes` - Active nodes at level
+/// * `k_feats` - Features per node
+/// * `n_targets` - Targets in batch
+/// * `n_bins_gpu` - Coarsened bin count from [`pick_gpu_bins`]
+/// * `bin_shift` - Right shift taking a fine bin to a coarse one
+/// * `min_samples_leaf` - Minimum samples per child
+/// * `wg_size` - Workgroup width (comptime)
+///
+/// ### Grid mapping
+///
+/// * `CUBE_POS_X` -> feature slot
+/// * `CUBE_POS_Y` -> node index
+/// * `CUBE_POS_Z` -> tree_in_wave
+/// * `UNIT_POS_X` -> target index in the accumulate and prefix phases, candidate
+///   bin in the scoring phase
+///
+/// ### Returns
+///
+/// The four `slot_best_*` tensors written for every (tree, node, slot).
+#[cube(launch_unchecked)]
+#[allow(clippy::too_many_arguments, clippy::collapsible_if)]
+pub fn build_score_rf_fused(
+    feature_data: &Tensor<u32>,
+    y_dense: &Tensor<f32>,
+    node_sample_offsets: &Tensor<u32>,
+    node_sample_ids: &Tensor<u32>,
+    node_sample_mults: &Tensor<u32>,
+    node_features: &Tensor<u32>,
+    node_counts: &Tensor<u32>,
+    node_y_sums: &Tensor<f32>,
+    node_y_sum_sqs: &Tensor<f32>,
+    slot_best_score: &mut Tensor<f32>,
+    slot_best_thr: &mut Tensor<u32>,
+    slot_best_n_left: &mut Tensor<u32>,
+    slot_best_valid: &mut Tensor<u32>,
+    n_samples: u32,
+    wave_size: u32,
+    n_active_nodes: u32,
+    k_feats: u32,
+    n_targets: u32,
+    n_bins_gpu: u32,
+    bin_shift: u32,
+    min_samples_leaf: u32,
+    #[comptime] wg_size: u32,
+) {
+    let slot = CUBE_POS_X;
+    let node = CUBE_POS_Y;
+    let tree = CUBE_POS_Z;
+    if slot >= k_feats {
+        terminate!();
+    }
+    if node >= n_active_nodes {
+        terminate!();
+    }
+    if tree >= wave_size {
+        terminate!();
+    }
+
+    let mut s_hist = SharedMemory::<f32>::new(SMEM_HIST_SLOTS as usize);
+    let mut s_cnt = SharedMemory::<u32>::new(N_BINS as usize);
+    let mut s_score = SharedMemory::<f32>::new(WORKGROUP_128 as usize);
+    let mut s_bin = SharedMemory::<u32>::new(WORKGROUP_128 as usize);
+    let mut s_nl = SharedMemory::<u32>::new(WORKGROUP_128 as usize);
+    let mut s_valid = SharedMemory::<u32>::new(WORKGROUP_128 as usize);
+    let mut s_pq = SharedMemory::<f32>::new(2usize);
+
+    let tx = UNIT_POS_X;
+    let node_flat = (tree * n_active_nodes + node) as usize;
+    let slot_flat = ((tree * n_active_nodes + node) * k_feats + slot) as usize;
+    let stats_base = node_flat * n_targets as usize;
+    let n = node_counts[node_flat];
+
+    // Nodes that cannot split still have to leave a definite verdict behind, or
+    // reduce_slot_winners reads whatever was in the buffer two levels ago.
+    if n < 2u32 || n < 2u32 * min_samples_leaf {
+        if tx == 0u32 {
+            slot_best_score[slot_flat] = 0f32;
+            slot_best_thr[slot_flat] = 0u32;
+            slot_best_n_left[slot_flat] = 0u32;
+            slot_best_valid[slot_flat] = 0u32;
+        }
+        terminate!();
+    }
+
+    // Rows are padded by one float so the scoring phase, where consecutive
+    // threads own consecutive bins, does not put all of them on one bank.
+    let stride = n_targets + 1u32;
+    let feat = node_features[slot_flat];
+
+    let hist_len = n_bins_gpu * stride;
+    let mut z: u32 = tx;
+    while z < hist_len {
+        s_hist[z as usize] = 0f32;
+        z += wg_size;
+    }
+    let mut zc: u32 = tx;
+    while zc < n_bins_gpu {
+        s_cnt[zc as usize] = 0u32;
+        zc += wg_size;
+    }
+    sync_cube();
+
+    // Accumulate. The whole workgroup walks one sample at a time; thread k adds
+    // that sample's target k. Column ownership is what makes this atomic-free,
+    // and it is why the loop runs over samples rather than striding them.
+    let obase = (tree * (n_active_nodes + 1u32)) as usize;
+    let lo = node_sample_offsets[obase + node as usize];
+    let hi = node_sample_offsets[obase + (node + 1u32) as usize];
+    let gbase = (tree * n_samples) as usize;
+
+    let mut j: u32 = lo;
+    while j < hi {
+        let s = node_sample_ids[gbase + j as usize];
+        let mult = node_sample_mults[gbase + j as usize];
+        let b = feature_bin(feature_data, feat * n_samples + s) >> bin_shift;
+        if tx < n_targets {
+            let mf = f32::cast_from(mult);
+            let y = y_dense[(s * n_targets + tx) as usize];
+            s_hist[(b * stride + tx) as usize] += mf * y;
+        }
+        if tx == 0u32 {
+            s_cnt[b as usize] += mult;
+        }
+        j += 1u32;
+    }
+    sync_cube();
+
+    // Inclusive prefix along bins, in place. Thread k owns column k throughout,
+    // so the running total lives in a register and no barrier is needed.
+    if tx < n_targets {
+        let mut run: f32 = 0f32;
+        let mut b: u32 = 0u32;
+        while b < n_bins_gpu {
+            run += s_hist[(b * stride + tx) as usize];
+            s_hist[(b * stride + tx) as usize] = run;
+            b += 1u32;
+        }
+    }
+    if tx == 0u32 {
+        let mut runc: u32 = 0u32;
+        let mut b: u32 = 0u32;
+        while b < n_bins_gpu {
+            runc += s_cnt[b as usize];
+            s_cnt[b as usize] = runc;
+            b += 1u32;
+        }
+
+        // Node constants for the score reconstruction: the clamped parent
+        // variance sum and the raw sum-of-squares total.
+        let nf = f32::cast_from(n);
+        let mut p: f32 = 0f32;
+        let mut q: f32 = 0f32;
+        let mut k: u32 = 0u32;
+        while k < n_targets {
+            let sy = node_y_sums[stats_base + k as usize];
+            let ssq = node_y_sum_sqs[stats_base + k as usize];
+            q += ssq;
+            let mean = sy / nf;
+            p += f32::max(ssq / nf - mean * mean, 0f32);
+            k += 1u32;
+        }
+        s_pq[0] = p;
+        s_pq[1] = q;
+    }
+    sync_cube();
+
+    let parent_var = s_pq[0];
+    let q_tot = s_pq[1];
+    if parent_var <= 0f32 {
+        if tx == 0u32 {
+            slot_best_score[slot_flat] = 0f32;
+            slot_best_thr[slot_flat] = 0u32;
+            slot_best_n_left[slot_flat] = 0u32;
+            slot_best_valid[slot_flat] = 0u32;
+        }
+        terminate!();
+    }
+
+    // Score. One thread per candidate bin; splitting at the last bin sends
+    // everything left, so the sweep stops one short.
+    let mut best_g: f32 = 0f32;
+    let mut best_b: u32 = 0u32;
+    let mut best_nl: u32 = 0u32;
+    let mut best_valid: u32 = 0u32;
+
+    let mut b: u32 = tx;
+    while b + 1u32 < n_bins_gpu {
+        let n_left = s_cnt[b as usize];
+        let n_right = n - n_left;
+        if n_left >= min_samples_leaf {
+            if n_right >= min_samples_leaf {
+                let nl = f32::cast_from(n_left);
+                let nr = f32::cast_from(n_right);
+                let mut sl: f32 = 0f32;
+                let mut sr: f32 = 0f32;
+                let mut k: u32 = 0u32;
+                while k < n_targets {
+                    let cl = s_hist[(b * stride + k) as usize];
+                    let cr = node_y_sums[stats_base + k as usize] - cl;
+                    sl += cl * cl;
+                    sr += cr * cr;
+                    k += 1u32;
+                }
+                let g = sl / nl + sr / nr;
+                if best_valid == 0u32 || g > best_g {
+                    best_g = g;
+                    best_b = b;
+                    best_nl = n_left;
+                    best_valid = 1u32;
+                }
+            }
+        }
+        b += wg_size;
+    }
+
+    s_score[tx as usize] = best_g;
+    s_bin[tx as usize] = best_b;
+    s_nl[tx as usize] = best_nl;
+    s_valid[tx as usize] = best_valid;
+    sync_cube();
+
+    let mut red: u32 = (wg_size / 2u32).runtime();
+    while red > 0u32 {
+        if tx < red {
+            let mate = tx + red;
+            let take = argmax_takes_mate(
+                s_valid[tx as usize],
+                s_score[tx as usize],
+                s_valid[mate as usize],
+                s_score[mate as usize],
+            );
+            if take == 1u32 {
+                s_score[tx as usize] = s_score[mate as usize];
+                s_bin[tx as usize] = s_bin[mate as usize];
+                s_nl[tx as usize] = s_nl[mate as usize];
+                s_valid[tx as usize] = s_valid[mate as usize];
+            }
+        }
+        sync_cube();
+        red /= 2u32;
+    }
+
+    if tx == 0u32 {
+        let nf = f32::cast_from(n);
+        // argmax on G is argmax on the real score, but the > 0 acceptance gate
+        // needs the real thing back.
+        let score = parent_var - q_tot / nf + s_score[0] / nf;
+        if s_valid[0] == 1u32 && score > 0f32 {
+            slot_best_score[slot_flat] = score;
+            slot_best_thr[slot_flat] = (s_bin[0] << bin_shift) | ((1u32 << bin_shift) - 1u32);
+            slot_best_n_left[slot_flat] = s_nl[0];
+            slot_best_valid[slot_flat] = 1u32;
+        } else {
+            slot_best_score[slot_flat] = 0f32;
+            slot_best_thr[slot_flat] = 0u32;
+            slot_best_n_left[slot_flat] = 0u32;
+            slot_best_valid[slot_flat] = 0u32;
+        }
+    }
+}
+
+/// Pick each node's winning slot from the per-slot proposals.
+///
+/// Scans slots ascending with a strict `>`, so ties go to the lowest slot,
+/// matching how the CPU walks its shuffled feature buffer.
+///
+/// ### Params
+///
+/// * `slot_best_score` - Per-slot reconstructed scores
+/// * `slot_best_thr` - Per-slot thresholds, fine bin space
+/// * `slot_best_n_left` - Per-slot left-child counts
+/// * `slot_best_valid` - Per-slot validity flags
+/// * `node_features` - Selected feature ids per (tree, node, slot)
+/// * `split_feature` - Output winning feature per node, `INVALID_NODE` for leaf
+/// * `split_threshold` - Output winning threshold per node
+/// * `split_n_left` - Output left-child count per node
+/// * `wave_size` - Trees in wave
+/// * `n_active_nodes` - Active nodes at level
+/// * `k_feats` - Features per node
+///
+/// ### Grid mapping
+///
+/// * `CUBE_POS_X + CUBE_POS_Y * CUBE_COUNT_X` -> node index
+/// * `CUBE_POS_Z` -> tree_in_wave
+/// * Single thread per workgroup (`UNIT_POS_X == 0`)
+///
+/// ### Returns
+///
+/// `split_feature`, `split_threshold` and `split_n_left` written per node.
+#[cube(launch_unchecked)]
+#[allow(clippy::too_many_arguments)]
+pub fn reduce_slot_winners(
+    slot_best_score: &Tensor<f32>,
+    slot_best_thr: &Tensor<u32>,
+    slot_best_n_left: &Tensor<u32>,
+    slot_best_valid: &Tensor<u32>,
+    node_features: &Tensor<u32>,
+    split_feature: &mut Tensor<u32>,
+    split_threshold: &mut Tensor<u32>,
+    split_n_left: &mut Tensor<u32>,
+    wave_size: u32,
+    n_active_nodes: u32,
+    k_feats: u32,
+) {
+    let node = CUBE_POS_X + CUBE_POS_Y * CUBE_COUNT_X;
+    let tree = CUBE_POS_Z;
+    if node >= n_active_nodes {
+        terminate!();
+    }
+    if tree >= wave_size {
+        terminate!();
+    }
+    if UNIT_POS_X != 0u32 {
+        terminate!();
+    }
+
+    let node_flat = (tree * n_active_nodes + node) as usize;
+    let base = node_flat * k_feats as usize;
+
+    let mut best_score: f32 = 0f32;
+    let mut best_slot: u32 = 0u32;
+    let mut found: u32 = 0u32;
+    let mut s: u32 = 0u32;
+    while s < k_feats {
+        if slot_best_valid[base + s as usize] == 1u32 {
+            let sc = slot_best_score[base + s as usize];
+            if found == 0u32 || sc > best_score {
+                best_score = sc;
+                best_slot = s;
+                found = 1u32;
+            }
+        }
+        s += 1u32;
+    }
+
+    if found == 1u32 {
+        split_feature[node_flat] = node_features[base + best_slot as usize];
+        split_threshold[node_flat] = slot_best_thr[base + best_slot as usize];
+        split_n_left[node_flat] = slot_best_n_left[base + best_slot as usize];
+    } else {
+        split_feature[node_flat] = INVALID_NODE;
+        split_threshold[node_flat] = 0u32;
+        split_n_left[node_flat] = 0u32;
+    }
 }
 
 ///////////////////////
@@ -2830,6 +3303,123 @@ fn launch_gather_node_samples<R: Runtime>(
     }
 }
 
+/// Dispatch [`build_score_rf_fused`] then [`reduce_slot_winners`].
+///
+/// Together these replace `launch_build_hist` + `launch_prefix_sum` +
+/// `launch_evaluate_splits_rf`. The bin count is chosen from `n_targets` by
+/// [`pick_gpu_bins`]; the caller must have checked [`fused_rf_viable`] first.
+///
+/// ### Workgroup
+///
+/// `CubeDim::new_1d(WORKGROUP_128)` for both. The fused kernel uses `tx` as a
+/// target index while accumulating and as a candidate bin while scoring; the
+/// reducer is single-threaded per node.
+///
+/// ### Params
+///
+/// * `client` - CubeCL compute client
+/// * `feature_data` - Quantised bins `[n_features, n_samples]` (u8 as u32)
+/// * `y_dense` - Dense Y `[n_samples, n_targets]`
+/// * `node_sample_offsets` - Node slice bounds
+/// * `node_sample_ids` - Gathered sample ids
+/// * `node_sample_mults` - Gathered multiplicities
+/// * `node_features` - Selected feature ids per (tree, node, slot)
+/// * `node_counts` - Per-node sample totals
+/// * `node_y_sums` - Per-node Y sums
+/// * `node_y_sum_sqs` - Per-node Y sums-of-squares
+/// * `slot_best_score` - Scratch per-slot scores
+/// * `slot_best_thr` - Scratch per-slot thresholds
+/// * `slot_best_n_left` - Scratch per-slot left counts
+/// * `slot_best_valid` - Scratch per-slot validity flags
+/// * `split_feature` - Output winning feature per node
+/// * `split_threshold` - Output winning threshold per node
+/// * `split_n_left` - Output left-child count per node
+/// * `n_samples` - Number of samples
+/// * `wave_size` - Trees in wave
+/// * `n_active_nodes` - Active nodes at level
+/// * `k_feats` - Features per node
+/// * `n_targets` - Targets in batch
+/// * `min_samples_leaf` - Minimum samples per child
+///
+/// ### Returns
+///
+/// `()` — kernels are dispatched asynchronously via the client command queue.
+#[allow(clippy::too_many_arguments)]
+fn launch_rf_fused<R: Runtime>(
+    client: &ComputeClient<R>,
+    feature_data: &GpuTensor<R, u32>,
+    y_dense: &GpuTensor<R, f32>,
+    node_sample_offsets: &GpuTensor<R, u32>,
+    node_sample_ids: &GpuTensor<R, u32>,
+    node_sample_mults: &GpuTensor<R, u32>,
+    node_features: &GpuTensor<R, u32>,
+    node_counts: &GpuTensor<R, u32>,
+    node_y_sums: &GpuTensor<R, f32>,
+    node_y_sum_sqs: &GpuTensor<R, f32>,
+    slot_best_score: &GpuTensor<R, f32>,
+    slot_best_thr: &GpuTensor<R, u32>,
+    slot_best_n_left: &GpuTensor<R, u32>,
+    slot_best_valid: &GpuTensor<R, u32>,
+    split_feature: &GpuTensor<R, u32>,
+    split_threshold: &GpuTensor<R, u32>,
+    split_n_left: &GpuTensor<R, u32>,
+    n_samples: usize,
+    wave_size: usize,
+    n_active_nodes: usize,
+    k_feats: usize,
+    n_targets: usize,
+    min_samples_leaf: usize,
+) {
+    let n_bins_gpu = pick_gpu_bins(n_targets);
+    let bin_shift = (N_BINS / n_bins_gpu).trailing_zeros();
+    let (gx, gy) = grid_2d((n_active_nodes as u32).max(1));
+    unsafe {
+        build_score_rf_fused::launch_unchecked::<R>(
+            client,
+            CubeCount::Static(k_feats as u32, n_active_nodes as u32, wave_size as u32),
+            CubeDim::new_1d(WORKGROUP_128),
+            feature_data.clone().into_tensor_arg(),
+            y_dense.clone().into_tensor_arg(),
+            node_sample_offsets.clone().into_tensor_arg(),
+            node_sample_ids.clone().into_tensor_arg(),
+            node_sample_mults.clone().into_tensor_arg(),
+            node_features.clone().into_tensor_arg(),
+            node_counts.clone().into_tensor_arg(),
+            node_y_sums.clone().into_tensor_arg(),
+            node_y_sum_sqs.clone().into_tensor_arg(),
+            slot_best_score.clone().into_tensor_arg(),
+            slot_best_thr.clone().into_tensor_arg(),
+            slot_best_n_left.clone().into_tensor_arg(),
+            slot_best_valid.clone().into_tensor_arg(),
+            n_samples as u32,
+            wave_size as u32,
+            n_active_nodes as u32,
+            k_feats as u32,
+            n_targets as u32,
+            n_bins_gpu,
+            bin_shift,
+            min_samples_leaf as u32,
+            WORKGROUP_128,
+        );
+        reduce_slot_winners::launch_unchecked::<R>(
+            client,
+            CubeCount::Static(gx, gy, wave_size as u32),
+            CubeDim::new_1d(1),
+            slot_best_score.clone().into_tensor_arg(),
+            slot_best_thr.clone().into_tensor_arg(),
+            slot_best_n_left.clone().into_tensor_arg(),
+            slot_best_valid.clone().into_tensor_arg(),
+            node_features.clone().into_tensor_arg(),
+            split_feature.clone().into_tensor_arg(),
+            split_threshold.clone().into_tensor_arg(),
+            split_n_left.clone().into_tensor_arg(),
+            wave_size as u32,
+            n_active_nodes as u32,
+            k_feats as u32,
+        );
+    }
+}
+
 /// Dispatch [`finalise_split_stats_rf`] over `grid_2d(n_active_nodes)` by
 /// `wave_size` workgroups.
 ///
@@ -3839,6 +4429,15 @@ struct WaveState<R: Runtime> {
     node_sample_ids: GpuTensor<R, u32>,
     /// Multiplicities parallel to `node_sample_ids`. RandomForest only.
     node_sample_mults: GpuTensor<R, u32>,
+    /// Per-slot best score from `build_score_rf_fused` `[wave_size,
+    /// max_active_nodes, k_feats]`. Fused RandomForest path only.
+    slot_best_score: GpuTensor<R, f32>,
+    /// Per-slot best threshold in fine bin space, same layout.
+    slot_best_thr: GpuTensor<R, u32>,
+    /// Per-slot left-child count, same layout.
+    slot_best_n_left: GpuTensor<R, u32>,
+    /// Per-slot validity flag, same layout.
+    slot_best_valid: GpuTensor<R, u32>,
     /// Per-node sample totals `[wave_size, max_active_nodes]`. Written by
     /// `merge_hist` at level 0 and by `propagate_child_stats` thereafter.
     /// Ping-pongs with `node_counts_alt` on level parity.
@@ -3929,20 +4528,22 @@ impl<R: Runtime> WaveState<R> {
         k_feats: usize,
         n_targets: usize,
         n_thresholds: usize,
-        use_et: bool,
+        layout: WaveLayout,
     ) -> Self {
+        let use_et = layout == WaveLayout::ExtraTrees;
+        let use_hist = layout == WaveLayout::RandomForestHist;
         // The ExtraTrees path never touches the histogram or its prefix sums,
         // so they collapse to stubs. This is where the ~6.1 GiB -> ~13 MB drop
         // at the reference shape comes from.
-        let hist_counts_len = if use_et {
-            1
-        } else {
+        let hist_counts_len = if use_hist {
             wave_size * max_active_nodes * k_feats * N_BINS as usize
-        };
-        let hist_sums_len = if use_et {
-            1
         } else {
+            1
+        };
+        let hist_sums_len = if use_hist {
             hist_counts_len * n_targets
+        } else {
+            1
         };
         let node_stats_len = wave_size * max_active_nodes * n_targets;
         let n_cands = k_feats * n_thresholds;
@@ -3964,6 +4565,11 @@ impl<R: Runtime> WaveState<R> {
             wave_size * (max_active_nodes + 1)
         };
         let gather_id_len = if use_et { 1 } else { wave_size * n_samples };
+        let slot_best_len = if use_et {
+            1
+        } else {
+            wave_size * max_active_nodes * k_feats
+        };
 
         Self {
             sample_to_node: GpuTensor::empty(vec![wave_size * n_samples], client),
@@ -3980,6 +4586,10 @@ impl<R: Runtime> WaveState<R> {
             node_sample_offsets: GpuTensor::empty(vec![gather_offset_len], client),
             node_sample_ids: GpuTensor::empty(vec![gather_id_len], client),
             node_sample_mults: GpuTensor::empty(vec![gather_id_len], client),
+            slot_best_score: GpuTensor::empty(vec![slot_best_len], client),
+            slot_best_thr: GpuTensor::empty(vec![slot_best_len], client),
+            slot_best_n_left: GpuTensor::empty(vec![slot_best_len], client),
+            slot_best_valid: GpuTensor::empty(vec![slot_best_len], client),
             node_counts: GpuTensor::empty(vec![wave_size * max_active_nodes], client),
             node_y_sums: GpuTensor::empty(vec![node_stats_len], client),
             node_y_sum_sqs: GpuTensor::empty(vec![node_stats_len], client),
@@ -4131,6 +4741,61 @@ pub fn wave_byte_cost_et(
 /// via `launch_unchecked` that failure is silent, producing zeroed output and
 /// an implausibly fast run rather than an error, so both are checked here.
 #[allow(clippy::too_many_arguments)]
+/// Which set of per-wave tensors a run holds resident.
+///
+/// The three paths differ enough that one cost model cannot describe them:
+/// ExtraTrees materialises per-candidate left sums, the fused RandomForest path
+/// holds only per-slot winners plus the sample gather, and the fallback
+/// RandomForest path holds the full `[bin, target]` histogram and its prefix
+/// sums. The last of those is three orders of magnitude larger than the other
+/// two, which is why it is the only one that ever forces the wave below 32.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaveLayout {
+    /// ExtraTrees: per-candidate left sums, no histogram.
+    ExtraTrees,
+    /// RandomForest with the shared-memory fused kernel.
+    RandomForestFused,
+    /// RandomForest falling back to the DRAM histogram kernels.
+    RandomForestHist,
+}
+
+/// Approximate per-wave byte cost of the fused RandomForest path.
+///
+/// Dominated by the per-node sample gather at large cell counts and by the
+/// per-slot winner arrays at large `k_feats`. Both are small: at the reference
+/// shape this is ~335 KB per tree against 0.76 GiB for
+/// [`wave_byte_cost`], which is what takes RandomForest from wave 8 to wave 32.
+///
+/// ### Params
+///
+/// * `wave_size` - Trees in the wave
+/// * `max_active_nodes` - Node bound per level
+/// * `k_feats` - Features per node
+/// * `n_targets` - Targets in batch
+/// * `n_samples` - Number of samples
+///
+/// ### Returns
+///
+/// Estimated bytes held resident for one wave.
+pub fn wave_byte_cost_rf_fused(
+    wave_size: usize,
+    max_active_nodes: usize,
+    k_feats: usize,
+    n_targets: usize,
+    n_samples: usize,
+) -> usize {
+    // node_features plus the four slot_best_* arrays.
+    let slot_slots = wave_size * max_active_nodes * k_feats;
+    // Node stats ping-pong (sums and sum-of-squares, live and alt) plus the two
+    // split-stat outputs.
+    let node_stats = wave_size * max_active_nodes * n_targets;
+    // sample_to_node plus the gather's ids and multiplicities.
+    let sample_slots = wave_size * n_samples;
+
+    (slot_slots * 5 * 4) + (node_stats * 6 * 4) + (sample_slots * 3 * 4)
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn pick_wave_size(
     max_active_nodes: usize,
     k_feats: usize,
@@ -4138,24 +4803,29 @@ pub fn pick_wave_size(
     n_trees_target: usize,
     wave_byte_budget: usize,
     n_thresholds: usize,
-    use_et: bool,
+    layout: WaveLayout,
+    n_samples: usize,
     max_binding_bytes: usize,
 ) -> Result<usize, BixverseErrors> {
-    let cost = |w: usize| {
-        if use_et {
+    let cost = |w: usize| match layout {
+        WaveLayout::ExtraTrees => {
             wave_byte_cost_et(w, max_active_nodes, k_feats, n_targets, n_thresholds)
-        } else {
-            wave_byte_cost(w, max_active_nodes, k_feats, n_targets)
         }
+        WaveLayout::RandomForestFused => {
+            wave_byte_cost_rf_fused(w, max_active_nodes, k_feats, n_targets, n_samples)
+        }
+        WaveLayout::RandomForestHist => wave_byte_cost(w, max_active_nodes, k_feats, n_targets),
     };
-    // Largest single tensor in the wave: the per-(bin, target) histogram on
-    // the RandomForest path, the per-(candidate, target) left-side sums on the
-    // ExtraTrees one.
+    // Largest single tensor in the wave: the per-(bin, target) histogram on the
+    // fallback RandomForest path, the per-(candidate, target) left-side sums on
+    // the ExtraTrees one, and the gathered sample ids on the fused one.
     let largest = |w: usize| {
-        let slots = if use_et {
-            w * max_active_nodes * k_feats * n_thresholds * n_targets
-        } else {
-            w * max_active_nodes * k_feats * N_BINS as usize * n_targets
+        let slots = match layout {
+            WaveLayout::ExtraTrees => w * max_active_nodes * k_feats * n_thresholds * n_targets,
+            WaveLayout::RandomForestFused => (w * n_samples).max(w * max_active_nodes * n_targets),
+            WaveLayout::RandomForestHist => {
+                w * max_active_nodes * k_feats * N_BINS as usize * n_targets
+            }
         };
         slots * 4
     };
@@ -4339,6 +5009,9 @@ fn run_wave_bfs<R: Runtime>(
     let n_targets = state.n_targets;
     let max_active_nodes = state.max_active_nodes;
     let use_et = config.random_threshold();
+    // The fused RandomForest path needs ~20 KB of threadgroup memory. Devices
+    // that cannot spare it fall back to the DRAM histogram kernels.
+    let use_fused_rf = !use_et && fused_rf_viable(client);
 
     launch_init_sample_to_node(
         client,
@@ -4479,6 +5152,81 @@ fn run_wave_bfs<R: Runtime>(
                 n_targets,
                 n_thresholds,
                 min_samples_leaf,
+            );
+        } else if use_fused_rf {
+            // No histogram in DRAM: build it in threadgroup memory, scan and
+            // score it there, and emit only the per-slot winner. Root stats come
+            // from init_root_stats for the same reason they do on the ExtraTrees
+            // path, since merge_hist has no histogram to fold.
+            if depth == 0 {
+                launch_init_root_stats(
+                    client,
+                    y_dense_gpu,
+                    sample_multiplicity_gpu,
+                    cur_counts,
+                    cur_y_sums,
+                    cur_y_sum_sqs,
+                    n_samples,
+                    wave_size,
+                    n_active_nodes,
+                    n_targets,
+                );
+            }
+
+            launch_gather_node_samples(
+                client,
+                &state.sample_to_node,
+                sample_multiplicity_gpu,
+                &state.node_sample_counts,
+                &state.node_sample_offsets,
+                &state.node_sample_ids,
+                &state.node_sample_mults,
+                n_samples,
+                wave_size,
+                n_active_nodes,
+            );
+
+            launch_rf_fused(
+                client,
+                feature_data_gpu,
+                y_dense_gpu,
+                &state.node_sample_offsets,
+                &state.node_sample_ids,
+                &state.node_sample_mults,
+                &state.node_features,
+                cur_counts,
+                cur_y_sums,
+                cur_y_sum_sqs,
+                &state.slot_best_score,
+                &state.slot_best_thr,
+                &state.slot_best_n_left,
+                &state.slot_best_valid,
+                &state.split_feature,
+                &state.split_threshold,
+                &state.split_n_left,
+                n_samples,
+                wave_size,
+                n_active_nodes,
+                k_feats,
+                n_targets,
+                min_samples_leaf,
+            );
+
+            launch_finalise_split_stats_rf(
+                client,
+                feature_data_gpu,
+                y_dense_gpu,
+                &state.node_sample_offsets,
+                &state.node_sample_ids,
+                &state.node_sample_mults,
+                &state.split_feature,
+                &state.split_threshold,
+                &state.split_y_sums_l,
+                &state.split_y_sum_sqs_l,
+                n_samples,
+                wave_size,
+                n_active_nodes,
+                n_targets,
             );
         } else {
             // Present whenever use_et is false, which is the only path here.
@@ -4764,6 +5512,17 @@ pub fn fit_scenic_batches_gpu<R: Runtime>(
 
     let client = R::client(&device);
 
+    // Decided once per call: run_wave_bfs makes the same choice per level, and
+    // the wave sizing has to agree with it or the fused path pays for a
+    // histogram it never touches.
+    let wave_layout = if use_et {
+        WaveLayout::ExtraTrees
+    } else if fused_rf_viable(&client) {
+        WaveLayout::RandomForestFused
+    } else {
+        WaveLayout::RandomForestHist
+    };
+
     // Single feature upload amortised across every batch, packed four u8 bins
     // per u32 word. Widening to u32 instead would cost 4 GB on both host and
     // device at 1000 TFs by 1M cells, which is the per-binding limit on an M1
@@ -4809,10 +5568,12 @@ pub fn fit_scenic_batches_gpu<R: Runtime>(
         let sparse_y = SparseYBatch::from_targets(chunk, n_samples)?;
         // The ExtraTrees path reads only the dense form, so skip the CSR
         // upload entirely there rather than shipping it for nothing.
-        let sy_gpu = if use_et {
-            None
-        } else {
+        // Only the DRAM histogram path reads the CSR form; ExtraTrees and the
+        // fused RandomForest kernel both take Y dense.
+        let sy_gpu = if wave_layout == WaveLayout::RandomForestHist {
             Some(SparseYGpu::upload(&sparse_y, n_samples, &client))
+        } else {
+            None
         };
         let y_dense_gpu = upload_dense_y(
             &sparse_y,
@@ -4829,7 +5590,8 @@ pub fn fit_scenic_batches_gpu<R: Runtime>(
             n_trees,
             params.wave_byte_budget,
             n_thresholds,
-            use_et,
+            wave_layout,
+            n_samples,
             client.properties().memory.max_page_size as usize,
         )?;
         let state = WaveState::allocate(
@@ -4840,7 +5602,7 @@ pub fn fit_scenic_batches_gpu<R: Runtime>(
             k_feats,
             batch_n_targets,
             n_thresholds,
-            use_et,
+            wave_layout,
         );
 
         // Interleaved [n_features, batch_n_targets] importances, accumulated
@@ -4906,7 +5668,7 @@ pub fn fit_scenic_batches_gpu<R: Runtime>(
                     k_feats,
                     batch_n_targets,
                     n_thresholds,
-                    use_et,
+                    wave_layout,
                 ))
             };
             let use_state = effective_state.as_ref().unwrap_or(&state);
