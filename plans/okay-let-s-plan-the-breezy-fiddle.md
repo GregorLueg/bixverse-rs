@@ -10,7 +10,8 @@ part to rediscover.
 
 ## Context
 
-`docs/archive/scenic_gpu_experiment.md` concluded the GPU SCENIC tree regressor
+`docs/archive/scenic_gpu_experiment.md` (now rewritten as `docs/scenic_gpu.md`)
+concluded the GPU SCENIC tree regressor
 was a hardware loss on Apple Silicon (7.2x slower than CPU end-to-end for ET,
 2.9x for RF) and parked it. It attributed the gap to the CPU getting a rayon
 fan-out over gene batches while the GPU has one queue, and concluded "the gap is
@@ -206,19 +207,10 @@ through DRAM.
 
 ### Documentation
 
-`docs/archive/scenic_gpu_experiment.md` needs correcting on three counts, plus
-its overall verdict:
-
-1. Root cause #3 and the "single highest-leverage experiment left" paragraph
-   describe a wave size of 4. The bench overrides the budget to 12 GiB
-   (`gpu_scenic_bench.rs:79`), so the measured runs were at wave 8. The
-   in-place prefix sum it recommends would have bought nothing.
-2. "The VRAM hog is the sum buffers, not the features" is right on capacity and
-   wrong on bandwidth, though this turned out not to matter since neither was
-   the bottleneck.
-3. "wgpu/Metal has no host knob to run independent batches concurrently" is not
-   accurate, and in any case the right lever is fatter launches, not concurrent
-   queues.
+Done. `docs/archive/scenic_gpu_experiment.md` deleted and rewritten as
+`docs/scenic_gpu.md`, no longer archived since the ET path is a win. Records the
+current numbers, both kernel designs, the four things the archive got wrong, and
+a revised discriminator for GPU wins in this crate.
 
 ## Verification
 
