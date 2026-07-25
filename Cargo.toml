@@ -1,6 +1,6 @@
 [package]
 name = "bixverse-rs"
-version = "0.3.7"
+version = "0.3.8"
 edition = "2024"
 authors = ["Gregor Lueg <gregorlueg@me.com>"]
 license = "MIT"
@@ -88,3 +88,8 @@ features = ["single-cell", "multi-modal"]
 name = "gpu_k_means_bench"
 harness = false
 required-features = ["gpu"]
+
+[[bench]]
+name = "gpu_scenic_bench"
+harness = false
+required-features = ["gpu", "single-cell"]

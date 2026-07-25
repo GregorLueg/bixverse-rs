@@ -113,6 +113,7 @@ pub fn dense_gemm<R, MP>(
     a_transposed: bool,
     b_handle: &Handle,
     b_logical_shape: [usize; 2],
+    b_tranposed: bool,
     c_handle: &Handle,
     c_shape: [usize; 2],
     strategy: Option<Strategy>,
@@ -126,7 +127,7 @@ where
     let strategy = strategy.unwrap_or(Strategy::Auto);
 
     let a_tensor = wrap_handle::<R>(a_handle, a_logical_shape, a_transposed, dtypes.lhs_global);
-    let b_tensor = wrap_handle::<R>(b_handle, b_logical_shape, false, dtypes.rhs_global);
+    let b_tensor = wrap_handle::<R>(b_handle, b_logical_shape, b_tranposed, dtypes.rhs_global);
     let c_tensor = wrap_handle::<R>(c_handle, c_shape, false, dtypes.acc_global);
 
     launch_ref(
@@ -231,6 +232,7 @@ where
         true, // transpose to get input^T as lhs
         input.handle(),
         [n, s],
+        false,
         g_scratch.handle(),
         [s, s],
         None,
@@ -253,6 +255,7 @@ where
         false,
         r_inv_gpu.handle(),
         [s, s],
+        false,
         output.handle(),
         [n, s],
         None,

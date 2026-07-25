@@ -364,6 +364,30 @@ pub enum BixverseErrors {
         /// Number of provided batches
         n_batches: usize,
     },
+
+    /// Anchor finding produced no pairs between two batches
+    #[cfg(feature = "single-cell")]
+    #[error("No anchors found between batches {batch_a} and {batch_b}.")]
+    NoAnchorsFound {
+        /// Reference batch index
+        batch_a: usize,
+        /// Query batch index
+        batch_b: usize,
+    },
+
+    /// A batch has too few cells for the requested anchor search
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Batch {batch} has {n_cells} cells, needs at least {required} for anchor finding."
+    )]
+    TooFewCellsForAnchor {
+        /// Batch index
+        batch: usize,
+        /// Cells in the batch
+        n_cells: usize,
+        /// Minimum required
+        required: usize,
+    },
     // -- Harmony --
     /// Sigma length is not equal to the number of clusters
     #[error("Harmony: sigma length must match number of clusters")]
@@ -573,4 +597,15 @@ pub enum BixverseErrors {
     #[cfg(feature = "gpu")]
     #[error("Harmony GPU: Only a single co-variate is supported for the GPU path")]
     GpuHarmonySupportsSingleCovariateOnly,
+    /// Selected SCENIC regression learner has no GPU implementation. Only the
+    /// tree-based learners (ExtraTrees, RandomForest) are ported; GRNBoost2 /
+    /// gradient boosting stays on CPU by design.
+    #[cfg(feature = "gpu")]
+    #[error(
+        "SCENIC GPU: the {learner} regression learner has no GPU path; use the CPU entry point (run_scenic_grn / run_scenic_grn_streaming / run_scenic_grn_in_memory)"
+    )]
+    GpuNotSupportedForLearner {
+        /// Name of the requested regression learner.
+        learner: &'static str,
+    },
 }
