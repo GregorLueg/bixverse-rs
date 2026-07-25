@@ -82,7 +82,13 @@ const MAX_DEPTH: usize = 10;
 const MIN_SAMPLES_LEAF: usize = 50;
 
 /// Fraction of (cell, target) pairs that carry a nonzero value.
-const SPARSITY: f32 = 0.5;
+///
+/// 0.2 is the dense end of realistic single-cell data; metacells are denser
+/// still. This matters because the two GPU paths scale differently with it:
+/// the ExtraTrees path reads `n_targets` dense values per matched sample
+/// regardless of density, while the RandomForest histogram build does work per
+/// *nonzero*. Benchmarking at 0.5 flatters the dense path.
+const SPARSITY: f32 = 0.2;
 
 /// Features that actually drive the synthetic targets.
 const N_INFORMATIVE: usize = 10;

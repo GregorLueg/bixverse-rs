@@ -66,7 +66,7 @@ const MAX_DEPTH: usize = 10;
 const MIN_SAMPLES_LEAF: usize = 50;
 const N_FEATURES_SPLIT: usize = 0;
 const N_INFORMATIVE: usize = 10;
-const SPARSITY: f32 = 0.5;
+const SPARSITY: f32 = 0.2;
 const SEED: usize = 20260708;
 
 /// Ceiling per bench iteration (median-of-3). Any shape whose warmup alone

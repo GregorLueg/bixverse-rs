@@ -28,6 +28,24 @@ Single 64-target batch:
 | ET | 33.80s | 1.03s | **32.8x** |
 | RF | 24.55s | 19.24s | 1.28x |
 
+**These are measured at 50% target density, which flatters the GPU.** The
+benches now default to `SPARSITY = 0.2`, the dense end of realistic single-cell
+data. At 0.2 the same shape gives:
+
+| cell | @0.5 | @0.2 |
+|---|---:|---:|
+| `et_32t` | 28.33x | **19.62x** |
+| `et_multibatch` | 27.76x | **18.93x** |
+| `rf_32t` | 1.29x | 1.17x |
+
+The GPU wall clock is *identical* at both densities (0.15s for `et_32t`); it is
+the CPU that gets faster. That is structural: the ET path reads `n_targets`
+dense values per matched sample regardless of how many are nonzero, so its cost
+is density-independent, while both CPU paths and the RF histogram build do work
+per nonzero. Expect the e2e ET win to be ~2.5x at 0.2 rather than the 3.67x
+measured at 0.5. Metacells are denser than raw cells, so the metacell path sits
+nearer the top of that range.
+
 The CPU e2e driver fans out over gene batches with rayon while
 `fit_multi_trees_sparse` is sequential over trees, so the fan-out is worth about
 9.1x and that is the bar the GPU has to clear per batch. ET clears it three
@@ -142,6 +160,38 @@ Two better questions to ask of a kernel:
 
 Both are visible in a five-minute profiler run and invisible to reasoning about
 memory traffic on paper.
+
+## Scaling to large cell counts
+
+`n_targets` is hard-capped at `MULTI_OUTPUT_BATCH = 64`, so everything below is
+linear in cells only. There is no global cell cap in the config:
+`ScenicParams::n_subsample` only feeds the correlated gene-batching PCA, not the
+fit.
+
+| tensor | bytes per cell | at 1M cells |
+|---|---:|---:|
+| dense Y (per batch, freed after) | 256 | 256 MB |
+| `feature_data_gpu`, u8 widened to u32 | `4 * n_features` | **4 GB** at 1000 TFs |
+| ET wave tensors, wave 32 | n/a, node-bound | ~530 MB |
+| RF wave tensors, wave 1 | n/a, node-bound | ~8.4 GB |
+
+Two things follow.
+
+**`feature_data_gpu` is the binding that breaks first.** At 1000 TFs and 1M
+cells it is exactly 4 GB, which is the per-binding limit on this machine, and
+`pick_wave_size` does not check it, so crossing it fails the silent
+`launch_unchecked` way. It also costs a 4 GB *host* allocation purely to widen
+u8 to u32. Packing 4 bins per u32 gives 4x headroom and cuts the host
+allocation to 1 GB. This was investigated for performance during the ET work and
+correctly rejected (the sample scan is free); it is still wanted for **capacity**.
+
+**On larger systems this is mostly fine for ET and not for RF.** Datacentre
+cards have far higher per-binding limits, so a 1M-cell run with the u32 feature
+tensor would work there, just wastefully. ET's wave tensors stay around 530 MB
+because `max_active_nodes` saturates at the depth cap of 1024. RF's are ~8.4 GB
+at **wave 1**, so RF would refuse to run at 1M cells under any sane budget long
+before ET is uncomfortable. If large-cell-count runs are a target, ET is the
+only path that scales.
 
 ## Hardware caveat
 

@@ -18,6 +18,7 @@ changes to reach break-even, and the payoff at the end is modest.
 | RF e2e GPU | 1131.63s |
 | RF single batch, CPU 1 core | 24.55s |
 | RF single batch, GPU | 19.24s (**1.28x**) |
+| Same at 20% density | **1.17x** |
 | Effective rayon fan-out | 63 x 24.55 / 187.39 = **8.25x** |
 
 So the GPU must beat one core by 8.25x to draw, from 1.28x today. That is a
@@ -189,6 +190,27 @@ Worth being explicit that "leave RF on CPU" is not a failure. `run_scenic_grn_gp
 already rejects GBM with `GpuNotSupportedForLearner`; extending that posture to
 RF, or simply documenting that RF is CPU-preferred, is a legitimate shipping
 decision.
+
+## Scaling, if large cell counts matter
+
+Independent of the speed work, and arguably more urgent if anyone wants to run
+1M-cell datasets.
+
+- **`feature_data_gpu` is u8 widened to u32**: `4 * n_features` bytes per cell,
+  so 4 GB at 1000 TFs and 1M cells, exactly the per-binding limit on an M1 Max.
+  `pick_wave_size` does not check it, so crossing it fails silently through
+  `launch_unchecked`. Pack 4 bins per u32 for 4x headroom and a 1 GB rather than
+  4 GB host allocation. Bigger cards raise the limit but not the waste.
+- **RF's wave tensors do not scale.** At 1M cells `max_active_nodes` saturates
+  at the depth cap (1024) and RF needs ~8.4 GB at **wave 1**, against ET's
+  ~530 MB at wave 32. RF will refuse to run at large cell counts long before ET
+  is uncomfortable. Steps 3 and 4 above (dropping the sum-of-squares histogram,
+  and `N_BINS` at 64) are worth 8x on that footprint between them, so they are
+  capacity fixes as much as speed ones.
+- Two cheap ET cleanups found while looking at this: `fit_scenic_batches_gpu`
+  uploads the sparse Y unconditionally even though `run_wave_bfs` only reads it
+  on the RF branch, and `upload_dense_y` reallocates its host buffer per batch
+  rather than reusing one scratch allocation.
 
 ## Verification
 
