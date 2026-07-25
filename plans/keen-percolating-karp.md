@@ -1,0 +1,326 @@
+# SCENIC GPU: RandomForest, revised plan
+
+Supersedes the step list in `plans/scenic-gpu-randomforest.md`. Fold this into
+that file when the work starts; the corrections at the bottom apply to it and to
+`plans/scenic-gpu-extratrees.md` and `docs/scenic_gpu.md`.
+
+## Status
+
+| step | state |
+|---|---|
+| -1 RF test coverage | code-complete, `cargo check` clean. **Floors uncalibrated**, needs one run |
+| 0 `prefix_sum_bins` fixes | code-complete, `cargo check` clean. **Needs the re-profile that gates it** |
+| 1 per-node gather | not started |
+| 2 fused kernel | not started |
+
+Nothing has been run yet: no tests, no benches, no clippy, no profiler. Both
+completed steps are compile-verified only.
+
+Open questions the first run answers, in order of how much they change the plan:
+
+1. **Does `prefix_sum_bins` drop from 36% to under 10%?** This is Step 0's gate.
+2. **What does `max_shared_memory_size` report?** `report_shape` now prints it
+   with a fits/busts verdict for 64- and 128-bin histograms. If Metal reports
+   16384 rather than the 32768 I assumed, the fused kernel needs the
+   split-target variant from day one rather than as a fallback.
+3. **What is `phase3_rf_pearson_small` actually worth?** The 0.90 floor is a
+   guess; the test prints its measured value.
+4. **Do the two new GPU tests finish in sane time in a debug build?** That is
+   what CI runs, on lavapipe on Linux.
+
+## Context
+
+ExtraTrees on GPU beats the 10-core CPU by 3.67x end to end after the rewrite
+recorded in `plans/scenic-gpu-extratrees.md`. RandomForest was left untouched at
+1.28x against a single core and loses 6.0x end to end. The rayon fan-out over
+gene batches is worth ~8.25x, so that is the bar.
+
+The existing RF plan proposed five stacked steps and recommended doing the first
+two. Reviewing the code changed that recommendation. Three things came out of it.
+
+**RF has never run at wave 32.** `viable_max_active_nodes(10, 10000, 50) = 100`,
+so `wave_byte_cost` is 0.76 GiB per tree at the reference shape. `pick_wave_size`
+lands on **8** under the bench's 12 GiB budget and **4** under the 4 GiB library
+default. ET runs at 32. Every RF profile number on record is a wave-8
+measurement compared against ET at wave 32, and RF pays 4x the launch count and
+gets 4x fewer workgroups per grid for it. Killing the histogram fixes this as a
+side effect, and it is worth an independent 2-4x that no projection has priced.
+
+**`prefix_sum_bins` is not bandwidth-bound, it is dependency-bound, and two
+one-line fixes may capture most of what "fuse the scan into evaluate" was worth.**
+It moves 4H of the 8H total histogram traffic (H = 212 GB for a 250-tree fit at
+the reference shape, so 4H = 848 GB, ~2.1 s at 400 GB/s) but measures at 36% of
+a 19.24 s run, i.e. ~6.9 s, an effective 120 GB/s. Two reasons, both trivially
+fixable. Lines 518/548/549 read `cum_*[prev]`, which is a global load of the
+value the same thread wrote one iteration earlier: a 256-deep read-after-write
+chain through DRAM that the compiler cannot forward. And `launch_prefix_sum`
+dispatches `WORKGROUP_128` with `n_targets = 64`, so half the workgroup falls
+straight out of `while k < n_targets` and idles through the whole kernel.
+
+**Step 5 of the old plan (histogram subtraction) is actively harmful** under the
+design below, and step 2's proposed reuse of the ET compaction pattern is the
+wrong machinery for RF. Details in the corrections section.
+
+## Target design
+
+One kernel per level replaces four. Workgroup owns `(slot, node, tree)`, 128
+threads, thread `k` owns target `k`.
+
+1. Walk the node's own sample list (from a per-level gather, see Step 1), not all
+   `n_samples`. No membership test, no compaction, no `sync_cube` in the hot loop.
+2. Accumulate `s_hist[bin_coarse * n_targets + k] += mult * y_dense[sid * n_targets + k]`
+   in **shared memory**. Thread `k` is the sole writer of column `k`, so no
+   atomics. All 64 drain threads share one `bin`, so the 64 words are consecutive
+   and bank-conflict free.
+3. Scan bins 0..N_BINS_COARSE with the running cumulative `c_k` in a **register**.
+   No prefix tensor, in DRAM or anywhere else.
+4. Score each bin from `G(thr) = S_L/nl + S_R/nr` with `S_L = Σ_k c_k²`,
+   `S_R = Σ_k (sy_k − c_k)²`. One cross-target reduction per bin (`plane_sum`
+   over two planes plus a 2-entry shared combine). Emit the slot's best.
+
+Then a small argmax over slots per `(node, tree)`, and a `finalise_split_stats_rf`
+pass that recomputes the winner's `syl_k` and `ssyl_k` from the actual samples at
+**full 256-bin precision**. That last point matters: everything flowing down the
+tree is exact, so coarsening changes only which split is chosen, never the
+arithmetic of anything downstream.
+
+Three things this design turns on.
+
+**Dropping `hist_y_sum_sqs` from the search.** `wl·vl_k + wr·vr_k =
+(ssyl_k + ssyr_k)/n − syl_k²/(n·nl) − syr_k²/(n·nr)` and `ssyl_k + ssyr_k = ssq_k`
+is constant in `thr`, so `argmax score ≡ argmax G`. Standard cuML MSE
+formulation. Two consequences the old plan missed: it drops the per-target
+`max(var, 0)` clamp, and `best_score` starts at `0.0` with strict `>`, which is an
+**acceptance** gate, not just a tie-break. `G` carries an unknown per-node offset,
+so the winner's true score has to be reconstructed as
+`parent_var_sum − Q/n + G_win/n` with `Q = Σ_k node_y_sum_sqs[k]`. Skip that and
+you silently accept zero-gain splits at every node where no positive split exists,
+which at depth 9 with ~63 samples per node is common.
+
+**GPU-only bin coarsening.** `bin_c = feature_bin(..) >> BIN_SHIFT`, winner
+widened back as `(thr_c << BIN_SHIFT) | ((1 << BIN_SHIFT) - 1)`. Exact:
+`b >> S ≤ thr_c  ⟺  b ≤ (thr_c << S) | (2^S − 1)`. `QuantisedStore` stays at 256
+u8 bins, `reassign_samples` is untouched, the CPU path is untouched. The argument
+for 64 bins is not "compromise": at depth 7-9 a node holds 63-200 samples, so at
+most that many bins are occupied out of 256, and a 64-bin dense histogram at 64
+targets is already the minimum useful size.
+
+**Shared-memory residency.** At `BIN_SHIFT = 2`: `s_hist` 64x64 f32 = 16,384 B,
+`s_counts` 256 B, `s_binscore` 256 B, scratch ~512 B. About 17.4 KB. Fits a 32 KB
+threadgroup budget; 128 bins does not (32 KB for sums alone). Post-change RF wave
+cost is `wave · max_active_nodes · k_feats · 4 arrays · 4 B` plus the gather, i.e.
+**~2.9 MB** at the reference shape against 6.10 GiB today, and **~16 MB** at 1M
+cells against 8.39 GB at wave 1. RF goes to wave 32 permanently and the 1M-cell
+refusal disappears. That capacity result is worth shipping even if the speed work
+lands short.
+
+## Steps
+
+Each step gates on the two RF Pearson floors (`phase3_random_forest_pearson`
+0.988, `phase3_rf_bootstrap_pearson` 0.976, both floored at 0.95) plus the new
+tests from Step -1, and is measured on `rf_32t` / `rf_multibatch`.
+
+### Step -1: RF test coverage
+
+RF has zero CI coverage today. Both fidelity tests sit behind
+`large_scale_diagnostics`, which no workflow enables. Five kernels are about to
+be rewritten on that path.
+
+- `rf_gpu_matches_cpu_top10`, ungated, toy shape, mirroring
+  `extra_trees_gpu_matches_cpu_top10` (`tests/scenic_gpu.rs:233`). Runs on
+  lavapipe and Metal in seconds.
+- `phase3_rf_pearson_small`, ungated, ~2k cells / 100 features / 50 trees, floor
+  0.90. The 0.95 versions stay gated as milestone gates; the current shape is far
+  too slow for lavapipe.
+- `coarse_threshold_roundtrip`, host-only: for `shift in 1..=3`, all `thr_c`, all
+  `b in 0..256`, assert `(b >> shift <= thr_c) == (b <= ((thr_c << shift) | ((1 << shift) - 1)))`.
+- `benches/gpu_scenic_micro.rs`: add a `SCENIC_MICRO_ONLY=rf_32t` filter (there is
+  no per-cell selection today, so an RF iteration costs a full ET run), and print
+  `max_shared_memory_size`, the chosen wave size for both learners, and
+  `BIN_SHIFT` in `report_shape` (line 403).
+
+### Step 0: the two cheap `prefix_sum_bins` fixes
+
+1. `scenic_gpu.rs:518,548,549` carry the cumulative in a register instead of
+   re-reading `cum_*[prev]` from global.
+2. `launch_prefix_sum:2557` dispatch `WORKGROUP_64`, not `WORKGROUP_128`.
+3. Fix the residual bench ordering risk: `gpu_scenic_bench` runs `kernel_matrix`
+   then `end_to_end_matrix`, so the first CPU row of the e2e matrix still follows
+   the last GPU row of the kernel matrix.
+4. Re-profile with `CUBECL_DEBUG_OPTION=profile-medium`, at the default wave *and*
+   with the budget forced to give wave 32, so kernel cost and occupancy separate.
+
+**Gate.** If `prefix_sum_bins` drops from 36% to under 10%, the dependency chain
+was the cost and the fused design's projections hold. If it does not move, the
+profile has shifted somewhere unmodelled and you re-profile before committing.
+Either way this settles in a day a question `plans/scenic-gpu-extratrees.md:110`
+left open: that experiment moved bins onto the lane axis, which changes
+coalescing, and never isolated the global-memory chain.
+
+### Step 1: per-node sample gather
+
+Three small kernels after `reassign_samples`, plus `node_sample_offsets` /
+`node_sample_ids` in `WaveState`:
+
+- `count_node_samples`: grid (sample-blocks, 1, wave), `Atomic::fetch_add` into
+  `node_sample_counts`.
+- `scan_node_offsets`: grid (wave), single thread, serial exclusive prefix over
+  ≤1024 nodes. Copy the `compute_child_ids:2026` shape.
+- `scatter_node_samples`: grid (sample-blocks, 1, wave), atomic cursor into
+  `node_sample_ids`.
+
+Wire the gathered list into the existing `build_hist_privatised` sample loop as a
+drop-in for `while s < n_samples`. Nothing else changes.
+
+**Be honest about the gate here: expect little or no speedup.** The scan it
+removes is 158x wasteful at depth (10,000 samples tested to find ~63), but
+`sample_to_node` is 320 KB and lives in L2, so my own arithmetic puts the scan at
+low single-digit percent of runtime. The reason to do it is that it makes the
+fused kernel of Step 2 **barrier-free and portable**: no compaction, no
+`plane_exclusive_sum`, no `sync_cube` in the hot loop, and no plane-viability
+fallback branch. A flat measurement is not a failure. A Pearson move is.
+
+Cost: `node_sample_ids` is `wave × n_samples × 4` = 1.28 MB at reference, same
+order as `sample_to_node`. One caveat to put in the docstring: the atomic-cursor
+scatter makes within-node sample order nondeterministic, so f32 summation order
+varies run to run. `accumulate_importance:1987` already does this via its CAS
+loop, so it is not a new class of problem.
+
+### Step 2: the fused kernel
+
+Build it with `BIN_SHIFT` and `use_smem` as comptime knobs, and land it in four
+substeps so a Pearson move is attributable.
+
+1. **`finalise_split_stats_rf` first**, wired into the *existing*
+   `evaluate_splits_rf`, which stops writing `split_y_sums_l` /
+   `split_y_sum_sqs_l`. Body is `accumulate_split_stats_et:1370-1396` with the
+   threshold supplied rather than drawn, grid `(node, tree)`, so 1/31 the cost of
+   the build. Existing tests must not move at all.
+2. **`build_score_rf_fused` at `BIN_SHIFT = 0`, `use_smem = false`** (256 bins,
+   histogram still in DRAM), plus `reduce_slot_winners`. This is a pure fusion
+   with no accuracy change, so it gets a **differential test**
+   (`rf_fused_matches_dram_path`, ungated, toy shape) comparing `split_feature`,
+   `split_threshold` and `split_n_left` element-wise against the old path. Keep
+   the old kernels alive for this. Separating "the fusion is wrong" from
+   "coarsening moved the answer" is what stops this costing a week.
+3. **Add the `> 0` score reconstruction** and drop `hist_y_sum_sqs` from the
+   search. Verify the RF Pearson gates do not move.
+4. **Flip to `BIN_SHIFT = 2` and enable shared memory.** Gate on
+   `smem_hist_viable()`, host-side, mirroring `plane_compact_viable:2591`, because
+   an oversized `SharedMemory` allocation almost certainly fails through
+   `launch_unchecked` the same silent-zeros way the binding-limit bug did.
+5. Delete the dead kernels and shrink `WaveState`.
+
+**Gate after 4.** Pearson below 0.96, try `BIN_SHIFT = 1` (128 bins) with the
+target axis split into two halves of 32 (16 KB, two workgroups per slot; build
+that comptime variant anyway as the portability tier for any device reporting the
+WebGPU default 16384). Below 0.95 at `BIN_SHIFT = 1`, keep the fused DRAM path at
+256 bins: you still get the fusion, the atomics removal and the gather, just not
+shared-memory residency or the wave-32 capacity win.
+
+Two occupancy caveats to watch, not to pre-optimise. `SharedMemory::new` is
+comptime-sized and `n_targets` is runtime, so the full 16 KB is allocated even on
+a trailing 8-target batch. And 17.4 KB out of a 32 KB per-core budget permits one
+resident threadgroup per core, which hurts latency hiding on the `y_dense` reads.
+The split-target variant is the mitigation for both.
+
+## Files
+
+All in `src/gpu/sc_gpu/scenic_gpu.rs` unless stated.
+
+**Add.** Consts `BIN_SHIFT`, `N_BINS_COARSE`, `SMEM_TARGET_STRIDE` near line 62.
+Kernels `count_node_samples`, `scan_node_offsets`, `scatter_node_samples`,
+`build_score_rf_fused`, `reduce_slot_winners`, `finalise_split_stats_rf`, each
+with a `launch_*` host wrapper in the 2337-3288 block. Helpers
+`smem_hist_viable<R>(client, bins, padded_targets)` next to
+`plane_compact_viable:2591`, and `wave_byte_cost_rf` next to
+`wave_byte_cost_et:3549`.
+
+**Modify.** `WaveState` (3289-3383): drop the six `hist_*` / `cum_*` fields, add
+`node_sample_counts`, `node_sample_offsets`, `node_sample_ids`, and
+`slot_best_{score,thr,n_left,valid}` at `[wave, max_active_nodes, k_feats]`.
+`WaveState::allocate` (3404-3470) follows, stubbing the RF-only fields to length 1
+when `use_et`, same pattern as today. `pick_wave_size` (3598-3651): RF arm calls
+`wave_byte_cost_rf`, and its `largest` closure becomes
+`max(w · max_active_nodes · k_feats · 4, w · n_samples · 4)` because
+`node_sample_ids` is the biggest RF binding once the histogram goes. `run_wave_bfs`
+(3784-3798) drops `sy_gpu`; hoist `launch_init_root_stats` (3871) out of the
+`use_et` block so both paths seed root stats from `y_dense`; replace the RF branch
+(3947-4025) with gather / fused / reduce / finalise.
+`fit_scenic_batches_gpu` (4240-4244) drops the `SparseYGpu` construction.
+
+**Delete** at substep 2.5: `build_hist_privatised` (229-313), `merge_hist`
+(355-407), `prefix_sum_bins` (465-554), `evaluate_splits_rf` (696-1010), their
+four `launch_*` wrappers, and `SparseYGpu` (3659-3783). Keep
+`atomic_add_f32_bits:169-182`, still the only mechanism `accumulate_importance`
+has. No fallback needed: the gather makes `build_score_rf_fused` plane-free, and
+its `use_smem = false` variant covers low-shared-memory devices.
+
+## Verification
+
+```bash
+# every step
+cargo test --release --features gpu,single-cell --test scenic_gpu -- --nocapture
+cargo clippy --features gpu,single-cell --all-targets && cargo fmt --check
+
+# milestone gates
+cargo test --release --features gpu,single-cell,large_scale_diagnostics --test scenic_gpu -- --nocapture
+CUBECL_DEBUG_OPTION=profile-medium CUBECL_DEBUG_LOG=stdout \
+  cargo bench --features gpu,single-cell --bench gpu_scenic_micro
+
+# before merge
+cargo test --no-default-features
+cargo test --features single-cell,multi-modal
+```
+
+Watch `rf_32t` / `rf_multibatch` and the two RF Pearson means. `gpu_scenic_bench`
+at milestones only (~1h). Note `gpu_scenic_bench` has no checksum guard at all, so
+a silently dead kernel reads there as a spectacular win; the micro bench's guard
+(`checksum > 0.5 * n_targets`, line 318) is the only liveness check and it does
+not compare values against the CPU. Add a Pearson column to the micro bench at
+reduced tree count as part of Step -1.
+
+## Corrections to the existing plan files
+
+`plans/scenic-gpu-randomforest.md`:
+
+- **Step 5 (histogram subtraction): delete.** Under a shared-memory-resident
+  histogram it needs the parent resident in DRAM, ~1.6 GB at reference, which is
+  exactly the traffic the design removes. It is only a win for the DRAM design
+  being abandoned.
+- **Step 2's compaction reuse: replace with the gather.** The ET pattern costs
+  three `sync_cube` per 128-sample block; at 79 blocks × 423k workgroups that is
+  ~2e8 barriers in the fused kernel, for a scan the gather removes entirely.
+- **Step 3: incomplete.** Add the `> 0` acceptance-gate reconstruction, and note
+  that the winner's `ssyl_k` is still needed by `accumulate_importance:1970` and
+  `propagate_child_stats`, with `finalise_split_stats_rf` as the answer.
+- **Step 4: wrong on one point.** "It changes results for the CPU path too if the
+  binning is shared" is false. Coarsening is GPU-only.
+- **Lines 36-46:** the 57.4 / 35.8 / 6.6 profile is a wave-8 measurement and the
+  file does not say so. ET's is at wave 32. The two are not comparable.
+- **Lines 63-66:** the "3.25 GB per level" framing misdirects the whole step. The
+  ratio is right; the cost is the global read-after-write chain, not the volume.
+- **Lines 177-198:** the projection omits the wave-8 to wave-32 jump, so it
+  understates the ceiling.
+- **Lines 220-223:** both "cheap ET cleanups" are already done. `sy_gpu` is `None`
+  when `use_et` (4240-4244) and `upload_dense_y` takes a reused scratch (3690).
+- **Line 22:** the 8.25x bar derives from the 187.39s RF CPU baseline the same
+  file calls suspect. Restate after the Step 0 bench fix.
+
+`plans/scenic-gpu-extratrees.md` and `docs/scenic_gpu.md`:
+
+- "The CI gpu job compiles `tests/scenic_gpu.rs` to zero tests" is **wrong**.
+  The file gates on `single-cell, gpu` only (line 20); nine tests run in CI on both
+  runners. The accurate statement is that **RF** has no CI coverage, because only
+  the three Pearson tests sit behind `large_scale_diagnostics`.
+- The `viable_max_active_nodes` hazard is recorded as "Not fixed", but
+  `reassign_samples:1857-1862` now drops out-of-range nodes defensively. Mark it
+  resolved.
+- `docs/scenic_gpu.md:141` says "The bench runs `rf_e2e_cpu` straight after
+  `et_e2e_gpu`" in the present tense. Both drivers now run CPU rows first. Make it
+  past tense.
+- `docs/scenic_gpu.md:100-114` should say RF is scheduled at wave 4 (default) or 8
+  (bench) against ET at 32. It is a live handicap on the numbers in that section.
+- `plans/scenic-gpu-extratrees.md:110`: the plane-scan experiment changed
+  coalescing and never isolated the global dependency chain. Add the caveat; Step
+  0 settles it.

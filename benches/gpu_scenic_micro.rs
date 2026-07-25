@@ -11,9 +11,11 @@
 //!
 //! Shape mirrors one end-to-end batch exactly (10k cells, 1000 TFs, 64
 //! targets, depth 10, `min_samples_leaf` 50). Only `n_trees` shrinks. Two tree
-//! counts run per learner: [`TREES_ONE_WAVE`] fits in a single wave, so the gap
-//! to [`TREES_MULTI_WAVE`] separates fixed per-batch cost (`WaveState`
-//! allocation, feature upload, sparse Y upload) from per-wave kernel cost.
+//! counts run per learner, and the gap between them separates fixed per-batch
+//! cost (`WaveState` allocation, feature upload, sparse Y upload) from the
+//! marginal cost of more trees. Mind that the two learners are not scheduled
+//! alike: at [`TREES_MULTI_WAVE`] ExtraTrees still runs in one wave while
+//! RandomForest's histogram allocation forces four. See [`TREES_MULTI_WAVE`].
 //!
 //! A final multi-batch cell runs [`N_BATCHES`] gene batches. The single-batch
 //! cells structurally flatter the CPU, because the GPU pays its whole fixed
@@ -29,6 +31,10 @@
 //! archive table shows the GPU ratio improving with cell count, so 10k is its
 //! worst shape and worth optimising against, but check 50k at milestones so we
 //! do not tune into that corner.
+//!
+//! Set `SCENIC_MICRO_ONLY=rf_32t,rf_multibatch` to run a subset. Comma-separated
+//! substrings matched against the cell label; unset runs everything. Iterating
+//! on one learner otherwise pays for the other one every time.
 
 #![cfg(all(feature = "gpu", feature = "single-cell"))]
 #![allow(clippy::field_reassign_with_default, clippy::needless_range_loop)]
@@ -66,12 +72,20 @@ const N_FEATURES: usize = 1_000;
 /// end-to-end gene batch.
 const N_TARGETS: usize = 64;
 
-/// Single-wave tree count. `DEFAULT_WAVE_SIZE` is 8, so this is one wave and
-/// its wall clock is dominated by fixed per-batch cost.
+/// Single-wave tree count. `pick_wave_size` caps the wave at the tree count, so
+/// this is one wave for both learners and its wall clock is dominated by fixed
+/// per-batch cost.
 const TREES_ONE_WAVE: usize = 8;
 
-/// Multi-wave tree count. Four waves at the current default, so
-/// `(t_multi - t_one) / 3` is the marginal cost of a wave.
+/// Multi-wave tree count, and the two learners do not agree on how many.
+///
+/// ExtraTrees gets `DEFAULT_WAVE_SIZE = 32`, so this is still **one** wave and
+/// the gap to [`TREES_ONE_WAVE`] measures marginal per-tree cost. RandomForest's
+/// histogram allocation is 0.76 GiB per tree at this shape, so `pick_wave_size`
+/// halves down to 8 under [`WAVE_BUDGET`] (and to 4 under the 4 GiB library
+/// default), making this **four** waves. The two learners' `(t_multi - t_one)`
+/// gaps are therefore not comparable. Read the `wave:` line from `report_shape`
+/// rather than assuming.
 const TREES_MULTI_WAVE: usize = 32;
 
 /// Tree depth, matching the end-to-end config.
@@ -398,13 +412,28 @@ fn run_multi_batch_cell(
     );
 }
 
+/// Cell labels selected by `SCENIC_MICRO_ONLY`. Empty means run everything.
+fn cell_filter() -> Vec<String> {
+    std::env::var("SCENIC_MICRO_ONLY")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Whether `label` passes the filter. Substring match, so `rf_` selects every
+/// RandomForest cell.
+fn selected(filter: &[String], label: &str) -> bool {
+    filter.is_empty() || filter.iter().any(|f| label.contains(f.as_str()))
+}
+
 /// Print the wave scheduler's decision for this shape, so the VRAM story stays
 /// visible as the histogram allocations change.
 fn report_shape(n_samples: usize, device: &WgpuDevice) {
-    let max_binding = WgpuRuntime::client(device)
-        .properties()
-        .memory
-        .max_page_size as usize;
+    let client = WgpuRuntime::client(device);
+    let max_binding = client.properties().memory.max_page_size as usize;
+    let max_smem = client.properties().hardware.max_shared_memory_size;
     let k_feats = resolve_n_features_split(0, N_FEATURES).clamp(1, N_FEATURES);
     let nodes = viable_max_active_nodes(MAX_DEPTH, n_samples, MIN_SAMPLES_LEAF);
     let gib = |b: usize| b as f64 / (1024.0 * 1024.0 * 1024.0);
@@ -444,6 +473,22 @@ fn report_shape(n_samples: usize, device: &WgpuDevice) {
         gib(WAVE_BUDGET),
         gib(max_binding),
     );
+
+    // Forward-looking: the planned RF rewrite keeps the per-slot histogram in
+    // threadgroup memory, which only works if a coarsened bin axis fits. Print
+    // the budget now so the viability is visible before the kernel exists.
+    let need_64 = 64 * N_TARGETS * 4;
+    let need_128 = 128 * N_TARGETS * 4;
+    println!(
+        "  smem:  device {max_smem} B | f32 hist at {N_TARGETS} targets: \
+         64 bins {need_64} B ({}), 128 bins {need_128} B ({})",
+        if need_64 <= max_smem { "fits" } else { "busts" },
+        if need_128 <= max_smem {
+            "fits"
+        } else {
+            "busts"
+        },
+    );
 }
 
 fn main() {
@@ -457,8 +502,13 @@ fn main() {
         std::process::exit(1);
     };
 
+    let filter = cell_filter();
+
     println!("gpu_scenic_micro: best of {N_REPEATS} after 1 warmup");
     report_shape(n_samples, &device);
+    if !filter.is_empty() {
+        println!("  only:  {}", filter.join(", "));
+    }
     println!("  target: ratio >= 10x (M1 Max has ~10 cores for the rayon fan-out)\n");
 
     let x = make_features(n_samples, SEED as u64 + n_samples as u64);
@@ -474,45 +524,61 @@ fn main() {
     let rf_warm = rf_config(WARMUP_TREES);
 
     for &n_trees in &[TREES_ONE_WAVE, TREES_MULTI_WAVE] {
+        let et_label = format!("et_{n_trees}t");
+        let rf_label = format!("rf_{n_trees}t");
+        if !selected(&filter, &et_label) && !selected(&filter, &rf_label) {
+            continue;
+        }
         println!("--- {n_trees} trees ---");
-        run_cell(
-            &format!("et_{n_trees}t"),
-            n_samples,
-            &x,
-            one_batch,
-            &et_config(n_trees),
-            &et_warm,
-            &device,
-        );
-        run_cell(
-            &format!("rf_{n_trees}t"),
-            n_samples,
-            &x,
-            one_batch,
-            &rf_config(n_trees),
-            &rf_warm,
-            &device,
-        );
+        if selected(&filter, &et_label) {
+            run_cell(
+                &et_label,
+                n_samples,
+                &x,
+                one_batch,
+                &et_config(n_trees),
+                &et_warm,
+                &device,
+            );
+        }
+        if selected(&filter, &rf_label) {
+            run_cell(
+                &rf_label,
+                n_samples,
+                &x,
+                one_batch,
+                &rf_config(n_trees),
+                &rf_warm,
+                &device,
+            );
+        }
         println!();
     }
 
+    if !selected(&filter, "et_multibatch") && !selected(&filter, "rf_multibatch") {
+        return;
+    }
     println!("--- {N_BATCHES} batches x {N_TARGETS} targets, {TREES_MULTI_BATCH} trees ---");
-    run_multi_batch_cell(
-        "et_multibatch",
-        n_samples,
-        &x,
-        &axes,
-        &et_config(TREES_MULTI_BATCH),
-        &et_warm,
-        &device,
-    );
-    run_multi_batch_cell(
-        "rf_multibatch",
-        n_samples,
-        &x,
-        &axes,
-        &rf_config(TREES_MULTI_BATCH),
-        &rf_warm,
-        &device,
-    );
+    if selected(&filter, "et_multibatch") {
+        run_multi_batch_cell(
+            "et_multibatch",
+            n_samples,
+            &x,
+            &axes,
+            &et_config(TREES_MULTI_BATCH),
+            &et_warm,
+            &device,
+        );
+    }
+    if selected(&filter, "rf_multibatch") {
+        run_multi_batch_cell(
+            "rf_multibatch",
+            n_samples,
+            &x,
+            &axes,
+            &rf_config(TREES_MULTI_BATCH),
+            &rf_warm,
+            &device,
+        );
+    }
 }
