@@ -865,14 +865,24 @@ fn phase3_rf_bootstrap_pearson() {
 
 /// Reduced-shape RF Pearson gate that actually runs in CI.
 ///
-/// [`phase3_random_forest_pearson`] is the real fidelity gate but it needs
+/// `phase3_random_forest_pearson` is the real fidelity gate but it needs
 /// `large_scale_diagnostics`, and at 10k cells / 250 trees it is far too slow
-/// for a debug build on lavapipe. This runs the same comparison at roughly a
-/// hundredth of the work with a floor loosened to 0.90 to absorb the extra
-/// seed noise of 30 trees.
+/// for a debug build on lavapipe. This runs the same comparison at a fraction
+/// of the work.
 ///
-/// The floor is provisional until it has been calibrated against one real run;
-/// the measured value is printed either way.
+/// Two assertions, and the second is the one that matters. An absolute floor
+/// alone is not meaningful here: what the comparison can reach is bounded by
+/// how far the ensemble has converged, and at this shape a CPU run against
+/// another CPU run on a different seed only reaches ~0.966 itself. So the test
+/// also anchors against that baseline, which is what distinguishes "the GPU
+/// diverged" from "120 trees is not many trees".
+///
+/// Calibrated, not guessed: measured 0.878 cpu-gpu against a 0.891 cpu-cpu
+/// baseline at 30 trees, 0.966 against 0.966 at 120, and 0.982 against 0.984
+/// at 300. The GPU sits on the noise ceiling at every tree count. 120 is the
+/// cheapest of those that leaves headroom over a 0.95 floor, and the result is
+/// stable to three decimals across repeat runs despite the CAS-loop atomic in
+/// `accumulate_importance` varying summation order.
 #[test]
 fn phase3_rf_pearson_small() {
     let Some(device) = try_device() else {
@@ -883,9 +893,10 @@ fn phase3_rf_pearson_small() {
     const RS_N_SAMPLES: usize = 1_000;
     const RS_N_FEATURES: usize = 50; // n_features_split = 0 -> sqrt(50) = 7
     const RS_N_TARGETS: usize = 8;
-    const RS_N_TREES: usize = 30;
+    const RS_N_TREES: usize = 120;
     const RS_INFORMATIVE: usize = 6;
     const RS_SPARSITY: f32 = 0.5;
+    const RS_PEARSON_FLOOR: f32 = 0.95;
 
     let seed_base = 20260712u64;
 
@@ -942,6 +953,14 @@ fn phase3_rf_pearson_small() {
 
     let cpu = fit_multi_trees_sparse(&axes, &x, RS_N_SAMPLES, &cfg, seed_base as usize)
         .expect("CPU RF fit failed");
+    let cpu_b = fit_multi_trees_sparse(
+        &axes,
+        &x,
+        RS_N_SAMPLES,
+        &cfg,
+        seed_base.wrapping_add(0xBEEF) as usize,
+    )
+    .expect("CPU RF baseline fit failed");
     let gpu = fit_multi_trees_gpu::<WgpuRuntime>(
         &axes,
         &x,
@@ -954,23 +973,33 @@ fn phase3_rf_pearson_small() {
     .expect("GPU RF fit failed");
 
     let mut per_target: Vec<f32> = Vec::with_capacity(RS_N_TARGETS);
+    let mut baseline: Vec<f32> = Vec::with_capacity(RS_N_TARGETS);
     for t in 0..RS_N_TARGETS {
         assert_eq!(cpu[t].len(), RS_N_FEATURES);
         assert_eq!(gpu[t].len(), RS_N_FEATURES);
         per_target.push(pearson(&cpu[t], &gpu[t]));
+        baseline.push(pearson(&cpu[t], &cpu_b[t]));
     }
     let mean_corr = per_target.iter().sum::<f32>() / per_target.len() as f32;
+    let baseline_corr = baseline.iter().sum::<f32>() / baseline.len() as f32;
 
     eprintln!(
         "phase3_rf_pearson_small ({RS_N_SAMPLES} cells * {RS_N_FEATURES} feats * \
-         {RS_N_TARGETS} targets * {RS_N_TREES} trees): mean pearson r = {mean_corr:.3} \
-         (per-target: {per_target:?})"
+         {RS_N_TARGETS} targets * {RS_N_TREES} trees): cpu-gpu r = {mean_corr:.3}, \
+         cpu-cpu baseline r = {baseline_corr:.3} \
+         (cpu-gpu per-target: {per_target:?})"
     );
 
     assert!(
-        mean_corr >= 0.90,
-        "Phase 3 RF (small) mean per-target Pearson r = {mean_corr:.3} < 0.90 floor \
+        mean_corr >= RS_PEARSON_FLOOR,
+        "Phase 3 RF (small) cpu-gpu Pearson r = {mean_corr:.3} < {RS_PEARSON_FLOOR} floor \
          (per-target: {per_target:?})"
+    );
+    assert!(
+        mean_corr + 0.05 >= baseline_corr,
+        "Phase 3 RF (small) cpu-gpu Pearson r = {mean_corr:.3} materially worse than the \
+         cpu-cpu seed-variance baseline {baseline_corr:.3}; the GPU is diverging beyond \
+         what the tree count explains"
     );
 }
 
