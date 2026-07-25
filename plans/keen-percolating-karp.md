@@ -6,12 +6,28 @@ that file when the work starts; the corrections at the bottom apply to it and to
 
 ## Status
 
+**RandomForest on GPU went 1.18x -> 4.83x against one CPU core, and its wave
+VRAM went 6.10 GiB -> 0.010 GiB.** All three Pearson gates hold: ET 0.993
+unchanged, RF 0.987 against a 0.988 baseline, RF+bootstrap 0.975 against 0.976.
+
 | step | state |
 |---|---|
 | -1 RF test coverage | **done**, calibrated, 12 tests pass in 7.6s debug |
 | 0 `prefix_sum_bins` fixes | **dead end, reverted.** Both hypotheses measured wrong |
-| 1 per-node gather | not started |
-| 2 fused kernel | not started |
+| 1 per-node gather | **done.** 1.18x -> 1.21x, as predicted a near-null result |
+| 2 fused kernel | **done.** 1.21x -> 4.83x |
+
+| cell | before | after |
+|---|---:|---:|
+| `rf_8t` | 1.16x | **3.75x** |
+| `rf_32t` | 1.18x | **4.83x** |
+| `rf_multibatch` | 1.18x | **4.63x** |
+| RF wave size | 8 | **32** |
+| RF wave VRAM | 6.10 GiB | **0.010 GiB** |
+| `phase3_random_forest_pearson` GPU | 5.9s | **2.0s** |
+
+The 8.25x break-even against the rayon fan-out is not reached. What remains is in
+"What is left" at the bottom.
 
 ### What the first measurements settled
 
@@ -148,6 +164,85 @@ cost is `wave · max_active_nodes · k_feats · 4 arrays · 4 B` plus the gather
 cells against 8.39 GB at wave 1. RF goes to wave 32 permanently and the 1M-cell
 refusal disappears. That capacity result is worth shipping even if the speed work
 lands short.
+
+## What was built
+
+Three commits after the gather, replacing four kernels with three.
+
+**`build_score_rf_fused`** (one workgroup per slot/node/tree) builds the slot's
+histogram in threadgroup memory, prefix-sums it along bins with a register
+carry, scores every candidate bin and emits the slot's winner. Nothing reaches
+DRAM but four small per-slot arrays. No atomics anywhere: the whole workgroup
+walks one sample at a time and thread `k` owns target `k`, so no two threads ever
+touch the same histogram column.
+
+**`reduce_slot_winners`** picks each node's best slot, single-threaded, ascending
+with a strict `>` so ties go to the lowest slot.
+
+**`finalise_split_stats_rf`** recomputes the winner's left-child sums and
+sums-of-squares from the node's samples at the decided threshold, per (node,
+tree) rather than per (slot, node, tree).
+
+Three things made it fit.
+
+**Dropping the sum-of-squares histogram from the search.** `argmax` only needs
+`G = S_L/nl + S_R/nr`; `Q = Σ_k ssq_k` is a node constant. The winner's true
+score is reconstructed as `P − Q/n + G/n` before the `> 0` acceptance gate,
+which is the part the original plan missed: `argmax G` alone silently accepts
+zero-gain splits wherever no positive split exists.
+
+**Adaptive bin coarsening, not a fixed `BIN_SHIFT`.** The budget is
+`n_bins × (n_targets+1)` floats, so `pick_gpu_bins` returns the finest count that
+fits: 256 bins at 8 targets, 128 at 32, 64 at the production 64. Small-target
+batches keep exact behaviour for free. The winning threshold widens back to fine
+bin space before `reassign_samples` sees it, so the shared `QuantisedStore` and
+the CPU path are untouched. Cost at 128 bins: 0.001 Pearson.
+
+**Rows padded to `n_targets + 1`.** The scoring phase gives consecutive threads
+consecutive bins; at an unpadded stride of 64 every one of them resolves to the
+same shared-memory bank.
+
+Two more things that mattered as much as the kernel:
+
+- **`WaveLayout`** replaced the `use_et` bool in `pick_wave_size` and
+  `WaveState::allocate`. Without it the fused path still allocated the 6.10 GiB
+  histogram it never touches and stayed pinned at wave 8. This is where most of
+  the speedup actually came from.
+- **Staging the sample tile in shared memory.** Id, multiplicity and bin are
+  workgroup-uniform, so reading them per thread per sample was three redundant
+  global loads on the critical path. Worth 6%.
+
+## What is left
+
+Profile after the rewrite, `rf_32t`, 30 launches:
+
+| kernel | share |
+|---|---:|
+| `BuildScoreRfFused` | 92.7% |
+| `FinaliseSplitStatsRf` | 3.9% |
+| `InitRootStats` | 2.4% |
+| everything else (12 kernels) | 1.0% |
+
+One kernel is the whole cost now. It is latency bound on the per-sample
+`y_dense` fetch: 22 KB of shared memory per workgroup against a 32 KB budget
+means **one resident workgroup per core**, so 32 cores × 128 threads = 4096
+threads in flight and very little to hide a ~400-cycle load behind.
+
+Levers, in the order I would try them:
+
+1. **Unroll the sample loop.** Two or four `y_dense` fetches in flight per thread
+   costs nothing in accuracy and directly attacks the stall. Safe: thread `k`
+   owns column `k`, so repeated bins just serialise within one thread.
+2. **Get under 16 KB for two resident workgroups.** Needs 32 bins at 64 targets,
+   which is a real accuracy trade and should be measured against the 0.95 floor
+   before being taken seriously.
+3. **Split the target axis** so two workgroups each handle 32 targets. Halves
+   shared memory per workgroup and doubles occupancy, at the cost of combining
+   partial `S_L`/`S_R` across workgroups.
+
+Whether any of this reaches 8.25x is open. 4.83x is already a shipping-worthy
+result for a path that was 6.0x behind end to end, and the VRAM collapse means
+RandomForest now runs at 1M cells where it previously refused.
 
 ## Steps
 

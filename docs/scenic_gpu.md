@@ -1,8 +1,9 @@
 # SCENIC on GPU
 
 Short version: **ExtraTrees on GPU beats the CPU by 3.7x end to end and is the
-path worth using. RandomForest does not and should stay on CPU for now.** GBM
-is a GPU non-goal.
+path worth using. RandomForest is now 4.8x faster than one CPU core, up from
+1.2x, but still short of the ~8x the rayon fan-out gives the CPU end to end.**
+GBM is a GPU non-goal.
 
 This file replaces `docs/archive/scenic_gpu_experiment.md`, which concluded the
 whole thing was a hardware loss on Apple Silicon. That conclusion was wrong, and
@@ -36,7 +37,27 @@ data. At 0.2 the same shape gives:
 |---|---:|---:|
 | `et_32t` | 28.33x | **19.62x** |
 | `et_multibatch` | 27.76x | **18.93x** |
-| `rf_32t` | 1.29x | 1.17x |
+| `rf_32t` | 1.29x | 1.17x (now **4.83x**, see below) |
+
+### RandomForest after the fused rewrite
+
+The `rf` rows above are the pre-rewrite numbers, kept because the e2e matrix has
+not been re-run. Per-batch, at `SPARSITY = 0.2`:
+
+| cell | before | after |
+|---|---:|---:|
+| `rf_8t` | 1.16x | **3.75x** |
+| `rf_32t` | 1.18x | **4.83x** |
+| `rf_multibatch` | 1.18x | **4.63x** |
+| wave size | 8 | **32** |
+| wave VRAM | 6.10 GiB | **0.010 GiB** |
+
+The VRAM collapse matters as much as the speed. RandomForest used to need ~8.4 GB
+at wave 1 at 1M cells and would refuse to run; it now scales like ExtraTrees.
+
+Fidelity is unchanged: `phase3_random_forest_pearson` 0.987 against a 0.988
+baseline, `phase3_rf_bootstrap_pearson` 0.975 against 0.976, both floored at
+0.95. The 0.001 is the cost of coarsening the GPU's bin axis.
 
 The GPU wall clock is *identical* at both densities (0.15s for `et_32t`); it is
 the CPU that gets faster. That is structural: the ET path reads `n_targets`
@@ -49,7 +70,7 @@ nearer the top of that range.
 The CPU e2e driver fans out over gene batches with rayon while
 `fit_multi_trees_sparse` is sequential over trees, so the fan-out is worth about
 9.1x and that is the bar the GPU has to clear per batch. ET clears it three
-times over; RF does not come close.
+times over; RF is now within about 2x of it rather than 8x.
 
 RF is cheaper than ET on CPU because `RandomForestConfig` defaults to
 `subsample_rate = 0.632`, so each tree sees 63% of the cells, while ET uses all
@@ -97,21 +118,51 @@ survives only at depth 0.
 Wave-scoped VRAM is ~13 MB at the reference shape, down from 6.1 GiB, which is
 why `DEFAULT_WAVE_SIZE` could go from 8 to 32.
 
-## How the RandomForest path works, and why it loses
+## How the RandomForest path works
 
-Unchanged: `build_hist_privatised` builds a 256-bin x `n_targets` histogram per
-(tree, node, slot), `prefix_sum_bins` turns it into a cumulative table, and
-`evaluate_splits_rf` sweeps all 255 thresholds against it. RF genuinely needs
-that table, so the ET approach does not port.
+RF genuinely consumes a cumulative histogram, so the ET approach of deleting it
+does not port. What ported instead was *where the histogram lives*.
 
-Per-kernel profile at the reference shape: `build_hist_privatised` ~57%,
-`prefix_sum_bins` ~36%, `evaluate_splits_rf` ~7%. The threshold sweep is nearly
-free; the cost is moving the histogram through DRAM and the atomics that fill
-it. `build_hist_privatised` does one CAS-retry-loop float add per (sample,
-target) in global memory, about 1.4e9 of them per fit, which accounts for its
-time almost exactly.
+The old path was three kernels: `build_hist_privatised` filled a 256-bin x
+`n_targets` table per (tree, node, slot) with CAS-retry-loop atomics,
+`prefix_sum_bins` turned it into a cumulative table, and `evaluate_splits_rf`
+swept 255 thresholds against it. Between them 91% of GPU time, at an effective
+34 GB/s of a ~400 GB/s budget, which is neither compute nor bandwidth bound but
+issue bound.
 
-See `plans/` for the RF work plan.
+`build_score_rf_fused` replaces all three. One workgroup per (slot, node, tree)
+builds the histogram in **threadgroup memory**, prefix-sums it along bins with a
+register carry, scores every candidate bin and emits only that slot's winner.
+Nothing reaches DRAM but four small per-slot arrays. `reduce_slot_winners` picks
+the node's best slot, and `finalise_split_stats_rf` recomputes the winner's
+left-child sums from the node's samples at the decided threshold.
+
+Three things make it fit in 32 KB of threadgroup memory:
+
+- **The sum-of-squares histogram drops out of the search.** `argmax` needs only
+  `G = S_L/nl + S_R/nr`, since `Q = Σ_k ssq_k` is a node constant. The winner's
+  true score is reconstructed as `P − Q/n + G/n` before the `> 0` acceptance
+  gate; skipping that reconstruction silently accepts zero-gain splits.
+- **The GPU bins more coarsely than the shared `QuantisedStore`.** `pick_gpu_bins`
+  returns the finest count that fits the budget: 256 bins at 8 targets, 128 at
+  32, 64 at the production 64. The winning threshold widens back to fine bin
+  space before `reassign_samples` sees it, so the CPU path and the stored bins
+  are untouched. Costs 0.001 Pearson at 128 bins.
+- **Rows are padded to `n_targets + 1`.** The scoring pass gives consecutive
+  threads consecutive bins; at an unpadded stride of 64 they all land on one
+  shared-memory bank.
+
+There is no atomic anywhere in the accumulation: the workgroup walks one sample
+at a time and thread `k` owns target `k`, so no two threads share a column.
+
+Devices reporting less than ~22 KB of threadgroup memory fall back to the old
+DRAM kernels via `fused_rf_viable`, checked host-side because an oversized
+`SharedMemory` allocation fails where the caller cannot see it.
+
+Per-kernel profile after the rewrite: `build_score_rf_fused` 92.7%,
+`finalise_split_stats_rf` 3.9%, `init_root_stats` 2.4%, the other twelve 1.0%.
+The remaining cost is latency on the per-sample dense-Y fetch, with only one
+resident workgroup per core. See `plans/` for the levers left.
 
 ## Where the original archive went wrong
 
