@@ -13,8 +13,12 @@
 //! each other. That is what "statistical parity" means for this workload,
 //! per the plan's "sanity floor, not precision target" wording.
 
-#![cfg(all(feature = "gpu", feature = "single-cell"))]
-#![allow(clippy::needless_range_loop, clippy::field_reassign_with_default)]
+#![allow(clippy::needless_range_loop)]
+#![cfg(all(
+    feature = "single-cell",
+    feature = "large_scale_diagnostics",
+    feature = "gpu"
+))]
 
 use bixverse_rs::gpu::sc_gpu::scenic_gpu::{
     ScenicGpuParams, fit_extra_trees_gpu_single, fit_multi_trees_gpu, run_scenic_grn_gpu,
