@@ -2472,7 +2472,11 @@ impl<R: Runtime> WaveState<R> {
 /// ### Returns
 ///
 /// Upper bound on active nodes at any single level.
-fn viable_max_active_nodes(max_depth: usize, n_samples: usize, min_samples_leaf: usize) -> usize {
+pub fn viable_max_active_nodes(
+    max_depth: usize,
+    n_samples: usize,
+    min_samples_leaf: usize,
+) -> usize {
     let depth_cap = 1usize << max_depth.min(20);
     let leaf_cap = if min_samples_leaf == 0 {
         depth_cap
@@ -2498,7 +2502,7 @@ fn viable_max_active_nodes(max_depth: usize, n_samples: usize, min_samples_leaf:
 /// ### Returns
 ///
 /// Estimated byte cost of the wave-scoped histogram and cumulative tensors.
-fn wave_byte_cost(
+pub fn wave_byte_cost(
     wave_size: usize,
     max_active_nodes: usize,
     k_feats: usize,
@@ -2533,7 +2537,7 @@ fn wave_byte_cost(
 /// * `InvalidArgument` if even `wave_size = 1` exceeds the budget; the
 ///   caller should surface this as an actionable error rather than OOM-ing
 ///   at allocation time.
-fn pick_wave_size(
+pub fn pick_wave_size(
     max_active_nodes: usize,
     k_feats: usize,
     n_targets: usize,
