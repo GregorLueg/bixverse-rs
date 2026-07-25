@@ -1,12 +1,17 @@
 //! GPU implementation of the multi-output tree regression from
 //! `sc_analysis/scenic.rs`: wave-scheduled, multi-tree, multi-batch
 //! ExtraTrees and RandomForest, dispatched per level via
-//! [`evaluate_splits_et`] (random threshold) or [`evaluate_splits_rf`]
-//! (exhaustive threshold) on `config.random_threshold()`. Six-kernel
-//! level-synchronous BFS pipeline, all kernels running at full
-//! `WORKGROUP_128` width using the atomic-free segmented pattern from
+//! [`evaluate_splits_et_direct`] (random threshold) or [`evaluate_splits_rf`]
+//! (exhaustive threshold) on `config.random_threshold()`. Level-synchronous
+//! BFS pipeline sharing a common tail of node-bookkeeping kernels, built on the
+//! atomic-free segmented pattern from
 //! `gpu/ml/k_means_gpu.rs::segmented_centroid_update` and the SMEM tree
 //! reduction from `gpu/sc_gpu/kernels/harmony_kernels.rs::objective_partials`.
+//!
+//! Most kernels run [`WORKGROUP_128`] wide. The exceptions are deliberate and
+//! documented at each: [`evaluate_splits_et_direct`] is [`WORKGROUP_32`] so its
+//! argmax fits one plane, and [`prefix_sum_bins`] is [`WORKGROUP_64`] because
+//! `n_targets` is capped at `MULTI_OUTPUT_BATCH`.
 
 #![allow(missing_docs)]
 #![cfg(all(feature = "single-cell", feature = "gpu"))]
@@ -21,7 +26,7 @@ use rustc_hash::FxHashMap;
 use std::time::Instant;
 use thousands::Separable;
 
-use crate::gpu::{WORKGROUP_32, WORKGROUP_128};
+use crate::gpu::{WORKGROUP_32, WORKGROUP_64, WORKGROUP_128};
 use crate::prelude::*;
 use crate::single_cell::mc_analysis::scenic_metacells::{
     batch_genes_in_memory, build_tf_quantised_store, extract_target_column,
@@ -408,14 +413,18 @@ pub fn merge_hist(
 
 /// Inclusive prefix sum over 256 bins per (tree, node, slot).
 ///
-/// One workgroug per (slot, node, tree), `WORKGROUP_128` wide. Thread 0 runs
+/// One workgroup per (slot, node, tree), [`WORKGROUP_64`] wide. Thread 0 runs
 /// the counts scan and, in the same pass, computes the per-slot informative bin
 /// range `[min_bin, max_bin]` (first and last bins with nonzero counts) into
 /// `slot_min_bin` / `slot_max_bin`. Downstream `evaluate_splits_*` read
 /// these two u32s per slot instead of rescanning all 256 bins per candidate.
 ///
 /// Thread `tx` owns targets `tx, tx+wg, ...` for y-sum scans. Each scan only
-/// touches its own history so no cross-thread ordering is needed.
+/// touches its own history so no cross-thread ordering is needed, and every
+/// running total is carried in a register rather than read back out of the
+/// output tensor. The width is 64 rather than 128 because `n_targets` is capped
+/// at `MULTI_OUTPUT_BATCH`, so a 128-wide group leaves half its threads with
+/// nothing to do while still holding the workgroup's occupancy slot.
 ///
 /// Empty-slot encoding: `min_bin = 0, max_bin = 0` when the slot has no
 /// samples in any bin. `evaluate_splits_*` reject via `max_bin > min_bin`.
@@ -510,12 +519,17 @@ pub fn prefix_sum_bins(
             has_min = 1u32;
             max_b = 0u32;
         }
+        // `run` carries the cumulative in a register. Reading it back out of
+        // `cum_counts` instead would make every iteration a global
+        // read-after-write on the value this thread wrote one step earlier,
+        // i.e. a 256-deep dependent chain through DRAM.
+        let mut run: u32 = first;
         let mut b: u32 = 1u32;
         while b < N_BINS {
-            let prev = count_base + (b - 1u32) as usize;
             let curr = count_base + b as usize;
             let hc = hist_counts[curr];
-            cum_counts[curr] = cum_counts[prev] + hc;
+            run += hc;
+            cum_counts[curr] = run;
             if hc > 0u32 {
                 if has_min == 0u32 {
                     min_b = b;
@@ -535,18 +549,23 @@ pub fn prefix_sum_bins(
         }
     }
 
+    // Same register carry as above. The store/load round trip it replaces was
+    // exact, so the sequence of f32 additions is unchanged and so is the
+    // output, bit for bit.
     let mut k: u32 = tx;
     while k < n_targets {
-        cum_y_sums[sum_base + k as usize] = f32::from_bits(hist_y_sums[sum_base + k as usize]);
-        cum_y_sum_sqs[sum_base + k as usize] =
-            f32::from_bits(hist_y_sum_sqs[sum_base + k as usize]);
+        let mut run_s = f32::from_bits(hist_y_sums[sum_base + k as usize]);
+        let mut run_q = f32::from_bits(hist_y_sum_sqs[sum_base + k as usize]);
+        cum_y_sums[sum_base + k as usize] = run_s;
+        cum_y_sum_sqs[sum_base + k as usize] = run_q;
 
         let mut b: u32 = 1u32;
         while b < N_BINS {
-            let prev_s = sum_base + ((b - 1u32) * n_targets) as usize + k as usize;
             let curr_s = sum_base + (b * n_targets) as usize + k as usize;
-            cum_y_sums[curr_s] = cum_y_sums[prev_s] + f32::from_bits(hist_y_sums[curr_s]);
-            cum_y_sum_sqs[curr_s] = cum_y_sum_sqs[prev_s] + f32::from_bits(hist_y_sum_sqs[curr_s]);
+            run_s += f32::from_bits(hist_y_sums[curr_s]);
+            run_q += f32::from_bits(hist_y_sum_sqs[curr_s]);
+            cum_y_sums[curr_s] = run_s;
+            cum_y_sum_sqs[curr_s] = run_q;
             b += 1u32;
         }
         k += wg_size;
@@ -2505,9 +2524,12 @@ fn launch_merge_hist<R: Runtime>(
 ///
 /// ### Workgroup
 ///
-/// `CubeDim::new_1d(WORKGROUP_128)` — 128 threads per workgroup; thread 0
-/// runs the fused count prefix sum and bin-range scan, threads `tx` own
-/// targets `tx, tx+128, ...` for the y-sum prefix sums.
+/// `CubeDim::new_1d(WORKGROUP_64)` — 64 threads per workgroup; thread 0 runs
+/// the fused count prefix sum and bin-range scan, threads `tx` own targets
+/// `tx, tx+64, ...` for the y-sum prefix sums. 64 rather than 128 because
+/// `n_targets` never exceeds `MULTI_OUTPUT_BATCH`, so the upper half of a
+/// 128-wide group falls straight out of the target loop while still holding
+/// the workgroup's occupancy slot.
 ///
 /// ### Params
 ///
@@ -2554,7 +2576,7 @@ fn launch_prefix_sum<R: Runtime>(
         prefix_sum_bins::launch_unchecked::<R>(
             client,
             CubeCount::Static(k_feats as u32, n_active_nodes as u32, wave_size as u32),
-            CubeDim::new_1d(WORKGROUP_128),
+            CubeDim::new_1d(WORKGROUP_64),
             hist_counts.clone().into_tensor_arg(),
             hist_y_sums.clone().into_tensor_arg(),
             hist_y_sum_sqs.clone().into_tensor_arg(),
@@ -2567,7 +2589,7 @@ fn launch_prefix_sum<R: Runtime>(
             n_active_nodes as u32,
             k_feats as u32,
             n_targets as u32,
-            WORKGROUP_128,
+            WORKGROUP_64,
         );
     }
 }
