@@ -2559,7 +2559,7 @@ fn plane_compact_viable<R: Runtime>(client: &ComputeClient<R>, wg_size: u32) -> 
     let plane = hw.plane_size_min;
     plane == hw.plane_size_max
         && plane > 0
-        && wg_size % plane == 0
+        && wg_size.is_multiple_of(plane)
         && wg_size / plane <= MAX_PLANES_PER_CUBE
 }
 
