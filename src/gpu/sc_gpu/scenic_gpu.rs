@@ -736,8 +736,6 @@ pub fn evaluate_splits_rf(
     split_feature: &mut Tensor<u32>,
     split_threshold: &mut Tensor<u32>,
     split_n_left: &mut Tensor<u32>,
-    split_y_sums_l: &mut Tensor<f32>,
-    split_y_sum_sqs_l: &mut Tensor<f32>,
     wave_size: u32,
     n_active_nodes: u32,
     k_feats: u32,
@@ -1025,18 +1023,115 @@ pub fn evaluate_splits_rf(
             split_n_left[node_flat] = 0u32;
         }
     }
+}
 
-    if winner_valid == 1u32 {
-        let bin_base = ((((tree * n_active_nodes + node) * k_feats + winner_slot) * N_BINS)
-            * n_targets) as usize
-            + (winner_thr * n_targets) as usize;
-        let mut k: u32 = tx;
-        while k < n_targets {
-            split_y_sums_l[stats_base + k as usize] = cum_y_sums[bin_base + k as usize];
-            split_y_sum_sqs_l[stats_base + k as usize] = cum_y_sum_sqs[bin_base + k as usize];
-            k += wg_size;
-        }
+/// Recompute the winning split's left-child Y sums and sums-of-squares from the
+/// node's actual samples.
+///
+/// The cumulative histogram carries these for free, which is why
+/// [`evaluate_splits_rf`] reads them straight out of it. A fused evaluator
+/// cannot: dropping the sum-of-squares histogram is what buys the shared-memory
+/// budget, so the winner's `ssyl` has to come from somewhere else. One pass over
+/// the node's gathered samples at the already-decided threshold is that
+/// somewhere, and it runs per (node, tree) rather than per (slot, node, tree),
+/// so it costs `1/k_feats` of a histogram build.
+///
+/// Reads the dense Y so target sits on the thread axis and the loads coalesce,
+/// matching [`accumulate_split_stats_et`].
+///
+/// Values differ in the last f32 place from the histogram-derived ones: this
+/// sums in sample order, the histogram sums per bin and then prefix-sums across
+/// bins. Same terms, different association.
+///
+/// ### Params
+///
+/// * `feature_data` - Quantised bins `[n_features, n_samples]` (u8 as u32)
+/// * `y_dense` - Dense Y `[n_samples, n_targets]`, target contiguous
+/// * `node_sample_offsets` - Node slice bounds `[wave_size, n_active_nodes + 1]`
+/// * `node_sample_ids` - Gathered sample ids `[wave_size, n_samples]`
+/// * `node_sample_mults` - Gathered multiplicities, same layout
+/// * `split_feature` - Winning feature per node; `INVALID_NODE` means leaf
+/// * `split_threshold` - Winning threshold per node, in *fine* bin space
+/// * `split_y_sums_l` - Output left-child Y sums `[wave_size, n_active_nodes,
+///   n_targets]`
+/// * `split_y_sum_sqs_l` - Output left-child Y sums-of-squares, same layout
+/// * `n_samples` - Number of samples
+/// * `wave_size` - Trees in wave
+/// * `n_active_nodes` - Active nodes at level
+/// * `n_targets` - Targets in batch
+/// * `wg_size` - Workgroup width (comptime)
+///
+/// ### Grid mapping
+///
+/// * `CUBE_POS_X + CUBE_POS_Y * CUBE_COUNT_X` -> node index
+/// * `CUBE_POS_Z` -> tree_in_wave
+/// * `UNIT_POS_X` -> target index
+///
+/// ### Returns
+///
+/// `split_y_sums_l` and `split_y_sum_sqs_l` written for every node that took a
+/// split; leaves are left untouched, matching what `accumulate_importance`
+/// already skips.
+#[cube(launch_unchecked)]
+#[allow(clippy::too_many_arguments)]
+pub fn finalise_split_stats_rf(
+    feature_data: &Tensor<u32>,
+    y_dense: &Tensor<f32>,
+    node_sample_offsets: &Tensor<u32>,
+    node_sample_ids: &Tensor<u32>,
+    node_sample_mults: &Tensor<u32>,
+    split_feature: &Tensor<u32>,
+    split_threshold: &Tensor<u32>,
+    split_y_sums_l: &mut Tensor<f32>,
+    split_y_sum_sqs_l: &mut Tensor<f32>,
+    n_samples: u32,
+    wave_size: u32,
+    n_active_nodes: u32,
+    n_targets: u32,
+    #[comptime] _wg_size: u32,
+) {
+    let node = CUBE_POS_X + CUBE_POS_Y * CUBE_COUNT_X;
+    let tree = CUBE_POS_Z;
+    if node >= n_active_nodes {
+        terminate!();
     }
+    if tree >= wave_size {
+        terminate!();
+    }
+
+    let tx = UNIT_POS_X;
+    let node_flat = (tree * n_active_nodes + node) as usize;
+    let feat = split_feature[node_flat];
+    if feat == INVALID_NODE {
+        terminate!();
+    }
+    if tx >= n_targets {
+        terminate!();
+    }
+
+    let thr = split_threshold[node_flat];
+    let obase = (tree * (n_active_nodes + 1u32)) as usize;
+    let lo = node_sample_offsets[obase + node as usize];
+    let hi = node_sample_offsets[obase + (node + 1u32) as usize];
+    let gbase = (tree * n_samples) as usize;
+
+    let mut acc_s: f32 = 0f32;
+    let mut acc_q: f32 = 0f32;
+    let mut j: u32 = lo;
+    while j < hi {
+        let s = node_sample_ids[gbase + j as usize];
+        if feature_bin(feature_data, feat * n_samples + s) <= thr {
+            let mf = f32::cast_from(node_sample_mults[gbase + j as usize]);
+            let y = y_dense[(s * n_targets + tx) as usize];
+            acc_s += mf * y;
+            acc_q += mf * y * y;
+        }
+        j += 1u32;
+    }
+
+    let out = node_flat * n_targets as usize + tx as usize;
+    split_y_sums_l[out] = acc_s;
+    split_y_sum_sqs_l[out] = acc_q;
 }
 
 ///////////////////////
@@ -2735,6 +2830,75 @@ fn launch_gather_node_samples<R: Runtime>(
     }
 }
 
+/// Dispatch [`finalise_split_stats_rf`] over `grid_2d(n_active_nodes)` by
+/// `wave_size` workgroups.
+///
+/// ### Workgroup
+///
+/// `CubeDim::new_1d(WORKGROUP_128)` — thread `tx` owns target `tx`, so the
+/// dense-Y loads coalesce. Threads past `n_targets` exit.
+///
+/// ### Params
+///
+/// * `client` - CubeCL compute client
+/// * `feature_data` - Quantised bins `[n_features, n_samples]` (u8 as u32)
+/// * `y_dense` - Dense Y `[n_samples, n_targets]`
+/// * `node_sample_offsets` - Node slice bounds
+/// * `node_sample_ids` - Gathered sample ids
+/// * `node_sample_mults` - Gathered multiplicities
+/// * `split_feature` - Winning feature per node
+/// * `split_threshold` - Winning threshold per node, fine bin space
+/// * `split_y_sums_l` - Output left-child Y sums
+/// * `split_y_sum_sqs_l` - Output left-child Y sums-of-squares
+/// * `n_samples` - Number of samples
+/// * `wave_size` - Trees in wave
+/// * `n_active_nodes` - Active nodes at level
+/// * `n_targets` - Targets in batch
+///
+/// ### Returns
+///
+/// `()` — kernel is dispatched asynchronously via the client command queue.
+#[allow(clippy::too_many_arguments)]
+fn launch_finalise_split_stats_rf<R: Runtime>(
+    client: &ComputeClient<R>,
+    feature_data: &GpuTensor<R, u32>,
+    y_dense: &GpuTensor<R, f32>,
+    node_sample_offsets: &GpuTensor<R, u32>,
+    node_sample_ids: &GpuTensor<R, u32>,
+    node_sample_mults: &GpuTensor<R, u32>,
+    split_feature: &GpuTensor<R, u32>,
+    split_threshold: &GpuTensor<R, u32>,
+    split_y_sums_l: &GpuTensor<R, f32>,
+    split_y_sum_sqs_l: &GpuTensor<R, f32>,
+    n_samples: usize,
+    wave_size: usize,
+    n_active_nodes: usize,
+    n_targets: usize,
+) {
+    let (gx, gy) = grid_2d((n_active_nodes as u32).max(1));
+    unsafe {
+        finalise_split_stats_rf::launch_unchecked::<R>(
+            client,
+            CubeCount::Static(gx, gy, wave_size as u32),
+            CubeDim::new_1d(WORKGROUP_128),
+            feature_data.clone().into_tensor_arg(),
+            y_dense.clone().into_tensor_arg(),
+            node_sample_offsets.clone().into_tensor_arg(),
+            node_sample_ids.clone().into_tensor_arg(),
+            node_sample_mults.clone().into_tensor_arg(),
+            split_feature.clone().into_tensor_arg(),
+            split_threshold.clone().into_tensor_arg(),
+            split_y_sums_l.clone().into_tensor_arg(),
+            split_y_sum_sqs_l.clone().into_tensor_arg(),
+            n_samples as u32,
+            wave_size as u32,
+            n_active_nodes as u32,
+            n_targets as u32,
+            WORKGROUP_128,
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn launch_build_hist<R: Runtime>(
     client: &ComputeClient<R>,
@@ -3021,8 +3185,6 @@ fn launch_evaluate_splits_rf<R: Runtime>(
     split_feature: &GpuTensor<R, u32>,
     split_threshold: &GpuTensor<R, u32>,
     split_n_left: &GpuTensor<R, u32>,
-    split_y_sums_l: &GpuTensor<R, f32>,
-    split_y_sum_sqs_l: &GpuTensor<R, f32>,
     wave_size: usize,
     n_active_nodes: usize,
     k_feats: usize,
@@ -3047,8 +3209,6 @@ fn launch_evaluate_splits_rf<R: Runtime>(
             split_feature.clone().into_tensor_arg(),
             split_threshold.clone().into_tensor_arg(),
             split_n_left.clone().into_tensor_arg(),
-            split_y_sums_l.clone().into_tensor_arg(),
-            split_y_sum_sqs_l.clone().into_tensor_arg(),
             wave_size as u32,
             n_active_nodes as u32,
             k_feats as u32,
@@ -4408,13 +4568,31 @@ fn run_wave_bfs<R: Runtime>(
                 &state.split_feature,
                 &state.split_threshold,
                 &state.split_n_left,
-                &state.split_y_sums_l,
-                &state.split_y_sum_sqs_l,
                 wave_size,
                 n_active_nodes,
                 k_feats,
                 n_targets,
                 min_samples_leaf,
+            );
+
+            // The winner's left-child sums no longer fall out of the cumulative
+            // histogram, so recompute them from the node's samples at the
+            // decided threshold. Per (node, tree), so 1/k_feats of a build.
+            launch_finalise_split_stats_rf(
+                client,
+                feature_data_gpu,
+                y_dense_gpu,
+                &state.node_sample_offsets,
+                &state.node_sample_ids,
+                &state.node_sample_mults,
+                &state.split_feature,
+                &state.split_threshold,
+                &state.split_y_sums_l,
+                &state.split_y_sum_sqs_l,
+                n_samples,
+                wave_size,
+                n_active_nodes,
+                n_targets,
             );
         }
 
