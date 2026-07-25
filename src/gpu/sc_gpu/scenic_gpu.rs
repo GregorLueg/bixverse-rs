@@ -64,6 +64,12 @@ const N_BINS: u32 = 256;
 /// Default wave size.
 const DEFAULT_WAVE_SIZE: usize = 32;
 
+/// Upper bound on planes per workgroup, used only to size the small
+/// scan-offset scratch in [`accumulate_split_stats_et`]. Workgroups are at
+/// most `WORKGROUP_128` wide and no shipping backend reports a plane narrower
+/// than 4, so 32 slots is a generous ceiling at 128 bytes of shared memory.
+const MAX_PLANES_PER_CUBE: u32 = 32;
+
 /// Sentinel for "no node" / "no valid split" / "no child" in the u32-typed
 /// device buffers (`split_feature`, `sample_to_node`, `left_child_id`,
 /// `right_child_id`).
@@ -1220,6 +1226,7 @@ pub fn accumulate_split_stats_et(
     n_thresholds: u32,
     level: u32,
     #[comptime] _wg_size: u32,
+    #[comptime] use_plane: bool,
 ) {
     let cand = CUBE_POS_X;
     let node = CUBE_POS_Y;
@@ -1266,68 +1273,162 @@ pub fn accumulate_split_stats_et(
     let feat_base = (feat * n_samples) as usize;
     let s2n_base = (tree * n_samples) as usize;
 
-    // (stripe, target) decomposition. n_targets <= MULTI_OUTPUT_BATCH = 64 and
-    // wg_size is 128, so there are at least two stripes in practice.
-    let n_stripes = (CUBE_DIM_X / n_targets).max(1u32);
-    let stripe = tx / n_targets;
-    let k = tx % n_targets;
+    let mut s_sum = SharedMemory::<f32>::new(WORKGROUP_128 as usize);
+    let mut s_sq = SharedMemory::<f32>::new(WORKGROUP_128 as usize);
+    let mut s_cnt = SharedMemory::<u32>::new(WORKGROUP_128 as usize);
+    let mut s_id = SharedMemory::<u32>::new(WORKGROUP_128 as usize);
+    let mut s_mult = SharedMemory::<u32>::new(WORKGROUP_128 as usize);
+    let mut s_ptot = SharedMemory::<u32>::new(MAX_PLANES_PER_CUBE as usize);
 
     let mut acc_s: f32 = 0f32;
     let mut acc_q: f32 = 0f32;
     let mut acc_n: u32 = 0u32;
 
-    if stripe < n_stripes {
-        let mut s: u32 = stripe;
-        while s < n_samples {
-            if sample_to_node[s2n_base + s as usize] == node {
-                let mult = sample_multiplicity[s2n_base + s as usize];
-                if mult > 0u32 {
-                    if feature_data[feat_base + s as usize] <= thr {
-                        let mf = f32::cast_from(mult);
-                        let y = y_dense[(s * n_targets + k) as usize];
-                        acc_s += mf * y;
-                        acc_q += mf * y * y;
-                        acc_n += mult;
+    if use_plane {
+        // Block-compacted path. Every thread tests one sample per block, so
+        // sample_to_node / sample_multiplicity / feature_data are each read
+        // once per sample rather than once per (sample, target). The survivors
+        // are compacted into shared memory via a plane-based exclusive scan,
+        // so the drain loop below runs over the number of matches rather than
+        // the block width, which is what makes deep levels cheap: a node
+        // holding ~100 samples matches once or twice per 128-wide block.
+        let lane = UNIT_POS_PLANE;
+        let plane_id = UNIT_POS_X / PLANE_DIM;
+        let n_planes = CUBE_DIM_X / PLANE_DIM;
+        let n_blocks = n_samples.div_ceil(CUBE_DIM_X);
+
+        let mut blk: u32 = 0u32;
+        while blk < n_blocks {
+            let s = blk * CUBE_DIM_X + tx;
+            let mut hit: u32 = 0u32;
+            let mut mult: u32 = 0u32;
+            if s < n_samples {
+                if sample_to_node[s2n_base + s as usize] == node {
+                    let m = sample_multiplicity[s2n_base + s as usize];
+                    if m > 0u32 {
+                        if feature_data[feat_base + s as usize] <= thr {
+                            hit = 1u32;
+                            mult = m;
+                        }
                     }
                 }
             }
-            s += n_stripes;
-        }
-    }
 
-    let mut s_sum = SharedMemory::<f32>::new(WORKGROUP_128 as usize);
-    let mut s_sq = SharedMemory::<f32>::new(WORKGROUP_128 as usize);
-    let mut s_cnt = SharedMemory::<u32>::new(WORKGROUP_128 as usize);
-    s_sum[tx as usize] = acc_s;
-    s_sq[tx as usize] = acc_q;
-    s_cnt[tx as usize] = acc_n;
-    sync_cube();
+            // Workgroup exclusive scan of `hit`: scan within the plane, then
+            // offset by the totals of the planes below.
+            let p_excl = plane_exclusive_sum(hit);
+            let p_tot = plane_sum(hit);
+            if lane == 0u32 {
+                s_ptot[plane_id as usize] = p_tot;
+            }
+            sync_cube();
 
-    // Fold the stripes. Only the first n_targets threads do the work; the
-    // count is stripe-invariant across targets so lane k == 0 folds it.
-    if tx < n_targets {
-        let mut tot_s: f32 = 0f32;
-        let mut tot_q: f32 = 0f32;
-        let mut p: u32 = 0u32;
-        while p < n_stripes {
-            tot_s += s_sum[(p * n_targets + tx) as usize];
-            tot_q += s_sq[(p * n_targets + tx) as usize];
-            p += 1u32;
-        }
-        let out = cand_flat * n_targets as usize + tx as usize;
-        cand_y_sums_l[out] = tot_s;
-        cand_y_sum_sqs_l[out] = tot_q;
-    }
+            let mut base: u32 = 0u32;
+            let mut cnt: u32 = 0u32;
+            let mut i: u32 = 0u32;
+            while i < n_planes {
+                let t = s_ptot[i as usize];
+                if i < plane_id {
+                    base += t;
+                }
+                cnt += t;
+                i += 1u32;
+            }
 
-    if tx == 0u32 {
-        let mut tot_n: u32 = 0u32;
-        let mut p: u32 = 0u32;
-        while p < n_stripes {
-            tot_n += s_cnt[(p * n_targets) as usize];
-            p += 1u32;
+            if hit == 1u32 {
+                s_id[(base + p_excl) as usize] = s;
+                s_mult[(base + p_excl) as usize] = mult;
+            }
+            sync_cube();
+
+            if tx < n_targets {
+                let mut j: u32 = 0u32;
+                while j < cnt {
+                    let sid = s_id[j as usize];
+                    let mf = f32::cast_from(s_mult[j as usize]);
+                    let y = y_dense[(sid * n_targets + tx) as usize];
+                    acc_s += mf * y;
+                    acc_q += mf * y * y;
+                    j += 1u32;
+                }
+            }
+            if tx == 0u32 {
+                let mut j: u32 = 0u32;
+                while j < cnt {
+                    acc_n += s_mult[j as usize];
+                    j += 1u32;
+                }
+            }
+            sync_cube();
+            blk += 1u32;
         }
-        cand_thr[cand_flat] = thr;
-        cand_n_left[cand_flat] = tot_n;
+
+        if tx < n_targets {
+            let out = cand_flat * n_targets as usize + tx as usize;
+            cand_y_sums_l[out] = acc_s;
+            cand_y_sum_sqs_l[out] = acc_q;
+        }
+        if tx == 0u32 {
+            cand_thr[cand_flat] = thr;
+            cand_n_left[cand_flat] = acc_n;
+        }
+    } else {
+        // Portable fallback: (stripe, target) decomposition. Correct but
+        // re-reads the sample metadata once per target.
+        let n_stripes = (CUBE_DIM_X / n_targets).max(1u32);
+        let stripe = tx / n_targets;
+        let k = tx % n_targets;
+
+        if stripe < n_stripes {
+            let mut s: u32 = stripe;
+            while s < n_samples {
+                if sample_to_node[s2n_base + s as usize] == node {
+                    let mult = sample_multiplicity[s2n_base + s as usize];
+                    if mult > 0u32 {
+                        if feature_data[feat_base + s as usize] <= thr {
+                            let mf = f32::cast_from(mult);
+                            let y = y_dense[(s * n_targets + k) as usize];
+                            acc_s += mf * y;
+                            acc_q += mf * y * y;
+                            acc_n += mult;
+                        }
+                    }
+                }
+                s += n_stripes;
+            }
+        }
+
+        s_sum[tx as usize] = acc_s;
+        s_sq[tx as usize] = acc_q;
+        s_cnt[tx as usize] = acc_n;
+        sync_cube();
+
+        // Fold the stripes. Only the first n_targets threads do the work; the
+        // count is stripe-invariant across targets so lane k == 0 folds it.
+        if tx < n_targets {
+            let mut tot_s: f32 = 0f32;
+            let mut tot_q: f32 = 0f32;
+            let mut p: u32 = 0u32;
+            while p < n_stripes {
+                tot_s += s_sum[(p * n_targets + tx) as usize];
+                tot_q += s_sq[(p * n_targets + tx) as usize];
+                p += 1u32;
+            }
+            let out = cand_flat * n_targets as usize + tx as usize;
+            cand_y_sums_l[out] = tot_s;
+            cand_y_sum_sqs_l[out] = tot_q;
+        }
+
+        if tx == 0u32 {
+            let mut tot_n: u32 = 0u32;
+            let mut p: u32 = 0u32;
+            while p < n_stripes {
+                tot_n += s_cnt[(p * n_targets) as usize];
+                p += 1u32;
+            }
+            cand_thr[cand_flat] = thr;
+            cand_n_left[cand_flat] = tot_n;
+        }
     }
 }
 
@@ -2437,6 +2538,31 @@ fn launch_prefix_sum<R: Runtime>(
     }
 }
 
+/// Whether the plane-compacted path in [`accumulate_split_stats_et`] can be
+/// used on this device.
+///
+/// It derives a plane id from `UNIT_POS_X / PLANE_DIM`, so the device must
+/// report an exact plane size rather than a range, and that size must divide
+/// the workgroup width so no plane is partially populated. The resulting plane
+/// count also has to fit [`MAX_PLANES_PER_CUBE`].
+///
+/// ### Params
+///
+/// * `client` - CubeCL compute client, queried for hardware properties
+/// * `wg_size` - Workgroup width the kernel will be launched at
+///
+/// ### Returns
+///
+/// `true` to take the compacted path, `false` for the portable fallback.
+fn plane_compact_viable<R: Runtime>(client: &ComputeClient<R>, wg_size: u32) -> bool {
+    let hw = &client.properties().hardware;
+    let plane = hw.plane_size_min;
+    plane == hw.plane_size_max
+        && plane > 0
+        && wg_size % plane == 0
+        && wg_size / plane <= MAX_PLANES_PER_CUBE
+}
+
 /// Whether a `wg_size`-wide workgroup is guaranteed to be exactly one plane on
 /// this device, which is the precondition for the plane-primitive argmax in
 /// [`evaluate_splits_et_direct`].
@@ -2839,6 +2965,7 @@ fn launch_accumulate_split_stats_et<R: Runtime>(
             n_thresholds as u32,
             level,
             WORKGROUP_128,
+            plane_compact_viable(client, WORKGROUP_128),
         );
     }
 }
