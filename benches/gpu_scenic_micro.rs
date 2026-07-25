@@ -394,10 +394,12 @@ fn run_multi_batch_cell(
 
 /// Print the wave scheduler's decision for this shape, so the VRAM story stays
 /// visible as the histogram allocations change.
-fn report_shape(n_samples: usize) {
-    let k_feats = resolve_n_features_split(0, N_FEATURES)
-        .min(N_FEATURES)
-        .max(1);
+fn report_shape(n_samples: usize, device: &WgpuDevice) {
+    let max_binding = WgpuRuntime::client(device)
+        .properties()
+        .memory
+        .max_page_size as usize;
+    let k_feats = resolve_n_features_split(0, N_FEATURES).clamp(1, N_FEATURES);
     let nodes = viable_max_active_nodes(MAX_DEPTH, n_samples, MIN_SAMPLES_LEAF);
     let gib = |b: usize| b as f64 / (1024.0 * 1024.0 * 1024.0);
 
@@ -409,6 +411,7 @@ fn report_shape(n_samples: usize) {
         WAVE_BUDGET,
         1,
         false,
+        max_binding,
     )
     .expect("shape busts the wave budget at wave_size = 1");
     let wave_et = pick_wave_size(
@@ -419,6 +422,7 @@ fn report_shape(n_samples: usize) {
         WAVE_BUDGET,
         1,
         true,
+        max_binding,
     )
     .expect("shape busts the wave budget at wave_size = 1");
 
@@ -427,10 +431,12 @@ fn report_shape(n_samples: usize) {
          k_feats {k_feats}, max_active_nodes {nodes}"
     );
     println!(
-        "  wave:  et size {wave_et} ({:.3} GiB) | rf size {wave_rf} ({:.2} GiB) | budget {:.0} GiB",
+        "  wave:  et size {wave_et} ({:.3} GiB) | rf size {wave_rf} ({:.2} GiB) | \
+         budget {:.0} GiB | max binding {:.2} GiB",
         gib(wave_byte_cost_et(wave_et, nodes, k_feats, N_TARGETS, 1)),
         gib(wave_byte_cost(wave_rf, nodes, k_feats, N_TARGETS)),
         gib(WAVE_BUDGET),
+        gib(max_binding),
     );
 }
 
@@ -446,7 +452,7 @@ fn main() {
     };
 
     println!("gpu_scenic_micro: best of {N_REPEATS} after 1 warmup");
-    report_shape(n_samples);
+    report_shape(n_samples, &device);
     println!("  target: ratio >= 10x (M1 Max has ~10 cores for the rayon fan-out)\n");
 
     let x = make_features(n_samples, SEED as u64 + n_samples as u64);

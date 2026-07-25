@@ -62,7 +62,7 @@ impl Default for ScenicGpuParams {
 const N_BINS: u32 = 256;
 
 /// Default wave size.
-const DEFAULT_WAVE_SIZE: usize = 8;
+const DEFAULT_WAVE_SIZE: usize = 32;
 
 /// Sentinel for "no node" / "no valid split" / "no child" in the u32-typed
 /// device buffers (`split_feature`, `sample_to_node`, `left_child_id`,
@@ -1042,7 +1042,7 @@ pub fn evaluate_splits_rf(
 ///
 /// `slot_min_bin` and `slot_max_bin` written per slot.
 #[cube(launch_unchecked)]
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::collapsible_if)]
 pub fn scan_slot_bin_range(
     feature_data: &Tensor<u32>,
     sample_to_node: &Tensor<u32>,
@@ -3239,6 +3239,7 @@ impl<R: Runtime> WaveState<R> {
     /// ### Returns
     ///
     /// A `WaveState` with all GPU tensors allocated and uninitialised.
+    #[allow(clippy::too_many_arguments)]
     fn allocate(
         client: &ComputeClient<R>,
         wave_size: usize,
@@ -3408,6 +3409,11 @@ pub fn wave_byte_cost_et(
 ///   wave size below the default when the ensemble is small
 /// * `wave_byte_budget` - VRAM ceiling in bytes, see
 ///   [`ScenicGpuParams::wave_byte_budget`]
+/// * `n_thresholds` - Random thresholds per feature slot (ExtraTrees only)
+/// * `use_et` - Size for the ExtraTrees candidate tensors rather than the
+///   histogram
+/// * `max_binding_bytes` - Largest single buffer binding the device accepts,
+///   from `client.properties().memory.max_page_size`
 ///
 /// ### Returns
 ///
@@ -3415,9 +3421,19 @@ pub fn wave_byte_cost_et(
 ///
 /// ### Errors
 ///
-/// * `InvalidArgument` if even `wave_size = 1` exceeds the budget; the
+/// * `InvalidArgument` if even `wave_size = 1` exceeds either limit; the
 ///   caller should surface this as an actionable error rather than OOM-ing
 ///   at allocation time.
+///
+/// ### Implementation details
+///
+/// Two independent ceilings apply. `wave_byte_budget` bounds the *total* of
+/// the wave-scoped tensors, but graphics APIs also bound each *individual*
+/// binding, and the two disagree: a wave can fit the total budget while its
+/// largest single tensor busts the binding limit. Because the kernels launch
+/// via `launch_unchecked` that failure is silent, producing zeroed output and
+/// an implausibly fast run rather than an error, so both are checked here.
+#[allow(clippy::too_many_arguments)]
 pub fn pick_wave_size(
     max_active_nodes: usize,
     k_feats: usize,
@@ -3426,6 +3442,7 @@ pub fn pick_wave_size(
     wave_byte_budget: usize,
     n_thresholds: usize,
     use_et: bool,
+    max_binding_bytes: usize,
 ) -> Result<usize, BixverseErrors> {
     let cost = |w: usize| {
         if use_et {
@@ -3434,19 +3451,36 @@ pub fn pick_wave_size(
             wave_byte_cost(w, max_active_nodes, k_feats, n_targets)
         }
     };
+    // Largest single tensor in the wave: the per-(bin, target) histogram on
+    // the RandomForest path, the per-(candidate, target) left-side sums on the
+    // ExtraTrees one.
+    let largest = |w: usize| {
+        let slots = if use_et {
+            w * max_active_nodes * k_feats * n_thresholds * n_targets
+        } else {
+            w * max_active_nodes * k_feats * N_BINS as usize * n_targets
+        };
+        slots * 4
+    };
+    let fits = |w: usize| cost(w) <= wave_byte_budget && largest(w) <= max_binding_bytes;
+
     let mut w = DEFAULT_WAVE_SIZE.min(n_trees_target.max(1));
     while w > 1 {
-        if cost(w) <= wave_byte_budget {
+        if fits(w) {
             return Ok(w);
         }
         w /= 2;
     }
-    if cost(1) > wave_byte_budget {
+    if !fits(1) {
         return Err(BixverseErrors::InvalidArgument(format!(
-            "GPU SCENIC: even wave_size=1 exceeds the {} MB VRAM budget \
-             (nodes={}, k_feats={}, n_targets={}). Reduce max_depth or \
+            "GPU SCENIC: even wave_size=1 does not fit (needs {} MB total vs a \
+             {} MB budget, largest binding {} MB vs a {} MB device limit; \
+             nodes={}, k_feats={}, n_targets={}). Reduce max_depth or \
              n_features_split.",
+            cost(1) / (1024 * 1024),
             wave_byte_budget / (1024 * 1024),
+            largest(1) / (1024 * 1024),
+            max_binding_bytes / (1024 * 1024),
             max_active_nodes,
             k_feats,
             n_targets,
@@ -4024,6 +4058,7 @@ pub fn fit_scenic_batches_gpu<R: Runtime>(
             params.wave_byte_budget,
             n_thresholds,
             use_et,
+            client.properties().memory.max_page_size as usize,
         )?;
         let state = WaveState::allocate(
             &client,
