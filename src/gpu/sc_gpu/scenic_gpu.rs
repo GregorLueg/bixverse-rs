@@ -1640,6 +1640,203 @@ pub fn compute_child_ids(
     }
 }
 
+/// Zero the next level's node-stat slice so unwritten slots read as empty.
+///
+/// [`propagate_child_stats`] only touches slots that an internal parent
+/// actually spawned. Child ids are handed out compactly from 0 by
+/// [`compute_child_ids`], so everything above `2 * n_internal` is stale from
+/// two levels ago and has to be cleared or it looks like a live node.
+///
+/// One workgroup per (node, tree), `WORKGROUP_128` wide. Thread 0 clears the
+/// count; thread `tx` clears targets `tx, tx+wg, ...`.
+///
+/// ### Params
+///
+/// * `node_counts` - Per-node sample totals to clear `[wave_size,
+///   n_active_nodes]`
+/// * `node_y_sums` - Per-node Y sums to clear `[wave_size, n_active_nodes,
+///   n_targets]`
+/// * `node_y_sum_sqs` - Per-node Y sum-of-squares to clear, same layout
+/// * `wave_size` - Trees in wave
+/// * `n_active_nodes` - Nodes to clear at the next level
+/// * `n_targets` - Targets in batch
+/// * `wg_size` - Workgroup width (comptime)
+///
+/// ### Grid mapping
+///
+/// * `CUBE_POS_X + CUBE_POS_Y * CUBE_COUNT_X` -> node index
+/// * `CUBE_POS_Z` -> tree_in_wave
+/// * `UNIT_POS_X` -> target stride offset
+///
+/// ### Returns
+///
+/// `node_counts`, `node_y_sums` and `node_y_sum_sqs` zeroed in place over the
+/// `n_active_nodes` prefix.
+#[cube(launch_unchecked)]
+pub fn zero_node_stats(
+    node_counts: &mut Tensor<u32>,
+    node_y_sums: &mut Tensor<f32>,
+    node_y_sum_sqs: &mut Tensor<f32>,
+    wave_size: u32,
+    n_active_nodes: u32,
+    n_targets: u32,
+    #[comptime] wg_size: u32,
+) {
+    let node = CUBE_POS_X + CUBE_POS_Y * CUBE_COUNT_X;
+    let tree = CUBE_POS_Z;
+    if node >= n_active_nodes {
+        terminate!();
+    }
+    if tree >= wave_size {
+        terminate!();
+    }
+
+    let tx = UNIT_POS_X;
+    let node_flat = (tree * n_active_nodes + node) as usize;
+    if tx == 0u32 {
+        node_counts[node_flat] = 0u32;
+    }
+    let stats_base = node_flat * n_targets as usize;
+    let mut k: u32 = tx;
+    while k < n_targets {
+        node_y_sums[stats_base + k as usize] = 0f32;
+        node_y_sum_sqs[stats_base + k as usize] = 0f32;
+        k += wg_size;
+    }
+}
+
+/// Hand each child node its sufficient statistics straight from the parent
+/// split, so the next level never rebuilds them from the histogram.
+///
+/// The left child's stats are exactly the winning split's left-side totals
+/// that `evaluate_splits_*` already wrote; the right child's are the parent
+/// minus the left. This is what the CPU recursion does (it threads
+/// `left_y_sums` / `right_y_sums` down through `build_node_multi_sparse`), and
+/// it makes `merge_hist` redundant at every level below the root: rescanning
+/// `n_active_nodes * k_feats * N_BINS * n_targets` histogram slots to recover
+/// numbers the parent already holds is the single largest wasted read in the
+/// level loop.
+///
+/// One workgroup per (parent node, tree), `WORKGROUP_128` wide. Thread 0
+/// writes both child counts; thread `tx` writes targets `tx, tx+wg, ...` for
+/// both children.
+///
+/// Child ids at or above `n_active_next` are dropped rather than written.
+/// `viable_max_active_nodes` bounds a level at `n_samples / (2 *
+/// min_samples_leaf)`, which counts splits rather than nodes, so a
+/// sufficiently balanced tree can in principle produce more children than the
+/// buffer holds. Those samples are already dropped downstream (their node id
+/// matches nothing in `build_hist_privatised`); the guard just keeps the write
+/// in bounds.
+///
+/// ### Params
+///
+/// * `split_feature` - Winning feature id per parent; `INVALID_NODE` marks a
+///   leaf and contributes nothing
+/// * `split_n_left` - Left-child sample count per parent
+/// * `split_y_sums_l` - Left-child Y sums per (parent, target)
+/// * `split_y_sum_sqs_l` - Left-child Y sum-of-squares per (parent, target)
+/// * `left_child_id` - Left child id per parent from [`compute_child_ids`]
+/// * `right_child_id` - Right child id per parent, same source
+/// * `node_counts` - Current-level per-node sample totals (read)
+/// * `node_y_sums` - Current-level per-node Y sums (read)
+/// * `node_y_sum_sqs` - Current-level per-node Y sum-of-squares (read)
+/// * `next_counts` - Next-level per-node sample totals (written)
+/// * `next_y_sums` - Next-level per-node Y sums (written)
+/// * `next_y_sum_sqs` - Next-level per-node Y sum-of-squares (written)
+/// * `wave_size` - Trees in wave
+/// * `n_active_nodes` - Active nodes at the current level
+/// * `n_active_next` - Active nodes at the next level; bounds the writes
+/// * `n_targets` - Targets in batch
+/// * `wg_size` - Workgroup width (comptime)
+///
+/// ### Grid mapping
+///
+/// * `CUBE_POS_X + CUBE_POS_Y * CUBE_COUNT_X` -> parent node index
+/// * `CUBE_POS_Z` -> tree_in_wave
+/// * `UNIT_POS_X` -> target stride offset
+///
+/// ### Returns
+///
+/// `next_counts`, `next_y_sums` and `next_y_sum_sqs` filled for every child
+/// spawned by an internal parent.
+#[cube(launch_unchecked)]
+#[allow(clippy::too_many_arguments)]
+pub fn propagate_child_stats(
+    split_feature: &Tensor<u32>,
+    split_n_left: &Tensor<u32>,
+    split_y_sums_l: &Tensor<f32>,
+    split_y_sum_sqs_l: &Tensor<f32>,
+    left_child_id: &Tensor<u32>,
+    right_child_id: &Tensor<u32>,
+    node_counts: &Tensor<u32>,
+    node_y_sums: &Tensor<f32>,
+    node_y_sum_sqs: &Tensor<f32>,
+    next_counts: &mut Tensor<u32>,
+    next_y_sums: &mut Tensor<f32>,
+    next_y_sum_sqs: &mut Tensor<f32>,
+    wave_size: u32,
+    n_active_nodes: u32,
+    n_active_next: u32,
+    n_targets: u32,
+    #[comptime] wg_size: u32,
+) {
+    let node = CUBE_POS_X + CUBE_POS_Y * CUBE_COUNT_X;
+    let tree = CUBE_POS_Z;
+    if node >= n_active_nodes {
+        terminate!();
+    }
+    if tree >= wave_size {
+        terminate!();
+    }
+
+    let node_flat = (tree * n_active_nodes + node) as usize;
+    if split_feature[node_flat] == INVALID_NODE {
+        terminate!();
+    }
+
+    let lid = left_child_id[node_flat];
+    let rid = right_child_id[node_flat];
+    if lid == INVALID_NODE {
+        terminate!();
+    }
+    if lid >= n_active_next {
+        terminate!();
+    }
+    if rid >= n_active_next {
+        terminate!();
+    }
+
+    let tx = UNIT_POS_X;
+    let n = node_counts[node_flat];
+    let n_left = split_n_left[node_flat];
+
+    let l_flat = (tree * n_active_next + lid) as usize;
+    let r_flat = (tree * n_active_next + rid) as usize;
+    if tx == 0u32 {
+        next_counts[l_flat] = n_left;
+        next_counts[r_flat] = n - n_left;
+    }
+
+    let stats_base = node_flat * n_targets as usize;
+    let l_base = l_flat * n_targets as usize;
+    let r_base = r_flat * n_targets as usize;
+
+    let mut k: u32 = tx;
+    while k < n_targets {
+        let sy = node_y_sums[stats_base + k as usize];
+        let ssq = node_y_sum_sqs[stats_base + k as usize];
+        let syl = split_y_sums_l[stats_base + k as usize];
+        let ssyl = split_y_sum_sqs_l[stats_base + k as usize];
+
+        next_y_sums[l_base + k as usize] = syl;
+        next_y_sum_sqs[l_base + k as usize] = ssyl;
+        next_y_sums[r_base + k as usize] = sy - syl;
+        next_y_sum_sqs[r_base + k as usize] = ssq - ssyl;
+        k += wg_size;
+    }
+}
+
 /// Seed the per-tree `sample_to_node` at level 0.
 ///
 /// Samples with multiplicity 0 (not selected for this tree's subset) are marked
@@ -2348,6 +2545,131 @@ fn launch_compute_child_ids<R: Runtime>(
     }
 }
 
+/// Dispatch [`zero_node_stats`] over `(gx, gy, wave_size)` workgroups, where
+/// `(gx, gy)` is the `grid_2d` decomposition of `n_active_nodes`.
+///
+/// ### Workgroup
+///
+/// `CubeDim::new_1d(WORKGROUP_128)` — 128 threads per workgroup; thread 0
+/// clears the count, threads `tx` clear targets `tx, tx+128, ...`.
+///
+/// ### Params
+///
+/// * `client` - CubeCL compute client
+/// * `node_counts` - Per-node sample totals to clear
+/// * `node_y_sums` - Per-node Y sums to clear
+/// * `node_y_sum_sqs` - Per-node Y sum-of-squares to clear
+/// * `wave_size` - Trees in wave
+/// * `n_active_nodes` - Nodes to clear
+/// * `n_targets` - Targets in batch
+///
+/// ### Returns
+///
+/// `()` — kernel is dispatched asynchronously via the client command queue.
+fn launch_zero_node_stats<R: Runtime>(
+    client: &ComputeClient<R>,
+    node_counts: &GpuTensor<R, u32>,
+    node_y_sums: &GpuTensor<R, f32>,
+    node_y_sum_sqs: &GpuTensor<R, f32>,
+    wave_size: usize,
+    n_active_nodes: usize,
+    n_targets: usize,
+) {
+    let (gx, gy) = grid_2d((n_active_nodes as u32).max(1));
+    unsafe {
+        zero_node_stats::launch_unchecked::<R>(
+            client,
+            CubeCount::Static(gx, gy, wave_size as u32),
+            CubeDim::new_1d(WORKGROUP_128),
+            node_counts.clone().into_tensor_arg(),
+            node_y_sums.clone().into_tensor_arg(),
+            node_y_sum_sqs.clone().into_tensor_arg(),
+            wave_size as u32,
+            n_active_nodes as u32,
+            n_targets as u32,
+            WORKGROUP_128,
+        );
+    }
+}
+
+/// Dispatch [`propagate_child_stats`] over `(gx, gy, wave_size)` workgroups,
+/// where `(gx, gy)` is the `grid_2d` decomposition of `n_active_nodes`.
+///
+/// ### Workgroup
+///
+/// `CubeDim::new_1d(WORKGROUP_128)` — 128 threads per workgroup; thread 0
+/// writes both child counts, threads `tx` write targets `tx, tx+128, ...`.
+///
+/// ### Params
+///
+/// * `client` - CubeCL compute client
+/// * `split_feature` - Winning feature id per parent
+/// * `split_n_left` - Left-child sample count per parent
+/// * `split_y_sums_l` - Left-child Y sums per (parent, target)
+/// * `split_y_sum_sqs_l` - Left-child Y sum-of-squares per (parent, target)
+/// * `left_child_id` - Left child id per parent
+/// * `right_child_id` - Right child id per parent
+/// * `node_counts` - Current-level per-node sample totals
+/// * `node_y_sums` - Current-level per-node Y sums
+/// * `node_y_sum_sqs` - Current-level per-node Y sum-of-squares
+/// * `next_counts` - Next-level per-node sample totals (written)
+/// * `next_y_sums` - Next-level per-node Y sums (written)
+/// * `next_y_sum_sqs` - Next-level per-node Y sum-of-squares (written)
+/// * `wave_size` - Trees in wave
+/// * `n_active_nodes` - Active nodes at the current level
+/// * `n_active_next` - Active nodes at the next level
+/// * `n_targets` - Targets in batch
+///
+/// ### Returns
+///
+/// `()` — kernel is dispatched asynchronously via the client command queue.
+#[allow(clippy::too_many_arguments)]
+fn launch_propagate_child_stats<R: Runtime>(
+    client: &ComputeClient<R>,
+    split_feature: &GpuTensor<R, u32>,
+    split_n_left: &GpuTensor<R, u32>,
+    split_y_sums_l: &GpuTensor<R, f32>,
+    split_y_sum_sqs_l: &GpuTensor<R, f32>,
+    left_child_id: &GpuTensor<R, u32>,
+    right_child_id: &GpuTensor<R, u32>,
+    node_counts: &GpuTensor<R, u32>,
+    node_y_sums: &GpuTensor<R, f32>,
+    node_y_sum_sqs: &GpuTensor<R, f32>,
+    next_counts: &GpuTensor<R, u32>,
+    next_y_sums: &GpuTensor<R, f32>,
+    next_y_sum_sqs: &GpuTensor<R, f32>,
+    wave_size: usize,
+    n_active_nodes: usize,
+    n_active_next: usize,
+    n_targets: usize,
+) {
+    let (gx, gy) = grid_2d((n_active_nodes as u32).max(1));
+    unsafe {
+        propagate_child_stats::launch_unchecked::<R>(
+            client,
+            CubeCount::Static(gx, gy, wave_size as u32),
+            CubeDim::new_1d(WORKGROUP_128),
+            split_feature.clone().into_tensor_arg(),
+            split_n_left.clone().into_tensor_arg(),
+            split_y_sums_l.clone().into_tensor_arg(),
+            split_y_sum_sqs_l.clone().into_tensor_arg(),
+            left_child_id.clone().into_tensor_arg(),
+            right_child_id.clone().into_tensor_arg(),
+            node_counts.clone().into_tensor_arg(),
+            node_y_sums.clone().into_tensor_arg(),
+            node_y_sum_sqs.clone().into_tensor_arg(),
+            next_counts.clone().into_tensor_arg(),
+            next_y_sums.clone().into_tensor_arg(),
+            next_y_sum_sqs.clone().into_tensor_arg(),
+            wave_size as u32,
+            n_active_nodes as u32,
+            n_active_next as u32,
+            n_targets as u32,
+            WORKGROUP_128,
+        );
+    }
+}
+
 /// Dispatch [`init_sample_to_node`] over `(gx, gy, wave_size)` workgroups,
 /// where `(gx, gy)` is the `grid_2d` decomposition of the sample-block count
 /// `ceil(n_samples / WORKGROUP_128)`.
@@ -2432,15 +2754,25 @@ struct WaveState<R: Runtime> {
     slot_min_bin: GpuTensor<R, u32>,
     /// Last informative bin per slot, same layout as `slot_min_bin`.
     slot_max_bin: GpuTensor<R, u32>,
-    /// Per-node sample totals `[wave_size, max_active_nodes]` from
-    /// `merge_hist`.
+    /// Per-node sample totals `[wave_size, max_active_nodes]`. Written by
+    /// `merge_hist` at level 0 and by `propagate_child_stats` thereafter.
+    /// Ping-pongs with `node_counts_alt` on level parity.
     node_counts: GpuTensor<R, u32>,
-    /// Per-node Y sums `[wave_size, max_active_nodes, n_targets]` from
-    /// `merge_hist`.
+    /// Per-node Y sums `[wave_size, max_active_nodes, n_targets]`. Same
+    /// producers and ping-pong as `node_counts`.
     node_y_sums: GpuTensor<R, f32>,
-    /// Per-node Y sum-of-squares from `merge_hist`, same layout as
+    /// Per-node Y sum-of-squares, same layout and ping-pong as
     /// `node_y_sums`.
     node_y_sum_sqs: GpuTensor<R, f32>,
+    /// Odd-level half of the node-stat ping-pong, same layout as
+    /// `node_counts`. `propagate_child_stats` reads the current level's
+    /// stats and writes the next level's, and child ids overlap parent ids,
+    /// so the two cannot share a buffer.
+    node_counts_alt: GpuTensor<R, u32>,
+    /// Odd-level half of the ping-pong, same layout as `node_y_sums`.
+    node_y_sums_alt: GpuTensor<R, f32>,
+    /// Odd-level half of the ping-pong, same layout as `node_y_sum_sqs`.
+    node_y_sum_sqs_alt: GpuTensor<R, f32>,
     /// Winning feature id per node `[wave_size, max_active_nodes]`;
     /// `INVALID_NODE`
     /// for leaves and phantom nodes.
@@ -2517,6 +2849,9 @@ impl<R: Runtime> WaveState<R> {
             node_counts: GpuTensor::empty(vec![wave_size * max_active_nodes], client),
             node_y_sums: GpuTensor::empty(vec![node_stats_len], client),
             node_y_sum_sqs: GpuTensor::empty(vec![node_stats_len], client),
+            node_counts_alt: GpuTensor::empty(vec![wave_size * max_active_nodes], client),
+            node_y_sums_alt: GpuTensor::empty(vec![node_stats_len], client),
+            node_y_sum_sqs_alt: GpuTensor::empty(vec![node_stats_len], client),
             split_feature: GpuTensor::empty(vec![wave_size * max_active_nodes], client),
             split_threshold: GpuTensor::empty(vec![wave_size * max_active_nodes], client),
             split_n_left: GpuTensor::empty(vec![wave_size * max_active_nodes], client),
@@ -2775,6 +3110,40 @@ fn run_wave_bfs<R: Runtime>(
         // sample_to_node never matches.
         let depth_cap = 1usize.checked_shl(depth as u32).unwrap_or(usize::MAX);
         let n_active_nodes = depth_cap.min(max_active_nodes).max(1);
+        let n_active_next = depth_cap
+            .saturating_mul(2)
+            .min(max_active_nodes)
+            .max(1);
+
+        // Node stats ping-pong on level parity: propagate_child_stats reads
+        // the current level's totals and writes the next level's, and child
+        // ids overlap parent ids, so they cannot share a buffer.
+        let (cur_counts, cur_y_sums, cur_y_sum_sqs) = if depth % 2 == 0 {
+            (
+                &state.node_counts,
+                &state.node_y_sums,
+                &state.node_y_sum_sqs,
+            )
+        } else {
+            (
+                &state.node_counts_alt,
+                &state.node_y_sums_alt,
+                &state.node_y_sum_sqs_alt,
+            )
+        };
+        let (nxt_counts, nxt_y_sums, nxt_y_sum_sqs) = if depth % 2 == 0 {
+            (
+                &state.node_counts_alt,
+                &state.node_y_sums_alt,
+                &state.node_y_sum_sqs_alt,
+            )
+        } else {
+            (
+                &state.node_counts,
+                &state.node_y_sums,
+                &state.node_y_sum_sqs,
+            )
+        };
 
         launch_sample_features(
             client,
@@ -2806,19 +3175,27 @@ fn run_wave_bfs<R: Runtime>(
             n_targets,
         );
 
-        launch_merge_hist(
-            client,
-            &state.hist_counts,
-            &state.hist_y_sums,
-            &state.hist_y_sum_sqs,
-            &state.node_counts,
-            &state.node_y_sums,
-            &state.node_y_sum_sqs,
-            wave_size,
-            n_active_nodes,
-            k_feats,
-            n_targets,
-        );
+        // Root only. Below the root every node's totals arrive from
+        // propagate_child_stats at the end of the parent level, so rescanning
+        // the histogram would re-derive numbers we already hold exactly. At
+        // depth 0 there is a single node per tree, so this call reads one
+        // slot-0 histogram rather than n_active_nodes of them and costs
+        // nothing.
+        if depth == 0 {
+            launch_merge_hist(
+                client,
+                &state.hist_counts,
+                &state.hist_y_sums,
+                &state.hist_y_sum_sqs,
+                cur_counts,
+                cur_y_sums,
+                cur_y_sum_sqs,
+                wave_size,
+                n_active_nodes,
+                k_feats,
+                n_targets,
+            );
+        }
 
         launch_prefix_sum(
             client,
@@ -2844,9 +3221,9 @@ fn run_wave_bfs<R: Runtime>(
                 &state.cum_counts,
                 &state.cum_y_sums,
                 &state.cum_y_sum_sqs,
-                &state.node_counts,
-                &state.node_y_sums,
-                &state.node_y_sum_sqs,
+                cur_counts,
+                cur_y_sums,
+                cur_y_sum_sqs,
                 &state.node_features,
                 tree_seeds,
                 &state.slot_min_bin,
@@ -2870,9 +3247,9 @@ fn run_wave_bfs<R: Runtime>(
                 &state.cum_counts,
                 &state.cum_y_sums,
                 &state.cum_y_sum_sqs,
-                &state.node_counts,
-                &state.node_y_sums,
-                &state.node_y_sum_sqs,
+                cur_counts,
+                cur_y_sums,
+                cur_y_sum_sqs,
                 &state.node_features,
                 &state.slot_min_bin,
                 &state.slot_max_bin,
@@ -2891,9 +3268,9 @@ fn run_wave_bfs<R: Runtime>(
 
         launch_accumulate_importance(
             client,
-            &state.node_counts,
-            &state.node_y_sums,
-            &state.node_y_sum_sqs,
+            cur_counts,
+            cur_y_sums,
+            cur_y_sum_sqs,
             &state.split_feature,
             &state.split_n_left,
             &state.split_y_sums_l,
@@ -2912,11 +3289,41 @@ fn run_wave_bfs<R: Runtime>(
         launch_compute_child_ids(
             client,
             &state.split_feature,
-            &state.node_counts,
+            cur_counts,
             &state.left_child_id,
             &state.right_child_id,
             wave_size,
             n_active_nodes,
+        );
+
+        launch_zero_node_stats(
+            client,
+            nxt_counts,
+            nxt_y_sums,
+            nxt_y_sum_sqs,
+            wave_size,
+            n_active_next,
+            n_targets,
+        );
+
+        launch_propagate_child_stats(
+            client,
+            &state.split_feature,
+            &state.split_n_left,
+            &state.split_y_sums_l,
+            &state.split_y_sum_sqs_l,
+            &state.left_child_id,
+            &state.right_child_id,
+            cur_counts,
+            cur_y_sums,
+            cur_y_sum_sqs,
+            nxt_counts,
+            nxt_y_sums,
+            nxt_y_sum_sqs,
+            wave_size,
+            n_active_nodes,
+            n_active_next,
+            n_targets,
         );
 
         launch_reassign(
