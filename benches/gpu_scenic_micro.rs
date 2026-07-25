@@ -15,6 +15,11 @@
 //! to [`TREES_MULTI_WAVE`] separates fixed per-batch cost (`WaveState`
 //! allocation, feature upload, sparse Y upload) from per-wave kernel cost.
 //!
+//! A final multi-batch cell runs [`N_BATCHES`] gene batches. The single-batch
+//! cells structurally flatter the CPU, because the GPU pays its whole fixed
+//! per-call cost to serve one batch while production serves ~63 from one call.
+//! The multi-batch ratio is the one to trust when estimating end-to-end.
+//!
 //! Run with:
 //! ```
 //! cargo bench --features gpu,single-cell --bench gpu_scenic_micro
@@ -98,6 +103,19 @@ const N_REPEATS: usize = 2;
 /// clock starts.
 const WARMUP_TREES: usize = 2;
 
+/// Gene batches in the multi-batch cell. The single-batch cells pay the full
+/// fixed per-call cost (feature upload, `WaveState` allocation, readback) over
+/// one batch, which structurally flatters the CPU: production runs ~63 batches
+/// through one `fit_scenic_batches_gpu` call that uploads features once and
+/// defers every readback. Four batches is enough to see the fixed cost
+/// amortise without the CPU side taking all afternoon.
+const N_BATCHES: usize = 4;
+
+/// Trees for the multi-batch cell. Lower than [`TREES_MULTI_WAVE`] because the
+/// CPU side runs `N_BATCHES` sequential fits and would otherwise dominate the
+/// harness runtime.
+const TREES_MULTI_BATCH: usize = 16;
+
 ////////////////
 // Data build //
 ////////////////
@@ -130,17 +148,24 @@ fn make_features(n_samples: usize, seed: u64) -> QuantisedStore {
 ///
 /// * `x` - Feature store the targets are generated from.
 /// * `n_samples` - Cell count.
+/// * `n_targets` - Columns to generate. Use a multiple of [`N_TARGETS`] to get
+///   whole gene batches out of the driver's internal chunking.
 /// * `seed` - RNG seed.
 ///
 /// ### Returns
 ///
-/// `N_TARGETS` sparse columns, each with roughly `SPARSITY * n_samples`
+/// `n_targets` sparse columns, each with roughly `SPARSITY * n_samples`
 /// nonzeros.
-fn make_targets(x: &QuantisedStore, n_samples: usize, seed: u64) -> Vec<SparseAxis<u32, f32>> {
+fn make_targets(
+    x: &QuantisedStore,
+    n_samples: usize,
+    n_targets: usize,
+    seed: u64,
+) -> Vec<SparseAxis<u32, f32>> {
     let mut rng = SmallRng::seed_from_u64(seed);
 
     let mut weight_rng = SmallRng::seed_from_u64(0xF00D_BABE);
-    let mut weights = vec![vec![0.0f32; N_INFORMATIVE]; N_TARGETS];
+    let mut weights = vec![vec![0.0f32; N_INFORMATIVE]; n_targets];
     for w_row in weights.iter_mut() {
         for w in w_row.iter_mut() {
             *w = weight_rng.random::<f32>() + 1.0;
@@ -149,10 +174,10 @@ fn make_targets(x: &QuantisedStore, n_samples: usize, seed: u64) -> Vec<SparseAx
 
     let feats: Vec<&[u8]> = (0..N_INFORMATIVE).map(|f| x.get_col(f)).collect();
 
-    let mut cols_indices: Vec<Vec<usize>> = vec![Vec::new(); N_TARGETS];
-    let mut cols_values: Vec<Vec<f32>> = vec![Vec::new(); N_TARGETS];
+    let mut cols_indices: Vec<Vec<usize>> = vec![Vec::new(); n_targets];
+    let mut cols_values: Vec<Vec<f32>> = vec![Vec::new(); n_targets];
     for c in 0..n_samples {
-        for t in 0..N_TARGETS {
+        for t in 0..n_targets {
             if rng.random::<f32>() < SPARSITY {
                 let mut signal = 0.0f32;
                 for f in 0..N_INFORMATIVE {
@@ -261,9 +286,10 @@ fn run_cell(
         .expect("GPU warmup failed");
 
     let mut gpu = f32::MAX;
+    let mut checksum = 0.0f64;
     for _ in 0..N_REPEATS {
         let t0 = Instant::now();
-        fit_multi_trees_gpu::<WgpuRuntime>(
+        let imp = fit_multi_trees_gpu::<WgpuRuntime>(
             axes,
             x,
             n_samples,
@@ -274,7 +300,90 @@ fn run_cell(
         )
         .expect("GPU fit failed");
         gpu = gpu.min(t0.elapsed().as_secs_f32());
+        checksum = imp.iter().flatten().map(|&v| v as f64).sum();
     }
+
+    // Silent-failure guard. The kernels launch via `launch_unchecked`, so a
+    // binding that busts a device limit produces no work and no error, just an
+    // implausibly fast run returning zeros. Normalised importances sum to 1.0
+    // per target, so a healthy run checksums to n_targets.
+    assert!(
+        checksum > 0.5 * axes.len() as f64,
+        "{label}: importance checksum {checksum:.3} vs expected ~{}; \
+         the GPU almost certainly did no work",
+        axes.len()
+    );
+
+    println!(
+        "  {label:<18} cpu {cpu:>7.2}s  gpu {gpu:>7.2}s  ratio {:>6.2}x",
+        cpu / gpu
+    );
+}
+
+/// Time [`N_BATCHES`] gene batches on both backends and print the ratio.
+///
+/// The two sides are deliberately asymmetric, mirroring production. The CPU
+/// runs one sequential `fit_multi_trees_sparse` per batch, which is exactly
+/// what a single rayon worker does in `run_scenic_multi_output_in_memory`. The
+/// GPU gets one `fit_multi_trees_gpu` call over all the targets, which chunks
+/// internally at `MULTI_OUTPUT_BATCH` and so uploads the feature tensor once
+/// and defers every importance readback.
+///
+/// ### Params
+///
+/// * `label` - Row label.
+/// * `n_samples` - Cell count.
+/// * `x` - Feature store.
+/// * `axes` - All `N_BATCHES * N_TARGETS` target columns.
+/// * `config` - Tree config at [`TREES_MULTI_BATCH`] trees.
+/// * `warmup` - Same learner at [`WARMUP_TREES`] trees.
+/// * `device` - wgpu device.
+fn run_multi_batch_cell(
+    label: &str,
+    n_samples: usize,
+    x: &QuantisedStore,
+    axes: &[SparseAxis<u32, f32>],
+    config: &dyn TreeRegressorConfig,
+    warmup: &dyn TreeRegressorConfig,
+    device: &WgpuDevice,
+) {
+    let params = ScenicGpuParams {
+        wave_byte_budget: WAVE_BUDGET,
+    };
+
+    let cpu = best_of(|| {
+        for chunk in axes.chunks(N_TARGETS) {
+            fit_multi_trees_sparse(chunk, x, n_samples, config, SEED).expect("CPU fit failed");
+        }
+    });
+
+    fit_multi_trees_gpu::<WgpuRuntime>(axes, x, n_samples, warmup, SEED, device.clone(), &params)
+        .expect("GPU warmup failed");
+
+    let mut gpu = f32::MAX;
+    let mut checksum = 0.0f64;
+    for _ in 0..N_REPEATS {
+        let t0 = Instant::now();
+        let imp = fit_multi_trees_gpu::<WgpuRuntime>(
+            axes,
+            x,
+            n_samples,
+            config,
+            SEED,
+            device.clone(),
+            &params,
+        )
+        .expect("GPU fit failed");
+        gpu = gpu.min(t0.elapsed().as_secs_f32());
+        checksum = imp.iter().flatten().map(|&v| v as f64).sum();
+    }
+
+    assert!(
+        checksum > 0.5 * axes.len() as f64,
+        "{label}: importance checksum {checksum:.3} vs expected ~{}; \
+         the GPU almost certainly did no work",
+        axes.len()
+    );
 
     println!(
         "  {label:<18} cpu {cpu:>7.2}s  gpu {gpu:>7.2}s  ratio {:>6.2}x",
@@ -318,7 +427,13 @@ fn main() {
     println!("  target: ratio >= 10x (M1 Max has ~10 cores for the rayon fan-out)\n");
 
     let x = make_features(n_samples, SEED as u64 + n_samples as u64);
-    let axes = make_targets(&x, n_samples, SEED as u64 + n_samples as u64 + 1);
+    let axes = make_targets(
+        &x,
+        n_samples,
+        N_TARGETS * N_BATCHES,
+        SEED as u64 + n_samples as u64 + 1,
+    );
+    let one_batch = &axes[..N_TARGETS];
 
     let et_warm = et_config(WARMUP_TREES);
     let rf_warm = rf_config(WARMUP_TREES);
@@ -329,7 +444,7 @@ fn main() {
             &format!("et_{n_trees}t"),
             n_samples,
             &x,
-            &axes,
+            one_batch,
             &et_config(n_trees),
             &et_warm,
             &device,
@@ -338,11 +453,31 @@ fn main() {
             &format!("rf_{n_trees}t"),
             n_samples,
             &x,
-            &axes,
+            one_batch,
             &rf_config(n_trees),
             &rf_warm,
             &device,
         );
         println!();
     }
+
+    println!("--- {N_BATCHES} batches x {N_TARGETS} targets, {TREES_MULTI_BATCH} trees ---");
+    run_multi_batch_cell(
+        "et_multibatch",
+        n_samples,
+        &x,
+        &axes,
+        &et_config(TREES_MULTI_BATCH),
+        &et_warm,
+        &device,
+    );
+    run_multi_batch_cell(
+        "rf_multibatch",
+        n_samples,
+        &x,
+        &axes,
+        &rf_config(TREES_MULTI_BATCH),
+        &rf_warm,
+        &device,
+    );
 }
