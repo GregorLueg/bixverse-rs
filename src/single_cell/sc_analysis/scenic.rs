@@ -2743,7 +2743,10 @@ fn chunk_into_batches(genes: &[usize], batch_size: usize) -> Vec<Vec<usize>> {
 ///
 /// Half-open `[start, end)` index ranges into `batches`, each covering at
 /// most `max_genes` genes without splitting a batch across groups
-pub(crate) fn group_batches_for_io(batches: &[Vec<usize>], max_genes: usize) -> Vec<(usize, usize)> {
+pub(crate) fn group_batches_for_io(
+    batches: &[Vec<usize>],
+    max_genes: usize,
+) -> Vec<(usize, usize)> {
     let mut groups = Vec::new();
     let mut start = 0usize;
     let mut count = 0usize;

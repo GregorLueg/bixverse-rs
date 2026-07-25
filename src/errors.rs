@@ -377,9 +377,7 @@ pub enum BixverseErrors {
 
     /// A batch has too few cells for the requested anchor search
     #[cfg(feature = "single-cell")]
-    #[error(
-        "Batch {batch} has {n_cells} cells, needs at least {required} for anchor finding."
-    )]
+    #[error("Batch {batch} has {n_cells} cells, needs at least {required} for anchor finding.")]
     TooFewCellsForAnchor {
         /// Batch index
         batch: usize,

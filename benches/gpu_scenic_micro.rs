@@ -37,6 +37,7 @@ use std::time::Instant;
 
 use bixverse_rs::gpu::sc_gpu::scenic_gpu::{
     ScenicGpuParams, fit_multi_trees_gpu, pick_wave_size, viable_max_active_nodes, wave_byte_cost,
+    wave_byte_cost_et,
 };
 use bixverse_rs::prelude::*;
 use bixverse_rs::single_cell::sc_analysis::scenic::{
@@ -394,20 +395,42 @@ fn run_multi_batch_cell(
 /// Print the wave scheduler's decision for this shape, so the VRAM story stays
 /// visible as the histogram allocations change.
 fn report_shape(n_samples: usize) {
-    let k_feats = resolve_n_features_split(0, N_FEATURES).min(N_FEATURES).max(1);
+    let k_feats = resolve_n_features_split(0, N_FEATURES)
+        .min(N_FEATURES)
+        .max(1);
     let nodes = viable_max_active_nodes(MAX_DEPTH, n_samples, MIN_SAMPLES_LEAF);
-    let wave = pick_wave_size(nodes, k_feats, N_TARGETS, TREES_MULTI_WAVE, WAVE_BUDGET)
-        .expect("shape busts the wave budget at wave_size = 1");
-    let bytes = wave_byte_cost(wave, nodes, k_feats, N_TARGETS);
+    let gib = |b: usize| b as f64 / (1024.0 * 1024.0 * 1024.0);
+
+    let wave_rf = pick_wave_size(
+        nodes,
+        k_feats,
+        N_TARGETS,
+        TREES_MULTI_WAVE,
+        WAVE_BUDGET,
+        1,
+        false,
+    )
+    .expect("shape busts the wave budget at wave_size = 1");
+    let wave_et = pick_wave_size(
+        nodes,
+        k_feats,
+        N_TARGETS,
+        TREES_MULTI_WAVE,
+        WAVE_BUDGET,
+        1,
+        true,
+    )
+    .expect("shape busts the wave budget at wave_size = 1");
 
     println!(
         "  shape: {n_samples} cells, {N_FEATURES} TFs, {N_TARGETS} targets, \
          k_feats {k_feats}, max_active_nodes {nodes}"
     );
     println!(
-        "  wave:  size {wave}, wave_byte_cost {:.2} GiB (budget {:.0} GiB)",
-        bytes as f64 / (1024.0 * 1024.0 * 1024.0),
-        WAVE_BUDGET as f64 / (1024.0 * 1024.0 * 1024.0),
+        "  wave:  et size {wave_et} ({:.3} GiB) | rf size {wave_rf} ({:.2} GiB) | budget {:.0} GiB",
+        gib(wave_byte_cost_et(wave_et, nodes, k_feats, N_TARGETS, 1)),
+        gib(wave_byte_cost(wave_rf, nodes, k_feats, N_TARGETS)),
+        gib(WAVE_BUDGET),
     );
 }
 
