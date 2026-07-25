@@ -1193,7 +1193,9 @@ pub fn pick_gpu_bins(n_targets: usize) -> u32 {
 pub fn fused_rf_smem_bytes() -> usize {
     (SMEM_HIST_SLOTS as usize * 4)
         + (N_BINS as usize * 4)
-        + (WORKGROUP_128 as usize * 4 * 4)
+        // s_score, s_bin, s_nl, s_valid for the argmax; s_tile_{id,mult,bin} for
+        // the sample staging.
+        + (WORKGROUP_128 as usize * 7 * 4)
         + (2 * 4)
 }
 
@@ -1326,6 +1328,9 @@ pub fn build_score_rf_fused(
     let mut s_nl = SharedMemory::<u32>::new(WORKGROUP_128 as usize);
     let mut s_valid = SharedMemory::<u32>::new(WORKGROUP_128 as usize);
     let mut s_pq = SharedMemory::<f32>::new(2usize);
+    let mut s_tile_id = SharedMemory::<u32>::new(WORKGROUP_128 as usize);
+    let mut s_tile_mult = SharedMemory::<u32>::new(WORKGROUP_128 as usize);
+    let mut s_tile_bin = SharedMemory::<u32>::new(WORKGROUP_128 as usize);
 
     let tx = UNIT_POS_X;
     let node_flat = (tree * n_active_nodes + node) as usize;
@@ -1371,22 +1376,42 @@ pub fn build_score_rf_fused(
     let hi = node_sample_offsets[obase + (node + 1u32) as usize];
     let gbase = (tree * n_samples) as usize;
 
-    let mut j: u32 = lo;
-    while j < hi {
-        let s = node_sample_ids[gbase + j as usize];
-        let mult = node_sample_mults[gbase + j as usize];
-        let b = feature_bin(feature_data, feat * n_samples + s) >> bin_shift;
-        if tx < n_targets {
-            let mf = f32::cast_from(mult);
-            let y = y_dense[(s * n_targets + tx) as usize];
-            s_hist[(b * stride + tx) as usize] += mf * y;
+    // Staged a tile at a time. The id, multiplicity and bin of a sample are the
+    // same for all 128 threads, so reading them per thread per sample is three
+    // redundant global loads on the critical path; one cooperative load per tile
+    // replaces them. Only the y_dense fetch stays per-iteration, and that one is
+    // genuinely per-thread.
+    let mut base: u32 = lo;
+    while base < hi {
+        let idx = base + tx;
+        if idx < hi {
+            let s = node_sample_ids[gbase + idx as usize];
+            s_tile_id[tx as usize] = s;
+            s_tile_mult[tx as usize] = node_sample_mults[gbase + idx as usize];
+            s_tile_bin[tx as usize] = feature_bin(feature_data, feat * n_samples + s) >> bin_shift;
         }
-        if tx == 0u32 {
-            s_cnt[b as usize] += mult;
+        sync_cube();
+
+        let mut cnt = hi - base;
+        if cnt > CUBE_DIM_X {
+            cnt = CUBE_DIM_X;
         }
-        j += 1u32;
+        let mut i: u32 = 0u32;
+        while i < cnt {
+            let b = s_tile_bin[i as usize];
+            if tx < n_targets {
+                let mf = f32::cast_from(s_tile_mult[i as usize]);
+                let y = y_dense[(s_tile_id[i as usize] * n_targets + tx) as usize];
+                s_hist[(b * stride + tx) as usize] += mf * y;
+            }
+            if tx == 0u32 {
+                s_cnt[b as usize] += s_tile_mult[i as usize];
+            }
+            i += 1u32;
+        }
+        sync_cube();
+        base += CUBE_DIM_X;
     }
-    sync_cube();
 
     // Inclusive prefix along bins, in place. Thread k owns column k throughout,
     // so the running total lives in a register and no barrier is needed.
