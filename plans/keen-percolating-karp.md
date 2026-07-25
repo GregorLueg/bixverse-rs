@@ -8,25 +8,60 @@ that file when the work starts; the corrections at the bottom apply to it and to
 
 | step | state |
 |---|---|
-| -1 RF test coverage | code-complete, `cargo check` clean. **Floors uncalibrated**, needs one run |
-| 0 `prefix_sum_bins` fixes | code-complete, `cargo check` clean. **Needs the re-profile that gates it** |
+| -1 RF test coverage | **done**, calibrated, 12 tests pass in 7.6s debug |
+| 0 `prefix_sum_bins` fixes | **dead end, reverted.** Both hypotheses measured wrong |
 | 1 per-node gather | not started |
 | 2 fused kernel | not started |
 
-Nothing has been run yet: no tests, no benches, no clippy, no profiler. Both
-completed steps are compile-verified only.
+### What the first measurements settled
 
-Open questions the first run answers, in order of how much they change the plan:
+**Step 0 was wrong twice, and one half of it was a 31% regression.** Three runs
+on `rf_32t`, same machine state:
 
-1. **Does `prefix_sum_bins` drop from 36% to under 10%?** This is Step 0's gate.
-2. **What does `max_shared_memory_size` report?** `report_shape` now prints it
-   with a fits/busts verdict for 64- and 128-bin histograms. If Metal reports
-   16384 rather than the 32768 I assumed, the fused kernel needs the
-   split-target variant from day one rather than as a fallback.
-3. **What is `phase3_rf_pearson_small` actually worth?** The 0.90 floor is a
-   guess; the test prints its measured value.
-4. **Do the two new GPU tests finish in sane time in a debug build?** That is
-   what CI runs, on lavapipe on Linux.
+| variant | GPU | ratio |
+|---|---:|---:|
+| baseline | 1.88s | 1.18x |
+| register-carried prefix sums | 1.91s | 1.17x |
+| + `WORKGROUP_64` dispatch | 2.51s | 0.86x |
+
+The 256-deep read-after-write chain through global memory costs nothing:
+occupancy hides it, exactly as `plans/scenic-gpu-extratrees.md:110` concluded and
+my caveat on it denied. And narrowing the dispatch to stop half the workgroup
+idling costs 31%: those threads are free, and four SIMD groups per workgroup hide
+memory latency that two cannot. Both are now recorded as negative results in the
+`prefix_sum_bins` doc comment so nobody retries them. The register carry is kept
+(neutral, bit-identical); the width change is reverted.
+
+The baseline 1.18x reproduces `docs/scenic_gpu.md`'s 1.17x at 20% density
+exactly, so the harness is trustworthy.
+
+**The profile, and it validates the fused design by a different route.**
+`rf_32t`, 90 launches, `CUBECL_DEBUG_OPTION=profile-medium`:
+
+| kernel | total | share |
+|---|---:|---:|
+| `PrefixSumBins` | 1829 ms | 46.1% |
+| `BuildHistPrivatised` | 1785 ms | 45.0% |
+| `EvaluateSplitsRf` | 345 ms | 8.7% |
+| the other nine | 6.6 ms | 0.1% |
+
+`prefix_sum_bins` moves 27.3 GB per run in 813 ms, i.e. **34 GB/s against ~400
+available**. Not bandwidth bound, not chain bound: issue bound, at four memory
+ops per two flops in its inner loop. It cannot be fixed in place, which is the
+same conclusion the ET work reached about the same kernel. **91% of RF GPU time
+is in the two kernels Step 2 deletes outright.**
+
+**`max_shared_memory_size` is 32768 B on this M1 Max.** A fused 64-bin histogram
+at 64 targets needs 16384 B of sums plus counts, per-bin scores and compaction
+scratch, about 17.9 KB, so it fits with room. 128 bins needs ~34.8 KB and busts.
+`BIN_SHIFT = 2` it is, and the split-target variant is not needed on this device.
+
+**RF runs at wave 8, ET at 32**, confirmed by `report_shape`: 6.10 GiB against
+0.048 GiB at the reference shape.
+
+**`phase3_rf_pearson_small` calibrated** to 120 trees, floor 0.95. Measured
+cpu-gpu against cpu-cpu at 0.878/0.891 (30 trees), 0.966/0.966 (120), 0.982/0.984
+(300): the GPU sits on the noise ceiling at every tree count.
 
 ## Context
 
@@ -139,23 +174,15 @@ be rewritten on that path.
   `max_shared_memory_size`, the chosen wave size for both learners, and
   `BIN_SHIFT` in `report_shape` (line 403).
 
-### Step 0: the two cheap `prefix_sum_bins` fixes
+### Step 0: dead, see the status section
 
-1. `scenic_gpu.rs:518,548,549` carry the cumulative in a register instead of
-   re-reading `cum_*[prev]` from global.
-2. `launch_prefix_sum:2557` dispatch `WORKGROUP_64`, not `WORKGROUP_128`.
-3. Fix the residual bench ordering risk: `gpu_scenic_bench` runs `kernel_matrix`
-   then `end_to_end_matrix`, so the first CPU row of the e2e matrix still follows
-   the last GPU row of the kernel matrix.
-4. Re-profile with `CUBECL_DEBUG_OPTION=profile-medium`, at the default wave *and*
-   with the budget forced to give wave 32, so kernel cost and occupancy separate.
+Both fixes measured wrong and one was a 31% regression. Reverted, with the
+negative results recorded in the `prefix_sum_bins` doc comment. The bench
+cooldown from that work is kept, and so is the module-doc correction.
 
-**Gate.** If `prefix_sum_bins` drops from 36% to under 10%, the dependency chain
-was the cost and the fused design's projections hold. If it does not move, the
-profile has shifted somewhere unmodelled and you re-profile before committing.
-Either way this settles in a day a question `plans/scenic-gpu-extratrees.md:110`
-left open: that experiment moved bins onto the lane axis, which changes
-coalescing, and never isolated the global-memory chain.
+The one thing worth carrying forward: `prefix_sum_bins` cannot be repaired in
+place. It is issue bound at 34 GB/s of ~400, and every attempt to shorten its
+chain or tighten its dispatch has now failed, here and in the ET work. Delete it.
 
 ### Step 1: per-node sample gather
 

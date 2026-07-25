@@ -477,17 +477,20 @@ fn report_shape(n_samples: usize, device: &WgpuDevice) {
     // Forward-looking: the planned RF rewrite keeps the per-slot histogram in
     // threadgroup memory, which only works if a coarsened bin axis fits. Print
     // the budget now so the viability is visible before the kernel exists.
-    let need_64 = 64 * N_TARGETS * 4;
-    let need_128 = 128 * N_TARGETS * 4;
+    //
+    // Counts and the per-bin score array are part of the ask, not just the sums,
+    // and the compaction scratch on top. Comparing the sums alone says 128 bins
+    // fits in 32768 B at exactly 32768 B, which is wrong by every byte of the
+    // rest.
+    let smem_need = |bins: usize| bins * N_TARGETS * 4 + bins * 4 + bins * 4 + 1024;
+    let verdict = |n: usize| if n <= max_smem { "fits" } else { "busts" };
     println!(
-        "  smem:  device {max_smem} B | f32 hist at {N_TARGETS} targets: \
-         64 bins {need_64} B ({}), 128 bins {need_128} B ({})",
-        if need_64 <= max_smem { "fits" } else { "busts" },
-        if need_128 <= max_smem {
-            "fits"
-        } else {
-            "busts"
-        },
+        "  smem:  device {max_smem} B | fused hist at {N_TARGETS} targets: \
+         64 bins {} B ({}), 128 bins {} B ({})",
+        smem_need(64),
+        verdict(smem_need(64)),
+        smem_need(128),
+        verdict(smem_need(128)),
     );
 }
 

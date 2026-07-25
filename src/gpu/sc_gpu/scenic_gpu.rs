@@ -8,10 +8,8 @@
 //! `gpu/ml/k_means_gpu.rs::segmented_centroid_update` and the SMEM tree
 //! reduction from `gpu/sc_gpu/kernels/harmony_kernels.rs::objective_partials`.
 //!
-//! Most kernels run [`WORKGROUP_128`] wide. The exceptions are deliberate and
-//! documented at each: [`evaluate_splits_et_direct`] is [`WORKGROUP_32`] so its
-//! argmax fits one plane, and [`prefix_sum_bins`] is [`WORKGROUP_64`] because
-//! `n_targets` is capped at `MULTI_OUTPUT_BATCH`.
+//! Kernels run [`WORKGROUP_128`] wide, except [`evaluate_splits_et_direct`],
+//! which is [`WORKGROUP_32`] so its argmax fits one plane.
 
 #![allow(missing_docs)]
 #![cfg(all(feature = "single-cell", feature = "gpu"))]
@@ -26,7 +24,7 @@ use rustc_hash::FxHashMap;
 use std::time::Instant;
 use thousands::Separable;
 
-use crate::gpu::{WORKGROUP_32, WORKGROUP_64, WORKGROUP_128};
+use crate::gpu::{WORKGROUP_32, WORKGROUP_128};
 use crate::prelude::*;
 use crate::single_cell::mc_analysis::scenic_metacells::{
     batch_genes_in_memory, build_tf_quantised_store, extract_target_column,
@@ -413,7 +411,7 @@ pub fn merge_hist(
 
 /// Inclusive prefix sum over 256 bins per (tree, node, slot).
 ///
-/// One workgroup per (slot, node, tree), [`WORKGROUP_64`] wide. Thread 0 runs
+/// One workgroup per (slot, node, tree), [`WORKGROUP_128`] wide. Thread 0 runs
 /// the counts scan and, in the same pass, computes the per-slot informative bin
 /// range `[min_bin, max_bin]` (first and last bins with nonzero counts) into
 /// `slot_min_bin` / `slot_max_bin`. Downstream `evaluate_splits_*` read
@@ -422,9 +420,15 @@ pub fn merge_hist(
 /// Thread `tx` owns targets `tx, tx+wg, ...` for y-sum scans. Each scan only
 /// touches its own history so no cross-thread ordering is needed, and every
 /// running total is carried in a register rather than read back out of the
-/// output tensor. The width is 64 rather than 128 because `n_targets` is capped
-/// at `MULTI_OUTPUT_BATCH`, so a 128-wide group leaves half its threads with
-/// nothing to do while still holding the workgroup's occupancy slot.
+/// output tensor.
+///
+/// Two measured negative results, so they do not get re-tried. The register
+/// carry above replaced a 256-deep read-after-write chain through global memory
+/// and is worth **nothing** (1.91s against 1.88s on `rf_32t`); occupancy hides
+/// the chain completely. And narrowing to `WORKGROUP_64` on the grounds that
+/// `n_targets` never exceeds `MULTI_OUTPUT_BATCH`, so the upper half of the
+/// group idles, costs **31%** (1.91s to 2.51s). Those idle threads are free,
+/// and four SIMD groups per workgroup hide memory latency that two cannot.
 ///
 /// Empty-slot encoding: `min_bin = 0, max_bin = 0` when the slot has no
 /// samples in any bin. `evaluate_splits_*` reject via `max_bin > min_bin`.
@@ -2524,12 +2528,11 @@ fn launch_merge_hist<R: Runtime>(
 ///
 /// ### Workgroup
 ///
-/// `CubeDim::new_1d(WORKGROUP_64)` — 64 threads per workgroup; thread 0 runs
+/// `CubeDim::new_1d(WORKGROUP_128)` — 128 threads per workgroup; thread 0 runs
 /// the fused count prefix sum and bin-range scan, threads `tx` own targets
-/// `tx, tx+64, ...` for the y-sum prefix sums. 64 rather than 128 because
-/// `n_targets` never exceeds `MULTI_OUTPUT_BATCH`, so the upper half of a
-/// 128-wide group falls straight out of the target loop while still holding
-/// the workgroup's occupancy slot.
+/// `tx, tx+128, ...` for the y-sum prefix sums. Do not narrow this to 64 on the
+/// grounds that the upper half idles: measured at 31% slower. See
+/// [`prefix_sum_bins`].
 ///
 /// ### Params
 ///
@@ -2576,7 +2579,7 @@ fn launch_prefix_sum<R: Runtime>(
         prefix_sum_bins::launch_unchecked::<R>(
             client,
             CubeCount::Static(k_feats as u32, n_active_nodes as u32, wave_size as u32),
-            CubeDim::new_1d(WORKGROUP_64),
+            CubeDim::new_1d(WORKGROUP_128),
             hist_counts.clone().into_tensor_arg(),
             hist_y_sums.clone().into_tensor_arg(),
             hist_y_sum_sqs.clone().into_tensor_arg(),
@@ -2589,7 +2592,7 @@ fn launch_prefix_sum<R: Runtime>(
             n_active_nodes as u32,
             k_feats as u32,
             n_targets as u32,
-            WORKGROUP_64,
+            WORKGROUP_128,
         );
     }
 }
