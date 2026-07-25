@@ -1,6 +1,7 @@
 # SCENIC GPU: make the ET path actually fast
 
-Status: **ExtraTrees done, 1.49x -> 28.33x. RandomForest untouched at 1.29x.**
+Status: **ExtraTrees done. 1.49x -> 28.33x per batch, and end-to-end it went
+from 7.2x slower than the CPU to 3.67x faster. RandomForest untouched.**
 
 This file started as a plan. It is now mostly a record, because measurement
 killed four of its six steps and the two that survived worked for reasons the
@@ -36,6 +37,28 @@ sequential CPU core.
 | `rf_*` | 1.29x | 1.29x (untouched) |
 | ET wave VRAM | 6.10 GiB | **0.012 GiB** |
 | `phase2` test, GPU | 9.1s | **1.5s** (CPU 22.2s) |
+
+End-to-end, `gpu_scenic_bench`, 4000 targets in ~63 batches at 10k cells:
+
+| row | archive | now |
+|---|---|---|
+| ET e2e CPU | 229.28s | 236.46s |
+| ET e2e GPU | 1640.50s | **64.44s** |
+| **ET verdict** | GPU 7.2x slower | **GPU 3.67x faster** |
+| ET kernel matrix, 10k | 1.53x | **32.8x** |
+| RF e2e CPU | 427.36s | 187.39s (see below) |
+| RF e2e GPU | 1239.24s | 1131.63s |
+
+The archive's central claim is false for ExtraTrees. GPU e2e is 25.5x faster
+than it was and beats the 10-core CPU by 3.67x.
+
+**Caveat on the RF CPU baseline.** It moved from 427.36s to 187.39s on a code
+path this work never touched, while ET CPU reproduced (229s vs 236s). The
+likely cause is thermal: the bench runs `rf_e2e_cpu` straight after
+`et_e2e_gpu`, which used to be 27 minutes of saturating GPU work and is now
+one minute. If that holds, the archive's RF baseline was throttled and RF is
+really 6.0x behind rather than 2.9x. Unproven without an isolated re-run. The
+bench has an ordering dependency that should be fixed regardless.
 
 Every gate in `tests/scenic_gpu.rs` holds at its baseline value throughout:
 phase2 0.993, RF 0.988, RF+bootstrap 0.976, roundtrips 1.000, et_still_works
