@@ -35,6 +35,7 @@
 // The `#[cube]` macro generates undocumented launcher structs and functions.
 #![allow(missing_docs)]
 
+use ann_search_rs::gpu::grid_2d;
 use ann_search_rs::gpu::tensor::GpuTensor;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
@@ -45,6 +46,7 @@ use cubek::std::InputBinding;
 use faer::linalg::triangular_solve::solve_upper_triangular_in_place;
 use faer::{Mat, Side};
 
+use crate::gpu::checked_cube_count;
 use crate::prelude::*;
 use crate::utils::faer_parallelism;
 
@@ -365,6 +367,14 @@ pub fn gram_reduce<F: Float>(partials: &Tensor<F>, g: &mut Tensor<F>, s: u32, n_
 /// * `gram_partials` - Scratch `[n_chunks, s, s]`, sized by [`gram_chunks`]
 /// * `n` - Row count
 /// * `s` - Column count
+///
+/// ### Returns
+///
+/// `Ok(())` on success; `g_scratch` holds `Y^T Y`.
+///
+/// ### Errors
+///
+/// * `GpuCubeCountExceeded` if either grid is over the device limit.
 fn gram<R, T>(
     client: &ComputeClient<R>,
     y: &GpuTensor<R, T>,
@@ -372,18 +382,23 @@ fn gram<R, T>(
     gram_partials: &GpuTensor<R, T>,
     n: usize,
     s: usize,
-) where
+) -> Result<(), BixverseErrors>
+where
     R: Runtime,
     T: cubecl::prelude::Float + cubecl::CubeElement,
 {
     let n_chunks = gram_chunks(n);
     let rows_per_chunk = n.div_ceil(n_chunks) as u32;
     let tiles = (s as u32).div_ceil(GRAM_TILE);
+    let total = (s * s) as u32;
+
+    let partial_count = checked_cube_count::<R>("gram_partial", tiles, tiles, n_chunks as u32)?;
+    let reduce_count = checked_cube_count::<R>("gram_reduce", total.div_ceil(256), 1, 1)?;
 
     unsafe {
         gram_partial::launch_unchecked::<T, R>(
             client,
-            CubeCount::Static(tiles, tiles, n_chunks as u32),
+            partial_count,
             CubeDim::new_2d(GRAM_TILE, GRAM_TILE),
             y.clone().into_tensor_arg(),
             gram_partials.clone().into_tensor_arg(),
@@ -392,10 +407,9 @@ fn gram<R, T>(
             rows_per_chunk,
         );
 
-        let total = (s * s) as u32;
         gram_reduce::launch_unchecked::<T, R>(
             client,
-            CubeCount::Static(total.div_ceil(256), 1, 1),
+            reduce_count,
             CubeDim::new_1d(256),
             gram_partials.clone().into_tensor_arg(),
             g_scratch.clone().into_tensor_arg(),
@@ -403,6 +417,8 @@ fn gram<R, T>(
             n_chunks as u32,
         );
     }
+
+    Ok(())
 }
 
 //////////////////////
@@ -450,7 +466,10 @@ const TSMM_UNROLL: u32 = 4;
 ///
 /// ### Grid mapping
 ///
-/// * `CUBE_POS_X` -> row block, `CUBE_POS_Y` -> output column block
+/// * `CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X` -> row block. Flattened over two
+///   dimensions because `n / TSMM_ROWS` is past the 65535-per-dimension
+///   dispatch limit from ~524k rows upward.
+/// * `CUBE_POS_Z` -> output column block
 /// * `UNIT_POS_X` -> flattened `(row within block, column within block)`
 #[cube(launch_unchecked)]
 pub fn tall_skinny_mm<F: Float>(
@@ -466,8 +485,9 @@ pub fn tall_skinny_mm<F: Float>(
     let tc = tid % TSMM_COLS;
     let n_threads = TSMM_ROWS * TSMM_COLS;
 
-    let row0 = CUBE_POS_X * TSMM_ROWS;
-    let col0 = CUBE_POS_Y * TSMM_COLS;
+    let blk = CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X;
+    let row0 = blk * TSMM_ROWS;
+    let col0 = CUBE_POS_Z * TSMM_COLS;
 
     // Rows of A staged once and reused by every column in the tile. Stride is
     // the runtime `k_dim`, so the tail of the allocation goes unused when
@@ -555,7 +575,7 @@ where
     // First step: G = input^T * input, via the split-K Gram kernels rather
     // than cubek. See [`gram_partial`] for why the generic matmul is a bad fit
     // for a `[s, s]` output with an `n`-long reduction.
-    gram::<R, T>(client, input, g_scratch, gram_partials, n, s);
+    gram::<R, T>(client, input, g_scratch, gram_partials, n, s)?;
 
     // Second step: Read G back to the host. (Minor matrix, should be fine ...)
     let g_host = g_scratch.clone().read(client)?;
@@ -570,14 +590,16 @@ where
     // inner dimensions its shared-memory staging can hold; wider problems fall
     // back to the generic matmul, which is correct just slower.
     if (s as u32) <= TSMM_K_MAX {
+        // Row blocks are flattened over (x, y): at 1M rows there are 125k of
+        // them, roughly twice the per-dimension dispatch limit.
+        let (gx, gy) = grid_2d((n as u32).div_ceil(TSMM_ROWS));
+        let count =
+            checked_cube_count::<R>("tall_skinny_mm", gx, gy, (s as u32).div_ceil(TSMM_COLS))?;
+
         unsafe {
             tall_skinny_mm::launch_unchecked::<T, R>(
                 client,
-                CubeCount::Static(
-                    (n as u32).div_ceil(TSMM_ROWS),
-                    (s as u32).div_ceil(TSMM_COLS),
-                    1,
-                ),
+                count,
                 CubeDim::new_1d(TSMM_ROWS * TSMM_COLS),
                 input.clone().into_tensor_arg(),
                 r_inv_gpu.clone().into_tensor_arg(),
@@ -708,6 +730,34 @@ mod tests {
         c
     }
 
+    /// Well-conditioned tall-skinny `[n, s]` input: densely sampled sinusoids
+    /// of distinct frequency, which are near-orthogonal as columns.
+    fn sinusoidal_tall_skinny(n: usize, s: usize) -> Vec<f32> {
+        (0..n * s)
+            .map(|i| {
+                let row = i / s;
+                let col = i % s;
+                let x = (row as f32 + 0.5) / n as f32;
+                (2.0 * std::f32::consts::PI * (col + 1) as f32 * x).sin()
+            })
+            .collect()
+    }
+
+    /// `Q^T Q` in row-major, for an `[n, s]` row-major `Q`.
+    fn gram_host(q: &[f32], n: usize, s: usize) -> Vec<f32> {
+        let mut out = vec![0.0f32; s * s];
+        for i in 0..s {
+            for j in 0..s {
+                let mut acc = 0.0f32;
+                for k in 0..n {
+                    acc += q[k * s + i] * q[k * s + j];
+                }
+                out[i * s + j] = acc;
+            }
+        }
+        out
+    }
+
     fn assert_close_to_identity(mat: &[f32], s: usize, tol: f32) {
         for i in 0..s {
             for j in 0..s {
@@ -774,15 +824,54 @@ mod tests {
         let client = WgpuRuntime::client(&device);
 
         let (n, s) = (200, 8);
-        // Well-conditioned tall-skinny input.
-        let y_host: Vec<f32> = (0..n * s)
-            .map(|i| {
-                let row = i / s;
-                let col = i % s;
-                let x = (row as f32 + 0.5) / n as f32;
-                (2.0 * std::f32::consts::PI * (col + 1) as f32 * x).sin()
-            })
-            .collect();
+        let y_host = sinusoidal_tall_skinny(n, s);
+
+        let y = GpuTensor::<WgpuRuntime, f32>::from_slice(&y_host, vec![n, s], &client);
+        let q =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; n * s], vec![n, s], &client);
+
+        let q1_scratch = GpuTensor::<WgpuRuntime, f32>::empty(vec![n, s], &client);
+        let g_scratch = GpuTensor::<WgpuRuntime, f32>::empty(vec![s, s], &client);
+
+        cholesky_qr2::<WgpuRuntime, f32, f32>(&client, &y, &q, &q1_scratch, &g_scratch, n, s)
+            .unwrap();
+
+        let q_host = q.read(&client).unwrap();
+        let qtq = gram_host(&q_host, n, s);
+
+        assert_close_to_identity(&qtq, s, 1e-4);
+    }
+
+    // The row-block axis of tall_skinny_mm must stay inside the per-dimension
+    // dispatch limit. Putting `n / TSMM_ROWS` straight on x, as the kernel
+    // originally did, is over the limit from 65535 * TSMM_ROWS = 524_280 rows
+    // upward: the launch is rejected on the cubecl server thread, that thread
+    // dies, and the next call on the client surfaces an unrelated CallError.
+    #[test]
+    fn test_tall_skinny_grid_within_dispatch_limit() {
+        let (max_x, max_y, max_z) = WgpuRuntime::max_cube_count();
+        let gz = 130u32.div_ceil(TSMM_COLS);
+
+        // The threshold is real, not hypothetical.
+        assert!((900_000u32).div_ceil(TSMM_ROWS) > max_x);
+
+        for n in [524_281u32, 1_000_000, 5_000_000] {
+            let blocks = n.div_ceil(TSMM_ROWS);
+            let (gx, gy) = grid_2d(blocks);
+            assert!(gx <= max_x && gy <= max_y && gz <= max_z, "n = {n}");
+            assert!(gx as u64 * gy as u64 >= blocks as u64, "n = {n} uncovered");
+        }
+    }
+
+    // End to end past that threshold. Cheap at s = 4: three [n, s] buffers of
+    // 9.6 MB each.
+    #[test]
+    fn test_cholesky_qr2_above_dispatch_limit() {
+        let Some(device) = try_device() else { return };
+        let client = WgpuRuntime::client(&device);
+
+        let (n, s) = (600_000, 4);
+        let y_host = sinusoidal_tall_skinny(n, s);
 
         let y = GpuTensor::<WgpuRuntime, f32>::from_slice(&y_host, vec![n, s], &client);
         let q =
@@ -796,18 +885,12 @@ mod tests {
 
         let q_host = q.read(&client).unwrap();
 
-        // Q^T Q in row-major.
-        let mut qtq = vec![0.0f32; s * s];
-        for i in 0..s {
-            for j in 0..s {
-                let mut acc = 0.0f32;
-                for k in 0..n {
-                    acc += q_host[k * s + i] * q_host[k * s + j];
-                }
-                qtq[i * s + j] = acc;
-            }
-        }
-
-        assert_close_to_identity(&qtq, s, 1e-4);
+        // A rejected dispatch leaves the output untouched, so check for the
+        // all-zero signature before the orthogonality assertion.
+        assert!(
+            q_host.iter().any(|v| v.abs() > 1e-6),
+            "Q is all zeros, the GPU did no work"
+        );
+        assert_close_to_identity(&gram_host(&q_host, n, s), s, 1e-4);
     }
 }

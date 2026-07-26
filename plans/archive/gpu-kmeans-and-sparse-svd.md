@@ -183,6 +183,15 @@ tolerance cannot catch an insensitive gate; that assertion can.
 - The SVD bench runs 200k x 2000. The 1M x 2000 production shape is behind
   `BIXVERSE_BENCH_BIG=1` and has not been run, so the ~3.9 GB memory path and the
   520 MB first-touch question are both still unmeasured.
+
+  **This caveat was the bug.** `tall_skinny_mm` put `n / TSMM_ROWS` straight on
+  the x grid dimension, which is over the 65535-per-dimension dispatch limit
+  from 524_280 rows upward. Every shape that was ever benchmarked fit; the
+  900k-cell production run did not, and surfaced as an unrelated `CallError`
+  once the rejected launch killed the cubecl server thread. Fixed by flattening
+  the row-block axis over `(x, y)` via `grid_2d`, plus a `checked_cube_count`
+  guard that turns a busted limit into a typed error. The 1M shape now runs at
+  4.77 s.
 - SVD wall clock includes substantial host work (the CSR transpose of 4e7
   non-zeros, ~1 GB of uploads) which was never touched and is now a large share
   of the total. The `host CSC build` column doubles under load and is the
