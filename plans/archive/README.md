@@ -67,3 +67,12 @@ time in both rounds.
 - End-to-end rows are single-shot. Treat the last few percent as noise.
 - All numbers are one M1 Max at 20% target density. Denser data favours the GPU
   further; other hardware is unmeasured.
+
+## Also in this directory
+
+`gpu-kmeans-and-sparse-svd.md` is a separate effort, on GPU k-means (5.0-5.2x end
+to end) and the sparse randomised SVD (~2.7x). It repeats the pattern above from
+a third and fourth angle: the profile contradicted the plan both times, and in
+each case the biggest win sat in code the plan had only meant to tidy. It also
+adds the case where a library GEMM, rather than anything hand-written, was 84.7%
+of GPU time.
