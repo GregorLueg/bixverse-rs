@@ -32,6 +32,9 @@
 //! The two `[s, s]` matrices and the host-side round-trip of `G` and
 //! `R^{-1}` are tiny by comparison (~67 KB each).
 
+// The `#[cube]` macro generates undocumented launcher structs and functions.
+#![allow(missing_docs)]
+
 use ann_search_rs::gpu::tensor::GpuTensor;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
@@ -45,9 +48,44 @@ use faer::{Mat, Side};
 use crate::prelude::*;
 use crate::utils::faer_parallelism;
 
+////////////
+// Consts //
+////////////
+
+/// Output tile edge for the Gram kernel. One thread per `G[i, j]` in a
+/// `GRAM_TILE x GRAM_TILE` block, so the workgroup is `GRAM_TILE^2` threads.
+const GRAM_TILE: u32 = 16;
+
+/// Rows of `Y` staged per shared-memory step in the Gram kernel. Each step
+/// costs `2 * GRAM_ROWS_STEP * GRAM_TILE` loads and yields
+/// `GRAM_ROWS_STEP * GRAM_TILE^2` fused multiply-adds, i.e. `GRAM_ROWS_STEP`
+/// per loaded element.
+const GRAM_ROWS_STEP: u32 = 8;
+
+/// Upper bound on Gram split-K chunks. Partials cost `chunks * s * s * 4 B`,
+/// which at `s = 130` is ~68 KB per chunk.
+const GRAM_MAX_CHUNKS: usize = 64;
+
+/// Minimum rows per Gram chunk. Below this the per-chunk fixed cost and the
+/// reduction outweigh the extra parallelism.
+const GRAM_MIN_ROWS_PER_CHUNK: usize = 1024;
+
 /////////////
 // Helpers //
 /////////////
+
+/// Split-K chunk count for the Gram kernel.
+///
+/// ### Params
+///
+/// * `n` - Row count of `Y`
+///
+/// ### Returns
+///
+/// Number of row chunks, at least 1 and at most [`GRAM_MAX_CHUNKS`].
+fn gram_chunks(n: usize) -> usize {
+    (n / GRAM_MIN_ROWS_PER_CHUNK).clamp(1, GRAM_MAX_CHUNKS)
+}
 
 /// Wrap a raw `Handle` as a `TensorHandle` with row-major strides for the given
 /// 2D shape. If `transposed` is true the last two strides are swapped so the
@@ -185,6 +223,295 @@ where
     Ok(out)
 }
 
+//////////
+// Gram //
+//////////
+
+/// Partial `G = Y^T Y` over one chunk of rows.
+///
+/// cubek has no split-K strategy, and `Strategy::Auto` picks `SimpleUnit` for
+/// this shape: one unit per output element. At `s = 130` that is 16 900
+/// threads each running a serial reduction over all `n` rows, which measured
+/// 223 ms per call and 0.3% of peak on an M1 Max. Splitting the reduction
+/// across row chunks and giving each workgroup an output tile fixes both the
+/// parallelism and the reuse.
+///
+/// Each workgroup owns a `GRAM_TILE x GRAM_TILE` block of `G` and one chunk of
+/// rows. It stages `GRAM_ROWS_STEP` rows of the two relevant column slices in
+/// shared memory and accumulates their outer products, so every loaded element
+/// feeds `GRAM_ROWS_STEP` fused multiply-adds. The full `[s, s]` block is
+/// computed rather than just the lower triangle; the symmetry saving is not
+/// worth the divergence.
+///
+/// ### Params
+///
+/// * `y` - Tall-skinny input `[n, s]`, row-major
+/// * `partials` - Output `[n_chunks, s, s]`, one Gram contribution per chunk
+/// * `n` - Row count
+/// * `s` - Column count
+/// * `rows_per_chunk` - Rows handled by each chunk; the last chunk is short
+///
+/// ### Grid mapping
+///
+/// * `CUBE_POS_X` -> output tile row, `CUBE_POS_Y` -> output tile column
+/// * `CUBE_POS_Z` -> row chunk
+/// * `UNIT_POS_X`, `UNIT_POS_Y` -> position within the output tile
+#[cube(launch_unchecked)]
+pub fn gram_partial<F: Float>(
+    y: &Tensor<F>,
+    partials: &mut Tensor<F>,
+    n: u32,
+    s: u32,
+    rows_per_chunk: u32,
+) {
+    let ti = UNIT_POS_X;
+    let tj = UNIT_POS_Y;
+    let i0 = CUBE_POS_X * GRAM_TILE;
+    let j0 = CUBE_POS_Y * GRAM_TILE;
+    let chunk = CUBE_POS_Z;
+
+    let r_start = chunk * rows_per_chunk;
+    let mut r_end = r_start + rows_per_chunk;
+    if r_end > n {
+        r_end = n;
+    }
+
+    let mut sa = SharedMemory::<F>::new((GRAM_ROWS_STEP * GRAM_TILE) as usize);
+    let mut sb = SharedMemory::<F>::new((GRAM_ROWS_STEP * GRAM_TILE) as usize);
+
+    let lid = tj * GRAM_TILE + ti;
+    let n_threads = GRAM_TILE * GRAM_TILE;
+    let stage = GRAM_ROWS_STEP * GRAM_TILE;
+
+    let mut acc = F::new(0.0);
+
+    let mut r = r_start;
+    while r < r_end {
+        // Cooperative stage of both column slices. Out-of-range rows and
+        // columns are zero-filled so the accumulation below needs no guard.
+        let mut li = lid;
+        while li < stage {
+            let rr = li / GRAM_TILE;
+            let cc = li % GRAM_TILE;
+            let row = r + rr;
+            let in_row = row < r_end;
+
+            if in_row && i0 + cc < s {
+                sa[li as usize] = y[(row * s + i0 + cc) as usize];
+            } else {
+                sa[li as usize] = F::new(0.0);
+            }
+            if in_row && j0 + cc < s {
+                sb[li as usize] = y[(row * s + j0 + cc) as usize];
+            } else {
+                sb[li as usize] = F::new(0.0);
+            }
+            li += n_threads;
+        }
+        sync_cube();
+
+        #[unroll]
+        for rr in 0..GRAM_ROWS_STEP {
+            acc += sa[(rr * GRAM_TILE + ti) as usize] * sb[(rr * GRAM_TILE + tj) as usize];
+        }
+        sync_cube();
+
+        r += GRAM_ROWS_STEP;
+    }
+
+    let gi = i0 + ti;
+    let gj = j0 + tj;
+    if gi < s && gj < s {
+        partials[(chunk * s * s + gi * s + gj) as usize] = acc;
+    }
+}
+
+/// Sum the per-chunk Gram contributions into `G`.
+///
+/// ### Params
+///
+/// * `partials` - Per-chunk contributions `[n_chunks, s, s]`
+/// * `g` - Output Gram matrix `[s, s]`, row-major
+/// * `s` - Column count of `Y`
+/// * `n_chunks` - Number of row chunks
+///
+/// ### Grid mapping
+///
+/// * `ABSOLUTE_POS_X` -> flat index into the `[s, s]` output
+#[cube(launch_unchecked)]
+pub fn gram_reduce<F: Float>(partials: &Tensor<F>, g: &mut Tensor<F>, s: u32, n_chunks: u32) {
+    let idx = ABSOLUTE_POS_X;
+    let total = s * s;
+    if idx >= total {
+        terminate!();
+    }
+
+    let mut acc = F::new(0.0);
+    let mut c = 0u32;
+    while c < n_chunks {
+        acc += partials[(c * total + idx) as usize];
+        c += 1u32;
+    }
+    g[idx as usize] = acc;
+}
+
+/// Compute `G = Y^T Y` into `g_scratch` via the split-K Gram kernels.
+///
+/// ### Params
+///
+/// * `client` - CubeCL compute client
+/// * `y` - Tall-skinny input `[n, s]`
+/// * `g_scratch` - Output `[s, s]`
+/// * `gram_partials` - Scratch `[n_chunks, s, s]`, sized by [`gram_chunks`]
+/// * `n` - Row count
+/// * `s` - Column count
+fn gram<R, T>(
+    client: &ComputeClient<R>,
+    y: &GpuTensor<R, T>,
+    g_scratch: &GpuTensor<R, T>,
+    gram_partials: &GpuTensor<R, T>,
+    n: usize,
+    s: usize,
+) where
+    R: Runtime,
+    T: cubecl::prelude::Float + cubecl::CubeElement,
+{
+    let n_chunks = gram_chunks(n);
+    let rows_per_chunk = n.div_ceil(n_chunks) as u32;
+    let tiles = (s as u32).div_ceil(GRAM_TILE);
+
+    unsafe {
+        gram_partial::launch_unchecked::<T, R>(
+            client,
+            CubeCount::Static(tiles, tiles, n_chunks as u32),
+            CubeDim::new_2d(GRAM_TILE, GRAM_TILE),
+            y.clone().into_tensor_arg(),
+            gram_partials.clone().into_tensor_arg(),
+            n as u32,
+            s as u32,
+            rows_per_chunk,
+        );
+
+        let total = (s * s) as u32;
+        gram_reduce::launch_unchecked::<T, R>(
+            client,
+            CubeCount::Static(total.div_ceil(256), 1, 1),
+            CubeDim::new_1d(256),
+            gram_partials.clone().into_tensor_arg(),
+            g_scratch.clone().into_tensor_arg(),
+            s as u32,
+            n_chunks as u32,
+        );
+    }
+}
+
+//////////////////////
+// Tall-skinny GEMM //
+//////////////////////
+
+/// Rows of `A` handled per workgroup in [`tall_skinny_mm`].
+const TSMM_ROWS: u32 = 8;
+
+/// Output columns handled per workgroup in [`tall_skinny_mm`].
+const TSMM_COLS: u32 = 32;
+
+/// Largest inner dimension the shared-memory staging supports.
+///
+/// Footprint is `TSMM_ROWS * TSMM_K_MAX * 4 B` = 16 KiB, which leaves room for
+/// two resident workgroups inside a 32 KiB threadgroup budget. Above this the
+/// caller falls back to the generic matmul.
+const TSMM_K_MAX: u32 = 512;
+
+/// Inner-loop unroll for [`tall_skinny_mm`], to keep several loads of `b` in
+/// flight rather than one.
+const TSMM_UNROLL: u32 = 4;
+
+/// `C = A * B` for a tall-skinny `A` and a small `B`.
+///
+/// The same `SimpleUnit` problem as [`gram_partial`], from the other side: for
+/// `[n, k] * [k, s]` with `n` large and `k`, `s` small, cubek gives each unit
+/// one output element and a serial `k`-loop that re-reads `A`'s row from
+/// global for every output column. Measured 34 ms per call at
+/// `[200000, 130] * [130, 130]`, i.e. 2% of peak FLOPs and 1.5% of bandwidth.
+///
+/// Here each workgroup owns `TSMM_ROWS` rows and `TSMM_COLS` output columns.
+/// The rows of `A` are staged in shared memory once and reused across the
+/// column tile; `B` is small enough to stay cache-resident and is read from
+/// global, where consecutive threads hit consecutive columns and coalesce.
+///
+/// ### Params
+///
+/// * `a` - Left operand `[n, k_dim]`, row-major
+/// * `b` - Right operand `[k_dim, s]`, row-major
+/// * `c` - Output `[n, s]`, row-major
+/// * `n` - Rows of `A`
+/// * `k_dim` - Inner dimension, must be at most [`TSMM_K_MAX`]
+/// * `s` - Output column count
+///
+/// ### Grid mapping
+///
+/// * `CUBE_POS_X` -> row block, `CUBE_POS_Y` -> output column block
+/// * `UNIT_POS_X` -> flattened `(row within block, column within block)`
+#[cube(launch_unchecked)]
+pub fn tall_skinny_mm<F: Float>(
+    a: &Tensor<F>,
+    b: &Tensor<F>,
+    c: &mut Tensor<F>,
+    n: u32,
+    k_dim: u32,
+    s: u32,
+) {
+    let tid = UNIT_POS_X;
+    let tr = tid / TSMM_COLS;
+    let tc = tid % TSMM_COLS;
+    let n_threads = TSMM_ROWS * TSMM_COLS;
+
+    let row0 = CUBE_POS_X * TSMM_ROWS;
+    let col0 = CUBE_POS_Y * TSMM_COLS;
+
+    // Rows of A staged once and reused by every column in the tile. Stride is
+    // the runtime `k_dim`, so the tail of the allocation goes unused when
+    // `k_dim < TSMM_K_MAX`.
+    let mut sa = SharedMemory::<F>::new((TSMM_ROWS * TSMM_K_MAX) as usize);
+
+    let stage = TSMM_ROWS * k_dim;
+    let mut li = tid;
+    while li < stage {
+        let rr = li / k_dim;
+        let cc = li % k_dim;
+        let row = row0 + rr;
+        if row < n {
+            sa[li as usize] = a[(row * k_dim + cc) as usize];
+        } else {
+            sa[li as usize] = F::new(0.0);
+        }
+        li += n_threads;
+    }
+    sync_cube();
+
+    let row = row0 + tr;
+    let col = col0 + tc;
+    if row < n && col < s {
+        let abase = tr * k_dim;
+        let mut acc = F::new(0.0);
+
+        let mut i = 0u32;
+        while i + TSMM_UNROLL <= k_dim {
+            #[unroll]
+            for u in 0..TSMM_UNROLL {
+                acc += sa[(abase + i + u) as usize] * b[((i + u) * s + col) as usize];
+            }
+            i += TSMM_UNROLL;
+        }
+        while i < k_dim {
+            acc += sa[(abase + i) as usize] * b[(i * s + col) as usize];
+            i += 1u32;
+        }
+
+        c[(row * s + col) as usize] = acc;
+    }
+}
+
 ///////////////
 // QR passes //
 ///////////////
@@ -216,6 +543,7 @@ fn cholesky_qr_pass<R, T, MP>(
     input: &GpuTensor<R, T>,
     output: &GpuTensor<R, T>,
     g_scratch: &GpuTensor<R, T>,
+    gram_partials: &GpuTensor<R, T>,
     n: usize,
     s: usize,
 ) -> Result<(), BixverseErrors>
@@ -224,20 +552,10 @@ where
     T: cubecl::prelude::Float + cubecl::CubeElement + BixverseFloat,
     MP: MatmulPrecision,
 {
-    // First step: G = input^T * input on the GPU. Both operands share the input
-    // handle; the lhs has its strides swapped to express the transpose.
-    dense_gemm::<R, MP>(
-        input.handle(),
-        [s, n],
-        true, // transpose to get input^T as lhs
-        input.handle(),
-        [n, s],
-        false,
-        g_scratch.handle(),
-        [s, s],
-        None,
-        client,
-    )?;
+    // First step: G = input^T * input, via the split-K Gram kernels rather
+    // than cubek. See [`gram_partial`] for why the generic matmul is a bad fit
+    // for a `[s, s]` output with an `n`-long reduction.
+    gram::<R, T>(client, input, g_scratch, gram_partials, n, s);
 
     // Second step: Read G back to the host. (Minor matrix, should be fine ...)
     let g_host = g_scratch.clone().read(client)?;
@@ -248,19 +566,41 @@ where
     // Fourth step: Upload R^{-1}. Fresh allocation per pass; trivially small.
     let r_inv_gpu = GpuTensor::<R, T>::from_slice(&r_inv_host, vec![s, s], client);
 
-    // Last step output = input * R^{-1}.
-    dense_gemm::<R, MP>(
-        input.handle(),
-        [n, s],
-        false,
-        r_inv_gpu.handle(),
-        [s, s],
-        false,
-        output.handle(),
-        [n, s],
-        None,
-        client,
-    )?;
+    // Last step output = input * R^{-1}. The dedicated kernel only covers
+    // inner dimensions its shared-memory staging can hold; wider problems fall
+    // back to the generic matmul, which is correct just slower.
+    if (s as u32) <= TSMM_K_MAX {
+        unsafe {
+            tall_skinny_mm::launch_unchecked::<T, R>(
+                client,
+                CubeCount::Static(
+                    (n as u32).div_ceil(TSMM_ROWS),
+                    (s as u32).div_ceil(TSMM_COLS),
+                    1,
+                ),
+                CubeDim::new_1d(TSMM_ROWS * TSMM_COLS),
+                input.clone().into_tensor_arg(),
+                r_inv_gpu.clone().into_tensor_arg(),
+                output.clone().into_tensor_arg(),
+                n as u32,
+                s as u32,
+                s as u32,
+            );
+        }
+    } else {
+        dense_gemm::<R, MP>(
+            input.handle(),
+            [n, s],
+            false,
+            r_inv_gpu.handle(),
+            [s, s],
+            false,
+            output.handle(),
+            [n, s],
+            None,
+            client,
+        )?;
+    }
 
     Ok(())
 }
@@ -280,6 +620,9 @@ where
 /// * `client` - CubeCL compute client
 /// * `y` - Tall-skinny input `[n, s]`, untouched on exit
 /// * `q` - Tall-skinny output `[n, s]`, must be distinct from `y`
+/// * `q1_scratch` - Pre-allocated `[n, s]` scratch, distinct from both `y` and
+///   `q`; contents on entry are irrelevant and are overwritten
+/// * `g_scratch` - Pre-allocated `[s, s]` scratch for the Gram matrix
 /// * `n` - Row count (e.g. number of cells)
 /// * `s` - Column count, rank plus oversampling
 ///
@@ -293,10 +636,20 @@ where
 /// * `GpuMatmul` if any GEMM dispatch fails.
 /// * `FaerCholeskyError` if either pass's Gram matrix is not SPD (e.g.
 ///   rank-deficient `y`).
+///
+/// ### Notes
+///
+/// Both scratch buffers are caller-owned so that a driver calling this in a
+/// loop allocates them once. The `[n, s]` one is ~520 MB at 1M cells and
+/// s = 130, and a fresh `client.empty()` pays page faults on its first kernel
+/// write, so reallocating per call is not free even though allocation itself
+/// returns quickly.
 pub fn cholesky_qr2<R, T, MP>(
     client: &ComputeClient<R>,
     y: &GpuTensor<R, T>,
     q: &GpuTensor<R, T>,
+    q1_scratch: &GpuTensor<R, T>,
+    g_scratch: &GpuTensor<R, T>,
     n: usize,
     s: usize,
 ) -> Result<(), BixverseErrors>
@@ -305,14 +658,16 @@ where
     T: cubecl::prelude::Float + cubecl::CubeElement + BixverseFloat,
     MP: MatmulPrecision,
 {
-    let g_scratch = GpuTensor::<R, T>::empty(vec![s, s], client);
-    let q1_scratch = GpuTensor::<R, T>::empty(vec![n, s], client);
+    // Gram split-K partials. `gram_chunks(n) * s * s * 4 B` is ~4.3 MB at the
+    // production shape, so allocating here rather than threading yet another
+    // buffer through the caller costs nothing measurable.
+    let gram_partials = GpuTensor::<R, T>::empty(vec![gram_chunks(n), s, s], client);
 
     // Pass 1: y -> q1 (approximately orthonormal, loses half the precision)
-    cholesky_qr_pass::<R, T, MP>(client, y, &q1_scratch, &g_scratch, n, s)?;
+    cholesky_qr_pass::<R, T, MP>(client, y, q1_scratch, g_scratch, &gram_partials, n, s)?;
 
     // Pass 2: q1 -> q (recovers full fp32 precision)
-    cholesky_qr_pass::<R, T, MP>(client, &q1_scratch, q, &g_scratch, n, s)?;
+    cholesky_qr_pass::<R, T, MP>(client, q1_scratch, q, g_scratch, &gram_partials, n, s)?;
 
     Ok(())
 }
@@ -433,7 +788,11 @@ mod tests {
         let q =
             GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; n * s], vec![n, s], &client);
 
-        cholesky_qr2::<WgpuRuntime, f32, f32>(&client, &y, &q, n, s).unwrap();
+        let q1_scratch = GpuTensor::<WgpuRuntime, f32>::empty(vec![n, s], &client);
+        let g_scratch = GpuTensor::<WgpuRuntime, f32>::empty(vec![s, s], &client);
+
+        cholesky_qr2::<WgpuRuntime, f32, f32>(&client, &y, &q, &q1_scratch, &g_scratch, n, s)
+            .unwrap();
 
         let q_host = q.read(&client).unwrap();
 

@@ -48,7 +48,38 @@ use ann_search_rs::gpu::tensor::GpuTensor;
 use ann_search_rs::gpu::*;
 use cubecl::prelude::*;
 
-use crate::gpu::WORKGROUP_128;
+use crate::gpu::{WORKGROUP_64, WORKGROUP_128, WORKGROUP_256};
+
+/////////////
+// Helpers //
+/////////////
+
+/// Pick the SpMM workgroup width from the dense width `s`.
+///
+/// Both SpMM kernels stride their column loop by the workgroup width, so a
+/// width below `s` re-streams the whole non-zero segment of every row once per
+/// extra pass. At the single-cell PCA default `s` is 130 against a 128-wide
+/// workgroup, which costs a second full pass of the indices and values for two
+/// columns of useful work.
+///
+/// Rounding up leaves threads that never enter the loop. That is fine: idle
+/// threads cost nothing, and the SIMD groups they sit in still help hide
+/// memory latency.
+///
+/// ### Params
+///
+/// * `s_width` - Number of dense columns
+///
+/// ### Returns
+///
+/// Workgroup width, one of 64, 128 or 256.
+fn spmm_workgroup(s_width: usize) -> u32 {
+    match s_width {
+        0..=64 => WORKGROUP_64,
+        65..=128 => WORKGROUP_128,
+        _ => WORKGROUP_256,
+    }
+}
 use crate::gpu::linalg::sparse_gpu::GpuCompressedSparseData;
 use crate::prelude::*;
 
@@ -424,24 +455,35 @@ where
 
     let (n, _m) = sparse.shape;
     let (gx, gy) = grid_2d(n as u32);
+    let count = CubeCount::Static(gx, gy, 1);
 
-    unsafe {
-        spmm_csr_forward::launch_unchecked::<S, A, R>(
-            client,
-            CubeCount::Static(gx, gy, 1),
-            CubeDim::new_1d(WORKGROUP_128),
-            sparse.indptr.clone().into_tensor_arg(),
-            sparse.indices.clone().into_tensor_arg(),
-            sparse.values.clone().into_tensor_arg(),
-            x.clone().into_tensor_arg(),
-            correction.clone().into_tensor_arg(),
-            row_offsets.clone().into_tensor_arg(),
-            x_sum.clone().into_tensor_arg(),
-            y.clone().into_tensor_arg(),
-            n as u32,
-            s_width as u32,
-            WORKGROUP_128,
-        );
+    macro_rules! dispatch {
+        ($wg:expr) => {
+            unsafe {
+                spmm_csr_forward::launch_unchecked::<S, A, R>(
+                    client,
+                    count,
+                    CubeDim::new_1d($wg),
+                    sparse.indptr.clone().into_tensor_arg(),
+                    sparse.indices.clone().into_tensor_arg(),
+                    sparse.values.clone().into_tensor_arg(),
+                    x.clone().into_tensor_arg(),
+                    correction.clone().into_tensor_arg(),
+                    row_offsets.clone().into_tensor_arg(),
+                    x_sum.clone().into_tensor_arg(),
+                    y.clone().into_tensor_arg(),
+                    n as u32,
+                    s_width as u32,
+                    $wg,
+                );
+            }
+        };
+    }
+
+    match spmm_workgroup(s_width) {
+        WORKGROUP_64 => dispatch!(WORKGROUP_64),
+        WORKGROUP_128 => dispatch!(WORKGROUP_128),
+        _ => dispatch!(WORKGROUP_256),
     }
 
     Ok(())
@@ -493,25 +535,36 @@ where
 
     let (_n, m) = sparse.shape;
     let (gx, gy) = grid_2d(m as u32);
+    let count = CubeCount::Static(gx, gy, 1);
 
-    unsafe {
-        spmm_csc_transpose::launch_unchecked::<S, A, R>(
-            client,
-            CubeCount::Static(gx, gy, 1),
-            CubeDim::new_1d(WORKGROUP_128),
-            sparse.indptr.clone().into_tensor_arg(),
-            sparse.indices.clone().into_tensor_arg(),
-            sparse.values.clone().into_tensor_arg(),
-            q.clone().into_tensor_arg(),
-            q_sum.clone().into_tensor_arg(),
-            mu.clone().into_tensor_arg(),
-            sigma.clone().into_tensor_arg(),
-            m_dot_q.clone().into_tensor_arg(),
-            z.clone().into_tensor_arg(),
-            m as u32,
-            s_width as u32,
-            WORKGROUP_128,
-        );
+    macro_rules! dispatch {
+        ($wg:expr) => {
+            unsafe {
+                spmm_csc_transpose::launch_unchecked::<S, A, R>(
+                    client,
+                    count,
+                    CubeDim::new_1d($wg),
+                    sparse.indptr.clone().into_tensor_arg(),
+                    sparse.indices.clone().into_tensor_arg(),
+                    sparse.values.clone().into_tensor_arg(),
+                    q.clone().into_tensor_arg(),
+                    q_sum.clone().into_tensor_arg(),
+                    mu.clone().into_tensor_arg(),
+                    sigma.clone().into_tensor_arg(),
+                    m_dot_q.clone().into_tensor_arg(),
+                    z.clone().into_tensor_arg(),
+                    m as u32,
+                    s_width as u32,
+                    $wg,
+                );
+            }
+        };
+    }
+
+    match spmm_workgroup(s_width) {
+        WORKGROUP_64 => dispatch!(WORKGROUP_64),
+        WORKGROUP_128 => dispatch!(WORKGROUP_128),
+        _ => dispatch!(WORKGROUP_256),
     }
 
     Ok(())
