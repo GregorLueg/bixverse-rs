@@ -1396,7 +1396,39 @@ pub fn build_score_rf_fused(
         if cnt > CUBE_DIM_X {
             cnt = CUBE_DIM_X;
         }
+        // Unrolled four ways. The kernel is latency bound on the y_dense fetch
+        // and only one workgroup fits per core, so there is nothing else in
+        // flight to hide it behind; issuing four independent loads before the
+        // first is consumed is the one lever that does not cost accuracy or
+        // shared memory. Repeated bins within a group are safe because thread k
+        // owns column k, so they serialise inside one thread rather than racing.
         let mut i: u32 = 0u32;
+        while i + 3u32 < cnt {
+            let b0 = s_tile_bin[i as usize];
+            let b1 = s_tile_bin[(i + 1u32) as usize];
+            let b2 = s_tile_bin[(i + 2u32) as usize];
+            let b3 = s_tile_bin[(i + 3u32) as usize];
+            if tx < n_targets {
+                let y0 = y_dense[(s_tile_id[i as usize] * n_targets + tx) as usize];
+                let y1 = y_dense[(s_tile_id[(i + 1u32) as usize] * n_targets + tx) as usize];
+                let y2 = y_dense[(s_tile_id[(i + 2u32) as usize] * n_targets + tx) as usize];
+                let y3 = y_dense[(s_tile_id[(i + 3u32) as usize] * n_targets + tx) as usize];
+                s_hist[(b0 * stride + tx) as usize] += f32::cast_from(s_tile_mult[i as usize]) * y0;
+                s_hist[(b1 * stride + tx) as usize] +=
+                    f32::cast_from(s_tile_mult[(i + 1u32) as usize]) * y1;
+                s_hist[(b2 * stride + tx) as usize] +=
+                    f32::cast_from(s_tile_mult[(i + 2u32) as usize]) * y2;
+                s_hist[(b3 * stride + tx) as usize] +=
+                    f32::cast_from(s_tile_mult[(i + 3u32) as usize]) * y3;
+            }
+            if tx == 0u32 {
+                s_cnt[b0 as usize] += s_tile_mult[i as usize];
+                s_cnt[b1 as usize] += s_tile_mult[(i + 1u32) as usize];
+                s_cnt[b2 as usize] += s_tile_mult[(i + 2u32) as usize];
+                s_cnt[b3 as usize] += s_tile_mult[(i + 3u32) as usize];
+            }
+            i += 4u32;
+        }
         while i < cnt {
             let b = s_tile_bin[i as usize];
             if tx < n_targets {
