@@ -1,19 +1,17 @@
-//! GPU-accelerated correlations and co-variance calculations, leveraging the
-//! fast GEMM on the GPU. Should be faster than the faer stuff on very large
-//! data sets.
+//! GPU-accelerated correlations and co-variance calculations. Centre and scale
+//! on the device, then one symmetric Gram product. Should be faster than the
+//! faer stuff on very large data sets.
 
 #![allow(missing_docs)]
 
 use ann_search_rs::gpu::tensor::GpuTensor;
 use ann_search_rs::gpu::*;
 use cubecl::prelude::*;
-use cubek::matmul::definition::MatmulPrecision;
-use cubek::matmul::launch::Strategy;
 use faer::{Mat, MatRef};
 use std::time::Instant;
 
 use crate::core::math::matrix_helpers::rank_matrix_col;
-use crate::gpu::linalg::cholesky_gpu::dense_gemm;
+use crate::gpu::linalg::gram::gram_aat;
 use crate::gpu::*;
 use crate::prelude::*;
 
@@ -61,7 +59,7 @@ pub fn parse_gpu_cor(s: &str) -> Option<GpuCorCov> {
 /// stable mean; pass 2 tree-reduces `sum((x - mean)^2)` so we never form
 /// `sumsq - n*mu^2`. With `scale_sd`, writes `1/(std * sqrt(n-1))`; otherwise
 /// just `1/sqrt(n-1)`. The `1/sqrt(n-1)` factor is folded in so the downstream
-/// `S^T S` GEMM produces correlation or covariance directly.
+/// Gram product produces correlation or covariance directly.
 ///
 /// ### Params
 ///
@@ -220,7 +218,8 @@ pub fn column_stats<F: Float>(
 /// * `data` - Input matrix `[n_cols, n_rows]` row-major in `F`
 /// * `means` - Column means `[n_cols]` (from [`column_stats`])
 /// * `inv_scales` - Column inverse scales `[n_cols]` (from [`column_stats`])
-/// * `out` - Output matrix `[n_rows, n_cols]` row-major in `F`
+/// * `out` - Output matrix `[n_cols, n_rows]` row-major in `F`, i.e. the same
+///   feature-major layout as `data`
 /// * `n_rows` - Number of rows
 /// * `n_cols` - Number of columns
 /// * `wg_size` - Workgroup size (comptime)
@@ -259,12 +258,13 @@ pub fn apply_centre_scale<F: Float>(
 /// Centre and (optionally) rescale columns.
 ///
 /// Dispatches [`column_stats`] followed by [`apply_centre_scale`]. The returned
-/// tensor has `1/sqrt(n-1)` baked in, so `S^T S` over it yields correlation
+/// tensor has `1/sqrt(n-1)` baked in, so `S S^T` over it (`S` being
+/// feature-major, so this is the Gram of its rows) yields correlation
 /// (`scale_sd = true`) or covariance (`scale_sd = false`).
 ///
 /// ### Params
 ///
-/// * `data` - Input matrix `[n_rows, n_cols]` row-major
+/// * `data` - Input matrix `[n_cols, n_rows]` row-major, feature-major
 /// * `n_rows` - Number of rows
 /// * `n_cols` - Number of columns
 /// * `scale_sd` - Whether to divide by the column standard deviation; true
@@ -273,14 +273,19 @@ pub fn apply_centre_scale<F: Float>(
 ///
 /// ### Returns
 ///
-/// Scaled matrix `[n_rows, n_cols]` row-major
+/// Scaled matrix `[n_cols, n_rows]` row-major, i.e. the same feature-major
+/// layout as the input.
+///
+/// ### Errors
+///
+/// * `GpuCubeCountExceeded` if either grid is over the device limit.
 pub fn scale_matrix_col_gpu<F, R>(
     data: &GpuTensor<R, F>,
     n_rows: usize,
     n_cols: usize,
     scale_sd: bool,
     client: &ComputeClient<R>,
-) -> GpuTensor<R, F>
+) -> Result<GpuTensor<R, F>, BixverseErrors>
 where
     R: Runtime,
     F: Float + cubecl::CubeElement,
@@ -289,10 +294,11 @@ where
     let inv_scales = GpuTensor::<R, F>::empty(vec![n_cols], client);
     let scaled = GpuTensor::<R, F>::empty(vec![n_rows, n_cols], client);
 
+    let stats_count = checked_cube_count::<R>("column_stats", n_cols as u32, 1, 1)?;
     unsafe {
         column_stats::launch_unchecked::<F, R>(
             client,
-            CubeCount::Static(n_cols as u32, 1, 1),
+            stats_count,
             CubeDim::new_1d(WORKGROUP_128),
             data.clone().into_tensor_arg(),
             means.clone().into_tensor_arg(),
@@ -306,10 +312,11 @@ where
     let total = (n_rows * n_cols) as u32;
     let n_blocks = total.div_ceil(WORKGROUP_256);
     let (gx, gy) = grid_2d(n_blocks);
+    let scale_count = checked_cube_count::<R>("apply_centre_scale", gx, gy, 1)?;
     unsafe {
         apply_centre_scale::launch_unchecked::<F, R>(
             client,
-            CubeCount::Static(gx, gy, 1),
+            scale_count,
             CubeDim::new_1d(WORKGROUP_256),
             data.clone().into_tensor_arg(),
             means.clone().into_tensor_arg(),
@@ -321,7 +328,41 @@ where
         );
     }
 
-    scaled
+    Ok(scaled)
+}
+
+/////////////
+// Helpers //
+/////////////
+
+/// Borrow a matrix's backing buffer as one flat feature-major slice, if its
+/// columns are stored back to back.
+///
+/// The upload wants `[n_cols, n_rows]` row-major, which for a column-major
+/// `MatRef` is exactly the underlying allocation. A `Mat` built by faer
+/// normally satisfies this, so the common path can skip building a second copy
+/// of the whole matrix; a strided view or a submatrix cannot, and the caller
+/// falls back to copying.
+///
+/// ### Params
+///
+/// * `mat` - Input matrix `[n_rows, n_cols]`
+///
+/// ### Returns
+///
+/// `Some(slice)` of length `n_rows * n_cols` when the matrix is column-major
+/// with unit row stride and no gap between columns, `None` otherwise.
+fn contiguous_col_major<F: BixverseFloat>(mat: MatRef<'_, F>) -> Option<&'_ [F]> {
+    let (n_rows, n_cols) = (mat.nrows(), mat.ncols());
+    let cm = mat.try_as_col_major()?;
+    if cm.col_stride() as usize != n_rows {
+        return None;
+    }
+    // SAFETY: `try_as_col_major` guarantees unit row stride, and the check
+    // above guarantees no padding between columns, so the `n_rows * n_cols`
+    // elements of a single allocation are exactly the range starting at
+    // `as_ptr()`.
+    Some(unsafe { std::slice::from_raw_parts(cm.as_ptr(), n_rows * n_cols) })
 }
 
 //////////
@@ -330,10 +371,15 @@ where
 
 /// GPU-accelerated pairwise column correlation or covariance.
 ///
-/// For Spearman, columns are rank-transformed on the CPU before upload.
-/// The matrix is then centred and scaled on the GPU via
-/// [`scale_matrix_col_gpu`], and the result `S^T S` is computed via a
-/// single GEMM, yielding the full `[n_cols, n_cols]` output directly.
+/// For Spearman, columns are rank-transformed on the CPU before upload. The
+/// matrix is then centred and scaled on the GPU via [`scale_matrix_col_gpu`],
+/// which leaves it feature-major, and the Gram product of its rows gives the
+/// full `[n_cols, n_cols]` output directly.
+///
+/// The product goes through [`gram_aat`] rather than cubek. cubek's
+/// `Strategy::Auto` blows up on Apple devices here, and the `DoubleUnit`
+/// fallback it was pinned to runs at 5-7% of peak on ordinary shapes and 0.13%
+/// when `n_cols` is small; see the module doc on [`crate::gpu::linalg::gram`].
 ///
 /// ### Params
 ///
@@ -346,7 +392,13 @@ where
 ///
 /// Pairwise column correlation or covariance matrix (d x d), or a
 /// `BixverseErrors` on GPU failure.
-pub fn column_pairwise_cor_gpu<F, R, MP>(
+///
+/// ### Errors
+///
+/// * `InvalidArgument` if the `[d, d]` output is larger than the device accepts
+///   in one binding.
+/// * `GpuCubeCountExceeded` if any grid is over the device limit.
+pub fn column_pairwise_cor_gpu<F, R>(
     mat: MatRef<F>,
     cor_type: GpuCorCov,
     device: R::Device,
@@ -355,7 +407,6 @@ pub fn column_pairwise_cor_gpu<F, R, MP>(
 where
     R: Runtime,
     F: Float + cubecl::CubeElement + BixverseFloat,
-    MP: MatmulPrecision,
 {
     let start = Instant::now();
     let scale_sd = !matches!(cor_type, GpuCorCov::Covariance);
@@ -364,33 +415,48 @@ where
     let mat = ranked.as_ref().map(|m| m.as_ref()).unwrap_or(mat);
 
     let (n_rows, n_cols) = (mat.nrows(), mat.ncols());
-    let mut data_flat: Vec<F> = Vec::with_capacity(n_rows * n_cols);
-    for j in 0..n_cols {
-        data_flat.extend(mat.col(j).iter().cloned());
-    }
+    let owned;
+    let data_flat: &[F] = match contiguous_col_major(mat) {
+        Some(slice) => slice,
+        None => {
+            let mut buf: Vec<F> = Vec::with_capacity(n_rows * n_cols);
+            for j in 0..n_cols {
+                match mat.col(j).try_as_col_major() {
+                    Some(col) => buf.extend_from_slice(col.as_slice()),
+                    None => buf.extend(mat.col(j).iter().cloned()),
+                }
+            }
+            owned = buf;
+            &owned
+        }
+    };
     let client = R::client(&device);
 
-    let data_gpu = GpuTensor::<R, F>::from_slice(&data_flat, vec![n_rows, n_cols], &client);
+    // The output is quadratic in `n_cols` and is a single binding. Past the
+    // device limit `launch_unchecked` does no work, returns zeros and reports
+    // nothing, so refuse up front rather than hand back a plausible-looking
+    // matrix of zeros.
+    let out_bytes = n_cols * n_cols * size_of::<F>();
+    let max_binding = client.properties().memory.max_page_size as usize;
+    if out_bytes > max_binding {
+        return Err(BixverseErrors::InvalidArgument(format!(
+            "GPU correlation: the {n_cols} x {n_cols} output needs {} MB but the \
+             device accepts at most {} MB per binding. Reduce the feature set.",
+            out_bytes / (1024 * 1024),
+            max_binding / (1024 * 1024),
+        )));
+    }
+
+    let data_gpu = GpuTensor::<R, F>::from_slice(data_flat, vec![n_rows, n_cols], &client);
 
     if verbose {
         println!("Upload to GPU done: {:.2?}", start.elapsed());
     }
 
-    let scaled = scale_matrix_col_gpu(&data_gpu, n_rows, n_cols, scale_sd, &client);
+    let scaled = scale_matrix_col_gpu(&data_gpu, n_rows, n_cols, scale_sd, &client)?;
     let result = GpuTensor::<R, F>::empty(vec![n_cols, n_cols], &client);
 
-    dense_gemm::<R, MP>(
-        scaled.handle(),
-        [n_cols, n_rows],
-        false,
-        scaled.handle(),
-        [n_rows, n_cols],
-        true,
-        result.handle(),
-        [n_cols, n_cols],
-        Some(Strategy::DoubleUnit(Default::default())),
-        &client,
-    )?;
+    gram_aat::<R, F>(&client, &scaled, &result, n_rows, n_cols)?;
 
     let result_flat = result.read(&client)?;
 
@@ -398,8 +464,12 @@ where
         println!(" ... done in {:.2?}", start.elapsed());
     }
 
+    // `result_flat` is row-major and `Mat::from_fn` fills column-major, so the
+    // obvious `[i * n_cols + j]` strides by `n_cols` on every read. The output
+    // is symmetric, so reading the transpose is the same matrix and walks the
+    // buffer sequentially. Worth 80% of wall-clock at d = 8000.
     Ok(Mat::from_fn(n_cols, n_cols, |i, j| {
-        result_flat[i * n_cols + j]
+        result_flat[j * n_cols + i]
     }))
 }
 
@@ -539,7 +609,7 @@ mod tests {
             .collect();
         let mat = Mat::from_fn(n, d, |i, j| data[i * d + j]);
 
-        let got = column_pairwise_cor_gpu::<f32, WgpuRuntime, f32>(
+        let got = column_pairwise_cor_gpu::<f32, WgpuRuntime>(
             mat.as_ref(),
             GpuCorCov::Pearson,
             device,
@@ -559,7 +629,7 @@ mod tests {
             .collect();
         let mat = Mat::from_fn(n, d, |i, j| data[i * d + j]);
 
-        let got = column_pairwise_cor_gpu::<f32, WgpuRuntime, f32>(
+        let got = column_pairwise_cor_gpu::<f32, WgpuRuntime>(
             mat.as_ref(),
             GpuCorCov::Covariance,
             device,
@@ -579,7 +649,7 @@ mod tests {
             .collect();
         let mat = Mat::from_fn(n, d, |i, j| data[i * d + j]);
 
-        let got = column_pairwise_cor_gpu::<f32, WgpuRuntime, f32>(
+        let got = column_pairwise_cor_gpu::<f32, WgpuRuntime>(
             mat.as_ref(),
             GpuCorCov::Spearman,
             device,
@@ -600,7 +670,7 @@ mod tests {
             .collect();
         let mat = Mat::from_fn(n, d, |i, j| data[i * d + j]);
 
-        let got = column_pairwise_cor_gpu::<f32, WgpuRuntime, f32>(
+        let got = column_pairwise_cor_gpu::<f32, WgpuRuntime>(
             mat.as_ref(),
             GpuCorCov::Pearson,
             device,
@@ -633,7 +703,7 @@ mod tests {
             GpuCorCov::Spearman,
         ] {
             let mat = Mat::from_fn(n, d, |i, j| data[i * d + j]);
-            let got = column_pairwise_cor_gpu::<f32, WgpuRuntime, f32>(
+            let got = column_pairwise_cor_gpu::<f32, WgpuRuntime>(
                 mat.as_ref(),
                 cor_type,
                 device.clone(),

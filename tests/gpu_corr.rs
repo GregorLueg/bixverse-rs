@@ -19,9 +19,8 @@ fn diagnose(n: usize, d: usize, cor_type: GpuCorCov, label: &str) {
     let data = make_gaussian(n, d, 42);
     let device = WgpuDevice::DefaultDevice;
 
-    let gpu =
-        column_pairwise_cor_gpu::<f32, WgpuRuntime, f32>(data.as_ref(), cor_type, device, false)
-            .unwrap();
+    let gpu = column_pairwise_cor_gpu::<f32, WgpuRuntime>(data.as_ref(), cor_type, device, false)
+        .unwrap();
 
     let cpu = match cor_type {
         GpuCorCov::Covariance => column_pairwise_cov(&data.as_ref()),

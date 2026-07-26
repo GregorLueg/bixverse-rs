@@ -95,6 +95,11 @@ harness = false
 required-features = ["gpu"]
 
 [[bench]]
+name = "gpu_corr_bench"
+harness = false
+required-features = ["gpu"]
+
+[[bench]]
 name = "gpu_scenic_bench"
 harness = false
 required-features = ["gpu", "single-cell"]
