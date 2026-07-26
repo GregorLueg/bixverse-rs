@@ -99,7 +99,7 @@ pub struct HarmonyParamsV2Gpu {
 impl Default for HarmonyParamsV2Gpu {
     fn default() -> Self {
         Self {
-            k: 10,
+            k: 100,
             sigma: vec![0.1],
             theta: vec![2.0],
             lambda: vec![1.0],
