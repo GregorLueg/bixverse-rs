@@ -173,10 +173,12 @@ Devices reporting less than ~22 KB of threadgroup memory fall back to the old
 DRAM kernels via `fused_rf_viable`, checked host-side because an oversized
 `SharedMemory` allocation fails where the caller cannot see it.
 
-Per-kernel profile after the rewrite: `build_score_rf_fused` 92.7%,
-`finalise_split_stats_rf` 3.9%, `init_root_stats` 2.4%, the other twelve 1.0%.
-The remaining cost is latency on the per-sample dense-Y fetch, with only one
-resident workgroup per core. See `plans/` for the levers left.
+Per-kernel profile after all of it: `build_score_rf_fused` still ~83%, the rest
+noise. It remains latency bound on the per-sample dense-Y fetch. The levers that
+would go further are known and were deliberately not taken: below 32 bins the
+speed saturates while only the accuracy keeps falling, and parallelising
+`init_root_stats` or trimming `max_active_nodes` from 100 to 63 are each worth a
+few percent. See `plans/archive/` for the full record and the measured dead ends.
 
 ## Where the original archive went wrong
 

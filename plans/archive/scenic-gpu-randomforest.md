@@ -1,8 +1,12 @@
-# SCENIC GPU: RandomForest, revised plan
+# SCENIC GPU: RandomForest
 
-Supersedes the step list in `plans/scenic-gpu-randomforest.md`. Fold this into
-that file when the work starts; the corrections at the bottom apply to it and to
-`plans/scenic-gpu-extratrees.md` and `docs/scenic_gpu.md`.
+Done. Archived record of the work, kept for the dead ends as much as the result;
+the live overview is `docs/scenic_gpu.md`.
+
+This started as a revised plan replacing an earlier six-step one, and it is now a
+record. Half of what it originally proposed was measured wrong, including one
+change that was a 31% regression, and the largest win in the whole effort is not
+in the original step list at all. That is the reason to keep it in this shape.
 
 ## Status
 
@@ -50,7 +54,7 @@ on `rf_32t`, same machine state:
 | + `WORKGROUP_64` dispatch | 2.51s | 0.86x |
 
 The 256-deep read-after-write chain through global memory costs nothing:
-occupancy hides it, exactly as `plans/scenic-gpu-extratrees.md:110` concluded and
+occupancy hides it, exactly as `plans/archive/scenic-gpu-extratrees.md:110` concluded and
 my caveat on it denied. And narrowing the dispatch to stop half the workgroup
 idling costs 31%: those threads are free, and four SIMD groups per workgroup hide
 memory latency that two cannot. Both are now recorded as negative results in the
@@ -91,7 +95,7 @@ cpu-gpu against cpu-cpu at 0.878/0.891 (30 trees), 0.966/0.966 (120), 0.982/0.98
 ## Context
 
 ExtraTrees on GPU beats the 10-core CPU by 3.67x end to end after the rewrite
-recorded in `plans/scenic-gpu-extratrees.md`. RandomForest was left untouched at
+recorded in `plans/archive/scenic-gpu-extratrees.md`. RandomForest was left untouched at
 1.28x against a single core and loses 6.0x end to end. The rayon fan-out over
 gene batches is worth ~8.25x, so that is the bar.
 
@@ -221,37 +225,39 @@ Two more things that mattered as much as the kernel:
   workgroup-uniform, so reading them per thread per sample was three redundant
   global loads on the critical path. Worth 6%.
 
-## What is left
+## What was left, and what was taken
 
-Profile after the rewrite, `rf_32t`, 30 launches:
+Profile immediately after the fusion, `rf_32t`: `BuildScoreRfFused` 92.7%,
+`FinaliseSplitStatsRf` 3.9%, `InitRootStats` 2.4%, twelve others 1.0%. One kernel
+was the whole cost, latency bound on the per-sample `y_dense` fetch, with 22 KB
+of shared memory pinning it to one resident workgroup per core.
 
-| kernel | share |
-|---|---:|
-| `BuildScoreRfFused` | 92.7% |
-| `FinaliseSplitStatsRf` | 3.9% |
-| `InitRootStats` | 2.4% |
-| everything else (12 kernels) | 1.0% |
+Three levers were identified. Two were taken and both beat their estimate:
 
-One kernel is the whole cost now. It is latency bound on the per-sample
-`y_dense` fetch: 22 KB of shared memory per workgroup against a 32 KB budget
-means **one resident workgroup per core**, so 32 cores × 128 threads = 4096
-threads in flight and very little to hide a ~400-cycle load behind.
+1. **Unroll the sample loop.** Estimated "costs nothing in accuracy, attacks the
+   stall directly". Delivered **2.1x** (4.83x -> 10.0x). Saturates at 16; 24 and
+   32 give nothing more.
+2. **Get under 16 KB for two resident workgroups**, which needs 32 bins.
+   Estimated "a real accuracy trade, measure it first". Delivered **1.75x**
+   (10.5x -> 18.9x) and the accuracy cost measured **zero** on every gate,
+   including a purpose-built skewed-bin test.
+3. **Split the target axis** across two workgroups. Not taken: items 1 and 2
+   reached the goal, and this one is real complexity for occupancy that 32 bins
+   already bought.
 
-Levers, in the order I would try them:
+Deliberately left on the table, in rough order of value:
 
-1. **Unroll the sample loop.** Two or four `y_dense` fetches in flight per thread
-   costs nothing in accuracy and directly attacks the stall. Safe: thread `k`
-   owns column `k`, so repeated bins just serialise within one thread.
-2. **Get under 16 KB for two resident workgroups.** Needs 32 bins at 64 targets,
-   which is a real accuracy trade and should be measured against the 0.95 floor
-   before being taken seriously.
-3. **Split the target axis** so two workgroups each handle 32 targets. Halves
-   shared memory per workgroup and doubles occupancy, at the cost of combining
-   partial `S_L`/`S_R` across workgroups.
-
-Whether any of this reaches 8.25x is open. 4.83x is already a shipping-worthy
-result for a path that was 6.0x behind end to end, and the VRAM collapse means
-RandomForest now runs at 1M cells where it previously refused.
+- **Below 32 bins.** 16 gives another 1.17x and 8 or 4 give nothing beyond that,
+  while resolution keeps halving. The fidelity gates stayed flat all the way to 4
+  bins, which is not credible and says the metric is blind to threshold
+  resolution rather than that coarsening is free.
+- **`init_root_stats`**, ~5% of GPU time, dispatched as 32 workgroups on a
+  32-core GPU with a serial thread-0 scan over all samples. Splitting the sample
+  axis would fix it. Shared with the ExtraTrees path, so it helps both.
+- **`max_active_nodes` 100 -> 63.** `viable_max_active_nodes` is passed the full
+  `n_samples` when the trees only see `n_sub = 0.632 * n_samples`. At most
+  `6320/100 = 63` nodes can hold enough samples to split, so the bound is loose
+  by 37% and that fraction of deep-level workgroups is dead dispatch.
 
 ## Steps
 
@@ -413,7 +419,7 @@ reduced tree count as part of Step -1.
 
 ## Corrections to the existing plan files
 
-`plans/scenic-gpu-randomforest.md`:
+the original RandomForest plan (deleted; see git history):
 
 - **Step 5 (histogram subtraction): delete.** Under a shared-memory-resident
   histogram it needs the parent resident in DRAM, ~1.6 GB at reference, which is
@@ -438,7 +444,7 @@ reduced tree count as part of Step -1.
 - **Line 22:** the 8.25x bar derives from the 187.39s RF CPU baseline the same
   file calls suspect. Restate after the Step 0 bench fix.
 
-`plans/scenic-gpu-extratrees.md` and `docs/scenic_gpu.md`:
+`plans/archive/scenic-gpu-extratrees.md` and `docs/scenic_gpu.md`:
 
 - "The CI gpu job compiles `tests/scenic_gpu.rs` to zero tests" is **wrong**.
   The file gates on `single-cell, gpu` only (line 20); nine tests run in CI on both
@@ -452,6 +458,6 @@ reduced tree count as part of Step -1.
   past tense.
 - `docs/scenic_gpu.md:100-114` should say RF is scheduled at wave 4 (default) or 8
   (bench) against ET at 32. It is a live handicap on the numbers in that section.
-- `plans/scenic-gpu-extratrees.md:110`: the plane-scan experiment changed
+- `plans/archive/scenic-gpu-extratrees.md:110`: the plane-scan experiment changed
   coalescing and never isolated the global dependency chain. Add the caveat; Step
   0 settles it.
