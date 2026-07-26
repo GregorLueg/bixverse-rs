@@ -1,5 +1,11 @@
 # News
 
+## 0.3.9
+
+### Features
+
+- An actually fast GPU-accelerated SCENIC version that beats CPU.
+
 ## 0.3.8
 
 ### Features

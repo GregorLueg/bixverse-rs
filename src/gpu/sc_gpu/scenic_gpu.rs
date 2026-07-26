@@ -483,21 +483,6 @@ pub fn merge_hist(
 /// running total is carried in a register rather than read back out of the
 /// output tensor.
 ///
-/// Two measured negative results, so they do not get re-tried. The register
-/// carry above replaced a 256-deep read-after-write chain through global memory
-/// and is worth **nothing** (1.91s against 1.88s on `rf_32t`); occupancy hides
-/// the chain completely. And narrowing to `WORKGROUP_64` on the grounds that
-/// `n_targets` never exceeds `MULTI_OUTPUT_BATCH`, so the upper half of the
-/// group idles, costs **31%** (1.91s to 2.51s). Those idle threads are free,
-/// and four SIMD groups per workgroup hide memory latency that two cannot.
-///
-/// Empty-slot encoding: `min_bin = 0, max_bin = 0` when the slot has no
-/// samples in any bin. `evaluate_splits_*` reject via `max_bin > min_bin`.
-///
-/// `hist_y_sums` and `hist_y_sum_sqs` are u32-typed (f32 bits written by
-/// [`build_hist_privatised`] via atomic CAS); reads reinterpret via
-/// `f32::from_bits`. Outputs (`cum_*`) stay in native f32.
-///
 /// ### Params
 ///
 /// * `hist_counts` - Per-slot histogram counts `[wave_size, n_active_nodes,
@@ -3062,9 +3047,9 @@ pub fn init_sample_to_node(
     }
 }
 
-///////////////////////
-// Per-node gather   //
-///////////////////////
+/////////////////////
+// Per-node gather //
+/////////////////////
 
 // Three kernels that turn `sample_to_node` into a per-node contiguous list, so
 // the RandomForest histogram build can walk a node's own samples instead of
@@ -4869,46 +4854,6 @@ pub fn wave_byte_cost_et(
     (cand_slots * 2 * 4) + (cand_slots * n_targets * 2 * 4)
 }
 
-/// Pick a wave size that fits under `wave_byte_budget`, halving from the
-/// default until it does.
-///
-/// ### Params
-///
-/// * `max_active_nodes` - Widest viable active-node count, see
-///   [`viable_max_active_nodes`]
-/// * `k_feats` - Features per node
-/// * `n_targets` - Targets in batch
-/// * `n_trees_target` - Trees remaining in the ensemble; caps the initial
-///   wave size below the default when the ensemble is small
-/// * `wave_byte_budget` - VRAM ceiling in bytes, see
-///   [`ScenicGpuParams::wave_byte_budget`]
-/// * `n_thresholds` - Random thresholds per feature slot (ExtraTrees only)
-/// * `use_et` - Size for the ExtraTrees candidate tensors rather than the
-///   histogram
-/// * `max_binding_bytes` - Largest single buffer binding the device accepts,
-///   from `client.properties().memory.max_page_size`
-///
-/// ### Returns
-///
-/// A wave size in `[1, DEFAULT_WAVE_SIZE]`.
-///
-/// ### Errors
-///
-/// * `InvalidArgument` if even `wave_size = 1` exceeds either limit; the
-///   caller should surface this as an actionable error rather than OOM-ing
-///   at allocation time.
-///
-/// ### Implementation details
-///
-/// Two independent ceilings apply. `wave_byte_budget` bounds the *total* of
-/// the wave-scoped tensors, but graphics APIs also bound each *individual*
-/// binding, and the two disagree: a wave can fit the total budget while its
-/// largest single tensor busts the binding limit. Because the kernels launch
-/// via `launch_unchecked` that failure is silent, producing zeroed output and
-/// an implausibly fast run rather than an error, so both are checked here.
-#[allow(clippy::too_many_arguments)]
-/// Which set of per-wave tensors a run holds resident.
-///
 /// The three paths differ enough that one cost model cannot describe them:
 /// ExtraTrees materialises per-candidate left sums, the fused RandomForest path
 /// holds only per-slot winners plus the sample gather, and the fallback
