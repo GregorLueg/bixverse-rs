@@ -1,9 +1,9 @@
 # SCENIC on GPU
 
-Short version: **ExtraTrees on GPU beats the CPU by ~2x end to end and is the
-path worth using. RandomForest used to lose by 6x and is now at parity, having
-got 12.8x faster on the GPU side, and it runs at cell counts where it used to
-refuse.** GBM is a GPU non-goal.
+Short version: **both ExtraTrees and RandomForest beat the CPU end to end, by
+2.0x and 1.8x. RandomForest used to lose by 6x; its GPU side got 23.5x faster
+this round and it now runs at cell counts where it previously refused.** GBM is
+a GPU non-goal.
 
 This file replaces `docs/archive/scenic_gpu_experiment.md`, which concluded the
 whole thing was a hardware loss on Apple Silicon. That conclusion was wrong, and
@@ -21,26 +21,29 @@ End-to-end, 4000 target genes in ~63 batches:
 
 | learner | CPU | GPU | result |
 |---------|----:|----:|--------|
-| ET | 111.30s | 56.19s | **GPU 1.98x faster** |
-| RF | 90.01s | 88.28s | **parity** |
+| ET | 113.09s | 56.66s | **GPU 2.00x faster** |
+| RF | 87.02s | 48.10s | **GPU 1.81x faster** |
 
-The e2e rows are single-shot with no repeats, so RF's 2% margin is noise. Parity
-is the honest reading, not a win.
+RandomForest is now the faster of the two on the GPU in absolute terms (48.10s
+against 56.66s), which it was not before: it subsamples `0.632` of the cells per
+tree while ExtraTrees uses all of them, and the fused kernel finally lets that
+show. The e2e rows are single-shot, so treat the last few percent as noise; the
+1.8x is not.
 
 Single 64-target batch against one CPU core:
 
 | learner | CPU (1 core) | GPU | ratio |
 |---------|-------------:|----:|------:|
-| ET | 23.54s | 1.05s | **22.4x** |
-| RF | 17.86s | 1.46s | **12.2x** |
+| ET | 24.11s | 1.13s | **21.3x** |
+| RF | 18.20s | 0.77s | **23.6x** |
 
 **The bar is the rayon fan-out.** `fit_multi_trees_sparse` is sequential over
 trees while the e2e driver fans out over gene batches, so the GPU has to beat one
 core by whatever that fan-out is worth before the e2e comparison can flip.
-Measured here: `63 x 23.54 / 111.30 = 13.3x` for ET, `63 x 17.86 / 90.01 = 12.5x`
-for RF. ET clears it comfortably. RF at 12.2x sits right on its bar, which is why
-it lands at parity end to end rather than ahead or behind. The two numbers
-agreeing is the main reason to trust either.
+Measured here: `63 x 24.11 / 113.09 = 13.4x` for ET, `63 x 18.20 / 87.02 = 13.2x`
+for RF. Both clear it, ET by 1.6x and RF by 1.8x, and those are the same margins
+they show end to end. The per-batch and end-to-end numbers agreeing is the main
+reason to trust either.
 
 RF is cheaper than ET on CPU because `RandomForestConfig` defaults to
 `subsample_rate = 0.632`, so each tree sees 63% of the cells while ET uses all of
@@ -60,17 +63,24 @@ range.
 
 | | before | after |
 |---|---:|---:|
-| `rf_32t` vs one core | 1.18x | **10.5x** |
-| `rf_multibatch` vs one core | 1.18x | **10.7x** |
-| e2e GPU | 1131.63s @0.5 | **88.28s @0.2** |
+| `rf_32t` vs one core | 1.18x | **18.9x** |
+| `rf_multibatch` vs one core | 1.18x | **18.8x** |
+| e2e GPU | 1131.63s @0.5 | **48.10s @0.2** |
 | wave size | 8 | **32** |
 | wave VRAM | 6.10 GiB | **0.010 GiB** |
 
 Where the speed came from, in order of size: deleting the DRAM histogram (1.18x
--> 4.83x), unrolling the accumulate loop 16 ways so several dense-Y fetches are in
-flight at once (4.83x -> 10.0x), and giving `finalise_split_stats_rf` the same
-treatment (10.0x -> 10.5x). The unroll was worth more than the fusion, which was
-not the expectation going in.
+-> 4.83x), unrolling the accumulate loop 16 ways (4.83x -> 10.0x), the same
+treatment for `finalise_split_stats_rf` (-> 10.5x), and coarsening the bin axis
+to 32 so two workgroups stay resident per core instead of one (-> 18.9x).
+
+**The pattern is worth internalising: this kernel only ever responded to memory-level
+parallelism.** Three separate changes that cut traffic or instruction count
+(register-carried prefix sums, staging the node Y totals, narrowing the
+workgroup) measured zero, zero and *negative*. The two that raised parallelism
+gave 2.1x and 1.75x. It runs at roughly 6% of memory-issue capacity and 0.3% of
+peak FLOPs, so it is doing nothing but waiting, and only occupancy and
+outstanding loads change that.
 
 The VRAM collapse may be the more useful half. RandomForest needed ~8.4 GB at
 wave 1 at 1M cells and would refuse to run; it now scales like ExtraTrees, so the

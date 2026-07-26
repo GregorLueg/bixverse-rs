@@ -18,22 +18,24 @@ unchanged, RF 0.987 against a 0.988 baseline, RF+bootstrap 0.975 against 0.976.
 | 2 fused kernel | **done.** 1.21x -> 4.83x |
 | 3 unroll the accumulate | **done.** 4.83x -> 10.0x, the biggest single win |
 | 4 unroll `finalise` | **done.** 10.0x -> 10.5x |
+| 5 32 bins for 2 resident workgroups | **done.** 10.5x -> 18.9x |
 
 | cell | before | after |
 |---|---:|---:|
-| `rf_8t` | 1.16x | **7.19x** |
-| `rf_32t` | 1.18x | **10.53x** |
-| `rf_multibatch` | 1.18x | **10.72x** |
+| `rf_8t` | 1.16x | **10.17x** |
+| `rf_32t` | 1.18x | **18.92x** |
+| `rf_multibatch` | 1.18x | **18.77x** |
 | RF wave size | 8 | **32** |
 | RF wave VRAM | 6.10 GiB | **0.010 GiB** |
 | `phase3_random_forest_pearson` GPU | 5.9s | **2.0s** |
 
-**End to end it now draws.** Full `gpu_scenic_bench` at 20% density: RF 88.28s
-GPU against 90.01s CPU, i.e. parity, from 6.0x slower at the start. The e2e rows
-are single-shot so the 2% margin is noise; parity is the claim, not a win.
+**End to end RandomForest now wins.** Full `gpu_scenic_bench` at 20% density:
+RF 48.10s GPU against 87.02s CPU, **1.81x faster**, from 6.0x slower at the
+start. The GPU side went 1131.63s -> 48.10s, **23.5x**. RF is now faster than ET
+on the GPU in absolute terms (48.10s vs 56.66s).
 
-The GPU side went 1131.63s -> 88.28s, **12.8x**. Per batch RF is at 12.2x against
-a measured fan-out bar of 12.5x, and the two agreeing is the main reason to trust
+Per batch RF is at 23.6x against a measured fan-out bar of 13.2x. The per-batch
+and end-to-end margins agree (1.8x both ways), which is the main reason to trust
 either.
 
 ### What the first measurements settled
