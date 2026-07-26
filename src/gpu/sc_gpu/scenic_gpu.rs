@@ -1304,6 +1304,13 @@ fn fused_rf_viable<R: Runtime>(client: &ComputeClient<R>) -> bool {
 /// `argmax G` alone would silently accept zero-gain splits at every node where
 /// no positive split exists.
 ///
+/// One measured negative result: the scoring loop re-reads all `n_targets` node
+/// Y totals from global for every candidate bin, which looks like ~4000
+/// redundant loads per workgroup. Staging them in shared memory first is worth
+/// **nothing** (10.53x to 10.60x, inside the noise) because every thread wants
+/// the same address and the hardware broadcasts it from cache. Do not spend
+/// shared memory on it; this kernel's occupancy is shared-memory bound.
+///
 /// ### Params
 ///
 /// * `feature_data` - Quantised bins `[n_features, n_samples]` (u8 as u32)
