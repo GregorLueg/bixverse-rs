@@ -102,6 +102,16 @@ const RF_UNROLL: u32 = 16;
 /// `right_child_id`).
 const INVALID_NODE: u32 = u32::MAX;
 
+// Several kernels put the target axis on the thread axis: thread `k` owns target
+// `k` in `build_score_rf_fused`, `finalise_split_stats_rf` and
+// `accumulate_split_stats_et`. A batch wider than the workgroup would leave the
+// targets past thread 127 silently unaccumulated, which reads as a plausible but
+// wrong histogram rather than as a failure. The shared-memory budget does *not*
+// catch this: at 129 targets `pick_gpu_bins` still returns a bin count that
+// fits. Assert the invariant here so raising the batch size breaks the build
+// instead of the results.
+const _: () = assert!(MULTI_OUTPUT_BATCH <= WORKGROUP_128 as usize);
+
 /////////////
 // Kernels //
 /////////////
