@@ -1,14 +1,20 @@
 //! GPU implementation of the multi-output tree regression from
-//! `sc_analysis/scenic.rs`: wave-scheduled, multi-tree, multi-batch
-//! ExtraTrees and RandomForest, dispatched per level via
-//! [`evaluate_splits_et_direct`] (random threshold) or [`evaluate_splits_rf`]
-//! (exhaustive threshold) on `config.random_threshold()`. Level-synchronous
-//! BFS pipeline sharing a common tail of node-bookkeeping kernels, built on the
-//! atomic-free segmented pattern from
-//! `gpu/ml/k_means_gpu.rs::segmented_centroid_update` and the SMEM tree
-//! reduction from `gpu/sc_gpu/kernels/harmony_kernels.rs::objective_partials`.
+//! `sc_analysis/scenic.rs`: wave-scheduled, multi-tree, multi-batch ExtraTrees
+//! and RandomForest as a level-synchronous BFS sharing a common tail of
+//! node-bookkeeping kernels.
 //!
-//! Kernels run [`WORKGROUP_128`] wide, except [`evaluate_splits_et_direct`],
+//! `config.random_threshold()` picks one of three split paths, see
+//! [`WaveLayout`]:
+//!
+//! * ExtraTrees: [`scan_slot_bin_range()`] -> [`accumulate_split_stats_et()`] ->
+//!   [`evaluate_splits_et_direct()`]. No histogram at all.
+//! * RandomForest, fused: [`build_score_rf_fused()`] -> [`reduce_slot_winners()`],
+//!   histogram in threadgroup memory. Taken whenever the device has the shared
+//!   memory for it.
+//! * RandomForest, fallback: [`build_hist_privatised()`] -> [`prefix_sum_bins()`]
+//!   -> [`evaluate_splits_rf()`], histogram in DRAM.
+//!
+//! Kernels run [`WORKGROUP_128`] wide, except [`evaluate_splits_et_direct()`],
 //! which is [`WORKGROUP_32`] so its argmax fits one plane.
 
 #![allow(missing_docs)]
@@ -67,25 +73,24 @@ const N_BINS: u32 = 256;
 /// Default wave size.
 const DEFAULT_WAVE_SIZE: usize = 32;
 
-/// Upper bound on planes per workgroup, used only to size the small
-/// scan-offset scratch in [`accumulate_split_stats_et`]. Workgroups are at
-/// most `WORKGROUP_128` wide and no shipping backend reports a plane narrower
-/// than 4, so 32 slots is a generous ceiling at 128 bytes of shared memory.
+/// Upper bound on planes per workgroup. Sizes the scan-offset scratch in
+/// [`accumulate_split_stats_et()`] and gates `plane_compact_viable`. Workgroups
+/// are at most `WORKGROUP_128` wide and no shipping backend reports a plane
+/// narrower than 4, so 32 slots is a generous ceiling at 128 bytes of shared
+/// memory.
 const MAX_PLANES_PER_CUBE: u32 = 32;
 
 /// Float slots reserved for the fused RandomForest histogram in threadgroup
 /// memory.
 ///
 /// Rows are padded to `n_targets + 1`, so this bounds
-/// `n_bins_gpu * (n_targets + 1)` rather than `n_bins_gpu * n_targets`. The pad
-/// exists because the scoring phase gives consecutive threads consecutive bins:
-/// at an unpadded stride of 64 every one of them resolves to the same bank and
-/// the pass serialises 32 ways.
+/// `n_bins_gpu * (n_targets + 1)`. The pad matters because the scoring phase
+/// gives consecutive threads consecutive bins: at an unpadded stride of 64 they
+/// all resolve to the same bank and the pass serialises 32 ways.
 ///
-/// **This constant is an occupancy knob, not just a capacity bound.** The kernel
-/// is latency bound, so what matters is how many workgroups stay resident per
-/// core: 32768 / footprint. Measured on `rf_32t`, sweeping this value and
-/// letting [`pick_gpu_bins`] fall out of it:
+/// This is an occupancy knob, not just a capacity bound. The kernel is latency
+/// bound, so what matters is workgroups resident per core (32768 / footprint).
+/// Measured on `rf_32t`, letting [`pick_gpu_bins`] fall out of the value:
 ///
 /// | slots | bins @ 64 targets | footprint | resident | ratio |
 /// |---|---|---|---|---|
@@ -94,27 +99,21 @@ const MAX_PLANES_PER_CUBE: u32 = 32;
 /// | 1088 | 16 | 8968 B | 3 | 22.17x |
 /// | 544 | 8 | 6792 B | 4 | 22.40x |
 ///
-/// Nearly all of the win is the single step from one resident workgroup to two.
-/// Past 16 bins the speed saturates and only the accuracy keeps falling.
-///
-/// 2176 is deliberately *not* the fastest setting. Fidelity measured flat all
-/// the way down to 4 bins, which is not believable: four thresholds against the
-/// CPU's 255 cannot be free. The gates correlate importance *vectors*, i.e.
-/// feature ranking, and the synthetic targets are monotone in their informative
-/// features, so any split near the middle preserves the ranking. The metric is
-/// insensitive to threshold resolution, so a flat result is weak evidence rather
-/// than a licence to coarsen. 32 bins takes the occupancy step that matters and
-/// keeps resolution in hand.
+/// Nearly all of the win is the step from one resident workgroup to two; past
+/// 16 bins the speed saturates and only accuracy keeps falling. 2176 is
+/// deliberately not the fastest setting: fidelity measured flat down to 4 bins,
+/// which is weak evidence rather than a licence to coarsen (the metric
+/// correlates importance vectors, and the synthetic targets are monotone in
+/// their informative features, so any mid-range split preserves the ranking).
 const SMEM_HIST_SLOTS: u32 = 2176;
 
 /// Samples processed per iteration of the fused accumulate loop.
 ///
-/// Purely a latency knob: the loop is bound on the per-sample dense-Y fetch and
-/// only one workgroup fits per core, so the fix is to have several fetches in
-/// flight at once. Measured on `rf_32t` (GPU seconds, lower is better): 1 gives
-/// 0.46, 4 gives 0.26, 8 gives 0.23, 16 gives 0.22, and 24 and 32 give nothing
-/// further. It saturates once enough loads are in flight to cover the latency,
-/// so 16 rather than 32 for the smaller register footprint.
+/// A latency knob: the loop is bound on the per-sample dense-Y fetch and only
+/// one workgroup fits per core, so the fix is several fetches in flight at once.
+/// Measured on `rf_32t` (GPU seconds): 1 -> 0.46, 4 -> 0.26, 8 -> 0.23,
+/// 16 -> 0.22, and 24 and 32 give nothing further. 16 over 32 for the smaller
+/// register footprint.
 const RF_UNROLL: u32 = 16;
 
 /// Sentinel for "no node" / "no valid split" / "no child" in the u32-typed
@@ -122,14 +121,11 @@ const RF_UNROLL: u32 = 16;
 /// `right_child_id`).
 const INVALID_NODE: u32 = u32::MAX;
 
-// Several kernels put the target axis on the thread axis: thread `k` owns target
-// `k` in `build_score_rf_fused`, `finalise_split_stats_rf` and
-// `accumulate_split_stats_et`. A batch wider than the workgroup would leave the
-// targets past thread 127 silently unaccumulated, which reads as a plausible but
-// wrong histogram rather than as a failure. The shared-memory budget does *not*
-// catch this: at 129 targets `pick_gpu_bins` still returns a bin count that
-// fits. Assert the invariant here so raising the batch size breaks the build
-// instead of the results.
+// `build_score_rf_fused`, `finalise_split_stats_rf` and
+// `accumulate_split_stats_et` put target `k` on thread `k`, so a batch wider
+// than the workgroup would silently drop every target past thread 127. The
+// shared-memory budget does not catch it: at 129 targets `pick_gpu_bins` still
+// returns a bin count that fits.
 const _: () = assert!(MULTI_OUTPUT_BATCH <= WORKGROUP_128 as usize);
 
 /////////////
@@ -193,7 +189,8 @@ pub fn sample_node_features(
 
     let mut slot: u32 = tx;
     while slot < k_feats {
-        // hash chain matches the threshold-draw pattern in evaluate_splits_et
+        // Same hash chain shape as the threshold draw in
+        // accumulate_split_stats_et.
         let mut h = seed;
         h = hash_mix(h ^ level);
         h = hash_mix(h ^ node);
@@ -247,7 +244,7 @@ fn atomic_add_f32_bits(ptr: &Atomic<u32>, delta: f32) {
 /// slice `[wave, node, slot, bin, target]`, atomics contend only *within* a
 /// workgroup, never across workgroups.
 ///
-/// The gather (see [`scatter_node_samples`]) is what makes the sample loop
+/// The gather (see [`scatter_node_samples()`]) is what makes the sample loop
 /// proportional to the node's population rather than to `n_samples`.
 ///
 /// ### Params
@@ -381,7 +378,7 @@ pub fn build_hist_privatised(
 /// thread `tx` owns targets `tx, tx+wg, ...` for the y-sum totals.
 ///
 /// `hist_y_sums` and `hist_y_sum_sqs` are stored as `u32` (f32 bits written
-/// by [`build_hist_privatised`] via atomic CAS); reads reinterpret via
+/// by [`build_hist_privatised()`] via atomic CAS); reads reinterpret via
 /// `f32::from_bits`.
 ///
 /// ### Params
@@ -719,29 +716,26 @@ fn argmax_takes_mate(cur_valid: u32, cur_score: f32, mate_valid: u32, mate_score
 /// gate (they produce n_left = 0 or n_right = 0), matching CPU's implicit
 /// pruning without an explicit bin scan.
 ///
-/// Same SMEM argmax reduction and left-child copy fan-out as
-/// `evaluate_splits_et`. Reuses the shared `argmax_takes_mate` decision.
+/// Emits the winning split only; the left-child Y stats it does not carry come
+/// from [`finalise_split_stats_rf()`] afterwards.
 ///
 /// ### Params
 ///
-/// * `cum_counts` - Inclusive prefix-sum counts from [`prefix_sum_bins`]
-/// * `cum_y_sums` - Inclusive prefix-sum Y sums from [`prefix_sum_bins`]
+/// * `cum_counts` - Inclusive prefix-sum counts from [`prefix_sum_bins()`]
+/// * `cum_y_sums` - Inclusive prefix-sum Y sums from [`prefix_sum_bins()`]
 /// * `cum_y_sum_sqs` - Inclusive prefix-sum Y sum-of-squares from
-///   [`prefix_sum_bins`]
-/// * `node_counts` - Per-node sample totals from [`merge_hist`]
-/// * `node_y_sums` - Per-node Y sums from [`merge_hist`]
-/// * `node_y_sum_sqs` - Per-node Y sum-of-squares from [`merge_hist`]
+///   [`prefix_sum_bins()`]
+/// * `node_counts` - Per-node sample totals from [`merge_hist()`]
+/// * `node_y_sums` - Per-node Y sums from [`merge_hist()`]
+/// * `node_y_sum_sqs` - Per-node Y sum-of-squares from [`merge_hist()`]
 /// * `node_features` - Selected feature ids per (tree, node, slot) from
-///   [`sample_node_features`]
-/// * `slot_min_bin` - First informative bin per slot from [`prefix_sum_bins`]
-/// * `slot_max_bin` - Last informative bin per slot from [`prefix_sum_bins`]
+///   [`sample_node_features()`]
+/// * `slot_min_bin` - First informative bin per slot from [`prefix_sum_bins()`]
+/// * `slot_max_bin` - Last informative bin per slot from [`prefix_sum_bins()`]
 /// * `split_feature` - Output winning feature id per node, or `u32::MAX` if
 ///   no valid split
 /// * `split_threshold` - Output winning threshold bin per node
 /// * `split_n_left` - Output left-child sample count per node
-/// * `split_y_sums_l` - Output left-child Y sums per (node, target)
-/// * `split_y_sum_sqs_l` - Output left-child Y sum-of-squares per (node,
-///   target)
 /// * `wave_size` - Trees in wave
 /// * `n_active_nodes` - Active nodes at level
 /// * `k_feats` - Features per node
@@ -758,8 +752,7 @@ fn argmax_takes_mate(cur_valid: u32, cur_score: f32, mate_valid: u32, mate_score
 /// ### Returns
 ///
 /// Winning split written into `split_feature`, `split_threshold`, and
-/// `split_n_left`; left-child Y stats into `split_y_sums_l` and
-/// `split_y_sum_sqs_l`. Nodes with no valid split get `split_feature = u32::MAX`.
+/// `split_n_left`. Nodes with no valid split get `split_feature = u32::MAX`.
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments, clippy::collapsible_if)]
 pub fn evaluate_splits_rf(
@@ -1067,19 +1060,15 @@ pub fn evaluate_splits_rf(
 /// Recompute the winning split's left-child Y sums and sums-of-squares from the
 /// node's actual samples.
 ///
-/// The cumulative histogram carries these for free, which is why
-/// [`evaluate_splits_rf`] reads them straight out of it. A fused evaluator
-/// cannot: dropping the sum-of-squares histogram is what buys the shared-memory
-/// budget, so the winner's `ssyl` has to come from somewhere else. One pass over
-/// the node's gathered samples at the already-decided threshold is that
-/// somewhere, and it runs per (node, tree) rather than per (slot, node, tree),
-/// so it costs `1/k_feats` of a histogram build.
+/// Dropping the sum-of-squares histogram is what buys [`build_score_rf_fused()`]
+/// its shared-memory budget, so the winner's `ssyl` has to come from somewhere
+/// else. One pass over the node's gathered samples at the already-decided
+/// threshold is that somewhere, and it runs per (node, tree) rather than per
+/// (slot, node, tree), so it costs `1/k_feats` of a histogram build.
 ///
-/// Reads the dense Y so target sits on the thread axis and the loads coalesce,
-/// matching [`accumulate_split_stats_et`].
-///
+/// Reads the dense Y so target sits on the thread axis and the loads coalesce.
 /// Values differ in the last f32 place from the histogram-derived ones: this
-/// sums in sample order, the histogram sums per bin and then prefix-sums across
+/// sums in sample order, the histogram sums per bin then prefix-sums across
 /// bins. Same terms, different association.
 ///
 /// ### Params
@@ -1098,7 +1087,6 @@ pub fn evaluate_splits_rf(
 /// * `wave_size` - Trees in wave
 /// * `n_active_nodes` - Active nodes at level
 /// * `n_targets` - Targets in batch
-/// * `wg_size` - Workgroup width (comptime)
 ///
 /// ### Grid mapping
 ///
@@ -1127,7 +1115,6 @@ pub fn finalise_split_stats_rf(
     wave_size: u32,
     n_active_nodes: u32,
     n_targets: u32,
-    #[comptime] _wg_size: u32,
 ) {
     let node = CUBE_POS_X + CUBE_POS_Y * CUBE_COUNT_X;
     let tree = CUBE_POS_Z;
@@ -1157,12 +1144,9 @@ pub fn finalise_split_stats_rf(
     let hi = node_sample_offsets[obase + (node + 1u32) as usize];
     let gbase = (tree * n_samples) as usize;
 
-    // Same staging and unrolling as build_score_rf_fused, and for the same
-    // reason. The threshold test is folded into the staged multiplicity: a
-    // sample on the right of the split gets multiplicity 0 and contributes
-    // exactly nothing, which removes the branch from the unrolled body. All 128
-    // threads take part in the staging even though only n_targets of them
-    // accumulate, so the early exit for the surplus ones is gone.
+    // Same staging and unrolling as build_score_rf_fused. The threshold test is
+    // folded into the staged multiplicity: a sample right of the split gets
+    // multiplicity 0, which keeps the branch out of the unrolled body.
     let mut acc_s: f32 = 0f32;
     let mut acc_q: f32 = 0f32;
 
@@ -1227,16 +1211,14 @@ pub fn finalise_split_stats_rf(
 
 // One kernel replacing build_hist_privatised + prefix_sum_bins +
 // evaluate_splits_rf, which between them are 91% of RandomForest GPU time. The
-// histogram lives in threadgroup memory and is never written to DRAM, the
-// prefix sum is a register carry, and the threshold sweep reads the result
-// while it is still in shared memory.
+// histogram lives in threadgroup memory and never reaches DRAM, the prefix sum
+// is a register carry, and the threshold sweep reads the result in place.
 //
-// Two things buy the shared-memory budget. The sum-of-squares histogram drops
-// out of the search algebraically (see the score note on
-// `build_score_rf_fused`), and the bin axis is coarsened to whatever fits.
-// Neither touches the shared `QuantisedStore`, which stays at 256 u8 bins.
+// The shared-memory budget is bought by dropping the sum-of-squares histogram
+// (see the score note on `build_score_rf_fused`) and coarsening the bin axis to
+// whatever fits. Neither touches the shared `QuantisedStore`, still 256 u8 bins.
 
-/// Finest bin count whose padded histogram fits [`SMEM_HIST_SLOTS`].
+/// Finest bin count whose padded histogram fits `SMEM_HIST_SLOTS`.
 ///
 /// The GPU is free to bin more coarsely than the shared `QuantisedStore`,
 /// because the winning threshold is widened back into fine bin space before
@@ -1259,7 +1241,7 @@ pub fn pick_gpu_bins(n_targets: usize) -> u32 {
     bins
 }
 
-/// Shared-memory bytes [`build_score_rf_fused`] asks for, independent of shape.
+/// Shared-memory bytes [`build_score_rf_fused()`] asks for, independent of shape.
 ///
 /// Everything it declares is comptime-sized, so the ask does not vary with
 /// `n_targets` or the bin count.
@@ -1272,7 +1254,7 @@ pub fn fused_rf_smem_bytes() -> usize {
         + (2 * 4)
 }
 
-/// Whether this device can run [`build_score_rf_fused`].
+/// Whether this device can run [`build_score_rf_fused()`].
 ///
 /// An oversized `SharedMemory` allocation is rejected when the pipeline is
 /// compiled, and that happens on a cubecl background thread where the error
@@ -1311,20 +1293,19 @@ fn fused_rf_viable<R: Runtime>(client: &ComputeClient<R>) -> bool {
 /// `hist_y_sum_sqs` never has to exist. This is cuML's standard MSE
 /// formulation.
 ///
-/// Two consequences worth being explicit about. The algebraic form does not
-/// clamp the per-target child variances at zero the way the CPU does, so results
-/// differ wherever f32 cancellation drives one negative. And `best_score > 0` is
-/// an *acceptance* gate on the CPU, not just a tie-break, so the winner's true
-/// score is reconstructed as `P − Q/n + G/n` before that gate is applied;
-/// `argmax G` alone would silently accept zero-gain splits at every node where
-/// no positive split exists.
+/// Two consequences. The algebraic form does not clamp the per-target child
+/// variances at zero the way the CPU does, so results differ wherever f32
+/// cancellation drives one negative. And `best_score > 0` is an *acceptance*
+/// gate on the CPU, not just a tie-break, so the winner's true score is
+/// reconstructed as `P − Q/n + G/n` before that gate applies; `argmax G` alone
+/// would accept zero-gain splits wherever no positive split exists.
 ///
-/// One measured negative result: the scoring loop re-reads all `n_targets` node
-/// Y totals from global for every candidate bin, which looks like ~4000
-/// redundant loads per workgroup. Staging them in shared memory first is worth
-/// **nothing** (10.53x to 10.60x, inside the noise) because every thread wants
-/// the same address and the hardware broadcasts it from cache. Do not spend
-/// shared memory on it; this kernel's occupancy is shared-memory bound.
+/// Measured negative result: the scoring loop re-reads all `n_targets` node Y
+/// totals per candidate bin, ~4000 apparently redundant loads per workgroup.
+/// Staging them in shared memory first is worth nothing (10.53x to 10.60x,
+/// inside the noise) because every thread wants the same address and the
+/// hardware broadcasts it from cache. Occupancy here is shared-memory bound, so
+/// do not spend any on it.
 ///
 /// ### Params
 ///
@@ -1411,8 +1392,8 @@ pub fn build_score_rf_fused(
     let mut s_tile_id = SharedMemory::<u32>::new(WORKGROUP_128 as usize);
     let mut s_tile_mult = SharedMemory::<u32>::new(WORKGROUP_128 as usize);
     let mut s_tile_bin = SharedMemory::<u32>::new(WORKGROUP_128 as usize);
-    // Per-thread staging for the unrolled accumulate. Register-backed, so the
-    // loads can all be in flight before the first store consumes one.
+    // Register-backed staging, so every load of the unrolled accumulate can be
+    // in flight before the first store consumes one.
     let mut ys = Array::<f32>::new(RF_UNROLL as usize);
     let mut bs = Array::<u32>::new(RF_UNROLL as usize);
     let mut ms = Array::<u32>::new(RF_UNROLL as usize);
@@ -1455,17 +1436,17 @@ pub fn build_score_rf_fused(
 
     // Accumulate. The whole workgroup walks one sample at a time; thread k adds
     // that sample's target k. Column ownership is what makes this atomic-free,
-    // and it is why the loop runs over samples rather than striding them.
+    // and why the loop runs over samples rather than striding them.
+    //
+    // Staged a tile at a time: a sample's id, multiplicity and bin are the same
+    // for all 128 threads, so one cooperative load per tile replaces three
+    // redundant global loads per thread. Only the y_dense fetch is genuinely
+    // per-thread.
     let obase = (tree * (n_active_nodes + 1u32)) as usize;
     let lo = node_sample_offsets[obase + node as usize];
     let hi = node_sample_offsets[obase + (node + 1u32) as usize];
     let gbase = (tree * n_samples) as usize;
 
-    // Staged a tile at a time. The id, multiplicity and bin of a sample are the
-    // same for all 128 threads, so reading them per thread per sample is three
-    // redundant global loads on the critical path; one cooperative load per tile
-    // replaces them. Only the y_dense fetch stays per-iteration, and that one is
-    // genuinely per-thread.
     let mut base: u32 = lo;
     while base < hi {
         let idx = base + tx;
@@ -1481,12 +1462,9 @@ pub fn build_score_rf_fused(
         if cnt > CUBE_DIM_X {
             cnt = CUBE_DIM_X;
         }
-        // Unrolled [`RF_UNROLL`] ways, with every y_dense load issued before the
-        // first is consumed. The kernel is latency bound on that fetch and only
-        // one workgroup fits per core, so there is nothing else in flight to
-        // hide it behind; this is the one lever that costs neither accuracy nor
-        // shared memory. Repeated bins within a group are safe because thread k
-        // owns column k, so they serialise inside one thread rather than racing.
+        // Every y_dense load issued before the first is consumed. Repeated bins
+        // within a group are safe: thread k owns column k, so they serialise
+        // inside one thread rather than racing.
         let mut i: u32 = 0u32;
         while i + (RF_UNROLL - 1u32) < cnt {
             #[unroll]
@@ -1753,36 +1731,26 @@ pub fn reduce_slot_winners(
 // ExtraTrees direct //
 ///////////////////////
 
-// The kernels below replace build_hist_privatised / prefix_sum_bins /
-// evaluate_splits_et for the ExtraTrees path.
+// The histogram pipeline is pure waste for ExtraTrees: it builds a full
+// 256-bin x n_targets cumulative table per slot, then reads exactly one bin row
+// out of it, because ExtraTrees draws `n_thresholds` random thresholds per
+// (node, slot) and defaults to 1. Profiling put build_hist_privatised at 69%
+// and prefix_sum_bins at 31% of ExtraTrees GPU time.
 //
-// Why: ExtraTrees draws `n_thresholds` random thresholds per (node, slot),
-// defaulting to 1. The histogram pipeline builds a full 256-bin x n_targets
-// cumulative table per slot and then reads exactly one bin row out of it.
-// Profiling puts build_hist_privatised at 69% and prefix_sum_bins at 31% of
-// ExtraTrees GPU time, and both costs exist only to produce 255 bins nobody
-// looks at.
+// So: reduce the node's bin range (scan_slot_bin_range), draw the threshold
+// from it, and accumulate the left-side statistics at that single threshold
+// (accumulate_split_stats_et). Per-level scratch drops from ~6.1 GiB to ~13 MB
+// at the reference shape, and the accumulation moves off global CAS-loop float
+// atomics (~1.4 billion per fit, which is where build_hist's time went) onto
+// registers with a shared-memory reduction.
 //
-// Instead: reduce the node's bin range (scan_slot_bin_range), draw the
-// threshold from it, and accumulate the left-side statistics at that single
-// threshold directly (accumulate_split_stats_et). The threshold hash chain is
-// reproduced verbatim from evaluate_splits_et, so the RNG stream and therefore
-// the tree structure are unchanged.
-//
-// Two consequences worth stating. Per-level scratch drops from ~6.1 GiB to
-// ~13 MB at the reference shape, since nothing is sized by N_BINS x n_targets
-// any more. And the accumulation moves off global CAS-loop float atomics (~1.4
-// billion of them per fit at that shape, which is where build_hist's time
-// actually goes) onto per-thread registers with a shared-memory reduction.
-//
-// The path needs Y dense rather than CSR-by-sample. At MULTI_OUTPUT_BATCH = 64
-// targets that is n_samples x 64 x 4 bytes, ~2.5 MB at 10k cells, and it makes
-// every Y read coalesced across the target axis.
+// Needs Y dense rather than CSR-by-sample, which makes every Y read coalesced
+// across the target axis. At 64 targets that is ~2.5 MB at 10k cells.
 
 /// Per-(tree, node, slot) min and max occupied bin, by reduction over the
 /// node's samples.
 ///
-/// Replaces the informative-range scan that [`prefix_sum_bins`] folds into its
+/// Replaces the informative-range scan that [`prefix_sum_bins()`] folds into its
 /// counts pass. Identical semantics: the first and last bin holding at least
 /// one active sample. Empty slots emit `min = max = 0`, which the evaluate
 /// kernels reject via `max > min`.
@@ -1922,16 +1890,16 @@ pub fn scan_slot_bin_range(
 /// sample into 256 buckets per target and prefix-summing, it evaluates the
 /// single predicate `bin <= thr` and sums the matching samples' Y directly.
 ///
-/// The threshold hash chain is copied verbatim from [`evaluate_splits_et`]
-/// (`tree_seed ^ level ^ node ^ slot ^ ti`, salted with `2654435769`), so the
-/// drawn thresholds and hence the trees are identical to the histogram path.
+/// The threshold hash chain (`tree_seed ^ level ^ node ^ slot ^ ti`, salted
+/// with `2654435769`) is the one the histogram path used, so the drawn
+/// thresholds and hence the trees are unchanged.
 ///
-/// Threads are laid out as `(stripe, target)`: thread `tx` owns target
-/// `tx % n_targets` and sample stripe `tx / n_targets`. Each thread keeps its
-/// target's running sums in registers, so there are no atomics at all, and
-/// consecutive threads read consecutive targets out of the dense Y, so the
-/// reads coalesce. Stripes are folded together through shared memory at the
-/// end.
+/// Two decompositions, chosen at comptime by `use_plane`. The compacted path
+/// tests one sample per thread per block and compacts survivors through a
+/// plane-based scan; the fallback lays threads out as `(stripe, target)` and
+/// re-reads the sample metadata once per target. Either way each thread keeps
+/// its target's running sums in registers, so there are no atomics, and
+/// consecutive threads read consecutive targets out of the dense Y.
 ///
 /// ### Params
 ///
@@ -1942,7 +1910,7 @@ pub fn scan_slot_bin_range(
 /// * `node_features` - Selected feature ids `[wave_size, n_active_nodes, k_feats]`
 /// * `node_counts` - Per-node sample totals; nodes at 0 are skipped
 /// * `tree_seeds` - Per-tree base seed `[wave_size]`
-/// * `slot_min_bin` - First occupied bin per slot from [`scan_slot_bin_range`]
+/// * `slot_min_bin` - First occupied bin per slot from [`scan_slot_bin_range()`]
 /// * `slot_max_bin` - Last occupied bin per slot, same source
 /// * `cand_thr` - Output drawn threshold per candidate
 /// * `cand_n_left` - Output left-side sample count per candidate
@@ -1955,7 +1923,7 @@ pub fn scan_slot_bin_range(
 /// * `n_targets` - Targets in batch
 /// * `n_thresholds` - Random thresholds drawn per feature slot
 /// * `level` - Depth being processed
-/// * `wg_size` - Workgroup width (comptime)
+/// * `use_plane` - Take the plane-compacted path; see `plane_compact_viable`
 ///
 /// ### Grid mapping
 ///
@@ -1992,7 +1960,6 @@ pub fn accumulate_split_stats_et(
     n_targets: u32,
     n_thresholds: u32,
     level: u32,
-    #[comptime] _wg_size: u32,
     #[comptime] use_plane: bool,
 ) {
     let cand = CUBE_POS_X;
@@ -2027,7 +1994,6 @@ pub fn accumulate_split_stats_et(
         terminate!();
     }
 
-    // Verbatim from evaluate_splits_et so the RNG stream is preserved.
     let mut seed_mix = tree_seeds[tree as usize];
     seed_mix = hash_mix(seed_mix ^ level);
     seed_mix = hash_mix(seed_mix ^ node);
@@ -2051,12 +2017,10 @@ pub fn accumulate_split_stats_et(
     let mut acc_n: u32 = 0u32;
 
     if use_plane {
-        // Block-compacted path. Every thread tests one sample per block, so
-        // sample_to_node / sample_multiplicity / feature_data are each read
-        // once per sample rather than once per (sample, target). The survivors
-        // are compacted into shared memory via a plane-based exclusive scan,
-        // so the drain loop below runs over the number of matches rather than
-        // the block width, which is what makes deep levels cheap: a node
+        // Sample metadata is read once per sample rather than once per
+        // (sample, target), and survivors are compacted through a plane-based
+        // exclusive scan so the drain loop runs over the match count rather
+        // than the block width. That is what makes deep levels cheap: a node
         // holding ~100 samples matches once or twice per 128-wide block.
         let lane = UNIT_POS_PLANE;
         let plane_id = UNIT_POS_X / PLANE_DIM;
@@ -2200,9 +2164,9 @@ pub fn accumulate_split_stats_et(
 
 /// Score the pre-accumulated ExtraTrees candidates and pick the winner.
 ///
-/// Same variance-reduction objective and same tie-break as
-/// [`evaluate_splits_et`], but reading per-candidate left-side statistics from
-/// [`accumulate_split_stats_et`] instead of indexing a cumulative histogram.
+/// Same variance-reduction objective and tie-break as [`evaluate_splits_rf()`],
+/// but reading per-candidate left-side statistics from
+/// [`accumulate_split_stats_et()`] instead of indexing a cumulative histogram.
 /// One workgroup per (node, tree), `WORKGROUP_32` wide, reduced with the plane
 /// argmax when the device allows it.
 ///
@@ -2228,7 +2192,7 @@ pub fn accumulate_split_stats_et(
 /// * `n_thresholds` - Random thresholds drawn per feature slot
 /// * `min_samples_leaf` - Minimum samples required on both sides
 /// * `wg_size` - Workgroup width (comptime)
-/// * `use_plane` - Take the plane argmax; see [`plane_argmax_viable`]
+/// * `use_plane` - Take the plane argmax; see `plane_argmax_viable`
 ///
 /// ### Grid mapping
 ///
@@ -2458,7 +2422,7 @@ pub fn evaluate_splits_et_direct(
 /// Seed the root node's sufficient statistics from the dense Y.
 ///
 /// The ExtraTrees path has no histogram, so `merge_hist` cannot supply the
-/// level-0 totals that [`propagate_child_stats`] then carries down the tree.
+/// level-0 totals that [`propagate_child_stats()`] then carries down the tree.
 /// One workgroup per tree, thread `tx` owning target `tx`, so the Y reads
 /// coalesce. Runs once per wave.
 ///
@@ -2545,8 +2509,8 @@ pub fn init_root_stats(
 /// * `feature_data` - Quantised bins `[n_features, n_samples]` (u8 as u32)
 /// * `split_feature` - Winning feature id per node from `evaluate_splits_*`
 /// * `split_threshold` - Winning threshold bin per node
-/// * `left_child_id` - Left child id per node from [`compute_child_ids`]
-/// * `right_child_id` - Right child id per node from [`compute_child_ids`]
+/// * `left_child_id` - Left child id per node from [`compute_child_ids()`]
+/// * `right_child_id` - Right child id per node from [`compute_child_ids()`]
 /// * `sample_to_node` - Per-tree sample assignment `[wave_size, n_samples]`,
 ///   updated in place
 /// * `n_samples` - Number of samples
@@ -2593,10 +2557,9 @@ pub fn reassign_samples(
     if node == INVALID_NODE {
         terminate!();
     }
-    // viable_max_active_nodes bounds a level at n_samples / (2 *
-    // min_samples_leaf), which counts splits rather than nodes at a level, so a
-    // sufficiently balanced tree can be handed a child id past the buffer. Drop
-    // those samples rather than reading out of range.
+    // viable_max_active_nodes counts splits rather than nodes at a level, so a
+    // balanced enough tree can be handed a child id past the buffer. Drop those
+    // samples rather than reading out of range.
     if node >= n_active_nodes {
         sample_to_node[s2n_idx] = INVALID_NODE;
         terminate!();
@@ -2633,9 +2596,9 @@ pub fn reassign_samples(
 ///
 /// ### Params
 ///
-/// * `node_counts` - Per-node sample totals from [`merge_hist`]
-/// * `node_y_sums` - Per-node Y sums from [`merge_hist`]
-/// * `node_y_sum_sqs` - Per-node Y sum-of-squares from [`merge_hist`]
+/// * `node_counts` - Per-node sample totals from [`merge_hist()`]
+/// * `node_y_sums` - Per-node Y sums from [`merge_hist()`]
+/// * `node_y_sum_sqs` - Per-node Y sum-of-squares from [`merge_hist()`]
 /// * `split_feature` - Winning feature id per node from `evaluate_splits_*`;
 ///   nodes with `INVALID_NODE` contribute nothing
 /// * `split_n_left` - Left-child sample count per node
@@ -2746,7 +2709,7 @@ pub fn accumulate_importance(
 /// ### Params
 ///
 /// * `split_feature` - Winning feature id per node from `evaluate_splits_*`
-/// * `node_counts` - Per-node sample totals from [`merge_hist`]
+/// * `node_counts` - Per-node sample totals from [`merge_hist()`]
 /// * `left_child_id` - Output left child id per node, updated in place
 /// * `right_child_id` - Output right child id per node, updated in place
 /// * `wave_size` - Trees in wave
@@ -2804,9 +2767,9 @@ pub fn compute_child_ids(
 
 /// Zero the next level's node-stat slice so unwritten slots read as empty.
 ///
-/// [`propagate_child_stats`] only touches slots that an internal parent
+/// [`propagate_child_stats()`] only touches slots that an internal parent
 /// actually spawned. Child ids are handed out compactly from 0 by
-/// [`compute_child_ids`], so everything above `2 * n_internal` is stale from
+/// [`compute_child_ids()`], so everything above `2 * n_internal` is stale from
 /// two levels ago and has to be cleared or it looks like a live node.
 ///
 /// One workgroup per (node, tree), `WORKGROUP_128` wide. Thread 0 clears the
@@ -2883,13 +2846,9 @@ pub fn zero_node_stats(
 /// writes both child counts; thread `tx` writes targets `tx, tx+wg, ...` for
 /// both children.
 ///
-/// Child ids at or above `n_active_next` are dropped rather than written.
-/// `viable_max_active_nodes` bounds a level at `n_samples / (2 *
-/// min_samples_leaf)`, which counts splits rather than nodes, so a
-/// sufficiently balanced tree can in principle produce more children than the
-/// buffer holds. Those samples are already dropped downstream (their node id
-/// matches nothing in `build_hist_privatised`); the guard just keeps the write
-/// in bounds.
+/// Child ids at or above `n_active_next` are dropped rather than written, for
+/// the same reason [`reassign_samples()`] drops out-of-range nodes. Those samples
+/// are already dropped downstream; the guard just keeps the write in bounds.
 ///
 /// ### Params
 ///
@@ -2898,7 +2857,7 @@ pub fn zero_node_stats(
 /// * `split_n_left` - Left-child sample count per parent
 /// * `split_y_sums_l` - Left-child Y sums per (parent, target)
 /// * `split_y_sum_sqs_l` - Left-child Y sum-of-squares per (parent, target)
-/// * `left_child_id` - Left child id per parent from [`compute_child_ids`]
+/// * `left_child_id` - Left child id per parent from [`compute_child_ids()`]
 /// * `right_child_id` - Right child id per parent, same source
 /// * `node_counts` - Current-level per-node sample totals (read)
 /// * `node_y_sums` - Current-level per-node Y sums (read)
@@ -3061,7 +3020,7 @@ pub fn init_sample_to_node(
 // count as it folds it into the offsets, `scatter_node_samples` bumps it back
 // up to the total, and `zero_node_sample_counts` clears it again next level.
 
-/// Zero the per-node sample counters ahead of [`count_node_samples`].
+/// Zero the per-node sample counters ahead of [`count_node_samples()`].
 ///
 /// ### Params
 ///
@@ -3154,7 +3113,7 @@ pub fn count_node_samples(
 /// Exclusive prefix sum of the per-node counts, one thread per tree.
 ///
 /// Also resets each count to zero on the way past, so
-/// [`scatter_node_samples`] can use it as a per-node write cursor.
+/// [`scatter_node_samples()`] can use it as a per-node write cursor.
 ///
 /// Serial over at most `max_active_nodes` (1024) entries and launched once per
 /// level, which puts it in the same class as the other node-bookkeeping
@@ -3211,13 +3170,13 @@ pub fn scan_node_offsets(
 /// Within a node the order is whatever the atomic cursor hands out, so it
 /// varies run to run. That makes the f32 summation order in the consumer
 /// nondeterministic, which is a property the pipeline already has via the
-/// CAS-loop atomic in [`accumulate_importance`].
+/// CAS-loop atomic in [`accumulate_importance()`].
 ///
 /// ### Params
 ///
 /// * `sample_to_node` - Per-tree sample assignment `[wave_size, n_samples]`
 /// * `sample_multiplicity` - Per-tree sample multiplicity, same layout
-/// * `node_sample_offsets` - Node slice bounds from [`scan_node_offsets`]
+/// * `node_sample_offsets` - Node slice bounds from [`scan_node_offsets()`]
 /// * `node_sample_counts` - Per-node write cursor, zeroed on entry
 /// * `node_sample_ids` - Output sample ids `[wave_size, n_samples]`
 /// * `node_sample_mults` - Output multiplicities, same layout
@@ -3276,7 +3235,7 @@ pub fn scatter_node_samples(
 // Launch wrappers //
 /////////////////////
 
-/// Dispatch [`sample_node_features`] over `(n_active_nodes, 1, wave_size)`
+/// Dispatch [`sample_node_features()`] over `(n_active_nodes, 1, wave_size)`
 /// workgroups.
 ///
 /// ### Workgroup
@@ -3326,47 +3285,16 @@ fn launch_sample_features<R: Runtime>(
     }
 }
 
-/// Dispatch [`build_hist_privatised`] over `(k_feats, n_active_nodes, wave_size)`
-/// workgroups.
-///
-/// ### Workgroup
-///
-/// `CubeDim::new_1d(WORKGROUP_128)` — 128 threads per workgroup, each striding
-/// over samples `tx, tx+128, ...`.
-///
-/// ### Params
-///
-/// * `client` - CubeCL compute client
-/// * `feature_data` - Quantised bins `[n_features, n_samples]` (u8 as u32)
-/// * `sy_offsets` - Sparse Y offsets `[n_samples + 1]`
-/// * `sy_target_indices` - Sparse Y target ids `[nnz]` (u8 as u32)
-/// * `sy_values` - Sparse Y values `[nnz]`
-/// * `sample_to_node` - Per-tree sample assignment `[wave_size, n_samples]`
-/// * `sample_multiplicity` - Per-tree sample multiplier `[wave_size, n_samples]`
-/// * `node_features` - Selected feature ids `[wave_size, n_active_nodes, k_feats]`
-/// * `hist_counts` - Output counts `[wave_size, n_active_nodes, k_feats, N_BINS]`
-/// * `hist_y_sums` - Output Y sums as u32 f32 bits, same layout with trailing `n_targets`
-/// * `hist_y_sum_sqs` - Output Y sum-of-squares, same layout as `hist_y_sums`
-/// * `n_samples` - Number of samples
-/// * `wave_size` - Trees in wave
-/// * `n_active_nodes` - Active nodes at this level
-/// * `k_feats` - Features per node
-/// * `n_targets` - Targets in batch
-///
-/// ### Returns
-///
-/// `()` — kernel is dispatched asynchronously via the client command queue.
-#[allow(clippy::too_many_arguments)]
-/// Dispatch the three per-node gather kernels in order.
+/// Dispatch the four per-node gather kernels in order.
 ///
 /// They are always run as a unit and each depends on the previous, so they get
-/// one wrapper rather than three. Cheap by construction: two sample-wide passes
+/// one wrapper rather than four. Cheap by construction: two sample-wide passes
 /// and one serial scan over at most `max_active_nodes` entries per tree.
 ///
 /// ### Workgroup
 ///
 /// `WORKGROUP_128` for the zero and the two sample passes; the offset scan is
-/// one thread per tree, matching [`compute_child_ids`].
+/// one thread per tree, matching [`compute_child_ids()`].
 ///
 /// ### Params
 ///
@@ -3384,6 +3312,7 @@ fn launch_sample_features<R: Runtime>(
 /// ### Returns
 ///
 /// `()` — kernels are dispatched asynchronously via the client command queue.
+#[allow(clippy::too_many_arguments)]
 fn launch_gather_node_samples<R: Runtime>(
     client: &ComputeClient<R>,
     sample_to_node: &GpuTensor<R, u32>,
@@ -3445,11 +3374,11 @@ fn launch_gather_node_samples<R: Runtime>(
     }
 }
 
-/// Dispatch [`build_score_rf_fused`] then [`reduce_slot_winners`].
+/// Dispatch [`build_score_rf_fused()`] then [`reduce_slot_winners()`].
 ///
 /// Together these replace `launch_build_hist` + `launch_prefix_sum` +
 /// `launch_evaluate_splits_rf`. The bin count is chosen from `n_targets` by
-/// [`pick_gpu_bins`]; the caller must have checked [`fused_rf_viable`] first.
+/// [`pick_gpu_bins`]; the caller must have checked `fused_rf_viable` first.
 ///
 /// ### Workgroup
 ///
@@ -3571,7 +3500,7 @@ fn launch_rf_fused<R: Runtime>(
     }
 }
 
-/// Dispatch [`finalise_split_stats_rf`] over `grid_2d(n_active_nodes)` by
+/// Dispatch [`finalise_split_stats_rf()`] over `grid_2d(n_active_nodes)` by
 /// `wave_size` workgroups.
 ///
 /// ### Workgroup
@@ -3635,11 +3564,42 @@ fn launch_finalise_split_stats_rf<R: Runtime>(
             wave_size as u32,
             n_active_nodes as u32,
             n_targets as u32,
-            WORKGROUP_128,
         );
     }
 }
 
+/// Dispatch [`build_hist_privatised()`] over
+/// `(k_feats, n_active_nodes, wave_size)` workgroups.
+///
+/// ### Workgroup
+///
+/// `CubeDim::new_1d(WORKGROUP_128)` — 128 threads per workgroup, each striding
+/// over the node's gathered samples `tx, tx+128, ...`.
+///
+/// ### Params
+///
+/// * `client` - CubeCL compute client
+/// * `feature_data` - Quantised bins `[n_features, n_samples]` (u8 as u32)
+/// * `sy_offsets` - Sparse Y offsets `[n_samples + 1]`
+/// * `sy_target_indices` - Sparse Y target ids `[nnz]` (u8 as u32)
+/// * `sy_values` - Sparse Y values `[nnz]`
+/// * `node_sample_offsets` - Node slice bounds from [`launch_gather_node_samples`]
+/// * `node_sample_ids` - Gathered sample ids, same source
+/// * `node_sample_mults` - Gathered multiplicities, same source
+/// * `node_features` - Selected feature ids `[wave_size, n_active_nodes, k_feats]`
+/// * `hist_counts` - Output counts `[wave_size, n_active_nodes, k_feats, N_BINS]`
+/// * `hist_y_sums` - Output Y sums as u32 f32 bits, same layout with a trailing
+///   `n_targets`
+/// * `hist_y_sum_sqs` - Output Y sum-of-squares, same layout as `hist_y_sums`
+/// * `n_samples` - Number of samples
+/// * `wave_size` - Trees in wave
+/// * `n_active_nodes` - Active nodes at this level
+/// * `k_feats` - Features per node
+/// * `n_targets` - Targets in batch
+///
+/// ### Returns
+///
+/// `()` — kernel is dispatched asynchronously via the client command queue.
 #[allow(clippy::too_many_arguments)]
 fn launch_build_hist<R: Runtime>(
     client: &ComputeClient<R>,
@@ -3686,7 +3646,7 @@ fn launch_build_hist<R: Runtime>(
     }
 }
 
-/// Dispatch [`merge_hist`] over `(gx, gy, wave_size)` workgroups, where
+/// Dispatch [`merge_hist()`] over `(gx, gy, wave_size)` workgroups, where
 /// `(gx, gy)` is the `grid_2d` decomposition of `n_active_nodes`.
 ///
 /// ### Workgroup
@@ -3751,7 +3711,7 @@ fn launch_merge_hist<R: Runtime>(
     }
 }
 
-/// Dispatch [`prefix_sum_bins`] over `(k_feats, n_active_nodes, wave_size)`
+/// Dispatch [`prefix_sum_bins()`] over `(k_feats, n_active_nodes, wave_size)`
 /// workgroups.
 ///
 /// ### Workgroup
@@ -3760,7 +3720,7 @@ fn launch_merge_hist<R: Runtime>(
 /// the fused count prefix sum and bin-range scan, threads `tx` own targets
 /// `tx, tx+128, ...` for the y-sum prefix sums. Do not narrow this to 64 on the
 /// grounds that the upper half idles: measured at 31% slower. See
-/// [`prefix_sum_bins`].
+/// [`prefix_sum_bins()`].
 ///
 /// ### Params
 ///
@@ -3825,7 +3785,7 @@ fn launch_prefix_sum<R: Runtime>(
     }
 }
 
-/// Whether the plane-compacted path in [`accumulate_split_stats_et`] can be
+/// Whether the plane-compacted path in [`accumulate_split_stats_et()`] can be
 /// used on this device.
 ///
 /// It derives a plane id from `UNIT_POS_X / PLANE_DIM`, so the device must
@@ -3852,7 +3812,7 @@ fn plane_compact_viable<R: Runtime>(client: &ComputeClient<R>, wg_size: u32) -> 
 
 /// Whether a `wg_size`-wide workgroup is guaranteed to be exactly one plane on
 /// this device, which is the precondition for the plane-primitive argmax in
-/// [`evaluate_splits_et_direct`].
+/// [`evaluate_splits_et_direct()`].
 ///
 /// Both the min and max reported plane size must equal the workgroup width. If
 /// the device reports a range (some backends do), a workgroup could straddle
@@ -3873,7 +3833,7 @@ fn plane_argmax_viable<R: Runtime>(client: &ComputeClient<R>, wg_size: u32) -> b
     hw.plane_size_min == wg_size && hw.plane_size_max == wg_size
 }
 
-/// Dispatch [`evaluate_splits_rf`] over `(gx, gy, wave_size)` workgroups,
+/// Dispatch [`evaluate_splits_rf()`] over `(gx, gy, wave_size)` workgroups,
 /// where `(gx, gy)` is the `grid_2d` decomposition of `n_active_nodes`.
 ///
 /// ### Workgroup
@@ -3899,9 +3859,6 @@ fn plane_argmax_viable<R: Runtime>(client: &ComputeClient<R>, wg_size: u32) -> b
 ///   valid split
 /// * `split_threshold` - Output winning threshold bin per node
 /// * `split_n_left` - Output left-child sample count per node
-/// * `split_y_sums_l` - Output left-child Y sums per (node, target)
-/// * `split_y_sum_sqs_l` - Output left-child Y sum-of-squares per (node,
-///   target)
 /// * `wave_size` - Trees in wave
 /// * `n_active_nodes` - Active nodes at this level
 /// * `k_feats` - Features per node
@@ -3960,7 +3917,7 @@ fn launch_evaluate_splits_rf<R: Runtime>(
     }
 }
 
-/// Dispatch [`reassign_samples`] over `(gx, gy, wave_size)` workgroups, where
+/// Dispatch [`reassign_samples()`] over `(gx, gy, wave_size)` workgroups, where
 /// `(gx, gy)` is the `grid_2d` decomposition of the sample-block count
 /// `ceil(n_samples / WORKGROUP_128)`.
 ///
@@ -4023,7 +3980,7 @@ fn launch_reassign<R: Runtime>(
     }
 }
 
-/// Dispatch [`accumulate_importance`] over `(gx, gy, wave_size)` workgroups,
+/// Dispatch [`accumulate_importance()`] over `(gx, gy, wave_size)` workgroups,
 /// where `(gx, gy)` is the `grid_2d` decomposition of `n_active_nodes`.
 ///
 /// ### Workgroup
@@ -4091,7 +4048,7 @@ fn launch_accumulate_importance<R: Runtime>(
     }
 }
 
-/// Dispatch [`compute_child_ids`] over `(wave_size, 1, 1)` workgroups, one
+/// Dispatch [`compute_child_ids()`] over `(wave_size, 1, 1)` workgroups, one
 /// thread per workgroup.
 ///
 /// ### Workgroup
@@ -4137,12 +4094,12 @@ fn launch_compute_child_ids<R: Runtime>(
     }
 }
 
-/// Dispatch [`scan_slot_bin_range`] over `(k_feats, n_active_nodes, wave_size)`
+/// Dispatch [`scan_slot_bin_range()`] over `(k_feats, n_active_nodes, wave_size)`
 /// workgroups of `WORKGROUP_128`.
 ///
 /// ### Params
 ///
-/// See [`scan_slot_bin_range`]; `client` is the CubeCL compute client.
+/// See [`scan_slot_bin_range()`]; `client` is the CubeCL compute client.
 ///
 /// ### Returns
 ///
@@ -4183,13 +4140,13 @@ fn launch_scan_slot_bin_range<R: Runtime>(
     }
 }
 
-/// Dispatch [`accumulate_split_stats_et`] over
+/// Dispatch [`accumulate_split_stats_et()`] over
 /// `(k_feats * n_thresholds, n_active_nodes, wave_size)` workgroups of
 /// `WORKGROUP_128`.
 ///
 /// ### Params
 ///
-/// See [`accumulate_split_stats_et`]; `client` is the CubeCL compute client.
+/// See [`accumulate_split_stats_et()`]; `client` is the CubeCL compute client.
 ///
 /// ### Returns
 ///
@@ -4247,18 +4204,17 @@ fn launch_accumulate_split_stats_et<R: Runtime>(
             n_targets as u32,
             n_thresholds as u32,
             level,
-            WORKGROUP_128,
             plane_compact_viable(client, WORKGROUP_128),
         );
     }
 }
 
-/// Dispatch [`evaluate_splits_et_direct`] over `(gx, gy, wave_size)`
+/// Dispatch [`evaluate_splits_et_direct()`] over `(gx, gy, wave_size)`
 /// workgroups of `WORKGROUP_32`.
 ///
 /// ### Params
 ///
-/// See [`evaluate_splits_et_direct`]; `client` is the CubeCL compute client.
+/// See [`evaluate_splits_et_direct()`]; `client` is the CubeCL compute client.
 ///
 /// ### Returns
 ///
@@ -4317,12 +4273,12 @@ fn launch_evaluate_splits_et_direct<R: Runtime>(
     }
 }
 
-/// Dispatch [`init_root_stats`] over `(wave_size, 1, 1)` workgroups of
+/// Dispatch [`init_root_stats()`] over `(wave_size, 1, 1)` workgroups of
 /// `WORKGROUP_128`.
 ///
 /// ### Params
 ///
-/// See [`init_root_stats`]; `client` is the CubeCL compute client.
+/// See [`init_root_stats()`]; `client` is the CubeCL compute client.
 ///
 /// ### Returns
 ///
@@ -4359,7 +4315,7 @@ fn launch_init_root_stats<R: Runtime>(
     }
 }
 
-/// Dispatch [`zero_node_stats`] over `(gx, gy, wave_size)` workgroups, where
+/// Dispatch [`zero_node_stats()`] over `(gx, gy, wave_size)` workgroups, where
 /// `(gx, gy)` is the `grid_2d` decomposition of `n_active_nodes`.
 ///
 /// ### Workgroup
@@ -4406,7 +4362,7 @@ fn launch_zero_node_stats<R: Runtime>(
     }
 }
 
-/// Dispatch [`propagate_child_stats`] over `(gx, gy, wave_size)` workgroups,
+/// Dispatch [`propagate_child_stats()`] over `(gx, gy, wave_size)` workgroups,
 /// where `(gx, gy)` is the `grid_2d` decomposition of `n_active_nodes`.
 ///
 /// ### Workgroup
@@ -4484,7 +4440,7 @@ fn launch_propagate_child_stats<R: Runtime>(
     }
 }
 
-/// Dispatch [`init_sample_to_node`] over `(gx, gy, wave_size)` workgroups,
+/// Dispatch [`init_sample_to_node()`] over `(gx, gy, wave_size)` workgroups,
 /// where `(gx, gy)` is the `grid_2d` decomposition of the sample-block count
 /// `ceil(n_samples / WORKGROUP_128)`.
 ///
@@ -4562,9 +4518,9 @@ struct WaveState<R: Runtime> {
     /// layout as `cum_y_sums`.
     cum_y_sum_sqs: GpuTensor<R, f32>,
     /// First informative bin per slot `[wave_size, max_active_nodes, k_feats]`.
-    /// Populated by `prefix_sum_bins`; read by `evaluate_splits_et` / `_rf` to
-    /// skip empty out-of-range thresholds without a per-candidate 256-bin
-    /// rescan.
+    /// Written by `prefix_sum_bins` on the histogram path and by
+    /// `scan_slot_bin_range` on the ExtraTrees one; lets the consumers skip
+    /// out-of-range thresholds without a per-candidate 256-bin rescan.
     slot_min_bin: GpuTensor<R, u32>,
     /// Last informative bin per slot, same layout as `slot_min_bin`.
     slot_max_bin: GpuTensor<R, u32>,
@@ -4683,9 +4639,9 @@ impl<R: Runtime> WaveState<R> {
     ) -> Self {
         let use_et = layout == WaveLayout::ExtraTrees;
         let use_hist = layout == WaveLayout::RandomForestHist;
-        // The ExtraTrees path never touches the histogram or its prefix sums,
-        // so they collapse to stubs. This is where the ~6.1 GiB -> ~13 MB drop
-        // at the reference shape comes from.
+        // Every tensor a layout does not touch collapses to a length-1 stub.
+        // That is where the ~6.1 GiB -> ~13 MB drop at the reference shape
+        // comes from on the ExtraTrees path.
         let hist_counts_len = if use_hist {
             wave_size * max_active_nodes * k_feats * N_BINS as usize
         } else {
@@ -4704,7 +4660,6 @@ impl<R: Runtime> WaveState<R> {
             1
         };
         let cand_stats_len = if use_et { cand_len * n_targets } else { 1 };
-        // The per-node gather feeds the RandomForest histogram build only.
         let gather_node_len = if use_et {
             1
         } else {
@@ -4854,12 +4809,15 @@ pub fn wave_byte_cost_et(
     (cand_slots * 2 * 4) + (cand_slots * n_targets * 2 * 4)
 }
 
-/// The three paths differ enough that one cost model cannot describe them:
-/// ExtraTrees materialises per-candidate left sums, the fused RandomForest path
-/// holds only per-slot winners plus the sample gather, and the fallback
-/// RandomForest path holds the full `[bin, target]` histogram and its prefix
-/// sums. The last of those is three orders of magnitude larger than the other
-/// two, which is why it is the only one that ever forces the wave below 32.
+/// Which split pipeline a wave runs, and therefore which cost model
+/// [`pick_wave_size`] applies.
+///
+/// The three differ enough that one model cannot describe them: ExtraTrees
+/// materialises per-candidate left sums, the fused path holds only per-slot
+/// winners plus the sample gather, and the fallback holds the full
+/// `[bin, target]` histogram and its prefix sums. The last is three orders of
+/// magnitude larger than the other two, and the only one that ever forces the
+/// wave below 32.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WaveLayout {
     /// ExtraTrees: per-candidate left sums, no histogram.
@@ -4906,6 +4864,34 @@ pub fn wave_byte_cost_rf_fused(
     (slot_slots * 5 * 4) + (node_stats * 6 * 4) + (sample_slots * 3 * 4)
 }
 
+/// Largest wave that fits both the VRAM budget and the device's per-binding
+/// limit.
+///
+/// Halves from `DEFAULT_WAVE_SIZE` (capped at the tree count) until both
+/// constraints hold. Errors only when a single-tree wave still busts them,
+/// which in practice only happens on [`WaveLayout::RandomForestHist`] where the
+/// full `[bin, target]` histogram is three orders of magnitude larger than the
+/// other two layouts.
+///
+/// ### Params
+///
+/// * `max_active_nodes` - Node bound per level, see [`viable_max_active_nodes`]
+/// * `k_feats` - Features per node
+/// * `n_targets` - Targets in batch
+/// * `n_trees_target` - Trees to fit; caps the wave
+/// * `wave_byte_budget` - VRAM ceiling for the wave-scoped tensors
+/// * `n_thresholds` - Random thresholds per feature slot (ExtraTrees only)
+/// * `layout` - Which cost model applies
+/// * `n_samples` - Number of samples
+/// * `max_binding_bytes` - Device limit on a single buffer binding
+///
+/// ### Returns
+///
+/// Trees per wave, in `1..=DEFAULT_WAVE_SIZE`.
+///
+/// ### Errors
+///
+/// `InvalidArgument` when even `wave_size = 1` exceeds either constraint.
 #[allow(clippy::too_many_arguments)]
 pub fn pick_wave_size(
     max_active_nodes: usize,
@@ -4971,8 +4957,9 @@ pub fn pick_wave_size(
 // Sparse Y upload wrapper //
 /////////////////////////////
 
-/// Device-resident sparse Y for one target batch (CSR by sample). Uploaded
-/// once per batch and read by [`build_hist_privatised`] across every wave.
+/// Device-resident sparse Y for one target batch (CSR by sample). Uploaded once
+/// per batch and read by [`build_hist_privatised()`] across every wave. Only
+/// [`WaveLayout::RandomForestHist`] needs it; the other two take Y dense.
 struct SparseYGpu<R: Runtime> {
     /// Exclusive prefix sums `[n_samples + 1]`
     offsets: GpuTensor<R, u32>,
@@ -4995,6 +4982,7 @@ struct SparseYGpu<R: Runtime> {
 /// * `sy` - Host sparse Y batch to densify (CSR by sample)
 /// * `n_samples` - Number of samples
 /// * `n_targets` - Targets in the batch
+/// * `scratch` - Caller-owned staging buffer, resized and reused across batches
 /// * `client` - CubeCL compute client for buffer allocation and upload
 ///
 /// ### Returns
@@ -5067,18 +5055,18 @@ impl<R: Runtime> SparseYGpu<R> {
 /// `[n_features, n_targets]`, f32 bits stored as `u32`). Uses the
 /// pre-allocated `WaveState` and the once-per-batch sparse Y upload.
 ///
-/// No per-level `.read()` calls. `n_active_nodes` per level is the
-/// upper bound `min(2^depth, max_active_nodes)`; phantom nodes (no samples)
-/// naturally end up with `split_feature == INVALID` from `evaluate_splits`
-/// and are no-ops in `compute_child_ids` and `accumulate_importance`. Child
-/// ids for `reassign_samples` come from persistent `state.left_child_id` /
-/// `state.right_child_id`, populated on device by `compute_child_ids`.
+/// No per-level `.read()` calls. `n_active_nodes` per level is the upper bound
+/// `min(2^depth, max_active_nodes)`; phantom nodes (no samples) end up with
+/// `split_feature == INVALID_NODE` from the split kernels and are no-ops in
+/// `compute_child_ids` and `accumulate_importance`.
 ///
 /// ### Params
 ///
 /// * `client` - CubeCL compute client
 /// * `feature_data_gpu` - Quantised bins `[n_features, n_samples]` (u8 as u32)
-/// * `sy_gpu` - Uploaded sparse Y for this batch
+/// * `sy_gpu` - Uploaded sparse Y; `None` unless the layout is
+///   [`WaveLayout::RandomForestHist`]
+/// * `y_dense_gpu` - Dense Y `[n_samples, n_targets]` for this batch
 /// * `state` - Pre-allocated wave-sized scratch tensors
 /// * `sample_multiplicity_gpu` - Per-tree sample multiplier `[wave_size,
 ///   n_samples]`
@@ -5133,10 +5121,9 @@ fn run_wave_bfs<R: Runtime>(
     );
 
     for depth in 0..max_depth {
-        // Upper-bound estimate: at depth d, at most 2^d active nodes exist
-        // (full binary tree). Clamp to the pre-allocated buffer. Phantom
-        // nodes cost cheap kernel launches and no atomics because their
-        // sample_to_node never matches.
+        // At depth d a full binary tree has at most 2^d active nodes. Phantom
+        // nodes cost cheap launches and no atomics: their sample_to_node never
+        // matches.
         let depth_cap = 1usize.checked_shl(depth as u32).unwrap_or(usize::MAX);
         let n_active_nodes = depth_cap.min(max_active_nodes).max(1);
         let n_active_next = depth_cap.saturating_mul(2).min(max_active_nodes).max(1);
@@ -5185,9 +5172,6 @@ fn run_wave_bfs<R: Runtime>(
         let at_max_depth = depth + 1 >= max_depth;
 
         if use_et {
-            // No histogram at all: reduce the node's bin range, draw the
-            // threshold from it, accumulate left-side stats at that single
-            // threshold. See the ExtraTrees direct kernels for the rationale.
             if depth == 0 {
                 launch_init_root_stats(
                     client,
@@ -5265,10 +5249,8 @@ fn run_wave_bfs<R: Runtime>(
                 min_samples_leaf,
             );
         } else if use_fused_rf {
-            // No histogram in DRAM: build it in threadgroup memory, scan and
-            // score it there, and emit only the per-slot winner. Root stats come
-            // from init_root_stats for the same reason they do on the ExtraTrees
-            // path, since merge_hist has no histogram to fold.
+            // Root stats come from init_root_stats rather than merge_hist:
+            // there is no DRAM histogram to fold, same as the ExtraTrees path.
             if depth == 0 {
                 launch_init_root_stats(
                     client,
@@ -5340,12 +5322,9 @@ fn run_wave_bfs<R: Runtime>(
                 n_targets,
             );
         } else {
-            // Present whenever use_et is false, which is the only path here.
+            // Uploaded by fit_scenic_batches_gpu for exactly this layout.
             let sy = sy_gpu.expect("RandomForest path requires the sparse Y upload");
 
-            // Group this level's live samples by owning node, so the histogram
-            // build walks each node's own slice instead of testing all
-            // n_samples once per (slot, node, tree).
             launch_gather_node_samples(
                 client,
                 &state.sample_to_node,
@@ -5434,9 +5413,6 @@ fn run_wave_bfs<R: Runtime>(
                 min_samples_leaf,
             );
 
-            // The winner's left-child sums no longer fall out of the cumulative
-            // histogram, so recompute them from the node's samples at the
-            // decided threshold. Per (node, tree), so 1/k_feats of a build.
             launch_finalise_split_stats_rf(
                 client,
                 feature_data_gpu,
@@ -5537,6 +5513,36 @@ fn run_wave_bfs<R: Runtime>(
 // Public entry //
 //////////////////
 
+/// Print a progress line every time the completed fraction crosses a 10%
+/// stride, matching the CPU driver's cadence in `run_scenic_multi_output`.
+///
+/// The counter tracks batches *dispatched*, not batches the GPU has retired.
+/// Kernel launches are asynchronous, so the queue trails this line. It cannot
+/// trail without bound: each batch allocates its own [`WaveState`] and holds an
+/// importance tensor resident, so the allocator ends up waiting on finished
+/// work to recycle VRAM and the host loop is pulled back in step. Reporting
+/// true completion instead would need a `sync()` per batch, which is precisely
+/// the host/device overlap this driver exists to buy.
+///
+/// ### Params
+///
+/// * `done` - Batches dispatched so far, `1..=total`
+/// * `total` - Non-empty batches in this call
+/// * `start` - Timer started before the dispatch loop
+fn report_batch_progress(done: usize, total: usize, start: Instant) {
+    let pct = done * 100 / total;
+    let prev_pct = (done - 1) * 100 / total;
+    if pct / 10 > prev_pct / 10 || done == total {
+        println!(
+            "  Progress: {}% ({}/{} batches dispatched, {:.2?} elapsed)",
+            pct,
+            done,
+            total,
+            start.elapsed()
+        );
+    }
+}
+
 /// Fit a sequence of pre-sliced gene batches on GPU, sharing one feature
 /// upload across every batch and deferring importance readbacks to the end
 /// of the call.
@@ -5564,6 +5570,8 @@ fn run_wave_bfs<R: Runtime>(
 ///   ExtraTrees or RandomForest split kernel and `bootstrap()` is honoured.
 /// * `device` - Runtime device.
 /// * `params` - GPU-side runtime knobs (currently just the wave VRAM budget).
+/// * `verbose` - `0` -> silent, `1` -> per-batch progress, `2` -> detailed.
+///   See the note on `report_batch_progress` for what the counter tracks.
 ///
 /// ### Returns
 ///
@@ -5579,6 +5587,7 @@ fn run_wave_bfs<R: Runtime>(
 /// * `InvalidArgument` from [`pick_wave_size`] if even `wave_size = 1` busts
 ///   `params.wave_byte_budget` on any batch.
 /// * Propagates GPU read-back errors from the deferred importance readback.
+#[allow(clippy::too_many_arguments)]
 pub fn fit_scenic_batches_gpu<R: Runtime>(
     batches: &[&[SparseAxis<u32, f32>]],
     batch_seeds: &[usize],
@@ -5587,6 +5596,7 @@ pub fn fit_scenic_batches_gpu<R: Runtime>(
     config: &dyn TreeRegressorConfig,
     device: R::Device,
     params: &ScenicGpuParams,
+    verbose: usize,
 ) -> Result<Vec<Vec<f32>>, BixverseErrors> {
     debug_assert_eq!(
         batches.len(),
@@ -5621,6 +5631,8 @@ pub fn fit_scenic_batches_gpu<R: Runtime>(
         return Ok(result);
     }
 
+    let verbosity = parse_verbosity_level(verbose);
+    let total_batches = batches.iter().filter(|b| !b.is_empty()).count();
     let client = R::client(&device);
 
     // Decided once per call: run_wave_bfs makes the same choice per level, and
@@ -5661,14 +5673,15 @@ pub fn fit_scenic_batches_gpu<R: Runtime>(
 
     // Per-batch importance tensor handles, kept alive until the deferred
     // readback pass. Each entry is (flat_target_offset, batch_n_targets,
-    // importance_gpu). Small in VRAM (n_features * batch_n_targets * 4
-    // bytes) so N handles across a whole run add up to a few tens of MB
-    // even for hundreds of batches.
+    // importance_gpu), n_features * batch_n_targets * 4 bytes apiece, so
+    // hundreds of batches still add up to only tens of MB.
     let mut deferred: Vec<(usize, usize, GpuTensor<R, u32>)> = Vec::with_capacity(batches.len());
 
     // Reused across batches by upload_dense_y.
     let mut dense_scratch: Vec<f32> = Vec::new();
 
+    let start_dispatch = Instant::now();
+    let mut batches_done = 0usize;
     let mut flat_offset = 0usize;
     for (chunk, &batch_seed) in batches.iter().zip(batch_seeds.iter()) {
         let batch_n_targets = chunk.len();
@@ -5677,8 +5690,6 @@ pub fn fit_scenic_batches_gpu<R: Runtime>(
         }
 
         let sparse_y = SparseYBatch::from_targets(chunk, n_samples)?;
-        // The ExtraTrees path reads only the dense form, so skip the CSR
-        // upload entirely there rather than shipping it for nothing.
         // Only the DRAM histogram path reads the CSR form; ExtraTrees and the
         // fused RandomForest kernel both take Y dense.
         let sy_gpu = if wave_layout == WaveLayout::RandomForestHist {
@@ -5735,11 +5746,9 @@ pub fn fit_scenic_batches_gpu<R: Runtime>(
             let tree_seeds_gpu =
                 GpuTensor::<R, u32>::from_slice(&seeds_host, vec![this_wave], &client);
 
-            // Per-tree sample multiplicity for this wave. Bootstrap draws
-            // n_sub with replacement (mult in {0, 1, 2, ...}); non-bootstrap
-            // subsample is Fisher-Yates and takes the first n_sub (mult in
-            // {0, 1}); no-subsample path fills 1s. RNG seeded off
-            // `tree_seed(batch_seed, t)` matching the CPU path.
+            // Bootstrap draws n_sub with replacement; non-bootstrap subsample
+            // is Fisher-Yates over the first n_sub. RNG seeded off
+            // `tree_seed(batch_seed, t)` to match the CPU path.
             let mut mult_host = vec![0u32; this_wave * n_samples];
             if subsample_needed {
                 for w in 0..this_wave {
@@ -5765,9 +5774,8 @@ pub fn fit_scenic_batches_gpu<R: Runtime>(
             let mult_gpu =
                 GpuTensor::<R, u32>::from_slice(&mult_host, vec![this_wave * n_samples], &client);
 
-            // Terminal-wave reuse: kernels gate on the `wave_size` param, so
-            // an over-provisioned `state` is safe. Only when `this_wave` does
-            // not match do we allocate a smaller shadow state.
+            // Kernels gate on the `wave_size` param, so an over-provisioned
+            // `state` is safe; only the terminal short wave needs a shadow.
             let effective_state = if this_wave == wave_size {
                 None
             } else {
@@ -5804,11 +5812,23 @@ pub fn fit_scenic_batches_gpu<R: Runtime>(
             tree_idx += this_wave;
         }
 
-        // Stash the importance handle; no .read() here. The .read() below
-        // flushes the queue at that point, so later batches keep submitting
-        // kernels while we wait on the first one.
+        // Stash the importance handle; no .read() here, so later batches keep
+        // submitting kernels instead of blocking on this one.
         deferred.push((flat_offset, batch_n_targets, batch_importances_gpu));
         flat_offset += batch_n_targets;
+
+        batches_done += 1;
+        if verbosity.normal_verbosity() {
+            report_batch_progress(batches_done, total_batches, start_dispatch);
+        }
+    }
+
+    if verbosity.detailed_verbosity() {
+        println!(
+            "  All {} batches dispatched in {:.2?}, draining the queue",
+            total_batches,
+            start_dispatch.elapsed()
+        );
     }
 
     for (target_offset, batch_n_targets, imp_gpu) in deferred {
@@ -5874,6 +5894,7 @@ pub fn fit_multi_trees_gpu<R: Runtime>(
         config,
         device,
         params,
+        0,
     )
 }
 
@@ -6168,6 +6189,7 @@ where
         config,
         device,
         gpu_params,
+        verbose,
     )?;
 
     let flat_gene_ids: Vec<usize> = batches.iter().flatten().copied().collect();
@@ -6343,6 +6365,7 @@ where
             config,
             device.clone(),
             gpu_params,
+            verbose,
         )?;
 
         let chunk_flat_gene_ids: Vec<usize> = group.iter().flatten().copied().collect();
@@ -6532,6 +6555,7 @@ where
         config,
         device,
         gpu_params,
+        verbose,
     )?;
 
     let flat_gene_ids: Vec<usize> = id_batches.iter().flat_map(|b| b.iter().copied()).collect();
