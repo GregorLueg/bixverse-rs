@@ -1123,13 +1123,16 @@ pub fn finalise_split_stats_rf(
         terminate!();
     }
 
+    let mut s_tile_id = SharedMemory::<u32>::new(WORKGROUP_128 as usize);
+    let mut s_tile_mult = SharedMemory::<u32>::new(WORKGROUP_128 as usize);
+    let mut ys = Array::<f32>::new(RF_UNROLL as usize);
+    let mut ms = Array::<u32>::new(RF_UNROLL as usize);
+
     let tx = UNIT_POS_X;
     let node_flat = (tree * n_active_nodes + node) as usize;
     let feat = split_feature[node_flat];
+    // Uniform across the workgroup, so bailing here cannot strand a sync_cube.
     if feat == INVALID_NODE {
-        terminate!();
-    }
-    if tx >= n_targets {
         terminate!();
     }
 
@@ -1139,23 +1142,68 @@ pub fn finalise_split_stats_rf(
     let hi = node_sample_offsets[obase + (node + 1u32) as usize];
     let gbase = (tree * n_samples) as usize;
 
+    // Same staging and unrolling as build_score_rf_fused, and for the same
+    // reason. The threshold test is folded into the staged multiplicity: a
+    // sample on the right of the split gets multiplicity 0 and contributes
+    // exactly nothing, which removes the branch from the unrolled body. All 128
+    // threads take part in the staging even though only n_targets of them
+    // accumulate, so the early exit for the surplus ones is gone.
     let mut acc_s: f32 = 0f32;
     let mut acc_q: f32 = 0f32;
-    let mut j: u32 = lo;
-    while j < hi {
-        let s = node_sample_ids[gbase + j as usize];
-        if feature_bin(feature_data, feat * n_samples + s) <= thr {
-            let mf = f32::cast_from(node_sample_mults[gbase + j as usize]);
-            let y = y_dense[(s * n_targets + tx) as usize];
-            acc_s += mf * y;
-            acc_q += mf * y * y;
+
+    let mut base: u32 = lo;
+    while base < hi {
+        let idx = base + tx;
+        if idx < hi {
+            let s = node_sample_ids[gbase + idx as usize];
+            s_tile_id[tx as usize] = s;
+            if feature_bin(feature_data, feat * n_samples + s) <= thr {
+                s_tile_mult[tx as usize] = node_sample_mults[gbase + idx as usize];
+            } else {
+                s_tile_mult[tx as usize] = 0u32;
+            }
         }
-        j += 1u32;
+        sync_cube();
+
+        let mut cnt = hi - base;
+        if cnt > CUBE_DIM_X {
+            cnt = CUBE_DIM_X;
+        }
+
+        if tx < n_targets {
+            let mut i: u32 = 0u32;
+            while i + (RF_UNROLL - 1u32) < cnt {
+                #[unroll]
+                for u in 0..RF_UNROLL {
+                    ms[u as usize] = s_tile_mult[(i + u) as usize];
+                    ys[u as usize] =
+                        y_dense[(s_tile_id[(i + u) as usize] * n_targets + tx) as usize];
+                }
+                #[unroll]
+                for u in 0..RF_UNROLL {
+                    let mf = f32::cast_from(ms[u as usize]);
+                    acc_s += mf * ys[u as usize];
+                    acc_q += mf * ys[u as usize] * ys[u as usize];
+                }
+                i += RF_UNROLL;
+            }
+            while i < cnt {
+                let mf = f32::cast_from(s_tile_mult[i as usize]);
+                let y = y_dense[(s_tile_id[i as usize] * n_targets + tx) as usize];
+                acc_s += mf * y;
+                acc_q += mf * y * y;
+                i += 1u32;
+            }
+        }
+        sync_cube();
+        base += CUBE_DIM_X;
     }
 
-    let out = node_flat * n_targets as usize + tx as usize;
-    split_y_sums_l[out] = acc_s;
-    split_y_sum_sqs_l[out] = acc_q;
+    if tx < n_targets {
+        let out = node_flat * n_targets as usize + tx as usize;
+        split_y_sums_l[out] = acc_s;
+        split_y_sum_sqs_l[out] = acc_q;
+    }
 }
 
 //////////////////////////
