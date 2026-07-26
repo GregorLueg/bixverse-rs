@@ -16,25 +16,25 @@ unchanged, RF 0.987 against a 0.988 baseline, RF+bootstrap 0.975 against 0.976.
 | 0 `prefix_sum_bins` fixes | **dead end, reverted.** Both hypotheses measured wrong |
 | 1 per-node gather | **done.** 1.18x -> 1.21x, as predicted a near-null result |
 | 2 fused kernel | **done.** 1.21x -> 4.83x |
+| 3 unroll the accumulate | **done.** 4.83x -> 10.0x, the biggest single win |
+| 4 unroll `finalise` | **done.** 10.0x -> 10.5x |
 
 | cell | before | after |
 |---|---:|---:|
-| `rf_8t` | 1.16x | **3.75x** |
-| `rf_32t` | 1.18x | **4.83x** |
-| `rf_multibatch` | 1.18x | **4.63x** |
+| `rf_8t` | 1.16x | **7.19x** |
+| `rf_32t` | 1.18x | **10.53x** |
+| `rf_multibatch` | 1.18x | **10.72x** |
 | RF wave size | 8 | **32** |
 | RF wave VRAM | 6.10 GiB | **0.010 GiB** |
 | `phase3_random_forest_pearson` GPU | 5.9s | **2.0s** |
 
-**End to end it still loses.** Full `gpu_scenic_bench` at 20% density: RF
-251.35s GPU against 87.62s CPU, i.e. 2.87x slower, down from 6.0x. The GPU side
-went 1131.63s -> 251.35s but the bar moved too: the measured rayon fan-out at
-this density is **12.8x**, not the 8.25x quoted from the old 50%-density
-baseline. RF needs 12.8x per batch and has 4.99x.
+**End to end it now draws.** Full `gpu_scenic_bench` at 20% density: RF 88.28s
+GPU against 90.01s CPU, i.e. parity, from 6.0x slower at the start. The e2e rows
+are single-shot so the 2% margin is noise; parity is the claim, not a win.
 
-So the shipping recommendation is unchanged: RandomForest stays CPU-preferred.
-What did change is that it now runs at 1M cells instead of refusing. Remaining
-levers are in "What is left" at the bottom.
+The GPU side went 1131.63s -> 88.28s, **12.8x**. Per batch RF is at 12.2x against
+a measured fan-out bar of 12.5x, and the two agreeing is the main reason to trust
+either.
 
 ### What the first measurements settled
 
