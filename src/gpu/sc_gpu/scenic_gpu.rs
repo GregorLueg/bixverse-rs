@@ -82,10 +82,30 @@ const MAX_PLANES_PER_CUBE: u32 = 32;
 /// at an unpadded stride of 64 every one of them resolves to the same bank and
 /// the pass serialises 32 ways.
 ///
-/// 4352 is the smallest value covering all four cases [`pick_gpu_bins`] returns
-/// (256x9, 256x17, 128x33, 64x65) and costs 17 KB of the 32 KB an M1 Max
-/// reports.
-const SMEM_HIST_SLOTS: u32 = 4352;
+/// **This constant is an occupancy knob, not just a capacity bound.** The kernel
+/// is latency bound, so what matters is how many workgroups stay resident per
+/// core: 32768 / footprint. Measured on `rf_32t`, sweeping this value and
+/// letting [`pick_gpu_bins`] fall out of it:
+///
+/// | slots | bins @ 64 targets | footprint | resident | ratio |
+/// |---|---|---|---|---|
+/// | 4352 | 64 | 22024 B | 1 | 10.80x |
+/// | **2176** | **32** | **13320 B** | **2** | **18.92x** |
+/// | 1088 | 16 | 8968 B | 3 | 22.17x |
+/// | 544 | 8 | 6792 B | 4 | 22.40x |
+///
+/// Nearly all of the win is the single step from one resident workgroup to two.
+/// Past 16 bins the speed saturates and only the accuracy keeps falling.
+///
+/// 2176 is deliberately *not* the fastest setting. Fidelity measured flat all
+/// the way down to 4 bins, which is not believable: four thresholds against the
+/// CPU's 255 cannot be free. The gates correlate importance *vectors*, i.e.
+/// feature ranking, and the synthetic targets are monotone in their informative
+/// features, so any split near the middle preserves the ranking. The metric is
+/// insensitive to threshold resolution, so a flat result is weak evidence rather
+/// than a licence to coarsen. 32 bins takes the occupancy step that matters and
+/// keeps resolution in hand.
+const SMEM_HIST_SLOTS: u32 = 2176;
 
 /// Samples processed per iteration of the fused accumulate loop.
 ///
@@ -3509,6 +3529,15 @@ fn launch_rf_fused<R: Runtime>(
 ) {
     let n_bins_gpu = pick_gpu_bins(n_targets);
     let bin_shift = (N_BINS / n_bins_gpu).trailing_zeros();
+    // pick_gpu_bins guarantees this, but the kernel indexes shared memory with
+    // runtime values against a comptime allocation, so an over-wide batch would
+    // write past s_hist with no error anywhere. Cheap to state, and the margin
+    // is only 2176 against 2080 at the production shape.
+    debug_assert!(
+        n_bins_gpu * (n_targets as u32 + 1) <= SMEM_HIST_SLOTS,
+        "fused RF histogram wants {} slots of {SMEM_HIST_SLOTS}",
+        n_bins_gpu * (n_targets as u32 + 1)
+    );
     let (gx, gy) = grid_2d((n_active_nodes as u32).max(1));
     unsafe {
         build_score_rf_fused::launch_unchecked::<R>(

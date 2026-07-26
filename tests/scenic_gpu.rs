@@ -1003,6 +1003,139 @@ fn phase3_rf_pearson_small() {
     );
 }
 
+/// RF fidelity when the quantised bins are *skewed*, which is what real data
+/// looks like and what none of the other GPU tests exercise.
+///
+/// Every other test here builds its store with `QuantisedStore::from_raw` and
+/// uniform random u8 bins. Uniform bins are the easy case for the GPU's coarser
+/// bin axis: merging them loses almost nothing. Real single-cell data quantises
+/// to a spike at bin 0 with a long right tail, where the informative split
+/// points are crowded into the tail and merging bins there is a much bigger ask.
+///
+/// This is the test that has to hold before `SMEM_HIST_SLOTS` is tightened, not
+/// the uniform ones.
+#[test]
+fn phase3_rf_pearson_skewed_bins() {
+    let Some(device) = try_device() else {
+        eprintln!("scenic_gpu (Phase 3 RF skewed): no wgpu device -- skipping");
+        return;
+    };
+
+    const SK_N_SAMPLES: usize = 1_500;
+    const SK_N_FEATURES: usize = 50;
+    const SK_N_TARGETS: usize = 64; // full batch, so the GPU takes its coarsest bins
+    const SK_N_TREES: usize = 120;
+    const SK_INFORMATIVE: usize = 6;
+    const SK_ZERO_FRAC: f32 = 0.6;
+
+    let seed_base = 20260713u64;
+
+    // Spike at bin 0 plus a right-skewed tail, roughly what QuantisedStore
+    // produces from sparse counts.
+    let x = {
+        let mut rng = SmallRng::seed_from_u64(seed_base);
+        let data: Vec<u8> = (0..SK_N_SAMPLES * SK_N_FEATURES)
+            .map(|_| {
+                if rng.random::<f32>() < SK_ZERO_FRAC {
+                    0u8
+                } else {
+                    let u: f32 = rng.random();
+                    (u * u * 255.0) as u8
+                }
+            })
+            .collect();
+        QuantisedStore::from_raw(data, SK_N_SAMPLES, SK_N_FEATURES)
+    };
+
+    let axes = {
+        let mut rng = SmallRng::seed_from_u64(seed_base.wrapping_add(1));
+        let mut weight_rng = SmallRng::seed_from_u64(0x51CE_D000);
+        let mut weights = vec![vec![0.0f32; SK_INFORMATIVE]; SK_N_TARGETS];
+        for w_row in weights.iter_mut() {
+            for w in w_row.iter_mut() {
+                *w = weight_rng.random::<f32>() + 1.0;
+            }
+        }
+        let feats: Vec<&[u8]> = (0..SK_INFORMATIVE).map(|f| x.get_col(f)).collect();
+
+        let mut cols_indices: Vec<Vec<usize>> = vec![Vec::new(); SK_N_TARGETS];
+        let mut cols_values: Vec<Vec<f32>> = vec![Vec::new(); SK_N_TARGETS];
+        for c in 0..SK_N_SAMPLES {
+            for t in 0..SK_N_TARGETS {
+                if rng.random::<f32>() < 0.5 {
+                    let mut signal = 0.0f32;
+                    for f in 0..SK_INFORMATIVE {
+                        signal += weights[t][f] * (feats[f][c] as f32 / 255.0);
+                    }
+                    let noise: f32 = rng.random::<f32>() * 0.05;
+                    cols_indices[t].push(c);
+                    cols_values[t].push(signal + noise + 0.01);
+                }
+            }
+        }
+        cols_indices
+            .into_iter()
+            .zip(cols_values)
+            .map(|(idx, vs)| {
+                SparseAxis::<u32, f32>::new_csc(idx, Vec::new(), Some(vs), SK_N_SAMPLES)
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let mut cfg = RandomForestConfig::default();
+    cfg.n_trees = SK_N_TREES;
+    cfg.max_depth = Some(6);
+    cfg.min_samples_leaf = 20;
+    cfg.n_features_split = 0;
+
+    let cpu = fit_multi_trees_sparse(&axes, &x, SK_N_SAMPLES, &cfg, seed_base as usize)
+        .expect("CPU RF fit failed");
+    let cpu_b = fit_multi_trees_sparse(
+        &axes,
+        &x,
+        SK_N_SAMPLES,
+        &cfg,
+        seed_base.wrapping_add(0xBEEF) as usize,
+    )
+    .expect("CPU RF baseline fit failed");
+    let gpu = fit_multi_trees_gpu::<WgpuRuntime>(
+        &axes,
+        &x,
+        SK_N_SAMPLES,
+        &cfg,
+        seed_base as usize,
+        device.clone(),
+        &ScenicGpuParams::default(),
+    )
+    .expect("GPU RF fit failed");
+
+    let mut per_target: Vec<f32> = Vec::with_capacity(SK_N_TARGETS);
+    let mut baseline: Vec<f32> = Vec::with_capacity(SK_N_TARGETS);
+    for t in 0..SK_N_TARGETS {
+        per_target.push(pearson(&cpu[t], &gpu[t]));
+        baseline.push(pearson(&cpu[t], &cpu_b[t]));
+    }
+    let mean_corr = per_target.iter().sum::<f32>() / per_target.len() as f32;
+    let baseline_corr = baseline.iter().sum::<f32>() / baseline.len() as f32;
+
+    eprintln!(
+        "phase3_rf_pearson_skewed_bins ({SK_N_SAMPLES} cells * {SK_N_FEATURES} feats * \
+         {SK_N_TARGETS} targets * {SK_N_TREES} trees, {SK_ZERO_FRAC} zeros): \
+         cpu-gpu r = {mean_corr:.3}, cpu-cpu baseline r = {baseline_corr:.3}"
+    );
+
+    assert!(
+        mean_corr >= 0.95,
+        "RF on skewed bins: cpu-gpu Pearson r = {mean_corr:.3} < 0.95 floor \
+         (per-target: {per_target:?})"
+    );
+    assert!(
+        mean_corr + 0.05 >= baseline_corr,
+        "RF on skewed bins: cpu-gpu Pearson r = {mean_corr:.3} materially worse than the \
+         cpu-cpu seed-variance baseline {baseline_corr:.3}"
+    );
+}
+
 /// The GPU is going to bin at a coarser resolution than the shared
 /// [`QuantisedStore`], which stays at 256 u8 bins. A split found at coarse
 /// threshold `thr_c` has to be written back as a fine threshold so
