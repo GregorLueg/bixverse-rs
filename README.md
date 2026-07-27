@@ -1,5 +1,6 @@
 [![CI](https://github.com/GregorLueg/bixverse-rs/actions/workflows/test.yml/badge.svg)](https://github.com/GregorLueg/bixverse-rs/actions/workflows/test.yml)
 [![Crates.io Version](https://img.shields.io/crates/v/bixverse-rs.svg)](https://crates.io/crates/bixverse-rs)
+[![docs.rs](https://img.shields.io/docsrs/bixverse-rs)](https://docs.rs/bixverse-rs)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 # bixverse-rs

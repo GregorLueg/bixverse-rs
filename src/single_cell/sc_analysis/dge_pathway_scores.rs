@@ -104,7 +104,7 @@ fn mann_whitney_u_test(ranks1: &[f32], ranks2: &[f32]) -> f64 {
 
 //////////
 // Main //
-/////////
+//////////
 
 /// Get differential expression based on Mann-Whitney
 ///
