@@ -4,7 +4,13 @@
 
 ### Features
 
-- An actually fast GPU-accelerated SCENIC version that beats CPU.
+- **GPU improvements**:
+  * An actually fast GPU-accelerated SCENIC version that beats CPU.
+  * Improved k-means clustering on the GPU.
+  * Faster randomised sparse SVD on the GPU.
+  * Custom kernels for the correlations which beat `cubek` (at least on Apple
+    Silicon).
+
 
 ## 0.3.8
 
