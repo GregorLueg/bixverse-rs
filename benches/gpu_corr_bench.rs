@@ -1,11 +1,17 @@
 //! End-to-end benchmark for the GPU pairwise correlation / covariance path.
 //!
-//! `column_pairwise_cor_gpu` reduces to one product, `G = S^T S` over the
-//! centred and scaled matrix. That product currently goes through cubek with
-//! `Strategy::DoubleUnit`, pinned there because `Strategy::Auto` blows up on
-//! Apple devices. `DoubleUnit` gives one thread per output element with a
-//! serial reduction, which is the same wrong-algorithm-for-the-shape problem
-//! that cost the randomised SVD 25.7x before it got a dedicated Gram kernel.
+//! `column_pairwise_cor_gpu` reduces to one product, `G = A A^T` over the
+//! centred and scaled matrix, which is uploaded feature-major. That product goes
+//! through `gram_aat`. It used to go through cubek with `Strategy::DoubleUnit`,
+//! pinned there because `Strategy::Auto` blows up on Apple devices, and
+//! `DoubleUnit` gives one thread per output element with a serial reduction:
+//! the same wrong-algorithm-for-the-shape problem that cost the randomised SVD
+//! 25.7x before it got a dedicated Gram kernel.
+//!
+//! Both still run here. The cubek arm is timed into `Stages::product_cubek` and
+//! left out of `Stages::total`, so every shape scores the replacement against
+//! the thing it replaced in one pass rather than against a number from an old
+//! run on a different machine.
 //!
 //! Nothing in the crate benchmarked this path before. The two things this file
 //! has to establish are the baseline itself and, per the k-means experience,
@@ -269,7 +275,7 @@ fn run_staged<R: Runtime>(
     st.flatten = t.elapsed();
 
     let t = Instant::now();
-    let data_gpu = GpuTensor::<R, f32>::from_slice(&data_flat, vec![n, d], client);
+    let data_gpu = GpuTensor::<R, f32>::from_slice(&data_flat, vec![d, n], client);
     sync(client);
     st.upload = t.elapsed();
 

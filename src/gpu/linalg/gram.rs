@@ -8,9 +8,12 @@
 //! ```
 //!
 //! This is what pairwise correlation and covariance reduce to once the columns
-//! are centred and scaled, and it is a much narrower problem than a general
-//! dense GEMM: one input stream rather than two, a symmetric output, and a
-//! fixed layout. cubek has no strategy that exploits any of that. Measured on an
+//! are centred and scaled. [`crate::gpu::linalg::corr`] is the caller, where the
+//! same `[d, n]` buffer goes by `[n_cols, n_rows]`. It is a much narrower
+//! problem than a general dense GEMM: one input stream rather than two, a
+//! symmetric output, and a fixed layout.
+//!
+//! cubek has no strategy that exploits any of that. Measured on an
 //! M1 Max, its `Strategy::Auto` pick (a `DoubleBufferingMatmulFamily` over
 //! `UnitMatmulFamily`, one thread per output element with a serial reduction)
 //! runs this at 5-7% of peak on ordinary shapes and **0.13%** at `d = 100,
@@ -351,7 +354,7 @@ pub fn gram_reduce<F: Float>(partials: &Tensor<F>, g: &mut Tensor<F>, total: u32
 
 /// Compute `G = A A^T` for a feature-major `A`.
 ///
-/// Selects split-K via [`gram_chunks`]; when it returns 1, [`gram_symmetric`]
+/// Selects split-K via `gram_chunks`; when it returns 1, [`gram_symmetric()`]
 /// writes straight into `g` and no reduce is launched.
 ///
 /// ### Params
@@ -433,6 +436,8 @@ mod tests {
     use super::*;
     use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
 
+    /// The default device, or `None` when the machine has no usable GPU, in
+    /// which case every test here returns early rather than failing.
     fn try_device() -> Option<WgpuDevice> {
         let device = WgpuDevice::DefaultDevice;
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -487,6 +492,10 @@ mod tests {
         (got, gram_host(&a_host, n, d))
     }
 
+    /// Compare `[d, d]` row-major buffers to a relative tolerance, floored at 1
+    /// so near-zero entries do not demand impossible precision. The all-zeros
+    /// guard is the one that matters: a rejected dispatch leaves the output
+    /// untouched and reports nothing, so without it a dead kernel passes.
     fn assert_close(got: &[f32], want: &[f32], d: usize, tol: f32) {
         assert!(
             got.iter().any(|v| v.abs() > 1e-6),
@@ -503,9 +512,9 @@ mod tests {
         }
     }
 
-    //////////////////
-    // Actual tests //
-    //////////////////
+    ///////////
+    // Tests //
+    ///////////
 
     // Exactly one tile, no tails, single chunk.
     #[test]
