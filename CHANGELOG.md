@@ -11,7 +11,6 @@
   * Custom kernels for the correlations which beat `cubek` (at least on Apple
     Silicon).
 
-
 ## 0.3.8
 
 ### Features
