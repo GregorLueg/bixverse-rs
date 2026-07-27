@@ -112,9 +112,9 @@ fn compute_marker_sensitivity(
 /// * `use_sensitivity` - Boolean. If set up, common cell type markers are down
 ///   weighted.
 /// * `gene_batch_size` - Optional gene batch size. If not provided, defaults
-///   to [GENE_BATCH_SIZE].
+///   to `GENE_BATCH_SIZE` (100).
 /// * `weight_floor` - Optional weight floor. If not provided, defaults to
-///   [WEIGHT_FLOOR]
+///   `WEIGHT_FLOOR` (0.1)
 /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
 ///   verbosity.
 ///

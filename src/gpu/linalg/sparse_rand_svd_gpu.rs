@@ -38,8 +38,9 @@ use ann_search_rs::gpu::tensor::GpuTensor;
 use cubecl::Runtime;
 use cubek::matmul::definition::MatmulPrecision;
 use faer::Mat;
+use rand::SeedableRng;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand_distr::{Distribution, Normal};
 use std::time::Instant;
 
 use crate::core::math::pca_svd::SvdResults;
@@ -190,12 +191,17 @@ where
     drop(csr_host);
     drop(data);
 
+    // Standard normal, matching the CPU randomised SVDs in `core::math::
+    // pca_svd`. A uniform sketch on [0, 1) is not zero-mean, so Omega carries
+    // a rank-1 all-ones component that every sketch column shares: the
+    // columns of Y come out heavily correlated, which both wastes the sketch
+    // and leaves Y badly conditioned for CholeskyQR2.
     let mut rng = StdRng::seed_from_u64(seed);
+    let normal = Normal::new(0.0, 1.0).expect("unit normal is always valid");
     let omega_scaled: Vec<T> = (0..m * s)
         .map(|i| {
             let j = i / s;
-            let u = rng.random::<f64>();
-            T::from(u).unwrap() / col_stds[j]
+            T::from(normal.sample(&mut rng)).unwrap() / col_stds[j]
         })
         .collect();
     let omega_gpu = GpuTensor::<R, T>::from_slice(&omega_scaled, vec![m, s], &client);
@@ -210,6 +216,13 @@ where
     let zero_s = vec![T::from(0.0).unwrap(); s];
     let x_sum_buf = GpuTensor::<R, T>::from_slice(&zero_s, vec![s], &client);
     let m_dot_q_buf = GpuTensor::<R, T>::from_slice(&zero_s, vec![s], &client);
+
+    // CholeskyQR2 scratch, allocated once and reused across all
+    // `n_power_iters + 1` calls. The `[n, s]` buffer is ~520 MB at the
+    // production shape and its first kernel write faults its pages in, so
+    // letting `cholesky_qr2` allocate it per call pays that repeatedly.
+    let q1_scratch = GpuTensor::<R, T>::empty(vec![n, s], &client);
+    let g_scratch = GpuTensor::<R, T>::empty(vec![s, s], &client);
 
     // -- Initial sketch --
     launch_dense_column_weighted_sum::<R, T>(&mu_gpu, &omega_gpu, &c_buf, m, s, &client);
@@ -227,7 +240,7 @@ where
         &client,
     )?;
 
-    cholesky_qr2::<R, T, MP>(&client, &y_buf, &q_buf, n, s)?;
+    cholesky_qr2::<R, T, MP>(&client, &y_buf, &q_buf, &q1_scratch, &g_scratch, n, s)?;
 
     // -- Power iters --
     for iter in 0..params.n_power_iters {
@@ -269,7 +282,7 @@ where
             &client,
         )?;
 
-        cholesky_qr2::<R, T, MP>(&client, &y_buf, &q_buf, n, s)?;
+        cholesky_qr2::<R, T, MP>(&client, &y_buf, &q_buf, &q1_scratch, &g_scratch, n, s)?;
 
         if verbosity.detailed_verbosity() {
             println!(
@@ -483,6 +496,136 @@ mod tests {
                 assert!(svd.s[i - 1] >= svd.s[i], "not sorted at {}", i);
             }
         }
+    }
+
+    // Accuracy against the dense reference at a size where the quality of the
+    // random sketch actually shows. The other tests here are 60x20, small
+    // enough that almost any sketch works.
+    #[test]
+    fn test_randomised_sparse_svd_gpu_accuracy_vs_dense() {
+        let Some(device) = try_device() else { return };
+
+        let (n, m, n_components, oversampling) = (3000usize, 300usize, 20usize, 30usize);
+
+        // Deterministic pseudo-random values so the matrix is full rank, with
+        // a decaying low-rank signal on top so the spectrum is not flat.
+        let hash = |a: usize, b: usize| -> f32 {
+            let mut h = (a as u64)
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .wrapping_add((b as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F));
+            h ^= h >> 29;
+            h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            h ^= h >> 32;
+            ((h >> 40) as f32) / 16_777_216.0
+        };
+
+        let mut dense = vec![0.0f32; n * m];
+        for i in 0..n {
+            for j in 0..m {
+                if (i + j) % 10 != 0 {
+                    continue;
+                }
+                // Strong low-rank structure over `n_components` factors so the
+                // leading singular values sit well clear of the noise floor.
+                // Without a spectral gap the truncation error swamps any
+                // difference the sketch makes, and the test measures nothing.
+                let mut v = 0.0f32;
+                for f in 0..24 {
+                    v += 6.0 * (hash(i, f) - 0.5) * (hash(j, f + 100) - 0.5)
+                        / (1.0 + f as f32).sqrt();
+                }
+                dense[i * m + j] = v + 0.15 * hash(i, j + 7) + 0.1;
+            }
+        }
+
+        // CSC view of the same matrix.
+        let mut values = Vec::new();
+        let mut indices = Vec::new();
+        let mut indptr = vec![0u32];
+        for j in 0..m {
+            for i in 0..n {
+                let v = dense[i * m + j];
+                if v != 0.0 {
+                    values.push(v);
+                    indices.push(i as u32);
+                }
+            }
+            indptr.push(values.len() as u32);
+        }
+
+        // Column statistics over the full dense column, zeros included, which
+        // is what the driver's implicit centring and scaling assume.
+        let mut mu = vec![0.0f32; m];
+        let mut sigma = vec![0.0f32; m];
+        for j in 0..m {
+            let mean: f64 = (0..n).map(|i| dense[i * m + j] as f64).sum::<f64>() / n as f64;
+            let var: f64 = (0..n)
+                .map(|i| {
+                    let d = dense[i * m + j] as f64 - mean;
+                    d * d
+                })
+                .sum::<f64>()
+                / n as f64;
+            mu[j] = mean as f32;
+            sigma[j] = (var.sqrt() as f32).max(1e-6);
+        }
+
+        // Dense reference on the same centred and scaled matrix.
+        let scaled = Mat::<f32>::from_fn(n, m, |i, j| (dense[i * m + j] - mu[j]) / sigma[j]);
+        let want = scaled.thin_svd().unwrap();
+
+        // Sweep the power iterations. Zero is what actually exercises the
+        // sketch; two is the production setting, where power iteration is
+        // expected to hide most of the sketch's quality.
+        let mut worst_at = Vec::new();
+        for n_power in [0usize, 1, 2] {
+            let csc = CompressedSparseData2::<f32, f32>::new_csc(
+                &values,
+                &indices,
+                &indptr,
+                Some(&values),
+                (n, m),
+            );
+            let got = randomised_sparse_svd_gpu::<WgpuRuntime, f32, f32>(
+                csc,
+                &mu,
+                &sigma,
+                None,
+                n_components,
+                Some(RandSvdGpuParams::new(n_power, oversampling)),
+                42,
+                device.clone(),
+                0,
+            )
+            .unwrap();
+
+            let mut worst = 0.0f32;
+            for i in 0..n_components {
+                let rel = (got.s[i] - want.S()[i]).abs() / want.S()[i].abs();
+                worst = worst.max(rel);
+            }
+            println!(
+                "n_power_iters={}: worst relative error {:.5}",
+                n_power, worst
+            );
+            worst_at.push(worst);
+        }
+
+        // The sweep is the point: the error must fall sharply with power
+        // iterations, otherwise this gate is insensitive and would pass on a
+        // broken sketch. Measured 0.184 / 0.042 / 0.010.
+        assert!(
+            worst_at[0] > 4.0 * worst_at[2],
+            "error barely moved across power iterations ({:.5} -> {:.5}); \
+             this gate cannot detect sketch quality",
+            worst_at[0],
+            worst_at[2]
+        );
+        assert!(
+            worst_at[2] < 0.015,
+            "worst relative singular-value error {:.5} at the production setting",
+            worst_at[2]
+        );
     }
 
     #[test]

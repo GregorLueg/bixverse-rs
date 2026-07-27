@@ -377,9 +377,7 @@ pub enum BixverseErrors {
 
     /// A batch has too few cells for the requested anchor search
     #[cfg(feature = "single-cell")]
-    #[error(
-        "Batch {batch} has {n_cells} cells, needs at least {required} for anchor finding."
-    )]
+    #[error("Batch {batch} has {n_cells} cells, needs at least {required} for anchor finding.")]
     TooFewCellsForAnchor {
         /// Batch index
         batch: usize,
@@ -592,6 +590,22 @@ pub enum BixverseErrors {
     #[cfg(feature = "gpu")]
     #[error("GPU: A matrix multiplication occurred: {0}")]
     GpuMatmul(String),
+    /// A kernel launch asked for more workgroups in one grid dimension than
+    /// the device allows. Dispatching it anyway kills the cubecl server
+    /// thread, after which every later call on that client fails with an
+    /// unrelated `CallError`, so it is caught before the launch instead.
+    #[cfg(feature = "gpu")]
+    #[error(
+        "GPU: kernel '{kernel}' requested a cube count of {requested:?}, device limit is {limit:?}"
+    )]
+    GpuCubeCountExceeded {
+        /// Name of the kernel whose dispatch was rejected.
+        kernel: &'static str,
+        /// Requested cube count as `(x, y, z)`.
+        requested: (u32, u32, u32),
+        /// Per-dimension device limit as `(x, y, z)`.
+        limit: (u32, u32, u32),
+    },
     // -- gpu / single cell --
     /// GPU Harmony only supports one co-variate for now (based on Arrowhead)
     #[cfg(feature = "gpu")]

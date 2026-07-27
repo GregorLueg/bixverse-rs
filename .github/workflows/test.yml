@@ -94,4 +94,4 @@ jobs:
         env:
           LD_LIBRARY_PATH: ${{ steps.setup-r.outputs.r-home }}/lib
           DYLD_LIBRARY_PATH: ${{ steps.setup-r.outputs.r-home }}/lib
-        run: cargo test --features gpu
+        run: cargo test --features gpu,single-cell

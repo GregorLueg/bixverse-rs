@@ -1,5 +1,17 @@
 # News
 
+## 0.3.9
+
+### Features
+
+- **GPU improvements**:
+  * An actually fast GPU-accelerated SCENIC version that beats CPU.
+  * Improved k-means clustering on the GPU.
+  * Faster randomised sparse SVD on the GPU.
+  * Custom kernels for the correlations which beat `cubek` (at least on Apple
+    Silicon).
+- Different AUCell methods with true alternatives.
+
 ## 0.3.8
 
 ### Features

@@ -13,12 +13,11 @@
 //! each other. That is what "statistical parity" means for this workload,
 //! per the plan's "sanity floor, not precision target" wording.
 
-#![allow(clippy::needless_range_loop)]
-#![cfg(all(
-    feature = "single-cell",
-    feature = "large_scale_diagnostics",
-    feature = "gpu"
-))]
+#![allow(clippy::needless_range_loop, clippy::field_reassign_with_default)]
+// Helpers feeding the `large_scale_diagnostics` tests are unused when that
+// feature is off. Not worth cfg-ing each one individually in a test file.
+#![allow(dead_code)]
+#![cfg(all(feature = "single-cell", feature = "gpu"))]
 
 use bixverse_rs::gpu::sc_gpu::scenic_gpu::{
     ScenicGpuParams, fit_extra_trees_gpu_single, fit_multi_trees_gpu, run_scenic_grn_gpu,
@@ -320,6 +319,120 @@ fn extra_trees_gpu_matches_cpu_top10() {
     );
 }
 
+/// RandomForest at the toy shape. Sized to run in a debug CI build.
+///
+/// RF draws no random thresholds, so it converges far faster than ET and a
+/// handful of trees is enough for the informative block to dominate the top-10.
+/// Seeds and tree count are kept low deliberately: the CI gpu job builds in
+/// debug and falls back to lavapipe software Vulkan on Linux.
+fn rf_toy_config(n_trees: usize) -> RandomForestConfig {
+    let mut c = RandomForestConfig::default();
+    c.n_trees = n_trees;
+    c.max_depth = Some(6);
+    // Matches `config()`: the ET default of 50 would make max_depth 6
+    // unreachable on 256 samples.
+    c.min_samples_leaf = 8;
+    c.n_features_split = 16;
+    c
+}
+
+/// Statistical-parity check for RandomForest, anchored the same way as
+/// [`extra_trees_gpu_matches_cpu_top10`]: the GPU must agree with the CPU at
+/// least as well as two CPU runs on different seeds agree with each other.
+///
+/// This is the only RF fidelity test that runs in CI. The two 0.95 Pearson
+/// gates sit behind `large_scale_diagnostics`, which no workflow enables.
+#[test]
+fn rf_gpu_matches_cpu_top10() {
+    let Some(device) = try_device() else {
+        eprintln!("scenic_gpu (RF toy): no wgpu device available -- skipping");
+        return;
+    };
+
+    const RF_TOY_TREES: usize = 16;
+    const RF_TOY_SEEDS: u64 = 5;
+
+    let cfg = rf_toy_config(RF_TOY_TREES);
+
+    let mut cpu_gpu_overlaps: Vec<usize> = Vec::new();
+    let mut cpu_cpu_overlaps: Vec<usize> = Vec::new();
+    let mut pearsons: Vec<f32> = Vec::new();
+
+    for seed_i in 0..RF_TOY_SEEDS {
+        let seed = 20260711 + seed_i;
+        let seed_b = seed.wrapping_add(0xC0FFEE);
+        let x = make_toy_quantised(seed);
+        let (_sparse_y, axes) = make_toy_targets(&x, seed.wrapping_add(1));
+
+        let cpu = fit_multi_trees_sparse(&axes, &x, N_SAMPLES, &cfg, seed as usize)
+            .expect("CPU RF fit failed");
+        let cpu_b = fit_multi_trees_sparse(&axes, &x, N_SAMPLES, &cfg, seed_b as usize)
+            .expect("CPU RF baseline fit failed");
+        let gpu = fit_multi_trees_gpu::<WgpuRuntime>(
+            &axes,
+            &x,
+            N_SAMPLES,
+            &cfg,
+            seed as usize,
+            device.clone(),
+            &ScenicGpuParams::default(),
+        )
+        .expect("GPU RF fit failed");
+
+        assert_eq!(cpu.len(), N_TARGETS);
+        assert_eq!(gpu.len(), N_TARGETS);
+        for t in 0..N_TARGETS {
+            assert_eq!(cpu[t].len(), N_FEATURES);
+            assert_eq!(gpu[t].len(), N_FEATURES);
+            pearsons.push(pearson(&cpu[t], &gpu[t]));
+        }
+
+        let cpu_sum = sum_importances(&cpu);
+        let cpu_b_sum = sum_importances(&cpu_b);
+        let gpu_sum = sum_importances(&gpu);
+
+        // Non-zero importances. A silently dead kernel returns all zeros, which
+        // still produces a plausible-looking top-10 out of an arbitrary
+        // tie-break order.
+        let gpu_total: f32 = gpu_sum.iter().sum();
+        assert!(
+            gpu_total > 0.0,
+            "seed {seed_i}: GPU RF importances are all zero"
+        );
+
+        cpu_gpu_overlaps.push(overlap(
+            &top_k_indices(&cpu_sum, TOP_K),
+            &top_k_indices(&gpu_sum, TOP_K),
+        ));
+        cpu_cpu_overlaps.push(overlap(
+            &top_k_indices(&cpu_sum, TOP_K),
+            &top_k_indices(&cpu_b_sum, TOP_K),
+        ));
+    }
+
+    let cpu_gpu_mean =
+        cpu_gpu_overlaps.iter().sum::<usize>() as f32 / (cpu_gpu_overlaps.len() * TOP_K) as f32;
+    let cpu_cpu_mean =
+        cpu_cpu_overlaps.iter().sum::<usize>() as f32 / (cpu_cpu_overlaps.len() * TOP_K) as f32;
+    let pearson_mean = pearsons.iter().sum::<f32>() / pearsons.len() as f32;
+
+    eprintln!(
+        "rf_gpu_matches_cpu_top10 ({RF_TOY_TREES} trees, {RF_TOY_SEEDS} seeds): \
+         cpu-gpu mean = {cpu_gpu_mean:.2}, cpu-cpu baseline = {cpu_cpu_mean:.2}, \
+         mean per-target pearson r = {pearson_mean:.3}"
+    );
+
+    assert!(
+        cpu_gpu_mean >= 0.32,
+        "RF cpu-gpu top-{TOP_K} overlap {cpu_gpu_mean:.2} at or below random baseline (0.31)"
+    );
+    assert!(
+        cpu_gpu_mean + 0.05 >= cpu_cpu_mean,
+        "RF cpu-gpu top-{TOP_K} overlap {cpu_gpu_mean:.2} materially worse than \
+         cpu-cpu seed-variance baseline {cpu_cpu_mean:.2}"
+    );
+}
+
 /////////////////////////
 // Phase 2 test harness //
 /////////////////////////
@@ -448,6 +561,9 @@ fn phase2_cpu_baseline() {
 /// e.g. 100 if CI-runtime budget is tighter (CPU-vs-CPU baseline at n_trees=100
 /// still clears ~0.99 Pearson with the current synthetic data).
 #[test]
+// 10k-40k sample fits against a sequential CPU baseline. Minutes on a GH
+// runner, where the Linux GPU job falls back to lavapipe software Vulkan.
+#[cfg(feature = "large_scale_diagnostics")]
 fn phase2_multi_tree_pearson() {
     let Some(device) = try_device() else {
         eprintln!("scenic_gpu (Phase 2): no wgpu device available -- skipping");
@@ -636,6 +752,8 @@ fn phase2_multi_batch_determinism() {
 /// left at the CPU RF default of 250 rather than ET's 500. Run under
 /// `cargo test --release` -- debug mode is dominated by CPU-side RF.
 #[test]
+// 250-tree RandomForest fit against a sequential CPU baseline. Same reason.
+#[cfg(feature = "large_scale_diagnostics")]
 fn phase3_random_forest_pearson() {
     let Some(device) = try_device() else {
         eprintln!("scenic_gpu (Phase 3 RF): no wgpu device available -- skipping");
@@ -691,6 +809,8 @@ fn phase3_random_forest_pearson() {
 /// Phase 3 bootstrap variant: same RF config but with bootstrap-with-replacement
 /// enabled. Assert the same 0.95 tolerance.
 #[test]
+// As above, bootstrap variant.
+#[cfg(feature = "large_scale_diagnostics")]
 fn phase3_rf_bootstrap_pearson() {
     let Some(device) = try_device() else {
         eprintln!("scenic_gpu (Phase 3 RF+bootstrap): no wgpu device -- skipping");
@@ -741,6 +861,311 @@ fn phase3_rf_bootstrap_pearson() {
         mean_corr >= 0.95,
         "Phase 3 RF+bootstrap mean per-target Pearson r = {mean_corr:.3} < 0.95"
     );
+}
+
+/// Reduced-shape RF Pearson gate that actually runs in CI.
+///
+/// `phase3_random_forest_pearson` is the real fidelity gate but it needs
+/// `large_scale_diagnostics`, and at 10k cells / 250 trees it is far too slow
+/// for a debug build on lavapipe. This runs the same comparison at a fraction
+/// of the work.
+///
+/// Two assertions, and the second is the one that matters. An absolute floor
+/// alone is not meaningful here: what the comparison can reach is bounded by
+/// how far the ensemble has converged, and at this shape a CPU run against
+/// another CPU run on a different seed only reaches ~0.966 itself. So the test
+/// also anchors against that baseline, which is what distinguishes "the GPU
+/// diverged" from "120 trees is not many trees".
+///
+/// Calibrated, not guessed: measured 0.878 cpu-gpu against a 0.891 cpu-cpu
+/// baseline at 30 trees, 0.966 against 0.966 at 120, and 0.982 against 0.984
+/// at 300. The GPU sits on the noise ceiling at every tree count. 120 is the
+/// cheapest of those that leaves headroom over a 0.95 floor, and the result is
+/// stable to three decimals across repeat runs despite the CAS-loop atomic in
+/// `accumulate_importance` varying summation order.
+#[test]
+fn phase3_rf_pearson_small() {
+    let Some(device) = try_device() else {
+        eprintln!("scenic_gpu (Phase 3 RF small): no wgpu device -- skipping");
+        return;
+    };
+
+    const RS_N_SAMPLES: usize = 1_000;
+    const RS_N_FEATURES: usize = 50; // n_features_split = 0 -> sqrt(50) = 7
+    const RS_N_TARGETS: usize = 8;
+    const RS_N_TREES: usize = 120;
+    const RS_INFORMATIVE: usize = 6;
+    const RS_SPARSITY: f32 = 0.5;
+    const RS_PEARSON_FLOOR: f32 = 0.95;
+
+    let seed_base = 20260712u64;
+
+    let x = {
+        let mut rng = SmallRng::seed_from_u64(seed_base);
+        let data: Vec<u8> = (0..RS_N_SAMPLES * RS_N_FEATURES)
+            .map(|_| rng.random())
+            .collect();
+        QuantisedStore::from_raw(data, RS_N_SAMPLES, RS_N_FEATURES)
+    };
+
+    let axes = {
+        let mut rng = SmallRng::seed_from_u64(seed_base.wrapping_add(1));
+        // Weights seeded off a fixed constant so target structure is stable if
+        // the shape seeds ever move.
+        let mut weight_rng = SmallRng::seed_from_u64(0x5EED_1234);
+        let mut weights = vec![vec![0.0f32; RS_INFORMATIVE]; RS_N_TARGETS];
+        for w_row in weights.iter_mut() {
+            for w in w_row.iter_mut() {
+                *w = weight_rng.random::<f32>() + 1.0;
+            }
+        }
+        let feats: Vec<&[u8]> = (0..RS_INFORMATIVE).map(|f| x.get_col(f)).collect();
+
+        let mut cols_indices: Vec<Vec<usize>> = vec![Vec::new(); RS_N_TARGETS];
+        let mut cols_values: Vec<Vec<f32>> = vec![Vec::new(); RS_N_TARGETS];
+        for c in 0..RS_N_SAMPLES {
+            for t in 0..RS_N_TARGETS {
+                if rng.random::<f32>() < RS_SPARSITY {
+                    let mut signal = 0.0f32;
+                    for f in 0..RS_INFORMATIVE {
+                        signal += weights[t][f] * (feats[f][c] as f32 / 255.0);
+                    }
+                    let noise: f32 = rng.random::<f32>() * 0.05;
+                    cols_indices[t].push(c);
+                    cols_values[t].push(signal + noise + 0.01);
+                }
+            }
+        }
+        cols_indices
+            .into_iter()
+            .zip(cols_values)
+            .map(|(idx, vs)| {
+                SparseAxis::<u32, f32>::new_csc(idx, Vec::new(), Some(vs), RS_N_SAMPLES)
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let mut cfg = RandomForestConfig::default();
+    cfg.n_trees = RS_N_TREES;
+    cfg.max_depth = Some(5);
+    cfg.min_samples_leaf = 20;
+    cfg.n_features_split = 0;
+
+    let cpu = fit_multi_trees_sparse(&axes, &x, RS_N_SAMPLES, &cfg, seed_base as usize)
+        .expect("CPU RF fit failed");
+    let cpu_b = fit_multi_trees_sparse(
+        &axes,
+        &x,
+        RS_N_SAMPLES,
+        &cfg,
+        seed_base.wrapping_add(0xBEEF) as usize,
+    )
+    .expect("CPU RF baseline fit failed");
+    let gpu = fit_multi_trees_gpu::<WgpuRuntime>(
+        &axes,
+        &x,
+        RS_N_SAMPLES,
+        &cfg,
+        seed_base as usize,
+        device.clone(),
+        &ScenicGpuParams::default(),
+    )
+    .expect("GPU RF fit failed");
+
+    let mut per_target: Vec<f32> = Vec::with_capacity(RS_N_TARGETS);
+    let mut baseline: Vec<f32> = Vec::with_capacity(RS_N_TARGETS);
+    for t in 0..RS_N_TARGETS {
+        assert_eq!(cpu[t].len(), RS_N_FEATURES);
+        assert_eq!(gpu[t].len(), RS_N_FEATURES);
+        per_target.push(pearson(&cpu[t], &gpu[t]));
+        baseline.push(pearson(&cpu[t], &cpu_b[t]));
+    }
+    let mean_corr = per_target.iter().sum::<f32>() / per_target.len() as f32;
+    let baseline_corr = baseline.iter().sum::<f32>() / baseline.len() as f32;
+
+    eprintln!(
+        "phase3_rf_pearson_small ({RS_N_SAMPLES} cells * {RS_N_FEATURES} feats * \
+         {RS_N_TARGETS} targets * {RS_N_TREES} trees): cpu-gpu r = {mean_corr:.3}, \
+         cpu-cpu baseline r = {baseline_corr:.3} \
+         (cpu-gpu per-target: {per_target:?})"
+    );
+
+    assert!(
+        mean_corr >= RS_PEARSON_FLOOR,
+        "Phase 3 RF (small) cpu-gpu Pearson r = {mean_corr:.3} < {RS_PEARSON_FLOOR} floor \
+         (per-target: {per_target:?})"
+    );
+    assert!(
+        mean_corr + 0.05 >= baseline_corr,
+        "Phase 3 RF (small) cpu-gpu Pearson r = {mean_corr:.3} materially worse than the \
+         cpu-cpu seed-variance baseline {baseline_corr:.3}; the GPU is diverging beyond \
+         what the tree count explains"
+    );
+}
+
+/// RF fidelity when the quantised bins are *skewed*, which is what real data
+/// looks like and what none of the other GPU tests exercise.
+///
+/// Every other test here builds its store with `QuantisedStore::from_raw` and
+/// uniform random u8 bins. Uniform bins are the easy case for the GPU's coarser
+/// bin axis: merging them loses almost nothing. Real single-cell data quantises
+/// to a spike at bin 0 with a long right tail, where the informative split
+/// points are crowded into the tail and merging bins there is a much bigger ask.
+///
+/// This is the test that has to hold before `SMEM_HIST_SLOTS` is tightened, not
+/// the uniform ones.
+#[test]
+fn phase3_rf_pearson_skewed_bins() {
+    let Some(device) = try_device() else {
+        eprintln!("scenic_gpu (Phase 3 RF skewed): no wgpu device -- skipping");
+        return;
+    };
+
+    const SK_N_SAMPLES: usize = 1_500;
+    const SK_N_FEATURES: usize = 50;
+    const SK_N_TARGETS: usize = 64; // full batch, so the GPU takes its coarsest bins
+    const SK_N_TREES: usize = 120;
+    const SK_INFORMATIVE: usize = 6;
+    const SK_ZERO_FRAC: f32 = 0.6;
+
+    let seed_base = 20260713u64;
+
+    // Spike at bin 0 plus a right-skewed tail, roughly what QuantisedStore
+    // produces from sparse counts.
+    let x = {
+        let mut rng = SmallRng::seed_from_u64(seed_base);
+        let data: Vec<u8> = (0..SK_N_SAMPLES * SK_N_FEATURES)
+            .map(|_| {
+                if rng.random::<f32>() < SK_ZERO_FRAC {
+                    0u8
+                } else {
+                    let u: f32 = rng.random();
+                    (u * u * 255.0) as u8
+                }
+            })
+            .collect();
+        QuantisedStore::from_raw(data, SK_N_SAMPLES, SK_N_FEATURES)
+    };
+
+    let axes = {
+        let mut rng = SmallRng::seed_from_u64(seed_base.wrapping_add(1));
+        let mut weight_rng = SmallRng::seed_from_u64(0x51CE_D000);
+        let mut weights = vec![vec![0.0f32; SK_INFORMATIVE]; SK_N_TARGETS];
+        for w_row in weights.iter_mut() {
+            for w in w_row.iter_mut() {
+                *w = weight_rng.random::<f32>() + 1.0;
+            }
+        }
+        let feats: Vec<&[u8]> = (0..SK_INFORMATIVE).map(|f| x.get_col(f)).collect();
+
+        let mut cols_indices: Vec<Vec<usize>> = vec![Vec::new(); SK_N_TARGETS];
+        let mut cols_values: Vec<Vec<f32>> = vec![Vec::new(); SK_N_TARGETS];
+        for c in 0..SK_N_SAMPLES {
+            for t in 0..SK_N_TARGETS {
+                if rng.random::<f32>() < 0.5 {
+                    let mut signal = 0.0f32;
+                    for f in 0..SK_INFORMATIVE {
+                        signal += weights[t][f] * (feats[f][c] as f32 / 255.0);
+                    }
+                    let noise: f32 = rng.random::<f32>() * 0.05;
+                    cols_indices[t].push(c);
+                    cols_values[t].push(signal + noise + 0.01);
+                }
+            }
+        }
+        cols_indices
+            .into_iter()
+            .zip(cols_values)
+            .map(|(idx, vs)| {
+                SparseAxis::<u32, f32>::new_csc(idx, Vec::new(), Some(vs), SK_N_SAMPLES)
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let mut cfg = RandomForestConfig::default();
+    cfg.n_trees = SK_N_TREES;
+    cfg.max_depth = Some(6);
+    cfg.min_samples_leaf = 20;
+    cfg.n_features_split = 0;
+
+    let cpu = fit_multi_trees_sparse(&axes, &x, SK_N_SAMPLES, &cfg, seed_base as usize)
+        .expect("CPU RF fit failed");
+    let cpu_b = fit_multi_trees_sparse(
+        &axes,
+        &x,
+        SK_N_SAMPLES,
+        &cfg,
+        seed_base.wrapping_add(0xBEEF) as usize,
+    )
+    .expect("CPU RF baseline fit failed");
+    let gpu = fit_multi_trees_gpu::<WgpuRuntime>(
+        &axes,
+        &x,
+        SK_N_SAMPLES,
+        &cfg,
+        seed_base as usize,
+        device.clone(),
+        &ScenicGpuParams::default(),
+    )
+    .expect("GPU RF fit failed");
+
+    let mut per_target: Vec<f32> = Vec::with_capacity(SK_N_TARGETS);
+    let mut baseline: Vec<f32> = Vec::with_capacity(SK_N_TARGETS);
+    for t in 0..SK_N_TARGETS {
+        per_target.push(pearson(&cpu[t], &gpu[t]));
+        baseline.push(pearson(&cpu[t], &cpu_b[t]));
+    }
+    let mean_corr = per_target.iter().sum::<f32>() / per_target.len() as f32;
+    let baseline_corr = baseline.iter().sum::<f32>() / baseline.len() as f32;
+
+    eprintln!(
+        "phase3_rf_pearson_skewed_bins ({SK_N_SAMPLES} cells * {SK_N_FEATURES} feats * \
+         {SK_N_TARGETS} targets * {SK_N_TREES} trees, {SK_ZERO_FRAC} zeros): \
+         cpu-gpu r = {mean_corr:.3}, cpu-cpu baseline r = {baseline_corr:.3}"
+    );
+
+    assert!(
+        mean_corr >= 0.95,
+        "RF on skewed bins: cpu-gpu Pearson r = {mean_corr:.3} < 0.95 floor \
+         (per-target: {per_target:?})"
+    );
+    assert!(
+        mean_corr + 0.05 >= baseline_corr,
+        "RF on skewed bins: cpu-gpu Pearson r = {mean_corr:.3} materially worse than the \
+         cpu-cpu seed-variance baseline {baseline_corr:.3}"
+    );
+}
+
+/// The GPU is going to bin at a coarser resolution than the shared
+/// [`QuantisedStore`], which stays at 256 u8 bins. A split found at coarse
+/// threshold `thr_c` has to be written back as a fine threshold so
+/// `reassign_samples` and the CPU-side tree semantics keep working unchanged.
+///
+/// The widening is `(thr_c << shift) | ((1 << shift) - 1)`, and this asserts it
+/// is exact for every shift, threshold and bin: `b >> shift <= thr_c` must hold
+/// for exactly the same bins as `b <= widened`.
+#[test]
+fn coarse_threshold_roundtrip() {
+    for shift in 1..=3u32 {
+        let n_coarse = 256u32 >> shift;
+        // Threshold n_coarse - 1 sends everything left and is never a
+        // candidate, matching how the fine path excludes bin 255.
+        for thr_c in 0..n_coarse - 1 {
+            let widened = (thr_c << shift) | ((1u32 << shift) - 1);
+            assert!(
+                widened < 256,
+                "shift {shift}, thr_c {thr_c}: widened {widened} out of u8 range"
+            );
+            for b in 0..256u32 {
+                assert_eq!(
+                    b >> shift <= thr_c,
+                    b <= widened,
+                    "shift {shift}, thr_c {thr_c}, bin {b}: coarse and widened \
+                     tests disagree"
+                );
+            }
+        }
+    }
 }
 
 /// ET path still works after the RF dispatch was added. Uses the smallest

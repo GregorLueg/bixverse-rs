@@ -181,7 +181,7 @@ where
 /// * `file` - The h5ad file reference
 /// * `raw_slot` - The slot for the raw data
 /// * `n_check` - Optional number of entries to check. If not provided, defaults
-///   to [N_CHECK].
+///   to `N_CHECK` (100).
 ///
 /// ### Returns
 ///
@@ -210,7 +210,7 @@ pub fn check_h5ad_is_raw(
 /// * `file` - The h5ad file reference
 /// * `raw_slot` - The slot for the raw data
 /// * `n_check` - Optional number of entries to check. If not provided, defaults
-///   to [N_CHECK].
+///   to `N_CHECK` (100).
 ///
 /// ### Returns
 ///

@@ -796,7 +796,7 @@ fn normal_model(
 ///
 /// Two graph representations are held: the original non-redundant
 /// `neighbours`/`weights` arrays drive the autocorrelation path
-/// (`compute_all_genes*`), while the symmetric [GraphCsr] drives the pair path
+/// (`compute_all_genes*`), while the symmetric `GraphCsr` drives the pair path
 /// (`compute_gene_cor*`).
 #[derive(Clone, Debug)]
 pub struct Hotspot<'a> {

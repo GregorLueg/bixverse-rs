@@ -66,7 +66,7 @@ const MAX_DEPTH: usize = 10;
 const MIN_SAMPLES_LEAF: usize = 50;
 const N_FEATURES_SPLIT: usize = 0;
 const N_INFORMATIVE: usize = 10;
-const SPARSITY: f32 = 0.5;
+const SPARSITY: f32 = 0.2;
 const SEED: usize = 20260708;
 
 /// Ceiling per bench iteration (median-of-3). Any shape whose warmup alone
@@ -77,6 +77,30 @@ const SKIP_ABOVE_SECS: f32 = 300.0;
 /// targets / sqrt(1000) features per split. The default 4 GiB errors past
 /// 50k cells on this shape.
 const BENCH_WAVE_BUDGET: usize = 12 * 1024 * 1024 * 1024;
+
+/// Idle seconds before each block of CPU rows, so the package sheds the heat a
+/// preceding GPU block put into it.
+///
+/// Running the two interleaved is how an earlier run of this bench produced an
+/// RF CPU baseline 2.3x slower than it reproduces at. Ordering the rows CPU-first
+/// within a block fixed most of it, but `kernel_matrix` still ends on a GPU row
+/// and `end_to_end_matrix` still opens with a CPU one, and the same seam exists
+/// between successive `CELL_COUNTS` iterations. Override with
+/// `SCENIC_BENCH_COOLDOWN=0` to measure without it.
+const COOLDOWN_SECS: u64 = 60;
+
+/// Sleep [`COOLDOWN_SECS`] (or the `SCENIC_BENCH_COOLDOWN` override) and say so.
+fn cooldown() {
+    let secs = std::env::var("SCENIC_BENCH_COOLDOWN")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(COOLDOWN_SECS);
+    if secs == 0 {
+        return;
+    }
+    println!("  (cooling down {secs}s before the CPU rows)");
+    std::thread::sleep(std::time::Duration::from_secs(secs));
+}
 
 ////////////////
 // Data build //
@@ -327,9 +351,12 @@ fn kernel_matrix(device: &WgpuDevice) {
         let x = make_features_kernel(n, SEED as u64 + n as u64);
         let axes = make_targets_kernel(&x, n, SEED as u64 + n as u64 + 1);
 
+        // CPU rows first, then GPU, with a cooldown in front so a preceding GPU
+        // block cannot throttle them. See [`COOLDOWN_SECS`].
+        cooldown();
         run_kernel_cpu(n, &x, &axes, &et, &format!("et_cpu_{l}"));
-        run_kernel_gpu(n, &x, &axes, &et, device, &format!("et_gpu_{l}"));
         run_kernel_cpu(n, &x, &axes, &rf, &format!("rf_cpu_{l}"));
+        run_kernel_gpu(n, &x, &axes, &et, device, &format!("et_gpu_{l}"));
         run_kernel_gpu(n, &x, &axes, &rf, device, &format!("rf_gpu_{l}"));
         println!();
     }
@@ -402,9 +429,13 @@ fn end_to_end_matrix(device: &WgpuDevice) {
 
         let csc = make_csc_e2e(n, SEED as u64 + n as u64 + 2);
 
+        // CPU rows first; see the note in kernel_matrix. The cooldown matters
+        // more here than anywhere else: this is the first CPU row after the
+        // whole kernel matrix, whose last row is a GPU one.
+        cooldown();
         run_e2e_cpu(&csc, &et_params, &format!("et_e2e_cpu_{l}"));
-        run_e2e_gpu(&csc, &et_params, device, &format!("et_e2e_gpu_{l}"));
         run_e2e_cpu(&csc, &rf_params, &format!("rf_e2e_cpu_{l}"));
+        run_e2e_gpu(&csc, &et_params, device, &format!("et_e2e_gpu_{l}"));
         run_e2e_gpu(&csc, &rf_params, device, &format!("rf_e2e_gpu_{l}"));
         println!();
     }
