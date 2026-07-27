@@ -340,7 +340,7 @@ impl Default for AucellParams {
         Self {
             auc_type: AucType::Recovery,
             max_rank: None,
-            standardise: false,
+            standardise: true,
         }
     }
 }

@@ -10,6 +10,7 @@
   * Faster randomised sparse SVD on the GPU.
   * Custom kernels for the correlations which beat `cubek` (at least on Apple
     Silicon).
+- Different AUCell methods that make more sense.
 
 ## 0.3.8
 
