@@ -338,7 +338,7 @@ impl AucellParams {
 impl Default for AucellParams {
     fn default() -> Self {
         Self {
-            auc_type: AucType::Recovery,
+            auc_type: AucType::MannWhitney,
             max_rank: None,
             standardise: false,
         }
