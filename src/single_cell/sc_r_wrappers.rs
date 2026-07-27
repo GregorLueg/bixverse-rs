@@ -11,6 +11,7 @@ use crate::single_cell::mc_generation::{
     seacells::SEACellsParams, super_cells::SuperCellParams,
 };
 use crate::single_cell::sc_analysis::{
+    dge_pathway_scores::{AucellParams, parse_auc_type},
     fast_clusters::FastLouvainParams,
     hotspot::HotSpotParams,
     meld::{MeldParams, parse_lap_type, parse_meld_filter},
@@ -3025,6 +3026,45 @@ impl MeldParams {
             lap_type,
             normalise_indicators,
             knn_params,
+        })
+    }
+}
+
+impl AucellParams {
+    /// Generate AucellParams from an R list, falling back to defaults.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The R list from which to parse the arguments
+    ///
+    /// ### Returns
+    ///
+    /// The populated [AucellParams]
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let defaults = Self::default();
+
+        let auc_type = params
+            .get("auc_type")
+            .and_then(|v| v.as_str())
+            .and_then(parse_auc_type)
+            .unwrap_or(defaults.auc_type);
+
+        let max_rank = params
+            .get("max_rank")
+            .and_then(|v| v.as_real())
+            .map(|v| v as usize)
+            .or(defaults.max_rank);
+
+        let standardise = params
+            .get("standardise")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.standardise);
+
+        Ok(Self {
+            auc_type,
+            max_rank,
+            standardise,
         })
     }
 }
