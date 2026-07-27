@@ -58,7 +58,8 @@ const CENTROID_UNROLL: usize = 8;
 // Params //
 ////////////
 
-/// GPU k-means parameters. Mirrors [KMeansParamsWrappers]
+/// GPU k-means parameters. Mirrors
+/// [crate::ml::clustering::k_means::KMeansParamsWrappers]
 #[derive(Clone, Copy, Debug)]
 pub struct KMeansGpuParams {
     /// Maximum number of Lloyd's iterations.
@@ -232,7 +233,7 @@ pub fn flash_assign_euclidean_vec<S: Float, A: Float, N: Size>(
     assignments[point_idx as usize] = best_idx;
 }
 
-/// Cosine analogue of [`flash_assign_euclidean_vec`]. Uses precomputed L2
+/// Cosine analogue of [`fn@flash_assign_euclidean_vec`]. Uses precomputed L2
 /// norms; minimises `1 - dot(x, c) / (||x|| * ||c||)`.
 ///
 /// ### Type parameters
@@ -435,7 +436,7 @@ fn flash_assign_device<S, A, R>(
 
 /// Squared Euclidean distance from each point to its nearest candidate.
 ///
-/// Same traversal as [`flash_assign_euclidean_vec`], but it keeps the distance
+/// Same traversal as [`fn@flash_assign_euclidean_vec`], but it keeps the distance
 /// rather than the index. This is the D² pass of k-means||, which dominates
 /// that algorithm: it runs `ln(k) + 1` times against a candidate set growing
 /// by `2k` each round, so at n = 1e6, k = 100 it is n * dim * 2005 fused
@@ -543,7 +544,7 @@ pub fn min_dist_euclidean_vec<S: Float, A: Float, N: Size>(
     out[point_idx as usize] = best;
 }
 
-/// Cosine analogue of [`min_dist_euclidean_vec`].
+/// Cosine analogue of [`fn@min_dist_euclidean_vec`].
 ///
 /// ### Type parameters
 ///

@@ -444,7 +444,7 @@ const TSMM_UNROLL: u32 = 4;
 
 /// `C = A * B` for a tall-skinny `A` and a small `B`.
 ///
-/// The same `SimpleUnit` problem as [`gram_partial`], from the other side: for
+/// The same `SimpleUnit` problem as [`fn@gram_partial`], from the other side: for
 /// `[n, k] * [k, s]` with `n` large and `k`, `s` small, cubek gives each unit
 /// one output element and a serial `k`-loop that re-reads `A`'s row from
 /// global for every output column. Measured 34 ms per call at
@@ -461,7 +461,7 @@ const TSMM_UNROLL: u32 = 4;
 /// * `b` - Right operand `[k_dim, s]`, row-major
 /// * `c` - Output `[n, s]`, row-major
 /// * `n` - Rows of `A`
-/// * `k_dim` - Inner dimension, must be at most [`TSMM_K_MAX`]
+/// * `k_dim` - Inner dimension, must be at most `TSMM_K_MAX`
 /// * `s` - Output column count
 ///
 /// ### Grid mapping
@@ -633,7 +633,7 @@ where
 
 /// Compute an orthonormal `Q` from a tall-skinny `Y` via CholeskyQR2.
 ///
-/// Two passes of [`cholesky_qr_pass`]; the second cleans up the precision loss
+/// Two passes of `cholesky_qr_pass`; the second cleans up the precision loss
 /// from the first. On exit, `q` holds an orthonormal basis for the column space
 /// of `y` to fp32 tolerance.
 ///

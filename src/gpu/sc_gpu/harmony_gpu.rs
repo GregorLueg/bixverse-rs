@@ -308,7 +308,7 @@ where
 
 /// Harmony v2 objective (single covariate), reduced to a host scalar.
 ///
-/// Launches [`objective_partials`], reads the `OBJ_BLOCKS` partials back, sums
+/// Launches `objective_partials`, reads the `OBJ_BLOCKS` partials back, sums
 /// them, and applies the `2000 / N` constant. Pinned to `f32`: Harmony is
 /// f32-only and the result is a host scalar. The host sum and the GPU tree
 /// reduction differ in order from the CPU's parallel reduction, so a CPU
@@ -451,7 +451,7 @@ pub fn ridge_correction_gpu<R: Runtime>(
 
 /// Out-of-place row L2-normalisation: `dst[row, :] = src[row, :] / ||src[row,
 /// :]||`, or zeros if the norm is below `1e-8`. Identical to
-/// [`row_l2_normalise`] but preserves `src`; used for `z_cos =
+/// `row_l2_normalise` but preserves `src`; used for `z_cos =
 /// normalise(z_corr)` in the driver, where `z_corr` is the returned value and
 /// must survive.
 ///
@@ -494,7 +494,7 @@ pub fn row_l2_normalise_into<F: Float>(
     }
 }
 
-/// Dispatch [`row_l2_normalise_into`]. One workgroup per row.
+/// Dispatch [`fn@row_l2_normalise_into`]. One workgroup per row.
 pub fn launch_row_l2_normalise_into<R, F>(
     src: &GpuTensor<R, F>,
     dst: &GpuTensor<R, F>,

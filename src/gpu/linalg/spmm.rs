@@ -4,17 +4,17 @@
 //! Both directions of the operator A appearing in randomised SVD are
 //! supported:
 //!
-//! * [`spmm_csr_forward`] computes `Y = A * X - 1 * c^T - r * x_sum^T` where
+//! * [`fn@spmm_csr_forward`] computes `Y = A * X - 1 * c^T - r * x_sum^T` where
 //!   `c` is a precomputed correction vector and `r` is a per-row offset vector.
-//! * [`spmm_csc_transpose`] computes
+//! * [`fn@spmm_csc_transpose`] computes
 //!   `Z = (A^T * Q - mu * q_sum^T - 1 * d^T) / sigma` where `d` is a
 //!   precomputed column offset vector.
 //!
 //! Two small reduction kernels precompute the correction vectors:
 //!
-//! * [`dense_column_weighted_sum`] computes `c = mu^T * X_scaled` for the
+//! * [`fn@dense_column_weighted_sum`] computes `c = mu^T * X_scaled` for the
 //!   forward SpMM.
-//! * [`dense_column_sum`] computes `q_sum = 1^T * Q` for the transpose SpMM.
+//! * [`fn@dense_column_sum`] computes `q_sum = 1^T * Q` for the transpose SpMM.
 //!
 //! ### Threading
 //!
@@ -409,7 +409,7 @@ pub fn dense_column_weighted_sum<A: Float>(
 // Launchers //
 ///////////////
 
-/// Dispatch [`spmm_csr_forward`] with shape and layout checks on the
+/// Dispatch [`fn@spmm_csr_forward`] with shape and layout checks on the
 /// sparse matrix.
 ///
 /// The dense tensors are not shape-checked here because `GpuTensor` does
@@ -489,7 +489,7 @@ where
     Ok(())
 }
 
-/// Dispatch [`spmm_csc_transpose`] with shape and layout checks on the
+/// Dispatch [`fn@spmm_csc_transpose`] with shape and layout checks on the
 /// sparse matrix.
 ///
 /// As with the forward launcher, dense tensors are not shape-checked here.
@@ -570,7 +570,7 @@ where
     Ok(())
 }
 
-/// Dispatch [`dense_column_sum`]. One workgroup per output column.
+/// Dispatch [`fn@dense_column_sum`]. One workgroup per output column.
 pub fn launch_dense_column_sum<R, A>(
     matrix: &GpuTensor<R, A>,
     out: &GpuTensor<R, A>,
@@ -597,7 +597,7 @@ pub fn launch_dense_column_sum<R, A>(
     }
 }
 
-/// Dispatch [`dense_column_weighted_sum`]. One workgroup per output column.
+/// Dispatch [`fn@dense_column_weighted_sum`]. One workgroup per output column.
 pub fn launch_dense_column_weighted_sum<R, A>(
     weights: &GpuTensor<R, A>,
     matrix: &GpuTensor<R, A>,
