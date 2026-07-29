@@ -1,5 +1,11 @@
 # News
 
+## 0.3.10
+
+### Features
+
+- ScType with kNN smoothing.
+
 ## 0.3.9
 
 ### Features
