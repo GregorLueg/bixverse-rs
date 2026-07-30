@@ -26,7 +26,7 @@ use crate::single_cell::sc_analysis::{
 use crate::single_cell::sc_data::h5ad_io::parse_h5ad_format;
 
 use crate::single_cell::sc_annotation::{
-    sc_type::{CellTypeMarkers, SctypeRes},
+    sc_type::{CellTypeMarkers, ScTypeCellParams, SctypeRes, parse_score_calibration},
     symphony::SymphonyMapParams,
 };
 use crate::single_cell::sc_batch_correction::{
@@ -2953,6 +2953,52 @@ impl SctypeRes {
             n_cells,
             n_cell_types,
         })
+    }
+}
+
+impl ScTypeCellParams {
+    /// Generate the [ScTypeCellParams] from an R list
+    ///
+    /// Missing fields fall back to the defaults rather than erroring. An
+    /// unrecognised calibration string is an error, since silently scoring on
+    /// raw values would hide the mistake.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The R list from which to parse the parameters
+    ///
+    /// ### Returns
+    ///
+    /// The [ScTypeCellParams] or Error
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let data: HashMap<&str, Robj> = r_list.try_into()?;
+
+        let calibration =
+            match data.get("calibration").and_then(|v| v.as_str()) {
+                Some(s) => Some(parse_score_calibration(s).ok_or_else(|| {
+                    Error::Other(format!("Invalid ScType score calibration: {}", s))
+                })?),
+                None => None,
+            };
+
+        Ok(Self::new(
+            data.get("alpha")
+                .and_then(|v| v.as_real())
+                .map(|x| x as f32),
+            data.get("iterations")
+                .and_then(|v| v.as_integer())
+                .map(|x| x as usize),
+            data.get("tolerance")
+                .and_then(|v| v.as_real())
+                .map(|x| x as f32),
+            calibration,
+            data.get("score_floor")
+                .and_then(|v| v.as_real())
+                .map(|x| x as f32),
+            data.get("purity_threshold")
+                .and_then(|v| v.as_real())
+                .map(|x| x as f32),
+        ))
     }
 }
 
