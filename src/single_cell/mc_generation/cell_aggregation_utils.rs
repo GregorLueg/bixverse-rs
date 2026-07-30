@@ -29,8 +29,8 @@ use crate::prelude::*;
 ///
 /// `CompressedSparseData2` in CSR format with aggregated raw counts and re-
 /// normalised counts per meta cell.
-pub fn aggregate_meta_cells(
-    reader: &ParallelSparseReader,
+pub fn aggregate_meta_cells<S: SingleCellReading>(
+    reader: &S,
     metacells: &[&[usize]],
     target_size: f32,
     n_genes: usize,

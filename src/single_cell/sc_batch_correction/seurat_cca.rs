@@ -106,8 +106,8 @@ impl Default for SeuratCcaParams {
 /// ### Returns
 ///
 /// Dense `Mat<f32>` of shape `(n_hvg, n_cells)`, per-column standardised.
-pub(crate) fn load_hvg_standardised(
-    reader: &ParallelSparseReader,
+pub(crate) fn load_hvg_standardised<S: SingleCellReading>(
+    reader: &S,
     batch_cell_indices: &[usize],
     hvg_indices: &[usize],
     clr_offsets: Option<&[f64]>,
@@ -154,8 +154,8 @@ pub(crate) fn load_hvg_standardised(
 /// ### Returns
 ///
 /// `(n_cells, n_features)` dense matrix, row-L2-normalised.
-fn load_filter_expression(
-    reader: &ParallelSparseReader,
+fn load_filter_expression<S: SingleCellReading>(
+    reader: &S,
     batch_cell_indices: &[usize],
     feature_indices: &[usize],
     clr_offsets: Option<&[f64]>,
@@ -413,7 +413,7 @@ fn find_cca_anchors_for_pair(
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to the gene-major streaming binary
+/// * `reader` - Reader over the gene-major count store
 /// * `cell_indices` - Absolute cell indices to include (the union)
 /// * `gene_indices` - Absolute HVG indices used for the CCA anchor space
 /// * `batch_indices` - Zero-based batch label per cell in `cell_indices`
@@ -434,8 +434,8 @@ fn find_cca_anchors_for_pair(
 ///
 /// Stuart et al., Cell, 2019.
 #[allow(clippy::too_many_arguments)]
-pub fn seurat_cca_integration(
-    f_path: &str,
+pub fn seurat_cca_integration<S: SingleCellReading>(
+    reader: &S,
     cell_indices: &[usize],
     gene_indices: &[usize],
     batch_indices: &[usize],
@@ -486,7 +486,7 @@ pub fn seurat_cca_integration(
         // No loadings available from a pre-computed embedding; compute a
         // cheap sparse PCA on the same data to recover them.
         let (_pc, load, s) = pca_on_sc_sparse(
-            f_path,
+            reader,
             cell_indices,
             gene_indices,
             params.dims.max(scores.ncols()),
@@ -505,7 +505,7 @@ pub fn seurat_cca_integration(
         }
         if params.pca_params.randomised {
             let (sc, load, s, _) = pca_on_sc(
-                f_path,
+                reader,
                 cell_indices,
                 gene_indices,
                 params.dims,
@@ -518,7 +518,7 @@ pub fn seurat_cca_integration(
             (sc, load, s)
         } else {
             let (sc, load, s) = pca_on_sc_sparse(
-                f_path,
+                reader,
                 cell_indices,
                 gene_indices,
                 params.dims,
@@ -538,7 +538,6 @@ pub fn seurat_cca_integration(
     let top_absolute_genes: Vec<usize> =
         top_positions.iter().map(|&pos| gene_indices[pos]).collect();
 
-    let reader = ParallelSparseReader::new(f_path)?;
 
     // Per-pair anchor computation: load only the two batches involved,
     // build CC space and filter expression, extract anchors, drop.
@@ -575,7 +574,7 @@ pub fn seurat_cca_integration(
             });
 
             let x1 = load_hvg_standardised(
-                &reader,
+                reader,
                 &cells_a,
                 gene_indices,
                 clr_a.as_deref(),
@@ -583,7 +582,7 @@ pub fn seurat_cca_integration(
                 params.pca_params.size_factor,
             )?;
             let x2 = load_hvg_standardised(
-                &reader,
+                reader,
                 &cells_b,
                 gene_indices,
                 clr_b.as_deref(),
@@ -608,7 +607,7 @@ pub fn seurat_cca_integration(
 
             let filter_a = if params.k_filter > 0 && !top_absolute_genes.is_empty() {
                 Some(load_filter_expression(
-                    &reader,
+                    reader,
                     &cells_a,
                     &top_absolute_genes,
                     clr_a.as_deref(),
@@ -620,7 +619,7 @@ pub fn seurat_cca_integration(
             };
             let filter_b = if params.k_filter > 0 && !top_absolute_genes.is_empty() {
                 Some(load_filter_expression(
-                    &reader,
+                    reader,
                     &cells_b,
                     &top_absolute_genes,
                     clr_b.as_deref(),

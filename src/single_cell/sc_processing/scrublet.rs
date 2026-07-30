@@ -222,11 +222,11 @@ impl CsrCellChunk {
 /// cells together via sparse PCA, builds a kNN graph, and scores each
 /// observed cell by the Bayesian proportion of simulated neighbours.
 #[derive(Clone, Debug)]
-pub struct Scrublet {
-    /// Path to the gene-based binary file (CSC format).
-    f_path_gene: String,
-    /// Path to the cell-based binary file (CSR format).
-    f_path_cell: String,
+pub struct Scrublet<'a, S: SingleCellReading> {
+    /// Reader over the gene-based (CSC) count store.
+    gene_reader: &'a S,
+    /// Reader over the cell-based (CSR) count store.
+    cell_reader: &'a S,
     /// Algorithm parameters.
     params: ScrubletParams,
     /// Number of observed cells.
@@ -239,13 +239,13 @@ pub struct Scrublet {
     hvg_library_sizes: Vec<usize>,
 }
 
-impl Scrublet {
+impl<'a, S: SingleCellReading> Scrublet<'a, S> {
     /// Create a new Scrublet instance.
     ///
     /// ### Params
     ///
-    /// * `f_path_gene` - Path to the gene-based binary file (CSC).
-    /// * `f_path_cells` - Path to the cell-based binary file (CSR).
+    /// * `gene_reader` - Reader over the gene-based (CSC) count store.
+    /// * `cell_reader` - Reader over the cell-based (CSR) count store.
     /// * `params` - Scrublet parameters.
     /// * `cell_indices` - Cell indices to include in the analysis.
     ///
@@ -253,14 +253,14 @@ impl Scrublet {
     ///
     /// Initialised `Scrublet`.
     pub fn new(
-        f_path_gene: &str,
-        f_path_cells: &str,
+        gene_reader: &'a S,
+        cell_reader: &'a S,
         params: ScrubletParams,
         cell_indices: &[usize],
     ) -> Self {
         Scrublet {
-            f_path_gene: f_path_gene.to_string(),
-            f_path_cell: f_path_cells.to_string(),
+            gene_reader,
+            cell_reader,
             params,
             n_cells: cell_indices.len(),
             n_cells_sim: 0,
@@ -316,7 +316,7 @@ impl Scrublet {
         let start_hvg = Instant::now();
 
         let hvg_genes = select_hvg(
-            &self.f_path_gene,
+            self.gene_reader,
             &self.cells_to_keep,
             &hvg_opts,
             streaming,
@@ -332,7 +332,7 @@ impl Scrublet {
         }
 
         self.hvg_library_sizes =
-            compute_hvg_library_sizes(&self.f_path_cell, &self.cells_to_keep, &hvg_genes)?;
+            compute_hvg_library_sizes(self.cell_reader, &self.cells_to_keep, &hvg_genes)?;
         let target_size = resolve_target_size(self.params.target_size, &self.hvg_library_sizes);
 
         // Simulate doublets
@@ -350,7 +350,7 @@ impl Scrublet {
             &self.cells_to_keep,
             &self.hvg_library_sizes,
             &hvg_genes,
-            &self.f_path_cell,
+            self.cell_reader,
             target_size,
             self.params.log_transform,
         )?;
@@ -369,7 +369,7 @@ impl Scrublet {
         }
 
         let (combined_pca, _) = pca_and_project(
-            &self.f_path_gene,
+            self.gene_reader,
             &self.cells_to_keep,
             &hvg_genes,
             &self.hvg_library_sizes,

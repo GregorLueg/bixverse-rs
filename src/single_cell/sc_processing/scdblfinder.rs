@@ -412,20 +412,19 @@ fn slice_obs_rows(features: MatRef<f32>, n_obs: usize) -> Mat<f32> {
 ///
 /// ### Params
 ///
-/// * `f_path_cell` - Path to the cell-based binary file (CSR format).
+/// * `reader` - Reader over the cell-based (CSR) count store.
 /// * `cells_to_keep` - Indices of the cells to keep
 /// * `selected_genes` - The genes to include in this analysis
 ///
 /// ### Returns
 ///
 /// Tuple of `(non_zero, count_above_2)`
-fn compute_cell_complexity(
-    f_path_cell: &str,
+fn compute_cell_complexity<S: SingleCellReading>(
+    reader: &S,
     cells_to_keep: &[usize],
     selected_genes: &[usize],
 ) -> Result<(Vec<u32>, Vec<u32>), BixverseErrors> {
     let selected_gene_set: FxHashSet<usize> = selected_genes.iter().copied().collect();
-    let reader = ParallelSparseReader::new(f_path_cell)?;
     let results: Vec<(u32, u32)> = cells_to_keep
         .par_iter()
         .map(|&cell_idx| -> Result<(u32, u32), BixverseErrors> {
@@ -637,8 +636,8 @@ fn aggregate_origin_counts(origins: &[Option<(usize, usize)>]) -> FxHashMap<(usi
 ///
 /// This matches R's scDblFinder which runs PCA on `cbind(counts, ad)`.
 #[allow(clippy::too_many_arguments)]
-pub fn pca_combined(
-    f_path_cell: &str,
+pub fn pca_combined<S: SingleCellReading>(
+    reader: &S,
     cells_to_keep: &[usize],
     hvg_genes: &[usize],
     hvg_library_sizes: &[usize],
@@ -665,7 +664,6 @@ pub fn pca_combined(
     let mut combined = Mat::<f64>::zeros(n_total, n_genes);
 
     // fill observed rows
-    let reader = ParallelSparseReader::new(f_path_cell)?;
     for (row, &cell_idx) in cells_to_keep.iter().enumerate() {
         let chunk = reader.read_cell(cell_idx)?;
         let lib = hvg_library_sizes[row] as f64;
@@ -1184,11 +1182,11 @@ fn find_threshold_optimised(
 /// gradient-boosted classification with iterative refinement of cluster
 /// assignments.
 #[derive(Clone, Debug)]
-pub struct ScDblFinder {
-    /// Path to the gene-based binary file (CSC format).
-    f_path_gene: String,
-    /// Path to the cell-based binary file (CSR format).
-    f_path_cell: String,
+pub struct ScDblFinder<'a, S: SingleCellReading> {
+    /// Reader over the gene-based (CSC) count store.
+    gene_reader: &'a S,
+    /// Reader over the cell-based (CSR) count store.
+    cell_reader: &'a S,
     /// Algorithm parameters.
     params: ScDblFinderParams,
     /// Number of observed cells.
@@ -1201,13 +1199,13 @@ pub struct ScDblFinder {
     red_library_sizes: Vec<usize>,
 }
 
-impl ScDblFinder {
+impl<'a, S: SingleCellReading> ScDblFinder<'a, S> {
     /// Create a new ScDblFinder instance.
     ///
     /// ### Params
     ///
-    /// * `f_path_gene` - Path to the gene-based binary file (CSC).
-    /// * `f_path_cell` - Path to the cell-based binary file (CSR).
+    /// * `gene_reader` - Reader over the gene-based (CSC) count store.
+    /// * `cell_reader` - Reader over the cell-based (CSR) count store.
     /// * `params` - ScDblFinder parameters.
     /// * `cell_indices` - Cell indices to include in the analysis.
     ///
@@ -1215,14 +1213,14 @@ impl ScDblFinder {
     ///
     /// Initialised `ScDblFinder`.
     pub fn new(
-        f_path_gene: &str,
-        f_path_cell: &str,
+        gene_reader: &'a S,
+        cell_reader: &'a S,
         params: ScDblFinderParams,
         cell_indices: &[usize],
     ) -> Self {
         Self {
-            f_path_gene: f_path_gene.to_string(),
-            f_path_cell: f_path_cell.to_string(),
+            gene_reader,
+            cell_reader,
             params,
             n_cells: cell_indices.len(),
             n_cells_sim: 0,
@@ -1277,7 +1275,7 @@ impl ScDblFinder {
 
         let selected_genes = if streaming {
             select_top_genes_streaming(
-                &self.f_path_gene,
+                self.gene_reader,
                 &self.cells_to_keep,
                 None,
                 self.params.n_genes,
@@ -1285,7 +1283,7 @@ impl ScDblFinder {
             )?
         } else {
             select_top_genes(
-                &self.f_path_gene,
+                self.gene_reader,
                 &self.cells_to_keep,
                 None,
                 self.params.n_genes,
@@ -1302,7 +1300,7 @@ impl ScDblFinder {
 
         // recycling function from scrublet/doublet detection
         self.red_library_sizes =
-            compute_hvg_library_sizes(&self.f_path_cell, &self.cells_to_keep, &selected_genes)?;
+            compute_hvg_library_sizes(self.cell_reader, &self.cells_to_keep, &selected_genes)?;
         let target_size = resolve_target_size(self.params.target_size, &self.red_library_sizes);
         self.n_cells_sim = (self.n_cells as f32 * self.params.doublet_ratio) as usize;
 
@@ -1310,7 +1308,7 @@ impl ScDblFinder {
             println!(" Computing cell complexity features...");
         }
         let (obs_n_features, obs_n_above2) =
-            compute_cell_complexity(&self.f_path_cell, &self.cells_to_keep, &selected_genes)?;
+            compute_cell_complexity(self.cell_reader, &self.cells_to_keep, &selected_genes)?;
 
         let n_cxds = self.params.cxds_genes.unwrap_or(CXDS_NTOP);
         if verbosity.normal_verbosity() {
@@ -1322,7 +1320,7 @@ impl ScDblFinder {
 
         let start_cxds = Instant::now();
         let (cxds_model, obs_cxds_gene_sets) = CxdsModel::fit(
-            &self.f_path_cell,
+            self.cell_reader,
             &self.cells_to_keep,
             &selected_genes,
             n_cxds,
@@ -1343,7 +1341,7 @@ impl ScDblFinder {
         }
 
         let (obs_pca, _, _, _) = pca_observed(
-            &self.f_path_gene,
+            self.gene_reader,
             &self.cells_to_keep,
             &selected_genes,
             &self.red_library_sizes,
@@ -1480,7 +1478,7 @@ impl ScDblFinder {
             &self.red_library_sizes,
             &cluster_labels,
             &selected_genes,
-            &self.f_path_cell,
+            self.cell_reader,
             target_size,
             self.params.log_transform,
             &self.params.sim_params,
@@ -1500,7 +1498,7 @@ impl ScDblFinder {
             println!(" Running PCA across all observed and synthetic cells...");
         }
         let combined_pca = pca_combined(
-            &self.f_path_cell,
+            self.cell_reader,
             &self.cells_to_keep,
             &selected_genes,
             &self.red_library_sizes,

@@ -413,7 +413,7 @@ pub fn calculate_std_variance_filtered(
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to the gene-based binary file
+/// * `reader` - Reader over the gene-based count store.
 /// * `cell_indices` - HashSet with the cell indices to keep.
 /// * `loess_span` - Span parameter for the loess function
 /// * `clip_max` - Optional clip max parameter
@@ -423,8 +423,8 @@ pub fn calculate_std_variance_filtered(
 /// ### Returns
 ///
 /// The `HvgRes`
-pub fn get_hvg_vst(
-    f_path: &str,
+pub fn get_hvg_vst<S: SingleCellReading>(
+    reader: &S,
     cell_indices: &[usize],
     loess_span: f32,
     clip_max: Option<f32>,
@@ -437,7 +437,6 @@ pub fn get_hvg_vst(
     // Get data
     let start_read = Instant::now();
 
-    let reader = ParallelSparseReader::new(f_path)?;
     let mut gene_chunks: Vec<CscGeneChunk> = reader.get_all_genes()?;
     let no_cells = cell_indices.len();
 
@@ -537,7 +536,7 @@ pub fn get_hvg_vst(
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to the gene-based binary file
+/// * `reader` - Reader over the gene-based count store.
 /// * `cell_indices` - Slice with the cell indices to keep.
 /// * `loess_span` - Span parameter for the loess function
 /// * `clip_max` - Optional clip max parameter
@@ -547,8 +546,8 @@ pub fn get_hvg_vst(
 /// ### Returns
 ///
 /// The `HvgRes`
-pub fn get_hvg_vst_streaming(
-    f_path: &str,
+pub fn get_hvg_vst_streaming<S: SingleCellReading>(
+    reader: &S,
     cell_indices: &[usize],
     loess_span: f32,
     clip_max: Option<f32>,
@@ -558,7 +557,6 @@ pub fn get_hvg_vst_streaming(
 
     let start_total = Instant::now();
 
-    let reader = ParallelSparseReader::new(f_path)?;
     let header = reader.get_header();
     let no_genes = header.total_genes;
     let no_cells = cell_indices.len();
@@ -731,7 +729,7 @@ pub fn get_hvg_vst_streaming(
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to the gene-based binary file
+/// * `reader` - Reader over the gene-based count store.
 /// * `cell_indices` - Slice with the cell indices to keep.
 /// * `binning` - The binning strategy to use. One of
 ///   `"equal_width"` or `"equal_freq"`
@@ -742,8 +740,8 @@ pub fn get_hvg_vst_streaming(
 /// ### Returns
 ///
 /// The `HvgDispersionRes`
-pub fn get_hvg_dispersion(
-    f_path: &str,
+pub fn get_hvg_dispersion<S: SingleCellReading>(
+    reader: &S,
     cell_indices: &[usize],
     binning: &str,
     n_bins: usize,
@@ -756,7 +754,6 @@ pub fn get_hvg_dispersion(
     let binning = parse_bin_strategy_type(binning).unwrap_or_default();
 
     let start_read = Instant::now();
-    let reader = ParallelSparseReader::new(f_path)?;
     let mut gene_chunks: Vec<CscGeneChunk> = reader.get_all_genes()?;
     let no_cells = cell_indices.len();
 
@@ -808,7 +805,7 @@ pub fn get_hvg_dispersion(
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to the gene-based binary file
+/// * `reader` - Reader over the gene-based count store.
 /// * `cell_indices` - Slice with the cell indices to keep.
 /// * `binning` - The binning strategy to use. One of
 ///   `"equal_width"` or `"equal_freq"`
@@ -819,8 +816,8 @@ pub fn get_hvg_dispersion(
 /// ### Returns
 ///
 /// The `HvgDispersionRes`
-pub fn get_hvg_dispersion_streaming(
-    f_path: &str,
+pub fn get_hvg_dispersion_streaming<S: SingleCellReading>(
+    reader: &S,
     cell_indices: &[usize],
     binning: &str,
     n_bins: usize,
@@ -832,7 +829,6 @@ pub fn get_hvg_dispersion_streaming(
 
     let binning = parse_bin_strategy_type(binning).unwrap_or_default();
 
-    let reader = ParallelSparseReader::new(f_path)?;
     let header = reader.get_header();
     let no_genes = header.total_genes;
     let no_cells = cell_indices.len();
@@ -904,7 +900,7 @@ pub fn get_hvg_dispersion_streaming(
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to the gene-based binary file
+/// * `reader` - Reader over the gene-based count store.
 /// * `cell_indices` - Slice with the cell indices to keep.
 /// * `binning` - The binning strategy to use. One of
 ///   `"equal_width"` or `"equal_freq"`
@@ -915,14 +911,14 @@ pub fn get_hvg_dispersion_streaming(
 /// ### Returns
 ///
 /// The `HvgDispersionRes`
-pub fn get_hvg_mvb(
-    f_path: &str,
+pub fn get_hvg_mvb<S: SingleCellReading>(
+    reader: &S,
     cell_indices: &[usize],
     binning: &str,
     n_bins: usize,
     verbose: usize,
 ) -> Result<HvgDispersionRes, BixverseErrors> {
-    get_hvg_dispersion(f_path, cell_indices, binning, n_bins, verbose)
+    get_hvg_dispersion(reader, cell_indices, binning, n_bins, verbose)
 }
 
 /// MVB is computationally identical to dispersion (streaming)
@@ -931,7 +927,7 @@ pub fn get_hvg_mvb(
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to the gene-based binary file
+/// * `reader` - Reader over the gene-based count store.
 /// * `cell_indices` - Slice with the cell indices to keep.
 /// * `binning` - The binning strategy to use. One of
 ///   `"equal_width"` or `"equal_freq"`
@@ -942,14 +938,14 @@ pub fn get_hvg_mvb(
 /// ### Returns
 ///
 /// The `HvgDispersionRes`
-pub fn get_hvg_mvb_streaming(
-    f_path: &str,
+pub fn get_hvg_mvb_streaming<S: SingleCellReading>(
+    reader: &S,
     cell_indices: &[usize],
     binning: &str,
     n_bins: usize,
     verbose: usize,
 ) -> Result<HvgDispersionRes, BixverseErrors> {
-    get_hvg_dispersion_streaming(f_path, cell_indices, binning, n_bins, verbose)
+    get_hvg_dispersion_streaming(reader, cell_indices, binning, n_bins, verbose)
 }
 
 /////////////////////
@@ -966,7 +962,7 @@ pub fn get_hvg_mvb_streaming(
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to the gene-based binary file
+/// * `reader` - Reader over the gene-based count store.
 /// * `cell_indices` - Slice with the cell indices to keep
 /// * `batch_labels` - Batch assignment for each cell (same length as cell_indices)
 /// * `loess_span` - Span parameter for the loess function
@@ -977,8 +973,8 @@ pub fn get_hvg_mvb_streaming(
 /// ### Returns
 ///
 /// `Vec<HvgRes>` - One HvgRes per batch
-pub fn get_hvg_vst_batch_aware(
-    f_path: &str,
+pub fn get_hvg_vst_batch_aware<S: SingleCellReading>(
+    reader: &S,
     cell_indices: &[usize],
     batch_labels: &[usize],
     loess_span: f32,
@@ -1013,7 +1009,6 @@ pub fn get_hvg_vst_batch_aware(
 
     // load data
     let start_read = Instant::now();
-    let reader = ParallelSparseReader::new(f_path)?;
     let mut gene_chunks: Vec<CscGeneChunk> = reader.get_all_genes()?;
     let end_read = start_read.elapsed();
 
@@ -1144,7 +1139,7 @@ pub fn get_hvg_vst_batch_aware(
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to the gene-based binary file
+/// * `reader` - Reader over the gene-based count store.
 /// * `cell_indices` - Slice with the cell indices to keep
 /// * `batch_labels` - Batch assignment for each cell (same length as cell_
 ///   indices)
@@ -1156,8 +1151,8 @@ pub fn get_hvg_vst_batch_aware(
 /// ### Returns
 ///
 /// `Vec<HvgRes>` - One HvgRes per batch
-pub fn get_hvg_vst_batch_aware_streaming(
-    f_path: &str,
+pub fn get_hvg_vst_batch_aware_streaming<S: SingleCellReading>(
+    reader: &S,
     cell_indices: &[usize],
     batch_labels: &[usize],
     loess_span: f32,
@@ -1168,7 +1163,6 @@ pub fn get_hvg_vst_batch_aware_streaming(
 
     let start_total = Instant::now();
 
-    let reader = ParallelSparseReader::new(f_path)?;
     let header = reader.get_header();
     let no_genes = header.total_genes;
 
@@ -1358,7 +1352,7 @@ pub fn get_hvg_vst_batch_aware_streaming(
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to the gene-based binary file
+/// * `reader` - Reader over the gene-based count store.
 /// * `cell_indices` - Slice with the cell indices to keep
 /// * `batch_labels` - Batch assignment for each cell (same length as cell_
 ///   indices)
@@ -1371,8 +1365,8 @@ pub fn get_hvg_vst_batch_aware_streaming(
 /// ### Returns
 ///
 /// A `Vec<HvgDispersionRes>` with each element being a batch.
-pub fn get_hvg_dispersion_batch_aware(
-    f_path: &str,
+pub fn get_hvg_dispersion_batch_aware<S: SingleCellReading>(
+    reader: &S,
     cell_indices: &[usize],
     batch_labels: &[usize],
     binning: &str,
@@ -1401,7 +1395,6 @@ pub fn get_hvg_dispersion_batch_aware(
     }
 
     let start_read = Instant::now();
-    let reader = ParallelSparseReader::new(f_path)?;
     let mut gene_chunks: Vec<CscGeneChunk> = reader.get_all_genes()?;
     if verbosity.normal_verbosity() {
         println!(
@@ -1453,7 +1446,7 @@ pub fn get_hvg_dispersion_batch_aware(
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to the gene-based binary file
+/// * `reader` - Reader over the gene-based count store.
 /// * `cell_indices` - Slice with the cell indices to keep
 /// * `batch_labels` - Batch assignment for each cell (same length as cell_
 ///   indices)
@@ -1466,8 +1459,8 @@ pub fn get_hvg_dispersion_batch_aware(
 /// ### Returns
 ///
 /// A `Vec<HvgDispersionRes>` with each element being a batch.
-pub fn get_hvg_dispersion_batch_aware_streaming(
-    f_path: &str,
+pub fn get_hvg_dispersion_batch_aware_streaming<S: SingleCellReading>(
+    reader: &S,
     cell_indices: &[usize],
     batch_labels: &[usize],
     binning: &str,
@@ -1480,7 +1473,6 @@ pub fn get_hvg_dispersion_batch_aware_streaming(
 
     let binning = parse_bin_strategy_type(binning).unwrap_or_default();
 
-    let reader = ParallelSparseReader::new(f_path)?;
     let header = reader.get_header();
     let no_genes = header.total_genes;
 
@@ -1563,7 +1555,7 @@ pub fn get_hvg_dispersion_batch_aware_streaming(
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to the gene-based binary file
+/// * `reader` - Reader over the gene-based count store.
 /// * `cell_indices` - Slice with the cell indices to keep
 /// * `batch_labels` - Batch assignment for each cell (same length as cell_
 ///   indices)
@@ -1576,22 +1568,22 @@ pub fn get_hvg_dispersion_batch_aware_streaming(
 /// ### Returns
 ///
 /// A `Vec<HvgDispersionRes>` with each element being a batch.
-pub fn get_hvg_mvb_batch_aware(
-    f_path: &str,
+pub fn get_hvg_mvb_batch_aware<S: SingleCellReading>(
+    reader: &S,
     cell_indices: &[usize],
     batch_labels: &[usize],
     binning: &str,
     n_bins: usize,
     verbose: usize,
 ) -> Result<Vec<HvgDispersionRes>, BixverseErrors> {
-    get_hvg_dispersion_batch_aware(f_path, cell_indices, batch_labels, binning, n_bins, verbose)
+    get_hvg_dispersion_batch_aware(reader, cell_indices, batch_labels, binning, n_bins, verbose)
 }
 
 /// MVB HVG, batch-aware (streaming)
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to the gene-based binary file
+/// * `reader` - Reader over the gene-based count store.
 /// * `cell_indices` - Slice with the cell indices to keep
 /// * `batch_labels` - Batch assignment for each cell (same length as cell_
 ///   indices)
@@ -1604,8 +1596,8 @@ pub fn get_hvg_mvb_batch_aware(
 /// ### Returns
 ///
 /// A `Vec<HvgDispersionRes>` with each element being a batch.
-pub fn get_hvg_mvb_batch_aware_streaming(
-    f_path: &str,
+pub fn get_hvg_mvb_batch_aware_streaming<S: SingleCellReading>(
+    reader: &S,
     cell_indices: &[usize],
     batch_labels: &[usize],
     binning: &str,
@@ -1613,7 +1605,7 @@ pub fn get_hvg_mvb_batch_aware_streaming(
     verbose: usize,
 ) -> Result<Vec<HvgDispersionRes>, BixverseErrors> {
     get_hvg_dispersion_batch_aware_streaming(
-        f_path,
+        reader,
         cell_indices,
         batch_labels,
         binning,

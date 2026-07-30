@@ -20,7 +20,7 @@ pub use crate::single_cell::CELL_BATCH_SIZE;
 #[cfg(feature = "single-cell")]
 pub use crate::single_cell::sc_data::data_io::{
     CellQuality, CscGeneChunk, CsrCellChunk, DataLayerReturn, MinCellQuality, ParallelSparseReader,
-    RawCounts, from_cell_chunks, from_gene_chunks,
+    RawCounts, SingleCellReading, from_cell_chunks, from_gene_chunks,
 };
 #[cfg(feature = "single-cell")]
 pub use crate::single_cell::sc_processing::knn::*;

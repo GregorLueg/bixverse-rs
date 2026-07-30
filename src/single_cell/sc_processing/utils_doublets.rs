@@ -70,7 +70,7 @@ pub struct PcaOpts {
 ///
 /// ### Params
 ///
-/// * `f_path_gene` - Path to the binary file storing the genes
+/// * `reader` - Reader over the gene-based count store.
 /// * `cells_to_keep` - Indices of the cells to include in this analysis.
 /// * `opts` - Hvg parameters
 /// * `streaming` - Shall the data be streamed (reduces memory pressure)
@@ -80,8 +80,8 @@ pub struct PcaOpts {
 /// ### Returns
 ///
 /// Returns the indices of the HVG
-pub fn select_hvg(
-    f_path_gene: &str,
+pub fn select_hvg<S: SingleCellReading>(
+    reader: &S,
     cells_to_keep: &[usize],
     opts: &HvgOpts,
     streaming: bool,
@@ -93,7 +93,7 @@ pub fn select_hvg(
         HvgMethod::Vst => {
             let res = if streaming {
                 get_hvg_vst_streaming(
-                    f_path_gene,
+                    reader,
                     cells_to_keep,
                     opts.loess_span,
                     opts.clip_max,
@@ -101,7 +101,7 @@ pub fn select_hvg(
                 )
             } else {
                 get_hvg_vst(
-                    f_path_gene,
+                    reader,
                     cells_to_keep,
                     opts.loess_span,
                     opts.clip_max,
@@ -113,7 +113,7 @@ pub fn select_hvg(
         HvgMethod::Dispersion => {
             let res = if streaming {
                 get_hvg_dispersion_streaming(
-                    f_path_gene,
+                    reader,
                     cells_to_keep,
                     &opts.binning_strategy,
                     opts.n_bins,
@@ -121,7 +121,7 @@ pub fn select_hvg(
                 )
             } else {
                 get_hvg_dispersion(
-                    f_path_gene,
+                    reader,
                     cells_to_keep,
                     &opts.binning_strategy,
                     opts.n_bins,
@@ -133,7 +133,7 @@ pub fn select_hvg(
         HvgMethod::MeanVarBin => {
             let res = if streaming {
                 get_hvg_mvb_streaming(
-                    f_path_gene,
+                    reader,
                     cells_to_keep,
                     &opts.binning_strategy,
                     opts.n_bins,
@@ -141,7 +141,7 @@ pub fn select_hvg(
                 )
             } else {
                 get_hvg_mvb(
-                    f_path_gene,
+                    reader,
                     cells_to_keep,
                     &opts.binning_strategy,
                     opts.n_bins,
@@ -167,20 +167,19 @@ pub fn select_hvg(
 ///
 /// ### Params
 ///
-/// * `f_path_gene` - Path to the binary file storing the cells
+/// * `reader` - Reader over the gene-based count store.
 /// * `cells_to_keep` - Indices of the cells to include in this analysis.
 /// * `hvg_genes` - Indices of the highly variable genes
 ///
 /// ### Returns
 ///
 /// Library sizes per cell given only the HVG genes
-pub fn compute_hvg_library_sizes(
-    f_path_cell: &str,
+pub fn compute_hvg_library_sizes<S: SingleCellReading>(
+    reader: &S,
     cells_to_keep: &[usize],
     hvg_genes: &[usize],
 ) -> Result<Vec<usize>, BixverseErrors> {
     let hvg_set: FxHashSet<usize> = hvg_genes.iter().copied().collect();
-    let reader = ParallelSparseReader::new(f_path_cell)?;
 
     cells_to_keep
         .par_iter()
@@ -314,7 +313,7 @@ pub fn scale_cell_chunks_with_stats(
 ///
 /// ### Params
 ///
-/// * `f_path_gene` - Path to the gene-based binary file (CSC on disk).
+/// * `reader` - Reader over the gene-based count store.
 /// * `cell_indices` - Slice of cell indices to include in the analysis.
 /// * `gene_indices` - Slice of gene indices (HVGs) to use.
 /// * `hvg_library_sizes` - Per-cell library sizes computed over HVG genes
@@ -338,8 +337,8 @@ pub fn scale_cell_chunks_with_stats(
 /// where scores is `n_cells x no_pcs`, loadings is `n_genes x no_pcs`,
 /// and means/stds are per-gene vectors for downstream doublet projection.
 #[allow(clippy::too_many_arguments)]
-pub fn pca_observed(
-    f_path_gene: &str,
+pub fn pca_observed<S: SingleCellReading>(
+    reader: &S,
     cell_indices: &[usize],
     gene_indices: &[usize],
     hvg_library_sizes: &[usize],
@@ -359,7 +358,6 @@ pub fn pca_observed(
     let n_cells = cell_indices.len();
 
     let start_reading = Instant::now();
-    let reader = ParallelSparseReader::new(f_path_gene)?;
     let mut gene_chunks: Vec<CscGeneChunk> =
         reader.read_gene_parallel_filtered(gene_indices, &cell_set)?;
     if verbosity.normal_verbosity() {
@@ -465,7 +463,7 @@ pub fn pca_observed(
 ///
 /// ### Params
 ///
-/// * `f_path_gene` - Path to the gene-based binary files
+/// * `reader` - Reader over the gene-based count store.
 /// * `cells_to_keep` - Indices of the cells to keep
 /// * `hvg_genes` - Indices of the HVG genes
 /// * `hvg_library_sizes` - Library sizes adjusted for only including HVG
@@ -480,8 +478,8 @@ pub fn pca_observed(
 ///
 /// A tuple of `(combined_scores, DoubletPcaRes)`
 #[allow(clippy::too_many_arguments)]
-pub fn pca_and_project(
-    f_path_gene: &str,
+pub fn pca_and_project<S: SingleCellReading>(
+    reader: &S,
     cells_to_keep: &[usize],
     hvg_genes: &[usize],
     hvg_library_sizes: &[usize],
@@ -492,7 +490,7 @@ pub fn pca_and_project(
     verbose: usize,
 ) -> Result<(Mat<f32>, DoubletPcaRes), BixverseErrors> {
     let pca_res = pca_observed(
-        f_path_gene,
+        reader,
         cells_to_keep,
         hvg_genes,
         hvg_library_sizes,
@@ -687,7 +685,7 @@ pub fn adjusted_k(base_k: usize, n_obs: usize, n_sim: usize) -> usize {
 /// * `hvg_library_sizes` - Per-cell library sizes over HVG genes, parallel
 ///   to `cells_to_keep`.
 /// * `hvg_genes` - Sorted gene indices of the selected HVGs.
-/// * `f_path_cell` - Path to the cell-based binary file (CSR format).
+/// * `reader` - Reader over the cell-based count store.
 /// * `target_size` - Normalisation target library size.
 /// * `log_transform` - Whether to apply `ln(1 + x)` after normalisation.
 ///
@@ -695,12 +693,12 @@ pub fn adjusted_k(base_k: usize, n_obs: usize, n_sim: usize) -> usize {
 ///
 /// Vector of `CsrCellChunk`, one per pair, with gene indices remapped to
 /// contiguous HVG positions (0-based).
-pub fn simulate_from_pairs(
+pub fn simulate_from_pairs<S: SingleCellReading>(
     pairs: &[(usize, usize)],
     cells_to_keep: &[usize],
     hvg_library_sizes: &[usize],
     hvg_genes: &[usize],
-    f_path_cell: &str,
+    reader: &S,
     target_size: f32,
     log_transform: bool,
 ) -> Result<Vec<CsrCellChunk>, BixverseErrors> {
@@ -711,7 +709,6 @@ pub fn simulate_from_pairs(
         .map(|(hvg_idx, &orig_idx)| (orig_idx, hvg_idx as u32))
         .collect();
 
-    let reader = ParallelSparseReader::new(f_path_cell)?;
 
     pairs
         .par_iter()
@@ -987,14 +984,13 @@ fn select_by_cluster_roundrobin(
 /// ### Returns
 ///
 /// The indices of the genes to take forward
-pub fn select_top_genes_streaming(
-    f_path_gene: &str,
+pub fn select_top_genes_streaming<S: SingleCellReading>(
+    reader: &S,
     cells_to_keep: &[usize],
     clusters: Option<&[usize]>,
     n_top: usize,
     verbose: bool,
 ) -> Result<Vec<usize>, BixverseErrors> {
-    let reader = ParallelSparseReader::new(f_path_gene)?;
     let n_total_genes = reader.get_header().total_genes;
 
     if n_top >= n_total_genes {
@@ -1231,7 +1227,7 @@ fn top_n_indices_ordered(values: &[f64], n_top: usize) -> Vec<usize> {
 ///
 /// ### Params
 ///
-/// * `f_path_gene` - Path to the gene-based binary file (CSC).
+/// * `reader` - Reader over the gene-based count store.
 /// * `cells_to_keep` - Cell indices to include.
 /// * `clusters` - Optional cluster labels, parallel to `cells_to_keep`. If
 ///   `None`, falls back to overall mean ranking.
@@ -1240,13 +1236,12 @@ fn top_n_indices_ordered(values: &[f64], n_top: usize) -> Vec<usize> {
 /// ### Returns
 ///
 /// Sorted ascending vector of gene indices.
-pub fn select_top_genes(
-    f_path_gene: &str,
+pub fn select_top_genes<S: SingleCellReading>(
+    reader: &S,
     cells_to_keep: &[usize],
     clusters: Option<&[usize]>,
     n_top: usize,
 ) -> Result<Vec<usize>, BixverseErrors> {
-    let reader = ParallelSparseReader::new(f_path_gene)?;
     let n_total_genes = reader.get_header().total_genes;
 
     if n_top >= n_total_genes {
@@ -1591,7 +1586,7 @@ impl CsrCellChunk {
 /// * `cluster_labels` - Per-cell cluster labels, parallel to
 ///   `cells_to_keep`.
 /// * `hvg_genes` - Sorted gene indices of selected HVGs.
-/// * `f_path_cell` - Path to the cell-based binary file (CSR).
+/// * `reader` - Reader over the cell-based count store.
 /// * `target_size` - Normalisation target library size.
 /// * `log_transform` - Whether to apply `ln(1 + x)` after
 ///   normalisation.
@@ -1605,13 +1600,13 @@ impl CsrCellChunk {
 /// values, and `library_sizes` holds the post-noise effective HVG
 /// library size for each doublet.
 #[allow(clippy::too_many_arguments)]
-pub fn simulate_doublets_scdbl(
+pub fn simulate_doublets_scdbl<S: SingleCellReading>(
     pairs: &[(usize, usize)],
     cells_to_keep: &[usize],
     selected_genes_library_sizes: &[usize],
     cluster_labels: &[usize],
     selected_genes: &[usize],
-    f_path_cell: &str,
+    reader: &S,
     target_size: f32,
     log_transform: bool,
     params: &ScDblSimParams,
@@ -1639,7 +1634,6 @@ pub fn simulate_doublets_scdbl(
         })
         .collect();
 
-    let reader = ParallelSparseReader::new(f_path_cell)?;
 
     let results: Vec<(CsrCellChunk, usize)> = (0..n_sim)
         .into_par_iter()

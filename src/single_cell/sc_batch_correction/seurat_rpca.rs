@@ -245,7 +245,7 @@ fn find_rpca_anchors_for_pair(
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to the gene-major streaming binary
+/// * `reader` - Reader over the gene-major count store
 /// * `cell_indices` - Absolute cell indices to include
 /// * `gene_indices` - Absolute HVG indices used for PCA and projections
 /// * `batch_indices` - Zero-based batch label per cell
@@ -265,8 +265,8 @@ fn find_rpca_anchors_for_pair(
 ///
 /// Stuart et al., Cell, 2019.
 #[allow(clippy::too_many_arguments)]
-pub fn seurat_rpca_integration(
-    f_path: &str,
+pub fn seurat_rpca_integration<S: SingleCellReading>(
+    reader: &S,
     cell_indices: &[usize],
     gene_indices: &[usize],
     batch_indices: &[usize],
@@ -325,7 +325,7 @@ pub fn seurat_rpca_integration(
         }
         if params.pca_params.randomised {
             let (sc, _load, _s, _) = pca_on_sc(
-                f_path,
+                reader,
                 cell_indices,
                 gene_indices,
                 params.dims,
@@ -338,7 +338,7 @@ pub fn seurat_rpca_integration(
             sc
         } else {
             let (sc, _load, _s) = pca_on_sc_sparse(
-                f_path,
+                reader,
                 cell_indices,
                 gene_indices,
                 params.dims,
@@ -351,7 +351,6 @@ pub fn seurat_rpca_integration(
         }
     };
 
-    let reader = ParallelSparseReader::new(f_path)?;
 
     // Cache per-batch standardised HVG expression: loaded once, reused
     // for per-batch PCA and every cross-projection.
@@ -374,7 +373,7 @@ pub fn seurat_rpca_integration(
                 .collect()
         });
         let x = load_hvg_standardised(
-            &reader,
+            reader,
             &cells_b,
             gene_indices,
             clr_b.as_deref(),
