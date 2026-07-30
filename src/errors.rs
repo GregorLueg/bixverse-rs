@@ -524,6 +524,15 @@ pub enum BixverseErrors {
         n_cluster_assignment: usize,
     },
 
+    /// Error when the smoothing graph node count != the number of cells
+    #[error("SCType: The graph has {n_nodes} nodes, but there are {n_cells} cells.")]
+    ScTypeGraphNodesNotEqualNCells {
+        /// Number of cells
+        n_cells: usize,
+        /// Number of nodes in the smoothing graph
+        n_nodes: usize,
+    },
+
     // -- wnn --
     /// Error if the modalities do not have the same number of cells
     #[cfg(feature = "multi-modal")]
