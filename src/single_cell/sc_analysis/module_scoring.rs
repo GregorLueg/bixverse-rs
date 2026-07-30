@@ -30,7 +30,7 @@ struct GeneBins {
 ///
 /// ### Params
 ///
-/// * `f_path_gene` - Path to the gene-based binary file.
+/// * `gene_reader` - Reader for the gene-based store.
 /// * `cell_set` - IndexSet that stores which cells to include in the analysis.
 /// * `streaming` - Boolean. If set to TRUE, the chunks will be loaded in groups
 ///   of 500 gene.
@@ -38,20 +38,19 @@ struct GeneBins {
 /// ### Returns
 ///
 /// A vector of `(gene_index, avg expression)`
-fn get_average_expression(
-    f_path_gene: &str,
+fn get_average_expression<S: SingleCellReading>(
+    gene_reader: &S,
     cell_set: &IndexSet<u32>,
     streaming: bool,
 ) -> Result<Vec<(usize, f32)>, BixverseErrors> {
-    let reader = ParallelSparseReader::new(f_path_gene)?;
-    let total_genes = reader.get_header().total_genes;
+    let total_genes = gene_reader.get_header().total_genes;
 
     if streaming {
         const CHUNK_SIZE: usize = 500;
         let gene_indices: Vec<usize> = (0..total_genes).collect();
         let mut results: Vec<(usize, f32)> = Vec::with_capacity(total_genes);
         for chunk in gene_indices.chunks(CHUNK_SIZE) {
-            let gene_chunks = reader.read_gene_parallel(chunk)?;
+            let gene_chunks = gene_reader.read_gene_parallel(chunk)?;
             let chunk_results: Vec<(usize, f32)> = gene_chunks
                 .par_iter()
                 .map(|gene| gene.calculate_avg_exp(cell_set))
@@ -60,7 +59,7 @@ fn get_average_expression(
         }
         Ok(results)
     } else {
-        let gene_chunks = reader.get_all_genes()?;
+        let gene_chunks = gene_reader.get_all_genes()?;
         let results: Vec<(usize, f32)> = gene_chunks
             .par_iter()
             .map(|gene| gene.calculate_avg_exp(cell_set))
@@ -187,7 +186,7 @@ fn calculate_cell_module_score(
 ///
 /// ### Params
 ///
-/// * `f_path_cell` - Path to the cell-based binary file
+/// * `cell_reader` - Reader for the cell-based store
 /// * `gene_sets` - Slice of indices of the gene sets
 /// * `cells_to_keep` - Slice of indices of the cells to keep
 /// * `gene_bins` - The pre-calculated GeneBins.
@@ -198,8 +197,8 @@ fn calculate_cell_module_score(
 ///
 /// Vec of vec with outer vector representing the gene sets and the inner ones
 /// the cells.
-fn calculate_module_scores(
-    f_path_cell: &str,
+fn calculate_module_scores<S: SingleCellReading>(
+    cell_reader: &S,
     gene_sets: &[Vec<usize>],
     cells_to_keep: &[usize],
     gene_bins: &GeneBins,
@@ -213,8 +212,7 @@ fn calculate_module_scores(
         .map(|gene_set| sample_control_genes(gene_set, gene_bins, ctrl, &mut rng))
         .collect();
 
-    let reader = ParallelSparseReader::new(f_path_cell)?;
-    let cell_chunks = reader.read_cells_parallel(cells_to_keep)?;
+    let cell_chunks = cell_reader.read_cells_parallel(cells_to_keep)?;
 
     let all_scores: Vec<Vec<f32>> = cell_chunks
         .par_iter()
@@ -244,7 +242,7 @@ fn calculate_module_scores(
 ///
 /// ### Params
 ///
-/// * `f_path_cell` - Path to the cell-based binary file
+/// * `cell_reader` - Reader for the cell-based store
 /// * `gene_sets` - Slice of indices of the gene sets
 /// * `cells_to_keep` - Slice of indices of the cells to keep
 /// * `gene_bins` - The pre-calculated GeneBins.
@@ -255,8 +253,8 @@ fn calculate_module_scores(
 ///
 /// Vec of vec with outer vector representing the gene sets and the inner ones
 /// the cells.
-fn calculate_module_scores_streaming(
-    f_path_cell: &str,
+fn calculate_module_scores_streaming<S: SingleCellReading>(
+    cell_reader: &S,
     gene_sets: &[Vec<usize>],
     cells_to_keep: &[usize],
     gene_bins: &GeneBins,
@@ -273,15 +271,13 @@ fn calculate_module_scores_streaming(
         .map(|gene_set| sample_control_genes(gene_set, gene_bins, ctrl, &mut rng))
         .collect();
 
-    let reader = ParallelSparseReader::new(f_path_cell)?;
-
     let total_chunks = cells_to_keep.len().div_ceil(CHUNK_SIZE);
     let mut results: Vec<Vec<f32>> = vec![Vec::with_capacity(cells_to_keep.len()); gene_sets.len()];
 
     for (chunk_idx, cell_indices_chunk) in cells_to_keep.chunks(CHUNK_SIZE).enumerate() {
         let start = Instant::now();
 
-        let cell_chunks = reader.read_cells_parallel(cell_indices_chunk)?;
+        let cell_chunks = cell_reader.read_cells_parallel(cell_indices_chunk)?;
 
         // Calculate scores in parallel (cells x modules)
         let chunk_scores: Vec<Vec<f32>> = cell_chunks
@@ -324,8 +320,8 @@ fn calculate_module_scores_streaming(
 ///
 /// ### Params
 ///
-/// * `f_path_gene` - Path to the gene-based binary file.
-/// * `f_path_cell` - Path to the cell-based binary file.
+/// * `gene_reader` - Reader for the gene-based store.
+/// * `cell_reader` - Reader for the cell-based store.
 /// * `gene_sets` - Slice of indices of the gene sets.
 /// * `cells_to_use` - Slice of indices of the cells to use.
 /// * `nbin` - Number of bins to use
@@ -340,9 +336,9 @@ fn calculate_module_scores_streaming(
 /// Vec of vec with outer vector representing the gene sets and the inner ones
 /// the cells.
 #[allow(clippy::too_many_arguments)]
-pub fn calculate_module_scores_main(
-    f_path_gene: &str,
-    f_path_cell: &str,
+pub fn calculate_module_scores_main<S: SingleCellReading>(
+    gene_reader: &S,
+    cell_reader: &S,
     gene_sets: &[Vec<usize>],
     cells_to_use: &[usize],
     nbin: usize,
@@ -363,7 +359,7 @@ pub fn calculate_module_scores_main(
 
     let start_avg_exp = Instant::now();
 
-    let avg_exp = get_average_expression(f_path_gene, &cell_set, streaming)?;
+    let avg_exp = get_average_expression(gene_reader, &cell_set, streaming)?;
 
     let end_evg_exp = start_avg_exp.elapsed();
 
@@ -381,7 +377,7 @@ pub fn calculate_module_scores_main(
 
     let module_scores = if streaming {
         calculate_module_scores_streaming(
-            f_path_cell,
+            cell_reader,
             gene_sets,
             cells_to_use,
             &gene_bins,
@@ -391,7 +387,7 @@ pub fn calculate_module_scores_main(
         )
     } else {
         calculate_module_scores(
-            f_path_cell,
+            cell_reader,
             gene_sets,
             cells_to_use,
             &gene_bins,

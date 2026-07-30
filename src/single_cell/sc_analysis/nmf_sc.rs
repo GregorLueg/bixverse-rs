@@ -151,7 +151,7 @@ where
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to the gene-based binary file.
+/// * `reader` - Reader over the gene-based count store.
 /// * `gene_indices` - The indices of the genes to include. Typically, people
 ///   take 2000 to 5000 HVG within the subset of cells.
 /// * `cell_indices` - The cells on which to run NMF.
@@ -167,8 +167,8 @@ where
 ///
 /// [NmfResult] or respective errors if something went wrong.
 #[allow(clippy::too_many_arguments)]
-pub fn nmf_single_run_sc(
-    f_path: &str,
+pub fn nmf_single_run_sc<S: SingleCellReading>(
+    reader: &S,
     gene_indices: &[usize],
     cell_indices: &[usize],
     k: usize,
@@ -192,7 +192,6 @@ pub fn nmf_single_run_sc(
         DataLayerReturn::Raw
     };
 
-    let reader = ParallelSparseReader::new(f_path)?;
     let gene_chunks: Vec<CscGeneChunk> =
         reader.read_gene_parallel_filtered(gene_indices, &cell_set)?;
     let csc: CompressedSparseData2<f32> = from_gene_chunks::<f32>(gene_chunks, &layer, n_cells);
@@ -230,7 +229,7 @@ pub fn nmf_single_run_sc(
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to the gene-based binary file.
+/// * `reader` - Reader over the gene-based count store.
 /// * `gene_indices` - The indices of the genes to include. Typically, people
 ///   take 2000 to 5000 HVG within the subset of cells.
 /// * `cell_indices` - The cells on which to run NMF.
@@ -246,8 +245,8 @@ pub fn nmf_single_run_sc(
 ///
 /// [NmfResult] or respective errors if something went wrong.
 #[allow(clippy::too_many_arguments)]
-pub fn nmf_multiple_run_sc(
-    f_path: &str,
+pub fn nmf_multiple_run_sc<S: SingleCellReading>(
+    reader: &S,
     gene_indices: &[usize],
     cell_indices: &[usize],
     k: usize,
@@ -273,7 +272,6 @@ pub fn nmf_multiple_run_sc(
         DataLayerReturn::Raw
     };
 
-    let reader = ParallelSparseReader::new(f_path)?;
     let gene_chunks: Vec<CscGeneChunk> =
         reader.read_gene_parallel_filtered(gene_indices, &cell_set)?;
     let csc: CompressedSparseData2<f32> = from_gene_chunks::<f32>(gene_chunks, &layer, n_cells);

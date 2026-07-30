@@ -709,7 +709,6 @@ pub fn simulate_from_pairs<S: SingleCellReading>(
         .map(|(hvg_idx, &orig_idx)| (orig_idx, hvg_idx as u32))
         .collect();
 
-
     pairs
         .par_iter()
         .enumerate()
@@ -1633,7 +1632,6 @@ pub fn simulate_doublets_scdbl<S: SingleCellReading>(
             rng_seed: master_rng.next_u64(),
         })
         .collect();
-
 
     let results: Vec<(CsrCellChunk, usize)> = (0..n_sim)
         .into_par_iter()

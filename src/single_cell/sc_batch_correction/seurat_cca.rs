@@ -538,7 +538,6 @@ pub fn seurat_cca_integration<S: SingleCellReading>(
     let top_absolute_genes: Vec<usize> =
         top_positions.iter().map(|&pos| gene_indices[pos]).collect();
 
-
     // Per-pair anchor computation: load only the two batches involved,
     // build CC space and filter expression, extract anchors, drop.
     let mut anchors_by_pair: FxHashMap<(usize, usize), AnchorSet> = FxHashMap::default();

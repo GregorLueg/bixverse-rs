@@ -351,7 +351,6 @@ pub fn seurat_rpca_integration<S: SingleCellReading>(
         }
     };
 
-
     // Cache per-batch standardised HVG expression: loaded once, reused
     // for per-batch PCA and every cross-projection.
     //

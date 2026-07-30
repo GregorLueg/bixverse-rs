@@ -110,7 +110,7 @@ fn mann_whitney_u_test(ranks1: &[f32], ranks2: &[f32]) -> f64 {
 ///
 /// ### Params
 ///
-/// * `f_path` - File path to the cell-based binary file.
+/// * `reader` - Reader over the cell-based count store.
 /// * `grp_1_indices` - The cell indices of group 1.
 /// * `grp_2_indices` - The cell indices of group 2.
 /// * `min_proportion` - The minimum proportion that a gene needs to be
@@ -123,8 +123,8 @@ fn mann_whitney_u_test(ranks1: &[f32], ranks2: &[f32]) -> f64 {
 /// ### Returns
 ///
 /// The `DgeMannWhitneyRes` structure with results
-pub fn calculate_dge_grps_mann_whitney(
-    f_path: &str,
+pub fn calculate_dge_grps_mann_whitney<S: SingleCellReading>(
+    reader: &S,
     grp_1_indices: &[usize],
     grp_2_indices: &[usize],
     min_proportion: f32,
@@ -135,7 +135,6 @@ pub fn calculate_dge_grps_mann_whitney(
 
     let start_read = Instant::now();
 
-    let reader = ParallelSparseReader::new(f_path)?;
     let no_genes = reader.get_header().total_genes;
 
     let mut cell_chunks_1: Vec<CsrCellChunk> = reader.read_cells_parallel(grp_1_indices)?;
@@ -595,7 +594,7 @@ pub(crate) fn score_cell(
 ///
 /// ### Params
 ///
-/// * `f_path` - File path to the cell-based binary file.
+/// * `reader` - Reader over the cell-based count store.
 /// * `gene_sets` - Slice of Vecs indicating the indices of the gene sets
 /// * `cells_to_keep` - Vector of indices with the cells to keep.
 /// * `params` - Optional [AucellParams]. Defaults to the recovery-curve AUC
@@ -610,8 +609,8 @@ pub(crate) fn score_cell(
 /// ### References
 ///
 /// Aibar, et al., Nat Methods, 2017
-pub fn calculate_aucell(
-    f_path: &str,
+pub fn calculate_aucell<S: SingleCellReading>(
+    reader: &S,
     gene_sets: &[Vec<usize>],
     cells_to_keep: &[usize],
     params: Option<AucellParams>,
@@ -621,7 +620,6 @@ pub fn calculate_aucell(
     let params = params.unwrap_or_default();
 
     let start_read = Instant::now();
-    let reader = ParallelSparseReader::new(f_path)?;
     let no_genes = reader.get_header().total_genes;
     let cell_chunks: Vec<CsrCellChunk> = reader.read_cells_parallel(cells_to_keep)?;
     let total_cells = cell_chunks.len();
@@ -673,7 +671,7 @@ pub fn calculate_aucell(
 ///
 /// ### Params
 ///
-/// * `f_path` -  File path to the cell-based binary file.
+/// * `reader` - Reader over the cell-based count store.
 /// * `gene_sets` - Slice of Vecs indicating the indices of the gene sets
 /// * `cells_to_keep` - Vector of indices with the cells to keep.
 /// * `params` - Optional [AucellParams]. Defaults to the recovery-curve AUC
@@ -688,8 +686,8 @@ pub fn calculate_aucell(
 /// ### References
 ///
 /// Aibar, et al., Nat Methods, 2017
-pub fn calculate_aucell_streaming(
-    f_path: &str,
+pub fn calculate_aucell_streaming<S: SingleCellReading>(
+    reader: &S,
     gene_sets: &[Vec<usize>],
     cells_to_keep: &[usize],
     params: Option<AucellParams>,
@@ -700,7 +698,6 @@ pub fn calculate_aucell_streaming(
 
     const CHUNK_SIZE: usize = 50000;
 
-    let reader = ParallelSparseReader::new(f_path)?;
     let no_genes = reader.get_header().total_genes;
     let total_chunks = cells_to_keep.len().div_ceil(CHUNK_SIZE);
     let max_rank = resolve_max_rank(params.max_rank, no_genes);

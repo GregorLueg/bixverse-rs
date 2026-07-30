@@ -192,7 +192,7 @@ fn calc_knn_weights(knn_indices: &[Vec<usize>], knn_distances: &[Vec<f32>]) -> V
 ///
 /// ### Params
 ///
-/// * `f_path` -  File path to the cell-based binary file.
+/// * `reader` - Reader over the cell-based count store.
 /// * `signatures` - Slice of `SignatureGenes` to calculate the scores for
 /// * `cells_to_keep` - Vector of indices with the cells to keep.
 /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
@@ -201,8 +201,8 @@ fn calc_knn_weights(knn_indices: &[Vec<usize>], knn_distances: &[Vec<f32>]) -> V
 /// ### Returns
 ///
 /// A `Vec<Vec<f32>>` with cells x scores per gene set (pair)
-pub fn calculate_vision(
-    f_path: &str,
+pub fn calculate_vision<S: SingleCellReading>(
+    reader: &S,
     gene_signs: &[SignatureGenes],
     cells_to_keep: &[usize],
     verbose: usize,
@@ -210,7 +210,6 @@ pub fn calculate_vision(
     let verbosity = parse_verbosity_level(verbose);
 
     let start_read = Instant::now();
-    let reader = ParallelSparseReader::new(f_path)?;
     let no_genes = reader.get_header().total_genes;
     let cell_chunks: Vec<CsrCellChunk> = reader.read_cells_parallel(cells_to_keep)?;
     let end_read = start_read.elapsed();
@@ -240,7 +239,7 @@ pub fn calculate_vision(
 ///
 /// ### Params
 ///
-/// * `f_path` -  File path to the cell-based binary file.
+/// * `reader` - Reader over the cell-based count store.
 /// * `signatures` - Slice of `SignatureGenes` to calculate the scores for
 /// * `cells_to_keep` - Vector of indices with the cells to keep.
 /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
@@ -249,8 +248,8 @@ pub fn calculate_vision(
 /// ### Returns
 ///
 /// A `Vec<Vec<f32>>` with cells x scores per gene set (pair)
-pub fn calculate_vision_streaming(
-    f_path: &str,
+pub fn calculate_vision_streaming<S: SingleCellReading>(
+    reader: &S,
     gene_signs: &[SignatureGenes],
     cells_to_keep: &[usize],
     verbose: usize,
@@ -260,7 +259,6 @@ pub fn calculate_vision_streaming(
     let verbosity = parse_verbosity_level(verbose);
 
     let total_chunks = cells_to_keep.len().div_ceil(CHUNK_SIZE);
-    let reader = ParallelSparseReader::new(f_path)?;
     let no_genes = reader.get_header().total_genes;
 
     let mut all_results: Vec<Vec<f32>> = Vec::with_capacity(cells_to_keep.len());

@@ -722,7 +722,6 @@ pub fn pca_on_sc_streaming<S: SingleCellReading>(
     let n_genes = gene_indices.len();
     let num_batches = n_genes.div_ceil(gene_batch_size);
 
-
     let mut scaled_matrix = Mat::<f64>::zeros(n_cells, n_genes);
 
     let start_scaling = Instant::now();
