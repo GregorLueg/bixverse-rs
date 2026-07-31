@@ -6051,7 +6051,7 @@ fn tree_config_of(params: &ScenicParams) -> &dyn TreeRegressorConfig {
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to the sparse gene expression file.
+/// * `reader` - Reader over the sparse gene expression store.
 /// * `cell_indices` - Indices of cells to use.
 /// * `gene_indices` - Target gene indices.
 /// * `tf_indices` - Transcription factor gene indices (predictors).
@@ -6070,8 +6070,8 @@ fn tree_config_of(params: &ScenicParams) -> &dyn TreeRegressorConfig {
 ///
 /// Aibar et al., Nat Methods, 2017.
 #[allow(clippy::too_many_arguments)]
-pub fn run_scenic_grn_gpu<R>(
-    f_path: &str,
+pub fn run_scenic_grn_gpu<R, S>(
+    reader: &S,
     cell_indices: &[usize],
     gene_indices: &[usize],
     tf_indices: &[usize],
@@ -6083,6 +6083,7 @@ pub fn run_scenic_grn_gpu<R>(
 ) -> Result<Mat<f32>, BixverseErrors>
 where
     R: Runtime,
+    S: SingleCellReading,
 {
     if matches!(
         scenic_params.regression_learner,
@@ -6094,7 +6095,7 @@ where
     }
 
     let verbosity = parse_verbosity_level(verbose);
-    let setup = scenic_common_setup(f_path, cell_indices, tf_indices, verbose)?;
+    let setup = scenic_common_setup(reader, cell_indices, tf_indices, verbose)?;
     let n_genes = gene_indices.len();
 
     let n_multi_output = scenic_params
@@ -6110,7 +6111,7 @@ where
     .unwrap_or(GeneBatchStrategy::Random);
 
     let batches = batch_genes(
-        f_path,
+        reader,
         gene_indices,
         cell_indices,
         n_multi_output,
@@ -6236,8 +6237,8 @@ where
 ///
 /// Aibar et al., Nat Methods, 2017.
 #[allow(clippy::too_many_arguments)]
-pub fn run_scenic_grn_streaming_gpu<R>(
-    f_path: &str,
+pub fn run_scenic_grn_streaming_gpu<R, S>(
+    reader: &S,
     cell_indices: &[usize],
     gene_indices: &[usize],
     tf_indices: &[usize],
@@ -6249,6 +6250,7 @@ pub fn run_scenic_grn_streaming_gpu<R>(
 ) -> Result<Mat<f32>, BixverseErrors>
 where
     R: Runtime,
+    S: SingleCellReading,
 {
     if matches!(
         scenic_params.regression_learner,
@@ -6260,7 +6262,7 @@ where
     }
 
     let verbosity = parse_verbosity_level(verbose);
-    let setup = scenic_common_setup(f_path, cell_indices, tf_indices, verbose)?;
+    let setup = scenic_common_setup(reader, cell_indices, tf_indices, verbose)?;
     let n_genes = gene_indices.len();
 
     let n_multi_output = scenic_params
@@ -6276,7 +6278,7 @@ where
     .unwrap_or(GeneBatchStrategy::Random);
 
     let batches = batch_genes(
-        f_path,
+        reader,
         gene_indices,
         cell_indices,
         n_multi_output,

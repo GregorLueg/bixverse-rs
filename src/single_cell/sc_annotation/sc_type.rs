@@ -301,7 +301,7 @@ fn compute_marker_sensitivity(
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to the gene-based binary file
+/// * `reader` - Reader for the gene-based store.
 /// * `cell_indices` - HashSet with the cell indices to keep.
 /// * `markers` - A slice of [CellTypeMarkers].
 /// * `use_sensitivity` - Boolean. If set up, common cell type markers are down
@@ -316,8 +316,8 @@ fn compute_marker_sensitivity(
 /// ### Returns
 ///
 /// The [SctypeRes].
-pub fn run_sctype(
-    f_path: &str,
+pub fn run_sctype<S: SingleCellReading>(
+    reader: &S,
     cell_indices: &[usize],
     markers: &[CellTypeMarkers],
     use_sensitivity: bool,
@@ -331,7 +331,6 @@ pub fn run_sctype(
     let weight_floor = weight_floor.unwrap_or(WEIGHT_FLOOR);
     let gene_batch_size = gene_batch_size.unwrap_or(GENE_BATCH_SIZE);
 
-    let reader = ParallelSparseReader::new(f_path)?;
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
     let no_cells = cell_set.len();
     let n_cell_types = markers.len();

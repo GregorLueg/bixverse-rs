@@ -1378,8 +1378,10 @@ fn run_scenic_grn_gpu_roundtrip() {
 
     let params = scenic_params_for_roundtrip();
 
+    let reader = ParallelSparseReader::new(path_str).expect("failed to open synthetic file");
+
     let cpu = run_scenic_grn(
-        path_str,
+        &reader,
         &cell_indices,
         &gene_indices,
         &tf_indices,
@@ -1389,8 +1391,8 @@ fn run_scenic_grn_gpu_roundtrip() {
     )
     .expect("CPU run_scenic_grn failed");
 
-    let gpu = run_scenic_grn_gpu::<WgpuRuntime>(
-        path_str,
+    let gpu = run_scenic_grn_gpu::<WgpuRuntime, _>(
+        &reader,
         &cell_indices,
         &gene_indices,
         &tf_indices,
@@ -1430,8 +1432,10 @@ fn run_scenic_grn_streaming_gpu_roundtrip() {
 
     let params = scenic_params_for_roundtrip();
 
+    let reader = ParallelSparseReader::new(path_str).expect("failed to open synthetic file");
+
     let cpu = run_scenic_grn(
-        path_str,
+        &reader,
         &cell_indices,
         &gene_indices,
         &tf_indices,
@@ -1441,8 +1445,8 @@ fn run_scenic_grn_streaming_gpu_roundtrip() {
     )
     .expect("CPU baseline failed");
 
-    let gpu = run_scenic_grn_streaming_gpu::<WgpuRuntime>(
-        path_str,
+    let gpu = run_scenic_grn_streaming_gpu::<WgpuRuntime, _>(
+        &reader,
         &cell_indices,
         &gene_indices,
         &tf_indices,
@@ -1606,8 +1610,10 @@ fn run_scenic_grn_gpu_rejects_gbm() {
     params.regression_learner =
         RegressionLearner::GradientBoosting(GradientBoostingConfig::default());
 
-    let err = run_scenic_grn_gpu::<WgpuRuntime>(
-        path_str,
+    let reader = ParallelSparseReader::new(path_str).expect("failed to open synthetic file");
+
+    let err = run_scenic_grn_gpu::<WgpuRuntime, _>(
+        &reader,
         &cell_indices,
         &gene_indices,
         &tf_indices,

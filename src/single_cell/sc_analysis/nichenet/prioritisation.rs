@@ -49,13 +49,14 @@ pub struct ClusterExpressionStats<T> {
 /// ### Returns
 ///
 /// The [ClusterExpressionStats] results.
-pub fn compute_cluster_expression_stats<T>(
-    reader: &ParallelSparseReader,
+pub fn compute_cluster_expression_stats<T, S>(
+    reader: &S,
     gene_indices: &[usize],
     clusters: &[Vec<usize>],
 ) -> Result<ClusterExpressionStats<T>, BixverseErrors>
 where
     T: BixverseFloat + Send + Sync,
+    S: SingleCellReading,
 {
     if !reader.is_gene_based() {
         return Err(BixverseErrors::ReaderModeMismatch {

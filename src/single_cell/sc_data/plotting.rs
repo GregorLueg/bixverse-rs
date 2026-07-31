@@ -56,7 +56,7 @@ fn scale_and_clip(data: &mut [f32], clip: Option<f32>) {
 ///
 /// ### Params
 ///
-/// * `f_path` -  Path to the gene-based binary file.
+/// * `reader` - Reader over the gene-based count store.
 /// * `cell_indices` - Slice of indices for the cells.
 /// * `gene_index` - The gene index for which to get the values.
 ///
@@ -64,14 +64,13 @@ fn scale_and_clip(data: &mut [f32], clip: Option<f32>) {
 ///
 /// Returns a vector of length `cell_indices.len()` in the same order as
 /// `cell_indices`.
-pub fn extract_raw_counts(
-    f_path: &str,
+pub fn extract_raw_counts<S: SingleCellReading>(
+    reader: &S,
     cell_indices: &[usize],
     gene_index: usize,
 ) -> Result<Vec<u32>, BixverseErrors> {
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
 
-    let reader = ParallelSparseReader::new(f_path)?;
     let mut chunk = reader
         .read_gene_parallel(&[gene_index])?
         .into_iter()
@@ -94,7 +93,7 @@ pub fn extract_raw_counts(
 ///
 /// ### Params
 ///
-/// * `f_path` -  Path to the gene-based binary file.
+/// * `reader` - Reader over the gene-based count store.
 /// * `cell_indices` - Slice of indices for the cells.
 /// * `gene_index` - The gene index for which to get the values.
 /// * `scale` - Shall the data be scaled.
@@ -104,8 +103,8 @@ pub fn extract_raw_counts(
 ///
 /// Returns a vector of length `cell_indices.len()` in the same order as
 /// `cell_indices`.
-pub fn extract_norm_counts(
-    f_path: &str,
+pub fn extract_norm_counts<S: SingleCellReading>(
+    reader: &S,
     cell_indices: &[usize],
     gene_index: usize,
     scale: bool,
@@ -113,7 +112,6 @@ pub fn extract_norm_counts(
 ) -> Result<Vec<f32>, BixverseErrors> {
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
 
-    let reader = ParallelSparseReader::new(f_path)?;
     let mut chunk = reader
         .read_gene_parallel(&[gene_index])?
         .into_iter()
@@ -142,7 +140,7 @@ pub fn extract_norm_counts(
 ///
 /// ### Params
 ///
-/// * `f_path` -  Path to the gene-based binary file.
+/// * `reader` - Reader over the gene-based count store.
 /// * `cell_indices` - Slice of indices for the cells.
 /// * `gene_index` - The gene index for which to get the values.
 /// * `scale` - Shall the data be scaled.
@@ -152,8 +150,8 @@ pub fn extract_norm_counts(
 ///
 /// Returns a vector of vectors of length `cell_indices.len()` in the same order
 /// as `cell_indices` with the densified gene expression values.
-pub fn extract_norm_counts_multi(
-    f_path: &str,
+pub fn extract_norm_counts_multi<S: SingleCellReading>(
+    reader: &S,
     cell_indices: &[usize],
     gene_indices: &[usize],
     scale: bool,
@@ -162,7 +160,6 @@ pub fn extract_norm_counts_multi(
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
     let n = cell_indices.len();
 
-    let reader = ParallelSparseReader::new(f_path)?;
     let mut chunks = reader.read_gene_parallel(gene_indices)?;
 
     chunks.par_iter_mut().for_each(|chunk| {
@@ -197,7 +194,7 @@ pub fn extract_norm_counts_multi(
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to the gene-based binary file.
+/// * `reader` - Reader over the gene-based count store.
 /// * `cell_indices` - Slice of indices for the cells.
 /// * `gene_indices` - Slice of indices for the genes.
 /// * `group_ids` - Integer group assignments parallel to `cell_indices`,
@@ -210,8 +207,8 @@ pub fn extract_norm_counts_multi(
 /// A `GroupedGeneStats` containing per-gene, per-group mean normalised
 /// expression and fraction of expressing cells. Output vectors are laid out
 /// row-major (genes x n_levels).
-pub fn extract_grouped_gene_stats(
-    f_path: &str,
+pub fn extract_grouped_gene_stats<S: SingleCellReading>(
+    reader: &S,
     cell_indices: &[usize],
     gene_indices: &[usize],
     group_ids: &[usize],
@@ -237,7 +234,6 @@ pub fn extract_grouped_gene_stats(
         group_sizes[g] += 1;
     }
 
-    let reader = ParallelSparseReader::new(f_path)?;
     let mut chunks = reader.read_gene_parallel(gene_indices)?;
 
     chunks.par_iter_mut().for_each(|chunk| {

@@ -55,8 +55,8 @@ impl Pile {
     /// ### Returns
     ///
     /// The [`Pile`] of the specified cells.
-    pub fn from_reader(
-        reader: &ParallelSparseReader,
+    pub fn from_reader<S: SingleCellReading>(
+        reader: &S,
         cell_indices: &[usize],
     ) -> Result<Self, BixverseErrors> {
         let chunks = reader.read_cells_parallel(cell_indices)?;

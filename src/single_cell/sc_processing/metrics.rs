@@ -403,7 +403,7 @@ pub fn batch_lisi(
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to the gene-based (CSC) binary file.
+/// * `reader` - Reader over the gene-based count store.
 /// * `gene_indices_1` - First set of gene indices.
 /// * `gene_indices_2` - Second set of gene indices (same length).
 /// * `cells_to_keep` - Indices of cells to include.
@@ -412,8 +412,8 @@ pub fn batch_lisi(
 /// ### Returns
 ///
 /// Vector of correlations, one per pair.
-pub fn pairwise_gene_correlations(
-    f_path: &str,
+pub fn pairwise_gene_correlations<S: SingleCellReading>(
+    reader: &S,
     gene_indices_1: &[usize],
     gene_indices_2: &[usize],
     cells_to_keep: &[usize],
@@ -432,7 +432,6 @@ pub fn pairwise_gene_correlations(
     let unique_vec: Vec<usize> = unique_genes.iter().copied().collect();
 
     // Load and filter
-    let reader = ParallelSparseReader::new(f_path)?;
     let mut gene_chunks = reader.read_gene_parallel(&unique_vec)?;
 
     gene_chunks.par_iter_mut().for_each(|chunk| {

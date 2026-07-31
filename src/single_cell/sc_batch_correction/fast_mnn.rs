@@ -564,7 +564,7 @@ pub fn split_pca_by_batch(
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to single cell data file
+/// * `reader` - Reader over the single cell count store
 /// * `cell_indices` - Indices of cells to include
 /// * `gene_indices` - Indices of genes to include
 /// * `batch_indices` - Batch assignment for each cell
@@ -578,8 +578,8 @@ pub fn split_pca_by_batch(
 ///
 /// Batch-corrected PCA matrix (cells x n_pcs) in original cell order
 #[allow(clippy::too_many_arguments)]
-pub fn fast_mnn_main(
-    f_path: &str,
+pub fn fast_mnn_main<S: SingleCellReading>(
+    reader: &S,
     cell_indices: &[usize],
     gene_indices: &[usize],
     batch_indices: &[usize],
@@ -607,7 +607,7 @@ pub fn fast_mnn_main(
         }
         if params.sparse_svd {
             let (pca, _, _) = pca_on_sc_sparse(
-                f_path,
+                reader,
                 cell_indices,
                 gene_indices,
                 params.no_pcs,
@@ -620,7 +620,7 @@ pub fn fast_mnn_main(
             pca
         } else {
             let (pca, _, _, _) = pca_on_sc(
-                f_path,
+                reader,
                 cell_indices,
                 gene_indices,
                 params.no_pcs,
