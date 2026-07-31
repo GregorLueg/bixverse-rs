@@ -29,8 +29,8 @@ use crate::prelude::*;
 ///
 /// `CompressedSparseData2` in CSR format with aggregated raw counts and re-
 /// normalised counts per meta cell.
-pub fn aggregate_meta_cells(
-    reader: &ParallelSparseReader,
+pub fn aggregate_meta_cells<S: SingleCellReading>(
+    reader: &S,
     metacells: &[&[usize]],
     target_size: f32,
     n_genes: usize,
@@ -204,7 +204,7 @@ pub fn parse_pseudo_bulk(s: &str) -> Option<PseudoBulk> {
 ///
 /// ### Params
 ///
-/// * `f_path` - File path to the cell-based binary file.
+/// * `reader` - Reader for the cell-based store.
 /// * `cell_indices` - Slice of indices to pseudo-bulk.
 /// * `bulk_type` - Whether to pseudo-bulk raw (sum) or normalised (average)
 ///   counts.
@@ -214,15 +214,14 @@ pub fn parse_pseudo_bulk(s: &str) -> Option<PseudoBulk> {
 /// ### Returns
 ///
 /// Dense matrix of samples x genes pseudo-bulked.
-pub fn get_pseudo_bulked_counts_dense(
-    f_path: &str,
+pub fn get_pseudo_bulked_counts_dense<S: SingleCellReading>(
+    reader: &S,
     cell_indices: &[Vec<usize>],
     bulk_type: PseudoBulk,
     verbose: usize,
 ) -> Result<Mat<f64>, BixverseErrors> {
     let verbosity = parse_verbosity_level(verbose);
 
-    let reader = ParallelSparseReader::new(f_path).unwrap();
     let n_genes = reader.get_header().total_genes;
     let n_groups = cell_indices.len();
     let mut result = Mat::zeros(n_groups, n_genes);
@@ -273,7 +272,7 @@ pub fn get_pseudo_bulked_counts_dense(
 ///
 /// ### Params
 ///
-/// * `f_path` - File path to the cell-based binary file.
+/// * `reader` - Reader for the cell-based store.
 /// * `cell_indices` - Slice of indices to pseudo-bulk.
 /// * `bulk_type` - Whether to pseudo-bulk raw (sum) or normalised (average)
 ///   counts.
@@ -283,15 +282,14 @@ pub fn get_pseudo_bulked_counts_dense(
 /// ### Returns
 ///
 /// Sparse CSR matrix of samples x genes pseudo-bulked.
-pub fn get_pseudo_bulked_counts_sparse(
-    f_path: &str,
+pub fn get_pseudo_bulked_counts_sparse<S: SingleCellReading>(
+    reader: &S,
     cell_indices: &[Vec<usize>],
     bulk_type: PseudoBulk,
     verbose: usize,
 ) -> Result<CompressedSparseData2<f64>, BixverseErrors> {
     let verbosity = parse_verbosity_level(verbose);
 
-    let reader = ParallelSparseReader::new(f_path).unwrap();
     let n_genes = reader.get_header().total_genes;
     let n_groups = cell_indices.len();
     let mut row_data: Vec<FxHashMap<usize, f64>> = vec![FxHashMap::default(); n_groups];

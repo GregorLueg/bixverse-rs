@@ -48,6 +48,11 @@ pub enum BixverseErrors {
     #[error("The faer Cholesky failed: {0}")]
     FaerCholeskyError(#[from] faer::linalg::solvers::LltError),
 
+    // -- statrs --
+    /// Beta distribution construction failed
+    #[error("Beta distribution error: {0}")]
+    BetaDistribution(String),
+
     // -- ann-search-rs --
     /// Propagate errors from the ann-search-rs crate
     #[error("Error from the ann-search-rs crate: {0}")]
@@ -359,6 +364,28 @@ pub enum BixverseErrors {
         /// Number of provided batches
         n_batches: usize,
     },
+
+    /// Anchor finding produced no pairs between two batches
+    #[cfg(feature = "single-cell")]
+    #[error("No anchors found between batches {batch_a} and {batch_b}.")]
+    NoAnchorsFound {
+        /// Reference batch index
+        batch_a: usize,
+        /// Query batch index
+        batch_b: usize,
+    },
+
+    /// A batch has too few cells for the requested anchor search
+    #[cfg(feature = "single-cell")]
+    #[error("Batch {batch} has {n_cells} cells, needs at least {required} for anchor finding.")]
+    TooFewCellsForAnchor {
+        /// Batch index
+        batch: usize,
+        /// Cells in the batch
+        n_cells: usize,
+        /// Minimum required
+        required: usize,
+    },
     // -- Harmony --
     /// Sigma length is not equal to the number of clusters
     #[error("Harmony: sigma length must match number of clusters")]
@@ -497,6 +524,15 @@ pub enum BixverseErrors {
         n_cluster_assignment: usize,
     },
 
+    /// Error when the smoothing graph node count != the number of cells
+    #[error("SCType: The graph has {n_nodes} nodes, but there are {n_cells} cells.")]
+    ScTypeGraphNodesNotEqualNCells {
+        /// Number of cells
+        n_cells: usize,
+        /// Number of nodes in the smoothing graph
+        n_nodes: usize,
+    },
+
     // -- wnn --
     /// Error if the modalities do not have the same number of cells
     #[cfg(feature = "multi-modal")]
@@ -609,9 +645,36 @@ pub enum BixverseErrors {
     #[cfg(feature = "gpu")]
     #[error("GPU: A matrix multiplication occurred: {0}")]
     GpuMatmul(String),
+    /// A kernel launch asked for more workgroups in one grid dimension than
+    /// the device allows. Dispatching it anyway kills the cubecl server
+    /// thread, after which every later call on that client fails with an
+    /// unrelated `CallError`, so it is caught before the launch instead.
+    #[cfg(feature = "gpu")]
+    #[error(
+        "GPU: kernel '{kernel}' requested a cube count of {requested:?}, device limit is {limit:?}"
+    )]
+    GpuCubeCountExceeded {
+        /// Name of the kernel whose dispatch was rejected.
+        kernel: &'static str,
+        /// Requested cube count as `(x, y, z)`.
+        requested: (u32, u32, u32),
+        /// Per-dimension device limit as `(x, y, z)`.
+        limit: (u32, u32, u32),
+    },
     // -- gpu / single cell --
     /// GPU Harmony only supports one co-variate for now (based on Arrowhead)
     #[cfg(feature = "gpu")]
     #[error("Harmony GPU: Only a single co-variate is supported for the GPU path")]
     GpuHarmonySupportsSingleCovariateOnly,
+    /// Selected SCENIC regression learner has no GPU implementation. Only the
+    /// tree-based learners (ExtraTrees, RandomForest) are ported; GRNBoost2 /
+    /// gradient boosting stays on CPU by design.
+    #[cfg(feature = "gpu")]
+    #[error(
+        "SCENIC GPU: the {learner} regression learner has no GPU path; use the CPU entry point (run_scenic_grn / run_scenic_grn_streaming / run_scenic_grn_in_memory)"
+    )]
+    GpuNotSupportedForLearner {
+        /// Name of the requested regression learner.
+        learner: &'static str,
+    },
 }

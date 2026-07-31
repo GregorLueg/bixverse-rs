@@ -29,7 +29,7 @@ use crate::single_cell::sc_utils::simd::*;
 use crate::single_cell::sc_utils::utils_tree::*;
 
 /// How many genes to test for in one go
-const SCENIC_GENE_CHUNK_SIZE: usize = 1024;
+pub(crate) const SCENIC_GENE_CHUNK_SIZE: usize = 1024;
 
 /// How many target genes to batch into a single multi-output tree ensemble.
 /// 64 targets * 256 bins * 16 bytes ≈ 256KB per feature histogram, fits L2
@@ -361,7 +361,7 @@ impl SparseYBatch {
     ///
     /// A `SparseYBatch` where entries are sorted by cell, then by target
     /// index within each cell.
-    fn from_targets(
+    pub fn from_targets(
         targets: &[SparseAxis<u32, f32>],
         n_cells: usize,
     ) -> Result<Self, BixverseErrors> {
@@ -2743,7 +2743,10 @@ fn chunk_into_batches(genes: &[usize], batch_size: usize) -> Vec<Vec<usize>> {
 ///
 /// Half-open `[start, end)` index ranges into `batches`, each covering at
 /// most `max_genes` genes without splitting a batch across groups
-fn group_batches_for_io(batches: &[Vec<usize>], max_genes: usize) -> Vec<(usize, usize)> {
+pub(crate) fn group_batches_for_io(
+    batches: &[Vec<usize>],
+    max_genes: usize,
+) -> Vec<(usize, usize)> {
     let mut groups = Vec::new();
     let mut start = 0usize;
     let mut count = 0usize;
@@ -2815,7 +2818,7 @@ pub fn subsample_cells(cell_indices: &[usize], n_target: usize, seed: usize) -> 
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to the gene-based file
+/// * `reader` - Reader over the gene-based count store
 /// * `gene_indices` - The genes to include
 /// * `batch_size` - Size of the batches
 /// * `n_components` - Number of components to use for the clustering
@@ -2829,8 +2832,8 @@ pub fn subsample_cells(cell_indices: &[usize], n_target: usize, seed: usize) -> 
 /// Returns gene indices reordered so that co-expressed genes are contiguous for
 /// subsequent batching
 #[allow(clippy::too_many_arguments)]
-fn batch_genes_correlated(
-    f_path: &str,
+fn batch_genes_correlated<S: SingleCellReading>(
+    reader: &S,
     gene_indices: &[usize],
     cell_indices: &[usize],
     batch_size: usize,
@@ -2860,7 +2863,7 @@ fn batch_genes_correlated(
     // loadings is (n_genes, n_components)
     // using a streaming version here to avoid memory blowing up
     let (_, loadings, _, _) = pca_on_sc_streaming(
-        f_path,
+        reader,
         &sub_cells,
         gene_indices,
         n_components,
@@ -2952,7 +2955,7 @@ fn batch_genes_correlated(
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to the sparse expression file.
+/// * `reader` - Reader over the sparse expression store.
 /// * `gene_indices` - Target gene indices to batch.
 /// * `cell_indices` - Cell indices in use.
 /// * `batch_size` - Target batch size (MULTI_OUTPUT_BATCH).
@@ -2965,8 +2968,8 @@ fn batch_genes_correlated(
 ///
 /// The gene indices partitioned into batches of at most `batch_size`,
 /// ordered according to the chosen strategy
-pub fn batch_genes(
-    f_path: &str,
+pub fn batch_genes<S: SingleCellReading>(
+    reader: &S,
     gene_indices: &[usize],
     cell_indices: &[usize],
     batch_size: usize,
@@ -2990,7 +2993,7 @@ pub fn batch_genes(
                 ));
             }
             batch_genes_correlated(
-                f_path,
+                reader,
                 gene_indices,
                 cell_indices,
                 batch_size,
@@ -3012,9 +3015,7 @@ pub fn batch_genes(
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to the sparse expression file (forwarded to
-///   `batch_genes` for correlated batching).
-/// * `reader` - Parallel sparse reader for target gene I/O.
+/// * `reader` - Reader for target gene I/O.
 /// * `cell_set` - Set of active cell IDs for filtering.
 /// * `cell_indices` - Cell indices as a slice (forwarded to `batch_genes`).
 /// * `gene_indices` - Target gene indices.
@@ -3033,9 +3034,8 @@ pub fn batch_genes(
 /// A `Mat<f32>` of shape `(n_genes, n_tfs)` containing normalised
 /// per-target feature importances.
 #[allow(clippy::too_many_arguments)]
-fn run_scenic_multi_output(
-    f_path: &str,
-    reader: &ParallelSparseReader,
+fn run_scenic_multi_output<S: SingleCellReading>(
+    reader: &S,
     cell_set: &IndexSet<u32>,
     cell_indices: &[usize],
     gene_indices: &[usize],
@@ -3063,7 +3063,7 @@ fn run_scenic_multi_output(
     .unwrap_or(GeneBatchStrategy::Random);
 
     let batches = batch_genes(
-        f_path,
+        reader,
         gene_indices,
         cell_indices,
         n_multi_output,
@@ -3208,7 +3208,7 @@ fn run_scenic_multi_output(
 ///
 /// ### Params
 ///
-/// * `reader` - Parallel sparse reader for target gene I/O.
+/// * `reader` - Reader for target gene I/O.
 /// * `cell_set` - Set of active cell IDs for filtering.
 /// * `gene_indices` - Target gene indices.
 /// * `tf_data` - Quantised TF feature store.
@@ -3226,8 +3226,8 @@ fn run_scenic_multi_output(
 /// A `Mat<f32>` of shape `(n_genes, n_tfs)` containing normalised
 /// per-target feature importances.
 #[allow(clippy::too_many_arguments)]
-fn run_scenic_gbm(
-    reader: &ParallelSparseReader,
+fn run_scenic_gbm<S: SingleCellReading>(
+    reader: &S,
     cell_set: &IndexSet<u32>,
     gene_indices: &[usize],
     tf_data: &QuantisedStore,
@@ -3337,9 +3337,7 @@ fn run_scenic_gbm(
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to the sparse expression file (forwarded to
-///   `batch_genes` for correlated batching).
-/// * `reader` - Parallel sparse reader for target gene I/O.
+/// * `reader` - Reader for target gene I/O.
 /// * `cell_set` - Set of active cell IDs for filtering.
 /// * `cell_indices` - Cell indices as a slice (forwarded to `batch_genes`).
 /// * `gene_indices` - Target gene indices.
@@ -3358,9 +3356,8 @@ fn run_scenic_gbm(
 /// A `Mat<f32>` of shape `(n_genes, n_tfs)` containing normalised
 /// per-target feature importances.
 #[allow(clippy::too_many_arguments)]
-fn run_scenic_multi_output_streaming(
-    f_path: &str,
-    reader: &ParallelSparseReader,
+fn run_scenic_multi_output_streaming<S: SingleCellReading>(
+    reader: &S,
     cell_set: &IndexSet<u32>,
     cell_indices: &[usize],
     gene_indices: &[usize],
@@ -3388,7 +3385,7 @@ fn run_scenic_multi_output_streaming(
     .unwrap_or(GeneBatchStrategy::Random);
 
     let batches = batch_genes(
-        f_path,
+        reader,
         gene_indices,
         cell_indices,
         n_multi_output,
@@ -3554,7 +3551,7 @@ fn run_scenic_multi_output_streaming(
 ///
 /// ### Params
 ///
-/// * `reader` - Parallel sparse reader for target gene I/O.
+/// * `reader` - Reader for target gene I/O.
 /// * `cell_set` - Set of active cell IDs for filtering.
 /// * `gene_indices` - Target gene indices.
 /// * `tf_data` - Quantised TF feature store.
@@ -3572,8 +3569,8 @@ fn run_scenic_multi_output_streaming(
 /// A `Mat<f32>` of shape `(n_genes, n_tfs)` containing normalised
 /// per-target feature importances.
 #[allow(clippy::too_many_arguments)]
-fn run_scenic_gbm_streaming(
-    reader: &ParallelSparseReader,
+fn run_scenic_gbm_streaming<S: SingleCellReading>(
+    reader: &S,
     cell_set: &IndexSet<u32>,
     gene_indices: &[usize],
     tf_data: &QuantisedStore,
@@ -3738,11 +3735,96 @@ impl Default for ScenicParams {
 // Main //
 //////////
 
+/// Shared setup produced by [`scenic_common_setup`]: the artefacts every
+/// top-level SCENIC entry point needs before dispatching on the regression
+/// learner.
+///
+/// ### Fields
+///
+/// * `reader` - Borrowed reader over the sparse expression store.
+/// * `cell_set` - Active cell IDs, deduplicated and preserved in input order.
+/// * `tf_data` - Quantised TF feature store (`u8` columns, column-major).
+/// * `n_cells` - Number of active cells.
+/// * `n_tfs` - Number of TFs (features).
+/// * `start_total` - Wall-clock timer started at the top of the call.
+pub(crate) struct ScenicSetup<'a, S: SingleCellReading> {
+    /// Open reader over the sparse expression file.
+    pub reader: &'a S,
+    /// Active cell IDs, deduplicated and preserved in input order.
+    pub cell_set: IndexSet<u32>,
+    /// Quantised TF feature store (`u8` columns, column-major).
+    pub tf_data: QuantisedStore,
+    /// Number of active cells.
+    pub n_cells: usize,
+    /// Number of TFs (features).
+    pub n_tfs: usize,
+    /// Wall-clock timer started at the top of the call.
+    pub start_total: Instant,
+}
+
+/// Perform the prelude shared by every top-level SCENIC entry point: open the
+/// reader, build the cell set, read + filter + quantise the TF columns, and
+/// print a timing line.
+///
+/// ### Params
+///
+/// * `reader` - Reader over the sparse gene expression store.
+/// * `cell_indices` - Indices of the active cells.
+/// * `tf_indices` - Transcription-factor gene indices.
+/// * `verbose` - `0` -> silent, `1` -> normal, `2` -> detailed.
+///
+/// ### Returns
+///
+/// A populated [`ScenicSetup`] on success.
+pub(crate) fn scenic_common_setup<'a, S: SingleCellReading>(
+    reader: &'a S,
+    cell_indices: &[usize],
+    tf_indices: &[usize],
+    verbose: usize,
+) -> Result<ScenicSetup<'a, S>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
+    let start_total = Instant::now();
+    let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
+    let n_cells = cell_set.len();
+
+    let start_reading = Instant::now();
+
+    let mut tf_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(tf_indices)?;
+    tf_chunks.par_iter_mut().for_each(|chunk| {
+        chunk.filter_selected_cells(&cell_set);
+    });
+
+    let tf_csc: CompressedSparseData2<u16, f32> =
+        from_gene_chunks::<u16>(tf_chunks, &DataLayerReturn::Norm, n_cells);
+    let tf_data = QuantisedStore::from_csc(&tf_csc, n_cells)?;
+    drop(tf_csc);
+
+    let n_tfs = tf_data.n_features;
+
+    if verbosity.normal_verbosity() {
+        println!(
+            "Loaded, filtered and quantised TF data (n: {}) in: {:.2?}",
+            n_tfs.separate_with_underscores(),
+            start_reading.elapsed()
+        );
+    }
+
+    Ok(ScenicSetup {
+        reader,
+        cell_set,
+        tf_data,
+        n_cells,
+        n_tfs,
+        start_total,
+    })
+}
+
 /// Filter genes by minimum total counts and minimum expressed-cell fraction
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to the sparse gene expression file.
+/// * `reader` - Reader over the sparse gene expression store.
 /// * `cell_indices` - Indices of the cells to restrict to.
 /// * `scenic_params` - Reference to the SCENIC parameters indicating minimum
 ///   couts per gene and minimum proportions of cells expressing a gene to
@@ -3753,15 +3835,14 @@ impl Default for ScenicParams {
 /// ### Returns
 ///
 /// Indices of genes passing both filters, in their original order.
-pub fn scenic_gene_filter(
-    f_path: &str,
+pub fn scenic_gene_filter<S: SingleCellReading>(
+    reader: &S,
     cell_indices: &[usize],
     scenic_params: &ScenicParams,
     verbose: usize,
 ) -> Result<Vec<usize>, BixverseErrors> {
     let verbosity = parse_verbosity_level(verbose);
 
-    let reader = ParallelSparseReader::new(f_path)?;
     let total_genes = reader.get_header().total_genes;
     let all_gene_indices: Vec<usize> = (0..total_genes).collect();
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
@@ -3801,7 +3882,7 @@ pub fn scenic_gene_filter(
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to the sparse gene expression file.
+/// * `reader` - Reader over the sparse gene expression store.
 /// * `cell_indices` - Indices of cells to use.
 /// * `gene_indices` - Target gene indices.
 /// * `tf_indices` - Transcription factor gene indices (predictors).
@@ -3830,8 +3911,8 @@ pub fn scenic_gene_filter(
 /// 100k cells and 10% sparsity this is roughly 60KB per gene (~1.2GB for
 /// 20k genes). For datasets where this is prohibitive, a wave-based
 /// approach processing a few thousand genes at a time can be substituted.
-pub fn run_scenic_grn(
-    f_path: &str,
+pub fn run_scenic_grn<S: SingleCellReading>(
+    reader: &S,
     cell_indices: &[usize],
     gene_indices: &[usize],
     tf_indices: &[usize],
@@ -3839,65 +3920,36 @@ pub fn run_scenic_grn(
     seed: usize,
     verbose: usize,
 ) -> Result<Mat<f32>, BixverseErrors> {
-    let verbosity = parse_verbosity_level(verbose);
-
-    let start_total = Instant::now();
-    let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
-    let n_cells = cell_set.len();
-
-    // load and quantise TFs
-    let start_reading = Instant::now();
-    let reader = ParallelSparseReader::new(f_path)?;
-
-    let mut tf_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(tf_indices)?;
-    tf_chunks.par_iter_mut().for_each(|chunk| {
-        chunk.filter_selected_cells(&cell_set);
-    });
-
-    let tf_csc: CompressedSparseData2<u16, f32> =
-        from_gene_chunks::<u16>(tf_chunks, &DataLayerReturn::Norm, n_cells);
-    let tf_data = QuantisedStore::from_csc(&tf_csc, n_cells)?;
-    drop(tf_csc);
-
-    let n_tfs = tf_data.n_features;
+    let setup = scenic_common_setup(reader, cell_indices, tf_indices, verbose)?;
     let n_genes = gene_indices.len();
-
-    if verbosity.normal_verbosity() {
-        println!(
-            "Loaded, filtered and quantised TF data (n: {}) in: {:.2?}",
-            n_tfs.separate_with_underscores(),
-            start_reading.elapsed()
-        );
-    }
 
     match &scenic_params.regression_learner {
         RegressionLearner::GradientBoosting(gbm_config) => run_scenic_gbm(
-            &reader,
-            &cell_set,
+            setup.reader,
+            &setup.cell_set,
             gene_indices,
-            &tf_data,
-            n_cells,
-            n_tfs,
+            &setup.tf_data,
+            setup.n_cells,
+            setup.n_tfs,
             n_genes,
             gbm_config,
             seed,
             verbose,
-            start_total,
+            setup.start_total,
         ),
         _ => run_scenic_multi_output(
-            f_path,
-            &reader,
-            &cell_set,
+            setup.reader,
+            &setup.cell_set,
             cell_indices,
             gene_indices,
-            &tf_data,
-            n_cells,
-            n_tfs,
+            &setup.tf_data,
+            setup.n_cells,
+            setup.n_tfs,
             n_genes,
             scenic_params,
             seed,
             verbose,
-            start_total,
+            setup.start_total,
         ),
     }
 }
@@ -3907,7 +3959,7 @@ pub fn run_scenic_grn(
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to the sparse gene expression file.
+/// * `reader` - Reader over the sparse gene expression store.
 /// * `cell_indices` - Indices of cells to use.
 /// * `gene_indices` - Target gene indices.
 /// * `tf_indices` - Transcription factor gene indices (predictors).
@@ -3935,8 +3987,8 @@ pub fn run_scenic_grn(
 /// configurations (1024 genes / 64 per batch = 16 batches) this is
 /// acceptable. Use `run_scenic_grn` when memory permits for maximum
 /// throughput.
-pub fn run_scenic_grn_streaming(
-    f_path: &str,
+pub fn run_scenic_grn_streaming<S: SingleCellReading>(
+    reader: &S,
     cell_indices: &[usize],
     gene_indices: &[usize],
     tf_indices: &[usize],
@@ -3944,66 +3996,36 @@ pub fn run_scenic_grn_streaming(
     seed: usize,
     verbose: usize,
 ) -> Result<Mat<f32>, BixverseErrors> {
-    let verbosity = parse_verbosity_level(verbose);
-
-    let start_total = Instant::now();
-    let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
-    let n_cells = cell_set.len();
-
-    // load and quantise the TFs
-    let start_reading = Instant::now();
-    let reader = ParallelSparseReader::new(f_path).unwrap();
-
-    let mut tf_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(tf_indices)?;
-    tf_chunks.par_iter_mut().for_each(|chunk| {
-        chunk.filter_selected_cells(&cell_set);
-    });
-
-    let tf_csc: CompressedSparseData2<u16, f32> =
-        from_gene_chunks::<u16>(tf_chunks, &DataLayerReturn::Norm, n_cells);
-    let tf_data = QuantisedStore::from_csc(&tf_csc, n_cells)?;
-
-    drop(tf_csc);
-
-    let n_tfs = tf_data.n_features;
+    let setup = scenic_common_setup(reader, cell_indices, tf_indices, verbose)?;
     let n_genes = gene_indices.len();
-
-    if verbosity.normal_verbosity() {
-        println!(
-            "Loaded, filtered and quantised TF data (n: {}) in: {:.2?}",
-            n_tfs.separate_with_underscores(),
-            start_reading.elapsed()
-        );
-    }
 
     match &scenic_params.regression_learner {
         RegressionLearner::GradientBoosting(gbm_config) => run_scenic_gbm_streaming(
-            &reader,
-            &cell_set,
+            setup.reader,
+            &setup.cell_set,
             gene_indices,
-            &tf_data,
-            n_cells,
-            n_tfs,
+            &setup.tf_data,
+            setup.n_cells,
+            setup.n_tfs,
             n_genes,
             gbm_config,
             seed,
             verbose,
-            start_total,
+            setup.start_total,
         ),
         _ => run_scenic_multi_output_streaming(
-            f_path,
-            &reader,
-            &cell_set,
+            setup.reader,
+            &setup.cell_set,
             cell_indices,
             gene_indices,
-            &tf_data,
-            n_cells,
-            n_tfs,
+            &setup.tf_data,
+            setup.n_cells,
+            setup.n_tfs,
             n_genes,
             scenic_params,
             seed,
             verbose,
-            start_total,
+            setup.start_total,
         ),
     }
 }

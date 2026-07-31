@@ -2,7 +2,64 @@
 
 ## 0.4.0
 
-Skunk works for spatial transcriptomics stuff
+### Features
+
+- Spatial transcriptomics module: Moran's I, SPARK-X spatially variable genes,
+  and neighbourhood enrichment. Gated behind the `spatial` feature.
+
+## 0.3.11
+
+### Features
+
+- Large refactor for the streaming engine for single cell.
+
+## 0.3.10
+
+### Features
+
+- ScType with kNN smoothing.
+
+## 0.3.9
+
+### Features
+
+- **GPU improvements**:
+  * An actually fast GPU-accelerated SCENIC version that beats CPU.
+  * Improved k-means clustering on the GPU.
+  * Faster randomised sparse SVD on the GPU.
+  * Custom kernels for the correlations which beat `cubek` (at least on Apple
+    Silicon).
+- Different AUCell methods with true alternatives.
+
+## 0.3.8
+
+### Features
+
+- Updated synthetic data set generation for bulk RNAseq.
+- Attempt at a GPU-accelerated SCENIC version. Individual tree-building is
+  faster; however, parallelised CPU smokes GPU (at least on Apple Silicon).
+- Faster GPU correlations.
+- Implementation of two additional batch correction methods:
+  * Seurat rPCA batch correction.
+  * Seurat CCA batch correction.
+
+## 0.3.7
+
+### Fix
+
+- Bumped to `ann-search-rs = "0.4.4"` to ensure the IVF kNN search always
+  returns k neighbours.
+
+## 0.3.6
+
+### Features
+
+- Speed improvements to the fgsea multi-level implementation removing
+  unnecessary computations and allocations.
+
+### Fix
+
+- Fixed an edge case in the multi-level implementation that caused panics.
 
 ## 0.3.5
 

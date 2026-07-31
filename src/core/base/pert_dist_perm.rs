@@ -59,7 +59,7 @@ impl Default for PermutationPath {
 ///
 /// * `s` - String to parse. One of `"fast"`, `"slow"`, or `"subsample"`.
 /// * `max_per_group` - Optional usize. To how many max to subsample. If not
-///   provided, defaults to [N_SUB_SAMPLE].
+///   provided, defaults to `N_SUB_SAMPLE` (500).
 ///
 /// ### Returns
 ///

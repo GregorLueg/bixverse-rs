@@ -394,7 +394,7 @@ pub fn sparse_csc_column_stds(
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to the gene-based binary file.
+/// * `reader` - Reader over the gene-based count store.
 /// * `cell_indices` - Slice of indices for the cells.
 /// * `gene_indices` - Slice of indices for the genes.
 /// * `no_pcs` - Number of principal components to calculate
@@ -412,8 +412,8 @@ pub fn sparse_csc_column_stds(
 ///
 /// The [SingleCellPcaResScaledStats]
 #[allow(clippy::too_many_arguments)]
-fn dense_pca(
-    f_path: &str,
+fn dense_pca<S: SingleCellReading>(
+    reader: &S,
     cell_indices: &[usize],
     gene_indices: &[usize],
     no_pcs: usize,
@@ -444,7 +444,6 @@ fn dense_pca(
 
     let start_reading = Instant::now();
 
-    let reader = ParallelSparseReader::new(f_path)?;
     let mut gene_chunks: Vec<CscGeneChunk> =
         reader.read_gene_parallel_filtered(gene_indices, &cell_set)?;
 
@@ -561,7 +560,7 @@ fn dense_pca(
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to the gene-based binary file.
+/// * `reader` - Reader over the gene-based count store.
 /// * `cell_indices` - Slice of indices for the cells.
 /// * `gene_indices` - Slice of indices for the genes.
 /// * `no_pcs` - Number of principal components to calculate
@@ -579,8 +578,8 @@ fn dense_pca(
 ///
 /// The [SingleCellPcaResScaled]
 #[allow(clippy::too_many_arguments)]
-pub fn pca_on_sc(
-    f_path: &str,
+pub fn pca_on_sc<S: SingleCellReading>(
+    reader: &S,
     cell_indices: &[usize],
     gene_indices: &[usize],
     no_pcs: usize,
@@ -591,7 +590,7 @@ pub fn pca_on_sc(
     verbose: usize,
 ) -> SingleCellPcaResScaled {
     let (scores, loadings, s, scaled_f32, _, _) = dense_pca(
-        f_path,
+        reader,
         cell_indices,
         gene_indices,
         no_pcs,
@@ -613,7 +612,7 @@ pub fn pca_on_sc(
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to the gene-based binary file.
+/// * `reader` - Reader over the gene-based count store.
 /// * `cell_indices` - Slice of indices for the cells.
 /// * `gene_indices` - Slice of indices for the genes.
 /// * `no_pcs` - Number of principal components to calculate
@@ -630,8 +629,8 @@ pub fn pca_on_sc(
 ///
 /// The [SingleCellPcaResScaled]
 #[allow(clippy::too_many_arguments)]
-pub fn pca_on_sc_stats(
-    f_path: &str,
+pub fn pca_on_sc_stats<S: SingleCellReading>(
+    reader: &S,
     cell_indices: &[usize],
     gene_indices: &[usize],
     no_pcs: usize,
@@ -641,7 +640,7 @@ pub fn pca_on_sc_stats(
     verbose: usize,
 ) -> SingleCellPcaResStats {
     let (scores, loadings, s, _, feature_means, feature_sds) = dense_pca(
-        f_path,
+        reader,
         cell_indices,
         gene_indices,
         no_pcs,
@@ -670,7 +669,7 @@ pub fn pca_on_sc_stats(
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to the gene-based binary file.
+/// * `reader` - Reader over the gene-based count store.
 /// * `cell_indices` - Slice of indices for the cells.
 /// * `gene_indices` - Slice of indices for the genes.
 /// * `no_pcs` - Number of principal components to calculate.
@@ -690,8 +689,8 @@ pub fn pca_on_sc_stats(
 /// A tuple of the samples projected on the PC space, gene loadings, singular
 /// values, and optionally the scaled data.
 #[allow(clippy::too_many_arguments)]
-pub fn pca_on_sc_streaming(
-    f_path: &str,
+pub fn pca_on_sc_streaming<S: SingleCellReading>(
+    reader: &S,
     cell_indices: &[usize],
     gene_indices: &[usize],
     no_pcs: usize,
@@ -722,8 +721,6 @@ pub fn pca_on_sc_streaming(
     let n_cells = cell_indices.len();
     let n_genes = gene_indices.len();
     let num_batches = n_genes.div_ceil(gene_batch_size);
-
-    let reader = ParallelSparseReader::new(f_path)?;
 
     let mut scaled_matrix = Mat::<f64>::zeros(n_cells, n_genes);
 
@@ -844,7 +841,7 @@ pub fn pca_on_sc_streaming(
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to the gene-based binary file.
+/// * `reader` - Reader over the gene-based count store.
 /// * `cell_indices` - Slice of indices for the cells.
 /// * `gene_indices` - Slice of indices for the genes.
 /// * `no_pcs` - Number of principal components to calculate
@@ -860,8 +857,8 @@ pub fn pca_on_sc_streaming(
 ///
 /// The [SingleCellPcaResStats]
 #[allow(clippy::too_many_arguments)]
-fn sparse_pca(
-    f_path: &str,
+fn sparse_pca<S: SingleCellReading>(
+    reader: &S,
     cell_indices: &[usize],
     gene_indices: &[usize],
     no_pcs: usize,
@@ -891,7 +888,6 @@ fn sparse_pca(
 
     let start_reading = Instant::now();
 
-    let reader = ParallelSparseReader::new(f_path)?;
     let mut gene_chunks: Vec<CscGeneChunk> =
         reader.read_gene_parallel_filtered(gene_indices, &cell_set)?;
 
@@ -992,7 +988,7 @@ fn sparse_pca(
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to the gene-based binary file.
+/// * `reader` - Reader over the gene-based count store.
 /// * `cell_indices` - Slice of indices for the cells.
 /// * `gene_indices` - Slice of indices for the genes.
 /// * `no_pcs` - Number of principal components to calculate
@@ -1008,8 +1004,8 @@ fn sparse_pca(
 ///
 /// The [SingleCellPcaRes]
 #[allow(clippy::too_many_arguments)]
-pub fn pca_on_sc_sparse(
-    f_path: &str,
+pub fn pca_on_sc_sparse<S: SingleCellReading>(
+    reader: &S,
     cell_indices: &[usize],
     gene_indices: &[usize],
     no_pcs: usize,
@@ -1019,7 +1015,7 @@ pub fn pca_on_sc_sparse(
     verbose: usize,
 ) -> SingleCellPcaRes {
     let (scores, loadings, s, _, _) = sparse_pca(
-        f_path,
+        reader,
         cell_indices,
         gene_indices,
         no_pcs,
@@ -1039,7 +1035,7 @@ pub fn pca_on_sc_sparse(
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to the gene-based binary file.
+/// * `reader` - Reader over the gene-based count store.
 /// * `cell_indices` - Slice of indices for the cells.
 /// * `gene_indices` - Slice of indices for the genes.
 /// * `no_pcs` - Number of principal components to calculate
@@ -1055,8 +1051,8 @@ pub fn pca_on_sc_sparse(
 ///
 /// The [SingleCellPcaResStats]
 #[allow(clippy::too_many_arguments)]
-pub fn pca_on_sc_sparse_stats(
-    f_path: &str,
+pub fn pca_on_sc_sparse_stats<S: SingleCellReading>(
+    reader: &S,
     cell_indices: &[usize],
     gene_indices: &[usize],
     no_pcs: usize,
@@ -1066,7 +1062,7 @@ pub fn pca_on_sc_sparse_stats(
     verbose: usize,
 ) -> SingleCellPcaResStats {
     let res = sparse_pca(
-        f_path,
+        reader,
         cell_indices,
         gene_indices,
         no_pcs,

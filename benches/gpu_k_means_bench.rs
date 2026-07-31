@@ -1,28 +1,45 @@
-//! GPU kernel microbenchmarks for the k-means assignment step.
+//! GPU benchmarks for k-means: assignment-kernel variants plus the full
+//! device-resident Lloyd's loop.
 //!
-//! Each variant is self-contained: kernel function plus launcher. They all
-//! consume the same prepared GpuTensor inputs so the comparison is fair.
+//! ### Assignment variants
 //!
-//! Variants:
+//! Each is self-contained (kernel plus launcher) and consumes the same
+//! prepared GpuTensor inputs, so the comparison is fair.
 //!
 //! * `v1_baseline` - WG=32, SMEM-tiled centroids, scalar inner loop.
-//! * `v2_wide_wg` - WG=128, otherwise identical to V1.
+//! * `v2_wide_wg` - WG=128, otherwise identical to V1. This is what
+//!   production dispatches (`flash_assign_device` uses `WORKGROUP_128`).
 //! * `v3_rn` - WG=32, SMEM-tiled, register-blocked (rn points per
 //!   thread, dim-aware via `rn_for`).
 //! * `v4_vec` - WG=128, NO SMEM, vectorised inner arithmetic via
 //!   Vector<F, N>. Conflates two changes (drop SMEM, vectorise); see comments
 //!   on the kernel.
 //!
-//! Run with: cargo bench --bench gpu_kmeans_assign_kernels --features gpu
+//! ### Full loop
+//!
+//! `run_loop_suite` calls `k_means_clusters_gpu` end to end at the shapes
+//! production actually runs (Harmony: large n, small dim, k 100-200) and at
+//! the large-k / high-dim shapes the variants above were written for. Host
+//! initialisation is timed separately because `kmeans_parallel_init` runs on
+//! the CPU and is invisible in a single end-to-end number.
+//!
+//! Run with: cargo bench --bench gpu_k_means_bench --features gpu
 
-#![allow(dead_code, missing_docs)]
+#![allow(missing_docs)]
+
+use std::time::{Duration, Instant};
 
 use cubecl::benchmark::{Benchmark, TimingMethod};
 use cubecl::future;
 use cubecl::prelude::*;
+use faer::Mat;
 
 use ann_search_rs::gpu::tensor::GpuTensor;
 use ann_search_rs::gpu::*;
+use ann_search_rs::utils::dist::{Dist, compute_l2_norm};
+use ann_search_rs::utils::k_means_utils::{KMeansInit, fast_random_init, kmeans_parallel_init};
+
+use bixverse_rs::gpu::ml::k_means_gpu::{KMeansGpuParams, k_means_clusters_gpu};
 
 ////////////
 // Shapes //
@@ -48,8 +65,8 @@ const SHAPES: &[AssignShape] = &[
     },
 ];
 
-/// Mirrors the production `assign_k_tile` heuristic so V1 matches the real
-/// kernel's launch config.
+/// Mirrors the production `assign_k_tile` heuristic. Note that production
+/// dispatches at `WORKGROUP_128`, i.e. V2's launch config, not V1's.
 fn k_tile_for(dim: usize) -> usize {
     match dim {
         0..=64 => 32,
@@ -736,6 +753,268 @@ impl<R: Runtime> Benchmark for V4Bench<R> {
     }
 }
 
+/////////////////////
+// Full-loop bench //
+/////////////////////
+
+/// One end-to-end k-means configuration.
+#[derive(Clone, Copy, Debug)]
+struct LoopShape {
+    /// Human-readable label used in the output.
+    label: &'static str,
+    /// Number of points.
+    n: usize,
+    /// Embedding dimensionality. All entries are multiples of `LINE_SIZE`, so
+    /// `k_means_clusters_gpu` takes its no-padding path.
+    dim: usize,
+    /// Number of centroids.
+    k: usize,
+    /// Distance metric string, as `k_means_clusters_gpu` parses it.
+    metric: &'static str,
+    /// Whether to run both initialisation strategies. Only meaningful below
+    /// the `n_centroids > 200` threshold, where the default picks k-means||.
+    sweep_init: bool,
+}
+
+/// The three Harmony rows are the production regime: `harmony_v2_gpu` is the
+/// only caller and runs at large `n`, `dim` 20-50 and `k` 100-200 with cosine.
+/// The last two are the shapes the assignment-kernel variants were written
+/// for, kept so a change cannot silently regress them.
+const LOOP_SHAPES: &[LoopShape] = &[
+    LoopShape {
+        label: "harmony-small",
+        n: 100_000,
+        dim: 32,
+        k: 100,
+        metric: "cosine",
+        sweep_init: true,
+    },
+    LoopShape {
+        label: "harmony-large",
+        n: 1_000_000,
+        dim: 48,
+        k: 100,
+        metric: "cosine",
+        sweep_init: true,
+    },
+    LoopShape {
+        label: "harmony-wide",
+        n: 1_000_000,
+        dim: 48,
+        k: 200,
+        metric: "cosine",
+        sweep_init: true,
+    },
+    LoopShape {
+        label: "large-k",
+        n: 10_000,
+        dim: 128,
+        k: 400,
+        metric: "euclidean",
+        sweep_init: false,
+    },
+    LoopShape {
+        label: "high-dim",
+        n: 10_000,
+        dim: 512,
+        k: 400,
+        metric: "euclidean",
+        sweep_init: false,
+    },
+];
+
+/// Lloyd's iterations per run. Matches `KMeansGpuParams::default`, which is
+/// what Harmony gets.
+const LOOP_ITERS: usize = 50;
+
+/// Measured repetitions per configuration, after one discarded warm-up. Two
+/// is enough to spot a wildly unstable reading without making a 1M-point
+/// sweep take all afternoon.
+const LOOP_REPS: usize = 2;
+
+/// Deterministic synthetic data, flat row-major.
+///
+/// ### Params
+///
+/// * `n` - Number of points
+/// * `dim` - Embedding dimensionality
+///
+/// ### Returns
+///
+/// `n * dim` values in row-major order.
+fn make_loop_data(n: usize, dim: usize) -> Vec<f32> {
+    (0..n * dim)
+        .map(|i| {
+            // A coarse cluster signal on top of a deterministic ramp, so the
+            // partition is non-degenerate and empty clusters stay rare.
+            let cluster = (i / dim) % 64;
+            ((i * 13 + 7) % 29) as f32 * 0.1 + cluster as f32 * 0.05
+        })
+        .collect()
+}
+
+/// Time the CPU reference initialisation, for comparison only.
+///
+/// `k_means_clusters_gpu` now runs k-means|| on the device, so this is the
+/// cost that path replaced rather than a component of the measured total. It
+/// stays in the bench because it is the number that justified porting the
+/// initialisation in the first place: 1.9 s at n = 1e6, k = 100 and 5.4 s at
+/// k = 200, against a GPU loop of well under a second.
+///
+/// ### Params
+///
+/// * `data` - Flat row-major data `[n, dim]`
+/// * `shape` - The configuration being measured
+/// * `init` - Initialisation strategy
+/// * `metric` - Parsed distance metric
+///
+/// ### Returns
+///
+/// `(elapsed, centroids)`
+fn time_init(
+    data: &[f32],
+    shape: LoopShape,
+    init: KMeansInit,
+    metric: &Dist,
+) -> (Duration, Vec<f32>) {
+    let start = Instant::now();
+    let cents = match init {
+        KMeansInit::Random => fast_random_init(data, shape.dim, shape.n, shape.k, 42),
+        KMeansInit::KMeansParallel => {
+            let norms: Vec<f32> = (0..shape.n)
+                .map(|i| compute_l2_norm(&data[i * shape.dim..(i + 1) * shape.dim]))
+                .collect();
+            kmeans_parallel_init(data, &norms, shape.dim, shape.n, shape.k, metric, 42)
+        }
+    };
+    (start.elapsed(), cents)
+}
+
+/// Reject a run that produced no work.
+///
+/// `k_means_clusters_gpu` dispatches with `launch_unchecked`, which does
+/// nothing and reports no error when a device limit is busted; the assignment
+/// buffer is `GpuTensor::empty`, so a dead run returns uninitialised VRAM.
+/// Out-of-range indices catch that, and the non-empty cluster count catches a
+/// run that technically wrote but collapsed.
+///
+/// ### Params
+///
+/// * `assignments` - Hard assignments returned by the driver
+/// * `shape` - The configuration being checked
+fn guard_assignments(assignments: &[usize], shape: LoopShape) {
+    assert_eq!(assignments.len(), shape.n, "wrong assignment count");
+    assert!(
+        assignments.iter().all(|&a| a < shape.k),
+        "assignment out of range: the GPU almost certainly did no work"
+    );
+    let mut seen = vec![false; shape.k];
+    for &a in assignments {
+        seen[a] = true;
+    }
+    let occupied = seen.iter().filter(|&&s| s).count();
+    assert!(
+        occupied * 2 > shape.k,
+        "only {}/{} clusters occupied, partition collapsed",
+        occupied,
+        shape.k
+    );
+}
+
+/// Run one shape under one initialisation strategy and print the split
+/// between host init and device loop.
+fn run_loop_shape<R: Runtime>(shape: LoopShape, init: KMeansInit, device: &R::Device)
+where
+    R::Device: Clone,
+{
+    let flat = make_loop_data(shape.n, shape.dim);
+    let mat = Mat::<f32>::from_fn(shape.n, shape.dim, |i, j| flat[i * shape.dim + j]);
+    let metric = match shape.metric {
+        "cosine" => Dist::Cosine,
+        _ => Dist::SquaredEuclidean,
+    };
+
+    let params = KMeansGpuParams::new(LOOP_ITERS, Some(init), true, false);
+
+    // Warm-up: compiles the shaders and faults in the buffers, both of which
+    // would otherwise land entirely in the first measured rep.
+    let (_, warm) = k_means_clusters_gpu::<f32, R>(
+        mat.as_ref(),
+        shape.metric,
+        shape.k,
+        Some(params),
+        42,
+        device.clone(),
+        false,
+    )
+    .expect("warm-up run failed");
+    guard_assignments(&warm, shape);
+
+    let (init_time, _) = time_init(&flat, shape, init, &metric);
+
+    for rep in 0..LOOP_REPS {
+        let start = Instant::now();
+        let (_, assignments) = k_means_clusters_gpu::<f32, R>(
+            mat.as_ref(),
+            shape.metric,
+            shape.k,
+            Some(params),
+            42,
+            device.clone(),
+            false,
+        )
+        .expect("k-means run failed");
+        let total = start.elapsed();
+        guard_assignments(&assignments, shape);
+
+        // `init_time` is the CPU reference cost. `k_means_clusters_gpu` runs
+        // k-means|| on the device, so this is what the GPU path replaced, not
+        // a component of `total`.
+        println!(
+            "  {:<14} init={:?}  rep {}: total {:>10.2?} | cpu-ref init {:>10.2?}",
+            shape.label, init, rep, total, init_time,
+        );
+    }
+}
+
+/// End-to-end Lloyd's loop across every shape in [`LOOP_SHAPES`].
+fn run_loop_suite<R: Runtime>(device: &R::Device)
+where
+    R::Device: Clone,
+{
+    println!(
+        "\n====== k-means full-loop bench ({} iters) ======\n",
+        LOOP_ITERS
+    );
+
+    // Under the profiler the whole sweep takes long enough to be unusable, so
+    // allow narrowing to one row by label.
+    let only = std::env::var("BIXVERSE_BENCH_SHAPE").ok();
+
+    for &shape in LOOP_SHAPES {
+        if let Some(want) = &only
+            && want != shape.label
+        {
+            continue;
+        }
+        println!(
+            "--- {}: n={}, k={}, dim={}, {} ---",
+            shape.label, shape.n, shape.k, shape.dim, shape.metric
+        );
+
+        // `k_means_clusters_gpu` picks Random above k=200 and k-means|| at or
+        // below it, so the production range straddles a cliff. Measure both
+        // sides of it rather than trusting the default.
+        if shape.sweep_init {
+            run_loop_shape::<R>(shape, KMeansInit::Random, device);
+            run_loop_shape::<R>(shape, KMeansInit::KMeansParallel, device);
+        } else {
+            run_loop_shape::<R>(shape, KMeansInit::Random, device);
+        }
+        println!();
+    }
+}
+
 ////////////
 // Runner //
 ////////////
@@ -787,5 +1066,17 @@ fn run_suite<R: Runtime>(device: &R::Device) {
 }
 
 fn main() {
-    run_suite::<cubecl::wgpu::WgpuRuntime>(&Default::default());
+    let device: <cubecl::wgpu::WgpuRuntime as Runtime>::Device = Default::default();
+
+    // `BIXVERSE_BENCH_ONLY=micro|loop` runs a single group. Useful under
+    // `CUBECL_DEBUG_OPTION=profile-medium`, where the profiler's syncs make
+    // running both groups take far longer than it is worth.
+    let only = std::env::var("BIXVERSE_BENCH_ONLY").unwrap_or_default();
+
+    if only != "loop" {
+        run_suite::<cubecl::wgpu::WgpuRuntime>(&device);
+    }
+    if only != "micro" {
+        run_loop_suite::<cubecl::wgpu::WgpuRuntime>(&device);
+    }
 }
