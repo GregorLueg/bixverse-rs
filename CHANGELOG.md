@@ -1,5 +1,11 @@
 # News
 
+## 0.3.11
+
+### Features
+
+- Large refactor for the streaming engine for single cell.
+
 ## 0.3.10
 
 ### Features

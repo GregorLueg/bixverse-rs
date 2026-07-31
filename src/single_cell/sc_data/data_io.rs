@@ -1219,9 +1219,9 @@ impl CellGeneSparseWriter {
     }
 }
 
-////////////////////////
+///////////////////////
 // SingleCellReading //
-////////////////////////
+///////////////////////
 
 /// Read access to a chunked single cell count store.
 ///
@@ -1552,9 +1552,8 @@ impl ParallelSparseReader {
 
     /// Locate, decompress and return the raw bytes of a single chunk
     ///
-    /// Shared by every read path: resolve the original index to a chunk
-    /// offset via the header index map, read the length prefix, then lz4
-    /// decompress.
+    /// Shared by every read path: resolve the original index to a chunk offset
+    /// via the header index map, read the length prefix, then lz4 decompress.
     ///
     /// ### Params
     ///
@@ -1583,6 +1582,10 @@ impl ParallelSparseReader {
             .map_err(|_| BixverseErrors::ChunkDecompressionFailed(chunk_offset as u64))
     }
 }
+
+//////////////////////////
+// Trait implementation //
+//////////////////////////
 
 impl SingleCellReading for ParallelSparseReader {
     /// Read in cells by indices in a multi-threaded manner
