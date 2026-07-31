@@ -22,6 +22,7 @@ Feature flags gate large chunks of the crate. Match your `cargo` invocations to 
 - default (no features): pure Rust bulk / statistics / graph / enrichment code
 - `single-cell`: enables the `single_cell` module and pulls in `hdf5`, `ndarray`, `memmap2`, `lz4_flex`, `bincode`, `indexmap`, `half`
 - `multi-modal`: enables `single_cell::multi_modal` (implies `single-cell`)
+- `spatial`: enables the `spatial` module (implies `single-cell`)
 - `gpu`: enables the `gpu` module, `cubecl` (wgpu + cpu backends), `cubek`, `half`, and `ann-search-rs/gpu`
 - `large_scale_diagnostics`: development-only, expensive diagnostic tests
 
@@ -30,46 +31,47 @@ Feature flags gate large chunks of the crate. Match your `cargo` invocations to 
 ```bash
 # Match CI: two independent test passes
 cargo test --no-default-features
-cargo test --features single-cell,multi-modal
+cargo test --features single-cell,multi-modal,spatial
 
 # GPU tests (separate CI job)
-cargo test --features gpu
+cargo test --features gpu,single-cell
 
 # Run a single test by name (substring match)
-cargo test --features single-cell,multi-modal -- test_name_substring
+cargo test --features single-cell,multi-modal,spatial -- test_name_substring
 
 # Format / lint
 cargo fmt
-cargo clippy --features single-cell,multi-modal --all-targets
+cargo clippy --features single-cell,multi-modal,spatial --all-targets
 
 # Benches (GPU k-means bench requires the gpu feature)
 cargo bench --features gpu --bench gpu_k_means_bench
 
-# Docs: docs.rs builds with single-cell + multi-modal
-cargo doc --features single-cell,multi-modal --open
+# Docs: docs.rs builds with single-cell + multi-modal + spatial
+cargo doc --features single-cell,multi-modal,spatial --open
 ```
 
 Linux and Windows CI need `R_HOME` / R shared libraries on the linker path because `extendr-api` links against libR. On macOS with R installed this generally works out of the box.
 
 ## Architecture
 
-The crate is organised by domain, not by algorithmic layer. Each top-level module contains its methods plus a sibling `*_r_wrapper.rs` file that exposes R-callable entry points via `extendr_api`. Keep the pure Rust surface free of R types: do all R conversions in the wrapper file.
+The crate is organised by domain, not by algorithmic layer. Each top-level module contains its methods plus a sibling `*_r_wrapper(s).rs` file that exposes R-callable entry points via `extendr_api`. Keep the pure Rust surface free of R types: do all R conversions in the wrapper file.
 
 Top-level modules:
 
 - `core/`: shared math primitives, linear algebra (`faer`), sparse structures (`CompressedSparseData2`, `CompressedSparseFormat`, `SparseAxis`), PCA/SVD, correlations, RBF kernels, synthetic data
 - `enrichment/`: GSEA (fgsea multi-level), GSVA, singscore, mitch, over-representation (OAE)
-- `graph/`: `SparseGraph` structure, community detection, label propagation, PageRank, graph metrics
+- `graph/`: `SparseGraph` structure, community detection, label propagation, PageRank, graph metrics, and `spatial_graph.rs` (`GraphCsr`, the symmetric CSR graph shared by HotSpot, Moran's I and neighbourhood enrichment)
 - `methods/`: bulk-omics methods, NMF (dense + HALS sparse), ICA, differential correlation, graph diffusion, SNF, RBH, dgRDL, CoReMo, cis-target
 - `ml/clustering/`: general-purpose clustering
 - `ontology/`: GO Elim algorithm and semantic similarity
 - `utils/`: SIMD wrappers (`wide` via `BixverseSimd`), matrix helpers, traits, R↔Rust conversion (`r_rust_interface.rs`), heap structures, assertion macros
 - `single_cell/` (feature): sc/mc data I/O (h5ad, 10x h5, mtx, bixverse binary format), processing, kNN, batch correction (Harmony), annotation (scType), analysis (Hotspot, MELD, SEACells, MetaCells2), multi-modal (WNN)
+- `spatial/` (feature): spatial transcriptomics on top of `single_cell`. `sp_processing/` has spatially variable gene detection (Moran's I, SPARK-X) with shared types in `svg_utils.rs`; `sp_analysis/` has neighbourhood enrichment
 - `gpu/` (feature): GPU kernels via `cubecl`/`cubek`, sparse randomised SVD, sparse GEMM, correlation, Cholesky, Harmony, PCA, k-means
 
 `prelude.rs` re-exports the most-used types (errors, sparse structures, `SparseGraph`, matrix/vector utils, SIMD trait, assertion macros). Prefer `use crate::prelude::*;` in new modules over deep imports.
 
-`errors.rs` defines `BixverseErrors` (a single `thiserror` enum for the whole crate). Variants are grouped by subsystem, so add new variants in the matching section rather than at the bottom. Many variants are gated by `#[cfg(feature = "single-cell")]` / `"multi-modal"` / `"gpu"`. Match the gating of the code that produces them.
+`errors.rs` defines `BixverseErrors` (a single `thiserror` enum for the whole crate). Variants are grouped by subsystem, so add new variants in the matching section rather than at the bottom. Many variants are gated by `#[cfg(feature = "single-cell")]` / `"multi-modal"` / `"spatial"` / `"gpu"`. Match the gating of the code that produces them.
 
 The single-cell binary sparse format is versioned via `SC_FILE_VERSION` (currently 3) and `MC_SPARSE_VERSION` (currently 1) in `prelude.rs`. Bumping either invalidates existing files on disk.
 
@@ -85,10 +87,10 @@ Performance is a first-class concern. This crate is the fast core underneath an 
 
 ## R interop pattern
 
-R-facing functions live in `*_r_wrapper.rs` files and use `extendr_api`. The convention: the wrapper deserialises R types into Rust-native inputs, calls the pure Rust implementation, then serialises the result back. `utils/r_rust_interface.rs` has the shared helpers (`r_list_to_hashmap`, `faer_to_r_matrix`, `NamedNumericVec`, etc). `NamedVecError` implements `From` for `extendr_api::Error` so `?` works across the boundary.
+R-facing functions live in `*_r_wrapper(s).rs` files and use `extendr_api`. The convention: the wrapper deserialises R types into Rust-native inputs, calls the pure Rust implementation, then serialises the result back. `utils/r_rust_interface.rs` has the shared helpers (`r_list_to_hashmap`, `faer_to_r_matrix`, `NamedNumericVec`, etc). `NamedVecError` implements `From` for `extendr_api::Error` so `?` works across the boundary.
 
 ## Testing layout
 
 - Unit tests live inline (`#[cfg(test)] mod tests`) in each module file
-- Integration tests in `tests/`: `gpu_corr.rs` (gpu feature), `meta_cells2.rs` (single-cell feature), `large_scale_diagnostics.rs` (dev-only feature)
+- Integration tests in `tests/`: `gpu_corr.rs` and `scenic_gpu.rs` (gpu feature), `meta_cells2.rs` (single-cell feature), `large_scale_diagnostics.rs` (dev-only feature)
 - CI matrix: Ubuntu / macOS / Windows for CPU tests; Ubuntu / macOS for GPU tests (Linux uses Vulkan via `WGPU_BACKEND=vulkan`)
