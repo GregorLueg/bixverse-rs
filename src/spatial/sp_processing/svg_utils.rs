@@ -2,6 +2,13 @@
 
 use crate::single_cell::sc_data::data_io::CscGeneChunk;
 
+#[cfg(test)]
+use crate::errors::BixverseErrors;
+#[cfg(test)]
+use crate::single_cell::sc_data::data_io::{CsrCellChunk, SingleCellReading, SparseDataHeader};
+#[cfg(test)]
+use rustc_hash::FxHashMap;
+
 ////////////
 // Params //
 ////////////
@@ -113,6 +120,46 @@ pub fn center_inplace(vals: &mut [f32]) -> (f32, f32) {
     }
 
     (mean, sum_sq)
+}
+
+///////////////////
+// Test scaffold //
+///////////////////
+
+/// Reader stub for tests that only exercise driver construction.
+///
+/// [`MoransI::new`](crate::spatial::sp_processing::morans_i::MoransI::new) and
+/// [`SparkX::new`](crate::spatial::sp_processing::sparkx::SparkX::new) never
+/// touch the store, so the read paths are unreachable in those tests and
+/// return empty.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct EmptyGeneReader;
+
+#[cfg(test)]
+impl SingleCellReading for EmptyGeneReader {
+    fn read_cells_parallel(&self, _: &[usize]) -> Result<Vec<CsrCellChunk>, BixverseErrors> {
+        Ok(Vec::new())
+    }
+
+    fn read_gene_parallel(&self, _: &[usize]) -> Result<Vec<CscGeneChunk>, BixverseErrors> {
+        Ok(Vec::new())
+    }
+
+    fn get_header(&self) -> SparseDataHeader {
+        SparseDataHeader {
+            total_cells: 0,
+            total_genes: 0,
+            cell_based: false,
+            no_chunks: 0,
+            chunk_offsets: Vec::new(),
+            index_map: FxHashMap::default(),
+        }
+    }
+
+    fn is_cell_based(&self) -> bool {
+        false
+    }
 }
 
 ///////////

@@ -10,7 +10,6 @@ use std::time::Instant;
 
 use crate::core::math::stats::calc_fdr;
 use crate::prelude::*;
-use crate::single_cell::sc_data::data_io::{CscGeneChunk, ParallelSparseReader};
 use crate::spatial::sp_processing::svg_utils::{Assay, center_inplace, materialise_gene_dense};
 
 ////////////
@@ -907,9 +906,9 @@ struct GeneRes {
 
 /// Per-sample SPARK-X driver.
 #[derive(Clone, Debug)]
-pub struct SparkX<'a> {
-    /// File path to the gene-based binary file.
-    f_path_gene: String,
+pub struct SparkX<'a, S: SingleCellReading> {
+    /// Reader over the gene-based (CSC) count store.
+    gene_reader: &'a S,
     /// Global spot indices to keep.
     spots_to_keep: &'a [usize],
     /// Number of spots in this sample (= `spots_to_keep.len()`).
@@ -924,7 +923,7 @@ pub struct SparkX<'a> {
     phis: Vec<KernelFactor>,
 }
 
-impl<'a> SparkX<'a> {
+impl<'a, S: SingleCellReading> SparkX<'a, S> {
     /// Build a SPARK-X driver for a single sample.
     ///
     /// Resolves the kernel bank (using coordinate-derived defaults when
@@ -933,7 +932,7 @@ impl<'a> SparkX<'a> {
     ///
     /// ### Params
     ///
-    /// * `f_path_gene` - Gene-based binary file path.
+    /// * `gene_reader` - Reader over the gene-based (CSC) count store.
     /// * `spots_to_keep` - Global spot indices that make up this sample.
     /// * `coordinates` - Per-spot 2D coordinates, aligned with `spots_to_keep`.
     /// * `params` - Run parameters.
@@ -942,7 +941,7 @@ impl<'a> SparkX<'a> {
     ///
     /// `Result<Self>` with the initialised driver.
     pub fn new(
-        f_path_gene: String,
+        gene_reader: &'a S,
         spots_to_keep: &'a [usize],
         coordinates: &[(f32, f32)],
         params: SparkXParams,
@@ -981,7 +980,7 @@ impl<'a> SparkX<'a> {
         let spot_set: IndexSet<u32> = spots_to_keep.iter().map(|&x| x as u32).collect();
 
         Ok(Self {
-            f_path_gene,
+            gene_reader,
             spots_to_keep,
             n_spots,
             spot_set,
@@ -1042,12 +1041,10 @@ impl<'a> SparkX<'a> {
         let verbosity = parse_verbosity_level(verbose);
         let start_all = Instant::now();
 
-        let reader = ParallelSparseReader::new(&self.f_path_gene)?;
         let start_load = Instant::now();
-        let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(gene_indices)?;
-        gene_chunks
-            .par_iter_mut()
-            .for_each(|chunk| chunk.filter_selected_cells(&self.spot_set));
+        let gene_chunks: Vec<CscGeneChunk> = self
+            .gene_reader
+            .read_gene_parallel_filtered(gene_indices, &self.spot_set)?;
         if verbosity.normal_verbosity() {
             println!(
                 "SPARK-X: loaded {} gene chunks in {:.2?}",
@@ -1101,7 +1098,6 @@ impl<'a> SparkX<'a> {
         const GENE_BATCH_SIZE: usize = 1000;
         let no_genes = gene_indices.len();
         let no_batches = no_genes.div_ceil(GENE_BATCH_SIZE);
-        let reader = ParallelSparseReader::new(&self.f_path_gene)?;
 
         let mut per_gene: Vec<GeneRes> = Vec::with_capacity(no_genes);
 
@@ -1116,10 +1112,9 @@ impl<'a> SparkX<'a> {
             let batch = &gene_indices[start_gene..end_gene];
 
             let start_load = Instant::now();
-            let mut chunks = reader.read_gene_parallel(batch)?;
-            chunks
-                .par_iter_mut()
-                .for_each(|chunk| chunk.filter_selected_cells(&self.spot_set));
+            let chunks = self
+                .gene_reader
+                .read_gene_parallel_filtered(batch, &self.spot_set)?;
             if verbosity.detailed_verbosity() {
                 println!("    Loaded batch in: {:.2?}.", start_load.elapsed());
             }
@@ -1259,6 +1254,7 @@ impl<'a> SparkX<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::spatial::sp_processing::svg_utils::EmptyGeneReader;
 
     #[test]
     fn cosine_features_reconstruct_per_dim_kernel() {
@@ -1526,7 +1522,7 @@ mod tests {
         let spots = vec![0_usize, 1, 2, 3, 4];
         let coords = vec![(0.0_f32, 0.0); 4]; // wrong length
         let err = SparkX::new(
-            "/dev/null".to_string(),
+            &EmptyGeneReader,
             &spots,
             &coords,
             SparkXParams::default(),
@@ -1547,7 +1543,7 @@ mod tests {
         let spots = vec![0_usize, 1];
         let coords = vec![(0.0_f32, 0.0), (1.0, 0.0)];
         let err = SparkX::new(
-            "/dev/null".to_string(),
+            &EmptyGeneReader,
             &spots,
             &coords,
             SparkXParams::default(),

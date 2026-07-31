@@ -69,6 +69,8 @@ Top-level modules:
 - `spatial/` (feature): spatial transcriptomics on top of `single_cell`. `sp_processing/` has spatially variable gene detection (Moran's I, SPARK-X) with shared types in `svg_utils.rs`; `sp_analysis/` has neighbourhood enrichment
 - `gpu/` (feature): GPU kernels via `cubecl`/`cubek`, sparse randomised SVD, sparse GEMM, correlation, Cholesky, Harmony, PCA, k-means
 
+Anything that reads counts off a chunked store takes a reader, it does not take a file path and open one itself. The convention is a generic `<S: SingleCellReading>` parameter holding `&S` (see `SingleCellReading` in `single_cell/sc_data/data_io.rs`); `ParallelSparseReader` is the only implementor today. Callers build the reader and pass it in, so a single reader can be shared across several calls. Prefer the trait's own combined methods over hand-rolling the equivalent: `read_gene_parallel_filtered` is overridden by `ParallelSparseReader` to fuse read and filter into one pass, whereas reading then filtering separately does two.
+
 `prelude.rs` re-exports the most-used types (errors, sparse structures, `SparseGraph`, matrix/vector utils, SIMD trait, assertion macros). Prefer `use crate::prelude::*;` in new modules over deep imports.
 
 `errors.rs` defines `BixverseErrors` (a single `thiserror` enum for the whole crate). Variants are grouped by subsystem, so add new variants in the matching section rather than at the bottom. Many variants are gated by `#[cfg(feature = "single-cell")]` / `"multi-modal"` / `"spatial"` / `"gpu"`. Match the gating of the code that produces them.
