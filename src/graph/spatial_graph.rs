@@ -42,6 +42,16 @@ impl GraphCsr {
     /// each into both endpoints' rows. Zero-weight reciprocal entries are
     /// dropped.
     ///
+    /// Self-loops are dropped too. The scatter would push `j == i` into
+    /// `rows[i]` twice, and a non-zero diagonal breaks every statistic built
+    /// on this CSR: Moran's I is defined with `w_ii = 0`, so a self-loop adds
+    /// `w_ii c_i²` to the numerator and `2 w_ii` to `S0`. With an
+    /// inverse-distance weight on two coincident spots (`MIN_EDGE_DISTANCE`
+    /// turns `d = 0` into `w = 1e6`) the statistic collapses onto that one
+    /// spot for every gene. The drop sits here rather than in the builder
+    /// because [`GraphCsr::from_non_redundant`] is public and takes a
+    /// caller-supplied adjacency.
+    ///
     /// ### Params
     ///
     /// * `neighbours` - Neighbour indices for each node
@@ -49,7 +59,8 @@ impl GraphCsr {
     ///
     /// ### Returns
     ///
-    /// A new `GraphCsr` with symmetric edges in CSR layout.
+    /// A new `GraphCsr` with symmetric edges in CSR layout and an empty
+    /// diagonal.
     pub fn from_non_redundant(neighbours: &[Vec<usize>], weights: &[Vec<f32>]) -> Self {
         let n = neighbours.len();
         let mut rows: Vec<Vec<(u32, f32)>> = vec![Vec::new(); n];
@@ -57,7 +68,7 @@ impl GraphCsr {
         for i in 0..n {
             for (k, &j) in neighbours[i].iter().enumerate() {
                 let w = weights[i][k];
-                if w == 0.0 {
+                if w == 0.0 || j == i {
                     continue;
                 }
                 rows[i].push((j as u32, w));
@@ -322,6 +333,12 @@ pub fn graph_weight_moments(graph: &GraphCsr) -> (f64, f64, f64) {
 /// combined weight `w_ij + w_ji` is written into node `i`'s entry and node
 /// `j`'s reciprocal entry is zeroed.
 ///
+/// Self-loops are zeroed rather than combined. `j == i` used to take the
+/// `j >= i` branch, find itself at `k2 == k` and execute a no-op
+/// (`w = 0; w += w`), so the entry survived at full weight into the CSR and
+/// into [`compute_node_degree`]. kNN on two coincident spots is enough to
+/// produce one.
+///
 /// ### Params
 ///
 /// * `neighbours` - Neighbour indices for each node
@@ -329,7 +346,7 @@ pub fn graph_weight_moments(graph: &GraphCsr) -> (f64, f64, f64) {
 ///
 /// ### Returns
 ///
-/// Modified weights with redundant edges zeroed.
+/// Modified weights with redundant edges and self-loops zeroed.
 pub fn make_weights_non_redundant(
     neighbours: &[Vec<usize>],
     weights: &[Vec<f32>],
@@ -340,6 +357,10 @@ pub fn make_weights_non_redundant(
         for k in 0..neighbours[i].len() {
             let j = neighbours[i][k];
 
+            if j == i {
+                w_no_redundant[i][k] = 0.0;
+                continue;
+            }
             if j < i {
                 continue;
             }
@@ -499,6 +520,91 @@ mod tests {
         // upper-triangular weights: 1.0 + 0.5 + 1.5 + 2.0 = 5.0
         // symmetric storage doubles this: 10.0
         assert!((graph.weight_sum() - 10.0).abs() < 1e-6);
+    }
+
+    /// Moran's I straight off the CSR, for the self-loop checks below.
+    fn morans_i(x: &[f32], neighbours: &[Vec<usize>], weights: &[Vec<f32>]) -> f64 {
+        let nr = make_weights_non_redundant(neighbours, weights);
+        let graph = GraphCsr::from_non_redundant(neighbours, &nr);
+
+        let n = x.len() as f64;
+        let mean: f64 = x.iter().map(|&v| v as f64).sum::<f64>() / n;
+        let centred: Vec<f32> = x.iter().map(|&v| v - mean as f32).collect();
+        let sum_sq: f64 = centred.iter().map(|&c| (c as f64) * (c as f64)).sum();
+
+        (n / graph.weight_sum()) * (graph.quadratic_form(&centred) as f64 / sum_sq)
+    }
+
+    #[test]
+    fn self_loop_never_reaches_the_csr_diagonal() {
+        // Node 1 neighbours itself, which is what kNN returns for two spots at
+        // identical coordinates. The 1e6 is what MIN_EDGE_DISTANCE makes of a
+        // zero-length inverse-distance edge.
+        let neigh = vec![vec![1_usize], vec![0, 1, 2], vec![1, 3], vec![2]];
+        let w = vec![
+            vec![1.0_f32],
+            vec![1.0, 1e6, 1.0],
+            vec![1.0, 1.0],
+            vec![1.0],
+        ];
+
+        let nr = make_weights_non_redundant(&neigh, &w);
+        assert_eq!(nr[1][1], 0.0, "the self edge must be zeroed, not combined");
+
+        let graph = GraphCsr::from_non_redundant(&neigh, &nr);
+        for i in 0..graph.n_nodes() {
+            for k in graph.offsets()[i]..graph.offsets()[i + 1] {
+                assert_ne!(
+                    graph.indices()[k] as usize,
+                    i,
+                    "node {i} kept a diagonal entry"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn self_loop_leaves_morans_i_untouched() {
+        // 4-node chain, x = [1, 2, 3, 4], I = 1/3. Before the fix the binary
+        // self-loop dropped this to 0.314286 and the inverse-distance one to
+        // 0.200001, i.e. n c_1^2 / sum c^2, the same number for every gene.
+        let x = [1.0_f32, 2.0, 3.0, 4.0];
+
+        let clean = vec![vec![1_usize], vec![0, 2], vec![1, 3], vec![2]];
+        let clean_w = vec![vec![1.0_f32], vec![1.0, 1.0], vec![1.0, 1.0], vec![1.0]];
+        let expected = morans_i(&x, &clean, &clean_w);
+        assert!((expected - 1.0 / 3.0).abs() < 1e-6, "{expected}");
+
+        let looped = vec![vec![1_usize], vec![0, 1, 2], vec![1, 3], vec![2]];
+        for &self_w in &[1.0_f32, 1e6] {
+            let looped_w = vec![
+                vec![1.0_f32],
+                vec![1.0, self_w, 1.0],
+                vec![1.0, 1.0],
+                vec![1.0],
+            ];
+            let got = morans_i(&x, &looped, &looped_w);
+            assert!(
+                (got - expected).abs() < 1e-6,
+                "self weight {self_w}: {got} vs {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn self_loop_does_not_inflate_node_degree() {
+        let neigh = vec![vec![1_usize], vec![0, 1, 2], vec![1, 3], vec![2]];
+        let w = vec![
+            vec![1.0_f32],
+            vec![1.0, 1e6, 1.0],
+            vec![1.0, 1.0],
+            vec![1.0],
+        ];
+        let nr = make_weights_non_redundant(&neigh, &w);
+        let d = compute_node_degree(&neigh, &nr);
+
+        // Chain degrees on combined weights: 2, 4, 4, 2.
+        assert!((d[1] - 4.0).abs() < 1e-6, "{}", d[1]);
     }
 
     #[test]
