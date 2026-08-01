@@ -602,11 +602,27 @@ fn sq_dist(a: (f32, f32), b: (f32, f32)) -> f32 {
 // Saddle-point CDF //
 //////////////////////
 
+/// How close to zero the saddle-point may sit before Liu takes over, as a
+/// fraction of `t_max = 1 / (2 λ_max)`.
+///
+/// Relative, not absolute. The λ are eigenvalues of `Φ_cᵀ Φ_c`, a sum over
+/// spots, so `λ_max = O(n)` and `t_max = O(1/n)`. An absolute 1e-5 therefore
+/// swallowed every saddle-point above roughly 1e5 spots, which is Visium HD
+/// and Xenium, the workload this module exists for. Liu is anti-conservative
+/// out there: on a geometrically decaying rank-20 Gaussian spectrum it
+/// returns 0.39x the saddle-point p-value at p ≈ 2e-6, right where SVG
+/// calling sits after BH over 20k genes.
+const SADDLE_NEAR_ZERO_TOLERANCE: f64 = 1e-4;
+
 /// Upper-tail probability for a weighted sum of chi-squared variables.
 ///
 /// Computes `P(Σ λ_k Q_k > q)` where `Q_k ~ χ²_1` independently, using the
 /// Kuonen (1999) saddle-point approximation. Falls back to [`liu_upper_tail`]
 /// when the saddle-point is near zero or numerically degenerate.
+///
+/// The result is invariant under a common rescale of `q` and `lambdas`, which
+/// is what the statistic itself is: `t̂ q`, `K(t̂)`, `w` and `v` are all
+/// scale-free, so the branch choice must be too.
 ///
 /// ### Params
 ///
@@ -644,8 +660,10 @@ fn saddle_point_upper_tail(q: f64, lambdas: &[f64]) -> f64 {
     }
     // Near-zero saddle: Barndorff-Nielsen formula degenerates here; Liu's
     // approximation handles the q ≈ mean region correctly even for skewed
-    // (small-r) mixtures.
-    if t_hat.abs() < 1e-5 {
+    // (small-r) mixtures. The threshold is relative to `t_max` because
+    // everything else in this function is scale-free in `(q, λ)` and `t_hat`
+    // is not.
+    if t_hat.abs() < SADDLE_NEAR_ZERO_TOLERANCE * t_max {
         return liu_upper_tail(q, lambdas);
     }
 
@@ -1378,6 +1396,47 @@ mod tests {
                 "q={q}: saddle={p_sp} vs closed={p_ref}"
             );
         }
+    }
+
+    #[test]
+    fn saddle_is_invariant_under_a_common_rescale() {
+        // `λ_max = O(n)`, so the absolute 1e-5 threshold made the branch
+        // choice a function of the spot count. At 1e5 spots and above every
+        // call quietly took the Liu path.
+        let base = [1.0_f64, 0.7, 0.4, 0.2];
+        let mean: f64 = base.iter().sum();
+
+        for &mult in &[1.0_f64, 3.0, 6.0, 12.0] {
+            let q = mult * mean;
+            let p_ref = saddle_point_upper_tail(q, &base);
+            for &scale in &[1e2_f64, 1e4, 1e5] {
+                let lambdas: Vec<f64> = base.iter().map(|l| l * scale).collect();
+                let p = saddle_point_upper_tail(q * scale, &lambdas);
+                assert!(
+                    (p - p_ref).abs() <= 1e-3 * p_ref,
+                    "q = {mult} x mean, scale {scale}: {p} vs {p_ref}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn saddle_branch_still_runs_at_production_lambda_scale() {
+        // A geometrically decaying spectrum, the shape the Gaussian Nystroem
+        // kernels produce, scaled to 1e5 spots. Liu is anti-conservative here,
+        // so the two must not agree: if they do, the fallback is firing.
+        let lambdas: Vec<f64> = (0..20).map(|k| 5e4 * 0.5_f64.powi(k)).collect();
+        let mean: f64 = lambdas.iter().sum();
+        let q = 12.0 * mean;
+
+        let p_saddle = saddle_point_upper_tail(q, &lambdas);
+        let p_liu = liu_upper_tail(q, &lambdas);
+
+        assert!(p_saddle > 0.0 && p_saddle < 1e-3, "{p_saddle}");
+        assert!(
+            p_liu < 0.9 * p_saddle,
+            "the Liu fallback fired: {p_liu} vs {p_saddle}"
+        );
     }
 
     #[test]
