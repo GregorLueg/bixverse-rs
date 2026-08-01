@@ -136,7 +136,7 @@ fn clamp_sym(x: f32, t: f32) -> f32 {
 ///
 /// ### Params
 ///
-/// * `f_path_query` - Path to the gene-based binary file.
+/// * `reader` - Reader over the query gene-based count store.
 /// * `cell_indices_query` - The cell indices to keep.
 /// * `ref_to_query_gene_map` - The reference to query gene map with `None`
 ///   for HVGs from the reference that are not represented in this data set.
@@ -147,8 +147,8 @@ fn clamp_sym(x: f32, t: f32) -> f32 {
 ///
 /// An N_q x n_hvgs dense matrix of clipped z-scores against the reference
 /// statistics. Columns corresponding to absent HVGs are all zero.
-fn build_scaled_query_matrix(
-    f_path_query: &str,
+fn build_scaled_query_matrix<S: SingleCellReading>(
+    reader: &S,
     cell_indices_query: &[usize],
     ref_to_query_gene_map: &[Option<usize>],
     ref_means: &[f32],
@@ -169,7 +169,6 @@ fn build_scaled_query_matrix(
         .collect();
 
     let cell_set: IndexSet<u32> = cell_indices_query.iter().map(|&x| x as u32).collect();
-    let reader = ParallelSparseReader::new(f_path_query)?;
     let gene_chunks: Vec<CscGeneChunk> =
         reader.read_gene_parallel_filtered(&present_query_indices, &cell_set)?;
 
@@ -338,7 +337,7 @@ fn moe_correct_query(
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to the gene-based sparse binary file.
+/// * `reader` - Reader over the gene-based count store.
 /// * `cell_indices` - Cell indices to include in the reference.
 /// * `hvg_indices` - HVG gene indices, already selected upstream.
 /// * `batch_labels` - One label slice per batch variable, each with length
@@ -359,8 +358,8 @@ fn moe_correct_query(
 /// normalised centroids and the compression terms (`nr`, `c`) needed for
 /// query mapping.
 #[allow(clippy::too_many_arguments)]
-pub fn build_symphony_reference(
-    f_path: &str,
+pub fn build_symphony_reference<S: SingleCellReading>(
+    reader: &S,
     cell_indices: &[usize],
     hvg_indices: &[usize],
     batch_labels: &[Vec<usize>],
@@ -392,7 +391,7 @@ pub fn build_symphony_reference(
     }
 
     let (scores, loadings, _, gene_means, gene_sds) = pca_on_sc_sparse_stats(
-        f_path,
+        reader,
         cell_indices,
         hvg_indices,
         no_pcs,
@@ -480,7 +479,7 @@ pub fn build_symphony_reference(
 /// ### Params
 ///
 /// * `reference` - The Symphony reference.
-/// * `f_path_query` - Path to the query gene-based sparse binary file.
+/// * `reader` - Reader over the query gene-based count store.
 /// * `cell_indices_query` - Query cell indices.
 /// * `ref_to_query_gene_map` - For each reference HVG slot (in
 ///   `reference.gene_indices` order), the corresponding gene index in the
@@ -497,9 +496,9 @@ pub fn build_symphony_reference(
 /// A [SymphonyQuery] with the projected scores (`z_pca`), the MoE-corrected
 /// embedding (`z_corr`), and the K x N_q soft assignment matrix (`r`)
 /// against the reference centroids.
-pub fn symphony_map_query(
+pub fn symphony_map_query<S: SingleCellReading>(
     reference: &SymphonyReference,
-    f_path_query: &str,
+    reader: &S,
     cell_indices_query: &[usize],
     ref_to_query_gene_map: &[Option<usize>],
     batch_labels_query: &[Vec<usize>],
@@ -537,7 +536,7 @@ pub fn symphony_map_query(
 
     // 1. Build N_q x n_hvgs scaled, dense matrix using reference mean/SD.
     let scaled = build_scaled_query_matrix(
-        f_path_query,
+        reader,
         cell_indices_query,
         ref_to_query_gene_map,
         &reference.gene_means,
@@ -585,7 +584,7 @@ pub fn symphony_map_query(
 ///
 /// ### Params
 ///
-/// * `f_path_query` - Path to the query gene-based sparse binary file.
+/// * `reader` - Reader over the query gene-based count store.
 /// * `cell_indices_query` - Query cell indices.
 /// * `ref_gene_means` - Per-HVG mean of the normalised reference data.
 /// * `ref_gene_sds` - Per-HVG standard deviation of the normalised reference data.
@@ -608,8 +607,8 @@ pub fn symphony_map_query(
 /// embedding (`z_corr`), and the K x N_q soft assignment matrix (`r`)
 /// against the reference centroids.
 #[allow(clippy::too_many_arguments)]
-pub fn symphony_map_query_parts(
-    f_path_query: &str,
+pub fn symphony_map_query_parts<S: SingleCellReading>(
+    reader: &S,
     cell_indices_query: &[usize],
     ref_gene_means: &[f32],
     ref_gene_sds: &[f32],
@@ -650,7 +649,7 @@ pub fn symphony_map_query_parts(
     }
 
     let scaled = build_scaled_query_matrix(
-        f_path_query,
+        reader,
         cell_indices_query,
         ref_to_query_gene_map,
         ref_gene_means,

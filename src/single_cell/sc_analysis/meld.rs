@@ -91,7 +91,8 @@ pub fn parse_lap_type(s: &str) -> Option<LaplacianType> {
 ///   [`MeldFilter::Laplacian`]).
 /// * `chebyshev_order` - Number of Chebyshev coefficients (polynomial terms).
 ///   Reference default: 50. Must be >= 2.
-/// * `lap_type` - [`LapType::Combinatorial`] or [`LapType::Normalised`].
+/// * `lap_type` - [`LaplacianType::Combinatorial`] or
+///   [`LaplacianType::Normalised`].
 /// * `normalise_indicators` - If true, each column of the indicator matrix is
 ///   divided by its column sum before filtering, so cross-condition densities
 ///   are comparable regardless of cells-per-condition.

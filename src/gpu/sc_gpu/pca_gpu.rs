@@ -27,7 +27,7 @@ use crate::single_cell::sc_processing::pca::*;
 ///
 /// ### Params
 ///
-/// * `f_path` - Path to the gene-based binary file.
+/// * `reader` - Reader over the gene-based count store.
 /// * `cell_indices` - Slice of indices for the cells.
 /// * `gene_indices` - Slice of indices for the genes.
 /// * `no_pcs` - Number of principal components to calculate
@@ -43,8 +43,8 @@ use crate::single_cell::sc_processing::pca::*;
 /// A tuple of the samples projected on the PC space, gene loadings and singular
 /// values.
 #[allow(clippy::too_many_arguments)]
-pub fn pca_on_sc_sparse_gpu<R>(
-    f_path: &str,
+pub fn pca_on_sc_sparse_gpu<R, S>(
+    reader: &S,
     cell_indices: &[usize],
     gene_indices: &[usize],
     no_pcs: usize,
@@ -56,6 +56,7 @@ pub fn pca_on_sc_sparse_gpu<R>(
 ) -> SingleCellPcaRes
 where
     R: Runtime,
+    S: SingleCellReading,
 {
     if params_pca.clr && clr_offsets.is_none() {
         return Err(BixverseErrors::OffsetsNotProvidedForClrPCA);
@@ -78,7 +79,6 @@ where
 
     let start_reading = Instant::now();
 
-    let reader = ParallelSparseReader::new(f_path)?;
     let mut gene_chunks: Vec<CscGeneChunk> =
         reader.read_gene_parallel_filtered(gene_indices, &cell_set)?;
 
@@ -139,7 +139,10 @@ where
 
     let start_svd = Instant::now();
 
-    let svd_params = RandSvdGpuParams::new(2, 100);
+    // safe guard against degenerate cases
+    let max_s = std::cmp::min(cell_indices.len(), gene_indices.len()).saturating_sub(1);
+    let oversampling = std::cmp::min(100, max_s.saturating_sub(no_pcs));
+    let svd_params = RandSvdGpuParams::new(2, oversampling);
 
     let svd_res = randomised_sparse_svd_gpu::<R, f32, f32>(
         csc,

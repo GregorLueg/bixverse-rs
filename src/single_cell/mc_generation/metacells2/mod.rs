@@ -53,7 +53,7 @@ pub use similarity::compute_similarity;
 ///
 /// ### Params
 ///
-/// * `f_path` - File path to the cell-based binary file.
+/// * `reader` - Reader for the cell-based store.
 /// * `cells_to_include` - Indices of the cells to include.
 /// * `params` - MC2 parameters.
 /// * `seed` - Master RNG seed.
@@ -64,20 +64,18 @@ pub use similarity::compute_similarity;
 /// A [`DirectMetacellsResult`] with per-cell assignments and flags. The
 /// indices in the returned vectors correspond to the reader's cell
 /// indices in their natural order.
-pub fn compute_metacells_single_pile(
-    f_path: &str,
+pub fn compute_metacells_single_pile<S: SingleCellReading>(
+    reader: &S,
     cell_indices: &[usize],
     params: &MetacellsParams,
     seed: usize,
     verbose: bool,
 ) -> Result<DirectMetacellsResult, BixverseErrors> {
-    let reader = ParallelSparseReader::new(f_path)?;
-
     if verbose {
         println!("Loading {} cells into a single pile...", cell_indices.len());
     }
 
-    let mut pile = Pile::from_reader(&reader, cell_indices)?;
+    let mut pile = Pile::from_reader(reader, cell_indices)?;
 
     compute_direct_metacells(&mut pile, params, seed, verbose)
 }

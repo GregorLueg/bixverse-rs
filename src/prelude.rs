@@ -4,6 +4,7 @@
 pub use crate::core::math::sparse::{
     CompressedSparseData2, CompressedSparseFormat, SparseAxis, parse_compressed_sparse_format,
 };
+pub use crate::core::math::vector_helpers::MAD_SCALE;
 pub use crate::errors::*;
 pub use crate::graph::graph_structures::{EdgeData, NodeData, SparseGraph};
 pub use crate::utils::heap_structures::RevOrderedFloat;
@@ -19,7 +20,7 @@ pub use crate::single_cell::CELL_BATCH_SIZE;
 #[cfg(feature = "single-cell")]
 pub use crate::single_cell::sc_data::data_io::{
     CellQuality, CscGeneChunk, CsrCellChunk, DataLayerReturn, MinCellQuality, ParallelSparseReader,
-    RawCounts, from_cell_chunks, from_gene_chunks,
+    RawCounts, SingleCellReading, from_cell_chunks, from_gene_chunks,
 };
 #[cfg(feature = "single-cell")]
 pub use crate::single_cell::sc_processing::knn::*;

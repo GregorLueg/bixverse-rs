@@ -19,8 +19,7 @@ use crate::prelude::*;
 ///
 /// ### Params
 ///
-/// * `f_path` - File path to the binarised format that contains the cell-based
-///   data
+/// * `reader` - Reader over the cell-based count store.
 /// * `top_n_values` - Slice of top N values to calculate (e.g., &[10, 50, 100])
 /// * `cell_indices` - Vector of cell positions to use.
 /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
@@ -30,8 +29,8 @@ use crate::prelude::*;
 ///
 /// A vector of vectors with the proportions. Outer vector corresponds to each
 /// top_n value, inner vector to each cell.
-pub fn get_top_genes_perc(
-    f_path: &str,
+pub fn get_top_genes_perc<S: SingleCellReading>(
+    reader: &S,
     top_n_values: &[usize],
     cell_indices: &[usize],
     verbose: usize,
@@ -39,8 +38,6 @@ pub fn get_top_genes_perc(
     let verbosity = parse_verbosity_level(verbose);
 
     let start_reading = Instant::now();
-
-    let reader = ParallelSparseReader::new(f_path)?;
 
     let cell_chunks = reader.read_cells_parallel(cell_indices)?;
 
@@ -91,8 +88,7 @@ pub fn get_top_genes_perc(
 ///
 /// ### Params
 ///
-/// * `f_path` - File path to the binarised format that contains the cell-based
-///   data
+/// * `reader` - Reader over the cell-based count store.
 /// * `top_n_values` - Slice of top N values to calculate (e.g., &[10, 50, 100])
 /// * `cell_indices` - Vector of cell positions to use.
 /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
@@ -102,8 +98,8 @@ pub fn get_top_genes_perc(
 ///
 /// A vector of vectors with the proportions. Outer vector corresponds to each
 /// top_n value, inner vector to each cell.
-pub fn get_top_genes_perc_streaming(
-    f_path: &str,
+pub fn get_top_genes_perc_streaming<S: SingleCellReading>(
+    reader: &S,
     top_n_values: &[usize],
     cell_indices: &[usize],
     verbose: usize,
@@ -111,8 +107,6 @@ pub fn get_top_genes_perc_streaming(
     let verbosity = parse_verbosity_level(verbose);
 
     let start_total = Instant::now();
-
-    let reader = ParallelSparseReader::new(f_path)?;
 
     let mut results: Vec<Vec<f32>> = vec![Vec::new(); top_n_values.len()];
 
@@ -179,8 +173,7 @@ pub fn get_top_genes_perc_streaming(
 ///
 /// ### Params
 ///
-/// * `f_path` - File path to the binarised format that contains the cell-based
-///   data
+/// * `reader` - Reader over the cell-based count store.
 /// * `gene_indices` - Vector of index positions of the genes of interest
 /// * `cell_indices` - Vector of cell positions to use.
 /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
@@ -189,8 +182,8 @@ pub fn get_top_genes_perc_streaming(
 /// ### Returns
 ///
 /// A vector with the percentages of these genes over the total reads.
-pub fn get_gene_set_perc(
-    f_path: &str,
+pub fn get_gene_set_perc<S: SingleCellReading>(
+    reader: &S,
     gene_indices: Vec<Vec<u32>>,
     cell_indices: &[usize],
     verbose: usize,
@@ -198,8 +191,6 @@ pub fn get_gene_set_perc(
     let verbosity = parse_verbosity_level(verbose);
 
     let start_reading = Instant::now();
-
-    let reader = ParallelSparseReader::new(f_path)?;
 
     let cell_chunks = reader.read_cells_parallel(cell_indices)?;
 
@@ -254,8 +245,7 @@ pub fn get_gene_set_perc(
 ///
 /// ### Params
 ///
-/// * `f_path` - File path to the binarised format that contains the cell-based
-///   data
+/// * `reader` - Reader over the cell-based count store.
 /// * `gene_indices` - Vector of index positions of the genes of interest
 /// * `cell_indices` - Vector of cell positions to use.
 /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
@@ -264,8 +254,8 @@ pub fn get_gene_set_perc(
 /// ### Returns
 ///
 /// A vector with the percentages of these genes over the total reads.
-pub fn get_gene_set_perc_streaming(
-    f_path: &str,
+pub fn get_gene_set_perc_streaming<S: SingleCellReading>(
+    reader: &S,
     gene_indices: Vec<Vec<u32>>,
     cell_indices: &[usize],
     verbose: usize,
@@ -273,8 +263,6 @@ pub fn get_gene_set_perc_streaming(
     let verbosity = parse_verbosity_level(verbose);
 
     let start_total = Instant::now();
-
-    let reader = ParallelSparseReader::new(f_path)?;
 
     let mut results: Vec<Vec<f32>> = vec![Vec::new(); gene_indices.len()];
     let hash_gene_sets: Vec<FxHashSet<&u32>> =

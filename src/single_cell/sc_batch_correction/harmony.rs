@@ -51,7 +51,7 @@ pub struct HarmonyParams {
 impl Default for HarmonyParams {
     fn default() -> Self {
         Self {
-            k: 10,
+            k: 100,
             sigma: vec![0.1],
             theta: vec![2.0],
             lambda: vec![1.0],
@@ -117,9 +117,9 @@ pub struct BatchInfo {
 /// reverse lookup
 pub fn create_batch_info(labels: &[usize], n_cells: usize) -> Result<BatchInfo, BixverseErrors> {
     if labels.len() != n_cells {
-        return Err(BixverseErrors::HarmonyLabelLenghtUnequalNcells {
+        return Err(BixverseErrors::NumberLabelsNotEqualSampleNumber {
             label_length: labels.len(),
-            n_cells,
+            n_samples: n_cells,
         });
     }
 

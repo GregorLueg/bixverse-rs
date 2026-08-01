@@ -575,12 +575,12 @@ fn normal_model(
 ///
 /// Two graph representations are held: the original non-redundant
 /// `neighbours`/`weights` arrays drive the autocorrelation path
-/// (`compute_all_genes*`), while the symmetric [GraphCsr] drives the pair path
+/// (`compute_all_genes*`), while the symmetric `GraphCsr` drives the pair path
 /// (`compute_gene_cor*`).
 #[derive(Clone, Debug)]
-pub struct Hotspot<'a> {
-    /// File path to the gene-based binary file.
-    f_path_gene: String,
+pub struct Hotspot<'a, S: SingleCellReading> {
+    /// Reader over the gene-based count store.
+    gene_reader: &'a S,
     /// Symmetric CSR graph (used by the pair path).
     graph: GraphCsr,
     /// Slice of cells to analyse/keep in this analysis.
@@ -611,17 +611,17 @@ pub struct Hotspot<'a> {
     n_bins: usize,
 }
 
-impl<'a> Hotspot<'a> {
+impl<'a, S: SingleCellReading> Hotspot<'a, S> {
     /// Initialise a new instance
     ///
-    /// Reads the per-cell UMI counts from `f_path_cell` eagerly and builds both
+    /// Reads the per-cell UMI counts from `cell_reader` eagerly and builds both
     /// the non-redundant weights (autocorrelation path) and the symmetric CSR
     /// graph (pair path).
     ///
     /// ### Params
     ///
-    /// * `f_path_gene` - File path to the gene-based binary file.
-    /// * `f_path_cell` - File path to the cell-based binary file.
+    /// * `gene_reader` - Reader over the gene-based count store.
+    /// * `cell_reader` - Reader over the cell-based count store.
     /// * `cells_to_keep` - Slice if the indices of the cells to include in this
     ///   analysis.
     /// * `neighbours` - Slice of the indices of the neighbours of the given
@@ -632,8 +632,8 @@ impl<'a> Hotspot<'a> {
     ///
     /// `Result` with the initialised `Hotspot`
     pub fn new(
-        f_path_gene: String,
-        f_path_cell: String,
+        gene_reader: &'a S,
+        cell_reader: &S,
         cells_to_keep: &'a [usize],
         neighbours: &'a [Vec<usize>],
         weights: &mut [Vec<f32>],
@@ -645,7 +645,7 @@ impl<'a> Hotspot<'a> {
         let graph = GraphCsr::from_non_redundant(neighbours, &weights);
         let wtot2: f32 = weights.iter().flatten().map(|&w| w * w).sum();
 
-        let reader = ParallelSparseReader::new(&f_path_cell)?;
+        let reader = cell_reader;
         let lib_sizes = reader.read_cell_library_sizes(cells_to_keep)?;
         let umi_counts: Vec<f32> = lib_sizes.iter().map(|x| *x as f32).collect();
 
@@ -675,7 +675,7 @@ impl<'a> Hotspot<'a> {
         }
 
         Ok(Self {
-            f_path_gene,
+            gene_reader,
             graph,
             cells_to_keep,
             node_degrees,
@@ -729,7 +729,7 @@ impl<'a> Hotspot<'a> {
         let cell_set: IndexSet<u32> = self.cells_to_keep.iter().map(|&x| x as u32).collect();
 
         let start_reading = Instant::now();
-        let reader = ParallelSparseReader::new(&self.f_path_gene)?;
+        let reader = self.gene_reader;
         let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(gene_indices)?;
         gene_chunks.par_iter_mut().for_each(|chunk| {
             chunk.filter_selected_cells(&cell_set);
@@ -810,7 +810,7 @@ impl<'a> Hotspot<'a> {
         let no_genes = gene_indices.len();
         let no_batches = no_genes.div_ceil(GENE_BATCH_SIZE);
         let cell_set: IndexSet<u32> = self.cells_to_keep.iter().map(|&x| x as u32).collect();
-        let reader = ParallelSparseReader::new(&self.f_path_gene)?;
+        let reader = self.gene_reader;
 
         let gex_model = parse_gex_model(model)
             .ok_or_else(|| BixverseErrors::HotSpotWrongModel(model.to_string()))?;
@@ -1086,7 +1086,7 @@ impl<'a> Hotspot<'a> {
         }
 
         let start_loading = Instant::now();
-        let reader = ParallelSparseReader::new(&self.f_path_gene)?;
+        let reader = self.gene_reader;
         let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(gene_indices)?;
 
         gene_chunks.par_iter_mut().for_each(|chunk| {
@@ -1241,7 +1241,7 @@ impl<'a> Hotspot<'a> {
             .ok_or_else(|| BixverseErrors::HotSpotWrongModel(model.to_string()))?;
 
         let cell_set: IndexSet<u32> = self.cells_to_keep.iter().map(|&x| x as u32).collect();
-        let reader = ParallelSparseReader::new(&self.f_path_gene)?;
+        let reader = self.gene_reader;
 
         let n_genes = gene_indices.len();
         let n_cells = self.n_cells;

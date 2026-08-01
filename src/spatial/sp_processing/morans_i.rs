@@ -25,7 +25,6 @@ use std::time::Instant;
 use crate::core::math::stats::{calc_fdr, z_scores_to_pval};
 use crate::graph::spatial_graph::{GraphCsr, graph_weight_moments};
 use crate::prelude::*;
-use crate::single_cell::sc_data::data_io::{CscGeneChunk, ParallelSparseReader};
 use crate::spatial::sp_processing::svg_utils::{
     SpatialSvgParams, center_inplace, materialise_gene_dense,
 };
@@ -61,9 +60,9 @@ pub struct MoranIRes {
 
 /// Per-sample Moran's I driver.
 #[derive(Clone, Debug)]
-pub struct MoransI<'a> {
-    /// File path to the gene-based binary file.
-    f_path_gene: String,
+pub struct MoransI<'a, S: SingleCellReading> {
+    /// Reader over the gene-based (CSC) count store.
+    gene_reader: &'a S,
     /// Per-sample symmetric CSR graph.
     graph: GraphCsr,
     /// Global spot indices to keep.
@@ -83,12 +82,12 @@ pub struct MoransI<'a> {
     w_sym_total: f64,
 }
 
-impl<'a> MoransI<'a> {
+impl<'a, S: SingleCellReading> MoransI<'a, S> {
     /// Build a Moran's I driver for a single sample.
     ///
     /// ### Params
     ///
-    /// * `f_path_gene` - File path to the gene-based binary file.
+    /// * `gene_reader` - Reader over the gene-based (CSC) count store.
     /// * `spots_to_keep` - Global spot indices that make up this sample.
     /// * `neighbours` - Per-node neighbour indices (graph is built from these,
     ///   indices are local positions in `0..n_spots`).
@@ -99,7 +98,7 @@ impl<'a> MoransI<'a> {
     ///
     /// `Result` with the initialised `MoransI`.
     pub fn new(
-        f_path_gene: String,
+        gene_reader: &'a S,
         spots_to_keep: &'a [usize],
         neighbours: &'a [Vec<usize>],
         weights: &mut [Vec<f32>],
@@ -134,7 +133,7 @@ impl<'a> MoransI<'a> {
         let spot_set: IndexSet<u32> = spots_to_keep.iter().map(|&x| x as u32).collect();
 
         Ok(Self {
-            f_path_gene,
+            gene_reader,
             graph,
             spots_to_keep,
             params,
@@ -208,12 +207,10 @@ impl<'a> MoransI<'a> {
         let verbosity = parse_verbosity_level(verbose);
         let start_all = Instant::now();
 
-        let reader = ParallelSparseReader::new(&self.f_path_gene)?;
         let start_load = Instant::now();
-        let mut gene_chunks: Vec<CscGeneChunk> = reader.read_gene_parallel(gene_indices)?;
-        gene_chunks
-            .par_iter_mut()
-            .for_each(|chunk| chunk.filter_selected_cells(&self.spot_set));
+        let gene_chunks: Vec<CscGeneChunk> = self
+            .gene_reader
+            .read_gene_parallel_filtered(gene_indices, &self.spot_set)?;
         if verbosity.normal_verbosity() {
             println!(
                 "Moran's I: loaded {} gene chunks in {:.2?}",
@@ -262,7 +259,6 @@ impl<'a> MoransI<'a> {
         const GENE_BATCH_SIZE: usize = 1000;
         let no_genes = gene_indices.len();
         let no_batches = no_genes.div_ceil(GENE_BATCH_SIZE);
-        let reader = ParallelSparseReader::new(&self.f_path_gene)?;
 
         let mut per_gene: Vec<(usize, f64)> = Vec::with_capacity(no_genes);
 
@@ -277,10 +273,9 @@ impl<'a> MoransI<'a> {
             let batch = &gene_indices[start_gene..end_gene];
 
             let start_load = Instant::now();
-            let mut chunks = reader.read_gene_parallel(batch)?;
-            chunks
-                .par_iter_mut()
-                .for_each(|chunk| chunk.filter_selected_cells(&self.spot_set));
+            let chunks = self
+                .gene_reader
+                .read_gene_parallel_filtered(batch, &self.spot_set)?;
             if verbosity.detailed_verbosity() {
                 println!("    Loaded batch in: {:.2?}.", start_load.elapsed());
             }
@@ -388,6 +383,7 @@ impl<'a> MoransI<'a> {
 mod tests {
     use super::*;
     use crate::graph::spatial_graph::make_weights_non_redundant;
+    use crate::spatial::sp_processing::svg_utils::EmptyGeneReader;
 
     // Build a small graph in the canonical (neighbours, weights) form used by
     // R-side callers; both directions present so the redundancy collapse path
@@ -463,16 +459,16 @@ mod tests {
         let (neigh, mut w) = small_graph_data();
         let spots = vec![0_usize, 1, 2, 3];
         let mi = MoransI::new(
-            "/dev/null".to_string(),
+            &EmptyGeneReader,
             &spots,
             &neigh,
             &mut w,
             SpatialSvgParams::default(),
         )
         .unwrap();
-        // The constructor uses /dev/null as a stand-in path; new() doesn't
-        // touch the file (file access is in compute_all_genes), so the
-        // construction must succeed and yield the expected scalar moments.
+        // new() never reads from the store (reads happen in
+        // compute_all_genes), so a stub reader suffices and construction must
+        // succeed with the expected scalar moments.
 
         let _ = mi; // silence "unused"
 
@@ -493,7 +489,7 @@ mod tests {
         let (neigh, mut w) = small_graph_data();
         let spots = vec![0_usize, 1, 2, 3];
         let mi = MoransI::new(
-            "/dev/null".to_string(),
+            &EmptyGeneReader,
             &spots,
             &neigh,
             &mut w,
@@ -515,7 +511,7 @@ mod tests {
         // 3 spots vs 4-node graph — should error.
         let spots = vec![0_usize, 1, 2];
         let err = MoransI::new(
-            "/dev/null".to_string(),
+            &EmptyGeneReader,
             &spots,
             &neigh,
             &mut w,

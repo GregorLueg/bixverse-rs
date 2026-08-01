@@ -19,7 +19,8 @@ use crate::single_cell::sc_analysis::nmf_sc::{nmf_multiple_run_sparse, nmf_singl
 /// * `data` - The [CompressedSparseData2] on which to run the the NMF. If
 ///   supplied as
 /// * `k` - Number of latent variables to return
-/// * `preprocessing` - String to forward to [parse_nmf_processing].
+/// * `preprocessing` - String to forward to
+///   [crate::methods::nmf_hals::nmf_preprocessing::parse_nmf_processing].
 /// * `use_second_layer` - Shall the second data layer (normalised counts) be
 ///   used.
 /// * `nmf_hals_params` - Optional parameters for the [HalsOpts].
@@ -82,7 +83,8 @@ pub fn nmf_single_run_mc(
 /// * `data` - The [CompressedSparseData2] on which to run the the NMF. If
 ///   supplied as
 /// * `k` - Number of latent variables to return
-/// * `preprocessing` - String to forward to [parse_nmf_processing].
+/// * `preprocessing` - String to forward to
+///   [crate::methods::nmf_hals::nmf_preprocessing::parse_nmf_processing].
 /// * `use_second_layer` - Shall the second data layer (normalised counts) be
 ///   used.
 /// * `nmf_hals_params` - Optional parameters for the [HalsOpts].

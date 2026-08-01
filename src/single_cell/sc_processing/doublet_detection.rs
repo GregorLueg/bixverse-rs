@@ -239,11 +239,11 @@ fn find_score_cutoff(scores: &[f32]) -> f32 {
 /// cells together via Louvain, and scores communities by synthetic enrichment.
 /// Doublets are called by majority voting across iterations.
 #[derive(Clone, Debug)]
-pub struct BoostClassifier {
-    /// Path to the gene-based binary file (CSC format).
-    f_path_gene: String,
-    /// Path to the cell-based binary file (CSR format).
-    f_path_cell: String,
+pub struct BoostClassifier<'a, S: SingleCellReading> {
+    /// Reader over the gene-based (CSC) count store.
+    gene_reader: &'a S,
+    /// Reader over the cell-based (CSR) count store.
+    cell_reader: &'a S,
     /// Algorithm parameters.
     params: BoostParams,
     /// Number of observed cells.
@@ -258,13 +258,13 @@ pub struct BoostClassifier {
     pca_results: Option<DoubletPcaRes>,
 }
 
-impl BoostClassifier {
+impl<'a, S: SingleCellReading> BoostClassifier<'a, S> {
     /// Create a new BoostClassifier instance.
     ///
     /// ### Params
     ///
-    /// * `f_path_gene` - Path to the gene-based binary file (CSC).
-    /// * `f_path_cell` - Path to the cell-based binary file (CSR).
+    /// * `gene_reader` - Reader over the gene-based (CSC) count store.
+    /// * `cell_reader` - Reader over the cell-based (CSR) count store.
     /// * `params` - Boost parameters.
     /// * `cell_indices` - Cell indices to include in the analysis.
     ///
@@ -272,14 +272,14 @@ impl BoostClassifier {
     ///
     /// Initialised `BoostClassifier`.
     pub fn new(
-        f_path_gene: &str,
-        f_path_cell: &str,
+        gene_reader: &'a S,
+        cell_reader: &'a S,
         params: BoostParams,
         cell_indices: &[usize],
     ) -> Self {
         BoostClassifier {
-            f_path_gene: f_path_gene.to_string(),
-            f_path_cell: f_path_cell.to_string(),
+            gene_reader,
+            cell_reader,
             params,
             n_cells: cell_indices.len(),
             n_cells_sim: 0,
@@ -331,7 +331,7 @@ impl BoostClassifier {
         let start_hvg = Instant::now();
 
         let hvg_genes = select_hvg(
-            &self.f_path_gene,
+            self.gene_reader,
             &self.cells_to_keep,
             &hvg_opts,
             streaming,
@@ -347,7 +347,7 @@ impl BoostClassifier {
         }
 
         self.hvg_library_sizes =
-            compute_hvg_library_sizes(&self.f_path_cell, &self.cells_to_keep, &hvg_genes)?;
+            compute_hvg_library_sizes(self.cell_reader, &self.cells_to_keep, &hvg_genes)?;
         let target_size = resolve_target_size(self.params.target_size, &self.hvg_library_sizes);
         self.n_cells_sim = (self.n_cells as f32 * self.params.boost_rate) as usize;
 
@@ -465,7 +465,7 @@ impl BoostClassifier {
             &self.cells_to_keep,
             &self.hvg_library_sizes,
             hvg_genes,
-            &self.f_path_cell,
+            self.cell_reader,
             target_size,
             self.params.log_transform,
         )?;
@@ -480,7 +480,7 @@ impl BoostClassifier {
                 }
 
                 let (combined, pca_res) = pca_and_project(
-                    &self.f_path_gene,
+                    self.gene_reader,
                     &self.cells_to_keep,
                     hvg_genes,
                     &self.hvg_library_sizes,

@@ -125,7 +125,7 @@ impl CxdsModel {
     ///
     /// ### Params
     ///
-    /// * `f_path_cell` - Path to the cell-based binary file (CSR).
+    /// * `reader` - Reader over the cell-based count store.
     /// * `cells_to_keep` - Observed cell indices.
     /// * `hvg_genes` - Highly variable gene indices (the candidate
     ///   pool for cxds gene selection).
@@ -135,15 +135,14 @@ impl CxdsModel {
     ///
     /// `(model, obs_gene_sets)` where `obs_gene_sets[i]` is the
     /// expressed gene set for observed cell `i`.
-    pub fn fit(
-        f_path_cell: &str,
+    pub fn fit<S: SingleCellReading>(
+        reader: &S,
         cells_to_keep: &[usize],
         hvg_genes: &[usize],
         ntop: usize,
     ) -> Result<(Self, Vec<CellGeneSet>), BixverseErrors> {
         let n_cells = cells_to_keep.len();
         let hvg_set: FxHashSet<usize> = hvg_genes.iter().copied().collect();
-        let reader = ParallelSparseReader::new(f_path_cell)?;
 
         let mut gene_counts: FxHashMap<usize, u32> = FxHashMap::default();
         let mut cell_hvg_indices: Vec<Vec<usize>> = Vec::with_capacity(n_cells);

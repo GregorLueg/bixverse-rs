@@ -702,7 +702,7 @@ pub fn launch_cosine_distances<R, F>(
     }
 }
 
-/// Dispatch [`row_l2_normalise`]. One workgroup per row.
+/// Dispatch `row_l2_normalise`. One workgroup per row.
 pub fn launch_row_l2_normalise<R, F>(
     data: &GpuTensor<R, F>,
     n_rows: usize,
@@ -726,7 +726,7 @@ pub fn launch_row_l2_normalise<R, F>(
     }
 }
 
-/// Dispatch [`scale_exp_normalise`]. One workgroup per cell.
+/// Dispatch `scale_exp_normalise`. One workgroup per cell.
 pub fn launch_scale_exp_normalise<R, F>(
     dist: &GpuTensor<R, F>,
     sigma: &GpuTensor<R, F>,
@@ -755,7 +755,7 @@ pub fn launch_scale_exp_normalise<R, F>(
     }
 }
 
-/// Dispatch [`segmented_sum`]. One workgroup per level. The level-CSR
+/// Dispatch `segmented_sum`. One workgroup per level. The level-CSR
 /// (`all_indices`, `offsets`) is built once via `build_csr_gpu_privatised`
 /// with `cell_to_level` as labels and `b` as the cluster count.
 pub fn launch_segmented_sum<R, F>(
@@ -787,7 +787,7 @@ pub fn launch_segmented_sum<R, F>(
     }
 }
 
-/// Dispatch [`objective_partials`].
+/// Dispatch `objective_partials`.
 #[allow(clippy::too_many_arguments)]
 pub fn launch_objective_partials<R, F>(
     r: &GpuTensor<R, F>,
@@ -827,7 +827,7 @@ pub fn launch_objective_partials<R, F>(
     }
 }
 
-/// Dispatch [`jacobi_r_update`]. One workgroup per cell. R is written in place.
+/// Dispatch `jacobi_r_update`. One workgroup per cell. R is written in place.
 #[allow(clippy::too_many_arguments)]
 pub fn launch_jacobi_r_update<R, F>(
     scale_dist: &GpuTensor<R, F>,
@@ -865,7 +865,7 @@ pub fn launch_jacobi_r_update<R, F>(
     }
 }
 
-/// Dispatch [`weighted_segmented_sum`]. One workgroup per `(level, cluster)`
+/// Dispatch `weighted_segmented_sum`. One workgroup per `(level, cluster)`
 /// pair; `s` must have length `b * k * d`.
 #[allow(clippy::too_many_arguments)]
 pub fn launch_weighted_segmented_sum<R, F>(
@@ -901,7 +901,7 @@ pub fn launch_weighted_segmented_sum<R, F>(
     }
 }
 
-/// Dispatch [`ridge_subtract`]. One workgroup per cell.
+/// Dispatch `ridge_subtract`. One workgroup per cell.
 #[allow(clippy::too_many_arguments)]
 pub fn launch_ridge_subtract<R, F>(
     z: &GpuTensor<R, F>,
