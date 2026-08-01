@@ -283,11 +283,21 @@ impl ImageSource for SlideImage {
     }
 }
 
-/// Convert a pre-multiplied ARGB32 buffer to row-major RGB8.
+/// Convert a pre-multiplied ARGB32 buffer to row-major RGB8, composited onto
+/// white.
 ///
 /// On little-endian machines the ARGB32 words land in memory as B, G, R, A.
-/// Un-premultiplying divides each channel by alpha; alpha 0 means the pixel sat
-/// outside the slide's own bounds and becomes black.
+/// Compositing a pre-multiplied pixel onto an opaque background is
+/// `c + bg * (255 - a) / 255`, which for a white background collapses to
+/// `c + (255 - a)`. No division and no un-premultiplication needed.
+///
+/// White is the only defensible fill for brightfield histology. Transparency
+/// means unscanned canvas: MIRAX and DICOM return alpha 0 for missing tiles
+/// inside the grid, and Hamamatsu, MIRAX and Ventana all put the scan inside a
+/// larger level-0 canvas. Filling those with black instead put them at
+/// `rgb_to_od([0,0,0]) = log10(256) = 2.408`, the saturation point of the
+/// optical density transform, so a spot on a blank margin came back as the
+/// densest tissue on the slide.
 ///
 /// ### Params
 ///
@@ -304,20 +314,19 @@ fn bgra_premultiplied_to_rgb(bgra: &[u8], width: u32, height: u32) -> RgbTile {
 
     for px in bgra.chunks_exact(OPENSLIDE_BYTES_PER_PIXEL).take(n_pixels) {
         let (b, g, r, a) = (px[0], px[1], px[2], px[3]);
-        if a == 0 {
-            data.extend_from_slice(&[0, 0, 0]);
-        } else if a == u8::MAX {
+        if a == u8::MAX {
             data.extend_from_slice(&[r, g, b]);
         } else {
-            let a = u32::from(a);
-            let unmul = |c: u8| ((u32::from(c) * 255 + a / 2) / a).min(255) as u8;
-            data.extend_from_slice(&[unmul(r), unmul(g), unmul(b)]);
+            let bg = u8::MAX - a;
+            let over = |c: u8| c.saturating_add(bg);
+            data.extend_from_slice(&[over(r), over(g), over(b)]);
         }
     }
 
     // A short buffer would be an OpenSlide contract violation, but pad rather
-    // than hand back a tile whose length disagrees with its dimensions.
-    data.resize(n_pixels * RGB_BYTES_PER_PIXEL, 0);
+    // than hand back a tile whose length disagrees with its dimensions. White,
+    // for the same reason as above.
+    data.resize(n_pixels * RGB_BYTES_PER_PIXEL, u8::MAX);
 
     RgbTile {
         data,
@@ -640,15 +649,28 @@ mod tests {
     }
 
     #[test]
-    fn test_bgra_zero_alpha_becomes_black() {
+    fn test_bgra_zero_alpha_composites_onto_white() {
+        // Unscanned canvas. As black this entered the feature pipeline at
+        // mean_od 2.408, the saturation point of the OD transform.
         let bgra = vec![0, 0, 0, 0];
         let tile = bgra_premultiplied_to_rgb(&bgra, 1, 1);
-        assert_eq!(tile.data, vec![0, 0, 0]);
+        assert_eq!(tile.data, vec![255, 255, 255]);
+        assert_relative_eq!(
+            crate::spatial::sp_image::colour::mean_optical_density(&tile),
+            0.0_f32,
+            epsilon = 1e-3
+        );
     }
 
     #[test]
-    fn test_bgra_unpremultiplies_partial_alpha() {
-        // Half-transparent white: premultiplied channels sit at ~128.
+    fn test_bgra_partial_alpha_composites_onto_white() {
+        // Half-transparent black: premultiplied channels are 0, alpha 128, so
+        // over white this is mid-grey rather than black.
+        let bgra = vec![0, 0, 0, 128];
+        let tile = bgra_premultiplied_to_rgb(&bgra, 1, 1);
+        assert_eq!(tile.data, vec![127, 127, 127]);
+
+        // Half-transparent white stays white.
         let bgra = vec![128, 128, 128, 128];
         let tile = bgra_premultiplied_to_rgb(&bgra, 1, 1);
         for &c in &tile.data {
@@ -661,7 +683,7 @@ mod tests {
         let bgra = vec![0, 0, 255, 255];
         let tile = bgra_premultiplied_to_rgb(&bgra, 2, 1);
         assert_eq!(tile.data.len(), 6);
-        assert_eq!(tile.data, vec![255, 0, 0, 0, 0, 0]);
+        assert_eq!(tile.data, vec![255, 0, 0, 255, 255, 255]);
     }
 
     #[test]

@@ -207,6 +207,12 @@ impl WholeImage {
     ///   space, e.g. `tissue_hires_scalef`. Use 1.0 if the file already is
     ///   full-res.
     ///
+    /// An RGBA file gets composited onto white rather than having its alpha
+    /// dropped. `into_rgb8` discards the channel, which turns a transparent
+    /// region black, and black is the maximum of the optical density
+    /// transform. An RGBA PNG or TIFF out of QuPath or ImageJ is the usual
+    /// source of one.
+    ///
     /// ### Returns
     ///
     /// The decoded image, or [`BixverseErrors::ImageDecode`] if the file cannot
@@ -214,8 +220,13 @@ impl WholeImage {
     pub fn new<P: AsRef<Path>>(path: P, scale: f32) -> Result<Self, BixverseErrors> {
         let decoded = image::open(path.as_ref())?;
         let (width, height) = decoded.dimensions();
+        let data = if decoded.color().has_alpha() {
+            rgba_onto_white(&decoded.into_rgba8())
+        } else {
+            decoded.into_rgb8().into_raw()
+        };
         Ok(Self {
-            data: decoded.into_rgb8().into_raw(),
+            data,
             width,
             height,
             scale,
@@ -274,6 +285,31 @@ impl ImageSource for WholeImage {
             height: w.height,
         })
     }
+}
+
+/// Flatten an RGBA8 buffer onto a white background.
+///
+/// Straight `src-over` on non-premultiplied channels:
+/// `out = (c a + 255 (255 - a) + 127) / 255`. White because brightfield
+/// background is white, and because black sits at the ceiling of the optical
+/// density transform.
+///
+/// ### Params
+///
+/// * `rgba` - Decoded RGBA8 image.
+///
+/// ### Returns
+///
+/// Row-major RGB8, three bytes per pixel.
+fn rgba_onto_white(rgba: &image::RgbaImage) -> Vec<u8> {
+    let mut out = Vec::with_capacity(rgba.len() / 4 * 3);
+    for px in rgba.chunks_exact(4) {
+        let a = u32::from(px[3]);
+        let bg = 255 * (255 - a);
+        let over = |c: u8| ((u32::from(c) * a + bg + 127) / 255).min(255) as u8;
+        out.extend_from_slice(&[over(px[0]), over(px[1]), over(px[2])]);
+    }
+    out
 }
 
 ////////////////////
@@ -483,6 +519,27 @@ mod tests {
             err,
             Err(BixverseErrors::ImageWindowOutOfBounds { .. })
         ));
+    }
+
+    #[test]
+    fn test_rgba_transparency_composites_onto_white() {
+        // `into_rgb8` drops alpha, so a fully transparent black pixel came out
+        // as black, i.e. maximum optical density.
+        let rgba = image::RgbaImage::from_raw(
+            3,
+            1,
+            vec![
+                0, 0, 0, 0, // transparent black -> white
+                0, 0, 0, 255, // opaque black stays black
+                255, 0, 0, 128, // half-transparent red -> pink
+            ],
+        )
+        .unwrap();
+        let rgb = rgba_onto_white(&rgba);
+        assert_eq!(&rgb[0..3], &[255, 255, 255]);
+        assert_eq!(&rgb[3..6], &[0, 0, 0]);
+        assert_eq!(rgb[6], 255);
+        assert!(rgb[7] > 120 && rgb[7] < 135, "{}", rgb[7]);
     }
 
     #[test]
