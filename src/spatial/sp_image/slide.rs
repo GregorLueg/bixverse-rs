@@ -46,6 +46,16 @@ const OPENSLIDE_BYTES_PER_PIXEL: usize = 4;
 /// Bytes per pixel in an [`RgbTile`].
 const RGB_BYTES_PER_PIXEL: usize = 3;
 
+/// Relative slack when matching a reported downsample against a requested one.
+///
+/// OpenSlide computes a level's downsample as `level0_width / level_width`
+/// with `level_width` already floored, so the reported value overshoots the
+/// nominal one by roughly `1 / level_width`. That is 4.5e-4 on a level 3.4k
+/// pixels wide and around 1e-2 on a thumbnail level a hundred pixels wide.
+/// 1% covers both and the worst it can cost is a level 1% coarser than asked
+/// for, against a whole pyramid step of 2x or 4x if the match is refused.
+const DOWNSAMPLE_TOLERANCE: f64 = 1e-2;
+
 ////////////////
 // SlideImage //
 ////////////////
@@ -129,6 +139,13 @@ impl SlideImage {
     /// already thrown away detail the features need. Level 0 is the floor, so a
     /// `working_scale` above 1.0 just gets full resolution.
     ///
+    /// The comparison carries [`DOWNSAMPLE_TOLERANCE`] because real pyramids do
+    /// not report integral downsamples. OpenSlide derives them from floored
+    /// level dimensions, so a 46000x32914 slide on the usual 1/4/16/32 pyramid
+    /// reports `[1.0, 4.000121536, 16.000486145, 32.014322018]` and an exact
+    /// `d <= target` rejects every level past the first. `1.0 / 0.1f32` coming
+    /// out as `9.99999985` does the same to an exactly-10x level.
+    ///
     /// ### Params
     ///
     /// * `downsamples` - Per-level downsample factors, level 0 first. Must be
@@ -143,7 +160,7 @@ impl SlideImage {
         if working_scale <= 0.0 {
             return 0;
         }
-        let target = 1.0 / f64::from(working_scale);
+        let target = 1.0 / f64::from(working_scale) * (1.0 + DOWNSAMPLE_TOLERANCE);
 
         let mut best = 0u32;
         let mut best_downsample = downsamples[0];
@@ -565,6 +582,34 @@ mod tests {
         assert_eq!(SlideImage::pick_level(&d, 0.2), 2);
         // 1/0.3 = 3.33, level 1 is the coarsest that still fits.
         assert_eq!(SlideImage::pick_level(&d, 0.3), 1);
+    }
+
+    #[test]
+    fn test_pick_level_on_a_real_scanner_pyramid() {
+        // What OpenSlide reports for a 46000x32914 level 0 on a 1/4/16/32
+        // pyramid: floored level dimensions, so nothing is integral. Exact
+        // comparison landed one level too fine on every one of these.
+        let d = [1.0, 4.000121536, 16.000486145, 32.014322018];
+        assert_eq!(SlideImage::pick_level(&d, 0.25), 1);
+        assert_eq!(SlideImage::pick_level(&d, 0.0625), 2);
+        assert_eq!(SlideImage::pick_level(&d, 0.03125), 3);
+    }
+
+    #[test]
+    fn test_pick_level_survives_the_f32_reciprocal() {
+        // 1.0 / 0.1f32 is 9.99999985, which used to reject an exactly-10x
+        // level.
+        let d = [1.0, 10.0];
+        assert_eq!(SlideImage::pick_level(&d, 0.1), 1);
+    }
+
+    #[test]
+    fn test_pick_level_tolerance_does_not_swallow_a_whole_step() {
+        // The slack is relative and small: a level twice as coarse as asked
+        // for still gets refused.
+        let d = [1.0, 2.0, 4.0];
+        assert_eq!(SlideImage::pick_level(&d, 0.5), 1);
+        assert_eq!(SlideImage::pick_level(&d, 0.6), 0);
     }
 
     #[test]
