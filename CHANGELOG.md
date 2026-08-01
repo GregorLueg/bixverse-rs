@@ -6,6 +6,25 @@
 
 - Spatial transcriptomics module: Moran's I, SPARK-X spatially variable genes,
   and neighbourhood enrichment. Gated behind the `spatial` feature.
+- Spatial graph builder that turns spot coordinates into the
+  `(neighbours, weights)` pair `MoransI::new` takes:
+  * Four layouts: `HexLattice`, `SquareLattice`, `Knn` and `Radius`.
+  * Three weightings: `Binary`, `InverseDistance` and `Gaussian`.
+  * Optional row-normalisation, matching spdep `style = "W"`.
+  * `build_spatial_graph_csr` for the neighbourhood enrichment path.
+- Per-spot histology features behind the new `spatial-image` feature, which
+  needs the OpenSlide C library at build and run time:
+  * `ImageSource` trait with two backends: `WholeImage` via `image` and
+    `SlideImage` via `openslide-rs`. Windowed reads throughout, backend picked
+    by probing the file.
+  * Tiling, Ruifrok-Johnston colour deconvolution, GLCM/Haralick texture on
+    both grey and haematoxylin, and first-order statistics.
+  * `SlideImage::metadata()` and a dispatching `image_metadata()`.
+- `from_r_list` converters for `SpatialGraphParams`, `SpatialSvgParams` and
+  `SpatialImageParams`, joining the three that already existed.
+- `MtxReader::with_cell_allowlist()`, an optional cell filter applied in both
+  passes of `parse_mtx_quality` so gene-level QC only ever sees admitted cells.
+  Defaults to `None`, so existing callers are unaffected.
 
 ## 0.3.11
 
