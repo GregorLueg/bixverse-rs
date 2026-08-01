@@ -3,5 +3,6 @@
 //! This extends the single cell analysis suite.
 
 pub mod sp_analysis;
+pub mod sp_graph;
 pub mod sp_processing;
 pub mod sp_r_wrappers;
