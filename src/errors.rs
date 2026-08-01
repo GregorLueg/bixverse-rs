@@ -640,6 +640,39 @@ pub enum BixverseErrors {
     #[error("Spatial: n_permutations must be >= 1")]
     NhoodZeroPermutations,
 
+    /// Lattice index arrays do not match the coordinate count.
+    #[cfg(feature = "spatial")]
+    #[error(
+        "Spatial: lattice arrays have lengths {n_array_row} (row) and {n_array_col} (col) but {n_spots} spots were provided"
+    )]
+    SpatialLatticeLengthMismatch {
+        /// Length of `array_row`.
+        n_array_row: usize,
+        /// Length of `array_col`.
+        n_array_col: usize,
+        /// Number of coordinate pairs supplied.
+        n_spots: usize,
+    },
+
+    /// Two spots share the same lattice coordinate, which makes the lookup
+    /// driving the exact lattice adjacency ambiguous.
+    #[cfg(feature = "spatial")]
+    #[error("Spatial: lattice coordinate ({array_row}, {array_col}) occurs more than once")]
+    SpatialLatticeDuplicateCoord {
+        /// Offending `array_row`.
+        array_row: i32,
+        /// Offending `array_col`.
+        array_col: i32,
+    },
+
+    /// The automatic Gaussian bandwidth could not be derived because the graph
+    /// carries no edge of positive length.
+    #[cfg(feature = "spatial")]
+    #[error(
+        "Spatial: cannot resolve the Gaussian bandwidth, the graph has no edge with a positive length"
+    )]
+    SpatialGraphBandwidthUnresolved,
+
     // -- gpu --
     /// A GPU cubecl matrix multiplication error from the cubek crate
     #[cfg(feature = "gpu")]
