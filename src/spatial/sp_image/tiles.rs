@@ -29,7 +29,13 @@ use crate::spatial::sp_image::source::{ImageSource, ImageWindow, RgbTile};
 /// ### Returns
 ///
 /// The clipped window, or [`BixverseErrors::ImageWindowOutOfBounds`] if the
-/// spot falls entirely off the image.
+/// spot falls entirely off the image. A non-finite centre takes the same
+/// branch: `(NaN - side / 2.0).round() as i64` saturates to 0, so without the
+/// guard the window would pass every bounds check and hand back the top-left
+/// corner of the slide. Callers taking a whole coordinate slice should reject
+/// it earlier with
+/// [`validate_coordinates`](crate::spatial::sp_validate::validate_coordinates),
+/// which names the offending spot.
 pub fn spot_window<S: ImageSource>(
     source: &S,
     coord_fullres: (f32, f32),
@@ -42,6 +48,17 @@ pub fn spot_window<S: ImageSource>(
     let side = (spot_diameter_fullres * tile_scale * scale).ceil().max(1.0) as i64;
     let cx = f64::from(coord_fullres.0 * scale);
     let cy = f64::from(coord_fullres.1 * scale);
+
+    if !cx.is_finite() || !cy.is_finite() {
+        return Err(BixverseErrors::ImageWindowOutOfBounds {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+            img_width: img_w,
+            img_height: img_h,
+        });
+    }
 
     // Work in i64 so a spot hanging off the top-left does not wrap a u32.
     let x0 = (cx - side as f64 / 2.0).round() as i64;
@@ -182,6 +199,21 @@ mod tests {
         ));
         assert!(matches!(
             spot_window(&img, (-50.0, 50.0), 10.0, 1.0),
+            Err(BixverseErrors::ImageWindowOutOfBounds { .. })
+        ));
+    }
+
+    #[test]
+    fn test_spot_window_rejects_non_finite_coordinates() {
+        let img = grid(1.0);
+        // Without the guard this came back as (0, 0, 15, 15): the cast
+        // saturates to 0 and the window passes every bounds check.
+        assert!(matches!(
+            spot_window(&img, (f32::NAN, 50.0), 15.0, 1.0),
+            Err(BixverseErrors::ImageWindowOutOfBounds { .. })
+        ));
+        assert!(matches!(
+            spot_window(&img, (50.0, f32::INFINITY), 15.0, 1.0),
             Err(BixverseErrors::ImageWindowOutOfBounds { .. })
         ));
     }

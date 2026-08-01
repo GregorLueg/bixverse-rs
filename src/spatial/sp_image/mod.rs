@@ -58,6 +58,7 @@ use crate::spatial::sp_image::texture::{
     N_HARALICK_FEATURES, STAIN_QUANT_MAX, glcm_haralick, quantise_stain, quantise_u8,
 };
 use crate::spatial::sp_image::tiles::spot_window;
+use crate::spatial::sp_validate::validate_coordinates;
 
 ///////////////
 // Constants //
@@ -518,7 +519,9 @@ fn glcm_on_scratch(
 /// ### Returns
 ///
 /// The per-spot feature matrix, `n_spots * n_features`, row-major and
-/// spot-major.
+/// spot-major. Errors if any coordinate is not finite: a `NaN` is a broken
+/// join upstream rather than a spot that happens to sit off the image, so it
+/// gets rejected instead of dropped.
 ///
 /// ### References
 ///
@@ -532,6 +535,7 @@ pub fn spatial_image_features<S: ImageSource>(
     params: Option<SpatialImageParams>,
 ) -> Result<SpatialImageRes, BixverseErrors> {
     let params = params.unwrap_or_default();
+    validate_coordinates(coords_fullres)?;
     if params.glcm_levels < 2 {
         return Err(BixverseErrors::GlcmLevelsOutOfRange(params.glcm_levels));
     }
@@ -626,6 +630,18 @@ mod tests {
         assert_eq!(res.values.len(), 3 * N_SPOT_FEATURES);
         assert_eq!(res.spot_indices, vec![0, 1, 2]);
         assert!(res.values.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn test_nan_coordinate_is_rejected_not_featurised() {
+        // Before the guard this produced a complete 29-value row cut from the
+        // top-left corner, indistinguishable from a real spot downstream.
+        let img = two_tone();
+        let coords = [(16.0, 16.0), (f32::NAN, 48.0)];
+        assert!(matches!(
+            spatial_image_features(&img, &coords, 16.0, None),
+            Err(BixverseErrors::SpatialNonFiniteCoord { index: 1 })
+        ));
     }
 
     #[test]

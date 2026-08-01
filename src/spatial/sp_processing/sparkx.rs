@@ -11,6 +11,7 @@ use std::time::Instant;
 use crate::core::math::stats::calc_fdr;
 use crate::prelude::*;
 use crate::spatial::sp_processing::svg_utils::{Assay, center_inplace, materialise_gene_dense};
+use crate::spatial::sp_validate::{validate_coordinates, validate_spots_to_keep};
 
 ////////////
 // Params //
@@ -939,7 +940,8 @@ impl<'a, S: SingleCellReading> SparkX<'a, S> {
     ///
     /// ### Returns
     ///
-    /// `Result<Self>` with the initialised driver.
+    /// `Result<Self>` with the initialised driver. Errors if `spots_to_keep`
+    /// repeats an index or any coordinate is not finite.
     pub fn new(
         gene_reader: &'a S,
         spots_to_keep: &'a [usize],
@@ -954,6 +956,8 @@ impl<'a, S: SingleCellReading> SparkX<'a, S> {
                 n_spots,
             });
         }
+        validate_spots_to_keep(spots_to_keep)?;
+        validate_coordinates(coordinates)?;
         if n_spots < 3 {
             return Err(BixverseErrors::InvalidArgument(format!(
                 "SPARK-X needs at least 3 spots, got {n_spots}"
@@ -1536,6 +1540,47 @@ mod tests {
             }
             other => panic!("wrong error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn new_rejects_duplicate_spots_to_keep() {
+        // n_spots = 4 but the IndexSet holds {5, 7, 9}, so expression would
+        // pair with the wrong coordinates from index 2 onwards.
+        let spots = vec![5_usize, 7, 5, 9];
+        let coords = vec![(0.0_f32, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)];
+        let err = SparkX::new(
+            &EmptyGeneReader,
+            &spots,
+            &coords,
+            SparkXParams::default(),
+            42,
+        )
+        .unwrap_err();
+        match err {
+            BixverseErrors::SpatialDuplicateSpot { spot, index } => {
+                assert_eq!(spot, 5);
+                assert_eq!(index, 2);
+            }
+            other => panic!("wrong error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn new_rejects_non_finite_coordinates() {
+        let spots = vec![0_usize, 1, 2, 3];
+        let coords = vec![(0.0_f32, 0.0), (1.0, 0.0), (f32::NAN, 1.0), (1.0, 1.0)];
+        let err = SparkX::new(
+            &EmptyGeneReader,
+            &spots,
+            &coords,
+            SparkXParams::default(),
+            42,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            BixverseErrors::SpatialNonFiniteCoord { index: 2 }
+        ));
     }
 
     #[test]

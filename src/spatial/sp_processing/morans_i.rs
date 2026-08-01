@@ -28,6 +28,7 @@ use crate::prelude::*;
 use crate::spatial::sp_processing::svg_utils::{
     SpatialSvgParams, center_inplace, materialise_gene_dense,
 };
+use crate::spatial::sp_validate::{validate_adjacency, validate_spots_to_keep};
 
 /////////////
 // Results //
@@ -96,7 +97,9 @@ impl<'a, S: SingleCellReading> MoransI<'a, S> {
     ///
     /// ### Returns
     ///
-    /// `Result` with the initialised `MoransI`.
+    /// `Result` with the initialised `MoransI`. Errors if `spots_to_keep`
+    /// repeats an index, or if the adjacency does not describe `n_spots`
+    /// nodes in the local index space.
     pub fn new(
         gene_reader: &'a S,
         spots_to_keep: &'a [usize],
@@ -105,12 +108,8 @@ impl<'a, S: SingleCellReading> MoransI<'a, S> {
         params: SpatialSvgParams,
     ) -> Result<Self, BixverseErrors> {
         let n_spots = spots_to_keep.len();
-        if neighbours.len() != n_spots {
-            return Err(BixverseErrors::SpatialGraphSpotMismatch {
-                graph_nodes: neighbours.len(),
-                n_spots,
-            });
-        }
+        validate_spots_to_keep(spots_to_keep)?;
+        validate_adjacency(neighbours, weights, n_spots)?;
 
         let nr = crate::graph::spatial_graph::make_weights_non_redundant(neighbours, weights);
         let graph = GraphCsr::from_non_redundant(neighbours, &nr);
@@ -528,6 +527,70 @@ mod tests {
             }
             other => panic!("wrong error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn duplicate_spots_to_keep_errors() {
+        // Four spots, but `{5, 7, 9}` after deduplication. Nothing is ever out
+        // of bounds, so before the check this ran to completion and returned
+        // finite p-values against mis-paired expression.
+        let (neigh, mut w) = small_graph_data();
+        let spots = vec![5_usize, 7, 5, 9];
+        let err = MoransI::new(
+            &EmptyGeneReader,
+            &spots,
+            &neigh,
+            &mut w,
+            SpatialSvgParams::default(),
+        )
+        .unwrap_err();
+        match err {
+            BixverseErrors::SpatialDuplicateSpot { spot, index } => {
+                assert_eq!(spot, 5);
+                assert_eq!(index, 2);
+            }
+            other => panic!("wrong error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn one_based_neighbour_list_errors() {
+        // What R produces without the `- 1L`. Used to panic out of bounds
+        // inside make_weights_non_redundant.
+        let neigh = vec![vec![2_usize], vec![1, 3], vec![2, 4], vec![3]];
+        let mut w = vec![vec![1.0_f32], vec![1.0, 1.0], vec![1.0, 1.0], vec![1.0_f32]];
+        let spots = vec![0_usize, 1, 2, 3];
+        let err = MoransI::new(
+            &EmptyGeneReader,
+            &spots,
+            &neigh,
+            &mut w,
+            SpatialSvgParams::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            BixverseErrors::SpatialNeighbourOutOfRange { neighbour: 4, .. }
+        ));
+    }
+
+    #[test]
+    fn ragged_adjacency_errors() {
+        let neigh = vec![vec![1_usize], vec![0, 2], vec![1, 3], vec![2]];
+        let mut w = vec![vec![1.0_f32], vec![1.0], vec![1.0, 1.0], vec![1.0]];
+        let spots = vec![0_usize, 1, 2, 3];
+        let err = MoransI::new(
+            &EmptyGeneReader,
+            &spots,
+            &neigh,
+            &mut w,
+            SpatialSvgParams::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            BixverseErrors::SpatialAdjacencyRagged { node: 1, .. }
+        ));
     }
 
     #[test]

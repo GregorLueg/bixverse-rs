@@ -31,6 +31,7 @@ use rustc_hash::FxHashMap;
 use crate::core::math::vector_helpers::median;
 use crate::graph::spatial_graph::{GraphCsr, make_weights_non_redundant};
 use crate::prelude::*;
+use crate::spatial::sp_validate::validate_coordinates;
 
 ///////////
 // Types //
@@ -212,12 +213,14 @@ impl Default for SpatialGraphParams {
 /// ### Returns
 ///
 /// `(neighbours, weights)`, both local and 0-based against `coordinates`.
+/// Errors if any coordinate is not finite.
 pub fn build_spatial_graph(
     coordinates: &[(f32, f32)],
     params: &SpatialGraphParams,
     knn_params: Option<&KnnParams>,
     seed: usize,
 ) -> Result<SpatialAdjacency, BixverseErrors> {
+    validate_coordinates(coordinates)?;
     let n = coordinates.len();
 
     let neighbours = match &params.layout {
@@ -806,6 +809,23 @@ mod tests {
         assert!(matches!(
             build_spatial_graph(&coords, &params, None, 42),
             Err(BixverseErrors::InvalidArgument(_))
+        ));
+    }
+
+    #[test]
+    fn non_finite_coordinates_error() {
+        // NaN silently isolates the spot: `NaN <= radius` is false and
+        // `NaN as i32` buckets it at the origin.
+        let mut coords = square_grid(2);
+        coords[2].1 = f32::NAN;
+        let params = SpatialGraphParams::new(
+            SpatialGraphLayout::Radius { radius: 1.5 },
+            SpatialWeighting::Binary,
+            false,
+        );
+        assert!(matches!(
+            build_spatial_graph(&coords, &params, None, 42),
+            Err(BixverseErrors::SpatialNonFiniteCoord { index: 2 })
         ));
     }
 

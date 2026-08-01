@@ -8,3 +8,4 @@ pub mod sp_graph;
 pub mod sp_image;
 pub mod sp_processing;
 pub mod sp_r_wrappers;
+pub mod sp_validate;

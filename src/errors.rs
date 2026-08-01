@@ -665,6 +665,62 @@ pub enum BixverseErrors {
         array_col: i32,
     },
 
+    /// A spot coordinate is not finite.
+    ///
+    /// `NA_real_` in the R coordinate matrix, or an infinity out of a bad
+    /// rescale. Rejected at the boundary because nothing downstream notices:
+    /// the tile window saturates to the image origin, the radius graph buckets
+    /// the spot at `(0, 0)` and the SPARK-X bandwidth quantiles come back
+    /// short.
+    #[cfg(feature = "spatial")]
+    #[error("Spatial: the coordinate at index {index} is not finite")]
+    SpatialNonFiniteCoord {
+        /// Position of the offending coordinate in the input slice.
+        index: usize,
+    },
+
+    /// `spots_to_keep` repeats a global spot index.
+    ///
+    /// The local index space is defined by position in the deduplicating
+    /// `IndexSet` the readers filter against, while `n_spots` is the raw slice
+    /// length. A repeat puts the two out of step without going out of bounds,
+    /// so expression pairs with the wrong spot's coordinates and graph row
+    /// from the first duplicate onwards.
+    #[cfg(feature = "spatial")]
+    #[error("Spatial: spot index {spot} occurs more than once in spots_to_keep (at index {index})")]
+    SpatialDuplicateSpot {
+        /// The repeated global spot index.
+        spot: usize,
+        /// Position of the repeat in `spots_to_keep`.
+        index: usize,
+    },
+
+    /// A node's neighbour list and weight list have different lengths.
+    #[cfg(feature = "spatial")]
+    #[error("Spatial: node {node} has {n_neighbours} neighbours but {n_weights} weights")]
+    SpatialAdjacencyRagged {
+        /// Offending node.
+        node: usize,
+        /// Length of `neighbours[node]`.
+        n_neighbours: usize,
+        /// Length of `weights[node]`.
+        n_weights: usize,
+    },
+
+    /// A neighbour index falls outside the local `0..n_nodes` space.
+    ///
+    /// A 1-based neighbour list out of R is the usual cause.
+    #[cfg(feature = "spatial")]
+    #[error("Spatial: node {node} lists neighbour {neighbour}, which is outside 0..{n_nodes}")]
+    SpatialNeighbourOutOfRange {
+        /// Offending node.
+        node: usize,
+        /// The out-of-range neighbour index.
+        neighbour: usize,
+        /// Number of nodes in the local index space.
+        n_nodes: usize,
+    },
+
     /// The automatic Gaussian bandwidth could not be derived because the graph
     /// carries no edge of positive length.
     #[cfg(feature = "spatial")]

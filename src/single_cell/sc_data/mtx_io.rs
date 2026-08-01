@@ -125,6 +125,13 @@ impl MtxReader {
     /// `tissue_positions.csv` is in array raster order and must be joined on
     /// the barcode string first.
     ///
+    /// Indices are range-checked against the header in
+    /// [`MtxReader::parse_mtx_quality`] rather than here, so the builder stays
+    /// infallible. That check matters: mtx is 1-based on disk and so is R, and
+    /// correctness rests on a single `- 1L` in the R caller. Without it a
+    /// 1-based allowlist silently drops the last cell and shifts every
+    /// barcode by one in the positional join downstream.
+    ///
     /// ### Params
     ///
     /// * `allowlist` - Cell indices to admit. An empty list admits nothing.
@@ -211,6 +218,23 @@ impl MtxReader {
     /// for the cells/genes to keep.
     pub fn parse_mtx_quality(&mut self, verbose: bool) -> IoResult<CellOnFileQuality> {
         const CHUNK_SIZE: u64 = 64 * 1024 * 1024;
+
+        // Out-of-range allowlist entries would otherwise be dropped without a
+        // word: the selection loops `0..total_cells` and the set lookups just
+        // miss.
+        if let Some(set) = &self.cell_allowlist
+            && let Some(&max) = set.iter().max()
+            && max >= self.header.total_cells
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "Cell allowlist index {max} is out of range for a file with {} cells (indices are 0-based)",
+                    self.header.total_cells
+                ),
+            ));
+        }
+
         let file_size = self.reader.get_ref().metadata()?.len();
         let num_chunks = ((file_size / CHUNK_SIZE) as usize).max(1);
 
@@ -1062,6 +1086,20 @@ mod tests {
         let quality = reader.parse_mtx_quality(false).unwrap();
 
         assert_eq!(quality.cells_to_keep, vec![2]);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_mtx_allowlist_out_of_range_errors() {
+        // A 1-based allowlist out of R. Silently dropped the last cell and
+        // shifted every barcode by one in the join downstream.
+        let path = write_mtx("allowlist_range", 3, 4, &fixture());
+        let mut reader = MtxReader::new(&path, qc(), false)
+            .unwrap()
+            .with_cell_allowlist([1_usize, 2, 3, 4]);
+        let err = reader.parse_mtx_quality(false).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
 
         let _ = std::fs::remove_file(&path);
     }
