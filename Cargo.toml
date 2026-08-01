@@ -26,6 +26,10 @@ multi-modal = ["single-cell"]
 gpu = ["cubecl", "ann-search-rs/gpu", "half", "cubek"]
 ## Enables the spatial transcriptomics-specific features in bixverse-rs
 spatial = ["single-cell"]
+## Enables histology image features for spatial data. Needs the OpenSlide C
+## library present at build and run time (`brew install openslide`,
+## `apt install libopenslide-dev`).
+spatial-image = ["spatial", "dep:image", "dep:openslide-rs", "dep:openslide-sys"]
 
 #####################
 # Compilation flags #
@@ -58,12 +62,30 @@ hdf5 = { package = "hdf5-metno", version = "0.10.1", features = [
     "static",
     "zlib",
 ], optional = true }
+# `tiff` is not optional decoration. The Space Ranger CytAssist frame is a
+# strip TIFF, which OpenSlide's generic-tiff driver refuses (it needs tiled),
+# so without this decoder that image is unreadable by either backend.
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "tiff",
+], optional = true }
 indexmap = { version = "2.13.0", optional = true }
 lz4_flex = { version = "0.12.0", optional = true }
 memmap2 = { version = "0.9.9", optional = true }
 ndarray = { version = "0.16.1", optional = true }
 num-traits = "0.2.19"
 once_cell = "1.21.3"
+# `default-features = false` drops the `deepzoom` default, which would otherwise
+# pull `image` and `fast_image_resize` in. We do our own tiling.
+openslide-rs = { version = "2.4.0", default-features = false, optional = true }
+# Licence-critical, do not drop. OpenSlide is LGPL-2.1 and bixverse-rs is MIT,
+# so the C library must be linked dynamically. `openslide-sys` requests *static*
+# linking unless its `dynamic-link` feature is on, and `openslide-rs` never
+# turns it on. Depending on the -sys crate directly is the only way to force it.
+openslide-sys = { version = "1.0.8", features = [
+    "dynamic-link",
+], optional = true }
 petgraph = "0.8.3"
 rand = "0.9.2"
 rand_distr = "0.5.1"
@@ -80,6 +102,9 @@ wide = "1.4.0"
 #################
 
 [package.metadata.docs.rs]
+# `spatial-image` is deliberately absent: it needs the OpenSlide C library and
+# its headers, which docs.rs has no way to install. Adding it here would fail
+# the whole docs build, not just that module.
 features = ["single-cell", "multi-modal", "spatial"]
 
 ###########

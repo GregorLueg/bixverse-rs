@@ -640,6 +640,95 @@ pub enum BixverseErrors {
     #[error("Spatial: n_permutations must be >= 1")]
     NhoodZeroPermutations,
 
+    // -- spatial / image --
+    /// Wraps any error out of the `image` crate while decoding a whole image.
+    ///
+    /// Covers unreadable files, unsupported codecs (only PNG and JPEG are
+    /// compiled in) and truncated data.
+    #[cfg(feature = "spatial-image")]
+    #[error("Spatial image: decoding failed: {0}")]
+    ImageDecode(#[from] image::ImageError),
+
+    /// Wraps any error out of `openslide-rs`.
+    ///
+    /// Covers slide opening, level queries and windowed region reads. The
+    /// wrapped error carries the original OpenSlide message.
+    #[cfg(feature = "spatial-image")]
+    #[error("Spatial image: OpenSlide error: {0}")]
+    OpenSlide(#[from] openslide_rs::errors::OpenSlideError),
+
+    /// The file could not be opened by either backing implementation.
+    ///
+    /// Raised by the probe in [`crate::prelude::open_image_source`] when
+    /// OpenSlide does not recognise the file and the `image` crate cannot
+    /// decode it either.
+    #[cfg(feature = "spatial-image")]
+    #[error("Spatial image: '{path}' is readable by neither OpenSlide nor the image decoder")]
+    ImageSourceUnrecognised {
+        /// Path that was probed.
+        path: String,
+    },
+
+    /// A requested window lies wholly outside the backing image.
+    ///
+    /// Windows that only partly overlap get clamped and come back smaller.
+    /// This fires only when the intersection with the image is empty.
+    #[cfg(feature = "spatial-image")]
+    #[error(
+        "Spatial image: window at ({x}, {y}) size {width}x{height} does not intersect the {img_width}x{img_height} image"
+    )]
+    ImageWindowOutOfBounds {
+        /// Window origin, x.
+        x: u32,
+        /// Window origin, y.
+        y: u32,
+        /// Window width.
+        width: u32,
+        /// Window height.
+        height: u32,
+        /// Backing image width.
+        img_width: u32,
+        /// Backing image height.
+        img_height: u32,
+    },
+
+    /// The slide reports no pyramid levels, so nothing can be read from it.
+    #[cfg(feature = "spatial-image")]
+    #[error("Spatial image: the slide reports zero pyramid levels")]
+    SlideNoLevels,
+
+    /// A stain matrix could not be inverted.
+    ///
+    /// Means the three stain vectors are linearly dependent, so the colour
+    /// space they span is degenerate and deconvolution has no unique solution.
+    #[cfg(feature = "spatial-image")]
+    #[error("Spatial image: the stain matrix is singular and cannot be inverted")]
+    StainMatrixSingular,
+
+    /// `glcm_levels` outside the usable range.
+    #[cfg(feature = "spatial-image")]
+    #[error("Spatial image: glcm_levels must be in 2..=255, got {0}")]
+    GlcmLevelsOutOfRange(u8),
+
+    /// No GLCM offsets were supplied, so no co-occurrence can be counted.
+    #[cfg(feature = "spatial-image")]
+    #[error("Spatial image: at least one GLCM offset is required")]
+    GlcmNoOffsets,
+
+    /// A quantised value fell outside `0..levels`.
+    ///
+    /// Means the buffer handed to the GLCM was never quantised, or was
+    /// quantised against a different level count. Caught up front because the
+    /// alternative is an out-of-bounds index inside the counting loop.
+    #[cfg(feature = "spatial-image")]
+    #[error("Spatial image: quantised value {value} is out of range for {levels} GLCM levels")]
+    GlcmValueOutOfRange {
+        /// The offending value.
+        value: u8,
+        /// Number of levels the matrix was sized for.
+        levels: u8,
+    },
+
     // -- gpu --
     /// A GPU cubecl matrix multiplication error from the cubek crate
     #[cfg(feature = "gpu")]
