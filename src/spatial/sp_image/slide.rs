@@ -182,6 +182,57 @@ impl SlideImage {
     pub fn level_count(&self) -> Result<u32, BixverseErrors> {
         Ok(self.slide.get_level_count()?)
     }
+
+    /// Describe the pyramid without pinning a level.
+    ///
+    /// Opens the slide, reads the level table and drops the handle again. Use
+    /// this to decide which `working_scale` is worth asking for before paying
+    /// for a read.
+    ///
+    /// ### Params
+    ///
+    /// * `path` - Slide file.
+    ///
+    /// ### Returns
+    ///
+    /// Per-level dimensions, per-level downsamples and the vendor string.
+    pub fn metadata<P: AsRef<Path>>(path: P) -> Result<SlideMetadata, BixverseErrors> {
+        let path = path.as_ref();
+        let vendor = OpenSlide::detect_vendor(path)?;
+        let slide = OpenSlide::new(path)?;
+
+        let level_dims: Vec<(u32, u32)> = slide
+            .get_all_level_dimensions()?
+            .into_iter()
+            .map(|s| (s.w, s.h))
+            .collect();
+        let downsamples = slide.get_all_level_downsample()?;
+
+        if level_dims.is_empty() || downsamples.is_empty() {
+            return Err(BixverseErrors::SlideNoLevels);
+        }
+
+        Ok(SlideMetadata {
+            vendor,
+            level_dims,
+            downsamples,
+        })
+    }
+}
+
+//////////////
+// Metadata //
+//////////////
+
+/// What OpenSlide reports about a pyramid, without any level being chosen.
+#[derive(Clone, Debug)]
+pub struct SlideMetadata {
+    /// Vendor string as OpenSlide detected it, e.g. `"aperio"`.
+    pub vendor: String,
+    /// Per-level `(width, height)`, level 0 first.
+    pub level_dims: Vec<(u32, u32)>,
+    /// Per-level downsample relative to level 0. Level 0 is 1.0.
+    pub downsamples: Vec<f64>,
 }
 
 impl ImageSource for SlideImage {

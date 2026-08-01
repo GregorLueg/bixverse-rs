@@ -357,6 +357,76 @@ pub fn open_image_source<P: AsRef<Path>>(
     }
 }
 
+//////////////
+// Metadata //
+//////////////
+
+/// What a file says about itself before anything gets read out of it.
+///
+/// A plain image has no pyramid, so it reports one level, a downsample of 1.0
+/// and no vendor. That keeps the shape identical across both backends and
+/// saves the caller a branch.
+#[derive(Clone, Debug)]
+pub struct ImageMetadata {
+    /// Width of level 0, in pixels.
+    pub width: u32,
+    /// Height of level 0, in pixels.
+    pub height: u32,
+    /// Number of pyramid levels. Always 1 for a plain image.
+    pub n_levels: usize,
+    /// Per-level `(width, height)`, level 0 first.
+    pub level_dims: Vec<(u32, u32)>,
+    /// Per-level downsample relative to level 0.
+    pub downsamples: Vec<f64>,
+    /// OpenSlide vendor string, `None` for a plain image.
+    pub vendor: Option<String>,
+}
+
+/// Describe an image file without decoding it.
+///
+/// Probes with OpenSlide first, same rule as [`open_image_source`]. The plain
+/// image path reads the header only, so this stays cheap on a 3 GB TIFF that
+/// [`WholeImage::new`] would happily pull into memory.
+///
+/// ### Params
+///
+/// * `path` - File to describe.
+///
+/// ### Returns
+///
+/// The metadata, or [`BixverseErrors::ImageSourceUnrecognised`] if neither
+/// backend can read the file.
+pub fn image_metadata<P: AsRef<Path>>(path: P) -> Result<ImageMetadata, BixverseErrors> {
+    let path = path.as_ref();
+
+    if SlideImage::is_slide(path) {
+        let meta = SlideImage::metadata(path)?;
+        let (width, height) = meta.level_dims[0];
+        return Ok(ImageMetadata {
+            width,
+            height,
+            n_levels: meta.level_dims.len(),
+            level_dims: meta.level_dims,
+            downsamples: meta.downsamples,
+            vendor: Some(meta.vendor),
+        });
+    }
+
+    let (width, height) =
+        image::image_dimensions(path).map_err(|_| BixverseErrors::ImageSourceUnrecognised {
+            path: path.display().to_string(),
+        })?;
+
+    Ok(ImageMetadata {
+        width,
+        height,
+        n_levels: 1,
+        level_dims: vec![(width, height)],
+        downsamples: vec![1.0],
+        vendor: None,
+    })
+}
+
 ///////////
 // Tests //
 ///////////
