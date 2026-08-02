@@ -679,6 +679,68 @@ pub enum BixverseErrors {
         index: usize,
     },
 
+    // -- spatial ingest --
+    /// The h5ad carries no `obsm/spatial` array.
+    ///
+    /// A bare `filtered_feature_bc_matrix.h5` hits this: the coordinates live
+    /// in a sibling `spatial/` directory rather than in the file, so there is
+    /// nothing to read and the answer is to go and ask for that directory.
+    #[cfg(feature = "spatial")]
+    #[error(
+        "Spatial: '{path}' not found. A file without it carries no coordinates; if this came from Space Ranger, load the run directory with load_visium() instead"
+    )]
+    SpatialObsmMissing {
+        /// The path that was looked for.
+        path: String,
+    },
+
+    /// `obsm/spatial` is not an N x 2 (or wider) array.
+    #[cfg(feature = "spatial")]
+    #[error("Spatial: '{path}' has shape {shape}, expected two dimensions with at least 2 columns")]
+    SpatialObsmShape {
+        /// The offending dataset.
+        path: String,
+        /// Its shape, as reported by HDF5.
+        shape: String,
+    },
+
+    /// A numeric HDF5 dataset is stored as something that is not a number.
+    ///
+    /// `obsm/spatial` is `int64` in every survey file and the scale factors mix
+    /// `int64` and `float64` inside one group, so the reader dispatches on the
+    /// descriptor rather than assuming. This is what is left over.
+    #[cfg(feature = "spatial")]
+    #[error("Spatial: dataset '{path}' has non-numeric type {dtype}")]
+    H5UnexpectedNumericType {
+        /// Path of the dataset.
+        path: String,
+        /// The type descriptor found.
+        dtype: String,
+    },
+
+    /// The requested `uns/spatial` library is not in the file.
+    #[cfg(feature = "spatial")]
+    #[error("Spatial: uns/spatial library '{library_id}' not found. Available: {available}")]
+    SpatialLibraryNotFound {
+        /// The library that was asked for.
+        library_id: String,
+        /// What the file actually holds.
+        available: String,
+    },
+
+    /// The file carries several `uns/spatial` libraries and none was named.
+    ///
+    /// Each library has its own scale factors and its own images, so picking
+    /// one arbitrarily would attach the wrong ones to the coordinates.
+    #[cfg(feature = "spatial")]
+    #[error(
+        "Spatial: uns/spatial holds several libraries and none was requested. Available: {available}"
+    )]
+    SpatialLibraryAmbiguous {
+        /// What the file holds.
+        available: String,
+    },
+
     /// `spots_to_keep` repeats a global spot index.
     ///
     /// The local index space is defined by position in the deduplicating
