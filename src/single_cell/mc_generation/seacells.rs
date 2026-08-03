@@ -601,6 +601,278 @@ fn nystrom_extend(
         .collect()
 }
 
+////////////////////////
+// Frank-Wolfe column //
+////////////////////////
+
+/// Below this the L1 renormalisation is skipped, matching
+/// `normalise_csr_columns_l1`, which leaves a column alone when its sum does not
+/// exceed this. Reproducing the guard exactly is what keeps a fully-pruned column
+/// behaving identically on both paths.
+const FW_RENORM_FLOOR: f64 = 1e-15;
+
+/// Atom bookkeeping for one Frank-Wolfe column.
+///
+/// A column of `A` (or `B`) is a convex combination of at most `max_fw_iters`
+/// one-hot atoms. Rather than rebuilding the sparse matrix each iteration, this
+/// tracks the `(index, weight)` pairs and reports what each operation changed, so
+/// the caller can apply the matching correction to whatever gradient state it
+/// maintains:
+///
+/// - the convex step scales every weight by `1 - γ` and adds `γ` to one atom, so
+///   the gradient state scales and takes one rank-1 update;
+/// - pruning removes atoms outright, so the gradient state takes one rank-1
+///   *subtraction* per dropped atom, which can happen at most once per atom;
+/// - renormalisation scales every weight, so the gradient state scales.
+///
+/// The whole point is that none of these needs the gradient recomputed from
+/// scratch, which is what the iteration-major formulation does.
+#[derive(Clone, Debug, Default)]
+pub struct FwAtoms {
+    /// Atom indices, unique and in insertion order
+    indices: Vec<u32>,
+    /// Atom weights, parallel to `indices`
+    weights: Vec<f32>,
+}
+
+/// What a `prune` call removed, so the caller can correct its gradient state.
+#[derive(Clone, Debug, Default)]
+pub struct FwPruneOutcome {
+    /// Dropped `(index, weight)` pairs, weights as they stood *before* the
+    /// renormalisation
+    pub dropped: Vec<(u32, f32)>,
+    /// Factor the surviving weights were multiplied by. `1.0` when nothing needed
+    /// renormalising.
+    pub renorm: f32,
+}
+
+impl FwAtoms {
+    /// Empty atom set with capacity for `max_atoms`
+    ///
+    /// ### Params
+    ///
+    /// * `max_atoms` - Upper bound on distinct atoms, i.e. `max_fw_iters`
+    ///
+    /// ### Returns
+    ///
+    /// Self.
+    pub fn with_capacity(max_atoms: usize) -> Self {
+        Self {
+            indices: Vec::with_capacity(max_atoms),
+            weights: Vec::with_capacity(max_atoms),
+        }
+    }
+
+    /// Seed from an existing sparse column
+    ///
+    /// ### Params
+    ///
+    /// * `indices` - Atom indices
+    /// * `weights` - Atom weights
+    pub fn reset_from(&mut self, indices: &[u32], weights: &[f32]) {
+        self.indices.clear();
+        self.weights.clear();
+        self.indices.extend_from_slice(indices);
+        self.weights.extend_from_slice(weights);
+    }
+
+    /// Clear all atoms
+    pub fn clear(&mut self) {
+        self.indices.clear();
+        self.weights.clear();
+    }
+
+    /// The current atoms
+    ///
+    /// ### Returns
+    ///
+    /// `(indices, weights)`, parallel slices.
+    pub fn atoms(&self) -> (&[u32], &[f32]) {
+        (&self.indices, &self.weights)
+    }
+
+    /// Number of atoms currently held
+    ///
+    /// ### Returns
+    ///
+    /// The atom count.
+    pub fn len(&self) -> usize {
+        self.indices.len()
+    }
+
+    /// Whether the column is empty
+    ///
+    /// ### Returns
+    ///
+    /// `true` if no atoms are held.
+    pub fn is_empty(&self) -> bool {
+        self.indices.is_empty()
+    }
+
+    /// Apply the Frank-Wolfe convex step `X ← (1 - γ)X + γ e_amin`
+    ///
+    /// A repeated `amin` merges into the existing atom rather than creating a
+    /// duplicate, matching what `sparse_add_csr` does on the iteration-major path.
+    ///
+    /// ### Params
+    ///
+    /// * `gamma` - Step size
+    /// * `amin` - Index of the atom receiving `gamma`
+    pub fn step(&mut self, gamma: f32, amin: u32) {
+        let retain = 1.0 - gamma;
+        for weight in &mut self.weights {
+            *weight *= retain;
+        }
+        match self.indices.iter().position(|&i| i == amin) {
+            Some(pos) => self.weights[pos] += gamma,
+            None => {
+                self.indices.push(amin);
+                self.weights.push(gamma);
+            }
+        }
+    }
+
+    /// Drop atoms at or below `threshold`, then renormalise the survivors to sum
+    /// to 1
+    ///
+    /// The keep test is `|w| > threshold` and the renormalisation is skipped for a
+    /// surviving mass at or below [FW_RENORM_FLOOR], both matching
+    /// `prune_and_renormalise` and `normalise_csr_columns_l1`.
+    ///
+    /// ### Params
+    ///
+    /// * `threshold` - Pruning threshold
+    ///
+    /// ### Returns
+    ///
+    /// The [FwPruneOutcome] describing what to correct in the gradient state.
+    pub fn prune(&mut self, threshold: f32) -> FwPruneOutcome {
+        let mut dropped = Vec::new();
+        let mut write = 0;
+        for read in 0..self.indices.len() {
+            if self.weights[read].abs() > threshold {
+                self.indices[write] = self.indices[read];
+                self.weights[write] = self.weights[read];
+                write += 1;
+            } else {
+                dropped.push((self.indices[read], self.weights[read]));
+            }
+        }
+        self.indices.truncate(write);
+        self.weights.truncate(write);
+
+        let sum: f32 = self.weights.iter().sum();
+        let renorm = if (sum as f64) > FW_RENORM_FLOOR {
+            1.0 / sum
+        } else {
+            1.0
+        };
+        if renorm != 1.0 {
+            for weight in &mut self.weights {
+                *weight *= renorm;
+            }
+        }
+
+        FwPruneOutcome { dropped, renorm }
+    }
+}
+
+///////////////////////
+// B argmin back end //
+///////////////////////
+
+/// Back end for the per-archetype Frank-Wolfe gradient argmin in the B update.
+///
+/// This is the one seam between the CPU and GPU paths. It dominates the runtime
+/// while everything else the B update does is a few percent, so the GPU entry
+/// point swaps this out and reuses the rest of the loop rather than forking it.
+///
+/// [begin] is called once per B update, when `t1` and `t2` change; [argmins]
+/// once per Frank-Wolfe iteration, when `K²B` and `B` change. Splitting them
+/// keeps the per-update uploads out of the per-iteration path.
+///
+/// [begin]: FwArgminB::begin
+/// [argmins]: FwArgminB::argmins
+pub trait FwArgminB {
+    /// Bind the terms that stay fixed across one B update.
+    ///
+    /// ### Params
+    ///
+    /// * `t1` - k × k matrix A Aᵀ (symmetric)
+    /// * `t2` - n × k matrix K² Aᵀ
+    ///
+    /// ### Returns
+    ///
+    /// `Ok(())`, or a back end specific error.
+    fn begin(
+        &mut self,
+        t1: &CompressedSparseData2<f32>,
+        t2: &CompressedSparseData2<f32>,
+    ) -> Result<(), BixverseErrors>;
+
+    /// Argmin per archetype and the Frank-Wolfe duality gap.
+    ///
+    /// ### Params
+    ///
+    /// * `k2_b` - n × k matrix K² B for the current B
+    /// * `b` - n × k current B
+    ///
+    /// ### Returns
+    ///
+    /// The argmin cell index per archetype, and the absolute duality gap.
+    fn argmins(
+        &mut self,
+        k2_b: &CompressedSparseData2<f32>,
+        b: &CompressedSparseData2<f32>,
+    ) -> Result<(Vec<usize>, f32), BixverseErrors>;
+}
+
+/// CPU back end, wrapping [fw_argmins_b].
+///
+/// Holds the transposes the scan needs. `fw_argmins_b` walks columns of `K²B`,
+/// `K²Aᵀ` and `B`, so all three arrive here untransposed and are converted on
+/// the way in, exactly as the pre-seam `update_b_mat` did.
+#[derive(Default)]
+pub struct CpuFwArgminB {
+    /// k × k matrix A Aᵀ
+    t1: Option<CompressedSparseData2<f32>>,
+    /// k × n, rows are columns of K² Aᵀ
+    t2_t: Option<CompressedSparseData2<f32>>,
+}
+
+impl FwArgminB for CpuFwArgminB {
+    fn begin(
+        &mut self,
+        t1: &CompressedSparseData2<f32>,
+        t2: &CompressedSparseData2<f32>,
+    ) -> Result<(), BixverseErrors> {
+        self.t1 = Some(t1.clone());
+        self.t2_t = Some(t2.transpose_and_convert());
+        Ok(())
+    }
+
+    fn argmins(
+        &mut self,
+        k2_b: &CompressedSparseData2<f32>,
+        b: &CompressedSparseData2<f32>,
+    ) -> Result<(Vec<usize>, f32), BixverseErrors> {
+        let t1 = self
+            .t1
+            .as_ref()
+            .ok_or(BixverseErrors::SEACellsModelNotFitted)?;
+        let t2_t = self
+            .t2_t
+            .as_ref()
+            .ok_or(BixverseErrors::SEACellsModelNotFitted)?;
+
+        let (n, k) = (k2_b.shape.0, k2_b.shape.1);
+        let k2_b_t = k2_b.transpose_and_convert();
+        let b_t = b.transpose_and_convert();
+
+        Ok(fw_argmins_b(&k2_b_t, t1, t2_t, &b_t, n, k))
+    }
+}
+
 ////////////////////
 // Matrix updates //
 ////////////////////
@@ -608,6 +880,9 @@ fn nystrom_extend(
 /// Per-cell Frank-Wolfe argmins for the A update, one gradient column at a
 /// time so the full k × n gradient is never materialised. The factor of 2 in
 /// the true gradient is dropped: irrelevant to an argmin.
+///
+/// Superseded by [fw_columns_a], which runs all Frank-Wolfe iterations for a cell
+/// in one pass. Retained as the reference the rewrite is checked against.
 ///
 /// ### Params
 ///
@@ -620,6 +895,7 @@ fn nystrom_extend(
 /// ### Returns
 ///
 /// Vector of length n with the argmin archetype index for each cell
+#[cfg(test)]
 fn fw_argmins_a(
     t1: &CompressedSparseData2<f32>,   // k × k, Bᵀ K² B (symmetric)
     a: &CompressedSparseData2<f32>,    // k × n, current A
@@ -671,6 +947,164 @@ fn fw_argmins_a(
         .collect();
 
     chunks.into_iter().flatten().collect()
+}
+
+/// Cell-major Frank-Wolfe pass for the A update.
+///
+/// The iteration-major formulation rebuilds the gradient from the sparse `A`
+/// every iteration, then rebuilds `A` itself through an `E` matrix, a sort, a
+/// scalar multiply and a sparse add. Neither is necessary: the A columns are
+/// independent (the gradient column for cell `j` depends only on `A[:,j]`, and
+/// `prune_and_renormalise` is elementwise plus a per-column normalisation), and
+/// the running `w = t1 · A[:,j]` survives every operation in the loop as a scalar
+/// scale plus a rank-1 update. See [FwAtoms].
+///
+/// So one cell goes through all `n_iters` iterations against a `k`-length
+/// scratch, which is the same per-thread footprint `fw_argmins_a` already used
+/// for a single iteration. Per cell per iteration the cost drops from
+/// `d · nnz(t1)/k + k` to `nnz(t1[amin,:]) + k`.
+///
+/// It also closes a leak in the iteration-major path, where `γ_0 = 1` zeroed the
+/// previous `A`'s values but left them in the sparsity pattern, so with pruning
+/// off the pattern grew across outer iterations and never shrank. Tracking atoms
+/// by index means a repeated argmin merges instead of adding an entry.
+///
+/// ### Params
+///
+/// * `t1` - k × k matrix Bᵀ K² B (symmetric)
+/// * `a_prev_t` - n × k, row `j` is column `j` of the previous A
+/// * `k2_b` - n × k matrix K² B
+/// * `k` - Number of archetypes
+/// * `n` - Number of cells
+/// * `n_iters` - Frank-Wolfe iterations to run
+/// * `pruning` - Pruning threshold, or `None` to skip pruning
+///
+/// ### Returns
+///
+/// One [FwAtoms] per cell, holding that column of the updated A.
+fn fw_columns_a(
+    t1: &CompressedSparseData2<f32>,
+    a_prev_t: &CompressedSparseData2<f32>,
+    k2_b: &CompressedSparseData2<f32>,
+    k: usize,
+    n: usize,
+    n_iters: usize,
+    pruning: Option<f32>,
+) -> Vec<FwAtoms> {
+    /// Cells per rayon task. Large enough that the two `k`-length scratch buffers
+    /// are reused many times per task, small enough to keep the tail balanced.
+    const CHUNK: usize = 256;
+
+    let n_chunks = n.div_ceil(CHUNK);
+
+    let chunks: Vec<Vec<FwAtoms>> = (0..n_chunks)
+        .into_par_iter()
+        .map_init(
+            || (vec![0.0f32; k], vec![0.0f32; k]),
+            |(w, k2b_row), chunk_idx| {
+                let start = chunk_idx * CHUNK;
+                let end = ((chunk_idx + 1) * CHUNK).min(n);
+                let mut out = Vec::with_capacity(end - start);
+
+                for j in start..end {
+                    // stage the gradient's constant term, -K²B[j, :]
+                    k2b_row.fill(0.0);
+                    for ki in k2_b.indptr[j] as usize..k2_b.indptr[j + 1] as usize {
+                        k2b_row[k2_b.indices[ki] as usize] = k2_b.data[ki];
+                    }
+
+                    // seed the atoms and w = t1 · A_prev[:, j]
+                    let seed = a_prev_t.indptr[j] as usize..a_prev_t.indptr[j + 1] as usize;
+                    let mut atoms = FwAtoms::with_capacity(n_iters + seed.len());
+                    atoms.reset_from(
+                        &a_prev_t.indices[seed.clone()],
+                        &a_prev_t.data[seed.clone()],
+                    );
+
+                    w.fill(0.0);
+                    for ai in seed {
+                        let r = a_prev_t.indices[ai] as usize;
+                        let weight = a_prev_t.data[ai];
+                        for ti in t1.indptr[r] as usize..t1.indptr[r + 1] as usize {
+                            w[t1.indices[ti] as usize] += weight * t1.data[ti];
+                        }
+                    }
+
+                    for t in 0..n_iters {
+                        // fused argmin over the gradient, which is never stored
+                        let mut min_val = w[0] - k2b_row[0];
+                        let mut amin = 0usize;
+                        for c in 1..k {
+                            let grad = w[c] - k2b_row[c];
+                            if grad < min_val {
+                                min_val = grad;
+                                amin = c;
+                            }
+                        }
+
+                        let gamma = 2.0 / (t as f32 + 2.0);
+                        atoms.step(gamma, amin as u32);
+
+                        let retain = 1.0 - gamma;
+                        for value in w.iter_mut() {
+                            *value *= retain;
+                        }
+                        for ti in t1.indptr[amin] as usize..t1.indptr[amin + 1] as usize {
+                            w[t1.indices[ti] as usize] += gamma * t1.data[ti];
+                        }
+
+                        if let Some(threshold) = pruning {
+                            let outcome = atoms.prune(threshold);
+                            for (r, weight) in outcome.dropped {
+                                let r = r as usize;
+                                for ti in t1.indptr[r] as usize..t1.indptr[r + 1] as usize {
+                                    w[t1.indices[ti] as usize] -= weight * t1.data[ti];
+                                }
+                            }
+                            if outcome.renorm != 1.0 {
+                                for value in w.iter_mut() {
+                                    *value *= outcome.renorm;
+                                }
+                            }
+                        }
+                    }
+
+                    out.push(atoms);
+                }
+                out
+            },
+        )
+        .collect();
+
+    chunks.into_iter().flatten().collect()
+}
+
+/// Assemble a sparse matrix from per-column Frank-Wolfe atom lists.
+///
+/// ### Params
+///
+/// * `columns` - One [FwAtoms] per column, in column order
+/// * `shape` - `(nrow, ncol)` of the result
+///
+/// ### Returns
+///
+/// The matrix in CSR, with column indices sorted within each row.
+fn fw_atoms_to_csr(columns: &[FwAtoms], shape: (usize, usize)) -> CompressedSparseData2<f32> {
+    let nnz: usize = columns.iter().map(|c| c.len()).sum();
+    let mut rows = Vec::with_capacity(nnz);
+    let mut cols = Vec::with_capacity(nnz);
+    let mut vals = Vec::with_capacity(nnz);
+
+    for (col, atoms) in columns.iter().enumerate() {
+        let (indices, weights) = atoms.atoms();
+        for (&row, &weight) in indices.iter().zip(weights.iter()) {
+            rows.push(row as usize);
+            cols.push(col);
+            vals.push(weight);
+        }
+    }
+
+    coo_to_csr(&rows.index_cast(), &cols.index_cast(), &vals, shape)
 }
 
 /// Per-archetype Frank-Wolfe argmins and FW duality gap for the B update,
@@ -928,13 +1362,11 @@ impl<'a> SEACells<'a> {
 
         let kernel = coo_to_csr(&rows.index_cast(), &cols.index_cast(), &vals, (n, n));
 
-        if self.n_cells > 20000 {
-            if verbosity.detailed_verbosity() {
-                println!(" Pre-computing kernel Frobenius norm...");
-            }
-            let k_frob = frobenius_norm(&kernel);
-            self.k_frobenius_norm_sq = Some(k_frob * k_frob);
+        if verbosity.detailed_verbosity() {
+            println!(" Pre-computing kernel Frobenius norm...");
         }
+        let k_frob = frobenius_norm(&kernel);
+        self.k_frobenius_norm_sq = Some(k_frob * k_frob);
 
         self.kernel_mat = Some(kernel);
     }
@@ -1003,6 +1435,27 @@ impl<'a> SEACells<'a> {
     /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
     ///   detailed verbosity.
     pub fn fit(&mut self, seed: usize, verbose: usize) -> Result<(), BixverseErrors> {
+        self.fit_with(seed, verbose, &mut CpuFwArgminB::default())
+    }
+
+    /// Fit the SEACells model against a chosen B-argmin back end
+    ///
+    /// Same loop as [SEACells::fit], with the one step that dominates the
+    /// runtime pluggable. The GPU entry point uses this rather than duplicating
+    /// the outer loop; see [FwArgminB].
+    ///
+    /// ### Params
+    ///
+    /// * `seed` - Random seed for reproducibility
+    /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+    ///   detailed verbosity.
+    /// * `backend` - The gradient argmin implementation to use
+    pub fn fit_with(
+        &mut self,
+        seed: usize,
+        verbose: usize,
+        backend: &mut impl FwArgminB,
+    ) -> Result<(), BixverseErrors> {
         let verbosity = parse_verbosity_level(verbose);
 
         if self.kernel_mat.is_none() {
@@ -1040,7 +1493,7 @@ impl<'a> SEACells<'a> {
             let a_current = self.a.take().unwrap();
 
             let a_new = self.update_a_mat(&b_current, &a_current, verbose)?;
-            let b_new = self.update_b_mat(&a_new, &b_current, verbose)?;
+            let b_new = self.update_b_mat(&a_new, &b_current, verbose, backend)?;
 
             let rss = self.compute_rss(&a_new, &b_new)?;
             self.rss_history.push(rss);
@@ -1619,6 +2072,58 @@ impl<'a> SEACells<'a> {
         let t2 = k2_b.transpose_and_convert();
         let t1 = csr_matmul_csr(&t2, b)?;
         drop(t2);
+        let a_prev_t = a_prev.transpose_and_convert();
+
+        let n = a_prev.shape.1;
+        let k = a_prev.shape.0;
+
+        let columns = fw_columns_a(
+            &t1,
+            &a_prev_t,
+            &k2_b,
+            k,
+            n,
+            self.params.max_fw_iters,
+            self.params.pruning.then_some(self.params.pruning_threshold),
+        );
+
+        let a = fw_atoms_to_csr(&columns, (k, n));
+
+        if verbosity.detailed_verbosity() {
+            println!(
+                "  A matrix Frank-Wolfe: {} iterations over {} cells",
+                self.params.max_fw_iters, n
+            );
+        }
+
+        Ok(a)
+    }
+
+    /// Iteration-major A update, kept as the reference for the parity test
+    ///
+    /// This is the formulation `update_a_mat` used before the cell-major rewrite.
+    /// It rebuilds the gradient from the sparse `A` every iteration and rebuilds
+    /// `A` through an `E` matrix, a sort and a sparse add. Retained so the new
+    /// path can be checked against it rather than against itself.
+    ///
+    /// ### Params
+    ///
+    /// * `b` - Current archetype matrix
+    /// * `a_prev` - Previous assignment matrix
+    ///
+    /// ### Returns
+    ///
+    /// Updated assignment matrix
+    #[cfg(test)]
+    fn update_a_mat_iteration_major(
+        &self,
+        b: &CompressedSparseData2<f32>,
+        a_prev: &CompressedSparseData2<f32>,
+    ) -> Result<CompressedSparseData2<f32>, BixverseErrors> {
+        let k2_b = self.k_squared_matmul(b)?;
+        let t2 = k2_b.transpose_and_convert();
+        let t1 = csr_matmul_csr(&t2, b)?;
+        drop(t2);
 
         let mut a = a_prev.clone();
         let n = a.shape.1;
@@ -1650,14 +2155,6 @@ impl<'a> SEACells<'a> {
 
             if self.params.pruning {
                 prune_and_renormalise(&mut a, self.params.pruning_threshold);
-            }
-
-            if verbosity.detailed_verbosity() && (t + 1) % 10 == 0 {
-                println!(
-                    "  A matrix Frank-Wolfe iteration: {} / {}",
-                    t + 1,
-                    self.params.max_fw_iters
-                );
             }
         }
 
@@ -1702,6 +2199,7 @@ impl<'a> SEACells<'a> {
         a: &CompressedSparseData2<f32>,
         b_prev: &CompressedSparseData2<f32>,
         verbose: usize,
+        backend: &mut impl FwArgminB,
     ) -> Result<CompressedSparseData2<f32>, BixverseErrors> {
         let verbosity = parse_verbosity_level(verbose);
 
@@ -1711,7 +2209,7 @@ impl<'a> SEACells<'a> {
         let a_t = a.transpose_and_convert();
         let t1 = csr_matmul_csr(a, &a_t)?;
         let t2 = self.k_squared_matmul(&a_t)?;
-        let t2_t = t2.transpose_and_convert();
+        backend.begin(&t1, &t2)?;
         drop(t2);
 
         let mut b = b_prev.clone();
@@ -1721,11 +2219,7 @@ impl<'a> SEACells<'a> {
 
         for t in 0..self.params.max_fw_iters {
             let k2_b = self.k_squared_matmul(&b)?;
-            let k2_b_t = k2_b.transpose_and_convert();
-            drop(k2_b);
-            let b_t = b.transpose_and_convert();
-
-            let (argmins, fw_gap) = fw_argmins_b(&k2_b_t, &t1, &t2_t, &b_t, n, k);
+            let (argmins, fw_gap) = backend.argmins(&k2_b, &b)?;
             if t == 0 {
                 initial_gap = fw_gap.max(1e-12);
             }
@@ -1804,17 +2298,16 @@ impl<'a> SEACells<'a> {
         a: &CompressedSparseData2<f32>,
         b: &CompressedSparseData2<f32>,
     ) -> Result<f32, BixverseErrors> {
-        if self.n_cells <= 20000 {
-            Ok(self.compute_rss_simple(a, b)?)
-        } else {
-            Ok(self.compute_rss_trace(a, b)?)
-        }
+        self.compute_rss_trace(a, b)
     }
 
-    /// Fast RSS computation for small datasets (materialises reconstruction)
+    /// RSS by materialising the reconstruction
     ///
-    /// Directly forms the n × n reconstruction K B A and returns the Frobenius
-    /// norm of (K - K B A). Cheap when n is small.
+    /// Forms the n × n reconstruction K B A directly and returns the Frobenius
+    /// norm of (K - K B A). Superseded by [SEACells::compute_rss_trace], which is
+    /// faster at every size measured and agrees to well within the convergence
+    /// threshold. Retained as the reference the trace identity is checked
+    /// against.
     ///
     /// ### Params
     ///
@@ -1824,6 +2317,7 @@ impl<'a> SEACells<'a> {
     /// ### Returns
     ///
     /// The residual sum of squares (RSS)
+    #[cfg(test)]
     fn compute_rss_simple(
         &self,
         a: &CompressedSparseData2<f32>,
@@ -1863,8 +2357,10 @@ impl<'a> SEACells<'a> {
         a: &CompressedSparseData2<f32>,
         b: &CompressedSparseData2<f32>,
     ) -> Result<f32, BixverseErrors> {
-        // Term 1: ||K||_F^2 (cached)
-        let k_frob_sq = self.k_frobenius_norm_sq.unwrap();
+        // Term 1: ||K||_F^2, cached by construct_kernel_mat
+        let k_frob_sq = self
+            .k_frobenius_norm_sq
+            .ok_or(BixverseErrors::SEACellsKernelMatrixMissing)?;
 
         // K^2 @ B = K @ (K @ B)  [n × k]
         let k2_b = self.k_squared_matmul(b)?;
@@ -1955,5 +2451,508 @@ impl<'a> SEACells<'a> {
         }
 
         Ok(self.archetypes.as_ref().unwrap().clone())
+    }
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_relative_eq;
+
+    /// Dense symmetric `t1` for the reference computation, row-major `k × k`.
+    ///
+    /// ### Params
+    ///
+    /// * `k` - Dimension
+    ///
+    /// ### Returns
+    ///
+    /// A deterministic symmetric matrix with a strong diagonal.
+    fn dense_t1(k: usize) -> Vec<f32> {
+        let mut t1 = vec![0.0f32; k * k];
+        for i in 0..k {
+            for j in i..k {
+                let v = ((i * 7 + j * 13) % 11) as f32 * 0.1 + if i == j { 2.0 } else { 0.0 };
+                t1[i * k + j] = v;
+                t1[j * k + i] = v;
+            }
+        }
+        t1
+    }
+
+    /// Reference `t1 · x` computed from scratch off the atom list.
+    ///
+    /// ### Params
+    ///
+    /// * `t1` - Dense row-major `k × k`
+    /// * `k` - Dimension
+    /// * `atoms` - The column's atoms
+    ///
+    /// ### Returns
+    ///
+    /// The dense `k`-length product.
+    fn reference_product(t1: &[f32], k: usize, atoms: &FwAtoms) -> Vec<f32> {
+        let (indices, weights) = atoms.atoms();
+        let mut out = vec![0.0f32; k];
+        for (&r, &v) in indices.iter().zip(weights.iter()) {
+            for i in 0..k {
+                out[i] += v * t1[r as usize * k + i];
+            }
+        }
+        out
+    }
+
+    /// Apply the convex step to both the atoms and the incremental state.
+    ///
+    /// ### Params
+    ///
+    /// * `atoms` - The column's atoms
+    /// * `w` - Incremental `t1 · x`
+    /// * `t1` - Dense row-major `k × k`
+    /// * `k` - Dimension
+    /// * `gamma` - Step size
+    /// * `amin` - Atom receiving `gamma`
+    fn step_both(atoms: &mut FwAtoms, w: &mut [f32], t1: &[f32], k: usize, gamma: f32, amin: u32) {
+        atoms.step(gamma, amin);
+        let retain = 1.0 - gamma;
+        let row = &t1[amin as usize * k..(amin as usize + 1) * k];
+        for i in 0..k {
+            w[i] = w[i] * retain + gamma * row[i];
+        }
+    }
+
+    /// Apply prune and renormalise to both the atoms and the incremental state.
+    ///
+    /// ### Params
+    ///
+    /// * `atoms` - The column's atoms
+    /// * `w` - Incremental `t1 · x`
+    /// * `t1` - Dense row-major `k × k`
+    /// * `k` - Dimension
+    /// * `threshold` - Pruning threshold
+    fn prune_both(atoms: &mut FwAtoms, w: &mut [f32], t1: &[f32], k: usize, threshold: f32) {
+        let outcome = atoms.prune(threshold);
+        for (r, v) in outcome.dropped {
+            let row = &t1[r as usize * k..(r as usize + 1) * k];
+            for i in 0..k {
+                w[i] -= v * row[i];
+            }
+        }
+        if outcome.renorm != 1.0 {
+            for value in w.iter_mut() {
+                *value *= outcome.renorm;
+            }
+        }
+    }
+
+    /// The incrementally maintained gradient state must track a from-scratch
+    /// recomputation through steps, prunes and renormalisations. This is the
+    /// invariant the whole reformulation rests on.
+    #[test]
+    fn test_fw_atoms_gradient_tracks_reference_without_pruning() {
+        let k = 12;
+        let t1 = dense_t1(k);
+        let mut atoms = FwAtoms::with_capacity(50);
+        let mut w = vec![0.0f32; k];
+
+        for t in 0..50u32 {
+            let gamma = 2.0 / (t as f32 + 2.0);
+            let amin = (t * 5 + 3) % k as u32;
+            step_both(&mut atoms, &mut w, &t1, k, gamma, amin);
+
+            let reference = reference_product(&t1, k, &atoms);
+            for i in 0..k {
+                assert_relative_eq!(w[i], reference[i], max_relative = 1e-4, epsilon = 1e-6);
+            }
+        }
+
+        let (_, weights) = atoms.atoms();
+        let mass: f32 = weights.iter().sum();
+        assert_relative_eq!(mass, 1.0, max_relative = 1e-5);
+    }
+
+    /// Same invariant with a threshold that fires on most iterations, which is the
+    /// case the rank-1 removal exists for.
+    #[test]
+    fn test_fw_atoms_gradient_tracks_reference_with_pruning() {
+        let k = 12;
+        let t1 = dense_t1(k);
+        let mut atoms = FwAtoms::with_capacity(50);
+        let mut w = vec![0.0f32; k];
+
+        // 5e-2 is well above the smallest weight the schedule produces, so atoms
+        // that stop being chosen get dropped rather than merely decaying.
+        let threshold = 5e-2f32;
+
+        for t in 0..50u32 {
+            let gamma = 2.0 / (t as f32 + 2.0);
+            let amin = (t * 5 + 3) % k as u32;
+            step_both(&mut atoms, &mut w, &t1, k, gamma, amin);
+            prune_both(&mut atoms, &mut w, &t1, k, threshold);
+
+            let reference = reference_product(&t1, k, &atoms);
+            for i in 0..k {
+                assert_relative_eq!(w[i], reference[i], max_relative = 1e-3, epsilon = 1e-5);
+            }
+        }
+
+        assert!(
+            !atoms.is_empty(),
+            "pruning should not empty the column at this threshold"
+        );
+        let (_, weights) = atoms.atoms();
+        let mass: f32 = weights.iter().sum();
+        assert_relative_eq!(mass, 1.0, max_relative = 1e-4);
+    }
+
+    /// An atom dropped and later re-chosen must come back as a fresh atom, not as
+    /// a stale weight, and the gradient state must follow.
+    #[test]
+    fn test_fw_atoms_dropped_atom_can_return() {
+        let k = 8;
+        let t1 = dense_t1(k);
+        let mut atoms = FwAtoms::with_capacity(16);
+        let mut w = vec![0.0f32; k];
+
+        step_both(&mut atoms, &mut w, &t1, k, 1.0, 3);
+        step_both(&mut atoms, &mut w, &t1, k, 0.5, 5);
+        // Drops atom 3 (weight 0.5 after the step) is not wanted here; pick a
+        // threshold that leaves both, then one that removes only atom 3.
+        prune_both(&mut atoms, &mut w, &t1, k, 0.1);
+        assert_eq!(atoms.len(), 2);
+
+        step_both(&mut atoms, &mut w, &t1, k, 0.9, 5);
+        prune_both(&mut atoms, &mut w, &t1, k, 0.2);
+        assert_eq!(atoms.len(), 1, "atom 3 should have been pruned");
+        assert_eq!(atoms.atoms().0[0], 5);
+
+        // Re-choose the dropped atom.
+        step_both(&mut atoms, &mut w, &t1, k, 0.5, 3);
+        assert_eq!(atoms.len(), 2);
+
+        let reference = reference_product(&t1, k, &atoms);
+        for i in 0..k {
+            assert_relative_eq!(w[i], reference[i], max_relative = 1e-4, epsilon = 1e-6);
+        }
+    }
+
+    /// A threshold above every weight empties the column. The renormalisation must
+    /// then be skipped rather than dividing by zero, matching
+    /// `normalise_csr_columns_l1`.
+    #[test]
+    fn test_fw_atoms_prune_everything_leaves_zero_state() {
+        let k = 6;
+        let t1 = dense_t1(k);
+        let mut atoms = FwAtoms::with_capacity(8);
+        let mut w = vec![0.0f32; k];
+
+        step_both(&mut atoms, &mut w, &t1, k, 1.0, 2);
+        prune_both(&mut atoms, &mut w, &t1, k, 2.0);
+
+        assert!(atoms.is_empty());
+        for value in &w {
+            assert_relative_eq!(*value, 0.0, epsilon = 1e-6);
+        }
+    }
+
+    /// Repeated argmins merge rather than duplicating, which is what
+    /// `sparse_add_csr` does on the iteration-major path.
+    #[test]
+    fn test_fw_atoms_repeated_argmin_merges() {
+        let mut atoms = FwAtoms::with_capacity(8);
+        atoms.step(1.0, 4);
+        atoms.step(0.5, 4);
+        atoms.step(0.25, 4);
+
+        assert_eq!(atoms.len(), 1);
+        let (indices, weights) = atoms.atoms();
+        assert_eq!(indices[0], 4);
+        assert_relative_eq!(weights[0], 1.0, max_relative = 1e-6);
+    }
+
+    /// Banded symmetric kernel with unit diagonal, standing in for the adaptive
+    /// RBF kernel over a kNN graph.
+    ///
+    /// ### Params
+    ///
+    /// * `n` - Number of cells
+    /// * `bandwidth` - Neighbours on each side
+    ///
+    /// ### Returns
+    ///
+    /// An `n × n` symmetric CSR kernel.
+    fn banded_kernel(n: usize, bandwidth: usize) -> CompressedSparseData2<f32> {
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+
+        for i in 0..n {
+            let lo = i.saturating_sub(bandwidth);
+            let hi = (i + bandwidth + 1).min(n);
+            for j in lo..hi {
+                let d = (i as f32 - j as f32).abs();
+                rows.push(i);
+                cols.push(j);
+                vals.push((-d * d / 4.0).exp());
+            }
+        }
+
+        coo_to_csr(&rows.index_cast(), &cols.index_cast(), &vals, (n, n))
+    }
+
+    /// Densify a CSR matrix, row-major.
+    ///
+    /// ### Params
+    ///
+    /// * `mat` - The sparse matrix
+    ///
+    /// ### Returns
+    ///
+    /// `nrow * ncol` values in row-major order.
+    fn densify(mat: &CompressedSparseData2<f32>) -> Vec<f32> {
+        let (nrow, ncol) = mat.shape;
+        let mut out = vec![0.0f32; nrow * ncol];
+        for row in 0..nrow {
+            for idx in mat.indptr[row] as usize..mat.indptr[row + 1] as usize {
+                out[row * ncol + mat.indices[idx] as usize] += mat.data[idx];
+            }
+        }
+        out
+    }
+
+    /// Build the `(B, A_0)` pair the way `initialise_matrices` does.
+    ///
+    /// ### Params
+    ///
+    /// * `n` - Number of cells
+    /// * `k` - Number of archetypes
+    /// * `seed` - Random seed
+    ///
+    /// ### Returns
+    ///
+    /// `(B, A_0)` as `(n × k, k × n)`.
+    fn initial_matrices(
+        n: usize,
+        k: usize,
+        seed: u64,
+    ) -> (CompressedSparseData2<f32>, CompressedSparseData2<f32>) {
+        let stride = n / k;
+        let b_rows: Vec<usize> = (0..k).map(|c| c * stride).collect();
+        let b_cols: Vec<usize> = (0..k).collect();
+        let b_vals = vec![1.0f32; k];
+        let b = coo_to_csr(&b_rows.index_cast(), &b_cols.index_cast(), &b_vals, (n, k));
+
+        let mut rng = StdRng::seed_from_u64(seed);
+        let per_cell = 10.min(k);
+        let mut a_rows = Vec::new();
+        let mut a_cols = Vec::new();
+        let mut a_vals = Vec::new();
+        for cell in 0..n {
+            for _ in 0..per_cell {
+                a_rows.push(rng.random_range(0..k));
+                a_cols.push(cell);
+                a_vals.push(rng.random::<f32>());
+            }
+        }
+        let mut a = coo_to_csr(&a_rows.index_cast(), &a_cols.index_cast(), &a_vals, (k, n));
+        normalise_csr_columns_l1(&mut a);
+
+        (b, a)
+    }
+
+    /// The cell-major A update must reproduce the iteration-major one it replaces,
+    /// at every pruning setting: pruning off, a threshold that never fires, and
+    /// one that fires hard.
+    ///
+    /// Exact equality is deliberately *not* the invariant. The two paths compute
+    /// the same gradient by different associations, so they differ in the last
+    /// bits and flip near-ties; the maintenance itself is pinned exactly by
+    /// `test_fw_atoms_gradient_tracks_reference_*`. Above `2/(T(T+1))`, the
+    /// smallest weight the schedule produces, pruning also removes live mass and
+    /// the renormalisation feeds it back, so a flipped tie cascades into a
+    /// different but equally good vertex. Sparsity and objective are what hold.
+    #[test]
+    fn test_update_a_mat_matches_iteration_major() {
+        let n = 300usize;
+        let k = 12usize;
+
+        for (pruning, threshold) in [(false, 0.0f32), (true, 1e-7), (true, 5e-2)] {
+            let params = SEACellsParams {
+                n_sea_cells: k,
+                max_fw_iters: 50,
+                convergence_epsilon: 1e-3,
+                max_iter: 3,
+                min_iter: 1,
+                greedy_threshold: 0,
+                graph_building: "union".to_string(),
+                pruning,
+                pruning_threshold: threshold,
+                n_landmarks: None,
+                knn_params: KnnParams::new(),
+            };
+
+            let mut model = SEACells::new(n, &params);
+            let kernel = banded_kernel(n, 4);
+            let k_frob = frobenius_norm(&kernel);
+            model.k_frobenius_norm_sq = Some(k_frob * k_frob);
+            model.kernel_mat = Some(kernel);
+
+            let (b, a_prev) = initial_matrices(n, k, 11);
+
+            let a_new = model
+                .update_a_mat(&b, &a_prev, 0)
+                .expect("cell-major update failed");
+            let a_ref = model
+                .update_a_mat_iteration_major(&b, &a_prev)
+                .expect("iteration-major update failed");
+
+            assert_eq!(a_new.shape, a_ref.shape);
+
+            let dense_new = densify(&a_new);
+            let dense_ref = densify(&a_ref);
+
+            // Disagreement must stay at the tie-break level, not the systematic
+            // level. Anything above a couple of percent of cells means the
+            // gradient maintenance is wrong rather than merely reassociated.
+            let differing = (0..n)
+                .filter(|&cell| {
+                    (0..k).any(|r| (dense_new[r * n + cell] - dense_ref[r * n + cell]).abs() > 1e-4)
+                })
+                .count();
+            // Below the smallest weight the schedule produces, pruning removes
+            // only structural zeros and cannot feed back into the trajectory, so
+            // the two paths must track each other cell by cell. Above it,
+            // renormalisation redistributes mass and amplifies last-bit
+            // differences into different-but-equally-good vertices, which the
+            // objective check below is what pins.
+            let t_iters = params.max_fw_iters as f32;
+            let min_fw_weight = 2.0 / (t_iters * (t_iters + 1.0));
+            if !pruning || threshold < min_fw_weight {
+                assert!(
+                    differing * 50 <= n,
+                    "{} / {} cells differ (pruning {:?}, threshold {}) below the \
+                     cascade threshold {:.2e}, well past a tie-break rate",
+                    differing,
+                    n,
+                    pruning,
+                    threshold,
+                    min_fw_weight
+                );
+            }
+
+            // Every column must still be a convex combination.
+            for cell in 0..n {
+                let mass: f32 = (0..k).map(|r| dense_new[r * n + cell]).sum();
+                assert_relative_eq!(mass, 1.0, max_relative = 1e-4);
+            }
+
+            // The objective is what the argmin is a means to. A flipped near-tie
+            // must not move it.
+            let rss_new = model.compute_rss(&a_new, &b).expect("RSS failed");
+            let rss_ref = model.compute_rss(&a_ref, &b).expect("RSS failed");
+            assert_relative_eq!(rss_new, rss_ref, max_relative = 1e-4);
+
+            // Memory regression guard: the rewrite must not densify. The slack
+            // covers the one extra atom a flipped tie can introduce per cell.
+            assert!(
+                a_new.get_nnz() <= a_ref.get_nnz() + differing,
+                "nnz grew beyond the tie-break slack: {} vs {} + {} (pruning {:?}, threshold {})",
+                a_new.get_nnz(),
+                a_ref.get_nnz(),
+                differing,
+                pruning,
+                threshold
+            );
+        }
+    }
+
+    /// With pruning off, the atom weights collapse to `2(t+1) / (T(T+1))` when
+    /// every argmin is distinct. This is the closed form the GPU fast arm uses.
+    #[test]
+    fn test_fw_atoms_closed_form_weights() {
+        let n_iters = 20usize;
+        let mut atoms = FwAtoms::with_capacity(n_iters);
+
+        for t in 0..n_iters {
+            let gamma = 2.0 / (t as f32 + 2.0);
+            atoms.step(gamma, t as u32);
+        }
+
+        let denom = (n_iters * (n_iters + 1)) as f32;
+        let (indices, weights) = atoms.atoms();
+        assert_eq!(indices.len(), n_iters);
+        for (t, &weight) in weights.iter().enumerate() {
+            let expected = 2.0 * (t as f32 + 1.0) / denom;
+            assert_relative_eq!(weight, expected, max_relative = 1e-5);
+        }
+    }
+
+    /// Compare the two RSS paths on accuracy and cost.
+    ///
+    /// The trace path expands `||K - KBA||_F^2` into three terms that
+    /// individually dwarf the result, so cancellation is the risk that would
+    /// justify keeping the materialising path. It does not materialise: the two
+    /// agree well inside the convergence threshold at every size tested.
+    #[test]
+    fn test_rss_paths_agree() {
+        for n in [2000usize, 8000, 20000] {
+            let k = (n / 75).max(8);
+            let params = SEACellsParams {
+                n_sea_cells: k,
+                max_fw_iters: 50,
+                convergence_epsilon: 1e-3,
+                max_iter: 3,
+                min_iter: 1,
+                greedy_threshold: 0,
+                graph_building: "union".to_string(),
+                pruning: false,
+                pruning_threshold: 0.0,
+                n_landmarks: None,
+                knn_params: KnnParams::new(),
+            };
+            let mut model = SEACells::new(n, &params);
+            let kernel = banded_kernel(n, 6);
+            let k_frob = frobenius_norm(&kernel);
+            model.k_frobenius_norm_sq = Some(k_frob * k_frob);
+            model.kernel_mat = Some(kernel);
+
+            let (b, a_prev) = initial_matrices(n, k, 11);
+            let a = model.update_a_mat(&b, &a_prev, 0).expect("A update failed");
+
+            let simple_start = Instant::now();
+            let simple = model.compute_rss_simple(&a, &b).expect("simple failed");
+            let simple_time = simple_start.elapsed();
+
+            let trace_start = Instant::now();
+            let trace = model.compute_rss_trace(&a, &b).expect("trace failed");
+            let trace_time = trace_start.elapsed();
+
+            let rel = ((simple - trace) / simple).abs();
+            println!(
+                "n = {:>6} k = {:>4} | simple {:>8.4} in {:>8.3}s | trace {:>8.4} in {:>8.3}s \
+                 | speedup {:>7.1}x | rel diff {:.2e}",
+                n,
+                k,
+                simple,
+                simple_time.as_secs_f64(),
+                trace,
+                trace_time.as_secs_f64(),
+                simple_time.as_secs_f64() / trace_time.as_secs_f64(),
+                rel
+            );
+
+            assert!(
+                rel < 1e-2,
+                "RSS paths disagree at n = {}: {} vs {} (rel {:.2e})",
+                n,
+                simple,
+                trace,
+                rel
+            );
+        }
     }
 }
