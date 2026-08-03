@@ -119,7 +119,7 @@ fn test_seacells_gpu_matches_cpu() {
             .expect("assignments failed");
         let cpu_rss = cpu_model.get_rss_history().to_vec();
 
-        let (gpu_assign, gpu_metacells, gpu_rss) = seacells_fit_gpu::<WgpuRuntime>(
+        let (gpu_assign, gpu_metacells, _, gpu_rss) = seacells_fit_gpu::<WgpuRuntime>(
             embedding.as_ref(),
             &knn_indices,
             &knn_distances,

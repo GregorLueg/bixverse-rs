@@ -379,7 +379,7 @@ fn run_end_to_end(n: usize, k: usize, knn: usize, device: &WgpuDevice) {
     let cpu_rss = cpu_model.get_rss_history().to_vec();
 
     let gpu_start = Instant::now();
-    let (gpu_assign, _, gpu_rss) = seacells_fit_gpu::<WgpuRuntime>(
+    let (gpu_assign, _, _, gpu_rss) = seacells_fit_gpu::<WgpuRuntime>(
         embedding.as_ref(),
         &knn_indices,
         &knn_distances,
@@ -452,7 +452,7 @@ fn main() {
             let knn_distances = knn_distances.expect("distances requested");
 
             let start = Instant::now();
-            let (_, _, rss) = seacells_fit_gpu::<WgpuRuntime>(
+            let (_, _, _, rss) = seacells_fit_gpu::<WgpuRuntime>(
                 embedding.as_ref(),
                 &knn_indices,
                 &knn_distances,

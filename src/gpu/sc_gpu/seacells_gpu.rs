@@ -24,8 +24,8 @@ use crate::single_cell::mc_generation::seacells::{
 ///////////
 
 /// Output of a SEACells fit: hard assignment per cell, the cells grouped by
-/// SEACell, and the RSS at each iteration.
-pub type SeacellsFitResult = (Vec<usize>, Vec<Vec<usize>>, Vec<f32>);
+/// SEACell, the cell index of each archetype, and the RSS at each iteration.
+pub type SeacellsFitResult = (Vec<usize>, Vec<Vec<usize>>, Vec<usize>, Vec<f32>);
 
 /////////////////
 // Back end    //
@@ -264,9 +264,10 @@ impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
 ///
 /// ### Returns
 ///
-/// `(hard assignments per cell, metacell groupings, RSS history)`. The groupings
-/// are one entry per archetype the initialisation actually selected, which is
-/// `params.n_sea_cells` unless deduplication came back short.
+/// `(hard assignments per cell, metacell groupings, archetype cell indices, RSS
+/// history)`. The groupings and the archetypes are one entry per archetype the
+/// initialisation actually selected, which is `params.n_sea_cells` unless
+/// deduplication came back short.
 ///
 /// ### References
 ///
@@ -312,7 +313,8 @@ pub fn seacells_fit_gpu<R: Runtime>(
     // Archetype initialisation dedups and can come back with fewer than
     // `n_sea_cells`, and the model sizes A and B from what it actually got. The
     // device scratch has to follow that rather than the requested count.
-    let k = model.get_archetypes()?.len();
+    let archetypes = model.get_archetypes()?;
+    let k = archetypes.len();
 
     let mut backend = GpuFwArgminB::<R>::new(n, k, client);
 
@@ -329,5 +331,5 @@ pub fn seacells_fit_gpu<R: Runtime>(
     let metacells = assignments_to_metacells(&assignments, k);
     let rss_history = model.get_rss_history().to_vec();
 
-    Ok((assignments, metacells, rss_history))
+    Ok((assignments, metacells, archetypes, rss_history))
 }
