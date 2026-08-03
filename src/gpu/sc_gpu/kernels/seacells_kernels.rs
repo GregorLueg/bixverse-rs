@@ -127,7 +127,7 @@ pub fn fw_argmin_b<F: Float>(
 
     #[unroll]
     for s in 0..slots {
-        run_val[s] = F::new(f32::MAX);
+        run_val[s] = F::max_value();
         run_idx[s] = 0u32;
     }
 
@@ -279,7 +279,7 @@ pub fn reduce_argmin_blocks<F: Float>(
         terminate!();
     }
 
-    let mut best = F::new(f32::MAX);
+    let mut best = F::max_value();
     let mut best_row = u32::MAX.runtime();
 
     let mut block = 0u32;
@@ -351,14 +351,24 @@ where
     }
 
     // An over-sized binding is rejected silently: the kernel does no work and
-    // returns zeros. Check on the host so it surfaces as an error instead.
+    // returns zeros. Check on the host so it surfaces as an error instead. Every
+    // buffer the launch binds is listed; the indptrs will not be what blows
+    // first, but a guard that covers only some of its bindings is not a guard.
     let limit = client.properties().memory.max_page_size as usize;
+    let indptr_bytes = (n + 1) * size_of::<u32>();
     let checked = [
         ("K2B values", k2b.nnz * size_of::<F>()),
         ("K2B indices", k2b.nnz * size_of::<u32>()),
+        ("K2B indptr", indptr_bytes),
         ("K2At values", t2.nnz * size_of::<F>()),
+        ("K2At indices", t2.nnz * size_of::<u32>()),
+        ("K2At indptr", indptr_bytes),
+        ("B values", b_mat.nnz * size_of::<F>()),
+        ("B indices", b_mat.nnz * size_of::<u32>()),
+        ("B indptr", indptr_bytes),
         ("t1", k * k * size_of::<F>()),
-        ("argmin partials", part_val.len() * size_of::<F>()),
+        ("argmin partial values", part_val.len() * size_of::<F>()),
+        ("argmin partial indices", part_idx.len() * size_of::<u32>()),
     ];
     for (buffer, bytes) in checked {
         if bytes > limit {
@@ -593,6 +603,78 @@ mod tests {
         (vals, idx, gap)
     }
 
+    /// One entry of the gradient `G[i, c]`, for checking an argmin that came back
+    /// different from the reference.
+    ///
+    /// ### Params
+    ///
+    /// * `k2b` - Dense `[n, k]` row-major
+    /// * `t1` - Dense `[k, k]` row-major
+    /// * `t2` - Dense `[n, k]` row-major
+    /// * `k` - Columns
+    /// * `i` - Row
+    /// * `c` - Column
+    ///
+    /// ### Returns
+    ///
+    /// `sum_m K²B[i, m] * t1[m, c] - K²Aᵀ[i, c]`.
+    fn cpu_grad_at(k2b: &[f32], t1: &[f32], t2: &[f32], k: usize, i: usize, c: usize) -> f32 {
+        let mut g = 0.0f32;
+        for m in 0..k {
+            g += k2b[i * k + m] * t1[m * k + c];
+        }
+        g - t2[i * k + c]
+    }
+
+    /// Assert the kernel's argmins against the reference, tolerating near-ties.
+    ///
+    /// The two paths sum the same products in different orders, so columns whose
+    /// two best rows sit within a few last bits of each other can legitimately
+    /// resolve either way. An exact index match is demanded wherever the minimum
+    /// is unambiguous; where it is not, what has to hold is that the row the
+    /// kernel picked really is a minimum.
+    ///
+    /// ### Params
+    ///
+    /// * `k2b` - Dense `[n, k]` row-major
+    /// * `t1` - Dense `[k, k]` row-major
+    /// * `t2` - Dense `[n, k]` row-major
+    /// * `got_idx` - Kernel argmins `[k]`
+    /// * `want_idx` - Reference argmins `[k]`
+    /// * `want_val` - Reference minima `[k]`
+    /// * `n` - Rows
+    /// * `k` - Columns
+    #[allow(clippy::too_many_arguments)]
+    fn assert_argmins_agree(
+        k2b: &[f32],
+        t1: &[f32],
+        t2: &[f32],
+        got_idx: &[u32],
+        want_idx: &[u32],
+        want_val: &[f32],
+        n: usize,
+        k: usize,
+    ) {
+        let mut ties = 0usize;
+        for c in 0..k {
+            if got_idx[c] == want_idx[c] {
+                continue;
+            }
+            ties += 1;
+            let got = cpu_grad_at(k2b, t1, t2, k, got_idx[c] as usize, c);
+            assert_relative_eq!(got, want_val[c], max_relative = 1e-5, epsilon = 1e-6);
+        }
+        // A handful of ties is the arithmetic; a flood of them is a broken scan.
+        assert!(
+            ties * 50 <= k,
+            "{} / {} columns disagree at ({}, {}), well past a tie-break rate",
+            ties,
+            k,
+            n,
+            k
+        );
+    }
+
     /// Deterministic pseudo-random dense fixture with a controlled zero rate.
     ///
     /// ### Params
@@ -618,11 +700,30 @@ mod tests {
 
     /// The fused kernel must reproduce the CPU scan it replaces: same argmin per
     /// archetype, same minimum, same duality-gap term.
+    ///
+    /// The shapes are picked to cover the two things the kernel's structure turns
+    /// on, both of which are degenerate at small sizes:
+    ///
+    /// - `slots = ceil(k / B_ARGMIN_WG)`, the strided column ownership held in
+    ///   registers. It is 1 for every `k <= 256`, so anything smaller than that
+    ///   never exercises the multi-slot unrolling or the "find the owning slot by
+    ///   comparison" trick in the `K²Aᵀ` and gap loops. `k = 300` gives 2 slots,
+    ///   `k = 1100` gives 5.
+    /// - the grid stride. Blocks are capped at `B_ARGMIN_BLOCKS`, so below
+    ///   `n = 1024` each block owns exactly one row and the per-block running
+    ///   minimum never actually accumulates. `n = 3000` gives about three rows per
+    ///   block.
     #[test]
     fn test_fw_argmin_b_matches_cpu() {
         let Some(device) = try_device() else { return };
 
-        for (n, k) in [(40usize, 7usize), (257, 33), (1000, 130)] {
+        for (n, k) in [
+            (40usize, 7usize),
+            (257, 33),
+            (1000, 130),
+            (3000, 300),
+            (300, 1100),
+        ] {
             let k2b = fixture(n * k, 1, 3);
             let t1 = fixture(k * k, 5, 4);
             let t2 = fixture(n * k, 9, 5);
@@ -634,8 +735,8 @@ mod tests {
 
             for c in 0..k {
                 assert_relative_eq!(got_val[c], want_val[c], max_relative = 1e-4, epsilon = 1e-5);
-                assert_eq!(got_idx[c], want_idx[c], "argmin differs at column {}", c);
             }
+            assert_argmins_agree(&k2b, &t1, &t2, &got_idx, &want_idx, &want_val, n, k);
             assert_relative_eq!(got_gap, want_gap, max_relative = 1e-3, epsilon = 1e-4);
         }
     }

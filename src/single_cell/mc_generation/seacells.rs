@@ -151,6 +151,10 @@ fn prune_and_renormalise(mat: &mut CompressedSparseData2<f32>, threshold: f32) {
 
 /// Compute the trace (sum of diagonal elements) of a sparse matrix
 ///
+/// Accumulates in `f64`. The traces feed [SEACells::compute_rss_trace], where
+/// they cancel against `||K||_F^2`, so the summation itself must not be the
+/// thing that loses the answer.
+///
 /// ### Params
 ///
 /// * `mat` - Sparse CSR matrix
@@ -158,9 +162,9 @@ fn prune_and_renormalise(mat: &mut CompressedSparseData2<f32>, threshold: f32) {
 /// ### Returns
 ///
 /// Sum of diagonal elements `mat[i, i]`
-fn matrix_trace(mat: &CompressedSparseData2<f32>) -> f32 {
+fn matrix_trace(mat: &CompressedSparseData2<f32>) -> f64 {
     let n = mat.shape.0.min(mat.shape.1);
-    let mut trace = 0.0;
+    let mut trace = 0.0f64;
 
     for i in 0..n {
         let row_start = mat.indptr[i] as usize;
@@ -168,13 +172,34 @@ fn matrix_trace(mat: &CompressedSparseData2<f32>) -> f32 {
 
         for idx in row_start..row_end {
             if mat.indices[idx] == i as u32 {
-                trace += mat.data[idx];
+                trace += mat.data[idx] as f64;
                 break;
             }
         }
     }
 
     trace
+}
+
+/// Squared Frobenius norm of a sparse matrix, accumulated in `f64`
+///
+/// [frobenius_norm] sums in `f32` and squaring its result loses another few
+/// bits. Both matter for [SEACells::compute_rss_trace], where `||K||_F^2` is the
+/// largest of three terms that cancel down to a small residual.
+///
+/// ### Params
+///
+/// * `mat` - Sparse CSR matrix
+///
+/// ### Returns
+///
+/// `||mat||_F^2`.
+fn frobenius_norm_sq_f64(mat: &CompressedSparseData2<f32>) -> f64 {
+    mat.data
+        .par_iter()
+        .with_min_len(10000)
+        .map(|&v| (v as f64) * (v as f64))
+        .sum()
 }
 
 /// Compute adaptive anisotropic diffusion kernel
@@ -968,10 +993,13 @@ fn fw_argmins_a(
 /// for a single iteration. Per cell per iteration the cost drops from
 /// `d · nnz(t1)/k + k` to `nnz(t1[amin,:]) + k`.
 ///
-/// It also closes a leak in the iteration-major path, where `γ_0 = 1` zeroed the
-/// previous `A`'s values but left them in the sparsity pattern, so with pruning
-/// off the pattern grew across outer iterations and never shrank. Tracking atoms
-/// by index means a repeated argmin merges instead of adding an entry.
+/// It also carries fewer structural zeros than the iteration-major path. `γ_0 = 1`
+/// zeroes the previous `A`'s weights while leaving them in the pattern, and
+/// `sparse_add_csr` keeps them; [fw_atoms_to_csr] goes through `coo_to_csr`, which
+/// drops exact zeros, so they never reach the assembled matrix. Measured at
+/// `n = 2000`, `k = 200`, pruning off: 25.6 atoms per cell against 34.6. Both
+/// settle after the first outer iteration rather than growing, so this is a
+/// constant factor on `nnz(A)`, not an unbounded leak.
 ///
 /// ### Params
 ///
@@ -1228,8 +1256,8 @@ pub struct SEACells<'a> {
     rss_history: Vec<f32>,
     /// Absolute RSS change threshold for convergence.
     convergence_threshold: Option<f32>,
-    ///  Cached ||K||_F^2 for trace-based RSS.
-    k_frobenius_norm_sq: Option<f32>,
+    ///  Cached ||K||_F^2 for trace-based RSS, accumulated in `f64`.
+    k_frobenius_norm_sq: Option<f64>,
     /// SEACell parameters.
     params: &'a SEACellsParams,
 }
@@ -1369,8 +1397,7 @@ impl<'a> SEACells<'a> {
         if verbosity.detailed_verbosity() {
             println!(" Pre-computing kernel Frobenius norm...");
         }
-        let k_frob = frobenius_norm(&kernel);
-        self.k_frobenius_norm_sq = Some(k_frob * k_frob);
+        self.k_frobenius_norm_sq = Some(frobenius_norm_sq_f64(&kernel));
 
         self.kernel_mat = Some(kernel);
     }
@@ -2348,6 +2375,19 @@ impl<'a> SEACells<'a> {
     /// The final `.sqrt()` converts back to the Frobenius norm to match
     /// `compute_rss_simple`.
     ///
+    /// ### Accuracy
+    ///
+    /// The three terms are each of order `||K||_F^2` and cancel down to the
+    /// residual, so the relative error grows as the fit improves. The traces and
+    /// the combination run in `f64`; doing that in `f32` was the dominant error
+    /// source and cost an order of magnitude. Measured against
+    /// [SEACells::compute_rss_simple]: 4e-6 to 8e-6 at the SEACells convention
+    /// `k = n/75`, against a convergence threshold of `convergence_epsilon`
+    /// (1e-3 by default), and 3e-3 to 1e-2 at `k = n`, where the residual is
+    /// 0.2% of `||K||_F` and the cancellation is near-total. The clamp before
+    /// the root stops that regime from returning NaN, which would make the
+    /// convergence test silently false forever.
+    ///
     /// ### Params
     ///
     /// * `a` - The A matrix
@@ -2385,7 +2425,9 @@ impl<'a> SEACells<'a> {
         let result = csr_matmul_csr(&a_at, &bt_k2b)?; // [k × k]
         let reconstruction_frob_sq = matrix_trace(&result);
 
-        Ok((k_frob_sq - 2.0 * trace_term + reconstruction_frob_sq).sqrt())
+        let residual_sq = k_frob_sq - 2.0 * trace_term + reconstruction_frob_sq;
+
+        Ok(residual_sq.max(0.0).sqrt() as f32)
     }
 
     /// Get hard cell assignments (each cell assigned to one SEACell)
@@ -2801,8 +2843,7 @@ mod tests {
 
             let mut model = SEACells::new(n, &params);
             let kernel = banded_kernel(n, 4);
-            let k_frob = frobenius_norm(&kernel);
-            model.k_frobenius_norm_sq = Some(k_frob * k_frob);
+            model.k_frobenius_norm_sq = Some(frobenius_norm_sq_f64(&kernel));
             model.kernel_mat = Some(kernel);
 
             let (b, a_prev) = initial_matrices(n, k, 11);
@@ -2895,6 +2936,69 @@ mod tests {
         }
     }
 
+    /// The regime the trace identity is dangerous in: `k = n`, so `B` is the
+    /// identity and the residual is a small fraction of `||K||_F`. The three terms
+    /// then cancel almost completely and the relative error is worst.
+    ///
+    /// The bound asserted here is loose on purpose. What has to hold is that the
+    /// result stays finite and non-negative rather than turning into a NaN that
+    /// would make the convergence test silently false forever.
+    #[test]
+    fn test_rss_trace_survives_near_total_cancellation() {
+        let n = 200usize;
+        let k = 200usize;
+        let params = SEACellsParams {
+            n_sea_cells: k,
+            max_fw_iters: 50,
+            convergence_epsilon: 1e-3,
+            max_iter: 3,
+            min_iter: 1,
+            greedy_threshold: 0,
+            graph_building: "union".to_string(),
+            pruning: false,
+            pruning_threshold: 0.0,
+            n_landmarks: None,
+            knn_params: KnnParams::new(),
+        };
+
+        for bandwidth in [0usize, 2] {
+            let mut model = SEACells::new(n, &params);
+            let kernel = banded_kernel(n, bandwidth);
+            model.k_frobenius_norm_sq = Some(frobenius_norm_sq_f64(&kernel));
+            model.kernel_mat = Some(kernel);
+
+            let (b, a_prev) = initial_matrices(n, k, 11);
+            let a = model.update_a_mat(&b, &a_prev, 0).expect("A update failed");
+
+            let simple = model.compute_rss_simple(&a, &b).expect("simple failed");
+            let trace = model.compute_rss_trace(&a, &b).expect("trace failed");
+
+            let residual_fraction = simple / model.k_frobenius_norm_sq.unwrap().sqrt() as f32;
+            println!(
+                "bandwidth {} | simple {:.6} trace {:.6} | residual {:.3}% of |K|_F | rel {:.2e}",
+                bandwidth,
+                simple,
+                trace,
+                100.0 * residual_fraction,
+                ((simple - trace) / simple).abs()
+            );
+
+            assert!(
+                trace.is_finite() && trace >= 0.0,
+                "trace RSS is not a usable number at bandwidth {}: {}",
+                bandwidth,
+                trace
+            );
+            assert!(
+                ((simple - trace) / simple).abs() < 5e-2,
+                "trace RSS lost its accuracy at bandwidth {}: {} vs {}",
+                bandwidth,
+                trace,
+                simple
+            );
+        }
+    }
+
     /// Compare the two RSS paths on accuracy and cost.
     ///
     /// The trace path expands `||K - KBA||_F^2` into three terms that
@@ -2920,8 +3024,7 @@ mod tests {
             };
             let mut model = SEACells::new(n, &params);
             let kernel = banded_kernel(n, 6);
-            let k_frob = frobenius_norm(&kernel);
-            model.k_frobenius_norm_sq = Some(k_frob * k_frob);
+            model.k_frobenius_norm_sq = Some(frobenius_norm_sq_f64(&kernel));
             model.kernel_mat = Some(kernel);
 
             let (b, a_prev) = initial_matrices(n, k, 11);
@@ -2949,8 +3052,11 @@ mod tests {
                 rel
             );
 
+            // Tied to what the trace path has to protect: the convergence test
+            // fires on `|RSS_{i-1} - RSS_i| < convergence_epsilon * RSS_0`, so
+            // the RSS noise has to sit well under 1e-3. Measured 4e-6 to 8e-6.
             assert!(
-                rel < 1e-2,
+                rel < 1e-4,
                 "RSS paths disagree at n = {}: {} vs {} (rel {:.2e})",
                 n,
                 simple,

@@ -166,6 +166,17 @@ impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
         k2_b: &CompressedSparseData2<f32>,
         b: &CompressedSparseData2<f32>,
     ) -> Result<(Vec<usize>, f32), BixverseErrors> {
+        // The kernel launches unchecked and indexes `indptr` up to `n`, so a
+        // wrong shape here is an out-of-bounds device read rather than an error.
+        for mat in [k2_b, b] {
+            if mat.shape != (self.n, self.k) {
+                return Err(BixverseErrors::ShapeMismatch {
+                    expected: (self.n, self.k),
+                    got: mat.shape,
+                });
+            }
+        }
+
         let t1 = self
             .t1
             .as_ref()
@@ -252,7 +263,9 @@ impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
 ///
 /// ### Returns
 ///
-/// `(hard assignments per cell, metacell groupings, RSS history)`.
+/// `(hard assignments per cell, metacell groupings, RSS history)`. The groupings
+/// are one entry per archetype the initialisation actually selected, which is
+/// `params.n_sea_cells` unless deduplication came back short.
 ///
 /// ### References
 ///
@@ -272,7 +285,6 @@ pub fn seacells_fit_gpu<R: Runtime>(
     let client = R::client(&device);
 
     let n = pca.nrows();
-    let k = params.n_sea_cells;
 
     let mut model = SEACells::new(n, params);
     model.construct_kernel_mat(pca, knn_indices, knn_distances, verbose);
@@ -295,6 +307,11 @@ pub fn seacells_fit_gpu<R: Runtime>(
             seed as u64,
         )?,
     }
+
+    // Archetype initialisation dedups and can come back with fewer than
+    // `n_sea_cells`, and the model sizes A and B from what it actually got. The
+    // device scratch has to follow that rather than the requested count.
+    let k = model.get_archetypes()?.len();
 
     let mut backend = GpuFwArgminB::<R>::new(n, k, client);
 

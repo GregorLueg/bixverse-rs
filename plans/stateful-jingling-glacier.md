@@ -65,8 +65,8 @@ fix on the CPU path; irrelevant on the GPU.
 **4. Pruning on is 2.3× faster end to end** (19.3s vs 44.2s at 50k/666), and my
 earlier claim that it "provably cannot fire" was wrong for a reason I had not
 considered. Only 7 of 350 calls remove anything, but `γ_0 = 1` zeroes the previous
-`A`'s values while leaving them in the sparsity pattern, so with pruning off the
-pattern accumulates across outer iterations and never shrinks:
+`A`'s values while leaving them in the sparsity pattern, and `sparse_add_csr` keeps
+those zeros, so with pruning off the pattern carries them:
 
 | | nnz(A) atoms/cell | nnz(t1_b) density |
 |---|---|---|
@@ -93,11 +93,19 @@ smaller problem 10× slower than the bigger one. Independent bug, cheap fix.
   `update_a_mat_iteration_major` and `fw_argmins_a` kept `#[cfg(test)]`.
 - RSS: `compute_rss_simple` retired to `#[cfg(test)]`, the trace path is now
   unconditional and `k_frobenius_norm_sq` always cached. Measured 1.9-3.3x faster
-  at every size with 5e-6 to 1.8e-5 relative agreement, against a 1e-3
-  convergence threshold.
-- The structural-zero leak is closed as a side effect: `nnz(A)` with pruning off
-  drops from 64.5 to 22.6 atoms per cell, matching what pruning-on gives, so
-  pruning is no longer load-bearing for memory.
+  at every size. The three terms cancel down to the residual, so the traces, the
+  cached `||K||_F^2` and the combination all run in `f64`; doing that in `f32` was
+  the dominant error and cost an order of magnitude. Agreement with the
+  materialising path is 4e-6 to 8e-6 at `k = n/75`, against a 1e-3 convergence
+  threshold, and 3e-3 to 1e-2 at `k = n` where the residual is 0.2% of `||K||_F`.
+  The result is clamped at zero before the root so that regime cannot return NaN.
+- The structural zeros go with it: `nnz(A)` with pruning off drops from 64.5 to
+  22.6 atoms per cell, matching what pruning-on gives, so pruning is no longer
+  load-bearing for memory. The mechanism is `fw_atoms_to_csr` going through
+  `coo_to_csr`, which drops exact zeros, rather than anything to do with merging
+  repeated argmins: `sparse_add_csr` merges those too. At `n = 2000`, `k = 200`
+  the two paths sit at 25.6 against 34.6 atoms per cell and both settle after the
+  first outer iteration, so this is a constant factor rather than unbounded growth.
 - Phase-timing scaffolding (`SEACellsDiagnostics`, `PruneStats`,
   `benches/seacells_bench.rs`) removed once it had served its purpose.
 
