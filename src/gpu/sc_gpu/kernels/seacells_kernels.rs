@@ -3,11 +3,11 @@
 //! [fw_argmin_b] replaces `fw_argmins_b`, the per-archetype gradient scan that
 //! dominates the CPU runtime. The remaining phases stay on the host.
 //!
-//! Layout convention: every `n × k` matrix (`K²B`, `K²Aᵀ`, `B`) is passed as CSR
-//! over cells, the untransposed output of `k_squared_matmul`, so the GPU path
-//! drops the transposes the CPU scan needs rather than adding any. `t1 = A Aᵀ`
-//! is dense `[k, k]`: it runs close to dense in practice and at `4k²` bytes stays
-//! cache-resident.
+//! Layout convention: every `n × k` matrix (`K²B`, `K²Aᵀ`, `B`) is passed as
+//! CSR over cells, the untransposed output of `k_squared_matmul`, so the GPU
+//! path drops the transposes the CPU scan needs rather than adding any.
+//! `t1 = A Aᵀ` is dense `[k, k]`: it runs close to dense in practice and at
+//! `4k²` bytes stays cache-resident.
 //!
 //! Nothing here allocates an `n × k` dense buffer. The gradient is never
 //! materialised: each thread owns a strided slice of the `k` columns in

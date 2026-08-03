@@ -180,8 +180,8 @@ fn matrix_trace(mat: &CompressedSparseData2<f32>) -> f32 {
 /// Compute adaptive anisotropic diffusion kernel
 ///
 /// Implementation from palantir package.  Uses knn/3-th nearest neighbor
-/// distance as adaptive bandwidth. For edge (i,j) with distance d:
-/// weight = exp(-d/σᵢ)
+/// distance as adaptive bandwidth. For edge (i,j) with distance d: weight =
+/// exp(-d/σᵢ)
 ///
 /// ### Params
 ///
@@ -335,7 +335,7 @@ pub fn determine_multiscale_space(
 
 /// Max-min waypoint sampling
 ///
-/// For each dimension, iteratively selects points maximizing the minimum
+/// For each dimension, iteratively selects points maximising the minimum
 /// distance to already selected points.
 ///
 /// ### Params
@@ -606,21 +606,21 @@ fn nystrom_extend(
 ////////////////////////
 
 /// Below this the L1 renormalisation is skipped, matching
-/// `normalise_csr_columns_l1`, which leaves a column alone when its sum does not
-/// exceed this. Reproducing the guard exactly is what keeps a fully-pruned column
-/// behaving identically on both paths.
+/// `normalise_csr_columns_l1`, which leaves a column alone when its sum does
+/// not exceed this. Reproducing the guard exactly is what keeps a fully-pruned
+/// column behaving identically on both paths.
 const FW_RENORM_FLOOR: f64 = 1e-15;
 
 /// Atom bookkeeping for one Frank-Wolfe column.
 ///
 /// A column of `A` (or `B`) is a convex combination of at most `max_fw_iters`
 /// one-hot atoms. Rather than rebuilding the sparse matrix each iteration, this
-/// tracks the `(index, weight)` pairs and reports what each operation changed, so
-/// the caller can apply the matching correction to whatever gradient state it
-/// maintains:
+/// tracks the `(index, weight)` pairs and reports what each operation changed,
+/// so the caller can apply the matching correction to whatever gradient state
+/// it maintains:
 ///
-/// - the convex step scales every weight by `1 - γ` and adds `γ` to one atom, so
-///   the gradient state scales and takes one rank-1 update;
+/// - the convex step scales every weight by `1 - γ` and adds `γ` to one atom,
+///   so the gradient state scales and takes one rank-1 update;
 /// - pruning removes atoms outright, so the gradient state takes one rank-1
 ///   *subtraction* per dropped atom, which can happen at most once per atom;
 /// - renormalisation scales every weight, so the gradient state scales.
@@ -641,8 +641,8 @@ pub struct FwPruneOutcome {
     /// Dropped `(index, weight)` pairs, weights as they stood *before* the
     /// renormalisation
     pub dropped: Vec<(u32, f32)>,
-    /// Factor the surviving weights were multiplied by. `1.0` when nothing needed
-    /// renormalising.
+    /// Factor the surviving weights were multiplied by. `1.0` when nothing
+    /// needed renormalising.
     pub renorm: f32,
 }
 
@@ -876,6 +876,10 @@ impl FwArgminB for CpuFwArgminB {
 ////////////////////
 // Matrix updates //
 ////////////////////
+
+/////////
+// Old //
+/////////
 
 /// Per-cell Frank-Wolfe argmins for the A update, one gradient column at a
 /// time so the full k × n gradient is never materialised. The factor of 2 in

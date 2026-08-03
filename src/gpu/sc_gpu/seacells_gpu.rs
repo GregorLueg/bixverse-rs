@@ -1,9 +1,9 @@
 //! GPU-accelerated SEACells fit.
 //!
-//! The per-archetype Frank-Wolfe gradient argmin dominates the runtime and every
-//! other step of the B update is a few percent, so that argmin is the only thing
-//! this module moves to the device. [GpuFwArgminB] implements the [FwArgminB]
-//! seam with `fw_argmin_b`, and [seacells_fit_gpu] drives the same
+//! The per-archetype Frank-Wolfe gradient argmin dominates the runtime and
+//! every other step of the B update is a few percent, so that argmin is the
+//! only thing this module moves to the device. [GpuFwArgminB] implements the
+//! [FwArgminB] seam with `fw_argmin_b`, and [seacells_fit_gpu] drives the same
 //! [SEACells::fit_with] loop the CPU path uses.
 //!
 //! Nothing here holds an `n × k` dense buffer. `K²B`, `K²Aᵀ` and `B` stay
