@@ -167,7 +167,8 @@ impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
         b: &CompressedSparseData2<f32>,
     ) -> Result<(Vec<usize>, f32), BixverseErrors> {
         // The kernel launches unchecked and indexes `indptr` up to `n`, so a
-        // wrong shape here is an out-of-bounds device read rather than an error.
+        // wrong shape here is an out-of-bounds device read rather than an
+        // error.
         for mat in [k2_b, b] {
             if mat.shape != (self.n, self.k) {
                 return Err(BixverseErrors::ShapeMismatch {

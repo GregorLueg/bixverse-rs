@@ -980,27 +980,6 @@ fn fw_argmins_a(
 
 /// Cell-major Frank-Wolfe pass for the A update.
 ///
-/// The iteration-major formulation rebuilds the gradient from the sparse `A`
-/// every iteration, then rebuilds `A` itself through an `E` matrix, a sort, a
-/// scalar multiply and a sparse add. Neither is necessary: the A columns are
-/// independent (the gradient column for cell `j` depends only on `A[:,j]`, and
-/// `prune_and_renormalise` is elementwise plus a per-column normalisation), and
-/// the running `w = t1 · A[:,j]` survives every operation in the loop as a scalar
-/// scale plus a rank-1 update. See [FwAtoms].
-///
-/// So one cell goes through all `n_iters` iterations against a `k`-length
-/// scratch, which is the same per-thread footprint `fw_argmins_a` already used
-/// for a single iteration. Per cell per iteration the cost drops from
-/// `d · nnz(t1)/k + k` to `nnz(t1[amin,:]) + k`.
-///
-/// It also carries fewer structural zeros than the iteration-major path. `γ_0 = 1`
-/// zeroes the previous `A`'s weights while leaving them in the pattern, and
-/// `sparse_add_csr` keeps them; [fw_atoms_to_csr] goes through `coo_to_csr`, which
-/// drops exact zeros, so they never reach the assembled matrix. Measured at
-/// `n = 2000`, `k = 200`, pruning off: 25.6 atoms per cell against 34.6. Both
-/// settle after the first outer iteration rather than growing, so this is a
-/// constant factor on `nnz(A)`, not an unbounded leak.
-///
 /// ### Params
 ///
 /// * `t1` - k × k matrix Bᵀ K² B (symmetric)
@@ -1568,7 +1547,8 @@ impl<'a> SEACells<'a> {
     /// Initialise archetypes using adaptive strategy
     ///
     /// For small datasets (< greedy_threshold): combines waypoint + greedy CSSP
-    /// For large datasets (>= greedy_threshold): uses fast random initialisation
+    /// For large datasets (>= greedy_threshold): uses fast random
+    /// initialisation
     ///
     /// ### Params
     ///
@@ -2335,10 +2315,10 @@ impl<'a> SEACells<'a> {
     /// RSS by materialising the reconstruction
     ///
     /// Forms the n × n reconstruction K B A directly and returns the Frobenius
-    /// norm of (K - K B A). Superseded by [SEACells::compute_rss_trace], which is
-    /// faster at every size measured and agrees to well within the convergence
-    /// threshold. Retained as the reference the trace identity is checked
-    /// against.
+    /// norm of (K - K B A). Superseded by [SEACells::compute_rss_trace], which
+    /// is faster at every size measured and agrees to well within the
+    /// convergence threshold. Retained as the reference the trace identity is
+    /// checked against.
     ///
     /// ### Params
     ///
@@ -2374,19 +2354,6 @@ impl<'a> SEACells<'a> {
     ///
     /// The final `.sqrt()` converts back to the Frobenius norm to match
     /// `compute_rss_simple`.
-    ///
-    /// ### Accuracy
-    ///
-    /// The three terms are each of order `||K||_F^2` and cancel down to the
-    /// residual, so the relative error grows as the fit improves. The traces and
-    /// the combination run in `f64`; doing that in `f32` was the dominant error
-    /// source and cost an order of magnitude. Measured against
-    /// [SEACells::compute_rss_simple]: 4e-6 to 8e-6 at the SEACells convention
-    /// `k = n/75`, against a convergence threshold of `convergence_epsilon`
-    /// (1e-3 by default), and 3e-3 to 1e-2 at `k = n`, where the residual is
-    /// 0.2% of `||K||_F` and the cancellation is near-total. The clamp before
-    /// the root stops that regime from returning NaN, which would make the
-    /// convergence test silently false forever.
     ///
     /// ### Params
     ///

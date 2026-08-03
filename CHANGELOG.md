@@ -1,5 +1,12 @@
 # News
 
+## 0.3.12
+
+### Features
+
+- GPU-accelerated SEACells
+- Speed improvements on the CPU SEACells version
+
 ## 0.3.11
 
 ### Features

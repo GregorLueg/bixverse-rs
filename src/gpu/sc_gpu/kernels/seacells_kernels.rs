@@ -263,7 +263,8 @@ pub fn fw_argmin_b<F: Float>(
 ///
 /// ### Grid mapping
 ///
-/// * `(CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * wg_size + UNIT_POS_X` -> column
+/// * `(CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * wg_size + UNIT_POS_X` ->
+///   column
 #[cube(launch_unchecked)]
 pub fn reduce_argmin_blocks<F: Float>(
     part_val: &Tensor<F>,
@@ -351,9 +352,7 @@ where
     }
 
     // An over-sized binding is rejected silently: the kernel does no work and
-    // returns zeros. Check on the host so it surfaces as an error instead. Every
-    // buffer the launch binds is listed; the indptrs will not be what blows
-    // first, but a guard that covers only some of its bindings is not a guard.
+    // returns zeros.
     let limit = client.properties().memory.max_page_size as usize;
     let indptr_bytes = (n + 1) * size_of::<u32>();
     let checked = [
