@@ -204,38 +204,51 @@ fn frobenius_norm_sq_f64(mat: &CompressedSparseData2<f32>) -> f64 {
 
 /// Compute adaptive anisotropic diffusion kernel
 ///
-/// Implementation from palantir package.  Uses knn/3-th nearest neighbor
+/// Implementation from palantir package.  Uses the k/3-th nearest neighbour
 /// distance as adaptive bandwidth. For edge (i,j) with distance d: weight =
 /// exp(-d/σᵢ)
+///
+/// The bandwidth is derived per row from the neighbours actually supplied,
+/// which is the same set the weights are computed over. Taking it from a
+/// separately requested `k` breaks that invariant: it indexes out of bounds
+/// when the supplied graph is narrower, and picks a bandwidth from the wrong
+/// part of the neighbourhood when it is wider.
 ///
 /// ### Params
 ///
 /// * `knn_indices` - kNN indices for each cell
 /// * `knn_distances` - kNN distances for each cell
-/// * `knn` - Number of nearest neighbours used
 /// * `squared_dist` - Are the distances squared (squared Euclidean for
 ///   example).
 ///
 /// ### Returns
 ///
-/// Symmetric kernel matrix
+/// Symmetric kernel matrix, or an error when a cell has no neighbours.
 pub fn compute_diffusion_kernel(
     knn_indices: &[Vec<usize>],
     knn_distances: &[Vec<f32>],
-    knn: usize,
     squared_dist: bool,
 ) -> Result<CompressedSparseData2<f32>, BixverseErrors> {
     let n = knn_indices.len();
-    let adaptive_k = (knn / 3).max(1);
 
     let adaptive_std: Vec<f32> = knn_distances
         .iter()
-        .map(|dists| {
+        .enumerate()
+        .map(|(i, dists)| {
             let mut sorted = dists.clone();
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            sorted[adaptive_k - 1]
+            // total_cmp rather than partial_cmp: a NaN distance in a
+            // caller-supplied graph would otherwise panic the sort.
+            sorted.sort_by(|a, b| a.total_cmp(b));
+            sorted
+                .get((dists.len() / 3).max(1) - 1)
+                .copied()
+                .ok_or_else(|| {
+                    BixverseErrors::InvalidArgument(format!(
+                        "kNN row {i} has no neighbours; cannot derive an adaptive bandwidth"
+                    ))
+                })
         })
-        .collect();
+        .collect::<Result<Vec<f32>, BixverseErrors>>()?;
 
     let mut rows = Vec::new();
     let mut cols = Vec::new();
@@ -1646,12 +1659,7 @@ impl<'a> SEACells<'a> {
             println!("Computing diffusion maps for waypoint initialisation...");
         }
 
-        let mut kernel = compute_diffusion_kernel(
-            knn_indices,
-            knn_distances,
-            self.params.knn_params.k,
-            squared_dist,
-        )?;
+        let mut kernel = compute_diffusion_kernel(knn_indices, knn_distances, squared_dist)?;
 
         let (eigenvalues, eigenvectors) =
             diffusion_map_from_kernel(&mut kernel, self.params.knn_params.k, seed)?;
@@ -1734,7 +1742,7 @@ impl<'a> SEACells<'a> {
         if verbosity.normal_verbosity() {
             println!("Building diffusion kernel for landmark selection...");
         }
-        let kernel = compute_diffusion_kernel(knn_indices, knn_distances, knn_k, squared_dist)?;
+        let kernel = compute_diffusion_kernel(knn_indices, knn_distances, squared_dist)?;
 
         if verbosity.normal_verbosity() {
             println!(
@@ -1759,7 +1767,7 @@ impl<'a> SEACells<'a> {
         )?;
         let squared_dist = self.params.knn_params.ann_dist == "euclidean";
 
-        let mut ll_kernel = compute_diffusion_kernel(&ll_idx, &ll_dist, k_ll, squared_dist)?;
+        let mut ll_kernel = compute_diffusion_kernel(&ll_idx, &ll_dist, squared_dist)?;
 
         let n_eigs = k_ll.min(l - 1).max(11);
         let (evals, evecs) = diffusion_map_from_kernel(&mut ll_kernel, n_eigs, seed)?;
@@ -3031,5 +3039,70 @@ mod tests {
                 rel
             );
         }
+    }
+
+    /// Build a ring kNN graph with a fixed neighbour count per cell.
+    ///
+    /// ### Params
+    ///
+    /// * `n` - Number of cells
+    /// * `k` - Neighbours per cell
+    ///
+    /// ### Returns
+    ///
+    /// `(indices, distances)` with `k` entries per row.
+    fn ring_knn(n: usize, k: usize) -> (Vec<Vec<usize>>, Vec<Vec<f32>>) {
+        let indices: Vec<Vec<usize>> = (0..n)
+            .map(|i| (1..=k).map(|step| (i + step) % n).collect())
+            .collect();
+        let distances: Vec<Vec<f32>> = (0..n)
+            .map(|_| (1..=k).map(|step| step as f32).collect())
+            .collect();
+        (indices, distances)
+    }
+
+    #[test]
+    fn test_diffusion_kernel_narrow_graph() {
+        // A five-neighbour graph used to index `sorted[7]` when the caller's
+        // params asked for k = 25. The bandwidth now comes from the row itself.
+        let (indices, distances) = ring_knn(20, 5);
+        let kernel = compute_diffusion_kernel(&indices, &distances, false)
+            .expect("narrow kNN graph must not panic");
+        assert_eq!(kernel.shape, (20, 20));
+    }
+
+    #[test]
+    fn test_diffusion_kernel_bandwidth_scales_with_row_width() {
+        // adaptive_k is (row width / 3).max(1), so a 3-wide row picks the
+        // first sorted distance and a 9-wide row picks the third.
+        let (idx_narrow, dist_narrow) = ring_knn(12, 3);
+        let (idx_wide, dist_wide) = ring_knn(12, 9);
+
+        let narrow = compute_diffusion_kernel(&idx_narrow, &dist_narrow, false).unwrap();
+        let wide = compute_diffusion_kernel(&idx_wide, &dist_wide, false).unwrap();
+
+        // exp(-1/1) for the narrow graph, exp(-1/3) for the wide one, on the
+        // nearest neighbour of cell 0. Different bandwidths, same edge.
+        let narrow_first = narrow.data[0];
+        let wide_first = wide.data[0];
+        assert!(
+            wide_first > narrow_first,
+            "wider graph should give a larger bandwidth and heavier weights: {narrow_first} vs {wide_first}"
+        );
+    }
+
+    #[test]
+    fn test_diffusion_kernel_empty_row_errors() {
+        let indices = vec![vec![1usize], vec![]];
+        let distances = vec![vec![1.0f32], vec![]];
+        assert!(compute_diffusion_kernel(&indices, &distances, false).is_err());
+    }
+
+    #[test]
+    fn test_diffusion_kernel_nan_distance_does_not_panic() {
+        let (indices, mut distances) = ring_knn(10, 6);
+        distances[3][2] = f32::NAN;
+        // total_cmp sorts NaN to the end rather than panicking the comparator.
+        assert!(compute_diffusion_kernel(&indices, &distances, false).is_ok());
     }
 }
