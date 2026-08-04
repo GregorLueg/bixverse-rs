@@ -1,7 +1,7 @@
 //! GPU kernels for the SEACells Frank-Wolfe updates.
 //!
-//! [fw_argmin_b] replaces `fw_argmins_b`, the per-archetype gradient scan in the
-//! B update, and [fw_columns_a_gpu] replaces `fw_columns_a`, the per-cell column
+//! [fw_argmin_b()] replaces `fw_argmins_b`, the per-archetype gradient scan in the
+//! B update, and [fw_columns_a_gpu()] replaces `fw_columns_a`, the per-cell column
 //! solve in the A update. Kernel construction, archetype initialisation and the
 //! RSS stay on the host.
 //!
@@ -39,13 +39,13 @@ use crate::prelude::CompressedSparseFormat;
 /// `B_ARGMIN_BLOCKS * k` at every dataset size instead of growing with it.
 pub const B_ARGMIN_BLOCKS: u32 = 1024;
 
-/// Workgroup width for [fw_argmin_b].
+/// Workgroup width for [fw_argmin_b()].
 ///
 /// Sets how many columns each thread owns, `ceil(k / B_ARGMIN_WG)`. Wider means
 /// fewer register slots per thread but more idle threads at small `k`.
 pub const B_ARGMIN_WG: u32 = 256;
 
-/// Workgroup width for [reduce_argmin_blocks]. One thread per output column,
+/// Workgroup width for [reduce_argmin_blocks()]. One thread per output column,
 /// grid-striding.
 pub const B_REDUCE_WG: u32 = 256;
 
@@ -56,7 +56,7 @@ pub const B_REDUCE_WG: u32 = 256;
 /// is reset per cell and nothing scales with it.
 pub const A_COLUMNS_BLOCKS: u32 = 1024;
 
-/// Workgroup width for [fw_columns_a_gpu].
+/// Workgroup width for [fw_columns_a_gpu()].
 ///
 /// Doubles as the atom capacity ceiling, since thread `i` owns atom slot `i`,
 /// and a column wider than this falls back to the CPU. Must be a power of two
@@ -70,7 +70,7 @@ pub const A_COLUMNS_BLOCKS: u32 = 1024;
 /// giving each thread several atom slots.
 pub const A_COLUMNS_WG: u32 = 128;
 
-/// Register slots per thread beyond which [fw_columns_a_gpu] declines the work.
+/// Register slots per thread beyond which [fw_columns_a_gpu()] declines the work.
 ///
 /// `w` and `k2b_row` are each `Array::<F>::new(slots)` with
 /// `slots = ceil(k / A_COLUMNS_WG)`, so the pair costs `2 * slots` floats per
@@ -116,7 +116,7 @@ pub const A_RENORM_FLOOR: f32 = 1e-15;
 ///
 /// Rows are visited in increasing order with a strict `<`, so the lowest row
 /// index wins a tie within a block. Blocks grid-stride, so block order does not
-/// follow row order and [reduce_argmin_blocks] has to break ties by index
+/// follow row order and [reduce_argmin_blocks()] has to break ties by index
 /// explicitly.
 ///
 /// ### Params
@@ -295,7 +295,7 @@ pub fn fw_argmin_b<F: Float>(
 /// Second stage of the B-gradient argmin: reduce per-block partials to one
 /// `(min, idx)` per archetype.
 ///
-/// Blocks grid-stride over cells in [fw_argmin_b], so block order does not
+/// Blocks grid-stride over cells in [fw_argmin_b()], so block order does not
 /// follow row order. Ties are therefore broken on the row index explicitly,
 /// reproducing the CPU scan's lowest-index-wins behaviour.
 ///
@@ -749,7 +749,7 @@ pub fn fw_columns_a_gpu<F: Float>(
 // Launchers //
 ///////////////
 
-/// Dispatch [fw_argmin_b] followed by [reduce_argmin_blocks].
+/// Dispatch [fw_argmin_b()] followed by [reduce_argmin_blocks()].
 ///
 /// ### Params
 ///
@@ -878,7 +878,7 @@ where
     Ok(())
 }
 
-/// Whether the plane-reduction path in [fw_columns_a_gpu] is safe on this device.
+/// Whether the plane-reduction path in [fw_columns_a_gpu()] is safe on this device.
 ///
 /// The kernel derives a plane id from `UNIT_POS_X / PLANE_DIM` and reduces
 /// within each plane before combining. If the device reports a plane-size range
@@ -901,7 +901,7 @@ pub fn plane_reduce_viable<R: Runtime>(client: &ComputeClient<R>, wg_size: u32) 
     plane == hw.plane_size_max && plane > 0 && wg_size.is_multiple_of(plane)
 }
 
-/// Dispatch [fw_columns_a_gpu].
+/// Dispatch [fw_columns_a_gpu()].
 ///
 /// The atom capacity is a hard constraint rather than a tuning knob: thread `i`
 /// owns atom slot `i`, so `cap` cannot exceed the workgroup width. `cap` is
@@ -1106,7 +1106,7 @@ mod tests {
         (values, indices, indptr)
     }
 
-    /// CPU reference for [fw_argmin_b], mirroring `fw_argmins_b` in
+    /// CPU reference for [fw_argmin_b()], mirroring `fw_argmins_b` in
     /// `single_cell::mc_generation::seacells`.
     ///
     /// ### Params

@@ -1,10 +1,11 @@
 //! End-to-end parity between the CPU and GPU SEACells paths.
 //!
-//! Only the Frank-Wolfe B-gradient argmin differs between the two, so the
-//! trajectories should track each other closely. Near-ties in the argmin can
-//! still resolve differently between a scattered CPU accumulation and a
-//! register-blocked GPU one, so the assertions are on agreement rate and the
-//! objective rather than on exact equality.
+//! Only the two Frank-Wolfe inner solves differ between the two paths, the
+//! B-gradient argmin and the A-column update, so the trajectories should track
+//! each other closely. Near-ties in either argmin can still resolve differently
+//! between a scattered CPU accumulation and a register-blocked GPU one, so the
+//! assertions are on agreement rate and the objective rather than on exact
+//! equality.
 
 #![cfg(all(feature = "single-cell", feature = "gpu"))]
 

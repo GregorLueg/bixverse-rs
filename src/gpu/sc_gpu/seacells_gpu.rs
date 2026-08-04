@@ -1,8 +1,8 @@
 //! GPU-accelerated SEACells fit.
 //!
-//! [GpuFwArgminB] implements the [FwArgminB] seam with `fw_argmin_b`, and
-//! [seacells_fit_gpu] drives the same [SEACells::fit_with] loop the CPU path
-//! uses.
+//! [GpuFwArgminB] implements the [FwArgminB] seam with `fw_argmin_b` for the B
+//! update and `fw_columns_a_gpu` for the A update, and [seacells_fit_gpu] drives
+//! the same [SEACells::fit_with] loop the CPU path uses.
 //!
 //! The B-gradient argmin does not dominate the fit. Sampled at 50k cells and
 //! 666 archetypes, the argmin kernel is about a quarter of wall-clock, the
@@ -39,7 +39,7 @@ pub type SeacellsFitResult = (Vec<usize>, Vec<Vec<usize>>, Vec<usize>, Vec<f32>)
 // Back end    //
 /////////////////
 
-/// Device-resident B-argmin back end.
+/// Device-resident back end for both Frank-Wolfe solves.
 ///
 /// Scratch is allocated once in [GpuFwArgminB::new] and reused across every
 /// Frank-Wolfe iteration and every outer iteration: `client.empty()` returns

@@ -339,8 +339,9 @@ pub fn compute_diffusion_kernel(
 ///
 /// ### Params
 ///
-/// * `kernel` - Symmetric kernel matrix
+/// * `kernel` - Symmetric kernel matrix, normalised in place
 /// * `n_components` - Number of eigenvectors to compute
+/// * `seed` - Random seed for the Lanczos start vector
 ///
 /// ### Returns
 ///
@@ -657,11 +658,14 @@ pub fn build_data_to_landmark_transitions(
 ///
 /// ### Params
 ///
-/// * `p_nl` -
-/// * `landmark_embedding` -
-/// * `lambdas` -
+/// * `p_nl` - Row-stochastic data-to-landmark transitions, `n × l`
+/// * `landmark_embedding` - Multiscale embedding of the landmarks, `l × n_dim`
+/// * `lambdas` - Eigenvalue per embedding dimension; a dimension with a
+///   near-zero eigenvalue is left unscaled rather than divided by it
 ///
 /// ### Returns
+///
+/// The embedding extended to all `n` cells, `n × n_dim`.
 fn nystrom_extend(
     p_nl: &CompressedSparseData2<f32>,
     landmark_embedding: &[Vec<f32>],
@@ -828,7 +832,7 @@ impl FwAtoms {
     /// to 1
     ///
     /// The keep test is `|w| > threshold` and the renormalisation is skipped for a
-    /// surviving mass at or below [FW_RENORM_FLOOR], both matching
+    /// surviving mass at or below `FW_RENORM_FLOOR`, both matching
     /// `prune_and_renormalise` and `normalise_csr_columns_l1`.
     ///
     /// ### Params
@@ -958,7 +962,7 @@ pub trait FwArgminB {
     }
 }
 
-/// CPU back end, wrapping [fw_argmins_b].
+/// CPU back end, wrapping `fw_argmins_b`.
 ///
 /// Holds the transposes the scan needs. `fw_argmins_b` walks columns of `K²B`,
 /// `K²Aᵀ` and `B`, so all three arrive here untransposed and are converted on
@@ -1540,7 +1544,9 @@ fn prune_and_renormalise_tracked(
 ///
 /// This Rust implementation includes memory optimisations:
 ///
-/// - Never materialises K_square, instead computing K @ (K @ X) on the fly
+/// - Never materialises `K²`. Products go through `K @ (K @ X)`, and the one
+///   product the Frank-Wolfe loop needs every iteration, `K² B`, is cached and
+///   updated incrementally from weighted columns of `K²`
 /// - Prunes small values to maintain sparsity
 /// - Supports fast random initialisation for large datasets
 pub struct SEACells<'a> {
@@ -1614,8 +1620,9 @@ impl<'a> SEACells<'a> {
     /// a symmetric sparsity pattern. Weights are symmetric by construction
     /// since both the distance and σᵢσⱼ are symmetric.
     ///
-    /// K² is never materialised - downstream operations compute
-    /// K @ (K @ X), bounding memory to O(nnz(K)).
+    /// K² is never materialised - downstream operations either compute
+    /// K @ (K @ X) or merge single weighted columns of K² out of K's rows,
+    /// bounding memory to O(nnz(K)).
     ///
     /// ### Params
     ///
@@ -2319,19 +2326,21 @@ impl<'a> SEACells<'a> {
     /// - B matrix (n × k): one-hot encoding of archetype cells
     /// - A matrix (k × n): sparse random assignments, column-L1-normalised
     ///
-    /// Each cell is randomly assigned to ⌈0.25 k⌉ archetypes with uniform
+    /// Each cell is randomly assigned to `min(10, k)` archetypes with uniform
     /// random weights, then column-normalised so each cell's weights sum to 1.
     /// A is then refined by one full Frank-Wolfe update pass against the fixed
     /// B for a better starting point.
     ///
-    /// Matches the Python reference, which uses the same 25%-of-k sparsity
-    /// and L1 column normalisation.
+    /// The L1 column normalisation matches the Python reference; the fixed
+    /// count is a deliberate deviation from it, since the reference scales the
+    /// non-zeros per column with `k` at ⌈0.25 k⌉.
     ///
     /// ### Params
     ///
     /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
     ///   detailed verbosity.
     /// * `seed` - Random seed for A matrix initialisation
+    /// * `backend` - Frank-Wolfe back end running the refinement pass
     fn initialise_matrices(
         &mut self,
         verbose: usize,
@@ -2593,12 +2602,16 @@ impl<'a> SEACells<'a> {
     /// - t1 = A Aᵀ     [k × k]
     /// - t2 = K² Aᵀ    [n × k]
     ///
-    /// K² @ B is recomputed each inner iteration as K @ (K @ B) because B
-    /// is what is being updated. Two matmuls through sparse K is still
-    /// cheaper than one through a materialised K² at single-cell scale.
+    /// `K² B` is carried through the inner loop rather than recomputed. Each
+    /// Frank-Wolfe step changes `B` by a rank-k update, so the matching change
+    /// to `K² B` is the same scaling plus one weighted column of `K²` per
+    /// archetype, assembled by [k_squared_column_combination]. Pruning folds
+    /// into the same delta. The update is exact; a full `K @ (K @ B)` recompute
+    /// still runs every [K2B_REFRESH_EVERY] iterations to bound fp drift and
+    /// the sparsity pattern.
     ///
-    /// Includes early stopping when the Frank-Wolfe step contribution
-    /// falls below FW_TOLERANCE after a minimum of 10 iterations.
+    /// Stops early once the relative Frank-Wolfe duality gap falls below
+    /// `FW_REL_TOL`, but never before [MIN_FW_ITERS] iterations have run.
     ///
     /// ### Params
     ///
@@ -2901,11 +2914,8 @@ impl<'a> SEACells<'a> {
     ///
     /// ### Returns
     ///
-    /// Vector of cell indices selected as archetypes
-    ///
-    /// ### Panics
-    ///
-    /// Panics if archetypes have not been initialised yet
+    /// Vector of cell indices selected as archetypes, or
+    /// `SEACellsArchetypesMissing` if they have not been initialised yet
     pub fn get_archetypes(&self) -> Result<Vec<usize>, BixverseErrors> {
         if self.archetypes.is_none() {
             return Err(BixverseErrors::SEACellsArchetypesMissing);

@@ -1,12 +1,11 @@
-//! Micro-benchmark for the SEACells B-gradient argmin kernel.
+//! Benchmarks for the GPU SEACells path, kernel and end-to-end.
 //!
 //! Rebuilds a `K²B` of realistic shape and density, times `launch_fw_argmin_b`
 //! in isolation, then runs the full fit both ways. `BIXVERSE_BENCH_BIG=1` adds
 //! shapes up to 500k cells.
 //!
-//! The micro-benchmark reports the kernel alone. It used to print a speedup
-//! against hardcoded CPU numbers copied from a bench file that no longer exists;
-//! the end-to-end section below is the only comparison here that measures both
+//! The micro-benchmark reports the kernel alone, with no CPU baseline: the
+//! end-to-end section below is the only comparison here that measures both
 //! sides in the same run.
 //!
 //! Timings are best-of-N with the worst also reported: a single-shot number is a

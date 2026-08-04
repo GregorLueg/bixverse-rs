@@ -1294,8 +1294,8 @@ impl MiloRParams {
 impl SEACellsParams {
     /// Generate SEACellsParams from an R list
     ///
-    /// Should values not be found within the List, the parameters will default
-    /// to sensible defaults based on the original SEACells implementation.
+    /// Any element missing from the list falls back to the matching field of
+    /// [SEACellsParams::default], so the two sides cannot drift apart.
     ///
     /// ### Params
     ///
