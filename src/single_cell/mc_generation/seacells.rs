@@ -890,8 +890,11 @@ impl FwAtoms {
 /// called once per A update and defaults to the CPU implementation, so an
 /// existing implementor keeps working untouched.
 ///
-/// Sampled at 50k cells and 666 archetypes, [argmins] is about a quarter of the
-/// fit and [columns_a] another quarter, so neither one on its own bounds it.
+/// Neither solve on its own bounds the fit: sampled at 50k cells and 666
+/// archetypes, [argmins] was about a quarter of wall-clock and [columns_a]
+/// another quarter. That split predates the current kernels and both have since
+/// got faster, so treat it as the reason the seam covers both rather than as a
+/// current attribution.
 ///
 /// [begin]: FwArgminB::begin
 /// [argmins]: FwArgminB::argmins
