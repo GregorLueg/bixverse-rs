@@ -1112,8 +1112,9 @@ pub(crate) fn fw_columns_a(
     n_iters: usize,
     pruning: Option<f32>,
 ) -> Vec<FwAtoms> {
-    /// Cells per rayon task. Large enough that the two `k`-length scratch buffers
-    /// are reused many times per task, small enough to keep the tail balanced.
+    /// Cells per rayon task. Large enough that the two `k`-length scratch
+    /// buffers are reused many times per task, small enough to keep the tail
+    /// balanced.
     const CHUNK: usize = 256;
 
     let n_chunks = n.div_ceil(CHUNK);
@@ -2517,7 +2518,8 @@ impl<'a> SEACells<'a> {
         if verbosity.detailed_verbosity() {
             println!(
                 "  A matrix Frank-Wolfe: {} iterations over {} cells",
-                self.params.max_fw_iters, n
+                self.params.max_fw_iters,
+                n.separate_with_underscores()
             );
         }
 
@@ -2526,10 +2528,11 @@ impl<'a> SEACells<'a> {
 
     /// Iteration-major A update, kept as the reference for the parity test
     ///
-    /// This is the formulation `update_a_mat` used before the cell-major rewrite.
-    /// It rebuilds the gradient from the sparse `A` every iteration and rebuilds
-    /// `A` through an `E` matrix, a sort and a sparse add. Retained so the new
-    /// path can be checked against it rather than against itself.
+    /// This is the formulation `update_a_mat` used before the cell-major
+    /// rewrite. It rebuilds the gradient from the sparse `A` every iteration
+    /// and rebuilds `A` through an `E` matrix, a sort and a sparse add.
+    /// Retained so the new path can be checked against it rather than against
+    /// itself.
     ///
     /// ### Params
     ///
