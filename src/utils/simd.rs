@@ -1,7 +1,8 @@
 //! Targeted SIMD implementations to accelerate specific hot loops in bixverse
 
 use std::sync::OnceLock;
-use wide::{f32x4, f32x8, f64x2, f64x4};
+#[allow(unused_imports)] // broke comiling with R otherwise
+use wide::{CmpLt, f32x4, f32x8, f64x2, f64x4};
 
 /// Enum for the different architectures and potential SIMD levels
 #[derive(Clone, Copy, Debug)]
