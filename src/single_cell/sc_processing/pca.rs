@@ -166,15 +166,23 @@ impl CscGeneChunk {
 /// Resolve which size factor to undo a file's normalisation with.
 ///
 /// [`CscGeneChunk::transform_to_clr`] has to be handed the exact factor the
-/// writer used, otherwise it computes garbage. Files that record it in their
-/// header are authoritative; older files do not and fall back to whatever the
-/// caller asked for.
+/// writer used, otherwise it computes garbage. Three cases:
+///
+/// - The header records a factor and it matches: use it.
+/// - The header records a factor and it disagrees: always a bug, so this is a
+///   hard [`BixverseErrors::TargetSizeMismatch`].
+/// - The header records nothing, i.e. a raw-only file or one written before
+///   `target_size` entered the format: nothing can be verified, so `requested`
+///   is taken on trust and a warning goes to stderr under detailed verbosity.
+///   Call this once per operation rather than per batch, or the warning
+///   repeats.
 ///
 /// ### Params
 ///
 /// * `reader` - The store the chunks were read from.
 /// * `requested` - The size factor the caller supplied, typically
-///   `SingleCellPcaParams::size_factor`.
+///   [`SingleCellPcaParams::size_factor`].
+/// * `verbosity` - Controls whether the unverifiable-file warning is emitted.
 ///
 /// ### Returns
 ///
@@ -183,13 +191,23 @@ impl CscGeneChunk {
 pub(crate) fn resolve_clr_size_factor<S: SingleCellReading>(
     reader: &S,
     requested: f32,
+    verbosity: &Verbosity,
 ) -> Result<f32, BixverseErrors> {
     match reader.target_size() {
         Some(header) if header != requested => {
             Err(BixverseErrors::TargetSizeMismatch { header, requested })
         }
         Some(header) => Ok(header),
-        None => Ok(requested),
+        None if !verbosity.detailed_verbosity() => Ok(requested),
+        None => {
+            eprintln!(
+                "[WARNING] This file does not record the target size it was normalised against, \
+                 so the CLR transformation cannot verify that {requested} is correct. If the file \
+                 was normalised against a different value the results will be wrong. Regenerate \
+                 the file to record it."
+            );
+            Ok(requested)
+        }
     }
 }
 
@@ -477,8 +495,8 @@ fn dense_pca<S: SingleCellReading>(
     let mut gene_chunks: Vec<CscGeneChunk> =
         reader.read_gene_parallel_filtered(gene_indices, &cell_set)?;
 
-    let size_factor = resolve_clr_size_factor(reader, params_pca.size_factor)?;
     if params_pca.clr {
+        let size_factor = resolve_clr_size_factor(reader, params_pca.size_factor, &verbosity)?;
         gene_chunks
             .par_iter_mut()
             .for_each(|chunk| chunk.transform_to_clr(size_factor));
@@ -755,6 +773,18 @@ pub fn pca_on_sc_streaming<S: SingleCellReading>(
 
     let mut scaled_matrix = Mat::<f64>::zeros(n_cells, n_genes);
 
+    // Resolved once rather than per batch: the answer cannot change between
+    // batches, and the unverifiable-file warning would otherwise repeat.
+    let clr_size_factor = if params_pca.clr {
+        Some(resolve_clr_size_factor(
+            reader,
+            params_pca.size_factor,
+            &verbosity,
+        )?)
+    } else {
+        None
+    };
+
     let start_scaling = Instant::now();
 
     for batch_idx in 0..num_batches {
@@ -774,8 +804,7 @@ pub fn pca_on_sc_streaming<S: SingleCellReading>(
         let start_loading = Instant::now();
         let mut gene_chunks = reader.read_gene_parallel_filtered(batch_gene_indices, &cell_set)?;
 
-        let size_factor = resolve_clr_size_factor(reader, params_pca.size_factor)?;
-        if params_pca.clr {
+        if let Some(size_factor) = clr_size_factor {
             gene_chunks
                 .par_iter_mut()
                 .for_each(|chunk| chunk.transform_to_clr(size_factor));
@@ -923,8 +952,8 @@ fn sparse_pca<S: SingleCellReading>(
     let mut gene_chunks: Vec<CscGeneChunk> =
         reader.read_gene_parallel_filtered(gene_indices, &cell_set)?;
 
-    let size_factor = resolve_clr_size_factor(reader, params_pca.size_factor)?;
     if params_pca.clr {
+        let size_factor = resolve_clr_size_factor(reader, params_pca.size_factor, &verbosity)?;
         gene_chunks
             .par_iter_mut()
             .for_each(|chunk| chunk.transform_to_clr(size_factor));

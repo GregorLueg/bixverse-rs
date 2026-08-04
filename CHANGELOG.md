@@ -28,6 +28,9 @@ Breaking changes in the streaming engine.
   `RawCountOverflow` instead of clipping; mtx ingest and the Scrublet doublet
   simulation keep full u32 width.
 - The binary format is consistently little-endian.
+- CLR transformations now verify the requested size factor against the one
+  recorded in the file header, and hard-error on a mismatch. Files written
+  before the header carried it warn under detailed verbosity instead.
 
 ## 0.3.12
 

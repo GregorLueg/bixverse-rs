@@ -82,8 +82,8 @@ where
     let mut gene_chunks: Vec<CscGeneChunk> =
         reader.read_gene_parallel_filtered(gene_indices, &cell_set)?;
 
-    let size_factor = resolve_clr_size_factor(reader, params_pca.size_factor)?;
     if params_pca.clr {
+        let size_factor = resolve_clr_size_factor(reader, params_pca.size_factor, &verbosity)?;
         gene_chunks
             .par_iter_mut()
             .for_each(|chunk| chunk.transform_to_clr(size_factor));
