@@ -1,8 +1,13 @@
 //! Micro-benchmark for the SEACells B-gradient argmin kernel.
 //!
 //! Rebuilds a `K²B` of realistic shape and density, times `launch_fw_argmin_b`
-//! against the per-iteration CPU cost recorded in [Shape], then runs the full fit
-//! both ways. `BIXVERSE_BENCH_BIG=1` adds shapes up to 500k cells.
+//! in isolation, then runs the full fit both ways. `BIXVERSE_BENCH_BIG=1` adds
+//! shapes up to 500k cells.
+//!
+//! The micro-benchmark reports the kernel alone. It used to print a speedup
+//! against hardcoded CPU numbers copied from a bench file that no longer exists;
+//! the end-to-end section below is the only comparison here that measures both
+//! sides in the same run.
 //!
 //! Timings are best-of-N with the worst also reported: a single-shot number is a
 //! first-call number, since shader compilation and buffer-pool first touch land
@@ -42,7 +47,7 @@ const REPEATS: usize = 5;
 // Bench shapes //
 //////////////////
 
-/// One measured configuration, matching a row of the CPU attribution.
+/// One measured configuration.
 #[derive(Clone, Copy, Debug)]
 struct Shape {
     /// Number of cells
@@ -51,12 +56,9 @@ struct Shape {
     k: usize,
     /// Fraction of `n * k` that is non-zero in `K²B`
     density: f64,
-    /// Measured CPU cost per Frank-Wolfe iteration, milliseconds, where a
-    /// baseline exists
-    cpu_ms: Option<f64>,
 }
 
-/// Shapes taken straight from the post-rewrite CPU attribution.
+/// Shapes covering the range the kernel is used over.
 ///
 /// ### Returns
 ///
@@ -67,19 +69,16 @@ fn shapes() -> Vec<Shape> {
             n: 20_000,
             k: 266,
             density: 0.0341,
-            cpu_ms: Some(1363.0 / 150.0),
         },
         Shape {
             n: 50_000,
             k: 666,
             density: 0.0308,
-            cpu_ms: Some(12280.0 / 150.0),
         },
         Shape {
             n: 50_000,
             k: 200,
             density: 0.0405,
-            cpu_ms: Some(5500.0 / 150.0),
         },
     ];
 
@@ -94,31 +93,26 @@ fn shapes() -> Vec<Shape> {
                 n: 200_000,
                 k: 1_000,
                 density: 0.03,
-                cpu_ms: None,
             },
             Shape {
                 n: 500_000,
                 k: 1_000,
                 density: 0.03,
-                cpu_ms: None,
             },
             Shape {
                 n: 500_000,
                 k: 2_000,
                 density: 0.02,
-                cpu_ms: None,
             },
             Shape {
                 n: 500_000,
                 k: 4_000,
                 density: 0.01,
-                cpu_ms: None,
             },
             Shape {
                 n: 500_000,
                 k: 6_666,
                 density: 0.006,
-                cpu_ms: None,
             },
         ]);
     }
@@ -262,20 +256,14 @@ fn run_shape(shape: Shape, device: &WgpuDevice) {
         + t1.vram_bytes()
         + part_val.vram_bytes()
         + part_idx.vram_bytes();
-    let speedup = match shape.cpu_ms {
-        Some(cpu) => format!("{:>6.1}x", cpu / best),
-        None => "     -".to_string(),
-    };
-
     println!(
         "n = {:>7}  k = {:>5}  nnz(K2B) = {:>10}  |  GPU best {:>8.2} ms  worst {:>8.2} ms  \
-         |  speedup {}  |  {:>6.1} GFLOP/s  |  {:>7.1} MB VRAM  |  t1 {:>6.1} MB",
+         |  {:>6.1} GFLOP/s  |  {:>7.1} MB VRAM  |  t1 {:>6.1} MB",
         n,
         k,
         nnz,
         best,
         worst,
-        speedup,
         flops / (best / 1000.0) / 1e9,
         vram as f64 / (1024.0 * 1024.0),
         (k * k * 4) as f64 / (1024.0 * 1024.0),
@@ -286,7 +274,7 @@ fn run_shape(shape: Shape, device: &WgpuDevice) {
 // End-to-end   //
 //////////////////
 
-/// Clustered synthetic embedding, matching `benches/seacells_bench.rs`.
+/// Clustered synthetic embedding.
 ///
 /// ### Params
 ///
@@ -429,7 +417,11 @@ fn main() {
     }
 
     println!("\nEnd to end, full fit, pruning 1e-7, 3 outer iterations\n");
-    for (n, k, knn) in [(20_000usize, 266usize, 15usize), (50_000, 666, 15)] {
+    for (n, k, knn) in [
+        (6_800usize, 250usize, 15usize),
+        (20_000, 266, 15),
+        (50_000, 666, 15),
+    ] {
         run_end_to_end(n, k, knn, &device);
     }
 
