@@ -13,6 +13,7 @@ use thousands::Separable;
 
 use crate::core::math::sparse::*;
 use crate::prelude::*;
+use crate::utils::simd::argmin_diff_simd_f32;
 
 ////////////////////////
 // kNN symmetrisation //
@@ -70,10 +71,22 @@ pub struct SEACellsParams {
     /// Which type of KNN graph symmetrisation to use
     pub graph_building: String,
     /// Shall tiny values during the Franke Wolfe updates be pruned.
-    /// This can affect numerical stability, but makes runs on large data sets
-    /// feasible.
+    ///
+    /// Leave this on. The Frank-Wolfe updates only ever add atoms: `A` grows by
+    /// one atom per iteration and `B` gains up to `k` entries per iteration via
+    /// [sparse_add_csr], and `B` carries over into the next outer iteration.
+    /// Without pruning the nnz of both climbs monotonically across the whole
+    /// fit, and with it the cost of every `K^2 X` product, so the time per
+    /// iteration keeps rising instead of settling.
+    ///
+    /// The accuracy cost is set by [SEACellsParams::pruning_threshold], not by
+    /// this flag. With pruning off the atom weights collapse to
+    /// `2(t + 1) / (T(T + 1))` for `T = max_fw_iters`, so any threshold below
+    /// that floor removes numerical dust only.
     pub pruning: bool,
-    /// Pruning threshold to apply
+    /// Pruning threshold to apply. Choose it below the smallest weight the
+    /// Frank-Wolfe schedule produces, `2 / (T(T + 1))` for `T = max_fw_iters`;
+    /// above that, pruning starts removing live mass and shifts the solution.
     pub pruning_threshold: f32,
     /// Optional number of landmarks. If provided, it will use the Nystroem
     /// approach during archetype generation.
@@ -82,6 +95,42 @@ pub struct SEACellsParams {
     /// [KnnParams] for the various approximate nearest neighbour searches
     /// in ann-search-rs
     pub knn_params: KnnParams,
+}
+
+impl SEACellsParams {
+    /// Generate a version of this with sensible base parameters
+    ///
+    /// The iteration counts follow the reference Python implementation of
+    /// Persad, et al. `n_sea_cells` has no meaningful default and is left at
+    /// zero, so callers have to set it.
+    ///
+    /// ### Returns
+    ///
+    /// Self.
+    pub fn new() -> Self {
+        Self {
+            // sea cells
+            n_sea_cells: 0,
+            max_fw_iters: 50,
+            convergence_epsilon: 1e-3,
+            max_iter: 100,
+            min_iter: 10,
+            greedy_threshold: 20000,
+            graph_building: "union".to_string(),
+            pruning: true,
+            pruning_threshold: 1e-7,
+            n_landmarks: None,
+            // knn
+            knn_params: KnnParams::default(),
+        }
+    }
+}
+
+/// Default implementation for SEACellsParams
+impl Default for SEACellsParams {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /////////////
@@ -114,6 +163,10 @@ pub fn assignments_to_metacells(assignments: &[usize], k: usize) -> Vec<Vec<usiz
 
 /// Helper function to prune tiny values and renormalise with L1
 ///
+/// Superseded on the live path by [prune_and_renormalise_tracked], which does
+/// the same thing and additionally reports what it changed so `K² B` can be
+/// mirrored. Retained for the iteration-major reference implementation.
+///
 /// ### Params
 ///
 /// * `mat` - Mutable reference to the CompressedSparseData2 to be pruned
@@ -122,6 +175,7 @@ pub fn assignments_to_metacells(assignments: &[usize], k: usize) -> Vec<Vec<usiz
 /// ### Returns
 ///
 /// Pruned matrix.
+#[cfg(test)]
 fn prune_and_renormalise(mat: &mut CompressedSparseData2<f32>, threshold: f32) {
     // remove values below threshold
     let mut new_data = Vec::new();
@@ -819,18 +873,25 @@ impl FwAtoms {
 // B argmin back end //
 ///////////////////////
 
-/// Back end for the per-archetype Frank-Wolfe gradient argmin in the B update.
+/// Back end for the Frank-Wolfe inner solves, on whatever device.
 ///
-/// This is the one seam between the CPU and GPU paths. It dominates the runtime
-/// while everything else the B update does is a few percent, so the GPU entry
-/// point swaps this out and reuses the rest of the loop rather than forking it.
+/// This is the seam between the CPU and GPU paths: the GPU entry point swaps it
+/// out and reuses the rest of the loop rather than forking it. Despite the name,
+/// which is kept because the trait is public and implemented downstream, it now
+/// covers both Frank-Wolfe solves.
 ///
 /// [begin] is called once per B update, when `t1` and `t2` change; [argmins]
 /// once per Frank-Wolfe iteration, when `K²B` and `B` change. Splitting them
-/// keeps the per-update uploads out of the per-iteration path.
+/// keeps the per-update uploads out of the per-iteration path. [columns_a] is
+/// called once per A update and defaults to the CPU implementation, so an
+/// existing implementor keeps working untouched.
+///
+/// Sampled at 50k cells and 666 archetypes, [argmins] is about a quarter of the
+/// fit and [columns_a] another quarter, so neither one on its own bounds it.
 ///
 /// [begin]: FwArgminB::begin
 /// [argmins]: FwArgminB::argmins
+/// [columns_a]: FwArgminB::columns_a
 pub trait FwArgminB {
     /// Bind the terms that stay fixed across one B update.
     ///
@@ -863,6 +924,38 @@ pub trait FwArgminB {
         k2_b: &CompressedSparseData2<f32>,
         b: &CompressedSparseData2<f32>,
     ) -> Result<(Vec<usize>, f32), BixverseErrors>;
+
+    /// Frank-Wolfe column solve for the A update, one column per cell.
+    ///
+    /// Defaults to the crate-internal `fw_columns_a`, so a back end that only
+    /// accelerates the B argmin needs no change.
+    ///
+    /// ### Params
+    ///
+    /// * `t1` - k × k matrix Bᵀ K² B
+    /// * `a_prev_t` - n × k, rows are columns of the previous A
+    /// * `k2_b` - n × k matrix K² B
+    /// * `k` - Number of archetypes
+    /// * `n` - Number of cells
+    /// * `n_iters` - Frank-Wolfe iterations per column
+    /// * `pruning` - Pruning threshold, or `None` to skip pruning
+    ///
+    /// ### Returns
+    ///
+    /// One [FwAtoms] per cell, in cell order.
+    #[allow(clippy::too_many_arguments)]
+    fn columns_a(
+        &mut self,
+        t1: &CompressedSparseData2<f32>,
+        a_prev_t: &CompressedSparseData2<f32>,
+        k2_b: &CompressedSparseData2<f32>,
+        k: usize,
+        n: usize,
+        n_iters: usize,
+        pruning: Option<f32>,
+    ) -> Result<Vec<FwAtoms>, BixverseErrors> {
+        Ok(fw_columns_a(t1, a_prev_t, k2_b, k, n, n_iters, pruning))
+    }
 }
 
 /// CPU back end, wrapping [fw_argmins_b].
@@ -1006,7 +1099,7 @@ fn fw_argmins_a(
 /// ### Returns
 ///
 /// One [FwAtoms] per cell, holding that column of the updated A.
-fn fw_columns_a(
+pub(crate) fn fw_columns_a(
     t1: &CompressedSparseData2<f32>,
     a_prev_t: &CompressedSparseData2<f32>,
     k2_b: &CompressedSparseData2<f32>,
@@ -1056,15 +1149,7 @@ fn fw_columns_a(
 
                     for t in 0..n_iters {
                         // fused argmin over the gradient, which is never stored
-                        let mut min_val = w[0] - k2b_row[0];
-                        let mut amin = 0usize;
-                        for c in 1..k {
-                            let grad = w[c] - k2b_row[c];
-                            if grad < min_val {
-                                min_val = grad;
-                                amin = c;
-                            }
-                        }
+                        let (amin, _) = argmin_diff_simd_f32(&w[..k], &k2b_row[..k]);
 
                         let gamma = 2.0 / (t as f32 + 2.0);
                         atoms.step(gamma, amin as u32);
@@ -1217,6 +1302,231 @@ fn fw_argmins_b(
     (argmins, (g_dot_b - g_dot_e).abs())
 }
 
+///////////////////////
+// K^2 B maintenance //
+///////////////////////
+
+/// Frank-Wolfe iterations between full recomputes of `K² B`.
+///
+/// The incremental update is exact, so this is not a correctness backstop for
+/// the arithmetic. It bounds fp drift and caps the sparsity pattern in the worst
+/// case.
+///
+/// It has to sit below `MIN_FW_ITERS` in [SEACells::update_b_mat] to fire at
+/// all: the loop may break as soon as `t >= MIN_FW_ITERS`, so a larger interval
+/// simply never runs on a B update that converges early, which is the common
+/// case.
+///
+/// The pattern does not in fact run away without it. `sparse_add_csr` drops
+/// overlaps below its own epsilon, which removes exactly the entries the prune
+/// corrections cancel, and those are always present in both addends. That is a
+/// property of a shared helper rather than of anything here, so the refresh
+/// stays as the thing this module actually controls.
+const K2B_REFRESH_EVERY: usize = 8;
+
+/// Frank-Wolfe iterations the B update always runs before it may converge.
+///
+/// Module scope rather than local because [K2B_REFRESH_EVERY] is only reachable
+/// while this holds: the loop cannot break earlier, so an interval below this
+/// always fires at least once, and one above it never fires on a B update that
+/// converges early.
+const MIN_FW_ITERS: usize = 10;
+
+const _: () = assert!(
+    K2B_REFRESH_EVERY < MIN_FW_ITERS,
+    "K2B_REFRESH_EVERY must sit below MIN_FW_ITERS or the refresh never fires"
+);
+
+/// Accumulate weighted columns of `K²` into a CSC matrix.
+///
+/// `K` is symmetric, so `K²[:, j] == K²[j, :]`, and row `j` of `K²` is the
+/// weighted merge of the `K` rows named by row `j` of `K`. Everything therefore
+/// reads `K`'s CSR layout directly and no transpose or CSC of `K` is needed.
+///
+/// Each column gets a dense `n`-length accumulator with a stamp array, so the
+/// per-column clear costs the number of touched entries rather than `n`.
+/// Columns are processed in chunks because rayon calls a `map_init` initialiser
+/// once per split job rather than once per thread, and allocating plus zeroing
+/// two `n`-length buffers per column is far more work than the merge itself.
+/// This matches [fw_columns_a] and [fw_argmins_b].
+///
+/// ### Params
+///
+/// * `kernel` - Symmetric kernel `K` as CSR `n × n`
+/// * `per_column` - `per_column[c]` lists `(j, w)` pairs, meaning column `c` of
+///   the result is `Σ w · K²[:, j]`. Empty lists give empty columns.
+/// * `n` - Number of cells
+///
+/// ### Returns
+///
+/// The combination as CSC `n × k`. Row indices within a column are in scatter
+/// order, **not** sorted: the only consumer is [transpose_sparse], which counts
+/// per row and then scatters in column order, so its output rows come out
+/// column-sorted whatever order the input column was in.
+fn k_squared_column_combination(
+    kernel: &CompressedSparseData2<f32>,
+    per_column: &[Vec<(u32, f32)>],
+    n: usize,
+) -> CompressedSparseData2<f32> {
+    const CHUNK: usize = 64;
+
+    let k = per_column.len();
+
+    let columns: Vec<(Vec<u32>, Vec<f32>)> = per_column
+        .par_chunks(CHUNK)
+        .map_init(
+            || (vec![0.0f32; n], vec![0u32; n], Vec::<u32>::new(), 0u32),
+            |(acc, stamp, touched, epoch), chunk| {
+                let mut out = Vec::with_capacity(chunk.len());
+
+                for sources in chunk.iter() {
+                    *epoch += 1;
+                    let tag = *epoch;
+                    touched.clear();
+
+                    for &(j, weight) in sources.iter() {
+                        // A dropped atom that was already zero contributes
+                        // nothing, and at `t = 0` every seed atom is one of
+                        // those. Skipping them here avoids a full `K²` row merge
+                        // per entry for a result the filter below discards.
+                        if weight == 0.0 {
+                            continue;
+                        }
+                        let j = j as usize;
+                        for mid in kernel.indptr[j] as usize..kernel.indptr[j + 1] as usize {
+                            let m = kernel.indices[mid] as usize;
+                            let scaled = kernel.data[mid] * weight;
+                            for oid in kernel.indptr[m] as usize..kernel.indptr[m + 1] as usize {
+                                let o = kernel.indices[oid] as usize;
+                                if stamp[o] != tag {
+                                    stamp[o] = tag;
+                                    acc[o] = 0.0;
+                                    touched.push(o as u32);
+                                }
+                                acc[o] += scaled * kernel.data[oid];
+                            }
+                        }
+                    }
+
+                    let mut indices = Vec::with_capacity(touched.len());
+                    let mut data = Vec::with_capacity(touched.len());
+                    for &o in touched.iter() {
+                        let value = acc[o as usize];
+                        if value != 0.0 {
+                            indices.push(o);
+                            data.push(value);
+                        }
+                    }
+                    out.push((indices, data));
+                }
+
+                out
+            },
+        )
+        .flatten()
+        .collect();
+
+    let nnz: usize = columns.iter().map(|(idx, _)| idx.len()).sum();
+    let mut indptr = Vec::with_capacity(k + 1);
+    let mut indices = Vec::with_capacity(nnz);
+    let mut data = Vec::with_capacity(nnz);
+    indptr.push(0u32);
+    for (col_indices, col_data) in columns {
+        indices.extend_from_slice(&col_indices);
+        data.extend_from_slice(&col_data);
+        indptr.push(indices.len() as u32);
+    }
+
+    CompressedSparseData2 {
+        data,
+        indices,
+        indptr,
+        cs_type: CompressedSparseFormat::Csc,
+        data_2: None,
+        shape: (n, k),
+    }
+}
+
+/// Prune tiny values and L1-normalise columns, reporting what changed.
+///
+/// Same operation as [prune_and_renormalise], but returns enough to mirror it
+/// onto `K² B` exactly. Mirroring `B ← (B - D) diag(s)` needs both the dropped
+/// entries `D` and the per-column factors `s`, since
+/// `K²(B - D) diag(s) = (K²B - Σ v · K²[:, j]) diag(s)`.
+///
+/// ### Params
+///
+/// * `mat` - CSR matrix to prune in place
+/// * `threshold` - Values at or below this magnitude are dropped
+///
+/// ### Returns
+///
+/// `(dropped, factors)` where `dropped` holds `(column, row, value)` for every
+/// removed entry and `factors[c]` is the multiplier applied to column `c`.
+fn prune_and_renormalise_tracked(
+    mat: &mut CompressedSparseData2<f32>,
+    threshold: f32,
+) -> (Vec<(u32, u32, f32)>, Vec<f32>) {
+    assert!(
+        mat.cs_type.is_csr(),
+        "prune_and_renormalise_tracked expects CSR; a CSC input would read rows as columns"
+    );
+
+    let ncols = mat.shape.1;
+    let mut dropped = Vec::new();
+    let mut new_data = Vec::with_capacity(mat.data.len());
+    let mut new_indices = Vec::with_capacity(mat.indices.len());
+    let mut new_indptr = Vec::with_capacity(mat.indptr.len());
+    new_indptr.push(0u32);
+
+    for row in 0..mat.shape.0 {
+        for idx in mat.indptr[row] as usize..mat.indptr[row + 1] as usize {
+            let value = mat.data[idx];
+            let col = mat.indices[idx];
+            if value.abs() > threshold {
+                new_data.push(value);
+                new_indices.push(col);
+            } else {
+                dropped.push((col, row as u32, value));
+            }
+        }
+        new_indptr.push(new_data.len() as u32);
+    }
+
+    mat.data = new_data;
+    mat.indices = new_indices;
+    mat.indptr = new_indptr;
+
+    // The floor guard matches `normalise_csr_columns_l1`, which leaves a column
+    // alone when its sum does not clear it; that is what keeps a fully-pruned
+    // column behaving the same on both paths.
+    //
+    // The scaling deliberately does not match: that function divides by the sum
+    // and this multiplies by its reciprocal. The same factors are applied to
+    // `K² B`, and multiplying both by one reciprocal keeps the two exactly
+    // consistent, which matters more here than agreeing in the last bit with a
+    // helper this path no longer calls.
+    let mut col_sums = vec![0.0f32; ncols];
+    for (idx, &col) in mat.indices.iter().enumerate() {
+        col_sums[col as usize] += mat.data[idx];
+    }
+    let factors: Vec<f32> = col_sums
+        .iter()
+        .map(|&sum| {
+            if (sum as f64) > FW_RENORM_FLOOR {
+                1.0 / sum
+            } else {
+                1.0
+            }
+        })
+        .collect();
+    for (idx, &col) in mat.indices.iter().enumerate() {
+        mat.data[idx] *= factors[col as usize];
+    }
+
+    (dropped, factors)
+}
+
 //////////
 // Main //
 //////////
@@ -1242,6 +1552,14 @@ pub struct SEACells<'a> {
     a: Option<CompressedSparseData2<f32>>,
     /// Archetype matrix (n × k) defining SEACells as cell combinations.
     b: Option<CompressedSparseData2<f32>>,
+    /// Cached `K² B` (n × k), maintained incrementally through the Frank-Wolfe
+    /// B loop.
+    ///
+    /// Invariant: whenever this and [SEACells::b] are both `Some`, this equals
+    /// `K² · b`. Every consumer of `K² B` reads it from here rather than
+    /// recomputing, so anything that writes `b` must write this in the same
+    /// step. [K2B_REFRESH_EVERY] governs how often it is rebuilt from scratch.
+    k2_b: Option<CompressedSparseData2<f32>>,
     /// Indices of cells selected as initial archetypes.
     archetypes: Option<Vec<usize>>,
     /// Residual sum of squares at each iteration.
@@ -1271,6 +1589,7 @@ impl<'a> SEACells<'a> {
             kernel_mat: None,
             a: None,
             b: None,
+            k2_b: None,
             archetypes: None,
             convergence_threshold: None,
             k_frobenius_norm_sq: None,
@@ -1488,12 +1807,13 @@ impl<'a> SEACells<'a> {
             return Err(BixverseErrors::SEACellsArchetypesMissing);
         }
 
-        self.initialise_matrices(verbose, seed as u64)?;
+        self.initialise_matrices(verbose, seed as u64, backend)?;
 
         let a = self.a.as_ref().unwrap();
         let b = self.b.as_ref().unwrap();
+        let k2_b = self.k2_b.as_ref().unwrap();
 
-        let initial_rss = self.compute_rss(a, b)?;
+        let initial_rss = self.compute_rss(a, b, k2_b)?;
         self.rss_history.push(initial_rss);
         self.convergence_threshold = Some(self.params.convergence_epsilon * initial_rss);
 
@@ -1514,15 +1834,31 @@ impl<'a> SEACells<'a> {
 
             let b_current = self.b.take().unwrap();
             let a_current = self.a.take().unwrap();
+            let k2_b_current = self.k2_b.take().unwrap();
 
-            let a_new = self.update_a_mat(&b_current, &a_current, verbose)?;
-            let b_new = self.update_b_mat(&a_new, &b_current, verbose, backend)?;
+            debug_assert!(
+                self.k2_b_matches(&b_current, &k2_b_current),
+                "the K^2 B cache drifted from B before iteration {}",
+                n_iter
+            );
 
-            let rss = self.compute_rss(&a_new, &b_new)?;
+            let a_new =
+                self.update_a_mat(&b_current, &k2_b_current, &a_current, verbose, backend)?;
+            let (b_new, k2_b_new) =
+                self.update_b_mat(&a_new, &b_current, &k2_b_current, verbose, backend)?;
+
+            debug_assert!(
+                self.k2_b_matches(&b_new, &k2_b_new),
+                "the K^2 B cache drifted from B after iteration {}",
+                n_iter
+            );
+
+            let rss = self.compute_rss(&a_new, &b_new, &k2_b_new)?;
             self.rss_history.push(rss);
 
             self.a = Some(a_new);
             self.b = Some(b_new);
+            self.k2_b = Some(k2_b_new);
 
             let iter_duration = iter_start.elapsed();
 
@@ -1996,7 +2332,12 @@ impl<'a> SEACells<'a> {
     /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
     ///   detailed verbosity.
     /// * `seed` - Random seed for A matrix initialisation
-    fn initialise_matrices(&mut self, verbose: usize, seed: u64) -> Result<(), BixverseErrors> {
+    fn initialise_matrices(
+        &mut self,
+        verbose: usize,
+        seed: u64,
+        backend: &mut impl FwArgminB,
+    ) -> Result<(), BixverseErrors> {
         let verbosity = parse_verbosity_level(verbose);
 
         let archetypes = self.archetypes.as_ref().unwrap();
@@ -2039,12 +2380,64 @@ impl<'a> SEACells<'a> {
         let mut a = coo_to_csr(&a_rows.index_cast(), &a_cols.index_cast(), &a_vals, (k, n));
         normalise_csr_columns_l1(&mut a);
 
-        a = self.update_a_mat(&b, &a, verbose)?;
+        let k2_b = self.k_squared_matmul(&b)?;
+        a = self.update_a_mat(&b, &k2_b, &a, verbose, backend)?;
 
         self.a = Some(a);
         self.b = Some(b);
+        self.k2_b = Some(k2_b);
 
         Ok(())
+    }
+
+    /// Whether a cached `K² B` still matches its `B`.
+    ///
+    /// Only ever called from `debug_assert!`: it recomputes the product from
+    /// scratch, which is exactly the work the cache exists to avoid. Every
+    /// consumer of [SEACells::k2_b] trusts the invariant blindly, so an edit
+    /// that writes `b` without writing `k2_b` would otherwise produce a
+    /// silently wrong gradient and RSS.
+    ///
+    /// ### Params
+    ///
+    /// * `b` - The archetype matrix
+    /// * `k2_b` - The cached product to check against it
+    ///
+    /// ### Returns
+    ///
+    /// `true` when the two agree to a scale-relative tolerance.
+    ///
+    /// Not `cfg(debug_assertions)`-gated: `debug_assert!` still compiles its
+    /// argument in release, it just never evaluates it.
+    fn k2_b_matches(
+        &self,
+        b: &CompressedSparseData2<f32>,
+        k2_b: &CompressedSparseData2<f32>,
+    ) -> bool {
+        let Ok(reference) = self.k_squared_matmul(b) else {
+            return false;
+        };
+        if reference.shape != k2_b.shape {
+            return false;
+        }
+
+        let (nrow, ncol) = reference.shape;
+        let mut dense = vec![0.0f32; nrow * ncol];
+        for row in 0..nrow {
+            for idx in reference.indptr[row] as usize..reference.indptr[row + 1] as usize {
+                dense[row * ncol + reference.indices[idx] as usize] += reference.data[idx];
+            }
+        }
+        let scale = dense.iter().fold(0.0f32, |acc, v| acc.max(v.abs()));
+
+        for row in 0..nrow {
+            for idx in k2_b.indptr[row] as usize..k2_b.indptr[row + 1] as usize {
+                dense[row * ncol + k2_b.indices[idx] as usize] -= k2_b.data[idx];
+            }
+        }
+        let worst = dense.iter().fold(0.0f32, |acc, v| acc.max(v.abs()));
+
+        scale == 0.0 || worst / scale < 1e-3
     }
 
     /// Update assignment matrix A using Frank-Wolfe algorithm
@@ -2063,7 +2456,8 @@ impl<'a> SEACells<'a> {
     /// - t1 = Bᵀ K² B   [k × k]
     /// - t2 = Bᵀ K²     [k × n]
     ///
-    /// K² @ B is computed as K @ (K @ B) without ever materialising K².
+    /// `K² B` is supplied by the caller rather than recomputed; see
+    /// [SEACells::k2_b] for the invariant that makes that safe.
     ///
     /// For each cell (column), sets weight to 1 for the archetype with
     /// minimum gradient, then takes a convex step A ← (1 - γ) A + γ E
@@ -2072,9 +2466,11 @@ impl<'a> SEACells<'a> {
     /// ### Params
     ///
     /// * `b` - Current archetype matrix
+    /// * `k2_b` - `K² b`, matching `b`
     /// * `a_prev` - Previous assignment matrix
     /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
     ///   detailed verbosity.
+    /// * `backend` - Frank-Wolfe back end running the column solve
     ///
     /// ### Returns
     ///
@@ -2082,12 +2478,13 @@ impl<'a> SEACells<'a> {
     fn update_a_mat(
         &self,
         b: &CompressedSparseData2<f32>,
+        k2_b: &CompressedSparseData2<f32>,
         a_prev: &CompressedSparseData2<f32>,
         verbose: usize,
+        backend: &mut impl FwArgminB,
     ) -> Result<CompressedSparseData2<f32>, BixverseErrors> {
         let verbosity = parse_verbosity_level(verbose);
 
-        let k2_b = self.k_squared_matmul(b)?;
         let t2 = k2_b.transpose_and_convert();
         let t1 = csr_matmul_csr(&t2, b)?;
         drop(t2);
@@ -2096,15 +2493,15 @@ impl<'a> SEACells<'a> {
         let n = a_prev.shape.1;
         let k = a_prev.shape.0;
 
-        let columns = fw_columns_a(
+        let columns = backend.columns_a(
             &t1,
             &a_prev_t,
-            &k2_b,
+            k2_b,
             k,
             n,
             self.params.max_fw_iters,
             self.params.pruning.then_some(self.params.pruning_threshold),
-        );
+        )?;
 
         let a = fw_atoms_to_csr(&columns, (k, n));
 
@@ -2207,23 +2604,31 @@ impl<'a> SEACells<'a> {
     ///
     /// * `a` - Current assignment matrix
     /// * `b_prev` - Previous archetype matrix
+    /// * `k2_b_prev` - `K² b_prev`, matching `b_prev`
     /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
     ///   detailed verbosity.
+    /// * `backend` - Frank-Wolfe back end running the per-archetype argmin
     ///
     /// ### Returns
     ///
-    /// Updated archetype matrix
+    /// The updated archetype matrix and its `K² B`, maintained together so the
+    /// invariant on [SEACells::k2_b] survives the call.
     fn update_b_mat(
         &self,
         a: &CompressedSparseData2<f32>,
         b_prev: &CompressedSparseData2<f32>,
+        k2_b_prev: &CompressedSparseData2<f32>,
         verbose: usize,
         backend: &mut impl FwArgminB,
-    ) -> Result<CompressedSparseData2<f32>, BixverseErrors> {
+    ) -> Result<(CompressedSparseData2<f32>, CompressedSparseData2<f32>), BixverseErrors> {
         let verbosity = parse_verbosity_level(verbose);
 
         const FW_REL_TOL: f32 = 1e-3;
-        const MIN_FW_ITERS: usize = 10;
+
+        let kernel = self
+            .kernel_mat
+            .as_ref()
+            .ok_or(BixverseErrors::SEACellsKernelMatrixMissing)?;
 
         let a_t = a.transpose_and_convert();
         let t1 = csr_matmul_csr(a, &a_t)?;
@@ -2232,12 +2637,12 @@ impl<'a> SEACells<'a> {
         drop(t2);
 
         let mut b = b_prev.clone();
+        let mut k2_b = k2_b_prev.clone();
         let n = b.shape.0;
         let k = b.shape.1;
         let mut initial_gap: f32 = 0.0;
 
         for t in 0..self.params.max_fw_iters {
-            let k2_b = self.k_squared_matmul(&b)?;
             let (argmins, fw_gap) = backend.argmins(&k2_b, &b)?;
             if t == 0 {
                 initial_gap = fw_gap.max(1e-12);
@@ -2264,15 +2669,49 @@ impl<'a> SEACells<'a> {
             let e_scaled = sparse_scalar_multiply_csr(&e, step_size);
             b = sparse_add_csr(&b, &e_scaled)?;
 
-            if self.params.pruning {
-                prune_and_renormalise(&mut b, self.params.pruning_threshold);
+            // `E` is one unit entry per column, so `K² E` is one column of `K²`
+            // per archetype and the whole update is rank-k. Pruning folds into
+            // the same delta: dropping `B[j, c] = v` contributes `-v K²[:, j]`.
+            let mut contributions: Vec<Vec<(u32, f32)>> = vec![Vec::new(); k];
+            for (col, &row) in argmins.iter().enumerate() {
+                contributions[col].push((row as u32, step_size));
+            }
+
+            let renorm = if self.params.pruning {
+                let (dropped, factors) =
+                    prune_and_renormalise_tracked(&mut b, self.params.pruning_threshold);
+                for (col, row, value) in dropped {
+                    contributions[col as usize].push((row, -value));
+                }
+                Some(factors)
+            } else {
+                None
+            };
+
+            for val in &mut k2_b.data {
+                *val *= retain;
+            }
+            let delta = k_squared_column_combination(kernel, &contributions, n);
+            k2_b = sparse_add_csr(&k2_b, &transpose_sparse(&delta))?;
+            if let Some(factors) = renorm {
+                for (idx, &col) in k2_b.indices.iter().enumerate() {
+                    k2_b.data[idx] *= factors[col as usize];
+                }
+            }
+
+            // The incremental form is exact but only ever grows the sparsity
+            // pattern, since entries decay without reaching zero.
+            if (t + 1) % K2B_REFRESH_EVERY == 0 {
+                k2_b = self.k_squared_matmul(&b)?;
             }
 
             if verbosity.detailed_verbosity() && (t + 1) % 10 == 0 {
                 println!(
-                    "  B matrix Frank-Wolfe iteration: {} / {}",
+                    "  B matrix Frank-Wolfe iteration: {} / {}, nnz(B) = {}, nnz(K^2 B) = {}",
                     t + 1,
-                    self.params.max_fw_iters
+                    self.params.max_fw_iters,
+                    b.get_nnz().separate_with_underscores(),
+                    k2_b.get_nnz().separate_with_underscores()
                 );
             }
 
@@ -2288,7 +2727,7 @@ impl<'a> SEACells<'a> {
             }
         }
 
-        Ok(b)
+        Ok((b, k2_b))
     }
 
     /// Compute residual sum of squares (RSS)
@@ -2308,6 +2747,7 @@ impl<'a> SEACells<'a> {
     ///
     /// * `a` - Assignment matrix
     /// * `b` - Archetype matrix
+    /// * `k2_b` - `K² b`, matching `b`
     ///
     /// ### Returns
     ///
@@ -2316,8 +2756,9 @@ impl<'a> SEACells<'a> {
         &self,
         a: &CompressedSparseData2<f32>,
         b: &CompressedSparseData2<f32>,
+        k2_b: &CompressedSparseData2<f32>,
     ) -> Result<f32, BixverseErrors> {
-        self.compute_rss_trace(a, b)
+        self.compute_rss_trace(a, b, k2_b)
     }
 
     /// RSS by materialising the reconstruction
@@ -2357,8 +2798,8 @@ impl<'a> SEACells<'a> {
     /// ```||K - K B A||_F² = ||K||_F² - 2 tr(K² B A) + tr(A Aᵀ Bᵀ K² B)```
     ///
     /// Cyclic trace reordering keeps every intermediate at worst (n × k) or
-    /// (k × k); the n × n reconstruction is never formed. All K² @ X terms are
-    /// computed as K @ (K @ X).
+    /// (k × k); the n × n reconstruction is never formed. `K² B` comes from the
+    /// caller rather than being recomputed, see [SEACells::k2_b].
     ///
     /// The final `.sqrt()` converts back to the Frobenius norm to match
     /// `compute_rss_simple`.
@@ -2367,6 +2808,7 @@ impl<'a> SEACells<'a> {
     ///
     /// * `a` - The A matrix
     /// * `b` - The B matrix
+    /// * `k2_b` - `K² b`, matching `b`
     ///
     /// ### Returns
     ///
@@ -2375,18 +2817,16 @@ impl<'a> SEACells<'a> {
         &self,
         a: &CompressedSparseData2<f32>,
         b: &CompressedSparseData2<f32>,
+        k2_b: &CompressedSparseData2<f32>,
     ) -> Result<f32, BixverseErrors> {
         // Term 1: ||K||_F^2, cached by construct_kernel_mat
         let k_frob_sq = self
             .k_frobenius_norm_sq
             .ok_or(BixverseErrors::SEACellsKernelMatrixMissing)?;
 
-        // K^2 @ B = K @ (K @ B)  [n × k]
-        let k2_b = self.k_squared_matmul(b)?;
-
         // Term 2: -2 * trace(K^2 @ B @ A)
         // Reorder via cyclic property: trace(A @ K^2 @ B)  [k × k]
-        let a_k2b = csr_matmul_csr(a, &k2_b)?;
+        let a_k2b = csr_matmul_csr(a, k2_b)?;
         let trace_term = matrix_trace(&a_k2b);
 
         // Term 3: trace(A^T @ B^T @ K^2 @ B @ A)
@@ -2395,7 +2835,7 @@ impl<'a> SEACells<'a> {
         let a_at = csr_matmul_csr(a, &a_t)?; // [k × k]
 
         let b_t = b.transpose_and_convert();
-        let bt_k2b = csr_matmul_csr(&b_t, &k2_b)?; // [k × k]
+        let bt_k2b = csr_matmul_csr(&b_t, k2_b)?; // [k × k]
 
         let result = csr_matmul_csr(&a_at, &bt_k2b)?; // [k × k]
         let reconstruction_frob_sq = matrix_trace(&result);
@@ -2785,6 +3225,115 @@ mod tests {
         (b, a)
     }
 
+    /// The incrementally maintained `K² B` must equal the from-scratch product.
+    ///
+    /// This is the gate for the whole incremental scheme. `update_b_mat` never
+    /// recomputes `K² B`, it rides the rank-k identity
+    /// `K² B_{t+1} = (1-γ) K² B_t + γ K²E_t` and folds the pruning corrections
+    /// into the same delta, so if the maintenance drifts every downstream
+    /// gradient and the RSS drift with it and nothing else would notice.
+    ///
+    /// Swept over the [K2B_REFRESH_EVERY] boundary so the assertion is about the
+    /// incremental path rather than a full recompute that happened to land on
+    /// the last iteration, and over both pruning settings because the dropped
+    /// entries are the part most likely to be mirrored wrongly.
+    #[test]
+    fn test_k2b_maintenance_matches_from_scratch() {
+        let n = 600usize;
+        let k = 12usize;
+
+        // The refresh firing at all is guaranteed by the `K2B_REFRESH_EVERY <
+        // MIN_FW_ITERS` compile-time assertion next to those constants: the
+        // convergence break cannot trigger before `MIN_FW_ITERS`, so the loop
+        // always reaches the refresh. The branch itself is not observable here.
+
+        for (max_fw_iters, pruning, threshold) in [
+            // Below the refresh interval: purely incremental, nothing recomputed.
+            (K2B_REFRESH_EVERY - 1, false, 0.0f32),
+            (K2B_REFRESH_EVERY - 1, true, 1e-7),
+            // Several incremental steps *after* a refresh, so the tail being
+            // gated is incremental rather than a fresh product.
+            (K2B_REFRESH_EVERY + 5, false, 0.0),
+            (K2B_REFRESH_EVERY + 5, true, 1e-7),
+            // Fires hard enough that entries are actually dropped, which is the
+            // path the correction terms exist for.
+            (K2B_REFRESH_EVERY + 4, true, 5e-2),
+        ] {
+            let params = SEACellsParams {
+                n_sea_cells: k,
+                max_fw_iters,
+                convergence_epsilon: 1e-3,
+                max_iter: 2,
+                min_iter: 2,
+                greedy_threshold: 0,
+                graph_building: "union".to_string(),
+                pruning,
+                pruning_threshold: threshold,
+                n_landmarks: None,
+                knn_params: KnnParams::new(),
+            };
+
+            let mut model = SEACells::new(n, &params);
+            let kernel = banded_kernel(n, 3);
+            model.k_frobenius_norm_sq = Some(frobenius_norm_sq_f64(&kernel));
+            model.kernel_mat = Some(kernel);
+
+            let (b, a_prev) = initial_matrices(n, k, 11);
+            let k2_b = model.k_squared_matmul(&b).expect("K^2 B failed");
+            let a = model
+                .update_a_mat(&b, &k2_b, &a_prev, 0, &mut CpuFwArgminB::default())
+                .expect("A update failed");
+
+            let (b_new, k2_b_new) = model
+                .update_b_mat(&a, &b, &k2_b, 0, &mut CpuFwArgminB::default())
+                .expect("B update failed");
+
+            let reference = model.k_squared_matmul(&b_new).expect("K^2 B failed");
+
+            assert_eq!(k2_b_new.shape, reference.shape);
+
+            let maintained = densify(&k2_b_new);
+            let expected = densify(&reference);
+
+            let scale = expected.iter().fold(0.0f32, |acc, v| acc.max(v.abs()));
+            assert!(scale > 0.0, "reference K^2 B is all zeros, test is vacuous");
+
+            // Per entry, not against the global maximum. The entries span
+            // several orders of magnitude, so a tolerance scaled to the largest
+            // one lets anything small be arbitrarily wrong. The absolute floor
+            // is what keeps near-zero entries from failing on pure rounding.
+            let floor = 1e-6 * scale;
+            let mut worst_rel = 0.0f32;
+            let mut worst_at = (0usize, 0usize);
+            for row in 0..expected.len() / k2_b_new.shape.1 {
+                for col in 0..k2_b_new.shape.1 {
+                    let i = row * k2_b_new.shape.1 + col;
+                    let diff = (maintained[i] - expected[i]).abs();
+                    if diff <= floor {
+                        continue;
+                    }
+                    let rel = diff / expected[i].abs().max(floor);
+                    if rel > worst_rel {
+                        worst_rel = rel;
+                        worst_at = (row, col);
+                    }
+                }
+            }
+
+            assert!(
+                worst_rel < 1e-3,
+                "K^2 B drifted from the from-scratch product: worst relative {:.3e} at \
+                 ({}, {}) (max_fw_iters {}, pruning {:?}, threshold {})",
+                worst_rel,
+                worst_at.0,
+                worst_at.1,
+                max_fw_iters,
+                pruning,
+                threshold
+            );
+        }
+    }
+
     /// The cell-major A update must reproduce the iteration-major one it replaces,
     /// at every pruning setting: pruning off, a threshold that never fires, and
     /// one that fires hard.
@@ -2823,8 +3372,9 @@ mod tests {
 
             let (b, a_prev) = initial_matrices(n, k, 11);
 
+            let k2_b = model.k_squared_matmul(&b).expect("K^2 B failed");
             let a_new = model
-                .update_a_mat(&b, &a_prev, 0)
+                .update_a_mat(&b, &k2_b, &a_prev, 0, &mut CpuFwArgminB::default())
                 .expect("cell-major update failed");
             let a_ref = model
                 .update_a_mat_iteration_major(&b, &a_prev)
@@ -2872,8 +3422,8 @@ mod tests {
 
             // The objective is what the argmin is a means to. A flipped near-tie
             // must not move it.
-            let rss_new = model.compute_rss(&a_new, &b).expect("RSS failed");
-            let rss_ref = model.compute_rss(&a_ref, &b).expect("RSS failed");
+            let rss_new = model.compute_rss(&a_new, &b, &k2_b).expect("RSS failed");
+            let rss_ref = model.compute_rss(&a_ref, &b, &k2_b).expect("RSS failed");
             assert_relative_eq!(rss_new, rss_ref, max_relative = 1e-4);
 
             // Memory regression guard: the rewrite must not densify. The slack
@@ -2943,10 +3493,15 @@ mod tests {
             model.kernel_mat = Some(kernel);
 
             let (b, a_prev) = initial_matrices(n, k, 11);
-            let a = model.update_a_mat(&b, &a_prev, 0).expect("A update failed");
+            let k2_b = model.k_squared_matmul(&b).expect("K^2 B failed");
+            let a = model
+                .update_a_mat(&b, &k2_b, &a_prev, 0, &mut CpuFwArgminB::default())
+                .expect("A update failed");
 
             let simple = model.compute_rss_simple(&a, &b).expect("simple failed");
-            let trace = model.compute_rss_trace(&a, &b).expect("trace failed");
+            let trace = model
+                .compute_rss_trace(&a, &b, &k2_b)
+                .expect("trace failed");
 
             let residual_fraction = simple / model.k_frobenius_norm_sq.unwrap().sqrt() as f32;
             println!(
@@ -3003,14 +3558,19 @@ mod tests {
             model.kernel_mat = Some(kernel);
 
             let (b, a_prev) = initial_matrices(n, k, 11);
-            let a = model.update_a_mat(&b, &a_prev, 0).expect("A update failed");
+            let k2_b = model.k_squared_matmul(&b).expect("K^2 B failed");
+            let a = model
+                .update_a_mat(&b, &k2_b, &a_prev, 0, &mut CpuFwArgminB::default())
+                .expect("A update failed");
 
             let simple_start = Instant::now();
             let simple = model.compute_rss_simple(&a, &b).expect("simple failed");
             let simple_time = simple_start.elapsed();
 
             let trace_start = Instant::now();
-            let trace = model.compute_rss_trace(&a, &b).expect("trace failed");
+            let trace = model
+                .compute_rss_trace(&a, &b, &k2_b)
+                .expect("trace failed");
             let trace_time = trace_start.elapsed();
 
             let rel = ((simple - trace) / simple).abs();

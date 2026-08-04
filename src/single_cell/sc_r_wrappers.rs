@@ -1305,6 +1305,7 @@ impl SEACellsParams {
     ///
     /// The `SEACellsParams` with all parameters set.
     pub fn from_r_list(r_list: List) -> Result<Self> {
+        let defaults = Self::default();
         let knn_params = KnnParams::from_r_list(r_list.clone())?;
 
         let seacells_list: HashMap<&str, Robj> = r_list.try_into()?;
@@ -1312,50 +1313,56 @@ impl SEACellsParams {
         let n_sea_cells = seacells_list
             .get("n_sea_cells")
             .and_then(|v| v.as_integer())
-            .unwrap_or(0) as usize;
+            .map(|v| v as usize)
+            .unwrap_or(defaults.n_sea_cells);
 
         let max_fw_iters = seacells_list
             .get("max_fw_iters")
             .and_then(|v| v.as_integer())
-            .unwrap_or(50) as usize;
+            .map(|v| v as usize)
+            .unwrap_or(defaults.max_fw_iters);
 
         // convergence_epsilon: algorithm converges when RSS change < epsilon * RSS(0)
-        // Default: 1e-3 from Python implementation
         let convergence_epsilon = seacells_list
             .get("convergence_epsilon")
             .and_then(|v| v.as_real())
-            .unwrap_or(1e-3) as f32;
+            .map(|v| v as f32)
+            .unwrap_or(defaults.convergence_epsilon);
 
         let max_iter = seacells_list
             .get("max_iter")
             .and_then(|v| v.as_integer())
-            .unwrap_or(100) as usize;
+            .map(|v| v as usize)
+            .unwrap_or(defaults.max_iter);
 
         let min_iter = seacells_list
             .get("min_iter")
             .and_then(|v| v.as_integer())
-            .unwrap_or(10) as usize;
+            .map(|v| v as usize)
+            .unwrap_or(defaults.min_iter);
 
         let greedy_threshold = seacells_list
             .get("greedy_threshold")
             .and_then(|v| v.as_integer())
-            .unwrap_or(20000) as usize;
+            .map(|v| v as usize)
+            .unwrap_or(defaults.greedy_threshold);
 
         let graph_building = seacells_list
             .get("graph_building")
             .and_then(|v| v.as_str())
-            .unwrap_or("union")
-            .to_string();
+            .map(String::from)
+            .unwrap_or(defaults.graph_building);
 
         let pruning = seacells_list
             .get("pruning")
             .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+            .unwrap_or(defaults.pruning);
 
-        let pruning_threshold: f32 = seacells_list
+        let pruning_threshold = seacells_list
             .get("pruning_threshold")
             .and_then(|v| v.as_real())
-            .unwrap_or(1e-7) as f32;
+            .map(|v| v as f32)
+            .unwrap_or(defaults.pruning_threshold);
 
         let n_landmarks = seacells_list
             .get("n_landmarks")
