@@ -615,6 +615,23 @@ pub enum BixverseErrors {
         /// Per-dimension device limit as `(x, y, z)`.
         limit: (u32, u32, u32),
     },
+    /// A single buffer exceeds the device's per-binding size limit.
+    ///
+    /// Over-sized bindings are rejected without an error surfacing: the kernel
+    /// does no work and returns zeros, so the condition is caught on the host
+    /// before the upload instead.
+    #[cfg(feature = "gpu")]
+    #[error(
+        "GPU: buffer '{buffer}' needs {bytes} bytes, device per-binding limit is {limit} bytes"
+    )]
+    GpuBindingTooLarge {
+        /// Name of the buffer that does not fit.
+        buffer: &'static str,
+        /// Bytes the buffer requires.
+        bytes: usize,
+        /// Per-binding limit reported by the device.
+        limit: usize,
+    },
     // -- gpu / single cell --
     /// GPU Harmony only supports one co-variate for now (based on Arrowhead)
     #[cfg(feature = "gpu")]

@@ -1,5 +1,15 @@
 # News
 
+## 0.3.12
+
+### Features
+
+- GPU-accelerated SEACells
+- Speed improvements on the CPU SEACells version
+- AVX-2 and AVX-512 SIMD arms now actually run on x86. They were gated behind
+  `cfg(target_feature)`, which is compile-time, so stock builds fell all the
+  way back to SSE2; they are runtime-dispatched via `target_feature` now.
+
 ## 0.3.11
 
 ### Features

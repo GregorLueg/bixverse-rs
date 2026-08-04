@@ -95,7 +95,6 @@ fn classify_density_regions(dist: &[f32]) -> Vec<DensityRegion> {
 /// * `knn_distances` - Input kNN distances.
 /// * `squared_dist` - If the distance is squared (for example Euclidean
 ///   squared).
-/// * `knn_k` - Number of neighbours in the input kNN graph
 /// * `n_dcs` - Number of diffusion components to retain (paper uses `10`)
 /// * `k_density` - Neighbour rank for the density estimate (paper uses `150`)
 /// * `knn_params` - Parameters for the DC-space kNN search
@@ -111,7 +110,6 @@ pub fn compute_diffusion_density(
     knn_indices: &[Vec<usize>],
     knn_distances: &[Vec<f32>],
     squared_dist: bool,
-    knn_k: usize,
     n_dcs: usize,
     k_density: usize,
     knn_params: &KnnParams,
@@ -125,7 +123,7 @@ pub fn compute_diffusion_density(
     if verbosity.normal_verbosity() {
         println!("Building diffusion kernel...");
     }
-    let mut kernel = compute_diffusion_kernel(knn_indices, knn_distances, knn_k, squared_dist)?;
+    let mut kernel = compute_diffusion_kernel(knn_indices, knn_distances, squared_dist)?;
 
     if verbosity.normal_verbosity() {
         println!("Computing top {} diffusion components...", n_dcs);

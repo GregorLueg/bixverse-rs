@@ -544,7 +544,6 @@ pub fn meld(
     }
 
     let start = Instant::now();
-    let knn_k = knn_indices[0].len();
 
     if verbosity.normal_verbosity() {
         println!(
@@ -552,7 +551,7 @@ pub fn meld(
             n.separate_with_underscores()
         );
     }
-    let adj = compute_diffusion_kernel(knn_indices, knn_distances, knn_k, squared_dist)?;
+    let adj = compute_diffusion_kernel(knn_indices, knn_distances, squared_dist)?;
     if verbosity.normal_verbosity() {
         println!(" Done in {:.2?}", start.elapsed())
     }
