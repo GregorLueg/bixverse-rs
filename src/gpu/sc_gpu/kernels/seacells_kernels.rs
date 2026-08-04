@@ -1,9 +1,9 @@
 //! GPU kernels for the SEACells Frank-Wolfe updates.
 //!
-//! [fw_argmin_b()] replaces `fw_argmins_b`, the per-archetype gradient scan in the
-//! B update, and [fw_columns_a_gpu()] replaces `fw_columns_a`, the per-cell column
-//! solve in the A update. Kernel construction, archetype initialisation and the
-//! RSS stay on the host.
+//! [fw_argmin_b()] replaces `fw_argmins_b`, the per-archetype gradient scan in
+//! the B update, and [fw_columns_a_gpu()] replaces `fw_columns_a`, the per-cell
+//! column solve in the A update. Kernel construction, archetype initialisation
+//! and the RSS stay on the host.
 //!
 //! Layout convention: every `n × k` matrix (`K²B`, `K²Aᵀ`, `B`) is passed as
 //! CSR over cells, the untransposed output of `k_squared_matmul`, so the GPU
@@ -124,7 +124,8 @@ pub const A_COLUMNS_BLOCKS: u32 = 1024;
 /// for the tier the wider shapes take.
 pub const A_COLUMNS_WG: u32 = 128;
 
-/// Register slots per thread beyond which [fw_columns_a_gpu()] declines the work.
+/// Register slots per thread beyond which [fw_columns_a_gpu()] declines the
+/// work.
 ///
 /// `w` and `k2b_row` are each `Array::<F>::new(slots)`, so the pair costs
 /// `2 * slots` floats per thread. On Metal a spilled register array is backed by
