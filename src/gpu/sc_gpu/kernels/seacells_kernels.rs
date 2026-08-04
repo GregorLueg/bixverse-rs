@@ -13,19 +13,15 @@
 //! Nothing here allocates a buffer quadratic in `k`, and no `n × k` matrix is
 //! ever dense. The gradient is never materialised: each thread owns a
 //! contiguous block of `ceil(k / wg)` columns in registers and reduces it to a
-//! running `(min, idx)` as it goes.
-//!
-//! Contiguous rather than strided ownership is what lets `t1` stay sparse. A
-//! thread's columns form one run of any sorted row, so the entries it needs are
-//! bracketed by a precomputed `[k, wg + 1]` segment table instead of searched
-//! for; see [a_columns_segments()] and [accumulate_segmented_row()]. Searching
-//! was tried and measured slower than reading a dense row, and a dense `t1`
-//! costs `4k²` bytes, which is 381 MB at k = 10 000.
+//! running `(min, idx)` as it goes. Contiguous rather than strided ownership is
+//! what lets `t1` stay sparse: a thread's columns form one run of any sorted
+//! row, bracketed by a precomputed `[k, wg + 1]` segment table instead of
+//! searched for. See [a_columns_segments()] and [accumulate_segmented_row()].
 //!
 //! The per-thread register arrays are what bound `k`. Exceeding the bound is a
 //! rejected dispatch that reports success and does no work, so the widths live
-//! in [A_COLUMNS_WG_TIERS] and [B_ARGMIN_WG_TIERS] with measured caps, and the
-//! callers verify the output rather than trusting them.
+//! in [A_COLUMNS_WG_TIERS] and [B_ARGMIN_WG_TIERS] with per-device caps, and
+//! the callers verify the output rather than trusting them.
 
 #![allow(missing_docs)]
 
@@ -49,12 +45,6 @@ use crate::prelude::CompressedSparseFormat;
 /// `B_ARGMIN_BLOCKS * k` at every dataset size instead of growing with it.
 pub const B_ARGMIN_BLOCKS: u32 = 1024;
 
-/// Workgroup width for [fw_argmin_b()].
-///
-/// Sets how many columns each thread owns, `ceil(k / B_ARGMIN_WG)`. Wider means
-/// fewer register slots per thread but more idle threads at small `k`.
-pub const B_ARGMIN_WG: u32 = 256;
-
 /// Workgroup width for [reduce_argmin_blocks()]. One thread per output column,
 /// grid-striding.
 pub const B_REDUCE_WG: u32 = 256;
@@ -67,17 +57,10 @@ pub const B_REDUCE_WG: u32 = 256;
 /// thread, three register arrays of `slots` against the A solve's two. Past the
 /// cap the dispatch is rejected and the kernel silently does no work.
 ///
-/// Measured on an M1 Max: at wg 512, 20 slots (k = 10 000) runs at 268 GFLOP/s
-/// and 24 slots (k = 12 288) does not run at all. The boundary between them is
-/// untested, so the cap sits at the last width measured good rather than the
-/// first that failed. That puts the ceiling at k = 10 240; above it
-/// [GpuFwArgminB] runs this solve on the CPU.
-///
-/// The two narrow tiers are **not** bisected. 40 slots at wg 256 was measured
-/// working (194 ms at k = 10 000, against 149 ms for wg 512 at 20 slots), so
-/// their caps are conservative rather than tight. Raising them would not change
-/// any selection, since the selector prefers the narrowest tier and the wider
-/// one is faster wherever both fit.
+/// The caps are device-specific and each sits at the last width observed to
+/// work rather than at a bisected boundary, so they are conservative. The
+/// widest tier fixes the ceiling on `k`; above it [GpuFwArgminB] runs this
+/// solve on the CPU.
 ///
 /// The silent failure is easy to miss here because `fw_argmin_b` is followed by
 /// `reduce_argmin_blocks`, which runs regardless and fills the output with
@@ -115,13 +98,12 @@ pub const A_COLUMNS_BLOCKS: u32 = 1024;
 /// The width doubles as the atom capacity ceiling, since thread `i` owns atom
 /// slot `i`. Must be a power of two and a whole number of planes.
 ///
-/// Measured at 50k cells and 666 archetypes: 256 gave ~210 ms per call and 128
-/// gave ~115 ms. Narrower is better wherever both fit, because the kernel is
-/// bound by the reductions rather than the arithmetic, and halving the width
-/// doubles the columns each thread owns while halving the planes to combine. 64
-/// would continue the trend but cannot hold the ~100 atoms that shape needs
-/// without giving each thread several atom slots. See [a_columns_workgroup()]
-/// for the tier the wider shapes take.
+/// Narrower is better wherever both fit, because the kernel is bound by the
+/// reductions rather than the arithmetic, and halving the width doubles the
+/// columns each thread owns while halving the planes to combine. 64 would
+/// continue the trend but cannot hold the atom counts these shapes need without
+/// giving each thread several atom slots. See [a_columns_workgroup()] for the
+/// tier the wider shapes take.
 pub const A_COLUMNS_WG: u32 = 128;
 
 /// Register slots per thread beyond which [fw_columns_a_gpu()] declines the
@@ -132,18 +114,10 @@ pub const A_COLUMNS_WG: u32 = 128;
 /// global memory, which turns the kernel's whole reason for holding the gradient
 /// in registers into a slow scatter.
 ///
-/// Measured on an M1 Max at n = 50 000, 50 Frank-Wolfe iterations, against the
-/// CPU path the fallback runs, by sweeping `k` at a fixed 128-wide workgroup:
-///
-/// | slots | k | GPU vs CPU | rate |
-/// |---|---|---|---|
-/// | 16 | 2 048 | 2.03x | 123 GFLOP/s |
-/// | 32 | 4 096 | 1.78x | 122 GFLOP/s |
-/// | 64 | 8 192 | **0.25x** | 20 GFLOP/s |
-///
-/// The cliff between 32 and 64 is the spill, and it is a cliff rather than a
-/// slope: the rate is flat up to 32 and falls six-fold at 64. 32 is therefore
-/// the measured knee, where the previous value of 16 was an unswept guess.
+/// The value sits at the knee of the spill: throughput is flat up to it and
+/// falls several-fold immediately past it, so this is a cliff rather than a
+/// slope and there is nothing to be gained by creeping over it. Retune by
+/// sweeping `k` at a fixed workgroup width and watching for the drop.
 ///
 /// This is the performance ceiling. [A_COLUMNS_WG_TIERS] carries a second,
 /// per-width ceiling which is a correctness bound; the effective limit is the
@@ -160,21 +134,11 @@ pub const A_COLUMNS_MAX_SLOTS: usize = 32;
 ///
 /// **The per-tier slot cap is a correctness bound, not a tuning knob.** Past it
 /// the launch is rejected and the kernel does no work while reporting success,
-/// which is the `launch_unchecked` failure mode. Measured on an M1 Max by
-/// bisecting `k` at each width:
-///
-/// | wg | last working | first failing |
-/// |---|---|---|
-/// | 128 | 128 slots | — |
-/// | 256 | 64 slots | — |
-/// | 512 | 24 slots (k = 12288) | 28 slots (k = 14336) |
-/// | 1024 | 10 slots (k = 10000) | 12 slots (k = 12288) |
-///
-/// The caps below sit at the last width measured good. 1024 is not listed at
-/// all: its ceiling of 10 slots covers less `k` than 512's 24, so the narrower
-/// tier reaches every shape it could. The caps are device-specific, so
-/// [FwArgminB::columns_a] verifies the kernel actually wrote output rather than
-/// trusting them.
+/// which is the `launch_unchecked` failure mode. Each cap sits at the last
+/// width observed to work at that tier. 1024 is not listed at all: its ceiling
+/// covers less `k` than 512's, so the narrower tier reaches every shape it
+/// could. The caps are device-specific, so [FwArgminB::columns_a] verifies the
+/// kernel actually wrote output rather than trusting them.
 ///
 /// [FwArgminB::columns_a]: crate::single_cell::mc_generation::seacells::FwArgminB::columns_a
 pub const A_COLUMNS_WG_TIERS: [(u32, usize); 3] = [(128, 32), (256, 32), (512, 24)];
@@ -259,8 +223,8 @@ pub fn lower_bound(indices: &Tensor<u32>, start: u32, end: u32, target: u32) -> 
 /// `seg[row * (wg + 1) + tx]` is where thread `tx`'s contiguous column block
 /// starts in that row, so the bounds are two loads at adjacent addresses, which
 /// coalesce across the workgroup. Searching instead costs `log2(nnz(row))`
-/// divergent probes in *every* thread, and with only ~120 non-zeros per row
-/// against 512 threads that measured slower than reading a dense row outright.
+/// divergent probes in *every* thread, which measured slower than reading a
+/// dense row outright on the shapes this kernel sees.
 ///
 /// ### Params
 ///
@@ -307,10 +271,6 @@ pub fn accumulate_segmented_row<F: Float>(
 /// contiguous run. One binary search finds where that run starts and the walk
 /// stops at the first column past the block, which costs about one load more
 /// than the number of entries actually owned.
-///
-/// This is what lets `t1` stay sparse. Under the strided ownership this kernel
-/// used before, a thread's columns were scattered through the row, so finding
-/// its own entries meant scanning all of them and the row had to be dense.
 ///
 /// ### Params
 ///
@@ -381,9 +341,7 @@ pub fn accumulate_sparse_row<F: Float>(
 ///
 /// Contiguous ownership is what lets `t1` stay sparse: the entries of a sorted
 /// row that a thread needs form one run, bracketed by the precomputed segment
-/// table rather than searched for. See [accumulate_segmented_row()]. `t1` used
-/// to be dense `k × k`, which is 381 MB at k = 10 000 and made this loop read a
-/// full `k`-float row for *every* non-zero of the `K²B` row.
+/// table rather than searched for. See [accumulate_segmented_row()].
 ///
 /// The per-thread register arrays are what bound `k` here; see
 /// [B_ARGMIN_WG_TIERS].
@@ -748,8 +706,8 @@ pub fn fw_columns_a_gpu<F: Float>(
     // Sized by what is actually indexed, not by the workgroup width: the atom
     // arrays never go past `cap`, and the reduction scratch holds one entry per
     // plane on the plane arm. Shared memory is a residency knob, not just a
-    // ceiling, and at `wg_size = 1024` the old `5 * wg_size` sizing was 20 KB of
-    // a 32 KB budget, i.e. one resident workgroup per core.
+    // ceiling: sizing every array at `wg_size` starves the wide tiers of
+    // resident workgroups.
     let mut s_atom_idx = SharedMemory::<u32>::new(cap_pad);
     let mut s_atom_val = SharedMemory::<F>::new(cap_pad);
     let mut s_dropped = SharedMemory::<F>::new(cap_pad);
@@ -847,11 +805,10 @@ pub fn fw_columns_a_gpu<F: Float>(
             let mut amin = u32::MAX.runtime();
             if use_plane {
                 // Plane reduce, then one barrier to combine the per-plane
-                // winners. The tie-break has to run on the column index, not
-                // the lane: thread `tx` owns columns `tx, tx + wg, ...`, so the
-                // lowest lane holding the minimum can be holding a high column.
-                // Reducing the candidate columns directly gets it right and
-                // needs no shuffle.
+                // winners. The tie-break runs on the column index rather than
+                // the lane: a second `plane_min` over the candidate columns
+                // picks the lowest-index winner directly, where selecting by
+                // lane would need a ballot or shuffle primitive.
                 let plane_best = plane_min(best);
                 let mut candidate = u32::MAX.runtime();
                 if best == plane_best {
@@ -868,9 +825,7 @@ pub fn fw_columns_a_gpu<F: Float>(
 
                 // Second level, on plane 0. Combining the per-plane winners with
                 // a serial loop instead costs `n_planes` shared reads in *every*
-                // thread, which is what made the wide tiers unusable: at k = 666
-                // a 1024-wide workgroup measured 16x slower than a 128-wide one
-                // purely on this loop, with a quarter of the arithmetic.
+                // thread, which is what made the wide tiers unusable.
                 let n_planes = CUBE_DIM_X / PLANE_DIM;
                 let mut lvl2_val = F::max_value();
                 let mut lvl2_idx = u32::MAX.runtime();
@@ -1472,11 +1427,6 @@ where
 /// slot `i`. Narrower wins because the reduction still combines `wg / plane`
 /// partials, just no longer serially.
 ///
-/// Narrowest-first was measured, not assumed, and it only became the right rule
-/// once the `t1` row read stopped scaling with `k`: with a dense `t1` the widest
-/// tier that fit won at k = 8192, and with the segment table the narrowest wins
-/// at every `k` measured.
-///
 /// ### Params
 ///
 /// * `k` - Number of archetypes
@@ -1500,10 +1450,8 @@ pub fn a_columns_workgroup(k: usize, cap: usize) -> Option<u32> {
 /// of `row` whose column is at least `t * slots`, so thread `t` reads its run as
 /// `[seg[.. + t], seg[.. + t + 1])` with no search. Built once per A update in
 /// `O(nnz + k * wg)`, against a `k * wg` search cost paid every Frank-Wolfe
-/// iteration otherwise.
-///
-/// The table is `k * (wg + 1)` `u32`, which is `slots` times smaller than the
-/// dense `k * k` the kernel used to need: 20 MB against 381 MB at k = 10 000.
+/// iteration otherwise. The table is `k * (wg + 1)` `u32`, `slots` times
+/// smaller than a dense `k * k` row store.
 ///
 /// ### Params
 ///
@@ -1861,11 +1809,10 @@ mod tests {
     /// The shapes are picked to cover the two things the kernel's structure turns
     /// on, both of which are degenerate at small sizes:
     ///
-    /// - `slots = ceil(k / B_ARGMIN_WG)`, the strided column ownership held in
-    ///   registers. It is 1 for every `k <= 256`, so anything smaller than that
-    ///   never exercises the multi-slot unrolling or the "find the owning slot by
-    ///   comparison" trick in the `K²Aᵀ` and gap loops. `k = 300` gives 2 slots,
-    ///   `k = 1100` gives 5.
+    /// - `slots = ceil(k / wg)`, the contiguous column ownership held in
+    ///   registers. It is 1 at small `k`, so those shapes never exercise the
+    ///   multi-slot unrolling or the "find the owning slot by comparison" trick
+    ///   in the `K²Aᵀ` and gap loops. `k = 300` and `k = 1100` do.
     /// - the grid stride. Blocks are capped at `B_ARGMIN_BLOCKS`, so below
     ///   `n = 1024` each block owns exactly one row and the per-block running
     ///   minimum never actually accumulates. `n = 3000` gives about three rows per
