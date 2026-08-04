@@ -421,6 +421,201 @@ fn dot_avx512_f32(a: &[f32], b: &[f32]) -> f32 {
     dot_avx2_f32(a, b)
 }
 
+///////////////////////////
+// Fused subtract-argmin //
+///////////////////////////
+
+/// Fused subtract-and-argmin over two slices of f32 (scalar)
+///
+/// ### Params
+///
+/// * `a` - The minuend slice.
+/// * `b` - The subtrahend slice, same length as `a`.
+///
+/// ### Returns
+///
+/// `(index, value)` of the smallest `a[i] - b[i]`, ties to the lowest index.
+#[inline(always)]
+fn argmin_diff_scalar_f32(a: &[f32], b: &[f32]) -> (usize, f32) {
+    let mut min_val = a[0] - b[0];
+    let mut min_idx = 0usize;
+    for i in 1..a.len() {
+        let diff = a[i] - b[i];
+        if diff < min_val {
+            min_val = diff;
+            min_idx = i;
+        }
+    }
+    (min_idx, min_val)
+}
+
+/// Reduce per-lane running minima to a single `(index, value)`.
+///
+/// Lane indices are carried as `f32`, which is exact for any index below 2^24
+/// and avoids a bitcast between the float compare mask and an integer vector.
+///
+/// ### Params
+///
+/// * `vals` - Per-lane minimum values.
+/// * `idxs` - Per-lane indices at which those minima occurred.
+///
+/// ### Returns
+///
+/// `(index, value)` of the smallest entry, ties to the lowest index.
+#[inline(always)]
+fn reduce_lane_argmin_f32(vals: &[f32], idxs: &[f32]) -> (usize, f32) {
+    let mut min_val = f32::INFINITY;
+    let mut min_idx = usize::MAX;
+    for (&value, &index) in vals.iter().zip(idxs.iter()) {
+        let index = index as usize;
+        if value < min_val || (value == min_val && index < min_idx) {
+            min_val = value;
+            min_idx = index;
+        }
+    }
+    (min_idx, min_val)
+}
+
+/// Fused subtract-and-argmin over two slices of f32 (128-bit)
+///
+/// ### Params
+///
+/// * `a` - The minuend slice.
+/// * `b` - The subtrahend slice, same length as `a`.
+///
+/// ### Returns
+///
+/// `(index, value)` of the smallest `a[i] - b[i]`, ties to the lowest index.
+#[inline]
+fn argmin_diff_sse_f32(a: &[f32], b: &[f32]) -> (usize, f32) {
+    let len = a.len();
+    let chunks = len / 4;
+
+    let mut best = f32x4::from(f32::INFINITY);
+    let mut best_idx = f32x4::ZERO;
+    let mut lane = f32x4::from([0.0, 1.0, 2.0, 3.0]);
+    let step = f32x4::from(4.0);
+
+    unsafe {
+        let a_ptr = a.as_ptr();
+        let b_ptr = b.as_ptr();
+        for i in 0..chunks {
+            let va = f32x4::from(*(a_ptr.add(i * 4) as *const [f32; 4]));
+            let vb = f32x4::from(*(b_ptr.add(i * 4) as *const [f32; 4]));
+            let diff = va - vb;
+            // Strict `<` keeps the earliest lane on a tie, matching the scalar
+            // scan the callers replaced.
+            let mask = diff.simd_lt(best);
+            best = mask.blend(diff, best);
+            best_idx = mask.blend(lane, best_idx);
+            lane += step;
+        }
+    }
+
+    let (mut min_idx, mut min_val) = reduce_lane_argmin_f32(&best.to_array(), &best_idx.to_array());
+
+    for i in (chunks * 4)..len {
+        let diff = a[i] - b[i];
+        if diff < min_val {
+            min_val = diff;
+            min_idx = i;
+        }
+    }
+
+    (min_idx, min_val)
+}
+
+/// Fused subtract-and-argmin over two slices of f32 (256-bit)
+///
+/// ### Params
+///
+/// * `a` - The minuend slice.
+/// * `b` - The subtrahend slice, same length as `a`.
+///
+/// ### Returns
+///
+/// `(index, value)` of the smallest `a[i] - b[i]`, ties to the lowest index.
+#[inline]
+fn argmin_diff_avx2_f32(a: &[f32], b: &[f32]) -> (usize, f32) {
+    let len = a.len();
+    let chunks = len / 8;
+
+    let mut best = f32x8::from(f32::INFINITY);
+    let mut best_idx = f32x8::ZERO;
+    let mut lane = f32x8::from([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
+    let step = f32x8::from(8.0);
+
+    unsafe {
+        let a_ptr = a.as_ptr();
+        let b_ptr = b.as_ptr();
+        for i in 0..chunks {
+            let va = f32x8::from(*(a_ptr.add(i * 8) as *const [f32; 8]));
+            let vb = f32x8::from(*(b_ptr.add(i * 8) as *const [f32; 8]));
+            let diff = va - vb;
+            let mask = diff.simd_lt(best);
+            best = mask.blend(diff, best);
+            best_idx = mask.blend(lane, best_idx);
+            lane += step;
+        }
+    }
+
+    let (mut min_idx, mut min_val) = reduce_lane_argmin_f32(&best.to_array(), &best_idx.to_array());
+
+    for i in (chunks * 8)..len {
+        let diff = a[i] - b[i];
+        if diff < min_val {
+            min_val = diff;
+            min_idx = i;
+        }
+    }
+
+    (min_idx, min_val)
+}
+
+/// Fused subtract-and-argmin over two slices of f32 (dispatch)
+///
+/// Computes `argmin_i (a[i] - b[i])` without materialising the difference. The
+/// scalar form of this loop does not auto-vectorise, because the running
+/// minimum is a data-dependent branch, so it is the one pass in the Frank-Wolfe
+/// column update that stays scalar unless it is written out by hand.
+///
+/// AVX-512 dispatches to the 256-bit path, matching the rest of this module.
+///
+/// Two caveats, neither reachable from the Frank-Wolfe callers but both visible
+/// to anyone else calling this:
+///
+/// - Lane indices are carried as `f32`, exact only below `2^24`. Longer slices
+///   would return a rounded index.
+/// - `NaN` is not handled consistently across the arms. The scalar path seeds
+///   from `a[0] - b[0]`, so a `NaN` there poisons every later comparison and it
+///   returns index 0; the vector paths seed at `+INFINITY` and never blend a
+///   `NaN` in, so they return the minimum over the finite differences. Filter
+///   `NaN` before calling if it is possible in your data.
+///
+/// ### Params
+///
+/// * `a` - The minuend slice. Must be non-empty and shorter than `2^24`.
+/// * `b` - The subtrahend slice, same length as `a`.
+///
+/// ### Returns
+///
+/// `(index, value)` of the smallest `a[i] - b[i]`, ties to the lowest index.
+#[inline]
+pub fn argmin_diff_simd_f32(a: &[f32], b: &[f32]) -> (usize, f32) {
+    debug_assert_eq!(a.len(), b.len(), "slices must match in length");
+    debug_assert!(!a.is_empty(), "argmin over an empty slice is undefined");
+    debug_assert!(
+        a.len() < (1usize << 24),
+        "lane indices are carried as f32 and stop being exact at 2^24"
+    );
+
+    match detect_simd_level() {
+        SimdLevel::Avx512 | SimdLevel::Avx2 => argmin_diff_avx2_f32(a, b),
+        SimdLevel::Sse => argmin_diff_sse_f32(a, b),
+        SimdLevel::Scalar => argmin_diff_scalar_f32(a, b),
+    }
+}
+
 /// SIMD dot product of two slices of f32 (dispatch)
 ///
 /// Dispatches to the best available SIMD implementation at runtime.
@@ -1207,5 +1402,83 @@ pub fn sum_squared_dev_simd_f64(a: &[f64], mean: f64) -> f64 {
         SimdLevel::Avx2 => sum_squared_dev_avx2_f64(a, mean),
         SimdLevel::Sse => sum_squared_dev_sse_f64(a, mean),
         SimdLevel::Scalar => sum_squared_dev_scalar_f64(a, mean),
+    }
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::prelude::*;
+    use rand::rngs::StdRng;
+
+    /// The vectorised subtract-and-argmin must agree with the scalar scan it
+    /// replaced, exactly.
+    ///
+    /// Lengths are swept across the 4- and 8-wide boundaries so the tail
+    /// handling is covered, and a low-cardinality case is included because ties
+    /// are where a lane-wise reduction is most likely to disagree: the scalar
+    /// scan uses a strict `<` and therefore keeps the lowest index.
+    #[test]
+    fn test_argmin_diff_simd_matches_scalar() {
+        let mut rng = StdRng::seed_from_u64(42);
+
+        for len in [
+            1usize, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 64, 100, 257, 666,
+        ] {
+            for tied in [false, true] {
+                let (a, b): (Vec<f32>, Vec<f32>) = (0..len)
+                    .map(|_| {
+                        if tied {
+                            // Few distinct differences, so ties are frequent.
+                            (rng.random_range(0..3) as f32, 0.0f32)
+                        } else {
+                            (
+                                rng.random::<f32>() * 2.0 - 1.0,
+                                rng.random::<f32>() * 2.0 - 1.0,
+                            )
+                        }
+                    })
+                    .unzip();
+
+                let (simd_idx, simd_val) = argmin_diff_simd_f32(&a, &b);
+                let (scalar_idx, scalar_val) = argmin_diff_scalar_f32(&a, &b);
+
+                assert_eq!(
+                    simd_idx, scalar_idx,
+                    "index mismatch at len {} (tied {:?})",
+                    len, tied
+                );
+                assert_eq!(
+                    simd_val, scalar_val,
+                    "value mismatch at len {} (tied {:?})",
+                    len, tied
+                );
+            }
+        }
+    }
+
+    /// Both explicit widths must agree with the scalar reference regardless of
+    /// what the runtime dispatch picks on this machine, so the arm that is not
+    /// selected here still gets covered.
+    #[test]
+    fn test_argmin_diff_widths_agree() {
+        let mut rng = StdRng::seed_from_u64(7);
+        for len in [1usize, 6, 13, 32, 129, 666] {
+            let a: Vec<f32> = (0..len).map(|_| rng.random::<f32>()).collect();
+            let b: Vec<f32> = (0..len).map(|_| rng.random::<f32>()).collect();
+
+            let reference = argmin_diff_scalar_f32(&a, &b);
+            assert_eq!(argmin_diff_sse_f32(&a, &b), reference, "sse at len {}", len);
+            assert_eq!(
+                argmin_diff_avx2_f32(&a, &b),
+                reference,
+                "avx2 at len {}",
+                len
+            );
+        }
     }
 }
