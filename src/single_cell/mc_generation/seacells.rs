@@ -808,7 +808,8 @@ impl FwAtoms {
     /// Apply the Frank-Wolfe convex step `X ← (1 - γ)X + γ e_amin`
     ///
     /// A repeated `amin` merges into the existing atom rather than creating a
-    /// duplicate, matching what `sparse_add_csr` does on the iteration-major path.
+    /// duplicate, matching what `sparse_add_csr` does on the iteration-major
+    /// path.
     ///
     /// ### Params
     ///
@@ -828,11 +829,11 @@ impl FwAtoms {
         }
     }
 
-    /// Drop atoms at or below `threshold`, then renormalise the survivors to sum
-    /// to 1
+    /// Drop atoms at or below `threshold`, then renormalise the survivors to
+    /// sum to 1
     ///
-    /// The keep test is `|w| > threshold` and the renormalisation is skipped for a
-    /// surviving mass at or below `FW_RENORM_FLOOR`, both matching
+    /// The keep test is `|w| > threshold` and the renormalisation is skipped
+    /// for a surviving mass at or below `FW_RENORM_FLOOR`, both matching
     /// `prune_and_renormalise` and `normalise_csr_columns_l1`.
     ///
     /// ### Params
@@ -880,9 +881,9 @@ impl FwAtoms {
 /// Back end for the Frank-Wolfe inner solves, on whatever device.
 ///
 /// This is the seam between the CPU and GPU paths: the GPU entry point swaps it
-/// out and reuses the rest of the loop rather than forking it. Despite the name,
-/// which is kept because the trait is public and implemented downstream, it now
-/// covers both Frank-Wolfe solves.
+/// out and reuses the rest of the loop rather than forking it. Despite the
+/// name, which is kept because the trait is public and implemented downstream,
+/// it now covers both Frank-Wolfe solves.
 ///
 /// [begin] is called once per B update, when `t1` and `t2` change; [argmins]
 /// once per Frank-Wolfe iteration, when `K²B` and `B` change. Splitting them
@@ -1023,8 +1024,8 @@ impl FwArgminB for CpuFwArgminB {
 /// time so the full k × n gradient is never materialised. The factor of 2 in
 /// the true gradient is dropped: irrelevant to an argmin.
 ///
-/// Superseded by [fw_columns_a], which runs all Frank-Wolfe iterations for a cell
-/// in one pass. Retained as the reference the rewrite is checked against.
+/// Superseded by [fw_columns_a], which runs all Frank-Wolfe iterations for a
+/// cell in one pass. Retained as the reference the rewrite is checked against.
 ///
 /// ### Params
 ///
@@ -1224,9 +1225,9 @@ fn fw_atoms_to_csr(columns: &[FwAtoms], shape: (usize, usize)) -> CompressedSpar
     coo_to_csr(&rows.index_cast(), &cols.index_cast(), &vals, shape)
 }
 
-/// Per-archetype Frank-Wolfe argmins and FW duality gap for the B update,
-/// one gradient column at a time. Factor of 2 dropped: cancels in the gap
-/// ratio, irrelevant to the argmin.
+/// Per-archetype Frank-Wolfe argmins and FW duality gap for the B update, one
+/// gradient column at a time. Factor of 2 dropped: cancels in the gap ratio,
+/// irrelevant to the argmin.
 ///
 /// ### Params
 ///
@@ -1317,8 +1318,8 @@ fn fw_argmins_b(
 /// Frank-Wolfe iterations between full recomputes of `K² B`.
 ///
 /// The incremental update is exact, so this is not a correctness backstop for
-/// the arithmetic. It bounds fp drift and caps the sparsity pattern in the worst
-/// case.
+/// the arithmetic. It bounds fp drift and caps the sparsity pattern in the
+/// worst case.
 ///
 /// It has to sit below `MIN_FW_ITERS` in [SEACells::update_b_mat] to fire at
 /// all: the loop may break as soon as `t >= MIN_FW_ITERS`, so a larger interval
@@ -1505,15 +1506,6 @@ fn prune_and_renormalise_tracked(
     mat.indices = new_indices;
     mat.indptr = new_indptr;
 
-    // The floor guard matches `normalise_csr_columns_l1`, which leaves a column
-    // alone when its sum does not clear it; that is what keeps a fully-pruned
-    // column behaving the same on both paths.
-    //
-    // The scaling deliberately does not match: that function divides by the sum
-    // and this multiplies by its reciprocal. The same factors are applied to
-    // `K² B`, and multiplying both by one reciprocal keeps the two exactly
-    // consistent, which matters more here than agreeing in the last bit with a
-    // helper this path no longer calls.
     let mut col_sums = vec![0.0f32; ncols];
     for (idx, &col) in mat.indices.iter().enumerate() {
         col_sums[col as usize] += mat.data[idx];

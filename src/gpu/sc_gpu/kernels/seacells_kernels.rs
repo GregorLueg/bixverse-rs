@@ -334,10 +334,11 @@ pub fn accumulate_sparse_row<F: Float>(
 /// fused multiply-adds, the same count as the CPU scan it replaces; the win is
 /// throughput, not a better algorithm.
 ///
-/// Thread `tx` owns the contiguous column block `[tx * slots, (tx + 1) * slots)`,
-/// held in registers rather than shared memory, so there is no `k`-dependent
-/// shared memory budget to gate on. Every register-array index is comptime,
-/// since a dynamically indexed local array is backed by global memory on Metal.
+/// Thread `tx` owns the contiguous column block
+/// `[tx * slots, (tx + 1) * slots)`, held in registers rather than shared
+/// memory, so there is no `k`-dependent shared memory budget to gate on. Every
+/// register-array index is comptime, since a dynamically indexed local array is
+/// backed by global memory on Metal.
 ///
 /// Contiguous ownership is what lets `t1` stay sparse: the entries of a sorted
 /// row that a thread needs form one run, bracketed by the precomputed segment
@@ -602,8 +603,8 @@ pub fn reduce_argmin_blocks<F: Float>(
 ///
 /// with the atom weights following the same recurrence. The gradient is never
 /// materialised across cells: thread `tx` owns the contiguous column block
-/// `[tx * slots, (tx + 1) * slots)` in `slots` registers, so nothing here scales
-/// shared memory with `k`.
+/// `[tx * slots, (tx + 1) * slots)` in `slots` registers, so nothing here
+/// scales shared memory with `k`.
 ///
 /// Contiguous ownership is what lets `t1` stay sparse. The entries of a sorted
 /// row that a thread needs form one run, bracketed by the precomputed segment
@@ -628,9 +629,11 @@ pub fn reduce_argmin_blocks<F: Float>(
 ///
 /// ### Params
 ///
-/// * `t1_indices` - Archetype indices of `Bᵀ K² B`'s non-zeros, ascending per row
+/// * `t1_indices` - Archetype indices of `Bᵀ K² B`'s non-zeros, ascending per
+///   row
 /// * `t1_values` - Values of its non-zeros `[nnz]`
-/// * `t1_seg` - Per-thread column segments of `t1`, `[k, wg_size + 1]` row-major
+/// * `t1_seg` - Per-thread column segments of `t1`, `[k, wg_size + 1]`
+///   row-major
 /// * `ap_indptr` - CSR row pointers of `A_prevᵀ` `[n + 1]`
 /// * `ap_indices` - Archetype indices of its non-zeros `[nnz]`
 /// * `ap_values` - Values of its non-zeros `[nnz]`
@@ -653,8 +656,8 @@ pub fn reduce_argmin_blocks<F: Float>(
 ///   Runtime rather than comptime so a changing capacity does not recompile the
 ///   shader; the shared arrays are sized at `cap_pad` instead.
 /// * `cap_pad` - `cap` rounded up to a power of two, sizing the atom arrays in
-///   shared memory. Bucketed rather than exact so a capacity that drifts between
-///   outer iterations does not recompile the shader (comptime)
+///   shared memory. Bucketed rather than exact so a capacity that drifts
+///   between outer iterations does not recompile the shader (comptime)
 /// * `pruning` - Whether to prune and renormalise (comptime)
 /// * `use_plane` - Reduce with plane primitives instead of a shared-memory
 ///   tree. Halving trees cost `log2(wg_size)` barriers each and this kernel
@@ -1222,14 +1225,15 @@ where
     Ok(())
 }
 
-/// Whether the plane-reduction path in [fw_columns_a_gpu()] is safe on this device.
+/// Whether the plane-reduction path in [fw_columns_a_gpu()] is safe on this
+/// device.
 ///
 /// The kernel derives a plane id from `UNIT_POS_X / PLANE_DIM` and reduces
 /// within each plane before combining. If the device reports a plane-size range
 /// rather than an exact size, or the width is not a whole number of planes, a
-/// plane could be partially populated and `plane_min` would silently reduce over
-/// only part of the columns. Apple Silicon reports 32/32, so the plane path is
-/// taken there.
+/// plane could be partially populated and `plane_min` would silently reduce
+/// over only part of the columns. Apple Silicon reports 32/32, so the plane
+/// path is taken there.
 ///
 /// ### Params
 ///
@@ -1250,8 +1254,8 @@ pub fn plane_reduce_viable<R: Runtime>(client: &ComputeClient<R>, wg_size: u32) 
 /// The atom capacity is a hard constraint rather than a tuning knob: thread `i`
 /// owns atom slot `i`, so `cap` cannot exceed the workgroup width. `cap` is
 /// `max_seed + n_iters`, where `max_seed` is the widest column of `A_prev`, and
-/// the caller is expected to check [a_columns_capacity()] first and fall back to
-/// the CPU when it does not fit.
+/// the caller is expected to check [a_columns_capacity()] first and fall back
+/// to the CPU when it does not fit.
 ///
 /// The width defaults to [a_columns_workgroup()] and each width is a separately
 /// compiled shader, so a shape no tier covers is an error here rather than a
@@ -1446,12 +1450,12 @@ pub fn a_columns_workgroup(k: usize, cap: usize) -> Option<u32> {
 
 /// Per-thread segment bounds for every row of `t1`.
 ///
-/// Entry `row * (wg + 1) + t` is the position in `t1.indices` of the first entry
-/// of `row` whose column is at least `t * slots`, so thread `t` reads its run as
-/// `[seg[.. + t], seg[.. + t + 1])` with no search. Built once per A update in
-/// `O(nnz + k * wg)`, against a `k * wg` search cost paid every Frank-Wolfe
-/// iteration otherwise. The table is `k * (wg + 1)` `u32`, `slots` times
-/// smaller than a dense `k * k` row store.
+/// Entry `row * (wg + 1) + t` is the position in `t1.indices` of the first
+/// entry of `row` whose column is at least `t * slots`, so thread `t` reads its
+/// run as `[seg[.. + t], seg[.. + t + 1])` with no search. Built once per A
+/// update in `O(nnz + k * wg)`, against a `k * wg` search cost paid every
+/// Frank-Wolfe iteration otherwise. The table is `k * (wg + 1)` `u32`, `slots`
+/// times smaller than a dense `k * k` row store.
 ///
 /// ### Params
 ///
@@ -1733,11 +1737,11 @@ mod tests {
 
     /// Assert the kernel's argmins against the reference, tolerating near-ties.
     ///
-    /// The two paths sum the same products in different orders, so columns whose
-    /// two best rows sit within a few last bits of each other can legitimately
-    /// resolve either way. An exact index match is demanded wherever the minimum
-    /// is unambiguous; where it is not, what has to hold is that the row the
-    /// kernel picked really is a minimum.
+    /// The two paths sum the same products in different orders, so columns
+    /// whose two best rows sit within a few last bits of each other can
+    /// legitimately resolve either way. An exact index match is demanded
+    /// wherever the minimum is unambiguous; where it is not, what has to hold
+    /// is that the row the kernel picked really is a minimum.
     ///
     /// ### Params
     ///
@@ -1803,11 +1807,11 @@ mod tests {
             .collect()
     }
 
-    /// The fused kernel must reproduce the CPU scan it replaces: same argmin per
-    /// archetype, same minimum, same duality-gap term.
+    /// The fused kernel must reproduce the CPU scan it replaces: same argmin
+    /// per archetype, same minimum, same duality-gap term.
     ///
-    /// The shapes are picked to cover the two things the kernel's structure turns
-    /// on, both of which are degenerate at small sizes:
+    /// The shapes are picked to cover the two things the kernel's structure
+    /// turns on, both of which are degenerate at small sizes:
     ///
     /// - `slots = ceil(k / wg)`, the contiguous column ownership held in
     ///   registers. It is 1 at small `k`, so those shapes never exercise the
@@ -1815,8 +1819,8 @@ mod tests {
     ///   in the `K²Aᵀ` and gap loops. `k = 300` and `k = 1100` do.
     /// - the grid stride. Blocks are capped at `B_ARGMIN_BLOCKS`, so below
     ///   `n = 1024` each block owns exactly one row and the per-block running
-    ///   minimum never actually accumulates. `n = 3000` gives about three rows per
-    ///   block.
+    ///   minimum never actually accumulates. `n = 3000` gives about three rows
+    ///   per block.
     #[test]
     fn test_fw_argmin_b_matches_cpu() {
         let Some(device) = try_device() else { return };

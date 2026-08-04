@@ -43,9 +43,9 @@ use crate::single_cell::mc_generation::seacells::{
 /// SEACell, the cell index of each archetype, and the RSS at each iteration.
 pub type SeacellsFitResult = (Vec<usize>, Vec<Vec<usize>>, Vec<usize>, Vec<f32>);
 
-/////////////////
-// Back end    //
-/////////////////
+//////////////
+// Back end //
+//////////////
 
 /// Device-resident back end for both Frank-Wolfe solves.
 ///
@@ -356,9 +356,6 @@ impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
         n_iters: usize,
         pruning: Option<f32>,
     ) -> Result<Vec<FwAtoms>, BixverseErrors> {
-        // The kernel launches unchecked and indexes `indptr` up to `n` and the
-        // segment table by archetype row, so a wrong shape is an out-of-bounds
-        // device read rather than an error.
         if t1.shape != (k, k) {
             return Err(BixverseErrors::ShapeMismatch {
                 expected: (k, k),
@@ -374,12 +371,6 @@ impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
             }
         }
 
-        // Shapes no workgroup tier covers. Thread `i` owns atom slot `i`, so a
-        // column wider than the widest tier cannot be represented; and past
-        // [A_COLUMNS_MAX_SLOTS] the per-thread gradient arrays spill to global
-        // memory, which is slower than the CPU path it is meant to replace.
-        // Falls back rather than fails, and says so, because an invisible
-        // several-fold slowdown is worse than a noisy one.
         let cap = a_columns_capacity(a_prev_t, n_iters);
         let Some(wg) = a_columns_workgroup(k, cap) else {
             if parse_verbosity_level(self.verbose).detailed_verbosity() {
@@ -391,10 +382,6 @@ impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
             return Ok(fw_columns_a(t1, a_prev_t, k2_b, k, n, n_iters, pruning));
         };
 
-        // Uploaded sparse. `t1` is 1-7% dense, so a `k × k` dense copy is both a
-        // large host allocation per outer iteration and, worse, a full `k`-float
-        // row read per Frank-Wolfe iteration per cell. Blocked column ownership
-        // in the kernel is what makes the sparse row searchable per thread.
         let t1_gpu = GpuCompressedSparseData::<R, f32>::from_compressed_sparse_data_2(
             t1,
             false,
@@ -415,14 +402,6 @@ impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
             &self.client,
         )?;
 
-        // Pooled, and only regrown when the requirement rises. `client.empty()`
-        // returns immediately but the pages are not backed until the kernel
-        // writes them, and at 36 MB that first touch measured ~140 ms, several
-        // times the kernel itself.
-        //
-        // Keyed on `n * cap`, not `cap` alone: the kernel writes
-        // `atom_idx[cell * cap + tx]`, so a larger `n` at an unchanged capacity
-        // would run off the end of a buffer that looks big enough.
         let required = n * cap;
         if self.a_atom_idx.is_none() || self.a_n * self.a_cap < required || self.a_n < n {
             self.a_cap = cap;
@@ -436,10 +415,6 @@ impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
         let atom_val = self.a_atom_val.as_ref().expect("just allocated").clone();
         let atom_cnt = self.a_atom_cnt.as_ref().expect("just allocated").clone();
 
-        // Rewritten every call rather than pooled on `is_none`. The comptime
-        // `pruning` flag is re-read per call, so a back end reused across
-        // different thresholds would otherwise enable pruning while feeding it
-        // whichever value happened to be uploaded first.
         let threshold =
             GpuTensor::<R, f32>::from_slice(&[pruning.unwrap_or(0.0)], vec![1], &self.client);
 
@@ -475,12 +450,6 @@ impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
             .read(&self.client)
             .map_err(|e| BixverseErrors::GpuMatmul(e.to_string()))?;
 
-        // Every Frank-Wolfe iteration either appends an atom or merges into an
-        // existing one, so after `n_iters >= 1` every cell holds at least one.
-        // A zero count therefore means the launch was rejected and did nothing,
-        // which `launch_unchecked` reports as success. The per-tier slot caps in
-        // [A_COLUMNS_WG_TIERS] are measured on one device, so this is the
-        // backstop that keeps a different one from returning silent zeros.
         if n_iters > 0 && cnt_host.contains(&0) {
             let dead = cnt_host.iter().filter(|c| **c == 0).count();
             println!(
@@ -496,12 +465,6 @@ impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
             return Ok(fw_columns_a(t1, a_prev_t, k2_b, k, n, n_iters, pruning));
         }
 
-        // The kernel marks a pruned atom weight-zero instead of compacting, so
-        // with pruning on the zeros are exactly what `FwAtoms::prune` removed
-        // and they are dropped here to match. With pruning off they are *not*
-        // removed: the first Frank-Wolfe step has `γ = 1`, so every seed atom is
-        // scaled to exactly zero and the CPU keeps it as an explicit entry.
-        // Filtering unconditionally would give a structurally different column.
         let drop_zeros = pruning.is_some();
         let mut columns = Vec::with_capacity(n);
         let mut keep_idx: Vec<u32> = Vec::with_capacity(stride);
