@@ -272,16 +272,60 @@ pub enum BixverseErrors {
         requested: &'static str,
     },
 
-    /// If serialisation of the [crate::prelude::CompressedSparseData2] to disk failed
+    /// A chunk's declared payload lengths exceed the bytes actually present.
+    ///
+    /// The three length fields in a chunk header are untrusted input. This is
+    /// raised after they have been parsed but before any payload slice is
+    /// taken, so a corrupt length cannot index out of bounds.
     #[cfg(feature = "single-cell")]
-    #[error("Serialisation to meta cell CompressedSparseData2 format on disk failed")]
-    SerialisationFailed,
+    #[error("Chunk payload truncated: header declares {expected} bytes, buffer holds {found}")]
+    ChunkPayloadTruncated {
+        /// Total bytes the header's length fields imply.
+        expected: usize,
+        /// Actual bytes available in the decompressed chunk.
+        found: usize,
+    },
 
-    /// If deserialisation of the [crate::prelude::CompressedSparseData2] from disk
-    /// failed
+    /// The raw-count element-size discriminant was not recognised.
+    ///
+    /// Valid values are `RAW_ELEM_U16` (2), `RAW_ELEM_U32` (4), and 0 for
+    /// legacy files where the byte was zero padding. Anything else means the
+    /// chunk is corrupt; reinterpreting it would misparse the whole payload.
     #[cfg(feature = "single-cell")]
-    #[error("Serialisation to meta cell CompressedSparseData2 format on disk failed")]
-    DeserialisationFailed,
+    #[error("Invalid raw count element size discriminant: {0}")]
+    RawElemSizeInvalid(u8),
+
+    /// A raw count read from disk does not fit the requested numeric type.
+    ///
+    /// Raised by `from_gene_chunks` / `from_cell_chunks` instead of silently
+    /// saturating. Pick a wider `T` (`u32`, `f32`, `f64`) for the affected
+    /// dataset.
+    #[cfg(feature = "single-cell")]
+    #[error("Raw count {value} does not fit target type {target_type}")]
+    RawCountOverflow {
+        /// The count that could not be represented.
+        value: u32,
+        /// Name of the type it was being converted into.
+        target_type: &'static str,
+    },
+
+    /// The `target_size` recorded in a file header disagrees with the one the
+    /// caller requested.
+    ///
+    /// Undoing a file's own library-size normalisation requires the exact
+    /// factor the writer used, so a mismatch always yields wrong numbers.
+    /// Files written before `target_size` entered the header report `0.0` and
+    /// are exempt from the check.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Target size mismatch: file was normalised against {header}, but {requested} was requested"
+    )]
+    TargetSizeMismatch {
+        /// Value stored in the file header.
+        header: f32,
+        /// Value the caller supplied.
+        requested: f32,
+    },
 
     /// Error for h5 ingestion if feature type is not found
     #[cfg(feature = "single-cell")]

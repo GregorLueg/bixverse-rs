@@ -62,7 +62,7 @@ impl Pile {
         let chunks = reader.read_cells_parallel(cell_indices)?;
         let n_genes = reader.get_header().total_genes;
 
-        let raw = assemble_pile_csr(&chunks, n_genes);
+        let raw = from_cell_chunks::<u32>(&chunks, &DataLayerReturn::Raw, n_genes)?;
         let umis_per_cell = sum_rows_csr(&raw);
 
         Ok(Self {
@@ -84,48 +84,6 @@ impl Pile {
     #[inline]
     pub fn n_cells(&self) -> usize {
         self.cell_indices.len()
-    }
-}
-
-/// Assemble a CSR `cells × genes` matrix from a slice of cell chunks.
-///
-/// Unlike `from_cell_chunks` in the streaming module, this preserves full
-/// `u32` raw counts (no saturation to `u16`) and discards `data_norm`.
-///
-/// ### Params
-///
-/// * `chunks` - The [CsrCellChunk]'s to assemble.
-/// * `n_genes` - Number of genes
-///
-/// ### Returns
-///
-/// The [CompressedSparseData2]
-fn assemble_pile_csr(chunks: &[CsrCellChunk], n_genes: usize) -> CompressedSparseData2<u32, f32> {
-    let n_cells = chunks.len();
-    let total_nnz: usize = chunks.iter().map(|c| c.indices.len()).sum();
-
-    let mut data: Vec<u32> = Vec::with_capacity(total_nnz);
-    let mut indices: Vec<usize> = Vec::with_capacity(total_nnz);
-    let mut indptr: Vec<usize> = Vec::with_capacity(n_cells + 1);
-    indptr.push(0);
-
-    for chunk in chunks {
-        for v in chunk.data_raw.iter() {
-            data.push(v);
-        }
-        for &idx in &chunk.indices {
-            indices.push(idx as usize);
-        }
-        indptr.push(data.len());
-    }
-
-    CompressedSparseData2 {
-        data,
-        indices: indices.index_cast(),
-        indptr: indptr.index_cast(),
-        cs_type: CompressedSparseFormat::Csr,
-        data_2: None,
-        shape: (n_cells, n_genes),
     }
 }
 

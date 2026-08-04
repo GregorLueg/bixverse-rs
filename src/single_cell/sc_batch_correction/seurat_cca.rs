@@ -25,7 +25,7 @@ use crate::single_cell::sc_batch_correction::seurat_anchors::{
     tree_merge_embeddings,
 };
 use crate::single_cell::sc_processing::pca::{
-    SingleCellPcaParams, pca_on_sc, pca_on_sc_sparse, scale_csc_chunk,
+    SingleCellPcaParams, pca_on_sc, pca_on_sc_sparse, resolve_clr_size_factor, scale_csc_chunk,
 };
 
 ///////////
@@ -120,6 +120,7 @@ pub(crate) fn load_hvg_standardised<S: SingleCellReading>(
 
     let mut chunks = reader.read_gene_parallel_filtered(hvg_indices, &cell_set)?;
     if use_clr {
+        let size_factor = resolve_clr_size_factor(reader, size_factor)?;
         chunks
             .par_iter_mut()
             .for_each(|chunk| chunk.transform_to_clr(size_factor));
@@ -168,6 +169,7 @@ fn load_filter_expression<S: SingleCellReading>(
 
     let mut chunks = reader.read_gene_parallel_filtered(feature_indices, &cell_set)?;
     if use_clr {
+        let size_factor = resolve_clr_size_factor(reader, size_factor)?;
         chunks
             .par_iter_mut()
             .for_each(|chunk| chunk.transform_to_clr(size_factor));

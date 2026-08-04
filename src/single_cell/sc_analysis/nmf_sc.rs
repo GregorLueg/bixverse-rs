@@ -194,7 +194,7 @@ pub fn nmf_single_run_sc<S: SingleCellReading>(
 
     let gene_chunks: Vec<CscGeneChunk> =
         reader.read_gene_parallel_filtered(gene_indices, &cell_set)?;
-    let csc: CompressedSparseData2<f32> = from_gene_chunks::<f32>(gene_chunks, &layer, n_cells);
+    let csc: CompressedSparseData2<f32> = from_gene_chunks::<f32>(gene_chunks, &layer, n_cells)?;
 
     if verbosity.normal_verbosity() {
         println!(" ... done in {:.2?}", start_total.elapsed())
@@ -274,7 +274,7 @@ pub fn nmf_multiple_run_sc<S: SingleCellReading>(
 
     let gene_chunks: Vec<CscGeneChunk> =
         reader.read_gene_parallel_filtered(gene_indices, &cell_set)?;
-    let csc: CompressedSparseData2<f32> = from_gene_chunks::<f32>(gene_chunks, &layer, n_cells);
+    let csc: CompressedSparseData2<f32> = from_gene_chunks::<f32>(gene_chunks, &layer, n_cells)?;
 
     if verbosity.normal_verbosity() {
         println!(" ... done in {:.2?}", start_total.elapsed())

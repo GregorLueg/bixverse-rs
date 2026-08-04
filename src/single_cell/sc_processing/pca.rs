@@ -163,6 +163,36 @@ impl CscGeneChunk {
     }
 }
 
+/// Resolve which size factor to undo a file's normalisation with.
+///
+/// [`CscGeneChunk::transform_to_clr`] has to be handed the exact factor the
+/// writer used, otherwise it computes garbage. Files that record it in their
+/// header are authoritative; older files do not and fall back to whatever the
+/// caller asked for.
+///
+/// ### Params
+///
+/// * `reader` - The store the chunks were read from.
+/// * `requested` - The size factor the caller supplied, typically
+///   `SingleCellPcaParams::size_factor`.
+///
+/// ### Returns
+///
+/// The size factor to use, or [`BixverseErrors::TargetSizeMismatch`] when the
+/// header and the request disagree.
+pub(crate) fn resolve_clr_size_factor<S: SingleCellReading>(
+    reader: &S,
+    requested: f32,
+) -> Result<f32, BixverseErrors> {
+    match reader.target_size() {
+        Some(header) if header != requested => {
+            Err(BixverseErrors::TargetSizeMismatch { header, requested })
+        }
+        Some(header) => Ok(header),
+        None => Ok(requested),
+    }
+}
+
 /// Scales the data in a CSC chunk
 ///
 /// ### Params
@@ -447,10 +477,11 @@ fn dense_pca<S: SingleCellReading>(
     let mut gene_chunks: Vec<CscGeneChunk> =
         reader.read_gene_parallel_filtered(gene_indices, &cell_set)?;
 
+    let size_factor = resolve_clr_size_factor(reader, params_pca.size_factor)?;
     if params_pca.clr {
         gene_chunks
             .par_iter_mut()
-            .for_each(|chunk| chunk.transform_to_clr(params_pca.size_factor));
+            .for_each(|chunk| chunk.transform_to_clr(size_factor));
     }
 
     let end_reading = start_reading.elapsed();
@@ -743,10 +774,11 @@ pub fn pca_on_sc_streaming<S: SingleCellReading>(
         let start_loading = Instant::now();
         let mut gene_chunks = reader.read_gene_parallel_filtered(batch_gene_indices, &cell_set)?;
 
+        let size_factor = resolve_clr_size_factor(reader, params_pca.size_factor)?;
         if params_pca.clr {
             gene_chunks
                 .par_iter_mut()
-                .for_each(|chunk| chunk.transform_to_clr(params_pca.size_factor));
+                .for_each(|chunk| chunk.transform_to_clr(size_factor));
         }
 
         if verbosity.detailed_verbosity() {
@@ -891,10 +923,11 @@ fn sparse_pca<S: SingleCellReading>(
     let mut gene_chunks: Vec<CscGeneChunk> =
         reader.read_gene_parallel_filtered(gene_indices, &cell_set)?;
 
+    let size_factor = resolve_clr_size_factor(reader, params_pca.size_factor)?;
     if params_pca.clr {
         gene_chunks
             .par_iter_mut()
-            .for_each(|chunk| chunk.transform_to_clr(params_pca.size_factor));
+            .for_each(|chunk| chunk.transform_to_clr(size_factor));
     }
 
     let end_reading = start_reading.elapsed();
@@ -907,7 +940,7 @@ fn sparse_pca<S: SingleCellReading>(
 
     let n_cells = cell_set.len();
 
-    let csc = from_gene_chunks::<f32>(gene_chunks, &DataLayerReturn::Norm, n_cells);
+    let csc = from_gene_chunks::<f32>(gene_chunks, &DataLayerReturn::Norm, n_cells)?;
 
     let end_data_prep = start_data_prep.elapsed();
 

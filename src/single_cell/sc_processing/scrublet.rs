@@ -177,14 +177,14 @@ impl CsrCellChunk {
         let mut gene_vec: Vec<(u32, u32)> = gene_counts.into_iter().collect();
         gene_vec.sort_unstable_by_key(|&(gene, _)| gene);
 
-        let mut data_raw = Vec::with_capacity(gene_vec.len());
+        let mut data_raw: Vec<u32> = Vec::with_capacity(gene_vec.len());
         let mut data_norm = Vec::with_capacity(gene_vec.len());
         let mut indices = Vec::with_capacity(gene_vec.len());
 
         let norm_factor = target_size / hvg_lib_size_combined as f32;
 
         for (gene, count) in gene_vec {
-            data_raw.push(count.min(u16::MAX as u32) as u16);
+            data_raw.push(count);
 
             let normalised = if log_transform {
                 (count as f32 * norm_factor).ln_1p()
@@ -198,7 +198,7 @@ impl CsrCellChunk {
         }
 
         Self {
-            data_raw: RawCounts::U16(data_raw),
+            data_raw: RawCounts::from_u32_auto(&data_raw),
             data_norm,
             library_size: hvg_lib_size_combined,
             indices,

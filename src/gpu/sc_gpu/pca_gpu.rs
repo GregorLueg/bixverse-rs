@@ -82,10 +82,11 @@ where
     let mut gene_chunks: Vec<CscGeneChunk> =
         reader.read_gene_parallel_filtered(gene_indices, &cell_set)?;
 
+    let size_factor = resolve_clr_size_factor(reader, params_pca.size_factor)?;
     if params_pca.clr {
         gene_chunks
             .par_iter_mut()
-            .for_each(|chunk| chunk.transform_to_clr(params_pca.size_factor));
+            .for_each(|chunk| chunk.transform_to_clr(size_factor));
     }
 
     let row_offsets_f64: Option<Vec<f64>> = if params_pca.clr {
@@ -108,7 +109,7 @@ where
     let n_cells = cell_set.len();
 
     let csc: CompressedSparseData2<f32> =
-        from_gene_chunks::<f32>(gene_chunks, &DataLayerReturn::Norm, n_cells);
+        from_gene_chunks::<f32>(gene_chunks, &DataLayerReturn::Norm, n_cells)?;
 
     let end_data_prep = start_data_prep.elapsed();
 

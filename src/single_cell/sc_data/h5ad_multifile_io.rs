@@ -950,7 +950,13 @@ pub fn multi_h5ad_to_file<P: AsRef<Path>>(
         println!("Writing cells to binary...");
     }
 
-    let mut writer = CellGeneSparseWriter::new(&bin_path, true, total_cells, total_genes)?;
+    let mut writer = CellGeneSparseWriter::new(
+        &bin_path,
+        true,
+        total_cells,
+        total_genes,
+        cell_qc.target_size,
+    )?;
 
     let mut cell_offset = 0usize;
     let mut per_file_results = Vec::with_capacity(tasks.len());

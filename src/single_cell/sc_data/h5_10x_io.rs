@@ -15,6 +15,7 @@ use std::time::Instant;
 use thousands::Separable;
 
 use crate::prelude::*;
+use crate::single_cell::sc_data::H5_CELL_SLICE_SIZE;
 use crate::single_cell::sc_data::data_io::CellOnFileQuality;
 use crate::single_cell::sc_data::data_io::*;
 
@@ -694,20 +695,20 @@ pub fn write_h5_tenx_streaming<P: AsRef<Path>>(
         true,
         quality.cells_to_keep.len(),
         quality.genes_to_keep.len(),
+        cell_qc.target_size,
     )?;
 
     let mut lib_size = Vec::with_capacity(quality.cells_to_keep.len());
     let mut nnz = Vec::with_capacity(quality.cells_to_keep.len());
 
-    const CELL_BATCH_SIZE: usize = 1000;
     let total_cells = quality.cells_to_keep.len();
-    let num_batches = total_cells.div_ceil(CELL_BATCH_SIZE);
+    let num_batches = total_cells.div_ceil(H5_CELL_SLICE_SIZE);
 
     if verbose {
         println!(
             "  Processing {} cells in batches of {}...",
             total_cells.separate_with_underscores(),
-            CELL_BATCH_SIZE.separate_with_underscores()
+            H5_CELL_SLICE_SIZE.separate_with_underscores()
         );
     }
 
@@ -717,11 +718,11 @@ pub fn write_h5_tenx_streaming<P: AsRef<Path>>(
     let mut gene_indices: Vec<u32> = Vec::with_capacity(10000);
     let mut gene_counts: Vec<u32> = Vec::with_capacity(10000);
 
-    for (batch_idx, cell_batch) in quality.cells_to_keep.chunks(CELL_BATCH_SIZE).enumerate() {
+    for (batch_idx, cell_batch) in quality.cells_to_keep.chunks(H5_CELL_SLICE_SIZE).enumerate() {
         if verbose && (batch_idx % ((num_batches / 10).max(1)) == 0 || batch_idx == num_batches - 1)
         {
             let progress = ((batch_idx as f64 / num_batches as f64 * 10.0).round() as usize) * 10;
-            let processed = (batch_idx + 1) * CELL_BATCH_SIZE;
+            let processed = (batch_idx + 1) * H5_CELL_SLICE_SIZE;
             println!(
                 "  Processed {}% ({} / {} cells)",
                 progress,

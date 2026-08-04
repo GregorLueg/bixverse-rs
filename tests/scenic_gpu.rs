@@ -1272,7 +1272,7 @@ const RT_TOTAL_GENES: usize = RT_TFS + RT_TARGETS;
 /// threshold in reasonable wall-clock.
 fn write_synthetic_scenic_file(path: &str) {
     let mut writer =
-        CellGeneSparseWriter::new(path, false, RT_CELLS, RT_TOTAL_GENES).expect("writer new");
+        CellGeneSparseWriter::new(path, false, RT_CELLS, RT_TOTAL_GENES, 1e4).expect("writer new");
 
     let mut rng = SmallRng::seed_from_u64(0xA5A5);
 

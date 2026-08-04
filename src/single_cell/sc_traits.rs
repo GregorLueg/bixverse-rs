@@ -248,7 +248,11 @@ pub trait FloatAndUInt: Copy {
     /// Transform u16 to f32 for fast conversions
     fn to_f32(self) -> f32;
 
-    /// Transform u32/f32 to u16
+    /// Transform u32/f32 to u16, **saturating** at `u16::MAX`.
+    ///
+    /// Prefer [`Self::to_u32`] plus `RawCounts::from_u32_auto` on any path that
+    /// reaches the binary format: that narrows to u16 only when every value
+    /// fits, instead of silently clipping high-expression genes.
     fn to_u16(self) -> u16;
 
     /// Transform f32/u16 to u32
