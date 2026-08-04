@@ -4,27 +4,35 @@
 //! update and `fw_columns_a_gpu` for the A update, and [seacells_fit_gpu] drives
 //! the same [SEACells::fit_with] loop the CPU path uses.
 //!
-//! The B-gradient argmin does not dominate the fit. Sampled at 50k cells and
-//! 666 archetypes, the argmin kernel is about a quarter of wall-clock, the
-//! blocking readbacks around it another fifth, and the A update a third. The
-//! kernel beats the CPU scan by 3-15x in isolation but only moves the whole
-//! fit by ~2.5x, which is Amdahl rather than anything wrong with it.
+//! Neither kernel dominates the fit. Each beats the CPU scan it replaces by
+//! several fold in isolation, but the whole fit moves by ~2.6x at 50k cells and
+//! 666 archetypes, which is Amdahl rather than anything wrong with them: the
+//! blocking readbacks around the kernels were about a fifth of wall-clock when
+//! last attributed, and the kernel construction, archetype initialisation, `K²B`
+//! maintenance and RSS all stay on the host.
 //!
 //! Nothing here holds an `n × k` dense buffer. `K²B`, `K²Aᵀ` and `B` stay
-//! sparse; `t1` is dense at `4k²` bytes, and the A update's atom scratch is
-//! `[n, cap]` where `cap` is the widest `A` column plus `max_fw_iters`.
+//! sparse, and the A update's atom scratch is `[n, cap]` where `cap` is the
+//! widest `A` column plus `max_fw_iters`.
+//!
+//! `t1` stays sparse on both solves, paired with a `[k, wg + 1]` per-thread
+//! segment table so a thread reaches its own contiguous column block without
+//! searching. Nothing on the path is quadratic in `k`; it used to be densified
+//! to `4k²` bytes on both, which is 381 MB at k = 10 000.
 
 use ann_search_rs::gpu::tensor::GpuTensor;
 use cubecl::prelude::*;
 
 use crate::gpu::linalg::sparse_gpu::GpuCompressedSparseData;
 use crate::gpu::sc_gpu::kernels::seacells_kernels::{
-    A_COLUMNS_MAX_SLOTS, A_COLUMNS_WG, B_ARGMIN_BLOCKS, a_columns_capacity, launch_fw_argmin_b,
-    launch_fw_columns_a,
+    A_COLUMNS_MAX_SLOTS, A_COLUMNS_WG_TIERS, B_ARGMIN_BLOCKS, B_ARGMIN_WG_TIERS,
+    a_columns_capacity, a_columns_segments, a_columns_workgroup, b_argmin_workgroup,
+    launch_fw_argmin_b, launch_fw_columns_a,
 };
 use crate::prelude::*;
 use crate::single_cell::mc_generation::seacells::{
-    FwArgminB, FwAtoms, SEACells, SEACellsParams, assignments_to_metacells, fw_columns_a,
+    CpuFwArgminB, FwArgminB, FwAtoms, SEACells, SEACellsParams, assignments_to_metacells,
+    fw_columns_a,
 };
 
 ///////////
@@ -46,10 +54,13 @@ pub type SeacellsFitResult = (Vec<usize>, Vec<Vec<usize>>, Vec<usize>, Vec<f32>)
 /// quickly but the device pages are not backed until something writes them, so
 /// allocating per call would pay that fault repeatedly.
 ///
-/// `t1` and `K²Aᵀ` are uploaded once per B update via [FwArgminB::begin]; `K²B`
-/// and `B` change every Frank-Wolfe iteration and are re-uploaded there. Their
-/// non-zero counts drift between iterations, so those two are the only buffers
-/// not pooled.
+/// `t1`, its segment table and `K²Aᵀ` are uploaded once per B update via
+/// [FwArgminB::begin]; `K²B` and `B` change every Frank-Wolfe iteration and are
+/// re-uploaded there. Their non-zero counts drift between iterations, so those
+/// two are the only buffers not pooled.
+///
+/// Either solve independently falls back to the CPU when no workgroup tier
+/// covers `k`, so a shape can run one on the device and the other on the host.
 pub struct GpuFwArgminB<R: Runtime> {
     /// Compute client
     client: ComputeClient<R>,
@@ -59,8 +70,14 @@ pub struct GpuFwArgminB<R: Runtime> {
     k: usize,
     /// Workgroups the kernel dispatches, and therefore the partial-buffer depth
     blocks: usize,
-    /// `A Aᵀ` dense `[k, k]`, rebound per B update
-    t1: Option<GpuTensor<R, f32>>,
+    /// `A Aᵀ` as CSR `k × k`, rebound per B update
+    t1: Option<GpuCompressedSparseData<R, f32>>,
+    /// Per-thread column segments of `t1`, `[k, b_wg + 1]`, rebound with it
+    t1_seg: Option<GpuTensor<R, u32>>,
+    /// Workgroup width the B argmin was last bound for
+    b_wg: u32,
+    /// CPU back end for the B argmin, used when no workgroup tier covers `k`
+    b_cpu: Option<CpuFwArgminB>,
     /// `K² Aᵀ` as CSR `n × k`, rebound per B update
     t2: Option<GpuCompressedSparseData<R, f32>>,
     /// Per-block partial minima `[blocks, k]`
@@ -132,6 +149,9 @@ impl<R: Runtime> GpuFwArgminB<R> {
             k,
             blocks,
             t1: None,
+            t1_seg: None,
+            b_wg: 0,
+            b_cpu: None,
             t2: None,
             part_val,
             part_idx,
@@ -191,38 +211,43 @@ impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
             });
         }
 
-        // t1 is sparse, measured at 1-7% across every shape benchmarked, but it
-        // is densified anyway: the kernel's innermost loop indexes `t1[m*k+col]`
-        // so each thread reads only the column it owns. Left sparse, every
-        // thread would have to scan the whole row to find its own entries, the
-        // way the `t2` and `b` loops do, and that scan sits inside the
-        // `nnz(K²B)` loop where it costs roughly `nnz(t1 row)` times more work.
-        //
-        // The size check comes before the allocation because `k²` floats is
-        // 178 MB at k = 6666 and grows quadratically; the launcher checks the
-        // same bound, but only after host and device buffers already exist.
-        let bytes = self.k * self.k * size_of::<f32>();
-        let limit = self.client.properties().memory.max_page_size as usize;
-        if bytes > limit {
-            return Err(BixverseErrors::GpuBindingTooLarge {
-                buffer: "t1",
-                bytes,
-                limit,
-            });
-        }
-
-        let mut dense = vec![0.0f32; self.k * self.k];
-        for row in 0..self.k {
-            for idx in t1.indptr[row] as usize..t1.indptr[row + 1] as usize {
-                dense[row * self.k + t1.indices[idx] as usize] += t1.data[idx];
+        // `t1` stays sparse, paired with a per-thread segment table so each
+        // thread reaches its own contiguous column block in one row without
+        // searching. It used to be densified to `k²` floats, which is 381 MB at
+        // k = 10 000 and grows quadratically; the inner loop then read a full
+        // `k`-float row for every non-zero of the `K²B` row.
+        // No tier means the register arrays would not fit and the dispatch
+        // would be rejected silently, so this solve runs on the CPU instead.
+        // The A solve still runs on the device; they are independent.
+        let Some(wg) = b_argmin_workgroup(self.k) else {
+            if parse_verbosity_level(self.verbose).detailed_verbosity() {
+                println!(
+                    "  B-gradient argmin on CPU: k {} fits no tier {:?}",
+                    self.k, B_ARGMIN_WG_TIERS
+                );
             }
-        }
-
-        self.t1 = Some(GpuTensor::<R, f32>::from_slice(
-            &dense,
-            vec![self.k * self.k],
+            let mut cpu = CpuFwArgminB::default();
+            cpu.begin(t1, t2)?;
+            self.b_cpu = Some(cpu);
+            return Ok(());
+        };
+        self.b_cpu = None;
+        let seg_host = a_columns_segments(t1, wg, self.k.div_ceil(wg as usize));
+        self.t1_seg = Some(GpuTensor::<R, u32>::from_slice(
+            &seg_host,
+            vec![seg_host.len()],
             &self.client,
         ));
+        drop(seg_host);
+        self.b_wg = wg;
+
+        self.t1 = Some(
+            GpuCompressedSparseData::<R, f32>::from_compressed_sparse_data_2(
+                t1,
+                false,
+                &self.client,
+            )?,
+        );
         self.t2 = Some(
             GpuCompressedSparseData::<R, f32>::from_compressed_sparse_data_2(
                 t2,
@@ -239,6 +264,10 @@ impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
         k2_b: &CompressedSparseData2<f32>,
         b: &CompressedSparseData2<f32>,
     ) -> Result<(Vec<usize>, f32), BixverseErrors> {
+        if let Some(cpu) = self.b_cpu.as_mut() {
+            return cpu.argmins(k2_b, b);
+        }
+
         // The kernel launches unchecked and indexes `indptr` up to `n`, so a
         // wrong shape here is an out-of-bounds device read rather than an
         // error.
@@ -253,6 +282,10 @@ impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
 
         let t1 = self
             .t1
+            .as_ref()
+            .ok_or(BixverseErrors::SEACellsModelNotFitted)?;
+        let t1_seg = self
+            .t1_seg
             .as_ref()
             .ok_or(BixverseErrors::SEACellsModelNotFitted)?;
         let t2 = self
@@ -274,6 +307,7 @@ impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
         launch_fw_argmin_b(
             &k2b_gpu,
             t1,
+            t1_seg,
             t2,
             &b_gpu,
             &self.part_val,
@@ -322,9 +356,9 @@ impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
         n_iters: usize,
         pruning: Option<f32>,
     ) -> Result<Vec<FwAtoms>, BixverseErrors> {
-        // The kernel launches unchecked and indexes `indptr` up to `n` and `t1`
-        // up to `k * k`, so a wrong shape is an out-of-bounds device read rather
-        // than an error.
+        // The kernel launches unchecked and indexes `indptr` up to `n` and the
+        // segment table by archetype row, so a wrong shape is an out-of-bounds
+        // device read rather than an error.
         if t1.shape != (k, k) {
             return Err(BixverseErrors::ShapeMismatch {
                 expected: (k, k),
@@ -340,45 +374,35 @@ impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
             }
         }
 
-        // Two shapes the kernel does not cover. Thread `i` owns atom slot `i`,
-        // so a column wider than the workgroup cannot be represented; and past
+        // Shapes no workgroup tier covers. Thread `i` owns atom slot `i`, so a
+        // column wider than the widest tier cannot be represented; and past
         // [A_COLUMNS_MAX_SLOTS] the per-thread gradient arrays spill to global
         // memory, which is slower than the CPU path it is meant to replace.
-        // Both fall back rather than fail, and both say so, because an
-        // invisible several-fold slowdown is worse than a noisy one.
+        // Falls back rather than fails, and says so, because an invisible
+        // several-fold slowdown is worse than a noisy one.
         let cap = a_columns_capacity(a_prev_t, n_iters);
-        let slots = k.div_ceil(A_COLUMNS_WG as usize);
-        if cap > A_COLUMNS_WG as usize || slots > A_COLUMNS_MAX_SLOTS {
+        let Some(wg) = a_columns_workgroup(k, cap) else {
             if parse_verbosity_level(self.verbose).detailed_verbosity() {
                 println!(
-                    "  A-column solve on CPU: cap {} (max {}), slots {} (max {})",
-                    cap, A_COLUMNS_WG, slots, A_COLUMNS_MAX_SLOTS
+                    "  A-column solve on CPU: k {} at cap {} fits no tier {:?} within {} slots",
+                    k, cap, A_COLUMNS_WG_TIERS, A_COLUMNS_MAX_SLOTS
                 );
             }
             return Ok(fw_columns_a(t1, a_prev_t, k2_b, k, n, n_iters, pruning));
-        }
+        };
 
-        // Same trade as `begin`: dense so each thread indexes the one column it
-        // owns. Checked before allocating because it is quadratic in `k`.
-        let t1_bytes = k * k * size_of::<f32>();
-        let limit = self.client.properties().memory.max_page_size as usize;
-        if t1_bytes > limit {
-            return Err(BixverseErrors::GpuBindingTooLarge {
-                buffer: "t1 (A update)",
-                bytes: t1_bytes,
-                limit,
-            });
-        }
-
-        let mut t1_dense = vec![0.0f32; k * k];
-        for row in 0..k {
-            for idx in t1.indptr[row] as usize..t1.indptr[row + 1] as usize {
-                t1_dense[row * k + t1.indices[idx] as usize] += t1.data[idx];
-            }
-        }
-
-        let t1_gpu = GpuTensor::<R, f32>::from_slice(&t1_dense, vec![k * k], &self.client);
-        drop(t1_dense);
+        // Uploaded sparse. `t1` is 1-7% dense, so a `k × k` dense copy is both a
+        // large host allocation per outer iteration and, worse, a full `k`-float
+        // row read per Frank-Wolfe iteration per cell. Blocked column ownership
+        // in the kernel is what makes the sparse row searchable per thread.
+        let t1_gpu = GpuCompressedSparseData::<R, f32>::from_compressed_sparse_data_2(
+            t1,
+            false,
+            &self.client,
+        )?;
+        let seg_host = a_columns_segments(t1, wg, k.div_ceil(wg as usize));
+        let t1_seg = GpuTensor::<R, u32>::from_slice(&seg_host, vec![seg_host.len()], &self.client);
+        drop(seg_host);
 
         let a_prev_gpu = GpuCompressedSparseData::<R, f32>::from_compressed_sparse_data_2(
             a_prev_t,
@@ -421,6 +445,7 @@ impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
 
         launch_fw_columns_a(
             &t1_gpu,
+            &t1_seg,
             &a_prev_gpu,
             &k2b_gpu,
             &atom_idx,
@@ -433,6 +458,7 @@ impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
             stride as u32,
             pruning,
             None,
+            Some(wg),
             &self.client,
         )?;
 
@@ -448,6 +474,27 @@ impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
             .clone()
             .read(&self.client)
             .map_err(|e| BixverseErrors::GpuMatmul(e.to_string()))?;
+
+        // Every Frank-Wolfe iteration either appends an atom or merges into an
+        // existing one, so after `n_iters >= 1` every cell holds at least one.
+        // A zero count therefore means the launch was rejected and did nothing,
+        // which `launch_unchecked` reports as success. The per-tier slot caps in
+        // [A_COLUMNS_WG_TIERS] are measured on one device, so this is the
+        // backstop that keeps a different one from returning silent zeros.
+        if n_iters > 0 && cnt_host.contains(&0) {
+            let dead = cnt_host.iter().filter(|c| **c == 0).count();
+            println!(
+                "  A-column solve fell back to CPU: the kernel wrote no atoms for {} of {} cells \
+                 at k = {}, workgroup {}, {} slots. This is a rejected dispatch, not a result. \
+                 Please report the device and shape.",
+                dead,
+                n,
+                k,
+                wg,
+                k.div_ceil(wg as usize)
+            );
+            return Ok(fw_columns_a(t1, a_prev_t, k2_b, k, n, n_iters, pruning));
+        }
 
         // The kernel marks a pruned atom weight-zero instead of compacting, so
         // with pruning on the zeros are exactly what `FwAtoms::prune` removed
@@ -585,6 +632,8 @@ mod tests {
     use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
     use rand::prelude::*;
     use rand::rngs::StdRng;
+
+    use crate::gpu::sc_gpu::kernels::seacells_kernels::A_COLUMNS_WG;
 
     /// Skip rather than fail where no GPU is available.
     fn try_device() -> Option<WgpuDevice> {
@@ -776,6 +825,146 @@ mod tests {
             }
         }
     }
+    /// Parity above the old `k <= 2048` ceiling, across every workgroup tier.
+    ///
+    /// Each `k` here selects a different tier and a different slot count, and
+    /// none is a multiple of `wg * slots`, so the partial block at the end of
+    /// the column range is exercised on every one. That tail is where blocked
+    /// ownership can go wrong without the totals noticing: a thread whose block
+    /// runs past `k` must contribute no argmin candidate.
+    #[test]
+    fn test_fw_columns_a_large_k_matches_cpu() {
+        let Some(device) = try_device() else {
+            eprintln!("no GPU available, skipping");
+            return;
+        };
+        let client = WgpuRuntime::client(&device);
+
+        let n = 1_500usize;
+        let n_iters = 12usize;
+
+        // 3000 -> wg 128, 4500 -> wg 256, 9000 -> wg 512. All above the ceiling
+        // the kernel used to fall back at, and none a power of two.
+        for k in [3_000usize, 4_500, 9_000] {
+            let wg = a_columns_workgroup(k, n_iters + 6).expect("no tier for k");
+            let slots = k.div_ceil(wg as usize);
+            assert!(
+                wg as usize * slots > k,
+                "k = {} is an exact multiple of wg * slots, tail not exercised",
+                k
+            );
+
+            let mut rng = StdRng::seed_from_u64(k as u64);
+            let t1 = random_csr(k, k, 20, false, false, &mut rng);
+            let a_prev_t = random_csr(n, k, 6, true, false, &mut rng);
+            let k2_b = random_csr(n, k, 10, false, false, &mut rng);
+
+            let mut backend = GpuFwArgminB::<WgpuRuntime>::new(n, k, client.clone());
+
+            for pruning in [None, Some(1e-7f32)] {
+                let expected = fw_columns_a(&t1, &a_prev_t, &k2_b, k, n, n_iters, pruning);
+                let actual = backend
+                    .columns_a(&t1, &a_prev_t, &k2_b, k, n, n_iters, pruning)
+                    .expect("GPU column solve failed");
+
+                let total_mass: f64 = actual
+                    .iter()
+                    .map(|atoms| atoms.atoms().1.iter().map(|&w| w as f64).sum::<f64>())
+                    .sum();
+                assert!(
+                    (total_mass - n as f64).abs() < 0.01 * n as f64,
+                    "k = {} (wg {}, {} slots): total mass {} over {} cells, the kernel probably \
+                     did no work",
+                    k,
+                    wg,
+                    slots,
+                    total_mass,
+                    n
+                );
+
+                let mut differing = 0usize;
+                for (want, got) in expected.iter().zip(actual.iter()) {
+                    let key = |atoms: &FwAtoms| {
+                        let (idx, val) = atoms.atoms();
+                        let mut pairs: Vec<(u32, f32)> =
+                            idx.iter().copied().zip(val.iter().copied()).collect();
+                        pairs.sort_unstable_by_key(|&(i, _)| i);
+                        pairs
+                    };
+                    let (want_pairs, got_pairs) = (key(want), key(got));
+                    let same = want_pairs.len() == got_pairs.len()
+                        && want_pairs.iter().zip(got_pairs.iter()).all(|(a, b)| {
+                            a.0 == b.0 && (a.1 - b.1).abs() <= 1e-4 * a.1.abs().max(1e-3)
+                        });
+                    if !same {
+                        differing += 1;
+                    }
+                }
+                assert!(
+                    differing * 50 <= n,
+                    "k = {} (wg {}, {} slots): {} / {} columns differ (pruning {:?})",
+                    k,
+                    wg,
+                    slots,
+                    differing,
+                    n,
+                    pruning
+                );
+            }
+        }
+    }
+
+    /// The segment table must bracket exactly the entries a thread owns.
+    ///
+    /// Checked against the definition rather than against the kernel, including
+    /// the two cases the kernel relies on and a walk would not reveal: a block
+    /// holding no entries at all, and a row whose entries all fall in one block.
+    #[test]
+    fn test_a_columns_segments_bracket_owned_columns() {
+        let k = 300usize;
+        let wg = 128u32;
+        let slots = k.div_ceil(wg as usize);
+
+        let mut rng = StdRng::seed_from_u64(7);
+        let t1 = random_csr(k, k, 9, false, false, &mut rng);
+        let seg = a_columns_segments(&t1, wg, slots);
+
+        let stride = wg as usize + 1;
+        assert_eq!(seg.len(), k * stride);
+
+        let mut saw_empty = false;
+        for row in 0..k {
+            let (start, end) = (t1.indptr[row], t1.indptr[row + 1]);
+            assert_eq!(seg[row * stride], start, "row {} start", row);
+            assert_eq!(seg[row * stride + wg as usize], end, "row {} end", row);
+
+            for t in 0..wg as usize {
+                let (lo, hi) = (seg[row * stride + t], seg[row * stride + t + 1]);
+                assert!(lo <= hi, "row {} thread {}: bounds inverted", row, t);
+                if lo == hi {
+                    saw_empty = true;
+                }
+                let base = (t * slots) as u32;
+                for p in lo..hi {
+                    let col = t1.indices[p as usize];
+                    assert!(
+                        col >= base && col < base + slots as u32,
+                        "row {} thread {}: column {} outside [{}, {})",
+                        row,
+                        t,
+                        col,
+                        base,
+                        base + slots as u32
+                    );
+                }
+            }
+        }
+        assert!(
+            saw_empty,
+            "no empty block seen, the sparse case is untested"
+        );
+    }
+
     /// Drive [launch_fw_columns_a] directly so the reduction arm can be forced.
     ///
     /// ### Params
@@ -788,6 +977,7 @@ mod tests {
     /// * `n_iters` - Frank-Wolfe iterations
     /// * `pruning` - Pruning threshold, or `None`
     /// * `use_plane` - Force the plane or shared-memory reduction
+    /// * `wg` - Force a workgroup width, or `None` for the selected tier
     /// * `client` - Compute client
     ///
     /// ### Returns
@@ -803,17 +993,19 @@ mod tests {
         n_iters: usize,
         pruning: Option<f32>,
         use_plane: bool,
+        wg: Option<u32>,
         client: &ComputeClient<WgpuRuntime>,
     ) -> (Vec<u32>, Vec<f32>, Vec<u32>, usize) {
         let cap = a_columns_capacity(a_prev_t, n_iters);
 
-        let mut dense = vec![0.0f32; k * k];
-        for row in 0..k {
-            for idx in t1.indptr[row] as usize..t1.indptr[row + 1] as usize {
-                dense[row * k + t1.indices[idx] as usize] += t1.data[idx];
-            }
-        }
-        let t1_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&dense, vec![k * k], client);
+        let t1_gpu = GpuCompressedSparseData::<WgpuRuntime, f32>::from_compressed_sparse_data_2(
+            t1, false, client,
+        )
+        .expect("upload failed");
+        let width = wg.unwrap_or(A_COLUMNS_WG);
+        let seg_host = a_columns_segments(t1, width, k.div_ceil(width as usize));
+        let t1_seg =
+            GpuTensor::<WgpuRuntime, u32>::from_slice(&seg_host, vec![seg_host.len()], client);
         let a_gpu = GpuCompressedSparseData::<WgpuRuntime, f32>::from_compressed_sparse_data_2(
             a_prev_t, false, client,
         )
@@ -831,6 +1023,7 @@ mod tests {
 
         launch_fw_columns_a(
             &t1_gpu,
+            &t1_seg,
             &a_gpu,
             &k2b_gpu,
             &atom_idx,
@@ -843,6 +1036,7 @@ mod tests {
             cap as u32,
             pruning,
             Some(use_plane),
+            wg,
             client,
         )
         .expect("launch failed");
@@ -881,10 +1075,11 @@ mod tests {
         let k2_b = random_csr(n, k, 8, false, true, &mut rng);
 
         for pruning in [None, Some(1e-7f32)] {
-            let (plane_idx, plane_val, plane_cnt, cap) =
-                run_columns_a_raw(&t1, &a_prev_t, &k2_b, n, k, n_iters, pruning, true, &client);
+            let (plane_idx, plane_val, plane_cnt, cap) = run_columns_a_raw(
+                &t1, &a_prev_t, &k2_b, n, k, n_iters, pruning, true, None, &client,
+            );
             let (tree_idx, tree_val, tree_cnt, tree_cap) = run_columns_a_raw(
-                &t1, &a_prev_t, &k2_b, n, k, n_iters, pruning, false, &client,
+                &t1, &a_prev_t, &k2_b, n, k, n_iters, pruning, false, None, &client,
             );
 
             assert_eq!(cap, tree_cap);
@@ -915,9 +1110,11 @@ mod tests {
     /// The atom capacity ceiling must be exact on both sides.
     ///
     /// `cap = widest column of A_prev + n_iters`, and thread `i` owns atom slot
-    /// `i`, so `cap == A_COLUMNS_WG` is the last configuration the kernel can
-    /// represent and the last append writes the highest in-bounds slot. One more
-    /// has to reach the CPU instead.
+    /// `i`, so `cap` equal to the chosen workgroup width is the last
+    /// configuration the kernel can represent and the last append writes the
+    /// highest in-bounds slot. One more has to reach a wider tier, or the CPU
+    /// when none is wide enough. Pinned to the narrowest tier here, which is the
+    /// width this `k` selects.
     #[test]
     fn test_fw_columns_a_capacity_boundary() {
         let Some(device) = try_device() else {
