@@ -4,6 +4,10 @@
 
 Breaking changes in the streaming engine.
 
+### Features
+
+- Improved SEACell GPU code to work on larger data sets.
+
 ### Breaking changes
 
 - `CellGeneSparseWriter::new` takes a fifth `target_size: f32`. It is stored in
@@ -16,8 +20,7 @@ Breaking changes in the streaming engine.
 
 ### Fixes
 
-- Fixed a panic in `CscGeneChunk::read_from_buffer`, which guarded on 32 bytes
-  and then sliced 36.
+- Fixed a potential panic in `CscGeneChunk::read_from_buffer`.
 - Fixed `migrate_v2_to_v3`, which compared against `SC_FILE_VERSION` (3) instead
   of 2.
 - Chunk parsers now validate the total payload against the buffer before
