@@ -34,10 +34,11 @@ use cubecl::future;
 use cubecl::prelude::*;
 use faer::Mat;
 
-use ann_search_rs::gpu::tensor::GpuTensor;
-use ann_search_rs::gpu::*;
 use ann_search_rs::utils::dist::{Dist, compute_l2_norm};
 use ann_search_rs::utils::k_means_utils::{KMeansInit, fast_random_init, kmeans_parallel_init};
+use cubecl_utils_rs::prelude::*;
+
+use bixverse_rs::gpu::WORKGROUP_32;
 
 use bixverse_rs::gpu::ml::k_means_gpu::{KMeansGpuParams, k_means_clusters_gpu};
 
@@ -108,7 +109,7 @@ fn assign_v1_baseline<F: Float, N: Size>(
     let lanes = LINE_SIZE;
     let dim_scalars = dim_lines * lanes;
     let tx = UNIT_POS_X;
-    let wg = WORKGROUP_SIZE_X;
+    let wg = WORKGROUP_32;
 
     let point_idx = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * wg + tx;
     let active = point_idx < n_samples;
@@ -185,7 +186,7 @@ fn assign_v1_baseline<F: Float, N: Size>(
     }
 }
 
-// V2: same as V1 but with comptime wg_size in place of WORKGROUP_SIZE_X.
+// V2: same as V1 but with comptime wg_size in place of WORKGROUP_32.
 // Strictly the same arithmetic as V1 - only the workgroup width changes.
 #[cube(launch_unchecked)]
 fn assign_v2_wide_wg<F: Float, N: Size>(
@@ -294,7 +295,7 @@ fn assign_v3_rn<F: Float, N: Size>(
     let lanes = LINE_SIZE;
     let dim_scalars = dim_lines * lanes;
     let tx = UNIT_POS_X;
-    let wg = WORKGROUP_SIZE_X;
+    let wg = WORKGROUP_32;
 
     let thread_idx = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * wg + tx;
     let p0 = thread_idx as usize * rn;
@@ -483,9 +484,11 @@ fn make_input<R: Runtime>(shape: AssignShape, client: &ComputeClient<R>) -> Assi
         .collect();
 
     AssignInput {
-        data: GpuTensor::<R, f32>::from_slice(&data_host, vec![shape.n, shape.dim], client),
-        cents: GpuTensor::<R, f32>::from_slice(&cent_host, vec![shape.k, shape.dim], client),
-        assignments: GpuTensor::<R, u32>::empty(vec![shape.n], client),
+        data: GpuTensor::<R, f32>::from_slice(&data_host, vec![shape.n, shape.dim], client)
+            .unwrap(),
+        cents: GpuTensor::<R, f32>::from_slice(&cent_host, vec![shape.k, shape.dim], client)
+            .unwrap(),
+        assignments: GpuTensor::<R, u32>::empty(vec![shape.n], client).unwrap(),
     }
 }
 
@@ -516,14 +519,14 @@ impl<R: Runtime> Benchmark for V1Bench<R> {
     fn execute(&self, input: Self::Input) -> Result<(), String> {
         let dim_lines = self.shape.dim / LINE_SIZE;
         let k_tile = k_tile_for(self.shape.dim);
-        let n_workgroups = (self.shape.n as u32).div_ceil(WORKGROUP_SIZE_X);
-        let (gx, gy) = grid_2d(n_workgroups);
+        let n_workgroups = (self.shape.n as u32).div_ceil(WORKGROUP_32);
+        let (gx, gy) = grid_2d(n_workgroups, &GpuLimits::from_client(&self.client)).unwrap();
 
         unsafe {
             assign_v1_baseline::launch_unchecked::<f32, R>(
                 &self.client,
                 CubeCount::Static(gx, gy, 1),
-                CubeDim::new_1d(WORKGROUP_SIZE_X),
+                CubeDim::new_1d(WORKGROUP_32),
                 LINE_SIZE,
                 input.data.into_tensor_arg(),
                 input.cents.into_tensor_arg(),
@@ -570,7 +573,7 @@ impl<R: Runtime> Benchmark for V2Bench<R> {
         let dim_lines = self.shape.dim / LINE_SIZE;
         let k_tile = k_tile_for(self.shape.dim);
         let n_workgroups = (self.shape.n as u32).div_ceil(V2_WG);
-        let (gx, gy) = grid_2d(n_workgroups);
+        let (gx, gy) = grid_2d(n_workgroups, &GpuLimits::from_client(&self.client)).unwrap();
 
         unsafe {
             assign_v2_wide_wg::launch_unchecked::<f32, R>(
@@ -625,10 +628,10 @@ impl<R: Runtime> Benchmark for V3Bench<R> {
         let k_tile = k_tile_for(self.shape.dim);
         let rn = rn_for(self.shape.dim);
         let n_threads = self.shape.n.div_ceil(rn) as u32;
-        let n_workgroups = n_threads.div_ceil(WORKGROUP_SIZE_X);
-        let (gx, gy) = grid_2d(n_workgroups);
+        let n_workgroups = n_threads.div_ceil(WORKGROUP_32);
+        let (gx, gy) = grid_2d(n_workgroups, &GpuLimits::from_client(&self.client)).unwrap();
         let count = CubeCount::Static(gx, gy, 1);
-        let cdim = CubeDim::new_1d(WORKGROUP_SIZE_X);
+        let cdim = CubeDim::new_1d(WORKGROUP_32);
 
         // `rn` is comptime in the kernel; the launcher dispatches per rn value
         // so each gets its own monomorphisation.
@@ -721,7 +724,7 @@ impl<R: Runtime> Benchmark for V4Bench<R> {
     fn execute(&self, input: Self::Input) -> Result<(), String> {
         let dim_lines = self.shape.dim / LINE_SIZE;
         let n_workgroups = (self.shape.n as u32).div_ceil(V4_WG);
-        let (gx, gy) = grid_2d(n_workgroups);
+        let (gx, gy) = grid_2d(n_workgroups, &GpuLimits::from_client(&self.client)).unwrap();
 
         unsafe {
             assign_v4_vec::launch_unchecked::<f32, R>(

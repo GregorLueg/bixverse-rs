@@ -25,9 +25,8 @@
 // The `#[cube]` macro generates undocumented launcher structs and functions.
 #![allow(missing_docs)]
 
-use ann_search_rs::gpu::tensor::GpuTensor;
-use ann_search_rs::gpu::*;
 use cubecl::prelude::*;
+use cubecl_utils_rs::prelude::*;
 use faer::{Mat, MatRef};
 use std::time::Instant;
 
@@ -322,7 +321,8 @@ pub fn apply_centre_scale<F: Float>(
 ///
 /// ### Errors
 ///
-/// * `GpuCubeCountExceeded` if either grid is over the device limit.
+/// * `CubeclUtils` if either grid is over the device limit, or an allocation
+///   busts the per-binding size limit.
 pub fn scale_matrix_col_gpu<F, R>(
     data: &GpuTensor<R, F>,
     n_rows: usize,
@@ -334,11 +334,12 @@ where
     R: Runtime,
     F: Float + cubecl::CubeElement,
 {
-    let means = GpuTensor::<R, F>::empty(vec![n_cols], client);
-    let inv_scales = GpuTensor::<R, F>::empty(vec![n_cols], client);
-    let scaled = GpuTensor::<R, F>::empty(vec![n_cols, n_rows], client);
+    let limits = GpuLimits::from_client(client);
+    let means = GpuTensor::<R, F>::empty(vec![n_cols], client)?;
+    let inv_scales = GpuTensor::<R, F>::empty(vec![n_cols], client)?;
+    let scaled = GpuTensor::<R, F>::empty(vec![n_cols, n_rows], client)?;
 
-    let stats_count = checked_cube_count::<R>("column_stats", n_cols as u32, 1, 1)?;
+    let stats_count = checked_cube_count("column_stats", n_cols as u32, 1, 1, &limits)?;
     unsafe {
         column_stats::launch_unchecked::<F, R>(
             client,
@@ -355,8 +356,8 @@ where
 
     let total = (n_rows * n_cols) as u32;
     let n_blocks = total.div_ceil(WORKGROUP_256);
-    let (gx, gy) = grid_2d(n_blocks);
-    let scale_count = checked_cube_count::<R>("apply_centre_scale", gx, gy, 1)?;
+    let (gx, gy) = grid_2d(n_blocks, &limits)?;
+    let scale_count = checked_cube_count("apply_centre_scale", gx, gy, 1, &limits)?;
     unsafe {
         apply_centre_scale::launch_unchecked::<F, R>(
             client,
@@ -440,7 +441,7 @@ fn contiguous_col_major<F: BixverseFloat>(mat: MatRef<'_, F>) -> Option<&'_ [F]>
 ///
 /// * `InvalidArgument` if the `[d, d]` output is larger than the device accepts
 ///   in one binding.
-/// * `GpuCubeCountExceeded` if any grid is over the device limit.
+/// * `CubeclUtils` if any grid is over the device limit.
 pub fn column_pairwise_cor_gpu<F, R>(
     mat: MatRef<F>,
     cor_type: GpuCorCov,
@@ -480,7 +481,7 @@ where
     // nothing, so refuse up front rather than hand back a plausible-looking
     // matrix of zeros.
     let out_bytes = n_cols * n_cols * size_of::<F>();
-    let max_binding = client.properties().memory.max_page_size as usize;
+    let max_binding = GpuLimits::from_client(&client).max_binding_bytes as usize;
     if out_bytes > max_binding {
         return Err(BixverseErrors::InvalidArgument(format!(
             "GPU correlation: the {n_cols} x {n_cols} output needs {} MB but the \
@@ -490,14 +491,14 @@ where
         )));
     }
 
-    let data_gpu = GpuTensor::<R, F>::from_slice(data_flat, vec![n_cols, n_rows], &client);
+    let data_gpu = GpuTensor::<R, F>::from_slice(data_flat, vec![n_cols, n_rows], &client)?;
 
     if verbose {
         println!("Upload to GPU done: {:.2?}", start.elapsed());
     }
 
     let scaled = scale_matrix_col_gpu(&data_gpu, n_rows, n_cols, scale_sd, &client)?;
-    let result = GpuTensor::<R, F>::empty(vec![n_cols, n_cols], &client);
+    let result = GpuTensor::<R, F>::empty(vec![n_cols, n_cols], &client)?;
 
     gram_aat::<R, F>(&client, &scaled, &result, n_rows, n_cols)?;
 

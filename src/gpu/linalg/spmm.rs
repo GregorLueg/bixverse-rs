@@ -44,9 +44,8 @@
 
 #![allow(missing_docs)]
 
-use ann_search_rs::gpu::tensor::GpuTensor;
-use ann_search_rs::gpu::*;
 use cubecl::prelude::*;
+use cubecl_utils_rs::prelude::*;
 
 use crate::gpu::{WORKGROUP_64, WORKGROUP_128, WORKGROUP_256};
 
@@ -429,7 +428,8 @@ pub fn dense_column_weighted_sum<A: Float>(
 ///
 /// ### Errors
 ///
-/// * `GpuSparseLayoutMismatch` if `sparse.cs_type` is not CSR.
+/// * `SparseLayoutMismatch` if `sparse.cs_type` is not CSR.
+/// * `CubeclUtils` if the grid is over the device's cube-count limit.
 #[allow(clippy::too_many_arguments)]
 pub fn launch_spmm_csr_forward<R, S, A>(
     sparse: &GpuCompressedSparseData<R, S>,
@@ -454,7 +454,8 @@ where
     }
 
     let (n, _m) = sparse.shape;
-    let (gx, gy) = grid_2d(n as u32);
+    let limits = GpuLimits::from_client(client);
+    let (gx, gy) = grid_2d(n as u32, &limits)?;
     let count = CubeCount::Static(gx, gy, 1);
 
     macro_rules! dispatch {
@@ -508,7 +509,8 @@ where
 ///
 /// ### Errors
 ///
-/// * `GpuSparseLayoutMismatch` if `sparse.cs_type` is not CSC.
+/// * `SparseLayoutMismatch` if `sparse.cs_type` is not CSC.
+/// * `CubeclUtils` if the grid is over the device's cube-count limit.
 #[allow(clippy::too_many_arguments)]
 pub fn launch_spmm_csc_transpose<R, S, A>(
     sparse: &GpuCompressedSparseData<R, S>,
@@ -534,7 +536,8 @@ where
     }
 
     let (_n, m) = sparse.shape;
-    let (gx, gy) = grid_2d(m as u32);
+    let limits = GpuLimits::from_client(client);
+    let (gx, gy) = grid_2d(m as u32, &limits)?;
     let count = CubeCount::Static(gx, gy, 1);
 
     macro_rules! dispatch {
@@ -571,17 +574,31 @@ where
 }
 
 /// Dispatch [`fn@dense_column_sum`]. One workgroup per output column.
+///
+/// ### Params
+///
+/// * `matrix` - Dense input `[n_rows, s_width]` row-major
+/// * `out` - Dense output `[s_width]`
+/// * `n_rows` - Number of rows in `matrix`
+/// * `s_width` - Number of columns in `matrix`
+/// * `client` - CubeCL compute client
+///
+/// ### Returns
+///
+/// `Ok(())`, or `CubeclUtils` if the grid busts the device's cube-count limit.
 pub fn launch_dense_column_sum<R, A>(
     matrix: &GpuTensor<R, A>,
     out: &GpuTensor<R, A>,
     n_rows: usize,
     s_width: usize,
     client: &ComputeClient<R>,
-) where
+) -> Result<(), BixverseErrors>
+where
     R: Runtime,
     A: Float + cubecl::CubeElement,
 {
-    let (gx, gy) = grid_2d(s_width as u32);
+    let limits = GpuLimits::from_client(client);
+    let (gx, gy) = grid_2d(s_width as u32, &limits)?;
 
     unsafe {
         dense_column_sum::launch_unchecked::<A, R>(
@@ -595,9 +612,24 @@ pub fn launch_dense_column_sum<R, A>(
             WORKGROUP_128,
         );
     }
+
+    Ok(())
 }
 
 /// Dispatch [`fn@dense_column_weighted_sum`]. One workgroup per output column.
+///
+/// ### Params
+///
+/// * `weights` - Per-row weights `[n_rows]`
+/// * `matrix` - Dense input `[n_rows, s_width]` row-major
+/// * `out` - Dense output `[s_width]`
+/// * `n_rows` - Number of rows in `matrix`
+/// * `s_width` - Number of columns in `matrix`
+/// * `client` - CubeCL compute client
+///
+/// ### Returns
+///
+/// `Ok(())`, or `CubeclUtils` if the grid busts the device's cube-count limit.
 pub fn launch_dense_column_weighted_sum<R, A>(
     weights: &GpuTensor<R, A>,
     matrix: &GpuTensor<R, A>,
@@ -605,11 +637,13 @@ pub fn launch_dense_column_weighted_sum<R, A>(
     n_rows: usize,
     s_width: usize,
     client: &ComputeClient<R>,
-) where
+) -> Result<(), BixverseErrors>
+where
     R: Runtime,
     A: Float + cubecl::CubeElement,
 {
-    let (gx, gy) = grid_2d(s_width as u32);
+    let limits = GpuLimits::from_client(client);
+    let (gx, gy) = grid_2d(s_width as u32, &limits)?;
 
     unsafe {
         dense_column_weighted_sum::launch_unchecked::<A, R>(
@@ -624,6 +658,8 @@ pub fn launch_dense_column_weighted_sum<R, A>(
             WORKGROUP_128,
         );
     }
+
+    Ok(())
 }
 
 ///////////
@@ -773,13 +809,15 @@ mod tests {
     ) -> Vec<f32> {
         let client = WgpuRuntime::client(device);
         let m_gpu =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(matrix, vec![n_rows, s_width], &client);
+            GpuTensor::<WgpuRuntime, f32>::from_slice(matrix, vec![n_rows, s_width], &client)
+                .unwrap();
         let out_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(
             &vec![0.0f32; s_width],
             vec![s_width],
             &client,
-        );
-        launch_dense_column_sum(&m_gpu, &out_gpu, n_rows, s_width, &client);
+        )
+        .unwrap();
+        launch_dense_column_sum(&m_gpu, &out_gpu, n_rows, s_width, &client).unwrap();
         out_gpu.read(&client).unwrap()
     }
 
@@ -791,15 +829,19 @@ mod tests {
         device: &WgpuDevice,
     ) -> Vec<f32> {
         let client = WgpuRuntime::client(device);
-        let w_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(weights, vec![n_rows], &client);
+        let w_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(weights, vec![n_rows], &client).unwrap();
         let m_gpu =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(matrix, vec![n_rows, s_width], &client);
+            GpuTensor::<WgpuRuntime, f32>::from_slice(matrix, vec![n_rows, s_width], &client)
+                .unwrap();
         let out_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(
             &vec![0.0f32; s_width],
             vec![s_width],
             &client,
-        );
-        launch_dense_column_weighted_sum(&w_gpu, &m_gpu, &out_gpu, n_rows, s_width, &client);
+        )
+        .unwrap();
+        launch_dense_column_weighted_sum(&w_gpu, &m_gpu, &out_gpu, n_rows, s_width, &client)
+            .unwrap();
         out_gpu.read(&client).unwrap()
     }
 
@@ -824,14 +866,17 @@ mod tests {
             CompressedSparseFormat::Csr,
             (n, m),
             &client,
-        );
-        let x_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(x, vec![m, s], &client);
-        let corr_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(correction, vec![s], &client);
+        )
+        .unwrap();
+        let x_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(x, vec![m, s], &client).unwrap();
+        let corr_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(correction, vec![s], &client).unwrap();
         let row_offsets_gpu =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(row_offsets, vec![n], &client);
-        let x_sum_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(x_sum, vec![s], &client);
+            GpuTensor::<WgpuRuntime, f32>::from_slice(row_offsets, vec![n], &client).unwrap();
+        let x_sum_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(x_sum, vec![s], &client).unwrap();
         let y_gpu =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; n * s], vec![n, s], &client);
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; n * s], vec![n, s], &client)
+                .unwrap();
 
         launch_spmm_csr_forward(
             &sparse,
@@ -869,14 +914,17 @@ mod tests {
             CompressedSparseFormat::Csc,
             (n, m),
             &client,
-        );
-        let q_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(q, vec![n, s], &client);
-        let qsum_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(q_sum, vec![s], &client);
-        let mu_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(mu, vec![m], &client);
-        let sigma_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(sigma, vec![m], &client);
-        let m_dot_q_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(m_dot_q, vec![s], &client);
+        )
+        .unwrap();
+        let q_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(q, vec![n, s], &client).unwrap();
+        let qsum_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(q_sum, vec![s], &client).unwrap();
+        let mu_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(mu, vec![m], &client).unwrap();
+        let sigma_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(sigma, vec![m], &client).unwrap();
+        let m_dot_q_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(m_dot_q, vec![s], &client).unwrap();
         let z_gpu =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; m * s], vec![m, s], &client);
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; m * s], vec![m, s], &client)
+                .unwrap();
 
         launch_spmm_csc_transpose(
             &sparse,
@@ -1025,20 +1073,23 @@ mod tests {
             CompressedSparseFormat::Csc,
             (n, m),
             &client,
-        );
+        )
+        .unwrap();
         let x_gpu =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; m * s], vec![m, s], &client);
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; m * s], vec![m, s], &client)
+                .unwrap();
         let corr_gpu =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; s], vec![s], &client);
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; s], vec![s], &client).unwrap();
         let y_gpu =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; n * s], vec![n, s], &client);
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; n * s], vec![n, s], &client)
+                .unwrap();
 
         let res = launch_spmm_csr_forward(
             &sparse,
             &x_gpu,
             &corr_gpu,
-            &GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; n], vec![n], &client),
-            &GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; s], vec![s], &client),
+            &GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; n], vec![n], &client).unwrap(),
+            &GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; s], vec![s], &client).unwrap(),
             &y_gpu,
             s,
             &client,
@@ -1064,16 +1115,20 @@ mod tests {
             CompressedSparseFormat::Csr,
             (n, m),
             &client,
-        );
+        )
+        .unwrap();
         let q_gpu =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; n * s], vec![n, s], &client);
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; n * s], vec![n, s], &client)
+                .unwrap();
         let qsum_gpu =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; s], vec![s], &client);
-        let mu_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; m], vec![m], &client);
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; s], vec![s], &client).unwrap();
+        let mu_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; m], vec![m], &client).unwrap();
         let sigma_gpu =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![1.0f32; m], vec![m], &client);
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![1.0f32; m], vec![m], &client).unwrap();
         let z_gpu =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; m * s], vec![m, s], &client);
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; m * s], vec![m, s], &client)
+                .unwrap();
 
         let res = launch_spmm_csc_transpose(
             &sparse,
@@ -1081,7 +1136,7 @@ mod tests {
             &qsum_gpu,
             &mu_gpu,
             &sigma_gpu,
-            &GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; s], vec![s], &client),
+            &GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; s], vec![s], &client).unwrap(),
             &z_gpu,
             s,
             &client,

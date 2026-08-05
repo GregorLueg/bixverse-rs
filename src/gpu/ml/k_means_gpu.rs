@@ -2,8 +2,9 @@
 //! the Flash-KMeans approach from Yang et al., arXive and ports over what can
 //! be ported over to wgpu and cubecl.
 //!
-//! Re-uses the GPU infrastructure from `ann-search-rs` with `"gpu"` feature
-//! enabled to avoid code duplication.
+//! Re-uses the GPU infrastructure from `cubecl-utils-rs` (tensors, grid
+//! decomposition, device limits) and the CPU k-means utilities from
+//! `ann-search-rs` to avoid code duplication.
 //!
 //! ### Mixed precision
 //!
@@ -17,19 +18,18 @@
 
 #![allow(missing_docs)]
 
-use ann_search_rs::gpu::tensor::GpuTensor;
-use ann_search_rs::gpu::*;
 use ann_search_rs::prelude::*;
 use ann_search_rs::utils::dist::Dist;
 use ann_search_rs::utils::{k_means_utils::*, matrix_to_flat};
 use cubecl::prelude::*;
+use cubecl_utils_rs::prelude::*;
 use faer::{Mat, MatRef};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::iter::Sum;
 use std::time::Instant;
 
-use crate::gpu::WORKGROUP_128;
+use crate::gpu::{WORKGROUP_32, WORKGROUP_128};
 use crate::prelude::*;
 
 ////////////
@@ -369,6 +369,11 @@ pub fn flash_assign_cosine_vec<S: Float, A: Float, N: Size>(
 /// * `k` - Number of clusters
 /// * `dim` - Vector dimension (unpadded)
 /// * `metric` - Distance metric; `Manhattan` is not supported
+///
+/// ### Returns
+///
+/// `Ok(())`; assignments are written into `assign_gpu` in place. `CubeclUtils`
+/// if the grid is over the device limit.
 #[allow(clippy::too_many_arguments)]
 fn flash_assign_device<S, A, R>(
     client: &ComputeClient<R>,
@@ -381,15 +386,17 @@ fn flash_assign_device<S, A, R>(
     k: usize,
     dim: usize,
     metric: &Dist,
-) where
+) -> Result<(), BixverseErrors>
+where
     R: Runtime,
     S: Float + cubecl::CubeElement,
     A: Float + cubecl::CubeElement,
 {
+    let limits = GpuLimits::from_client(client);
     let vec_size = LINE_SIZE;
     let dim_lines = dim / vec_size;
     let n_workgroups = (n as u32).div_ceil(WORKGROUP_128);
-    let (gx, gy) = grid_2d(n_workgroups);
+    let (gx, gy) = grid_2d(n_workgroups, &limits)?;
     let count = CubeCount::Static(gx, gy, 1);
     let cdim = CubeDim::new_1d(WORKGROUP_128);
 
@@ -428,6 +435,8 @@ fn flash_assign_device<S, A, R>(
         },
         Dist::Manhattan => unreachable!("Manhattan distance is not supported!"),
     }
+
+    Ok(())
 }
 
 ///////////////////
@@ -642,6 +651,11 @@ pub fn min_dist_cosine_vec<S: Float, A: Float, N: Size>(
 /// * `k` - Number of candidates
 /// * `dim` - Padded vector dimension
 /// * `metric` - Distance metric; `Manhattan` is not supported
+///
+/// ### Returns
+///
+/// `Ok(())`; distances are written into `out_gpu` in place. `CubeclUtils` if
+/// the grid is over the device limit.
 #[allow(clippy::too_many_arguments)]
 fn min_dist_device<S, A, R>(
     client: &ComputeClient<R>,
@@ -654,14 +668,16 @@ fn min_dist_device<S, A, R>(
     k: usize,
     dim: usize,
     metric: &Dist,
-) where
+) -> Result<(), BixverseErrors>
+where
     R: Runtime,
     S: Float + cubecl::CubeElement,
     A: Float + cubecl::CubeElement,
 {
+    let limits = GpuLimits::from_client(client);
     let vec_size = LINE_SIZE;
     let dim_lines = dim / vec_size;
-    let (gx, gy) = grid_2d((n as u32).div_ceil(WORKGROUP_128));
+    let (gx, gy) = grid_2d((n as u32).div_ceil(WORKGROUP_128), &limits)?;
     let count = CubeCount::Static(gx, gy, 1);
     let cdim = CubeDim::new_1d(WORKGROUP_128);
 
@@ -700,6 +716,8 @@ fn min_dist_device<S, A, R>(
         },
         Dist::Manhattan => unreachable!("Manhattan distance is not supported!"),
     }
+
+    Ok(())
 }
 
 /// Oversampling factor for [`kmeans_parallel_init_gpu`]. Each round samples
@@ -866,7 +884,9 @@ where
 ///
 /// ### Errors
 ///
-/// * Propagates readback failures from the distance buffer.
+/// * `CubeclUtils` if the D² dispatch grid is over the device limit, a
+///   candidate upload busts the per-binding size limit, or the distance
+///   read-back fails.
 #[allow(clippy::too_many_arguments)]
 fn kmeans_parallel_init_gpu<S, A, R>(
     client: &ComputeClient<R>,
@@ -892,16 +912,16 @@ where
     let mut cands: Vec<A> = data_host[first * dim..(first + 1) * dim].to_vec();
     let mut cand_norms: Vec<A> = vec![norms_host[first]];
 
-    let dist_gpu = GpuTensor::<R, A>::empty(vec![n], client);
+    let dist_gpu = GpuTensor::<R, A>::empty(vec![n], client)?;
 
     for _ in 0..n_rounds {
         let n_cand = cand_norms.len();
-        let cand_gpu = GpuTensor::<R, A>::from_slice(&cands, vec![n_cand, dim], client);
-        let cnorm_gpu = GpuTensor::<R, A>::from_slice(&cand_norms, vec![n_cand], client);
+        let cand_gpu = GpuTensor::<R, A>::from_slice(&cands, vec![n_cand, dim], client)?;
+        let cnorm_gpu = GpuTensor::<R, A>::from_slice(&cand_norms, vec![n_cand], client)?;
 
         min_dist_device::<S, A, R>(
             client, data_gpu, &cand_gpu, pnorm_gpu, &cnorm_gpu, &dist_gpu, n, n_cand, dim, metric,
-        );
+        )?;
 
         let distances = dist_gpu.clone().read(client)?;
         let picked = sample_proportional(&distances, k * KMEANSPP_OVERSAMPLING, &mut rng);
@@ -955,7 +975,7 @@ pub fn histogram_clusters_privatised(
 ) {
     let r = CUBE_POS_X;
     let tx = UNIT_POS_X;
-    let wg = WORKGROUP_SIZE_X;
+    let wg = WORKGROUP_32;
 
     // 1. Cooperative inline zeroing: threads clear their chunk of the row.
     let mut c = tx;
@@ -1110,7 +1130,7 @@ pub fn scatter_csr_privatised(
 ) {
     let r = CUBE_POS_X;
     let tx = UNIT_POS_X;
-    let wg = WORKGROUP_SIZE_X;
+    let wg = WORKGROUP_32;
 
     let total_threads = wg * CUBE_COUNT_X;
     let mut i = r * wg + tx;
@@ -1144,6 +1164,13 @@ pub fn scatter_csr_privatised(
 /// * `all_indices` - Pre-allocated output index buffer `[n]`; cluster `c`
 ///   occupies `all_indices[offsets[c]..offsets[c+1]]` on exit
 /// * `client` - CubeCL compute client for the target device
+///
+/// ### Returns
+///
+/// `Ok(())`; the CSR layout lands in `offsets` and `all_indices`.
+/// `CubeclUtils` if any of the five dispatches is over the device's cube-count
+/// limit. The merge pass is the one that reaches it first: its grid is
+/// `cube_count * k / 256`, which grows in both terms.
 #[allow(clippy::too_many_arguments)]
 pub fn build_csr_gpu_privatised<R>(
     assignments: &GpuTensor<R, u32>,
@@ -1155,14 +1182,42 @@ pub fn build_csr_gpu_privatised<R>(
     offsets: &GpuTensor<R, u32>,
     all_indices: &GpuTensor<R, u32>,
     client: &ComputeClient<R>,
-) where
+) -> Result<(), BixverseErrors>
+where
     R: Runtime,
 {
+    let limits = GpuLimits::from_client(client);
+    let total_elements = cube_count * k;
+
+    let hist_count = checked_cube_count(
+        "histogram_clusters_privatised",
+        cube_count as u32,
+        1,
+        1,
+        &limits,
+    )?;
+    let scan_count = checked_cube_count(
+        "scan_columns_and_sum",
+        k.div_ceil(256) as u32,
+        1,
+        1,
+        &limits,
+    )?;
+    let merge_count = checked_cube_count(
+        "merge_offsets_to_cursors",
+        total_elements.div_ceil(256) as u32,
+        1,
+        1,
+        &limits,
+    )?;
+    let scatter_count =
+        checked_cube_count("scatter_csr_privatised", cube_count as u32, 1, 1, &limits)?;
+
     unsafe {
         histogram_clusters_privatised::launch_unchecked::<R>(
             client,
-            CubeCount::Static(cube_count as u32, 1, 1),
-            CubeDim::new_1d(WORKGROUP_SIZE_X),
+            hist_count,
+            CubeDim::new_1d(WORKGROUP_32),
             assignments.clone().into_tensor_arg(),
             privatised_counts.clone().into_tensor_arg(),
             n as u32,
@@ -1171,7 +1226,7 @@ pub fn build_csr_gpu_privatised<R>(
 
         scan_columns_and_sum::launch_unchecked::<R>(
             client,
-            CubeCount::Static(k.div_ceil(256) as u32, 1, 1),
+            scan_count,
             CubeDim::new_1d(256),
             privatised_counts.clone().into_tensor_arg(),
             counts.clone().into_tensor_arg(),
@@ -1188,10 +1243,9 @@ pub fn build_csr_gpu_privatised<R>(
             k as u32,
         );
 
-        let total_elements = cube_count * k;
         merge_offsets_to_cursors::launch_unchecked::<R>(
             client,
-            CubeCount::Static(total_elements.div_ceil(256) as u32, 1, 1),
+            merge_count,
             CubeDim::new_1d(256),
             privatised_counts.clone().into_tensor_arg(),
             offsets.clone().into_tensor_arg(),
@@ -1201,8 +1255,8 @@ pub fn build_csr_gpu_privatised<R>(
 
         scatter_csr_privatised::launch_unchecked::<R>(
             client,
-            CubeCount::Static(cube_count as u32, 1, 1),
-            CubeDim::new_1d(WORKGROUP_SIZE_X),
+            scatter_count,
+            CubeDim::new_1d(WORKGROUP_32),
             assignments.clone().into_tensor_arg(),
             privatised_counts.clone().into_tensor_arg(),
             all_indices.clone().into_tensor_arg(),
@@ -1210,6 +1264,8 @@ pub fn build_csr_gpu_privatised<R>(
             k as u32,
         );
     }
+
+    Ok(())
 }
 
 /// Recompute centroids as the mean of assigned points via segmented reduction
@@ -1353,6 +1409,11 @@ pub fn segmented_centroid_update<S: Float, A: Float>(
 /// * `k` - Number of clusters
 /// * `dim` - Embedding dimensionality
 /// * `client` - CubeCL compute client for the target device
+///
+/// ### Returns
+///
+/// `Ok(())`; `centroids` is updated in place. `CubeclUtils` if the grid is over
+/// the device limit.
 pub fn segmented_update<R, S, A>(
     data: &GpuTensor<R, S>,
     all_indices: &GpuTensor<R, u32>,
@@ -1361,12 +1422,14 @@ pub fn segmented_update<R, S, A>(
     k: usize,
     dim: usize,
     client: &ComputeClient<R>,
-) where
+) -> Result<(), BixverseErrors>
+where
     R: Runtime,
     S: Float + cubecl::CubeElement,
     A: Float + cubecl::CubeElement,
 {
-    let (gx, gy) = grid_2d(k as u32);
+    let limits = GpuLimits::from_client(client);
+    let (gx, gy) = grid_2d(k as u32, &limits)?;
     // Threads split as `dim_eff` output dimensions by `n_sub` point
     // sub-stripes. At the Harmony shapes (dim 32-48) that gives 4 or 2
     // sub-stripes per workgroup; above `WORKGROUP_128` dimensions there is
@@ -1388,6 +1451,8 @@ pub fn segmented_update<R, S, A>(
             n_sub,
         );
     }
+
+    Ok(())
 }
 
 /// Count how many points changed cluster between two assignment snapshots.
@@ -1500,6 +1565,11 @@ pub fn centroid_norms_l2<F: Float>(
 /// * `counts` - Pre-allocated cluster size buffer `[k]`
 /// * `offsets` - Pre-allocated offset buffer `[k + 1]`
 /// * `all_indices` - Pre-allocated CSR index buffer `[n]`
+///
+/// ### Returns
+///
+/// `Ok(())`; `cent_gpu`, `assign_gpu` and the CSR scratch are updated in place.
+/// `CubeclUtils` if any dispatch is over the device limit.
 #[allow(clippy::too_many_arguments)]
 fn lloyd_step<S, A, R>(
     client: &ComputeClient<R>,
@@ -1517,14 +1587,15 @@ fn lloyd_step<S, A, R>(
     counts: &GpuTensor<R, u32>,
     offsets: &GpuTensor<R, u32>,
     all_indices: &GpuTensor<R, u32>,
-) where
+) -> Result<(), BixverseErrors>
+where
     R: Runtime,
     S: Float + cubecl::CubeElement,
     A: Float + cubecl::CubeElement,
 {
     flash_assign_device::<S, A, R>(
         client, data_gpu, cent_gpu, pnorm_gpu, cnorm_gpu, assign_gpu, n, k, dim, metric,
-    );
+    )?;
 
     build_csr_gpu_privatised::<R>(
         assign_gpu,
@@ -1536,12 +1607,13 @@ fn lloyd_step<S, A, R>(
         offsets,
         all_indices,
         client,
-    );
+    )?;
 
-    segmented_update::<R, S, A>(data_gpu, all_indices, offsets, cent_gpu, k, dim, client);
+    segmented_update::<R, S, A>(data_gpu, all_indices, offsets, cent_gpu, k, dim, client)?;
 
     if *metric == Dist::Cosine {
-        let (gx, gy) = grid_2d(k as u32);
+        let limits = GpuLimits::from_client(client);
+        let (gx, gy) = grid_2d(k as u32, &limits)?;
         unsafe {
             centroid_norms_l2::launch_unchecked::<A, R>(
                 client,
@@ -1554,6 +1626,8 @@ fn lloyd_step<S, A, R>(
             );
         }
     }
+
+    Ok(())
 }
 
 /// Run the device-resident Lloyd's loop and read back the final state.
@@ -1573,6 +1647,27 @@ fn lloyd_step<S, A, R>(
 /// * `S` - Storage type of the data buffer (`T` on the unquantised path,
 ///   `half::f16` on the quantised path)
 /// * `A` - Accumulator and centroid type (`T` on both paths)
+///
+/// ### Params
+///
+/// * `client` - CubeCL compute client
+/// * `data_gpu` - Input data `[n, dim_padded]` in storage precision `S`
+/// * `cent_gpu` - Centroid matrix `[n_centroids, dim_padded]` in `A`, updated
+///   in place across the loop
+/// * `pnorm_gpu` - Point L2 norms `[n]`; only read for cosine
+/// * `cnorm_gpu` - Centroid L2 norms `[n_centroids]`; only read for cosine
+/// * `n` - Number of data points
+/// * `n_centroids` - Number of clusters
+/// * `dim_padded` - Padded vector dimension, a multiple of `LINE_SIZE`
+/// * `dist` - Distance metric
+/// * `params` - Iteration count and the fixed / assignment-checked switch
+/// * `verbose` - Print per-iteration convergence progress to stdout
+///
+/// ### Returns
+///
+/// `(assignments, centroids)` read back from the device: one cluster index per
+/// point, and the final `[n_centroids, dim_padded]` centroid buffer flattened
+/// row-major. `CubeclUtils` if any dispatch or allocation busts a device limit.
 #[allow(clippy::too_many_arguments)]
 fn run_kmeans_loop<S, A, R>(
     client: &ComputeClient<R>,
@@ -1592,13 +1687,13 @@ where
     S: Float + cubecl::CubeElement,
     A: Float + cubecl::CubeElement,
 {
-    let assign_gpu = GpuTensor::<R, u32>::empty(vec![n], client);
+    let assign_gpu = GpuTensor::<R, u32>::empty(vec![n], client)?;
 
     let cube_count = 512usize;
-    let privatised_counts = GpuTensor::<R, u32>::empty(vec![cube_count, n_centroids], client);
-    let counts = GpuTensor::<R, u32>::empty(vec![n_centroids], client);
-    let offsets = GpuTensor::<R, u32>::empty(vec![n_centroids + 1], client);
-    let all_indices = GpuTensor::<R, u32>::empty(vec![n], client);
+    let privatised_counts = GpuTensor::<R, u32>::empty(vec![cube_count, n_centroids], client)?;
+    let counts = GpuTensor::<R, u32>::empty(vec![n_centroids], client)?;
+    let offsets = GpuTensor::<R, u32>::empty(vec![n_centroids + 1], client)?;
+    let all_indices = GpuTensor::<R, u32>::empty(vec![n], client)?;
 
     if params.fixed {
         if verbose {
@@ -1624,15 +1719,16 @@ where
                 &counts,
                 &offsets,
                 &all_indices,
-            );
+            )?;
         }
     } else {
         // A change floor to absorb near-equidistant points that flip between
         // equally good centroids without stalling termination.
         let change_floor = (n / 10_000).max(1) as u32;
 
-        let assign_alt_gpu = GpuTensor::<R, u32>::empty(vec![n], client);
-        let (cnt_gx, cnt_gy) = grid_2d((n as u32).div_ceil(WORKGROUP_SIZE_X));
+        let limits = GpuLimits::from_client(client);
+        let assign_alt_gpu = GpuTensor::<R, u32>::empty(vec![n], client)?;
+        let (cnt_gx, cnt_gy) = grid_2d((n as u32).div_ceil(WORKGROUP_32), &limits)?;
 
         for iter in 0..params.iters {
             // `cur` receives this iteration's assignments; `prev` holds last.
@@ -1658,15 +1754,15 @@ where
                 &counts,
                 &offsets,
                 &all_indices,
-            );
+            )?;
 
             // Zeroed single-element atomic counter, recreated per iter.
-            let changed_gpu = GpuTensor::<R, u32>::from_slice(&[0u32], vec![1], client);
+            let changed_gpu = GpuTensor::<R, u32>::from_slice(&[0u32], vec![1], client)?;
             unsafe {
                 count_changed::launch_unchecked::<R>(
                     client,
                     CubeCount::Static(cnt_gx, cnt_gy, 1),
-                    CubeDim::new_1d(WORKGROUP_SIZE_X),
+                    CubeDim::new_1d(WORKGROUP_32),
                     cur.clone().into_tensor_arg(),
                     prev.clone().into_tensor_arg(),
                     changed_gpu.clone().into_tensor_arg(),
@@ -1710,7 +1806,7 @@ where
         n_centroids,
         dim_padded,
         dist,
-    );
+    )?;
 
     let assignments: Vec<usize> = assign_gpu
         .read(client)?
@@ -1758,7 +1854,8 @@ where
 ///
 /// ### Errors
 ///
-/// * Propagates readback failures from initialisation and from the loop.
+/// * `CubeclUtils` if a dispatch or an allocation busts a device limit, or a
+///   read-back fails during initialisation or the loop.
 #[allow(clippy::too_many_arguments)]
 fn init_and_run<S, A, R>(
     client: &ComputeClient<R>,
@@ -1806,15 +1903,16 @@ where
         }
     };
 
-    let cent_gpu = GpuTensor::<R, A>::from_slice(&centroids, vec![n_centroids, dim_padded], client);
+    let cent_gpu =
+        GpuTensor::<R, A>::from_slice(&centroids, vec![n_centroids, dim_padded], client)?;
 
     let cnorm_gpu = if *dist == Dist::Cosine {
         let cnorms: Vec<A> = (0..n_centroids)
             .map(|c| A::calculate_l2_norm(&centroids[c * dim_padded..(c + 1) * dim_padded]))
             .collect();
-        GpuTensor::<R, A>::from_slice(&cnorms, vec![n_centroids], client)
+        GpuTensor::<R, A>::from_slice(&cnorms, vec![n_centroids], client)?
     } else {
-        GpuTensor::<R, A>::from_slice(&[A::one()], vec![1], client)
+        GpuTensor::<R, A>::from_slice(&[A::one()], vec![1], client)?
     };
 
     run_kmeans_loop::<S, A, R>(
@@ -1871,6 +1969,11 @@ where
 /// ### Returns
 ///
 /// `(centroid matrix of shape n_centroids x dim, assignments)`
+///
+/// ### Errors
+///
+/// * `CubeclUtils` if a dispatch grid is over the device's cube-count limit
+///   or an upload busts the per-binding size limit, or a read-back fails.
 #[allow(clippy::too_many_arguments)]
 pub fn k_means_clusters_gpu<T, R>(
     data: MatRef<T>,
@@ -1931,9 +2034,9 @@ where
         Vec::new()
     };
     let pnorm_gpu = if dist == Dist::Cosine {
-        GpuTensor::<R, T>::from_slice(&norms_host, vec![n], &client)
+        GpuTensor::<R, T>::from_slice(&norms_host, vec![n], &client)?
     } else {
-        GpuTensor::<R, T>::from_slice(&[T::one()], vec![1], &client)
+        GpuTensor::<R, T>::from_slice(&[T::one()], vec![1], &client)?
     };
 
     if verbose {
@@ -1961,7 +2064,7 @@ where
             .map(|x| half::f16::from_f32(x.to_f32().unwrap_or(0.0)))
             .collect();
         let data_gpu =
-            GpuTensor::<R, half::f16>::from_slice(&data_f16, vec![n, dim_padded], &client);
+            GpuTensor::<R, half::f16>::from_slice(&data_f16, vec![n, dim_padded], &client)?;
 
         if verbose {
             println!("  ... moved data to GPU (fp16): {:.2?}", start.elapsed());
@@ -1983,7 +2086,7 @@ where
             verbose,
         )?
     } else {
-        let data_gpu = GpuTensor::<R, T>::from_slice(&data_padded, vec![n, dim_padded], &client);
+        let data_gpu = GpuTensor::<R, T>::from_slice(&data_padded, vec![n, dim_padded], &client)?;
 
         if verbose {
             println!("  ... moved data to GPU: {:.2?}", start.elapsed());
@@ -2050,25 +2153,27 @@ mod tests {
         device: &WgpuDevice,
     ) -> Vec<usize> {
         let client = WgpuRuntime::client(device);
-        let data_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(data, vec![n, dim], &client);
-        let cent_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(cents, vec![k, dim], &client);
-        let assign_gpu = GpuTensor::<WgpuRuntime, u32>::empty(vec![n], &client);
+        let data_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(data, vec![n, dim], &client).unwrap();
+        let cent_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(cents, vec![k, dim], &client).unwrap();
+        let assign_gpu = GpuTensor::<WgpuRuntime, u32>::empty(vec![n], &client).unwrap();
 
         let pnorm_gpu = if *metric == Dist::Cosine {
             let v: Vec<f32> = (0..n)
                 .map(|i| compute_l2_norm(&data[i * dim..(i + 1) * dim]))
                 .collect();
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&v, vec![n], &client)
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&v, vec![n], &client).unwrap()
         } else {
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&[1.0f32], vec![1], &client)
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&[1.0f32], vec![1], &client).unwrap()
         };
         let cnorm_gpu = if *metric == Dist::Cosine {
             let v: Vec<f32> = (0..k)
                 .map(|c| compute_l2_norm(&cents[c * dim..(c + 1) * dim]))
                 .collect();
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&v, vec![k], &client)
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&v, vec![k], &client).unwrap()
         } else {
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&[1.0f32], vec![1], &client)
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&[1.0f32], vec![1], &client).unwrap()
         };
 
         flash_assign_device(
@@ -2082,7 +2187,8 @@ mod tests {
             k,
             dim,
             metric,
-        );
+        )
+        .unwrap();
 
         assign_gpu
             .read(&client)
@@ -2105,18 +2211,24 @@ mod tests {
         let client = WgpuRuntime::client(device);
         let cube_count = 64usize;
 
-        let data_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(data, vec![n, dim], &client);
-        let assign_gpu = GpuTensor::<WgpuRuntime, u32>::from_slice(assignments, vec![n], &client);
-        let cent_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(init_cents, vec![k, dim], &client);
+        let data_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(data, vec![n, dim], &client).unwrap();
+        let assign_gpu =
+            GpuTensor::<WgpuRuntime, u32>::from_slice(assignments, vec![n], &client).unwrap();
+        let cent_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(init_cents, vec![k, dim], &client).unwrap();
         let privatised_counts = GpuTensor::<WgpuRuntime, u32>::from_slice(
             &vec![0u32; cube_count * k],
             vec![cube_count * k],
             &client,
-        );
-        let counts = GpuTensor::<WgpuRuntime, u32>::from_slice(&vec![0u32; k], vec![k], &client);
+        )
+        .unwrap();
+        let counts =
+            GpuTensor::<WgpuRuntime, u32>::from_slice(&vec![0u32; k], vec![k], &client).unwrap();
         let offsets =
-            GpuTensor::<WgpuRuntime, u32>::from_slice(&vec![0u32; k + 1], vec![k + 1], &client);
-        let all_indices = GpuTensor::<WgpuRuntime, u32>::empty(vec![n], &client);
+            GpuTensor::<WgpuRuntime, u32>::from_slice(&vec![0u32; k + 1], vec![k + 1], &client)
+                .unwrap();
+        let all_indices = GpuTensor::<WgpuRuntime, u32>::empty(vec![n], &client).unwrap();
 
         build_csr_gpu_privatised::<WgpuRuntime>(
             &assign_gpu,
@@ -2128,7 +2240,8 @@ mod tests {
             &offsets,
             &all_indices,
             &client,
-        );
+        )
+        .unwrap();
         segmented_update::<WgpuRuntime, f32, f32>(
             &data_gpu,
             &all_indices,
@@ -2137,7 +2250,8 @@ mod tests {
             k,
             dim,
             &client,
-        );
+        )
+        .unwrap();
 
         cent_gpu.read(&client).unwrap()
     }
@@ -2277,16 +2391,20 @@ mod tests {
         let assignments = vec![0u32, 1, 0, 2, 1, 0, 2, 2];
         let (n, k, cube_count) = (assignments.len(), 3usize, 64usize);
 
-        let assign_gpu = GpuTensor::<WgpuRuntime, u32>::from_slice(&assignments, vec![n], &client);
+        let assign_gpu =
+            GpuTensor::<WgpuRuntime, u32>::from_slice(&assignments, vec![n], &client).unwrap();
         let privatised_counts = GpuTensor::<WgpuRuntime, u32>::from_slice(
             &vec![0u32; cube_count * k],
             vec![cube_count * k],
             &client,
-        );
-        let counts = GpuTensor::<WgpuRuntime, u32>::from_slice(&vec![0u32; k], vec![k], &client);
+        )
+        .unwrap();
+        let counts =
+            GpuTensor::<WgpuRuntime, u32>::from_slice(&vec![0u32; k], vec![k], &client).unwrap();
         let offsets =
-            GpuTensor::<WgpuRuntime, u32>::from_slice(&vec![0u32; k + 1], vec![k + 1], &client);
-        let all_indices = GpuTensor::<WgpuRuntime, u32>::empty(vec![n], &client);
+            GpuTensor::<WgpuRuntime, u32>::from_slice(&vec![0u32; k + 1], vec![k + 1], &client)
+                .unwrap();
+        let all_indices = GpuTensor::<WgpuRuntime, u32>::empty(vec![n], &client).unwrap();
 
         build_csr_gpu_privatised::<WgpuRuntime>(
             &assign_gpu,
@@ -2298,7 +2416,8 @@ mod tests {
             &offsets,
             &all_indices,
             &client,
-        );
+        )
+        .unwrap();
 
         let idx = all_indices.read(&client).unwrap();
         let off = offsets.read(&client).unwrap();

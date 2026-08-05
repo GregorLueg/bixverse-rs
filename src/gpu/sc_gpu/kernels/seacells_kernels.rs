@@ -25,14 +25,12 @@
 
 #![allow(missing_docs)]
 
-use ann_search_rs::gpu::tensor::GpuTensor;
-use ann_search_rs::gpu::*;
 use cubecl::prelude::*;
+use cubecl_utils_rs::prelude::*;
 use rayon::prelude::*;
 
 use crate::errors::BixverseErrors;
 use crate::gpu::linalg::sparse_gpu::GpuCompressedSparseData;
-use crate::gpu::*;
 use crate::prelude::CompressedSparseFormat;
 
 ////////////
@@ -1100,7 +1098,7 @@ pub fn fw_columns_a_gpu<F: Float>(
 ///
 /// ### Returns
 ///
-/// `Ok(())`, or `GpuBindingTooLarge` / `GpuCubeCountExceeded` if a dispatch
+/// `Ok(())`, or `GpuBindingTooLarge` / `CubeclUtils` if a dispatch
 /// busts a device limit, or `InvalidArgument` if no workgroup tier covers `k`.
 ///
 /// [GpuFwArgminB]: crate::gpu::sc_gpu::seacells_gpu::GpuFwArgminB
@@ -1135,7 +1133,8 @@ where
 
     // An over-sized binding is rejected silently: the kernel does no work and
     // returns zeros.
-    let limit = client.properties().memory.max_page_size as usize;
+    let limits = GpuLimits::from_client(client);
+    let limit = limits.max_binding_bytes as usize;
     let indptr_bytes = (n + 1) * size_of::<u32>();
     let checked = [
         ("K2B values", k2b.nnz * size_of::<F>()),
@@ -1171,8 +1170,8 @@ where
     })?;
     let blocks = B_ARGMIN_BLOCKS.min(n.max(1) as u32);
 
-    let (gx, gy) = grid_2d(blocks);
-    let count = checked_cube_count::<R>("fw_argmin_b", gx, gy, 1)?;
+    let (gx, gy) = grid_2d(blocks, &limits)?;
+    let count = checked_cube_count("fw_argmin_b", gx, gy, 1, &limits)?;
 
     // One arm per tier: `wg_size` is comptime, so each width is its own shader.
     macro_rules! dispatch {
@@ -1219,8 +1218,8 @@ where
     }
 
     let reduce_cubes = (k as u32).div_ceil(B_REDUCE_WG);
-    let (rx, ry) = grid_2d(reduce_cubes);
-    let reduce_count = checked_cube_count::<R>("reduce_argmin_blocks", rx, ry, 1)?;
+    let (rx, ry) = grid_2d(reduce_cubes, &limits)?;
+    let reduce_count = checked_cube_count("reduce_argmin_blocks", rx, ry, 1, &limits)?;
 
     unsafe {
         reduce_argmin_blocks::launch_unchecked::<F, R>(
@@ -1259,19 +1258,16 @@ where
 ///
 /// ### Params
 ///
-/// * `client` - CubeCL compute client, queried for hardware properties
 /// * `wg_size` - Workgroup width the kernel will be launched at
+/// * `limits` - Device limits from [`GpuLimits::from_client`]
 ///
 /// ### Returns
 ///
 /// `true` to take the plane path, `false` for the shared-memory tree.
-pub fn plane_reduce_viable<R: Runtime>(client: &ComputeClient<R>, wg_size: u32) -> bool {
-    let hw = &client.properties().hardware;
-    let plane = hw.plane_size_min;
-    plane == hw.plane_size_max
-        && plane > 0
-        && plane >= MIN_PLANE_WIDTH
-        && wg_size.is_multiple_of(plane)
+pub fn plane_reduce_viable(wg_size: u32, limits: &GpuLimits) -> bool {
+    // `plane_partitions` guarantees `n_planes * plane == wg_size`, so bounding
+    // the plane count by `wg_size / MIN_PLANE_WIDTH` is exactly the width floor.
+    plane_partitions(wg_size, limits).is_some_and(|n_planes| n_planes <= wg_size / MIN_PLANE_WIDTH)
 }
 
 /// Dispatch [fw_columns_a_gpu()].
@@ -1311,7 +1307,7 @@ pub fn plane_reduce_viable<R: Runtime>(client: &ComputeClient<R>, wg_size: u32) 
 ///
 /// ### Returns
 ///
-/// `Ok(())`, or `GpuBindingTooLarge` / `GpuCubeCountExceeded` if the dispatch
+/// `Ok(())`, or `GpuBindingTooLarge` / `CubeclUtils` if the dispatch
 /// would bust a device limit, or `InvalidArgument` if no tier covers `k` or
 /// `cap` exceeds the chosen workgroup width.
 #[allow(clippy::too_many_arguments)]
@@ -1365,7 +1361,8 @@ where
 
     // An over-sized binding is rejected silently: the kernel does no work and
     // returns zeros.
-    let limit = client.properties().memory.max_page_size as usize;
+    let limits = GpuLimits::from_client(client);
+    let limit = limits.max_binding_bytes as usize;
     let indptr_bytes = (n + 1) * size_of::<u32>();
     let checked = [
         ("t1 values", t1.nnz * size_of::<F>()),
@@ -1392,10 +1389,10 @@ where
     }
 
     let blocks = A_COLUMNS_BLOCKS.min(n.max(1) as u32);
-    let (gx, gy) = grid_2d(blocks);
-    let count = checked_cube_count::<R>("fw_columns_a_gpu", gx, gy, 1)?;
+    let (gx, gy) = grid_2d(blocks, &limits)?;
+    let count = checked_cube_count("fw_columns_a_gpu", gx, gy, 1, &limits)?;
     let cap_pad = (cap as usize).next_power_of_two().max(1);
-    let planes = use_plane.unwrap_or_else(|| plane_reduce_viable::<R>(client, wg));
+    let planes = use_plane.unwrap_or_else(|| plane_reduce_viable(wg, &limits));
 
     // One arm per tier: `wg_size` is comptime, so each width is its own shader.
     macro_rules! dispatch {
@@ -1679,6 +1676,7 @@ mod tests {
                 (n, k),
                 &client,
             )
+            .unwrap()
         };
 
         let k2b_gpu = upload(k2b);
@@ -1699,18 +1697,20 @@ mod tests {
             CompressedSparseFormat::Csr,
             (k, k),
             &client,
-        );
+        )
+        .unwrap();
         let b_wg = b_argmin_workgroup(k).expect("no tier for k");
         let seg_host = a_columns_segments(&t1_csr, b_wg, k.div_ceil(b_wg as usize));
         let t1_seg =
-            GpuTensor::<WgpuRuntime, u32>::from_slice(&seg_host, vec![seg_host.len()], &client);
+            GpuTensor::<WgpuRuntime, u32>::from_slice(&seg_host, vec![seg_host.len()], &client)
+                .unwrap();
 
         let blocks = B_ARGMIN_BLOCKS.min(n.max(1) as u32) as usize;
-        let part_val = GpuTensor::<WgpuRuntime, f32>::empty(vec![blocks * k], &client);
-        let part_idx = GpuTensor::<WgpuRuntime, u32>::empty(vec![blocks * k], &client);
-        let gap_partial = GpuTensor::<WgpuRuntime, f32>::empty(vec![blocks], &client);
-        let out_val = GpuTensor::<WgpuRuntime, f32>::empty(vec![k], &client);
-        let out_idx = GpuTensor::<WgpuRuntime, u32>::empty(vec![k], &client);
+        let part_val = GpuTensor::<WgpuRuntime, f32>::empty(vec![blocks * k], &client).unwrap();
+        let part_idx = GpuTensor::<WgpuRuntime, u32>::empty(vec![blocks * k], &client).unwrap();
+        let gap_partial = GpuTensor::<WgpuRuntime, f32>::empty(vec![blocks], &client).unwrap();
+        let out_val = GpuTensor::<WgpuRuntime, f32>::empty(vec![k], &client).unwrap();
+        let out_idx = GpuTensor::<WgpuRuntime, u32>::empty(vec![k], &client).unwrap();
 
         launch_fw_argmin_b(
             &k2b_gpu,

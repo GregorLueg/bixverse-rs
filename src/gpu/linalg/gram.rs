@@ -33,11 +33,9 @@
 // The `#[cube]` macro generates undocumented launcher structs and functions.
 #![allow(missing_docs)]
 
-use ann_search_rs::gpu::grid_2d;
-use ann_search_rs::gpu::tensor::GpuTensor;
 use cubecl::prelude::*;
+use cubecl_utils_rs::prelude::*;
 
-use crate::gpu::checked_cube_count;
 use crate::prelude::*;
 
 ////////////
@@ -371,7 +369,8 @@ pub fn gram_reduce<F: Float>(partials: &Tensor<F>, g: &mut Tensor<F>, total: u32
 ///
 /// ### Errors
 ///
-/// * `GpuCubeCountExceeded` if either grid is over the device limit.
+/// * `CubeclUtils` if either grid is over the device limit, or the partials
+///   buffer busts the per-binding size limit.
 pub fn gram_aat<R, F>(
     client: &ComputeClient<R>,
     a: &GpuTensor<R, F>,
@@ -383,6 +382,7 @@ where
     R: Runtime,
     F: Float + cubecl::CubeElement,
 {
+    let limits = GpuLimits::from_client(client);
     let n_chunks = gram_chunks(n, d, size_of::<F>());
     let rows_per_chunk = n.div_ceil(n_chunks) as u32;
     let tiles = (d as u32).div_ceil(GRAM_BM);
@@ -390,10 +390,12 @@ where
     // With one chunk the kernel accumulates the whole reduction and can write
     // the output in place, which skips both the partials allocation and the
     // reduce launch.
-    let partials = (n_chunks > 1).then(|| GpuTensor::<R, F>::empty(vec![n_chunks, d, d], client));
+    let partials = (n_chunks > 1)
+        .then(|| GpuTensor::<R, F>::empty(vec![n_chunks, d, d], client))
+        .transpose()?;
     let target = partials.as_ref().unwrap_or(g);
 
-    let count = checked_cube_count::<R>("gram_symmetric", tiles, tiles, n_chunks as u32)?;
+    let count = checked_cube_count("gram_symmetric", tiles, tiles, n_chunks as u32, &limits)?;
     unsafe {
         gram_symmetric::launch_unchecked::<F, R>(
             client,
@@ -409,8 +411,8 @@ where
 
     if let Some(partials) = partials {
         let total = (d * d) as u32;
-        let (gx, gy) = grid_2d(total.div_ceil(GRAM_REDUCE_WG));
-        let count = checked_cube_count::<R>("gram_reduce", gx, gy, 1)?;
+        let (gx, gy) = grid_2d(total.div_ceil(GRAM_REDUCE_WG), &limits)?;
+        let count = checked_cube_count("gram_reduce", gx, gy, 1, &limits)?;
         unsafe {
             gram_reduce::launch_unchecked::<F, R>(
                 client,
@@ -483,8 +485,8 @@ mod tests {
         let client = WgpuRuntime::client(&device);
 
         let a_host = build_a(n, d);
-        let a = GpuTensor::<WgpuRuntime, f32>::from_slice(&a_host, vec![d, n], &client);
-        let g = GpuTensor::<WgpuRuntime, f32>::empty(vec![d, d], &client);
+        let a = GpuTensor::<WgpuRuntime, f32>::from_slice(&a_host, vec![d, n], &client).unwrap();
+        let g = GpuTensor::<WgpuRuntime, f32>::empty(vec![d, d], &client).unwrap();
 
         gram_aat::<WgpuRuntime, f32>(&client, &a, &g, n, d).unwrap();
 
@@ -617,7 +619,7 @@ mod tests {
 
         for d in [4_096u32, 20_000, 32_768] {
             let blocks = (d * d).div_ceil(GRAM_REDUCE_WG);
-            let (gx, gy) = grid_2d(blocks);
+            let (gx, gy) = grid_2d_limited(blocks, max_x.min(max_y)).unwrap();
             assert!(gx <= max_x && gy <= max_y, "d = {d}");
             assert!(gx as u64 * gy as u64 >= blocks as u64, "d = {d} uncovered");
         }

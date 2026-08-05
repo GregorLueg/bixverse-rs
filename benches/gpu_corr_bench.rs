@@ -35,7 +35,7 @@ use cubecl::prelude::*;
 use cubecl::wgpu::WgpuRuntime;
 use faer::Mat;
 
-use ann_search_rs::gpu::tensor::GpuTensor;
+use cubecl_utils_rs::prelude::*;
 
 use bixverse_rs::gpu::linalg::cholesky_gpu::dense_gemm;
 use bixverse_rs::gpu::linalg::corr::{GpuCorCov, column_pairwise_cor_gpu, scale_matrix_col_gpu};
@@ -275,7 +275,7 @@ fn run_staged<R: Runtime>(
     st.flatten = t.elapsed();
 
     let t = Instant::now();
-    let data_gpu = GpuTensor::<R, f32>::from_slice(&data_flat, vec![d, n], client);
+    let data_gpu = GpuTensor::<R, f32>::from_slice(&data_flat, vec![d, n], client).unwrap();
     sync(client);
     st.upload = t.elapsed();
 
@@ -290,8 +290,8 @@ fn run_staged<R: Runtime>(
     // 256 MB: leaving it inside the timed region attributes a page-fault cost
     // to whichever kernel happened to run first and moved the same config by
     // 1.6x between runs.
-    let result = GpuTensor::<R, f32>::empty(vec![d, d], client);
-    let baseline = GpuTensor::<R, f32>::empty(vec![d, d], client);
+    let result = GpuTensor::<R, f32>::empty(vec![d, d], client).unwrap();
+    let baseline = GpuTensor::<R, f32>::empty(vec![d, d], client).unwrap();
 
     let run_gram = || {
         gram_aat::<R, f32>(client, &scaled, &result, n, d).expect("gram_aat failed");

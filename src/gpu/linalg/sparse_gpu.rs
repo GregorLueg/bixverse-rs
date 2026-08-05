@@ -2,9 +2,9 @@
 //! upload time. Hold two of these (one CSR, one CSC) when both directions
 //! of SpMM are needed.
 
-use ann_search_rs::gpu::tensor::GpuTensor;
 use cubecl::Runtime;
 use cubecl::prelude::*;
+use cubecl_utils_rs::prelude::*;
 
 use crate::prelude::*;
 
@@ -73,7 +73,8 @@ where
     ///
     /// ### Returns
     ///
-    /// Self.
+    /// Self, or `CubeclUtils` if any of the three buffers busts the device's
+    /// per-binding size limit.
     pub fn from_parts(
         values: &[F],
         indices: &[u32],
@@ -81,16 +82,16 @@ where
         cs_type: CompressedSparseFormat,
         shape: (usize, usize),
         client: &ComputeClient<R>,
-    ) -> Self {
+    ) -> Result<Self, BixverseErrors> {
         let nnz = values.len();
-        Self {
-            indptr: GpuTensor::from_slice(indptr, vec![indptr.len()], client),
-            indices: GpuTensor::from_slice(indices, vec![nnz], client),
-            values: GpuTensor::from_slice(values, vec![nnz], client),
+        Ok(Self {
+            indptr: GpuTensor::from_slice(indptr, vec![indptr.len()], client)?,
+            indices: GpuTensor::from_slice(indices, vec![nnz], client)?,
+            values: GpuTensor::from_slice(values, vec![nnz], client)?,
             cs_type,
             shape,
             nnz,
-        }
+        })
     }
 
     /// Upload a layer of a host-side `CompressedSparseData2`.
@@ -104,7 +105,9 @@ where
     ///
     /// ### Returns
     ///
-    /// Self.
+    /// Self, `Data2NotAvailable` if `use_second_layer` is set and `src` has no
+    /// second layer, or `CubeclUtils` if any of the three buffers busts the
+    /// device's per-binding size limit.
     pub fn from_compressed_sparse_data_2<T, U>(
         src: &CompressedSparseData2<T, U>,
         use_second_layer: bool,
@@ -124,14 +127,14 @@ where
             src.data.iter().copied().map(Into::into).collect()
         };
 
-        Ok(Self::from_parts(
+        Self::from_parts(
             &values,
             &src.indices,
             &src.indptr,
             src.cs_type,
             src.shape,
             client,
-        ))
+        )
     }
 
     /// Total VRAM footprint of the three buffers.

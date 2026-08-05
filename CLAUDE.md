@@ -6,14 +6,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `bixverse-rs` is a Rust library for computational biology, statistics, and single-cell analysis. It was extracted from the `bixverse` R package's `src/Rust/` directory and refactored into a standalone crate. It is published on crates.io and consumed both as a pure Rust library and (via `extendr-api`) from R.
 
-## Sister crate: ann-search-rs
+## Sister crates: ann-search-rs and cubecl-utils-rs
 
-The user also maintains [`ann-search-rs`](https://crates.io/crates/ann-search-rs) (local checkout: `~/repos/shared/ann-search-rs`), a vector-search crate built for the same computational-biology use cases. `bixverse-rs` depends on it directly and reuses:
+The user also maintains two upstream crates, both with local checkouts:
 
-- **CPU side:** SIMD primitives, distance metrics (`ann_search_rs::utils::dist::Dist`), kNN search, and k-means clustering (`build_csr_layout`, etc.)
-- **GPU side:** the `gpu` feature here is built on top of GPU primitives from `ann-search-rs`: tensors, 2D grid helpers, work-group conventions, and related dispatch scaffolding. Changes to those primitives originate upstream in `ann-search-rs`, not in a local fork here.
+- [`ann-search-rs`](https://crates.io/crates/ann-search-rs) (`~/repos/shared/ann-search-rs`), a vector-search crate for the same computational-biology use cases. `bixverse-rs` reuses its **CPU** side: SIMD primitives, distance metrics (`ann_search_rs::utils::dist::Dist`), kNN search, and k-means clustering (`build_csr_layout`, etc.). Nothing GPU comes from here any more.
+- [`cubecl-utils-rs`](https://crates.io/crates/cubecl-utils-rs) (`~/repos/shared/cubecl-utils-rs`), the GPU primitives layer: `GpuTensor`, `GpuLimits`, `grid_2d`, `checked_cube_count`, `fits_binding`, `fits_shared_memory`, `plane_uniform` / `plane_partitions`, `resolve_workgroup_size`, `LINE_SIZE`, `pad_vectors`, `CubeclFloat`. Import it as `use cubecl_utils_rs::prelude::*;`.
 
-When a task looks like it wants a new SIMD kernel, distance metric, kNN structure, k-means variant, or GPU primitive, check `ann-search-rs` first. The code may already exist there and just need to be exposed. Bug fixes to those primitives usually belong upstream in `ann-search-rs`, not here.
+`ann-search-rs` depends on `cubecl-utils-rs` too, so both sides of the diamond must resolve to one copy of `GpuTensor` or nothing typechecks across the boundary.
+
+Everything in `cubecl-utils-rs` except `GpuLimits::from_client` and the `GpuTensor` constructors is a pure function of `&GpuLimits`, so derive limits once per dispatcher (`let limits = GpuLimits::from_client(client);`) and pass them down. Do not cache them on long-lived structs.
+
+When a task looks like it wants a new SIMD kernel, distance metric, kNN structure or k-means variant, check `ann-search-rs` first; for a new tensor, grid, device-limit or workgroup-sizing helper, check `cubecl-utils-rs`. The code may already exist and just need exposing. Bug fixes to those primitives belong upstream, not here.
+
+While `ann-search-rs` 0.5.0 is unpublished it is a path dependency (`../ann-search-rs`). Building from a git worktree needs a symlink at `.claude/worktrees/ann-search-rs`; swap the manifest to a plain version pin once 0.5.0 is on crates.io.
 
 ## Feature flags
 
@@ -22,7 +28,7 @@ Feature flags gate large chunks of the crate. Match your `cargo` invocations to 
 - default (no features): pure Rust bulk / statistics / graph / enrichment code
 - `single-cell`: enables the `single_cell` module and pulls in `hdf5`, `ndarray`, `memmap2`, `lz4_flex`, `bincode`, `indexmap`, `half`
 - `multi-modal`: enables `single_cell::multi_modal` (implies `single-cell`)
-- `gpu`: enables the `gpu` module, `cubecl` (wgpu + cpu backends), `cubek`, `half`, and `ann-search-rs/gpu`
+- `gpu`: enables the `gpu` module, `cubecl` (wgpu + cpu backends), `cubecl-utils-rs`, `cubek` and `half`
 - `large_scale_diagnostics`: development-only. Gates the expensive tests and the unasserted diagnostic sweeps. No CI job enables it
 
 ## Common commands

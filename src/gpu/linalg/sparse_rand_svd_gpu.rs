@@ -34,8 +34,8 @@
 //! and `[s, s]` matrices that are negligible. Total ~3.9 GB. Fits on most
 //! discrete GPUs and on Apple Silicon with unified memory.
 
-use ann_search_rs::gpu::tensor::GpuTensor;
 use cubecl::Runtime;
+use cubecl_utils_rs::prelude::*;
 use cubek::matmul::definition::MatmulPrecision;
 use faer::Mat;
 use rand::SeedableRng;
@@ -120,6 +120,13 @@ impl Default for RandSvdGpuParams {
 /// `SvdResults<T>` with `u` of shape `[n, n_components]`, `s` of length
 /// `n_components`, and `v` of shape `[m, n_components]`.
 ///
+/// ### Errors
+///
+/// * `CubeclUtils` if a dispatch grid is over the device limit or one of the
+///   workspace buffers busts the per-binding size limit. The `[n, s]` sketch
+///   and CholeskyQR2 scratch are the ones that reach it first.
+/// * `FaerCholeskyError` if a CholeskyQR2 pass hits a non-SPD Gram matrix.
+///
 /// ### Notes
 ///
 /// The current implementation will always run PCA on the data_2 layer, i.e.,
@@ -179,13 +186,13 @@ where
         GpuCompressedSparseData::<R, T>::from_compressed_sparse_data_2(&csr_host, true, &client)?;
     let csc_gpu =
         GpuCompressedSparseData::<R, T>::from_compressed_sparse_data_2(&data, true, &client)?;
-    let mu_gpu = GpuTensor::<R, T>::from_slice(col_means, vec![m], &client);
-    let sigma_gpu = GpuTensor::<R, T>::from_slice(col_stds, vec![m], &client);
+    let mu_gpu = GpuTensor::<R, T>::from_slice(col_means, vec![m], &client)?;
+    let sigma_gpu = GpuTensor::<R, T>::from_slice(col_stds, vec![m], &client)?;
 
     let zero_n = vec![T::from(0.0).unwrap(); n];
     let row_offsets_gpu = match row_offsets {
-        Some(off) => GpuTensor::<R, T>::from_slice(off, vec![n], &client),
-        None => GpuTensor::<R, T>::from_slice(&zero_n, vec![n], &client),
+        Some(off) => GpuTensor::<R, T>::from_slice(off, vec![n], &client)?,
+        None => GpuTensor::<R, T>::from_slice(&zero_n, vec![n], &client)?,
     };
 
     drop(csr_host);
@@ -204,30 +211,30 @@ where
             T::from(normal.sample(&mut rng)).unwrap() / col_stds[j]
         })
         .collect();
-    let omega_gpu = GpuTensor::<R, T>::from_slice(&omega_scaled, vec![m, s], &client);
+    let omega_gpu = GpuTensor::<R, T>::from_slice(&omega_scaled, vec![m, s], &client)?;
 
     // Workspace buffers. x_sum and m_dot_q are zero-initialised so they
     // contribute no correction when CLR is off.
-    let y_buf = GpuTensor::<R, T>::empty(vec![n, s], &client);
-    let q_buf = GpuTensor::<R, T>::empty(vec![n, s], &client);
-    let z_buf = GpuTensor::<R, T>::empty(vec![m, s], &client);
-    let c_buf = GpuTensor::<R, T>::empty(vec![s], &client);
-    let q_sum_buf = GpuTensor::<R, T>::empty(vec![s], &client);
+    let y_buf = GpuTensor::<R, T>::empty(vec![n, s], &client)?;
+    let q_buf = GpuTensor::<R, T>::empty(vec![n, s], &client)?;
+    let z_buf = GpuTensor::<R, T>::empty(vec![m, s], &client)?;
+    let c_buf = GpuTensor::<R, T>::empty(vec![s], &client)?;
+    let q_sum_buf = GpuTensor::<R, T>::empty(vec![s], &client)?;
     let zero_s = vec![T::from(0.0).unwrap(); s];
-    let x_sum_buf = GpuTensor::<R, T>::from_slice(&zero_s, vec![s], &client);
-    let m_dot_q_buf = GpuTensor::<R, T>::from_slice(&zero_s, vec![s], &client);
+    let x_sum_buf = GpuTensor::<R, T>::from_slice(&zero_s, vec![s], &client)?;
+    let m_dot_q_buf = GpuTensor::<R, T>::from_slice(&zero_s, vec![s], &client)?;
 
     // CholeskyQR2 scratch, allocated once and reused across all
     // `n_power_iters + 1` calls. The `[n, s]` buffer is ~520 MB at the
     // production shape and its first kernel write faults its pages in, so
     // letting `cholesky_qr2` allocate it per call pays that repeatedly.
-    let q1_scratch = GpuTensor::<R, T>::empty(vec![n, s], &client);
-    let g_scratch = GpuTensor::<R, T>::empty(vec![s, s], &client);
+    let q1_scratch = GpuTensor::<R, T>::empty(vec![n, s], &client)?;
+    let g_scratch = GpuTensor::<R, T>::empty(vec![s, s], &client)?;
 
     // -- Initial sketch --
-    launch_dense_column_weighted_sum::<R, T>(&mu_gpu, &omega_gpu, &c_buf, m, s, &client);
+    launch_dense_column_weighted_sum::<R, T>(&mu_gpu, &omega_gpu, &c_buf, m, s, &client)?;
     if use_clr {
-        launch_dense_column_sum::<R, T>(&omega_gpu, &x_sum_buf, m, s, &client);
+        launch_dense_column_sum::<R, T>(&omega_gpu, &x_sum_buf, m, s, &client)?;
     }
     launch_spmm_csr_forward::<R, T, T>(
         &csr_gpu,
@@ -244,7 +251,7 @@ where
 
     // -- Power iters --
     for iter in 0..params.n_power_iters {
-        launch_dense_column_sum::<R, T>(&q_buf, &q_sum_buf, n, s, &client);
+        launch_dense_column_sum::<R, T>(&q_buf, &q_sum_buf, n, s, &client)?;
         if use_clr {
             launch_dense_column_weighted_sum::<R, T>(
                 &row_offsets_gpu,
@@ -253,7 +260,7 @@ where
                 n,
                 s,
                 &client,
-            );
+            )?;
         }
         launch_spmm_csc_transpose::<R, T, T>(
             &csc_gpu,
@@ -267,9 +274,9 @@ where
             &client,
         )?;
 
-        launch_dense_column_weighted_sum::<R, T>(&mu_gpu, &z_buf, &c_buf, m, s, &client);
+        launch_dense_column_weighted_sum::<R, T>(&mu_gpu, &z_buf, &c_buf, m, s, &client)?;
         if use_clr {
-            launch_dense_column_sum::<R, T>(&z_buf, &x_sum_buf, m, s, &client);
+            launch_dense_column_sum::<R, T>(&z_buf, &x_sum_buf, m, s, &client)?;
         }
         launch_spmm_csr_forward::<R, T, T>(
             &csr_gpu,
@@ -295,7 +302,7 @@ where
     }
 
     // -- Final Z --
-    launch_dense_column_sum::<R, T>(&q_buf, &q_sum_buf, n, s, &client);
+    launch_dense_column_sum::<R, T>(&q_buf, &q_sum_buf, n, s, &client)?;
     if use_clr {
         launch_dense_column_weighted_sum::<R, T>(
             &row_offsets_gpu,
@@ -304,7 +311,7 @@ where
             n,
             s,
             &client,
-        );
+        )?;
     }
     launch_spmm_csc_transpose::<R, T, T>(
         &csc_gpu,
@@ -332,9 +339,9 @@ where
     let v_z_trunc: Vec<T> = (0..s)
         .flat_map(|i| (0..n_components).map(move |j| v_z[(i, j)]))
         .collect();
-    let v_z_gpu = GpuTensor::<R, T>::from_slice(&v_z_trunc, vec![s, n_components], &client);
+    let v_z_gpu = GpuTensor::<R, T>::from_slice(&v_z_trunc, vec![s, n_components], &client)?;
 
-    let u_gpu = GpuTensor::<R, T>::empty(vec![n, n_components], &client);
+    let u_gpu = GpuTensor::<R, T>::empty(vec![n, n_components], &client)?;
     dense_gemm::<R, MP>(
         q_buf.handle(),
         [n, s],

@@ -54,6 +54,7 @@ use bixverse_rs::single_cell::sc_utils::utils_tree::{QuantisedStore, resolve_n_f
 
 use cubecl::Runtime;
 use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+use cubecl_utils_rs::prelude::GpuLimits;
 use rand::prelude::*;
 use rand::rngs::SmallRng;
 
@@ -433,8 +434,9 @@ fn selected(filter: &[String], label: &str) -> bool {
 /// visible as the histogram allocations change.
 fn report_shape(n_samples: usize, device: &WgpuDevice) {
     let client = WgpuRuntime::client(device);
-    let max_binding = client.properties().memory.max_page_size as usize;
-    let max_smem = client.properties().hardware.max_shared_memory_size;
+    let limits = GpuLimits::from_client(&client);
+    let max_binding = limits.max_binding_bytes as usize;
+    let max_smem = limits.max_shared_bytes;
     let k_feats = resolve_n_features_split(0, N_FEATURES).clamp(1, N_FEATURES);
     let nodes = viable_max_active_nodes(MAX_DEPTH, n_samples, MIN_SAMPLES_LEAF);
     let gib = |b: usize| b as f64 / (1024.0 * 1024.0 * 1024.0);
@@ -449,7 +451,7 @@ fn report_shape(n_samples: usize, device: &WgpuDevice) {
             1,
             layout,
             n_samples,
-            max_binding,
+            &limits,
         )
         .expect("shape busts the wave budget at wave_size = 1")
     };

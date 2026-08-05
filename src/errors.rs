@@ -639,31 +639,27 @@ pub enum BixverseErrors {
     },
 
     // -- gpu --
+    /// A device-limit or runtime error from the `cubecl-utils-rs` primitives.
+    ///
+    /// Covers the cube-count, grid, binding-size and shared-memory guards, plus
+    /// buffer reads that fail on the CubeCL server.
+    #[cfg(feature = "gpu")]
+    #[error("GPU: {0}")]
+    CubeclUtils(#[from] cubecl_utils_rs::CubeclUtilsErrors),
     /// A GPU cubecl matrix multiplication error from the cubek crate
     #[cfg(feature = "gpu")]
     #[error("GPU: A matrix multiplication occurred: {0}")]
     GpuMatmul(String),
-    /// A kernel launch asked for more workgroups in one grid dimension than
-    /// the device allows. Dispatching it anyway kills the cubecl server
-    /// thread, after which every later call on that client fails with an
-    /// unrelated `CallError`, so it is caught before the launch instead.
-    #[cfg(feature = "gpu")]
-    #[error(
-        "GPU: kernel '{kernel}' requested a cube count of {requested:?}, device limit is {limit:?}"
-    )]
-    GpuCubeCountExceeded {
-        /// Name of the kernel whose dispatch was rejected.
-        kernel: &'static str,
-        /// Requested cube count as `(x, y, z)`.
-        requested: (u32, u32, u32),
-        /// Per-dimension device limit as `(x, y, z)`.
-        limit: (u32, u32, u32),
-    },
-    /// A single buffer exceeds the device's per-binding size limit.
+    /// A single named buffer exceeds the device's per-binding size limit.
     ///
     /// Over-sized bindings are rejected without an error surfacing: the kernel
     /// does no work and returns zeros, so the condition is caught on the host
     /// before the upload instead.
+    ///
+    /// `GpuTensor`'s own constructors already guard their allocations and
+    /// report `CubeclUtils`. This variant is for the host-side pre-checks that
+    /// walk a whole named buffer set before a dispatch, where the buffer name
+    /// is worth more than a bare byte count.
     #[cfg(feature = "gpu")]
     #[error(
         "GPU: buffer '{buffer}' needs {bytes} bytes, device per-binding limit is {limit} bytes"

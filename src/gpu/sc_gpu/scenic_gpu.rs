@@ -20,9 +20,8 @@
 #![allow(missing_docs)]
 #![cfg(all(feature = "single-cell", feature = "gpu"))]
 
-use ann_search_rs::gpu::grid_2d;
-use ann_search_rs::gpu::tensor::GpuTensor;
 use cubecl::prelude::*;
+use cubecl_utils_rs::prelude::*;
 use faer::Mat;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use rayon::prelude::*;
@@ -274,7 +273,9 @@ fn atomic_add_f32_bits(ptr: &Atomic<u32>, delta: f32) {
 /// ### Grid mapping
 ///
 /// * `CUBE_POS_X` -> feature slot index
-/// * `CUBE_POS_Y` -> node index (max 65535, so `grid_2d` is not needed here)
+/// * `CUBE_POS_Y` -> node index. All three axes are occupied, so `grid_2d`
+///   cannot fold this one and the launcher validates it with
+///   `checked_cube_count`; see [`viable_max_active_nodes`] for why that matters.
 /// * `CUBE_POS_Z` -> tree_in_wave
 /// * `UNIT_POS_X` -> sample stripe (thread `tx` walks `s = tx, tx+wg, ...`)
 ///
@@ -1270,7 +1271,8 @@ pub fn fused_rf_smem_bytes() -> usize {
 /// `true` when the device's threadgroup-memory budget covers
 /// [`fused_rf_smem_bytes`].
 fn fused_rf_viable<R: Runtime>(client: &ComputeClient<R>) -> bool {
-    client.properties().hardware.max_shared_memory_size >= fused_rf_smem_bytes()
+    let limits = GpuLimits::from_client(client);
+    fits_shared_memory("build_score_rf_fused", fused_rf_smem_bytes(), &limits).is_ok()
 }
 
 /// Build a slot's histogram in shared memory, sweep every threshold, and emit
@@ -3256,7 +3258,10 @@ pub fn scatter_node_samples(
 ///
 /// ### Returns
 ///
-/// `()` — kernel is dispatched asynchronously via the client command queue.
+/// `Ok(())`. The kernel is dispatched asynchronously via the client command
+/// queue, so a successful return means the launch was accepted, not that
+/// it has run. `CubeclUtils` when the dispatch geometry busts a device
+/// limit, which is checked on the host before the launch.
 #[allow(clippy::too_many_arguments)]
 fn launch_sample_features<R: Runtime>(
     client: &ComputeClient<R>,
@@ -3267,11 +3272,20 @@ fn launch_sample_features<R: Runtime>(
     k_feats: usize,
     n_features: usize,
     level: u32,
-) {
+) -> Result<(), BixverseErrors> {
+    let limits = GpuLimits::from_client(client);
+    let count = checked_cube_count(
+        "sample_node_features",
+        n_active_nodes as u32,
+        1,
+        wave_size as u32,
+        &limits,
+    )?;
+
     unsafe {
         sample_node_features::launch_unchecked::<R>(
             client,
-            CubeCount::Static(n_active_nodes as u32, 1, wave_size as u32),
+            count,
             CubeDim::new_1d(WORKGROUP_128),
             tree_seeds.clone().into_tensor_arg(),
             node_features.clone().into_tensor_arg(),
@@ -3283,6 +3297,8 @@ fn launch_sample_features<R: Runtime>(
             WORKGROUP_128,
         );
     }
+
+    Ok(())
 }
 
 /// Dispatch the four per-node gather kernels in order.
@@ -3311,7 +3327,10 @@ fn launch_sample_features<R: Runtime>(
 ///
 /// ### Returns
 ///
-/// `()` — kernels are dispatched asynchronously via the client command queue.
+/// `Ok(())`. Kernels are dispatched asynchronously via the client command
+/// queue, so a successful return means the launch was accepted, not that
+/// it has run. `CubeclUtils` when the dispatch geometry busts a device
+/// limit, which is checked on the host before the launch.
 #[allow(clippy::too_many_arguments)]
 fn launch_gather_node_samples<R: Runtime>(
     client: &ComputeClient<R>,
@@ -3324,9 +3343,10 @@ fn launch_gather_node_samples<R: Runtime>(
     n_samples: usize,
     wave_size: usize,
     n_active_nodes: usize,
-) {
+) -> Result<(), BixverseErrors> {
+    let limits = GpuLimits::from_client(client);
     let n_wgs = (n_samples as u32).div_ceil(WORKGROUP_128);
-    let (gx, gy) = grid_2d(n_wgs.max(1));
+    let (gx, gy) = grid_2d(n_wgs.max(1), &limits)?;
     unsafe {
         zero_node_sample_counts::launch_unchecked::<R>(
             client,
@@ -3372,6 +3392,8 @@ fn launch_gather_node_samples<R: Runtime>(
             n_active_nodes as u32,
         );
     }
+
+    Ok(())
 }
 
 /// Dispatch [`build_score_rf_fused()`] then [`reduce_slot_winners()`].
@@ -3414,7 +3436,10 @@ fn launch_gather_node_samples<R: Runtime>(
 ///
 /// ### Returns
 ///
-/// `()` — kernels are dispatched asynchronously via the client command queue.
+/// `Ok(())`. Kernels are dispatched asynchronously via the client command
+/// queue, so a successful return means the launch was accepted, not that
+/// it has run. `CubeclUtils` when the dispatch geometry busts a device
+/// limit, which is checked on the host before the launch.
 #[allow(clippy::too_many_arguments)]
 fn launch_rf_fused<R: Runtime>(
     client: &ComputeClient<R>,
@@ -3440,7 +3465,15 @@ fn launch_rf_fused<R: Runtime>(
     k_feats: usize,
     n_targets: usize,
     min_samples_leaf: usize,
-) {
+) -> Result<(), BixverseErrors> {
+    let limits = GpuLimits::from_client(client);
+    let count = checked_cube_count(
+        "build_score_rf_fused",
+        k_feats as u32,
+        n_active_nodes as u32,
+        wave_size as u32,
+        &limits,
+    )?;
     let n_bins_gpu = pick_gpu_bins(n_targets);
     let bin_shift = (N_BINS / n_bins_gpu).trailing_zeros();
     // pick_gpu_bins guarantees this, but the kernel indexes shared memory with
@@ -3452,11 +3485,11 @@ fn launch_rf_fused<R: Runtime>(
         "fused RF histogram wants {} slots of {SMEM_HIST_SLOTS}",
         n_bins_gpu * (n_targets as u32 + 1)
     );
-    let (gx, gy) = grid_2d((n_active_nodes as u32).max(1));
+    let (gx, gy) = grid_2d((n_active_nodes as u32).max(1), &limits)?;
     unsafe {
         build_score_rf_fused::launch_unchecked::<R>(
             client,
-            CubeCount::Static(k_feats as u32, n_active_nodes as u32, wave_size as u32),
+            count,
             CubeDim::new_1d(WORKGROUP_128),
             feature_data.clone().into_tensor_arg(),
             y_dense.clone().into_tensor_arg(),
@@ -3498,6 +3531,8 @@ fn launch_rf_fused<R: Runtime>(
             k_feats as u32,
         );
     }
+
+    Ok(())
 }
 
 /// Dispatch [`finalise_split_stats_rf()`] over `grid_2d(n_active_nodes)` by
@@ -3527,7 +3562,10 @@ fn launch_rf_fused<R: Runtime>(
 ///
 /// ### Returns
 ///
-/// `()` — kernel is dispatched asynchronously via the client command queue.
+/// `Ok(())`. The kernel is dispatched asynchronously via the client command
+/// queue, so a successful return means the launch was accepted, not that
+/// it has run. `CubeclUtils` when the dispatch geometry busts a device
+/// limit, which is checked on the host before the launch.
 #[allow(clippy::too_many_arguments)]
 fn launch_finalise_split_stats_rf<R: Runtime>(
     client: &ComputeClient<R>,
@@ -3544,8 +3582,9 @@ fn launch_finalise_split_stats_rf<R: Runtime>(
     wave_size: usize,
     n_active_nodes: usize,
     n_targets: usize,
-) {
-    let (gx, gy) = grid_2d((n_active_nodes as u32).max(1));
+) -> Result<(), BixverseErrors> {
+    let limits = GpuLimits::from_client(client);
+    let (gx, gy) = grid_2d((n_active_nodes as u32).max(1), &limits)?;
     unsafe {
         finalise_split_stats_rf::launch_unchecked::<R>(
             client,
@@ -3566,6 +3605,8 @@ fn launch_finalise_split_stats_rf<R: Runtime>(
             n_targets as u32,
         );
     }
+
+    Ok(())
 }
 
 /// Dispatch [`build_hist_privatised()`] over
@@ -3599,7 +3640,10 @@ fn launch_finalise_split_stats_rf<R: Runtime>(
 ///
 /// ### Returns
 ///
-/// `()` — kernel is dispatched asynchronously via the client command queue.
+/// `Ok(())`. The kernel is dispatched asynchronously via the client command
+/// queue, so a successful return means the launch was accepted, not that
+/// it has run. `CubeclUtils` when the dispatch geometry busts a device
+/// limit, which is checked on the host before the launch.
 #[allow(clippy::too_many_arguments)]
 fn launch_build_hist<R: Runtime>(
     client: &ComputeClient<R>,
@@ -3619,11 +3663,19 @@ fn launch_build_hist<R: Runtime>(
     n_active_nodes: usize,
     k_feats: usize,
     n_targets: usize,
-) {
+) -> Result<(), BixverseErrors> {
+    let limits = GpuLimits::from_client(client);
+    let count = checked_cube_count(
+        "build_hist_privatised",
+        k_feats as u32,
+        n_active_nodes as u32,
+        wave_size as u32,
+        &limits,
+    )?;
     unsafe {
         build_hist_privatised::launch_unchecked::<R>(
             client,
-            CubeCount::Static(k_feats as u32, n_active_nodes as u32, wave_size as u32),
+            count,
             CubeDim::new_1d(WORKGROUP_128),
             feature_data.clone().into_tensor_arg(),
             sy_offsets.clone().into_tensor_arg(),
@@ -3644,6 +3696,8 @@ fn launch_build_hist<R: Runtime>(
             WORKGROUP_128,
         );
     }
+
+    Ok(())
 }
 
 /// Dispatch [`merge_hist()`] over `(gx, gy, wave_size)` workgroups, where
@@ -3675,7 +3729,10 @@ fn launch_build_hist<R: Runtime>(
 ///
 /// ### Returns
 ///
-/// `()` — kernel is dispatched asynchronously via the client command queue.
+/// `Ok(())`. The kernel is dispatched asynchronously via the client command
+/// queue, so a successful return means the launch was accepted, not that
+/// it has run. `CubeclUtils` when the dispatch geometry busts a device
+/// limit, which is checked on the host before the launch.
 #[allow(clippy::too_many_arguments)]
 fn launch_merge_hist<R: Runtime>(
     client: &ComputeClient<R>,
@@ -3689,8 +3746,9 @@ fn launch_merge_hist<R: Runtime>(
     n_active_nodes: usize,
     k_feats: usize,
     n_targets: usize,
-) {
-    let (gx, gy) = grid_2d((n_active_nodes as u32).max(1));
+) -> Result<(), BixverseErrors> {
+    let limits = GpuLimits::from_client(client);
+    let (gx, gy) = grid_2d((n_active_nodes as u32).max(1), &limits)?;
     unsafe {
         merge_hist::launch_unchecked::<R>(
             client,
@@ -3709,6 +3767,8 @@ fn launch_merge_hist<R: Runtime>(
             WORKGROUP_128,
         );
     }
+
+    Ok(())
 }
 
 /// Dispatch [`prefix_sum_bins()`] over `(k_feats, n_active_nodes, wave_size)`
@@ -3746,7 +3806,10 @@ fn launch_merge_hist<R: Runtime>(
 ///
 /// ### Returns
 ///
-/// `()` — kernel is dispatched asynchronously via the client command queue.
+/// `Ok(())`. The kernel is dispatched asynchronously via the client command
+/// queue, so a successful return means the launch was accepted, not that
+/// it has run. `CubeclUtils` when the dispatch geometry busts a device
+/// limit, which is checked on the host before the launch.
 #[allow(clippy::too_many_arguments)]
 fn launch_prefix_sum<R: Runtime>(
     client: &ComputeClient<R>,
@@ -3762,11 +3825,19 @@ fn launch_prefix_sum<R: Runtime>(
     n_active_nodes: usize,
     k_feats: usize,
     n_targets: usize,
-) {
+) -> Result<(), BixverseErrors> {
+    let limits = GpuLimits::from_client(client);
+    let count = checked_cube_count(
+        "prefix_sum_bins",
+        k_feats as u32,
+        n_active_nodes as u32,
+        wave_size as u32,
+        &limits,
+    )?;
     unsafe {
         prefix_sum_bins::launch_unchecked::<R>(
             client,
-            CubeCount::Static(k_feats as u32, n_active_nodes as u32, wave_size as u32),
+            count,
             CubeDim::new_1d(WORKGROUP_128),
             hist_counts.clone().into_tensor_arg(),
             hist_y_sums.clone().into_tensor_arg(),
@@ -3783,6 +3854,8 @@ fn launch_prefix_sum<R: Runtime>(
             WORKGROUP_128,
         );
     }
+
+    Ok(())
 }
 
 /// Whether the plane-compacted path in [`accumulate_split_stats_et()`] can be
@@ -3795,19 +3868,14 @@ fn launch_prefix_sum<R: Runtime>(
 ///
 /// ### Params
 ///
-/// * `client` - CubeCL compute client, queried for hardware properties
 /// * `wg_size` - Workgroup width the kernel will be launched at
+/// * `limits` - Device limits from [`GpuLimits::from_client`]
 ///
 /// ### Returns
 ///
 /// `true` to take the compacted path, `false` for the portable fallback.
-fn plane_compact_viable<R: Runtime>(client: &ComputeClient<R>, wg_size: u32) -> bool {
-    let hw = &client.properties().hardware;
-    let plane = hw.plane_size_min;
-    plane == hw.plane_size_max
-        && plane > 0
-        && wg_size.is_multiple_of(plane)
-        && wg_size / plane <= MAX_PLANES_PER_CUBE
+fn plane_compact_viable(wg_size: u32, limits: &GpuLimits) -> bool {
+    plane_partitions(wg_size, limits).is_some_and(|n_planes| n_planes <= MAX_PLANES_PER_CUBE)
 }
 
 /// Whether a `wg_size`-wide workgroup is guaranteed to be exactly one plane on
@@ -3822,15 +3890,14 @@ fn plane_compact_viable<R: Runtime>(client: &ComputeClient<R>, wg_size: u32) -> 
 ///
 /// ### Params
 ///
-/// * `client` - CubeCL compute client, queried for hardware properties
 /// * `wg_size` - Workgroup width the kernel will be launched at
+/// * `limits` - Device limits from [`GpuLimits::from_client`]
 ///
 /// ### Returns
 ///
 /// `true` when the plane path is safe, `false` to take the SMEM fallback.
-fn plane_argmax_viable<R: Runtime>(client: &ComputeClient<R>, wg_size: u32) -> bool {
-    let hw = &client.properties().hardware;
-    hw.plane_size_min == wg_size && hw.plane_size_max == wg_size
+fn plane_argmax_viable(wg_size: u32, limits: &GpuLimits) -> bool {
+    plane_uniform(wg_size, limits)
 }
 
 /// Dispatch [`evaluate_splits_rf()`] over `(gx, gy, wave_size)` workgroups,
@@ -3867,7 +3934,10 @@ fn plane_argmax_viable<R: Runtime>(client: &ComputeClient<R>, wg_size: u32) -> b
 ///
 /// ### Returns
 ///
-/// `()` — kernel is dispatched asynchronously via the client command queue.
+/// `Ok(())`. The kernel is dispatched asynchronously via the client command
+/// queue, so a successful return means the launch was accepted, not that
+/// it has run. `CubeclUtils` when the dispatch geometry busts a device
+/// limit, which is checked on the host before the launch.
 #[allow(clippy::too_many_arguments)]
 fn launch_evaluate_splits_rf<R: Runtime>(
     client: &ComputeClient<R>,
@@ -3888,8 +3958,9 @@ fn launch_evaluate_splits_rf<R: Runtime>(
     k_feats: usize,
     n_targets: usize,
     min_samples_leaf: usize,
-) {
-    let (gx, gy) = grid_2d((n_active_nodes as u32).max(1));
+) -> Result<(), BixverseErrors> {
+    let limits = GpuLimits::from_client(client);
+    let (gx, gy) = grid_2d((n_active_nodes as u32).max(1), &limits)?;
     unsafe {
         evaluate_splits_rf::launch_unchecked::<R>(
             client,
@@ -3915,6 +3986,8 @@ fn launch_evaluate_splits_rf<R: Runtime>(
             WORKGROUP_128,
         );
     }
+
+    Ok(())
 }
 
 /// Dispatch [`reassign_samples()`] over `(gx, gy, wave_size)` workgroups, where
@@ -3944,7 +4017,10 @@ fn launch_evaluate_splits_rf<R: Runtime>(
 ///
 /// ### Returns
 ///
-/// `()` — kernel is dispatched asynchronously via the client command queue.
+/// `Ok(())`. The kernel is dispatched asynchronously via the client command
+/// queue, so a successful return means the launch was accepted, not that
+/// it has run. `CubeclUtils` when the dispatch geometry busts a device
+/// limit, which is checked on the host before the launch.
 #[allow(clippy::too_many_arguments)]
 fn launch_reassign<R: Runtime>(
     client: &ComputeClient<R>,
@@ -3958,9 +4034,10 @@ fn launch_reassign<R: Runtime>(
     n_features: usize,
     wave_size: usize,
     n_active_nodes: usize,
-) {
+) -> Result<(), BixverseErrors> {
+    let limits = GpuLimits::from_client(client);
     let n_wgs = (n_samples as u32).div_ceil(WORKGROUP_128);
-    let (gx, gy) = grid_2d(n_wgs.max(1));
+    let (gx, gy) = grid_2d(n_wgs.max(1), &limits)?;
     unsafe {
         reassign_samples::launch_unchecked::<R>(
             client,
@@ -3978,6 +4055,8 @@ fn launch_reassign<R: Runtime>(
             n_active_nodes as u32,
         );
     }
+
+    Ok(())
 }
 
 /// Dispatch [`accumulate_importance()`] over `(gx, gy, wave_size)` workgroups,
@@ -4008,7 +4087,10 @@ fn launch_reassign<R: Runtime>(
 ///
 /// ### Returns
 ///
-/// `()` — kernel is dispatched asynchronously via the client command queue.
+/// `Ok(())`. The kernel is dispatched asynchronously via the client command
+/// queue, so a successful return means the launch was accepted, not that
+/// it has run. `CubeclUtils` when the dispatch geometry busts a device
+/// limit, which is checked on the host before the launch.
 #[allow(clippy::too_many_arguments)]
 fn launch_accumulate_importance<R: Runtime>(
     client: &ComputeClient<R>,
@@ -4024,8 +4106,9 @@ fn launch_accumulate_importance<R: Runtime>(
     n_active_nodes: usize,
     n_targets: usize,
     n_total: usize,
-) {
-    let (gx, gy) = grid_2d((n_active_nodes as u32).max(1));
+) -> Result<(), BixverseErrors> {
+    let limits = GpuLimits::from_client(client);
+    let (gx, gy) = grid_2d((n_active_nodes as u32).max(1), &limits)?;
     unsafe {
         accumulate_importance::launch_unchecked::<R>(
             client,
@@ -4046,6 +4129,8 @@ fn launch_accumulate_importance<R: Runtime>(
             WORKGROUP_128,
         );
     }
+
+    Ok(())
 }
 
 /// Dispatch [`compute_child_ids()`] over `(wave_size, 1, 1)` workgroups, one
@@ -4103,7 +4188,10 @@ fn launch_compute_child_ids<R: Runtime>(
 ///
 /// ### Returns
 ///
-/// `()` — kernel is dispatched asynchronously via the client command queue.
+/// `Ok(())`. The kernel is dispatched asynchronously via the client command
+/// queue, so a successful return means the launch was accepted, not that
+/// it has run. `CubeclUtils` when the dispatch geometry busts a device
+/// limit, which is checked on the host before the launch.
 #[allow(clippy::too_many_arguments)]
 fn launch_scan_slot_bin_range<R: Runtime>(
     client: &ComputeClient<R>,
@@ -4118,11 +4206,19 @@ fn launch_scan_slot_bin_range<R: Runtime>(
     wave_size: usize,
     n_active_nodes: usize,
     k_feats: usize,
-) {
+) -> Result<(), BixverseErrors> {
+    let limits = GpuLimits::from_client(client);
+    let count = checked_cube_count(
+        "scan_slot_bin_range",
+        k_feats as u32,
+        n_active_nodes as u32,
+        wave_size as u32,
+        &limits,
+    )?;
     unsafe {
         scan_slot_bin_range::launch_unchecked::<R>(
             client,
-            CubeCount::Static(k_feats as u32, n_active_nodes as u32, wave_size as u32),
+            count,
             CubeDim::new_1d(WORKGROUP_128),
             feature_data.clone().into_tensor_arg(),
             sample_to_node.clone().into_tensor_arg(),
@@ -4138,6 +4234,8 @@ fn launch_scan_slot_bin_range<R: Runtime>(
             WORKGROUP_128,
         );
     }
+
+    Ok(())
 }
 
 /// Dispatch [`accumulate_split_stats_et()`] over
@@ -4150,7 +4248,10 @@ fn launch_scan_slot_bin_range<R: Runtime>(
 ///
 /// ### Returns
 ///
-/// `()` — kernel is dispatched asynchronously via the client command queue.
+/// `Ok(())`. The kernel is dispatched asynchronously via the client command
+/// queue, so a successful return means the launch was accepted, not that
+/// it has run. `CubeclUtils` when the dispatch geometry busts a device
+/// limit, which is checked on the host before the launch.
 #[allow(clippy::too_many_arguments)]
 fn launch_accumulate_split_stats_et<R: Runtime>(
     client: &ComputeClient<R>,
@@ -4174,15 +4275,20 @@ fn launch_accumulate_split_stats_et<R: Runtime>(
     n_targets: usize,
     n_thresholds: usize,
     level: u32,
-) {
+) -> Result<(), BixverseErrors> {
+    let limits = GpuLimits::from_client(client);
+    let count = checked_cube_count(
+        "accumulate_split_stats_et",
+        (k_feats * n_thresholds) as u32,
+        n_active_nodes as u32,
+        wave_size as u32,
+        &limits,
+    )?;
+
     unsafe {
         accumulate_split_stats_et::launch_unchecked::<R>(
             client,
-            CubeCount::Static(
-                (k_feats * n_thresholds) as u32,
-                n_active_nodes as u32,
-                wave_size as u32,
-            ),
+            count,
             CubeDim::new_1d(WORKGROUP_128),
             feature_data.clone().into_tensor_arg(),
             y_dense.clone().into_tensor_arg(),
@@ -4204,9 +4310,11 @@ fn launch_accumulate_split_stats_et<R: Runtime>(
             n_targets as u32,
             n_thresholds as u32,
             level,
-            plane_compact_viable(client, WORKGROUP_128),
+            plane_compact_viable(WORKGROUP_128, &limits),
         );
     }
+
+    Ok(())
 }
 
 /// Dispatch [`evaluate_splits_et_direct()`] over `(gx, gy, wave_size)`
@@ -4218,7 +4326,10 @@ fn launch_accumulate_split_stats_et<R: Runtime>(
 ///
 /// ### Returns
 ///
-/// `()` — kernel is dispatched asynchronously via the client command queue.
+/// `Ok(())`. The kernel is dispatched asynchronously via the client command
+/// queue, so a successful return means the launch was accepted, not that
+/// it has run. `CubeclUtils` when the dispatch geometry busts a device
+/// limit, which is checked on the host before the launch.
 #[allow(clippy::too_many_arguments)]
 fn launch_evaluate_splits_et_direct<R: Runtime>(
     client: &ComputeClient<R>,
@@ -4241,8 +4352,9 @@ fn launch_evaluate_splits_et_direct<R: Runtime>(
     n_targets: usize,
     n_thresholds: usize,
     min_samples_leaf: usize,
-) {
-    let (gx, gy) = grid_2d((n_active_nodes as u32).max(1));
+) -> Result<(), BixverseErrors> {
+    let limits = GpuLimits::from_client(client);
+    let (gx, gy) = grid_2d((n_active_nodes as u32).max(1), &limits)?;
     unsafe {
         evaluate_splits_et_direct::launch_unchecked::<R>(
             client,
@@ -4268,9 +4380,11 @@ fn launch_evaluate_splits_et_direct<R: Runtime>(
             n_thresholds as u32,
             min_samples_leaf as u32,
             WORKGROUP_32,
-            plane_argmax_viable(client, WORKGROUP_32),
+            plane_argmax_viable(WORKGROUP_32, &limits),
         );
     }
+
+    Ok(())
 }
 
 /// Dispatch [`init_root_stats()`] over `(wave_size, 1, 1)` workgroups of
@@ -4335,7 +4449,10 @@ fn launch_init_root_stats<R: Runtime>(
 ///
 /// ### Returns
 ///
-/// `()` — kernel is dispatched asynchronously via the client command queue.
+/// `Ok(())`. The kernel is dispatched asynchronously via the client command
+/// queue, so a successful return means the launch was accepted, not that
+/// it has run. `CubeclUtils` when the dispatch geometry busts a device
+/// limit, which is checked on the host before the launch.
 fn launch_zero_node_stats<R: Runtime>(
     client: &ComputeClient<R>,
     node_counts: &GpuTensor<R, u32>,
@@ -4344,8 +4461,9 @@ fn launch_zero_node_stats<R: Runtime>(
     wave_size: usize,
     n_active_nodes: usize,
     n_targets: usize,
-) {
-    let (gx, gy) = grid_2d((n_active_nodes as u32).max(1));
+) -> Result<(), BixverseErrors> {
+    let limits = GpuLimits::from_client(client);
+    let (gx, gy) = grid_2d((n_active_nodes as u32).max(1), &limits)?;
     unsafe {
         zero_node_stats::launch_unchecked::<R>(
             client,
@@ -4360,6 +4478,8 @@ fn launch_zero_node_stats<R: Runtime>(
             WORKGROUP_128,
         );
     }
+
+    Ok(())
 }
 
 /// Dispatch [`propagate_child_stats()`] over `(gx, gy, wave_size)` workgroups,
@@ -4392,7 +4512,10 @@ fn launch_zero_node_stats<R: Runtime>(
 ///
 /// ### Returns
 ///
-/// `()` — kernel is dispatched asynchronously via the client command queue.
+/// `Ok(())`. The kernel is dispatched asynchronously via the client command
+/// queue, so a successful return means the launch was accepted, not that
+/// it has run. `CubeclUtils` when the dispatch geometry busts a device
+/// limit, which is checked on the host before the launch.
 #[allow(clippy::too_many_arguments)]
 fn launch_propagate_child_stats<R: Runtime>(
     client: &ComputeClient<R>,
@@ -4412,8 +4535,9 @@ fn launch_propagate_child_stats<R: Runtime>(
     n_active_nodes: usize,
     n_active_next: usize,
     n_targets: usize,
-) {
-    let (gx, gy) = grid_2d((n_active_nodes as u32).max(1));
+) -> Result<(), BixverseErrors> {
+    let limits = GpuLimits::from_client(client);
+    let (gx, gy) = grid_2d((n_active_nodes as u32).max(1), &limits)?;
     unsafe {
         propagate_child_stats::launch_unchecked::<R>(
             client,
@@ -4438,6 +4562,8 @@ fn launch_propagate_child_stats<R: Runtime>(
             WORKGROUP_128,
         );
     }
+
+    Ok(())
 }
 
 /// Dispatch [`init_sample_to_node()`] over `(gx, gy, wave_size)` workgroups,
@@ -4459,16 +4585,20 @@ fn launch_propagate_child_stats<R: Runtime>(
 ///
 /// ### Returns
 ///
-/// `()` — kernel is dispatched asynchronously via the client command queue.
+/// `Ok(())`. The kernel is dispatched asynchronously via the client command
+/// queue, so a successful return means the launch was accepted, not that
+/// it has run. `CubeclUtils` when the dispatch geometry busts a device
+/// limit, which is checked on the host before the launch.
 fn launch_init_sample_to_node<R: Runtime>(
     client: &ComputeClient<R>,
     sample_multiplicity: &GpuTensor<R, u32>,
     sample_to_node: &GpuTensor<R, u32>,
     n_samples: usize,
     wave_size: usize,
-) {
+) -> Result<(), BixverseErrors> {
+    let limits = GpuLimits::from_client(client);
     let n_wgs = (n_samples as u32).div_ceil(WORKGROUP_128);
-    let (gx, gy) = grid_2d(n_wgs.max(1));
+    let (gx, gy) = grid_2d(n_wgs.max(1), &limits)?;
     unsafe {
         init_sample_to_node::launch_unchecked::<R>(
             client,
@@ -4480,6 +4610,8 @@ fn launch_init_sample_to_node<R: Runtime>(
             wave_size as u32,
         );
     }
+
+    Ok(())
 }
 
 ////////////////
@@ -4625,7 +4757,10 @@ impl<R: Runtime> WaveState<R> {
     ///
     /// ### Returns
     ///
-    /// A `WaveState` with all GPU tensors allocated and uninitialised.
+    /// A `WaveState` with all GPU tensors allocated and uninitialised, or
+    /// `CubeclUtils` if one busts the device's per-binding size limit. The
+    /// histogram tensors are the ones that reach it: `hist_sums_len` is
+    /// `wave_size * max_active_nodes * k_feats * N_BINS * n_targets`.
     #[allow(clippy::too_many_arguments)]
     fn allocate(
         client: &ComputeClient<R>,
@@ -4636,7 +4771,7 @@ impl<R: Runtime> WaveState<R> {
         n_targets: usize,
         n_thresholds: usize,
         layout: WaveLayout,
-    ) -> Self {
+    ) -> Result<Self, BixverseErrors> {
         let use_et = layout == WaveLayout::ExtraTrees;
         let use_hist = layout == WaveLayout::RandomForestHist;
         // Every tensor a layout does not touch collapses to a length-1 stub.
@@ -4677,48 +4812,48 @@ impl<R: Runtime> WaveState<R> {
             wave_size * max_active_nodes * k_feats
         };
 
-        Self {
-            sample_to_node: GpuTensor::empty(vec![wave_size * n_samples], client),
-            node_features: GpuTensor::empty(vec![wave_size * max_active_nodes * k_feats], client),
-            hist_counts: GpuTensor::empty(vec![hist_counts_len], client),
-            hist_y_sums: GpuTensor::empty(vec![hist_sums_len], client),
-            hist_y_sum_sqs: GpuTensor::empty(vec![hist_sums_len], client),
-            cum_counts: GpuTensor::empty(vec![hist_counts_len], client),
-            cum_y_sums: GpuTensor::empty(vec![hist_sums_len], client),
-            cum_y_sum_sqs: GpuTensor::empty(vec![hist_sums_len], client),
-            slot_min_bin: GpuTensor::empty(vec![wave_size * max_active_nodes * k_feats], client),
-            slot_max_bin: GpuTensor::empty(vec![wave_size * max_active_nodes * k_feats], client),
-            node_sample_counts: GpuTensor::empty(vec![gather_node_len], client),
-            node_sample_offsets: GpuTensor::empty(vec![gather_offset_len], client),
-            node_sample_ids: GpuTensor::empty(vec![gather_id_len], client),
-            node_sample_mults: GpuTensor::empty(vec![gather_id_len], client),
-            slot_best_score: GpuTensor::empty(vec![slot_best_len], client),
-            slot_best_thr: GpuTensor::empty(vec![slot_best_len], client),
-            slot_best_n_left: GpuTensor::empty(vec![slot_best_len], client),
-            slot_best_valid: GpuTensor::empty(vec![slot_best_len], client),
-            node_counts: GpuTensor::empty(vec![wave_size * max_active_nodes], client),
-            node_y_sums: GpuTensor::empty(vec![node_stats_len], client),
-            node_y_sum_sqs: GpuTensor::empty(vec![node_stats_len], client),
-            node_counts_alt: GpuTensor::empty(vec![wave_size * max_active_nodes], client),
-            node_y_sums_alt: GpuTensor::empty(vec![node_stats_len], client),
-            node_y_sum_sqs_alt: GpuTensor::empty(vec![node_stats_len], client),
-            split_feature: GpuTensor::empty(vec![wave_size * max_active_nodes], client),
-            split_threshold: GpuTensor::empty(vec![wave_size * max_active_nodes], client),
-            split_n_left: GpuTensor::empty(vec![wave_size * max_active_nodes], client),
-            split_y_sums_l: GpuTensor::empty(vec![node_stats_len], client),
-            split_y_sum_sqs_l: GpuTensor::empty(vec![node_stats_len], client),
-            cand_thr: GpuTensor::empty(vec![cand_len], client),
-            cand_n_left: GpuTensor::empty(vec![cand_len], client),
-            cand_y_sums_l: GpuTensor::empty(vec![cand_stats_len], client),
-            cand_y_sum_sqs_l: GpuTensor::empty(vec![cand_stats_len], client),
-            left_child_id: GpuTensor::empty(vec![wave_size * max_active_nodes], client),
-            right_child_id: GpuTensor::empty(vec![wave_size * max_active_nodes], client),
+        Ok(Self {
+            sample_to_node: GpuTensor::empty(vec![wave_size * n_samples], client)?,
+            node_features: GpuTensor::empty(vec![wave_size * max_active_nodes * k_feats], client)?,
+            hist_counts: GpuTensor::empty(vec![hist_counts_len], client)?,
+            hist_y_sums: GpuTensor::empty(vec![hist_sums_len], client)?,
+            hist_y_sum_sqs: GpuTensor::empty(vec![hist_sums_len], client)?,
+            cum_counts: GpuTensor::empty(vec![hist_counts_len], client)?,
+            cum_y_sums: GpuTensor::empty(vec![hist_sums_len], client)?,
+            cum_y_sum_sqs: GpuTensor::empty(vec![hist_sums_len], client)?,
+            slot_min_bin: GpuTensor::empty(vec![wave_size * max_active_nodes * k_feats], client)?,
+            slot_max_bin: GpuTensor::empty(vec![wave_size * max_active_nodes * k_feats], client)?,
+            node_sample_counts: GpuTensor::empty(vec![gather_node_len], client)?,
+            node_sample_offsets: GpuTensor::empty(vec![gather_offset_len], client)?,
+            node_sample_ids: GpuTensor::empty(vec![gather_id_len], client)?,
+            node_sample_mults: GpuTensor::empty(vec![gather_id_len], client)?,
+            slot_best_score: GpuTensor::empty(vec![slot_best_len], client)?,
+            slot_best_thr: GpuTensor::empty(vec![slot_best_len], client)?,
+            slot_best_n_left: GpuTensor::empty(vec![slot_best_len], client)?,
+            slot_best_valid: GpuTensor::empty(vec![slot_best_len], client)?,
+            node_counts: GpuTensor::empty(vec![wave_size * max_active_nodes], client)?,
+            node_y_sums: GpuTensor::empty(vec![node_stats_len], client)?,
+            node_y_sum_sqs: GpuTensor::empty(vec![node_stats_len], client)?,
+            node_counts_alt: GpuTensor::empty(vec![wave_size * max_active_nodes], client)?,
+            node_y_sums_alt: GpuTensor::empty(vec![node_stats_len], client)?,
+            node_y_sum_sqs_alt: GpuTensor::empty(vec![node_stats_len], client)?,
+            split_feature: GpuTensor::empty(vec![wave_size * max_active_nodes], client)?,
+            split_threshold: GpuTensor::empty(vec![wave_size * max_active_nodes], client)?,
+            split_n_left: GpuTensor::empty(vec![wave_size * max_active_nodes], client)?,
+            split_y_sums_l: GpuTensor::empty(vec![node_stats_len], client)?,
+            split_y_sum_sqs_l: GpuTensor::empty(vec![node_stats_len], client)?,
+            cand_thr: GpuTensor::empty(vec![cand_len], client)?,
+            cand_n_left: GpuTensor::empty(vec![cand_len], client)?,
+            cand_y_sums_l: GpuTensor::empty(vec![cand_stats_len], client)?,
+            cand_y_sum_sqs_l: GpuTensor::empty(vec![cand_stats_len], client)?,
+            left_child_id: GpuTensor::empty(vec![wave_size * max_active_nodes], client)?,
+            right_child_id: GpuTensor::empty(vec![wave_size * max_active_nodes], client)?,
             wave_size,
             max_active_nodes,
             n_samples,
             k_feats,
             n_targets,
-        }
+        })
     }
 }
 
@@ -4732,6 +4867,14 @@ impl<R: Runtime> WaveState<R> {
 /// Undersized allocations blow up as OOB writes into
 /// `node_features` / `hist_*`; oversized just wastes memory. We stick with the
 /// smaller of the two caps.
+///
+/// The result is **not** bounded by the device's grid limit. Six kernels put
+/// the active-node count straight on the grid y axis with all three axes
+/// occupied, so `grid_2d` cannot fold it, and the depth cap alone reaches
+/// 1_048_576 against a wgpu per-dimension limit of 65535. Their launchers run
+/// the dispatch through `checked_cube_count` and fail loudly rather than
+/// truncating a deep tree here, which needs `n_samples > 131_070` and
+/// `max_depth >= 17` to reach because the leaf cap usually binds first.
 ///
 /// ### Params
 ///
@@ -4883,7 +5026,7 @@ pub fn wave_byte_cost_rf_fused(
 /// * `n_thresholds` - Random thresholds per feature slot (ExtraTrees only)
 /// * `layout` - Which cost model applies
 /// * `n_samples` - Number of samples
-/// * `max_binding_bytes` - Device limit on a single buffer binding
+/// * `limits` - Device limits from [`GpuLimits::from_client`]
 ///
 /// ### Returns
 ///
@@ -4902,8 +5045,9 @@ pub fn pick_wave_size(
     n_thresholds: usize,
     layout: WaveLayout,
     n_samples: usize,
-    max_binding_bytes: usize,
+    limits: &GpuLimits,
 ) -> Result<usize, BixverseErrors> {
+    let max_binding_bytes = limits.max_binding_bytes as usize;
     let cost = |w: usize| match layout {
         WaveLayout::ExtraTrees => {
             wave_byte_cost_et(w, max_active_nodes, k_feats, n_targets, n_thresholds)
@@ -4987,14 +5131,15 @@ struct SparseYGpu<R: Runtime> {
 ///
 /// ### Returns
 ///
-/// A `[n_samples * n_targets]` f32 tensor with implicit zeros filled in.
+/// A `[n_samples * n_targets]` f32 tensor with implicit zeros filled in, or
+/// `CubeclUtils` if it busts the device's per-binding size limit.
 fn upload_dense_y<R: Runtime>(
     sy: &SparseYBatch,
     n_samples: usize,
     n_targets: usize,
     scratch: &mut Vec<f32>,
     client: &ComputeClient<R>,
-) -> GpuTensor<R, f32> {
+) -> Result<GpuTensor<R, f32>, BixverseErrors> {
     // Reuse the caller's allocation across batches. At 1M cells this buffer is
     // 256 MB, and a 63-batch run would otherwise allocate and free it 63 times.
     scratch.clear();
@@ -5006,7 +5151,11 @@ fn upload_dense_y<R: Runtime>(
             scratch[s * n_targets + sy.target_indices[j] as usize] = sy.values[j];
         }
     }
-    GpuTensor::<R, f32>::from_slice(scratch, vec![n_samples * n_targets], client)
+    Ok(GpuTensor::<R, f32>::from_slice(
+        scratch,
+        vec![n_samples * n_targets],
+        client,
+    )?)
 }
 
 impl<R: Runtime> SparseYGpu<R> {
@@ -5022,27 +5171,32 @@ impl<R: Runtime> SparseYGpu<R> {
     ///
     /// ### Returns
     ///
-    /// A `SparseYGpu` with all three tensors resident on device.
-    fn upload(sy: &SparseYBatch, n_samples: usize, client: &ComputeClient<R>) -> Self {
-        let offsets = GpuTensor::<R, u32>::from_slice(&sy.offsets, vec![n_samples + 1], client);
+    /// A `SparseYGpu` with all three tensors resident on device, or
+    /// `CubeclUtils` if one busts the device's per-binding size limit.
+    fn upload(
+        sy: &SparseYBatch,
+        n_samples: usize,
+        client: &ComputeClient<R>,
+    ) -> Result<Self, BixverseErrors> {
+        let offsets = GpuTensor::<R, u32>::from_slice(&sy.offsets, vec![n_samples + 1], client)?;
         let target_indices_u32: Vec<u32> = sy.target_indices.iter().map(|&i| i as u32).collect();
         let nnz = target_indices_u32.len().max(1);
         let (target_indices, values) = if target_indices_u32.is_empty() {
             (
-                GpuTensor::<R, u32>::from_slice(&[0u32], vec![1], client),
-                GpuTensor::<R, f32>::from_slice(&[0.0f32], vec![1], client),
+                GpuTensor::<R, u32>::from_slice(&[0u32], vec![1], client)?,
+                GpuTensor::<R, f32>::from_slice(&[0.0f32], vec![1], client)?,
             )
         } else {
             (
-                GpuTensor::<R, u32>::from_slice(&target_indices_u32, vec![nnz], client),
-                GpuTensor::<R, f32>::from_slice(&sy.values, vec![nnz], client),
+                GpuTensor::<R, u32>::from_slice(&target_indices_u32, vec![nnz], client)?,
+                GpuTensor::<R, f32>::from_slice(&sy.values, vec![nnz], client)?,
             )
         };
-        Self {
+        Ok(Self {
             offsets,
             target_indices,
             values,
-        }
+        })
     }
 }
 
@@ -5118,7 +5272,7 @@ fn run_wave_bfs<R: Runtime>(
         &state.sample_to_node,
         n_samples,
         wave_size,
-    );
+    )?;
 
     for depth in 0..max_depth {
         // At depth d a full binary tree has at most 2^d active nodes. Phantom
@@ -5167,7 +5321,7 @@ fn run_wave_bfs<R: Runtime>(
             k_feats,
             n_features,
             depth as u32,
-        );
+        )?;
 
         let at_max_depth = depth + 1 >= max_depth;
 
@@ -5200,7 +5354,7 @@ fn run_wave_bfs<R: Runtime>(
                 wave_size,
                 n_active_nodes,
                 k_feats,
-            );
+            )?;
 
             launch_accumulate_split_stats_et(
                 client,
@@ -5224,7 +5378,7 @@ fn run_wave_bfs<R: Runtime>(
                 n_targets,
                 n_thresholds,
                 depth as u32,
-            );
+            )?;
 
             launch_evaluate_splits_et_direct(
                 client,
@@ -5247,7 +5401,7 @@ fn run_wave_bfs<R: Runtime>(
                 n_targets,
                 n_thresholds,
                 min_samples_leaf,
-            );
+            )?;
         } else if use_fused_rf {
             // Root stats come from init_root_stats rather than merge_hist:
             // there is no DRAM histogram to fold, same as the ExtraTrees path.
@@ -5277,7 +5431,7 @@ fn run_wave_bfs<R: Runtime>(
                 n_samples,
                 wave_size,
                 n_active_nodes,
-            );
+            )?;
 
             launch_rf_fused(
                 client,
@@ -5303,7 +5457,7 @@ fn run_wave_bfs<R: Runtime>(
                 k_feats,
                 n_targets,
                 min_samples_leaf,
-            );
+            )?;
 
             launch_finalise_split_stats_rf(
                 client,
@@ -5320,7 +5474,7 @@ fn run_wave_bfs<R: Runtime>(
                 wave_size,
                 n_active_nodes,
                 n_targets,
-            );
+            )?;
         } else {
             // Uploaded by fit_scenic_batches_gpu for exactly this layout.
             let sy = sy_gpu.expect("RandomForest path requires the sparse Y upload");
@@ -5336,7 +5490,7 @@ fn run_wave_bfs<R: Runtime>(
                 n_samples,
                 wave_size,
                 n_active_nodes,
-            );
+            )?;
 
             launch_build_hist(
                 client,
@@ -5356,7 +5510,7 @@ fn run_wave_bfs<R: Runtime>(
                 n_active_nodes,
                 k_feats,
                 n_targets,
-            );
+            )?;
 
             // Root only. Below the root every node's totals arrive from
             // propagate_child_stats at the end of the parent level.
@@ -5373,7 +5527,7 @@ fn run_wave_bfs<R: Runtime>(
                     n_active_nodes,
                     k_feats,
                     n_targets,
-                );
+                )?;
             }
 
             launch_prefix_sum(
@@ -5390,7 +5544,7 @@ fn run_wave_bfs<R: Runtime>(
                 n_active_nodes,
                 k_feats,
                 n_targets,
-            );
+            )?;
 
             launch_evaluate_splits_rf(
                 client,
@@ -5411,7 +5565,7 @@ fn run_wave_bfs<R: Runtime>(
                 k_feats,
                 n_targets,
                 min_samples_leaf,
-            );
+            )?;
 
             launch_finalise_split_stats_rf(
                 client,
@@ -5428,7 +5582,7 @@ fn run_wave_bfs<R: Runtime>(
                 wave_size,
                 n_active_nodes,
                 n_targets,
-            );
+            )?;
         }
 
         launch_accumulate_importance(
@@ -5445,7 +5599,7 @@ fn run_wave_bfs<R: Runtime>(
             n_active_nodes,
             n_targets,
             n_total,
-        );
+        )?;
 
         if at_max_depth {
             continue;
@@ -5469,7 +5623,7 @@ fn run_wave_bfs<R: Runtime>(
             wave_size,
             n_active_next,
             n_targets,
-        );
+        )?;
 
         launch_propagate_child_stats(
             client,
@@ -5489,7 +5643,7 @@ fn run_wave_bfs<R: Runtime>(
             n_active_nodes,
             n_active_next,
             n_targets,
-        );
+        )?;
 
         launch_reassign(
             client,
@@ -5503,7 +5657,7 @@ fn run_wave_bfs<R: Runtime>(
             n_features,
             wave_size,
             n_active_nodes,
-        );
+        )?;
     }
 
     Ok(())
@@ -5585,7 +5739,12 @@ fn report_batch_progress(done: usize, total: usize, start: Instant) {
 /// * Propagates sparse-Y construction failures from
 ///   [`SparseYBatch::from_targets`].
 /// * `InvalidArgument` from [`pick_wave_size`] if even `wave_size = 1` busts
-///   `params.wave_byte_budget` on any batch.
+///   `params.wave_byte_budget` on any batch, or if the packed feature tensor
+///   exceeds the device's per-binding limit.
+/// * `CubeclUtils` if a wave allocation busts the per-binding limit or a
+///   dispatch grid is over the device's cube-count limit. The active-node
+///   count on the grid y axis is the one that reaches it on deep trees; see
+///   [`viable_max_active_nodes`].
 /// * Propagates GPU read-back errors from the deferred importance readback.
 #[allow(clippy::too_many_arguments)]
 pub fn fit_scenic_batches_gpu<R: Runtime>(
@@ -5652,7 +5811,8 @@ pub fn fit_scenic_batches_gpu<R: Runtime>(
     // Max; `feature_bin` unpacks on the device side.
     let n_bins_total = n_features * n_samples;
     let n_words = n_bins_total.div_ceil(4);
-    let max_binding = client.properties().memory.max_page_size as usize;
+    let limits = GpuLimits::from_client(&client);
+    let max_binding = limits.max_binding_bytes as usize;
     if n_words * 4 > max_binding {
         return Err(BixverseErrors::InvalidArgument(format!(
             "GPU SCENIC: the packed feature tensor needs {} MB but the device \
@@ -5668,7 +5828,7 @@ pub fn fit_scenic_batches_gpu<R: Runtime>(
     for (i, &b) in feature_matrix.data.iter().enumerate() {
         packed[i / 4] |= (b as u32) << ((i % 4) * 8);
     }
-    let feature_data_gpu = GpuTensor::<R, u32>::from_slice(&packed, vec![n_words], &client);
+    let feature_data_gpu = GpuTensor::<R, u32>::from_slice(&packed, vec![n_words], &client)?;
     drop(packed);
 
     // Per-batch importance tensor handles, kept alive until the deferred
@@ -5693,7 +5853,7 @@ pub fn fit_scenic_batches_gpu<R: Runtime>(
         // Only the DRAM histogram path reads the CSR form; ExtraTrees and the
         // fused RandomForest kernel both take Y dense.
         let sy_gpu = if wave_layout == WaveLayout::RandomForestHist {
-            Some(SparseYGpu::upload(&sparse_y, n_samples, &client))
+            Some(SparseYGpu::upload(&sparse_y, n_samples, &client)?)
         } else {
             None
         };
@@ -5703,7 +5863,7 @@ pub fn fit_scenic_batches_gpu<R: Runtime>(
             batch_n_targets,
             &mut dense_scratch,
             &client,
-        );
+        )?;
 
         let wave_size = pick_wave_size(
             max_active_nodes,
@@ -5714,7 +5874,7 @@ pub fn fit_scenic_batches_gpu<R: Runtime>(
             n_thresholds,
             wave_layout,
             n_samples,
-            client.properties().memory.max_page_size as usize,
+            &limits,
         )?;
         let state = WaveState::allocate(
             &client,
@@ -5725,7 +5885,7 @@ pub fn fit_scenic_batches_gpu<R: Runtime>(
             batch_n_targets,
             n_thresholds,
             wave_layout,
-        );
+        )?;
 
         // Interleaved [n_features, batch_n_targets] importances, accumulated
         // atomically on device across every tree in this batch. f32 bits
@@ -5734,7 +5894,7 @@ pub fn fit_scenic_batches_gpu<R: Runtime>(
             &vec![0u32; n_features * batch_n_targets],
             vec![n_features * batch_n_targets],
             &client,
-        );
+        )?;
 
         let mut tree_idx = 0usize;
         while tree_idx < n_trees {
@@ -5744,7 +5904,7 @@ pub fn fit_scenic_batches_gpu<R: Runtime>(
                 .map(|t| tree_seed(batch_seed, t) as u32)
                 .collect();
             let tree_seeds_gpu =
-                GpuTensor::<R, u32>::from_slice(&seeds_host, vec![this_wave], &client);
+                GpuTensor::<R, u32>::from_slice(&seeds_host, vec![this_wave], &client)?;
 
             // Bootstrap draws n_sub with replacement; non-bootstrap subsample
             // is Fisher-Yates over the first n_sub. RNG seeded off
@@ -5772,7 +5932,7 @@ pub fn fit_scenic_batches_gpu<R: Runtime>(
                 mult_host.fill(1);
             }
             let mult_gpu =
-                GpuTensor::<R, u32>::from_slice(&mult_host, vec![this_wave * n_samples], &client);
+                GpuTensor::<R, u32>::from_slice(&mult_host, vec![this_wave * n_samples], &client)?;
 
             // Kernels gate on the `wave_size` param, so an over-provisioned
             // `state` is safe; only the terminal short wave needs a shadow.
@@ -5788,7 +5948,7 @@ pub fn fit_scenic_batches_gpu<R: Runtime>(
                     batch_n_targets,
                     n_thresholds,
                     wave_layout,
-                ))
+                )?)
             };
             let use_state = effective_state.as_ref().unwrap_or(&state);
 

@@ -28,10 +28,10 @@
 
 use std::time::{Duration, Instant};
 
-use ann_search_rs::gpu::tensor::GpuTensor;
 use cubecl::future;
 use cubecl::prelude::*;
 use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+use cubecl_utils_rs::prelude::*;
 use faer::Mat;
 use rand::prelude::*;
 use rand::rngs::StdRng;
@@ -216,6 +216,7 @@ fn run_shape(shape: Shape, device: &WgpuDevice) {
             (n, k),
             &client,
         )
+        .unwrap()
     };
 
     let k2b_parts = make_csr(n, k, density, 1);
@@ -243,7 +244,8 @@ fn run_shape(shape: Shape, device: &WgpuDevice) {
     };
     let seg_host = a_columns_segments(&t1_csr, b_wg, k.div_ceil(b_wg as usize));
     let t1_seg =
-        GpuTensor::<WgpuRuntime, u32>::from_slice(&seg_host, vec![seg_host.len()], &client);
+        GpuTensor::<WgpuRuntime, u32>::from_slice(&seg_host, vec![seg_host.len()], &client)
+            .unwrap();
 
     let blocks = B_ARGMIN_BLOCKS.min(n.max(1) as u32) as usize;
     // Zeroed, not `empty()`. `reduce_argmin_blocks` runs even when
@@ -253,17 +255,21 @@ fn run_shape(shape: Shape, device: &WgpuDevice) {
         &vec![0.0f32; blocks * k],
         vec![blocks * k],
         &client,
-    );
+    )
+    .unwrap();
     let part_idx = GpuTensor::<WgpuRuntime, u32>::from_slice(
         &vec![0u32; blocks * k],
         vec![blocks * k],
         &client,
-    );
-    let gap_partial = GpuTensor::<WgpuRuntime, f32>::empty(vec![blocks], &client);
+    )
+    .unwrap();
+    let gap_partial = GpuTensor::<WgpuRuntime, f32>::empty(vec![blocks], &client).unwrap();
     // Zeroed, not `empty()`: a rejected dispatch leaves uninitialised VRAM,
     // which can pass a "did it write anything" check by accident.
-    let out_val = GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; k], vec![k], &client);
-    let out_idx = GpuTensor::<WgpuRuntime, u32>::from_slice(&vec![0u32; k], vec![k], &client);
+    let out_val =
+        GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; k], vec![k], &client).unwrap();
+    let out_idx =
+        GpuTensor::<WgpuRuntime, u32>::from_slice(&vec![0u32; k], vec![k], &client).unwrap();
 
     let mut timings: Vec<Duration> = Vec::with_capacity(REPEATS);
     for _ in 0..REPEATS {
@@ -531,8 +537,9 @@ fn run_a_shape(shape: AShape, n_iters: usize, device: &WgpuDevice) {
     )
     .expect("K2B upload failed");
 
-    let atom_idx = GpuTensor::<WgpuRuntime, u32>::empty(vec![n * cap], &client);
-    let threshold = GpuTensor::<WgpuRuntime, f32>::from_slice(&[1e-7f32], vec![1], &client);
+    let atom_idx = GpuTensor::<WgpuRuntime, u32>::empty(vec![n * cap], &client).unwrap();
+    let threshold =
+        GpuTensor::<WgpuRuntime, f32>::from_slice(&[1e-7f32], vec![1], &client).unwrap();
 
     println!(
         "n = {:>7}  k = {:>5}  cap {:>4}  nnz(t1)/row {:>6.1}  t1 {:>6.1} MB sparse vs \
@@ -566,16 +573,19 @@ fn run_a_shape(shape: AShape, n_iters: usize, device: &WgpuDevice) {
         // Zeroed per tier, or the previous tier's output passes the mass check
         // for a launch that did nothing. That is not hypothetical: it hid a
         // silent failure at k = 16384 until the buffers were cleared.
-        let atom_cnt = GpuTensor::<WgpuRuntime, u32>::from_slice(&vec![0u32; n], vec![n], &client);
+        let atom_cnt =
+            GpuTensor::<WgpuRuntime, u32>::from_slice(&vec![0u32; n], vec![n], &client).unwrap();
         let atom_val = GpuTensor::<WgpuRuntime, f32>::from_slice(
             &vec![0.0f32; n * cap],
             vec![n * cap],
             &client,
-        );
+        )
+        .unwrap();
 
         let seg_host = a_columns_segments(&t1, wg, slots);
         let t1_seg =
-            GpuTensor::<WgpuRuntime, u32>::from_slice(&seg_host, vec![seg_host.len()], &client);
+            GpuTensor::<WgpuRuntime, u32>::from_slice(&seg_host, vec![seg_host.len()], &client)
+                .unwrap();
 
         let mut timings: Vec<Duration> = Vec::with_capacity(REPEATS);
         for _ in 0..REPEATS {
@@ -804,16 +814,17 @@ fn main() {
     }
 
     {
-        let props = WgpuRuntime::client(&device).properties().clone();
+        let limits = GpuLimits::from_client(&WgpuRuntime::client(&device));
         println!(
-            "\ndevice: max_units_per_cube {}  max_cube_dim {:?}  plane {}..{}  \
-             shared {} B  max_page_size {} MB",
-            props.hardware.max_units_per_cube,
-            props.hardware.max_cube_dim,
-            props.hardware.plane_size_min,
-            props.hardware.plane_size_max,
-            props.hardware.max_shared_memory_size,
-            props.memory.max_page_size / (1024 * 1024),
+            "\ndevice: max_units_per_cube {}  max_cube_dim {:?}  max_cube_count {:?}  \
+             plane {}..{}  shared {} B  binding limit {} MB",
+            limits.max_units_per_cube,
+            limits.max_cube_dim,
+            limits.max_cube_count,
+            limits.plane_size_min,
+            limits.plane_size_max,
+            limits.max_shared_bytes,
+            limits.max_binding_bytes / (1024 * 1024),
         );
     }
 

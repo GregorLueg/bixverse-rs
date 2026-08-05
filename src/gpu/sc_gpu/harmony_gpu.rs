@@ -3,9 +3,8 @@
 
 #![allow(missing_docs)]
 
-use ann_search_rs::gpu::grid_2d;
-use ann_search_rs::gpu::tensor::GpuTensor;
 use cubecl::prelude::*;
+use cubecl_utils_rs::prelude::*;
 use cubek::matmul::definition::MatmulPrecision;
 use faer::{Mat, MatRef};
 use rayon::prelude::*;
@@ -274,6 +273,7 @@ pub fn solve_ridge_arrowhead_host(
 /// ### Errors
 ///
 /// * `GpuMatmul` if the GEMM dispatch fails.
+/// * `CubeclUtils` if the row-normalise grid is over the device limit.
 pub fn update_centroids_from_r_gpu<R, T, MP>(
     client: &ComputeClient<R>,
     r: &GpuTensor<R, T>,
@@ -301,7 +301,7 @@ where
         client,
     )?;
 
-    launch_row_l2_normalise(y_out, k, dim, client);
+    launch_row_l2_normalise(y_out, k, dim, client)?;
 
     Ok(())
 }
@@ -330,7 +330,8 @@ where
 ///
 /// ### Errors
 ///
-/// * Propagates the read-back error if the device transfer fails.
+/// * `CubeclUtils` if the partials allocation busts the per-binding size
+///   limit, or the read-back fails on the device.
 #[allow(clippy::too_many_arguments)]
 pub fn compute_objective_gpu<R: Runtime>(
     client: &ComputeClient<R>,
@@ -345,7 +346,7 @@ pub fn compute_objective_gpu<R: Runtime>(
     n: usize,
     k: usize,
 ) -> Result<f32, BixverseErrors> {
-    let partials = GpuTensor::<R, f32>::empty(vec![WORKGROUP_512 as usize], client);
+    let partials = GpuTensor::<R, f32>::empty(vec![WORKGROUP_512 as usize], client)?;
 
     launch_objective_partials(
         r,
@@ -397,7 +398,8 @@ pub fn compute_objective_gpu<R: Runtime>(
 ///
 /// ### Errors
 ///
-/// * Propagates read-back errors from `S`, `O`, or `r_sum`.
+/// * `CubeclUtils` if a dispatch grid or an allocation busts a device limit,
+///   or a read-back of `S`, `O` or `r_sum` fails.
 #[allow(clippy::too_many_arguments)]
 pub fn ridge_correction_gpu<R: Runtime>(
     client: &ComputeClient<R>,
@@ -419,8 +421,8 @@ pub fn ridge_correction_gpu<R: Runtime>(
     use_dynamic_lambda: bool,
     batch_proportion_cutoff: f32,
 ) -> Result<(), BixverseErrors> {
-    let s = GpuTensor::<R, f32>::empty(vec![b * k * d], client);
-    launch_weighted_segmented_sum(r, z, all_indices, offsets, &s, b, k, d, client);
+    let s = GpuTensor::<R, f32>::empty(vec![b * k * d], client)?;
+    launch_weighted_segmented_sum(r, z, all_indices, offsets, &s, b, k, d, client)?;
 
     let s_host = s.clone().read(client)?;
     let o_host = o.clone().read(client)?;
@@ -439,8 +441,8 @@ pub fn ridge_correction_gpu<R: Runtime>(
         batch_proportion_cutoff,
     );
 
-    let c = GpuTensor::<R, f32>::from_slice(&c_host, vec![k * b * d], client);
-    launch_ridge_subtract(z, r, &c, cell_to_level, z_corr, n, k, b, d, client);
+    let c = GpuTensor::<R, f32>::from_slice(&c_host, vec![k * b * d], client)?;
+    launch_ridge_subtract(z, r, &c, cell_to_level, z_corr, n, k, b, d, client)?;
 
     Ok(())
 }
@@ -495,17 +497,36 @@ pub fn row_l2_normalise_into<F: Float>(
 }
 
 /// Dispatch [`fn@row_l2_normalise_into`]. One workgroup per row.
+///
+/// The out-of-place sibling of [`launch_row_l2_normalise`], for the ridge
+/// correction where the source `z_corr` is the value returned to the caller and
+/// so cannot be normalised in place.
+///
+/// ### Params
+///
+/// * `src` - Input matrix `[n_rows, dim]` row-major, left untouched
+/// * `dst` - Output matrix `[n_rows, dim]` row-major
+/// * `n_rows` - Number of rows
+/// * `dim` - Row length
+/// * `client` - CubeCL compute client
+///
+/// ### Returns
+///
+/// `Ok(())`; `dst` holds the row-normalised copy. `CubeclUtils` if the grid is
+/// over the device's cube-count limit.
 pub fn launch_row_l2_normalise_into<R, F>(
     src: &GpuTensor<R, F>,
     dst: &GpuTensor<R, F>,
     n_rows: usize,
     dim: usize,
     client: &ComputeClient<R>,
-) where
+) -> Result<(), BixverseErrors>
+where
     R: Runtime,
     F: Float + cubecl::CubeElement,
 {
-    let (gx, gy) = grid_2d(n_rows as u32);
+    let limits = GpuLimits::from_client(client);
+    let (gx, gy) = grid_2d(n_rows as u32, &limits)?;
 
     unsafe {
         row_l2_normalise_into::launch_unchecked::<F, R>(
@@ -518,6 +539,8 @@ pub fn launch_row_l2_normalise_into<R, F>(
             dim,
         );
     }
+
+    Ok(())
 }
 
 //////////
@@ -548,7 +571,8 @@ pub fn launch_row_l2_normalise_into<R, F>(
 ///
 /// ### Errors
 ///
-/// * Propagates k-means, GEMM, and read-back errors.
+/// * Propagates k-means, GEMM, read-back and device-limit (`CubeclUtils`)
+///   errors.
 pub fn harmony_v2_gpu<R: Runtime>(
     pca: MatRef<f32>,
     batch_labels: &[Vec<usize>],
@@ -626,26 +650,26 @@ where
         println!("GPU Harmony v2: moving data to GPU.");
     }
     let z_orig_gpu =
-        GpuTensor::<R, f32>::from_slice(&to_row_major(z_orig.as_ref()), vec![n, d], &client);
+        GpuTensor::<R, f32>::from_slice(&to_row_major(z_orig.as_ref()), vec![n, d], &client)?;
     let z_cos_gpu =
-        GpuTensor::<R, f32>::from_slice(&to_row_major(z_cos_host.as_ref()), vec![n, d], &client);
+        GpuTensor::<R, f32>::from_slice(&to_row_major(z_cos_host.as_ref()), vec![n, d], &client)?;
     let y_gpu =
-        GpuTensor::<R, f32>::from_slice(&to_row_major(y_host.as_ref()), vec![k, d], &client);
+        GpuTensor::<R, f32>::from_slice(&to_row_major(y_host.as_ref()), vec![k, d], &client)?;
 
-    let sigma_gpu = GpuTensor::<R, f32>::from_slice(&sigma, vec![k], &client);
-    let theta_gpu = GpuTensor::<R, f32>::from_slice(theta_levels, vec![b], &client);
-    let pr_b_gpu = GpuTensor::<R, f32>::from_slice(&info.pr_b, vec![b], &client);
+    let sigma_gpu = GpuTensor::<R, f32>::from_slice(&sigma, vec![k], &client)?;
+    let theta_gpu = GpuTensor::<R, f32>::from_slice(theta_levels, vec![b], &client)?;
+    let pr_b_gpu = GpuTensor::<R, f32>::from_slice(&info.pr_b, vec![b], &client)?;
 
     let cell_to_level_u32: Vec<u32> = info.cell_to_level.iter().map(|&l| l as u32).collect();
-    let cell_to_level_gpu = GpuTensor::<R, u32>::from_slice(&cell_to_level_u32, vec![n], &client);
+    let cell_to_level_gpu = GpuTensor::<R, u32>::from_slice(&cell_to_level_u32, vec![n], &client)?;
 
     // build the level-CSR once (cell_to_level is static)
     let cc = params.csr_cube_count;
     let privatised_counts =
-        GpuTensor::<R, u32>::from_slice(&vec![0u32; cc * b], vec![cc * b], &client);
-    let counts = GpuTensor::<R, u32>::from_slice(&vec![0u32; b], vec![b], &client);
-    let offsets = GpuTensor::<R, u32>::from_slice(&vec![0u32; b + 1], vec![b + 1], &client);
-    let all_indices = GpuTensor::<R, u32>::from_slice(&vec![0u32; n], vec![n], &client);
+        GpuTensor::<R, u32>::from_slice(&vec![0u32; cc * b], vec![cc * b], &client)?;
+    let counts = GpuTensor::<R, u32>::from_slice(&vec![0u32; b], vec![b], &client)?;
+    let offsets = GpuTensor::<R, u32>::from_slice(&vec![0u32; b + 1], vec![b + 1], &client)?;
+    let all_indices = GpuTensor::<R, u32>::from_slice(&vec![0u32; n], vec![n], &client)?;
     build_csr_gpu_privatised(
         &cell_to_level_gpu,
         n,
@@ -656,25 +680,25 @@ where
         &offsets,
         &all_indices,
         &client,
-    );
+    )?;
 
     // working buffers
-    let dist_gpu = GpuTensor::<R, f32>::empty(vec![n, k], &client);
-    let scale_dist_gpu = GpuTensor::<R, f32>::empty(vec![n, k], &client);
-    let r_gpu = GpuTensor::<R, f32>::empty(vec![n, k], &client);
-    let o_gpu = GpuTensor::<R, f32>::empty(vec![b, k], &client);
-    let r_sum_gpu = GpuTensor::<R, f32>::empty(vec![k], &client);
-    let z_corr_gpu = GpuTensor::<R, f32>::empty(vec![n, d], &client);
+    let dist_gpu = GpuTensor::<R, f32>::empty(vec![n, k], &client)?;
+    let scale_dist_gpu = GpuTensor::<R, f32>::empty(vec![n, k], &client)?;
+    let r_gpu = GpuTensor::<R, f32>::empty(vec![n, k], &client)?;
+    let o_gpu = GpuTensor::<R, f32>::empty(vec![b, k], &client)?;
+    let r_sum_gpu = GpuTensor::<R, f32>::empty(vec![k], &client)?;
+    let z_corr_gpu = GpuTensor::<R, f32>::empty(vec![n, d], &client)?;
 
     if verbosity.detailed_verbosity() {
         println!(" ... done in {:.2?}", start.elapsed());
     }
 
     // initial distances, R, and statistics
-    launch_cosine_distances(&y_gpu, &z_cos_gpu, &dist_gpu, n, k, d, &client);
-    launch_scale_exp_normalise(&dist_gpu, &sigma_gpu, &r_gpu, n, k, &client);
-    launch_dense_column_sum(&r_gpu, &r_sum_gpu, n, k, &client);
-    launch_segmented_sum(&r_gpu, &all_indices, &offsets, &o_gpu, b, k, &client);
+    launch_cosine_distances(&y_gpu, &z_cos_gpu, &dist_gpu, n, k, d, &client)?;
+    launch_scale_exp_normalise(&dist_gpu, &sigma_gpu, &r_gpu, n, k, &client)?;
+    launch_dense_column_sum(&r_gpu, &r_sum_gpu, n, k, &client)?;
+    launch_segmented_sum(&r_gpu, &all_indices, &offsets, &o_gpu, b, k, &client)?;
 
     let initial_obj = compute_objective_gpu(
         &client,
@@ -706,7 +730,7 @@ where
         let start_iter = Instant::now();
 
         // base assignments, fixed across the inner loop
-        launch_scale_exp_normalise(&dist_gpu, &sigma_gpu, &scale_dist_gpu, n, k, &client);
+        launch_scale_exp_normalise(&dist_gpu, &sigma_gpu, &scale_dist_gpu, n, k, &client)?;
 
         for kmeans_iter in 0..params.max_iter_kmeans {
             // Jacobi sweep: reads O/r_sum from the previous sweep, writes R in place
@@ -721,9 +745,9 @@ where
                 n,
                 k,
                 &client,
-            );
-            launch_dense_column_sum(&r_gpu, &r_sum_gpu, n, k, &client);
-            launch_segmented_sum(&r_gpu, &all_indices, &offsets, &o_gpu, b, k, &client);
+            )?;
+            launch_dense_column_sum(&r_gpu, &r_sum_gpu, n, k, &client)?;
+            launch_segmented_sum(&r_gpu, &all_indices, &offsets, &o_gpu, b, k, &client)?;
 
             let obj = compute_objective_gpu(
                 &client,
@@ -779,16 +803,16 @@ where
         )?;
 
         // z_cos = normalise(z_corr) (out-of-place: z_corr is the returned value)
-        launch_row_l2_normalise_into(&z_corr_gpu, &z_cos_gpu, n, d, &client);
+        launch_row_l2_normalise_into(&z_corr_gpu, &z_cos_gpu, n, d, &client)?;
 
         // update centroids and distances for the next round
         update_centroids_from_r_gpu::<R, f32, f32>(&client, &r_gpu, &z_cos_gpu, &y_gpu, n, k, d)?;
-        launch_cosine_distances(&y_gpu, &z_cos_gpu, &dist_gpu, n, k, d, &client);
+        launch_cosine_distances(&y_gpu, &z_cos_gpu, &dist_gpu, n, k, d, &client)?;
 
         // re-initialise R and statistics from the new distances
-        launch_scale_exp_normalise(&dist_gpu, &sigma_gpu, &r_gpu, n, k, &client);
-        launch_dense_column_sum(&r_gpu, &r_sum_gpu, n, k, &client);
-        launch_segmented_sum(&r_gpu, &all_indices, &offsets, &o_gpu, b, k, &client);
+        launch_scale_exp_normalise(&dist_gpu, &sigma_gpu, &r_gpu, n, k, &client)?;
+        launch_dense_column_sum(&r_gpu, &r_sum_gpu, n, k, &client)?;
+        launch_segmented_sum(&r_gpu, &all_indices, &offsets, &o_gpu, b, k, &client)?;
 
         let harmony_obj = *objectives_kmeans.last().unwrap();
         objectives_harmony.push(harmony_obj);
@@ -841,7 +865,6 @@ where
 #[cfg(test)]
 mod tests_harmony_gpu {
     use super::*;
-    use ann_search_rs::gpu::tensor::GpuTensor;
     use approx::assert_relative_eq;
     use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
 
@@ -1103,16 +1126,24 @@ mod tests_harmony_gpu {
             .collect();
         let cell_to_level_u32: Vec<u32> = info.cell_to_level.iter().map(|&l| l as u32).collect();
 
-        let r_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&r_host, vec![n, k], &client);
-        let dist_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&dist_host, vec![n, k], &client);
-        let o_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&o_host, vec![b, k], &client);
-        let r_sum_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&r_sum_host, vec![k], &client);
-        let sigma_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&sigma, vec![k], &client);
+        let r_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&r_host, vec![n, k], &client).unwrap();
+        let dist_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&dist_host, vec![n, k], &client).unwrap();
+        let o_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&o_host, vec![b, k], &client).unwrap();
+        let r_sum_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&r_sum_host, vec![k], &client).unwrap();
+        let sigma_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&sigma, vec![k], &client).unwrap();
         let theta_gpu =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&theta_expanded[0], vec![b], &client);
-        let pr_b_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&info.pr_b, vec![b], &client);
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&theta_expanded[0], vec![b], &client)
+                .unwrap();
+        let pr_b_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&info.pr_b, vec![b], &client).unwrap();
         let ctl_gpu =
-            GpuTensor::<WgpuRuntime, u32>::from_slice(&cell_to_level_u32, vec![n], &client);
+            GpuTensor::<WgpuRuntime, u32>::from_slice(&cell_to_level_u32, vec![n], &client)
+                .unwrap();
 
         let gpu_obj = compute_objective_gpu::<WgpuRuntime>(
             &client, &r_gpu, &dist_gpu, &o_gpu, &r_sum_gpu, &sigma_gpu, &theta_gpu, &pr_b_gpu,
@@ -1142,9 +1173,10 @@ mod tests_harmony_gpu {
             })
             .collect();
 
-        let r_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&r_host, vec![n, k], &client);
-        let z_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&z_cos, vec![n, d], &client);
-        let y_gpu = GpuTensor::<WgpuRuntime, f32>::empty(vec![k, d], &client);
+        let r_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&r_host, vec![n, k], &client).unwrap();
+        let z_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&z_cos, vec![n, d], &client).unwrap();
+        let y_gpu = GpuTensor::<WgpuRuntime, f32>::empty(vec![k, d], &client).unwrap();
 
         update_centroids_from_r_gpu::<WgpuRuntime, f32, f32>(
             &client, &r_gpu, &z_gpu, &y_gpu, n, k, d,
@@ -1196,10 +1228,11 @@ mod tests_harmony_gpu {
 
         let (n, dim) = (5, 6);
         let src: Vec<f32> = (0..n * dim).map(|i| (i as f32) * 0.1 - 1.0).collect();
-        let src_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&src, vec![n, dim], &client);
-        let dst_gpu = GpuTensor::<WgpuRuntime, f32>::empty(vec![n, dim], &client);
+        let src_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&src, vec![n, dim], &client).unwrap();
+        let dst_gpu = GpuTensor::<WgpuRuntime, f32>::empty(vec![n, dim], &client).unwrap();
 
-        launch_row_l2_normalise_into(&src_gpu, &dst_gpu, n, dim, &client);
+        launch_row_l2_normalise_into(&src_gpu, &dst_gpu, n, dim, &client).unwrap();
         let dst = dst_gpu.read(&client).unwrap();
 
         for row in 0..n {
