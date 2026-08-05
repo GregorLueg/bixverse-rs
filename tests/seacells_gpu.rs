@@ -6,8 +6,16 @@
 //! between a scattered CPU accumulation and a register-blocked GPU one, so the
 //! assertions are on agreement rate and the objective rather than on exact
 //! equality.
+//!
+//! The single test here is the most expensive in the crate: n = 3000 over two
+//! pruning arms, each running a full CPU SEACells fit and a full GPU fit. The
+//! whole file is therefore behind `large_scale_diagnostics`.
 
-#![cfg(all(feature = "single-cell", feature = "gpu"))]
+#![cfg(all(
+    feature = "single-cell",
+    feature = "gpu",
+    feature = "large_scale_diagnostics"
+))]
 
 use cubecl::prelude::*;
 use cubecl::wgpu::{WgpuDevice, WgpuRuntime};

@@ -591,6 +591,7 @@ pub fn seacells_fit_gpu<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "large_scale_diagnostics")]
     use crate::gpu::sc_gpu::kernels::seacells_kernels::A_COLUMNS_BLOCKS;
     use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
     use rand::prelude::*;
@@ -672,6 +673,10 @@ mod tests {
     /// kernel diverges most from the CPU structure: it marks weights zero
     /// instead of compacting the atom list.
     #[test]
+    // Heavy: n = 2500, k = 300 over six configurations, so six full CPU
+    // `fw_columns_a` solves. `test_fw_columns_a_capacity_boundary` keeps a
+    // cheaper CPU-vs-GPU parity check in the default run.
+    #[cfg(feature = "large_scale_diagnostics")]
     fn test_fw_columns_a_gpu_matches_cpu() {
         let Some(device) = try_device() else {
             eprintln!("no GPU available, skipping");
@@ -796,6 +801,9 @@ mod tests {
     /// ownership can go wrong without the totals noticing: a thread whose block
     /// runs past `k` must contribute no argmin candidate.
     #[test]
+    // Heavy: k up to 9000 across every tier, six configurations, each with a
+    // full CPU solve. The heaviest test in this file.
+    #[cfg(feature = "large_scale_diagnostics")]
     fn test_fw_columns_a_large_k_matches_cpu() {
         let Some(device) = try_device() else {
             eprintln!("no GPU available, skipping");
@@ -947,6 +955,9 @@ mod tests {
     ///
     /// `(atom indices, atom weights, atom counts, stride)`.
     #[allow(clippy::too_many_arguments)]
+    // Only `test_fw_columns_a_reduction_arms_agree` uses this, so it carries the
+    // same gate or it is dead code in the library.
+    #[cfg(feature = "large_scale_diagnostics")]
     fn run_columns_a_raw(
         t1: &CompressedSparseData2<f32>,
         a_prev_t: &CompressedSparseData2<f32>,
@@ -1019,6 +1030,8 @@ mod tests {
     /// own tie-break and barrier structure, would otherwise never execute
     /// anywhere.
     #[test]
+    // Heavy: n = 1500, k = 300 across four dispatches.
+    #[cfg(feature = "large_scale_diagnostics")]
     fn test_fw_columns_a_reduction_arms_agree() {
         let Some(device) = try_device() else {
             eprintln!("no GPU available, skipping");
@@ -1051,21 +1064,35 @@ mod tests {
                 "atom counts differ (pruning {:?})",
                 pruning
             );
-            assert_eq!(
-                plane_idx, tree_idx,
-                "atom indices differ (pruning {:?})",
-                pruning
-            );
-            for (cell, (a, b)) in plane_val.iter().zip(tree_val.iter()).enumerate() {
-                assert!(
-                    (a - b).abs() <= 1e-5 * a.abs().max(1e-3),
-                    "weight {} differs at slot {} (pruning {:?}): {} vs {}",
+
+            // Only `[0, cnt)` of each row is written by the kernel. The rest of
+            // the row is whatever the pooled `empty()` allocation happened to
+            // contain, so comparing the whole buffer would be comparing
+            // uninitialised device memory.
+            for cell in 0..n {
+                let cnt = plane_cnt[cell] as usize;
+                let lo = cell * cap;
+                let hi = lo + cnt;
+                assert_eq!(
+                    &plane_idx[lo..hi],
+                    &tree_idx[lo..hi],
+                    "atom indices differ at cell {} (pruning {:?})",
                     cell,
-                    cell % cap,
-                    pruning,
-                    a,
-                    b
+                    pruning
                 );
+                for slot in 0..cnt {
+                    let a = plane_val[lo + slot];
+                    let b = tree_val[lo + slot];
+                    assert!(
+                        (a - b).abs() <= 1e-5 * a.abs().max(1e-3),
+                        "weight differs at cell {} slot {} (pruning {:?}): {} vs {}",
+                        cell,
+                        slot,
+                        pruning,
+                        a,
+                        b
+                    );
+                }
             }
         }
     }

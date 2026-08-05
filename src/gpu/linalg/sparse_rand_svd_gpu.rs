@@ -502,6 +502,8 @@ mod tests {
     // random sketch actually shows. The other tests here are 60x20, small
     // enough that almost any sketch works.
     #[test]
+    // Heavy: three power-iteration arms at n = 3000, plus a dense faer SVD.
+    #[cfg(feature = "large_scale_diagnostics")]
     fn test_randomised_sparse_svd_gpu_accuracy_vs_dense() {
         let Some(device) = try_device() else { return };
 

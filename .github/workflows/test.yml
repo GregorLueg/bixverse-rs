@@ -10,6 +10,7 @@ jobs:
   test:
     name: Test on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
@@ -64,6 +65,7 @@ jobs:
   test-gpu:
     name: Test GPU on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
@@ -82,6 +84,18 @@ jobs:
           echo "LIBRARY_PATH=/usr/lib/R/lib:$LIBRARY_PATH" >> $GITHUB_ENV
           echo "LD_LIBRARY_PATH=/usr/lib/R/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-gpu-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-gpu-
+
       - name: Install Vulkan (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -89,8 +103,12 @@ jobs:
           sudo apt-get install -y libvulkan1 mesa-vulkan-drivers libgl1-mesa-dri
           echo "WGPU_BACKEND=vulkan" >> $GITHUB_ENV
 
+      # The expensive GPU tests sit behind `large_scale_diagnostics`, which this
+      # job deliberately does not enable. The Linux runner has no real GPU and
+      # falls back to lavapipe software Vulkan, so it is a smoke lane: it covers
+      # the shared-memory reduction arm and SPIR-V codegen, neither of which
+      # Apple exercises.
       - name: Run tests
-        if: runner.os != 'Windows'
         env:
           LD_LIBRARY_PATH: ${{ steps.setup-r.outputs.r-home }}/lib
           DYLD_LIBRARY_PATH: ${{ steps.setup-r.outputs.r-home }}/lib

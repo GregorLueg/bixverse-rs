@@ -14,9 +14,10 @@
 //! per the plan's "sanity floor, not precision target" wording.
 
 #![allow(clippy::needless_range_loop, clippy::field_reassign_with_default)]
-// Helpers feeding the `large_scale_diagnostics` tests are unused when that
-// feature is off. Not worth cfg-ing each one individually in a test file.
-#![allow(dead_code)]
+// Helpers and imports feeding the `large_scale_diagnostics` tests are unused
+// when that feature is off. Not worth cfg-ing each one individually in a test
+// file.
+#![allow(dead_code, unused_imports)]
 #![cfg(all(feature = "single-cell", feature = "gpu"))]
 
 use bixverse_rs::gpu::sc_gpu::scenic_gpu::{
@@ -522,7 +523,10 @@ fn pearson(a: &[f32], b: &[f32]) -> f32 {
 /// the CPU ExtraTrees ensemble to converge, or does it still have material
 /// seed variance? Any GPU-vs-CPU comparison is bounded by this baseline.
 #[test]
-#[ignore]
+// A diagnostic, not a gate: it asserts nothing and prints the mean Pearson.
+// ~500s in debug, so it sits with its siblings behind the feature rather than
+// under `#[ignore]`.
+#[cfg(feature = "large_scale_diagnostics")]
 fn phase2_cpu_baseline() {
     let seed_a = 20260708u64;
     let seed_b = seed_a.wrapping_add(0xBEEF);
@@ -639,6 +643,8 @@ fn phase2_multi_tree_pearson() {
 /// standalone call sees the same `n_targets_in_batch` and therefore the
 /// same per-tree multi-output scoring, so the trees and importances match.
 #[test]
+// Heavy: 2000 x 100 x 130 with 50 trees, so four full GPU ensemble fits.
+#[cfg(feature = "large_scale_diagnostics")]
 fn phase2_multi_batch_determinism() {
     let Some(device) = try_device() else {
         eprintln!("scenic_gpu (Phase 2 multi-batch): no wgpu device -- skipping");
@@ -884,6 +890,8 @@ fn phase3_rf_bootstrap_pearson() {
 /// stable to three decimals across repeat runs despite the CAS-loop atomic in
 /// `accumulate_importance` varying summation order.
 #[test]
+// Heavy: 120 RF trees, two CPU fits plus one GPU fit.
+#[cfg(feature = "large_scale_diagnostics")]
 fn phase3_rf_pearson_small() {
     let Some(device) = try_device() else {
         eprintln!("scenic_gpu (Phase 3 RF small): no wgpu device -- skipping");
@@ -1015,6 +1023,8 @@ fn phase3_rf_pearson_small() {
 /// This is the test that has to hold before `SMEM_HIST_SLOTS` is tightened, not
 /// the uniform ones.
 #[test]
+// Heavy: 1500 x 50 x 64 with 120 RF trees, two CPU fits plus one GPU fit.
+#[cfg(feature = "large_scale_diagnostics")]
 fn phase3_rf_pearson_skewed_bins() {
     let Some(device) = try_device() else {
         eprintln!("scenic_gpu (Phase 3 RF skewed): no wgpu device -- skipping");
@@ -1362,6 +1372,8 @@ fn scenic_params_for_roundtrip() -> ScenicParams {
 }
 
 #[test]
+// Heavy: full pipeline, including writing a sparse binary fixture to temp_dir.
+#[cfg(feature = "large_scale_diagnostics")]
 fn run_scenic_grn_gpu_roundtrip() {
     let Some(device) = try_device() else {
         eprintln!("skipping: no GPU device available");
@@ -1416,6 +1428,8 @@ fn run_scenic_grn_gpu_roundtrip() {
 }
 
 #[test]
+// Heavy: full streaming pipeline, including a sparse binary fixture on disk.
+#[cfg(feature = "large_scale_diagnostics")]
 fn run_scenic_grn_streaming_gpu_roundtrip() {
     let Some(device) = try_device() else {
         eprintln!("skipping: no GPU device available");
@@ -1520,6 +1534,8 @@ fn build_synthetic_scenic_csc() -> CompressedSparseData2<u16, f32> {
 }
 
 #[test]
+// Heavy: full in-memory pipeline, CPU and GPU.
+#[cfg(feature = "large_scale_diagnostics")]
 fn run_scenic_grn_in_memory_gpu_roundtrip() {
     let Some(device) = try_device() else {
         eprintln!("skipping: no GPU device available");

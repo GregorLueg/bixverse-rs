@@ -143,10 +143,15 @@ pub const A_COLUMNS_MAX_SLOTS: usize = 32;
 /// [FwArgminB::columns_a]: crate::single_cell::mc_generation::seacells::FwArgminB::columns_a
 pub const A_COLUMNS_WG_TIERS: [(u32, usize); 3] = [(128, 32), (256, 32), (512, 24)];
 
-/// Smallest plane width any supported backend reports, used as the safe upper
-/// bound on the per-plane reduction scratch. Metal and Vulkan both report 32 or
-/// 64; the plane arm additionally requires an exact plane size, see
-/// [plane_reduce_viable()].
+/// Narrowest plane the plane-reduction arm supports, used to size the per-plane
+/// reduction scratch.
+///
+/// This is a floor the arm *enforces*, not an observation about hardware. Metal
+/// and hardware Vulkan report 32 or 64, but lavapipe reports 4 or 8 and Intel
+/// integrated graphics can report 8 or 16. Since the scratch is sized by this
+/// constant and indexed by the runtime `PLANE_DIM`, anything narrower overruns
+/// it, so [plane_reduce_viable()] rejects those devices and they take the
+/// shared-memory tree arm instead.
 pub const MIN_PLANE_WIDTH: u32 = 32;
 
 /// Shared-memory entries the argmin and renormalisation reductions need.
@@ -155,6 +160,16 @@ pub const MIN_PLANE_WIDTH: u32 = 32;
 /// `wg_size / plane`; the shared-memory tree arm indexes by thread and needs the
 /// full width. Sizing this by arm rather than by workgroup width is what makes
 /// the wide tiers affordable.
+///
+/// The plane arm relies on two invariants, both of which
+/// [plane_reduce_viable()] and [A_COLUMNS_WG_TIERS] hold up between them:
+///
+/// - `plane >= MIN_PLANE_WIDTH`, so `wg_size / plane` never exceeds the
+///   `wg_size / MIN_PLANE_WIDTH` slots allocated here;
+/// - `wg_size <= plane * plane`, so the level-2 combine, which reduces the
+///   per-plane winners with a single `plane_min` over plane 0, covers every
+///   plane. The widest tier is 512 and the narrowest accepted plane is 32, so
+///   the worst case is 16 planes reduced by 32 lanes.
 ///
 /// ### Params
 ///
@@ -1235,6 +1250,13 @@ where
 /// over only part of the columns. Apple Silicon reports 32/32, so the plane
 /// path is taken there.
 ///
+/// The width floor is load-bearing, not defensive. [reduce_scratch_len()] sizes
+/// the per-plane scratch by [MIN_PLANE_WIDTH], while the kernel indexes it by
+/// the runtime `PLANE_DIM`, so a narrower plane means more planes than slots and
+/// the reduction reads past the end of the scratch into the neighbouring array.
+/// Software Vulkan (lavapipe reports 8/8) and Intel integrated graphics both
+/// land there, which is why an exact-size check alone is not enough.
+///
 /// ### Params
 ///
 /// * `client` - CubeCL compute client, queried for hardware properties
@@ -1246,7 +1268,10 @@ where
 pub fn plane_reduce_viable<R: Runtime>(client: &ComputeClient<R>, wg_size: u32) -> bool {
     let hw = &client.properties().hardware;
     let plane = hw.plane_size_min;
-    plane == hw.plane_size_max && plane > 0 && wg_size.is_multiple_of(plane)
+    plane == hw.plane_size_max
+        && plane > 0
+        && plane >= MIN_PLANE_WIDTH
+        && wg_size.is_multiple_of(plane)
 }
 
 /// Dispatch [fw_columns_a_gpu()].
@@ -1807,11 +1832,47 @@ mod tests {
             .collect()
     }
 
-    /// The fused kernel must reproduce the CPU scan it replaces: same argmin
-    /// per archetype, same minimum, same duality-gap term.
+    /// One shape of the fused-kernel parity check.
     ///
-    /// The shapes are picked to cover the two things the kernel's structure
-    /// turns on, both of which are degenerate at small sizes:
+    /// The kernel must reproduce the CPU scan it replaces: same argmin per
+    /// archetype, same minimum, same duality-gap term.
+    ///
+    /// ### Params
+    ///
+    /// * `n` - Cells
+    /// * `k` - Archetypes
+    /// * `device` - Device to launch on
+    fn check_argmin_arm(n: usize, k: usize, device: &WgpuDevice) {
+        let k2b = fixture(n * k, 1, 3);
+        let t1 = fixture(k * k, 5, 4);
+        let t2 = fixture(n * k, 9, 5);
+        let b_mat = fixture(n * k, 13, 11);
+
+        let (want_val, want_idx, want_gap) = cpu_fw_argmin_b(&k2b, &t1, &t2, &b_mat, n, k);
+        let (got_val, got_idx, got_gap) = gpu_fw_argmin_b(&k2b, &t1, &t2, &b_mat, n, k, device);
+
+        for c in 0..k {
+            assert_relative_eq!(got_val[c], want_val[c], max_relative = 1e-4, epsilon = 1e-5);
+        }
+        assert_argmins_agree(&k2b, &t1, &t2, &got_idx, &want_idx, &want_val, n, k);
+        assert_relative_eq!(got_gap, want_gap, max_relative = 1e-3, epsilon = 1e-4);
+    }
+
+    /// Parity at shapes cheap enough to run on every push.
+    ///
+    /// The two structural properties the kernel turns on, multi-slot ownership
+    /// and the grid stride, are both degenerate at these sizes. They are covered
+    /// by `test_fw_argmin_b_matches_cpu_large`.
+    #[test]
+    fn test_fw_argmin_b_matches_cpu() {
+        let Some(device) = try_device() else { return };
+
+        for (n, k) in [(40usize, 7usize), (257, 33), (1000, 130)] {
+            check_argmin_arm(n, k, &device);
+        }
+    }
+
+    /// Parity at the shapes that actually exercise the kernel's structure.
     ///
     /// - `slots = ceil(k / wg)`, the contiguous column ownership held in
     ///   registers. It is 1 at small `k`, so those shapes never exercise the
@@ -1822,30 +1883,14 @@ mod tests {
     ///   minimum never actually accumulates. `n = 3000` gives about three rows
     ///   per block.
     #[test]
-    fn test_fw_argmin_b_matches_cpu() {
+    // Heavy: these are also the two arms that cost anything, because the CPU
+    // reference is O(n k²).
+    #[cfg(feature = "large_scale_diagnostics")]
+    fn test_fw_argmin_b_matches_cpu_large() {
         let Some(device) = try_device() else { return };
 
-        for (n, k) in [
-            (40usize, 7usize),
-            (257, 33),
-            (1000, 130),
-            (3000, 300),
-            (300, 1100),
-        ] {
-            let k2b = fixture(n * k, 1, 3);
-            let t1 = fixture(k * k, 5, 4);
-            let t2 = fixture(n * k, 9, 5);
-            let b_mat = fixture(n * k, 13, 11);
-
-            let (want_val, want_idx, want_gap) = cpu_fw_argmin_b(&k2b, &t1, &t2, &b_mat, n, k);
-            let (got_val, got_idx, got_gap) =
-                gpu_fw_argmin_b(&k2b, &t1, &t2, &b_mat, n, k, &device);
-
-            for c in 0..k {
-                assert_relative_eq!(got_val[c], want_val[c], max_relative = 1e-4, epsilon = 1e-5);
-            }
-            assert_argmins_agree(&k2b, &t1, &t2, &got_idx, &want_idx, &want_val, n, k);
-            assert_relative_eq!(got_gap, want_gap, max_relative = 1e-3, epsilon = 1e-4);
+        for (n, k) in [(3000usize, 300usize), (300, 1100)] {
+            check_argmin_arm(n, k, &device);
         }
     }
 

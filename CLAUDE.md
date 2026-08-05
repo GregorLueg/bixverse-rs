@@ -23,7 +23,7 @@ Feature flags gate large chunks of the crate. Match your `cargo` invocations to 
 - `single-cell`: enables the `single_cell` module and pulls in `hdf5`, `ndarray`, `memmap2`, `lz4_flex`, `bincode`, `indexmap`, `half`
 - `multi-modal`: enables `single_cell::multi_modal` (implies `single-cell`)
 - `gpu`: enables the `gpu` module, `cubecl` (wgpu + cpu backends), `cubek`, `half`, and `ann-search-rs/gpu`
-- `large_scale_diagnostics`: development-only, expensive diagnostic tests
+- `large_scale_diagnostics`: development-only. Gates the expensive tests and the unasserted diagnostic sweeps. No CI job enables it
 
 ## Common commands
 
@@ -32,8 +32,13 @@ Feature flags gate large chunks of the crate. Match your `cargo` invocations to 
 cargo test --no-default-features
 cargo test --features single-cell,multi-modal
 
-# GPU tests (separate CI job)
-cargo test --features gpu
+# GPU tests (separate CI job). single-cell is required: tests/scenic_gpu.rs and
+# tests/seacells_gpu.rs are both cfg'd on single-cell + gpu, so `--features gpu`
+# alone silently skips them entirely.
+cargo test --features gpu,single-cell
+
+# The expensive tests. Release, or the CPU reference solves dominate.
+cargo test --release --features gpu,single-cell,multi-modal,large_scale_diagnostics
 
 # Run a single test by name (substring match)
 cargo test --features single-cell,multi-modal -- test_name_substring
@@ -90,5 +95,18 @@ R-facing functions live in `*_r_wrapper.rs` files and use `extendr_api`. The con
 ## Testing layout
 
 - Unit tests live inline (`#[cfg(test)] mod tests`) in each module file
-- Integration tests in `tests/`: `gpu_corr.rs` (gpu feature), `meta_cells2.rs` (single-cell feature), `large_scale_diagnostics.rs` (dev-only feature)
+- Integration tests in `tests/`, each gated by a file-level `#![cfg(...)]`: `meta_cells2.rs` (single-cell), `scenic_gpu.rs` (single-cell + gpu), `seacells_gpu.rs` (single-cell + gpu + large_scale_diagnostics), `gpu_corr.rs` (gpu + large_scale_diagnostics), `large_scale_diagnostics.rs` (single-cell + large_scale_diagnostics)
 - CI matrix: Ubuntu / macOS / Windows for CPU tests; Ubuntu / macOS for GPU tests (Linux uses Vulkan via `WGPU_BACKEND=vulkan`)
+
+### Expensive tests
+
+Anything that takes more than a second or two goes behind `#[cfg(feature = "large_scale_diagnostics")]`, placed directly after `#[test]` with a one-line comment giving the problem size. The feature covers both the slow GPU parity tests and the unasserted diagnostic sweeps. No CI job enables it, so CI runs toy sizes only.
+
+Two consequences to keep in mind:
+
+- Gated tests do not compile under the CI feature sets, so they can bit-rot. Run `cargo clippy --features gpu,single-cell,large_scale_diagnostics --all-targets` whenever you touch them.
+- Gating a test can orphan a helper or an import inside a `#[cfg(test)] mod tests` block. Carry the same `cfg` on the helper rather than reaching for `#[allow(dead_code)]` in `src/`. `run_columns_a_raw` in `gpu/sc_gpu/seacells_gpu.rs` is the worked example.
+
+When gating, leave at least one cheap test covering each structural property. `test_fw_argmin_b_matches_cpu` and `test_fw_columns_a_capacity_boundary` exist for exactly that reason; do not gate them alongside their heavier siblings.
+
+The Linux GPU runner has no real GPU and falls back to lavapipe software Vulkan. It reports a plane width of 8, so it takes the shared-memory reduction arms that Apple Silicon (which reports 32/32) never touches. That coverage is the reason the Ubuntu GPU job is worth keeping, but treat large-data failures there with suspicion: lavapipe is happy to hand back recycled uninitialised buffers.

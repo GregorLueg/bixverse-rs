@@ -562,6 +562,8 @@ mod tests {
     // Small d and long n forces the split-K arm, so the partials buffer and
     // the reduce kernel are both exercised.
     #[test]
+    // Heavy: n = 40000 against a host reference that is a 92 MFLOP triple loop.
+    #[cfg(feature = "large_scale_diagnostics")]
     fn test_gram_aat_split_k_path() {
         if try_device().is_none() {
             return;

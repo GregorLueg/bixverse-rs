@@ -866,6 +866,8 @@ mod tests {
     // End to end past that threshold. Cheap at s = 4: three [n, s] buffers of
     // 9.6 MB each.
     #[test]
+    // Heavy: n = 600000, plus a host gram over all 600k rows.
+    #[cfg(feature = "large_scale_diagnostics")]
     fn test_cholesky_qr2_above_dispatch_limit() {
         let Some(device) = try_device() else { return };
         let client = WgpuRuntime::client(&device);

@@ -2026,6 +2026,7 @@ where
 mod tests {
     use super::*;
     use ann_search_rs::utils::dist::compute_l2_norm;
+    #[cfg(feature = "large_scale_diagnostics")]
     use approx::assert_relative_eq;
     use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
 
@@ -2359,6 +2360,8 @@ mod tests {
     // remainder, and a dim that is not a multiple of the sub-stripe count so
     // the outer dimension loop runs more than once.
     #[test]
+    // Heavy: n = 20000 with a host reference over the same.
+    #[cfg(feature = "large_scale_diagnostics")]
     fn test_segmented_update_long_segments() {
         let Some(device) = try_device() else { return };
         let (n, k, dim) = (20_000, 4, 48);
@@ -2388,6 +2391,8 @@ mod tests {
     // exactly, which is the property that would be lost by falling back to
     // random initialisation.
     #[test]
+    // Heavy: full k-means|| init plus 20 Lloyd iterations over n = 2000.
+    #[cfg(feature = "large_scale_diagnostics")]
     fn test_kmeans_parallel_init_gpu_recovers_blobs() {
         let Some(device) = try_device() else { return };
         let (n_blobs, per_blob, dim) = (8usize, 250usize, 16usize);
