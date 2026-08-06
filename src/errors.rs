@@ -464,6 +464,64 @@ pub enum BixverseErrors {
         n_cells: usize,
     },
 
+    // -- HVG --
+    /// A requested cell index does not exist in the store.
+    #[cfg(feature = "single-cell")]
+    #[error("HVG: cell index {index} is outside the store, which holds {total_cells} cells.")]
+    HvgCellIndexOutOfRange {
+        /// The offending cell index
+        index: usize,
+        /// Number of cells the store holds
+        total_cells: usize,
+    },
+
+    /// The same cell was selected twice, which would inflate the denominator.
+    #[cfg(feature = "single-cell")]
+    #[error("HVG: cell index {index} appears more than once in the selection.")]
+    HvgDuplicateCellIndex {
+        /// The duplicated cell index
+        index: usize,
+    },
+
+    /// Batch labels and cell indices disagree in length.
+    #[cfg(feature = "single-cell")]
+    #[error("HVG: {n_labels} batch labels were given for {n_cells} selected cells.")]
+    HvgBatchLabelLengthMismatch {
+        /// Number of batch labels provided
+        n_labels: usize,
+        /// Number of selected cells
+        n_cells: usize,
+    },
+
+    /// A batch in `0..n_batches` ended up with no cells.
+    #[cfg(feature = "single-cell")]
+    #[error("HVG: batch {batch} has no cells; labels must densely cover 0..{n_batches}.")]
+    HvgEmptyBatch {
+        /// The empty batch
+        batch: usize,
+        /// Number of batches implied by the labels
+        n_batches: usize,
+    },
+
+    /// No cells were selected at all.
+    #[cfg(feature = "single-cell")]
+    #[error("HVG: the cell selection is empty.")]
+    HvgEmptySelection,
+
+    /// Loess span outside the range [`crate::core::base::loess::LoessRegression`]
+    /// accepts.
+    #[cfg(feature = "single-cell")]
+    #[error("HVG: the loess span is {span}, but it must be within (0, 1].")]
+    HvgInvalidLoessSpan {
+        /// The provided span
+        span: f32,
+    },
+
+    /// Bin count of zero, which would divide by zero during binning.
+    #[cfg(feature = "single-cell")]
+    #[error("HVG: n_bins must be at least 1.")]
+    HvgInvalidBinCount,
+
     // -- NMF --
     /// NMF Rank is too large for the NNDSVD initialisation
     #[error(
