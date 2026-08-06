@@ -1,5 +1,11 @@
 # News
 
+## 0.4.1
+
+### Features
+
+- Faster HVG detections for single cell.
+
 ## 0.4.0
 
 Breaking changes in the streaming engine.

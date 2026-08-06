@@ -16,6 +16,10 @@ use crate::core::base::info::{BinningStrategy, parse_bin_strategy_type};
 use crate::core::base::loess::*;
 use crate::prelude::*;
 
+////////////
+// Consts //
+////////////
+
 /// Genes read per disk batch by the streaming HVG entry points.
 ///
 /// Trades read-call overhead against how many decompressed gene chunks are
@@ -39,9 +43,9 @@ const MAX_HISTOGRAM_SPAN: usize = 1024;
 /// for a second disk pass instead.
 const HVG_SUMMARY_BUDGET_ENTRIES: usize = 32 * 1024 * 1024;
 
-/////////
-// HVG //
-/////////
+/////////////
+// Results //
+/////////////
 
 /// Structure that stores HVG information from VST
 #[derive(Clone, Debug)]
@@ -108,17 +112,11 @@ pub struct HvgRunOpts {
     pub verbose: usize,
 }
 
-/////////////////////
-// CellBatchIndex  //
-/////////////////////
+////////////////////
+// CellBatchIndex //
+////////////////////
 
 /// Dense cell to accumulator-slot lookup over the whole store.
-///
-/// Replaces the per-gene `FxHashMap` membership probe with a single array
-/// load. Slot `0` is a discard bucket for cells outside the selection, so
-/// batch `b` lives at slot `b + 1` and the accumulation loops need no branch
-/// to skip unselected cells. Costs 4 bytes per cell in the store and is built
-/// once per HVG call.
 #[derive(Clone, Debug)]
 pub struct CellBatchIndex {
     /// `batch_id + 1` for selected cells and `0` otherwise, indexed by global
@@ -131,9 +129,7 @@ pub struct CellBatchIndex {
 impl CellBatchIndex {
     /// Build the lookup, validating the selection against the store.
     ///
-    /// Batch labels must densely cover `0..n_batches`. That is what the R side
-    /// produces (`as.integer(factor(x)) - 1L`), and an empty batch would
-    /// otherwise yield NaN statistics that blow up downstream ranking.
+    /// Batch labels must densely cover `0..n_batches`.
     ///
     /// ### Params
     ///
@@ -268,9 +264,9 @@ impl CellBatchIndex {
     }
 }
 
-//////////////////////
-// RawCountSummary  //
-//////////////////////
+/////////////////////
+// RawCountSummary //
+/////////////////////
 
 /// Run-length summary of one gene's filtered raw counts within one batch.
 ///
@@ -323,6 +319,10 @@ impl RawCountSummary {
         self.values.len()
     }
 }
+
+//////////////////////
+// HistogramScratch //
+//////////////////////
 
 /// Thread-local scratch for building [`RawCountSummary`] values, reused across
 /// genes so the per-gene cost is a memset rather than an allocation.
@@ -445,11 +445,7 @@ pub fn summarise_gene_raw(
 ///
 /// Fuses the sums into a single accumulation via
 /// `var = (sum(v^2) - n * mean^2) / n`, which folds the zero cells in
-/// analytically. That one-pass form is only safe in `f64`: in `f32` it cancels
-/// catastrophically for high-mean genes, and the running sums themselves
-/// overflow the mantissa (`sum` reaches ~1e8 for a well-expressed gene at a
-/// million cells, where adding 1.0 in `f32` is a no-op). Over integer counts
-/// both sums are exact in `f64` while `nnz * max_count^2 < 2^53`.
+/// analytically. That one-pass form is only safe in `f64`.
 ///
 /// ### Params
 ///
@@ -744,7 +740,7 @@ fn scale_within_bins(dispersion: &[f32], bins: &[i32], n_bins: usize) -> Vec<f32
         .collect()
 }
 
-/// Build the final HvgDispersionRes from raw per-gene means and dispersions
+/// Build the final [`HvgDispersionRes`] from raw per-gene means and dispersions
 ///
 /// ### Params
 ///
