@@ -6,15 +6,37 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Debug info is the bulk of `target/` and the cache restore is the dominant
+# cost on Windows. Set here rather than in Cargo.toml so local builds keep
+# their backtraces.
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
 jobs:
   test:
     name: Test on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v5
+
+      # Defender scans every file cargo and the cache extractor touch, which is
+      # a large multiplier on an IO-bound job. Must come before the cache step.
+      - name: Exclude build dirs from Defender (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          Add-MpPreference -ExclusionPath "${{ github.workspace }}"
+          Add-MpPreference -ExclusionPath "$env:USERPROFILE\.cargo"
+          Add-MpPreference -ExclusionProcess "cargo.exe","rustc.exe","link.exe","ld.exe"
 
       - name: Install R
         id: setup-r
@@ -27,28 +49,24 @@ jobs:
           sudo apt-get install -y r-base-dev
           echo "LIBRARY_PATH=/usr/lib/R/lib:$LIBRARY_PATH" >> $GITHUB_ENV
           echo "LD_LIBRARY_PATH=/usr/lib/R/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+
+      # R on Windows is mingw-built, so extendr needs the GNU ABI. Install it
+      # directly instead of pulling MSVC first and switching afterwards.
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/cache@v5
+        if: runner.os != 'Windows'
+      - uses: dtolnay/rust-toolchain@master
+        if: runner.os == 'Windows'
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+          toolchain: stable-x86_64-pc-windows-gnu
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+          cache-on-failure: true
 
       - name: Set R_HOME (Windows)
         if: runner.os == 'Windows'
         run: echo "R_HOME=${{ steps.setup-r.outputs.r-home }}" >> $env:GITHUB_ENV
-
-      - name: Set Rust target (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          rustup target add x86_64-pc-windows-gnu
-          rustup default stable-x86_64-pc-windows-gnu
 
       - name: Run tests (non-Windows)
         if: runner.os != 'Windows'
@@ -64,6 +82,7 @@ jobs:
   test-gpu:
     name: Test GPU on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
@@ -82,6 +101,11 @@ jobs:
           echo "LIBRARY_PATH=/usr/lib/R/lib:$LIBRARY_PATH" >> $GITHUB_ENV
           echo "LD_LIBRARY_PATH=/usr/lib/R/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}-gpu
+          cache-on-failure: true
+
       - name: Install Vulkan (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -89,8 +113,12 @@ jobs:
           sudo apt-get install -y libvulkan1 mesa-vulkan-drivers libgl1-mesa-dri
           echo "WGPU_BACKEND=vulkan" >> $GITHUB_ENV
 
+      # The expensive GPU tests sit behind `large_scale_diagnostics`, which this
+      # job deliberately does not enable. The Linux runner has no real GPU and
+      # falls back to lavapipe software Vulkan, so it is a smoke lane: it covers
+      # the shared-memory reduction arm and SPIR-V codegen, neither of which
+      # Apple exercises.
       - name: Run tests
-        if: runner.os != 'Windows'
         env:
           LD_LIBRARY_PATH: ${{ steps.setup-r.outputs.r-home }}/lib
           DYLD_LIBRARY_PATH: ${{ steps.setup-r.outputs.r-home }}/lib

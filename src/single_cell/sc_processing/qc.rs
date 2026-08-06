@@ -8,6 +8,13 @@ use std::time::Instant;
 
 use crate::prelude::*;
 
+/// Cells read per batch by the streaming QC passes.
+///
+/// Larger than the reader default [`CELL_BATCH_SIZE`] because the QC passes
+/// only keep a handful of scalars per cell, so a bigger batch amortises the
+/// read without growing peak memory much.
+const QC_CELL_BATCH_SIZE: usize = 100_000;
+
 ///////////////////////////////////////////
 // QC metrics based on cumulative counts //
 ///////////////////////////////////////////
@@ -110,14 +117,12 @@ pub fn get_top_genes_perc_streaming<S: SingleCellReading>(
 
     let mut results: Vec<Vec<f32>> = vec![Vec::new(); top_n_values.len()];
 
-    const CELL_BATCH_SIZE: usize = 100000;
-
     if verbosity.normal_verbosity() {
         println!("Using a streaming approach for top gene percentage calculations.");
     }
 
-    for batch_start in (0..cell_indices.len()).step_by(CELL_BATCH_SIZE) {
-        let batch_end = (batch_start + CELL_BATCH_SIZE).min(cell_indices.len());
+    for batch_start in (0..cell_indices.len()).step_by(QC_CELL_BATCH_SIZE) {
+        let batch_end = (batch_start + QC_CELL_BATCH_SIZE).min(cell_indices.len());
         let cell_batch = &cell_indices[batch_start..batch_end];
 
         let cell_chunks = reader.read_cells_parallel(cell_batch)?;
@@ -141,7 +146,7 @@ pub fn get_top_genes_perc_streaming<S: SingleCellReading>(
             results[top_idx].extend(proportions);
         }
 
-        if verbosity.detailed_verbosity() && batch_start % (CELL_BATCH_SIZE * 5) == 0 {
+        if verbosity.detailed_verbosity() && batch_start % (QC_CELL_BATCH_SIZE * 5) == 0 {
             let progress = ((batch_start + 1) as f32 / cell_indices.len() as f32) * 100.0;
             println!(
                 " Reading cells and calculating proportions: {:.1}%",
@@ -268,14 +273,12 @@ pub fn get_gene_set_perc_streaming<S: SingleCellReading>(
     let hash_gene_sets: Vec<FxHashSet<&u32>> =
         gene_indices.iter().map(|gs| gs.iter().collect()).collect();
 
-    const CELL_BATCH_SIZE: usize = 100000;
-
     if verbosity.normal_verbosity() {
         println!("Using a streaming approach for gene set percentage calculation.");
     }
 
-    for batch_start in (0..cell_indices.len()).step_by(CELL_BATCH_SIZE) {
-        let batch_end = (batch_start + CELL_BATCH_SIZE).min(cell_indices.len());
+    for batch_start in (0..cell_indices.len()).step_by(QC_CELL_BATCH_SIZE) {
+        let batch_end = (batch_start + QC_CELL_BATCH_SIZE).min(cell_indices.len());
         let cell_batch = &cell_indices[batch_start..batch_end];
 
         let cell_chunks = reader.read_cells_parallel(cell_batch)?;
@@ -298,7 +301,7 @@ pub fn get_gene_set_perc_streaming<S: SingleCellReading>(
             results[gs_idx].extend(percentage);
         }
 
-        if verbosity.detailed_verbosity() && batch_start % (CELL_BATCH_SIZE * 5) == 0 {
+        if verbosity.detailed_verbosity() && batch_start % (QC_CELL_BATCH_SIZE * 5) == 0 {
             let progress = ((batch_start + 1) as f32 / cell_indices.len() as f32) * 100.0;
             println!(
                 " Reading cells and calculating proportions: {:.1}%",

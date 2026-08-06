@@ -238,17 +238,19 @@ fn scan_gene_nnz_chunk(
     local
 }
 
-/// Parse a single coordinate-format mtx line from raw bytes.
+/// Count, per universe gene, the number of cells expressing it in one mtx file.
 ///
-/// Values exceeding `u16::MAX` are saturated.
+/// The file is split into byte ranges on line boundaries and scanned in
+/// parallel, then the per-chunk tallies are summed.
 ///
 /// ### Params
 ///
-/// * `line` - Raw bytes of a single trimmed mtx line
+/// * `task` - The mtx file to scan plus its local-to-universe gene mapping
+/// * `universe_size` - Number of genes in the intersection universe
 ///
 /// ### Returns
 ///
-/// `Some((row, col, value))` on success, `None` if the line is malformed
+/// Per-gene non-zero counts, indexed by universe gene index.
 fn scan_gene_nnz(task: &MtxFileTask, universe_size: usize) -> Result<Vec<usize>, BixverseErrors> {
     let path = PathBuf::from(&task.mtx_path);
     let file_size = std::fs::metadata(&path)?.len();
@@ -280,7 +282,8 @@ fn scan_gene_nnz(task: &MtxFileTask, universe_size: usize) -> Result<Vec<usize>,
 
 /// Parse a single coordinate-format mtx line from raw bytes.
 ///
-/// Values exceeding `u16::MAX` are saturated.
+/// Counts are kept at full `u32` width; the on-disk chunk format narrows to
+/// u16 only when every value fits.
 ///
 /// ### Params
 ///
@@ -290,7 +293,7 @@ fn scan_gene_nnz(task: &MtxFileTask, universe_size: usize) -> Result<Vec<usize>,
 ///
 /// `Some((row, col, value))` on success, `None` if the line is malformed
 #[inline]
-fn parse_mtx_coord(line: &[u8]) -> Option<(u32, u32, u16)> {
+fn parse_mtx_coord(line: &[u8]) -> Option<(u32, u32, u32)> {
     let mut i = 0;
     let len = line.len();
 
@@ -327,7 +330,7 @@ fn parse_mtx_coord(line: &[u8]) -> Option<(u32, u32, u16)> {
         val = val * 10 + (line[i] - b'0') as u32;
         i += 1;
     }
-    Some((row, col, val.min(u16::MAX as u32) as u16))
+    Some((row, col, val))
 }
 
 /// Read the cell and gene counts from an mtx file header.
@@ -497,7 +500,7 @@ fn write_mtx_file_cells(
         .collect();
 
     // (gene_final_idx, raw_count) per kept cell
-    let mut cell_data: Vec<Vec<(u32, u16)>> = vec![Vec::new(); cells_to_keep.len()];
+    let mut cell_data: Vec<Vec<(u32, u32)>> = vec![Vec::new(); cells_to_keep.len()];
 
     let file = File::open(&path)?;
     let mut reader = BufReader::with_capacity(1024 * 1024, file);
@@ -532,7 +535,7 @@ fn write_mtx_file_cells(
     for (i, mut data) in cell_data.into_iter().enumerate() {
         data.sort_unstable_by_key(|(g, _)| *g);
         let gene_indices: Vec<u32> = data.iter().map(|(g, _)| *g).collect();
-        let gene_counts: Vec<u16> = data.iter().map(|(_, c)| *c).collect();
+        let gene_counts: Vec<u32> = data.iter().map(|(_, c)| *c).collect();
 
         let chunk = CsrCellChunk::from_data(
             &gene_counts,
@@ -696,7 +699,13 @@ pub fn multi_mtx_to_file<P: AsRef<Path>>(
     if verbose {
         println!("Writing cells to binary...");
     }
-    let mut writer = CellGeneSparseWriter::new(&bin_path, true, total_cells, total_genes)?;
+    let mut writer = CellGeneSparseWriter::new(
+        &bin_path,
+        true,
+        total_cells,
+        total_genes,
+        cell_qc.target_size,
+    )?;
     let mut cell_offset = 0usize;
     let mut per_file_results = Vec::with_capacity(tasks.len());
 

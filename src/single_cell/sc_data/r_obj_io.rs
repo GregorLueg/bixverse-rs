@@ -31,7 +31,7 @@ pub fn write_r_counts<P: AsRef<Path>, T>(
     compressed_data: CompressedSparseData2<T>,
     cell_quality: MinCellQuality,
     verbose: bool,
-) -> (usize, usize, CellQuality)
+) -> Result<(usize, usize, CellQuality), BixverseErrors>
 where
     T: BixverseNumeric + Into<f64> + Into<u32>,
 {
@@ -82,7 +82,7 @@ pub fn write_r_counts_csr<P: AsRef<Path>, T>(
     compressed_data: CompressedSparseData2<T>,
     cell_quality: MinCellQuality,
     verbose: bool,
-) -> (usize, usize, CellQuality)
+) -> Result<(usize, usize, CellQuality), BixverseErrors>
 where
     T: BixverseNumeric + Into<f64> + Into<u32>,
 {
@@ -91,6 +91,8 @@ where
     if verbose {
         println!("Generating cell chunks...");
     }
+
+    let target_size = cell_quality.target_size;
 
     let (cell_chunk_vec, cell_qc): (Vec<CsrCellChunk>, CellQuality) =
         CsrCellChunk::generate_chunks_sparse_data(compressed_data, cell_quality);
@@ -113,7 +115,7 @@ where
     }
 
     let mut writer =
-        CellGeneSparseWriter::new(bin_path, true, cells_passing, genes_passing).unwrap();
+        CellGeneSparseWriter::new(bin_path, true, cells_passing, genes_passing, target_size)?;
 
     // Filter to passing cells and remap indices to sequential
     let mut passing_chunks: Vec<_> = cell_chunk_vec
@@ -127,7 +129,7 @@ where
     }
 
     for (i, cell_chunk) in passing_chunks.into_iter().enumerate() {
-        writer.write_cell_chunk(cell_chunk).unwrap();
+        writer.write_cell_chunk(cell_chunk)?;
 
         if verbose && (i + 1) % 100000 == 0 {
             println!(
@@ -147,9 +149,9 @@ where
         println!("Finalising file...");
     }
 
-    writer.finalise().unwrap();
+    writer.finalise()?;
 
     // Return cell_qc as-is - it already contains correct original indices
     // from generate_chunks_sparse_data
-    (cells_passing, genes_passing, cell_qc)
+    Ok((cells_passing, genes_passing, cell_qc))
 }

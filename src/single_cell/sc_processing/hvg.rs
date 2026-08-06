@@ -10,6 +10,12 @@ use crate::core::base::info::{BinningStrategy, parse_bin_strategy_type};
 use crate::core::base::loess::*;
 use crate::prelude::*;
 
+/// Genes read per batch by the streaming HVG passes.
+///
+/// Sized so a batch of dense per-gene vectors stays inside L3 for typical
+/// cell counts.
+const GENE_BATCH_SIZE: usize = 1000;
+
 /////////
 // HVG //
 /////////
@@ -577,7 +583,6 @@ pub fn get_hvg_vst_streaming<S: SingleCellReading>(
     // first pass -> calculate mean and variance in batches
     let start_pass1 = Instant::now();
 
-    const GENE_BATCH_SIZE: usize = 1000;
     let num_batches = no_genes.div_ceil(GENE_BATCH_SIZE);
 
     let mut means = Vec::with_capacity(no_genes);
@@ -846,7 +851,6 @@ pub fn get_hvg_dispersion_streaming<S: SingleCellReading>(
         );
     }
 
-    const GENE_BATCH_SIZE: usize = 1000;
     let num_batches = no_genes.div_ceil(GENE_BATCH_SIZE);
 
     let mut means = Vec::with_capacity(no_genes);
@@ -1197,7 +1201,6 @@ pub fn get_hvg_vst_batch_aware_streaming<S: SingleCellReading>(
     }
 
     let start_pass1 = Instant::now();
-    const GENE_BATCH_SIZE: usize = 1000;
     let num_batches = no_genes.div_ceil(GENE_BATCH_SIZE);
 
     let mut batch_means: Vec<Vec<f32>> = vec![Vec::with_capacity(no_genes); n_batches];
@@ -1496,7 +1499,6 @@ pub fn get_hvg_dispersion_batch_aware_streaming<S: SingleCellReading>(
         );
     }
 
-    const GENE_BATCH_SIZE: usize = 1000;
     let num_batches = no_genes.div_ceil(GENE_BATCH_SIZE);
 
     let mut batch_means: Vec<Vec<f32>> = vec![Vec::with_capacity(no_genes); n_batches];

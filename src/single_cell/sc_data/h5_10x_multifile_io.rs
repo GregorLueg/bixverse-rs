@@ -83,7 +83,7 @@ pub struct MultiTenxResult {
 const CELL_CHUNK_SIZE: usize = 10_000;
 
 /// Number of kept cells buffered per HDF5 slice while writing a single file.
-const CELL_BATCH_SIZE: usize = 1_000;
+const WRITE_CELL_SLICE_SIZE: usize = 1_000;
 
 /// Build the effective file-local -> universe mapping for a single task.
 ///
@@ -291,7 +291,7 @@ fn write_tenx_file_cells(
 
     let mut written = 0usize;
 
-    for cell_batch in cells_to_keep.chunks(CELL_BATCH_SIZE) {
+    for cell_batch in cells_to_keep.chunks(WRITE_CELL_SLICE_SIZE) {
         let start_pos = cell_batch.iter().map(|&c| indptr[c]).min().unwrap_or(0);
         let end_pos = cell_batch.iter().map(|&c| indptr[c + 1]).max().unwrap_or(0);
 
@@ -532,7 +532,13 @@ pub fn multi_10x_h5_to_file<P: AsRef<Path>>(
     if verbose {
         println!("Writing cells to binary...");
     }
-    let mut writer = CellGeneSparseWriter::new(&bin_path, true, total_cells, total_genes)?;
+    let mut writer = CellGeneSparseWriter::new(
+        &bin_path,
+        true,
+        total_cells,
+        total_genes,
+        cell_qc.target_size,
+    )?;
     let mut cell_offset = 0usize;
     let mut per_file_results = Vec::with_capacity(tasks.len());
 

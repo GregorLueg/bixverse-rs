@@ -6,14 +6,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `bixverse-rs` is a Rust library for computational biology, statistics, and single-cell analysis. It was extracted from the `bixverse` R package's `src/Rust/` directory and refactored into a standalone crate. It is published on crates.io and consumed both as a pure Rust library and (via `extendr-api`) from R.
 
-## Sister crate: ann-search-rs
+## Sister crates: ann-search-rs and cubecl-utils-rs
 
-The user also maintains [`ann-search-rs`](https://crates.io/crates/ann-search-rs) (local checkout: `~/repos/shared/ann-search-rs`), a vector-search crate built for the same computational-biology use cases. `bixverse-rs` depends on it directly and reuses:
+The user also maintains two upstream crates, both with local checkouts:
 
-- **CPU side:** SIMD primitives, distance metrics (`ann_search_rs::utils::dist::Dist`), kNN search, and k-means clustering (`build_csr_layout`, etc.)
-- **GPU side:** the `gpu` feature here is built on top of GPU primitives from `ann-search-rs`: tensors, 2D grid helpers, work-group conventions, and related dispatch scaffolding. Changes to those primitives originate upstream in `ann-search-rs`, not in a local fork here.
+- [`ann-search-rs`](https://crates.io/crates/ann-search-rs) (`~/repos/shared/ann-search-rs`), a vector-search crate for the same computational-biology use cases. `bixverse-rs` reuses its **CPU** side: SIMD primitives, distance metrics (`ann_search_rs::utils::dist::Dist`), kNN search, and k-means clustering (`build_csr_layout`, etc.). Nothing GPU comes from here any more.
+- [`cubecl-utils-rs`](https://crates.io/crates/cubecl-utils-rs) (`~/repos/shared/cubecl-utils-rs`), the GPU primitives layer: `GpuTensor`, `GpuLimits`, `grid_2d`, `checked_cube_count`, `fits_binding`, `fits_shared_memory`, `plane_uniform` / `plane_partitions`, `resolve_workgroup_size`, `LINE_SIZE`, `pad_vectors`, `CubeclFloat`. Import it as `use cubecl_utils_rs::prelude::*;`.
 
-When a task looks like it wants a new SIMD kernel, distance metric, kNN structure, k-means variant, or GPU primitive, check `ann-search-rs` first. The code may already exist there and just need to be exposed. Bug fixes to those primitives usually belong upstream in `ann-search-rs`, not here.
+`ann-search-rs` depends on `cubecl-utils-rs` too, so both sides of the diamond must resolve to one copy of `GpuTensor` or nothing typechecks across the boundary.
+
+Everything in `cubecl-utils-rs` except `GpuLimits::from_client` and the `GpuTensor` constructors is a pure function of `&GpuLimits`, so derive limits once per dispatcher (`let limits = GpuLimits::from_client(client);`) and pass them down. Do not cache them on long-lived structs.
+
+When a task looks like it wants a new SIMD kernel, distance metric, kNN structure or k-means variant, check `ann-search-rs` first; for a new tensor, grid, device-limit or workgroup-sizing helper, check `cubecl-utils-rs`. The code may already exist and just need exposing. Bug fixes to those primitives belong upstream, not here.
+
+While `ann-search-rs` 0.5.0 is unpublished it is a path dependency (`../ann-search-rs`). Building from a git worktree needs a symlink at `.claude/worktrees/ann-search-rs`; swap the manifest to a plain version pin once 0.5.0 is on crates.io.
 
 ## Feature flags
 
@@ -22,8 +28,8 @@ Feature flags gate large chunks of the crate. Match your `cargo` invocations to 
 - default (no features): pure Rust bulk / statistics / graph / enrichment code
 - `single-cell`: enables the `single_cell` module and pulls in `hdf5`, `ndarray`, `memmap2`, `lz4_flex`, `bincode`, `indexmap`, `half`
 - `multi-modal`: enables `single_cell::multi_modal` (implies `single-cell`)
-- `gpu`: enables the `gpu` module, `cubecl` (wgpu + cpu backends), `cubek`, `half`, and `ann-search-rs/gpu`
-- `large_scale_diagnostics`: development-only, expensive diagnostic tests
+- `gpu`: enables the `gpu` module, `cubecl` (wgpu + cpu backends), `cubecl-utils-rs`, `cubek` and `half`
+- `large_scale_diagnostics`: development-only. Gates the expensive tests and the unasserted diagnostic sweeps. No CI job enables it
 
 ## Common commands
 
@@ -32,8 +38,13 @@ Feature flags gate large chunks of the crate. Match your `cargo` invocations to 
 cargo test --no-default-features
 cargo test --features single-cell,multi-modal
 
-# GPU tests (separate CI job)
-cargo test --features gpu
+# GPU tests (separate CI job). single-cell is required: tests/scenic_gpu.rs and
+# tests/seacells_gpu.rs are both cfg'd on single-cell + gpu, so `--features gpu`
+# alone silently skips them entirely.
+cargo test --features gpu,single-cell
+
+# The expensive tests. Release, or the CPU reference solves dominate.
+cargo test --release --features gpu,single-cell,multi-modal,large_scale_diagnostics
 
 # Run a single test by name (substring match)
 cargo test --features single-cell,multi-modal -- test_name_substring
@@ -90,5 +101,18 @@ R-facing functions live in `*_r_wrapper.rs` files and use `extendr_api`. The con
 ## Testing layout
 
 - Unit tests live inline (`#[cfg(test)] mod tests`) in each module file
-- Integration tests in `tests/`: `gpu_corr.rs` (gpu feature), `meta_cells2.rs` (single-cell feature), `large_scale_diagnostics.rs` (dev-only feature)
+- Integration tests in `tests/`, each gated by a file-level `#![cfg(...)]`: `meta_cells2.rs` (single-cell), `scenic_gpu.rs` (single-cell + gpu), `seacells_gpu.rs` (single-cell + gpu + large_scale_diagnostics), `gpu_corr.rs` (gpu + large_scale_diagnostics), `large_scale_diagnostics.rs` (single-cell + large_scale_diagnostics)
 - CI matrix: Ubuntu / macOS / Windows for CPU tests; Ubuntu / macOS for GPU tests (Linux uses Vulkan via `WGPU_BACKEND=vulkan`)
+
+### Expensive tests
+
+Anything that takes more than a second or two goes behind `#[cfg(feature = "large_scale_diagnostics")]`, placed directly after `#[test]` with a one-line comment giving the problem size. The feature covers both the slow GPU parity tests and the unasserted diagnostic sweeps. No CI job enables it, so CI runs toy sizes only.
+
+Two consequences to keep in mind:
+
+- Gated tests do not compile under the CI feature sets, so they can bit-rot. Run `cargo clippy --features gpu,single-cell,large_scale_diagnostics --all-targets` whenever you touch them.
+- Gating a test can orphan a helper or an import inside a `#[cfg(test)] mod tests` block. Carry the same `cfg` on the helper rather than reaching for `#[allow(dead_code)]` in `src/`. `run_columns_a_raw` in `gpu/sc_gpu/seacells_gpu.rs` is the worked example.
+
+When gating, leave at least one cheap test covering each structural property. `test_fw_argmin_b_matches_cpu` and `test_fw_columns_a_capacity_boundary` exist for exactly that reason; do not gate them alongside their heavier siblings.
+
+The Linux GPU runner has no real GPU and falls back to lavapipe software Vulkan. It reports a plane width of 8, so it takes the shared-memory reduction arms that Apple Silicon (which reports 32/32) never touches. That coverage is the reason the Ubuntu GPU job is worth keeping, but treat large-data failures there with suspicion: lavapipe is happy to hand back recycled uninitialised buffers.

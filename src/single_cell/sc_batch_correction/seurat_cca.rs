@@ -25,7 +25,7 @@ use crate::single_cell::sc_batch_correction::seurat_anchors::{
     tree_merge_embeddings,
 };
 use crate::single_cell::sc_processing::pca::{
-    SingleCellPcaParams, pca_on_sc, pca_on_sc_sparse, scale_csc_chunk,
+    SingleCellPcaParams, pca_on_sc, pca_on_sc_sparse, resolve_clr_size_factor, scale_csc_chunk,
 };
 
 ///////////
@@ -102,6 +102,7 @@ impl Default for SeuratCcaParams {
 ///   Required when `use_clr` is true.
 /// * `use_clr` - Apply the shifted CLR transformation before standardising
 /// * `size_factor` - Size factor used during original log-normalisation
+/// * `verbosity` - Controls verbosity of the function
 ///
 /// ### Returns
 ///
@@ -113,6 +114,7 @@ pub(crate) fn load_hvg_standardised<S: SingleCellReading>(
     clr_offsets: Option<&[f64]>,
     use_clr: bool,
     size_factor: f32,
+    verbosity: &Verbosity,
 ) -> Result<Mat<f32>, BixverseErrors> {
     let cell_set: IndexSet<u32> = batch_cell_indices.iter().map(|&x| x as u32).collect();
     let n_cells = batch_cell_indices.len();
@@ -120,6 +122,7 @@ pub(crate) fn load_hvg_standardised<S: SingleCellReading>(
 
     let mut chunks = reader.read_gene_parallel_filtered(hvg_indices, &cell_set)?;
     if use_clr {
+        let size_factor = resolve_clr_size_factor(reader, size_factor, verbosity)?;
         chunks
             .par_iter_mut()
             .for_each(|chunk| chunk.transform_to_clr(size_factor));
@@ -150,6 +153,7 @@ pub(crate) fn load_hvg_standardised<S: SingleCellReading>(
 ///   `batch_cell_indices`
 /// * `use_clr` - Apply shifted CLR
 /// * `size_factor` - Size factor for CLR
+/// * `verbosity` - Controls verbosity of the function
 ///
 /// ### Returns
 ///
@@ -161,6 +165,7 @@ fn load_filter_expression<S: SingleCellReading>(
     clr_offsets: Option<&[f64]>,
     use_clr: bool,
     size_factor: f32,
+    verbosity: &Verbosity,
 ) -> Result<Mat<f32>, BixverseErrors> {
     let cell_set: IndexSet<u32> = batch_cell_indices.iter().map(|&x| x as u32).collect();
     let n_cells = batch_cell_indices.len();
@@ -168,6 +173,7 @@ fn load_filter_expression<S: SingleCellReading>(
 
     let mut chunks = reader.read_gene_parallel_filtered(feature_indices, &cell_set)?;
     if use_clr {
+        let size_factor = resolve_clr_size_factor(reader, size_factor, verbosity)?;
         chunks
             .par_iter_mut()
             .for_each(|chunk| chunk.transform_to_clr(size_factor));
@@ -579,6 +585,7 @@ pub fn seurat_cca_integration<S: SingleCellReading>(
                 clr_a.as_deref(),
                 params.pca_params.clr,
                 params.pca_params.size_factor,
+                &verbosity,
             )?;
             let x2 = load_hvg_standardised(
                 reader,
@@ -587,6 +594,7 @@ pub fn seurat_cca_integration<S: SingleCellReading>(
                 clr_b.as_deref(),
                 params.pca_params.clr,
                 params.pca_params.size_factor,
+                &verbosity,
             )?;
 
             let (cc_a, cc_b) = build_cca_anchor_space(
@@ -612,6 +620,7 @@ pub fn seurat_cca_integration<S: SingleCellReading>(
                     clr_a.as_deref(),
                     params.pca_params.clr,
                     params.pca_params.size_factor,
+                    &verbosity,
                 )?)
             } else {
                 None
@@ -624,6 +633,7 @@ pub fn seurat_cca_integration<S: SingleCellReading>(
                     clr_b.as_deref(),
                     params.pca_params.clr,
                     params.pca_params.size_factor,
+                    &verbosity,
                 )?)
             } else {
                 None

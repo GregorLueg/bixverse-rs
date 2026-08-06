@@ -35,8 +35,6 @@
 // The `#[cube]` macro generates undocumented launcher structs and functions.
 #![allow(missing_docs)]
 
-use ann_search_rs::gpu::grid_2d;
-use ann_search_rs::gpu::tensor::GpuTensor;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 use cubecl::std::tensor::TensorHandle;
@@ -46,7 +44,8 @@ use cubek::std::InputBinding;
 use faer::linalg::triangular_solve::solve_upper_triangular_in_place;
 use faer::{Mat, Side};
 
-use crate::gpu::checked_cube_count;
+use cubecl_utils_rs::prelude::*;
+
 use crate::prelude::*;
 use crate::utils::faer_parallelism;
 
@@ -374,7 +373,7 @@ pub fn gram_reduce<F: Float>(partials: &Tensor<F>, g: &mut Tensor<F>, s: u32, n_
 ///
 /// ### Errors
 ///
-/// * `GpuCubeCountExceeded` if either grid is over the device limit.
+/// * `CubeclUtils` if either grid is over the device limit.
 fn gram<R, T>(
     client: &ComputeClient<R>,
     y: &GpuTensor<R, T>,
@@ -392,8 +391,9 @@ where
     let tiles = (s as u32).div_ceil(GRAM_TILE);
     let total = (s * s) as u32;
 
-    let partial_count = checked_cube_count::<R>("gram_partial", tiles, tiles, n_chunks as u32)?;
-    let reduce_count = checked_cube_count::<R>("gram_reduce", total.div_ceil(256), 1, 1)?;
+    let limits = GpuLimits::from_client(client);
+    let partial_count = checked_cube_count("gram_partial", tiles, tiles, n_chunks as u32, &limits)?;
+    let reduce_count = checked_cube_count("gram_reduce", total.div_ceil(256), 1, 1, &limits)?;
 
     unsafe {
         gram_partial::launch_unchecked::<T, R>(
@@ -556,6 +556,8 @@ pub fn tall_skinny_mm<F: Float>(
 /// ### Errors
 ///
 /// * `GpuMatmul` if either GEMM dispatch fails.
+/// * `CubeclUtils` if a grid is over the device limit or the `R^{-1}` upload
+///   busts the per-binding size limit.
 /// * `FaerCholeskyError` if the Gram matrix is not SPD (e.g. `input` is
 ///   rank-deficient).
 fn cholesky_qr_pass<R, T, MP>(
@@ -584,7 +586,7 @@ where
     let r_inv_host = r_inverse_from_gram(&g_host, s)?;
 
     // Fourth step: Upload R^{-1}. Fresh allocation per pass; trivially small.
-    let r_inv_gpu = GpuTensor::<R, T>::from_slice(&r_inv_host, vec![s, s], client);
+    let r_inv_gpu = GpuTensor::<R, T>::from_slice(&r_inv_host, vec![s, s], client)?;
 
     // Last step output = input * R^{-1}. The dedicated kernel only covers
     // inner dimensions its shared-memory staging can hold; wider problems fall
@@ -592,9 +594,15 @@ where
     if (s as u32) <= TSMM_K_MAX {
         // Row blocks are flattened over (x, y): at 1M rows there are 125k of
         // them, roughly twice the per-dimension dispatch limit.
-        let (gx, gy) = grid_2d((n as u32).div_ceil(TSMM_ROWS));
-        let count =
-            checked_cube_count::<R>("tall_skinny_mm", gx, gy, (s as u32).div_ceil(TSMM_COLS))?;
+        let limits = GpuLimits::from_client(client);
+        let (gx, gy) = grid_2d((n as u32).div_ceil(TSMM_ROWS), &limits)?;
+        let count = checked_cube_count(
+            "tall_skinny_mm",
+            gx,
+            gy,
+            (s as u32).div_ceil(TSMM_COLS),
+            &limits,
+        )?;
 
         unsafe {
             tall_skinny_mm::launch_unchecked::<T, R>(
@@ -656,6 +664,8 @@ where
 /// ### Errors
 ///
 /// * `GpuMatmul` if any GEMM dispatch fails.
+/// * `CubeclUtils` if a grid is over the device limit or the split-K partials
+///   allocation busts the per-binding size limit.
 /// * `FaerCholeskyError` if either pass's Gram matrix is not SPD (e.g.
 ///   rank-deficient `y`).
 ///
@@ -683,7 +693,7 @@ where
     // Gram split-K partials. `gram_chunks(n) * s * s * 4 B` is ~4.3 MB at the
     // production shape, so allocating here rather than threading yet another
     // buffer through the caller costs nothing measurable.
-    let gram_partials = GpuTensor::<R, T>::empty(vec![gram_chunks(n), s, s], client);
+    let gram_partials = GpuTensor::<R, T>::empty(vec![gram_chunks(n), s, s], client)?;
 
     // Pass 1: y -> q1 (approximately orthonormal, loses half the precision)
     cholesky_qr_pass::<R, T, MP>(client, y, q1_scratch, g_scratch, &gram_partials, n, s)?;
@@ -826,12 +836,13 @@ mod tests {
         let (n, s) = (200, 8);
         let y_host = sinusoidal_tall_skinny(n, s);
 
-        let y = GpuTensor::<WgpuRuntime, f32>::from_slice(&y_host, vec![n, s], &client);
+        let y = GpuTensor::<WgpuRuntime, f32>::from_slice(&y_host, vec![n, s], &client).unwrap();
         let q =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; n * s], vec![n, s], &client);
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; n * s], vec![n, s], &client)
+                .unwrap();
 
-        let q1_scratch = GpuTensor::<WgpuRuntime, f32>::empty(vec![n, s], &client);
-        let g_scratch = GpuTensor::<WgpuRuntime, f32>::empty(vec![s, s], &client);
+        let q1_scratch = GpuTensor::<WgpuRuntime, f32>::empty(vec![n, s], &client).unwrap();
+        let g_scratch = GpuTensor::<WgpuRuntime, f32>::empty(vec![s, s], &client).unwrap();
 
         cholesky_qr2::<WgpuRuntime, f32, f32>(&client, &y, &q, &q1_scratch, &g_scratch, n, s)
             .unwrap();
@@ -857,7 +868,7 @@ mod tests {
 
         for n in [524_281u32, 1_000_000, 5_000_000] {
             let blocks = n.div_ceil(TSMM_ROWS);
-            let (gx, gy) = grid_2d(blocks);
+            let (gx, gy) = grid_2d_limited(blocks, max_x.min(max_y)).unwrap();
             assert!(gx <= max_x && gy <= max_y && gz <= max_z, "n = {n}");
             assert!(gx as u64 * gy as u64 >= blocks as u64, "n = {n} uncovered");
         }
@@ -866,6 +877,8 @@ mod tests {
     // End to end past that threshold. Cheap at s = 4: three [n, s] buffers of
     // 9.6 MB each.
     #[test]
+    // Heavy: n = 600000, plus a host gram over all 600k rows.
+    #[cfg(feature = "large_scale_diagnostics")]
     fn test_cholesky_qr2_above_dispatch_limit() {
         let Some(device) = try_device() else { return };
         let client = WgpuRuntime::client(&device);
@@ -873,12 +886,13 @@ mod tests {
         let (n, s) = (600_000, 4);
         let y_host = sinusoidal_tall_skinny(n, s);
 
-        let y = GpuTensor::<WgpuRuntime, f32>::from_slice(&y_host, vec![n, s], &client);
+        let y = GpuTensor::<WgpuRuntime, f32>::from_slice(&y_host, vec![n, s], &client).unwrap();
         let q =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; n * s], vec![n, s], &client);
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; n * s], vec![n, s], &client)
+                .unwrap();
 
-        let q1_scratch = GpuTensor::<WgpuRuntime, f32>::empty(vec![n, s], &client);
-        let g_scratch = GpuTensor::<WgpuRuntime, f32>::empty(vec![s, s], &client);
+        let q1_scratch = GpuTensor::<WgpuRuntime, f32>::empty(vec![n, s], &client).unwrap();
+        let g_scratch = GpuTensor::<WgpuRuntime, f32>::empty(vec![s, s], &client).unwrap();
 
         cholesky_qr2::<WgpuRuntime, f32, f32>(&client, &y, &q, &q1_scratch, &g_scratch, n, s)
             .unwrap();

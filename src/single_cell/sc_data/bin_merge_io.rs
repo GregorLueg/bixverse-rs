@@ -8,7 +8,7 @@ use std::time::Instant;
 use thousands::Separable;
 
 use crate::prelude::*;
-use crate::single_cell::sc_data::data_io::CellGeneSparseWriter;
+use crate::single_cell::sc_data::data_io::{CellGeneSparseWriter, peek_target_size};
 
 ////////////
 // Consts //
@@ -145,8 +145,10 @@ fn remap_cell(
 /// * `universe_size` - Number of genes in the intersection universe.
 /// * `renormalise` - If `true`, recompute `data_norm` against `target_size`
 ///   using each cell's surviving raw counts. If `false`, pass `data_norm`
-///   through untouched; the caller is responsible for ensuring all inputs
-///   were normalised against the same `target_size`.
+///   through untouched; the inputs are then checked to agree on the
+///   `target_size` recorded in their headers and
+///   [`BixverseErrors::TargetSizeMismatch`] is returned if they do not. Inputs
+///   predating that header field report nothing and are skipped by the check.
 /// * `target_size` - Target library size for renormalisation. Ignored when
 ///   `renormalise = false`.
 /// * `verbose` - Controls verbosity.
@@ -176,7 +178,37 @@ pub fn merge_sc_bin_files<P: AsRef<Path>>(
         );
     }
 
-    let mut writer = CellGeneSparseWriter::new(output_bin_path, true, total_cells, universe_size)?;
+    // Pass-through mode inherits the inputs' normalisation, so they have to
+    // agree on it. Renormalise mode imposes `target_size` regardless.
+    let output_target_size = if renormalise {
+        target_size
+    } else {
+        let mut agreed: Option<f32> = None;
+        for task in tasks {
+            let Some(found) = peek_target_size(&task.bin_cells_path)? else {
+                continue;
+            };
+            match agreed {
+                None => agreed = Some(found),
+                Some(expected) if expected != found => {
+                    return Err(BixverseErrors::TargetSizeMismatch {
+                        header: expected,
+                        requested: found,
+                    });
+                }
+                Some(_) => {}
+            }
+        }
+        agreed.unwrap_or(0.0)
+    };
+
+    let mut writer = CellGeneSparseWriter::new(
+        output_bin_path,
+        true,
+        total_cells,
+        universe_size,
+        output_target_size,
+    )?;
 
     let mut per_file: Vec<PerFileMergeResult> = Vec::with_capacity(tasks.len());
     let mut new_cell_idx: usize = 0;

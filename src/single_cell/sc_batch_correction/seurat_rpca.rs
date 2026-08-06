@@ -378,6 +378,7 @@ pub fn seurat_rpca_integration<S: SingleCellReading>(
             clr_b.as_deref(),
             params.pca_params.clr,
             params.pca_params.size_factor,
+            &verbosity,
         )?;
         per_batch_standardised.push(x);
     }

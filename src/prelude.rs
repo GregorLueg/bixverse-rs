@@ -35,6 +35,10 @@ pub use crate::single_cell::sc_traits::*;
 #[cfg(feature = "single-cell")]
 pub const SC_FILE_VERSION: u32 = 3;
 
+/// Legacy single cell file version accepted by the v2 to v3 migration.
+#[cfg(feature = "single-cell")]
+pub const SC_FILE_VERSION_V2: u32 = 2;
+
 /// Version of the meta cell files
 #[cfg(feature = "single-cell")]
 pub const MC_SPARSE_VERSION: u32 = 1;

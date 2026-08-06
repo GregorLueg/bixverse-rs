@@ -12,6 +12,7 @@ use std::time::Instant;
 use thousands::Separable;
 
 use crate::prelude::*;
+use crate::single_cell::sc_data::H5_CELL_SLICE_SIZE;
 use crate::single_cell::sc_data::data_io::{CellGeneSparseWriter, CellOnFileQuality};
 
 ////////////
@@ -350,7 +351,8 @@ pub fn write_h5_counts<P: AsRef<Path>>(
     }
 
     let n_cells = file_data.indptr.len() - 1;
-    let mut writer = CellGeneSparseWriter::new(bin_path, true, no_cells, no_genes)?;
+    let mut writer =
+        CellGeneSparseWriter::new(bin_path, true, no_cells, no_genes, cell_quality.target_size)?;
 
     let mut lib_size = Vec::with_capacity(n_cells);
     let mut nnz = Vec::with_capacity(n_cells);
@@ -391,7 +393,7 @@ pub fn write_h5_counts<P: AsRef<Path>>(
 
     writer.update_header_no_cells(file_quality.cells_to_keep.len());
     writer.update_header_no_genes(file_quality.genes_to_keep.len());
-    writer.finalise().unwrap();
+    writer.finalise()?;
 
     let cell_qc = CellQuality {
         cell_indices: file_quality.cells_to_keep.clone(),
@@ -1039,6 +1041,7 @@ pub fn write_h5_csc_to_csr_streaming<P: AsRef<Path>>(
         true,
         cell_lib_sizes.len(),
         quality.genes_to_keep.len(),
+        target_size,
     )?;
     let mut lib_size = Vec::with_capacity(cell_lib_sizes.len());
     let mut nnz = Vec::with_capacity(cell_lib_sizes.len());
@@ -1539,20 +1542,20 @@ pub fn write_h5_csr_streaming<P: AsRef<Path>>(
         true,
         quality.cells_to_keep.len(),
         quality.genes_to_keep.len(),
+        cell_qc.target_size,
     )?;
 
     let mut lib_size = Vec::with_capacity(quality.cells_to_keep.len());
     let mut nnz = Vec::with_capacity(quality.cells_to_keep.len());
 
-    const CELL_BATCH_SIZE: usize = 1000;
     let total_cells = quality.cells_to_keep.len();
-    let num_batches = total_cells.div_ceil(CELL_BATCH_SIZE);
+    let num_batches = total_cells.div_ceil(H5_CELL_SLICE_SIZE);
 
     if verbose {
         println!(
             "  Processing {} cells in batches of {}...",
             total_cells.separate_with_underscores(),
-            CELL_BATCH_SIZE.separate_with_underscores()
+            H5_CELL_SLICE_SIZE.separate_with_underscores()
         );
     }
 
@@ -1563,11 +1566,11 @@ pub fn write_h5_csr_streaming<P: AsRef<Path>>(
     let mut gene_indices: Vec<u32> = Vec::with_capacity(10000);
     let mut gene_counts: Vec<u32> = Vec::with_capacity(10000);
 
-    for (batch_idx, cell_batch) in quality.cells_to_keep.chunks(CELL_BATCH_SIZE).enumerate() {
+    for (batch_idx, cell_batch) in quality.cells_to_keep.chunks(H5_CELL_SLICE_SIZE).enumerate() {
         if verbose && (batch_idx % ((num_batches / 10).max(1)) == 0 || batch_idx == num_batches - 1)
         {
             let progress = ((batch_idx as f64 / num_batches as f64 * 10.0).round() as usize) * 10;
-            let processed = (batch_idx + 1) * CELL_BATCH_SIZE;
+            let processed = (batch_idx + 1) * H5_CELL_SLICE_SIZE;
             println!(
                 "  Processed {}% ({} / {} cells)",
                 progress,
@@ -1956,8 +1959,16 @@ pub fn read_h5ad_x_data_dense_row<P: AsRef<Path>>(
             );
         }
 
-        let row_start = *cell_chunk.iter().min().unwrap();
-        let row_end = *cell_chunk.iter().max().unwrap() + 1;
+        // `chunks` never yields an empty slice.
+        let row_start = *cell_chunk
+            .iter()
+            .min()
+            .expect("batch non-empty by construction");
+        let row_end = *cell_chunk
+            .iter()
+            .max()
+            .expect("batch non-empty by construction")
+            + 1;
         let block = ds.read_slice_2d::<f32, _>((row_start..row_end, 0..no_genes_total))?;
 
         for &old_cell_idx in cell_chunk {
@@ -2039,20 +2050,20 @@ pub fn write_h5_dense_row_streaming<P: AsRef<Path>>(
         true,
         quality.cells_to_keep.len(),
         quality.genes_to_keep.len(),
+        cell_qc.target_size,
     )?;
 
     let mut lib_size = Vec::with_capacity(quality.cells_to_keep.len());
     let mut nnz = Vec::with_capacity(quality.cells_to_keep.len());
 
-    const CELL_BATCH_SIZE: usize = 1000;
     let total_cells = quality.cells_to_keep.len();
-    let num_batches = total_cells.div_ceil(CELL_BATCH_SIZE);
+    let num_batches = total_cells.div_ceil(H5_CELL_SLICE_SIZE);
 
     if verbose {
         println!(
             "  Processing {} cells in batches of {}...",
             total_cells.separate_with_underscores(),
-            CELL_BATCH_SIZE.separate_with_underscores()
+            H5_CELL_SLICE_SIZE.separate_with_underscores()
         );
     }
 
@@ -2061,12 +2072,12 @@ pub fn write_h5_dense_row_streaming<P: AsRef<Path>>(
     let mut gene_indices_buf: Vec<u32> = Vec::with_capacity(1024);
     let mut gene_counts_buf: Vec<u32> = Vec::with_capacity(1024);
 
-    for (batch_idx, cell_batch) in quality.cells_to_keep.chunks(CELL_BATCH_SIZE).enumerate() {
+    for (batch_idx, cell_batch) in quality.cells_to_keep.chunks(H5_CELL_SLICE_SIZE).enumerate() {
         if verbose
             && (batch_idx.is_multiple_of((num_batches / 10).max(1)) || batch_idx == num_batches - 1)
         {
             let progress = ((batch_idx as f64 / num_batches as f64 * 10.0).round() as usize) * 10;
-            let processed = (batch_idx + 1) * CELL_BATCH_SIZE;
+            let processed = (batch_idx + 1) * H5_CELL_SLICE_SIZE;
             println!(
                 "  Processed {}% ({} / {} cells)",
                 progress,
@@ -2077,8 +2088,15 @@ pub fn write_h5_dense_row_streaming<P: AsRef<Path>>(
 
         // Batched read: span = [min(batch), max(batch)+1]. Kept cells should be
         // sorted (they came from an ordered scan), but be defensive.
-        let row_start = *cell_batch.iter().min().unwrap();
-        let row_end = *cell_batch.iter().max().unwrap() + 1;
+        let row_start = *cell_batch
+            .iter()
+            .min()
+            .expect("batch non-empty by construction");
+        let row_end = *cell_batch
+            .iter()
+            .max()
+            .expect("batch non-empty by construction")
+            + 1;
         let block: Array2<f32> = ds.read_slice_2d(s![row_start..row_end, 0..no_genes_total])?;
 
         for &old_cell_idx in cell_batch {
@@ -2421,21 +2439,21 @@ fn reconstruct_and_write_csr<P: AsRef<Path>>(
         true,
         quality.cells_to_keep.len(),
         quality.genes_to_keep.len(),
+        target_size,
     )?;
 
     let mut lib_size_out = Vec::with_capacity(quality.cells_to_keep.len());
     let mut nnz_out = Vec::with_capacity(quality.cells_to_keep.len());
 
-    const CELL_BATCH_SIZE: usize = 1000;
     let total_cells = quality.cells_to_keep.len();
     // (gene_index, raw_count) - gene index as usize, count as u32
     let mut cell_data: Vec<(usize, u32)> = Vec::with_capacity(10000);
     let mut gene_indices: Vec<u32> = Vec::with_capacity(10000);
     let mut gene_counts: Vec<u32> = Vec::with_capacity(10000);
 
-    for (batch_idx, cell_batch) in quality.cells_to_keep.chunks(CELL_BATCH_SIZE).enumerate() {
+    for (batch_idx, cell_batch) in quality.cells_to_keep.chunks(H5_CELL_SLICE_SIZE).enumerate() {
         if verbose && batch_idx % 10 == 0 {
-            let processed = (batch_idx * CELL_BATCH_SIZE).min(total_cells);
+            let processed = (batch_idx * H5_CELL_SLICE_SIZE).min(total_cells);
             println!(
                 "   Processed {} / {} cells",
                 processed.separate_with_underscores(),
@@ -2638,6 +2656,7 @@ fn reconstruct_and_write_csc<P: AsRef<Path>>(
         true,
         quality.cells_to_keep.len(),
         quality.genes_to_keep.len(),
+        target_size,
     )?;
     let mut lib_size_out = Vec::with_capacity(quality.cells_to_keep.len());
     let mut nnz_out = Vec::with_capacity(quality.cells_to_keep.len());
@@ -2732,17 +2751,16 @@ pub fn write_h5_normalised_counts<P: AsRef<Path>>(
     let lib_size_path = format!("obs/{}", obs_lib_size_col);
     let lib_sizes_raw: Vec<f32> = file
         .dataset(&lib_size_path)
-        .unwrap_or_else(|_| panic!("obs column '{}' not found in h5ad file", obs_lib_size_col))
+        .map_err(|_| BixverseErrors::ObsColumnMissing(obs_lib_size_col.to_string()))?
         .read_1d()?
         .to_vec();
 
-    assert_eq!(
-        lib_sizes_raw.len(),
-        no_cells,
-        "Library size column length ({}) does not match no_cells ({})",
-        lib_sizes_raw.len(),
-        no_cells
-    );
+    if lib_sizes_raw.len() != no_cells {
+        return Err(BixverseErrors::LibSizeLengthMismatch {
+            expected: no_cells,
+            found: lib_sizes_raw.len(),
+        });
+    }
 
     if verbose {
         let max_lib = lib_sizes_raw.iter().cloned().fold(0.0f32, f32::max);
@@ -2798,8 +2816,7 @@ pub fn write_h5_normalised_counts<P: AsRef<Path>>(
             target_size,
             &cell_quality,
             verbose,
-        )
-        .unwrap(),
+        )?,
         CompressedSparseFormat::Csr => reconstruct_and_write_csr(
             &h5_path,
             &bin_path,
@@ -2808,8 +2825,7 @@ pub fn write_h5_normalised_counts<P: AsRef<Path>>(
             target_size,
             &cell_quality,
             verbose,
-        )
-        .unwrap(),
+        )?,
     };
 
     cell_qc.set_cell_indices(&file_quality.cells_to_keep);

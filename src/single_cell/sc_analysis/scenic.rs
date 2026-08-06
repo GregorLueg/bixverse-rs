@@ -3796,7 +3796,7 @@ pub(crate) fn scenic_common_setup<'a, S: SingleCellReading>(
     });
 
     let tf_csc: CompressedSparseData2<u16, f32> =
-        from_gene_chunks::<u16>(tf_chunks, &DataLayerReturn::Norm, n_cells);
+        from_gene_chunks::<u16>(tf_chunks, &DataLayerReturn::Norm, n_cells)?;
     let tf_data = QuantisedStore::from_csc(&tf_csc, n_cells)?;
     drop(tf_csc);
 

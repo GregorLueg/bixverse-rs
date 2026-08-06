@@ -272,16 +272,60 @@ pub enum BixverseErrors {
         requested: &'static str,
     },
 
-    /// If serialisation of the [crate::prelude::CompressedSparseData2] to disk failed
+    /// A chunk's declared payload lengths exceed the bytes actually present.
+    ///
+    /// The three length fields in a chunk header are untrusted input. This is
+    /// raised after they have been parsed but before any payload slice is
+    /// taken, so a corrupt length cannot index out of bounds.
     #[cfg(feature = "single-cell")]
-    #[error("Serialisation to meta cell CompressedSparseData2 format on disk failed")]
-    SerialisationFailed,
+    #[error("Chunk payload truncated: header declares {expected} bytes, buffer holds {found}")]
+    ChunkPayloadTruncated {
+        /// Total bytes the header's length fields imply.
+        expected: usize,
+        /// Actual bytes available in the decompressed chunk.
+        found: usize,
+    },
 
-    /// If deserialisation of the [crate::prelude::CompressedSparseData2] from disk
-    /// failed
+    /// The raw-count element-size discriminant was not recognised.
+    ///
+    /// Valid values are `RAW_ELEM_U16` (2), `RAW_ELEM_U32` (4), and 0 for
+    /// legacy files where the byte was zero padding. Anything else means the
+    /// chunk is corrupt; reinterpreting it would misparse the whole payload.
     #[cfg(feature = "single-cell")]
-    #[error("Serialisation to meta cell CompressedSparseData2 format on disk failed")]
-    DeserialisationFailed,
+    #[error("Invalid raw count element size discriminant: {0}")]
+    RawElemSizeInvalid(u8),
+
+    /// A raw count read from disk does not fit the requested numeric type.
+    ///
+    /// Raised by `from_gene_chunks` / `from_cell_chunks` instead of silently
+    /// saturating. Pick a wider `T` (`u32`, `f32`, `f64`) for the affected
+    /// dataset.
+    #[cfg(feature = "single-cell")]
+    #[error("Raw count {value} does not fit target type {target_type}")]
+    RawCountOverflow {
+        /// The count that could not be represented.
+        value: u32,
+        /// Name of the type it was being converted into.
+        target_type: &'static str,
+    },
+
+    /// The `target_size` recorded in a file header disagrees with the one the
+    /// caller requested.
+    ///
+    /// Undoing a file's own library-size normalisation requires the exact
+    /// factor the writer used, so a mismatch always yields wrong numbers.
+    /// Files written before `target_size` entered the header report `0.0` and
+    /// are exempt from the check.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Target size mismatch: file was normalised against {header}, but {requested} was requested"
+    )]
+    TargetSizeMismatch {
+        /// Value stored in the file header.
+        header: f32,
+        /// Value the caller supplied.
+        requested: f32,
+    },
 
     /// Error for h5 ingestion if feature type is not found
     #[cfg(feature = "single-cell")]
@@ -595,31 +639,27 @@ pub enum BixverseErrors {
     },
 
     // -- gpu --
+    /// A device-limit or runtime error from the `cubecl-utils-rs` primitives.
+    ///
+    /// Covers the cube-count, grid, binding-size and shared-memory guards, plus
+    /// buffer reads that fail on the CubeCL server.
+    #[cfg(feature = "gpu")]
+    #[error("GPU: {0}")]
+    CubeclUtils(#[from] cubecl_utils_rs::CubeclUtilsErrors),
     /// A GPU cubecl matrix multiplication error from the cubek crate
     #[cfg(feature = "gpu")]
     #[error("GPU: A matrix multiplication occurred: {0}")]
     GpuMatmul(String),
-    /// A kernel launch asked for more workgroups in one grid dimension than
-    /// the device allows. Dispatching it anyway kills the cubecl server
-    /// thread, after which every later call on that client fails with an
-    /// unrelated `CallError`, so it is caught before the launch instead.
-    #[cfg(feature = "gpu")]
-    #[error(
-        "GPU: kernel '{kernel}' requested a cube count of {requested:?}, device limit is {limit:?}"
-    )]
-    GpuCubeCountExceeded {
-        /// Name of the kernel whose dispatch was rejected.
-        kernel: &'static str,
-        /// Requested cube count as `(x, y, z)`.
-        requested: (u32, u32, u32),
-        /// Per-dimension device limit as `(x, y, z)`.
-        limit: (u32, u32, u32),
-    },
-    /// A single buffer exceeds the device's per-binding size limit.
+    /// A single named buffer exceeds the device's per-binding size limit.
     ///
     /// Over-sized bindings are rejected without an error surfacing: the kernel
     /// does no work and returns zeros, so the condition is caught on the host
     /// before the upload instead.
+    ///
+    /// `GpuTensor`'s own constructors already guard their allocations and
+    /// report `CubeclUtils`. This variant is for the host-side pre-checks that
+    /// walk a whole named buffer set before a dispatch, where the buffer name
+    /// is worth more than a bare byte count.
     #[cfg(feature = "gpu")]
     #[error(
         "GPU: buffer '{buffer}' needs {bytes} bytes, device per-binding limit is {limit} bytes"

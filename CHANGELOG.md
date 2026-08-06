@@ -1,5 +1,40 @@
 # News
 
+## 0.4.0
+
+Breaking changes in the streaming engine.
+
+### Features
+
+- Improved SEACell GPU code to work on larger data sets.
+
+### Breaking changes
+
+- `CellGeneSparseWriter::new` takes a fifth `target_size: f32`. It is stored in
+  the file header and exposed via `SingleCellReading::target_size`, so CLR
+  transforms and bin merges can verify the normalisation instead of assuming it.
+  Carved out of reserved bytes, so existing files still open and report `None`.
+- `write_cell_chunk`, `write_gene_chunk`, `finalise`, `write_r_counts` and
+  `write_r_counts_csr` return `Result<_, BixverseErrors>`. Writer orientation
+  asserts and the remaining h5ad panics are now typed errors.
+
+### Fixes
+
+- Fixed a potential panic in `CscGeneChunk::read_from_buffer`.
+- Fixed `migrate_v2_to_v3`, which compared against `SC_FILE_VERSION` (3) instead
+  of 2.
+- Chunk parsers now validate the total payload against the buffer before
+  slicing. The three length fields are untrusted and previously fed two `unsafe`
+  out-of-bounds reads.
+- Raw counts no longer saturate at `u16::MAX`. `from_gene_chunks` /
+  `from_cell_chunks` are generic over `FromPrimitive` and return
+  `RawCountOverflow` instead of clipping; mtx ingest and the Scrublet doublet
+  simulation keep full u32 width.
+- The binary format is consistently little-endian.
+- CLR transformations now verify the requested size factor against the one
+  recorded in the file header, and hard-error on a mismatch. Files written
+  before the header carried it warn under detailed verbosity instead.
+
 ## 0.3.12
 
 ### Features

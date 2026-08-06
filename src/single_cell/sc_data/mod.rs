@@ -13,3 +13,11 @@ pub mod mtx_multifile_io;
 pub mod plotting;
 pub mod r_obj_io;
 pub mod sc_synthetic_data;
+
+/// Number of cell rows requested per HDF5 hyperslab read.
+///
+/// This is a slice height for the h5 layer, not a cell batch size: it bounds
+/// how much of a dataset is materialised at once during ingest. Deliberately
+/// far smaller than [`crate::prelude::CELL_BATCH_SIZE`], which sizes reads
+/// against the bixverse binary format.
+pub(crate) const H5_CELL_SLICE_SIZE: usize = 1_000;

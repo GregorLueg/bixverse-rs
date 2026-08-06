@@ -11,6 +11,9 @@ use std::time::Instant;
 use crate::core::math::pca_svd::*;
 use crate::core::math::sparse::sparse_svd_lanczos;
 use crate::prelude::*;
+
+/// Genes read per batch while streaming gene chunks for doublet scoring.
+const GENE_BATCH_SIZE: usize = 1000;
 use crate::single_cell::sc_processing::hvg::*;
 use crate::single_cell::sc_processing::pca::*;
 
@@ -379,7 +382,7 @@ pub fn pca_observed<S: SingleCellReading>(
         }
     });
 
-    let csc = from_gene_chunks::<f32>(gene_chunks, &DataLayerReturn::Norm, n_cells);
+    let csc = from_gene_chunks::<f32>(gene_chunks, &DataLayerReturn::Norm, n_cells)?;
 
     let col_means: Vec<f64> = sparse_csc_column_means(&csc, true, None)?;
     let col_stds: Vec<f64> = sparse_csc_column_stds(&csc, &col_means, true, None)?;
@@ -1027,7 +1030,6 @@ pub fn select_top_genes_streaming<S: SingleCellReading>(
         None => None,
     };
 
-    const GENE_BATCH_SIZE: usize = 1000;
     let num_batches = n_total_genes.div_ceil(GENE_BATCH_SIZE);
     let n_cells = cells_to_keep.len();
 

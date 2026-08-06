@@ -8,10 +8,10 @@
 
 #![allow(missing_docs)]
 
-use ann_search_rs::gpu::tensor::GpuTensor;
-use ann_search_rs::gpu::*;
 use cubecl::prelude::*;
+use cubecl_utils_rs::prelude::*;
 
+use crate::errors::BixverseErrors;
 use crate::gpu::*;
 
 /////////////
@@ -266,7 +266,7 @@ fn segmented_sum<F: Float>(
     }
 
     let tx = UNIT_POS_X as usize;
-    let wg = WORKGROUP_SIZE_X as usize;
+    let wg = WORKGROUP_32 as usize;
 
     let seg_start = offsets[level as usize];
     let seg_end = offsets[(level + 1u32) as usize];
@@ -671,7 +671,22 @@ fn ridge_subtract<F: Float>(
 // Launchers //
 ///////////////
 
-// Dispatch [`cosine_distances`]. One workgroup per cell.
+/// Dispatch `cosine_distances`. One workgroup per cell.
+///
+/// ### Params
+///
+/// * `centroids` - Centroids `[k, dim]` row-major, cosine-normalised
+/// * `data_cos` - Cells `[n, dim]` row-major, cosine-normalised
+/// * `dist` - Output distances `[n, k]` row-major
+/// * `n` - Cell count
+/// * `k` - Cluster count
+/// * `dim` - Embedding dimension
+/// * `client` - CubeCL compute client
+///
+/// ### Returns
+///
+/// `Ok(())`; `dist` is written in place. `CubeclUtils` if the grid is over the
+/// device's cube-count limit.
 pub fn launch_cosine_distances<R, F>(
     centroids: &GpuTensor<R, F>,
     data_cos: &GpuTensor<R, F>,
@@ -680,11 +695,13 @@ pub fn launch_cosine_distances<R, F>(
     k: usize,
     dim: usize,
     client: &ComputeClient<R>,
-) where
+) -> Result<(), BixverseErrors>
+where
     R: Runtime,
     F: Float + cubecl::CubeElement,
 {
-    let (gx, gy) = grid_2d(n as u32);
+    let limits = GpuLimits::from_client(client);
+    let (gx, gy) = grid_2d(n as u32, &limits)?;
 
     unsafe {
         cosine_distances::launch_unchecked::<F, R>(
@@ -700,19 +717,35 @@ pub fn launch_cosine_distances<R, F>(
             WORKGROUP_128,
         );
     }
+
+    Ok(())
 }
 
 /// Dispatch `row_l2_normalise`. One workgroup per row.
+///
+/// ### Params
+///
+/// * `data` - Matrix `[n_rows, dim]` row-major, normalised in place
+/// * `n_rows` - Number of rows
+/// * `dim` - Row length
+/// * `client` - CubeCL compute client
+///
+/// ### Returns
+///
+/// `Ok(())`; `data` is normalised in place. `CubeclUtils` if the grid is over
+/// the device's cube-count limit.
 pub fn launch_row_l2_normalise<R, F>(
     data: &GpuTensor<R, F>,
     n_rows: usize,
     dim: usize,
     client: &ComputeClient<R>,
-) where
+) -> Result<(), BixverseErrors>
+where
     R: Runtime,
     F: Float + cubecl::CubeElement,
 {
-    let (gx, gy) = grid_2d(n_rows as u32);
+    let limits = GpuLimits::from_client(client);
+    let (gx, gy) = grid_2d(n_rows as u32, &limits)?;
 
     unsafe {
         row_l2_normalise::launch_unchecked::<F, R>(
@@ -724,9 +757,25 @@ pub fn launch_row_l2_normalise<R, F>(
             dim,
         );
     }
+
+    Ok(())
 }
 
 /// Dispatch `scale_exp_normalise`. One workgroup per cell.
+///
+/// ### Params
+///
+/// * `dist` - Distance matrix `[n, k]` row-major
+/// * `sigma` - Per-cluster weights `[k]`
+/// * `out` - Output `[n, k]` row-major, either `scale_dist` or the initial `R`
+/// * `n` - Cell count
+/// * `k` - Cluster count
+/// * `client` - CubeCL compute client
+///
+/// ### Returns
+///
+/// `Ok(())`; `out` is written in place. `CubeclUtils` if the grid is over the
+/// device's cube-count limit.
 pub fn launch_scale_exp_normalise<R, F>(
     dist: &GpuTensor<R, F>,
     sigma: &GpuTensor<R, F>,
@@ -734,11 +783,13 @@ pub fn launch_scale_exp_normalise<R, F>(
     n: usize,
     k: usize,
     client: &ComputeClient<R>,
-) where
+) -> Result<(), BixverseErrors>
+where
     R: Runtime,
     F: Float + cubecl::CubeElement,
 {
-    let (gx, gy) = grid_2d(n as u32);
+    let limits = GpuLimits::from_client(client);
+    let (gx, gy) = grid_2d(n as u32, &limits)?;
 
     unsafe {
         scale_exp_normalise::launch_unchecked::<F, R>(
@@ -753,11 +804,28 @@ pub fn launch_scale_exp_normalise<R, F>(
             WORKGROUP_128,
         );
     }
+
+    Ok(())
 }
 
 /// Dispatch `segmented_sum`. One workgroup per level. The level-CSR
 /// (`all_indices`, `offsets`) is built once via `build_csr_gpu_privatised`
 /// with `cell_to_level` as labels and `b` as the cluster count.
+///
+/// ### Params
+///
+/// * `r` - Assignment matrix `[n, k]` row-major
+/// * `all_indices` - Cell indices in level-CSR order `[n]`
+/// * `offsets` - Exclusive prefix sums `[b + 1]`
+/// * `o` - Output observed counts `[b, k]` row-major
+/// * `b` - Number of levels
+/// * `k` - Cluster count
+/// * `client` - CubeCL compute client
+///
+/// ### Returns
+///
+/// `Ok(())`; `o` is written in place, zeros for empty levels. `CubeclUtils` if
+/// the grid is over the device's cube-count limit.
 pub fn launch_segmented_sum<R, F>(
     r: &GpuTensor<R, F>,
     all_indices: &GpuTensor<R, u32>,
@@ -766,17 +834,19 @@ pub fn launch_segmented_sum<R, F>(
     b: usize,
     k: usize,
     client: &ComputeClient<R>,
-) where
+) -> Result<(), BixverseErrors>
+where
     R: Runtime,
     F: Float + cubecl::CubeElement,
 {
-    let (gx, gy) = grid_2d(b as u32);
+    let limits = GpuLimits::from_client(client);
+    let (gx, gy) = grid_2d(b as u32, &limits)?;
 
     unsafe {
         segmented_sum::launch_unchecked::<F, R>(
             client,
             CubeCount::Static(gx, gy, 1),
-            CubeDim::new_1d(WORKGROUP_SIZE_X),
+            CubeDim::new_1d(WORKGROUP_32),
             r.clone().into_tensor_arg(),
             all_indices.clone().into_tensor_arg(),
             offsets.clone().into_tensor_arg(),
@@ -785,9 +855,33 @@ pub fn launch_segmented_sum<R, F>(
             k,
         );
     }
+
+    Ok(())
 }
 
 /// Dispatch `objective_partials`.
+///
+/// The only launcher here with a fixed grid (`WORKGROUP_512` cubes), so it has
+/// no geometry to validate and stays infallible.
+///
+/// ### Params
+///
+/// * `r` - Assignment matrix `[n, k]` row-major
+/// * `dist` - Distance matrix `[n, k]` row-major
+/// * `o` - Observed counts `[b, k]` row-major
+/// * `r_sum` - Per-cluster totals `[k]`
+/// * `sigma` - Per-cluster weights `[k]`
+/// * `theta` - Per-level diversity penalties `[b]`
+/// * `pr_b` - Level proportions `[b]`
+/// * `cell_to_level` - Level index per cell `[n]`
+/// * `partials` - Output per-workgroup partial sums `[WORKGROUP_512]`
+/// * `n` - Cell count
+/// * `k` - Cluster count
+/// * `client` - CubeCL compute client
+///
+/// ### Returns
+///
+/// Nothing; `partials` is written in place and the caller sums it on the host.
 #[allow(clippy::too_many_arguments)]
 pub fn launch_objective_partials<R, F>(
     r: &GpuTensor<R, F>,
@@ -827,7 +921,25 @@ pub fn launch_objective_partials<R, F>(
     }
 }
 
-/// Dispatch `jacobi_r_update`. One workgroup per cell. R is written in place.
+/// Dispatch `jacobi_r_update`. One workgroup per cell.
+///
+/// ### Params
+///
+/// * `scale_dist` - Scaled distances `[n, k]` row-major, fixed across the sweep
+/// * `o` - Observed counts `[b, k]` row-major, from the previous sweep
+/// * `r_sum` - Per-cluster totals `[k]`, from the previous sweep
+/// * `theta` - Per-level diversity penalties `[b]`
+/// * `pr_b` - Level proportions `[b]`
+/// * `cell_to_level` - Level index per cell `[n]`
+/// * `r_out` - Output assignments `[n, k]` row-major
+/// * `n` - Cell count
+/// * `k` - Cluster count
+/// * `client` - CubeCL compute client
+///
+/// ### Returns
+///
+/// `Ok(())`; `r_out` is written in place. `CubeclUtils` if the grid is over the
+/// device's cube-count limit.
 #[allow(clippy::too_many_arguments)]
 pub fn launch_jacobi_r_update<R, F>(
     scale_dist: &GpuTensor<R, F>,
@@ -840,11 +952,13 @@ pub fn launch_jacobi_r_update<R, F>(
     n: usize,
     k: usize,
     client: &ComputeClient<R>,
-) where
+) -> Result<(), BixverseErrors>
+where
     R: Runtime,
     F: Float + cubecl::CubeElement,
 {
-    let (gx, gy) = grid_2d(n as u32);
+    let limits = GpuLimits::from_client(client);
+    let (gx, gy) = grid_2d(n as u32, &limits)?;
 
     unsafe {
         jacobi_r_update::launch_unchecked::<F, R>(
@@ -863,10 +977,29 @@ pub fn launch_jacobi_r_update<R, F>(
             WORKGROUP_128,
         );
     }
+
+    Ok(())
 }
 
 /// Dispatch `weighted_segmented_sum`. One workgroup per `(level, cluster)`
 /// pair; `s` must have length `b * k * d`.
+///
+/// ### Params
+///
+/// * `r` - Assignment matrix `[n, k]` row-major
+/// * `z` - Embedding `[n, d]` row-major
+/// * `all_indices` - Cell indices in level-CSR order `[n]`
+/// * `offsets` - Exclusive prefix sums `[b + 1]`
+/// * `s` - Output weighted sums `[b, k, d]` row-major
+/// * `b` - Number of levels
+/// * `k` - Cluster count
+/// * `d` - Embedding dimension
+/// * `client` - CubeCL compute client
+///
+/// ### Returns
+///
+/// `Ok(())`; `s` is written in place. `CubeclUtils` if the grid is over the
+/// device's cube-count limit.
 #[allow(clippy::too_many_arguments)]
 pub fn launch_weighted_segmented_sum<R, F>(
     r: &GpuTensor<R, F>,
@@ -878,11 +1011,13 @@ pub fn launch_weighted_segmented_sum<R, F>(
     k: usize,
     d: usize,
     client: &ComputeClient<R>,
-) where
+) -> Result<(), BixverseErrors>
+where
     R: Runtime,
     F: Float + cubecl::CubeElement,
 {
-    let (gx, gy) = grid_2d((b * k) as u32);
+    let limits = GpuLimits::from_client(client);
+    let (gx, gy) = grid_2d((b * k) as u32, &limits)?;
 
     unsafe {
         weighted_segmented_sum::launch_unchecked::<F, R>(
@@ -899,9 +1034,29 @@ pub fn launch_weighted_segmented_sum<R, F>(
             d,
         );
     }
+
+    Ok(())
 }
 
 /// Dispatch `ridge_subtract`. One workgroup per cell.
+///
+/// ### Params
+///
+/// * `z` - Embedding `[n, d]` row-major
+/// * `r` - Assignment matrix `[n, k]` row-major
+/// * `c` - Per-`(cluster, level)` corrections `[k, b, d]` row-major
+/// * `cell_to_level` - Level index per cell `[n]`
+/// * `z_corr` - Output corrected embedding `[n, d]` row-major
+/// * `n` - Cell count
+/// * `k` - Cluster count
+/// * `b` - Number of levels
+/// * `d` - Embedding dimension
+/// * `client` - CubeCL compute client
+///
+/// ### Returns
+///
+/// `Ok(())`; `z_corr` is written in place. `CubeclUtils` if the grid is over
+/// the device's cube-count limit.
 #[allow(clippy::too_many_arguments)]
 pub fn launch_ridge_subtract<R, F>(
     z: &GpuTensor<R, F>,
@@ -914,11 +1069,13 @@ pub fn launch_ridge_subtract<R, F>(
     b: usize,
     d: usize,
     client: &ComputeClient<R>,
-) where
+) -> Result<(), BixverseErrors>
+where
     R: Runtime,
     F: Float + cubecl::CubeElement,
 {
-    let (gx, gy) = grid_2d(n as u32);
+    let limits = GpuLimits::from_client(client);
+    let (gx, gy) = grid_2d(n as u32, &limits)?;
 
     unsafe {
         ridge_subtract::launch_unchecked::<F, R>(
@@ -936,6 +1093,8 @@ pub fn launch_ridge_subtract<R, F>(
             d,
         );
     }
+
+    Ok(())
 }
 
 ///////////
@@ -945,7 +1104,6 @@ pub fn launch_ridge_subtract<R, F>(
 #[cfg(test)]
 mod tests_harmony_kernels {
     use super::*;
-    use ann_search_rs::gpu::tensor::GpuTensor;
     use approx::assert_relative_eq;
     use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
 
@@ -1144,11 +1302,13 @@ mod tests_harmony_kernels {
         l2_normalise_rows(&mut centroids, k, dim);
         l2_normalise_rows(&mut data_cos, n, dim);
 
-        let cent_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&centroids, vec![k, dim], &client);
-        let data_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&data_cos, vec![n, dim], &client);
-        let dist_gpu = GpuTensor::<WgpuRuntime, f32>::empty(vec![n, k], &client);
+        let cent_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&centroids, vec![k, dim], &client).unwrap();
+        let data_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&data_cos, vec![n, dim], &client).unwrap();
+        let dist_gpu = GpuTensor::<WgpuRuntime, f32>::empty(vec![n, k], &client).unwrap();
 
-        launch_cosine_distances(&cent_gpu, &data_gpu, &dist_gpu, n, k, dim, &client);
+        launch_cosine_distances(&cent_gpu, &data_gpu, &dist_gpu, n, k, dim, &client).unwrap();
 
         let got = dist_gpu.read(&client).unwrap();
         let want = cpu_cosine_distances(&centroids, &data_cos, n, k, dim);
@@ -1172,8 +1332,9 @@ mod tests_harmony_kernels {
         ];
         let original = data.clone();
 
-        let data_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&data, vec![n, dim], &client);
-        launch_row_l2_normalise(&data_gpu, n, dim, &client);
+        let data_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&data, vec![n, dim], &client).unwrap();
+        launch_row_l2_normalise(&data_gpu, n, dim, &client).unwrap();
         let got = data_gpu.read(&client).unwrap();
 
         // Reference: normalise the same data on CPU
@@ -1215,11 +1376,13 @@ mod tests_harmony_kernels {
             .collect();
         let sigma: Vec<f32> = (0..k).map(|i| 0.1 + i as f32 * 0.02).collect();
 
-        let dist_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&dist, vec![n, k], &client);
-        let sigma_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&sigma, vec![k], &client);
-        let out_gpu = GpuTensor::<WgpuRuntime, f32>::empty(vec![n, k], &client);
+        let dist_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&dist, vec![n, k], &client).unwrap();
+        let sigma_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&sigma, vec![k], &client).unwrap();
+        let out_gpu = GpuTensor::<WgpuRuntime, f32>::empty(vec![n, k], &client).unwrap();
 
-        launch_scale_exp_normalise(&dist_gpu, &sigma_gpu, &out_gpu, n, k, &client);
+        launch_scale_exp_normalise(&dist_gpu, &sigma_gpu, &out_gpu, n, k, &client).unwrap();
 
         let got = out_gpu.read(&client).unwrap();
         let want = cpu_scale_exp_normalise(&dist, &sigma, n, k);
@@ -1247,13 +1410,15 @@ mod tests_harmony_kernels {
             .map(|i| ((i * 7 + 1) % 11) as f32 * 0.1 + 0.01)
             .collect();
 
-        let r_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&r, vec![n, k], &client);
+        let r_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&r, vec![n, k], &client).unwrap();
 
         let (cpu_idx, cpu_off) = cpu_build_level_csr(&cell_to_level, n, b);
-        let all_indices_gpu = GpuTensor::<WgpuRuntime, u32>::from_slice(&cpu_idx, vec![n], &client);
-        let offsets_gpu = GpuTensor::<WgpuRuntime, u32>::from_slice(&cpu_off, vec![b + 1], &client);
+        let all_indices_gpu =
+            GpuTensor::<WgpuRuntime, u32>::from_slice(&cpu_idx, vec![n], &client).unwrap();
+        let offsets_gpu =
+            GpuTensor::<WgpuRuntime, u32>::from_slice(&cpu_off, vec![b + 1], &client).unwrap();
 
-        let o_gpu = GpuTensor::<WgpuRuntime, f32>::empty(vec![b, k], &client);
+        let o_gpu = GpuTensor::<WgpuRuntime, f32>::empty(vec![b, k], &client).unwrap();
         launch_segmented_sum(
             &r_gpu,
             &all_indices_gpu,
@@ -1262,7 +1427,8 @@ mod tests_harmony_kernels {
             b,
             k,
             &client,
-        );
+        )
+        .unwrap();
 
         let got = o_gpu.read(&client).unwrap();
         let want = cpu_segmented_sum(&r, &cell_to_level, n, k, b);
@@ -1295,18 +1461,23 @@ mod tests_harmony_kernels {
         let theta: Vec<f32> = (0..b).map(|i| 1.0 + i as f32 * 0.3).collect();
         let pr_b: Vec<f32> = (0..b).map(|i| 0.2 + i as f32 * 0.1).collect();
 
-        let scale_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&scale_dist, vec![n, k], &client);
-        let o_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&o, vec![b, k], &client);
-        let r_sum_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&r_sum, vec![k], &client);
-        let theta_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&theta, vec![b], &client);
-        let pr_b_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&pr_b, vec![b], &client);
-        let ctl_gpu = GpuTensor::<WgpuRuntime, u32>::from_slice(&cell_to_level, vec![n], &client);
-        let r_out_gpu = GpuTensor::<WgpuRuntime, f32>::empty(vec![n, k], &client);
+        let scale_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&scale_dist, vec![n, k], &client).unwrap();
+        let o_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&o, vec![b, k], &client).unwrap();
+        let r_sum_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&r_sum, vec![k], &client).unwrap();
+        let theta_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&theta, vec![b], &client).unwrap();
+        let pr_b_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&pr_b, vec![b], &client).unwrap();
+        let ctl_gpu =
+            GpuTensor::<WgpuRuntime, u32>::from_slice(&cell_to_level, vec![n], &client).unwrap();
+        let r_out_gpu = GpuTensor::<WgpuRuntime, f32>::empty(vec![n, k], &client).unwrap();
 
         launch_jacobi_r_update(
             &scale_gpu, &o_gpu, &r_sum_gpu, &theta_gpu, &pr_b_gpu, &ctl_gpu, &r_out_gpu, n, k,
             &client,
-        );
+        )
+        .unwrap();
 
         let got = r_out_gpu.read(&client).unwrap();
         let want =
@@ -1340,18 +1511,23 @@ mod tests_harmony_kernels {
         let theta = vec![1.0f32; b];
         let pr_b = vec![0.5f32; b];
 
-        let scale_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&scale_dist, vec![n, k], &client);
-        let o_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&o, vec![b, k], &client);
-        let r_sum_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&r_sum, vec![k], &client);
-        let theta_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&theta, vec![b], &client);
-        let pr_b_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&pr_b, vec![b], &client);
-        let ctl_gpu = GpuTensor::<WgpuRuntime, u32>::from_slice(&cell_to_level, vec![n], &client);
-        let r_out_gpu = GpuTensor::<WgpuRuntime, f32>::empty(vec![n, k], &client);
+        let scale_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&scale_dist, vec![n, k], &client).unwrap();
+        let o_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&o, vec![b, k], &client).unwrap();
+        let r_sum_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&r_sum, vec![k], &client).unwrap();
+        let theta_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&theta, vec![b], &client).unwrap();
+        let pr_b_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&pr_b, vec![b], &client).unwrap();
+        let ctl_gpu =
+            GpuTensor::<WgpuRuntime, u32>::from_slice(&cell_to_level, vec![n], &client).unwrap();
+        let r_out_gpu = GpuTensor::<WgpuRuntime, f32>::empty(vec![n, k], &client).unwrap();
 
         launch_jacobi_r_update(
             &scale_gpu, &o_gpu, &r_sum_gpu, &theta_gpu, &pr_b_gpu, &ctl_gpu, &r_out_gpu, n, k,
             &client,
-        );
+        )
+        .unwrap();
 
         let got = r_out_gpu.read(&client).unwrap();
         for cluster in 0..k {
@@ -1371,15 +1547,18 @@ mod tests_harmony_kernels {
             .collect();
         let z: Vec<f32> = (0..n * d).map(|i| (i as f32) * 0.13 - 1.0).collect();
 
-        let r_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&r, vec![n, k], &client);
-        let z_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&z, vec![n, d], &client);
+        let r_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&r, vec![n, k], &client).unwrap();
+        let z_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&z, vec![n, d], &client).unwrap();
 
         let (cpu_idx, cpu_off) = cpu_build_level_csr(&cell_to_level, n, b);
-        let idx_gpu = GpuTensor::<WgpuRuntime, u32>::from_slice(&cpu_idx, vec![n], &client);
-        let off_gpu = GpuTensor::<WgpuRuntime, u32>::from_slice(&cpu_off, vec![b + 1], &client);
+        let idx_gpu =
+            GpuTensor::<WgpuRuntime, u32>::from_slice(&cpu_idx, vec![n], &client).unwrap();
+        let off_gpu =
+            GpuTensor::<WgpuRuntime, u32>::from_slice(&cpu_off, vec![b + 1], &client).unwrap();
 
-        let s_gpu = GpuTensor::<WgpuRuntime, f32>::empty(vec![b * k * d], &client);
-        launch_weighted_segmented_sum(&r_gpu, &z_gpu, &idx_gpu, &off_gpu, &s_gpu, b, k, d, &client);
+        let s_gpu = GpuTensor::<WgpuRuntime, f32>::empty(vec![b * k * d], &client).unwrap();
+        launch_weighted_segmented_sum(&r_gpu, &z_gpu, &idx_gpu, &off_gpu, &s_gpu, b, k, d, &client)
+            .unwrap();
 
         let got = s_gpu.read(&client).unwrap();
         let want = cpu_weighted_segmented_sum(&r, &z, &cell_to_level, n, k, b, d);
@@ -1404,11 +1583,13 @@ mod tests_harmony_kernels {
             .map(|i| ((i * 11 + 1) % 13) as f32 * 0.05)
             .collect();
 
-        let z_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&z, vec![n, d], &client);
-        let r_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&r, vec![n, k], &client);
-        let c_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&c, vec![k * b * d], &client);
-        let ctl_gpu = GpuTensor::<WgpuRuntime, u32>::from_slice(&cell_to_level, vec![n], &client);
-        let z_corr_gpu = GpuTensor::<WgpuRuntime, f32>::empty(vec![n, d], &client);
+        let z_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&z, vec![n, d], &client).unwrap();
+        let r_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&r, vec![n, k], &client).unwrap();
+        let c_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&c, vec![k * b * d], &client).unwrap();
+        let ctl_gpu =
+            GpuTensor::<WgpuRuntime, u32>::from_slice(&cell_to_level, vec![n], &client).unwrap();
+        let z_corr_gpu = GpuTensor::<WgpuRuntime, f32>::empty(vec![n, d], &client).unwrap();
 
         launch_ridge_subtract(
             &z_gpu,
@@ -1421,7 +1602,8 @@ mod tests_harmony_kernels {
             b,
             d,
             &client,
-        );
+        )
+        .unwrap();
 
         let got = z_corr_gpu.read(&client).unwrap();
         let want = cpu_ridge_subtract(&z, &r, &c, &cell_to_level, n, k, b, d);

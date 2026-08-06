@@ -61,13 +61,12 @@ checksum = "4b46cbb362ab8752921c97e041f5e366ee6297bd428a31275b9fcf1e380f7299"
 
 [[package]]
 name = "ann-search-rs"
-version = "0.4.5"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91d8f6404a7d43a08eeac9b8338fbf01285ba0666d857ab594044dcf34ee87ac"
+checksum = "088160370d8e750693d767ee4af24abc0a56c1a8b605be2f6f87a9fb481a9bf0"
 dependencies = [
  "approx",
  "clap",
- "cubecl",
  "document-features",
  "faer",
  "faer-traits",
@@ -296,12 +295,13 @@ dependencies = [
 
 [[package]]
 name = "bixverse-rs"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "ann-search-rs",
  "approx",
  "bincode",
  "cubecl",
+ "cubecl-utils-rs",
  "cubek",
  "document-features",
  "either",
@@ -1037,6 +1037,17 @@ dependencies = [
  "serde",
  "spin",
  "variadics_please",
+]
+
+[[package]]
+name = "cubecl-utils-rs"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26e6098494722dab3d8243707faded9dcea26f3d6dd77d816b8c995343f3a90a"
+dependencies = [
+ "cubecl",
+ "num-traits",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

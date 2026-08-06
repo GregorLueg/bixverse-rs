@@ -18,6 +18,14 @@ use crate::single_cell::sc_data::data_io::{CellGeneSparseWriter, CellOnFileQuali
 // MTX //
 /////////
 
+/// Byte width of one record in a temporary bucket spill file:
+/// `cell_idx: u32`, `gene_idx: u32`, `count: u32`.
+///
+/// These files live and die inside a single
+/// [`MtxReader::process_mtx_and_write_bin_streaming`] call, so the layout
+/// carries no on-disk compatibility obligation.
+const BUCKET_RECORD_LEN: usize = 12;
+
 /// MTX file metadata
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -91,7 +99,7 @@ impl MtxReader {
         path: P,
         qc_params: MinCellQuality,
         cells_as_rows: bool,
-    ) -> IoResult<Self> {
+    ) -> Result<Self, BixverseErrors> {
         let path = path.as_ref().to_path_buf();
         let file = File::open(&path)?;
         let mut reader = BufReader::with_capacity(1024 * 1024, file);
@@ -112,7 +120,10 @@ impl MtxReader {
     /// ### Returns
     ///
     /// The `MtxHeader`
-    fn parse_header(reader: &mut BufReader<File>, cells_as_rows: bool) -> IoResult<MtxHeader> {
+    fn parse_header(
+        reader: &mut BufReader<File>,
+        cells_as_rows: bool,
+    ) -> Result<MtxHeader, BixverseErrors> {
         let mut line = String::new();
 
         loop {
@@ -126,42 +137,23 @@ impl MtxReader {
         let parts: Vec<&str> = line.split_whitespace().collect();
 
         if parts.len() != 3 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Invalid MTX header format",
+            return Err(BixverseErrors::MtxHeaderInvalid(
+                "expected three whitespace-separated fields on the shape line",
             ));
         }
 
-        let (total_cells, total_genes) = if cells_as_rows {
-            // Header format: cells genes entries
-            (
-                parts[0].parse().map_err(|_| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid cell count")
-                })?,
-                parts[1].parse().map_err(|_| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid gene count")
-                })?,
-            )
-        } else {
-            // Header format: genes cells entries
-            (
-                parts[1].parse().map_err(|_| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid cell count")
-                })?,
-                parts[0].parse().map_err(|_| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid gene count")
-                })?,
-            )
+        let parse_field = |s: &str, field: &'static str| -> Result<usize, BixverseErrors> {
+            s.parse()
+                .map_err(|_| BixverseErrors::MtxParseError { field })
         };
 
-        let total_entries = parts[2].parse().map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid entry count")
-        })?;
+        // Header is either `cells genes entries` or `genes cells entries`.
+        let (cell_pos, gene_pos) = if cells_as_rows { (0, 1) } else { (1, 0) };
 
         Ok(MtxHeader {
-            total_cells,
-            total_genes,
-            total_entries,
+            total_cells: parse_field(parts[cell_pos], "cell count")?,
+            total_genes: parse_field(parts[gene_pos], "gene count")?,
+            total_entries: parse_field(parts[2], "entry count")?,
         })
     }
 
@@ -327,7 +319,7 @@ impl MtxReader {
                                         && cell_idx < self.header.total_cells
                                     {
                                         local_cell_stats[cell_idx].0 += 1;
-                                        local_cell_stats[cell_idx].1 += value as u32;
+                                        local_cell_stats[cell_idx].1 += value;
                                     }
                                 }
                             }
@@ -419,10 +411,12 @@ impl MtxReader {
             true,
             quality.cells_to_keep.len(),
             quality.genes_to_keep.len(),
+            self.qc_params.target_size,
         )?;
 
-        // (gene_index, raw_count) - gene index as u32 to support >65k features
-        let mut cell_data: Vec<Vec<(u32, u16)>> = vec![Vec::new(); quality.cells_to_keep.len()];
+        // (gene_index, raw_count), both u32: gene index to support >65k
+        // features, count to avoid saturating high-expression genes.
+        let mut cell_data: Vec<Vec<(u32, u32)>> = vec![Vec::new(); quality.cells_to_keep.len()];
         let mut line_buffer = Vec::with_capacity(64);
 
         let start_read = Instant::now();
@@ -494,9 +488,9 @@ impl MtxReader {
             data.sort_by_key(|(gene_idx, _)| *gene_idx);
 
             let gene_indices: Vec<u32> = data.iter().map(|(g, _)| *g).collect();
-            let gene_counts: Vec<u16> = data.iter().map(|(_, c)| *c).collect();
+            let gene_counts: Vec<u32> = data.iter().map(|(_, c)| *c).collect();
 
-            let total_umi: u32 = gene_counts.iter().map(|&x| x as u32).sum();
+            let total_umi: u64 = gene_counts.iter().map(|&x| x as u64).sum();
             let n_genes = gene_counts.len();
 
             lib_size.push(total_umi as usize);
@@ -563,7 +557,13 @@ impl MtxReader {
         let n_kept_genes = quality.genes_to_keep.len();
 
         if n_kept_cells == 0 {
-            let writer = CellGeneSparseWriter::new(bin_path, true, 0, n_kept_genes)?;
+            let writer = CellGeneSparseWriter::new(
+                bin_path,
+                true,
+                0,
+                n_kept_genes,
+                self.qc_params.target_size,
+            )?;
             writer.finalise()?;
             return Ok(MtxFinalData {
                 cell_qc: CellQuality {
@@ -652,10 +652,10 @@ impl MtxReader {
             let new_gene_idx = quality.gene_old_to_new[&old_gene_idx] as u32;
             let bucket = (new_cell_idx as usize) / cells_per_bucket;
 
-            let mut buf = [0u8; 10];
+            let mut buf = [0u8; BUCKET_RECORD_LEN];
             buf[0..4].copy_from_slice(&new_cell_idx.to_le_bytes());
             buf[4..8].copy_from_slice(&new_gene_idx.to_le_bytes());
-            buf[8..10].copy_from_slice(&value.to_le_bytes());
+            buf[8..12].copy_from_slice(&value.to_le_bytes());
             bucket_writers[bucket].write_all(&buf)?;
 
             lines_read += 1;
@@ -675,7 +675,13 @@ impl MtxReader {
             println!("Bucketing done: {:.2?}", pass1.elapsed());
         }
 
-        let mut writer = CellGeneSparseWriter::new(bin_path, true, n_kept_cells, n_kept_genes)?;
+        let mut writer = CellGeneSparseWriter::new(
+            bin_path,
+            true,
+            n_kept_cells,
+            n_kept_genes,
+            self.qc_params.target_size,
+        )?;
         let mut lib_size = Vec::with_capacity(n_kept_cells);
         let mut nnz = Vec::with_capacity(n_kept_cells);
 
@@ -686,11 +692,11 @@ impl MtxReader {
 
         for (bucket_idx, temp_path) in temp_paths.iter().enumerate() {
             let bucket_bytes = std::fs::read(temp_path)?;
-            let n_entries = bucket_bytes.len() / 10;
+            let n_entries = bucket_bytes.len() / BUCKET_RECORD_LEN;
 
-            let mut entries: Vec<(u32, u32, u16)> = Vec::with_capacity(n_entries);
+            let mut entries: Vec<(u32, u32, u32)> = Vec::with_capacity(n_entries);
             for i in 0..n_entries {
-                let off = i * 10;
+                let off = i * BUCKET_RECORD_LEN;
                 let cell = u32::from_le_bytes([
                     bucket_bytes[off],
                     bucket_bytes[off + 1],
@@ -703,7 +709,12 @@ impl MtxReader {
                     bucket_bytes[off + 6],
                     bucket_bytes[off + 7],
                 ]);
-                let value = u16::from_le_bytes([bucket_bytes[off + 8], bucket_bytes[off + 9]]);
+                let value = u32::from_le_bytes([
+                    bucket_bytes[off + 8],
+                    bucket_bytes[off + 9],
+                    bucket_bytes[off + 10],
+                    bucket_bytes[off + 11],
+                ]);
                 entries.push((cell, gene, value));
             }
             drop(bucket_bytes);
@@ -719,8 +730,8 @@ impl MtxReader {
                 }
 
                 let gene_indices: Vec<u32> = entries[i..j].iter().map(|&(_, g, _)| g).collect();
-                let gene_counts: Vec<u16> = entries[i..j].iter().map(|&(_, _, v)| v).collect();
-                let total_umi: u32 = gene_counts.iter().map(|&x| x as u32).sum();
+                let gene_counts: Vec<u32> = entries[i..j].iter().map(|&(_, _, v)| v).collect();
+                let total_umi: u64 = gene_counts.iter().map(|&x| x as u64).sum();
 
                 lib_size.push(total_umi as usize);
                 nnz.push(gene_counts.len());
@@ -857,10 +868,10 @@ impl MtxReader {
 /// ### Return
 ///
 /// Returns an Option of a tuple representing
-/// `<row_index, col_index, raw_count>` where the count is u16 (sufficient
-/// for single cell data; values exceeding u16::MAX will saturate).
+/// `<row_index, col_index, raw_count>`. Counts are kept at full `u32` width;
+/// the on-disk chunk format narrows to u16 only when every value fits.
 #[inline]
-fn parse_mtx_line(line: &[u8]) -> Option<(u32, u32, u16)> {
+fn parse_mtx_line(line: &[u8]) -> Option<(u32, u32, u32)> {
     let mut i = 0;
     let len = line.len();
 
@@ -897,12 +908,38 @@ fn parse_mtx_line(line: &[u8]) -> Option<(u32, u32, u16)> {
         return None;
     }
 
-    // Parse third number (value) - parse as u32 then saturate to u16
+    // Parse third number (value)
     let mut val = 0u32;
     while i < len && line[i].is_ascii_digit() {
         val = val * 10 + (line[i] - b'0') as u32;
         i += 1;
     }
 
-    Some((row, col, val.min(u16::MAX as u32) as u16))
+    Some((row, col, val))
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: the parser used to saturate counts at `u16::MAX`.
+    #[test]
+    fn test_parse_mtx_line_keeps_full_u32_counts() {
+        assert_eq!(parse_mtx_line(b"1 2 3"), Some((1, 2, 3)));
+        assert_eq!(parse_mtx_line(b"7\t9\t65535"), Some((7, 9, 65_535)));
+        assert_eq!(parse_mtx_line(b"4 5 70000"), Some((4, 5, 70_000)));
+        assert_eq!(parse_mtx_line(b"1 2 4294967295"), Some((1, 2, u32::MAX)));
+    }
+
+    #[test]
+    fn test_parse_mtx_line_rejects_malformed_input() {
+        assert_eq!(parse_mtx_line(b""), None);
+        assert_eq!(parse_mtx_line(b"abc"), None);
+        assert_eq!(parse_mtx_line(b"1"), None);
+        assert_eq!(parse_mtx_line(b"1 2"), None);
+    }
 }

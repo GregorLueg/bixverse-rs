@@ -14,6 +14,9 @@ use std::time::Instant;
 use crate::core::math::linear_algebra::linear_regression;
 use crate::core::math::stats::{calc_fdr, inv_logit, logit, z_scores_to_pval};
 use crate::prelude::*;
+
+/// Genes read per batch while streaming gene chunks for Hotspot.
+const GENE_BATCH_SIZE: usize = 1000;
 use crate::single_cell::sc_utils::simd::*;
 use crate::utils::faer_parallelism;
 use crate::utils::simd::{sum_simd_f32, sum_squares_simd_f32};
@@ -1023,8 +1026,6 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
         verbose: usize,
     ) -> Result<HotSpotGeneRes, BixverseErrors> {
         let verbosity = parse_verbosity_level(verbose);
-
-        const GENE_BATCH_SIZE: usize = 1000;
 
         let start_all = Instant::now();
 
