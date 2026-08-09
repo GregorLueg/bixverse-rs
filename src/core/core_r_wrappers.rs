@@ -393,3 +393,55 @@ impl<T: BixverseFloat> SparsityParams<T> {
         })
     }
 }
+
+////////////////////////////
+// Lanczos eigensolver //
+////////////////////////////
+
+impl LanczosParams {
+    /// Generate LanczosParams from a flattened R list
+    ///
+    /// Takes the already-flattened map rather than a `List`, so it can be nested
+    /// inside the parameter block of whichever method owns the eigensolver.
+    /// Anything missing falls back to [LanczosParams::default], so the R and
+    /// Rust defaults cannot drift apart.
+    ///
+    /// ### Params
+    ///
+    /// * `params` - Parsed R list contents, already flattened to a HashMap.
+    ///
+    /// ### Returns
+    ///
+    /// A [LanczosParams] populated with the provided or default values.
+    pub fn from_r_map(params: &HashMap<&str, Robj>) -> LanczosParams {
+        let defaults = LanczosParams::default();
+
+        // None derives the basis from the requested component count. The
+        // positivity filter is load bearing: `NA_integer_` is `i32::MIN` and a
+        // plain `as usize` turns it, or any negative, into ~1.8e19, which for
+        // the restart budget is an unbounded loop rather than an error.
+        let basis_size = params
+            .get("lanczos_basis_size")
+            .and_then(|v| v.as_integer())
+            .filter(|&v| v > 0)
+            .map(|v| v as usize);
+
+        let max_restarts = params
+            .get("lanczos_max_restarts")
+            .and_then(|v| v.as_integer())
+            .filter(|&v| v > 0)
+            .map(|v| v as usize)
+            .unwrap_or(defaults.max_restarts);
+
+        let tol = params
+            .get("lanczos_tol")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.tol);
+
+        LanczosParams {
+            basis_size,
+            max_restarts,
+            tol,
+        }
+    }
+}

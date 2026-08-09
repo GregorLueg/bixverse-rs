@@ -304,8 +304,11 @@ fn build_normalised_laplacian(adj: &CompressedSparseData2<f32>) -> CompressedSpa
 ///
 /// The largest eigenvalue of the provided Laplacian matrix
 fn estimate_lmax(lap: &CompressedSparseData2<f32>, seed: u64) -> Result<f32, BixverseErrors> {
-    let (evals, _) = compute_largest_eigenpairs_lanczos(lap, 1, seed)?;
-    Ok(evals[0])
+    let (evals, _) = compute_largest_eigenpairs_lanczos(lap, 1, seed, None)?;
+    let lmax = *evals
+        .first()
+        .ok_or_else(|| BixverseErrors::InvalidArgument("MELD: empty Laplacian".to_string()))?;
+    Ok(lmax as f32)
 }
 
 /// Compute Chebyshev coefficients of the MELD filter on `[0, lmax]`.

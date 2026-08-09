@@ -614,6 +614,148 @@ pub enum BixverseErrors {
     #[error("MELD: Embedding rows unequals samples")]
     MELDEmbeddingUnequalsSamples,
 
+    // -- Palantir --
+    /// The user-supplied early cell index sits outside the cell range.
+    #[cfg(feature = "single-cell")]
+    #[error("Palantir: early cell index {early_cell} is out of range for {n_cells} cells")]
+    PalantirEarlyCellOutOfRange {
+        /// The offending early cell index
+        early_cell: usize,
+        /// Number of cells in the input
+        n_cells: usize,
+    },
+
+    /// A user-supplied terminal state index sits outside the cell range.
+    #[cfg(feature = "single-cell")]
+    #[error("Palantir: terminal state index {state} is out of range for {n_cells} cells")]
+    PalantirTerminalStateOutOfRange {
+        /// The offending terminal state index
+        state: usize,
+        /// Number of cells in the input
+        n_cells: usize,
+    },
+
+    /// A terminal state cell was never sampled as a waypoint, so it has no
+    /// position in the waypoint Markov chain.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Palantir: terminal state cell {state} is not among the {n_waypoints} sampled waypoints"
+    )]
+    PalantirTerminalStateNotAWaypoint {
+        /// The offending terminal state cell index
+        state: usize,
+        /// Number of sampled waypoints
+        n_waypoints: usize,
+    },
+
+    /// The first waypoint is not the start cell, which every consumer of the
+    /// geodesic matrix assumes.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Palantir: waypoint 0 is cell {first_waypoint}, but the start cell is {start_cell}; the start cell must be the first waypoint"
+    )]
+    PalantirStartCellNotFirstWaypoint {
+        /// The start cell the caller asked for
+        start_cell: usize,
+        /// The cell actually sitting in waypoint position zero
+        first_waypoint: usize,
+    },
+
+    /// The pseudotime refinement cap leaves no room for a single pass.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Palantir: max_iterations is {max_iterations}, but at least {minimum} is needed to run a refinement pass"
+    )]
+    PalantirMaxIterationsTooSmall {
+        /// The requested cap
+        max_iterations: usize,
+        /// Smallest cap that runs at least one pass
+        minimum: usize,
+    },
+
+    /// The neighbour count is too small to derive the back-edge bandwidth of
+    /// the waypoint Markov chain, which indexes neighbour rank
+    /// `min(knn / 3 - 1, 30)`.
+    #[cfg(feature = "single-cell")]
+    #[error("Palantir: knn is {knn}, but at least {minimum} is needed for the adaptive bandwidth")]
+    PalantirKnnTooSmall {
+        /// The requested neighbour count
+        knn: usize,
+        /// Smallest neighbour count yielding a valid bandwidth rank
+        minimum: usize,
+    },
+
+    /// Cells remained unreachable from the start cell after graph repair.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Palantir: {n_unreachable} cells remain unreachable from the start cell after {repairs} repair edges; increase knn"
+    )]
+    PalantirDisconnectedGraph {
+        /// Cells still at infinite geodesic distance
+        n_unreachable: usize,
+        /// Repair edges added before giving up
+        repairs: usize,
+    },
+
+    /// The pseudotime collapsed to a constant, or the Silverman bandwidth was
+    /// zero or non-finite, so the refinement cannot be normalised.
+    #[cfg(feature = "single-cell")]
+    #[error("Palantir: degenerate pseudotime ({reason}); the manifold is probably collapsed")]
+    PalantirDegeneratePseudotime {
+        /// Which quantity degenerated
+        reason: &'static str,
+    },
+
+    /// The stationary power iteration lost all of its mass, which can only
+    /// happen when the supplied chain is not row-stochastic or carries
+    /// non-finite entries.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Palantir: the stationary power iteration lost its mass at iteration {iteration} (total mass {total:e}); the transition matrix is not row-stochastic"
+    )]
+    PalantirStationaryMassLost {
+        /// The pass on which the mass went non-positive or non-finite
+        iteration: usize,
+        /// The offending total mass
+        total: f64,
+    },
+
+    /// No terminal states survived the rank cutoff and the caller supplied none.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Palantir: no terminal states detected; supply them explicitly or increase num_waypoints"
+    )]
+    PalantirNoTerminalStates,
+
+    /// The densified `(I - Q) B = R` solve did not produce a usable answer.
+    ///
+    /// Carries the achieved `‖(I - Q) B - R‖_inf`, which is what actually
+    /// distinguishes a near-singular system from ordinary rounding.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Palantir: the (I - Q) B = R solve over {n_transient} transient waypoints failed ({reason}, residual {residual:e})"
+    )]
+    PalantirAbsorbingSolveFailed {
+        /// Which check rejected the solution
+        reason: &'static str,
+        /// Achieved `‖(I - Q) B - R‖_inf`
+        residual: f64,
+        /// Total transient waypoints
+        n_transient: usize,
+    },
+
+    /// The densified `(I - Q)` would exceed the supported size.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Palantir: {n_transient} transient waypoints exceed the dense solve limit of {limit}; lower num_waypoints"
+    )]
+    PalantirTooManyWaypointsForDenseSolve {
+        /// Transient waypoint count requested
+        n_transient: usize,
+        /// The supported ceiling
+        limit: usize,
+    },
+
     // -- sctype --
     /// Error when number of cluster assignment != the number of cells
     #[error(

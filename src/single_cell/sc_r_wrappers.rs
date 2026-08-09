@@ -5,7 +5,7 @@ use extendr_api::*;
 use std::collections::HashMap;
 
 use crate::ml::clustering::k_means::KMeansParamsWrappers;
-use crate::prelude::{BixverseFloat, VecConvert, VecFloatConvert};
+use crate::prelude::{BixverseFloat, LanczosParams, VecConvert, VecFloatConvert};
 use crate::single_cell::mc_generation::{
     hdwgcna_meta_cells::BootstrappedMetaCellParams, metacells2::params::*,
     seacells::SEACellsParams, super_cells::SuperCellParams,
@@ -24,6 +24,7 @@ use crate::single_cell::sc_analysis::{
     vision::SignatureGenes,
 };
 use crate::single_cell::sc_data::h5ad_io::parse_h5ad_format;
+use crate::single_cell::sc_trajectory::palantir::PalantirParams;
 
 use crate::single_cell::sc_annotation::{
     sc_type::{CellTypeMarkers, ScTypeCellParams, SctypeRes, parse_score_calibration},
@@ -1309,6 +1310,7 @@ impl SEACellsParams {
         let knn_params = KnnParams::from_r_list(r_list.clone())?;
 
         let seacells_list: HashMap<&str, Robj> = r_list.try_into()?;
+        let lanczos_params = LanczosParams::from_r_map(&seacells_list);
 
         let n_sea_cells = seacells_list
             .get("n_sea_cells")
@@ -1383,6 +1385,8 @@ impl SEACellsParams {
             n_landmarks,
             // knn
             knn_params,
+            // eigensolver
+            lanczos_params,
         })
     }
 }
@@ -3118,6 +3122,101 @@ impl AucellParams {
             auc_type,
             max_rank,
             standardise,
+        })
+    }
+}
+
+//////////////
+// Palantir //
+//////////////
+
+impl PalantirParams {
+    /// Generate PalantirParams from an R list
+    ///
+    /// Any element missing from the list falls back to the matching field of
+    /// [PalantirParams::default], so the two sides cannot drift apart. The
+    /// nested kNN block is parsed by [KnnParams::from_r_list].
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the Palantir parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The `PalantirParams` with all parameters set.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let defaults = Self::default();
+        let knn_params = KnnParams::from_r_list(r_list.clone())?;
+
+        let palantir_list: HashMap<&str, Robj> = r_list.try_into()?;
+        let lanczos_params = LanczosParams::from_r_map(&palantir_list);
+
+        // `as_integer` hands back `NA_integer_` as `i32::MIN` and takes negative
+        // values at face value, both of which wrap to something around 1.8e19
+        // once cast to `usize`. Everything here is a count, so anything that is
+        // not strictly positive falls back to the default.
+        let n_dcs = palantir_list
+            .get("n_dcs")
+            .and_then(|v| v.as_integer())
+            .filter(|&v| v > 0)
+            .map(|v| v as usize)
+            .unwrap_or(defaults.n_dcs);
+
+        // None applies the eigengap heuristic rather than a fixed count.
+        let n_eigs = palantir_list
+            .get("n_eigs")
+            .and_then(|v| v.as_integer())
+            .filter(|&v| v > 0)
+            .map(|v| v as usize);
+
+        let knn = palantir_list
+            .get("knn")
+            .and_then(|v| v.as_integer())
+            .filter(|&v| v > 0)
+            .map(|v| v as usize)
+            .unwrap_or(defaults.knn);
+
+        let num_waypoints = palantir_list
+            .get("num_waypoints")
+            .and_then(|v| v.as_integer())
+            .filter(|&v| v > 0)
+            .map(|v| v as usize)
+            .unwrap_or(defaults.num_waypoints);
+
+        let scale_components = palantir_list
+            .get("scale_components")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.scale_components);
+
+        let use_early_cell_as_start = palantir_list
+            .get("use_early_cell_as_start")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.use_early_cell_as_start);
+
+        let max_iterations = palantir_list
+            .get("max_iterations")
+            .and_then(|v| v.as_integer())
+            .filter(|&v| v > 0)
+            .map(|v| v as usize)
+            .unwrap_or(defaults.max_iterations);
+
+        let branch_prob_threshold = palantir_list
+            .get("branch_prob_threshold")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.branch_prob_threshold);
+
+        Ok(Self {
+            n_dcs,
+            n_eigs,
+            knn,
+            num_waypoints,
+            scale_components,
+            use_early_cell_as_start,
+            max_iterations,
+            branch_prob_threshold,
+            knn_params,
+            lanczos_params,
         })
     }
 }

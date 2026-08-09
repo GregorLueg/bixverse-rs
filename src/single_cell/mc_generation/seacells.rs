@@ -95,6 +95,9 @@ pub struct SEACellsParams {
     /// [KnnParams] for the various approximate nearest neighbour searches
     /// in ann-search-rs
     pub knn_params: KnnParams,
+    // -- eigensolver --
+    /// [LanczosParams] for the diffusion-map eigendecomposition.
+    pub lanczos_params: LanczosParams,
 }
 
 impl SEACellsParams {
@@ -122,6 +125,8 @@ impl SEACellsParams {
             n_landmarks: None,
             // knn
             knn_params: KnnParams::default(),
+            // eigensolver
+            lanczos_params: LanczosParams::default(),
         }
     }
 }
@@ -342,15 +347,25 @@ pub fn compute_diffusion_kernel(
 /// * `kernel` - Symmetric kernel matrix, normalised in place
 /// * `n_components` - Number of eigenvectors to compute
 /// * `seed` - Random seed for the Lanczos start vector
+/// * `lanczos_params` - Optional [LanczosParams] for the eigensolver, defaulted
+///   when `None`. A diffusion kernel over a long, thin manifold has a tightly
+///   clustered spectrum, so the restart budget is what decides whether the
+///   components come back resolved.
 ///
 /// ### Returns
 ///
-/// (eigenvalues, eigenvectors) where eigenvectors is (n × n_components)
+/// `(eigenvalues, eigenvectors)`, the eigenvectors `n` by the returned
+/// eigenvalue count. That count is `min(n_components, n)` and can be smaller
+/// still when the solver hits an invariant subspace, so read it off the result
+/// rather than assuming `n_components`. Eigenvalues are `f64` because the
+/// multiscale scaling forms `lambda / (1 - lambda)` and `lambda` sits within a
+/// few `f32` ulps of one for any well-connected kernel.
 pub fn diffusion_map_from_kernel(
     kernel: &mut CompressedSparseData2<f32>,
     n_components: usize,
     seed: u64,
-) -> Result<(Vec<f32>, Vec<Vec<f32>>), BixverseErrors> {
+    lanczos_params: Option<LanczosParams>,
+) -> Result<(Vec<f64>, Vec<Vec<f32>>), BixverseErrors> {
     // Compute row sums (degrees)
     let row_sums: Vec<f32> = (0..kernel.shape.0)
         .map(|i| {
@@ -370,53 +385,73 @@ pub fn diffusion_map_from_kernel(
         }
     }
 
-    compute_largest_eigenpairs_lanczos(kernel, n_components, seed)
+    compute_largest_eigenpairs_lanczos(kernel, n_components, seed, lanczos_params)
 }
+
+/// Largest eigenvalue admitted into the `lambda / (1 - lambda)` scaling.
+///
+/// A diffusion operator has `lambda_0 = 1` exactly and, on a nearly
+/// disconnected graph, several more within rounding of it. The unclamped scale
+/// then overflows and poisons every downstream distance. Clamping at `1 - 1e-6`
+/// caps the scale at `1e6`, orders of magnitude beyond any real diffusion
+/// component, so genuine signal is untouched.
+const MAX_MULTISCALE_LAMBDA: f64 = 1.0 - 1e-10;
 
 /// Determine multiscale space by scaling eigenvectors
 ///
-/// Scales eigenvectors by λᵢ/(1-λᵢ) for diffusion distance metric.
+/// Scales eigenvectors by λᵢ/(1-λᵢ) for diffusion distance metric. The scaling
+/// is done in `f64` and the eigenvalue clamped below one first; `1 - lambda` is
+/// a subtraction of nearly equal numbers and loses every significant digit in
+/// `f32` for the leading components.
 ///
 /// ### Params
 ///
 /// * `eigenvalues` - Eigenvalues from diffusion maps
-/// * `eigenvectors` - Eigenvectors (n × n_components)
+/// * `eigenvectors` - Eigenvectors (n × components), the column count matching
+///   `eigenvalues`
 /// * `n_eigs` - Optional number of eigenvectors to use (None = auto-detect via
-///   eigengap)
+///   eigengap). Silently capped at the number actually available, because the
+///   eigensolver can return fewer pairs than were asked for.
 ///
 /// ### Returns
 ///
-/// Scaled eigenvectors (n × n_eigs)
+/// Scaled eigenvectors, `n` by `max(0, used - 1)`, the trivial leading
+/// eigenvector dropped. Empty rows when fewer than two eigenvalues are
+/// available.
 pub fn determine_multiscale_space(
-    eigenvalues: &[f32],
+    eigenvalues: &[f64],
     eigenvectors: &[Vec<f32>],
     n_eigs: Option<usize>,
 ) -> Vec<Vec<f32>> {
     let n = eigenvectors.len();
+    let available = eigenvalues
+        .len()
+        .min(eigenvectors.first().map_or(0, Vec::len));
 
     // auto-detect n_eigs using eigengap if not provided
-    let use_n_eigs = if let Some(n) = n_eigs {
+    let requested = if let Some(n) = n_eigs {
         n
     } else {
-        let gaps: Vec<f32> = eigenvalues.windows(2).map(|w| w[0] - w[1]).collect();
+        let gaps: Vec<f64> = eigenvalues.windows(2).map(|w| w[0] - w[1]).collect();
 
         let max_gap_idx = gaps
             .iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .max_by(|(_, a), (_, b)| a.total_cmp(b))
             .map(|(idx, _)| idx + 1)
             .unwrap_or(3);
 
-        max_gap_idx.max(3).min(eigenvalues.len())
+        max_gap_idx.max(3)
     };
 
+    let use_n_eigs = requested.min(available);
     let use_indices: Vec<usize> = (1..use_n_eigs).collect();
 
     let mut scaled = vec![vec![0.0f32; use_indices.len()]; n];
 
     for (out_idx, &eig_idx) in use_indices.iter().enumerate() {
-        let lambda = eigenvalues[eig_idx];
-        let scale = lambda / (1.0 - lambda);
+        let lambda = eigenvalues[eig_idx].min(MAX_MULTISCALE_LAMBDA);
+        let scale = (lambda / (1.0 - lambda)) as f32;
 
         for i in 0..n {
             scaled[i][out_idx] = eigenvectors[i][eig_idx] * scale;
@@ -439,10 +474,15 @@ pub fn determine_multiscale_space(
 ///
 /// ### Returns
 ///
-/// Indices of selected waypoints
-fn max_min_sampling(data: &[Vec<f32>], num_waypoints: usize, seed: u64) -> Vec<usize> {
+/// Indices of selected waypoints. Empty when there is nothing to sample over,
+/// which happens when the diffusion map came back with fewer than two
+/// components and the multiscale space is therefore zero-width.
+pub fn max_min_sampling(data: &[Vec<f32>], num_waypoints: usize, seed: u64) -> Vec<usize> {
     let n = data.len();
-    let n_dims = data[0].len();
+    let n_dims = data.first().map_or(0, Vec::len);
+    if n == 0 || n_dims == 0 {
+        return Vec::new();
+    }
     let no_iterations = (num_waypoints / n_dims).max(1);
 
     let mut rng = StdRng::seed_from_u64(seed);
@@ -2000,8 +2040,12 @@ impl<'a> SEACells<'a> {
 
         let mut kernel = compute_diffusion_kernel(knn_indices, knn_distances, squared_dist)?;
 
-        let (eigenvalues, eigenvectors) =
-            diffusion_map_from_kernel(&mut kernel, self.params.knn_params.k, seed)?;
+        let (eigenvalues, eigenvectors) = diffusion_map_from_kernel(
+            &mut kernel,
+            self.params.knn_params.k,
+            seed,
+            Some(self.params.lanczos_params),
+        )?;
 
         let multiscale = determine_multiscale_space(&eigenvalues, &eigenvectors, Some(10));
         let waypoint_ix = max_min_sampling(&multiscale, k, seed);
@@ -2109,11 +2153,16 @@ impl<'a> SEACells<'a> {
         let mut ll_kernel = compute_diffusion_kernel(&ll_idx, &ll_dist, squared_dist)?;
 
         let n_eigs = k_ll.min(l - 1).max(11);
-        let (evals, evecs) = diffusion_map_from_kernel(&mut ll_kernel, n_eigs, seed)?;
+        let (evals, evecs) = diffusion_map_from_kernel(
+            &mut ll_kernel,
+            n_eigs,
+            seed,
+            Some(self.params.lanczos_params),
+        )?;
 
         let landmark_multiscale = determine_multiscale_space(&evals, &evecs, Some(10));
-        let n_components = landmark_multiscale[0].len();
-        let used_lambdas: Vec<f32> = (1..=n_components).map(|i| evals[i]).collect();
+        let n_components = landmark_multiscale.first().map_or(0, Vec::len);
+        let used_lambdas: Vec<f32> = (1..=n_components).map(|i| evals[i] as f32).collect();
 
         if verbosity.normal_verbosity() {
             println!(
@@ -3268,6 +3317,7 @@ mod tests {
             (K2B_REFRESH_EVERY + 4, true, 5e-2),
         ] {
             let params = SEACellsParams {
+                lanczos_params: LanczosParams::default(),
                 n_sea_cells: k,
                 max_fw_iters,
                 convergence_epsilon: 1e-3,
@@ -3360,6 +3410,7 @@ mod tests {
 
         for (pruning, threshold) in [(false, 0.0f32), (true, 1e-7), (true, 5e-2)] {
             let params = SEACellsParams {
+                lanczos_params: LanczosParams::default(),
                 n_sea_cells: k,
                 max_fw_iters: 50,
                 convergence_epsilon: 1e-3,
@@ -3481,6 +3532,7 @@ mod tests {
         let n = 200usize;
         let k = 200usize;
         let params = SEACellsParams {
+            lanczos_params: LanczosParams::default(),
             n_sea_cells: k,
             max_fw_iters: 50,
             convergence_epsilon: 1e-3,
@@ -3548,6 +3600,7 @@ mod tests {
         for n in [2000usize, 8000, 20000] {
             let k = (n / 75).max(8);
             let params = SEACellsParams {
+                lanczos_params: LanczosParams::default(),
                 n_sea_cells: k,
                 max_fw_iters: 50,
                 convergence_epsilon: 1e-3,
