@@ -26,9 +26,9 @@ use rayon::prelude::*;
 use crate::core::math::sparse::undirected_edges_to_csr;
 use crate::prelude::*;
 
-///////////////
-// Constants //
-///////////////
+////////////
+// Consts //
+////////////
 
 /// Partition count above which edge counting drops to a single accumulator.
 ///
@@ -178,9 +178,9 @@ where
 
 /// Count directed edges between every ordered pair of partitions.
 ///
-/// The accumulator is dense `k * k` in row-major order, with `counts[a * k + b]`
-/// holding the number of stored edges from a node in `a` to a node in `b`. The
-/// diagonal therefore holds the within-partition count.
+/// The accumulator is dense `k * k` in row-major order, with
+/// `counts[a * k + b]` holding the number of stored edges from a node in `a` to
+/// a node in `b`. The diagonal therefore holds the within-partition count.
 ///
 /// Parallel below [PARALLEL_PARTITION_LIMIT] partitions: rows are split into
 /// one chunk per thread and each chunk folds into its own accumulator, merged

@@ -320,11 +320,10 @@ pub fn run_palantir(
     squared_dist: bool,
     early_cell: usize,
     terminal_states: Option<&[usize]>,
-    params: Option<PalantirParams>,
+    params: PalantirParams,
     seed: u64,
     verbose: usize,
 ) -> Result<PalantirResult, BixverseErrors> {
-    let params = params.unwrap_or_default();
     let verbosity = parse_verbosity_level(verbose);
     let n_cells = knn_indices.len();
 
@@ -613,17 +612,7 @@ mod tests {
         let coords = linear_manifold(120);
         let (indices, distances) = knn_of(&coords, 15);
 
-        let res = run_palantir(
-            &indices,
-            &distances,
-            true,
-            0,
-            None,
-            Some(test_params()),
-            42,
-            0,
-        )
-        .unwrap();
+        let res = run_palantir(&indices, &distances, true, 0, None, test_params(), 42, 0).unwrap();
 
         let truth: Vec<f32> = (0..120).map(|i| i as f32).collect();
         let corr = crate::core::math::vector_helpers::pearson_correlation(&res.pseudotime, &truth)
@@ -652,17 +641,7 @@ mod tests {
         let coords = y_manifold(trunk, arm);
         let (indices, distances) = knn_of(&coords, 15);
 
-        let res = run_palantir(
-            &indices,
-            &distances,
-            true,
-            0,
-            None,
-            Some(test_params()),
-            42,
-            0,
-        )
-        .unwrap();
+        let res = run_palantir(&indices, &distances, true, 0, None, test_params(), 42, 0).unwrap();
 
         // The arms must stay attached to the trunk. Detaching them gives a kNN
         // graph with three connected components, which puts eigenvalue one at
@@ -706,7 +685,7 @@ mod tests {
             true,
             0,
             Some(&tips),
-            Some(test_params()),
+            test_params(),
             42,
             0,
         )
@@ -784,7 +763,7 @@ mod tests {
             true,
             0,
             Some(&supplied),
-            Some(params),
+            params,
             42,
             0,
         )
@@ -826,7 +805,7 @@ mod tests {
             true,
             0,
             Some(&supplied),
-            Some(test_params()),
+            test_params(),
             42,
             0,
         )
@@ -848,16 +827,7 @@ mod tests {
         let (indices, distances) = knn_of(&coords, 10);
 
         assert!(matches!(
-            run_palantir(
-                &indices,
-                &distances,
-                true,
-                999,
-                None,
-                Some(test_params()),
-                42,
-                0
-            ),
+            run_palantir(&indices, &distances, true, 999, None, test_params(), 42, 0),
             Err(BixverseErrors::PalantirEarlyCellOutOfRange { .. })
         ));
     }
@@ -874,7 +844,7 @@ mod tests {
                 true,
                 0,
                 Some(&[999]),
-                Some(test_params()),
+                test_params(),
                 42,
                 0
             ),
@@ -891,7 +861,7 @@ mod tests {
         params.knn = 4;
 
         assert!(matches!(
-            run_palantir(&indices, &distances, true, 0, None, Some(params), 42, 0),
+            run_palantir(&indices, &distances, true, 0, None, params, 42, 0),
             Err(BixverseErrors::PalantirKnnTooSmall { .. })
         ));
     }

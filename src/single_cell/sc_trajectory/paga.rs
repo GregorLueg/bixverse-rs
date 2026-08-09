@@ -67,6 +67,59 @@ where
     pub sizes: Vec<usize>,
 }
 
+/////////////
+// Helpers //
+/////////////
+
+/// Build the binarised directed adjacency of a kNN graph.
+///
+/// Values are `u8` ones and are never read: the coarsening consumes the
+/// sparsity pattern alone, so this costs a byte per edge instead of the four a
+/// `f32` distance layer would.
+///
+/// Neither [crate::core::math::sparse::coo_to_csr] nor
+/// [crate::single_cell::sc_processing::knn::knn_to_sparse_dist] fits. The first
+/// sorts the whole edge list when the rows are already grouped; the second
+/// drops zero-distance neighbours, which would silently delete edges between
+/// duplicate cells.
+///
+/// ### Params
+///
+/// * `knn_indices` - kNN indices per cell. Self hits and out-of-range indices
+///   are dropped; the row is then sorted, which CSR wants and the backends do
+///   not provide (they return neighbours by distance).
+///
+/// ### Returns
+///
+/// A square CSR adjacency over the cells with one entry per surviving
+/// neighbour.
+fn directed_knn_csr(knn_indices: &[Vec<usize>]) -> CompressedSparseData2<u8> {
+    let n = knn_indices.len();
+
+    let mut indptr: Vec<u32> = Vec::with_capacity(n + 1);
+    let mut indices: Vec<u32> = Vec::with_capacity(knn_indices.iter().map(|r| r.len()).sum());
+    indptr.push(0);
+
+    let mut row: Vec<u32> = Vec::new();
+    for (i, neighbours) in knn_indices.iter().enumerate() {
+        row.clear();
+        row.extend(
+            neighbours
+                .iter()
+                .filter(|&&j| j != i && j < n)
+                .map(|&j| j as u32),
+        );
+        row.sort_unstable();
+        row.dedup();
+        indices.extend_from_slice(&row);
+        indptr.push(indices.len() as u32);
+    }
+
+    let data = vec![1u8; indices.len()];
+
+    CompressedSparseData2::new_csr(&data, &indices, &indptr, None, (n, n))
+}
+
 //////////
 // Main //
 //////////
@@ -119,59 +172,6 @@ where
         connectivities_tree,
         sizes: abstracted.sizes,
     })
-}
-
-/////////////
-// Helpers //
-/////////////
-
-/// Build the binarised directed adjacency of a kNN graph.
-///
-/// Values are `u8` ones and are never read: the coarsening consumes the
-/// sparsity pattern alone, so this costs a byte per edge instead of the four a
-/// `f32` distance layer would.
-///
-/// Neither [crate::core::math::sparse::coo_to_csr] nor
-/// [crate::single_cell::sc_processing::knn::knn_to_sparse_dist] fits. The first
-/// sorts the whole edge list when the rows are already grouped; the second
-/// drops zero-distance neighbours, which would silently delete edges between
-/// duplicate cells.
-///
-/// ### Params
-///
-/// * `knn_indices` - kNN indices per cell. Self hits and out-of-range indices
-///   are dropped; the row is then sorted, which CSR wants and the backends do
-///   not provide (they return neighbours by distance).
-///
-/// ### Returns
-///
-/// A square CSR adjacency over the cells with one entry per surviving
-/// neighbour.
-fn directed_knn_csr(knn_indices: &[Vec<usize>]) -> CompressedSparseData2<u8> {
-    let n = knn_indices.len();
-
-    let mut indptr: Vec<u32> = Vec::with_capacity(n + 1);
-    let mut indices: Vec<u32> = Vec::with_capacity(knn_indices.iter().map(|r| r.len()).sum());
-    indptr.push(0);
-
-    let mut row: Vec<u32> = Vec::new();
-    for (i, neighbours) in knn_indices.iter().enumerate() {
-        row.clear();
-        row.extend(
-            neighbours
-                .iter()
-                .filter(|&&j| j != i && j < n)
-                .map(|&j| j as u32),
-        );
-        row.sort_unstable();
-        row.dedup();
-        indices.extend_from_slice(&row);
-        indptr.push(indices.len() as u32);
-    }
-
-    let data = vec![1u8; indices.len()];
-
-    CompressedSparseData2::new_csr(&data, &indices, &indptr, None, (n, n))
 }
 
 ///////////

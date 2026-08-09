@@ -18,54 +18,6 @@ use crate::core::math::sparse::undirected_edges_to_csr;
 use crate::graph::graph_structures::UnionFind;
 use crate::prelude::*;
 
-//////////
-// Main //
-//////////
-
-/// Minimum spanning forest of a CSR adjacency.
-///
-/// ### Params
-///
-/// * `graph` - Square CSR adjacency, read as undirected. Self loops and
-///   non-finite weights are skipped.
-///
-/// ### Returns
-///
-/// A symmetric CSR of the same shape holding the retained edges at their
-/// original weights, or an error when `graph` is not a square CSR.
-pub fn minimum_spanning_forest<T>(
-    graph: &CompressedSparseData2<T>,
-) -> Result<CompressedSparseData2<T>, BixverseErrors>
-where
-    T: BixverseFloat + BixverseNumeric,
-{
-    spanning_forest(graph, false)
-}
-
-/// Maximum spanning forest of a CSR adjacency.
-///
-/// The same routine with the weight ordering flipped. Preferring the heaviest
-/// edges is what PAGA's `connectivities_tree` wants, and it avoids the
-/// reference implementation's detour through the reciprocals of the weights.
-///
-/// ### Params
-///
-/// * `graph` - Square CSR adjacency, read as undirected. Self loops and
-///   non-finite weights are skipped.
-///
-/// ### Returns
-///
-/// A symmetric CSR of the same shape holding the retained edges at their
-/// original weights, or an error when `graph` is not a square CSR.
-pub fn maximum_spanning_forest<T>(
-    graph: &CompressedSparseData2<T>,
-) -> Result<CompressedSparseData2<T>, BixverseErrors>
-where
-    T: BixverseFloat + BixverseNumeric,
-{
-    spanning_forest(graph, true)
-}
-
 /////////////
 // Helpers //
 /////////////
@@ -211,6 +163,54 @@ where
         });
     }
     Ok(rows)
+}
+
+//////////
+// Main //
+//////////
+
+/// Minimum spanning forest of a CSR adjacency.
+///
+/// ### Params
+///
+/// * `graph` - Square CSR adjacency, read as undirected. Self loops and
+///   non-finite weights are skipped.
+///
+/// ### Returns
+///
+/// A symmetric CSR of the same shape holding the retained edges at their
+/// original weights, or an error when `graph` is not a square CSR.
+pub fn minimum_spanning_forest<T>(
+    graph: &CompressedSparseData2<T>,
+) -> Result<CompressedSparseData2<T>, BixverseErrors>
+where
+    T: BixverseFloat + BixverseNumeric,
+{
+    spanning_forest(graph, false)
+}
+
+/// Maximum spanning forest of a CSR adjacency.
+///
+/// The same routine with the weight ordering flipped. Preferring the heaviest
+/// edges is what PAGA's `connectivities_tree` wants, and it avoids the
+/// reference implementation's detour through the reciprocals of the weights.
+///
+/// ### Params
+///
+/// * `graph` - Square CSR adjacency, read as undirected. Self loops and
+///   non-finite weights are skipped.
+///
+/// ### Returns
+///
+/// A symmetric CSR of the same shape holding the retained edges at their
+/// original weights, or an error when `graph` is not a square CSR.
+pub fn maximum_spanning_forest<T>(
+    graph: &CompressedSparseData2<T>,
+) -> Result<CompressedSparseData2<T>, BixverseErrors>
+where
+    T: BixverseFloat + BixverseNumeric,
+{
+    spanning_forest(graph, true)
 }
 
 ///////////
