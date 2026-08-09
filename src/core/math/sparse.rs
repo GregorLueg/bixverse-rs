@@ -1102,6 +1102,62 @@ where
     CompressedSparseData2::new_csr(&data, &indices, &indptr, None, shape)
 }
 
+/// Scatter a sorted undirected edge list into a symmetric CSR adjacency
+///
+/// Rows come out ascending without a per-row sort or a per-row allocation. The
+/// trick is the scatter order: the `hi` endpoint of every edge is written
+/// first, filling each row `r` with its `lo < r` partners in ascending order,
+/// and the `lo` endpoint second, appending its `hi > r` partners also
+/// ascending. Both halves are ascending because the input is sorted by `(lo,
+/// hi)`, and the first half sits entirely below the second because `lo < hi`.
+///
+/// Unlike [coo_to_csr] this neither sorts nor merges duplicates, so the caller
+/// owns both invariants.
+///
+/// ### Params
+///
+/// * `n` - Node count; the output is `n` square.
+/// * `edges` - Deduplicated `(lo, hi, value)` triples with `lo < hi`, sorted
+///   ascending by `(lo, hi)`.
+///
+/// ### Returns
+///
+/// `CompressedSparseData2` in CSR format with both directions of every edge
+/// stored at the same value.
+pub fn undirected_edges_to_csr<T>(n: usize, edges: &[(u32, u32, T)]) -> CompressedSparseData2<T>
+where
+    T: BixverseNumeric,
+{
+    let mut indptr = vec![0u32; n + 1];
+    for &(lo, hi, _) in edges {
+        indptr[lo as usize + 1] += 1;
+        indptr[hi as usize + 1] += 1;
+    }
+    for i in 0..n {
+        indptr[i + 1] += indptr[i];
+    }
+
+    let nnz = 2 * edges.len();
+    let mut indices = vec![0u32; nnz];
+    let mut data = vec![T::default(); nnz];
+    let mut cursor: Vec<u32> = indptr[..n].to_vec();
+
+    for &(lo, hi, v) in edges {
+        let pos = cursor[hi as usize] as usize;
+        indices[pos] = lo;
+        data[pos] = v;
+        cursor[hi as usize] += 1;
+    }
+    for &(lo, hi, v) in edges {
+        let pos = cursor[lo as usize] as usize;
+        indices[pos] = hi;
+        data[pos] = v;
+        cursor[lo as usize] += 1;
+    }
+
+    CompressedSparseData2::new_csr(&data, &indices, &indptr, None, (n, n))
+}
+
 ///////////////////////
 // Sparse operations //
 ///////////////////////

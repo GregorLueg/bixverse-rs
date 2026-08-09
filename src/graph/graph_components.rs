@@ -10,77 +10,8 @@
 
 use rustc_hash::FxHashMap;
 
+use crate::graph::graph_structures::UnionFind;
 use crate::prelude::*;
-
-///////////////
-// Union-find //
-///////////////
-
-/// Disjoint-set forest with path halving and union by size.
-struct UnionFind {
-    /// Parent pointer per element; a root points at itself.
-    parent: Vec<u32>,
-    /// Size of the tree rooted at each element. Only meaningful at roots.
-    size: Vec<u32>,
-}
-
-impl UnionFind {
-    /// Create `n` singleton sets.
-    ///
-    /// ### Params
-    ///
-    /// * `n` - Number of elements.
-    ///
-    /// ### Returns
-    ///
-    /// The initialised forest.
-    fn new(n: usize) -> Self {
-        Self {
-            parent: (0..n as u32).collect(),
-            size: vec![1; n],
-        }
-    }
-
-    /// Find the root of `x`, halving the path on the way up.
-    ///
-    /// ### Params
-    ///
-    /// * `x` - Element to look up.
-    ///
-    /// ### Returns
-    ///
-    /// The root of `x`'s set.
-    fn find(&mut self, mut x: u32) -> u32 {
-        while self.parent[x as usize] != x {
-            let grandparent = self.parent[self.parent[x as usize] as usize];
-            self.parent[x as usize] = grandparent;
-            x = grandparent;
-        }
-        x
-    }
-
-    /// Merge the sets containing `a` and `b`, smaller tree under larger.
-    ///
-    /// ### Params
-    ///
-    /// * `a` - First element.
-    /// * `b` - Second element.
-    ///
-    /// ### Returns
-    ///
-    /// Nothing; the forest is mutated in place.
-    fn union(&mut self, a: u32, b: u32) {
-        let (mut ra, mut rb) = (self.find(a), self.find(b));
-        if ra == rb {
-            return;
-        }
-        if self.size[ra as usize] < self.size[rb as usize] {
-            std::mem::swap(&mut ra, &mut rb);
-        }
-        self.parent[rb as usize] = ra;
-        self.size[ra as usize] += self.size[rb as usize];
-    }
-}
 
 //////////
 // Main //

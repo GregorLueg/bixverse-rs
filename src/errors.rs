@@ -87,6 +87,26 @@ pub enum BixverseErrors {
     #[error("The number of nodes and membership assignments in the communities do not add up.")]
     CommunityAssignmentMismatch,
 
+    /// Error if a partition label sits outside the declared partition count
+    #[error("The partition label {label} is out of range for {n_partitions} partitions.")]
+    PartitionLabelOutOfRange {
+        /// The offending label
+        label: usize,
+        /// Number of declared partitions
+        n_partitions: usize,
+    },
+
+    /// Error if the partition count exceeds what the dense coarsening accepts
+    #[error(
+        "The number of partitions ({n_partitions}) exceeds the maximum of {max} for graph abstraction."
+    )]
+    TooManyPartitions {
+        /// Provided number of partitions
+        n_partitions: usize,
+        /// The supported maximum
+        max: usize,
+    },
+
     // -- matrix algebra errors --
     /// Error if the feature dimensions are not the same
     #[error("The feature dimensions between the two matrices are unequal! x: {dim_x}, y: {dim_y}")]
