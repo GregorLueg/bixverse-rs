@@ -1982,19 +1982,13 @@ where
 }
 
 /// Ritz vectors retained across a restart, above the requested pair count.
-///
-/// The restart itself is a `keep * basis_size * n` product, so a large retained
-/// block buys few new Krylov steps per cycle for a lot of work: at `keep = 2k`
-/// out of a `2k + 10` basis only ten steps are bought. Keeping the wanted pairs
-/// plus a small guard block is the standard thick-restart choice and measured
-/// roughly twice as fast to a given residual on a single cell diffusion kernel.
 const LANCZOS_RESTART_GUARD: usize = 5;
 
 /// Norm ratio below which a second Gram-Schmidt pass is run.
 ///
 /// The DGKS criterion. A drop past `1 / sqrt(2)` means the projection cancelled
-/// at least half the vector, which is where the round-off it leaves behind stops
-/// being negligible. Above that the second pass is measurably wasted work.
+/// at least half the vector, which is where the round-off it leaves behind
+/// stops being negligible. Above that the second pass is measurably wasted work.
 const LANCZOS_ORTHO_REFINE_RATIO: f64 = 0.707;
 
 /// Lanczos breakdown threshold, relative to the running `||A||` estimate.
@@ -2006,33 +2000,15 @@ const LANCZOS_ORTHO_REFINE_RATIO: f64 = 0.707;
 const LANCZOS_BREAKDOWN_RATIO: f64 = 1e-12;
 
 /// Parameters for the restarted Lanczos eigensolver.
-///
-/// The basis size bounds memory at `basis_size * n` in `f64`, and restarting is
-/// what lets the solver keep iterating past that bound. The binding cost is not
-/// memory, though: half a million cells and a basis of 250 is 1 GB, which is
-/// affordable. It is the orthogonalisation, which grows as `basis_size^2 * n`
-/// per cycle against `basis_size * nnz` for the matrix products. A basis large
-/// enough to resolve a clustered spectrum in one run is quadratically more
-/// expensive than several restarted cycles at a bounded basis.
-///
-/// ### References
-///
-/// Wu and Simon, SIAM J. Matrix Anal. Appl., 2000. "Thick-restart Lanczos
-/// method for large symmetric eigenvalue problems."
 #[derive(Clone, Copy, Debug)]
 pub struct LanczosParams {
     /// Krylov basis vectors held at once. `None` derives it from the requested
-    /// component count as `max(2k + 10, k + 20)`, which leaves enough room above
-    /// the wanted pairs for the restart to make progress.
+    /// component count as `max(2k + 10, k + 20)`, which leaves enough room
+    /// above the wanted pairs for the restart to make progress.
     pub basis_size: Option<usize>,
-    /// Maximum restart cycles. Each cycle costs one basis worth of matrix-vector
-    /// products plus the orthogonalisation against the basis, so this is the
-    /// only knob that bounds the run time. The loop stops early on convergence
-    /// but not on stagnation: the residual of the slowest wanted pair is not
-    /// monotone across restarts, because a restart reshuffles which pair that
-    /// is. Measured on a 300-node path graph it went 2.6e-3, 4.5e-3, 1.5e-2,
-    /// 1.6e-2, 4.3e-3 over five consecutive cycles on its way to 9e-9, so any
-    /// stagnation test tight enough to be useful also cuts a converging run off.
+    /// Maximum restart cycles. Each cycle costs one basis worth of
+    /// matrix-vector products plus the orthogonalisation against the basis, so
+    /// this is the only knob that bounds the run time.
     pub max_restarts: usize,
     /// Relative residual tolerance. A Ritz pair counts as converged once
     /// `||A x - lambda x||` drops below `tol * ||A||`. The scaling matters: an
@@ -2043,22 +2019,6 @@ pub struct LanczosParams {
 
 impl LanczosParams {
     /// Defaults tuned on a single cell diffusion kernel.
-    ///
-    /// A well-separated spectrum reaches the tolerance in one to three cycles
-    /// and never sees this budget. It only binds on a clustered one, where
-    /// convergence is algebraic rather than geometric: measured on a
-    /// symmetrically normalised kNN kernel at `n = 50_000` with 15 components
-    /// the residual falls as roughly `1 / cycles`, so accuracy is bought
-    /// linearly in wall clock with no knee to stop at and the budget is the
-    /// whole decision.
-    ///
-    /// Sixteen is where that trade was settled. On a 300-node path graph, the
-    /// hardest clustered case here, the leading eigenvector's correlation with
-    /// the truth goes 0.65 at four cycles, 0.91 at eight and 0.999 at sixteen,
-    /// so anything below this reopens the noise the restart machinery exists to
-    /// fix. On the `n = 50_000` kernel it costs 0.49 s against 7.5 s for the
-    /// 50-cycle budget it replaces, for a comparable residual. Callers who need
-    /// more should raise it knowingly and check [LanczosResult::converged].
     ///
     /// ### Returns
     ///
@@ -2152,55 +2112,49 @@ where
     Ok((res.eigenvalues, res.eigenvectors))
 }
 
-/// Compute the largest eigenpairs of a symmetric sparse matrix, with diagnostics.
+/// Compute the largest eigenpairs of a symmetric sparse matrix, with
+/// diagnostics.
 ///
 /// Thick-restarted Lanczos. Each cycle builds a Krylov basis of
-/// [LanczosParams::basis_size] vectors with full reorthogonalisation, performs a
+/// [LanczosParams::basis_size] vectors with full reorthogonalisation, does a
 /// Rayleigh-Ritz extraction, and restarts from the best Ritz vectors plus the
-/// residual direction. Restarting is the point: the basis stays bounded while
-/// the iteration continues, so a clustered spectrum converges without the
-/// quadratic orthogonalisation cost a single long run would need.
+/// residual direction. Restarting is the key point: the basis stays bounded
+/// while the iteration keeps going, so a clustered spectrum converges without
+/// the quadratic orthogonalisation cost a single long run would need.
 ///
-/// The projected matrix is accumulated explicitly as `H[i][j] = <v_i, A v_j>`
+/// The projected matrix is accumulated explicitly as H[i][j] = <v_i, A v_j>
 /// rather than as a tridiagonal recurrence. After a thick restart the leading
-/// basis vectors are Ritz vectors rather than Lanczos vectors, so the projection
-/// is arrow-shaped rather than tridiagonal, and forming it directly keeps that
-/// correct without special-casing.
+/// basis vectors are Ritz vectors, not Lanczos vectors, so the projection is
+/// arrow-shaped rather than tridiagonal; forming it directly handles that
+/// without special-casing.
 ///
-/// The basis is held column-major as one flat buffer so that the projection, the
-/// reorthogonalisation, the restart and the final Ritz vectors are all `faer`
-/// products rather than scalar loops. That is where the time goes: the work is
-/// `O(basis_size^2 * n)` against `O(basis_size * nnz)` for the matrix products,
-/// so parallelising only the matrix product would be parallelising the cheap
-/// half. Orthogonalisation is classical Gram-Schmidt with a DGKS-conditional
-/// second pass, which is as accurate as two unconditional modified passes and
-/// expressible as two matrix products instead of `2 * basis_size` scalar loops.
+/// The basis is held column-major as one flat buffer, so the projection, the
+/// reorthogonalisation, the restart and the final Ritz vectors are all faer
+/// products rather than scalar loops. Orthogonalisation is classical
+/// Gram-Schmidt with a DGKS-conditional second pass, which matches the accuracy
+/// of two unconditional modified passes while being expressible as two matrix
+/// products instead of 2 * basis_size scalar loops.
 ///
-/// Convergence uses the exact Arnoldi residual `|beta_m| * |y[m-1]|`, which
-/// holds under thick restart because the relation `A V = V H + beta v e^T` is
-/// preserved across cycles, tested against `tol * ||A||`.
+/// Convergence uses the exact Arnoldi residual |beta_m| * |y[m-1]|, which
+/// still holds under thick restart because the relation A V = V H + beta v
+/// e^T is preserved across cycles, tested against tol * ||A||.
 ///
-/// Internals are `f64` regardless of the input type. Eigenvalues are returned in
-/// `f64`, eigenvectors in `f32`.
+/// Internals are f64 regardless of the input type. Eigenvalues come back in
+/// f64, eigenvectors in f32.
 ///
 /// ### Params
 ///
 /// * `matrix` - Symmetric sparse matrix. CSC input is converted to CSR.
 /// * `n_components` - Number of eigenpairs to compute. Capped at the matrix
-///   dimension rather than erroring, so a request for more pairs than the matrix
-///   has simply returns all of them.
+///   dimension rather than erroring, so a request for more pairs than the
+///   matrix has simply returns all of them.
 /// * `seed` - Seed for the starting vector.
-/// * `params` - Optional [LanczosParams], defaulted when `None`.
+/// * `params` - Optional [LanczosParams], defaulted when None.
 ///
 /// ### Returns
 ///
-/// A [LanczosResult]. The eigenvalue count and the eigenvector column count are
-/// always equal.
-///
-/// ### References
-///
-/// Wu and Simon, SIAM J. Matrix Anal. Appl., 2000; Daniel, Gragg, Kaufman and
-/// Stewart, Math. Comp., 1976 (the reorthogonalisation criterion).
+/// A [LanczosResult]. The eigenvalue count and the eigenvector column count
+/// are always equal.
 pub fn compute_largest_eigenpairs_lanczos_diag<T>(
     matrix: &CompressedSparseData2<T>,
     n_components: usize,
@@ -2219,8 +2173,6 @@ where
         ));
     }
 
-    // Asking for more pairs than the matrix has is not an error, it is a small
-    // matrix. Everything below is sized off this rather than the raw request.
     let n_keep = n_components.min(n);
     let m = params.resolve_basis(n_keep, n);
 
