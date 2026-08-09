@@ -3153,10 +3153,6 @@ impl PalantirParams {
         let palantir_list: HashMap<&str, Robj> = r_list.try_into()?;
         let lanczos_params = LanczosParams::from_r_list(&palantir_list);
 
-        // `as_integer` hands back `NA_integer_` as `i32::MIN` and takes negative
-        // values at face value, both of which wrap to something around 1.8e19
-        // once cast to `usize`. Everything here is a count, so anything that is
-        // not strictly positive falls back to the default.
         let n_dcs = palantir_list
             .get("n_dcs")
             .and_then(|v| v.as_integer())
@@ -3164,7 +3160,6 @@ impl PalantirParams {
             .map(|v| v as usize)
             .unwrap_or(defaults.n_dcs);
 
-        // None applies the eigengap heuristic rather than a fixed count.
         let n_eigs = palantir_list
             .get("n_eigs")
             .and_then(|v| v.as_integer())

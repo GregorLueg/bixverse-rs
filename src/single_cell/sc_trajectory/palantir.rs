@@ -14,25 +14,25 @@
 //! 1. Waypoints after the start cell are ordered ascending by cell index; the
 //!    reference sorts lexicographically by cell name. Same set, different order,
 //!    which propagates into the row order of the internal matrices.
-//! 2. Terminal states are likewise ordered by index, which sets the column order
-//!    of `branch_probs`.
+//! 2. Terminal states are likewise ordered by index, which sets the column
+//!    order of `branch_probs`.
 //! 3. The stationary distribution comes from power iteration on the lazy chain
 //!    `(I + T) / 2` rather than ARPACK with an unseeded start vector. Same
 //!    eigenvector, deterministic, and immune to periodicity.
 //! 4. Diffusion components come from a symmetric Lanczos solve plus a
-//!    back-transform rather than a non-symmetric solve. Mathematically identical
-//!    and far better conditioned.
+//!    back-transform rather than a non-symmetric solve. Mathematically
+//!    identical and far better conditioned.
 //! 5. Eigenvalues are clamped away from one before the multiscale scaling.
-//! 6. A zero adaptive bandwidth is replaced by the smallest positive one instead
-//!    of silently killing the row.
+//! 6. A zero adaptive bandwidth is replaced by the smallest positive one
+//!    instead of silently killing the row.
 //! 7. A waypoint whose neighbours are all pruned keeps its nearest neighbour at
 //!    full weight. The reference leaves the row empty, which makes the waypoint
 //!    a dead end that the absorbing solve then drops; this keeps the chain
 //!    row-stochastic and the waypoint attached to the manifold instead.
 //! 8. `(I - Q)` is densified and solved with a partial-pivot LU rather than a
 //!    sparse SuperLU factorisation, with a documented waypoint ceiling.
-//!    Waypoints that cannot reach any terminal state are dropped from the system
-//!    and reported through `stranded_waypoints`; the reference lets the
+//!    Waypoints that cannot reach any terminal state are dropped from the
+//!    system and reported through `stranded_waypoints`; the reference lets the
 //!    factorisation fail and falls back to a pseudo-inverse.
 //! 9. Graph repair adds each bridging edge from the farthest reachable cell in
 //!    one pass per component rather than iterating the reference's full search.
