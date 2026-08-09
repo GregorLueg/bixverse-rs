@@ -3,9 +3,7 @@
 //! Only stage one changes: the k-means coarsening runs on the device via
 //! [`k_means_clusters_gpu`]. The centroid kNN, the optional sNN pass and the
 //! Louvain runs all reuse the CPU stages from
-//! [`crate::single_cell::sc_analysis::fast_clusters`]. That split is deliberate:
-//! k-means over `n` cells is the only part that scales with the data, while
-//! everything downstream operates on ~1000 centroids and is already cheap.
+//! [`crate::single_cell::sc_analysis::fast_clusters`].
 
 use cubecl::prelude::*;
 use faer::MatRef;
