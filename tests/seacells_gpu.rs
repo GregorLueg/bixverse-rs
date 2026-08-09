@@ -17,6 +17,7 @@
     feature = "large_scale_diagnostics"
 ))]
 
+use bixverse_rs::prelude::LanczosParams;
 use cubecl::prelude::*;
 use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
 use faer::Mat;
@@ -96,6 +97,7 @@ fn params(k: usize, pruning: bool) -> SEACellsParams {
         pruning_threshold: 1e-7,
         n_landmarks: None,
         knn_params,
+        lanczos_params: LanczosParams::default(),
     }
 }
 

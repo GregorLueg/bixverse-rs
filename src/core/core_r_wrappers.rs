@@ -413,7 +413,7 @@ impl LanczosParams {
     /// ### Returns
     ///
     /// A [LanczosParams] populated with the provided or default values.
-    pub fn from_r_map(params: &HashMap<&str, Robj>) -> LanczosParams {
+    pub fn from_r_list(params: &HashMap<&str, Robj>) -> LanczosParams {
         let defaults = LanczosParams::default();
 
         // None derives the basis from the requested component count. The

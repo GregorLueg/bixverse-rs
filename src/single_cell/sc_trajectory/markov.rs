@@ -1,11 +1,11 @@
 //! The directed waypoint Markov chain and everything derived from it: terminal
 //! states, absorption probabilities, and the projection back onto all cells.
 //!
-//! Everything here is sized by the waypoint count rather than the cell count, so
-//! it is small and dense where the pseudotime half is enormous and sparse. That
-//! is also why the absorbing system is solved by densifying `(I - Q)` and
+//! Everything here is sized by the waypoint count rather than the cell count,
+//! so it is small and dense where the pseudotime half is enormous and sparse.
+//! That is also why the absorbing system is solved by densifying `(I - Q)` and
 //! handing it to a partial-pivot LU rather than reaching for a sparse
-//! factorisation the crate does not have.
+//! factorisation.
 //!
 //! ### References
 //!
@@ -23,9 +23,9 @@ use crate::prelude::*;
 use crate::single_cell::sc_trajectory::diffusion::{boundary_cells, nearest_candidate};
 use crate::utils::faer_parallelism;
 
-///////////////
-// Constants //
-///////////////
+////////////
+// Consts //
+////////////
 
 /// Cap on the neighbour rank used for the back-edge bandwidth.
 ///
@@ -75,11 +75,7 @@ const MAX_DENSE_TRANSIENT: usize = 20_000;
 ///
 /// Rows may legitimately sum to *less* than one, because mass that leaks into a
 /// stranded state never absorbs anywhere. Summing to more than one is not
-/// legitimate under any configuration, so only the upper side is bounded. The
-/// transition matrix is `f32` and its rows are normalised in `f32`, so each
-/// carries a few times `1e-7` of error which the solve amplifies by roughly the
-/// expected absorption time; measured drift on well-conditioned chains sits
-/// around `1e-6`.
+/// legitimate under any configuration, so only the upper side is bounded.
 const ABSORPTION_ROW_SUM_TOL: f64 = 1e-3;
 
 /// Tolerance on `‖(I - Q) B - R‖_inf`, the achieved solve residual.
@@ -92,9 +88,9 @@ const ABSORPTION_ROW_SUM_TOL: f64 = 1e-3;
 /// failing, not rounding.
 const ABSORPTION_RESIDUAL_TOL: f64 = 1e-5;
 
-/////////////////////
+///////////////////////
 // Transition matrix //
-/////////////////////
+///////////////////////
 
 /// Build the pseudotime-directed Markov chain over the waypoints.
 ///
@@ -134,11 +130,7 @@ pub fn build_waypoint_transitions(
             data_len: wp_pseudotime.len(),
         });
     }
-    // Clamp once, before both consumers. Handing the raw `knn` to
-    // `adaptive_bandwidths` while the search only retrieved `n_wp` neighbours
-    // makes the bandwidth rank saturate at the *farthest* retrieved neighbour,
-    // which is large enough that the pseudotime pruning then cuts nothing and
-    // the chain quietly loses its directionality. sklearn raises here instead.
+
     let knn = knn.min(n_wp);
     if knn < MIN_KNN {
         return Err(BixverseErrors::PalantirKnnTooSmall {
@@ -161,10 +153,6 @@ pub fn build_waypoint_transitions(
         let start = data.len();
         for (slot, &j) in indices[i].iter().enumerate() {
             let d = distances[i][slot];
-            // scipy's `find` drops explicitly stored zeros, which removes both
-            // the self loop and any duplicate-waypoint edge. Matched here,
-            // because a surviving self loop would make every state partially
-            // absorbing.
             if d <= 0.0 {
                 continue;
             }
@@ -177,24 +165,15 @@ pub fn build_waypoint_transitions(
             data.push(exponent.exp());
         }
 
-        if data.len() == start {
-            // Everything was pruned as too far back in pseudotime. A deliberate
-            // divergence: the reference leaves the row empty, which turns the
-            // waypoint into a dead end that absorbs nowhere and is later dropped
-            // from the absorbing solve. Keeping the nearest non-self neighbour
-            // at full weight instead keeps the chain row-stochastic and the
-            // waypoint attached to the manifold. It is *not* a NaN fix; the
-            // reference builds its transition matrix from `find(W)`, which only
-            // visits stored nonzeros, so an empty row never divides by zero.
-            if let Some(&j) = indices[i]
+        if data.len() == start
+            && let Some(&j) = indices[i]
                 .iter()
                 .enumerate()
                 .find(|&(slot, &j)| j != i && distances[i][slot] > 0.0)
                 .map(|(_, j)| j)
-            {
-                col_idx.push(j as u32);
-                data.push(1.0);
-            }
+        {
+            col_idx.push(j as u32);
+            data.push(1.0);
         }
 
         let row_sum: f32 = data[start..].iter().sum();
@@ -219,8 +198,8 @@ pub fn build_waypoint_transitions(
 ///
 /// Uses the SIMD flat-layout exhaustive index from `ann-search-rs` rather than
 /// the crate's [crate::prelude::generate_knn_with_dist]: at a few thousand
-/// waypoints an exact scan beats any index build, and this entry point keeps the
-/// self hit that the reference's convention indexes against.
+/// waypoints an exact scan beats any index build, and this entry point keeps
+/// the self hit that the reference's convention indexes against.
 ///
 /// ### Params
 ///
@@ -255,12 +234,13 @@ fn waypoint_knn(wp_data: &[Vec<f32>], k: usize, verbose: bool) -> ScKnnResults {
 
 /// Per-waypoint bandwidth for the back-edge tolerance and the affinity kernel.
 ///
-/// The reference indexes rank `min(floor(knn / 3) - 1, 30)` into a self-inclusive
-/// neighbour list, and so does this: the self hit is retrieved too, so the rank
-/// lands on the same non-self neighbour without any adjustment. Zero bandwidths,
-/// which duplicate waypoints produce, are replaced by the smallest positive
-/// bandwidth in the set; the reference divides by zero and silently kills the
-/// row.
+/// Matches the reference's min(floor(knn / 3) - 1, 30) rank into a
+/// self-inclusive neighbour list. Since the self hit is retrieved too, no
+/// adjustment is needed to land on the same non-self neighbour.
+///
+/// Duplicate waypoints produce zero bandwidths; these are replaced with the
+/// smallest positive bandwidth in the set. The reference instead divides by
+/// zero and silently kills the row.
 ///
 /// ### Params
 ///
@@ -302,42 +282,42 @@ fn adaptive_bandwidths(distances: &[Vec<f32>], knn: usize) -> Vec<f32> {
     sigma
 }
 
-///////////////////////
+/////////////////////
 // Terminal states //
-///////////////////////
+/////////////////////
 
 /// Stationary distribution of a row-stochastic chain.
 ///
-/// Power iteration on the lazy chain `(I + T) / 2`. That has the same stationary
-/// vector as `T` but strictly positive eigenvalues, so the periodicity the
-/// pseudotime pruning can introduce cannot stall the iteration. The reference
-/// uses ARPACK with an unseeded start vector, which makes its terminal-state
-/// detection irreproducible run to run; this is deterministic.
+/// Power iteration on the lazy chain (I + T) / 2. Same stationary vector as
+/// T, but strictly positive eigenvalues, so periodicity from the pseudotime
+/// pruning can't stall the iteration. The reference uses ARPACK with an
+/// unseeded start vector, so its terminal-state detection isn't reproducible
+/// run to run; this is deterministic.
 ///
-/// **The iteration is capped rather than converged, deliberately.** A trajectory
-/// with several fates produces a chain that is nearly reducible, so the
-/// eigenvalue at one is nearly repeated and the stationary vector is genuinely
-/// ill-determined; no method recovers a unique answer, and ARPACK merely hides
-/// that behind its random start. What survives the degeneracy is exactly what
-/// [detect_terminal_states] uses: mass piles up on the near-absorbing ends, and
-/// their ranking against the rest settles long before the vector itself does.
-/// Running from a uniform start makes the choice within the degenerate subspace
-/// reproducible.
+/// The iteration is capped rather than converged, on purpose. A trajectory
+/// with several fates gives a chain that's nearly reducible: the eigenvalue at
+/// one is nearly repeated, and the stationary vector is genuinely
+/// ill-determined. No method recovers a unique answer here, ARPACK just hides
+/// it behind its random start. What survives the degeneracy is exactly what
+/// [detect_terminal_states] relies on: mass piles up on the near-absorbing
+/// ends, and their ranking against the rest settles long before the vector
+/// itself does. Starting from uniform makes the choice within that degenerate
+/// subspace reproducible.
 ///
-/// Sequential by design: at a few thousand waypoints the sparse product is a few
-/// hundred microseconds and the rayon overhead would dominate.
+/// Sequential by design: at a few thousand waypoints the sparse product takes
+/// a few hundred microseconds, and rayon's overhead would dominate.
 ///
 /// ### Params
 ///
-/// * `transitions` - Row-stochastic CSR transition matrix.
+/// * transitions - Row-stochastic CSR transition matrix.
 ///
 /// ### Returns
 ///
-/// The L1-normalised stationary distribution, or an error when the chain loses
-/// all its mass, which means the input was not row-stochastic. That guard
-/// cannot fire on a genuinely row-stochastic chain: the lazy step keeps at
-/// least half of an L1-normalised non-negative vector, so the total stays in
-/// `[0.5, 1]`. It exists for callers that hand over non-finite chain data.
+/// The L1-normalised stationary distribution, or an error if the chain loses
+/// all its mass, meaning the input wasn't row-stochastic. That guard can't
+/// fire on a genuinely row-stochastic chain: the lazy step keeps at least
+/// half of an L1-normalised non-negative vector, so the total stays in
+/// [0.5, 1]. It's there for callers passing in non-finite chain data.
 pub fn stationary_distribution(
     transitions: &CompressedSparseData2<f32>,
 ) -> Result<Vec<f64>, BixverseErrors> {
@@ -460,22 +440,38 @@ pub fn detect_terminal_states(
     Ok(terminal)
 }
 
-/////////////////////////
-// Absorption probabilities //
-/////////////////////////
+//////////////////////
+// Absorption probs //
+//////////////////////
 
 /// Absorption probabilities of the waypoint chain.
 ///
-/// Makes the terminal states absorbing and solves `(I - Q) B = R` for the
-/// transient rows, where `Q` is the transient-to-transient block and `R` the
+/// Makes the terminal states absorbing and solves (I - Q) B = R for the
+/// transient rows, where Q is the transient-to-transient block and R the
 /// transient-to-absorbing one. The absorbing rows are never read, so zeroing
 /// them and setting their diagonal to one is skipped rather than performed.
 ///
 /// The system is densified and factorised with a partial-pivot LU. faer's LU
 /// reads the global parallelism setting, which this crate never touches, so it
-/// runs sequentially and costs `O(n_transient^3)`. That is milliseconds at the
-/// reference's waypoint count and is refused outright above
+/// runs sequentially and costs O(n_transient^3). That's milliseconds at the
+/// reference's waypoint count, and is refused outright above
 /// [MAX_DENSE_TRANSIENT].
+///
+/// Transient states with no path to any absorbing state are dropped from the
+/// system and left at zero rather than aborting the solve. Their absorption
+/// probabilities are genuinely undefined, since the walk never absorbs from
+/// there, and a handful of such waypoints is normal on a noisy manifold where
+/// the pseudotime pruning strands a local maximum. Including them would make
+/// (I - Q) singular; the reference lets the sparse factorisation fail and
+/// falls back to a pseudo-inverse, which returns numbers with no meaning.
+///
+/// Edges from a solved state into a stranded one are kept at their raw
+/// probability and simply lead nowhere, exactly as in the reference. That mass
+/// is lost, so the affected rows sum to less than one. Rescaling the surviving
+/// edges to recover a sum of one would be neither the absorption probability
+/// nor the probability conditional on absorbing, which needs a Doob
+/// h-transform, and it would silently rewrite the fate ratios of every state
+/// upstream of a strand.
 ///
 /// ### Params
 ///
@@ -483,24 +479,9 @@ pub fn detect_terminal_states(
 /// * `absorbing` - Terminal state positions within the waypoint array. Unique;
 ///   the order sets the column order of the result and is otherwise free.
 ///
-/// Transient states with no path to any absorbing state are dropped from the
-/// system and left at zero rather than aborting the solve. Their absorption
-/// probabilities are genuinely undefined, since the walk never absorbs from
-/// there, and a handful of such waypoints is normal on a noisy manifold where
-/// the pseudotime pruning strands a local maximum. Including them would make
-/// `(I - Q)` singular; the reference lets the sparse factorisation fail and
-/// falls back to a pseudo-inverse, which returns numbers with no meaning.
-///
-/// Edges from a solved state *into* a stranded one are kept at their raw
-/// probability and simply lead nowhere, exactly as in the reference. That mass
-/// is lost, so the affected rows sum to less than one. Rescaling the surviving
-/// edges to recover a sum of one would be neither the absorption probability nor
-/// the probability conditional on absorbing, which needs a Doob h-transform, and
-/// it silently rewrites the fate ratios of every state upstream of a strand.
-///
 /// ### Returns
 ///
-/// The `n_waypoints x n_absorbing` matrix and the number of stranded transient
+/// The n_waypoints x n_absorbing matrix and the number of stranded transient
 /// states. Absorbing rows are one-hot; solvable transient rows hold the
 /// absorption probabilities with negatives clamped to zero and no
 /// renormalisation, matching the reference.
@@ -550,11 +531,6 @@ pub fn absorption_probabilities(
         return Ok((out, stranded));
     }
 
-    // (I - Q) and R in one pass; absorbing rows are skipped rather than zeroed,
-    // which is equivalent to the reference's explicit zeroing because those rows
-    // are never read. Probabilities go in raw, widened to `f64`: an edge into a
-    // stranded state contributes to neither block and its mass is simply lost,
-    // which is what makes the row sums of `B` an absorption probability.
     let mut lhs = Mat::<f64>::zeros(n_trans, n_trans);
     let mut rhs = Mat::<f64>::zeros(n_trans, n_abs);
     for i in 0..n {
@@ -578,9 +554,6 @@ pub fn absorption_probabilities(
 
     let solved = lhs.partial_piv_lu().solve(&rhs);
 
-    // The residual is the only check that sees everything. A row-sum test is
-    // blind to errors that cancel across columns, and blind to whatever the
-    // non-negativity clamp below then hides.
     let mut residual = Mat::<f64>::zeros(n_trans, n_abs);
     matmul(
         residual.as_mut(),
@@ -608,10 +581,6 @@ pub fn absorption_probabilities(
         });
     }
 
-    // Row sums are checked on the *emitted* values, which is not the same set
-    // as the solved ones: a row of `[+1.5, -0.5]` sums to one but is emitted as
-    // `[1.5, 0.0]`. Only the upper side is bounded; a stranded neighbour makes a
-    // sum below one correct rather than suspicious.
     for ti in 0..n_trans {
         let mut row_sum = 0.0f64;
         for k in 0..n_abs {
@@ -669,9 +638,9 @@ fn reaches_absorbing(transitions: &CompressedSparseData2<f32>, pos_abs: &[i64]) 
     reached
 }
 
-//////////////////////////
+////////////////////////////
 // Projection and entropy //
-//////////////////////////
+////////////////////////////
 
 /// Project waypoint absorption probabilities onto every cell.
 ///

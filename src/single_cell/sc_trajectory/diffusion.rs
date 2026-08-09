@@ -2,11 +2,11 @@
 //! trajectory pipeline does on top of it.
 //!
 //! The kernel and eigendecomposition are reused from the SEACells
-//! implementation. Two things are done differently here and both are load
-//! bearing: the eigenvectors are back-transformed from the symmetrically
-//! normalised problem to the row-stochastic one Palantir actually defines its
-//! diffusion coordinates on, and the multiscale scaling carries an eigenvalue
-//! clamp plus the reference's second-largest-gap fallback.
+//! implementation. Two things are done differently here: a.) the eigenvectors
+//! are back-transformed from the symmetrically normalised problem to the
+//! row-stochastic one Palantir actually defines its diffusion coordinates on,
+//! and b.) the multiscale scaling carries an eigenvalue clamp plus the
+//! reference's second-largest-gap fallback.
 //!
 //! Data is kept as row-major `Vec<Vec<f32>>` (cells x components) throughout,
 //! which is what [determine_multiscale_space] emits and what
@@ -25,21 +25,12 @@ use crate::single_cell::mc_generation::seacells::{
     max_min_sampling,
 };
 
-///////////////
-// Constants //
-///////////////
+////////////
+// Consts //
+////////////
 
 /// Largest eigenvalue admitted into the `lambda / (1 - lambda)` multiscale
 /// scaling.
-///
-/// The reference has no guard here. An eigenvalue approaching one means a
-/// nearly disconnected graph, and the unclamped scale then overflows into
-/// infinities that poison every downstream distance. Clamping at `1 - 1e-4`
-/// caps the scale at roughly `1e4`, far beyond any real diffusion component,
-/// so genuine signal is untouched while the degenerate case stays finite.
-///
-/// This is the tighter of two clamps: [determine_multiscale_space] applies its
-/// own at `1 - 1e-6` for callers that do not come through here.
 const MAX_MULTISCALE_EIGENVALUE: f64 = 1.0 - 1e-4;
 
 /// Floor on the number of eigenvectors kept by the eigengap heuristic.
@@ -67,8 +58,9 @@ const MIN_MULTISCALE_EIGENVALUES: usize = 2;
 /// The eigensolver runs on `D^(-1/2) K D^(-1/2)` while Palantir defines its
 /// coordinates on the row-stochastic `T = D^(-1) K`. The two are similar,
 /// `T = D^(-1/2) M D^(1/2)`, so they share eigenvalues and their eigenvectors
-/// differ by `psi = D^(-1/2) v`. Taking the symmetric route and back-transforming
-/// is both exact and far better conditioned than a non-symmetric solve.
+/// differ by `psi = D^(-1/2) v`. Taking the symmetric route and
+/// back-transforming is both exact and far better conditioned than a
+/// non-symmetric solve.
 ///
 /// ### Params
 ///
@@ -86,11 +78,6 @@ const MIN_MULTISCALE_EIGENVALUES: usize = 2;
 ///
 /// Multiscale components, `n_cells` rows by `n_eigs - 1` columns; the trivial
 /// first eigenvector is dropped.
-///
-/// ### References
-///
-/// Setty, et al., Nat. Biotechnol., 2019; Coifman and Lafon, Appl. Comput.
-/// Harmon. Anal., 2006.
 pub fn multiscale_components(
     knn_indices: &[Vec<usize>],
     knn_distances: &[Vec<f32>],
@@ -109,12 +96,12 @@ pub fn multiscale_components(
     let mut kernel = compute_diffusion_kernel(knn_indices, knn_distances, squared_dist)?;
     let degrees = kernel_row_sums(&kernel);
 
-    // Mutates the kernel into its symmetrically normalised form, so the degrees
+    // mutates the kernel into its symmetrically normalised form, so the degrees
     // have to be taken before this call.
     let (eigenvalues, eigenvectors) =
         diffusion_map_from_kernel(&mut kernel, n_dcs + 1, seed, lanczos_params)?;
 
-    // The solver caps the pair count at the matrix dimension and can stop early
+    // the solver caps the pair count at the matrix dimension and can stop early
     // on an invariant subspace, so the count it returns is a ceiling, not a
     // promise.
     if eigenvalues.len() < MIN_MULTISCALE_EIGENVALUES {
@@ -161,8 +148,7 @@ fn kernel_row_sums(kernel: &CompressedSparseData2<f32>) -> Vec<f32> {
 /// The zero-degree branch is defensive only, not a guard: a zero-degree row has
 /// already been divided by its own square root inside
 /// [diffusion_map_from_kernel], so the kernel and hence `v` are non-finite well
-/// before this runs. Keeping zeros out of the output stops the damage
-/// spreading, but the place to catch an isolated cell is the kNN graph.
+/// before this runs.
 ///
 /// ### Params
 ///
@@ -223,17 +209,7 @@ fn clamp_eigenvalues(eigenvalues: &[f64]) -> Vec<f64> {
 ///
 /// The reference's rule: the largest eigengap wins; if that leaves fewer than
 /// three, fall back to the second largest; if that still leaves fewer than
-/// three, take three. Ties resolve to the *last* index. That is not a
-/// reproduction of anything: the reference reads off the end of an `argsort`
-/// whose default kind is `quicksort`, which is not stable, so its index among
-/// tied gaps is unspecified. Taking the last is simply the deterministic choice,
-/// and the sort here is stable so tied gaps keep ascending index order.
-///
-/// The floor of three is applied to explicit requests as well, which the
-/// reference does not do. One or two eigenvectors leaves at most a single
-/// multiscale coordinate, which cannot describe a branching manifold, so a
-/// request that small is treated as a mistake rather than honoured. Every path
-/// is then capped at what the eigensolver actually returned.
+/// three, take three. Ties resolve to the *last* index.
 ///
 /// ### Params
 ///
@@ -269,11 +245,13 @@ fn resolve_n_eigs(eigenvalues: &[f64], requested: Option<usize>) -> usize {
     n_eigs.min(available)
 }
 
-/////////////////////////
+///////////////////////////
 // Geometric bookkeeping //
-/////////////////////////
+///////////////////////////
 
 /// Min-max scale every component to `[0, 1]` in place.
+///
+/// ### Notes
 ///
 /// A constant component maps to all zeros rather than `NaN`, matching
 /// `sklearn.preprocessing.minmax_scale`.
@@ -317,6 +295,8 @@ pub fn minmax_scale_columns(data: &mut [Vec<f32>]) {
 /// The per-component argmax and argmin cells, deduplicated. These are the
 /// candidate endpoints of the manifold: the start cell is snapped to one of
 /// them, and so is every terminal state candidate.
+///
+/// ### Notes
 ///
 /// Ties resolve to the first index, matching `pandas.Series.idxmax`.
 ///
@@ -402,9 +382,7 @@ pub fn nearest_candidate(
 /// the start cell pulled to the front.
 ///
 /// The reference orders the tail lexicographically by cell name; here it is
-/// ascending by cell index, which is the deterministic equivalent. The set is
-/// identical either way, but the order propagates into the row order of every
-/// internal matrix, so it is a deliberate documented divergence.
+/// ascending by cell index, which is the deterministic equivalent.
 ///
 /// ### Params
 ///

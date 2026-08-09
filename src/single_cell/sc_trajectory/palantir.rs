@@ -4,16 +4,12 @@
 //! a pseudotime-directed Markov chain over the waypoints, terminal states, and
 //! absorption probabilities projected back onto every cell.
 //!
-//! The entry point takes a kNN graph and nothing else, so a disk-backed single
-//! cell store and an in-memory meta cell matrix are served identically: both
-//! produce the same `(indices, distances)` pair.
-//!
 //! Memory is dominated by the geodesic and weight matrices at
 //! `n_waypoints * n_cells * 12` bytes, so 14.4 KB per cell at the reference's
 //! 1200 waypoints. `num_waypoints` is the knob for that and for the dense
 //! absorbing solve.
 //!
-//! ## Deliberate divergences from the reference implementation
+//! ### Deliberate divergences from the reference implementation
 //!
 //! 1. Waypoints after the start cell are ordered ascending by cell index; the
 //!    reference sorts lexicographically by cell name. Same set, different order,
@@ -66,15 +62,11 @@ use crate::single_cell::sc_trajectory::pseudotime::{
     build_symmetric_knn_graph, compute_pseudotime, connect_graph,
 };
 
-//////////////////////////
-// Enums and structures //
-//////////////////////////
+//////////////////////
+// Enums and strucs //
+//////////////////////
 
 /// Parameters for Palantir trajectory inference.
-///
-/// ### References
-///
-/// Setty, et al., Nat. Biotechnol., 2019.
 #[derive(Clone, Debug)]
 pub struct PalantirParams {
     /// Diffusion components to extract before the multiscale scaling.
@@ -147,7 +139,8 @@ impl Default for PalantirParams {
 
 /// Results of a Palantir run.
 pub struct PalantirResult {
-    /// Pseudotime per cell, min-max scaled to `[0, 1]` with the start cell at 0.
+    /// Pseudotime per cell, min-max scaled to `[0, 1]` with the start cell at
+    /// 0.
     pub pseudotime: Vec<f32>,
     /// Differentiation entropy per cell, natural log, computed on the
     /// row-renormalised fate probabilities *before* thresholding.
@@ -158,8 +151,8 @@ pub struct PalantirResult {
     pub branch_probs: Mat<f32>,
     /// Terminal state cell indices, ascending. Sets the column order above.
     pub terminal_states: Vec<usize>,
-    /// Waypoint cell indices. `waypoints[0]` is the start cell; the remainder is
-    /// ascending.
+    /// Waypoint cell indices. `waypoints[0]` is the start cell; the remainder
+    /// is ascending.
     pub waypoints: Vec<usize>,
     /// The start cell actually used.
     pub start_cell: usize,
@@ -177,6 +170,116 @@ pub struct PalantirResult {
     /// weight sits on them have rows summing below one. A large count means the
     /// chain is over-pruned.
     pub stranded_waypoints: usize,
+}
+
+/////////////
+// Helpers //
+/////////////
+
+/// Build the symmetric kNN graph geodesics are measured over.
+///
+/// The search runs on the multiscale space rather than the caller's original
+/// embedding, because that is where the reference defines its geodesics. `k`
+/// and the metric are forced; the caller's backend choice and its tuning are
+/// kept.
+///
+/// ### Params
+///
+/// * `multiscale` - Multiscale components, cells by components.
+/// * `params` - The run parameters, read for `knn` and the kNN backend.
+/// * `seed` - Seed for the kNN backend.
+/// * `verbose` - Progress reporting for the search.
+///
+/// ### Returns
+///
+/// A symmetric CSR adjacency over the cells.
+fn geodesic_graph(
+    multiscale: faer::MatRef<f32>,
+    params: &PalantirParams,
+    seed: u64,
+    verbose: bool,
+) -> Result<CompressedSparseData2<f32>, BixverseErrors> {
+    let n_cells = multiscale.nrows();
+
+    let mut knn_params = params.knn_params.clone();
+
+    // the reference's knn counts the self hit; the crate's search drops it.
+    knn_params.k = params
+        .knn
+        .saturating_sub(1)
+        .clamp(1, n_cells.saturating_sub(1).max(1));
+    knn_params.ann_dist = "euclidean".to_string();
+
+    let (indices, distances) =
+        generate_knn_with_dist(multiscale, &knn_params, true, false, seed as usize, verbose)?;
+    let distances = distances.ok_or(BixverseErrors::InvalidArgument(
+        "Palantir: the multiscale kNN search returned no distances".to_string(),
+    ))?;
+
+    // euclidean distances come back squared from the ANN backends.
+    build_symmetric_knn_graph(&indices, &distances, true)
+}
+
+/// Map terminal state cell indices onto their waypoint positions.
+///
+/// ### Params
+///
+/// * `waypoints` - Waypoint cell indices.
+/// * `states` - Terminal state cell indices.
+///
+/// ### Returns
+///
+/// Positions within `waypoints`, ascending and unique, or an error when a state
+/// is not a waypoint. [assemble_waypoints] guarantees it is, so this only fires
+/// when the two are called out of step.
+fn waypoint_positions(waypoints: &[usize], states: &[usize]) -> Result<Vec<usize>, BixverseErrors> {
+    let lookup: FxHashMap<usize, usize> = waypoints
+        .iter()
+        .enumerate()
+        .map(|(pos, &cell)| (cell, pos))
+        .collect();
+
+    let mut out: Vec<usize> = states
+        .iter()
+        .map(|&s| {
+            lookup
+                .get(&s)
+                .copied()
+                .ok_or(BixverseErrors::PalantirTerminalStateNotAWaypoint {
+                    state: s,
+                    n_waypoints: waypoints.len(),
+                })
+        })
+        .collect::<Result<Vec<usize>, BixverseErrors>>()?;
+
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
+}
+
+/// Zero fate probabilities below a threshold, without renormalising.
+///
+/// The reference does the same, so rows generally stop summing to one.
+///
+/// ### Params
+///
+/// * `branch_probs` - Fate probabilities, cells by terminal states. Mutated.
+/// * `threshold` - Values strictly below this become zero.
+///
+/// ### Returns
+///
+/// Nothing; `branch_probs` is rewritten.
+fn apply_probability_threshold(branch_probs: &mut Mat<f32>, threshold: f32) {
+    if threshold <= 0.0 {
+        return;
+    }
+    for i in 0..branch_probs.nrows() {
+        for j in 0..branch_probs.ncols() {
+            if branch_probs[(i, j)] < threshold {
+                branch_probs[(i, j)] = 0.0;
+            }
+        }
+    }
 }
 
 //////////
@@ -327,7 +430,8 @@ pub fn run_palantir(
         Some(states) => waypoint_positions(&waypoints, states)?,
         None => detect_terminal_states(&transitions, &wp_data, &wp_pseudotime)?,
     };
-    // Order by cell index, not waypoint position: `terminal_states` is exported
+
+    // order by cell index, not waypoint position: `terminal_states` is exported
     // ascending and it has to stay aligned with the `branch_probs` columns.
     absorbing.sort_unstable_by_key(|&p| waypoints[p]);
 
@@ -348,7 +452,7 @@ pub fn run_palantir(
         branch_probs_wp.as_ref(),
     )?;
 
-    // Entropy is taken before the threshold, matching the reference.
+    // entropy is taken before the threshold, matching the reference.
     let entropy = branch_entropy(branch_probs.as_ref());
     apply_probability_threshold(&mut branch_probs, params.branch_prob_threshold);
 
@@ -367,114 +471,6 @@ pub fn run_palantir(
         repair_edges,
         stranded_waypoints,
     })
-}
-
-/////////////
-// Helpers //
-/////////////
-
-/// Build the symmetric kNN graph geodesics are measured over.
-///
-/// The search runs on the multiscale space rather than the caller's original
-/// embedding, because that is where the reference defines its geodesics. `k` and
-/// the metric are forced; the caller's backend choice and its tuning are kept.
-///
-/// ### Params
-///
-/// * `multiscale` - Multiscale components, cells by components.
-/// * `params` - The run parameters, read for `knn` and the kNN backend.
-/// * `seed` - Seed for the kNN backend.
-/// * `verbose` - Progress reporting for the search.
-///
-/// ### Returns
-///
-/// A symmetric CSR adjacency over the cells.
-fn geodesic_graph(
-    multiscale: faer::MatRef<f32>,
-    params: &PalantirParams,
-    seed: u64,
-    verbose: bool,
-) -> Result<CompressedSparseData2<f32>, BixverseErrors> {
-    let n_cells = multiscale.nrows();
-
-    let mut knn_params = params.knn_params.clone();
-    // The reference's knn counts the self hit; the crate's search drops it.
-    knn_params.k = params
-        .knn
-        .saturating_sub(1)
-        .clamp(1, n_cells.saturating_sub(1).max(1));
-    knn_params.ann_dist = "euclidean".to_string();
-
-    let (indices, distances) =
-        generate_knn_with_dist(multiscale, &knn_params, true, false, seed as usize, verbose)?;
-    let distances = distances.ok_or(BixverseErrors::InvalidArgument(
-        "Palantir: the multiscale kNN search returned no distances".to_string(),
-    ))?;
-
-    // Euclidean distances come back squared from the ANN backends.
-    build_symmetric_knn_graph(&indices, &distances, true)
-}
-
-/// Map terminal state cell indices onto their waypoint positions.
-///
-/// ### Params
-///
-/// * `waypoints` - Waypoint cell indices.
-/// * `states` - Terminal state cell indices.
-///
-/// ### Returns
-///
-/// Positions within `waypoints`, ascending and unique, or an error when a state
-/// is not a waypoint. [assemble_waypoints] guarantees it is, so this only fires
-/// when the two are called out of step.
-fn waypoint_positions(waypoints: &[usize], states: &[usize]) -> Result<Vec<usize>, BixverseErrors> {
-    let lookup: FxHashMap<usize, usize> = waypoints
-        .iter()
-        .enumerate()
-        .map(|(pos, &cell)| (cell, pos))
-        .collect();
-
-    let mut out: Vec<usize> = states
-        .iter()
-        .map(|&s| {
-            lookup
-                .get(&s)
-                .copied()
-                .ok_or(BixverseErrors::PalantirTerminalStateNotAWaypoint {
-                    state: s,
-                    n_waypoints: waypoints.len(),
-                })
-        })
-        .collect::<Result<Vec<usize>, BixverseErrors>>()?;
-
-    out.sort_unstable();
-    out.dedup();
-    Ok(out)
-}
-
-/// Zero fate probabilities below a threshold, without renormalising.
-///
-/// The reference does the same, so rows generally stop summing to one.
-///
-/// ### Params
-///
-/// * `branch_probs` - Fate probabilities, cells by terminal states. Mutated.
-/// * `threshold` - Values strictly below this become zero.
-///
-/// ### Returns
-///
-/// Nothing; `branch_probs` is rewritten.
-fn apply_probability_threshold(branch_probs: &mut Mat<f32>, threshold: f32) {
-    if threshold <= 0.0 {
-        return;
-    }
-    for i in 0..branch_probs.nrows() {
-        for j in 0..branch_probs.ncols() {
-            if branch_probs[(i, j)] < threshold {
-                branch_probs[(i, j)] = 0.0;
-            }
-        }
-    }
 }
 
 ///////////

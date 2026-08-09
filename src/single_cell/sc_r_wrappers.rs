@@ -1310,7 +1310,7 @@ impl SEACellsParams {
         let knn_params = KnnParams::from_r_list(r_list.clone())?;
 
         let seacells_list: HashMap<&str, Robj> = r_list.try_into()?;
-        let lanczos_params = LanczosParams::from_r_map(&seacells_list);
+        let lanczos_params = LanczosParams::from_r_list(&seacells_list);
 
         let n_sea_cells = seacells_list
             .get("n_sea_cells")
@@ -3149,7 +3149,7 @@ impl PalantirParams {
         let knn_params = KnnParams::from_r_list(r_list.clone())?;
 
         let palantir_list: HashMap<&str, Robj> = r_list.try_into()?;
-        let lanczos_params = LanczosParams::from_r_map(&palantir_list);
+        let lanczos_params = LanczosParams::from_r_list(&palantir_list);
 
         // `as_integer` hands back `NA_integer_` as `i32::MIN` and takes negative
         // values at face value, both of which wrap to something around 1.8e19
