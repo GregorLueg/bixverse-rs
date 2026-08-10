@@ -751,10 +751,10 @@ impl ScDblFinderParams {
                 .and_then(|v| v.as_integer())
                 .unwrap_or(defaults.n_iterations as i32) as usize,
             // Classification
-            n_trees: map
+            gbm_n_trees: map
                 .get("n_trees")
                 .and_then(|v| v.as_integer())
-                .unwrap_or(defaults.n_trees as i32) as usize,
+                .unwrap_or(defaults.gbm_n_trees as i32) as usize,
             max_depth: map
                 .get("max_depth")
                 .and_then(|v| v.as_integer())

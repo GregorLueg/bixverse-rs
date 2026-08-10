@@ -2204,12 +2204,12 @@ impl LanczosParams {
     ///
     /// ### Returns
     ///
-    /// Self with a derived basis size, 16 restarts and a relative tolerance of
+    /// Self with a derived basis size, 64 restarts and a relative tolerance of
     /// `1e-8`.
     pub fn new() -> Self {
         Self {
             basis_size: None,
-            max_restarts: 16,
+            max_restarts: 64,
             tol: 1e-8,
         }
     }
