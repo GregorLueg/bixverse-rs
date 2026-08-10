@@ -419,13 +419,17 @@ where
 /// ### Params
 ///
 /// * `r_list` - R list that has the following elements: `indptr`, `indices`,
-///   `data`, `nrow`, `ncol` and `format`
+///   `data`, `nrow`, `ncol` and `cs_type`. The key names are exactly the ones
+///   [sparse_data_to_list] writes, so a list survives a round trip through both.
 /// * `populate_data_2` - Boolean. If set to `true`, the data will be also
 ///   copied into data_2 of the `CompressedSparseData2`.
 ///
 /// ### Returns
 ///
-/// The CompressedSparseData2 Rust object with the data
+/// The CompressedSparseData2 Rust object with the data, or an error naming the
+/// slot at fault. Nothing here panics: this sits on the R boundary, where a
+/// panic takes the whole session down instead of surfacing as a condition R can
+/// catch.
 pub fn list_to_sparse_matrix<T>(
     r_list: List,
     populate_data_2: bool,
@@ -440,7 +444,7 @@ where
     let indptr: Vec<usize> = r_data
         .get("indptr")
         .and_then(|v| v.as_integer_slice())
-        .unwrap()
+        .ok_or(BixverseErrors::RListParse("indptr missing or not integer"))?
         .iter()
         .map(|&x| x as usize)
         .collect();
@@ -448,29 +452,35 @@ where
     let indices: Vec<usize> = r_data
         .get("indices")
         .and_then(|v| v.as_integer_slice())
-        .unwrap()
+        .ok_or(BixverseErrors::RListParse("indices missing or not integer"))?
         .iter()
         .map(|&x| x as usize)
         .collect();
 
     let data: Vec<T> = r_data
         .get("data")
-        .unwrap()
-        .as_real_slice()
-        .unwrap()
+        .and_then(|v| v.as_real_slice())
+        .ok_or(BixverseErrors::RListParse("data missing or not double"))?
         .iter()
-        .map(|&x| T::from(x).unwrap())
-        .collect();
+        .map(|&x| T::from(x).ok_or(BixverseErrors::RListParse("data value out of range")))
+        .collect::<Result<Vec<T>, _>>()?;
 
-    let nrow = r_data.get("nrow").and_then(|v| v.as_integer()).unwrap() as usize;
-    let ncol = r_data.get("ncol").and_then(|v| v.as_integer()).unwrap() as usize;
+    let nrow = r_data
+        .get("nrow")
+        .and_then(|v| v.as_integer())
+        .ok_or(BixverseErrors::RListParse("nrow missing or not integer"))? as usize;
+    let ncol = r_data
+        .get("ncol")
+        .and_then(|v| v.as_integer())
+        .ok_or(BixverseErrors::RListParse("ncol missing or not integer"))? as usize;
 
-    let format_str = r_data.get("format").and_then(|v| v.as_str()).unwrap();
-    let cs_type = match format_str {
-        "csr" => CompressedSparseFormat::Csr,
-        "csc" => CompressedSparseFormat::Csc,
-        _ => panic!("Unknown format"),
-    };
+    let cs_type = r_data
+        .get("cs_type")
+        .and_then(|v| v.as_str())
+        .and_then(parse_compressed_sparse_format)
+        .ok_or(BixverseErrors::RListParse(
+            "cs_type missing or not one of 'csr' / 'csc'",
+        ))?;
 
     let data_2 = if populate_data_2 {
         Some(data.clone())

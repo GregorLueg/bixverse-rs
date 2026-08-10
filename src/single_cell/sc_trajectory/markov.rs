@@ -76,16 +76,22 @@ const MAX_DENSE_TRANSIENT: usize = 20_000;
 /// Rows may legitimately sum to *less* than one, because mass that leaks into a
 /// stranded state never absorbs anywhere. Summing to more than one is not
 /// legitimate under any configuration, so only the upper side is bounded.
+///
+/// Reaching this bound is only survivable because [absorption_probabilities]
+/// rescales each row in `f64` before the solve. Without that the `f32` chain's
+/// 3e-7 row-sum error is multiplied by the expected absorption time, which a
+/// pruned chain can push to 3e5, and the bound is blown by a factor of 70 on a
+/// solve that is otherwise exact.
 const ABSORPTION_ROW_SUM_TOL: f64 = 1e-3;
 
 /// Tolerance on `‖(I - Q) B - R‖_inf`, the achieved solve residual.
 ///
-/// This is the check that actually sees a bad solve. A row-sum test is blind to
-/// errors that cancel across columns, and blind to anything the non-negativity
-/// clamp then hides. `(I - Q)` and `R` are built from `f32` chain data widened
-/// to `f64`, so the attainable residual is set by the `f32` input at a few times
-/// `1e-7`; anything an order of magnitude above that is the factorisation
-/// failing, not rounding.
+/// This catches a factorisation that failed outright. It is **not** a check on
+/// whether the system was the right one: `(I - Q)` and `R` are `f64` matrices by
+/// the time they get here, so the attainable residual is `f64` rounding at
+/// around `1e-16` no matter how inaccurate the `f32` chain behind them was. A
+/// consistent solve of a subtly wrong system passes this comfortably, which is
+/// exactly why the row-sum check exists alongside it.
 const ABSORPTION_RESIDUAL_TOL: f64 = 1e-5;
 
 ///////////////////////
@@ -540,9 +546,22 @@ pub fn absorption_probabilities(
         }
         let ti = ti as usize;
 
-        for idx in transitions.indptr[i] as usize..transitions.indptr[i + 1] as usize {
+        // Renormalise the row in `f64` rather than trusting the `f32` chain.
+        // `build_waypoint_transitions` normalises in `f32`, so its rows sum to
+        // 1 only to about 3e-7 over a 24-term sum. That error is per *step*,
+        // and the fundamental matrix multiplies it by the expected absorption
+        // time. On a well-mixed chain that factor is ~1e3 and nobody notices;
+        // on a pseudotime-pruned corridor it reaches ~3e5, at which point the
+        // solve returns row sums past ABSORPTION_ROW_SUM_TOL while remaining a
+        // perfectly consistent answer to the system it was handed. Rescaling
+        // here makes the system exactly sub-stochastic by construction.
+        let span = transitions.indptr[i] as usize..transitions.indptr[i + 1] as usize;
+        let mass: f64 = span.clone().map(|idx| transitions.data[idx] as f64).sum();
+        let scale = if mass > 0.0 { 1.0 / mass } else { 1.0 };
+
+        for idx in span {
             let j = transitions.indices[idx] as usize;
-            let v = transitions.data[idx] as f64;
+            let v = transitions.data[idx] as f64 * scale;
             if pos_trans[j] >= 0 {
                 lhs[(ti, pos_trans[j] as usize)] -= v;
             } else if pos_abs[j] >= 0 {
@@ -575,7 +594,6 @@ pub fn absorption_probabilities(
     }
     if !max_residual.is_finite() || max_residual > ABSORPTION_RESIDUAL_TOL {
         return Err(BixverseErrors::PalantirAbsorbingSolveFailed {
-            reason: "the achieved residual is above tolerance",
             residual: max_residual,
             n_transient: n_trans,
         });
@@ -589,9 +607,9 @@ pub fn absorption_probabilities(
             out[(transient[ti], k)] = p as f32;
         }
         if !row_sum.is_finite() || row_sum > 1.0 + ABSORPTION_ROW_SUM_TOL {
-            return Err(BixverseErrors::PalantirAbsorbingSolveFailed {
-                reason: "an absorption row sums above one",
-                residual: max_residual,
+            return Err(BixverseErrors::PalantirAbsorbingRowSum {
+                row_sum,
+                waypoint: transient[ti],
                 n_transient: n_trans,
             });
         }
@@ -984,6 +1002,37 @@ mod tests {
         for i in 0..6 {
             let sum: f32 = (0..2).map(|k| b[(i, k)]).sum();
             assert!((0.0..=1.0 + 1e-5).contains(&sum), "row {i} sums to {sum}");
+        }
+    }
+
+    #[test]
+    fn test_absorption_survives_a_chain_with_a_huge_absorption_time() {
+        // A birth-death chain biased *away* from its absorber. Expected
+        // absorption time grows as (back / forward)^length, so 30 states at
+        // 0.6 / 0.4 reaches roughly 1.9e5 steps.
+        //
+        // The weights are the point. `0.4f32 + 0.6f32` is 1.0000000298, not
+        // one, which is exactly the kind of residue `build_waypoint_transitions`
+        // leaves behind when it normalises in `f32`. Without the `f64` rescale
+        // in [absorption_probabilities] this row sums to 1.0606, sixty times
+        // ABSORPTION_ROW_SUM_TOL, on a solve whose residual is at machine
+        // precision.
+        const N: usize = 31;
+        let mut rows = vec![vec![0.0f32; N]; N];
+        rows[0][1] = 1.0;
+        for i in 1..N - 1 {
+            rows[i][i + 1] = 0.4;
+            rows[i][i - 1] = 0.6;
+        }
+        rows[N - 1][N - 1] = 1.0;
+        let t = chain_from_rows(&rows);
+
+        let (b, stranded) = absorption_probabilities(&t, &[N - 1]).unwrap();
+
+        assert_eq!(stranded, 0);
+        // One absorber, every state reaches it, so every row is exactly one.
+        for i in 0..N {
+            assert_relative_eq!(b[(i, 0)], 1.0, epsilon = 1e-4);
         }
     }
 

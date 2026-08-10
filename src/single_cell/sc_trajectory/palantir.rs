@@ -40,6 +40,18 @@
 //!     typed errors here.
 //! 11. `alpha`, the anisotropic kernel exponent, is not exposed. Its reference
 //!     default of zero makes the step a no-op.
+//! 12. `use_early_cell_as_start` defaults to `true`. The reference defaults to
+//!     `false`, meaning it silently relocates `early_cell` to whichever
+//!     diffusion-map boundary cell is nearest in the multiscale space. The
+//!     boundary set is only the per-column argmin and argmax, so it holds at
+//!     most `2 * n_components` cells, and "nearest" among so few extremes is
+//!     close to arbitrary. Measured on 40 realisations of the Y fixture, the
+//!     snap moved a trunk-root `early_cell` into one of the arms 12 times at the
+//!     crate's default component count and 33 times with `n_eigs` pinned to
+//!     three; pseudotime then runs backwards along the trunk and the root's fate
+//!     entropy collapses to zero. Naming an early cell is an explicit statement
+//!     about the data, so it is honoured by default here. Set the flag to
+//!     `false` for the reference's behaviour.
 //!
 //! ### References
 //!
@@ -86,7 +98,13 @@ pub struct PalantirParams {
     /// is taken. Reference default: true.
     pub scale_components: bool,
     /// Use `early_cell` directly rather than snapping it to the nearest
-    /// diffusion-map boundary cell. Reference default: false.
+    /// diffusion-map boundary cell.
+    ///
+    /// Defaults to `true`, against the reference's `false`. The snap picks from
+    /// at most `2 * n_components` extremes and gets it wrong often enough to
+    /// invert the trajectory; see divergence 12 in the module docs for the
+    /// measurements. Set to `false` to reproduce the reference. Reference
+    /// default: false.
     pub use_early_cell_as_start: bool,
     /// Iteration cap for the pseudotime refinement. The counter starts at one,
     /// so this permits at most `max_iterations - 1` passes, matching the
@@ -110,7 +128,11 @@ pub struct PalantirParams {
 }
 
 impl PalantirParams {
-    /// Parameters matching the reference's `run_palantir` defaults.
+    /// Parameters matching the reference's `run_palantir` defaults, except for
+    /// `use_early_cell_as_start`.
+    ///
+    /// That one flag is flipped on purpose; divergence 12 in the module docs has
+    /// the reasoning and the numbers behind it.
     ///
     /// ### Returns
     ///
@@ -122,7 +144,7 @@ impl PalantirParams {
             knn: 30,
             num_waypoints: 1200,
             scale_components: true,
-            use_early_cell_as_start: false,
+            use_early_cell_as_start: true,
             max_iterations: 25,
             branch_prob_threshold: 0.01,
             knn_params: KnnParams::new(),

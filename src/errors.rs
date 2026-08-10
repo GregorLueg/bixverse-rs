@@ -747,19 +747,36 @@ pub enum BixverseErrors {
     )]
     PalantirNoTerminalStates,
 
-    /// The densified `(I - Q) B = R` solve did not produce a usable answer.
+    /// The densified `(I - Q) B = R` solve did not converge.
     ///
     /// Carries the achieved `‖(I - Q) B - R‖_inf`, which is what actually
     /// distinguishes a near-singular system from ordinary rounding.
     #[cfg(feature = "single-cell")]
     #[error(
-        "Palantir: the (I - Q) B = R solve over {n_transient} transient waypoints failed ({reason}, residual {residual:e})"
+        "Palantir: the (I - Q) B = R solve over {n_transient} transient waypoints left a residual of {residual:e}, above tolerance"
     )]
     PalantirAbsorbingSolveFailed {
-        /// Which check rejected the solution
-        reason: &'static str,
         /// Achieved `‖(I - Q) B - R‖_inf`
         residual: f64,
+        /// Total transient waypoints
+        n_transient: usize,
+    },
+
+    /// The absorption probabilities of one waypoint sum to more than one.
+    ///
+    /// Split out from [BixverseErrors::PalantirAbsorbingSolveFailed] because the
+    /// solve residual says nothing here: the factorisation can be exact to
+    /// machine precision and still land on this, which is what makes the
+    /// offending sum the only number worth reporting.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Palantir: waypoint {waypoint} absorbs with probability {row_sum} across {n_transient} transient waypoints, which is above one"
+    )]
+    PalantirAbsorbingRowSum {
+        /// The offending row sum
+        row_sum: f64,
+        /// Waypoint index the row belongs to
+        waypoint: usize,
         /// Total transient waypoints
         n_transient: usize,
     },
