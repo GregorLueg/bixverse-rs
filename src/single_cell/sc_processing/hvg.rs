@@ -4,9 +4,14 @@
 //! Every entry point funnels into one of two drivers, [`run_hvg_vst`] and
 //! [`run_hvg_dispersion`]. Streaming and non-streaming differ only in how many
 //! genes are read per disk batch, and the batch-aware variants differ only in
-//! how cells map onto accumulator slots. Both drivers read the store exactly
-//! once and sweep each gene's entries exactly once, no matter how many batches
-//! are requested.
+//! how cells map onto accumulator slots. Both drivers sweep each gene's
+//! entries once per disk pass, no matter how many batches are requested, and
+//! keep no per-gene state beyond a handful of scalars.
+//!
+//! The dispersion driver reads the store exactly once. The VST driver reads it
+//! once and then re-reads the genes whose values the clip actually reaches,
+//! which on droplet data is a fraction of a percent of them. See
+//! [`clip_is_reachable`].
 
 use rayon::prelude::*;
 use std::time::Instant;
@@ -27,21 +32,22 @@ use crate::prelude::*;
 /// keeping peak occupancy proportional to the batch rather than the store.
 const GENE_BATCH_SIZE: usize = 1000;
 
-/// Largest raw count span summarised by counting sort.
+/// Largest raw count span tallied by counting sort.
 ///
-/// The scratch grid is `n_slots * (max_count + 1)` `u32` counters, so at 1024
-/// it stays a few KiB per slot and resident in L1. UMI counts for a single
-/// gene sit far below this; the rare gene that does not falls back to the
-/// gather-and-run-length path rather than forcing a huge sparse grid.
+/// The grid is `n_slots * (max_count + 1)` `u32` counters, so at 1024 it stays
+/// a few KiB per slot and resident in L1. UMI counts for a single gene sit far
+/// below this; the rare gene that does not accumulates per entry instead,
+/// rather than forcing a huge sparse grid.
 const MAX_HISTOGRAM_SPAN: usize = 1024;
 
-/// Ceiling on retained [`RawCountSummary`] entries during the VST first pass.
+/// Guard against a degenerate expected variance in the VST second pass.
 ///
-/// Summaries have to survive until after the loess fit, so this is a whole-run
-/// budget that shrinking the gene batch size cannot help with. At 8 bytes per
-/// entry this caps them at 256 MiB, above which the run drops them and pays
-/// for a second disk pass instead.
-const HVG_SUMMARY_BUDGET_ENTRIES: usize = 32 * 1024 * 1024;
+/// The loess leaves dropped points at `0.0`, which exponentiates to an
+/// expected variance of `1.0`, but a strongly negative fit can still underflow
+/// to zero. A gene whose expected variance lands below this is sent down the
+/// exact path, where the clip absorbs the resulting infinities the way the
+/// dense reference does.
+const MIN_EXPECTED_VAR: f32 = f32::MIN_POSITIVE;
 
 /////////////
 // Results //
@@ -264,59 +270,86 @@ impl CellBatchIndex {
     }
 }
 
-/////////////////////
-// RawCountSummary //
-/////////////////////
+///////////////
+// GeneStats //
+///////////////
 
-/// Run-length summary of one gene's filtered raw counts within one batch.
+/// First-pass statistics for one gene within one batch.
 ///
-/// The standardised variance is a pure function of the multiset of a gene's
-/// selected non-zero raw counts plus the mean, the expected standard
-/// deviation, the clip and the cell count. Raw counts are small integers, so
-/// that multiset compresses to distinct values and multiplicities. This makes
-/// the summary a sufficient statistic for both VST passes, which is what lets
-/// the second pass skip the disk entirely.
-///
-/// Worst case, when every selected value is distinct, it degenerates to
-/// `(value, 1)` pairs and is no better than keeping the raw counts.
-#[derive(Clone, Debug, Default)]
-pub struct RawCountSummary {
-    /// Distinct raw counts observed, ascending on the counting-sort path.
-    values: Vec<u32>,
-    /// Multiplicity of the matching entry of `values`.
-    freqs: Vec<u32>,
-    /// Selected non-zero count, i.e. the sum of `freqs`.
+/// The standardised variance collapses to `var / expected_var` whenever the
+/// clip reaches nothing, because the standardised values then sum to zero by
+/// construction. Deciding that needs only the two extremes, so these five
+/// scalars are all the second pass needs from the first. Nothing per-gene is
+/// retained beyond them.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GeneStats {
+    /// Mean over the selected cells, zeros included.
+    pub mean: f32,
+    /// Population variance over the selected cells, zeros included.
+    pub var: f32,
+    /// Largest selected raw count. Zero when nothing is selected.
+    pub max_count: u32,
+    /// Smallest selected value, counting the implicit zeros. Zero unless the
+    /// gene is expressed in every selected cell of the batch.
+    pub min_count: u32,
+}
+
+/// Per-slot accumulator for the wide-range fallback.
+#[derive(Clone, Copy, Debug)]
+struct RawAccumulator {
+    /// Sum of the selected raw counts.
+    sum: f64,
+    /// Sum of their squares.
+    sum_sq: f64,
+    /// Largest selected raw count.
+    max: u32,
+    /// Smallest selected non-zero raw count.
+    min: u32,
+    /// Number of selected non-zero entries.
     nnz: usize,
 }
 
-impl RawCountSummary {
-    /// Drop all entries, keeping the allocations for reuse.
-    fn clear(&mut self) {
-        self.values.clear();
-        self.freqs.clear();
-        self.nnz = 0;
+impl Default for RawAccumulator {
+    /// Empty accumulator. `min` starts at the maximum so the first value wins.
+    fn default() -> Self {
+        Self {
+            sum: 0.0,
+            sum_sq: 0.0,
+            max: 0,
+            min: u32::MAX,
+            nnz: 0,
+        }
     }
+}
 
-    /// Append one distinct value and its multiplicity.
+impl RawAccumulator {
+    /// Reduce to the batch's statistics.
     ///
     /// ### Params
     ///
-    /// * `value` - The raw count
-    /// * `freq` - How often it occurs among the selected cells
-    #[inline]
-    fn push(&mut self, value: u32, freq: u32) {
-        self.values.push(value);
-        self.freqs.push(freq);
-        self.nnz += freq as usize;
-    }
-
-    /// Number of stored `(value, freq)` pairs, for budgeting.
+    /// * `no_cells` - Number of selected cells in this batch
     ///
     /// ### Returns
     ///
-    /// The entry count.
-    fn entries(&self) -> usize {
-        self.values.len()
+    /// The statistics, or the default for an empty batch or gene.
+    #[inline]
+    fn finish(&self, no_cells: usize) -> GeneStats {
+        if no_cells == 0 || self.nnz == 0 {
+            return GeneStats::default();
+        }
+
+        let n = no_cells as f64;
+        let mean = self.sum / n;
+        let var = ((self.sum_sq - n * mean * mean) / n).max(0.0);
+
+        GeneStats {
+            mean: mean as f32,
+            var: var as f32,
+            max_count: self.max,
+            // A gene expressed in every selected cell has no implicit zero, so
+            // its lower extreme is the smallest stored count.
+            min_count: if self.nnz < no_cells { 0 } else { self.min },
+        }
     }
 }
 
@@ -324,14 +357,14 @@ impl RawCountSummary {
 // HistogramScratch //
 //////////////////////
 
-/// Thread-local scratch for building [`RawCountSummary`] values, reused across
-/// genes so the per-gene cost is a memset rather than an allocation.
+/// Thread-local scratch for the first pass, reused across genes so the
+/// per-gene cost is a memset rather than an allocation.
 pub struct HistogramScratch {
     /// Flat `n_slots * stride` counting-sort grid, slot major, where `stride`
     /// is `max_count + 1` for the gene in flight.
     counters: Vec<u32>,
-    /// Per-slot gather buffers for the wide-range fallback path.
-    gathered: Vec<Vec<u32>>,
+    /// Per-slot accumulators for the wide-range fallback.
+    accumulators: Vec<RawAccumulator>,
 }
 
 impl HistogramScratch {
@@ -348,91 +381,185 @@ impl HistogramScratch {
     pub fn new(n_slots: usize) -> Self {
         Self {
             counters: Vec::new(),
-            gathered: vec![Vec::new(); n_slots],
+            accumulators: vec![RawAccumulator::default(); n_slots],
         }
     }
 }
 
-/// Summarise one gene's raw counts into one [`RawCountSummary`] per batch.
+/// Tally one gene's entries into the counting-sort grid.
 ///
-/// One sweep over the gene's stored entries regardless of the batch count: the
-/// slot lookup dispatches each entry straight into its batch's counters. Two
-/// build paths, picked from a cheap max-scan over the unfiltered counts:
-/// counting sort while the value span stays within [`MAX_HISTOGRAM_SPAN`], and
-/// gather-sort-run-length above it so a single very large count cannot force a
-/// huge sparse grid.
+/// Generic over the stored width so the raw-count variant is matched once per
+/// gene rather than once per entry. This is the hottest loop in the crate and
+/// an enum match inside it stops the compiler vectorising anything.
+///
+/// Unselected cells land in slot 0 and are simply never read back, which keeps
+/// the loop branch-free.
 ///
 /// ### Params
 ///
-/// * `gene` - The gene chunk to summarise
+/// * `values` - Raw counts, in chunk order
+/// * `indices` - Global cell ids, in the same order
+/// * `index` - Cell to slot lookup
+/// * `counters` - Flat `n_slots * stride` grid, zeroed by the caller
+/// * `stride` - `max_count + 1`
+#[inline]
+fn tally_counts<V: Copy + Into<u32>>(
+    values: &[V],
+    indices: &[u32],
+    index: &CellBatchIndex,
+    counters: &mut [u32],
+    stride: usize,
+) {
+    for (&cell_id, &value) in indices.iter().zip(values.iter()) {
+        let slot = index.slot(cell_id);
+        counters[slot * stride + Into::<u32>::into(value) as usize] += 1;
+    }
+}
+
+/// Accumulate one gene's entries directly, without a histogram.
+///
+/// The fallback for a gene whose count span would make the grid unreasonably
+/// wide. Generic over the stored width for the same reason as [`tally_counts`].
+///
+/// ### Params
+///
+/// * `values` - Raw counts, in chunk order
+/// * `indices` - Global cell ids, in the same order
+/// * `index` - Cell to slot lookup
+/// * `accumulators` - Per-slot accumulators, reset by the caller
+#[inline]
+fn accumulate_counts<V: Copy + Into<u32>>(
+    values: &[V],
+    indices: &[u32],
+    index: &CellBatchIndex,
+    accumulators: &mut [RawAccumulator],
+) {
+    for (&cell_id, &value) in indices.iter().zip(values.iter()) {
+        let slot = index.slot(cell_id);
+        if slot == 0 {
+            continue;
+        }
+
+        let value = Into::<u32>::into(value);
+        let as_f64 = value as f64;
+        let acc = &mut accumulators[slot];
+
+        acc.sum += as_f64;
+        acc.sum_sq += as_f64 * as_f64;
+        acc.max = acc.max.max(value);
+        acc.min = acc.min.min(value);
+        acc.nnz += 1;
+    }
+}
+
+/// Largest raw count in a gene chunk.
+///
+/// Matches the storage variant once so the scan runs over a concrete slice.
+///
+/// ### Params
+///
+/// * `gene` - The gene chunk
+///
+/// ### Returns
+///
+/// The maximum, or `0` for an empty chunk.
+#[inline]
+fn max_raw_count(gene: &CscGeneChunk) -> u32 {
+    match &gene.data_raw {
+        RawCounts::U16(values) => values.iter().copied().max().unwrap_or(0) as u32,
+        RawCounts::U32(values) => values.iter().copied().max().unwrap_or(0),
+    }
+}
+
+/// Sweep one gene's stored entries into per-batch statistics.
+///
+/// One pass over the entries regardless of the batch count: the slot lookup
+/// dispatches each entry into its batch. Raw counts are small integers, so the
+/// default path tallies them into a counting-sort grid and then does the float
+/// arithmetic once per *distinct* value rather than once per entry. On droplet
+/// data the median gene has two distinct counts across hundreds of entries, so
+/// that turns the inner loop into a single integer increment.
+///
+/// Genes whose count span would make the grid unreasonably wide fall back to
+/// accumulating in `f64` per entry. That is the rare case, a couple of genes in
+/// twenty thousand, and it needs no sorting because only sums and extremes come
+/// out of it.
+///
+/// The zeros fold in analytically through `var = (sum(v^2) - n * mean^2) / n`,
+/// which is why the accumulation is `f64` and not `f32`.
+///
+/// ### Params
+///
+/// * `gene` - The gene chunk to sweep
 /// * `index` - Cell to slot lookup
 /// * `scratch` - Thread-local scratch, reused across genes
-/// * `out` - One summary per batch, length `index.n_batches()`. Overwritten.
-pub fn summarise_gene_raw(
+/// * `out` - One entry per batch, length `index.n_batches()`. Overwritten.
+pub fn gene_stats(
     gene: &CscGeneChunk,
     index: &CellBatchIndex,
     scratch: &mut HistogramScratch,
-    out: &mut [RawCountSummary],
+    out: &mut [GeneStats],
 ) {
-    for summary in out.iter_mut() {
-        summary.clear();
-    }
-
     if gene.indices.is_empty() {
+        out.fill(GeneStats::default());
         return;
     }
 
     let n_slots = index.n_slots();
-    let max_count = gene.data_raw.iter().max().unwrap_or(0);
-    let stride = max_count as usize + 1;
+    let stride = max_raw_count(gene) as usize + 1;
 
     if stride <= MAX_HISTOGRAM_SPAN {
         scratch.counters.clear();
         scratch.counters.resize(n_slots * stride, 0);
 
-        for (i, &cell_id) in gene.indices.iter().enumerate() {
-            let slot = index.slot(cell_id);
-            scratch.counters[slot * stride + gene.data_raw.get(i) as usize] += 1;
+        match &gene.data_raw {
+            RawCounts::U16(values) => {
+                tally_counts(values, &gene.indices, index, &mut scratch.counters, stride)
+            }
+            RawCounts::U32(values) => {
+                tally_counts(values, &gene.indices, index, &mut scratch.counters, stride)
+            }
         }
 
-        for (batch, summary) in out.iter_mut().enumerate() {
+        for (batch, stats) in out.iter_mut().enumerate() {
             let base = (batch + 1) * stride;
+            let mut acc = RawAccumulator::default();
+
+            // Bins are ascending by construction, so the first occupied one is
+            // the minimum and the last is the maximum. No comparisons needed.
             for (value, &freq) in scratch.counters[base..base + stride].iter().enumerate() {
-                if freq > 0 {
-                    summary.push(value as u32, freq);
+                if freq == 0 {
+                    continue;
                 }
+
+                if acc.nnz == 0 {
+                    acc.min = value as u32;
+                }
+                acc.max = value as u32;
+
+                let value = value as f64;
+                let freq = freq as f64;
+                acc.sum += freq * value;
+                acc.sum_sq += freq * value * value;
+                acc.nnz += freq as usize;
             }
+
+            *stats = acc.finish(index.batch_sizes()[batch]);
         }
     } else {
-        for buffer in scratch.gathered.iter_mut() {
-            buffer.clear();
+        scratch.accumulators.fill(RawAccumulator::default());
+
+        match &gene.data_raw {
+            RawCounts::U16(values) => {
+                accumulate_counts(values, &gene.indices, index, &mut scratch.accumulators)
+            }
+            RawCounts::U32(values) => {
+                accumulate_counts(values, &gene.indices, index, &mut scratch.accumulators)
+            }
         }
 
-        for (i, &cell_id) in gene.indices.iter().enumerate() {
-            let slot = index.slot(cell_id);
-            scratch.gathered[slot].push(gene.data_raw.get(i));
-        }
-
-        for (batch, summary) in out.iter_mut().enumerate() {
-            let buffer = &mut scratch.gathered[batch + 1];
-            buffer.sort_unstable();
-
-            let mut run = 0u32;
-            let mut current = 0u32;
-            for &value in buffer.iter() {
-                if run > 0 && value == current {
-                    run += 1;
-                } else {
-                    if run > 0 {
-                        summary.push(current, run);
-                    }
-                    current = value;
-                    run = 1;
-                }
-            }
-            if run > 0 {
-                summary.push(current, run);
-            }
+        for (batch, stats) in out.iter_mut().enumerate() {
+            *stats = scratch.accumulators[batch + 1].finish(index.batch_sizes()[batch]);
         }
     }
 }
@@ -441,100 +568,100 @@ pub fn summarise_gene_raw(
 // Kernels //
 /////////////
 
-/// Mean and population variance of a gene within one batch.
+/// Whether the clip can reach any value of a gene within one batch.
 ///
-/// Fuses the sums into a single accumulation via
-/// `var = (sum(v^2) - n * mean^2) / n`, which folds the zero cells in
-/// analytically. That one-pass form is only safe in `f64`.
-///
-/// ### Params
-///
-/// * `summary` - Run-length summary of the gene's selected raw counts
-/// * `no_cells` - Number of selected cells in this batch
-///
-/// ### Returns
-///
-/// A tuple of `(mean, var)`.
-#[inline]
-pub fn mean_var_from_summary(summary: &RawCountSummary, no_cells: usize) -> (f32, f32) {
-    if no_cells == 0 {
-        return (0.0, 0.0);
-    }
-
-    let n = no_cells as f64;
-    let mut sum = 0f64;
-    let mut sum_sq = 0f64;
-
-    for (&value, &freq) in summary.values.iter().zip(summary.freqs.iter()) {
-        let value = value as f64;
-        let freq = freq as f64;
-        sum += freq * value;
-        sum_sq += freq * value * value;
-    }
-
-    let mean = sum / n;
-    let var = ((sum_sq - n * mean * mean) / n).max(0.0);
-
-    (mean as f32, var as f32)
-}
-
-/// Standardised variance of a gene within one batch.
-///
-/// Clipping uses `.min(clip_max).max(-clip_max)` rather than `f32::clamp`, and
-/// that is deliberate: `f32::min` discards NaN whereas `clamp` propagates it.
-/// If `expected_var` underflows on an all-zero gene the ratio is `0/0`, and a
-/// NaN reaching `var_std` panics the ranking in `select_hvg`.
+/// Checks both extremes: the largest stored count, and the smallest selected
+/// value, which is zero for any gene left unexpressed in a selected cell. A
+/// degenerate expected variance counts as reachable too, so that the exact path
+/// absorbs the resulting infinities through the clip rather than the closed
+/// form handing back one.
 ///
 /// ### Params
 ///
-/// * `summary` - Run-length summary of the gene's selected raw counts
-/// * `mean` - Mean of the gene in this batch
+/// * `stats` - First-pass statistics for this gene and batch
 /// * `expected_var` - Expected variance from the loess fit
 /// * `clip_max` - Symmetric clip applied to the standardised values
-/// * `no_cells` - Number of selected cells in this batch
 ///
 /// ### Returns
 ///
-/// The standardised variance.
+/// `true` when the gene needs the exact, distribution-aware treatment.
 #[inline]
-pub fn std_variance_from_summary(
-    summary: &RawCountSummary,
-    mean: f32,
-    expected_var: f32,
-    clip_max: f32,
-    no_cells: usize,
-) -> f32 {
-    if no_cells == 0 {
-        return 0.0;
+pub fn clip_is_reachable(stats: &GeneStats, expected_var: f32, clip_max: f32) -> bool {
+    if !expected_var.is_finite() || expected_var < MIN_EXPECTED_VAR {
+        return true;
     }
 
-    let n = no_cells as f64;
-    let expected_sd = expected_var.sqrt();
+    let reach = clip_max * expected_var.sqrt();
 
-    let mut sum = 0f64;
-    let mut sum_sq = 0f64;
+    (stats.max_count as f32 - stats.mean) > reach || (stats.mean - stats.min_count as f32) > reach
+}
 
-    for (&value, &freq) in summary.values.iter().zip(summary.freqs.iter()) {
-        let norm = ((value as f32 - mean) / expected_sd)
+/// Exact standardised variance for one gene across every batch.
+///
+/// Only ever runs for the genes [`clip_is_reachable`] flags. Clipping uses
+/// `.min(clip_max).max(-clip_max)` rather than `f32::clamp`, and that is
+/// deliberate: `f32::min` discards NaN whereas `clamp` propagates it, and a NaN
+/// reaching `var_std` panics the ranking in `select_hvg`.
+///
+/// ### Params
+///
+/// * `gene` - The gene chunk, re-read for this purpose
+/// * `index` - Cell to slot lookup
+/// * `params` - Per-batch `(mean, expected_sd, clip_max)`
+/// * `scratch` - Per-slot `(sum, sum_sq, nnz)` accumulators, length
+///   `index.n_slots()`. Overwritten.
+/// * `out` - One standardised variance per batch, length `index.n_batches()`
+pub fn std_variance_exact(
+    gene: &CscGeneChunk,
+    index: &CellBatchIndex,
+    params: &[(f32, f32, f32)],
+    scratch: &mut [(f64, f64, usize)],
+    out: &mut [f32],
+) {
+    for slot in scratch.iter_mut() {
+        *slot = (0.0, 0.0, 0);
+    }
+
+    for (i, &cell_id) in gene.indices.iter().enumerate() {
+        let slot = index.slot(cell_id);
+        if slot == 0 {
+            continue;
+        }
+
+        let (mean, expected_sd, clip_max) = params[slot - 1];
+        let norm = ((gene.data_raw.get(i) as f32 - mean) / expected_sd)
             .min(clip_max)
             .max(-clip_max) as f64;
-        let freq = freq as f64;
-        sum += freq * norm;
-        sum_sq += freq * norm * norm;
+
+        scratch[slot].0 += norm;
+        scratch[slot].1 += norm * norm;
+        scratch[slot].2 += 1;
     }
 
-    // Saturating because a corrupt chunk listing the same cell twice would
-    // otherwise underflow; a well-formed one always has nnz <= no_cells.
-    let n_zeros = no_cells.saturating_sub(summary.nnz);
-    if n_zeros > 0 {
-        let norm = ((-mean) / expected_sd).min(clip_max).max(-clip_max) as f64;
-        let n_zeros = n_zeros as f64;
-        sum += n_zeros * norm;
-        sum_sq += n_zeros * norm * norm;
-    }
+    for (batch, value) in out.iter_mut().enumerate() {
+        let no_cells = index.batch_sizes()[batch];
+        if no_cells == 0 {
+            *value = 0.0;
+            continue;
+        }
 
-    let standardised_mean = sum / n;
-    ((sum_sq / n) - standardised_mean * standardised_mean) as f32
+        let (mean, expected_sd, clip_max) = params[batch];
+        let (mut sum, mut sum_sq, nnz) = scratch[batch + 1];
+
+        // Saturating because a corrupt chunk listing the same cell twice would
+        // otherwise underflow; a well-formed one always has nnz <= no_cells.
+        let n_zeros = no_cells.saturating_sub(nnz);
+        if n_zeros > 0 {
+            let norm = ((-mean) / expected_sd).min(clip_max).max(-clip_max) as f64;
+            let n_zeros = n_zeros as f64;
+            sum += n_zeros * norm;
+            sum_sq += n_zeros * norm * norm;
+        }
+
+        let n = no_cells as f64;
+        let standardised_mean = sum / n;
+        *value = ((sum_sq / n) - standardised_mean * standardised_mean) as f32;
+    }
 }
 
 /// Accumulate Seurat dispersion sums for one gene across every batch.
@@ -800,46 +927,54 @@ fn gene_blocks(no_genes: usize, gene_batch_size: Option<usize>) -> Vec<(usize, u
         .collect()
 }
 
-/// Read a block of genes and summarise their raw counts per batch.
+/// Sweep a block of genes into gene-major statistics.
+///
+/// Everything happens inside the parallel closure: the entry sweep, the
+/// mean/variance reduction and the extremes. There is no serial tail behind it,
+/// and `out` is a slice of the run-wide array rather than a per-block
+/// allocation, so nothing is appended or copied afterwards.
 ///
 /// ### Params
 ///
 /// * `reader` - Reader over the gene-based count store
 /// * `gene_indices` - Genes to read
 /// * `index` - Cell to slot lookup
-///
-/// ### Returns
-///
-/// Gene-major summaries, `gene_indices.len() * index.n_batches()` entries.
-fn summarise_gene_block<S: SingleCellReading>(
+/// * `out` - Gene-major destination, `gene_indices.len() * index.n_batches()`
+///   entries. Overwritten.
+fn sweep_gene_block<S: SingleCellReading>(
     reader: &S,
     gene_indices: &[usize],
     index: &CellBatchIndex,
-) -> Result<Vec<RawCountSummary>, BixverseErrors> {
+    out: &mut [GeneStats],
+) -> Result<(), BixverseErrors> {
     let genes = reader.read_gene_parallel(gene_indices)?;
     let n_batches = index.n_batches();
     let n_slots = index.n_slots();
 
-    let mut block = vec![RawCountSummary::default(); genes.len() * n_batches];
-
     genes
         .par_iter()
-        .zip(block.par_chunks_mut(n_batches))
+        .zip(out.par_chunks_mut(n_batches))
         .for_each_init(
             || HistogramScratch::new(n_slots),
-            |scratch, (gene, out)| summarise_gene_raw(gene, index, scratch, out),
+            |scratch, (gene, stats)| gene_stats(gene, index, scratch, stats),
         );
 
-    Ok(block)
+    Ok(())
 }
 
 /// Variance-stabilising HVG selection across every batch in `index`.
 ///
-/// Single disk pass in the normal case: the first pass builds a
-/// [`RawCountSummary`] per gene per batch, the loess is fit per batch, and the
-/// standardised variance is then evaluated straight off those summaries. If
-/// the summaries would exceed [`HVG_SUMMARY_BUDGET_ENTRIES`] they are dropped
-/// and the second pass re-reads the store, reusing the same kernels.
+/// One disk pass in the normal case, and no retained per-gene state. The first
+/// pass keeps five scalars per gene per batch; after the loess, the
+/// standardised variance falls out of `var / expected_var` for every gene the
+/// clip cannot reach. That identity holds because unclipped standardised values
+/// are `(x - mean) / sd`, which sum to zero by construction, leaving the
+/// variance of the standardised values exactly `var / expected_var`.
+///
+/// The genes the clip does reach are re-read and evaluated exactly. On droplet
+/// data that is a fraction of a percent of the store. It grows as `clip_max`
+/// shrinks, so a small cell count re-reads more of the store, but a small cell
+/// count is also a small store.
 ///
 /// Genes with no selected counts fall out with `mean = var = 0`, so `log10`
 /// gives `-inf`. `LoessRegression::fit` drops non-finite points and leaves
@@ -874,6 +1009,7 @@ pub fn run_hvg_vst<S: SingleCellReading>(
 
     let no_genes = reader.get_header().total_genes;
     let n_batches = index.n_batches();
+    let n_slots = index.n_slots();
     let blocks = gene_blocks(no_genes, opts.gene_batch_size);
 
     if verbosity.normal_verbosity() {
@@ -885,41 +1021,19 @@ pub fn run_hvg_vst<S: SingleCellReading>(
         );
     }
 
-    // pass 1 -> per-gene summaries, mean and variance
+    // pass 1 -> mean, variance and the two extremes, gene-major
     let start_pass1 = Instant::now();
 
-    let mut means: Vec<Vec<f32>> = vec![Vec::with_capacity(no_genes); n_batches];
-    let mut vars: Vec<Vec<f32>> = vec![Vec::with_capacity(no_genes); n_batches];
-    let mut summaries: Vec<RawCountSummary> = Vec::new();
-    let mut retained = true;
-    let mut budget_used = 0usize;
+    let mut stats: Vec<GeneStats> = vec![GeneStats::default(); no_genes * n_batches];
 
     for &(start_gene, end_gene) in blocks.iter() {
         let gene_indices: Vec<usize> = (start_gene..end_gene).collect();
-        let block = summarise_gene_block(reader, &gene_indices, index)?;
-
-        for gene_summaries in block.chunks(n_batches) {
-            for (batch, summary) in gene_summaries.iter().enumerate() {
-                let (mean, var) = mean_var_from_summary(summary, index.batch_sizes()[batch]);
-                means[batch].push(mean);
-                vars[batch].push(var);
-            }
-        }
-
-        if retained {
-            budget_used += block.iter().map(RawCountSummary::entries).sum::<usize>();
-            if budget_used > HVG_SUMMARY_BUDGET_ENTRIES {
-                retained = false;
-                summaries = Vec::new();
-                if verbosity.normal_verbosity() {
-                    println!(
-                        "HVG (VST): summary budget exceeded, falling back to a second disk pass"
-                    );
-                }
-            } else {
-                summaries.extend(block);
-            }
-        }
+        sweep_gene_block(
+            reader,
+            &gene_indices,
+            index,
+            &mut stats[start_gene * n_batches..end_gene * n_batches],
+        )?;
     }
 
     if verbosity.normal_verbosity() {
@@ -938,8 +1052,16 @@ pub fn run_hvg_vst<S: SingleCellReading>(
     for batch in 0..n_batches {
         clips.push(clip_max.unwrap_or((index.batch_sizes()[batch] as f32).sqrt()));
 
-        let means_log10: Vec<f32> = means[batch].iter().map(|x| x.log10()).collect();
-        let vars_log10: Vec<f32> = vars[batch].iter().map(|x| x.log10()).collect();
+        let means_log10: Vec<f32> = stats[batch..]
+            .iter()
+            .step_by(n_batches)
+            .map(|s| s.mean.log10())
+            .collect();
+        let vars_log10: Vec<f32> = stats[batch..]
+            .iter()
+            .step_by(n_batches)
+            .map(|s| s.var.log10())
+            .collect();
 
         let loess = LoessRegression::new(loess_span, 2);
         loess_results.push(loess.fit(&means_log10, &vars_log10));
@@ -949,67 +1071,90 @@ pub fn run_hvg_vst<S: SingleCellReading>(
         println!("HVG (VST): Fitted Loess in {:.2?}", start_loess.elapsed());
     }
 
-    // pass 2 -> standardised variance, off the summaries where possible
+    // pass 2 -> closed form wherever the clip cannot reach
     let start_pass2 = Instant::now();
 
-    let mut var_std: Vec<Vec<f32>> = vec![Vec::with_capacity(no_genes); n_batches];
+    let mut var_std: Vec<f32> = vec![0.0; no_genes * n_batches];
 
-    if retained {
-        for batch in 0..n_batches {
-            let values: Vec<f32> = summaries
-                .par_chunks(n_batches)
-                .enumerate()
-                .map(|(gene, gene_summaries)| {
-                    std_variance_from_summary(
-                        &gene_summaries[batch],
-                        means[batch][gene],
-                        10_f32.powf(loess_results[batch].fitted_vals[gene]),
-                        clips[batch],
-                        index.batch_sizes()[batch],
-                    )
-                })
-                .collect();
-            var_std[batch] = values;
-        }
-    } else {
-        for &(start_gene, end_gene) in blocks.iter() {
-            let gene_indices: Vec<usize> = (start_gene..end_gene).collect();
-            let block = summarise_gene_block(reader, &gene_indices, index)?;
-
-            for (local_idx, gene_summaries) in block.chunks(n_batches).enumerate() {
-                let gene = start_gene + local_idx;
-                for (batch, summary) in gene_summaries.iter().enumerate() {
-                    var_std[batch].push(std_variance_from_summary(
-                        summary,
-                        means[batch][gene],
-                        10_f32.powf(loess_results[batch].fitted_vals[gene]),
-                        clips[batch],
-                        index.batch_sizes()[batch],
-                    ));
+    let needs_exact: Vec<usize> = stats
+        .par_chunks(n_batches)
+        .zip(var_std.par_chunks_mut(n_batches))
+        .enumerate()
+        .filter_map(|(gene, (gene_stats, out))| {
+            let mut reachable = false;
+            for (batch, value) in out.iter_mut().enumerate() {
+                let expected_var = 10_f32.powf(loess_results[batch].fitted_vals[gene]);
+                if clip_is_reachable(&gene_stats[batch], expected_var, clips[batch]) {
+                    reachable = true;
+                } else {
+                    *value = gene_stats[batch].var / expected_var;
                 }
             }
+            if reachable { Some(gene) } else { None }
+        })
+        .collect();
+
+    if !needs_exact.is_empty() {
+        let genes = reader.read_gene_parallel(&needs_exact)?;
+        let mut exact = vec![0f32; needs_exact.len() * n_batches];
+
+        genes
+            .par_iter()
+            .zip(needs_exact.par_iter())
+            .zip(exact.par_chunks_mut(n_batches))
+            .for_each_init(
+                || vec![(0f64, 0f64, 0usize); n_slots],
+                |scratch, ((gene, &gene_idx), out)| {
+                    let params: Vec<(f32, f32, f32)> = (0..n_batches)
+                        .map(|batch| {
+                            let expected_var =
+                                10_f32.powf(loess_results[batch].fitted_vals[gene_idx]);
+                            (
+                                stats[gene_idx * n_batches + batch].mean,
+                                expected_var.sqrt(),
+                                clips[batch],
+                            )
+                        })
+                        .collect();
+                    std_variance_exact(gene, index, &params, scratch, out);
+                },
+            );
+
+        for (&gene, values) in needs_exact.iter().zip(exact.chunks(n_batches)) {
+            var_std[gene * n_batches..(gene + 1) * n_batches].copy_from_slice(values);
         }
     }
 
     if verbosity.normal_verbosity() {
         println!(
-            "HVG (VST): Standardised variance in {:.2?}",
-            start_pass2.elapsed()
+            "HVG (VST): Standardised variance in {:.2?} ({} gene(s) re-read for the clip)",
+            start_pass2.elapsed(),
+            needs_exact.len().separate_with_underscores()
         );
         println!("HVG (VST): Total run time -> {:.2?}", start_total.elapsed());
     }
 
-    // transform to f64 for R
-    Ok(means
+    // gather gene-major back into one result per batch
+    Ok(loess_results
         .into_iter()
-        .zip(vars)
-        .zip(loess_results)
-        .zip(var_std)
-        .map(|(((mean, var), loess_res), std_var)| HvgRes {
-            mean: mean.r_float_convert(),
-            var: var.r_float_convert(),
+        .enumerate()
+        .map(|(batch, loess_res)| HvgRes {
+            mean: stats[batch..]
+                .iter()
+                .step_by(n_batches)
+                .map(|s| s.mean as f64)
+                .collect(),
+            var: stats[batch..]
+                .iter()
+                .step_by(n_batches)
+                .map(|s| s.var as f64)
+                .collect(),
             var_exp: loess_res.fitted_vals.r_float_convert(),
-            var_std: std_var.r_float_convert(),
+            var_std: var_std[batch..]
+                .iter()
+                .step_by(n_batches)
+                .map(|&v| v as f64)
+                .collect(),
         })
         .collect())
 }
@@ -1061,28 +1206,28 @@ pub fn run_hvg_dispersion<S: SingleCellReading>(
 
     let start_stats = Instant::now();
 
-    let mut means: Vec<Vec<f32>> = vec![Vec::with_capacity(no_genes); n_batches];
-    let mut dispersions: Vec<Vec<f32>> = vec![Vec::with_capacity(no_genes); n_batches];
+    // Gene-major, so the sums and the reduction both happen inside the
+    // parallel closure and nothing is appended behind it.
+    let mut stats: Vec<(f32, f32)> = vec![(0.0, 0.0); no_genes * n_batches];
 
     for &(start_gene, end_gene) in blocks.iter() {
         let gene_indices: Vec<usize> = (start_gene..end_gene).collect();
         let genes = reader.read_gene_parallel(&gene_indices)?;
 
-        let mut acc = vec![(0f64, 0f64); genes.len() * n_slots];
         genes
             .par_iter()
-            .zip(acc.par_chunks_mut(n_slots))
-            .for_each(|(gene, out)| accumulate_disp_stats(gene, index, out));
-
-        for gene_acc in acc.chunks(n_slots) {
-            for batch in 0..n_batches {
-                let (sum, sum_sq) = gene_acc[batch + 1];
-                let (mean, dispersion) =
-                    disp_stats_from_sums(sum, sum_sq, index.batch_sizes()[batch]);
-                means[batch].push(mean);
-                dispersions[batch].push(dispersion);
-            }
-        }
+            .zip(stats[start_gene * n_batches..end_gene * n_batches].par_chunks_mut(n_batches))
+            .for_each_init(
+                || vec![(0f64, 0f64); n_slots],
+                |acc, (gene, out)| {
+                    acc.fill((0.0, 0.0));
+                    accumulate_disp_stats(gene, index, acc);
+                    for (batch, slot) in out.iter_mut().enumerate() {
+                        let (sum, sum_sq) = acc[batch + 1];
+                        *slot = disp_stats_from_sums(sum, sum_sq, index.batch_sizes()[batch]);
+                    }
+                },
+            );
     }
 
     if verbosity.normal_verbosity() {
@@ -1093,10 +1238,20 @@ pub fn run_hvg_dispersion<S: SingleCellReading>(
     }
 
     let start_bin = Instant::now();
-    let out: Vec<HvgDispersionRes> = means
-        .into_iter()
-        .zip(dispersions)
-        .map(|(mean, dispersion)| build_disp_result(mean, dispersion, binning, n_bins))
+    let out: Vec<HvgDispersionRes> = (0..n_batches)
+        .map(|batch| {
+            let mean: Vec<f32> = stats[batch..]
+                .iter()
+                .step_by(n_batches)
+                .map(|s| s.0)
+                .collect();
+            let dispersion: Vec<f32> = stats[batch..]
+                .iter()
+                .step_by(n_batches)
+                .map(|s| s.1)
+                .collect();
+            build_disp_result(mean, dispersion, binning, n_bins)
+        })
         .collect();
 
     if verbosity.normal_verbosity() {
@@ -1960,10 +2115,10 @@ mod tests {
     }
 
     #[test]
-    fn test_wide_count_range_takes_sort_path() {
-        // max count sits far above MAX_HISTOGRAM_SPAN and every value differs,
-        // so this forces the gather-sort-run-length branch and the degenerate
-        // freq-1 summary at once
+    fn test_wide_count_range_takes_exact_path() {
+        // counts spanning thousands against a clip of sqrt(32), so the clip
+        // reaches these genes and they go down the re-read path rather than the
+        // closed form
         let n_cells = 32;
         let wide: Vec<u32> = (0..n_cells as u32).map(|c| 5_000 + c * 137).collect();
         let dense = vec![
@@ -2037,7 +2192,7 @@ mod tests {
     }
 
     #[test]
-    fn test_summarise_gene_raw_counts_per_batch() {
+    fn test_gene_stats_per_batch() {
         let index = CellBatchIndex::new(6, &[0, 1, 2, 3], Some(&[0, 0, 1, 1])).expect("index");
         let gene = CscGeneChunk::from_conversion(
             RawCounts::from_u32_auto(&[5, 5, 5, 7, 9]),
@@ -2048,18 +2203,61 @@ mod tests {
         );
 
         let mut scratch = HistogramScratch::new(index.n_slots());
-        let mut out = vec![RawCountSummary::default(); index.n_batches()];
-        summarise_gene_raw(&gene, &index, &mut scratch, &mut out);
+        let mut out = vec![GeneStats::default(); index.n_batches()];
+        gene_stats(&gene, &index, &mut scratch, &mut out);
 
-        // batch 0 holds cells 0 and 1, both at count 5
-        assert_eq!(out[0].values, vec![5]);
-        assert_eq!(out[0].freqs, vec![2]);
-        assert_eq!(out[0].nnz, 2);
+        // batch 0 holds cells 0 and 1, both at count 5, so the gene is dense
+        // in this batch and has no implicit zero
+        assert_eq!(out[0].mean, 5.0);
+        assert_eq!(out[0].var, 0.0);
+        assert_eq!(out[0].max_count, 5);
+        assert_eq!(out[0].min_count, 5);
 
         // batch 1 holds cells 2 and 3, at counts 5 and 7; cell 4 is unselected
-        assert_eq!(out[1].values, vec![5, 7]);
-        assert_eq!(out[1].freqs, vec![1, 1]);
-        assert_eq!(out[1].nnz, 2);
+        assert_eq!(out[1].mean, 6.0);
+        assert_eq!(out[1].var, 1.0);
+        assert_eq!(out[1].max_count, 7);
+        assert_eq!(out[1].min_count, 5);
+    }
+
+    #[test]
+    fn test_gene_stats_marks_the_implicit_zero() {
+        // cell 2 is selected but carries no entry for this gene, so the lower
+        // extreme has to be 0 rather than the smallest stored count
+        let index = CellBatchIndex::new(4, &[0, 1, 2], None).expect("index");
+        let gene = CscGeneChunk::from_conversion(
+            RawCounts::from_u32_auto(&[4, 6]),
+            &[norm_of(4), norm_of(6)],
+            &[0, 1],
+            0,
+            true,
+        );
+
+        let mut scratch = HistogramScratch::new(index.n_slots());
+        let mut out = vec![GeneStats::default(); index.n_batches()];
+        gene_stats(&gene, &index, &mut scratch, &mut out);
+
+        assert_eq!(out[0].max_count, 6);
+        assert_eq!(out[0].min_count, 0);
+        assert_relative_eq!(out[0].mean, 10.0 / 3.0, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn test_clip_reachability_gates_the_exact_path() {
+        // a tight clip cannot cover a wide gene, a generous one can
+        let stats = GeneStats {
+            mean: 2.0,
+            var: 4.0,
+            max_count: 50,
+            min_count: 0,
+        };
+
+        assert!(clip_is_reachable(&stats, 1.0, 1.0));
+        assert!(!clip_is_reachable(&stats, 1.0, 100.0));
+
+        // a degenerate expected variance always routes to the exact path
+        assert!(clip_is_reachable(&stats, 0.0, 1e9));
+        assert!(clip_is_reachable(&stats, f32::NAN, 1e9));
     }
 
     #[test]
