@@ -3678,9 +3678,21 @@ mod tests {
     /// individually dwarf the result, so cancellation is the risk that would
     /// justify keeping the materialising path. It does not materialise: the two
     /// agree well inside the convergence threshold at every size tested.
+    ///
+    /// The kernel is dense, so the materialising path costs `O(n^2)` and the two
+    /// larger sizes were five seconds of the crate's test time on their own.
+    /// They stay behind `large_scale_diagnostics`; 2000 cells run everywhere and
+    /// assert the same bound. `test_rss_trace_survives_near_total_cancellation`
+    /// covers the regime where the cancellation is worst, which is `k = n`
+    /// rather than large `n`.
     #[test]
     fn test_rss_paths_agree() {
-        for n in [2000usize, 8000, 20000] {
+        #[cfg(not(feature = "large_scale_diagnostics"))]
+        let sizes: &[usize] = &[2000];
+        #[cfg(feature = "large_scale_diagnostics")]
+        let sizes: &[usize] = &[2000, 8000, 20000];
+
+        for &n in sizes {
             let k = (n / 75).max(8);
             let params = SEACellsParams {
                 lanczos_params: LanczosParams::default(),
