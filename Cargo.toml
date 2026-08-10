@@ -89,6 +89,11 @@ features = ["single-cell", "multi-modal"]
 ###########
 
 [[bench]]
+name = "hvg_bench"
+harness = false
+required-features = ["single-cell"]
+
+[[bench]]
 name = "seacells_gpu_bench"
 harness = false
 required-features = ["gpu", "single-cell"]
