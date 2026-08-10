@@ -5,6 +5,7 @@ use extendr_api::{List, Robj};
 use std::collections::HashMap;
 
 use crate::single_cell::sc_processing::knn::KnnParams;
+use crate::utils::r_rust_interface::r_list_to_map;
 use crate::{
     prelude::VecConvert,
     single_cell::{multi_modal::wnn::parse_sigma_method, sc_processing::snn::parse_snn_type},
@@ -29,7 +30,7 @@ impl WnnParams {
     /// The [WnnParams]
     pub fn from_r_list(r_list: List) -> Result<Self, extendr_api::Error> {
         let knn_params = KnnParams::from_r_list(r_list.clone())?;
-        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
         let defaults = Self::default();
 
         let k_nn = params
@@ -127,7 +128,7 @@ impl DsbParams {
         r_list: List,
         isotype_indices: Vec<i32>,
     ) -> Result<Self, extendr_api::Error> {
-        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
         let defaults = Self::default();
 
         let denoise_counts = params

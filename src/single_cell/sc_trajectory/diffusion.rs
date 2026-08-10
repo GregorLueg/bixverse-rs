@@ -21,9 +21,29 @@ use rustc_hash::FxHashSet;
 
 use crate::prelude::*;
 use crate::single_cell::mc_generation::seacells::{
-    compute_diffusion_kernel, determine_multiscale_space, diffusion_map_from_kernel,
+    compute_diffusion_kernel, determine_multiscale_space, diffusion_map_from_kernel_diag,
     max_min_sampling,
 };
+
+/////////////
+// Structs //
+/////////////
+
+/// The multiscale diffusion space plus the eigensolver's own verdict on it.
+///
+/// The diagnostics travel with the components on purpose. A budget-exhausted
+/// Lanczos solve returns an embedding that is noise, and nothing downstream can
+/// tell: the pseudotime refinement happily converges on it, so a run reports
+/// success end to end.
+pub struct MultiscaleSpace {
+    /// Multiscale components, `n_cells` rows by the retained component count.
+    pub components: Vec<Vec<f32>>,
+    /// Whether the eigensolve met its tolerance rather than running out of
+    /// restarts.
+    pub converged: bool,
+    /// Largest achieved `||A x - lambda x||` over the returned pairs.
+    pub residual: f64,
+}
 
 ////////////
 // Consts //
@@ -31,13 +51,14 @@ use crate::single_cell::mc_generation::seacells::{
 
 /// Largest eigenvalue admitted into the `lambda / (1 - lambda)` multiscale
 /// scaling.
-const MAX_MULTISCALE_EIGENVALUE: f64 = 1.0 - 1e-4;
+const MAX_MULTISCALE_EIGENVALUE: f64 = 1.0 - 1e-10;
 
 /// Floor on the number of eigenvectors kept by the eigengap heuristic.
 ///
 /// Matches the reference's `n_eigs = 3` fallback. Dropping the trivial first
 /// eigenvector leaves two multiscale components, which is the minimum that
-/// still describes a branching manifold.
+/// still describes a branching manifold. The reference applies this floor only
+/// when it picks the count itself, and so does [resolve_n_eigs].
 const MIN_MULTISCALE_EIGS: usize = 3;
 
 /// Eigenvalues needed before a multiscale space can be built at all.
@@ -68,16 +89,21 @@ const MIN_MULTISCALE_EIGENVALUES: usize = 2;
 /// * `knn_distances` - kNN distances per cell, aligned with `knn_indices`.
 /// * `squared_dist` - Whether `knn_distances` holds squared distances, as the
 ///   ANN backends return for Euclidean.
-/// * `n_dcs` - Diffusion components to extract before scaling.
-/// * `n_eigs` - Components to retain. `None` applies the eigengap heuristic.
+/// * `n_dcs` - Usable diffusion components to extract before scaling. The
+///   eigensolver is asked for `n_dcs + 1` pairs, since the trivial leading
+///   eigenvector is always dropped.
+/// * `n_eigs` - **Eigenvectors** to retain, not components: the trivial leading
+///   one is included in the count and then dropped, so `Some(3)` yields two
+///   multiscale components. `None` applies the eigengap heuristic.
 /// * `seed` - Seed for the Lanczos start vector.
 /// * `lanczos_params` - Optional [LanczosParams] for the eigensolver, defaulted
 ///   when `None`.
 ///
 /// ### Returns
 ///
-/// Multiscale components, `n_cells` rows by `n_eigs - 1` columns; the trivial
-/// first eigenvector is dropped.
+/// The [MultiscaleSpace]: components `n_cells` rows by `n_eigs - 1` columns
+/// with the trivial first eigenvector dropped, plus the eigensolver's
+/// convergence flag and residual.
 pub fn multiscale_components(
     knn_indices: &[Vec<usize>],
     knn_distances: &[Vec<f32>],
@@ -86,7 +112,7 @@ pub fn multiscale_components(
     n_eigs: Option<usize>,
     seed: u64,
     lanczos_params: Option<LanczosParams>,
-) -> Result<Vec<Vec<f32>>, BixverseErrors> {
+) -> Result<MultiscaleSpace, BixverseErrors> {
     if n_dcs == 0 {
         return Err(BixverseErrors::InvalidArgument(
             "Palantir: n_dcs must be positive".to_string(),
@@ -97,28 +123,28 @@ pub fn multiscale_components(
     let degrees = kernel_row_sums(&kernel);
 
     // mutates the kernel into its symmetrically normalised form, so the degrees
-    // have to be taken before this call.
-    let (eigenvalues, eigenvectors) =
-        diffusion_map_from_kernel(&mut kernel, n_dcs + 1, seed, lanczos_params)?;
+    // have to be taken before this call. The `_diag` variant is the point: an
+    // under-resolved embedding is otherwise indistinguishable from a good one.
+    let solve = diffusion_map_from_kernel_diag(&mut kernel, n_dcs + 1, seed, lanczos_params)?;
 
     // the solver caps the pair count at the matrix dimension and can stop early
     // on an invariant subspace, so the count it returns is a ceiling, not a
     // promise.
-    if eigenvalues.len() < MIN_MULTISCALE_EIGENVALUES {
+    if solve.eigenvalues.len() < MIN_MULTISCALE_EIGENVALUES {
         return Err(BixverseErrors::InvalidArgument(
             "Palantir: fewer than two diffusion components could be resolved".to_string(),
         ));
     }
 
-    let eigenvectors = back_transform_eigenvectors(&eigenvectors, &degrees);
-    let n_keep = resolve_n_eigs(&eigenvalues, n_eigs);
-    let clamped = clamp_eigenvalues(&eigenvalues);
+    let eigenvectors = back_transform_eigenvectors(&solve.eigenvectors, &degrees);
+    let n_keep = resolve_n_eigs(&solve.eigenvalues, n_eigs)?;
+    let clamped = clamp_eigenvalues(&solve.eigenvalues)?;
 
-    Ok(determine_multiscale_space(
-        &clamped,
-        &eigenvectors,
-        Some(n_keep),
-    ))
+    Ok(MultiscaleSpace {
+        components: determine_multiscale_space(&clamped, &eigenvectors, Some(n_keep)),
+        converged: solve.converged,
+        residual: solve.residual,
+    })
 }
 
 /// Row sums of a CSR kernel, i.e. the diffusion degrees.
@@ -191,17 +217,29 @@ fn back_transform_eigenvectors(eigenvectors: &[Vec<f32>], degrees: &[f32]) -> Ve
 
 /// Clamp eigenvalues away from one before the multiscale scaling.
 ///
+/// Non-finite eigenvalues are rejected rather than clamped. `f64::min` returns
+/// the other operand when one side is `NaN`, so a `NaN` eigenvalue would come
+/// out as [MAX_MULTISCALE_EIGENVALUE] and go on to weight a `NaN` eigenvector at
+/// full scale, which looks exactly like a converged component.
+///
 /// ### Params
 ///
 /// * `eigenvalues` - Raw eigenvalues, descending.
 ///
 /// ### Returns
 ///
-/// The same values with anything above [MAX_MULTISCALE_EIGENVALUE] pulled down.
-fn clamp_eigenvalues(eigenvalues: &[f64]) -> Vec<f64> {
+/// The same values with anything above [MAX_MULTISCALE_EIGENVALUE] pulled down,
+/// or an error when any eigenvalue is non-finite.
+fn clamp_eigenvalues(eigenvalues: &[f64]) -> Result<Vec<f64>, BixverseErrors> {
     eigenvalues
         .iter()
-        .map(|&l| l.min(MAX_MULTISCALE_EIGENVALUE))
+        .map(|&l| {
+            if l.is_finite() {
+                Ok(l.min(MAX_MULTISCALE_EIGENVALUE))
+            } else {
+                Err(BixverseErrors::PalantirNonFiniteEigenvalue { eigenvalue: l })
+            }
+        })
         .collect()
 }
 
@@ -211,6 +249,13 @@ fn clamp_eigenvalues(eigenvalues: &[f64]) -> Vec<f64> {
 /// three, fall back to the second largest; if that still leaves fewer than
 /// three, take three. Ties resolve to the *last* index.
 ///
+/// The floor of three belongs to the heuristic alone. An explicit `requested`
+/// bypasses it, as it does in the reference, so `Some(2)` genuinely means two
+/// eigenvectors and one multiscale component. Anything below
+/// [MIN_MULTISCALE_EIGENVALUES] is refused rather than raised: silently turning
+/// a pinned count into a different one changes every waypoint distance,
+/// boundary and geodesic downstream.
+///
 /// ### Params
 ///
 /// * `eigenvalues` - Eigenvalues, descending.
@@ -219,16 +264,22 @@ fn clamp_eigenvalues(eigenvalues: &[f64]) -> Vec<f64> {
 /// ### Returns
 ///
 /// The number of eigenvectors to feed to the multiscale scaling, never above
-/// the number available.
-fn resolve_n_eigs(eigenvalues: &[f64], requested: Option<usize>) -> usize {
+/// the number available, or an error when `requested` is below the minimum.
+fn resolve_n_eigs(eigenvalues: &[f64], requested: Option<usize>) -> Result<usize, BixverseErrors> {
     let available = eigenvalues.len();
     if let Some(n) = requested {
-        return n.max(MIN_MULTISCALE_EIGS).min(available);
+        if n < MIN_MULTISCALE_EIGENVALUES {
+            return Err(BixverseErrors::PalantirNEigsTooSmall {
+                n_eigs: n,
+                minimum: MIN_MULTISCALE_EIGENVALUES,
+            });
+        }
+        return Ok(n.min(available));
     }
 
     let gaps: Vec<f64> = eigenvalues.windows(2).map(|w| w[0] - w[1]).collect();
     if gaps.is_empty() {
-        return MIN_MULTISCALE_EIGS.min(available);
+        return Ok(MIN_MULTISCALE_EIGS.min(available));
     }
 
     let mut order: Vec<usize> = (0..gaps.len()).collect();
@@ -242,7 +293,7 @@ fn resolve_n_eigs(eigenvalues: &[f64], requested: Option<usize>) -> usize {
         n_eigs = MIN_MULTISCALE_EIGS;
     }
 
-    n_eigs.min(available)
+    Ok(n_eigs.min(available))
 }
 
 ///////////////////////////
@@ -348,7 +399,9 @@ pub fn boundary_cells(data: &[Vec<f32>]) -> Vec<usize> {
 /// ### Returns
 ///
 /// The candidate at the smallest Euclidean distance, first index on ties, or an
-/// error when `candidates` is empty.
+/// error when `candidates` is empty. Both call sites pass the boundary set, so
+/// the error names that rather than terminal states, which are not involved in
+/// the start-cell snap at all.
 pub fn nearest_candidate(
     data: &[Vec<f32>],
     candidates: &[usize],
@@ -356,7 +409,7 @@ pub fn nearest_candidate(
 ) -> Result<usize, BixverseErrors> {
     let first = *candidates
         .first()
-        .ok_or(BixverseErrors::PalantirNoTerminalStates)?;
+        .ok_or(BixverseErrors::PalantirNoBoundaryCells)?;
 
     let mut best = first;
     let mut best_dist = f32::INFINITY;
@@ -514,7 +567,7 @@ mod tests {
         // (n_eigs 1), and that also fails, leaving the floor of three.
         let eigenvalues = [1.0, 0.9, 0.4, 0.35];
 
-        assert_eq!(resolve_n_eigs(&eigenvalues, None), 3);
+        assert_eq!(resolve_n_eigs(&eigenvalues, None).unwrap(), 3);
     }
 
     #[test]
@@ -523,16 +576,34 @@ mod tests {
         // n_eigs is 4 and the floor never comes into play.
         let eigenvalues = [1.0, 0.98, 0.95, 0.93, 0.30];
 
-        assert_eq!(resolve_n_eigs(&eigenvalues, None), 4);
+        assert_eq!(resolve_n_eigs(&eigenvalues, None).unwrap(), 4);
     }
 
     #[test]
-    fn test_resolve_n_eigs_respects_the_floor_on_explicit_requests() {
+    fn test_resolve_n_eigs_honours_explicit_requests_below_the_floor() {
+        // The floor of three is the *heuristic's*, not the function's. The
+        // reference applies it only inside the `n_eigs is None` branch, so a
+        // pinned `Some(2)` genuinely means two eigenvectors and one component.
+        // Raising it silently would change every waypoint distance downstream.
         let eigenvalues = [1.0, 0.9, 0.5, 0.2];
 
-        assert_eq!(resolve_n_eigs(&eigenvalues, Some(1)), MIN_MULTISCALE_EIGS);
-        assert_eq!(resolve_n_eigs(&eigenvalues, Some(4)), 4);
-        assert_eq!(resolve_n_eigs(&eigenvalues, Some(99)), 4);
+        assert_eq!(resolve_n_eigs(&eigenvalues, Some(2)).unwrap(), 2);
+        assert_eq!(resolve_n_eigs(&eigenvalues, Some(4)).unwrap(), 4);
+        assert_eq!(resolve_n_eigs(&eigenvalues, Some(99)).unwrap(), 4);
+    }
+
+    #[test]
+    fn test_resolve_n_eigs_rejects_a_request_below_two() {
+        let eigenvalues = [1.0, 0.9, 0.5, 0.2];
+
+        assert!(matches!(
+            resolve_n_eigs(&eigenvalues, Some(1)),
+            Err(BixverseErrors::PalantirNEigsTooSmall { n_eigs: 1, .. })
+        ));
+        assert!(matches!(
+            resolve_n_eigs(&eigenvalues, Some(0)),
+            Err(BixverseErrors::PalantirNEigsTooSmall { n_eigs: 0, .. })
+        ));
     }
 
     #[test]
@@ -542,22 +613,44 @@ mod tests {
         let two = [1.0, 0.5];
         let one = [1.0];
 
-        assert_eq!(resolve_n_eigs(&two, Some(2)), 2);
-        assert_eq!(resolve_n_eigs(&two, Some(99)), 2);
-        assert_eq!(resolve_n_eigs(&two, None), 2);
-        assert_eq!(resolve_n_eigs(&one, Some(3)), 1);
-        assert_eq!(resolve_n_eigs(&one, None), 1);
-        assert_eq!(resolve_n_eigs(&[], None), 0);
+        assert_eq!(resolve_n_eigs(&two, Some(2)).unwrap(), 2);
+        assert_eq!(resolve_n_eigs(&two, Some(99)).unwrap(), 2);
+        assert_eq!(resolve_n_eigs(&two, None).unwrap(), 2);
+        assert_eq!(resolve_n_eigs(&one, Some(3)).unwrap(), 1);
+        assert_eq!(resolve_n_eigs(&one, None).unwrap(), 1);
+        assert_eq!(resolve_n_eigs(&[], None).unwrap(), 0);
     }
 
     #[test]
-    fn test_clamp_eigenvalues_keeps_the_scale_finite() {
-        let clamped = clamp_eigenvalues(&[1.0, 0.999_999, 0.5]);
+    fn test_clamp_eigenvalues_pins_the_ceiling() {
+        // A scale of 1e300 is finite too, so "the scale is finite" pins
+        // nothing. What matters is where the ceiling actually sits and that
+        // everything below it is untouched.
+        let clamped = clamp_eigenvalues(&[1.0, 1.5, 0.999_999, 0.5]).unwrap();
 
-        for &l in &clamped {
-            let scale = l / (1.0 - l);
-            assert!(scale.is_finite(), "scale blew up for lambda {l}");
+        assert_eq!(clamped[0], MAX_MULTISCALE_EIGENVALUE);
+        assert_eq!(clamped[1], MAX_MULTISCALE_EIGENVALUE);
+        assert_eq!(clamped[2], 0.999_999);
+        assert_eq!(clamped[3], 0.5);
+
+        // The clamp must leave a genuine leading eigenvalue alone. The leading
+        // spectral gap of a knn = 30 diffusion operator is around 4e-5 at 10k
+        // cells, so a ceiling anywhere near 1 - 1e-4 would bind on real signal.
+        const {
+            assert!(1.0 - MAX_MULTISCALE_EIGENVALUE < 4e-5);
         }
+    }
+
+    #[test]
+    fn test_clamp_eigenvalues_rejects_non_finite_input() {
+        // `f64::min` returns the other operand for a NaN, so the clamp would
+        // otherwise hand back MAX_MULTISCALE_EIGENVALUE and weight a NaN
+        // eigenvector at full scale.
+        assert!(matches!(
+            clamp_eigenvalues(&[1.0, f64::NAN]),
+            Err(BixverseErrors::PalantirNonFiniteEigenvalue { .. })
+        ));
+        assert!(clamp_eigenvalues(&[f64::INFINITY]).is_err());
     }
 
     #[test]

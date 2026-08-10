@@ -51,8 +51,11 @@ const TERMINAL_CUTOFF_Z: f64 = 3.719_016_485_455_680_4;
 /// Iteration cap for the stationary-distribution power iteration.
 ///
 /// Reaching this is expected rather than exceptional; see
-/// [stationary_distribution]. The ranking the cutoff needs settles within a few
-/// hundred passes, so this is generous.
+/// [stationary_distribution]. It is not a convergence budget: the lazy chain's
+/// second eigenvalue is `(1 + lambda_2) / 2`, so a near-reducible chain with
+/// `lambda_2 = 1 - 1e-4` only decays its error to `exp(-0.25)` of the starting
+/// value over the full 5000 passes. What settles far sooner is the *ranking*
+/// [detect_terminal_states] reads, which is all the cap has to buy.
 const POWER_ITER_MAX: usize = 5_000;
 
 /// L1 change per pass below which the iteration stops early.
@@ -76,12 +79,6 @@ const MAX_DENSE_TRANSIENT: usize = 20_000;
 /// Rows may legitimately sum to *less* than one, because mass that leaks into a
 /// stranded state never absorbs anywhere. Summing to more than one is not
 /// legitimate under any configuration, so only the upper side is bounded.
-///
-/// Reaching this bound is only survivable because [absorption_probabilities]
-/// rescales each row in `f64` before the solve. Without that the `f32` chain's
-/// 3e-7 row-sum error is multiplied by the expected absorption time, which a
-/// pruned chain can push to 3e5, and the bound is blown by a factor of 70 on a
-/// solve that is otherwise exact.
 const ABSORPTION_ROW_SUM_TOL: f64 = 1e-3;
 
 /// Tolerance on `‖(I - Q) B - R‖_inf`, the achieved solve residual.
@@ -115,9 +112,9 @@ const ABSORPTION_RESIDUAL_TOL: f64 = 1e-5;
 ///   by components.
 /// * `wp_pseudotime` - Pseudotime per waypoint, aligned with `wp_data`.
 /// * `knn` - Neighbour count in the reference's self-inclusive convention.
-///   Clamped to the waypoint count; the bandwidth floor is then checked against
-///   the clamped value, so too few waypoints is rejected the same way too small
-///   a `knn` is.
+///   Clamped to the waypoint count. Too small a `knn` and too few waypoints are
+///   rejected separately, so the error names whichever the caller can actually
+///   act on.
 /// * `verbose` - Passed through to the exhaustive search.
 ///
 /// ### Returns
@@ -130,20 +127,31 @@ pub fn build_waypoint_transitions(
     verbose: bool,
 ) -> Result<CompressedSparseData2<f32>, BixverseErrors> {
     let n_wp = wp_data.len();
-    if n_wp == 0 || wp_pseudotime.len() != n_wp {
-        return Err(BixverseErrors::DimensionMisMatchSparse {
-            indices_len: n_wp,
-            data_len: wp_pseudotime.len(),
+    if n_wp == 0 {
+        return Err(BixverseErrors::InvalidArgument(
+            "Palantir: the waypoint set is empty".to_string(),
+        ));
+    }
+    if wp_pseudotime.len() != n_wp {
+        return Err(BixverseErrors::PalantirWaypointDataMismatch {
+            n_waypoints: n_wp,
+            n_pseudotime: wp_pseudotime.len(),
         });
     }
 
-    let knn = knn.min(n_wp);
     if knn < MIN_KNN {
         return Err(BixverseErrors::PalantirKnnTooSmall {
             knn,
             minimum: MIN_KNN,
         });
     }
+    if n_wp < MIN_KNN {
+        return Err(BixverseErrors::PalantirTooFewWaypoints {
+            n_waypoints: n_wp,
+            minimum: MIN_KNN,
+        });
+    }
+    let knn = knn.min(n_wp);
 
     let (indices, distances) = waypoint_knn(wp_data, knn, verbose)?;
     let adaptive_std = adaptive_bandwidths(&distances, knn);
@@ -171,14 +179,21 @@ pub fn build_waypoint_transitions(
             data.push(exponent.exp());
         }
 
-        if data.len() == start
-            && let Some(&j) = indices[i]
-                .iter()
-                .enumerate()
-                .find(|&(slot, &j)| j != i && distances[i][slot] > 0.0)
-                .map(|(_, j)| j)
-        {
-            col_idx.push(j as u32);
+        if data.len() == start {
+            let mut best: Option<usize> = None;
+            let mut best_pt = f32::NEG_INFINITY;
+            for (slot, &j) in indices[i].iter().enumerate() {
+                // Strict `>` keeps the first index on ties.
+                if j != i && distances[i][slot] > 0.0 && wp_pseudotime[j] > best_pt {
+                    best_pt = wp_pseudotime[j];
+                    best = Some(j);
+                }
+            }
+            let target = match best {
+                Some(j) if wp_pseudotime[j] >= wp_pseudotime[i] => j,
+                _ => i,
+            };
+            col_idx.push(target as u32);
             data.push(1.0);
         }
 
@@ -292,6 +307,40 @@ fn adaptive_bandwidths(distances: &[Vec<f32>], knn: usize) -> Vec<f32> {
 // Terminal states //
 /////////////////////
 
+/// Per-row rescaling factors that make an `f32` chain exactly row-stochastic.
+///
+/// [build_waypoint_transitions] normalises in `f32`, so its rows sum to one only
+/// to about 3e-7 over a 24-term sum. That error is per *step* and per *row*, so
+/// no downstream global renormalisation can undo it: it perturbs the operator
+/// itself rather than the vector it acts on. Reading the row mass back in `f64`
+/// and dividing by it costs one extra pass over the data and makes every
+/// consumer see the same exactly sub-stochastic matrix.
+///
+/// Both consumers need this and for different reasons.
+/// [absorption_probabilities] multiplies the per-step error by the expected
+/// absorption time, which a pruned corridor pushes to ~3e5.
+/// [stationary_distribution] is sensitive to the perturbation as
+/// `1 / (1 - |lambda_2|)`, and a trajectory with several fates is near-reducible
+/// by construction, so `lambda_2` sits within rounding of one.
+///
+/// ### Params
+///
+/// * `transitions` - Row-stochastic CSR transition matrix.
+///
+/// ### Returns
+///
+/// One factor per row: `1 / row_mass`, or `1` for a row with no mass to scale.
+fn row_rescale_factors(transitions: &CompressedSparseData2<f32>) -> Vec<f64> {
+    (0..transitions.shape.0)
+        .map(|i| {
+            let mass: f64 = (transitions.indptr[i] as usize..transitions.indptr[i + 1] as usize)
+                .map(|idx| transitions.data[idx] as f64)
+                .sum();
+            if mass > 0.0 { 1.0 / mass } else { 1.0 }
+        })
+        .collect()
+}
+
 /// Stationary distribution of a row-stochastic chain.
 ///
 /// Power iteration on the lazy chain (I + T) / 2. Same stationary vector as
@@ -309,6 +358,11 @@ fn adaptive_bandwidths(distances: &[Vec<f32>], knn: usize) -> Vec<f32> {
 /// ends, and their ranking against the rest settles long before the vector
 /// itself does. Starting from uniform makes the choice within that degenerate
 /// subspace reproducible.
+///
+/// Rows are rescaled in `f64` by [row_rescale_factors] before the iteration
+/// starts. Without that the operator itself carries the `f32` chain's per-row
+/// drift, and the stationary vector amplifies it by `1 / (1 - |lambda_2|)` on
+/// exactly the near-reducible chains this is asked about.
 ///
 /// Sequential by design: at a few thousand waypoints the sparse product takes
 /// a few hundred microseconds, and rayon's overhead would dominate.
@@ -331,6 +385,7 @@ pub fn stationary_distribution(
         return Err(BixverseErrors::SparseMatrixMustBeCsr);
     }
     let n = transitions.shape.0;
+    let scale = row_rescale_factors(transitions);
 
     let mut v = vec![1.0 / n as f64; n];
     let mut next = vec![0.0f64; n];
@@ -345,9 +400,10 @@ pub fn stationary_distribution(
             if vi == 0.0 {
                 continue;
             }
+            let scaled = 0.5 * scale[i] * vi;
             for idx in transitions.indptr[i] as usize..transitions.indptr[i + 1] as usize {
                 let j = transitions.indices[idx] as usize;
-                next[j] += 0.5 * transitions.data[idx] as f64 * vi;
+                next[j] += transitions.data[idx] as f64 * scaled;
             }
         }
 
@@ -404,6 +460,18 @@ pub fn detect_terminal_states(
 
     let centre = median(&ranks).ok_or(BixverseErrors::PalantirNoTerminalStates)?;
     let spread = mad(&ranks, None).ok_or(BixverseErrors::PalantirNoTerminalStates)?;
+
+    // A zero MAD means more than half the waypoints share a stationary rank, so
+    // the cutoff collapses onto the median and roughly half of everything clears
+    // it. `induced_components` then merges the lot and the branching structure
+    // silently becomes one terminal state. The "nothing is above" case is
+    // guarded below; this is the opposite failure and needs its own.
+    if spread <= 0.0 || !spread.is_finite() {
+        return Err(BixverseErrors::PalantirStationaryRanksDegenerate {
+            n_waypoints: ranks.len(),
+        });
+    }
+
     let cutoff = centre + TERMINAL_CUTOFF_Z * spread;
 
     let above: Vec<usize> = (0..ranks.len()).filter(|&i| ranks[i] > cutoff).collect();
@@ -427,7 +495,7 @@ pub fn detect_terminal_states(
 
     let boundaries = boundary_cells(wp_data);
     if boundaries.is_empty() {
-        return Err(BixverseErrors::PalantirNoTerminalStates);
+        return Err(BixverseErrors::PalantirNoBoundaryCells);
     }
 
     let mut terminal: Vec<usize> = candidates
@@ -537,6 +605,12 @@ pub fn absorption_probabilities(
         return Ok((out, stranded));
     }
 
+    // Renormalise the rows in `f64` rather than trusting the `f32` chain; see
+    // [row_rescale_factors]. Without it the solve returns row sums past
+    // ABSORPTION_ROW_SUM_TOL while remaining a perfectly consistent answer to
+    // the system it was handed.
+    let scale = row_rescale_factors(transitions);
+
     let mut lhs = Mat::<f64>::zeros(n_trans, n_trans);
     let mut rhs = Mat::<f64>::zeros(n_trans, n_abs);
     for i in 0..n {
@@ -546,22 +620,9 @@ pub fn absorption_probabilities(
         }
         let ti = ti as usize;
 
-        // Renormalise the row in `f64` rather than trusting the `f32` chain.
-        // `build_waypoint_transitions` normalises in `f32`, so its rows sum to
-        // 1 only to about 3e-7 over a 24-term sum. That error is per *step*,
-        // and the fundamental matrix multiplies it by the expected absorption
-        // time. On a well-mixed chain that factor is ~1e3 and nobody notices;
-        // on a pseudotime-pruned corridor it reaches ~3e5, at which point the
-        // solve returns row sums past ABSORPTION_ROW_SUM_TOL while remaining a
-        // perfectly consistent answer to the system it was handed. Rescaling
-        // here makes the system exactly sub-stochastic by construction.
-        let span = transitions.indptr[i] as usize..transitions.indptr[i + 1] as usize;
-        let mass: f64 = span.clone().map(|idx| transitions.data[idx] as f64).sum();
-        let scale = if mass > 0.0 { 1.0 / mass } else { 1.0 };
-
-        for idx in span {
+        for idx in transitions.indptr[i] as usize..transitions.indptr[i + 1] as usize {
             let j = transitions.indices[idx] as usize;
-            let v = transitions.data[idx] as f64 * scale;
+            let v = transitions.data[idx] as f64 * scale[i];
             if pos_trans[j] >= 0 {
                 lhs[(ti, pos_trans[j] as usize)] -= v;
             } else if pos_abs[j] >= 0 {
@@ -606,7 +667,18 @@ pub fn absorption_probabilities(
             row_sum += p;
             out[(transient[ti], k)] = p as f32;
         }
-        if !row_sum.is_finite() || row_sum > 1.0 + ABSORPTION_ROW_SUM_TOL {
+        // Split, because the two say completely different things. A non-finite
+        // sum points at a NaN in the solve; a sum above one points at a
+        // normalisation problem. Reporting "NaN, which is above one" sends the
+        // reader after the wrong bug.
+        if !row_sum.is_finite() {
+            return Err(BixverseErrors::PalantirAbsorbingRowNotFinite {
+                row_sum,
+                waypoint: transient[ti],
+                n_transient: n_trans,
+            });
+        }
+        if row_sum > 1.0 + ABSORPTION_ROW_SUM_TOL {
             return Err(BixverseErrors::PalantirAbsorbingRowSum {
                 row_sum,
                 waypoint: transient[ti],
@@ -625,6 +697,13 @@ pub fn absorption_probabilities(
 /// and a zero column to `(I - Q)`, making it singular, so these are excluded
 /// from the system rather than solved for.
 ///
+/// Edges are followed only where they carry positive probability. The affinity
+/// kernel's `exponent.exp()` can store an exact `0.0f32`, and walking the
+/// structural nonzeros alone would count a waypoint whose only route out is a
+/// zero-weight edge as reachable. It then solves to zero and never shows up in
+/// the `stranded_waypoints` diagnostic, which is the user's headline signal for
+/// over-pruning.
+///
 /// ### Params
 ///
 /// * `transitions` - Row-stochastic CSR transition matrix.
@@ -632,7 +711,8 @@ pub fn absorption_probabilities(
 ///
 /// ### Returns
 ///
-/// One flag per state, true when an absorbing state is reachable from it.
+/// One flag per state, true when an absorbing state is reachable from it along
+/// edges of positive probability.
 fn reaches_absorbing(transitions: &CompressedSparseData2<f32>, pos_abs: &[i64]) -> Vec<bool> {
     let n = transitions.shape.0;
     let reversed = transitions.transpose_and_convert();
@@ -646,7 +726,7 @@ fn reaches_absorbing(transitions: &CompressedSparseData2<f32>, pos_abs: &[i64]) 
     while let Some(u) = stack.pop() {
         for idx in reversed.indptr[u] as usize..reversed.indptr[u + 1] as usize {
             let v = reversed.indices[idx] as usize;
-            if !reached[v] {
+            if reversed.data[idx] > 0.0 && !reached[v] {
                 reached[v] = true;
                 stack.push(v);
             }
@@ -849,20 +929,87 @@ mod tests {
     #[test]
     fn test_transitions_reject_too_few_waypoints_for_the_bandwidth() {
         // Four waypoints cannot support a rank-`knn / 3 - 1` bandwidth however
-        // large the requested knn is.
+        // large the requested knn is. The diagnostic has to say so: reporting
+        // "knn 4 is below the minimum of 6" to someone who passed knn = 30
+        // sends them after a parameter that is not the problem.
         let wp_data: Vec<Vec<f32>> = (0..4).map(|i| vec![i as f32]).collect();
         let wp_pt: Vec<f32> = (0..4).map(|i| i as f32).collect();
 
         assert!(matches!(
             build_waypoint_transitions(&wp_data, &wp_pt, 30, false),
-            Err(BixverseErrors::PalantirKnnTooSmall { knn: 4, minimum: 6 })
+            Err(BixverseErrors::PalantirTooFewWaypoints {
+                n_waypoints: 4,
+                minimum: 6
+            })
         ));
+    }
+
+    #[test]
+    fn test_transitions_reject_a_waypoint_pseudotime_mismatch() {
+        let wp_data: Vec<Vec<f32>> = (0..8).map(|i| vec![i as f32]).collect();
+        let wp_pt: Vec<f32> = (0..3).map(|i| i as f32).collect();
+
+        assert!(matches!(
+            build_waypoint_transitions(&wp_data, &wp_pt, 6, false),
+            Err(BixverseErrors::PalantirWaypointDataMismatch {
+                n_waypoints: 8,
+                n_pseudotime: 3
+            })
+        ));
+    }
+
+    #[test]
+    fn test_fully_pruned_row_never_runs_backwards() {
+        // Widely spaced pseudotime against tightly spaced coordinates, so every
+        // back edge is pruned for every waypoint. The last waypoint has nothing
+        // ahead of it, and handing its whole row to the nearest neighbour would
+        // push all of its mass back down the trunk, suppressing exactly the
+        // terminal state it is.
+        let wp_data: Vec<Vec<f32>> = (0..12).map(|i| vec![i as f32 * 0.01]).collect();
+        let wp_pt: Vec<f32> = (0..12).map(|i| i as f32).collect();
+
+        let t = build_waypoint_transitions(&wp_data, &wp_pt, 6, false).unwrap();
+
+        for i in 0..12 {
+            for idx in t.indptr[i] as usize..t.indptr[i + 1] as usize {
+                let j = t.indices[idx] as usize;
+                assert!(
+                    wp_pt[j] >= wp_pt[i],
+                    "edge {i} -> {j} runs backwards in pseudotime"
+                );
+            }
+        }
+
+        // The last waypoint falls back to a self loop, which leaves it a sink.
+        let last = 11usize;
+        let lo = t.indptr[last] as usize;
+        let hi = t.indptr[last + 1] as usize;
+        assert_eq!(&t.indices[lo..hi], &[last as u32]);
     }
 
     #[test]
     fn test_stationary_of_two_state_chain() {
         // P(0->1) = 0.25, P(1->0) = 0.5; stationary is (2/3, 1/3).
         let t = chain_from_rows(&[vec![0.75, 0.25], vec![0.5, 0.5]]);
+
+        let pi = stationary_distribution(&t).unwrap();
+
+        assert_relative_eq!(pi[0], 2.0 / 3.0, epsilon = 1e-9);
+        assert_relative_eq!(pi[1], 1.0 / 3.0, epsilon = 1e-9);
+    }
+
+    #[test]
+    fn test_stationary_ignores_per_row_scale_drift() {
+        // Same chain as above with row 0 scaled up. That is the shape of the
+        // residue `build_waypoint_transitions` leaves behind when it normalises
+        // in `f32`, magnified until it is visible in a test: the drift is per
+        // row, so the per-pass L1 renormalisation cannot undo it. Without the
+        // `f64` rescale the answer is 0.6702 / 0.3298 against a true 2/3, and
+        // `detect_terminal_states` thresholds those ranks at
+        // `median + 3.719 * MAD`, where a shift of that size moves an arm tip
+        // across the cutoff and costs a whole branch.
+        let drift = 1.05f32;
+        let t = chain_from_rows(&[vec![0.75 * drift, 0.25 * drift], vec![0.5, 0.5]]);
 
         let pi = stationary_distribution(&t).unwrap();
 
@@ -1089,19 +1236,59 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_terminal_states_on_a_line() {
-        // A pseudotime-ordered line: the late end accumulates the mass.
+    fn test_detect_terminal_states_finds_the_late_end_of_a_line() {
+        // A pseudotime-ordered line: the late end accumulates the mass and is
+        // the only thing that should come back. Asserting that the result is a
+        // boundary waypoint pins nothing, since `detect_terminal_states` returns
+        // `nearest_candidate(_, &boundaries, _)` by construction; a line has
+        // exactly two boundaries and picking the *early* one would be the bug.
         let wp_data: Vec<Vec<f32>> = (0..30).map(|i| vec![i as f32 / 29.0]).collect();
         let wp_pt: Vec<f32> = (0..30).map(|i| i as f32 / 29.0).collect();
 
         let t = build_waypoint_transitions(&wp_data, &wp_pt, 6, false).unwrap();
         let terminal = detect_terminal_states(&t, &wp_data, &wp_pt).unwrap();
 
-        assert!(!terminal.is_empty());
-        // Every detected state must be a boundary waypoint.
-        let boundaries = boundary_cells(&wp_data);
-        for s in &terminal {
-            assert!(boundaries.contains(s), "state {s} is not a boundary");
+        assert_eq!(terminal, vec![29]);
+    }
+
+    #[test]
+    fn test_detect_terminal_states_rejects_a_flat_stationary_spread() {
+        // A uniform cycle: every waypoint carries the same stationary mass, so
+        // the MAD is exactly zero and the cutoff lands on the median. Roughly
+        // half of everything then clears it, `induced_components` merges the
+        // lot, and the branching structure silently collapses to one terminal
+        // state. The empty case is guarded; this is the opposite failure.
+        let n = 8usize;
+        let mut rows = vec![vec![0.0f32; n]; n];
+        for (i, row) in rows.iter_mut().enumerate() {
+            row[(i + 1) % n] = 1.0;
         }
+        let t = chain_from_rows(&rows);
+        let wp_data: Vec<Vec<f32>> = (0..n).map(|i| vec![i as f32]).collect();
+        let wp_pt: Vec<f32> = (0..n).map(|i| i as f32).collect();
+
+        assert!(matches!(
+            detect_terminal_states(&t, &wp_data, &wp_pt),
+            Err(BixverseErrors::PalantirStationaryRanksDegenerate { n_waypoints: 8 })
+        ));
+    }
+
+    #[test]
+    fn test_stranded_waypoints_count_a_zero_weight_route_out() {
+        // State 1's only edge to the absorber carries an exact zero. Walking
+        // structural nonzeros alone calls it reachable, so it solves to zero and
+        // never shows up in `stranded_waypoints`, which is the user's headline
+        // diagnostic for over-pruning. The affinity kernel's `exp()` really does
+        // underflow to `0.0f32` on a pruned corridor, so this is not a
+        // hypothetical.
+        let data = vec![1.0f32, 0.0, 1.0, 0.5, 0.5];
+        let indices = vec![0u32, 0, 1, 0, 2];
+        let indptr = vec![0u32, 1, 3, 5];
+        let t = CompressedSparseData2::new_csr(&data, &indices, &indptr, None, (3, 3));
+
+        let (b, stranded) = absorption_probabilities(&t, &[0]).unwrap();
+
+        assert_eq!(stranded, 1);
+        assert_relative_eq!(b[(1, 0)], 0.0, epsilon = 1e-6);
     }
 }

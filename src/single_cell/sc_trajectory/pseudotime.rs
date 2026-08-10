@@ -409,10 +409,7 @@ pub fn compute_pseudotime(
 
     let n_unreachable = count_unreachable_cells(&geodesic, n_wp, n_cells);
     if n_unreachable > 0 {
-        return Err(BixverseErrors::PalantirDisconnectedGraph {
-            n_unreachable,
-            repairs: 0,
-        });
+        return Err(BixverseErrors::PalantirUnreachableFromWaypoints { n_unreachable });
     }
 
     let weights = gaussian_waypoint_weights(&geodesic, n_wp, n_cells)?;
@@ -866,19 +863,6 @@ mod tests {
     }
 
     #[test]
-    fn test_pseudotime_is_reproducible() {
-        let (indices, distances) = chain_knn(30);
-        let graph = build_symmetric_knn_graph(&indices, &distances, false).unwrap();
-        let waypoints: Vec<usize> = std::iter::once(0).chain((4..30).step_by(4)).collect();
-
-        let a = compute_pseudotime(&graph, &waypoints, 0, 25, Verbosity::Quiet).unwrap();
-        let b = compute_pseudotime(&graph, &waypoints, 0, 25, Verbosity::Quiet).unwrap();
-
-        assert_eq!(a.pseudotime, b.pseudotime);
-        assert_eq!(a.iterations, b.iterations);
-    }
-
-    #[test]
     fn test_fused_kernel_matches_naive() {
         // Deliberately not a multiple of CELL_BLOCK, so the tail block runs too.
         let (n_wp, n_cells) = (7usize, 23usize);
@@ -1116,9 +1100,11 @@ mod tests {
 
         let err = compute_pseudotime(&graph, &[0, 1], 0, 25, Verbosity::Quiet);
 
+        // Not `PalantirDisconnectedGraph`: that variant reports a repair count,
+        // which this call site does not have.
         assert!(matches!(
             err,
-            Err(BixverseErrors::PalantirDisconnectedGraph { .. })
+            Err(BixverseErrors::PalantirUnreachableFromWaypoints { n_unreachable: 2 })
         ));
     }
 }

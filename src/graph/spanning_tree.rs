@@ -14,7 +14,7 @@
 
 use rayon::prelude::*;
 
-use crate::core::math::sparse::undirected_edges_to_csr;
+use crate::core::math::sparse::{undirected_edges_to_csr, validate_square_csr};
 use crate::graph::graph_structures::UnionFind;
 use crate::prelude::*;
 
@@ -24,15 +24,16 @@ use crate::prelude::*;
 
 /// Shared Kruskal core behind both public entry points.
 ///
-/// Runs two sorts over the candidate edges. The first collapses each `(lo,
-/// hi)` pair down to its objective-favouring weight; the second is the Kruskal
-/// ordering itself. Sorting twice beats a hash map here because the candidate
-/// list is one contiguous allocation the whole way through.
+/// One sort over the candidate edges, then the union-find pass. A pair stored in
+/// both directions needs no separate collapse: the objective-favouring copy
+/// sorts first under the Kruskal ordering, so union accepts it and every later
+/// copy is rejected as a cycle. The result is identical to deduplicating first
+/// and half a sort cheaper.
 ///
-/// Those sorts are the whole cost, so they are the only part that runs in
-/// parallel. Collecting the candidates is linear and the union-find pass is
-/// inherently sequential. Rayon leaves short slices on the sequential path, so
-/// this stays cheap on the tiny graphs that graph abstraction feeds it.
+/// The sort is the whole cost, so it is the only part that runs in parallel.
+/// Collecting the candidates is linear and the union-find pass is inherently
+/// sequential. Rayon leaves short slices on the sequential path, so this stays
+/// cheap on the tiny graphs that graph abstraction feeds it.
 ///
 /// ### Params
 ///
@@ -41,8 +42,8 @@ use crate::prelude::*;
 ///
 /// ### Returns
 ///
-/// The forest as a symmetric CSR, or an error when `graph` is not a square
-/// CSR.
+/// The forest as a symmetric CSR, or an error when `graph` is not a structurally
+/// sound square CSR.
 fn spanning_forest<T>(
     graph: &CompressedSparseData2<T>,
     maximise: bool,
@@ -53,15 +54,6 @@ where
     let n = validate_square_csr(graph)?;
 
     let mut edges = candidate_edges(graph, n);
-
-    // Objective-favouring weight first within each pair, so the dedup below
-    // keeps the right one.
-    edges.par_sort_unstable_by(|a, b| {
-        (a.0, a.1)
-            .cmp(&(b.0, b.1))
-            .then_with(|| weight_order(a.2, b.2, maximise))
-    });
-    edges.dedup_by_key(|e| (e.0, e.1));
 
     edges.par_sort_unstable_by(|a, b| {
         weight_order(a.2, b.2, maximise).then_with(|| (a.0, a.1).cmp(&(b.0, b.1)))
@@ -82,8 +74,14 @@ where
 
 /// Collect the undirected candidate edges of a CSR adjacency.
 ///
-/// Self loops and non-finite weights are dropped: neither can belong to a
-/// spanning forest, and a `NaN` weight would poison the comparator.
+/// Self loops and `NaN` weights are dropped: a self loop can never belong to a
+/// spanning forest, and a `NaN` would poison the comparator and silently
+/// reorder the whole Kruskal sequence.
+///
+/// Infinities are kept. `total_cmp` orders them correctly, scipy treats them as
+/// ordinary large weights, and for [maximum_spanning_forest] a `+inf` edge is
+/// the *most* desirable one in the graph. Dropping it would hand the caller an
+/// extra component whenever it was the only bridge between two of them.
 ///
 /// ### Params
 ///
@@ -105,7 +103,7 @@ where
         for idx in graph.indptr[i] as usize..graph.indptr[i + 1] as usize {
             let j = graph.indices[idx];
             let w = graph.data[idx];
-            if j == row || !w.is_finite() {
+            if j == row || w.is_nan() {
                 continue;
             }
             edges.push((row.min(j), row.max(j), w));
@@ -125,8 +123,8 @@ where
 ///
 /// ### Returns
 ///
-/// The ordering to sort by. Uses `total_cmp`, so the comparator stays a total
-/// order even though non-finite weights are already filtered out.
+/// The ordering to sort by. Uses `total_cmp`, which is a total order over the
+/// infinities [candidate_edges] lets through.
 #[inline]
 fn weight_order<T>(a: T, b: T, maximise: bool) -> std::cmp::Ordering
 where
@@ -139,32 +137,6 @@ where
     }
 }
 
-/// Check that a graph is a square CSR matrix and return its node count.
-///
-/// ### Params
-///
-/// * `graph` - The adjacency to validate.
-///
-/// ### Returns
-///
-/// The node count, or an error when the matrix is not CSR or not square.
-fn validate_square_csr<T>(graph: &CompressedSparseData2<T>) -> Result<usize, BixverseErrors>
-where
-    T: Clone,
-{
-    if !graph.cs_type.is_csr() {
-        return Err(BixverseErrors::SparseMatrixMustBeCsr);
-    }
-    let (rows, cols) = graph.shape;
-    if rows != cols {
-        return Err(BixverseErrors::ShapeMismatch {
-            expected: (rows, rows),
-            got: (rows, cols),
-        });
-    }
-    Ok(rows)
-}
-
 //////////
 // Main //
 //////////
@@ -173,13 +145,14 @@ where
 ///
 /// ### Params
 ///
-/// * `graph` - Square CSR adjacency, read as undirected. Self loops and
-///   non-finite weights are skipped.
+/// * `graph` - Square CSR adjacency, read as undirected. Self loops and `NaN`
+///   weights are skipped; infinities are ordinary weights.
 ///
 /// ### Returns
 ///
 /// A symmetric CSR of the same shape holding the retained edges at their
-/// original weights, or an error when `graph` is not a square CSR.
+/// original weights, or an error when `graph` is not a structurally sound square
+/// CSR.
 pub fn minimum_spanning_forest<T>(
     graph: &CompressedSparseData2<T>,
 ) -> Result<CompressedSparseData2<T>, BixverseErrors>
@@ -197,13 +170,14 @@ where
 ///
 /// ### Params
 ///
-/// * `graph` - Square CSR adjacency, read as undirected. Self loops and
-///   non-finite weights are skipped.
+/// * `graph` - Square CSR adjacency, read as undirected. Self loops and `NaN`
+///   weights are skipped; infinities are ordinary weights.
 ///
 /// ### Returns
 ///
 /// A symmetric CSR of the same shape holding the retained edges at their
-/// original weights, or an error when `graph` is not a square CSR.
+/// original weights, or an error when `graph` is not a structurally sound square
+/// CSR.
 pub fn maximum_spanning_forest<T>(
     graph: &CompressedSparseData2<T>,
 ) -> Result<CompressedSparseData2<T>, BixverseErrors>
@@ -244,6 +218,46 @@ mod tests {
         let mut data: Vec<f64> = Vec::new();
         for row in rows.iter_mut() {
             row.sort_unstable_by_key(|e| e.0);
+            for &(j, w) in row.iter() {
+                indices.push(j);
+                data.push(w);
+            }
+            indptr.push(indices.len() as u32);
+        }
+
+        CompressedSparseData2::new_csr(&data, &indices, &indptr, None, (n, n))
+    }
+
+    /// Build a symmetric CSR whose rows keep the insertion order of the edge
+    /// list rather than being sorted by column.
+    ///
+    /// A valid CSR for this crate wants ascending rows, so this is only for
+    /// probing order dependence in a routine that reads the rows as an unordered
+    /// bag of edges.
+    ///
+    /// ### Params
+    ///
+    /// * `n` - Node count.
+    /// * `edges` - Undirected edges as `(a, b, weight)`; both directions are
+    ///   stored.
+    ///
+    /// ### Returns
+    ///
+    /// The CSR adjacency with per-row column order following `edges`.
+    fn undirected_csr_unsorted(
+        n: usize,
+        edges: &[(usize, usize, f64)],
+    ) -> CompressedSparseData2<f64> {
+        let mut rows: Vec<Vec<(u32, f64)>> = vec![Vec::new(); n];
+        for &(a, b, w) in edges {
+            rows[a].push((b as u32, w));
+            rows[b].push((a as u32, w));
+        }
+
+        let mut indptr: Vec<u32> = vec![0];
+        let mut indices: Vec<u32> = Vec::new();
+        let mut data: Vec<f64> = Vec::new();
+        for row in rows.iter() {
             for &(j, w) in row.iter() {
                 indices.push(j);
                 data.push(w);
@@ -358,7 +372,9 @@ mod tests {
     #[test]
     fn test_all_equal_weights_break_ties_deterministically() {
         // Every edge of K4 at the same weight: the tie-break is (lo, hi), so
-        // the star at node 0 wins and the result is stable across runs.
+        // the star at node 0 wins. Building the same graph twice in a *permuted
+        // storage order* is the point. Running the same pure function on the
+        // same input twice would pass for an order-dependent implementation too.
         let mut edges = Vec::new();
         for i in 0..4 {
             for j in (i + 1)..4 {
@@ -367,15 +383,19 @@ mod tests {
         }
         let graph = undirected_csr(4, &edges);
 
+        let mut permuted = edges.clone();
+        permuted.reverse();
+        let permuted = undirected_csr_unsorted(4, &permuted);
+
         let first = edge_list(&minimum_spanning_forest(&graph).unwrap());
-        let second = edge_list(&minimum_spanning_forest(&graph).unwrap());
+        let second = edge_list(&minimum_spanning_forest(&permuted).unwrap());
 
         assert_eq!(first, second);
         assert_eq!(first, vec![(0, 1, 1.0), (0, 2, 1.0), (0, 3, 1.0)]);
     }
 
     #[test]
-    fn test_self_loops_and_non_finite_weights_are_dropped() {
+    fn test_self_loops_and_nan_weights_are_dropped() {
         let data = vec![f64::NAN, 7.0, 1.0, 1.0];
         let indices = vec![0u32, 1, 0, 0];
         let indptr = vec![0u32, 2, 3, 4];
@@ -388,6 +408,43 @@ mod tests {
             edge_list(&minimum_spanning_forest(&graph).unwrap()),
             vec![(0, 1, 1.0), (0, 2, 1.0)]
         );
+    }
+
+    #[test]
+    fn test_a_nan_on_a_real_edge_is_dropped() {
+        // The self-loop case above short-circuits on `j == row`, so it passes
+        // with the NaN filter deleted. This one cannot: a NaN reaching
+        // `total_cmp` sorts above every finite weight for the maximum forest and
+        // silently reorders the whole Kruskal sequence.
+        let graph = undirected_csr(3, &[(0, 1, f64::NAN), (0, 2, 5.0), (1, 2, 6.0)]);
+
+        assert_eq!(
+            edge_list(&maximum_spanning_forest(&graph).unwrap()),
+            vec![(0, 2, 5.0), (1, 2, 6.0)]
+        );
+        assert_eq!(
+            edge_list(&minimum_spanning_forest(&graph).unwrap()),
+            vec![(0, 2, 5.0), (1, 2, 6.0)]
+        );
+    }
+
+    #[test]
+    fn test_infinite_weights_are_ordinary_edges() {
+        // scipy treats infinities as very large weights and so does this.
+        // Filtering them out alongside NaN discards the single most desirable
+        // edge of a maximum forest, and hands the caller an extra component
+        // whenever it was the only bridge between two of them.
+        let graph = undirected_csr(4, &[(0, 1, 1.0), (2, 3, 1.0), (1, 2, f64::INFINITY)]);
+
+        let max_forest = edge_list(&maximum_spanning_forest(&graph).unwrap());
+        assert_eq!(max_forest.len(), 3);
+        assert!(max_forest.iter().any(|e| (e.0, e.1) == (1, 2)));
+
+        // The minimum forest takes it last but still has to take it: nothing
+        // else connects the two halves.
+        let min_forest = edge_list(&minimum_spanning_forest(&graph).unwrap());
+        assert_eq!(min_forest.len(), 3);
+        assert!(min_forest.iter().any(|e| (e.0, e.1) == (1, 2)));
     }
 
     #[test]

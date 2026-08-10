@@ -11,6 +11,7 @@ use crate::gpu::sc_gpu::harmony_gpu::HarmonyParamsV2Gpu;
 use crate::ml::clustering::k_means::parse_kmeans_init;
 #[cfg(feature = "single-cell")]
 use crate::single_cell::sc_processing::knn::KnnParams;
+use crate::utils::r_rust_interface::r_list_to_map;
 
 /////////////////////
 // KMeansGpuParams //
@@ -27,7 +28,7 @@ impl KMeansGpuParams {
     ///
     /// The [KMeansGpuParams] populated by the R list.
     pub fn from_r_list(r_list: List) -> Result<Self> {
-        let params_list: HashMap<&str, Robj> = r_list.try_into()?;
+        let params_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
         let iters = params_list
             .get("k_means_iter")
@@ -79,7 +80,7 @@ impl FastLouvainParamsGpu {
         let kmeans_params = Some(KMeansGpuParams::from_r_list(r_list.clone())?);
 
         let defaults = Self::default();
-        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
         let n_centroids = params
             .get("n_centroids")
@@ -150,7 +151,7 @@ impl HarmonyParamsV2Gpu {
     /// The `HarmonyParamsV2Gpu` with all parameters set.
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let defaults = Self::default();
-        let params_list: HashMap<&str, Robj> = r_list.try_into()?;
+        let params_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
         let k = params_list
             .get("k")

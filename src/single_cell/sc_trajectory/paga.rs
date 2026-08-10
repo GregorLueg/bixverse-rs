@@ -45,6 +45,20 @@ use crate::graph::graph_abstraction::partition_connectivities;
 use crate::graph::spanning_tree::maximum_spanning_forest;
 use crate::prelude::*;
 
+////////////
+// Consts //
+////////////
+
+/// Share of kNN entries that may point outside the cell set before the input is
+/// refused.
+///
+/// A stray index or two is worth dropping quietly, which is what the reference
+/// does. Wholesale is a different thing: kNN indices computed against a
+/// reference index rather than the query set land entirely out of range, every
+/// edge disappears, and PAGA returns an all-zero connectivity matrix that looks
+/// like a finding. Half is far past anything a real graph produces.
+const MAX_OUT_OF_RANGE_SHARE: f64 = 0.5;
+
 /////////////
 // Structs //
 /////////////
@@ -92,32 +106,57 @@ where
 /// ### Returns
 ///
 /// A square CSR adjacency over the cells with one entry per surviving
-/// neighbour.
-fn directed_knn_csr(knn_indices: &[Vec<usize>]) -> CompressedSparseData2<u8> {
+/// neighbour, or an error when more than [MAX_OUT_OF_RANGE_SHARE] of the
+/// supplied entries point outside the cell set.
+fn directed_knn_csr(
+    knn_indices: &[Vec<usize>],
+) -> Result<CompressedSparseData2<u8>, BixverseErrors> {
     let n = knn_indices.len();
+    let total: usize = knn_indices.iter().map(|r| r.len()).sum();
 
     let mut indptr: Vec<u32> = Vec::with_capacity(n + 1);
-    let mut indices: Vec<u32> = Vec::with_capacity(knn_indices.iter().map(|r| r.len()).sum());
+    let mut indices: Vec<u32> = Vec::with_capacity(total);
     indptr.push(0);
 
+    let mut out_of_range = 0usize;
     let mut row: Vec<u32> = Vec::new();
     for (i, neighbours) in knn_indices.iter().enumerate() {
         row.clear();
-        row.extend(
-            neighbours
-                .iter()
-                .filter(|&&j| j != i && j < n)
-                .map(|&j| j as u32),
-        );
+        for &j in neighbours.iter() {
+            if j >= n {
+                out_of_range += 1;
+                continue;
+            }
+            if j != i {
+                row.push(j as u32);
+            }
+        }
         row.sort_unstable();
         row.dedup();
         indices.extend_from_slice(&row);
         indptr.push(indices.len() as u32);
     }
 
+    if total > 0 && (out_of_range as f64) > MAX_OUT_OF_RANGE_SHARE * total as f64 {
+        return Err(BixverseErrors::PagaKnnIndicesOutOfRange {
+            out_of_range,
+            total,
+            n_cells: n,
+        });
+    }
+
     let data = vec![1u8; indices.len()];
 
-    CompressedSparseData2::new_csr(&data, &indices, &indptr, None, (n, n))
+    // `from_parts` rather than `new_csr`: at a million cells by thirty
+    // neighbours the copy is 150 MB of pure transit cost.
+    Ok(CompressedSparseData2::from_parts(
+        data,
+        indices,
+        indptr,
+        None,
+        CompressedSparseFormat::Csr,
+        (n, n),
+    ))
 }
 
 //////////
@@ -139,7 +178,8 @@ fn directed_knn_csr(knn_indices: &[Vec<usize>]) -> CompressedSparseData2<u8> {
 /// ### Params
 ///
 /// * `knn_indices` - kNN indices per cell, self excluded. Out-of-range and
-///   self-referencing entries are dropped rather than counted.
+///   self-referencing entries are dropped rather than counted, up to
+///   [MAX_OUT_OF_RANGE_SHARE] of the input.
 /// * `partitions` - Cluster label per cell, one per entry of `knn_indices`.
 ///   Typically the output of [crate::graph::community_detections].
 /// * `n_partitions` - Declared cluster count. `None` derives it as
@@ -149,7 +189,8 @@ fn directed_knn_csr(knn_indices: &[Vec<usize>]) -> CompressedSparseData2<u8> {
 ///
 /// The abstracted graph, its spanning forest and the cluster sizes, or an error
 /// when the label count does not match the cell count, a label sits outside
-/// `n_partitions`, or the cluster count is implausibly large.
+/// `n_partitions`, the cluster count is implausibly large, or most of the kNN
+/// indices point outside the cell set.
 ///
 /// ### References
 ///
@@ -162,7 +203,7 @@ pub fn run_paga<T>(
 where
     T: BixverseFloat + BixverseNumeric,
 {
-    let graph = directed_knn_csr(knn_indices);
+    let graph = directed_knn_csr(knn_indices)?;
 
     let abstracted = partition_connectivities::<T, u8>(&graph, partitions, n_partitions)?;
     let connectivities_tree = maximum_spanning_forest(&abstracted.connectivities)?;
@@ -206,7 +247,10 @@ mod tests {
     /// Three tight blocks of four cells, with 0 the trunk and 1, 2 the arms.
     ///
     /// Every cell lists the other three of its block. The trunk is wired to
-    /// both arms; the arms touch only through it.
+    /// both arms with two mutual bridges each; the arms touch each other
+    /// through a single one-way link, so the abstracted graph is a triangle
+    /// with one clearly weakest side rather than a path. A path fixture would
+    /// be passed by any implementation that hands back its own input.
     ///
     /// ### Returns
     ///
@@ -219,16 +263,18 @@ mod tests {
                 knn[c] = block.iter().copied().filter(|&o| o != c).collect();
             }
         }
-        // Trunk to arms, in both directions so the bridge is not one-sided.
-        knn[3].push(4);
-        knn[4].push(3);
-        knn[0].push(8);
-        knn[8].push(0);
+        // Trunk to arms, in both directions so the bridges are not one-sided.
+        for (a, b) in [(3, 4), (2, 5), (0, 8), (1, 9)] {
+            knn[a].push(b);
+            knn[b].push(a);
+        }
+        // The weak direct link between the two arms: one direction only.
+        knn[7].push(8);
         knn
     }
 
     #[test]
-    fn test_y_shape_connects_the_trunk_to_both_arms_only() {
+    fn test_y_shape_connects_the_trunk_to_both_arms_most_strongly() {
         let knn = y_shape();
         let partitions = vec![0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2];
 
@@ -239,7 +285,9 @@ mod tests {
         let dense = densify(&res.connectivities);
         assert!(dense[0][1] > 0.0);
         assert!(dense[0][2] > 0.0);
-        assert_eq!(dense[1][2], 0.0);
+        assert!(dense[1][2] > 0.0);
+        assert!(dense[1][2] < dense[0][1]);
+        assert!(dense[1][2] < dense[0][2]);
         // Symmetric, zero diagonal.
         for a in 0..3 {
             assert_eq!(dense[a][a], 0.0);
@@ -256,7 +304,9 @@ mod tests {
 
         let res: PagaResult<f64> = run_paga(&knn, &partitions, None).unwrap();
 
-        // Three nodes, two edges, both incident on the trunk.
+        // Three nodes and a cycle over them, so the forest has to make a
+        // choice: two edges, both incident on the trunk, with the weak arm-to-arm
+        // link given up.
         assert_eq!(res.connectivities_tree.get_nnz(), 4);
         let tree = densify(&res.connectivities_tree);
         assert!(tree[0][1] > 0.0);
@@ -313,6 +363,24 @@ mod tests {
         assert_eq!(a.connectivities.data, b.connectivities.data);
         assert_eq!(a.connectivities.indices, b.connectivities.indices);
         assert_eq!(a.sizes, b.sizes);
+    }
+
+    #[test]
+    fn test_rejects_a_knn_built_against_another_index() {
+        // Every neighbour points past the last cell, which is what happens when
+        // the search ran against a reference index rather than the query set.
+        // The old behaviour was an all-zero connectivity matrix and no word
+        // about it.
+        let knn = vec![vec![50, 51], vec![52, 53], vec![54, 55]];
+
+        assert!(matches!(
+            run_paga::<f64>(&knn, &[0, 1, 1], None),
+            Err(BixverseErrors::PagaKnnIndicesOutOfRange {
+                out_of_range: 6,
+                total: 6,
+                n_cells: 3
+            })
+        ));
     }
 
     #[test]

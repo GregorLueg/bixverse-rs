@@ -63,16 +63,6 @@ pub enum BixverseErrors {
     #[error("Distance metric '{0}' is not supported for this method.")]
     DistanceNotSupported(Dist),
 
-    // -- sparse --
-    /// Error if wrong sparse format has been provided
-    #[error("Wrong sparse format. Expected {expected}; got {found}")]
-    WrongSparseFormat {
-        /// Expected format
-        expected: String,
-        /// Got format
-        found: String,
-    },
-
     // -- graph based errors ---
     /// Error for algorithms that expect undirected graphs
     ///
@@ -94,6 +84,24 @@ pub enum BixverseErrors {
         label: usize,
         /// Number of declared partitions
         n_partitions: usize,
+    },
+
+    /// Most of the supplied kNN indices point outside the cell set
+    ///
+    /// The usual cause is a kNN computed against a reference index rather than
+    /// the query set, which drops every edge and returns an all-zero
+    /// connectivity matrix looking like a genuine result.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "PAGA: {out_of_range} of {total} kNN entries point outside the {n_cells} cells; the graph was probably built against a different index"
+    )]
+    PagaKnnIndicesOutOfRange {
+        /// Entries pointing past the last cell
+        out_of_range: usize,
+        /// Entries supplied in total
+        total: usize,
+        /// Cells in the input
+        n_cells: usize,
     },
 
     /// Error if the partition count exceeds what the dense coarsening accepts
@@ -178,6 +186,14 @@ pub enum BixverseErrors {
     /// Error if the [crate::prelude::CompressedSparseData2] is not in CSR.
     #[error("The SparseCompressedData2 must be in CSR format")]
     SparseMatrixMustBeCsr,
+
+    /// A CSR matrix failed one of its structural invariants.
+    ///
+    /// Raised by [crate::core::math::sparse::validate_square_csr]. The static
+    /// string names the invariant, because "the graph is malformed" alone leaves
+    /// the caller to bisect their own input.
+    #[error("The CSR matrix is malformed: {0}")]
+    MalformedCsr(&'static str),
 
     /// Error if the [crate::prelude::CompressedSparseData2] is not in Csc.
     #[error("The SparseCompressedData2 must be in CSC format")]
@@ -375,6 +391,7 @@ pub enum BixverseErrors {
     Hdf5(#[from] hdf5::Error),
 
     /// Provide custom error message for unsupported file formats.
+    #[cfg(feature = "single-cell")]
     #[error("Unknown or unsupported h5ad format: {0}")]
     UnsupportH5ADFormat(String),
 
@@ -429,16 +446,6 @@ pub enum BixverseErrors {
         n_batches: usize,
     },
 
-    /// Anchor finding produced no pairs between two batches
-    #[cfg(feature = "single-cell")]
-    #[error("No anchors found between batches {batch_a} and {batch_b}.")]
-    NoAnchorsFound {
-        /// Reference batch index
-        batch_a: usize,
-        /// Query batch index
-        batch_b: usize,
-    },
-
     /// A batch has too few cells for the requested anchor search
     #[cfg(feature = "single-cell")]
     #[error("Batch {batch} has {n_cells} cells, needs at least {required} for anchor finding.")]
@@ -452,6 +459,7 @@ pub enum BixverseErrors {
     },
     // -- Harmony --
     /// Sigma length is not equal to the number of clusters
+    #[cfg(feature = "single-cell")]
     #[error("Harmony: sigma length must match number of clusters")]
     HarmonySigmaLengthUnequalCluster,
 
@@ -591,6 +599,21 @@ pub enum BixverseErrors {
     #[error("SEACells: The model has not been fitted yet. Please run .fit()")]
     SEACellsModelNotFitted,
 
+    /// The adaptive diffusion kernel came out with non-finite weights.
+    ///
+    /// Raised by
+    /// [crate::single_cell::mc_generation::seacells::compute_diffusion_kernel].
+    /// The usual cause is a caller-supplied kNN graph carrying `NaN` distances,
+    /// since zero bandwidths are handled by the smallest-positive fallback.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "The adaptive diffusion kernel over {n_cells} cells holds non-finite weights; check the supplied kNN distances"
+    )]
+    DiffusionKernelNotFinite {
+        /// Cells in the kNN graph
+        n_cells: usize,
+    },
+
     // -- FastCluster --
     /// The Fast cluster results do not contain k-means cluster assignments
     #[cfg(feature = "single-cell")]
@@ -628,11 +651,6 @@ pub enum BixverseErrors {
     #[cfg(feature = "single-cell")]
     #[error("MELD: labels needs two groups minimum")]
     MELDOnlyOneGroup,
-
-    /// Error if embedding rows do not match the kNN
-    #[cfg(feature = "single-cell")]
-    #[error("MELD: Embedding rows unequals samples")]
-    MELDEmbeddingUnequalsSamples,
 
     // -- Palantir --
     /// The user-supplied early cell index sits outside the cell range.
@@ -696,6 +714,11 @@ pub enum BixverseErrors {
     /// The neighbour count is too small to derive the back-edge bandwidth of
     /// the waypoint Markov chain, which indexes neighbour rank
     /// `min(knn / 3 - 1, 30)`.
+    ///
+    /// Carries the neighbour count the caller asked for, not the one clamped to
+    /// the waypoint set. Too few waypoints raises
+    /// [BixverseErrors::PalantirTooFewWaypoints] instead, so the message always
+    /// names the parameter that can actually be changed.
     #[cfg(feature = "single-cell")]
     #[error("Palantir: knn is {knn}, but at least {minimum} is needed for the adaptive bandwidth")]
     PalantirKnnTooSmall {
@@ -703,6 +726,48 @@ pub enum BixverseErrors {
         knn: usize,
         /// Smallest neighbour count yielding a valid bandwidth rank
         minimum: usize,
+    },
+
+    /// Too few waypoints were sampled to support the back-edge bandwidth rank,
+    /// however large the requested `knn` is.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Palantir: only {n_waypoints} waypoints were sampled, but at least {minimum} are needed for the adaptive bandwidth; raise num_waypoints or supply more cells"
+    )]
+    PalantirTooFewWaypoints {
+        /// Waypoints actually sampled
+        n_waypoints: usize,
+        /// Smallest waypoint count yielding a valid bandwidth rank
+        minimum: usize,
+    },
+
+    /// The waypoint data and the waypoint pseudotime disagree on the waypoint
+    /// count.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Palantir: {n_waypoints} waypoint rows were supplied against {n_pseudotime} pseudotime values"
+    )]
+    PalantirWaypointDataMismatch {
+        /// Rows of multiscale data restricted to the waypoints
+        n_waypoints: usize,
+        /// Pseudotime values supplied alongside
+        n_pseudotime: usize,
+    },
+
+    /// The stationary ranks have no spread, so the outlier cutoff separates
+    /// nothing.
+    ///
+    /// More than half the waypoints share a stationary mass, which puts the
+    /// median absolute deviation at exactly zero and the cutoff exactly on the
+    /// median. Roughly half of everything then clears it, the components merge,
+    /// and the branching structure collapses to a single terminal state.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Palantir: the stationary ranks over {n_waypoints} waypoints have zero spread, so terminal states cannot be separated; supply them explicitly or raise knn"
+    )]
+    PalantirStationaryRanksDegenerate {
+        /// Waypoints in the chain
+        n_waypoints: usize,
     },
 
     /// Cells remained unreachable from the start cell after graph repair.
@@ -740,12 +805,65 @@ pub enum BixverseErrors {
         total: f64,
     },
 
+    /// An eigenvalue of the diffusion operator came back non-finite.
+    ///
+    /// Clamping it would fabricate a plausible-looking scale factor out of a
+    /// `NaN`, since `f64::min` returns the other operand for a `NaN` input.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Palantir: the diffusion eigensolve returned a non-finite eigenvalue ({eigenvalue}); the kernel is degenerate"
+    )]
+    PalantirNonFiniteEigenvalue {
+        /// The offending eigenvalue
+        eigenvalue: f64,
+    },
+
+    /// An explicit `n_eigs` below the smallest usable count was requested.
+    ///
+    /// The trivial leading eigenvector is always dropped, so fewer than two
+    /// eigenvectors leaves no multiscale coordinate at all. The request is
+    /// refused rather than raised to the heuristic's floor: silently changing a
+    /// pinned count changes every distance downstream.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Palantir: n_eigs is {n_eigs}, but at least {minimum} eigenvectors are needed for a multiscale space"
+    )]
+    PalantirNEigsTooSmall {
+        /// The requested eigenvector count
+        n_eigs: usize,
+        /// Smallest count leaving a usable coordinate
+        minimum: usize,
+    },
+
     /// No terminal states survived the rank cutoff and the caller supplied none.
     #[cfg(feature = "single-cell")]
     #[error(
         "Palantir: no terminal states detected; supply them explicitly or increase num_waypoints"
     )]
     PalantirNoTerminalStates,
+
+    /// The multiscale space has no boundary cells, so there is nothing to snap
+    /// the start cell or a terminal-state candidate onto.
+    ///
+    /// Boundaries are the per-component argmin and argmax, so an empty set means
+    /// the multiscale space has no columns at all.
+    #[cfg(feature = "single-cell")]
+    #[error("Palantir: the multiscale space has no boundary cells to snap onto")]
+    PalantirNoBoundaryCells,
+
+    /// Cells remained unreachable from the waypoint set when the geodesic
+    /// matrix was built.
+    ///
+    /// Distinct from [BixverseErrors::PalantirDisconnectedGraph], which reports
+    /// the repair attempts. This fires after repair, inside the pseudotime
+    /// solve, where the repair count is not in scope and claiming zero of them
+    /// would be a lie.
+    #[cfg(feature = "single-cell")]
+    #[error("Palantir: {n_unreachable} cells have no geodesic path to some waypoint; increase knn")]
+    PalantirUnreachableFromWaypoints {
+        /// Cells at infinite geodesic distance from at least one waypoint
+        n_unreachable: usize,
+    },
 
     /// The densified `(I - Q) B = R` solve did not converge.
     ///
@@ -781,6 +899,24 @@ pub enum BixverseErrors {
         n_transient: usize,
     },
 
+    /// The absorption probabilities of one waypoint are not finite.
+    ///
+    /// Split from [BixverseErrors::PalantirAbsorbingRowSum] because the two
+    /// point at different bugs: a non-finite sum means a `NaN` reached the
+    /// solve, while a sum above one means the chain was not sub-stochastic.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Palantir: waypoint {waypoint} has a non-finite absorption row sum ({row_sum}) across {n_transient} transient waypoints; the solve produced non-finite entries"
+    )]
+    PalantirAbsorbingRowNotFinite {
+        /// The offending row sum
+        row_sum: f64,
+        /// Waypoint index the row belongs to
+        waypoint: usize,
+        /// Total transient waypoints
+        n_transient: usize,
+    },
+
     /// The densified `(I - Q)` would exceed the supported size.
     #[cfg(feature = "single-cell")]
     #[error(
@@ -795,6 +931,7 @@ pub enum BixverseErrors {
 
     // -- sctype --
     /// Error when number of cluster assignment != the number of cells
+    #[cfg(feature = "single-cell")]
     #[error(
         "SCType: The number of cells ({n_cells}) and cluster assignments length ({n_cluster_assignment}) is not the same."
     )]
@@ -806,6 +943,7 @@ pub enum BixverseErrors {
     },
 
     /// Error when the smoothing graph node count != the number of cells
+    #[cfg(feature = "single-cell")]
     #[error("SCType: The graph has {n_nodes} nodes, but there are {n_cells} cells.")]
     ScTypeGraphNodesNotEqualNCells {
         /// Number of cells

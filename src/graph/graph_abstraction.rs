@@ -23,7 +23,7 @@
 
 use rayon::prelude::*;
 
-use crate::core::math::sparse::undirected_edges_to_csr;
+use crate::core::math::sparse::{undirected_edges_to_csr, validate_square_csr};
 use crate::prelude::*;
 
 ////////////
@@ -33,19 +33,18 @@ use crate::prelude::*;
 /// Partition count above which edge counting drops to a single accumulator.
 ///
 /// The parallel path keeps one dense `n_partitions²` `u64` accumulator per
-/// rayon chunk. At 512 partitions that is 2 MB each, which is the most worth
-/// paying for a pass that is only `O(nnz)` to begin with. Real clusterings sit
-/// two orders of magnitude below this, so the sequential arm is a guard rather
-/// than a path anyone takes.
+/// rayon chunk.
 const PARALLEL_PARTITION_LIMIT: usize = 512;
 
-/// Largest partition count the dense coarsening accepts.
+/// Edges needed before the per-thread accumulators pay for themselves.
 ///
-/// The counting matrix is `n_partitions²` `u64`, so 4096 partitions is already
-/// 128 MB and the pair scan behind it is 16M cells. Graph abstraction is a
-/// coarse-graining method; a partition vector this fine is a mis-specified
-/// input rather than a workload worth a sparse rewrite, so it errors instead of
-/// quietly allocating.
+/// Each rayon chunk allocates, zeroes and then merges its own dense `k²` `u64`
+/// accumulator, so the fixed cost is `k² × 8 × num_threads` bytes touched twice
+/// no matter how few edges there are. Requiring one edge per accumulator slot
+/// per thread keeps the parallel arm to cases where the scan is the cost.
+const PARALLEL_EDGES_PER_SLOT: usize = 1;
+
+/// Largest partition count the dense coarsening accepts.
 const MAX_PARTITIONS: usize = 4096;
 
 /////////////
@@ -65,116 +64,33 @@ where
     pub sizes: Vec<usize>,
 }
 
-//////////
-// Main //
-//////////
-
-/// Connectivity of a graph's partitions under a random-connection null model.
-///
-/// For partitions `a` and `b`, with `e[a]` the number of edges leaving `a`
-/// (within-partition edges included), `s[a]` its node count and `n` the total
-/// node count:
-///
-/// ```text
-/// observed[a][b] = edges(a -> b) + edges(b -> a)
-/// expected[a][b] = (e[a] * s[b] + e[b] * s[a]) / (n - 1)
-/// conn[a][b]     = min(observed / expected, 1)
-/// ```
-///
-/// The cap matters: the null over-estimates what "connected" means in real
-/// data, so ratios above one are common and are not more informative than one.
-/// See the reference's discussion.
-///
-/// Counting runs into a dense `n_partitions²` matrix whose **diagonal holds the
-/// within-partition edge count**, which makes `e[a]` a plain row sum. The
-/// diagonal is then dropped, mirroring the self-loop removal the reference gets
-/// from igraph's `simplify`.
-///
-/// Every accumulation and the ratio itself run in `f64` before the cast to `T`.
-/// Edge counts reach `10^8` on a million-node graph and the expected value is a
-/// sum of two large products, so `f32` would lose the low bits of both.
-///
-/// ### Params
-///
-/// * `graph` - Square CSR adjacency, read as directed. **Stored values are
-///   ignored**; only the sparsity pattern counts. Self loops are counted onto
-///   the diagonal and then discarded, so they influence nothing but `e[a]`.
-/// * `partitions` - Partition label per node, one per row of `graph`.
-/// * `n_partitions` - Declared partition count. `None` derives it as
-///   `max(label) + 1`, which drops trailing empty partitions; pass it
-///   explicitly to keep unused levels of a factor.
-///
-/// ### Returns
-///
-/// The abstracted graph and the partition sizes, or an error when `graph` is
-/// not a square CSR, the label count does not match the node count, a label
-/// sits outside `n_partitions`, or `n_partitions` exceeds [MAX_PARTITIONS].
-///
-/// ### References
-///
-/// Wolf, et al., Genome Biol., 2019.
-pub fn partition_connectivities<T, U>(
-    graph: &CompressedSparseData2<U>,
-    partitions: &[usize],
-    n_partitions: Option<usize>,
-) -> Result<PartitionConnectivity<T>, BixverseErrors>
-where
-    T: BixverseFloat + BixverseNumeric,
-    U: Clone + Sync,
-{
-    let n = validate_square_csr(graph)?;
-    if partitions.len() != n {
-        return Err(BixverseErrors::CommunityAssignmentMismatch);
-    }
-
-    let k = match n_partitions {
-        Some(k) => k,
-        None => partitions.iter().copied().max().map_or(0, |m| m + 1),
-    };
-    if k > MAX_PARTITIONS {
-        return Err(BixverseErrors::TooManyPartitions {
-            n_partitions: k,
-            max: MAX_PARTITIONS,
-        });
-    }
-    if let Some(&label) = partitions.iter().find(|&&p| p >= k) {
-        return Err(BixverseErrors::PartitionLabelOutOfRange {
-            label,
-            n_partitions: k,
-        });
-    }
-
-    let mut sizes = vec![0usize; k];
-    for &p in partitions {
-        sizes[p] += 1;
-    }
-
-    if k == 0 {
-        return Ok(PartitionConnectivity {
-            connectivities: undirected_edges_to_csr::<T>(0, &[]),
-            sizes,
-        });
-    }
-
-    let counts = count_partition_edges(graph, partitions, k);
-
-    // Row sums include the diagonal, which is exactly the reference's
-    // `es_inner_cluster + inter_es.sum(axis=1)`.
-    let out_edges: Vec<f64> = (0..k)
-        .map(|a| counts[a * k..(a + 1) * k].iter().sum::<u64>() as f64)
-        .collect();
-
-    let edges = connectivity_edges::<T>(&counts, &out_edges, &sizes, n, k);
-
-    Ok(PartitionConnectivity {
-        connectivities: undirected_edges_to_csr(k, &edges),
-        sizes,
-    })
-}
-
 /////////////
 // Helpers //
 /////////////
+
+/// Decide whether the per-thread accumulators are worth allocating.
+///
+/// Two conditions, and both matter. The partition count bounds a single
+/// accumulator's size, and the edge count decides whether there is enough work
+/// to amortise one per thread. See [PARALLEL_PARTITION_LIMIT] and
+/// [PARALLEL_EDGES_PER_SLOT].
+///
+/// ### Params
+///
+/// * `k` - Partition count.
+/// * `nnz` - Stored edges in the adjacency.
+/// * `n_threads` - Threads rayon would spread the scan over.
+///
+/// ### Returns
+///
+/// `true` when the fold-reduce arm should run.
+fn use_parallel_counting(k: usize, nnz: usize, n_threads: usize) -> bool {
+    if k > PARALLEL_PARTITION_LIMIT {
+        return false;
+    }
+    let slots = k.saturating_mul(k).saturating_mul(n_threads.max(1));
+    nnz >= slots.saturating_mul(PARALLEL_EDGES_PER_SLOT)
+}
 
 /// Count directed edges between every ordered pair of partitions.
 ///
@@ -182,31 +98,32 @@ where
 /// `counts[a * k + b]` holding the number of stored edges from a node in `a` to
 /// a node in `b`. The diagonal therefore holds the within-partition count.
 ///
-/// Parallel below [PARALLEL_PARTITION_LIMIT] partitions: rows are split into
-/// one chunk per thread and each chunk folds into its own accumulator, merged
-/// in the reduce. Above the limit a per-thread copy costs more than the scan
-/// saves, so a single accumulator runs sequentially.
+/// On the parallel arm rows are split into one chunk per thread and each chunk
+/// folds into its own accumulator, merged in the reduce. On the sequential arm
+/// a single accumulator is filled in one pass. [use_parallel_counting] picks.
 ///
 /// ### Params
 ///
 /// * `graph` - Square CSR adjacency, values ignored.
 /// * `partitions` - Partition label per node.
 /// * `k` - Partition count, at least one.
+/// * `parallel` - Take the fold-reduce arm.
 ///
 /// ### Returns
 ///
-/// The dense `k * k` count matrix, row-major.
+/// The dense `k * k` count matrix, row-major. Both arms produce the same matrix.
 fn count_partition_edges<U>(
     graph: &CompressedSparseData2<U>,
     partitions: &[usize],
     k: usize,
+    parallel: bool,
 ) -> Vec<u64>
 where
     U: Clone + Sync,
 {
     let n = partitions.len();
 
-    if k > PARALLEL_PARTITION_LIMIT {
+    if !parallel {
         let mut counts = vec![0u64; k * k];
         for i in 0..n {
             let row = partitions[i] * k;
@@ -290,9 +207,11 @@ where
 
             let expected =
                 (out_edges[a] * sizes[b] as f64 + out_edges[b] * sizes[a] as f64) / denominator;
-            // An observed edge with a zero expectation cannot happen from a
-            // consistent count matrix, but the reference scores it as full
-            // confidence rather than dividing by zero.
+            // Unreachable: `observed > 0` forces both partition sizes and at
+            // least one out-edge count positive, so `expected` cannot be zero
+            // from a consistent count matrix. Kept because the reference carries
+            // the same guard, equally unreachable, and matching it makes the two
+            // easy to read side by side.
             let connectivity = if expected != 0.0 {
                 (observed as f64 / expected).min(1.0)
             } else {
@@ -306,30 +225,128 @@ where
     edges
 }
 
-/// Check that a graph is a square CSR matrix and return its node count.
+//////////
+// Main //
+//////////
+
+/// Connectivity of a graph's partitions under a random-connection null model.
+///
+/// For partitions `a` and `b`, with `e[a]` the number of edges leaving `a`
+/// (within-partition edges included), `s[a]` its node count and `n` the total
+/// node count:
+///
+/// ```text
+/// observed[a][b] = edges(a -> b) + edges(b -> a)
+/// expected[a][b] = (e[a] * s[b] + e[b] * s[a]) / (n - 1)
+/// conn[a][b]     = min(observed / expected, 1)
+/// ```
+///
+/// The cap matters: the null over-estimates what "connected" means in real
+/// data, so ratios above one are common and are not more informative than one.
+/// See the reference's discussion.
+///
+/// Counting runs into a dense `n_partitions²` matrix whose **diagonal holds the
+/// within-partition edge count**, which makes `e[a]` a plain row sum. The
+/// diagonal is then dropped, mirroring the self-loop removal the reference gets
+/// from igraph's `simplify`.
+///
+/// Every accumulation and the ratio itself run in `f64` before the cast to `T`.
+/// Edge counts reach `10^8` on a million-node graph and the expected value is a
+/// sum of two large products, so `f32` would lose the low bits of both.
 ///
 /// ### Params
 ///
-/// * `graph` - The adjacency to validate.
+/// * `graph` - Square CSR adjacency, read as directed. **Stored values are
+///   ignored**; only the sparsity pattern counts. Self loops are counted onto
+///   the diagonal and then discarded, so they influence nothing but `e[a]`.
+/// * `partitions` - Partition label per node, one per row of `graph`.
+/// * `n_partitions` - Declared partition count. `None` derives it as
+///   `max(label) + 1`, which drops trailing empty partitions; pass it
+///   explicitly to keep unused levels of a factor.
 ///
 /// ### Returns
 ///
-/// The node count, or an error when the matrix is not CSR or not square.
-fn validate_square_csr<U>(graph: &CompressedSparseData2<U>) -> Result<usize, BixverseErrors>
+/// The abstracted graph and the partition sizes, or an error when `graph` is
+/// not a square CSR, the label count does not match the node count, a label
+/// sits outside `n_partitions`, or `n_partitions` exceeds [MAX_PARTITIONS].
+///
+/// ### References
+///
+/// Wolf, et al., Genome Biol., 2019.
+pub fn partition_connectivities<T, U>(
+    graph: &CompressedSparseData2<U>,
+    partitions: &[usize],
+    n_partitions: Option<usize>,
+) -> Result<PartitionConnectivity<T>, BixverseErrors>
 where
-    U: Clone,
+    T: BixverseFloat + BixverseNumeric,
+    U: Clone + Sync,
 {
-    if !graph.cs_type.is_csr() {
-        return Err(BixverseErrors::SparseMatrixMustBeCsr);
+    let n = validate_square_csr(graph)?;
+    if partitions.len() != n {
+        return Err(BixverseErrors::CommunityAssignmentMismatch);
     }
-    let (rows, cols) = graph.shape;
-    if rows != cols {
-        return Err(BixverseErrors::ShapeMismatch {
-            expected: (rows, rows),
-            got: (rows, cols),
+
+    let k = match n_partitions {
+        Some(k) => k,
+        None => match partitions.iter().copied().max() {
+            // `m + 1` overflows on a `usize::MAX` label, which panics in debug
+            // and wraps to zero in release. Same input, two behaviours.
+            Some(m) => m
+                .checked_add(1)
+                .ok_or(BixverseErrors::PartitionLabelOutOfRange {
+                    label: m,
+                    n_partitions: MAX_PARTITIONS,
+                })?,
+            None => 0,
+        },
+    };
+    if k > MAX_PARTITIONS {
+        return Err(BixverseErrors::TooManyPartitions {
+            n_partitions: k,
+            max: MAX_PARTITIONS,
         });
     }
-    Ok(rows)
+    if let Some(&label) = partitions.iter().find(|&&p| p >= k) {
+        return Err(BixverseErrors::PartitionLabelOutOfRange {
+            label,
+            n_partitions: k,
+        });
+    }
+
+    let mut sizes = vec![0usize; k];
+    for &p in partitions {
+        sizes[p] += 1;
+    }
+
+    if k == 0 {
+        return Ok(PartitionConnectivity {
+            connectivities: undirected_edges_to_csr::<T>(0, &[]),
+            sizes,
+        });
+    }
+
+    let counts = count_partition_edges(
+        graph,
+        partitions,
+        k,
+        // `indices.len()` rather than `get_nnz()`: the latter needs the full
+        // numeric bound on `U`, which this reads as a pure sparsity pattern.
+        use_parallel_counting(k, graph.indices.len(), rayon::current_num_threads()),
+    );
+
+    // Row sums include the diagonal, which is exactly the reference's
+    // `es_inner_cluster + inter_es.sum(axis=1)`.
+    let out_edges: Vec<f64> = (0..k)
+        .map(|a| counts[a * k..(a + 1) * k].iter().sum::<u64>() as f64)
+        .collect();
+
+    let edges = connectivity_edges::<T>(&counts, &out_edges, &sizes, n, k);
+
+    Ok(PartitionConnectivity {
+        connectivities: undirected_edges_to_csr(k, &edges),
+        sizes,
+    })
 }
 
 ///////////
@@ -454,24 +471,28 @@ mod tests {
     }
 
     #[test]
-    fn test_connectivity_is_capped_at_one() {
+    fn test_connectivity_of_exactly_one_is_left_alone() {
         // Two singleton partitions joined in both directions. e = (1, 1),
         // s = (1, 1), n = 2, so expected = (1 + 1) / 1 = 2 while observed is
-        // also 2. Adding a self loop to node 0 pushes e[0] to 2 and the ratio
-        // to 2 / 3 < 1, so keep the pair clean and check the boundary instead.
+        // also 2. The ratio is exactly one, so the clamp is a no-op here; this
+        // pins the boundary, not the clamp. `test_connectivity_is_capped_at_one`
+        // is the one that exercises the clamp.
         let graph = directed_csr(2, &[(0, 1), (1, 0)]);
         let partitions = vec![0, 1];
 
         let res: PartitionConnectivity<f64> =
             partition_connectivities(&graph, &partitions, None).unwrap();
 
-        let dense = densify(&res.connectivities);
-        assert_relative_eq!(dense[0][1], 1.0, epsilon = 1e-12);
+        assert_relative_eq!(densify(&res.connectivities)[0][1], 1.0, epsilon = 1e-12);
+    }
 
-        // Now make the observation exceed the null: four nodes, two per
-        // partition, fully cross-connected and nothing internal. e = (4, 4),
-        // s = (2, 2), n = 4, expected = (8 + 8) / 3 = 16 / 3 = 5.33 while
-        // observed is 8, so the raw ratio is 1.5 and must clamp.
+    #[test]
+    fn test_connectivity_is_capped_at_one() {
+        // The observation has to genuinely exceed the null or the clamp is
+        // never asked to do anything. Four nodes, two per partition, fully
+        // cross-connected and nothing internal: e = (4, 4), s = (2, 2), n = 4,
+        // expected = (8 + 8) / 3 = 16 / 3 = 5.33 against an observed 8, so the
+        // raw ratio is 1.5.
         let cross = directed_csr(
             4,
             &[
@@ -536,24 +557,70 @@ mod tests {
 
     #[test]
     fn test_both_counting_arms_agree() {
-        // Same graph and labels, once under the parallel limit and once above
-        // it, by declaring more partitions than are used. The extra partitions
-        // are empty, so the connectivities must be identical.
+        // Both arms driven directly on the same graph and the same `k`. Forcing
+        // the arms apart by declaring more partitions changes the output shape
+        // as well as the code path, which is not the thing under test.
         let mut edges = ring(&[0, 1, 2, 3]);
         edges.extend(ring(&[4, 5, 6, 7]));
         edges.push((3, 4));
         edges.push((7, 0));
+        edges.push((0, 0));
         let graph = directed_csr(8, &edges);
-        let partitions = vec![0, 0, 0, 0, 1, 1, 1, 1];
+        let partitions = vec![0, 0, 0, 1, 1, 2, 2, 2];
 
-        let small: PartitionConnectivity<f64> =
-            partition_connectivities(&graph, &partitions, Some(PARALLEL_PARTITION_LIMIT)).unwrap();
-        let large: PartitionConnectivity<f64> =
-            partition_connectivities(&graph, &partitions, Some(PARALLEL_PARTITION_LIMIT + 1))
-                .unwrap();
+        let sequential = count_partition_edges(&graph, &partitions, 3, false);
+        let parallel = count_partition_edges(&graph, &partitions, 3, true);
 
-        assert_eq!(small.connectivities.data, large.connectivities.data);
-        assert_eq!(small.connectivities.indices, large.connectivities.indices);
+        assert_eq!(sequential, parallel);
+        assert_eq!(sequential.iter().sum::<u64>(), graph.indices.len() as u64);
+    }
+
+    #[test]
+    fn test_parallel_counting_needs_edges_as_well_as_few_partitions() {
+        // Keying the decision on `k` alone is what makes this go wrong: at
+        // k = 500 on 64 cores the parallel arm allocates and zeroes 128 MB of
+        // accumulators to perform 750k increments.
+        assert!(!use_parallel_counting(500, 750_000, 64));
+        assert!(!use_parallel_counting(MAX_PARTITIONS, 10_000_000, 8));
+        // A real single-cell graph at a real cluster count still takes it.
+        assert!(use_parallel_counting(30, 30_000_000, 16));
+        // And the partition ceiling still binds on its own.
+        assert!(!use_parallel_counting(
+            PARALLEL_PARTITION_LIMIT + 1,
+            usize::MAX,
+            1
+        ));
+    }
+
+    #[test]
+    fn test_rejects_a_non_monotonic_indptr() {
+        // `indptr = [0, 5, 2, 7]` makes the Rust range `5..2` empty, so row 1 is
+        // skipped and the answer comes back computed on a subset of the graph
+        // with nothing said about it.
+        let data = vec![1u8; 7];
+        let indices = vec![1u32, 2, 0, 2, 0, 0, 1];
+        let indptr = vec![0u32, 5, 2, 7];
+        let graph = CompressedSparseData2::new_csr(&data, &indices, &indptr, None, (3, 3));
+
+        assert!(matches!(
+            partition_connectivities::<f64, _>(&graph, &[0, 0, 1], None),
+            Err(BixverseErrors::MalformedCsr(_))
+        ));
+    }
+
+    #[test]
+    fn test_rejects_an_out_of_range_column_index() {
+        // Indexing `partitions[9]` on a three-node graph panics through the
+        // extendr boundary rather than erroring.
+        let data = vec![1u8, 1];
+        let indices = vec![1u32, 9];
+        let indptr = vec![0u32, 1, 2, 2];
+        let graph = CompressedSparseData2::new_csr(&data, &indices, &indptr, None, (3, 3));
+
+        assert!(matches!(
+            partition_connectivities::<f64, _>(&graph, &[0, 0, 1], None),
+            Err(BixverseErrors::MalformedCsr(_))
+        ));
     }
 
     #[test]

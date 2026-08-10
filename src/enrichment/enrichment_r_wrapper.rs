@@ -58,7 +58,7 @@ pub fn get_gsva_gs_indices(gs_list: List) -> Result<Vec<Vec<usize>>> {
 /// `GseaParams` struct with parsed parameters (defaults: gsea_param=1.0,
 /// min_size=5, max_size=500)
 pub fn prepare_gsea_params<T: BixverseFloat>(r_list: List) -> Result<GseaParams<T>> {
-    let gsea_params: HashMap<&str, Robj> = r_list.try_into()?;
+    let gsea_params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
     let gsea_param = gsea_params
         .get("gsea_param")

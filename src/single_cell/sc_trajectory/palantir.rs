@@ -24,18 +24,25 @@
 //!    identical and far better conditioned.
 //! 5. Eigenvalues are clamped away from one before the multiscale scaling.
 //! 6. A zero adaptive bandwidth is replaced by the smallest positive one
-//!    instead of silently killing the row.
-//! 7. A waypoint whose neighbours are all pruned keeps its nearest neighbour at
-//!    full weight. The reference leaves the row empty, which makes the waypoint
-//!    a dead end that the absorbing solve then drops; this keeps the chain
-//!    row-stochastic and the waypoint attached to the manifold instead.
+//!    instead of silently killing the row. This applies to both the waypoint
+//!    chain and the diffusion kernel; a duplicate cell in a narrow kNN graph
+//!    otherwise makes the kernel `NaN`.
+//! 7. A waypoint whose neighbours are all pruned keeps the *latest* of them at
+//!    full weight, and falls back to a self loop when even that one sits
+//!    earlier in pseudotime. The reference leaves the row empty; this keeps the
+//!    chain row-stochastic while still leaving a branch tip a sink, which is
+//!    what terminal-state detection needs from it.
 //! 8. `(I - Q)` is densified and solved with a partial-pivot LU rather than a
 //!    sparse SuperLU factorisation, with a documented waypoint ceiling.
 //!    Waypoints that cannot reach any terminal state are dropped from the
 //!    system and reported through `stranded_waypoints`; the reference lets the
 //!    factorisation fail and falls back to a pseudo-inverse.
-//! 9. Graph repair adds each bridging edge from the farthest reachable cell in
-//!    one pass per component rather than iterating the reference's full search.
+//! 9. Graph repair is capped at `n` passes and then raises
+//!    `PalantirDisconnectedGraph`, where the reference loops until the graph is
+//!    connected with no bound at all. On a duplicate `(lo, hi)` pair the repair
+//!    keeps the smaller weight; the reference overwrites with the later one.
+//!    The per-pass structure itself is the same on both sides: one edge added,
+//!    Dijkstra recomputed.
 //! 10. Degenerate cases the reference turns into `NaN` or empty frames return
 //!     typed errors here.
 //! 11. `alpha`, the anisotropic kernel exponent, is not exposed. Its reference
@@ -52,6 +59,15 @@
 //!     entropy collapses to zero. Naming an early cell is an explicit statement
 //!     about the data, so it is honoured by default here. Set the flag to
 //!     `false` for the reference's behaviour.
+//! 13. `n_dcs` counts *usable* components, so the eigensolver is asked for
+//!     `n_dcs + 1` pairs and the eigengap heuristic runs over all of them. The
+//!     reference's `n_components` counts eigenvectors, runs the heuristic over
+//!     those, and ends up with one fewer usable component at the same setting.
+//!     On identical data the two can therefore retain different component
+//!     counts, which shifts every downstream distance.
+//! 14. An explicit `n_eigs` is honoured exactly, where the reference's floor of
+//!     three is heuristic-only. Below two eigenvectors nothing survives dropping
+//!     the trivial one, so that is refused rather than silently raised.
 //!
 //! ### References
 //!
@@ -81,11 +97,17 @@ use crate::single_cell::sc_trajectory::pseudotime::{
 /// Parameters for Palantir trajectory inference.
 #[derive(Clone, Debug)]
 pub struct PalantirParams {
-    /// Diffusion components to extract before the multiscale scaling.
-    /// Reference default: 10.
+    /// Usable diffusion components to extract before the multiscale scaling.
+    /// The eigensolver is asked for `n_dcs + 1` pairs because the trivial
+    /// leading eigenvector is always dropped. Reference default: 10, which the
+    /// reference reads as an eigenvector count rather than a component count;
+    /// see divergence 13.
     pub n_dcs: usize,
-    /// Multiscale components to retain. `None` selects the count from the
-    /// largest eigengap, as the reference does.
+    /// **Eigenvectors** to retain, the trivial leading one included. It is then
+    /// dropped, so `Some(3)` leaves two multiscale components. `None` selects
+    /// the count from the largest eigengap, as the reference does; an explicit
+    /// count bypasses the heuristic's floor of three and anything below two is
+    /// rejected.
     pub n_eigs: Option<usize>,
     /// Neighbours in the reference's self-inclusive convention. Reference
     /// default: 30. The crate's kNN search drops the self hit, so it is asked
@@ -119,11 +141,7 @@ pub struct PalantirParams {
     /// `ann_dist` are overridden by this module; only the method choice and its
     /// backend-specific tuning are read.
     pub knn_params: KnnParams,
-    /// [LanczosParams] for the diffusion-map eigendecomposition. A trajectory is
-    /// a long, thin manifold, which is the worst case for the eigensolver: the
-    /// diffusion eigenvalues cluster as `O(1 / n_cells^2)` and an
-    /// under-resolved decomposition scrambles the whole embedding. This is the
-    /// knob to reach for when pseudotime does not track the manifold.
+    /// [LanczosParams] for the diffusion-map eigendecomposition.
     pub lanczos_params: LanczosParams,
 }
 
@@ -161,8 +179,13 @@ impl Default for PalantirParams {
 
 /// Results of a Palantir run.
 pub struct PalantirResult {
-    /// Pseudotime per cell, min-max scaled to `[0, 1]` with the start cell at
-    /// 0.
+    /// Pseudotime per cell, min-max scaled to `[0, 1]`.
+    ///
+    /// The start cell is not pinned to zero. `refine_once` gives it
+    /// `sum_w w (t_w - d(w, start))`, which nothing bounds below every other
+    /// cell, so on a noisy manifold the minimum can land on a neighbour
+    /// instead. A start cell far from zero means the refinement disagreed with
+    /// the anchor, which is worth looking at.
     pub pseudotime: Vec<f32>,
     /// Differentiation entropy per cell, natural log, computed on the
     /// row-renormalised fate probabilities *before* thresholding.
@@ -182,8 +205,15 @@ pub struct PalantirResult {
     pub multiscale: Mat<f32>,
     /// Refinement passes actually run.
     pub iterations: usize,
-    /// Whether the refinement met the correlation criterion before the cap.
+    /// Whether the *pseudotime refinement* met the correlation criterion before
+    /// the cap.
     pub converged: bool,
+    /// Whether the diffusion eigensolve met its tolerance rather than running
+    /// out of restarts. `false` means the embedding is under-resolved and every
+    /// distance taken on it is suspect; raise `lanczos_params.max_restarts`.
+    pub eigen_converged: bool,
+    /// Largest achieved `||A x - lambda x||` from the diffusion eigensolve.
+    pub eigen_residual: f64,
     /// Bridging edges the connectivity repair had to add. Anything non-zero
     /// means the kNN graph was disconnected and `knn` is probably too small.
     pub repair_edges: usize,
@@ -372,7 +402,7 @@ pub fn run_palantir(
     if verbosity.normal_verbosity() {
         println!("Building the multiscale diffusion space...");
     }
-    let mut multiscale = multiscale_components(
+    let space = multiscale_components(
         knn_indices,
         knn_distances,
         squared_dist,
@@ -381,6 +411,14 @@ pub fn run_palantir(
         seed,
         Some(params.lanczos_params),
     )?;
+    let (eigen_converged, eigen_residual) = (space.converged, space.residual);
+    if !eigen_converged && verbosity.normal_verbosity() {
+        println!(
+            "[WARNING] The diffusion eigensolve did not converge (residual {eigen_residual:e}); the embedding is under-resolved. Raise lanczos_max_restarts."
+        );
+    }
+
+    let mut multiscale = space.components;
     if params.scale_components {
         minmax_scale_columns(&mut multiscale);
     }
@@ -489,6 +527,8 @@ pub fn run_palantir(
         multiscale: multiscale_mat,
         iterations: pseudotime.iterations,
         converged: pseudotime.converged,
+        eigen_converged,
+        eigen_residual,
         repair_edges,
         stranded_waypoints,
     })
@@ -640,9 +680,20 @@ mod tests {
         let corr = crate::core::math::vector_helpers::pearson_correlation(&res.pseudotime, &truth)
             .unwrap();
 
+        // No `.abs()`. A fully inverted trajectory gives r = -1 and would sail
+        // through the absolute version, which is precisely the failure
+        // divergence 12 exists to prevent, so the one test that could catch a
+        // regression in `use_early_cell_as_start` has to be signed.
         assert!(
-            corr.abs() > 0.95,
+            corr > 0.95,
             "pseudotime does not track the manifold: r = {corr}"
+        );
+        // Cell 0 is both the start cell and the earliest cell on the manifold,
+        // so it has to land at the bottom of the scaled range.
+        assert!(
+            res.pseudotime[0] < 0.05,
+            "the start cell sits at pseudotime {}, so the trajectory runs backwards",
+            res.pseudotime[0]
         );
         assert_eq!(res.terminal_states.len(), 1);
     }
@@ -801,12 +852,15 @@ mod tests {
         }
 
         // Neither column may be dead, or the row sums are trivial again for
-        // want of anything to split between.
+        // want of anything to split between. The bound is a real fraction of
+        // the cell count rather than `> 0.0`, which passes on 1e-38.
+        let n_cells = res.branch_probs.nrows();
         for j in 0..2 {
-            let column_mass: f32 = (0..res.branch_probs.nrows())
-                .map(|i| res.branch_probs[(i, j)])
-                .sum();
-            assert!(column_mass > 0.0, "fate {j} carries no mass at all");
+            let column_mass: f32 = (0..n_cells).map(|i| res.branch_probs[(i, j)]).sum();
+            assert!(
+                column_mass > 0.1 * n_cells as f32,
+                "fate {j} carries only {column_mass} across {n_cells} cells"
+            );
         }
 
         // The exact numbers for a multi-absorber chain, including the one where
@@ -835,13 +889,6 @@ mod tests {
 
         assert_eq!(res.terminal_states, vec![399, 599]);
     }
-
-    // `test_run_is_reproducible` used to live here. It pinned the kNN backend to
-    // `"exhaustive"`, seeded the eigensolver and the sampler, and every rayon
-    // site in the pipeline is an order-preserving `map().collect()`, so
-    // determinism held by construction and the test could not fail. The
-    // nondeterminism that does exist lives in the approximate ANN backends,
-    // which this fixture never touched.
 
     #[test]
     fn test_rejects_out_of_range_early_cell() {

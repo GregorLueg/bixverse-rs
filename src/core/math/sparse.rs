@@ -296,6 +296,44 @@ where
         }
     }
 
+    /// Take ownership of buffers that were built for this matrix
+    ///
+    /// [CompressedSparseData2::new_csr] and its CSC sibling copy all three
+    /// buffers, which doubles peak memory for any caller that assembled them
+    /// itself and then throws the originals away. At a million cells by thirty
+    /// neighbours that is 150 MB built and immediately cloned, so the `u8` edge
+    /// layer sold as a byte per edge is two bytes per edge in transit.
+    ///
+    /// ### Params
+    ///
+    /// * `data` - The underlying data, moved.
+    /// * `indices` - The minor-axis indices, moved.
+    /// * `indptr` - The major-axis pointers, moved.
+    /// * `data2` - An optional second layer, moved.
+    /// * `cs_type` - Which orientation the buffers describe.
+    /// * `shape` - `(nrow, ncol)`.
+    ///
+    /// ### Returns
+    ///
+    /// The matrix, with no buffer copied.
+    pub fn from_parts(
+        data: Vec<T>,
+        indices: Vec<u32>,
+        indptr: Vec<u32>,
+        data2: Option<Vec<U>>,
+        cs_type: CompressedSparseFormat,
+        shape: (usize, usize),
+    ) -> Self {
+        Self {
+            data,
+            indices,
+            indptr,
+            cs_type,
+            data_2: data2,
+            shape,
+        }
+    }
+
     /// Transform from CSC to CSR or vice versa
     ///
     /// ### Returns
@@ -977,6 +1015,67 @@ where
     })
 }
 
+/// Check that a matrix is a structurally sound square CSR and return its order
+///
+/// Callers that index `partitions[j]` or `parent[j]` from a stored column index
+/// rely on every invariant here, and a violated one is otherwise silent: a
+/// non-monotonic `indptr` gives an empty Rust range, so the row is skipped and
+/// the caller returns a plausible answer computed on a subset of the graph. An
+/// out-of-range column index panics through whatever boundary the caller sits
+/// behind instead of erroring.
+///
+/// ### Params
+///
+/// * `graph` - The adjacency to validate.
+///
+/// ### Returns
+///
+/// The node count, or an error naming the violated invariant.
+pub fn validate_square_csr<T>(graph: &CompressedSparseData2<T>) -> Result<usize, BixverseErrors>
+where
+    T: Clone,
+{
+    if !graph.cs_type.is_csr() {
+        return Err(BixverseErrors::SparseMatrixMustBeCsr);
+    }
+    let (rows, cols) = graph.shape;
+    if rows != cols {
+        return Err(BixverseErrors::ShapeMismatch {
+            expected: (rows, rows),
+            got: (rows, cols),
+        });
+    }
+
+    if graph.indptr.len() != rows + 1 {
+        return Err(BixverseErrors::MalformedCsr(
+            "indptr length must be the row count plus one",
+        ));
+    }
+    if graph.indices.len() != graph.data.len() {
+        return Err(BixverseErrors::MalformedCsr(
+            "indices and data must have the same length",
+        ));
+    }
+    if graph.indptr.windows(2).any(|w| w[0] > w[1]) {
+        return Err(BixverseErrors::MalformedCsr(
+            "indptr must be non-decreasing",
+        ));
+    }
+    // `indptr` is non-empty by the length check above.
+    if graph.indptr[rows] as usize != graph.indices.len() {
+        return Err(BixverseErrors::MalformedCsr(
+            "the last indptr entry must equal the number of stored values",
+        ));
+    }
+    if graph.indices.iter().any(|&j| j as usize >= rows) {
+        return Err(BixverseErrors::MalformedCsr(
+            "a column index sits outside the matrix",
+        ));
+    }
+
+    Ok(rows)
+}
+
 /// Transform COO stored data into CSR
 ///
 /// ### Params
@@ -1112,22 +1211,42 @@ where
 /// hi)`, and the first half sits entirely below the second because `lo < hi`.
 ///
 /// Unlike [coo_to_csr] this neither sorts nor merges duplicates, so the caller
-/// owns both invariants.
+/// owns both invariants. Violating them produces a *corrupt* CSR rather than a
+/// panic: unsorted input or `lo > hi` gives descending column indices,
+/// `lo == hi` duplicates a diagonal entry, and a repeated pair doubles the nnz.
+/// Every other consumer in the crate assumes ascending deduplicated rows, so the
+/// invariants are `debug_assert!`ed here and the function stays crate-private.
 ///
 /// ### Params
 ///
 /// * `n` - Node count; the output is `n` square.
-/// * `edges` - Deduplicated `(lo, hi, value)` triples with `lo < hi`, sorted
-///   ascending by `(lo, hi)`.
+/// * `edges` - Deduplicated `(lo, hi, value)` triples with `lo < hi < n`, sorted
+///   strictly ascending by `(lo, hi)`.
 ///
 /// ### Returns
 ///
 /// `CompressedSparseData2` in CSR format with both directions of every edge
 /// stored at the same value.
-pub fn undirected_edges_to_csr<T>(n: usize, edges: &[(u32, u32, T)]) -> CompressedSparseData2<T>
+pub(crate) fn undirected_edges_to_csr<T>(
+    n: usize,
+    edges: &[(u32, u32, T)],
+) -> CompressedSparseData2<T>
 where
     T: BixverseNumeric,
 {
+    debug_assert!(
+        edges
+            .iter()
+            .all(|&(lo, hi, _)| lo < hi && (hi as usize) < n),
+        "undirected_edges_to_csr wants lo < hi < n"
+    );
+    debug_assert!(
+        edges
+            .windows(2)
+            .all(|w| (w[0].0, w[0].1) < (w[1].0, w[1].1)),
+        "undirected_edges_to_csr wants strictly ascending, deduplicated (lo, hi)"
+    );
+
     let mut indptr = vec![0u32; n + 1];
     for &(lo, hi, _) in edges {
         indptr[lo as usize + 1] += 1;
@@ -1155,7 +1274,14 @@ where
         cursor[lo as usize] += 1;
     }
 
-    CompressedSparseData2::new_csr(&data, &indices, &indptr, None, (n, n))
+    CompressedSparseData2::from_parts(
+        data,
+        indices,
+        indptr,
+        None,
+        CompressedSparseFormat::Csr,
+        (n, n),
+    )
 }
 
 ///////////////////////
@@ -2794,6 +2920,109 @@ mod tests {
         assert!(parse_compressed_sparse_format("csr").unwrap().is_csr());
         assert!(parse_compressed_sparse_format("CSC").unwrap().is_csc());
         assert!(parse_compressed_sparse_format("dense").is_none());
+    }
+
+    #[test]
+    fn test_undirected_edges_to_csr_is_symmetric_and_row_sorted() {
+        // A path plus one chord, so several rows hold both a `lo < r` partner
+        // and a `hi > r` one. That split is the whole trick behind the
+        // sort-free scatter, and it is what breaks first if the two passes are
+        // ever reordered.
+        let edges = vec![(0u32, 1u32, 1.0f64), (0, 3, 2.0), (1, 2, 3.0), (2, 3, 4.0)];
+
+        let csr = undirected_edges_to_csr(4, &edges);
+
+        assert_eq!(csr.shape, (4, 4));
+        assert_eq!(csr.indptr, vec![0, 2, 4, 6, 8]);
+        assert_eq!(csr.indices, vec![1, 3, 0, 2, 1, 3, 0, 2]);
+        assert_eq!(csr.data, vec![1.0, 2.0, 1.0, 3.0, 3.0, 4.0, 2.0, 4.0]);
+
+        // Every row ascending, which every consumer in the crate assumes.
+        for i in 0..4 {
+            let lo = csr.indptr[i] as usize;
+            let hi = csr.indptr[i + 1] as usize;
+            assert!(csr.indices[lo..hi].windows(2).all(|w| w[0] < w[1]));
+        }
+    }
+
+    #[test]
+    fn test_undirected_edges_to_csr_handles_empty_input() {
+        let csr = undirected_edges_to_csr::<f64>(3, &[]);
+
+        assert_eq!(csr.shape, (3, 3));
+        assert_eq!(csr.indptr, vec![0, 0, 0, 0]);
+        assert!(csr.indices.is_empty());
+    }
+
+    #[test]
+    fn test_undirected_edges_to_csr_keeps_isolated_nodes() {
+        // Node 0 has no edges at all, so its span has to be empty rather than
+        // shifting every later row.
+        let edges = vec![(1u32, 2u32, 7.0f64)];
+
+        let csr = undirected_edges_to_csr(3, &edges);
+
+        assert_eq!(csr.indptr, vec![0, 0, 1, 2]);
+        assert_eq!(csr.indices, vec![2, 1]);
+    }
+
+    #[test]
+    fn test_validate_square_csr_accepts_a_sound_matrix() {
+        let csr = undirected_edges_to_csr(3, &[(0u32, 1u32, 1.0f64), (1, 2, 2.0)]);
+
+        assert_eq!(validate_square_csr(&csr).unwrap(), 3);
+    }
+
+    #[test]
+    fn test_validate_square_csr_catches_structural_faults() {
+        // Non-monotonic indptr: the Rust range `5..2` is empty, so row 1 is
+        // silently skipped rather than read.
+        let bad_indptr = CompressedSparseData2::new_csr(
+            &[1.0f64; 7],
+            &[1u32, 2, 0, 2, 0, 0, 1],
+            &[0u32, 5, 2, 7],
+            None,
+            (3, 3),
+        );
+        assert!(matches!(
+            validate_square_csr(&bad_indptr),
+            Err(BixverseErrors::MalformedCsr(_))
+        ));
+
+        // A column index past the last row indexes whatever the caller keys off
+        // it out of bounds.
+        let bad_index = CompressedSparseData2::new_csr(
+            &[1.0f64, 1.0],
+            &[1u32, 9],
+            &[0u32, 1, 2, 2],
+            None,
+            (3, 3),
+        );
+        assert!(matches!(
+            validate_square_csr(&bad_index),
+            Err(BixverseErrors::MalformedCsr(_))
+        ));
+
+        // indptr of the wrong length for the declared row count.
+        let short_indptr =
+            CompressedSparseData2::new_csr(&[1.0f64], &[1u32], &[0u32, 1], None, (3, 3));
+        assert!(matches!(
+            validate_square_csr(&short_indptr),
+            Err(BixverseErrors::MalformedCsr(_))
+        ));
+
+        // The last pointer must account for every stored value.
+        let short_tail = CompressedSparseData2::new_csr(
+            &[1.0f64, 1.0],
+            &[1u32, 0],
+            &[0u32, 1, 1, 1],
+            None,
+            (3, 3),
+        );
+        assert!(matches!(
+            validate_square_csr(&short_tail),
+            Err(BixverseErrors::MalformedCsr(_))
+        ));
     }
 
     #[test]
