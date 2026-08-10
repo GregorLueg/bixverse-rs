@@ -224,9 +224,69 @@ pub fn r_list_to_map<'a>(r_list: List) -> extendr_api::Result<HashMap<&'a str, R
 /// as long as the value is a whole number.
 ///
 /// Missing keys, `NULL` and `NA` all read as absent, so the caller's default
+/// applies. Values > min are accepted and give more fine grained control if
+/// a `0` value is allowed.
+///
+/// ### Params
+///
+/// * `params` - Parsed R list contents, already flattened to a map.
+/// * `key` - The list element to read.
+/// * `min` - Minimum value.
+///
+/// ### Returns
+///
+/// `Some(count)` when the key holds a positive whole number, `None` when it is
+/// absent or `NA`, or an error naming the key.
+fn r_list_bounded_count(
+    params: &HashMap<&str, Robj>,
+    key: &str,
+    min: usize,
+) -> extendr_api::Result<Option<usize>> {
+    let Some(value) = params.get(key) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+
+    let raw = if let Some(v) = value.as_integer() {
+        if v == i32::MIN {
+            return Ok(None);
+        }
+        v as f64
+    } else if let Some(v) = value.as_real() {
+        if v.is_nan() {
+            return Ok(None);
+        }
+        v
+    } else {
+        return Err(Error::Other(format!(
+            "'{key}' must be a single number, got something else"
+        )));
+    };
+
+    if raw < min as f64 || raw.fract() != 0.0 || raw > MAX_R_COUNT {
+        return Err(Error::Other(format!(
+            "'{key}' must be a whole number >= {min}, got {raw}"
+        )));
+    }
+
+    Ok(Some(raw as usize))
+}
+
+/// Read a count-like parameter out of a flattened R list.
+///
+/// R writes `10` as a double and only `10L` as an integer, and extendr's
+/// `as_integer()` matches INTSXP alone without coercing. A caller writing
+/// `list(knn = 50)` therefore hands over a double that the plain accessor drops
+/// on the floor, and the default runs instead. This accepts either storage mode
+/// as long as the value is a whole number.
+///
+/// Missing keys, `NULL` and `NA` all read as absent, so the caller's default
 /// applies. Anything present but unusable (zero, negative, fractional, or the
 /// wrong type entirely) is an error rather than a silent fallback: a typo and a
-/// deliberate omission should not resolve to the same run.
+/// deliberate omission should not resolve to the same run. If you want zero
+/// to pass through, use [r_list_count_allow_zero].
 ///
 /// ### Params
 ///
@@ -238,39 +298,26 @@ pub fn r_list_to_map<'a>(r_list: List) -> extendr_api::Result<HashMap<&'a str, R
 /// `Some(count)` when the key holds a positive whole number, `None` when it is
 /// absent or `NA`, or an error naming the key.
 pub fn r_list_count(params: &HashMap<&str, Robj>, key: &str) -> extendr_api::Result<Option<usize>> {
-    let Some(value) = params.get(key) else {
-        return Ok(None);
-    };
-    if value.is_null() {
-        return Ok(None);
-    }
+    r_list_bounded_count(params, key, 1)
+}
 
-    let raw = if let Some(v) = value.as_integer() {
-        // R's NA_integer_ is i32::MIN.
-        if v == i32::MIN {
-            return Ok(None);
-        }
-        v as f64
-    } else if let Some(v) = value.as_real() {
-        // NA_real_ arrives as a NaN payload; so does a genuine NaN, and neither
-        // is a count.
-        if v.is_nan() {
-            return Ok(None);
-        }
-        v
-    } else {
-        return Err(Error::Other(format!(
-            "'{key}' must be a single number, got something else"
-        )));
-    };
-
-    if raw < 1.0 || raw.fract() != 0.0 || raw > MAX_R_COUNT {
-        return Err(Error::Other(format!(
-            "'{key}' must be a positive whole number, got {raw}"
-        )));
-    }
-
-    Ok(Some(raw as usize))
+/// As [r_list_count], but admits `0`, which several callers use as a
+/// "derive it from the data" sentinel.
+///
+/// ### Params
+///
+/// * `params` - Parsed R list contents, already flattened to a map.
+/// * `key` - The list element to read.
+///
+/// ### Returns
+///
+/// `Some(count)` when the key holds a positive whole number or zero, `None`
+/// when it is absent or `NA`, or an error naming the key.
+pub fn r_list_count_allow_zero(
+    params: &HashMap<&str, Robj>,
+    key: &str,
+) -> extendr_api::Result<Option<usize>> {
+    r_list_bounded_count(params, key, 0)
 }
 
 /// Transforms a Robj List into a Hashmap

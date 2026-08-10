@@ -25,7 +25,7 @@ use crate::single_cell::sc_analysis::{
 };
 use crate::single_cell::sc_data::h5ad_io::parse_h5ad_format;
 use crate::single_cell::sc_trajectory::palantir::PalantirParams;
-use crate::utils::r_rust_interface::{r_list_count, r_list_to_map};
+use crate::utils::r_rust_interface::{r_list_count, r_list_count_allow_zero, r_list_to_map};
 
 use crate::single_cell::sc_annotation::{
     sc_type::{CellTypeMarkers, ScTypeCellParams, SctypeRes, parse_score_calibration},
@@ -290,7 +290,9 @@ impl KnnParams {
                 .unwrap_or("cosine"),
         );
 
-        let k = r_list_count(&params_list, "k")?.unwrap_or(15);
+        // this allows zeros through deliberately for auto-detection in the
+        // doublet detection methods
+        let k = r_list_count_allow_zero(&params_list, "k")?.unwrap_or(15);
 
         // annoy
         let n_tree = r_list_count(&params_list, "n_trees")?.unwrap_or(50);
