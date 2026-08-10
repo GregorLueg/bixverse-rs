@@ -52,13 +52,18 @@
 //!     diffusion-map boundary cell is nearest in the multiscale space. The
 //!     boundary set is only the per-column argmin and argmax, so it holds at
 //!     most `2 * n_components` cells, and "nearest" among so few extremes is
-//!     close to arbitrary. Measured on 40 realisations of the Y fixture, the
-//!     snap moved a trunk-root `early_cell` into one of the arms 12 times at the
-//!     crate's default component count and 33 times with `n_eigs` pinned to
-//!     three; pseudotime then runs backwards along the trunk and the root's fate
-//!     entropy collapses to zero. Naming an early cell is an explicit statement
-//!     about the data, so it is honoured by default here. Set the flag to
-//!     `false` for the reference's behaviour.
+//!     close to arbitrary once the components themselves are not pinned down.
+//!     Measured over 40 waypoint seeds on the Y fixture: with the eigensolve
+//!     converged the snap never moved a trunk-root `early_cell` at all, but at
+//!     a restart budget leaving the residual above the leading eigengap it
+//!     moved it into an arm 5 times at the heuristic component count and 16
+//!     times with `n_eigs` pinned to three, taking the trunk pseudotime
+//!     backwards on 2 of those. So the failure is a symptom of an
+//!     under-resolved multiscale space rather than of the snap on its own, and
+//!     the reference has no `eigen_converged` equivalent to tell a caller they
+//!     are in that regime. Naming an early cell is an explicit statement about
+//!     the data, so it is honoured by default here. Set the flag to `false` for
+//!     the reference's behaviour.
 //! 13. `n_dcs` counts *usable* components, so the eigensolver is asked for
 //!     `n_dcs + 1` pairs and the eigengap heuristic runs over all of them. The
 //!     reference's `n_components` counts eigenvectors, runs the heuristic over
@@ -123,10 +128,11 @@ pub struct PalantirParams {
     /// diffusion-map boundary cell.
     ///
     /// Defaults to `true`, against the reference's `false`. The snap picks from
-    /// at most `2 * n_components` extremes and gets it wrong often enough to
-    /// invert the trajectory; see divergence 12 in the module docs for the
-    /// measurements. Set to `false` to reproduce the reference. Reference
-    /// default: false.
+    /// at most `2 * n_components` extremes, which is reliable only while the
+    /// components are resolved; on an under-converged embedding it relocates
+    /// the root often enough to invert the trajectory. See divergence 12 in the
+    /// module docs for the measurements. Set to `false` to reproduce the
+    /// reference. Reference default: false.
     pub use_early_cell_as_start: bool,
     /// Iteration cap for the pseudotime refinement. The counter starts at one,
     /// so this permits at most `max_iterations - 1` passes, matching the
@@ -620,6 +626,18 @@ mod tests {
     /// Cells `0..trunk` run the trunk; the next `arm` cells are the first
     /// branch, the last `arm` cells the second.
     ///
+    /// The second arm is the exact reflection of the first, noise included.
+    /// That is what gives "the trunk is undecided between the two fates" a
+    /// ground truth to be asserted against: with an independent noise stream
+    /// per arm the two fates are not equivalent, an uneven trunk split is then
+    /// a correct answer, and the assertion has nothing to hold on to. Measured
+    /// over 40 waypoint seeds, independent noise put the mid-trunk split
+    /// anywhere up to 0.54 and dropped the root into the detected terminal
+    /// states on 4 of them; the reflected arms hold at 0.31 and 0 of 40. The
+    /// trunk carries its own noise stream and does not sit on `y = 0`, so the
+    /// manifold as a whole is still asymmetric and the diffusion operator has
+    /// no exact reflection symmetry to make its eigenvalues degenerate.
+    ///
     /// ### Params
     ///
     /// * `trunk` - Cells on the shared trunk.
@@ -644,21 +662,48 @@ mod tests {
         }
         for i in 0..arm {
             let t = (i + 1) as f32 / arm as f32 * 5.0;
-            coords.push(vec![5.0 + t, -t * ARM_DIVERGENCE + jitter(i, 5) * 0.3]);
+            coords.push(vec![5.0 + t, -(t * ARM_DIVERGENCE + jitter(i, 4) * 0.3)]);
         }
 
         coords
     }
 
+    /// Trunk and arm sizes for the Y fixture.
+    ///
+    /// A full Palantir run over the 600-cell version costs around five seconds
+    /// in a debug build, and four of them dominated the whole crate's test time.
+    /// Everything that supplies its terminal states explicitly holds at 300, and
+    /// measurably better: over 40 waypoint seeds the mid-trunk split worsens
+    /// from 0.31 to only 0.12. Automatic detection is the one thing that does
+    /// not survive the shrink, so it keeps the large fixture and goes behind
+    /// `large_scale_diagnostics`.
+    const Y_TRUNK: usize = 100;
+    const Y_ARM: usize = 100;
+
+    /// Trunk and arm sizes automatic terminal-state detection needs.
+    ///
+    /// At `Y_TRUNK` the detection misses one of the two arms on 2 of 40 waypoint
+    /// seeds, and below 240 cells the waypoint chain stops resolving the branch
+    /// at all. The detected states stay inside the arms throughout, which is
+    /// what the cheap test asserts.
+    #[cfg(feature = "large_scale_diagnostics")]
+    const Y_TRUNK_LARGE: usize = 200;
+    #[cfg(feature = "large_scale_diagnostics")]
+    const Y_ARM_LARGE: usize = 200;
+
     /// Parameters sized for the small synthetic fixtures.
+    ///
+    /// ### Params
+    ///
+    /// * `num_waypoints` - Waypoint target, which has to track the fixture size.
     ///
     /// ### Returns
     ///
-    /// [PalantirParams] with a modest waypoint count and an exact kNN backend.
-    fn test_params() -> PalantirParams {
+    /// [PalantirParams] with an exact kNN backend and a pinned spectrum budget.
+    fn test_params(num_waypoints: usize) -> PalantirParams {
         let mut params = PalantirParams::new();
         params.knn = 24;
-        params.num_waypoints = 250;
+        params.num_waypoints = num_waypoints;
         params.knn_params.knn_method = "exhaustive".to_string();
         // Pin the component count. The eigengap heuristic keeps six or more on
         // these fixtures, and the higher harmonics of a simple manifold
@@ -666,6 +711,16 @@ mod tests {
         // until the spatial bandwidth swamps every pseudotime gap and the
         // directed pruning stops cutting anything. Unrelated to the eigensolver.
         params.n_eigs = Some(3);
+        // Pin the restart budget rather than inheriting the crate default.
+        // These fixtures are long, thin and densely sampled, so their diffusion
+        // spectrum sits inside 1e-5 of one across the whole retained range and
+        // the leading eigenvectors are not separated until the residual drops
+        // below that gap. The default budget stops an order of magnitude short
+        // of it, which leaves the embedding a function of the restart count
+        // rather than of the data; raising the default from 16 to 64 moved
+        // every downstream number here. Real data has a spectrum nothing like
+        // this, so it is the fixtures that need the budget, not the default.
+        params.lanczos_params.max_restarts = 256;
         params
     }
 
@@ -674,7 +729,12 @@ mod tests {
         let coords = linear_manifold(120);
         let (indices, distances) = knn_of(&coords, 15);
 
-        let res = run_palantir(&indices, &distances, true, 0, None, test_params(), 42, 0).unwrap();
+        // 250 rather than the cell count: `max_min_sampling` runs
+        // `num_waypoints / n_dims` iterations per component, so a target equal
+        // to `n` samples barely half the cells per axis and detection loses the
+        // single terminal state on this fixture.
+        let res =
+            run_palantir(&indices, &distances, true, 0, None, test_params(250), 42, 0).unwrap();
 
         let truth: Vec<f32> = (0..120).map(|i| i as f32).collect();
         let corr = crate::core::math::vector_helpers::pearson_correlation(&res.pseudotime, &truth)
@@ -700,21 +760,18 @@ mod tests {
 
     #[test]
     fn test_y_branch_terminal_states_lie_in_the_arms() {
-        // What automatic detection can be held to on a fixture this size, and
-        // no more. The candidates are drawn from the per-axis extremes of the
-        // multiscale space, and a 600-cell thin manifold has a diffusion
-        // spectrum clustered to within 1e-5, so the individual components are
-        // not determined well enough to place all three tips at extremes. That
-        // is the reference's heuristic behaving as designed, not a defect, so
-        // this pins the properties that are genuinely determined: something is
-        // found, it sits in a branch rather than the trunk, and the export
-        // ordering holds. `test_y_branch_fate_probabilities_split_at_the_root`
-        // covers the downstream machinery with the tips supplied explicitly.
-        let (trunk, arm) = (200usize, 200usize);
+        // The cheap half of detection coverage: whatever comes back is in a
+        // branch and not in the trunk, and the export ordering holds. True on
+        // all 40 waypoint seeds swept at this size, where pinning the exact
+        // answer is not: two of them find only one of the two arms.
+        // `test_y_branch_detection_finds_one_state_per_arm` pins the full answer
+        // on the fixture that supports it.
+        let (trunk, arm) = (Y_TRUNK, Y_ARM);
         let coords = y_manifold(trunk, arm);
         let (indices, distances) = knn_of(&coords, 15);
 
-        let res = run_palantir(&indices, &distances, true, 0, None, test_params(), 42, 0).unwrap();
+        let res =
+            run_palantir(&indices, &distances, true, 0, None, test_params(120), 42, 0).unwrap();
 
         // The arms must stay attached to the trunk. Detaching them gives a kNN
         // graph with three connected components, which puts eigenvalue one at
@@ -723,6 +780,16 @@ mod tests {
         assert_eq!(
             res.repair_edges, 0,
             "the Y fixture is disconnected; the arms have detached from the trunk"
+        );
+
+        // Terminal states are read off the extremes of the multiscale space, so
+        // an under-resolved embedding decides this test. Two components leave
+        // only four per-axis extremes, one of which is the root, and an
+        // unconverged solve reliably hands that root back as a terminal state.
+        assert!(
+            res.eigen_converged,
+            "the eigensolve stopped at residual {:e}; the embedding is not determined",
+            res.eigen_residual
         );
 
         assert!(
@@ -742,12 +809,48 @@ mod tests {
     }
 
     #[test]
+    // 800 cells, a full Palantir run, around five seconds in a debug build.
+    #[cfg(feature = "large_scale_diagnostics")]
+    fn test_y_branch_detection_finds_one_state_per_arm() {
+        // Detection held to the full answer: exactly one terminal state per arm.
+        // It needs the large fixture; the cheap sibling above covers the same
+        // machinery at a size where only the weaker property is determined.
+        let (trunk, arm) = (Y_TRUNK_LARGE, Y_ARM_LARGE);
+        let coords = y_manifold(trunk, arm);
+        let (indices, distances) = knn_of(&coords, 15);
+
+        let res =
+            run_palantir(&indices, &distances, true, 0, None, test_params(250), 42, 0).unwrap();
+
+        assert_eq!(res.repair_edges, 0);
+        assert!(
+            res.eigen_converged,
+            "the eigensolve stopped at residual {:e}",
+            res.eigen_residual
+        );
+        assert_eq!(
+            res.terminal_states.len(),
+            2,
+            "expected one terminal state per arm, got {:?}",
+            res.terminal_states
+        );
+        // Checked by arm rather than only by `>= trunk`, or both states landing
+        // in the same arm would pass.
+        assert!(
+            (trunk..trunk + arm).contains(&res.terminal_states[0])
+                && (trunk + arm..trunk + 2 * arm).contains(&res.terminal_states[1]),
+            "terminal states do not sit one per arm: {:?}",
+            res.terminal_states
+        );
+    }
+
+    #[test]
     fn test_y_branch_fate_probabilities_split_at_the_root() {
         // Terminal states supplied, so this exercises the Markov chain, the
         // absorbing solve, the projection and the entropy without depending on
         // the detection heuristic. Both arm tips are given, so the root has two
         // reachable fates and its entropy should approach ln 2.
-        let (trunk, arm) = (200usize, 200usize);
+        let (trunk, arm) = (Y_TRUNK, Y_ARM);
         let coords = y_manifold(trunk, arm);
         let (indices, distances) = knn_of(&coords, 15);
         let tips = [trunk + arm - 1, trunk + 2 * arm - 1];
@@ -758,7 +861,7 @@ mod tests {
             true,
             0,
             Some(&tips),
-            test_params(),
+            test_params(120),
             42,
             0,
         )
@@ -766,27 +869,29 @@ mod tests {
 
         assert_eq!(res.terminal_states, tips.to_vec());
 
-        // Measured on this fixture: tips sit at 0.952 and 0.886 for their own
-        // fate, the root at 0.593/0.407, mid-trunk at 0.518/0.482. Bounds are
-        // set from those with headroom rather than at the idealised values. A
-        // per-cell probability is a convex combination over nearby waypoints,
-        // so even a tip picks up some of its neighbours' fates; only the
-        // waypoint row itself is one-hot.
+        // Bounds come from a 40-seed sweep of the waypoint sampler rather than
+        // from the single seed run here, so a sampler change shows up as a
+        // failure instead of drifting quietly. Worst case over that sweep: tips
+        // hold 0.979 of their own fate at entropy 0.103, the mid-trunk split
+        // reaches 0.123 at entropy 0.686. A per-cell probability is a convex
+        // combination over nearby waypoints, so even a tip picks up some of its
+        // neighbours' fates; only the waypoint row itself is one-hot.
         for (col, &tip) in res.terminal_states.iter().enumerate() {
             assert!(
-                res.branch_probs[(tip, col)] > 0.8,
+                res.branch_probs[(tip, col)] > 0.95,
                 "tip {tip} gives only {} to its own fate",
                 res.branch_probs[(tip, col)]
             );
             assert!(
-                res.entropy[tip] < 0.45,
+                res.entropy[tip] < 0.2,
                 "terminal state {tip} has entropy {}",
                 res.entropy[tip]
             );
         }
 
-        // The shared trunk is genuinely undecided: both fates are close to even
-        // and the entropy sits near ln 2 = 0.693. This is the assertion that
+        // The shared trunk is genuinely undecided: the arms are exact
+        // reflections of each other, so an even split is the right answer and
+        // the entropy belongs near ln 2 = 0.693. This is the assertion that
         // actually says the branch probabilities are splitting rather than
         // collapsing onto one arm.
         let mid_trunk = trunk / 2;
@@ -796,12 +901,12 @@ mod tests {
             "mid-trunk fates are not close to even, difference {split}"
         );
         assert!(
-            res.entropy[mid_trunk] > 0.6,
+            res.entropy[mid_trunk] > 0.65,
             "mid-trunk entropy is only {}, expected near ln 2",
             res.entropy[mid_trunk]
         );
         assert!(
-            res.entropy[0] > 0.6,
+            res.entropy[0] > 0.65,
             "root entropy is only {}, expected near ln 2",
             res.entropy[0]
         );
@@ -822,12 +927,12 @@ mod tests {
         // below one, and a cell whose weight sits entirely on them sums to
         // zero. Both are the correct answer; summing *above* one never is, and
         // that is exactly what rescaling the surviving edges used to produce.
-        let (trunk, arm) = (200usize, 200usize);
+        let (trunk, arm) = (Y_TRUNK, Y_ARM);
         let coords = y_manifold(trunk, arm);
         let (indices, distances) = knn_of(&coords, 15);
         let supplied = [trunk + arm - 1, trunk + 2 * arm - 1];
 
-        let mut params = test_params();
+        let mut params = test_params(120);
         params.branch_prob_threshold = 0.0;
 
         let res = run_palantir(
@@ -871,9 +976,11 @@ mod tests {
 
     #[test]
     fn test_user_supplied_terminal_states_are_honoured() {
-        let coords = y_manifold(200, 200);
+        let coords = y_manifold(Y_TRUNK, Y_ARM);
         let (indices, distances) = knn_of(&coords, 15);
-        let supplied = [399usize, 599usize];
+        // Deliberately not the arm tips: an interior cell of each arm, so this
+        // cannot pass by agreeing with what detection would have found anyway.
+        let supplied = [Y_TRUNK + Y_ARM - 40, Y_TRUNK + 2 * Y_ARM - 40];
 
         let res = run_palantir(
             &indices,
@@ -881,13 +988,13 @@ mod tests {
             true,
             0,
             Some(&supplied),
-            test_params(),
+            test_params(120),
             42,
             0,
         )
         .unwrap();
 
-        assert_eq!(res.terminal_states, vec![399, 599]);
+        assert_eq!(res.terminal_states, supplied.to_vec());
     }
 
     #[test]
@@ -896,7 +1003,16 @@ mod tests {
         let (indices, distances) = knn_of(&coords, 10);
 
         assert!(matches!(
-            run_palantir(&indices, &distances, true, 999, None, test_params(), 42, 0),
+            run_palantir(
+                &indices,
+                &distances,
+                true,
+                999,
+                None,
+                test_params(250),
+                42,
+                0
+            ),
             Err(BixverseErrors::PalantirEarlyCellOutOfRange { .. })
         ));
     }
@@ -913,7 +1029,7 @@ mod tests {
                 true,
                 0,
                 Some(&[999]),
-                test_params(),
+                test_params(250),
                 42,
                 0
             ),
@@ -926,7 +1042,7 @@ mod tests {
         let coords = linear_manifold(60);
         let (indices, distances) = knn_of(&coords, 10);
 
-        let mut params = test_params();
+        let mut params = test_params(250);
         params.knn = 4;
 
         assert!(matches!(
