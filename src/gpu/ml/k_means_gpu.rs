@@ -2453,6 +2453,99 @@ mod tests {
         }
     }
 
+    // `s_part` must cover every thread the workgroup dispatches. The store
+    // index `sub * dim_eff + e0` collapses to exactly `tx` for the leftover
+    // threads, so the highest index reached is WORKGROUP_128 - 1 while the
+    // allocation is `n_sub * dim_eff`. Whenever `dim_eff` does not divide 128
+    // the truncating division leaves those threads storing past the end.
+    // Under lavapipe shared memory is an ordinary host allocation, so that is
+    // a real heap overflow rather than a harmless write to on-chip scratch.
+    #[test]
+    fn test_segmented_update_shared_memory_covers_workgroup() {
+        let wg = WORKGROUP_128 as usize;
+
+        // The threshold is real, not hypothetical: no_pcs = 10 in
+        // test_fast_cluster_gpu.R pads to 12, which does not divide 128.
+        let dim_eff = 10usize.next_multiple_of(LINE_SIZE).min(wg);
+        assert!((wg / dim_eff) * dim_eff < wg);
+
+        // Raw dims a caller can supply, padded here exactly as
+        // `k_means_clusters_gpu` pads them.
+        for dim in [5usize, 8, 10, 15, 32, 48, 50, 65, 100, 130] {
+            let dim_eff = dim.next_multiple_of(LINE_SIZE).min(wg);
+            let n_sub = wg / dim_eff;
+            assert!(
+                n_sub * dim_eff >= wg,
+                "dim = {dim}: {} of {wg} threads store past a {} element buffer",
+                wg - n_sub * dim_eff,
+                n_sub * dim_eff
+            );
+        }
+    }
+
+    // Loudest reachable shape. dim_eff = 68 leaves n_sub = 1, so 60 of the 128
+    // threads write 240 bytes past a 272 byte allocation, once per workgroup.
+    // The assertion is expected to pass regardless: the reduction only reads
+    // `s in 0..n_sub`, so the corrupted slots never reach the output. Only the
+    // allocator can see this.
+    #[test]
+    fn test_segmented_update_ragged_dim() {
+        let Some(device) = try_device() else { return };
+        let (n, k, dim) = (300, 64, 68);
+        let data: Vec<f32> = (0..n * dim)
+            .map(|i| ((i * 11 + 5) % 23) as f32 * 0.3)
+            .collect();
+        let assignments: Vec<u32> = (0..n).map(|i| (i % k) as u32).collect();
+        let init = vec![-1.0f32; k * dim];
+
+        let got = run_update(&data, &assignments, &init, n, k, dim, &device);
+        let want = cpu_centroid_means(
+            &data,
+            &assignments.iter().map(|&c| c as usize).collect::<Vec<_>>(),
+            &init,
+            n,
+            k,
+            dim,
+        );
+
+        for j in 0..k * dim {
+            assert!(
+                (got[j] - want[j]).abs() < 1e-3,
+                "elem {}: {} != {}",
+                j,
+                got[j],
+                want[j]
+            );
+        }
+    }
+
+    // The shape that aborts bixverse.gpu R CMD check on the lavapipe runner:
+    // no_pcs = 10 pads to 12, so 8 threads overrun by 8 elements per workgroup
+    // per Lloyd iteration. Many small corruption events rather than the few
+    // large ones above. Shape assertions only; an abort is the signal.
+    #[test]
+    fn test_kmeans_padded_dim_not_divisor_of_workgroup() {
+        let Some(device) = try_device() else { return };
+        let (n, k, dim) = (600, 16, 10);
+        let mat = Mat::<f32>::from_fn(n, dim, |i, j| ((i * 31 + j * 17) % 100) as f32 * 0.01);
+        let params = KMeansGpuParams::new(10, None, true, false);
+
+        let (cents, assignments) = k_means_clusters_gpu::<f32, WgpuRuntime>(
+            mat.as_ref(),
+            "euclidean",
+            k,
+            Some(params),
+            42,
+            device.clone(),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(cents.nrows(), k);
+        assert_eq!(cents.ncols(), dim);
+        assert_eq!(assignments.len(), n);
+    }
+
     // The other update tests use n=300 and n=6, small enough that the
     // unrolled body runs at most once per thread. This one has segments long
     // enough for the unrolled path to dominate and the tail to be a genuine
