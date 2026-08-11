@@ -2,4 +2,5 @@
 //! bioinformatics, such as clustering methods, etc.
 
 pub mod clustering;
+pub mod gp;
 pub mod ml_r_wrappers;
