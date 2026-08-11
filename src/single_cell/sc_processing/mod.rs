@@ -4,6 +4,7 @@
 pub mod doublet_detection;
 pub mod hvg;
 pub mod knn;
+pub mod magic;
 pub mod metrics;
 pub mod pca;
 pub mod qc;
