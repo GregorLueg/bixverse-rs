@@ -394,9 +394,9 @@ impl<T: BixverseFloat> SparsityParams<T> {
     }
 }
 
-////////////////////////////
+/////////////////////////
 // Lanczos eigensolver //
-////////////////////////////
+/////////////////////////
 
 impl LanczosParams {
     /// Generate LanczosParams from a flattened R list
