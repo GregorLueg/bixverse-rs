@@ -12,6 +12,7 @@
 //! share nothing but their input.
 
 pub mod diffusion;
+pub mod gene_trends;
 pub mod markov;
 pub mod paga;
 pub mod palantir;
