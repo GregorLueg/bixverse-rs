@@ -1,6 +1,6 @@
 [package]
 name = "bixverse-rs"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 authors = ["Gregor Lueg <gregorlueg@me.com>"]
 license = "MIT"
@@ -87,6 +87,11 @@ features = ["single-cell", "multi-modal"]
 ###########
 # Benches #
 ###########
+
+[[bench]]
+name = "hvg_bench"
+harness = false
+required-features = ["single-cell"]
 
 [[bench]]
 name = "seacells_gpu_bench"

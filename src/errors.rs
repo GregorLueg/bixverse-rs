@@ -48,6 +48,80 @@ pub enum BixverseErrors {
     #[error("The faer Cholesky failed: {0}")]
     FaerCholeskyError(#[from] faer::linalg::solvers::LltError),
 
+    // -- Gaussian processes --
+    /// A Gaussian process was handed empty training data.
+    #[error("Gaussian process: {name} is empty")]
+    GpEmptyInput {
+        /// Which input was empty
+        name: &'static str,
+    },
+
+    /// The training inputs and responses disagree in length.
+    #[error(
+        "Gaussian process: {n_x} training inputs against {n_y} response rows; the two must be aligned"
+    )]
+    GpDimensionMismatch {
+        /// Length of the input vector
+        n_x: usize,
+        /// Rows in the response matrix
+        n_y: usize,
+    },
+
+    /// A hyperparameter is outside its supported range.
+    #[error("Gaussian process: hyperparameter '{name}' is {value}, which is not supported")]
+    GpInvalidHyperparameter {
+        /// Name of the offending hyperparameter
+        name: &'static str,
+        /// The value that was rejected
+        value: f64,
+    },
+
+    /// A non-finite value reached the fit.
+    ///
+    /// Checked up front because a `NaN` otherwise surfaces as an unexplained
+    /// Cholesky failure much later, with nothing pointing back at the input.
+    #[error("Gaussian process: {name} contains a non-finite value")]
+    GpNonFiniteInput {
+        /// Which input carried the non-finite value
+        name: &'static str,
+    },
+
+    /// The landmark Gram matrix stayed singular through the whole jitter ladder.
+    #[error(
+        "Gaussian process: the {n_landmarks} x {n_landmarks} landmark Gram is not positive definite even at a jitter of {jitter}; spread the landmarks out or shorten the length scale"
+    )]
+    GpLandmarkCholeskyFailed {
+        /// Largest jitter that was tried
+        jitter: f64,
+        /// Number of landmarks
+        n_landmarks: usize,
+    },
+
+    /// The posterior Cholesky failed.
+    ///
+    /// Distinct from [BixverseErrors::GpLandmarkCholeskyFailed] because this
+    /// factorises `A A^T / sigma^2 + I`, whose smallest eigenvalue is at least
+    /// one in exact arithmetic. A failure here means a non-finite value got
+    /// through the input checks, not that the problem is ill-conditioned.
+    #[error(
+        "Gaussian process: the posterior Cholesky failed, which should be impossible for a matrix with unit diagonal dominance; the accumulation produced non-finite entries"
+    )]
+    GpPosteriorCholeskyFailed,
+
+    /// Every landmark sits at the same coordinate.
+    #[error(
+        "Gaussian process: all landmarks share the same coordinate, so the kernel matrix is degenerate"
+    )]
+    GpDegenerateLandmarks,
+
+    /// Every sample weight is zero.
+    ///
+    /// A zero weight drops its observation, so this leaves the fit with no data
+    /// and returns the prior everywhere. Indistinguishable from a genuinely
+    /// flat response, hence an error rather than a silent zero curve.
+    #[error("Gaussian process: every sample weight is zero, so the fit would carry no data")]
+    GpAllWeightsZero,
+
     // -- statrs --
     /// Beta distribution construction failed
     #[error("Beta distribution error: {0}")]
@@ -63,16 +137,6 @@ pub enum BixverseErrors {
     #[error("Distance metric '{0}' is not supported for this method.")]
     DistanceNotSupported(Dist),
 
-    // -- sparse --
-    /// Error if wrong sparse format has been provided
-    #[error("Wrong sparse format. Expected {expected}; got {found}")]
-    WrongSparseFormat {
-        /// Expected format
-        expected: String,
-        /// Got format
-        found: String,
-    },
-
     // -- graph based errors ---
     /// Error for algorithms that expect undirected graphs
     ///
@@ -86,6 +150,44 @@ pub enum BixverseErrors {
     /// In cases where the graph and the community membership do not agree.
     #[error("The number of nodes and membership assignments in the communities do not add up.")]
     CommunityAssignmentMismatch,
+
+    /// Error if a partition label sits outside the declared partition count
+    #[error("The partition label {label} is out of range for {n_partitions} partitions.")]
+    PartitionLabelOutOfRange {
+        /// The offending label
+        label: usize,
+        /// Number of declared partitions
+        n_partitions: usize,
+    },
+
+    /// Most of the supplied kNN indices point outside the cell set
+    ///
+    /// The usual cause is a kNN computed against a reference index rather than
+    /// the query set, which drops every edge and returns an all-zero
+    /// connectivity matrix looking like a genuine result.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "PAGA: {out_of_range} of {total} kNN entries point outside the {n_cells} cells; the graph was probably built against a different index"
+    )]
+    PagaKnnIndicesOutOfRange {
+        /// Entries pointing past the last cell
+        out_of_range: usize,
+        /// Entries supplied in total
+        total: usize,
+        /// Cells in the input
+        n_cells: usize,
+    },
+
+    /// Error if the partition count exceeds what the dense coarsening accepts
+    #[error(
+        "The number of partitions ({n_partitions}) exceeds the maximum of {max} for graph abstraction."
+    )]
+    TooManyPartitions {
+        /// Provided number of partitions
+        n_partitions: usize,
+        /// The supported maximum
+        max: usize,
+    },
 
     // -- matrix algebra errors --
     /// Error if the feature dimensions are not the same
@@ -158,6 +260,31 @@ pub enum BixverseErrors {
     /// Error if the [crate::prelude::CompressedSparseData2] is not in CSR.
     #[error("The SparseCompressedData2 must be in CSR format")]
     SparseMatrixMustBeCsr,
+
+    /// A row summed to (effectively) zero where a row-stochastic normalisation
+    /// was asked for.
+    ///
+    /// On a kNN-derived affinity matrix every node has `k` out-edges, so a zero
+    /// row means the kernel weights underflowed rather than that the graph is
+    /// legitimately disconnected. Anything built on top of the operator would
+    /// be meaningless, hence an error rather than leaving the row at zero.
+    #[error(
+        "Row {row} of the sparse matrix sums to {row_sum}, which is not positive, so it cannot be normalised to a row-stochastic form (isolated node, or the kernel weights underflowed)"
+    )]
+    SparseMatrixIsolatedRow {
+        /// The offending row index
+        row: usize,
+        /// The row sum that was rejected
+        row_sum: f64,
+    },
+
+    /// A CSR matrix failed one of its structural invariants.
+    ///
+    /// Raised by [crate::core::math::sparse::validate_square_csr]. The static
+    /// string names the invariant, because "the graph is malformed" alone leaves
+    /// the caller to bisect their own input.
+    #[error("The CSR matrix is malformed: {0}")]
+    MalformedCsr(&'static str),
 
     /// Error if the [crate::prelude::CompressedSparseData2] is not in Csc.
     #[error("The SparseCompressedData2 must be in CSC format")]
@@ -355,6 +482,7 @@ pub enum BixverseErrors {
     Hdf5(#[from] hdf5::Error),
 
     /// Provide custom error message for unsupported file formats.
+    #[cfg(feature = "single-cell")]
     #[error("Unknown or unsupported h5ad format: {0}")]
     UnsupportH5ADFormat(String),
 
@@ -409,16 +537,6 @@ pub enum BixverseErrors {
         n_batches: usize,
     },
 
-    /// Anchor finding produced no pairs between two batches
-    #[cfg(feature = "single-cell")]
-    #[error("No anchors found between batches {batch_a} and {batch_b}.")]
-    NoAnchorsFound {
-        /// Reference batch index
-        batch_a: usize,
-        /// Query batch index
-        batch_b: usize,
-    },
-
     /// A batch has too few cells for the requested anchor search
     #[cfg(feature = "single-cell")]
     #[error("Batch {batch} has {n_cells} cells, needs at least {required} for anchor finding.")]
@@ -432,6 +550,7 @@ pub enum BixverseErrors {
     },
     // -- Harmony --
     /// Sigma length is not equal to the number of clusters
+    #[cfg(feature = "single-cell")]
     #[error("Harmony: sigma length must match number of clusters")]
     HarmonySigmaLengthUnequalCluster,
 
@@ -463,6 +582,64 @@ pub enum BixverseErrors {
         /// Number of cells provided
         n_cells: usize,
     },
+
+    // -- HVG --
+    /// A requested cell index does not exist in the store.
+    #[cfg(feature = "single-cell")]
+    #[error("HVG: cell index {index} is outside the store, which holds {total_cells} cells.")]
+    HvgCellIndexOutOfRange {
+        /// The offending cell index
+        index: usize,
+        /// Number of cells the store holds
+        total_cells: usize,
+    },
+
+    /// The same cell was selected twice, which would inflate the denominator.
+    #[cfg(feature = "single-cell")]
+    #[error("HVG: cell index {index} appears more than once in the selection.")]
+    HvgDuplicateCellIndex {
+        /// The duplicated cell index
+        index: usize,
+    },
+
+    /// Batch labels and cell indices disagree in length.
+    #[cfg(feature = "single-cell")]
+    #[error("HVG: {n_labels} batch labels were given for {n_cells} selected cells.")]
+    HvgBatchLabelLengthMismatch {
+        /// Number of batch labels provided
+        n_labels: usize,
+        /// Number of selected cells
+        n_cells: usize,
+    },
+
+    /// A batch in `0..n_batches` ended up with no cells.
+    #[cfg(feature = "single-cell")]
+    #[error("HVG: batch {batch} has no cells; labels must densely cover 0..{n_batches}.")]
+    HvgEmptyBatch {
+        /// The empty batch
+        batch: usize,
+        /// Number of batches implied by the labels
+        n_batches: usize,
+    },
+
+    /// No cells were selected at all.
+    #[cfg(feature = "single-cell")]
+    #[error("HVG: the cell selection is empty.")]
+    HvgEmptySelection,
+
+    /// Loess span outside the range [`crate::core::base::loess::LoessRegression`]
+    /// accepts.
+    #[cfg(feature = "single-cell")]
+    #[error("HVG: the loess span is {span}, but it must be within (0, 1].")]
+    HvgInvalidLoessSpan {
+        /// The provided span
+        span: f32,
+    },
+
+    /// Bin count of zero, which would divide by zero during binning.
+    #[cfg(feature = "single-cell")]
+    #[error("HVG: n_bins must be at least 1.")]
+    HvgInvalidBinCount,
 
     // -- NMF --
     /// NMF Rank is too large for the NNDSVD initialisation
@@ -513,6 +690,21 @@ pub enum BixverseErrors {
     #[error("SEACells: The model has not been fitted yet. Please run .fit()")]
     SEACellsModelNotFitted,
 
+    /// The adaptive diffusion kernel came out with non-finite weights.
+    ///
+    /// Raised by
+    /// [crate::single_cell::mc_generation::seacells::compute_diffusion_kernel].
+    /// The usual cause is a caller-supplied kNN graph carrying `NaN` distances,
+    /// since zero bandwidths are handled by the smallest-positive fallback.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "The adaptive diffusion kernel over {n_cells} cells holds non-finite weights; check the supplied kNN distances"
+    )]
+    DiffusionKernelNotFinite {
+        /// Cells in the kNN graph
+        n_cells: usize,
+    },
+
     // -- FastCluster --
     /// The Fast cluster results do not contain k-means cluster assignments
     #[cfg(feature = "single-cell")]
@@ -551,13 +743,472 @@ pub enum BixverseErrors {
     #[error("MELD: labels needs two groups minimum")]
     MELDOnlyOneGroup,
 
-    /// Error if embedding rows do not match the kNN
+    // -- Palantir --
+    /// The user-supplied early cell index sits outside the cell range.
     #[cfg(feature = "single-cell")]
-    #[error("MELD: Embedding rows unequals samples")]
-    MELDEmbeddingUnequalsSamples,
+    #[error("Palantir: early cell index {early_cell} is out of range for {n_cells} cells")]
+    PalantirEarlyCellOutOfRange {
+        /// The offending early cell index
+        early_cell: usize,
+        /// Number of cells in the input
+        n_cells: usize,
+    },
+
+    /// A user-supplied terminal state index sits outside the cell range.
+    #[cfg(feature = "single-cell")]
+    #[error("Palantir: terminal state index {state} is out of range for {n_cells} cells")]
+    PalantirTerminalStateOutOfRange {
+        /// The offending terminal state index
+        state: usize,
+        /// Number of cells in the input
+        n_cells: usize,
+    },
+
+    /// A terminal state cell was never sampled as a waypoint, so it has no
+    /// position in the waypoint Markov chain.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Palantir: terminal state cell {state} is not among the {n_waypoints} sampled waypoints"
+    )]
+    PalantirTerminalStateNotAWaypoint {
+        /// The offending terminal state cell index
+        state: usize,
+        /// Number of sampled waypoints
+        n_waypoints: usize,
+    },
+
+    /// The first waypoint is not the start cell, which every consumer of the
+    /// geodesic matrix assumes.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Palantir: waypoint 0 is cell {first_waypoint}, but the start cell is {start_cell}; the start cell must be the first waypoint"
+    )]
+    PalantirStartCellNotFirstWaypoint {
+        /// The start cell the caller asked for
+        start_cell: usize,
+        /// The cell actually sitting in waypoint position zero
+        first_waypoint: usize,
+    },
+
+    /// The pseudotime refinement cap leaves no room for a single pass.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Palantir: max_iterations is {max_iterations}, but at least {minimum} is needed to run a refinement pass"
+    )]
+    PalantirMaxIterationsTooSmall {
+        /// The requested cap
+        max_iterations: usize,
+        /// Smallest cap that runs at least one pass
+        minimum: usize,
+    },
+
+    /// The neighbour count is too small to derive the back-edge bandwidth of
+    /// the waypoint Markov chain, which indexes neighbour rank
+    /// `min(knn / 3 - 1, 30)`.
+    ///
+    /// Carries the neighbour count the caller asked for, not the one clamped to
+    /// the waypoint set. Too few waypoints raises
+    /// [BixverseErrors::PalantirTooFewWaypoints] instead, so the message always
+    /// names the parameter that can actually be changed.
+    #[cfg(feature = "single-cell")]
+    #[error("Palantir: knn is {knn}, but at least {minimum} is needed for the adaptive bandwidth")]
+    PalantirKnnTooSmall {
+        /// The requested neighbour count
+        knn: usize,
+        /// Smallest neighbour count yielding a valid bandwidth rank
+        minimum: usize,
+    },
+
+    /// Too few waypoints were sampled to support the back-edge bandwidth rank,
+    /// however large the requested `knn` is.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Palantir: only {n_waypoints} waypoints were sampled, but at least {minimum} are needed for the adaptive bandwidth; raise num_waypoints or supply more cells"
+    )]
+    PalantirTooFewWaypoints {
+        /// Waypoints actually sampled
+        n_waypoints: usize,
+        /// Smallest waypoint count yielding a valid bandwidth rank
+        minimum: usize,
+    },
+
+    /// The waypoint data and the waypoint pseudotime disagree on the waypoint
+    /// count.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Palantir: {n_waypoints} waypoint rows were supplied against {n_pseudotime} pseudotime values"
+    )]
+    PalantirWaypointDataMismatch {
+        /// Rows of multiscale data restricted to the waypoints
+        n_waypoints: usize,
+        /// Pseudotime values supplied alongside
+        n_pseudotime: usize,
+    },
+
+    /// The stationary ranks have no spread, so the outlier cutoff separates
+    /// nothing.
+    ///
+    /// More than half the waypoints share a stationary mass, which puts the
+    /// median absolute deviation at exactly zero and the cutoff exactly on the
+    /// median. Roughly half of everything then clears it, the components merge,
+    /// and the branching structure collapses to a single terminal state.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Palantir: the stationary ranks over {n_waypoints} waypoints have zero spread, so terminal states cannot be separated; supply them explicitly or raise knn"
+    )]
+    PalantirStationaryRanksDegenerate {
+        /// Waypoints in the chain
+        n_waypoints: usize,
+    },
+
+    /// Cells remained unreachable from the start cell after graph repair.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Palantir: {n_unreachable} cells remain unreachable from the start cell after {repairs} repair edges; increase knn"
+    )]
+    PalantirDisconnectedGraph {
+        /// Cells still at infinite geodesic distance
+        n_unreachable: usize,
+        /// Repair edges added before giving up
+        repairs: usize,
+    },
+
+    /// The pseudotime collapsed to a constant, or the Silverman bandwidth was
+    /// zero or non-finite, so the refinement cannot be normalised.
+    #[cfg(feature = "single-cell")]
+    #[error("Palantir: degenerate pseudotime ({reason}); the manifold is probably collapsed")]
+    PalantirDegeneratePseudotime {
+        /// Which quantity degenerated
+        reason: &'static str,
+    },
+
+    /// The stationary power iteration lost all of its mass, which can only
+    /// happen when the supplied chain is not row-stochastic or carries
+    /// non-finite entries.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Palantir: the stationary power iteration lost its mass at iteration {iteration} (total mass {total:e}); the transition matrix is not row-stochastic"
+    )]
+    PalantirStationaryMassLost {
+        /// The pass on which the mass went non-positive or non-finite
+        iteration: usize,
+        /// The offending total mass
+        total: f64,
+    },
+
+    /// An eigenvalue of the diffusion operator came back non-finite.
+    ///
+    /// Clamping it would fabricate a plausible-looking scale factor out of a
+    /// `NaN`, since `f64::min` returns the other operand for a `NaN` input.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Palantir: the diffusion eigensolve returned a non-finite eigenvalue ({eigenvalue}); the kernel is degenerate"
+    )]
+    PalantirNonFiniteEigenvalue {
+        /// The offending eigenvalue
+        eigenvalue: f64,
+    },
+
+    /// An explicit `n_eigs` below the smallest usable count was requested.
+    ///
+    /// The trivial leading eigenvector is always dropped, so fewer than two
+    /// eigenvectors leaves no multiscale coordinate at all. The request is
+    /// refused rather than raised to the heuristic's floor: silently changing a
+    /// pinned count changes every distance downstream.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Palantir: n_eigs is {n_eigs}, but at least {minimum} eigenvectors are needed for a multiscale space"
+    )]
+    PalantirNEigsTooSmall {
+        /// The requested eigenvector count
+        n_eigs: usize,
+        /// Smallest count leaving a usable coordinate
+        minimum: usize,
+    },
+
+    /// No terminal states survived the rank cutoff and the caller supplied none.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Palantir: no terminal states detected; supply them explicitly or increase num_waypoints"
+    )]
+    PalantirNoTerminalStates,
+
+    /// The multiscale space has no boundary cells, so there is nothing to snap
+    /// the start cell or a terminal-state candidate onto.
+    ///
+    /// Boundaries are the per-component argmin and argmax, so an empty set means
+    /// the multiscale space has no columns at all.
+    #[cfg(feature = "single-cell")]
+    #[error("Palantir: the multiscale space has no boundary cells to snap onto")]
+    PalantirNoBoundaryCells,
+
+    /// Cells remained unreachable from the waypoint set when the geodesic
+    /// matrix was built.
+    ///
+    /// Distinct from [BixverseErrors::PalantirDisconnectedGraph], which reports
+    /// the repair attempts. This fires after repair, inside the pseudotime
+    /// solve, where the repair count is not in scope and claiming zero of them
+    /// would be a lie.
+    #[cfg(feature = "single-cell")]
+    #[error("Palantir: {n_unreachable} cells have no geodesic path to some waypoint; increase knn")]
+    PalantirUnreachableFromWaypoints {
+        /// Cells at infinite geodesic distance from at least one waypoint
+        n_unreachable: usize,
+    },
+
+    /// The densified `(I - Q) B = R` solve did not converge.
+    ///
+    /// Carries the achieved `‖(I - Q) B - R‖_inf`, which is what actually
+    /// distinguishes a near-singular system from ordinary rounding.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Palantir: the (I - Q) B = R solve over {n_transient} transient waypoints left a residual of {residual:e}, above tolerance"
+    )]
+    PalantirAbsorbingSolveFailed {
+        /// Achieved `‖(I - Q) B - R‖_inf`
+        residual: f64,
+        /// Total transient waypoints
+        n_transient: usize,
+    },
+
+    /// The absorption probabilities of one waypoint sum to more than one.
+    ///
+    /// Split out from [BixverseErrors::PalantirAbsorbingSolveFailed] because the
+    /// solve residual says nothing here: the factorisation can be exact to
+    /// machine precision and still land on this, which is what makes the
+    /// offending sum the only number worth reporting.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Palantir: waypoint {waypoint} absorbs with probability {row_sum} across {n_transient} transient waypoints, which is above one"
+    )]
+    PalantirAbsorbingRowSum {
+        /// The offending row sum
+        row_sum: f64,
+        /// Waypoint index the row belongs to
+        waypoint: usize,
+        /// Total transient waypoints
+        n_transient: usize,
+    },
+
+    /// The absorption probabilities of one waypoint are not finite.
+    ///
+    /// Split from [BixverseErrors::PalantirAbsorbingRowSum] because the two
+    /// point at different bugs: a non-finite sum means a `NaN` reached the
+    /// solve, while a sum above one means the chain was not sub-stochastic.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Palantir: waypoint {waypoint} has a non-finite absorption row sum ({row_sum}) across {n_transient} transient waypoints; the solve produced non-finite entries"
+    )]
+    PalantirAbsorbingRowNotFinite {
+        /// The offending row sum
+        row_sum: f64,
+        /// Waypoint index the row belongs to
+        waypoint: usize,
+        /// Total transient waypoints
+        n_transient: usize,
+    },
+
+    /// The densified `(I - Q)` would exceed the supported size.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Palantir: {n_transient} transient waypoints exceed the dense solve limit of {limit}; lower num_waypoints"
+    )]
+    PalantirTooManyWaypointsForDenseSolve {
+        /// Transient waypoint count requested
+        n_transient: usize,
+        /// The supported ceiling
+        limit: usize,
+    },
+
+    // -- MAGIC --
+    /// The requested imputation would not fit in a sane amount of memory.
+    ///
+    /// MAGIC output is unavoidably dense, so the only bound available is the
+    /// caller's gene selection. This is an error rather than a warning because
+    /// the crate is driven from R, where a printed warning is easily missed and
+    /// the alternative failure mode is the session being OOM-killed.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "MAGIC: imputing {n_genes} genes across {n_cells} cells needs {} MB of dense f32, above the {} MB budget; subset the genes or set allow_large",
+        (*n_cells as f64 * *n_genes as f64 * 4.0 / 1.048576e6).round(),
+        (*max_elements as f64 * 4.0 / 1.048576e6).round()
+    )]
+    MagicOutputTooLarge {
+        /// Cells in the selection
+        n_cells: usize,
+        /// Genes in the selection
+        n_genes: usize,
+        /// The element ceiling that was exceeded
+        max_elements: usize,
+    },
+
+    /// The kNN inputs disagree with the requested cell selection.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "MAGIC: the kNN graph has {n_knn} rows but {n_selected} cells were selected; the two must be aligned"
+    )]
+    MagicKnnSelectionMismatch {
+        /// Rows in the supplied kNN graph
+        n_knn: usize,
+        /// Cells in the selection
+        n_selected: usize,
+    },
+
+    /// A cell index in the selection sits outside the store.
+    #[cfg(feature = "single-cell")]
+    #[error("MAGIC: cell index {cell} is out of range for a store of {total_cells} cells")]
+    MagicCellOutOfRange {
+        /// The offending cell index
+        cell: usize,
+        /// Cells in the store
+        total_cells: usize,
+    },
+
+    /// A cell index appears twice in the selection.
+    #[cfg(feature = "single-cell")]
+    #[error("MAGIC: cell index {cell} appears more than once in the selection")]
+    MagicDuplicateCell {
+        /// The duplicated cell index
+        cell: usize,
+    },
+
+    /// The operator was built against a different store than the one being read.
+    ///
+    /// The operator's cell lookup is indexed by global cell id, so reading a
+    /// store with more cells than it was sized for would index past its end.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "MAGIC: the operator was built for a store of {operator_cells} cells but the reader holds {store_cells}; the `total_cells` passed to MagicOperator::from_knn must match the store"
+    )]
+    MagicStoreSizeMismatch {
+        /// Cells the operator was built for
+        operator_cells: usize,
+        /// Cells the reader actually holds
+        store_cells: usize,
+    },
+
+    // -- Gene trends --
+    /// The expression matrix does not have one row per cell.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Gene trends: the expression matrix has {n_cells} rows but {n_pseudotime} pseudotime values were supplied"
+    )]
+    GeneTrendsShapeMismatch {
+        /// Rows in the expression matrix
+        n_cells: usize,
+        /// Length of the pseudotime vector
+        n_pseudotime: usize,
+    },
+
+    /// A branch selected no cells at all.
+    #[cfg(feature = "single-cell")]
+    #[error("Gene trends: branch {branch} selected no cells")]
+    GeneTrendsBranchEmpty {
+        /// Index of the offending branch
+        branch: usize,
+    },
+
+    /// A branch has too few cells to fit anything meaningful.
+    ///
+    /// The reference has no such guard and will happily fit a 500-point grid to
+    /// a single cell. The resulting curve is the prior, not the data.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Gene trends: branch {branch} has only {n_cells} cells, which is below the minimum of {minimum}"
+    )]
+    GeneTrendsBranchTooFewCells {
+        /// Index of the offending branch
+        branch: usize,
+        /// Cells the branch selected
+        n_cells: usize,
+        /// Minimum the fit requires
+        minimum: usize,
+    },
+
+    /// Every cell in a branch shares the same pseudotime, so there is no grid
+    /// to fit over.
+    #[cfg(feature = "single-cell")]
+    #[error("Gene trends: branch {branch} spans zero pseudotime, so its grid would be degenerate")]
+    GeneTrendsDegeneratePseudotime {
+        /// Index of the offending branch
+        branch: usize,
+    },
+
+    /// Fate-probability weighting was asked for without the probabilities.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Gene trends: BranchWeighting::FateProbability needs the fate probabilities, but none were supplied"
+    )]
+    GeneTrendsMissingFateProbabilities,
+
+    /// The fate-probability matrix does not have one column per branch.
+    ///
+    /// Branch `i` takes column `i` positionally, so a mismatch would silently
+    /// weight every cell by the wrong fate rather than failing.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Gene trends: the fate probabilities have {n_columns} columns but {n_branches} branches were supplied; branches map to columns positionally, so the two must agree"
+    )]
+    GeneTrendsFateColumnMismatch {
+        /// Columns in the fate probability matrix
+        n_columns: usize,
+        /// Branches supplied
+        n_branches: usize,
+    },
+
+    /// The fate-probability matrix does not have one row per cell.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Gene trends: the fate probabilities have {n_rows} rows but {n_cells} cells were supplied"
+    )]
+    GeneTrendsFateShapeMismatch {
+        /// Rows in the fate probability matrix
+        n_rows: usize,
+        /// Cells supplied
+        n_cells: usize,
+    },
+
+    /// A branch cell index sits outside the cell range.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Gene trends: branch {branch} references cell {cell}, which is out of range for {n_cells} cells"
+    )]
+    GeneTrendsCellOutOfRange {
+        /// Index of the offending branch
+        branch: usize,
+        /// The offending cell index
+        cell: usize,
+        /// Cells in the input
+        n_cells: usize,
+    },
+
+    /// Every cell in a branch carries zero fate-probability weight.
+    ///
+    /// The Gaussian process treats a zero-weight observation as absent, so this
+    /// would otherwise return the zero-mean prior and be indistinguishable from
+    /// a genuinely flat gene.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Gene trends: every cell selected for branch {branch} has zero fate probability, so the fit would carry no data"
+    )]
+    GeneTrendsZeroWeightBranch {
+        /// Index of the offending branch
+        branch: usize,
+    },
+
+    /// The requested grid is too coarse to fit anything over.
+    #[cfg(feature = "single-cell")]
+    #[error("Gene trends: a resolution of {resolution} is below the minimum of {minimum}")]
+    GeneTrendsResolutionTooLow {
+        /// Requested grid points
+        resolution: usize,
+        /// Minimum the fit requires
+        minimum: usize,
+    },
 
     // -- sctype --
     /// Error when number of cluster assignment != the number of cells
+    #[cfg(feature = "single-cell")]
     #[error(
         "SCType: The number of cells ({n_cells}) and cluster assignments length ({n_cluster_assignment}) is not the same."
     )]
@@ -569,6 +1220,7 @@ pub enum BixverseErrors {
     },
 
     /// Error when the smoothing graph node count != the number of cells
+    #[cfg(feature = "single-cell")]
     #[error("SCType: The graph has {n_nodes} nodes, but there are {n_cells} cells.")]
     ScTypeGraphNodesNotEqualNCells {
         /// Number of cells

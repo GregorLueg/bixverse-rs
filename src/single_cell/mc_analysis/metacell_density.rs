@@ -128,9 +128,18 @@ pub fn compute_diffusion_density(
     if verbosity.normal_verbosity() {
         println!("Computing top {} diffusion components...", n_dcs);
     }
-    let (evals, evecs) = diffusion_map_from_kernel(&mut kernel, n_dcs + 1, seed)?;
+    let (evals, evecs) = diffusion_map_from_kernel(&mut kernel, n_dcs + 1, seed, None)?;
     let dcs = determine_multiscale_space(&evals, &evecs, Some(n_dcs + 1));
-    let dim = dcs[0].len();
+
+    // The solver caps the pair count at the matrix dimension, so a metacell set
+    // smaller than the requested component count yields a narrower embedding
+    // than asked for, and an empty one when there is only a single metacell.
+    let dim = dcs.first().map_or(0, Vec::len);
+    if dim == 0 {
+        return Err(BixverseErrors::InvalidArgument(
+            "Diffusion density: too few metacells to build a diffusion embedding".to_string(),
+        ));
+    }
 
     if verbosity.normal_verbosity() {
         println!("Running kNN on DC embedding (k = {})...", k_density);

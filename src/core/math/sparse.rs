@@ -1,8 +1,8 @@
 //! Sparse matrix formats, sparse operations and helpers to transform different
 //! formats into each other.
 
-use faer::{Mat, MatRef};
-use num_traits::ToPrimitive;
+use faer::linalg::matmul::matmul;
+use faer::{Accum, Mat, MatMut, MatRef};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
@@ -10,6 +10,7 @@ use std::ops::{Add, AddAssign, Mul};
 
 use crate::core::math::pca_svd::SvdResults;
 use crate::prelude::*;
+use crate::utils::faer_parallelism;
 
 /////////////
 // Helpers //
@@ -291,6 +292,44 @@ where
             indptr: indptr.to_vec(), // Fixed: was using indices instead of indptr
             cs_type: CompressedSparseFormat::Csr,
             data_2: data2.map(|d| d.to_vec()),
+            shape,
+        }
+    }
+
+    /// Take ownership of buffers that were built for this matrix
+    ///
+    /// [CompressedSparseData2::new_csr] and its CSC sibling copy all three
+    /// buffers, which doubles peak memory for any caller that assembled them
+    /// itself and then throws the originals away. At a million cells by thirty
+    /// neighbours that is 150 MB built and immediately cloned, so the `u8` edge
+    /// layer sold as a byte per edge is two bytes per edge in transit.
+    ///
+    /// ### Params
+    ///
+    /// * `data` - The underlying data, moved.
+    /// * `indices` - The minor-axis indices, moved.
+    /// * `indptr` - The major-axis pointers, moved.
+    /// * `data2` - An optional second layer, moved.
+    /// * `cs_type` - Which orientation the buffers describe.
+    /// * `shape` - `(nrow, ncol)`.
+    ///
+    /// ### Returns
+    ///
+    /// The matrix, with no buffer copied.
+    pub fn from_parts(
+        data: Vec<T>,
+        indices: Vec<u32>,
+        indptr: Vec<u32>,
+        data2: Option<Vec<U>>,
+        cs_type: CompressedSparseFormat,
+        shape: (usize, usize),
+    ) -> Self {
+        Self {
+            data,
+            indices,
+            indptr,
+            cs_type,
+            data_2: data2,
             shape,
         }
     }
@@ -976,6 +1015,67 @@ where
     })
 }
 
+/// Check that a matrix is a structurally sound square CSR and return its order
+///
+/// Callers that index `partitions[j]` or `parent[j]` from a stored column index
+/// rely on every invariant here, and a violated one is otherwise silent: a
+/// non-monotonic `indptr` gives an empty Rust range, so the row is skipped and
+/// the caller returns a plausible answer computed on a subset of the graph. An
+/// out-of-range column index panics through whatever boundary the caller sits
+/// behind instead of erroring.
+///
+/// ### Params
+///
+/// * `graph` - The adjacency to validate.
+///
+/// ### Returns
+///
+/// The node count, or an error naming the violated invariant.
+pub fn validate_square_csr<T>(graph: &CompressedSparseData2<T>) -> Result<usize, BixverseErrors>
+where
+    T: Clone,
+{
+    if !graph.cs_type.is_csr() {
+        return Err(BixverseErrors::SparseMatrixMustBeCsr);
+    }
+    let (rows, cols) = graph.shape;
+    if rows != cols {
+        return Err(BixverseErrors::ShapeMismatch {
+            expected: (rows, rows),
+            got: (rows, cols),
+        });
+    }
+
+    if graph.indptr.len() != rows + 1 {
+        return Err(BixverseErrors::MalformedCsr(
+            "indptr length must be the row count plus one",
+        ));
+    }
+    if graph.indices.len() != graph.data.len() {
+        return Err(BixverseErrors::MalformedCsr(
+            "indices and data must have the same length",
+        ));
+    }
+    if graph.indptr.windows(2).any(|w| w[0] > w[1]) {
+        return Err(BixverseErrors::MalformedCsr(
+            "indptr must be non-decreasing",
+        ));
+    }
+    // `indptr` is non-empty by the length check above.
+    if graph.indptr[rows] as usize != graph.indices.len() {
+        return Err(BixverseErrors::MalformedCsr(
+            "the last indptr entry must equal the number of stored values",
+        ));
+    }
+    if graph.indices.iter().any(|&j| j as usize >= rows) {
+        return Err(BixverseErrors::MalformedCsr(
+            "a column index sits outside the matrix",
+        ));
+    }
+
+    Ok(rows)
+}
+
 /// Transform COO stored data into CSR
 ///
 /// ### Params
@@ -1099,6 +1199,89 @@ where
     }
 
     CompressedSparseData2::new_csr(&data, &indices, &indptr, None, shape)
+}
+
+/// Scatter a sorted undirected edge list into a symmetric CSR adjacency
+///
+/// Rows come out ascending without a per-row sort or a per-row allocation. The
+/// trick is the scatter order: the `hi` endpoint of every edge is written
+/// first, filling each row `r` with its `lo < r` partners in ascending order,
+/// and the `lo` endpoint second, appending its `hi > r` partners also
+/// ascending. Both halves are ascending because the input is sorted by `(lo,
+/// hi)`, and the first half sits entirely below the second because `lo < hi`.
+///
+/// Unlike [coo_to_csr] this neither sorts nor merges duplicates, so the caller
+/// owns both invariants. Violating them produces a *corrupt* CSR rather than a
+/// panic: unsorted input or `lo > hi` gives descending column indices,
+/// `lo == hi` duplicates a diagonal entry, and a repeated pair doubles the nnz.
+/// Every other consumer in the crate assumes ascending deduplicated rows, so the
+/// invariants are `debug_assert!`ed here and the function stays crate-private.
+///
+/// ### Params
+///
+/// * `n` - Node count; the output is `n` square.
+/// * `edges` - Deduplicated `(lo, hi, value)` triples with `lo < hi < n`, sorted
+///   strictly ascending by `(lo, hi)`.
+///
+/// ### Returns
+///
+/// `CompressedSparseData2` in CSR format with both directions of every edge
+/// stored at the same value.
+pub(crate) fn undirected_edges_to_csr<T>(
+    n: usize,
+    edges: &[(u32, u32, T)],
+) -> CompressedSparseData2<T>
+where
+    T: BixverseNumeric,
+{
+    debug_assert!(
+        edges
+            .iter()
+            .all(|&(lo, hi, _)| lo < hi && (hi as usize) < n),
+        "undirected_edges_to_csr wants lo < hi < n"
+    );
+    debug_assert!(
+        edges
+            .windows(2)
+            .all(|w| (w[0].0, w[0].1) < (w[1].0, w[1].1)),
+        "undirected_edges_to_csr wants strictly ascending, deduplicated (lo, hi)"
+    );
+
+    let mut indptr = vec![0u32; n + 1];
+    for &(lo, hi, _) in edges {
+        indptr[lo as usize + 1] += 1;
+        indptr[hi as usize + 1] += 1;
+    }
+    for i in 0..n {
+        indptr[i + 1] += indptr[i];
+    }
+
+    let nnz = 2 * edges.len();
+    let mut indices = vec![0u32; nnz];
+    let mut data = vec![T::default(); nnz];
+    let mut cursor: Vec<u32> = indptr[..n].to_vec();
+
+    for &(lo, hi, v) in edges {
+        let pos = cursor[hi as usize] as usize;
+        indices[pos] = lo;
+        data[pos] = v;
+        cursor[hi as usize] += 1;
+    }
+    for &(lo, hi, v) in edges {
+        let pos = cursor[lo as usize] as usize;
+        indices[pos] = hi;
+        data[pos] = v;
+        cursor[lo as usize] += 1;
+    }
+
+    CompressedSparseData2::from_parts(
+        data,
+        indices,
+        indptr,
+        None,
+        CompressedSparseFormat::Csr,
+        (n, n),
+    )
 }
 
 ///////////////////////
@@ -1363,9 +1546,25 @@ where
 
 /// Normalises the rows of a CSR matrix to a sum of 1 (L1 norm)
 ///
+/// Turns an affinity matrix `K` into the row-stochastic diffusion operator
+/// `D^-1 K` in place.
+///
+/// A row summing to zero is an error rather than a no-op. The reference
+/// implementations this backs (Palantir's `diffusion_maps_from_kernel`, MAGIC)
+/// guard with `D[D != 0] = 1 / D[D != 0]` and leave the row at zero, but on a
+/// kNN-derived kernel every node has `k` out-edges, so a zero row means the
+/// weights underflowed and everything downstream of the operator is garbage.
+/// Failing loudly beats propagating a silently absorbing state.
+///
 /// ### Params
 ///
 /// * `csr` - Mutable reference to the CSR matrix (modified in-place)
+///
+/// ### Returns
+///
+/// `Ok(())`, or [BixverseErrors::SparseMatrixMustBeCsr] if the matrix is in
+/// CSC, or [BixverseErrors::SparseMatrixIsolatedRow] naming the first row that
+/// sums to zero.
 pub fn normalise_csr_rows_l1<T>(csr: &mut CompressedSparseData2<T>) -> Result<(), BixverseErrors>
 where
     T: BixverseNumeric + Into<f64>,
@@ -1384,16 +1583,15 @@ where
 
         let row_sum: T = row_data_slice.iter().copied().sum();
 
-        if row_sum.into() > 1e-15 {
-            for val in row_data_slice.iter_mut() {
-                *val /= row_sum;
-            }
-        } else {
-            panic!(
-                "Row {} has sum {}, indicating isolated node",
-                i,
-                row_sum.into()
-            );
+        if row_sum.into() <= 1e-15 {
+            return Err(BixverseErrors::SparseMatrixIsolatedRow {
+                row: i,
+                row_sum: row_sum.into(),
+            });
+        }
+
+        for val in row_data_slice.iter_mut() {
+            *val /= row_sum;
         }
     }
 
@@ -1796,6 +1994,87 @@ where
     Ok(out)
 }
 
+/// Apply a CSR operator to a dense row-major block: `out = a @ block`
+///
+/// The kernel behind repeated diffusion, `T @ (T @ (T @ X))`. Applying the
+/// operator `t` times is always preferable to forming `T^t`: at `knn = 30` the
+/// operator carries ~30 non-zeros per row, `T^2` ~900 and `T^3` ~27,000, so at
+/// 100k rows the explicit cube is on the order of 2.7e9 non-zeros while `t`
+/// applications stay at ~30 per row for the same answer.
+///
+/// Both buffers are flat row-major rather than [faer::Mat] on purpose. The
+/// operation is `out_row_i = sum_j w_ij * block_row_j`, so a row-major layout
+/// makes every inner step a contiguous SIMD axpy of `width` elements, where
+/// faer's column-major storage would turn it into a strided scatter.
+///
+/// Parallel over output rows, which are disjoint, so no synchronisation.
+///
+/// Note that `single_cell::sc_analysis::meld` has an older private
+/// column-at-a-time version of this (`chebyshev_apply_columns`) that restreams
+/// the whole operator once per column. It should move over here at some point.
+///
+/// ### Params
+///
+/// * `a` - The operator, CSR, `n x k`
+/// * `block` - Dense input, row-major, `k * width` elements
+/// * `width` - Columns in the block
+/// * `out` - Dense output, row-major, `n * width` elements, overwritten
+///
+/// ### Returns
+///
+/// `Ok(())`, or [BixverseErrors::SparseMatrixMustBeCsr] if `a` is in CSC, or
+/// [BixverseErrors::SparseMatrixMultiplication] if the buffers do not match the
+/// operator's shape.
+///
+/// ### Panics
+///
+/// If `a` violates its own CSR invariants: a column index at or above
+/// `a.shape().1`, or an `indptr` shorter than `a.shape().0 + 1`. Both index
+/// safe slices, so this is a panic rather than unsoundness, but it surfaces
+/// inside a rayon closure. `CompressedSparseData2` constructors do not validate,
+/// so run [assert_invariants](CompressedSparseData2::assert_invariants) on a
+/// matrix of uncertain provenance.
+pub fn csr_matmul_dense_block<T>(
+    a: &CompressedSparseData2<T>,
+    block: &[T],
+    width: usize,
+    out: &mut [T],
+) -> Result<(), BixverseErrors>
+where
+    T: BixverseFloat + BixverseSimd,
+{
+    if !a.cs_type.is_csr() {
+        return Err(BixverseErrors::SparseMatrixMustBeCsr);
+    }
+
+    let (n_rows, n_cols) = a.shape();
+
+    // `width == 0` would make both buffers empty regardless of the operator, so
+    // the length checks below could not tell a shape mismatch from a no-op.
+    if width == 0 || block.len() != n_cols * width || out.len() != n_rows * width {
+        return Err(BixverseErrors::SparseMatrixMultiplication {
+            n_col_a: n_cols,
+            n_row_b: block.len().checked_div(width).unwrap_or(0),
+        });
+    }
+
+    let indptr = &a.indptr;
+    let indices = &a.indices;
+    let data = &a.data;
+
+    out.par_chunks_mut(width)
+        .enumerate()
+        .for_each(|(i, out_row)| {
+            out_row.fill(T::zero());
+            for p in indptr[i] as usize..indptr[i + 1] as usize {
+                let j = indices[p] as usize;
+                T::bxv_axpy_simd(out_row, data[p], &block[j * width..(j + 1) * width]);
+            }
+        });
+
+    Ok(())
+}
+
 ///////////////////////
 // Sparse statistics //
 ///////////////////////
@@ -1980,38 +2259,208 @@ where
     Ok((evals, evecs))
 }
 
-/// Compute largest eigenvalues and eigenvectors using Lanczos
+/// Ritz vectors retained across a restart, above the requested pair count.
+const LANCZOS_RESTART_GUARD: usize = 5;
+
+/// Norm ratio below which a second Gram-Schmidt pass is run.
+///
+/// The DGKS criterion. A drop past `1 / sqrt(2)` means the projection cancelled
+/// at least half the vector, which is where the round-off it leaves behind
+/// stops being negligible. Above that the second pass is measurably wasted work.
+const LANCZOS_ORTHO_REFINE_RATIO: f64 = 0.707;
+
+/// Lanczos breakdown threshold, relative to the running `||A||` estimate.
+///
+/// An absolute threshold is meaningless for a matrix that is not `O(1)`. The
+/// attainable floor on the residual norm after two Gram-Schmidt passes is
+/// `~eps * sqrt(n) * ||A||`, so this sits comfortably above it while still only
+/// firing on a genuinely invariant subspace.
+const LANCZOS_BREAKDOWN_RATIO: f64 = 1e-12;
+
+/// Parameters for the restarted Lanczos eigensolver.
+#[derive(Clone, Copy, Debug)]
+pub struct LanczosParams {
+    /// Krylov basis vectors held at once. `None` derives it from the requested
+    /// component count as `max(2k + 10, k + 20)`, which leaves enough room
+    /// above the wanted pairs for the restart to make progress.
+    pub basis_size: Option<usize>,
+    /// Maximum restart cycles. Each cycle costs one basis worth of
+    /// matrix-vector products plus the orthogonalisation against the basis, so
+    /// this is the only knob that bounds the run time.
+    pub max_restarts: usize,
+    /// Relative residual tolerance. A Ritz pair counts as converged once
+    /// `||A x - lambda x||` drops below `tol * ||A||`. The scaling matters: an
+    /// absolute threshold is unreachable for a matrix whose norm is large and
+    /// trivially met for one whose norm is tiny.
+    pub tol: f64,
+}
+
+impl LanczosParams {
+    /// Defaults tuned on a single cell diffusion kernel.
+    ///
+    /// ### Returns
+    ///
+    /// Self with a derived basis size, 64 restarts and a relative tolerance of
+    /// `1e-8`.
+    pub fn new() -> Self {
+        Self {
+            basis_size: None,
+            max_restarts: 64,
+            tol: 1e-8,
+        }
+    }
+
+    /// Resolve the basis size for a given component count.
+    ///
+    /// ### Params
+    ///
+    /// * `n_components` - Eigenpairs requested, already capped at `n`.
+    /// * `n` - Matrix dimension, which caps the basis.
+    ///
+    /// ### Returns
+    ///
+    /// The number of basis vectors to hold, at least one and never above `n`.
+    fn resolve_basis(&self, n_components: usize, n: usize) -> usize {
+        self.basis_size
+            .unwrap_or_else(|| (n_components * 2 + 10).max(n_components + 20))
+            .max(n_components + 1)
+            .min(n)
+            .max(1)
+    }
+}
+
+impl Default for LanczosParams {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Outcome of a restarted Lanczos solve, with the convergence diagnostics.
+///
+/// The diagnostics exist because a budget-exhausted solve and a converged one
+/// are otherwise indistinguishable from the outside, and the difference is
+/// several digits of accuracy in the eigenvalues.
+#[derive(Clone, Debug)]
+pub struct LanczosResult {
+    /// Eigenvalues sorted descending. Kept in `f64` because the callers form
+    /// `lambda / (1 - lambda)`, which is catastrophic in `f32` once `lambda`
+    /// approaches one, as it does for any diffusion operator.
+    pub eigenvalues: Vec<f64>,
+    /// `eigenvectors[i][j]` is element `i` of eigenvector `j`. Always exactly
+    /// `eigenvalues.len()` columns wide.
+    pub eigenvectors: Vec<Vec<f32>>,
+    /// Largest residual `||A x - lambda x||` over the returned pairs.
+    pub residual: f64,
+    /// Scale the residual was tested against, i.e. the `||A||` estimate.
+    pub norm_estimate: f64,
+    /// Whether `residual` met `tol * norm_estimate`.
+    pub converged: bool,
+    /// Restart cycles actually run.
+    pub restarts: usize,
+}
+
+/// Compute the largest eigenpairs of a symmetric sparse matrix.
+///
+/// Thin wrapper over [compute_largest_eigenpairs_lanczos_diag] for callers that
+/// do not inspect the convergence diagnostics.
 ///
 /// ### Params
 ///
-/// * `matrix` - Sparse matrix in CSR format
-/// * `n_components` - Number of eigenpairs to compute
-/// * `seed` - For reproducibility
+/// * `matrix` - Symmetric sparse matrix. CSC input is converted to CSR.
+/// * `n_components` - Number of eigenpairs to compute.
+/// * `seed` - Seed for the starting vector.
+/// * `params` - Optional [LanczosParams], defaulted when `None`.
 ///
 /// ### Returns
 ///
-/// (eigenvalues, eigenvectors) where `eigenvectors[i][j]` is element j of
-/// eigenvector i
+/// `(eigenvalues, eigenvectors)` sorted by descending eigenvalue, where
+/// `eigenvectors[i][j]` is element `i` of eigenvector `j`. Both outputs carry
+/// the same number of components, which is `min(n_components, n)` and can be
+/// smaller still if the iteration hit an invariant subspace first.
 pub fn compute_largest_eigenpairs_lanczos<T>(
     matrix: &CompressedSparseData2<T>,
     n_components: usize,
     seed: u64,
-) -> Result<(Vec<f32>, Vec<Vec<f32>>), BixverseErrors>
+    params: Option<LanczosParams>,
+) -> Result<(Vec<f64>, Vec<Vec<f32>>), BixverseErrors>
 where
     T: BixverseNumeric + BixverseSimd + Into<f64>,
 {
-    let n = matrix.shape.0;
-    let n_iter = (n_components * 2 + 10).max(n_components).min(n);
+    let res = compute_largest_eigenpairs_lanczos_diag(matrix, n_components, seed, params)?;
+    Ok((res.eigenvalues, res.eigenvectors))
+}
 
-    // Convert to CSR for efficient row access
+/// Compute the largest eigenpairs of a symmetric sparse matrix, with
+/// diagnostics.
+///
+/// Thick-restarted Lanczos. Each cycle builds a Krylov basis of
+/// [LanczosParams::basis_size] vectors with full reorthogonalisation, does a
+/// Rayleigh-Ritz extraction, and restarts from the best Ritz vectors plus the
+/// residual direction. Restarting is the key point: the basis stays bounded
+/// while the iteration keeps going, so a clustered spectrum converges without
+/// the quadratic orthogonalisation cost a single long run would need.
+///
+/// The projected matrix is accumulated explicitly as H[i][j] = <v_i, A v_j>
+/// rather than as a tridiagonal recurrence. After a thick restart the leading
+/// basis vectors are Ritz vectors, not Lanczos vectors, so the projection is
+/// arrow-shaped rather than tridiagonal; forming it directly handles that
+/// without special-casing.
+///
+/// The basis is held column-major as one flat buffer, so the projection, the
+/// reorthogonalisation, the restart and the final Ritz vectors are all faer
+/// products rather than scalar loops. Orthogonalisation is classical
+/// Gram-Schmidt with a DGKS-conditional second pass, which matches the accuracy
+/// of two unconditional modified passes while being expressible as two matrix
+/// products instead of 2 * basis_size scalar loops.
+///
+/// Convergence uses the exact Arnoldi residual |beta_m| * |y[m-1]|, which
+/// still holds under thick restart because the relation A V = V H + beta v
+/// e^T is preserved across cycles, tested against tol * ||A||.
+///
+/// Internals are f64 regardless of the input type. Eigenvalues come back in
+/// f64, eigenvectors in f32.
+///
+/// ### Params
+///
+/// * `matrix` - Symmetric sparse matrix. CSC input is converted to CSR.
+/// * `n_components` - Number of eigenpairs to compute. Capped at the matrix
+///   dimension rather than erroring, so a request for more pairs than the
+///   matrix has simply returns all of them.
+/// * `seed` - Seed for the starting vector.
+/// * `params` - Optional [LanczosParams], defaulted when None.
+///
+/// ### Returns
+///
+/// A [LanczosResult]. The eigenvalue count and the eigenvector column count
+/// are always equal.
+pub fn compute_largest_eigenpairs_lanczos_diag<T>(
+    matrix: &CompressedSparseData2<T>,
+    n_components: usize,
+    seed: u64,
+    params: Option<LanczosParams>,
+) -> Result<LanczosResult, BixverseErrors>
+where
+    T: BixverseNumeric + BixverseSimd + Into<f64>,
+{
+    let params = params.unwrap_or_default();
+    let n = matrix.shape.0;
+
+    if n_components == 0 || n == 0 {
+        return Err(BixverseErrors::MustBePositive(
+            "n_components and the matrix dimension".to_string(),
+        ));
+    }
+
+    let n_keep = n_components.min(n);
+    let m = params.resolve_basis(n_keep, n);
+
+    // CSR gives contiguous rows for the matrix-vector product.
     let csr = match matrix.cs_type {
         CompressedSparseFormat::Csr => matrix.clone(),
         CompressedSparseFormat::Csc => matrix.transform(),
     };
-
     let data_f64: Vec<f64> = csr.data.iter().map(|&v| v.into()).collect();
 
-    // Parallelised matvec: y = A * x
     let matvec = |x: &[f64], y: &mut [f64]| {
         y.par_iter_mut().enumerate().for_each(|(i, yi)| {
             let mut sum = 0.0;
@@ -2023,89 +2472,276 @@ where
         });
     };
 
-    // Lanczos iteration
-    let mut v = vec![0.0; n];
-    let mut v_old = vec![0.0; n];
-    let mut w = vec![0.0; n];
-    let mut v_matrix = vec![vec![0.0; n]; n_iter];
+    // Column-major basis, one flat buffer, so every pass over it is a `faer`
+    // product and column `j` is still a contiguous slice for the matrix product.
+    let mut basis = vec![0.0f64; m * n];
+    let mut h = Mat::<f64>::zeros(m, m);
+    let mut w = vec![0.0f64; n];
+    let mut coeffs = vec![0.0f64; m];
 
     let mut rng = StdRng::seed_from_u64(seed);
-
-    for i in 0..n {
-        v[i] = rng.random::<f64>() - 0.5;
+    for x in basis[..n].iter_mut() {
+        *x = rng.random::<f64>() - 0.5;
     }
-    normalise(&mut v);
+    normalise(&mut basis[..n]);
 
-    let mut alpha = vec![0.0; n_iter];
-    let mut beta = vec![0.0; n_iter];
+    // Basis vectors carried over from the previous cycle. Zero on the first.
+    let mut locked = 0usize;
+    let mut ritz_values: Vec<f64> = Vec::new();
+    let mut ritz_coeffs = Mat::<f64>::zeros(0, 0);
+    let mut m_final = 0usize;
 
-    for j in 0..n_iter {
-        v_matrix[j].copy_from_slice(&v);
+    // Lower bound on ||A||_2, refined as the iteration sees more of the matrix.
+    let mut norm_estimate = 0.0f64;
+    let mut residual = f64::INFINITY;
+    let mut converged = false;
+    let mut restarts = 0usize;
 
-        matvec(&v, &mut w);
-        alpha[j] = dot(&w, &v);
+    let budget = params.max_restarts.max(1);
 
-        // w = w - alpha[j]*v - beta[j-1]*v_old
-        for i in 0..n {
-            w[i] -= alpha[j] * v[i];
-            if j > 0 {
-                w[i] -= beta[j - 1] * v_old[i];
+    for cycle in 0..budget {
+        restarts = cycle + 1;
+        let mut m_eff = m;
+        let mut last_beta = 0.0f64;
+
+        for j in locked..m {
+            matvec(&basis[j * n..(j + 1) * n], &mut w);
+
+            let width = j + 1;
+
+            // Rayleigh-Ritz coefficients against the whole basis so far. Taken
+            // before any subtraction, so `h` is the exact projection, and they
+            // double as the first Gram-Schmidt coefficient set.
+            basis_project(&basis, n, width, &w, &mut coeffs[..width]);
+            for i in 0..width {
+                h[(i, j)] = coeffs[i];
+                h[(j, i)] = coeffs[i];
+            }
+
+            let before = norm(&w);
+            norm_estimate = norm_estimate.max(before);
+
+            basis_subtract(&basis, n, width, &coeffs[..width], &mut w);
+            last_beta = norm(&w);
+
+            // DGKS: refine only when the projection cancelled enough of the
+            // vector for the round-off it left behind to matter.
+            if last_beta < LANCZOS_ORTHO_REFINE_RATIO * before {
+                basis_project(&basis, n, width, &w, &mut coeffs[..width]);
+                basis_subtract(&basis, n, width, &coeffs[..width], &mut w);
+                last_beta = norm(&w);
+            }
+
+            // Breakdown: the basis already spans an invariant subspace, so the
+            // Ritz pairs from it are exact and there is nothing left to add.
+            if last_beta <= LANCZOS_BREAKDOWN_RATIO * norm_estimate {
+                m_eff = width;
+                last_beta = 0.0;
+                break;
+            }
+
+            if width < m {
+                let inv = 1.0 / last_beta;
+                let next = &mut basis[width * n..(width + 1) * n];
+                for (dst, &src) in next.iter_mut().zip(w.iter()) {
+                    *dst = src * inv;
+                }
             }
         }
 
-        // full reorthogonalisation
-        for k in 0..=j {
-            let coeff = dot(&w, &v_matrix[k]);
-            for i in 0..n {
-                w[i] -= coeff * v_matrix[k][i];
-            }
-        }
+        let (values, vectors) = symmetric_eigen_descending(h.as_ref(), m_eff)?;
 
-        beta[j] = norm(&w);
-        if beta[j] < 1e-12 {
+        // Residual of Ritz pair i is |beta| * |y[m_eff - 1, i]|, exact under the
+        // Arnoldi relation that thick restart preserves.
+        let n_out = n_keep.min(m_eff);
+        residual = (0..n_out).fold(0.0f64, |acc, i| {
+            acc.max(last_beta * vectors[(m_eff - 1, i)].abs())
+        });
+
+        // The extreme Ritz values are the sharpest available lower bound on
+        // ||A||, so scale the tolerance by them rather than testing an absolute
+        // threshold that a large matrix can never reach.
+        norm_estimate = norm_estimate
+            .max(values[0].abs())
+            .max(values[m_eff - 1].abs());
+        converged = residual <= params.tol * norm_estimate;
+
+        ritz_values = values;
+        ritz_coeffs = vectors;
+        m_final = m_eff;
+
+        if converged || m_eff < m || last_beta == 0.0 || cycle + 1 == budget {
             break;
         }
 
-        v_old.copy_from_slice(&v);
-        v.copy_from_slice(&w);
-        normalise(&mut v);
-    }
+        // Thick restart: keep the best Ritz vectors, then hand the residual
+        // direction over as the next basis vector so the Krylov space continues
+        // to grow from where it stopped.
+        // Never retain more than half the basis: past that the cycle buys too
+        // few new Krylov vectors to pay for the restart, and at `keep = m - 1`
+        // it buys exactly one and the iteration effectively stops.
+        let keep = (n_keep + LANCZOS_RESTART_GUARD).min(m / 2).max(1);
+        let mut restarted = vec![0.0f64; keep * n];
+        basis_expand(&basis, n, m_eff, ritz_coeffs.as_ref(), keep, &mut restarted);
 
-    let (evals, evecs) = tridiag_eig(&alpha[..n_iter], &beta[..n_iter - 1])?;
-
-    let mut indices: Vec<usize> = (0..evals.len()).collect();
-    indices.sort_by(|&i, &j| evals[j].partial_cmp(&evals[i]).unwrap());
-
-    let mut largest_evals: Vec<f32> = Vec::with_capacity(n_components);
-    let mut largest_evecs: Vec<Vec<f32>> = Vec::with_capacity(n_components);
-
-    for &idx in indices.iter().take(n_components) {
-        // Transform eigenvector back to original space: v_original = V * v_tridiag
-        let mut evec = vec![0.0; n];
-        for i in 0..n {
-            for j in 0..n_iter {
-                evec[i] += v_matrix[j][i] * evecs[(j, idx)].to_f64().unwrap();
-            }
+        let inv = 1.0 / last_beta;
+        for x in w.iter_mut() {
+            *x *= inv;
         }
 
-        // Normalise the transformed eigenvector
-        let norm: f64 = evec.iter().map(|x| x * x).sum::<f64>().sqrt();
-        for x in &mut evec {
-            *x /= norm;
+        h.fill(0.0);
+        basis[..keep * n].copy_from_slice(&restarted);
+        for (i, &value) in ritz_values.iter().take(keep).enumerate() {
+            h[(i, i)] = value;
         }
-
-        largest_evals.push(evals[idx].to_f64().unwrap() as f32);
-        largest_evecs.push(evec.iter().map(|&x| x as f32).collect());
+        basis[keep * n..(keep + 1) * n].copy_from_slice(&w);
+        locked = keep;
     }
 
-    let mut transposed = vec![vec![0.0f32; n_components]; n];
-    for comp_idx in 0..n_components {
-        for point_idx in 0..n {
-            transposed[point_idx][comp_idx] = largest_evecs[comp_idx][point_idx];
+    // Ritz vectors are built once, on the way out. Building them every cycle is
+    // pure waste: only the last cycle's are ever returned, and the retained
+    // block of the restart is bit-identical to the leading columns anyway.
+    let n_out = n_keep.min(m_final);
+    let mut ritz = vec![0.0f64; n_out * n];
+    basis_expand(&basis, n, m_final, ritz_coeffs.as_ref(), n_out, &mut ritz);
+
+    let eigenvalues: Vec<f64> = ritz_values[..n_out].to_vec();
+    let mut eigenvectors = vec![vec![0.0f32; n_out]; n];
+
+    for comp in 0..n_out {
+        let column = &ritz[comp * n..(comp + 1) * n];
+        let scale: f64 = column.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let inv = if scale > 0.0 { 1.0 / scale } else { 0.0 };
+        for (point, &v) in column.iter().enumerate() {
+            eigenvectors[point][comp] = (v * inv) as f32;
         }
     }
 
-    Ok((largest_evals, transposed))
+    Ok(LanczosResult {
+        eigenvalues,
+        eigenvectors,
+        residual,
+        norm_estimate,
+        converged,
+        restarts,
+    })
+}
+
+/// Project a vector onto the leading columns of the basis.
+///
+/// ### Params
+///
+/// * `basis` - Column-major basis buffer with `n` rows.
+/// * `n` - Length of a basis vector.
+/// * `width` - Leading columns to project against.
+/// * `v` - Vector of length `n`.
+/// * `out` - Receives `V^T v`; must be exactly `width` long.
+///
+/// ### Returns
+///
+/// Nothing; `out` is overwritten.
+fn basis_project(basis: &[f64], n: usize, width: usize, v: &[f64], out: &mut [f64]) {
+    let b = MatRef::from_column_major_slice(&basis[..width * n], n, width);
+    let v = MatRef::from_column_major_slice(v, n, 1);
+    let mut out = MatMut::from_column_major_slice_mut(out, width, 1);
+
+    matmul(
+        out.as_mut(),
+        Accum::Replace,
+        b.transpose(),
+        v,
+        1.0,
+        faer_parallelism(),
+    );
+}
+
+/// Subtract the basis expansion of a coefficient vector in place.
+///
+/// ### Params
+///
+/// * `basis` - Column-major basis buffer with `n` rows.
+/// * `n` - Length of a basis vector.
+/// * `width` - Leading columns to expand.
+/// * `coeffs` - Coefficients, exactly `width` long.
+/// * `v` - Vector of length `n`, updated to `v - V c`.
+///
+/// ### Returns
+///
+/// Nothing; `v` is updated in place.
+fn basis_subtract(basis: &[f64], n: usize, width: usize, coeffs: &[f64], v: &mut [f64]) {
+    let b = MatRef::from_column_major_slice(&basis[..width * n], n, width);
+    let c = MatRef::from_column_major_slice(coeffs, width, 1);
+    let mut v = MatMut::from_column_major_slice_mut(v, n, 1);
+
+    matmul(v.as_mut(), Accum::Add, b, c, -1.0, faer_parallelism());
+}
+
+/// Expand Ritz coefficient columns back into the full space.
+///
+/// ### Params
+///
+/// * `basis` - Column-major basis buffer with `n` rows.
+/// * `n` - Length of a basis vector.
+/// * `width` - Basis columns spanned by the coefficients.
+/// * `coeffs` - Rayleigh-Ritz eigenvectors, column-wise.
+/// * `n_out` - Leading coefficient columns to expand.
+/// * `out` - Receives the `n_out` expanded vectors, column-major.
+///
+/// ### Returns
+///
+/// Nothing; `out` is overwritten.
+fn basis_expand(
+    basis: &[f64],
+    n: usize,
+    width: usize,
+    coeffs: MatRef<f64>,
+    n_out: usize,
+    out: &mut [f64],
+) {
+    let b = MatRef::from_column_major_slice(&basis[..width * n], n, width);
+    let mut out = MatMut::from_column_major_slice_mut(out, n, n_out);
+
+    matmul(
+        out.as_mut(),
+        Accum::Replace,
+        b,
+        coeffs.subcols(0, n_out),
+        1.0,
+        faer_parallelism(),
+    );
+}
+
+/// Eigen-decompose the leading `size` block of a symmetric matrix, descending.
+///
+/// ### Params
+///
+/// * `h` - Symmetric matrix; only the leading `size` by `size` block is read.
+/// * `size` - Size of the block to decompose.
+///
+/// ### Returns
+///
+/// `(eigenvalues, eigenvectors)` sorted by descending eigenvalue, the
+/// eigenvectors held column-wise.
+fn symmetric_eigen_descending(
+    h: MatRef<f64>,
+    size: usize,
+) -> Result<(Vec<f64>, Mat<f64>), BixverseErrors> {
+    let block = Mat::<f64>::from_fn(size, size, |i, j| h[(i, j)]);
+
+    let eig = block
+        .self_adjoint_eigen(faer::Side::Lower)
+        .map_err(|_| BixverseErrors::FaerEigenError)?;
+
+    let raw_values = eig.S();
+    let raw_vectors = eig.U();
+
+    let mut order: Vec<usize> = (0..size).collect();
+    order.sort_by(|&a, &b| raw_values[b].total_cmp(&raw_values[a]));
+
+    let values: Vec<f64> = order.iter().map(|&i| raw_values[i]).collect();
+    let vectors = Mat::<f64>::from_fn(size, size, |i, j| raw_vectors[(i, order[j])]);
+
+    Ok((values, vectors))
 }
 
 /////////////////
@@ -2383,6 +3019,109 @@ mod tests {
     }
 
     #[test]
+    fn test_undirected_edges_to_csr_is_symmetric_and_row_sorted() {
+        // A path plus one chord, so several rows hold both a `lo < r` partner
+        // and a `hi > r` one. That split is the whole trick behind the
+        // sort-free scatter, and it is what breaks first if the two passes are
+        // ever reordered.
+        let edges = vec![(0u32, 1u32, 1.0f64), (0, 3, 2.0), (1, 2, 3.0), (2, 3, 4.0)];
+
+        let csr = undirected_edges_to_csr(4, &edges);
+
+        assert_eq!(csr.shape, (4, 4));
+        assert_eq!(csr.indptr, vec![0, 2, 4, 6, 8]);
+        assert_eq!(csr.indices, vec![1, 3, 0, 2, 1, 3, 0, 2]);
+        assert_eq!(csr.data, vec![1.0, 2.0, 1.0, 3.0, 3.0, 4.0, 2.0, 4.0]);
+
+        // Every row ascending, which every consumer in the crate assumes.
+        for i in 0..4 {
+            let lo = csr.indptr[i] as usize;
+            let hi = csr.indptr[i + 1] as usize;
+            assert!(csr.indices[lo..hi].windows(2).all(|w| w[0] < w[1]));
+        }
+    }
+
+    #[test]
+    fn test_undirected_edges_to_csr_handles_empty_input() {
+        let csr = undirected_edges_to_csr::<f64>(3, &[]);
+
+        assert_eq!(csr.shape, (3, 3));
+        assert_eq!(csr.indptr, vec![0, 0, 0, 0]);
+        assert!(csr.indices.is_empty());
+    }
+
+    #[test]
+    fn test_undirected_edges_to_csr_keeps_isolated_nodes() {
+        // Node 0 has no edges at all, so its span has to be empty rather than
+        // shifting every later row.
+        let edges = vec![(1u32, 2u32, 7.0f64)];
+
+        let csr = undirected_edges_to_csr(3, &edges);
+
+        assert_eq!(csr.indptr, vec![0, 0, 1, 2]);
+        assert_eq!(csr.indices, vec![2, 1]);
+    }
+
+    #[test]
+    fn test_validate_square_csr_accepts_a_sound_matrix() {
+        let csr = undirected_edges_to_csr(3, &[(0u32, 1u32, 1.0f64), (1, 2, 2.0)]);
+
+        assert_eq!(validate_square_csr(&csr).unwrap(), 3);
+    }
+
+    #[test]
+    fn test_validate_square_csr_catches_structural_faults() {
+        // Non-monotonic indptr: the Rust range `5..2` is empty, so row 1 is
+        // silently skipped rather than read.
+        let bad_indptr = CompressedSparseData2::new_csr(
+            &[1.0f64; 7],
+            &[1u32, 2, 0, 2, 0, 0, 1],
+            &[0u32, 5, 2, 7],
+            None,
+            (3, 3),
+        );
+        assert!(matches!(
+            validate_square_csr(&bad_indptr),
+            Err(BixverseErrors::MalformedCsr(_))
+        ));
+
+        // A column index past the last row indexes whatever the caller keys off
+        // it out of bounds.
+        let bad_index = CompressedSparseData2::new_csr(
+            &[1.0f64, 1.0],
+            &[1u32, 9],
+            &[0u32, 1, 2, 2],
+            None,
+            (3, 3),
+        );
+        assert!(matches!(
+            validate_square_csr(&bad_index),
+            Err(BixverseErrors::MalformedCsr(_))
+        ));
+
+        // indptr of the wrong length for the declared row count.
+        let short_indptr =
+            CompressedSparseData2::new_csr(&[1.0f64], &[1u32], &[0u32, 1], None, (3, 3));
+        assert!(matches!(
+            validate_square_csr(&short_indptr),
+            Err(BixverseErrors::MalformedCsr(_))
+        ));
+
+        // The last pointer must account for every stored value.
+        let short_tail = CompressedSparseData2::new_csr(
+            &[1.0f64, 1.0],
+            &[1u32, 0],
+            &[0u32, 1, 1, 1],
+            None,
+            (3, 3),
+        );
+        assert!(matches!(
+            validate_square_csr(&short_tail),
+            Err(BixverseErrors::MalformedCsr(_))
+        ));
+    }
+
+    #[test]
     fn test_from_dense_and_count_zeroes() {
         let mat: Mat<f64> = Mat::from_fn(3, 2, |i, j| if i == j { (i + 1) as f64 } else { 0.0 });
         let (total_zeroes, row_zeroes, col_zeroes) = count_zeroes(&mat.as_ref());
@@ -2449,7 +3188,7 @@ mod tests {
         let csr = CompressedSparseData2::<f64, f64>::new_csr(&data, &indices, &indptr, None, shape);
 
         // Lanczos expects symmetric matrix, this one is symmetric
-        let (evals, evecs) = compute_largest_eigenpairs_lanczos(&csr, 1, 42).unwrap();
+        let (evals, evecs) = compute_largest_eigenpairs_lanczos(&csr, 1, 42, None).unwrap();
 
         // True top eigenvalue should be exactly sum(x_i^2) = 1.0 + 4.0 = 5.0
         assert!((evals[0] - 5.0).abs() < 1e-3);
@@ -2488,5 +3227,416 @@ mod tests {
         let y_norm = 1.25_f64.sqrt();
         let dot_v = (v_col[0] * 1.0 + v_col[2] * 0.5) / y_norm;
         assert!(dot_v.abs() > 0.999);
+    }
+
+    use approx::assert_relative_eq;
+
+    /// Adjacency matrix of a path graph on `n` nodes.
+    ///
+    /// Eigenvalues are `2 cos(k pi / (n + 1))`, separated by `O(1 / n^2)`, which
+    /// makes it the cheapest genuinely clustered spectrum to build.
+    ///
+    /// ### Params
+    ///
+    /// * `n` - Number of nodes.
+    ///
+    /// ### Returns
+    ///
+    /// The adjacency matrix in CSR.
+    fn path_graph(n: usize) -> CompressedSparseData2<f64, f64> {
+        let mut rows: Vec<Vec<(u32, f64)>> = vec![Vec::new(); n];
+        for i in 0..n - 1 {
+            rows[i].push(((i + 1) as u32, 1.0));
+            rows[i + 1].push((i as u32, 1.0));
+        }
+        let mut indptr = vec![0u32];
+        let mut indices = Vec::new();
+        let mut data = Vec::new();
+        for row in rows.iter_mut() {
+            row.sort_by_key(|&(j, _)| j);
+            for &(j, v) in row.iter() {
+                indices.push(j);
+                data.push(v);
+            }
+            indptr.push(indices.len() as u32);
+        }
+
+        CompressedSparseData2::new_csr(&data, &indices, &indptr, None, (n, n))
+    }
+
+    /// Diagonal matrix from an explicit list of diagonal entries.
+    ///
+    /// ### Params
+    ///
+    /// * `diag` - The diagonal entries, in order.
+    ///
+    /// ### Returns
+    ///
+    /// The matrix in CSR, including any zero entries as stored nonzeros.
+    fn diagonal(diag: &[f64]) -> CompressedSparseData2<f64, f64> {
+        let indices: Vec<u32> = (0..diag.len() as u32).collect();
+        let indptr: Vec<u32> = (0..=diag.len() as u32).collect();
+
+        CompressedSparseData2::new_csr(diag, &indices, &indptr, None, (diag.len(), diag.len()))
+    }
+
+    /// `||A x - lambda x||` for one returned pair.
+    ///
+    /// ### Params
+    ///
+    /// * `mat` - The CSR matrix the pair came from.
+    /// * `values` - Returned eigenvalues.
+    /// * `vectors` - Returned eigenvectors, `vectors[i][k]`.
+    /// * `k` - Which pair to check.
+    ///
+    /// ### Returns
+    ///
+    /// The residual norm.
+    fn pair_residual(
+        mat: &CompressedSparseData2<f64, f64>,
+        values: &[f64],
+        vectors: &[Vec<f32>],
+        k: usize,
+    ) -> f64 {
+        let n = mat.shape.0;
+        let v: Vec<f64> = (0..n).map(|i| vectors[i][k] as f64).collect();
+        let lam = values[k];
+
+        (0..n)
+            .map(|i| {
+                let mut sum = 0.0;
+                for x in mat.indptr[i] as usize..mat.indptr[i + 1] as usize {
+                    sum += mat.data[x] * v[mat.indices[x] as usize];
+                }
+                (sum - lam * v[i]).powi(2)
+            })
+            .sum::<f64>()
+            .sqrt()
+    }
+
+    #[test]
+    fn test_lanczos_resolves_a_clustered_spectrum_at_defaults() {
+        // The regression: this used to come back as noise, with the leading
+        // eigenvector uncorrelated with position. The default budget does not
+        // drive the residual to zero on a spectrum this tight, so what is
+        // asserted here is that the shape is right, not that it is converged.
+        let n = 300usize;
+        let mat = path_graph(n);
+
+        let (values, vectors) = compute_largest_eigenpairs_lanczos(&mat, 4, 42, None).unwrap();
+
+        for k in 0..4 {
+            let expected = 2.0 * ((k + 1) as f64 * std::f64::consts::PI / (n + 1) as f64).cos();
+            assert_relative_eq!(values[k], expected, epsilon = 1e-3);
+        }
+
+        // The leading eigenvector is sin(pi x / (n + 1)), so it has no sign
+        // change anywhere. Noise does.
+        let sign = vectors[0][0].signum();
+        assert!(
+            (0..n).all(|i| vectors[i][0].signum() == sign || vectors[i][0] == 0.0),
+            "leading eigenvector of a path graph changed sign"
+        );
+    }
+
+    #[test]
+    fn test_lanczos_restarts_converge_a_clustered_spectrum() {
+        // Same fixture with a budget large enough to actually converge, which
+        // is what the restart machinery exists for. 300 nodes, ~40 cycles.
+        let n = 300usize;
+        let mat = path_graph(n);
+        let params = LanczosParams {
+            basis_size: None,
+            max_restarts: 64,
+            tol: 1e-8,
+        };
+
+        let res = compute_largest_eigenpairs_lanczos_diag(&mat, 4, 42, Some(params)).unwrap();
+
+        assert!(res.converged, "residual stalled at {:e}", res.residual);
+        for k in 0..4 {
+            let expected = 2.0 * ((k + 1) as f64 * std::f64::consts::PI / (n + 1) as f64).cos();
+            assert_relative_eq!(res.eigenvalues[k], expected, epsilon = 1e-6);
+
+            let residual = pair_residual(&mat, &res.eigenvalues, &res.eigenvectors, k);
+            assert!(residual < 1e-5, "pair {k} has residual {residual:e}");
+        }
+    }
+
+    #[test]
+    fn test_lanczos_caps_components_at_the_matrix_dimension() {
+        // Used to panic inside `clamp` before it ever got to the iteration.
+        let mat = diagonal(&[4.0, 3.0, 2.0, 1.0]);
+
+        for requested in [4usize, 5, 40] {
+            let (values, vectors) =
+                compute_largest_eigenpairs_lanczos(&mat, requested, 11, None).unwrap();
+
+            assert_eq!(values.len(), 4, "requested {requested}");
+            assert_eq!(vectors[0].len(), values.len(), "requested {requested}");
+            assert_relative_eq!(values[0], 4.0, epsilon = 1e-9);
+            assert_relative_eq!(values[3], 1.0, epsilon = 1e-9);
+        }
+    }
+
+    #[test]
+    fn test_lanczos_breakdown_keeps_values_and_vectors_the_same_length() {
+        // Rank two, so the Krylov space closes after three vectors and there is
+        // no way to produce the ten pairs asked for. Both outputs must agree on
+        // how many there are; they used to disagree and index out of bounds
+        // downstream.
+        let mut diag = vec![0.0f64; 12];
+        diag[0] = 5.0;
+        diag[1] = 3.0;
+        let mat = diagonal(&diag);
+
+        let res = compute_largest_eigenpairs_lanczos_diag(&mat, 10, 3, None).unwrap();
+
+        assert!(res.eigenvalues.len() < 10, "expected an early breakdown");
+        assert_eq!(res.eigenvalues.len(), res.eigenvectors[0].len());
+        assert_relative_eq!(res.eigenvalues[0], 5.0, epsilon = 1e-9);
+        assert_relative_eq!(res.eigenvalues[1], 3.0, epsilon = 1e-9);
+    }
+
+    #[test]
+    fn test_lanczos_reports_budget_exhaustion() {
+        // One cycle on a path graph cannot converge, and the caller has to be
+        // able to tell that apart from a solve that did.
+        let mat = path_graph(300);
+        let params = LanczosParams {
+            basis_size: None,
+            max_restarts: 1,
+            tol: 1e-8,
+        };
+
+        let res = compute_largest_eigenpairs_lanczos_diag(&mat, 4, 42, Some(params)).unwrap();
+
+        assert!(!res.converged);
+        assert_eq!(res.restarts, 1);
+        assert!(res.residual > params.tol * res.norm_estimate);
+    }
+
+    #[test]
+    fn test_lanczos_tolerance_is_relative_to_the_matrix_norm() {
+        // Scaling the matrix by 1e8 scales every residual by 1e8 too. An
+        // absolute tolerance would make the scaled problem unconvergeable; a
+        // relative one converges both in the same number of cycles.
+        let small = diagonal(&[4.0, 3.0, 2.0, 1.0]);
+        let large = diagonal(&[4e8, 3e8, 2e8, 1e8]);
+
+        let a = compute_largest_eigenpairs_lanczos_diag(&small, 2, 5, None).unwrap();
+        let b = compute_largest_eigenpairs_lanczos_diag(&large, 2, 5, None).unwrap();
+
+        assert!(a.converged && b.converged);
+        assert_relative_eq!(b.eigenvalues[0] / a.eigenvalues[0], 1e8, epsilon = 1e-1);
+    }
+
+    #[test]
+    fn test_lanczos_params_basis_size_is_honoured() {
+        let n = 40usize;
+        let mut indptr = vec![0u32];
+        let mut indices = Vec::new();
+        let mut data = Vec::new();
+        for i in 0..n {
+            indices.push(i as u32);
+            data.push((i + 1) as f64);
+            indptr.push(indices.len() as u32);
+        }
+        let mat = CompressedSparseData2::new_csr(&data, &indices, &indptr, None, (n, n));
+
+        // Diagonal matrix: the largest eigenvalue is n regardless of the basis.
+        let tight = LanczosParams {
+            basis_size: Some(6),
+            max_restarts: 200,
+            tol: 1e-10,
+        };
+        let (values, _) = compute_largest_eigenpairs_lanczos(&mat, 3, 7, Some(tight)).unwrap();
+
+        assert_relative_eq!(values[0], 40.0, epsilon = 1e-8);
+        assert_relative_eq!(values[1], 39.0, epsilon = 1e-8);
+        assert_relative_eq!(values[2], 38.0, epsilon = 1e-8);
+    }
+
+    ///////////////////////////
+    // Row-stochastic + axpy //
+    ///////////////////////////
+
+    /// A row that sums to zero must come back as an error rather than a panic.
+    #[test]
+    fn test_normalise_csr_rows_l1_isolated_row_errors() {
+        // Row 1 is structurally empty, row 2 stores an explicit zero. Both are
+        // isolated as far as a row-stochastic normalisation is concerned.
+        let data = vec![1.0f64, 3.0, 0.0];
+        let indices = vec![0u32, 2, 1];
+        let indptr = vec![0u32, 2, 2, 3];
+        let mut csr = CompressedSparseData2::new_csr(&data, &indices, &indptr, None, (3, 3));
+
+        match normalise_csr_rows_l1(&mut csr) {
+            Err(BixverseErrors::SparseMatrixIsolatedRow { row, row_sum }) => {
+                assert_eq!(row, 1);
+                assert_eq!(row_sum, 0.0);
+            }
+            other => panic!("expected SparseMatrixIsolatedRow, got {:?}", other),
+        }
+    }
+
+    /// The happy path has to leave every row summing to exactly one.
+    #[test]
+    fn test_normalise_csr_rows_l1_rows_sum_to_one() {
+        let data = vec![1.0f64, 3.0, 2.0, 2.0, 5.0];
+        let indices = vec![0u32, 2, 1, 2, 0];
+        let indptr = vec![0u32, 2, 4, 5];
+        let mut csr = CompressedSparseData2::new_csr(&data, &indices, &indptr, None, (3, 3));
+
+        normalise_csr_rows_l1(&mut csr).unwrap();
+
+        for i in 0..3 {
+            let lo = csr.indptr[i] as usize;
+            let hi = csr.indptr[i + 1] as usize;
+            let sum: f64 = csr.data[lo..hi].iter().sum();
+            assert_relative_eq!(sum, 1.0, epsilon = 1e-12);
+        }
+        assert_relative_eq!(csr.data[0], 0.25, epsilon = 1e-12);
+        assert_relative_eq!(csr.data[1], 0.75, epsilon = 1e-12);
+    }
+
+    /// Build a small random CSR operator plus a dense block, both deterministic.
+    fn dense_block_fixture(
+        n: usize,
+        k: usize,
+        width: usize,
+        seed: u64,
+    ) -> (CompressedSparseData2<f64>, Vec<f64>) {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut indptr = vec![0u32];
+        let mut indices: Vec<u32> = Vec::new();
+        let mut data: Vec<f64> = Vec::new();
+
+        for _ in 0..n {
+            // Ascending, unique column indices; some rows deliberately empty.
+            for j in 0..k {
+                if rng.random::<f64>() < 0.35 {
+                    indices.push(j as u32);
+                    data.push(rng.random::<f64>() * 2.0 - 1.0);
+                }
+            }
+            indptr.push(indices.len() as u32);
+        }
+
+        let csr = CompressedSparseData2::new_csr(&data, &indices, &indptr, None, (n, k));
+        let block: Vec<f64> = (0..k * width)
+            .map(|_| rng.random::<f64>() * 2.0 - 1.0)
+            .collect();
+
+        (csr, block)
+    }
+
+    /// The SIMD dense-block kernel must agree with the obvious scalar triple
+    /// loop, including on rows that carry no non-zeros at all.
+    #[test]
+    fn test_csr_matmul_dense_block_matches_scalar() {
+        // Widths straddling the 2-, 4-, 8- and 16-lane boundaries so every
+        // axpy tail path is hit.
+        for width in [1usize, 3, 4, 7, 16, 17, 33] {
+            let (csr, block) = dense_block_fixture(11, 9, width, 4242 + width as u64);
+
+            let mut got = vec![0.0f64; 11 * width];
+            csr_matmul_dense_block(&csr, &block, width, &mut got).unwrap();
+
+            let mut want = vec![0.0f64; 11 * width];
+            for i in 0..11 {
+                for p in csr.indptr[i] as usize..csr.indptr[i + 1] as usize {
+                    let j = csr.indices[p] as usize;
+                    for c in 0..width {
+                        want[i * width + c] += csr.data[p] * block[j * width + c];
+                    }
+                }
+            }
+
+            for (g, w) in got.iter().zip(want.iter()) {
+                assert_relative_eq!(g, w, epsilon = 1e-12, max_relative = 1e-12);
+            }
+        }
+    }
+
+    /// Applying the operator `t` times must equal multiplying by the explicit
+    /// `T^t`. This is the whole justification for never materialising the power
+    /// in MAGIC, so it is worth pinning at a size where the explicit cube is
+    /// still legal to build.
+    #[test]
+    fn test_csr_matmul_dense_block_repeated_matches_explicit_power() {
+        let width = 5usize;
+        let n = 8usize;
+        let (csr, block) = dense_block_fixture(n, n, width, 77);
+
+        // Three applications, ping-ponging between two buffers.
+        let mut buf_a = block.clone();
+        let mut buf_b = vec![0.0f64; n * width];
+        for _ in 0..3 {
+            csr_matmul_dense_block(&csr, &buf_a, width, &mut buf_b).unwrap();
+            std::mem::swap(&mut buf_a, &mut buf_b);
+        }
+
+        // The explicit cube, applied once.
+        let sq = csr_matmul_csr(&csr, &csr).unwrap();
+        let cube = csr_matmul_csr(&sq, &csr).unwrap();
+        let mut direct = vec![0.0f64; n * width];
+        csr_matmul_dense_block(&cube, &block, width, &mut direct).unwrap();
+
+        for (rep, dir) in buf_a.iter().zip(direct.iter()) {
+            assert_relative_eq!(rep, dir, epsilon = 1e-10, max_relative = 1e-10);
+        }
+    }
+
+    /// A row-stochastic operator preserves a constant column, which is the
+    /// invariant that makes imputed values sit on the input's scale.
+    #[test]
+    fn test_csr_matmul_dense_block_preserves_constant_column() {
+        let n = 6usize;
+        let width = 3usize;
+
+        // Dense positive rows, so nothing is isolated, then row-normalise.
+        let mut indptr = vec![0u32];
+        let mut indices: Vec<u32> = Vec::new();
+        let mut data: Vec<f64> = Vec::new();
+        for i in 0..n {
+            for j in 0..n {
+                indices.push(j as u32);
+                data.push(1.0 + ((i * n + j) % 3) as f64);
+            }
+            indptr.push(indices.len() as u32);
+        }
+        let mut csr = CompressedSparseData2::new_csr(&data, &indices, &indptr, None, (n, n));
+        normalise_csr_rows_l1(&mut csr).unwrap();
+
+        let block = vec![2.5f64; n * width];
+        let mut out = vec![0.0f64; n * width];
+        csr_matmul_dense_block(&csr, &block, width, &mut out).unwrap();
+
+        for v in out {
+            assert_relative_eq!(v, 2.5, epsilon = 1e-12);
+        }
+    }
+
+    /// Shape mismatches and a CSC operator must be rejected, not read out of
+    /// bounds.
+    #[test]
+    fn test_csr_matmul_dense_block_rejects_bad_shapes() {
+        let (csr, block) = dense_block_fixture(4, 4, 2, 1);
+        let mut out = vec![0.0f64; 4 * 2];
+
+        // Wrong width for the block that was built.
+        assert!(csr_matmul_dense_block(&csr, &block, 3, &mut out).is_err());
+        // Zero width.
+        assert!(csr_matmul_dense_block(&csr, &block, 0, &mut out).is_err());
+        // Output too short.
+        let mut short = vec![0.0f64; 4];
+        assert!(csr_matmul_dense_block(&csr, &block, 2, &mut short).is_err());
+
+        let csc = csr.transform();
+        assert!(matches!(
+            csr_matmul_dense_block(&csc, &block, 2, &mut out),
+            Err(BixverseErrors::SparseMatrixMustBeCsr)
+        ));
     }
 }

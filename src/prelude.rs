@@ -2,7 +2,8 @@
 //! crate in other libraries
 
 pub use crate::core::math::sparse::{
-    CompressedSparseData2, CompressedSparseFormat, SparseAxis, parse_compressed_sparse_format,
+    CompressedSparseData2, CompressedSparseFormat, LanczosParams, SparseAxis,
+    parse_compressed_sparse_format,
 };
 pub use crate::core::math::vector_helpers::MAD_SCALE;
 pub use crate::errors::*;

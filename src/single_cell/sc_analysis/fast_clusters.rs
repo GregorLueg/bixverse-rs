@@ -2,6 +2,12 @@
 //! the data, followed by kNN search on the centroids, (for now only) Louvain
 //! clustering on the resulting kNN graph with subsequent propagation of the
 //! module membership based on the original nearest centroid.
+//!
+//! The pipeline is split into three stages ([`fast_cluster_kmeans`],
+//! [`build_centroid_graph`] and [`louvain_over_resolutions`] /
+//! [`louvain_grid_over_resolutions`]) so that the GPU variant in
+//! `crate::gpu::sc_gpu::fast_clusters_gpu` can swap out stage one and reuse the
+//! rest untouched.
 
 use either::Either;
 use faer::{Mat, MatRef};
@@ -50,6 +56,66 @@ pub enum FastLouvainResults {
 }
 
 impl FastLouvainResults {
+    /// Build the [`FastLouvainResults::Single`] variant.
+    ///
+    /// ### Params
+    ///
+    /// * `assignments` - Per-resolution membership vectors
+    /// * `centroids` - The k-means centroids
+    /// * `clusters` - The k-means assignment per sample
+    /// * `keep_kmeans` - If `false`, `centroids` and `clusters` are dropped
+    ///
+    /// ### Returns
+    ///
+    /// Self.
+    pub fn single(
+        assignments: Vec<Vec<usize>>,
+        centroids: Mat<f32>,
+        clusters: Vec<usize>,
+        keep_kmeans: bool,
+    ) -> Self {
+        let (centroids, clusters) = if keep_kmeans {
+            (Some(centroids), Some(clusters))
+        } else {
+            (None, None)
+        };
+        Self::Single {
+            assignments,
+            clusters,
+            centroids,
+        }
+    }
+
+    /// Build the [`FastLouvainResults::GridRes`] variant.
+    ///
+    /// ### Params
+    ///
+    /// * `assignments` - Per-resolution [FastLouvainGridResult]
+    /// * `centroids` - The k-means centroids
+    /// * `clusters` - The k-means assignment per sample
+    /// * `keep_kmeans` - If `false`, `centroids` and `clusters` are dropped
+    ///
+    /// ### Returns
+    ///
+    /// Self.
+    pub fn grid(
+        assignments: Vec<FastLouvainGridResult>,
+        centroids: Mat<f32>,
+        clusters: Vec<usize>,
+        keep_kmeans: bool,
+    ) -> Self {
+        let (centroids, clusters) = if keep_kmeans {
+            (Some(centroids), Some(clusters))
+        } else {
+            (None, None)
+        };
+        Self::GridRes {
+            assignments,
+            clusters,
+            centroids,
+        }
+    }
+
     /// Helper to get the assignments
     ///
     /// ### Returns
@@ -71,49 +137,57 @@ impl FastLouvainResults {
     /// Returns the centroid matrix if found; Error otherwise
     #[inline]
     pub fn get_centroids(&self) -> Result<Mat<f32>, BixverseErrors> {
-        match self {
-            Self::Single { centroids, .. } => {
-                if centroids.is_none() {
-                    return Err(BixverseErrors::FastClusterNoCentroids);
-                }
-                Ok(centroids.to_owned().unwrap())
-            }
-            Self::GridRes { centroids, .. } => {
-                if centroids.is_none() {
-                    return Err(BixverseErrors::FastClusterNoCentroids);
-                }
-                Ok(centroids.to_owned().unwrap())
-            }
-        }
+        let centroids = match self {
+            Self::Single { centroids, .. } | Self::GridRes { centroids, .. } => centroids,
+        };
+        centroids
+            .to_owned()
+            .ok_or(BixverseErrors::FastClusterNoCentroids)
     }
 
-    /// Helper to return the centroids
+    /// Helper to return the k-means cluster assignments
     ///
     /// ### Returns
     ///
     /// Returns the k-means cluster assignment; Error otherwise
     #[inline]
     pub fn get_k_mean_clusters(&self) -> Result<Vec<usize>, BixverseErrors> {
-        match self {
-            Self::Single { clusters, .. } => {
-                if clusters.is_none() {
-                    return Err(BixverseErrors::FastClusterNoCentroids);
-                }
-                Ok(clusters.clone().unwrap())
-            }
-            Self::GridRes { clusters, .. } => {
-                if clusters.is_none() {
-                    return Err(BixverseErrors::FastClusterNoCentroids);
-                }
-                Ok(clusters.clone().unwrap())
-            }
-        }
+        let clusters = match self {
+            Self::Single { clusters, .. } | Self::GridRes { clusters, .. } => clusters,
+        };
+        clusters
+            .clone()
+            .ok_or(BixverseErrors::FastClusterNoKmeansAssignments)
     }
 }
 
 ////////////
 // Params //
 ////////////
+
+/// Graph-construction settings shared by the CPU and GPU fast-clustering paths.
+///
+/// Both `FastLouvainParams` and its GPU sibling produce one of these via their
+/// `graph_params` method, so [`build_centroid_graph`] does not need to know
+/// which k-means backend produced the centroids.
+#[derive(Clone, Debug)]
+pub struct CentroidGraphParams {
+    /// [KnnParams] applied to the centroids. `ann_dist` also drives the k-means
+    /// distance and `k` is the number of neighbours per centroid.
+    pub knn_params: KnnParams,
+    /// Shall the weight of the kNN be set to 1.0 across or edges that have
+    /// reverse edges be double counted.
+    pub same_weight: bool,
+    /// Shall the full sNN graph be generated (also from non-connected
+    /// neighbours)
+    pub full_snn: bool,
+    /// Optional pruning threshold. If not provided, will default to
+    /// `1 / ceil(0.8 * k)`.
+    pub pruning: Option<f32>,
+    /// String for the type of sNN similarity to use. One of `"jaccard"` or
+    /// `"rank"`.
+    pub snn_similarity: String,
+}
 
 /// Parameters for fast Louvain clustering via k-means + kNN.
 #[derive(Clone, Debug)]
@@ -200,6 +274,23 @@ where
     }
 }
 
+impl FastLouvainParams<f32> {
+    /// Extract the graph-construction settings for [`build_centroid_graph`].
+    ///
+    /// ### Returns
+    ///
+    /// The [CentroidGraphParams].
+    pub fn graph_params(&self) -> CentroidGraphParams {
+        CentroidGraphParams {
+            knn_params: self.knn_params.clone(),
+            same_weight: self.same_weight,
+            full_snn: self.full_snn,
+            pruning: self.pruning,
+            snn_similarity: self.snn_similarity.clone(),
+        }
+    }
+}
+
 /// Default implementation for KnnParams
 impl<T> Default for FastLouvainParams<T>
 where
@@ -264,53 +355,40 @@ fn flatten_knn_column_major<T: Copy>(knn: &[Vec<T>], k: usize) -> Vec<T> {
     out
 }
 
-////////////////////
-// Main functions //
-////////////////////
+////////////
+// Stages //
+////////////
 
-/// Fast Louvain clustering on large data via k-means coarsening.
+/// Stage one: k-means coarsening of the data on the CPU.
 ///
-/// Runs k-means to obtain centroids, builds a kNN graph on the centroids,
-/// applies Louvain to that graph, then propagates each centroid's community
-/// label back to the points assigned to it.
+/// The requested centroid count is clamped to `n_samples - 1`. The distance
+/// metric is taken from `params.knn_params.ann_dist`, so the coarsening and the
+/// centroid kNN always agree on the geometry.
 ///
 /// ### Params
 ///
 /// * `data` - n_samples x n_features matrix.
-/// * `km_type` - String. Which type of k-means clustering to use. `"standard"`
-///   or `"minibatch"`.
-/// * `resolutions` - Slice of resolutions to iterate over.
+/// * `km_type` - Which type of k-means clustering to use. `"standard"` or
+///   `"minibatch"`; anything unparseable falls back to `"standard"`.
 /// * `params` - Pipeline parameters.
-/// * `run_snn` - Shall a shared nearest neighbour generation be run.
-/// * `same_weight` - Shall the weights of the kNN graph be set to 1.0 or shall
-///   reverse edges get higher weights.
-/// * `multi_level` - If `true`, run the full multi-level Louvain (phase 1 +
-///   phase 2 aggregation, repeated). If `false`, run only one phase 1 pass
-///   (matches Phenograph / the original doubletdetection behaviour).
 /// * `seed` - Seed for reproducibility.
-/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
-///   verbosity.
+/// * `verbose` - `0` silent, `1` normal, `2` detailed.
 ///
 /// ### Returns
 ///
-/// The [FastLouvainResults]
-#[allow(clippy::too_many_arguments)]
-pub fn fast_louvain_clusters(
+/// `(centroids of shape n_centroids x n_features, per-sample centroid index)`.
+pub fn fast_cluster_kmeans(
     data: MatRef<f32>,
     km_type: &str,
-    resolutions: &[f32],
     params: &FastLouvainParams<f32>,
-    run_snn: bool,
-    return_k_mean: bool,
     seed: usize,
     verbose: usize,
-) -> Result<FastLouvainResults, BixverseErrors> {
+) -> Result<(Mat<f32>, Vec<usize>), BixverseErrors> {
     let verbosity = parse_verbosity_level(verbose);
-
     let km_type = parse_k_means(km_type).unwrap_or_default();
     let n_centroids = params.n_centroids.min(data.nrows() - 1);
 
-    let (centroids, assignments) = match km_type {
+    let res = match km_type {
         KMeansType::StandardKMeans => k_means_clusters(
             data,
             &params.knn_params.ann_dist,
@@ -332,230 +410,178 @@ pub fn fast_louvain_clusters(
         ),
     };
 
+    Ok(res)
+}
+
+/// Stage two: build the neighbour graph over the k-means centroids.
+///
+/// Runs a kNN search on the centroids and turns it into a [SparseGraph], either
+/// directly or via a shared-nearest-neighbour pass. The sNN pruning threshold
+/// defaults to `1 / ceil(0.8 * k)` when `params.pruning` is `None`.
+///
+/// ### Params
+///
+/// * `centroids` - n_centroids x n_features matrix from stage one.
+/// * `params` - Graph-construction settings.
+/// * `run_snn` - Shall a shared nearest neighbour graph be generated.
+/// * `seed` - Seed for reproducibility of the kNN search.
+/// * `verbose` - `0` silent, `1` normal, `2` detailed.
+///
+/// ### Returns
+///
+/// The undirected centroid graph.
+pub fn build_centroid_graph(
+    centroids: MatRef<f32>,
+    params: &CentroidGraphParams,
+    run_snn: bool,
+    seed: usize,
+    verbose: usize,
+) -> Result<SparseGraph<f32>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
     let knn = dispatch_knn(
-        centroids.as_ref(),
+        centroids,
         params.knn_params.k,
         &params.knn_params,
         seed,
         verbosity.detailed_verbosity(),
     )?;
 
-    let graph = if run_snn {
-        let pruning = params
-            .pruning
-            .unwrap_or(1.0 / (params.knn_params.k as f32 * 0.8).ceil());
-
-        let start = Instant::now();
-
-        if verbosity.normal_verbosity() {
-            println!(" Running the sNN graph as {}...", &params.snn_similarity)
-        }
-
-        let knn_flat = flatten_knn_column_major(&knn, params.knn_params.k);
-
-        let snn_method = parse_snn_similiarity_method(&params.snn_similarity).unwrap_or_default();
-
-        let (snn_edges, snn_weights) = if params.full_snn {
-            generate_snn_full(
-                &knn_flat,
-                params.knn_params.k,
-                knn.len(),
-                pruning,
-                snn_method,
-                verbose,
-            )
-        } else {
-            generate_snn_limited(
-                &knn_flat,
-                params.knn_params.k,
-                knn.len(),
-                pruning,
-                snn_method,
-                verbose,
-            )
-        };
-
-        let end = start.elapsed();
-
-        if verbosity.normal_verbosity() {
-            println!(" Finished the sNN generation in {:.2?}...", end)
-        }
-
-        snn_edges_to_sparse_graph(&snn_edges, &snn_weights, knn.len())
-    } else {
-        knn_to_sparse_graph(&knn, params.same_weight)
-    };
-
-    let mut results: Vec<Vec<usize>> = Vec::with_capacity(resolutions.len());
-
-    for &res in resolutions {
-        let centroid_communities = louvain_sparse_graph(
-            &graph,
-            res,
-            params.louvain_iters,
-            params.multi_level_louvain,
-            seed,
-        )?;
-
-        let membership = assignments
-            .iter()
-            .map(|&c| centroid_communities[c])
-            .collect();
-
-        results.push(membership)
+    if !run_snn {
+        return Ok(knn_to_sparse_graph(&knn, params.same_weight));
     }
 
-    let (centroids, k_means_cluster) = if return_k_mean {
-        (Some(centroids), Some(assignments))
+    let pruning = params
+        .pruning
+        .unwrap_or(1.0 / (params.knn_params.k as f32 * 0.8).ceil());
+
+    let start = Instant::now();
+
+    if verbosity.normal_verbosity() {
+        println!(" Running the sNN graph as {}...", &params.snn_similarity)
+    }
+
+    let knn_flat = flatten_knn_column_major(&knn, params.knn_params.k);
+    let snn_method = parse_snn_similiarity_method(&params.snn_similarity).unwrap_or_default();
+
+    let (snn_edges, snn_weights) = if params.full_snn {
+        generate_snn_full(
+            &knn_flat,
+            params.knn_params.k,
+            knn.len(),
+            pruning,
+            snn_method,
+            verbose,
+        )
     } else {
-        (None, None)
+        generate_snn_limited(
+            &knn_flat,
+            params.knn_params.k,
+            knn.len(),
+            pruning,
+            snn_method,
+            verbose,
+        )
     };
 
-    Ok(FastLouvainResults::Single {
-        assignments: results,
-        clusters: k_means_cluster,
-        centroids,
-    })
+    if verbosity.normal_verbosity() {
+        println!(" Finished the sNN generation in {:.2?}...", start.elapsed())
+    }
+
+    Ok(snn_edges_to_sparse_graph(
+        &snn_edges,
+        &snn_weights,
+        knn.len(),
+    ))
 }
 
-/// Grid-search version of [`fast_louvain_clusters`] with stability metrics.
-///
-/// Builds the k-means -> kNN/sNN graph once, then runs Louvain across
-/// `louvain_seeds` for each resolution. Reports mean/median pairwise ARI
-/// (Louvain stability), mean/median conductance (community quality), and
-/// the labels from the seed achieving the best (lowest) mean conductance.
+/// Stage three: Louvain per resolution, propagated back to the samples.
 ///
 /// ### Params
 ///
-/// * `data` - n_samples x n_features matrix.
-/// * `km_type` - String. Which type of k-means clustering to use. `"standard"`
-///   or `"minibatch"`.
+/// * `graph` - The centroid graph from stage two.
+/// * `assignments` - Per-sample centroid index from stage one.
 /// * `resolutions` - Slice of resolutions to iterate over.
-/// * `params` - Pipeline parameters.
-/// * `run_snn` - Shall a shared nearest neighbour generation be run.
-/// * `multi_level_louvain` - Multi-level Louvain or single phase 1 pass.
-/// * `seed` - Seed for k-means and kNN (the shared graph).
-/// * `louvain_seeds` - Seeds to vary Louvain over. Must contain at least 2
-///   entries to produce ARI.
-/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
-///   verbosity.
+/// * `louvain_iters` - Number of Louvain iterations.
+/// * `multi_level` - If `true`, run the full multi-level Louvain (phase 1 +
+///   phase 2 aggregation, repeated). If `false`, run only one phase 1 pass
+///   (matches Phenograph / the original doubletdetection behaviour).
+/// * `seed` - Seed for reproducibility.
 ///
 /// ### Returns
 ///
-/// One [`FastLouvainGridResult`] per resolution, in the same order.
-#[allow(clippy::too_many_arguments)]
-pub fn fast_louvain_clusters_grid(
-    data: MatRef<f32>,
-    km_type: &str,
+/// One per-sample membership vector per resolution, in the same order.
+pub fn louvain_over_resolutions(
+    graph: &SparseGraph<f32>,
+    assignments: &[usize],
     resolutions: &[f32],
-    params: &FastLouvainParams<f32>,
-    run_snn: bool,
-    return_k_mean: bool,
+    louvain_iters: usize,
+    multi_level: bool,
+    seed: usize,
+) -> Result<Vec<Vec<usize>>, BixverseErrors> {
+    resolutions
+        .iter()
+        .map(|&res| {
+            let centroid_communities =
+                louvain_sparse_graph(graph, res, louvain_iters, multi_level, seed)?;
+            Ok(assignments
+                .iter()
+                .map(|&c| centroid_communities[c])
+                .collect())
+        })
+        .collect()
+}
+
+/// Stage three, grid variant: Louvain across several seeds per resolution.
+///
+/// Reports mean/median pairwise ARI (Louvain stability), mean/median
+/// conductance (community quality), and the labels from the seed achieving the
+/// best (lowest) mean conductance. Both ARI and conductance are computed on the
+/// centroid-level partitions, which is cheaper than the per-sample ones and
+/// ranks the resolutions identically.
+///
+/// ### Params
+///
+/// * `graph` - The centroid graph from stage two.
+/// * `assignments` - Per-sample centroid index from stage one.
+/// * `resolutions` - Slice of resolutions to iterate over.
+/// * `louvain_iters` - Number of Louvain iterations.
+/// * `multi_level` - Multi-level Louvain or a single phase 1 pass.
+/// * `seed` - Seed from which the per-run Louvain seeds are drawn.
+/// * `n_louvain_seeds` - Number of Louvain seeds. Must be at least 2 to produce
+///   an ARI.
+///
+/// ### Returns
+///
+/// One [FastLouvainGridResult] per resolution, in the same order.
+pub fn louvain_grid_over_resolutions(
+    graph: &SparseGraph<f32>,
+    assignments: &[usize],
+    resolutions: &[f32],
+    louvain_iters: usize,
+    multi_level: bool,
     seed: usize,
     n_louvain_seeds: usize,
-    verbose: usize,
-) -> Result<FastLouvainResults, BixverseErrors> {
-    let verbosity = parse_verbosity_level(verbose);
-
+) -> Result<Vec<FastLouvainGridResult>, BixverseErrors> {
     if n_louvain_seeds < 2 {
         return Err(BixverseErrors::InvalidArgument(
             "n_louvain_seeds must be at least 2".to_string(),
         ));
     }
 
-    let km_type = parse_k_means(km_type).unwrap_or_default();
-    let n_centroids = params.n_centroids.min(data.nrows() - 1);
-
-    let (centroids, assignments) = match km_type {
-        KMeansType::StandardKMeans => k_means_clusters(
-            data,
-            &params.knn_params.ann_dist,
-            n_centroids,
-            Some(params.get_kmeans_params()),
-            seed,
-            verbosity.detailed_verbosity(),
-        )?,
-        KMeansType::MiniBatchKMeans => train_centroids_minibatch(
-            data,
-            &params.knn_params.ann_dist,
-            n_centroids,
-            params.kmeans_params.clone().get_data().iters,
-            params.batch_size,
-            params.drift_threshold,
-            params.lr_alpha,
-            seed,
-            verbosity.detailed_verbosity(),
-        ),
-    };
-
-    let knn = dispatch_knn(
-        centroids.as_ref(),
-        params.knn_params.k,
-        &params.knn_params,
-        seed,
-        verbosity.detailed_verbosity(),
-    )?;
-
-    let graph = if run_snn {
-        let pruning = params
-            .pruning
-            .unwrap_or(1.0 / (params.knn_params.k as f32 * 0.8).ceil());
-
-        let knn_flat = flatten_knn_column_major(&knn, params.knn_params.k);
-        let snn_method = parse_snn_similiarity_method(&params.snn_similarity).unwrap_or_default();
-
-        let (snn_edges, snn_weights) = if params.full_snn {
-            generate_snn_full(
-                &knn_flat,
-                params.knn_params.k,
-                knn.len(),
-                pruning,
-                snn_method,
-                verbose,
-            )
-        } else {
-            generate_snn_limited(
-                &knn_flat,
-                params.knn_params.k,
-                knn.len(),
-                pruning,
-                snn_method,
-                verbose,
-            )
-        };
-
-        snn_edges_to_sparse_graph(&snn_edges, &snn_weights, knn.len())
-    } else {
-        knn_to_sparse_graph(&knn, params.same_weight)
-    };
-
-    let mut results = Vec::with_capacity(resolutions.len());
-
     let mut seed_rng = StdRng::seed_from_u64(seed as u64);
     let louvain_seeds: Vec<usize> = (0..n_louvain_seeds)
         .map(|_| seed_rng.random::<u64>() as usize)
         .collect();
 
+    let mut results = Vec::with_capacity(resolutions.len());
+
     for &res in resolutions {
         // run Louvain across all seeds at the centroid level
         let centroid_partitions: Vec<Vec<usize>> = louvain_seeds
             .iter()
-            .map(|&s| {
-                louvain_sparse_graph(
-                    &graph,
-                    res,
-                    params.louvain_iters,
-                    params.multi_level_louvain,
-                    s,
-                )
-            })
+            .map(|&s| louvain_sparse_graph(graph, res, louvain_iters, multi_level, s))
             .collect::<Result<_, _>>()?;
-
-        // propagate to per-sample labels
-        let sample_partitions: Vec<Vec<usize>> = centroid_partitions
-            .iter()
-            .map(|cp| assignments.iter().map(|&c| cp[c]).collect())
-            .collect();
 
         // pairwise ARI on centroid-level partitions (cheaper, equivalent ranking)
         let s = louvain_seeds.len();
@@ -575,23 +601,10 @@ pub fn fast_louvain_clusters_grid(
         let mut per_seed_mean_cond = Vec::with_capacity(s);
         let mut per_seed_median_cond = Vec::with_capacity(s);
         for cp in &centroid_partitions {
-            let cond = conductance_undirected(&graph, cp)?;
+            let cond = conductance_undirected(graph, cp)?;
             let finite: Vec<f32> = cond.into_iter().filter(|x| x.is_finite()).collect();
-            if finite.is_empty() {
-                per_seed_mean_cond.push(f32::NAN);
-                per_seed_median_cond.push(f32::NAN);
-            } else {
-                let mean = finite.iter().sum::<f32>() / finite.len() as f32;
-                let mut sorted = finite.clone();
-                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                let median = if sorted.len().is_multiple_of(2) {
-                    (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) / 2.0
-                } else {
-                    sorted[sorted.len() / 2]
-                };
-                per_seed_mean_cond.push(mean);
-                per_seed_median_cond.push(median);
-            }
+            per_seed_mean_cond.push(mean_nan(&finite));
+            per_seed_median_cond.push(median(&finite).unwrap_or(f32::NAN));
         }
 
         let mean_conductance = mean_nan(&per_seed_mean_cond);
@@ -615,6 +628,12 @@ pub fn fast_louvain_clusters_grid(
             .map(|(i, _)| i)
             .unwrap_or(0);
 
+        // propagate the winning centroid partition to per-sample labels
+        let best_labels = assignments
+            .iter()
+            .map(|&c| centroid_partitions[best_idx][c])
+            .collect();
+
         results.push(FastLouvainGridResult {
             resolution: res,
             mean_ari: mean_ari as f32,
@@ -622,21 +641,143 @@ pub fn fast_louvain_clusters_grid(
             mean_conductance,
             median_conductance,
             mean_n_communities,
-            best_labels: sample_partitions[best_idx].clone(),
+            best_labels,
         });
     }
 
-    let (centroids, k_means_cluster) = if return_k_mean {
-        (Some(centroids), Some(assignments))
-    } else {
-        (None, None)
-    };
+    Ok(results)
+}
 
-    Ok(FastLouvainResults::GridRes {
-        assignments: results,
-        clusters: k_means_cluster,
+////////////////////
+// Main functions //
+////////////////////
+
+/// Fast Louvain clustering on large data via k-means coarsening.
+///
+/// Runs k-means to obtain centroids, builds a kNN graph on the centroids,
+/// applies Louvain to that graph, then propagates each centroid's community
+/// label back to the points assigned to it.
+///
+/// ### Params
+///
+/// * `data` - n_samples x n_features matrix.
+/// * `km_type` - String. Which type of k-means clustering to use. `"standard"`
+///   or `"minibatch"`.
+/// * `resolutions` - Slice of resolutions to iterate over.
+/// * `params` - Pipeline parameters.
+/// * `run_snn` - Shall a shared nearest neighbour generation be run.
+/// * `return_k_mean` - Shall the k-means centroids and assignments be returned
+///   alongside the Louvain memberships.
+/// * `seed` - Seed for reproducibility.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
+///
+/// ### Returns
+///
+/// The [FastLouvainResults], `Single` variant.
+#[allow(clippy::too_many_arguments)]
+pub fn fast_louvain_clusters(
+    data: MatRef<f32>,
+    km_type: &str,
+    resolutions: &[f32],
+    params: &FastLouvainParams<f32>,
+    run_snn: bool,
+    return_k_mean: bool,
+    seed: usize,
+    verbose: usize,
+) -> Result<FastLouvainResults, BixverseErrors> {
+    let (centroids, assignments) = fast_cluster_kmeans(data, km_type, params, seed, verbose)?;
+
+    let graph = build_centroid_graph(
+        centroids.as_ref(),
+        &params.graph_params(),
+        run_snn,
+        seed,
+        verbose,
+    )?;
+
+    let results = louvain_over_resolutions(
+        &graph,
+        &assignments,
+        resolutions,
+        params.louvain_iters,
+        params.multi_level_louvain,
+        seed,
+    )?;
+
+    Ok(FastLouvainResults::single(
+        results,
         centroids,
-    })
+        assignments,
+        return_k_mean,
+    ))
+}
+
+/// Grid-search version of [`fast_louvain_clusters`] with stability metrics.
+///
+/// Builds the k-means -> kNN/sNN graph once, then runs Louvain across
+/// `n_louvain_seeds` seeds for each resolution. Reports mean/median pairwise
+/// ARI (Louvain stability), mean/median conductance (community quality), and
+/// the labels from the seed achieving the best (lowest) mean conductance.
+///
+/// ### Params
+///
+/// * `data` - n_samples x n_features matrix.
+/// * `km_type` - String. Which type of k-means clustering to use. `"standard"`
+///   or `"minibatch"`.
+/// * `resolutions` - Slice of resolutions to iterate over.
+/// * `params` - Pipeline parameters.
+/// * `run_snn` - Shall a shared nearest neighbour generation be run.
+/// * `return_k_mean` - Shall the k-means centroids and assignments be returned
+///   alongside the grid results.
+/// * `seed` - Seed for k-means and kNN (the shared graph).
+/// * `n_louvain_seeds` - Number of seeds to vary Louvain over. Must be at least
+///   2 to produce ARI.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
+///
+/// ### Returns
+///
+/// The [FastLouvainResults], `GridRes` variant, with one
+/// [FastLouvainGridResult] per resolution in the same order.
+#[allow(clippy::too_many_arguments)]
+pub fn fast_louvain_clusters_grid(
+    data: MatRef<f32>,
+    km_type: &str,
+    resolutions: &[f32],
+    params: &FastLouvainParams<f32>,
+    run_snn: bool,
+    return_k_mean: bool,
+    seed: usize,
+    n_louvain_seeds: usize,
+    verbose: usize,
+) -> Result<FastLouvainResults, BixverseErrors> {
+    let (centroids, assignments) = fast_cluster_kmeans(data, km_type, params, seed, verbose)?;
+
+    let graph = build_centroid_graph(
+        centroids.as_ref(),
+        &params.graph_params(),
+        run_snn,
+        seed,
+        verbose,
+    )?;
+
+    let results = louvain_grid_over_resolutions(
+        &graph,
+        &assignments,
+        resolutions,
+        params.louvain_iters,
+        params.multi_level_louvain,
+        seed,
+        n_louvain_seeds,
+    )?;
+
+    Ok(FastLouvainResults::grid(
+        results,
+        centroids,
+        assignments,
+        return_k_mean,
+    ))
 }
 
 ///////////
@@ -702,6 +843,48 @@ mod tests {
         match r.get_assignments() {
             Either::Right(v) => v,
             Either::Left(_) => panic!("expected GridRes variant"),
+        }
+    }
+
+    #[test]
+    fn centroid_graph_matches_centroid_count() {
+        let data = make_two_blobs(100, 5, 5.0, 42);
+        let params = default_params();
+        let (centroids, _) = fast_cluster_kmeans(data.as_ref(), "standard", &params, 0, 0).unwrap();
+
+        for run_snn in [false, true] {
+            let graph =
+                build_centroid_graph(centroids.as_ref(), &params.graph_params(), run_snn, 0, 0)
+                    .unwrap();
+            assert_eq!(graph.get_node_number(), centroids.nrows());
+            assert!(!graph.is_directed());
+        }
+    }
+
+    #[test]
+    fn louvain_over_resolutions_propagates_to_samples() {
+        let data = make_two_blobs(100, 5, 5.0, 42);
+        let params = default_params();
+        let resolutions: Vec<f32> = vec![1.0, 0.5];
+
+        let (centroids, assignments) =
+            fast_cluster_kmeans(data.as_ref(), "standard", &params, 0, 0).unwrap();
+        let graph =
+            build_centroid_graph(centroids.as_ref(), &params.graph_params(), false, 0, 0).unwrap();
+
+        let labels = louvain_over_resolutions(
+            &graph,
+            &assignments,
+            &resolutions,
+            params.louvain_iters,
+            params.multi_level_louvain,
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(labels.len(), resolutions.len());
+        for l in &labels {
+            assert_eq!(l.len(), assignments.len());
         }
     }
 

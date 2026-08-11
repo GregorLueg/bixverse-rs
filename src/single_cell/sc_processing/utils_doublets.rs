@@ -1941,7 +1941,12 @@ mod tests {
     fn test_poisson_sampler_statistics() {
         let mut rng = StdRng::seed_from_u64(42);
         for &lambda in &[0.5, 2.0, 10.0, 50.0, 200.0, 1000.0] {
-            let n = 50_000;
+            // 5000 rather than 50000, which was six seconds of the crate's test
+            // time. The tolerances below are dominated by their relative terms,
+            // 5% on the mean and 10% on the variance, and the sampling error at
+            // this count is `sqrt(2/n) = 2%` on the variance. So the bounds are
+            // unchanged in practice and a broken sampler still cannot hide.
+            let n = 5_000;
             let samples: Vec<u32> = (0..n).map(|_| poisson_sample(&mut rng, lambda)).collect();
             let mean = samples.iter().map(|&s| s as f64).sum::<f64>() / n as f64;
             let var = samples

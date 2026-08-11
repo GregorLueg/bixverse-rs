@@ -107,7 +107,7 @@ impl<T: BixverseFloat> ModularConfig<T> {
     ///
     /// The [`ModularConfig`] populated with provided or default values.
     pub fn from_r_list(r_list: List) -> Result<ModularConfig<T>> {
-        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
         let defaults: ModularConfig<T> = ModularConfig::default();
 
         let factor_std = params
@@ -134,7 +134,7 @@ impl<T: BixverseFloat> HubModularConfig<T> {
     ///
     /// The [`HubModularConfig`] populated with provided or default values.
     pub fn from_r_list(r_list: List) -> Result<HubModularConfig<T>> {
-        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
         let defaults: HubModularConfig<T> = HubModularConfig::default();
 
         let factor_std = params
@@ -167,7 +167,7 @@ impl<T: BixverseFloat> NonNegativeFactorConfig<T> {
     ///
     /// The [`NonNegativeFactorConfig`] populated with provided or default values.
     pub fn from_r_list(r_list: List) -> Result<NonNegativeFactorConfig<T>> {
-        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
         let defaults: NonNegativeFactorConfig<T> = NonNegativeFactorConfig::default();
 
         let factor_shape = params
@@ -206,7 +206,7 @@ impl<T: BixverseFloat> NonGaussianFactorConfig<T> {
     ///
     /// The [`NonGaussianFactorConfig`] populated with provided or default values.
     pub fn from_r_list(r_list: List) -> Result<NonGaussianFactorConfig<T>> {
-        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
         let defaults: NonGaussianFactorConfig<T> = NonGaussianFactorConfig::default();
 
         let factor_scale = params
@@ -250,7 +250,7 @@ impl<T: BixverseFloat> SyntheticRnaSeqParams<T> {
     /// The [`SyntheticRnaSeqParams`] with all parameters set.
     pub fn from_r_list(r_list: List) -> Result<SyntheticRnaSeqParams<T>> {
         let defaults: SyntheticRnaSeqParams<T> = SyntheticRnaSeqParams::default();
-        let params: HashMap<&str, Robj> = r_list.clone().try_into()?;
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list.clone())?;
 
         let num_samples = params
             .get("num_samples")
@@ -359,7 +359,7 @@ impl<T: BixverseFloat> SparsityParams<T> {
     /// The [`SparsityParams`] with all parameters set.
     pub fn from_r_list(r_list: List) -> Result<SparsityParams<T>> {
         let defaults: SparsityParams<T> = SparsityParams::default();
-        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
         let strategy = params
             .get("strategy")
@@ -390,6 +390,51 @@ impl<T: BixverseFloat> SparsityParams<T> {
             target_library_size,
             capture_efficiency_sigma,
             seed,
+        })
+    }
+}
+
+/////////////////////////
+// Lanczos eigensolver //
+/////////////////////////
+
+impl LanczosParams {
+    /// Generate LanczosParams from a flattened R list
+    ///
+    /// Takes the already-flattened map rather than a `List`, so it can be nested
+    /// inside the parameter block of whichever method owns the eigensolver.
+    /// Anything missing falls back to [LanczosParams::default], so the R and
+    /// Rust defaults cannot drift apart.
+    ///
+    /// ### Params
+    ///
+    /// * `params` - Parsed R list contents, already flattened to a HashMap.
+    ///
+    /// ### Returns
+    ///
+    /// A [LanczosParams] populated with the provided or default values, or an
+    /// error when a count is present but unusable.
+    pub fn from_r_list(params: &HashMap<&str, Robj>) -> Result<LanczosParams> {
+        let defaults = LanczosParams::default();
+
+        // `None` derives the basis from the requested component count.
+        // `r_list_count` is load bearing here: `NA_integer_` is `i32::MIN` and a
+        // plain `as usize` turns it, or any negative, into ~1.8e19, which for
+        // the restart budget is an unbounded loop rather than an error.
+        let basis_size = r_list_count(params, "lanczos_basis_size")?;
+
+        let max_restarts =
+            r_list_count(params, "lanczos_max_restarts")?.unwrap_or(defaults.max_restarts);
+
+        let tol = params
+            .get("lanczos_tol")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.tol);
+
+        Ok(LanczosParams {
+            basis_size,
+            max_restarts,
+            tol,
         })
     }
 }

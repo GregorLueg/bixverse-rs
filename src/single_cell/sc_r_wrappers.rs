@@ -5,7 +5,8 @@ use extendr_api::*;
 use std::collections::HashMap;
 
 use crate::ml::clustering::k_means::KMeansParamsWrappers;
-use crate::prelude::{BixverseFloat, VecConvert, VecFloatConvert};
+use crate::ml::gp::LandmarkGpParams;
+use crate::prelude::{BixverseFloat, LanczosParams, VecConvert, VecFloatConvert};
 use crate::single_cell::mc_generation::{
     hdwgcna_meta_cells::BootstrappedMetaCellParams, metacells2::params::*,
     seacells::SEACellsParams, super_cells::SuperCellParams,
@@ -24,6 +25,12 @@ use crate::single_cell::sc_analysis::{
     vision::SignatureGenes,
 };
 use crate::single_cell::sc_data::h5ad_io::parse_h5ad_format;
+use crate::single_cell::sc_processing::magic::{MagicLayer, MagicParams};
+use crate::single_cell::sc_trajectory::gene_trends::{
+    BranchSelectionParams, BranchWeighting, GeneTrendsParams,
+};
+use crate::single_cell::sc_trajectory::palantir::PalantirParams;
+use crate::utils::r_rust_interface::{r_list_count, r_list_count_allow_zero, r_list_to_map};
 
 use crate::single_cell::sc_annotation::{
     sc_type::{CellTypeMarkers, ScTypeCellParams, SctypeRes, parse_score_calibration},
@@ -57,11 +64,14 @@ use crate::single_cell::sc_processing::{
 /// * `assignments` - Vector where
 ///   `assignments[cell_id] = Some(metacell_id) or None`
 /// * `n_cells` - Total number of cells
-/// * `k` - Number of metacells
 ///
 /// ### Returns
 ///
-/// R List with -1 indicating unassigned cells
+/// R List with the slots `assignments`, `metacells`, `unassigned`,
+/// `n_metacells`, `n_cells` and `n_unassigned`, with -1 marking unassigned
+/// cells. `n_metacells` is derived as `max(id) + 1` over the assignments, so
+/// trailing metacells that ended up empty are dropped rather than reported at
+/// size zero.
 pub fn assignments_to_r_list(assignments: &[Option<usize>], n_cells: usize) -> List {
     let r_assignments: Vec<i32> = assignments
         .iter()
@@ -188,7 +198,7 @@ impl CellTypeConfig {
     ///
     /// The `CellTypeConfig` based on the R list.
     pub fn from_r_list(r_list: List) -> Result<Self> {
-        let map: HashMap<&str, Robj> = r_list.try_into()?;
+        let map: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
         let marker_genes = map
             .get("marker_genes")
@@ -217,7 +227,7 @@ impl MinCellQuality {
     ///
     /// Self with the specified parameters.
     pub fn from_r_list(r_list: List) -> Result<Self> {
-        let min_qc: HashMap<&str, Robj> = r_list.try_into()?;
+        let min_qc: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
         let min_unique_genes = min_qc
             .get("min_unique_genes")
@@ -256,7 +266,9 @@ impl KnnParams {
     /// Generate KnnParams from an R list
     ///
     /// Should values not be found within the List, the parameters will default
-    /// to sensible defaults based on heuristics.
+    /// to sensible defaults based on heuristics. Every count is read through
+    /// [r_list_count], so `list(k = 50)` works as well as `list(k = 50L)` and a
+    /// nonsensical value errors instead of silently reverting to the default.
     ///
     /// ### Params
     ///
@@ -266,7 +278,7 @@ impl KnnParams {
     ///
     /// The `KnnParams` with all parameters set.
     pub fn from_r_list(r_list: List) -> Result<Self> {
-        let params_list: HashMap<&str, Robj> = r_list.try_into()?;
+        let params_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
         // general
         let knn_method = std::string::String::from(
@@ -283,21 +295,14 @@ impl KnnParams {
                 .unwrap_or("cosine"),
         );
 
-        let k = params_list
-            .get("k")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(15) as usize;
+        // this allows zeros through deliberately for auto-detection in the
+        // doublet detection methods
+        let k = r_list_count_allow_zero(&params_list, "k")?.unwrap_or(15);
 
         // annoy
-        let n_tree = params_list
-            .get("n_trees")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(50) as usize;
+        let n_tree = r_list_count(&params_list, "n_trees")?.unwrap_or(50);
 
-        let search_budget = params_list
-            .get("search_budget")
-            .and_then(|v| v.as_integer())
-            .map(|v| v as usize);
+        let search_budget = r_list_count(&params_list, "search_budget")?;
 
         // nn descent
         let diversify_prob = params_list
@@ -310,37 +315,19 @@ impl KnnParams {
             .and_then(|v| v.as_real())
             .unwrap_or(0.001) as f32;
 
-        let ef_budget = params_list
-            .get("ef_budget")
-            .and_then(|v| v.as_integer())
-            .map(|v| v as usize);
+        let ef_budget = r_list_count(&params_list, "ef_budget")?;
 
         // hnsw
-        let m = params_list
-            .get("m")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(16) as usize;
+        let m = r_list_count(&params_list, "m")?.unwrap_or(16);
 
-        let ef_construction = params_list
-            .get("ef_construction")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(200) as usize;
+        let ef_construction = r_list_count(&params_list, "ef_construction")?.unwrap_or(200);
 
-        let ef_search = params_list
-            .get("ef_search")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(100) as usize;
+        let ef_search = r_list_count(&params_list, "ef_search")?.unwrap_or(100);
 
         // ivf
-        let n_list = params_list
-            .get("n_list")
-            .and_then(|v| v.as_integer())
-            .map(|v| v as usize);
+        let n_list = r_list_count(&params_list, "n_list")?;
 
-        let n_probe = params_list
-            .get("n_probe")
-            .and_then(|v| v.as_integer())
-            .map(|v| v as usize);
+        let n_probe = r_list_count(&params_list, "n_probe")?;
 
         Ok(Self {
             knn_method,
@@ -380,7 +367,7 @@ impl ScrubletParams {
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let knn_params = KnnParams::from_r_list(r_list.clone())?;
 
-        let scrublet_list: HashMap<&str, Robj> = r_list.try_into()?;
+        let scrublet_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
         // General params
         let log_transform = scrublet_list
@@ -525,7 +512,7 @@ impl BoostParams {
         let knn_params = KnnParams::from_r_list(r_list.clone())?;
         let fast_cluster_params = FastLouvainParams::from_r_list(r_list.clone())?;
 
-        let params_list: HashMap<&str, Robj> = r_list.try_into()?;
+        let params_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
         // norm parameters
         let log_transform = params_list
@@ -695,7 +682,7 @@ impl ScDblFinderParams {
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let knn_params = KnnParams::from_r_list(r_list.clone())?;
         let fast_cluster_params = FastLouvainParams::from_r_list(r_list.clone())?;
-        let map: HashMap<&str, Robj> = r_list.try_into()?;
+        let map: HashMap<&str, Robj> = r_list_to_map(r_list)?;
         let defaults = Self::default();
 
         let km_type = std::string::String::from(
@@ -769,10 +756,10 @@ impl ScDblFinderParams {
                 .and_then(|v| v.as_integer())
                 .unwrap_or(defaults.n_iterations as i32) as usize,
             // Classification
-            n_trees: map
+            gbm_n_trees: map
                 .get("n_trees")
                 .and_then(|v| v.as_integer())
-                .unwrap_or(defaults.n_trees as i32) as usize,
+                .unwrap_or(defaults.gbm_n_trees as i32) as usize,
             max_depth: map
                 .get("max_depth")
                 .and_then(|v| v.as_integer())
@@ -833,22 +820,24 @@ impl ScDblFinderParams {
 ///////////////////////
 
 impl FastLouvainParams<f32> {
-    /// Generate the BbknnParams from a R list
+    /// Generate the [FastLouvainParams] from an R list.
     ///
     /// Should values not be found within the List, the parameters will default
-    /// to sensible defaults.
+    /// to sensible defaults. The nested kNN and k-means blocks are parsed from
+    /// the same flat list via `KnnParams::from_r_list` and
+    /// `KMeansParamsWrappers::from_r_list`.
     ///
     /// ### Params
     ///
-    /// * `r_list` - The list with the BBKNN parameters.
+    /// * `r_list` - The list with the fast Louvain parameters.
     ///
     /// ### Return
     ///
-    /// The `BbknnParams` with all of the parameters.
+    /// The [FastLouvainParams] with all of the parameters.
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let knn_params = KnnParams::from_r_list(r_list.clone())?;
         let kmeans_params = KMeansParamsWrappers::from_r_list(r_list.clone())?;
-        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
         let defaults: FastLouvainParams<f32> = Self::default();
 
         // knn
@@ -946,7 +935,7 @@ impl SingleCellPcaParams {
     ///
     /// The [SingleCellPcaParams] with all of the parameters.
     pub fn from_r_list(r_list: List) -> Result<Self> {
-        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
         let defaults = SingleCellPcaParams::default();
 
         let mean_center = params
@@ -1004,7 +993,7 @@ impl BbknnParams {
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let knn_params = KnnParams::from_r_list(r_list.clone())?;
 
-        let bbknn_list: HashMap<&str, Robj> = r_list.try_into()?;
+        let bbknn_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
         let neighbours_within_batch = bbknn_list
             .get("neighbours_within_batch")
@@ -1056,7 +1045,7 @@ impl FastMnnParams {
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let knn_params = KnnParams::from_r_list(r_list.clone())?;
         let pca_params = SingleCellPcaParams::from_r_list(r_list.clone())?;
-        let fastmnn_list: HashMap<&str, Robj> = r_list.try_into()?;
+        let fastmnn_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
         let ndist = fastmnn_list
             .get("ndist")
@@ -1116,7 +1105,7 @@ impl SeuratCcaParams {
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let knn_params = KnnParams::from_r_list(r_list.clone())?;
         let pca_params = SingleCellPcaParams::from_r_list(r_list.clone())?;
-        let cca_list: HashMap<&str, Robj> = r_list.try_into()?;
+        let cca_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
         let num_cc = cca_list
             .get("num_cc")
@@ -1193,7 +1182,7 @@ impl SeuratRpcaParams {
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let knn_params = KnnParams::from_r_list(r_list.clone())?;
         let pca_params = SingleCellPcaParams::from_r_list(r_list.clone())?;
-        let rpca_list: HashMap<&str, Robj> = r_list.try_into()?;
+        let rpca_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
         let dims = rpca_list
             .get("dims")
@@ -1251,7 +1240,7 @@ impl MiloRParams {
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let knn_params = KnnParams::from_r_list(r_list.clone())?;
 
-        let params_list: HashMap<&str, Robj> = r_list.try_into()?;
+        let params_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
         let prop = params_list
             .get("prop")
@@ -1308,7 +1297,8 @@ impl SEACellsParams {
         let defaults = Self::default();
         let knn_params = KnnParams::from_r_list(r_list.clone())?;
 
-        let seacells_list: HashMap<&str, Robj> = r_list.try_into()?;
+        let seacells_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+        let lanczos_params = LanczosParams::from_r_list(&seacells_list)?;
 
         let n_sea_cells = seacells_list
             .get("n_sea_cells")
@@ -1383,6 +1373,8 @@ impl SEACellsParams {
             n_landmarks,
             // knn
             knn_params,
+            // eigensolver
+            lanczos_params,
         })
     }
 }
@@ -1403,7 +1395,7 @@ impl BootstrappedMetaCellParams {
     /// The `MetaCellParams` structure.
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let knn_params = KnnParams::from_r_list(r_list.clone())?;
-        let meta_cell_params: HashMap<&str, Robj> = r_list.try_into()?;
+        let meta_cell_params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
         // meta cell
         let max_shared = meta_cell_params
@@ -1445,7 +1437,7 @@ impl SuperCellParams {
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let knn_params = KnnParams::from_r_list(r_list.clone())?;
 
-        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
         // supercell
         let walk_length = params
@@ -1495,7 +1487,7 @@ impl SignatureGenes {
     /// * `r_list` - An R list that is expected to have `"pos"` and `"neg"` with
     ///   0-index positions of the gene for this gene set.
     pub fn from_r_list(r_list: List) -> Result<Self> {
-        let r_list: HashMap<&str, Robj> = r_list.try_into()?;
+        let r_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
         let positive: Vec<usize> = r_list
             .get("pos")
@@ -1537,7 +1529,7 @@ impl HotSpotParams {
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let knn_params = KnnParams::from_r_list(r_list.clone())?;
 
-        let params_list: HashMap<&str, Robj> = r_list.try_into()?;
+        let params_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
         // hotspot
         let model = std::string::String::from(
@@ -1580,7 +1572,7 @@ impl HarmonyParams {
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let defaults = Self::default();
         let kmeans_params = KMeansParamsWrappers::from_r_list(r_list.clone())?;
-        let params_list: HashMap<&str, Robj> = r_list.try_into()?;
+        let params_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
         let k = params_list
             .get("k")
@@ -1678,7 +1670,7 @@ impl HarmonyParamsV2 {
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let defaults = Self::default();
         let kmeans_params = KMeansParamsWrappers::from_r_list(r_list.clone())?;
-        let params_list: HashMap<&str, Robj> = r_list.try_into()?;
+        let params_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
         let k = params_list
             .get("k")
@@ -1805,7 +1797,7 @@ impl SymphonyMapParams {
     ///
     /// The [SymphonyMapParams] with all parameters set.
     pub fn from_r_list(r_list: List) -> Result<Self> {
-        let params_list: HashMap<&str, Robj> = r_list.try_into()?;
+        let params_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
         let defaults = SymphonyMapParams::default();
 
         let sigma = params_list
@@ -1842,7 +1834,7 @@ impl RandomForestConfig {
     /// The `RandomForestConfig` with all parameters set.
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let defaults = Self::default();
-        let params_list: HashMap<&str, Robj> = r_list.try_into()?;
+        let params_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
         let n_trees = params_list
             .get("n_trees")
             .and_then(|v| v.as_integer())
@@ -1905,7 +1897,7 @@ impl ExtraTreesConfig {
     /// The `ExtraTreesConfig` with all parameters set.
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let defaults = Self::default();
-        let params_list: HashMap<&str, Robj> = r_list.try_into()?;
+        let params_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
         let n_trees = params_list
             .get("n_trees")
             .and_then(|v| v.as_integer())
@@ -1963,7 +1955,7 @@ impl GradientBoostingConfig {
     /// The `GradientBoostingConfig` with all parameters set.
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let defaults = Self::default();
-        let params_list: HashMap<&str, Robj> = r_list.try_into()?;
+        let params_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
         let n_trees_max = params_list
             .get("n_trees_max")
             .and_then(|v| v.as_integer())
@@ -2043,7 +2035,7 @@ impl ScenicParams {
     /// The `ScenicParams` with all parameters set.
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let defaults = Self::default();
-        let params: HashMap<&str, Robj> = r_list.clone().try_into()?;
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list.clone())?;
 
         let min_counts = params
             .get("min_counts")
@@ -2119,13 +2111,14 @@ impl H5adFileTask {
     /// gene_local_to_universe (integer vector, NA for unmapped genes,
     /// 0-indexed).
     pub fn from_r_list(r_list: List) -> extendr_api::Result<Self> {
-        let map: HashMap<&str, Robj> = r_list.try_into()?;
+        let map: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
-        let raw_slot: RawDataSlot = map
-            .get("raw_slot")
-            .and_then(|v| v.as_str())
-            .and_then(parse_raw_slot)
-            .unwrap_or_default();
+        let raw_slot: RawDataSlot = match map.get("raw_slot").and_then(|v| v.as_str()) {
+            Some(s) => {
+                parse_raw_slot(s).ok_or_else(|| Error::Other(format!("Invalid raw slot: {}", s)))?
+            }
+            None => RawDataSlot::default(),
+        };
 
         let exp_id = map
             .get("exp_id")
@@ -2200,7 +2193,7 @@ impl BinMergeTask {
     /// vector), gene_local_to_universe (integer vector, NA for unmapped
     /// genes, 0-indexed).
     pub fn from_r_list(r_list: List) -> extendr_api::Result<Self> {
-        let map: HashMap<&str, Robj> = r_list.try_into()?;
+        let map: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
         let exp_id = map
             .get("exp_id")
@@ -2260,7 +2253,7 @@ impl MtxFileTask {
     ///
     /// Self.
     pub fn from_r_list(r_list: List) -> extendr_api::Result<Self> {
-        let map: HashMap<&str, Robj> = r_list.try_into()?;
+        let map: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
         let exp_id = map
             .get("exp_id")
@@ -2325,7 +2318,7 @@ impl TenxFileTask {
     ///
     /// Self.
     pub fn from_r_list(r_list: List) -> extendr_api::Result<Self> {
-        let map: HashMap<&str, Robj> = r_list.try_into()?;
+        let map: HashMap<&str, Robj> = r_list_to_map(r_list)?;
         let exp_id = map
             .get("exp_id")
             .and_then(|v| v.as_str())
@@ -2402,7 +2395,7 @@ where
     ///
     /// Self.
     pub fn from_r_list(r_list: List) -> extendr_api::Result<Self> {
-        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
         let defaults = LigandTargetParams::default();
 
         let lr_sig_hub = params
@@ -2468,7 +2461,7 @@ where
 impl SelectParams {
     /// Generate SelectParams from an R list, falling back to defaults.
     pub fn from_r_list(r_list: List) -> Result<Self> {
-        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
         let defaults = Self::default();
 
         let downsample_min_samples = params
@@ -2540,19 +2533,23 @@ impl SelectParams {
 impl SimilarityParams {
     /// Generate SimilarityParams from an R list, falling back to defaults.
     pub fn from_r_list(r_list: List) -> Result<Self> {
-        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
         let defaults = Self::default();
 
-        let method = params
-            .get("similarity_method")
-            .and_then(|v| v.as_str())
-            .map(|s| match s.to_lowercase().as_str() {
+        let method = match params.get("similarity_method").and_then(|v| v.as_str()) {
+            Some(s) => match s.to_lowercase().as_str() {
                 "log_pearson" | "logpearson" => SimilarityMethod::LogPearson,
                 "pearson" => SimilarityMethod::Pearson,
                 "spearman" => SimilarityMethod::Spearman,
-                _ => defaults.method,
-            })
-            .unwrap_or(defaults.method);
+                other => {
+                    return Err(Error::Other(format!(
+                        "Invalid similarity method: {}",
+                        other
+                    )));
+                }
+            },
+            None => defaults.method,
+        };
 
         let value_regularisation = params
             .get("value_regularisation")
@@ -2574,7 +2571,7 @@ impl SimilarityParams {
 impl MC2KnnParams {
     /// Generate MC2KnnParams from an R list, falling back to defaults.
     pub fn from_r_list(r_list: List) -> Result<Self> {
-        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
         let defaults = Self::default();
 
         let balanced_ranks_factor = params
@@ -2645,7 +2642,7 @@ impl MC2KnnParams {
 impl PartitionParams {
     /// Generate PartitionParams from an R list, falling back to defaults.
     pub fn from_r_list(r_list: List) -> Result<Self> {
-        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
         let defaults = Self::default();
 
         let cooldown_pass = params
@@ -2717,7 +2714,7 @@ impl PartitionParams {
 impl DeviantsParams {
     /// Generate DeviantsParams from an R list, falling back to defaults.
     pub fn from_r_list(r_list: List) -> Result<Self> {
-        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
         let defaults = Self::default();
 
         let min_gene_fold_factor = params
@@ -2788,7 +2785,7 @@ impl DeviantsParams {
 impl DissolveParams {
     /// Generate DissolveParams from an R list, falling back to defaults.
     pub fn from_r_list(r_list: List) -> Result<Self> {
-        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
         let defaults = Self::default();
 
         let min_robust_size_factor = params
@@ -2826,7 +2823,7 @@ impl MetacellsParams {
         let deviants = DeviantsParams::from_r_list(r_list.clone())?;
         let dissolve = DissolveParams::from_r_list(r_list.clone())?;
 
-        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
         let defaults = Self::default();
 
         let target_metacell_size = params
@@ -2890,7 +2887,7 @@ impl CellTypeMarkers {
     ///
     /// The [CellTypeMarkers] or Error
     pub fn from_r_list(r_list: List) -> Result<Self> {
-        let data: HashMap<&str, Robj> = r_list.try_into()?;
+        let data: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
         let cell_type = data
             .get("cell_type")
@@ -2929,7 +2926,7 @@ impl SctypeRes {
     ///
     /// The [SctypeRes] or Error
     pub fn from_r_list(r_list: List) -> Result<Self> {
-        let data: HashMap<&str, Robj> = r_list.try_into()?;
+        let data: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
         let cell_types = data
             .get("cell_types")
@@ -2978,7 +2975,7 @@ impl ScTypeCellParams {
     ///
     /// The [ScTypeCellParams] or Error
     pub fn from_r_list(r_list: List) -> Result<Self> {
-        let data: HashMap<&str, Robj> = r_list.try_into()?;
+        let data: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
         let calibration =
             match data.get("calibration").and_then(|v| v.as_str()) {
@@ -3026,7 +3023,7 @@ impl MeldParams {
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let knn_params = KnnParams::from_r_list(r_list.clone())?;
 
-        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
         let defaults = Self::default();
 
         let beta = params
@@ -3047,11 +3044,14 @@ impl MeldParams {
             .map(|v| v as f32)
             .unwrap_or(defaults.order);
 
-        let filter = params
-            .get("filter")
-            .and_then(|v| v.as_str())
-            .and_then(parse_meld_filter)
-            .unwrap_or(defaults.filter);
+        // An unrecognised string errors rather than falling back, matching
+        // `ScTypeCellParams`: silently filtering with something other than what
+        // was asked for hides the typo.
+        let filter = match params.get("filter").and_then(|v| v.as_str()) {
+            Some(s) => parse_meld_filter(s)
+                .ok_or_else(|| Error::Other(format!("Invalid MELD filter: {}", s)))?,
+            None => defaults.filter,
+        };
 
         let chebyshev_order = params
             .get("chebyshev_order")
@@ -3059,11 +3059,11 @@ impl MeldParams {
             .map(|v| v as usize)
             .unwrap_or(defaults.chebyshev_order);
 
-        let lap_type = params
-            .get("lap_type")
-            .and_then(|v| v.as_str())
-            .and_then(parse_lap_type)
-            .unwrap_or(defaults.lap_type);
+        let lap_type = match params.get("lap_type").and_then(|v| v.as_str()) {
+            Some(s) => parse_lap_type(s)
+                .ok_or_else(|| Error::Other(format!("Invalid MELD Laplacian type: {}", s)))?,
+            None => defaults.lap_type,
+        };
 
         let normalise_indicators = params
             .get("normalise_indicators")
@@ -3094,14 +3094,15 @@ impl AucellParams {
     ///
     /// The populated [AucellParams]
     pub fn from_r_list(r_list: List) -> Result<Self> {
-        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
         let defaults = Self::default();
 
-        let auc_type = params
-            .get("auc_type")
-            .and_then(|v| v.as_str())
-            .and_then(parse_auc_type)
-            .unwrap_or(defaults.auc_type);
+        let auc_type = match params.get("auc_type").and_then(|v| v.as_str()) {
+            Some(s) => {
+                parse_auc_type(s).ok_or_else(|| Error::Other(format!("Invalid AUC type: {}", s)))?
+            }
+            None => defaults.auc_type,
+        };
 
         let max_rank = params
             .get("max_rank")
@@ -3119,5 +3120,297 @@ impl AucellParams {
             max_rank,
             standardise,
         })
+    }
+}
+
+//////////////
+// Palantir //
+//////////////
+
+impl PalantirParams {
+    /// Generate PalantirParams from an R list
+    ///
+    /// Any element missing from the list falls back to the matching field of
+    /// [PalantirParams::default], so the two sides cannot drift apart. The
+    /// nested kNN block is parsed by [KnnParams::from_r_list].
+    ///
+    /// Counts go through [r_list_count], which accepts both `10` and `10L` and
+    /// errors on a value that is present but unusable. Previously a stray
+    /// `knn = -5L` quietly became 30.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the Palantir parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The `PalantirParams` with all parameters set.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let defaults = Self::default();
+        let knn_params = KnnParams::from_r_list(r_list.clone())?;
+
+        let palantir_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+        let lanczos_params = LanczosParams::from_r_list(&palantir_list)?;
+
+        let n_dcs = r_list_count(&palantir_list, "n_dcs")?.unwrap_or(defaults.n_dcs);
+
+        let n_eigs = r_list_count(&palantir_list, "n_eigs")?;
+
+        let knn = r_list_count(&palantir_list, "knn")?.unwrap_or(defaults.knn);
+
+        let num_waypoints =
+            r_list_count(&palantir_list, "num_waypoints")?.unwrap_or(defaults.num_waypoints);
+
+        let scale_components = palantir_list
+            .get("scale_components")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.scale_components);
+
+        let use_early_cell_as_start = palantir_list
+            .get("use_early_cell_as_start")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.use_early_cell_as_start);
+
+        let max_iterations =
+            r_list_count(&palantir_list, "max_iterations")?.unwrap_or(defaults.max_iterations);
+
+        let branch_prob_threshold = palantir_list
+            .get("branch_prob_threshold")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.branch_prob_threshold);
+
+        Ok(Self {
+            n_dcs,
+            n_eigs,
+            knn,
+            num_waypoints,
+            scale_components,
+            use_early_cell_as_start,
+            max_iterations,
+            branch_prob_threshold,
+            knn_params,
+            lanczos_params,
+        })
+    }
+}
+
+///////////
+// MAGIC //
+///////////
+
+impl MagicParams {
+    /// Generate MagicParams from an R list
+    ///
+    /// Missing elements fall back to [MagicParams::default]. `layer` accepts
+    /// `"norm"` or `"raw"`; anything else takes the default rather than
+    /// erroring, matching how the other parsers here treat an unusable value.
+    ///
+    /// `n_steps` goes through [r_list_count_allow_zero] because zero is
+    /// meaningful: it returns the un-imputed matrix.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the MAGIC parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The `MagicParams` with all parameters set.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let defaults = Self::default();
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+
+        let n_steps = r_list_count_allow_zero(&params, "n_steps")?.unwrap_or(defaults.n_steps);
+
+        let clip_threshold = params
+            .get("clip_threshold")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.clip_threshold);
+
+        let gene_batch_size =
+            r_list_count(&params, "gene_batch_size")?.unwrap_or(defaults.gene_batch_size);
+
+        let layer = params
+            .get("layer")
+            .and_then(|v| v.as_str())
+            .and_then(parse_magic_layer)
+            .unwrap_or(defaults.layer);
+
+        let allow_large = params
+            .get("allow_large")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.allow_large);
+
+        Ok(Self {
+            n_steps,
+            clip_threshold,
+            gene_batch_size,
+            layer,
+            allow_large,
+        })
+    }
+}
+
+/// Parse the R-side layer string into a [MagicLayer].
+///
+/// ### Params
+///
+/// * `s` - The layer name, `"norm"` or `"raw"`, case-insensitive.
+///
+/// ### Returns
+///
+/// The matching layer, or `None` if the string is not recognised.
+pub fn parse_magic_layer(s: &str) -> Option<MagicLayer> {
+    match s.to_lowercase().as_str() {
+        "norm" | "normalised" | "normalized" => Some(MagicLayer::Norm),
+        "raw" | "counts" => Some(MagicLayer::Raw),
+        _ => None,
+    }
+}
+
+/////////////////
+// Gene trends //
+/////////////////
+
+impl BranchSelectionParams {
+    /// Generate BranchSelectionParams from an R list
+    ///
+    /// Missing elements fall back to [BranchSelectionParams::default], which
+    /// carries the reference's `q = eps = 1e-2` and a resolution of 500.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the branch selection parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The `BranchSelectionParams` with all parameters set.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let defaults = Self::default();
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+
+        let q = params
+            .get("q")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.q);
+
+        let eps = params
+            .get("eps")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.eps);
+
+        let resolution = r_list_count(&params, "resolution")?.unwrap_or(defaults.resolution);
+
+        Ok(Self { q, eps, resolution })
+    }
+}
+
+impl LandmarkGpParams {
+    /// Generate LandmarkGpParams from an R list
+    ///
+    /// Missing elements fall back to [LandmarkGpParams::default], which carries
+    /// mellon's `length_scale = sigma = 1.0`. Those defaults are a strong
+    /// smoothing prior; see the module documentation of
+    /// [crate::single_cell::sc_trajectory::gene_trends].
+    ///
+    /// ### Params
+    ///
+    /// * `params` - Parsed R list contents, already flattened to a map. Shares
+    ///   the list with [GeneTrendsParams], so the keys sit at the same level
+    ///   rather than in a nested block.
+    ///
+    /// ### Returns
+    ///
+    /// The `LandmarkGpParams` with all parameters set.
+    pub fn from_r_map(params: &HashMap<&str, Robj>) -> Result<Self> {
+        let defaults = Self::default();
+
+        let length_scale = params
+            .get("length_scale")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.length_scale);
+
+        let sigma = params
+            .get("sigma")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.sigma);
+
+        let jitter = params
+            .get("jitter")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.jitter);
+
+        let max_jitter_retries = r_list_count_allow_zero(params, "max_jitter_retries")?
+            .unwrap_or(defaults.max_jitter_retries);
+
+        // Zero is legal here and means "use the default", which is what
+        // `fit_landmark_gp` does with it.
+        let chunk_size =
+            r_list_count_allow_zero(params, "chunk_size")?.unwrap_or(defaults.chunk_size);
+
+        Ok(Self {
+            length_scale,
+            sigma,
+            jitter,
+            max_jitter_retries,
+            chunk_size,
+        })
+    }
+}
+
+impl GeneTrendsParams {
+    /// Generate GeneTrendsParams from an R list
+    ///
+    /// The Gaussian process hyperparameters live in the same flat list and are
+    /// parsed by [LandmarkGpParams::from_r_map]. `weighting` accepts
+    /// `"hard_mask"` or `"fate_probability"`.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the gene trend parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The `GeneTrendsParams` with all parameters set.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let defaults = Self::default();
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+
+        let gp = LandmarkGpParams::from_r_map(&params)?;
+
+        let resolution = r_list_count(&params, "resolution")?.unwrap_or(defaults.resolution);
+
+        let weighting = params
+            .get("weighting")
+            .and_then(|v| v.as_str())
+            .and_then(parse_branch_weighting)
+            .unwrap_or(defaults.weighting);
+
+        Ok(Self {
+            resolution,
+            weighting,
+            gp,
+        })
+    }
+}
+
+/// Parse the R-side weighting string into a [BranchWeighting].
+///
+/// ### Params
+///
+/// * `s` - The weighting name, `"hard_mask"` or `"fate_probability"`,
+///   case-insensitive.
+///
+/// ### Returns
+///
+/// The matching weighting, or `None` if the string is not recognised.
+pub fn parse_branch_weighting(s: &str) -> Option<BranchWeighting> {
+    match s.to_lowercase().as_str() {
+        "hard_mask" | "hardmask" | "mask" => Some(BranchWeighting::HardMask),
+        "fate_probability" | "fateprobability" | "fate_prob" => {
+            Some(BranchWeighting::FateProbability)
+        }
+        _ => None,
     }
 }

@@ -37,6 +37,7 @@ use rand::prelude::*;
 use rand::rngs::StdRng;
 use rand_distr::{Distribution, Normal};
 
+use bixverse_rs::core::math::sparse::LanczosParams;
 use bixverse_rs::gpu::linalg::sparse_gpu::GpuCompressedSparseData;
 use bixverse_rs::gpu::sc_gpu::kernels::seacells_kernels::{
     A_COLUMNS_WG_TIERS, B_ARGMIN_BLOCKS, a_columns_capacity, a_columns_segments,
@@ -718,6 +719,7 @@ fn e2e_params(n_sea_cells: usize, knn: usize) -> SEACellsParams {
         pruning_threshold: 1e-7,
         n_landmarks: None,
         knn_params,
+        lanczos_params: LanczosParams::default(),
     }
 }
 

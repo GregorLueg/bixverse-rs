@@ -82,7 +82,7 @@ pub struct ScDblFinderParams {
 
     // -- Classification --
     /// Maximum number of boosting rounds.
-    pub n_trees: usize,
+    pub gbm_n_trees: usize,
     /// Maximum tree depth (shallow trees, 3-5, work best).
     pub max_depth: usize,
     /// Shrinkage applied to each tree's predictions.
@@ -134,7 +134,7 @@ impl Default for ScDblFinderParams {
             fast_cluster_params: FastLouvainParams::default(),
             knn_params: KnnParams::default(),
             n_iterations: 3,
-            n_trees: 200,
+            gbm_n_trees: 200,
             max_depth: 4,
             learning_rate: 0.3,
             min_samples_leaf: 20,
@@ -1609,7 +1609,7 @@ impl<'a, S: SingleCellReading> ScDblFinder<'a, S> {
 
         // classifier config
         let gbm_config = LogisticGbmConfig {
-            max_rounds: self.params.n_trees,
+            max_rounds: self.params.gbm_n_trees,
             learning_rate: self.params.learning_rate,
             max_depth: self.params.max_depth,
             min_samples_leaf: self.params.min_samples_leaf,

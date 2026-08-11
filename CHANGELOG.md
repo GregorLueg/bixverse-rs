@@ -1,5 +1,16 @@
 # News
 
+## 0.4.1
+
+### Features
+
+- Faster HVG detections for single cell with a fix for the Loess function.
+- GPU-accelerated FastClusters for single cell (k-means executed on the GPU).
+- [Palantir](https://www.nature.com/articles/s41587-019-0068-4) for trajectory
+  inference.
+- [PAGA](https://link.springer.com/article/10.1186/s13059-019-1663-x) for
+  trajectory analysis.
+
 ## 0.4.0
 
 Breaking changes in the streaming engine.

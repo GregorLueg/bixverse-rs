@@ -5,8 +5,13 @@ use std::collections::HashMap;
 
 use crate::gpu::ml::k_means_gpu::KMeansGpuParams;
 #[cfg(feature = "single-cell")]
+use crate::gpu::sc_gpu::fast_clusters_gpu::FastLouvainParamsGpu;
+#[cfg(feature = "single-cell")]
 use crate::gpu::sc_gpu::harmony_gpu::HarmonyParamsV2Gpu;
 use crate::ml::clustering::k_means::parse_kmeans_init;
+#[cfg(feature = "single-cell")]
+use crate::single_cell::sc_processing::knn::KnnParams;
+use crate::utils::r_rust_interface::r_list_to_map;
 
 /////////////////////
 // KMeansGpuParams //
@@ -23,7 +28,7 @@ impl KMeansGpuParams {
     ///
     /// The [KMeansGpuParams] populated by the R list.
     pub fn from_r_list(r_list: List) -> Result<Self> {
-        let params_list: HashMap<&str, Robj> = r_list.try_into()?;
+        let params_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
         let iters = params_list
             .get("k_means_iter")
@@ -49,6 +54,81 @@ impl KMeansGpuParams {
     }
 }
 
+//////////////////////////
+// FastLouvainParamsGpu //
+//////////////////////////
+
+#[cfg(feature = "single-cell")]
+impl FastLouvainParamsGpu {
+    /// Generate [FastLouvainParamsGpu] from an R list.
+    ///
+    /// Should values not be found within the List, the parameters will default
+    /// to the values defined in `FastLouvainParamsGpu::default()`. Field names
+    /// mirror the CPU `FastLouvainParams::from_r_list`, with the k-means block
+    /// coming from the GPU keys (`k_means_iter`, `k_means_init`, `fixed`,
+    /// `quantise`) instead of the CPU ones.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the fast Louvain parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The [FastLouvainParamsGpu] with all parameters set.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let knn_params = KnnParams::from_r_list(r_list.clone())?;
+        let kmeans_params = Some(KMeansGpuParams::from_r_list(r_list.clone())?);
+
+        let defaults = Self::default();
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+
+        let n_centroids = params
+            .get("n_centroids")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.n_centroids);
+        let same_weight = params
+            .get("same_weight")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.same_weight);
+        let full_snn = params
+            .get("full_snn")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.full_snn);
+        let pruning = params
+            .get("pruning")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32);
+        let snn_similarity = std::string::String::from(
+            params
+                .get("snn_similarity")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&defaults.snn_similarity),
+        );
+        let louvain_iters = params
+            .get("louvain_iters")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.louvain_iters);
+        let multi_level_louvain = params
+            .get("multi_level_louvain")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.multi_level_louvain);
+
+        Ok(Self {
+            n_centroids,
+            kmeans_params,
+            knn_params,
+            same_weight,
+            full_snn,
+            pruning,
+            snn_similarity,
+            louvain_iters,
+            multi_level_louvain,
+        })
+    }
+}
+
 ////////////////////////
 // HarmonyParamsV2Gpu //
 ////////////////////////
@@ -71,7 +151,7 @@ impl HarmonyParamsV2Gpu {
     /// The `HarmonyParamsV2Gpu` with all parameters set.
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let defaults = Self::default();
-        let params_list: HashMap<&str, Robj> = r_list.try_into()?;
+        let params_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
         let k = params_list
             .get("k")

@@ -47,6 +47,17 @@ pub fn parse_knn_symmetrisation(s: &str) -> Option<KnnSymmetrisation> {
 }
 
 ////////////
+// Consts //
+////////////
+
+/// Divisor behind the adaptive bandwidth's neighbour rank.
+///
+/// The reference's `adaptive_k = floor(n_neighbors / 3)`, indexed one back. A
+/// third of the neighbourhood is far enough out to be a stable local scale and
+/// close enough in to still be local.
+const BANDWIDTH_RANK_DIVISOR: usize = 3;
+
+////////////
 // Params //
 ////////////
 
@@ -95,6 +106,9 @@ pub struct SEACellsParams {
     /// [KnnParams] for the various approximate nearest neighbour searches
     /// in ann-search-rs
     pub knn_params: KnnParams,
+    // -- eigensolver --
+    /// [LanczosParams] for the diffusion-map eigendecomposition.
+    pub lanczos_params: LanczosParams,
 }
 
 impl SEACellsParams {
@@ -122,6 +136,8 @@ impl SEACellsParams {
             n_landmarks: None,
             // knn
             knn_params: KnnParams::default(),
+            // eigensolver
+            lanczos_params: LanczosParams::default(),
         }
     }
 }
@@ -266,7 +282,22 @@ fn frobenius_norm_sq_f64(mat: &CompressedSparseData2<f32>) -> f64 {
 /// which is the same set the weights are computed over. Taking it from a
 /// separately requested `k` breaks that invariant: it indexes out of bounds
 /// when the supplied graph is narrower, and picks a bandwidth from the wrong
-/// part of the neighbourhood when it is wider.
+/// part of the neighbourhood when it is wider. The consequence worth knowing
+/// about is that the *caller's* graph width sets the kernel bandwidth, so a
+/// pipeline whose `params.knn` disagrees with the width of the `knn_indices` it
+/// hands over gets the width, silently.
+///
+/// The rank is [BANDWIDTH_RANK_DIVISOR] into a **self-inclusive** count. The
+/// reference asks scanpy for `n_neighbors = 30`, gets 29 stored distances back
+/// with the self hit excluded, and indexes rank `floor(30 / 3) - 1 = 9` into
+/// them. Deriving the rank from the 29 instead lands on rank 8, one neighbour
+/// tighter, and every kernel bandwidth comes out slightly smaller.
+///
+/// A row of duplicate cells gives a zero bandwidth, and the matching zero
+/// distance then turns the weight into `0 / 0 = NaN`. Zero and non-finite
+/// bandwidths are replaced by the smallest positive one in the set, mirroring
+/// [crate::single_cell::sc_trajectory::markov::build_waypoint_transitions]; the
+/// reference divides by zero and silently kills the row.
 ///
 /// ### Params
 ///
@@ -277,7 +308,8 @@ fn frobenius_norm_sq_f64(mat: &CompressedSparseData2<f32>) -> f64 {
 ///
 /// ### Returns
 ///
-/// Symmetric kernel matrix, or an error when a cell has no neighbours.
+/// Symmetric kernel matrix, or an error when a cell has no neighbours or the
+/// kernel comes out non-finite.
 pub fn compute_diffusion_kernel(
     knn_indices: &[Vec<usize>],
     knn_distances: &[Vec<f32>],
@@ -285,7 +317,7 @@ pub fn compute_diffusion_kernel(
 ) -> Result<CompressedSparseData2<f32>, BixverseErrors> {
     let n = knn_indices.len();
 
-    let adaptive_std: Vec<f32> = knn_distances
+    let mut adaptive_std: Vec<f32> = knn_distances
         .iter()
         .enumerate()
         .map(|(i, dists)| {
@@ -293,8 +325,10 @@ pub fn compute_diffusion_kernel(
             // total_cmp rather than partial_cmp: a NaN distance in a
             // caller-supplied graph would otherwise panic the sort.
             sorted.sort_by(|a, b| a.total_cmp(b));
+            // `+ 1` puts the count back on the reference's self-inclusive
+            // footing; the supplied row has the self hit removed.
             sorted
-                .get((dists.len() / 3).max(1) - 1)
+                .get(((dists.len() + 1) / BANDWIDTH_RANK_DIVISOR).max(1) - 1)
                 .copied()
                 .ok_or_else(|| {
                     BixverseErrors::InvalidArgument(format!(
@@ -303,6 +337,22 @@ pub fn compute_diffusion_kernel(
                 })
         })
         .collect::<Result<Vec<f32>, BixverseErrors>>()?;
+
+    let smallest_positive = adaptive_std
+        .iter()
+        .copied()
+        .filter(|s| *s > 0.0)
+        .fold(f32::INFINITY, f32::min);
+    let fallback = if smallest_positive.is_finite() {
+        smallest_positive
+    } else {
+        1.0
+    };
+    for s in adaptive_std.iter_mut() {
+        if !s.is_finite() || *s <= 0.0 {
+            *s = fallback;
+        }
+    }
 
     let mut rows = Vec::new();
     let mut cols = Vec::new();
@@ -330,6 +380,14 @@ pub fn compute_diffusion_kernel(
 
     let res = sparse_add_csr(&w, &w_t)?;
 
+    // A NaN here survives everything downstream: `f32::min` / `f32::max` swallow
+    // it in the min-max scaling, every NaN comparison in the boundary scan is
+    // false, and it finally lands on a `partial_cmp().unwrap()` in the waypoint
+    // sampler. Catch it where it is still attributable.
+    if res.data.par_iter().any(|v| !v.is_finite()) {
+        return Err(BixverseErrors::DiffusionKernelNotFinite { n_cells: n });
+    }
+
     Ok(res)
 }
 
@@ -342,15 +400,55 @@ pub fn compute_diffusion_kernel(
 /// * `kernel` - Symmetric kernel matrix, normalised in place
 /// * `n_components` - Number of eigenvectors to compute
 /// * `seed` - Random seed for the Lanczos start vector
+/// * `lanczos_params` - Optional [LanczosParams] for the eigensolver, defaulted
+///   when `None`. A diffusion kernel over a long, thin manifold has a tightly
+///   clustered spectrum, so the restart budget is what decides whether the
+///   components come back resolved.
 ///
 /// ### Returns
 ///
-/// (eigenvalues, eigenvectors) where eigenvectors is (n × n_components)
+/// `(eigenvalues, eigenvectors)`, the eigenvectors `n` by the returned
+/// eigenvalue count. That count is `min(n_components, n)` and can be smaller
+/// still when the solver hits an invariant subspace, so read it off the result
+/// rather than assuming `n_components`. Eigenvalues are `f64` because the
+/// multiscale scaling forms `lambda / (1 - lambda)` and `lambda` sits within a
+/// few `f32` ulps of one for any well-connected kernel.
 pub fn diffusion_map_from_kernel(
     kernel: &mut CompressedSparseData2<f32>,
     n_components: usize,
     seed: u64,
-) -> Result<(Vec<f32>, Vec<Vec<f32>>), BixverseErrors> {
+    lanczos_params: Option<LanczosParams>,
+) -> Result<(Vec<f64>, Vec<Vec<f32>>), BixverseErrors> {
+    let res = diffusion_map_from_kernel_diag(kernel, n_components, seed, lanczos_params)?;
+    Ok((res.eigenvalues, res.eigenvectors))
+}
+
+/// Compute diffusion maps from a kernel matrix, keeping the solver diagnostics
+///
+/// Same normalisation and solve as [diffusion_map_from_kernel]. A trajectory is
+/// a long, thin manifold, which is the worst case for the eigensolver, and a
+/// budget-exhausted solve is otherwise indistinguishable from a converged one:
+/// the embedding comes back as noise and every result downstream still looks
+/// perfectly well formed. Callers that report to a user should take this one.
+///
+/// ### Params
+///
+/// * `kernel` - Symmetric kernel matrix, normalised in place
+/// * `n_components` - Number of eigenvectors to compute
+/// * `seed` - Random seed for the Lanczos start vector
+/// * `lanczos_params` - Optional [LanczosParams] for the eigensolver, defaulted
+///   when `None`.
+///
+/// ### Returns
+///
+/// The [LanczosResult], carrying the eigenpairs alongside `converged`,
+/// `residual`, `norm_estimate` and `restarts`.
+pub fn diffusion_map_from_kernel_diag(
+    kernel: &mut CompressedSparseData2<f32>,
+    n_components: usize,
+    seed: u64,
+    lanczos_params: Option<LanczosParams>,
+) -> Result<LanczosResult, BixverseErrors> {
     // Compute row sums (degrees)
     let row_sums: Vec<f32> = (0..kernel.shape.0)
         .map(|i| {
@@ -370,53 +468,73 @@ pub fn diffusion_map_from_kernel(
         }
     }
 
-    compute_largest_eigenpairs_lanczos(kernel, n_components, seed)
+    compute_largest_eigenpairs_lanczos_diag(kernel, n_components, seed, lanczos_params)
 }
+
+/// Largest eigenvalue admitted into the `lambda / (1 - lambda)` scaling.
+///
+/// A diffusion operator has `lambda_0 = 1` exactly and, on a nearly
+/// disconnected graph, several more within rounding of it. The unclamped scale
+/// then overflows and poisons every downstream distance. Clamping at
+/// `1 - 1e-10` caps the scale at `1e10`, orders of magnitude beyond any real
+/// diffusion component, so genuine signal is untouched.
+const MAX_MULTISCALE_LAMBDA: f64 = 1.0 - 1e-10;
 
 /// Determine multiscale space by scaling eigenvectors
 ///
-/// Scales eigenvectors by λᵢ/(1-λᵢ) for diffusion distance metric.
+/// Scales eigenvectors by λᵢ/(1-λᵢ) for diffusion distance metric. The scaling
+/// is done in `f64` and the eigenvalue clamped below one first; `1 - lambda` is
+/// a subtraction of nearly equal numbers and loses every significant digit in
+/// `f32` for the leading components.
 ///
 /// ### Params
 ///
 /// * `eigenvalues` - Eigenvalues from diffusion maps
-/// * `eigenvectors` - Eigenvectors (n × n_components)
+/// * `eigenvectors` - Eigenvectors (n × components), the column count matching
+///   `eigenvalues`
 /// * `n_eigs` - Optional number of eigenvectors to use (None = auto-detect via
-///   eigengap)
+///   eigengap). Silently capped at the number actually available, because the
+///   eigensolver can return fewer pairs than were asked for.
 ///
 /// ### Returns
 ///
-/// Scaled eigenvectors (n × n_eigs)
+/// Scaled eigenvectors, `n` by `max(0, used - 1)`, the trivial leading
+/// eigenvector dropped. Empty rows when fewer than two eigenvalues are
+/// available.
 pub fn determine_multiscale_space(
-    eigenvalues: &[f32],
+    eigenvalues: &[f64],
     eigenvectors: &[Vec<f32>],
     n_eigs: Option<usize>,
 ) -> Vec<Vec<f32>> {
     let n = eigenvectors.len();
+    let available = eigenvalues
+        .len()
+        .min(eigenvectors.first().map_or(0, Vec::len));
 
     // auto-detect n_eigs using eigengap if not provided
-    let use_n_eigs = if let Some(n) = n_eigs {
+    let requested = if let Some(n) = n_eigs {
         n
     } else {
-        let gaps: Vec<f32> = eigenvalues.windows(2).map(|w| w[0] - w[1]).collect();
+        let gaps: Vec<f64> = eigenvalues.windows(2).map(|w| w[0] - w[1]).collect();
 
         let max_gap_idx = gaps
             .iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .max_by(|(_, a), (_, b)| a.total_cmp(b))
             .map(|(idx, _)| idx + 1)
             .unwrap_or(3);
 
-        max_gap_idx.max(3).min(eigenvalues.len())
+        max_gap_idx.max(3)
     };
 
+    let use_n_eigs = requested.min(available);
     let use_indices: Vec<usize> = (1..use_n_eigs).collect();
 
     let mut scaled = vec![vec![0.0f32; use_indices.len()]; n];
 
     for (out_idx, &eig_idx) in use_indices.iter().enumerate() {
-        let lambda = eigenvalues[eig_idx];
-        let scale = lambda / (1.0 - lambda);
+        let lambda = eigenvalues[eig_idx].min(MAX_MULTISCALE_LAMBDA);
+        let scale = (lambda / (1.0 - lambda)) as f32;
 
         for i in 0..n {
             scaled[i][out_idx] = eigenvectors[i][eig_idx] * scale;
@@ -439,10 +557,15 @@ pub fn determine_multiscale_space(
 ///
 /// ### Returns
 ///
-/// Indices of selected waypoints
-fn max_min_sampling(data: &[Vec<f32>], num_waypoints: usize, seed: u64) -> Vec<usize> {
+/// Indices of selected waypoints. Empty when there is nothing to sample over,
+/// which happens when the diffusion map came back with fewer than two
+/// components and the multiscale space is therefore zero-width.
+pub fn max_min_sampling(data: &[Vec<f32>], num_waypoints: usize, seed: u64) -> Vec<usize> {
     let n = data.len();
-    let n_dims = data[0].len();
+    let n_dims = data.first().map_or(0, Vec::len);
+    if n == 0 || n_dims == 0 {
+        return Vec::new();
+    }
     let no_iterations = (num_waypoints / n_dims).max(1);
 
     let mut rng = StdRng::seed_from_u64(seed);
@@ -2000,8 +2123,12 @@ impl<'a> SEACells<'a> {
 
         let mut kernel = compute_diffusion_kernel(knn_indices, knn_distances, squared_dist)?;
 
-        let (eigenvalues, eigenvectors) =
-            diffusion_map_from_kernel(&mut kernel, self.params.knn_params.k, seed)?;
+        let (eigenvalues, eigenvectors) = diffusion_map_from_kernel(
+            &mut kernel,
+            self.params.knn_params.k,
+            seed,
+            Some(self.params.lanczos_params),
+        )?;
 
         let multiscale = determine_multiscale_space(&eigenvalues, &eigenvectors, Some(10));
         let waypoint_ix = max_min_sampling(&multiscale, k, seed);
@@ -2109,11 +2236,16 @@ impl<'a> SEACells<'a> {
         let mut ll_kernel = compute_diffusion_kernel(&ll_idx, &ll_dist, squared_dist)?;
 
         let n_eigs = k_ll.min(l - 1).max(11);
-        let (evals, evecs) = diffusion_map_from_kernel(&mut ll_kernel, n_eigs, seed)?;
+        let (evals, evecs) = diffusion_map_from_kernel(
+            &mut ll_kernel,
+            n_eigs,
+            seed,
+            Some(self.params.lanczos_params),
+        )?;
 
         let landmark_multiscale = determine_multiscale_space(&evals, &evecs, Some(10));
-        let n_components = landmark_multiscale[0].len();
-        let used_lambdas: Vec<f32> = (1..=n_components).map(|i| evals[i]).collect();
+        let n_components = landmark_multiscale.first().map_or(0, Vec::len);
+        let used_lambdas: Vec<f32> = (1..=n_components).map(|i| evals[i] as f32).collect();
 
         if verbosity.normal_verbosity() {
             println!(
@@ -3268,6 +3400,7 @@ mod tests {
             (K2B_REFRESH_EVERY + 4, true, 5e-2),
         ] {
             let params = SEACellsParams {
+                lanczos_params: LanczosParams::default(),
                 n_sea_cells: k,
                 max_fw_iters,
                 convergence_epsilon: 1e-3,
@@ -3360,6 +3493,7 @@ mod tests {
 
         for (pruning, threshold) in [(false, 0.0f32), (true, 1e-7), (true, 5e-2)] {
             let params = SEACellsParams {
+                lanczos_params: LanczosParams::default(),
                 n_sea_cells: k,
                 max_fw_iters: 50,
                 convergence_epsilon: 1e-3,
@@ -3481,6 +3615,7 @@ mod tests {
         let n = 200usize;
         let k = 200usize;
         let params = SEACellsParams {
+            lanczos_params: LanczosParams::default(),
             n_sea_cells: k,
             max_fw_iters: 50,
             convergence_epsilon: 1e-3,
@@ -3543,11 +3678,24 @@ mod tests {
     /// individually dwarf the result, so cancellation is the risk that would
     /// justify keeping the materialising path. It does not materialise: the two
     /// agree well inside the convergence threshold at every size tested.
+    ///
+    /// The kernel is dense, so the materialising path costs `O(n^2)` and the two
+    /// larger sizes were five seconds of the crate's test time on their own.
+    /// They stay behind `large_scale_diagnostics`; 2000 cells run everywhere and
+    /// assert the same bound. `test_rss_trace_survives_near_total_cancellation`
+    /// covers the regime where the cancellation is worst, which is `k = n`
+    /// rather than large `n`.
     #[test]
     fn test_rss_paths_agree() {
-        for n in [2000usize, 8000, 20000] {
+        #[cfg(not(feature = "large_scale_diagnostics"))]
+        let sizes: &[usize] = &[2000];
+        #[cfg(feature = "large_scale_diagnostics")]
+        let sizes: &[usize] = &[2000, 8000, 20000];
+
+        for &n in sizes {
             let k = (n / 75).max(8);
             let params = SEACellsParams {
+                lanczos_params: LanczosParams::default(),
                 n_sea_cells: k,
                 max_fw_iters: 50,
                 convergence_epsilon: 1e-3,
@@ -3667,10 +3815,152 @@ mod tests {
     }
 
     #[test]
-    fn test_diffusion_kernel_nan_distance_does_not_panic() {
+    fn test_diffusion_kernel_nan_distance_errors_rather_than_panics() {
         let (indices, mut distances) = ring_knn(10, 6);
         distances[3][2] = f32::NAN;
-        // total_cmp sorts NaN to the end rather than panicking the comparator.
-        assert!(compute_diffusion_kernel(&indices, &distances, false).is_ok());
+
+        // total_cmp sorts NaN to the end rather than panicking the comparator,
+        // so the bandwidth pass survives. The NaN then reaches the weight and
+        // has to be caught here: `f32::min` / `f32::max` swallow it in the
+        // min-max scaling, every NaN comparison in the boundary scan is false,
+        // and the panic finally lands in the waypoint sampler with nothing left
+        // pointing back at the kNN input.
+        assert!(matches!(
+            compute_diffusion_kernel(&indices, &distances, false),
+            Err(BixverseErrors::DiffusionKernelNotFinite { n_cells: 10 })
+        ));
+    }
+
+    /// A one-dimensional kNN fixture with cell 1 sitting exactly on cell 0.
+    ///
+    /// Four supplied neighbours puts the bandwidth rank at
+    /// `((4 + 1) / 3).max(1) - 1 = 0`, the nearest neighbour, which for both
+    /// duplicates is a distance of zero.
+    ///
+    /// ### Params
+    ///
+    /// * `mutual` - Keep the duplicate pair in both directions. With `false`,
+    ///   cell 1 drops cell 0 from its row, which is what an approximate backend
+    ///   returning an asymmetric graph looks like.
+    ///
+    /// ### Returns
+    ///
+    /// `(indices, distances)`, distances un-squared.
+    fn duplicate_cell_knn(mutual: bool) -> (Vec<Vec<usize>>, Vec<Vec<f32>>) {
+        let n = 8usize;
+        let coords: Vec<f32> = (0..n)
+            .map(|i| if i == 1 { 0.0 } else { i as f32 })
+            .collect();
+
+        let mut indices = Vec::with_capacity(n);
+        let mut distances = Vec::with_capacity(n);
+        for i in 0..n {
+            let mut order: Vec<usize> = (0..n)
+                .filter(|&j| j != i && (mutual || i != 1 || j != 0))
+                .collect();
+            order.sort_by(|&a, &b| {
+                (coords[a] - coords[i])
+                    .abs()
+                    .total_cmp(&(coords[b] - coords[i]).abs())
+            });
+            order.truncate(4);
+            distances.push(
+                order
+                    .iter()
+                    .map(|&j| (coords[j] - coords[i]).abs())
+                    .collect::<Vec<f32>>(),
+            );
+            indices.push(order);
+        }
+
+        (indices, distances)
+    }
+
+    #[test]
+    fn test_diffusion_kernel_keeps_the_row_of_a_duplicated_cell() {
+        // A zero bandwidth turns every one of that cell's outgoing weights into
+        // `exp(-d / 0)`, which is an exact zero for `d > 0` and NaN for the
+        // duplicate itself. `coo_to_csr` drops the zeros and `sparse_add_csr`
+        // drops the NaN, since `NaN.abs() > EPSILON` is false, so the row is
+        // silently gutted rather than blowing up. That is the reference's
+        // behaviour and it is what the smallest-positive fallback exists to
+        // avoid.
+        let (indices, distances) = duplicate_cell_knn(true);
+        assert_eq!(distances[0][0], 0.0);
+
+        let kernel = compute_diffusion_kernel(&indices, &distances, false).unwrap();
+
+        assert!(kernel.data.iter().all(|v| v.is_finite()));
+
+        // Cell 0 keeps every neighbour it was given, the duplicate included.
+        let lo = kernel.indptr[0] as usize;
+        let hi = kernel.indptr[1] as usize;
+        assert!(
+            kernel.indices[lo..hi].contains(&1),
+            "the edge to the duplicate was dropped"
+        );
+        assert_eq!(hi - lo, 4, "cell 0 lost neighbours to a zero bandwidth");
+        assert!(kernel.data[lo..hi].iter().all(|&v| v > 0.0));
+    }
+
+    #[test]
+    fn test_diffusion_kernel_survives_a_one_sided_duplicate() {
+        // The dangerous shape. With the duplicate pair stored both ways the
+        // `0 -> 1` NaN meets the `1 -> 0` NaN in `sparse_add_csr`, sums to NaN,
+        // and is dropped because `NaN.abs() > EPSILON` is false. Stored one way
+        // only, it never meets a partner and reaches the output, where nothing
+        // downstream can see it: `f32::min` / `f32::max` swallow it in the
+        // min-max scaling, every NaN comparison in the boundary scan is false,
+        // and the panic finally lands in `max_min_sampling` naming nothing.
+        let (indices, distances) = duplicate_cell_knn(false);
+
+        // Cell 0 gets a zero bandwidth, cell 1 does not, so only the 0 -> 1
+        // direction is degenerate.
+        assert_eq!(distances[0][0], 0.0);
+        assert!(distances[1][0] > 0.0);
+
+        let kernel = compute_diffusion_kernel(&indices, &distances, false).unwrap();
+
+        assert!(kernel.data.iter().all(|v| v.is_finite()));
+        let lo = kernel.indptr[0] as usize;
+        let hi = kernel.indptr[1] as usize;
+        assert!(kernel.indices[lo..hi].contains(&1));
+    }
+
+    #[test]
+    fn test_diffusion_kernel_bandwidth_rank_is_self_inclusive() {
+        // The reference asks scanpy for `n_neighbors = 30`, gets 29 stored
+        // distances and indexes rank `floor(30 / 3) - 1 = 9`. Feeding 29
+        // neighbours here has to land on the same rank, not on 8.
+        let n = 40usize;
+        let mut indices = Vec::with_capacity(n);
+        let mut distances = Vec::with_capacity(n);
+        for i in 0..n {
+            let mut order: Vec<usize> = (0..n).filter(|&j| j != i).collect();
+            order.sort_by_key(|&j| j.abs_diff(i));
+            order.truncate(29);
+            distances.push(
+                order
+                    .iter()
+                    .map(|&j| j.abs_diff(i) as f32)
+                    .collect::<Vec<f32>>(),
+            );
+            indices.push(order);
+        }
+
+        let kernel = compute_diffusion_kernel(&indices, &distances, false).unwrap();
+
+        // Cell 20 sits in the middle, so its sorted distances run
+        // 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, ... and rank 9 is 5 while rank 8 is 4.
+        // The self edge is absent, so the nearest stored weight is exp(-1/sigma)
+        // doubled by the symmetrisation.
+        let lo = kernel.indptr[20] as usize;
+        let hi = kernel.indptr[20 + 1] as usize;
+        let nearest = kernel.data[lo..hi]
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max);
+
+        assert_relative_eq!(nearest, 2.0 * (-1.0f32 / 5.0).exp(), epsilon = 1e-6);
     }
 }

@@ -93,7 +93,7 @@ where
     ///
     /// The `DgrdlParams` structure based on the R list
     pub fn from_r_list(r_list: List) -> Result<DgrdlParams<f64>> {
-        let dgrdl_params: HashMap<&str, Robj> = r_list.try_into()?;
+        let dgrdl_params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
         let sparsity = dgrdl_params
             .get("sparsity")
@@ -158,7 +158,7 @@ impl<T: BixverseFloat> IcaParams<T> {
     ///
     /// `IcaParams` parameter structure.
     pub fn from_r_list(r_list: List) -> Result<IcaParams<f64>> {
-        let ica_params: HashMap<&str, Robj> = r_list.try_into()?;
+        let ica_params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
         let maxit = ica_params
             .get("maxit")
@@ -248,7 +248,7 @@ where
     ///
     /// The [HalsOpts]
     pub fn from_r_list(r_list: List, seed: usize) -> Result<HalsOpts<T>> {
-        let params: HashMap<&str, Robj> = r_list.try_into()?;
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
         let defaults: HalsOpts<T> = HalsOpts::default();
 
         let max_iter = params

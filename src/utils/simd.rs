@@ -377,6 +377,25 @@ pub trait BixverseSimd:
     ///
     /// The sum of the squared deviations.
     fn bxv_sum_squared_deviation(x: &[Self], mean: Self) -> Self;
+
+    /// Scaled vector addition, `y += a * x`, in place.
+    ///
+    /// The inner step of any sparse-operator-times-dense-block kernel, where
+    /// `y` is one contiguous output row and `x` one contiguous input row.
+    ///
+    /// Defaulted to a scalar loop so that adding it did not break the trait for
+    /// out-of-crate implementors. Both in-crate impls override it.
+    ///
+    /// ### Params
+    ///
+    /// * `y` - Accumulator, updated in place.
+    /// * `a` - Scalar multiplier.
+    /// * `x` - Slice added into `y` (must be the same length as `y`).
+    fn bxv_axpy_simd(y: &mut [Self], a: Self, x: &[Self]) {
+        for (y_i, &x_i) in y.iter_mut().zip(x.iter()) {
+            *y_i += a * x_i;
+        }
+    }
 }
 
 impl BixverseSimd for f32 {
@@ -394,6 +413,11 @@ impl BixverseSimd for f32 {
     fn bxv_sum_squared_deviation(x: &[f32], mean: f32) -> f32 {
         sum_squared_dev_simd_f32(x, mean)
     }
+
+    #[inline]
+    fn bxv_axpy_simd(y: &mut [f32], a: f32, x: &[f32]) {
+        axpy_simd_f32(y, a, x)
+    }
 }
 
 impl BixverseSimd for f64 {
@@ -410,6 +434,11 @@ impl BixverseSimd for f64 {
     #[inline]
     fn bxv_sum_squared_deviation(x: &[f64], mean: f64) -> f64 {
         sum_squared_dev_simd_f64(x, mean)
+    }
+
+    #[inline]
+    fn bxv_axpy_simd(y: &mut [f64], a: f64, x: &[f64]) {
+        axpy_simd_f64(y, a, x)
     }
 }
 
@@ -2097,6 +2126,289 @@ pub fn sum_squared_dev_simd_f64(a: &[f64], mean: f64) -> f64 {
     }
 }
 
+//////////
+// Axpy //
+//////////
+
+// `y += a * x`. Unlike every reduction above this is a store loop, so there is
+// no accumulator dependency chain to hide and `UNROLL` buys nothing: the kernel
+// is bound by the two streams it moves, not by FMA latency. Each arm is a plain
+// vector loop with a scalar tail.
+
+/////////
+// f32 //
+/////////
+
+/// Scaled vector addition `y += a * x` for f32 (scalar)
+///
+/// ### Params
+///
+/// * `y` - Accumulator, updated in place.
+/// * `a` - Scalar multiplier.
+/// * `x` - Slice added into `y` (must be the same length as `y`).
+#[inline(always)]
+fn axpy_scalar_f32(y: &mut [f32], a: f32, x: &[f32]) {
+    for (y_i, &x_i) in y.iter_mut().zip(x.iter()) {
+        *y_i += a * x_i;
+    }
+}
+
+/// Scaled vector addition `y += a * x` for f32 (128-bit)
+///
+/// ### Params
+///
+/// * `y` - Accumulator, updated in place.
+/// * `a` - Scalar multiplier.
+/// * `x` - Slice added into `y` (must be the same length as `y`).
+#[inline(always)]
+fn axpy_sse_f32(y: &mut [f32], a: f32, x: &[f32]) {
+    const W: usize = 4;
+    let len = y.len();
+    let chunks = len / W;
+    let va = f32x4::splat(a);
+
+    unsafe {
+        let x_ptr = x.as_ptr();
+        let y_ptr = y.as_mut_ptr();
+        for i in 0..chunks {
+            let off = i * W;
+            let vx = f32x4::from(*(x_ptr.add(off) as *const [f32; W]));
+            let vy = f32x4::from(*(y_ptr.add(off) as *const [f32; W]));
+            *(y_ptr.add(off) as *mut [f32; W]) = vx.mul_add(va, vy).to_array();
+        }
+    }
+
+    axpy_scalar_f32(&mut y[chunks * W..], a, &x[chunks * W..]);
+}
+
+/// Scaled vector addition `y += a * x` for f32 (256-bit)
+///
+/// ### Params
+///
+/// * `y` - Accumulator, updated in place.
+/// * `a` - Scalar multiplier.
+/// * `x` - Slice added into `y` (must be the same length as `y`).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "fma")]
+unsafe fn axpy_avx2_f32(y: &mut [f32], a: f32, x: &[f32]) {
+    const W: usize = 8;
+    let len = y.len();
+    let chunks = len / W;
+
+    unsafe {
+        let va = _mm256_set1_ps(a);
+        let x_ptr = x.as_ptr();
+        let y_ptr = y.as_mut_ptr();
+        for i in 0..chunks {
+            let off = i * W;
+            let vx = _mm256_loadu_ps(x_ptr.add(off));
+            let vy = _mm256_loadu_ps(y_ptr.add(off));
+            _mm256_storeu_ps(y_ptr.add(off), _mm256_fmadd_ps(vx, va, vy));
+        }
+    }
+
+    axpy_scalar_f32(&mut y[chunks * W..], a, &x[chunks * W..]);
+}
+
+/// Scaled vector addition `y += a * x` for f32 (512-bit)
+///
+/// ### Params
+///
+/// * `y` - Accumulator, updated in place.
+/// * `a` - Scalar multiplier.
+/// * `x` - Slice added into `y` (must be the same length as `y`).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn axpy_avx512_f32(y: &mut [f32], a: f32, x: &[f32]) {
+    const W: usize = 16;
+    let len = y.len();
+    let chunks = len / W;
+
+    unsafe {
+        let va = _mm512_set1_ps(a);
+        let x_ptr = x.as_ptr();
+        let y_ptr = y.as_mut_ptr();
+        for i in 0..chunks {
+            let off = i * W;
+            let vx = _mm512_loadu_ps(x_ptr.add(off));
+            let vy = _mm512_loadu_ps(y_ptr.add(off));
+            _mm512_storeu_ps(y_ptr.add(off), _mm512_fmadd_ps(vx, va, vy));
+        }
+    }
+
+    axpy_scalar_f32(&mut y[chunks * W..], a, &x[chunks * W..]);
+}
+
+/// Scaled vector addition `y += a * x` for f32 (dispatch)
+///
+/// ### Params
+///
+/// * `y` - Accumulator, updated in place.
+/// * `a` - Scalar multiplier.
+/// * `x` - Slice added into `y`.
+///
+/// ### Panics
+///
+/// If `x` and `y` differ in length.
+#[inline]
+pub fn axpy_simd_f32(y: &mut [f32], a: f32, x: &[f32]) {
+    assert_eq!(y.len(), x.len(), "axpy operands differ in length");
+
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: see `sum_squares_simd_f32`.
+    unsafe {
+        match detect_simd_level() {
+            SimdLevel::Avx512 => axpy_avx512_f32(y, a, x),
+            SimdLevel::Avx2 => axpy_avx2_f32(y, a, x),
+            SimdLevel::Sse => axpy_sse_f32(y, a, x),
+            SimdLevel::Scalar => axpy_scalar_f32(y, a, x),
+        }
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    match detect_simd_level() {
+        SimdLevel::Sse => axpy_sse_f32(y, a, x),
+        _ => axpy_scalar_f32(y, a, x),
+    }
+}
+
+/////////
+// f64 //
+/////////
+
+/// Scaled vector addition `y += a * x` for f64 (scalar)
+///
+/// ### Params
+///
+/// * `y` - Accumulator, updated in place.
+/// * `a` - Scalar multiplier.
+/// * `x` - Slice added into `y` (must be the same length as `y`).
+#[inline(always)]
+fn axpy_scalar_f64(y: &mut [f64], a: f64, x: &[f64]) {
+    for (y_i, &x_i) in y.iter_mut().zip(x.iter()) {
+        *y_i += a * x_i;
+    }
+}
+
+/// Scaled vector addition `y += a * x` for f64 (128-bit)
+///
+/// ### Params
+///
+/// * `y` - Accumulator, updated in place.
+/// * `a` - Scalar multiplier.
+/// * `x` - Slice added into `y` (must be the same length as `y`).
+#[inline(always)]
+fn axpy_sse_f64(y: &mut [f64], a: f64, x: &[f64]) {
+    const W: usize = 2;
+    let len = y.len();
+    let chunks = len / W;
+    let va = f64x2::splat(a);
+
+    unsafe {
+        let x_ptr = x.as_ptr();
+        let y_ptr = y.as_mut_ptr();
+        for i in 0..chunks {
+            let off = i * W;
+            let vx = f64x2::from(*(x_ptr.add(off) as *const [f64; W]));
+            let vy = f64x2::from(*(y_ptr.add(off) as *const [f64; W]));
+            *(y_ptr.add(off) as *mut [f64; W]) = vx.mul_add(va, vy).to_array();
+        }
+    }
+
+    axpy_scalar_f64(&mut y[chunks * W..], a, &x[chunks * W..]);
+}
+
+/// Scaled vector addition `y += a * x` for f64 (256-bit)
+///
+/// ### Params
+///
+/// * `y` - Accumulator, updated in place.
+/// * `a` - Scalar multiplier.
+/// * `x` - Slice added into `y` (must be the same length as `y`).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "fma")]
+unsafe fn axpy_avx2_f64(y: &mut [f64], a: f64, x: &[f64]) {
+    const W: usize = 4;
+    let len = y.len();
+    let chunks = len / W;
+
+    unsafe {
+        let va = _mm256_set1_pd(a);
+        let x_ptr = x.as_ptr();
+        let y_ptr = y.as_mut_ptr();
+        for i in 0..chunks {
+            let off = i * W;
+            let vx = _mm256_loadu_pd(x_ptr.add(off));
+            let vy = _mm256_loadu_pd(y_ptr.add(off));
+            _mm256_storeu_pd(y_ptr.add(off), _mm256_fmadd_pd(vx, va, vy));
+        }
+    }
+
+    axpy_scalar_f64(&mut y[chunks * W..], a, &x[chunks * W..]);
+}
+
+/// Scaled vector addition `y += a * x` for f64 (512-bit)
+///
+/// ### Params
+///
+/// * `y` - Accumulator, updated in place.
+/// * `a` - Scalar multiplier.
+/// * `x` - Slice added into `y` (must be the same length as `y`).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn axpy_avx512_f64(y: &mut [f64], a: f64, x: &[f64]) {
+    const W: usize = 8;
+    let len = y.len();
+    let chunks = len / W;
+
+    unsafe {
+        let va = _mm512_set1_pd(a);
+        let x_ptr = x.as_ptr();
+        let y_ptr = y.as_mut_ptr();
+        for i in 0..chunks {
+            let off = i * W;
+            let vx = _mm512_loadu_pd(x_ptr.add(off));
+            let vy = _mm512_loadu_pd(y_ptr.add(off));
+            _mm512_storeu_pd(y_ptr.add(off), _mm512_fmadd_pd(vx, va, vy));
+        }
+    }
+
+    axpy_scalar_f64(&mut y[chunks * W..], a, &x[chunks * W..]);
+}
+
+/// Scaled vector addition `y += a * x` for f64 (dispatch)
+///
+/// ### Params
+///
+/// * `y` - Accumulator, updated in place.
+/// * `a` - Scalar multiplier.
+/// * `x` - Slice added into `y`.
+///
+/// ### Panics
+///
+/// If `x` and `y` differ in length.
+#[inline]
+pub fn axpy_simd_f64(y: &mut [f64], a: f64, x: &[f64]) {
+    assert_eq!(y.len(), x.len(), "axpy operands differ in length");
+
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: see `sum_squares_simd_f32`.
+    unsafe {
+        match detect_simd_level() {
+            SimdLevel::Avx512 => axpy_avx512_f64(y, a, x),
+            SimdLevel::Avx2 => axpy_avx2_f64(y, a, x),
+            SimdLevel::Sse => axpy_sse_f64(y, a, x),
+            SimdLevel::Scalar => axpy_scalar_f64(y, a, x),
+        }
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    match detect_simd_level() {
+        SimdLevel::Sse => axpy_sse_f64(y, a, x),
+        _ => axpy_scalar_f64(y, a, x),
+    }
+}
+
 ///////////
 // Tests //
 ///////////
@@ -2379,5 +2691,118 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Every axpy arm must agree with the scalar reference elementwise.
+    ///
+    /// Tolerance rather than equality because the vector arms fuse the multiply
+    /// and add while the scalar loop may or may not, depending on what LLVM
+    /// contracts, so the intermediate rounding can differ by an ulp.
+    ///
+    /// The lengths sweep every lane boundary, so the scalar tail of each arm is
+    /// exercised as well as its vector body.
+    #[test]
+    fn test_axpy_widths_agree() {
+        let mut rng = StdRng::seed_from_u64(2024);
+
+        for len in LENGTHS {
+            let x32: Vec<f32> = (0..len).map(|_| rng.random::<f32>() * 2.0 - 1.0).collect();
+            let y32: Vec<f32> = (0..len).map(|_| rng.random::<f32>() * 2.0 - 1.0).collect();
+            let x64: Vec<f64> = x32.iter().map(|&v| v as f64).collect();
+            let y64: Vec<f64> = y32.iter().map(|&v| v as f64).collect();
+            let a32 = 0.75_f32;
+            let a64 = 0.75_f64;
+
+            let mut want32 = y32.clone();
+            axpy_scalar_f32(&mut want32, a32, &x32);
+            let mut want64 = y64.clone();
+            axpy_scalar_f64(&mut want64, a64, &x64);
+
+            // Dispatch, i.e. whatever this machine actually picks.
+            let mut got32 = y32.clone();
+            axpy_simd_f32(&mut got32, a32, &x32);
+            let mut got64 = y64.clone();
+            axpy_simd_f64(&mut got64, a64, &x64);
+            for i in 0..len {
+                assert_relative_eq!(got32[i], want32[i], epsilon = 1e-6, max_relative = 1e-6);
+                assert_relative_eq!(got64[i], want64[i], epsilon = 1e-14, max_relative = 1e-14);
+            }
+
+            let mut sse32 = y32.clone();
+            axpy_sse_f32(&mut sse32, a32, &x32);
+            let mut sse64 = y64.clone();
+            axpy_sse_f64(&mut sse64, a64, &x64);
+            for i in 0..len {
+                assert_relative_eq!(sse32[i], want32[i], epsilon = 1e-6, max_relative = 1e-6);
+                assert_relative_eq!(sse64[i], want64[i], epsilon = 1e-14, max_relative = 1e-14);
+            }
+
+            #[cfg(target_arch = "x86_64")]
+            {
+                if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+                    let mut avx32 = y32.clone();
+                    let mut avx64 = y64.clone();
+                    unsafe {
+                        axpy_avx2_f32(&mut avx32, a32, &x32);
+                        axpy_avx2_f64(&mut avx64, a64, &x64);
+                    }
+                    for i in 0..len {
+                        assert_relative_eq!(
+                            avx32[i],
+                            want32[i],
+                            epsilon = 1e-6,
+                            max_relative = 1e-6
+                        );
+                        assert_relative_eq!(
+                            avx64[i],
+                            want64[i],
+                            epsilon = 1e-14,
+                            max_relative = 1e-14
+                        );
+                    }
+                }
+
+                if is_x86_feature_detected!("avx512f") {
+                    let mut avx32 = y32.clone();
+                    let mut avx64 = y64.clone();
+                    unsafe {
+                        axpy_avx512_f32(&mut avx32, a32, &x32);
+                        axpy_avx512_f64(&mut avx64, a64, &x64);
+                    }
+                    for i in 0..len {
+                        assert_relative_eq!(
+                            avx32[i],
+                            want32[i],
+                            epsilon = 1e-6,
+                            max_relative = 1e-6
+                        );
+                        assert_relative_eq!(
+                            avx64[i],
+                            want64[i],
+                            epsilon = 1e-14,
+                            max_relative = 1e-14
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A zero multiplier must leave the accumulator untouched, and a unit
+    /// multiplier must give a plain elementwise add. Both are edge cases the
+    /// sparse kernel hits whenever an operator row carries an exact zero.
+    #[test]
+    fn test_axpy_trivial_multipliers() {
+        let x = vec![1.5_f32, -2.0, 3.25, 0.5, 7.0];
+        let y0 = vec![0.5_f32, 0.25, -1.0, 2.0, -3.5];
+
+        let mut y = y0.clone();
+        axpy_simd_f32(&mut y, 0.0, &x);
+        assert_eq!(y, y0);
+
+        let mut y = y0.clone();
+        axpy_simd_f32(&mut y, 1.0, &x);
+        let want: Vec<f32> = y0.iter().zip(x.iter()).map(|(&a, &b)| a + b).collect();
+        assert_eq!(y, want);
     }
 }

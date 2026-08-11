@@ -37,22 +37,15 @@ use crate::prelude::*;
 ////////////
 
 /// Points consumed per unrolled step in the segmented centroid reduction.
-///
-/// The kernel is latency bound: one workgroup per cluster means only `k` of
-/// them, and each thread walks its slice of the segment through two dependent
-/// global loads. Unrolling with the index loads hoisted above their consumers
-/// puts this many of each in flight instead of one. The equivalent unroll
-/// saturated around 16 on the SCENIC split-finder, so 8 is the low end of the
-/// useful range rather than a maximum.
 const SEGMENT_UNROLL: usize = 8;
 
 /// Centroids scored per unrolled step in the assignment kernels.
-///
-/// Measured at n=1e6, k=100, dim=48 the assignment kernel ran at 3.8% of peak
-/// FLOPs and 2% of bandwidth, i.e. bound by neither and simply waiting on
-/// memory. Scoring several centroids per step hoists their loads above the
-/// accumulators that consume them and gives each its own dependency chain.
 const CENTROID_UNROLL: usize = 8;
+
+/// Oversampling factor for [`kmeans_parallel_init_gpu`]. Each round samples
+/// `k * KMEANSPP_OVERSAMPLING` candidates. Matches the upstream CPU
+/// `kmeans_parallel_init` so the two produce comparable initialisations.
+const KMEANSPP_OVERSAMPLING: usize = 2;
 
 ////////////
 // Params //
@@ -117,14 +110,11 @@ impl Default for KMeansGpuParams {
 /// workgroup reads the same centroid element at the same time, so the value is
 /// workgroup-uniform and the hardware already broadcasts it from cache;
 /// staging it buys nothing and costs two barriers per tile plus the shared
-/// memory that occupancy wants. Measured against the previous SMEM-tiled
-/// kernel at n=10k, k=400: 14.0 -> 6.1 ms at dim=128 and 59.2 -> 20.0 ms at
-/// dim=512.
+/// memory that occupancy wants.
 ///
 /// The point is held in registers as `dim_lines` vectors rather than exploded
-/// to `dim_lines * LINE_SIZE` scalars, which is what made the old kernel spill
-/// at high dim. Squared differences accumulate in a vector and are reduced
-/// horizontally once per centroid, not once per line.
+/// to `dim_lines * LINE_SIZE` scalars. Squared differences accumulate in a
+/// vector and are reduced horizontally once per centroid.
 ///
 /// ### Type parameters
 ///
@@ -439,17 +429,17 @@ where
     Ok(())
 }
 
-///////////////////
-// k-means｜｜ init //
-///////////////////
+//////////////////////
+// k-means |｜ init //
+/////////////////////
 
 /// Squared Euclidean distance from each point to its nearest candidate.
 ///
-/// Same traversal as [`fn@flash_assign_euclidean_vec`], but it keeps the distance
-/// rather than the index. This is the D² pass of k-means||, which dominates
-/// that algorithm: it runs `ln(k) + 1` times against a candidate set growing
-/// by `2k` each round, so at n = 1e6, k = 100 it is n * dim * 2005 fused
-/// multiply-adds in total.
+/// Same traversal as [`fn@flash_assign_euclidean_vec`], but it keeps the
+/// distance rather than the index. This is the D² pass of k-means||, which
+/// dominates that algorithm: it runs `ln(k) + 1` times against a candidate set
+/// growing by `2k` each round, so at n = 1e6, k = 100 it is n * dim * 2005
+/// fused multiply-adds in total.
 ///
 /// ### Type parameters
 ///
@@ -720,11 +710,6 @@ where
     Ok(())
 }
 
-/// Oversampling factor for [`kmeans_parallel_init_gpu`]. Each round samples
-/// `k * KMEANSPP_OVERSAMPLING` candidates. Matches the upstream CPU
-/// `kmeans_parallel_init` so the two produce comparable initialisations.
-const KMEANSPP_OVERSAMPLING: usize = 2;
-
 /// Sample `count` indices proportional to `weights` via a prefix sum and
 /// binary search.
 ///
@@ -853,8 +838,7 @@ where
 /// Mirrors the upstream CPU `kmeans_parallel_init`, but runs the D² pass on
 /// the device against data already resident there. That pass is the whole
 /// cost of the algorithm: `ln(k) + 1` rounds against a candidate set growing
-/// by `2k` per round. On the host at n = 1e6 it measured 1.86 s at k = 100 and
-/// 5.87 s at k = 200, which was 76-86% of the entire clustering call.
+/// by `2k` per round.
 ///
 /// Only the distances come back to the host each round (`n` floats), where the
 /// weighted sample and the final k-means++ over the candidates are cheap.
@@ -1430,10 +1414,6 @@ where
 {
     let limits = GpuLimits::from_client(client);
     let (gx, gy) = grid_2d(k as u32, &limits)?;
-    // Threads split as `dim_eff` output dimensions by `n_sub` point
-    // sub-stripes. At the Harmony shapes (dim 32-48) that gives 4 or 2
-    // sub-stripes per workgroup; above `WORKGROUP_128` dimensions there is
-    // one, and the kernel's outer loop strides through the rest.
     let dim_eff = dim.min(WORKGROUP_128 as usize);
     let n_sub = WORKGROUP_128 as usize / dim_eff;
     unsafe {
