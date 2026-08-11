@@ -39,6 +39,17 @@ use crate::prelude::*;
 /// Points consumed per unrolled step in the segmented centroid reduction.
 const SEGMENT_UNROLL: usize = 8;
 
+/// Shared-memory length of [`segmented_centroid_update`], in elements of the
+/// accumulator type.
+///
+/// Deliberately the whole workgroup rather than the `n_sub * dim_eff` slots the
+/// reduction reads back. `n_sub` truncates, so any `dim_eff` that does not
+/// divide the workgroup leaves threads with `sub == n_sub` whose store index
+/// `sub * dim_eff + e0` collapses to `tx`. They are never read, but they do
+/// store, so the buffer has to span `0..WORKGROUP_128`. 512 bytes at fp32,
+/// against a 32 KiB budget, so it costs no occupancy.
+const SEGMENTED_SMEM_LEN: usize = WORKGROUP_128 as usize;
+
 /// Centroids scored per unrolled step in the assignment kernels.
 const CENTROID_UNROLL: usize = 8;
 
@@ -1321,7 +1332,7 @@ pub fn segmented_centroid_update<S: Float, A: Float>(
     let sub = (tx / dim_eff) as u32;
     let subs = n_sub as u32;
 
-    let mut s_part = SharedMemory::<A>::new(n_sub * dim_eff);
+    let mut s_part = SharedMemory::<A>::new(SEGMENTED_SMEM_LEN);
 
     let stride = (n_sub * SEGMENT_UNROLL) as u32;
 
@@ -2453,19 +2464,21 @@ mod tests {
         }
     }
 
-    // `s_part` must cover every thread the workgroup dispatches. The store
-    // index `sub * dim_eff + e0` collapses to exactly `tx` for the leftover
-    // threads, so the highest index reached is WORKGROUP_128 - 1 while the
-    // allocation is `n_sub * dim_eff`. Whenever `dim_eff` does not divide 128
-    // the truncating division leaves those threads storing past the end.
-    // Under lavapipe shared memory is an ordinary host allocation, so that is
-    // a real heap overflow rather than a harmless write to on-chip scratch.
+    // Every thread stores into `s_part`, so SEGMENTED_SMEM_LEN has to cover the
+    // whole mapping and not just the `n_sub * dim_eff` slots the reduction
+    // reads. Sizing it to the latter is what the kernel did originally, and it
+    // overran for any `dim_eff` not dividing the workgroup: `n_sub` truncates,
+    // the leftover threads get `sub == n_sub`, and their index collapses to
+    // `tx`. Under lavapipe shared memory is an ordinary host allocation, so
+    // that is a real out-of-bounds write and not a harmless scribble on
+    // on-chip scratch.
     #[test]
     fn test_segmented_update_shared_memory_covers_workgroup() {
         let wg = WORKGROUP_128 as usize;
 
         // The threshold is real, not hypothetical: no_pcs = 10 in
-        // test_fast_cluster_gpu.R pads to 12, which does not divide 128.
+        // test_fast_cluster_gpu.R pads to 12, which does not divide 128 and so
+        // leaves the reduction reading fewer slots than the kernel writes.
         let dim_eff = 10usize.next_multiple_of(LINE_SIZE).min(wg);
         assert!((wg / dim_eff) * dim_eff < wg);
 
@@ -2473,13 +2486,14 @@ mod tests {
         // `k_means_clusters_gpu` pads them.
         for dim in [5usize, 8, 10, 15, 32, 48, 50, 65, 100, 130] {
             let dim_eff = dim.next_multiple_of(LINE_SIZE).min(wg);
-            let n_sub = wg / dim_eff;
-            assert!(
-                n_sub * dim_eff >= wg,
-                "dim = {dim}: {} of {wg} threads store past a {} element buffer",
-                wg - n_sub * dim_eff,
-                n_sub * dim_eff
-            );
+            for tx in 0..wg {
+                let idx = (tx / dim_eff) * dim_eff + tx % dim_eff;
+                assert!(
+                    idx < SEGMENTED_SMEM_LEN,
+                    "dim = {dim}: thread {tx} stores at {idx} in a {SEGMENTED_SMEM_LEN} \
+                     element buffer"
+                );
+            }
         }
     }
 
