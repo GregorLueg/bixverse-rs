@@ -1546,9 +1546,25 @@ where
 
 /// Normalises the rows of a CSR matrix to a sum of 1 (L1 norm)
 ///
+/// Turns an affinity matrix `K` into the row-stochastic diffusion operator
+/// `D^-1 K` in place.
+///
+/// A row summing to zero is an error rather than a no-op. The reference
+/// implementations this backs (Palantir's `diffusion_maps_from_kernel`, MAGIC)
+/// guard with `D[D != 0] = 1 / D[D != 0]` and leave the row at zero, but on a
+/// kNN-derived kernel every node has `k` out-edges, so a zero row means the
+/// weights underflowed and everything downstream of the operator is garbage.
+/// Failing loudly beats propagating a silently absorbing state.
+///
 /// ### Params
 ///
 /// * `csr` - Mutable reference to the CSR matrix (modified in-place)
+///
+/// ### Returns
+///
+/// `Ok(())`, or [BixverseErrors::SparseMatrixMustBeCsr] if the matrix is in
+/// CSC, or [BixverseErrors::SparseMatrixIsolatedRow] naming the first row that
+/// sums to zero.
 pub fn normalise_csr_rows_l1<T>(csr: &mut CompressedSparseData2<T>) -> Result<(), BixverseErrors>
 where
     T: BixverseNumeric + Into<f64>,
@@ -1567,16 +1583,15 @@ where
 
         let row_sum: T = row_data_slice.iter().copied().sum();
 
-        if row_sum.into() > 1e-15 {
-            for val in row_data_slice.iter_mut() {
-                *val /= row_sum;
-            }
-        } else {
-            panic!(
-                "Row {} has sum {}, indicating isolated node",
-                i,
-                row_sum.into()
-            );
+        if row_sum.into() <= 1e-15 {
+            return Err(BixverseErrors::SparseMatrixIsolatedRow {
+                row: i,
+                row_sum: row_sum.into(),
+            });
+        }
+
+        for val in row_data_slice.iter_mut() {
+            *val /= row_sum;
         }
     }
 
@@ -1977,6 +1992,87 @@ where
     }
 
     Ok(out)
+}
+
+/// Apply a CSR operator to a dense row-major block: `out = a @ block`
+///
+/// The kernel behind repeated diffusion, `T @ (T @ (T @ X))`. Applying the
+/// operator `t` times is always preferable to forming `T^t`: at `knn = 30` the
+/// operator carries ~30 non-zeros per row, `T^2` ~900 and `T^3` ~27,000, so at
+/// 100k rows the explicit cube is on the order of 2.7e9 non-zeros while `t`
+/// applications stay at ~30 per row for the same answer.
+///
+/// Both buffers are flat row-major rather than [faer::Mat] on purpose. The
+/// operation is `out_row_i = sum_j w_ij * block_row_j`, so a row-major layout
+/// makes every inner step a contiguous SIMD axpy of `width` elements, where
+/// faer's column-major storage would turn it into a strided scatter.
+///
+/// Parallel over output rows, which are disjoint, so no synchronisation.
+///
+/// Note that `single_cell::sc_analysis::meld` has an older private
+/// column-at-a-time version of this (`chebyshev_apply_columns`) that restreams
+/// the whole operator once per column. It should move over here at some point.
+///
+/// ### Params
+///
+/// * `a` - The operator, CSR, `n x k`
+/// * `block` - Dense input, row-major, `k * width` elements
+/// * `width` - Columns in the block
+/// * `out` - Dense output, row-major, `n * width` elements, overwritten
+///
+/// ### Returns
+///
+/// `Ok(())`, or [BixverseErrors::SparseMatrixMustBeCsr] if `a` is in CSC, or
+/// [BixverseErrors::SparseMatrixMultiplication] if the buffers do not match the
+/// operator's shape.
+///
+/// ### Panics
+///
+/// If `a` violates its own CSR invariants: a column index at or above
+/// `a.shape().1`, or an `indptr` shorter than `a.shape().0 + 1`. Both index
+/// safe slices, so this is a panic rather than unsoundness, but it surfaces
+/// inside a rayon closure. `CompressedSparseData2` constructors do not validate,
+/// so run [assert_invariants](CompressedSparseData2::assert_invariants) on a
+/// matrix of uncertain provenance.
+pub fn csr_matmul_dense_block<T>(
+    a: &CompressedSparseData2<T>,
+    block: &[T],
+    width: usize,
+    out: &mut [T],
+) -> Result<(), BixverseErrors>
+where
+    T: BixverseFloat + BixverseSimd,
+{
+    if !a.cs_type.is_csr() {
+        return Err(BixverseErrors::SparseMatrixMustBeCsr);
+    }
+
+    let (n_rows, n_cols) = a.shape();
+
+    // `width == 0` would make both buffers empty regardless of the operator, so
+    // the length checks below could not tell a shape mismatch from a no-op.
+    if width == 0 || block.len() != n_cols * width || out.len() != n_rows * width {
+        return Err(BixverseErrors::SparseMatrixMultiplication {
+            n_col_a: n_cols,
+            n_row_b: block.len().checked_div(width).unwrap_or(0),
+        });
+    }
+
+    let indptr = &a.indptr;
+    let indices = &a.indices;
+    let data = &a.data;
+
+    out.par_chunks_mut(width)
+        .enumerate()
+        .for_each(|(i, out_row)| {
+            out_row.fill(T::zero());
+            for p in indptr[i] as usize..indptr[i + 1] as usize {
+                let j = indices[p] as usize;
+                T::bxv_axpy_simd(out_row, data[p], &block[j * width..(j + 1) * width]);
+            }
+        });
+
+    Ok(())
 }
 
 ///////////////////////
@@ -3359,5 +3455,188 @@ mod tests {
         assert_relative_eq!(values[0], 40.0, epsilon = 1e-8);
         assert_relative_eq!(values[1], 39.0, epsilon = 1e-8);
         assert_relative_eq!(values[2], 38.0, epsilon = 1e-8);
+    }
+
+    ///////////////////////////
+    // Row-stochastic + axpy //
+    ///////////////////////////
+
+    /// A row that sums to zero must come back as an error rather than a panic.
+    #[test]
+    fn test_normalise_csr_rows_l1_isolated_row_errors() {
+        // Row 1 is structurally empty, row 2 stores an explicit zero. Both are
+        // isolated as far as a row-stochastic normalisation is concerned.
+        let data = vec![1.0f64, 3.0, 0.0];
+        let indices = vec![0u32, 2, 1];
+        let indptr = vec![0u32, 2, 2, 3];
+        let mut csr = CompressedSparseData2::new_csr(&data, &indices, &indptr, None, (3, 3));
+
+        match normalise_csr_rows_l1(&mut csr) {
+            Err(BixverseErrors::SparseMatrixIsolatedRow { row, row_sum }) => {
+                assert_eq!(row, 1);
+                assert_eq!(row_sum, 0.0);
+            }
+            other => panic!("expected SparseMatrixIsolatedRow, got {:?}", other),
+        }
+    }
+
+    /// The happy path has to leave every row summing to exactly one.
+    #[test]
+    fn test_normalise_csr_rows_l1_rows_sum_to_one() {
+        let data = vec![1.0f64, 3.0, 2.0, 2.0, 5.0];
+        let indices = vec![0u32, 2, 1, 2, 0];
+        let indptr = vec![0u32, 2, 4, 5];
+        let mut csr = CompressedSparseData2::new_csr(&data, &indices, &indptr, None, (3, 3));
+
+        normalise_csr_rows_l1(&mut csr).unwrap();
+
+        for i in 0..3 {
+            let lo = csr.indptr[i] as usize;
+            let hi = csr.indptr[i + 1] as usize;
+            let sum: f64 = csr.data[lo..hi].iter().sum();
+            assert_relative_eq!(sum, 1.0, epsilon = 1e-12);
+        }
+        assert_relative_eq!(csr.data[0], 0.25, epsilon = 1e-12);
+        assert_relative_eq!(csr.data[1], 0.75, epsilon = 1e-12);
+    }
+
+    /// Build a small random CSR operator plus a dense block, both deterministic.
+    fn dense_block_fixture(
+        n: usize,
+        k: usize,
+        width: usize,
+        seed: u64,
+    ) -> (CompressedSparseData2<f64>, Vec<f64>) {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut indptr = vec![0u32];
+        let mut indices: Vec<u32> = Vec::new();
+        let mut data: Vec<f64> = Vec::new();
+
+        for _ in 0..n {
+            // Ascending, unique column indices; some rows deliberately empty.
+            for j in 0..k {
+                if rng.random::<f64>() < 0.35 {
+                    indices.push(j as u32);
+                    data.push(rng.random::<f64>() * 2.0 - 1.0);
+                }
+            }
+            indptr.push(indices.len() as u32);
+        }
+
+        let csr = CompressedSparseData2::new_csr(&data, &indices, &indptr, None, (n, k));
+        let block: Vec<f64> = (0..k * width)
+            .map(|_| rng.random::<f64>() * 2.0 - 1.0)
+            .collect();
+
+        (csr, block)
+    }
+
+    /// The SIMD dense-block kernel must agree with the obvious scalar triple
+    /// loop, including on rows that carry no non-zeros at all.
+    #[test]
+    fn test_csr_matmul_dense_block_matches_scalar() {
+        // Widths straddling the 2-, 4-, 8- and 16-lane boundaries so every
+        // axpy tail path is hit.
+        for width in [1usize, 3, 4, 7, 16, 17, 33] {
+            let (csr, block) = dense_block_fixture(11, 9, width, 4242 + width as u64);
+
+            let mut got = vec![0.0f64; 11 * width];
+            csr_matmul_dense_block(&csr, &block, width, &mut got).unwrap();
+
+            let mut want = vec![0.0f64; 11 * width];
+            for i in 0..11 {
+                for p in csr.indptr[i] as usize..csr.indptr[i + 1] as usize {
+                    let j = csr.indices[p] as usize;
+                    for c in 0..width {
+                        want[i * width + c] += csr.data[p] * block[j * width + c];
+                    }
+                }
+            }
+
+            for (g, w) in got.iter().zip(want.iter()) {
+                assert_relative_eq!(g, w, epsilon = 1e-12, max_relative = 1e-12);
+            }
+        }
+    }
+
+    /// Applying the operator `t` times must equal multiplying by the explicit
+    /// `T^t`. This is the whole justification for never materialising the power
+    /// in MAGIC, so it is worth pinning at a size where the explicit cube is
+    /// still legal to build.
+    #[test]
+    fn test_csr_matmul_dense_block_repeated_matches_explicit_power() {
+        let width = 5usize;
+        let n = 8usize;
+        let (csr, block) = dense_block_fixture(n, n, width, 77);
+
+        // Three applications, ping-ponging between two buffers.
+        let mut buf_a = block.clone();
+        let mut buf_b = vec![0.0f64; n * width];
+        for _ in 0..3 {
+            csr_matmul_dense_block(&csr, &buf_a, width, &mut buf_b).unwrap();
+            std::mem::swap(&mut buf_a, &mut buf_b);
+        }
+
+        // The explicit cube, applied once.
+        let sq = csr_matmul_csr(&csr, &csr).unwrap();
+        let cube = csr_matmul_csr(&sq, &csr).unwrap();
+        let mut direct = vec![0.0f64; n * width];
+        csr_matmul_dense_block(&cube, &block, width, &mut direct).unwrap();
+
+        for (rep, dir) in buf_a.iter().zip(direct.iter()) {
+            assert_relative_eq!(rep, dir, epsilon = 1e-10, max_relative = 1e-10);
+        }
+    }
+
+    /// A row-stochastic operator preserves a constant column, which is the
+    /// invariant that makes imputed values sit on the input's scale.
+    #[test]
+    fn test_csr_matmul_dense_block_preserves_constant_column() {
+        let n = 6usize;
+        let width = 3usize;
+
+        // Dense positive rows, so nothing is isolated, then row-normalise.
+        let mut indptr = vec![0u32];
+        let mut indices: Vec<u32> = Vec::new();
+        let mut data: Vec<f64> = Vec::new();
+        for i in 0..n {
+            for j in 0..n {
+                indices.push(j as u32);
+                data.push(1.0 + ((i * n + j) % 3) as f64);
+            }
+            indptr.push(indices.len() as u32);
+        }
+        let mut csr = CompressedSparseData2::new_csr(&data, &indices, &indptr, None, (n, n));
+        normalise_csr_rows_l1(&mut csr).unwrap();
+
+        let block = vec![2.5f64; n * width];
+        let mut out = vec![0.0f64; n * width];
+        csr_matmul_dense_block(&csr, &block, width, &mut out).unwrap();
+
+        for v in out {
+            assert_relative_eq!(v, 2.5, epsilon = 1e-12);
+        }
+    }
+
+    /// Shape mismatches and a CSC operator must be rejected, not read out of
+    /// bounds.
+    #[test]
+    fn test_csr_matmul_dense_block_rejects_bad_shapes() {
+        let (csr, block) = dense_block_fixture(4, 4, 2, 1);
+        let mut out = vec![0.0f64; 4 * 2];
+
+        // Wrong width for the block that was built.
+        assert!(csr_matmul_dense_block(&csr, &block, 3, &mut out).is_err());
+        // Zero width.
+        assert!(csr_matmul_dense_block(&csr, &block, 0, &mut out).is_err());
+        // Output too short.
+        let mut short = vec![0.0f64; 4];
+        assert!(csr_matmul_dense_block(&csr, &block, 2, &mut short).is_err());
+
+        let csc = csr.transform();
+        assert!(matches!(
+            csr_matmul_dense_block(&csc, &block, 2, &mut out),
+            Err(BixverseErrors::SparseMatrixMustBeCsr)
+        ));
     }
 }

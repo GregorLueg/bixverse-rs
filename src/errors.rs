@@ -48,6 +48,80 @@ pub enum BixverseErrors {
     #[error("The faer Cholesky failed: {0}")]
     FaerCholeskyError(#[from] faer::linalg::solvers::LltError),
 
+    // -- Gaussian processes --
+    /// A Gaussian process was handed empty training data.
+    #[error("Gaussian process: {name} is empty")]
+    GpEmptyInput {
+        /// Which input was empty
+        name: &'static str,
+    },
+
+    /// The training inputs and responses disagree in length.
+    #[error(
+        "Gaussian process: {n_x} training inputs against {n_y} response rows; the two must be aligned"
+    )]
+    GpDimensionMismatch {
+        /// Length of the input vector
+        n_x: usize,
+        /// Rows in the response matrix
+        n_y: usize,
+    },
+
+    /// A hyperparameter is outside its supported range.
+    #[error("Gaussian process: hyperparameter '{name}' is {value}, which is not supported")]
+    GpInvalidHyperparameter {
+        /// Name of the offending hyperparameter
+        name: &'static str,
+        /// The value that was rejected
+        value: f64,
+    },
+
+    /// A non-finite value reached the fit.
+    ///
+    /// Checked up front because a `NaN` otherwise surfaces as an unexplained
+    /// Cholesky failure much later, with nothing pointing back at the input.
+    #[error("Gaussian process: {name} contains a non-finite value")]
+    GpNonFiniteInput {
+        /// Which input carried the non-finite value
+        name: &'static str,
+    },
+
+    /// The landmark Gram matrix stayed singular through the whole jitter ladder.
+    #[error(
+        "Gaussian process: the {n_landmarks} x {n_landmarks} landmark Gram is not positive definite even at a jitter of {jitter}; spread the landmarks out or shorten the length scale"
+    )]
+    GpLandmarkCholeskyFailed {
+        /// Largest jitter that was tried
+        jitter: f64,
+        /// Number of landmarks
+        n_landmarks: usize,
+    },
+
+    /// The posterior Cholesky failed.
+    ///
+    /// Distinct from [BixverseErrors::GpLandmarkCholeskyFailed] because this
+    /// factorises `A A^T / sigma^2 + I`, whose smallest eigenvalue is at least
+    /// one in exact arithmetic. A failure here means a non-finite value got
+    /// through the input checks, not that the problem is ill-conditioned.
+    #[error(
+        "Gaussian process: the posterior Cholesky failed, which should be impossible for a matrix with unit diagonal dominance; the accumulation produced non-finite entries"
+    )]
+    GpPosteriorCholeskyFailed,
+
+    /// Every landmark sits at the same coordinate.
+    #[error(
+        "Gaussian process: all landmarks share the same coordinate, so the kernel matrix is degenerate"
+    )]
+    GpDegenerateLandmarks,
+
+    /// Every sample weight is zero.
+    ///
+    /// A zero weight drops its observation, so this leaves the fit with no data
+    /// and returns the prior everywhere. Indistinguishable from a genuinely
+    /// flat response, hence an error rather than a silent zero curve.
+    #[error("Gaussian process: every sample weight is zero, so the fit would carry no data")]
+    GpAllWeightsZero,
+
     // -- statrs --
     /// Beta distribution construction failed
     #[error("Beta distribution error: {0}")]
@@ -186,6 +260,23 @@ pub enum BixverseErrors {
     /// Error if the [crate::prelude::CompressedSparseData2] is not in CSR.
     #[error("The SparseCompressedData2 must be in CSR format")]
     SparseMatrixMustBeCsr,
+
+    /// A row summed to (effectively) zero where a row-stochastic normalisation
+    /// was asked for.
+    ///
+    /// On a kNN-derived affinity matrix every node has `k` out-edges, so a zero
+    /// row means the kernel weights underflowed rather than that the graph is
+    /// legitimately disconnected. Anything built on top of the operator would
+    /// be meaningless, hence an error rather than leaving the row at zero.
+    #[error(
+        "Row {row} of the sparse matrix sums to {row_sum}, which is not positive, so it cannot be normalised to a row-stochastic form (isolated node, or the kernel weights underflowed)"
+    )]
+    SparseMatrixIsolatedRow {
+        /// The offending row index
+        row: usize,
+        /// The row sum that was rejected
+        row_sum: f64,
+    },
 
     /// A CSR matrix failed one of its structural invariants.
     ///
@@ -927,6 +1018,192 @@ pub enum BixverseErrors {
         n_transient: usize,
         /// The supported ceiling
         limit: usize,
+    },
+
+    // -- MAGIC --
+    /// The requested imputation would not fit in a sane amount of memory.
+    ///
+    /// MAGIC output is unavoidably dense, so the only bound available is the
+    /// caller's gene selection. This is an error rather than a warning because
+    /// the crate is driven from R, where a printed warning is easily missed and
+    /// the alternative failure mode is the session being OOM-killed.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "MAGIC: imputing {n_genes} genes across {n_cells} cells needs {} MB of dense f32, above the {} MB budget; subset the genes or set allow_large",
+        (*n_cells as f64 * *n_genes as f64 * 4.0 / 1.048576e6).round(),
+        (*max_elements as f64 * 4.0 / 1.048576e6).round()
+    )]
+    MagicOutputTooLarge {
+        /// Cells in the selection
+        n_cells: usize,
+        /// Genes in the selection
+        n_genes: usize,
+        /// The element ceiling that was exceeded
+        max_elements: usize,
+    },
+
+    /// The kNN inputs disagree with the requested cell selection.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "MAGIC: the kNN graph has {n_knn} rows but {n_selected} cells were selected; the two must be aligned"
+    )]
+    MagicKnnSelectionMismatch {
+        /// Rows in the supplied kNN graph
+        n_knn: usize,
+        /// Cells in the selection
+        n_selected: usize,
+    },
+
+    /// A cell index in the selection sits outside the store.
+    #[cfg(feature = "single-cell")]
+    #[error("MAGIC: cell index {cell} is out of range for a store of {total_cells} cells")]
+    MagicCellOutOfRange {
+        /// The offending cell index
+        cell: usize,
+        /// Cells in the store
+        total_cells: usize,
+    },
+
+    /// A cell index appears twice in the selection.
+    #[cfg(feature = "single-cell")]
+    #[error("MAGIC: cell index {cell} appears more than once in the selection")]
+    MagicDuplicateCell {
+        /// The duplicated cell index
+        cell: usize,
+    },
+
+    /// The operator was built against a different store than the one being read.
+    ///
+    /// The operator's cell lookup is indexed by global cell id, so reading a
+    /// store with more cells than it was sized for would index past its end.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "MAGIC: the operator was built for a store of {operator_cells} cells but the reader holds {store_cells}; the `total_cells` passed to MagicOperator::from_knn must match the store"
+    )]
+    MagicStoreSizeMismatch {
+        /// Cells the operator was built for
+        operator_cells: usize,
+        /// Cells the reader actually holds
+        store_cells: usize,
+    },
+
+    // -- Gene trends --
+    /// The expression matrix does not have one row per cell.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Gene trends: the expression matrix has {n_cells} rows but {n_pseudotime} pseudotime values were supplied"
+    )]
+    GeneTrendsShapeMismatch {
+        /// Rows in the expression matrix
+        n_cells: usize,
+        /// Length of the pseudotime vector
+        n_pseudotime: usize,
+    },
+
+    /// A branch selected no cells at all.
+    #[cfg(feature = "single-cell")]
+    #[error("Gene trends: branch {branch} selected no cells")]
+    GeneTrendsBranchEmpty {
+        /// Index of the offending branch
+        branch: usize,
+    },
+
+    /// A branch has too few cells to fit anything meaningful.
+    ///
+    /// The reference has no such guard and will happily fit a 500-point grid to
+    /// a single cell. The resulting curve is the prior, not the data.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Gene trends: branch {branch} has only {n_cells} cells, which is below the minimum of {minimum}"
+    )]
+    GeneTrendsBranchTooFewCells {
+        /// Index of the offending branch
+        branch: usize,
+        /// Cells the branch selected
+        n_cells: usize,
+        /// Minimum the fit requires
+        minimum: usize,
+    },
+
+    /// Every cell in a branch shares the same pseudotime, so there is no grid
+    /// to fit over.
+    #[cfg(feature = "single-cell")]
+    #[error("Gene trends: branch {branch} spans zero pseudotime, so its grid would be degenerate")]
+    GeneTrendsDegeneratePseudotime {
+        /// Index of the offending branch
+        branch: usize,
+    },
+
+    /// Fate-probability weighting was asked for without the probabilities.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Gene trends: BranchWeighting::FateProbability needs the fate probabilities, but none were supplied"
+    )]
+    GeneTrendsMissingFateProbabilities,
+
+    /// The fate-probability matrix does not have one column per branch.
+    ///
+    /// Branch `i` takes column `i` positionally, so a mismatch would silently
+    /// weight every cell by the wrong fate rather than failing.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Gene trends: the fate probabilities have {n_columns} columns but {n_branches} branches were supplied; branches map to columns positionally, so the two must agree"
+    )]
+    GeneTrendsFateColumnMismatch {
+        /// Columns in the fate probability matrix
+        n_columns: usize,
+        /// Branches supplied
+        n_branches: usize,
+    },
+
+    /// The fate-probability matrix does not have one row per cell.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Gene trends: the fate probabilities have {n_rows} rows but {n_cells} cells were supplied"
+    )]
+    GeneTrendsFateShapeMismatch {
+        /// Rows in the fate probability matrix
+        n_rows: usize,
+        /// Cells supplied
+        n_cells: usize,
+    },
+
+    /// A branch cell index sits outside the cell range.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Gene trends: branch {branch} references cell {cell}, which is out of range for {n_cells} cells"
+    )]
+    GeneTrendsCellOutOfRange {
+        /// Index of the offending branch
+        branch: usize,
+        /// The offending cell index
+        cell: usize,
+        /// Cells in the input
+        n_cells: usize,
+    },
+
+    /// Every cell in a branch carries zero fate-probability weight.
+    ///
+    /// The Gaussian process treats a zero-weight observation as absent, so this
+    /// would otherwise return the zero-mean prior and be indistinguishable from
+    /// a genuinely flat gene.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "Gene trends: every cell selected for branch {branch} has zero fate probability, so the fit would carry no data"
+    )]
+    GeneTrendsZeroWeightBranch {
+        /// Index of the offending branch
+        branch: usize,
+    },
+
+    /// The requested grid is too coarse to fit anything over.
+    #[cfg(feature = "single-cell")]
+    #[error("Gene trends: a resolution of {resolution} is below the minimum of {minimum}")]
+    GeneTrendsResolutionTooLow {
+        /// Requested grid points
+        resolution: usize,
+        /// Minimum the fit requires
+        minimum: usize,
     },
 
     // -- sctype --
