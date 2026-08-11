@@ -23,7 +23,7 @@ next targets would be
 - [x] NMF for dense and sparse data
 - [x] NicheNet for single cell, see
   [Browaeys et al.](https://www.nature.com/articles/s41592-019-0667-5).
-- [ ] Palantir for single-cell trajectories, see
+- [x] Palantir for single-cell trajectories, see
   [Setty, et al.](https://www.nature.com/articles/s41587-019-0068-4).
 - [ ] Slingshot for single-cell trajectories, see
   [Street, et al.](https://link.springer.com/article/10.1186/s12864-018-4772-0).
