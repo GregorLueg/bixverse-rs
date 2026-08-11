@@ -928,7 +928,10 @@ mod tests {
             assert_relative_eq!(got, expected, epsilon = 1e-6, max_relative = 1e-5);
         }
 
-        // A single block must give the same thing as four-gene blocks.
+        // A single block must give the same thing as four-gene blocks, up to
+        // rounding: `axpy_simd_f32` fuses the multiply-add on full SIMD lanes
+        // but not on the scalar tail, so the block width decides which lanes
+        // get an FMA. Bit-exactness across widths is not on offer.
         let single = magic_impute_genes(
             &reader,
             &op,
@@ -940,7 +943,10 @@ mod tests {
             0,
         )
         .unwrap();
-        assert_eq!(single.data, streamed.data);
+        assert_eq!(single.data.len(), streamed.data.len());
+        for (one, four) in single.data.iter().zip(streamed.data.iter()) {
+            assert_relative_eq!(one, four, epsilon = 1e-6, max_relative = 1e-5);
+        }
     }
 
     /// A cell subset must impute only over that subset, and the gene order the
