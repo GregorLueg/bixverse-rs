@@ -64,9 +64,9 @@ const GP_DEFAULT_CHUNK: usize = 2048;
 /// error rather than a degenerate-but-valid fit.
 const GP_MIN_LANDMARKS: usize = 2;
 
-//////////////
+////////////
 // Params //
-//////////////
+////////////
 
 /// Hyperparameters for [fit_landmark_gp].
 ///
@@ -154,34 +154,159 @@ impl Default for LandmarkGpParams {
     }
 }
 
-/////////////////
-// Fitted state //
-/////////////////
+/////////////
+// Helpers //
+/////////////
 
-/// A fitted landmark Gaussian process.
+/// Validate everything that would otherwise surface as an unexplained Cholesky
+/// failure much later.
 ///
-/// Holds everything prediction needs, so the training data can be dropped.
-#[derive(Clone, Debug)]
-pub struct LandmarkGpFit {
-    /// Landmark coordinates, `m` of them.
-    pub landmarks: Vec<f64>,
-    /// Posterior weights, `m` by `n_outputs`.
-    pub weights: Mat<f64>,
-    /// Length scale the fit used, needed to rebuild the kernel at prediction.
-    pub length_scale: f64,
-    /// Jitter the landmark Cholesky actually succeeded at.
-    ///
-    /// Above the requested value means the Gram was singular there and the
-    /// retry ladder had to over-regularise, which shows up as a flatter curve.
-    pub jitter_used: f64,
-    /// `k(u, u)` without the jitter, cached so that predicting on the landmarks
-    /// themselves is a single GEMM rather than a rebuild.
-    k_uu: Mat<f64>,
+/// ### Params
+///
+/// * `x` - Training inputs.
+/// * `y` - Training responses.
+/// * `landmarks` - Inducing points.
+/// * `sample_weights` - Optional per-observation weights.
+/// * `params` - Hyperparameters.
+///
+/// ### Returns
+///
+/// `Ok(())`, or the matching [BixverseErrors] variant.
+fn validate_inputs<T>(
+    x: &[f64],
+    y: MatRef<'_, T>,
+    landmarks: &[f64],
+    sample_weights: Option<&[f64]>,
+    params: &LandmarkGpParams,
+) -> Result<(), BixverseErrors>
+where
+    T: BixverseFloat,
+{
+    if x.is_empty() {
+        return Err(BixverseErrors::GpEmptyInput { name: "x" });
+    }
+    if y.ncols() == 0 {
+        return Err(BixverseErrors::GpEmptyInput { name: "y" });
+    }
+    if x.len() != y.nrows() {
+        return Err(BixverseErrors::GpDimensionMismatch {
+            n_x: x.len(),
+            n_y: y.nrows(),
+        });
+    }
+    if landmarks.len() < GP_MIN_LANDMARKS {
+        return Err(BixverseErrors::GpEmptyInput { name: "landmarks" });
+    }
+
+    // Finiteness first, so the range comparisons that follow are total.
+    if !params.length_scale.is_finite() || params.length_scale <= 0.0 {
+        return Err(BixverseErrors::GpInvalidHyperparameter {
+            name: "length_scale",
+            value: params.length_scale,
+        });
+    }
+    if !params.sigma.is_finite() || params.sigma <= 0.0 {
+        return Err(BixverseErrors::GpInvalidHyperparameter {
+            name: "sigma",
+            value: params.sigma,
+        });
+    }
+    if !params.jitter.is_finite() || params.jitter < 0.0 {
+        return Err(BixverseErrors::GpInvalidHyperparameter {
+            name: "jitter",
+            value: params.jitter,
+        });
+    }
+
+    if x.iter().any(|v| !v.is_finite()) {
+        return Err(BixverseErrors::GpNonFiniteInput { name: "x" });
+    }
+    if landmarks.iter().any(|v| !v.is_finite()) {
+        return Err(BixverseErrors::GpNonFiniteInput { name: "landmarks" });
+    }
+    let y_bad = (0..y.ncols())
+        .into_par_iter()
+        .any(|j| (0..y.nrows()).any(|i| !y[(i, j)].is_finite()));
+    if y_bad {
+        return Err(BixverseErrors::GpNonFiniteInput { name: "y" });
+    }
+
+    if let Some(w) = sample_weights {
+        if w.len() != x.len() {
+            return Err(BixverseErrors::GpDimensionMismatch {
+                n_x: x.len(),
+                n_y: w.len(),
+            });
+        }
+        if w.iter().any(|v| !v.is_finite() || *v < 0.0) {
+            return Err(BixverseErrors::GpNonFiniteInput {
+                name: "sample_weights",
+            });
+        }
+        // A zero weight drops its observation, so all-zero weights leave the
+        // fit with no data at all: `G` and `P` stay zero, the weights come out
+        // zero, and the trend is the zero prior everywhere. That is
+        // indistinguishable from a genuinely flat response, so it has to fail
+        // rather than return.
+        if w.iter().all(|v| *v == 0.0) {
+            return Err(BixverseErrors::GpAllWeightsZero);
+        }
+    }
+
+    // All landmarks at one coordinate gives an exactly all-ones Gram, which is
+    // SPD once jittered but whose "trend" is a single number repeated.
+    let first = landmarks[0];
+    if landmarks.iter().all(|v| *v == first) {
+        return Err(BixverseErrors::GpDegenerateLandmarks);
+    }
+
+    Ok(())
 }
 
-///////////////
+/// Factorise the landmark Gram, escalating the jitter until it succeeds.
+///
+/// ### Params
+///
+/// * `k_uu` - The jitter-free landmark Gram, left untouched.
+/// * `params` - Hyperparameters, supplying the starting jitter and the retries.
+///
+/// ### Returns
+///
+/// The Cholesky factorisation and the jitter it succeeded at, or
+/// [BixverseErrors::GpLandmarkCholeskyFailed] once the ladder is exhausted.
+#[allow(clippy::type_complexity)]
+fn factorise_landmarks(
+    k_uu: &Mat<f64>,
+    params: &LandmarkGpParams,
+) -> Result<(faer::linalg::solvers::Llt<f64>, f64), BixverseErrors> {
+    let m = k_uu.nrows();
+    let mut jitter = params.jitter;
+    // Tracked separately so the error reports the largest value actually
+    // attempted rather than the next rung the loop was about to try.
+    let mut last_tried = jitter;
+
+    for _ in 0..=params.max_jitter_retries {
+        let mut kp = k_uu.clone();
+        for i in 0..m {
+            kp[(i, i)] += jitter;
+        }
+        if let Ok(factorisation) = kp.llt(Side::Lower) {
+            return Ok((factorisation, jitter));
+        }
+        last_tried = jitter;
+        // A zero starting jitter has nothing to escalate from.
+        jitter = if jitter == 0.0 { 1e-12 } else { jitter * 10.0 };
+    }
+
+    Err(BixverseErrors::GpLandmarkCholeskyFailed {
+        jitter: last_tried,
+        n_landmarks: m,
+    })
+}
+
+/////////////
 // Fitting //
-///////////////
+/////////////
 
 /// Fit the subset-of-regressors posterior mean.
 ///
@@ -384,6 +509,31 @@ where
     })
 }
 
+//////////////////
+// Fitted state //
+//////////////////
+
+/// A fitted landmark Gaussian process.
+///
+/// Holds everything prediction needs, so the training data can be dropped.
+#[derive(Clone, Debug)]
+pub struct LandmarkGpFit {
+    /// Landmark coordinates, `m` of them.
+    pub landmarks: Vec<f64>,
+    /// Posterior weights, `m` by `n_outputs`.
+    pub weights: Mat<f64>,
+    /// Length scale the fit used, needed to rebuild the kernel at prediction.
+    pub length_scale: f64,
+    /// Jitter the landmark Cholesky actually succeeded at.
+    ///
+    /// Above the requested value means the Gram was singular there and the
+    /// retry ladder had to over-regularise, which shows up as a flatter curve.
+    pub jitter_used: f64,
+    /// `k(u, u)` without the jitter, cached so that predicting on the landmarks
+    /// themselves is a single GEMM rather than a rebuild.
+    k_uu: Mat<f64>,
+}
+
 impl LandmarkGpFit {
     /// Number of response columns the fit carries.
     ///
@@ -456,156 +606,6 @@ impl LandmarkGpFit {
             T::from_f64(out[(i, j)]).unwrap_or_else(T::zero)
         })
     }
-}
-
-/////////////
-// Helpers //
-/////////////
-
-/// Validate everything that would otherwise surface as an unexplained Cholesky
-/// failure much later.
-///
-/// ### Params
-///
-/// * `x` - Training inputs.
-/// * `y` - Training responses.
-/// * `landmarks` - Inducing points.
-/// * `sample_weights` - Optional per-observation weights.
-/// * `params` - Hyperparameters.
-///
-/// ### Returns
-///
-/// `Ok(())`, or the matching [BixverseErrors] variant.
-fn validate_inputs<T>(
-    x: &[f64],
-    y: MatRef<'_, T>,
-    landmarks: &[f64],
-    sample_weights: Option<&[f64]>,
-    params: &LandmarkGpParams,
-) -> Result<(), BixverseErrors>
-where
-    T: BixverseFloat,
-{
-    if x.is_empty() {
-        return Err(BixverseErrors::GpEmptyInput { name: "x" });
-    }
-    if y.ncols() == 0 {
-        return Err(BixverseErrors::GpEmptyInput { name: "y" });
-    }
-    if x.len() != y.nrows() {
-        return Err(BixverseErrors::GpDimensionMismatch {
-            n_x: x.len(),
-            n_y: y.nrows(),
-        });
-    }
-    if landmarks.len() < GP_MIN_LANDMARKS {
-        return Err(BixverseErrors::GpEmptyInput { name: "landmarks" });
-    }
-
-    // Finiteness first, so the range comparisons that follow are total.
-    if !params.length_scale.is_finite() || params.length_scale <= 0.0 {
-        return Err(BixverseErrors::GpInvalidHyperparameter {
-            name: "length_scale",
-            value: params.length_scale,
-        });
-    }
-    if !params.sigma.is_finite() || params.sigma <= 0.0 {
-        return Err(BixverseErrors::GpInvalidHyperparameter {
-            name: "sigma",
-            value: params.sigma,
-        });
-    }
-    if !params.jitter.is_finite() || params.jitter < 0.0 {
-        return Err(BixverseErrors::GpInvalidHyperparameter {
-            name: "jitter",
-            value: params.jitter,
-        });
-    }
-
-    if x.iter().any(|v| !v.is_finite()) {
-        return Err(BixverseErrors::GpNonFiniteInput { name: "x" });
-    }
-    if landmarks.iter().any(|v| !v.is_finite()) {
-        return Err(BixverseErrors::GpNonFiniteInput { name: "landmarks" });
-    }
-    let y_bad = (0..y.ncols())
-        .into_par_iter()
-        .any(|j| (0..y.nrows()).any(|i| !y[(i, j)].is_finite()));
-    if y_bad {
-        return Err(BixverseErrors::GpNonFiniteInput { name: "y" });
-    }
-
-    if let Some(w) = sample_weights {
-        if w.len() != x.len() {
-            return Err(BixverseErrors::GpDimensionMismatch {
-                n_x: x.len(),
-                n_y: w.len(),
-            });
-        }
-        if w.iter().any(|v| !v.is_finite() || *v < 0.0) {
-            return Err(BixverseErrors::GpNonFiniteInput {
-                name: "sample_weights",
-            });
-        }
-        // A zero weight drops its observation, so all-zero weights leave the
-        // fit with no data at all: `G` and `P` stay zero, the weights come out
-        // zero, and the trend is the zero prior everywhere. That is
-        // indistinguishable from a genuinely flat response, so it has to fail
-        // rather than return.
-        if w.iter().all(|v| *v == 0.0) {
-            return Err(BixverseErrors::GpAllWeightsZero);
-        }
-    }
-
-    // All landmarks at one coordinate gives an exactly all-ones Gram, which is
-    // SPD once jittered but whose "trend" is a single number repeated.
-    let first = landmarks[0];
-    if landmarks.iter().all(|v| *v == first) {
-        return Err(BixverseErrors::GpDegenerateLandmarks);
-    }
-
-    Ok(())
-}
-
-/// Factorise the landmark Gram, escalating the jitter until it succeeds.
-///
-/// ### Params
-///
-/// * `k_uu` - The jitter-free landmark Gram, left untouched.
-/// * `params` - Hyperparameters, supplying the starting jitter and the retries.
-///
-/// ### Returns
-///
-/// The Cholesky factorisation and the jitter it succeeded at, or
-/// [BixverseErrors::GpLandmarkCholeskyFailed] once the ladder is exhausted.
-#[allow(clippy::type_complexity)]
-fn factorise_landmarks(
-    k_uu: &Mat<f64>,
-    params: &LandmarkGpParams,
-) -> Result<(faer::linalg::solvers::Llt<f64>, f64), BixverseErrors> {
-    let m = k_uu.nrows();
-    let mut jitter = params.jitter;
-    // Tracked separately so the error reports the largest value actually
-    // attempted rather than the next rung the loop was about to try.
-    let mut last_tried = jitter;
-
-    for _ in 0..=params.max_jitter_retries {
-        let mut kp = k_uu.clone();
-        for i in 0..m {
-            kp[(i, i)] += jitter;
-        }
-        if let Ok(factorisation) = kp.llt(Side::Lower) {
-            return Ok((factorisation, jitter));
-        }
-        last_tried = jitter;
-        // A zero starting jitter has nothing to escalate from.
-        jitter = if jitter == 0.0 { 1e-12 } else { jitter * 10.0 };
-    }
-
-    Err(BixverseErrors::GpLandmarkCholeskyFailed {
-        jitter: last_tried,
-        n_landmarks: m,
-    })
 }
 
 ///////////

@@ -7,6 +7,10 @@ use std::collections::HashMap;
 use crate::ml::clustering::k_means::*;
 use crate::utils::r_rust_interface::{r_list_count, r_list_to_map};
 
+//////////////////////////
+// KMeansParamsWrappers //
+//////////////////////////
+
 impl KMeansParamsWrappers {
     /// Parse the [KMeansParamsWrappers] from a list
     ///

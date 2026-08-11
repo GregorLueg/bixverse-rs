@@ -59,13 +59,13 @@ use crate::single_cell::sc_data::data_io::SingleCellReading;
 
 /// Element budget for the dense output.
 ///
-/// 250e6 `f32` elements is a gigabyte, which is roughly where an R session on a
-/// laptop starts swapping. Exceeding it raises
+/// 1e9 `f32` elements is four gigabytes, which is roughly where an R session on
+/// a laptop starts swapping. Exceeding it raises
 /// [BixverseErrors::MagicOutputTooLarge] rather than printing a warning: this
 /// crate is driven from R, where stderr is easily missed, and the alternative
 /// failure mode is the session being killed by the OOM reaper with no message
 /// at all. `allow_large` on [MagicParams] is the deliberate override.
-const MAGIC_MAX_ELEMENTS: usize = 250_000_000;
+const MAGIC_MAX_ELEMENTS: usize = 1_000_000_000;
 
 /// Genes read per disk batch.
 ///
@@ -74,6 +74,41 @@ const MAGIC_MAX_ELEMENTS: usize = 250_000_000;
 /// the knob to turn down on a memory-tight machine. It is clamped to the gene
 /// count at entry, so a small selection never over-allocates.
 const MAGIC_GENE_BATCH_SIZE: usize = 1000;
+
+/////////////
+// Helpers //
+/////////////
+
+/// Guard the dense output against the memory budget.
+///
+/// ### Params
+///
+/// * `n_cells` - Rows of the output.
+/// * `n_genes` - Columns of the output.
+/// * `params` - Parameters, supplying the override.
+///
+/// ### Returns
+///
+/// `Ok(())`, or [BixverseErrors::MagicOutputTooLarge].
+fn check_output_size(
+    n_cells: usize,
+    n_genes: usize,
+    params: &MagicParams,
+) -> Result<(), BixverseErrors> {
+    if params.allow_large {
+        return Ok(());
+    }
+    // Saturating, so an absurd request reports rather than wrapping to a small
+    // number and sailing through.
+    if n_cells.saturating_mul(n_genes) > MAGIC_MAX_ELEMENTS {
+        return Err(BixverseErrors::MagicOutputTooLarge {
+            n_cells,
+            n_genes,
+            max_elements: MAGIC_MAX_ELEMENTS,
+        });
+    }
+    Ok(())
+}
 
 ////////////
 // Params //
@@ -518,41 +553,6 @@ pub fn magic_impute_dense(
     });
 
     Ok(buf_a)
-}
-
-/////////////
-// Helpers //
-/////////////
-
-/// Guard the dense output against the memory budget.
-///
-/// ### Params
-///
-/// * `n_cells` - Rows of the output.
-/// * `n_genes` - Columns of the output.
-/// * `params` - Parameters, supplying the override.
-///
-/// ### Returns
-///
-/// `Ok(())`, or [BixverseErrors::MagicOutputTooLarge].
-fn check_output_size(
-    n_cells: usize,
-    n_genes: usize,
-    params: &MagicParams,
-) -> Result<(), BixverseErrors> {
-    if params.allow_large {
-        return Ok(());
-    }
-    // Saturating, so an absurd request reports rather than wrapping to a small
-    // number and sailing through.
-    if n_cells.saturating_mul(n_genes) > MAGIC_MAX_ELEMENTS {
-        return Err(BixverseErrors::MagicOutputTooLarge {
-            n_cells,
-            n_genes,
-            max_elements: MAGIC_MAX_ELEMENTS,
-        });
-    }
-    Ok(())
 }
 
 ///////////

@@ -4,7 +4,7 @@
 
 ### Features
 
-- Faster HVG detections for single cell.
+- Faster HVG detections for single cell with a fix for the Loess function.
 - GPU-accelerated FastClusters for single cell (k-means executed on the GPU).
 - [Palantir](https://www.nature.com/articles/s41587-019-0068-4) for trajectory
   inference.
