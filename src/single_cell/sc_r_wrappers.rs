@@ -5,6 +5,7 @@ use extendr_api::*;
 use std::collections::HashMap;
 
 use crate::ml::clustering::k_means::KMeansParamsWrappers;
+use crate::ml::gp::LandmarkGpParams;
 use crate::prelude::{BixverseFloat, LanczosParams, VecConvert, VecFloatConvert};
 use crate::single_cell::mc_generation::{
     hdwgcna_meta_cells::BootstrappedMetaCellParams, metacells2::params::*,
@@ -24,6 +25,10 @@ use crate::single_cell::sc_analysis::{
     vision::SignatureGenes,
 };
 use crate::single_cell::sc_data::h5ad_io::parse_h5ad_format;
+use crate::single_cell::sc_processing::magic::{MagicLayer, MagicParams};
+use crate::single_cell::sc_trajectory::gene_trends::{
+    BranchSelectionParams, BranchWeighting, GeneTrendsParams,
+};
 use crate::single_cell::sc_trajectory::palantir::PalantirParams;
 use crate::utils::r_rust_interface::{r_list_count, r_list_count_allow_zero, r_list_to_map};
 
@@ -3187,5 +3192,225 @@ impl PalantirParams {
             knn_params,
             lanczos_params,
         })
+    }
+}
+
+///////////
+// MAGIC //
+///////////
+
+impl MagicParams {
+    /// Generate MagicParams from an R list
+    ///
+    /// Missing elements fall back to [MagicParams::default]. `layer` accepts
+    /// `"norm"` or `"raw"`; anything else takes the default rather than
+    /// erroring, matching how the other parsers here treat an unusable value.
+    ///
+    /// `n_steps` goes through [r_list_count_allow_zero] because zero is
+    /// meaningful: it returns the un-imputed matrix.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the MAGIC parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The `MagicParams` with all parameters set.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let defaults = Self::default();
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+
+        let n_steps = r_list_count_allow_zero(&params, "n_steps")?.unwrap_or(defaults.n_steps);
+
+        let clip_threshold = params
+            .get("clip_threshold")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.clip_threshold);
+
+        let gene_batch_size =
+            r_list_count(&params, "gene_batch_size")?.unwrap_or(defaults.gene_batch_size);
+
+        let layer = params
+            .get("layer")
+            .and_then(|v| v.as_str())
+            .and_then(parse_magic_layer)
+            .unwrap_or(defaults.layer);
+
+        let allow_large = params
+            .get("allow_large")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.allow_large);
+
+        Ok(Self {
+            n_steps,
+            clip_threshold,
+            gene_batch_size,
+            layer,
+            allow_large,
+        })
+    }
+}
+
+/// Parse the R-side layer string into a [MagicLayer].
+///
+/// ### Params
+///
+/// * `s` - The layer name, `"norm"` or `"raw"`, case-insensitive.
+///
+/// ### Returns
+///
+/// The matching layer, or `None` if the string is not recognised.
+pub fn parse_magic_layer(s: &str) -> Option<MagicLayer> {
+    match s.to_lowercase().as_str() {
+        "norm" | "normalised" | "normalized" => Some(MagicLayer::Norm),
+        "raw" | "counts" => Some(MagicLayer::Raw),
+        _ => None,
+    }
+}
+
+/////////////////
+// Gene trends //
+/////////////////
+
+impl BranchSelectionParams {
+    /// Generate BranchSelectionParams from an R list
+    ///
+    /// Missing elements fall back to [BranchSelectionParams::default], which
+    /// carries the reference's `q = eps = 1e-2` and a resolution of 500.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the branch selection parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The `BranchSelectionParams` with all parameters set.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let defaults = Self::default();
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+
+        let q = params
+            .get("q")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.q);
+
+        let eps = params
+            .get("eps")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.eps);
+
+        let resolution = r_list_count(&params, "resolution")?.unwrap_or(defaults.resolution);
+
+        Ok(Self { q, eps, resolution })
+    }
+}
+
+impl LandmarkGpParams {
+    /// Generate LandmarkGpParams from an R list
+    ///
+    /// Missing elements fall back to [LandmarkGpParams::default], which carries
+    /// mellon's `length_scale = sigma = 1.0`. Those defaults are a strong
+    /// smoothing prior; see the module documentation of
+    /// [crate::single_cell::sc_trajectory::gene_trends].
+    ///
+    /// ### Params
+    ///
+    /// * `params` - Parsed R list contents, already flattened to a map. Shares
+    ///   the list with [GeneTrendsParams], so the keys sit at the same level
+    ///   rather than in a nested block.
+    ///
+    /// ### Returns
+    ///
+    /// The `LandmarkGpParams` with all parameters set.
+    pub fn from_r_map(params: &HashMap<&str, Robj>) -> Result<Self> {
+        let defaults = Self::default();
+
+        let length_scale = params
+            .get("length_scale")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.length_scale);
+
+        let sigma = params
+            .get("sigma")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.sigma);
+
+        let jitter = params
+            .get("jitter")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.jitter);
+
+        let max_jitter_retries = r_list_count_allow_zero(params, "max_jitter_retries")?
+            .unwrap_or(defaults.max_jitter_retries);
+
+        // Zero is legal here and means "use the default", which is what
+        // `fit_landmark_gp` does with it.
+        let chunk_size =
+            r_list_count_allow_zero(params, "chunk_size")?.unwrap_or(defaults.chunk_size);
+
+        Ok(Self {
+            length_scale,
+            sigma,
+            jitter,
+            max_jitter_retries,
+            chunk_size,
+        })
+    }
+}
+
+impl GeneTrendsParams {
+    /// Generate GeneTrendsParams from an R list
+    ///
+    /// The Gaussian process hyperparameters live in the same flat list and are
+    /// parsed by [LandmarkGpParams::from_r_map]. `weighting` accepts
+    /// `"hard_mask"` or `"fate_probability"`.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the gene trend parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The `GeneTrendsParams` with all parameters set.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let defaults = Self::default();
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+
+        let gp = LandmarkGpParams::from_r_map(&params)?;
+
+        let resolution = r_list_count(&params, "resolution")?.unwrap_or(defaults.resolution);
+
+        let weighting = params
+            .get("weighting")
+            .and_then(|v| v.as_str())
+            .and_then(parse_branch_weighting)
+            .unwrap_or(defaults.weighting);
+
+        Ok(Self {
+            resolution,
+            weighting,
+            gp,
+        })
+    }
+}
+
+/// Parse the R-side weighting string into a [BranchWeighting].
+///
+/// ### Params
+///
+/// * `s` - The weighting name, `"hard_mask"` or `"fate_probability"`,
+///   case-insensitive.
+///
+/// ### Returns
+///
+/// The matching weighting, or `None` if the string is not recognised.
+pub fn parse_branch_weighting(s: &str) -> Option<BranchWeighting> {
+    match s.to_lowercase().as_str() {
+        "hard_mask" | "hardmask" | "mask" => Some(BranchWeighting::HardMask),
+        "fate_probability" | "fateprobability" | "fate_prob" => {
+            Some(BranchWeighting::FateProbability)
+        }
+        _ => None,
     }
 }
