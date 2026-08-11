@@ -21,19 +21,16 @@ use bixverse_rs::single_cell::sc_processing::magic::{
 use bixverse_rs::single_cell::sc_trajectory::gene_trends::{
     BranchSelectionParams, GeneTrendsParams, compute_gene_trends, select_branch_cells,
 };
-#[cfg(feature = "large_scale_diagnostics")]
 use bixverse_rs::single_cell::sc_trajectory::palantir::{PalantirParams, run_palantir};
 
 /// Cells on the shared trunk of the Y.
 ///
-/// Not tunable downward. The arm geometry is fixed, so halving the cell count
-/// doubles the point spacing, the kNN can no longer bridge the arms onto the
-/// trunk, and the fixture comes apart into three components. That is why the
-/// full-chain test is gated and the cheap companion below skips Palantir
-/// entirely rather than shrinking the manifold.
-const TRUNK: usize = 200;
+/// Matches `Y_TRUNK` in the Palantir unit tests. Everything here supplies its
+/// terminal states explicitly, which is the case that holds at this size;
+/// automatic detection is the one thing that needs the 200-cell fixture.
+const TRUNK: usize = 100;
 /// Cells per arm.
-const ARM: usize = 200;
+const ARM: usize = 100;
 /// Rate at which the arms separate, per unit of arc.
 ///
 /// Same value the Palantir unit tests use, and load bearing in both directions:
@@ -62,6 +59,12 @@ fn jitter(i: usize, salt: usize) -> f32 {
 /// Cells `0..TRUNK` are the trunk, the next `ARM` cells are the first branch,
 /// the last `ARM` cells the second.
 ///
+/// The second arm is the exact reflection of the first, noise included, which
+/// is what makes "the two fates are equivalent" a statement with a ground
+/// truth. An independent noise stream per arm makes them genuinely different,
+/// and an uneven branch assignment is then a correct answer rather than a bug.
+/// Same construction as the Palantir unit tests.
+///
 /// ### Returns
 ///
 /// Coordinates for `TRUNK + 2 * ARM` cells.
@@ -78,7 +81,7 @@ fn y_manifold() -> Vec<Vec<f32>> {
     }
     for i in 0..ARM {
         let t = (i + 1) as f32 / ARM as f32 * 5.0;
-        coords.push(vec![5.0 + t, -t * ARM_DIVERGENCE + jitter(i, 5) * 0.3]);
+        coords.push(vec![5.0 + t, -(t * ARM_DIVERGENCE + jitter(i, 4) * 0.3)]);
     }
 
     coords
@@ -111,16 +114,27 @@ fn knn_of(coords: &[Vec<f32>], k: usize) -> (Vec<Vec<usize>>, Vec<Vec<f32>>) {
 
 /// Palantir parameters sized for the fixture.
 ///
+/// Mirrors `test_params` in the Palantir unit tests, restart budget included.
+///
+/// At this fixture size the crate default already converges, so the budget is
+/// insurance rather than a requirement: these manifolds are long, thin and
+/// densely sampled, their diffusion spectrum sits within `1e-5` of one across
+/// the retained range, and the margin closes as the fixture grows. Anyone
+/// enlarging it would otherwise start measuring the eigensolver instead of the
+/// data, silently. The `eigen_converged` assertion below is what would catch
+/// that.
+///
 /// ### Returns
 ///
-/// [PalantirParams] with an exact kNN backend and a pinned component count.
-#[cfg(feature = "large_scale_diagnostics")]
+/// [PalantirParams] with an exact kNN backend, a pinned component count and a
+/// pinned spectrum budget.
 fn palantir_params() -> PalantirParams {
     let mut params = PalantirParams::new();
     params.knn = 24;
-    params.num_waypoints = 250;
+    params.num_waypoints = 120;
     params.knn_params.knn_method = "exhaustive".to_string();
     params.n_eigs = Some(3);
+    params.lanczos_params.max_restarts = 256;
     params
 }
 
@@ -173,8 +187,6 @@ fn planted_expression() -> Mat<f32> {
 /// is exercised by the Palantir unit tests, and pinning the tips here keeps
 /// this test about the joins rather than about that heuristic.
 #[test]
-// 600 cells through the full Palantir eigensolve, ~4s unoptimised.
-#[cfg(feature = "large_scale_diagnostics")]
 fn test_palantir_to_magic_to_gene_trends() {
     let n = TRUNK + 2 * ARM;
     let coords = y_manifold();
@@ -193,6 +205,15 @@ fn test_palantir_to_magic_to_gene_trends() {
     )
     .expect("palantir runs");
 
+    // Both of these gate everything below. A disconnected graph or an
+    // under-resolved embedding makes the branch assignment a property of the
+    // eigensolver's budget rather than of the manifold, and the trend
+    // assertions would then be measuring the wrong thing while still passing.
+    assert!(
+        palantir.eigen_converged,
+        "the diffusion eigensolve did not converge (residual {:e}); the embedding is under-resolved",
+        palantir.eigen_residual
+    );
     assert_eq!(
         palantir.repair_edges, 0,
         "the Y fixture is disconnected; every number below would be an eigensolver artefact"
