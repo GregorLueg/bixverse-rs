@@ -22,9 +22,9 @@ use crate::single_cell::sc_data::data_io::{
 };
 use crate::single_cell::sc_traits::F16;
 
-////////////////////////////
-// InMemorySparseReader   //
-////////////////////////////
+//////////////////////////
+// InMemorySparseReader //
+//////////////////////////
 
 /// Gene-major in-memory store behind the [`SingleCellReading`] interface.
 ///

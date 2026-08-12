@@ -36,9 +36,9 @@ struct DenseGeneStats {
     nnz: usize,
 }
 
-////////////////////
-// CSR streaming  //
-////////////////////
+///////////////////
+// CSR streaming //
+///////////////////
 
 /// Per-gene accumulators for one streaming pass over a CSR matrix.
 ///

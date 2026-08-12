@@ -886,9 +886,9 @@ pub fn compare_knn_graphs(a: MatRef<i32>, b: MatRef<i32>) -> Vec<i32> {
         .collect()
 }
 
-////////////////////////
-// Neighbour kernels   //
-////////////////////////
+///////////////////////
+// Neighbour kernels //
+///////////////////////
 
 /// Gaussian-kernel weights on the neighbour distances.
 ///
@@ -903,10 +903,6 @@ pub fn compare_knn_graphs(a: MatRef<i32>, b: MatRef<i32>) -> Vec<i32> {
 /// `"l2"` onto [`Dist::SquaredEuclidean`] and hands back `d^2` already, while
 /// `"cosine"` and `"manhattan"` hand back a plain distance. Squaring the wrong
 /// one yields `exp(-d^4 / sigma^4)`, which is not a Gaussian kernel.
-///
-/// **The neighbour lists must be ordered by increasing distance**, which every
-/// kNN producer in the crate guarantees. Upstream reads the width straight out
-/// of a fixed column of a sorted result and this does the same.
 ///
 /// ### Params
 ///

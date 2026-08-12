@@ -41,9 +41,9 @@ fn as_csc(matrix: &CompressedSparseData2<u32, f32>) -> Cow<'_, CompressedSparseD
     }
 }
 
-//////////////////////
-// Autocorrelation  //
-//////////////////////
+/////////////////////
+// Autocorrelation //
+/////////////////////
 
 /// Spatial autocorrelation of every requested gene over a metacell graph.
 ///
@@ -94,9 +94,9 @@ pub fn hotspot_autocor_metacells(
     hotspot.compute_all_genes(genes_to_use, &params.model, params.normalise, verbose)
 }
 
-///////////////////
-// Pairwise      //
-///////////////////
+//////////////
+// Pairwise //
+//////////////
 
 /// Gene to gene local correlations over a metacell graph.
 ///
