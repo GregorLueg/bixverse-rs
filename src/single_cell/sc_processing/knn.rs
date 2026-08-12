@@ -118,7 +118,7 @@ impl KnnParams {
         Self {
             // general
             knn_method: "kmknn".to_string(),
-            ann_dist: "cosine".to_string(),
+            ann_dist: "euclidean".to_string(),
             // annoy
             k: 15,
             n_tree: 50,
