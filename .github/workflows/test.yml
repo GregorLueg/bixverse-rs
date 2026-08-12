@@ -2,130 +2,26 @@ name: Test the package
 
 on:
   push:
-    branches: [main]
+    branches: [ main ]
   pull_request:
-    branches: [main]
+    branches: [ main ]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Debug info is the bulk of `target/` and the cache restore is the dominant
-# cost on Windows. Set here rather than in Cargo.toml so local builds keep
-# their backtraces.
-env:
-  CARGO_INCREMENTAL: 0
-  CARGO_PROFILE_DEV_DEBUG: 0
-  CARGO_PROFILE_TEST_DEBUG: 0
-
 jobs:
   test:
-    name: Test on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    steps:
-      - uses: actions/checkout@v5
-
-      # Defender scans every file cargo and the cache extractor touch, which is
-      # a large multiplier on an IO-bound job. Must come before the cache step.
-      - name: Exclude build dirs from Defender (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          Add-MpPreference -ExclusionPath "${{ github.workspace }}"
-          Add-MpPreference -ExclusionPath "$env:USERPROFILE\.cargo"
-          Add-MpPreference -ExclusionProcess "cargo.exe","rustc.exe","link.exe","ld.exe"
-
-      - name: Install R
-        id: setup-r
-        uses: r-lib/actions/setup-r@v2
-
-      - name: Install R shared library (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y r-base-dev
-          echo "LIBRARY_PATH=/usr/lib/R/lib:$LIBRARY_PATH" >> $GITHUB_ENV
-          echo "LD_LIBRARY_PATH=/usr/lib/R/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
-
-      # R on Windows is mingw-built, so extendr needs the GNU ABI. Install it
-      # directly instead of pulling MSVC first and switching afterwards.
-      - uses: dtolnay/rust-toolchain@stable
-        if: runner.os != 'Windows'
-      - uses: dtolnay/rust-toolchain@master
-        if: runner.os == 'Windows'
-        with:
-          toolchain: stable-x86_64-pc-windows-gnu
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.os }}
-          cache-on-failure: true
-
-      - name: Set R_HOME (Windows)
-        if: runner.os == 'Windows'
-        run: echo "R_HOME=${{ steps.setup-r.outputs.r-home }}" >> $env:GITHUB_ENV
-
-      - name: Run tests (non-Windows)
-        if: runner.os != 'Windows'
-        env:
-          LD_LIBRARY_PATH: ${{ steps.setup-r.outputs.r-home }}/lib
-          DYLD_LIBRARY_PATH: ${{ steps.setup-r.outputs.r-home }}/lib
-        run: cargo test --no-default-features && cargo test --features single-cell,multi-modal
-
-      - name: Run tests (Windows)
-        if: runner.os == 'Windows'
-        run: cargo test --no-default-features && cargo test --features single-cell,multi-modal
-
-  test-gpu:
-    name: Test GPU on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Install R
-        id: setup-r
-        uses: r-lib/actions/setup-r@v2
-
-      - name: Install R shared library (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y r-base-dev
-          echo "LIBRARY_PATH=/usr/lib/R/lib:$LIBRARY_PATH" >> $GITHUB_ENV
-          echo "LD_LIBRARY_PATH=/usr/lib/R/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.os }}-gpu
-          cache-on-failure: true
-
-      - name: Install Vulkan (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libvulkan1 mesa-vulkan-drivers libgl1-mesa-dri
-          echo "WGPU_BACKEND=vulkan" >> $GITHUB_ENV
-
-      # The expensive GPU tests sit behind `large_scale_diagnostics`, which this
-      # job deliberately does not enable. The Linux runner has no real GPU and
-      # falls back to lavapipe software Vulkan, so it is a smoke lane: it covers
-      # the shared-memory reduction arm and SPIR-V codegen, neither of which
-      # Apple exercises.
-      # MALLOC_CHECK_ is glibc only and a no-op on macOS. Under lavapipe a
-      # kernel writing past a shared-memory allocation is a real heap overflow,
-      # so this aborts the run at the next free once the chunk header is found
-      # corrupted. It reports where the damage was noticed, not where it was
-      # done, which is enough to turn the lane red.
-      - name: Run tests
-        env:
-          MALLOC_CHECK_: 3
-          LD_LIBRARY_PATH: ${{ steps.setup-r.outputs.r-home }}/lib
-          DYLD_LIBRARY_PATH: ${{ steps.setup-r.outputs.r-home }}/lib
-        run: cargo test --features gpu,single-cell
+    uses: GregorLueg/personal-actions/.github/workflows/rust-test.yml@v1
+    with:
+      # Two runs: the default-feature-free build and the feature build.
+      cpu-args: '--no-default-features'
+      cpu-args-extra: '--features single-cell,multi-modal'
+      gpu-args: '--features gpu,single-cell'
+      # extendr links against R, so the toolchain needs the gnu ABI on Windows
+      # and a shared libR on Linux.
+      needs-r: true
+      # The expensive GPU tests sit behind large_scale_diagnostics, which this
+      # lane deliberately does not enable.
+      gpu-malloc-check: true
+    secrets: inherit
