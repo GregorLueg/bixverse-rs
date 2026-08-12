@@ -578,7 +578,9 @@ pub fn gene_stats(
 ///
 /// ### Params
 ///
-/// * `stats` - First-pass statistics for this gene and batch
+/// * `mean` - Mean over the selected cells, zeros included
+/// * `min` - Smallest selected value, zeros included
+/// * `max` - Largest selected value
 /// * `expected_var` - Expected variance from the loess fit
 /// * `clip_max` - Symmetric clip applied to the standardised values
 ///
@@ -586,14 +588,14 @@ pub fn gene_stats(
 ///
 /// `true` when the gene needs the exact, distribution-aware treatment.
 #[inline]
-pub fn clip_is_reachable(stats: &GeneStats, expected_var: f32, clip_max: f32) -> bool {
+pub fn clip_is_reachable(mean: f32, min: f32, max: f32, expected_var: f32, clip_max: f32) -> bool {
     if !expected_var.is_finite() || expected_var < MIN_EXPECTED_VAR {
         return true;
     }
 
     let reach = clip_max * expected_var.sqrt();
 
-    (stats.max_count as f32 - stats.mean) > reach || (stats.mean - stats.min_count as f32) > reach
+    (max - mean) > reach || (mean - min) > reach
 }
 
 /// Exact standardised variance for one gene across every batch.
@@ -1083,11 +1085,18 @@ pub fn run_hvg_vst<S: SingleCellReading>(
         .filter_map(|(gene, (gene_stats, out))| {
             let mut reachable = false;
             for (batch, value) in out.iter_mut().enumerate() {
+                let stats = &gene_stats[batch];
                 let expected_var = 10_f32.powf(loess_results[batch].fitted_vals[gene]);
-                if clip_is_reachable(&gene_stats[batch], expected_var, clips[batch]) {
+                if clip_is_reachable(
+                    stats.mean,
+                    stats.min_count as f32,
+                    stats.max_count as f32,
+                    expected_var,
+                    clips[batch],
+                ) {
                     reachable = true;
                 } else {
-                    *value = gene_stats[batch].var / expected_var;
+                    *value = stats.var / expected_var;
                 }
             }
             if reachable { Some(gene) } else { None }
@@ -2245,19 +2254,14 @@ mod tests {
     #[test]
     fn test_clip_reachability_gates_the_exact_path() {
         // a tight clip cannot cover a wide gene, a generous one can
-        let stats = GeneStats {
-            mean: 2.0,
-            var: 4.0,
-            max_count: 50,
-            min_count: 0,
-        };
+        let (mean, min, max) = (2.0, 0.0, 50.0);
 
-        assert!(clip_is_reachable(&stats, 1.0, 1.0));
-        assert!(!clip_is_reachable(&stats, 1.0, 100.0));
+        assert!(clip_is_reachable(mean, min, max, 1.0, 1.0));
+        assert!(!clip_is_reachable(mean, min, max, 1.0, 100.0));
 
         // a degenerate expected variance always routes to the exact path
-        assert!(clip_is_reachable(&stats, 0.0, 1e9));
-        assert!(clip_is_reachable(&stats, f32::NAN, 1e9));
+        assert!(clip_is_reachable(mean, min, max, 0.0, 1e9));
+        assert!(clip_is_reachable(mean, min, max, f32::NAN, 1e9));
     }
 
     #[test]
