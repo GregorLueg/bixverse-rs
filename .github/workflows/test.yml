@@ -118,8 +118,14 @@ jobs:
       # falls back to lavapipe software Vulkan, so it is a smoke lane: it covers
       # the shared-memory reduction arm and SPIR-V codegen, neither of which
       # Apple exercises.
+      # MALLOC_CHECK_ is glibc only and a no-op on macOS. Under lavapipe a
+      # kernel writing past a shared-memory allocation is a real heap overflow,
+      # so this aborts the run at the next free once the chunk header is found
+      # corrupted. It reports where the damage was noticed, not where it was
+      # done, which is enough to turn the lane red.
       - name: Run tests
         env:
+          MALLOC_CHECK_: 3
           LD_LIBRARY_PATH: ${{ steps.setup-r.outputs.r-home }}/lib
           DYLD_LIBRARY_PATH: ${{ steps.setup-r.outputs.r-home }}/lib
         run: cargo test --features gpu,single-cell

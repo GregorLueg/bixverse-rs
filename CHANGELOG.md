@@ -1,5 +1,11 @@
 # News
 
+## 0.4.2
+
+### Fix
+
+- Problem with the k-means GPU cluster under certain circumstances.
+
 ## 0.4.1
 
 ### Features
