@@ -1,5 +1,11 @@
 # News
 
+## 0.4.3
+
+### Fix
+
+- Make the dimension conversion in R less harsh to avoid future problems.
+
 ## 0.4.2
 
 ### Fix

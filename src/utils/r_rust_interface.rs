@@ -90,11 +90,18 @@ fn r_index_slice(
 /// ### Returns
 ///
 /// `Some(0)` when the slot holds an exact zero, `None` otherwise.
-fn r_dimension_zero(value: Option<&Robj>) -> Option<usize> {
-    let value = value?;
-    let is_zero = value.as_integer().map(|v| v == 0).unwrap_or(false)
-        || value.as_real().map(|v| v == 0.0).unwrap_or(false);
-    is_zero.then_some(0)
+fn r_dimension(value: Option<&Robj>, msg: &'static str) -> Result<usize, BixverseErrors> {
+    let value = value.ok_or(BixverseErrors::RListParse(msg))?;
+    let dim = value
+        .as_integer()
+        .map(<f64 as From<i32>>::from)
+        .or_else(|| value.as_real())
+        .ok_or(BixverseErrors::RListParse(msg))?;
+    // NA_integer_ arrives as i32::MIN, NA_real_ as NaN; both fail below.
+    if !dim.is_finite() || dim < 0.0 || dim.fract() != 0.0 {
+        return Err(BixverseErrors::RListParse(msg));
+    }
+    Ok(dim as usize)
 }
 
 /// Check that a parsed sparse structure is internally consistent.
@@ -748,20 +755,14 @@ where
         .map(|&x| T::from(x).ok_or(BixverseErrors::RListParse("data value out of range")))
         .collect::<Result<Vec<T>, _>>()?;
 
-    let nrow = r_list_count(&r_data, "nrow")
-        .ok()
-        .flatten()
-        .or_else(|| r_dimension_zero(r_data.get("nrow")))
-        .ok_or(BixverseErrors::RListParse(
-            "nrow missing or not a non-negative whole number",
-        ))?;
-    let ncol = r_list_count(&r_data, "ncol")
-        .ok()
-        .flatten()
-        .or_else(|| r_dimension_zero(r_data.get("ncol")))
-        .ok_or(BixverseErrors::RListParse(
-            "ncol missing or not a non-negative whole number",
-        ))?;
+    let nrow = r_dimension(
+        r_data.get("nrow"),
+        "nrow missing or not a non-negative whole number",
+    )?;
+    let ncol = r_dimension(
+        r_data.get("ncol"),
+        "ncol missing or not a non-negative whole number",
+    )?;
 
     let cs_type = r_data
         .get("cs_type")
