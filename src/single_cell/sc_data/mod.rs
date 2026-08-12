@@ -8,6 +8,7 @@ pub mod h5_10x_io;
 pub mod h5_10x_multifile_io;
 pub mod h5ad_io;
 pub mod h5ad_multifile_io;
+pub mod in_memory_io;
 pub mod mtx_io;
 pub mod mtx_multifile_io;
 pub mod plotting;

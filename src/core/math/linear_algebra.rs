@@ -37,6 +37,40 @@ where
     (intercept, slope)
 }
 
+/// Simple linear regression over `f32` data, accumulated in `f64`
+///
+/// Same fit as [`linear_regression`], but the four moment sums are taken in
+/// `f64`. `f32` holds integers exactly only to `2^24`, and the normal equations
+/// need `sum_xy` and `sum_xx`, which square the inputs: aggregated counts over
+/// tens of thousands of observations walk past that immediately and the slope
+/// comes back wrong rather than merely imprecise.
+///
+/// ### Params
+///
+/// * `x` - Independent variable
+/// * `y` - Dependent variable
+///
+/// ### Returns
+///
+/// Tuple of (intercept, slope), narrowed back to `f32`.
+pub fn linear_regression_widen(x: &[f32], y: &[f32]) -> (f32, f32) {
+    let n = x.len() as f64;
+
+    let (sum_x, sum_y, sum_xy, sum_xx) = x.iter().zip(y.iter()).fold(
+        (0f64, 0f64, 0f64, 0f64),
+        |(sx, sy, sxy, sxx), (&xi, &yi)| {
+            let xi = xi as f64;
+            let yi = yi as f64;
+            (sx + xi, sy + yi, sxy + xi * yi, sxx + xi * xi)
+        },
+    );
+
+    let slope = (n * sum_xy - sum_x * sum_y) / (n * sum_xx - sum_x * sum_x);
+    let intercept = (sum_y - slope * sum_x) / n;
+
+    (intercept as f32, slope as f32)
+}
+
 ////////////////////
 // Matrix solvers //
 ////////////////////

@@ -2,7 +2,7 @@
 //! the kNN graphs (with and without distances).
 
 use ann_search_rs::utils::KnnValidation;
-use ann_search_rs::utils::dist::{Dist, SimdDistance};
+use ann_search_rs::utils::dist::{Dist, SimdDistance, parse_ann_dist};
 use ann_search_rs::*;
 use faer::{MatRef, RowRef};
 use rayon::prelude::*;
@@ -884,4 +884,202 @@ pub fn compare_knn_graphs(a: MatRef<i32>, b: MatRef<i32>) -> Vec<i32> {
                 .count() as i32
         })
         .collect()
+}
+
+///////////////////////
+// Neighbour kernels //
+///////////////////////
+
+/// Gaussian-kernel weights on the neighbour distances.
+///
+/// `w_ij = exp(-d_ij^2 / sigma_i^2)`, row-normalised to sum to one, with the
+/// kernel width `sigma_i` set to node `i`'s `ceil(k / neighborhood_factor)`-th
+/// smallest neighbour distance. A zero width, which happens when that many
+/// neighbours sit exactly on top of the node, is replaced by one, and a row
+/// whose weights all underflow is left alone rather than divided by zero.
+///
+/// The kernel only ever needs `d^2`, so `squared` says which form the caller
+/// holds, and it is not a detail: `ann-search-rs` maps `"euclidean"` and
+/// `"l2"` onto [`Dist::SquaredEuclidean`] and hands back `d^2` already, while
+/// `"cosine"` and `"manhattan"` hand back a plain distance. Squaring the wrong
+/// one yields `exp(-d^4 / sigma^4)`, which is not a Gaussian kernel.
+///
+/// ### Params
+///
+/// * `distances` - Neighbour distances per node, ascending, self excluded
+/// * `neighborhood_factor` - Divisor picking which neighbour sets the width
+/// * `squared` - `true` when `distances` already holds `d^2`
+///
+/// ### Returns
+///
+/// One weight per neighbour, in the same layout as `distances`.
+///
+/// ### References
+///
+/// DeTomaso and Yosef, Cell Systems, 2021 (`hotspot/knn.py::compute_weights`)
+pub fn knn_distance_weights(
+    distances: &[Vec<f32>],
+    neighborhood_factor: f32,
+    squared: bool,
+) -> Vec<Vec<f32>> {
+    distances
+        .par_iter()
+        .map(|row| {
+            if row.is_empty() {
+                return Vec::new();
+            }
+
+            let radius =
+                ((row.len() as f32 / neighborhood_factor).ceil() as usize).clamp(1, row.len());
+
+            // everything below works in `d^2`, so the width is already sigma^2
+            let sigma_sq = if squared {
+                row[radius - 1]
+            } else {
+                row[radius - 1] * row[radius - 1]
+            };
+            let sigma_sq = if sigma_sq == 0.0 { 1.0 } else { sigma_sq };
+
+            let mut weights: Vec<f32> = row
+                .iter()
+                .map(|&d| {
+                    let d_sq = if squared { d } else { d * d };
+                    (-d_sq / sigma_sq).exp()
+                })
+                .collect();
+
+            let total: f32 = weights.iter().sum();
+            if total != 0.0 {
+                for w in weights.iter_mut() {
+                    *w /= total;
+                }
+            }
+
+            weights
+        })
+        .collect()
+}
+
+/// Does this metric hand back `d^2` rather than `d`?
+///
+/// `ann-search-rs` folds `"euclidean"` and `"l2"` onto
+/// [`Dist::SquaredEuclidean`], which never takes the square root; `"cosine"`
+/// and `"manhattan"` return the distance itself. Anything that feeds neighbour
+/// distances into a Gaussian kernel has to know which it is holding.
+///
+/// ### Params
+///
+/// * `ann_dist` - Metric name, as carried in `KnnParams::ann_dist`
+///
+/// ### Returns
+///
+/// `true` for the squared-Euclidean metric, `false` otherwise, including for
+/// a name that does not parse.
+pub fn distances_are_squared(ann_dist: &str) -> bool {
+    matches!(parse_ann_dist(ann_dist), Some(Dist::SquaredEuclidean))
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_relative_eq;
+
+    /// Values taken from `hotspot/knn.py::compute_weights` run on the same
+    /// input: `radius_ii = ceil(6 / 3) = 2`, so the kernel width is the second
+    /// neighbour distance. Rows 0 and 2 are the same distances scaled by two,
+    /// and the kernel is scale-invariant, so they have to come out identical.
+    #[test]
+    fn test_knn_weights_match_the_reference_kernel() {
+        let distances = vec![
+            vec![0.5, 1.0, 1.5, 2.0, 2.5, 3.0],
+            vec![0.0; 6],
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        ];
+
+        let expected = [
+            0.612_048_74,
+            0.289_111_36,
+            0.082_831_79,
+            0.014_394_007,
+            0.001_517_117_2,
+            0.000_096_986_055,
+        ];
+
+        let weights = knn_distance_weights(&distances, 3.0, false);
+
+        for row in [0, 2] {
+            for (got, want) in weights[row].iter().zip(expected.iter()) {
+                assert_relative_eq!(got, want, epsilon = 1e-6);
+            }
+        }
+
+        // a zero kernel width falls back to one, leaving every weight equal
+        for &w in &weights[1] {
+            assert_relative_eq!(w, 1.0 / 6.0, epsilon = 1e-6);
+        }
+
+        // every row sums to one
+        for row in &weights {
+            assert_relative_eq!(row.iter().sum::<f32>(), 1.0, epsilon = 1e-6);
+        }
+    }
+
+    /// The kernel is a function of `d^2`, so feeding it squared distances with
+    /// `squared = true` has to land on the same weights as feeding it the plain
+    /// distances. Getting this wrong silently computes `exp(-d^4 / sigma^4)`,
+    /// and `ann-search-rs` returns `d^2` for `"euclidean"`, so it is the
+    /// default metric that would have been wrong, not an exotic one.
+    #[test]
+    fn test_squared_and_plain_distances_agree() {
+        let plain = vec![
+            vec![0.5, 1.0, 1.5, 2.0, 2.5, 3.0],
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        ];
+        let squared: Vec<Vec<f32>> = plain
+            .iter()
+            .map(|row| row.iter().map(|d| d * d).collect())
+            .collect();
+
+        let from_plain = knn_distance_weights(&plain, 3.0, false);
+        let from_squared = knn_distance_weights(&squared, 3.0, true);
+
+        for (a, b) in from_plain.iter().zip(from_squared.iter()) {
+            for (x, y) in a.iter().zip(b.iter()) {
+                assert_relative_eq!(x, y, epsilon = 1e-6);
+            }
+        }
+
+        // and the wrong reading really is a different kernel, so the test above
+        // is not vacuously true
+        let mis_read = knn_distance_weights(&squared, 3.0, false);
+        assert!((mis_read[0][5] - from_plain[0][5]).abs() > 1e-6);
+    }
+
+    /// The kernel width tracks `neighborhood_factor`, so a wider neighbourhood
+    /// has to spread the weight further out.
+    #[test]
+    fn test_neighborhood_factor_widens_the_kernel() {
+        let distances = vec![vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]];
+
+        let tight = knn_distance_weights(&distances, 6.0, false);
+        let wide = knn_distance_weights(&distances, 1.0, false);
+
+        // ceil(6/6) = 1 -> sigma = 1.0, ceil(6/1) = 6 -> sigma = 6.0
+        assert!(tight[0][0] > wide[0][0]);
+        assert!(tight[0][5] < wide[0][5]);
+    }
+
+    /// `"euclidean"` and `"l2"` come back pre-squared, the others do not.
+    #[test]
+    fn test_squared_metric_detection() {
+        assert!(distances_are_squared("euclidean"));
+        assert!(distances_are_squared("l2"));
+        assert!(!distances_are_squared("cosine"));
+        assert!(!distances_are_squared("manhattan"));
+        assert!(!distances_are_squared("not a metric"));
+    }
 }

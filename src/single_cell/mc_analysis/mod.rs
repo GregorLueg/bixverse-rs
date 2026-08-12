@@ -3,6 +3,7 @@
 //! SCENIC, etc.
 
 pub mod aucell;
+pub mod hotspot_mc;
 pub mod metacell_density;
 pub mod metrics;
 pub mod nmf_mc;

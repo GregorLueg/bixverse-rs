@@ -17,6 +17,30 @@ use crate::prelude::*;
 // Vector helpers //
 ////////////////////
 
+/// Split `0..n` into one contiguous range per rayon worker.
+///
+/// For fan-outs where each worker carries scratch proportional to the whole
+/// problem, one chunk per worker is what keeps the number of allocations and
+/// merges down to the thread count. Rayon's own splitting is the better choice
+/// whenever the per-item work is self-contained.
+///
+/// ### Params
+///
+/// * `n` - Length of the range to split
+///
+/// ### Returns
+///
+/// Half-open `(start, end)` ranges covering `0..n`. Empty when `n` is zero.
+pub fn thread_chunks(n: usize) -> Vec<(usize, usize)> {
+    let n_threads = rayon::current_num_threads().max(1);
+    let chunk = n.div_ceil(n_threads).max(1);
+
+    (0..n)
+        .step_by(chunk)
+        .map(|start| (start, (start + chunk).min(n)))
+        .collect()
+}
+
 /// Flatten a nested vector
 ///
 /// ### Params
