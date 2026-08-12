@@ -20,6 +20,10 @@
 //! instead. The reductions only need arithmetic and `reduce_add`, which are
 //! stable, so they stay on `wide`.
 //!
+//! The widening reductions at the bottom, which read `f32` and accumulate in
+//! `f64`, are the other exception: `wide` has no `f32x4` to `f64x2`
+//! conversion, so their 128-bit arms are per-architecture too.
+//!
 //! Every hand-written arm follows the same shape, so the two function-local
 //! constants mean the same thing throughout: `W` is the lane count forced by
 //! the intrinsic width (4, 8 or 16 for `f32`; 2, 4 or 8 for `f64`) and
@@ -148,6 +152,26 @@ unsafe fn hsum_avx_f64(v: __m256d) -> f64 {
         let mut tmp = [0.0f64; 4];
         _mm256_storeu_pd(tmp.as_mut_ptr(), v);
         tmp.iter().sum()
+    }
+}
+
+/// Horizontal sum of a 128-bit f64 vector.
+///
+/// ### Params
+///
+/// * `v` - The vector to reduce.
+///
+/// ### Returns
+///
+/// The sum of the two lanes.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+#[inline]
+unsafe fn hsum_sse_f64(v: __m128d) -> f64 {
+    unsafe {
+        let mut tmp = [0.0f64; 2];
+        _mm_storeu_pd(tmp.as_mut_ptr(), v);
+        tmp[0] + tmp[1]
     }
 }
 
@@ -2409,6 +2433,577 @@ pub fn axpy_simd_f64(y: &mut [f64], a: f64, x: &[f64]) {
     }
 }
 
+////////////////////////
+// Widening reductions //
+////////////////////////
+
+// `f32` in, `f64` out. Sparse single-cell and metacell layers store counts as
+// `f32` to halve the footprint, but a column sum over tens of thousands of
+// entries walks straight past `2^24` and a `f32` accumulator starts dropping
+// whole entries. Converting once on load and accumulating in `f64` costs one
+// extra instruction per vector and removes the problem.
+//
+// Each arm loads its widest `f32` vector, converts both halves and folds them
+// into one `f64` accumulator per unrolled slot.
+
+//////////
+// Sums //
+//////////
+
+/// Widening sum of a slice of f32, accumulated in f64 (scalar)
+///
+/// ### Params
+///
+/// * `a` - The slice of f32 values to sum.
+///
+/// ### Returns
+///
+/// Sum, in f64
+#[inline(always)]
+fn sum_widen_scalar_f32(a: &[f32]) -> f64 {
+    a.iter().map(|&x| x as f64).sum()
+}
+
+/// Widening sum of a slice of f32, accumulated in f64 (128-bit, SSE2)
+///
+/// ### Params
+///
+/// * `a` - The slice of f32 values to sum.
+///
+/// ### Returns
+///
+/// Sum, in f64
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn sum_widen_sse_f32(a: &[f32]) -> f64 {
+    const W: usize = 4;
+    const BLOCK: usize = W * UNROLL;
+
+    unsafe {
+        let len = a.len();
+        let a_ptr = a.as_ptr();
+        let mut acc = [_mm_setzero_pd(); UNROLL];
+
+        let n_blocks = len / BLOCK;
+        for i in 0..n_blocks {
+            let base = i * BLOCK;
+            for (u, acc) in acc.iter_mut().enumerate() {
+                let v = _mm_loadu_ps(a_ptr.add(base + u * W));
+                let lo = _mm_cvtps_pd(v);
+                let hi = _mm_cvtps_pd(_mm_movehl_ps(v, v));
+                *acc = _mm_add_pd(*acc, _mm_add_pd(lo, hi));
+            }
+        }
+
+        let mut total = acc[0];
+        for acc in &acc[1..] {
+            total = _mm_add_pd(total, *acc);
+        }
+
+        let mut i = n_blocks * BLOCK;
+        while i + W <= len {
+            let v = _mm_loadu_ps(a_ptr.add(i));
+            let lo = _mm_cvtps_pd(v);
+            let hi = _mm_cvtps_pd(_mm_movehl_ps(v, v));
+            total = _mm_add_pd(total, _mm_add_pd(lo, hi));
+            i += W;
+        }
+
+        let mut sum = hsum_sse_f64(total);
+        while i < len {
+            sum += a[i] as f64;
+            i += 1;
+        }
+        sum
+    }
+}
+
+/// Widening sum of a slice of f32, accumulated in f64 (128-bit, NEON)
+///
+/// ### Params
+///
+/// * `a` - The slice of f32 values to sum.
+///
+/// ### Returns
+///
+/// Sum, in f64
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn sum_widen_neon_f32(a: &[f32]) -> f64 {
+    const W: usize = 4;
+    const BLOCK: usize = W * UNROLL;
+
+    unsafe {
+        let len = a.len();
+        let a_ptr = a.as_ptr();
+        let mut acc = [vdupq_n_f64(0.0); UNROLL];
+
+        let n_blocks = len / BLOCK;
+        for i in 0..n_blocks {
+            let base = i * BLOCK;
+            for (u, acc) in acc.iter_mut().enumerate() {
+                let v = vld1q_f32(a_ptr.add(base + u * W));
+                let lo = vcvt_f64_f32(vget_low_f32(v));
+                let hi = vcvt_high_f64_f32(v);
+                *acc = vaddq_f64(*acc, vaddq_f64(lo, hi));
+            }
+        }
+
+        let mut total = acc[0];
+        for acc in &acc[1..] {
+            total = vaddq_f64(total, *acc);
+        }
+
+        let mut i = n_blocks * BLOCK;
+        while i + W <= len {
+            let v = vld1q_f32(a_ptr.add(i));
+            let lo = vcvt_f64_f32(vget_low_f32(v));
+            let hi = vcvt_high_f64_f32(v);
+            total = vaddq_f64(total, vaddq_f64(lo, hi));
+            i += W;
+        }
+
+        let mut sum = vaddvq_f64(total);
+        while i < len {
+            sum += a[i] as f64;
+            i += 1;
+        }
+        sum
+    }
+}
+
+/// Widening sum of a slice of f32, accumulated in f64 (256-bit)
+///
+/// ### Params
+///
+/// * `a` - The slice of f32 values to sum.
+///
+/// ### Returns
+///
+/// Sum, in f64
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "fma")]
+unsafe fn sum_widen_avx2_f32(a: &[f32]) -> f64 {
+    const W: usize = 8;
+    const BLOCK: usize = W * UNROLL;
+
+    unsafe {
+        let len = a.len();
+        let a_ptr = a.as_ptr();
+        let mut acc = [_mm256_setzero_pd(); UNROLL];
+
+        let n_blocks = len / BLOCK;
+        for i in 0..n_blocks {
+            let base = i * BLOCK;
+            for (u, acc) in acc.iter_mut().enumerate() {
+                let p = a_ptr.add(base + u * W);
+                let lo = _mm256_cvtps_pd(_mm_loadu_ps(p));
+                let hi = _mm256_cvtps_pd(_mm_loadu_ps(p.add(4)));
+                *acc = _mm256_add_pd(*acc, _mm256_add_pd(lo, hi));
+            }
+        }
+
+        let mut total = acc[0];
+        for acc in &acc[1..] {
+            total = _mm256_add_pd(total, *acc);
+        }
+
+        let mut i = n_blocks * BLOCK;
+        while i + W <= len {
+            let p = a_ptr.add(i);
+            let lo = _mm256_cvtps_pd(_mm_loadu_ps(p));
+            let hi = _mm256_cvtps_pd(_mm_loadu_ps(p.add(4)));
+            total = _mm256_add_pd(total, _mm256_add_pd(lo, hi));
+            i += W;
+        }
+
+        let mut sum = hsum_avx_f64(total);
+        while i < len {
+            sum += a[i] as f64;
+            i += 1;
+        }
+        sum
+    }
+}
+
+/// Widening sum of a slice of f32, accumulated in f64 (512-bit)
+///
+/// ### Params
+///
+/// * `a` - The slice of f32 values to sum.
+///
+/// ### Returns
+///
+/// Sum, in f64
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn sum_widen_avx512_f32(a: &[f32]) -> f64 {
+    const W: usize = 16;
+    const BLOCK: usize = W * UNROLL;
+
+    unsafe {
+        let len = a.len();
+        let a_ptr = a.as_ptr();
+        let mut acc = [_mm512_setzero_pd(); UNROLL];
+
+        let n_blocks = len / BLOCK;
+        for i in 0..n_blocks {
+            let base = i * BLOCK;
+            for (u, acc) in acc.iter_mut().enumerate() {
+                let p = a_ptr.add(base + u * W);
+                let lo = _mm512_cvtps_pd(_mm256_loadu_ps(p));
+                let hi = _mm512_cvtps_pd(_mm256_loadu_ps(p.add(8)));
+                *acc = _mm512_add_pd(*acc, _mm512_add_pd(lo, hi));
+            }
+        }
+
+        let mut total = acc[0];
+        for acc in &acc[1..] {
+            total = _mm512_add_pd(total, *acc);
+        }
+
+        let mut i = n_blocks * BLOCK;
+        while i + W <= len {
+            let p = a_ptr.add(i);
+            let lo = _mm512_cvtps_pd(_mm256_loadu_ps(p));
+            let hi = _mm512_cvtps_pd(_mm256_loadu_ps(p.add(8)));
+            total = _mm512_add_pd(total, _mm512_add_pd(lo, hi));
+            i += W;
+        }
+
+        let mut sum = _mm512_reduce_add_pd(total);
+        while i < len {
+            sum += a[i] as f64;
+            i += 1;
+        }
+        sum
+    }
+}
+
+/// Widening sum of a slice of f32, accumulated in f64 (dispatch)
+///
+/// ### Params
+///
+/// * `a` - The slice of f32 values to sum.
+///
+/// ### Returns
+///
+/// Sum, in f64
+#[inline]
+pub fn sum_widen_simd_f32(a: &[f32]) -> f64 {
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: see `sum_squares_simd_f32`.
+    unsafe {
+        match detect_simd_level() {
+            SimdLevel::Avx512 => sum_widen_avx512_f32(a),
+            SimdLevel::Avx2 => sum_widen_avx2_f32(a),
+            SimdLevel::Sse => sum_widen_sse_f32(a),
+            SimdLevel::Scalar => sum_widen_scalar_f32(a),
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: NEON is baseline on aarch64, so the feature is unconditionally
+    // present and `detect_simd_level` always reports `Sse` here.
+    unsafe {
+        match detect_simd_level() {
+            SimdLevel::Sse => sum_widen_neon_f32(a),
+            _ => sum_widen_scalar_f32(a),
+        }
+    }
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    sum_widen_scalar_f32(a)
+}
+
+//////////////
+// Variance //
+//////////////
+
+/// Widening sum of squared deviations of a slice of f32 (scalar)
+///
+/// ### Params
+///
+/// * `a` - The slice of f32 values to calculate variance for.
+/// * `mean` - The mean of the values in `a`, in f64.
+///
+/// ### Returns
+///
+/// Sum of the squared deviations from the mean, in f64
+#[inline(always)]
+fn sum_squared_dev_widen_scalar_f32(a: &[f32], mean: f64) -> f64 {
+    a.iter()
+        .map(|&x| {
+            let d = x as f64 - mean;
+            d * d
+        })
+        .sum()
+}
+
+/// Widening sum of squared deviations of a slice of f32 (128-bit, SSE2)
+///
+/// ### Params
+///
+/// * `a` - The slice of f32 values to calculate variance for.
+/// * `mean` - The mean of the values in `a`, in f64.
+///
+/// ### Returns
+///
+/// Sum of the squared deviations from the mean, in f64
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn sum_squared_dev_widen_sse_f32(a: &[f32], mean: f64) -> f64 {
+    const W: usize = 4;
+    const BLOCK: usize = W * UNROLL;
+
+    unsafe {
+        let len = a.len();
+        let a_ptr = a.as_ptr();
+        let mean_vec = _mm_set1_pd(mean);
+        let mut acc = [_mm_setzero_pd(); UNROLL];
+
+        let n_blocks = len / BLOCK;
+        for i in 0..n_blocks {
+            let base = i * BLOCK;
+            for (u, acc) in acc.iter_mut().enumerate() {
+                let v = _mm_loadu_ps(a_ptr.add(base + u * W));
+                let lo = _mm_sub_pd(_mm_cvtps_pd(v), mean_vec);
+                let hi = _mm_sub_pd(_mm_cvtps_pd(_mm_movehl_ps(v, v)), mean_vec);
+                *acc = _mm_add_pd(*acc, _mm_add_pd(_mm_mul_pd(lo, lo), _mm_mul_pd(hi, hi)));
+            }
+        }
+
+        let mut total = acc[0];
+        for acc in &acc[1..] {
+            total = _mm_add_pd(total, *acc);
+        }
+
+        let mut i = n_blocks * BLOCK;
+        while i + W <= len {
+            let v = _mm_loadu_ps(a_ptr.add(i));
+            let lo = _mm_sub_pd(_mm_cvtps_pd(v), mean_vec);
+            let hi = _mm_sub_pd(_mm_cvtps_pd(_mm_movehl_ps(v, v)), mean_vec);
+            total = _mm_add_pd(total, _mm_add_pd(_mm_mul_pd(lo, lo), _mm_mul_pd(hi, hi)));
+            i += W;
+        }
+
+        let mut sum = hsum_sse_f64(total);
+        while i < len {
+            let d = a[i] as f64 - mean;
+            sum += d * d;
+            i += 1;
+        }
+        sum
+    }
+}
+
+/// Widening sum of squared deviations of a slice of f32 (128-bit, NEON)
+///
+/// ### Params
+///
+/// * `a` - The slice of f32 values to calculate variance for.
+/// * `mean` - The mean of the values in `a`, in f64.
+///
+/// ### Returns
+///
+/// Sum of the squared deviations from the mean, in f64
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn sum_squared_dev_widen_neon_f32(a: &[f32], mean: f64) -> f64 {
+    const W: usize = 4;
+    const BLOCK: usize = W * UNROLL;
+
+    unsafe {
+        let len = a.len();
+        let a_ptr = a.as_ptr();
+        let mean_vec = vdupq_n_f64(mean);
+        let mut acc = [vdupq_n_f64(0.0); UNROLL];
+
+        let n_blocks = len / BLOCK;
+        for i in 0..n_blocks {
+            let base = i * BLOCK;
+            for (u, acc) in acc.iter_mut().enumerate() {
+                let v = vld1q_f32(a_ptr.add(base + u * W));
+                let lo = vsubq_f64(vcvt_f64_f32(vget_low_f32(v)), mean_vec);
+                let hi = vsubq_f64(vcvt_high_f64_f32(v), mean_vec);
+                *acc = vfmaq_f64(vfmaq_f64(*acc, lo, lo), hi, hi);
+            }
+        }
+
+        let mut total = acc[0];
+        for acc in &acc[1..] {
+            total = vaddq_f64(total, *acc);
+        }
+
+        let mut i = n_blocks * BLOCK;
+        while i + W <= len {
+            let v = vld1q_f32(a_ptr.add(i));
+            let lo = vsubq_f64(vcvt_f64_f32(vget_low_f32(v)), mean_vec);
+            let hi = vsubq_f64(vcvt_high_f64_f32(v), mean_vec);
+            total = vfmaq_f64(vfmaq_f64(total, lo, lo), hi, hi);
+            i += W;
+        }
+
+        let mut sum = vaddvq_f64(total);
+        while i < len {
+            let d = a[i] as f64 - mean;
+            sum += d * d;
+            i += 1;
+        }
+        sum
+    }
+}
+
+/// Widening sum of squared deviations of a slice of f32 (256-bit)
+///
+/// ### Params
+///
+/// * `a` - The slice of f32 values to calculate variance for.
+/// * `mean` - The mean of the values in `a`, in f64.
+///
+/// ### Returns
+///
+/// Sum of the squared deviations from the mean, in f64
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "fma")]
+unsafe fn sum_squared_dev_widen_avx2_f32(a: &[f32], mean: f64) -> f64 {
+    const W: usize = 8;
+    const BLOCK: usize = W * UNROLL;
+
+    unsafe {
+        let len = a.len();
+        let a_ptr = a.as_ptr();
+        let mean_vec = _mm256_set1_pd(mean);
+        let mut acc = [_mm256_setzero_pd(); UNROLL];
+
+        let n_blocks = len / BLOCK;
+        for i in 0..n_blocks {
+            let base = i * BLOCK;
+            for (u, acc) in acc.iter_mut().enumerate() {
+                let p = a_ptr.add(base + u * W);
+                let lo = _mm256_sub_pd(_mm256_cvtps_pd(_mm_loadu_ps(p)), mean_vec);
+                let hi = _mm256_sub_pd(_mm256_cvtps_pd(_mm_loadu_ps(p.add(4))), mean_vec);
+                *acc = _mm256_fmadd_pd(hi, hi, _mm256_fmadd_pd(lo, lo, *acc));
+            }
+        }
+
+        let mut total = acc[0];
+        for acc in &acc[1..] {
+            total = _mm256_add_pd(total, *acc);
+        }
+
+        let mut i = n_blocks * BLOCK;
+        while i + W <= len {
+            let p = a_ptr.add(i);
+            let lo = _mm256_sub_pd(_mm256_cvtps_pd(_mm_loadu_ps(p)), mean_vec);
+            let hi = _mm256_sub_pd(_mm256_cvtps_pd(_mm_loadu_ps(p.add(4))), mean_vec);
+            total = _mm256_fmadd_pd(hi, hi, _mm256_fmadd_pd(lo, lo, total));
+            i += W;
+        }
+
+        let mut sum = hsum_avx_f64(total);
+        while i < len {
+            let d = a[i] as f64 - mean;
+            sum += d * d;
+            i += 1;
+        }
+        sum
+    }
+}
+
+/// Widening sum of squared deviations of a slice of f32 (512-bit)
+///
+/// ### Params
+///
+/// * `a` - The slice of f32 values to calculate variance for.
+/// * `mean` - The mean of the values in `a`, in f64.
+///
+/// ### Returns
+///
+/// Sum of the squared deviations from the mean, in f64
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn sum_squared_dev_widen_avx512_f32(a: &[f32], mean: f64) -> f64 {
+    const W: usize = 16;
+    const BLOCK: usize = W * UNROLL;
+
+    unsafe {
+        let len = a.len();
+        let a_ptr = a.as_ptr();
+        let mean_vec = _mm512_set1_pd(mean);
+        let mut acc = [_mm512_setzero_pd(); UNROLL];
+
+        let n_blocks = len / BLOCK;
+        for i in 0..n_blocks {
+            let base = i * BLOCK;
+            for (u, acc) in acc.iter_mut().enumerate() {
+                let p = a_ptr.add(base + u * W);
+                let lo = _mm512_sub_pd(_mm512_cvtps_pd(_mm256_loadu_ps(p)), mean_vec);
+                let hi = _mm512_sub_pd(_mm512_cvtps_pd(_mm256_loadu_ps(p.add(8))), mean_vec);
+                *acc = _mm512_fmadd_pd(hi, hi, _mm512_fmadd_pd(lo, lo, *acc));
+            }
+        }
+
+        let mut total = acc[0];
+        for acc in &acc[1..] {
+            total = _mm512_add_pd(total, *acc);
+        }
+
+        let mut i = n_blocks * BLOCK;
+        while i + W <= len {
+            let p = a_ptr.add(i);
+            let lo = _mm512_sub_pd(_mm512_cvtps_pd(_mm256_loadu_ps(p)), mean_vec);
+            let hi = _mm512_sub_pd(_mm512_cvtps_pd(_mm256_loadu_ps(p.add(8))), mean_vec);
+            total = _mm512_fmadd_pd(hi, hi, _mm512_fmadd_pd(lo, lo, total));
+            i += W;
+        }
+
+        let mut sum = _mm512_reduce_add_pd(total);
+        while i < len {
+            let d = a[i] as f64 - mean;
+            sum += d * d;
+            i += 1;
+        }
+        sum
+    }
+}
+
+/// Widening sum of squared deviations of a slice of f32 (dispatch)
+///
+/// ### Params
+///
+/// * `a` - The slice of f32 values to calculate variance for.
+/// * `mean` - The mean of the values in `a`, in f64.
+///
+/// ### Returns
+///
+/// Sum of the squared deviations from the mean, in f64
+#[inline]
+pub fn sum_squared_dev_widen_simd_f32(a: &[f32], mean: f64) -> f64 {
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: see `sum_squares_simd_f32`.
+    unsafe {
+        match detect_simd_level() {
+            SimdLevel::Avx512 => sum_squared_dev_widen_avx512_f32(a, mean),
+            SimdLevel::Avx2 => sum_squared_dev_widen_avx2_f32(a, mean),
+            SimdLevel::Sse => sum_squared_dev_widen_sse_f32(a, mean),
+            SimdLevel::Scalar => sum_squared_dev_widen_scalar_f32(a, mean),
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: see `sum_widen_simd_f32`.
+    unsafe {
+        match detect_simd_level() {
+            SimdLevel::Sse => sum_squared_dev_widen_neon_f32(a, mean),
+            _ => sum_squared_dev_widen_scalar_f32(a, mean),
+        }
+    }
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    sum_squared_dev_widen_scalar_f32(a, mean)
+}
+
 ///////////
 // Tests //
 ///////////
@@ -2691,6 +3286,84 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Every widening arm must agree with the widened scalar reference.
+    ///
+    /// Same tolerance as the f64 reductions above, since the accumulation is
+    /// f64 in every arm; only the load and convert are f32.
+    #[test]
+    fn test_widening_reductions_match_f64_reference() {
+        let mut rng = StdRng::seed_from_u64(7);
+
+        for len in LENGTHS {
+            let a: Vec<f32> = (0..len).map(|_| rng.random::<f32>() * 2.0 - 1.0).collect();
+            let mean = sum_widen_scalar_f32(&a) / len as f64;
+            let sum_ref = sum_widen_scalar_f32(&a);
+            let dev_ref = sum_squared_dev_widen_scalar_f32(&a, mean);
+
+            #[cfg(target_arch = "aarch64")]
+            // SAFETY: NEON is baseline on aarch64.
+            unsafe {
+                assert_relative_eq!(sum_widen_neon_f32(&a), sum_ref, epsilon = 1e-12);
+                assert_relative_eq!(
+                    sum_squared_dev_widen_neon_f32(&a, mean),
+                    dev_ref,
+                    epsilon = 1e-12
+                );
+            }
+
+            #[cfg(target_arch = "x86_64")]
+            // SAFETY: SSE2 is baseline on x86_64, the wider arms are probed.
+            unsafe {
+                assert_relative_eq!(sum_widen_sse_f32(&a), sum_ref, epsilon = 1e-12);
+                assert_relative_eq!(
+                    sum_squared_dev_widen_sse_f32(&a, mean),
+                    dev_ref,
+                    epsilon = 1e-12
+                );
+
+                if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+                    assert_relative_eq!(sum_widen_avx2_f32(&a), sum_ref, epsilon = 1e-12);
+                    assert_relative_eq!(
+                        sum_squared_dev_widen_avx2_f32(&a, mean),
+                        dev_ref,
+                        epsilon = 1e-12
+                    );
+                }
+
+                if is_x86_feature_detected!("avx512f") {
+                    assert_relative_eq!(sum_widen_avx512_f32(&a), sum_ref, epsilon = 1e-12);
+                    assert_relative_eq!(
+                        sum_squared_dev_widen_avx512_f32(&a, mean),
+                        dev_ref,
+                        epsilon = 1e-12
+                    );
+                }
+            }
+        }
+    }
+
+    /// The reason the widening arms exist: a metacell-sized column of counts
+    /// sums past `2^24`, where an f32 accumulator starts dropping entries
+    /// whole. The widened sum stays exact; the f32 one is off by orders of
+    /// magnitude more than the tolerance any caller would set.
+    #[test]
+    fn test_widening_sum_survives_large_counts() {
+        let mut rng = StdRng::seed_from_u64(11);
+        let values: Vec<f32> = (0..50_000)
+            .map(|_| (rng.random::<f32>() * 1e5).round())
+            .collect();
+
+        let exact: f64 = values.iter().map(|&x| x as f64).sum();
+        let widened = sum_widen_simd_f32(&values);
+        let naive = values.iter().sum::<f32>() as f64;
+
+        assert_relative_eq!(widened, exact, max_relative = 1e-12);
+        assert!(
+            (naive - exact).abs() > (widened - exact).abs() * 1e3,
+            "f32 accumulation was expected to drift badly: naive {naive}, exact {exact}"
+        );
     }
 
     /// Every axpy arm must agree with the scalar reference elementwise.
