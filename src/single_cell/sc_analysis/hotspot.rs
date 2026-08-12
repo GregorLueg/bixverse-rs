@@ -11,15 +11,18 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::time::Instant;
 
-use crate::core::math::linear_algebra::linear_regression;
+use crate::core::math::linear_algebra::{linear_regression, linear_regression_widen};
 use crate::core::math::stats::{calc_fdr, inv_logit, logit, z_scores_to_pval};
 use crate::prelude::*;
 
 /// Genes read per batch while streaming gene chunks for Hotspot.
 const GENE_BATCH_SIZE: usize = 1000;
+use crate::single_cell::sc_processing::knn::knn_distance_weights;
 use crate::single_cell::sc_utils::simd::*;
 use crate::utils::faer_parallelism;
-use crate::utils::simd::{sum_simd_f32, sum_squares_simd_f32};
+use crate::utils::simd::{
+    sum_squared_dev_widen_simd_f32, sum_squares_simd_f32, sum_widen_simd_f32,
+};
 
 /////////////
 // Hotspot //
@@ -46,6 +49,60 @@ pub struct HotSpotParams {
     /// [KnnParams] for the various approximate nearest neighbour searches
     /// in ann-search-rs
     pub knn_params: KnnParams,
+    /// How the kNN distances become edge weights, see [HotSpotGraphParams]
+    pub graph_params: HotSpotGraphParams,
+}
+
+/// How the kNN distances are turned into edge weights.
+///
+/// Mirrors `Hotspot.create_knn_graph` in the reference implementation, right
+/// down to the default: upstream ships `weighted_graph=False`, so every
+/// retained edge weighs one and the distances only decide who is a neighbour.
+#[derive(Clone, Copy, Debug)]
+pub struct HotSpotGraphParams {
+    /// Apply the Gaussian kernel of [`knn_distance_weights`] to the neighbour
+    /// distances. `false` gives every edge a weight of one.
+    pub weighted_graph: bool,
+    /// Kernel width is the `ceil(k / neighborhood_factor)`-th neighbour
+    /// distance. Only read when `weighted_graph` is `true`.
+    pub neighborhood_factor: f32,
+    /// Whether the supplied distances already hold `d^2`. Depends entirely on
+    /// the metric the neighbours came from, see
+    /// [`distances_are_squared`]. Only read when `weighted_graph` is `true`.
+    pub squared_distances: bool,
+}
+
+impl Default for HotSpotGraphParams {
+    fn default() -> Self {
+        Self {
+            weighted_graph: false,
+            neighborhood_factor: 3.0,
+            // upstream runs on scikit-learn / pynndescent distances, which are
+            // never pre-squared
+            squared_distances: false,
+        }
+    }
+}
+
+impl HotSpotGraphParams {
+    /// Generate a new instance
+    ///
+    /// ### Params
+    ///
+    /// * `weighted_graph` - Weight the edges by the Gaussian kernel
+    /// * `neighborhood_factor` - Divisor picking the kernel width neighbour
+    /// * `squared_distances` - `true` when the distances already hold `d^2`
+    ///
+    /// ### Returns
+    ///
+    /// The initialised parameters.
+    pub fn new(weighted_graph: bool, neighborhood_factor: f32, squared_distances: bool) -> Self {
+        Self {
+            weighted_graph,
+            neighborhood_factor,
+            squared_distances,
+        }
+    }
 }
 
 /////////////
@@ -386,6 +443,35 @@ fn compute_moments_weights_csr(
     (eg, eg2)
 }
 
+/// Turn neighbour distances into the edge weights the statistics run on.
+///
+/// ### Params
+///
+/// * `distances` - Neighbour distances per node, ascending, self excluded
+/// * `params` - See [HotSpotGraphParams]
+///
+/// ### Returns
+///
+/// One weight per neighbour, in the same layout as `distances`.
+fn graph_weights(distances: &[Vec<f32>], params: &HotSpotGraphParams) -> Vec<Vec<f32>> {
+    if params.weighted_graph {
+        knn_distance_weights(
+            distances,
+            params.neighborhood_factor,
+            params.squared_distances,
+        )
+    } else {
+        distances
+            .iter()
+            .map(|row| vec![1.0_f32; row.len()])
+            .collect()
+    }
+}
+
+/// Combine the two directions of every reciprocal edge onto one slot
+///
+/// ### Params
+///
 /// * `neighbours` - Neighbour indices for each node
 /// * `weights` - Edge weights for each neighbour connection
 ///
@@ -552,11 +638,13 @@ fn danb_model(
     umi_counts: &[f32],
     n_cells: usize,
 ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
-    let n = n_cells as f32;
-    let total: f32 = sum_simd_f32(umi_counts);
-    let tj: f32 = gene.data_raw.iter().map(|x| x as f32).sum();
+    let n = n_cells as f64;
+    // f64 throughout the moment matching, see `Hotspot::fit_danb`
+    let total = sum_widen_simd_f32(umi_counts);
+    let tj: f64 = gene.data_raw.iter().map(|x| x as f64).sum();
 
-    let mu: Vec<f32> = umi_counts.iter().map(|&ti| tj * ti / total).collect();
+    let scale = (tj / total) as f32;
+    let mu: Vec<f32> = umi_counts.iter().map(|&ti| scale * ti).collect();
 
     // Build dense array for O(1) lookups
     let mut data_dense = vec![0.0f32; n_cells];
@@ -564,14 +652,14 @@ fn danb_model(
         data_dense[idx as usize] = val as f32;
     }
 
-    let mut sum_sq = 0_f32;
+    let mut sum_sq = 0_f64;
     for i in 0..n_cells {
-        let diff = data_dense[i] - mu[i];
+        let diff = (data_dense[i] - mu[i]) as f64;
         sum_sq += diff * diff;
     }
 
     let vv = sum_sq / (n - 1.0);
-    let tis_sq_sum: f32 = sum_squares_simd_f32(umi_counts);
+    let tis_sq_sum = sum_squared_dev_widen_simd_f32(umi_counts, 0.0);
     let mut size = ((tj * tj) / total) * (tis_sq_sum / total) / ((n - 1.0) * vv - tj);
 
     if size < 0.0 {
@@ -579,6 +667,7 @@ fn danb_model(
     } else if size < 1e-10 {
         size = 1e-10;
     }
+    let size = size as f32;
 
     let var: Vec<f32> = mu.iter().map(|&m| m * (1.0 + m / size)).collect();
     let x2: Vec<f32> = var.iter().zip(&mu).map(|(&v, &m)| v + m * m).collect();
@@ -769,18 +858,21 @@ fn normal_model(
         .map(|&x| if x > 0.0 { x.ln() } else { 0.0 })
         .collect();
 
-    let (intercept, slope) = linear_regression(&log_umi, &gene_raw);
+    let (intercept, slope) = linear_regression_widen(&log_umi, &gene_raw);
 
     // Cell-specific mu from regression
     let mu: Vec<f32> = log_umi.iter().map(|&x| intercept + slope * x).collect();
 
-    // Residual variance (constant across cells)
-    let residuals_sq: f32 = gene_raw
+    // Residual variance (constant across cells), accumulated in f64
+    let residuals_sq: f64 = gene_raw
         .iter()
         .zip(&mu)
-        .map(|(&obs, &pred)| (obs - pred).powi(2))
+        .map(|(&obs, &pred)| {
+            let d = (obs - pred) as f64;
+            d * d
+        })
         .sum();
-    let var_val = residuals_sq / (n_cells as f32 - 2.0);
+    let var_val = (residuals_sq / (n_cells as f64 - 2.0)) as f32;
 
     let var = vec![var_val; n_cells];
     let x2: Vec<f32> = mu.iter().map(|&m| var_val + m * m).collect();
@@ -817,10 +909,12 @@ pub struct Hotspot<'a, S: SingleCellReading> {
     wtot2: f32,
     /// Total number of cells analysed in the experiment.
     n_cells: usize,
-    /// Sum of `umi_counts` (hoisted out of the DANB fit).
-    umi_total: f32,
-    /// Sum of squared `umi_counts` (hoisted out of the DANB fit).
-    umi_sq_sum: f32,
+    /// Sum of `umi_counts` (hoisted out of the DANB fit). `f64` because
+    /// metacell depths sum well past what `f32` represents exactly.
+    umi_total: f64,
+    /// Sum of squared `umi_counts` (hoisted out of the DANB fit), in `f64` for
+    /// the same reason as `umi_total`, only more so.
+    umi_sq_sum: f64,
     /// log10(umi) per cell (hoisted out of the Bernoulli fit).
     log10_umi: Vec<f32>,
     /// ln(umi) per cell (hoisted out of the Normal fit).
@@ -850,7 +944,11 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
     ///   analysis.
     /// * `neighbours` - Slice of the indices of the neighbours of the given
     ///   cell.
-    /// * `weights` - Slice of the distances to the neighbours of a given cell.
+    /// * `distances` - Slice of the distances to the neighbours of a given
+    ///   cell, ascending. These are distances, not weights: the edge weights
+    ///   are derived here, see [`graph_weights`].
+    /// * `graph_params` - See [HotSpotGraphParams]. `None` takes the upstream
+    ///   defaults, i.e. an unweighted graph.
     ///
     /// ### Returns
     ///
@@ -860,11 +958,13 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
         cell_reader: &S,
         cells_to_keep: &'a [usize],
         neighbours: &'a [Vec<usize>],
-        weights: &mut [Vec<f32>],
+        distances: &[Vec<f32>],
+        graph_params: Option<HotSpotGraphParams>,
     ) -> Result<Self, BixverseErrors> {
         let n_cells = neighbours.len();
 
-        let weights = make_weights_non_redundant(neighbours, weights);
+        let weights = graph_weights(distances, &graph_params.unwrap_or_default());
+        let weights = make_weights_non_redundant(neighbours, &weights);
         let node_degrees = compute_node_degree(neighbours, &weights);
         let graph = GraphCsr::from_non_redundant(neighbours, &weights);
         let wtot2: f32 = weights.iter().flatten().map(|&w| w * w).sum();
@@ -874,8 +974,8 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
         let umi_counts: Vec<f32> = lib_sizes.iter().map(|x| *x as f32).collect();
 
         // Depth-derived quantities are constant across genes; compute once.
-        let umi_total = sum_simd_f32(&umi_counts);
-        let umi_sq_sum = sum_squares_simd_f32(&umi_counts);
+        let umi_total = sum_widen_simd_f32(&umi_counts);
+        let umi_sq_sum = sum_squared_dev_widen_simd_f32(&umi_counts, 0.0);
         let log10_umi: Vec<f32> = umi_counts
             .iter()
             .map(|&x| if x > 0.0 { x.log10() } else { 0.0 })
@@ -1171,17 +1271,21 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
     ///
     /// Nothing; writes `mu`, `var`, `x2`.
     fn fit_danb(&self, gene: &CscGeneChunk, sc: &mut GeneScratch) {
-        let n = self.n_cells as f32;
+        let n = self.n_cells as f64;
         let total = self.umi_total;
-        let tj: f32 = gene.data_raw.iter().map(|x| x as f32).sum();
+        // f64: a metacell aggregates dozens of cells, so a gene total over tens
+        // of thousands of them clears `2^24` and an f32 accumulator starts
+        // dropping entries outright.
+        let tj: f64 = gene.data_raw.iter().map(|x| x as f64).sum();
 
+        let scale = (tj / total) as f32;
         for i in 0..self.n_cells {
-            sc.mu[i] = tj * self.umi_counts[i] / total;
+            sc.mu[i] = scale * self.umi_counts[i];
         }
 
-        let mut sum_sq = 0.0_f32;
+        let mut sum_sq = 0.0_f64;
         for i in 0..self.n_cells {
-            let diff = sc.vals[i] - sc.mu[i];
+            let diff = (sc.vals[i] - sc.mu[i]) as f64;
             sum_sq += diff * diff;
         }
         let vv = sum_sq / (n - 1.0);
@@ -1192,6 +1296,7 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
         } else if size < 1e-10 {
             size = 1e-10;
         }
+        let size = size as f32;
 
         for i in 0..self.n_cells {
             let m = sc.mu[i];
@@ -1245,17 +1350,17 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
     ///
     /// Nothing; writes `mu`, `var` (constant), `x2`.
     fn fit_normal(&self, sc: &mut GeneScratch) {
-        let (intercept, slope) = linear_regression(&self.ln_umi, &sc.vals);
+        let (intercept, slope) = linear_regression_widen(&self.ln_umi, &sc.vals);
         for i in 0..self.n_cells {
             sc.mu[i] = intercept + slope * self.ln_umi[i];
         }
 
-        let mut resid_sq = 0.0_f32;
+        let mut resid_sq = 0.0_f64;
         for i in 0..self.n_cells {
-            let d = sc.vals[i] - sc.mu[i];
+            let d = (sc.vals[i] - sc.mu[i]) as f64;
             resid_sq += d * d;
         }
-        let var_val = resid_sq / (self.n_cells as f32 - 2.0);
+        let var_val = (resid_sq / (self.n_cells as f64 - 2.0)) as f32;
 
         for i in 0..self.n_cells {
             sc.var[i] = var_val;
@@ -1925,6 +2030,17 @@ mod tests {
 
     fn dot(a: &[f32], b: &[f32]) -> f32 {
         a.iter().zip(b.iter()).map(|(&x, &y)| x * y).sum()
+    }
+
+    /// The default is upstream's `weighted_graph=False`: distances decide who
+    /// is a neighbour and nothing else.
+    #[test]
+    fn test_unweighted_graph_is_the_default() {
+        let distances = vec![vec![0.5, 1.0, 1.5], vec![2.0, 4.0, 8.0]];
+
+        let weights = graph_weights(&distances, &HotSpotGraphParams::default());
+
+        assert_eq!(weights, vec![vec![1.0_f32; 3], vec![1.0_f32; 3]]);
     }
 
     #[test]
