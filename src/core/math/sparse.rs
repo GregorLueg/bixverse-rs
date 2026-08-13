@@ -3168,6 +3168,7 @@ mod tests {
     use super::*;
     use faer::Mat;
 
+    /// The format parser takes either case and rejects anything that is not CSR or CSC.
     #[test]
     fn test_parse_sparse_format() {
         assert!(parse_compressed_sparse_format("csr").unwrap().is_csr());
@@ -3252,6 +3253,7 @@ mod tests {
         assert_eq!(norm_only.indices, full.indices);
     }
 
+    /// Both endpoints of every edge land in the matrix and every row stays ascending.
     #[test]
     fn test_undirected_edges_to_csr_is_symmetric_and_row_sorted() {
         // A path plus one chord, so several rows hold both a `lo < r` partner
@@ -3275,6 +3277,7 @@ mod tests {
         }
     }
 
+    /// No edges must still produce a well-formed `indptr` of the declared size.
     #[test]
     fn test_undirected_edges_to_csr_handles_empty_input() {
         let csr = undirected_edges_to_csr::<f64>(3, &[]);
@@ -3284,6 +3287,7 @@ mod tests {
         assert!(csr.indices.is_empty());
     }
 
+    /// An edgeless node keeps an empty span instead of shifting every later row.
     #[test]
     fn test_undirected_edges_to_csr_keeps_isolated_nodes() {
         // Node 0 has no edges at all, so its span has to be empty rather than
@@ -3296,6 +3300,7 @@ mod tests {
         assert_eq!(csr.indices, vec![2, 1]);
     }
 
+    /// A well-formed square CSR passes and reports its dimension.
     #[test]
     fn test_validate_square_csr_accepts_a_sound_matrix() {
         let csr = undirected_edges_to_csr(3, &[(0u32, 1u32, 1.0f64), (1, 2, 2.0)]);
@@ -3303,6 +3308,7 @@ mod tests {
         assert_eq!(validate_square_csr(&csr).unwrap(), 3);
     }
 
+    /// Each structural fault the validator exists for must come back as `MalformedCsr`.
     #[test]
     fn test_validate_square_csr_catches_structural_faults() {
         // Non-monotonic indptr: the Rust range `5..2` is empty, so row 1 is
@@ -3355,6 +3361,7 @@ mod tests {
         ));
     }
 
+    /// The zero counts and the dense-to-CSR conversion agree on what is structurally zero.
     #[test]
     fn test_from_dense_and_count_zeroes() {
         let mat: Mat<f64> = Mat::from_fn(3, 2, |i, j| if i == j { (i + 1) as f64 } else { 0.0 });
@@ -3372,6 +3379,7 @@ mod tests {
         assert_eq!(csr.data, vec![1.0, 2.0]);
     }
 
+    /// Adding two CSR matrices merges shared columns rather than storing them twice.
     #[test]
     fn test_sparse_add_csr() {
         let shape = (2, 2);
@@ -3396,6 +3404,7 @@ mod tests {
         assert_eq!(c.indptr, vec![0, 2, 3]);
     }
 
+    /// CSR matrix-vector product on a case small enough to check by hand.
     #[test]
     fn test_csr_matvec() {
         let a = CompressedSparseData2::<f64, f64>::new_csr(
@@ -3410,6 +3419,7 @@ mod tests {
         assert_eq!(result, vec![4.0, 3.0]);
     }
 
+    /// Lanczos recovers the one nonzero eigenpair of a symmetric rank-one matrix.
     #[test]
     fn test_lanczos_eigenpairs_logic() {
         // Symmetric rank-1 matrix M = x * x^T
@@ -3435,6 +3445,7 @@ mod tests {
         assert!(dot_x.abs() > 0.999);
     }
 
+    /// Lanczos SVD recovers both singular vectors of a sparse rank-one matrix.
     #[test]
     fn test_sparse_svd_lanczos_logic() {
         // Sparse rank-1 matrix A = x * y^T
@@ -3469,14 +3480,6 @@ mod tests {
     ///
     /// Eigenvalues are `2 cos(k pi / (n + 1))`, separated by `O(1 / n^2)`, which
     /// makes it the cheapest genuinely clustered spectrum to build.
-    ///
-    /// ### Params
-    ///
-    /// * `n` - Number of nodes.
-    ///
-    /// ### Returns
-    ///
-    /// The adjacency matrix in CSR.
     fn path_graph(n: usize) -> CompressedSparseData2<f64, f64> {
         let mut rows: Vec<Vec<(u32, f64)>> = vec![Vec::new(); n];
         for i in 0..n - 1 {
@@ -3498,15 +3501,7 @@ mod tests {
         CompressedSparseData2::new_csr(&data, &indices, &indptr, None, (n, n))
     }
 
-    /// Diagonal matrix from an explicit list of diagonal entries.
-    ///
-    /// ### Params
-    ///
-    /// * `diag` - The diagonal entries, in order.
-    ///
-    /// ### Returns
-    ///
-    /// The matrix in CSR, including any zero entries as stored nonzeros.
+    /// Diagonal matrix in CSR, storing every entry given, zeros included.
     fn diagonal(diag: &[f64]) -> CompressedSparseData2<f64, f64> {
         let indices: Vec<u32> = (0..diag.len() as u32).collect();
         let indptr: Vec<u32> = (0..=diag.len() as u32).collect();
@@ -3514,18 +3509,7 @@ mod tests {
         CompressedSparseData2::new_csr(diag, &indices, &indptr, None, (diag.len(), diag.len()))
     }
 
-    /// `||A x - lambda x||` for one returned pair.
-    ///
-    /// ### Params
-    ///
-    /// * `mat` - The CSR matrix the pair came from.
-    /// * `values` - Returned eigenvalues.
-    /// * `vectors` - Returned eigenvectors, `vectors[i][k]`.
-    /// * `k` - Which pair to check.
-    ///
-    /// ### Returns
-    ///
-    /// The residual norm.
+    /// `||A x - lambda x||` for the `k`-th returned pair, with `vectors` indexed `[i][k]`.
     fn pair_residual(
         mat: &CompressedSparseData2<f64, f64>,
         values: &[f64],
@@ -3548,6 +3532,7 @@ mod tests {
             .sqrt()
     }
 
+    /// Regression: a tightly clustered spectrum used to come back as noise.
     #[test]
     fn test_lanczos_resolves_a_clustered_spectrum_at_defaults() {
         // The regression: this used to come back as noise, with the leading
@@ -3573,6 +3558,7 @@ mod tests {
         );
     }
 
+    /// Given a big enough restart budget the same clustered spectrum does converge.
     #[test]
     fn test_lanczos_restarts_converge_a_clustered_spectrum() {
         // Same fixture with a budget large enough to actually converge, which
@@ -3597,6 +3583,7 @@ mod tests {
         }
     }
 
+    /// Regression: asking for more components than the matrix has rows used to panic.
     #[test]
     fn test_lanczos_caps_components_at_the_matrix_dimension() {
         // Used to panic inside `clamp` before it ever got to the iteration.
@@ -3613,6 +3600,7 @@ mod tests {
         }
     }
 
+    /// Regression: an early Krylov breakdown used to leave values and vectors different lengths.
     #[test]
     fn test_lanczos_breakdown_keeps_values_and_vectors_the_same_length() {
         // Rank two, so the Krylov space closes after three vectors and there is
@@ -3632,6 +3620,7 @@ mod tests {
         assert_relative_eq!(res.eigenvalues[1], 3.0, epsilon = 1e-9);
     }
 
+    /// A solve that ran out of restarts has to report itself as unconverged.
     #[test]
     fn test_lanczos_reports_budget_exhaustion() {
         // One cycle on a path graph cannot converge, and the caller has to be
@@ -3650,6 +3639,7 @@ mod tests {
         assert!(res.residual > params.tol * res.norm_estimate);
     }
 
+    /// Scaling the whole matrix must not change whether the solve converges.
     #[test]
     fn test_lanczos_tolerance_is_relative_to_the_matrix_norm() {
         // Scaling the matrix by 1e8 scales every residual by 1e8 too. An
@@ -3665,6 +3655,7 @@ mod tests {
         assert_relative_eq!(b.eigenvalues[0] / a.eigenvalues[0], 1e8, epsilon = 1e-1);
     }
 
+    /// A basis smaller than the default still resolves the top eigenvalues via restarts.
     #[test]
     fn test_lanczos_params_basis_size_is_honoured() {
         let n = 40usize;

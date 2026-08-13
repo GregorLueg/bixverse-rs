@@ -378,6 +378,7 @@ mod tests {
         (a - b).abs() < EPS
     }
 
+    /// The R-facing parser is case insensitive, accepts both aliases and rejects the rest.
     #[test]
     fn parse_pert_distance_variants() {
         assert!(matches!(
@@ -400,6 +401,7 @@ mod tests {
         assert!(parse_perturbation_distance("").is_none());
     }
 
+    /// With no pair to average over the mean is defined as zero, not NaN from a zero divisor.
     #[test]
     fn within_lt_two_rows_is_zero() {
         let single = Mat::<f64>::from_fn(1, 3, |_, j| j as f64);
@@ -414,6 +416,7 @@ mod tests {
         );
     }
 
+    /// Pins the within-group mean against a hand-computed value for both metrics.
     #[test]
     fn within_three_points_known() {
         // Right triangle (0,0), (3,0), (0,4): pairwise 3, 4, 5; mean 4.
@@ -428,6 +431,7 @@ mod tests {
         assert!(close(d_sq, (9.0 + 16.0 + 25.0) / 3.0));
     }
 
+    /// Mismatched feature counts error rather than reading past the shorter row.
     #[test]
     fn between_dim_mismatch_errors() {
         let x = Mat::<f64>::zeros(2, 3);
@@ -438,6 +442,7 @@ mod tests {
         ));
     }
 
+    /// An empty group on one side yields zero instead of dividing by an empty product.
     #[test]
     fn between_empty_returns_zero() {
         let x = Mat::<f64>::zeros(0, 2);
@@ -448,6 +453,7 @@ mod tests {
         );
     }
 
+    /// Pins the between-group mean against a hand-computed value.
     #[test]
     fn between_known_value() {
         // X = {(0,0)}, Y = {(3,4), (6,8)}. Distances 5, 10; mean 7.5.
@@ -463,6 +469,7 @@ mod tests {
         assert!(close(d, 7.5));
     }
 
+    /// The energy distance is symmetric in its two groups despite the asymmetric argument order.
     #[test]
     fn edistance_symmetric() {
         let x = Mat::<f64>::from_fn(4, 3, |i, j| (i + j) as f64);
@@ -472,6 +479,7 @@ mod tests {
         assert!(close(exy, eyx));
     }
 
+    /// The one closed form the energy distance has, so it pins the constant factor.
     #[test]
     fn edistance_singletons_squared_identity() {
         // Singletons: within = 0, so E = 2*||mu_x - mu_y||^2 exactly.
@@ -482,6 +490,7 @@ mod tests {
         assert!(close(e, 50.0));
     }
 
+    /// The pairwise matrix is group by group, symmetric, and zero on the diagonal.
     #[test]
     fn pairwise_edistance_shape_and_symmetry() {
         let emb = Mat::<f64>::from_fn(6, 2, |i, j| (i + j) as f64);
@@ -497,6 +506,7 @@ mod tests {
         }
     }
 
+    /// Fewer labels than rows errors rather than silently dropping the tail.
     #[test]
     fn pairwise_edistance_label_count_mismatch() {
         let emb = Mat::<f64>::zeros(4, 2);
@@ -507,6 +517,7 @@ mod tests {
         ));
     }
 
+    /// The reference group keeps its slot in the output and scores zero against itself.
     #[test]
     fn onesided_reference_entry_is_zero() {
         let emb = Mat::<f64>::from_fn(6, 2, |i, j| (i + j) as f64);
@@ -516,6 +527,7 @@ mod tests {
         assert_eq!(res[1], 0.0);
     }
 
+    /// The cheap one-sided path must agree with the column it replaces in the full matrix.
     #[test]
     fn onesided_matches_pairwise_column() {
         let emb = Mat::<f64>::from_fn(8, 3, |i, j| ((i + 1) * (j + 1)) as f64);

@@ -195,17 +195,8 @@ where
 mod tests {
     use super::*;
 
-    /// Build a symmetric CSR from an undirected weighted edge list.
-    ///
-    /// ### Params
-    ///
-    /// * `n` - Node count.
-    /// * `edges` - Undirected edges as `(a, b, weight)`; both directions are
-    ///   stored.
-    ///
-    /// ### Returns
-    ///
-    /// The CSR adjacency.
+    /// Build a symmetric CSR over `n` nodes from `(a, b, weight)` edges, storing
+    /// both directions with each row sorted by column.
     fn undirected_csr(n: usize, edges: &[(usize, usize, f64)]) -> CompressedSparseData2<f64> {
         let mut rows: Vec<Vec<(u32, f64)>> = vec![Vec::new(); n];
         for &(a, b, w) in edges {
@@ -234,16 +225,6 @@ mod tests {
     /// A valid CSR for this crate wants ascending rows, so this is only for
     /// probing order dependence in a routine that reads the rows as an unordered
     /// bag of edges.
-    ///
-    /// ### Params
-    ///
-    /// * `n` - Node count.
-    /// * `edges` - Undirected edges as `(a, b, weight)`; both directions are
-    ///   stored.
-    ///
-    /// ### Returns
-    ///
-    /// The CSR adjacency with per-row column order following `edges`.
     fn undirected_csr_unsorted(
         n: usize,
         edges: &[(usize, usize, f64)],
@@ -268,15 +249,8 @@ mod tests {
         CompressedSparseData2::new_csr(&data, &indices, &indptr, None, (n, n))
     }
 
-    /// Read a CSR back as a sorted `(lo, hi, weight)` edge list.
-    ///
-    /// ### Params
-    ///
-    /// * `csr` - The adjacency to read.
-    ///
-    /// ### Returns
-    ///
-    /// Deduplicated undirected edges, ascending by `(lo, hi)`.
+    /// Read a CSR back as deduplicated undirected `(lo, hi, weight)` edges,
+    /// ascending by `(lo, hi)`.
     fn edge_list(csr: &CompressedSparseData2<f64>) -> Vec<(usize, usize, f64)> {
         let n = csr.nrows();
         let mut out = Vec::new();
@@ -292,6 +266,8 @@ mod tests {
         out
     }
 
+    /// The two objectives really do run Kruskal in opposite orders and land on
+    /// different edge sets.
     #[test]
     fn test_minimum_and_maximum_forests_pick_different_edges() {
         // A 4-cycle with one chord. Cheapest three edges are 0-1, 1-2, 2-3.
@@ -315,6 +291,7 @@ mod tests {
         assert_eq!(max_tree, vec![(0, 2, 10.0), (0, 3, 9.0), (1, 2, 2.0)]);
     }
 
+    /// A disconnected graph gives a forest, not an attempt at a single tree.
     #[test]
     fn test_forest_spans_each_component_separately() {
         // Two triangles with no edge between them: 4 kept edges, not 5.
@@ -339,6 +316,7 @@ mod tests {
         );
     }
 
+    /// An isolated node keeps its row in the output shape while adding no edge.
     #[test]
     fn test_isolated_node_contributes_no_edges() {
         let graph = undirected_csr(3, &[(0, 1, 1.0)]);
@@ -350,6 +328,8 @@ mod tests {
         assert_eq!(forest.indptr[3], 2);
     }
 
+    /// When the two stored directions disagree the objective picks the weight,
+    /// rather than whichever direction happens to be read first.
     #[test]
     fn test_asymmetric_pair_resolves_towards_the_objective() {
         // 0->1 stored at 5.0, 1->0 at 1.0. The minimum forest must take 1.0
@@ -369,6 +349,7 @@ mod tests {
         );
     }
 
+    /// Ties resolve on `(lo, hi)`, so storage order cannot change the answer.
     #[test]
     fn test_all_equal_weights_break_ties_deterministically() {
         // Every edge of K4 at the same weight: the tie-break is (lo, hi), so
@@ -394,6 +375,7 @@ mod tests {
         assert_eq!(first, vec![(0, 1, 1.0), (0, 2, 1.0), (0, 3, 1.0)]);
     }
 
+    /// Self loops never enter the forest, and a NaN weight is filtered out.
     #[test]
     fn test_self_loops_and_nan_weights_are_dropped() {
         let data = vec![f64::NAN, 7.0, 1.0, 1.0];
@@ -410,6 +392,8 @@ mod tests {
         );
     }
 
+    /// Regression: a NaN on a genuine off-diagonal edge reached `total_cmp` and
+    /// reordered the whole Kruskal sequence.
     #[test]
     fn test_a_nan_on_a_real_edge_is_dropped() {
         // The self-loop case above short-circuits on `j == row`, so it passes
@@ -428,6 +412,7 @@ mod tests {
         );
     }
 
+    /// Infinities are weights, not sentinels: the NaN filter must not take them.
     #[test]
     fn test_infinite_weights_are_ordinary_edges() {
         // scipy treats infinities as very large weights and so does this.
@@ -447,6 +432,7 @@ mod tests {
         assert!(min_forest.iter().any(|e| (e.0, e.1) == (1, 2)));
     }
 
+    /// A stored zero is a real edge here, not an absent one.
     #[test]
     fn test_zero_weight_edges_are_kept() {
         // scipy's csgraph would treat the stored zero as an absent edge. Here
@@ -459,6 +445,7 @@ mod tests {
         );
     }
 
+    /// A zero-node graph returns an empty forest rather than panicking.
     #[test]
     fn test_empty_graph_returns_empty_forest() {
         let graph = CompressedSparseData2::<f64>::new_csr(&[], &[], &[0], None, (0, 0));
@@ -469,6 +456,7 @@ mod tests {
         assert_eq!(forest.get_nnz(), 0);
     }
 
+    /// A CSC matrix is refused rather than read as if it were CSR.
     #[test]
     fn test_rejects_csc_input() {
         let graph = undirected_csr(3, &[(0, 1, 1.0)]).transform();
@@ -476,6 +464,7 @@ mod tests {
         assert!(minimum_spanning_forest(&graph).is_err());
     }
 
+    /// A non-square adjacency is not a graph and must not be walked.
     #[test]
     fn test_rejects_non_square_input() {
         let data = vec![1.0f64];

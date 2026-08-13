@@ -655,26 +655,19 @@ mod tests {
         (outgoing, incoming)
     }
 
+    /// The seed count is the midpoint of the ranges implied by the size and UMI bounds.
     #[test]
     fn seeds_count_for_basic() {
-        // Simple: total_size 1000, target metacell 100 cells / 10K UMIs;
-        // bounds 50–150 cells, 5K–15K UMIs; total UMIs 100K.
         let n = seeds_count_for(1000, 100_000.0, 50, 150, 5_000.0, 15_000.0);
-        // by_size: ceil(1000/150)=7 .. ceil(1000/50)=20
-        // by_umis: ceil(100000/15000)=7 .. ceil(100000/5000)=20
-        // overlap [7,20], midpoint round-up = 14
         assert_eq!(n, 14);
-    }
 
-    #[test]
-    fn seeds_count_for_at_least_one() {
+        // Degenerate input still yields a usable seed count.
         assert!(seeds_count_for(1, 1.0, 1, 2, 1.0, 2.0) >= 1);
     }
 
+    /// No node is left unassigned once the last seeding phase has run.
     #[test]
     fn complete_assignment_after_phase3() {
-        // Simple 4-node directed cycle with uniform weights:
-        // 0 -> 1 -> 2 -> 3 -> 0, all weight 1.0.
         let (out, inc) = make_graph(
             vec![0, 1, 2, 3],
             vec![1, 2, 3, 0],
@@ -685,20 +678,18 @@ mod tests {
         let mut seeds = vec![-1i32; 4];
         let count = choose_seeds(&out, &inc, &mut seeds, 2, 0.0, 1.0, 42);
 
-        // Every node assigned, count <= 2.
-        assert!(seeds.iter().all(|&s| s >= 0));
+        // Every node assigned to one of the `count` seeds.
         assert!(
             seeds
                 .iter()
                 .copied()
                 .all(|s| (0..count as i32).contains(&s))
         );
-        assert!(seeds.iter().copied().all(|s| (s as usize) < count));
     }
 
+    /// A pre-assigned node keeps its partition while the rest are still filled in.
     #[test]
     fn respects_partial_input() {
-        // Pre-seed node 0 to partition 0; expect it to remain there.
         let (out, inc) = make_graph(
             vec![0, 1, 2, 3, 0, 1, 2, 3],
             vec![1, 2, 3, 0, 2, 3, 0, 1],
@@ -715,6 +706,7 @@ mod tests {
         assert!(count >= 1);
     }
 
+    /// The same RNG seed reproduces both the assignment and the seed count.
     #[test]
     fn deterministic_under_same_seed() {
         let (out, inc) = make_graph(

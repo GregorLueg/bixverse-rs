@@ -490,6 +490,7 @@ mod tests {
     use super::*;
     use approx::assert_relative_eq;
 
+    /// Column scaling maps each component onto 0 to 1 independently.
     #[test]
     fn test_minmax_scale_maps_to_unit_range() {
         let mut data = vec![vec![1.0, 10.0], vec![3.0, 20.0], vec![5.0, 30.0]];
@@ -501,6 +502,7 @@ mod tests {
         assert_relative_eq!(data[1][1], 0.5, epsilon = 1e-6);
     }
 
+    /// A constant column has zero range, so it scales to zero instead of dividing by it.
     #[test]
     fn test_minmax_scale_constant_column_is_zero_not_nan() {
         let mut data = vec![vec![7.0, 1.0], vec![7.0, 2.0]];
@@ -511,6 +513,7 @@ mod tests {
         assert_relative_eq!(data[1][0], 0.0, epsilon = 1e-6);
     }
 
+    /// Boundary cells are the argmin and argmax of every component.
     #[test]
     fn test_boundary_cells_are_column_extremes() {
         // Column 0 extremes are cells 3 and 0; column 1 extremes are 1 and 2.
@@ -524,6 +527,7 @@ mod tests {
         assert_eq!(boundary_cells(&data), vec![0, 1, 2, 3]);
     }
 
+    /// Ties resolve to the first index, and the boundary set is deduplicated.
     #[test]
     fn test_boundary_cells_take_first_index_on_ties() {
         // Every cell shares the same value, so the first index wins both ways.
@@ -532,6 +536,7 @@ mod tests {
         assert_eq!(boundary_cells(&data), vec![0]);
     }
 
+    /// The closest candidate wins, and an empty candidate set errors rather than returning zero.
     #[test]
     fn test_nearest_candidate_picks_closest() {
         let data = vec![vec![0.0, 0.0], vec![10.0, 0.0], vec![1.0, 1.0]];
@@ -540,6 +545,7 @@ mod tests {
         assert!(nearest_candidate(&data, &[], 0).is_err());
     }
 
+    /// Waypoints lead with the start cell, then run ascending with no repeat of it, keeping boundaries and pinned cells.
     #[test]
     fn test_waypoints_start_first_then_ascending() {
         let data: Vec<Vec<f32>> = (0..50)
@@ -560,6 +566,7 @@ mod tests {
         }
     }
 
+    /// The eigengap heuristic falls back through the gaps until one clears the floor of three.
     #[test]
     fn test_resolve_n_eigs_takes_largest_gap() {
         // Gaps are [0.1, 0.5, 0.05]; the largest sits at index 1 -> n_eigs 2,
@@ -570,6 +577,7 @@ mod tests {
         assert_eq!(resolve_n_eigs(&eigenvalues, None).unwrap(), 3);
     }
 
+    /// A gap late in the spectrum is taken when it is the largest, with the floor never binding.
     #[test]
     fn test_resolve_n_eigs_uses_a_late_gap_when_it_is_largest() {
         // Gaps are [0.02, 0.03, 0.02, 0.63]; the largest sits at index 3, so
@@ -579,6 +587,7 @@ mod tests {
         assert_eq!(resolve_n_eigs(&eigenvalues, None).unwrap(), 4);
     }
 
+    /// An explicit request is passed through, floor included, and capped at what exists.
     #[test]
     fn test_resolve_n_eigs_honours_explicit_requests_below_the_floor() {
         // The floor of three is the *heuristic's*, not the function's. The
@@ -592,6 +601,7 @@ mod tests {
         assert_eq!(resolve_n_eigs(&eigenvalues, Some(99)).unwrap(), 4);
     }
 
+    /// Fewer than two eigenvectors leaves nothing to embed, so it errors.
     #[test]
     fn test_resolve_n_eigs_rejects_a_request_below_two() {
         let eigenvalues = [1.0, 0.9, 0.5, 0.2];
@@ -606,6 +616,7 @@ mod tests {
         ));
     }
 
+    /// Regression: every return path handed back the floor of three, past the end of a shorter spectrum.
     #[test]
     fn test_resolve_n_eigs_never_exceeds_what_is_available() {
         // Every return path used to hand back the floor of three regardless,
@@ -621,6 +632,7 @@ mod tests {
         assert_eq!(resolve_n_eigs(&[], None).unwrap(), 0);
     }
 
+    /// The clamp binds at its ceiling, leaves everything below untouched, and sits above real signal.
     #[test]
     fn test_clamp_eigenvalues_pins_the_ceiling() {
         // A scale of 1e300 is finite too, so "the scale is finite" pins
@@ -641,6 +653,7 @@ mod tests {
         }
     }
 
+    /// A non-finite eigenvalue errors rather than passing the clamp unchanged.
     #[test]
     fn test_clamp_eigenvalues_rejects_non_finite_input() {
         // `f64::min` returns the other operand for a NaN, so the clamp would
@@ -653,6 +666,7 @@ mod tests {
         assert!(clamp_eigenvalues(&[f64::INFINITY]).is_err());
     }
 
+    /// Back-transformed eigenvectors come out unit L2 with their direction intact.
     #[test]
     fn test_back_transform_renormalises_to_unit_l2() {
         let eigenvectors = vec![vec![0.6, 1.0], vec![0.8, 2.0]];
@@ -670,6 +684,7 @@ mod tests {
         assert!(out[0][0] > out[1][0]);
     }
 
+    /// A zero-degree row back-transforms to zero instead of dividing by zero.
     #[test]
     fn test_back_transform_survives_zero_degree_rows() {
         let eigenvectors = vec![vec![1.0], vec![2.0]];

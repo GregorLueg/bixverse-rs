@@ -400,7 +400,8 @@ where
 ///
 /// ### Params
 ///
-/// * `gene_set_ranks` - Rank positions of genes in the gene set
+/// * `gene_set_ranks` - Rank positions of genes in the gene set. Must be unique;
+///   duplicates double-count the walk weights.
 /// * `decreasing_order_indices` - All genes sorted by rank (descending KCDF)
 /// * `symmetric_rank_stats` - Rank statistics for weighting genes
 /// * `tau` - Weighting exponent (1.0 = equal weights, >1.0 = emphasize extremes)
@@ -438,7 +439,9 @@ fn gsva_random_walk<T: BixverseFloat>(
 
     weights.sort_unstable_by_key(|&(rank, _)| rank);
 
-    let total_out = T::from_usize(n - gene_set_ranks.len()).unwrap();
+    // Saturating: a caller that ignores the uniqueness contract falls into the
+    // `total_out <= 0` NaN arm rather than underflowing.
+    let total_out = T::from_usize(n.saturating_sub(gene_set_ranks.len())).unwrap();
     if total_out <= T::zero() {
         return (T::nan(), T::nan());
     }
@@ -479,7 +482,8 @@ fn gsva_random_walk<T: BixverseFloat>(
 ///
 /// ### Params
 ///
-/// * `gene_sets` - Vector of gene sets, each containing gene indices
+/// * `gene_sets` - Vector of gene sets, each containing gene indices. Repeated
+///   indices are de-duplicated.
 /// * `decreasing_order_indices` - Genes sorted by KCDF values (descending)
 /// * `symmetric_rank_stats` - Rank statistics for weighting genes
 /// * `tau` - Weighting exponent (1.0 = equal weights, >1.0 = emphasize extremes)
@@ -488,7 +492,8 @@ fn gsva_random_walk<T: BixverseFloat>(
 ///
 /// ### Returns
 ///
-/// Vector of ES, one per gene set.
+/// Vector of ES, one per gene set. `NaN` for a set that is empty, matches no
+/// gene, carries zero total weight, or covers the whole background.
 pub fn gsva_score_genesets<T: BixverseFloat>(
     gene_sets: &[Vec<usize>],
     decreasing_order_indices: &[usize],
@@ -518,6 +523,11 @@ pub fn gsva_score_genesets<T: BixverseFloat>(
                     gene_set_ranks.push(rank);
                 }
             }
+
+            // Nothing upstream promises unique indices, and a repeated gene would
+            // both double-count its weight and inflate the in-set size past `n`.
+            gene_set_ranks.sort_unstable();
+            gene_set_ranks.dedup();
 
             if gene_set_ranks.is_empty() {
                 return T::nan();
@@ -961,4 +971,142 @@ pub fn ssgsea<T: BixverseFloat>(
     }
 
     result
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_relative_eq;
+
+    /// Pins the descending order and the symmetric rank statistics for an even
+    /// background, where `half_n` is a whole number.
+    #[test]
+    fn order_rankstat_ranks_descending_and_centres_the_statistics() {
+        let values: Vec<f64> = vec![0.1, 0.5, 0.3, 0.9];
+        let (order, stats) = order_rankstat(&values);
+
+        assert_eq!(order, vec![3, 1, 2, 0]);
+        // |n - rank - n/2| = |2 - rank| at ranks 3, 1, 2, 0 for genes 0..3.
+        assert_eq!(stats, vec![1.0, 1.0, 0.0, 2.0]);
+    }
+
+    /// Pins the odd-n behaviour: `half_n` is the float `n / 2.0`, so every rank
+    /// statistic lands on a half-integer. GSVA's C `utils.c` was not available to
+    /// check, so this records what the Rust does rather than a claimed reference.
+    #[test]
+    fn order_rankstat_half_n_stays_fractional_for_odd_backgrounds() {
+        let values: Vec<f64> = vec![0.5, 0.1, 0.4, 0.2, 0.3];
+        let (order, stats) = order_rankstat(&values);
+
+        assert_eq!(order, vec![0, 2, 4, 3, 1]);
+        // |5 - rank - 2.5| = |2.5 - rank| at ranks 0, 4, 1, 3, 2 for genes 0..4.
+        assert_eq!(stats, vec![2.5, 1.5, 1.5, 0.5, 0.5]);
+        assert!(stats.iter().all(|s| (s - s.floor() - 0.5).abs() < 1e-15));
+    }
+
+    /// Pins the full random walk plus all three scoring modes on a set whose walk
+    /// reaches `(pos, neg) = (0.0, -0.5)`.
+    #[test]
+    fn gsva_score_genesets_covers_all_three_scoring_modes() {
+        let order = vec![3_usize, 1, 2, 0];
+        let stats: Vec<f64> = vec![1.0, 1.0, 0.0, 2.0];
+        let gene_sets = vec![vec![1_usize, 0]];
+
+        // Walk over ranks 0..4 with in-ranks {1, 3}, total_in = 2, total_out = 2:
+        // -0.5, 0.0, -0.5, 0.0 => max_pos 0.0, max_neg -0.5.
+        let max_diff_abs = gsva_score_genesets(&gene_sets, &order, &stats, 1.0, true, true);
+        let max_diff_sum = gsva_score_genesets(&gene_sets, &order, &stats, 1.0, true, false);
+        let largest_abs = gsva_score_genesets(&gene_sets, &order, &stats, 1.0, false, false);
+
+        assert_relative_eq!(max_diff_abs[0], 0.5, epsilon = 1e-12);
+        assert_relative_eq!(max_diff_sum[0], -0.5, epsilon = 1e-12);
+        assert_relative_eq!(largest_abs[0], -0.5, epsilon = 1e-12);
+    }
+
+    /// Pins the other arm of `max_diff = false`, where the positive excursion
+    /// beats the negative one and is returned instead.
+    #[test]
+    fn gsva_score_genesets_returns_the_positive_walk_when_it_dominates() {
+        let order = vec![3_usize, 1, 2, 0];
+        let stats: Vec<f64> = vec![1.0, 1.0, 0.0, 2.0];
+        // Gene 3 sits at rank 0, so the walk starts at 1.0 and decays to 0.0.
+        let gene_sets = vec![vec![3_usize]];
+
+        let largest_abs = gsva_score_genesets(&gene_sets, &order, &stats, 1.0, false, false);
+        let max_diff_abs = gsva_score_genesets(&gene_sets, &order, &stats, 1.0, true, true);
+
+        assert_relative_eq!(largest_abs[0], 1.0, epsilon = 1e-12);
+        assert_relative_eq!(max_diff_abs[0], 1.0, epsilon = 1e-12);
+    }
+
+    /// Pins the four NaN paths: empty set, no gene matched, zero total weight and
+    /// zero genes outside the set.
+    #[test]
+    fn gsva_score_genesets_returns_nan_on_every_degenerate_set() {
+        let order = vec![3_usize, 1, 2, 0];
+        let stats: Vec<f64> = vec![1.0, 1.0, 0.0, 2.0];
+        let gene_sets = vec![
+            vec![],           // empty gene set
+            vec![99_usize],   // no index present in the ranking
+            vec![2_usize],    // rank statistic is exactly zero => total_in == 0
+            vec![0, 1, 2, 3], // whole background => total_out == 0
+        ];
+
+        let scores = gsva_score_genesets(&gene_sets, &order, &stats, 1.0, true, true);
+
+        assert!(scores.iter().all(|s| s.is_nan()), "got {scores:?}");
+    }
+
+    /// Regression: repeated gene indices used to double-count the walk weights and
+    /// underflow `n - gene_set_ranks.len()` once the set outgrew the background.
+    #[test]
+    fn gsva_score_genesets_deduplicates_repeated_gene_indices() {
+        let order = vec![3_usize, 1, 2, 0];
+        let stats: Vec<f64> = vec![1.0, 1.0, 0.0, 2.0];
+        let gene_sets = vec![
+            vec![1_usize, 0],          // reference, scores 0.5
+            vec![1_usize, 0, 1, 0],    // duplicated up to n, used to give total_out == 0
+            vec![1_usize, 0, 1, 0, 1], // longer than n, used to panic on the subtraction
+        ];
+
+        let scores = gsva_score_genesets(&gene_sets, &order, &stats, 1.0, true, true);
+
+        assert_relative_eq!(scores[0], 0.5, epsilon = 1e-12);
+        assert_relative_eq!(scores[1], 0.5, epsilon = 1e-12);
+        assert_relative_eq!(scores[2], 0.5, epsilon = 1e-12);
+    }
+
+    /// Regression: a gene set that still covers the whole background after
+    /// de-duplication has no genes outside it, so it must stay `NaN`.
+    #[test]
+    fn gsva_score_genesets_returns_nan_for_a_duplicated_full_background_set() {
+        let order = vec![3_usize, 1, 2, 0];
+        let stats: Vec<f64> = vec![1.0, 1.0, 0.0, 2.0];
+        let gene_sets = vec![vec![0_usize, 1, 2, 3, 3, 0]];
+
+        let scores = gsva_score_genesets(&gene_sets, &order, &stats, 1.0, true, true);
+
+        assert!(scores[0].is_nan(), "got {scores:?}");
+    }
+
+    /// Pins the kernel string parsing, including the case folding and the `None`
+    /// returned for anything unrecognised.
+    #[test]
+    fn parse_gsva_kernel_round_trips_the_three_kernel_names() {
+        assert!(matches!(
+            parse_gsva_kernel("gaussian"),
+            Some(GsvaKernel::Gaussian)
+        ));
+        assert!(matches!(
+            parse_gsva_kernel("Poisson"),
+            Some(GsvaKernel::Poisson)
+        ));
+        assert!(matches!(parse_gsva_kernel("NONE"), Some(GsvaKernel::None)));
+        assert!(parse_gsva_kernel("normal").is_none());
+        assert!(parse_gsva_kernel("").is_none());
+    }
 }

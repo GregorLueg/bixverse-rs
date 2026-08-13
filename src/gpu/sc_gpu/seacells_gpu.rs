@@ -608,13 +608,13 @@ pub fn seacells_fit_gpu<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "large_scale_diagnostics")]
+    #[cfg(feature = "large-test")]
     use crate::gpu::sc_gpu::kernels::seacells_kernels::A_COLUMNS_BLOCKS;
     use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
     use rand::prelude::*;
     use rand::rngs::StdRng;
 
-    use crate::gpu::sc_gpu::kernels::seacells_kernels::A_COLUMNS_WG;
+    use crate::gpu::sc_gpu::kernels::seacells_kernels::{A_COLUMNS_WG, plane_reduce_viable};
 
     /// Skip rather than fail where no GPU is available.
     fn try_device() -> Option<WgpuDevice> {
@@ -693,7 +693,7 @@ mod tests {
     // Heavy: n = 2500, k = 300 over six configurations, so six full CPU
     // `fw_columns_a` solves. `test_fw_columns_a_capacity_boundary` keeps a
     // cheaper CPU-vs-GPU parity check in the default run.
-    #[cfg(feature = "large_scale_diagnostics")]
+    #[cfg(feature = "large-test")]
     fn test_fw_columns_a_gpu_matches_cpu() {
         let Some(device) = try_device() else {
             eprintln!("no GPU available, skipping");
@@ -820,7 +820,7 @@ mod tests {
     #[test]
     // Heavy: k up to 9000 across every tier, six configurations, each with a
     // full CPU solve. The heaviest test in this file.
-    #[cfg(feature = "large_scale_diagnostics")]
+    #[cfg(feature = "large-test")]
     fn test_fw_columns_a_large_k_matches_cpu() {
         let Some(device) = try_device() else {
             eprintln!("no GPU available, skipping");
@@ -972,9 +972,6 @@ mod tests {
     ///
     /// `(atom indices, atom weights, atom counts, stride)`.
     #[allow(clippy::too_many_arguments)]
-    // Only `test_fw_columns_a_reduction_arms_agree` uses this, so it carries the
-    // same gate or it is dead code in the library.
-    #[cfg(feature = "large_scale_diagnostics")]
     fn run_columns_a_raw(
         t1: &CompressedSparseData2<f32>,
         a_prev_t: &CompressedSparseData2<f32>,
@@ -1042,46 +1039,61 @@ mod tests {
         )
     }
 
-    /// The shared-memory tree arm must agree with the plane arm.
+    /// Compare the two reduction arms of `fw_columns_a_gpu` at one shape.
     ///
-    /// `plane_reduce_viable` is true on Apple Silicon, so every other test in
-    /// this file takes the plane path and the `else` branches, which carry their
-    /// own tie-break and barrier structure, would otherwise never execute
-    /// anywhere.
-    #[test]
-    // Heavy: n = 1500, k = 300 across four dispatches.
-    #[cfg(feature = "large_scale_diagnostics")]
-    fn test_fw_columns_a_reduction_arms_agree() {
-        let Some(device) = try_device() else {
-            eprintln!("no GPU available, skipping");
-            return;
-        };
-        let client = WgpuRuntime::client(&device);
-
-        let n = 1_500usize;
-        let k = 300usize;
-        let n_iters = 12usize;
+    /// Forcing `use_plane = true` is only safe where `plane_reduce_viable` says
+    /// so. On a device that reports a narrow plane, lavapipe being the one in
+    /// CI, the kernel's own docs call that configuration unsafe, so the plane
+    /// arm is skipped there and only the tree arm runs.
+    ///
+    /// ### Params
+    ///
+    /// * `n` - Cell count
+    /// * `k` - Archetype count
+    /// * `n_iters` - Frank-Wolfe iterations
+    /// * `seed` - RNG seed for the fixtures
+    /// * `client` - Compute client
+    fn assert_reduction_arms_agree(
+        n: usize,
+        k: usize,
+        n_iters: usize,
+        seed: u64,
+        client: &ComputeClient<WgpuRuntime>,
+    ) {
+        let limits = GpuLimits::from_client(client);
+        let plane_ok = plane_reduce_viable(A_COLUMNS_WG, &limits);
 
         // Coarse values so the tie-break is exercised: that is where the two
         // arms are most likely to diverge.
-        let mut rng = StdRng::seed_from_u64(5);
-        let t1 = random_csr(k, k, 12, false, true, &mut rng);
-        let a_prev_t = random_csr(n, k, 6, true, true, &mut rng);
-        let k2_b = random_csr(n, k, 8, false, true, &mut rng);
+        let mut rng = StdRng::seed_from_u64(seed);
+        let t1 = random_csr(k, k, 12.min(k), false, true, &mut rng);
+        let a_prev_t = random_csr(n, k, 6.min(k), true, true, &mut rng);
+        let k2_b = random_csr(n, k, 8.min(k), false, true, &mut rng);
 
         for pruning in [None, Some(1e-7f32)] {
-            let (plane_idx, plane_val, plane_cnt, cap) = run_columns_a_raw(
-                &t1, &a_prev_t, &k2_b, n, k, n_iters, pruning, true, None, &client,
-            );
             let (tree_idx, tree_val, tree_cnt, tree_cap) = run_columns_a_raw(
-                &t1, &a_prev_t, &k2_b, n, k, n_iters, pruning, false, None, &client,
+                &t1, &a_prev_t, &k2_b, n, k, n_iters, pruning, false, None, client,
+            );
+
+            if !plane_ok {
+                // Nothing to compare against, but the tree arm still has to
+                // produce a column per cell rather than an empty buffer.
+                assert_eq!(tree_cnt.len(), n);
+                assert!(
+                    tree_cnt.iter().any(|&c| c > 0),
+                    "tree arm produced no atoms at all (pruning {pruning:?})"
+                );
+                continue;
+            }
+
+            let (plane_idx, plane_val, plane_cnt, cap) = run_columns_a_raw(
+                &t1, &a_prev_t, &k2_b, n, k, n_iters, pruning, true, None, client,
             );
 
             assert_eq!(cap, tree_cap);
             assert_eq!(
                 plane_cnt, tree_cnt,
-                "atom counts differ (pruning {:?})",
-                pruning
+                "atom counts differ (pruning {pruning:?})"
             );
 
             // Only `[0, cnt)` of each row is written by the kernel. The rest of
@@ -1095,25 +1107,47 @@ mod tests {
                 assert_eq!(
                     &plane_idx[lo..hi],
                     &tree_idx[lo..hi],
-                    "atom indices differ at cell {} (pruning {:?})",
-                    cell,
-                    pruning
+                    "atom indices differ at cell {cell} (pruning {pruning:?})"
                 );
                 for slot in 0..cnt {
                     let a = plane_val[lo + slot];
                     let b = tree_val[lo + slot];
                     assert!(
                         (a - b).abs() <= 1e-5 * a.abs().max(1e-3),
-                        "weight differs at cell {} slot {} (pruning {:?}): {} vs {}",
-                        cell,
-                        slot,
-                        pruning,
-                        a,
-                        b
+                        "weight differs at cell {cell} slot {slot} (pruning {pruning:?}): {a} vs {b}"
                     );
                 }
             }
         }
+    }
+
+    /// The shared-memory tree arm must agree with the plane arm, at a size cheap
+    /// enough to run by default. `plane_reduce_viable` is true on Apple Silicon,
+    /// so without this the tree arm's tie-break and barrier structure never
+    /// executes anywhere outside the gated sweep below.
+    #[test]
+    fn test_fw_columns_a_reduction_arms_agree_small() {
+        let Some(device) = try_device() else {
+            eprintln!("no GPU available, skipping");
+            return;
+        };
+        let client = WgpuRuntime::client(&device);
+
+        assert_reduction_arms_agree(64, 32, 4, 5, &client);
+    }
+
+    /// The same comparison at a shape that crosses the block and slot bounds.
+    #[test]
+    // Heavy: n = 1500, k = 300 across four dispatches.
+    #[cfg(feature = "large-test")]
+    fn test_fw_columns_a_reduction_arms_agree() {
+        let Some(device) = try_device() else {
+            eprintln!("no GPU available, skipping");
+            return;
+        };
+        let client = WgpuRuntime::client(&device);
+
+        assert_reduction_arms_agree(1_500, 300, 12, 5, &client);
     }
 
     /// The atom capacity ceiling must be exact on both sides.

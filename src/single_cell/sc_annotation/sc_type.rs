@@ -1046,17 +1046,7 @@ mod tests {
     use super::*;
     use approx::assert_relative_eq;
 
-    /// Build a [SctypeRes] where every cell scores `2.0` for its own cell type
-    /// and `0.0` for all others.
-    ///
-    /// ### Params
-    ///
-    /// * `cell_type_per_cell` - The true cell type index of each cell.
-    /// * `n_ct` - Number of cell types.
-    ///
-    /// ### Returns
-    ///
-    /// The synthetic [SctypeRes].
+    /// Build a [SctypeRes] scoring 2.0 for each cell's own type and 0.0 elsewhere.
     fn one_hot_res(cell_type_per_cell: &[usize], n_ct: usize) -> SctypeRes {
         let n_cells = cell_type_per_cell.len();
         let mut scores = vec![0.0_f32; n_cells * n_ct];
@@ -1071,16 +1061,7 @@ mod tests {
         }
     }
 
-    /// Fully connected edge list over `[start, start + size)`.
-    ///
-    /// ### Params
-    ///
-    /// * `start` - First node index.
-    /// * `size` - Number of nodes in the clique.
-    ///
-    /// ### Returns
-    ///
-    /// A flat alternating pair vector of edges.
+    /// Fully connected edge list over `[start, start + size)` as flat alternating pairs.
     fn clique_edges(start: usize, size: usize) -> Vec<usize> {
         let mut edges = Vec::with_capacity(size * (size - 1));
         for i in 0..size {
@@ -1092,6 +1073,7 @@ mod tests {
         edges
     }
 
+    /// Graph smoothing rescues a cell whose raw profile disagrees with its entire neighbourhood.
     #[test]
     fn test_sctype_smoothing_two_cliques() {
         // Two 5-cliques. Cell 4 sits in clique A but carries clique B's profile.
@@ -1130,6 +1112,7 @@ mod tests {
         assert_relative_eq!(raw_with_graph.agreement.unwrap()[4], 0.0, epsilon = 1e-6);
     }
 
+    /// A node with no edges keeps its own scores and counts as agreeing with itself.
     #[test]
     fn test_sctype_smoothing_isolated_node() {
         let res = one_hot_res(&[0, 0, 1], 2);
@@ -1146,6 +1129,7 @@ mod tests {
         assert_relative_eq!(cells.agreement.unwrap()[2], 1.0, epsilon = 1e-6);
     }
 
+    /// Column-z centres and scales each cell type, and a constant column stays at zero.
     #[test]
     fn test_sctype_column_z_calibration() {
         // Column 0 varies, column 1 is constant and must not blow up.
@@ -1168,6 +1152,7 @@ mod tests {
         assert_eq!(raw, scores);
     }
 
+    /// A single-cell-type cluster has purity 1, zero entropy and no runner-up.
     #[test]
     fn test_sctype_composition_pure_cluster() {
         let res = one_hot_res(&[0, 0, 0, 0], 2);
@@ -1183,6 +1168,7 @@ mod tests {
         assert_relative_eq!(comp[0].entropy, 0.0, epsilon = 1e-6);
     }
 
+    /// An even two-way split gives purity 0.5 and ln(2) entropy.
     #[test]
     fn test_sctype_composition_mixed_cluster() {
         let res = one_hot_res(&[0, 0, 1, 1], 2);
@@ -1196,6 +1182,7 @@ mod tests {
         assert_relative_eq!(comp[0].entropy, std::f32::consts::LN_2, epsilon = 1e-6);
     }
 
+    /// Cells below the score floor stay unassigned and form their own entropy category.
     #[test]
     fn test_sctype_composition_counts_unknown() {
         // Scores below the floor never get a call.
@@ -1215,6 +1202,7 @@ mod tests {
         assert_relative_eq!(comp[0].entropy, std::f32::consts::LN_2, epsilon = 1e-6);
     }
 
+    /// Above the purity threshold the cluster call overrides the per-cell outliers.
     #[test]
     fn test_sctype_hybrid_keeps_pure_cluster() {
         // 19 of 20 cells agree, purity 0.95, so the cluster call wins outright.
@@ -1231,6 +1219,7 @@ mod tests {
         assert!(hybrid.assignments.iter().all(|&a| a == Some(0)));
     }
 
+    /// Below the purity threshold the per-cell calls survive untouched.
     #[test]
     fn test_sctype_hybrid_splits_mixed_cluster() {
         // 7/3 split, purity 0.7, below the threshold, so the per-cell calls stand.
@@ -1251,6 +1240,7 @@ mod tests {
         assert!(strict.assignments.iter().all(|&a| a == Some(0)));
     }
 
+    /// A graph whose node count differs from the cell count is refused up front.
     #[test]
     fn test_sctype_graph_size_mismatch_errors() {
         let res = one_hot_res(&[0, 0, 1], 2);
@@ -1266,6 +1256,7 @@ mod tests {
         ));
     }
 
+    /// Cluster labels must be one per cell.
     #[test]
     fn test_sctype_cluster_labels_length_mismatch_errors() {
         let res = one_hot_res(&[0, 0, 1], 2);

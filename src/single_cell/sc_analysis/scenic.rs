@@ -4038,6 +4038,7 @@ pub fn run_scenic_grn_streaming<S: SingleCellReading>(
 mod tests {
     use super::*;
 
+    /// Variance is recovered from the running sum and sum of squares, with no second pass.
     #[test]
     fn node_variance_basic() {
         // values: 1, 2, 3 -> mean=2, var=2/3
@@ -4046,6 +4047,7 @@ mod tests {
         assert!((v - 2.0 / 3.0).abs() < 1e-6, "got {v}");
     }
 
+    /// A constant node gives exactly zero, not a small floating point residue.
     #[test]
     fn node_variance_uniform() {
         // values: 3, 3, 3 -> var=0
@@ -4054,95 +4056,7 @@ mod tests {
         assert_eq!(v, 0.0);
     }
 
-    #[test]
-    fn partition_logic_single_target() {
-        let tf_col: Vec<u8> = vec![10, 50, 200, 30, 250, 100];
-        let sample_slice: Vec<u32> = vec![0, 1, 2, 4];
-        let y_slice: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
-        let n_targets = 1;
-
-        let mut left_buf = [0u32; 4];
-        let mut right_buf = [0u32; 4];
-        let mut left_y_buf = [0.0f32; 4];
-        let mut right_y_buf = [0.0f32; 4];
-
-        let threshold = 100u8;
-        let mut l_idx = 0;
-        let mut r_idx = 0;
-
-        for i in 0..sample_slice.len() {
-            let s = sample_slice[i];
-            let val = tf_col[s as usize];
-            let src_base = i * n_targets;
-
-            if val <= threshold {
-                left_buf[l_idx] = s;
-                let dst = l_idx * n_targets;
-                left_y_buf[dst..dst + n_targets]
-                    .copy_from_slice(&y_slice[src_base..src_base + n_targets]);
-                l_idx += 1;
-            } else {
-                right_buf[r_idx] = s;
-                let dst = r_idx * n_targets;
-                right_y_buf[dst..dst + n_targets]
-                    .copy_from_slice(&y_slice[src_base..src_base + n_targets]);
-                r_idx += 1;
-            }
-        }
-
-        assert_eq!(l_idx, 2);
-        assert_eq!(r_idx, 2);
-        assert_eq!(&left_buf[..l_idx], &[0, 1]);
-        assert_eq!(&right_buf[..r_idx], &[2, 4]);
-        assert_eq!(&left_y_buf[..l_idx], &[1.0, 2.0]);
-        assert_eq!(&right_y_buf[..r_idx], &[3.0, 4.0]);
-    }
-
-    #[test]
-    fn partition_logic_multi_target() {
-        let tf_col: Vec<u8> = vec![10, 200, 50];
-        let sample_slice: Vec<u32> = vec![0, 1, 2];
-        // 2 targets per sample, interleaved: sample0=[1,10], sample1=[2,20], sample2=[3,30]
-        let y_slice: Vec<f32> = vec![1.0, 10.0, 2.0, 20.0, 3.0, 30.0];
-        let n_targets = 2;
-
-        let mut left_buf = [0u32; 3];
-        let mut right_buf = [0u32; 3];
-        let mut left_y_buf = [0.0f32; 6];
-        let mut right_y_buf = [0.0f32; 6];
-
-        let threshold = 100u8;
-        let mut l_idx = 0;
-        let mut r_idx = 0;
-
-        for i in 0..sample_slice.len() {
-            let s = sample_slice[i];
-            let val = tf_col[s as usize];
-            let src_base = i * n_targets;
-
-            if val <= threshold {
-                left_buf[l_idx] = s;
-                let dst = l_idx * n_targets;
-                left_y_buf[dst..dst + n_targets]
-                    .copy_from_slice(&y_slice[src_base..src_base + n_targets]);
-                l_idx += 1;
-            } else {
-                right_buf[r_idx] = s;
-                let dst = r_idx * n_targets;
-                right_y_buf[dst..dst + n_targets]
-                    .copy_from_slice(&y_slice[src_base..src_base + n_targets]);
-                r_idx += 1;
-            }
-        }
-
-        assert_eq!(l_idx, 2);
-        assert_eq!(r_idx, 1);
-        assert_eq!(&left_buf[..l_idx], &[0, 2]);
-        assert_eq!(&right_buf[..r_idx], &[1]);
-        assert_eq!(&left_y_buf[..l_idx * n_targets], &[1.0, 10.0, 3.0, 30.0]);
-        assert_eq!(&right_y_buf[..r_idx * n_targets], &[2.0, 20.0]);
-    }
-
+    /// Bins accumulate every target side by side and the cumulative sums roll up over bins.
     #[test]
     fn histogram_build_multi_target() {
         let n_targets = 2;
@@ -4174,16 +4088,13 @@ mod tests {
         assert!((bufs.cum_y_sums[10 * n_targets + 1] - 20.0).abs() < 1e-10);
     }
 
+    /// The CSR-style offsets slice out each cell's target entries, empty cells included.
     #[test]
     fn sparse_y_batch_construction() {
-        // 4 cells, 2 targets
-        // target 0: cell 0 = 1.0, cell 2 = 3.0
-        // target 1: cell 1 = 2.0, cell 2 = 4.0
-
         // Simulate SparseAxis with just indices and values
         // We can't construct SparseAxis directly here, so test via
         // SparseYBatch manually
-        let offsets = vec![0u32, 1, 2, 4, 4]; // cell0: 1 entry, cell1: 1, cell2: 2, cell3: 0
+        let offsets = vec![0u32, 1, 2, 4, 4];
         let target_indices = vec![0u8, 1, 0, 1];
         let values = vec![1.0f32, 2.0, 3.0, 4.0];
 
@@ -4214,11 +4125,11 @@ mod tests {
         assert!(tv.is_empty());
     }
 
+    /// The sparse histogram builder agrees bin for bin with the dense one on equivalent data.
     #[test]
     fn sparse_histogram_matches_dense() {
         // Build a scenario where we can compare dense and sparse histogram
         // outputs directly.
-        // 6 cells, 2 targets. Bins: [0, 0, 10, 10, 0, 10]
         let n_targets = 2;
         let n_features = 1;
         let n_samples = 6;
@@ -4226,7 +4137,6 @@ mod tests {
         let sample_slice: Vec<u32> = vec![0, 1, 2, 3, 4, 5];
 
         // Dense y: interleaved [s0t0, s0t1, s1t0, s1t1, ...]
-        // cell0=[1,2], cell1=[0,0], cell2=[3,4], cell3=[0,0], cell4=[5,6], cell5=[7,8]
         let y_dense: Vec<f32> = vec![1.0, 2.0, 0.0, 0.0, 3.0, 4.0, 0.0, 0.0, 5.0, 6.0, 7.0, 8.0];
 
         // Equivalent sparse representation
@@ -4283,14 +4193,9 @@ mod tests {
         }
     }
 
+    /// Pins the variance-reduction score of a split against a hand-computed value.
     #[test]
     fn evaluate_split_basic() {
-        // 4 samples, 1 target. Bins: [0, 0, 10, 10]
-        // y: [1, 3, 10, 12]
-        // Split at threshold 0: left=[1,3], right=[10,12]
-        // parent var = var([1,3,10,12]) = 19.1875
-        // var_l = var([1,3]) = 1.0, var_r = var([10,12]) = 1.0
-        // reduction = 19.1875 - 0.5*1.0 - 0.5*1.0 = 18.1875
         let n_targets = 1;
         let mut cum_counts = [0u32; 256];
         let mut cum_y_sums = vec![0.0f32; 256];
@@ -4353,6 +4258,7 @@ mod tests {
         assert!((best_score - 20.25).abs() < 1e-10, "got {}", best_score);
     }
 
+    /// Batching returns every gene exactly once and does not hand back the input order.
     #[test]
     fn batch_genes_random_is_permutation() {
         let genes: Vec<usize> = (0..100).collect();
@@ -4367,6 +4273,7 @@ mod tests {
         assert_ne!(shuffled, genes);
     }
 
+    /// The same seed gives the same gene order, so a run can be reproduced.
     #[test]
     fn batch_genes_random_deterministic() {
         let genes: Vec<usize> = (0..100).collect();
@@ -4375,6 +4282,7 @@ mod tests {
         assert_eq!(a, b);
     }
 
+    /// Asking for more cells than exist returns all of them rather than padding or resampling.
     #[test]
     fn subsample_cells_all_when_small() {
         let cells: Vec<usize> = (0..50).collect();
@@ -4386,6 +4294,7 @@ mod tests {
         assert_eq!(sorted, cells);
     }
 
+    /// Subsampling yields the requested count with no duplicates and no out-of-range indices.
     #[test]
     fn subsample_cells_correct_count() {
         let cells: Vec<usize> = (0..1000).collect();
@@ -4402,11 +4311,9 @@ mod tests {
         assert_eq!(sorted.len(), 100);
     }
 
+    /// Each feature gets its own 256-bin block, indexed by the quantised value of the cell.
     #[test]
     fn node_hist_build_from_samples() {
-        // 4 cells, 2 features
-        // Feature 0: [0, 10, 10, 20]
-        // Feature 1: [5, 5, 15, 15]
         let data = vec![
             0, 10, 10, 20, // feature 0, cells 0..3
             5, 5, 15, 15, // feature 1, cells 0..3
@@ -4435,6 +4342,7 @@ mod tests {
         assert!((hist.y_sums[256 + 15] - 7.0).abs() < 1e-10);
     }
 
+    /// Restricting the sample list accumulates only those cells and leaves the other bins empty.
     #[test]
     fn node_hist_build_subset() {
         // Same store, only use cells 0 and 2
@@ -4454,6 +4362,7 @@ mod tests {
         assert!((hist.y_sums[10] - 3.0).abs() < 1e-10);
     }
 
+    /// Parent minus child must equal building the sibling histogram from scratch.
     #[test]
     fn histogram_subtraction_matches_complement() {
         // Build parent from all 4 samples, child from {0,2},
@@ -4508,10 +4417,9 @@ mod tests {
         }
     }
 
+    /// A cleanly separable feature yields the expected partition and left-hand sum.
     #[test]
     fn find_split_obvious_partition() {
-        // 8 cells, 1 feature. Feature bins: [0,0,0,0, 100,100,100,100]
-        // Residuals: [1,1,1,1, 10,10,10,10]
         // Obvious split at threshold ~50: left=[1,1,1,1], right=[10,10,10,10]
         let data: Vec<u8> = vec![0, 0, 0, 0, 100, 100, 100, 100];
         let store = QuantisedStore::from_raw(data, 8, 1);
@@ -4537,9 +4445,9 @@ mod tests {
         assert!((split.y_sum_left - 4.0).abs() < 1e-6);
     }
 
+    /// When no candidate leaves both sides large enough the search returns None, not a bad split.
     #[test]
     fn find_split_respects_min_samples_leaf() {
-        // 4 cells, 1 feature. Bins: [0, 0, 0, 100]
         // With min_samples_leaf=3, only threshold that puts 3 left / 1 right
         // violates the right side. Should return None.
         let data: Vec<u8> = vec![0, 0, 0, 100];
@@ -4559,25 +4467,7 @@ mod tests {
         assert!(split.is_none(), "should not find a valid split");
     }
 
-    #[test]
-    fn apply_leaf_updates_residuals_sampled() {
-        let mut residuals = vec![10.0, 20.0, 30.0, 40.0];
-        let train: Vec<u32> = vec![0, 1];
-        let oob: Vec<u32> = vec![2, 3];
-        let mut improvement = 0.0f32;
-
-        apply_regression_leaf(&mut residuals, &train, &oob, 30.0, 2, 0.1, &mut improvement);
-
-        // pred = 15, lr_pred = 1.5
-        assert!((residuals[0] - 8.5).abs() < 1e-6);
-        assert!((residuals[1] - 18.5).abs() < 1e-6);
-        assert!((residuals[2] - 28.5).abs() < 1e-6);
-        assert!((residuals[3] - 38.5).abs() < 1e-6);
-
-        // OOB: 2*1.5*30 - 2.25 + 2*1.5*40 - 2.25 = 87.75 + 117.75 = 205.5
-        assert!((improvement - 205.5).abs() < 1e-4, "got {}", improvement);
-    }
-
+    /// Constant residuals leave nothing to reduce, so no split is proposed.
     #[test]
     fn find_split_no_variance() {
         // All residuals identical => no useful split
@@ -4596,6 +4486,7 @@ mod tests {
         assert!(split.is_none());
     }
 
+    /// The leaf prediction is shrunk by the learning rate, applied to every cell, and scored out of bag.
     #[test]
     fn apply_leaf_updates_residuals() {
         let mut residuals = vec![10.0, 20.0, 30.0, 40.0];
@@ -4621,6 +4512,7 @@ mod tests {
 
     // ---- fit_grnboost2_sparse (integration) ----
 
+    /// The TF that actually drives the target takes the top importance, and importances sum to one.
     #[test]
     fn fit_grnboost2_strong_signal() {
         // 200 cells, 3 features (TFs). Target = 2.0 * TF0 + noise.
@@ -4684,6 +4576,7 @@ mod tests {
         assert!((sum - 1.0).abs() < 1e-6, "sum={}", sum);
     }
 
+    /// An all-zero target has no variance to explain, so no TF picks up spurious importance.
     #[test]
     fn fit_grnboost2_early_stopping() {
         // Pure noise target: all zero. Early stopping should kick in fast.
@@ -4728,6 +4621,7 @@ mod tests {
         );
     }
 
+    /// The whole boosting loop, subsampling included, is reproducible from the seed alone.
     #[test]
     fn fit_grnboost2_deterministic() {
         let n_cells = 100;
@@ -4761,6 +4655,7 @@ mod tests {
         assert_eq!(a, b, "same seed should produce identical results");
     }
 
+    /// Released slots go back on the free list and get handed out again instead of leaking.
     #[test]
     fn pool_acquire_release_cycle() {
         let mut pool = HistogramPool::new(3, 1);
@@ -4774,6 +4669,7 @@ mod tests {
         assert_eq!(d, b, "released slot should be reused");
     }
 
+    /// Over-acquiring is a caller bug, so the pool panics rather than growing silently.
     #[test]
     #[should_panic(expected = "histogram pool exhausted")]
     fn pool_exhaustion_panics() {

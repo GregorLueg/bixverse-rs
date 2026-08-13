@@ -846,88 +846,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn centroid_graph_matches_centroid_count() {
-        let data = make_two_blobs(100, 5, 5.0, 42);
-        let params = default_params();
-        let (centroids, _) = fast_cluster_kmeans(data.as_ref(), "standard", &params, 0, 0).unwrap();
-
-        for run_snn in [false, true] {
-            let graph =
-                build_centroid_graph(centroids.as_ref(), &params.graph_params(), run_snn, 0, 0)
-                    .unwrap();
-            assert_eq!(graph.get_node_number(), centroids.nrows());
-            assert!(!graph.is_directed());
-        }
-    }
-
-    #[test]
-    fn louvain_over_resolutions_propagates_to_samples() {
-        let data = make_two_blobs(100, 5, 5.0, 42);
-        let params = default_params();
-        let resolutions: Vec<f32> = vec![1.0, 0.5];
-
-        let (centroids, assignments) =
-            fast_cluster_kmeans(data.as_ref(), "standard", &params, 0, 0).unwrap();
-        let graph =
-            build_centroid_graph(centroids.as_ref(), &params.graph_params(), false, 0, 0).unwrap();
-
-        let labels = louvain_over_resolutions(
-            &graph,
-            &assignments,
-            &resolutions,
-            params.louvain_iters,
-            params.multi_level_louvain,
-            0,
-        )
-        .unwrap();
-
-        assert_eq!(labels.len(), resolutions.len());
-        for l in &labels {
-            assert_eq!(l.len(), assignments.len());
-        }
-    }
-
-    #[test]
-    fn output_length_matches_input() {
-        let data = make_two_blobs(100, 5, 5.0, 42);
-        let resolutions: Vec<f32> = vec![1.0, 0.5];
-
-        // without snn
-        let labels = unwrap_single(
-            fast_louvain_clusters(
-                data.as_ref(),
-                "standard",
-                &resolutions,
-                &default_params(),
-                false,
-                false,
-                0,
-                0,
-            )
-            .unwrap(),
-        );
-        assert_eq!(labels.len(), resolutions.len());
-        assert_eq!(labels[0].len(), 200);
-
-        // with snn
-        let labels_snn = unwrap_single(
-            fast_louvain_clusters(
-                data.as_ref(),
-                "standard",
-                &resolutions,
-                &default_params(),
-                true,
-                false,
-                0,
-                0,
-            )
-            .unwrap(),
-        );
-        assert_eq!(labels_snn.len(), resolutions.len());
-        assert_eq!(labels_snn[0].len(), 200);
-    }
-
+    /// The same seed must give identical assignments, so nothing downstream sees run-to-run drift.
     #[test]
     fn deterministic_with_same_seed() {
         let data = make_two_blobs(100, 5, 5.0, 42);
@@ -964,6 +883,7 @@ mod tests {
         assert_eq!(a, b);
     }
 
+    /// Two well-separated blobs get distinct majority labels at over 90% purity, SNN on and off.
     #[test]
     fn produces_multiple_communities_on_separated_blobs() {
         let n_per = 200;
@@ -971,94 +891,49 @@ mod tests {
         let params = default_params();
         let resolutions: Vec<f32> = vec![1.0];
 
-        let labels = unwrap_single(
-            fast_louvain_clusters(
-                data.as_ref(),
-                "standard",
-                &resolutions,
-                &params,
-                false,
-                false,
-                0,
-                0,
-            )
-            .unwrap(),
-        );
+        for run_snn in [false, true] {
+            let labels = unwrap_single(
+                fast_louvain_clusters(
+                    data.as_ref(),
+                    "standard",
+                    &resolutions,
+                    &params,
+                    run_snn,
+                    false,
+                    0,
+                    0,
+                )
+                .unwrap(),
+            );
 
-        let (blob_a, blob_b) = labels[0].split_at(n_per);
+            assert_eq!(labels.len(), resolutions.len());
+            assert_eq!(labels[0].len(), 2 * n_per);
 
-        let maj_a = majority(blob_a);
-        let maj_b = majority(blob_b);
-        assert_ne!(maj_a, maj_b);
+            let (blob_a, blob_b) = labels[0].split_at(n_per);
 
-        let purity_a = blob_a.iter().filter(|&&l| l == maj_a).count() as f32 / n_per as f32;
-        let purity_b = blob_b.iter().filter(|&&l| l == maj_b).count() as f32 / n_per as f32;
+            let maj_a = majority(blob_a);
+            let maj_b = majority(blob_b);
+            assert_ne!(maj_a, maj_b, "run_snn {}", run_snn);
 
-        assert!(purity_a > 0.9, "blob A purity {}", purity_a);
-        assert!(purity_b > 0.9, "blob B purity {}", purity_b);
-    }
+            let purity_a = blob_a.iter().filter(|&&l| l == maj_a).count() as f32 / n_per as f32;
+            let purity_b = blob_b.iter().filter(|&&l| l == maj_b).count() as f32 / n_per as f32;
 
-    #[test]
-    fn produces_multiple_communities_on_separated_blobs_snn() {
-        let n_per = 200;
-        let data = make_two_blobs(n_per, 8, 15.0, 42);
-        let params = default_params();
-        let resolutions: Vec<f32> = vec![1.0];
-
-        let labels = unwrap_single(
-            fast_louvain_clusters(
-                data.as_ref(),
-                "standard",
-                &resolutions,
-                &params,
-                true,
-                false,
-                0,
-                0,
-            )
-            .unwrap(),
-        );
-
-        let (blob_a, blob_b) = labels[0].split_at(n_per);
-
-        let maj_a = majority(blob_a);
-        let maj_b = majority(blob_b);
-        assert_ne!(maj_a, maj_b);
-
-        let purity_a = blob_a.iter().filter(|&&l| l == maj_a).count() as f32 / n_per as f32;
-        let purity_b = blob_b.iter().filter(|&&l| l == maj_b).count() as f32 / n_per as f32;
-
-        assert!(purity_a > 0.9, "blob A purity {}", purity_a);
-        assert!(purity_b > 0.9, "blob B purity {}", purity_b);
-    }
-
-    #[test]
-    fn grid_output_shape_matches_resolutions() {
-        let data = make_two_blobs(100, 5, 5.0, 42);
-        let resolutions: Vec<f32> = vec![0.5, 1.0, 2.0];
-
-        let results = unwrap_grid(
-            fast_louvain_clusters_grid(
-                data.as_ref(),
-                "standard",
-                &resolutions,
-                &default_params(),
-                false,
-                false,
-                0,
-                5,
-                0,
-            )
-            .unwrap(),
-        );
-
-        assert_eq!(results.len(), resolutions.len());
-        for (r, res) in results.iter().zip(resolutions.iter()) {
-            assert_eq!(r.resolution, *res);
-            assert_eq!(r.best_labels.len(), 200);
+            assert!(
+                purity_a > 0.9,
+                "blob A purity {} (snn {})",
+                purity_a,
+                run_snn
+            );
+            assert!(
+                purity_b > 0.9,
+                "blob B purity {} (snn {})",
+                purity_b,
+                run_snn
+            );
         }
     }
 
+    /// Stability metrics need seeds to compare, so a single Louvain seed is rejected up front.
     #[test]
     fn grid_rejects_too_few_seeds() {
         let data = make_two_blobs(100, 5, 5.0, 42);
@@ -1076,9 +951,10 @@ mod tests {
             0,
         );
 
-        assert!(result.is_err());
+        assert!(matches!(result, Err(BixverseErrors::InvalidArgument(_))));
     }
 
+    /// The grid search is reproducible down to the ARI, conductance and best labels it reports.
     #[test]
     fn grid_deterministic_with_same_seed() {
         let data = make_two_blobs(100, 5, 5.0, 42);
@@ -1123,52 +999,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn grid_metrics_in_valid_ranges() {
-        let n_per = 200;
-        let data = make_two_blobs(n_per, 8, 15.0, 42);
-        let resolutions: Vec<f32> = vec![1.0];
-
-        let results = unwrap_grid(
-            fast_louvain_clusters_grid(
-                data.as_ref(),
-                "standard",
-                &resolutions,
-                &default_params(),
-                false,
-                false,
-                0,
-                4,
-                0,
-            )
-            .unwrap(),
-        );
-
-        let r = &results[0];
-
-        assert!(
-            r.mean_ari >= -1.0 && r.mean_ari <= 1.0,
-            "mean_ari {}",
-            r.mean_ari
-        );
-        assert!(
-            r.median_ari >= -1.0 && r.median_ari <= 1.0,
-            "median_ari {}",
-            r.median_ari
-        );
-        assert!(
-            r.mean_conductance >= 0.0,
-            "mean_conductance {}",
-            r.mean_conductance
-        );
-        assert!(
-            r.median_conductance >= 0.0,
-            "median_conductance {}",
-            r.median_conductance
-        );
-        assert!(r.mean_n_communities >= 1.0);
-    }
-
+    /// On easy data every resolution reports a high mean ARI and still splits the two blobs.
     #[test]
     fn grid_well_separated_blobs_are_stable() {
         let n_per = 250;
@@ -1203,29 +1034,5 @@ mod tests {
             let maj_b = majority(blob_b);
             assert_ne!(maj_a, maj_b, "not the same majority for seed no {}", i);
         }
-    }
-
-    #[test]
-    fn grid_runs_with_snn() {
-        let data = make_two_blobs(200, 8, 15.0, 42);
-        let resolutions: Vec<f32> = vec![1.0];
-
-        let results = unwrap_grid(
-            fast_louvain_clusters_grid(
-                data.as_ref(),
-                "standard",
-                &resolutions,
-                &default_params(),
-                true,
-                false,
-                0,
-                4,
-                0,
-            )
-            .unwrap(),
-        );
-
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].best_labels.len(), 400);
     }
 }

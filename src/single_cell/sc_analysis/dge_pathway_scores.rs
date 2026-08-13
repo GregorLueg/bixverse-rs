@@ -1455,6 +1455,7 @@ mod tests {
         asc.iter().map(|&r| r - 1).collect()
     }
 
+    /// A gene set sitting at the very top of the ranking scores 1.0, one at the bottom 0.0.
     #[test]
     fn test_mw_auc_perfect_separation() {
         let ranks = identity_ranks(10);
@@ -1466,6 +1467,7 @@ mod tests {
         assert_relative_eq!(calculate_auc_per_cell_mw(&ranks, &bottom), 0.0);
     }
 
+    /// Pins the recovery AUC to a hand-computed area, plus the case where nothing clears the cutoff.
     #[test]
     fn test_recovery_auc_known_value() {
         let ranks = identity_ranks(10);
@@ -1480,6 +1482,7 @@ mod tests {
         assert_relative_eq!(calculate_auc_recovery(&ranks, &deep, 4), 0.0);
     }
 
+    /// Regression: rank sum alone cannot separate a top-heavy set from a spread one, the cutoff can.
     #[test]
     fn test_recovery_auc_distinguishes_top_heavy() {
         // Regression guard. Both sets have an identical rank sum of 30, so the
@@ -1501,6 +1504,7 @@ mod tests {
         assert_relative_eq!(calculate_auc_recovery(&ranks, &concentrated, 8), 7.0 / 16.0);
     }
 
+    /// Average precision weights hits by depth, so it splits the two sets the Mann-Whitney AUC ties.
     #[test]
     fn test_ap_distinguishes_top_heavy() {
         let ranks = identity_ranks(20);
@@ -1521,6 +1525,7 @@ mod tests {
         );
     }
 
+    /// The rank cutoff clamps to the gene universe and never drops below one.
     #[test]
     fn test_resolve_max_rank() {
         assert_eq!(resolve_max_rank(None, 20_000), 1_000);
@@ -1531,6 +1536,7 @@ mod tests {
         assert_eq!(resolve_max_rank(None, 3), 1);
     }
 
+    /// Rows are z-scored in place, with zero-variance rows collapsing to zero rather than NaN.
     #[test]
     fn test_standardise_rows() {
         let mut rows = vec![vec![1.0, 2.0, 3.0], vec![5.0, 5.0, 5.0], vec![7.0]];
@@ -1544,6 +1550,7 @@ mod tests {
         assert_eq!(rows[2], vec![0.0]);
     }
 
+    /// Every accepted alias maps to its variant and anything unknown returns `None`.
     #[test]
     fn test_auroc_perfect_separation() {
         // n1 = n2 = 3, group 1 holds the top ranks 4, 5, 6

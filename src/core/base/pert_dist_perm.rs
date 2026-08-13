@@ -434,6 +434,7 @@ mod tests {
         (a - b).abs() < EPS
     }
 
+    /// The parser is case insensitive and carries the cap through into the subsample variant.
     #[test]
     fn parse_path_variants() {
         assert!(matches!(
@@ -451,6 +452,7 @@ mod tests {
         assert!(parse_perm_path("nope", Some(0)).is_none());
     }
 
+    /// At or below the cap nothing is dropped or reordered, so the RNG stays unused.
     #[test]
     fn subsample_keeps_all_when_le_max() {
         let mut rng = StdRng::seed_from_u64(0);
@@ -458,6 +460,7 @@ mod tests {
         assert_eq!(subsample_indices(5, 5, &mut rng), vec![0, 1, 2, 3, 4]);
     }
 
+    /// Above the cap the draw is exactly `max`, strictly ascending and in range.
     #[test]
     fn subsample_truncates_sorted_in_range() {
         let mut rng = StdRng::seed_from_u64(42);
@@ -469,6 +472,7 @@ mod tests {
         assert!(*idx.last().unwrap() < 100);
     }
 
+    /// Reading the energy distance off a pooled distance matrix by mask matches the direct route.
     #[test]
     fn edist_from_pairwise_matches_direct() {
         let x = Mat::<f64>::from_fn(4, 3, |i, j| (i as f64 - 1.0) * (j as f64 + 1.0));
@@ -486,6 +490,7 @@ mod tests {
         assert!(close(e_mask, e_direct));
     }
 
+    /// The cached-matrix path and the recompute path are the same test, not two different ones.
     #[test]
     fn fast_and_slow_agree() {
         // Same seed -> same masks -> two paths must agree up to fp precision.
@@ -513,6 +518,7 @@ mod tests {
         assert!(close(fast.pvalue, slow.pvalue));
     }
 
+    /// The observed statistic is the plain energy distance, untouched by the permutation code.
     #[test]
     fn observed_matches_edistance() {
         let x = Mat::<f64>::from_fn(4, 3, |i, j| (i + 2 * j) as f64);
@@ -531,6 +537,7 @@ mod tests {
         assert!(close(direct, perm.observed));
     }
 
+    /// Zero permutations errors instead of returning a p-value with an empty null.
     #[test]
     fn zero_perms_errors() {
         let x = Mat::<f64>::zeros(2, 2);
@@ -548,6 +555,7 @@ mod tests {
         ));
     }
 
+    /// Mismatched feature counts are caught before any permutation work starts.
     #[test]
     fn dim_mismatch_errors() {
         let x = Mat::<f64>::zeros(3, 2);
@@ -565,6 +573,7 @@ mod tests {
         ));
     }
 
+    /// The p-value is bounded by the pseudocount floor of `1/n_perm` and by 1.
     #[test]
     fn pvalue_in_range() {
         let x = Mat::<f64>::from_fn(4, 2, |i, j| (i + j) as f64);
@@ -582,6 +591,7 @@ mod tests {
         assert!(r.pvalue <= 1.0 + 1e-12);
     }
 
+    /// The reference group compared with itself gives distance zero and a p-value of one.
     #[test]
     fn onesided_reference_axiom() {
         let emb = Mat::<f64>::from_fn(9, 2, |i, j| ((i + 1) * (j + 1)) as f64);

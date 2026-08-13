@@ -1154,6 +1154,7 @@ mod tests {
 
     // ---- basic dimensions --------------------------------------------
 
+    /// With no modules every gene lands in module 0 and the factor matrix is empty but shaped.
     #[test]
     fn dims_no_modules() {
         let params = SyntheticRnaSeqParams::<f64> {
@@ -1172,6 +1173,7 @@ mod tests {
         assert_eq!(data.module_factors.ncols(), 10);
     }
 
+    /// Module sizes are honoured exactly, the remainder is background, and hubs sit inside modules.
     #[test]
     fn dims_with_modules() {
         let params = SyntheticRnaSeqParams::<f64> {
@@ -1195,6 +1197,7 @@ mod tests {
 
     // ---- validation --------------------------------------------------
 
+    /// Modules larger than the gene count are refused rather than silently truncated.
     #[test]
     fn invalid_module_sizes_rejected() {
         let params = SyntheticRnaSeqParams::<f64> {
@@ -1211,6 +1214,7 @@ mod tests {
 
     // ---- correlation structure --------------------------------------
 
+    /// The point of the generator: co-module genes must correlate more than cross-module ones.
     #[test]
     fn within_module_corr_stronger_than_cross() {
         let params = SyntheticRnaSeqParams::<f64> {
@@ -1250,6 +1254,7 @@ mod tests {
         );
     }
 
+    /// The hub-modular generator must produce a real degree gradient, not uniform modules.
     #[test]
     fn hubs_have_higher_degree_than_non_hubs() {
         let params = SyntheticRnaSeqParams::<f64> {
@@ -1302,6 +1307,7 @@ mod tests {
 
     // ---- reproducibility --------------------------------------------
 
+    /// Everything is seeded, so two runs at one seed must be bit-identical, not merely similar.
     #[test]
     fn same_seed_same_output() {
         let params = SyntheticRnaSeqParams::<f64> {
@@ -1327,6 +1333,7 @@ mod tests {
 
     // ---- module factor round-trip ------------------------------------
 
+    /// The returned module factors are the real latent signal, recoverable as PC1 of the counts.
     #[test]
     fn module_pc1_tracks_ground_truth_factor() {
         let params = SyntheticRnaSeqParams::<f64> {
@@ -1365,6 +1372,7 @@ mod tests {
 
     // ---- non-negative factor variant ---------------------------------
 
+    /// The NMF-flavoured generator must keep factors non-negative without losing module structure.
     #[test]
     fn non_negative_factor_is_non_negative() {
         let params = SyntheticRnaSeqParams::<f64> {
@@ -1406,6 +1414,7 @@ mod tests {
 
     // ---- non-Gaussian factor variant ---------------------------------
 
+    /// The ICA-flavoured generator must be heavy tailed, otherwise it is no test for ICA at all.
     #[test]
     fn non_gaussian_factor_is_non_gaussian() {
         let params = SyntheticRnaSeqParams::<f64> {
@@ -1430,6 +1439,7 @@ mod tests {
 
     // ---- sparsification ---------------------------------------------
 
+    /// Sequencing-depth dropout removes counts; it must not rescale them upwards.
     #[test]
     fn dropout_reduces_total_counts() {
         let base = SyntheticRnaSeqParams::<f64> {
@@ -1465,6 +1475,7 @@ mod tests {
         );
     }
 
+    /// Dropout may weaken the module signal but must not invert it.
     #[test]
     fn dropout_preserves_within_module_correlation_sign() {
         let base = SyntheticRnaSeqParams::<f64> {
@@ -1502,6 +1513,7 @@ mod tests {
         );
     }
 
+    /// The dropout RNG is seeded separately from the generator and is equally reproducible.
     #[test]
     fn dropout_reproducible() {
         let base = SyntheticRnaSeqParams::<f64> {
@@ -1529,6 +1541,7 @@ mod tests {
 
     // ---- parse helpers ----------------------------------------------
 
+    /// The R-facing strings, aliases and casing all still map onto the right generator variants.
     #[test]
     fn parse_helpers_work() {
         assert!(matches!(

@@ -548,30 +548,14 @@ pub fn run_palantir(
 mod tests {
     use super::*;
 
-    /// Deterministic jitter in `[-0.5, 0.5)`, so fixtures need no RNG.
-    ///
-    /// ### Params
-    ///
-    /// * `i` - Sample index.
-    /// * `salt` - Distinguishes independent noise streams.
-    ///
-    /// ### Returns
-    ///
-    /// A reproducible pseudo-random offset.
+    /// Deterministic jitter in `[-0.5, 0.5)`, so fixtures need no RNG. `salt`
+    /// distinguishes independent noise streams.
     fn jitter(i: usize, salt: usize) -> f32 {
         let h = (i.wrapping_mul(2_654_435_761) ^ salt.wrapping_mul(40_503)) % 10_007;
         h as f32 / 10_007.0 - 0.5
     }
 
-    /// kNN graph over a synthetic embedding, as `run_palantir` expects it.
-    ///
-    /// ### Params
-    ///
-    /// * `coords` - Cell coordinates, cells by dimensions.
-    /// * `k` - Neighbours per cell, self excluded.
-    ///
-    /// ### Returns
-    ///
+    /// kNN graph over a synthetic embedding, as `run_palantir` expects it:
     /// `(indices, squared distances)` from an exhaustive Euclidean search.
     fn knn_of(coords: &[Vec<f32>], k: usize) -> (Vec<Vec<usize>>, Vec<Vec<f32>>) {
         let n = coords.len();
@@ -588,18 +572,9 @@ mod tests {
         (indices, distances.unwrap())
     }
 
-    /// A noisy one-dimensional trajectory.
-    ///
-    /// Genuinely noisy on purpose. A clean lattice makes every neighbourhood
-    /// identical, which is not what the adaptive bandwidths are built for.
-    ///
-    /// ### Params
-    ///
-    /// * `n` - Cell count.
-    ///
-    /// ### Returns
-    ///
-    /// Coordinates ordered along the trajectory.
+    /// A one-dimensional trajectory, coordinates ordered along it. Genuinely
+    /// noisy on purpose: a clean lattice makes every neighbourhood identical,
+    /// which is not what the adaptive bandwidths are built for.
     fn linear_manifold(n: usize) -> Vec<Vec<f32>> {
         (0..n)
             .map(|i| {
@@ -637,15 +612,6 @@ mod tests {
     /// trunk carries its own noise stream and does not sit on `y = 0`, so the
     /// manifold as a whole is still asymmetric and the diffusion operator has
     /// no exact reflection symmetry to make its eigenvalues degenerate.
-    ///
-    /// ### Params
-    ///
-    /// * `trunk` - Cells on the shared trunk.
-    /// * `arm` - Cells per branch.
-    ///
-    /// ### Returns
-    ///
-    /// Coordinates for `trunk + 2 * arm` cells.
     fn y_manifold(trunk: usize, arm: usize) -> Vec<Vec<f32>> {
         let mut coords = Vec::with_capacity(trunk + 2 * arm);
 
@@ -676,7 +642,7 @@ mod tests {
     /// measurably better: over 40 waypoint seeds the mid-trunk split worsens
     /// from 0.31 to only 0.12. Automatic detection is the one thing that does
     /// not survive the shrink, so it keeps the large fixture and goes behind
-    /// `large_scale_diagnostics`.
+    /// `large-test`.
     const Y_TRUNK: usize = 100;
     const Y_ARM: usize = 100;
 
@@ -686,20 +652,14 @@ mod tests {
     /// seeds, and below 240 cells the waypoint chain stops resolving the branch
     /// at all. The detected states stay inside the arms throughout, which is
     /// what the cheap test asserts.
-    #[cfg(feature = "large_scale_diagnostics")]
+    #[cfg(feature = "large-test")]
     const Y_TRUNK_LARGE: usize = 200;
-    #[cfg(feature = "large_scale_diagnostics")]
+    #[cfg(feature = "large-test")]
     const Y_ARM_LARGE: usize = 200;
 
-    /// Parameters sized for the small synthetic fixtures.
-    ///
-    /// ### Params
-    ///
-    /// * `num_waypoints` - Waypoint target, which has to track the fixture size.
-    ///
-    /// ### Returns
-    ///
-    /// [PalantirParams] with an exact kNN backend and a pinned spectrum budget.
+    /// [PalantirParams] for the small synthetic fixtures, with an exact kNN
+    /// backend and a pinned spectrum budget. `num_waypoints` has to track the
+    /// fixture size.
     fn test_params(num_waypoints: usize) -> PalantirParams {
         let mut params = PalantirParams::new();
         params.knn = 24;
@@ -711,19 +671,16 @@ mod tests {
         // until the spatial bandwidth swamps every pseudotime gap and the
         // directed pruning stops cutting anything. Unrelated to the eigensolver.
         params.n_eigs = Some(3);
-        // Pin the restart budget rather than inheriting the crate default.
-        // These fixtures are long, thin and densely sampled, so their diffusion
-        // spectrum sits inside 1e-5 of one across the whole retained range and
-        // the leading eigenvectors are not separated until the residual drops
-        // below that gap. The default budget stops an order of magnitude short
-        // of it, which leaves the embedding a function of the restart count
-        // rather than of the data; raising the default from 16 to 64 moved
-        // every downstream number here. Real data has a spectrum nothing like
-        // this, so it is the fixtures that need the budget, not the default.
+        // These fixtures' spectra sit within 1e-5 of one across the whole
+        // retained range, so the leading eigenvectors do not separate until the
+        // residual drops below that gap. The crate default stops an order of
+        // magnitude short, leaving the embedding a function of the restart count
+        // rather than of the data. Real data needs nothing like this budget.
         params.lanczos_params.max_restarts = 256;
         params
     }
 
+    /// Pseudotime tracks the manifold in the right direction on a single-fate trajectory.
     #[test]
     fn test_linear_trajectory_has_monotone_pseudotime() {
         let coords = linear_manifold(120);
@@ -758,6 +715,7 @@ mod tests {
         assert_eq!(res.terminal_states.len(), 1);
     }
 
+    /// The cheap half of detection coverage: whatever is detected sits in a branch, never the trunk.
     #[test]
     fn test_y_branch_terminal_states_lie_in_the_arms() {
         // The cheap half of detection coverage: whatever comes back is in a
@@ -773,10 +731,8 @@ mod tests {
         let res =
             run_palantir(&indices, &distances, true, 0, None, test_params(120), 42, 0).unwrap();
 
-        // The arms must stay attached to the trunk. Detaching them gives a kNN
-        // graph with three connected components, which puts eigenvalue one at
-        // multiplicity three and makes every result downstream an artefact of
-        // the eigensolver's convergence budget rather than of the data.
+        // The arms must stay attached to the trunk, for the reason spelled out
+        // at [ARM_DIVERGENCE].
         assert_eq!(
             res.repair_edges, 0,
             "the Y fixture is disconnected; the arms have detached from the trunk"
@@ -808,9 +764,10 @@ mod tests {
         );
     }
 
+    /// Detection held to the full answer: exactly one terminal state per arm.
     #[test]
     // 800 cells, a full Palantir run, around five seconds in a debug build.
-    #[cfg(feature = "large_scale_diagnostics")]
+    #[cfg(feature = "large-test")]
     fn test_y_branch_detection_finds_one_state_per_arm() {
         // Detection held to the full answer: exactly one terminal state per arm.
         // It needs the large fixture; the cheap sibling above covers the same
@@ -844,6 +801,7 @@ mod tests {
         );
     }
 
+    /// The Markov chain, absorbing solve, projection and entropy, with detection taken out of the loop.
     #[test]
     fn test_y_branch_fate_probabilities_split_at_the_root() {
         // Terminal states supplied, so this exercises the Markov chain, the
@@ -916,6 +874,7 @@ mod tests {
         assert_eq!(res.repair_edges, 0);
     }
 
+    /// Regression: rescaling the surviving edges used to push fate probabilities above one.
     #[test]
     fn test_branch_probs_are_bounded_and_split_across_two_absorbers() {
         // Two absorbers, so the row sums say something about the solve rather
@@ -974,6 +933,7 @@ mod tests {
         // than here, where the diffusion map decides the answer.
     }
 
+    /// Supplied terminal states are used verbatim rather than re-detected.
     #[test]
     fn test_user_supplied_terminal_states_are_honoured() {
         let coords = y_manifold(Y_TRUNK, Y_ARM);
@@ -997,6 +957,7 @@ mod tests {
         assert_eq!(res.terminal_states, supplied.to_vec());
     }
 
+    /// An early cell past the cell count errors rather than indexing out of bounds.
     #[test]
     fn test_rejects_out_of_range_early_cell() {
         let coords = linear_manifold(60);
@@ -1017,6 +978,7 @@ mod tests {
         ));
     }
 
+    /// Same guard on supplied terminal states.
     #[test]
     fn test_rejects_out_of_range_terminal_state() {
         let coords = linear_manifold(60);
@@ -1037,6 +999,7 @@ mod tests {
         ));
     }
 
+    /// A `knn` too small for the adaptive bandwidth rank errors up front.
     #[test]
     fn test_rejects_knn_below_the_bandwidth_floor() {
         let coords = linear_manifold(60);

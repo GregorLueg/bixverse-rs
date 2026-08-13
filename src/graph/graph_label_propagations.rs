@@ -443,6 +443,7 @@ mod tests {
         Graph::from_edge_list(&edges, 3, true)
     }
 
+    /// An edge list builds both directions, so the CSR offsets are symmetric.
     #[test]
     fn test_csr_structure_symmetric() {
         let g = simple_chain();
@@ -451,6 +452,7 @@ mod tests {
         assert_eq!(g.neighbours.len(), 4);
     }
 
+    /// Each node's outgoing weights sum to one, so propagation is a convex mix.
     #[test]
     fn test_weights_normalised() {
         let g = simple_chain();
@@ -461,32 +463,7 @@ mod tests {
         assert!((sum - 1.0).abs() < 1e-9);
     }
 
-    #[test]
-    fn test_weighted_symmetry_average() {
-        // Edge 0->1 weight 0.8, Edge 1->0 weight 0.4 => symmetric weight 0.6
-        let edges = vec![0, 1, 1, 0];
-        let weights = vec![0.8_f64, 0.4];
-        let g = Graph::from_weighted_edge_list(
-            &edges,
-            &weights,
-            2,
-            Some(SymmetryWeightStrategy::Average),
-        );
-        // Both nodes have a single neighbour so weight == 1.0 after normalisation,
-        // but the raw value before normalisation should have been averaged.
-        // With a single edge per node, normalised weight is always 1.0.
-        assert!((g.weights[0] - 1.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn test_weighted_symmetry_min() {
-        let edges = vec![0, 1, 1, 0];
-        let weights = vec![0.8_f64, 0.4];
-        let g =
-            Graph::from_weighted_edge_list(&edges, &weights, 2, Some(SymmetryWeightStrategy::Min));
-        assert!((g.weights[0] - 1.0).abs() < 1e-9);
-    }
-
+    /// Seed nodes keep their own class dominant after spreading.
     #[test]
     fn test_label_spreading_labelled_nodes_anchored() {
         let g = simple_chain();
@@ -505,6 +482,7 @@ mod tests {
         );
     }
 
+    /// An unlabelled node equidistant from two seeds settles between them.
     #[test]
     fn test_label_spreading_unlabelled_receives_distribution() {
         let g = simple_chain();
@@ -517,6 +495,7 @@ mod tests {
         assert!((result[1][1] - 0.5).abs() < 0.05);
     }
 
+    /// `max_hops` is a hard cutoff: nodes beyond it stay at zero mass.
     #[test]
     fn test_max_hops_restricts_propagation() {
         // 0 -- 1 -- 2 -- 3 -- 4
@@ -538,6 +517,7 @@ mod tests {
         assert!((result[4][1]).abs() < 1e-9);
     }
 
+    /// Hop distances are measured from the seed set, which sits at zero.
     #[test]
     fn test_hop_distances() {
         let g = simple_chain();
@@ -548,6 +528,7 @@ mod tests {
         assert_eq!(dists[2], 0);
     }
 
+    /// Strategy parsing is case-insensitive and rejects unknown names.
     #[test]
     fn test_parse_symmetry_strategy() {
         assert!(matches!(
@@ -565,42 +546,24 @@ mod tests {
         assert!(parse_symmetry_strategy("nonsense").is_none());
     }
 
+    /// The two constructors are the same graph in different input shapes.
     #[test]
     fn test_node_pairs_matches_edge_list() {
         let from = vec![0, 1];
         let to = vec![1, 2];
-        let g = Graph::from_node_pairs(&from, &to, 3, true);
-        assert_eq!(g.offsets, vec![0, 1, 3, 4]);
-        assert_eq!(g.neighbours.len(), 4);
+        let g_pairs = Graph::from_node_pairs(&from, &to, 3, true);
+
+        let edges = vec![0, 1, 1, 2];
+        let g_edge = Graph::from_edge_list(&edges, 3, true);
+
+        assert_eq!(g_pairs.offsets, g_edge.offsets);
+        assert_eq!(g_pairs.neighbours, g_edge.neighbours);
+        for (a, b) in g_pairs.weights.iter().zip(g_edge.weights.iter()) {
+            assert!((a - b).abs() < 1e-9);
+        }
     }
 
-    #[test]
-    fn test_node_pairs_weights_normalised() {
-        let from = vec![0, 1];
-        let to = vec![1, 2];
-        let g = Graph::from_node_pairs(&from, &to, 3, true);
-        let start = g.offsets[1];
-        let end = g.offsets[2];
-        let sum: f64 = g.weights[start..end].iter().sum();
-        assert!((sum - 1.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn test_weighted_node_pairs_symmetry_average() {
-        let from = vec![0];
-        let to = vec![1];
-        let weights = vec![0.8_f64];
-        let g = Graph::from_weighted_node_pairs(
-            &from,
-            &to,
-            &weights,
-            2,
-            Some(SymmetryWeightStrategy::Average),
-        );
-        assert!((g.weights[0] - 1.0).abs() < 1e-9);
-        assert!((g.weights[1] - 1.0).abs() < 1e-9);
-    }
-
+    /// Same for the weighted constructors, including the symmetry strategy.
     #[test]
     fn test_weighted_node_pairs_matches_weighted_edge_list() {
         let from = vec![0, 1];

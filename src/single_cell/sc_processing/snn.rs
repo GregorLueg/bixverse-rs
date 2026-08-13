@@ -464,6 +464,7 @@ mod tests {
             .collect()
     }
 
+    /// Jaccard weights on a fixture small enough to check by hand.
     #[test]
     fn snn_full_jaccard_known_weights() {
         let (knn, k, n) = small_knn();
@@ -484,6 +485,7 @@ mod tests {
         }
     }
 
+    /// The prune threshold drops edges, and nothing below it survives.
     #[test]
     fn snn_pruning() {
         let (knn, k, n) = small_knn();
@@ -496,6 +498,7 @@ mod tests {
         assert!(w_pruned.iter().all(|&w| w >= 0.6));
     }
 
+    /// The limited graph is a subgraph of the full one, with the same weights.
     #[test]
     fn snn_limited_is_subset_of_full() {
         let (knn, k, n) = small_knn();
@@ -514,6 +517,7 @@ mod tests {
         assert!(!lim.contains_key(&(2, 3)));
     }
 
+    /// Rank weighting stays inside (0, 1] on both the full and the limited path.
     #[test]
     fn snn_rank_weights_valid() {
         let (knn, k, n) = small_knn();
@@ -524,6 +528,7 @@ mod tests {
         }
     }
 
+    /// The method parser is case-insensitive and refuses names it does not know.
     #[test]
     fn method_parser() {
         assert!(matches!(
@@ -539,6 +544,7 @@ mod tests {
 
     // ---- helper tests ----
 
+    /// Edge pairs and their weights land on the right nodes in the built graph.
     #[test]
     fn helper_round_trip() {
         // (0,1) w=0.5, (1,2) w=0.7, (0,2) w=0.3
@@ -558,6 +564,7 @@ mod tests {
         assert_eq!(w1, &[0.5, 0.7]);
     }
 
+    /// Neighbour indices come out sorted whatever order the edges arrived in.
     #[test]
     fn helper_indices_sorted() {
         // deliberately scramble the order in which node 0's edges are inserted
@@ -569,6 +576,7 @@ mod tests {
         assert_eq!(nbrs, &[1, 2, 3, 4, 5]);
     }
 
+    /// Every edge is stored in both directions with the same weight.
     #[test]
     fn helper_symmetric() {
         let edges = vec![0, 2, 1, 3, 0, 3];
@@ -588,6 +596,7 @@ mod tests {
         }
     }
 
+    /// Total weight recovers the input sum rather than the doubled adjacency sum.
     #[test]
     fn helper_total_weight() {
         let edges = vec![0, 1, 1, 2];
@@ -598,6 +607,7 @@ mod tests {
         assert!((g.total_weight() - 1.0).abs() < 1e-6);
     }
 
+    /// No edges still gives a graph of the requested size, with every degree zero.
     #[test]
     fn helper_empty() {
         let g = snn_edges_to_sparse_graph(&[], &[], 5);
@@ -607,6 +617,7 @@ mod tests {
         }
     }
 
+    /// SNN output feeds the graph builder directly: degrees double, indices stay sorted.
     #[test]
     fn helper_end_to_end() {
         let (knn, k, n) = small_knn();

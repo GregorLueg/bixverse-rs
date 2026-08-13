@@ -86,6 +86,8 @@ mod tests {
     use super::*;
     use faer::Mat;
 
+    /// Two similarity blocks with weak cross-noise are recovered as two
+    /// clusters.
     #[test]
     fn test_spectral_clustering_block_diagonal() {
         // 4x4 matrix, two distinct blocks: (0,1) and (2,3)

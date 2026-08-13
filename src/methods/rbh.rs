@@ -346,6 +346,7 @@ mod tests {
             .collect()
     }
 
+    /// Perfectly matching module pairs come back as reciprocal best hits at similarity 1.
     #[test]
     fn k1_identifies_clear_reciprocal_hits() {
         let origin = modules(&[("A", &["g1", "g2", "g3"]), ("B", &["g4", "g5", "g6"])]);
@@ -362,6 +363,7 @@ mod tests {
         }
     }
 
+    /// A hit that is best in its row but not in its column must not survive k = 1.
     #[test]
     fn k1_excludes_non_reciprocal_hits() {
         let (origin, target) = three_by_three_modules();
@@ -376,6 +378,7 @@ mod tests {
         assert_eq!(pairs, expected);
     }
 
+    /// Raising k to 2 admits the second-best hits that k = 1 discards.
     #[test]
     fn k2_includes_pairs_missed_by_k1() {
         let (origin, target) = three_by_three_modules();
@@ -395,6 +398,7 @@ mod tests {
         assert_eq!(pairs, expected);
     }
 
+    /// A k at or above both dimensions thresholds nothing, so every pair is returned.
     #[test]
     fn k_at_least_as_large_as_dim_returns_all_pairs() {
         let (origin, target) = three_by_three_modules();
@@ -404,6 +408,7 @@ mod tests {
         assert_eq!(result.len(), 9);
     }
 
+    /// Nothing clearing `min_similarity` yields the single NA placeholder, not an empty vector.
     #[test]
     fn returns_na_when_max_below_threshold() {
         let origin = modules(&[("A", &["g1", "g2"])]);
@@ -417,6 +422,7 @@ mod tests {
         assert_eq!(result[0].sim, 0.0);
     }
 
+    /// The overlap coefficient flag switches metric: a strict subset scores 1.0, not 0.25.
     #[test]
     fn overlap_coefficient_differs_from_jaccard() {
         let origin = modules(&[("A", &["g1"])]);
@@ -473,6 +479,7 @@ mod tests {
         (m1, m2)
     }
 
+    /// Identical inputs give a diagonal of 1.0, so k = 1 returns exactly the matched column pairs.
     #[test]
     fn cor_k1_identifies_perfect_pairs() {
         let (m1, m2) = two_by_two_cor_setup();
@@ -496,6 +503,7 @@ mod tests {
         }
     }
 
+    /// At k = 2 every entry of a 2x2 correlation matrix clears both thresholds.
     #[test]
     fn cor_k2_returns_all_pairs_in_2x2() {
         let (m1, m2) = two_by_two_cor_setup();
@@ -507,6 +515,7 @@ mod tests {
         assert_eq!(result.len(), 4);
     }
 
+    /// Perfectly anticorrelated columns still pair, since the correlation matrix is taken absolute.
     #[test]
     fn cor_uses_absolute_correlation() {
         // m2 = -m1, so cor(A,X) = cor(B,Y) = -1; after abs they should still pair.
@@ -532,6 +541,7 @@ mod tests {
         }
     }
 
+    /// Matrices with no shared row names return the NA placeholder rather than correlating nothing.
     #[test]
     fn cor_no_row_intersection_returns_na() {
         let m1 = mat_from_rows(&[&[1.0], &[2.0]]);
@@ -547,6 +557,7 @@ mod tests {
         assert_eq!(result[0].sim, 0.0);
     }
 
+    /// Rows in only one matrix are dropped before correlating, so their values cannot leak in.
     #[test]
     fn cor_uses_only_intersecting_rows() {
         // x1 has g1..g4; x2 has g2..g5. Shared rows are {g2, g3, g4}.
@@ -571,6 +582,7 @@ mod tests {
         assert_eq!(pairs, expected);
     }
 
+    /// Columns are resolved by stored index, not by the BTreeMap's alphabetical key order.
     #[test]
     fn cor_respects_non_alphabetical_column_order() {
         let m1 = mat_from_rows(&[&[1.0, 1.0], &[2.0, 1.0], &[3.0, 2.0], &[4.0, 3.0]]);

@@ -204,10 +204,10 @@ pub fn hypergeom_pval<T>(q: usize, m: usize, n: usize, k: usize) -> T
 where
     T: BixverseFloat,
 {
-    if q == 0 {
-        return T::one();
-    }
-
+    // `q == 0` is P(X >= 1), a legitimate query, and the loop below computes it.
+    // Returning 1.0 here meant every gene set with exactly one hit scored p = 1.
+    // An empty summation range is still handled, at the `log_probs.is_empty()`
+    // check further down.
     let population = m + n;
     let (n_f, m_f, k_f) = (
         T::from_usize(n).unwrap(),
@@ -267,6 +267,12 @@ where
     T: BixverseFloat,
 {
     let n = pvals.len();
+    // The monotonicity pass below indexes `[n - 1]`, so an empty input panicked.
+    // Reachable from `hypergeom_helper` with no gene sets and from
+    // `finalise_go_res` when every level is empty.
+    if n == 0 {
+        return Vec::new();
+    }
     let n_t = T::from_usize(n).unwrap();
     let one = T::one();
 
@@ -765,6 +771,7 @@ where
 mod tests {
     use super::*;
 
+    /// `logit` and `inv_logit` are inverses, with p = 0.5 sitting at zero log-odds.
     #[test]
     fn test_logit_and_inv_logit() {
         let p: f64 = 0.5;
@@ -775,6 +782,7 @@ mod tests {
         assert!((recovered_p - 0.5).abs() < 1e-6);
     }
 
+    /// Two-sided p-values at the two z-scores whose answers are known by heart.
     #[test]
     fn test_z_scores_to_pval() {
         let z_scores: Vec<f64> = vec![0.0, 1.95996398454]; // ~ 95% confidence interval
@@ -786,6 +794,7 @@ mod tests {
         assert!((pvals_two_sided[1] - 0.05).abs() < 1e-5);
     }
 
+    /// Benjamini-Hochberg adjustment stays monotonic and comes back in the input order.
     #[test]
     fn test_calc_fdr() {
         // Classic Benjamini-Hochberg test case
@@ -801,6 +810,7 @@ mod tests {
         assert!((fdr[2] - 0.04).abs() < 1e-6);
     }
 
+    /// Only points beyond the median plus `threshold` MADs count as outliers.
     #[test]
     fn test_mad_outlier() {
         let vec: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 100.0];
@@ -815,6 +825,7 @@ mod tests {
         assert_eq!(outliers, vec![false, false, false, false, true]); // 100.0 is an outlier
     }
 
+    /// The alternative and outlier-direction parsers ignore case.
     #[test]
     fn test_parse_helpers() {
         assert!(matches!(
@@ -836,6 +847,7 @@ mod tests {
         ));
     }
 
+    /// Two-group MANOVA against hand-computed Wilks, Pillai and F statistics.
     #[test]
     fn test_manova_two_group_analytic() {
         // Group 0: rows 0, 1; Group 1: rows 2, 3
@@ -877,6 +889,7 @@ mod tests {
         assert!((0.0..=1.0).contains(&p_p));
     }
 
+    /// Regression: at Mitch-scale magnitudes `det()` overflowed to NaN and panicked downstream.
     #[test]
     fn test_manova_no_overflow_large_p() {
         // Regression test: previously panicked via det() overflow → NaN →
@@ -926,6 +939,7 @@ mod tests {
         assert!((p_w - p_p).abs() < 1e-9);
     }
 
+    /// Regression: a constant column has no within-group variance and used to panic.
     #[test]
     fn test_summary_aov_constant_column() {
         // ss_within == 0 used to feed NaN into FisherSnedecor and panic.

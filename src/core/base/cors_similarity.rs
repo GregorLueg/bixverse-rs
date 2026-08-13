@@ -1009,10 +1009,7 @@ mod tests {
     use faer::Mat;
     use rustc_hash::FxHashSet;
 
-    // Helper to create a simple matrix for testing
-    // 1.0 2.0
-    // 3.0 4.0
-    // 5.0 6.0
+    /// A 3 by 2 matrix whose two columns are perfectly linearly related.
     fn get_test_mat() -> Mat<f64> {
         Mat::from_fn(3, 2, |i, j| match (i, j) {
             (0, 0) => 1.0,
@@ -1029,6 +1026,7 @@ mod tests {
         assert!((a - b).abs() < 1e-10, "{} != {}", a, b);
     }
 
+    /// Covariance is column by column and square in the column count.
     #[test]
     fn test_column_pairwise_cov_f64() {
         let mat = get_test_mat();
@@ -1043,6 +1041,7 @@ mod tests {
         assert!(*cov.get(0, 1) > 0.0);
     }
 
+    /// Pearson normalisation puts ones on the diagonal and saturates on a linear pair.
     #[test]
     fn test_column_pairwise_cor_pearson() {
         let mat = get_test_mat();
@@ -1056,6 +1055,7 @@ mod tests {
         assert_approx_eq(*cor.get(0, 1), 1.0);
     }
 
+    /// The Spearman flag ranks before correlating instead of being ignored.
     #[test]
     fn test_column_pairwise_cor_spearman() {
         let mat = get_test_mat();
@@ -1065,6 +1065,7 @@ mod tests {
         assert_approx_eq(*cor.get(0, 1), 1.0);
     }
 
+    /// The cross-matrix form lines columns up in order, so identical inputs give a unit diagonal.
     #[test]
     fn test_cor_two_matrices() {
         let mat_a = get_test_mat();
@@ -1077,6 +1078,7 @@ mod tests {
         assert_approx_eq(*cor.get(1, 1), 1.0);
     }
 
+    /// Scaling a covariance by its diagonal recovers the correlation.
     #[test]
     fn test_cov2cor() {
         let mut cov = Mat::<f64>::zeros(2, 2);
@@ -1091,6 +1093,7 @@ mod tests {
         assert_approx_eq(*cor.get(0, 1), 0.5);
     }
 
+    /// L2 is a distance, not a similarity: zero on the diagonal, positive off it.
     #[test]
     fn test_distances_l2() {
         // Orthogonal vectors: (1, 0) and (0, 1)
@@ -1102,6 +1105,7 @@ mod tests {
         assert_approx_eq(*dist.get(0, 1), 2.0_f64.sqrt());
     }
 
+    /// L1 sums absolute differences instead of squaring them.
     #[test]
     fn test_distances_l1() {
         let mat = Mat::<f64>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
@@ -1111,6 +1115,7 @@ mod tests {
         assert_approx_eq(*dist.get(0, 1), 2.0);
     }
 
+    /// Normalised PMI tops out at 1 for perfectly co-occurring boolean columns.
     #[test]
     fn test_calc_pmi() {
         // Simple case: 2 identical columns
@@ -1120,6 +1125,7 @@ mod tests {
         assert_approx_eq(*pmi.get(0, 1), 1.0);
     }
 
+    /// Categorical Hamming is normalised by the row count, not left as a raw mismatch count.
     #[test]
     fn test_hamming_cat() {
         use faer::mat;
@@ -1134,6 +1140,7 @@ mod tests {
         assert_approx_eq(*hamming.get(0, 1), 1.0 / 3.0);
     }
 
+    /// Gower runs over rows, not columns, and handles the all-numeric case.
     #[test]
     fn test_gower() {
         let mat = Mat::<f64>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
@@ -1144,6 +1151,7 @@ mod tests {
         assert_approx_eq(*gower.get(0, 1), 1.0);
     }
 
+    /// TOM version 1 on a small adjacency: unit diagonal and shared-neighbour weighting off it.
     #[test]
     fn test_calc_tom() {
         use faer::mat;
@@ -1159,6 +1167,7 @@ mod tests {
         assert_approx_eq(*tom.get(1, 2), 1.0 / 3.0);
     }
 
+    /// The overlap flag switches the denominator from the union to the smaller set.
     #[test]
     fn test_set_similarity() {
         let mut s1 = FxHashSet::default();
@@ -1178,6 +1187,7 @@ mod tests {
         assert_approx_eq(overlap, 0.5);
     }
 
+    /// The sorted merge path gives the same Jaccard as the hash-set path.
     #[test]
     fn test_jaccard_sorted() {
         let a = vec![1, 2, 3];
@@ -1188,6 +1198,7 @@ mod tests {
         assert_approx_eq(sim, 0.5);
     }
 
+    /// The R-facing string parsers still map onto the enum variants they name.
     #[test]
     fn test_parse_helpers() {
         assert!(matches!(

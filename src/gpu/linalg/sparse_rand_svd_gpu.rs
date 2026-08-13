@@ -510,7 +510,7 @@ mod tests {
     // enough that almost any sketch works.
     #[test]
     // Heavy: three power-iteration arms at n = 3000, plus a dense faer SVD.
-    #[cfg(feature = "large_scale_diagnostics")]
+    #[cfg(feature = "large-test")]
     fn test_randomised_sparse_svd_gpu_accuracy_vs_dense() {
         let Some(device) = try_device() else { return };
 
@@ -637,6 +637,7 @@ mod tests {
         );
     }
 
+    /// The kernels assume CSC, so a CSR input must be refused up front.
     #[test]
     fn test_randomised_sparse_svd_gpu_csr_input_rejected() {
         let Some(device) = try_device() else { return };
@@ -678,6 +679,7 @@ mod tests {
         ));
     }
 
+    /// Wrong-length `mu` or `sigma` must error before it reaches the kernel.
     #[test]
     fn test_randomised_sparse_svd_gpu_dim_mismatch_rejected() {
         let Some(device) = try_device() else { return };

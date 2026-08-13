@@ -224,15 +224,7 @@ mod tests {
     use super::*;
     use approx::assert_relative_eq;
 
-    /// Densify a symmetric CSR for readable assertions.
-    ///
-    /// ### Params
-    ///
-    /// * `csr` - The matrix to densify.
-    ///
-    /// ### Returns
-    ///
-    /// A `k` by `k` dense copy, indexed `[row][col]`.
+    /// Densify a symmetric CSR into a `k` by `k` `[row][col]` copy for readable assertions.
     fn densify(csr: &CompressedSparseData2<f64>) -> Vec<Vec<f64>> {
         let k = csr.nrows();
         let mut out = vec![vec![0.0; k]; k];
@@ -251,10 +243,6 @@ mod tests {
     /// through a single one-way link, so the abstracted graph is a triangle
     /// with one clearly weakest side rather than a path. A path fixture would
     /// be passed by any implementation that hands back its own input.
-    ///
-    /// ### Returns
-    ///
-    /// kNN indices for the twelve cells.
     fn y_shape() -> Vec<Vec<usize>> {
         let blocks = [[0, 1, 2, 3], [4, 5, 6, 7], [8, 9, 10, 11]];
         let mut knn: Vec<Vec<usize>> = vec![Vec::new(); 12];
@@ -273,6 +261,7 @@ mod tests {
         knn
     }
 
+    /// Connectivity is symmetric with a zero diagonal, and the weak arm-to-arm link scores lowest.
     #[test]
     fn test_y_shape_connects_the_trunk_to_both_arms_most_strongly() {
         let knn = y_shape();
@@ -297,6 +286,7 @@ mod tests {
         }
     }
 
+    /// The spanning forest keeps both trunk edges rather than collapsing the Y to a path.
     #[test]
     fn test_tree_keeps_both_arms_of_the_y() {
         let knn = y_shape();
@@ -314,14 +304,12 @@ mod tests {
         assert_eq!(tree[1][2], 0.0);
     }
 
+    /// Connectivities follow the expected-count formula and the forest drops the weakest triangle edge.
     #[test]
     fn test_tree_drops_the_weakest_edge_of_a_triangle() {
         // Three blocks of four wired into a triangle, with two mutual bridges
-        // on 0-1 and on 0-2 but only one on 1-2. Working it through: es is
-        // (16, 15, 15) against sizes of four each over twelve cells, so the
-        // expectations are 124/11 twice and 120/11 once, against observed
-        // counts of 4, 4 and 2. The 1-2 link is the weakest by a clear margin
-        // and is the edge the forest has to give up.
+        // on 0-1 and on 0-2 but only one on 1-2. The 1-2 link is the weakest by
+        // a clear margin and is the edge the forest has to give up.
         let blocks = [[0, 1, 2, 3], [4, 5, 6, 7], [8, 9, 10, 11]];
         let mut knn: Vec<Vec<usize>> = vec![Vec::new(); 12];
         for block in blocks.iter() {
@@ -350,6 +338,7 @@ mod tests {
         assert_eq!(tree[1][2], 0.0);
     }
 
+    /// Self hits and out-of-range neighbours never reach the edge counting.
     #[test]
     fn test_self_hits_and_out_of_range_neighbours_are_dropped() {
         // Cell 0 lists itself and a cell that does not exist. Neither may reach
@@ -365,6 +354,7 @@ mod tests {
         assert_eq!(a.sizes, b.sizes);
     }
 
+    /// Regression: a kNN indexed against another cell set gave all-zero connectivities silently.
     #[test]
     fn test_rejects_a_knn_built_against_another_index() {
         // Every neighbour points past the last cell, which is what happens when
@@ -383,6 +373,7 @@ mod tests {
         ));
     }
 
+    /// A repeated neighbour contributes one edge, not one per listing.
     #[test]
     fn test_duplicate_neighbours_are_counted_once() {
         let duped = vec![vec![1, 1, 1], vec![0]];
@@ -400,10 +391,6 @@ mod tests {
     /// through `sc.pp.neighbors(n_neighbors=5, use_rep="X")`. These are the
     /// stored column indices of `adata.obsp["distances"]`, row by row, which is
     /// exactly the directed graph `sc.tl.paga` binarises.
-    ///
-    /// ### Returns
-    ///
-    /// kNN indices for the twenty-four cells.
     fn scanpy_reference_knn() -> Vec<Vec<usize>> {
         vec![
             vec![1, 8, 5, 2],
@@ -433,6 +420,7 @@ mod tests {
         ]
     }
 
+    /// Parity with a scanpy `sc.tl.paga` run on a fixed 24-cell fixture, connectivities and tree.
     #[test]
     fn test_matches_the_scanpy_reference() {
         // Reference values from `sc.tl.paga(adata, groups="grp")` on the run
@@ -470,6 +458,7 @@ mod tests {
         assert_relative_eq!(tree[1][2], dense[1][2], epsilon = 1e-15);
     }
 
+    /// A partition vector shorter than the cell count errors.
     #[test]
     fn test_rejects_label_count_mismatch() {
         let knn = vec![vec![1], vec![0]];
@@ -482,6 +471,7 @@ mod tests {
         ));
     }
 
+    /// A label beyond the declared partition count errors.
     #[test]
     fn test_rejects_out_of_range_label() {
         let knn = vec![vec![1], vec![0]];

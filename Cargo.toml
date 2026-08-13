@@ -19,9 +19,12 @@ path = "src/lib.rs"
 [features]
 ## Enables the single cell features in bixverse-rs
 single-cell = ["half", "bincode", "indexmap", "memmap2", "hdf5", "lz4_flex", "ndarray"]
-## Expensive tests and large-scale diagnostics - for development only! Covers
-## the slow GPU parity tests and the unasserted diagnostic sweeps. No CI job
-## enables it; run it in release or the CPU reference solves dominate.
+## Slow but asserting tests: the GPU parity gates and the large-scale numerical
+## checks. These can fail, so they are worth running on a schedule. Run in
+## release or the CPU reference solves dominate.
+large-test = []
+## Unasserted diagnostic sweeps that print tables for a human to read. They
+## cannot fail, so running them in CI buys nothing; use them when investigating.
 large_scale_diagnostics = []
 ## Enables multi-modal single cell analysis (requires single-cell)
 multi-modal = ["single-cell"]

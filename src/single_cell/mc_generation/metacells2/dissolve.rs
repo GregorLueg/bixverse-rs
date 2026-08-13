@@ -223,9 +223,9 @@ mod tests {
         }
     }
 
+    /// A candidate below the minimum metacell size dissolves into outliers.
     #[test]
     fn dissolves_below_min_size() {
-        // Two cells in one candidate, min_metacell_size = 3 → dissolve.
         let raw = make_raw(vec![vec![(0, 10)], vec![(0, 10)]], 2);
         let umis = vec![10.0_f32, 10.0];
         let cand = vec![0_i32, 0];
@@ -236,6 +236,7 @@ mod tests {
         assert_eq!(dis, vec![true, true]);
     }
 
+    /// A candidate at or above the robust size survives untouched.
     #[test]
     fn keeps_robust_size() {
         // 4 cells, target = 4, min_robust_factor = 0.5 → min_robust_size = 2.
@@ -253,6 +254,7 @@ mod tests {
         assert!(dis.iter().all(|&v| !v));
     }
 
+    /// Deviants leave as outliers without marking the surviving metacell dissolved.
     #[test]
     fn deviants_become_outliers_not_dissolved() {
         // 4 cells; cell 3 is deviant. Surviving size 3, robust at 2 →
@@ -270,10 +272,9 @@ mod tests {
         assert!(dis.iter().all(|&v| !v));
     }
 
+    /// Metacell IDs are renumbered densely when a candidate in the middle dissolves.
     #[test]
     fn dense_metacell_ids_with_gaps() {
-        // Three candidates; middle one dissolves. Output IDs should be
-        // dense [0, 1].
         let raw = make_raw(
             vec![
                 vec![(0, 10)],
@@ -292,8 +293,6 @@ mod tests {
             ..Default::default()
         };
         let (mc, _dis) = dissolve_metacells(&raw, &umis, &cand, &dev, 4, 40.0, 2, &params);
-        // Candidate 0 → metacell 0, candidate 1 dissolves, candidate 2 →
-        // metacell 1.
         assert_eq!(mc, vec![0, 0, -1, 1, 1]);
     }
 }

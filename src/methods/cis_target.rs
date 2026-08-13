@@ -182,7 +182,7 @@ fn rolling_mean<T: BixverseFloat>(values: &[T], window: usize) -> Vec<T> {
     let mut count = 0;
 
     let start = 0;
-    let end = half_window.min(n);
+    let end = (half_window + 1).min(n);
     for &v in &values[start..end] {
         sum += v;
         count += 1;
@@ -549,4 +549,89 @@ where
             }
         })
         .collect()
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_relative_eq;
+
+    /// Regression: the priming loop primed `half_window` elements instead of
+    /// `half_window + 1`, so `values[2]` here was dropped and never recovered.
+    /// Every mean except the middle one was wrong.
+    #[test]
+    fn rolling_mean_is_centred_and_clipped_at_the_edges() {
+        let got: Vec<f64> = rolling_mean(&[1.0, 2.0, 3.0, 4.0, 5.0], 5);
+
+        assert_eq!(got.len(), 5);
+        for (g, w) in got.iter().zip([2.0, 2.5, 3.0, 3.5, 4.0]) {
+            assert_relative_eq!(*g, w, epsilon = 1e-12);
+        }
+    }
+
+    /// A window of one is the identity, and must not divide by a zero count.
+    #[test]
+    fn rolling_mean_window_of_one_is_the_identity() {
+        let values = [1.0_f64, 7.0, 3.0];
+        let got: Vec<f64> = rolling_mean(&values, 1);
+
+        for (g, w) in got.iter().zip(values) {
+            assert_relative_eq!(*g, w, epsilon = 1e-12);
+        }
+    }
+
+    /// AUC normalises by the full gene count, not the below-threshold subset:
+    /// ranks [1, 3] contribute 2*1 + 2*2 = 6 against a maximum of 5 * 3.
+    #[test]
+    fn auc_single_normalises_by_the_unfiltered_gene_count() {
+        assert_relative_eq!(
+            calculate_auc_single::<f64>(&[1, 3, 7], 5),
+            0.4,
+            epsilon = 1e-12
+        );
+    }
+
+    /// Every rank at or above the threshold leaves nothing to integrate.
+    #[test]
+    fn auc_single_is_zero_when_no_gene_beats_the_threshold() {
+        assert_relative_eq!(
+            calculate_auc_single::<f64>(&[7, 9], 5),
+            0.0,
+            epsilon = 1e-12
+        );
+    }
+
+    /// The recovery curve steps at each retained rank and holds until the next.
+    #[test]
+    fn rcc_steps_at_each_retained_rank() {
+        assert_eq!(calculate_rcc(&[2, 4, 9], 6), vec![0, 0, 1, 1, 2, 2]);
+    }
+
+    /// Rank 0 is filtered out by the `r > 0` guard, so it counts as absent
+    /// rather than as the best possible rank.
+    #[test]
+    fn rcc_treats_rank_zero_as_absent() {
+        assert_eq!(calculate_rcc(&[0, 3], 5), vec![0, 0, 0, 1, 1]);
+    }
+
+    /// NES z-scores against the sample standard deviation.
+    #[test]
+    fn nes_z_scores_against_the_sample_sd() {
+        let got: Vec<f64> = calculate_nes(&[1.0, 2.0, 3.0]);
+
+        for (g, w) in got.iter().zip([-1.0, 0.0, 1.0]) {
+            assert_relative_eq!(*g, w, epsilon = 1e-12);
+        }
+    }
+
+    /// A constant input has no spread to normalise by, so every score is zero
+    /// rather than NaN.
+    #[test]
+    fn nes_of_a_constant_input_is_all_zero() {
+        assert_eq!(calculate_nes::<f64>(&[2.0; 4]), vec![0.0; 4]);
+    }
 }

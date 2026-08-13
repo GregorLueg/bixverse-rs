@@ -780,7 +780,12 @@ impl CscGeneChunk {
         original_index: usize,
         to_keep: bool,
     ) -> Self {
-        let avg_exp = data_norm.iter().sum::<F16>();
+        // Accumulate in f32 and narrow once, as `pca.rs` already does. Summing
+        // in f16 biases the total upwards: past 64 the f16 step is 0.0625, so
+        // small addends round up every time and a thousand-cell gene overshoots
+        // by roughly 5%. This value is written into the chunk header, so the
+        // drift was being persisted.
+        let avg_exp = F16::from_f32(data_norm.iter().map(|v| v.to_f32()).sum::<f32>());
         let nnz = data_raw.len();
 
         Self {
@@ -1031,6 +1036,10 @@ pub struct SparseDataHeader {
     pub index_map: FxHashMap<usize, usize>,
 }
 
+/// Leading bytes identifying a bixverse single-cell binary. Checked on open so
+/// a foreign file is refused rather than parsed as one of ours.
+const FILE_MAGIC: &[u8; 8] = b"SCRNASEQ";
+
 /// Fixed-size file header that points to the main header location
 #[repr(C)]
 #[derive(Encode, Decode, Serialize, Deserialize)]
@@ -1067,7 +1076,7 @@ impl FileHeader {
     /// A new object of `FileHeader`
     fn new(cell_based: bool, target_size: f32) -> Self {
         Self {
-            magic: *b"SCRNASEQ",
+            magic: *FILE_MAGIC,
             version: SC_FILE_VERSION,
             main_header_offset: 0,
             cell_based,
@@ -1680,10 +1689,21 @@ impl ParallelSparseReader {
         #[cfg(unix)]
         mmap.advise(memmap2::Advice::Random)?;
 
+        // Everything below indexes the mmap directly, so each offset is checked
+        // before it is used. A corrupt or foreign file must return an error,
+        // not panic on a slice bound or parse as if it were ours.
+        if mmap.len() < 64 {
+            return Err(BixverseErrors::HeaderDecodeFailed);
+        }
+
         let file_header_bytes = &mmap[0..64];
         let (file_header, _) =
             decode_from_slice::<FileHeader, _>(file_header_bytes, config::standard())
                 .map_err(|_| BixverseErrors::HeaderDecodeFailed)?;
+
+        if &file_header.magic != FILE_MAGIC {
+            return Err(BixverseErrors::HeaderDecodeFailed);
+        }
 
         if file_header.version != SC_FILE_VERSION {
             return Err(BixverseErrors::FileVersionMismatch {
@@ -1693,13 +1713,24 @@ impl ParallelSparseReader {
         }
 
         let main_header_offset = file_header.main_header_offset as usize;
+        if main_header_offset.saturating_add(8) > mmap.len() {
+            return Err(BixverseErrors::HeaderDecodeFailed);
+        }
+
         let header_size = u64::from_le_bytes(
             mmap[main_header_offset..main_header_offset + 8]
                 .try_into()
-                .expect("8-byte slice by construction"),
+                .expect("8-byte slice, bounds checked above"),
         ) as usize;
 
-        let header_bytes = &mmap[main_header_offset + 8..main_header_offset + 8 + header_size];
+        let header_end = main_header_offset
+            .saturating_add(8)
+            .saturating_add(header_size);
+        if header_end > mmap.len() {
+            return Err(BixverseErrors::HeaderDecodeFailed);
+        }
+
+        let header_bytes = &mmap[main_header_offset + 8..header_end];
         let (header, _) =
             decode_from_slice::<SparseDataHeader, _>(header_bytes, config::standard())
                 .map_err(|_| BixverseErrors::HeaderDecodeFailed)?;
@@ -2205,6 +2236,7 @@ mod tests {
     // Chunk codec //
     ////////////////////
 
+    /// Pins the CSR chunk codec: every field must return bit-identical.
     #[test]
     fn test_cell_chunk_round_trip_preserves_fields() {
         let raw = [1_u32, 7, 42, 65_535, 3];
@@ -2225,6 +2257,7 @@ mod tests {
         assert_eq!(bits, want);
     }
 
+    /// Same pin for the CSC codec, which carries `nnz` and `avg_exp` too.
     #[test]
     fn test_gene_chunk_round_trip_preserves_fields() {
         let raw = [2_u32, 0, 99, 70_000];
@@ -2305,6 +2338,7 @@ mod tests {
         assert_eq!(back.data_raw.iter().collect::<Vec<_>>(), raw.to_vec());
     }
 
+    /// A zero discriminant still means u16; an unknown width must error.
     #[test]
     fn test_raw_counts_element_size_discriminant() {
         let payload = [1_u8, 0, 2, 0];
@@ -2342,6 +2376,7 @@ mod tests {
         assert_eq!(csr.data, vec![70_000_u32, 1]);
     }
 
+    /// A count above `u16::MAX` must be reported, not wrapped or saturated.
     #[test]
     fn test_narrow_target_type_reports_overflow() {
         let chunk = gene_chunk(&[70_000, 1], &[0, 1], 0);
@@ -2356,6 +2391,7 @@ mod tests {
     // Writer and reader //
     ///////////////////////
 
+    /// Writer to reader round trip: orientation, target size and both chunks.
     #[test]
     fn test_cell_based_file_round_trip() {
         let temp = TempBin::new("cell_round_trip");
@@ -2381,6 +2417,94 @@ mod tests {
         assert_eq!(back[1].indices, vec![0, 1, 2]);
     }
 
+    /// Rewrite the 64-byte header slot of an existing file, applying `edit` to
+    /// the decoded [`FileHeader`]. Lets a test corrupt one field of an otherwise
+    /// valid file without hand-assembling the whole layout.
+    fn patch_file_header(path: &str, edit: impl FnOnce(&mut FileHeader)) {
+        let mut bytes = std::fs::read(path).expect("read back");
+        let (mut header, _) = decode_from_slice::<FileHeader, _>(&bytes[0..64], config::standard())
+            .expect("header decodes");
+
+        edit(&mut header);
+
+        let encoded = encode_to_vec(&header, config::standard()).expect("header encodes");
+        let mut slot = [0_u8; 64];
+        slot[..encoded.len()].copy_from_slice(&encoded);
+        bytes[0..64].copy_from_slice(&slot);
+
+        std::fs::write(path, bytes).expect("write back");
+    }
+
+    /// Build a minimal but valid cell-based file at `path`.
+    fn write_valid_file(path: &str) {
+        let mut writer = CellGeneSparseWriter::new(path, true, 1, 3, 1e4).expect("writer opens");
+        writer
+            .write_cell_chunk(cell_chunk(&[1, 2], &[0, 1], 0))
+            .expect("write");
+        writer.finalise().expect("finalise");
+    }
+
+    /// Regression: `ParallelSparseReader::new` rejects any file whose version is
+    /// not `SC_FILE_VERSION`, and nothing exercised that guard.
+    #[test]
+    fn test_reader_rejects_a_version_mismatch() {
+        let temp = TempBin::new("version_mismatch");
+        write_valid_file(temp.path());
+        patch_file_header(temp.path(), |h| h.version = SC_FILE_VERSION + 1);
+
+        match ParallelSparseReader::new(temp.path()) {
+            Err(BixverseErrors::FileVersionMismatch { expected, found }) => {
+                assert_eq!(expected, SC_FILE_VERSION);
+                assert_eq!(found, SC_FILE_VERSION + 1);
+            }
+            Err(other) => panic!("expected a version mismatch, got {other:?}"),
+            Ok(_) => panic!("a mismatched version must not open"),
+        }
+    }
+
+    /// A file that is not ours at all must be refused rather than parsed.
+    #[test]
+    fn test_reader_rejects_a_bad_magic() {
+        let temp = TempBin::new("bad_magic");
+        write_valid_file(temp.path());
+        patch_file_header(temp.path(), |h| h.magic = *b"NOTOURS!");
+
+        assert!(
+            ParallelSparseReader::new(temp.path()).is_err(),
+            "a wrong magic string must not open"
+        );
+    }
+
+    /// A header pointing past the end of the file must error rather than read
+    /// out of bounds off the mmap.
+    #[test]
+    fn test_reader_rejects_a_main_header_offset_past_eof() {
+        let temp = TempBin::new("offset_past_eof");
+        write_valid_file(temp.path());
+        patch_file_header(temp.path(), |h| h.main_header_offset = u64::MAX / 2);
+
+        assert!(
+            ParallelSparseReader::new(temp.path()).is_err(),
+            "an out-of-range main header offset must not open"
+        );
+    }
+
+    /// A file truncated mid-payload must error rather than panic.
+    #[test]
+    fn test_reader_rejects_a_truncated_file() {
+        let temp = TempBin::new("truncated");
+        write_valid_file(temp.path());
+
+        let bytes = std::fs::read(temp.path()).expect("read back");
+        std::fs::write(temp.path(), &bytes[..bytes.len() / 2]).expect("truncate");
+
+        assert!(
+            ParallelSparseReader::new(temp.path()).is_err(),
+            "a truncated file must not open"
+        );
+    }
+
+    /// The gene-based half of the same pin, with one chunk forced to u32 raw.
     #[test]
     fn test_gene_based_file_round_trip() {
         let temp = TempBin::new("gene_round_trip");
@@ -2420,6 +2544,7 @@ mod tests {
         }
     }
 
+    /// A target size of 0 means raw only: reader and peek must both say `None`.
     #[test]
     fn test_raw_only_file_reports_no_target_size() {
         let temp = TempBin::new("no_target_size");
@@ -2475,6 +2600,7 @@ mod tests {
         slot
     }
 
+    /// Backwards: pre-`target_size` header bytes must still decode, reading 0.
     #[test]
     fn test_legacy_header_decodes_with_zero_target_size() {
         let legacy = LegacyFileHeader {
@@ -2497,6 +2623,7 @@ mod tests {
         assert_eq!(decoded.target_size, 0.0);
     }
 
+    /// Forwards: today's header must still decode under the old layout.
     #[test]
     fn test_new_header_still_decodes_on_the_old_layout() {
         let mut header = FileHeader::new(false, 1e4);
@@ -2512,6 +2639,7 @@ mod tests {
         assert!(!decoded.cell_based);
     }
 
+    /// The new field survives the fixed, zero-padded 64-byte slot.
     #[test]
     fn test_target_size_survives_header_round_trip() {
         let slot = encode_slot(&FileHeader::new(true, 1e5));

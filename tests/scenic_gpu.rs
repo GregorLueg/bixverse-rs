@@ -14,7 +14,7 @@
 //! per the plan's "sanity floor, not precision target" wording.
 
 #![allow(clippy::needless_range_loop, clippy::field_reassign_with_default)]
-// Helpers and imports feeding the `large_scale_diagnostics` tests are unused
+// Helpers and imports feeding the `large-test` tests are unused
 // when that feature is off. Not worth cfg-ing each one individually in a test
 // file.
 #![allow(dead_code, unused_imports)]
@@ -194,36 +194,6 @@ fn config() -> ExtraTreesConfig {
     c
 }
 
-/// Baseline: CPU vs CPU with different seeds. This bounds what any
-/// CPU-vs-GPU comparison can plausibly achieve on a single tree.
-#[test]
-fn cpu_baseline_seed_variance() {
-    let cfg = config();
-
-    let mut overlaps: Vec<usize> = Vec::new();
-
-    for seed_i in 0..10u64 {
-        let seed_a = 20260707 + seed_i;
-        let seed_b = seed_a.wrapping_add(0xC0FFEE);
-        let x = make_toy_quantised(seed_a);
-        let (_sy, axes) = make_toy_targets(&x, seed_a.wrapping_add(1));
-
-        let cpu_a = fit_multi_trees_sparse(&axes, &x, N_SAMPLES, &cfg, seed_a as usize)
-            .expect("CPU fit A failed");
-        let cpu_b = fit_multi_trees_sparse(&axes, &x, N_SAMPLES, &cfg, seed_b as usize)
-            .expect("CPU fit B failed");
-
-        let a_sum = sum_importances(&cpu_a);
-        let b_sum = sum_importances(&cpu_b);
-        overlaps.push(overlap(
-            &top_k_indices(&a_sum, TOP_K),
-            &top_k_indices(&b_sum, TOP_K),
-        ));
-    }
-    let mean_ov = overlaps.iter().sum::<usize>() as f32 / (overlaps.len() * TOP_K) as f32;
-    eprintln!("cpu_baseline: mean top-{TOP_K} overlap = {mean_ov:.2} (per seed: {overlaps:?})");
-}
-
 /// Statistical-parity check: GPU vs CPU top-10 overlap must be at least
 /// as high as the CPU-vs-CPU seed-variance baseline. Any lower would mean
 /// the GPU pipeline introduces noise beyond what BFS-vs-DFS RNG ordering
@@ -342,7 +312,7 @@ fn rf_toy_config(n_trees: usize) -> RandomForestConfig {
 /// least as well as two CPU runs on different seeds agree with each other.
 ///
 /// This is the only RF fidelity test that runs in CI. The two 0.95 Pearson
-/// gates sit behind `large_scale_diagnostics`, which no workflow enables.
+/// gates sit behind `large-test`, which no workflow enables.
 #[test]
 fn rf_gpu_matches_cpu_top10() {
     let Some(device) = try_device() else {
@@ -567,7 +537,7 @@ fn phase2_cpu_baseline() {
 #[test]
 // 10k-40k sample fits against a sequential CPU baseline. Minutes on a GH
 // runner, where the Linux GPU job falls back to lavapipe software Vulkan.
-#[cfg(feature = "large_scale_diagnostics")]
+#[cfg(feature = "large-test")]
 fn phase2_multi_tree_pearson() {
     let Some(device) = try_device() else {
         eprintln!("scenic_gpu (Phase 2): no wgpu device available -- skipping");
@@ -644,7 +614,7 @@ fn phase2_multi_tree_pearson() {
 /// same per-tree multi-output scoring, so the trees and importances match.
 #[test]
 // Heavy: 2000 x 100 x 130 with 50 trees, so four full GPU ensemble fits.
-#[cfg(feature = "large_scale_diagnostics")]
+#[cfg(feature = "large-test")]
 fn phase2_multi_batch_determinism() {
     let Some(device) = try_device() else {
         eprintln!("scenic_gpu (Phase 2 multi-batch): no wgpu device -- skipping");
@@ -759,7 +729,7 @@ fn phase2_multi_batch_determinism() {
 /// `cargo test --release` -- debug mode is dominated by CPU-side RF.
 #[test]
 // 250-tree RandomForest fit against a sequential CPU baseline. Same reason.
-#[cfg(feature = "large_scale_diagnostics")]
+#[cfg(feature = "large-test")]
 fn phase3_random_forest_pearson() {
     let Some(device) = try_device() else {
         eprintln!("scenic_gpu (Phase 3 RF): no wgpu device available -- skipping");
@@ -816,7 +786,7 @@ fn phase3_random_forest_pearson() {
 /// enabled. Assert the same 0.95 tolerance.
 #[test]
 // As above, bootstrap variant.
-#[cfg(feature = "large_scale_diagnostics")]
+#[cfg(feature = "large-test")]
 fn phase3_rf_bootstrap_pearson() {
     let Some(device) = try_device() else {
         eprintln!("scenic_gpu (Phase 3 RF+bootstrap): no wgpu device -- skipping");
@@ -872,7 +842,7 @@ fn phase3_rf_bootstrap_pearson() {
 /// Reduced-shape RF Pearson gate that actually runs in CI.
 ///
 /// `phase3_random_forest_pearson` is the real fidelity gate but it needs
-/// `large_scale_diagnostics`, and at 10k cells / 250 trees it is far too slow
+/// `large-test`, and at 10k cells / 250 trees it is far too slow
 /// for a debug build on lavapipe. This runs the same comparison at a fraction
 /// of the work.
 ///
@@ -891,7 +861,7 @@ fn phase3_rf_bootstrap_pearson() {
 /// `accumulate_importance` varying summation order.
 #[test]
 // Heavy: 120 RF trees, two CPU fits plus one GPU fit.
-#[cfg(feature = "large_scale_diagnostics")]
+#[cfg(feature = "large-test")]
 fn phase3_rf_pearson_small() {
     let Some(device) = try_device() else {
         eprintln!("scenic_gpu (Phase 3 RF small): no wgpu device -- skipping");
@@ -1024,7 +994,7 @@ fn phase3_rf_pearson_small() {
 /// the uniform ones.
 #[test]
 // Heavy: 1500 x 50 x 64 with 120 RF trees, two CPU fits plus one GPU fit.
-#[cfg(feature = "large_scale_diagnostics")]
+#[cfg(feature = "large-test")]
 fn phase3_rf_pearson_skewed_bins() {
     let Some(device) = try_device() else {
         eprintln!("scenic_gpu (Phase 3 RF skewed): no wgpu device -- skipping");
@@ -1371,9 +1341,10 @@ fn scenic_params_for_roundtrip() -> ScenicParams {
     }
 }
 
+/// Reader-backed GRN: GPU must track CPU at mean per-target Pearson >= 0.85.
 #[test]
 // Heavy: full pipeline, including writing a sparse binary fixture to temp_dir.
-#[cfg(feature = "large_scale_diagnostics")]
+#[cfg(feature = "large-test")]
 fn run_scenic_grn_gpu_roundtrip() {
     let Some(device) = try_device() else {
         eprintln!("skipping: no GPU device available");
@@ -1427,9 +1398,10 @@ fn run_scenic_grn_gpu_roundtrip() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// Same gate for the streaming path, which chunks genes off disk.
 #[test]
 // Heavy: full streaming pipeline, including a sparse binary fixture on disk.
-#[cfg(feature = "large_scale_diagnostics")]
+#[cfg(feature = "large-test")]
 fn run_scenic_grn_streaming_gpu_roundtrip() {
     let Some(device) = try_device() else {
         eprintln!("skipping: no GPU device available");
@@ -1533,9 +1505,10 @@ fn build_synthetic_scenic_csc() -> CompressedSparseData2<u16, f32> {
     }
 }
 
+/// Same gate for the in-memory CSC path, comparing the target rows only.
 #[test]
 // Heavy: full in-memory pipeline, CPU and GPU.
-#[cfg(feature = "large_scale_diagnostics")]
+#[cfg(feature = "large-test")]
 fn run_scenic_grn_in_memory_gpu_roundtrip() {
     let Some(device) = try_device() else {
         eprintln!("skipping: no GPU device available");
@@ -1573,6 +1546,7 @@ fn run_scenic_grn_in_memory_gpu_roundtrip() {
     );
 }
 
+/// Gradient boosting has no GPU learner: must error, not fall back.
 #[test]
 fn run_scenic_grn_in_memory_gpu_rejects_gbm() {
     let Some(device) = try_device() else {
@@ -1606,6 +1580,7 @@ fn run_scenic_grn_in_memory_gpu_rejects_gbm() {
     }
 }
 
+/// The same rejection on the reader path, ahead of any I/O.
 #[test]
 fn run_scenic_grn_gpu_rejects_gbm() {
     let Some(device) = try_device() else {
@@ -1613,7 +1588,8 @@ fn run_scenic_grn_gpu_rejects_gbm() {
         return;
     };
 
-    // File does not need to exist -- the GBM check runs before any I/O.
+    // The file has to exist: the learner check happens inside
+    // `run_scenic_grn_gpu`, so a real reader has to be built first.
     let path = std::env::temp_dir().join("bixverse_scenic_gpu_gbm_reject.bin");
     let path_str = path.to_str().unwrap();
     write_synthetic_scenic_file(path_str);

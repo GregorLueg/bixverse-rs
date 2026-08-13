@@ -833,15 +833,8 @@ mod tests {
     use super::*;
     use approx::assert_relative_eq;
 
-    /// Build a row-stochastic CSR chain from dense rows.
-    ///
-    /// ### Params
-    ///
-    /// * `rows` - Dense transition rows; each must already sum to one.
-    ///
-    /// ### Returns
-    ///
-    /// The CSR transition matrix with structural zeros dropped.
+    /// A CSR transition matrix from dense rows that already sum to one, with
+    /// structural zeros dropped.
     fn chain_from_rows(rows: &[Vec<f32>]) -> CompressedSparseData2<f32> {
         let n = rows.len();
         let mut indptr = vec![0u32];
@@ -859,6 +852,7 @@ mod tests {
         CompressedSparseData2::new_csr(&data, &indices, &indptr, None, (n, n))
     }
 
+    /// The waypoint chain is row-stochastic and no waypoint transitions to itself.
     #[test]
     fn test_transitions_rows_sum_to_one_and_have_no_self_loops() {
         // A short pseudotime-ordered line of waypoints.
@@ -879,6 +873,7 @@ mod tests {
         }
     }
 
+    /// Edges running far backwards in pseudotime are pruned out of the chain.
     #[test]
     fn test_transitions_prune_far_back_edges() {
         // Widely spaced pseudotime means backward edges cannot survive the
@@ -899,6 +894,7 @@ mod tests {
         }
     }
 
+    /// A `knn` below the bandwidth rank errors rather than silently degrading.
     #[test]
     fn test_transitions_reject_small_knn() {
         let wp_data: Vec<Vec<f32>> = (0..12).map(|i| vec![i as f32]).collect();
@@ -910,6 +906,7 @@ mod tests {
         ));
     }
 
+    /// Regression: an oversized `knn` fed the raw value to the bandwidth and stopped the pruning cutting.
     #[test]
     fn test_transitions_clamp_knn_to_the_waypoint_count() {
         // Asking for more neighbours than there are waypoints must behave
@@ -926,6 +923,7 @@ mod tests {
         assert_eq!(oversized.indices, exact.indices);
     }
 
+    /// The diagnostic names the waypoint count, not the `knn` the caller passed.
     #[test]
     fn test_transitions_reject_too_few_waypoints_for_the_bandwidth() {
         // Four waypoints cannot support a rank-`knn / 3 - 1` bandwidth however
@@ -944,6 +942,7 @@ mod tests {
         ));
     }
 
+    /// Mismatched waypoint and pseudotime lengths are refused up front.
     #[test]
     fn test_transitions_reject_a_waypoint_pseudotime_mismatch() {
         let wp_data: Vec<Vec<f32>> = (0..8).map(|i| vec![i as f32]).collect();
@@ -958,6 +957,7 @@ mod tests {
         ));
     }
 
+    /// Regression: a fully pruned row handed its mass to the nearest neighbour, suppressing the terminal state.
     #[test]
     fn test_fully_pruned_row_never_runs_backwards() {
         // Widely spaced pseudotime against tightly spaced coordinates, so every
@@ -987,6 +987,7 @@ mod tests {
         assert_eq!(&t.indices[lo..hi], &[last as u32]);
     }
 
+    /// The stationary distribution of a hand-solved two-state chain.
     #[test]
     fn test_stationary_of_two_state_chain() {
         // P(0->1) = 0.25, P(1->0) = 0.5; stationary is (2/3, 1/3).
@@ -998,16 +999,14 @@ mod tests {
         assert_relative_eq!(pi[1], 1.0 / 3.0, epsilon = 1e-9);
     }
 
+    /// Regression: per-row `f32` drift shifted the stationary ranks past the terminal-state cutoff.
     #[test]
     fn test_stationary_ignores_per_row_scale_drift() {
-        // Same chain as above with row 0 scaled up. That is the shape of the
-        // residue `build_waypoint_transitions` leaves behind when it normalises
-        // in `f32`, magnified until it is visible in a test: the drift is per
-        // row, so the per-pass L1 renormalisation cannot undo it. Without the
-        // `f64` rescale the answer is 0.6702 / 0.3298 against a true 2/3, and
-        // `detect_terminal_states` thresholds those ranks at
-        // `median + 3.719 * MAD`, where a shift of that size moves an arm tip
-        // across the cutoff and costs a whole branch.
+        // Row 0 scaled up, magnifying the per-row `f32` residue that the L1
+        // renormalisation cannot undo. Without the `f64` rescale the answer is
+        // 0.6702 / 0.3298 against a true 2/3, and `detect_terminal_states`
+        // thresholds those ranks at `median + 3.719 * MAD`, so a shift that size
+        // moves an arm tip across the cutoff and costs a whole branch.
         let drift = 1.05f32;
         let t = chain_from_rows(&[vec![0.75 * drift, 0.25 * drift], vec![0.5, 0.5]]);
 
@@ -1017,6 +1016,7 @@ mod tests {
         assert_relative_eq!(pi[1], 1.0 / 3.0, epsilon = 1e-9);
     }
 
+    /// The lazy chain converges where the raw one oscillates forever.
     #[test]
     fn test_stationary_survives_a_periodic_chain() {
         // A pure two-cycle: the raw chain never converges, the lazy one does.
@@ -1028,6 +1028,7 @@ mod tests {
         assert_relative_eq!(pi[1], 0.5, epsilon = 1e-9);
     }
 
+    /// Absorption probabilities on a hand-solved chain, with one-hot absorbing rows.
     #[test]
     fn test_absorption_on_a_three_state_chain() {
         // State 1 is transient with a 30/70 split onto absorbers 0 and 2.
@@ -1047,6 +1048,7 @@ mod tests {
         assert_relative_eq!(b[(2, 1)], 1.0, epsilon = 1e-6);
     }
 
+    /// A transient passing through another transient inherits its fate split.
     #[test]
     fn test_absorption_through_a_transient_cascade() {
         // 1 -> 2 -> {0, 3}: the analytic answer for state 1 matches state 2.
@@ -1064,6 +1066,7 @@ mod tests {
         assert_relative_eq!(b[(2, 0)], 0.25, epsilon = 1e-6);
     }
 
+    /// With every transient reachable, each row of the solve is a full distribution.
     #[test]
     fn test_absorption_rows_sum_to_one() {
         let t = chain_from_rows(&[
@@ -1081,6 +1084,7 @@ mod tests {
         }
     }
 
+    /// A transient that can never be absorbed is dropped and counted, not left to make `(I - Q)` singular.
     #[test]
     fn test_absorption_reports_a_stranded_transient() {
         // State 1 only ever loops back to itself, so it can never be absorbed.
@@ -1100,15 +1104,13 @@ mod tests {
         assert_relative_eq!(b[(0, 0)], 1.0, epsilon = 1e-6);
     }
 
+    /// Regression: rescaling surviving edges turned a 1:10 fate ratio into an even split.
     #[test]
     fn test_absorption_does_not_redistribute_mass_lost_to_a_strand() {
-        // 0 = A and 1 = B absorb; 2 = s is stranded on a self loop.
-        //   j (3): 0.9 -> s, 0.1 -> A
-        //   k (4): 1.0 -> B
-        //   i (5): 0.5 -> j, 0.5 -> k
-        // The true fates of i are A = 0.05 and B = 0.5, a 1:10 ratio. Rescaling
-        // the surviving edges so each row sums to one gives 0.5 / 0.5 instead,
-        // which is a plausible-looking answer to a different question.
+        // 0 and 1 absorb, 2 is stranded on a self loop, and state 5 leaks half
+        // its mass towards it. The true fates of state 5 are 0.05 and 0.5, a
+        // 1:10 ratio. Rescaling the surviving edges to sum to one gives
+        // 0.5 / 0.5, a plausible-looking answer to a different question.
         let t = chain_from_rows(&[
             vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             vec![0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
@@ -1131,6 +1133,7 @@ mod tests {
         assert_relative_eq!(b[(2, 1)], 0.0, epsilon = 1e-6);
     }
 
+    /// Leaking into a strand may put a row below one; nothing may put it above.
     #[test]
     fn test_absorption_rows_never_sum_above_one() {
         // Same chain as above: leaking into the strand means rows are allowed
@@ -1152,18 +1155,14 @@ mod tests {
         }
     }
 
+    /// Regression: `f32` weight residue broke the row-sum check on a well-conditioned solve.
     #[test]
     fn test_absorption_survives_a_chain_with_a_huge_absorption_time() {
-        // A birth-death chain biased *away* from its absorber. Expected
-        // absorption time grows as (back / forward)^length, so 30 states at
-        // 0.6 / 0.4 reaches roughly 1.9e5 steps.
-        //
-        // The weights are the point. `0.4f32 + 0.6f32` is 1.0000000298, not
-        // one, which is exactly the kind of residue `build_waypoint_transitions`
-        // leaves behind when it normalises in `f32`. Without the `f64` rescale
-        // in [absorption_probabilities] this row sums to 1.0606, sixty times
-        // ABSORPTION_ROW_SUM_TOL, on a solve whose residual is at machine
-        // precision.
+        // A birth-death chain biased away from its absorber: 30 states at
+        // 0.6 / 0.4 reaches roughly 1.9e5 expected steps. The weights are the
+        // point, since `0.4f32 + 0.6f32` is 1.0000000298. Without the `f64`
+        // rescale in [absorption_probabilities] the row sums to 1.0606, sixty
+        // times ABSORPTION_ROW_SUM_TOL, on a machine-precision solve.
         const N: usize = 31;
         let mut rows = vec![vec![0.0f32; N]; N];
         rows[0][1] = 1.0;
@@ -1183,6 +1182,7 @@ mod tests {
         }
     }
 
+    /// No terminal states is an error, not an empty result.
     #[test]
     fn test_absorption_rejects_an_empty_absorbing_set() {
         let t = chain_from_rows(&[vec![1.0, 0.0], vec![0.0, 1.0]]);
@@ -1193,6 +1193,7 @@ mod tests {
         ));
     }
 
+    /// Cell-level fates are the waypoint weights applied to the waypoint fates.
     #[test]
     fn test_projection_is_a_convex_combination() {
         // Two waypoints, three cells, weights split 0.25 / 0.75 per cell.
@@ -1207,6 +1208,7 @@ mod tests {
         }
     }
 
+    /// Branch entropy against hand-computed values, unnormalised rows included.
     #[test]
     fn test_entropy_matches_known_values() {
         let bp = Mat::<f32>::from_fn(3, 2, |i, j| match (i, j) {
@@ -1225,6 +1227,7 @@ mod tests {
         assert_relative_eq!(h[2], std::f32::consts::LN_2, epsilon = 1e-6);
     }
 
+    /// An all-zero row has no fates to be uncertain between, so its entropy is zero.
     #[test]
     fn test_entropy_of_an_all_zero_row_is_zero_not_nan() {
         let bp = Mat::<f32>::zeros(2, 3);
@@ -1235,6 +1238,7 @@ mod tests {
         assert_relative_eq!(h[0], 0.0, epsilon = 1e-6);
     }
 
+    /// Detection picks the late boundary of a line, not merely some boundary.
     #[test]
     fn test_detect_terminal_states_finds_the_late_end_of_a_line() {
         // A pseudotime-ordered line: the late end accumulates the mass and is
@@ -1251,6 +1255,7 @@ mod tests {
         assert_eq!(terminal, vec![29]);
     }
 
+    /// A zero MAD would let half the waypoints clear the cutoff, so it errors instead.
     #[test]
     fn test_detect_terminal_states_rejects_a_flat_stationary_spread() {
         // A uniform cycle: every waypoint carries the same stationary mass, so
@@ -1273,6 +1278,7 @@ mod tests {
         ));
     }
 
+    /// Regression: an exact-zero edge counted as reachable and hid the waypoint from the strand diagnostic.
     #[test]
     fn test_stranded_waypoints_count_a_zero_weight_route_out() {
         // State 1's only edge to the absorber carries an exact zero. Walking

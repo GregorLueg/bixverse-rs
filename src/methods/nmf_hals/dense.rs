@@ -133,15 +133,16 @@ mod tests {
     use super::*;
     use faer::Mat;
 
+    /// Shape is reported as (rows, cols) and the cached norm is the sum of squared entries.
     #[test]
     fn shape_and_sq_frob() {
         let v: Mat<f64> = Mat::from_fn(3, 2, |i, j| (i + j) as f64);
         let input = DenseInput::new(v.as_ref()).unwrap();
         assert_eq!(input.shape(), (3, 2));
-        // entries: 0,1,2,1,2,3 -> squares sum = 0+1+4+1+4+9 = 19
         assert!((input.sq_frob() - 19.0).abs() < 1e-12);
     }
 
+    /// A negative entry is refused at construction rather than silently factorised.
     #[test]
     fn rejects_negative() {
         let v: Mat<f64> = Mat::from_fn(2, 2, |i, _| if i == 0 { 1.0 } else { -1.0 });
@@ -149,6 +150,7 @@ mod tests {
         assert!(matches!(err, BixverseErrors::NmfNonNegativeViolated));
     }
 
+    /// Both NaN and infinity are refused at construction.
     #[test]
     fn rejects_non_finite() {
         let v: Mat<f64> = Mat::from_fn(2, 2, |i, _| if i == 0 { 1.0 } else { f64::NAN });
@@ -160,6 +162,7 @@ mod tests {
         assert!(matches!(err, BixverseErrors::NmfNonFinite));
     }
 
+    /// The faer-routed `W^T V` matches an explicit dot product reference, transpose included.
     #[test]
     fn wt_v_matches_reference() {
         let (m, n, k) = (4, 3, 2);
@@ -176,6 +179,7 @@ mod tests {
         }
     }
 
+    /// The faer-routed `V H^T` matches an explicit dot product reference, transpose included.
     #[test]
     fn v_ht_matches_reference() {
         let (m, n, k) = (4, 3, 2);
@@ -192,6 +196,7 @@ mod tests {
         }
     }
 
+    /// The truncated SVD returns k triplets of the right shape, descending and non-negative.
     #[test]
     fn top_k_svd_shapes_and_ordering() {
         let v_mat: Mat<f64> = Mat::from_fn(5, 4, |i, j| (i * 4 + j + 1) as f64);
@@ -204,6 +209,7 @@ mod tests {
         assert!(svd.s[1] >= 0.0);
     }
 
+    /// A k above min(m, n) errors instead of indexing past the available triplets.
     #[test]
     fn top_k_svd_rejects_too_large_k() {
         let v_mat: Mat<f64> = Mat::from_fn(3, 2, |i, j| (i + j + 1) as f64);

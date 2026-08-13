@@ -945,6 +945,7 @@ mod tests {
     // Tests //
     ///////////
 
+    /// Column-sum reduction against the host, past a single workgroup of rows.
     #[test]
     fn test_dense_column_sum() {
         let Some(device) = try_device() else { return };
@@ -959,6 +960,7 @@ mod tests {
         assert_vec_close(&got, &want, 1e-3);
     }
 
+    /// Same reduction with per-row weights, a separate kernel that can drift.
     #[test]
     fn test_dense_column_weighted_sum() {
         let Some(device) = try_device() else { return };
@@ -974,6 +976,7 @@ mod tests {
         assert_vec_close(&got, &want, 1e-3);
     }
 
+    /// Fused CSR forward product against the host, corrections and all.
     #[test]
     fn test_spmm_csr_forward() {
         let Some(device) = try_device() else { return };
@@ -1000,6 +1003,7 @@ mod tests {
         assert_vec_close(&got, &want, 1e-3);
     }
 
+    /// Transposed CSC product against the host, with non-trivial mu and sigma.
     #[test]
     fn test_spmm_csc_transpose() {
         let Some(device) = try_device() else { return };
@@ -1058,6 +1062,7 @@ mod tests {
         }
     }
 
+    /// A CSC operand into the CSR launcher must error, not be reinterpreted.
     #[test]
     fn test_spmm_csr_forward_layout_mismatch() {
         let Some(device) = try_device() else { return };
@@ -1100,6 +1105,7 @@ mod tests {
         ));
     }
 
+    /// The mirror guard: a CSR operand into the CSC transpose launcher.
     #[test]
     fn test_spmm_csc_transpose_layout_mismatch() {
         let Some(device) = try_device() else { return };

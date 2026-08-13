@@ -76,6 +76,10 @@ pub struct SingscorePermutationResult<T: BixverseFloat> {
 
 /// Theoretical score bounds.
 ///
+/// The two bounds coincide when the gene set covers the whole background
+/// (`gs_size == bg_size`), leaving a zero-width range. Callers must handle that;
+/// see [`score_at_sample`].
+///
 /// ### Params
 ///
 /// * `gs_size` - Gene set size.
@@ -165,6 +169,12 @@ fn build_unknown_dir_matrix<T: BixverseFloat>(ranks: &MatRef<T>) -> Mat<T> {
 
 /// Score one gene set against one sample.
 ///
+/// When the bounds have zero width (gene set == whole background) there is only
+/// one attainable mean rank, so the score is defined as the midpoint of the
+/// bounds, `0.5` before the offset. That is the limit of the normal formula as
+/// the gene set grows to cover the background, and it keeps the degenerate case
+/// finite instead of `0 / 0`.
+///
 /// ### Params
 ///
 /// * `col` - Rank column for one sample.
@@ -183,11 +193,16 @@ fn score_at_sample<T: BixverseFloat>(
     score_offset: f64,
 ) -> (T, T) {
     let (low, up) = bounds;
-    let range_inv = 1.0 / (up - low);
+    let range = up - low;
 
     let gs_ranks: Vec<T> = gene_set.iter().map(|&i| col[i]).collect();
     let mean = gs_ranks.iter().map(|&x| x.to_f64().unwrap()).sum::<f64>() / gs_ranks.len() as f64;
-    let score = T::from_f64((mean - low) * range_inv + score_offset).unwrap();
+    let normalised = if range > 0.0 {
+        (mean - low) / range
+    } else {
+        0.5
+    };
+    let score = T::from_f64(normalised + score_offset).unwrap();
     let disp = mad(&gs_ranks, Some(T::from_f64(MAD_SCALE).unwrap())).unwrap_or_else(T::zero);
 
     (score, disp)
@@ -361,6 +376,9 @@ pub fn rank_matrix_col_stable<T: BixverseFloat>(
 ///
 /// Scores one up set with an optional paired down set across all samples.
 ///
+/// A set covering the whole background collapses the theoretical bounds; those
+/// scores are defined as the bounds midpoint, `0.5` raw or `0.0` centred.
+///
 /// ### Params
 ///
 /// * `rank_matrix` - Ranked expression matrix (genes × samples).
@@ -533,7 +551,9 @@ pub fn singscore_multi<T: BixverseFloat>(
 /// replacement and scores them with the same settings as the real call.
 /// Computes per-sample empirical p-values as `max(1/B, mean(null > observed))`.
 /// Parameters `center_score`, `known_direction`, and `rank_type` must match the
-/// corresponding `singscore_single` call.
+/// corresponding `singscore_single` call. `total_size == n_genes` is permitted:
+/// every permutation then redraws the whole background, so all scores are the
+/// degenerate midpoint and every p-value is the `1/B` floor.
 ///
 /// ### Params
 ///
@@ -664,5 +684,367 @@ pub fn singscore_permutation_test<T: BixverseFloat>(
         observed_scores: observed.total_score,
         null_distribution,
         pvals,
+    }
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_relative_eq;
+
+    /// Build a genes x samples matrix from column-major data.
+    fn mat_from_cols(cols: &[Vec<f64>]) -> Mat<f64> {
+        Mat::from_fn(cols[0].len(), cols.len(), |i, j| cols[j][i])
+    }
+
+    /// A single sample whose ranks are 1..=4 in gene order.
+    fn ranks_1_to_4() -> Mat<f64> {
+        mat_from_cols(&[vec![1.0, 2.0, 3.0, 4.0]])
+    }
+
+    /// Pins that the top and bottom gene sets hit the theoretical bounds exactly.
+    /// With k = 2 and N = 4 the bounds are (1.5, 3.5), so mean rank 3.5 -> 1.0 and
+    /// mean rank 1.5 -> 0.0.
+    #[test]
+    fn singscore_extremes_hit_the_theoretical_bounds() {
+        let ranks = ranks_1_to_4();
+        let r = ranks.as_ref();
+
+        let top = singscore_single(&r, &[2, 3], None, false, true, SingscoreRankType::Standard);
+        let bottom = singscore_single(&r, &[0, 1], None, false, true, SingscoreRankType::Standard);
+
+        assert_relative_eq!(top.total_score[0], 1.0, epsilon = 1e-12);
+        assert_relative_eq!(bottom.total_score[0], 0.0, epsilon = 1e-12);
+        assert!(top.up_score.is_none());
+    }
+
+    /// Pins that `center_score` is a pure shift of -0.5 on the known-direction path.
+    #[test]
+    fn singscore_centering_shifts_by_exactly_half() {
+        let ranks = ranks_1_to_4();
+        let r = ranks.as_ref();
+
+        let top = singscore_single(&r, &[2, 3], None, true, true, SingscoreRankType::Standard);
+        let bottom = singscore_single(&r, &[0, 1], None, true, true, SingscoreRankType::Standard);
+
+        assert_relative_eq!(top.total_score[0], 0.5, epsilon = 1e-12);
+        assert_relative_eq!(bottom.total_score[0], -0.5, epsilon = 1e-12);
+    }
+
+    /// Pins the dispersion as the MAD scaled by [`MAD_SCALE`]: ranks [3, 4] have a
+    /// raw MAD of 0.5, so 0.5 * 1.482602218505602.
+    #[test]
+    fn singscore_dispersion_is_the_scaled_mad() {
+        let ranks = ranks_1_to_4();
+        let r = ranks.as_ref();
+
+        let res = singscore_single(&r, &[2, 3], None, false, true, SingscoreRankType::Standard);
+
+        assert_relative_eq!(
+            res.total_dispersion[0],
+            0.741_301_109_252_801,
+            epsilon = 1e-12
+        );
+    }
+
+    /// Pins the centred up + down total at exactly +/-1.0, the two extremes of the
+    /// paired score. Uncentred the same pair gives 2.0 and 0.0.
+    #[test]
+    fn singscore_up_and_down_total_hits_plus_minus_one_when_centred() {
+        let ranks = ranks_1_to_4();
+        let r = ranks.as_ref();
+
+        // k = 1, N = 4 => bounds (1.0, 4.0). Up on the top gene, down on the
+        // bottom one: up = 1.0, dn_raw = 0.0 => centred total 0.5 + 0.5 = 1.0.
+        let best = singscore_single(
+            &r,
+            &[3],
+            Some(&[0]),
+            true,
+            true,
+            SingscoreRankType::Standard,
+        );
+        let worst = singscore_single(
+            &r,
+            &[0],
+            Some(&[3]),
+            true,
+            true,
+            SingscoreRankType::Standard,
+        );
+        let best_raw = singscore_single(
+            &r,
+            &[3],
+            Some(&[0]),
+            false,
+            true,
+            SingscoreRankType::Standard,
+        );
+        let worst_raw = singscore_single(
+            &r,
+            &[0],
+            Some(&[3]),
+            false,
+            true,
+            SingscoreRankType::Standard,
+        );
+
+        assert_relative_eq!(best.total_score[0], 1.0, epsilon = 1e-12);
+        assert_relative_eq!(worst.total_score[0], -1.0, epsilon = 1e-12);
+        assert_relative_eq!(best_raw.total_score[0], 2.0, epsilon = 1e-12);
+        assert_relative_eq!(worst_raw.total_score[0], 0.0, epsilon = 1e-12);
+
+        // Paired scoring populates the components; a single gene has zero MAD.
+        assert_relative_eq!(best.up_score.unwrap()[0], 0.5, epsilon = 1e-12);
+        assert_relative_eq!(best.down_score.unwrap()[0], 0.5, epsilon = 1e-12);
+        assert_relative_eq!(best.total_dispersion[0], 0.0, epsilon = 1e-12);
+    }
+
+    /// Pins the unknown-direction transform and its bounds, and that
+    /// `center_score` is ignored on that path.
+    #[test]
+    fn singscore_unknown_direction_transforms_and_ignores_centering() {
+        let ranks = ranks_1_to_4();
+        let r = ranks.as_ref();
+
+        // median([1,2,3,4]) = 2.5, ceil -> 3, transform -> [2, 1, 0, 1].
+        // Bounds are calc_bounds(2 / 2, ceil(4 / 2)) = (1.0, 2.0), and the up set
+        // {2, 3} has transformed mean 0.5 => (0.5 - 1.0) / 1.0 = -0.5.
+        let uncentred =
+            singscore_single(&r, &[2, 3], None, false, false, SingscoreRankType::Standard);
+        let centred = singscore_single(&r, &[2, 3], None, true, false, SingscoreRankType::Standard);
+
+        assert_relative_eq!(uncentred.total_score[0], -0.5, epsilon = 1e-12);
+        assert_relative_eq!(centred.total_score[0], -0.5, epsilon = 1e-12);
+    }
+
+    /// Pins the stable-gene ranks: a stable gene never counts itself, so it tops
+    /// out at `n_stable / (n_stable + 1)`, while a gene above the whole panel
+    /// reaches exactly 1.0.
+    #[test]
+    fn rank_matrix_col_stable_never_reaches_one_for_a_stable_gene() {
+        let expr = mat_from_cols(&[vec![1.0, 2.0, 3.0, 10.0]]);
+        let ranks = rank_matrix_col_stable(&expr.as_ref(), &[0, 1, 2]);
+
+        // counts of stable values strictly below each gene: 0, 1, 2, 3; +1, / 4.
+        assert_relative_eq!(ranks[(0, 0)], 0.25, epsilon = 1e-12);
+        assert_relative_eq!(ranks[(1, 0)], 0.5, epsilon = 1e-12);
+        assert_relative_eq!(ranks[(2, 0)], 0.75, epsilon = 1e-12);
+        assert_relative_eq!(ranks[(3, 0)], 1.0, epsilon = 1e-12);
+        for i in 0..3 {
+            assert!(ranks[(i, 0)] < 1.0);
+            assert!(ranks[(i, 0)] > 0.0);
+        }
+    }
+
+    /// Pins that [`SingscoreRankType::Stable`] uses identity bounds, so the score
+    /// is the raw mean of the stable ranks.
+    #[test]
+    fn singscore_stable_rank_type_passes_the_mean_rank_through() {
+        let expr = mat_from_cols(&[vec![1.0, 2.0, 3.0, 10.0]]);
+        let ranks = rank_matrix_col_stable(&expr.as_ref(), &[0, 1, 2]);
+        let r = ranks.as_ref();
+
+        let top = singscore_single(&r, &[3], None, false, true, SingscoreRankType::Stable);
+        let pair = singscore_single(&r, &[0, 1], None, false, true, SingscoreRankType::Stable);
+
+        assert_relative_eq!(top.total_score[0], 1.0, epsilon = 1e-12);
+        assert_relative_eq!(pair.total_score[0], 0.375, epsilon = 1e-12);
+    }
+
+    /// Pins that the multi-set path agrees with the single-set path for every
+    /// combination of `known_direction` and `center_score`, with and without down
+    /// sets. Covers `score_one_set_par` against `score_one_set_serial`.
+    #[test]
+    fn singscore_multi_matches_singscore_single_across_settings() {
+        let ranks = mat_from_cols(&[
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            vec![6.0, 5.0, 4.0, 3.0, 2.0, 1.0],
+            vec![3.0, 1.0, 6.0, 2.0, 5.0, 4.0],
+        ]);
+        let r = ranks.as_ref();
+        let up_sets = vec![vec![0_usize, 1], vec![2_usize, 3, 4]];
+        let down_sets = vec![vec![4_usize, 5], vec![0_usize, 1]];
+
+        for known_direction in [true, false] {
+            for center_score in [true, false] {
+                for with_down in [true, false] {
+                    let dn: Option<&[Vec<usize>]> = if with_down { Some(&down_sets) } else { None };
+                    let multi = singscore_multi(
+                        &r,
+                        &up_sets,
+                        dn,
+                        center_score,
+                        known_direction,
+                        SingscoreRankType::Standard,
+                    );
+
+                    for (i, up) in up_sets.iter().enumerate() {
+                        let single = singscore_single(
+                            &r,
+                            up,
+                            if with_down {
+                                Some(down_sets[i].as_slice())
+                            } else {
+                                None
+                            },
+                            center_score,
+                            known_direction,
+                            SingscoreRankType::Standard,
+                        );
+                        for j in 0..3 {
+                            assert_relative_eq!(
+                                multi.scores[(i, j)],
+                                single.total_score[j],
+                                epsilon = 1e-12
+                            );
+                            assert_relative_eq!(
+                                multi.dispersions[(i, j)],
+                                single.total_dispersion[j],
+                                epsilon = 1e-12
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Pins that the permutation test is reproducible under a fixed seed and that
+    /// p-values never fall below the 1/B floor.
+    #[test]
+    fn singscore_permutation_test_is_deterministic_and_floored() {
+        let ranks = mat_from_cols(&[
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            vec![6.0, 5.0, 4.0, 3.0, 2.0, 1.0],
+        ]);
+        let r = ranks.as_ref();
+        let b = 16_usize;
+
+        let run = |seed: u64| {
+            singscore_permutation_test(
+                &r,
+                &[0, 1],
+                None,
+                false,
+                true,
+                SingscoreRankType::Standard,
+                b,
+                seed,
+            )
+        };
+
+        let a = run(42);
+        let c = run(42);
+
+        assert_eq!(a.null_distribution.shape(), (b, 2));
+        for j in 0..2 {
+            assert_relative_eq!(a.observed_scores[j], c.observed_scores[j], epsilon = 1e-12);
+            assert_relative_eq!(a.pvals[j], c.pvals[j], epsilon = 1e-12);
+            assert!(a.pvals[j] >= 1.0 / b as f64);
+            assert!(a.pvals[j] <= 1.0);
+            for i in 0..b {
+                assert_relative_eq!(
+                    a.null_distribution[(i, j)],
+                    c.null_distribution[(i, j)],
+                    epsilon = 1e-12
+                );
+            }
+        }
+    }
+
+    /// Regression: with `gs_size == bg_size` the standard bounds coincide, and the
+    /// old `1 / (up - low)` turned every score into a silent `NaN`.
+    #[test]
+    fn singscore_full_background_set_scores_the_bounds_midpoint() {
+        let ranks = mat_from_cols(&[vec![1.0, 2.0, 3.0, 4.0], vec![4.0, 3.0, 2.0, 1.0]]);
+        let r = ranks.as_ref();
+        let all = [0_usize, 1, 2, 3];
+
+        let raw = singscore_single(&r, &all, None, false, true, SingscoreRankType::Standard);
+        let centred = singscore_single(&r, &all, None, true, true, SingscoreRankType::Standard);
+        // The unknown-direction bounds collapse too: calc_bounds(2, 2) = (1.5, 1.5).
+        let unknown = singscore_single(&r, &all, None, false, false, SingscoreRankType::Standard);
+        let multi = singscore_multi(
+            &r,
+            &[all.to_vec()],
+            None,
+            false,
+            true,
+            SingscoreRankType::Standard,
+        );
+
+        for j in 0..2 {
+            assert_relative_eq!(raw.total_score[j], 0.5, epsilon = 1e-12);
+            assert_relative_eq!(centred.total_score[j], 0.0, epsilon = 1e-12);
+            assert_relative_eq!(unknown.total_score[j], 0.5, epsilon = 1e-12);
+            assert_relative_eq!(multi.scores[(0, j)], 0.5, epsilon = 1e-12);
+        }
+    }
+
+    /// Regression: the permutation test explicitly allows `total_size == n_genes`,
+    /// which used to hand back a `NaN` observed score and a `NaN` null.
+    #[test]
+    fn singscore_permutation_test_on_the_full_background_stays_finite() {
+        let ranks = mat_from_cols(&[vec![1.0, 2.0, 3.0, 4.0], vec![4.0, 3.0, 2.0, 1.0]]);
+        let r = ranks.as_ref();
+        let b = 8_usize;
+
+        let res = singscore_permutation_test(
+            &r,
+            &[0, 1, 2, 3],
+            None,
+            false,
+            true,
+            SingscoreRankType::Standard,
+            b,
+            11,
+        );
+
+        for j in 0..2 {
+            assert_relative_eq!(res.observed_scores[j], 0.5, epsilon = 1e-12);
+            assert_relative_eq!(res.pvals[j], 1.0 / b as f64, epsilon = 1e-12);
+            for i in 0..b {
+                assert_relative_eq!(res.null_distribution[(i, j)], 0.5, epsilon = 1e-12);
+            }
+        }
+    }
+
+    /// Pins the degenerate case where the gene set is the whole background: every
+    /// permutation redraws the same set, so the null collapses onto the observed
+    /// score and every p-value is the 1/B floor, here on the stable rank type where
+    /// the bounds are fixed to [0, 1] and never collapse.
+    #[test]
+    fn singscore_permutation_test_on_the_full_background_gives_the_floor_pval() {
+        let expr = mat_from_cols(&[vec![1.0, 2.0, 3.0, 10.0], vec![4.0, 3.0, 2.0, 1.0]]);
+        let ranks = rank_matrix_col_stable(&expr.as_ref(), &[0, 1, 2]);
+        let r = ranks.as_ref();
+        let b = 5_usize;
+
+        let res = singscore_permutation_test(
+            &r,
+            &[0, 1, 2, 3],
+            None,
+            false,
+            true,
+            SingscoreRankType::Stable,
+            b,
+            7,
+        );
+
+        for j in 0..2 {
+            assert_relative_eq!(res.pvals[j], 1.0 / b as f64, epsilon = 1e-12);
+            for i in 0..b {
+                assert_relative_eq!(
+                    res.null_distribution[(i, j)],
+                    res.observed_scores[j],
+                    epsilon = 1e-12
+                );
+            }
+        }
     }
 }

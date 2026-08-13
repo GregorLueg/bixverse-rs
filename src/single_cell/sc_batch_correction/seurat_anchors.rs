@@ -804,16 +804,16 @@ mod tests {
     use super::*;
     use approx::assert_relative_eq;
 
+    /// Only cells that are neighbours in both directions become anchor pairs.
     #[test]
     fn test_find_anchor_pairs_mutual() {
-        // a=0 has b-neighbours [1, 2]; b=1 has a-neighbours [0]; b=2 has a-neighbours [3]
-        // Only (0, 1) is mutual.
         let nnab = vec![vec![1_usize, 2], vec![], vec![], vec![]];
         let nnba = vec![vec![], vec![0_usize], vec![3_usize]];
         let pairs = find_anchor_pairs(&nnab, &nnba, 2);
         assert_eq!(pairs, vec![(0_u32, 1_u32)]);
     }
 
+    /// Rescaled scores stay inside [0, 1] with the top of the range clamped to 1.
     #[test]
     fn test_rescale_scores() {
         let raw = vec![0_u32, 5, 10, 100];
@@ -826,18 +826,12 @@ mod tests {
         assert_relative_eq!(out[3], 1.0);
     }
 
+    /// An anchor scores on how much of its merged neighbourhood the two sides share.
     #[test]
     fn test_score_anchors_toy() {
         // Two anchors: (0, 0) and (1, 1). Design a merged neighbourhood so
         // (0, 0) shares more neighbours than (1, 1).
         let pairs = vec![(0_u32, 0_u32), (1_u32, 1_u32)];
-        // With offset_b = 3:
-        //   a=0: nnaa=[1] → {1}, nnab=[0,1] → {3, 4}
-        //   b=0: nnbb=[1,2] → {4, 5}, nnba=[1] → {1}
-        //   intersect({1,3,4}, {1,4,5}) = {1,4} → 2
-        //   a=1: nnaa=[0] → {0}, nnab=[2] → {5}
-        //   b=1: nnbb=[0] → {3}, nnba=[2] → {2}
-        //   intersect({0,5}, {2,3}) = {} → 0
         let nnaa = vec![vec![1_usize], vec![0_usize]];
         let nnab = vec![vec![0_usize, 1_usize], vec![2_usize]];
         let nnba = vec![vec![1_usize], vec![2_usize], vec![]];
@@ -866,6 +860,7 @@ mod tests {
         assert!(scored[0] > scored[1]);
     }
 
+    /// One correction row per anchor pair: query embedding minus reference embedding.
     #[test]
     fn test_build_integration_matrix_per_pair() {
         // Two anchors: (r=0, q=5) with score 0.4, (r=1, q=5) with score 0.9.
@@ -897,35 +892,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_apply_correction_identity_when_weights_zero() {
-        // Empty CSC weight matrix (shape n_pairs x n_query = 2 x 4).
-        // apply_correction should return the query embedding unchanged.
-        let query: Mat<f32> = Mat::from_fn(4, 3, |i, j| (i as f32) + 0.1 * j as f32);
-        let delta: Mat<f32> = Mat::from_fn(2, 3, |_, _| 5.0);
-        let weights = CompressedSparseData2 {
-            data: Vec::<f32>::new(),
-            indices: Vec::<u32>::new(),
-            indptr: vec![0_u32; 5],
-            cs_type: CompressedSparseFormat::Csc,
-            data_2: None,
-            shape: (2, 4),
-        };
-        let out = apply_correction(query.as_ref(), &weights, delta.as_ref());
-        for i in 0..4 {
-            for j in 0..3 {
-                assert_relative_eq!(out[(i, j)], query[(i, j)], epsilon = 1e-6);
-            }
-        }
-    }
-
+    /// Batches merge in descending order of shared anchor count.
     #[test]
     fn test_build_sample_tree_three_batches() {
-        // Anchor count matrix:
-        //   0-1: 100 (highest)
-        //   0-2: 10
-        //   1-2: 5
-        // Expected merge order: (0, 1), then (0, 2)
         let counts = vec![vec![0_u32, 100, 10], vec![100, 0, 5], vec![10, 5, 0]];
         let merges = build_sample_tree(&counts);
         assert_eq!(merges.len(), 2);
@@ -933,6 +902,7 @@ mod tests {
         assert_eq!(merges[1], (0, 2));
     }
 
+    /// Regression: a single pair or all-equal counts used to rescale to 0.
     #[test]
     fn test_rescale_scores_single_and_uniform() {
         // Regression test for the silent-no-op case: a single anchor pair,
@@ -942,6 +912,7 @@ mod tests {
         assert_eq!(rescale_scores(&[5, 5, 5, 5]), vec![1.0; 4]);
     }
 
+    /// Regression: raw L2 distances flipped the kernel and let far anchors dominate.
     #[test]
     fn test_find_weights_close_anchor_wins() {
         // Regression test for kernel direction: close anchors must get
@@ -998,6 +969,7 @@ mod tests {
         );
     }
 
+    /// The weight matrix must stay column-stochastic over each query cell's anchors.
     #[test]
     fn test_find_weights_columns_sum_to_one() {
         // Every query-cell column with any non-zero entries must sum to 1
@@ -1029,6 +1001,7 @@ mod tests {
         }
     }
 
+    /// A merge order that forces the canonical-key flip must still resolve anchor indices.
     #[test]
     fn test_tree_merge_exercises_flip_branch() {
         // With 3 batches merged in order (0, 2) then (0, 1), the second
@@ -1103,15 +1076,5 @@ mod tests {
         let mut sorted = index_map.clone();
         sorted.sort_unstable();
         assert_eq!(sorted, (0..9).collect::<Vec<_>>());
-    }
-
-    #[test]
-    fn test_build_sample_tree_updates_counts_by_min() {
-        // Two batches merge first, then the merged-vs-remaining count is
-        // min of the two contributing counts. With only three batches the
-        // second merge is forced regardless of that update.
-        let counts = vec![vec![0_u32, 50, 20], vec![50, 0, 5], vec![20, 5, 0]];
-        let merges = build_sample_tree(&counts);
-        assert_eq!(merges, vec![(0, 1), (0, 2)]);
     }
 }

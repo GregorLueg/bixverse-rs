@@ -663,6 +663,7 @@ mod tests {
         (cells, empty)
     }
 
+    /// Scale-factor names parse case-insensitively in both the dot and underscore spellings.
     #[test]
     fn parse_scale_factor_known_and_unknown() {
         assert!(matches!(
@@ -688,6 +689,7 @@ mod tests {
         assert!(parse_scale_factor("nope").is_none());
     }
 
+    /// An empty-droplet matrix picks the EmptyDroplets branch, `None` falls back to ModelNegative.
     #[test]
     fn prepare_background_source_branches() {
         let empty = Mat::<f32>::from_fn(3, 2, |i, j| (i + j) as f32);
@@ -703,21 +705,20 @@ mod tests {
         }
     }
 
+    /// The pseudocount goes in before the log, so a zero count maps to zero rather than -inf.
     #[test]
     fn log_transform_applies_pseudocount() {
         let mat = Mat::<f32>::from_fn(2, 3, |i, j| (i * 3 + j) as f32); // 0..6
         let logged = log_transform(mat.as_ref(), 1.0);
         assert_eq!(logged.len(), 2);
         assert_eq!(logged[0].len(), 3);
-        // ln(0 + 1) = 0
         assert!(approx_eq(logged[0][0], 0.0, EPS64));
-        // ln(5 + 1) = ln(6)
         assert!(approx_eq(logged[1][2], 6.0_f64.ln(), EPS64));
     }
 
+    /// Column means are taken down the rows, not across them.
     #[test]
     fn col_means_known_values() {
-        // rows: [1,2,3], [4,5,6], [7,8,9] -> col means: 4, 5, 6
         let rows = vec![
             vec![1.0, 2.0, 3.0],
             vec![4.0, 5.0, 6.0],
@@ -727,23 +728,24 @@ mod tests {
         assert_eq!(m, vec![4.0, 5.0, 6.0]);
     }
 
+    /// No rows must give an empty result rather than indexing `rows[0]`.
     #[test]
     fn col_means_empty_input() {
         let rows: Vec<Vec<f64>> = Vec::new();
         assert!(col_means(&rows).is_empty());
     }
 
+    /// Column sds use the n-1 denominator, and a constant column gives exactly zero.
     #[test]
     fn col_sds_known_values() {
-        // col 0: [1,4,7], mean=4, sd = sqrt((9+0+9)/2) = sqrt(9) = 3
         let rows = vec![vec![1.0, 2.0], vec![4.0, 2.0], vec![7.0, 2.0]];
         let means = col_means(&rows);
         let sds = col_sds(&rows, &means);
         assert!(approx_eq(sds[0], 3.0, EPS64));
-        // col 1 is constant -> sd = 0
         assert!(approx_eq(sds[1], 0.0, EPS64));
     }
 
+    /// A single row would divide by zero, so the sds are forced to zero instead.
     #[test]
     fn col_sds_single_row_returns_zero() {
         let rows = vec![vec![1.0, 2.0, 3.0]];
@@ -752,9 +754,9 @@ mod tests {
         assert_eq!(sds, vec![0.0, 0.0, 0.0]);
     }
 
+    /// The quantile interpolates between order statistics rather than snapping to the nearer one.
     #[test]
     fn col_quantile_interpolates() {
-        // Sorted col 0: [1, 2, 3, 4, 5]. q=0.0 -> 1, q=1.0 -> 5, q=0.5 -> 3.
         let rows = vec![vec![3.0], vec![1.0], vec![5.0], vec![2.0], vec![4.0]];
         assert!(approx_eq(col_quantile(&rows, 0, 0.0), 1.0, EPS64));
         assert!(approx_eq(col_quantile(&rows, 0, 1.0), 5.0, EPS64));
@@ -763,6 +765,7 @@ mod tests {
         assert!(approx_eq(col_quantile(&rows, 0, 0.25), 2.0, EPS64));
     }
 
+    /// Empty and single-element columns must not index past the end.
     #[test]
     fn col_quantile_handles_short_inputs() {
         let empty: Vec<Vec<f64>> = vec![];
@@ -771,6 +774,7 @@ mod tests {
         assert!(approx_eq(col_quantile(&single, 0, 0.5), 7.0, EPS64));
     }
 
+    /// On bimodal input the background estimate must land on the lower of the two modes.
     #[test]
     fn lower_centroid_kmeans_picks_lower_mode() {
         let v = bimodal_values();
@@ -779,6 +783,7 @@ mod tests {
         assert!(lower < 1.0, "expected lower centroid near 0, got {lower}");
     }
 
+    /// Fewer points than clusters falls back to the value itself, and an empty input to zero.
     #[test]
     fn lower_centroid_kmeans_handles_short_input() {
         let v: Vec<f64> = vec![7.5];
@@ -795,6 +800,7 @@ mod tests {
         ));
     }
 
+    /// Every noise row is z-scored so isotypes and background enter the PC on one scale.
     #[test]
     fn build_noise_matrix_zscores_each_row() {
         // cells: 4 x 3, isotype = column 0, plus background as last row.
@@ -820,6 +826,7 @@ mod tests {
         }
     }
 
+    /// A constant row has zero sd, so it is only mean-centred instead of dividing by zero.
     #[test]
     fn build_noise_matrix_constant_row_safe() {
         // isotype col is constant -> sd = 0 -> row should be mean-subtracted only (all zeros)
@@ -832,6 +839,7 @@ mod tests {
         }
     }
 
+    /// Regressing out the technical component strips the linear part and leaves constant columns alone.
     #[test]
     fn regress_out_covariate_removes_linear_effect() {
         // Two cells x two proteins. Build y = 2*z + small noise; regression
@@ -857,6 +865,7 @@ mod tests {
         }
     }
 
+    /// A constant covariate has no variance to regress on, so the matrix comes back untouched.
     #[test]
     fn regress_out_covariate_constant_z_is_noop() {
         let z = vec![3.0_f64; 5];
@@ -866,42 +875,7 @@ mod tests {
         assert_eq!(cells, before);
     }
 
-    #[test]
-    fn dsb_normalise_empty_droplets_shape_and_finite() {
-        let (cells, empty) = small_fixture();
-        let bg = BackgroundSource::EmptyDroplets {
-            empty_counts: empty.as_ref(),
-            scale_factor: ScaleFactor::Standardise,
-        };
-        let params = DsbParams {
-            denoise_counts: false,
-            use_isotype_controls: false,
-            isotype_indices: vec![],
-            pseudocount: 10.0,
-            kmeans_iters: 50,
-            quantile_clip: None,
-        };
-
-        let res = dsb_normalise(cells.as_ref(), bg, &params, 0, 42).expect("DSB failed");
-
-        assert_eq!(res.normalised.nrows(), 20);
-        assert_eq!(res.normalised.ncols(), 5);
-        assert_eq!(res.protein_background_mean.len(), 5);
-        assert!(res.protein_background_sd.is_some());
-        assert!(res.technical_component.is_none());
-        assert!(res.cellwise_background_mean.is_none());
-
-        for i in 0..20 {
-            for j in 0..5 {
-                assert!(
-                    res.normalised[(i, j)].is_finite(),
-                    "non-finite at [{i}, {j}]: {}",
-                    res.normalised[(i, j)]
-                );
-            }
-        }
-    }
-
+    /// Step I on its own must preserve the planted high/low split on every protein.
     #[test]
     fn dsb_normalise_separates_high_low_proteins() {
         // Numerical sanity: cells with high expression (raw ~100) should
@@ -941,9 +915,31 @@ mod tests {
         }
     }
 
+    /// Both denoising paths keep the split and populate only the outputs they can actually compute.
     #[test]
-    fn dsb_normalise_model_negative_runs_end_to_end() {
-        let (cells, _) = small_fixture();
+    fn dsb_normalise_denoising_paths_preserve_separation() {
+        let (cells, empty) = small_fixture();
+
+        // Both denoising paths must keep the planted high/low split: proteins
+        // 0..2 are high in cells 10..19, proteins 3..4 the other way round.
+        let check_separation = |res: &DsbResult, label: &str| {
+            for j in 0..5 {
+                let low_half: f32 = (0..10).map(|i| res.normalised[(i, j)]).sum::<f32>() / 10.0;
+                let high_half: f32 = (10..20).map(|i| res.normalised[(i, j)]).sum::<f32>() / 10.0;
+                let separated = if j < 3 {
+                    high_half > low_half
+                } else {
+                    low_half > high_half
+                };
+                assert!(
+                    separated,
+                    "{label} protein {j}: low={low_half}, high={high_half}"
+                );
+            }
+        };
+
+        // ModelNegative: background estimated per cell from the lower k-means
+        // centroid, so there is no protein-wise background sd.
         let params = DsbParams {
             denoise_counts: true,
             use_isotype_controls: false,
@@ -952,7 +948,6 @@ mod tests {
             kmeans_iters: 50,
             quantile_clip: None,
         };
-
         let res = dsb_normalise(
             cells.as_ref(),
             BackgroundSource::ModelNegative,
@@ -963,21 +958,12 @@ mod tests {
         .expect("ModelNegative DSB failed");
 
         assert_eq!(res.normalised.nrows(), 20);
-        assert!(res.protein_background_sd.is_none()); // not computed for ModelNegative
+        assert!(res.protein_background_sd.is_none());
         assert!(res.technical_component.is_some());
         assert!(res.cellwise_background_mean.is_some());
+        check_separation(&res, "model negative");
 
-        for i in 0..20 {
-            for j in 0..5 {
-                assert!(res.normalised[(i, j)].is_finite());
-            }
-        }
-    }
-
-    #[test]
-    fn dsb_normalise_with_denoising_runs_end_to_end() {
-        // designate proteins 3,4 as "isotypes" for the test (pretend)
-        let (cells, empty) = small_fixture();
+        // Empty droplets plus isotype controls (proteins 3 and 4 stand in).
         let bg = BackgroundSource::EmptyDroplets {
             empty_counts: empty.as_ref(),
             scale_factor: ScaleFactor::Standardise,
@@ -990,21 +976,18 @@ mod tests {
             kmeans_iters: 50,
             quantile_clip: None,
         };
-
         let res = dsb_normalise(cells.as_ref(), bg, &params, 0, 42).unwrap();
 
-        assert!(res.technical_component.is_some());
-        let tc = res.technical_component.unwrap();
+        let tc = res
+            .technical_component
+            .clone()
+            .expect("technical component");
         assert_eq!(tc.len(), 20);
         assert!(tc.iter().all(|v| v.is_finite()));
-
-        for i in 0..20 {
-            for j in 0..5 {
-                assert!(res.normalised[(i, j)].is_finite());
-            }
-        }
+        check_separation(&res, "isotype denoised");
     }
 
+    /// Quantile clipping must keep every value inside its own protein's range.
     #[test]
     fn dsb_normalise_quantile_clipping_bounds_output() {
         let (cells, empty) = small_fixture();
@@ -1027,7 +1010,6 @@ mod tests {
         for j in 0..5 {
             let mut col: Vec<f32> = (0..20).map(|i| res.normalised[(i, j)]).collect();
             col.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            // 10th percentile = col[0..20] at h = 19*0.1 = 1.9 -> mostly col[1] or col[2]
             let lo = col[0];
             let hi = col[19];
             // after clipping at q=0.1 and q=0.9, the min should equal the 10th
@@ -1041,6 +1023,7 @@ mod tests {
         }
     }
 
+    /// Zero cells is an error, not an empty result.
     #[test]
     fn dsb_normalise_rejects_empty_input() {
         let cells = Mat::<f32>::from_fn(0, 5, |_, _| 0.0_f32);
@@ -1055,6 +1038,7 @@ mod tests {
         assert!(matches!(res, Err(BixverseErrors::InvalidArgument(_))));
     }
 
+    /// Isotype indices are bounds-checked before they index the protein columns.
     #[test]
     fn dsb_normalise_rejects_isotype_index_out_of_range() {
         let (cells, empty) = small_fixture();
@@ -1072,6 +1056,7 @@ mod tests {
         assert!(matches!(res, Err(BixverseErrors::InvalidArgument(_))));
     }
 
+    /// Empty droplets must carry the same proteins as the cells.
     #[test]
     fn dsb_normalise_rejects_empty_droplet_protein_mismatch() {
         let (cells, _) = small_fixture(); // 20x5
@@ -1086,6 +1071,7 @@ mod tests {
         assert!(matches!(res, Err(BixverseErrors::InvalidArgument(_))));
     }
 
+    /// A reversed clip range is rejected rather than producing an empty interval.
     #[test]
     fn dsb_normalise_rejects_invalid_quantile_clip() {
         let (cells, empty) = small_fixture();

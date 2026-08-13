@@ -391,10 +391,11 @@ where
     for (key, value) in level_data_final {
         let gene_set_length = value.len();
         let hits = target_set.intersection(value).count();
-        let q = hits as i64 - 1;
-        let pval: T = if q > 0 {
+        // A single hit gives q = 0, which is P(X >= 1) and perfectly meaningful;
+        // only zero hits is the degenerate case.
+        let pval: T = if hits > 0 {
             hypergeom_pval(
-                q as usize,
+                hits - 1,
                 gene_set_length,
                 gene_universe_length - gene_set_length,
                 trials,
@@ -406,7 +407,9 @@ where
             hits,
             gene_set_length - hits,
             trials - hits,
-            gene_universe_length - gene_set_length - trials + hits,
+            // Grouped so the addition lands before the subtractions, otherwise
+            // `N - m - k` underflows on a large target set.
+            (gene_universe_length + hits) - gene_set_length - trials,
         );
         go_ids.push(key.clone());
         hits_vec.push(hits);
@@ -550,5 +553,150 @@ where
         ge_zero: level_res.ge_zero,
         le_zero: level_res.le_zero,
         leading_edge: leading_edge_indices,
+    }
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_relative_eq;
+
+    fn genes(range: std::ops::RangeInclusive<usize>) -> FxHashSet<String> {
+        range.map(|i| format!("g{i}")).collect()
+    }
+
+    /// `GO:B` (g1..g5) sits one level below `GO:A` (g1..g10), so eliminating
+    /// `GO:B` must strip its genes from `GO:A`.
+    fn two_level_ontology() -> (GeneMap, AncestorMap, LevelMap) {
+        let mut gene_map = GeneMap::default();
+        gene_map.insert("GO:A".to_string(), genes(1..=10));
+        gene_map.insert("GO:B".to_string(), genes(1..=5));
+
+        let mut ancestors = AncestorMap::default();
+        ancestors.insert("GO:B".to_string(), vec!["GO:A".to_string()]);
+
+        let mut levels = LevelMap::default();
+        levels.insert("1".to_string(), vec!["GO:A".to_string()]);
+        levels.insert("2".to_string(), vec!["GO:B".to_string()]);
+
+        (gene_map, ancestors, levels)
+    }
+
+    /// The accessors are plain map lookups and must tolerate unknown ids.
+    #[test]
+    fn gene_ontology_accessors_ignore_unknown_terms() {
+        let (gene_map, ancestors, levels) = two_level_ontology();
+        let mut go = GeneOntology::new(gene_map, &ancestors, &levels);
+
+        assert_eq!(go.get_genes(&"GO:A".to_string()).unwrap().len(), 10);
+        assert!(go.get_genes(&"GO:MISSING".to_string()).is_none());
+        assert_eq!(go.get_level_ids(&"2".to_string()).unwrap(), &vec!["GO:B"]);
+        assert_eq!(
+            go.get_genes_list(&["GO:A".to_string(), "GO:MISSING".to_string()])
+                .len(),
+            1
+        );
+
+        go.remove_genes(&["GO:A".to_string()], &genes(1..=2));
+        assert_eq!(go.get_genes(&"GO:A".to_string()).unwrap().len(), 8);
+
+        // A term with no entry must not panic.
+        go.remove_genes(&["GO:MISSING".to_string()], &genes(1..=2));
+    }
+
+    /// The elim algorithm itself. Processing the lower level first must strip
+    /// `GO:B`'s five genes out of its ancestor, so the same target set then
+    /// scores zero hits against `GO:A`. Every assertion here is a whole number.
+    #[test]
+    fn process_ontology_level_eliminates_genes_from_ancestors() {
+        let (gene_map, ancestors, levels) = two_level_ontology();
+        let mut go = GeneOntology::new(gene_map, &ancestors, &levels);
+        let target = genes(1..=5);
+
+        let lower: GoElimLevelResults<f64> =
+            process_ontology_level(&target, &"2".to_string(), &mut go, 3, 100, 0.05);
+
+        assert_eq!(lower.go_ids, vec!["GO:B"]);
+        assert_eq!(lower.hits, vec![5]);
+        assert!(lower.pvals[0] < 0.05, "GO:B should be significant");
+
+        // The elimination fired.
+        let remaining = go.get_genes(&"GO:A".to_string()).unwrap();
+        assert_eq!(remaining.len(), 5);
+        assert!(remaining.iter().all(|g| !target.contains(g)));
+
+        let upper: GoElimLevelResults<f64> =
+            process_ontology_level(&target, &"1".to_string(), &mut go, 3, 100, 0.05);
+
+        assert_eq!(upper.hits, vec![0]);
+        assert_relative_eq!(upper.pvals[0], 1.0, epsilon = 1e-12);
+    }
+
+    /// With the threshold at zero nothing clears it, so the ancestor keeps all
+    /// ten genes and still sees the full overlap. This is the control for the
+    /// test above.
+    #[test]
+    fn process_ontology_level_without_elimination_leaves_ancestors_intact() {
+        let (gene_map, ancestors, levels) = two_level_ontology();
+        let mut go = GeneOntology::new(gene_map, &ancestors, &levels);
+        let target = genes(1..=5);
+
+        let _: GoElimLevelResults<f64> =
+            process_ontology_level(&target, &"2".to_string(), &mut go, 3, 100, 0.0);
+
+        assert_eq!(go.get_genes(&"GO:A".to_string()).unwrap().len(), 10);
+
+        let upper: GoElimLevelResults<f64> =
+            process_ontology_level(&target, &"1".to_string(), &mut go, 3, 100, 0.0);
+
+        assert_eq!(upper.hits, vec![5]);
+    }
+
+    /// Terms below `min_genes` are dropped before testing, so nothing is
+    /// eliminated either.
+    #[test]
+    fn process_ontology_level_skips_terms_below_min_genes() {
+        let (gene_map, ancestors, levels) = two_level_ontology();
+        let mut go = GeneOntology::new(gene_map, &ancestors, &levels);
+
+        let res: GoElimLevelResults<f64> =
+            process_ontology_level(&genes(1..=5), &"2".to_string(), &mut go, 6, 100, 0.05);
+
+        assert!(res.go_ids.is_empty());
+        assert_eq!(go.get_genes(&"GO:A".to_string()).unwrap().len(), 10);
+    }
+
+    /// BH runs across every level at once, not per level. For p-values
+    /// [0.001, 0.5] and [0.02, 0.9] over n = 4 this gives, in input order,
+    /// [0.004, 2/3, 0.04, 0.9]; matches `p.adjust(..., "BH")` in R.
+    #[test]
+    fn finalise_go_res_applies_bh_across_all_levels() {
+        let level_a = GoElimLevelResults::<f64> {
+            go_ids: vec!["GO:1".to_string(), "GO:2".to_string()],
+            pvals: vec![0.001, 0.5],
+            odds_ratios: vec![8.0, 1.0],
+            hits: vec![10, 1],
+            gene_set_lengths: vec![20, 5],
+        };
+        let level_b = GoElimLevelResults::<f64> {
+            go_ids: vec!["GO:3".to_string(), "GO:4".to_string()],
+            pvals: vec![0.02, 0.9],
+            odds_ratios: vec![3.0, 1.0],
+            hits: vec![5, 2],
+            gene_set_lengths: vec![10, 8],
+        };
+
+        let all = finalise_go_res(&[level_a.clone(), level_b.clone()], None, None);
+        assert_eq!(all.go_ids, vec!["GO:1", "GO:2", "GO:3", "GO:4"]);
+        for (g, w) in all.fdr.iter().zip([0.004, 2.0 / 3.0, 0.04, 0.9]) {
+            assert_relative_eq!(*g, w, epsilon = 1e-12);
+        }
+
+        let filtered = finalise_go_res(&[level_a, level_b], Some(4), Some(0.05));
+        assert_eq!(filtered.go_ids, vec!["GO:1", "GO:3"]);
     }
 }

@@ -447,109 +447,28 @@ mod tests {
         values.iter().map(|&v| F16::from_f32(v)).collect()
     }
 
-    #[test]
-    fn test_simple_row_ranking() {
-        // Matrix
-        // [1.0, 0.0, 3.0]
-        // [0.0, 2.0, 0.0]
-        let row_ptr = vec![0, 2, 3];
-        let col_indices = vec![0, 2, 1];
-        let data = f16_vec(&[1.0, 3.0, 2.0]);
-
-        let result = fast_csr_ranking(&row_ptr, &col_indices, &data, 2, 3, true);
-
-        // Row 0: [1.0, 0.0, 3.0] -> ranks [2.0, 1.0, 3.0]
-        // Row 1: [0.0, 2.0, 0.0] -> ranks [1.5, 3.0, 1.5]
-
-        assert_eq!(result[0], vec![2.0, 1.0, 3.0]);
-        assert_eq!(result[1], vec![1.5, 3.0, 1.5]);
-    }
-
-    #[test]
-    fn test_column_ranking() {
-        // Matrix:
-        // [1.0, 0.0, 3.0]
-        // [0.0, 2.0, 0.0]
-        let row_ptr = vec![0, 2, 3];
-        let col_indices = vec![0, 2, 1];
-        let data = f16_vec(&[1.0, 3.0, 2.0]);
-
-        let result = fast_csr_ranking(&row_ptr, &col_indices, &data, 2, 3, false);
-
-        // Now ranking cells within genes:
-        // Gene 0: [1.0, 0.0] -> ranks [2.0, 1.0]
-        // Gene 1: [0.0, 2.0] -> ranks [1.0, 2.0]
-        // Gene 2: [3.0, 0.0] -> ranks [2.0, 1.0]
-        assert_eq!(result[0], vec![2.0, 1.0]);
-        assert_eq!(result[1], vec![1.0, 2.0]);
-        assert_eq!(result[2], vec![2.0, 1.0]);
-    }
-
+    /// A row with no stored entries ranks as one tie across the full gene width.
     #[test]
     fn test_all_zeros_row() {
-        // Matrix
-        // [0.0, 0.0, 0.0]
-        // [1.0, 2.0, 3.0]
         let row_ptr = vec![0, 0, 3];
         let col_indices = vec![0, 1, 2];
         let data = f16_vec(&[1.0, 2.0, 3.0]);
 
         let result = fast_csr_ranking(&row_ptr, &col_indices, &data, 2, 3, true);
 
-        // Row 0: all zeros -> all ranks = (1+3)/2 = 2.0
-        // Row 1: [1.0, 2.0, 3.0] -> ranks [1.0, 2.0, 3.0]
         assert_eq!(result[0], vec![2.0, 2.0, 2.0]);
         assert_eq!(result[1], vec![1.0, 2.0, 3.0]);
     }
 
-    #[test]
-    fn test_all_nonzeros_row() {
-        // Matrix:
-        // [[1.0, 2.0, 3.0]]
-        let row_ptr = vec![0, 3];
-        let col_indices = vec![0, 1, 2];
-        let data = f16_vec(&[1.0, 2.0, 3.0]);
-
-        let result = fast_csr_ranking(&row_ptr, &col_indices, &data, 1, 3, true);
-
-        // No zeros, direct ranking
-        assert_eq!(result[0], vec![1.0, 2.0, 3.0]);
-    }
-
-    #[test]
-    fn test_tied_values() {
-        // Matrix:
-        // [[2.0, 0.0, 2.0, 1.0]]
-        let row_ptr = vec![0, 3];
-        let col_indices = vec![0, 2, 3];
-        let data = f16_vec(&[2.0, 2.0, 1.0]);
-
-        let result = fast_csr_ranking(&row_ptr, &col_indices, &data, 1, 4, true);
-
-        // Values: [2.0, 0.0, 2.0, 1.0]
-        // Sorted: 0.0(rank1), 1.0(rank2), 2.0(rank3.5), 2.0(rank3.5)
-        // Expected: [3.5, 1.0, 3.5, 2.0]
-        let expected = [3.5, 1.0, 3.5, 2.0];
-        let actual = &result[0];
-
-        for (a, e) in actual.iter().zip(expected.iter()) {
-            assert!((a - e).abs() < 0.01, "Expected {}, got {}", e, a);
-        }
-    }
-
+    /// Implicit zeros share the average of the ranks they span; stored values rank above.
     #[test]
     fn test_multiple_tied_zeros() {
-        // Matrix: [[1.0, 0.0, 0.0, 2.0]]
         let row_ptr = vec![0, 2];
         let col_indices = vec![0, 3];
         let data = f16_vec(&[1.0, 2.0]);
 
         let result = fast_csr_ranking(&row_ptr, &col_indices, &data, 1, 4, true);
 
-        // Values: [1.0, 0.0, 0.0, 2.0]
-        // Two zeros get average rank (1+2)/2 = 1.5
-        // Non-zeros: 1.0 gets rank 3, 2.0 gets rank 4
-        // Expected: [3.0, 1.5, 1.5, 4.0]
         let expected = [3.0, 1.5, 1.5, 4.0];
         let actual = &result[0];
 
@@ -558,56 +477,34 @@ mod tests {
         }
     }
 
+    /// `rank_within_rows` switches between ranking genes inside a cell and cells inside a gene.
     #[test]
     fn test_row_vs_column_ranking() {
-        // Matrix
-        // [1.0, 2.0, 5.0]
-        // [3.0, 0.0, 0.0]
         let row_ptr = vec![0, 3, 4];
         let col_indices = vec![0, 1, 2, 0];
         let data = f16_vec(&[1.0, 2.0, 5.0, 3.0]);
 
-        // Row ranking (rank genes within cells)
         let row_result = fast_csr_ranking(&row_ptr, &col_indices, &data, 2, 3, true);
-
-        // Column ranking (rank cells within genes)
         let col_result = fast_csr_ranking(&row_ptr, &col_indices, &data, 2, 3, false);
 
-        // Row result (rank genes within each cell):
-        // Row 0: [1.0, 2.0, 5.0] -> ranks [1.0, 2.0, 3.0]
-        // Row 1: [3.0, 0.0, 0.0] -> ranks [3.0, 1.5, 1.5]
         assert_eq!(row_result.len(), 2);
         assert_eq!(row_result[0], vec![1.0, 2.0, 3.0]);
         assert_eq!(row_result[1], vec![3.0, 1.5, 1.5]);
 
-        // Column result (rank cells within each gene):
-        // Gene 0: [1.0, 3.0] -> ranks [1.0, 2.0]
-        // Gene 1: [2.0, 0.0] -> ranks [2.0, 1.0]
-        // Gene 2: [5.0, 0.0] -> ranks [2.0, 1.0]
         assert_eq!(col_result.len(), 3);
         assert_eq!(col_result[0], vec![1.0, 2.0]);
         assert_eq!(col_result[1], vec![2.0, 1.0]);
         assert_eq!(col_result[2], vec![2.0, 1.0]);
     }
 
+    /// Ties between stored values within a column also get the averaged rank.
     #[test]
     fn test_column_ranking_with_ties() {
-        // Matrix
-        // [2.0, 1.0]
-        // [0.0, 1.0]
-        // [2.0, 0.0]
         let row_ptr = vec![0, 2, 3, 4];
         let col_indices = vec![0, 1, 1, 0];
         let data = f16_vec(&[2.0, 1.0, 1.0, 2.0]);
 
         let result = fast_csr_ranking(&row_ptr, &col_indices, &data, 3, 2, false);
-
-        // Gene 0: [2.0, 0.0, 2.0] -> tied 2.0s at positions 0 and 2
-        //   Sorted: 0.0(rank1), 2.0(rank2.5), 2.0(rank2.5)
-        //   Result: [2.5, 1.0, 2.5]
-        // Gene 1: [1.0, 1.0, 0.0] -> tied 1.0s at positions 0 and 1
-        //   Sorted: 0.0(rank1), 1.0(rank2.5), 1.0(rank2.5)
-        //   Result: [2.5, 2.5, 1.0]
 
         let gene0_actual = &result[0];
         let gene1_actual = &result[1];

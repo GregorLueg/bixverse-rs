@@ -88,6 +88,7 @@ mod tests {
     use approx::assert_relative_eq;
     use faer::Mat;
 
+    /// Zero distance is unit covariance whatever the length scale.
     #[test]
     fn test_matern52_unit_at_zero() {
         for ls in [0.1, 1.0, 7.5] {
@@ -107,6 +108,7 @@ mod tests {
         }
     }
 
+    /// A valid covariance decays monotonically; the growing polynomial must not win.
     #[test]
     fn test_matern52_is_monotone_decreasing() {
         let ls = 0.8_f64;
@@ -132,6 +134,7 @@ mod tests {
         }
     }
 
+    /// The fill must agree with the scalar kernel entry by entry, indices and all.
     #[test]
     fn test_fill_cross_matches_scalar_and_is_symmetric_on_self() {
         let a = vec![0.0_f64, 0.3, 0.9, 2.0];

@@ -231,6 +231,7 @@ fn full_params() -> MetacellsParams {
 // Tests //
 ///////////
 
+/// Downsampling caps every library at the target and leaves the sparsity pattern alone.
 #[test]
 fn stage1_downsample_caps_libraries_and_preserves_sparsity() {
     let mut fix = build_fixture();
@@ -268,6 +269,7 @@ fn stage1_downsample_caps_libraries_and_preserves_sparsity() {
     }
 }
 
+/// Feature selection is dominated by markers and leaves no cluster unrepresented.
 #[test]
 fn stage2_select_recovers_marker_genes() {
     let mut fix = build_fixture();
@@ -310,6 +312,7 @@ fn stage2_select_recovers_marker_genes() {
     }
 }
 
+/// Within-cluster similarity has to beat between-cluster similarity by a clear margin.
 #[test]
 fn stage3_similarity_separates_clusters() {
     let mut fix = build_fixture();
@@ -352,6 +355,7 @@ fn stage3_similarity_separates_clusters() {
     );
 }
 
+/// kNN rows are L1-normalised and self-loop free, with within-cluster edges dominant.
 #[test]
 fn stage4_knn_graph_is_normalised_and_clusters_dominate() {
     let mut fix = build_fixture();
@@ -443,6 +447,7 @@ fn stage4_knn_graph_is_normalised_and_clusters_dominate() {
     );
 }
 
+/// Seeding leaves no cell unassigned and keeps each true cluster in one dominant seed.
 #[test]
 fn stage5_seeds_assigned_with_high_purity() {
     let mut fix = build_fixture();
@@ -507,6 +512,7 @@ fn stage5_seeds_assigned_with_high_purity() {
     );
 }
 
+/// Candidate metacells respect the true cluster boundaries instead of mixing across them.
 #[test]
 fn stage6_candidate_metacells_recover_clusters() {
     let mut fix = build_fixture();
@@ -589,6 +595,7 @@ fn stage6_candidate_metacells_recover_clusters() {
     );
 }
 
+/// Deviant detection stays near its configured ceiling on data with no real outliers.
 #[test]
 fn stage7_deviants_dont_flag_well_behaved_cells() {
     // Run pipeline up to candidates, then check deviant detection on a
@@ -634,6 +641,7 @@ fn stage7_deviants_dont_flag_well_behaved_cells() {
     );
 }
 
+/// End to end, the outlier flags stay consistent and the metacell IDs stay dense.
 #[test]
 fn stage8_direct_pipeline_produces_valid_output() {
     let mut fix = build_fixture();

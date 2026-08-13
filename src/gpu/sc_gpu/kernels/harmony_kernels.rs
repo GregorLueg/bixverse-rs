@@ -1287,6 +1287,7 @@ mod tests_harmony_kernels {
         (all_indices, offsets)
     }
 
+    /// Cosine distance kernel against the host, on pre-normalised rows.
     #[test]
     fn test_cosine_distances_matches_cpu() {
         let Some(device) = try_device() else { return };
@@ -1318,6 +1319,7 @@ mod tests_harmony_kernels {
         }
     }
 
+    /// In-place normalisation against the host; a zero row must give zeros.
     #[test]
     fn test_row_l2_normalise_basic_and_zero() {
         let Some(device) = try_device() else { return };
@@ -1365,6 +1367,7 @@ mod tests_harmony_kernels {
         }
     }
 
+    /// Sigma scaling, exp and normalisation: must match, rows must sum to 1.
     #[test]
     fn test_scale_exp_normalise_matches_cpu() {
         let Some(device) = try_device() else { return };
@@ -1398,6 +1401,7 @@ mod tests_harmony_kernels {
         }
     }
 
+    /// An empty batch level must be written as zeros, not left as it was.
     #[test]
     fn test_segmented_sum_with_empty_level() {
         let Some(device) = try_device() else { return };
@@ -1443,6 +1447,7 @@ mod tests_harmony_kernels {
         }
     }
 
+    /// Diversity-penalised R update against the host; rows still sum to 1.
     #[test]
     fn test_jacobi_r_update_matches_cpu() {
         let Some(device) = try_device() else { return };
@@ -1494,6 +1499,7 @@ mod tests_harmony_kernels {
         }
     }
 
+    /// An all-zero distance row would divide by zero: it must write zeros.
     #[test]
     fn test_jacobi_r_update_zero_scale_dist_row_writes_zeros() {
         let Some(device) = try_device() else { return };
@@ -1535,6 +1541,7 @@ mod tests_harmony_kernels {
         }
     }
 
+    /// R-weighted reduction building S, where the `[b, k, d]` indexing bites.
     #[test]
     fn test_weighted_segmented_sum_matches_cpu() {
         let Some(device) = try_device() else { return };
@@ -1568,6 +1575,7 @@ mod tests_harmony_kernels {
         }
     }
 
+    /// Correction subtraction on the host, pinning C's `[k, b, d]` stride.
     #[test]
     fn test_ridge_subtract_matches_cpu() {
         let Some(device) = try_device() else { return };

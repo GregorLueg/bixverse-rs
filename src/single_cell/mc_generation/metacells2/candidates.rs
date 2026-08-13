@@ -938,6 +938,7 @@ mod tests {
         (outgoing, incoming)
     }
 
+    /// The minimum cut lands on the weak bridge rather than shaving off a single node.
     #[test]
     fn stoer_wagner_separates_two_cliques() {
         // Two K3 cliques weakly linked by 0<->3.
@@ -977,6 +978,7 @@ mod tests {
         );
     }
 
+    /// A graph with no bridging edge reports zero cut strength instead of failing.
     #[test]
     fn stoer_wagner_disconnected_components() {
         // Two disconnected pairs.
@@ -987,28 +989,27 @@ mod tests {
         assert!(strength < 1e-9, "disconnected should give zero strength");
     }
 
+    /// Cancelled communities drop to -1 and the survivors are renumbered densely.
     #[test]
     fn cancel_communities_renumbers_correctly() {
         let mut p = vec![0i32, 1, 2, 0, 1, 2, 3, 3];
         let cancelled = vec![1, 3];
         let kept = cancel_communities(&mut p, &cancelled);
         assert_eq!(kept, 2);
-        // Originals 0 and 2 survive; 0 stays 0, 2 becomes 1.
-        // Originals 1 and 3 dissolve to -1.
         assert_eq!(p, vec![0, -1, 1, 0, -1, 1, -1, -1]);
     }
 
+    /// Gaps in the partition IDs are closed in order while outliers stay at -1.
     #[test]
     fn compact_partition_ids_fills_gaps() {
         let mut p = vec![0i32, 5, -1, 5, 0, 2];
         compact_partition_ids(&mut p);
-        // Distinct surviving IDs were {0, 2, 5}; remap to {0, 1, 2}.
         assert_eq!(p, vec![0, 2, -1, 2, 0, 1]);
     }
 
+    /// Only communities failing both the size and the UMI floor are flagged as small.
     #[test]
     fn find_small_communities_flags_below_threshold() {
-        // Communities: 0={0,1,2,3,4}, 1={5,6}, 2={7,8,9,10}.
         let p = vec![0i32, 0, 0, 0, 0, 1, 1, 2, 2, 2, 2];
         let umis = vec![100.0f32; 11];
         let (small, total_size, _total_umis) = find_small_communities(
