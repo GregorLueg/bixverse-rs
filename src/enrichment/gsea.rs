@@ -1452,7 +1452,8 @@ where
 
     let mut stat_eps = T::from_f64(1e-5).unwrap();
     for (i, _) in (0..k).enumerate() {
-        let t = selected_stats[i];
+        // `selected_stats` is 1-based here, as everywhere else in this function
+        let t = selected_stats[i] - 1;
         let xx = stats[t].abs();
         if xx > T::zero() {
             stat_eps = stat_eps.min(xx);

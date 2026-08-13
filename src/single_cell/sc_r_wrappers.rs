@@ -18,6 +18,7 @@ use crate::single_cell::sc_analysis::{
     meld::{MeldParams, parse_lap_type, parse_meld_filter},
     milo_r::MiloRParams,
     nichenet::ligand_regulatory_potential::LigandTargetParams,
+    regulon_binarise::BinariseParams,
     scenic::{
         ExtraTreesConfig, GradientBoostingConfig, RandomForestConfig, RegressionLearner,
         ScenicParams,
@@ -3147,6 +3148,45 @@ impl AucellParams {
             auc_type,
             max_rank,
             standardise,
+        })
+    }
+}
+
+impl BinariseParams {
+    /// Generate BinariseParams from an R list, falling back to defaults.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The R list from which to parse the arguments
+    ///
+    /// ### Returns
+    ///
+    /// The populated [BinariseParams]
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+        let defaults = Self::default();
+
+        let bw_adjust = params
+            .get("bw_adjust")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.bw_adjust);
+
+        let n_grid = params
+            .get("n_grid")
+            .and_then(|v| v.as_real())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.n_grid);
+
+        let n_bins = params
+            .get("n_bins")
+            .and_then(|v| v.as_real())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.n_bins);
+
+        Ok(Self {
+            bw_adjust,
+            n_grid,
+            n_bins,
         })
     }
 }

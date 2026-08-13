@@ -925,7 +925,10 @@ pub fn parse_auc_type(s: &str) -> Option<AucType> {
 const AUC_MAX_RANK_FRAC: f64 = 0.05;
 
 /// Parameters for the AUCell-type scoring functions
-#[derive(Clone, Copy, Debug)]
+///
+/// The default is the recovery-curve AUC, i.e. AUCell as published. Derived
+/// rather than hand-written so it cannot drift away from [AucType]'s default.
+#[derive(Clone, Copy, Debug, Default)]
 pub struct AucellParams {
     /// Which statistic to compute.
     pub auc_type: AucType,
@@ -958,16 +961,6 @@ impl AucellParams {
             auc_type,
             max_rank,
             standardise,
-        }
-    }
-}
-
-impl Default for AucellParams {
-    fn default() -> Self {
-        Self {
-            auc_type: AucType::MannWhitney,
-            max_rank: None,
-            standardise: false,
         }
     }
 }
