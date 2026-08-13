@@ -743,6 +743,38 @@ pub enum BixverseErrors {
     #[error("MELD: labels needs two groups minimum")]
     MELDOnlyOneGroup,
 
+    // -- DGE --
+    /// The reference group holds no cells.
+    #[cfg(feature = "single-cell")]
+    #[error("DGE: the reference group is empty")]
+    DgeEmptyReferenceGroup,
+
+    /// No comparison group was supplied at all.
+    #[cfg(feature = "single-cell")]
+    #[error("DGE: at least one comparison group is required")]
+    DgeNoComparisonGroups,
+
+    /// One of the comparison groups holds no cells.
+    #[cfg(feature = "single-cell")]
+    #[error("DGE: comparison group {group} is empty")]
+    DgeEmptyComparisonGroup {
+        /// Index of the offending comparison group
+        group: usize,
+    },
+
+    /// A cell appears both in the reference and in a comparison group.
+    ///
+    /// Silently biases every AUROC toward 0.5 rather than failing, so it is
+    /// worth rejecting outright.
+    #[cfg(feature = "single-cell")]
+    #[error("DGE: cell {cell} appears in both the reference and comparison group {group}")]
+    DgeOverlappingGroups {
+        /// Index of the offending comparison group
+        group: usize,
+        /// The cell shared with the reference group
+        cell: usize,
+    },
+
     // -- Palantir --
     /// The user-supplied early cell index sits outside the cell range.
     #[cfg(feature = "single-cell")]

@@ -163,6 +163,138 @@ pub fn fast_csr_ranking(
     }
 }
 
+/// Tie-correction contribution of a single tie group.
+///
+/// `t^3 - t`, which is zero for `t <= 1`, so the caller never needs to branch.
+///
+/// ### Params
+///
+/// * `t` - Size of the tie group.
+///
+/// ### Returns
+///
+/// The `t^3 - t` term for the Mann-Whitney variance correction.
+#[inline(always)]
+fn tie_contribution(t: usize) -> f64 {
+    let t = t as f64;
+    t * t * t - t
+}
+
+/// Per-gene rank-sum statistics for two groups of cells, fused into the scan
+///
+/// Group 1 occupies rows `0..n_grp1` of the CSR data and group 2 the remainder,
+/// so the caller concatenates the two groups in that order. Computes the same
+/// midranks as [fast_csr_ranking] with `rank_within_rows = false`, but reduces
+/// them to a rank sum and a tie term inside the block walk instead of
+/// materialising the `n_genes x n_cells` rank matrix. Peak memory is therefore
+/// `O(nnz)` rather than `O(ncol * nrow)`, which is the difference between a
+/// few hundred MB and several GB on a realistic comparison.
+///
+/// Both accumulators are `f64`. The rank sum reaches ~2.5e9 at 50k cells,
+/// well past what `f32` can accumulate without swamping the test statistic.
+///
+/// ### Params
+///
+/// * `row_ptr` - The row pointer in the given CSR data.
+/// * `col_indices` - The col indices of the data.
+/// * `data` - The normalised count data.
+/// * `n_grp1` - Number of leading rows belonging to group 1.
+/// * `nrow` - Number of rows (cells) across both groups.
+/// * `ncol` - Number of columns (genes).
+///
+/// ### Returns
+///
+/// One `(rank_sum_grp1, tie_term)` per gene, where `tie_term` is `sum(t^3 - t)`
+/// over the gene's tie groups, including the block of implicit zeros.
+pub fn csr_rank_sum_stats_two_groups(
+    row_ptr: &[usize],
+    col_indices: &[u32],
+    data: &[F16],
+    n_grp1: usize,
+    nrow: usize,
+    ncol: usize,
+) -> Vec<(f64, f64)> {
+    // (u16, u32) is 8 bytes against 16 for (u16, usize) after alignment
+    // padding, and this buffer is the dominant transient allocation.
+    let mut gene_data: Vec<Vec<(u16, u32)>> = vec![Vec::new(); ncol];
+
+    for row_idx in 0..nrow {
+        let start = row_ptr[row_idx];
+        let end = row_ptr[row_idx + 1];
+
+        for i in start..end {
+            gene_data[col_indices[i] as usize].push((data[i].to_bits(), row_idx as u32));
+        }
+    }
+
+    gene_data
+        .into_par_iter()
+        .map(|mut values| {
+            let num_nonzeros = values.len();
+            let num_zeros = nrow - num_nonzeros;
+
+            let mut rank_sum = 0.0_f64;
+            let mut tie_term = tie_contribution(num_zeros);
+            let mut nonzeros_grp1 = 0_usize;
+
+            if num_nonzeros > 0 {
+                values.sort_unstable_by_key(|&(bits, _)| bits);
+
+                let mut i = 0;
+                while i < num_nonzeros {
+                    let start_idx = i;
+                    let current_value = values[i].0;
+                    let mut in_grp1 = 0_usize;
+                    while i < num_nonzeros && values[i].0 == current_value {
+                        if (values[i].1 as usize) < n_grp1 {
+                            in_grp1 += 1;
+                        }
+                        i += 1;
+                    }
+                    let midrank = (start_idx + i + 1 + 2 * num_zeros) as f64 / 2.0;
+                    rank_sum += in_grp1 as f64 * midrank;
+                    tie_term += tie_contribution(i - start_idx);
+                    nonzeros_grp1 += in_grp1;
+                }
+            }
+
+            // Whatever is left of group 1 sits in the shared zero block
+            let zeros_grp1 = n_grp1 - nonzeros_grp1;
+            rank_sum += zeros_grp1 as f64 * (1.0 + num_zeros as f64) / 2.0;
+
+            (rank_sum, tie_term)
+        })
+        .collect()
+}
+
+/// Append a group of cells to flat CSR buffers
+///
+/// Lets a caller build the CSR of one group once and then swap the second
+/// group in via `truncate` plus another append, rather than re-flattening both
+/// groups for every comparison.
+///
+/// ### Params
+///
+/// * `chunks` - The cells to append, one CSR row each.
+/// * `indptr` - Row pointer, which the caller seeds with a single `0`.
+/// * `indices` - Column indices, appended to.
+/// * `data` - Normalised counts, appended to.
+pub(crate) fn append_cell_chunks(
+    chunks: &[CsrCellChunk],
+    indptr: &mut Vec<usize>,
+    indices: &mut Vec<u32>,
+    data: &mut Vec<F16>,
+) {
+    let mut current = *indptr.last().unwrap_or(&0);
+
+    for chunk in chunks {
+        data.extend_from_slice(&chunk.data_norm);
+        indices.extend_from_slice(&chunk.indices);
+        current += chunk.data_norm.len();
+        indptr.push(current);
+    }
+}
+
 /// Helper function to rank all cells within a given chunk vector
 ///
 /// ### Params
@@ -308,6 +440,7 @@ pub fn rank_within_rows_f32(
 mod tests {
     use super::*;
     use crate::single_cell::sc_traits::F16;
+    use approx::assert_relative_eq;
 
     // Helper to create F16 from f32
     fn f16_vec(values: &[f32]) -> Vec<F16> {
@@ -486,5 +619,95 @@ mod tests {
         assert!((gene1_actual[0] - 2.5).abs() < 0.01);
         assert!((gene1_actual[1] - 2.5).abs() < 0.01);
         assert!((gene1_actual[2] - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_rank_sum_stats_matches_materialised() {
+        // Anchor test: the fused kernel must agree with summing the group 1
+        // slice of the already-tested materialised ranking.
+        // Matrix (6 cells x 4 genes), first 3 cells are group 1:
+        // [2.0, 0.0, 1.0, 0.0]
+        // [0.0, 3.0, 1.0, 0.0]
+        // [5.0, 0.0, 0.0, 0.0]
+        // [1.0, 3.0, 4.0, 0.0]
+        // [0.0, 0.0, 1.0, 0.0]
+        // [2.0, 1.0, 0.0, 0.0]
+        let row_ptr = vec![0, 2, 4, 5, 8, 9, 11];
+        let col_indices: Vec<u32> = vec![0, 2, 1, 2, 0, 0, 1, 2, 2, 0, 1];
+        let data = f16_vec(&[2.0, 1.0, 3.0, 1.0, 5.0, 1.0, 3.0, 4.0, 1.0, 2.0, 1.0]);
+
+        let n_grp1 = 3;
+        let (nrow, ncol) = (6, 4);
+
+        let ranks = fast_csr_ranking(&row_ptr, &col_indices, &data, nrow, ncol, false);
+        let stats =
+            csr_rank_sum_stats_two_groups(&row_ptr, &col_indices, &data, n_grp1, nrow, ncol);
+
+        for gene in 0..ncol {
+            let expected: f64 = ranks[gene][..n_grp1].iter().map(|&r| r as f64).sum();
+            assert_relative_eq!(stats[gene].0, expected, epsilon = 1e-9);
+        }
+
+        // Gene 3 is empty, so all six cells share one tie group
+        assert_relative_eq!(stats[3].0, 3.0 * 3.5, epsilon = 1e-9);
+        assert_relative_eq!(stats[3].1, 6.0 * 6.0 * 6.0 - 6.0, epsilon = 1e-9);
+    }
+
+    #[test]
+    fn test_rank_sum_stats_tie_term() {
+        // Single gene over 6 cells: values [1.0, 1.0, 1.0, 2.0, 2.0, 0.0].
+        // Tie groups: three 1.0s, two 2.0s and a single implicit zero.
+        // S = (27 - 3) + (8 - 2) + (1 - 1) = 30
+        let row_ptr = vec![0, 1, 2, 3, 4, 5, 5];
+        let col_indices: Vec<u32> = vec![0, 0, 0, 0, 0];
+        let data = f16_vec(&[1.0, 1.0, 1.0, 2.0, 2.0]);
+
+        let stats = csr_rank_sum_stats_two_groups(&row_ptr, &col_indices, &data, 3, 6, 1);
+
+        assert_relative_eq!(stats[0].1, 30.0, epsilon = 1e-9);
+        // Zero sits at rank 1, the three 1.0s share midrank 3, the two 2.0s
+        // share midrank 5.5. Group 1 is the first three cells, all 1.0s.
+        assert_relative_eq!(stats[0].0, 9.0, epsilon = 1e-9);
+    }
+
+    #[test]
+    fn test_rank_sum_stats_no_ties() {
+        // Six distinct values, no zeros: S must be exactly 0.
+        let row_ptr = vec![0, 1, 2, 3, 4, 5, 6];
+        let col_indices: Vec<u32> = vec![0, 0, 0, 0, 0, 0];
+        let data = f16_vec(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+
+        let stats = csr_rank_sum_stats_two_groups(&row_ptr, &col_indices, &data, 3, 6, 1);
+
+        assert_relative_eq!(stats[0].1, 0.0, epsilon = 1e-9);
+        // Group 1 holds the three lowest values, so ranks 1 + 2 + 3
+        assert_relative_eq!(stats[0].0, 6.0, epsilon = 1e-9);
+    }
+
+    #[test]
+    fn test_append_cell_chunks_round_trip() {
+        let chunks = [
+            CsrCellChunk::from_data(&[1_u32, 3], &[0_u32, 2], 0, 1e4, true),
+            CsrCellChunk::from_data(&[2_u32], &[1_u32], 1, 1e4, true),
+        ];
+
+        let mut indptr = vec![0_usize];
+        let mut indices: Vec<u32> = Vec::new();
+        let mut data: Vec<F16> = Vec::new();
+
+        append_cell_chunks(&chunks[..1], &mut indptr, &mut indices, &mut data);
+        let prefix_rows = indptr.len();
+        let prefix_nnz = indices.len();
+
+        append_cell_chunks(&chunks[1..], &mut indptr, &mut indices, &mut data);
+        assert_eq!(indptr, vec![0, 2, 3]);
+        assert_eq!(indices, vec![0, 2, 1]);
+
+        // Truncating back to the prefix must restore the first append exactly
+        indptr.truncate(prefix_rows);
+        indices.truncate(prefix_nnz);
+        data.truncate(prefix_nnz);
+        assert_eq!(indptr, vec![0, 2]);
+        assert_eq!(indices, vec![0, 2]);
     }
 }
