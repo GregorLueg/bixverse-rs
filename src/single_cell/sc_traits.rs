@@ -37,6 +37,11 @@ impl From<F16> for f16 {
 // Iterator sum //
 //////////////////
 
+/// Do not use for anything stored or compared across machines. `half` chooses
+/// its accumulation strategy per architecture: aarch64 with `fp16` folds in
+/// native f16 and rounds at every step, everything else widens to f32 and
+/// narrows once. Over a thousand elements the two disagree by about 5%. Widen
+/// yourself and narrow at the end when the result is persisted.
 impl Sum for F16 {
     fn sum<I: Iterator<Item = F16>>(iter: I) -> Self {
         let sum: f16 = iter.map(f16::from).sum();
@@ -393,26 +398,38 @@ mod tests {
         assert_ne!(v.to_f32(), 0.1_f32, "0.1 is not representable in f16");
     }
 
-    /// `Sum` accumulates in f16 rather than widening, and the error compounds
-    /// badly with length. Once the running total passes 64 the f16 step is
-    /// 0.0625, so adding 0.1 rounds up to two steps every time and the sum
-    /// drifts *upwards*: 1000 tenths land on 105.19, not 100, a 5.2% overshoot.
+    /// `Sum` is not a reliable accumulator over a long column, and how badly it
+    /// fails depends on the target.
     ///
-    /// This is pinned rather than tolerated because
-    /// [in_memory_io](crate::single_cell::sc_data::in_memory_io) computes
-    /// `avg_exp` this way over a whole gene column, so a gene expressed in
-    /// thousands of cells carries that bias.
+    /// `half` picks its strategy per architecture (`binary16/arch.rs::sum_f16`):
+    /// aarch64 with `fp16` folds in native f16, rounding at every step, so a
+    /// thousand tenths drift upwards to 105.19. Everywhere else it accumulates
+    /// in f32 and narrows once, landing on exactly 100.0. Both are legitimate,
+    /// which is the point: the same data summed on an M-series Mac and on an
+    /// x86 runner does not agree.
+    ///
+    /// So nothing that is stored or compared across machines may use this.
+    /// `data_io` and `in_memory_io` accumulate `avg_exp` in f32 and narrow once,
+    /// which is what `pca.rs` already did and what makes the two platforms
+    /// agree.
     #[test]
-    fn f16_sum_drifts_upwards_on_long_columns() {
-        // Exact while the running total stays small.
+    fn f16_sum_is_not_portable_over_long_columns() {
+        // Exact on both targets while the running total stays small.
         let exact: F16 = (0..4).map(|_| F16::from_f32(0.25)).sum();
         assert_relative_eq!(exact.to_f32(), 1.0, epsilon = 1e-3);
 
-        let drifting: F16 = (0..1000).map(|_| F16::from_f32(0.1)).sum();
-        assert_relative_eq!(drifting.to_f32(), 105.1875, epsilon = 1e-3);
+        // Widening first is exact to within one f16 step, on every target. This
+        // is the accumulation production code performs.
+        let widened: f32 = (0..1000).map(|_| F16::from_f32(0.1).to_f32()).sum();
+        assert_relative_eq!(widened, 99.9756, epsilon = 1e-3);
+
+        // Summing in f16 is target-dependent: 100.0 where `half` widens
+        // internally, 105.1875 where it folds in native f16.
+        let summed: F16 = (0..1000).map(|_| F16::from_f32(0.1)).sum();
+        let v = summed.to_f32();
         assert!(
-            drifting.to_f32() > 100.0,
-            "the drift is upwards, not symmetric rounding"
+            (99.0..=106.0).contains(&v),
+            "f16 Sum gave {v}, outside both known per-target results"
         );
     }
 
