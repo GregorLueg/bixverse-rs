@@ -9,13 +9,9 @@
 //!
 //! The single test here is the most expensive in the crate: n = 3000 over two
 //! pruning arms, each running a full CPU SEACells fit and a full GPU fit. The
-//! whole file is therefore behind `large_scale_diagnostics`.
+//! whole file is therefore behind `large-test`.
 
-#![cfg(all(
-    feature = "single-cell",
-    feature = "gpu",
-    feature = "large_scale_diagnostics"
-))]
+#![cfg(all(feature = "single-cell", feature = "gpu", feature = "large-test"))]
 
 use bixverse_rs::prelude::LanczosParams;
 use cubecl::prelude::*;

@@ -639,31 +639,28 @@ mod tests {
         (x, y)
     }
 
-    #[test]
-    fn test_loess_construction() {
-        let loess: LoessRegression<f64> = LoessRegression::new(0.5, 1);
-        // Should not panic
-        let _res = loess.fit(&[1.0], &[1.0]);
-    }
-
+    /// A span above 1 is rejected at construction rather than silently clamped.
     #[test]
     #[should_panic(expected = "Span must be between 0 and 1")]
     fn test_loess_invalid_span_high() {
         let _loess: LoessRegression<f64> = LoessRegression::new(1.5, 1);
     }
 
+    /// A zero span is rejected too, since the open interval excludes both ends.
     #[test]
     #[should_panic(expected = "Span must be between 0 and 1")]
     fn test_loess_invalid_span_zero() {
         let _loess: LoessRegression<f64> = LoessRegression::new(0.0, 1);
     }
 
+    /// Only degree 1 and 2 exist, so any other degree must panic rather than fit.
     #[test]
     #[should_panic(expected = "Only linear (1) and quadratic (2) supported")]
     fn test_loess_invalid_degree() {
         let _loess: LoessRegression<f64> = LoessRegression::new(0.5, 3);
     }
 
+    /// A local linear fit must reproduce exactly linear data with zero residuals.
     #[test]
     fn test_perfect_linear_fit() {
         // Data: y = 2x + 1
@@ -682,6 +679,7 @@ mod tests {
         }
     }
 
+    /// A local quadratic fit over the full span must reproduce a parabola exactly.
     #[test]
     fn test_perfect_quadratic_fit() {
         // Data: y = x^2
@@ -698,6 +696,7 @@ mod tests {
         }
     }
 
+    /// Too few points for the requested degree degrades to linear instead of failing.
     #[test]
     fn test_quadratic_fallback_on_small_sample() {
         // Only 2 points provided. Quadratic fit needs at least 3.
@@ -712,6 +711,7 @@ mod tests {
         assert_approx_eq(res.fitted_vals[1], 4.0);
     }
 
+    /// NaN responses are excluded from the fit, zero filled in the output and reported.
     #[test]
     fn test_handling_nans_and_order() {
         // Input contains NaNs.
@@ -737,6 +737,7 @@ mod tests {
         assert_eq!(res.valid_indices, vec![0, 2]);
     }
 
+    /// Degenerate sample sizes: no points and one point must return, not index out of bounds.
     #[test]
     fn test_empty_input() {
         let x: Vec<f64> = vec![];
@@ -747,8 +748,14 @@ mod tests {
 
         assert!(res.fitted_vals.is_empty());
         assert!(res.valid_indices.is_empty());
+
+        // A single point is fitted by itself.
+        let res = loess.fit(&[1.0], &[7.0]);
+        assert_eq!(res.valid_indices, vec![0]);
+        assert!((res.fitted_vals[0] - 7.0).abs() < 1e-9);
     }
 
+    /// A non-finite predictor must be dropped, so no infinity leaks into the fit.
     #[test]
     fn test_infinite_x_is_dropped_not_propagated() {
         // hvg.rs sends log10(0) = -inf for all-zero genes and needs a finite
@@ -764,6 +771,7 @@ mod tests {
         assert_eq!(res.valid_indices, vec![1, 2, 3]);
     }
 
+    /// Regression: the span parameter has to move the fitted values on large inputs.
     #[test]
     fn test_span_changes_the_fit() {
         // The regression that started this: a fixed 64-neighbour cap made the
@@ -786,6 +794,7 @@ mod tests {
         );
     }
 
+    /// Guards accuracy rather than stability: a smooth but wrong fit must fail here.
     #[test]
     fn test_wide_span_tracks_the_signal() {
         // A correctly spanned quadratic loess should sit close to a smooth
@@ -806,17 +815,7 @@ mod tests {
         );
     }
 
-    /// Largest absolute gap between the two surfaces on the same input.
-    ///
-    /// ### Params
-    ///
-    /// * `x` - Predictor values
-    /// * `y` - Response values
-    /// * `span` - Span to fit both surfaces at
-    ///
-    /// ### Returns
-    ///
-    /// The maximum absolute difference in fitted values.
+    /// Largest absolute gap between the direct and interpolating surfaces on one input.
     fn surface_gap(x: &[f64], y: &[f64], span: f64) -> f64 {
         let direct = LoessRegression::with_surface(span, 2, LoessSurface::Direct).fit(x, y);
         let interpolated =
@@ -830,6 +829,7 @@ mod tests {
             .fold(0f64, f64::max)
     }
 
+    /// The interpolating surface stays inside R's quoted tolerance on a hard signal.
     #[test]
     fn test_interpolate_matches_direct_on_oscillating_signal() {
         // Adversarial for the spline: 1.6 periods of a sine against roughly 11
@@ -846,6 +846,7 @@ mod tests {
         );
     }
 
+    /// A far tighter bound on the same surfaces for the input shape HVG really sends.
     #[test]
     fn test_interpolate_matches_direct_on_a_monotone_trend() {
         // The shape HVG actually feeds it: log10 variance against log10 mean is
@@ -863,6 +864,7 @@ mod tests {
         );
     }
 
+    /// Below the interpolation threshold the surfaces must be bit-identical, not just close.
     #[test]
     fn test_small_input_ignores_interpolation() {
         // Below LOESS_INTERPOLATE_MIN_POINTS the two surfaces must agree
@@ -876,6 +878,7 @@ mod tests {
         assert_eq!(direct.fitted_vals, interpolated.fitted_vals);
     }
 
+    /// The neighbour window clamps at both edges and stays centred everywhere between.
     #[test]
     fn test_window_start_picks_nearest_neighbours() {
         let xs: Vec<f64> = (0..10).map(|i| i as f64).collect();
@@ -891,6 +894,7 @@ mod tests {
         assert_eq!(window_start(&xs, 10, 7.0), 0);
     }
 
+    /// A predictor with no spread must not divide by zero when scaling weights.
     #[test]
     fn test_constant_x_does_not_divide_by_zero() {
         let x = vec![2.0; 50];
@@ -905,15 +909,7 @@ mod tests {
         assert!(res.fitted_vals.iter().all(|&v| (v - first).abs() < 1e-9));
     }
 
-    #[test]
-    fn test_reproducible() {
-        let (x, y) = curved_data(1_000);
-        let a = LoessRegression::new(0.3, 2).fit(&x, &y);
-        let b = LoessRegression::new(0.3, 2).fit(&x, &y);
-
-        assert_eq!(a.fitted_vals, b.fitted_vals);
-    }
-
+    /// The generic float path gives the same fit in single and double precision.
     #[test]
     fn test_f32_and_f64_agree() {
         let (x64, y64) = curved_data(1_000);

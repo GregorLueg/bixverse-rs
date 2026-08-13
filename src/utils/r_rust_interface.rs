@@ -3,6 +3,7 @@
 use extendr_api::prelude::*;
 use faer::{Mat, MatRef};
 use num_traits::NumCast;
+use rayon::prelude::*;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, HashMap};
 use std::ops::{Add, Mul};
@@ -37,65 +38,17 @@ const MAX_R_COUNT: f64 = 9_007_199_254_740_992.0;
 /// silently hands R negative column pointers, so the writer refuses instead.
 const MAX_R_SPARSE_INDEX: u32 = i32::MAX as u32;
 
+/// Minimum buffer length before the parsers switch to Rayon.
+///
+/// Below this the cost of splitting the work exceeds the scan itself. Single-cell
+/// count matrices sit five orders of magnitude above the threshold, so it only
+/// guards the small-matrix and unit-test paths. 64 Ki elements is a few pages per
+/// thread on a typical 16-thread machine.
+const PARALLEL_PARSE_THRESHOLD: usize = 1 << 16;
+
 /////////////
 // Helpers //
 /////////////
-
-/// Read an R integer vector of non-negative indices.
-///
-/// `NA_integer_` is `i32::MIN` and a plain `as usize` turns it into 2147483648,
-/// while `-1` becomes 4294967295 after the later `index_cast`. Both build a
-/// plausible-looking structure whose row spans are nonsense and whose panic
-/// lands somewhere deep in a slicing routine naming neither R nor the input.
-///
-/// ### Params
-///
-/// * `value` - The list element, if present.
-/// * `missing` - Error message when the slot is absent or not an integer vector.
-/// * `invalid` - Error message when an entry is `NA` or negative.
-///
-/// ### Returns
-///
-/// The indices, or an error.
-fn r_index_slice(
-    value: Option<&Robj>,
-    missing: &'static str,
-    invalid: &'static str,
-) -> Result<Vec<usize>, BixverseErrors> {
-    let raw = value
-        .and_then(|v| v.as_integer_slice())
-        .ok_or(BixverseErrors::RListParse(missing))?;
-
-    raw.iter()
-        .map(|&x| {
-            if x < 0 {
-                Err(BixverseErrors::RListParse(invalid))
-            } else {
-                Ok(x as usize)
-            }
-        })
-        .collect()
-}
-
-/// Accept an explicit zero for a matrix dimension.
-///
-/// [r_list_count] floors at one, since a count of zero is a mistake for every
-/// parameter it serves. A sparse matrix may legitimately have no rows or no
-/// columns, so that one case is read separately.
-///
-/// ### Params
-///
-/// * `value` - The list element, if present.
-///
-/// ### Returns
-///
-/// `Some(0)` when the slot holds an exact zero, `None` otherwise.
-fn r_dimension_zero(value: Option<&Robj>) -> Option<usize> {
-    let value = value?;
-    let is_zero = value.as_integer().map(|v| v == 0).unwrap_or(false)
-        || value.as_real().map(|v| v == 0.0).unwrap_or(false);
-    is_zero.then_some(0)
-}
 
 /// Check that a parsed sparse structure is internally consistent.
 ///
@@ -111,8 +64,8 @@ fn r_dimension_zero(value: Option<&Robj>) -> Option<usize> {
 ///
 /// Nothing on success, or an error naming the violated invariant.
 fn validate_sparse_layout(
-    indptr: &[usize],
-    indices: &[usize],
+    indptr: &[u32],
+    indices: &[u32],
     nnz: usize,
     shape: (usize, usize),
     cs_type: CompressedSparseFormat,
@@ -136,12 +89,12 @@ fn validate_sparse_layout(
         return Err(BixverseErrors::RListParse("indptr must be non-decreasing"));
     }
     // `indptr` is non-empty here: `major + 1 >= 1`.
-    if indptr[indptr.len() - 1] != nnz {
+    if indptr[indptr.len() - 1] != nnz as u32 {
         return Err(BixverseErrors::RListParse(
             "the last indptr entry must equal the number of stored values",
         ));
     }
-    if indices.iter().any(|&j| j >= minor) {
+    if indices.iter().any(|&j| j >= minor as u32) {
         return Err(BixverseErrors::RListParse(
             "an index sits outside the minor dimension",
         ));
@@ -681,7 +634,151 @@ where
     ))
 }
 
+/// Read a matrix dimension from an R list slot.
+///
+/// Accepts an integer or a whole, non-negative double, because R writes `5` as a
+/// double and only `5L` as an integer. Zero is legal: a sparse matrix may have no
+/// rows or no columns. `NA_integer_` arrives as [i32::MIN] and `NA_real_` as
+/// `NaN`, so both are rejected by the range and finiteness checks.
+///
+/// ### Params
+///
+/// * `value` - The list element, if present.
+/// * `message` - Error message naming the offending slot.
+///
+/// ### Returns
+///
+/// The dimension as a `usize`, or an error when the slot is missing, of the wrong
+/// type, negative, fractional or `NA`.
+fn r_dimension(value: Option<&Robj>, message: &'static str) -> Result<usize, BixverseErrors> {
+    let value = value.ok_or(BixverseErrors::RListParse(message))?;
+    let dimension = value
+        .as_integer()
+        .map(<f64 as From<i32>>::from)
+        .or_else(|| value.as_real())
+        .ok_or(BixverseErrors::RListParse(message))?;
+    if !dimension.is_finite() || dimension < 0.0 || dimension.fract() != 0.0 {
+        return Err(BixverseErrors::RListParse(message));
+    }
+    Ok(dimension as usize)
+}
+
+/// Parse an R integer vector into a sparse index buffer.
+///
+/// Fuses three passes that were previously separate: the `NA`/negative scan, the
+/// widening cast into the internal index type, and the upper-bound check that
+/// [validate_sparse_layout] would otherwise perform on a second traversal. On a
+/// 354 M non-zero matrix each avoided pass is a gigabyte of memory traffic.
+///
+/// `NA_integer_` is [i32::MIN], so the `TryFrom` into an unsigned index type
+/// rejects it along with genuine negatives; no separate `NA` test is needed.
+///
+/// Parallel above [PARALLEL_PARSE_THRESHOLD]. Rayon's indexed `collect` into a
+/// `Result<Vec<_>, _>` allocates exactly once, unlike the sequential
+/// `ResultShunt`, whose `size_hint` lower bound is zero and which therefore
+/// reallocates logarithmically often.
+///
+/// ### Params
+///
+/// * `value` - The list element, if present.
+/// * `exclusive_bound` - Every entry must be strictly below this. `ncol` for the
+///   `indices` of a CSR matrix, `nrow` for CSC, and `nnz + 1` for `indptr`.
+/// * `missing` - Error message for a missing or non-integer slot.
+/// * `invalid` - Error message for `NA`, negative or out-of-bounds entries.
+///
+/// ### Returns
+///
+/// The buffer in the internal index type, in R's original order.
+fn r_index_buffer<I>(
+    value: Option<&Robj>,
+    exclusive_bound: usize,
+    missing: &'static str,
+    invalid: &'static str,
+) -> Result<Vec<I>, BixverseErrors>
+where
+    I: TryFrom<i32> + Send,
+{
+    let slice = value
+        .and_then(|v| v.as_integer_slice())
+        .ok_or(BixverseErrors::RListParse(missing))?;
+
+    #[inline(always)]
+    fn convert<I>(
+        x: i32,
+        exclusive_bound: usize,
+        invalid: &'static str,
+    ) -> Result<I, BixverseErrors>
+    where
+        I: TryFrom<i32>,
+    {
+        let index = I::try_from(x).map_err(|_| BixverseErrors::RListParse(invalid))?;
+        // `x` is non-negative at this point, so the cast cannot wrap.
+        if (x as usize) >= exclusive_bound {
+            return Err(BixverseErrors::RListParse(invalid));
+        }
+        Ok(index)
+    }
+
+    if slice.len() >= PARALLEL_PARSE_THRESHOLD {
+        slice
+            .par_iter()
+            .map(|&x| convert(x, exclusive_bound, invalid))
+            .collect()
+    } else {
+        let mut buffer = Vec::with_capacity(slice.len());
+        for &x in slice {
+            buffer.push(convert(x, exclusive_bound, invalid)?);
+        }
+        Ok(buffer)
+    }
+}
+
+/// Parse an R double vector into the generic value buffer.
+///
+/// Preallocates and, above [PARALLEL_PARSE_THRESHOLD], parses in parallel. The
+/// per-element [NumCast] check is a branch the compiler cannot elide for a
+/// generic `T`; it is retained because narrowing to `f32` for single-cell data
+/// genuinely can overflow and a silent `inf` is worse than an error.
+///
+/// ### Params
+///
+/// * `value` - The list element, if present.
+/// * `missing` - Error message for a missing or non-double slot.
+/// * `out_of_range` - Error message for a value `T` cannot represent.
+///
+/// ### Returns
+///
+/// The values as `Vec<T>`, in R's original order.
+fn r_value_buffer<T>(
+    value: Option<&Robj>,
+    missing: &'static str,
+    out_of_range: &'static str,
+) -> Result<Vec<T>, BixverseErrors>
+where
+    T: NumCast + Send,
+{
+    let slice = value
+        .and_then(|v| v.as_real_slice())
+        .ok_or(BixverseErrors::RListParse(missing))?;
+
+    if slice.len() >= PARALLEL_PARSE_THRESHOLD {
+        slice
+            .par_iter()
+            .map(|&x| T::from(x).ok_or(BixverseErrors::RListParse(out_of_range)))
+            .collect()
+    } else {
+        let mut buffer = Vec::with_capacity(slice.len());
+        for &x in slice {
+            buffer.push(T::from(x).ok_or(BixverseErrors::RListParse(out_of_range))?);
+        }
+        Ok(buffer)
+    }
+}
+
 /// Narrow a `u32` index buffer to the `i32` R stores sparse indices in.
+///
+/// Fuses the bounds check into the cast, and parallelises above
+/// [PARALLEL_PARSE_THRESHOLD].
 ///
 /// ### Params
 ///
@@ -693,33 +790,54 @@ where
 /// The buffer as `i32`, or an error when any entry is past
 /// [MAX_R_SPARSE_INDEX].
 fn index_buffer_to_r(buffer: &[u32], message: &'static str) -> Result<Vec<i32>, BixverseErrors> {
-    if buffer.iter().any(|&x| x > MAX_R_SPARSE_INDEX) {
-        return Err(BixverseErrors::RListParse(message));
+    #[inline(always)]
+    fn narrow(x: u32, message: &'static str) -> Result<i32, BixverseErrors> {
+        if x > MAX_R_SPARSE_INDEX {
+            return Err(BixverseErrors::RListParse(message));
+        }
+        Ok(x as i32)
     }
-    Ok(buffer.iter().map(|&x| x as i32).collect())
+
+    if buffer.len() >= PARALLEL_PARSE_THRESHOLD {
+        buffer.par_iter().map(|&x| narrow(x, message)).collect()
+    } else {
+        let mut out = Vec::with_capacity(buffer.len());
+        for &x in buffer {
+            out.push(narrow(x, message)?);
+        }
+        Ok(out)
+    }
 }
 
-/// Transform an R list storing CSR/C data into CompressedSparseData2
+/// Transform an R list storing CSR/C data into a [CompressedSparseData2].
+///
+/// The key names are exactly the ones [sparse_data_to_list] writes, so a list
+/// survives a round trip through both. `nrow` and `ncol` are accepted as either
+/// an integer or a whole double, because R writes `5` as a double and only `5L`
+/// as an integer.
+///
+/// Slots are read in dependency order rather than declaration order: the
+/// dimensions and `cs_type` come first, so the index parsers know the bound each
+/// buffer has to respect and can validate during the cast instead of on a second
+/// traversal. All three large buffers are read straight from R's memory via
+/// zero-copy slices, converted once, and allocated once.
 ///
 /// ### Params
 ///
-/// * `r_list` - R list that has the following elements: `indptr`, `indices`,
-///   `data`, `nrow`, `ncol` and `cs_type`. The key names are exactly the ones
-///   [sparse_data_to_list] writes, so a list survives a round trip through both.
-///   `nrow` and `ncol` are accepted as either an integer or a whole double,
-///   because R writes `5` as a double and only `5L` as an integer.
-/// * `populate_data_2` - Boolean. If set to `true`, the data will be also
-///   copied into data_2 of the `CompressedSparseData2`.
+/// * `r_list` - R list holding `indptr`, `indices`, `data`, `nrow`, `ncol` and
+///   `cs_type`.
+/// * `populate_data_2` - Boolean. If set to `true`, the data will also be copied
+///   into `data_2` of the [CompressedSparseData2].
 ///
 /// ### Returns
 ///
-/// The [CompressedSparseData2]
+/// The [CompressedSparseData2].
 pub fn list_to_sparse_matrix<T>(
     r_list: List,
     populate_data_2: bool,
 ) -> Result<CompressedSparseData2<T>, BixverseErrors>
 where
-    T: Clone + Default + NumCast,
+    T: Clone + Default + NumCast + Send,
 {
     if !r_list.is_empty() && r_list.names().is_none() {
         return Err(BixverseErrors::RListParse("not a named list"));
@@ -728,41 +846,14 @@ where
         .try_into()
         .map_err(|_| BixverseErrors::RListParse("not a named list"))?;
 
-    let indptr = r_index_slice(
-        r_data.get("indptr"),
-        "indptr missing or not integer",
-        "indptr holds NA or negative values",
+    let nrow = r_dimension(
+        r_data.get("nrow"),
+        "nrow missing or not a non-negative whole number",
     )?;
-
-    let indices = r_index_slice(
-        r_data.get("indices"),
-        "indices missing or not integer",
-        "indices hold NA or negative values",
+    let ncol = r_dimension(
+        r_data.get("ncol"),
+        "ncol missing or not a non-negative whole number",
     )?;
-
-    let data: Vec<T> = r_data
-        .get("data")
-        .and_then(|v| v.as_real_slice())
-        .ok_or(BixverseErrors::RListParse("data missing or not double"))?
-        .iter()
-        .map(|&x| T::from(x).ok_or(BixverseErrors::RListParse("data value out of range")))
-        .collect::<Result<Vec<T>, _>>()?;
-
-    let nrow = r_list_count(&r_data, "nrow")
-        .ok()
-        .flatten()
-        .or_else(|| r_dimension_zero(r_data.get("nrow")))
-        .ok_or(BixverseErrors::RListParse(
-            "nrow missing or not a non-negative whole number",
-        ))?;
-    let ncol = r_list_count(&r_data, "ncol")
-        .ok()
-        .flatten()
-        .or_else(|| r_dimension_zero(r_data.get("ncol")))
-        .ok_or(BixverseErrors::RListParse(
-            "ncol missing or not a non-negative whole number",
-        ))?;
-
     let cs_type = r_data
         .get("cs_type")
         .and_then(|v| v.as_str())
@@ -770,6 +861,31 @@ where
         .ok_or(BixverseErrors::RListParse(
             "cs_type missing or not one of 'csr' / 'csc'",
         ))?;
+
+    let data: Vec<T> = r_value_buffer(
+        r_data.get("data"),
+        "data missing or not double",
+        "data value out of range",
+    )?;
+
+    // `indptr` addresses positions in `data`, so it may equal nnz but not exceed
+    // it; `indices` addresses the minor axis, whichever that is for this layout.
+    let indptr: Vec<u32> = r_index_buffer(
+        r_data.get("indptr"),
+        data.len() + 1,
+        "indptr missing or not integer",
+        "indptr holds NA, negative or out-of-range values",
+    )?;
+    let minor_dimension = match cs_type {
+        CompressedSparseFormat::Csr => ncol,
+        CompressedSparseFormat::Csc => nrow,
+    };
+    let indices: Vec<u32> = r_index_buffer(
+        r_data.get("indices"),
+        minor_dimension,
+        "indices missing or not integer",
+        "indices hold NA, negative or out-of-range values",
+    )?;
 
     validate_sparse_layout(&indptr, &indices, data.len(), (nrow, ncol), cs_type)?;
 
@@ -781,8 +897,8 @@ where
 
     Ok(CompressedSparseData2 {
         data,
-        indices: indices.index_cast(),
-        indptr: indptr.index_cast(),
+        indices,
+        indptr,
         cs_type,
         data_2,
         shape: (nrow, ncol),
@@ -797,11 +913,12 @@ where
 mod tests {
     use super::*;
 
+    /// A well-formed CSR layout has to pass untouched.
     #[test]
     fn test_validate_sparse_layout_accepts_a_sound_csr() {
         // 3x4 CSR with two entries in row 0 and one in row 2.
-        let indptr = [0usize, 2, 2, 3];
-        let indices = [1usize, 3, 0];
+        let indptr = [0u32, 2, 2, 3];
+        let indices = [1u32, 3, 0];
 
         assert!(
             validate_sparse_layout(&indptr, &indices, 3, (3, 4), CompressedSparseFormat::Csr)
@@ -809,12 +926,13 @@ mod tests {
         );
     }
 
+    /// The format flag picks the major axis: one valid CSC, the same buffers a broken CSR.
     #[test]
     fn test_validate_sparse_layout_reads_csc_the_other_way_round() {
         // The same buffers describe a 4x3 CSC: the major axis is the column
         // count and the indices are row indices.
-        let indptr = [0usize, 2, 2, 3];
-        let indices = [1usize, 3, 0];
+        let indptr = [0u32, 2, 2, 3];
+        let indices = [1u32, 3, 0];
 
         assert!(
             validate_sparse_layout(&indptr, &indices, 3, (4, 3), CompressedSparseFormat::Csc)
@@ -828,13 +946,14 @@ mod tests {
         );
     }
 
+    /// Each malformed layout must be refused on its own, not just the first.
     #[test]
     fn test_validate_sparse_layout_catches_each_fault() {
         // indices and data disagree.
         assert!(
             validate_sparse_layout(
-                &[0usize, 2],
-                &[0usize, 1],
+                &[0u32, 2],
+                &[0u32, 1],
                 1,
                 (1, 2),
                 CompressedSparseFormat::Csr
@@ -843,21 +962,15 @@ mod tests {
         );
         // indptr the wrong length for the row count.
         assert!(
-            validate_sparse_layout(
-                &[0usize, 1],
-                &[0usize],
-                1,
-                (3, 2),
-                CompressedSparseFormat::Csr
-            )
-            .is_err()
+            validate_sparse_layout(&[0u32, 1], &[0u32], 1, (3, 2), CompressedSparseFormat::Csr)
+                .is_err()
         );
         // Non-monotonic pointers: the Rust range comes out empty and the row is
         // silently skipped.
         assert!(
             validate_sparse_layout(
-                &[0usize, 5, 2, 7],
-                &[0usize; 7],
+                &[0u32, 5, 2, 7],
+                &[0u32; 7],
                 7,
                 (3, 3),
                 CompressedSparseFormat::Csr
@@ -867,8 +980,8 @@ mod tests {
         // The last pointer must account for every stored value.
         assert!(
             validate_sparse_layout(
-                &[0usize, 1, 1],
-                &[0usize, 1],
+                &[0u32, 1, 1],
+                &[0u32, 1],
                 2,
                 (2, 2),
                 CompressedSparseFormat::Csr
@@ -878,8 +991,8 @@ mod tests {
         // A column index past the declared width.
         assert!(
             validate_sparse_layout(
-                &[0usize, 2],
-                &[0usize, 9],
+                &[0u32, 2],
+                &[0u32, 9],
                 2,
                 (1, 2),
                 CompressedSparseFormat::Csr
@@ -888,10 +1001,11 @@ mod tests {
         );
     }
 
+    /// An empty matrix is a legal layout, so the guards must not reject it.
     #[test]
     fn test_validate_sparse_layout_accepts_an_empty_matrix() {
         assert!(
-            validate_sparse_layout(&[0usize], &[], 0, (0, 0), CompressedSparseFormat::Csr).is_ok()
+            validate_sparse_layout(&[0u32], &[], 0, (0, 0), CompressedSparseFormat::Csr).is_ok()
         );
     }
 }

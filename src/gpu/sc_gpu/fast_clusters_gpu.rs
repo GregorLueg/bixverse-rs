@@ -369,6 +369,7 @@ mod tests {
         assert!(purity_b > 0.9, "blob B purity {}", purity_b);
     }
 
+    /// Correctness floor: two blobs give two communities, each over 90% pure.
     #[test]
     fn test_gpu_separated_blobs() {
         let Some(device) = try_device() else { return };
@@ -395,6 +396,7 @@ mod tests {
         assert_blobs_separated(&labels[0], n_per);
     }
 
+    /// Same floor for the sNN path, which prunes edges by Jaccard first.
     #[test]
     fn test_gpu_separated_blobs_snn() {
         let Some(device) = try_device() else { return };
@@ -425,6 +427,7 @@ mod tests {
         assert_blobs_separated(&labels[0], n_per);
     }
 
+    /// The same seed twice must give identical labels, k-means and Louvain.
     #[test]
     fn test_gpu_deterministic_with_same_seed() {
         let Some(device) = try_device() else { return };
@@ -450,6 +453,7 @@ mod tests {
         assert_eq!(run(device.clone()), run(device));
     }
 
+    /// With the flag set the result must also carry centroids and assignments.
     #[test]
     fn test_gpu_returns_kmeans_when_requested() {
         let Some(device) = try_device() else { return };
@@ -474,6 +478,7 @@ mod tests {
         assert_eq!(res.get_k_mean_clusters().unwrap().len(), data.nrows());
     }
 
+    /// One entry per resolution, in order, ARI in `[-1, 1]`, sane metrics.
     #[test]
     fn test_gpu_grid_shape_and_metrics() {
         let Some(device) = try_device() else { return };
@@ -515,6 +520,7 @@ mod tests {
         }
     }
 
+    /// Mean ARI needs two seeds to compare, so a single seed must error.
     #[test]
     fn test_gpu_grid_rejects_too_few_seeds() {
         let Some(device) = try_device() else { return };

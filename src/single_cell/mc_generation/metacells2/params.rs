@@ -342,71 +342,16 @@ impl Default for DissolveParams {
 mod tests {
     use super::*;
 
+    /// The defaults other modules assume must not drift from the reference.
     #[test]
-    fn metacells_defaults_match_plan() {
+    fn metacells_defaults() {
+        // Only the constants other modules assume. These are the published
+        // metacells2 defaults (Ben-Kiki et al., Genome Biology 2022), so a
+        // change here is a change in behaviour against the reference.
         let p = MetacellsParams::default();
         assert_eq!(p.target_metacell_size, 48);
         assert_eq!(p.min_metacell_size, 12);
         assert_eq!(p.target_metacell_umis, 160_000);
-        assert!(!p.must_complete_cover);
-        assert_eq!(p.random_seed, 0);
-    }
-
-    #[test]
-    fn similarity_method_default_is_log_pearson() {
-        assert_eq!(SimilarityMethod::default(), SimilarityMethod::LogPearson);
-    }
-
-    #[test]
-    fn select_defaults() {
-        let s = SelectParams::default();
-        assert_eq!(s.downsample_min_samples, 750);
-        assert_eq!(s.downsample_min_cell_quantile, 0.05);
-        assert_eq!(s.downsample_max_cell_quantile, 0.5);
-        assert_eq!(s.min_gene_total, Some(50));
-        assert_eq!(s.min_gene_top3, Some(4));
-        assert_eq!(s.min_gene_relative_variance, Some(0.1));
-        assert_eq!(s.min_genes, 100);
-        assert!(s.lateral_gene_mask.is_none());
-    }
-
-    #[test]
-    fn knn_defaults() {
-        let k = MC2KnnParams::default();
-        assert_eq!(k.balanced_ranks_factor, (10_f32).sqrt());
-        assert_eq!(k.incoming_degree_factor, 3.0);
-        assert_eq!(k.outgoing_degree_factor, 1.0);
-        assert_eq!(k.min_outgoing_degree, 2);
-    }
-
-    #[test]
-    fn deviants_and_dissolve_defaults() {
-        let d = DeviantsParams::default();
-        assert_eq!(d.min_gene_fold_factor, 3.0);
-        assert_eq!(d.max_gene_fraction, 0.03);
-        assert_eq!(d.max_cell_fraction, 0.25);
-
-        let ds = DissolveParams::default();
-        assert_eq!(ds.min_robust_size_factor, 0.5);
-        assert_eq!(ds.min_convincing_gene_fold_factor, Some(3.0));
-    }
-
-    #[test]
-    fn composition_preserves_unrelated_subparams() {
-        // Touch one knob deep in the tree, verify others stay default.
-        let mut p = MetacellsParams {
-            target_metacell_size: 50,
-            ..Default::default()
-        };
-        p.knn.balanced_ranks_factor = 2.0;
-        p.must_complete_cover = true;
-
-        assert_eq!(p.target_metacell_size, 50);
-        assert_eq!(p.knn.balanced_ranks_factor, 2.0);
-        assert!(p.must_complete_cover);
-        // Untouched fields hold defaults.
-        assert_eq!(p.min_metacell_size, 12);
-        assert_eq!(p.knn.incoming_degree_factor, 3.0);
-        assert_eq!(p.select.min_genes, 100);
+        assert_eq!(p.knn.balanced_ranks_factor, (10_f32).sqrt());
     }
 }

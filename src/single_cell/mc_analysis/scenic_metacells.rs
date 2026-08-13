@@ -802,12 +802,9 @@ mod tests {
         }
     }
 
+    /// A target column comes back with its cell indices, raw counts and normalised values.
     #[test]
     fn extract_target_column_basic() {
-        // 4 cells, 3 genes
-        // gene 0: cells 0, 2 -> raw 1, 3; norm 0.1, 0.3
-        // gene 1: cell 1 -> raw 5; norm 0.5
-        // gene 2: cells 0, 3 -> raw 2, 4; norm 0.2, 0.4
         let csc = CompressedSparseData2 {
             data: vec![1u16, 3, 5, 2, 4],
             indices: vec![0, 2, 1, 0, 3],
@@ -832,6 +829,7 @@ mod tests {
         assert_eq!(t2.data_2.as_ref().unwrap(), &vec![0.2f32, 0.4]);
     }
 
+    /// Building the TF store over every gene must match quantising the whole CSC.
     #[test]
     fn build_tf_store_matches_from_csc_full() {
         let csc = CompressedSparseData2 {
@@ -853,6 +851,7 @@ mod tests {
         assert_eq!(full.feature_range, subset.feature_range);
     }
 
+    /// Store columns follow the order of the TF index list, not the gene order.
     #[test]
     fn build_tf_store_respects_tf_order() {
         let csc = CompressedSparseData2 {
@@ -874,6 +873,7 @@ mod tests {
         }
     }
 
+    /// Quantisation is per feature, so each selected gene maps its own max to 255.
     #[test]
     fn build_tf_store_gene_subset() {
         // 4 cells, 4 genes. Pick genes 1 and 3 as TFs.
@@ -902,6 +902,7 @@ mod tests {
         assert!(col0[2] < col0[3]);
     }
 
+    /// Subsetting cells renumbers the row indices and keeps every gene column in place.
     #[test]
     fn subset_csc_rows_keeps_all_genes() {
         let csc = CompressedSparseData2 {
@@ -936,6 +937,7 @@ mod tests {
         );
     }
 
+    /// A reordering subset relabels the row indices without moving the stored values.
     #[test]
     fn subset_csc_cell_reorder() {
         let csc = CompressedSparseData2 {
@@ -953,6 +955,7 @@ mod tests {
         assert_eq!(sub.data_2.as_ref().unwrap(), &vec![0.1f32, 0.2, 0.3]);
     }
 
+    /// The gradient-boosting learner ranks the driving TF above the noise TFs.
     #[test]
     fn in_memory_scenic_gbm_smoke() {
         let csc = build_smoke_csc(80, 3, 2, 7);
@@ -976,7 +979,6 @@ mod tests {
         };
 
         let result = run_scenic_grn_in_memory(&csc, &[0, 1, 2], &params, 42, 0).unwrap();
-        // 5 columns (3 TFs + 2 targets) -> n_genes = 5, n_tfs = 3
         assert_eq!(result.nrows(), 5);
         assert_eq!(result.ncols(), 3);
 
@@ -988,6 +990,7 @@ mod tests {
         );
     }
 
+    /// Extra-trees importances per gene either sum to one or are all zero.
     #[test]
     fn in_memory_scenic_extratrees_smoke() {
         let csc = build_smoke_csc(80, 3, 2, 13);

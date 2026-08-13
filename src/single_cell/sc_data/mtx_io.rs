@@ -926,6 +926,106 @@ fn parse_mtx_line(line: &[u8]) -> Option<(u32, u32, u32)> {
 mod tests {
     use super::*;
 
+    ///////////////
+    // Fixtures //
+    ///////////////
+
+    /// Three cells x four genes, cells as rows, five entries. All indices are
+    /// base-1 as the Matrix Market spec demands.
+    ///
+    /// ```text
+    ///        g0 g1 g2 g3
+    ///   c0 [  5  .  7  . ]
+    ///   c1 [  .  3  .  . ]
+    ///   c2 [  2  .  .  9 ]
+    /// ```
+    const CELLS_AS_ROWS_MTX: &str = "%%MatrixMarket matrix coordinate integer general\n\
+%\n\
+3 4 5\n\
+1 1 5\n\
+1 3 7\n\
+2 2 3\n\
+3 1 2\n\
+3 4 9\n";
+
+    /// The transpose of [`CELLS_AS_ROWS_MTX`], i.e. genes as rows.
+    const GENES_AS_ROWS_MTX: &str = "%%MatrixMarket matrix coordinate integer general\n\
+%\n\
+4 3 5\n\
+1 1 5\n\
+3 1 7\n\
+2 2 3\n\
+1 3 2\n\
+4 3 9\n";
+
+    /// The `(gene indices, raw counts)` the two fixtures both encode.
+    fn expected_cells() -> Vec<(Vec<u32>, Vec<u32>)> {
+        vec![
+            (vec![0, 2], vec![5, 7]),
+            (vec![1], vec![3]),
+            (vec![0, 3], vec![2, 9]),
+        ]
+    }
+
+    /// RAII guard that removes a test's scratch file even if an assert fails.
+    struct TempPath(PathBuf);
+
+    /// Drop implementation for [`TempPath`]. Errors are ignored: the file may
+    /// already be gone, and this runs during unwind.
+    impl Drop for TempPath {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    impl TempPath {
+        /// Reserve a scratch file named after the calling test. The test name
+        /// is the uniqueness guarantee: `cargo test` runs the whole module in
+        /// one process, so a PID alone would collide across threads.
+        fn new(name: &str, ext: &str) -> Self {
+            Self(std::env::temp_dir().join(format!("bixverse_mtx_io_{name}.{ext}")))
+        }
+
+        /// Path of the guarded file as a `&str`.
+        fn path(&self) -> &str {
+            self.0.to_str().expect("temp path is valid UTF-8")
+        }
+    }
+
+    /// Write `body` to a scratch `.mtx` file and hand back its guard.
+    fn write_mtx(name: &str, body: &str) -> TempPath {
+        let temp = TempPath::new(name, "mtx");
+        std::fs::write(&temp.0, body).expect("mtx file written");
+        temp
+    }
+
+    /// QC thresholds that keep every cell and gene of the fixtures.
+    fn keep_all_qc() -> MinCellQuality {
+        MinCellQuality {
+            min_unique_genes: 1,
+            min_lib_size: 1,
+            min_cells: 1,
+            target_size: 1e4,
+        }
+    }
+
+    /// Read the first `n_cells` cells of a written store back as
+    /// `(gene indices, raw counts)`.
+    fn read_back(bin_path: &str, n_cells: usize) -> Vec<(Vec<u32>, Vec<u32>)> {
+        let reader = ParallelSparseReader::new(bin_path).expect("reader opens");
+        let indices: Vec<usize> = (0..n_cells).collect();
+        reader
+            .read_cells_parallel(&indices)
+            .expect("cells read back")
+            .into_iter()
+            .map(|c| (c.indices.clone(), c.data_raw.iter().collect()))
+            .collect()
+    }
+
+    /////////////////
+    // Line parser //
+    /////////////////
+
     /// Regression: the parser used to saturate counts at `u16::MAX`.
     #[test]
     fn test_parse_mtx_line_keeps_full_u32_counts() {
@@ -935,11 +1035,278 @@ mod tests {
         assert_eq!(parse_mtx_line(b"1 2 4294967295"), Some((1, 2, u32::MAX)));
     }
 
+    /// Empty, non-numeric and short lines give `None`, not a partial triplet.
     #[test]
     fn test_parse_mtx_line_rejects_malformed_input() {
         assert_eq!(parse_mtx_line(b""), None);
         assert_eq!(parse_mtx_line(b"abc"), None);
         assert_eq!(parse_mtx_line(b"1"), None);
         assert_eq!(parse_mtx_line(b"1 2"), None);
+    }
+
+    ////////////
+    // Header //
+    ////////////
+
+    /// The shape line is split by orientation, so both readings of the same
+    /// three numbers have to be pinned.
+    #[test]
+    fn mtx_header_shape_line_is_read_per_orientation() {
+        let mtx = write_mtx("header_shape", CELLS_AS_ROWS_MTX);
+
+        let cells_as_rows = MtxReader::new(mtx.path(), keep_all_qc(), true).expect("reader opens");
+        assert_eq!(cells_as_rows.header.total_cells, 3);
+        assert_eq!(cells_as_rows.header.total_genes, 4);
+        assert_eq!(cells_as_rows.header.total_entries, 5);
+
+        // Same file read the other way round: the first two fields swap roles.
+        let genes_as_rows = MtxReader::new(mtx.path(), keep_all_qc(), false).expect("reader opens");
+        assert_eq!(genes_as_rows.header.total_cells, 4);
+        assert_eq!(genes_as_rows.header.total_genes, 3);
+        assert_eq!(genes_as_rows.header.total_entries, 5);
+    }
+
+    /// A shape line that is not three fields must raise `MtxHeaderInvalid`
+    /// rather than index past the end of the split.
+    #[test]
+    fn mtx_header_with_wrong_field_count_is_rejected() {
+        let mtx = write_mtx(
+            "header_two_fields",
+            "%%MatrixMarket matrix coordinate integer general\n3 4\n1 1 5\n",
+        );
+
+        assert!(matches!(
+            MtxReader::new(mtx.path(), keep_all_qc(), true),
+            Err(BixverseErrors::MtxHeaderInvalid(_))
+        ));
+    }
+
+    /// `MtxParseError` has to name the field that failed, and the name depends
+    /// on the orientation because the first two fields swap.
+    #[test]
+    fn mtx_header_parse_error_names_the_failing_field() {
+        let bad_second = write_mtx(
+            "header_bad_second",
+            "%%MatrixMarket matrix coordinate integer general\n3 x 5\n",
+        );
+        assert!(matches!(
+            MtxReader::new(bad_second.path(), keep_all_qc(), true),
+            Err(BixverseErrors::MtxParseError {
+                field: "gene count"
+            })
+        ));
+        // Cells are the columns now, so the same broken field is the cell count.
+        assert!(matches!(
+            MtxReader::new(bad_second.path(), keep_all_qc(), false),
+            Err(BixverseErrors::MtxParseError {
+                field: "cell count"
+            })
+        ));
+
+        let bad_third = write_mtx(
+            "header_bad_third",
+            "%%MatrixMarket matrix coordinate integer general\n3 4 x\n",
+        );
+        assert!(matches!(
+            MtxReader::new(bad_third.path(), keep_all_qc(), true),
+            Err(BixverseErrors::MtxParseError {
+                field: "entry count"
+            })
+        ));
+    }
+
+    /// A missing file must surface as an I/O error, not a panic on unwrap.
+    #[test]
+    fn mtx_reader_reports_a_missing_file() {
+        let missing = std::env::temp_dir().join("bixverse_mtx_io_does_not_exist.mtx");
+        assert!(matches!(
+            MtxReader::new(&missing, keep_all_qc(), true),
+            Err(BixverseErrors::BinaryIo(_))
+        ));
+    }
+
+    /////////////////
+    // Quality pass //
+    /////////////////
+
+    /// `parse_mtx_quality` drives every downstream index remap, so pin the
+    /// gene-then-cell filter order and the old-to-new maps it builds.
+    #[test]
+    fn parse_mtx_quality_filters_genes_then_cells() {
+        let mtx = write_mtx("quality_filters", CELLS_AS_ROWS_MTX);
+
+        // Everything permissive: nothing is dropped and the maps are identities.
+        let mut reader = MtxReader::new(mtx.path(), keep_all_qc(), true).expect("reader opens");
+        let quality = reader.parse_mtx_quality(false).expect("quality pass");
+        assert_eq!(quality.cells_to_keep, vec![0, 1, 2]);
+        assert_eq!(quality.genes_to_keep, vec![0, 1, 2, 3]);
+
+        // min_cells = 2 keeps only gene 0, which is seen in cells 0 and 2.
+        // Cell 1 then has zero kept entries and fails min_unique_genes = 1.
+        let qc = MinCellQuality {
+            min_unique_genes: 1,
+            min_lib_size: 1,
+            min_cells: 2,
+            target_size: 1e4,
+        };
+        let mut reader = MtxReader::new(mtx.path(), qc, true).expect("reader opens");
+        let quality = reader.parse_mtx_quality(false).expect("quality pass");
+        assert_eq!(quality.genes_to_keep, vec![0]);
+        assert_eq!(quality.cells_to_keep, vec![0, 2]);
+        assert_eq!(quality.cell_old_to_new[&0], 0);
+        assert_eq!(quality.cell_old_to_new[&2], 1);
+        assert_eq!(quality.gene_old_to_new[&0], 0);
+    }
+
+    /////////////////
+    // Round trips //
+    /////////////////
+
+    /// The only mtx -> bin -> reader path in the crate. Counts and gene indices
+    /// have to survive the conversion untouched.
+    #[test]
+    fn mtx_round_trip_preserves_counts_and_indices() {
+        let mtx = write_mtx("round_trip", CELLS_AS_ROWS_MTX);
+        let bin = TempPath::new("round_trip", "bin");
+
+        let mut reader = MtxReader::new(mtx.path(), keep_all_qc(), true).expect("reader opens");
+        let quality = reader.parse_mtx_quality(false).expect("quality pass");
+        let final_data = reader
+            .process_mtx_and_write_bin(bin.path(), &quality, false)
+            .expect("conversion");
+
+        assert_eq!(final_data.no_cells, 3);
+        assert_eq!(final_data.no_genes, 4);
+        // Library sizes: 5 + 7 = 12, 3, 2 + 9 = 11.
+        assert_eq!(final_data.cell_qc.lib_size, vec![12, 3, 11]);
+        assert_eq!(final_data.cell_qc.nnz, vec![2, 1, 2]);
+
+        assert_eq!(read_back(bin.path(), 3), expected_cells());
+    }
+
+    /// Matrix Market is base-1. The lowest legal index has to land on 0 and the
+    /// highest on `n - 1`, with nothing shifted in between.
+    #[test]
+    fn mtx_indices_shift_from_base_one_to_base_zero() {
+        let mtx = write_mtx(
+            "base_one",
+            "%%MatrixMarket matrix coordinate integer general\n2 3 2\n1 1 42\n2 3 7\n",
+        );
+        let bin = TempPath::new("base_one", "bin");
+
+        let mut reader = MtxReader::new(mtx.path(), keep_all_qc(), true).expect("reader opens");
+        let quality = reader.parse_mtx_quality(false).expect("quality pass");
+        reader
+            .process_mtx_and_write_bin(bin.path(), &quality, false)
+            .expect("conversion");
+
+        // Only genes 1 and 3 (base-1) carry counts, so the kept genes are the
+        // old 0 and 2, renumbered to 0 and 1.
+        assert_eq!(quality.genes_to_keep, vec![0, 2]);
+        assert_eq!(
+            read_back(bin.path(), 2),
+            vec![(vec![0], vec![42]), (vec![1], vec![7])]
+        );
+    }
+
+    /// The two orientations parse different files but must produce the same
+    /// store, which is the only cross-check on the row/column swap.
+    #[test]
+    fn mtx_gene_as_rows_matches_cell_as_rows() {
+        let mtx = write_mtx("orientation", GENES_AS_ROWS_MTX);
+        let bin = TempPath::new("orientation", "bin");
+
+        let mut reader = MtxReader::new(mtx.path(), keep_all_qc(), false).expect("reader opens");
+        let quality = reader.parse_mtx_quality(false).expect("quality pass");
+        let final_data = reader
+            .process_mtx_and_write_bin(bin.path(), &quality, false)
+            .expect("conversion");
+
+        assert_eq!(final_data.no_cells, 3);
+        assert_eq!(final_data.no_genes, 4);
+        assert_eq!(final_data.cell_qc.lib_size, vec![12, 3, 11]);
+        assert_eq!(read_back(bin.path(), 3), expected_cells());
+    }
+
+    /// The streaming writer buckets to temp files and re-sorts; it must land on
+    /// exactly the same store as the in-memory writer.
+    #[test]
+    fn mtx_streaming_matches_non_streaming() {
+        let mtx = write_mtx("streaming", CELLS_AS_ROWS_MTX);
+        let bin_plain = TempPath::new("streaming_plain", "bin");
+        let bin_stream = TempPath::new("streaming_stream", "bin");
+
+        let mut reader = MtxReader::new(mtx.path(), keep_all_qc(), true).expect("reader opens");
+        let quality = reader.parse_mtx_quality(false).expect("quality pass");
+        let plain = reader
+            .process_mtx_and_write_bin(bin_plain.path(), &quality, false)
+            .expect("conversion");
+
+        let reader = MtxReader::new(mtx.path(), keep_all_qc(), true).expect("reader opens");
+        let streamed = reader
+            .process_mtx_and_write_bin_streaming(bin_stream.path(), &quality, false)
+            .expect("streaming conversion");
+
+        assert_eq!(streamed.no_cells, plain.no_cells);
+        assert_eq!(streamed.no_genes, plain.no_genes);
+        assert_eq!(streamed.cell_qc.lib_size, plain.cell_qc.lib_size);
+        assert_eq!(streamed.cell_qc.nnz, plain.cell_qc.nnz);
+        assert_eq!(
+            read_back(bin_stream.path(), 3),
+            read_back(bin_plain.path(), 3)
+        );
+    }
+
+    /// An empty input has no cells to keep; the streaming path short-circuits
+    /// there and still has to leave a readable, empty store behind.
+    #[test]
+    fn mtx_streaming_writes_a_readable_store_when_nothing_is_kept() {
+        let bin = TempPath::new("streaming_empty", "bin");
+        let mtx = write_mtx("streaming_empty", CELLS_AS_ROWS_MTX);
+
+        let reader = MtxReader::new(mtx.path(), keep_all_qc(), true).expect("reader opens");
+        let mut quality = CellOnFileQuality::new(vec![], vec![0, 1, 2, 3]);
+        quality.generate_maps_sets();
+
+        let final_data = reader
+            .process_mtx_and_write_bin_streaming(bin.path(), &quality, false)
+            .expect("streaming conversion");
+
+        assert_eq!(final_data.no_cells, 0);
+        assert_eq!(final_data.no_genes, 4);
+        assert!(final_data.cell_qc.lib_size.is_empty());
+
+        let reader = ParallelSparseReader::new(bin.path()).expect("reader opens");
+        assert!(reader.is_cell_based());
+        assert_eq!(reader.get_header().total_cells, 0);
+    }
+
+    /// Defect pin: a kept cell with no kept entries is never written, so
+    /// `lib_size` / `nnz` come back shorter than `cell_indices` and the two
+    /// stop lining up. Both writers agree on the flaw.
+    #[test]
+    fn mtx_kept_cell_without_entries_desyncs_the_quality_vectors() {
+        let mtx = write_mtx("empty_cell", CELLS_AS_ROWS_MTX);
+        let bin = TempPath::new("empty_cell", "bin");
+
+        // Keep every cell but only gene 0, which cell 1 does not express.
+        let reader = MtxReader::new(mtx.path(), keep_all_qc(), true).expect("reader opens");
+        let mut quality = CellOnFileQuality::new(vec![0, 1, 2], vec![0]);
+        quality.generate_maps_sets();
+
+        let final_data = reader
+            .process_mtx_and_write_bin(bin.path(), &quality, false)
+            .expect("conversion");
+
+        assert_eq!(final_data.cell_qc.cell_indices.len(), 3);
+        assert_eq!(final_data.cell_qc.lib_size, vec![5, 2]);
+        assert_eq!(final_data.cell_qc.nnz, vec![1, 1]);
+
+        // Cell 1 has no chunk on disk at all.
+        let store = ParallelSparseReader::new(bin.path()).expect("reader opens");
+        assert!(matches!(
+            store.read_cells_parallel(&[1]),
+            Err(BixverseErrors::ChunkIndexNotFound(1))
+        ));
     }
 }

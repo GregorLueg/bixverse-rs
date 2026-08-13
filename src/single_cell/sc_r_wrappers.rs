@@ -14,10 +14,11 @@ use crate::single_cell::mc_generation::{
 use crate::single_cell::sc_analysis::{
     dge_pathway_scores::{AucellParams, parse_auc_type},
     fast_clusters::FastLouvainParams,
-    hotspot::HotSpotParams,
+    hotspot::{HotSpotGraphParams, HotSpotParams},
     meld::{MeldParams, parse_lap_type, parse_meld_filter},
     milo_r::MiloRParams,
     nichenet::ligand_regulatory_potential::LigandTargetParams,
+    regulon_binarise::BinariseParams,
     scenic::{
         ExtraTreesConfig, GradientBoostingConfig, RandomForestConfig, RegressionLearner,
         ScenicParams,
@@ -25,6 +26,7 @@ use crate::single_cell::sc_analysis::{
     vision::SignatureGenes,
 };
 use crate::single_cell::sc_data::h5ad_io::parse_h5ad_format;
+use crate::single_cell::sc_processing::knn::distances_are_squared;
 use crate::single_cell::sc_processing::magic::{MagicLayer, MagicParams};
 use crate::single_cell::sc_trajectory::gene_trends::{
     BranchSelectionParams, BranchWeighting, GeneTrendsParams,
@@ -1544,10 +1546,37 @@ impl HotSpotParams {
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
 
+        // both default to what `Hotspot.create_knn_graph` ships upstream
+        let defaults = HotSpotGraphParams::default();
+        let weighted_graph = params_list
+            .get("weighted_graph")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.weighted_graph);
+
+        let neighborhood_factor = params_list
+            .get("neighborhood_factor")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .filter(|v| *v > 0.0)
+            .unwrap_or(defaults.neighborhood_factor);
+
+        // whether the distances are pre-squared follows from the metric, so it
+        // is derived rather than asked for. A caller handing over a
+        // pre-computed graph built with a different metric has to say so.
+        let squared_distances = params_list
+            .get("squared_distances")
+            .and_then(|v| v.as_bool())
+            .unwrap_or_else(|| distances_are_squared(&knn_params.ann_dist));
+
         Ok(Self {
             model,
             normalise,
             knn_params,
+            graph_params: HotSpotGraphParams::new(
+                weighted_graph,
+                neighborhood_factor,
+                squared_distances,
+            ),
         })
     }
 }
@@ -3119,6 +3148,45 @@ impl AucellParams {
             auc_type,
             max_rank,
             standardise,
+        })
+    }
+}
+
+impl BinariseParams {
+    /// Generate BinariseParams from an R list, falling back to defaults.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The R list from which to parse the arguments
+    ///
+    /// ### Returns
+    ///
+    /// The populated [BinariseParams]
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+        let defaults = Self::default();
+
+        let bw_adjust = params
+            .get("bw_adjust")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.bw_adjust);
+
+        let n_grid = params
+            .get("n_grid")
+            .and_then(|v| v.as_real())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.n_grid);
+
+        let n_bins = params
+            .get("n_bins")
+            .and_then(|v| v.as_real())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.n_bins);
+
+        Ok(Self {
+            bw_adjust,
+            n_grid,
+            n_bins,
         })
     }
 }

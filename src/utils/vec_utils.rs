@@ -17,6 +17,30 @@ use crate::prelude::*;
 // Vector helpers //
 ////////////////////
 
+/// Split `0..n` into one contiguous range per rayon worker.
+///
+/// For fan-outs where each worker carries scratch proportional to the whole
+/// problem, one chunk per worker is what keeps the number of allocations and
+/// merges down to the thread count. Rayon's own splitting is the better choice
+/// whenever the per-item work is self-contained.
+///
+/// ### Params
+///
+/// * `n` - Length of the range to split
+///
+/// ### Returns
+///
+/// Half-open `(start, end)` ranges covering `0..n`. Empty when `n` is zero.
+pub fn thread_chunks(n: usize) -> Vec<(usize, usize)> {
+    let n_threads = rayon::current_num_threads().max(1);
+    let chunk = n.div_ceil(n_threads).max(1);
+
+    (0..n)
+        .step_by(chunk)
+        .map(|start| (start, (start + chunk).min(n)))
+        .collect()
+}
+
 /// Flatten a nested vector
 ///
 /// ### Params
@@ -298,174 +322,127 @@ mod tests {
         a.len() == b.len() && a.iter().zip(b).all(|(&x, &y)| approx_eq(x, y))
     }
 
+    /// Order survives the nesting and empty inner vectors contribute nothing.
     #[test]
-    fn test_flatten_vector_basic() {
+    fn test_flatten_vector() {
         let nested = vec![vec![1, 2], vec![3], vec![4, 5]];
         assert_eq!(flatten_vector(nested), vec![1, 2, 3, 4, 5]);
+
+        let with_empties: Vec<Vec<i32>> = vec![vec![], vec![1], vec![]];
+        assert_eq!(flatten_vector(with_empties), vec![1]);
     }
 
-    #[test]
-    fn test_flatten_vector_empty_inner() {
-        let nested: Vec<Vec<i32>> = vec![vec![], vec![1], vec![]];
-        assert_eq!(flatten_vector(nested), vec![1]);
-    }
-
+    /// The maximum, including the single-element slice the loop seeds from.
     #[test]
     fn test_array_max() {
         assert_eq!(array_max(&[3, 1, 4, 1, 5, 9, 2, 6]), 9);
-    }
-
-    #[test]
-    fn test_array_max_single() {
         assert_eq!(array_max(&[42]), 42);
     }
 
+    /// The minimum, including the single-element slice the loop seeds from.
     #[test]
     fn test_array_min() {
         assert_eq!(array_min(&[3, 1, 4, 1, 5, 9, 2, 6]), 1);
-    }
-
-    #[test]
-    fn test_array_min_single() {
         assert_eq!(array_min(&[42]), 42);
     }
 
+    /// The fused scan returns `(max, min)` in that order, which is easy to swap.
     #[test]
     fn test_array_max_min() {
         let (max, min) = array_max_min(&[3.0_f64, 1.0, 4.0, 1.0, 5.0, 9.0]);
         assert!(approx_eq(max, 9.0));
         assert!(approx_eq(min, 1.0));
-    }
 
-    #[test]
-    fn test_array_max_min_single() {
         let (max, min) = array_max_min(&[7]);
         assert_eq!(max, 7);
         assert_eq!(min, 7);
     }
 
+    /// Repeats collapse to one entry and every distinct value survives.
     #[test]
-    fn test_unique_removes_duplicates() {
+    fn test_unique() {
         let mut result = unique(&[1, 2, 2, 3, 3, 3]);
         result.sort();
         assert_eq!(result, vec![1, 2, 3]);
-    }
 
-    #[test]
-    fn test_unique_no_duplicates() {
         let mut result = unique(&[4, 2, 1]);
         result.sort();
         assert_eq!(result, vec![1, 2, 4]);
     }
 
+    /// The running sum is inclusive, so the last entry is the total.
     #[test]
-    fn test_cumsum_basic() {
+    fn test_cumsum() {
         let result = cumsum(&[1.0_f64, 2.0, 3.0, 4.0]);
         assert!(vec_approx_eq(&result, &[1.0, 3.0, 6.0, 10.0]));
-    }
 
-    #[test]
-    fn test_cumsum_single() {
         let result = cumsum(&[5.0_f64]);
         assert!(vec_approx_eq(&result, &[5.0]));
     }
 
+    /// The split honours the requested length, loses nothing, and repeats per seed.
     #[test]
-    fn test_split_vector_randomly_lengths() {
+    fn test_split_vector_randomly() {
         let vec: Vec<i32> = (0..10).collect();
+
         let (a, b) = split_vector_randomly(&vec, 4, 42);
         assert_eq!(a.len(), 4);
         assert_eq!(b.len(), 6);
-    }
 
-    #[test]
-    fn test_split_vector_randomly_contains_all() {
-        let vec: Vec<i32> = (0..10).collect();
+        // The split is a partition: nothing lost, nothing duplicated.
         let (mut a, mut b) = split_vector_randomly(&vec, 4, 42);
         a.append(&mut b);
         a.sort();
         assert_eq!(a, vec);
-    }
 
-    #[test]
-    fn test_split_vector_randomly_reproducible() {
-        let vec: Vec<i32> = (0..10).collect();
         let (a1, _) = split_vector_randomly(&vec, 4, 99);
         let (a2, _) = split_vector_randomly(&vec, 4, 99);
         assert_eq!(a1, a2);
     }
 
+    /// The extremes land on exactly 0 and 1 with everything between spaced linearly.
     #[test]
-    fn test_min_max_scale_basic() {
+    fn test_min_max_scale() {
         let result = min_max_scale(&[0.0_f64, 1.0, 2.0, 3.0, 4.0]);
         assert!(vec_approx_eq(&result, &[0.0, 0.25, 0.5, 0.75, 1.0]));
-    }
 
-    #[test]
-    fn test_min_max_scale_uniform() {
+        // Zero range collapses to zeroes rather than dividing by zero.
         let result = min_max_scale(&[3.0_f64, 3.0, 3.0]);
         assert!(vec_approx_eq(&result, &[0.0, 0.0, 0.0]));
     }
 
+    /// Ranks divided by n, with tied values taking the averaged rank.
     #[test]
-    fn test_min_max_scale_empty() {
-        let result = min_max_scale::<f64>(&[]);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_rank_normalise_basic() {
-        let result = rank_normalise(&[10.0_f64, 30.0, 20.0]);
+    fn test_rank_normalise() {
         // ranks: 1, 3, 2 -> divided by 3
+        let result = rank_normalise(&[10.0_f64, 30.0, 20.0]);
         assert!(vec_approx_eq(&result, &[1.0 / 3.0, 1.0, 2.0 / 3.0]));
-    }
 
-    #[test]
-    fn test_rank_normalise_ties() {
-        let result = rank_normalise(&[1.0_f64, 1.0, 3.0]);
         // ranks: avg(1,2)=1.5, 1.5, 3 -> divided by 3
+        let result = rank_normalise(&[1.0_f64, 1.0, 3.0]);
         assert!(vec_approx_eq(&result, &[0.5, 0.5, 1.0]));
     }
 
+    /// Checked as zero mean and unit variance rather than against fixed values.
     #[test]
-    fn test_rank_normalise_empty() {
-        let result = rank_normalise::<f64>(&[]);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_zscore_normalise_mean_zero() {
-        let result = zscore_normalise(&[2.0_f64, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]);
-        let mean: f64 = result.iter().sum::<f64>() / result.len() as f64;
-        assert!(approx_eq(mean, 0.0));
-    }
-
-    #[test]
-    fn test_zscore_normalise_unit_variance() {
+    fn test_zscore_normalise() {
         let result = zscore_normalise(&[2.0_f64, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]);
         let mean: f64 = result.iter().sum::<f64>() / result.len() as f64;
         let variance: f64 =
             result.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / result.len() as f64;
+        assert!(approx_eq(mean, 0.0));
         assert!(approx_eq(variance, 1.0));
-    }
 
-    #[test]
-    fn test_zscore_normalise_uniform() {
+        // Zero standard deviation collapses to zeroes.
         let result = zscore_normalise(&[5.0_f64, 5.0, 5.0]);
         assert!(vec_approx_eq(&result, &[0.0, 0.0, 0.0]));
     }
 
+    /// Median-and-MAD scaling, including the zero-MAD and empty-input branches.
     #[test]
-    fn test_zscore_normalise_empty() {
-        let result = zscore_normalise::<f64>(&[]);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_robust_scale_basic() {
-        // median = 3, raw MAD = median(|2,0,1,2,1|) = 1, scaled MAD = 1 * MAD_SCALE
-        // values: [1, 3, 2, 5, 4] -> sorted [1,2,3,4,5], median = 3
-        // deviations: [-2, 0, -1, 2, 1] / MAD_SCALE
+    fn test_robust_scale() {
+        // values [1, 3, 2, 5, 4] -> median 3, raw MAD median(|2,0,1,2,1|) = 1,
+        // scaled MAD = 1 * MAD_SCALE
         let result = robust_scale(&[1.0_f64, 3.0, 2.0, 5.0, 4.0]).unwrap();
         assert!(vec_approx_eq(
             &result,
@@ -477,17 +454,10 @@ mod tests {
                 0.6744897501960817
             ]
         ));
-    }
 
-    #[test]
-    fn test_robust_scale_uniform_mad() {
         let result = robust_scale(&[4.0_f64, 4.0, 4.0]).unwrap();
         assert!(vec_approx_eq(&result, &[0.0, 0.0, 0.0]));
-    }
 
-    #[test]
-    fn test_robust_scale_empty() {
-        let result = robust_scale::<f64>(&[]);
-        assert!(result.is_none());
+        assert!(robust_scale::<f64>(&[]).is_none());
     }
 }

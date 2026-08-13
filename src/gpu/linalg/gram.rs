@@ -565,7 +565,7 @@ mod tests {
     // the reduce kernel are both exercised.
     #[test]
     // Heavy: n = 40000 against a host reference that is a 92 MFLOP triple loop.
-    #[cfg(feature = "large_scale_diagnostics")]
+    #[cfg(feature = "large-test")]
     fn test_gram_aat_split_k_path() {
         if try_device().is_none() {
             return;

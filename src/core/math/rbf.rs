@@ -267,6 +267,7 @@ where
 mod tests {
     use super::*;
 
+    /// The kernel name parser ignores case and rejects anything it does not know.
     #[test]
     fn test_parse_rbf_types() {
         assert!(matches!(
@@ -281,32 +282,30 @@ mod tests {
         assert!(parse_rbf_types("unknown").is_none());
     }
 
+    /// The Gaussian kernel `exp(-(eps d)^2)` at zero and unit distance.
     #[test]
     fn test_rbf_gaussian() {
         let dist: Vec<f64> = vec![0.0, 1.0];
         let eps = 1.0;
         let res = rbf_gaussian(&dist, &eps);
 
-        // exp(-(0 * 1)^2) = 1.0
         assert!((res[0] - 1.0).abs() < 1e-6);
-        // exp(-(1 * 1)^2) = exp(-1) ≈ 0.367879
         assert!((res[1] - std::f64::consts::E.powi(-1)).abs() < 1e-6);
     }
 
+    /// The inverse quadratic kernel `1 / (1 + (eps d)^2)` at distances zero, one and two.
     #[test]
     fn test_rbf_inverse_quadratic() {
         let dist: Vec<f64> = vec![0.0, 1.0, 2.0];
         let eps = 1.0;
         let res = rbf_inverse_quadratic(&dist, &eps);
 
-        // 1 / (1 + (0*1)^2) = 1.0
         assert!((res[0] - 1.0).abs() < 1e-6);
-        // 1 / (1 + (1*1)^2) = 0.5
         assert!((res[1] - 0.5).abs() < 1e-6);
-        // 1 / (1 + (2*1)^2) = 0.2
         assert!((res[2] - 0.2).abs() < 1e-6);
     }
 
+    /// The bump kernel peaks at one and is exactly zero outside its `1 / eps` support.
     #[test]
     fn test_rbf_bump() {
         let dist: Vec<f64> = vec![0.0, 2.0];

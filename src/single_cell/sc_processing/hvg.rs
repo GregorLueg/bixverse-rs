@@ -578,7 +578,9 @@ pub fn gene_stats(
 ///
 /// ### Params
 ///
-/// * `stats` - First-pass statistics for this gene and batch
+/// * `mean` - Mean over the selected cells, zeros included
+/// * `min` - Smallest selected value, zeros included
+/// * `max` - Largest selected value
 /// * `expected_var` - Expected variance from the loess fit
 /// * `clip_max` - Symmetric clip applied to the standardised values
 ///
@@ -586,14 +588,14 @@ pub fn gene_stats(
 ///
 /// `true` when the gene needs the exact, distribution-aware treatment.
 #[inline]
-pub fn clip_is_reachable(stats: &GeneStats, expected_var: f32, clip_max: f32) -> bool {
+pub fn clip_is_reachable(mean: f32, min: f32, max: f32, expected_var: f32, clip_max: f32) -> bool {
     if !expected_var.is_finite() || expected_var < MIN_EXPECTED_VAR {
         return true;
     }
 
     let reach = clip_max * expected_var.sqrt();
 
-    (stats.max_count as f32 - stats.mean) > reach || (stats.mean - stats.min_count as f32) > reach
+    (max - mean) > reach || (mean - min) > reach
 }
 
 /// Exact standardised variance for one gene across every batch.
@@ -1083,11 +1085,18 @@ pub fn run_hvg_vst<S: SingleCellReading>(
         .filter_map(|(gene, (gene_stats, out))| {
             let mut reachable = false;
             for (batch, value) in out.iter_mut().enumerate() {
+                let stats = &gene_stats[batch];
                 let expected_var = 10_f32.powf(loess_results[batch].fitted_vals[gene]);
-                if clip_is_reachable(&gene_stats[batch], expected_var, clips[batch]) {
+                if clip_is_reachable(
+                    stats.mean,
+                    stats.min_count as f32,
+                    stats.max_count as f32,
+                    expected_var,
+                    clips[batch],
+                ) {
                     reachable = true;
                 } else {
-                    *value = gene_stats[batch].var / expected_var;
+                    *value = stats.var / expected_var;
                 }
             }
             if reachable { Some(gene) } else { None }
@@ -1734,51 +1743,24 @@ mod tests {
 
     impl TempStore {
         /// Reserve a uniquely named scratch store in the system temp directory.
-        ///
-        /// ### Params
-        ///
-        /// * `name` - Test-unique suffix
-        ///
-        /// ### Returns
-        ///
-        /// The guard; the path is available via [`Self::path`].
         fn new(name: &str) -> Self {
             Self(std::env::temp_dir().join(format!("bixverse_hvg_{name}.bin")))
         }
 
         /// Path of the guarded store as a `&str`.
-        ///
-        /// ### Returns
-        ///
-        /// The path.
         fn path(&self) -> &str {
             self.0.to_str().expect("temp path is valid UTF-8")
         }
     }
 
-    /// Normalised layer value for a raw count.
-    ///
-    /// Quantised through `f16` exactly as the writer does, so the dense
-    /// reference and the driver see identical inputs.
-    ///
-    /// ### Params
-    ///
-    /// * `count` - The raw count
-    ///
-    /// ### Returns
-    ///
-    /// The stored `data_norm` value.
+    /// The stored `data_norm` value for a raw count, quantised through `f16`
+    /// exactly as the writer does so the dense reference and the driver see
+    /// identical inputs.
     fn norm_of(count: u32) -> F16 {
         F16::from_f32((count as f32).ln_1p())
     }
 
-    /// Write a dense count matrix out as a gene-based store.
-    ///
-    /// ### Params
-    ///
-    /// * `path` - Where to write
-    /// * `dense` - `dense[gene][cell]` raw counts
-    /// * `n_cells` - Number of cells, i.e. the row length of `dense`
+    /// Write a `dense[gene][cell]` count matrix out as a gene-based store.
     fn write_store(path: &str, dense: &[Vec<u32>], n_cells: usize) {
         let mut writer = CellGeneSparseWriter::new(path, false, n_cells, dense.len(), 1e4)
             .expect("writer opens");
@@ -1808,16 +1790,7 @@ mod tests {
         writer.finalise().expect("finalise");
     }
 
-    /// Deterministic sparse count matrix, no RNG dependency.
-    ///
-    /// ### Params
-    ///
-    /// * `n_genes` - Number of genes
-    /// * `n_cells` - Number of cells
-    ///
-    /// ### Returns
-    ///
-    /// `dense[gene][cell]` raw counts, roughly 40% dense.
+    /// Deterministic `dense[gene][cell]` counts, roughly 40% dense, no RNG dependency.
     fn synthetic_counts(n_genes: usize, n_cells: usize) -> Vec<Vec<u32>> {
         let mut state = 0x2545_F491_4F6C_DD1Du64;
         let mut dense = vec![vec![0u32; n_cells]; n_genes];
@@ -1837,21 +1810,9 @@ mod tests {
         dense
     }
 
-    /// Dense reference implementation of the VST statistics.
-    ///
-    /// Iterates every selected cell including the zeros, so it shares no code
-    /// with the summary-based kernels.
-    ///
-    /// ### Params
-    ///
-    /// * `dense` - `dense[gene][cell]` raw counts
-    /// * `cells` - Selected cell ids
-    /// * `loess_span` - Span parameter for the loess function
-    /// * `clip_max` - Optional clip, defaults to `sqrt(n_cells)`
-    ///
-    /// ### Returns
-    ///
-    /// `(mean, var, var_exp, var_std)` per gene.
+    /// Dense reference for `(mean, var, var_exp, var_std)` per gene. Iterates
+    /// every selected cell including the zeros, so it shares no code with the
+    /// summary-based kernels. `clip_max` defaults to `sqrt(n_cells)`.
     fn reference_vst(
         dense: &[Vec<u32>],
         cells: &[usize],
@@ -1900,16 +1861,8 @@ mod tests {
         (means, vars, loess.fitted_vals, var_std)
     }
 
-    /// Dense reference implementation of the Seurat dispersion statistics.
-    ///
-    /// ### Params
-    ///
-    /// * `dense` - `dense[gene][cell]` raw counts
-    /// * `cells` - Selected cell ids
-    ///
-    /// ### Returns
-    ///
-    /// `(exp_mean, log_vmr)` per gene, NaN cleaned to zero as Seurat does.
+    /// Dense reference for the Seurat dispersion statistics, `(exp_mean,
+    /// log_vmr)` per gene with NaN cleaned to zero as Seurat does.
     fn reference_dispersion(dense: &[Vec<u32>], cells: &[usize]) -> (Vec<f32>, Vec<f32>) {
         let n = cells.len() as f64;
 
@@ -1950,21 +1903,12 @@ mod tests {
     }
 
     /// Open a reader over a freshly written synthetic store.
-    ///
-    /// ### Params
-    ///
-    /// * `temp` - Guard owning the path
-    /// * `dense` - `dense[gene][cell]` raw counts
-    /// * `n_cells` - Number of cells
-    ///
-    /// ### Returns
-    ///
-    /// The reader.
     fn reader_for(temp: &TempStore, dense: &[Vec<u32>], n_cells: usize) -> ParallelSparseReader {
         write_store(temp.path(), dense, n_cells);
         ParallelSparseReader::new(temp.path()).expect("reader opens")
     }
 
+    /// The summary-based VST kernels must match a dense pass over every selected cell.
     #[test]
     fn test_vst_matches_dense_reference() {
         let (n_genes, n_cells) = (40, 120);
@@ -1986,6 +1930,7 @@ mod tests {
         }
     }
 
+    /// Same for the Seurat dispersion path, including its NaN cleaning.
     #[test]
     fn test_dispersion_matches_dense_reference() {
         let (n_genes, n_cells) = (30, 90);
@@ -2009,6 +1954,8 @@ mod tests {
         }
     }
 
+    /// One batch has to reduce exactly to the plain path, hence `assert_eq!` on
+    /// the `Vec<f64>`: the two are meant to be bit-identical, not merely close.
     #[test]
     fn test_batch_aware_single_batch_matches_plain() {
         let (n_genes, n_cells) = (25, 80);
@@ -2030,6 +1977,8 @@ mod tests {
         assert_eq!(plain.var_std, batched[0].var_std);
     }
 
+    /// Each batch has to reduce exactly to a solo run over its own cells, so
+    /// `assert_eq!` on the `Vec<f64>` is deliberate rather than a missing tolerance.
     #[test]
     fn test_batch_aware_matches_per_batch_runs() {
         let (n_genes, n_cells) = (25, 90);
@@ -2058,6 +2007,7 @@ mod tests {
         }
     }
 
+    /// Chunking the gene sweep must be bit-neutral, so `assert_eq!` is the point here.
     #[test]
     fn test_gene_batch_size_invariant() {
         let (n_genes, n_cells) = (37, 60);
@@ -2098,6 +2048,7 @@ mod tests {
         assert_eq!(single[0].var_std, chunked[0].var_std);
     }
 
+    /// A gene with no counts among the selected cells gives zero, not NaN.
     #[test]
     fn test_gene_without_selected_counts_gives_zero_var_std() {
         // gene 1 is only expressed in cells that are not selected
@@ -2114,6 +2065,7 @@ mod tests {
         assert_eq!(res.var_std[1], 0.0);
     }
 
+    /// Genes the clip actually reaches take the re-read path and still match the reference.
     #[test]
     fn test_wide_count_range_takes_exact_path() {
         // counts spanning thousands against a clip of sqrt(32), so the clip
@@ -2141,6 +2093,7 @@ mod tests {
         }
     }
 
+    /// Counts stored as u32 rather than u16 flow through the statistics unchanged.
     #[test]
     fn test_counts_above_u16_max() {
         let n_cells = 8;
@@ -2163,6 +2116,7 @@ mod tests {
         }
     }
 
+    /// A tight `clip_max` shrinks `var_std` and still agrees with the dense reference.
     #[test]
     fn test_clip_max_bites() {
         // one huge count against a flat background: without clipping the
@@ -2191,6 +2145,7 @@ mod tests {
         assert_relative_eq!(tight.var_std[0], reference[0] as f64, epsilon = 1e-4);
     }
 
+    /// Per-batch statistics only see their own cells, and unselected cells count for nothing.
     #[test]
     fn test_gene_stats_per_batch() {
         let index = CellBatchIndex::new(6, &[0, 1, 2, 3], Some(&[0, 0, 1, 1])).expect("index");
@@ -2220,6 +2175,7 @@ mod tests {
         assert_eq!(out[1].min_count, 5);
     }
 
+    /// A selected cell with no stored entry has to pull `min_count` down to zero.
     #[test]
     fn test_gene_stats_marks_the_implicit_zero() {
         // cell 2 is selected but carries no entry for this gene, so the lower
@@ -2242,24 +2198,21 @@ mod tests {
         assert_relative_eq!(out[0].mean, 10.0 / 3.0, epsilon = 1e-6);
     }
 
+    /// The gate routes to the exact path whenever the clip can bite or the variance is degenerate.
     #[test]
     fn test_clip_reachability_gates_the_exact_path() {
         // a tight clip cannot cover a wide gene, a generous one can
-        let stats = GeneStats {
-            mean: 2.0,
-            var: 4.0,
-            max_count: 50,
-            min_count: 0,
-        };
+        let (mean, min, max) = (2.0, 0.0, 50.0);
 
-        assert!(clip_is_reachable(&stats, 1.0, 1.0));
-        assert!(!clip_is_reachable(&stats, 1.0, 100.0));
+        assert!(clip_is_reachable(mean, min, max, 1.0, 1.0));
+        assert!(!clip_is_reachable(mean, min, max, 1.0, 100.0));
 
         // a degenerate expected variance always routes to the exact path
-        assert!(clip_is_reachable(&stats, 0.0, 1e9));
-        assert!(clip_is_reachable(&stats, f32::NAN, 1e9));
+        assert!(clip_is_reachable(mean, min, max, 0.0, 1e9));
+        assert!(clip_is_reachable(mean, min, max, f32::NAN, 1e9));
     }
 
+    /// Every malformed selection or batch labelling is refused, including a label big enough to blow up the allocation.
     #[test]
     fn test_index_rejects_bad_input() {
         assert!(matches!(
@@ -2298,6 +2251,7 @@ mod tests {
         ));
     }
 
+    /// Out-of-range loess spans and bin counts error at the driver rather than downstream.
     #[test]
     fn test_drivers_reject_bad_parameters() {
         let n_cells = 8;

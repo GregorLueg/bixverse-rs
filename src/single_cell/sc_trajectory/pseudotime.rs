@@ -728,15 +728,7 @@ mod tests {
     use super::*;
     use approx::assert_relative_eq;
 
-    /// kNN graph of a linear chain: every cell lists its two chain neighbours.
-    ///
-    /// ### Params
-    ///
-    /// * `n` - Chain length.
-    ///
-    /// ### Returns
-    ///
-    /// `(indices, distances)` with unit spacing, self excluded.
+    /// kNN graph of a chain of `n` cells: two unit-spaced neighbours each, self excluded.
     fn chain_knn(n: usize) -> (Vec<Vec<usize>>, Vec<Vec<f32>>) {
         let mut indices = Vec::with_capacity(n);
         let mut distances = Vec::with_capacity(n);
@@ -757,6 +749,7 @@ mod tests {
         (indices, distances)
     }
 
+    /// A mutual edge is stored once at its distance rather than summed twice.
     #[test]
     fn test_symmetric_graph_does_not_double_weight_mutual_edges() {
         // Both cells list each other, which is the case coo_to_csr would sum.
@@ -771,6 +764,7 @@ mod tests {
         }
     }
 
+    /// With squared distances in, the stored edge weight is their square root.
     #[test]
     fn test_symmetric_graph_square_roots_squared_distances() {
         let indices = vec![vec![1], vec![0]];
@@ -783,6 +777,7 @@ mod tests {
         }
     }
 
+    /// A one-sided kNN hit still produces an edge in both rows.
     #[test]
     fn test_symmetric_graph_is_symmetric_for_one_sided_edges() {
         // Only cell 0 lists cell 1; the edge must still exist both ways.
@@ -795,6 +790,7 @@ mod tests {
         assert_eq!(graph.indptr[2] - graph.indptr[1], 1);
     }
 
+    /// A split graph comes back as one reachable component with the bridge counted.
     #[test]
     fn test_connect_graph_bridges_two_islands() {
         // Two disjoint pairs, placed so the closest cross pair is (1, 2).
@@ -814,6 +810,7 @@ mod tests {
         assert!(dist.iter().all(|d| d.is_finite()));
     }
 
+    /// An already connected graph gains no edges.
     #[test]
     fn test_connect_graph_leaves_connected_input_alone() {
         let (indices, distances) = chain_knn(6);
@@ -826,6 +823,7 @@ mod tests {
         assert_eq!(repaired.get_nnz(), graph.get_nnz());
     }
 
+    /// Every cell's waypoint weights form a distribution.
     #[test]
     fn test_weight_columns_sum_to_one() {
         let (indices, distances) = chain_knn(40);
@@ -842,6 +840,7 @@ mod tests {
         }
     }
 
+    /// Pseudotime rises strictly along a chain and spans the full 0 to 1 range.
     #[test]
     fn test_pseudotime_monotone_on_a_chain() {
         let (indices, distances) = chain_knn(40);
@@ -862,6 +861,7 @@ mod tests {
         }
     }
 
+    /// The fused refinement kernel agrees with a literal transcription of the reference.
     #[test]
     fn test_fused_kernel_matches_naive() {
         // Deliberately not a multiple of CELL_BLOCK, so the tail block runs too.
@@ -915,6 +915,7 @@ mod tests {
         }
     }
 
+    /// A cell whose Gaussian weights all underflow still gets a usable column.
     #[test]
     fn test_weights_survive_an_underflowing_geodesic() {
         // One cell sits hundreds of bandwidths away from every waypoint while
@@ -962,6 +963,7 @@ mod tests {
         assert!(weights[far] > 0.9, "nearest weight is {}", weights[far]);
     }
 
+    /// Disagreeing directions keep the smaller distance, whatever the scan order.
     #[test]
     fn test_symmetric_graph_keeps_the_minimum_weight_on_a_disagreeing_pair() {
         // Both cells list each other but at different distances, which happens
@@ -980,6 +982,7 @@ mod tests {
         }
     }
 
+    /// Zero cells give an empty graph rather than an error or a panic.
     #[test]
     fn test_symmetric_graph_accepts_empty_input() {
         let graph = build_symmetric_knn_graph(&[], &[], false).unwrap();
@@ -988,6 +991,7 @@ mod tests {
         assert_eq!(graph.get_nnz(), 0);
     }
 
+    /// Column indices within a CSR row are strictly ascending.
     #[test]
     fn test_csr_rows_come_out_sorted() {
         // The scatter order is what makes rows ascending; a regression there is
@@ -1005,6 +1009,7 @@ mod tests {
         }
     }
 
+    /// Regression: non-finite coordinates priced every bridge at NaN and the repair loop never terminated.
     #[test]
     fn test_connect_graph_gives_up_instead_of_spinning() {
         // Two islands, and the coordinates of the second are non-finite, so
@@ -1026,6 +1031,7 @@ mod tests {
         ));
     }
 
+    /// Regression: fewer coordinate rows than graph nodes indexed past the end of `data`.
     #[test]
     fn test_connect_graph_rejects_mismatched_data_rows() {
         let indices = vec![vec![1], vec![0], vec![3], vec![2]];
@@ -1042,6 +1048,7 @@ mod tests {
         ));
     }
 
+    /// A cap that cannot run a single refinement pass is refused up front.
     #[test]
     fn test_pseudotime_rejects_a_useless_iteration_cap() {
         let (indices, distances) = chain_knn(20);
@@ -1063,6 +1070,7 @@ mod tests {
         assert_eq!(res.iterations, 1);
     }
 
+    /// The start cell has to be the first waypoint, since the refinement zeroes that row.
     #[test]
     fn test_pseudotime_rejects_a_start_cell_that_is_not_waypoint_zero() {
         let (indices, distances) = chain_knn(20);
@@ -1078,6 +1086,7 @@ mod tests {
         ));
     }
 
+    /// Unreachable cells are counted per cell, not per geodesic matrix entry.
     #[test]
     fn test_unreachable_count_is_in_cells_not_matrix_entries() {
         // Two waypoints, four cells, cells 2 and 3 unreachable from both. The
@@ -1092,6 +1101,7 @@ mod tests {
         assert_eq!(count_unreachable_cells(&geodesic, 2, n_cells), 2);
     }
 
+    /// Cells no waypoint can reach are reported rather than carried into the result.
     #[test]
     fn test_pseudotime_rejects_a_disconnected_graph() {
         let indices = vec![vec![1], vec![0], vec![3], vec![2]];

@@ -518,6 +518,7 @@ mod tests {
         }
     }
 
+    /// Quantile endpoints and the median land on the expected order statistics.
     #[test]
     fn quantile_known_values() {
         let v = vec![1.0_f32, 2.0, 3.0, 4.0, 5.0];
@@ -526,6 +527,7 @@ mod tests {
         assert!((quantile(&v, 0.5) - 3.0).abs() < 1e-6);
     }
 
+    /// Candidates too small to compare against are left free of deviants.
     #[test]
     fn no_deviants_when_metacell_too_small() {
         // 3 cells, 2 genes; max_gap_cells_count = 1. n_cells = 3 is more
@@ -546,6 +548,7 @@ mod tests {
         assert_eq!(dev, vec![false, false, false]);
     }
 
+    /// A single cell with a large fold change on one gene is flagged as deviant.
     #[test]
     fn detects_clear_outlier_in_metacell() {
         // 8 cells in one candidate. Cells 0..7 except cell 4 express gene

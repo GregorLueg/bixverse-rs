@@ -3064,15 +3064,7 @@ mod tests {
     use super::*;
     use approx::assert_relative_eq;
 
-    /// Dense symmetric `t1` for the reference computation, row-major `k × k`.
-    ///
-    /// ### Params
-    ///
-    /// * `k` - Dimension
-    ///
-    /// ### Returns
-    ///
-    /// A deterministic symmetric matrix with a strong diagonal.
+    /// Deterministic symmetric row-major `k × k` `t1` with a strong diagonal.
     fn dense_t1(k: usize) -> Vec<f32> {
         let mut t1 = vec![0.0f32; k * k];
         for i in 0..k {
@@ -3086,16 +3078,6 @@ mod tests {
     }
 
     /// Reference `t1 · x` computed from scratch off the atom list.
-    ///
-    /// ### Params
-    ///
-    /// * `t1` - Dense row-major `k × k`
-    /// * `k` - Dimension
-    /// * `atoms` - The column's atoms
-    ///
-    /// ### Returns
-    ///
-    /// The dense `k`-length product.
     fn reference_product(t1: &[f32], k: usize, atoms: &FwAtoms) -> Vec<f32> {
         let (indices, weights) = atoms.atoms();
         let mut out = vec![0.0f32; k];
@@ -3108,15 +3090,6 @@ mod tests {
     }
 
     /// Apply the convex step to both the atoms and the incremental state.
-    ///
-    /// ### Params
-    ///
-    /// * `atoms` - The column's atoms
-    /// * `w` - Incremental `t1 · x`
-    /// * `t1` - Dense row-major `k × k`
-    /// * `k` - Dimension
-    /// * `gamma` - Step size
-    /// * `amin` - Atom receiving `gamma`
     fn step_both(atoms: &mut FwAtoms, w: &mut [f32], t1: &[f32], k: usize, gamma: f32, amin: u32) {
         atoms.step(gamma, amin);
         let retain = 1.0 - gamma;
@@ -3127,14 +3100,6 @@ mod tests {
     }
 
     /// Apply prune and renormalise to both the atoms and the incremental state.
-    ///
-    /// ### Params
-    ///
-    /// * `atoms` - The column's atoms
-    /// * `w` - Incremental `t1 · x`
-    /// * `t1` - Dense row-major `k × k`
-    /// * `k` - Dimension
-    /// * `threshold` - Pruning threshold
     fn prune_both(atoms: &mut FwAtoms, w: &mut [f32], t1: &[f32], k: usize, threshold: f32) {
         let outcome = atoms.prune(threshold);
         for (r, v) in outcome.dropped {
@@ -3275,17 +3240,8 @@ mod tests {
         assert_relative_eq!(weights[0], 1.0, max_relative = 1e-6);
     }
 
-    /// Banded symmetric kernel with unit diagonal, standing in for the adaptive
-    /// RBF kernel over a kNN graph.
-    ///
-    /// ### Params
-    ///
-    /// * `n` - Number of cells
-    /// * `bandwidth` - Neighbours on each side
-    ///
-    /// ### Returns
-    ///
-    /// An `n × n` symmetric CSR kernel.
+    /// Banded symmetric `n × n` CSR kernel with unit diagonal, standing in for
+    /// the adaptive RBF kernel over a kNN graph.
     fn banded_kernel(n: usize, bandwidth: usize) -> CompressedSparseData2<f32> {
         let mut rows = Vec::new();
         let mut cols = Vec::new();
@@ -3305,15 +3261,7 @@ mod tests {
         coo_to_csr(&rows.index_cast(), &cols.index_cast(), &vals, (n, n))
     }
 
-    /// Densify a CSR matrix, row-major.
-    ///
-    /// ### Params
-    ///
-    /// * `mat` - The sparse matrix
-    ///
-    /// ### Returns
-    ///
-    /// `nrow * ncol` values in row-major order.
+    /// Densify a CSR matrix into `nrow * ncol` row-major values.
     fn densify(mat: &CompressedSparseData2<f32>) -> Vec<f32> {
         let (nrow, ncol) = mat.shape;
         let mut out = vec![0.0f32; nrow * ncol];
@@ -3325,17 +3273,7 @@ mod tests {
         out
     }
 
-    /// Build the `(B, A_0)` pair the way `initialise_matrices` does.
-    ///
-    /// ### Params
-    ///
-    /// * `n` - Number of cells
-    /// * `k` - Number of archetypes
-    /// * `seed` - Random seed
-    ///
-    /// ### Returns
-    ///
-    /// `(B, A_0)` as `(n × k, k × n)`.
+    /// The `(B, A_0)` pair, shaped `(n × k, k × n)`, the way `initialise_matrices` does it.
     fn initial_matrices(
         n: usize,
         k: usize,
@@ -3681,15 +3619,15 @@ mod tests {
     ///
     /// The kernel is dense, so the materialising path costs `O(n^2)` and the two
     /// larger sizes were five seconds of the crate's test time on their own.
-    /// They stay behind `large_scale_diagnostics`; 2000 cells run everywhere and
+    /// They stay behind `large-test`; 2000 cells run everywhere and
     /// assert the same bound. `test_rss_trace_survives_near_total_cancellation`
     /// covers the regime where the cancellation is worst, which is `k = n`
     /// rather than large `n`.
     #[test]
     fn test_rss_paths_agree() {
-        #[cfg(not(feature = "large_scale_diagnostics"))]
+        #[cfg(not(feature = "large-test"))]
         let sizes: &[usize] = &[2000];
-        #[cfg(feature = "large_scale_diagnostics")]
+        #[cfg(feature = "large-test")]
         let sizes: &[usize] = &[2000, 8000, 20000];
 
         for &n in sizes {
@@ -3757,16 +3695,7 @@ mod tests {
         }
     }
 
-    /// Build a ring kNN graph with a fixed neighbour count per cell.
-    ///
-    /// ### Params
-    ///
-    /// * `n` - Number of cells
-    /// * `k` - Neighbours per cell
-    ///
-    /// ### Returns
-    ///
-    /// `(indices, distances)` with `k` entries per row.
+    /// A ring kNN graph, `k` neighbours per cell, as `(indices, distances)`.
     fn ring_knn(n: usize, k: usize) -> (Vec<Vec<usize>>, Vec<Vec<f32>>) {
         let indices: Vec<Vec<usize>> = (0..n)
             .map(|i| (1..=k).map(|step| (i + step) % n).collect())
@@ -3777,6 +3706,7 @@ mod tests {
         (indices, distances)
     }
 
+    /// Regression: a graph narrower than the caller's `k` used to index past the row.
     #[test]
     fn test_diffusion_kernel_narrow_graph() {
         // A five-neighbour graph used to index `sorted[7]` when the caller's
@@ -3787,6 +3717,7 @@ mod tests {
         assert_eq!(kernel.shape, (20, 20));
     }
 
+    /// The bandwidth is taken from the row's own width, not from a fixed parameter.
     #[test]
     fn test_diffusion_kernel_bandwidth_scales_with_row_width() {
         // adaptive_k is (row width / 3).max(1), so a 3-wide row picks the
@@ -3807,6 +3738,7 @@ mod tests {
         );
     }
 
+    /// A cell with no neighbours has no bandwidth to take, so it must error not panic.
     #[test]
     fn test_diffusion_kernel_empty_row_errors() {
         let indices = vec![vec![1usize], vec![]];
@@ -3814,6 +3746,7 @@ mod tests {
         assert!(compute_diffusion_kernel(&indices, &distances, false).is_err());
     }
 
+    /// A NaN distance is caught at the kernel, where it can still name its cause.
     #[test]
     fn test_diffusion_kernel_nan_distance_errors_rather_than_panics() {
         let (indices, mut distances) = ring_knn(10, 6);
@@ -3831,21 +3764,12 @@ mod tests {
         ));
     }
 
-    /// A one-dimensional kNN fixture with cell 1 sitting exactly on cell 0.
-    ///
-    /// Four supplied neighbours puts the bandwidth rank at
-    /// `((4 + 1) / 3).max(1) - 1 = 0`, the nearest neighbour, which for both
-    /// duplicates is a distance of zero.
-    ///
-    /// ### Params
-    ///
-    /// * `mutual` - Keep the duplicate pair in both directions. With `false`,
-    ///   cell 1 drops cell 0 from its row, which is what an approximate backend
-    ///   returning an asymmetric graph looks like.
-    ///
-    /// ### Returns
-    ///
-    /// `(indices, distances)`, distances un-squared.
+    /// A one-dimensional kNN fixture with cell 1 sitting exactly on cell 0,
+    /// returning un-squared distances. Four supplied neighbours puts the
+    /// bandwidth rank at `((4 + 1) / 3).max(1) - 1 = 0`, the nearest neighbour,
+    /// which for both duplicates is a distance of zero. `mutual = false` drops
+    /// cell 0 from cell 1's row, which is what an approximate backend returning
+    /// an asymmetric graph looks like.
     fn duplicate_cell_knn(mutual: bool) -> (Vec<Vec<usize>>, Vec<Vec<f32>>) {
         let n = 8usize;
         let coords: Vec<f32> = (0..n)
@@ -3876,6 +3800,7 @@ mod tests {
         (indices, distances)
     }
 
+    /// Regression: a zero bandwidth used to gut the duplicated cell's row silently.
     #[test]
     fn test_diffusion_kernel_keeps_the_row_of_a_duplicated_cell() {
         // A zero bandwidth turns every one of that cell's outgoing weights into
@@ -3903,6 +3828,7 @@ mod tests {
         assert!(kernel.data[lo..hi].iter().all(|&v| v > 0.0));
     }
 
+    /// Regression: an asymmetric duplicate pair leaked a NaN nothing downstream could see.
     #[test]
     fn test_diffusion_kernel_survives_a_one_sided_duplicate() {
         // The dangerous shape. With the duplicate pair stored both ways the
@@ -3927,6 +3853,7 @@ mod tests {
         assert!(kernel.indices[lo..hi].contains(&1));
     }
 
+    /// The bandwidth rank counts the self edge, matching what the scanpy reference does.
     #[test]
     fn test_diffusion_kernel_bandwidth_rank_is_self_inclusive() {
         // The reference asks scanpy for `n_neighbors = 30`, gets 29 stored

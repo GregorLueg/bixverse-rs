@@ -1885,7 +1885,7 @@ mod tests {
     #[test]
     // Heavy: these are also the two arms that cost anything, because the CPU
     // reference is O(n k²).
-    #[cfg(feature = "large_scale_diagnostics")]
+    #[cfg(feature = "large-test")]
     fn test_fw_argmin_b_matches_cpu_large() {
         let Some(device) = try_device() else { return };
 

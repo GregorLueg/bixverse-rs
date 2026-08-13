@@ -812,9 +812,179 @@ where
 // Format conversions //
 ////////////////////////
 
+/// Destination pointer handed to every worker of the parallel scatter.
+///
+/// The transpose partitions the destination by `(chunk, minor)`: the counting
+/// pass gives every pair its own half-open run of slots, and a worker only ever
+/// advances the cursors of its own chunk. No two workers therefore address the
+/// same slot, which is what makes the shared `*mut` sound.
+struct ScatterPtr<T>(*mut T);
+
+// SAFETY: see the type doc. Writes go through disjoint per-chunk cursor runs.
+unsafe impl<T: Send> Send for ScatterPtr<T> {}
+// SAFETY: as above.
+unsafe impl<T: Send> Sync for ScatterPtr<T> {}
+
+impl<T> ScatterPtr<T> {
+    /// Write one value into the destination.
+    ///
+    /// ### Params
+    ///
+    /// * `pos` - Slot to write
+    /// * `value` - Value to store
+    ///
+    /// # Safety
+    ///
+    /// `pos` must be in bounds of the buffer this was built from, and no other
+    /// worker may write the same slot.
+    #[inline(always)]
+    unsafe fn write(&self, pos: usize, value: T) {
+        unsafe { *self.0.add(pos) = value }
+    }
+}
+
+/// Below this many stored values the transpose stays single-threaded.
+///
+/// The parallel path pays for `n_threads * new_major` counters plus two sweeps
+/// over them, which only earns its keep once the scatter itself is large enough
+/// to leave cache. A megabyte of stored values is comfortably past that point
+/// on every machine tested and well short of it for the small graphs and toy
+/// matrices most callers hand over.
+const PARALLEL_TRANSPOSE_MIN_NNZ: usize = 1 << 20;
+
+/// Per-chunk write cursors and the transposed `indptr`.
+///
+/// Runs the counting phase of the transpose: one histogram per chunk of the old
+/// major axis, folded into the new `indptr` and then rewritten in place as the
+/// absolute slot each `(chunk, minor)` pair starts at.
+///
+/// ### Params
+///
+/// * `sparse_data` - The matrix being transposed
+/// * `chunks` - Half-open ranges partitioning the old major axis
+/// * `new_major` - Length of the new major axis
+///
+/// ### Returns
+///
+/// `(new_indptr, cursors)`, where `cursors` is `chunks.len() * new_major` long
+/// and laid out chunk-major.
+fn transpose_cursors<T, U>(
+    sparse_data: &CompressedSparseData2<T, U>,
+    chunks: &[(usize, usize)],
+    new_major: usize,
+) -> (Vec<u32>, Vec<u32>)
+where
+    T: BixverseNumeric,
+    U: BixverseNumeric,
+{
+    let mut cursors = vec![0u32; chunks.len() * new_major];
+
+    chunks
+        .par_iter()
+        .zip(cursors.par_chunks_mut(new_major.max(1)))
+        .for_each(|(&(start, end), counts)| {
+            let lo = sparse_data.indptr[start] as usize;
+            let hi = sparse_data.indptr[end] as usize;
+            for &minor in &sparse_data.indices[lo..hi] {
+                counts[minor as usize] += 1;
+            }
+        });
+
+    // column sums of the histograms give the entries per new-major index
+    let mut new_indptr = vec![0u32; new_major + 1];
+    for counts in cursors.chunks(new_major.max(1)) {
+        for (total, &count) in new_indptr[1..].iter_mut().zip(counts.iter()) {
+            *total += count;
+        }
+    }
+    for i in 0..new_major {
+        new_indptr[i + 1] += new_indptr[i];
+    }
+
+    // rewrite the counts as absolute starts. Both the cursor row and the
+    // running offsets are swept contiguously, so this stays cache-friendly
+    // even when the new major axis is hundreds of thousands long.
+    let mut running: Vec<u32> = new_indptr[..new_major].to_vec();
+    for counts in cursors.chunks_mut(new_major.max(1)) {
+        for (count, offset) in counts.iter_mut().zip(running.iter_mut()) {
+            let start = *offset;
+            *offset += *count;
+            *count = start;
+        }
+    }
+
+    (new_indptr, cursors)
+}
+
+/// Scatter the stored values into their transposed positions, in parallel.
+///
+/// ### Params
+///
+/// * `sparse_data` - The matrix being transposed
+/// * `chunks` - Half-open ranges partitioning the old major axis
+/// * `cursors` - Per-chunk write cursors from [`transpose_cursors`], consumed
+/// * `new_major` - Length of the new major axis
+/// * `out_indices` - Destination for the new minor indices
+/// * `out_data` - Optional `(source, destination)` for the counts layer
+/// * `out_data2` - Optional `(source, destination)` for the second layer
+fn transpose_scatter<T, U>(
+    sparse_data: &CompressedSparseData2<T, U>,
+    chunks: &[(usize, usize)],
+    cursors: &mut [u32],
+    new_major: usize,
+    out_indices: &mut [u32],
+    out_data: Option<(&[T], &mut [T])>,
+    out_data2: Option<(&[U], &mut [U])>,
+) where
+    T: BixverseNumeric,
+    U: BixverseNumeric,
+{
+    let indices_ptr = ScatterPtr(out_indices.as_mut_ptr());
+    let (data_src, data_ptr) = match out_data {
+        Some((src, dst)) => (Some(src), Some(ScatterPtr(dst.as_mut_ptr()))),
+        None => (None, None),
+    };
+    let (data2_src, data2_ptr) = match out_data2 {
+        Some((src, dst)) => (Some(src), Some(ScatterPtr(dst.as_mut_ptr()))),
+        None => (None, None),
+    };
+
+    chunks
+        .par_iter()
+        .zip(cursors.par_chunks_mut(new_major.max(1)))
+        .for_each(|(&(start, end), cursor)| {
+            for major in start..end {
+                let lo = sparse_data.indptr[major] as usize;
+                let hi = sparse_data.indptr[major + 1] as usize;
+
+                for idx in lo..hi {
+                    let minor = sparse_data.indices[idx] as usize;
+                    let pos = cursor[minor] as usize;
+                    cursor[minor] += 1;
+
+                    // SAFETY: `pos` sits in the run this chunk owns for
+                    // `minor`, which no other worker touches, and every run is
+                    // inside `0..nnz` by the counting pass.
+                    unsafe {
+                        indices_ptr.write(pos, major as u32);
+                        if let (Some(src), Some(dst)) = (data_src, &data_ptr) {
+                            dst.write(pos, src[idx]);
+                        }
+                        if let (Some(src), Some(dst)) = (data2_src, &data2_ptr) {
+                            dst.write(pos, src[idx]);
+                        }
+                    }
+                }
+            }
+        });
+}
+
 /// Transpose a compressed sparse matrix (CSC→CSR or CSR→CSC).
 ///
-/// This is the standard two-pass sparse transpose in O(nnz) time.
+/// A counting sort in O(nnz) time. Above [`PARALLEL_TRANSPOSE_MIN_NNZ`] the
+/// count and the scatter both fan out over rayon: the scatter is a random-write
+/// pass over `nnz`-sized destinations, so leaving it single-threaded makes it
+/// the slowest step of anything that transposes on the way in.
 ///
 /// ### Params
 ///
@@ -830,6 +1000,55 @@ where
     T: BixverseNumeric,
     U: BixverseNumeric,
 {
+    transpose_sparse_chunked(sparse_data, &major_axis_chunks(sparse_data))
+}
+
+/// Half-open ranges the transpose should split the old major axis into.
+///
+/// One range keeps the whole thing single-threaded, which is what small inputs
+/// want. Split out so the tests can force a multi-chunk split without building
+/// a matrix past [`PARALLEL_TRANSPOSE_MIN_NNZ`].
+///
+/// ### Params
+///
+/// * `sparse_data` - The matrix being transposed
+///
+/// ### Returns
+///
+/// The chunks covering the old major axis.
+fn major_axis_chunks<T, U>(sparse_data: &CompressedSparseData2<T, U>) -> Vec<(usize, usize)>
+where
+    T: BixverseNumeric,
+    U: BixverseNumeric,
+{
+    let old_major_len = sparse_data.indptr.len() - 1;
+
+    if sparse_data.get_nnz() >= PARALLEL_TRANSPOSE_MIN_NNZ {
+        thread_chunks(old_major_len)
+    } else {
+        vec![(0, old_major_len)]
+    }
+}
+
+/// Transpose a compressed sparse matrix over a given chunking of the old major
+/// axis.
+///
+/// ### Params
+///
+/// * `sparse_data` - The input compressed sparse matrix to be transformed
+/// * `chunks` - Half-open ranges partitioning the old major axis
+///
+/// ### Returns
+///
+/// The transposed compressed sparse matrix.
+fn transpose_sparse_chunked<T, U>(
+    sparse_data: &CompressedSparseData2<T, U>,
+    chunks: &[(usize, usize)],
+) -> CompressedSparseData2<T, U>
+where
+    T: BixverseNumeric,
+    U: BixverseNumeric,
+{
     let nnz = sparse_data.get_nnz();
     let (nrow, ncol) = sparse_data.shape();
 
@@ -839,55 +1058,28 @@ where
         CompressedSparseFormat::Csr => (ncol, CompressedSparseFormat::Csc),
     };
 
-    // first pass: count entries per new-major index
-    let mut new_indptr = vec![0u32; new_major + 1];
-    for &idx in &sparse_data.indices {
-        new_indptr[(idx + 1) as usize] += 1;
-    }
-    for i in 0..new_major {
-        new_indptr[i + 1] += new_indptr[i];
-    }
-
-    // second pass: scatter data
     let mut new_data: Vec<T> = vec![T::default(); nnz];
     let mut new_indices: Vec<u32> = vec![0u32; nnz];
     let mut new_data2: Option<Vec<U>> =
         sparse_data.data_2.as_ref().map(|_| vec![U::default(); nnz]);
-    unsafe {
-        new_data.set_len(nnz);
-        new_indices.set_len(nnz);
-    }
 
-    let old_major_len = sparse_data.indptr.len() - 1;
-    for major in 0..old_major_len {
-        for idx in sparse_data.indptr[major]..sparse_data.indptr[major + 1] {
-            let minor = sparse_data.indices[idx as usize];
-            let pos = new_indptr[minor as usize];
+    let (new_indptr, mut cursors) = transpose_cursors(sparse_data, chunks, new_major);
 
-            let pos_usize = pos as usize;
+    let data_pair = Some((sparse_data.data.as_slice(), new_data.as_mut_slice()));
+    let data2_pair = match (&sparse_data.data_2, &mut new_data2) {
+        (Some(src), Some(dst)) => Some((src.as_slice(), dst.as_mut_slice())),
+        _ => None,
+    };
 
-            // SAFETY: pos < nnz guaranteed by the counting pass
-            unsafe {
-                *new_data.get_unchecked_mut(pos_usize) = sparse_data.data[idx as usize];
-                *new_indices.get_unchecked_mut(pos_usize) = major as u32;
-            }
-
-            if let (Some(src), Some(dst)) = (&sparse_data.data_2, &mut new_data2) {
-                unsafe {
-                    *dst.get_unchecked_mut(pos_usize) = src[idx as usize];
-                }
-            }
-
-            new_indptr[minor as usize] += 1;
-        }
-    }
-
-    // restore new_indptr: the scatter pass shifted every entry forward by its
-    // count, so we shift the whole array right by one position.
-    for i in (1..=new_major).rev() {
-        new_indptr[i] = new_indptr[i - 1];
-    }
-    new_indptr[0] = 0;
+    transpose_scatter(
+        sparse_data,
+        chunks,
+        &mut cursors,
+        new_major,
+        &mut new_indices,
+        data_pair,
+        data2_pair,
+    );
 
     CompressedSparseData2 {
         data: new_data,
@@ -933,15 +1125,6 @@ where
         CompressedSparseFormat::Csr => (ncol, CompressedSparseFormat::Csc),
     };
 
-    // first pass: count entries per new-major index
-    let mut new_indptr = vec![0u32; new_major + 1];
-    for &idx in &sparse_data.indices {
-        new_indptr[(idx + 1) as usize] += 1;
-    }
-    for i in 0..new_major {
-        new_indptr[i + 1] += new_indptr[i];
-    }
-
     let mut new_indices: Vec<u32> = vec![0u32; nnz];
 
     // allocate only for the kept layer
@@ -951,59 +1134,33 @@ where
         (vec![T::default(); nnz], None)
     };
 
-    let old_major_len = sparse_data.indptr.len() - 1;
+    let chunks = major_axis_chunks(sparse_data);
+    let (new_indptr, mut cursors) = transpose_cursors(sparse_data, &chunks, new_major);
 
-    // second pass: scatter. Two branches to keep the inner loop tight.
-    if use_second_layer {
+    let (data_pair, data2_pair) = if use_second_layer {
         let src = sparse_data
             .data_2
             .as_ref()
             .ok_or(BixverseErrors::Data2NotAvailable)?
             .as_slice();
-        let dst = new_data2.as_mut().unwrap();
-        for major in 0..old_major_len {
-            for idx in sparse_data.indptr[major]..sparse_data.indptr[major + 1] {
-                let idx_usize = idx as usize;
-
-                let minor = sparse_data.indices[idx_usize];
-                let minor_usize = minor as usize;
-
-                let pos = new_indptr[minor_usize];
-                let pos_usize = pos as usize;
-                // SAFETY: pos < nnz guaranteed by the counting pass
-                unsafe {
-                    *new_indices.get_unchecked_mut(pos_usize) = major as u32;
-                    *dst.get_unchecked_mut(pos_usize) = src[idx_usize];
-                }
-                new_indptr[minor_usize] += 1;
-            }
-        }
+        let dst = new_data2.as_mut().unwrap().as_mut_slice();
+        (None, Some((src, dst)))
     } else {
-        for major in 0..old_major_len {
-            for idx in sparse_data.indptr[major]..sparse_data.indptr[major + 1] {
-                let idx_usize = idx as usize;
+        (
+            Some((sparse_data.data.as_slice(), new_data.as_mut_slice())),
+            None,
+        )
+    };
 
-                let minor = sparse_data.indices[idx_usize];
-                let minor_usize = minor as usize;
-
-                let pos = new_indptr[minor_usize];
-                let pos_usize = pos as usize;
-                // SAFETY: pos < nnz guaranteed by the counting pass
-                unsafe {
-                    *new_indices.get_unchecked_mut(pos_usize) = major as u32;
-                    *new_data.get_unchecked_mut(pos_usize) = sparse_data.data[idx_usize];
-                }
-                new_indptr[minor_usize] += 1;
-            }
-        }
-    }
-
-    // restore new_indptr: the scatter pass shifted every entry forward by its
-    // count, so we shift the whole array right by one position.
-    for i in (1..=new_major).rev() {
-        new_indptr[i] = new_indptr[i - 1];
-    }
-    new_indptr[0] = 0;
+    transpose_scatter(
+        sparse_data,
+        &chunks,
+        &mut cursors,
+        new_major,
+        &mut new_indices,
+        data_pair,
+        data2_pair,
+    );
 
     Ok(CompressedSparseData2 {
         data: new_data,
@@ -3011,6 +3168,7 @@ mod tests {
     use super::*;
     use faer::Mat;
 
+    /// The format parser takes either case and rejects anything that is not CSR or CSC.
     #[test]
     fn test_parse_sparse_format() {
         assert!(parse_compressed_sparse_format("csr").unwrap().is_csr());
@@ -3018,6 +3176,84 @@ mod tests {
         assert!(parse_compressed_sparse_format("dense").is_none());
     }
 
+    /// Five rows, both layers populated, and one empty row so the chunk splits
+    /// land on an empty `indptr` span at least once.
+    fn transpose_fixture() -> CompressedSparseData2<f64, f64> {
+        let data: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let data2: Vec<f64> = data.iter().map(|v| v * 10.0).collect();
+        let indices: Vec<u32> = vec![0, 2, 1, 0, 1, 3, 2, 3];
+        let indptr: Vec<u32> = vec![0, 2, 3, 3, 6, 8];
+
+        CompressedSparseData2::new_csr(&data, &indices, &indptr, Some(&data2), (5, 4))
+    }
+
+    /// The parallel path only differs from the serial one in how the old major
+    /// axis is split, so forcing an uneven multi-chunk split is what exercises
+    /// the per-chunk cursors without building a matrix past
+    /// `PARALLEL_TRANSPOSE_MIN_NNZ`.
+    #[test]
+    fn test_transpose_chunked_matches_single_chunk() {
+        let csr = transpose_fixture();
+
+        let serial = transpose_sparse_chunked(&csr, &[(0, 5)]);
+
+        for chunks in [
+            vec![(0, 1), (1, 3), (3, 5)],
+            vec![(0, 2), (2, 5)],
+            vec![(0, 1), (1, 2), (2, 3), (3, 4), (4, 5)],
+        ] {
+            let parallel = transpose_sparse_chunked(&csr, &chunks);
+
+            assert_eq!(parallel.indptr, serial.indptr);
+            assert_eq!(parallel.indices, serial.indices);
+            assert_eq!(parallel.data, serial.data);
+            assert_eq!(parallel.data_2, serial.data_2);
+            assert_eq!(parallel.cs_type.is_csc(), serial.cs_type.is_csc());
+            assert_eq!(parallel.shape, serial.shape);
+        }
+    }
+
+    /// Round-tripping has to give the input back, and the transposed layout has
+    /// to be ascending within every new major index.
+    #[test]
+    fn test_transpose_round_trips_and_stays_sorted() {
+        let csr = transpose_fixture();
+        let csc = transpose_sparse(&csr);
+
+        assert!(csc.cs_type.is_csc());
+        for major in 0..csc.indptr.len() - 1 {
+            let lo = csc.indptr[major] as usize;
+            let hi = csc.indptr[major + 1] as usize;
+            assert!(csc.indices[lo..hi].windows(2).all(|w| w[0] < w[1]));
+        }
+
+        let round_trip = transpose_sparse(&csc);
+        assert_eq!(round_trip.indptr, csr.indptr);
+        assert_eq!(round_trip.indices, csr.indices);
+        assert_eq!(round_trip.data, csr.data);
+        assert_eq!(round_trip.data_2, csr.data_2);
+    }
+
+    /// The single-layer variant drops the layer it was not asked for and keeps
+    /// the other one identical to the two-layer transpose.
+    #[test]
+    fn test_transpose_single_layer_matches_full_transpose() {
+        let csr = transpose_fixture();
+        let full = transpose_sparse(&csr);
+
+        let counts_only = csr.transform_single_layer(false).unwrap();
+        assert_eq!(counts_only.data, full.data);
+        assert!(counts_only.data_2.is_none());
+
+        let norm_only = csr.transform_single_layer(true).unwrap();
+        assert_eq!(norm_only.data_2, full.data_2);
+        assert!(norm_only.data.is_empty());
+
+        assert_eq!(counts_only.indptr, full.indptr);
+        assert_eq!(norm_only.indices, full.indices);
+    }
+
+    /// Both endpoints of every edge land in the matrix and every row stays ascending.
     #[test]
     fn test_undirected_edges_to_csr_is_symmetric_and_row_sorted() {
         // A path plus one chord, so several rows hold both a `lo < r` partner
@@ -3041,6 +3277,7 @@ mod tests {
         }
     }
 
+    /// No edges must still produce a well-formed `indptr` of the declared size.
     #[test]
     fn test_undirected_edges_to_csr_handles_empty_input() {
         let csr = undirected_edges_to_csr::<f64>(3, &[]);
@@ -3050,6 +3287,7 @@ mod tests {
         assert!(csr.indices.is_empty());
     }
 
+    /// An edgeless node keeps an empty span instead of shifting every later row.
     #[test]
     fn test_undirected_edges_to_csr_keeps_isolated_nodes() {
         // Node 0 has no edges at all, so its span has to be empty rather than
@@ -3062,6 +3300,7 @@ mod tests {
         assert_eq!(csr.indices, vec![2, 1]);
     }
 
+    /// A well-formed square CSR passes and reports its dimension.
     #[test]
     fn test_validate_square_csr_accepts_a_sound_matrix() {
         let csr = undirected_edges_to_csr(3, &[(0u32, 1u32, 1.0f64), (1, 2, 2.0)]);
@@ -3069,6 +3308,7 @@ mod tests {
         assert_eq!(validate_square_csr(&csr).unwrap(), 3);
     }
 
+    /// Each structural fault the validator exists for must come back as `MalformedCsr`.
     #[test]
     fn test_validate_square_csr_catches_structural_faults() {
         // Non-monotonic indptr: the Rust range `5..2` is empty, so row 1 is
@@ -3121,6 +3361,7 @@ mod tests {
         ));
     }
 
+    /// The zero counts and the dense-to-CSR conversion agree on what is structurally zero.
     #[test]
     fn test_from_dense_and_count_zeroes() {
         let mat: Mat<f64> = Mat::from_fn(3, 2, |i, j| if i == j { (i + 1) as f64 } else { 0.0 });
@@ -3138,6 +3379,7 @@ mod tests {
         assert_eq!(csr.data, vec![1.0, 2.0]);
     }
 
+    /// Adding two CSR matrices merges shared columns rather than storing them twice.
     #[test]
     fn test_sparse_add_csr() {
         let shape = (2, 2);
@@ -3162,6 +3404,7 @@ mod tests {
         assert_eq!(c.indptr, vec![0, 2, 3]);
     }
 
+    /// CSR matrix-vector product on a case small enough to check by hand.
     #[test]
     fn test_csr_matvec() {
         let a = CompressedSparseData2::<f64, f64>::new_csr(
@@ -3176,6 +3419,7 @@ mod tests {
         assert_eq!(result, vec![4.0, 3.0]);
     }
 
+    /// Lanczos recovers the one nonzero eigenpair of a symmetric rank-one matrix.
     #[test]
     fn test_lanczos_eigenpairs_logic() {
         // Symmetric rank-1 matrix M = x * x^T
@@ -3201,6 +3445,7 @@ mod tests {
         assert!(dot_x.abs() > 0.999);
     }
 
+    /// Lanczos SVD recovers both singular vectors of a sparse rank-one matrix.
     #[test]
     fn test_sparse_svd_lanczos_logic() {
         // Sparse rank-1 matrix A = x * y^T
@@ -3235,14 +3480,6 @@ mod tests {
     ///
     /// Eigenvalues are `2 cos(k pi / (n + 1))`, separated by `O(1 / n^2)`, which
     /// makes it the cheapest genuinely clustered spectrum to build.
-    ///
-    /// ### Params
-    ///
-    /// * `n` - Number of nodes.
-    ///
-    /// ### Returns
-    ///
-    /// The adjacency matrix in CSR.
     fn path_graph(n: usize) -> CompressedSparseData2<f64, f64> {
         let mut rows: Vec<Vec<(u32, f64)>> = vec![Vec::new(); n];
         for i in 0..n - 1 {
@@ -3264,15 +3501,7 @@ mod tests {
         CompressedSparseData2::new_csr(&data, &indices, &indptr, None, (n, n))
     }
 
-    /// Diagonal matrix from an explicit list of diagonal entries.
-    ///
-    /// ### Params
-    ///
-    /// * `diag` - The diagonal entries, in order.
-    ///
-    /// ### Returns
-    ///
-    /// The matrix in CSR, including any zero entries as stored nonzeros.
+    /// Diagonal matrix in CSR, storing every entry given, zeros included.
     fn diagonal(diag: &[f64]) -> CompressedSparseData2<f64, f64> {
         let indices: Vec<u32> = (0..diag.len() as u32).collect();
         let indptr: Vec<u32> = (0..=diag.len() as u32).collect();
@@ -3280,18 +3509,7 @@ mod tests {
         CompressedSparseData2::new_csr(diag, &indices, &indptr, None, (diag.len(), diag.len()))
     }
 
-    /// `||A x - lambda x||` for one returned pair.
-    ///
-    /// ### Params
-    ///
-    /// * `mat` - The CSR matrix the pair came from.
-    /// * `values` - Returned eigenvalues.
-    /// * `vectors` - Returned eigenvectors, `vectors[i][k]`.
-    /// * `k` - Which pair to check.
-    ///
-    /// ### Returns
-    ///
-    /// The residual norm.
+    /// `||A x - lambda x||` for the `k`-th returned pair, with `vectors` indexed `[i][k]`.
     fn pair_residual(
         mat: &CompressedSparseData2<f64, f64>,
         values: &[f64],
@@ -3314,6 +3532,7 @@ mod tests {
             .sqrt()
     }
 
+    /// Regression: a tightly clustered spectrum used to come back as noise.
     #[test]
     fn test_lanczos_resolves_a_clustered_spectrum_at_defaults() {
         // The regression: this used to come back as noise, with the leading
@@ -3339,6 +3558,7 @@ mod tests {
         );
     }
 
+    /// Given a big enough restart budget the same clustered spectrum does converge.
     #[test]
     fn test_lanczos_restarts_converge_a_clustered_spectrum() {
         // Same fixture with a budget large enough to actually converge, which
@@ -3363,6 +3583,7 @@ mod tests {
         }
     }
 
+    /// Regression: asking for more components than the matrix has rows used to panic.
     #[test]
     fn test_lanczos_caps_components_at_the_matrix_dimension() {
         // Used to panic inside `clamp` before it ever got to the iteration.
@@ -3379,6 +3600,7 @@ mod tests {
         }
     }
 
+    /// Regression: an early Krylov breakdown used to leave values and vectors different lengths.
     #[test]
     fn test_lanczos_breakdown_keeps_values_and_vectors_the_same_length() {
         // Rank two, so the Krylov space closes after three vectors and there is
@@ -3398,6 +3620,7 @@ mod tests {
         assert_relative_eq!(res.eigenvalues[1], 3.0, epsilon = 1e-9);
     }
 
+    /// A solve that ran out of restarts has to report itself as unconverged.
     #[test]
     fn test_lanczos_reports_budget_exhaustion() {
         // One cycle on a path graph cannot converge, and the caller has to be
@@ -3416,6 +3639,7 @@ mod tests {
         assert!(res.residual > params.tol * res.norm_estimate);
     }
 
+    /// Scaling the whole matrix must not change whether the solve converges.
     #[test]
     fn test_lanczos_tolerance_is_relative_to_the_matrix_norm() {
         // Scaling the matrix by 1e8 scales every residual by 1e8 too. An
@@ -3431,6 +3655,7 @@ mod tests {
         assert_relative_eq!(b.eigenvalues[0] / a.eigenvalues[0], 1e8, epsilon = 1e-1);
     }
 
+    /// A basis smaller than the default still resolves the top eigenvalues via restarts.
     #[test]
     fn test_lanczos_params_basis_size_is_honoured() {
         let n = 40usize;

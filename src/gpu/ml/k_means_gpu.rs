@@ -2120,7 +2120,7 @@ where
 mod tests {
     use super::*;
     use ann_search_rs::utils::dist::compute_l2_norm;
-    #[cfg(feature = "large_scale_diagnostics")]
+    #[cfg(feature = "large-test")]
     use approx::assert_relative_eq;
     use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
 
@@ -2332,6 +2332,7 @@ mod tests {
     // Tests //
     //////////
 
+    /// Exact parity: squared-Euclidean assignment must match the host argmin.
     #[test]
     fn test_assign_euclidean() {
         let Some(device) = try_device() else { return };
@@ -2347,6 +2348,7 @@ mod tests {
         assert_eq!(got, cpu_assign_euclidean(&data, &cents, n, k, dim));
     }
 
+    /// Same exact gate for cosine, which normalises inside the kernel.
     #[test]
     fn test_assign_cosine() {
         let Some(device) = try_device() else { return };
@@ -2375,6 +2377,7 @@ mod tests {
         assert_eq!(got, cpu_assign_euclidean(&data, &cents, n, k, dim));
     }
 
+    /// Privatised CSR build must match `build_csr_layout`, ordering aside.
     #[test]
     fn test_csr_privatised_matches_cpu() {
         let Some(device) = try_device() else { return };
@@ -2433,6 +2436,7 @@ mod tests {
         }
     }
 
+    /// Segmented centroid update against host means, on a well behaved dim.
     #[test]
     fn test_segmented_update() {
         let Some(device) = try_device() else { return };
@@ -2567,7 +2571,7 @@ mod tests {
     // the outer dimension loop runs more than once.
     #[test]
     // Heavy: n = 20000 with a host reference over the same.
-    #[cfg(feature = "large_scale_diagnostics")]
+    #[cfg(feature = "large-test")]
     fn test_segmented_update_long_segments() {
         let Some(device) = try_device() else { return };
         let (n, k, dim) = (20_000, 4, 48);
@@ -2598,7 +2602,7 @@ mod tests {
     // random initialisation.
     #[test]
     // Heavy: full k-means|| init plus 20 Lloyd iterations over n = 2000.
-    #[cfg(feature = "large_scale_diagnostics")]
+    #[cfg(feature = "large-test")]
     fn test_kmeans_parallel_init_gpu_recovers_blobs() {
         let Some(device) = try_device() else { return };
         let (n_blobs, per_blob, dim) = (8usize, 250usize, 16usize);
@@ -2651,6 +2655,7 @@ mod tests {
         );
     }
 
+    /// k-means|| seeding must give identical assignments for the same seed.
     #[test]
     fn test_kmeans_parallel_init_gpu_deterministic() {
         let Some(device) = try_device() else { return };

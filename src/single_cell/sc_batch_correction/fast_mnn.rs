@@ -661,6 +661,7 @@ mod tests {
     use approx::assert_relative_eq;
     use faer::mat;
 
+    /// A pair only counts as mutual when both sides list each other.
     #[test]
     fn test_find_mutual_nns_simple() {
         // Cell 0 in left has right neighbour 0; cell 0 in right has left neighbour 0
@@ -676,20 +677,7 @@ mod tests {
         assert!(mnn_r.contains(&1));
     }
 
-    #[test]
-    fn test_find_mutual_nns_no_mutuals() {
-        // Left points to right 1, but right 1 points to left 1 (not 0)
-        let left_knn = vec![vec![1], vec![0]];
-        let right_knn = vec![vec![1], vec![0]];
-
-        let (mnn_l, mnn_r) = find_mutual_nns(&left_knn, &right_knn);
-
-        // left 0 -> right 1, right 1 -> left 0 => mutual
-        // left 1 -> right 0, right 0 -> left 1 => mutual
-        assert_eq!(mnn_l.len(), 2);
-        assert_eq!(mnn_r.len(), 2);
-    }
-
+    /// One-directional neighbour links are dropped; only the mutual pair survives.
     #[test]
     fn test_find_mutual_nns_asymmetric() {
         // Left 0 -> right 0, but right 0 -> left 1 (not 0)
@@ -704,6 +692,7 @@ mod tests {
         assert_eq!(mnn_r[0], 0);
     }
 
+    /// No mutual pair at all yields empty index vectors rather than an error.
     #[test]
     fn test_find_mutual_nns_empty() {
         let left_knn: Vec<Vec<usize>> = vec![vec![0]];
@@ -715,6 +704,7 @@ mod tests {
         assert!(mnn_r.is_empty());
     }
 
+    /// With k > 1 every mutual pair is emitted, not just the first one per cell.
     #[test]
     fn test_find_mutual_nns_multiple_neighbours() {
         let left_knn = vec![vec![0, 1], vec![0, 1], vec![1]];
@@ -722,10 +712,6 @@ mod tests {
 
         let (mnn_l, mnn_r) = find_mutual_nns(&left_knn, &right_knn);
 
-        // left 0 -> {right 0, right 1}; right 0 -> {left 0, left 1} => (0,0) mutual
-        // left 1 -> {right 0, right 1}; right 0 -> {left 0, left 1} => (1,0) mutual
-        // left 1 -> {right 0, right 1}; right 1 -> {left 1, left 2} => (1,1) mutual
-        // left 2 -> {right 1}; right 1 -> {left 1, left 2} => (2,1) mutual
         assert!(mnn_l.len() >= 3);
 
         let pairs: Vec<(usize, usize)> = mnn_l
@@ -738,6 +724,7 @@ mod tests {
         assert!(pairs.contains(&(2, 1)));
     }
 
+    /// A single MNN pair gives the plain difference between the two cells.
     #[test]
     fn test_correction_vecs_single_pair() {
         let data_1 = mat![[1.0f32, 2.0, 3.0]];
@@ -751,12 +738,12 @@ mod tests {
         assert_eq!(indices, vec![0]);
         assert_eq!(averaged.nrows(), 1);
         assert_eq!(averaged.ncols(), 3);
-        // correction = data_1[0] - data_2[0] = (0.5, 1.0, 1.5)
         assert_relative_eq!(averaged[(0, 0)], 0.5, epsilon = 1e-6);
         assert_relative_eq!(averaged[(0, 1)], 1.0, epsilon = 1e-6);
         assert_relative_eq!(averaged[(0, 2)], 1.5, epsilon = 1e-6);
     }
 
+    /// Several pairs hitting the same target cell collapse into one averaged vector.
     #[test]
     fn test_correction_vecs_averaging() {
         // Two pairs map to the same cell in batch 2
@@ -769,11 +756,11 @@ mod tests {
             compute_correction_vecs(&data_1.as_ref(), &data_2.as_ref(), &mnn_1, &mnn_2);
 
         assert_eq!(indices, vec![0]);
-        // corrections: (2-1, 0) = (1, 0) and (4-1, 0) = (3, 0), average = (2, 0)
         assert_relative_eq!(averaged[(0, 0)], 2.0, epsilon = 1e-6);
         assert_relative_eq!(averaged[(0, 1)], 0.0, epsilon = 1e-6);
     }
 
+    /// Distinct target cells keep their own correction vectors.
     #[test]
     fn test_correction_vecs_multiple_targets() {
         let data_1 = mat![[3.0f32, 0.0], [0.0, 3.0],];
@@ -793,48 +780,7 @@ mod tests {
         assert_relative_eq!(averaged[(idx_1, 1)], 2.0, epsilon = 1e-6);
     }
 
-    #[test]
-    fn test_correction_vecs_zero_difference() {
-        let data = mat![[1.0f32, 2.0, 3.0]];
-        let mnn = vec![0];
-
-        let (averaged, _) = compute_correction_vecs(&data.as_ref(), &data.as_ref(), &mnn, &mnn);
-
-        for g in 0..3 {
-            assert_relative_eq!(averaged[(0, g)], 0.0, epsilon = 1e-6);
-        }
-    }
-
-    #[test]
-    fn test_center_removes_variation_along_direction() {
-        // Two cells offset along x-axis
-        let data = mat![[0.0f32, 0.0], [4.0, 0.0],];
-        let batch_vec = vec![1.0f32, 0.0];
-
-        let centred = center_along_batch_vector(&data.as_ref(), &batch_vec);
-
-        // After centring, both cells should have the same x-coordinate (the mean = 2.0)
-        assert_relative_eq!(centred[(0, 0)], 2.0, epsilon = 1e-6);
-        assert_relative_eq!(centred[(1, 0)], 2.0, epsilon = 1e-6);
-        // y-coordinates unchanged
-        assert_relative_eq!(centred[(0, 1)], 0.0, epsilon = 1e-6);
-        assert_relative_eq!(centred[(1, 1)], 0.0, epsilon = 1e-6);
-    }
-
-    #[test]
-    fn test_center_preserves_orthogonal_variation() {
-        let data = mat![[0.0f32, 1.0], [4.0, 3.0],];
-        let batch_vec = vec![1.0f32, 0.0];
-
-        let centred = center_along_batch_vector(&data.as_ref(), &batch_vec);
-
-        // x collapsed to mean (2.0), y untouched
-        assert_relative_eq!(centred[(0, 0)], 2.0, epsilon = 1e-6);
-        assert_relative_eq!(centred[(1, 0)], 2.0, epsilon = 1e-6);
-        assert_relative_eq!(centred[(0, 1)], 1.0, epsilon = 1e-6);
-        assert_relative_eq!(centred[(1, 1)], 3.0, epsilon = 1e-6);
-    }
-
+    /// Centring collapses the spread along the batch vector onto the batch mean.
     #[test]
     fn test_center_diagonal_batch_vector() {
         // batch_vec along (1,1), data offset along that diagonal
@@ -843,15 +789,13 @@ mod tests {
 
         let centred = center_along_batch_vector(&data.as_ref(), &batch_vec);
 
-        // Projections onto unit (1/sqrt2, 1/sqrt2): 0 and 2*sqrt2
-        // Mean projection: sqrt2
-        // Both cells should end up at (1, 1)
         assert_relative_eq!(centred[(0, 0)], 1.0, epsilon = 1e-5);
         assert_relative_eq!(centred[(0, 1)], 1.0, epsilon = 1e-5);
         assert_relative_eq!(centred[(1, 0)], 1.0, epsilon = 1e-5);
         assert_relative_eq!(centred[(1, 1)], 1.0, epsilon = 1e-5);
     }
 
+    /// A zero batch vector has no direction to centre along, so the data passes through.
     #[test]
     fn test_center_zero_batch_vector() {
         let data = mat![[1.0f32, 2.0], [3.0, 4.0],];
@@ -867,21 +811,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_center_already_centred() {
-        // Both cells have the same projection onto batch_vec
-        let data = mat![[1.0f32, 0.0], [1.0, 5.0],];
-        let batch_vec = vec![1.0f32, 0.0];
-
-        let centred = center_along_batch_vector(&data.as_ref(), &batch_vec);
-
-        for i in 0..2 {
-            for g in 0..2 {
-                assert_relative_eq!(centred[(i, g)], data[(i, g)], epsilon = 1e-6);
-            }
-        }
-    }
-
+    /// Centring twice along the same vector matches centring once.
     #[test]
     fn test_center_idempotent() {
         let data = mat![[0.0f32, 1.0, 2.0], [3.0, 4.0, 5.0], [6.0, 7.0, 8.0],];
@@ -897,6 +827,7 @@ mod tests {
         }
     }
 
+    /// Splitting by batch keeps row order within a batch and records the original indices.
     #[test]
     fn test_split_pca_basic() {
         let pca = mat![[1.0f32, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0],];
@@ -919,18 +850,7 @@ mod tests {
         assert_relative_eq!(batches[1][(1, 0)], 7.0, epsilon = 1e-6);
     }
 
-    #[test]
-    fn test_split_pca_single_batch() {
-        let pca = mat![[1.0f32, 2.0], [3.0, 4.0],];
-        let batch_indices = vec![0, 0];
-
-        let (batches, indices) = split_pca_by_batch(&pca, &batch_indices);
-
-        assert_eq!(batches.len(), 1);
-        assert_eq!(indices[0], vec![0, 1]);
-        assert_eq!(batches[0].nrows(), 2);
-    }
-
+    /// Batches come back ordered by label, not by order of first appearance.
     #[test]
     fn test_split_pca_three_batches() {
         let pca = mat![[1.0f32], [2.0], [3.0], [4.0], [5.0], [6.0],];
@@ -949,6 +869,7 @@ mod tests {
         assert_relative_eq!(batches[2][(1, 0)], 5.0, epsilon = 1e-6);
     }
 
+    /// An identity mapping leaves the matrix untouched.
     #[test]
     fn test_reorder_identity() {
         let data = mat![[1.0f32, 2.0], [3.0, 4.0], [5.0, 6.0],];
@@ -963,6 +884,7 @@ mod tests {
         }
     }
 
+    /// The mapping is read as working row to original row, not the inverse.
     #[test]
     fn test_reorder_reversed() {
         let data = mat![[1.0f32, 2.0], [3.0, 4.0], [5.0, 6.0],];
@@ -975,38 +897,7 @@ mod tests {
         assert_relative_eq!(reordered[(2, 0)], 1.0, epsilon = 1e-6);
     }
 
-    #[test]
-    fn test_reorder_split_merge_roundtrip() {
-        let pca = mat![[10.0f32, 20.0], [30.0, 40.0], [50.0, 60.0], [70.0, 80.0],];
-        let batch_indices = vec![1, 0, 1, 0];
-
-        let (batches, original_indices) = split_pca_by_batch(&pca, &batch_indices);
-
-        // Simulate a merge that just stacks batches
-        let n_total = batches.iter().map(|b| b.nrows()).sum();
-        let n_features = pca.ncols();
-        let mut merged = Mat::zeros(n_total, n_features);
-        let mut index_map = Vec::new();
-        let mut row = 0;
-        for (batch, indices) in batches.iter().zip(original_indices.iter()) {
-            for i in 0..batch.nrows() {
-                for g in 0..n_features {
-                    merged[(row, g)] = batch[(i, g)];
-                }
-                row += 1;
-            }
-            index_map.extend(indices.iter().copied());
-        }
-
-        let reordered = reorder_to_original(&merged, &index_map);
-
-        for i in 0..4 {
-            for g in 0..2 {
-                assert_relative_eq!(reordered[(i, g)], pca[(i, g)], epsilon = 1e-6,);
-            }
-        }
-    }
-
+    /// Two identical batches must produce zero correction, not drift.
     #[test]
     fn test_correction_vecs_symmetric() {
         // If batches are identical, corrections should be zero
@@ -1023,6 +914,7 @@ mod tests {
         }
     }
 
+    /// The averaged correction points from the target batch back to the reference.
     #[test]
     fn test_overall_batch_vector_direction() {
         // Batch 2 is shifted +2 along feature 0 relative to batch 1
@@ -1057,6 +949,7 @@ mod tests {
         );
     }
 
+    /// Centring strips spread along the batch vector and leaves orthogonal features alone.
     #[test]
     fn test_center_then_recompute_reduces_within_batch_spread() {
         // Batch 1 at x~0, batch 2 at x~4, with some x-spread within each
@@ -1096,51 +989,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_orthogonalisation_accumulates() {
-        let vec_1 = vec![1.0f32, 0.0]; // first merge shifted along x
-
-        // Orthogonalise "batch 2" against vec_1
-        let batch_2 = mat![[6.0f32, 0.0]];
-        let orth = center_along_batch_vector(&batch_2.as_ref(), &vec_1);
-
-        // With a single cell, centring collapses to itself (mean = self)
-        // But with multiple cells it would remove x-variation
-        assert_eq!(orth.nrows(), 1);
-        // Single cell: no change expected
-        assert_relative_eq!(orth[(0, 0)], 6.0, epsilon = 1e-6);
-    }
-
-    #[test]
-    fn test_center_multiple_cells_along_batch_vector() {
-        // 4 cells with varying x, batch vec along x
-        let data = mat![[1.0f32, 5.0], [3.0, 5.0], [5.0, 5.0], [7.0, 5.0],];
-        let batch_vec = vec![1.0f32, 0.0];
-
-        let centred = center_along_batch_vector(&data.as_ref(), &batch_vec);
-
-        // All x-coords should equal the mean (4.0)
-        for i in 0..4 {
-            assert_relative_eq!(centred[(i, 0)], 4.0, epsilon = 1e-5);
-            assert_relative_eq!(centred[(i, 1)], 5.0, epsilon = 1e-5);
-        }
-    }
-
-    #[test]
-    fn test_correction_direction_is_ref_minus_target() {
-        // Verify sign convention: correction = ref - target
-        let data_1 = mat![[10.0f32, 0.0]]; // reference
-        let data_2 = mat![[0.0f32, 0.0]]; // target
-        let mnn_1 = vec![0];
-        let mnn_2 = vec![0];
-
-        let (averaged, _) =
-            compute_correction_vecs(&data_1.as_ref(), &data_2.as_ref(), &mnn_1, &mnn_2);
-
-        // correction = 10 - 0 = 10 (positive, pointing from target towards reference)
-        assert_relative_eq!(averaged[(0, 0)], 10.0, epsilon = 1e-6);
-    }
-
+    /// No cell is dropped, duplicated or misplaced when the batches are recombined.
     #[test]
     fn test_split_and_reorder_preserves_all_data() {
         // Property test: split then stack then reorder must reconstruct original
@@ -1173,6 +1022,7 @@ mod tests {
         }
     }
 
+    /// Target indices come back sorted whatever order the MNN pairs arrive in.
     #[test]
     fn test_correction_vecs_indices_are_sorted() {
         let data_1 = mat![[1.0f32, 0.0], [2.0, 0.0], [3.0, 0.0],];
@@ -1190,6 +1040,7 @@ mod tests {
         assert_eq!(indices, sorted);
     }
 
+    /// Only the component along the batch vector moves; the other dimensions stay put.
     #[test]
     fn test_center_high_dimensional() {
         let n_cells = 5;

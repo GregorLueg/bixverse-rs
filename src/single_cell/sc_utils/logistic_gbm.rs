@@ -961,16 +961,7 @@ pub fn fit_logistic_gbm(
 mod tests {
     use super::*;
 
-    /// Compute AUC via sorting (trapezoidal rule).
-    ///
-    /// ### Params
-    ///
-    /// * `scores` - Predicted probabilities or scores.
-    /// * `labels` - Ground truth labels.
-    ///
-    /// ### Returns
-    ///
-    /// Area under the ROC curve.
+    /// Area under the ROC curve, by sorting on score and applying the trapezoidal rule.
     fn auc(scores: &[f32], labels: &[bool]) -> f32 {
         let mut pairs: Vec<(f32, bool)> =
             scores.iter().copied().zip(labels.iter().copied()).collect();
@@ -1003,24 +994,7 @@ mod tests {
         auc_val / (n_pos * n_neg)
     }
 
-    /// Generate two Gaussian blobs in `n_features` dimensions.
-    ///
-    /// Class 0 is centred at `-separation/2`, class 1 at
-    /// `+separation/2` on the first `n_informative` features;
-    /// remaining features are pure noise.
-    ///
-    /// ### Params
-    ///
-    /// * `n_per_class` - Samples per class.
-    /// * `n_informative` - Number of informative features.
-    /// * `n_noise` - Number of noise features.
-    /// * `separation` - Distance between class centres.
-    /// * `seed` - Random seed.
-    ///
-    /// ### Returns
-    ///
-    /// `(columns, labels)` where `columns` is one `Vec<f32>` per
-    /// feature and `labels` is a `Vec<bool>`.
+    /// Two blobs split by `separation` on the first `n_informative` columns, the rest pure noise.
     fn make_blobs(
         n_per_class: usize,
         n_informative: usize,
@@ -1102,6 +1076,7 @@ mod tests {
         );
     }
 
+    /// The sigmoid is centred on 0.5, saturates at both tails and stays monotone.
     #[test]
     fn test_sigmoid_basic() {
         assert!((sigmoid(0.0) - 0.5).abs() < 1e-6);
@@ -1111,6 +1086,7 @@ mod tests {
         assert!(sigmoid(0.0) > sigmoid(-1.0));
     }
 
+    /// Well-separated blobs must be ranked near perfectly.
     #[test]
     fn test_separable_blobs() {
         let (cols, labels) = make_blobs(500, 3, 2, 6.0, 42);
@@ -1135,6 +1111,7 @@ mod tests {
         );
     }
 
+    /// Weak signal still ranks above chance without the probabilities collapsing to the extremes.
     #[test]
     fn test_overlapping_blobs() {
         // weak signal: separation=1.0 with lots of noise features
@@ -1163,6 +1140,7 @@ mod tests {
         assert_not_bimodal(&probs, &labels);
     }
 
+    /// One informative feature against nine noise ones must not produce confident calls.
     #[test]
     fn test_calibration_moderate_separation() {
         // genuinely ambiguous: 1 informative feature, 6 noise, weak signal
@@ -1185,6 +1163,7 @@ mod tests {
         assert_not_bimodal(&probs, &labels);
     }
 
+    /// A 1:9 class ratio still ranks well and keeps the two class means apart.
     #[test]
     fn test_imbalanced() {
         let mut rng = SmallRng::seed_from_u64(55);
@@ -1247,6 +1226,7 @@ mod tests {
         );
     }
 
+    /// Excluded samples are held out of training but still get varied, informative predictions.
     #[test]
     fn test_exclusion_still_predicts() {
         let (cols, labels) = make_blobs(300, 3, 0, 5.0, 88);
@@ -1298,6 +1278,7 @@ mod tests {
         );
     }
 
+    /// Random labels must give held-out AUC near chance and predictions near the base rate.
     #[test]
     fn test_early_stopping_pure_noise() {
         let mut rng = SmallRng::seed_from_u64(999);
@@ -1352,6 +1333,7 @@ mod tests {
         );
     }
 
+    /// The same seed gives identical predictions.
     #[test]
     fn test_deterministic() {
         let (cols, labels) = make_blobs(200, 2, 1, 4.0, 33);
@@ -1378,6 +1360,7 @@ mod tests {
         assert_eq!(a, b, "same seed should produce identical results");
     }
 
+    /// XOR is out of reach for a linear model, so this pins that the trees capture the interaction.
     #[test]
     fn test_xor_nonlinear() {
         let mut rng = SmallRng::seed_from_u64(777);
@@ -1413,6 +1396,7 @@ mod tests {
         );
     }
 
+    /// Cross-validated round selection stops almost immediately when there is nothing to learn.
     #[test]
     fn test_cv_selects_few_rounds_on_noise() {
         // on pure noise, CV should select very few rounds
@@ -1443,6 +1427,7 @@ mod tests {
         );
     }
 
+    /// Real signal buys more rounds, but the selection still stops well short of the cap.
     #[test]
     fn test_cv_selects_more_rounds_on_signal() {
         // on separable data, CV should allow more rounds
@@ -1468,6 +1453,7 @@ mod tests {
         );
     }
 
+    /// End to end on doublet-shaped features, both the ranking and the class means hold up.
     #[test]
     fn test_doublet_like_scenario() {
         let mut rng = SmallRng::seed_from_u64(2024);
@@ -1537,6 +1523,7 @@ mod tests {
         );
     }
 
+    /// With overlapping classes neither side may be pinned at the probability bounds.
     #[test]
     fn test_doublet_like_not_overfit() {
         // doublet-like but with significant overlap between classes

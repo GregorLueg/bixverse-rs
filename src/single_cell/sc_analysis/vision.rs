@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use crate::core::math::vector_helpers::rank_vector;
 use crate::prelude::*;
+use crate::single_cell::sc_processing::knn::knn_distance_weights;
 
 ////////////
 // VISION //
@@ -151,37 +152,35 @@ fn geary_c(scores: &[f64], knn_indices: &[Vec<usize>], knn_weights: &[Vec<f32>])
     numerator / norm
 }
 
-/// Calculate KNN weights using exponential kernel
+/// Calculate KNN weights using the VISION exponential kernel
+///
+/// `exp(-d^2 / sigma^2)` with `sigma` the distance to the furthest of the `k`
+/// neighbours, row-normalised so every cell contributes the same total weight.
+/// That is `computeKNNWeights` in `VISION/R/Projections.R`, and it is
+/// [`knn_distance_weights`] at `neighborhood_factor = 1`: the width neighbour
+/// is `ceil(k / 1) = k`, i.e. the furthest one.
+///
+/// The row normalisation matters. [`geary_c`] divides by the total weight, so
+/// a global rescaling would cancel, but normalising per row does not: it is
+/// what stops cells whose neighbours sit at similar distances from carrying
+/// more of the statistic than cells with one close neighbour and a long tail.
 ///
 /// ### Params
 ///
-/// * `knn_indices` - KNN indices (cells x k)
-/// * `knn_distances` - KNN squared distances (cells x k) - use Euclidean here!
+/// * `knn_distances` - KNN distances (cells x k), ascending
+/// * `squared` - `true` when `knn_distances` already holds `d^2`, which is what
+///   the `"euclidean"` metric returns, see
+///   [`crate::single_cell::sc_processing::knn::distances_are_squared`]
 ///
 /// ### Returns
 ///
-/// KNN weights matrix (cells x k)
-fn calc_knn_weights(knn_indices: &[Vec<usize>], knn_distances: &[Vec<f32>]) -> Vec<Vec<f32>> {
-    knn_indices
-        .par_iter() // Parallel iterator
-        .zip(knn_distances.par_iter())
-        .map(|(indices, distances)| {
-            if distances.is_empty() {
-                return vec![];
-            }
-
-            let sigma_sq = distances.last().copied().unwrap_or(1.0);
-
-            if sigma_sq == 0.0 {
-                return vec![1.0; indices.len()];
-            }
-
-            distances
-                .iter()
-                .map(|&d_sq| (-d_sq / sigma_sq).exp())
-                .collect()
-        })
-        .collect()
+/// KNN weights matrix (cells x k), each row summing to one
+///
+/// ### References
+///
+/// DeTomaso, et al., Nat. Commun., 2019
+fn calc_knn_weights(knn_distances: &[Vec<f32>], squared: bool) -> Vec<Vec<f32>> {
+    knn_distance_weights(knn_distances, 1.0, squared)
 }
 
 //////////
@@ -302,7 +301,12 @@ pub fn calculate_vision_streaming<S: SingleCellReading>(
 /// * `cluster_membership` - Vector representing to which cluster a given
 ///   gene set belongs.
 /// * `knn_indices` - KNN indices from embedding (cells x k)
-/// * `knn_distances` - KNN squared distances (cells x k)
+/// * `knn_distances` - KNN distances (cells x k), ascending
+/// * `squared_distances` - `true` when `knn_distances` already holds `d^2`.
+///   Follows from the metric the neighbours came from, so derive it with
+///   [`crate::single_cell::sc_processing::knn::distances_are_squared`] rather
+///   than guessing: `"euclidean"` and `"l2"`
+///   are pre-squared, `"cosine"` and `"manhattan"` are not.
 /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
 ///   verbosity.
 ///
@@ -315,13 +319,14 @@ pub fn calc_autocorr_with_clusters(
     cluster_membership: &[usize],
     knn_indices: Vec<Vec<usize>>,
     knn_distances: Vec<Vec<f32>>,
+    squared_distances: bool,
     verbose: usize,
 ) -> (Vec<f64>, Vec<f64>) {
     let verbosity = parse_verbosity_level(verbose);
 
     let start = Instant::now();
 
-    let knn_weights = calc_knn_weights(&knn_indices, &knn_distances);
+    let knn_weights = calc_knn_weights(&knn_distances, squared_distances);
 
     if verbosity.normal_verbosity() {
         println!("Computed KNN weights: {:.2?}", start.elapsed());
@@ -388,4 +393,59 @@ pub fn calc_autocorr_with_clusters(
     }
 
     (pathway_consistency, p_vals)
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_relative_eq;
+
+    /// Values from `VISION/R/Projections.R::computeKNNWeights` run on the same
+    /// input: `sigma = rowMaxs(d)`, `exp(-1 * (d * d) / sigma^2)`, then divided
+    /// by `rowSums`. The row normalisation is the part that was missing.
+    #[test]
+    fn test_vision_kernel_matches_the_r_reference() {
+        let distances = vec![
+            vec![0.5, 1.0, 2.0, 4.0],
+            vec![1.0, 1.0, 1.0, 1.0],
+            vec![0.0, 0.0, 0.0, 0.0],
+        ];
+
+        let expected = [
+            vec![0.320_621_29, 0.305_938_97, 0.253_632_3, 0.119_807_42],
+            vec![0.25, 0.25, 0.25, 0.25],
+            vec![0.25, 0.25, 0.25, 0.25],
+        ];
+
+        let weights = calc_knn_weights(&distances, false);
+
+        for (got, want) in weights.iter().zip(expected.iter()) {
+            for (a, b) in got.iter().zip(want.iter()) {
+                assert_relative_eq!(a, b, epsilon = 1e-6);
+            }
+            assert_relative_eq!(got.iter().sum::<f32>(), 1.0, epsilon = 1e-6);
+        }
+    }
+
+    /// The `"euclidean"` metric hands back `d^2`, so the squared reading of the
+    /// same neighbourhood has to reproduce the plain one.
+    #[test]
+    fn test_vision_kernel_handles_squared_distances() {
+        let plain = vec![vec![0.5, 1.0, 2.0, 4.0]];
+        let squared: Vec<Vec<f32>> = plain
+            .iter()
+            .map(|row| row.iter().map(|d| d * d).collect())
+            .collect();
+
+        let from_plain = calc_knn_weights(&plain, false);
+        let from_squared = calc_knn_weights(&squared, true);
+
+        for (a, b) in from_plain[0].iter().zip(from_squared[0].iter()) {
+            assert_relative_eq!(a, b, epsilon = 1e-6);
+        }
+    }
 }

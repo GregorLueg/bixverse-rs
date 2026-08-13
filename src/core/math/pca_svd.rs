@@ -568,6 +568,7 @@ mod tests {
     use super::*;
     use faer::Mat;
 
+    /// PC scores are `U * S`, so an identity `U` hands the singular values straight back.
     #[test]
     fn test_compute_pc_scores() {
         let u: Mat<f64> = Mat::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
@@ -584,6 +585,7 @@ mod tests {
         assert!((scores[(1, 1)] - 1.5).abs() < 1e-6);
     }
 
+    /// Eigenvalues come back in descending order.
     #[test]
     fn test_get_top_eigenvalues() {
         let mat: Mat<f64> = Mat::from_fn(
@@ -598,11 +600,10 @@ mod tests {
         assert!((top_eigen[1].0 - 1.0).abs() < 1e-6);
     }
 
+    /// Randomised SVD recovers the singular vectors of a dense rank-one matrix, up to sign.
     #[test]
     fn test_randomised_svd_logic() {
         // Create a dense rank-1 matrix A = x * y^T
-        // x = [1.0, 2.0, 3.0, 4.0]^T
-        // y = [1.0, 0.5, 0.25]^T
         let x = [1.0, 2.0, 3.0, 4.0];
         let y = [1.0, 0.5, 0.25];
         let mut mat: Mat<f64> = Mat::zeros(4, 3);
@@ -636,6 +637,7 @@ mod tests {
         assert!(dot_v.abs() > 0.999);
     }
 
+    /// The matrix-free path must agree with the dense one on the same operator.
     #[test]
     fn test_randomised_svd_matfree_matches_dense() {
         // Build A = X1^T @ X2 explicitly, then compare matfree(X1, X2) SVD
@@ -681,6 +683,7 @@ mod tests {
         }
     }
 
+    /// The sparse path recovers a rank-one factorisation despite two structurally empty rows.
     #[test]
     fn test_randomised_sparse_svd_logic() {
         // Create a sparse rank-1 matrix A = x * y^T

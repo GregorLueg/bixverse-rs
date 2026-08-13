@@ -39,16 +39,8 @@ const ARM: usize = 100;
 /// degenerate and every downstream number an artefact of the eigensolver.
 const ARM_DIVERGENCE: f32 = 1.4;
 
-/// Deterministic jitter in `[-0.5, 0.5)`, so the fixture needs no RNG.
-///
-/// ### Params
-///
-/// * `i` - Sample index.
-/// * `salt` - Distinguishes independent noise streams.
-///
-/// ### Returns
-///
-/// A reproducible pseudo-random offset.
+/// Deterministic jitter in `[-0.5, 0.5)`, so the fixture needs no RNG. `salt`
+/// distinguishes independent noise streams.
 fn jitter(i: usize, salt: usize) -> f32 {
     let h = (i.wrapping_mul(2_654_435_761) ^ salt.wrapping_mul(40_503)) % 10_007;
     h as f32 / 10_007.0 - 0.5
@@ -64,10 +56,6 @@ fn jitter(i: usize, salt: usize) -> f32 {
 /// truth. An independent noise stream per arm makes them genuinely different,
 /// and an uneven branch assignment is then a correct answer rather than a bug.
 /// Same construction as the Palantir unit tests.
-///
-/// ### Returns
-///
-/// Coordinates for `TRUNK + 2 * ARM` cells.
 fn y_manifold() -> Vec<Vec<f32>> {
     let mut coords = Vec::with_capacity(TRUNK + 2 * ARM);
 
@@ -87,15 +75,7 @@ fn y_manifold() -> Vec<Vec<f32>> {
     coords
 }
 
-/// Exhaustive kNN over the fixture, as `run_palantir` expects it.
-///
-/// ### Params
-///
-/// * `coords` - Cell coordinates, cells by dimensions.
-/// * `k` - Neighbours per cell, self excluded.
-///
-/// ### Returns
-///
+/// Exhaustive kNN over the fixture, as `run_palantir` expects it:
 /// `(indices, squared distances)`.
 fn knn_of(coords: &[Vec<f32>], k: usize) -> (Vec<Vec<usize>>, Vec<Vec<f32>>) {
     let n = coords.len();
@@ -112,22 +92,14 @@ fn knn_of(coords: &[Vec<f32>], k: usize) -> (Vec<Vec<usize>>, Vec<Vec<f32>>) {
     (indices, distances.unwrap())
 }
 
-/// Palantir parameters sized for the fixture.
-///
-/// Mirrors `test_params` in the Palantir unit tests, restart budget included.
-///
-/// At this fixture size the crate default already converges, so the budget is
-/// insurance rather than a requirement: these manifolds are long, thin and
-/// densely sampled, their diffusion spectrum sits within `1e-5` of one across
-/// the retained range, and the margin closes as the fixture grows. Anyone
-/// enlarging it would otherwise start measuring the eigensolver instead of the
-/// data, silently. The `eigen_converged` assertion below is what would catch
-/// that.
-///
-/// ### Returns
-///
 /// [PalantirParams] with an exact kNN backend, a pinned component count and a
-/// pinned spectrum budget.
+/// pinned spectrum budget. Mirrors `test_params` in the Palantir unit tests.
+///
+/// The crate default already converges at this size, so the restart budget is
+/// insurance: these manifolds' spectra sit within `1e-5` of one across the
+/// retained range and the margin closes as the fixture grows, so anyone
+/// enlarging it would silently start measuring the eigensolver instead of the
+/// data. The `eigen_converged` assertion below is what would catch that.
 fn palantir_params() -> PalantirParams {
     let mut params = PalantirParams::new();
     params.knn = 24;
@@ -144,11 +116,8 @@ fn palantir_params() -> PalantirParams {
 /// * Gene 1 switches on along the **second** arm only.
 /// * Gene 2 is a trunk marker that decays once the arms start.
 ///
-/// Counts are noisy and sparse on purpose, so MAGIC has something to do.
-///
-/// ### Returns
-///
-/// `n_cells` by 3 expression, log1p scaled.
+/// Counts are noisy and sparse on purpose, so MAGIC has something to do. The
+/// result is `n_cells` by 3, log1p scaled.
 fn planted_expression() -> Mat<f32> {
     let n = TRUNK + 2 * ARM;
 

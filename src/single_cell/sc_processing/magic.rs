@@ -744,6 +744,7 @@ mod tests {
         assert!(check_output_size(MAGIC_MAX_ELEMENTS, 100, &allowed).is_ok());
     }
 
+    /// Selections that do not match the kNN rows or the store are named, not accepted.
     #[test]
     fn test_operator_rejects_bad_selections() {
         let (idx, dist) = path_knn(5);
@@ -806,6 +807,7 @@ mod tests {
         }
     }
 
+    /// A gene count that contradicts the block length must error, not read off the end.
     #[test]
     fn test_dense_rejects_shape_mismatch() {
         let op = path_operator(6);

@@ -905,6 +905,7 @@ mod tests_harmony_gpu {
         Mat::<f32>::from_fn(n, d, |i, j| data[i * d + j])
     }
 
+    /// Pins the flattening every GPU upload in this file depends on.
     #[test]
     fn test_to_row_major_roundtrip() {
         let m = Mat::<f32>::from_fn(3, 4, |i, j| (i * 10 + j) as f32);
@@ -917,6 +918,7 @@ mod tests_harmony_gpu {
         }
     }
 
+    /// A near-singular arrowhead system must give exactly zero, not NaN.
     #[test]
     fn test_solve_ridge_arrowhead_host_single_passing_returns_zero() {
         let (n, k, b, d) = (4, 2, 2, 3);
@@ -961,6 +963,7 @@ mod tests_harmony_gpu {
         }
     }
 
+    /// Pins the GPU-layout packing of O, r_sum and S against the CPU ridge.
     #[test]
     fn test_solve_ridge_arrowhead_host_matches_cpu_ridge() {
         // Single-covariate case: solve_ridge_arrowhead_host must match
@@ -1062,6 +1065,7 @@ mod tests_harmony_gpu {
         }
     }
 
+    /// Parity gate for the objective that drives the convergence check.
     #[test]
     fn test_compute_objective_gpu_matches_cpu_v2() {
         let Some(device) = try_device() else { return };
@@ -1156,6 +1160,7 @@ mod tests_harmony_gpu {
         let _ = d; // d unused here
     }
 
+    /// The centroid kernel must emit unit-norm rows pointing like host R*Z.
     #[test]
     fn test_update_centroids_from_r_gpu_basic() {
         let Some(device) = try_device() else { return };
@@ -1221,6 +1226,7 @@ mod tests_harmony_gpu {
         }
     }
 
+    /// Must match the host, zero a zero-norm row, and leave the source alone.
     #[test]
     fn test_row_l2_normalise_into_matches_cpu() {
         let Some(device) = try_device() else { return };
@@ -1256,6 +1262,7 @@ mod tests_harmony_gpu {
         }
     }
 
+    /// End-to-end on two shifted batches: right shape, all entries finite.
     #[test]
     fn test_harmony_v2_gpu_smoke() {
         let Some(device) = try_device() else { return };

@@ -343,6 +343,7 @@ pub fn downsample_pile(pile: &mut Pile, params: &SelectParams, rng_seed: u64) {
 mod tests {
     use super::*;
 
+    /// Rounding up to a power of two, including zero and the exact powers.
     #[test]
     fn ceil_power_of_two_values() {
         assert_eq!(ceil_power_of_two(0), 1);
@@ -355,6 +356,7 @@ mod tests {
         assert_eq!(ceil_power_of_two(9), 16);
     }
 
+    /// Tree size degenerates to zero below two leaves and is a full binary tree above.
     #[test]
     fn tree_size_values() {
         assert_eq!(tree_size(0), 0);
@@ -365,6 +367,7 @@ mod tests {
         assert_eq!(tree_size(5), 15);
     }
 
+    /// Quantile interpolation at the endpoints, median and quarter, plus the empty fallback.
     #[test]
     fn quantile_known_values() {
         let v = vec![1.0f32, 2.0, 3.0, 4.0, 5.0];
@@ -377,6 +380,7 @@ mod tests {
         assert_eq!(quantile(&[], 0.5), 0.0);
     }
 
+    /// The downsample target is clamped into the UMI quantile band from both sides.
     #[test]
     fn compute_downsample_target_clamps() {
         let umis = vec![100.0f32, 200.0, 300.0, 400.0, 500.0];
@@ -388,6 +392,7 @@ mod tests {
         assert_eq!(compute_downsample_target(&umis, 600, 0.0, 1.0), 500);
     }
 
+    /// Tree construction keeps the leaves in place and puts the total at the root.
     #[test]
     fn initialise_tree_root_is_total() {
         let input = vec![1u32, 2, 3, 4, 5];
@@ -401,6 +406,7 @@ mod tests {
         }
     }
 
+    /// A row whose total is already at or below the target is copied through unchanged.
     #[test]
     fn downsample_row_passthrough_when_total_le_samples() {
         let input = vec![1u32, 2, 3];
@@ -409,6 +415,7 @@ mod tests {
         assert_eq!(output, vec![1, 2, 3]);
     }
 
+    /// Subsampling hits the target total exactly and never draws more than a bin holds.
     #[test]
     fn downsample_row_subsample_sum_matches_target() {
         let input = vec![20u32, 30, 50];
@@ -421,6 +428,7 @@ mod tests {
         }
     }
 
+    /// The same seed reproduces the same downsampled row.
     #[test]
     fn downsample_row_deterministic_under_same_seed() {
         let input = vec![10u32, 20, 30, 40];
@@ -431,6 +439,7 @@ mod tests {
         assert_eq!(a, b);
     }
 
+    /// A single bin takes the target, or its own count when the target exceeds it.
     #[test]
     fn downsample_row_single_element_caps() {
         let input = vec![100u32];
@@ -443,6 +452,7 @@ mod tests {
         assert_eq!(output2, vec![100]); // capped at the available count
     }
 
+    /// An empty row is a no-op rather than a panic on the empty tree.
     #[test]
     fn downsample_row_empty_is_noop() {
         let input: Vec<u32> = vec![];
@@ -451,9 +461,9 @@ mod tests {
         assert!(output.is_empty());
     }
 
+    /// Downsampling a pile leaves the sparsity pattern intact and is seed-reproducible.
     #[test]
     fn downsample_pile_preserves_sparsity_and_is_deterministic() {
-        // Two cells, three genes. Cell 0: [10, 20, 30]; cell 1: [40, 50, 60].
         let raw = CompressedSparseData2 {
             data: vec![10u32, 20, 30, 40, 50, 60],
             indices: vec![0, 1, 2, 0, 1, 2],

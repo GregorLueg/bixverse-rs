@@ -336,11 +336,10 @@ pub fn create_random_gs_indices(
             let iter_seed = seed.wrapping_add(i as u64);
             let mut rng = StdRng::seed_from_u64(iter_seed);
 
-            let adjusted_universe = universe_length - 1;
-            let actual_len = std::cmp::min(max_len, adjusted_universe);
+            let actual_len = std::cmp::min(max_len, universe_length);
 
             let mut indices: Vec<usize> =
-                rand::seq::index::sample(&mut rng, adjusted_universe, actual_len)
+                rand::seq::index::sample(&mut rng, universe_length, actual_len)
                     .into_iter()
                     .collect();
 
@@ -397,10 +396,17 @@ where
     };
     let n_t = T::from_usize(n).unwrap();
     let m_t = T::from_usize(m).unwrap();
+    // Misses seen before the i-th hit, which is `position - (i + 1)` only for a
+    // 1-based position. `one_indexed` used to gate the `stats` lookup alone, so
+    // a 0-based call undercounted every miss by one and inflated the ES by
+    // `1 / (n - m)`. Normalise the position here instead.
     let top_tmp: Vec<T> = gs_idx
         .iter()
         .enumerate()
-        .map(|(i, x)| (T::from_i32(*x).unwrap() - T::from_usize(i + 1).unwrap()) / (n_t - m_t))
+        .map(|(i, x)| {
+            let pos_one_based = if one_indexed { *x } else { *x + 1 };
+            (T::from_i32(pos_one_based).unwrap() - T::from_usize(i + 1).unwrap()) / (n_t - m_t)
+        })
         .collect();
     let tops: Vec<T> = r_cum_sum
         .iter()
@@ -1446,7 +1452,8 @@ where
 
     let mut stat_eps = T::from_f64(1e-5).unwrap();
     for (i, _) in (0..k).enumerate() {
-        let t = selected_stats[i];
+        // `selected_stats` is 1-based here, as everywhere else in this function
+        let t = selected_stats[i] - 1;
         let xx = stats[t].abs();
         if xx > T::zero() {
             stat_eps = stat_eps.min(xx);
@@ -1854,4 +1861,109 @@ pub fn calc_simple_and_multi_error<T: BixverseFloat>(
         })
         .collect();
     Ok((simple_err, multi_err))
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_relative_eq;
+    use rustc_hash::FxHashSet;
+
+    /// `stats = [4, 3, 2, 1]` with the set at positions 0 and 2. By hand:
+    /// `nr = 6`, hits add `4/6` then `2/6`, misses subtract `1/2` each, so the
+    /// running sum peaks at `2/3` on the first gene.
+    const STATS: [f64; 4] = [4.0, 3.0, 2.0, 1.0];
+    const EXPECTED_ES: f64 = 2.0 / 3.0;
+
+    /// `fgsea_order` sorts ascending and is stable, so ties keep input order.
+    #[test]
+    fn fgsea_order_sorts_ascending_and_keeps_ties_stable() {
+        assert_eq!(fgsea_order(&[3.0, 1.0, 2.0]), vec![1, 2, 0]);
+        assert_eq!(fgsea_order(&[1.0, 1.0]), vec![0, 1]);
+    }
+
+    /// `ranks_from_order` inverts the permutation `fgsea_order` produces.
+    #[test]
+    fn ranks_from_order_inverts_the_ordering() {
+        assert_eq!(ranks_from_order(&[1, 2, 0]), vec![2, 0, 1]);
+        assert_eq!(
+            ranks_from_order(&fgsea_order(&[3.0, 1.0, 2.0])),
+            vec![2, 0, 1]
+        );
+    }
+
+    /// The running-sum reference, hand-computed above.
+    #[test]
+    fn calculate_es_matches_the_hand_computed_running_sum() {
+        assert_relative_eq!(calculate_es(&STATS, &[0, 2]), EXPECTED_ES, epsilon = 1e-12);
+    }
+
+    /// A set covering the whole ranking scores +1, the mirrored set -1.
+    #[test]
+    fn calculate_es_is_signed_by_where_the_set_sits() {
+        let flat = [1.0_f64; 4];
+        assert_relative_eq!(calculate_es(&flat, &[0, 1]), 1.0, epsilon = 1e-12);
+        assert_relative_eq!(calculate_es(&flat, &[2, 3]), -1.0, epsilon = 1e-12);
+    }
+
+    /// Regression: `one_indexed` gated only the `stats` lookup, so the 0-based
+    /// call counted one miss too few per hit and inflated the ES by `1/(n - m)`,
+    /// returning 7/6 instead of 2/3. `go_elim` takes exactly that path.
+    #[test]
+    fn calc_gsea_stats_agrees_across_both_index_conventions() {
+        let one_based = calc_gsea_stats(&STATS, &[1, 3], 1.0, true, true, true);
+        let zero_based = calc_gsea_stats(&STATS, &[0, 2], 1.0, true, true, false);
+
+        assert_relative_eq!(one_based.es, EXPECTED_ES, epsilon = 1e-12);
+        assert_relative_eq!(zero_based.es, EXPECTED_ES, epsilon = 1e-12);
+        assert_relative_eq!(
+            zero_based.es,
+            calculate_es(&STATS, &[0, 2]),
+            epsilon = 1e-12
+        );
+    }
+
+    /// The plotting arrays are the only other output and nothing else covers
+    /// them. `tops` peaks at the ES; `bottoms` is `tops` minus each hit's share.
+    #[test]
+    fn calc_gsea_stats_returns_the_plotting_extremes() {
+        let res = calc_gsea_stats(&STATS, &[1, 3], 1.0, false, true, true);
+
+        for (g, w) in res.top.iter().zip([2.0 / 3.0, 0.5]) {
+            assert_relative_eq!(*g, w, epsilon = 1e-12);
+        }
+        for (g, w) in res.bottom.iter().zip([0.0, 1.0 / 6.0]) {
+            assert_relative_eq!(*g, w, epsilon = 1e-12);
+        }
+    }
+
+    /// An all-zero stat vector makes `nr` zero, which switches the cumulative
+    /// sum and the bottoms onto their fallback branches.
+    #[test]
+    fn calc_gsea_stats_survives_an_all_zero_stat_vector() {
+        let res = calc_gsea_stats(&[0.0_f64; 4], &[1, 2], 1.0, false, false, true);
+
+        assert!(res.es.is_finite());
+    }
+
+    /// Permutation gene sets must stay inside the universe, be reproducible for
+    /// a given seed, and be able to reach the last gene.
+    #[test]
+    fn create_random_gs_indices_is_reproducible_and_in_range() {
+        let a = create_random_gs_indices(200, 3, 10, 42, false);
+        let b = create_random_gs_indices(200, 3, 10, 42, false);
+
+        assert_eq!(a, b);
+        assert!(a.iter().all(|v| v.len() == 3 && v.iter().all(|&x| x < 10)));
+
+        let seen: FxHashSet<usize> = a.into_iter().flatten().collect();
+        assert!(
+            seen.contains(&9),
+            "the last gene of the universe is never sampled"
+        );
+    }
 }

@@ -181,16 +181,8 @@ mod tests {
     use super::*;
     use approx::assert_relative_eq;
 
-    /// Build a symmetric CSR adjacency from an undirected edge list.
-    ///
-    /// ### Params
-    ///
-    /// * `n` - Node count.
-    /// * `edges` - Undirected edges as `(from, to, weight)`.
-    ///
-    /// ### Returns
-    ///
-    /// The CSR adjacency with both directions stored.
+    /// Build a symmetric CSR over `n` nodes from `(from, to, weight)` edges,
+    /// storing both directions.
     fn undirected_csr(n: usize, edges: &[(usize, usize, f64)]) -> CompressedSparseData2<f64> {
         let mut rows: Vec<Vec<(u32, f64)>> = vec![Vec::new(); n];
         for &(a, b, w) in edges {
@@ -214,16 +206,7 @@ mod tests {
         CompressedSparseData2::new_csr(&data, &indices, &indptr, None, (n, n))
     }
 
-    /// Dense all-pairs reference via Floyd-Warshall.
-    ///
-    /// ### Params
-    ///
-    /// * `n` - Node count.
-    /// * `edges` - Undirected edges as `(from, to, weight)`.
-    ///
-    /// ### Returns
-    ///
-    /// Flat row-major `n x n` distances.
+    /// Dense all-pairs reference via Floyd-Warshall, flat row-major `n x n`.
     fn floyd_warshall(n: usize, edges: &[(usize, usize, f64)]) -> Vec<f64> {
         let mut d = vec![f64::INFINITY; n * n];
         for i in 0..n {
@@ -246,6 +229,7 @@ mod tests {
         d
     }
 
+    /// Distances along a unit chain grow by one per hop.
     #[test]
     fn test_dijkstra_linear_chain() {
         let edges: Vec<(usize, usize, f64)> = (0..5).map(|i| (i, i + 1, 1.0)).collect();
@@ -259,6 +243,8 @@ mod tests {
         }
     }
 
+    /// Relaxation actually happens: a cheaper two-hop route beats the direct
+    /// edge.
     #[test]
     fn test_dijkstra_prefers_two_hop_shortcut() {
         // Direct 0-2 edge is heavier than routing through node 1.
@@ -271,6 +257,7 @@ mod tests {
         assert_relative_eq!(dist[2], 2.0, epsilon = 1e-12);
     }
 
+    /// Nodes in another component report infinity, not zero.
     #[test]
     fn test_dijkstra_unreachable_stays_infinite() {
         let edges = [(0, 1, 1.0), (2, 3, 1.0)];
@@ -283,6 +270,7 @@ mod tests {
         assert!(dist[2].is_infinite() && dist[3].is_infinite());
     }
 
+    /// All-pairs output agrees with a dense Floyd-Warshall oracle.
     #[test]
     fn test_dijkstra_matches_floyd_warshall() {
         // Deterministic pseudo-random graph, no RNG dependency.
@@ -311,6 +299,7 @@ mod tests {
         }
     }
 
+    /// The multi-source result is one row per source, not per node.
     #[test]
     fn test_multi_source_layout_is_row_major_per_source() {
         let edges: Vec<(usize, usize, f64)> = (0..4).map(|i| (i, i + 1, 2.0)).collect();
@@ -325,6 +314,8 @@ mod tests {
         assert_relative_eq!(got[9], 0.0, epsilon = 1e-12);
     }
 
+    /// A source index past the node count errors rather than panicking, on both
+    /// the single- and multi-source entry points.
     #[test]
     fn test_dijkstra_rejects_out_of_range_source() {
         let graph = undirected_csr(3, &[(0, 1, 1.0)]);
@@ -334,6 +325,8 @@ mod tests {
         assert!(multi_source_dijkstra(&graph, &[0, 7]).is_err());
     }
 
+    /// Regression: a NaN weight has to be skipped explicitly, or it poisons the
+    /// relaxation instead of just failing to fire.
     #[test]
     fn test_dijkstra_skips_non_finite_edges() {
         // 0 -1- 1 -NaN- 2 -1- 3, plus a heavy but finite 0-2 detour. Without an
@@ -352,6 +345,7 @@ mod tests {
         assert_relative_eq!(dist[3], 10.0, epsilon = 1e-12);
     }
 
+    /// A node whose only edge is NaN comes back infinite, not NaN.
     #[test]
     fn test_dijkstra_leaves_a_nan_only_node_unreachable() {
         // The single edge onto node 1 is NaN, so node 1 has no usable route.
@@ -365,6 +359,7 @@ mod tests {
         assert!(dist[1].is_infinite());
     }
 
+    /// A CSC matrix is refused rather than walked as if it were CSR.
     #[test]
     fn test_dijkstra_rejects_csc_input() {
         let graph = undirected_csr(3, &[(0, 1, 1.0)]).transform();

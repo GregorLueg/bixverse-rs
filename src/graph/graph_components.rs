@@ -170,16 +170,8 @@ where
 mod tests {
     use super::*;
 
-    /// Build a CSR adjacency from a directed edge list.
-    ///
-    /// ### Params
-    ///
-    /// * `n` - Node count.
-    /// * `edges` - Directed edges as `(from, to)`; weights are all one.
-    ///
-    /// ### Returns
-    ///
-    /// The CSR adjacency storing exactly the given directions.
+    /// Build a CSR over `n` nodes storing exactly the given `(from, to)` edges,
+    /// all at weight one.
     fn directed_csr(n: usize, edges: &[(usize, usize)]) -> CompressedSparseData2<f64> {
         let mut rows: Vec<Vec<u32>> = vec![Vec::new(); n];
         for &(a, b) in edges {
@@ -201,6 +193,7 @@ mod tests {
         CompressedSparseData2::new_csr(&data, &indices, &indptr, None, (n, n))
     }
 
+    /// Disjoint cliques come back as separate components with dense labels.
     #[test]
     fn test_components_of_two_cliques() {
         // {0,1,2} and {3,4} with no edge between them.
@@ -213,6 +206,7 @@ mod tests {
         assert_eq!(labels, vec![0, 0, 0, 1, 1]);
     }
 
+    /// Edge direction is ignored: this is weak connectivity, not strong.
     #[test]
     fn test_components_are_weak_not_strong() {
         // 0 -> 1 -> 2 with no return path: strongly this is three components,
@@ -225,6 +219,7 @@ mod tests {
         assert_eq!(labels, vec![0, 0, 0]);
     }
 
+    /// Nodes with no edges are components in their own right, not dropped.
     #[test]
     fn test_isolated_nodes_get_own_components() {
         let graph = directed_csr(4, &[(0, 1)]);
@@ -235,6 +230,8 @@ mod tests {
         assert_eq!(labels, vec![0, 0, 1, 2]);
     }
 
+    /// The induced subgraph is walked on its own, so removing a cut vertex
+    /// splits it.
     #[test]
     fn test_induced_components_split_a_connected_graph() {
         // A path 0-1-2-3-4. Dropping node 2 splits it into {0,1} and {3,4}.
@@ -256,6 +253,7 @@ mod tests {
         assert_eq!(labels, vec![0, 0, 1, 1]);
     }
 
+    /// Paths through non-members do not connect two members.
     #[test]
     fn test_induced_components_ignore_edges_leaving_the_subset() {
         // 0 and 2 are only connected through 1, which is not a member.
@@ -268,6 +266,8 @@ mod tests {
         assert_eq!(labels, vec![0, 1]);
     }
 
+    /// Regression: a repeated member used to inflate the component count and
+    /// give its copies different labels.
     #[test]
     fn test_induced_components_put_duplicate_members_in_one_component() {
         // Node 0 appears three times and node 2 twice, with no edge between the
@@ -282,6 +282,8 @@ mod tests {
         assert_eq!(labels, vec![0, 1, 0, 1, 0]);
     }
 
+    /// Regression: a duplicated member on a path used to split one component
+    /// into two.
     #[test]
     fn test_induced_components_merge_through_a_duplicated_member() {
         // A path 0-1-2-3. Members list node 1 twice; the second copy must not
@@ -295,6 +297,7 @@ mod tests {
         assert_eq!(labels, vec![0, 0, 0, 0]);
     }
 
+    /// A member index past the node count errors rather than panicking.
     #[test]
     fn test_induced_components_rejects_out_of_range_member() {
         let graph = directed_csr(3, &[(0, 1)]);
@@ -302,6 +305,7 @@ mod tests {
         assert!(induced_components(&graph, &[0, 9]).is_err());
     }
 
+    /// A CSC matrix is refused rather than walked as if it were CSR.
     #[test]
     fn test_components_reject_csc_input() {
         let graph = directed_csr(3, &[(0, 1)]).transform();

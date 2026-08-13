@@ -641,46 +641,42 @@ where
 mod tests {
     use super::*;
 
+    /// The CSR-backed PageRank agrees with the petgraph reference implementation.
     #[test]
-    fn test_page_rank_star() {
+    fn test_optimised_page_rank_matches_reference() {
+        // Star graph 0 -> 1, 0 -> 2, uniform personalisation. Both the
+        // petgraph reference and the CSR-backed optimised path must agree.
         let mut graph = Graph::<&str, f64>::new();
-        let n0 = graph.add_node("0");
-        let n1 = graph.add_node("1");
-        let n2 = graph.add_node("2");
-
-        // 0 links to 1 and 2
+        let n0 = graph.add_node("A");
+        let n1 = graph.add_node("B");
+        let n2 = graph.add_node("C");
         graph.add_edge(n0, n1, 1.0);
         graph.add_edge(n0, n2, 1.0);
 
-        // Uniform personalization
-        let p_vec = vec![1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0];
+        let p_vec: Vec<f64> = vec![1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0];
+        let reference = personalised_page_rank(graph, 0.85, &p_vec, 100, None);
 
-        let ranks = personalised_page_rank(graph, 0.85, &p_vec, 100, None);
-
-        assert_eq!(ranks.len(), 3);
-        // Symmetry: 1 and 2 must have exactly the same rank
-        assert!((ranks[1] - ranks[2]).abs() < 1e-6);
-        // Mass conservation
-        assert!((ranks.iter().sum::<f64>() - 1.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_optimised_page_rank_matches() {
         let nodes = vec!["A".to_string(), "B".to_string(), "C".to_string()];
         let from = vec!["A".to_string(), "A".to_string()];
         let to = vec!["B".to_string(), "C".to_string()];
         let weights = vec![1.0, 1.0];
-
         let pr_graph = PageRankGraph::from_strings(&nodes, &from, &to, Some(&weights), false);
 
-        let p_vec: Vec<f64> = vec![1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0];
         let mut memory = PageRankWorkingMemory::new();
-
-        let ranks =
+        let optimised =
             personalised_page_rank_optimised(&pr_graph, 0.85, &p_vec, 100, 1e-6, &mut memory);
 
-        assert_eq!(ranks.len(), 3);
-        assert!((ranks[1] - ranks[2]).abs() < 1e-6);
-        assert!((ranks.iter().sum::<f64>() - 1.0).abs() < 1e-6);
+        assert_eq!(reference.len(), 3);
+        assert_eq!(optimised.len(), 3);
+        for (i, (r, o)) in reference.iter().zip(optimised.iter()).enumerate() {
+            assert!(
+                (r - o).abs() < 1e-6,
+                "node {i}: reference {r} vs optimised {o}"
+            );
+        }
+
+        // The two leaves are symmetric and the mass is conserved.
+        assert!((optimised[1] - optimised[2]).abs() < 1e-6);
+        assert!((optimised.iter().sum::<f64>() - 1.0).abs() < 1e-6);
     }
 }

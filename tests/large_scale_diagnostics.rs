@@ -1,5 +1,5 @@
 #![allow(clippy::needless_range_loop)]
-#![cfg(all(feature = "single-cell", feature = "large_scale_diagnostics"))]
+#![cfg(all(feature = "single-cell", feature = "large-test"))]
 
 use bixverse_rs::core::math::pca_svd::*;
 use bixverse_rs::core::math::sparse::*;

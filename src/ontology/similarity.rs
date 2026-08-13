@@ -578,8 +578,13 @@ where
             .cloned()
             .collect();
 
+        // No shared ancestor means no shared semantics, so the similarity is 0.
+        // This used to return 1.0, which disagreed with
+        // [Self::calculate_similarity_from_s_values] (the path `calc_sim_matrix`
+        // takes) and reported maximum similarity for terms in disconnected parts
+        // of the DAG, e.g. any GO BP term against any GO MF term.
         if common_nodes.is_empty() {
-            return Some(T::one());
+            return Some(T::zero());
         }
 
         let sv1: T = s_val_1.values().copied().sum();
@@ -654,4 +659,117 @@ where
     }
 
     results
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_relative_eq;
+
+    /// The chain `A -> B -> C` at edge weight 0.8. Ancestor sets include self,
+    /// so by hand:
+    ///   S_C = {C: 1, B: 0.8, A: 0.64}, SV(C) = 2.44
+    ///   S_B = {B: 1, A: 0.8},          SV(B) = 1.80
+    ///   S_A = {A: 1},                  SV(A) = 1.00
+    fn chain() -> WangSimOntology<f64> {
+        WangSimOntology::new(
+            &["A".to_string(), "B".to_string()],
+            &["B".to_string(), "C".to_string()],
+            &[0.8, 0.8],
+        )
+    }
+
+    /// Every pair of the chain, derived from the S-values above.
+    #[test]
+    fn wang_sim_on_a_chain_matches_the_hand_derivation() {
+        let onto = chain();
+
+        // (0.8 + 1.0) + (0.64 + 0.8) = 3.24 over 2.44 + 1.80
+        assert_relative_eq!(
+            onto.wang_sim("B", "C").unwrap(),
+            3.24 / 4.24,
+            epsilon = 1e-12
+        );
+        // (0.64 + 1.0) over 2.44 + 1.00
+        assert_relative_eq!(
+            onto.wang_sim("A", "C").unwrap(),
+            1.64 / 3.44,
+            epsilon = 1e-12
+        );
+        // (0.8 + 1.0) over 1.80 + 1.00
+        assert_relative_eq!(onto.wang_sim("A", "B").unwrap(), 1.8 / 2.8, epsilon = 1e-12);
+    }
+
+    /// A term against itself is 1, and an unknown term is `None`.
+    #[test]
+    fn wang_sim_handles_self_and_unknown_terms() {
+        let onto = chain();
+
+        assert_relative_eq!(onto.wang_sim("A", "A").unwrap(), 1.0, epsilon = 1e-12);
+        assert!(onto.wang_sim("A", "NOPE").is_none());
+    }
+
+    /// Regression: terms in disconnected parts of the DAG share no ancestor, so
+    /// the similarity is 0. `wang_sim` used to return 1.0 here while
+    /// `calc_sim_matrix` returned 0.0, i.e. maximum similarity for maximally
+    /// dissimilar terms. Asserting the two paths agree is the tightest way to
+    /// state that.
+    #[test]
+    fn wang_sim_of_disconnected_terms_is_zero_and_matches_the_matrix() {
+        let onto = WangSimOntology::<f64>::new(
+            &["X".to_string(), "Y".to_string()],
+            &["X1".to_string(), "Y1".to_string()],
+            &[0.8, 0.8],
+        );
+
+        let pair = onto.wang_sim("X1", "Y1").unwrap();
+        assert_relative_eq!(pair, 0.0, epsilon = 1e-12);
+
+        let (matrix, names) = onto.calc_sim_matrix();
+        let i = names.iter().position(|n| n == "X1").unwrap();
+        let j = names.iter().position(|n| n == "Y1").unwrap();
+        assert_relative_eq!(pair, matrix[(i, j)], epsilon = 1e-12);
+    }
+
+    /// The matrix agrees with the pairwise accessor, is symmetric, and has a
+    /// unit diagonal. Term order is hash-driven, so look everything up by name.
+    #[test]
+    fn calc_sim_matrix_is_symmetric_and_agrees_with_wang_sim() {
+        let onto = chain();
+        let (matrix, names) = onto.calc_sim_matrix();
+
+        assert_eq!(names.len(), 3);
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec!["A", "B", "C"]);
+
+        for (i, ni) in names.iter().enumerate() {
+            assert_relative_eq!(matrix[(i, i)], 1.0, epsilon = 1e-12);
+            for (j, nj) in names.iter().enumerate() {
+                assert_relative_eq!(matrix[(i, j)], matrix[(j, i)], epsilon = 1e-12);
+                if i != j {
+                    assert_relative_eq!(
+                        matrix[(i, j)],
+                        onto.wang_sim(ni, nj).unwrap(),
+                        epsilon = 1e-12
+                    );
+                }
+            }
+        }
+    }
+
+    /// A cycle has no topological order, so construction must refuse it.
+    #[test]
+    #[should_panic(expected = "cycle")]
+    fn wang_sim_ontology_rejects_a_cyclic_graph() {
+        WangSimOntology::<f64>::new(
+            &["A".to_string(), "B".to_string()],
+            &["B".to_string(), "A".to_string()],
+            &[0.8, 0.8],
+        );
+    }
 }

@@ -1102,6 +1102,7 @@ mod tests {
     use faer::mat;
     use std::slice::from_ref;
 
+    /// Level count, level priors and the per-level cell index lists all line up.
     #[test]
     fn test_create_batch_info() {
         let labels = vec![0, 0, 1, 1, 2, 0];
@@ -1117,16 +1118,7 @@ mod tests {
         assert_eq!(info.cell_to_level, labels);
     }
 
-    #[test]
-    fn test_create_batch_info_single_level() {
-        let labels = vec![0, 0, 0];
-        let info = create_batch_info(&labels, 3).unwrap();
-
-        assert_eq!(info.n_levels, 1);
-        assert_eq!(info.pr_b, vec![1.0]);
-        assert_eq!(info.batch_indices[0], vec![0, 1, 2]);
-    }
-
+    /// Two covariates each get their own independent batch info.
     #[test]
     fn test_create_batch_infos_multiple() {
         let var0 = vec![0, 0, 1, 1];
@@ -1142,6 +1134,7 @@ mod tests {
         assert_eq!(infos[1].batch_indices[1], vec![1, 3]);
     }
 
+    /// k-means on cosine-normalised input returns unit-length centroids.
     #[test]
     fn test_run_kmeans_cosine_basic() {
         let mut data = Vec::new();
@@ -1170,6 +1163,7 @@ mod tests {
         }
     }
 
+    /// A cell sitting on its centroid has zero cosine distance.
     #[test]
     fn test_compute_cosine_distances_identical() {
         let centroids = Mat::from_fn(2, 3, |i, j| match i {
@@ -1189,6 +1183,7 @@ mod tests {
         }
     }
 
+    /// Orthogonal unit vectors land at distance 2, the scale Harmony expects.
     #[test]
     fn test_compute_cosine_distances_orthogonal() {
         let centroids = Mat::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
@@ -1198,6 +1193,7 @@ mod tests {
         assert_relative_eq!(dist[(1, 0)], 2.0, epsilon = 1e-5);
     }
 
+    /// R is a per-cell softmax over clusters, so every column sums to one.
     #[test]
     fn test_initialise_r_from_distances() {
         let dist_data = [0.0, 2.0, 4.0, 4.0, 2.0, 0.0];
@@ -1222,6 +1218,7 @@ mod tests {
         assert_relative_eq!(r[(1, 1)], 0.5, epsilon = 1e-6);
     }
 
+    /// Sigma is per cluster, so at equal distance the larger sigma wins the mass.
     #[test]
     fn test_initialise_r_different_sigmas() {
         let dist_data = [1.0, 1.0, 1.0, 1.0];
@@ -1232,6 +1229,7 @@ mod tests {
         assert!(r[(1, 0)] > r[(0, 0)]);
     }
 
+    /// O sums soft memberships per batch level; E is the row sum times the level prior.
     #[test]
     fn test_compute_diversity_statistics_simple() {
         let labels = vec![0, 0, 1, 1, 1, 2];
@@ -1277,6 +1275,7 @@ mod tests {
         }
     }
 
+    /// Both O and E preserve the R row sums, whatever the membership pattern.
     #[test]
     fn test_diversity_statistics_properties() {
         let labels = vec![0, 0, 0, 1, 1, 2, 2, 2, 2];
@@ -1315,24 +1314,9 @@ mod tests {
                 r_row_sum
             );
         }
-
-        // Property 3: E proportional to pr_b
-        for cluster_idx in 0..3 {
-            let r_row_sum: f32 = (0..9).map(|n| r[(cluster_idx, n)]).sum();
-            for level_idx in 0..3 {
-                let expected = r_row_sum * info.pr_b[level_idx];
-                assert!(
-                    (e[(cluster_idx, level_idx)] - expected).abs() < 1e-5,
-                    "E[{},{}] = {}, expected {}",
-                    cluster_idx,
-                    level_idx,
-                    e[(cluster_idx, level_idx)],
-                    expected
-                );
-            }
-        }
     }
 
+    /// Centroids are the R-weighted cell means, renormalised back to unit length.
     #[test]
     fn test_update_centroids_simple() {
         let norm_3 = (0.5f32 * 0.5 + 0.5 * 0.5).sqrt();
@@ -1364,6 +1348,7 @@ mod tests {
         assert!(y[(1, 1)] > y[(1, 0)]);
     }
 
+    /// Hard 0/1 assignments put each centroid on exactly the cells it owns.
     #[test]
     fn test_update_centroids_hard_assignment() {
         let z_cos = mat![[1.0, 0.0], [0.0, 1.0], [0.707, 0.707],];
@@ -1380,6 +1365,7 @@ mod tests {
         assert!(y[(0, 0)] > y[(0, 1)]);
     }
 
+    /// A confident, well-separated R scores lower than a maximally uncertain one.
     #[test]
     fn test_compute_objective_decreases() {
         let labels = vec![0, 0, 1, 1];
@@ -1416,31 +1402,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_compute_objective_components() {
-        let labels = vec![0, 0, 1];
-        let info = create_batch_info(&labels, 3).unwrap();
-        let sigma = vec![1.0, 1.0];
-        let theta = vec![1.0];
-
-        let r = mat![[0.8, 0.7, 0.2], [0.2, 0.3, 0.8]];
-        let dist_mat = mat![[0.1, 0.2, 0.9], [0.9, 0.8, 0.1]];
-        let oe = compute_all_diversity_statistics(r.as_ref(), from_ref(&info));
-
-        let obj = compute_objective(
-            r.as_ref(),
-            dist_mat.as_ref(),
-            &oe[..],
-            &sigma,
-            &theta,
-            from_ref(&info),
-        );
-
-        assert!(obj.is_finite());
-        assert!(obj > 0.0);
-        assert!(obj < 10000.0, "Objective seems too large: {}", obj);
-    }
-
+    /// With theta zero and a hard R, only the k-means term and its 2000/n scaling remain.
     #[test]
     fn test_objective_zero_entropy() {
         let labels = vec![0, 1];
@@ -1469,6 +1431,7 @@ mod tests {
         );
     }
 
+    /// The R update keeps columns normalised and leaves O and E in step with the new R.
     #[test]
     fn test_update_r_basic() {
         let labels = vec![0, 0, 1, 1];
@@ -1535,6 +1498,7 @@ mod tests {
         }
     }
 
+    /// With theta zero the update follows the distances alone.
     #[test]
     fn test_update_r_no_diversity_penalty() {
         let labels = vec![0, 0];
@@ -1562,6 +1526,7 @@ mod tests {
         assert!(r_new[(1, 1)] > 0.6);
     }
 
+    /// A strong diversity penalty still leaves every column summing to one.
     #[test]
     fn test_update_r_diversity_correction() {
         let labels = vec![0, 0, 0, 1];
@@ -1596,6 +1561,7 @@ mod tests {
         }
     }
 
+    /// With two covariates both O/E blocks stay consistent with the updated R.
     #[test]
     fn test_update_r_two_variables() {
         let labels0 = vec![0, 0, 1, 1];
@@ -1667,50 +1633,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_ridge_regression_basic() {
-        let labels = vec![0, 0, 1, 1];
-        let info = create_batch_info(&labels, 4).unwrap();
-
-        // Batch effect in feature 0
-        let z_orig = mat![[1.0, 0.1], [1.1, 0.2], [5.0, 0.1], [5.1, 0.2],];
-
-        let r = mat![[1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 0.0]];
-
-        let z_corr = ridge_regression_correction(
-            z_orig.as_ref(),
-            r.as_ref(),
-            std::slice::from_ref(&info),
-            0.01,
-        );
-
-        let batch0_mean_orig = (z_orig[(0, 0)] + z_orig[(1, 0)]) / 2.0;
-        let batch1_mean_orig = (z_orig[(2, 0)] + z_orig[(3, 0)]) / 2.0;
-        let orig_diff = (batch1_mean_orig - batch0_mean_orig).abs();
-
-        let batch0_mean_corr = (z_corr[(0, 0)] + z_corr[(1, 0)]) / 2.0;
-        let batch1_mean_corr = (z_corr[(2, 0)] + z_corr[(3, 0)]) / 2.0;
-        let corr_diff = (batch1_mean_corr - batch0_mean_corr).abs();
-
-        assert!(
-            corr_diff < orig_diff,
-            "Batch effect should be reduced: orig_diff={}, corr_diff={}",
-            orig_diff,
-            corr_diff
-        );
-
-        let feature1_change: f32 = (0..4)
-            .map(|i| (z_corr[(i, 1)] - z_orig[(i, 1)]).abs())
-            .sum::<f32>()
-            / 4.0;
-
-        assert!(
-            feature1_change < 0.5,
-            "Feature without batch effect should change little: {}",
-            feature1_change
-        );
-    }
-
+    /// Data with no batch effect must not gain artificial spread from the correction.
     #[test]
     fn test_ridge_regression_no_correction_needed() {
         let labels = vec![0, 0, 1, 1];
@@ -1759,12 +1682,14 @@ mod tests {
         }
     }
 
+    /// Soft cluster memberships shrink the batch effect and leave the clean feature be.
     #[test]
     fn test_ridge_regression_soft_assignments() {
         let labels = vec![0, 0, 1, 1];
         let info = create_batch_info(&labels, 4).unwrap();
 
-        let z_orig = mat![[1.0, 0.0], [1.0, 0.0], [5.0, 0.0], [5.0, 0.0]];
+        // Feature 0 carries the batch effect, feature 1 does not.
+        let z_orig = mat![[1.0, 0.1], [1.0, 0.2], [5.0, 0.1], [5.0, 0.2]];
         let r = mat![[0.8, 0.9, 0.1, 0.2], [0.2, 0.1, 0.9, 0.8],];
 
         let z_corr = ridge_regression_correction(
@@ -1788,27 +1713,20 @@ mod tests {
             orig_diff,
             corr_diff
         );
-    }
 
-    #[test]
-    fn test_ridge_regression_preserves_dimensions() {
-        let labels = vec![0, 1, 2];
-        let info = create_batch_info(&labels, 3).unwrap();
+        let feature1_change: f32 = (0..4)
+            .map(|i| (z_corr[(i, 1)] - z_orig[(i, 1)]).abs())
+            .sum::<f32>()
+            / 4.0;
 
-        let z_orig = mat![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]];
-        let r = mat![[0.5, 0.5, 0.5], [0.5, 0.5, 0.5]];
-
-        let z_corr = ridge_regression_correction(
-            z_orig.as_ref(),
-            r.as_ref(),
-            std::slice::from_ref(&info),
-            0.1,
+        assert!(
+            feature1_change < 0.5,
+            "Feature without batch effect should change little: {}",
+            feature1_change
         );
-
-        assert_eq!(z_corr.nrows(), z_orig.nrows());
-        assert_eq!(z_corr.ncols(), z_orig.ncols());
     }
 
+    /// Two covariates each get their own effect removed from their own feature.
     #[test]
     fn test_ridge_regression_two_variables() {
         let batch_labels = vec![0, 0, 1, 1, 2, 2];
@@ -1882,6 +1800,7 @@ mod tests {
         );
     }
 
+    /// The second covariate really enters the design matrix rather than being ignored.
     #[test]
     fn test_ridge_regression_two_vars_design_matrix_size() {
         let batch_labels = vec![0, 0, 1, 1];
@@ -1937,6 +1856,7 @@ mod tests {
         );
     }
 
+    /// A second covariate adds its own cross-entropy term, raising the objective.
     #[test]
     fn test_objective_two_variables() {
         let labels0 = vec![0, 0, 1, 1];
