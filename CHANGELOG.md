@@ -2,9 +2,20 @@
 
 ## 0.4.3
 
+### Features
+
+- Speed improvements for meta cell HVG detection
+- Hotspot wiring for meta cells + updates to its kernel to be more faithful to
+  to original implementation.
+
 ### Fix
 
 - Make the dimension conversion in R less harsh to avoid future problems.
+- Various small bug fixes during a massive sweep of the test suite
+
+### Chores
+
+- Complete refactor of the testing suite.
 
 ## 0.4.2
 
