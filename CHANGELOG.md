@@ -7,6 +7,7 @@
 - Speed improvements for meta cell HVG detection
 - Hotspot wiring for meta cells + updates to its kernel to be more faithful to
   to original implementation.
+- SCENIC Regulon binariser improved.
 
 ### Fix
 
