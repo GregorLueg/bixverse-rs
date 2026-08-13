@@ -182,36 +182,18 @@ mod tests {
 
     impl TempStore {
         /// Reserve a uniquely named scratch store in the system temp directory.
-        ///
-        /// ### Params
-        ///
-        /// * `name` - Test-unique suffix
-        ///
-        /// ### Returns
-        ///
-        /// The guard.
         fn new(name: &str) -> Self {
             Self(std::env::temp_dir().join(format!("bixverse_hotspot_mc_{name}.bin")))
         }
 
         /// Path of the guarded store.
-        ///
-        /// ### Returns
-        ///
-        /// The path as a `&str`.
         fn path(&self) -> &str {
             self.0.to_str().expect("temp path is valid UTF-8")
         }
     }
 
-    /// Deterministic aggregated counts, no RNG dependency.
-    ///
-    /// Values run into the hundreds so the metacell regime, rather than the
-    /// single-cell one, is what gets exercised.
-    ///
-    /// ### Returns
-    ///
-    /// `dense[gene][cell]` raw counts.
+    /// Deterministic `dense[gene][cell]` counts in the hundreds, so the metacell
+    /// regime rather than the single-cell one gets exercised.
     fn synthetic_counts() -> Vec<Vec<u32>> {
         let mut state = 0x2545_F491_4F6C_DD1Du64;
         let mut dense = vec![vec![0u32; N_CELLS]; N_GENES];
@@ -234,19 +216,9 @@ mod tests {
         dense
     }
 
-    /// The same counts as a CSC `CompressedSparseData2` with both layers.
-    ///
-    /// The normalised layer is quantised through `f16` exactly as the writer
-    /// does, so the on-disk and in-memory paths see identical inputs.
-    ///
-    /// ### Params
-    ///
-    /// * `dense` - `dense[gene][cell]` raw counts
-    /// * `lib_sizes` - Total counts per cell
-    ///
-    /// ### Returns
-    ///
-    /// The matrix, shape (cells, genes).
+    /// The same counts as a (cells, genes) CSC matrix with both layers. The
+    /// normalised layer is quantised through `f16` exactly as the writer does,
+    /// so the on-disk and in-memory paths see identical inputs.
     fn to_csc(dense: &[Vec<u32>], lib_sizes: &[f32]) -> CompressedSparseData2<u32, f32> {
         let mut data: Vec<u32> = Vec::new();
         let mut data_2: Vec<f32> = Vec::new();
@@ -268,14 +240,7 @@ mod tests {
         CompressedSparseData2::new_csc(&data, &indices, &indptr, Some(&data_2), (N_CELLS, N_GENES))
     }
 
-    /// Write the gene-major and cell-major stores the disk-backed reference
-    /// needs.
-    ///
-    /// ### Params
-    ///
-    /// * `dense` - `dense[gene][cell]` raw counts
-    /// * `genes` - Guard for the gene store
-    /// * `cells` - Guard for the cell store
+    /// Write the gene-major and cell-major stores the disk-backed reference needs.
     fn write_stores(dense: &[Vec<u32>], genes: &TempStore, cells: &TempStore) {
         let mut gene_writer =
             CellGeneSparseWriter::new(genes.path(), false, N_CELLS, N_GENES, SIZE_FACTOR)
@@ -329,14 +294,6 @@ mod tests {
     }
 
     /// Total counts per cell.
-    ///
-    /// ### Params
-    ///
-    /// * `dense` - `dense[gene][cell]` raw counts
-    ///
-    /// ### Returns
-    ///
-    /// One library size per cell.
     fn library_sizes(dense: &[Vec<u32>]) -> Vec<f32> {
         (0..N_CELLS)
             .map(|cell| dense.iter().map(|gene| gene[cell] as f32).sum())
@@ -346,10 +303,6 @@ mod tests {
     /// A ring graph over the cells, so every node has two neighbours and every
     /// edge is reciprocal. Distances ascend within each row, as every kNN
     /// producer in the crate guarantees.
-    ///
-    /// ### Returns
-    ///
-    /// `(neighbours, distances)`.
     fn ring_graph() -> (Vec<Vec<usize>>, Vec<Vec<f32>>) {
         let neighbours: Vec<Vec<usize>> = (0..N_CELLS)
             .map(|i| vec![(i + 1) % N_CELLS, (i + N_CELLS - 1) % N_CELLS])
@@ -361,15 +314,7 @@ mod tests {
         (neighbours, distances)
     }
 
-    /// Parameters for a given model, on an unweighted graph.
-    ///
-    /// ### Params
-    ///
-    /// * `model` - One of `"danb"`, `"bernoulli"`, `"normal"`
-    ///
-    /// ### Returns
-    ///
-    /// The [HotSpotParams].
+    /// Parameters for a given null model, on an unweighted graph.
     fn params_for(model: &str) -> HotSpotParams {
         HotSpotParams {
             model: model.to_string(),

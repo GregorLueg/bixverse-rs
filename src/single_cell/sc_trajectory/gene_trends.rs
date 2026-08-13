@@ -811,6 +811,7 @@ mod tests {
         assert_eq!(masks[1].len(), n);
     }
 
+    /// Empty, mismatched and non-finite pseudotime are all refused rather than fitted.
     #[test]
     fn test_select_branch_cells_rejects_bad_inputs() {
         let probs = Mat::<f32>::from_fn(4, 2, |_, _| 0.5);
@@ -830,6 +831,7 @@ mod tests {
         ));
     }
 
+    /// Merging two sorted slices, including when either side is empty.
     #[test]
     fn test_merge_sorted() {
         let mut out = Vec::new();
@@ -843,6 +845,7 @@ mod tests {
         assert_eq!(out, vec![1.0]);
     }
 
+    /// Both endpoints land exactly on the requested bounds, with no drift in between.
     #[test]
     fn test_linspace_pins_both_endpoints() {
         let g = linspace(0.3, 2.7, 5);
@@ -1019,6 +1022,7 @@ mod tests {
         ));
     }
 
+    /// Empty, undersized and degenerate branches error with the branch named.
     #[test]
     fn test_gene_trends_rejects_bad_branches() {
         let n = 20usize;

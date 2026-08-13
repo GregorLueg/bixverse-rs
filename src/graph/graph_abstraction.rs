@@ -358,16 +358,8 @@ mod tests {
     use super::*;
     use approx::assert_relative_eq;
 
-    /// Build a directed binary CSR from an edge list.
-    ///
-    /// ### Params
-    ///
-    /// * `n` - Node count.
-    /// * `edges` - Directed edges as `(from, to)`.
-    ///
-    /// ### Returns
-    ///
-    /// The CSR adjacency storing exactly the given directions.
+    /// Build a directed binary CSR over `n` nodes storing exactly the given
+    /// `(from, to)` edges.
     fn directed_csr(n: usize, edges: &[(usize, usize)]) -> CompressedSparseData2<u8> {
         let mut rows: Vec<Vec<u32>> = vec![Vec::new(); n];
         for &(a, b) in edges {
@@ -389,15 +381,7 @@ mod tests {
         CompressedSparseData2::new_csr(&data, &indices, &indptr, None, (n, n))
     }
 
-    /// Densify a connectivity CSR for readable assertions.
-    ///
-    /// ### Params
-    ///
-    /// * `csr` - The abstracted graph.
-    ///
-    /// ### Returns
-    ///
-    /// A `k` by `k` dense copy, indexed `[row][col]`.
+    /// Densify a connectivity CSR into a `k` by `k` `[row][col]` copy.
     fn densify(csr: &CompressedSparseData2<f64>) -> Vec<Vec<f64>> {
         let k = csr.nrows();
         let mut out = vec![vec![0.0; k]; k];
@@ -411,20 +395,14 @@ mod tests {
 
     /// A ring of directed edges over `members`, so every node has out-degree
     /// one and the partition is internally connected.
-    ///
-    /// ### Params
-    ///
-    /// * `members` - Node indices in the ring.
-    ///
-    /// ### Returns
-    ///
-    /// The directed edges of the ring.
     fn ring(members: &[usize]) -> Vec<(usize, usize)> {
         (0..members.len())
             .map(|i| (members[i], members[(i + 1) % members.len()]))
             .collect()
     }
 
+    /// The connectivity of a single bridge between two dense blocks matches the
+    /// hand-computed null expectation.
     #[test]
     fn test_two_blocks_bridged_by_one_edge() {
         // Two rings of 4, one directed edge 3 -> 4 between them.
@@ -450,6 +428,7 @@ mod tests {
         assert!(want < 1.0);
     }
 
+    /// Connectivity is not transitive: unlinked partitions stay at zero.
     #[test]
     fn test_chain_of_three_partitions_leaves_the_ends_unconnected() {
         let mut edges = ring(&[0, 1]);
@@ -470,6 +449,7 @@ mod tests {
         assert_eq!(dense[2][0], 0.0);
     }
 
+    /// An observation landing exactly on the null gives one, unclamped.
     #[test]
     fn test_connectivity_of_exactly_one_is_left_alone() {
         // Two singleton partitions joined in both directions. e = (1, 1),
@@ -486,6 +466,7 @@ mod tests {
         assert_relative_eq!(densify(&res.connectivities)[0][1], 1.0, epsilon = 1e-12);
     }
 
+    /// A ratio above the null is clamped to one rather than reported raw.
     #[test]
     fn test_connectivity_is_capped_at_one() {
         // The observation has to genuinely exceed the null or the clamp is
@@ -512,6 +493,8 @@ mod tests {
         assert_relative_eq!(densify(&res.connectivities)[0][1], 1.0, epsilon = 1e-12);
     }
 
+    /// Self loops count towards the within-partition total but never emit an
+    /// off-diagonal or diagonal entry of their own.
     #[test]
     fn test_self_loops_only_move_the_expected_value() {
         // A self loop is a within-partition edge: it lands on the diagonal, so
@@ -531,6 +514,7 @@ mod tests {
         assert_eq!(db[1][1], 0.0);
     }
 
+    /// One partition yields a 1x1 empty matrix, not a self-connectivity.
     #[test]
     fn test_single_partition_has_no_connectivities() {
         let graph = directed_csr(4, &ring(&[0, 1, 2, 3]));
@@ -543,6 +527,8 @@ mod tests {
         assert_eq!(res.connectivities.get_nnz(), 0);
     }
 
+    /// A caller-declared partition count keeps unoccupied labels in the output
+    /// shape rather than compacting them away.
     #[test]
     fn test_declared_empty_partition_is_kept() {
         let graph = directed_csr(2, &[(0, 1), (1, 0)]);
@@ -555,6 +541,7 @@ mod tests {
         assert_eq!(res.connectivities.get_nnz(), 2);
     }
 
+    /// The sequential and parallel edge-counting arms give identical counts.
     #[test]
     fn test_both_counting_arms_agree() {
         // Both arms driven directly on the same graph and the same `k`. Forcing
@@ -575,6 +562,8 @@ mod tests {
         assert_eq!(sequential.iter().sum::<u64>(), graph.indices.len() as u64);
     }
 
+    /// Regression: the parallel arm was chosen on partition count alone, so it
+    /// fired on graphs too small to pay for the per-thread accumulators.
     #[test]
     fn test_parallel_counting_needs_edges_as_well_as_few_partitions() {
         // Keying the decision on `k` alone is what makes this go wrong: at
@@ -592,6 +581,8 @@ mod tests {
         ));
     }
 
+    /// Regression: a non-monotonic `indptr` silently skipped rows instead of
+    /// erroring.
     #[test]
     fn test_rejects_a_non_monotonic_indptr() {
         // `indptr = [0, 5, 2, 7]` makes the Rust range `5..2` empty, so row 1 is
@@ -608,6 +599,8 @@ mod tests {
         ));
     }
 
+    /// Regression: a column index beyond the node count panicked on the
+    /// `partitions` lookup rather than erroring.
     #[test]
     fn test_rejects_an_out_of_range_column_index() {
         // Indexing `partitions[9]` on a three-node graph panics through the
@@ -623,6 +616,7 @@ mod tests {
         ));
     }
 
+    /// Fewer labels than nodes is refused rather than silently truncated.
     #[test]
     fn test_rejects_label_count_mismatch() {
         let graph = directed_csr(3, &[(0, 1)]);
@@ -635,6 +629,8 @@ mod tests {
         ));
     }
 
+    /// A label past the declared partition count is refused, with both the
+    /// offending label and the ceiling reported.
     #[test]
     fn test_rejects_out_of_range_label() {
         let graph = directed_csr(2, &[(0, 1)]);
@@ -650,6 +646,8 @@ mod tests {
         ));
     }
 
+    /// `MAX_PARTITIONS` binds, so the dense accumulator cannot be sized
+    /// arbitrarily by the caller.
     #[test]
     fn test_rejects_too_many_partitions() {
         let graph = directed_csr(2, &[(0, 1)]);
@@ -659,6 +657,7 @@ mod tests {
         assert!(matches!(res, Err(BixverseErrors::TooManyPartitions { .. })));
     }
 
+    /// A CSC matrix is refused rather than read as if it were CSR.
     #[test]
     fn test_rejects_csc_input() {
         let graph = directed_csr(2, &[(0, 1)]).transform();

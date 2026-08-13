@@ -1832,17 +1832,20 @@ impl<'a, S: SingleCellReading> ScDblFinder<'a, S> {
 mod tests {
     use super::*;
 
+    /// A doublet of two cells from one cluster carries no origin to report.
     #[test]
     fn test_canonical_origin_homotypic_is_none() {
         assert_eq!(canonical_origin(3, 3), None);
     }
 
+    /// The parent pair is order-independent, so counts do not split across (a,b) and (b,a).
     #[test]
     fn test_canonical_origin_sorts_tuple() {
         assert_eq!(canonical_origin(5, 2), Some((2, 5)));
         assert_eq!(canonical_origin(2, 5), Some((2, 5)));
     }
 
+    /// Only simulated neighbours can vote, so a real-only neighbourhood yields nothing.
     #[test]
     fn test_origin_no_sim_neighbours() {
         // All neighbours are real cells (indices < n_obs)
@@ -1856,6 +1859,7 @@ mod tests {
         );
     }
 
+    /// The most frequent parent pair among the simulated neighbours wins.
     #[test]
     fn test_origin_unique_majority() {
         // n_obs = 5, neighbours 5,6,7 are sim doublets with clusters
@@ -1870,6 +1874,7 @@ mod tests {
         );
     }
 
+    /// Equal vote counts are broken by the closest simulated neighbour.
     #[test]
     fn test_origin_tiebreak_by_min_distance() {
         // Two origins tied 2:2, (0,1) has closer min distance
@@ -1883,6 +1888,7 @@ mod tests {
         );
     }
 
+    /// Homotypic neighbours do not vote, even when they are the nearest one.
     #[test]
     fn test_origin_skips_homotypic_neighbours() {
         // Neighbour 5 has homotypic origin (should be ignored)
@@ -1896,6 +1902,7 @@ mod tests {
         );
     }
 
+    /// The distance comes from the nearest real neighbour, skipping simulated ones.
     #[test]
     fn test_dist_to_real_finds_first_real() {
         let neighbours = vec![10, 11, 2, 3]; // 2 is first real (n_obs=5)
@@ -1906,6 +1913,7 @@ mod tests {
         );
     }
 
+    /// With no real neighbour at all the result is R's `2*md` fallback.
     #[test]
     fn test_dist_to_real_fallback() {
         // All neighbours are simulated
@@ -1917,6 +1925,7 @@ mod tests {
         );
     }
 
+    /// Cells without an assigned origin drop out of the tally rather than forming a key.
     #[test]
     fn test_aggregate_origin_counts() {
         let origins = vec![Some((0, 1)), Some((0, 1)), None, Some((1, 2)), Some((0, 1))];

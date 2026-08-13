@@ -518,14 +518,16 @@ pub enum BixverseErrors {
     #[error("Invalid MTX header: {0}")]
     MtxHeaderInvalid(&'static str),
 
-    /// A field inside an MTX body line could not be parsed.
+    /// A field of the MTX shape line could not be parsed as a number.
     ///
-    /// `field` names the offending column ("row", "col", "value") so that
-    /// malformed inputs can be diagnosed without quoting user data.
+    /// `field` names the offending column ("cell count", "gene count",
+    /// "entry count") so that malformed inputs can be diagnosed without
+    /// quoting user data. Which of the first two fields is which depends on
+    /// the `cells_as_rows` orientation.
     #[cfg(feature = "single-cell")]
     #[error("Failed to parse MTX value as {field}")]
     MtxParseError {
-        /// Which field failed: "row", "col", or "value".
+        /// Which field failed: "cell count", "gene count", or "entry count".
         field: &'static str,
     },
     // -- Batch --
@@ -742,6 +744,38 @@ pub enum BixverseErrors {
     #[cfg(feature = "single-cell")]
     #[error("MELD: labels needs two groups minimum")]
     MELDOnlyOneGroup,
+
+    // -- DGE --
+    /// The reference group holds no cells.
+    #[cfg(feature = "single-cell")]
+    #[error("DGE: the reference group is empty")]
+    DgeEmptyReferenceGroup,
+
+    /// No comparison group was supplied at all.
+    #[cfg(feature = "single-cell")]
+    #[error("DGE: at least one comparison group is required")]
+    DgeNoComparisonGroups,
+
+    /// One of the comparison groups holds no cells.
+    #[cfg(feature = "single-cell")]
+    #[error("DGE: comparison group {group} is empty")]
+    DgeEmptyComparisonGroup {
+        /// Index of the offending comparison group
+        group: usize,
+    },
+
+    /// A cell appears both in the reference and in a comparison group.
+    ///
+    /// Silently biases every AUROC toward 0.5 rather than failing, so it is
+    /// worth rejecting outright.
+    #[cfg(feature = "single-cell")]
+    #[error("DGE: cell {cell} appears in both the reference and comparison group {group}")]
+    DgeOverlappingGroups {
+        /// Index of the offending comparison group
+        group: usize,
+        /// The cell shared with the reference group
+        cell: usize,
+    },
 
     // -- Palantir --
     /// The user-supplied early cell index sits outside the cell range.
@@ -1339,5 +1373,21 @@ pub enum BixverseErrors {
     GpuNotSupportedForLearner {
         /// Name of the requested regression learner.
         learner: &'static str,
+    },
+    /// The device cannot give `build_score_rf_fused` the threadgroup memory it
+    /// asks for, so SCENIC's RandomForest learner has no GPU path on it.
+    ///
+    /// The kernel's ask is a compile-time constant checked against the tightest
+    /// shipping backend floor, so reaching this means a device well outside
+    /// what the crate targets rather than an unlucky shape.
+    #[cfg(feature = "gpu")]
+    #[error(
+        "SCENIC GPU: the fused RandomForest kernel needs {bytes} bytes of shared memory but this device offers {limit}; use the CPU entry point (run_scenic_grn / run_scenic_grn_streaming / run_scenic_grn_in_memory) or switch the learner to ExtraTrees"
+    )]
+    GpuScenicFusedRfUnavailable {
+        /// Shared-memory bytes the fused kernel allocates per workgroup.
+        bytes: usize,
+        /// Shared-memory bytes the device reports.
+        limit: usize,
     },
 }

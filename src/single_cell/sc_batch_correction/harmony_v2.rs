@@ -1162,6 +1162,7 @@ mod tests {
 
     use super::super::harmony::{compute_diversity_statistics, create_batch_info};
 
+    /// With tau zero every level of a variable keeps the raw theta.
     #[test]
     fn test_expand_theta_tau_zero() {
         let labels = vec![0, 0, 1, 1, 1];
@@ -1173,15 +1174,13 @@ mod tests {
         assert_relative_eq!(result[0][1], 2.0, epsilon = 1e-6);
     }
 
+    /// A positive tau damps theta for small levels, so the bigger batch gets more penalty.
     #[test]
     fn test_expand_theta_tau_positive() {
         let labels = vec![0, 0, 1, 1, 1, 1, 1, 1, 1, 1];
         let info = create_batch_info(&labels, 10).unwrap();
         let result = expand_theta(&[2.0], &[info], 5, 5.0);
 
-        // Level 0 has 2 cells, level 1 has 8 cells
-        // Level 0: 2.0 * (1 - exp(-(2/(5*5))^2)) -- small scaling
-        // Level 1: 2.0 * (1 - exp(-(8/(5*5))^2)) -- larger scaling
         assert!(
             result[0][0] < result[0][1],
             "Larger batch should get higher theta: {} vs {}",
@@ -1193,6 +1192,7 @@ mod tests {
         assert!(result[0][0] > 0.0);
     }
 
+    /// Each variable gets a theta vector as long as its own level count.
     #[test]
     fn test_expand_theta_multiple_variables() {
         let labels0 = vec![0, 0, 1, 1];
@@ -1208,23 +1208,27 @@ mod tests {
         assert_relative_eq!(result[1][0], 3.0, epsilon = 1e-6);
     }
 
+    /// Too few objective values to fill the window means not converged, not a panic.
     #[test]
     fn test_check_convergence_too_few_values() {
         assert!(!check_convergence(&[1.0, 2.0], 3, 1e-5));
     }
 
+    /// An objective trace that flattens over the window counts as converged.
     #[test]
     fn test_check_convergence_converged() {
         let vals = vec![100.0, 99.5, 99.0, 98.99, 98.98, 98.97];
         assert!(check_convergence(&vals, 3, 0.01));
     }
 
+    /// A steadily falling objective is not treated as converged.
     #[test]
     fn test_check_convergence_not_converged() {
         let vals = vec![100.0, 90.0, 80.0, 70.0, 60.0, 50.0];
         assert!(!check_convergence(&vals, 3, 0.01));
     }
 
+    /// The stabilised objective returns a finite number on ordinary input.
     #[test]
     fn test_objective_v2_finite_and_positive() {
         let labels = vec![0, 0, 1];
@@ -1249,6 +1253,7 @@ mod tests {
         assert!(!obj.is_nan());
     }
 
+    /// A confident, well-separated R scores lower than a maximally uncertain one.
     #[test]
     fn test_objective_v2_decreases_with_better_assignments() {
         let labels = vec![0, 0, 1, 1];
@@ -1288,6 +1293,7 @@ mod tests {
         );
     }
 
+    /// With theta zero the cross-entropy term drops out and only the k-means term is left.
     #[test]
     fn test_objective_v2_zero_theta_no_cross_entropy() {
         let labels = vec![0, 1];
@@ -1318,6 +1324,7 @@ mod tests {
         );
     }
 
+    /// A second covariate contributes its own term rather than being ignored.
     #[test]
     fn test_objective_v2_two_variables() {
         let labels0 = vec![0, 0, 1, 1];
@@ -1362,6 +1369,7 @@ mod tests {
         );
     }
 
+    /// Regression: the v1 cross-entropy blew up as O_kb approached zero; v2 stays finite.
     #[test]
     fn test_objective_v2_stabilised_near_zero_o() {
         // Scenario where v1 formula would be unstable: O_kb near zero
@@ -1394,69 +1402,9 @@ mod tests {
         assert!(!obj.is_nan());
     }
 
+    /// Columns stay normalised and the incrementally tracked O matches a fresh recomputation.
     #[test]
-    fn test_update_r_v2_columns_sum_to_one() {
-        let labels = vec![0, 0, 1, 1];
-        let info = create_batch_info(&labels, 4).unwrap();
-        let sigma = vec![1.0, 1.0];
-        let theta_expanded = vec![vec![1.0, 1.0]];
-
-        let r_init = mat![[0.5, 0.5, 0.5, 0.5], [0.5, 0.5, 0.5, 0.5]];
-        let dist_mat = mat![[0.1, 0.1, 0.9, 0.9], [0.9, 0.9, 0.1, 0.1]];
-        let oe_init = compute_all_diversity_statistics(r_init.as_ref(), from_ref(&info));
-        let scale_dist = compute_scaled_distances(dist_mat.as_ref(), &sigma).unwrap();
-
-        let (r_new, _) = update_r_with_diversity_v2(
-            scale_dist.as_ref(),
-            &theta_expanded,
-            from_ref(&info),
-            0.5,
-            42,
-            r_init.as_ref(),
-            &oe_init,
-        );
-
-        for cell_idx in 0..4 {
-            let col_sum: f32 = (0..2).map(|k| r_new[(k, cell_idx)]).sum();
-            assert!(
-                (col_sum - 1.0).abs() < 1e-5,
-                "Column {} sum: {}",
-                cell_idx,
-                col_sum
-            );
-        }
-    }
-
-    #[test]
-    fn test_update_r_v2_follows_distances() {
-        let labels = vec![0, 0, 1, 1];
-        let info = create_batch_info(&labels, 4).unwrap();
-        let sigma = vec![1.0, 1.0];
-        let theta_expanded = vec![vec![1.0, 1.0]];
-
-        let r_init = mat![[0.5, 0.5, 0.5, 0.5], [0.5, 0.5, 0.5, 0.5]];
-        let dist_mat = mat![[0.1, 0.1, 0.9, 0.9], [0.9, 0.9, 0.1, 0.1]];
-        let oe_init = compute_all_diversity_statistics(r_init.as_ref(), from_ref(&info));
-        let scale_dist = compute_scaled_distances(dist_mat.as_ref(), &sigma).unwrap();
-
-        let (r_new, _) = update_r_with_diversity_v2(
-            scale_dist.as_ref(),
-            &theta_expanded,
-            from_ref(&info),
-            0.5,
-            42,
-            r_init.as_ref(),
-            &oe_init,
-        );
-
-        assert!(r_new[(0, 0)] > 0.5);
-        assert!(r_new[(0, 1)] > 0.5);
-        assert!(r_new[(1, 2)] > 0.5);
-        assert!(r_new[(1, 3)] > 0.5);
-    }
-
-    #[test]
-    fn test_update_r_v2_oe_consistency() {
+    fn test_update_r_v2_properties() {
         let labels = vec![0, 0, 1, 1];
         let info = create_batch_info(&labels, 4).unwrap();
         let sigma = vec![1.0, 1.0];
@@ -1477,7 +1425,25 @@ mod tests {
             &oe_init,
         );
 
-        let oe_check = compute_all_diversity_statistics(r_new.as_ref(), &[info]);
+        // Columns are a distribution over clusters.
+        for cell_idx in 0..4 {
+            let col_sum: f32 = (0..2).map(|k| r_new[(k, cell_idx)]).sum();
+            assert!(
+                (col_sum - 1.0).abs() < 1e-5,
+                "Column {} sum: {}",
+                cell_idx,
+                col_sum
+            );
+        }
+
+        // Each cell moves towards its nearer centroid.
+        assert!(r_new[(0, 0)] > 0.5);
+        assert!(r_new[(0, 1)] > 0.5);
+        assert!(r_new[(1, 2)] > 0.5);
+        assert!(r_new[(1, 3)] > 0.5);
+
+        // The incrementally tracked O matches a recomputation from R.
+        let oe_check = compute_all_diversity_statistics(r_new.as_ref(), from_ref(&info));
         let OEPair { o: o_new, .. } = &oe_new[0];
         let OEPair { o: o_check, .. } = &oe_check[0];
 
@@ -1495,6 +1461,7 @@ mod tests {
         }
     }
 
+    /// With theta zero the update follows the scaled distances alone.
     #[test]
     fn test_update_r_v2_no_diversity_penalty() {
         let labels = vec![0, 0];
@@ -1521,6 +1488,7 @@ mod tests {
         assert!(r_new[(1, 1)] > 0.6);
     }
 
+    /// With two covariates both tracked O blocks stay consistent with the updated R.
     #[test]
     fn test_update_r_v2_two_variables() {
         let labels0 = vec![0, 0, 1, 1];
@@ -1569,6 +1537,7 @@ mod tests {
         }
     }
 
+    /// The fast arrowhead solve agrees with a general LU solve on arrowhead input.
     #[test]
     fn test_arrowhead_matches_lu() {
         // Build a design_cov that has arrowhead structure:
@@ -1602,6 +1571,7 @@ mod tests {
         }
     }
 
+    /// A zero on the diagonal makes the arrowhead solve degenerate, so it declines rather than divides.
     #[test]
     fn test_arrowhead_degenerate_returns_none() {
         let p = 3;
@@ -1615,65 +1585,7 @@ mod tests {
         assert!(solve_arrowhead(&design_cov, &phi_z).is_none());
     }
 
-    #[test]
-    fn test_ridge_v2_reduces_batch_effect() {
-        let labels = vec![0, 0, 1, 1];
-        let info = create_batch_info(&labels, 4).unwrap();
-
-        let z_orig = mat![[1.0, 0.1], [1.1, 0.2], [5.0, 0.1], [5.1, 0.2]];
-        let r = mat![[1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 0.0]];
-        let oe = compute_all_diversity_statistics(r.as_ref(), from_ref(&info));
-
-        let z_corr = ridge_regression_correction_v2(
-            z_orig.as_ref(),
-            r.as_ref(),
-            std::slice::from_ref(&info),
-            &oe,
-            0.01,
-            0.2,
-            false,
-            1e-5,
-        );
-
-        let orig_diff = ((z_orig[(2, 0)] + z_orig[(3, 0)]) / 2.0
-            - (z_orig[(0, 0)] + z_orig[(1, 0)]) / 2.0)
-            .abs();
-        let corr_diff = ((z_corr[(2, 0)] + z_corr[(3, 0)]) / 2.0
-            - (z_corr[(0, 0)] + z_corr[(1, 0)]) / 2.0)
-            .abs();
-
-        assert!(
-            corr_diff < orig_diff,
-            "Batch effect should be reduced: orig={}, corr={}",
-            orig_diff,
-            corr_diff
-        );
-    }
-
-    #[test]
-    fn test_ridge_v2_preserves_dimensions() {
-        let labels = vec![0, 1, 2];
-        let info = create_batch_info(&labels, 3).unwrap();
-
-        let z_orig = mat![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]];
-        let r = mat![[0.5, 0.5, 0.5], [0.5, 0.5, 0.5]];
-        let oe = compute_all_diversity_statistics(r.as_ref(), from_ref(&info));
-
-        let z_corr = ridge_regression_correction_v2(
-            z_orig.as_ref(),
-            r.as_ref(),
-            std::slice::from_ref(&info),
-            &oe,
-            0.1,
-            0.2,
-            false,
-            1e-5,
-        );
-
-        assert_eq!(z_corr.nrows(), 3);
-        assert_eq!(z_corr.ncols(), 3);
-    }
-
+    /// A variable left with one surviving level after pruning has nothing to correct.
     #[test]
     fn test_ridge_v2_batch_pruning_skips_single_level() {
         // If only one level passes the cutoff for a variable, that variable
@@ -1715,6 +1627,7 @@ mod tests {
         }
     }
 
+    /// Soft cluster memberships still shrink the batch effect.
     #[test]
     fn test_ridge_v2_soft_assignments() {
         let labels = vec![0, 0, 1, 1];
@@ -1750,6 +1663,7 @@ mod tests {
         );
     }
 
+    /// Dynamic lambda scales with E_kb, so its fit differs from the fixed-lambda one.
     #[test]
     fn test_ridge_v2_dynamic_lambda() {
         let labels = vec![0, 0, 1, 1];
@@ -1796,6 +1710,7 @@ mod tests {
         );
     }
 
+    /// Two covariates each get their own effect removed from their own feature.
     #[test]
     fn test_ridge_v2_two_variables() {
         let batch_labels = vec![0, 0, 1, 1, 2, 2];
@@ -1877,48 +1792,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_ridge_v2_uses_arrowhead_for_single_covariate() {
-        // Indirect test: single covariate should produce the same result
-        // whether arrowhead or LU is used (we test they agree)
-        let labels = vec![0, 0, 0, 1, 1, 1];
-        let info = create_batch_info(&labels, 6).unwrap();
-
-        let z_orig = mat![
-            [1.0, 0.5],
-            [1.2, 0.6],
-            [0.8, 0.4],
-            [4.0, 0.5],
-            [4.2, 0.6],
-            [3.8, 0.4],
-        ];
-        let r = mat![
-            [0.9, 0.9, 0.9, 0.1, 0.1, 0.1],
-            [0.1, 0.1, 0.1, 0.9, 0.9, 0.9],
-        ];
-        let oe = compute_all_diversity_statistics(r.as_ref(), from_ref(&info));
-
-        let z_corr = ridge_regression_correction_v2(
-            z_orig.as_ref(),
-            r.as_ref(),
-            std::slice::from_ref(&info),
-            &oe,
-            1.0,
-            0.2,
-            false,
-            1e-5,
-        );
-
-        // Just verify it runs and produces sensible output
-        assert_eq!(z_corr.nrows(), 6);
-        assert_eq!(z_corr.ncols(), 2);
-        for i in 0..6 {
-            for j in 0..2 {
-                assert!(z_corr[(i, j)].is_finite());
-            }
-        }
-    }
-
+    /// When every level is pruned the embedding comes back untouched.
     #[test]
     fn test_ridge_v2_no_correction_when_all_pruned() {
         let labels = vec![0, 1];

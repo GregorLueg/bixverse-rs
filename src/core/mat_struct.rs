@@ -302,11 +302,8 @@ mod tests {
     use faer::Mat;
     use std::collections::BTreeMap;
 
+    /// A 3 by 3 matrix holding 0 to 8 in row-major order, named r1 to r3 and c1 to c3.
     fn setup_named_matrix() -> (Mat<f64>, BTreeMap<String, usize>, BTreeMap<String, usize>) {
-        // 3x3 Matrix:
-        // [[0.0, 1.0, 2.0],
-        //  [3.0, 4.0, 5.0],
-        //  [6.0, 7.0, 8.0]]
         let mat: Mat<f64> = Mat::from_fn(3, 3, |i, j| (i * 3 + j) as f64);
 
         let mut row_names = BTreeMap::new();
@@ -322,6 +319,7 @@ mod tests {
         (mat, row_names, col_names)
     }
 
+    /// Selection follows the order of the requested names, not the stored index order.
     #[test]
     fn test_named_matrix_sub_mat() {
         let (mat, row_names, col_names) = setup_named_matrix();
@@ -345,6 +343,7 @@ mod tests {
         assert!((sub[(1, 0)] - 1.0).abs() < 1e-6);
     }
 
+    /// An empty selection and an all-unknown selection both give None, never a zero-sized matrix.
     #[test]
     fn test_named_matrix_empty_selection() {
         let (mat, row_names, col_names) = setup_named_matrix();
@@ -361,6 +360,7 @@ mod tests {
         assert!(invalid_rows.is_none());
     }
 
+    /// The deferred view reports the sliced shape and copies the right cells when realised.
     #[test]
     fn test_mat_slice_view() {
         let (mat, _, _) = setup_named_matrix();
@@ -378,6 +378,7 @@ mod tests {
         assert!((owned[(1, 1)] - 8.0).abs() < 1e-6);
     }
 
+    /// Out-of-range indices panic at construction, not later during `to_owned`.
     #[test]
     #[should_panic(expected = "You selected indices larger than ncol.")]
     fn test_mat_slice_view_out_of_bounds_col() {

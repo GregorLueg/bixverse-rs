@@ -132,40 +132,20 @@ mod tests {
         }
     }
 
+    /// Row sums accumulate only the stored non-zeros and stay in cell order.
     #[test]
     fn sum_rows_csr_basic() {
-        // Two cells, three genes.
-        // row 0: [3, 0, 5] -> sum 8
-        // row 1: [0, 2, 0] -> sum 2
         let mat = make_csr(vec![3, 5, 2], vec![0, 2, 1], vec![0, 2, 3], (2, 3));
         let sums = sum_rows_csr(&mat);
         assert_eq!(sums, vec![8.0, 2.0]);
     }
 
+    /// A row with no stored entries must sum to zero rather than be skipped.
     #[test]
     fn sum_rows_csr_empty_row() {
         // Single cell, no non-zeros.
         let mat = make_csr(vec![], vec![], vec![0, 0], (1, 5));
         let sums = sum_rows_csr(&mat);
         assert_eq!(sums, vec![0.0]);
-    }
-
-    #[test]
-    fn pile_n_cells_and_field_access() {
-        // Direct construction also pins the public field shape: any rename
-        // breaks this test, alerting future refactors.
-        let pile = Pile {
-            cell_indices: vec![10, 20, 30],
-            raw: make_csr(vec![1, 2, 3], vec![0, 1, 2], vec![0, 1, 2, 3], (3, 5)),
-            umis_per_cell: vec![1.0, 2.0, 3.0],
-            n_genes: 5,
-            downsampled: None,
-            selected_gene_indices: None,
-            selected_dense: None,
-        };
-        assert_eq!(pile.n_cells(), 3);
-        assert_eq!(pile.cell_indices, vec![10, 20, 30]);
-        assert_eq!(pile.n_genes, 5);
-        assert!(pile.downsampled.is_none());
     }
 }

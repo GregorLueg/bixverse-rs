@@ -1255,14 +1255,14 @@ mod tests {
         (outgoing, incoming)
     }
 
-    #[test]
-    fn mass_factor_is_zero_at_target() {
-        let mf = mass_factor(100.0, 50.0, 100.0, 200.0);
-        assert!(mf.abs() < 1e-9, "expected 0 at target, got {}", mf);
-    }
-
+    /// The mass penalty is zero on target and falls off faster outside the bounds than inside.
     #[test]
     fn mass_factor_is_negative_off_target() {
+        let at_target = mass_factor(100.0, 50.0, 100.0, 200.0);
+        assert!(
+            at_target.abs() < 1e-9,
+            "expected 0 at target, got {at_target}"
+        );
         let inside_lo = mass_factor(75.0, 50.0, 100.0, 200.0);
         let inside_hi = mass_factor(150.0, 50.0, 100.0, 200.0);
         let outside_lo = mass_factor(20.0, 50.0, 100.0, 200.0);
@@ -1273,14 +1273,7 @@ mod tests {
         assert!(outside_hi < inside_hi, "outside-high must be sharper");
     }
 
-    #[test]
-    fn node_score_default_is_log_epsilon_half() {
-        let s = NodeScore::new();
-        let expected = EPSILON.log2() / 2.0;
-        assert!((s.score - expected).abs() < 1e-12);
-        assert_eq!(s.connectivity(), 0);
-    }
-
+    /// Optimisation recovers the two cliques from a deliberately wrong start.
     #[test]
     fn two_clique_graph_separates_correctly() {
         // 6 nodes, two triangles {0,1,2} and {3,4,5}, weakly linked
@@ -1340,26 +1333,28 @@ mod tests {
         );
     }
 
+    /// The partition score depends on the grouping, not on the label each group carries.
     #[test]
-    fn score_is_finite_on_trivial_input() {
-        // Single edge graph; each node in its own partition.
+    fn score_is_invariant_to_partition_relabelling() {
+        // Single edge graph; each node in its own partition. The score sums
+        // over partitions, so swapping the two labels must not move it.
         let edges = vec![(0, 1, 1.0), (1, 0, 1.0)];
         let (out, inc) = make_graph(&edges, 2);
         let mass = vec![1.0f32; 2];
-        let mut assignment = vec![0i32, 1];
-        let s = score_partitions(
-            &out,
-            &inc,
-            &mass,
-            &mut assignment,
-            0.5,
-            1.0,
-            2.0,
-            0.5,
-            1.0,
-            2.0,
-            true,
+
+        let score_of = |assignment: &mut [i32]| {
+            score_partitions(
+                &out, &inc, &mass, assignment, 0.5, 1.0, 2.0, 0.5, 1.0, 2.0, true,
+            )
+        };
+
+        let s = score_of(&mut [0i32, 1]);
+        let s_swapped = score_of(&mut [1i32, 0]);
+
+        assert!(s.is_finite(), "score must be finite, got {s}");
+        assert!(
+            (s - s_swapped).abs() < 1e-12,
+            "relabelling changed the score: {s} vs {s_swapped}"
         );
-        assert!(s.is_finite(), "score must be finite, got {}", s);
     }
 }

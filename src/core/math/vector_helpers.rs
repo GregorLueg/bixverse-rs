@@ -280,6 +280,7 @@ where
 mod tests {
     use super::*;
 
+    /// Correlation hits plus or minus one on affine inputs and returns `None` on degenerate ones.
     #[test]
     fn test_pearson_correlation() {
         let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
@@ -296,6 +297,7 @@ mod tests {
         assert_eq!(pearson_correlation(&[1.0], &[1.0]), None);
     }
 
+    /// Regression: a large common offset cancelled the variance and returned `None`.
     #[test]
     fn test_pearson_correlation_survives_a_large_offset() {
         // Values sit at 1e8 with 1e-4 of spread, so the raw-moment formula
@@ -316,12 +318,10 @@ mod tests {
         );
     }
 
+    /// Tied values share the average of the ranks they span, and an empty input ranks to nothing.
     #[test]
     fn test_rank_vector() {
         let vec = vec![3.0, 1.0, 2.0, 3.0];
-        // Ranks should account for ties:
-        // sorted: 1.0 (idx 1), 2.0 (idx 2), 3.0 (idx 0), 3.0 (idx 3)
-        // ranks: 1.0 -> 1.0, 2.0 -> 2.0, 3.0 -> 3.5, 3.0 -> 3.5
         let ranks = rank_vector(&vec);
         assert_eq!(ranks, vec![3.5, 1.0, 2.0, 3.5]);
 
@@ -329,6 +329,7 @@ mod tests {
         assert_eq!(rank_vector(&empty), Vec::<f64>::new());
     }
 
+    /// Odd lengths take the middle value, even ones the midpoint, and an empty input gives `None`.
     #[test]
     fn test_median() {
         let vec_odd = vec![1.0, 3.0, 2.0];
@@ -341,16 +342,14 @@ mod tests {
         assert_eq!(median(&empty), None);
     }
 
+    /// MAD is the median of the absolute deviations from the median, unscaled without a constant.
     #[test]
     fn test_mad() {
         let vec = vec![1.0, 1.0, 2.0, 2.0, 4.0, 6.0, 9.0];
-        // Median is 2.0
-        // Absolute deviations: [1.0, 1.0, 0.0, 0.0, 2.0, 4.0, 7.0]
-        // Sorted deviations: [0.0, 0.0, 1.0, 1.0, 2.0, 4.0, 7.0]
-        // MAD (median of deviations) is 1.0
         assert_eq!(mad(&vec, None), Some(1.0));
     }
 
+    /// The `n - 1` denominator: the population standard deviation here would be exactly 2.0.
     #[test]
     fn test_standard_deviation() {
         let vec = vec![2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0];

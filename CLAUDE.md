@@ -29,7 +29,8 @@ Feature flags gate large chunks of the crate. Match your `cargo` invocations to 
 - `single-cell`: enables the `single_cell` module and pulls in `hdf5`, `ndarray`, `memmap2`, `lz4_flex`, `bincode`, `indexmap`, `half`
 - `multi-modal`: enables `single_cell::multi_modal` (implies `single-cell`)
 - `gpu`: enables the `gpu` module, `cubecl` (wgpu + cpu backends), `cubecl-utils-rs`, `cubek` and `half`
-- `large_scale_diagnostics`: development-only. Gates the expensive tests and the unasserted diagnostic sweeps. No CI job enables it
+- `large-test`: slow but asserting tests. The GPU parity gates and the large-scale numerical checks. These can fail, so they are worth running on a schedule. No CI job enables it yet
+- `large_scale_diagnostics`: development-only. Gates the unasserted diagnostic sweeps that print tables for a human to read. They cannot fail, so running them in CI buys nothing
 
 ## Common commands
 
@@ -43,8 +44,12 @@ cargo test --features single-cell,multi-modal
 # alone silently skips them entirely.
 cargo test --features gpu,single-cell
 
-# The expensive tests. Release, or the CPU reference solves dominate.
-cargo test --release --features gpu,single-cell,multi-modal,large_scale_diagnostics
+# The slow asserting gates. Release, or the CPU reference solves dominate.
+# Around two minutes and roughly 979 tests.
+cargo test --release --features gpu,single-cell,multi-modal,large-test
+
+# The print-only diagnostic sweeps. Nothing here can fail; read the output.
+cargo test --release --features gpu,single-cell,large_scale_diagnostics -- --nocapture
 
 # Run a single test by name (substring match)
 cargo test --features single-cell,multi-modal -- test_name_substring
@@ -82,7 +87,7 @@ Top-level modules:
 
 `errors.rs` defines `BixverseErrors` (a single `thiserror` enum for the whole crate). Variants are grouped by subsystem, so add new variants in the matching section rather than at the bottom. Many variants are gated by `#[cfg(feature = "single-cell")]` / `"multi-modal"` / `"gpu"`. Match the gating of the code that produces them.
 
-The single-cell binary sparse format is versioned via `SC_FILE_VERSION` (currently 3) and `MC_SPARSE_VERSION` (currently 1) in `prelude.rs`. Bumping either invalidates existing files on disk.
+The single-cell binary sparse format is versioned via `SC_FILE_VERSION` (currently 3) in `prelude.rs`. Bumping it invalidates existing files on disk. `ParallelSparseReader::new` checks the magic string, the version, and every offset it reads against the mmap length, so a foreign, truncated or corrupt file errors rather than parsing or panicking.
 
 ## Performance conventions
 
@@ -101,17 +106,25 @@ R-facing functions live in `*_r_wrapper.rs` files and use `extendr_api`. The con
 ## Testing layout
 
 - Unit tests live inline (`#[cfg(test)] mod tests`) in each module file
-- Integration tests in `tests/`, each gated by a file-level `#![cfg(...)]`: `meta_cells2.rs` (single-cell), `scenic_gpu.rs` (single-cell + gpu), `seacells_gpu.rs` (single-cell + gpu + large_scale_diagnostics), `gpu_corr.rs` (gpu + large_scale_diagnostics), `large_scale_diagnostics.rs` (single-cell + large_scale_diagnostics)
+- Integration tests in `tests/`, each gated by a file-level `#![cfg(...)]`: `meta_cells2.rs` (single-cell), `gene_trends.rs` (single-cell), `scenic_gpu.rs` (single-cell + gpu), `seacells_gpu.rs` (single-cell + gpu + large-test), `gpu_corr.rs` (gpu + large-test), `large_scale_diagnostics.rs` (single-cell + large-test, the file name predates the flag split)
 - CI matrix: Ubuntu / macOS / Windows for CPU tests; Ubuntu / macOS for GPU tests (Linux uses Vulkan via `WGPU_BACKEND=vulkan`)
 
 ### Expensive tests
 
-Anything that takes more than a second or two goes behind `#[cfg(feature = "large_scale_diagnostics")]`, placed directly after `#[test]` with a one-line comment giving the problem size. The feature covers both the slow GPU parity tests and the unasserted diagnostic sweeps. No CI job enables it, so CI runs toy sizes only.
+Anything that takes more than a second or two goes behind a feature, placed directly after `#[test]` with a one-line comment giving the problem size. Which feature depends on whether it can fail:
+
+- `large-test` if it asserts. These are real gates and are worth running on a schedule.
+- `large_scale_diagnostics` if it only prints for a human to read. Running these in CI buys nothing, since they cannot fail.
+
+If you are adding a sweep that computes a difference against a reference, assert on it and use `large-test`. A sweep that prints a number it never checks is not a test.
+
+No CI job enables either yet, so CI runs toy sizes only.
 
 Two consequences to keep in mind:
 
-- Gated tests do not compile under the CI feature sets, so they can bit-rot. Run `cargo clippy --features gpu,single-cell,large_scale_diagnostics --all-targets` whenever you touch them.
-- Gating a test can orphan a helper or an import inside a `#[cfg(test)] mod tests` block. Carry the same `cfg` on the helper rather than reaching for `#[allow(dead_code)]` in `src/`. `run_columns_a_raw` in `gpu/sc_gpu/seacells_gpu.rs` is the worked example.
+- Gated tests do not compile under the CI feature sets, so they can bit-rot. Run `cargo clippy --features gpu,single-cell,large-test,large_scale_diagnostics --all-targets` whenever you touch them.
+- Gating a test can orphan a helper or an import inside a `#[cfg(test)] mod tests` block. Carry the same `cfg` on the helper rather than reaching for `#[allow(dead_code)]` in `src/`.
+- Before doing that, check whether the gate is right at all. `run_columns_a_raw` in `gpu/sc_gpu/seacells_gpu.rs` used to carry the gate purely because its only caller was gated, which left the shared-memory reduction arm of `fw_columns_a_gpu` executing nowhere: `plane_reduce_viable` is true on Apple Silicon, so every default run took the plane path. The fix was a cheap ungated sibling at n = 64, k = 32, not a `cfg` on the helper. A gate that hides a whole code path is a coverage hole, not a cost saving.
 
 When gating, leave at least one cheap test covering each structural property. `test_fw_argmin_b_matches_cpu` and `test_fw_columns_a_capacity_boundary` exist for exactly that reason; do not gate them alongside their heavier siblings.
 

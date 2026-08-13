@@ -1081,6 +1081,7 @@ mod tests {
         }
     }
 
+    /// Each bad input must name its own fault, not fail later inside the Cholesky.
     #[test]
     fn test_landmark_gp_rejects_bad_inputs() {
         let x: Vec<f64> = grid(0.0, 1.0, 10);

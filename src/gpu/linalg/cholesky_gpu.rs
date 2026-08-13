@@ -878,7 +878,7 @@ mod tests {
     // 9.6 MB each.
     #[test]
     // Heavy: n = 600000, plus a host gram over all 600k rows.
-    #[cfg(feature = "large_scale_diagnostics")]
+    #[cfg(feature = "large-test")]
     fn test_cholesky_qr2_above_dispatch_limit() {
         let Some(device) = try_device() else { return };
         let client = WgpuRuntime::client(&device);

@@ -248,6 +248,7 @@ mod tests {
     use super::*;
     use faer::Mat;
 
+    /// Least squares on exactly collinear points recovers the intercept and the slope.
     #[test]
     fn test_linear_regression() {
         let x = vec![1.0, 2.0, 3.0];
@@ -258,6 +259,7 @@ mod tests {
         assert!((slope - 2.0).abs() < 1e-6);
     }
 
+    /// The Sylvester solver on a diagonal case whose solution is available in closed form.
     #[test]
     fn test_sylvester_solver() {
         // Solving AX + XB = C

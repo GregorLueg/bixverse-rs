@@ -913,6 +913,7 @@ where
 mod tests {
     use super::*;
 
+    /// A well-formed CSR layout has to pass untouched.
     #[test]
     fn test_validate_sparse_layout_accepts_a_sound_csr() {
         // 3x4 CSR with two entries in row 0 and one in row 2.
@@ -925,6 +926,7 @@ mod tests {
         );
     }
 
+    /// The format flag picks the major axis: one valid CSC, the same buffers a broken CSR.
     #[test]
     fn test_validate_sparse_layout_reads_csc_the_other_way_round() {
         // The same buffers describe a 4x3 CSC: the major axis is the column
@@ -944,6 +946,7 @@ mod tests {
         );
     }
 
+    /// Each malformed layout must be refused on its own, not just the first.
     #[test]
     fn test_validate_sparse_layout_catches_each_fault() {
         // indices and data disagree.
@@ -998,6 +1001,7 @@ mod tests {
         );
     }
 
+    /// An empty matrix is a legal layout, so the guards must not reject it.
     #[test]
     fn test_validate_sparse_layout_accepts_an_empty_matrix() {
         assert!(

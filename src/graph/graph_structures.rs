@@ -844,6 +844,7 @@ mod tests {
     use crate::core::math::sparse::CompressedSparseData2;
     use faer::Mat;
 
+    /// Degrees, total weight and neighbour slices read straight off the CSR.
     #[test]
     fn test_sparse_graph_properties() {
         // Simple line graph: 0 <-> 1 <-> 2
@@ -864,6 +865,7 @@ mod tests {
         assert_eq!(n0_weights, &[1.0]);
     }
 
+    /// The unnormalised Laplacian is `D - A`, degrees on the diagonal.
     #[test]
     fn test_adjacency_to_laplacian() {
         // Adjacency for 0 <-> 1
@@ -881,6 +883,7 @@ mod tests {
         assert!((lap[(1, 0)] - (-1.0)).abs() < 1e-6);
     }
 
+    /// String node names map onto indices without dropping or duplicating edges.
     #[test]
     fn test_graph_from_strings() {
         let nodes = vec!["A".to_string(), "B".to_string(), "C".to_string()];

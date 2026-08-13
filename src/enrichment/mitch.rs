@@ -224,3 +224,114 @@ where
         mysd: sd_scores,
     }
 }
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_relative_eq;
+
+    /// Build a rows x columns matrix from column-major data.
+    fn mat_from_cols(cols: &[Vec<f64>]) -> Mat<f64> {
+        Mat::from_fn(cols[0].len(), cols.len(), |i, j| cols[j][i])
+    }
+
+    /// Pins the offset `adj = n_negative + n_zero / 2` that mitch subtracts from
+    /// the 1-based ranks. An exact zero therefore lands on +0.5, not 0.0, because
+    /// the ranks are 1-based and the offset only recentres up to the midpoint of
+    /// the zero block. This is not an off-by-one: upstream mitch does the same,
+    /// see `rank_adj` inside `mitch_rank` at
+    /// <https://github.com/markziemann/mitch/blob/master/R/mitch.R>
+    ///
+    /// ```r
+    /// rank_adj <- function(x) {
+    ///     xx <- rank(x, na.last = "keep")
+    ///     num_neg <- length(which(x < 0))
+    ///     num_zero <- length(which(x == 0))
+    ///     num_adj <- num_neg + (num_zero/2)
+    ///     adj <- xx - num_adj
+    ///     adj
+    /// }
+    /// ```
+    ///
+    /// R's `rank()` defaults to 1-based average ties, which is exactly what
+    /// `rank_vector` does, so both sides return `[-1.5, -0.5, 0.5, 1.5, 2.5]`
+    /// here. Real DE statistics rarely contain exact zeros, so this case is the
+    /// only place the convention is visible.
+    #[test]
+    fn mitch_rank_subtracts_the_negative_and_zero_offset() {
+        let mat = mat_from_cols(&[vec![-2.0, -1.0, 0.0, 1.0, 2.0]]);
+        let ranked = mitch_rank(&mat.as_ref());
+
+        // ranks 1..=5, adj = 2 + 1 / 2 = 2.5.
+        let expected = [-1.5, -0.5, 0.5, 1.5, 2.5];
+        for (i, &want) in expected.iter().enumerate() {
+            assert_relative_eq!(ranked[(i, 0)], want, epsilon = 1e-12);
+        }
+    }
+
+    /// Pins the tie handling: tied values share the average of their 1-based rank
+    /// positions before the offset is subtracted.
+    #[test]
+    fn mitch_rank_averages_tied_ranks() {
+        let mat = mat_from_cols(&[vec![1.0, 1.0, -1.0, 0.0, 0.0]]);
+        let ranked = mitch_rank(&mat.as_ref());
+
+        // sorted -1, 0, 0, 1, 1 => ranks 1, 2.5, 2.5, 4.5, 4.5; adj = 1 + 2 / 2 = 2.
+        let expected = [2.5, 2.5, -1.0, 0.5, 0.5];
+        for (i, &want) in expected.iter().enumerate() {
+            assert_relative_eq!(ranked[(i, 0)], want, epsilon = 1e-12);
+        }
+    }
+
+    /// Pins the hand-computable half of the pathway summary: the per-contrast
+    /// scores, the Euclidean `s_dist` and the sample standard deviation `mysd`.
+    #[test]
+    fn process_mitch_pathway_scores_dist_and_sd_are_hand_computable() {
+        let ranked = mat_from_cols(&[
+            vec![3.0, 1.0, -1.0, -3.0, 2.0, -2.0],
+            vec![1.0, 2.0, 3.0, -1.0, -2.0, -3.0],
+        ]);
+        let res = process_mitch_pathway(ranked.as_ref(), "pathway_a", &[0, 1]);
+
+        // n = 6. In-set means (2.0, 1.5), out-of-set means (-1.0, -0.75).
+        // score = 2 * (mean_1 - mean_0) / n => 2 * 3 / 6 = 1.0 and 2 * 2.25 / 6 = 0.75.
+        assert_eq!(res.pathway_name, "pathway_a");
+        assert_eq!(res.pathway_size, 2);
+        assert_eq!(res.scores.len(), 2);
+        assert_relative_eq!(res.scores[0], 1.0, epsilon = 1e-12);
+        assert_relative_eq!(res.scores[1], 0.75, epsilon = 1e-12);
+
+        // sqrt(1.0^2 + 0.75^2) = sqrt(1.5625) = 1.25.
+        assert_relative_eq!(res.s_dist, 1.25, epsilon = 1e-12);
+
+        // Sample sd of [1.0, 0.75]: mean 0.875, sum of squares 0.03125 over n - 1 = 1.
+        assert_relative_eq!(res.mysd, 0.03125_f64.sqrt(), epsilon = 1e-12);
+
+        assert_eq!(res.anova_pvals.len(), 2);
+        assert!(res.anova_pvals.iter().all(|p| (0.0..=1.0).contains(p)));
+        assert!((0.0..=1.0).contains(&res.manova_pval));
+    }
+
+    /// Pins the sign flip: swapping the pathway for its complement negates every
+    /// score but leaves `s_dist` and `mysd` unchanged.
+    #[test]
+    fn process_mitch_pathway_scores_flip_sign_with_the_complement() {
+        let ranked = mat_from_cols(&[
+            vec![3.0, 1.0, -1.0, -3.0, 2.0, -2.0],
+            vec![1.0, 2.0, 3.0, -1.0, -2.0, -3.0],
+        ]);
+        let a = process_mitch_pathway(ranked.as_ref(), "a", &[0, 1]);
+        let b = process_mitch_pathway(ranked.as_ref(), "b", &[2, 3, 4, 5]);
+
+        // mean_1 - mean_0 simply swaps sign, and the divisor n is unchanged.
+        assert_relative_eq!(a.scores[0], -b.scores[0], epsilon = 1e-12);
+        assert_relative_eq!(a.scores[1], -b.scores[1], epsilon = 1e-12);
+        assert_relative_eq!(a.s_dist, b.s_dist, epsilon = 1e-12);
+        assert_relative_eq!(a.mysd, b.mysd, epsilon = 1e-12);
+        assert_eq!(b.pathway_size, 4);
+    }
+}

@@ -229,7 +229,9 @@ pub fn compute_compactness(dcs: MatRef<f32>, metacells: &[Vec<usize>]) -> Vec<f3
 ///
 /// ### Returns
 ///
-/// One separation value per metacell. Empty metacells yield NaN.
+/// One separation value per metacell. Empty metacells yield NaN. A lone
+/// non-empty metacell has no other centroid to measure against and yields
+/// positive infinity.
 pub fn compute_separation(dcs: MatRef<f32>, metacells: &[Vec<usize>]) -> Vec<f32> {
     let d = dcs.ncols();
     let k = metacells.len();
@@ -273,4 +275,172 @@ pub fn compute_separation(dcs: MatRef<f32>, metacells: &[Vec<usize>]) -> Vec<f32
             min_dist_sq.sqrt()
         })
         .collect()
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_relative_eq;
+
+    /// Four cells on a line in a two-dimensional DC space: x = 0, 2, 6, 10,
+    /// y = 0 throughout. Every metric below is hand-derivable from that.
+    fn line_dcs() -> Mat<f32> {
+        let xs = [0.0f32, 2.0, 6.0, 10.0];
+        Mat::<f32>::from_fn(4, 2, |i, j| if j == 0 { xs[i] } else { 0.0 })
+    }
+
+    /////////////////
+    // Compactness //
+    /////////////////
+
+    /// Average per-DC variance, worked by hand: metacell {0, 2} has mean 1 and
+    /// variance 1 on x, 0 on y, so (1 + 0) / 2 = 0.5; metacell {6, 10} has mean
+    /// 8 and variance 4, so (4 + 0) / 2 = 2.
+    #[test]
+    fn compute_compactness_averages_variance_across_dcs() {
+        let dcs = line_dcs();
+        let metacells = vec![vec![0, 1], vec![2, 3]];
+
+        let compactness = compute_compactness(dcs.as_ref(), &metacells);
+
+        assert_relative_eq!(compactness[0], 0.5, epsilon = 1e-6);
+        assert_relative_eq!(compactness[1], 2.0, epsilon = 1e-6);
+    }
+
+    /// A single cell has zero spread in every dimension.
+    #[test]
+    fn compute_compactness_is_zero_for_a_singleton_metacell() {
+        let dcs = line_dcs();
+        let compactness = compute_compactness(dcs.as_ref(), &[vec![3]]);
+
+        assert_relative_eq!(compactness[0], 0.0, epsilon = 1e-6);
+    }
+
+    /// The docstring promises NaN for empty metacells, and the position in the
+    /// output vector has to be kept rather than dropped.
+    #[test]
+    fn compute_compactness_yields_nan_for_empty_metacells() {
+        let dcs = line_dcs();
+        let metacells = vec![vec![0, 1], vec![], vec![2, 3]];
+
+        let compactness = compute_compactness(dcs.as_ref(), &metacells);
+
+        assert_eq!(compactness.len(), 3);
+        assert!(compactness[1].is_nan());
+        assert!(compactness[0].is_finite() && compactness[2].is_finite());
+    }
+
+    ////////////////
+    // Separation //
+    ////////////////
+
+    /// Centroids sit at x = 1 and x = 8, so the nearest-neighbour centroid
+    /// distance is 7 for both. Also pins that the squared distance from
+    /// `euclidean_distance_static` is square-rooted before it is returned.
+    #[test]
+    fn compute_separation_returns_the_nearest_centroid_distance() {
+        let dcs = line_dcs();
+        let metacells = vec![vec![0, 1], vec![2, 3]];
+
+        let separation = compute_separation(dcs.as_ref(), &metacells);
+
+        assert_relative_eq!(separation[0], 7.0, epsilon = 1e-5);
+        assert_relative_eq!(separation[1], 7.0, epsilon = 1e-5);
+    }
+
+    /// With three metacells the nearest one wins, not the mean or the last.
+    /// Centroids: 1, 8 and 10, so the middle one is 2 away from its right
+    /// neighbour and 7 from its left.
+    #[test]
+    fn compute_separation_picks_the_closest_other_centroid() {
+        let dcs = line_dcs();
+        let metacells = vec![vec![0, 1], vec![2, 3], vec![3]];
+
+        let separation = compute_separation(dcs.as_ref(), &metacells);
+
+        assert_relative_eq!(separation[0], 7.0, epsilon = 1e-5);
+        assert_relative_eq!(separation[1], 2.0, epsilon = 1e-5);
+        assert_relative_eq!(separation[2], 2.0, epsilon = 1e-5);
+    }
+
+    /// Empty metacells yield NaN and are skipped as comparison partners, so
+    /// the remaining pair still measures against each other.
+    #[test]
+    fn compute_separation_yields_nan_for_empty_metacells() {
+        let dcs = line_dcs();
+        let metacells = vec![vec![0, 1], vec![], vec![2, 3]];
+
+        let separation = compute_separation(dcs.as_ref(), &metacells);
+
+        assert!(separation[1].is_nan());
+        assert_relative_eq!(separation[0], 7.0, epsilon = 1e-5);
+        assert_relative_eq!(separation[2], 7.0, epsilon = 1e-5);
+    }
+
+    /// A lone metacell has nothing to compare against, so `min_dist_sq` stays
+    /// at its infinite initial value. Infinity, not NaN.
+    #[test]
+    fn compute_separation_yields_infinity_for_a_single_metacell() {
+        let dcs = line_dcs();
+        let separation = compute_separation(dcs.as_ref(), &[vec![0, 1]]);
+
+        assert!(separation[0].is_infinite() && separation[0].is_sign_positive());
+    }
+
+    ////////////////////////
+    // Density regions //
+    ////////////////////////
+
+    /// Quartile split on eight distances: the two smallest are High, the two
+    /// largest Low, the middle four Mid, and the labels follow the original
+    /// positions rather than the sorted order.
+    #[test]
+    fn classify_density_regions_splits_on_quartiles() {
+        let dist = [5.0f32, 1.0, 7.0, 0.0, 3.0, 6.0, 2.0, 4.0];
+
+        let regions = classify_density_regions(&dist);
+
+        use DensityRegion::*;
+        assert_eq!(regions, vec![Mid, High, Low, High, Mid, Low, Mid, Mid]);
+    }
+
+    /// With fewer than four inputs the High bucket collapses to nothing while
+    /// the Low bucket does not, which is the asymmetry a caller has to know.
+    #[test]
+    fn classify_density_regions_handles_tiny_inputs() {
+        let regions = classify_density_regions(&[1.0, 0.0]);
+
+        assert_eq!(regions, vec![DensityRegion::Low, DensityRegion::Mid]);
+        assert!(classify_density_regions(&[]).is_empty());
+    }
+
+    ///////////////////////
+    // Diffusion density //
+    ///////////////////////
+
+    /// A single cell cannot carry a diffusion embedding: the solver returns at
+    /// most one eigenpair, the multiscale space comes back zero-wide, and the
+    /// guard has to fire before the kNN search reads it.
+    #[test]
+    fn compute_diffusion_density_rejects_a_zero_width_embedding() {
+        let knn_indices = vec![vec![0]];
+        let knn_distances = vec![vec![0.0f32]];
+
+        let result = compute_diffusion_density(
+            &knn_indices,
+            &knn_distances,
+            false,
+            10,
+            5,
+            &KnnParams::default(),
+            42,
+            0,
+        );
+
+        assert!(matches!(result, Err(BixverseErrors::InvalidArgument(_))));
+    }
 }

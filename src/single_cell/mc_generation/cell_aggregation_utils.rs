@@ -359,3 +359,116 @@ pub fn get_pseudo_bulked_counts_sparse<S: SingleCellReading>(
         shape: (n_groups, n_genes),
     })
 }
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    //////////////////////
+    // Index remapping //
+    //////////////////////
+
+    /// Cell ids at or beyond `n_cells` are dropped without a word. Pinned so a
+    /// caller passing the wrong `n_cells` cannot start silently losing cells.
+    #[test]
+    fn metacells_to_assignments_drops_out_of_range_cell_ids() {
+        let mc0: &[usize] = &[0, 5];
+        let mc1: &[usize] = &[2, 99];
+        let assignments = metacells_to_assignments(&[mc0, mc1], 3);
+
+        assert_eq!(assignments, vec![Some(0), None, Some(1)]);
+    }
+
+    /// On overlap the last metacell in the slice wins. The function has no
+    /// disjointness check, so the ordering is the whole contract.
+    #[test]
+    fn metacells_to_assignments_lets_later_metacells_overwrite() {
+        let mc0: &[usize] = &[0, 1];
+        let mc1: &[usize] = &[1, 2];
+        let assignments = metacells_to_assignments(&[mc0, mc1], 3);
+
+        assert_eq!(assignments, vec![Some(0), Some(1), Some(1)]);
+    }
+
+    /// Cells outside the subset stay `None`, and the mapping is by position in
+    /// `subset_to_orig`, not by value.
+    #[test]
+    fn remap_assignments_to_original_scatters_by_subset_position() {
+        let subset = vec![Some(0), None, Some(1)];
+        let subset_to_orig = [4, 2, 0];
+        let full = remap_assignments_to_original(&subset, &subset_to_orig, 6);
+
+        assert_eq!(full, vec![Some(1), None, None, None, Some(0), None]);
+    }
+
+    /// A `subset_assignments` longer than `subset_to_orig` is truncated rather
+    /// than panicking, because the lookup goes through `.get`.
+    #[test]
+    fn remap_assignments_to_original_ignores_trailing_assignments() {
+        let subset = vec![Some(0), Some(1), Some(2)];
+        let subset_to_orig = [1];
+        let full = remap_assignments_to_original(&subset, &subset_to_orig, 3);
+
+        assert_eq!(full, vec![None, Some(0), None]);
+    }
+
+    /// Straight index translation, group structure untouched.
+    #[test]
+    fn remap_metacells_to_original_translates_every_index() {
+        let mc0: &[usize] = &[0, 2];
+        let mc1: &[usize] = &[1];
+        let remapped = remap_metacells_to_original(&[mc0, mc1], &[10, 20, 30]);
+
+        assert_eq!(remapped, vec![vec![10, 30], vec![20]]);
+    }
+
+    /// Defect pin: unlike its sibling this one indexes `subset_to_orig`
+    /// directly, so a stale subset index aborts the process instead of
+    /// returning an error.
+    #[test]
+    #[should_panic(expected = "index out of bounds")]
+    fn remap_metacells_to_original_panics_on_a_stale_index() {
+        let mc0: &[usize] = &[0, 5];
+        let _ = remap_metacells_to_original(&[mc0], &[10, 20]);
+    }
+
+    //////////////////////
+    // Pseudo-bulk enum //
+    //////////////////////
+
+    /// The string aliases are the R-facing contract and break silently on a
+    /// rename, including the British/American spelling pair.
+    #[test]
+    fn parse_pseudo_bulk_accepts_both_spellings_and_any_case() {
+        assert!(matches!(parse_pseudo_bulk("raw"), Some(PseudoBulk::Raw)));
+        assert!(matches!(parse_pseudo_bulk("RAW"), Some(PseudoBulk::Raw)));
+        assert!(matches!(parse_pseudo_bulk("norm"), Some(PseudoBulk::Norm)));
+        assert!(matches!(
+            parse_pseudo_bulk("normalised"),
+            Some(PseudoBulk::Norm)
+        ));
+        assert!(matches!(
+            parse_pseudo_bulk("Normalized"),
+            Some(PseudoBulk::Norm)
+        ));
+    }
+
+    /// Anything unrecognised falls back to `None` rather than defaulting to
+    /// raw counts.
+    #[test]
+    fn parse_pseudo_bulk_rejects_unknown_labels() {
+        assert!(parse_pseudo_bulk("").is_none());
+        assert!(parse_pseudo_bulk("counts").is_none());
+        assert!(parse_pseudo_bulk("normalise").is_none());
+    }
+
+    /// The derived `Default` is what an omitted R argument lands on.
+    #[test]
+    fn pseudo_bulk_defaults_to_raw() {
+        assert!(matches!(PseudoBulk::default(), PseudoBulk::Raw));
+    }
+}

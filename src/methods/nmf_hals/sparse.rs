@@ -390,11 +390,8 @@ mod tests {
     use crate::methods::nmf_hals::dense::DenseInput;
     use faer::Mat;
 
+    /// One 3x4 matrix in both CSR and dense form, for sparse against dense parity checks.
     fn fixture_csr() -> (CompressedSparseData2<f64, f64>, Mat<f64>) {
-        // 3x4:
-        //  [1 0 2 0]
-        //  [0 3 0 4]
-        //  [5 0 0 6]
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let indices: Vec<u32> = vec![0, 2, 1, 3, 0, 3];
         let indptr: Vec<u32> = vec![0, 2, 4, 6];
@@ -412,6 +409,7 @@ mod tests {
         (csr, dense)
     }
 
+    /// The sparse backend reports the same shape and squared Frobenius norm as the dense one.
     #[test]
     fn shape_and_sq_frob_match_dense() {
         let (csr, dense) = fixture_csr();
@@ -421,6 +419,7 @@ mod tests {
         assert!((sparse_in.sq_frob() - dense_in.sq_frob()).abs() < 1e-12);
     }
 
+    /// A negative non-zero is refused at construction rather than silently factorised.
     #[test]
     fn rejects_negative() {
         let data = vec![1.0, -2.0];
@@ -432,6 +431,7 @@ mod tests {
         assert!(matches!(err, BixverseErrors::NmfNonNegativeViolated));
     }
 
+    /// A NaN non-zero is refused at construction.
     #[test]
     fn rejects_non_finite() {
         let data = vec![1.0, f64::NAN];
@@ -443,6 +443,7 @@ mod tests {
         assert!(matches!(err, BixverseErrors::NmfNonFinite));
     }
 
+    /// The hand-rolled CSC `W^T V` kernel agrees with the dense faer matmul.
     #[test]
     fn wt_v_matches_dense() {
         let (csr, dense) = fixture_csr();
@@ -461,6 +462,7 @@ mod tests {
         }
     }
 
+    /// The hand-rolled CSR `V H^T` kernel agrees with the dense faer matmul.
     #[test]
     fn v_ht_matches_dense() {
         let (csr, dense) = fixture_csr();
@@ -479,6 +481,7 @@ mod tests {
         }
     }
 
+    /// A CSC source takes the other arm of `build_pair`, and must still yield the same products.
     #[test]
     fn csc_input_produces_same_products() {
         // Same logical matrix but constructed as CSC.
@@ -513,6 +516,7 @@ mod tests {
         }
     }
 
+    /// `from_secondary` reads the `data_2` layer, so the cached norm comes from it, not `data`.
     #[test]
     fn from_secondary_uses_data_2() {
         let data = vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0];
@@ -533,6 +537,7 @@ mod tests {
         assert!((sparse_in.sq_frob() - expected).abs() < 1e-12);
     }
 
+    /// The Lanczos SVD returns k triplets of the right shape, in descending singular value order.
     #[test]
     fn top_k_svd_shapes() {
         let (csr, _) = fixture_csr();

@@ -268,11 +268,9 @@ mod tests {
     use super::*;
     use faer::Mat;
 
+    /// Column sums and means run down the rows, not across them.
     #[test]
     fn test_col_sums_and_means() {
-        // Matrix:
-        // [[1.0, 2.0, 3.0],
-        //  [4.0, 5.0, 6.0]]
         let mat: Mat<f64> = Mat::from_fn(2, 3, |i, j| (i * 3 + j + 1) as f64);
 
         let sums = col_sums(mat.as_ref());
@@ -282,28 +280,24 @@ mod tests {
         assert_eq!(means, vec![2.5, 3.5, 4.5]);
     }
 
+    /// Each row is divided by its own sum, so rows with different sums scale differently.
     #[test]
     fn test_normalise_rows_l1() {
-        // Matrix:
-        // [[1.0, 2.0],
-        //  [3.0, 4.0]]
         let mat: Mat<f64> = Mat::from_fn(2, 2, |i, j| (i * 2 + j + 1) as f64);
         let norm = normalise_rows_l1(&mat.as_ref());
 
-        // Row 1 sum = 3.0 -> [1/3, 2/3]
-        // Row 2 sum = 7.0 -> [3/7, 4/7]
         assert!((norm[(0, 0)] - 1.0 / 3.0).abs() < 1e-6);
         assert!((norm[(0, 1)] - 2.0 / 3.0).abs() < 1e-6);
         assert!((norm[(1, 0)] - 3.0 / 7.0).abs() < 1e-6);
         assert!((norm[(1, 1)] - 4.0 / 7.0).abs() < 1e-6);
     }
 
+    /// Without the standard deviation the column is only centred, never rescaled.
     #[test]
     fn test_scale_matrix_col() {
-        let mat: Mat<f64> = Mat::from_fn(3, 1, |i, _| (i + 1) as f64); // [1.0, 2.0, 3.0]^T
+        let mat: Mat<f64> = Mat::from_fn(3, 1, |i, _| (i + 1) as f64);
         let scaled_no_sd = scale_matrix_col(&mat.as_ref(), false);
 
-        // Mean is 2.0, so centering should yield [-1.0, 0.0, 1.0]^T
         assert!((scaled_no_sd[(0, 0)] - (-1.0)).abs() < 1e-6);
         assert!((scaled_no_sd[(1, 0)] - 0.0).abs() < 1e-6);
         assert!((scaled_no_sd[(2, 0)] - 1.0).abs() < 1e-6);

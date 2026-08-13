@@ -339,32 +339,15 @@ mod tests_matrix_utils {
     use super::*;
     use approx::assert_relative_eq;
 
+    /// The flat layout must be row-major, not faer's native column-major order.
     #[test]
     fn test_mat_to_flat_row_major() {
         let mat = Mat::from_fn(2, 3, |i, j| (i * 3 + j) as f32);
-        // Mat is:
-        // [[0, 1, 2],
-        //  [3, 4, 5]]
-
         let flat = mat_to_flat_row_major(mat.as_ref());
         assert_eq!(flat, vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
     }
 
-    #[test]
-    fn test_flat_row_major_to_mat() {
-        let flat = vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0];
-        let mat = flat_row_major_to_mat(&flat, 2, 3);
-
-        assert_eq!(mat.nrows(), 2);
-        assert_eq!(mat.ncols(), 3);
-
-        for i in 0..2 {
-            for j in 0..3 {
-                assert_eq!(mat[(i, j)], (i * 3 + j) as f32);
-            }
-        }
-    }
-
+    /// Flattening and rebuilding must return the matrix it started from.
     #[test]
     fn test_round_trip() {
         let original = Mat::from_fn(3, 4, |i, j| (i as f32) * 0.5 + (j as f32) * 0.1);

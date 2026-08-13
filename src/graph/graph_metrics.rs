@@ -111,6 +111,7 @@ mod tests {
         SparseGraph::new(n, csr, true)
     }
 
+    /// A community with no crossing edges has conductance exactly zero.
     #[test]
     fn two_disconnected_cliques_have_zero_conductance() {
         // Two triangles, no edges between them.
@@ -132,6 +133,8 @@ mod tests {
         assert_eq!(cond[1], 0.0);
     }
 
+    /// Cut and volume are counted as the definition says, against a hand-worked
+    /// value.
     #[test]
     fn single_bridge_edge() {
         // Two triangles connected by one edge of weight 1.
@@ -156,6 +159,7 @@ mod tests {
         assert!((cond[1] - expected).abs() < 1e-12);
     }
 
+    /// Edge weights enter both cut and volume; this is not an edge count.
     #[test]
     fn weighted_edges_respected() {
         // K4 split 2/2. Internal edges weight 1, crossing edges weight 0.5.
@@ -179,6 +183,8 @@ mod tests {
         assert!((cond[1] - 0.5).abs() < 1e-12);
     }
 
+    /// With no complement the denominator is zero, so the result is NaN rather
+    /// than a made-up zero.
     #[test]
     fn whole_graph_one_community_gives_nan() {
         let edges = [(0, 1, 1.0), (1, 2, 1.0)];
@@ -191,6 +197,7 @@ mod tests {
         assert!(cond[0].is_nan());
     }
 
+    /// A zero-node graph returns an empty vector rather than panicking.
     #[test]
     fn empty_graph_returns_empty() {
         let csr = coo_to_csr::<f64>(&[], &[], &[], (0, 0));
@@ -199,6 +206,7 @@ mod tests {
         assert!(cond.is_empty());
     }
 
+    /// The undirected formula is wrong on a directed graph, so it is refused.
     #[test]
     fn directed_graph_errors() {
         let edges = [(0, 1, 1.0)];
@@ -207,6 +215,7 @@ mod tests {
         assert!(matches!(result, Err(BixverseErrors::GraphDirectedError)));
     }
 
+    /// More labels than nodes errors rather than reading past the graph.
     #[test]
     fn mismatched_lengths_error() {
         let edges = [(0, 1, 1.0)];

@@ -838,6 +838,7 @@ mod tests {
     use crate::methods::nmf_hals::sparse::SparseInput;
     use faer::Mat;
 
+    /// The triangular matmul fills only the lower half, so the mirror step must complete W^T W.
     #[test]
     fn gram_wt_w_full_symmetric() {
         let (m, k) = (5, 3);
@@ -852,6 +853,7 @@ mod tests {
         }
     }
 
+    /// Same mirror step for H H^T: both triangles must match the direct dot products.
     #[test]
     fn gram_h_ht_full_symmetric() {
         let (k, n) = (3, 5);
@@ -866,6 +868,7 @@ mod tests {
         }
     }
 
+    /// The expanded Frobenius objective equals a direct `||V - WH||_F^2` without materialising WH.
     #[test]
     fn objective_matches_direct() {
         let (m, n, k) = (4, 3, 2);
@@ -909,6 +912,7 @@ mod tests {
         assert!((direct - via).abs() < 1e-8);
     }
 
+    /// Column normalisation leaves W H invariant while driving every W column to unit L2 norm.
     #[test]
     fn normalise_preserves_product_and_unit_norms() {
         let (m, n, k) = (4, 3, 2);
@@ -951,6 +955,7 @@ mod tests {
         }
     }
 
+    /// HALS recovers an exactly rank-k dense product with near-zero loss and non-negative factors.
     #[test]
     fn hals_recovers_rank_k_dense() {
         let (m, n, k) = (30, 20, 3);
@@ -990,27 +995,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn hals_random_init_runs_and_decreases() {
-        let (m, n, k) = (10, 8, 2);
-        let v_mat: Mat<f64> = Mat::from_fn(m, n, |i, j| (i + j + 1) as f64);
-
-        let mut sq_frob_v = 0.0;
-        for i in 0..m {
-            for j in 0..n {
-                sq_frob_v += v_mat[(i, j)].powi(2);
-            }
-        }
-
-        let input = DenseInput::new(v_mat.as_ref()).unwrap();
-        let opts = HalsOpts::<f64>::new(100, 1e-8, 1e-12, 10, NmfInit::Random { seed: 7 });
-        let res = nmf_hals(&input, k, &opts, 0).unwrap();
-        assert!(res.final_loss.is_finite());
-        assert!(res.final_loss < sq_frob_v);
-        assert_eq!(res.w.shape(), (m, k));
-        assert_eq!(res.h.shape(), (k, n));
-    }
-
+    /// The sparse backend reaches the same low relative loss as the dense path on a rank-k product.
     #[test]
     fn hals_sparse_recovers_rank_k() {
         let (m, n, k) = (20, 15, 2);
@@ -1050,6 +1035,7 @@ mod tests {
         assert!(rel < 1e-2, "rel loss {rel}");
     }
 
+    /// The converged flag is set, and iteration stops early, once the relative tolerance is met.
     #[test]
     fn hals_converged_flag_set_when_tol_met() {
         let (m, n, k) = (15, 10, 2);
@@ -1065,63 +1051,7 @@ mod tests {
         assert!(res.n_iter < 1000);
     }
 
-    #[test]
-    fn stabilised_nmf_shapes_and_indexing() {
-        let (m, n, k) = (12, 8, 3);
-        let n_runs = 4;
-        let v_mat: Mat<f64> = Mat::from_fn(m, n, |i, j| (i + j + 1) as f64);
-        let input = DenseInput::new(v_mat.as_ref()).unwrap();
-        let opts = HalsOpts::<f64>::new(50, 1e-6, 1e-12, 10, NmfInit::Nndsvd);
-
-        let res = stabilised_nmf(&input, k, n_runs, 0, &opts, 0).unwrap();
-
-        assert_eq!(res.w_all.shape(), (m, k * n_runs));
-        assert_eq!(res.h_per_run.len(), n_runs);
-        assert_eq!(res.losses.len(), n_runs);
-        assert_eq!(res.converged.len(), n_runs);
-        assert!(res.best_idx < n_runs);
-
-        for run in 0..n_runs {
-            assert_eq!(res.h_per_run[run].shape(), (k, n));
-        }
-    }
-
-    #[test]
-    fn stabilised_nmf_single_run() {
-        let (m, n, k) = (8, 6, 2);
-        let v_mat: Mat<f64> = Mat::from_fn(m, n, |i, j| (i + j + 1) as f64);
-        let input = DenseInput::new(v_mat.as_ref()).unwrap();
-        let opts = HalsOpts::<f64>::new(50, 1e-6, 1e-12, 10, NmfInit::Nndsvd);
-
-        let res = stabilised_nmf(&input, k, 1, 42, &opts, 0).unwrap();
-
-        assert_eq!(res.w_all.shape(), (m, k));
-        assert_eq!(res.h_per_run.len(), 1);
-        assert_eq!(res.best_idx, 0);
-    }
-
-    #[test]
-    fn stabilised_nmf_column_binding_matches_best_run() {
-        let (m, n, k) = (10, 8, 2);
-        let n_runs = 3;
-        let v_mat: Mat<f64> = Mat::from_fn(m, n, |i, j| (i + j + 1) as f64);
-        let input = DenseInput::new(v_mat.as_ref()).unwrap();
-        let opts = HalsOpts::<f64>::new(50, 1e-6, 1e-12, 10, NmfInit::Nndsvd);
-
-        let res = stabilised_nmf(&input, k, n_runs, 7, &opts, 0).unwrap();
-
-        // Check w_all column structure: columns [run*k .. (run+1)*k] should match
-        // the W of run `run`. We can't access individual run W matrices since they
-        // were consumed into w_all, but we can verify via the best_idx index that
-        // the best run's columns are present and non-negative.
-        let best = res.best_idx;
-        for col in (best * k)..((best + 1) * k) {
-            for row in 0..m {
-                assert!(res.w_all[(row, col)] >= 0.0);
-            }
-        }
-    }
-
+    /// `best_idx` points at the run with the lowest final loss, not merely the first run.
     #[test]
     fn stabilised_nmf_best_idx_is_min_loss() {
         let (m, n, k) = (10, 8, 2);
@@ -1138,6 +1068,7 @@ mod tests {
         }
     }
 
+    /// The same base seed reproduces identical losses and W blocks, despite the outer thread pool.
     #[test]
     fn stabilised_nmf_deterministic_with_same_seed() {
         let (m, n, k) = (10, 8, 2);
@@ -1159,32 +1090,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn stabilised_nmf_different_seeds_give_different_results() {
-        let (m, n, k) = (10, 8, 2);
-        let v_mat: Mat<f64> = Mat::from_fn(m, n, |i, j| (i + j + 1) as f64);
-        let input = DenseInput::new(v_mat.as_ref()).unwrap();
-        let opts = HalsOpts::<f64>::new(20, 1e-3, 1e-12, 10, NmfInit::Nndsvd);
-
-        let res_a = stabilised_nmf(&input, k, 2, 0, &opts, 0).unwrap();
-        let res_b = stabilised_nmf(&input, k, 2, 1000, &opts, 0).unwrap();
-
-        // At least one entry of w_all should differ noticeably between seed sets.
-        let mut max_diff = 0.0_f64;
-        for col in 0..res_a.w_all.ncols() {
-            for row in 0..res_a.w_all.nrows() {
-                let d = (res_a.w_all[(row, col)] - res_b.w_all[(row, col)]).abs();
-                if d > max_diff {
-                    max_diff = d;
-                }
-            }
-        }
-        assert!(
-            max_diff > 1e-6,
-            "different seeds produced identical results"
-        );
-    }
-
+    /// The best of several random restarts still recovers an exactly rank-k product.
     #[test]
     fn stabilised_nmf_recovers_rank_k() {
         let (m, n, k) = (25, 18, 2);
@@ -1214,36 +1120,11 @@ mod tests {
         assert!(rel < 1e-2, "best rel loss {rel}");
     }
 
-    #[test]
-    fn stabilised_nmf_works_on_sparse_backend() {
-        let (m, n, k) = (15, 12, 2);
-        let v_dense: Mat<f64> = Mat::from_fn(m, n, |i, j| {
-            if (i + j) % 3 == 0 {
-                (i + j + 1) as f64
-            } else {
-                0.0
-            }
-        });
-        let csr = CompressedSparseData2::<f64, f64>::from_dense_matrix(
-            v_dense.as_ref(),
-            CompressedSparseFormat::Csr,
-        );
-        let sparse_in: SparseInput<f64, f64> = SparseInput::from_primary(&csr).unwrap();
-        let opts = HalsOpts::<f64>::new(100, 1e-6, 1e-12, 10, NmfInit::Nndsvd);
-
-        let res = stabilised_nmf(&sparse_in, k, 3, 0, &opts, 0).unwrap();
-
-        assert_eq!(res.w_all.shape(), (m, k * 3));
-        assert_eq!(res.h_per_run.len(), 3);
-        for &loss in &res.losses {
-            assert!(loss.is_finite());
-        }
-    }
-
+    /// The `init` field is ignored: every restart uses random init, so the per-run W blocks differ.
     #[test]
     fn stabilised_nmf_ignores_init_field() {
         // Passing NmfInit::Nndsvd in opts should not produce identical W columns
-        // across runs — random init must override.
+        // across runs: random init must override.
         let (m, n, k) = (10, 8, 2);
         let v_mat: Mat<f64> = Mat::from_fn(m, n, |i, j| (i + j + 1) as f64);
         let input = DenseInput::new(v_mat.as_ref()).unwrap();

@@ -264,6 +264,7 @@ mod tests {
     use super::*;
     use faer::Mat;
 
+    /// AUROC saturates at 1.0 when every positive outranks every negative.
     #[test]
     fn auroc_perfect_ranking() {
         // positives hold the top ranks
@@ -272,6 +273,7 @@ mod tests {
         assert!((auroc_from_ranks(&ranks, &pos, 2, 2) - 1.0).abs() < 1e-12);
     }
 
+    /// The mirror case gives 0.0, which pins the direction of the rank convention.
     #[test]
     fn auroc_inverse_ranking() {
         let ranks = vec![1.0_f64, 2.0, 3.0, 4.0];
@@ -279,6 +281,7 @@ mod tests {
         assert!(auroc_from_ranks(&ranks, &pos, 2, 2).abs() < 1e-12);
     }
 
+    /// A half-right ranking lands on the hand-computed value, not something near chance.
     #[test]
     fn auroc_partial() {
         // positives at ranks 1, 3 -> u = 4 - 3 = 1 -> auroc = 0.25
@@ -287,6 +290,7 @@ mod tests {
         assert!((auroc_from_ranks(&ranks, &pos, 2, 2) - 0.25).abs() < 1e-12);
     }
 
+    /// With no positives or no negatives the AUROC is undefined, so it must be NaN rather than 0.
     #[test]
     fn auroc_degenerate_returns_nan() {
         let ranks = vec![1.0_f64, 2.0];
@@ -294,6 +298,7 @@ mod tests {
         assert!(auroc_from_ranks(&ranks, &[0, 1], 2, 0).is_nan());
     }
 
+    /// AUPR reaches 1.0 when the positives take the top predictions.
     #[test]
     fn aupr_perfect_ranking() {
         let pred = vec![4.0_f64, 3.0, 2.0, 1.0];
@@ -301,6 +306,7 @@ mod tests {
         assert!((aupr_value(&pred, &response, 2) - 1.0).abs() < 1e-12);
     }
 
+    /// An all-positive or zero-positive response leaves the AUPR undefined.
     #[test]
     fn aupr_degenerate_returns_nan() {
         let pred = vec![1.0_f64, 2.0];
@@ -308,6 +314,7 @@ mod tests {
         assert!(aupr_value(&pred, &[false, false], 0).is_nan());
     }
 
+    /// A perfectly linear pair correlates at exactly 1.0.
     #[test]
     fn pearson_perfect_positive() {
         let x = vec![1.0_f64, 2.0, 3.0, 4.0];
@@ -315,6 +322,7 @@ mod tests {
         assert!((pearson_generic(&x, &y) - 1.0).abs() < 1e-12);
     }
 
+    /// A reversed pair correlates at exactly -1.0, so the sign is not lost.
     #[test]
     fn pearson_perfect_negative() {
         let x = vec![1.0_f64, 2.0, 3.0, 4.0];
@@ -322,6 +330,7 @@ mod tests {
         assert!((pearson_generic(&x, &y) + 1.0).abs() < 1e-12);
     }
 
+    /// A constant vector has no variance, so the result is NaN instead of a division by zero.
     #[test]
     fn pearson_zero_variance_returns_nan() {
         let x = vec![1.0_f64, 1.0, 1.0];
@@ -329,6 +338,7 @@ mod tests {
         assert!(pearson_generic(&x, &y).is_nan());
     }
 
+    /// All four activity metrics agree on a cleanly separated single-ligand case.
     #[test]
     fn ligand_activity_perfect_separation() {
         // single ligand, positives ranked above negatives

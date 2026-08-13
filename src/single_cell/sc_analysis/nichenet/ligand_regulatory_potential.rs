@@ -444,6 +444,7 @@ where
 mod tests {
     use super::*;
 
+    /// A hub exponent of zero leaves every edge weight untouched.
     #[test]
     fn hub_correct_h_zero_is_identity() {
         let to = vec![0u32, 1, 1, 2];
@@ -451,6 +452,7 @@ mod tests {
         assert_eq!(hub_correct(&to, &w, 3, 0.0), w);
     }
 
+    /// At h = 1 every edge is divided by the in-degree of its target, not its source.
     #[test]
     fn hub_correct_divides_by_indegree() {
         // indegrees: 0 -> 1, 1 -> 2, 2 -> 1
@@ -459,6 +461,7 @@ mod tests {
         assert_eq!(hub_correct(&to, &w, 3, 1.0), vec![1.0, 1.0, 1.5, 4.0]);
     }
 
+    /// The in-degree is raised to h before dividing, rather than the division being repeated.
     #[test]
     fn hub_correct_power_applied() {
         // node 1 has indegree 2; h=2 -> divide by 4
@@ -467,6 +470,7 @@ mod tests {
         assert_eq!(hub_correct(&to, &w, 2, 2.0), vec![2.0, 1.0]);
     }
 
+    /// The two matrices combine entrywise as `1 / (1/p + 1/s)`, written back into the primary.
     #[test]
     fn harmonic_combine_basic() {
         let mut p = Mat::<f64>::zeros(1, 2);
@@ -480,6 +484,7 @@ mod tests {
         assert!((p[(0, 1)] - 2.0).abs() < 1e-12);
     }
 
+    /// Zeros in the primary take its smallest positive entry, keeping the reciprocal finite.
     #[test]
     fn harmonic_combine_replaces_zero_with_min_positive() {
         // primary min positive = 3; (0,0) zero gets replaced by 3
@@ -495,6 +500,7 @@ mod tests {
         assert!((p[(0, 1)] - 2.0).abs() < 1e-12);
     }
 
+    /// The per-column baseline is subtracted and anything below zero is clamped, never left negative.
     #[test]
     fn subtract_baseline_clamps_negatives() {
         let mut m = Mat::<f64>::zeros(2, 3);

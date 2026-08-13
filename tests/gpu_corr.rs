@@ -1,5 +1,5 @@
 #![allow(clippy::needless_range_loop)]
-#![cfg(all(feature = "gpu", feature = "large_scale_diagnostics"))]
+#![cfg(all(feature = "gpu", feature = "large-test"))]
 
 use bixverse_rs::core::base::cors_similarity::{column_pairwise_cor, column_pairwise_cov};
 use bixverse_rs::gpu::linalg::corr::{GpuCorCov, column_pairwise_cor_gpu};
@@ -54,8 +54,19 @@ fn diagnose(n: usize, d: usize, cor_type: GpuCorCov, label: &str) {
     );
 
     assert!(gpu_max_abs > 0.0, "{label} {n}x{d}: GPU output is all zero",);
+
+    // `max_diff` was computed and printed but never asserted on, which left
+    // these the only large-n correlation coverage in the crate while being
+    // unable to fail. The inline tests in `gpu/linalg/corr.rs` run at n = 80,
+    // d = 6, so nothing else exercises the accumulation at these sizes.
+    assert!(
+        max_diff <= 1e-3 * cpu_max_abs.max(1.0),
+        "{label} {n}x{d}: GPU and CPU disagree by {max_diff:.3e} against a CPU \
+         maximum of {cpu_max_abs:.3e}"
+    );
 }
 
+/// The only large-n Pearson gate: 500 to 2000, square and not.
 #[test]
 fn diag_pearson_sweep() {
     for &(n, d) in &[
@@ -71,6 +82,7 @@ fn diag_pearson_sweep() {
     }
 }
 
+/// Same at large n for covariance, where entries grow with the data.
 #[test]
 fn diag_covariance_sweep() {
     for &(n, d) in &[(500, 500), (1000, 1000), (2000, 2000)] {
@@ -78,6 +90,7 @@ fn diag_covariance_sweep() {
     }
 }
 
+/// Same at large n for Spearman, ranking thousands of rows not 60.
 #[test]
 fn diag_spearman_sweep() {
     for &(n, d) in &[(500, 500), (1000, 1000), (2000, 2000)] {

@@ -881,6 +881,7 @@ mod tests {
         SparseGraph::new(8, csr, false)
     }
 
+    /// Louvain splits a barbell along the bridge, one community per bell.
     #[test]
     fn test_louvain_barbell() {
         let graph = build_barbell_graph();
@@ -892,6 +893,7 @@ mod tests {
         assert_ne!(comms[2], comms[3]);
     }
 
+    /// Walktrap finds the same barbell split as Louvain.
     #[test]
     fn test_walktrap_barbell() {
         let graph = build_barbell_graph();
@@ -903,6 +905,7 @@ mod tests {
         assert_ne!(comms[2], comms[3]);
     }
 
+    /// A single bridge between two cliques does not merge them.
     #[test]
     fn test_walktrap_two_cliques() {
         let graph = build_two_cliques_graph();

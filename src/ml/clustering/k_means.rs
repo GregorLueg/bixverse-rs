@@ -634,6 +634,7 @@ mod tests {
         assert_ne!(blob_a[0], blob_b[0]);
     }
 
+    /// Every accepted spelling and casing maps to its variant; anything else is None.
     #[test]
     fn parse_k_means_known_strings() {
         assert!(matches!(
@@ -659,6 +660,7 @@ mod tests {
         assert!(parse_k_means("nonsense").is_none());
     }
 
+    /// Two separated blobs give one centroid row each, in row-per-centroid layout.
     #[test]
     fn standard_centroid_rows_match_blob_centres() {
         let n_per = 200;
@@ -677,6 +679,7 @@ mod tests {
         assert_assignments_split_blobs(&assignments, n_per);
     }
 
+    /// The same, for the mini-batch path, which has its own update and layout code.
     #[test]
     fn minibatch_centroid_rows_match_blob_centres() {
         let n_per = 200;
@@ -695,6 +698,7 @@ mod tests {
         assert_assignments_split_blobs(&assignments, n_per);
     }
 
+    /// Ties the centroid rows back to the assignments rather than the blob geometry.
     #[test]
     fn standard_centroid_row_is_mean_of_assigned_points() {
         // Independent check that the Mat row r really is the mean of points
@@ -734,6 +738,7 @@ mod tests {
         }
     }
 
+    /// The seed must fix the initialisation, so two runs agree to the last centroid.
     #[test]
     fn standard_deterministic_with_same_seed() {
         let data = make_two_blobs(100, 5, 5.0, 42);
@@ -749,6 +754,7 @@ mod tests {
         }
     }
 
+    /// The seed must also fix the batch sampler and its shuffles, not just the init.
     #[test]
     fn minibatch_deterministic_with_same_seed() {
         let data = make_two_blobs(100, 5, 5.0, 42);
@@ -766,35 +772,30 @@ mod tests {
         }
     }
 
+    /// Both variants must honour the metric rather than falling back to Euclidean.
     #[test]
-    fn assignments_in_range() {
-        let data = make_two_blobs(100, 5, 5.0, 42);
-        let k = 7;
-
-        let (_, a) = k_means_clusters(data.as_ref(), "euclidean", k, None, 0, false).unwrap();
-        assert!(a.iter().all(|&c| c < k));
-
-        let (_, a) =
-            train_centroids_minibatch(data.as_ref(), "euclidean", k, 200, 32, 1e-4, 0.75, 0, false);
-        assert!(a.iter().all(|&c| c < k));
-    }
-
-    #[test]
-    fn cosine_metric_runs_for_both_paths() {
-        // Different code path (data norms populated, centroid norms = ||c||
-        // not ||c||^2). Worth a smoke test.
-        let data = make_two_blobs(100, 5, 5.0, 42);
+    fn cosine_metric_groups_by_direction_not_magnitude() {
+        // Two rays with very different magnitudes along each. Cosine must
+        // group by direction, which also exercises the branch where centroid
+        // norms are ||c|| rather than ||c||^2.
+        let dirs = [[1.0f32, 0.2, 0.0, 0.0, 0.0], [0.2, 1.0, 0.0, 0.0, 0.0]];
+        let data = Mat::from_fn(200, 5, |i, j| {
+            let ray = if i < 100 { 0 } else { 1 };
+            let magnitude = 1.0 + (i % 100) as f32;
+            dirs[ray][j] * magnitude
+        });
 
         let (c, a) = k_means_clusters(data.as_ref(), "cosine", 2, None, 0, false).unwrap();
         assert_eq!(c.nrows(), 2);
-        assert_eq!(a.len(), 200);
+        assert_assignments_split_blobs(&a, 100);
 
         let (c, a) =
             train_centroids_minibatch(data.as_ref(), "cosine", 2, 200, 64, 1e-4, 0.75, 0, false);
         assert_eq!(c.nrows(), 2);
-        assert_eq!(a.len(), 200);
+        assert_assignments_split_blobs(&a, 100);
     }
 
+    /// The Euclidean assignment path expects `||c||^2`, not the plain L2 norm.
     #[test]
     fn recompute_centroid_norms_euclidean_is_squared() {
         // Three centroids of dim 4: norms should be sum of squares for euclidean.
@@ -809,6 +810,7 @@ mod tests {
         assert!((norms[2] - 4.0).abs() < 1e-5);
     }
 
+    /// The cosine path wants the plain L2 norm, the other half of that contract.
     #[test]
     fn recompute_centroid_norms_cosine_is_l2() {
         let centroids: Vec<f32> = vec![

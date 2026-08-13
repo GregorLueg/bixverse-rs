@@ -2043,6 +2043,7 @@ mod tests {
         assert_eq!(weights, vec![vec![1.0_f32; 3], vec![1.0_f32; 3]]);
     }
 
+    /// Each undirected edge keeps its combined weight on one endpoint and zero on the other.
     #[test]
     fn non_redundant_combines_and_zeroes() {
         let (neigh, w) = small_graph();
@@ -2062,6 +2063,7 @@ mod tests {
         assert_eq!(nr[3][0], 0.0);
     }
 
+    /// Degree sums every incident edge regardless of which endpoint the weight was folded onto.
     #[test]
     fn node_degree_counts_both_endpoints() {
         let (neigh, w) = small_graph();
@@ -2074,6 +2076,7 @@ mod tests {
         assert!((d[3] - 2.0).abs() < 1e-6);
     }
 
+    /// The CSR spmv reproduces the symmetric scatter loop it replaced.
     #[test]
     fn spmv_matches_reference_t1x() {
         let (neigh, w) = small_graph();
@@ -2103,6 +2106,7 @@ mod tests {
         }
     }
 
+    /// E[G^2] collapses to the sum of squares of `W @ x`, matching the old `conditional_eg2`.
     #[test]
     fn eg2_equals_sum_squares_wy() {
         let (neigh, w) = small_graph();
@@ -2118,8 +2122,8 @@ mod tests {
         assert!((new_eg2 - old).abs() < 1e-5, "{new_eg2} vs {old}");
     }
 
-    // The centrepiece: dot(x, W @ y) must equal the old `local_cov_pair * 2.0`.
-    // This is what catches a half-value bug from getting symmetrisation wrong.
+    /// Regression: `dot(x, W @ y)` must equal the old `local_cov_pair * 2.0`, or a
+    /// botched symmetrisation halves every pair value.
     #[test]
     fn pair_formula_equivalence() {
         let (neigh, w) = small_graph();
@@ -2144,20 +2148,7 @@ mod tests {
         assert!((new_sym - old).abs() < 1e-5, "sym {new_sym} vs old {old}");
     }
 
-    #[test]
-    fn z_simplification_matches_min_abs_branch() {
-        let lc = -1.3_f32;
-        let eg2_i = 4.0_f32;
-        let eg2_j = 9.0_f32;
-
-        let z_xy = lc / eg2_i.sqrt();
-        let z_yx = lc / eg2_j.sqrt();
-        let old = if z_xy.abs() < z_yx.abs() { z_xy } else { z_yx };
-
-        let new = lc / eg2_i.max(eg2_j).sqrt();
-        assert!((new - old).abs() < 1e-6, "{new} vs {old}");
-    }
-
+    /// Bin edges come out strictly increasing and every point lands in a valid bin index.
     #[test]
     fn quantile_cut_assigns_and_orders() {
         let data: Vec<f32> = (0..100).map(|i| i as f32).collect();

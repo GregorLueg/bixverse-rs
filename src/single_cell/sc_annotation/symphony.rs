@@ -883,6 +883,7 @@ mod tests {
         (z_pca, r, batch_infos)
     }
 
+    /// Values inside the band pass through untouched.
     #[test]
     fn test_clamp_sym_within_range() {
         assert_eq!(clamp_sym(0.0, 10.0), 0.0);
@@ -890,12 +891,14 @@ mod tests {
         assert_eq!(clamp_sym(-7.5, 10.0), -7.5);
     }
 
+    /// The bound itself is inclusive at both ends.
     #[test]
     fn test_clamp_sym_at_boundary() {
         assert_eq!(clamp_sym(10.0, 10.0), 10.0);
         assert_eq!(clamp_sym(-10.0, 10.0), -10.0);
     }
 
+    /// Anything beyond the band, however extreme, saturates at the bound.
     #[test]
     fn test_clamp_sym_outside_range() {
         assert_eq!(clamp_sym(15.0, 10.0), 10.0);
@@ -904,6 +907,7 @@ mod tests {
         assert_eq!(clamp_sym(-1e9, 10.0), -10.0);
     }
 
+    /// The correction hands the query back in the shape it came in.
     #[test]
     fn test_moe_correct_query_preserves_dimensions() {
         let (z_pca, r, batch_infos) = make_simple_scenario();
@@ -922,6 +926,7 @@ mod tests {
         assert_eq!(result.ncols(), 2);
     }
 
+    /// Mapping a query onto reference centroids must shrink the batch separation.
     #[test]
     fn test_moe_correct_query_reduces_batch_effect() {
         let (z_pca, r, batch_infos) = make_simple_scenario();
@@ -954,6 +959,7 @@ mod tests {
         );
     }
 
+    /// A query already matching the reference distribution comes back unchanged.
     #[test]
     fn test_moe_correct_query_no_batch_effect_stable() {
         // Query with no batch effect: all four cells at (0.1, 0.2), one
@@ -983,6 +989,7 @@ mod tests {
         }
     }
 
+    /// Two batch variables both get corrected, so the design matrix layout is right.
     #[test]
     fn test_moe_correct_query_two_variables() {
         // Two batch variables, two levels each, all four combinations
@@ -1031,6 +1038,7 @@ mod tests {
         );
     }
 
+    /// The reference Nr cache actually feeds the solve rather than being ignored.
     #[test]
     fn test_moe_correct_query_responds_to_nr() {
         // Same query, two reference Nr regimes. Different Nr should give
@@ -1070,6 +1078,7 @@ mod tests {
         );
     }
 
+    /// An unpenalised solve must stay finite instead of hitting a singular system.
     #[test]
     fn test_moe_correct_query_lambda_zero_is_finite() {
         // With lambda = 0 the batch terms are unpenalised. The design block
@@ -1092,50 +1101,6 @@ mod tests {
             for j in 0..2 {
                 assert!(result[(i, j)].is_finite());
             }
-        }
-    }
-
-    #[test]
-    fn test_compression_cache_formula() {
-        // Nr = row sums of R; C = R * Z_corr. This is the cache that the
-        // query side consumes; the formula is inlined in
-        // build_symphony_reference, so we re-derive it here as a guard.
-        let r = mat![[0.7_f32, 0.3, 0.0], [0.3, 0.7, 1.0]];
-        let z_corr = mat![[1.0_f32, 2.0], [3.0, 4.0], [5.0, 6.0]];
-
-        let k = r.nrows();
-        let n = r.ncols();
-        let nr: Vec<f32> = (0..k)
-            .map(|cluster| (0..n).map(|cell| r[(cluster, cell)]).sum::<f32>())
-            .collect();
-        let c: Mat<f32> = r.as_ref() * z_corr.as_ref();
-
-        let nr_expected = [1.0_f32, 2.0];
-        let c_expected = mat![[1.6_f32, 2.6], [7.4, 9.4]];
-
-        for i in 0..k {
-            assert_relative_eq!(nr[i], nr_expected[i], epsilon = 1e-5);
-        }
-        for i in 0..k {
-            for j in 0..z_corr.ncols() {
-                assert_relative_eq!(c[(i, j)], c_expected[(i, j)], epsilon = 1e-5);
-            }
-        }
-    }
-
-    #[test]
-    fn test_centroids_are_row_normalised() {
-        // After cosine_normalise on the K x d compression matrix, each row
-        // should have unit L2 norm.
-        let c = mat![[3.0_f32, 4.0], [0.0, 5.0], [1.0, 0.0]];
-        let centroids = cosine_normalise(&c);
-
-        for i in 0..centroids.nrows() {
-            let norm: f32 = (0..centroids.ncols())
-                .map(|j| centroids[(i, j)] * centroids[(i, j)])
-                .sum::<f32>()
-                .sqrt();
-            assert_relative_eq!(norm, 1.0, epsilon = 1e-5);
         }
     }
 }

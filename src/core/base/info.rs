@@ -279,11 +279,9 @@ mod tests {
         assert!((a - b).abs() < 1e-10, "{} != {}", a, b);
     }
 
+    /// Two equally frequent symbols hit the maximum entropy for two bins, in nats.
     #[test]
     fn test_calculate_entropy_uniform() {
-        // Data: [0, 1, 0, 1]
-        // 2 bins. P(0) = 0.5, P(1) = 0.5
-        // Entropy = -0.5 * ln(0.5) - 0.5 * ln(0.5) = -ln(0.5) = ln(2)
         let data = mat![[0], [1], [0], [1]]; // usize matrix
         let col = data.col(0);
 
@@ -292,11 +290,9 @@ mod tests {
         assert_approx_eq(ent, 2.0_f64.ln());
     }
 
+    /// A single occupied bin has zero entropy, and the empty bins must not contribute NaN.
     #[test]
     fn test_calculate_entropy_zero() {
-        // Data: [0, 0, 0, 0]
-        // P(0) = 1.0
-        // Entropy = -1 * ln(1) = 0
         let data = mat![[0], [0], [0], [0]];
         let col = data.col(0);
 
@@ -304,50 +300,36 @@ mod tests {
         assert_approx_eq(ent, 0.0);
     }
 
+    /// Joint entropy equals H(X) for identical columns and adds up for independent ones.
     #[test]
     fn test_calculate_joint_entropy() {
-        // X: [0, 1, 0, 1]
-        // Y: [0, 1, 0, 1]
-        // Perfectly correlated. Joint entropy H(X,Y) should equal H(X) = ln(2)
         let data = mat![[0, 0], [1, 1], [0, 0], [1, 1]]; // usize matrix
 
         let je: f64 = calculate_joint_entropy(data.col(0), data.col(1), Some(2));
         assert_approx_eq(je, 2.0_f64.ln());
 
         // Independent variables
-        // X: [0, 0, 1, 1]
-        // Y: [0, 1, 0, 1]
-        // Joint distribution is uniform over (0,0), (0,1), (1,0), (1,1) -> p=0.25
-        // H(X,Y) = -4 * (0.25 * ln(0.25)) = -ln(0.25) = ln(4)
         let data_indep = mat![[0, 0], [0, 1], [1, 0], [1, 1]];
         let je_indep: f64 = calculate_joint_entropy(data_indep.col(0), data_indep.col(1), Some(2));
         assert_approx_eq(je_indep, 4.0_f64.ln());
     }
 
+    /// MI saturates at H(X) for identical columns and drops to zero for independent ones.
     #[test]
     fn test_calculate_mi() {
-        // X: [0, 1], Y: [0, 1] -> Perfectly correlated
-        // MI(X;Y) = H(X) + H(Y) - H(X,Y)
-        // H(X)=ln2, H(Y)=ln2, H(X,Y)=ln2
-        // MI = ln2
         let data = mat![[0, 0], [1, 1]];
         let mi: f64 = calculate_mi(data.col(0), data.col(1), Some(2));
         assert_approx_eq(mi, 2.0_f64.ln());
 
         // Independent -> MI should be 0
-        // X: [0, 0, 1, 1], Y: [0, 1, 0, 1]
         let data_indep = mat![[0, 0], [0, 1], [1, 0], [1, 1]];
         let mi_indep: f64 = calculate_mi(data_indep.col(0), data_indep.col(1), Some(2));
         assert_approx_eq(mi_indep, 0.0);
     }
 
+    /// Equal-width binning clamps the top edge back into the last bin rather than overflowing it.
     #[test]
     fn test_bin_equal_width() {
-        // Data: 0.0, 5.0, 10.0
-        // 3 bins. Range=10. Step=3.33...
-        // 0.0 -> bin 0
-        // 5.0 -> 1.5 -> bin 1
-        // 10.0 -> 3.0 -> clamped to bin 2
         let mat = mat![[0.0], [5.0], [10.0]];
 
         let binned = bin_matrix_cols(&mat.as_ref(), Some(3), BinningStrategy::EqualWidth);
@@ -358,6 +340,7 @@ mod tests {
         assert_eq!(binned.get(2, 0), &2);
     }
 
+    /// A constant column has zero range, so the bin width must not become a division by zero.
     #[test]
     fn test_bin_equal_width_constant_column() {
         // Edge case: Range is 0
@@ -370,12 +353,9 @@ mod tests {
         assert_eq!(binned.get(2, 0), &0);
     }
 
+    /// Equal-frequency binning splits on rank yet writes the labels back in input order.
     #[test]
     fn test_bin_equal_frequency() {
-        // Data: [1, 2, 8, 9]
-        // 2 bins.
-        // Sorted: 1, 2 | 8, 9
-        // Split should occur roughly between 2 and 8
         let mat = mat![[1.0], [9.0], [2.0], [8.0]];
 
         let binned = bin_matrix_cols(&mat.as_ref(), Some(2), BinningStrategy::EqualFrequency);
@@ -389,6 +369,7 @@ mod tests {
         assert_eq!(binned.get(3, 0), &1); // 8.0
     }
 
+    /// The R-facing strategy strings still map onto the enum variants they name.
     #[test]
     fn test_parse_bin_strategy() {
         assert!(matches!(

@@ -37,6 +37,11 @@ impl From<F16> for f16 {
 // Iterator sum //
 //////////////////
 
+/// Do not use for anything stored or compared across machines. `half` chooses
+/// its accumulation strategy per architecture: aarch64 with `fp16` folds in
+/// native f16 and rounds at every step, everything else widens to f32 and
+/// narrows once. Over a thousand elements the two disagree by about 5%. Widen
+/// yourself and narrow at the end when the result is persisted.
 impl Sum for F16 {
     fn sum<I: Iterator<Item = F16>>(iter: I) -> Self {
         let sum: f16 = iter.map(f16::from).sum();
@@ -167,13 +172,22 @@ impl<'a> std::ops::Div<&'a F16> for F16 {
 // Equality //
 //////////////
 
+/// Equality is reflexive, including for NaN, which IEEE floats are not.
+///
+/// [F16] is a storage newtype for the binary format rather than a float proper,
+/// and it claims both [Eq] and [Ord]. [Eq] requires `a == a` for every value,
+/// and [Ord::cmp] already reports `Equal` for two NaNs, so returning `false`
+/// here left the two disagreeing: a NaN compared unequal to itself while
+/// sorting as equal to itself. Values arrive from disk through
+/// [F16::from_le_bytes] unvalidated, so any `sort`, `dedup`, `BTreeMap` or
+/// `binary_search` over them could see that inconsistency.
 impl PartialEq for F16 {
     fn eq(&self, other: &Self) -> bool {
         let a = f16::from(*self);
         let b = f16::from(*other);
 
         if a.is_nan() && b.is_nan() {
-            false
+            true
         } else {
             a == b
         }
@@ -304,5 +318,134 @@ impl FloatAndUInt for u16 {
     }
     fn to_u32(self) -> u32 {
         self as u32
+    }
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_relative_eq;
+
+    /// Regression: `PartialEq` returned false for two NaNs while `Ord::cmp`
+    /// returned `Equal`, so `Eq` was claimed on a non-reflexive `PartialEq`.
+    /// Any sort or map keyed on `F16` could see the two disagree.
+    #[test]
+    fn f16_equality_is_reflexive_and_agrees_with_ord() {
+        let nan = F16::from_f32(f32::NAN);
+        let one = F16::from_f32(1.0);
+
+        assert_eq!(nan, nan, "Eq requires a == a for every value");
+        assert_eq!(nan.cmp(&nan), Ordering::Equal);
+        assert_eq!(one, one);
+
+        // The two traits must never disagree on any pair.
+        for (a, b) in [(nan, nan), (nan, one), (one, nan), (one, one)] {
+            assert_eq!(
+                a == b,
+                a.cmp(&b) == Ordering::Equal,
+                "PartialEq and Ord disagree"
+            );
+        }
+    }
+
+    /// NaN sorts after every real value, and sorting must not panic.
+    #[test]
+    fn f16_sorts_with_nan_last() {
+        let mut vals = [
+            F16::from_f32(2.0),
+            F16::from_f32(f32::NAN),
+            F16::from_f32(1.0),
+        ];
+        vals.sort();
+
+        assert_relative_eq!(vals[0].to_f32(), 1.0, epsilon = 1e-3);
+        assert_relative_eq!(vals[1].to_f32(), 2.0, epsilon = 1e-3);
+        assert!(vals[2].to_f32().is_nan());
+    }
+
+    /// The binary format depends on this pair round-tripping exactly.
+    #[test]
+    fn f16_le_bytes_round_trip_preserves_bits() {
+        for v in [0.0_f32, 1.0, -1.5, 65504.0, f32::INFINITY] {
+            let original = F16::from_f32(v);
+            let restored = F16::from_le_bytes(original.to_le_bytes());
+            assert_eq!(original.to_bits(), restored.to_bits());
+        }
+
+        let nan = F16::from_f32(f32::NAN);
+        assert!(F16::from_le_bytes(nan.to_le_bytes()).to_f32().is_nan());
+    }
+
+    /// `from_bits` and `to_bits` are inverse for every representable pattern.
+    #[test]
+    fn f16_bits_round_trip() {
+        for bits in [0u16, 0x3C00, 0xBC00, 0x7BFF] {
+            assert_eq!(F16::from_bits(bits).to_bits(), bits);
+        }
+    }
+
+    /// Half precision carries about three decimal digits, so 0.1 does not
+    /// survive exactly. Pinning that keeps anyone from assuming f32 fidelity.
+    #[test]
+    fn f16_conversion_loses_precision_predictably() {
+        let v = F16::from_f32(0.1);
+        assert_relative_eq!(v.to_f32(), 0.1, epsilon = 1e-3);
+        assert_relative_eq!(v.to_f64(), 0.1, epsilon = 1e-3);
+        assert_ne!(v.to_f32(), 0.1_f32, "0.1 is not representable in f16");
+    }
+
+    /// `Sum` is not a reliable accumulator over a long column, and how badly it
+    /// fails depends on the target.
+    ///
+    /// `half` picks its strategy per architecture (`binary16/arch.rs::sum_f16`):
+    /// aarch64 with `fp16` folds in native f16, rounding at every step, so a
+    /// thousand tenths drift upwards to 105.19. Everywhere else it accumulates
+    /// in f32 and narrows once, landing on exactly 100.0. Both are legitimate,
+    /// which is the point: the same data summed on an M-series Mac and on an
+    /// x86 runner does not agree.
+    ///
+    /// So nothing that is stored or compared across machines may use this.
+    /// `data_io` and `in_memory_io` accumulate `avg_exp` in f32 and narrow once,
+    /// which is what `pca.rs` already did and what makes the two platforms
+    /// agree.
+    #[test]
+    fn f16_sum_is_not_portable_over_long_columns() {
+        // Exact on both targets while the running total stays small.
+        let exact: F16 = (0..4).map(|_| F16::from_f32(0.25)).sum();
+        assert_relative_eq!(exact.to_f32(), 1.0, epsilon = 1e-3);
+
+        // Widening first is exact to within one f16 step, on every target. This
+        // is the accumulation production code performs.
+        let widened: f32 = (0..1000).map(|_| F16::from_f32(0.1).to_f32()).sum();
+        assert_relative_eq!(widened, 99.9756, epsilon = 1e-3);
+
+        // Summing in f16 is target-dependent: 100.0 where `half` widens
+        // internally, 105.1875 where it folds in native f16.
+        let summed: F16 = (0..1000).map(|_| F16::from_f32(0.1)).sum();
+        let v = summed.to_f32();
+        assert!(
+            (99.0..=106.0).contains(&v),
+            "f16 Sum gave {v}, outside both known per-target results"
+        );
+    }
+
+    /// Arithmetic round-trips through f16 at every step.
+    #[test]
+    fn f16_arithmetic_round_trips_through_half_precision() {
+        let a = F16::from_f32(1.5);
+        let b = F16::from_f32(2.5);
+
+        assert_relative_eq!((a + b).to_f32(), 4.0, epsilon = 1e-3);
+        assert_relative_eq!((b - a).to_f32(), 1.0, epsilon = 1e-3);
+        assert_relative_eq!((a * b).to_f32(), 3.75, epsilon = 1e-3);
+        assert_relative_eq!((b / a).to_f32(), 5.0 / 3.0, epsilon = 1e-3);
+
+        let mut acc = a;
+        acc += b;
+        assert_relative_eq!(acc.to_f32(), 4.0, epsilon = 1e-3);
     }
 }

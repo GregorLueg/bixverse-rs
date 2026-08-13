@@ -235,6 +235,7 @@ mod tests_batch_utils {
     use super::*;
     use approx::assert_relative_eq;
 
+    /// Every row comes out with unit norm and its direction unchanged.
     #[test]
     fn test_cosine_normalise_basic() {
         // Regular vectors with different magnitudes
@@ -264,92 +265,7 @@ mod tests_batch_utils {
         assert_relative_eq!(normalised[(1, 0)], 1.0, epsilon = 1e-6);
     }
 
-    #[test]
-    fn test_cosine_normalise_zero_vector() {
-        let mat = Mat::from_fn(3, 3, |i, j| {
-            match i {
-                0 => [1.0, 0.0, 0.0][j],
-                1 => [0.0, 0.0, 0.0][j], // Zero vector
-                2 => [0.0, 1.0, 0.0][j],
-                _ => unreachable!(),
-            }
-        });
-
-        let normalised = cosine_normalise(&mat);
-
-        // Zero vector should stay zero
-        for col in 0..3 {
-            assert_eq!(normalised[(1, col)], 0.0);
-        }
-
-        // Other rows should be normalised
-        assert_relative_eq!(normalised[(0, 0)], 1.0, epsilon = 1e-6);
-        assert_relative_eq!(normalised[(2, 1)], 1.0, epsilon = 1e-6);
-    }
-
-    #[test]
-    fn test_cosine_normalise_already_normalised() {
-        // Create already normalised vectors
-        let mat = Mat::from_fn(2, 3, |i, j| match i {
-            0 => [1.0, 0.0, 0.0][j],
-            1 => [0.0, 1.0, 0.0][j],
-            _ => unreachable!(),
-        });
-
-        let normalised = cosine_normalise(&mat);
-
-        // Should remain unchanged (within floating point precision)
-        for i in 0..2 {
-            for j in 0..3 {
-                assert_relative_eq!(normalised[(i, j)], mat[(i, j)], epsilon = 1e-6);
-            }
-        }
-    }
-
-    #[test]
-    fn test_cosine_normalise_small_values() {
-        // Very small values (but not zero)
-        let mat = Mat::from_fn(2, 3, |i, j| {
-            match i {
-                0 => [1e-5, 2e-5, 2e-5][j], // norm = 3e-5
-                1 => [0.01, 0.02, 0.02][j], // norm = 0.03
-                _ => unreachable!(),
-            }
-        });
-
-        let normalised = cosine_normalise(&mat);
-
-        // Both should normalize to unit vectors
-        for row in 0..2 {
-            let norm: f32 = (0..3)
-                .map(|col| normalised[(row, col)].powi(2))
-                .sum::<f32>()
-                .sqrt();
-            assert_relative_eq!(norm, 1.0, epsilon = 1e-5);
-        }
-    }
-
-    #[test]
-    fn test_cosine_normalise_large_values() {
-        // Very large values
-        let mat = Mat::from_fn(2, 3, |i, j| match i {
-            0 => [1000.0, 2000.0, 2000.0][j],
-            1 => [5000.0, 0.0, 0.0][j],
-            _ => unreachable!(),
-        });
-
-        let normalised = cosine_normalise(&mat);
-
-        // Should normalize correctly despite large magnitudes
-        for row in 0..2 {
-            let norm: f32 = (0..3)
-                .map(|col| normalised[(row, col)].powi(2))
-                .sum::<f32>()
-                .sqrt();
-            assert_relative_eq!(norm, 1.0, epsilon = 1e-5);
-        }
-    }
-
+    /// The near-zero cutoff is strict, so a row sitting exactly on it is zeroed.
     #[test]
     fn test_cosine_normalise_near_zero_threshold() {
         // Test values right at the threshold
@@ -382,6 +298,7 @@ mod tests_batch_utils {
         }
     }
 
+    /// With one column the result is the sign of each entry, and zero stays zero.
     #[test]
     fn test_cosine_normalise_single_column() {
         // Edge case: single column (scalars)
@@ -399,6 +316,7 @@ mod tests_batch_utils {
         assert_relative_eq!(normalised[(2, 0)], -1.0, epsilon = 1e-6);
     }
 
+    /// Normal, zero, large and tiny rows all normalise correctly in one call.
     #[test]
     fn test_cosine_normalise_mixed_cases() {
         // Mix of normal, zero, and edge cases

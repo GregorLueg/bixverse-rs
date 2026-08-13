@@ -43,8 +43,7 @@ use std::time::Instant;
 
 use bixverse_rs::gpu::sc_gpu::scenic_gpu::{
     ScenicGpuParams, WaveLayout, fit_multi_trees_gpu, fused_rf_smem_bytes, pick_gpu_bins,
-    pick_wave_size, viable_max_active_nodes, wave_byte_cost, wave_byte_cost_et,
-    wave_byte_cost_rf_fused,
+    pick_wave_size, viable_max_active_nodes, wave_byte_cost_et, wave_byte_cost_rf_fused,
 };
 use bixverse_rs::prelude::*;
 use bixverse_rs::single_cell::sc_analysis::scenic::{
@@ -456,7 +455,6 @@ fn report_shape(n_samples: usize, device: &WgpuDevice) {
         .expect("shape busts the wave budget at wave_size = 1")
     };
     let wave_et = wave(WaveLayout::ExtraTrees);
-    let wave_rf_hist = wave(WaveLayout::RandomForestHist);
     let wave_rf_fused = wave(WaveLayout::RandomForestFused);
     let fused_bytes = fused_rf_smem_bytes();
     let fused_ok = fused_bytes <= max_smem;
@@ -467,7 +465,7 @@ fn report_shape(n_samples: usize, device: &WgpuDevice) {
     );
     println!(
         "  wave:  et {wave_et} ({:.3} GiB) | rf-fused {wave_rf_fused} ({:.3} GiB) | \
-         rf-hist {wave_rf_hist} ({:.2} GiB) | budget {:.0} GiB | max binding {:.2} GiB",
+         budget {:.0} GiB | max binding {:.2} GiB",
         gib(wave_byte_cost_et(wave_et, nodes, k_feats, N_TARGETS, 1)),
         gib(wave_byte_cost_rf_fused(
             wave_rf_fused,
@@ -476,7 +474,6 @@ fn report_shape(n_samples: usize, device: &WgpuDevice) {
             N_TARGETS,
             n_samples
         )),
-        gib(wave_byte_cost(wave_rf_hist, nodes, k_feats, N_TARGETS)),
         gib(WAVE_BUDGET),
         gib(max_binding),
     );

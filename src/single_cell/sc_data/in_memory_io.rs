@@ -116,9 +116,7 @@ impl<'a> InMemorySparseReader<'a> {
             .map(|&v| F16::from_f32(v))
             .collect();
 
-        // `avg_exp` is the sum of the normalised layer, matching what
-        // `CscGeneChunk::from_conversion` writes on the ingest path.
-        let avg_exp = data_norm.iter().sum::<F16>();
+        let avg_exp = F16::from_f32(data_norm.iter().map(|v| v.to_f32()).sum::<f32>());
 
         Ok(CscGeneChunk {
             data_raw,
@@ -288,16 +286,17 @@ mod tests {
         CompressedSparseData2::new_csc(&data, &indices, &indptr, Some(&data_2), (4, 3))
     }
 
+    /// Library sizes sum down cells even though the storage is gene-major.
     #[test]
     fn test_library_sizes_are_the_cell_totals() {
         let matrix = toy_csc();
         let reader = InMemorySparseReader::new(&matrix, None).unwrap();
 
-        // cell 0: 3 + 1, cell 1: 2, cell 2: 5 + 4, cell 3: 1 + 7
         let sizes = reader.read_cell_library_sizes(&[0, 1, 2, 3]).unwrap();
         assert_eq!(sizes, vec![4, 2, 9, 8]);
     }
 
+    /// Gene chunks come back in request order with the stored column untouched.
     #[test]
     fn test_gene_chunks_carry_the_column_verbatim() {
         let matrix = toy_csc();
@@ -316,6 +315,7 @@ mod tests {
         assert_eq!(chunks[1].data_raw.iter().collect::<Vec<u32>>(), vec![3, 5]);
     }
 
+    /// The synthesised header reports the matrix shape and the reader stays gene-based only.
     #[test]
     fn test_header_and_mode() {
         let matrix = toy_csc();
@@ -330,6 +330,7 @@ mod tests {
         assert!(reader.read_cells_parallel(&[0]).is_err());
     }
 
+    /// The reader is CSC-only, so a CSR matrix must be refused at construction.
     #[test]
     fn test_csr_input_is_rejected() {
         let csc = toy_csc();
@@ -338,6 +339,7 @@ mod tests {
         assert!(InMemorySparseReader::new(&csr, None).is_err());
     }
 
+    /// Out-of-range gene and cell indices error rather than reading past the buffers.
     #[test]
     fn test_out_of_range_indices_error() {
         let matrix = toy_csc();

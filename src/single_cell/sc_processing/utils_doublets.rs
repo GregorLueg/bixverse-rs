@@ -1852,36 +1852,37 @@ mod tests {
     // Feat selection //
     ////////////////////
 
+    /// Indices come back in descending value order, not index order.
     #[test]
     fn test_top_n_ordered_preserves_rank_order() {
         let values = vec![1.0, 5.0, 3.0, 2.0, 4.0];
-        // Top 3 in rank order: 5.0 (idx 1), 4.0 (idx 4), 3.0 (idx 2)
         assert_eq!(top_n_indices_ordered(&values, 3), vec![1, 4, 2]);
     }
 
+    /// The unordered variant picks the same set but hands it back index-sorted.
     #[test]
     fn test_top_n_indices_sorts_by_index() {
         let values = vec![1.0, 5.0, 3.0, 2.0, 4.0];
         assert_eq!(top_n_indices(&values, 3), vec![1, 2, 4]);
     }
 
+    /// Ties resolve to the lower index, so selection is deterministic.
     #[test]
     fn test_top_n_ordered_ties_prefer_lower_index() {
         let values = vec![5.0, 5.0, 5.0, 1.0];
         assert_eq!(top_n_indices_ordered(&values, 2), vec![0, 1]);
     }
 
+    /// Selection sweeps rank by rank across clusters, not cluster by cluster.
     #[test]
     fn test_roundrobin_basic() {
         // 3 clusters, distinct top picks
         let rankings = vec![vec![10, 20, 30], vec![11, 21, 31], vec![12, 22, 32]];
-        // Rank 0 round: 10, 11, 12
-        // Rank 1 round: 20, 21, 22
-        // Rank 2 round: 30, 31, 32
         let result = roundrobin_select(&rankings, 5);
         assert_eq!(result, vec![10, 11, 12, 20, 21]);
     }
 
+    /// A gene already picked by an earlier cluster is not picked twice.
     #[test]
     fn test_roundrobin_dedupe() {
         // Overlapping rankings
@@ -1890,13 +1891,11 @@ mod tests {
             vec![1, 3, 5, 7], // 1 and 3 duplicate
             vec![2, 5, 8, 9], // 2 and 5 duplicate
         ];
-        // Rank 0: 1 (new), 1 (dup), 2 (new)
-        // Rank 1: 2 (dup), 3 (new), 5 (new)
-        // Rank 2: 3 (dup), 5 (dup), 8 (new)
         let result = roundrobin_select(&rankings, 5);
         assert_eq!(result, vec![1, 2, 3, 5, 8]);
     }
 
+    /// The sweep stops at `n_top` mid-round rather than finishing the round.
     #[test]
     fn test_roundrobin_stops_at_n_top() {
         let rankings = vec![vec![1, 2, 3], vec![4, 5, 6]];
@@ -1905,17 +1904,16 @@ mod tests {
         assert_eq!(result.len(), 3);
     }
 
+    /// Clusters that run out of ranks are skipped, not treated as the end of the sweep.
     #[test]
     fn test_roundrobin_small_per_cluster_lists() {
         // Some clusters have fewer ranks than others
         let rankings = vec![vec![1, 2], vec![3], vec![4, 5, 6]];
-        // Rank 0: 1, 3, 4
-        // Rank 1: 2, (skip), 5
-        // Rank 2: (skip), (skip), 6
         let result = roundrobin_select(&rankings, 10);
         assert_eq!(result, vec![1, 3, 4, 2, 5, 6]);
     }
 
+    /// Too few unique genes returns a short list rather than padding or looping.
     #[test]
     fn test_roundrobin_insufficient_unique() {
         // All clusters have the same top picks; result is smaller than n_top
@@ -1924,6 +1922,7 @@ mod tests {
         assert_eq!(result, vec![1, 2, 3]); // only 3 unique available
     }
 
+    /// No clusters is an empty result, not a panic on the first round.
     #[test]
     fn test_roundrobin_empty() {
         let rankings: Vec<Vec<usize>> = vec![];
@@ -1977,6 +1976,7 @@ mod tests {
         }
     }
 
+    /// Zero and negative rates return zero rather than looping or drawing.
     #[test]
     fn test_poisson_sampler_zero() {
         let mut rng = StdRng::seed_from_u64(99);
@@ -1986,6 +1986,7 @@ mod tests {
         }
     }
 
+    /// Medians are per cluster, including even-sized and single-cell clusters.
     #[test]
     fn test_cluster_median_lib_sizes() {
         let clusters = vec![0, 0, 0, 1, 1, 2];
@@ -2317,6 +2318,7 @@ mod tests {
         );
     }
 
+    /// The same seed gives the same doublet, so runs are reproducible.
     #[test]
     fn test_deterministic_with_same_seed() {
         let parent_a = vec![5, 10, 15, 20];
@@ -2359,6 +2361,7 @@ mod tests {
     // Unrecognisable doublets //
     /////////////////////////////
 
+    /// Quantiles at the ends and the middle of an odd-length sorted slice.
     #[test]
     fn test_quantile_basic() {
         let s = vec![0.1, 0.2, 0.3, 0.4, 0.5];
@@ -2367,6 +2370,7 @@ mod tests {
         assert!((quantile_sorted(&s, 1.0) - 0.5).abs() < 1e-6);
     }
 
+    /// Quantiles between two samples interpolate linearly rather than rounding to one.
     #[test]
     fn test_quantile_interpolation() {
         let s = vec![0.0, 10.0];
@@ -2374,12 +2378,14 @@ mod tests {
         assert!((quantile_sorted(&s, 0.1) - 1.0).abs() < 1e-6);
     }
 
+    /// Empty input gives NaN and a single value gives itself, rather than indexing out of range.
     #[test]
     fn test_quantile_empty_and_single() {
         assert!(quantile_sorted(&[], 0.5).is_nan());
         assert_eq!(quantile_sorted(&[3.15], 0.5), 3.15);
     }
 
+    /// Parent pairs are sorted and homotypic ones dropped, so origins key consistently.
     #[test]
     fn test_canonical_pair_ordering() {
         assert_eq!(canonical_pair(2, 5), Some((2, 5)));
@@ -2387,6 +2393,7 @@ mod tests {
         assert_eq!(canonical_pair(3, 3), None);
     }
 
+    /// An origin below `min_size` is left alone, since its quantiles mean nothing.
     #[test]
     fn test_too_few_sims_not_flagged() {
         // Only 4 sims for origin (0,1) -- below min_size=5
@@ -2398,6 +2405,7 @@ mod tests {
         assert!(flagged.is_empty());
     }
 
+    /// Simulated doublets that sit well above the real cells stay usable.
     #[test]
     fn test_clear_separation_not_flagged() {
         // Obs at 0.1, sim at 0.9+
@@ -2409,6 +2417,7 @@ mod tests {
         assert!(flagged.is_empty());
     }
 
+    /// One noisy parent cluster is enough to flag the origin; the check is over both.
     #[test]
     fn test_cond_a_triggers_via_any_parent() {
         // Cluster 0 has noisy real cells (90th pct = 0.96)
@@ -2425,6 +2434,7 @@ mod tests {
         assert!(flagged.contains(&(0, 1)));
     }
 
+    /// The median-proximity condition flags on its own, with the tail condition quiet.
     #[test]
     fn test_cond_b_triggers_on_median_proximity() {
         // Designed so cond_a does NOT trigger (sim 10th > max parent 90th)
@@ -2441,6 +2451,7 @@ mod tests {
         assert!(flagged.contains(&(0, 1)));
     }
 
+    /// Reversed parent pairs pool into one origin instead of two half-sized ones.
     #[test]
     fn test_canonical_combines_reversed_pairs() {
         // Alternating (0,1) and (1,0) should combine into one origin
@@ -2462,6 +2473,7 @@ mod tests {
         assert!(flagged.contains(&(0, 1)));
     }
 
+    /// Homotypic origins never reach the flagging logic.
     #[test]
     fn test_homotypic_ignored() {
         // All sims have homotypic origin (0,0) -- skipped entirely
@@ -2473,6 +2485,7 @@ mod tests {
         assert!(flagged.is_empty());
     }
 
+    /// Origins are judged one at a time, so a bad one does not take a good one with it.
     #[test]
     fn test_mixed_flagged_and_kept() {
         // (0,1) clearly separated (kept)
@@ -2496,6 +2509,7 @@ mod tests {
         assert!(!flagged.contains(&(0, 1)));
     }
 
+    /// The mask is built from canonical pairs, so (1,0) is marked by a flagged (0,1).
     #[test]
     fn test_mark_sims_from_flagged_origins_canonical() {
         // Flagged set contains (0,1); sims with either (0,1) or (1,0)
@@ -2507,6 +2521,7 @@ mod tests {
         assert_eq!(mask, vec![true, false, true, false, false]);
     }
 
+    /// Empty inputs return an empty flag set rather than panicking on a quantile.
     #[test]
     fn test_empty_inputs() {
         let flagged = identify_unrecognisable_origins(&[], &[], &[], &[], &Default::default());

@@ -660,6 +660,7 @@ mod tests {
     // Tests //
     ///////////
 
+    /// Cheap Pearson gate at n = 80, d = 6; large n in `tests/gpu_corr.rs`.
     #[test]
     fn test_pearson_matches_cpu() {
         let Some(device) = try_device() else { return };
@@ -680,6 +681,7 @@ mod tests {
         assert_mat_close(&got, &cpu_pearson(&data, n, d), 1e-4);
     }
 
+    /// Same gate for covariance, which skips the standard-deviation division.
     #[test]
     fn test_covariance_matches_cpu() {
         let Some(device) = try_device() else { return };
@@ -700,6 +702,7 @@ mod tests {
         assert_mat_close(&got, &cpu_covariance(&data, n, d), 1e-4);
     }
 
+    /// Same gate for Spearman, which also pins the on-device rank transform.
     #[test]
     fn test_spearman_matches_cpu() {
         let Some(device) = try_device() else { return };
