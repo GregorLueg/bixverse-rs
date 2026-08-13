@@ -518,6 +518,8 @@ mod tests {
         assert!((gene1_actual[2] - 1.0).abs() < 0.01);
     }
 
+    /// The fused rank-sum kernel must agree with summing the group 1 slice of
+    /// the materialised ranking, which is pinned separately above.
     #[test]
     fn test_rank_sum_stats_matches_materialised() {
         // Anchor test: the fused kernel must agree with summing the group 1
@@ -550,6 +552,8 @@ mod tests {
         assert_relative_eq!(stats[3].1, 6.0 * 6.0 * 6.0 - 6.0, epsilon = 1e-9);
     }
 
+    /// The tie-correction term sums `t^3 - t` over every tie group, including
+    /// the implicit group the structural zeros form.
     #[test]
     fn test_rank_sum_stats_tie_term() {
         // Single gene over 6 cells: values [1.0, 1.0, 1.0, 2.0, 2.0, 0.0].
@@ -567,6 +571,8 @@ mod tests {
         assert_relative_eq!(stats[0].0, 9.0, epsilon = 1e-9);
     }
 
+    /// With every value distinct there is no tie group, so the correction term
+    /// has to be exactly zero rather than merely small.
     #[test]
     fn test_rank_sum_stats_no_ties() {
         // Six distinct values, no zeros: S must be exactly 0.
@@ -581,6 +587,8 @@ mod tests {
         assert_relative_eq!(stats[0].0, 6.0, epsilon = 1e-9);
     }
 
+    /// Appending is incremental and truncating back to a recorded prefix must
+    /// restore the earlier state exactly, which is what lets a batch be undone.
     #[test]
     fn test_append_cell_chunks_round_trip() {
         let chunks = [

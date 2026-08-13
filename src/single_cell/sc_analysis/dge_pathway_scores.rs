@@ -1564,6 +1564,7 @@ mod tests {
         assert!(z < 0.0);
     }
 
+    /// Fully interleaved groups give AUROC 0.5 and z of zero.
     #[test]
     fn test_auroc_no_separation() {
         // n1 = n2 = 2, group 1 holds ranks 1 and 4
@@ -1571,6 +1572,8 @@ mod tests {
         assert_relative_eq!(auroc, 0.5);
     }
 
+    /// On untied data the z and the AUROC are related by a function of the two
+    /// group sizes alone, so their signs must agree.
     #[test]
     fn test_auroc_z_orientation() {
         // On untied data the two are related by a function of n1 and n2 alone
@@ -1584,6 +1587,7 @@ mod tests {
         assert!(z > 0.0 && auroc > 0.5);
     }
 
+    /// The variance correction sums `t^3 - t` over every tie group.
     #[test]
     fn test_tie_correction_known_value() {
         // Three tied plus two tied over n = 6: S = (27 - 3) + (8 - 2) = 30.
@@ -1594,6 +1598,7 @@ mod tests {
         assert_relative_eq!(z, 1.5 / 4.5_f64.sqrt(), epsilon = 1e-12);
     }
 
+    /// Distinct values leave nothing to correct, so the term is exactly zero.
     #[test]
     fn test_tie_correction_no_ties() {
         // Same rank sum, no ties: the variance falls back to n1 n2 (n + 1) / 12
@@ -1601,6 +1606,8 @@ mod tests {
         assert_relative_eq!(z, 1.5 / 5.25_f64.sqrt(), epsilon = 1e-12);
     }
 
+    /// A gene tied across every cell has zero corrected variance, which must
+    /// give z of zero rather than a NaN division.
     #[test]
     fn test_constant_gene_degenerate() {
         // Every cell tied: rank sum is n1 (n + 1) / 2 and S = n^3 - n, so the
@@ -1610,6 +1617,8 @@ mod tests {
         assert_eq!(z, 0.0);
     }
 
+    /// An empty group has no AUROC to report, so it is NaN rather than a silent
+    /// 0.5.
     #[test]
     fn test_mann_whitney_stats_empty_group() {
         let (auroc, z) = mann_whitney_stats(0.0, 0.0, 0, 5);
@@ -1617,6 +1626,8 @@ mod tests {
         assert_eq!(z, 0.0);
     }
 
+    /// Competition ranking gives a tied block the lowest rank and skips the
+    /// next, and returns ranks in input order rather than sorted order.
     #[test]
     fn test_min_rank_competition_ties() {
         // Competition ranking: the tied block takes the lowest rank and the
@@ -1629,6 +1640,8 @@ mod tests {
         assert_eq!(ranks, vec![3, 1, 2]);
     }
 
+    /// Simes takes the minimum of the scaled ordered p-values, and its last
+    /// term is `max(p)`, so a set of large p-values collapses to that.
     #[test]
     fn test_simes_and_max_p() {
         // m = 3: min(3/1 * 0.01, 3/2 * 0.04, 3/3 * 0.30) = 0.03
@@ -1642,6 +1655,8 @@ mod tests {
         assert_relative_eq!(simes_combine(&mut p), 0.95, epsilon = 1e-12);
     }
 
+    /// Odd, even and single-element medians, the even case being the mean of
+    /// the middle pair.
     #[test]
     fn test_median_in_place() {
         let mut odd = [3.0, 1.0, 2.0];
@@ -1654,6 +1669,8 @@ mod tests {
         assert_relative_eq!(median_in_place(&mut single), 7.0);
     }
 
+    /// Every rejection path of the one-vs-many input check, asserted by error
+    /// variant.
     #[test]
     fn test_validate_one_vs_many() {
         assert!(matches!(
@@ -1675,6 +1692,8 @@ mod tests {
         assert!(validate_one_vs_many(&[0, 1], &[vec![2], vec![3]]).is_ok());
     }
 
+    /// Regression: the rank sum reaches 1.95e7 at 20k genes, past exact f32
+    /// integer accumulation, so an f32 sum drifts off the exact 1.0.
     #[test]
     fn test_auc_per_cell_mw_precision() {
         // 20k genes, the top 1000 forming the set. The exact answer is 1.0,
@@ -1721,6 +1740,8 @@ mod tests {
         dense
     }
 
+    /// The full one-vs-many path on a fixture where the marker genes are known
+    /// by construction.
     #[test]
     fn test_one_vs_many_auroc_end_to_end() {
         let temp = TempStore::new("one_vs_many");
@@ -1770,6 +1791,9 @@ mod tests {
         assert_eq!(res.prop_other[0], vec![0.0, 1.0, 1.0, 1.0, 1.0]);
     }
 
+    /// Against a single rival the one-vs-many arm must agree with the pairwise
+    /// entry point, which shares the kernel but filters genes on its own two
+    /// groups.
     #[test]
     fn test_one_vs_many_matches_pairwise() {
         // The one-vs-many arm against a single rival must agree with the
@@ -1806,6 +1830,8 @@ mod tests {
         assert_eq!(multi.prop_other[0], pairwise.prop2);
     }
 
+    /// Filtering out every gene is an empty result rather than an error or a
+    /// panic.
     #[test]
     fn test_one_vs_many_all_genes_filtered() {
         let temp = TempStore::new("all_filtered");
@@ -1828,6 +1854,7 @@ mod tests {
         assert!(res.median_auroc.is_empty());
     }
 
+    /// String round trips for the AUC type, including the unrecognised case.
     #[test]
     fn test_parse_auc_type() {
         assert!(matches!(parse_auc_type("AUROC"), Some(AucType::Recovery)));
