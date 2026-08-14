@@ -1,5 +1,11 @@
 # News
 
+## 0.4.4
+
+### Features
+
+- GPU-accelerated Scrublet available.
+
 ## 0.4.3
 
 ### Features

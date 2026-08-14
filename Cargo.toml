@@ -125,8 +125,3 @@ required-features = ["gpu", "single-cell"]
 name = "gpu_scenic_micro"
 harness = false
 required-features = ["gpu", "single-cell"]
-
-# The GPU kNN defaults here assume the radix-select reducers introduced in
-# ann-search-rs 0.5.1. Delete this block once 0.5.1 is on crates.io.
-[patch.crates-io]
-ann-search-rs = { path = "/Users/gregorlueg/repos/shared/ann-search-rs" }
