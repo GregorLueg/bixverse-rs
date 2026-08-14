@@ -1,36 +1,6 @@
-//! GPU-accelerated approximate nearest neighbour search for single cell data.
-//!
-//! Mirrors the CPU routing in `single_cell::sc_processing::knn` against the
-//! GPU indices of `ann-search-rs`: an enum, a string parser, a parameter
-//! struct and a dispatcher. The CPU and GPU dispatchers return the same
-//! `Vec<Vec<usize>>`, so downstream graph construction is shared.
-//!
-//! ### Choosing a backend
-//!
-//! Exhaustive is exact but quadratic in `n`. IVF is faster from roughly
-//! n = 50k upwards and pulls away from there, measuring 4.74x over CPU KmKnn
-//! at n = 300k against exhaustive's 1.31x, at the cost of some recall. Pick on
-//! whether exactness or wall-clock matters more for the caller: there is no
-//! auto-dispatch, the caller names the backend, as on the CPU side.
-//!
-//! CAGRA is deliberately absent. It is the right index for the low `k` of
-//! ordinary single-cell work, but its build cost dominates at the `k` the
-//! doublet callers here use, measuring 132 s at n = 300k against IVF's 4.1 s.
-//! Consumers that want it call `ann-search-rs` directly.
-//!
-//! ### High `k`
-//!
-//! Doublet detection runs at `k` in the low hundreds, an order of magnitude
-//! above the 5-30 of ordinary single-cell work. The upstream reducers only
-//! select by radix above `RADIX_SELECT_MIN_K`, keeping an insertion-sort arm
-//! below it whose shared memory is proportional to `k`. That leaves a trough
-//! in the exhaustive index roughly between `k` of 30 and 80, where it measured
-//! 0.88x to 0.92x against the CPU. IVF has no such threshold and its cost is
-//! flat in `k`.
-//!
-//! Requires `ann-search-rs` 0.5.1 or newer. Against 0.5.0, whose reducers
-//! maintained per-lane sorted lists, every GPU backend here was several times
-//! slower than the CPU search at these `k`.
+//! GPU-accelerated approximate nearest neighbour search for single cell data,
+//! specifically with Scrublet in mind. Due to high k needed, CAGRA has been
+//! excluded as this approach is better for low k situations.
 
 use ann_search_rs::{
     build_exhaustive_index_gpu, build_ivf_index_gpu, query_exhaustive_index_gpu_self,

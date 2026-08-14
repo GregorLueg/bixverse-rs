@@ -12,25 +12,6 @@
 //!
 //! HVG selection, doublet simulation, scoring and Otsu thresholding stay on
 //! the CPU and are reused unchanged from the CPU module.
-//!
-//! ### Measured
-//!
-//! At 6000 cells, 1500 genes, 451 HVGs, 30 PCs and `k` of 150 on an M1 Max,
-//! against the CPU pipeline: PCA 121 ms to 42 ms and the projection at 12 ms
-//! with no dense intermediate. The kNN stage needs `ann-search-rs` 0.5.1 or
-//! newer, where the GPU reducers select by radix rather than by maintaining
-//! per-lane sorted lists; against 0.5.0 the GPU kNN was several times slower
-//! than the CPU at this `k` and the default here was the CPU search.
-//!
-//! ### Why the projection is a sparse matmul
-//!
-//! The CPU path densifies the simulated doublets to `n_sim x n_hvg` f32 before
-//! the projection GEMM. That is ~330 MB at 15k cells and tens of GB at 1M, so
-//! it is a memory wall rather than a speed problem. The projection is
-//! `((X_sim - mu) / sigma) @ V`, which is exactly the form
-//! `launch_spmm_csr_forward` already evaluates: set `Omega = V / sigma`
-//! rowwise and `c = mu^T @ Omega` and the kernel's `Y = A @ Omega - 1 * c^T`
-//! is the projection, with no dense intermediate at all.
 
 use cubecl::prelude::*;
 use cubecl_utils_rs::prelude::*;
@@ -40,6 +21,7 @@ use rayon::prelude::*;
 use std::time::Instant;
 
 use crate::core::math::pca_svd::compute_pc_scores;
+use crate::core::math::{DEFAULT_N_POWER_ITERS_RAND_SVD, DEFAULT_OVERSAMPLING_RAND_SVD};
 use crate::gpu::linalg::sparse_gpu::GpuCompressedSparseData;
 use crate::gpu::linalg::sparse_rand_svd_gpu::{RandSvdGpuParams, randomised_sparse_svd_gpu};
 use crate::gpu::linalg::spmm::{launch_dense_column_weighted_sum, launch_spmm_csr_forward};
@@ -59,26 +41,7 @@ use crate::single_cell::sc_processing::utils_doublets::*;
 /// Floor applied to the per-gene standard deviations before they reach the
 /// GPU SVD, which documents strictly positive standard deviations as a caller
 /// obligation and does not enforce them itself.
-///
-/// This is headroom, not a divide-by-zero guard: `sparse_csc_column_stds`
-/// already ends in `.max(f64::EPSILON)`, so a zero-variance gene arrives as
-/// about 2.2e-16 rather than as a literal zero. The problem is that the
-/// reciprocal is folded into the random sketch and the GPU path is f32
-/// throughout, where the CPU one runs the SVD in f64. Amplifying by 4.5e15
-/// leaves a column one stray value away from overflowing to infinity, and lets
-/// a near-constant gene dominate the sketch it should contribute nothing to.
-/// Flooring at 1e-8 caps the amplification at 1e8 and keeps roughly seven
-/// orders of f32 headroom.
 const MIN_GENE_STD: f32 = 1e-8;
-
-/// Maximum oversampling for the randomised SVD, matching the CPU doublet path
-/// and `pca_on_sc_sparse_gpu`. Clamped further down on small inputs so the
-/// sketch cannot exceed the rank of the matrix.
-const MAX_OVERSAMPLING: usize = 100;
-
-/// Power iterations for the randomised SVD. Two is the sweet spot for single
-/// cell data; one is too few and three rarely helps.
-const N_POWER_ITERS: usize = 2;
 
 ////////////
 // Params //
@@ -138,49 +101,6 @@ pub struct ScrubletParamsGpu {
 }
 
 /// Nearest neighbour backend for GPU Scrublet.
-///
-/// Scrublet runs its kNN at a `k` an order of magnitude above ordinary
-/// single-cell work: `adjusted_k` scales the requested `k` by
-/// `1 + sim_doublet_ratio`, so a `k` of 50 becomes 150, capped at 250.
-///
-/// Measured on an M1 Max at dim = 30 against `ann-search-rs` 0.5.1, which
-/// selects the top `k` by radix select. Numbers are GPU-over-CPU-KmKnn
-/// speedups on a realistic embedding (decaying PC variance, overlapping
-/// power-law populations, trajectories):
-///
-/// | n | backend | k=15 | k=50 | k=150 | k=250 |
-/// |---|---|---|---|---|---|
-/// | 18k | exhaustive | 3.04x | 0.88x | 4.08x | 2.94x |
-/// | 18k | IVF | 1.27x | 1.42x | 1.67x | 1.79x |
-/// | 50k | exhaustive | 1.96x | 0.92x | 2.52x | 1.78x |
-/// | 50k | IVF | 2.15x | 2.43x | 2.66x | 2.80x |
-/// | 300k | exhaustive | | | 1.31x | |
-/// | 300k | IVF | | | **4.74x** | |
-///
-/// The default is [`ScrubletKnnBackend::Gpu`] with the exhaustive index, and
-/// the reason is exactness rather than speed. Read the table again: IVF is
-/// already the faster of the two at every `k` by n = 50k, so the crossover
-/// sits somewhere between 18k and 50k rows, not higher. Exhaustive is the
-/// default because it returns the true neighbours, and the doublet score is a
-/// *count* of simulated neighbours among the `k`, so a missed neighbour biases
-/// the score directly rather than merely blurring a graph the way it would in
-/// clustering.
-///
-/// The cost of that choice is visible: IVF recall falls as `k / n` grows,
-/// measuring 0.9954 at n = 18k with `k` = 15, down to 0.9525 at n = 18k with
-/// `k` = 250, and 0.9949 at n = 300k with `k` = 150. Anything above roughly a
-/// 1% miss rate is worth thinking about before trading it for wall-clock. Take
-/// IVF when the run is large enough that exhaustive is impractical, which by
-/// n = 300k is a 4.74x against 1.31x difference, and accept the bias.
-///
-/// Two caveats on the exhaustive arm. Its cost is quadratic in `n`, so it stops
-/// being an option well before a million rows. And it has a dip between `k` of
-/// roughly 30 and 80, where the upstream reducer keeps its insertion-sort arm
-/// below `RADIX_SELECT_MIN_K`: shared memory is proportional to `k` there and
-/// only two workgroups stay resident, measuring 0.88x to 0.92x against the CPU.
-/// **The shipped defaults land in that dip**: `k` of 15 with a
-/// `sim_doublet_ratio` of 2.0 gives an `adjusted_k` of 45. Raising `k` above 27
-/// clears it, as does moving to IVF or to the CPU.
 ///
 /// [`ScrubletKnnBackend::Cpu`] stays available for the exact CPU indices.
 #[derive(Clone, Debug)]
@@ -269,7 +189,7 @@ impl Default for ScrubletParamsGpu {
 /// The number of extra sketch columns to sample.
 fn resolve_oversampling(n_cells: usize, n_genes: usize, no_pcs: usize) -> usize {
     let max_s = std::cmp::min(n_cells, n_genes).saturating_sub(1);
-    std::cmp::min(MAX_OVERSAMPLING, max_s.saturating_sub(no_pcs))
+    std::cmp::min(DEFAULT_OVERSAMPLING_RAND_SVD, max_s.saturating_sub(no_pcs))
 }
 
 /// PCA of the observed cells on the GPU.
@@ -380,7 +300,7 @@ where
     let start_svd = Instant::now();
 
     let oversampling = resolve_oversampling(n_cells, n_genes, no_pcs);
-    let svd_params = RandSvdGpuParams::new(N_POWER_ITERS, oversampling);
+    let svd_params = RandSvdGpuParams::new(DEFAULT_N_POWER_ITERS_RAND_SVD, oversampling);
 
     let svd_res = randomised_sparse_svd_gpu::<R, f32, f32>(
         csc,
@@ -967,7 +887,10 @@ mod tests {
     #[test]
     fn test_resolve_oversampling_clamps_on_small_inputs() {
         // Plenty of room: the constant ceiling applies.
-        assert_eq!(resolve_oversampling(10_000, 3_000, 30), MAX_OVERSAMPLING);
+        assert_eq!(
+            resolve_oversampling(10_000, 3_000, 30),
+            DEFAULT_OVERSAMPLING_RAND_SVD
+        );
 
         // Rank-limited: 20 genes, 30 PCs requested, nothing left to sample.
         assert_eq!(resolve_oversampling(10_000, 20, 30), 0);
