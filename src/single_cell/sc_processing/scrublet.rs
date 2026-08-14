@@ -27,7 +27,7 @@ use crate::single_cell::sc_processing::utils_doublets::*;
 /// * `1` - Standard errors for observed cell scores.
 /// * `2` - Doublet scores for simulated doublets.
 /// * `3` - Standard errors for simulated doublet scores.
-type ScrubletDoubletScores = (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>);
+pub type ScrubletDoubletScores = (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>);
 
 /// Final return type from `run_scrublet`.
 ///
@@ -437,9 +437,8 @@ impl<'a, S: SingleCellReading> Scrublet<'a, S> {
 
     /// Calculate Bayesian doublet scores from the kNN graph.
     ///
-    /// For each cell (observed and simulated), computes the doublet probability
-    /// based on the fraction of simulated neighbours, adjusted for the expected
-    /// doublet rate and simulation ratio.
+    /// Delegates to the free `calculate_doublet_scores`, taking the cell counts,
+    /// the adjusted `k` and the rate priors from `self`.
     ///
     /// ### Params
     ///
@@ -450,49 +449,22 @@ impl<'a, S: SingleCellReading> Scrublet<'a, S> {
     ///
     /// `ScrubletDoubletScores`: (obs_scores, obs_errors, sim_scores, sim_errors).
     fn calculate_doublet_scores(&self, knn_indices: &[Vec<usize>]) -> ScrubletDoubletScores {
-        let n_obs = self.n_cells;
-        let n_sim = self.n_cells_sim;
-
-        let r = n_sim as f32 / n_obs as f32;
-        let rho = self.params.expected_doublet_rate;
-        let se_rho = self.params.stdev_doublet_rate;
-
         let k_adj = adjusted_k(self.params.knn_params.k, self.n_cells, self.n_cells_sim);
-        let n_adj = k_adj as f32;
-
-        let scores_errors: Vec<(f32, f32)> = knn_indices
-            .par_iter()
-            .map(|neighbours| {
-                let n_sim_neigh = neighbours.iter().filter(|&&idx| idx >= n_obs).count() as f32;
-                let q = (n_sim_neigh + 1.0) / (n_adj + 2.0);
-                let denominator = 1.0 - rho - q * (1.0 - rho - rho / r);
-                let score = if denominator.abs() > 1e-10 {
-                    (q * rho / r) / denominator
-                } else {
-                    0.0
-                };
-
-                let se_q = (q * (1.0 - q) / (n_adj + 3.0)).sqrt();
-                let factor = q * rho / r / (denominator * denominator);
-                let se_score = factor
-                    * ((se_q / q * (1.0 - rho)).powi(2) + (se_rho / rho * (1.0 - q)).powi(2))
-                        .sqrt();
-
-                (score.max(0.0), se_score.max(1e-10))
-            })
-            .collect();
-
-        let (scores_obs, errors_obs): (Vec<f32>, Vec<f32>) =
-            scores_errors[..n_obs].iter().copied().unzip();
-        let (scores_sim, errors_sim): (Vec<f32>, Vec<f32>) =
-            scores_errors[n_obs..].iter().copied().unzip();
-
-        (scores_obs, errors_obs, scores_sim, errors_sim)
+        calculate_doublet_scores(
+            knn_indices,
+            self.n_cells,
+            self.n_cells_sim,
+            k_adj,
+            self.params.expected_doublet_rate,
+            self.params.stdev_doublet_rate,
+        )
     }
 
     /// Threshold doublet scores and produce final predictions.
     ///
-    /// Uses `find_threshold_otsu` if no manual threshold is provided.
+    /// Delegates to the free `call_doublets`, taking the expected doublet rate
+    /// from `self`. Uses `find_threshold_otsu` if no manual threshold is
+    /// provided.
     ///
     /// ### Params
     ///
@@ -512,68 +484,166 @@ impl<'a, S: SingleCellReading> Scrublet<'a, S> {
         n_bins: usize,
         verbose: usize,
     ) -> ScrubletResult {
-        let verbosity = parse_verbosity_level(verbose);
+        call_doublets(
+            doublet_scores,
+            manual_threshold,
+            n_bins,
+            self.params.expected_doublet_rate,
+            verbose,
+        )
+    }
+}
 
-        let threshold = manual_threshold.unwrap_or_else(|| {
-            let t = find_threshold_otsu(&doublet_scores.0, n_bins);
-            if verbosity.normal_verbosity() {
-                println!("Automatically set threshold at doublet score = {:.4}", t);
-            }
-            t
-        });
+//////////////////////////
+// Scoring and calling  //
+//////////////////////////
 
-        let predicted_doublets: Vec<bool> = doublet_scores
-            .0
-            .iter()
-            .map(|&score| score > threshold)
-            .collect();
+/// Calculate Bayesian doublet scores from the kNN graph.
+///
+/// For each cell (observed and simulated), computes the doublet probability
+/// based on the fraction of simulated neighbours, adjusted for the expected
+/// doublet rate and simulation ratio. Free-standing so both the CPU
+/// [`Scrublet`] driver and the GPU driver can share it.
+///
+/// ### Params
+///
+/// * `knn_indices` - kNN graph over the combined embedding, observed cells
+///   first. Indices at or above `n_obs` are simulated doublets.
+/// * `n_obs` - Number of observed cells.
+/// * `n_sim` - Number of simulated doublets.
+/// * `k_adj` - Neighbour count actually used, i.e. the output of
+///   [`adjusted_k`].
+/// * `expected_doublet_rate` - Prior doublet rate `rho`.
+/// * `stdev_doublet_rate` - Uncertainty on `rho`.
+///
+/// ### Returns
+///
+/// `ScrubletDoubletScores`: (obs_scores, obs_errors, sim_scores, sim_errors).
+pub fn calculate_doublet_scores(
+    knn_indices: &[Vec<usize>],
+    n_obs: usize,
+    n_sim: usize,
+    k_adj: usize,
+    expected_doublet_rate: f32,
+    stdev_doublet_rate: f32,
+) -> ScrubletDoubletScores {
+    let r = n_sim as f32 / n_obs as f32;
+    let rho = expected_doublet_rate;
+    let se_rho = stdev_doublet_rate;
+    let n_adj = k_adj as f32;
 
-        let z_scores: Vec<f32> = doublet_scores
-            .0
-            .iter()
-            .zip(doublet_scores.1.iter())
-            .map(|(&score, &error)| (score - threshold) / error)
-            .collect();
+    let scores_errors: Vec<(f32, f32)> = knn_indices
+        .par_iter()
+        .map(|neighbours| {
+            let n_sim_neigh = neighbours.iter().filter(|&&idx| idx >= n_obs).count() as f32;
+            let q = (n_sim_neigh + 1.0) / (n_adj + 2.0);
+            let denominator = 1.0 - rho - q * (1.0 - rho - rho / r);
+            let score = if denominator.abs() > 1e-10 {
+                (q * rho / r) / denominator
+            } else {
+                0.0
+            };
 
-        let n_detected = predicted_doublets.iter().filter(|&&x| x).count();
-        let detected_doublet_rate = n_detected as f32 / doublet_scores.0.len() as f32;
+            let se_q = (q * (1.0 - q) / (n_adj + 3.0)).sqrt();
+            let factor = q * rho / r / (denominator * denominator);
+            let se_score = factor
+                * ((se_q / q * (1.0 - rho)).powi(2) + (se_rho / rho * (1.0 - q)).powi(2)).sqrt();
 
-        let n_detectable = doublet_scores.2.iter().filter(|&&s| s > threshold).count();
-        let detectable_doublet_fraction = n_detectable as f32 / doublet_scores.2.len() as f32;
+            (score.max(0.0), se_score.max(1e-10))
+        })
+        .collect();
 
-        let overall_doublet_rate = if detectable_doublet_fraction > 0.01 {
-            detected_doublet_rate / detectable_doublet_fraction
-        } else {
-            0.0
-        };
+    let (scores_obs, errors_obs): (Vec<f32>, Vec<f32>) =
+        scores_errors[..n_obs].iter().copied().unzip();
+    let (scores_sim, errors_sim): (Vec<f32>, Vec<f32>) =
+        scores_errors[n_obs..].iter().copied().unzip();
 
+    (scores_obs, errors_obs, scores_sim, errors_sim)
+}
+
+/// Threshold doublet scores and produce final predictions.
+///
+/// Uses [`find_threshold_otsu`] if no manual threshold is provided. Free-standing
+/// so both the CPU [`Scrublet`] driver and the GPU driver can share it.
+///
+/// ### Params
+///
+/// * `doublet_scores` - Output from [`calculate_doublet_scores`].
+/// * `manual_threshold` - Optional override for the automatic threshold.
+/// * `n_bins` - Number of bins for the Otsu histogram.
+/// * `expected_doublet_rate` - Prior doublet rate, reported for comparison
+///   against the estimate.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
+///   detailed verbosity.
+///
+/// ### Returns
+///
+/// `ScrubletResult` with predictions, scores and diagnostics.
+pub fn call_doublets(
+    doublet_scores: ScrubletDoubletScores,
+    manual_threshold: Option<f32>,
+    n_bins: usize,
+    expected_doublet_rate: f32,
+    verbose: usize,
+) -> ScrubletResult {
+    let verbosity = parse_verbosity_level(verbose);
+
+    let threshold = manual_threshold.unwrap_or_else(|| {
+        let t = find_threshold_otsu(&doublet_scores.0, n_bins);
         if verbosity.normal_verbosity() {
-            println!(
-                "Detected doublet rate = {:.1}%",
-                100.0 * detected_doublet_rate
-            );
-            println!(
-                "Estimated detectable doublet fraction = {:.1}%",
-                100.0 * detectable_doublet_fraction
-            );
-            println!("Overall doublet rate:");
-            println!(
-                "  Expected  = {:.1}%",
-                100.0 * self.params.expected_doublet_rate
-            );
-            println!("  Estimated = {:.1}%", 100.0 * overall_doublet_rate);
+            println!("Automatically set threshold at doublet score = {:.4}", t);
         }
+        t
+    });
 
-        ScrubletResult {
-            predicted_doublets,
-            doublet_scores_obs: doublet_scores.0,
-            doublet_scores_sim: doublet_scores.2,
-            doublet_errors_obs: doublet_scores.1,
-            z_scores,
-            threshold,
-            detected_doublet_rate,
-            detectable_doublet_fraction,
-            overall_doublet_rate,
-        }
+    let predicted_doublets: Vec<bool> = doublet_scores
+        .0
+        .iter()
+        .map(|&score| score > threshold)
+        .collect();
+
+    let z_scores: Vec<f32> = doublet_scores
+        .0
+        .iter()
+        .zip(doublet_scores.1.iter())
+        .map(|(&score, &error)| (score - threshold) / error)
+        .collect();
+
+    let n_detected = predicted_doublets.iter().filter(|&&x| x).count();
+    let detected_doublet_rate = n_detected as f32 / doublet_scores.0.len() as f32;
+
+    let n_detectable = doublet_scores.2.iter().filter(|&&s| s > threshold).count();
+    let detectable_doublet_fraction = n_detectable as f32 / doublet_scores.2.len() as f32;
+
+    let overall_doublet_rate = if detectable_doublet_fraction > 0.01 {
+        detected_doublet_rate / detectable_doublet_fraction
+    } else {
+        0.0
+    };
+
+    if verbosity.normal_verbosity() {
+        println!(
+            "Detected doublet rate = {:.1}%",
+            100.0 * detected_doublet_rate
+        );
+        println!(
+            "Estimated detectable doublet fraction = {:.1}%",
+            100.0 * detectable_doublet_fraction
+        );
+        println!("Overall doublet rate:");
+        println!("  Expected  = {:.1}%", 100.0 * expected_doublet_rate);
+        println!("  Estimated = {:.1}%", 100.0 * overall_doublet_rate);
+    }
+
+    ScrubletResult {
+        predicted_doublets,
+        doublet_scores_obs: doublet_scores.0,
+        doublet_scores_sim: doublet_scores.2,
+        doublet_errors_obs: doublet_scores.1,
+        z_scores,
+        threshold,
+        detected_doublet_rate,
+        detectable_doublet_fraction,
+        overall_doublet_rate,
     }
 }
