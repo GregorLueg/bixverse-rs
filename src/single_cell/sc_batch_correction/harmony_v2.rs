@@ -983,7 +983,7 @@ pub fn harmony_v2_with_state(
     let mut y = run_kmeans_cosine(
         z_cos.as_ref(),
         params.k,
-        params.kmeans_params.clone(),
+        params.kmeans_params,
         seed,
         verbose,
     )?;

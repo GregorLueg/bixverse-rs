@@ -3,6 +3,9 @@
 
 #![allow(missing_docs)]
 
+use ann_search_rs::gpu::k_means_gpu::{
+    KMeansGpuParams, build_csr_gpu_privatised, k_means_clusters_gpu,
+};
 use cubecl::prelude::*;
 use cubecl_utils_rs::prelude::*;
 use cubek::matmul::definition::MatmulPrecision;
@@ -12,7 +15,6 @@ use std::time::Instant;
 
 use crate::gpu::linalg::cholesky_gpu::dense_gemm;
 use crate::gpu::linalg::spmm::launch_dense_column_sum;
-use crate::gpu::ml::k_means_gpu::*;
 use crate::gpu::sc_gpu::kernels::harmony_kernels::*;
 use crate::gpu::{WORKGROUP_64, WORKGROUP_512};
 use crate::prelude::*;

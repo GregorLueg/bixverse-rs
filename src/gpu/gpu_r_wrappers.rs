@@ -1,9 +1,9 @@
 //! Contains R-specific functions for GPU-accelerated parts of this crate.
 
+use ann_search_rs::gpu::k_means_gpu::KMeansGpuParams;
 use extendr_api::*;
 use std::collections::HashMap;
 
-use crate::gpu::ml::k_means_gpu::KMeansGpuParams;
 #[cfg(feature = "single-cell")]
 use crate::gpu::sc_gpu::fast_clusters_gpu::FastLouvainParamsGpu;
 #[cfg(feature = "single-cell")]
@@ -23,7 +23,11 @@ use crate::utils::r_rust_interface::{r_list_count, r_list_count_allow_zero};
 // KMeansGpuParams //
 /////////////////////
 
-impl KMeansGpuParams {
+/// R-list parsing for [KMeansGpuParams].
+///
+/// A trait rather than an inherent impl because [KMeansGpuParams] is defined in
+/// `ann-search-rs`.
+pub trait KMeansGpuParamsFromR: Sized {
     /// Parse the [KMeansGpuParams] from a list
     ///
     /// ### Params
@@ -33,7 +37,12 @@ impl KMeansGpuParams {
     /// ### Returns
     ///
     /// The [KMeansGpuParams] populated by the R list.
-    pub fn from_r_list(r_list: List) -> Result<Self> {
+    fn from_r_list(r_list: List) -> Result<Self>;
+}
+
+/// [KMeansGpuParamsFromR] implementation
+impl KMeansGpuParamsFromR for KMeansGpuParams {
+    fn from_r_list(r_list: List) -> Result<Self> {
         let params_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
         let iters = params_list

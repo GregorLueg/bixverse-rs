@@ -51,18 +51,8 @@ pub fn parse_k_means(s: &str) -> Option<KMeansType> {
 /// ### Fields
 ///
 /// `0` - The [KMeansTrainingParams].
+#[derive(Clone, Copy)]
 pub struct KMeansParamsWrappers(KMeansTrainingParams);
-
-/// Clone implementation
-impl Clone for KMeansParamsWrappers {
-    fn clone(&self) -> Self {
-        Self(KMeansTrainingParams {
-            iters: self.0.iters,
-            init: self.0.init,
-            path: self.0.path,
-        })
-    }
-}
 
 impl KMeansParamsWrappers {
     /// Generate a wrapped instance around the k-means clustering
@@ -146,6 +136,7 @@ impl std::fmt::Debug for KMeansParamsWrappers {
             .field("iters", &self.0.iters)
             .field("init", &self.0.init)
             .field("path", &self.0.path)
+            .field("balanced", &self.0.balanced)
             .finish()
     }
 }

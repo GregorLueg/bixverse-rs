@@ -1,14 +1,14 @@
 //! GPU-accelerated version of the fast Louvain clustering pipeline.
 //!
 //! Only stage one changes: the k-means coarsening runs on the device via
-//! [`k_means_clusters_gpu`]. The centroid kNN, the optional sNN pass and the
-//! Louvain runs all reuse the CPU stages from
+//! [`ann_search_rs::gpu::k_means_gpu::k_means_clusters_gpu`]. The centroid kNN,
+//! the optional sNN pass and the Louvain runs all reuse the CPU stages from
 //! [`crate::single_cell::sc_analysis::fast_clusters`].
 
+use ann_search_rs::gpu::k_means_gpu::{KMeansGpuParams, k_means_clusters_gpu};
 use cubecl::prelude::*;
 use faer::MatRef;
 
-use crate::gpu::ml::k_means_gpu::{KMeansGpuParams, k_means_clusters_gpu};
 use crate::prelude::*;
 use crate::single_cell::sc_analysis::fast_clusters::*;
 use crate::single_cell::sc_processing::knn::KnnParams;
@@ -139,7 +139,7 @@ pub fn fast_cluster_kmeans_gpu<R: Runtime>(
     let verbosity = parse_verbosity_level(verbose);
     let n_centroids = params.n_centroids.min(data.nrows() - 1);
 
-    k_means_clusters_gpu::<f32, R>(
+    Ok(k_means_clusters_gpu::<f32, R>(
         data,
         &params.knn_params.ann_dist,
         n_centroids,
@@ -147,7 +147,7 @@ pub fn fast_cluster_kmeans_gpu<R: Runtime>(
         seed,
         device,
         verbosity.detailed_verbosity(),
-    )
+    )?)
 }
 
 //////////
