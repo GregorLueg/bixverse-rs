@@ -21,7 +21,7 @@ use rayon::prelude::*;
 use std::time::Instant;
 
 use crate::core::math::pca_svd::compute_pc_scores;
-use crate::core::math::{DEFAULT_N_POWER_ITERS_RAND_SVD, DEFAULT_OVERSAMPLING_RAND_SVD};
+use crate::core::math::{DEFAULT_N_POWER_ITERS_RAND_SVD, MAX_OVERSAMPLING_SINGLE_CELL};
 use crate::gpu::linalg::sparse_gpu::GpuCompressedSparseData;
 use crate::gpu::linalg::sparse_rand_svd_gpu::{RandSvdGpuParams, randomised_sparse_svd_gpu};
 use crate::gpu::linalg::spmm::{launch_dense_column_weighted_sum, launch_spmm_csr_forward};
@@ -175,8 +175,9 @@ impl Default for ScrubletParamsGpu {
 /// Resolve the oversampling for the randomised SVD.
 ///
 /// Clamped against the rank of the matrix so a degenerate input (few cells or
-/// few HVGs) cannot ask for a sketch wider than the data supports. The CPU
-/// doublet path hardcodes 100, which can exceed the rank on small inputs.
+/// few HVGs) cannot ask for a sketch wider than the data supports.
+/// [MAX_OVERSAMPLING_SINGLE_CELL] is what the CPU doublet path asks for, and it
+/// can exceed the rank on small inputs.
 ///
 /// ### Params
 ///
@@ -189,7 +190,7 @@ impl Default for ScrubletParamsGpu {
 /// The number of extra sketch columns to sample.
 fn resolve_oversampling(n_cells: usize, n_genes: usize, no_pcs: usize) -> usize {
     let max_s = std::cmp::min(n_cells, n_genes).saturating_sub(1);
-    std::cmp::min(DEFAULT_OVERSAMPLING_RAND_SVD, max_s.saturating_sub(no_pcs))
+    std::cmp::min(MAX_OVERSAMPLING_SINGLE_CELL, max_s.saturating_sub(no_pcs))
 }
 
 /// PCA of the observed cells on the GPU.
@@ -689,7 +690,11 @@ mod tests {
 
     const TEST_CELLS: usize = 600;
     const TEST_GENES: usize = 150;
-    const TEST_PCS: usize = 10;
+    /// The fixture's three cell types span two real components; everything
+    /// below sits in a flat noise floor where any two SVDs disagree on
+    /// arbitrary directions. Keep this small enough that every retained PC is
+    /// signal, or the CPU/GPU parity gate measures the noise subspace.
+    const TEST_PCS: usize = 5;
 
     fn try_device() -> Option<WgpuDevice> {
         let device = WgpuDevice::DefaultDevice;
@@ -886,11 +891,11 @@ mod tests {
     /// sketch is wider than the matrix.
     #[test]
     fn test_resolve_oversampling_clamps_on_small_inputs() {
-        // Plenty of room: the constant ceiling applies.
-        assert_eq!(
-            resolve_oversampling(10_000, 3_000, 30),
-            DEFAULT_OVERSAMPLING_RAND_SVD
-        );
+        // Plenty of room: the constant ceiling applies. Spelled as a literal
+        // rather than the const, so swapping the const out changes the expected
+        // value here instead of silently agreeing with itself. That is exactly
+        // how the ceiling once dropped to 10 without this test noticing.
+        assert_eq!(resolve_oversampling(10_000, 3_000, 30), 100);
 
         // Rank-limited: 20 genes, 30 PCs requested, nothing left to sample.
         assert_eq!(resolve_oversampling(10_000, 20, 30), 0);

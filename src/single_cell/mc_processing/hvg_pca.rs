@@ -7,6 +7,7 @@ use std::borrow::Cow;
 
 use crate::core::base::info::parse_bin_strategy_type;
 use crate::core::base::loess::LoessRegression;
+use crate::core::math::MAX_OVERSAMPLING_SINGLE_CELL;
 use crate::core::math::pca_svd::*;
 use crate::prelude::*;
 use crate::single_cell::sc_processing::hvg::*;
@@ -721,8 +722,13 @@ pub fn pca_on_metacells<T: BixverseNumeric>(
     let scaled = MatRef::<f64>::from_column_major_slice(&buffer, n_cells, n_genes);
 
     let (scores, loadings, s) = if params_pca.randomised {
-        let res: RandomSvdResults<f64> =
-            randomised_svd(scaled, no_pcs, seed, Some(100_usize), None)?;
+        let res: RandomSvdResults<f64> = randomised_svd(
+            scaled,
+            no_pcs,
+            seed,
+            Some(MAX_OVERSAMPLING_SINGLE_CELL),
+            None,
+        )?;
         let loadings = Mat::<f32>::from_fn(n_genes, no_pcs, |i, j| res.v[(i, j)] as f32);
         let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| (res.u[(i, j)] * res.s[j]) as f32);
         let s: Vec<f32> = res.s[..no_pcs].iter().map(|&x| x as f32).collect();

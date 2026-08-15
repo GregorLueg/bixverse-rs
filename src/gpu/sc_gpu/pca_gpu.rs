@@ -9,6 +9,7 @@ use rayon::prelude::*;
 use std::time::Instant;
 
 use crate::core::math::pca_svd::*;
+use crate::core::math::{DEFAULT_N_POWER_ITERS_RAND_SVD, MAX_OVERSAMPLING_SINGLE_CELL};
 use crate::gpu::linalg::sparse_rand_svd_gpu::{RandSvdGpuParams, randomised_sparse_svd_gpu};
 use crate::prelude::*;
 use crate::single_cell::sc_processing::pca::SingleCellPcaParams;
@@ -142,8 +143,8 @@ where
 
     // safe guard against degenerate cases
     let max_s = std::cmp::min(cell_indices.len(), gene_indices.len()).saturating_sub(1);
-    let oversampling = std::cmp::min(100, max_s.saturating_sub(no_pcs));
-    let svd_params = RandSvdGpuParams::new(2, oversampling);
+    let oversampling = std::cmp::min(MAX_OVERSAMPLING_SINGLE_CELL, max_s.saturating_sub(no_pcs));
+    let svd_params = RandSvdGpuParams::new(DEFAULT_N_POWER_ITERS_RAND_SVD, oversampling);
 
     let svd_res = randomised_sparse_svd_gpu::<R, f32, f32>(
         csc,
