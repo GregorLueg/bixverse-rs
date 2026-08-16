@@ -1,12 +1,19 @@
 [package]
 name = "bixverse-rs"
-version = "0.4.3"
+version = "0.4.4"
 edition = "2024"
 authors = ["Gregor Lueg <gregorlueg@me.com>"]
 license = "MIT"
 repository = "https://github.com/GregorLueg/bixverse-rs"
 description = "A Rust library with various utilities for computational biology and single cell."
-categories = ["science"]
+categories = [
+  "science::computational-biology",
+  "science::bioinformatics",
+  "science::computational-biology::systems-biology",
+  "mathematics",
+  "algorithms",
+]
+keywords = ["bioinformatics", "single-cell", "genomics", "statistics", "gpu"]
 
 [lib]
 name = "bixverse_rs"
@@ -29,7 +36,7 @@ large_scale_diagnostics = []
 ## Enables multi-modal single cell analysis (requires single-cell)
 multi-modal = ["single-cell"]
 ## Enable GPU-accelerated algorithms and methods
-gpu = ["cubecl", "cubecl-utils-rs", "half", "cubek"]
+gpu = ["ann-search-rs/gpu", "cubecl", "cubecl-utils-rs", "half", "cubek"]
 
 #####################
 # Compilation flags #
@@ -46,7 +53,7 @@ codegen-units = 4
 
 [dependencies]
 approx = "0.5.1"
-ann-search-rs = { version = "0.5.0" }
+ann-search-rs = { version = "0.5.2" }
 bincode = { version = "2.0.1", features = ["serde"], optional = true }
 cubecl = { version = "0.10.0", features = ["wgpu", "cpu"], optional = true }
 cubecl-utils-rs = { version = "0.1.0", optional = true }
@@ -100,11 +107,6 @@ required-features = ["single-cell"]
 name = "seacells_gpu_bench"
 harness = false
 required-features = ["gpu", "single-cell"]
-
-[[bench]]
-name = "gpu_k_means_bench"
-harness = false
-required-features = ["gpu"]
 
 [[bench]]
 name = "gpu_sparse_svd_bench"

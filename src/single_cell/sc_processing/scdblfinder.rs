@@ -1375,7 +1375,7 @@ impl<'a, S: SingleCellReading> ScDblFinder<'a, S> {
                 knn_params: centroid_knn_params,
                 louvain_iters: self.params.cluster_iters,
                 batch_size: self.params.fast_cluster_params.batch_size,
-                kmeans_params: self.params.fast_cluster_params.kmeans_params.clone(),
+                kmeans_params: self.params.fast_cluster_params.kmeans_params,
                 ..Default::default()
             };
             if verbosity.normal_verbosity() {

@@ -270,7 +270,7 @@ where
     ///
     /// The [KMeansParamsWrappers]
     pub fn get_kmeans_params(&self) -> KMeansParamsWrappers {
-        self.kmeans_params.clone()
+        self.kmeans_params
     }
 }
 
@@ -401,7 +401,7 @@ pub fn fast_cluster_kmeans(
             data,
             &params.knn_params.ann_dist,
             n_centroids,
-            params.kmeans_params.clone().get_data().iters,
+            params.kmeans_params.get_data().iters,
             params.batch_size,
             params.drift_threshold,
             params.lr_alpha,

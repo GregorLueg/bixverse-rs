@@ -9,6 +9,7 @@ use indexmap::IndexSet;
 use rayon::prelude::*;
 use std::time::Instant;
 
+use crate::core::math::MAX_OVERSAMPLING_SINGLE_CELL;
 use crate::core::math::pca_svd::randomised_sparse_svd;
 use crate::core::math::pca_svd::*;
 use crate::core::math::sparse::sparse_svd_lanczos;
@@ -563,8 +564,13 @@ fn dense_pca<S: SingleCellReading>(
     let start_svd = Instant::now();
 
     let (scores, loadings, s) = if params_pca.randomised {
-        let res: RandomSvdResults<f64> =
-            randomised_svd(scaled_f64.as_ref(), no_pcs, seed, Some(100_usize), None)?;
+        let res: RandomSvdResults<f64> = randomised_svd(
+            scaled_f64.as_ref(),
+            no_pcs,
+            seed,
+            Some(MAX_OVERSAMPLING_SINGLE_CELL),
+            None,
+        )?;
         let loadings = Mat::<f32>::from_fn(num_genes, no_pcs, |i, j| res.v[(i, j)] as f32);
         let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| (res.u[(i, j)] * res.s[j]) as f32);
         let s: Vec<f32> = res.s[..no_pcs].iter().map(|&x| x as f32).collect();
@@ -848,8 +854,13 @@ pub fn pca_on_sc_streaming<S: SingleCellReading>(
     let start_svd = Instant::now();
 
     let (scores, loadings, s) = if params_pca.randomised {
-        let res: RandomSvdResults<f64> =
-            randomised_svd(scaled_matrix.as_ref(), no_pcs, seed, Some(100_usize), None)?;
+        let res: RandomSvdResults<f64> = randomised_svd(
+            scaled_matrix.as_ref(),
+            no_pcs,
+            seed,
+            Some(MAX_OVERSAMPLING_SINGLE_CELL),
+            None,
+        )?;
         let loadings = Mat::<f32>::from_fn(n_genes, no_pcs, |i, j| res.v[(i, j)] as f32);
         let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| (res.u[(i, j)] * res.s[j]) as f32);
         let s: Vec<f32> = res.s[..no_pcs].iter().map(|&x| x as f32).collect();
@@ -991,7 +1002,7 @@ fn sparse_pca<S: SingleCellReading>(
             no_pcs,
             seed as u64,
             true,
-            Some(100_usize),
+            Some(MAX_OVERSAMPLING_SINGLE_CELL),
             None,
             Some(&col_means),
             Some(&col_stds),

@@ -454,9 +454,13 @@ impl ScrubletParams {
             .and_then(|v| v.as_real())
             .unwrap_or(0.02) as f32;
 
-        // Doublet calling parameters
+        // Doublet calling parameters. `params_scrublet()` emits
+        // `n_bins_histogram`; `n_bins_hist` is the Rust field name and stays
+        // accepted for hand-built lists. Reading only the latter, as this did,
+        // meant the user's bin count never reached the Otsu histogram.
         let n_bins_hist = scrublet_list
-            .get("n_bins_hist")
+            .get("n_bins_histogram")
+            .or_else(|| scrublet_list.get("n_bins_hist"))
             .and_then(|v| v.as_integer())
             .unwrap_or(50) as usize;
 

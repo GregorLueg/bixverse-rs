@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 The user also maintains two upstream crates, both with local checkouts:
 
-- [`ann-search-rs`](https://crates.io/crates/ann-search-rs) (`~/repos/shared/ann-search-rs`), a vector-search crate for the same computational-biology use cases. `bixverse-rs` reuses its **CPU** side: SIMD primitives, distance metrics (`ann_search_rs::utils::dist::Dist`), kNN search, and k-means clustering (`build_csr_layout`, etc.). Nothing GPU comes from here any more.
+- [`ann-search-rs`](https://crates.io/crates/ann-search-rs) (`~/repos/shared/ann-search-rs`), a vector-search crate for the same computational-biology use cases. `bixverse-rs` reuses its SIMD primitives, distance metrics (`ann_search_rs::utils::dist::Dist`), kNN search, CPU k-means (`build_csr_layout`, etc.) and, since 0.5.2, the whole GPU k-means (`ann_search_rs::gpu::k_means_gpu`: `k_means_clusters_gpu`, `build_csr_gpu_privatised`, `segmented_update`, `KMeansGpuParams`). There is no local GPU k-means any more.
 - [`cubecl-utils-rs`](https://crates.io/crates/cubecl-utils-rs) (`~/repos/shared/cubecl-utils-rs`), the GPU primitives layer: `GpuTensor`, `GpuLimits`, `grid_2d`, `checked_cube_count`, `fits_binding`, `fits_shared_memory`, `plane_uniform` / `plane_partitions`, `resolve_workgroup_size`, `LINE_SIZE`, `pad_vectors`, `CubeclFloat`. Import it as `use cubecl_utils_rs::prelude::*;`.
 
 `ann-search-rs` depends on `cubecl-utils-rs` too, so both sides of the diamond must resolve to one copy of `GpuTensor` or nothing typechecks across the boundary.
@@ -19,7 +19,7 @@ Everything in `cubecl-utils-rs` except `GpuLimits::from_client` and the `GpuTens
 
 When a task looks like it wants a new SIMD kernel, distance metric, kNN structure or k-means variant, check `ann-search-rs` first; for a new tensor, grid, device-limit or workgroup-sizing helper, check `cubecl-utils-rs`. The code may already exist and just need exposing. Bug fixes to those primitives belong upstream, not here.
 
-While `ann-search-rs` 0.5.0 is unpublished it is a path dependency (`../ann-search-rs`). Building from a git worktree needs a symlink at `.claude/worktrees/ann-search-rs`; swap the manifest to a plain version pin once 0.5.0 is on crates.io.
+`ann-search-rs` is pinned at 0.5.2. While that version is unpublished the manifest carries a `[patch.crates-io]` block redirecting it to the local checkout (`~/repos/shared/ann-search-rs`); delete the block once 0.5.2 is on crates.io.
 
 ## Feature flags
 
@@ -28,7 +28,7 @@ Feature flags gate large chunks of the crate. Match your `cargo` invocations to 
 - default (no features): pure Rust bulk / statistics / graph / enrichment code
 - `single-cell`: enables the `single_cell` module and pulls in `hdf5`, `ndarray`, `memmap2`, `lz4_flex`, `bincode`, `indexmap`, `half`
 - `multi-modal`: enables `single_cell::multi_modal` (implies `single-cell`)
-- `gpu`: enables the `gpu` module, `cubecl` (wgpu + cpu backends), `cubecl-utils-rs`, `cubek` and `half`
+- `gpu`: enables the `gpu` module, `cubecl` (wgpu + cpu backends), `cubecl-utils-rs`, `cubek`, `half` and the `gpu` feature of `ann-search-rs` (its GPU kNN indices)
 - `large-test`: slow but asserting tests. The GPU parity gates and the large-scale numerical checks. These can fail, so they are worth running on a schedule. No CI job enables it yet
 - `large_scale_diagnostics`: development-only. Gates the unasserted diagnostic sweeps that print tables for a human to read. They cannot fail, so running them in CI buys nothing
 
@@ -58,8 +58,8 @@ cargo test --features single-cell,multi-modal -- test_name_substring
 cargo fmt
 cargo clippy --features single-cell,multi-modal --all-targets
 
-# Benches (GPU k-means bench requires the gpu feature)
-cargo bench --features gpu --bench gpu_k_means_bench
+# Benches (the GPU ones require the gpu feature)
+cargo bench --features gpu --bench gpu_corr_bench
 
 # Docs: docs.rs builds with single-cell + multi-modal
 cargo doc --features single-cell,multi-modal --open
@@ -81,7 +81,7 @@ Top-level modules:
 - `ontology/`: GO Elim algorithm and semantic similarity
 - `utils/`: SIMD wrappers (`wide` via `BixverseSimd`), matrix helpers, traits, R↔Rust conversion (`r_rust_interface.rs`), heap structures, assertion macros
 - `single_cell/` (feature): sc/mc data I/O (h5ad, 10x h5, mtx, bixverse binary format), processing, kNN, batch correction (Harmony), annotation (scType), analysis (Hotspot, MELD, SEACells, MetaCells2), multi-modal (WNN)
-- `gpu/` (feature): GPU kernels via `cubecl`/`cubek`, sparse randomised SVD, sparse GEMM, correlation, Cholesky, Harmony, PCA, k-means
+- `gpu/` (feature): GPU kernels via `cubecl`/`cubek`, sparse randomised SVD, sparse GEMM, correlation, Cholesky, Harmony, PCA. K-means comes from `ann-search-rs`
 
 `prelude.rs` re-exports the most-used types (errors, sparse structures, `SparseGraph`, matrix/vector utils, SIMD trait, assertion macros). Prefer `use crate::prelude::*;` in new modules over deep imports.
 

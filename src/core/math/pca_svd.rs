@@ -222,9 +222,9 @@ where
     })
 }
 
-///////////////////////////////////
-// Matrix-free randomised SVD    //
-///////////////////////////////////
+////////////////////////////////
+// Matrix-free randomised SVD //
+////////////////////////////////
 
 /// Randomised SVD for a linear operator `M` defined only through its
 /// matrix-vector product closures. Used by anchor-based batch correction

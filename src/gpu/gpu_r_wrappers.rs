@@ -1,23 +1,33 @@
 //! Contains R-specific functions for GPU-accelerated parts of this crate.
 
+use ann_search_rs::gpu::k_means_gpu::KMeansGpuParams;
 use extendr_api::*;
 use std::collections::HashMap;
 
-use crate::gpu::ml::k_means_gpu::KMeansGpuParams;
 #[cfg(feature = "single-cell")]
 use crate::gpu::sc_gpu::fast_clusters_gpu::FastLouvainParamsGpu;
 #[cfg(feature = "single-cell")]
 use crate::gpu::sc_gpu::harmony_gpu::HarmonyParamsV2Gpu;
+#[cfg(feature = "single-cell")]
+use crate::gpu::sc_gpu::knn_gpu::KnnParamsGpu;
+#[cfg(feature = "single-cell")]
+use crate::gpu::sc_gpu::scrublet_gpu::{ScrubletKnnBackend, ScrubletParamsGpu};
 use crate::ml::clustering::k_means::parse_kmeans_init;
 #[cfg(feature = "single-cell")]
 use crate::single_cell::sc_processing::knn::KnnParams;
 use crate::utils::r_rust_interface::r_list_to_map;
+#[cfg(feature = "single-cell")]
+use crate::utils::r_rust_interface::{r_list_count, r_list_count_allow_zero};
 
 /////////////////////
 // KMeansGpuParams //
 /////////////////////
 
-impl KMeansGpuParams {
+/// R-list parsing for [KMeansGpuParams].
+///
+/// A trait rather than an inherent impl because [KMeansGpuParams] is defined in
+/// `ann-search-rs`.
+pub trait KMeansGpuParamsFromR: Sized {
     /// Parse the [KMeansGpuParams] from a list
     ///
     /// ### Params
@@ -27,7 +37,12 @@ impl KMeansGpuParams {
     /// ### Returns
     ///
     /// The [KMeansGpuParams] populated by the R list.
-    pub fn from_r_list(r_list: List) -> Result<Self> {
+    fn from_r_list(r_list: List) -> Result<Self>;
+}
+
+/// [KMeansGpuParamsFromR] implementation
+impl KMeansGpuParamsFromR for KMeansGpuParams {
+    fn from_r_list(r_list: List) -> Result<Self> {
         let params_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
         let iters = params_list
@@ -263,6 +278,204 @@ impl HarmonyParamsV2Gpu {
             use_dynamic_lambda,
             csr_cube_count,
             kmeans_params,
+        })
+    }
+}
+
+//////////////////
+// KnnParamsGpu //
+//////////////////
+
+#[cfg(feature = "single-cell")]
+impl KnnParamsGpu {
+    /// Generate [KnnParamsGpu] from an R list.
+    ///
+    /// Reads the same flattened list `KnnParams::from_r_list` reads, but only
+    /// the five keys the GPU indices understand. Missing keys fall back to
+    /// [`KnnParamsGpu::default()`].
+    ///
+    /// `k` goes through [r_list_count_allow_zero]: zero is a legitimate value
+    /// here, read downstream by `adjusted_k` as "derive it from the data".
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the kNN parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The [KnnParamsGpu] with all parameters set.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let defaults = Self::default();
+        let params_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+
+        let knn_method = std::string::String::from(
+            params_list
+                .get("knn_method")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&defaults.knn_method),
+        );
+        let ann_dist = std::string::String::from(
+            params_list
+                .get("ann_dist")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&defaults.ann_dist),
+        );
+        let k = r_list_count_allow_zero(&params_list, "k")?.unwrap_or(defaults.k);
+        let n_list = r_list_count(&params_list, "n_list")?;
+        let n_probe = r_list_count(&params_list, "n_probe")?;
+
+        Ok(Self {
+            knn_method,
+            ann_dist,
+            k,
+            n_list,
+            n_probe,
+        })
+    }
+}
+
+///////////////////////
+// ScrubletParamsGpu //
+///////////////////////
+
+#[cfg(feature = "single-cell")]
+impl ScrubletParamsGpu {
+    /// Generate [ScrubletParamsGpu] from an R list.
+    ///
+    /// Field names mirror `ScrubletParams::from_r_list`, minus `random_svd`
+    /// (the GPU SVD is always randomised), plus one key the CPU list has no
+    /// need for: `knn_backend`.
+    ///
+    /// `knn_backend` is the only thing that can pick the
+    /// [`ScrubletKnnBackend`] arm. Both backends share `k`, `knn_method`,
+    /// `ann_dist`, `n_list` and `n_probe`, and `"exhaustive"` / `"ivf"` are
+    /// legal `knn_method` values on either side, so the method string carries
+    /// no information about which index was meant. Absent, the GPU arm is
+    /// taken. Anything other than `"gpu"` or `"cpu"` is an error rather than a
+    /// silent fallback: a typo should not quietly change which index runs.
+    ///
+    /// `n_bins_hist` is read first and `n_bins_histogram` second, so a list
+    /// built by `bixverse::params_scrublet()` lands on the right value too.
+    /// Keep both branches, they are not redundant.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the GPU Scrublet parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The [ScrubletParamsGpu] with all parameters set.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let defaults = Self::default();
+        let params_list: HashMap<&str, Robj> = r_list_to_map(r_list.clone())?;
+
+        let backend = params_list
+            .get("knn_backend")
+            .and_then(|v| v.as_str())
+            .unwrap_or("gpu")
+            .to_lowercase();
+
+        let knn_params = match backend.as_str() {
+            "gpu" => ScrubletKnnBackend::Gpu(KnnParamsGpu::from_r_list(r_list)?),
+            "cpu" => ScrubletKnnBackend::Cpu(KnnParams::from_r_list(r_list)?),
+            other => {
+                return Err(Error::Other(format!(
+                    "Unknown `knn_backend`: '{other}'. Expected 'gpu' or 'cpu'."
+                )));
+            }
+        };
+
+        // -- processing --
+        let log_transform = params_list
+            .get("log_transform")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.log_transform);
+        let mean_center = params_list
+            .get("mean_center")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.mean_center);
+        let normalise_variance = params_list
+            .get("normalise_variance")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.normalise_variance);
+        let target_size = params_list
+            .get("target_size")
+            .and_then(|v| v.as_real())
+            .map(|x| x as f32);
+
+        // -- hvg --
+        let min_gene_var_pctl = params_list
+            .get("min_gene_var_pctl")
+            .and_then(|v| v.as_real())
+            .map(|x| x as f32)
+            .unwrap_or(defaults.min_gene_var_pctl);
+        let hvg_method = std::string::String::from(
+            params_list
+                .get("hvg_method")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&defaults.hvg_method),
+        );
+        let loess_span = params_list
+            .get("loess_span")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.loess_span);
+        let clip_max = params_list
+            .get("clip_max")
+            .and_then(|v| v.as_real())
+            .map(|x| x as f32);
+        let binning_strategy = std::string::String::from(
+            params_list
+                .get("binning_strategy")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&defaults.binning_strategy),
+        );
+        let n_bins = r_list_count(&params_list, "n_bins")?.unwrap_or(defaults.n_bins);
+
+        // -- pca --
+        let no_pcs = r_list_count(&params_list, "no_pcs")?.unwrap_or(defaults.no_pcs);
+
+        // -- scrublet --
+        let sim_doublet_ratio = params_list
+            .get("sim_doublet_ratio")
+            .and_then(|v| v.as_real())
+            .map(|x| x as f32)
+            .unwrap_or(defaults.sim_doublet_ratio);
+        let expected_doublet_rate = params_list
+            .get("expected_doublet_rate")
+            .and_then(|v| v.as_real())
+            .map(|x| x as f32)
+            .unwrap_or(defaults.expected_doublet_rate);
+        let stdev_doublet_rate = params_list
+            .get("stdev_doublet_rate")
+            .and_then(|v| v.as_real())
+            .map(|x| x as f32)
+            .unwrap_or(defaults.stdev_doublet_rate);
+        let n_bins_hist = r_list_count(&params_list, "n_bins_hist")?
+            .or(r_list_count(&params_list, "n_bins_histogram")?)
+            .unwrap_or(defaults.n_bins_hist);
+        let manual_threshold = params_list
+            .get("manual_threshold")
+            .and_then(|v| v.as_real())
+            .map(|x| x as f32);
+
+        Ok(Self {
+            log_transform,
+            mean_center,
+            normalise_variance,
+            target_size,
+            min_gene_var_pctl,
+            hvg_method,
+            loess_span,
+            clip_max,
+            binning_strategy,
+            n_bins,
+            no_pcs,
+            sim_doublet_ratio,
+            expected_doublet_rate,
+            stdev_doublet_rate,
+            n_bins_hist,
+            manual_threshold,
+            knn_params,
         })
     }
 }

@@ -1,5 +1,17 @@
 # News
 
+## 0.4.4
+
+### Features
+
+- GPU-accelerated Scrublet available.
+
+### Breaking change
+
+- The GPU-accelerated k-means clustering was moved into `ann-search-rs ≥ 0.5.2`.
+  This is a breaking change in terms of availability of the API! However, the
+  same k-means can be now found in `ann-search-rs`.
+
 ## 0.4.3
 
 ### Features
