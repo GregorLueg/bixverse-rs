@@ -87,15 +87,6 @@ thiserror = "2.0.18"
 thousands = "0.2.0"
 wide = "1.4.0"
 
-###########
-# Patches #
-###########
-
-# ann-search-rs 0.5.2 carries the GPU k-means this crate now imports. Delete
-# this block once it is on crates.io.
-[patch.crates-io]
-ann-search-rs = { path = "/Users/gregorlueg/repos/shared/ann-search-rs" }
-
 #################
 # Documentation #
 #################
