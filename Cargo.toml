@@ -6,7 +6,14 @@ authors = ["Gregor Lueg <gregorlueg@me.com>"]
 license = "MIT"
 repository = "https://github.com/GregorLueg/bixverse-rs"
 description = "A Rust library with various utilities for computational biology and single cell."
-categories = ["science"]
+categories = [
+  "science::computational-biology",
+  "science::bioinformatics",
+  "science::computational-biology::systems-biology",
+  "mathematics",
+  "algorithms",
+]
+keywords = ["bioinformatics", "single-cell", "genomics", "statistics", "gpu"]
 
 [lib]
 name = "bixverse_rs"
