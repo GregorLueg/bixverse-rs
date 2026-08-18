@@ -3,12 +3,14 @@
 
 use faer::linalg::matmul::matmul;
 use faer::{Accum, Mat, MatMut, MatRef};
+use num_traits::ToPrimitive;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
 use std::ops::{Add, AddAssign, Mul};
 
 use crate::core::math::pca_svd::SvdResults;
+use crate::core::math::vector_helpers::sum_sq_f64;
 use crate::prelude::*;
 use crate::utils::faer_parallelism;
 
@@ -1757,6 +1759,10 @@ where
 
 /// Compute Frobenius norm of sparse matrix
 ///
+/// Accumulated in `f64` via [`sum_sq_f64`] and narrowed once at the end. Summing
+/// in `f32` drifts by percentage points over tens of millions of non-zeros, and
+/// the square root then hides how far off it was.
+///
 /// ### Params
 ///
 /// * `mat` - Sparse matrix in CSR or CSC format
@@ -1766,17 +1772,29 @@ where
 /// Frobenius norm ||A||_F = sqrt(sum(A_ij^2))
 pub fn frobenius_norm<T>(mat: &CompressedSparseData2<T>) -> f32
 where
-    T: BixverseNumeric + Into<f32>,
+    T: BixverseNumeric + ToPrimitive,
 {
-    mat.data
-        .par_iter()
-        .with_min_len(10000)
-        .map(|&v| {
-            let val: f32 = v.into();
-            val * val
-        })
-        .sum::<f32>()
-        .sqrt()
+    sum_sq_f64(&mat.data).sqrt() as f32
+}
+
+/// Squared Frobenius norm of a sparse matrix, in `f64`.
+///
+/// Prefer this over squaring [`frobenius_norm`] wherever the result is one of
+/// several large terms that cancel: narrowing to `f32` and squaring again throws
+/// away the precision the cancellation needs.
+///
+/// ### Params
+///
+/// * `mat` - Sparse matrix in CSR or CSC format
+///
+/// ### Returns
+///
+/// `||A||_F^2`.
+pub fn frobenius_norm_sq_f64<T>(mat: &CompressedSparseData2<T>) -> f64
+where
+    T: BixverseNumeric + ToPrimitive,
+{
+    sum_sq_f64(&mat.data)
 }
 
 /// Remove zeros from sparse matrix

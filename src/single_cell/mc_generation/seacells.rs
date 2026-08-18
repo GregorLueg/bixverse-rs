@@ -251,27 +251,6 @@ fn matrix_trace(mat: &CompressedSparseData2<f32>) -> f64 {
     trace
 }
 
-/// Squared Frobenius norm of a sparse matrix, accumulated in `f64`
-///
-/// [frobenius_norm] sums in `f32` and squaring its result loses another few
-/// bits. Both matter for [SEACells::compute_rss_trace], where `||K||_F^2` is the
-/// largest of three terms that cancel down to a small residual.
-///
-/// ### Params
-///
-/// * `mat` - Sparse CSR matrix
-///
-/// ### Returns
-///
-/// `||mat||_F^2`.
-fn frobenius_norm_sq_f64(mat: &CompressedSparseData2<f32>) -> f64 {
-    mat.data
-        .par_iter()
-        .with_min_len(10000)
-        .map(|&v| (v as f64) * (v as f64))
-        .sum()
-}
-
 /// Compute adaptive anisotropic diffusion kernel
 ///
 /// Implementation from palantir package.  Uses the k/3-th nearest neighbour

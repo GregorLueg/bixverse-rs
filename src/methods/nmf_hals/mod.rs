@@ -68,7 +68,7 @@ pub fn parse_nmf_init(s: &str, seed: usize) -> Option<NmfInit> {
 /// ### Returns
 ///
 /// Tuple of `(w, h)` matrix
-fn random_init<F: BixverseFloat>(
+pub(crate) fn random_init<F: BixverseFloat>(
     m: usize,
     n: usize,
     k: usize,
@@ -107,7 +107,7 @@ fn random_init<F: BixverseFloat>(
 /// ### Returns
 ///
 /// Tuple of `(w, h)` matrix
-fn nndsvd_from_svd<F: BixverseFloat>(
+pub(crate) fn nndsvd_from_svd<F: BixverseFloat>(
     svd: &SvdResults<F>,
     k: usize,
     m: usize,
@@ -137,36 +137,41 @@ fn nndsvd_from_svd<F: BixverseFloat>(
         let mut un = vec![F::zero(); m];
         let mut vp = vec![F::zero(); n];
         let mut vn = vec![F::zero(); n];
-        let mut up_sq = F::zero();
-        let mut un_sq = F::zero();
-        let mut vp_sq = F::zero();
-        let mut vn_sq = F::zero();
+        // f64 accumulators, for the same reason as in `normalise_w_cols`: these
+        // run over the sample and feature counts, and they set the scale of the
+        // whole initialisation.
+        let mut up_sq = 0f64;
+        let mut un_sq = 0f64;
+        let mut vp_sq = 0f64;
+        let mut vn_sq = 0f64;
 
         for i in 0..m {
             let x = svd.u[(i, r)];
+            let d = x.to_f64().unwrap();
             if x > F::zero() {
                 up[i] = x;
-                up_sq += x * x;
+                up_sq += d * d;
             } else if x < F::zero() {
                 un[i] = -x;
-                un_sq += x * x;
+                un_sq += d * d;
             }
         }
         for j in 0..n {
             let y = svd.v[(j, r)];
+            let d = y.to_f64().unwrap();
             if y > F::zero() {
                 vp[j] = y;
-                vp_sq += y * y;
+                vp_sq += d * d;
             } else if y < F::zero() {
                 vn[j] = -y;
-                vn_sq += y * y;
+                vn_sq += d * d;
             }
         }
 
-        let up_norm = up_sq.sqrt();
-        let un_norm = un_sq.sqrt();
-        let vp_norm = vp_sq.sqrt();
-        let vn_norm = vn_sq.sqrt();
+        let up_norm = F::from_f64(up_sq.sqrt()).unwrap();
+        let un_norm = F::from_f64(un_sq.sqrt()).unwrap();
+        let vp_norm = F::from_f64(vp_sq.sqrt()).unwrap();
+        let vn_norm = F::from_f64(vn_sq.sqrt()).unwrap();
         let m_pos = up_norm * vp_norm;
         let m_neg = un_norm * vn_norm;
 
@@ -343,7 +348,7 @@ pub trait NmfInput<F: BixverseFloat> {
 ///
 /// * `w` - Left factor, shape `m x k`.
 /// * `out` - Output buffer `k x k`. Overwritten on return.
-fn gram_wt_w<F: BixverseFloat>(w: MatRef<F>, out: &mut Mat<F>) {
+pub(crate) fn gram_wt_w<F: BixverseFloat>(w: MatRef<F>, out: &mut Mat<F>) {
     let k = w.ncols();
     triangular_matmul(
         out.as_mut(),
@@ -372,7 +377,7 @@ fn gram_wt_w<F: BixverseFloat>(w: MatRef<F>, out: &mut Mat<F>) {
 ///
 /// * `h` - Right factor, shape `k x n`.
 /// * `out` - Output buffer `k x k`. Overwritten on return.
-fn gram_h_ht<F: BixverseFloat>(h: MatRef<F>, out: &mut Mat<F>) {
+pub(crate) fn gram_h_ht<F: BixverseFloat>(h: MatRef<F>, out: &mut Mat<F>) {
     let k = h.nrows();
     triangular_matmul(
         out.as_mut(),
@@ -404,7 +409,7 @@ fn gram_h_ht<F: BixverseFloat>(h: MatRef<F>, out: &mut Mat<F>) {
 /// * `b` - Gram matrix `W^T W`, shape `k x k`.
 /// * `a` - Product `W^T V`, shape `k x n`.
 /// * `eps` - Non-negativity floor.
-fn hals_sweep_rows<F>(h: &mut Mat<F>, b: MatRef<F>, a: MatRef<F>, eps: F)
+pub(crate) fn hals_sweep_rows<F>(h: &mut Mat<F>, b: MatRef<F>, a: MatRef<F>, eps: F)
 where
     F: BixverseFloat + Send + Sync,
 {
@@ -455,7 +460,7 @@ where
 /// * `d` - Gram matrix `H H^T`, shape `k x k`.
 /// * `c_mat` - Product `V H^T`, shape `m x k`.
 /// * `eps` - Non-negativity floor.
-fn hals_sweep_cols<F>(w: &mut Mat<F>, d: MatRef<F>, c_mat: MatRef<F>, eps: F)
+pub(crate) fn hals_sweep_cols<F>(w: &mut Mat<F>, d: MatRef<F>, c_mat: MatRef<F>, eps: F)
 where
     F: BixverseFloat + Send + Sync,
 {
@@ -502,16 +507,22 @@ where
 ///
 /// * `w` - Left factor `m x k`, columns normalised in-place.
 /// * `h` - Right factor `k x n`, rows rescaled in-place.
-fn normalise_w_cols<F: BixverseFloat>(w: &mut Mat<F>, h: &mut Mat<F>) {
+pub(crate) fn normalise_w_cols<F: BixverseFloat>(w: &mut Mat<F>, h: &mut Mat<F>) {
     let m = w.nrows();
     let k = w.ncols();
     let n = h.ncols();
     for c in 0..k {
-        let mut sq_norm = F::zero();
+        // f64 accumulator: `m` is the sample count, so on single-cell inputs this
+        // is a sum over hundreds of thousands of positive terms. In `F = f32` the
+        // norm drifts, and since it is the scale pushed into H it decides whether
+        // W's columns really are unit length, which the consensus clustering
+        // assumes.
+        let mut sq_norm = 0f64;
         for i in 0..m {
-            sq_norm += w[(i, c)] * w[(i, c)];
+            let x = w[(i, c)].to_f64().unwrap();
+            sq_norm += x * x;
         }
-        let norm = sq_norm.sqrt();
+        let norm = F::from_f64(sq_norm.sqrt()).unwrap();
         if norm <= F::zero() {
             continue;
         }
@@ -543,7 +554,7 @@ fn normalise_w_cols<F: BixverseFloat>(w: &mut Mat<F>, h: &mut Mat<F>) {
 /// ### Returns
 ///
 /// The scalar reconstruction error.
-fn compute_objective<F: BixverseFloat + Send + Sync>(
+pub(crate) fn compute_objective<F: BixverseFloat + Send + Sync>(
     sq_frob_v: F,
     h: MatRef<F>,
     a: MatRef<F>,

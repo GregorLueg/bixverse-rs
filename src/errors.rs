@@ -1421,6 +1421,24 @@ pub enum BixverseErrors {
         /// Per-binding limit reported by the device.
         limit: usize,
     },
+    /// The requested NMF rank is above the largest comptime register tier the
+    /// GPU HALS sweeps are compiled for.
+    ///
+    /// The sweeps hold a whole row of `W` or column of `H` in a register array
+    /// whose length must be known at compilation, so the dispatch picks the
+    /// smallest tier that fits `k`. Past the largest tier the array would spill
+    /// to global memory and the kernel would be slower than the CPU path, so
+    /// this errors rather than silently degrading.
+    #[cfg(feature = "gpu")]
+    #[error(
+        "NMF GPU: rank k = {k} is above the largest supported rank of {max}; use the CPU entry point for ranks this large"
+    )]
+    GpuNmfRankTooLarge {
+        /// Requested number of components.
+        k: usize,
+        /// Largest rank the compiled tiers cover.
+        max: usize,
+    },
     // -- gpu / single cell --
     /// GPU Harmony only supports one co-variate for now (based on Arrowhead)
     #[cfg(feature = "gpu")]

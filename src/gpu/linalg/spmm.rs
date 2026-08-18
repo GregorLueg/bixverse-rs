@@ -10,11 +10,18 @@
 //!   `Z = (A^T * Q - mu * q_sum^T - 1 * d^T) / sigma` where `d` is a
 //!   precomputed column offset vector.
 //!
-//! Two small reduction kernels precompute the correction vectors:
+//! [`fn@spmm_csr_plain`] and [`fn@spmm_csc_transpose_plain`] are the same two
+//! kernels without any correction terms, for callers whose operator must not be
+//! centred or scaled at all. Non-negative matrix factorisation is the case that
+//! motivated them.
+//!
+//! Three small reduction kernels sit alongside:
 //!
 //! * [`fn@dense_column_weighted_sum`] computes `c = mu^T * X_scaled` for the
 //!   forward SpMM.
 //! * [`fn@dense_column_sum`] computes `q_sum = 1^T * Q` for the transpose SpMM.
+//! * [`fn@dense_column_sq_norm`] computes per-column sums of squares, for
+//!   callers needing column L2 norms.
 //!
 //! ### Threading
 //!
@@ -227,6 +234,122 @@ pub fn spmm_csc_transpose<S: Float, A: Float>(
     }
 }
 
+/// Plain forward SpMM: `Y = A * X`.
+///
+/// [`fn@spmm_csr_forward`] with the centring and offset terms dropped. The
+/// same result is reachable by passing zeroed correction vectors, but that
+/// costs three dummy allocations and two subtractions in the innermost loop of
+/// what is the dominant kernel of an NMF sweep. Non-negative factorisation must
+/// not centre its input at all, so the plain form is also the honest API.
+///
+/// ### Params
+///
+/// * `indptr` - CSR row pointers `[n + 1]`
+/// * `indices` - Column indices of nnz `[nnz]`
+/// * `values` - Values of nnz `[nnz]` in storage precision `S`
+/// * `x` - Dense RHS `[m, s]` row-major in accumulator precision `A`
+/// * `y` - Dense output `[n, s]` row-major in `A`
+/// * `n_rows` - Number of output rows
+/// * `s_width` - Output width
+/// * `wg_size` - Workgroup size (comptime)
+///
+/// ### Grid mapping
+///
+/// * `CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X` -> output row index
+/// * `UNIT_POS_X` -> stride offset over output columns
+#[cube(launch_unchecked)]
+pub fn spmm_csr_plain<S: Float, A: Float>(
+    indptr: &Tensor<u32>,
+    indices: &Tensor<u32>,
+    values: &Tensor<S>,
+    x: &Tensor<A>,
+    y: &mut Tensor<A>,
+    n_rows: u32,
+    s_width: u32,
+    #[comptime] wg_size: u32,
+) {
+    let row = CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X;
+    if row >= n_rows {
+        terminate!();
+    }
+
+    let tx = UNIT_POS_X;
+
+    let seg_start = indptr[row as usize];
+    let seg_end = indptr[(row + 1u32) as usize];
+
+    let mut col = tx;
+    while col < s_width {
+        let mut acc = A::new(0.0);
+        let mut idx = seg_start;
+        while idx < seg_end {
+            let j = indices[idx as usize];
+            let v = A::cast_from(values[idx as usize]);
+            acc += v * x[j as usize * s_width as usize + col as usize];
+            idx += 1u32;
+        }
+        y[row as usize * s_width as usize + col as usize] = acc;
+        col += wg_size;
+    }
+}
+
+/// Plain transpose SpMM: `Z = A^T * Q`.
+///
+/// [`fn@spmm_csc_transpose`] with the centring and scaling terms dropped, for
+/// the same reasons as [`fn@spmm_csr_plain`]. Uses the CSC of A, which is
+/// structurally a CSR of `A^T`.
+///
+/// ### Params
+///
+/// * `indptr` - CSC column pointers `[m + 1]`
+/// * `indices` - Row indices of nnz `[nnz]`
+/// * `values` - Values of nnz `[nnz]` in storage precision `S`
+/// * `q` - Dense RHS `[n, s]` row-major in accumulator precision `A`
+/// * `z` - Dense output `[m, s]` row-major in `A`
+/// * `m_rows` - Number of output rows
+/// * `s_width` - Output width
+/// * `wg_size` - Workgroup size (comptime)
+///
+/// ### Grid mapping
+///
+/// * `CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X` -> output row index
+/// * `UNIT_POS_X` -> stride offset over output columns
+#[cube(launch_unchecked)]
+pub fn spmm_csc_transpose_plain<S: Float, A: Float>(
+    indptr: &Tensor<u32>,
+    indices: &Tensor<u32>,
+    values: &Tensor<S>,
+    q: &Tensor<A>,
+    z: &mut Tensor<A>,
+    m_rows: u32,
+    s_width: u32,
+    #[comptime] wg_size: u32,
+) {
+    let row = CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X;
+    if row >= m_rows {
+        terminate!();
+    }
+
+    let tx = UNIT_POS_X;
+
+    let seg_start = indptr[row as usize];
+    let seg_end = indptr[(row + 1u32) as usize];
+
+    let mut col = tx;
+    while col < s_width {
+        let mut acc = A::new(0.0);
+        let mut idx = seg_start;
+        while idx < seg_end {
+            let i = indices[idx as usize];
+            let v = A::cast_from(values[idx as usize]);
+            acc += v * q[i as usize * s_width as usize + col as usize];
+            idx += 1u32;
+        }
+        z[row as usize * s_width as usize + col as usize] = acc;
+        col += wg_size;
+    }
+}
+
 /// Column sums of a dense matrix: `out[col] = sum_i M[i, col]`.
 ///
 /// One workgroup per output column. Each thread accumulates its strided
@@ -354,6 +477,94 @@ pub fn dense_column_weighted_sum<A: Float>(
     let mut i = tx;
     while i < n_rows {
         acc += weights[i as usize] * matrix[i as usize * s_width as usize + col as usize];
+        i += wg_size;
+    }
+
+    let mut shared = SharedMemory::<A>::new(WORKGROUP_128 as usize);
+    shared[tx as usize] = acc;
+    sync_cube();
+
+    // Pairwise tree reduction for REDUCE_WG = 128. If REDUCE_WG changes,
+    // update the unrolled steps to match.
+    if tx < 64u32 {
+        let other = shared[(tx + 64u32) as usize];
+        shared[tx as usize] += other;
+    }
+    sync_cube();
+    if tx < 32u32 {
+        let other = shared[(tx + 32u32) as usize];
+        shared[tx as usize] += other;
+    }
+    sync_cube();
+    if tx < 16u32 {
+        let other = shared[(tx + 16u32) as usize];
+        shared[tx as usize] += other;
+    }
+    sync_cube();
+    if tx < 8u32 {
+        let other = shared[(tx + 8u32) as usize];
+        shared[tx as usize] += other;
+    }
+    sync_cube();
+    if tx < 4u32 {
+        let other = shared[(tx + 4u32) as usize];
+        shared[tx as usize] += other;
+    }
+    sync_cube();
+    if tx < 2u32 {
+        let other = shared[(tx + 2u32) as usize];
+        shared[tx as usize] += other;
+    }
+    sync_cube();
+    if tx < 1u32 {
+        let other = shared[(tx + 1u32) as usize];
+        shared[tx as usize] += other;
+    }
+    sync_cube();
+
+    if tx == 0u32 {
+        out[col as usize] = shared[0];
+    }
+}
+
+/// Column sums of squares of a dense matrix: `out[col] = sum_i M[i, col]^2`.
+///
+/// Sibling of [`fn@dense_column_sum`], same threading and the same pinned
+/// 128-wide reduction ladder. Squaring on load rather than pre-squaring the
+/// matrix keeps this to one pass and needs no scratch buffer. Callers wanting
+/// an L2 norm take the square root on the consuming side.
+///
+/// ### Params
+///
+/// * `matrix` - Input matrix `[n_rows, s_width]` row-major
+/// * `out` - Output column sums of squares `[s_width]`
+/// * `n_rows` - Number of rows to sum over
+/// * `s_width` - Number of columns
+/// * `wg_size` - Workgroup size (comptime, must be a power of two)
+///
+/// ### Grid mapping
+///
+/// * `CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X` -> output column index
+#[cube(launch_unchecked)]
+pub fn dense_column_sq_norm<A: Float>(
+    matrix: &Tensor<A>,
+    out: &mut Tensor<A>,
+    n_rows: u32,
+    s_width: u32,
+    #[comptime] wg_size: u32,
+) {
+    let col = CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X;
+    if col >= s_width {
+        terminate!();
+    }
+
+    let tx = UNIT_POS_X;
+
+    let mut acc = A::new(0.0);
+    let mut i = tx;
+    while i < n_rows {
+        let v = matrix[i as usize * s_width as usize + col as usize];
+        acc += v * v;
         i += wg_size;
     }
 
@@ -568,6 +779,197 @@ where
         WORKGROUP_64 => dispatch!(WORKGROUP_64),
         WORKGROUP_128 => dispatch!(WORKGROUP_128),
         _ => dispatch!(WORKGROUP_256),
+    }
+
+    Ok(())
+}
+
+/// Dispatch [`fn@spmm_csr_plain`] with a layout check on the sparse matrix.
+///
+/// As with the correcting launchers, dense tensors are not shape-checked here.
+///
+/// ### Params
+///
+/// * `sparse` - CSR of A, shape `(n, m)`
+/// * `x` - Dense RHS `[m, s_width]` row-major
+/// * `y` - Dense output `[n, s_width]` row-major
+/// * `s_width` - Output width
+/// * `client` - CubeCL compute client
+///
+/// ### Returns
+///
+/// `Ok(())`, with `y` holding `A * X`.
+///
+/// ### Errors
+///
+/// * `SparseLayoutMismatch` if `sparse.cs_type` is not CSR.
+/// * `CubeclUtils` if the grid is over the device's cube-count limit.
+pub fn launch_spmm_csr_plain<R, S, A>(
+    sparse: &GpuCompressedSparseData<R, S>,
+    x: &GpuTensor<R, A>,
+    y: &GpuTensor<R, A>,
+    s_width: usize,
+    client: &ComputeClient<R>,
+) -> Result<(), BixverseErrors>
+where
+    R: Runtime,
+    S: Float + cubecl::CubeElement,
+    A: Float + cubecl::CubeElement,
+{
+    if !sparse.cs_type.is_csr() {
+        return Err(BixverseErrors::SparseLayoutMismatch {
+            expected: CompressedSparseFormat::Csr,
+            got: sparse.cs_type,
+        });
+    }
+
+    let (n, _m) = sparse.shape;
+    let limits = GpuLimits::from_client(client);
+    let (gx, gy) = grid_2d(n as u32, &limits)?;
+    let count = checked_cube_count("spmm_csr_plain", gx, gy, 1, &limits)?;
+
+    macro_rules! dispatch {
+        ($wg:expr) => {
+            unsafe {
+                spmm_csr_plain::launch_unchecked::<S, A, R>(
+                    client,
+                    count,
+                    CubeDim::new_1d($wg),
+                    sparse.indptr.clone().into_tensor_arg(),
+                    sparse.indices.clone().into_tensor_arg(),
+                    sparse.values.clone().into_tensor_arg(),
+                    x.clone().into_tensor_arg(),
+                    y.clone().into_tensor_arg(),
+                    n as u32,
+                    s_width as u32,
+                    $wg,
+                );
+            }
+        };
+    }
+
+    match spmm_workgroup(s_width) {
+        WORKGROUP_64 => dispatch!(WORKGROUP_64),
+        WORKGROUP_128 => dispatch!(WORKGROUP_128),
+        _ => dispatch!(WORKGROUP_256),
+    }
+
+    Ok(())
+}
+
+/// Dispatch [`fn@spmm_csc_transpose_plain`] with a layout check on the sparse
+/// matrix.
+///
+/// As with the correcting launchers, dense tensors are not shape-checked here.
+///
+/// ### Params
+///
+/// * `sparse` - CSC of A, shape `(n, m)`
+/// * `q` - Dense RHS `[n, s_width]` row-major
+/// * `z` - Dense output `[m, s_width]` row-major
+/// * `s_width` - Output width
+/// * `client` - CubeCL compute client
+///
+/// ### Returns
+///
+/// `Ok(())`, with `z` holding `A^T * Q`.
+///
+/// ### Errors
+///
+/// * `SparseLayoutMismatch` if `sparse.cs_type` is not CSC.
+/// * `CubeclUtils` if the grid is over the device's cube-count limit.
+pub fn launch_spmm_csc_transpose_plain<R, S, A>(
+    sparse: &GpuCompressedSparseData<R, S>,
+    q: &GpuTensor<R, A>,
+    z: &GpuTensor<R, A>,
+    s_width: usize,
+    client: &ComputeClient<R>,
+) -> Result<(), BixverseErrors>
+where
+    R: Runtime,
+    S: Float + cubecl::CubeElement,
+    A: Float + cubecl::CubeElement,
+{
+    if !sparse.cs_type.is_csc() {
+        return Err(BixverseErrors::SparseLayoutMismatch {
+            expected: CompressedSparseFormat::Csc,
+            got: sparse.cs_type,
+        });
+    }
+
+    let (_n, m) = sparse.shape;
+    let limits = GpuLimits::from_client(client);
+    let (gx, gy) = grid_2d(m as u32, &limits)?;
+    let count = checked_cube_count("spmm_csc_transpose_plain", gx, gy, 1, &limits)?;
+
+    macro_rules! dispatch {
+        ($wg:expr) => {
+            unsafe {
+                spmm_csc_transpose_plain::launch_unchecked::<S, A, R>(
+                    client,
+                    count,
+                    CubeDim::new_1d($wg),
+                    sparse.indptr.clone().into_tensor_arg(),
+                    sparse.indices.clone().into_tensor_arg(),
+                    sparse.values.clone().into_tensor_arg(),
+                    q.clone().into_tensor_arg(),
+                    z.clone().into_tensor_arg(),
+                    m as u32,
+                    s_width as u32,
+                    $wg,
+                );
+            }
+        };
+    }
+
+    match spmm_workgroup(s_width) {
+        WORKGROUP_64 => dispatch!(WORKGROUP_64),
+        WORKGROUP_128 => dispatch!(WORKGROUP_128),
+        _ => dispatch!(WORKGROUP_256),
+    }
+
+    Ok(())
+}
+
+/// Dispatch [`fn@dense_column_sq_norm`]. One workgroup per output column.
+///
+/// ### Params
+///
+/// * `matrix` - Dense input `[n_rows, s_width]` row-major
+/// * `out` - Dense output `[s_width]`, the per-column sum of squares
+/// * `n_rows` - Number of rows in `matrix`
+/// * `s_width` - Number of columns in `matrix`
+/// * `client` - CubeCL compute client
+///
+/// ### Returns
+///
+/// `Ok(())`, or `CubeclUtils` if the grid busts the device's cube-count limit.
+pub fn launch_dense_column_sq_norm<R, A>(
+    matrix: &GpuTensor<R, A>,
+    out: &GpuTensor<R, A>,
+    n_rows: usize,
+    s_width: usize,
+    client: &ComputeClient<R>,
+) -> Result<(), BixverseErrors>
+where
+    R: Runtime,
+    A: Float + cubecl::CubeElement,
+{
+    let limits = GpuLimits::from_client(client);
+    let (gx, gy) = grid_2d(s_width as u32, &limits)?;
+    let count = checked_cube_count("dense_column_sq_norm", gx, gy, 1, &limits)?;
+
+    unsafe {
+        dense_column_sq_norm::launch_unchecked::<A, R>(
+            client,
+            count,
+            CubeDim::new_1d(WORKGROUP_128),
+            matrix.clone().into_tensor_arg(),
+            out.clone().into_tensor_arg(),
+            n_rows as u32,
+            s_width as u32,
+            WORKGROUP_128,
+        );
     }
 
     Ok(())

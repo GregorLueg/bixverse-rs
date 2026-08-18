@@ -10,44 +10,13 @@
 use std::time::Instant;
 
 use crate::methods::nmf_hals::consensus::*;
+use crate::methods::nmf_hals::nmf_preprocessing::ensure_csc;
 use crate::methods::nmf_hals::*;
 use crate::prelude::*;
 use crate::single_cell::sc_analysis::nmf_sc::{
     nmf_consensus_run_sparse, nmf_k_sweep_run_sparse, nmf_multiple_run_sparse,
     nmf_single_run_sparse,
 };
-
-/////////////
-// Helpers //
-/////////////
-
-/// Transpose meta cell counts to CSC if they arrived as CSR
-///
-/// The sparse pre-processing indexes `indptr` per column, so CSR input scales
-/// the wrong axis and returns quiet nonsense rather than an error. The R side
-/// always hands over CSR, so this is the common path, not the exception.
-///
-/// ### Params
-///
-/// * `data` - The meta cell counts, in either orientation.
-/// * `verbosity` - Resolved verbosity, used only for the transpose notice.
-///
-/// ### Returns
-///
-/// The same data in CSC orientation.
-fn ensure_csc(
-    data: CompressedSparseData2<f32>,
-    verbosity: Verbosity,
-) -> CompressedSparseData2<f32> {
-    if data.cs_type.is_csr() {
-        if verbosity.detailed_verbosity() {
-            println!("NMF: meta cell data was provided as CSR. Transposing to CSC.")
-        }
-        data.transform()
-    } else {
-        data
-    }
-}
 
 ////////////////
 // Single run //

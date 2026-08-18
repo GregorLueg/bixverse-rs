@@ -397,7 +397,7 @@ where
 ///
 /// `Some(slice)` of length `n_rows * n_cols` when the matrix is column-major
 /// with unit row stride and no gap between columns, `None` otherwise.
-fn contiguous_col_major<F: BixverseFloat>(mat: MatRef<'_, F>) -> Option<&'_ [F]> {
+pub(crate) fn contiguous_col_major<F: BixverseFloat>(mat: MatRef<'_, F>) -> Option<&'_ [F]> {
     let (n_rows, n_cols) = (mat.nrows(), mat.ncols());
     let cm = mat.try_as_col_major()?;
     if cm.col_stride() as usize != n_rows {

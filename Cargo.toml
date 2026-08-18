@@ -119,6 +119,11 @@ harness = false
 required-features = ["gpu"]
 
 [[bench]]
+name = "gpu_nmf_bench"
+harness = false
+required-features = ["gpu"]
+
+[[bench]]
 name = "gpu_scenic_bench"
 harness = false
 required-features = ["gpu", "single-cell"]

@@ -328,9 +328,16 @@ fn pool_components<F: BixverseFloat>(
 /// The L2 norm of that row.
 #[inline]
 fn row_norm<F: BixverseFloat>(mat: MatRef<F>, row: usize) -> F {
-    (0..mat.ncols())
-        .fold(F::zero(), |acc, j| acc + mat[(row, j)] * mat[(row, j)])
-        .sqrt()
+    // f64 accumulator. `ncols` here is the pooled dimension, which is the feature
+    // count for `HRows` and the sample count for `WColumns`, so on single-cell
+    // inputs it runs to hundreds of thousands. This norm both drives the
+    // collapsed-component test and normalises the pooled rows the cosine kNN and
+    // the silhouette assume are unit length.
+    let acc = (0..mat.ncols()).fold(0f64, |acc, j| {
+        let x = mat[(row, j)].to_f64().unwrap();
+        acc + x * x
+    });
+    F::from_f64(acc.sqrt()).unwrap()
 }
 
 /// Copy a subset of rows into a fresh matrix.
@@ -587,7 +594,7 @@ fn median_in_place<F: BixverseFloat>(values: &mut [F]) -> F {
 /// ### Returns
 ///
 /// The median.
-fn median<F: BixverseFloat>(values: &[F]) -> F {
+pub(crate) fn median<F: BixverseFloat>(values: &[F]) -> F {
     let mut copy = values.to_vec();
     median_in_place(&mut copy)
 }
