@@ -1341,9 +1341,9 @@ mod tests {
         assert_eq!(to_row_major(back.as_ref()), to_row_major(w.as_ref()));
     }
 
-    /////////////////////
-    // Product parity  //
-    /////////////////////
+    ////////////////////
+    // Product parity //
+    ////////////////////
 
     // The two data products are where a layout mistake hides, because a wrong
     // transpose still produces plausible non-negative numbers. Both are checked
@@ -1621,9 +1621,9 @@ mod tests {
         );
     }
 
-    /////////////////////
-    // Solver parity   //
-    /////////////////////
+    ///////////////////
+    // Solver parity //
+    ///////////////////
 
     /// Run one CPU and one GPU solve from the same random initialisation.
     fn solve_pair(
