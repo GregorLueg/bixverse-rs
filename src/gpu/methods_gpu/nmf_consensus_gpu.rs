@@ -2,8 +2,8 @@
 //! entry points.
 //!
 //! Only the solver moves to the device. The consensus machinery itself, i.e.
-//! pooling, the local-density filter, the k-means clustering, the silhouette and
-//! the per-coordinate median, runs on
+//! pooling, the local-density filter, the k-means clustering, the silhouette
+//! and the per-coordinate median, runs on
 //! [`crate::methods::nmf_hals::consensus::consensus_from_restarts`] unchanged.
 //! That work is over a `(k * n_runs) x dim` matrix with `k * n_runs` in the
 //! hundreds, so it is nowhere near the solve in cost and there is nothing to
@@ -12,11 +12,6 @@
 //! What the GPU path does change is that `V` is uploaded once and reused across
 //! every restart and every rank in a sweep. On the CPU each of the
 //! `k_range.len() * n_runs` solves pays full memory traffic over `V` again.
-//!
-//! ### Precision
-//!
-//! These entry points are f32 only, matching the single-cell and metacell CPU
-//! paths and the device. Callers holding f64 data cast before entering.
 
 use cubecl::prelude::*;
 use faer::MatRef;
@@ -176,16 +171,8 @@ where
 /// Sweep k on the GPU and report stability against error.
 ///
 /// One row per rank, no refit and no factors retained. `V` is uploaded once for
-/// the whole sweep, which is where most of the GPU advantage sits: the CPU path
-/// re-reads `V` for all `k_range.len() * n_runs` solves.
-///
-/// Ranks are swept sequentially. There is one device, so nothing to interleave.
-///
-/// Two conditions that are properties of a particular rank rather than of the
-/// input are recorded rather than raised, matching the CPU path: an empty cluster
-/// (see `n_empty_clusters`) and a density filter that left fewer than `k`
-/// components (see `consensus_failed`, with `stability` set to `NaN`). Anything
-/// else aborts the sweep.
+/// the whole sweep. Ranks are swept sequentially. There is one device, so
+/// nothing to interleave.
 ///
 /// ### Params
 ///
@@ -669,8 +656,8 @@ pub fn nmf_consensus_run_sparse_gpu<R: Runtime>(
 
 /// Sweep k with GPU consensus NMF on a sparse matrix.
 ///
-/// This is the shape the GPU path is really for: `V` uploads once and serves all
-/// `k_range.len() * n_runs` solves.
+/// This is the shape the GPU path is really for: `V` uploads once and serves
+/// all `k_range.len() * n_runs` solves.
 ///
 /// ### Params
 ///

@@ -5,36 +5,6 @@
 //! Gram products, the two data products, the two sweeps and the normalisation
 //! step all see the same layout. See the module doc of
 //! [`crate::gpu::methods_gpu::nmf_gpu`] for why.
-//!
-//! ### The sweep
-//!
-//! HALS updates component `r` from components already updated in the same
-//! sweep, so the `r` loop is strictly sequential. But `H[r, j]` reads only
-//! `B[r, :]`, `A[r, j]` and `H[:, j]`, so *columns of H are independent of each
-//! other*. One thread per column runs the whole k-step sweep, which makes the
-//! entire sweep a single launch with no barriers rather than `k` launches.
-//!
-//! The same holds for `W` with one thread per row. And because `W^T W` and
-//! `H H^T` are both symmetric, the row sweep's `B[r, s]` and the column
-//! sweep's `D[s, c]` are the same walk, so [`fn@hals_sweep_gpu`] serves both.
-//!
-//! ### Where the working set lives
-//!
-//! Each thread needs its whole k-run addressable by a runtime index, which
-//! rules out a register `Array` (this crate avoids dynamic indexing into one;
-//! see the slot-by-comparison comment in `seacells_kernels.rs`), and unrolling
-//! over a comptime bound would emit `k_cap^2` statements. So the run is staged
-//! in shared memory, laid out component-major (`s * wg_size + tx`) so that
-//! adjacent threads hit adjacent banks and no padding is needed. No thread ever
-//! reads another thread's lane, so the kernel needs no `sync_cube`.
-//!
-//! The staged block is pinned to [`NMF_SWEEP_SMEM_ELEMS`] elements and the
-//! workgroup width falls out of the rank tier, so the footprint is constant at
-//! 16 KiB and two workgroups stay resident on a 32 KiB device regardless of `k`.
-//!
-//! `B` and `D` are workgroup-uniform, so they stay in global memory. Staging a
-//! workgroup-uniform value buys nothing and spends the occupancy the staged run
-//! needs.
 
 #![allow(missing_docs)]
 
@@ -144,9 +114,6 @@ pub fn hals_sweep_gpu<F: Float>(
     #[comptime] k_cap: u32,
     #[comptime] wg_size: u32,
 ) {
-    // Declared at kernel scope before the bounds check. Safe to leave the tail
-    // threads early because no thread reads another thread's lane, so there is
-    // no barrier for them to skip.
     let mut stage = SharedMemory::<F>::new((wg_size * k_cap) as usize);
 
     let tx = UNIT_POS_X;
@@ -157,9 +124,6 @@ pub fn hals_sweep_gpu<F: Float>(
 
     let base = row as usize * k as usize;
 
-    // Load this thread's k-run. Adjacent threads read `k` apart, so the global
-    // side is not coalesced, but the whole workgroup's run is contiguous and
-    // every fetched line is fully consumed across the lanes.
     let mut s = 0u32;
     while s < k {
         stage[(s * wg_size + tx) as usize] = x[base + s as usize];

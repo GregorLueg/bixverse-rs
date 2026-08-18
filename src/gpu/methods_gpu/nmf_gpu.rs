@@ -4,55 +4,6 @@
 //! `W`, `H` and every intermediate on the device for the whole solve. Only the
 //! objective comes back, once per convergence check, as a small partials vector
 //! the host finishes in f64.
-//!
-//! ### Layout
-//!
-//! `V` is `m x n`, samples by features. Every device buffer is row-major f32:
-//!
-//! | buffer | shape | note |
-//! |---|---|---|
-//! | `v_t` (dense) | `[n, m]` | faer `V` reinterpreted |
-//! | `v_csr` / `v_csc` (sparse) | `(m, n)` | one upload each |
-//! | `w` | `[m, k]` | |
-//! | `h` | `[n, k]`, i.e. `H^T` | faer `H` reinterpreted |
-//! | `a` = `(W^T V)^T` | `[n, k]` | matches `h` |
-//! | `c` = `V H^T` | `[m, k]` | matches `w` |
-//! | `b` = `W^T W`, `d` = `H H^T` | `[k, k]` | |
-//!
-//! Holding `H` transposed is what makes everything line up. Both Grams become
-//! `Y^T Y` over a `[rows, k]` buffer, which is
-//! [`crate::gpu::linalg::cholesky_gpu::gram`] unchanged. Both sparse products
-//! become the plain SpMM pair in [`crate::gpu::linalg::spmm`] unchanged. Both
-//! dense products become one GEMM each off the same `v_t`. Both sweeps become
-//! one launch each over a contiguous k-run per thread. And rescaling a row of
-//! `H` is the same operation as rescaling a column of `W`, so the normalisation
-//! step needs one kernel rather than two.
-//!
-//! Only `W` needs a transpose at the host boundary. faer's `H` is `k x n`
-//! column-major, whose flat buffer already *is* `[n, k]` row-major, and `V` is
-//! `m x n` column-major, whose flat buffer already *is* `[n, m]`.
-//!
-//! That reinterpretation is a borrow only when the matrix has no padding between
-//! columns, which is not the general case: faer rounds the column stride up to a
-//! 16-element boundary, so a `k x n` matrix is contiguous only when `k` is a
-//! multiple of 16. For `V` that is nearly always satisfied, because `m` is the
-//! sample count, and it is the upload worth caring about. For `H` it usually is
-//! not, so a `k * n` copy runs instead, which is nothing next to one iteration's
-//! data product. Both paths are covered by tests; the shape decides which fires.
-//!
-//! ### Precision
-//!
-//! f32 on device. The objective is the one place that matters, because
-//! `||V||^2 - 2<A, H> + <B, D>` cancels three large terms into a small one, so
-//! the two inner products are reduced in f64 on the host exactly as the CPU
-//! path does. That leaves the loss resolvable down to roughly `1e-6 * ||V||^2`;
-//! the default `tol` of `1e-4` sits comfortably above it, but tolerances below
-//! about `1e-6` are not meaningful here.
-//!
-//! `||V||_F^2` is accumulated in f64 and cast, unlike the CPU backends which
-//! accumulate in `F`. Over a few hundred million entries that difference is
-//! real, so GPU relative losses are slightly different from CPU ones by
-//! construction rather than by accident.
 
 use cubecl::prelude::*;
 use cubecl_utils_rs::prelude::*;
@@ -78,9 +29,9 @@ use crate::methods::nmf_hals::{
 };
 use crate::prelude::*;
 
-///////////////////
+////////////////////
 // Layout helpers //
-///////////////////
+////////////////////
 
 /// The device-resident factor pair, `W` as `[m, k]` and `H^T` as `[n, k]`.
 type GpuFactors<R> = (GpuTensor<R, f32>, GpuTensor<R, f32>);
@@ -256,6 +207,10 @@ pub trait GpuNmfData<R: Runtime> {
     fn top_k_svd(&self, k: usize) -> Result<SvdResults<f32>, BixverseErrors>;
 }
 
+//////////////////////
+// GpuDenseNmfInput //
+//////////////////////
+
 /// Dense `V` on device, uploaded once as `V^T`.
 ///
 /// Holds the host matrix alongside the device copy so NNDSVD initialisation can
@@ -361,22 +316,11 @@ impl<R: Runtime> GpuNmfData<R> for GpuDenseNmfInput<'_, R> {
     }
 }
 
+///////////////////////
+// GpuSparseNmfInput //
+///////////////////////
+
 /// Sparse `V` on device, uploaded once in both orientations.
-///
-/// `W^T V` wants the CSC and `V H^T` wants the CSR, so both are resident. The
-/// host [`SparseInput`] is kept for the initialisation SVD, which means the
-/// matched pair exists twice, once per side. That mirrors what the CPU path
-/// already costs and is what lets NNDSVD reuse the validated Lanczos path.
-///
-/// The two directions are not symmetric in cost even though they do the same
-/// amount of arithmetic. Profiled at 50000 x 3000, k = 30, 5% dense, the CSC
-/// direction ran 9.0 ms per launch against the CSR direction's 4.1 ms. The
-/// difference is the dense operand: `V H^T` gathers from `H^T`, which is
-/// `[n, k]` and a few hundred kilobytes, so it stays cache-resident, while
-/// `W^T V` gathers from `W`, which is `[m, k]` and megabytes at single-cell
-/// scale, so every non-zero's gather goes further out. Nothing to do about it
-/// short of blocking the cell axis, and the pair together already runs at 56% of
-/// device bandwidth.
 pub struct GpuSparseNmfInput<R: Runtime> {
     /// CSR of `V`, shape `(m, n)`.
     v_csr: GpuCompressedSparseData<R, f32>,
@@ -484,9 +428,9 @@ impl<R: Runtime> GpuNmfData<R> for GpuSparseNmfInput<R> {
     }
 }
 
-/////////////
-// Scratch //
-/////////////
+///////////////////
+// NmfGpuScratch //
+///////////////////
 
 /// Every device buffer a GPU HALS solve reuses, allocated once.
 ///
@@ -523,8 +467,8 @@ pub struct NmfGpuScratch<R: Runtime> {
     /// Per-row partials for the objective, `[max(m, n)]`.
     ///
     /// Sized for both axes because the two frozen-factor refits reduce over
-    /// opposite ones: `H` frozen pairs `W` against `V H^T` over `m` rows, and `W`
-    /// frozen pairs `H^T` against `(W^T V)^T` over `n`.
+    /// opposite ones: `H` frozen pairs `W` against `V H^T` over `m` rows, and
+    /// `W` frozen pairs `H^T` against `(W^T V)^T` over `n`.
     obj_partials: GpuTensor<R, f32>,
     /// The non-negativity floor, as a one-element tensor.
     eps: GpuTensor<R, f32>,
@@ -562,14 +506,8 @@ impl<R: Runtime> NmfGpuScratch<R> {
             });
         }
 
-        // One Gram runs over m rows and the other over n, so size the partials
-        // for whichever splits further.
         let chunks = gram_chunks(m).max(gram_chunks(n));
 
-        // The dense products split independently: `(W^T V)^T` is `[n, k_max]`
-        // reducing over m, and `V H^T` is `[m, k_max]` reducing over n. Size for
-        // whichever needs more, and floor at one element so the sparse backend,
-        // which never reads this, still gets a bindable buffer.
         let gemm_elems = skinny_partial_elems(n, k_max, m)
             .max(skinny_partial_elems(m, k_max, n))
             .max(1);
@@ -689,8 +627,6 @@ where
     let d_host = scratch.d.clone().read(client)?;
 
     let inner_ha: f64 = partials[..n].iter().map(|&x| x as f64).sum();
-    // The `[k, k]` buffers are `k_max`-strided allocations used as a `k` prefix,
-    // so only the leading `k * k` entries are live.
     let inner_bd = inner_kk(&b_host[..k * k], &d_host[..k * k]);
 
     let loss = v.sq_frob() as f64 - 2.0 * inner_ha + inner_bd;
@@ -904,14 +840,10 @@ where
 /// Stabilised GPU NMF via random restarts.
 ///
 /// Runs [`nmf_hals_gpu`] `n_runs` times with `base_seed + i`, reusing the
-/// uploaded `V` and the whole scratch across every restart, and column-binds the
-/// resulting `W` matrices for downstream consensus clustering. As on the CPU the
-/// `init` field of `opts` is ignored and random initialisation is always used.
-///
-/// Restarts run one after another. There is one device, so there is nothing to
-/// gain from interleaving them, and a serial order removes the CPU path's
-/// dependence on the rayon pool while keeping the same seed-per-index
-/// reproducibility.
+/// uploaded `V` and the whole scratch across every restart, and column-binds
+/// the resulting `W` matrices for downstream consensus clustering. As on the
+/// CPU the `init` field of `opts` is ignored and random initialisation is
+/// always used.
 ///
 /// ### Params
 ///
