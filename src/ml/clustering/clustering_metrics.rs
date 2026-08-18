@@ -82,18 +82,15 @@ pub fn adjusted_rand_index(labels_true: &[usize], labels_pred: &[usize]) -> f64 
 ///
 /// The sums and the dot products are accumulated in `f64` regardless of `F`.
 /// This is not optional: `<x_i, S_c>` is approximately `|c|`, so
-/// `|c| - <x_i, S_c>` subtracts two nearly equal numbers to recover a value near
-/// zero for a tight cluster. Accumulating in `f32` understates a clean pair of
-/// clusters by around 0.2. It is the same reason
-/// [`crate::methods::nmf_hals::refit`] evaluates its objective in `f64`. The cost
-/// is a `n_clusters x dim` `f64` buffer, and no copy of `data`, which matters
-/// because `dim` can be the cell count on the single-cell path.
+/// `|c| - <x_i, S_c>` subtracts two nearly equal numbers to recover a value
+/// near zero for a tight cluster. Accumulating in `f32` understates a clean
+/// pair of clusters by around 0.2.
 ///
 /// Rows are assumed to have unit L2 norm. The caller owns that invariant; a
-/// non-normalised input silently gives a different (and meaningless) metric, and
-/// a score marginally outside `[-1, 1]` is the symptom. Singleton clusters score
-/// `0` by the usual convention, and clusters that are declared but empty are
-/// skipped rather than counted.
+/// non-normalised input silently gives a different (and meaningless) metric,
+/// and a score marginally outside `[-1, 1]` is the symptom. Singleton clusters
+/// score `0` by the usual convention, and clusters that are declared but empty
+/// are skipped rather than counted.
 ///
 /// ### Params
 ///
@@ -129,8 +126,6 @@ where
         return (vec![F::zero(); n], F::zero());
     }
 
-    // Cluster sums and sizes. S_c is the plain sum, not the mean: the closed
-    // form below wants the sum so that the size cancels explicitly.
     let mut sums = Mat::<f64>::zeros(n_clusters, dim);
     let mut sizes = vec![0usize; n_clusters];
     for (i, &label) in labels.iter().enumerate() {
@@ -148,9 +143,6 @@ where
 
     let per_row: Vec<F> = (0..n)
         .into_par_iter()
-        // One scratch buffer per thread: row i needs its dot product against
-        // every cluster sum, and walking `dim` once while accumulating all of
-        // them reads the data row a single time.
         .map_init(
             || vec![0f64; n_clusters],
             |dots, i| {
@@ -170,12 +162,6 @@ where
                     return F::zero();
                 }
 
-                // Own-cluster mean over the OTHER members. `dots[own]` includes
-                // the self term, so it is subtracted explicitly rather than
-                // folded into the count: that would assume `<x_i, x_i> == 1`,
-                // which f32 rows only satisfy to about 1e-7. The resulting bias
-                // is systematic across all members and is enough to push the
-                // score above 1 on tight clusters.
                 let others = (own_size - 1) as f64;
                 let a = (others - (dots[own] - self_dot)) / others;
 
@@ -198,8 +184,7 @@ where
                 let max_ab = a.max(b);
                 let score = if max_ab > 0.0 { (b - a) / max_ab } else { 0.0 };
 
-                // Deliberately not clamped to [-1, 1]. With the algebra above and
-                // genuinely unit-norm rows the score is in range; a value outside
+                // Deliberately not clamped to [-1, 1]. A value outside
                 // it means the caller's normalisation is off, and clamping would
                 // hide that as readily as it would hide a bug here.
                 F::from_f64(score).unwrap()

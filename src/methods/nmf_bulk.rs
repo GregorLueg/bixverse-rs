@@ -12,6 +12,29 @@ use crate::methods::nmf_hals::nmf_preprocessing::*;
 use crate::methods::nmf_hals::*;
 use crate::prelude::BixverseFloat;
 
+/////////////
+// Helpers //
+/////////////
+
+/// Parse the pre-processing string, warning and defaulting on unknown input.
+///
+/// ### Params
+///
+/// * `preprocessing` - String to parse, see [parse_nmf_processing].
+///
+/// ### Returns
+///
+/// The [NmfPreprocessing] to apply.
+fn resolve_preprocessing(preprocessing: &str) -> NmfPreprocessing {
+    parse_nmf_processing(preprocessing).unwrap_or_else(|| {
+        println!(
+            "Unknown string provided: {:?}. Using the default (No additional pre-processing)",
+            preprocessing
+        );
+        NmfPreprocessing::default()
+    })
+}
+
 ////////////////
 // Single run //
 ////////////////
@@ -212,27 +235,4 @@ where
         consensus_params,
         verbose,
     )
-}
-
-/////////////
-// Helpers //
-/////////////
-
-/// Parse the pre-processing string, warning and defaulting on unknown input.
-///
-/// ### Params
-///
-/// * `preprocessing` - String to parse, see [parse_nmf_processing].
-///
-/// ### Returns
-///
-/// The [NmfPreprocessing] to apply.
-fn resolve_preprocessing(preprocessing: &str) -> NmfPreprocessing {
-    parse_nmf_processing(preprocessing).unwrap_or_else(|| {
-        println!(
-            "Unknown string provided: {:?}. Using the default (No additional pre-processing)",
-            preprocessing
-        );
-        NmfPreprocessing::default()
-    })
 }

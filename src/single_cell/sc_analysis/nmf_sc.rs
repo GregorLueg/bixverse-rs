@@ -113,9 +113,9 @@ where
     Ok(res)
 }
 
-///////////////////////////
+////////////////////////
 // Consensus (sparse) //
-///////////////////////////
+////////////////////////
 
 /// Run consensus NMF at a single k (sparse)
 ///
@@ -175,8 +175,8 @@ where
 /// Sweep k and report consensus stability against reconstruction error (sparse)
 ///
 /// Sparse inputs (think single cell or spatial transcriptomics). Returns
-/// diagnostics only, so a wide `k_range` stays cheap. Pick the k where stability
-/// is high and the error curve has not yet flattened, then call
+/// diagnostics only, so a wide `k_range` stays cheap. Pick the k where
+/// stability is high and the error curve has not yet flattened, then call
 /// [nmf_consensus_run_sparse] there.
 ///
 /// ### Params
@@ -426,9 +426,9 @@ pub fn nmf_multiple_run_sc<S: SingleCellReading>(
     Ok(res)
 }
 
-///////////////////////////////////
+////////////////////////////////////
 // Consensus (single cells, disk) //
-///////////////////////////////////
+////////////////////////////////////
 
 /// Load a cell/gene subset from disk as a CSC matrix.
 ///
@@ -555,10 +555,10 @@ pub fn nmf_consensus_run_sc<S: SingleCellReading>(
 
 /// Sweep k on cells loaded from disk and report stability against error
 ///
-/// Diagnostics only, so a wide `k_range` stays cheap in memory. Pick the k where
-/// stability is high and the error curve has not yet flattened, then call
-/// [nmf_consensus_run_sc] there. The data is loaded once and reused across every
-/// k in the range.
+/// Diagnostics only, so a wide `k_range` stays cheap in memory. Pick the k
+/// where stability is high and the error curve has not yet flattened, then call
+/// [nmf_consensus_run_sc] there. The data is loaded once and reused across
+/// every k in the range.
 ///
 /// ### Params
 ///

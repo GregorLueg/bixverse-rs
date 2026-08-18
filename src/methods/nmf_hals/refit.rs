@@ -15,6 +15,88 @@ use super::{
 };
 use crate::prelude::*;
 
+/////////////
+// Helpers //
+/////////////
+
+/// Denominator for the relative-decrease convergence test.
+///
+/// Matches [`super::nmf_hals`]: `||V||_F^2` floored at one, so `tol` reads as a
+/// fraction of the total energy and tiny-norm inputs do not divide by a value
+/// below one.
+///
+/// ### Params
+///
+/// * `sq_frob` - The squared Frobenius norm of V.
+///
+/// ### Returns
+///
+/// The floored denominator.
+#[inline]
+fn relative_denominator<F: BixverseFloat>(sq_frob: F) -> F {
+    if sq_frob > F::one() {
+        sq_frob
+    } else {
+        F::one()
+    }
+}
+
+/// Reconstruction error with H frozen.
+///
+/// Evaluates `||V - WH||_F^2` as
+/// `||V||_F^2 - 2<W, V H^T> + <W^T W, H H^T>`. The middle term uses the
+/// precomputed `V H^T` rather than `W^T V`, so a changing W costs no extra pass
+/// over V. Accumulated in `f64` regardless of `F`, matching
+/// [`super::compute_objective`], because the two large terms nearly cancel.
+///
+/// ### Params
+///
+/// * `sq_frob_v` - Precomputed `||V||_F^2`.
+/// * `w` - Left factor `m x k`.
+/// * `vht` - Product `V H^T`, shape `m x k`.
+/// * `wtw` - Gram matrix `W^T W`, shape `k x k`.
+/// * `hht` - Gram matrix `H H^T`, shape `k x k`.
+///
+/// ### Returns
+///
+/// The scalar reconstruction error, clamped at zero.
+fn objective_fixed_h<F: BixverseFloat + Send + Sync>(
+    sq_frob_v: F,
+    w: MatRef<F>,
+    vht: MatRef<F>,
+    wtw: MatRef<F>,
+    hht: MatRef<F>,
+) -> F {
+    let m = w.nrows();
+    let k = w.ncols();
+
+    let inner_w_vht: f64 = (0..m)
+        .into_par_iter()
+        .with_min_len(64)
+        .map(|i| {
+            let mut acc = 0f64;
+            for r in 0..k {
+                acc += w[(i, r)].to_f64().unwrap() * vht[(i, r)].to_f64().unwrap();
+            }
+            acc
+        })
+        .reduce(|| 0f64, |x, y| x + y);
+
+    let mut inner_grams = 0f64;
+    for j in 0..k {
+        for i in 0..k {
+            inner_grams += wtw[(i, j)].to_f64().unwrap() * hht[(i, j)].to_f64().unwrap();
+        }
+    }
+
+    let result = sq_frob_v.to_f64().unwrap() - 2.0 * inner_w_vht + inner_grams;
+    F::from_f64(result.max(0.0)).unwrap()
+}
+
+////////////
+// Refits //
+////////////
+
 /// Refit H against a frozen W.
 ///
 /// Initialises H at `opts.eps` and runs HALS row sweeps until the relative
@@ -190,80 +272,6 @@ where
     }
 
     Ok((w, final_loss))
-}
-
-/// Denominator for the relative-decrease convergence test.
-///
-/// Matches [`super::nmf_hals`]: `||V||_F^2` floored at one, so `tol` reads as a
-/// fraction of the total energy and tiny-norm inputs do not divide by a value
-/// below one.
-///
-/// ### Params
-///
-/// * `sq_frob` - The squared Frobenius norm of V.
-///
-/// ### Returns
-///
-/// The floored denominator.
-#[inline]
-fn relative_denominator<F: BixverseFloat>(sq_frob: F) -> F {
-    if sq_frob > F::one() {
-        sq_frob
-    } else {
-        F::one()
-    }
-}
-
-/// Reconstruction error with H frozen.
-///
-/// Evaluates `||V - WH||_F^2` as
-/// `||V||_F^2 - 2<W, V H^T> + <W^T W, H H^T>`. The middle term uses the
-/// precomputed `V H^T` rather than `W^T V`, so a changing W costs no extra pass
-/// over V. Accumulated in `f64` regardless of `F`, matching
-/// [`super::compute_objective`], because the two large terms nearly cancel.
-///
-/// ### Params
-///
-/// * `sq_frob_v` - Precomputed `||V||_F^2`.
-/// * `w` - Left factor `m x k`.
-/// * `vht` - Product `V H^T`, shape `m x k`.
-/// * `wtw` - Gram matrix `W^T W`, shape `k x k`.
-/// * `hht` - Gram matrix `H H^T`, shape `k x k`.
-///
-/// ### Returns
-///
-/// The scalar reconstruction error, clamped at zero.
-fn objective_fixed_h<F: BixverseFloat + Send + Sync>(
-    sq_frob_v: F,
-    w: MatRef<F>,
-    vht: MatRef<F>,
-    wtw: MatRef<F>,
-    hht: MatRef<F>,
-) -> F {
-    let m = w.nrows();
-    let k = w.ncols();
-
-    let inner_w_vht: f64 = (0..m)
-        .into_par_iter()
-        .with_min_len(64)
-        .map(|i| {
-            let mut acc = 0f64;
-            for r in 0..k {
-                acc += w[(i, r)].to_f64().unwrap() * vht[(i, r)].to_f64().unwrap();
-            }
-            acc
-        })
-        .reduce(|| 0f64, |x, y| x + y);
-
-    let mut inner_grams = 0f64;
-    for j in 0..k {
-        for i in 0..k {
-            inner_grams += wtw[(i, j)].to_f64().unwrap() * hht[(i, j)].to_f64().unwrap();
-        }
-    }
-
-    let result = sq_frob_v.to_f64().unwrap() - 2.0 * inner_w_vht + inner_grams;
-    F::from_f64(result.max(0.0)).unwrap()
 }
 
 ///////////

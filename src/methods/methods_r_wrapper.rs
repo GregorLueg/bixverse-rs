@@ -11,6 +11,44 @@ use crate::methods::nmf_hals::consensus::{ConsensusParams, parse_consensus_targe
 use crate::methods::nmf_hals::{HalsOpts, parse_nmf_init};
 use crate::prelude::*;
 
+/////////////
+// Helpers //
+/////////////
+
+/// Read an R scalar as a non-negative count, accepting either an integer or a
+/// double.
+///
+/// R makes it easy to pass `10` (a double) where `10L` was meant, and
+/// `extendr`'s `as_integer` only accepts INTSXP, so a type-strict read silently
+/// falls back to the default. Negative values are floored at zero rather than
+/// cast straight to `usize`, where `-1` becomes `usize::MAX` and turns a loop
+/// bound into a hang.
+///
+/// ### Params
+///
+/// * `robj` - The R object to read.
+///
+/// ### Returns
+///
+/// The count, or `None` if the object is neither an integer nor a double.
+fn robj_to_count(robj: &Robj) -> Option<usize> {
+    robj_to_f64(robj).map(|v| if v > 0.0 { v.round() as usize } else { 0 })
+}
+
+/// Read an R scalar as an `f64`, accepting either an integer or a double.
+///
+/// ### Params
+///
+/// * `robj` - The R object to read.
+///
+/// ### Returns
+///
+/// The value, or `None` if the object is neither an integer nor a double.
+fn robj_to_f64(robj: &Robj) -> Option<f64> {
+    robj.as_real()
+        .or_else(|| robj.as_integer().map(|v| v as f64))
+}
+
 ///////////////
 // CisTarget //
 ///////////////
@@ -286,43 +324,9 @@ where
     }
 }
 
-//////////////////////
+/////////////////////
 // ConsensusParams //
-//////////////////////
-
-/// Read an R scalar as a non-negative count, accepting either an integer or a
-/// double.
-///
-/// R makes it easy to pass `10` (a double) where `10L` was meant, and
-/// `extendr`'s `as_integer` only accepts INTSXP, so a type-strict read silently
-/// falls back to the default. Negative values are floored at zero rather than
-/// cast straight to `usize`, where `-1` becomes `usize::MAX` and turns a loop
-/// bound into a hang.
-///
-/// ### Params
-///
-/// * `robj` - The R object to read.
-///
-/// ### Returns
-///
-/// The count, or `None` if the object is neither an integer nor a double.
-fn robj_to_count(robj: &Robj) -> Option<usize> {
-    robj_to_f64(robj).map(|v| if v > 0.0 { v.round() as usize } else { 0 })
-}
-
-/// Read an R scalar as an `f64`, accepting either an integer or a double.
-///
-/// ### Params
-///
-/// * `robj` - The R object to read.
-///
-/// ### Returns
-///
-/// The value, or `None` if the object is neither an integer nor a double.
-fn robj_to_f64(robj: &Robj) -> Option<f64> {
-    robj.as_real()
-        .or_else(|| robj.as_integer().map(|v| v as f64))
-}
+/////////////////////
 
 impl<T> ConsensusParams<T>
 where
@@ -331,14 +335,14 @@ where
     /// Generate [ConsensusParams] from R list
     ///
     /// A `density_threshold` at or above 2 is taken as "no filtering", since
-    /// cosine distance cannot exceed 2. That gives R a single numeric knob rather
-    /// than a numeric plus a toggle. `n_neighbours = 0` means "pick for me", the
-    /// same as omitting it.
+    /// cosine distance cannot exceed 2. That gives R a single numeric knob
+    /// rather than a numeric plus a toggle. `n_neighbours = 0` means
+    /// "pick for me", the same as omitting it.
     ///
     /// Every numeric field accepts an R integer or a double, because
     /// `density_threshold = 2L` silently failing to disable the filter is the
-    /// exact opposite of what the caller asked for. Negative counts are floored at
-    /// zero rather than wrapping into a huge `usize`.
+    /// exact opposite of what the caller asked for. Negative counts are floored
+    /// at zero rather than wrapping into a huge `usize`.
     ///
     /// ### Params
     ///

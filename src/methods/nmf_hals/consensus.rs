@@ -23,38 +23,21 @@ use crate::ml::clustering::clustering_metrics::silhouette_cosine_unit;
 use crate::ml::clustering::k_means::{KMeansParamsWrappers, k_means_clusters};
 use crate::prelude::*;
 
-///////////////
-// Constants //
-///////////////
+////////////
+// Consts //
+////////////
 
 /// Fraction of `n_runs` used as the local neighbourhood size for the density
 /// filter. cNMF's `local_neighborhood_size` default.
 const LOCAL_NEIGHBOURHOOD_FRACTION: f64 = 0.3;
 
 /// Default cutoff for the density filter, as a mean COSINE distance. Cosine
-/// distance is bounded by 2, so any value at or above 2 leaves every component in
-/// place.
-///
-/// Not directly comparable to cNMF's `--local-density-threshold`, which is a mean
-/// Euclidean distance between L2-normalised spectra. On unit rows
-/// `d_euc = sqrt(2 * d_cos)`, so cNMF's own default of 0.5 corresponds to a cosine
-/// distance of 0.125 and this default of 0.5 corresponds to a Euclidean distance
-/// of 1.0. Transferring a threshold between the two therefore needs converting;
-/// this one is deliberately the looser end, since over-pruning shows up as a
-/// `consensus_failed` row while under-pruning only softens the stability curve.
+/// distance is bounded by 2, so any value at or above 2 leaves every component
+/// in place.
 const DEFAULT_DENSITY_THRESHOLD: f64 = 0.5;
 
 /// k-means restarts kept per consensus step, lowest inertia winning. cNMF leans
 /// on scikit-learn's `n_init = 10` for the same purpose.
-///
-/// Measured on a 200x120 rank-5 problem with 5% noise, sweeping k over 2..=8 with
-/// 20 restarts, across three seeds: the argmax of the stability curve is the true
-/// rank for every one of `n_init` 1, 3 and 10, and the peak value agrees to four
-/// decimals. What `n_init = 1` costs is the shape away from the peak, where the
-/// value moves by up to 0.08 between seeds. Three recovers almost all of what ten
-/// buys, and the k-means runs on `k * n_runs` points, so it is the cheapest stage
-/// in the pipeline; tripling it is close to free. Set it to 1 if you would rather
-/// have a straight cNMF port than a smoother curve.
 const DEFAULT_KMEANS_N_INIT: usize = 3;
 
 /// Default Lloyd iterations per k-means restart.
@@ -74,13 +57,13 @@ const DEGENERATE_NORM_TOLERANCE: f64 = 1e-12;
 pub enum ConsensusTarget {
     /// Rows of the per-run H matrices stacked vertically, L2-normalised. These
     /// are the programs over features (the spectra), and what cNMF clusters. H
-    /// rows carry the magnitudes out of [`super::nmf_hals`], so normalisation is
-    /// required rather than cosmetic.
+    /// rows carry the magnitudes out of [`super::nmf_hals`], so normalisation
+    /// is required rather than cosmetic.
     #[default]
     HRows,
     /// Columns of `w_all`. Already unit L2 by construction, but these are
-    /// sample-side activity patterns rather than the interpretable programs. The
-    /// clustering then runs in sample space, which is cheap for bulk and
+    /// sample-side activity patterns rather than the interpretable programs.
+    /// The clustering then runs in sample space, which is cheap for bulk and
     /// expensive on the single-cell path, where that is the cell count.
     WColumns,
 }
@@ -270,360 +253,6 @@ pub struct KSweepEntry<F: BixverseFloat> {
     pub n_empty_clusters: usize,
     /// Restarts that met the HALS tolerance.
     pub n_converged: usize,
-}
-
-///////////////
-// Workhorse //
-///////////////
-
-/// Cluster the pooled components of an existing set of restarts.
-///
-/// Split out from [`nmf_consensus`] so a density threshold can be re-picked from
-/// the `local_density` histogram without paying for the NMF restarts again, which
-/// is how cNMF is meant to be driven. That loop is Rust-only for now: no R-facing
-/// entry point round-trips a [`StabilisedNmfResult`], so from R a new threshold
-/// currently means redoing the restarts.
-///
-/// Steps: pool and L2-normalise the chosen factor, drop collapsed components,
-/// compute each component's mean cosine distance to its nearest neighbours and
-/// drop those above the threshold, k-means the survivors into k groups, score the
-/// silhouette, and take the per-cluster median.
-///
-/// The k-means runs on unit-norm rows under squared Euclidean rather than cosine
-/// distance. On unit-norm rows the two agree up to `||a - b||^2 = 2(1 - cos)`,
-/// this is what cNMF's scikit-learn call does, and ann-search-rs silently
-/// downgrades its accelerated Lloyd paths under `Dist::Cosine` because cosine has
-/// no triangle inequality.
-///
-/// ### Params
-///
-/// * `res` - Restarts from [`super::stabilised_nmf`].
-/// * `k` - Rank the restarts were run at. Must be at least 2.
-/// * `params` - Consensus options; see [`ConsensusParams`].
-/// * `verbose` - If `0` -> silent, `1` or higher prints progress.
-///
-/// ### Returns
-///
-/// The [`ConsensusClusters`] diagnostics, or
-/// [`BixverseErrors::NmfConsensusInvalidK`] /
-/// [`BixverseErrors::NmfConsensusTooFewRuns`] for bad arguments,
-/// [`BixverseErrors::NmfConsensusKMismatch`] if `k` does not match the restarts,
-/// or [`BixverseErrors::NmfConsensusTooFewComponents`] if the density filter left
-/// fewer than `k` survivors. An empty cluster is reported in the result rather
-/// than raised.
-pub fn consensus_from_restarts<F>(
-    res: &StabilisedNmfResult<F>,
-    k: usize,
-    params: &ConsensusParams<F>,
-    verbose: usize,
-) -> Result<ConsensusClusters<F>, BixverseErrors>
-where
-    F: BixverseFloat + AnnSearchFloat,
-{
-    let n_runs = res.h_per_run.len();
-    if k < 2 {
-        return Err(BixverseErrors::NmfConsensusInvalidK { k });
-    }
-    if n_runs < 2 {
-        return Err(BixverseErrors::NmfConsensusTooFewRuns { n_runs });
-    }
-    // k must be the rank the restarts were actually run at, or the pooling would
-    // slice the per-run H matrices along the wrong stride. `w_all` is checked
-    // separately: the fields of `StabilisedNmfResult` are public, so a spliced
-    // value can disagree with `h_per_run` and would otherwise index out of
-    // bounds inside faer rather than erroring.
-    let restart_k = res.h_per_run[0].nrows();
-    if restart_k != k || res.w_all.ncols() != k * n_runs {
-        return Err(BixverseErrors::NmfConsensusKMismatch {
-            requested: k,
-            restarts: restart_k,
-        });
-    }
-
-    let verbosity = parse_verbosity_level(verbose);
-    let pooled = pool_components(res, k, params.target);
-    let n_pooled = pooled.nrows();
-
-    // Collapsed components are dropped before anything touches cosine distance.
-    let tol = F::from_f64(DEGENERATE_NORM_TOLERANCE).unwrap();
-    let mut local_density = vec![F::infinity(); n_pooled];
-    let alive: Vec<usize> = (0..n_pooled)
-        .filter(|&i| row_norm(pooled.as_ref(), i) > tol)
-        .collect();
-
-    if alive.len() < k {
-        return Err(BixverseErrors::NmfConsensusTooFewComponents {
-            k,
-            n_surviving: alive.len(),
-        });
-    }
-
-    // Local density over the non-collapsed components only.
-    let alive_mat = subset_rows(pooled.as_ref(), &alive);
-    let l = resolve_n_neighbours(params.n_neighbours, n_runs, alive.len());
-    let densities = local_densities(alive_mat.as_ref(), l, verbose)?;
-    for (&idx, &d) in alive.iter().zip(densities.iter()) {
-        local_density[idx] = d;
-    }
-
-    let kept: Vec<usize> = match params.density_threshold {
-        Some(threshold) => alive
-            .iter()
-            .copied()
-            .filter(|&i| local_density[i] <= threshold)
-            .collect(),
-        None => alive.clone(),
-    };
-
-    if kept.len() < k {
-        return Err(BixverseErrors::NmfConsensusTooFewComponents {
-            k,
-            n_surviving: kept.len(),
-        });
-    }
-
-    if verbosity.normal_verbosity() {
-        println!(
-            "  Consensus NMF (k = {}): {} of {} components kept, {} neighbours per density estimate",
-            k,
-            kept.len(),
-            n_pooled,
-            l
-        );
-    }
-
-    let survivors = subset_rows(pooled.as_ref(), &kept);
-    let assignments = cluster_best_of_n(survivors.as_ref(), k, params)?;
-
-    let mut sizes = vec![0usize; k];
-    for &label in &assignments {
-        sizes[label] += 1;
-    }
-    let n_empty_clusters = sizes.iter().filter(|&&s| s == 0).count();
-
-    let (silhouette, stability) = silhouette_cosine_unit(survivors.as_ref(), &assignments, k);
-    let consensus = median_consensus(survivors.as_ref(), &assignments, k);
-
-    let mut labels = vec![None; n_pooled];
-    for (&idx, &label) in kept.iter().zip(assignments.iter()) {
-        labels[idx] = Some(label);
-    }
-
-    Ok(ConsensusClusters {
-        labels,
-        local_density,
-        n_dropped: n_pooled - kept.len(),
-        kept,
-        silhouette,
-        stability,
-        sizes,
-        consensus,
-        n_empty_clusters,
-    })
-}
-
-//////////////////
-// Entry points //
-//////////////////
-
-/// Consensus NMF at a single k.
-///
-/// Runs `n_runs` random restarts, clusters the pooled components, and refits the
-/// partner factor against the consensus one. For
-/// [`ConsensusTarget::HRows`] the consensus is H and W is refit against it, so
-/// the returned H rows have unit L2 norm and W carries the magnitudes. For
-/// [`ConsensusTarget::WColumns`] it is the other way round.
-///
-/// ### Params
-///
-/// * `v` - Input matrix backend.
-/// * `k` - Number of components. Must be at least 2.
-/// * `n_runs` - Number of random restarts. Must be at least 2.
-/// * `base_seed` - Seed offset; restart `i` uses `base_seed + i`.
-/// * `opts` - HALS options. The `init` field is ignored by the restarts.
-/// * `params` - Optional [`ConsensusParams`], defaulted if `None`.
-/// * `verbose` - If `0` -> silent, `1` for normal, `2` for detailed verbosity.
-///
-/// ### Returns
-///
-/// A [`ConsensusNmfResult`], or a [`BixverseErrors`]. Errors on an empty cluster,
-/// since the consensus factor would carry a zero row and the refit would be
-/// degenerate.
-pub fn nmf_consensus<F, In>(
-    v: &In,
-    k: usize,
-    n_runs: usize,
-    base_seed: u64,
-    opts: &HalsOpts<F>,
-    params: Option<ConsensusParams<F>>,
-    verbose: usize,
-) -> Result<ConsensusNmfResult<F>, BixverseErrors>
-where
-    F: BixverseFloat + AnnSearchFloat + Send + Sync,
-    In: NmfInput<F> + Sync,
-{
-    let params = params.unwrap_or_default();
-    if k < 2 {
-        return Err(BixverseErrors::NmfConsensusInvalidK { k });
-    }
-    if n_runs < 2 {
-        return Err(BixverseErrors::NmfConsensusTooFewRuns { n_runs });
-    }
-
-    let restarts = stabilised_nmf(v, k, n_runs, base_seed, opts, verbose)?;
-    let clusters = consensus_from_restarts(&restarts, k, &params, verbose)?;
-
-    if let Some(cluster) = clusters.sizes.iter().position(|&s| s == 0) {
-        return Err(BixverseErrors::NmfConsensusEmptyCluster { cluster, k });
-    }
-
-    let sq_frob = v.sq_frob();
-    let (w, h, loss) = match params.target {
-        ConsensusTarget::HRows => {
-            // The consensus is already k x n, so it is H directly.
-            let h = clusters.consensus.clone();
-            let (w, loss) = nmf_refit_w(v, h.as_ref(), opts)?;
-            (w, h, loss)
-        }
-        ConsensusTarget::WColumns => {
-            // The consensus is k x m, so transpose it into an m x k W.
-            let w = clusters.consensus.transpose().to_owned();
-            let (h, loss) = nmf_refit_h(v, w.as_ref(), opts)?;
-            (w, h, loss)
-        }
-    };
-
-    let denom = if sq_frob > F::zero() {
-        sq_frob
-    } else {
-        F::one()
-    };
-    let run_errors: Vec<F> = restarts.losses.iter().map(|&l| l / denom).collect();
-
-    Ok(ConsensusNmfResult {
-        w,
-        h,
-        error: loss / denom,
-        clusters,
-        run_errors,
-    })
-}
-
-/// Sweep k and report stability against error.
-///
-/// One row per k, with no refit and no factors retained, so sweeping a wide
-/// range stays cheap in memory. Pick the k where stability is high and the error
-/// curve has not yet flattened, then call [`nmf_consensus`] there.
-///
-/// k is swept sequentially: [`super::stabilised_nmf`] already parallelises across
-/// its restarts and sizes its inner pool against the core count, so nesting
-/// another layer here would only oversubscribe.
-///
-/// Two conditions that are properties of a particular k rather than of the input
-/// are recorded rather than raised, so one awkward rank does not take the whole
-/// sweep down: an empty cluster (see `n_empty_clusters`) and a density filter
-/// that left fewer than k components (see `consensus_failed`, with `stability`
-/// set to `NaN`). Anything else aborts.
-///
-/// ### Params
-///
-/// * `v` - Input matrix backend.
-/// * `k_range` - Ranks to evaluate. Must be non-empty, every entry at least 2.
-/// * `n_runs` - Restarts per k. Must be at least 2.
-/// * `base_seed` - Seed offset. Each k gets a disjoint block of seeds, so two
-///   ranks never share a restart.
-/// * `opts` - HALS options. The `init` field is ignored by the restarts.
-/// * `params` - Optional [`ConsensusParams`], defaulted if `None`.
-/// * `verbose` - If `0` -> silent, `1` for normal, `2` for detailed verbosity.
-///
-/// ### Returns
-///
-/// One [`KSweepEntry`] per entry of `k_range`, in the order given.
-pub fn nmf_k_sweep<F, In>(
-    v: &In,
-    k_range: &[usize],
-    n_runs: usize,
-    base_seed: u64,
-    opts: &HalsOpts<F>,
-    params: Option<ConsensusParams<F>>,
-    verbose: usize,
-) -> Result<Vec<KSweepEntry<F>>, BixverseErrors>
-where
-    F: BixverseFloat + AnnSearchFloat + Send + Sync,
-    In: NmfInput<F> + Sync,
-{
-    if k_range.is_empty() {
-        return Err(BixverseErrors::NmfKSweepEmptyRange);
-    }
-    if n_runs < 2 {
-        return Err(BixverseErrors::NmfConsensusTooFewRuns { n_runs });
-    }
-    if let Some(&k) = k_range.iter().find(|&&k| k < 2) {
-        return Err(BixverseErrors::NmfConsensusInvalidK { k });
-    }
-
-    let params = params.unwrap_or_default();
-    let verbosity = parse_verbosity_level(verbose);
-    let sq_frob = v.sq_frob();
-    let denom = if sq_frob > F::zero() {
-        sq_frob
-    } else {
-        F::one()
-    };
-
-    let mut out = Vec::with_capacity(k_range.len());
-    for (i, &k) in k_range.iter().enumerate() {
-        if verbosity.normal_verbosity() {
-            println!(
-                "Running NMF k sweep: k = {} ({} of {})",
-                k,
-                i + 1,
-                k_range.len()
-            );
-        }
-
-        // Disjoint seed block per k, so restarts are never shared between ranks.
-        let seed = base_seed + (i * n_runs) as u64;
-        let restarts = stabilised_nmf(v, k, n_runs, seed, opts, verbose.saturating_sub(1))?;
-
-        // Over-pruning is a property of this k and the threshold, not a broken
-        // input, so it is recorded and the sweep carries on. Every other error is
-        // a genuine failure and still aborts.
-        let clusters = match consensus_from_restarts(
-            &restarts,
-            k,
-            &params,
-            verbose.saturating_sub(1),
-        ) {
-            Ok(clusters) => Some(clusters),
-            Err(BixverseErrors::NmfConsensusTooFewComponents { n_surviving, .. }) => {
-                if verbosity.normal_verbosity() {
-                    println!(
-                        "  k = {}: only {} components survived the density filter (need {}); stability not scored",
-                        k, n_surviving, k
-                    );
-                }
-                None
-            }
-            Err(e) => return Err(e),
-        };
-
-        out.push(KSweepEntry {
-            k,
-            stability: clusters
-                .as_ref()
-                .map(|c| c.stability)
-                .unwrap_or_else(F::nan),
-            best_error: restarts.losses[restarts.best_idx] / denom,
-            median_error: median(&restarts.losses) / denom,
-            consensus_failed: clusters.is_none(),
-            n_dropped: clusters.as_ref().map(|c| c.n_dropped).unwrap_or(k * n_runs),
-            n_empty_clusters: clusters.as_ref().map(|c| c.n_empty_clusters).unwrap_or(0),
-            n_converged: restarts.converged.iter().filter(|&&c| c).count(),
-        });
-    }
-
-    Ok(out)
 }
 
 /////////////
@@ -958,6 +587,352 @@ fn median_in_place<F: BixverseFloat>(values: &mut [F]) -> F {
 fn median<F: BixverseFloat>(values: &[F]) -> F {
     let mut copy = values.to_vec();
     median_in_place(&mut copy)
+}
+
+///////////////
+// Workhorse //
+///////////////
+
+/// Cluster the pooled components of an existing set of restarts.
+///
+/// Split out from [`nmf_consensus`] so a density threshold can be re-picked
+/// from the `local_density` histogram without paying for the NMF restarts
+/// again, which is how cNMF is meant to be driven.
+///
+/// Steps: pool and L2-normalise the chosen factor, drop collapsed components,
+/// compute each component's mean cosine distance to its nearest neighbours and
+/// drop those above the threshold, k-means the survivors into k groups, score
+/// the silhouette, and take the per-cluster median.
+///
+/// The k-means runs on unit-norm rows under squared Euclidean rather than
+/// cosine distance. On unit-norm rows the two agree up to
+/// `||a - b||^2 = 2(1 - cos)`.
+///
+/// ### Params
+///
+/// * `res` - Restarts from [`super::stabilised_nmf`].
+/// * `k` - Rank the restarts were run at. Must be at least 2.
+/// * `params` - Consensus options; see [`ConsensusParams`].
+/// * `verbose` - If `0` -> silent, `1` or higher prints progress.
+///
+/// ### Returns
+///
+/// The [`ConsensusClusters`] diagnostics, or
+/// [`BixverseErrors::NmfConsensusInvalidK`] /
+/// [`BixverseErrors::NmfConsensusTooFewRuns`] for bad arguments,
+/// [`BixverseErrors::NmfConsensusKMismatch`] if `k` does not match the restarts,
+/// or [`BixverseErrors::NmfConsensusTooFewComponents`] if the density filter left
+/// fewer than `k` survivors. An empty cluster is reported in the result rather
+/// than raised.
+pub fn consensus_from_restarts<F>(
+    res: &StabilisedNmfResult<F>,
+    k: usize,
+    params: &ConsensusParams<F>,
+    verbose: usize,
+) -> Result<ConsensusClusters<F>, BixverseErrors>
+where
+    F: BixverseFloat + AnnSearchFloat,
+{
+    let n_runs = res.h_per_run.len();
+    if k < 2 {
+        return Err(BixverseErrors::NmfConsensusInvalidK { k });
+    }
+    if n_runs < 2 {
+        return Err(BixverseErrors::NmfConsensusTooFewRuns { n_runs });
+    }
+    // k must be the rank the restarts were actually run at, or the pooling
+    // would slice the per-run H matrices along the wrong stride. `w_all` is
+    // checked separately: the fields of `StabilisedNmfResult` are public, so a
+    // spliced value can disagree with `h_per_run` and would otherwise index out
+    // of bounds inside faer rather than erroring.
+    let restart_k = res.h_per_run[0].nrows();
+    if restart_k != k || res.w_all.ncols() != k * n_runs {
+        return Err(BixverseErrors::NmfConsensusKMismatch {
+            requested: k,
+            restarts: restart_k,
+        });
+    }
+
+    let verbosity = parse_verbosity_level(verbose);
+    let pooled = pool_components(res, k, params.target);
+    let n_pooled = pooled.nrows();
+
+    // Collapsed components are dropped before anything touches cosine distance.
+    let tol = F::from_f64(DEGENERATE_NORM_TOLERANCE).unwrap();
+    let mut local_density = vec![F::infinity(); n_pooled];
+    let alive: Vec<usize> = (0..n_pooled)
+        .filter(|&i| row_norm(pooled.as_ref(), i) > tol)
+        .collect();
+
+    if alive.len() < k {
+        return Err(BixverseErrors::NmfConsensusTooFewComponents {
+            k,
+            n_surviving: alive.len(),
+        });
+    }
+
+    // Local density over the non-collapsed components only.
+    let alive_mat = subset_rows(pooled.as_ref(), &alive);
+    let l = resolve_n_neighbours(params.n_neighbours, n_runs, alive.len());
+    let densities = local_densities(alive_mat.as_ref(), l, verbose)?;
+    for (&idx, &d) in alive.iter().zip(densities.iter()) {
+        local_density[idx] = d;
+    }
+
+    let kept: Vec<usize> = match params.density_threshold {
+        Some(threshold) => alive
+            .iter()
+            .copied()
+            .filter(|&i| local_density[i] <= threshold)
+            .collect(),
+        None => alive.clone(),
+    };
+
+    if kept.len() < k {
+        return Err(BixverseErrors::NmfConsensusTooFewComponents {
+            k,
+            n_surviving: kept.len(),
+        });
+    }
+
+    if verbosity.normal_verbosity() {
+        println!(
+            "  Consensus NMF (k = {}): {} of {} components kept, {} neighbours per density estimate",
+            k,
+            kept.len(),
+            n_pooled,
+            l
+        );
+    }
+
+    let survivors = subset_rows(pooled.as_ref(), &kept);
+    let assignments = cluster_best_of_n(survivors.as_ref(), k, params)?;
+
+    let mut sizes = vec![0usize; k];
+    for &label in &assignments {
+        sizes[label] += 1;
+    }
+    let n_empty_clusters = sizes.iter().filter(|&&s| s == 0).count();
+
+    let (silhouette, stability) = silhouette_cosine_unit(survivors.as_ref(), &assignments, k);
+    let consensus = median_consensus(survivors.as_ref(), &assignments, k);
+
+    let mut labels = vec![None; n_pooled];
+    for (&idx, &label) in kept.iter().zip(assignments.iter()) {
+        labels[idx] = Some(label);
+    }
+
+    Ok(ConsensusClusters {
+        labels,
+        local_density,
+        n_dropped: n_pooled - kept.len(),
+        kept,
+        silhouette,
+        stability,
+        sizes,
+        consensus,
+        n_empty_clusters,
+    })
+}
+
+//////////////////
+// Entry points //
+//////////////////
+
+/// Consensus NMF at a single k.
+///
+/// Runs `n_runs` random restarts, clusters the pooled components, and refits the
+/// partner factor against the consensus one. For
+/// [`ConsensusTarget::HRows`] the consensus is H and W is refit against it, so
+/// the returned H rows have unit L2 norm and W carries the magnitudes. For
+/// [`ConsensusTarget::WColumns`] it is the other way round.
+///
+/// ### Params
+///
+/// * `v` - Input matrix backend.
+/// * `k` - Number of components. Must be at least 2.
+/// * `n_runs` - Number of random restarts. Must be at least 2.
+/// * `base_seed` - Seed offset; restart `i` uses `base_seed + i`.
+/// * `opts` - HALS options. The `init` field is ignored by the restarts.
+/// * `params` - Optional [`ConsensusParams`], defaulted if `None`.
+/// * `verbose` - If `0` -> silent, `1` for normal, `2` for detailed verbosity.
+///
+/// ### Returns
+///
+/// A [`ConsensusNmfResult`], or a [`BixverseErrors`]. Errors on an empty cluster,
+/// since the consensus factor would carry a zero row and the refit would be
+/// degenerate.
+pub fn nmf_consensus<F, In>(
+    v: &In,
+    k: usize,
+    n_runs: usize,
+    base_seed: u64,
+    opts: &HalsOpts<F>,
+    params: Option<ConsensusParams<F>>,
+    verbose: usize,
+) -> Result<ConsensusNmfResult<F>, BixverseErrors>
+where
+    F: BixverseFloat + AnnSearchFloat + Send + Sync,
+    In: NmfInput<F> + Sync,
+{
+    let params = params.unwrap_or_default();
+    if k < 2 {
+        return Err(BixverseErrors::NmfConsensusInvalidK { k });
+    }
+    if n_runs < 2 {
+        return Err(BixverseErrors::NmfConsensusTooFewRuns { n_runs });
+    }
+
+    let restarts = stabilised_nmf(v, k, n_runs, base_seed, opts, verbose)?;
+    let clusters = consensus_from_restarts(&restarts, k, &params, verbose)?;
+
+    if let Some(cluster) = clusters.sizes.iter().position(|&s| s == 0) {
+        return Err(BixverseErrors::NmfConsensusEmptyCluster { cluster, k });
+    }
+
+    let sq_frob = v.sq_frob();
+    let (w, h, loss) = match params.target {
+        ConsensusTarget::HRows => {
+            // The consensus is already k x n, so it is H directly.
+            let h = clusters.consensus.clone();
+            let (w, loss) = nmf_refit_w(v, h.as_ref(), opts)?;
+            (w, h, loss)
+        }
+        ConsensusTarget::WColumns => {
+            // The consensus is k x m, so transpose it into an m x k W.
+            let w = clusters.consensus.transpose().to_owned();
+            let (h, loss) = nmf_refit_h(v, w.as_ref(), opts)?;
+            (w, h, loss)
+        }
+    };
+
+    let denom = if sq_frob > F::zero() {
+        sq_frob
+    } else {
+        F::one()
+    };
+    let run_errors: Vec<F> = restarts.losses.iter().map(|&l| l / denom).collect();
+
+    Ok(ConsensusNmfResult {
+        w,
+        h,
+        error: loss / denom,
+        clusters,
+        run_errors,
+    })
+}
+
+/// Sweep k and report stability against error.
+///
+/// One row per k, with no refit and no factors retained, so sweeping a wide
+/// range stays cheap in memory. Pick the k where stability is high and the
+/// error curve has not yet flattened, then call [`nmf_consensus`] there.
+///
+/// k is swept sequentially: [`super::stabilised_nmf`] already parallelises
+/// across its restarts and sizes its inner pool against the core count, so
+/// nesting another layer here would only oversubscribe.
+///
+/// Two conditions that are properties of a particular k rather than of the
+/// input are recorded rather than raised, so one awkward rank does not take the
+/// whole sweep down: an empty cluster (see `n_empty_clusters`) and a density
+/// filter that left fewer than k components (see `consensus_failed`, with
+/// `stability` set to `NaN`). Anything else aborts.
+///
+/// ### Params
+///
+/// * `v` - Input matrix backend.
+/// * `k_range` - Ranks to evaluate. Must be non-empty, every entry at least 2.
+/// * `n_runs` - Restarts per k. Must be at least 2.
+/// * `base_seed` - Seed offset. Each k gets a disjoint block of seeds, so two
+///   ranks never share a restart.
+/// * `opts` - HALS options. The `init` field is ignored by the restarts.
+/// * `params` - Optional [`ConsensusParams`], defaulted if `None`.
+/// * `verbose` - If `0` -> silent, `1` for normal, `2` for detailed verbosity.
+///
+/// ### Returns
+///
+/// One [`KSweepEntry`] per entry of `k_range`, in the order given.
+pub fn nmf_k_sweep<F, In>(
+    v: &In,
+    k_range: &[usize],
+    n_runs: usize,
+    base_seed: u64,
+    opts: &HalsOpts<F>,
+    params: Option<ConsensusParams<F>>,
+    verbose: usize,
+) -> Result<Vec<KSweepEntry<F>>, BixverseErrors>
+where
+    F: BixverseFloat + AnnSearchFloat + Send + Sync,
+    In: NmfInput<F> + Sync,
+{
+    if k_range.is_empty() {
+        return Err(BixverseErrors::NmfKSweepEmptyRange);
+    }
+    if n_runs < 2 {
+        return Err(BixverseErrors::NmfConsensusTooFewRuns { n_runs });
+    }
+    if let Some(&k) = k_range.iter().find(|&&k| k < 2) {
+        return Err(BixverseErrors::NmfConsensusInvalidK { k });
+    }
+
+    let params = params.unwrap_or_default();
+    let verbosity = parse_verbosity_level(verbose);
+    let sq_frob = v.sq_frob();
+    let denom = if sq_frob > F::zero() {
+        sq_frob
+    } else {
+        F::one()
+    };
+
+    let mut out = Vec::with_capacity(k_range.len());
+    for (i, &k) in k_range.iter().enumerate() {
+        if verbosity.normal_verbosity() {
+            println!(
+                "Running NMF k sweep: k = {} ({} of {})",
+                k,
+                i + 1,
+                k_range.len()
+            );
+        }
+
+        let seed = base_seed + (i * n_runs) as u64;
+        let restarts = stabilised_nmf(v, k, n_runs, seed, opts, verbose.saturating_sub(1))?;
+
+        let clusters = match consensus_from_restarts(
+            &restarts,
+            k,
+            &params,
+            verbose.saturating_sub(1),
+        ) {
+            Ok(clusters) => Some(clusters),
+            Err(BixverseErrors::NmfConsensusTooFewComponents { n_surviving, .. }) => {
+                if verbosity.normal_verbosity() {
+                    println!(
+                        "  k = {}: only {} components survived the density filter (need {}); stability not scored",
+                        k, n_surviving, k
+                    );
+                }
+                None
+            }
+            Err(e) => return Err(e),
+        };
+
+        out.push(KSweepEntry {
+            k,
+            stability: clusters
+                .as_ref()
+                .map(|c| c.stability)
+                .unwrap_or_else(F::nan),
+            best_error: restarts.losses[restarts.best_idx] / denom,
+            median_error: median(&restarts.losses) / denom,
+            consensus_failed: clusters.is_none(),
+            n_dropped: clusters.as_ref().map(|c| c.n_dropped).unwrap_or(k * n_runs),
+            n_empty_clusters: clusters.as_ref().map(|c| c.n_empty_clusters).unwrap_or(0),
+            n_converged: restarts.converged.iter().filter(|&&c| c).count(),
+        });
+    }
+
+    Ok(out)
 }
 
 ///////////
