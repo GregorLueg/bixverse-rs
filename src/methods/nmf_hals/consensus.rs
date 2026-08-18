@@ -189,6 +189,7 @@ fn resolve_n_neighbours(n_neighbours: Option<usize>, n_runs: usize, n_components
 /////////////
 
 /// Diagnostics from clustering the pooled components at one k.
+#[derive(Clone, Debug)]
 pub struct ConsensusClusters<F: BixverseFloat> {
     /// Cluster label per pooled component, `None` if the component was dropped.
     /// Length `k * n_runs`, indexed the same way as `w_all`'s columns.
@@ -216,6 +217,7 @@ pub struct ConsensusClusters<F: BixverseFloat> {
 }
 
 /// A consensus NMF fit at one k.
+#[derive(Clone, Debug)]
 pub struct ConsensusNmfResult<F: BixverseFloat> {
     /// Left factor, shape `m x k`.
     pub w: Mat<F>,
@@ -230,6 +232,7 @@ pub struct ConsensusNmfResult<F: BixverseFloat> {
 }
 
 /// One row of the k sweep.
+#[derive(Clone, Debug)]
 pub struct KSweepEntry<F: BixverseFloat> {
     /// The rank this row describes.
     pub k: usize,
