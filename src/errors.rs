@@ -663,6 +663,69 @@ pub enum BixverseErrors {
     #[error("Negative values were discovered for NMF. Please check the inputs.")]
     NmfNonNegativeViolated,
 
+    /// Consensus NMF received a rank that cannot support a silhouette.
+    #[error("Consensus NMF needs k >= 2, but k = {k} was requested.")]
+    NmfConsensusInvalidK {
+        /// Requested rank
+        k: usize,
+    },
+
+    /// Consensus NMF received too few restarts to pool over.
+    #[error("Consensus NMF needs at least 2 restarts, but n_runs = {n_runs} was requested.")]
+    NmfConsensusTooFewRuns {
+        /// Requested number of restarts
+        n_runs: usize,
+    },
+
+    /// The outlier filter removed so many components that k-means cannot run.
+    #[error(
+        "Consensus NMF: only {n_surviving} components survived the density filter, which is fewer than k = {k}. Raise the density threshold or add restarts."
+    )]
+    NmfConsensusTooFewComponents {
+        /// Requested rank
+        k: usize,
+        /// Components left after filtering
+        n_surviving: usize,
+    },
+
+    /// k-means returned an empty cluster, so the consensus factor would carry a
+    /// zero row and the refit would be degenerate.
+    #[error(
+        "Consensus NMF: cluster {cluster} of {k} is empty, so the consensus factor is degenerate."
+    )]
+    NmfConsensusEmptyCluster {
+        /// Index of the empty cluster
+        cluster: usize,
+        /// Requested rank
+        k: usize,
+    },
+
+    /// The k sweep was handed nothing to sweep over.
+    #[error("The NMF k sweep was given an empty k range.")]
+    NmfKSweepEmptyRange,
+
+    /// A consensus step was applied to restarts run at a different rank.
+    #[error(
+        "Consensus NMF was asked for k = {requested}, but the restarts were run at k = {restarts}."
+    )]
+    NmfConsensusKMismatch {
+        /// Rank requested for the consensus
+        requested: usize,
+        /// Rank the restarts actually hold
+        restarts: usize,
+    },
+
+    /// A frozen factor handed to a refit does not line up with V.
+    #[error(
+        "NMF refit: the frozen factor has a shared dimension of {found}, but V expects {expected}."
+    )]
+    NmfDimensionMismatch {
+        /// Dimension V expects
+        expected: usize,
+        /// Dimension the frozen factor provides
+        found: usize,
+    },
+
     // -- Hotspot --
     /// Invalid model chosen for Hotspot
     #[cfg(feature = "single-cell")]

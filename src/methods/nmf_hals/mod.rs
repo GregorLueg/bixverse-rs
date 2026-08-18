@@ -13,8 +13,10 @@ use crate::core::math::pca_svd::SvdResults;
 use crate::prelude::*;
 use crate::utils::faer_parallelism;
 
+pub mod consensus;
 pub mod dense;
 pub mod nmf_preprocessing;
+pub mod refit;
 pub mod sparse;
 
 ////////////////////
