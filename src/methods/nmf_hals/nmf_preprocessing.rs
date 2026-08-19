@@ -25,6 +25,34 @@ pub enum NmfPreprocessing {
     SqrtSdScaling,
 }
 
+/// Transpose sparse counts to CSC if they arrived as CSR.
+///
+/// [`nmf_process_sparse`] indexes `indptr` per column, so CSR input scales the
+/// wrong axis and returns quiet nonsense rather than an error. The R side always
+/// hands over CSR, so this is the common path, not the exception.
+///
+/// ### Params
+///
+/// * `data` - The counts, in either orientation.
+/// * `verbosity` - Resolved verbosity, used only for the transpose notice.
+///
+/// ### Returns
+///
+/// The same data in CSC orientation.
+pub fn ensure_csc(
+    data: CompressedSparseData2<f32>,
+    verbosity: Verbosity,
+) -> CompressedSparseData2<f32> {
+    if data.cs_type.is_csr() {
+        if verbosity.detailed_verbosity() {
+            println!("NMF: data was provided as CSR. Transposing to CSC.")
+        }
+        data.transform()
+    } else {
+        data
+    }
+}
+
 /// Parse the NMF pre-processing
 ///
 /// ### Params

@@ -1,5 +1,13 @@
 # News
 
+## 0.4.5
+
+### Features
+
+- Consensus NMF added with entry points for single cells, meta cells and bulk
+  data.
+- GPU-accelerated NMF solvers.
+
 ## 0.4.4
 
 ### Features

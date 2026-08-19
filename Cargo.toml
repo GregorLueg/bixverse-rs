@@ -1,6 +1,6 @@
 [package]
 name = "bixverse-rs"
-version = "0.4.4"
+version = "0.4.5"
 edition = "2024"
 authors = ["Gregor Lueg <gregorlueg@me.com>"]
 license = "MIT"
@@ -115,6 +115,11 @@ required-features = ["gpu"]
 
 [[bench]]
 name = "gpu_corr_bench"
+harness = false
+required-features = ["gpu"]
+
+[[bench]]
+name = "gpu_nmf_bench"
 harness = false
 required-features = ["gpu"]
 

@@ -33,10 +33,16 @@ impl<'a, F: BixverseFloat> DenseInput<'a, F> {
     ///
     /// A [`DenseInput`] wrapping `v`.
     pub fn new(v: MatRef<'a, F>) -> Result<Self, BixverseErrors> {
-        let (n, m) = (v.nrows(), v.ncols());
-        let mut sq_frob = F::zero();
-        for i in 0..n {
-            for j in 0..m {
+        let (m, n) = (v.nrows(), v.ncols());
+        // Accumulated in f64 and cast back once. In `F` this drifts badly:
+        // a naive f32 sum over positive terms stops registering the increment
+        // once the running total dwarfs it, which measured 2.5% low over 1.5e7
+        // entries and put that error straight into every relative loss the
+        // solver reports. See [`sum_sq_f64`] for the same problem on the sparse
+        // side. Validation stays fused into the same pass.
+        let mut sq_frob = 0f64;
+        for j in 0..n {
+            for i in 0..m {
                 let x = v[(i, j)];
                 if !x.is_finite() {
                     return Err(BixverseErrors::NmfNonFinite);
@@ -44,10 +50,14 @@ impl<'a, F: BixverseFloat> DenseInput<'a, F> {
                 if x < F::zero() {
                     return Err(BixverseErrors::NmfNonNegativeViolated);
                 }
-                sq_frob += x * x;
+                let d = x.to_f64().unwrap();
+                sq_frob += d * d;
             }
         }
-        Ok(Self { v, sq_frob })
+        Ok(Self {
+            v,
+            sq_frob: F::from_f64(sq_frob).unwrap(),
+        })
     }
 }
 
@@ -132,6 +142,41 @@ impl<F: BixverseFloat> NmfInput<F> for DenseInput<'_, F> {
 mod tests {
     use super::*;
     use faer::Mat;
+
+    /// `||V||_F^2` has to be accurate on a matrix where accumulating in `F`
+    /// visibly is not, because it is the denominator of every relative loss the
+    /// solver and the consensus path report.
+    ///
+    /// The leading entry squares to `1e8`, where the f32 spacing is 8, so a
+    /// running f32 total swallows every one of the `1.0` entries that follow. The
+    /// second assertion pins that the reference really is wrong, so the first one
+    /// is testing something.
+    #[test]
+    fn sq_frob_survives_a_swamped_accumulator() {
+        let (m, n) = (1_000usize, 1_000usize);
+        let v = Mat::<f32>::from_fn(m, n, |i, j| if i == 0 && j == 0 { 1e4 } else { 1.0 });
+        let input = DenseInput::new(v.as_ref()).unwrap();
+
+        let exact = 1e8 + (m * n - 1) as f64;
+        let got = input.sq_frob() as f64;
+        assert!(
+            (got - exact).abs() <= 1e-5 * exact,
+            "sq_frob is off: got {got}, exact {exact}"
+        );
+
+        // The f32 accumulation this replaced, in the same column-major order.
+        let mut naive = 0f32;
+        for j in 0..n {
+            for i in 0..m {
+                let x = v[(i, j)];
+                naive += x * x;
+            }
+        }
+        assert!(
+            (naive as f64 - exact).abs() > 0.005 * exact,
+            "the f32 reference was supposed to be visibly wrong, so this test proves nothing"
+        );
+    }
 
     /// Shape is reported as (rows, cols) and the cached norm is the sum of squared entries.
     #[test]

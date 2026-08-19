@@ -6,3 +6,7 @@
 
 # Claude
 .claude/worktrees/*
+
+# Planning docs and review reports (local only)
+/plans
+/adversarial_review.md

@@ -2,6 +2,7 @@
 
 pub mod gpu_r_wrappers;
 pub mod linalg;
+pub mod methods_gpu;
 #[cfg(feature = "single-cell")]
 pub mod sc_gpu;
 

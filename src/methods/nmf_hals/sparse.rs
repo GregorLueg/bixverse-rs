@@ -3,12 +3,13 @@
 //! hand-rolled spMM kernels.
 
 use faer::{Mat, MatRef};
-use num_traits::Float;
+use num_traits::{Float, ToPrimitive};
 use rayon::prelude::*;
 
 use super::NmfInput;
 use crate::core::math::pca_svd::SvdResults;
 use crate::core::math::sparse::sparse_svd_lanczos;
+use crate::core::math::vector_helpers::sum_sq_f64;
 use crate::prelude::*;
 
 /////////////
@@ -50,7 +51,9 @@ where
 
 /// Squared Frobenius norm of a flat data buffer.
 ///
-/// Casts each element to `F` and accumulates the sum of squares.
+/// Accumulates in `f64` via [`sum_sq_f64`] and casts once, rather than summing in
+/// `F`. Over 3e7 non-zeros the `F = f32` version measured 4.4% low, and that error
+/// lands directly in every relative loss the solver reports.
 ///
 /// ### Params
 ///
@@ -61,15 +64,10 @@ where
 /// The scalar `||V||_F^2`.
 fn compute_sq_frob<S, F>(data: &[S]) -> F
 where
-    S: Copy + Into<F>,
-    F: BixverseFloat + std::iter::Sum,
+    S: BixverseNumeric + ToPrimitive,
+    F: BixverseFloat,
 {
-    data.iter()
-        .map(|&v| {
-            let f: F = v.into();
-            f * f
-        })
-        .sum()
+    F::from_f64(sum_sq_f64(data)).unwrap()
 }
 
 /// Build a matched (CSR, CSC) pair from a source matrix and its transpose.
@@ -351,6 +349,29 @@ where
             shape,
         })
     }
+
+    /// The CSR layout of V, used for `V H^T`.
+    ///
+    /// Exposed so a GPU backend can upload the already-validated matched pair
+    /// rather than rebuilding and revalidating it.
+    ///
+    /// ### Returns
+    ///
+    /// A reference to the CSR layer.
+    pub fn csr(&self) -> &CompressedSparseData2<S> {
+        &self.csr
+    }
+
+    /// The CSC layout of V, used for `W^T V`.
+    ///
+    /// Exposed for the same reason as [`Self::csr`].
+    ///
+    /// ### Returns
+    ///
+    /// A reference to the CSC layer.
+    pub fn csc(&self) -> &CompressedSparseData2<S> {
+        &self.csc
+    }
 }
 
 /// NmfInput trait implementation for [SparseInput]
@@ -407,6 +428,38 @@ mod tests {
             _ => 0.0,
         });
         (csr, dense)
+    }
+
+    /// `||V||_F^2` over the non-zeros has to be accurate on data where summing in
+    /// `F` visibly is not. Sparse is the path where this bit hardest, because the
+    /// term count is the non-zero count: measured 4.4% low over 3e7 non-zeros
+    /// before the accumulator moved to f64.
+    #[test]
+    fn sq_frob_survives_a_swamped_accumulator() {
+        // One leading non-zero squaring to 1e8, then a million ones. At 1e8 the
+        // f32 spacing is 8, so a running f32 total swallows every one of them.
+        let n_ones = 1_000_000usize;
+        let mut data = vec![1e4f32];
+        data.extend(std::iter::repeat_n(1.0f32, n_ones));
+        let nnz = data.len();
+        let indices: Vec<u32> = (0..nnz as u32).collect();
+        let indptr: Vec<u32> = vec![0, nnz as u32];
+        let csr =
+            CompressedSparseData2::<f32, f32>::new_csr(&data, &indices, &indptr, None, (1, nnz));
+
+        let sparse_in: SparseInput<f32, f32> = SparseInput::from_primary(&csr).unwrap();
+        let exact = 1e8 + n_ones as f64;
+        let got = sparse_in.sq_frob() as f64;
+        assert!(
+            (got - exact).abs() <= 1e-5 * exact,
+            "sq_frob is off: got {got}, exact {exact}"
+        );
+
+        let naive = data.iter().fold(0f32, |acc, &v| acc + v * v) as f64;
+        assert!(
+            (naive - exact).abs() > 0.005 * exact,
+            "the f32 reference was supposed to be visibly wrong, so this test proves nothing"
+        );
     }
 
     /// The sparse backend reports the same shape and squared Frobenius norm as the dense one.

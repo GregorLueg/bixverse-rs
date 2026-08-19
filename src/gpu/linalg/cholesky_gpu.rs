@@ -84,7 +84,7 @@ const GRAM_MIN_ROWS_PER_CHUNK: usize = 1024;
 /// ### Returns
 ///
 /// Number of row chunks, at least 1 and at most [`GRAM_MAX_CHUNKS`].
-fn gram_chunks(n: usize) -> usize {
+pub fn gram_chunks(n: usize) -> usize {
     (n / GRAM_MIN_ROWS_PER_CHUNK).clamp(1, GRAM_MAX_CHUNKS)
 }
 
@@ -374,7 +374,7 @@ pub fn gram_reduce<F: Float>(partials: &Tensor<F>, g: &mut Tensor<F>, s: u32, n_
 /// ### Errors
 ///
 /// * `CubeclUtils` if either grid is over the device limit.
-fn gram<R, T>(
+pub fn gram<R, T>(
     client: &ComputeClient<R>,
     y: &GpuTensor<R, T>,
     g_scratch: &GpuTensor<R, T>,
