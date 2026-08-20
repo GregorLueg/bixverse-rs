@@ -795,6 +795,94 @@ where
         }
     }
 
+    /// Check every invariant that indexing this matrix relies on.
+    ///
+    /// [`Self::assert_invariants`] is a `debug_assert` helper and compiles out
+    /// in release, and it never checks the indices against the minor axis.
+    /// This is the release-mode counterpart, for input that crossed an FFI
+    /// boundary: the fields are public, so a caller can hand over an `indptr`
+    /// that disagrees with `shape` or an index past the minor axis, and any
+    /// consumer that scatters into a dense buffer sized from `shape` would
+    /// then panic inside a worker thread or, worse, silently process fewer
+    /// major runs than the shape declares.
+    ///
+    /// A layer that is empty is treated as absent rather than as a length
+    /// mismatch, since [`Self::transform_single_layer`] deliberately leaves the
+    /// unused layer empty.
+    ///
+    /// ### Returns
+    ///
+    /// `Ok(())`, or the first invariant that failed:
+    /// [`BixverseErrors::SparseIndptrInvalid`] for an `indptr` that disagrees
+    /// with `shape` or with the number of stored values,
+    /// [`BixverseErrors::DimensionMisMatchSparse`] for a populated layer whose
+    /// length does not match `indices`, and
+    /// [`BixverseErrors::SliceIndexOutOfBounds`] for an index past the minor
+    /// axis.
+    pub fn validate(&self) -> Result<(), BixverseErrors> {
+        let expected_major = match self.cs_type {
+            CompressedSparseFormat::Csr => self.shape.0,
+            CompressedSparseFormat::Csc => self.shape.1,
+        };
+
+        if self.indptr.len() != expected_major + 1 {
+            return Err(BixverseErrors::SparseIndptrInvalid {
+                detail: "length against the declared major axis",
+                expected: expected_major + 1,
+                got: self.indptr.len(),
+            });
+        }
+
+        // `indptr.len()` is now at least 1, so `last` cannot be `None`
+        let nnz = *self.indptr.last().expect("indptr length checked above") as usize;
+        if nnz != self.indices.len() {
+            return Err(BixverseErrors::SparseIndptrInvalid {
+                detail: "final offset against the stored indices",
+                expected: self.indices.len(),
+                got: nnz,
+            });
+        }
+
+        if !self.indptr.windows(2).all(|w| w[0] <= w[1]) {
+            return Err(BixverseErrors::SparseIndptrInvalid {
+                detail: "offsets must be non-decreasing",
+                expected: nnz,
+                got: nnz,
+            });
+        }
+
+        if !self.data.is_empty() && self.data.len() != self.indices.len() {
+            return Err(BixverseErrors::DimensionMisMatchSparse {
+                indices_len: self.indices.len(),
+                data_len: self.data.len(),
+            });
+        }
+
+        if let Some(data_2) = &self.data_2
+            && !data_2.is_empty()
+            && data_2.len() != self.indices.len()
+        {
+            return Err(BixverseErrors::DimensionMisMatchSparse {
+                indices_len: self.indices.len(),
+                data_len: data_2.len(),
+            });
+        }
+
+        let minor = self.minor_dim();
+        if let Some(&bad) = self
+            .indices
+            .par_iter()
+            .find_any(|&&idx| idx as usize >= minor)
+        {
+            return Err(BixverseErrors::SliceIndexOutOfBounds {
+                index: bad as usize,
+                len: minor,
+            });
+        }
+
+        Ok(())
+    }
+
     /// Assertion helper for invariants
     pub fn assert_invariants(&self) {
         let expected_major = match self.cs_type {
@@ -981,20 +1069,28 @@ fn transpose_scatter<T, U>(
         });
 }
 
-/// Transpose a compressed sparse matrix (CSC→CSR or CSR→CSC).
+/// Re-express a compressed sparse matrix in the other format (CSC→CSR or
+/// CSR→CSC).
 ///
-/// A counting sort in O(nnz) time. Above [`PARALLEL_TRANSPOSE_MIN_NNZ`] the
+/// Despite the name this does **not** transpose: `shape` is carried over
+/// unchanged and only `cs_type` flips, so the result addresses the same
+/// elements by the same `(row, col)` pair. Reach for
+/// [`CompressedSparseData2::transpose_and_convert`] when the shape is meant to
+/// swap.
+///
+/// A counting sort in O(nnz) time. Above `PARALLEL_TRANSPOSE_MIN_NNZ` the
 /// count and the scatter both fan out over rayon: the scatter is a random-write
 /// pass over `nnz`-sized destinations, so leaving it single-threaded makes it
-/// the slowest step of anything that transposes on the way in.
+/// the slowest step of anything that converts on the way in.
 ///
 /// ### Params
 ///
-/// * `sparse_data`: The input compressed sparse matrix to be transformed.
+/// * `sparse_data`: The input compressed sparse matrix to be converted.
 ///
 /// ### Returns
 ///
-/// The transposed compressed sparse matrix.
+/// The same matrix in the other compressed sparse format, with `shape`
+/// unchanged and the indices of each new major run ascending.
 pub fn transpose_sparse<T, U>(
     sparse_data: &CompressedSparseData2<T, U>,
 ) -> CompressedSparseData2<T, U>
@@ -2575,7 +2671,7 @@ where
 /// while the iteration keeps going, so a clustered spectrum converges without
 /// the quadratic orthogonalisation cost a single long run would need.
 ///
-/// The projected matrix is accumulated explicitly as H[i][j] = <v_i, A v_j>
+/// The projected matrix is accumulated explicitly as `H[i][j] = <v_i, A v_j>`
 /// rather than as a tridiagonal recurrence. After a thick restart the leading
 /// basis vectors are Ritz vectors, not Lanczos vectors, so the projection is
 /// arrow-shaped rather than tridiagonal; forming it directly handles that
@@ -3185,6 +3281,126 @@ where
 mod tests {
     use super::*;
     use faer::Mat;
+
+    ////////////////
+    // validate() //
+    ////////////////
+
+    /// A 3 x 4 CSR with one empty row, both layers populated.
+    fn validatable_csr() -> CompressedSparseData2<f32, f32> {
+        CompressedSparseData2 {
+            data: vec![1.0, 2.0, 3.0, 4.0],
+            indices: vec![0, 3, 1, 2],
+            indptr: vec![0, 2, 2, 4],
+            cs_type: CompressedSparseFormat::Csr,
+            data_2: Some(vec![10.0, 20.0, 30.0, 40.0]),
+            shape: (3, 4),
+        }
+    }
+
+    #[test]
+    fn test_validate_accepts_a_well_formed_matrix() {
+        assert!(validatable_csr().validate().is_ok());
+        assert!(validatable_csr().transform().validate().is_ok());
+    }
+
+    /// The single-layer transform leaves `data` empty on purpose, so an empty
+    /// layer must read as absent rather than as a length mismatch.
+    #[test]
+    fn test_validate_accepts_an_empty_unused_layer() {
+        let single = validatable_csr().transform_single_layer(true).unwrap();
+
+        assert!(single.data.is_empty());
+        assert!(single.validate().is_ok());
+    }
+
+    /// An indptr that disagrees with the declared major axis would otherwise
+    /// silently process fewer rows than the shape claims.
+    #[test]
+    fn test_validate_rejects_a_short_indptr() {
+        let mut m = validatable_csr();
+        m.indptr = vec![0, 2, 4];
+
+        assert!(matches!(
+            m.validate(),
+            Err(BixverseErrors::SparseIndptrInvalid {
+                expected: 4,
+                got: 3,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn test_validate_rejects_a_final_offset_past_the_indices() {
+        let mut m = validatable_csr();
+        m.indptr = vec![0, 2, 2, 9];
+
+        assert!(matches!(
+            m.validate(),
+            Err(BixverseErrors::SparseIndptrInvalid {
+                expected: 4,
+                got: 9,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn test_validate_rejects_decreasing_offsets() {
+        let mut m = validatable_csr();
+        m.indptr = vec![0, 3, 1, 4];
+
+        assert!(matches!(
+            m.validate(),
+            Err(BixverseErrors::SparseIndptrInvalid { .. })
+        ));
+    }
+
+    /// This is the one that matters: an index past the minor axis is what turns
+    /// a dense scatter into an out-of-bounds panic in a worker thread.
+    #[test]
+    fn test_validate_rejects_an_index_past_the_minor_axis() {
+        let mut m = validatable_csr();
+        m.indices = vec![0, 3, 1, 4];
+
+        assert!(matches!(
+            m.validate(),
+            Err(BixverseErrors::SliceIndexOutOfBounds { index: 4, len: 4 })
+        ));
+    }
+
+    /// CSC bounds the indices by the row count, not the column count, so the
+    /// same index list is fine in one orientation and not the other.
+    #[test]
+    fn test_validate_bounds_csc_by_the_row_count() {
+        let mut m = validatable_csr();
+        m.cs_type = CompressedSparseFormat::Csc;
+        m.shape = (4, 3);
+
+        // indices max to 3, rows are 4: fine
+        assert!(m.validate().is_ok());
+
+        m.shape = (3, 3);
+        assert!(matches!(
+            m.validate(),
+            Err(BixverseErrors::SliceIndexOutOfBounds { index: 3, len: 3 })
+        ));
+    }
+
+    #[test]
+    fn test_validate_rejects_a_truncated_second_layer() {
+        let mut m = validatable_csr();
+        m.data_2 = Some(vec![10.0, 20.0]);
+
+        assert!(matches!(
+            m.validate(),
+            Err(BixverseErrors::DimensionMisMatchSparse {
+                indices_len: 4,
+                data_len: 2
+            })
+        ));
+    }
 
     /// The format parser takes either case and rejects anything that is not CSR or CSC.
     #[test]

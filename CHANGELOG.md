@@ -1,5 +1,11 @@
 # News
 
+## 0.4.6
+
+### Features
+
+- Vision scores available for meta cells, too.
+
 ## 0.4.5
 
 ### Features

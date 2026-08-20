@@ -266,7 +266,7 @@ fn matrix_trace(mat: &CompressedSparseData2<f32>) -> f64 {
 /// pipeline whose `params.knn` disagrees with the width of the `knn_indices` it
 /// hands over gets the width, silently.
 ///
-/// The rank is [BANDWIDTH_RANK_DIVISOR] into a **self-inclusive** count. The
+/// The rank is `BANDWIDTH_RANK_DIVISOR` into a **self-inclusive** count. The
 /// reference asks scanpy for `n_neighbors = 30`, gets 29 stored distances back
 /// with the self hit excluded, and indexes rank `floor(30 / 3) - 1 = 9` into
 /// them. Deriving the rank from the 29 instead lands on rank 8, one neighbour

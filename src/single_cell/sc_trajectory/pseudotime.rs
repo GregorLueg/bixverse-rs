@@ -367,7 +367,7 @@ fn rebuild_with_extra(
 ///   in the sample at all.
 /// * `max_iterations` - Iteration cap. The counter starts at one, so this
 ///   permits `max_iterations - 1` passes, matching the reference. Must be at
-///   least [MIN_MAX_ITERATIONS].
+///   least `MIN_MAX_ITERATIONS`.
 /// * `verbosity` - Controls progress reporting.
 ///
 /// ### Returns

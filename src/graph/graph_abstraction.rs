@@ -268,7 +268,7 @@ where
 ///
 /// The abstracted graph and the partition sizes, or an error when `graph` is
 /// not a square CSR, the label count does not match the node count, a label
-/// sits outside `n_partitions`, or `n_partitions` exceeds [MAX_PARTITIONS].
+/// sits outside `n_partitions`, or `n_partitions` exceeds `MAX_PARTITIONS`.
 ///
 /// ### References
 ///

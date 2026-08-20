@@ -359,7 +359,7 @@ fn row_rescale_factors(transitions: &CompressedSparseData2<f32>) -> Vec<f64> {
 /// itself does. Starting from uniform makes the choice within that degenerate
 /// subspace reproducible.
 ///
-/// Rows are rescaled in `f64` by [row_rescale_factors] before the iteration
+/// Rows are rescaled in `f64` by `row_rescale_factors` before the iteration
 /// starts. Without that the operator itself carries the `f32` chain's per-row
 /// drift, and the stationary vector amplifies it by `1 / (1 - |lambda_2|)` on
 /// exactly the near-reducible chains this is asked about.
@@ -529,7 +529,7 @@ pub fn detect_terminal_states(
 /// reads the global parallelism setting, which this crate never touches, so it
 /// runs sequentially and costs O(n_transient^3). That's milliseconds at the
 /// reference's waypoint count, and is refused outright above
-/// [MAX_DENSE_TRANSIENT].
+/// `MAX_DENSE_TRANSIENT`.
 ///
 /// Transient states with no path to any absorbing state are dropped from the
 /// system and left at zero rather than aborting the solve. Their absorption
