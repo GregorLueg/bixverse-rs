@@ -83,7 +83,7 @@ const GRAM_MIN_ROWS_PER_CHUNK: usize = 1024;
 ///
 /// ### Returns
 ///
-/// Number of row chunks, at least 1 and at most [`GRAM_MAX_CHUNKS`].
+/// Number of row chunks, at least 1 and at most `GRAM_MAX_CHUNKS`.
 pub fn gram_chunks(n: usize) -> usize {
     (n / GRAM_MIN_ROWS_PER_CHUNK).clamp(1, GRAM_MAX_CHUNKS)
 }

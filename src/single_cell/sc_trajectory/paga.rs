@@ -179,7 +179,7 @@ fn directed_knn_csr(
 ///
 /// * `knn_indices` - kNN indices per cell, self excluded. Out-of-range and
 ///   self-referencing entries are dropped rather than counted, up to
-///   [MAX_OUT_OF_RANGE_SHARE] of the input.
+///   `MAX_OUT_OF_RANGE_SHARE` of the input.
 /// * `partitions` - Cluster label per cell, one per entry of `knn_indices`.
 ///   Typically the output of [crate::graph::community_detections].
 /// * `n_partitions` - Declared cluster count. `None` derives it as

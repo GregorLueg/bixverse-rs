@@ -189,7 +189,7 @@ where
 /// Refit W against a frozen H.
 ///
 /// Mirror of [`nmf_refit_h`]. `H H^T` and `V H^T` are the loop invariants, and
-/// the objective goes through [`objective_fixed_h`] so that a changing W never
+/// the objective goes through `objective_fixed_h` so that a changing W never
 /// forces another pass over V. No row normalisation is applied: H is frozen, so
 /// its scale convention is the caller's.
 ///

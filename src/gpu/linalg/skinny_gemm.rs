@@ -52,7 +52,7 @@
 //! The reduction splits over chunks when there are too few output tiles to
 //! saturate the device, which is the common case here rather than the exception:
 //! at `rows = 500`, `k = 10` the output is four tiles. Partials are
-//! `[chunks, rows, k]` and [`crate::gpu::linalg::gram::gram_reduce`] sums them,
+//! `[chunks, rows, k]` and [`crate::gpu::linalg::gram::gram_reduce()`] sums them,
 //! since that is exactly a `[chunks, X] -> [X]` reduction and it already carries
 //! the two-dimensional grid decode that a large `X` needs.
 
@@ -148,7 +148,7 @@ const SG_REDUCE_WG: u32 = 256;
 /// chunks it takes to fill the device given how few output tiles there are, and
 /// `by_len` stops a short reduction being cut into slivers.
 ///
-/// There is no third, memory bound. See [`SG_MAX_PARTIAL_ELEMS`]: `wanted`
+/// There is no third, memory bound. See `SG_MAX_PARTIAL_ELEMS`: `wanted`
 /// already caps the partials buffer, so a memory ceiling could never fire.
 ///
 /// ### Params
@@ -159,7 +159,7 @@ const SG_REDUCE_WG: u32 = 256;
 ///
 /// ### Returns
 ///
-/// Number of reduction chunks, at least one and at most [`SG_MAX_CHUNKS`].
+/// Number of reduction chunks, at least one and at most `SG_MAX_CHUNKS`.
 pub fn skinny_chunks(rows: usize, k: usize, len: usize) -> usize {
     let tiles = rows.div_ceil(SG_BM as usize) * k.div_ceil(SG_BN as usize);
     if tiles >= SG_TARGET_CUBES {

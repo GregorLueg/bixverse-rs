@@ -11,7 +11,8 @@
 //! bound disk re-reads, which is not a problem an in-memory matrix has.
 //!
 //! Gene module clustering needs no metacell twin:
-//! [`hotspot_gene_clusters`] takes a plain Z matrix and works unchanged.
+//! [`hotspot_gene_clusters`](crate::single_cell::sc_analysis::hotspot::hotspot_gene_clusters)
+//! takes a plain Z matrix and works unchanged.
 
 use std::borrow::Cow;
 

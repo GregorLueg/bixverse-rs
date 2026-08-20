@@ -212,7 +212,7 @@ fn mann_whitney_stats(rank_sum_1: f64, tie_term: f64, n1: usize, n2: usize) -> (
 /// Get differential expression based on Mann-Whitney
 ///
 /// Reports the AUROC alongside the Z-score, since both derive from the same
-/// rank sums. See [mann_whitney_stats] for the tie correction and why the two
+/// rank sums. See `mann_whitney_stats` for the tie correction and why the two
 /// do not order genes identically.
 ///
 /// ### Params

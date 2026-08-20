@@ -946,7 +946,7 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
     ///   cell.
     /// * `distances` - Slice of the distances to the neighbours of a given
     ///   cell, ascending. These are distances, not weights: the edge weights
-    ///   are derived here, see [`graph_weights`].
+    ///   are derived here, see `graph_weights`.
     /// * `graph_params` - See [HotSpotGraphParams]. `None` takes the upstream
     ///   defaults, i.e. an unweighted graph.
     ///
