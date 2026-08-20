@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   release:
-    uses: GregorLueg/personal-actions/.github/workflows/rust-release.yml@fix-release-recovery
+    uses: GregorLueg/personal-actions/.github/workflows/rust-release.yml@v1
     with:
       publish-args: '--features single-cell,multi-modal,gpu'
       # cargo publish builds the crate to verify it, and that build links
