@@ -253,6 +253,22 @@ pub enum BixverseErrors {
         data_len: usize,
     },
 
+    /// Error if the `indptr` of a [`crate::prelude::CompressedSparseData2`] is
+    /// inconsistent with the shape it declares or with the stored values.
+    ///
+    /// Raised by [`crate::prelude::CompressedSparseData2::validate`] on input
+    /// that crossed an FFI boundary, where the struct's public fields could
+    /// have been populated with anything.
+    #[error("The sparse indptr is inconsistent ({detail}): expected {expected}, got {got}")]
+    SparseIndptrInvalid {
+        /// Which invariant failed
+        detail: &'static str,
+        /// The value implied by the rest of the structure
+        expected: usize,
+        /// The value actually found
+        got: usize,
+    },
+
     /// Error if there is a dimension mismatch in terms of the two matrices
     #[error("The shape of the two sparse matrices must be the same.")]
     ShapeMismatchSparse,
@@ -384,6 +400,24 @@ pub enum BixverseErrors {
     #[cfg(feature = "single-cell")]
     #[error("Chunk index {0} not found in file index map")]
     ChunkIndexNotFound(usize),
+
+    /// Two stores that must share a gene axis disagree on how many genes
+    /// they hold.
+    ///
+    /// Raised where a method takes a gene-major and a cell-major reader over
+    /// what is meant to be the same experiment. Nothing ties the two files
+    /// together, so the check has to be explicit: indices derived from one
+    /// store are used against buffers sized from the other.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "The gene store holds {gene_store} genes but the cell store holds {cell_store}; they must describe the same experiment"
+    )]
+    GeneAxisMismatch {
+        /// Total genes reported by the gene-major store
+        gene_store: usize,
+        /// Total genes reported by the cell-major store
+        cell_store: usize,
+    },
 
     /// A cell-based reader method was called on a gene-based file, or vice
     /// versa.

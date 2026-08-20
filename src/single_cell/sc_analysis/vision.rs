@@ -1,5 +1,5 @@
 //! Implementation of the VISION framework to score spatially correlated
-//! gene sets. See DeTamaso, et al., Nat. Commun., 2019
+//! gene sets. See DeTomaso, et al., Nat. Commun., 2019
 
 use extendr_api::{Conversions, List};
 use rayon::prelude::*;
@@ -53,6 +53,18 @@ pub fn r_list_to_sig_genes(gs_list: List) -> extendr_api::Result<Vec<SignatureGe
 
 /// Calculate VISION signature scores for a single cell
 ///
+/// The cell-level mean and variance run over all `total_genes`, including the
+/// implicit zeros. Zeros contribute nothing to either sum, so dividing the sums
+/// over the stored values by `total_genes` is exactly that.
+///
+/// Both accumulate in one pass. Splitting them costs a second `f16` decode of
+/// every stored value, which is what the loop is bound by, so fusing them
+/// halves the per-cell statistics. The accumulators are `f64` to match
+/// [`crate::single_cell::mc_analysis::vision_mc`]; on this path that buys no
+/// accuracy, since the `f16` storage of `data_norm` already sets the floor an
+/// order of magnitude above the accumulation error, and it costs about one per
+/// cent.
+///
 /// ### Params
 ///
 /// * `cell` - The CsrCellChunk
@@ -68,45 +80,46 @@ fn calculate_vision_scores_for_cell(
     total_genes: usize,
 ) -> Vec<f32> {
     // helper
-    let get_expr = |gene_idx: usize| -> f32 {
+    let get_expr = |gene_idx: usize| -> f64 {
         match cell.indices.binary_search(&(gene_idx as u32)) {
-            Ok(pos) => cell.data_norm[pos].to_f32(),
+            Ok(pos) => cell.data_norm[pos].to_f32() as f64,
             Err(_) => 0.0,
         }
     };
 
     // Cell-level statistics (ALL genes including zeros)
-    let sum: f32 = cell.data_norm.iter().map(|x| x.to_f32()).sum();
-    let sum_sq: f32 = cell
-        .data_norm
-        .iter()
-        .map(|x| {
-            let v = x.to_f32();
-            v * v
-        })
-        .sum();
+    let mut sum = 0.0_f64;
+    let mut sum_sq = 0.0_f64;
+    for value in &cell.data_norm {
+        let value = value.to_f32() as f64;
+        sum += value;
+        sum_sq += value * value;
+    }
 
-    let mu_cell = sum / total_genes as f32;
-    let var_cell = (sum_sq / total_genes as f32) - (mu_cell * mu_cell);
-    let sigma_cell = var_cell.sqrt();
+    let mu_cell = sum / total_genes as f64;
+    // clamped so a residual negative variance yields zero rather than a NaN
+    // score, which would poison the ranks in `calc_autocorr_with_clusters`
+    let sigma_cell = ((sum_sq / total_genes as f64) - (mu_cell * mu_cell))
+        .max(0.0)
+        .sqrt();
 
     // Score signatures
     signatures
         .iter()
         .map(|sig| {
-            let sum_pos: f32 = sig.positive.iter().map(|&idx| get_expr(idx)).sum();
-            let sum_neg: f32 = sig.negative.iter().map(|&idx| get_expr(idx)).sum();
-
-            let signature_size = (sig.positive.len() + sig.negative.len()) as f32;
+            let signature_size = (sig.positive.len() + sig.negative.len()) as f64;
 
             if signature_size == 0.0 || sigma_cell == 0.0 {
                 return 0.0;
             }
 
+            let sum_pos: f64 = sig.positive.iter().map(|&idx| get_expr(idx)).sum();
+            let sum_neg: f64 = sig.negative.iter().map(|&idx| get_expr(idx)).sum();
+
             let mean_sig = (sum_pos - sum_neg) / signature_size;
 
             // R "znorm_columns" formula
-            (mean_sig - mu_cell) / sigma_cell
+            ((mean_sig - mu_cell) / sigma_cell) as f32
         })
         .collect()
 }
@@ -192,7 +205,7 @@ fn calc_knn_weights(knn_distances: &[Vec<f32>], squared: bool) -> Vec<Vec<f32>> 
 /// ### Params
 ///
 /// * `reader` - Reader over the cell-based count store.
-/// * `signatures` - Slice of `SignatureGenes` to calculate the scores for
+/// * `gene_signs` - Slice of `SignatureGenes` to calculate the scores for
 /// * `cells_to_keep` - Vector of indices with the cells to keep.
 /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
 ///   verbosity.
@@ -239,7 +252,7 @@ pub fn calculate_vision<S: SingleCellReading>(
 /// ### Params
 ///
 /// * `reader` - Reader over the cell-based count store.
-/// * `signatures` - Slice of `SignatureGenes` to calculate the scores for
+/// * `gene_signs` - Slice of `SignatureGenes` to calculate the scores for
 /// * `cells_to_keep` - Vector of indices with the cells to keep.
 /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
 ///   verbosity.
@@ -295,7 +308,7 @@ pub fn calculate_vision_streaming<S: SingleCellReading>(
 /// ### Params
 ///
 /// * `pathway_scores` - Vector representing the actual vision scores:
-///   `cells x pathways
+///   `cells x pathways`
 /// * `random_scores_by_cluster` - Vector representing the random scores by
 ///   cluster: `clusters -> (cells x sigs)`
 /// * `cluster_membership` - Vector representing to which cluster a given

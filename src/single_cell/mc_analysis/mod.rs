@@ -8,3 +8,4 @@ pub mod metacell_density;
 pub mod metrics;
 pub mod nmf_mc;
 pub mod scenic_metacells;
+pub mod vision_mc;
