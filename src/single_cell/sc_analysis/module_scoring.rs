@@ -143,43 +143,100 @@ fn sample_control_genes(
     controls.into_iter().collect()
 }
 
-/// Calculate module scores for a single cell
+/// Check that every gene index addresses a column of the dense scratch row.
+///
+/// The scoring kernel indexes the scratch directly, so an index past the gene
+/// axis panics inside a rayon worker where the old binary search returned
+/// `0.0`. Both the caller's gene sets and the control genes sampled from the
+/// expression bins go through here.
+///
+/// ### Params
+///
+/// * `gene_sets` - The index sets to validate
+/// * `n_genes` - Number of genes, i.e. the exclusive bound
+///
+/// ### Returns
+///
+/// `Ok(())`, or [`BixverseErrors::SliceIndexOutOfBounds`] for the first
+/// offending index.
+fn validate_gene_indices(gene_sets: &[Vec<usize>], n_genes: usize) -> Result<(), BixverseErrors> {
+    for gene_set in gene_sets {
+        for &gene in gene_set {
+            if gene >= n_genes {
+                return Err(BixverseErrors::SliceIndexOutOfBounds {
+                    index: gene,
+                    len: n_genes,
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Mean of a dense expression row over a set of gene indices.
+///
+/// ### Params
+///
+/// * `dense` - Dense expression row, length `n_genes`
+/// * `genes` - Gene indices to average over
+///
+/// ### Returns
+///
+/// The mean, or `0.0` for an empty set.
+#[inline]
+fn mean_over_genes(dense: &[f32], genes: &[usize]) -> f32 {
+    if genes.is_empty() {
+        return 0.0;
+    }
+
+    genes.iter().map(|&idx| dense[idx]).sum::<f32>() / genes.len() as f32
+}
+
+/// Calculate module scores for a single cell, one per gene set
+///
+/// `scratch` is a dense `n_genes` buffer owned by the calling thread. The cell
+/// is scattered into it, every gene set and its control set gather by direct
+/// index, and only the touched slots are cleared again. That replaces a binary
+/// search per gene lookup, which each gene set paid separately: with `m` sets
+/// the old cost was `m * (set + ctrl) * log(nnz)` against `nnz` plus the total
+/// gathered size now. Control sets are typically `ctrl` times larger than the
+/// sets themselves, so the gap widens with the number of modules.
 ///
 /// ### Params
 ///
 /// * `cell` - Reference to a CsrCellChunk
-/// * `gene_set` - Indices of genes in the module
-/// * `control_set` - Indices of control genes
+/// * `gene_sets` - Indices of the genes in each module
+/// * `control_sets` - Indices of the control genes for each module, in the same
+///   order as `gene_sets`
+/// * `scratch` - Thread-local dense row, zeroed on entry and on exit
 ///
 /// ### Returns
 ///
-/// Module score defined as `(mean(genes_of_interest) - mean(controls))`
-fn calculate_cell_module_score(
+/// One score per module, defined as `mean(genes_of_interest) - mean(controls)`.
+fn calculate_cell_module_scores(
     cell: &CsrCellChunk,
-    gene_set: &[usize],
-    control_set: &[usize],
-) -> f32 {
-    // leverage a binary search look up here
-    let lookup = |idx: usize| -> f32 {
-        match cell.indices.binary_search(&(idx as u32)) {
-            Ok(pos) => cell.data_norm[pos].to_f32(),
-            Err(_) => 0.0,
-        }
-    };
+    gene_sets: &[Vec<usize>],
+    control_sets: &[Vec<usize>],
+    scratch: &mut [f32],
+) -> Vec<f32> {
+    for (&idx, value) in cell.indices.iter().zip(cell.data_norm.iter()) {
+        scratch[idx as usize] = value.to_f32();
+    }
 
-    let gene_mean = if gene_set.is_empty() {
-        0.0
-    } else {
-        gene_set.iter().map(|&idx| lookup(idx)).sum::<f32>() / gene_set.len() as f32
-    };
+    let scores: Vec<f32> = gene_sets
+        .iter()
+        .zip(control_sets.iter())
+        .map(|(gene_set, control_set)| {
+            mean_over_genes(scratch, gene_set) - mean_over_genes(scratch, control_set)
+        })
+        .collect();
 
-    let ctrl_mean = if control_set.is_empty() {
-        0.0
-    } else {
-        control_set.iter().map(|&idx| lookup(idx)).sum::<f32>() / control_set.len() as f32
-    };
+    for &idx in &cell.indices {
+        scratch[idx as usize] = 0.0;
+    }
 
-    gene_mean - ctrl_mean
+    scores
 }
 
 /// Calculate the module scores
@@ -188,10 +245,11 @@ fn calculate_cell_module_score(
 ///
 /// * `cell_reader` - Reader for the cell-based store
 /// * `gene_sets` - Slice of indices of the gene sets
+/// * `control_sets` - Control genes per gene set, sampled and bounds-checked by
+///   [`calculate_module_scores_main`]
 /// * `cells_to_keep` - Slice of indices of the cells to keep
-/// * `gene_bins` - The pre-calculated GeneBins.
-/// * `ctrl` - Number of control genes to use
-/// * `seed` - Seed for reproducibility
+/// * `n_genes` - Size of the dense scratch row. Every index in `gene_sets` and
+///   `control_sets` must be below it.
 ///
 /// ### Returns
 ///
@@ -200,31 +258,18 @@ fn calculate_cell_module_score(
 fn calculate_module_scores<S: SingleCellReading>(
     cell_reader: &S,
     gene_sets: &[Vec<usize>],
+    control_sets: &[Vec<usize>],
     cells_to_keep: &[usize],
-    gene_bins: &GeneBins,
-    ctrl: usize,
-    seed: &usize,
+    n_genes: usize,
 ) -> Result<Vec<Vec<f32>>, BixverseErrors> {
-    let mut rng = StdRng::seed_from_u64(*seed as u64);
-
-    let control_sets: Vec<Vec<usize>> = gene_sets
-        .iter()
-        .map(|gene_set| sample_control_genes(gene_set, gene_bins, ctrl, &mut rng))
-        .collect();
-
     let cell_chunks = cell_reader.read_cells_parallel(cells_to_keep)?;
 
     let all_scores: Vec<Vec<f32>> = cell_chunks
         .par_iter()
-        .map(|cell| {
-            gene_sets
-                .iter()
-                .zip(control_sets.iter())
-                .map(|(gene_set, control_set)| {
-                    calculate_cell_module_score(cell, gene_set, control_set)
-                })
-                .collect()
-        })
+        .map_init(
+            || vec![0.0_f32; n_genes],
+            |scratch, cell| calculate_cell_module_scores(cell, gene_sets, control_sets, scratch),
+        )
         .collect();
 
     // Transpose: cells x modules -> modules x cells
@@ -244,32 +289,27 @@ fn calculate_module_scores<S: SingleCellReading>(
 ///
 /// * `cell_reader` - Reader for the cell-based store
 /// * `gene_sets` - Slice of indices of the gene sets
+/// * `control_sets` - Control genes per gene set, sampled and bounds-checked by
+///   [`calculate_module_scores_main`]
 /// * `cells_to_keep` - Slice of indices of the cells to keep
-/// * `gene_bins` - The pre-calculated GeneBins.
-/// * `ctrl` - Number of control genes to use
-/// * `seed` - Seed for reproducibility
+/// * `n_genes` - Size of the dense scratch row. Every index in `gene_sets` and
+///   `control_sets` must be below it.
+/// * `verbose` - Print per-chunk progress
 ///
 /// ### Returns
 ///
 /// Vec of vec with outer vector representing the gene sets and the inner ones
-/// the cells.
+/// the cells. Identical to [`calculate_module_scores`] for the same inputs;
+/// only the read granularity differs.
 fn calculate_module_scores_streaming<S: SingleCellReading>(
     cell_reader: &S,
     gene_sets: &[Vec<usize>],
+    control_sets: &[Vec<usize>],
     cells_to_keep: &[usize],
-    gene_bins: &GeneBins,
-    ctrl: usize,
-    seed: &usize,
+    n_genes: usize,
     verbose: bool,
 ) -> Result<Vec<Vec<f32>>, BixverseErrors> {
     const CHUNK_SIZE: usize = 50000;
-
-    let mut rng = StdRng::seed_from_u64(*seed as u64);
-
-    let control_sets: Vec<Vec<usize>> = gene_sets
-        .iter()
-        .map(|gene_set| sample_control_genes(gene_set, gene_bins, ctrl, &mut rng))
-        .collect();
 
     let total_chunks = cells_to_keep.len().div_ceil(CHUNK_SIZE);
     let mut results: Vec<Vec<f32>> = vec![Vec::with_capacity(cells_to_keep.len()); gene_sets.len()];
@@ -282,15 +322,12 @@ fn calculate_module_scores_streaming<S: SingleCellReading>(
         // Calculate scores in parallel (cells x modules)
         let chunk_scores: Vec<Vec<f32>> = cell_chunks
             .par_iter()
-            .map(|cell| {
-                gene_sets
-                    .iter()
-                    .zip(control_sets.iter())
-                    .map(|(gene_set, control_set)| {
-                        calculate_cell_module_score(cell, gene_set, control_set)
-                    })
-                    .collect()
-            })
+            .map_init(
+                || vec![0.0_f32; n_genes],
+                |scratch, cell| {
+                    calculate_cell_module_scores(cell, gene_sets, control_sets, scratch)
+                },
+            )
             .collect();
 
         // Transpose and append: cells x modules -> modules x cells
@@ -322,7 +359,8 @@ fn calculate_module_scores_streaming<S: SingleCellReading>(
 ///
 /// * `gene_reader` - Reader for the gene-based store.
 /// * `cell_reader` - Reader for the cell-based store.
-/// * `gene_sets` - Slice of indices of the gene sets.
+/// * `gene_sets` - Slice of indices of the gene sets. Every index must address
+///   a gene of the store.
 /// * `cells_to_use` - Slice of indices of the cells to use.
 /// * `nbin` - Number of bins to use
 /// * `ctrl` - Number of control genes to use.
@@ -348,6 +386,19 @@ pub fn calculate_module_scores_main<S: SingleCellReading>(
     verbose: usize,
 ) -> Result<Vec<Vec<f32>>, BixverseErrors> {
     let verbosity = parse_verbosity_level(verbose);
+
+    let n_genes = cell_reader.get_header().total_genes;
+    let n_genes_gene_store = gene_reader.get_header().total_genes;
+    if n_genes != n_genes_gene_store {
+        return Err(BixverseErrors::GeneAxisMismatch {
+            gene_store: n_genes_gene_store,
+            cell_store: n_genes,
+        });
+    }
+
+    // the scoring kernel indexes a dense row directly, so a gene past the axis
+    // has to error here rather than panic per cell
+    validate_gene_indices(gene_sets, n_genes)?;
 
     let cell_set: IndexSet<u32> = cells_to_use.iter().map(|&x| x as u32).collect();
 
@@ -375,25 +426,25 @@ pub fn calculate_module_scores_main<S: SingleCellReading>(
 
     let gene_bins = create_expression_bins(&avg_exp, nbin, &seed);
 
+    let mut rng = StdRng::seed_from_u64(seed as u64);
+    let control_sets: Vec<Vec<usize>> = gene_sets
+        .iter()
+        .map(|gene_set| sample_control_genes(gene_set, &gene_bins, ctrl, &mut rng))
+        .collect();
+
+    validate_gene_indices(&control_sets, n_genes)?;
+
     let module_scores = if streaming {
         calculate_module_scores_streaming(
             cell_reader,
             gene_sets,
+            &control_sets,
             cells_to_use,
-            &gene_bins,
-            ctrl,
-            &seed,
+            n_genes,
             verbosity.detailed_verbosity(),
         )
     } else {
-        calculate_module_scores(
-            cell_reader,
-            gene_sets,
-            cells_to_use,
-            &gene_bins,
-            ctrl,
-            &seed,
-        )
+        calculate_module_scores(cell_reader, gene_sets, &control_sets, cells_to_use, n_genes)
     }?;
 
     let end_modules = start_modules.elapsed();
@@ -408,4 +459,157 @@ pub fn calculate_module_scores_main<S: SingleCellReading>(
     }
 
     Ok(module_scores)
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_relative_eq;
+
+    /// Build a cell chunk from a dense row, keeping only the non-zeros.
+    fn chunk_from_dense(row: &[u32], original_index: usize) -> CsrCellChunk {
+        let idx: Vec<u32> = (0..row.len() as u32)
+            .filter(|&g| row[g as usize] > 0)
+            .collect();
+        let data: Vec<u32> = idx.iter().map(|&g| row[g as usize]).collect();
+
+        CsrCellChunk::from_data(&data, &idx, original_index, 1e4, true)
+    }
+
+    /// Densify a chunk the slow, obvious way.
+    fn densify(cell: &CsrCellChunk, n_genes: usize) -> Vec<f32> {
+        let mut dense = vec![0.0_f32; n_genes];
+        for (&idx, value) in cell.indices.iter().zip(cell.data_norm.iter()) {
+            dense[idx as usize] = value.to_f32();
+        }
+        dense
+    }
+
+    /// Reference score: the definition, straight off a dense row.
+    fn reference_score(dense: &[f32], gene_set: &[usize], control_set: &[usize]) -> f32 {
+        let mean = |genes: &[usize]| -> f32 {
+            if genes.is_empty() {
+                return 0.0;
+            }
+            genes.iter().map(|&g| dense[g]).sum::<f32>() / genes.len() as f32
+        };
+
+        mean(gene_set) - mean(control_set)
+    }
+
+    fn toy_cells() -> Vec<CsrCellChunk> {
+        vec![
+            chunk_from_dense(&[5, 0, 3, 0, 11, 0, 2, 0], 0),
+            chunk_from_dense(&[0, 7, 0, 1, 0, 4, 0, 9], 1),
+            chunk_from_dense(&[1, 1, 0, 0, 6, 0, 0, 2], 2),
+        ]
+    }
+
+    /// Both the caller's gene sets and the sampled control sets go through this,
+    /// which is the fix for control genes reaching the scratch unchecked.
+    #[test]
+    fn test_validate_gene_indices_bounds_every_set() {
+        let ok = vec![vec![0, 3], vec![7]];
+        assert!(validate_gene_indices(&ok, 8).is_ok());
+
+        // the offending index sits in the SECOND set, which is where the
+        // control genes land
+        let bad = vec![vec![0, 3], vec![8]];
+        assert!(matches!(
+            validate_gene_indices(&bad, 8),
+            Err(BixverseErrors::SliceIndexOutOfBounds { index: 8, len: 8 })
+        ));
+
+        assert!(validate_gene_indices(&[], 8).is_ok());
+        assert!(validate_gene_indices(&[vec![]], 8).is_ok());
+    }
+
+    #[test]
+    fn test_module_scores_match_the_dense_reference() {
+        let n_genes = 8;
+        let cells = toy_cells();
+
+        let gene_sets = vec![vec![0, 2, 4], vec![1, 7]];
+        let control_sets = vec![vec![1, 3, 5, 6, 7], vec![0, 2, 4, 6]];
+
+        let mut scratch = vec![0.0_f32; n_genes];
+        for cell in &cells {
+            let got = calculate_cell_module_scores(cell, &gene_sets, &control_sets, &mut scratch);
+            let dense = densify(cell, n_genes);
+
+            assert_eq!(got.len(), gene_sets.len());
+            for (module, &score) in got.iter().enumerate() {
+                assert_relative_eq!(
+                    score,
+                    reference_score(&dense, &gene_sets[module], &control_sets[module]),
+                    epsilon = 1e-6
+                );
+            }
+        }
+    }
+
+    /// The scratch is shared across cells, so a cell must not see the values of
+    /// the one scored before it. This is the failure mode the dense buffer
+    /// introduces over the binary-search lookup it replaced.
+    #[test]
+    fn test_module_scores_scratch_is_left_clean() {
+        let n_genes = 8;
+        let cells = vec![
+            chunk_from_dense(&[9, 9, 9, 9, 0, 0, 0, 0], 0),
+            chunk_from_dense(&[0, 0, 0, 0, 1, 2, 3, 4], 1),
+        ];
+
+        // scores only genes the second cell does not express
+        let gene_sets = vec![vec![0, 1, 2, 3]];
+        let control_sets = vec![vec![4, 5]];
+
+        let mut scratch = vec![0.0_f32; n_genes];
+        let mut scores = Vec::new();
+        for cell in &cells {
+            scores.push(calculate_cell_module_scores(
+                cell,
+                &gene_sets,
+                &control_sets,
+                &mut scratch,
+            ));
+        }
+
+        assert!(scratch.iter().all(|&v| v == 0.0));
+
+        let dense = densify(&cells[1], n_genes);
+        assert_relative_eq!(
+            scores[1][0],
+            reference_score(&dense, &gene_sets[0], &control_sets[0]),
+            epsilon = 1e-6
+        );
+    }
+
+    /// An empty set contributes a zero mean rather than a NaN.
+    #[test]
+    fn test_module_scores_handle_empty_sets() {
+        let n_genes = 8;
+        let cells = toy_cells();
+
+        let gene_sets = vec![vec![], vec![0, 4]];
+        let control_sets = vec![vec![1, 3], vec![]];
+
+        let mut scratch = vec![0.0_f32; n_genes];
+        let got = calculate_cell_module_scores(&cells[0], &gene_sets, &control_sets, &mut scratch);
+        let dense = densify(&cells[0], n_genes);
+
+        assert_relative_eq!(
+            got[0],
+            -reference_score(&dense, &control_sets[0], &[]),
+            epsilon = 1e-6
+        );
+        assert_relative_eq!(
+            got[1],
+            reference_score(&dense, &gene_sets[1], &[]),
+            epsilon = 1e-6
+        );
+    }
 }
