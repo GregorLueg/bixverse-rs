@@ -331,8 +331,10 @@ where
 
 /// Project the simulated doublets into the observed PC space on the GPU.
 ///
-/// Replaces the dense `scale_cell_chunks_with_stats` plus faer GEMM of the CPU
-/// path. `launch_spmm_csr_forward` evaluates `Y = A @ Omega - 1 * c^T`, so
+/// The GPU counterpart of
+/// [`project_cell_chunks_with_stats`](crate::single_cell::sc_processing::utils_doublets::project_cell_chunks_with_stats),
+/// and it splits the projection the same way.
+/// `launch_spmm_csr_forward` evaluates `Y = A @ Omega - 1 * c^T`, so
 /// with `Omega[g, j] = V[g, j] / sigma[g]` and `c = mu^T @ Omega` the result is
 /// `((X_sim - mu) / sigma) @ V`, i.e. the projection, without materialising the
 /// scaled dense matrix.

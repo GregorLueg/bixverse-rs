@@ -236,12 +236,21 @@ pub type DoubletPcaRes = (Mat<f32>, Mat<f32>, Vec<f32>, Vec<f32>);
 /// This ensures simulated doublets are scaled using the SAME statistics
 /// as the observed cells (critical for proper PCA projection)
 ///
+/// The background value a gene takes where a cell stores nothing is a column
+/// constant, so the columns are filled first, in parallel and contiguously
+/// (`Mat` is column-major), and only then are the stored entries scattered on
+/// top. The scatter strides across columns and stays sequential, but it touches
+/// `nnz` elements rather than `n_cells * n_genes`.
+///
+/// Prefer [`project_cell_chunks_with_stats`] when the result is only going to
+/// be multiplied by the PCA loadings, which avoids this matrix entirely.
+///
 /// ### Params
 ///
 /// * `chunks` - Vector of cell chunks (simulated doublets)
 /// * `gene_means` - Mean for each gene (from observed data)
 /// * `gene_stds` - Std dev for each gene (from observed data)
-/// * `mean_center` - Center the data around the mean
+/// * `mean_center` - Centre the data around the mean
 /// * `normalise_variance` - Normalise the variance
 /// * `n_genes` - Total number of genes
 ///
@@ -259,46 +268,156 @@ pub fn scale_cell_chunks_with_stats(
     let n_cells = chunks.len();
     let mut result = Mat::<f32>::zeros(n_cells, n_genes);
 
+    if mean_center {
+        result
+            .par_col_iter_mut()
+            .enumerate()
+            .for_each(|(gene, mut col)| {
+                let background = if normalise_variance {
+                    -gene_means[gene] / gene_stds[gene]
+                } else {
+                    -gene_means[gene]
+                };
+                col.fill(background);
+            });
+    }
+
     for (cell_idx, chunk) in chunks.iter().enumerate() {
-        match (mean_center, normalise_variance) {
-            (false, false) => {
-                for i in 0..chunk.indices.len() {
-                    let gene = chunk.indices[i] as usize;
-                    let val = chunk.data_norm[i].to_f32();
-                    *result.get_mut(cell_idx, gene) = val;
-                }
+        for (i, &gene) in chunk.indices.iter().enumerate() {
+            let gene = gene as usize;
+            let mut value = chunk.data_norm[i].to_f32();
+            if mean_center {
+                value -= gene_means[gene];
             }
-            (true, false) => {
-                for gene in 0..n_genes {
-                    *result.get_mut(cell_idx, gene) = -gene_means[gene];
-                }
-                for i in 0..chunk.indices.len() {
-                    let gene = chunk.indices[i] as usize;
-                    let val = chunk.data_norm[i].to_f32();
-                    *result.get_mut(cell_idx, gene) = val - gene_means[gene];
-                }
+            if normalise_variance {
+                value /= gene_stds[gene];
             }
-            (false, true) => {
-                for i in 0..chunk.indices.len() {
-                    let gene = chunk.indices[i] as usize;
-                    let val = chunk.data_norm[i].to_f32();
-                    *result.get_mut(cell_idx, gene) = val / gene_stds[gene];
-                }
-            }
-            (true, true) => {
-                for gene in 0..n_genes {
-                    *result.get_mut(cell_idx, gene) = -gene_means[gene] / gene_stds[gene];
-                }
-                for i in 0..chunk.indices.len() {
-                    let gene = chunk.indices[i] as usize;
-                    let val = chunk.data_norm[i].to_f32();
-                    *result.get_mut(cell_idx, gene) = (val - gene_means[gene]) / gene_stds[gene];
-                }
-            }
+            *result.get_mut(cell_idx, gene) = value;
         }
     }
 
     result
+}
+
+/// Project cell chunks straight onto PCA loadings, skipping the dense matrix.
+///
+/// [`scale_cell_chunks_with_stats`] followed by a GEMM against the loadings
+/// materialises an `n_cells x n_genes` block only to reduce it away. Since the
+/// scaling is affine, the projection splits into a sparse part and a constant:
+///
+/// ```text
+/// ((X - mu) / sd) V  =  (X / sd) V  -  1 ((mu / sd)^T V)
+/// ```
+///
+/// The right-hand term is one row of length `n_pcs`, computed once. The left is
+/// an axpy of the matching loadings row per stored entry, so the cost is
+/// `nnz * n_pcs` instead of `n_cells * n_genes * n_pcs`, with no dense
+/// intermediate. The loadings are transposed into row-major order up front so
+/// each axpy runs over a contiguous slice.
+///
+/// The result is mathematically the same as the two-step path but not
+/// bit-identical, since the sums accumulate in a different order.
+///
+/// ### Params
+///
+/// * `chunks` - Vector of cell chunks (simulated doublets)
+/// * `gene_means` - Mean for each gene (from observed data)
+/// * `gene_stds` - Std dev for each gene (from observed data)
+/// * `loadings` - PCA loadings, shape (genes, PCs). Its row count defines the
+///   gene axis and must match `gene_means` and `gene_stds`.
+/// * `mean_center` - Centre the data around the mean
+/// * `normalise_variance` - Normalise the variance
+///
+/// ### Returns
+///
+/// Dense matrix (cells x PCs) of projected scores.
+pub fn project_cell_chunks_with_stats(
+    chunks: &[CsrCellChunk],
+    gene_means: &[f32],
+    gene_stds: &[f32],
+    loadings: MatRef<'_, f32>,
+    mean_center: bool,
+    normalise_variance: bool,
+) -> Mat<f32> {
+    let n_cells = chunks.len();
+    let n_genes = loadings.nrows();
+    let n_pcs = loadings.ncols();
+
+    // the old scale-then-GEMM path took `n_genes` explicitly and faer checked
+    // `A.ncols() == B.nrows()`, so a mismatched statistics vector died loudly.
+    // Deriving the axis from the loadings removed that check, and a `gene_means`
+    // longer than `n_genes` would otherwise truncate the background term
+    // silently and return a wrong projection. Assert rather than return
+    // `Result`, since `reproject_doublets` is `pub` and infallible.
+    assert_eq!(
+        gene_means.len(),
+        n_genes,
+        "gene_means must match the gene axis of the loadings"
+    );
+    assert_eq!(
+        gene_stds.len(),
+        n_genes,
+        "gene_stds must match the gene axis of the loadings"
+    );
+
+    // `par_chunks_mut(0)` panics; the old GEMM handled a zero-column loadings
+    // and returned an `n_cells x 0` matrix, so keep that
+    if n_pcs == 0 {
+        return Mat::<f32>::zeros(n_cells, 0);
+    }
+
+    // row-major copy so the per-entry axpy walks a contiguous slice
+    let mut loadings_rm = vec![0.0_f32; n_genes * n_pcs];
+    loadings_rm
+        .par_chunks_mut(n_pcs)
+        .enumerate()
+        .for_each(|(gene, row)| {
+            for (pc, slot) in row.iter_mut().enumerate() {
+                *slot = loadings[(gene, pc)];
+            }
+        });
+
+    // constant contribution of the implicit -mean/sd background, negated so
+    // each cell can start from it directly
+    let mut background = vec![0.0_f32; n_pcs];
+    if mean_center {
+        for gene in 0..n_genes {
+            let mut centre = gene_means[gene];
+            if normalise_variance {
+                centre /= gene_stds[gene];
+            }
+            if centre == 0.0 {
+                continue;
+            }
+            f32::bxv_axpy_simd(
+                &mut background,
+                -centre,
+                &loadings_rm[gene * n_pcs..(gene + 1) * n_pcs],
+            );
+        }
+    }
+
+    let mut scores = vec![0.0_f32; n_cells * n_pcs];
+    scores
+        .par_chunks_mut(n_pcs)
+        .zip(chunks.par_iter())
+        .for_each(|(row, chunk)| {
+            row.copy_from_slice(&background);
+
+            for (i, &gene) in chunk.indices.iter().enumerate() {
+                let gene = gene as usize;
+                let mut value = chunk.data_norm[i].to_f32();
+                if normalise_variance {
+                    value /= gene_stds[gene];
+                }
+                if value == 0.0 {
+                    continue;
+                }
+                f32::bxv_axpy_simd(row, value, &loadings_rm[gene * n_pcs..(gene + 1) * n_pcs]);
+            }
+        });
+
+    Mat::from_fn(n_cells, n_pcs, |cell, pc| scores[cell * n_pcs + pc])
 }
 
 /// Calculate PCA for doublet detection methods using sparse SVD
@@ -461,9 +580,10 @@ pub fn pca_observed<S: SingleCellReading>(
 /// Run PCA on observed cells, project simulated doublets, return combined
 ///
 /// The observed cells are decomposed via sparse SVD (no densification).
-/// Simulated doublet chunks are scaled using the observed statistics and
-/// projected into the same PC space. Returns the vertically concatenated
-/// scores: observed on top, simulated on bottom.
+/// Simulated doublet chunks are projected into the same PC space using the
+/// observed statistics, via [`project_cell_chunks_with_stats`], so neither side
+/// materialises a dense matrix. Returns the vertically concatenated scores:
+/// observed on top, simulated on bottom.
 ///
 /// ### Params
 ///
@@ -508,16 +628,15 @@ pub fn pca_and_project<S: SingleCellReading>(
         verbose,
     )?;
 
-    let scaled_sim = scale_cell_chunks_with_stats(
+    let sim_pca = project_cell_chunks_with_stats(
         sim_chunks,
         &pca_res.2,
         &pca_res.3,
+        pca_res.1.as_ref(),
         opts.mean_center,
         opts.normalise_variance,
-        hvg_genes.len(),
     );
 
-    let sim_pca = &scaled_sim * &pca_res.1;
     let combined = concat![[&pca_res.0], [sim_pca]];
 
     Ok((combined, pca_res))
@@ -539,16 +658,14 @@ pub fn reproject_doublets(
     pca_res: &DoubletPcaRes,
     opts: &PcaOpts,
 ) -> Mat<f32> {
-    let scaled_sim = scale_cell_chunks_with_stats(
+    let sim_pca = project_cell_chunks_with_stats(
         sim_chunks,
         &pca_res.2,
         &pca_res.3,
+        pca_res.1.as_ref(),
         opts.mean_center,
         opts.normalise_variance,
-        pca_res.2.len(),
     );
-
-    let sim_pca = &scaled_sim * &pca_res.1;
 
     concat![[&pca_res.0], [sim_pca]]
 }
@@ -1848,6 +1965,180 @@ pub fn mark_sims_from_flagged_origins(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use approx::assert_relative_eq;
+
+    /////////////////////
+    // Doublet scaling //
+    /////////////////////
+
+    /// Build a small set of cell chunks over `n_genes` genes.
+    fn scaling_chunks(n_genes: usize) -> Vec<CsrCellChunk> {
+        let rows: Vec<Vec<u32>> = vec![
+            vec![5, 0, 3, 0, 11, 0, 2, 0],
+            vec![0, 7, 0, 1, 0, 4, 0, 9],
+            vec![1, 1, 0, 0, 6, 0, 0, 2],
+        ];
+
+        rows.iter()
+            .enumerate()
+            .map(|(cell, row)| {
+                let idx: Vec<u32> = (0..n_genes as u32)
+                    .filter(|&g| row[g as usize] > 0)
+                    .collect();
+                let data: Vec<u32> = idx.iter().map(|&g| row[g as usize]).collect();
+                CsrCellChunk::from_data(&data, &idx, cell, 1e4, true)
+            })
+            .collect()
+    }
+
+    /// Loadings with no structure worth reading into, just distinct values.
+    fn scaling_loadings(n_genes: usize, n_pcs: usize) -> Mat<f32> {
+        Mat::from_fn(n_genes, n_pcs, |g, k| {
+            ((g * 7 + k * 13) % 11) as f32 * 0.1 - 0.5
+        })
+    }
+
+    /// The fused projection has to reproduce scale-then-GEMM in every flag
+    /// combination, since that is the path it replaced.
+    #[test]
+    fn test_projection_matches_scale_then_gemm() {
+        let n_genes = 8;
+        let n_pcs = 4;
+        let chunks = scaling_chunks(n_genes);
+        let loadings = scaling_loadings(n_genes, n_pcs);
+
+        let gene_means: Vec<f32> = (0..n_genes).map(|g| 0.05 * g as f32 + 0.2).collect();
+        let gene_stds: Vec<f32> = (0..n_genes).map(|g| 0.5 + 0.1 * g as f32).collect();
+
+        for &mean_center in &[false, true] {
+            for &normalise_variance in &[false, true] {
+                let scaled = scale_cell_chunks_with_stats(
+                    &chunks,
+                    &gene_means,
+                    &gene_stds,
+                    mean_center,
+                    normalise_variance,
+                    n_genes,
+                );
+                let want = &scaled * &loadings;
+
+                let got = project_cell_chunks_with_stats(
+                    &chunks,
+                    &gene_means,
+                    &gene_stds,
+                    loadings.as_ref(),
+                    mean_center,
+                    normalise_variance,
+                );
+
+                assert_eq!(got.nrows(), want.nrows());
+                assert_eq!(got.ncols(), want.ncols());
+                for cell in 0..want.nrows() {
+                    for pc in 0..want.ncols() {
+                        assert_relative_eq!(
+                            got[(cell, pc)],
+                            want[(cell, pc)],
+                            epsilon = 1e-4,
+                            max_relative = 1e-4
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A zero-column loadings used to flow through the GEMM and yield an
+    /// `n_cells x 0` matrix; the fused path must not panic in `par_chunks_mut`.
+    #[test]
+    fn test_projection_handles_zero_pcs() {
+        let n_genes = 8;
+        let chunks = scaling_chunks(n_genes);
+        let gene_means = vec![0.5_f32; n_genes];
+        let gene_stds = vec![1.5_f32; n_genes];
+        let loadings = Mat::<f32>::zeros(n_genes, 0);
+
+        let got = project_cell_chunks_with_stats(
+            &chunks,
+            &gene_means,
+            &gene_stds,
+            loadings.as_ref(),
+            true,
+            true,
+        );
+
+        assert_eq!(got.nrows(), chunks.len());
+        assert_eq!(got.ncols(), 0);
+    }
+
+    /// The explicit `n_genes` parameter used to make faer check this at the
+    /// GEMM. Deriving the axis from the loadings put the check here instead, and
+    /// it has to survive release builds.
+    #[test]
+    #[should_panic(expected = "gene_means must match the gene axis")]
+    fn test_projection_rejects_mismatched_gene_stats() {
+        let n_genes = 8;
+        let chunks = scaling_chunks(n_genes);
+        let gene_means = vec![0.5_f32; n_genes + 1];
+        let gene_stds = vec![1.5_f32; n_genes];
+        let loadings = scaling_loadings(n_genes, 3);
+
+        let _ = project_cell_chunks_with_stats(
+            &chunks,
+            &gene_means,
+            &gene_stds,
+            loadings.as_ref(),
+            true,
+            true,
+        );
+    }
+
+    /// Unstored genes take the background value, stored ones the scaled value.
+    #[test]
+    fn test_scaling_fills_the_background_for_absent_genes() {
+        let n_genes = 8;
+        let chunks = scaling_chunks(n_genes);
+        let gene_means: Vec<f32> = (0..n_genes).map(|g| 0.05 * g as f32 + 0.2).collect();
+        let gene_stds: Vec<f32> = (0..n_genes).map(|g| 0.5 + 0.1 * g as f32).collect();
+
+        let scaled =
+            scale_cell_chunks_with_stats(&chunks, &gene_means, &gene_stds, true, true, n_genes);
+
+        for (cell, chunk) in chunks.iter().enumerate() {
+            let stored: FxHashSet<u32> = chunk.indices.iter().copied().collect();
+            for gene in 0..n_genes {
+                if stored.contains(&(gene as u32)) {
+                    continue;
+                }
+                assert_relative_eq!(
+                    scaled[(cell, gene)],
+                    -gene_means[gene] / gene_stds[gene],
+                    epsilon = 1e-6
+                );
+            }
+        }
+    }
+
+    /// Without mean centring the background is zero, so the matrix stays as
+    /// sparse in content as the chunks are.
+    #[test]
+    fn test_scaling_without_centring_leaves_zeros() {
+        let n_genes = 8;
+        let chunks = scaling_chunks(n_genes);
+        let gene_means = vec![1.0_f32; n_genes];
+        let gene_stds = vec![2.0_f32; n_genes];
+
+        let scaled =
+            scale_cell_chunks_with_stats(&chunks, &gene_means, &gene_stds, false, true, n_genes);
+
+        for (cell, chunk) in chunks.iter().enumerate() {
+            let stored: FxHashSet<u32> = chunk.indices.iter().copied().collect();
+            for gene in 0..n_genes {
+                if !stored.contains(&(gene as u32)) {
+                    assert_eq!(scaled[(cell, gene)], 0.0);
+                }
+            }
+        }
+    }
 
     ////////////////////
     // Feat selection //
