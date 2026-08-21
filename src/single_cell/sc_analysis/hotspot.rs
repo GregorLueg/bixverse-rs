@@ -7,8 +7,9 @@ use faer::linalg::matmul::triangular::{BlockStructure, matmul as triangular_matm
 use faer::{Accum, Mat, MatRef};
 use indexmap::IndexSet;
 use rayon::prelude::*;
+use rustc_hash::FxHashMap;
+use statrs::distribution::{ContinuousCDF, Normal};
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
 use std::time::Instant;
 
 use crate::core::math::linear_algebra::{linear_regression, linear_regression_widen};
@@ -118,6 +119,29 @@ pub enum GexModel {
     Bernoulli,
     /// Use depth-adjusted normal model
     Normal,
+    /// Assume the caller already standardised the data: `mu = 0`, `var = 1`.
+    ///
+    /// The escape hatch for anything the other three cannot express, since none
+    /// of them accept covariates. Standardise within batch, cell line or
+    /// whatever else needs regressing out, then run with this.
+    PreStandardised,
+}
+
+/// Which of the DANB dispersion clamps a gene's moment fit hit.
+///
+/// Both are silent corrections for a moment estimate that came out unusable, and
+/// both distort the variance the standardisation divides by, so a run where many
+/// genes clamp is worth knowing about. Only reported by
+/// [Hotspot::diagnostics].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DanbClamp {
+    /// The estimate was usable.
+    None,
+    /// Negative dispersion, so `size` was pinned high and the variance collapsed
+    /// to Poisson.
+    High,
+    /// Dispersion below the floor, so `size` was pinned at `1e-10`.
+    Low,
 }
 
 /// Parse the model to use gene expression
@@ -134,6 +158,7 @@ pub fn parse_gex_model(s: &str) -> Option<GexModel> {
         "danb" => Some(GexModel::DephAdjustNegBinom),
         "bernoulli" => Some(GexModel::Bernoulli),
         "normal" => Some(GexModel::Normal),
+        "none" => Some(GexModel::PreStandardised),
         _ => None,
     }
 }
@@ -470,6 +495,16 @@ fn graph_weights(distances: &[Vec<f32>], params: &HotSpotGraphParams) -> Vec<Vec
 
 /// Combine the two directions of every reciprocal edge onto one slot
 ///
+/// Self-loops are dropped. Upstream has no guard because it builds its own kNN
+/// and drops the query point, but this crate accepts a caller-supplied graph,
+/// and a kNN that returns each node as its own first neighbour would add
+/// `w * x_i^2` to `G` for every gene: a uniform positive bias that looks exactly
+/// like universal spatial autocorrelation.
+///
+/// Note that the result is *not* upper-triangular. A non-mutual edge where `i`
+/// lists `j` but `j` does not list `i` is left in place even when `j < i`, which
+/// matches upstream and is what every downstream traversal assumes.
+///
 /// ### Params
 ///
 /// * `neighbours` - Neighbour indices for each node
@@ -477,13 +512,18 @@ fn graph_weights(distances: &[Vec<f32>], params: &HotSpotGraphParams) -> Vec<Vec
 ///
 /// ### Returns
 ///
-/// Modified weights with redundant edges zeroed
+/// Modified weights with redundant edges and self-loops zeroed
 fn make_weights_non_redundant(neighbours: &[Vec<usize>], weights: &[Vec<f32>]) -> Vec<Vec<f32>> {
     let mut w_no_redundant = weights.to_vec();
 
     for i in 0..neighbours.len() {
         for k in 0..neighbours[i].len() {
             let j = neighbours[i][k];
+
+            if j == i {
+                w_no_redundant[i][k] = 0.0;
+                continue;
+            }
 
             if j < i {
                 continue;
@@ -595,20 +635,43 @@ fn create_centered_counts_gene(
     n_cells: usize,
     model: &GexModel,
 ) -> Vec<f32> {
-    let (mu, var, _) = match model {
-        GexModel::DephAdjustNegBinom => danb_model(gene, umi_counts, n_cells),
-        GexModel::Bernoulli => bernoulli_model(gene, umi_counts, n_cells),
-        GexModel::Normal => normal_model(gene, umi_counts, n_cells),
-    };
-
     let mut vals = vec![0_f32; n_cells];
     for (&idx, val) in gene.indices.iter().zip(gene.data_raw.iter()) {
         vals[idx as usize] = val as f32;
     }
 
+    // Bernoulli models detection, so it fits and centres the indicator rather
+    // than the counts, see `local_stats_pairs.py:417`.
+    if matches!(model, GexModel::Bernoulli) {
+        binarise(&mut vals);
+    }
+
+    let (mu, var, _) = match model {
+        GexModel::DephAdjustNegBinom => danb_model(gene, umi_counts, n_cells),
+        GexModel::Bernoulli => bernoulli_model(gene, umi_counts, n_cells),
+        GexModel::Normal => normal_model(gene, umi_counts, n_cells),
+        GexModel::PreStandardised => return vals,
+    };
+
     center_values(&mut vals, &mu, &var);
 
     vals
+}
+
+/// Replace counts by their detection indicator, in place.
+///
+/// ### Params
+///
+/// * `vals` - Dense counts, overwritten with `1.0` where positive
+///
+/// ### Returns
+///
+/// Nothing; modifies `vals` in place.
+#[inline]
+fn binarise(vals: &mut [f32]) {
+    for v in vals.iter_mut() {
+        *v = if *v > 0.0 { 1.0 } else { 0.0 };
+    }
 }
 
 ////////////////
@@ -852,18 +915,28 @@ fn normal_model(
         gene_raw[idx as usize] = val as f32;
     }
 
-    // Fit linear regression: expression ~ log(umi_counts)
-    let log_umi: Vec<f32> = umi_counts
-        .iter()
-        .map(|&x| if x > 0.0 { x.ln() } else { 0.0 })
-        .collect();
+    let n = n_cells as f64;
+    let umi_mean = sum_widen_simd_f32(umi_counts) / n;
+    let umi_var = sum_squared_dev_widen_simd_f32(umi_counts, umi_mean);
 
-    let (intercept, slope) = linear_regression_widen(&log_umi, &gene_raw);
+    // Degenerate design: the regression has nothing to fit against, so fall
+    // back on the gene's own moments.
+    if umi_var == 0.0 {
+        let mean = sum_widen_simd_f32(&gene_raw) / n;
+        let sq = sum_squared_dev_widen_simd_f32(&gene_raw, mean);
+        let (mu_val, var_val) = (mean as f32, (sq / n) as f32);
+        return (
+            vec![mu_val; n_cells],
+            vec![var_val; n_cells],
+            vec![var_val + mu_val * mu_val; n_cells],
+        );
+    }
 
-    // Cell-specific mu from regression
-    let mu: Vec<f32> = log_umi.iter().map(|&x| intercept + slope * x).collect();
+    // Expression ~ raw library size, matching `normal_model.py`
+    let (intercept, slope) = linear_regression_widen(umi_counts, &gene_raw);
+    let mu: Vec<f32> = umi_counts.iter().map(|&x| intercept + slope * x).collect();
 
-    // Residual variance (constant across cells), accumulated in f64
+    // `np.var` of the residuals, so `n` and not the regression's `n - 2`
     let residuals_sq: f64 = gene_raw
         .iter()
         .zip(&mu)
@@ -872,7 +945,7 @@ fn normal_model(
             d * d
         })
         .sum();
-    let var_val = (residuals_sq / (n_cells as f64 - 2.0)) as f32;
+    let var_val = (residuals_sq / n) as f32;
 
     let var = vec![var_val; n_cells];
     let x2: Vec<f32> = mu.iter().map(|&m| var_val + m * m).collect();
@@ -899,6 +972,8 @@ pub struct Hotspot<'a, S: SingleCellReading> {
     gene_reader: &'a S,
     /// Symmetric CSR graph (used by the pair path).
     graph: GraphCsr,
+    /// Neighbour lists as supplied, kept only for [Hotspot::diagnostics].
+    neighbours: &'a [Vec<usize>],
     /// Slice of cells to analyse/keep in this analysis.
     cells_to_keep: &'a [usize],
     /// Pre-computed node-degree for each cell based on the weights.
@@ -917,8 +992,9 @@ pub struct Hotspot<'a, S: SingleCellReading> {
     umi_sq_sum: f64,
     /// log10(umi) per cell (hoisted out of the Bernoulli fit).
     log10_umi: Vec<f32>,
-    /// ln(umi) per cell (hoisted out of the Normal fit).
-    ln_umi: Vec<f32>,
+    /// Whether the library sizes carry no variance, in which case the Normal
+    /// model's regression is degenerate.
+    umi_variance_zero: bool,
     /// Per-cell quantile bin on log10(umi); depends only on depth.
     umi_bins: Vec<usize>,
     /// Bin centres for the Bernoulli logistic fit.
@@ -980,10 +1056,8 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
             .iter()
             .map(|&x| if x > 0.0 { x.log10() } else { 0.0 })
             .collect();
-        let ln_umi: Vec<f32> = umi_counts
-            .iter()
-            .map(|&x| if x > 0.0 { x.ln() } else { 0.0 })
-            .collect();
+        let umi_variance_zero =
+            sum_squared_dev_widen_simd_f32(&umi_counts, umi_total / n_cells as f64) == 0.0;
 
         // Bernoulli binning depends only on depth, so the (sorting) quantile
         // cut moves out of the per-gene fit.
@@ -1001,13 +1075,14 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
         Ok(Self {
             gene_reader,
             graph,
+            neighbours,
             cells_to_keep,
             node_degrees,
             umi_counts,
             umi_total,
             umi_sq_sum,
             log10_umi,
-            ln_umi,
+            umi_variance_zero,
             umi_bins,
             bin_centers,
             bin_totals,
@@ -1090,7 +1165,8 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
             );
         }
 
-        let p_vals = z_scores_to_pval(&z_scores, "twosided");
+        // upstream tests positive autocorrelation only, see `local_stats.py:239`
+        let p_vals = z_scores_to_pval(&z_scores, "greater");
         let fdrs = calc_fdr(&p_vals);
 
         Ok(HotSpotGeneRes {
@@ -1181,7 +1257,8 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
             }
         }
 
-        let p_vals = z_scores_to_pval(&z_scores, "twosided");
+        // upstream tests positive autocorrelation only, see `local_stats.py:239`
+        let p_vals = z_scores_to_pval(&z_scores, "greater");
         let fdrs = calc_fdr(&p_vals);
 
         if verbosity.normal_verbosity() {
@@ -1221,13 +1298,22 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
             sc.vals[idx as usize] = val as f32;
         }
 
-        match gex_model {
-            GexModel::DephAdjustNegBinom => self.fit_danb(gene_chunk, sc),
-            GexModel::Bernoulli => self.fit_bernoulli(gene_chunk, sc),
-            GexModel::Normal => self.fit_normal(sc),
+        // Bernoulli models detection, so both the fit and the statistic run on
+        // the indicator, see `local_stats.py:254`.
+        if matches!(gex_model, GexModel::Bernoulli) {
+            binarise(&mut sc.vals);
         }
 
-        if centered {
+        match gex_model {
+            GexModel::DephAdjustNegBinom => {
+                self.fit_danb(gene_chunk, sc);
+            }
+            GexModel::Bernoulli => self.fit_bernoulli(gene_chunk, sc),
+            GexModel::Normal => self.fit_normal(sc),
+            GexModel::PreStandardised => self.fit_pre_standardised(sc),
+        }
+
+        if centered && !matches!(gex_model, GexModel::PreStandardised) {
             center_values(&mut sc.vals, &sc.mu, &sc.var);
         }
 
@@ -1269,8 +1355,8 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
     ///
     /// ### Returns
     ///
-    /// Nothing; writes `mu`, `var`, `x2`.
-    fn fit_danb(&self, gene: &CscGeneChunk, sc: &mut GeneScratch) {
+    /// Which dispersion clamp fired, if any; writes `mu`, `var`, `x2`.
+    fn fit_danb(&self, gene: &CscGeneChunk, sc: &mut GeneScratch) -> DanbClamp {
         let n = self.n_cells as f64;
         let total = self.umi_total;
         // f64: a metacell aggregates dozens of cells, so a gene total over tens
@@ -1291,10 +1377,13 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
         let vv = sum_sq / (n - 1.0);
 
         let mut size = ((tj * tj) / total) * (self.umi_sq_sum / total) / ((n - 1.0) * vv - tj);
+        let mut clamp = DanbClamp::None;
         if size < 0.0 {
             size = 1e9;
+            clamp = DanbClamp::High;
         } else if size < 1e-10 {
             size = 1e-10;
+            clamp = DanbClamp::Low;
         }
         let size = size as f32;
 
@@ -1304,6 +1393,8 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
             sc.var[i] = v;
             sc.x2[i] = v + m * m;
         }
+
+        clamp
     }
 
     /// Fit the Bernoulli model into scratch.
@@ -1342,6 +1433,11 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
 
     /// Fit the Normal model into scratch (reads dense raw from `sc.vals`).
     ///
+    /// OLS of the counts on the raw library size, with the residual variance
+    /// taken as the uncorrected (`ddof = 0`) second moment and shared across
+    /// cells. When the depths carry no variance the regression is degenerate and
+    /// the gene's own mean and variance are used instead.
+    ///
     /// ### Params
     ///
     /// * `sc` - Scratch; `vals` must already hold the dense raw counts
@@ -1349,10 +1445,33 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
     /// ### Returns
     ///
     /// Nothing; writes `mu`, `var` (constant), `x2`.
+    ///
+    /// ### References
+    ///
+    /// DeTomaso and Yosef, Cell Systems, 2021 (`hotspot/normal_model.py`)
     fn fit_normal(&self, sc: &mut GeneScratch) {
-        let (intercept, slope) = linear_regression_widen(&self.ln_umi, &sc.vals);
+        let n = self.n_cells as f64;
+
+        if self.umi_variance_zero {
+            let mean = sum_widen_simd_f32(&sc.vals) / n;
+            let mut sq = 0.0_f64;
+            for i in 0..self.n_cells {
+                let d = sc.vals[i] as f64 - mean;
+                sq += d * d;
+            }
+            let (mu_val, var_val) = ((mean as f32), ((sq / n) as f32));
+            for i in 0..self.n_cells {
+                sc.mu[i] = mu_val;
+                sc.var[i] = var_val;
+                sc.x2[i] = var_val + mu_val * mu_val;
+            }
+            return;
+        }
+
+        // Raw depth, not its log: upstream regresses on `umi_counts` directly.
+        let (intercept, slope) = linear_regression_widen(&self.umi_counts, &sc.vals);
         for i in 0..self.n_cells {
-            sc.mu[i] = intercept + slope * self.ln_umi[i];
+            sc.mu[i] = intercept + slope * self.umi_counts[i];
         }
 
         let mut resid_sq = 0.0_f64;
@@ -1360,12 +1479,134 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
             let d = (sc.vals[i] - sc.mu[i]) as f64;
             resid_sq += d * d;
         }
-        let var_val = (resid_sq / (self.n_cells as f64 - 2.0)) as f32;
+        // `np.var` of the residuals, so `n` rather than the regression's `n - 2`
+        let var_val = (resid_sq / n) as f32;
 
         for i in 0..self.n_cells {
             sc.var[i] = var_val;
             sc.x2[i] = var_val + sc.mu[i] * sc.mu[i];
         }
+    }
+
+    /// Fit the pre-standardised model into scratch: `mu = 0`, `var = x2 = 1`.
+    ///
+    /// Centring is then the identity, which is why `compute_single_gene` skips
+    /// it for this model rather than dividing by one.
+    ///
+    /// ### Params
+    ///
+    /// * `sc` - Scratch
+    ///
+    /// ### Returns
+    ///
+    /// Nothing; writes `mu`, `var`, `x2`.
+    ///
+    /// ### References
+    ///
+    /// DeTomaso and Yosef, Cell Systems, 2021 (`hotspot/none_model.py`)
+    fn fit_pre_standardised(&self, sc: &mut GeneScratch) {
+        sc.mu.fill(0.0);
+        sc.var.fill(1.0);
+        sc.x2.fill(1.0);
+    }
+
+    /////////////////
+    // Diagnostics //
+    /////////////////
+
+    /// Report what a run on this graph and gene set is actually measuring.
+    ///
+    /// See [HotSpotDiagnostics] for why each number is there. Runs the same
+    /// model fit as [Hotspot::compute_all_genes] and throws the fit away, so it
+    /// costs one extra pass over the genes and changes nothing.
+    ///
+    /// ### Params
+    ///
+    /// * `gene_indices` - Genes to report on
+    /// * `model` - Null model, as for [Hotspot::compute_all_genes]
+    /// * `groups` - Optional group id per cell, in `cells_to_keep` order. Pass
+    ///   the cell line, batch or donor when the graph was built over data
+    ///   spanning several of them.
+    ///
+    /// ### Returns
+    ///
+    /// `Result` with the [HotSpotDiagnostics].
+    pub fn diagnostics(
+        &self,
+        gene_indices: &[usize],
+        model: &str,
+        groups: Option<&[usize]>,
+    ) -> Result<HotSpotDiagnostics, BixverseErrors> {
+        let gex_model = parse_gex_model(model)
+            .ok_or_else(|| BixverseErrors::HotSpotWrongModel(model.to_string()))?;
+
+        let self_loops = self
+            .neighbours
+            .iter()
+            .enumerate()
+            .filter(|(i, row)| row.contains(i))
+            .count();
+
+        let within_group_edge_fraction =
+            groups.and_then(|g| within_group_edge_fraction(self.neighbours, g));
+
+        let cell_set: IndexSet<u32> = self.cells_to_keep.iter().map(|&x| x as u32).collect();
+        let mut gene_chunks = self.gene_reader.read_gene_parallel(gene_indices)?;
+        gene_chunks.par_iter_mut().for_each(|chunk| {
+            chunk.filter_selected_cells(&cell_set);
+        });
+
+        let per_gene: Vec<(f32, bool, bool)> = gene_chunks
+            .par_iter()
+            .map_init(
+                || GeneScratch::new(self.n_cells, false),
+                |sc, chunk| {
+                    sc.vals.fill(0.0);
+                    for (&idx, val) in chunk.indices.iter().zip(chunk.data_raw.iter()) {
+                        sc.vals[idx as usize] = val as f32;
+                    }
+                    if matches!(gex_model, GexModel::Bernoulli) {
+                        binarise(&mut sc.vals);
+                    }
+
+                    let clamps = match gex_model {
+                        GexModel::DephAdjustNegBinom => {
+                            let c = self.fit_danb(chunk, sc);
+                            (c == DanbClamp::High, c == DanbClamp::Low)
+                        }
+                        GexModel::Bernoulli => {
+                            self.fit_bernoulli(chunk, sc);
+                            (false, false)
+                        }
+                        GexModel::Normal => {
+                            self.fit_normal(sc);
+                            (false, false)
+                        }
+                        GexModel::PreStandardised => {
+                            self.fit_pre_standardised(sc);
+                            (false, false)
+                        }
+                    };
+
+                    center_values(&mut sc.vals, &sc.mu, &sc.var);
+
+                    // The null assumes unit variance about zero, so this is the
+                    // uncentred second moment, not the sample SD.
+                    let n = self.n_cells as f64;
+                    let sd = (sum_squares_simd_f32(&sc.vals) as f64 / n).sqrt() as f32;
+
+                    (sd, clamps.0, clamps.1)
+                },
+            )
+            .collect();
+
+        Ok(HotSpotDiagnostics {
+            self_loops,
+            within_group_edge_fraction,
+            centred_sd: per_gene.iter().map(|(sd, _, _)| *sd).collect(),
+            size_clamped_high: per_gene.iter().filter(|(_, h, _)| *h).count(),
+            size_clamped_low: per_gene.iter().filter(|(_, _, l)| *l).count(),
+        })
     }
 
     //////////////////
@@ -1786,187 +2027,729 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
     }
 }
 
+/////////////////
+// Diagnostics //
+/////////////////
+
+/// What a Hotspot run is actually measuring on a given graph and gene set.
+///
+/// Exists because a near-universal significant Z is ambiguous: it can mean the
+/// null is being applied correctly to data with real structure everywhere, or
+/// that the graph encodes a grouping the null knows nothing about, or that the
+/// model fit collapsed. These four numbers separate those cases.
+#[derive(Clone, Debug)]
+pub struct HotSpotDiagnostics {
+    /// Nodes listing themselves as their own neighbour. Should be zero; anything
+    /// else biases `G` upwards for every gene, see
+    /// [make_weights_non_redundant].
+    pub self_loops: usize,
+    /// Fraction of undirected edges whose endpoints share a group, when a
+    /// grouping was supplied.
+    ///
+    /// The single most informative number when the graph was rebuilt over
+    /// aggregated data spanning several batches, cell lines or donors. Near one
+    /// means the statistic is testing for between-group differences, and no
+    /// choice of null model changes that.
+    pub within_group_edge_fraction: Option<f64>,
+    /// Standard deviation of the standardised counts, per gene.
+    ///
+    /// The centred null assumes one. Values far above mean the fitted variance
+    /// is too small and Z is inflated mechanically rather than biologically.
+    pub centred_sd: Vec<f32>,
+    /// Genes whose DANB dispersion hit the negative-variance clamp, so their
+    /// variance collapsed to Poisson.
+    pub size_clamped_high: usize,
+    /// Genes whose DANB dispersion hit the lower clamp.
+    pub size_clamped_low: usize,
+}
+
+/// Fraction of undirected edges that stay inside a group.
+///
+/// ### Params
+///
+/// * `neighbours` - Neighbour indices per node
+/// * `groups` - Group id per node, same length and order as `neighbours`
+///
+/// ### Returns
+///
+/// The fraction, or `None` when there are no edges.
+fn within_group_edge_fraction(neighbours: &[Vec<usize>], groups: &[usize]) -> Option<f64> {
+    let mut total = 0usize;
+    let mut within = 0usize;
+
+    for (i, row) in neighbours.iter().enumerate() {
+        for &j in row {
+            if j == i {
+                continue;
+            }
+            // count each undirected pair once
+            if j < i && neighbours[j].contains(&i) {
+                continue;
+            }
+            total += 1;
+            if groups[i] == groups[j] {
+                within += 1;
+            }
+        }
+    }
+
+    (total > 0).then(|| within as f64 / total as f64)
+}
+
 ////////////////
 // Clustering //
 ////////////////
 
-/// Entry in the merge priority queue.
-#[derive(Clone, Debug)]
-struct MergeCandidate {
-    /// Z-score between the two clusters (higher = merge first).
-    z: f64,
-    /// First cluster index (always the smaller index).
-    i: usize,
-    /// Second cluster index.
-    j: usize,
-    /// Generation stamps at insertion time. If either cluster has been
-    /// merged since this entry was created, it is stale and must be
-    /// discarded.
-    gen_i: u32,
-    gen_j: u32,
-}
+////////////////////////
+// BH threshold search //
+////////////////////////
 
-impl PartialEq for MergeCandidate {
-    fn eq(&self, other: &Self) -> bool {
-        self.z == other.z
-    }
-}
-
-impl Eq for MergeCandidate {}
-
-impl PartialOrd for MergeCandidate {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for MergeCandidate {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.z.partial_cmp(&other.z).unwrap_or(Ordering::Equal)
-    }
-}
-
-/// Cluster the HotSpot Z matrix using heap-accelerated agglomerative
-/// clustering.
+/// Bins spanning the candidate Z range in [bh_z_threshold].
 ///
-/// Merges cluster pairs in descending Z-score order using average linkage.
-/// Stops when the best remaining Z falls below the FDR-derived threshold.
+/// 256 KB of `u32` per worker, so the histogram update stays L2-resident. At
+/// m = 1.3e8 pairs this leaves on the order of 1e4 entries in the one bin that
+/// has to be resolved exactly.
+const Z_HIST_BINS: usize = 1 << 16;
+
+/// Upper edge of the histogram.
+///
+/// Above roughly `|z| = 38.6` the normal pdf underflows in `f64`, so the
+/// upper-tail p-value is exactly zero and every entry there clears
+/// Benjamini-Hochberg unconditionally. One open bucket is therefore exact
+/// rather than approximate.
+const Z_HIST_MAX: f64 = 40.0;
+
+/// Slack subtracted from the histogram floor.
+///
+/// `inverse_cdf` rounds, and excluding a true candidate would be a silent wrong
+/// answer, whereas including a false one costs one extra exact re-test.
+const Z_ALPHA_RELAX: f64 = 1e-9;
+
+/// Largest dimension for which the symmetry precondition is fully asserted in
+/// debug builds. A full check is O(n^2) and would make a debug run at
+/// n = 16000 unusable.
+const SYMMETRY_CHECK_MAX_DIM: usize = 512;
+
+/// Upper-tail p-value of a single Z score.
+///
+/// Routed through [z_scores_to_pval] rather than calling `statrs` directly, so
+/// the threshold search and the reported p-values cannot drift apart.
 ///
 /// ### Params
 ///
-/// * `z_mat` - Reference to the Z-score matrix.
-/// * `fdr_threshold` - Below which FDR to stop merging.
-/// * `min_cluster_genes` - Minimum genes per cluster to assign a label.
+/// * `z` - The Z score
 ///
 /// ### Returns
 ///
-/// Per-gene cluster assignment. `NaN` indicates no assignment.
+/// `P(Z > z)` under the standard normal.
+#[inline]
+fn upper_tail_pval(z: f64) -> f64 {
+    z_scores_to_pval(&[z], "greater")[0]
+}
+
+/// Counts of the strict upper triangle of a Z matrix over a uniform grid.
+#[derive(Debug)]
+struct ZHistogram {
+    /// Bin counts over `[lo, hi)`, `Z_HIST_BINS` of them.
+    counts: Vec<u32>,
+    /// Lower edge of bin zero. Entries below are dropped uncounted.
+    lo: f64,
+    /// Width of one bin.
+    width: f64,
+    /// Entries at or above the top edge.
+    overflow: u32,
+    /// Smallest entry at or above the top edge, `INFINITY` when there are none.
+    overflow_min: f64,
+}
+
+impl ZHistogram {
+    /// Bin the strict upper triangle of `z_mat` over `[lo, Z_HIST_MAX)`.
+    ///
+    /// Parallel over columns. For column `j` the strict upper entries are rows
+    /// `0..j`, a contiguous prefix of a column-major matrix, so the pass is
+    /// sequential in memory.
+    ///
+    /// ### Params
+    ///
+    /// * `z_mat` - Symmetric Z matrix
+    /// * `lo` - Lower edge; entries below cannot clear BH and are dropped
+    ///
+    /// ### Returns
+    ///
+    /// The populated histogram.
+    fn build(z_mat: MatRef<f64>, lo: f64) -> Self {
+        let n = z_mat.nrows();
+        let width = (Z_HIST_MAX - lo) / Z_HIST_BINS as f64;
+
+        let (counts, overflow, overflow_min) = (0..n)
+            .into_par_iter()
+            .fold(
+                || (vec![0_u32; Z_HIST_BINS], 0_u32, f64::INFINITY),
+                |(mut counts, mut overflow, mut overflow_min), j| {
+                    for i in 0..j {
+                        let z = z_mat[(i, j)];
+                        if z < lo {
+                            continue;
+                        }
+                        if z >= Z_HIST_MAX {
+                            overflow += 1;
+                            overflow_min = overflow_min.min(z);
+                            continue;
+                        }
+                        let bin = (((z - lo) / width) as usize).min(Z_HIST_BINS - 1);
+                        counts[bin] += 1;
+                    }
+                    (counts, overflow, overflow_min)
+                },
+            )
+            .reduce(
+                || (vec![0_u32; Z_HIST_BINS], 0_u32, f64::INFINITY),
+                |(mut a_counts, a_over, a_min), (b_counts, b_over, b_min)| {
+                    for (a, b) in a_counts.iter_mut().zip(b_counts.iter()) {
+                        *a += b;
+                    }
+                    (a_counts, a_over + b_over, a_min.min(b_min))
+                },
+            );
+
+        Self {
+            counts,
+            lo,
+            width,
+            overflow,
+            overflow_min,
+        }
+    }
+
+    /// Lower edge of a bin.
+    ///
+    /// ### Params
+    ///
+    /// * `bin` - Bin index; `Z_HIST_BINS` gives the top edge
+    ///
+    /// ### Returns
+    ///
+    /// The edge value.
+    #[inline]
+    fn edge(&self, bin: usize) -> f64 {
+        self.lo + self.width * bin as f64
+    }
+}
+
+/// Smallest Z whose Benjamini-Hochberg q-value falls below `fdr_threshold`.
+///
+/// Equivalent to materialising the strict upper triangle, its upper-tail
+/// p-values and their BH adjustment, then taking the smallest Z that survives,
+/// but without any of the O(m) allocations. With `R(v) = #{z_i >= v}` the answer
+/// is `min { v observed : p(v) < fdr_threshold * R(v) / m }`, which a histogram
+/// plus one exact resolution pass finds in two streaming passes and 256 KB.
+///
+/// The upper tail matches upstream Hotspot (`modules.py` derives the threshold
+/// from `norm.sf`), so this is deliberately not the two-sided tail the
+/// pre-rewrite code used.
+///
+/// ### Params
+///
+/// * `z_mat` - Symmetric Z matrix with a zero diagonal. Must be finite: a `NaN`
+///   makes the BH adjustment itself ill-defined, not merely this shortcut.
+/// * `fdr_threshold` - The BH level
+///
+/// ### Returns
+///
+/// The threshold, or `f64::INFINITY` when nothing is significant, which stops
+/// every merge downstream.
+fn bh_z_threshold(z_mat: MatRef<f64>, fdr_threshold: f64) -> f64 {
+    let n = z_mat.nrows();
+    if n < 2 {
+        return f64::INFINITY;
+    }
+
+    debug_assert!(
+        n > SYMMETRY_CHECK_MAX_DIM
+            || (0..n).all(|j| (0..j).all(|i| z_mat[(i, j)] == z_mat[(j, i)])),
+        "bh_z_threshold requires a symmetric Z matrix"
+    );
+
+    let m = n * (n - 1) / 2;
+
+    // `calc_fdr` caps the adjusted p-value at one, so a threshold above one
+    // passes every entry and the answer is simply the smallest Z.
+    if fdr_threshold > 1.0 {
+        return (0..n)
+            .into_par_iter()
+            .map(|j| {
+                (0..j)
+                    .map(|i| z_mat[(i, j)])
+                    .fold(f64::INFINITY, |a, b| a.min(b))
+            })
+            .reduce(|| f64::INFINITY, |a, b| a.min(b));
+    }
+
+    // A passing entry needs `p < alpha * r / m <= alpha`, so nothing at or below
+    // the one-sided critical value can ever clear BH.
+    let normal = Normal::new(0.0, 1.0).unwrap();
+    let lo = (normal.inverse_cdf(1.0 - fdr_threshold) - Z_ALPHA_RELAX)
+        .clamp(-Z_HIST_MAX, Z_HIST_MAX - 1.0);
+
+    let hist = ZHistogram::build(z_mat, lo);
+
+    // Entries at or above each bin edge, walking down from the top.
+    let mut at_or_above = vec![0_u32; Z_HIST_BINS + 1];
+    at_or_above[Z_HIST_BINS] = hist.overflow;
+    for bin in (0..Z_HIST_BINS).rev() {
+        at_or_above[bin] = at_or_above[bin + 1] + hist.counts[bin];
+    }
+
+    let m_f = m as f64;
+    for bin in 0..Z_HIST_BINS {
+        if hist.counts[bin] == 0 {
+            continue;
+        }
+
+        // Most optimistic combination available inside this bin: the smallest
+        // possible p-value against the largest possible rank. If that fails,
+        // no member can pass and the whole bin is skippable.
+        let p_floor = upper_tail_pval(hist.edge(bin + 1));
+        if p_floor >= fdr_threshold * at_or_above[bin] as f64 / m_f {
+            continue;
+        }
+
+        if let Some(v) = resolve_threshold_bin(
+            z_mat,
+            hist.edge(bin),
+            hist.edge(bin + 1),
+            at_or_above[bin + 1],
+            hist.counts[bin] as usize,
+            m_f,
+            fdr_threshold,
+        ) {
+            return v;
+        }
+    }
+
+    // Above the top edge the tail p-value is exactly zero, so anything there
+    // passes; it is only reached once every bin below has been ruled out.
+    if hist.overflow > 0 {
+        return hist.overflow_min;
+    }
+
+    f64::INFINITY
+}
+
+/// Exact BH test over the members of one histogram bin.
+///
+/// The optimistic bin test in [bh_z_threshold] is necessary but not sufficient,
+/// so the members are collected and tested individually. p-values come from
+/// [z_scores_to_pval] in a single call, and the comparison is spelled as in
+/// `calc_fdr`, which is what makes the result bit-identical to the long way
+/// round.
+///
+/// ### Params
+///
+/// * `z_mat` - Symmetric Z matrix
+/// * `lo` - Bin lower edge, inclusive
+/// * `hi` - Bin upper edge, exclusive
+/// * `above` - Entries at or above `hi`
+/// * `capacity` - Member count, known from the histogram
+/// * `m_f` - Total pair count as a float
+/// * `fdr_threshold` - The BH level
+///
+/// ### Returns
+///
+/// The smallest passing member, or `None` when none passes.
+#[allow(clippy::too_many_arguments)]
+fn resolve_threshold_bin(
+    z_mat: MatRef<f64>,
+    lo: f64,
+    hi: f64,
+    above: u32,
+    capacity: usize,
+    m_f: f64,
+    fdr_threshold: f64,
+) -> Option<f64> {
+    let n = z_mat.nrows();
+    let mut members: Vec<f64> = Vec::with_capacity(capacity);
+    for j in 0..n {
+        for i in 0..j {
+            let z = z_mat[(i, j)];
+            if z >= lo && z < hi {
+                members.push(z);
+            }
+        }
+    }
+    members.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+
+    let pvals = z_scores_to_pval(&members, "greater");
+    let len = members.len();
+
+    // Ascending, so the first passing value is the smallest. Ties share a rank:
+    // the whole group takes the rank of its first member, which is the largest
+    // rank available to it and hence the one that gives it the best chance.
+    let mut t = 0usize;
+    while t < len {
+        let mut group_end = t + 1;
+        while group_end < len && members[group_end] == members[t] {
+            group_end += 1;
+        }
+
+        let rank = above as f64 + (len - t) as f64;
+        if (m_f / rank) * pvals[t] < fdr_threshold {
+            return Some(members[t]);
+        }
+
+        t = group_end;
+    }
+
+    None
+}
+
+///////////////////////////
+// Average-linkage tree //
+///////////////////////////
+
+/// One merge in the average-linkage dendrogram.
+///
+/// Laid out like a row of a scipy linkage matrix, except that `height` carries
+/// the average-linkage Z rather than the `maxZ - Z` distance upstream feeds to
+/// `scipy.linkage`. The two are affine with a negative slope, so working in Z
+/// avoids materialising the offset and turns upstream's
+/// `Z[i, 2] > offset - z_threshold` test into `height < z_threshold`.
+#[derive(Clone, Copy, Debug)]
+struct Merge {
+    /// Left child node id: a leaf below `n`, an internal node at or above it.
+    left: usize,
+    /// Right child node id, same encoding.
+    right: usize,
+    /// Average-linkage Z between the two children at the point they merged.
+    height: f64,
+    /// Number of leaves below this node.
+    size: usize,
+}
+
+/// Average-linkage dendrogram over a dense similarity matrix, via
+/// nearest-neighbour chain.
+///
+/// The algorithm `scipy.cluster.hierarchy.linkage(method='average')` uses, so
+/// this is a port of upstream's clustering rather than a lookalike. Average
+/// linkage on similarities is reducible (`sim(k, a u b)` is a convex combination
+/// of `sim(k,a)` and `sim(k,b)`, so it can never exceed their max), which is
+/// what makes the chain valid: O(n^2) time and O(n) working state on top of the
+/// similarity matrix, against O(n^2 log n) and an O(n^2)-entry heap for the
+/// greedy formulation.
+///
+/// The returned merges are ordered by descending height, i.e. ascending
+/// distance, so a bottom-up walk sees children before parents.
+///
+/// ### Params
+///
+/// * `z_mat` - Symmetric similarity matrix with a zero diagonal
+///
+/// ### Returns
+///
+/// `n - 1` merges, or an empty vector when `n < 2`.
+fn average_linkage_nn_chain(z_mat: MatRef<f64>) -> Vec<Merge> {
+    let n = z_mat.nrows();
+    if n < 2 {
+        return Vec::new();
+    }
+
+    // Column-major working copy. A plain `Vec` rather than a `Mat` on purpose:
+    // what this loop wants is raw column slices, not linear algebra, so the
+    // prefer-faer convention does not apply here.
+    let mut sim = vec![0.0_f64; n * n];
+    sim.par_chunks_mut(n).enumerate().for_each(|(j, col)| {
+        for (i, slot) in col.iter_mut().enumerate() {
+            *slot = z_mat[(i, j)];
+        }
+    });
+
+    let mut size = vec![1_usize; n];
+    let mut active = vec![true; n];
+    let mut chain: Vec<usize> = Vec::with_capacity(n);
+    let mut raw: Vec<(usize, usize, f64)> = Vec::with_capacity(n - 1);
+
+    for _ in 0..(n - 1) {
+        if chain.is_empty() {
+            let seed = (0..n)
+                .find(|&i| active[i])
+                .expect("an active cluster remains");
+            chain.push(seed);
+        }
+
+        // Walk the chain until two clusters are each other's nearest neighbour.
+        let (x, y, best) = loop {
+            let x = chain[chain.len() - 1];
+
+            // Everything before the previous chain entry can be ignored, which
+            // is what bounds the total work.
+            let (mut y, mut best) = if chain.len() > 1 {
+                let prev = chain[chain.len() - 2];
+                (prev, sim[prev + x * n])
+            } else {
+                (usize::MAX, f64::NEG_INFINITY)
+            };
+
+            let col = &sim[x * n..(x + 1) * n];
+            for k in 0..n {
+                if !active[k] || k == x {
+                    continue;
+                }
+                // Strict, so the smallest index wins a tie.
+                if col[k] > best {
+                    best = col[k];
+                    y = k;
+                }
+            }
+
+            if chain.len() > 1 && y == chain[chain.len() - 2] {
+                chain.pop();
+                chain.pop();
+                break (x, y, best);
+            }
+            chain.push(y);
+        };
+
+        // Lance-Williams over the survivor's column, then mirror. `y` survives,
+        // matching scipy so the combination order (and hence the rounding) is
+        // the same.
+        let (sx, sy) = (size[x], size[y]);
+        let total = (sx + sy) as f64;
+        let (wx, wy) = (sx as f64, sy as f64);
+        for k in 0..n {
+            if !active[k] || k == x || k == y {
+                continue;
+            }
+            let merged = (sim[k + x * n] * wx + sim[k + y * n] * wy) / total;
+            sim[k + y * n] = merged;
+            sim[y + k * n] = merged;
+        }
+
+        active[x] = false;
+        size[y] = sx + sy;
+        raw.push((x, y, best));
+    }
+
+    canonicalise_linkage(raw, n)
+}
+
+/// Turn raw nearest-neighbour-chain merges into a canonical dendrogram.
+///
+/// The chain emits merges in whatever order it walks the tree and identifies
+/// clusters by an original leaf slot. Sorting by descending height and mapping
+/// slots to node ids through a union-find reproduces scipy's post-`nn_chain`
+/// labelling step, which is what makes the node ids meaningful.
+///
+/// ### Params
+///
+/// * `raw` - `(dropped_slot, surviving_slot, height)` in chain order
+/// * `n` - Number of leaves
+///
+/// ### Returns
+///
+/// The merges ordered by descending height, with node ids assigned so that
+/// merge `i` is node `n + i`.
+fn canonicalise_linkage(mut raw: Vec<(usize, usize, f64)>, n: usize) -> Vec<Merge> {
+    // Descending height == ascending distance, which is the order a monotone
+    // dendrogram merges in.
+    raw.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(Ordering::Equal));
+
+    // Union-find over leaf slots, tracking the current node id of each cluster.
+    let mut parent: Vec<usize> = (0..n).collect();
+    let mut node_id: Vec<usize> = (0..n).collect();
+    let mut leaves: Vec<usize> = vec![1; n];
+
+    fn find(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+
+    let mut out = Vec::with_capacity(raw.len());
+    for (idx, (x, y, height)) in raw.into_iter().enumerate() {
+        let rx = find(&mut parent, x);
+        let ry = find(&mut parent, y);
+        let (a, b) = if node_id[rx] < node_id[ry] {
+            (node_id[rx], node_id[ry])
+        } else {
+            (node_id[ry], node_id[rx])
+        };
+        let size = leaves[rx] + leaves[ry];
+
+        out.push(Merge {
+            left: a,
+            right: b,
+            height,
+            size,
+        });
+
+        parent[rx] = ry;
+        node_id[ry] = n + idx;
+        leaves[ry] = size;
+    }
+
+    out
+}
+
+/// Assign gene modules over a dendrogram, as upstream `assign_modules_core`.
+///
+/// A bottom-up pass decides, per merge, whether the merged node names a module,
+/// inherits one from a child, or names none. `prop_label` then pushes labels
+/// down to the leaves, and the first non-empty label encountered wins the whole
+/// subtree below it: a merge that declines to join two already-large children
+/// leaves both children's modules standing rather than discarding them.
+///
+/// ### Params
+///
+/// * `merges` - Dendrogram from [average_linkage_nn_chain], descending height
+/// * `n` - Number of genes
+/// * `z_threshold` - Merges below this height cannot form or extend a module
+/// * `min_cluster_genes` - Minimum genes for a subtree to count as a module
+///
+/// ### Returns
+///
+/// Per-gene module label, densely renumbered from zero, `None` for unassigned.
+///
+/// ### References
+///
+/// DeTomaso and Yosef, Cell Systems, 2021 (`hotspot/modules.py::assign_modules_core`)
+fn assign_modules_core(
+    merges: &[Merge],
+    n: usize,
+    z_threshold: f64,
+    min_cluster_genes: usize,
+) -> Vec<Option<usize>> {
+    /// Leaves below a child node.
+    fn child_size(merges: &[Merge], n: usize, node: usize) -> usize {
+        if node < n { 1 } else { merges[node - n].size }
+    }
+
+    /// Label already attached to a child node, if any.
+    fn child_label(labels: &[Option<usize>], n: usize, node: usize) -> Option<usize> {
+        if node < n { None } else { labels[node - n] }
+    }
+
+    let mut labels: Vec<Option<usize>> = vec![None; merges.len()];
+    let mut next_label = 0usize;
+
+    for (i, merge) in merges.iter().enumerate() {
+        let n_a = child_size(merges, n, merge.left);
+        let n_b = child_size(merges, n, merge.right);
+        let big_a = n_a >= min_cluster_genes;
+        let big_b = n_b >= min_cluster_genes;
+
+        labels[i] = if big_a && big_b {
+            // Both sides are already modules in their own right. Declining to
+            // join them keeps both, because propagation stops here.
+            None
+        } else if merge.height < z_threshold {
+            None
+        } else if big_a {
+            child_label(&labels, n, merge.left)
+        } else if big_b {
+            child_label(&labels, n, merge.right)
+        } else if n_a + n_b >= min_cluster_genes {
+            let label = next_label;
+            next_label += 1;
+            Some(label)
+        } else {
+            None
+        };
+    }
+
+    let mut out: Vec<Option<usize>> = vec![None; n];
+    if merges.is_empty() {
+        return out;
+    }
+
+    // Iterative `prop_label`: upstream recurses, which hits Python's recursion
+    // limit on deep linkages.
+    let root = merges.len() - 1;
+    let mut stack: Vec<(usize, Option<usize>)> = vec![(root, labels[root])];
+    while let Some((idx, inherited)) = stack.pop() {
+        // Sticky: only pick up a label while none has been inherited yet.
+        let label = inherited.or(labels[idx]);
+        for child in [merges[idx].left, merges[idx].right] {
+            if child < n {
+                out[child] = label;
+            } else {
+                stack.push((child - n, label));
+            }
+        }
+    }
+
+    renumber_modules(out)
+}
+
+/// Renumber module labels densely from zero in order of first appearance by
+/// gene index.
+///
+/// Upstream renumbers from the sorted unique set so that ids are stable against
+/// the order the tree happened to be walked in; without this the ids depend on
+/// dendrogram traversal, which is an implementation detail.
+///
+/// ### Params
+///
+/// * `labels` - Per-gene raw labels
+///
+/// ### Returns
+///
+/// The same labels renumbered from zero.
+fn renumber_modules(labels: Vec<Option<usize>>) -> Vec<Option<usize>> {
+    let mut seen: Vec<usize> = labels.iter().flatten().copied().collect();
+    seen.sort_unstable();
+    seen.dedup();
+
+    let remap: FxHashMap<usize, usize> = seen
+        .into_iter()
+        .enumerate()
+        .map(|(new, old)| (old, new))
+        .collect();
+
+    labels
+        .into_iter()
+        .map(|l| l.and_then(|old| remap.get(&old).copied()))
+        .collect()
+}
+
+/// Cluster the HotSpot Z matrix into gene modules.
+///
+/// Builds the average-linkage dendrogram over the Z matrix, then assigns
+/// modules over it exactly as upstream `compute_modules` does: the FDR-derived
+/// Z threshold decides which merges may form a module, and
+/// [assign_modules_core] walks the tree.
+///
+/// ### Params
+///
+/// * `z_mat` - Symmetric Z matrix with a zero diagonal, as
+///   [HotSpotPairRes::z_scores] produces. Must be finite.
+/// * `fdr_threshold` - BH level at which a pair Z counts as significant.
+/// * `min_cluster_genes` - Minimum genes for a subtree to count as a module.
+///   Upstream's `Hotspot.create_modules` ships 20 here, while `compute_modules`
+///   itself defaults to 10; this takes whatever the caller passes.
+///
+/// ### Returns
+///
+/// Per-gene module label as a float, renumbered densely from zero. `NaN` means
+/// unassigned.
+///
+/// ### References
+///
+/// DeTomaso and Yosef, Cell Systems, 2021
 pub fn hotspot_gene_clusters(
     z_mat: MatRef<f64>,
     fdr_threshold: f64,
     min_cluster_genes: usize,
 ) -> Vec<f64> {
-    let z_upper_triangle = faer_mat_to_upper_triangle(z_mat, 1);
-    let pvals = z_scores_to_pval(&z_upper_triangle, "twosided");
-    let fdrs = calc_fdr(&pvals);
     let n = z_mat.nrows();
+    let z_threshold = bh_z_threshold(z_mat, fdr_threshold);
+    let merges = average_linkage_nn_chain(z_mat);
 
-    let z_threshold = z_upper_triangle
-        .iter()
-        .zip(fdrs.iter())
-        .filter(|&(_, &fdr)| fdr < fdr_threshold)
-        .map(|(&z, _)| z.abs())
-        .min_by(|a, b| a.partial_cmp(b).unwrap())
-        .unwrap_or(f64::INFINITY);
-
-    // mutable Z matrix for average-linkage updates
-    let mut z = z_mat.to_owned();
-
-    // per-cluster state
-    let mut sizes: Vec<usize> = vec![1; n];
-    let mut clusters: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
-    let mut labels: Vec<Option<usize>> = vec![None; n];
-    let mut gene_to_cluster: Vec<usize> = (0..n).collect();
-
-    // generation counter per cluster; incremented on each merge so stale
-    // heap entries can be detected cheaply.
-    let mut generation: Vec<u32> = vec![0; n];
-
-    // track which clusters are still active
-    let mut active = vec![true; n];
-
-    let mut next_label = 0usize;
-
-    // seed the heap with all pairs above threshold
-    let mut heap = BinaryHeap::new();
-    for i in 0..n {
-        for j in (i + 1)..n {
-            let zij = z[(i, j)];
-            if zij >= z_threshold {
-                heap.push(MergeCandidate {
-                    z: zij,
-                    i,
-                    j,
-                    gen_i: 0,
-                    gen_j: 0,
-                });
-            }
-        }
-    }
-
-    while let Some(candidate) = heap.pop() {
-        if candidate.z < z_threshold {
-            break;
-        }
-
-        let ci = candidate.i;
-        let cj = candidate.j;
-
-        // stale entry: one or both clusters have been merged since this
-        // candidate was inserted.
-        if !active[ci]
-            || !active[cj]
-            || generation[ci] != candidate.gen_i
-            || generation[cj] != candidate.gen_j
-        {
-            continue;
-        }
-
-        // merge cj into ci
-        let new_size = sizes[ci] + sizes[cj];
-        let both_labelled = labels[ci].is_some() && labels[cj].is_some();
-
-        // average-linkage Z update and push new candidates
-        generation[ci] += 1;
-        active[cj] = false;
-
-        for k in 0..n {
-            if k == ci || k == cj || !active[k] {
-                continue;
-            }
-
-            let new_z =
-                (z[(ci, k)] * sizes[ci] as f64 + z[(cj, k)] * sizes[cj] as f64) / new_size as f64;
-            z[(ci, k)] = new_z;
-            z[(k, ci)] = new_z;
-
-            if new_z >= z_threshold {
-                heap.push(MergeCandidate {
-                    z: new_z,
-                    i: ci.min(k),
-                    j: ci.max(k),
-                    gen_i: generation[ci.min(k)],
-                    gen_j: generation[ci.max(k)],
-                });
-            }
-        }
-
-        // Transfer genes from cj to ci
-        let cj_genes: Vec<usize> = clusters[cj].drain(..).collect();
-        clusters[ci].extend(cj_genes);
-        sizes[ci] = new_size;
-
-        for &gene in &clusters[ci] {
-            gene_to_cluster[gene] = ci;
-        }
-
-        if new_size >= min_cluster_genes && !both_labelled {
-            labels[ci] = Some(next_label);
-            next_label += 1;
-        } else if both_labelled {
-            labels[ci] = None;
-        }
-    }
-
-    let mut gene_labels = vec![f64::NAN; n];
-    for gene in 0..n {
-        let cluster = gene_to_cluster[gene];
-        if let Some(label) = labels[cluster] {
-            gene_labels[gene] = label as f64;
-        }
-    }
-
-    gene_labels
+    assign_modules_core(&merges, n, z_threshold, min_cluster_genes)
+        .into_iter()
+        .map(|l| l.map_or(f64::NAN, |v| v as f64))
+        .collect()
 }
 
 ///////////
@@ -1975,6 +2758,8 @@ pub fn hotspot_gene_clusters(
 
 #[cfg(test)]
 mod tests {
+    use approx::assert_relative_eq;
+
     use super::*;
 
     // A small undirected graph over 4 nodes. Reciprocal edges present so that
@@ -2162,5 +2947,575 @@ mod tests {
         // every assignment is a valid bin index
         let n_bins = edges.len() - 1;
         assert!(bins.iter().all(|&b| b < n_bins));
+    }
+
+    ////////////////////////////
+    // Clustering: references //
+    ////////////////////////////
+
+    // The functions below are verbatim copies of the pre-rewrite
+    // `hotspot_gene_clusters`, split at the point where the threshold is
+    // handed to the merge loop. They are the parity oracle for the histogram
+    // threshold and the NN-chain linkage, so they must not be "tidied" to
+    // match whatever the production code grows into.
+
+    use std::collections::BinaryHeap;
+
+    /// Entry in the pre-rewrite merge priority queue.
+    #[derive(Clone, Debug)]
+    struct MergeCandidate {
+        /// Z-score between the two clusters (higher = merge first).
+        z: f64,
+        /// First cluster index (always the smaller index).
+        i: usize,
+        /// Second cluster index.
+        j: usize,
+        /// Generation stamp of `i` at insertion time.
+        gen_i: u32,
+        /// Generation stamp of `j` at insertion time.
+        gen_j: u32,
+    }
+
+    impl PartialEq for MergeCandidate {
+        fn eq(&self, other: &Self) -> bool {
+            self.z == other.z
+        }
+    }
+
+    impl Eq for MergeCandidate {}
+
+    impl PartialOrd for MergeCandidate {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    impl Ord for MergeCandidate {
+        fn cmp(&self, other: &Self) -> Ordering {
+            self.z.partial_cmp(&other.z).unwrap_or(Ordering::Equal)
+        }
+    }
+
+    /// Pre-rewrite Z threshold: materialise the upper triangle, p-values and
+    /// FDRs, then take the smallest surviving `|z|`.
+    ///
+    /// ### Params
+    ///
+    /// * `z_mat` - Symmetric Z matrix
+    /// * `fdr_threshold` - Below which FDR an entry counts as significant
+    /// * `tail` - Tail passed to [z_scores_to_pval]; the production code used
+    ///   `"twosided"`, upstream Hotspot uses the upper tail
+    ///
+    /// ### Returns
+    ///
+    /// The threshold, or `f64::INFINITY` when nothing is significant.
+    fn z_threshold_reference(
+        z_mat: MatRef<f64>,
+        fdr_threshold: f64,
+        tail: &str,
+        use_abs: bool,
+    ) -> f64 {
+        let z_upper_triangle = faer_mat_to_upper_triangle(z_mat, 1);
+        let pvals = z_scores_to_pval(&z_upper_triangle, tail);
+        let fdrs = calc_fdr(&pvals);
+
+        z_upper_triangle
+            .iter()
+            .zip(fdrs.iter())
+            .filter(|&(_, &fdr)| fdr < fdr_threshold)
+            .map(|(&z, _)| if use_abs { z.abs() } else { z })
+            .min_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap_or(f64::INFINITY)
+    }
+
+    /// Pre-rewrite greedy merge loop, with the threshold injected.
+    ///
+    /// Average-linkage agglomerative clustering driven by a lazily invalidated
+    /// binary heap, plus the original label bookkeeping.
+    ///
+    /// ### Params
+    ///
+    /// * `z_mat` - Symmetric Z matrix
+    /// * `z_threshold` - Stop merging once the best remaining Z drops below this
+    /// * `min_cluster_genes` - Minimum genes per cluster to assign a label
+    ///
+    /// ### Returns
+    ///
+    /// Per-gene cluster assignment (`NaN` means unassigned), the induced
+    /// partition as sorted gene groups, and the merge heights in merge order.
+    fn greedy_merge_reference(
+        z_mat: MatRef<f64>,
+        z_threshold: f64,
+        min_cluster_genes: usize,
+    ) -> (Vec<f64>, Vec<Vec<usize>>, Vec<f64>) {
+        let n = z_mat.nrows();
+        let mut z = z_mat.to_owned();
+
+        let mut sizes: Vec<usize> = vec![1; n];
+        let mut clusters: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
+        let mut labels: Vec<Option<usize>> = vec![None; n];
+        let mut gene_to_cluster: Vec<usize> = (0..n).collect();
+        let mut generation: Vec<u32> = vec![0; n];
+        let mut active = vec![true; n];
+        let mut next_label = 0usize;
+        let mut heights: Vec<f64> = Vec::new();
+
+        let mut heap = BinaryHeap::new();
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let zij = z[(i, j)];
+                if zij >= z_threshold {
+                    heap.push(MergeCandidate {
+                        z: zij,
+                        i,
+                        j,
+                        gen_i: 0,
+                        gen_j: 0,
+                    });
+                }
+            }
+        }
+
+        while let Some(candidate) = heap.pop() {
+            if candidate.z < z_threshold {
+                break;
+            }
+
+            let ci = candidate.i;
+            let cj = candidate.j;
+
+            if !active[ci]
+                || !active[cj]
+                || generation[ci] != candidate.gen_i
+                || generation[cj] != candidate.gen_j
+            {
+                continue;
+            }
+
+            let new_size = sizes[ci] + sizes[cj];
+            let both_labelled = labels[ci].is_some() && labels[cj].is_some();
+            heights.push(candidate.z);
+
+            generation[ci] += 1;
+            active[cj] = false;
+
+            for k in 0..n {
+                if k == ci || k == cj || !active[k] {
+                    continue;
+                }
+
+                let new_z = (z[(ci, k)] * sizes[ci] as f64 + z[(cj, k)] * sizes[cj] as f64)
+                    / new_size as f64;
+                z[(ci, k)] = new_z;
+                z[(k, ci)] = new_z;
+
+                if new_z >= z_threshold {
+                    heap.push(MergeCandidate {
+                        z: new_z,
+                        i: ci.min(k),
+                        j: ci.max(k),
+                        gen_i: generation[ci.min(k)],
+                        gen_j: generation[ci.max(k)],
+                    });
+                }
+            }
+
+            let cj_genes: Vec<usize> = clusters[cj].drain(..).collect();
+            clusters[ci].extend(cj_genes);
+            sizes[ci] = new_size;
+
+            for &gene in &clusters[ci] {
+                gene_to_cluster[gene] = ci;
+            }
+
+            if new_size >= min_cluster_genes && !both_labelled {
+                labels[ci] = Some(next_label);
+                next_label += 1;
+            } else if both_labelled {
+                labels[ci] = None;
+            }
+        }
+
+        let mut gene_labels = vec![f64::NAN; n];
+        for gene in 0..n {
+            let cluster = gene_to_cluster[gene];
+            if let Some(label) = labels[cluster] {
+                gene_labels[gene] = label as f64;
+            }
+        }
+
+        (gene_labels, canonical_partition(&gene_to_cluster), heights)
+    }
+
+    /// Canonical form of a partition: sorted groups, sorted among themselves.
+    ///
+    /// ### Params
+    ///
+    /// * `assignment` - Per-gene cluster id, ids need not be dense
+    ///
+    /// ### Returns
+    ///
+    /// The groups, each sorted, ordered by their smallest member.
+    fn canonical_partition(assignment: &[usize]) -> Vec<Vec<usize>> {
+        let mut groups: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
+        for (gene, &cluster) in assignment.iter().enumerate() {
+            groups.entry(cluster).or_default().push(gene);
+        }
+        let mut out: Vec<Vec<usize>> = groups.into_values().collect();
+        for g in out.iter_mut() {
+            g.sort_unstable();
+        }
+        out.sort_unstable();
+        out
+    }
+
+    /// The partition a dendrogram induces when every merge below `z_threshold`
+    /// is cut.
+    ///
+    /// ### Params
+    ///
+    /// * `merges` - Dendrogram, descending height
+    /// * `n` - Number of genes
+    /// * `z_threshold` - Merges below this are not taken
+    ///
+    /// ### Returns
+    ///
+    /// The partition in the canonical form of [canonical_partition].
+    fn linkage_partition(merges: &[Merge], n: usize, z_threshold: f64) -> Vec<Vec<usize>> {
+        let mut assignment: Vec<usize> = (0..n).collect();
+        // node id -> the representative gene of its subtree
+        let mut rep: Vec<usize> = (0..n + merges.len()).collect();
+
+        for (i, merge) in merges.iter().enumerate() {
+            if merge.height < z_threshold {
+                continue;
+            }
+            let target = rep[merge.left].min(rep[merge.right]);
+            let (a, b) = (rep[merge.left], rep[merge.right]);
+            for slot in assignment.iter_mut() {
+                if *slot == a || *slot == b {
+                    *slot = target;
+                }
+            }
+            rep[n + i] = target;
+        }
+
+        canonical_partition(&assignment)
+    }
+
+    /// A reproducible symmetric matrix with a zero diagonal, as
+    /// `HotSpotPairRes::z_scores` produces.
+    ///
+    /// ### Params
+    ///
+    /// * `n` - Number of genes
+    /// * `scale` - Multiplier on the standard normal draws; controls how much
+    ///   of the matrix clears any given FDR threshold
+    /// * `seed` - RNG seed
+    ///
+    /// ### Returns
+    ///
+    /// The symmetric `n x n` matrix.
+    fn random_symmetric_z(n: usize, scale: f64, seed: u64) -> Mat<f64> {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut out = Mat::<f64>::zeros(n, n);
+        for i in 0..n {
+            for j in (i + 1)..n {
+                // Box-Muller, so the tail is a real normal tail rather than a
+                // scaled uniform: the threshold search keys off the tail shape.
+                let u1: f64 = rng.random_range(1e-12..1.0);
+                let u2: f64 = rng.random_range(0.0..1.0);
+                let v = (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos();
+                let z = v * scale;
+                out[(i, j)] = z;
+                out[(j, i)] = z;
+            }
+        }
+        out
+    }
+
+    /// Two well-separated blocks joined weakly, the shape the module
+    /// assignment has to get right.
+    ///
+    /// ### Params
+    ///
+    /// * `block` - Genes per block
+    /// * `within` - Z within a block
+    /// * `between` - Z across the two blocks
+    ///
+    /// ### Returns
+    ///
+    /// The symmetric `2 * block` square matrix.
+    fn two_block_z(block: usize, within: f64, between: f64) -> Mat<f64> {
+        let n = 2 * block;
+        Mat::<f64>::from_fn(n, n, |i, j| {
+            if i == j {
+                0.0
+            } else if (i < block) == (j < block) {
+                within
+            } else {
+                between
+            }
+        })
+    }
+
+    /// NN-chain and the pre-rewrite greedy loop must agree on the clustering
+    /// itself: the same merges get taken at any given threshold, so they induce
+    /// the same partition, and the merge heights are the same multiset.
+    ///
+    /// Not bit equality. NN-chain does the Lance-Williams combinations in a
+    /// different temporal order, so the heights differ in the last ulps. That
+    /// order is scipy's, which is what upstream Hotspot runs.
+    #[test]
+    fn nn_chain_matches_greedy_clustering() {
+        for (n, scale, seed) in [(20, 1.0, 1), (60, 2.0, 2), (40, 0.5, 3), (80, 1.5, 4)] {
+            let z = random_symmetric_z(n, scale, seed);
+            let merges = average_linkage_nn_chain(z.as_ref());
+            assert_eq!(merges.len(), n - 1);
+
+            // Heights are monotone: average linkage admits no inversions, and a
+            // violation here would mean the chain took merges out of order.
+            for w in merges.windows(2) {
+                assert!(
+                    w[0].height >= w[1].height,
+                    "non-monotone dendrogram at n={n} scale={scale}"
+                );
+            }
+
+            for threshold in [f64::NEG_INFINITY, -1.0, 0.0, 0.5, 1.0, 2.0] {
+                let (_, expected, ref_heights) = greedy_merge_reference(z.as_ref(), threshold, 1);
+                let actual = linkage_partition(&merges, n, threshold);
+
+                assert_eq!(
+                    expected, actual,
+                    "partition mismatch at n={n} scale={scale} threshold={threshold}"
+                );
+
+                // Same merges taken, so the same heights, up to rounding.
+                let mut a: Vec<f64> = ref_heights;
+                let mut b: Vec<f64> = merges
+                    .iter()
+                    .map(|m| m.height)
+                    .filter(|h| *h >= threshold)
+                    .collect();
+                a.sort_by(|x, y| x.partial_cmp(y).unwrap());
+                b.sort_by(|x, y| x.partial_cmp(y).unwrap());
+                assert_eq!(a.len(), b.len(), "merge count at threshold={threshold}");
+                for (x, y) in a.iter().zip(b.iter()) {
+                    assert_relative_eq!(x, y, epsilon = 1e-12);
+                }
+            }
+        }
+    }
+
+    /// The fix for the label bug: two labelled modules joined above the
+    /// threshold must both survive, where the pre-rewrite code wiped both.
+    #[test]
+    fn assign_modules_core_keeps_both_declined_children() {
+        let z = two_block_z(6, 10.0, 8.0);
+        let merges = average_linkage_nn_chain(z.as_ref());
+
+        let labels = assign_modules_core(&merges, 12, 1.0, 3);
+
+        let assigned: Vec<usize> = labels.iter().flatten().copied().collect();
+        assert_eq!(assigned.len(), 12, "every gene should land in a module");
+
+        let mut distinct = assigned.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(distinct, vec![0, 1], "expected exactly two modules");
+
+        // and the split must follow the blocks
+        let first = labels[0].unwrap();
+        assert!(labels[..6].iter().all(|l| *l == Some(first)));
+        assert!(labels[6..].iter().all(|l| *l == Some(1 - first)));
+    }
+
+    /// Wall clock of both phases against gene count. Print-only: there is no
+    /// threshold worth asserting on, the point is to read where the time goes.
+    #[test]
+    #[cfg(feature = "large_scale_diagnostics")]
+    // n = 1000..8000 genes, i.e. up to 3.2e7 pairs
+    fn diagnose_gene_cluster_scaling() {
+        println!(
+            "{:>7} {:>12} {:>14} {:>14} {:>10}",
+            "genes", "pairs", "threshold", "linkage", "modules"
+        );
+        for n in [1000usize, 2000, 4000, 8000] {
+            let z = random_symmetric_z(n, 1.5, 99);
+
+            let t0 = Instant::now();
+            let threshold = bh_z_threshold(z.as_ref(), 0.05);
+            let t_threshold = t0.elapsed();
+
+            let t1 = Instant::now();
+            let merges = average_linkage_nn_chain(z.as_ref());
+            let t_linkage = t1.elapsed();
+
+            let labels = assign_modules_core(&merges, n, threshold, 20);
+            let n_modules = {
+                let mut v: Vec<usize> = labels.iter().flatten().copied().collect();
+                v.sort_unstable();
+                v.dedup();
+                v.len()
+            };
+
+            println!(
+                "{:>7} {:>12} {:>14.2?} {:>14.2?} {:>10}",
+                n,
+                n * (n - 1) / 2,
+                t_threshold,
+                t_linkage,
+                n_modules
+            );
+        }
+    }
+
+    /// New path against the pre-rewrite one at the same problem sizes.
+    /// Print-only; the reference is the thing being replaced, so there is
+    /// nothing to assert beyond what the parity tests already cover.
+    #[test]
+    #[cfg(feature = "large_scale_diagnostics")]
+    // n = 500..4000 genes; the reference heap makes anything larger painful
+    fn diagnose_gene_cluster_speedup() {
+        println!(
+            "{:>7} {:>12} {:>12} {:>12} {:>12} {:>12}",
+            "genes", "pairs", "old thr", "new thr", "old merge", "new merge"
+        );
+        for n in [500usize, 1000, 2000, 4000] {
+            let z = random_symmetric_z(n, 1.5, 7);
+
+            let t0 = Instant::now();
+            let old_threshold = z_threshold_reference(z.as_ref(), 0.05, "greater", false);
+            let t_old_thr = t0.elapsed();
+
+            let t1 = Instant::now();
+            let new_threshold = bh_z_threshold(z.as_ref(), 0.05);
+            let t_new_thr = t1.elapsed();
+
+            assert_eq!(old_threshold, new_threshold);
+
+            // A threshold no merge clears would make the old loop trivially
+            // fast, so drive both with a threshold that admits real work.
+            let working = 0.0;
+
+            let t2 = Instant::now();
+            let _ = greedy_merge_reference(z.as_ref(), working, 20);
+            let t_old_merge = t2.elapsed();
+
+            let t3 = Instant::now();
+            let merges = average_linkage_nn_chain(z.as_ref());
+            let _ = assign_modules_core(&merges, n, working, 20);
+            let t_new_merge = t3.elapsed();
+
+            println!(
+                "{:>7} {:>12} {:>12.2?} {:>12.2?} {:>12.2?} {:>12.2?}",
+                n,
+                n * (n - 1) / 2,
+                t_old_thr,
+                t_new_thr,
+                t_old_merge,
+                t_new_merge
+            );
+        }
+    }
+
+    /// A merge below the threshold cannot form a module, so a matrix whose only
+    /// links are weak leaves everything unassigned.
+    #[test]
+    fn assign_modules_core_respects_the_threshold() {
+        let z = two_block_z(6, 0.5, 0.1);
+        let merges = average_linkage_nn_chain(z.as_ref());
+
+        let labels = assign_modules_core(&merges, 12, 5.0, 3);
+        assert!(labels.iter().all(|l| l.is_none()));
+    }
+
+    ///////////////////////////
+    // Clustering: threshold //
+    ///////////////////////////
+
+    /// The histogram search must reproduce the materialised BH pipeline exactly,
+    /// on the same (upper-tail, signed) semantics. Bit equality, not closeness:
+    /// the claim is that this is a pure optimisation.
+    #[test]
+    fn bh_z_threshold_matches_reference() {
+        // scales chosen so K = 0, 0 < K < m and K = m all occur
+        for (n, scale, seed) in [
+            (20, 0.3, 11),
+            (20, 3.0, 12),
+            (60, 1.0, 13),
+            (60, 2.5, 14),
+            (120, 0.8, 15),
+            (120, 4.0, 16),
+        ] {
+            let z = random_symmetric_z(n, scale, seed);
+            for alpha in [1e-6, 0.001, 0.05, 0.5, 1.0, 1.5] {
+                let expected = z_threshold_reference(z.as_ref(), alpha, "greater", false);
+                let actual = bh_z_threshold(z.as_ref(), alpha);
+
+                assert_eq!(
+                    expected, actual,
+                    "n={n} scale={scale} alpha={alpha}: {expected} vs {actual}"
+                );
+            }
+        }
+    }
+
+    /// Degenerate shapes and the paths the histogram cannot represent directly:
+    /// the zero-width case, the underflow plateau above the top edge, and heavy
+    /// ties landing in one bin.
+    #[test]
+    fn bh_z_threshold_edge_cases() {
+        // no pairs at all
+        assert_eq!(
+            bh_z_threshold(Mat::<f64>::zeros(0, 0).as_ref(), 0.05),
+            f64::INFINITY
+        );
+        assert_eq!(
+            bh_z_threshold(Mat::<f64>::zeros(1, 1).as_ref(), 0.05),
+            f64::INFINITY
+        );
+
+        // nothing significant
+        let flat = Mat::<f64>::zeros(10, 10);
+        assert_eq!(bh_z_threshold(flat.as_ref(), 0.05), f64::INFINITY);
+
+        // every entry above the underflow plateau, so every p-value is exactly
+        // zero and the smallest entry wins
+        let huge = two_block_z(5, 60.0, 50.0);
+        assert_eq!(bh_z_threshold(huge.as_ref(), 0.05), 50.0);
+
+        // heavy ties: one distinct off-diagonal value, all in a single bin
+        let tied = two_block_z(8, 7.0, 7.0);
+        assert_eq!(
+            bh_z_threshold(tied.as_ref(), 0.05),
+            z_threshold_reference(tied.as_ref(), 0.05, "greater", false)
+        );
+
+        // alpha above one passes everything, so the global minimum wins
+        let mixed = two_block_z(6, 4.0, -2.0);
+        assert_eq!(bh_z_threshold(mixed.as_ref(), 1.5), -2.0);
+    }
+
+    /// The pre-rewrite labelling destroys both parents when two labelled
+    /// modules merge, so a two-block matrix whose blocks join above the
+    /// threshold loses every label. Upstream `assign_modules_core` keeps both.
+    ///
+    /// This pins the bug so the fix has something to flip.
+    #[test]
+    fn reference_labelling_discards_both_merged_modules() {
+        let z = two_block_z(6, 10.0, 8.0);
+
+        // every pair clears it, so merging runs to a single cluster
+        let (labels, _, _) = greedy_merge_reference(z.as_ref(), 1.0, 3);
+
+        assert!(
+            labels.iter().all(|v| v.is_nan()),
+            "expected the both-labelled reset to wipe every label, got {labels:?}"
+        );
     }
 }

@@ -485,4 +485,239 @@ mod tests {
             assert_relative_eq!(from_csr.z[i], from_csc.z[i], epsilon = 1e-5);
         }
     }
+
+    /// The Bernoulli model works on detection, not counts.
+    ///
+    /// Scaling every count by a constant leaves the detection pattern alone and
+    /// shifts every `log10(depth)` by the same amount, which the logistic fit's
+    /// intercept absorbs. So the Z scores must not move. Pre-fix they scaled
+    /// with the counts, because raw counts were being centred against a
+    /// detection probability.
+    #[test]
+    fn test_bernoulli_depends_only_on_detection() {
+        let dense = synthetic_counts();
+        let lib_sizes = library_sizes(&dense);
+        let matrix = to_csc(&dense, &lib_sizes);
+
+        // A power of two, so the depths and their logs stay exact in f32.
+        let scaled: Vec<Vec<u32>> = dense
+            .iter()
+            .map(|g| g.iter().map(|&v| v * 4).collect())
+            .collect();
+        let scaled_lib = library_sizes(&scaled);
+        let scaled_matrix = to_csc(&scaled, &scaled_lib);
+
+        let (neighbours, distances) = ring_graph();
+        let cells: Vec<usize> = (0..N_CELLS).collect();
+        let genes: Vec<usize> = (0..N_GENES).collect();
+        let params = params_for("bernoulli");
+
+        let base =
+            hotspot_autocor_metacells(&matrix, &neighbours, &distances, &cells, &genes, &params, 0)
+                .expect("bernoulli runs");
+        let scaled_res = hotspot_autocor_metacells(
+            &scaled_matrix,
+            &neighbours,
+            &distances,
+            &cells,
+            &genes,
+            &params,
+            0,
+        )
+        .expect("bernoulli runs on the scaled counts");
+
+        assert_eq!(base.gene_idx, scaled_res.gene_idx);
+        // Not tighter than this on purpose: the logistic fit runs in f32 and
+        // `quantile_cut` nudges its last bin edge by an absolute 1e-6, so the
+        // binning is only invariant to a shift up to rounding. The bug this
+        // guards against moved Z by the count scale factor, not by 0.1%.
+        for (a, b) in base.z.iter().zip(scaled_res.z.iter()) {
+            assert_relative_eq!(a, b, max_relative = 1e-3);
+        }
+    }
+
+    /// The `none` model asserts the caller already standardised, so it passes the
+    /// values straight through: `mu = 0`, `var = 1`, no centring.
+    #[test]
+    fn test_none_model_passes_values_through() {
+        let dense = synthetic_counts();
+        let lib_sizes = library_sizes(&dense);
+        let matrix = to_csc(&dense, &lib_sizes);
+
+        let (neighbours, distances) = ring_graph();
+        let cells: Vec<usize> = (0..N_CELLS).collect();
+        let genes: Vec<usize> = (0..N_GENES).collect();
+
+        let res = hotspot_autocor_metacells(
+            &matrix,
+            &neighbours,
+            &distances,
+            &cells,
+            &genes,
+            &params_for("none"),
+            0,
+        )
+        .expect("the none model runs");
+
+        assert_eq!(res.gene_idx.len(), N_GENES);
+        assert!(res.z.iter().all(|z| z.is_finite()));
+    }
+
+    /// An all-zero gene used to standardise to `NaN` and get dropped. It should
+    /// come back with a finite Z instead, and it must not take the other genes
+    /// with it.
+    #[test]
+    fn test_all_zero_gene_is_kept_with_finite_z() {
+        let mut dense = synthetic_counts();
+        dense[4] = vec![0u32; N_CELLS];
+        let lib_sizes = library_sizes(&dense);
+        let matrix = to_csc(&dense, &lib_sizes);
+
+        let (neighbours, distances) = ring_graph();
+        let cells: Vec<usize> = (0..N_CELLS).collect();
+        let genes: Vec<usize> = (0..N_GENES).collect();
+
+        for model in ["danb", "bernoulli", "normal"] {
+            let res = hotspot_autocor_metacells(
+                &matrix,
+                &neighbours,
+                &distances,
+                &cells,
+                &genes,
+                &params_for(model),
+                0,
+            )
+            .unwrap_or_else(|e| panic!("{model} runs: {e:?}"));
+
+            assert_eq!(res.gene_idx.len(), N_GENES, "{model} dropped a gene");
+            let slot = res
+                .gene_idx
+                .iter()
+                .position(|&g| g == 4)
+                .unwrap_or_else(|| panic!("{model} dropped the all-zero gene"));
+            assert!(res.z[slot].is_finite(), "{model} gave a non-finite Z");
+        }
+    }
+
+    /// The diagnostics have to separate "the null is fine, the data has
+    /// structure" from "the graph encodes a grouping the null knows nothing
+    /// about". A ring graph laid out so every edge stays inside a block should
+    /// report a within-group fraction of one.
+    #[test]
+    fn test_diagnostics_flag_a_group_structured_graph() {
+        let dense = synthetic_counts();
+        let lib_sizes = library_sizes(&dense);
+        let matrix = to_csc(&dense, &lib_sizes);
+        let csc = as_csc(&matrix);
+        let reader = InMemorySparseReader::new(csc.as_ref(), None).expect("reader builds");
+
+        let (neighbours, distances) = ring_graph();
+        let cells: Vec<usize> = (0..N_CELLS).collect();
+        let genes: Vec<usize> = (0..N_GENES).collect();
+
+        let hotspot = Hotspot::new(
+            &reader,
+            &reader,
+            &cells,
+            &neighbours,
+            &distances,
+            Some(HotSpotGraphParams::default()),
+        )
+        .expect("hotspot builds");
+
+        // Every node's two neighbours are its ring successor and predecessor, so
+        // a grouping that is constant across the whole ring keeps every edge
+        // inside a group.
+        let one_group = vec![0usize; N_CELLS];
+        let diag = hotspot
+            .diagnostics(&genes, "danb", Some(&one_group))
+            .expect("diagnostics run");
+
+        assert_eq!(diag.self_loops, 0);
+        assert_relative_eq!(
+            diag.within_group_edge_fraction.expect("a fraction"),
+            1.0,
+            epsilon = 1e-12
+        );
+        assert_eq!(diag.centred_sd.len(), N_GENES);
+
+        // Alternating groups on a ring of even length puts every edge across a
+        // boundary.
+        let alternating: Vec<usize> = (0..N_CELLS).map(|i| i % 2).collect();
+        let split = hotspot
+            .diagnostics(&genes, "danb", Some(&alternating))
+            .expect("diagnostics run");
+        assert_relative_eq!(
+            split.within_group_edge_fraction.expect("a fraction"),
+            0.0,
+            epsilon = 1e-12
+        );
+
+        // The DANB standardisation targets unit variance, so this is the number
+        // to look at when Z comes back implausibly large.
+        for sd in &diag.centred_sd {
+            assert!(sd.is_finite(), "non-finite centred SD: {sd}");
+        }
+    }
+
+    /// A self-loop in the supplied graph is reported, and dropped rather than
+    /// biasing every gene's G upwards.
+    #[test]
+    fn test_diagnostics_report_self_loops() {
+        let dense = synthetic_counts();
+        let lib_sizes = library_sizes(&dense);
+        let matrix = to_csc(&dense, &lib_sizes);
+        let csc = as_csc(&matrix);
+        let reader = InMemorySparseReader::new(csc.as_ref(), None).expect("reader builds");
+
+        let (mut neighbours, mut distances) = ring_graph();
+        // as a kNN that forgot to drop the query point would give
+        for (i, row) in neighbours.iter_mut().enumerate() {
+            row.insert(0, i);
+        }
+        for row in distances.iter_mut() {
+            row.insert(0, 0.0);
+        }
+
+        let cells: Vec<usize> = (0..N_CELLS).collect();
+        let genes: Vec<usize> = (0..N_GENES).collect();
+
+        let hotspot = Hotspot::new(
+            &reader,
+            &reader,
+            &cells,
+            &neighbours,
+            &distances,
+            Some(HotSpotGraphParams::default()),
+        )
+        .expect("hotspot builds");
+
+        let diag = hotspot
+            .diagnostics(&genes, "danb", None)
+            .expect("diagnostics run");
+        assert_eq!(diag.self_loops, N_CELLS);
+        assert!(diag.within_group_edge_fraction.is_none());
+
+        // and the self-loops must not change the statistic
+        let (clean_neighbours, clean_distances) = ring_graph();
+        let params = params_for("danb");
+        let looped =
+            hotspot_autocor_metacells(&matrix, &neighbours, &distances, &cells, &genes, &params, 0)
+                .expect("runs with self-loops");
+        let clean = hotspot_autocor_metacells(
+            &matrix,
+            &clean_neighbours,
+            &clean_distances,
+            &cells,
+            &genes,
+            &params,
+            0,
+        )
+        .expect("runs without");
+
+        assert_eq!(looped.gene_idx, clean.gene_idx);
+        for (a, b) in looped.z.iter().zip(clean.z.iter()) {
+            assert_relative_eq!(a, b, epsilon = 1e-6);
+        }
+    }
 }
