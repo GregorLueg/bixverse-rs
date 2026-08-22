@@ -16,8 +16,6 @@ use crate::core::math::linear_algebra::{linear_regression, linear_regression_wid
 use crate::core::math::stats::{calc_fdr, inv_logit, logit, z_scores_to_pval};
 use crate::prelude::*;
 
-/// Genes read per batch while streaming gene chunks for Hotspot.
-const GENE_BATCH_SIZE: usize = 1000;
 use crate::single_cell::sc_processing::knn::knn_distance_weights;
 use crate::single_cell::sc_utils::simd::*;
 use crate::utils::faer_parallelism;
@@ -28,6 +26,13 @@ use crate::utils::simd::{
 /////////////
 // Hotspot //
 /////////////
+
+////////////
+// Consts //
+////////////
+
+/// Gene batch size for Hotspot streaming
+const GENE_BATCH_SIZE: usize = 1000;
 
 ///////////
 // Types //
@@ -129,9 +134,9 @@ pub enum GexModel {
 
 /// Which of the DANB dispersion clamps a gene's moment fit hit.
 ///
-/// Both are silent corrections for a moment estimate that came out unusable, and
-/// both distort the variance the standardisation divides by, so a run where many
-/// genes clamp is worth knowing about. Only reported by
+/// Both are silent corrections for a moment estimate that came out unusable,
+/// and both distort the variance the standardisation divides by, so a run where
+/// many genes clamp is worth knowing about. Only reported by
 /// [Hotspot::diagnostics].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DanbClamp {
@@ -163,6 +168,10 @@ pub fn parse_gex_model(s: &str) -> Option<GexModel> {
     }
 }
 
+/////////////
+// Results //
+/////////////
+
 /// Structure for the gene results
 #[derive(Debug, Clone)]
 pub struct HotSpotGeneRes {
@@ -186,6 +195,10 @@ pub struct HotSpotPairRes {
     /// Symmetric matrix with Z scores (N_genex x N_genes)
     pub z_scores: Mat<f32>,
 }
+
+/////////////////
+// GeneScratch //
+/////////////////
 
 /// Per-thread reusable buffers for the autocorrelation path.
 #[derive(Debug, Clone)]
@@ -498,12 +511,12 @@ fn graph_weights(distances: &[Vec<f32>], params: &HotSpotGraphParams) -> Vec<Vec
 /// Self-loops are dropped. Upstream has no guard because it builds its own kNN
 /// and drops the query point, but this crate accepts a caller-supplied graph,
 /// and a kNN that returns each node as its own first neighbour would add
-/// `w * x_i^2` to `G` for every gene: a uniform positive bias that looks exactly
-/// like universal spatial autocorrelation.
+/// `w * x_i^2` to `G` for every gene: a uniform positive bias that looks
+/// exactly like universal spatial autocorrelation.
 ///
 /// Note that the result is *not* upper-triangular. A non-mutual edge where `i`
-/// lists `j` but `j` does not list `i` is left in place even when `j < i`, which
-/// matches upstream and is what every downstream traversal assumes.
+/// lists `j` but `j` does not list `i` is left in place even when `j < i`,
+/// which matches upstream and is what every downstream traversal assumes.
 ///
 /// ### Params
 ///
@@ -614,6 +627,22 @@ fn center_values(vals: &mut [f32], mu: &[f32], var: &[f32]) {
 // Corr helpers //
 //////////////////
 
+/// Replace counts by their detection indicator, in place.
+///
+/// ### Params
+///
+/// * `vals` - Dense counts, overwritten with `1.0` where positive
+///
+/// ### Returns
+///
+/// Nothing; modifies `vals` in place.
+#[inline]
+fn binarise(vals: &mut [f32]) {
+    for v in vals.iter_mut() {
+        *v = if *v > 0.0 { 1.0 } else { 0.0 };
+    }
+}
+
 /// Centre gene counts for correlation computation
 ///
 /// Standardises gene expression using the specified model, transforming to
@@ -656,22 +685,6 @@ fn create_centered_counts_gene(
     center_values(&mut vals, &mu, &var);
 
     vals
-}
-
-/// Replace counts by their detection indicator, in place.
-///
-/// ### Params
-///
-/// * `vals` - Dense counts, overwritten with `1.0` where positive
-///
-/// ### Returns
-///
-/// Nothing; modifies `vals` in place.
-#[inline]
-fn binarise(vals: &mut [f32]) {
-    for v in vals.iter_mut() {
-        *v = if *v > 0.0 { 1.0 } else { 0.0 };
-    }
 }
 
 ////////////////
@@ -1359,9 +1372,6 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
     fn fit_danb(&self, gene: &CscGeneChunk, sc: &mut GeneScratch) -> DanbClamp {
         let n = self.n_cells as f64;
         let total = self.umi_total;
-        // f64: a metacell aggregates dozens of cells, so a gene total over tens
-        // of thousands of them clears `2^24` and an f32 accumulator starts
-        // dropping entries outright.
         let tj: f64 = gene.data_raw.iter().map(|x| x as f64).sum();
 
         let scale = (tj / total) as f32;
@@ -1435,8 +1445,8 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
     ///
     /// OLS of the counts on the raw library size, with the residual variance
     /// taken as the uncorrected (`ddof = 0`) second moment and shared across
-    /// cells. When the depths carry no variance the regression is degenerate and
-    /// the gene's own mean and variance are used instead.
+    /// cells. When the depths carry no variance the regression is degenerate
+    /// and the gene's own mean and variance are used instead.
     ///
     /// ### Params
     ///
@@ -1448,7 +1458,7 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
     ///
     /// ### References
     ///
-    /// DeTomaso and Yosef, Cell Systems, 2021 (`hotspot/normal_model.py`)
+    /// DeTomaso and Yosef, Cell Systems, 2021
     fn fit_normal(&self, sc: &mut GeneScratch) {
         let n = self.n_cells as f64;
 
@@ -1590,8 +1600,6 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
 
                     center_values(&mut sc.vals, &sc.mu, &sc.var);
 
-                    // The null assumes unit variance about zero, so this is the
-                    // uncentred second moment, not the sample SD.
                     let n = self.n_cells as f64;
                     let sd = (sum_squares_simd_f32(&sc.vals) as f64 / n).sqrt() as f32;
 
@@ -2039,16 +2047,16 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
 /// model fit collapsed. These four numbers separate those cases.
 #[derive(Clone, Debug)]
 pub struct HotSpotDiagnostics {
-    /// Nodes listing themselves as their own neighbour. Should be zero; anything
-    /// else biases `G` upwards for every gene, see
+    /// Nodes listing themselves as their own neighbour. Should be zero;
+    /// anything else biases `G` upwards for every gene, see
     /// [make_weights_non_redundant].
     pub self_loops: usize,
     /// Fraction of undirected edges whose endpoints share a group, when a
     /// grouping was supplied.
     ///
     /// The single most informative number when the graph was rebuilt over
-    /// aggregated data spanning several batches, cell lines or donors. Near one
-    /// means the statistic is testing for between-group differences, and no
+    /// aggregated data spanning several batches, cell lines or donors. Near
+    /// one means the statistic is testing for between-group differences, and no
     /// choice of null model changes that.
     pub within_group_edge_fraction: Option<f64>,
     /// Standard deviation of the standardised counts, per gene.
@@ -2100,9 +2108,9 @@ fn within_group_edge_fraction(neighbours: &[Vec<usize>], groups: &[usize]) -> Op
 // Clustering //
 ////////////////
 
-////////////////////////
+/////////////////////////
 // BH threshold search //
-////////////////////////
+/////////////////////////
 
 /// Bins spanning the candidate Z range in [bh_z_threshold].
 ///
@@ -2146,6 +2154,10 @@ const SYMMETRY_CHECK_MAX_DIM: usize = 512;
 fn upper_tail_pval(z: f64) -> f64 {
     z_scores_to_pval(&[z], "greater")[0]
 }
+
+////////////////
+// ZHistogram //
+////////////////
 
 /// Counts of the strict upper triangle of a Z matrix over a uniform grid.
 #[derive(Debug)]
@@ -2240,9 +2252,10 @@ impl ZHistogram {
 ///
 /// Equivalent to materialising the strict upper triangle, its upper-tail
 /// p-values and their BH adjustment, then taking the smallest Z that survives,
-/// but without any of the O(m) allocations. With `R(v) = #{z_i >= v}` the answer
-/// is `min { v observed : p(v) < fdr_threshold * R(v) / m }`, which a histogram
-/// plus one exact resolution pass finds in two streaming passes and 256 KB.
+/// but without any of the O(m) allocations. With `R(v) = #{z_i >= v}` the
+/// answer is `min { v observed : p(v) < fdr_threshold * R(v) / m }`, which a
+/// histogram plus one exact resolution pass finds in two streaming passes and
+/// 256 KB.
 ///
 /// The upper tail matches upstream Hotspot (`modules.py` derives the threshold
 /// from `norm.sf`), so this is deliberately not the two-sided tail the
@@ -2272,8 +2285,6 @@ fn bh_z_threshold(z_mat: MatRef<f64>, fdr_threshold: f64) -> f64 {
 
     let m = n * (n - 1) / 2;
 
-    // `calc_fdr` caps the adjusted p-value at one, so a threshold above one
-    // passes every entry and the answer is simply the smallest Z.
     if fdr_threshold > 1.0 {
         return (0..n)
             .into_par_iter()
@@ -2285,15 +2296,12 @@ fn bh_z_threshold(z_mat: MatRef<f64>, fdr_threshold: f64) -> f64 {
             .reduce(|| f64::INFINITY, |a, b| a.min(b));
     }
 
-    // A passing entry needs `p < alpha * r / m <= alpha`, so nothing at or below
-    // the one-sided critical value can ever clear BH.
     let normal = Normal::new(0.0, 1.0).unwrap();
     let lo = (normal.inverse_cdf(1.0 - fdr_threshold) - Z_ALPHA_RELAX)
         .clamp(-Z_HIST_MAX, Z_HIST_MAX - 1.0);
 
     let hist = ZHistogram::build(z_mat, lo);
 
-    // Entries at or above each bin edge, walking down from the top.
     let mut at_or_above = vec![0_u32; Z_HIST_BINS + 1];
     at_or_above[Z_HIST_BINS] = hist.overflow;
     for bin in (0..Z_HIST_BINS).rev() {
@@ -2306,9 +2314,6 @@ fn bh_z_threshold(z_mat: MatRef<f64>, fdr_threshold: f64) -> f64 {
             continue;
         }
 
-        // Most optimistic combination available inside this bin: the smallest
-        // possible p-value against the largest possible rank. If that fails,
-        // no member can pass and the whole bin is skippable.
         let p_floor = upper_tail_pval(hist.edge(bin + 1));
         if p_floor >= fdr_threshold * at_or_above[bin] as f64 / m_f {
             continue;
@@ -2327,8 +2332,6 @@ fn bh_z_threshold(z_mat: MatRef<f64>, fdr_threshold: f64) -> f64 {
         }
     }
 
-    // Above the top edge the tail p-value is exactly zero, so anything there
-    // passes; it is only reached once every bin below has been ruled out.
     if hist.overflow > 0 {
         return hist.overflow_min;
     }
@@ -2382,9 +2385,6 @@ fn resolve_threshold_bin(
     let pvals = z_scores_to_pval(&members, "greater");
     let len = members.len();
 
-    // Ascending, so the first passing value is the smallest. Ties share a rank:
-    // the whole group takes the rank of its first member, which is the largest
-    // rank available to it and hence the one that gives it the best chance.
     let mut t = 0usize;
     while t < len {
         let mut group_end = t + 1;
@@ -2403,9 +2403,9 @@ fn resolve_threshold_bin(
     None
 }
 
-///////////////////////////
+//////////////////////////
 // Average-linkage tree //
-///////////////////////////
+//////////////////////////
 
 /// One merge in the average-linkage dendrogram.
 ///
@@ -2431,11 +2431,11 @@ struct Merge {
 ///
 /// The algorithm `scipy.cluster.hierarchy.linkage(method='average')` uses, so
 /// this is a port of upstream's clustering rather than a lookalike. Average
-/// linkage on similarities is reducible (`sim(k, a u b)` is a convex combination
-/// of `sim(k,a)` and `sim(k,b)`, so it can never exceed their max), which is
-/// what makes the chain valid: O(n^2) time and O(n) working state on top of the
-/// similarity matrix, against O(n^2 log n) and an O(n^2)-entry heap for the
-/// greedy formulation.
+/// linkage on similarities is reducible (`sim(k, a u b)` is a convex
+/// combination of `sim(k,a)` and `sim(k,b)`, so it can never exceed their max),
+/// which is what makes the chain valid: O(n^2) time and O(n) working state on
+/// top of the similarity matrix, against O(n^2 log n) and an O(n^2)-entry heap
+/// for the greedy formulation.
 ///
 /// The returned merges are ordered by descending height, i.e. ascending
 /// distance, so a bottom-up walk sees children before parents.
@@ -2453,9 +2453,6 @@ fn average_linkage_nn_chain(z_mat: MatRef<f64>) -> Vec<Merge> {
         return Vec::new();
     }
 
-    // Column-major working copy. A plain `Vec` rather than a `Mat` on purpose:
-    // what this loop wants is raw column slices, not linear algebra, so the
-    // prefer-faer convention does not apply here.
     let mut sim = vec![0.0_f64; n * n];
     sim.par_chunks_mut(n).enumerate().for_each(|(j, col)| {
         for (i, slot) in col.iter_mut().enumerate() {
@@ -2476,12 +2473,9 @@ fn average_linkage_nn_chain(z_mat: MatRef<f64>) -> Vec<Merge> {
             chain.push(seed);
         }
 
-        // Walk the chain until two clusters are each other's nearest neighbour.
         let (x, y, best) = loop {
             let x = chain[chain.len() - 1];
 
-            // Everything before the previous chain entry can be ignored, which
-            // is what bounds the total work.
             let (mut y, mut best) = if chain.len() > 1 {
                 let prev = chain[chain.len() - 2];
                 (prev, sim[prev + x * n])
@@ -2494,7 +2488,6 @@ fn average_linkage_nn_chain(z_mat: MatRef<f64>) -> Vec<Merge> {
                 if !active[k] || k == x {
                     continue;
                 }
-                // Strict, so the smallest index wins a tie.
                 if col[k] > best {
                     best = col[k];
                     y = k;
@@ -2509,9 +2502,6 @@ fn average_linkage_nn_chain(z_mat: MatRef<f64>) -> Vec<Merge> {
             chain.push(y);
         };
 
-        // Lance-Williams over the survivor's column, then mirror. `y` survives,
-        // matching scipy so the combination order (and hence the rounding) is
-        // the same.
         let (sx, sy) = (size[x], size[y]);
         let total = (sx + sy) as f64;
         let (wx, wy) = (sx as f64, sy as f64);
@@ -2549,11 +2539,8 @@ fn average_linkage_nn_chain(z_mat: MatRef<f64>) -> Vec<Merge> {
 /// The merges ordered by descending height, with node ids assigned so that
 /// merge `i` is node `n + i`.
 fn canonicalise_linkage(mut raw: Vec<(usize, usize, f64)>, n: usize) -> Vec<Merge> {
-    // Descending height == ascending distance, which is the order a monotone
-    // dendrogram merges in.
     raw.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(Ordering::Equal));
 
-    // Union-find over leaf slots, tracking the current node id of each cluster.
     let mut parent: Vec<usize> = (0..n).collect();
     let mut node_id: Vec<usize> = (0..n).collect();
     let mut leaves: Vec<usize> = vec![1; n];
@@ -2625,7 +2612,6 @@ fn assign_modules_core(
         if node < n { 1 } else { merges[node - n].size }
     }
 
-    /// Label already attached to a child node, if any.
     fn child_label(labels: &[Option<usize>], n: usize, node: usize) -> Option<usize> {
         if node < n { None } else { labels[node - n] }
     }
@@ -2639,11 +2625,7 @@ fn assign_modules_core(
         let big_a = n_a >= min_cluster_genes;
         let big_b = n_b >= min_cluster_genes;
 
-        labels[i] = if big_a && big_b {
-            // Both sides are already modules in their own right. Declining to
-            // join them keeps both, because propagation stops here.
-            None
-        } else if merge.height < z_threshold {
+        labels[i] = if (big_a && big_b) || (merge.height < z_threshold) {
             None
         } else if big_a {
             child_label(&labels, n, merge.left)
@@ -2663,12 +2645,9 @@ fn assign_modules_core(
         return out;
     }
 
-    // Iterative `prop_label`: upstream recurses, which hits Python's recursion
-    // limit on deep linkages.
     let root = merges.len() - 1;
     let mut stack: Vec<(usize, Option<usize>)> = vec![(root, labels[root])];
     while let Some((idx, inherited)) = stack.pop() {
-        // Sticky: only pick up a label while none has been inherited yet.
         let label = inherited.or(labels[idx]);
         for child in [merges[idx].left, merges[idx].right] {
             if child < n {
