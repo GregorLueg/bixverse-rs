@@ -1337,6 +1337,66 @@ pub enum BixverseErrors {
         minimum: usize,
     },
 
+    // -- DIALOGUE --
+    /// Fewer than two cell types were supplied.
+    ///
+    /// There is nothing to correlate across with one.
+    #[cfg(feature = "single-cell")]
+    #[error("DIALOGUE: needs at least two cell types; got {n_cell_types}.")]
+    DialogueTooFewCellTypes {
+        /// Cell types supplied
+        n_cell_types: usize,
+    },
+
+    /// Too few samples are represented in every cell type.
+    ///
+    /// The decomposition runs on the samples the cell types share, and that
+    /// intersection is what has come up short.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "DIALOGUE: only {found} samples are present in every cell type; at least {minimum} are needed."
+    )]
+    DialogueTooFewSharedSamples {
+        /// Samples in the intersection
+        found: usize,
+        /// Minimum the decomposition requires
+        minimum: usize,
+    },
+
+    /// Too few features in one cell type survived the ANOVA filter.
+    ///
+    /// A feature is kept when it varies across samples. If almost none do, the
+    /// cell type carries no sample-level signal to decompose, and the usual
+    /// fixes are to drop it from the run or to set the spatial flag.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "DIALOGUE: only {found} of {total} features in cell type {cell_type} passed the ANOVA filter; at least {minimum} are needed."
+    )]
+    DialogueTooFewFeatures {
+        /// Index of the offending cell type
+        cell_type: usize,
+        /// Features that passed
+        found: usize,
+        /// Features tested
+        total: usize,
+        /// Minimum the decomposition requires
+        minimum: usize,
+    },
+
+    /// Too few samples carry enough cells for the ANOVA filter to run.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "DIALOGUE: cell type {cell_type} has {found} samples with at least {min_cells} cells; the ANOVA filter needs two. Lower abn_c or set the spatial flag."
+    )]
+    DialogueTooFewAbundantSamples {
+        /// Index of the offending cell type
+        cell_type: usize,
+        /// Samples meeting the threshold
+        found: usize,
+        /// Cells a sample must contribute
+        min_cells: usize,
+    },
+
     // -- sctype --
     /// Error when number of cluster assignment != the number of cells
     #[cfg(feature = "single-cell")]
