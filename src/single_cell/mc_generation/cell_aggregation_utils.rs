@@ -173,6 +173,13 @@ pub fn remap_metacells_to_original(
 // Pseudo-bulking //
 ////////////////////
 
+/// Gene-major batch size for [pseudo_bulk_genes_dense].
+///
+/// One batch holds `GENE_PSEUDO_BULK_BATCH * n_groups` accumulators plus the
+/// chunks themselves, so this bounds the transient memory rather than the
+/// result, which is dense and sized by the caller's gene list.
+const GENE_PSEUDO_BULK_BATCH: usize = 1000;
+
 /// Enum for Pseudo-bulking
 #[derive(Debug, Clone, Default)]
 pub enum PseudoBulk {
@@ -360,6 +367,138 @@ pub fn get_pseudo_bulked_counts_sparse<S: SingleCellReading>(
     })
 }
 
+/// Gene-major pseudo-bulk over a subset of genes.
+///
+/// The twin of [get_pseudo_bulked_counts_dense], which reads cell chunks and
+/// therefore needs a cell-major store and always sweeps every gene. This one
+/// reads gene chunks, so it runs on an [crate::single_cell::sc_data::in_memory_io::InMemorySparseReader]
+/// as happily as on a file, and it only touches the genes asked for. Both
+/// matter to anything that has already narrowed down to a signature.
+///
+/// Groups may overlap; a cell contributing to several is counted in each. The
+/// inverse map from cells to groups is built once as a flat CSR rather than a
+/// map per cell.
+///
+/// ### Params
+///
+/// * `reader` - Gene-major reader
+/// * `gene_indices` - Genes to aggregate. Result rows follow this order.
+/// * `groups` - Cell indices per group. Result columns follow this order.
+/// * `bulk_type` - [PseudoBulk::Raw] sums raw counts, [PseudoBulk::Norm]
+///   averages the normalised layer over every cell in the group, zeros
+///   included, which is what an R `colMeans` over a dense block gives.
+/// * `verbose` - `0` silent, `1` normal, `2` detailed
+///
+/// ### Returns
+///
+/// An `n_genes x n_groups` matrix, or [BixverseErrors::InvalidArgument] for an
+/// out-of-range cell index or an empty group.
+pub fn pseudo_bulk_genes_dense<S: SingleCellReading>(
+    reader: &S,
+    gene_indices: &[usize],
+    groups: &[Vec<usize>],
+    bulk_type: PseudoBulk,
+    verbose: usize,
+) -> Result<Mat<f64>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+    let n_cells = reader.get_header().total_cells;
+    let n_groups = groups.len();
+    let n_genes = gene_indices.len();
+
+    if n_groups == 0 || n_genes == 0 {
+        return Ok(Mat::zeros(n_genes, n_groups));
+    }
+
+    // Flat CSR of cell -> groups. Counting pass, prefix sum, fill.
+    let mut per_cell = vec![0_u32; n_cells + 1];
+    for (g, members) in groups.iter().enumerate() {
+        if members.is_empty() {
+            return Err(BixverseErrors::InvalidArgument(format!(
+                "pseudo-bulk group {g} has no cells."
+            )));
+        }
+        for &c in members.iter() {
+            if c >= n_cells {
+                return Err(BixverseErrors::InvalidArgument(format!(
+                    "cell index {c} is outside 0..{n_cells}."
+                )));
+            }
+            per_cell[c + 1] += 1;
+        }
+    }
+    for i in 0..n_cells {
+        per_cell[i + 1] += per_cell[i];
+    }
+    let offsets = per_cell;
+    let mut cursor = offsets.clone();
+    let mut membership = vec![0_u32; offsets[n_cells] as usize];
+    for (g, members) in groups.iter().enumerate() {
+        for &c in members.iter() {
+            membership[cursor[c] as usize] = g as u32;
+            cursor[c] += 1;
+        }
+    }
+
+    let sizes: Vec<f64> = groups.iter().map(|m| m.len() as f64).collect();
+    let mut out = Mat::<f64>::zeros(n_genes, n_groups);
+
+    for (batch_idx, batch) in gene_indices.chunks(GENE_PSEUDO_BULK_BATCH).enumerate() {
+        let start = Instant::now();
+        let chunks = reader.read_gene_parallel(batch)?;
+        let row_offset = batch_idx * GENE_PSEUDO_BULK_BATCH;
+
+        let rows: Vec<Vec<f64>> = chunks
+            .par_iter()
+            .map(|chunk| {
+                let mut row = vec![0.0_f64; n_groups];
+                match bulk_type {
+                    PseudoBulk::Raw => {
+                        for (value, &cell) in chunk.data_raw.iter().zip(chunk.indices.iter()) {
+                            let c = cell as usize;
+                            for g in &membership[offsets[c] as usize..offsets[c + 1] as usize] {
+                                row[*g as usize] += value as f64;
+                            }
+                        }
+                    }
+                    PseudoBulk::Norm => {
+                        // Widen out of f16 before accumulating; summing in f16
+                        // biases upwards once the running total passes 64.
+                        for (value, &cell) in chunk.data_norm.iter().zip(chunk.indices.iter()) {
+                            let v = value.to_f32() as f64;
+                            let c = cell as usize;
+                            for g in &membership[offsets[c] as usize..offsets[c + 1] as usize] {
+                                row[*g as usize] += v;
+                            }
+                        }
+                        for (r, size) in row.iter_mut().zip(sizes.iter()) {
+                            *r /= size;
+                        }
+                    }
+                }
+                row
+            })
+            .collect();
+
+        for (i, row) in rows.into_iter().enumerate() {
+            for (g, v) in row.into_iter().enumerate() {
+                out[(row_offset + i, g)] = v;
+            }
+        }
+
+        if verbosity.normal_verbosity() {
+            println!(
+                "Pseudo-bulked genes {} to {} of {} (took {:.2?})",
+                row_offset + 1,
+                row_offset + batch.len(),
+                n_genes,
+                start.elapsed()
+            );
+        }
+    }
+
+    Ok(out)
+}
+
 ///////////
 // Tests //
 ///////////
@@ -367,6 +506,7 @@ pub fn get_pseudo_bulked_counts_sparse<S: SingleCellReading>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::single_cell::sc_data::in_memory_io::InMemorySparseReader;
 
     //////////////////////
     // Index remapping //
@@ -470,5 +610,112 @@ mod tests {
     #[test]
     fn pseudo_bulk_defaults_to_raw() {
         assert!(matches!(PseudoBulk::default(), PseudoBulk::Raw));
+    }
+
+    // -- pseudo_bulk_genes_dense --
+
+    /// A dense 6-cell by 4-gene block as CSC, with the normalised layer set to
+    /// ten times the raw counts so the two paths are told apart by more than
+    /// rounding.
+    ///
+    /// ```text
+    /// gene\cell   0    1    2    3    4    5
+    ///    0        1    2    0    4    0    6
+    ///    1        0    0    3    0    5    0
+    ///    2        2    2    2    2    2    2
+    ///    3        0    0    0    0    0    0
+    /// ```
+    fn tiny_csc() -> CompressedSparseData2<u32, f32> {
+        let raw: Vec<u32> = vec![1, 2, 4, 6, 3, 5, 2, 2, 2, 2, 2, 2];
+        let norm: Vec<f32> = raw.iter().map(|v| *v as f32 * 10.0).collect();
+        // CSC over genes: gene 0 has cells 0,1,3,5; gene 1 has 2,4; gene 2 has
+        // all six; gene 3 is empty.
+        let indices: Vec<u32> = vec![0, 1, 3, 5, 2, 4, 0, 1, 2, 3, 4, 5];
+        let indptr: Vec<u32> = vec![0, 4, 6, 12, 12];
+        CompressedSparseData2::new_csc(&raw, &indices, &indptr, Some(&norm), (6, 4))
+    }
+
+    /// Raw pseudo-bulk sums counts within each group.
+    #[test]
+    fn test_pseudo_bulk_genes_dense_raw_sums() {
+        let matrix = tiny_csc();
+        let reader = InMemorySparseReader::new(&matrix, None).unwrap();
+        let groups = vec![vec![0usize, 1, 2], vec![3usize, 4, 5]];
+
+        let out =
+            pseudo_bulk_genes_dense(&reader, &[0, 1, 2, 3], &groups, PseudoBulk::Raw, 0).unwrap();
+
+        assert_eq!(out.nrows(), 4);
+        assert_eq!(out.ncols(), 2);
+        // gene 0: 1 + 2 + 0 = 3, then 4 + 0 + 6 = 10
+        assert_eq!(out[(0, 0)], 3.0);
+        assert_eq!(out[(0, 1)], 10.0);
+        // gene 1: 0 + 0 + 3 = 3, then 0 + 5 + 0 = 5
+        assert_eq!(out[(1, 0)], 3.0);
+        assert_eq!(out[(1, 1)], 5.0);
+        // gene 2 is uniform, gene 3 is empty
+        assert_eq!(out[(2, 0)], 6.0);
+        assert_eq!(out[(2, 1)], 6.0);
+        assert_eq!(out[(3, 0)], 0.0);
+        assert_eq!(out[(3, 1)], 0.0);
+    }
+
+    /// Normalised pseudo-bulk averages over every cell in the group, implicit
+    /// zeros included. That is the `colMeans` of a dense block, not the mean of
+    /// the stored values.
+    #[test]
+    fn test_pseudo_bulk_genes_dense_norm_averages_over_zeros() {
+        let matrix = tiny_csc();
+        let reader = InMemorySparseReader::new(&matrix, None).unwrap();
+        let groups = vec![vec![0usize, 1, 2], vec![3usize, 4, 5]];
+
+        let out =
+            pseudo_bulk_genes_dense(&reader, &[0, 1, 2, 3], &groups, PseudoBulk::Norm, 0).unwrap();
+
+        // gene 0 group 0: (10 + 20 + 0) / 3, not / 2.
+        assert!((out[(0, 0)] - 10.0).abs() < 1e-6);
+        assert!((out[(0, 1)] - 100.0 / 3.0).abs() < 1e-6);
+        assert!((out[(1, 0)] - 10.0).abs() < 1e-6);
+        assert!((out[(2, 0)] - 20.0).abs() < 1e-6);
+        assert_eq!(out[(3, 0)], 0.0);
+    }
+
+    /// Rows follow the caller's gene order, not the store's.
+    #[test]
+    fn test_pseudo_bulk_genes_dense_honours_gene_order() {
+        let matrix = tiny_csc();
+        let reader = InMemorySparseReader::new(&matrix, None).unwrap();
+        let groups = vec![vec![0usize, 1, 2], vec![3usize, 4, 5]];
+
+        let out = pseudo_bulk_genes_dense(&reader, &[2, 0], &groups, PseudoBulk::Raw, 0).unwrap();
+
+        assert_eq!(out.nrows(), 2);
+        assert_eq!(out[(0, 0)], 6.0); // gene 2 first
+        assert_eq!(out[(1, 0)], 3.0); // then gene 0
+    }
+
+    /// Overlapping groups are allowed; a shared cell counts in both.
+    #[test]
+    fn test_pseudo_bulk_genes_dense_allows_overlapping_groups() {
+        let matrix = tiny_csc();
+        let reader = InMemorySparseReader::new(&matrix, None).unwrap();
+        let groups = vec![vec![0usize, 1], vec![1usize, 3]];
+
+        let out = pseudo_bulk_genes_dense(&reader, &[0], &groups, PseudoBulk::Raw, 0).unwrap();
+
+        assert_eq!(out[(0, 0)], 3.0); // cells 0 and 1 -> 1 + 2
+        assert_eq!(out[(0, 1)], 6.0); // cells 1 and 3 -> 2 + 4
+    }
+
+    #[test]
+    fn test_pseudo_bulk_genes_dense_rejects_bad_groups() {
+        let matrix = tiny_csc();
+        let reader = InMemorySparseReader::new(&matrix, None).unwrap();
+        // Cell index past the end of the store.
+        let bad = vec![vec![0usize, 99]];
+        assert!(pseudo_bulk_genes_dense(&reader, &[0], &bad, PseudoBulk::Raw, 0).is_err());
+        // An empty group has no denominator.
+        let empty = vec![vec![0usize], Vec::new()];
+        assert!(pseudo_bulk_genes_dense(&reader, &[0], &empty, PseudoBulk::Raw, 0).is_err());
     }
 }
