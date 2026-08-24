@@ -16,11 +16,11 @@ use bixverse_rs::prelude::*;
 use bixverse_rs::single_cell::mc_analysis::dialogue_mc::dialogue_metacells;
 use bixverse_rs::single_cell::sc_analysis::dialogue::{DialogueParams, DialogueResult, PmdParams};
 use bixverse_rs::single_cell::sc_data::data_io::CellGeneSparseWriter;
+use bixverse_rs::single_cell::sc_data::sc_synthetic_data::{
+    DialogueSyntheticData, DialogueSyntheticParams, create_dialogue_synthetic_data,
+};
 
 use faer::{Mat, MatRef};
-use rand::SeedableRng;
-use rand::rngs::StdRng;
-use rand_distr::{Distribution, StandardNormal, Uniform};
 
 /////////////////////
 // Synthetic input //
@@ -42,132 +42,23 @@ const N_GENES: usize = 90;
 /// Planted genes per cell type, all tracking the shared latent.
 const N_PLANTED: usize = 8;
 
-/// Everything the pipeline needs, plus the ground truth to check against.
-struct Synthetic {
-    matrix: CompressedSparseData2<u32, f32>,
-    cell_type_indices: Vec<Vec<usize>>,
-    features: Vec<Mat<f64>>,
-    sample_ids: Vec<usize>,
-    quality: Vec<f64>,
-    /// Per-sample latent the planted programme follows.
-    latent: Vec<f64>,
-    /// Planted gene indices per cell type.
-    planted: Vec<Vec<usize>>,
+/// The synthetic shape, sized so the test constants above stay the source of
+/// truth for the assertions.
+fn shape() -> DialogueSyntheticParams {
+    DialogueSyntheticParams::new(
+        N_SAMPLES,
+        CELLS_PER_SAMPLE,
+        N_TYPES,
+        N_FEATURES,
+        N_SAMPLE_FEATURES,
+        N_GENES,
+        N_PLANTED,
+    )
 }
 
 /// Builds the synthetic experiment.
-///
-/// Every cell type gets its own noise and its own sample-level nuisance
-/// factors; only feature zero and the planted genes carry the shared latent, so
-/// anything DIALOGUE finds beyond that is something it invented.
-fn build(seed: u64) -> Synthetic {
-    let mut rng = StdRng::seed_from_u64(seed);
-    let mut normal = || -> f64 { StandardNormal.sample(&mut rng) };
-
-    let latent: Vec<f64> = (0..N_SAMPLES).map(|_| normal()).collect();
-    // Sample-level nuisance, one set per cell type per feature slot.
-    let nuisance: Vec<Vec<Vec<f64>>> = (0..N_TYPES)
-        .map(|_| {
-            (0..N_SAMPLE_FEATURES)
-                .map(|_| (0..N_SAMPLES).map(|_| normal()).collect())
-                .collect()
-        })
-        .collect();
-
-    let per_type = N_SAMPLES * CELLS_PER_SAMPLE;
-    let n_cells = per_type * N_TYPES;
-
-    let mut sample_ids = vec![0usize; n_cells];
-    let mut quality = vec![0.0_f64; n_cells];
-    let mut cell_type_indices: Vec<Vec<usize>> = Vec::with_capacity(N_TYPES);
-    let mut features: Vec<Mat<f64>> = Vec::with_capacity(N_TYPES);
-    // Per-cell programme strength, used to drive the planted genes.
-    let mut strength = vec![0.0_f64; n_cells];
-
-    let mut cursor = 0usize;
-    for t in 0..N_TYPES {
-        let mut cells = Vec::with_capacity(per_type);
-        let mut feature = Mat::<f64>::zeros(per_type, N_FEATURES);
-        for s in 0..N_SAMPLES {
-            for _ in 0..CELLS_PER_SAMPLE {
-                let global = cursor;
-                let local = cells.len();
-                cells.push(global);
-                sample_ids[global] = s;
-                quality[global] = normal();
-
-                // Feature 0 is the shared programme; 1..N_SAMPLE_FEATURES are
-                // cell-type-specific sample effects; the rest are noise.
-                let shared = latent[s] + 0.45 * normal();
-                feature[(local, 0)] = shared;
-                strength[global] = shared;
-                for f in 1..N_SAMPLE_FEATURES {
-                    feature[(local, f)] = nuisance[t][f][s] + 0.45 * normal();
-                }
-                for f in N_SAMPLE_FEATURES..N_FEATURES {
-                    feature[(local, f)] = normal();
-                }
-                cursor += 1;
-            }
-        }
-        cell_type_indices.push(cells);
-        features.push(feature);
-    }
-
-    // Genes: a planted block per cell type, then noise. The planted genes are
-    // driven by that cell type's own programme strength.
-    let mut planted: Vec<Vec<usize>> = Vec::with_capacity(N_TYPES);
-    for t in 0..N_TYPES {
-        planted.push((t * N_PLANTED..(t + 1) * N_PLANTED).collect());
-    }
-
-    let unit = Uniform::new(0.0_f64, 1.0).expect("valid range");
-    let mut data: Vec<u32> = Vec::new();
-    let mut data_norm: Vec<f32> = Vec::new();
-    let mut indices: Vec<u32> = Vec::new();
-    let mut indptr: Vec<u32> = vec![0];
-    // CSC over genes, shape (cells, genes). Cells are laid out contiguously by
-    // cell type above, so `cell / per_type` gives the owner directly.
-    for gene in 0..N_GENES {
-        let owner = planted.iter().position(|p| p.contains(&gene));
-        for cell in 0..n_cells {
-            let mean = if owner == Some(cell / per_type) {
-                // Planted: expression rises with the programme.
-                (1.2 + 0.9 * strength[cell]).max(0.05)
-            } else {
-                0.6
-            };
-            // Sparse and non-negative, standing in for a normalised count.
-            let draw: f64 = unit.sample(&mut rng);
-            if draw >= 0.45 {
-                let value = (mean * (0.5 + draw)).max(0.0) as f32;
-                if value > 0.0 {
-                    data.push((value * 10.0).round() as u32);
-                    data_norm.push(value);
-                    indices.push(cell as u32);
-                }
-            }
-        }
-        indptr.push(indices.len() as u32);
-    }
-
-    let matrix = CompressedSparseData2::new_csc(
-        &data,
-        &indices,
-        &indptr,
-        Some(&data_norm),
-        (n_cells, N_GENES),
-    );
-
-    Synthetic {
-        matrix,
-        cell_type_indices,
-        features,
-        sample_ids,
-        quality,
-        latent,
-        planted,
-    }
+fn build(seed: u64) -> DialogueSyntheticData {
+    create_dialogue_synthetic_data(&shape(), seed).expect("the fixture shape is buildable")
 }
 
 /// Parameters sized for the synthetic data: a small permutation null, since the
@@ -187,7 +78,7 @@ fn params(n_permutations: usize) -> DialogueParams {
 }
 
 /// Runs the pipeline over the synthetic store.
-fn run(data: &Synthetic, n_permutations: usize) -> DialogueResult {
+fn run(data: &DialogueSyntheticData, n_permutations: usize) -> DialogueResult {
     let feature_refs: Vec<MatRef<f64>> = data.features.iter().map(|m| m.as_ref()).collect();
     let genes: Vec<usize> = (0..N_GENES).collect();
     dialogue_metacells(
@@ -206,7 +97,11 @@ fn run(data: &Synthetic, n_permutations: usize) -> DialogueResult {
 /// Weakest agreement with the planted latent across cell types, for one
 /// programme. A programme only counts as recovered if *every* cell type tracks
 /// the latent, so the minimum is the right summary.
-fn worst_latent_agreement(result: &DialogueResult, data: &Synthetic, programme: usize) -> f64 {
+fn worst_latent_agreement(
+    result: &DialogueResult,
+    data: &DialogueSyntheticData,
+    programme: usize,
+) -> f64 {
     (0..N_TYPES)
         .map(|t| {
             let means = sample_means(
@@ -223,7 +118,7 @@ fn worst_latent_agreement(result: &DialogueResult, data: &Synthetic, programme: 
 }
 
 /// Which programme actually tracks the planted latent, by ground truth.
-fn planted_programme(result: &DialogueResult, data: &Synthetic) -> usize {
+fn planted_programme(result: &DialogueResult, data: &DialogueSyntheticData) -> usize {
     if worst_latent_agreement(result, data, 0) >= worst_latent_agreement(result, data, 1) {
         0
     } else {
@@ -486,7 +381,7 @@ impl TempStore {
 /// The in-memory reader narrows `data_2` to `f16` when it builds a chunk, and
 /// so does the writer, so both paths see bit-identical values and the
 /// comparison below can be exact rather than approximate.
-fn write_store(path: &str, data: &Synthetic) {
+fn write_store(path: &str, data: &DialogueSyntheticData) {
     let n_cells = data.matrix.shape.0;
     let mut writer =
         CellGeneSparseWriter::new(path, false, n_cells, N_GENES, 1e4).expect("writer opens");
