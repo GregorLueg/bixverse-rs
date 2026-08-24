@@ -1,4 +1,4 @@
-//! DIALOGUE: multicellular programmes from cross-cell-type association.
+//! DIALOGUE: multi-cellular programmes from cross-cell-type association.
 //!
 //! Given several cell types profiled across shared samples or spatial niches,
 //! finds programmes of co-regulated, cell-type-specific genes whose activity
@@ -22,21 +22,21 @@
 //!
 //! Jerby-Arnon & Regev, Nature Biotechnology 40, 2022
 
+pub mod hlm;
 pub mod params;
-pub mod step1_pmd;
-pub mod step2_hlm;
-pub mod step3_refine;
+pub mod pmd;
+pub mod refine;
 
 use faer::MatRef;
 
 use crate::prelude::*;
 
+pub use hlm::{DialogueStep2Result, GeneAssociation};
 pub use params::{Averaging, DialogueParams, HlmParams, PmdParams, RefineParams, parse_averaging};
-pub use step1_pmd::{ProgrammeSignature, Step1Result};
-pub use step2_hlm::{GeneAssociation, Step2Result};
-pub use step3_refine::{DialogueResult, GeneVerdict};
+pub use pmd::{DialogueStep1Result, ProgrammeSignature};
+pub use refine::{DialogueResult, GeneVerdict};
 
-use step1_pmd::CellTypeView;
+use pmd::CellTypeView;
 
 /// Runs the full DIALOGUE pipeline.
 ///
@@ -93,10 +93,6 @@ pub fn dialogue_run<S: SingleCellReading>(
         }
     }
 
-    // Validated here rather than in `CellTypeView`, which only sees the
-    // metadata: the dense position tables in stages one and three index by
-    // global cell id and would panic past the end of the store. A panic across
-    // the extendr boundary is worse than an error.
     let total_cells = reader.get_header().total_cells;
     for cells in cell_type_indices.iter() {
         if let Some(&bad) = cells.iter().find(|&&c| c >= total_cells) {
@@ -111,7 +107,7 @@ pub fn dialogue_run<S: SingleCellReading>(
         .map(|cells| CellTypeView::new(cells, sample_ids, cell_quality))
         .collect::<Result<_, _>>()?;
 
-    let step1 = step1_pmd::run_step1(reader, &views, features, genes, params, verbose)?;
-    let step2 = step2_hlm::run_step2(reader, &views, &step1, params, verbose)?;
-    step3_refine::run_step3(reader, &views, &step1, &step2, params, verbose)
+    let step1 = pmd::dialogue_step1_run(reader, &views, features, genes, params, verbose)?;
+    let step2 = hlm::run_step2(reader, &views, &step1, params, verbose)?;
+    refine::run_step3(reader, &views, &step1, &step2, params, verbose)
 }

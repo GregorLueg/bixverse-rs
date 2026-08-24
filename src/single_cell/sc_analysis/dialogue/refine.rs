@@ -33,17 +33,17 @@ use crate::core::math::linear_algebra::{nnls_gram, ols_residualise};
 use crate::core::math::stats::{calc_fdr, fisher_combine, p_adjust_holm};
 use crate::core::math::vector_helpers::pearson_correlation;
 use crate::prelude::*;
+use crate::single_cell::sc_analysis::dialogue::hlm::{DialogueStep2Result, p_from_signed_log};
 use crate::single_cell::sc_analysis::dialogue::params::DialogueParams;
-use crate::single_cell::sc_analysis::dialogue::step1_pmd::{
-    CellTypeView, ProgrammeSignature, Step1Result,
+use crate::single_cell::sc_analysis::dialogue::pmd::{
+    CellTypeView, DialogueStep1Result, ProgrammeSignature,
 };
-use crate::single_cell::sc_analysis::dialogue::step2_hlm::{Step2Result, p_from_signed_log};
 
 use faer::Mat;
 
-///////////////////
+//////////////////
 // Result types //
-///////////////////
+//////////////////
 
 /// What the meta-analysis concluded about one gene in one programme.
 #[derive(Clone, Debug)]
@@ -101,9 +101,9 @@ pub struct DialogueResult {
     pub strict: Vec<Vec<ProgrammeSignature>>,
 }
 
-//////////////////////
+///////////////////
 // Meta-analysis //
-//////////////////////
+///////////////////
 
 /// One gene's row in the per-cell-type meta-analysis.
 #[derive(Clone, Debug)]
@@ -229,9 +229,9 @@ fn meta_analyse(
         .collect()
 }
 
-/////////////////////////
+///////////////////////////
 // The Gram accumulation //
-/////////////////////////
+///////////////////////////
 
 /// The reduced form of one programme's gene block.
 struct GeneGram {
@@ -313,18 +313,14 @@ fn build_gram<S: SingleCellReading>(
         offset[g] = -sign * mean / sd;
     }
 
-    // Raw sparse Gram: one rank-one update per cell over its non-zero genes.
-    //
-    // Only the upper triangle is written, which is correct *because* the loop
-    // above pushes into `by_cell` in ascending slot order, so `entries` is
-    // sorted and `skip(a)` never misses a pair. Reorder or parallelise that
-    // loop without re-sorting and half the Gram silently disappears.
+    // Debugs
     debug_assert!(
         by_cell
             .iter()
             .all(|e| e.windows(2).all(|w| w[0].0 < w[1].0)),
         "by_cell must be sorted by gene slot"
     );
+
     let raw = by_cell
         .par_iter()
         .fold(
@@ -556,8 +552,8 @@ fn project(gram: &GeneGram, coef: &[f64]) -> Vec<f64> {
 pub(crate) fn run_step3<S: SingleCellReading>(
     reader: &S,
     views: &[CellTypeView],
-    step1: &Step1Result,
-    step2: &Step2Result,
+    step1: &DialogueStep1Result,
+    step2: &DialogueStep2Result,
     params: &DialogueParams,
     verbose: usize,
 ) -> Result<DialogueResult, BixverseErrors> {

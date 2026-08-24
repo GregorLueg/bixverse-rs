@@ -41,13 +41,13 @@ use crate::single_cell::mc_generation::cell_aggregation_utils::{
     PseudoBulk, pseudo_bulk_genes_dense,
 };
 use crate::single_cell::sc_analysis::dialogue::params::DialogueParams;
-use crate::single_cell::sc_analysis::dialogue::step1_pmd::{CellTypeView, Step1Result};
+use crate::single_cell::sc_analysis::dialogue::pmd::{CellTypeView, DialogueStep1Result};
 
 use faer::Mat;
 
-///////////////////
-// Result types //
-///////////////////
+/////////////////////
+// GeneAssociation //
+/////////////////////
 
 /// One gene's association with one partner cell type, for one programme.
 #[derive(Clone, Copy, Debug)]
@@ -76,14 +76,14 @@ pub struct GeneAssociation {
 
 /// What stage two produced.
 #[derive(Clone, Debug, Default)]
-pub struct Step2Result {
+pub struct DialogueStep2Result {
     /// Every fit that converged, one row per gene, partner and programme.
     pub associations: Vec<GeneAssociation>,
 }
 
-////////////////////////
+///////////////////////////
 // Sufficient statistics //
-////////////////////////
+///////////////////////////
 
 /// Per-sample reductions of everything that does not change between genes.
 ///
@@ -297,10 +297,10 @@ fn signed_log_p(estimate: f64, p_value: f64, floor: f64) -> f64 {
 pub(crate) fn run_step2<S: SingleCellReading>(
     reader: &S,
     views: &[CellTypeView],
-    step1: &Step1Result,
+    step1: &DialogueStep1Result,
     params: &DialogueParams,
     verbose: usize,
-) -> Result<Step2Result, BixverseErrors> {
+) -> Result<DialogueStep2Result, BixverseErrors> {
     let verbosity = parse_verbosity_level(verbose);
     let n_types = views.len();
     let hlm = &params.hlm;
@@ -475,7 +475,7 @@ pub(crate) fn run_step2<S: SingleCellReading>(
         );
     }
 
-    Ok(Step2Result { associations })
+    Ok(DialogueStep2Result { associations })
 }
 
 /// Converts a signed `-log10 p` back to a one-sided p-value.

@@ -312,9 +312,9 @@ impl Default for RefineParams {
     }
 }
 
-///////////////////
+////////////////////
 // DialogueParams //
-///////////////////
+////////////////////
 
 /// Everything DIALOGUE takes, one block per stage.
 #[derive(Clone, Debug, Default)]

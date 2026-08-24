@@ -35,9 +35,9 @@ use crate::single_cell::sc_analysis::dialogue::params::{
 /// Genes read per batch during the correlation sweeps.
 const GENE_BATCH: usize = 2000;
 
-///////////////////
+//////////////////
 // Result types //
-///////////////////
+//////////////////
 
 /// Up and down gene lists for one programme in one cell type.
 #[derive(Clone, Debug, Default)]
@@ -64,7 +64,7 @@ impl ProgrammeSignature {
 
 /// What stage one produced.
 #[derive(Clone, Debug)]
-pub struct Step1Result {
+pub struct DialogueStep1Result {
     /// Feature columns surviving the ANOVA filter, per cell type.
     pub kept_features: Vec<Vec<usize>>,
     /// Sample codes present in every cell type, ascending.
@@ -87,9 +87,9 @@ pub struct Step1Result {
     pub signatures: Vec<Vec<ProgrammeSignature>>,
 }
 
-/////////////////////
-// Per-cell-type view //
-/////////////////////
+//////////////////
+// CellTypeView //
+//////////////////
 
 /// One cell type's inputs, resolved against the global index space.
 #[derive(Clone, Debug)]
@@ -335,9 +335,9 @@ fn standardise_and_cap(mat: MatRef<f64>, cap: f64) -> Mat<f64> {
     out
 }
 
-/////////////////////
+//////////////////////////
 // The permutation null //
-/////////////////////
+//////////////////////////
 
 /// Every unordered cell-type pair, in `(0,1), (0,2), ..., (1,2), ...` order.
 ///
@@ -567,9 +567,9 @@ fn assign_cell_types(
     out
 }
 
-////////////////////////////
+/////////////////////////////
 // Gene-level correlations //
-////////////////////////////
+/////////////////////////////
 
 /// Per-column sums needed to correlate a sparse gene against dense scores.
 struct ScoreMoments {
@@ -674,8 +674,8 @@ fn sparse_gene_correlations(
 /// Top correlated genes in each direction.
 ///
 /// Reproduces `get.top.cor`: up to `q` genes on each side, but only those past
-/// `min_ci`, and ties at the cutoff are all kept, so a list can come back longer
-/// than `q`.
+/// `min_ci`, and ties at the cutoff are all kept, so a list can come back
+/// longer than `q`.
 ///
 /// ### Params
 ///
@@ -848,9 +848,9 @@ fn build_signatures<S: SingleCellReading>(
         .collect())
 }
 
-///////////////////
-// The stage //
-///////////////////
+/////////////////////////
+// DIALOGUE: Stage one //
+/////////////////////////
 
 /// Runs DIALOGUE stage one.
 ///
@@ -865,15 +865,15 @@ fn build_signatures<S: SingleCellReading>(
 ///
 /// ### Returns
 ///
-/// The [Step1Result], or the first error encountered.
-pub(crate) fn run_step1<S: SingleCellReading>(
+/// The [DialogueStep1Result], or the first error encountered.
+pub(crate) fn dialogue_step1_run<S: SingleCellReading>(
     reader: &S,
     views: &[CellTypeView],
     features: &[MatRef<f64>],
     genes: &[usize],
     params: &DialogueParams,
     verbose: usize,
-) -> Result<Step1Result, BixverseErrors> {
+) -> Result<DialogueStep1Result, BixverseErrors> {
     let verbosity = parse_verbosity_level(verbose);
     let n_types = views.len();
     let pmd = &params.pmd;
@@ -917,9 +917,6 @@ pub(crate) fn run_step1<S: SingleCellReading>(
         println!("{} samples shared across all cell types.", shared.len());
     }
 
-    // Standardise and winsorise over every sample the cell type has, then take
-    // the shared ones. That order is upstream's and it matters: the quantiles
-    // and the standard deviations are computed on the wider set.
     let blocks: Vec<Mat<f64>> = views
         .iter()
         .zip(sample_matrices.iter())
@@ -939,10 +936,6 @@ pub(crate) fn run_step1<S: SingleCellReading>(
         })
         .collect();
 
-    // Upstream's L1 bound: sqrt of the first block's width, halved, for every
-    // block. A block narrower than a quarter of the first would make that
-    // infeasible, so it is clamped to the widest admissible value instead of
-    // failing.
     let refs: Vec<MatRef<f64>> = blocks.iter().map(|m| m.as_ref()).collect();
     let penalties = if pmd.extra_sparse {
         let tuned = multi_cca_permute(
@@ -981,9 +974,6 @@ pub(crate) fn run_step1<S: SingleCellReading>(
         empirical_pvalues(&blocks, &cca_params, pmd.n_permutations, &pairs, pmd.seed)?;
     let mcp_cell_types = assign_cell_types(emp_p.as_ref(), &pairs, n_types, pmd.mcp_assignment_p);
 
-    // Cell-level scores. The weights were learned on the standardised,
-    // winsorised sample matrix and are applied to the raw cell-level features,
-    // exactly as upstream does; only the direction is used downstream.
     let mut scores = Vec::with_capacity(n_types);
     let mut raw_scores = Vec::with_capacity(n_types);
     let mut signatures = Vec::with_capacity(n_types);
@@ -1019,7 +1009,7 @@ pub(crate) fn run_step1<S: SingleCellReading>(
         signatures.push(sig);
     }
 
-    Ok(Step1Result {
+    Ok(DialogueStep1Result {
         kept_features,
         shared_samples: shared,
         ws: fit.ws,
