@@ -4,27 +4,6 @@
 //! those verdicts, then rebuilds each programme's score from the genes that
 //! survived rather than from the canonical weights, by non-negative least
 //! squares staged over how broadly a gene is supported.
-//!
-//! ### Nothing dense of size cells by genes is built
-//!
-//! Upstream materialises the gene-z-scored expression as a cells by genes
-//! matrix and hands it to `nnls`. That is the largest allocation in the whole
-//! method and it is avoidable: the staged fit only ever needs `Z'Z`, `Z'y` and
-//! `y'y`. Passing the residual between strata is
-//! `Z'(y - Z_S b) = Z'y - (Z'Z_S) b`, and the early stop falls out too, because
-//! z-scoring leaves every column summing to zero and so
-//! `cor(y, fitted) = b'Z'y / sqrt(b'Z'Z b * var(y))`.
-//!
-//! The one thing that does not survive the reduction is upstream's
-//! `length(unique(fitted)) > 10` guard, which exists only to keep `cor` from
-//! being called on a constant vector. `b'Z'Z b > 0` says the same thing.
-//!
-//! `Z'Z` itself is built from the raw sparse values rather than the z-scored
-//! dense ones. Standardising is affine, `Z = X S + 1 o'`, so
-//! `Z'Z = S(X'X - n m m')S` up to the sign flips, and `X'X` can be accumulated
-//! as one rank-one update per cell over that cell's non-zero genes. On droplet
-//! data that is far cheaper than the dense product, and it never allocates the
-//! dense block at all.
 
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
@@ -56,7 +35,8 @@ pub struct GeneVerdict {
     pub gene: usize,
     /// Whether the gene entered from the up or the down side.
     pub up: bool,
-    /// Partners supporting the gene at [crate::single_cell::sc_analysis::dialogue::params::RefineParams::support_p].
+    /// Partners supporting the gene at
+    /// [crate::single_cell::sc_analysis::dialogue::params::RefineParams::support_p].
     pub n_supporting: usize,
     /// Fraction of partners supporting it.
     pub support_fraction: f64,
@@ -169,6 +149,7 @@ fn meta_analyse(
             }
             let up_in: Vec<f64> = keep.iter().map(|&j| raw_up[j]).collect();
             let down_in: Vec<f64> = keep.iter().map(|&j| raw_down[j]).collect();
+
             // Upstream's `p.adjust.mat.per.label` branches on the column
             // count: with one partner it calls bare `p.adjust`, whose default
             // method is Holm, and only with two or more does it reach the

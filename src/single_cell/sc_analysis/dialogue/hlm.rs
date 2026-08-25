@@ -1,8 +1,8 @@
 //! DIALOGUE stage two: hierarchical modelling.
 //!
 //! For every ordered pair of cell types and every programme they share, ask of
-//! each candidate gene: does a cell's own programme score track how much of that
-//! gene the *other* cell type expresses in the same sample? The model is
+//! each candidate gene: does a cell's own programme score track how much of
+//! that gene the *other* cell type expresses in the same sample? The model is
 //!
 //! ```text
 //! score ~ (1 | sample) + partner_pseudobulk_of_gene + cellQ + tme.qc
@@ -10,25 +10,6 @@
 //!
 //! fitted by REML with Satterthwaite degrees of freedom. The answer kept is a
 //! signed `-log10 p` on the gene's coefficient.
-//!
-//! ### Why this is not the bottleneck
-//!
-//! Upstream fits one `lmer` per gene per programme per ordered pair, each over
-//! every cell of a cell type. Four cell types, three programmes and four hundred
-//! candidate genes is roughly fourteen thousand REML fits at the full cell
-//! count, and it is where DIALOGUE spends its afternoon.
-//!
-//! It does not need to be. The design is `[1, x_g, cellQ, tme.qc]` and only
-//! `x_g` changes between genes. Both `x_g` and `tme.qc` are partner-side
-//! sample-level quantities broadcast to cells, so they are constant within a
-//! sample; the only cell-level columns are the response and `cellQ`, and those
-//! are fixed across every gene and every partner. Six numbers per sample --
-//! `n`, `sum q`, `sum q^2`, `sum y`, `sum y^2`, `sum q y` -- therefore
-//! reconstruct the full sufficient statistics for *any* gene, and
-//! [crate::core::math::mixed_model] takes it from there in the sample count
-//! rather than the cell count.
-//!
-//! One `O(n_cells)` pass per (cell type, programme) replaces one per fit.
 
 use rayon::prelude::*;
 use rustc_hash::FxHashSet;
