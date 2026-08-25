@@ -8,6 +8,7 @@ pub mod optimise;
 pub mod pca_svd;
 pub mod rbf;
 pub mod sparse;
+pub mod special;
 pub mod stats;
 pub mod vector_helpers;
 

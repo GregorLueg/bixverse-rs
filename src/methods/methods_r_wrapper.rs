@@ -7,6 +7,8 @@ use crate::core::mat_struct::NamedMatrix;
 use crate::methods::cis_target::MotifEnrichment;
 use crate::methods::dgrdl::DgrdlParams;
 use crate::methods::ica::IcaParams;
+use crate::methods::lda::metrics::LdaMetrics;
+use crate::methods::lda::{LdaParams, LdaResult, LdaSweepResult, parse_lda_learning};
 use crate::methods::nmf_hals::consensus::{ConsensusParams, parse_consensus_target};
 use crate::methods::nmf_hals::{HalsOpts, parse_nmf_init};
 use crate::prelude::*;
@@ -401,4 +403,184 @@ where
             seed,
         ))
     }
+}
+
+///////////////
+// LdaParams //
+///////////////
+
+impl<T> LdaParams<T>
+where
+    T: BixverseFloat,
+{
+    /// Generate [LdaParams] from R list
+    ///
+    /// Unrecognised strings for `learning` fall back to the default rather than
+    /// erroring, matching [HalsOpts::from_r_list]. `batch_size` and `n_epochs`
+    /// are only read when `learning` resolves to the online variant.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The List from which to extract the parameters. If
+    ///   parameters are not found, defaults to sensible defaults.
+    /// * `seed` - Seed for the variational initialisation.
+    ///
+    /// ### Returns
+    ///
+    /// The [LdaParams]
+    pub fn from_r_list(r_list: List, seed: usize) -> Result<LdaParams<T>> {
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+        let defaults: LdaParams<T> = LdaParams::default();
+
+        let read_f = |key: &str, fallback: T| -> T {
+            params
+                .get(key)
+                .and_then(robj_to_f64)
+                .and_then(T::from_f64)
+                .unwrap_or(fallback)
+        };
+        let read_usize = |key: &str, fallback: usize| -> usize {
+            params.get(key).and_then(robj_to_count).unwrap_or(fallback)
+        };
+        let read_bool = |key: &str, fallback: bool| -> bool {
+            params
+                .get(key)
+                .and_then(|v| v.as_bool())
+                .unwrap_or(fallback)
+        };
+
+        let batch_size = read_usize("batch_size", 1024);
+        let n_epochs = read_usize("n_epochs", 10);
+        let learning = params
+            .get("learning")
+            .and_then(|v| v.as_str())
+            .and_then(|v| parse_lda_learning(v, batch_size, n_epochs))
+            .unwrap_or(defaults.learning);
+
+        Ok(LdaParams::new(
+            read_f("alpha", defaults.alpha),
+            read_bool("alpha_by_topic", defaults.alpha_by_topic),
+            read_f("eta", defaults.eta),
+            read_bool("eta_by_topic", defaults.eta_by_topic),
+            read_usize("max_iter", defaults.max_iter),
+            read_f("tol", defaults.tol),
+            read_usize("inner_max_iter", defaults.inner_max_iter),
+            read_f("inner_tol", defaults.inner_tol),
+            read_usize("check_every", defaults.check_every),
+            learning,
+            seed as u64,
+        ))
+    }
+}
+
+/// Convert a fitted LDA model to R list format
+///
+/// ### Params
+///
+/// * `model` - The fitted model.
+///
+/// ### Returns
+///
+/// R list containing `cell_topic` (topics x cells), `topic_region` (regions x
+/// topics), `bound`, `perplexity`, `n_iter` and `converged`.
+pub fn lda_result_to_r_list<T>(model: &LdaResult<T>) -> extendr_api::Result<List>
+where
+    T: BixverseFloat + FaerRType,
+{
+    let mut res = List::new(6);
+    res.set_elt(0, faer_to_r_matrix(model.cell_topic.as_ref()).into())?;
+    res.set_elt(1, faer_to_r_matrix(model.topic_region.as_ref()).into())?;
+    res.set_elt(2, model.bound.to_f64().into_robj())?;
+    res.set_elt(3, model.perplexity.to_f64().into_robj())?;
+    res.set_elt(4, (model.n_iter as i32).into_robj())?;
+    res.set_elt(5, model.converged.into_robj())?;
+    res.set_names([
+        "cell_topic",
+        "topic_region",
+        "bound",
+        "perplexity",
+        "n_iter",
+        "converged",
+    ])?;
+    Ok(res)
+}
+
+/// Convert LDA model selection metrics to R list format
+///
+/// ### Params
+///
+/// * `metrics` - Metrics for one fitted model.
+///
+/// ### Returns
+///
+/// R list containing `arun_2010`, `cao_juan_2009`, `mimno_2011`,
+/// `coherence_per_topic`, `bound` and `perplexity`.
+pub fn lda_metrics_to_r_list<T>(metrics: &LdaMetrics<T>) -> extendr_api::Result<List>
+where
+    T: BixverseFloat,
+{
+    let coherence: Vec<f64> = metrics
+        .coherence_per_topic
+        .iter()
+        .map(|v| v.to_f64().unwrap_or(f64::NAN))
+        .collect();
+
+    let mut res = List::new(6);
+    res.set_elt(0, metrics.arun_2010.to_f64().into_robj())?;
+    res.set_elt(1, metrics.cao_juan_2009.to_f64().into_robj())?;
+    res.set_elt(2, metrics.mimno_2011.to_f64().into_robj())?;
+    res.set_elt(3, coherence.into_robj())?;
+    res.set_elt(4, metrics.bound.to_f64().into_robj())?;
+    res.set_elt(5, metrics.perplexity.to_f64().into_robj())?;
+    res.set_names([
+        "arun_2010",
+        "cao_juan_2009",
+        "mimno_2011",
+        "coherence_per_topic",
+        "bound",
+        "perplexity",
+    ])?;
+    Ok(res)
+}
+
+/// Convert an LDA topic-count sweep to R list format
+///
+/// ### Params
+///
+/// * `sweep` - The sweep result.
+///
+/// ### Returns
+///
+/// R list containing `k` (the topic counts tried), `models`, `metrics`,
+/// `combined_score` and `best_k`. Entries excluded from selection by the
+/// topic-count floor carry `NA` in `combined_score`.
+pub fn lda_sweep_to_r_list<T>(sweep: &LdaSweepResult<T>) -> extendr_api::Result<List>
+where
+    T: BixverseFloat + FaerRType,
+{
+    let ks: Vec<i32> = sweep.entries.iter().map(|e| e.k as i32).collect();
+    let models: Vec<Robj> = sweep
+        .entries
+        .iter()
+        .map(|e| lda_result_to_r_list(&e.model).map(|l| l.into_robj()))
+        .collect::<extendr_api::Result<_>>()?;
+    let metrics: Vec<Robj> = sweep
+        .entries
+        .iter()
+        .map(|e| lda_metrics_to_r_list(&e.metrics).map(|l| l.into_robj()))
+        .collect::<extendr_api::Result<_>>()?;
+    let scores: Vec<f64> = sweep
+        .combined_score
+        .iter()
+        .map(|v| v.to_f64().unwrap_or(f64::NAN))
+        .collect();
+
+    let mut res = List::new(5);
+    res.set_elt(0, ks.into_robj())?;
+    res.set_elt(1, List::from_values(models).into_robj())?;
+    res.set_elt(2, List::from_values(metrics).into_robj())?;
+    res.set_elt(3, scores.into_robj())?;
+    res.set_elt(4, (sweep.best_k as i32).into_robj())?;
+    res.set_names(["k", "models", "metrics", "combined_score", "best_k"])?;
+    Ok(res)
 }
