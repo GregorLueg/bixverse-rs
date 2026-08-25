@@ -2,18 +2,10 @@
 //! binary matrices.
 //!
 //! The topic model behind cisTopic: given a binarised cells x regions scATAC
-//! matrix, recover a cell-topic distribution for clustering and a topic-region
-//! distribution for region set discovery. Nothing here is ATAC-specific, so any
-//! documents x terms count matrix works.
-//!
-//! ### Why variational Bayes and not collapsed Gibbs
-//!
-//! cisTopic and pycisTopic both run collapsed Gibbs sampling, which is
-//! inherently sequential over tokens and parallelises only across models. This
-//! implementation follows Hoffman, Blei and Bach instead: the E-step factorises
-//! over documents and the M-step over terms, so both fan out with `rayon`, and
-//! the result is deterministic given a seed. It converges to the same structure
-//! but is not bit-comparable with a Gibbs run.
+//! matrix or TF binary activity, recover a cell-topic distribution for
+//! clustering and a topic-region/TF distribution for region/TF set discovery.
+//! Nothing here is ATAC-specific or TF-specific, so any documents x terms count
+//! matrix works.
 //!
 //! ### Layout
 //!
@@ -358,8 +350,7 @@ impl<F: BixverseFloat + BixverseNumeric> LdaCorpus<F> {
     /// Accepts either orientation of compressed storage and re-expresses it,
     /// but the logical shape must already be documents x terms. A caller
     /// holding terms x documents wants
-    /// [CompressedSparseData2::transpose_and_convert] first, which is a clone
-    /// and a relabel when the input is CSC.
+    /// [CompressedSparseData2::transpose_and_convert] first.
     ///
     /// ### Params
     ///
@@ -379,8 +370,6 @@ impl<F: BixverseFloat + BixverseNumeric> LdaCorpus<F> {
             return Err(BixverseErrors::LdaEmptyMatrix);
         }
 
-        // Cast once, then derive the missing orientation, so the counting sort
-        // runs on the narrower of the two buffers only.
         let cast = cast_counts::<T, U, F>(matrix)?;
         let (csr, csc) = match cast.cs_type {
             CompressedSparseFormat::Csr => {

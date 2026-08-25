@@ -4,16 +4,6 @@
 //! reduction. The E-step gives each document its own column of `gamma`; the
 //! M-step gives each term its own column of the sufficient statistics.
 //!
-//! ### Not caching `phinorm`
-//!
-//! The M-step recomputes the per-token normaliser the E-step already had.
-//! Caching it would cost a buffer the size of the corpus, which on a real
-//! scATAC matrix is gigabytes, to save one `k`-length dot product per non-zero
-//! when the E-step has already done `inner_max_iter` of them. Recomputing is
-//! the cheaper side of that trade, and it is what lets the M-step parallelise
-//! over terms instead of documents, which is what removes the per-thread
-//! `k x n_terms` accumulator the naive arrangement would need.
-//!
 //! ### References
 //!
 //! Hoffman, Blei and Bach, Online Learning for Latent Dirichlet Allocation,
@@ -35,9 +25,9 @@ use super::{
     LdaParams, LdaResult,
 };
 
-///////////////
-// Utilities //
-///////////////
+///////////
+// Utils //
+///////////
 
 /// Column-major dense buffer with a contiguous column accessor.
 ///
@@ -174,18 +164,6 @@ fn exp_expected_log<F: BixverseFloat + BixverseSimd>(param: &[F], out: &mut [F])
 /// * `alpha` - Document-topic prior.
 /// * `inner_max_iter` - Iteration budget.
 /// * `inner_tol` - Relative L1 change in `gamma_d` to stop at, see below.
-///
-/// ### Why the stopping rule is relative
-///
-/// Hoffman's reference and scikit-learn both compare the *mean absolute* change
-/// against a fixed tolerance. `sum_k gamma_dk` equals `alpha * k` plus the
-/// document's count mass, so on a scATAC document holding a couple of thousand
-/// accessible regions the entries sit around fifty and the default `1e-3` is
-/// asking for five significant figures. Measured on a 4000 x 20000 corpus,
-/// **every single document hit the iteration cap** and none ever converged, so
-/// the budget rather than the tolerance was setting the cost. Dividing by
-/// `sum_k gamma_dk` instead makes the test scale-free: the same corpus then
-/// converges in a mean of 57 iterations with no document capped.
 #[allow(clippy::too_many_arguments)]
 fn e_step_document<F: BixverseFloat + BixverseSimd + Send + Sync>(
     ids: &[u32],
@@ -792,8 +770,7 @@ where
 /// what makes the bound checkable against another implementation: fitting twice
 /// only ever shows that both solvers found *some* optimum, whereas running a
 /// foreign `lambda` and `gamma` through this function isolates the objective
-/// from the solver. Also the way to compare a model fitted elsewhere (cisTopic
-/// in R, scikit-learn) against one fitted here on the same corpus.
+/// from the solver.
 ///
 /// Note both arguments are the *unnormalised* Dirichlet parameters, not the
 /// probability matrices [LdaResult] returns.

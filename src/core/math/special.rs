@@ -17,8 +17,7 @@ use crate::utils::traits::BixverseFloat;
 /// The series error falls off as `x^-(2n)`, so it is the shift that sets the
 /// accuracy. The first dropped term of the six-term expansion below is
 /// `B_14 / (14 x^14)`, which at `x = 6` is 1e-12 and only reaches `f64`
-/// resolution around ten. Each unit of shift costs one reciprocal, so this
-/// buys the last three digits for four flops on small arguments.
+/// resolution around ten.
 const DIGAMMA_ASYMPTOTIC_MIN: f64 = 10.0;
 
 /// Coefficients `B_{2n} / 2n` of the asymptotic expansion of `psi(x)`.

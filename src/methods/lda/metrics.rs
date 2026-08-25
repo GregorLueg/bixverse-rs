@@ -1,14 +1,6 @@
 //! Model selection metrics for LDA, and the combination that picks a topic
 //! count.
 //!
-//! The same four pycisTopic reports, with one substitution. Its fourth metric
-//! is a Griffiths and Steyvers joint log-likelihood whose implementation
-//! assigns rather than accumulates in both inner loops, so it returns a value
-//! derived from the last topic and last document only, and it is additionally
-//! called with the unscaled `alpha` rather than the `alpha / k` the model was
-//! fitted with. We report the variational bound instead, which is the quantity
-//! this solver actually maximises.
-//!
 //! ### References
 //!
 //! Arun et al., On Finding the Natural Number of Topics with Latent Dirichlet
@@ -69,6 +61,70 @@ pub struct LdaMetrics<F: BixverseFloat> {
     pub bound: F,
     /// The model's per-token perplexity. Lower is better.
     pub perplexity: F,
+}
+
+/////////////
+// Helpers //
+/////////////
+
+/// Scale a vector to sum to one.
+///
+/// ### Params
+///
+/// * `v` - Vector, normalised in place. A zero-sum vector is left alone.
+fn normalise_to_sum(v: &mut [f64]) {
+    let total: f64 = v.iter().sum();
+    if total > 0.0 {
+        v.iter_mut().for_each(|x| *x /= total);
+    }
+}
+
+/// Size of the intersection of two ascending index runs.
+///
+/// ### Params
+///
+/// * `a` - First run, ascending.
+/// * `b` - Second run, ascending.
+///
+/// ### Returns
+///
+/// How many indices appear in both.
+fn sorted_intersection_len(a: &[u32], b: &[u32]) -> usize {
+    let (mut i, mut j, mut count) = (0, 0, 0);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                count += 1;
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    count
+}
+
+/// Min-max rescale a vector into `[0, 1]`.
+///
+/// A constant vector maps to all zeros, which drops it out of the sum rather
+/// than letting an arbitrary ordering decide the winner.
+///
+/// ### Params
+///
+/// * `values` - Values to rescale.
+///
+/// ### Returns
+///
+/// The rescaled values.
+fn rescale(values: &[f64]) -> Vec<f64> {
+    let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
+    let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let range = max - min;
+    if !range.is_finite() || range <= 0.0 {
+        return vec![0.0; values.len()];
+    }
+    values.iter().map(|v| (v - min) / range).collect()
 }
 
 /////////////
@@ -210,18 +266,6 @@ where
     Ok(F::from_f64(divergence).unwrap_or(F::infinity()))
 }
 
-/// Scale a vector to sum to one.
-///
-/// ### Params
-///
-/// * `v` - Vector, normalised in place. A zero-sum vector is left alone.
-fn normalise_to_sum(v: &mut [f64]) {
-    let total: f64 = v.iter().sum();
-    if total > 0.0 {
-        v.iter_mut().for_each(|x| *x /= total);
-    }
-}
-
 /// Mimno 2011 UMass coherence, per topic.
 ///
 /// For each topic, takes the `top_n` highest-probability terms and sums
@@ -299,32 +343,6 @@ where
         .collect())
 }
 
-/// Size of the intersection of two ascending index runs.
-///
-/// ### Params
-///
-/// * `a` - First run, ascending.
-/// * `b` - Second run, ascending.
-///
-/// ### Returns
-///
-/// How many indices appear in both.
-fn sorted_intersection_len(a: &[u32], b: &[u32]) -> usize {
-    let (mut i, mut j, mut count) = (0, 0, 0);
-    while i < a.len() && j < b.len() {
-        match a[i].cmp(&b[j]) {
-            std::cmp::Ordering::Less => i += 1,
-            std::cmp::Ordering::Greater => j += 1,
-            std::cmp::Ordering::Equal => {
-                count += 1;
-                i += 1;
-                j += 1;
-            }
-        }
-    }
-    count
-}
-
 /// Score a fitted model on every metric.
 ///
 /// ### Params
@@ -368,28 +386,6 @@ where
 ///////////////
 // Selection //
 ///////////////
-
-/// Min-max rescale a vector into `[0, 1]`.
-///
-/// A constant vector maps to all zeros, which drops it out of the sum rather
-/// than letting an arbitrary ordering decide the winner.
-///
-/// ### Params
-///
-/// * `values` - Values to rescale.
-///
-/// ### Returns
-///
-/// The rescaled values.
-fn rescale(values: &[f64]) -> Vec<f64> {
-    let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
-    let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let range = max - min;
-    if !range.is_finite() || range <= 0.0 {
-        return vec![0.0; values.len()];
-    }
-    values.iter().map(|v| (v - min) / range).collect()
-}
 
 /// Combine the metrics across a topic-count sweep and pick a winner.
 ///
