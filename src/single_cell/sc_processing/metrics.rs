@@ -16,10 +16,10 @@ use std::time::Instant;
 use thousands::*;
 
 use crate::assert_same_len;
-use crate::core::math::vector_helpers::rank_vector;
+use crate::core::math::sparse::{
+    SparseColMoments, sparse_col_moments, sparse_pairwise_correlations,
+};
 use crate::prelude::*;
-use crate::single_cell::sc_processing::pca::scale_csc_chunk;
-use crate::utils::simd::*;
 
 //////////
 // kBET //
@@ -452,58 +452,43 @@ pub fn pairwise_gene_correlations<S: SingleCellReading>(
         );
     }
 
-    let start_densify = Instant::now();
+    let start_moments = Instant::now();
 
-    // densify, optionally rank, then standardise
-    let standardised: Vec<Vec<f32>> = gene_chunks
+    assert_same_len!(gene_chunks, unique_vec);
+
+    // moments per gene, straight off the stored entries. No densification.
+    let moments: Vec<SparseColMoments> = gene_chunks
         .par_iter()
         .map(|chunk| {
-            if spearman {
-                // Densify -> rank -> standardise
-                let mut dense = vec![0_f32; n_cells];
-                for (idx, &row_idx) in chunk.indices.iter().enumerate() {
-                    dense[row_idx as usize] = chunk.data_norm[idx].to_f32();
-                }
-                let dense = rank_vector(&dense);
-                let mean = sum_simd_f32(&dense) / n_cells as f32;
-                let var = sum_squared_dev_simd_f32(&dense, mean) / (n_cells as f32 - 1.0);
-                let std = var.sqrt();
-                if std < 1e-8 {
-                    vec![0_f32; n_cells]
-                } else {
-                    dense.iter().map(|&x| (x - mean) / std).collect()
-                }
-            } else {
-                let (scaled, _, _) = scale_csc_chunk(chunk, n_cells, true, true, None);
-                scaled
-            }
+            let values: Vec<f32> = chunk.data_norm.iter().map(|v| v.to_f32()).collect();
+            sparse_col_moments(&chunk.indices, &values, n_cells, spearman)
         })
         .collect();
 
-    let end_densify = start_densify.elapsed();
+    let end_moments = start_moments.elapsed();
 
     if verbosity.detailed_verbosity() {
         println!(
-            " Pairwise gene correlations: Densified, normalised and optionally ranked the data in {:.2?}",
-            end_densify
+            " Pairwise gene correlations: Reduced the genes to their moments in {:.2?}",
+            end_moments
         );
     }
 
     let start_cor = Instant::now();
 
-    // pairwise correlations via dot product
-    let denom = n_cells as f32 - 1.0;
-
-    let res = gene_indices_1
-        .par_iter()
-        .zip(gene_indices_2.par_iter())
-        .map(|(&g1, &g2)| {
-            let a = &standardised[unique_genes.get_index_of(&g1).unwrap()];
-            let b = &standardised[unique_genes.get_index_of(&g2).unwrap()];
-            let cor = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum::<f32>() / denom;
-            cor.clamp(-1_f32, 1_f32) // avoid floating ops instabilities
+    // Safe by construction: every pair index went into `unique_genes` above.
+    let pairs: Vec<(usize, usize)> = gene_indices_1
+        .iter()
+        .zip(gene_indices_2.iter())
+        .map(|(g1, g2)| {
+            (
+                unique_genes.get_index_of(g1).unwrap(),
+                unique_genes.get_index_of(g2).unwrap(),
+            )
         })
         .collect();
+
+    let res = sparse_pairwise_correlations(&moments, &pairs, n_cells);
 
     let end_cor = start_cor.elapsed();
 
@@ -521,4 +506,189 @@ pub fn pairwise_gene_correlations<S: SingleCellReading>(
     }
 
     Ok(res)
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod pairwise_cor_tests {
+    use super::*;
+    use crate::core::math::vector_helpers::{pearson_correlation, rank_vector};
+    use crate::single_cell::sc_data::in_memory_io::InMemorySparseReader;
+    use crate::single_cell::sc_traits::F16;
+    use approx::assert_relative_eq;
+    use rand::prelude::*;
+
+    /// Build a CSC `cells x genes` matrix from dense gene columns.
+    ///
+    /// `data` holds the same values as `data_2` cast to `u32`; nothing in this
+    /// path reads the raw layer, but [`InMemorySparseReader`] needs it present
+    /// to compute library sizes.
+    fn csc_from_columns(columns: &[Vec<f32>]) -> CompressedSparseData2<u32, f32> {
+        let n_cells = columns[0].len();
+        let mut data_2: Vec<f32> = Vec::new();
+        let mut indices: Vec<u32> = Vec::new();
+        let mut indptr: Vec<u32> = vec![0];
+        for col in columns {
+            assert_eq!(col.len(), n_cells);
+            for (i, &v) in col.iter().enumerate() {
+                if v != 0.0 {
+                    data_2.push(v);
+                    indices.push(i as u32);
+                }
+            }
+            indptr.push(data_2.len() as u32);
+        }
+        let data: Vec<u32> = data_2.iter().map(|&v| (v * 100.0) as u32).collect();
+        CompressedSparseData2::new_csc(
+            &data,
+            &indices,
+            &indptr,
+            Some(&data_2),
+            (n_cells, columns.len()),
+        )
+    }
+
+    /// Sparse log1p-like columns, matching the metacell fixture.
+    fn synthetic_columns(n_genes: usize, n_cells: usize, density: f64, seed: u64) -> Vec<Vec<f32>> {
+        let mut rng = StdRng::seed_from_u64(seed);
+        (0..n_genes)
+            .map(|_| {
+                (0..n_cells)
+                    .map(|_| {
+                        if rng.random::<f64>() < density {
+                            (rng.random::<f32>() * 4.0) + 0.05
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The reader narrows the normalised layer to f16 on the way out, so the
+    /// reference has to be built from the same quantised values or the
+    /// comparison measures storage precision rather than the calculation.
+    fn quantise(columns: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        columns
+            .iter()
+            .map(|col| {
+                col.iter()
+                    .map(|&v| {
+                        if v == 0.0 {
+                            0.0
+                        } else {
+                            F16::from_f32(v).to_f32()
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn reference_cor(a: &[f32], b: &[f32], spearman: bool) -> f64 {
+        if spearman {
+            pearson_correlation(&rank_vector(a), &rank_vector(b)).unwrap()
+        } else {
+            pearson_correlation(a, b).unwrap()
+        }
+    }
+
+    /// Every pair must agree with the dense f64 reference, for both methods.
+    #[test]
+    fn test_pairwise_gene_cor_sc_matches_dense_reference() {
+        let n_genes = 6;
+        let n_cells = 300;
+        let columns = synthetic_columns(n_genes, n_cells, 0.15, 42);
+        let matrix = csc_from_columns(&columns);
+        let reader = InMemorySparseReader::new(&matrix, None).unwrap();
+        let quantised = quantise(&columns);
+        let cells: Vec<usize> = (0..n_cells).collect();
+
+        let mut g1: Vec<usize> = Vec::new();
+        let mut g2: Vec<usize> = Vec::new();
+        for a in 0..n_genes {
+            for b in (a + 1)..n_genes {
+                g1.push(a);
+                g2.push(b);
+            }
+        }
+
+        for spearman in [false, true] {
+            let got = pairwise_gene_correlations(&reader, &g1, &g2, &cells, spearman, 0).unwrap();
+            for (k, (&a, &b)) in g1.iter().zip(g2.iter()).enumerate() {
+                let want = reference_cor(&quantised[a], &quantised[b], spearman);
+                assert_relative_eq!(got[k] as f64, want, epsilon = 1e-5);
+            }
+        }
+    }
+
+    /// A gene against itself is 1.0.
+    #[test]
+    fn test_pairwise_gene_cor_sc_self_is_one() {
+        let n_cells = 200;
+        let columns = synthetic_columns(3, n_cells, 0.2, 7);
+        let matrix = csc_from_columns(&columns);
+        let reader = InMemorySparseReader::new(&matrix, None).unwrap();
+        let cells: Vec<usize> = (0..n_cells).collect();
+        let g = [0_usize, 1, 2];
+
+        for spearman in [false, true] {
+            let got = pairwise_gene_correlations(&reader, &g, &g, &cells, spearman, 0).unwrap();
+            for &c in &got {
+                assert_relative_eq!(c, 1.0_f32, epsilon = 1e-5);
+            }
+        }
+    }
+
+    /// A gene with no variance yields 0.0, not NaN and not R's NA.
+    #[test]
+    fn test_pairwise_gene_cor_sc_constant_gene_is_zero() {
+        let n_cells = 100;
+        let mut columns = synthetic_columns(2, n_cells, 0.3, 11);
+        columns.push(vec![0.0_f32; n_cells]);
+        let matrix = csc_from_columns(&columns);
+        let reader = InMemorySparseReader::new(&matrix, None).unwrap();
+        let cells: Vec<usize> = (0..n_cells).collect();
+
+        for spearman in [false, true] {
+            let got =
+                pairwise_gene_correlations(&reader, &[0, 1], &[2, 2], &cells, spearman, 0).unwrap();
+            assert_eq!(got, vec![0.0_f32, 0.0_f32]);
+        }
+    }
+
+    /// A cell subset correlates the subset, not the full column.
+    ///
+    /// `cells_to_keep` is also deliberately unsorted here: the reader emits
+    /// indices in the order the selection was given, so anything downstream
+    /// that assumes ascending cell indices breaks on exactly this input.
+    #[test]
+    fn test_pairwise_gene_cor_sc_respects_unsorted_cell_subset() {
+        let n_cells = 240;
+        let columns = synthetic_columns(4, n_cells, 0.25, 99);
+        let matrix = csc_from_columns(&columns);
+        let reader = InMemorySparseReader::new(&matrix, None).unwrap();
+        let quantised = quantise(&columns);
+
+        let mut cells: Vec<usize> = (0..n_cells).step_by(2).collect();
+        let mut rng = StdRng::seed_from_u64(5);
+        cells.shuffle(&mut rng);
+
+        let g1 = [0_usize, 1, 0];
+        let g2 = [1_usize, 2, 3];
+
+        for spearman in [false, true] {
+            let got = pairwise_gene_correlations(&reader, &g1, &g2, &cells, spearman, 0).unwrap();
+            for (k, (&a, &b)) in g1.iter().zip(g2.iter()).enumerate() {
+                let sub_a: Vec<f32> = cells.iter().map(|&i| quantised[a][i]).collect();
+                let sub_b: Vec<f32> = cells.iter().map(|&i| quantised[b][i]).collect();
+                let want = reference_cor(&sub_a, &sub_b, spearman);
+                assert_relative_eq!(got[k] as f64, want, epsilon = 1e-5);
+            }
+        }
+    }
 }
