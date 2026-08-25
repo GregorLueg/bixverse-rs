@@ -7,12 +7,14 @@ use num_traits::ToPrimitive;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
+use rustc_hash::FxHashMap;
 use std::ops::{Add, AddAssign, Mul};
 
 use crate::core::math::pca_svd::SvdResults;
 use crate::core::math::vector_helpers::sum_sq_f64;
 use crate::prelude::*;
 use crate::utils::faer_parallelism;
+use crate::utils::simd::{sum_squared_dev_widen_simd_f32, sum_widen_simd_f32};
 
 /////////////
 // Helpers //
@@ -255,7 +257,11 @@ where
     /// * `indices` - The index positions (in this case row indices)
     /// * `indptr` - The index pointer (in this case the column index pointers)
     /// * `data2` - An optional second layer
-    #[allow(dead_code)]
+    /// * `shape` - `(nrow, ncol)`.
+    ///
+    /// ### Returns
+    ///
+    /// Self as a CSC-type matrix
     pub fn new_csc(
         data: &[T],
         indices: &[u32],
@@ -266,7 +272,7 @@ where
         Self {
             data: data.to_vec(),
             indices: indices.to_vec(),
-            indptr: indptr.to_vec(), // Fixed: was using indices instead of indptr
+            indptr: indptr.to_vec(),
             cs_type: CompressedSparseFormat::Csc,
             data_2: data2.map(|d| d.to_vec()),
             shape,
@@ -281,6 +287,11 @@ where
     /// * `indices` - The index positions (in this case row indices)
     /// * `indptr` - The index pointer (in this case the column index pointers)
     /// * `data2` - An optional second layer
+    /// * `shape` - `(nrow, ncol)`.
+    ///
+    /// ### Returns
+    ///
+    /// Self as a CSR-type matrix
     pub fn new_csr(
         data: &[T],
         indices: &[u32],
@@ -291,7 +302,7 @@ where
         Self {
             data: data.to_vec(),
             indices: indices.to_vec(),
-            indptr: indptr.to_vec(), // Fixed: was using indices instead of indptr
+            indptr: indptr.to_vec(),
             cs_type: CompressedSparseFormat::Csr,
             data_2: data2.map(|d| d.to_vec()),
             shape,
@@ -302,9 +313,7 @@ where
     ///
     /// [CompressedSparseData2::new_csr] and its CSC sibling copy all three
     /// buffers, which doubles peak memory for any caller that assembled them
-    /// itself and then throws the originals away. At a million cells by thirty
-    /// neighbours that is 150 MB built and immediately cloned, so the `u8` edge
-    /// layer sold as a byte per edge is two bytes per edge in transit.
+    /// itself and then throws the originals away.
     ///
     /// ### Params
     ///
@@ -457,7 +466,8 @@ where
     /// * `upper_triangle` - The upper triangular matrix.
     /// * `n` - The number of rows and columns in the matrix.
     /// * `include_diagonal` - Whether to include the diagonal elements.
-    /// * `format` - The format of the sparse matrix.
+    /// * `format` - The format of the sparse matrix, see
+    ///   [CompressedSparseFormat].
     ///
     /// ### Returns
     ///
@@ -544,7 +554,7 @@ where
     ///
     /// ### Returns
     ///
-    /// A tuple of `(nrow, ncol)`
+    /// A tuple of `(n_row, n_col)`
     pub fn shape(&self) -> (usize, usize) {
         self.shape
     }
@@ -2444,6 +2454,219 @@ where
     Ok(col_sds)
 }
 
+/////////////////////////
+// Sparse correlations //
+/////////////////////////
+
+/// Below this a column counts as constant and its correlations are reported as
+/// `0.0` rather than as a division by a vanishing standard deviation.
+const SPARSE_COR_SD_EPS: f64 = 1e-8;
+
+/// One sparse column reduced to what [`sparse_pairwise_correlations`] needs.
+///
+/// The stored entries are kept as they arrive; nothing here densifies, so the
+/// memory is `O(nnz)` per column rather than `O(n_rows)`.
+#[derive(Clone, Debug)]
+pub struct SparseColMoments {
+    /// Row indices of the stored entries. Ascending order is not required.
+    pub indices: Vec<u32>,
+    /// Values at those indices. The raw values for Pearson, the zero-shifted
+    /// ranks for Spearman. Every non-stored position is exactly zero in both
+    /// cases, which is what makes the closed forms below valid.
+    pub values: Vec<f32>,
+    /// Mean over all `n_rows` entries, structural zeros included.
+    pub mean: f64,
+    /// Standard deviation over all `n_rows` entries, sample (n - 1)
+    /// denominator.
+    pub sd: f64,
+}
+
+/// Average ranks of one sparse column, shifted so the zero block sits at zero.
+///
+/// ### Params
+///
+/// * `values` - The stored values of the column.
+/// * `n_rows` - Full length of the column, structural zeros included.
+///
+/// ### Returns
+///
+/// The shifted average ranks, aligned to `values`.
+fn shifted_ranks_sparse(values: &[f32], n_rows: usize) -> Vec<f32> {
+    let n_stored = values.len();
+    let n_implicit = n_rows.saturating_sub(n_stored);
+
+    let n_neg = values.iter().filter(|&&v| v < 0.0).count();
+    let n_stored_zero = values.iter().filter(|&&v| v == 0.0).count();
+    let zero_block = n_stored_zero + n_implicit;
+
+    // The zero group occupies 1-based ranks (n_neg + 1) ..= (n_neg + zero_block).
+    let r_zero = n_neg as f64 + (zero_block as f64 + 1.0) / 2.0;
+
+    let mut order: Vec<u32> = (0..n_stored as u32).collect();
+    order.sort_unstable_by(|&a, &b| {
+        values[a as usize]
+            .partial_cmp(&values[b as usize])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut ranks = vec![0_f32; n_stored];
+    let mut i = 0;
+    while i < n_stored {
+        let value = values[order[i] as usize];
+        let start = i;
+        while i < n_stored && values[order[i] as usize] == value {
+            i += 1;
+        }
+
+        let avg_rank = if value == 0.0 {
+            r_zero
+        } else {
+            // A stored value at sorted position `p` sits at 1-based full rank
+            // `p + 1` when negative, and `p + 1 + n_implicit` when positive:
+            // the implicit zeros are spliced in ahead of it.
+            let offset = if value < 0.0 { 0 } else { n_implicit };
+            (start + i + 1 + 2 * offset) as f64 / 2.0
+        };
+
+        let shifted = (avg_rank - r_zero) as f32;
+        for &slot in &order[start..i] {
+            ranks[slot as usize] = shifted;
+        }
+    }
+
+    ranks
+}
+
+/// Reduce one sparse column to its moments without densifying it.
+///
+/// ### Params
+///
+/// * `indices` - Row indices of the stored entries, each below `n_rows` and
+///   without duplicates. Order does not matter.
+/// * `values` - Values at those indices, aligned to `indices`.
+/// * `n_rows` - Full length of the column, structural zeros included. Must be
+///   at least `values.len()`.
+/// * `spearman` - Rank the column first, for Spearman rather than Pearson.
+///
+/// ### Returns
+///
+/// The [`SparseColMoments`] for this column.
+pub fn sparse_col_moments(
+    indices: &[u32],
+    values: &[f32],
+    n_rows: usize,
+    spearman: bool,
+) -> SparseColMoments {
+    let stored: Vec<f32> = if spearman {
+        shifted_ranks_sparse(values, n_rows)
+    } else {
+        values.to_vec()
+    };
+
+    let n = n_rows as f64;
+    let mean = sum_widen_simd_f32(&stored) / n;
+    let ss_stored = sum_squared_dev_widen_simd_f32(&stored, mean);
+    let ss = ss_stored + n_rows.saturating_sub(stored.len()) as f64 * mean * mean;
+    let sd = if n_rows < 2 {
+        0.0
+    } else {
+        (ss / (n - 1.0)).sqrt()
+    };
+
+    SparseColMoments {
+        indices: indices.to_vec(),
+        values: stored,
+        mean,
+        sd,
+    }
+}
+
+/// Pearson correlation of specified column pairs, over the sparsity patterns.
+///
+/// Uses the raw-moment form of the covariance,
+///
+/// ```text
+/// sum (x_a - m_a)(x_b - m_b) = sum x_a x_b - n * m_a * m_b
+/// ```
+///
+/// because `sum x_a x_b` only picks up the intersection of the two sparsity
+/// patterns. On single-cell like counts that is a hundredth of the column
+/// rather than all of it.
+///
+/// ### Params
+///
+/// * `moments` - Per-column moments, see [`sparse_col_moments`].
+/// * `pairs` - Index pairs into `moments`, one per requested correlation.
+/// * `n_rows` - Full column length, structural zeros included.
+///
+/// ### Returns
+///
+/// One correlation per entry of `pairs`, in the same order, clamped to
+/// `[-1, 1]`. A column whose standard deviation is below
+/// [`SPARSE_COR_SD_EPS`] yields `0.0`.
+pub fn sparse_pairwise_correlations(
+    moments: &[SparseColMoments],
+    pairs: &[(usize, usize)],
+    n_rows: usize,
+) -> Vec<f32> {
+    let mut grouped: FxHashMap<usize, Vec<(usize, usize)>> = FxHashMap::default();
+    for (slot, &(a, b)) in pairs.iter().enumerate() {
+        grouped.entry(a).or_default().push((slot, b));
+    }
+    let groups: Vec<(usize, Vec<(usize, usize)>)> = grouped.into_iter().collect();
+
+    let n = n_rows as f64;
+    let denom = n - 1.0;
+
+    let solved: Vec<Vec<(usize, f32)>> = groups
+        .par_iter()
+        .map_init(
+            || vec![0_f32; n_rows],
+            |scratch, (first, partners)| {
+                let a = &moments[*first];
+                for (&idx, &value) in a.indices.iter().zip(a.values.iter()) {
+                    scratch[idx as usize] = value;
+                }
+
+                let out = partners
+                    .iter()
+                    .map(|&(slot, second)| {
+                        let b = &moments[second];
+                        if a.sd < SPARSE_COR_SD_EPS || b.sd < SPARSE_COR_SD_EPS {
+                            return (slot, 0_f32);
+                        }
+                        // scratch is zero wherever `a` has no entry, so the
+                        // product drops out and no branch is needed.
+                        let mut cross = 0_f64;
+                        for (&idx, &value) in b.indices.iter().zip(b.values.iter()) {
+                            cross += scratch[idx as usize] as f64 * value as f64;
+                        }
+                        let cov = cross - n * a.mean * b.mean;
+                        let cor = cov / (denom * a.sd * b.sd);
+                        (slot, (cor as f32).clamp(-1_f32, 1_f32))
+                    })
+                    .collect();
+
+                // Clear only what was written; refilling the whole buffer would
+                // cost `n_rows` per group instead of `nnz`.
+                for &idx in &a.indices {
+                    scratch[idx as usize] = 0_f32;
+                }
+
+                out
+            },
+        )
+        .collect();
+
+    let mut res = vec![0_f32; pairs.len()];
+    for group in solved {
+        for (slot, value) in group {
+            res[slot] = value;
+        }
+    }
+    res
+}
+
 ////////////////////////
 // Lanczos Eigenvalue //
 ////////////////////////
@@ -3280,6 +3503,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::math::vector_helpers::rank_vector;
     use faer::Mat;
 
     ////////////////
@@ -3769,10 +3993,6 @@ mod tests {
     /// Regression: a tightly clustered spectrum used to come back as noise.
     #[test]
     fn test_lanczos_resolves_a_clustered_spectrum_at_defaults() {
-        // The regression: this used to come back as noise, with the leading
-        // eigenvector uncorrelated with position. The default budget does not
-        // drive the residual to zero on a spectrum this tight, so what is
-        // asserted here is that the shape is right, not that it is converged.
         let n = 300usize;
         let mat = path_graph(n);
 
@@ -4097,5 +4317,80 @@ mod tests {
             csr_matmul_dense_block(&csc, &block, 2, &mut out),
             Err(BixverseErrors::SparseMatrixMustBeCsr)
         ));
+    }
+
+    /// The sparse ranking must reproduce the dense one, up to the shift.
+    #[test]
+    fn test_shifted_ranks_sparse_matches_dense_rank_vector() {
+        let cases: Vec<Vec<f32>> = vec![
+            vec![3.0, 0.0, 1.0, 0.0, 0.0],
+            vec![0.0, 0.0, 0.0, 0.0, 0.0],
+            vec![-2.0, 0.0, 5.0, 0.0, 0.0, 0.0],
+            vec![-1.0, -3.0, 0.0, 2.0, 4.0, 0.0, 0.0],
+            vec![2.0, 2.0, 0.0, 2.0, 0.0, 5.0],
+            vec![-4.0, -4.0, 0.0, 0.0, -4.0, 1.0],
+            vec![1.0, 2.0, 3.0, 4.0],
+            vec![-1.0, -2.0, -3.0],
+            vec![7.0],
+        ];
+
+        for dense in cases {
+            let n = dense.len();
+            let indices: Vec<u32> = (0..n as u32)
+                .filter(|&i| dense[i as usize] != 0.0)
+                .collect();
+            let values: Vec<f32> = indices.iter().map(|&i| dense[i as usize]).collect();
+
+            let got = shifted_ranks_sparse(&values, n);
+            let dense_ranks = rank_vector(&dense);
+            assert_eq!(got.len(), indices.len());
+
+            if indices.is_empty() {
+                continue;
+            }
+
+            // The ranks themselves must match the dense ones. Only up to a
+            // constant, because the correlation is shift invariant and a fully
+            // dense column has no zero block to pin the shift to.
+            for (slot, &i) in indices.iter().enumerate() {
+                assert_relative_eq!(
+                    got[slot] - got[0],
+                    dense_ranks[i as usize] - dense_ranks[indices[0] as usize],
+                    epsilon = 1e-6
+                );
+            }
+
+            // Once a structural zero exists the shift is pinned: it has to put
+            // that whole tie group at exactly zero.
+            if indices.len() < n {
+                let r_zero = dense_ranks[(0..n).find(|&i| dense[i] == 0.0).unwrap()];
+                for (slot, &i) in indices.iter().enumerate() {
+                    assert_relative_eq!(
+                        got[slot],
+                        dense_ranks[i as usize] - r_zero,
+                        epsilon = 1e-6
+                    );
+                }
+            }
+        }
+    }
+
+    /// An explicitly stored zero must land on exactly the same shifted rank as
+    /// a structural one, namely zero.
+    ///
+    /// This is the invariant the closed-form variance and the scatter/gather
+    /// both stand on: every position the caller did not store contributes a
+    /// known constant. A stored zero that ranked as its own tie group would
+    /// break that silently, and CSC data from R does carry explicit zeros.
+    #[test]
+    fn test_shifted_ranks_sparse_merges_explicit_zeros() {
+        // Six rows, four stored, one of them an explicit zero.
+        let values: Vec<f32> = vec![-2.0, 0.0, 3.0, 1.0];
+        let got = shifted_ranks_sparse(&values, 6);
+
+        assert_relative_eq!(got[1], 0.0, epsilon = 1e-6);
+        assert!(got[0] < 0.0, "the negative must rank below the zero block");
+        assert!(got[2] > got[3], "3.0 must rank above 1.0");
+        assert!(got[3] > 0.0, "positives must rank above the zero block");
     }
 }

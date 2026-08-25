@@ -4,6 +4,7 @@
 //! metacell approaches.
 
 pub mod dge_pathway_scores;
+pub mod dialogue;
 pub mod fast_clusters;
 pub mod fast_ranking;
 pub mod hotspot;

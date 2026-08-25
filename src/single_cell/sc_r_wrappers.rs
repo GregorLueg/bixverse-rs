@@ -13,6 +13,7 @@ use crate::single_cell::mc_generation::{
 };
 use crate::single_cell::sc_analysis::{
     dge_pathway_scores::{AucellParams, parse_auc_type},
+    dialogue::{DialogueParams, HlmParams, PmdParams, RefineParams, parse_averaging},
     fast_clusters::FastLouvainParams,
     hotspot::{HotSpotGraphParams, HotSpotParams},
     meld::{MeldParams, parse_lap_type, parse_meld_filter},
@@ -3484,5 +3485,234 @@ pub fn parse_branch_weighting(s: &str) -> Option<BranchWeighting> {
             Some(BranchWeighting::FateProbability)
         }
         _ => None,
+    }
+}
+
+//////////////
+// DIALOGUE //
+//////////////
+
+impl PmdParams {
+    /// Generate PmdParams from a flattened R list.
+    ///
+    /// Missing elements fall back to [PmdParams::default], which carries
+    /// upstream's `DLG.get.param` values. Shares the list with [HlmParams] and
+    /// [RefineParams], so the keys sit at the same level rather than in a
+    /// nested block.
+    ///
+    /// ### Params
+    ///
+    /// * `params` - Parsed R list contents, already flattened to a map.
+    ///
+    /// ### Returns
+    ///
+    /// The `PmdParams` with all parameters set.
+    pub fn from_r_map(params: &HashMap<&str, Robj>) -> Result<Self> {
+        let defaults = Self::default();
+
+        let k = r_list_count(params, "k")?.unwrap_or(defaults.k);
+
+        let n_permutations =
+            r_list_count(params, "n_permutations")?.unwrap_or(defaults.n_permutations);
+
+        let extra_sparse = params
+            .get("extra_sparse")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.extra_sparse);
+
+        // Zero is legal and lets every sample into the ANOVA, however few cells
+        // it contributed.
+        let abn_c = r_list_count_allow_zero(params, "abn_c")?.unwrap_or(defaults.abn_c);
+
+        let p_anova = params
+            .get("p_anova")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.p_anova);
+
+        let centre = params
+            .get("centre")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.centre);
+
+        let cap = params
+            .get("cap")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.cap);
+
+        let spatial = params
+            .get("spatial")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.spatial);
+
+        let n_genes = r_list_count(params, "n_genes")?.unwrap_or(defaults.n_genes);
+
+        let min_ci = params
+            .get("min_ci")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.min_ci);
+
+        // An unrecognised string errors rather than falling back: collapsing
+        // with something other than what was asked for hides the typo.
+        let averaging = match params.get("averaging").and_then(|v| v.as_str()) {
+            Some(s) => parse_averaging(s)
+                .ok_or_else(|| Error::Other(format!("Invalid DIALOGUE averaging: {}", s)))?,
+            None => defaults.averaging,
+        };
+
+        let mcp_assignment_p = params
+            .get("mcp_assignment_p")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.mcp_assignment_p);
+
+        // u64 — read as real to dodge R's i32 limit.
+        let seed = params
+            .get("seed")
+            .and_then(|v| v.as_real())
+            .map(|v| v as u64)
+            .unwrap_or(defaults.seed);
+
+        Ok(Self {
+            k,
+            n_permutations,
+            extra_sparse,
+            abn_c,
+            p_anova,
+            centre,
+            cap,
+            spatial,
+            n_genes,
+            min_ci,
+            averaging,
+            mcp_assignment_p,
+            seed,
+        })
+    }
+}
+
+impl HlmParams {
+    /// Generate HlmParams from a flattened R list.
+    ///
+    /// Missing elements fall back to [HlmParams::default]. Shares the list with
+    /// [PmdParams] and [RefineParams].
+    ///
+    /// ### Params
+    ///
+    /// * `params` - Parsed R list contents, already flattened to a map.
+    ///
+    /// ### Returns
+    ///
+    /// The `HlmParams` with all parameters set.
+    pub fn from_r_map(params: &HashMap<&str, Robj>) -> Result<Self> {
+        let defaults = Self::default();
+
+        // Zero is legal and drops the per-sample cell count requirement.
+        let min_cells_per_sample = r_list_count_allow_zero(params, "min_cells_per_sample")?
+            .unwrap_or(defaults.min_cells_per_sample);
+
+        let use_tme_qc = params
+            .get("use_tme_qc")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.use_tme_qc);
+
+        let use_cell_quality = params
+            .get("use_cell_quality")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.use_cell_quality);
+
+        let satterthwaite = params
+            .get("satterthwaite")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.satterthwaite);
+
+        Ok(Self {
+            min_cells_per_sample,
+            use_tme_qc,
+            use_cell_quality,
+            satterthwaite,
+        })
+    }
+}
+
+impl RefineParams {
+    /// Generate RefineParams from a flattened R list.
+    ///
+    /// Missing elements fall back to [RefineParams::default]. Shares the list
+    /// with [PmdParams] and [HlmParams].
+    ///
+    /// ### Params
+    ///
+    /// * `params` - Parsed R list contents, already flattened to a map.
+    ///
+    /// ### Returns
+    ///
+    /// The `RefineParams` with all parameters set.
+    pub fn from_r_map(params: &HashMap<&str, Robj>) -> Result<Self> {
+        let defaults = Self::default();
+
+        let support_p = params
+            .get("support_p")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.support_p);
+
+        let min_support_fraction = params
+            .get("min_support_fraction")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.min_support_fraction);
+
+        // Zero is legal and lets any non-empty stratum through.
+        let min_stratum =
+            r_list_count_allow_zero(params, "min_stratum")?.unwrap_or(defaults.min_stratum);
+
+        let early_stop_cor = params
+            .get("early_stop_cor")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.early_stop_cor);
+
+        let permissive_p = params
+            .get("permissive_p")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.permissive_p);
+
+        let strict_p = params
+            .get("strict_p")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.strict_p);
+
+        Ok(Self {
+            support_p,
+            min_support_fraction,
+            min_stratum,
+            early_stop_cor,
+            permissive_p,
+            strict_p,
+        })
+    }
+}
+
+impl DialogueParams {
+    /// Generate DialogueParams from a flat R list.
+    ///
+    /// The three stage blocks share one list, so the keys sit at the same level
+    /// rather than in nested blocks. The list is flattened once and handed to
+    /// [PmdParams::from_r_map], [HlmParams::from_r_map] and
+    /// [RefineParams::from_r_map]. Nothing is validated here:
+    /// [DialogueParams::validate] needs the cell type count, which the list does
+    /// not carry, and `dialogue_run` calls it.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the DIALOGUE parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The `DialogueParams` with all parameters set.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+
+        Ok(Self {
+            pmd: PmdParams::from_r_map(&params)?,
+            hlm: HlmParams::from_r_map(&params)?,
+            refine: RefineParams::from_r_map(&params)?,
+        })
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "bixverse-rs"
-version = "0.4.6"
+version = "0.4.7"
 edition = "2024"
 authors = ["Gregor Lueg <gregorlueg@me.com>"]
 license = "MIT"
@@ -100,6 +100,11 @@ features = ["single-cell", "multi-modal"]
 
 [[bench]]
 name = "hvg_bench"
+harness = false
+required-features = ["single-cell"]
+
+[[bench]]
+name = "pairwise_cor_bench"
 harness = false
 required-features = ["single-cell"]
 

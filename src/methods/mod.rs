@@ -9,6 +9,7 @@ pub mod diffcor;
 pub mod graph_diffusions;
 pub mod ica;
 pub mod methods_r_wrapper;
+pub mod multi_cca;
 pub mod nmf_bulk;
 pub mod nmf_hals;
 pub mod rbh;

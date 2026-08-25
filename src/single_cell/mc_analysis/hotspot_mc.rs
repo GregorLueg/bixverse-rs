@@ -14,9 +14,8 @@
 //! [`hotspot_gene_clusters`](crate::single_cell::sc_analysis::hotspot::hotspot_gene_clusters)
 //! takes a plain Z matrix and works unchanged.
 
-use std::borrow::Cow;
-
 use crate::prelude::*;
+use crate::single_cell::mc_analysis::as_csc;
 use crate::single_cell::sc_analysis::hotspot::{
     HotSpotGeneRes, HotSpotPairRes, HotSpotParams, Hotspot,
 };
@@ -24,23 +23,6 @@ use crate::single_cell::sc_data::in_memory_io::InMemorySparseReader;
 
 /////////////
 // Helpers //
-/////////////
-
-/// Coerce the input to the gene-major orientation the reader needs.
-///
-/// ### Params
-///
-/// * `matrix` - The counts, shape (cells, genes)
-///
-/// ### Returns
-///
-/// The matrix as CSC, borrowed when it already was.
-fn as_csc(matrix: &CompressedSparseData2<u32, f32>) -> Cow<'_, CompressedSparseData2<u32, f32>> {
-    match matrix.cs_type {
-        CompressedSparseFormat::Csc => Cow::Borrowed(matrix),
-        CompressedSparseFormat::Csr => Cow::Owned(matrix.transform()),
-    }
-}
 
 /////////////////////
 // Autocorrelation //
