@@ -12,6 +12,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
+use std::time::Instant;
 use thousands::*;
 
 use crate::assert_same_len;
@@ -408,6 +409,8 @@ pub fn batch_lisi(
 /// * `gene_indices_2` - Second set of gene indices (same length).
 /// * `cells_to_keep` - Indices of cells to include.
 /// * `spearman` - Use Spearman (rank-based) correlation.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -418,8 +421,14 @@ pub fn pairwise_gene_correlations<S: SingleCellReading>(
     gene_indices_2: &[usize],
     cells_to_keep: &[usize],
     spearman: bool,
+    verbose: usize,
 ) -> Result<Vec<f32>, BixverseErrors> {
     assert_same_len!(gene_indices_1, gene_indices_2);
+    let verbosity = parse_verbosity_level(verbose);
+    if verbosity.normal_verbosity() {
+        println!("Calculating pairwise correlations between the genes of interest.")
+    }
+    let start = Instant::now();
 
     let n_cells = cells_to_keep.len();
     let cell_set: IndexSet<u32> = cells_to_keep.iter().map(|&x| x as u32).collect();
@@ -432,11 +441,18 @@ pub fn pairwise_gene_correlations<S: SingleCellReading>(
     let unique_vec: Vec<usize> = unique_genes.iter().copied().collect();
 
     // Load and filter
-    let mut gene_chunks = reader.read_gene_parallel(&unique_vec)?;
+    let gene_chunks = reader.read_gene_parallel_filtered(&unique_vec, &cell_set)?;
 
-    gene_chunks.par_iter_mut().for_each(|chunk| {
-        chunk.filter_selected_cells(&cell_set);
-    });
+    let end_load = start.elapsed();
+
+    if verbosity.detailed_verbosity() {
+        println!(
+            " Pairwise gene correlations: Loaded in data in {:.2?}",
+            end_load
+        );
+    }
+
+    let start_densify = Instant::now();
 
     // densify, optionally rank, then standardise
     let standardised: Vec<Vec<f32>> = gene_chunks
@@ -464,6 +480,17 @@ pub fn pairwise_gene_correlations<S: SingleCellReading>(
         })
         .collect();
 
+    let end_densify = start_densify.elapsed();
+
+    if verbosity.detailed_verbosity() {
+        println!(
+            " Pairwise gene correlations: Densified, normalised and optionally ranked the data in {:.2?}",
+            end_densify
+        );
+    }
+
+    let start_cor = Instant::now();
+
     // pairwise correlations via dot product
     let denom = n_cells as f32 - 1.0;
 
@@ -477,6 +504,21 @@ pub fn pairwise_gene_correlations<S: SingleCellReading>(
             cor.clamp(-1_f32, 1_f32) // avoid floating ops instabilities
         })
         .collect();
+
+    let end_cor = start_cor.elapsed();
+
+    if verbosity.detailed_verbosity() {
+        println!(
+            " Pairwise gene correlations: Calculated correlation coefficients in {:.2?}",
+            end_cor
+        );
+    }
+
+    let total = start.elapsed();
+
+    if verbosity.normal_verbosity() {
+        println!("Calculated pairwise correlations in {:.2?}", total)
+    }
 
     Ok(res)
 }

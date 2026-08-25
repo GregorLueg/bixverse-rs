@@ -2,6 +2,7 @@
 
 use indexmap::IndexSet;
 use rayon::prelude::*;
+use std::time::Instant;
 
 use crate::core::math::vector_helpers::rank_vector;
 use crate::prelude::*;
@@ -20,6 +21,8 @@ use crate::utils::simd::*;
 /// * `gene_indices_1` - First set of gene (column) indices.
 /// * `gene_indices_2` - Second set of gene (column) indices (same length).
 /// * `spearman` - Use Spearman (rank-based) correlation.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
 ///
 /// ### Returns
 ///
@@ -29,6 +32,7 @@ pub fn pairwise_gene_correlations_in_memory<T: BixverseNumeric>(
     gene_indices_1: &[usize],
     gene_indices_2: &[usize],
     spearman: bool,
+    verbose: usize,
 ) -> Result<Vec<f32>, BixverseErrors> {
     assert_same_len!(gene_indices_1, gene_indices_2);
 
@@ -40,6 +44,12 @@ pub fn pairwise_gene_correlations_in_memory<T: BixverseNumeric>(
         .data_2
         .as_ref()
         .ok_or(BixverseErrors::Data2NotAvailable)?;
+
+    let start = Instant::now();
+    let verbosity = parse_verbosity_level(verbose);
+    if verbosity.normal_verbosity() {
+        println!("Calculating pairwise correlations between the genes of interest for meta cells.")
+    }
 
     let n_cells = matrix.shape.0;
     let n_genes = matrix.shape.1;
@@ -84,6 +94,17 @@ pub fn pairwise_gene_correlations_in_memory<T: BixverseNumeric>(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    let end_densify = start.elapsed();
+
+    if verbosity.detailed_verbosity() {
+        println!(
+            " Pairwise gene correlations: Densified, normalised and optionally ranked the data in {:.2?}",
+            end_densify
+        );
+    }
+
+    let start_cor = Instant::now();
+
     // pairwise correlations via dot product
     let denom = n_cells as f32 - 1.0;
     let res = gene_indices_1
@@ -96,6 +117,22 @@ pub fn pairwise_gene_correlations_in_memory<T: BixverseNumeric>(
             cor.clamp(-1_f32, 1_f32)
         })
         .collect();
+
+    let end_cor = start_cor.elapsed();
+    if verbosity.detailed_verbosity() {
+        println!(
+            " Pairwise gene correlations: Calculated correlation coefficients in {:.2?}",
+            end_cor
+        );
+    }
+
+    let total = start.elapsed();
+    if verbosity.normal_verbosity() {
+        println!(
+            "Calculated pairwise correlations for meta cells in {:.2?}",
+            total
+        )
+    }
 
     Ok(res)
 }
