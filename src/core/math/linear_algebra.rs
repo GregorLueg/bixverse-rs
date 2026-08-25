@@ -245,9 +245,9 @@ fn sylvester_solver_direct<T: BixverseFloat>(
     res
 }
 
-////////////////////
+/////////////////////
 // Residualisation //
-////////////////////
+/////////////////////
 
 /// Regresses covariates out of one or more response columns.
 ///

@@ -205,10 +205,6 @@ pub fn hypergeom_pval<T>(q: usize, m: usize, n: usize, k: usize) -> T
 where
     T: BixverseFloat,
 {
-    // `q == 0` is P(X >= 1), a legitimate query, and the loop below computes it.
-    // Returning 1.0 here meant every gene set with exactly one hit scored p = 1.
-    // An empty summation range is still handled, at the `log_probs.is_empty()`
-    // check further down.
     let population = m + n;
     let (n_f, m_f, k_f) = (
         T::from_usize(n).unwrap(),
@@ -285,8 +281,6 @@ where
     let mut running = T::zero();
     for (rank, &idx) in order.iter().enumerate() {
         let scaled = T::from_usize(n - rank).unwrap() * pvals[idx];
-        // Step-down: the sequence is forced non-decreasing, so a small p later
-        // in the order cannot undercut a larger one before it.
         running = running.max(scaled);
         out[idx] = running.min(one);
     }
@@ -310,9 +304,6 @@ where
     T: BixverseFloat,
 {
     let n = pvals.len();
-    // The monotonicity pass below indexes `[n - 1]`, so an empty input panicked.
-    // Reachable from `hypergeom_helper` with no gene sets and from
-    // `finalise_go_res` when every level is empty.
     if n == 0 {
         return Vec::new();
     }
@@ -323,10 +314,6 @@ where
         pvals.par_iter().enumerate().map(|(i, &x)| (i, x)).collect();
 
     // Unstable and parallel are both safe here despite the sort deciding ranks.
-    // Within a group of tied p-values, `(n / rank) * p` decreases in `rank`, so
-    // the right-to-left cumulative min below hands every member of the group the
-    // value taken at its last rank, whatever order the sort put them in. Only
-    // the ranks of tied elements can be permuted, so the output cannot change.
     indexed_pval
         .par_sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -496,7 +483,6 @@ where
 
 /// ManovaSummary
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct ManovaSummary<T>
 where
     T: BixverseFloat,
@@ -576,7 +562,7 @@ where
     pub p_val: T,
 }
 
-/// Generates from MANOVE results the AnovaSummary
+/// Generates from MANOVA results the AnovaSummary
 ///
 /// ### Params
 ///
@@ -831,10 +817,7 @@ where
 ///
 /// ### Returns
 ///
-/// `(f_statistic, p_value)`, matching R's `summary(aov(values ~ factor(groups)))`.
-/// [BixverseErrors::ShapeMismatch] when the two slices disagree in length, and
-/// [BixverseErrors::InvalidArgument] when fewer than two groups carry data,
-/// there are no residual degrees of freedom, or any value is non-finite.
+/// `(f_statistic, p_value)`
 pub fn one_way_anova<T: BixverseFloat>(
     values: &[T],
     groups: &[usize],
@@ -923,11 +906,10 @@ pub fn one_way_anova<T: BixverseFloat>(
 
 /// First-order partial correlation of `x` and `y` given a single control `z`.
 ///
-/// `r_xy.z = (r_xy - r_xz r_yz) / sqrt((1 - r_xz^2)(1 - r_yz^2))`, which for one
-/// control variable is what inverting the 3x3 correlation matrix reduces to.
-/// The Spearman variant ranks all three vectors first, with average ranks for
-/// ties, then runs the same formula. Note `ppcor::pcor.test` itself defaults to
-/// Pearson; DIALOGUE is what asks for Spearman, and it never overrides that.
+/// `r_xy.z = (r_xy - r_xz r_yz) / sqrt((1 - r_xz^2)(1 - r_yz^2))`, which for
+/// one control variable is what inverting the 3x3 correlation matrix reduces
+/// to. The Spearman variant ranks all three vectors first, with average ranks
+/// for ties, then runs the same formula.
 ///
 /// The test is `t = r sqrt((n - 3) / (1 - r^2))` on `n - 3` degrees of freedom,
 /// two-sided: one degree of freedom is spent on the control on top of the two a
@@ -942,9 +924,7 @@ pub fn one_way_anova<T: BixverseFloat>(
 ///
 /// ### Returns
 ///
-/// `(estimate, p_value)`, matching `ppcor::pcor.test`.
-/// [BixverseErrors::ShapeMismatch] when the lengths disagree, and
-/// [BixverseErrors::InvalidArgument] for fewer than four observations.
+/// `(estimate, p_value)`
 pub fn partial_correlation<T: BixverseFloat + Sync>(
     x: &[T],
     y: &[T],
@@ -1039,21 +1019,16 @@ pub fn fisher_combine<T: BixverseFloat>(pvals: &[T]) -> Result<T, BixverseErrors
     }
 }
 
-///////////////////////////
+///////////////////////
 // Wilcoxon rank sum //
-///////////////////////////
+///////////////////////
 
 /// One-sided Wilcoxon rank-sum p-value, normal approximation.
 ///
 /// Matches `wilcox.test(x, y, alternative = "greater", exact = FALSE,
 /// correct = TRUE)`: continuity correction of a half, and the variance carries
-/// the tie correction `sum(t^3 - t) / (N (N - 1))`.
-///
-/// Deliberately only the approximation. R switches to the exact permutation
-/// distribution when both groups are under 50 and there are no ties, so this
-/// differs from a bare `wilcox.test` on small, tie-free inputs. It does not
-/// differ on the case it exists for: an empirical null of one observed value
-/// against many permutations, where the null group alone puts R on this branch.
+/// the tie correction `sum(t^3 - t) / (N (N - 1))`. Deliberately only the
+/// approximation.
 ///
 /// ### Params
 ///
@@ -1121,11 +1096,6 @@ pub fn wilcox_rank_sum_greater_approx<T: BixverseFloat>(
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
-
-    // Reference values for the ANOVA, partial correlation, Fisher and Wilcoxon
-    // blocks were generated in R on this machine and printed with "%.17g".
-
-    // -- one_way_anova --
 
     /// Three unbalanced groups with a real effect, against R's `aov`.
     #[test]
@@ -1247,8 +1217,6 @@ mod tests {
         assert!(holm.iter().all(|v| *v <= 1.0));
         assert!(holm.iter().zip(bh.iter()).all(|(h, b)| h >= b));
     }
-
-    // -- partial_correlation --
 
     /// Fixture shared by the partial correlation tests.
     #[allow(clippy::type_complexity)]

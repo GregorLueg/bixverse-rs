@@ -4,45 +4,6 @@
 //! `e ~ N(0, sigma^2 I_n)` and one grouping factor, by REML, and reports Wald
 //! tests on the fixed effects with Satterthwaite denominator degrees of
 //! freedom. That is `lmer(y ~ (1 | g) + ...)` read through `lmerTest`.
-//!
-//! ### Why it is cheap
-//!
-//! With one grouping factor the inverse of `H = I + lambda Z Z'` is closed
-//! form, `lambda = sigma_b^2 / sigma^2`:
-//!
-//! ```text
-//! H^-1 = I - sum_g [lambda / (1 + n_g lambda)] J_g
-//! ```
-//!
-//! so every generalised least squares quantity is a rank-`G` correction to the
-//! ordinary Gram matrices:
-//!
-//! ```text
-//! X'H^-1 X = X'X - sum_g c_g s_g s_g'      s_g = X_g' 1
-//! X'H^-1 y = X'y - sum_g c_g s_g t_g       t_g = 1' y_g
-//! y'H^-1 y = y'y - sum_g c_g t_g^2         c_g = lambda / (1 + n_g lambda)
-//! ```
-//!
-//! The whole fit therefore depends on the data only through `X'X`, `X'y`,
-//! `y'y` and the per-group `(n_g, s_g, t_g)`. Building those is one `O(n p^2)`
-//! pass; every subsequent evaluation, and so the entire optimisation, is
-//! `O(G p^2)` in the number of *groups*. A caller sweeping many responses or
-//! many predictors over the same grouping can build the statistics once and
-//! refit for almost nothing.
-//!
-//! ### Everything is in `f64`
-//!
-//! [RandomInterceptStats::from_design] accepts any [BixverseFloat] but stores
-//! and works in `f64`. The REML criterion is a sum of logs against a residual
-//! sum of squares formed by cancellation, and the Satterthwaite step then takes
-//! numerical second derivatives of it. There is no `f32` version of this that
-//! is worth having.
-//!
-//! ### References
-//!
-//! Bates, Mächler, Bolker & Walker, Journal of Statistical Software 67(1),
-//! 2015, for the REML formulation. Kuznetsova, Brockhoff & Christensen, Journal
-//! of Statistical Software 82(13), 2017, for the Satterthwaite approximation.
 
 use faer::{
     Mat, MatRef,
@@ -91,9 +52,6 @@ const SINGULAR_LAMBDA: f64 = 1.0e-8;
 const GRAD_STEP: f64 = 1.0e-5;
 
 /// Relative step for the numerical Hessian of the REML criterion.
-///
-/// `lmerTest` differentiates its deviance numerically too, and the two agree to
-/// seven significant figures on the degrees of freedom at this setting.
 const HESSIAN_STEP: f64 = 1.0e-4;
 
 /// Absolute floor on the `theta` finite-difference step.
@@ -108,9 +66,9 @@ const THETA_STEP_FLOOR: f64 = 1.0;
 /// Floor on the `sigma` step, present only to keep a degenerate fit finite.
 const SIGMA_STEP_FLOOR: f64 = 1.0e-300;
 
-////////////////////////////
+//////////////////////////
 // RandomInterceptStats //
-////////////////////////////
+//////////////////////////
 
 /// Sufficient statistics for a single-random-intercept fit.
 ///
@@ -211,7 +169,7 @@ impl RandomInterceptStats {
             }
         }
 
-        // Drop empty levels; they contribute nothing and would put a zero in
+        // drop empty levels; they contribute nothing and would put a zero in
         // the log-determinant.
         let kept: Vec<usize> = (0..n_groups).filter(|&g| counts[g] > 0.0).collect();
         if kept.len() < 2 {
@@ -252,9 +210,9 @@ impl RandomInterceptStats {
     }
 }
 
-/////////////////
-// The GLS core //
-/////////////////
+//////////////////////////////////
+// Generalised least square fit //
+//////////////////////////////////
 
 /// Generalised least squares quantities at one variance ratio.
 #[derive(Clone, Debug)]
@@ -421,9 +379,9 @@ fn coefficient_variance(s: &RandomInterceptStats, theta: f64, sigma: f64, coef: 
     }
 }
 
-//////////////////////////
-// Params and the result //
-//////////////////////////
+///////////////////////////
+// RandomInterceptParams //
+///////////////////////////
 
 /// Tuning knobs for [fit_random_intercept].
 #[derive(Clone, Copy, Debug)]
@@ -471,6 +429,10 @@ impl Default for RandomInterceptParams {
     }
 }
 
+////////////////////////
+// RandomInterceptFit //
+////////////////////////
+
 /// A fitted single-random-intercept model.
 #[derive(Clone, Debug)]
 pub struct RandomInterceptFit {
@@ -497,134 +459,12 @@ pub struct RandomInterceptFit {
     /// coefficients are still the right answer for the data.
     pub singular: bool,
     /// Whether the search ran out of bracket at the far end.
-    ///
-    /// The variance ratio is unbounded above, so it can exceed any bracket. The
-    /// coefficients and standard errors still converge and are reported, but
-    /// `df` and `p_value` come back `NaN`: the Satterthwaite denominator is
-    /// built from the asymptotic covariance of the variance parameters, which
-    /// is only that at a stationary point, and the edge of the bracket is not
-    /// one. Reporting a number from there was wrong by a factor of five in
-    /// testing, in the anti-conservative direction.
     pub bracket_exhausted: bool,
 }
 
-////////////////
-// The fit //
-////////////////
-
-/// Fits a single-random-intercept linear mixed model by REML.
-///
-/// The variance ratio is found by Brent on the profiled criterion, then the
-/// coefficients, standard errors and Satterthwaite degrees of freedom follow in
-/// closed form. Cost is `O(iterations * G p^2)` given the statistics, with `G`
-/// the number of groups and `p` the number of fixed effects: nothing here
-/// touches the observations again.
-///
-/// ### Params
-///
-/// * `stats` - Sufficient statistics from [RandomInterceptStats::from_design]
-/// * `params` - Optional [RandomInterceptParams]; the default otherwise
-///
-/// ### Returns
-///
-/// The [RandomInterceptFit], or [BixverseErrors::InvalidArgument] for a rank
-/// deficient design or a model with no residual degrees of freedom.
-///
-/// ### References
-///
-/// Kuznetsova, Brockhoff & Christensen, Journal of Statistical Software 82(13),
-/// 2017
-pub fn fit_random_intercept(
-    stats: &RandomInterceptStats,
-    params: Option<RandomInterceptParams>,
-) -> Result<RandomInterceptFit, BixverseErrors> {
-    let params = params.unwrap_or_default();
-    if stats.n <= stats.p {
-        return Err(BixverseErrors::InvalidArgument(format!(
-            "the model has {} observations and {} fixed effects, so no residual degrees of \
-             freedom.",
-            stats.n, stats.p
-        )));
-    }
-    // Checked here rather than only in the constructor: every field is public
-    // and callers holding per-group summaries build the struct directly. With
-    // one group the random intercept is not identified from the fixed one, and
-    // with none this degenerates to ordinary least squares wearing a mixed
-    // model's name.
-    if stats.n_groups() < 2 {
-        return Err(BixverseErrors::InvalidArgument(format!(
-            "a random intercept needs at least two groups; got {}.",
-            stats.n_groups()
-        )));
-    }
-
-    let lambda_hat = brent_fmin(
-        0.0,
-        params.lambda_max,
-        |lambda| profiled_reml(stats, lambda),
-        params.lambda_tol,
-    );
-    // Brent never evaluates the ends of the bracket, and the boundary is where
-    // a grouping that explains nothing lands. Take it if it wins.
-    let lambda = if profiled_reml(stats, 0.0) <= profiled_reml(stats, lambda_hat) {
-        0.0
-    } else {
-        lambda_hat
-    };
-    let singular = lambda <= SINGULAR_LAMBDA;
-    let lambda = if singular { 0.0 } else { lambda };
-    // See `RandomInterceptFit::bracket_exhausted`.
-    let bracket_exhausted = lambda >= BRACKET_EDGE * params.lambda_max;
-
-    let fit = gls_solve(stats, lambda)?;
-    let df_resid = (stats.n - stats.p) as f64;
-    let sigma_sq = fit.rss / df_resid;
-    let sigma = sigma_sq.sqrt();
-    let theta = lambda.sqrt();
-
-    let mut se = Vec::with_capacity(stats.p);
-    let mut t_stat = Vec::with_capacity(stats.p);
-    let mut df = Vec::with_capacity(stats.p);
-    let mut p_value = Vec::with_capacity(stats.p);
-
-    let hessian = if params.satterthwaite && !bracket_exhausted {
-        Some(reml_hessian(stats, theta, sigma))
-    } else {
-        None
-    };
-
-    for j in 0..stats.p {
-        let variance = fit.a_inv[(j, j)] * sigma_sq;
-        let error = variance.max(0.0).sqrt();
-        let t = fit.beta[j] / error;
-        let dof = match hessian.as_ref() {
-            Some(h) => satterthwaite_df(stats, theta, sigma, j, variance, h).unwrap_or(df_resid),
-            None if bracket_exhausted => f64::NAN,
-            None => df_resid,
-        };
-        se.push(error);
-        t_stat.push(t);
-        p_value.push(if t.is_finite() && dof.is_finite() && dof > 0.0 {
-            t_pval_two_sided(t, dof)?
-        } else {
-            f64::NAN
-        });
-        df.push(dof);
-    }
-
-    Ok(RandomInterceptFit {
-        beta: fit.beta,
-        se,
-        t_stat,
-        df,
-        p_value,
-        sigma_sq,
-        sigma_b_sq: lambda * sigma_sq,
-        lambda,
-        singular,
-        bracket_exhausted,
-    })
-}
+//////////////////////////
+// Random intercept fit //
+//////////////////////////
 
 /// Numerical Hessian of the REML criterion in `(theta, sigma)`.
 ///
@@ -749,6 +589,114 @@ fn satterthwaite_df(
     }
 }
 
+/// Fits a single-random-intercept linear mixed model by REML.
+///
+/// The variance ratio is found by Brent on the profiled criterion, then the
+/// coefficients, standard errors and Satterthwaite degrees of freedom follow in
+/// closed form. Cost is `O(iterations * G p^2)` given the statistics, with `G`
+/// the number of groups and `p` the number of fixed effects: nothing here
+/// touches the observations again.
+///
+/// ### Params
+///
+/// * `stats` - Sufficient statistics from [RandomInterceptStats::from_design]
+/// * `params` - Optional [RandomInterceptParams]; the default otherwise
+///
+/// ### Returns
+///
+/// The [RandomInterceptFit], or [BixverseErrors::InvalidArgument] for a rank
+/// deficient design or a model with no residual degrees of freedom.
+///
+/// ### References
+///
+/// Kuznetsova, Brockhoff & Christensen, Journal of Statistical Software 82(13),
+/// 2017
+pub fn fit_random_intercept(
+    stats: &RandomInterceptStats,
+    params: Option<RandomInterceptParams>,
+) -> Result<RandomInterceptFit, BixverseErrors> {
+    let params = params.unwrap_or_default();
+    if stats.n <= stats.p {
+        return Err(BixverseErrors::InvalidArgument(format!(
+            "the model has {} observations and {} fixed effects, so no residual degrees of \
+             freedom.",
+            stats.n, stats.p
+        )));
+    }
+    if stats.n_groups() < 2 {
+        return Err(BixverseErrors::InvalidArgument(format!(
+            "a random intercept needs at least two groups; got {}.",
+            stats.n_groups()
+        )));
+    }
+
+    let lambda_hat = brent_fmin(
+        0.0,
+        params.lambda_max,
+        |lambda| profiled_reml(stats, lambda),
+        params.lambda_tol,
+    );
+    // Brent never evaluates the ends of the bracket, and the boundary is where
+    // a grouping that explains nothing lands. Take it if it wins.
+    let lambda = if profiled_reml(stats, 0.0) <= profiled_reml(stats, lambda_hat) {
+        0.0
+    } else {
+        lambda_hat
+    };
+    let singular = lambda <= SINGULAR_LAMBDA;
+    let lambda = if singular { 0.0 } else { lambda };
+    let bracket_exhausted = lambda >= BRACKET_EDGE * params.lambda_max;
+
+    let fit = gls_solve(stats, lambda)?;
+    let df_resid = (stats.n - stats.p) as f64;
+    let sigma_sq = fit.rss / df_resid;
+    let sigma = sigma_sq.sqrt();
+    let theta = lambda.sqrt();
+
+    let mut se = Vec::with_capacity(stats.p);
+    let mut t_stat = Vec::with_capacity(stats.p);
+    let mut df = Vec::with_capacity(stats.p);
+    let mut p_value = Vec::with_capacity(stats.p);
+
+    let hessian = if params.satterthwaite && !bracket_exhausted {
+        Some(reml_hessian(stats, theta, sigma))
+    } else {
+        None
+    };
+
+    for j in 0..stats.p {
+        let variance = fit.a_inv[(j, j)] * sigma_sq;
+        let error = variance.max(0.0).sqrt();
+        let t = fit.beta[j] / error;
+        let dof = match hessian.as_ref() {
+            Some(h) => satterthwaite_df(stats, theta, sigma, j, variance, h).unwrap_or(df_resid),
+            None if bracket_exhausted => f64::NAN,
+            None => df_resid,
+        };
+        se.push(error);
+        t_stat.push(t);
+        p_value.push(if t.is_finite() && dof.is_finite() && dof > 0.0 {
+            t_pval_two_sided(t, dof)?
+        } else {
+            f64::NAN
+        });
+        df.push(dof);
+    }
+
+    Ok(RandomInterceptFit {
+        beta: fit.beta,
+        se,
+        t_stat,
+        df,
+        p_value,
+        sigma_sq,
+        sigma_b_sq: lambda * sigma_sq,
+        lambda,
+        singular,
+        bracket_exhausted,
+    })
+}
+
 ///////////
 // Tests //
 ///////////
@@ -758,6 +706,7 @@ mod tests {
     use super::*;
     use approx::assert_relative_eq;
 
+    // Initial implementation focusses on DIALOGUE.
     // Every reference value below came out of lme4 3.1-x with lmerTest on this
     // machine, printed with "%.17g".
 
@@ -818,12 +767,6 @@ mod tests {
 
     /// The full DIALOGUE-shaped model against
     /// `lmer(y ~ (1 | samples) + x + q + tq)`.
-    ///
-    /// The interesting part is the degrees of freedom. `x` and `tq` are
-    /// group-level, so Satterthwaite charges them roughly the group count;
-    /// `q` varies within a group and gets an order of magnitude more. Anything
-    /// that reported a single residual dof for all three would be wrong by a
-    /// factor of nine on two of them.
     #[test]
     fn test_random_intercept_matches_lmer_full_model() {
         let f = unbalanced_fixture();

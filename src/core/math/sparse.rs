@@ -257,7 +257,11 @@ where
     /// * `indices` - The index positions (in this case row indices)
     /// * `indptr` - The index pointer (in this case the column index pointers)
     /// * `data2` - An optional second layer
-    #[allow(dead_code)]
+    /// * `shape` - `(nrow, ncol)`.
+    ///
+    /// ### Returns
+    ///
+    /// Self as a CSC-type matrix
     pub fn new_csc(
         data: &[T],
         indices: &[u32],
@@ -268,7 +272,7 @@ where
         Self {
             data: data.to_vec(),
             indices: indices.to_vec(),
-            indptr: indptr.to_vec(), // Fixed: was using indices instead of indptr
+            indptr: indptr.to_vec(),
             cs_type: CompressedSparseFormat::Csc,
             data_2: data2.map(|d| d.to_vec()),
             shape,
@@ -283,6 +287,11 @@ where
     /// * `indices` - The index positions (in this case row indices)
     /// * `indptr` - The index pointer (in this case the column index pointers)
     /// * `data2` - An optional second layer
+    /// * `shape` - `(nrow, ncol)`.
+    ///
+    /// ### Returns
+    ///
+    /// Self as a CSR-type matrix
     pub fn new_csr(
         data: &[T],
         indices: &[u32],
@@ -293,7 +302,7 @@ where
         Self {
             data: data.to_vec(),
             indices: indices.to_vec(),
-            indptr: indptr.to_vec(), // Fixed: was using indices instead of indptr
+            indptr: indptr.to_vec(),
             cs_type: CompressedSparseFormat::Csr,
             data_2: data2.map(|d| d.to_vec()),
             shape,
@@ -304,9 +313,7 @@ where
     ///
     /// [CompressedSparseData2::new_csr] and its CSC sibling copy all three
     /// buffers, which doubles peak memory for any caller that assembled them
-    /// itself and then throws the originals away. At a million cells by thirty
-    /// neighbours that is 150 MB built and immediately cloned, so the `u8` edge
-    /// layer sold as a byte per edge is two bytes per edge in transit.
+    /// itself and then throws the originals away.
     ///
     /// ### Params
     ///
@@ -459,7 +466,8 @@ where
     /// * `upper_triangle` - The upper triangular matrix.
     /// * `n` - The number of rows and columns in the matrix.
     /// * `include_diagonal` - Whether to include the diagonal elements.
-    /// * `format` - The format of the sparse matrix.
+    /// * `format` - The format of the sparse matrix, see
+    ///   [CompressedSparseFormat].
     ///
     /// ### Returns
     ///
@@ -546,7 +554,7 @@ where
     ///
     /// ### Returns
     ///
-    /// A tuple of `(nrow, ncol)`
+    /// A tuple of `(n_row, n_col)`
     pub fn shape(&self) -> (usize, usize) {
         self.shape
     }
@@ -2582,22 +2590,8 @@ pub fn sparse_col_moments(
 /// ```
 ///
 /// because `sum x_a x_b` only picks up the intersection of the two sparsity
-/// patterns. On single-cell counts that is a hundredth of the column rather
-/// than all of it.
-///
-/// That form is the one [`crate::core::math::vector_helpers::pearson_correlation`]
-/// warns against, so the precondition is worth stating: it cancels
-/// catastrophically when the data carries a large constant offset relative to
-/// its spread. Log-normalised counts have a mean-to-sd ratio around a third, so
-/// the two subtracted terms are within about one decimal digit of their
-/// difference. Accumulating in `f64` then leaves roughly `1e-13` relative on the
-/// numerator. Do not point this at a column with a large offset.
-///
-/// The intersection is taken by scatter/gather through a scratch buffer rather
-/// than by merging two sorted index runs, because the indices are not
-/// guaranteed ascending: a filtered read emits them in the order the caller's
-/// selection was given. Pairs are grouped by their first column so the scatter
-/// is paid once per distinct column rather than once per pair.
+/// patterns. On single-cell like counts that is a hundredth of the column
+/// rather than all of it.
 ///
 /// ### Params
 ///
@@ -3999,10 +3993,6 @@ mod tests {
     /// Regression: a tightly clustered spectrum used to come back as noise.
     #[test]
     fn test_lanczos_resolves_a_clustered_spectrum_at_defaults() {
-        // The regression: this used to come back as noise, with the leading
-        // eigenvector uncorrelated with position. The default budget does not
-        // drive the residual to zero on a spectrum this tight, so what is
-        // asserted here is that the shape is right, not that it is converged.
         let n = 300usize;
         let mat = path_graph(n);
 
