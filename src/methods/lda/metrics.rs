@@ -94,31 +94,21 @@ pub fn cao_juan_2009<F>(topic_region: &Mat<F>) -> F
 where
     F: BixverseFloat + Send + Sync,
 {
-    let n_terms = topic_region.nrows();
     let k = topic_region.ncols();
     if k < 2 {
         return F::zero();
     }
 
-    let mut normalised = topic_region.cloned();
-    for topic in 0..k {
-        let norm = (0..n_terms)
-            .map(|w| normalised[(w, topic)] * normalised[(w, topic)])
-            .fold(F::zero(), |a, b| a + b)
-            .sqrt();
-        if norm > F::zero() {
-            for w in 0..n_terms {
-                normalised[(w, topic)] /= norm;
-            }
-        }
-    }
-
+    // The Gram matrix of the raw columns already carries both the pairwise
+    // inner products and, on its diagonal, the squared norms, so a normalised
+    // copy of the `n_terms x k` matrix would be pure waste: an allocation the
+    // size of the input plus two passes over it, to save `k^2` divisions.
     let mut gram = Mat::<F>::zeros(k, k);
     matmul(
         gram.as_mut(),
         Accum::Replace,
-        normalised.as_ref().transpose(),
-        normalised.as_ref(),
+        topic_region.as_ref().transpose(),
+        topic_region.as_ref(),
         F::one(),
         faer_parallelism(),
     );
@@ -126,7 +116,10 @@ where
     let mut total = F::zero();
     for i in 0..k {
         for j in (i + 1)..k {
-            total += gram[(i, j)];
+            let denom = (gram[(i, i)] * gram[(j, j)]).sqrt();
+            if denom > F::zero() {
+                total += gram[(i, j)] / denom;
+            }
         }
     }
     total / F::from_usize(k * (k - 1) / 2).unwrap()

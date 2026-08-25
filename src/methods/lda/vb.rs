@@ -145,8 +145,8 @@ impl<F: BixverseFloat + Send + Sync> ColMajor<F> {
 /// * `param` - Dirichlet parameters, strictly positive.
 /// * `out` - Destination, same length as `param`.
 #[inline]
-fn exp_expected_log<F: BixverseFloat>(param: &[F], out: &mut [F]) {
-    let total = param.iter().fold(F::zero(), |a, b| a + *b);
+fn exp_expected_log<F: BixverseFloat + BixverseSimd>(param: &[F], out: &mut [F]) {
+    let total = F::bxv_sum(param);
     let norm = digamma(total);
     for (o, p) in out.iter_mut().zip(param) {
         *o = (digamma(*p) - norm).exp();
@@ -434,10 +434,10 @@ fn apply_sstats<F: BixverseFloat + Send + Sync>(
 /// ### Returns
 ///
 /// The contribution to the bound.
-fn dirichlet_bound<F: BixverseFloat>(param: &[F], prior: F) -> f64 {
+fn dirichlet_bound<F: BixverseFloat + BixverseSimd>(param: &[F], prior: F) -> f64 {
     let n = param.len();
     let prior_f = prior.to_f64().unwrap_or(0.0);
-    let total = param.iter().fold(F::zero(), |a, b| a + *b);
+    let total = F::bxv_sum(param);
     let norm = digamma(total).to_f64().unwrap_or(0.0);
 
     let mut acc = 0.0_f64;
@@ -471,7 +471,7 @@ fn dirichlet_bound<F: BixverseFloat>(param: &[F], prior: F) -> f64 {
 ///
 /// The bound, in `f64`.
 #[allow(clippy::too_many_arguments)]
-fn variational_bound<F: BixverseFloat + Send + Sync>(
+fn variational_bound<F: BixverseFloat + BixverseSimd + Send + Sync>(
     token_ll: f64,
     gamma: &ColMajor<F>,
     lambda: &ColMajor<F>,
@@ -507,7 +507,7 @@ fn variational_bound<F: BixverseFloat + Send + Sync>(
 /// ### Returns
 ///
 /// The contribution to the bound, summed over topics.
-fn topic_dirichlet_bound<F: BixverseFloat + Send + Sync>(
+fn topic_dirichlet_bound<F: BixverseFloat + BixverseSimd + Send + Sync>(
     lambda: &ColMajor<F>,
     eta: F,
     n_terms: usize,
@@ -517,9 +517,7 @@ fn topic_dirichlet_bound<F: BixverseFloat + Send + Sync>(
 
     let mut row_sums = vec![F::zero(); k];
     for w in 0..n_terms {
-        for (s, v) in row_sums.iter_mut().zip(lambda.col(w)) {
-            *s += *v;
-        }
+        F::bxv_axpy_simd(&mut row_sums, F::one(), lambda.col(w));
     }
     let norms: Vec<f64> = row_sums
         .iter()
@@ -577,9 +575,9 @@ fn init_lambda<F: BixverseFloat + Send + Sync>(k: usize, n_terms: usize, seed: u
 /// ### Params
 ///
 /// * `buf` - Buffer whose columns are normalised in place.
-fn normalise_columns<F: BixverseFloat + Send + Sync>(buf: &mut ColMajor<F>) {
+fn normalise_columns<F: BixverseFloat + BixverseSimd + Send + Sync>(buf: &mut ColMajor<F>) {
     buf.par_cols_mut().for_each(|col| {
-        let total = col.iter().fold(F::zero(), |a, b| a + *b);
+        let total = F::bxv_sum(col);
         if total > F::zero() {
             col.iter_mut().for_each(|v| *v /= total);
         }
@@ -889,7 +887,7 @@ where
 /// * `lambda` - `k x n_terms` topic-term parameters.
 /// * `out` - `k x n_terms` destination.
 /// * `n_terms` - Vocabulary size.
-fn update_exp_elog_beta<F: BixverseFloat + Send + Sync>(
+fn update_exp_elog_beta<F: BixverseFloat + BixverseSimd + Send + Sync>(
     lambda: &ColMajor<F>,
     out: &mut ColMajor<F>,
     n_terms: usize,
@@ -897,10 +895,7 @@ fn update_exp_elog_beta<F: BixverseFloat + Send + Sync>(
     let k = lambda.rows;
     let mut row_sums = vec![F::zero(); k];
     for w in 0..n_terms {
-        let col = lambda.col(w);
-        for (s, v) in row_sums.iter_mut().zip(col) {
-            *s += *v;
-        }
+        F::bxv_axpy_simd(&mut row_sums, F::one(), lambda.col(w));
     }
     let norms: Vec<F> = row_sums.iter().map(|s| digamma(*s)).collect();
 
@@ -924,16 +919,14 @@ fn update_exp_elog_beta<F: BixverseFloat + Send + Sync>(
 /// ### Returns
 ///
 /// A `n_terms x k` matrix whose columns sum to one.
-fn topic_region_from_lambda<F: BixverseFloat + Send + Sync>(
+fn topic_region_from_lambda<F: BixverseFloat + BixverseSimd + Send + Sync>(
     lambda: &ColMajor<F>,
     k: usize,
     n_terms: usize,
 ) -> Mat<F> {
     let mut totals = vec![F::zero(); k];
     for w in 0..n_terms {
-        for (t, v) in totals.iter_mut().zip(lambda.col(w)) {
-            *t += *v;
-        }
+        F::bxv_axpy_simd(&mut totals, F::one(), lambda.col(w));
     }
     Mat::from_fn(n_terms, k, |w, topic| {
         let total = totals[topic];
