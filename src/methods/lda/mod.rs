@@ -40,8 +40,7 @@ use crate::prelude::*;
 pub mod metrics;
 pub mod vb;
 
-#[cfg(test)]
-pub(crate) mod sklearn_fixture;
+pub use vb::lda_bound;
 
 use metrics::{LdaMetrics, lda_metrics};
 use vb::fit_vb;
@@ -169,7 +168,8 @@ pub struct LdaParams<F: BixverseFloat> {
     pub tol: F,
     /// Maximum fixed-point iterations of the per-document E-step.
     pub inner_max_iter: usize,
-    /// Mean absolute change in `gamma` below which the E-step stops.
+    /// Relative L1 change in `gamma` below which the per-document E-step
+    /// stops. Relative rather than absolute, see [vb::e_step_document].
     pub inner_tol: F,
     /// Cadence, in iterations, for evaluating the bound and testing `tol`.
     pub check_every: usize,
@@ -191,7 +191,7 @@ impl<F: BixverseFloat> LdaParams<F> {
     /// * `max_iter` - Maximum outer iterations.
     /// * `tol` - Relative bound change for convergence.
     /// * `inner_max_iter` - Maximum per-document E-step iterations.
-    /// * `inner_tol` - Mean absolute `gamma` change for E-step convergence.
+    /// * `inner_tol` - Relative L1 `gamma` change for E-step convergence.
     /// * `check_every` - Iterations between bound evaluations.
     /// * `learning` - Batch or online, see [LdaLearning].
     /// * `seed` - Seed for the initialisation.
