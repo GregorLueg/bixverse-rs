@@ -279,8 +279,13 @@ where
     let mut indexed_pval: Vec<(usize, T)> =
         pvals.par_iter().enumerate().map(|(i, &x)| (i, x)).collect();
 
+    // Unstable and parallel are both safe here despite the sort deciding ranks.
+    // Within a group of tied p-values, `(n / rank) * p` decreases in `rank`, so
+    // the right-to-left cumulative min below hands every member of the group the
+    // value taken at its last rank, whatever order the sort put them in. Only
+    // the ranks of tied elements can be permuted, so the output cannot change.
     indexed_pval
-        .sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        .par_sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
     let adj_pvals_tmp: Vec<T> = indexed_pval
         .par_iter()
@@ -792,6 +797,78 @@ mod tests {
         assert!((pvals_two_sided[0] - 1.0).abs() < 1e-6);
         // Z = 1.96 -> p ≈ 0.05
         assert!((pvals_two_sided[1] - 0.05).abs() < 1e-5);
+    }
+
+    /// Heavy ties must not let the sort order leak into the result.
+    ///
+    /// `calc_fdr` sorts unstably and in parallel, so tied p-values land in an
+    /// arbitrary order. The cumulative-min pass is what makes that irrelevant,
+    /// and this pins it: every tied input must come back with the same adjusted
+    /// value, and repeated runs must agree.
+    #[test]
+    fn test_calc_fdr_is_invariant_to_tie_order() {
+        // one large tie group, one small, and a few distinct values
+        let mut pvals: Vec<f64> = vec![0.02; 500];
+        pvals.extend(vec![0.5; 50]);
+        pvals.extend([0.001, 0.3, 0.7, 0.9, 0.02, 0.5]);
+
+        let first = calc_fdr(&pvals);
+        let second = calc_fdr(&pvals);
+        assert_eq!(first, second, "calc_fdr is not deterministic");
+
+        // every entry sharing a p-value shares its adjusted value
+        for (i, p) in pvals.iter().enumerate() {
+            for (j, q) in pvals.iter().enumerate() {
+                if p == q {
+                    assert_eq!(
+                        first[i], first[j],
+                        "tied p-values {p} got different FDRs at {i} and {j}"
+                    );
+                }
+            }
+        }
+
+        // and a reversed input gives the same multiset of answers
+        let mut reversed = pvals.clone();
+        reversed.reverse();
+        let rev_fdr = calc_fdr(&reversed);
+        let mut a = first.clone();
+        let mut b = rev_fdr;
+        a.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        b.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        for (x, y) in a.iter().zip(b.iter()) {
+            assert!((x - y).abs() < 1e-15, "{x} vs {y}");
+        }
+    }
+
+    /// The upper-tail p-value must be non-increasing in Z, including across the
+    /// switch at `z = 6` from the CDF to the asymptotic tail.
+    ///
+    /// Hotspot's module threshold search skips whole histogram bins on the
+    /// strength of this, so a future tweak to the tail approximation that broke
+    /// monotonicity would silently give the wrong threshold rather than fail
+    /// anywhere near here.
+    #[test]
+    fn test_upper_tail_pval_monotone_in_z() {
+        let mut zs: Vec<f64> = vec![
+            -8.0, -6.0, -1.0, 0.0, 1.0, 3.0, 5.0, 5.9, 5.9999, 6.0, 6.0001, 6.1, 7.0, 10.0, 20.0,
+            37.0, 39.0,
+        ];
+        // and a dense sweep either side of the branch
+        for i in 0..200 {
+            zs.push(5.5 + i as f64 * 0.005);
+        }
+        zs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        let pvals = z_scores_to_pval(&zs, "greater");
+        for w in pvals.windows(2) {
+            assert!(
+                w[1] <= w[0],
+                "upper-tail p-value increased: {} then {}",
+                w[0],
+                w[1]
+            );
+        }
     }
 
     /// Benjamini-Hochberg adjustment stays monotonic and comes back in the input order.
