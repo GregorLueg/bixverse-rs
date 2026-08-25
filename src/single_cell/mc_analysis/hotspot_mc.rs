@@ -14,9 +14,8 @@
 //! [`hotspot_gene_clusters`](crate::single_cell::sc_analysis::hotspot::hotspot_gene_clusters)
 //! takes a plain Z matrix and works unchanged.
 
-use std::borrow::Cow;
-
 use crate::prelude::*;
+use crate::single_cell::mc_analysis::as_csc;
 use crate::single_cell::sc_analysis::hotspot::{
     HotSpotGeneRes, HotSpotPairRes, HotSpotParams, Hotspot,
 };
@@ -24,23 +23,6 @@ use crate::single_cell::sc_data::in_memory_io::InMemorySparseReader;
 
 /////////////
 // Helpers //
-/////////////
-
-/// Coerce the input to the gene-major orientation the reader needs.
-///
-/// ### Params
-///
-/// * `matrix` - The counts, shape (cells, genes)
-///
-/// ### Returns
-///
-/// The matrix as CSC, borrowed when it already was.
-fn as_csc(matrix: &CompressedSparseData2<u32, f32>) -> Cow<'_, CompressedSparseData2<u32, f32>> {
-    match matrix.cs_type {
-        CompressedSparseFormat::Csc => Cow::Borrowed(matrix),
-        CompressedSparseFormat::Csr => Cow::Owned(matrix.transform()),
-    }
-}
 
 /////////////////////
 // Autocorrelation //
@@ -483,6 +465,163 @@ mod tests {
         assert_eq!(from_csr.gene_idx, from_csc.gene_idx);
         for i in 0..from_csc.gene_idx.len() {
             assert_relative_eq!(from_csr.z[i], from_csc.z[i], epsilon = 1e-5);
+        }
+    }
+
+    /// The Bernoulli model works on detection, not counts.
+    ///
+    /// Scaling every count by a constant leaves the detection pattern alone and
+    /// shifts every `log10(depth)` by the same amount, which the logistic fit's
+    /// intercept absorbs. So the Z scores must not move. Pre-fix they scaled
+    /// with the counts, because raw counts were being centred against a
+    /// detection probability.
+    #[test]
+    fn test_bernoulli_depends_only_on_detection() {
+        let dense = synthetic_counts();
+        let lib_sizes = library_sizes(&dense);
+        let matrix = to_csc(&dense, &lib_sizes);
+
+        // A power of two, so the depths and their logs stay exact in f32.
+        let scaled: Vec<Vec<u32>> = dense
+            .iter()
+            .map(|g| g.iter().map(|&v| v * 4).collect())
+            .collect();
+        let scaled_lib = library_sizes(&scaled);
+        let scaled_matrix = to_csc(&scaled, &scaled_lib);
+
+        let (neighbours, distances) = ring_graph();
+        let cells: Vec<usize> = (0..N_CELLS).collect();
+        let genes: Vec<usize> = (0..N_GENES).collect();
+        let params = params_for("bernoulli");
+
+        let base =
+            hotspot_autocor_metacells(&matrix, &neighbours, &distances, &cells, &genes, &params, 0)
+                .expect("bernoulli runs");
+        let scaled_res = hotspot_autocor_metacells(
+            &scaled_matrix,
+            &neighbours,
+            &distances,
+            &cells,
+            &genes,
+            &params,
+            0,
+        )
+        .expect("bernoulli runs on the scaled counts");
+
+        assert_eq!(base.gene_idx, scaled_res.gene_idx);
+        // Not tighter than this on purpose: the logistic fit runs in f32 and
+        // `quantile_cut` nudges its last bin edge by an absolute 1e-6, so the
+        // binning is only invariant to a shift up to rounding. The bug this
+        // guards against moved Z by the count scale factor, not by 0.1%.
+        for (a, b) in base.z.iter().zip(scaled_res.z.iter()) {
+            assert_relative_eq!(a, b, max_relative = 1e-3);
+        }
+    }
+
+    /// The `none` model asserts the caller already standardised, so it passes the
+    /// values straight through: `mu = 0`, `var = 1`, no centring.
+    #[test]
+    fn test_none_model_passes_values_through() {
+        let dense = synthetic_counts();
+        let lib_sizes = library_sizes(&dense);
+        let matrix = to_csc(&dense, &lib_sizes);
+
+        let (neighbours, distances) = ring_graph();
+        let cells: Vec<usize> = (0..N_CELLS).collect();
+        let genes: Vec<usize> = (0..N_GENES).collect();
+
+        let res = hotspot_autocor_metacells(
+            &matrix,
+            &neighbours,
+            &distances,
+            &cells,
+            &genes,
+            &params_for("none"),
+            0,
+        )
+        .expect("the none model runs");
+
+        assert_eq!(res.gene_idx.len(), N_GENES);
+        assert!(res.z.iter().all(|z| z.is_finite()));
+    }
+
+    /// An all-zero gene used to standardise to `NaN` and get dropped. It should
+    /// come back with a finite Z instead, and it must not take the other genes
+    /// with it.
+    #[test]
+    fn test_all_zero_gene_is_kept_with_finite_z() {
+        let mut dense = synthetic_counts();
+        dense[4] = vec![0u32; N_CELLS];
+        let lib_sizes = library_sizes(&dense);
+        let matrix = to_csc(&dense, &lib_sizes);
+
+        let (neighbours, distances) = ring_graph();
+        let cells: Vec<usize> = (0..N_CELLS).collect();
+        let genes: Vec<usize> = (0..N_GENES).collect();
+
+        for model in ["danb", "bernoulli", "normal"] {
+            let res = hotspot_autocor_metacells(
+                &matrix,
+                &neighbours,
+                &distances,
+                &cells,
+                &genes,
+                &params_for(model),
+                0,
+            )
+            .unwrap_or_else(|e| panic!("{model} runs: {e:?}"));
+
+            assert_eq!(res.gene_idx.len(), N_GENES, "{model} dropped a gene");
+            let slot = res
+                .gene_idx
+                .iter()
+                .position(|&g| g == 4)
+                .unwrap_or_else(|| panic!("{model} dropped the all-zero gene"));
+            assert!(res.z[slot].is_finite(), "{model} gave a non-finite Z");
+        }
+    }
+
+    /// A kNN that forgot to drop the query point must not change the statistic:
+    /// `make_weights_non_redundant` zeroes the self-loop, and without that every
+    /// gene picks up `w * x_i^2` on `G`, which looks exactly like universal
+    /// spatial autocorrelation.
+    #[test]
+    fn test_self_loops_do_not_change_the_statistic() {
+        let dense = synthetic_counts();
+        let lib_sizes = library_sizes(&dense);
+        let matrix = to_csc(&dense, &lib_sizes);
+
+        let cells: Vec<usize> = (0..N_CELLS).collect();
+        let genes: Vec<usize> = (0..N_GENES).collect();
+
+        let (mut neighbours, mut distances) = ring_graph();
+        for (i, row) in neighbours.iter_mut().enumerate() {
+            row.insert(0, i);
+        }
+        for row in distances.iter_mut() {
+            row.insert(0, 0.0);
+        }
+
+        let (clean_neighbours, clean_distances) = ring_graph();
+        let params = params_for("danb");
+
+        let looped =
+            hotspot_autocor_metacells(&matrix, &neighbours, &distances, &cells, &genes, &params, 0)
+                .expect("runs with self-loops");
+        let clean = hotspot_autocor_metacells(
+            &matrix,
+            &clean_neighbours,
+            &clean_distances,
+            &cells,
+            &genes,
+            &params,
+            0,
+        )
+        .expect("runs without");
+
+        assert_eq!(looped.gene_idx, clean.gene_idx);
+        for (a, b) in looped.z.iter().zip(clean.z.iter()) {
+            assert_relative_eq!(a, b, epsilon = 1e-6);
         }
     }
 }

@@ -1,12 +1,14 @@
 //! Contains helpers for the generation of synthetic data for testing
 //! algorithms. Has the option to create single cell-like data with defined
 //! cell types, optional batch effects and different cell abundance
-//! distributions per given sample.
+//! distributions per given sample, plus a DIALOGUE fixture carrying a planted
+//! multicellular programme.
 
 use std::f64;
 
+use faer::Mat;
 use rand::prelude::*;
-use rand_distr::StandardNormal;
+use rand_distr::{StandardNormal, Uniform};
 use rustc_hash::FxHashMap;
 
 use crate::prelude::*;
@@ -460,9 +462,342 @@ pub fn create_adt_synthetic_data(
     (counts, cell_type_labels, batch_labels)
 }
 
+///////////////////////////////
+// DIALOGUE synthetic data   //
+///////////////////////////////
+
+/// Gaussian noise added on top of a sample-level feature component.
+const DIALOGUE_FEATURE_NOISE: f64 = 0.45;
+
+/// Baseline expression level of a planted gene, before the programme moves it.
+const DIALOGUE_PLANTED_BASE: f64 = 1.2;
+
+/// How hard the programme drives a planted gene.
+const DIALOGUE_PLANTED_EFFECT: f64 = 0.9;
+
+/// Floor on a planted gene's mean, so a strongly negative programme score
+/// cannot push it to zero.
+const DIALOGUE_MEAN_FLOOR: f64 = 0.05;
+
+/// Expression level of everything that is not planted.
+const DIALOGUE_BACKGROUND_MEAN: f64 = 0.6;
+
+/// Uniform draw below which an entry is dropped, giving the matrix its
+/// sparsity. Roughly 55% of entries survive.
+const DIALOGUE_DROPOUT: f64 = 0.45;
+
+/// Offset on the surviving draw, so a kept entry never scales its mean by zero.
+const DIALOGUE_DRAW_OFFSET: f64 = 0.5;
+
+/// Scales the normalised value into the raw count layer.
+const DIALOGUE_COUNT_SCALE: f32 = 10.0;
+
+/// Shape of a synthetic DIALOGUE experiment.
+///
+/// Cells are laid out contiguously by cell type, and within a cell type
+/// contiguously by sample, so every cell type ends up with the same sample
+/// composition. That is the easy case for the method: it is a fixture for
+/// testing the pipeline, not a stress test of the sample overlap logic.
+#[derive(Clone, Copy, Debug)]
+pub struct DialogueSyntheticParams {
+    /// Samples the experiment spans. Below `MIN_SHARED_SAMPLES` the
+    /// decomposition refuses to run.
+    pub n_samples: usize,
+    /// Cells per sample per cell type.
+    pub cells_per_sample: usize,
+    /// Cell types. DIALOGUE needs at least two.
+    pub n_cell_types: usize,
+    /// Feature columns per cell type.
+    pub n_features: usize,
+    /// Feature columns carrying a per-sample component. Column zero of those is
+    /// the shared programme, the rest are cell-type-specific nuisance. Anything
+    /// past this count is pure noise, and exists so the ANOVA filter has
+    /// something to reject.
+    pub n_sample_features: usize,
+    /// Genes in the store.
+    pub n_genes: usize,
+    /// Planted genes per cell type. Cell type `t` owns genes
+    /// `t * n_planted .. (t + 1) * n_planted`, so the blocks have to fit in
+    /// `n_genes`.
+    pub n_planted: usize,
+}
+
+impl DialogueSyntheticParams {
+    /// Builds a parameter set.
+    ///
+    /// ### Params
+    ///
+    /// * `n_samples` - Samples the experiment spans
+    /// * `cells_per_sample` - Cells per sample per cell type
+    /// * `n_cell_types` - Cell types
+    /// * `n_features` - Feature columns per cell type
+    /// * `n_sample_features` - Feature columns carrying a per-sample component
+    /// * `n_genes` - Genes in the store
+    /// * `n_planted` - Planted genes per cell type
+    ///
+    /// ### Returns
+    ///
+    /// The parameter set. Nothing is validated here, see
+    /// [DialogueSyntheticParams::validate].
+    pub fn new(
+        n_samples: usize,
+        cells_per_sample: usize,
+        n_cell_types: usize,
+        n_features: usize,
+        n_sample_features: usize,
+        n_genes: usize,
+        n_planted: usize,
+    ) -> Self {
+        Self {
+            n_samples,
+            cells_per_sample,
+            n_cell_types,
+            n_features,
+            n_sample_features,
+            n_genes,
+            n_planted,
+        }
+    }
+
+    /// Checks the shape is buildable.
+    ///
+    /// ### Returns
+    ///
+    /// `Ok(())`, or [BixverseErrors::InvalidArgument] describing the first
+    /// problem found.
+    pub fn validate(&self) -> Result<(), BixverseErrors> {
+        if self.n_cell_types < 2 {
+            return Err(BixverseErrors::InvalidArgument(format!(
+                "DIALOGUE needs at least two cell types; got {}.",
+                self.n_cell_types
+            )));
+        }
+        if self.n_samples == 0 || self.cells_per_sample == 0 {
+            return Err(BixverseErrors::InvalidArgument(
+                "n_samples and cells_per_sample must both be positive.".to_string(),
+            ));
+        }
+        if self.n_features < 2 {
+            return Err(BixverseErrors::InvalidArgument(format!(
+                "DIALOGUE needs at least two feature columns; got {}.",
+                self.n_features
+            )));
+        }
+        if self.n_sample_features == 0 || self.n_sample_features > self.n_features {
+            return Err(BixverseErrors::InvalidArgument(format!(
+                "n_sample_features must lie in 1..={}; got {}.",
+                self.n_features, self.n_sample_features
+            )));
+        }
+        if self.n_planted * self.n_cell_types > self.n_genes {
+            return Err(BixverseErrors::InvalidArgument(format!(
+                "the planted blocks need {} genes but only {} exist.",
+                self.n_planted * self.n_cell_types,
+                self.n_genes
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl Default for DialogueSyntheticParams {
+    fn default() -> Self {
+        Self {
+            n_samples: 14,
+            cells_per_sample: 25,
+            n_cell_types: 3,
+            n_features: 8,
+            n_sample_features: 5,
+            n_genes: 90,
+            n_planted: 8,
+        }
+    }
+}
+
+/// A synthetic DIALOGUE experiment, plus the ground truth to check against.
+#[derive(Clone, Debug)]
+pub struct DialogueSyntheticData {
+    /// Counts, CSC with shape (cells, genes). Raw counts in `data`, the
+    /// normalised layer they were scaled from in `data_2`.
+    pub matrix: CompressedSparseData2<u32, f32>,
+    /// Global cell indices per cell type.
+    pub cell_type_indices: Vec<Vec<usize>>,
+    /// Cell-level features per cell type, rows aligned to
+    /// `cell_type_indices`.
+    pub features: Vec<Mat<f64>>,
+    /// Sample code per global cell.
+    pub sample_ids: Vec<usize>,
+    /// Quality covariate per global cell. Pure noise: nothing in the data
+    /// depends on it, so anything a method attributes to it is spurious.
+    pub quality: Vec<f64>,
+    /// Per-sample latent the planted programme follows.
+    pub latent: Vec<f64>,
+    /// Planted gene indices per cell type.
+    pub planted: Vec<Vec<usize>>,
+}
+
+/// Builds a synthetic experiment with one planted multicellular programme.
+///
+/// Every cell type gets its own noise and its own sample-level nuisance
+/// factors; only feature zero and the planted genes carry the shared latent, so
+/// anything a method finds beyond that is something it invented.
+///
+/// The count layer is a scaled copy of the normalised layer rather than a draw
+/// from a count model. That is deliberate: the point of the fixture is a clean
+/// planted signal, and a gamma-Poisson draw on top would blur it.
+///
+/// ### Params
+///
+/// * `params` - See [DialogueSyntheticParams]
+/// * `seed` - Seed for reproducibility
+///
+/// ### Returns
+///
+/// The [DialogueSyntheticData], or the first shape problem found.
+pub fn create_dialogue_synthetic_data(
+    params: &DialogueSyntheticParams,
+    seed: u64,
+) -> Result<DialogueSyntheticData, BixverseErrors> {
+    params.validate()?;
+
+    let DialogueSyntheticParams {
+        n_samples,
+        cells_per_sample,
+        n_cell_types,
+        n_features,
+        n_sample_features,
+        n_genes,
+        n_planted,
+    } = *params;
+
+    let mut rng = StdRng::seed_from_u64(seed);
+
+    let latent: Vec<f64> = (0..n_samples).map(|_| standard_normal(&mut rng)).collect();
+    // Sample-level nuisance, one set per cell type per feature slot.
+    let nuisance: Vec<Vec<Vec<f64>>> = (0..n_cell_types)
+        .map(|_| {
+            (0..n_sample_features)
+                .map(|_| (0..n_samples).map(|_| standard_normal(&mut rng)).collect())
+                .collect()
+        })
+        .collect();
+
+    let per_type = n_samples * cells_per_sample;
+    let n_cells = per_type * n_cell_types;
+
+    let mut sample_ids = vec![0usize; n_cells];
+    let mut quality = vec![0.0_f64; n_cells];
+    let mut cell_type_indices: Vec<Vec<usize>> = Vec::with_capacity(n_cell_types);
+    let mut features: Vec<Mat<f64>> = Vec::with_capacity(n_cell_types);
+    // Per-cell programme strength, used to drive the planted genes.
+    let mut strength = vec![0.0_f64; n_cells];
+
+    let mut cursor = 0usize;
+    for t in 0..n_cell_types {
+        let mut cells = Vec::with_capacity(per_type);
+        let mut feature = Mat::<f64>::zeros(per_type, n_features);
+        for s in 0..n_samples {
+            for _ in 0..cells_per_sample {
+                let global = cursor;
+                let local = cells.len();
+                cells.push(global);
+                sample_ids[global] = s;
+                quality[global] = standard_normal(&mut rng);
+
+                // Feature 0 is the shared programme; 1..n_sample_features are
+                // cell-type-specific sample effects; the rest are noise.
+                let shared = latent[s] + DIALOGUE_FEATURE_NOISE * standard_normal(&mut rng);
+                feature[(local, 0)] = shared;
+                strength[global] = shared;
+                for f in 1..n_sample_features {
+                    feature[(local, f)] =
+                        nuisance[t][f][s] + DIALOGUE_FEATURE_NOISE * standard_normal(&mut rng);
+                }
+                for f in n_sample_features..n_features {
+                    feature[(local, f)] = standard_normal(&mut rng);
+                }
+                cursor += 1;
+            }
+        }
+        cell_type_indices.push(cells);
+        features.push(feature);
+    }
+
+    // Genes: a planted block per cell type, then noise. The planted genes are
+    // driven by that cell type's own programme strength.
+    let planted: Vec<Vec<usize>> = (0..n_cell_types)
+        .map(|t| (t * n_planted..(t + 1) * n_planted).collect())
+        .collect();
+
+    let unit = Uniform::new(0.0_f64, 1.0).expect("valid range");
+    let mut data: Vec<u32> = Vec::new();
+    let mut data_norm: Vec<f32> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    let mut indptr: Vec<u32> = vec![0];
+    // CSC over genes, shape (cells, genes). Cells are laid out contiguously by
+    // cell type above, so `cell / per_type` gives the owner directly.
+    for gene in 0..n_genes {
+        let owner = planted.iter().position(|p| p.contains(&gene));
+        for cell in 0..n_cells {
+            let mean = if owner == Some(cell / per_type) {
+                // Planted: expression rises with the programme.
+                (DIALOGUE_PLANTED_BASE + DIALOGUE_PLANTED_EFFECT * strength[cell])
+                    .max(DIALOGUE_MEAN_FLOOR)
+            } else {
+                DIALOGUE_BACKGROUND_MEAN
+            };
+            // Sparse and non-negative, standing in for a normalised count.
+            let draw: f64 = rng.sample(unit);
+            if draw >= DIALOGUE_DROPOUT {
+                let value = (mean * (DIALOGUE_DRAW_OFFSET + draw)).max(0.0) as f32;
+                if value > 0.0 {
+                    data.push((value * DIALOGUE_COUNT_SCALE).round() as u32);
+                    data_norm.push(value);
+                    indices.push(cell as u32);
+                }
+            }
+        }
+        indptr.push(indices.len() as u32);
+    }
+
+    let matrix = CompressedSparseData2::new_csc(
+        &data,
+        &indices,
+        &indptr,
+        Some(&data_norm),
+        (n_cells, n_genes),
+    );
+
+    Ok(DialogueSyntheticData {
+        matrix,
+        cell_type_indices,
+        features,
+        sample_ids,
+        quality,
+        latent,
+        planted,
+    })
+}
+
 /////////////
 // Helpers //
 /////////////
+
+/// Helper function to draw from the standard normal
+///
+/// A free function rather than a closure, so the borrow on the generator ends
+/// at the call and the caller can keep drawing from other distributions.
+///
+/// ### Params
+///
+/// * `rng` - The random number generator
+///
+/// ### Returns
+///
+/// A sample from `N(0, 1)`
+fn standard_normal<R: Rng>(rng: &mut R) -> f64 {
+    rng.sample(StandardNormal)
+}
 
 /// Helper function to sample from a Gamma distribution
 ///

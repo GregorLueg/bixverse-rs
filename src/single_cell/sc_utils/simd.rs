@@ -234,7 +234,35 @@ pub fn fused_mul_square_sum_simd(a: &[f32], b: &[f32]) -> f32 {
 #[inline(always)]
 fn center_values_scalar(vals: &mut [f32], mu: &[f32], var: &[f32]) {
     for i in 0..vals.len() {
-        vals[i] = (vals[i] - mu[i]) / var[i].sqrt();
+        vals[i] = center_one(vals[i], mu[i], var[i]);
+    }
+}
+
+/// Standardise one value, mapping a zero variance to zero.
+///
+/// Kept as a named helper rather than inlined because all four dispatch arms
+/// need the identical scalar tail, and the SIMD arms mirror it with a select.
+///
+/// A zero variance means the model predicts the observation exactly, so the
+/// standardised value is zero by definition rather than `0/0`. Without this the
+/// `NaN` propagates into the autocorrelation statistic and the gene is silently
+/// dropped; a single zero-depth cell would take every gene with it.
+///
+/// ### Params
+///
+/// * `val`: The value to centre.
+/// * `mu`: The mean.
+/// * `var`: The variance.
+///
+/// ### Returns
+///
+/// `(val - mu) / sqrt(var)`, or zero when `var` is zero.
+#[inline(always)]
+fn center_one(val: f32, mu: f32, var: f32) -> f32 {
+    if var > 0.0 {
+        (val - mu) / var.sqrt()
+    } else {
+        0.0
     }
 }
 
@@ -261,13 +289,15 @@ fn center_values_sse(vals: &mut [f32], mu: &[f32], var: &[f32]) {
             let m = f32x4::from(*(mu_ptr.add(offset) as *const [f32; 4]));
             let va = f32x4::from(*(var_ptr.add(offset) as *const [f32; 4]));
 
+            // zero variance -> zero, see `center_one`
             let result = (v - m) / va.sqrt();
+            let result = va.simd_gt(f32x4::ZERO).select(result, f32x4::ZERO);
             *(vals_ptr.add(offset) as *mut [f32; 4]) = result.into();
         }
     }
 
     for i in (chunks * 4)..len {
-        vals[i] = (vals[i] - mu[i]) / var[i].sqrt();
+        vals[i] = center_one(vals[i], mu[i], var[i]);
     }
 }
 
@@ -295,12 +325,15 @@ unsafe fn center_values_avx2(vals: &mut [f32], mu: &[f32], var: &[f32]) {
             let v = _mm256_loadu_ps(vals_ptr.add(off));
             let m = _mm256_loadu_ps(mu_ptr.add(off));
             let va = _mm256_loadu_ps(var_ptr.add(off));
-            let result = _mm256_div_ps(_mm256_sub_ps(v, m), _mm256_sqrt_ps(va));
+            // zero variance -> zero, see `center_one`
+            let raw = _mm256_div_ps(_mm256_sub_ps(v, m), _mm256_sqrt_ps(va));
+            let keep = _mm256_cmp_ps(va, _mm256_setzero_ps(), _CMP_GT_OQ);
+            let result = _mm256_and_ps(raw, keep);
             _mm256_storeu_ps(vals_ptr.add(off), result);
         }
 
         for i in (chunks * W)..len {
-            vals[i] = (vals[i] - mu[i]) / var[i].sqrt();
+            vals[i] = center_one(vals[i], mu[i], var[i]);
         }
     }
 }
@@ -329,12 +362,15 @@ unsafe fn center_values_avx512(vals: &mut [f32], mu: &[f32], var: &[f32]) {
             let v = _mm512_loadu_ps(vals_ptr.add(off));
             let m = _mm512_loadu_ps(mu_ptr.add(off));
             let va = _mm512_loadu_ps(var_ptr.add(off));
-            let result = _mm512_div_ps(_mm512_sub_ps(v, m), _mm512_sqrt_ps(va));
+            // zero variance -> zero, see `center_one`
+            let raw = _mm512_div_ps(_mm512_sub_ps(v, m), _mm512_sqrt_ps(va));
+            let keep = _mm512_cmp_ps_mask(va, _mm512_setzero_ps(), _CMP_GT_OQ);
+            let result = _mm512_maskz_mov_ps(keep, raw);
             _mm512_storeu_ps(vals_ptr.add(off), result);
         }
 
         for i in (chunks * W)..len {
-            vals[i] = (vals[i] - mu[i]) / var[i].sqrt();
+            vals[i] = center_one(vals[i], mu[i], var[i]);
         }
     }
 }
@@ -1343,6 +1379,41 @@ mod tests {
                     assert_relative_eq!(score, score_ref, epsilon = 1e-3, max_relative = 1e-4);
                 }
             }
+        }
+    }
+
+    /// A zero variance standardises to zero rather than `NaN`, on every dispatch
+    /// arm. Upstream `hotspot/utils.py:11-14` does the same, and without it a
+    /// single zero-depth cell drops every gene from a Hotspot run.
+    #[test]
+    fn center_values_maps_zero_variance_to_zero() {
+        // long enough to cover the widest vector body plus a scalar tail
+        let n = 37;
+        let mut vals: Vec<f32> = (0..n).map(|i| i as f32).collect();
+        let mu: Vec<f32> = (0..n).map(|i| i as f32).collect();
+        let var: Vec<f32> = (0..n).map(|i| if i % 3 == 0 { 0.0 } else { 4.0 }).collect();
+
+        center_values_simd(&mut vals, &mu, &var);
+
+        assert!(vals.iter().all(|v| v.is_finite()), "{vals:?}");
+        // vals == mu everywhere, so every entry standardises to zero
+        assert!(vals.iter().all(|v| *v == 0.0), "{vals:?}");
+    }
+
+    /// The guard must not disturb the ordinary path.
+    #[test]
+    fn center_values_matches_the_scalar_formula() {
+        let n = 37;
+        let vals_in: Vec<f32> = (0..n).map(|i| (i as f32) * 0.5 + 1.0).collect();
+        let mu: Vec<f32> = (0..n).map(|i| (i as f32) * 0.25).collect();
+        let var: Vec<f32> = (0..n).map(|i| 1.0 + (i % 5) as f32).collect();
+
+        let mut actual = vals_in.clone();
+        center_values_simd(&mut actual, &mu, &var);
+
+        for i in 0..n {
+            let expected = (vals_in[i] - mu[i]) / var[i].sqrt();
+            assert_relative_eq!(actual[i], expected, epsilon = 1e-6);
         }
     }
 }

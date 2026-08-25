@@ -8,6 +8,7 @@ use statrs::distribution::FisherSnedecor;
 use statrs::distribution::{Continuous, ContinuousCDF, Normal};
 use statrs::function::gamma::ln_gamma;
 
+use crate::core::math::distributions::{chisq_sf, f_sf, norm_sf, t_pval_two_sided};
 use crate::core::math::vector_helpers::*;
 use crate::prelude::*;
 
@@ -204,10 +205,6 @@ pub fn hypergeom_pval<T>(q: usize, m: usize, n: usize, k: usize) -> T
 where
     T: BixverseFloat,
 {
-    // `q == 0` is P(X >= 1), a legitimate query, and the loop below computes it.
-    // Returning 1.0 here meant every gene set with exactly one hit scored p = 1.
-    // An empty summation range is still handled, at the `log_probs.is_empty()`
-    // check further down.
     let population = m + n;
     let (n_f, m_f, k_f) = (
         T::from_usize(n).unwrap(),
@@ -253,7 +250,47 @@ where
     sum * max_log_prob.exp()
 }
 
+/// Holm-Bonferroni step-down adjustment.
+///
+/// R's `p.adjust` default, which is worth knowing: code that calls `p.adjust`
+/// without naming a method is doing Holm, not Benjamini-Hochberg. Controls the
+/// family-wise error rate, so it is markedly more conservative than
+/// [calc_fdr].
+///
+/// ### Params
+///
+/// * `pvals` - Unadjusted p-values
+///
+/// ### Returns
+///
+/// The adjusted p-values, in the input order, each capped at 1.
+pub fn p_adjust_holm<T>(pvals: &[T]) -> Vec<T>
+where
+    T: BixverseFloat,
+{
+    let n = pvals.len();
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| {
+        pvals[a]
+            .partial_cmp(&pvals[b])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let one = T::one();
+    let mut out = vec![T::zero(); n];
+    let mut running = T::zero();
+    for (rank, &idx) in order.iter().enumerate() {
+        let scaled = T::from_usize(n - rank).unwrap() * pvals[idx];
+        running = running.max(scaled);
+        out[idx] = running.min(one);
+    }
+    out
+}
+
 /// Calculate the FDR
+///
+/// Benjamini-Hochberg. See [p_adjust_holm] for the family-wise alternative,
+/// which is what R's `p.adjust` does when no method is named.
 ///
 /// ### Params
 ///
@@ -267,9 +304,6 @@ where
     T: BixverseFloat,
 {
     let n = pvals.len();
-    // The monotonicity pass below indexes `[n - 1]`, so an empty input panicked.
-    // Reachable from `hypergeom_helper` with no gene sets and from
-    // `finalise_go_res` when every level is empty.
     if n == 0 {
         return Vec::new();
     }
@@ -279,8 +313,9 @@ where
     let mut indexed_pval: Vec<(usize, T)> =
         pvals.par_iter().enumerate().map(|(i, &x)| (i, x)).collect();
 
+    // Unstable and parallel are both safe here despite the sort deciding ranks.
     indexed_pval
-        .sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        .par_sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
     let adj_pvals_tmp: Vec<T> = indexed_pval
         .par_iter()
@@ -448,7 +483,6 @@ where
 
 /// ManovaSummary
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct ManovaSummary<T>
 where
     T: BixverseFloat,
@@ -528,7 +562,7 @@ where
     pub p_val: T,
 }
 
-/// Generates from MANOVE results the AnovaSummary
+/// Generates from MANOVA results the AnovaSummary
 ///
 /// ### Params
 ///
@@ -763,6 +797,297 @@ where
     (res, margin)
 }
 
+///////////////////
+// One-way ANOVA //
+///////////////////
+
+/// One-way analysis of variance across an arbitrary number of groups.
+///
+/// The [ManovaResult] path in this module is two-group only, so this exists for
+/// the many-group case: does a feature vary across samples at all. Empty groups
+/// are dropped rather than counted, so a caller may pass a level set wider than
+/// the data.
+///
+/// ### Params
+///
+/// * `values` - Observations
+/// * `groups` - Level code per observation, parallel to `values`, each in
+///   `0..n_groups`
+/// * `n_groups` - Number of levels
+///
+/// ### Returns
+///
+/// `(f_statistic, p_value)`
+pub fn one_way_anova<T: BixverseFloat>(
+    values: &[T],
+    groups: &[usize],
+    n_groups: usize,
+) -> Result<(T, T), BixverseErrors> {
+    if values.len() != groups.len() {
+        return Err(BixverseErrors::ShapeMismatch {
+            expected: (values.len(), 1),
+            got: (groups.len(), 1),
+        });
+    }
+    let n = values.len();
+    let mut counts = vec![0_usize; n_groups];
+    let mut sums = vec![0.0_f64; n_groups];
+    for (v, &g) in values.iter().zip(groups.iter()) {
+        if g >= n_groups {
+            return Err(BixverseErrors::InvalidArgument(format!(
+                "group code {g} is outside 0..{n_groups}."
+            )));
+        }
+        counts[g] += 1;
+        sums[g] += v.to_f64().unwrap_or(f64::NAN);
+    }
+
+    let n_used: usize = counts.iter().filter(|&&c| c > 0).count();
+    if n_used < 2 {
+        return Err(BixverseErrors::InvalidArgument(
+            "one-way ANOVA needs at least two non-empty groups.".to_string(),
+        ));
+    }
+    let df_between = (n_used - 1) as f64;
+    let df_within = (n - n_used) as f64;
+    if df_within <= 0.0 {
+        return Err(BixverseErrors::InvalidArgument(
+            "one-way ANOVA has no residual degrees of freedom.".to_string(),
+        ));
+    }
+
+    let grand_mean: f64 = sums.iter().sum::<f64>() / n as f64;
+    let ss_between: f64 = counts
+        .iter()
+        .zip(sums.iter())
+        .filter(|(c, _)| **c > 0)
+        .map(|(&c, &s)| {
+            let d = s / c as f64 - grand_mean;
+            c as f64 * d * d
+        })
+        .sum();
+    let ss_within: f64 = values
+        .iter()
+        .zip(groups.iter())
+        .map(|(v, &g)| {
+            let d = v.to_f64().unwrap_or(f64::NAN) - sums[g] / counts[g] as f64;
+            d * d
+        })
+        .sum();
+
+    // Finiteness first: a non-finite sum fails both `> 0.0` tests below and
+    // would fall through to the F = 0 arm.
+    if !ss_within.is_finite() || !ss_between.is_finite() {
+        return Err(BixverseErrors::InvalidArgument(
+            "the values contain a non-finite entry.".to_string(),
+        ));
+    }
+    // A feature that is constant within every group but varies between them has
+    // an infinite F. R prints Inf and a p of 0, so do the same rather than
+    // dividing by zero and returning NaN.
+    let f_stat = if ss_within > 0.0 {
+        (ss_between / df_between) / (ss_within / df_within)
+    } else if ss_between > 0.0 {
+        f64::INFINITY
+    } else {
+        0.0
+    };
+    let p = f_sf(f_stat, df_between, df_within)?;
+
+    Ok((
+        T::from_f64(f_stat).unwrap_or_else(T::nan),
+        T::from_f64(p).unwrap_or_else(T::nan),
+    ))
+}
+
+/////////////////////////
+// Partial correlation //
+/////////////////////////
+
+/// First-order partial correlation of `x` and `y` given a single control `z`.
+///
+/// `r_xy.z = (r_xy - r_xz r_yz) / sqrt((1 - r_xz^2)(1 - r_yz^2))`, which for
+/// one control variable is what inverting the 3x3 correlation matrix reduces
+/// to. The Spearman variant ranks all three vectors first, with average ranks
+/// for ties, then runs the same formula.
+///
+/// The test is `t = r sqrt((n - 3) / (1 - r^2))` on `n - 3` degrees of freedom,
+/// two-sided: one degree of freedom is spent on the control on top of the two a
+/// plain correlation costs.
+///
+/// ### Params
+///
+/// * `x` - First variable
+/// * `y` - Second variable
+/// * `z` - Control variable
+/// * `spearman` - Rank-transform first, which is what DIALOGUE asks for
+///
+/// ### Returns
+///
+/// `(estimate, p_value)`
+pub fn partial_correlation<T: BixverseFloat + Sync>(
+    x: &[T],
+    y: &[T],
+    z: &[T],
+    spearman: bool,
+) -> Result<(T, T), BixverseErrors> {
+    let n = x.len();
+    if y.len() != n {
+        return Err(BixverseErrors::ShapeMismatch {
+            expected: (n, 3),
+            got: (y.len(), 3),
+        });
+    }
+    if z.len() != n {
+        return Err(BixverseErrors::ShapeMismatch {
+            expected: (n, 3),
+            got: (z.len(), 3),
+        });
+    }
+    if n < 4 {
+        return Err(BixverseErrors::InvalidArgument(format!(
+            "a first-order partial correlation needs at least 4 observations; got {n}."
+        )));
+    }
+
+    let (xv, yv, zv) = if spearman {
+        (rank_vector(x), rank_vector(y), rank_vector(z))
+    } else {
+        (x.to_vec(), y.to_vec(), z.to_vec())
+    };
+
+    let r_xy = pearson_correlation(&xv, &yv).unwrap_or(f64::NAN);
+    let r_xz = pearson_correlation(&xv, &zv).unwrap_or(f64::NAN);
+    let r_yz = pearson_correlation(&yv, &zv).unwrap_or(f64::NAN);
+
+    let denom = ((1.0 - r_xz * r_xz) * (1.0 - r_yz * r_yz)).sqrt();
+    if !(denom.is_finite() && denom > 0.0) {
+        return Ok((T::nan(), T::nan()));
+    }
+    let r = (r_xy - r_xz * r_yz) / denom;
+
+    let df = (n - 3) as f64;
+    // |r| == 1 leaves nothing to test; R reports a p of 0 there.
+    let p = if r.abs() >= 1.0 {
+        0.0
+    } else {
+        let t_stat = r * (df / (1.0 - r * r)).sqrt();
+        t_pval_two_sided(t_stat, df)?
+    };
+
+    Ok((
+        T::from_f64(r).unwrap_or_else(T::nan),
+        T::from_f64(p).unwrap_or_else(T::nan),
+    ))
+}
+
+//////////////////////
+// Fisher combining //
+//////////////////////
+
+/// Combines independent p-values by Fisher's method.
+///
+/// `-2 sum(log p)` is chi-squared on `2m` degrees of freedom under the joint
+/// null. `NaN` entries are skipped, and a single surviving p-value is returned
+/// unchanged rather than passed through the chi-squared, which is what
+/// DIALOGUE's `get.fisher.p.value` does.
+///
+/// ### Params
+///
+/// * `pvals` - p-values in `[0, 1]`. `NaN` entries are ignored.
+///
+/// ### Returns
+///
+/// The combined p-value, or `NaN` when nothing survives the `NaN` filter.
+/// Upstream returns 0.0 in that case, through `pchisq(0, 0)`; that is an
+/// artefact of R's zero-df convention and is not reproduced here, because "no
+/// evidence at all" is the one thing a p-value of zero must not mean.
+pub fn fisher_combine<T: BixverseFloat>(pvals: &[T]) -> Result<T, BixverseErrors> {
+    let kept: Vec<f64> = pvals
+        .iter()
+        .filter_map(|p| p.to_f64())
+        .filter(|p| !p.is_nan())
+        .collect();
+    match kept.len() {
+        0 => Ok(T::nan()),
+        1 => Ok(T::from_f64(kept[0]).unwrap_or_else(T::nan)),
+        m => {
+            let stat: f64 = -2.0 * kept.iter().map(|p| p.ln()).sum::<f64>();
+            let p = chisq_sf(stat, 2.0 * m as f64)?;
+            Ok(T::from_f64(p).unwrap_or_else(T::nan))
+        }
+    }
+}
+
+///////////////////////
+// Wilcoxon rank sum //
+///////////////////////
+
+/// One-sided Wilcoxon rank-sum p-value, normal approximation.
+///
+/// Matches `wilcox.test(x, y, alternative = "greater", exact = FALSE,
+/// correct = TRUE)`: continuity correction of a half, and the variance carries
+/// the tie correction `sum(t^3 - t) / (N (N - 1))`. Deliberately only the
+/// approximation.
+///
+/// ### Params
+///
+/// * `x` - First sample, the one tested for being larger
+/// * `y` - Second sample
+///
+/// ### Returns
+///
+/// `P(X > Y)` under the null, or [BixverseErrors::InvalidArgument] when either
+/// sample is empty or the tie correction leaves no variance.
+pub fn wilcox_rank_sum_greater_approx<T: BixverseFloat>(
+    x: &[T],
+    y: &[T],
+) -> Result<T, BixverseErrors> {
+    let n = x.len();
+    let m = y.len();
+    if n == 0 || m == 0 {
+        return Err(BixverseErrors::InvalidArgument(
+            "the Wilcoxon rank sum needs a non-empty sample on both sides.".to_string(),
+        ));
+    }
+    let total = n + m;
+
+    let mut pooled: Vec<T> = Vec::with_capacity(total);
+    pooled.extend_from_slice(x);
+    pooled.extend_from_slice(y);
+    let ranks = rank_vector(&pooled);
+
+    let rank_sum: f64 = ranks[..n].iter().filter_map(|r| r.to_f64()).sum();
+    let w = rank_sum - (n * (n + 1)) as f64 / 2.0;
+
+    // Tie correction, from the multiplicities of the pooled ranks.
+    let mut sorted: Vec<f64> = ranks.iter().filter_map(|r| r.to_f64()).collect();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mut tie_term = 0.0_f64;
+    let mut i = 0;
+    while i < total {
+        let mut j = i + 1;
+        while j < total && sorted[j] == sorted[i] {
+            j += 1;
+        }
+        let t = (j - i) as f64;
+        tie_term += t * t * t - t;
+        i = j;
+    }
+
+    let nm = (n * m) as f64;
+    let total_f = total as f64;
+    let variance = (nm / 12.0) * ((total_f + 1.0) - tie_term / (total_f * (total_f - 1.0)));
+    if !(variance.is_finite() && variance > 0.0) {
+        return Err(BixverseErrors::InvalidArgument(
+            "the Wilcoxon rank sum has zero variance; every observation is tied.".to_string(),
+        ));
+    }
+
+    let z = (w - nm / 2.0 - 0.5) / variance.sqrt();
+    Ok(T::from_f64(norm_sf(z)).unwrap_or_else(T::nan))
+}
+
 ///////////
 // Tests //
 ///////////
@@ -770,6 +1095,324 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use approx::assert_relative_eq;
+
+    /// Three unbalanced groups with a real effect, against R's `aov`.
+    #[test]
+    fn test_one_way_anova_matches_r_aov() {
+        // R: set.seed(3); grp sizes 4/6/5
+        let values: Vec<f64> = vec![
+            -0.962, -0.293, 0.259, -1.152, 1.696, 1.53, 1.585, 2.617, 0.281, 2.767, -1.245, -1.631,
+            -1.216, -0.247, -0.348,
+        ];
+        let groups: Vec<usize> = vec![0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2];
+
+        let (f_stat, p) = one_way_anova(&values, &groups, 3).unwrap();
+
+        assert_relative_eq!(f_stat, 20.398607696686263, max_relative = 1e-12);
+        assert_relative_eq!(p, 0.00013785463402486508, max_relative = 1e-11);
+    }
+
+    /// Two groups with no signal, so the p-value sits well away from zero.
+    #[test]
+    fn test_one_way_anova_null_case() {
+        // R: set.seed(9); rnorm(16), 8 per group
+        let values: Vec<f64> = vec![
+            -0.767, -0.816, -0.142, -0.278, 0.436, -1.187, 1.192, -0.018, -0.248, -0.363, 1.278,
+            -0.469, 0.071, -0.266, 1.845, -0.839,
+        ];
+        let groups: Vec<usize> = vec![0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1];
+
+        let (f_stat, p) = one_way_anova(&values, &groups, 2).unwrap();
+
+        assert_relative_eq!(f_stat, 0.577_110_410_366_241_4, max_relative = 1e-12);
+        assert_relative_eq!(p, 0.4600488747180288, max_relative = 1e-12);
+    }
+
+    /// An empty level is dropped rather than counted, so the answer is
+    /// unchanged by widening the level set.
+    #[test]
+    fn test_one_way_anova_ignores_empty_groups() {
+        let values: Vec<f64> = vec![1.0, 2.0, 5.0, 6.0];
+        let groups: Vec<usize> = vec![0, 0, 2, 2];
+        let widened = one_way_anova(&values, &groups, 5).unwrap();
+        let tight = one_way_anova(&values, &[0, 0, 1, 1], 2).unwrap();
+        assert_relative_eq!(widened.0, tight.0, max_relative = 1e-14);
+        assert_relative_eq!(widened.1, tight.1, max_relative = 1e-14);
+    }
+
+    /// A non-finite value must error, not be reported as "does not vary".
+    ///
+    /// `NaN > 0.0` is false, so without an explicit finiteness check control
+    /// reaches the constant-input arm and the function returns `F = 0, p = 1`.
+    /// The DIALOGUE feature filter *keeps* what varies, so that reading
+    /// silently discards the feature instead of flagging it.
+    #[test]
+    fn test_one_way_anova_rejects_non_finite_values() {
+        let groups = vec![0usize, 0, 0, 1, 1, 1];
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let values: Vec<f64> = vec![1.0, 2.0, bad, 5.0, 6.0, 7.0];
+            assert!(
+                one_way_anova::<f64>(&values, &groups, 2).is_err(),
+                "accepted {bad} and reported a verdict"
+            );
+        }
+    }
+
+    /// Constant within groups but different between them is an infinite F, and
+    /// a p of zero. Constant throughout is F of zero and a p of one.
+    #[test]
+    fn test_one_way_anova_degenerate_variance_branches() {
+        let groups = vec![0usize, 0, 1, 1];
+
+        let separated = vec![1.0, 1.0, 5.0, 5.0];
+        let (f_stat, p): (f64, f64) = one_way_anova(&separated, &groups, 2).unwrap();
+        assert!(f_stat.is_infinite() && f_stat > 0.0);
+        assert_eq!(p, 0.0);
+
+        let constant = vec![3.0, 3.0, 3.0, 3.0];
+        let (f_stat, p): (f64, f64) = one_way_anova(&constant, &groups, 2).unwrap();
+        assert_eq!(f_stat, 0.0);
+        assert_eq!(p, 1.0);
+    }
+
+    #[test]
+    fn test_one_way_anova_rejects_degenerate_input() {
+        let values: Vec<f64> = vec![1.0, 2.0, 3.0];
+        // Every observation in one group.
+        assert!(one_way_anova(&values, &[0, 0, 0], 1).is_err());
+        // Length mismatch.
+        assert!(one_way_anova(&values, &[0, 1], 2).is_err());
+        // One observation per group leaves no residual dof.
+        assert!(one_way_anova(&values, &[0, 1, 2], 3).is_err());
+    }
+
+    // -- p_adjust_holm --
+
+    /// Against R's bare `p.adjust`, whose default method is Holm.
+    #[test]
+    fn test_p_adjust_holm_matches_r() {
+        // R: p.adjust(c(0.001, 0.02, 0.03, 0.04, 0.5))
+        let got: Vec<f64> = p_adjust_holm(&[0.001, 0.02, 0.03, 0.04, 0.5]);
+        let expected = [0.005, 0.08, 0.09, 0.09, 0.5];
+        for (g, e) in got.iter().zip(expected.iter()) {
+            assert_relative_eq!(g, e, max_relative = 1e-12);
+        }
+    }
+
+    /// The step-down carry is what makes the sequence non-decreasing: the third
+    /// value would be 0.09 on its own but is held up by the second.
+    #[test]
+    fn test_p_adjust_holm_is_monotone_and_handles_ties() {
+        // R: p.adjust(c(0.01, 0.01, 0.04))
+        let got: Vec<f64> = p_adjust_holm(&[0.01, 0.01, 0.04]);
+        for (g, e) in got.iter().zip([0.03, 0.03, 0.04].iter()) {
+            assert_relative_eq!(g, e, max_relative = 1e-12);
+        }
+        assert!(p_adjust_holm::<f64>(&[]).is_empty());
+        // Capped at one, and more conservative than Benjamini-Hochberg.
+        let p = [0.2, 0.3, 0.4];
+        let holm: Vec<f64> = p_adjust_holm(&p);
+        let bh: Vec<f64> = calc_fdr(&p);
+        assert!(holm.iter().all(|v| *v <= 1.0));
+        assert!(holm.iter().zip(bh.iter()).all(|(h, b)| h >= b));
+    }
+
+    /// Fixture shared by the partial correlation tests.
+    #[allow(clippy::type_complexity)]
+    fn pcor_fixture() -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        // R: set.seed(21); z <- rnorm(30); x <- 0.8 z + noise; y <- 0.6 z + noise
+        let x = vec![
+            -0.466, 0.173, 1.413, -0.47, 2.738, 0.383, -0.147, -0.7, 0.902, 0.874, -1.788, -0.305,
+            -0.468, 0.01, 1.708, 1.331, 0.838, 1.904, -0.397, -1.11, -0.035, 1.094, -0.952, -1.223,
+            0.17, 1.205, 0.253, -1.441, -0.02, 0.115,
+        ];
+        let y = vec![
+            0.201, 0.87, -0.214, -1.769, 2.378, 0.736, -1.232, 0.596, -0.193, -0.953, -1.238,
+            -0.229, -0.035, -0.948, 0.638, 0.959, 0.51, 1.172, -0.878, -0.078, 0.903, 0.24, -0.782,
+            -0.877, -0.096, -0.073, -0.017, -1.358, -0.913, 0.349,
+        ];
+        let z = vec![
+            0.793, 0.522, 1.746, -1.271, 2.197, 0.433, -1.57, -0.935, 0.063, -0.002, -2.277, 0.757,
+            -0.548, 0.173, 0.563, 1.512, 0.659, 1.122, -0.785, -0.426, 0.393, 0.037, -1.032,
+            -1.265, -0.227, 0.746, 0.333, -1.124, -0.706, -0.728,
+        ];
+        (x, y, z)
+    }
+
+    /// Pearson variant, against `ppcor::pcor.test(x, y, z, method = "pearson")`.
+    #[test]
+    fn test_partial_correlation_pearson_matches_ppcor() {
+        let (x, y, z) = pcor_fixture();
+        let (est, p) = partial_correlation(&x, &y, &z, false).unwrap();
+        assert_relative_eq!(est, 0.13928951527176736, max_relative = 1e-12);
+        assert_relative_eq!(p, 0.47113917629636237, max_relative = 1e-11);
+    }
+
+    /// Spearman variant, which is what DIALOGUE uses. Ranks first, then the
+    /// same formula.
+    #[test]
+    fn test_partial_correlation_spearman_matches_ppcor() {
+        let (x, y, z) = pcor_fixture();
+        let (est, p) = partial_correlation(&x, &y, &z, true).unwrap();
+        assert_relative_eq!(est, 0.11596978538690578, max_relative = 1e-12);
+        assert_relative_eq!(p, 0.549_124_448_784_373_9, max_relative = 1e-11);
+    }
+
+    /// Controlling for a variable that carries the whole association drives the
+    /// partial correlation to zero, where the raw correlation is near one.
+    #[test]
+    fn test_partial_correlation_removes_a_shared_driver() {
+        let z: Vec<f64> = (0..40).map(|i| i as f64 * 0.1).collect();
+        // x and y are z plus independent, deterministic wobbles.
+        let x: Vec<f64> = z
+            .iter()
+            .enumerate()
+            .map(|(i, v)| v + ((i % 7) as f64) * 0.01)
+            .collect();
+        let y: Vec<f64> = z
+            .iter()
+            .enumerate()
+            .map(|(i, v)| v + ((i % 5) as f64) * 0.01)
+            .collect();
+
+        let raw = pearson_correlation(&x, &y).unwrap();
+        let (partial, _) = partial_correlation(&x, &y, &z, false).unwrap();
+
+        assert!(raw > 0.99, "raw correlation was {raw}");
+        assert!(partial.abs() < 0.5, "partial correlation was {partial}");
+    }
+
+    #[test]
+    fn test_partial_correlation_rejects_short_and_ragged_input() {
+        let a = vec![1.0, 2.0, 3.0];
+        assert!(partial_correlation(&a, &a, &a, false).is_err());
+        let b = vec![1.0, 2.0, 3.0, 4.0];
+        assert!(partial_correlation(&b, &a, &b, false).is_err());
+    }
+
+    // -- fisher_combine --
+
+    /// Four p-values, against `pchisq(-2 sum(log p), 2m, lower.tail = FALSE)`.
+    #[test]
+    fn test_fisher_combine_matches_r() {
+        let p = vec![0.01, 0.2, 0.5, 0.03];
+        let got: f64 = fisher_combine(&p).unwrap();
+        assert_relative_eq!(got, 0.007_616_871_850_449_079, max_relative = 1e-12);
+    }
+
+    /// NaN entries drop out of both the sum and the degrees of freedom.
+    #[test]
+    fn test_fisher_combine_skips_nan() {
+        let p = vec![0.4, f64::NAN, 0.9];
+        let got: f64 = fisher_combine(&p).unwrap();
+        assert_relative_eq!(got, 0.727_794_449_111_513_4, max_relative = 1e-12);
+    }
+
+    /// A single surviving p-value is returned unchanged, not passed through the
+    /// chi-squared.
+    #[test]
+    fn test_fisher_combine_single_value_passes_through() {
+        let got: f64 = fisher_combine(&[0.037]).unwrap();
+        assert_eq!(got, 0.037);
+        let got2: f64 = fisher_combine(&[f64::NAN, 0.037, f64::NAN]).unwrap();
+        assert_eq!(got2, 0.037);
+    }
+
+    /// Nothing to combine gives NaN, deliberately not the 0.0 that R's
+    /// zero-df `pchisq` would produce.
+    #[test]
+    fn test_fisher_combine_empty_is_nan() {
+        let got: f64 = fisher_combine(&[]).unwrap();
+        assert!(got.is_nan());
+        let got2: f64 = fisher_combine(&[f64::NAN, f64::NAN]).unwrap();
+        assert!(got2.is_nan());
+    }
+
+    // -- wilcox_rank_sum_greater_approx --
+
+    /// The 99 permutation nulls DIALOGUE's empirical p-value is built on.
+    fn wilcox_nulls() -> Vec<f64> {
+        vec![
+            -0.8409, 1.3844, -1.2555, 0.0701, 1.7114, -0.6029, -0.4722, -0.6354, -0.2858, 0.1381,
+            1.2276, -0.8018, -1.0804, -0.1575, -1.0718, -0.139, -0.5973, -2.184, 0.2408, -0.2594,
+            0.9005, 0.9419, 1.468, 0.7068, 0.819, -0.2935, 1.4186, 1.4988, -0.6571, -0.8528,
+            0.3159, 1.1097, 2.2155, 1.2171, 1.4792, 0.9516, -1.0095, -2.0005, -1.7622, -0.1426,
+            1.5501, -0.8024, -0.0746, 1.8957, -0.4566, 0.5622, -0.887, -0.4602, -0.7243, -0.0692,
+            1.4632, 0.1877, 1.022, -0.5918, -0.1122, -0.925, 0.7533, -0.1126, -0.0641, 0.2333,
+            -1.1366, 0.8548, -0.5784, 0.4964, -0.7601, -0.3414, -2.1023, -0.3017, -1.2724, -0.2797,
+            -0.2041, -0.2256, 0.347, 0.0324, 0.4135, -0.1553, 0.9735, 0.1211, 0.1892, -0.5629,
+            0.4984, -1.7423, 0.9755, -0.0241, 0.6757, -0.7103, 2.3872, -0.4734, -0.0758, -0.5218,
+            0.926, -1.0624, 0.557, 0.9007, 0.9899, 0.3836, -0.3466, -0.5402, -0.1826,
+        ]
+    }
+
+    /// The floor of DIALOGUE's empirical p-value is 0.045, not 0.01.
+    ///
+    /// One real value beating all 99 nulls. R takes the normal approximation
+    /// here because the null group has 99 members, so the naive
+    /// `(#{null >= real} + 1) / 100` is the wrong answer by more than a factor
+    /// of four, and the 0.1 threshold that assigns cell types to programmes
+    /// sits inside the gap.
+    #[test]
+    fn test_wilcox_rank_sum_greater_beats_every_null() {
+        let nulls = wilcox_nulls();
+        let real = nulls.iter().cloned().fold(f64::NEG_INFINITY, f64::max) + 0.1;
+        let p: f64 = wilcox_rank_sum_greater_approx(&[real], &nulls).unwrap();
+        // R: wilcox.test(real, nulls, alternative = "greater")$p.value
+        assert_relative_eq!(p, 0.044_801_589_130_970_6, max_relative = 1e-11);
+    }
+
+    /// Sitting at the 90th null, with a tie against it, still clears 0.1.
+    #[test]
+    fn test_wilcox_rank_sum_greater_at_the_ninetieth_null() {
+        let nulls = wilcox_nulls();
+        let mut sorted = nulls.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let real = sorted[89];
+        let p: f64 = wilcox_rank_sum_greater_approx(&[real], &nulls).unwrap();
+        assert_relative_eq!(p, 0.085_594_599_535_642_33, max_relative = 1e-11);
+        assert!(p < 0.1);
+    }
+
+    /// At the median the test is uninformative, as it should be.
+    #[test]
+    fn test_wilcox_rank_sum_greater_at_the_median() {
+        let nulls = wilcox_nulls();
+        let mut sorted = nulls.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let real = sorted[49];
+        let p: f64 = wilcox_rank_sum_greater_approx(&[real], &nulls).unwrap();
+        assert_relative_eq!(p, 0.506_909_903_708_803, max_relative = 1e-11);
+    }
+
+    /// The general branch, pinned against `wilcox.test(..., exact = FALSE)`.
+    #[test]
+    fn test_wilcox_rank_sum_greater_small_samples() {
+        let a = [3.1, 4.5, 2.2, 6.0];
+        let b = [1.0, 2.5, 3.9, 0.4, 5.5];
+        let p: f64 = wilcox_rank_sum_greater_approx(&a, &b).unwrap();
+        assert_relative_eq!(p, 0.195_633_639_641_319_7, max_relative = 1e-11);
+    }
+
+    /// Ties change the variance, and R takes this branch regardless of size.
+    #[test]
+    fn test_wilcox_rank_sum_greater_with_ties() {
+        let a = [1.0, 2.0, 3.0];
+        let b = [2.0, 3.0, 4.0, 5.0];
+        let p: f64 = wilcox_rank_sum_greater_approx(&a, &b).unwrap();
+        assert_relative_eq!(p, 0.947_403_747_439_979_2, max_relative = 1e-11);
+    }
+
+    #[test]
+    fn test_wilcox_rank_sum_rejects_degenerate_input() {
+        let a = [1.0, 2.0];
+        let empty: [f64; 0] = [];
+        assert!(wilcox_rank_sum_greater_approx(&a, &empty).is_err());
+        assert!(wilcox_rank_sum_greater_approx(&empty, &a).is_err());
+        // Everything tied leaves no variance to test against.
+        assert!(wilcox_rank_sum_greater_approx(&[1.0, 1.0], &[1.0, 1.0]).is_err());
+    }
 
     /// `logit` and `inv_logit` are inverses, with p = 0.5 sitting at zero log-odds.
     #[test]
@@ -792,6 +1435,78 @@ mod tests {
         assert!((pvals_two_sided[0] - 1.0).abs() < 1e-6);
         // Z = 1.96 -> p ≈ 0.05
         assert!((pvals_two_sided[1] - 0.05).abs() < 1e-5);
+    }
+
+    /// Heavy ties must not let the sort order leak into the result.
+    ///
+    /// `calc_fdr` sorts unstably and in parallel, so tied p-values land in an
+    /// arbitrary order. The cumulative-min pass is what makes that irrelevant,
+    /// and this pins it: every tied input must come back with the same adjusted
+    /// value, and repeated runs must agree.
+    #[test]
+    fn test_calc_fdr_is_invariant_to_tie_order() {
+        // one large tie group, one small, and a few distinct values
+        let mut pvals: Vec<f64> = vec![0.02; 500];
+        pvals.extend(vec![0.5; 50]);
+        pvals.extend([0.001, 0.3, 0.7, 0.9, 0.02, 0.5]);
+
+        let first = calc_fdr(&pvals);
+        let second = calc_fdr(&pvals);
+        assert_eq!(first, second, "calc_fdr is not deterministic");
+
+        // every entry sharing a p-value shares its adjusted value
+        for (i, p) in pvals.iter().enumerate() {
+            for (j, q) in pvals.iter().enumerate() {
+                if p == q {
+                    assert_eq!(
+                        first[i], first[j],
+                        "tied p-values {p} got different FDRs at {i} and {j}"
+                    );
+                }
+            }
+        }
+
+        // and a reversed input gives the same multiset of answers
+        let mut reversed = pvals.clone();
+        reversed.reverse();
+        let rev_fdr = calc_fdr(&reversed);
+        let mut a = first.clone();
+        let mut b = rev_fdr;
+        a.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        b.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        for (x, y) in a.iter().zip(b.iter()) {
+            assert!((x - y).abs() < 1e-15, "{x} vs {y}");
+        }
+    }
+
+    /// The upper-tail p-value must be non-increasing in Z, including across the
+    /// switch at `z = 6` from the CDF to the asymptotic tail.
+    ///
+    /// Hotspot's module threshold search skips whole histogram bins on the
+    /// strength of this, so a future tweak to the tail approximation that broke
+    /// monotonicity would silently give the wrong threshold rather than fail
+    /// anywhere near here.
+    #[test]
+    fn test_upper_tail_pval_monotone_in_z() {
+        let mut zs: Vec<f64> = vec![
+            -8.0, -6.0, -1.0, 0.0, 1.0, 3.0, 5.0, 5.9, 5.9999, 6.0, 6.0001, 6.1, 7.0, 10.0, 20.0,
+            37.0, 39.0,
+        ];
+        // and a dense sweep either side of the branch
+        for i in 0..200 {
+            zs.push(5.5 + i as f64 * 0.005);
+        }
+        zs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        let pvals = z_scores_to_pval(&zs, "greater");
+        for w in pvals.windows(2) {
+            assert!(
+                w[1] <= w[0],
+                "upper-tail p-value increased: {} then {}",
+                w[0],
+                w[1]
+            );
+        }
     }
 
     /// Benjamini-Hochberg adjustment stays monotonic and comes back in the input order.

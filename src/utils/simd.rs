@@ -208,23 +208,46 @@ fn sum_squares_scalar_f32(a: &[f32]) -> f32 {
 /// Squared sum
 #[inline(always)]
 fn sum_squares_sse_f32(a: &[f32]) -> f32 {
-    let len = a.len();
-    let chunks = len / 4;
-    let mut acc = f32x4::ZERO;
+    const W: usize = 4;
+    const BLOCK: usize = W * UNROLL;
 
+    let len = a.len();
+    let mut acc = [f32x4::ZERO; UNROLL];
+
+    // SAFETY: every load reads W lanes from an offset the loop bounds keep at
+    // or below `len - W`.
     unsafe {
         let a_ptr = a.as_ptr();
-        for i in 0..chunks {
-            let va = f32x4::from(*(a_ptr.add(i * 4) as *const [f32; 4]));
-            acc += va * va;
-        }
-    }
 
-    let mut sum = acc.reduce_add();
-    for i in (chunks * 4)..len {
-        sum += a[i] * a[i];
+        let n_blocks = len / BLOCK;
+        for i in 0..n_blocks {
+            let base = i * BLOCK;
+            for (u, acc) in acc.iter_mut().enumerate() {
+                let off = base + u * W;
+                let va = f32x4::from(*(a_ptr.add(off) as *const [f32; W]));
+                *acc += va * va;
+            }
+        }
+
+        let mut total = acc[0];
+        for acc in &acc[1..] {
+            total += *acc;
+        }
+
+        let mut i = n_blocks * BLOCK;
+        while i + W <= len {
+            let va = f32x4::from(*(a_ptr.add(i) as *const [f32; W]));
+            total += va * va;
+            i += W;
+        }
+
+        let mut sum = total.reduce_add();
+        while i < len {
+            sum += a[i] * a[i];
+            i += 1;
+        }
+        sum
     }
-    sum
 }
 
 /// SIMD squared sum of a slice of f32 (256-bit)
@@ -501,25 +524,49 @@ fn dot_scalar_f32(a: &[f32], b: &[f32]) -> f32 {
 /// Dot product
 #[inline(always)]
 fn dot_sse_f32(a: &[f32], b: &[f32]) -> f32 {
-    let len = a.len();
-    let chunks = len / 4;
-    let mut acc = f32x4::ZERO;
+    const W: usize = 4;
+    const BLOCK: usize = W * UNROLL;
 
+    let len = a.len();
+    let mut acc = [f32x4::ZERO; UNROLL];
+
+    // SAFETY: every load reads W lanes from an offset the loop bounds keep at
+    // or below `len - W`.
     unsafe {
         let a_ptr = a.as_ptr();
         let b_ptr = b.as_ptr();
-        for i in 0..chunks {
-            let va = f32x4::from(*(a_ptr.add(i * 4) as *const [f32; 4]));
-            let vb = f32x4::from(*(b_ptr.add(i * 4) as *const [f32; 4]));
-            acc += va * vb;
-        }
-    }
 
-    let mut sum = acc.reduce_add();
-    for i in (chunks * 4)..len {
-        sum += a[i] * b[i];
+        let n_blocks = len / BLOCK;
+        for i in 0..n_blocks {
+            let base = i * BLOCK;
+            for (u, acc) in acc.iter_mut().enumerate() {
+                let off = base + u * W;
+                let va = f32x4::from(*(a_ptr.add(off) as *const [f32; W]));
+                let vb = f32x4::from(*(b_ptr.add(off) as *const [f32; W]));
+                *acc += va * vb;
+            }
+        }
+
+        let mut total = acc[0];
+        for acc in &acc[1..] {
+            total += *acc;
+        }
+
+        let mut i = n_blocks * BLOCK;
+        while i + W <= len {
+            let va = f32x4::from(*(a_ptr.add(i) as *const [f32; W]));
+            let vb = f32x4::from(*(b_ptr.add(i) as *const [f32; W]));
+            total += va * vb;
+            i += W;
+        }
+
+        let mut sum = total.reduce_add();
+        while i < len {
+            sum += a[i] * b[i];
+            i += 1;
+        }
+        sum
     }
-    sum
 }
 
 /// SIMD dot product of two slices of f32 (256-bit)
@@ -695,25 +742,49 @@ fn dot_scalar_f64(a: &[f64], b: &[f64]) -> f64 {
 /// Dot product
 #[inline(always)]
 fn dot_sse_f64(a: &[f64], b: &[f64]) -> f64 {
-    let len = a.len();
-    let chunks = len / 2;
-    let mut acc = f64x2::ZERO;
+    const W: usize = 2;
+    const BLOCK: usize = W * UNROLL;
 
+    let len = a.len();
+    let mut acc = [f64x2::ZERO; UNROLL];
+
+    // SAFETY: every load reads W lanes from an offset the loop bounds keep at
+    // or below `len - W`.
     unsafe {
         let a_ptr = a.as_ptr();
         let b_ptr = b.as_ptr();
-        for i in 0..chunks {
-            let va = f64x2::from(*(a_ptr.add(i * 2) as *const [f64; 2]));
-            let vb = f64x2::from(*(b_ptr.add(i * 2) as *const [f64; 2]));
-            acc += va * vb;
-        }
-    }
 
-    let mut sum = acc.reduce_add();
-    for i in (chunks * 2)..len {
-        sum += a[i] * b[i];
+        let n_blocks = len / BLOCK;
+        for i in 0..n_blocks {
+            let base = i * BLOCK;
+            for (u, acc) in acc.iter_mut().enumerate() {
+                let off = base + u * W;
+                let va = f64x2::from(*(a_ptr.add(off) as *const [f64; W]));
+                let vb = f64x2::from(*(b_ptr.add(off) as *const [f64; W]));
+                *acc += va * vb;
+            }
+        }
+
+        let mut total = acc[0];
+        for acc in &acc[1..] {
+            total += *acc;
+        }
+
+        let mut i = n_blocks * BLOCK;
+        while i + W <= len {
+            let va = f64x2::from(*(a_ptr.add(i) as *const [f64; W]));
+            let vb = f64x2::from(*(b_ptr.add(i) as *const [f64; W]));
+            total += va * vb;
+            i += W;
+        }
+
+        let mut sum = total.reduce_add();
+        while i < len {
+            sum += a[i] * b[i];
+            i += 1;
+        }
+        sum
     }
-    sum
 }
 
 /// SIMD dot product of two slices of f64 (256-bit)
@@ -1453,23 +1524,44 @@ fn sum_scalar_f32(a: &[f32]) -> f32 {
 /// Sum
 #[inline(always)]
 fn sum_sse_f32(a: &[f32]) -> f32 {
-    let len = a.len();
-    let chunks = len / 4;
-    let mut acc = f32x4::ZERO;
+    const W: usize = 4;
+    const BLOCK: usize = W * UNROLL;
 
+    let len = a.len();
+    let mut acc = [f32x4::ZERO; UNROLL];
+
+    // SAFETY: every load reads W lanes from an offset the loop bounds keep at
+    // or below `len - W`.
     unsafe {
         let a_ptr = a.as_ptr();
-        for i in 0..chunks {
-            let va = f32x4::from(*(a_ptr.add(i * 4) as *const [f32; 4]));
-            acc += va;
-        }
-    }
 
-    let mut sum = acc.reduce_add();
-    for i in (chunks * 4)..len {
-        sum += a[i];
+        let n_blocks = len / BLOCK;
+        for i in 0..n_blocks {
+            let base = i * BLOCK;
+            for (u, acc) in acc.iter_mut().enumerate() {
+                let off = base + u * W;
+                *acc += f32x4::from(*(a_ptr.add(off) as *const [f32; W]));
+            }
+        }
+
+        let mut total = acc[0];
+        for acc in &acc[1..] {
+            total += *acc;
+        }
+
+        let mut i = n_blocks * BLOCK;
+        while i + W <= len {
+            total += f32x4::from(*(a_ptr.add(i) as *const [f32; W]));
+            i += W;
+        }
+
+        let mut sum = total.reduce_add();
+        while i < len {
+            sum += a[i];
+            i += 1;
+        }
+        sum
     }
-    sum
 }
 
 /// SIMD sum of a slice of f32 (256-bit)
@@ -1626,23 +1718,44 @@ fn sum_scalar_f64(a: &[f64]) -> f64 {
 /// Sum
 #[inline(always)]
 fn sum_sse_f64(a: &[f64]) -> f64 {
-    let len = a.len();
-    let chunks = len / 2;
-    let mut acc = f64x2::ZERO;
+    const W: usize = 2;
+    const BLOCK: usize = W * UNROLL;
 
+    let len = a.len();
+    let mut acc = [f64x2::ZERO; UNROLL];
+
+    // SAFETY: every load reads W lanes from an offset the loop bounds keep at
+    // or below `len - W`.
     unsafe {
         let a_ptr = a.as_ptr();
-        for i in 0..chunks {
-            let va = f64x2::from(*(a_ptr.add(i * 2) as *const [f64; 2]));
-            acc += va;
-        }
-    }
 
-    let mut sum = acc.reduce_add();
-    for i in (chunks * 2)..len {
-        sum += a[i];
+        let n_blocks = len / BLOCK;
+        for i in 0..n_blocks {
+            let base = i * BLOCK;
+            for (u, acc) in acc.iter_mut().enumerate() {
+                let off = base + u * W;
+                *acc += f64x2::from(*(a_ptr.add(off) as *const [f64; W]));
+            }
+        }
+
+        let mut total = acc[0];
+        for acc in &acc[1..] {
+            total += *acc;
+        }
+
+        let mut i = n_blocks * BLOCK;
+        while i + W <= len {
+            total += f64x2::from(*(a_ptr.add(i) as *const [f64; W]));
+            i += W;
+        }
+
+        let mut sum = total.reduce_add();
+        while i < len {
+            sum += a[i];
+            i += 1;
+        }
+        sum
     }
-    sum
 }
 
 /// SIMD sum of a slice of f64 (256-bit)
@@ -1805,24 +1918,48 @@ fn sum_squared_dev_scalar_f32(a: &[f32], mean: f32) -> f32 {
 /// Sum of squared deviations from the mean
 #[inline(always)]
 fn sum_squared_dev_sse_f32(a: &[f32], mean: f32) -> f32 {
+    const W: usize = 4;
+    const BLOCK: usize = W * UNROLL;
+
     let len = a.len();
-    let chunks = len / 4;
-    let mut acc = f32x4::ZERO;
+    let mut acc = [f32x4::ZERO; UNROLL];
     let mean_vec = f32x4::splat(mean);
+
+    // SAFETY: every load reads W lanes from an offset the loop bounds keep at
+    // or below `len - W`.
     unsafe {
         let a_ptr = a.as_ptr();
-        for i in 0..chunks {
-            let va = f32x4::from(*(a_ptr.add(i * 4) as *const [f32; 4]));
-            let diff = va - mean_vec;
-            acc += diff * diff;
+
+        let n_blocks = len / BLOCK;
+        for i in 0..n_blocks {
+            let base = i * BLOCK;
+            for (u, acc) in acc.iter_mut().enumerate() {
+                let off = base + u * W;
+                let diff = f32x4::from(*(a_ptr.add(off) as *const [f32; W])) - mean_vec;
+                *acc += diff * diff;
+            }
         }
+
+        let mut total = acc[0];
+        for acc in &acc[1..] {
+            total += *acc;
+        }
+
+        let mut i = n_blocks * BLOCK;
+        while i + W <= len {
+            let diff = f32x4::from(*(a_ptr.add(i) as *const [f32; W])) - mean_vec;
+            total += diff * diff;
+            i += W;
+        }
+
+        let mut sum = total.reduce_add();
+        while i < len {
+            let diff = a[i] - mean;
+            sum += diff * diff;
+            i += 1;
+        }
+        sum
     }
-    let mut sum = acc.reduce_add();
-    for i in (chunks * 4)..len {
-        let diff = a[i] - mean;
-        sum += diff * diff;
-    }
-    sum
 }
 
 /// SIMD sum of squared deviations of a slice of f32 (256-bit)
@@ -1992,26 +2129,48 @@ fn sum_squared_dev_scalar_f64(a: &[f64], mean: f64) -> f64 {
 /// Sum of squared deviations from the mean
 #[inline(always)]
 fn sum_squared_dev_sse_f64(a: &[f64], mean: f64) -> f64 {
+    const W: usize = 2;
+    const BLOCK: usize = W * UNROLL;
+
     let len = a.len();
-    let chunks = len / 2;
-    let mut acc = f64x2::ZERO;
+    let mut acc = [f64x2::ZERO; UNROLL];
     let mean_vec = f64x2::splat(mean);
 
+    // SAFETY: every load reads W lanes from an offset the loop bounds keep at
+    // or below `len - W`.
     unsafe {
         let a_ptr = a.as_ptr();
-        for i in 0..chunks {
-            let va = f64x2::from(*(a_ptr.add(i * 2) as *const [f64; 2]));
-            let diff = va - mean_vec;
-            acc += diff * diff;
-        }
-    }
 
-    let mut sum = acc.reduce_add();
-    for i in (chunks * 2)..len {
-        let diff = a[i] - mean;
-        sum += diff * diff;
+        let n_blocks = len / BLOCK;
+        for i in 0..n_blocks {
+            let base = i * BLOCK;
+            for (u, acc) in acc.iter_mut().enumerate() {
+                let off = base + u * W;
+                let diff = f64x2::from(*(a_ptr.add(off) as *const [f64; W])) - mean_vec;
+                *acc += diff * diff;
+            }
+        }
+
+        let mut total = acc[0];
+        for acc in &acc[1..] {
+            total += *acc;
+        }
+
+        let mut i = n_blocks * BLOCK;
+        while i + W <= len {
+            let diff = f64x2::from(*(a_ptr.add(i) as *const [f64; W])) - mean_vec;
+            total += diff * diff;
+            i += W;
+        }
+
+        let mut sum = total.reduce_add();
+        while i < len {
+            let diff = a[i] - mean;
+            sum += diff * diff;
+            i += 1;
+        }
+        sum
     }
-    sum
 }
 
 /// SIMD sum of squared deviations of a slice of f64 (256-bit)
