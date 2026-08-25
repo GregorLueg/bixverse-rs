@@ -760,6 +760,58 @@ pub enum BixverseErrors {
         found: usize,
     },
 
+    // -- LDA --
+    /// The requested topic count cannot be supported by the corpus.
+    ///
+    /// A topic needs somewhere to put its mass, so `k` above the vocabulary
+    /// size leaves topics that no document can ever distinguish.
+    #[error(
+        "LDA: the requested topic count ({requested}) exceeds what the corpus supports (max: {max_available})."
+    )]
+    LdaInvalidTopicCount {
+        /// Requested number of topics
+        requested: usize,
+        /// Largest topic count the corpus supports
+        max_available: usize,
+    },
+
+    /// A Dirichlet hyperparameter is not strictly positive.
+    #[error("LDA: hyperparameter '{name}' must be strictly positive, got {value}.")]
+    LdaInvalidHyperparameter {
+        /// Name of the offending hyperparameter
+        name: String,
+        /// Value that was supplied
+        value: f64,
+    },
+
+    /// The document-term matrix carries no counts at all.
+    #[error("LDA: the document-term matrix holds no non-zero entries.")]
+    LdaEmptyMatrix,
+
+    /// A non-finite value reached the variational parameters.
+    #[error("LDA: the variational parameters became non-finite. Please check the inputs.")]
+    LdaNonFinite,
+
+    /// Coherence was asked for more top terms than the vocabulary holds.
+    #[error(
+        "LDA: coherence requested the top {requested} terms, but the vocabulary holds {vocab_size}."
+    )]
+    LdaTopNTooLarge {
+        /// Requested number of top terms per topic
+        requested: usize,
+        /// Vocabulary size available
+        vocab_size: usize,
+    },
+
+    /// Metric inputs disagree on the number of documents or topics.
+    #[error("LDA metrics: expected a dimension of {expected}, but received {got}.")]
+    LdaDimensionMismatch {
+        /// Dimension the model implies
+        expected: usize,
+        /// Dimension that was supplied
+        got: usize,
+    },
+
     // -- Hotspot --
     /// Invalid model chosen for Hotspot
     #[cfg(feature = "single-cell")]
