@@ -1,4 +1,4 @@
-//! Distribution tails: normal, chi-squared, Student's t and F.
+//! Distribution tails: normal, gamma, chi-squared, Student's t and F.
 //!
 //! Plain functions rather than distribution objects, because every caller here
 //! wants a tail probability and there is nothing worth carrying state for.
@@ -295,6 +295,65 @@ pub fn norm_ppf(p: f64) -> Result<f64, BixverseErrors> {
         )));
     }
     Ok(-std::f64::consts::SQRT_2 * erfc_inv(2.0 * p))
+}
+
+///////////
+// Gamma //
+///////////
+
+/// Gamma cumulative distribution function, shape and scale parametrisation.
+///
+/// `P(k, x / theta)`. No location parameter: every caller here fits with the
+/// location pinned at zero.
+///
+/// ### Params
+///
+/// * `x` - Argument. Negative values give 0.0
+/// * `shape` - Shape `k`, finite and strictly positive
+/// * `scale` - Scale `theta`, finite and strictly positive
+///
+/// ### Returns
+///
+/// `P(X <= x)`, or [`BixverseErrors::InvalidArgument`] for a bad parameter.
+pub fn gamma_cdf(x: f64, shape: f64, scale: f64) -> Result<f64, BixverseErrors> {
+    check_positive("shape", shape)?;
+    check_positive("scale", scale)?;
+    if x <= 0.0 {
+        return Ok(0.0);
+    }
+    if x.is_infinite() {
+        return Ok(1.0);
+    }
+    Ok(reg_gamma_lower(shape, x / scale))
+}
+
+/// Gamma survival function, shape and scale parametrisation.
+///
+/// The upper regularised incomplete gamma directly, which is the whole reason
+/// this exists: a two-tailed p-value built from `1 - gamma_cdf` saturates at
+/// zero once the cdf reaches 1, and reference implementations reach for
+/// arbitrary-precision arithmetic to get past it. The continued fraction hands
+/// back the tail with no cancellation and no bignum.
+///
+/// ### Params
+///
+/// * `x` - Argument. Negative values give 1.0
+/// * `shape` - Shape `k`, finite and strictly positive
+/// * `scale` - Scale `theta`, finite and strictly positive
+///
+/// ### Returns
+///
+/// `P(X > x)`, or [`BixverseErrors::InvalidArgument`] for a bad parameter.
+pub fn gamma_sf(x: f64, shape: f64, scale: f64) -> Result<f64, BixverseErrors> {
+    check_positive("shape", shape)?;
+    check_positive("scale", scale)?;
+    if x <= 0.0 {
+        return Ok(1.0);
+    }
+    if x.is_infinite() {
+        return Ok(0.0);
+    }
+    Ok(reg_gamma_upper(shape, x / scale))
 }
 
 /////////////////
@@ -617,5 +676,76 @@ mod tests {
         assert_eq!(f_sf(f64::INFINITY, 1.0, 1.0).unwrap(), 0.0);
         assert!(f_sf(1.0, 0.0, 1.0).is_err());
         assert!(f_sf(1.0, 1.0, -2.0).is_err());
+    }
+
+    ///////////
+    // Gamma //
+    ///////////
+
+    #[test]
+    fn test_gamma_cdf_matches_r() {
+        // R: pgamma(x, shape = k, scale = theta)
+        let cases = [
+            (1.0, 2.0, 3.0, 0.044_624_919_234_947_685),
+            (0.5, 0.3, 2.0, 0.695_545_214_656_659_5),
+            (10.0, 5.0, 1.0, 0.970_747_311_923_038_9),
+            (2.5, 7.5, 0.4, 0.359_143_513_422_833_35),
+        ];
+
+        for (x, shape, scale, expected) in cases {
+            assert_relative_eq!(
+                gamma_cdf(x, shape, scale).unwrap(),
+                expected,
+                max_relative = 1e-12
+            );
+        }
+    }
+
+    #[test]
+    fn test_gamma_sf_matches_r() {
+        // R: pgamma(x, shape = k, scale = theta, lower.tail = FALSE)
+        let cases = [
+            (1.0, 2.0, 3.0, 0.955_375_080_765_052_4),
+            (0.5, 0.3, 2.0, 0.304_454_785_343_340_5),
+            (10.0, 5.0, 1.0, 0.029_252_688_076_961_08),
+            (50.0, 2.0, 3.0, 1.020_735_571_764_047_2e-6),
+        ];
+
+        for (x, shape, scale, expected) in cases {
+            assert_relative_eq!(
+                gamma_sf(x, shape, scale).unwrap(),
+                expected,
+                max_relative = 1e-11
+            );
+        }
+    }
+
+    /// The whole reason `gamma_sf` exists: `1 - cdf` is a flat zero here.
+    #[test]
+    fn test_gamma_sf_far_tail() {
+        // R: pgamma(200, shape = 2, scale = 1, lower.tail = FALSE)
+        let sf = gamma_sf(200.0, 2.0, 1.0).unwrap();
+
+        assert_relative_eq!(sf, 2.781_632_018_740_842_3e-85, max_relative = 1e-9);
+        assert_eq!(1.0 - gamma_cdf(200.0, 2.0, 1.0).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_gamma_cdf_sf_complement() {
+        for &x in &[0.1, 1.0, 3.0, 7.5] {
+            let cdf = gamma_cdf(x, 2.5, 1.5).unwrap();
+            let sf = gamma_sf(x, 2.5, 1.5).unwrap();
+            assert_relative_eq!(cdf + sf, 1.0, max_relative = 1e-14);
+        }
+    }
+
+    #[test]
+    fn test_gamma_edges() {
+        assert_eq!(gamma_cdf(-1.0, 2.0, 1.0).unwrap(), 0.0);
+        assert_eq!(gamma_sf(-1.0, 2.0, 1.0).unwrap(), 1.0);
+        assert_eq!(gamma_cdf(f64::INFINITY, 2.0, 1.0).unwrap(), 1.0);
+        assert_eq!(gamma_sf(f64::INFINITY, 2.0, 1.0).unwrap(), 0.0);
+        assert!(gamma_cdf(1.0, 0.0, 1.0).is_err());
+        assert!(gamma_sf(1.0, 1.0, -1.0).is_err());
     }
 }

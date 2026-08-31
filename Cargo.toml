@@ -14,6 +14,9 @@ categories = [
   "algorithms",
 ]
 keywords = ["bioinformatics", "single-cell", "genomics", "statistics", "gpu"]
+# Fixture generators and other development scripts. Not part of the library,
+# and they reach for reference implementations that are not dependencies.
+exclude = ["dev/"]
 
 [lib]
 name = "bixverse_rs"

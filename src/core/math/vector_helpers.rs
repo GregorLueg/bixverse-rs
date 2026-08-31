@@ -307,6 +307,99 @@ where
     Some(cov / denom)
 }
 
+///////////////////
+// Interpolation //
+///////////////////
+
+/// Linear interpolation at a single point, extrapolating past both ends.
+///
+/// Outside the knot range the nearest end segment is extended rather than
+/// clamped, which is `scipy.interpolate.interp1d(..., fill_value="extrapolate")`
+/// and not R's `approx(..., rule = 2)`. A single knot gives a constant.
+///
+/// ### Params
+///
+/// * `x` - Knot positions, strictly ascending and non-empty
+/// * `y` - Knot values, the same length as `x`
+/// * `at` - Where to evaluate
+///
+/// ### Returns
+///
+/// The interpolated (or extrapolated) value. An empty `x`, or a `y` shorter
+/// than `x`, returns `at` unchanged rather than indexing out of bounds; both
+/// are caller errors that [`crate::enrichment::blitzgsea::BlitzGseaNull`]
+/// rejects up front, and neither is worth a `Result` on a path this hot.
+pub fn interp_linear_at<T>(x: &[T], y: &[T], at: T) -> T
+where
+    T: BixverseFloat,
+{
+    let n = x.len();
+    if n == 0 || y.len() < n {
+        return at;
+    }
+    if n == 1 {
+        return y[0];
+    }
+
+    // Index of the segment to use: the interior segment containing `at`, or the
+    // nearest end segment when `at` falls outside the knots
+    let upper = x.partition_point(|&k| k <= at);
+    let j = upper.clamp(1, n - 1) - 1;
+
+    let dx = x[j + 1] - x[j];
+    if dx <= T::zero() {
+        return y[j];
+    }
+
+    y[j] + (y[j + 1] - y[j]) * ((at - x[j]) / dx)
+}
+
+/// Linear interpolation on a log-spaced knot grid.
+///
+/// Brackets on `x` directly, which is valid because the logarithm is monotone,
+/// then interpolates the position within that bracket in log space. On a grid
+/// whose knots grow geometrically, straight linear interpolation gives the
+/// widest segments the coarsest resolution; this spaces the resolution evenly
+/// instead.
+///
+/// ### Params
+///
+/// * `x` - Knot positions, strictly ascending and strictly positive
+/// * `y` - Knot values, the same length as `x`
+/// * `at` - Where to evaluate, strictly positive
+///
+/// ### Returns
+///
+/// The interpolated (or extrapolated) value. Degenerate inputs are handled as
+/// in [`interp_linear_at`]; a non-positive `at` or knot falls back to linear
+/// interpolation, since the logarithm is undefined there.
+pub fn interp_log_linear_at<T>(x: &[T], y: &[T], at: T) -> T
+where
+    T: BixverseFloat,
+{
+    let n = x.len();
+    if n == 0 || y.len() < n {
+        return at;
+    }
+    if n == 1 {
+        return y[0];
+    }
+
+    let upper = x.partition_point(|&k| k <= at);
+    let j = upper.clamp(1, n - 1) - 1;
+
+    if at <= T::zero() || x[j] <= T::zero() || x[j + 1] <= T::zero() {
+        return interp_linear_at(x, y, at);
+    }
+
+    let dx = x[j + 1].ln() - x[j].ln();
+    if dx <= T::zero() {
+        return y[j];
+    }
+
+    y[j] + (y[j + 1] - y[j]) * ((at.ln() - x[j].ln()) / dx)
+}
+
 ///////////
 // Tests //
 ///////////
@@ -436,5 +529,77 @@ mod tests {
         let vec = vec![2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0];
         let std = standard_deviation(&vec);
         assert!((std - 2.1380899352).abs() < 1e-6);
+    }
+
+    ///////////////////
+    // Interpolation //
+    ///////////////////
+
+    #[test]
+    fn test_interp_linear_hits_the_knots() {
+        let x = [0.0, 1.0, 3.0, 6.0];
+        let y = [10.0, 20.0, 0.0, 30.0];
+
+        for (&xi, &yi) in x.iter().zip(y.iter()) {
+            assert!((interp_linear_at(&x, &y, xi) - yi).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn test_interp_linear_interior() {
+        let x = [0.0, 1.0, 3.0];
+        let y = [0.0, 10.0, 30.0];
+
+        assert!((interp_linear_at(&x, &y, 0.5) - 5.0).abs() < 1e-12);
+        assert!((interp_linear_at(&x, &y, 2.0) - 20.0).abs() < 1e-12);
+    }
+
+    /// Past either end the nearest segment is extended, not clamped.
+    #[test]
+    fn test_interp_linear_extrapolates() {
+        let x = [1.0, 2.0, 3.0];
+        let y = [10.0, 20.0, 30.0];
+
+        assert!((interp_linear_at(&x, &y, 0.0) - 0.0).abs() < 1e-12);
+        assert!((interp_linear_at(&x, &y, 5.0) - 50.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_interp_linear_single_knot_is_constant() {
+        assert!((interp_linear_at(&[2.0], &[7.0], -100.0) - 7.0).abs() < 1e-12);
+        assert!((interp_linear_at(&[2.0], &[7.0], 100.0) - 7.0).abs() < 1e-12);
+    }
+
+    /// Degenerate knots must not index out of bounds. `BlitzGseaNull` rejects
+    /// these up front, but the functions are public and must not panic.
+    #[test]
+    fn test_interp_degenerate_knots() {
+        assert!((interp_linear_at::<f64>(&[], &[], 3.0) - 3.0).abs() < 1e-12);
+        assert!((interp_linear_at(&[1.0, 2.0, 3.0], &[1.0], 2.5) - 2.5).abs() < 1e-12);
+        assert!((interp_log_linear_at::<f64>(&[], &[], 3.0) - 3.0).abs() < 1e-12);
+        assert!((interp_log_linear_at(&[1.0, 2.0, 3.0], &[1.0], 2.5) - 2.5).abs() < 1e-12);
+    }
+
+    /// Log-space interpolation puts the midpoint of a geometric segment at the
+    /// geometric mean, not the arithmetic one.
+    #[test]
+    fn test_interp_log_linear_geometric_midpoint() {
+        let x = [1.0, 100.0];
+        let y = [0.0, 1.0];
+
+        assert!((interp_log_linear_at(&x, &y, 10.0) - 0.5).abs() < 1e-12);
+        assert!((interp_log_linear_at(&x, &y, 1.0) - 0.0).abs() < 1e-12);
+        assert!((interp_log_linear_at(&x, &y, 100.0) - 1.0).abs() < 1e-12);
+        assert!((interp_log_linear_at(&x, &y, 10_000.0) - 2.0).abs() < 1e-12);
+    }
+
+    /// A non-positive query has no logarithm, so it falls back to linear.
+    #[test]
+    fn test_interp_log_linear_falls_back_on_non_positive() {
+        let x = [1.0, 3.0];
+        let y = [10.0, 30.0];
+
+        let linear = interp_linear_at(&x, &y, -1.0);
+        assert!((interp_log_linear_at(&x, &y, -1.0) - linear).abs() < 1e-12);
     }
 }

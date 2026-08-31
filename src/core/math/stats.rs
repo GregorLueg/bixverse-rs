@@ -9,8 +9,64 @@ use statrs::distribution::{Continuous, ContinuousCDF, Normal};
 use statrs::function::gamma::ln_gamma;
 
 use crate::core::math::distributions::{chisq_sf, f_sf, norm_sf, t_pval_two_sided};
+use crate::core::math::special::digamma;
 use crate::core::math::vector_helpers::*;
 use crate::prelude::*;
+
+////////////
+// Consts //
+////////////
+
+/// Iteration budget for the Newton solve in [`fit_gamma_mle`].
+///
+/// Minka's starting point is within about 1.5% of the root and Newton doubles
+/// the correct digits each step, so five or six iterations is the working
+/// number. This is a runaway guard for pathological samples, not a limit the
+/// solver is expected to reach.
+const GAMMA_MLE_MAX_ITER: usize = 100;
+
+/// Log-scale spread below which [`fit_gamma_mle`] refuses to fit.
+///
+/// The score equation solves `ln k - psi(k) = s`, whose left side behaves like
+/// `1 / (2k)` for large `k`, so `s` at this floor already implies a shape near
+/// 5e11. An exact zero test would not do: a sample of identical values reaches
+/// `s = 0` only up to rounding, and the sign of that last bit decides between an
+/// error and a nonsense fit.
+const GAMMA_MLE_MIN_LOG_SPREAD: f64 = 1e-12;
+
+/// Relative step size below which the [`fit_gamma_mle`] Newton solve stops.
+///
+/// The shape feeds a gamma tail probability, and moving the shape by one part
+/// in 1e-12 moves that tail well below `f64` resolution.
+const GAMMA_MLE_TOL: f64 = 1e-12;
+
+/// Term budget for either [`kolmogorov_sf`] series.
+///
+/// Both branches converge in a handful of terms over the range each is used on,
+/// so this is a runaway guard rather than a working limit.
+const KS_MAX_TERMS: usize = 100;
+
+/// Relative size at which a [`kolmogorov_sf`] term stops contributing.
+const KS_SERIES_EPS: f64 = 1e-14;
+
+/// Crossover between the two [`kolmogorov_sf`] series.
+///
+/// The alternating form converges as `exp(-2 lambda^2)` per term and the
+/// theta-transformed form as `exp(-pi^2 / (8 lambda^2))`, so each is fast
+/// exactly where the other is useless. At one they are both about three terms,
+/// which makes it the natural place to switch.
+const KS_SERIES_CROSSOVER: f64 = 1.0;
+
+/// Stephens' constant term correcting `sqrt(n) * D` towards the exact
+/// Kolmogorov distribution.
+///
+/// ### References
+///
+/// Stephens, Journal of the Royal Statistical Society B, 1970
+const KS_STEPHENS_A: f64 = 0.12;
+
+/// Stephens' `1 / sqrt(n)` term, alongside [`KS_STEPHENS_A`].
+const KS_STEPHENS_B: f64 = 0.11;
 
 //////////////////
 // Effect sizes //
@@ -727,6 +783,234 @@ pub fn calculate_critval<T: BixverseFloat>(
     random_sample[index + 1]
 }
 
+////////////////////////
+// Distribution fits //
+////////////////////////
+
+/// Maximum likelihood fit of a gamma with the location fixed at zero.
+///
+/// The scale drops out of the likelihood analytically as `theta = mean / k`,
+/// which leaves the one-dimensional score equation
+/// `ln k - psi(k) = ln(mean) - mean(ln x)`. The right-hand side is the log of
+/// the ratio of the arithmetic to the geometric mean, so it is non-negative and
+/// zero only for degenerate data. Newton on that equation converges in a
+/// handful of steps from Minka's closed-form starting point.
+///
+/// Matches `scipy.stats.gamma.fit(x, floc=0)` and R's
+/// `MASS::fitdistr(x, "gamma")` up to their own convergence tolerances.
+///
+/// ### Params
+///
+/// * `x` - Observations, all strictly positive and finite
+///
+/// ### Returns
+///
+/// `(shape, scale)`, or [`BixverseErrors::InvalidArgument`] when the sample is
+/// empty, holds a non-positive or non-finite value, or has less log-scale spread
+/// than [`GAMMA_MLE_MIN_LOG_SPREAD`], which pins the shape at absurd values.
+///
+/// ### References
+///
+/// Minka, Estimating a Gamma distribution, 2002
+pub fn fit_gamma_mle(x: &[f64]) -> Result<(f64, f64), BixverseErrors> {
+    if x.is_empty() {
+        return Err(BixverseErrors::InvalidArgument(
+            "Cannot fit a gamma distribution to an empty sample.".to_string(),
+        ));
+    }
+
+    let n = x.len() as f64;
+    let mut sum = 0.0;
+    let mut sum_log = 0.0;
+    for &value in x {
+        if !(value.is_finite() && value > 0.0) {
+            return Err(BixverseErrors::InvalidArgument(format!(
+                "Gamma fitting needs finite, strictly positive observations; got {value}."
+            )));
+        }
+        sum += value;
+        sum_log += value.ln();
+    }
+
+    let mean = sum / n;
+    // log of the arithmetic-to-geometric mean ratio; zero iff every x is equal
+    let s = mean.ln() - sum_log / n;
+
+    if !s.is_finite() || s <= GAMMA_MLE_MIN_LOG_SPREAD {
+        return Err(BixverseErrors::InvalidArgument(format!(
+            "Gamma fitting needs spread on the log scale; got {s}, which is at or below {GAMMA_MLE_MIN_LOG_SPREAD}."
+        )));
+    }
+
+    // Minka's approximation, accurate to about 1.5% before any refinement
+    let mut shape = (3.0 - s + ((3.0 - s) * (3.0 - s) + 24.0 * s).sqrt()) / (12.0 * s);
+
+    for _ in 0..GAMMA_MLE_MAX_ITER {
+        let score = shape.ln() - digamma(shape) - s;
+        let derivative = 1.0 / shape - trigamma(shape);
+        if derivative.abs() < f64::MIN_POSITIVE {
+            break;
+        }
+        let next = shape - score / derivative;
+        // Newton can overshoot into the non-positive half on a near-degenerate
+        // sample; halving towards the current point keeps it in the domain.
+        let next = if next.is_finite() && next > 0.0 {
+            next
+        } else {
+            0.5 * shape
+        };
+        let step = (next - shape).abs();
+        shape = next;
+        if step <= GAMMA_MLE_TOL * shape {
+            break;
+        }
+    }
+
+    Ok((shape, mean / shape))
+}
+
+//////////////////////
+// Goodness of fit //
+//////////////////////
+
+/// Result of a one-sample Kolmogorov-Smirnov test
+#[derive(Clone, Copy, Debug)]
+pub struct KsTestRes {
+    /// The two-sided KS statistic, the largest gap between the empirical and
+    /// the reference CDF
+    pub statistic: f64,
+    /// Asymptotic two-sided p-value under the null that the sample came from
+    /// the reference distribution
+    pub pval: f64,
+}
+
+/// Survival function of the Kolmogorov distribution.
+///
+/// Two series, split at [`KS_SERIES_CROSSOVER`]. Above it the alternating form
+/// `Q = 2 sum (-1)^(j-1) exp(-2 j^2 lambda^2)`; below it the theta-transformed
+/// form `Q = 1 - sqrt(2 pi) / lambda * sum exp(-(2k-1)^2 pi^2 / (8 lambda^2))`,
+/// which is the same function written so that small `lambda` converges fast.
+///
+/// One series alone will not do. The alternating form needs terms in proportion
+/// to `1 / lambda`, so at `lambda = 0.001` it is nowhere near converged after a
+/// hundred of them and its partial sum is 0.02 where the answer is 1.
+///
+/// ### Params
+///
+/// * `lambda` - The scaled KS statistic, non-negative
+///
+/// ### Returns
+///
+/// `Q(lambda)` in `[0, 1]`, decreasing in `lambda`. Zero gives 1.0.
+///
+/// ### References
+///
+/// Press et al., Numerical Recipes, 3rd ed., section 6.14
+fn kolmogorov_sf(lambda: f64) -> f64 {
+    if lambda <= 0.0 {
+        return 1.0;
+    }
+
+    if lambda >= KS_SERIES_CROSSOVER {
+        let a = -2.0 * lambda * lambda;
+        let mut sum = 0.0;
+        let mut sign = 1.0;
+
+        for j in 1..=KS_MAX_TERMS {
+            let term = (a * (j * j) as f64).exp();
+            sum += sign * term;
+            if term <= KS_SERIES_EPS * sum.abs() {
+                break;
+            }
+            sign = -sign;
+        }
+
+        return (2.0 * sum).clamp(0.0, 1.0);
+    }
+
+    // exp(-(2k-1)^2 * pi^2 / (8 lambda^2)), summed over odd squares
+    let a = -std::f64::consts::PI * std::f64::consts::PI / (8.0 * lambda * lambda);
+    let mut sum = 0.0;
+
+    for k in 1..=KS_MAX_TERMS {
+        let odd = (2 * k - 1) as f64;
+        let term = (a * odd * odd).exp();
+        sum += term;
+        if term <= KS_SERIES_EPS * sum {
+            break;
+        }
+    }
+
+    (1.0 - (2.0 * std::f64::consts::PI).sqrt() / lambda * sum).clamp(0.0, 1.0)
+}
+
+/// One-sample Kolmogorov-Smirnov test against a fully specified distribution.
+///
+/// The p-value is the asymptotic Kolmogorov form with Stephens' finite-sample
+/// correction on the statistic, which tracks the exact distribution to about
+/// three decimal places from `n = 5` upwards. `scipy.stats.kstest` evaluates the
+/// exact `kstwo` distribution instead, so the two agree in the range that
+/// matters for a goodness-of-fit decision but not digit for digit.
+///
+/// The reference distribution must not have been fitted on this same sample if
+/// the p-value is to be read literally: estimating parameters from the data
+/// shrinks the statistic and makes the test conservative. That is a known
+/// property of how the calibration diagnostics use it, not something this
+/// function corrects for.
+///
+/// ### Params
+///
+/// * `x` - The sample. Non-finite values are an error rather than being dropped
+/// * `cdf` - The reference CDF, evaluated pointwise. Must be non-decreasing
+///
+/// ### Returns
+///
+/// A [`KsTestRes`], or [`BixverseErrors::InvalidArgument`] for an empty sample
+/// or a non-finite observation.
+///
+/// ### References
+///
+/// Stephens, Journal of the Royal Statistical Society B, 1970
+pub fn ks_test_1samp<F>(x: &[f64], cdf: F) -> Result<KsTestRes, BixverseErrors>
+where
+    F: Fn(f64) -> f64,
+{
+    if x.is_empty() {
+        return Err(BixverseErrors::InvalidArgument(
+            "The Kolmogorov-Smirnov test needs a non-empty sample.".to_string(),
+        ));
+    }
+
+    let mut sorted = x.to_vec();
+    if let Some(bad) = sorted.iter().find(|v| !v.is_finite()) {
+        return Err(BixverseErrors::InvalidArgument(format!(
+            "The Kolmogorov-Smirnov test needs finite observations; got {bad}."
+        )));
+    }
+    sorted.sort_unstable_by(f64::total_cmp);
+
+    let n = sorted.len();
+    let inv_n = 1.0 / n as f64;
+    let mut statistic = 0.0f64;
+
+    for (i, &value) in sorted.iter().enumerate() {
+        let theoretical = cdf(value).clamp(0.0, 1.0);
+        // The empirical CDF steps at each observation, so both the gap below the
+        // step and the gap above it have to be checked
+        let above = (i + 1) as f64 * inv_n - theoretical;
+        let below = theoretical - i as f64 * inv_n;
+        statistic = statistic.max(above).max(below);
+    }
+
+    let root_n = (n as f64).sqrt();
+    let lambda = (root_n + KS_STEPHENS_A + KS_STEPHENS_B / root_n) * statistic;
+
+    Ok(KsTestRes {
+        statistic,
+        pval: kolmogorov_sf(lambda),
+    })
+}
+
 //////////////
 // Outliers //
 //////////////
@@ -1096,6 +1380,8 @@ pub fn wilcox_rank_sum_greater_approx<T: BixverseFloat>(
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
+
+    use crate::core::math::distributions::gamma_cdf;
 
     /// Three unbalanced groups with a real effect, against R's `aov`.
     #[test]
@@ -1689,5 +1975,197 @@ mod tests {
         assert!((aov[0].p_val - 1.0).abs() < 1e-12);
         assert!(aov[1].f_stat.is_finite() && aov[1].f_stat > 0.0);
         assert!((0.0..=1.0).contains(&aov[1].p_val));
+    }
+
+    ////////////////////////
+    // Distribution fits //
+    ////////////////////////
+
+    /// The reference is R's `uniroot` on the score equation itself, not
+    /// `MASS::fitdistr`. `fitdistr` runs `optim` on the two-parameter likelihood
+    /// and stops at its own `reltol`, leaving a score residual of 4e-7 and a
+    /// log-likelihood below the one this returns. The exact root is the thing
+    /// worth pinning.
+    ///
+    /// R: `uniroot(function(k) log(k) - digamma(k) - s, c(1e-6, 100),
+    /// tol = .Machine$double.eps^0.75)`
+    #[test]
+    fn test_fit_gamma_mle_matches_the_exact_root() {
+        let y = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0];
+
+        let (shape, scale) = fit_gamma_mle(&y).unwrap();
+
+        assert_relative_eq!(shape, 1.934_295_921_801_258_3, max_relative = 1e-13);
+        assert_relative_eq!(scale, 1.731_896_325_811_62, max_relative = 1e-13);
+    }
+
+    /// The scale is pinned to `mean / shape` analytically, so the fitted mean
+    /// has to come back exactly.
+    #[test]
+    fn test_fit_gamma_mle_preserves_mean() {
+        let y = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0];
+        let mean = y.iter().sum::<f64>() / y.len() as f64;
+
+        let (shape, scale) = fit_gamma_mle(&y).unwrap();
+
+        assert_relative_eq!(shape * scale, mean, max_relative = 1e-12);
+    }
+
+    /// The score equation is what the Newton solve claims to zero, so check it
+    /// directly rather than only against a reference fit.
+    #[test]
+    fn test_fit_gamma_mle_solves_score_equation() {
+        let y: Vec<f64> = (1..=200).map(|i| (i as f64) * 0.07 + 0.3).collect();
+        let n = y.len() as f64;
+        let mean = y.iter().sum::<f64>() / n;
+        let s = mean.ln() - y.iter().map(|v| v.ln()).sum::<f64>() / n;
+
+        let (shape, _) = fit_gamma_mle(&y).unwrap();
+
+        assert_relative_eq!(shape.ln() - digamma(shape), s, max_relative = 1e-10);
+    }
+
+    /// Every other fixture has a shape above one. A heavy-tailed sample drives
+    /// it well below, which is a different part of Minka's start-point formula
+    /// and a different approach to the Newton domain guard.
+    #[test]
+    fn test_fit_gamma_mle_handles_shape_below_one() {
+        let y: Vec<f64> = (1..=400).map(|i| (i as f64).powi(6)).collect();
+        let n = y.len() as f64;
+        let mean = y.iter().sum::<f64>() / n;
+        let s = mean.ln() - y.iter().map(|v| v.ln()).sum::<f64>() / n;
+
+        let (shape, scale) = fit_gamma_mle(&y).unwrap();
+
+        assert!(shape > 0.0 && shape < 1.0, "shape came back as {shape}");
+        assert!(scale.is_finite() && scale > 0.0);
+        assert_relative_eq!(shape.ln() - digamma(shape), s, max_relative = 1e-10);
+        assert_relative_eq!(shape * scale, mean, max_relative = 1e-12);
+    }
+
+    #[test]
+    fn test_fit_gamma_mle_rejects_bad_samples() {
+        assert!(fit_gamma_mle(&[]).is_err());
+        assert!(fit_gamma_mle(&[1.0, -2.0, 3.0]).is_err());
+        assert!(fit_gamma_mle(&[1.0, f64::NAN]).is_err());
+        // no spread on the log scale pins the shape at infinity
+        assert!(fit_gamma_mle(&[2.0; 20]).is_err());
+    }
+
+    //////////////////////
+    // Goodness of fit //
+    //////////////////////
+
+    /// The parameters are pinned rather than refitted, so this gates the
+    /// statistic alone and does not move when the fitter does.
+    ///
+    /// R: `ks.test(y, "pgamma", 1.9342959218012583, 1 / 1.73189632581162)`
+    /// gives D = 0.096888414283814117. Only D is compared: R evaluates the
+    /// exact `kstwo` distribution for the p-value where this is the asymptotic
+    /// form.
+    #[test]
+    fn test_ks_statistic_matches_r() {
+        let y = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0];
+        let (shape, scale) = (1.934_295_921_801_258_3, 1.731_896_325_811_62);
+
+        let res = ks_test_1samp(&y, |x| gamma_cdf(x, shape, scale).unwrap()).unwrap();
+
+        assert_relative_eq!(
+            res.statistic,
+            0.096_888_414_283_814_12,
+            max_relative = 1e-12
+        );
+        assert!(res.pval > 0.9, "a good fit should not be rejected");
+    }
+
+    /// A sample drawn nowhere near the reference distribution must be rejected.
+    #[test]
+    fn test_ks_rejects_wrong_distribution() {
+        let y: Vec<f64> = (1..=200).map(|i| 50.0 + i as f64 * 0.01).collect();
+
+        let res = ks_test_1samp(&y, |x| gamma_cdf(x, 1.0, 1.0).unwrap()).unwrap();
+
+        assert!(res.statistic > 0.9);
+        assert!(res.pval < 1e-6, "got {}", res.pval);
+    }
+
+    /// The statistic has to see the gap below each step of the empirical CDF as
+    /// well as the gap above it.
+    #[test]
+    fn test_ks_statistic_checks_both_sides_of_the_step() {
+        // uniform reference, sample bunched at the top: the largest gap sits
+        // below the first observation, which a one-sided scan would miss
+        let y = [0.9, 0.92, 0.94, 0.96, 0.98];
+
+        let res = ks_test_1samp(&y, |x| x.clamp(0.0, 1.0)).unwrap();
+
+        assert_relative_eq!(res.statistic, 0.9, max_relative = 1e-12);
+    }
+
+    #[test]
+    fn test_ks_rejects_bad_samples() {
+        assert!(ks_test_1samp(&[], |x| x).is_err());
+        assert!(ks_test_1samp(&[1.0, f64::INFINITY], |x| x).is_err());
+    }
+
+    #[test]
+    fn test_kolmogorov_sf_bounds() {
+        assert_eq!(kolmogorov_sf(0.0), 1.0);
+        assert!(kolmogorov_sf(5.0) < 1e-20);
+    }
+
+    /// The alternating series alone returned 0.02 here, where the answer is one.
+    #[test]
+    fn test_kolmogorov_sf_small_lambda_is_one() {
+        for &lambda in &[1e-6, 1e-3, 0.01, 0.05, 0.1, 0.2] {
+            let q = kolmogorov_sf(lambda);
+            assert!(
+                q >= 0.999,
+                "Q({lambda}) = {q}, should be indistinguishable from 1"
+            );
+        }
+    }
+
+    /// The two series are the same function, so they have to agree where they
+    /// meet. This is what says the crossover is not a seam.
+    ///
+    /// The step either side has to be small enough that `Q` moving across it is
+    /// below the tolerance: the slope near one is about -0.79, so 1e-12 of
+    /// lambda buys 8e-13 of `Q`.
+    #[test]
+    fn test_kolmogorov_sf_series_agree_at_the_crossover() {
+        // Both series summed to convergence in Python agree on this to 5e-17:
+        // Q(1) = 2 * (exp(-2) - exp(-8) + exp(-18) - ...)
+        const Q_AT_ONE: f64 = 0.269_999_671_677_354_6;
+
+        // exactly at the crossover, so the alternating branch
+        assert_relative_eq!(
+            kolmogorov_sf(KS_SERIES_CROSSOVER),
+            Q_AT_ONE,
+            max_relative = 1e-14
+        );
+
+        // and a hair below it, so the theta branch. `Q` slides by the slope
+        // times the step, about 8e-13, which sets the tolerance.
+        assert_relative_eq!(
+            kolmogorov_sf(KS_SERIES_CROSSOVER - 1e-12),
+            Q_AT_ONE,
+            max_relative = 1e-11
+        );
+    }
+
+    /// Monotone decreasing across both branches and the join between them.
+    #[test]
+    fn test_kolmogorov_sf_is_monotone() {
+        let mut previous = 1.0;
+        for step in 1..=4000 {
+            let lambda = step as f64 * 0.001;
+            let current = kolmogorov_sf(lambda);
+            assert!(
+                current <= previous + 1e-12,
+                "not monotone at lambda = {lambda}"
+            );
+            previous = current;
+        }
     }
 }
