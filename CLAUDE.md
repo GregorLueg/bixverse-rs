@@ -6,20 +6,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `bixverse-rs` is a Rust library for computational biology, statistics, and single-cell analysis. It was extracted from the `bixverse` R package's `src/Rust/` directory and refactored into a standalone crate. It is published on crates.io and consumed both as a pure Rust library and (via `extendr-api`) from R.
 
-## Sister crates: ann-search-rs and cubecl-utils-rs
+## Sister crates: ann-search-rs, cubecl-utils-rs and edge-rs
 
-The user also maintains two upstream crates, both with local checkouts:
+The user also maintains three upstream crates, all with local checkouts:
 
 - [`ann-search-rs`](https://crates.io/crates/ann-search-rs) (`~/repos/shared/ann-search-rs`), a vector-search crate for the same computational-biology use cases. `bixverse-rs` reuses its SIMD primitives, distance metrics (`ann_search_rs::utils::dist::Dist`), kNN search, CPU k-means (`build_csr_layout`, etc.) and, since 0.5.2, the whole GPU k-means (`ann_search_rs::gpu::k_means_gpu`: `k_means_clusters_gpu`, `build_csr_gpu_privatised`, `segmented_update`, `KMeansGpuParams`). There is no local GPU k-means any more.
+- [`edge-rs`](https://crates.io/crates/edge-rs) (`~/repos/shared/edge-rs`), the negative binomial differential expression layer: the edgeR numerical stack (`filter_by_expr`, `calc_norm_factors`, `estimate_disp`, `glm_fit`, `glm_ql_fit`, `glm_lrt`, `glm_ql_ftest`, `top_tags`), the parts of limma edgeR leans on (`squeeze_var`, `voom_lmfit`, lowess and locfit), and NEBULA (`nebula`, `nebula_sparse`, `glm_sc_test`, `shrink_sc_dispersion`). It has no `eBayes`, no `contrasts.fit` and no limma `topTable`, so the voom chain stops at the moderated variances and the R-side `limma::` bulk path cannot be retired yet.
 - [`cubecl-utils-rs`](https://crates.io/crates/cubecl-utils-rs) (`~/repos/shared/cubecl-utils-rs`), the GPU primitives layer: `GpuTensor`, `GpuLimits`, `grid_2d`, `checked_cube_count`, `fits_binding`, `fits_shared_memory`, `plane_uniform` / `plane_partitions`, `resolve_workgroup_size`, `LINE_SIZE`, `pad_vectors`, `CubeclFloat`. Import it as `use cubecl_utils_rs::prelude::*;`.
 
 `ann-search-rs` depends on `cubecl-utils-rs` too, so both sides of the diamond must resolve to one copy of `GpuTensor` or nothing typechecks across the boundary.
 
 Everything in `cubecl-utils-rs` except `GpuLimits::from_client` and the `GpuTensor` constructors is a pure function of `&GpuLimits`, so derive limits once per dispatcher (`let limits = GpuLimits::from_client(client);`) and pass them down. Do not cache them on long-lived structs.
 
-When a task looks like it wants a new SIMD kernel, distance metric, kNN structure or k-means variant, check `ann-search-rs` first; for a new tensor, grid, device-limit or workgroup-sizing helper, check `cubecl-utils-rs`. The code may already exist and just need exposing. Bug fixes to those primitives belong upstream, not here.
-
-`ann-search-rs` is pinned at 0.5.2. While that version is unpublished the manifest carries a `[patch.crates-io]` block redirecting it to the local checkout (`~/repos/shared/ann-search-rs`); delete the block once 0.5.2 is on crates.io.
+When a task looks like it wants a new SIMD kernel, distance metric, kNN structure or k-means variant, check `ann-search-rs` first; for a new tensor, grid, device-limit or workgroup-sizing helper, check `cubecl-utils-rs`; for anything negative binomial, dispersion-shaped or design-matrix-shaped, check `edge-rs`. The code may already exist and just need exposing. Bug fixes to those primitives belong upstream, not here, and so do ergonomics that would otherwise mean re-encoding upstream internals here (`QlFit::as_glm_fit` and `QlFit::ql_summary` went up for exactly that reason).
 
 ## Feature flags
 
@@ -28,6 +27,7 @@ Feature flags gate large chunks of the crate. Match your `cargo` invocations to 
 - default (no features): pure Rust bulk / statistics / graph / enrichment code
 - `single-cell`: enables the `single_cell` module and pulls in `hdf5`, `ndarray`, `memmap2`, `lz4_flex`, `bincode`, `indexmap`, `half`
 - `multi-modal`: enables `single_cell::multi_modal` (implies `single-cell`)
+- `dge`: enables the negative binomial differential expression surface and pulls in `edge-rs`. Implied by `single-cell`, but usable on its own for the bulk half (`methods::dge_bulk`)
 - `gpu`: enables the `gpu` module, `cubecl` (wgpu + cpu backends), `cubecl-utils-rs`, `cubek`, `half` and the `gpu` feature of `ann-search-rs` (its GPU kNN indices)
 - `large-test`: slow but asserting tests. The GPU parity gates and the large-scale numerical checks. These can fail, so they are worth running on a schedule. No CI job enables it yet
 - `large_scale_diagnostics`: development-only. Gates the unasserted diagnostic sweeps that print tables for a human to read. They cannot fail, so running them in CI buys nothing
@@ -38,6 +38,10 @@ Feature flags gate large chunks of the crate. Match your `cargo` invocations to 
 # Match CI: two independent test passes
 cargo test --no-default-features
 cargo test --features single-cell,multi-modal
+
+# The differential expression surface on its own, without single-cell. Worth
+# running because `methods::dge_bulk` has to build with no other feature on.
+cargo test --features dge
 
 # GPU tests (separate CI job). single-cell is required: tests/scenic_gpu.rs and
 # tests/seacells_gpu.rs are both cfg'd on single-cell + gpu, so `--features gpu`
@@ -69,18 +73,18 @@ Linux and Windows CI need `R_HOME` / R shared libraries on the linker path becau
 
 ## Architecture
 
-The crate is organised by domain, not by algorithmic layer. Each top-level module contains its methods plus a sibling `*_r_wrapper.rs` file that exposes R-callable entry points via `extendr_api`. Keep the pure Rust surface free of R types: do all R conversions in the wrapper file.
+The crate is organised by domain, not by algorithmic layer. Each top-level module contains its methods plus a sibling `*_r_wrapper.rs` file holding the `extendr_api` conversions. Keep the pure Rust surface free of R types: do all R conversions in the wrapper file.
 
 Top-level modules:
 
 - `core/`: shared math primitives, linear algebra (`faer`), sparse structures (`CompressedSparseData2`, `CompressedSparseFormat`, `SparseAxis`), PCA/SVD, correlations, RBF kernels, synthetic data
 - `enrichment/`: GSEA (fgsea multi-level), GSVA, singscore, mitch, over-representation (OAE)
 - `graph/`: `SparseGraph` structure, community detection, label propagation, PageRank, graph metrics
-- `methods/`: bulk-omics methods, NMF (dense + HALS sparse), ICA, differential correlation, graph diffusion, SNF, RBH, dgRDL, CoReMo, cis-target
+- `methods/`: bulk-omics methods, NMF (dense + HALS sparse), ICA, differential correlation, graph diffusion, SNF, RBH, dgRDL, CoReMo, cis-target, and (feature `dge`) the edgeR quasi-likelihood chain in `dge_bulk.rs`
 - `ml/clustering/`: general-purpose clustering
 - `ontology/`: GO Elim algorithm and semantic similarity
 - `utils/`: SIMD wrappers (`wide` via `BixverseSimd`), matrix helpers, traits, R↔Rust conversion (`r_rust_interface.rs`), heap structures, assertion macros
-- `single_cell/` (feature): sc/mc data I/O (h5ad, 10x h5, mtx, bixverse binary format), processing, kNN, batch correction (Harmony), annotation (scType), analysis (Hotspot, MELD, SEACells, MetaCells2), multi-modal (WNN)
+- `single_cell/` (feature): sc/mc data I/O (h5ad, 10x h5, mtx, bixverse binary format), processing, kNN, batch correction (Harmony), annotation (scType), analysis (Hotspot, MELD, SEACells, MetaCells2, NEBULA, pseudobulk DE), multi-modal (WNN)
 - `gpu/` (feature): GPU kernels via `cubecl`/`cubek`, sparse randomised SVD, sparse GEMM, correlation, Cholesky, Harmony, PCA. K-means comes from `ann-search-rs`
 
 `prelude.rs` re-exports the most-used types (errors, sparse structures, `SparseGraph`, matrix/vector utils, SIMD trait, assertion macros). Prefer `use crate::prelude::*;` in new modules over deep imports.
@@ -101,12 +105,17 @@ Performance is a first-class concern. This crate is the fast core underneath an 
 
 ## R interop pattern
 
-R-facing functions live in `*_r_wrapper.rs` files and use `extendr_api`. The convention: the wrapper deserialises R types into Rust-native inputs, calls the pure Rust implementation, then serialises the result back. `utils/r_rust_interface.rs` has the shared helpers (`r_list_to_hashmap`, `faer_to_r_matrix`, `NamedNumericVec`, etc). `NamedVecError` implements `From` for `extendr_api::Error` so `?` works across the boundary.
+There is no `#[extendr]` anywhere in this crate. The `*_r_wrapper.rs` files hold the deserialisation half only: `impl X { pub fn from_r_list(r_list: List) -> extendr_api::Result<Self> }` plus a handful of `-> List` serialisers. The `#[extendr]` entry points live downstream in the `bixverse` R package.
+
+The convention inside a `from_r_list`: `r_list_to_map(r_list)?` then `let defaults = Self::default();`, numerics through `.and_then(|v| v.as_real()).unwrap_or(defaults.field)`, and string enums through a free `parse_*(s: &str) -> Option<T>` that errors on an unrecognised value rather than falling back. `utils/r_rust_interface.rs` has the shared helpers (`r_list_to_map`, `r_list_count`, `r_list_to_hashmap`, `faer_to_r_matrix`, `NamedNumericVec`, etc). `NamedVecError` implements `From` for `extendr_api::Error` so `?` works across the boundary.
+
+A params struct owned by an upstream crate cannot take an inherent impl, so it gets an extension trait instead: `KMeansGpuParamsFromR`, `NebulaParamsFromR`, `ScTestedFromR`, `TestedFromR`.
 
 ## Testing layout
 
 - Unit tests live inline (`#[cfg(test)] mod tests`) in each module file
-- Integration tests in `tests/`, each gated by a file-level `#![cfg(...)]`: `meta_cells2.rs` (single-cell), `gene_trends.rs` (single-cell), `scenic_gpu.rs` (single-cell + gpu), `seacells_gpu.rs` (single-cell + gpu + large-test), `gpu_corr.rs` (gpu + large-test), `large_scale_diagnostics.rs` (single-cell + large-test, the file name predates the flag split)
+- Integration tests in `tests/`, each gated by a file-level `#![cfg(...)]`: `meta_cells2.rs` (single-cell), `gene_trends.rs` (single-cell), `nebula_sc.rs` (single-cell), `pseudobulk_dge.rs` (single-cell), `edger_bulk.rs` (dge), `scenic_gpu.rs` (single-cell + gpu), `seacells_gpu.rs` (single-cell + gpu + large-test), `gpu_corr.rs` (gpu + large-test), `large_scale_diagnostics.rs` (single-cell + large-test, the file name predates the flag split)
+- Parity fixtures are generated, never recalled. `dev/gen_edger_fixtures.R` writes `tests/edger_fixtures/mod.rs` against edgeR 4.8.2; `dev/gen_blitzgsea_fixtures.py` does the same for `tests/blitzgsea_fixtures/`. Both rebuild their input from a seeded LCG on each side so no float data crosses as text
 - CI matrix: Ubuntu / macOS / Windows for CPU tests; Ubuntu / macOS for GPU tests (Linux uses Vulkan via `WGPU_BACKEND=vulkan`)
 
 ### Expensive tests

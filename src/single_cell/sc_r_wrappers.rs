@@ -1,6 +1,8 @@
 //! Contains R-specific functions for single-cell data processing that need
 //! the extendr interface.
 
+use edge_rs::sc::nebula::NebulaParams;
+use edge_rs::sc::test::ScTested;
 use extendr_api::*;
 use std::collections::HashMap;
 
@@ -18,6 +20,7 @@ use crate::single_cell::sc_analysis::{
     hotspot::{HotSpotGraphParams, HotSpotParams},
     meld::{MeldParams, parse_lap_type, parse_meld_filter},
     milo_r::MiloRParams,
+    nebula::{NebulaScParams, parse_nebula_method},
     nichenet::ligand_regulatory_potential::LigandTargetParams,
     regulon_binarise::BinariseParams,
     scenic::{
@@ -3713,6 +3716,135 @@ impl DialogueParams {
             pmd: PmdParams::from_r_map(&params)?,
             hlm: HlmParams::from_r_map(&params)?,
             refine: RefineParams::from_r_map(&params)?,
+        })
+    }
+}
+
+////////////
+// NEBULA //
+////////////
+
+/// R-list parsing for [NebulaParams].
+///
+/// A trait rather than an inherent impl because [NebulaParams] is defined in
+/// `edge-rs`.
+pub trait NebulaParamsFromR: Sized {
+    /// Parse the [NebulaParams] from a list
+    ///
+    /// ### Params
+    ///
+    /// * `params` - The flattened R list to parse
+    ///
+    /// ### Returns
+    ///
+    /// The [NebulaParams] populated by the R list, defaulting to the `nebula`
+    /// package's own values.
+    fn from_r_map(params: &HashMap<&str, Robj>) -> Result<Self>;
+}
+
+/// [NebulaParamsFromR] implementation
+impl NebulaParamsFromR for NebulaParams {
+    fn from_r_map(params: &HashMap<&str, Robj>) -> Result<Self> {
+        let defaults = Self::default();
+
+        let real = |key: &str, fallback: f64| -> f64 {
+            params
+                .get(key)
+                .and_then(|v| v.as_real())
+                .unwrap_or(fallback)
+        };
+
+        let method = match params.get("nebula_method").and_then(|v| v.as_str()) {
+            Some(s) => parse_nebula_method(s)
+                .ok_or_else(|| Error::Other(format!("Invalid NEBULA method: {}", s)))?,
+            None => defaults.method,
+        };
+
+        Ok(Self {
+            min: (
+                real("min_sigma", defaults.min.0),
+                real("min_phi", defaults.min.1),
+            ),
+            max: (
+                real("max_sigma", defaults.max.0),
+                real("max_phi", defaults.max.1),
+            ),
+            method,
+            cutoff_cell: real("cutoff_cell", defaults.cutoff_cell),
+            kappa: real("kappa", defaults.kappa),
+            cpc: real("cpc", defaults.cpc),
+            mincp: r_list_count(params, "mincp")?.unwrap_or(defaults.mincp),
+            reml: params
+                .get("reml")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(defaults.reml),
+            eps: real("eps", defaults.eps),
+        })
+    }
+}
+
+/// R-list parsing for [ScTested].
+///
+/// A trait rather than an inherent impl because [ScTested] is defined in
+/// `edge-rs`.
+pub trait ScTestedFromR: Sized {
+    /// Parse the [ScTested] from a list
+    ///
+    /// Expects either `coef`, a zero-based coefficient index, or `contrast`, one
+    /// weight per coefficient. There is no default: which effect to report is
+    /// the question the caller came to ask.
+    ///
+    /// ### Params
+    ///
+    /// * `params` - The flattened R list to parse
+    ///
+    /// ### Returns
+    ///
+    /// The [ScTested], or an error if neither key is present.
+    fn from_r_map(params: &HashMap<&str, Robj>) -> Result<Self>;
+}
+
+/// [ScTestedFromR] implementation
+impl ScTestedFromR for ScTested {
+    fn from_r_map(params: &HashMap<&str, Robj>) -> Result<Self> {
+        if let Some(contrast) = params.get("contrast").and_then(|v| v.as_real_vector()) {
+            return Ok(ScTested::Contrast(contrast));
+        }
+        match r_list_count_allow_zero(params, "coef")? {
+            Some(coef) => Ok(ScTested::Coef(coef)),
+            None => Err(Error::Other(
+                "NEBULA needs either `coef` or `contrast` to know what to test".into(),
+            )),
+        }
+    }
+}
+
+impl NebulaScParams {
+    /// Generate NebulaScParams from an R list
+    ///
+    /// The upstream NEBULA knobs fall back to the `nebula` package's own
+    /// defaults. `coef` or `contrast` is required.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the NEBULA parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The `NebulaScParams` with all parameters set.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+        let defaults = Self::default();
+
+        Ok(Self {
+            nebula: NebulaParams::from_r_map(&params)?,
+            gene_batch_size: r_list_count(&params, "gene_batch_size")?
+                .unwrap_or(defaults.gene_batch_size),
+            shrink_dispersion: params
+                .get("shrink_dispersion")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(defaults.shrink_dispersion),
+            tested: ScTested::from_r_map(&params)?,
         })
     }
 }
