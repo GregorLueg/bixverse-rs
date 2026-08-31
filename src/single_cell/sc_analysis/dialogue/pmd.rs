@@ -15,7 +15,7 @@ use rustc_hash::FxHashSet;
 
 use crate::core::math::linear_algebra::ols_residualise;
 use crate::core::math::stats::{
-    calc_fdr, one_way_anova, partial_correlation, wilcox_rank_sum_greater_approx,
+    one_way_anova, p_adjust_fdr, partial_correlation, wilcox_rank_sum_greater_approx,
 };
 use crate::core::math::vector_helpers::{
     median, pearson_correlation, quantile_sorted, rank_vector,
@@ -279,7 +279,7 @@ fn anova_filter(
         })
         .collect();
 
-    let adjusted = calc_fdr(&pvals);
+    let adjusted = p_adjust_fdr(&pvals);
     let kept: Vec<usize> = (0..p).filter(|&j| adjusted[j] < p_anova).collect();
     if kept.len() < MIN_ANOVA_FEATURES {
         return Err(BixverseErrors::DialogueTooFewFeatures {

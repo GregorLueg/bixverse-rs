@@ -14,6 +14,7 @@
 
 use rayon::prelude::*;
 
+use crate::core::math::vector_helpers::median;
 use crate::prelude::*;
 
 ////////////
@@ -42,6 +43,13 @@ const LOESS_INTERPOLATE_MIN_POINTS: usize = 256;
 /// The system is normalised by its zeroth moment before solving, so every
 /// entry is `O(1)` and this is a meaningful absolute threshold.
 const LOESS_PIVOT_TOLERANCE: f64 = 1e-12;
+
+/// Multiple of the median absolute residual at which a point loses all weight.
+///
+/// Cleveland's constant. Six median absolute residuals is roughly four standard
+/// deviations for Gaussian noise, so the robustness weights only bite on points
+/// the local fit genuinely cannot explain.
+const LOESS_ROBUSTNESS_SCALE: f64 = 6.0;
 
 /////////////
 // Results //
@@ -237,6 +245,8 @@ fn window_start<T: BixverseFloat>(xs: &[T], q: usize, target: T) -> usize {
 /// * `q` - Neighbourhood size
 /// * `target` - Point to fit at
 /// * `degree` - Local polynomial degree
+/// * `robustness` - Per-point robustness weights from a previous pass, indexed
+///   like `xs`. `None` on the first pass and whenever robustness is disabled
 ///
 /// ### Returns
 ///
@@ -248,6 +258,7 @@ fn local_fit<T: BixverseFloat>(
     q: usize,
     target: T,
     degree: LoessFunc,
+    robustness: Option<&[f64]>,
 ) -> (T, T) {
     let end = (start + q).min(xs.len());
     if start >= end {
@@ -284,7 +295,13 @@ fn local_fit<T: BixverseFloat>(
         }
 
         let tricube = 1.0 - distance * distance * distance;
-        let w = tricube * tricube * tricube;
+        let mut w = tricube * tricube * tricube;
+        if let Some(delta) = robustness {
+            w *= delta[i];
+        }
+        if w <= 0.0 {
+            continue;
+        }
         let y = to_f64(ys[i]);
 
         let wu = w * u;
@@ -332,6 +349,56 @@ fn local_fit<T: BixverseFloat>(
     let intercept = r0 - slope * n1;
 
     (from_f64(intercept), from_f64(slope * inv_d_max))
+}
+
+/// Bisquare robustness weights from the residuals of a previous pass.
+///
+/// Cleveland's reweighting step: scale the residuals by
+/// [`LOESS_ROBUSTNESS_SCALE`] median absolute residuals, then apply the
+/// bisquare so anything beyond that scale drops out entirely. Repeating the fit
+/// with these weights is what makes LOWESS insensitive to outliers.
+///
+/// ### Params
+///
+/// * `residuals` - Residuals of the previous pass, in the order of `xs`
+///
+/// ### Returns
+///
+/// The weights in `[0, 1]`, or `None` when there are no residuals or the median
+/// absolute residual is zero or non-finite. That means the fit already
+/// interpolates the data (or the residuals are degenerate), so there is nothing
+/// left to downweight and the caller should stop iterating.
+///
+/// ### References
+///
+/// Cleveland, Journal of the American Statistical Association, 1979
+fn bisquare_weights<T: BixverseFloat>(residuals: &[T]) -> Option<Vec<f64>> {
+    let absolute: Vec<f64> = residuals
+        .iter()
+        .map(|r| r.to_f64().unwrap_or(0.0).abs())
+        .collect();
+
+    let scale = median(&absolute)?;
+    if !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+
+    let inv_scale = 1.0 / (LOESS_ROBUSTNESS_SCALE * scale);
+
+    Some(
+        residuals
+            .iter()
+            .map(|r| {
+                let u = (r.to_f64().unwrap_or(0.0) * inv_scale).abs();
+                if u >= 1.0 {
+                    0.0
+                } else {
+                    let bisquare = 1.0 - u * u;
+                    bisquare * bisquare
+                }
+            })
+            .collect(),
+    )
 }
 
 /// Anchor vertex indices for the interpolating surface.
@@ -428,6 +495,9 @@ pub struct LoessRegression<T> {
     loess_type: LoessFunc,
     /// How the surface is evaluated away from the anchors
     surface: LoessSurface,
+    /// Number of bisquare reweighting passes after the initial fit. Zero gives
+    /// the plain least-squares loess of R's `family = "gaussian"`
+    robustness_iters: usize,
 }
 
 impl<T> LoessRegression<T>
@@ -452,6 +522,8 @@ where
 
     /// Generate a new instance with an explicit evaluation surface
     ///
+    /// Robustness iterations are off, matching R's `family = "gaussian"`.
+    ///
     /// ### Params
     ///
     /// * `span` - Fraction of the data in each local neighbourhood, in `(0, 1]`
@@ -462,6 +534,32 @@ where
     ///
     /// Initialised class
     pub fn with_surface(span: T, degree: usize, surface: LoessSurface) -> Self {
+        Self::with_options(span, degree, surface, 0)
+    }
+
+    /// Generate a new instance with every knob set explicitly
+    ///
+    /// `robustness_iters > 0` gives Cleveland's LOWESS: fit, downweight the
+    /// points the fit missed by [`bisquare_weights`], refit. R spells this
+    /// `family = "symmetric"` and statsmodels spells it `lowess(..., it = n)`,
+    /// whose default of three is what most reference implementations run.
+    ///
+    /// ### Params
+    ///
+    /// * `span` - Fraction of the data in each local neighbourhood, in `(0, 1]`
+    /// * `degree` - Local polynomial degree, `1` or `2`
+    /// * `surface` - How to evaluate away from the anchor points
+    /// * `robustness_iters` - Bisquare reweighting passes after the first fit
+    ///
+    /// ### Return
+    ///
+    /// Initialised class
+    pub fn with_options(
+        span: T,
+        degree: usize,
+        surface: LoessSurface,
+        robustness_iters: usize,
+    ) -> Self {
         assert!(
             span > T::zero() && span <= T::one(),
             "Span must be between 0 and 1"
@@ -477,6 +575,7 @@ where
             span,
             loess_type,
             surface,
+            robustness_iters,
         }
     }
 
@@ -540,11 +639,31 @@ where
         let interpolate =
             self.surface == LoessSurface::Interpolate && n_valid >= LOESS_INTERPOLATE_MIN_POINTS;
 
-        let fitted_sorted = if interpolate {
-            self.fit_interpolate(&xs, &ys, q)
-        } else {
-            self.fit_direct(&xs, &ys, q)
+        let run_pass = |robustness: Option<&[f64]>| {
+            if interpolate {
+                self.fit_interpolate(&xs, &ys, q, robustness)
+            } else {
+                self.fit_direct(&xs, &ys, q, robustness)
+            }
         };
+
+        let mut fitted_sorted = run_pass(None);
+
+        for _ in 0..self.robustness_iters {
+            let sorted_residuals: Vec<T> = ys
+                .iter()
+                .zip(fitted_sorted.iter())
+                .map(|(&y, &f)| y - f)
+                .collect();
+
+            // A degenerate scale means the fit already passes through the data,
+            // so another pass would only divide by zero.
+            let Some(weights) = bisquare_weights(&sorted_residuals) else {
+                break;
+            };
+
+            fitted_sorted = run_pass(Some(&weights));
+        }
 
         let mut fitted_values = vec![T::zero(); n];
         let mut residuals = vec![T::zero(); n];
@@ -567,15 +686,16 @@ where
     /// * `xs` - Predictor values, ascending
     /// * `ys` - Response values in the same order
     /// * `q` - Neighbourhood size
+    /// * `robustness` - Per-point robustness weights, `None` on the first pass
     ///
     /// ### Returns
     ///
     /// Fitted values in the order of `xs`.
-    fn fit_direct(&self, xs: &[T], ys: &[T], q: usize) -> Vec<T> {
+    fn fit_direct(&self, xs: &[T], ys: &[T], q: usize, robustness: Option<&[f64]>) -> Vec<T> {
         xs.par_iter()
             .map(|&target| {
                 let start = window_start(xs, q, target);
-                local_fit(xs, ys, start, q, target, self.loess_type).0
+                local_fit(xs, ys, start, q, target, self.loess_type, robustness).0
             })
             .collect()
     }
@@ -587,11 +707,12 @@ where
     /// * `xs` - Predictor values, ascending
     /// * `ys` - Response values in the same order
     /// * `q` - Neighbourhood size
+    /// * `robustness` - Per-point robustness weights, `None` on the first pass
     ///
     /// ### Returns
     ///
     /// Fitted values in the order of `xs`.
-    fn fit_interpolate(&self, xs: &[T], ys: &[T], q: usize) -> Vec<T> {
+    fn fit_interpolate(&self, xs: &[T], ys: &[T], q: usize, robustness: Option<&[f64]>) -> Vec<T> {
         let vertices = vertex_indices(xs, q);
 
         let anchors: Vec<(T, T, T)> = vertices
@@ -599,7 +720,8 @@ where
             .map(|&idx| {
                 let target = xs[idx];
                 let start = window_start(xs, q, target);
-                let (value, slope) = local_fit(xs, ys, start, q, target, self.loess_type);
+                let (value, slope) =
+                    local_fit(xs, ys, start, q, target, self.loess_type, robustness);
                 (target, value, slope)
             })
             .collect();
@@ -927,5 +1049,130 @@ mod tests {
             .fold(0f64, f64::max);
 
         assert!(worst < 1e-4, "f32 and f64 paths diverged by {worst}");
+    }
+
+    ///////////////////////////
+    // Robustness iterations //
+    ///////////////////////////
+
+    /// Zero iterations must be bit-identical to the plain constructor, which is
+    /// what keeps the HVG variance-stabilising fit untouched.
+    #[test]
+    fn test_zero_robustness_iters_matches_default() {
+        let (x, y) = curved_data(400);
+
+        let plain = LoessRegression::new(0.3, 2).fit(&x, &y);
+        let explicit =
+            LoessRegression::with_options(0.3, 2, LoessSurface::Interpolate, 0).fit(&x, &y);
+
+        for (a, b) in plain.fitted_vals.iter().zip(explicit.fitted_vals.iter()) {
+            assert_approx_eq(*a, *b);
+        }
+    }
+
+    /// A single gross outlier drags a least-squares local fit but not a
+    /// bisquare-reweighted one.
+    #[test]
+    fn test_robustness_resists_single_outlier() {
+        let n = 300;
+        let x: Vec<f64> = (0..n).map(|i| i as f64 / n as f64 * 10.0).collect();
+        let mut y: Vec<f64> = x.iter().map(|&v| 2.0 * v + 1.0).collect();
+
+        let spike = n / 2;
+        let truth = y[spike];
+        y[spike] += 200.0;
+
+        let gaussian = LoessRegression::with_surface(0.3, 1, LoessSurface::Direct).fit(&x, &y);
+        let robust = LoessRegression::with_options(0.3, 1, LoessSurface::Direct, 3).fit(&x, &y);
+
+        let err_gaussian = (gaussian.fitted_vals[spike] - truth).abs();
+        let err_robust = (robust.fitted_vals[spike] - truth).abs();
+
+        assert!(
+            err_robust < err_gaussian / 10.0,
+            "robust error {err_robust} should be far below gaussian error {err_gaussian}"
+        );
+    }
+
+    /// Symmetric noise around a curve the local fit can actually reproduce
+    /// leaves the reweighting with nothing to do, so both fits track the truth
+    /// and each other.
+    ///
+    /// The noise has to be real noise. On a noiseless curve that loess
+    /// underfits, the residuals are systematic rather than random, and the
+    /// bisquare legitimately downweights whole regions of high curvature and
+    /// moves the fit a long way. That is correct behaviour, not a regression.
+    #[test]
+    fn test_robustness_leaves_clean_data_alone() {
+        // sums to zero over each period, so a wide neighbourhood averages it out
+        let noise = [0.15, -0.15, 0.05, -0.05, 0.10, -0.10];
+        let n = 300;
+        let x: Vec<f64> = (0..n).map(|i| i as f64 / n as f64 * 10.0).collect();
+        let truth: Vec<f64> = x.iter().map(|&v| 2.0 * v + 1.0).collect();
+        let y: Vec<f64> = truth
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| v + noise[i % noise.len()])
+            .collect();
+
+        let gaussian = LoessRegression::with_surface(0.3, 1, LoessSurface::Direct).fit(&x, &y);
+        let robust = LoessRegression::with_options(0.3, 1, LoessSurface::Direct, 3).fit(&x, &y);
+
+        let worst_from_truth = |fitted: &[f64]| {
+            fitted
+                .iter()
+                .zip(truth.iter())
+                .map(|(&a, &b)| (a - b).abs())
+                .fold(0f64, f64::max)
+        };
+
+        assert!(worst_from_truth(&gaussian.fitted_vals) < 0.05);
+        assert!(worst_from_truth(&robust.fitted_vals) < 0.05);
+
+        let worst = gaussian
+            .fitted_vals
+            .iter()
+            .zip(robust.fitted_vals.iter())
+            .map(|(&a, &b)| (a - b).abs())
+            .fold(0f64, f64::max);
+
+        assert!(worst < 0.02, "robustness moved a clean fit by {worst}");
+    }
+
+    /// An exactly interpolating fit leaves zero residuals, so the reweighting
+    /// has no scale to work with and must bail rather than divide by zero.
+    #[test]
+    fn test_robustness_handles_zero_residuals() {
+        let n = 300;
+        let x: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let y: Vec<f64> = x.iter().map(|&v| 3.0 * v - 7.0).collect();
+
+        let res = LoessRegression::with_options(0.5, 1, LoessSurface::Direct, 4).fit(&x, &y);
+
+        assert!(res.fitted_vals.iter().all(|v| v.is_finite()));
+        for (fitted, expected) in res.fitted_vals.iter().zip(y.iter()) {
+            assert!((fitted - expected).abs() < 1e-6);
+        }
+    }
+
+    /// Bisquare weights are one at the centre, zero past the cut, and monotone
+    /// in between.
+    #[test]
+    fn test_bisquare_weights_shape() {
+        // median absolute residual is 1.0, so the cut sits at 6.0
+        let residuals = vec![0.0, -1.0, 1.0, 3.0, 100.0];
+        let weights = bisquare_weights(&residuals).expect("non-degenerate scale");
+
+        assert_approx_eq(weights[0], 1.0);
+        assert_approx_eq(weights[1], weights[2]);
+        assert_approx_eq(weights[4], 0.0);
+        assert!(weights[1] > weights[3] && weights[3] > weights[4]);
+    }
+
+    /// All-zero residuals give no scale to normalise by.
+    #[test]
+    fn test_bisquare_weights_degenerate_scale() {
+        assert!(bisquare_weights(&[0.0_f64; 10]).is_none());
+        assert!(bisquare_weights::<f64>(&[]).is_none());
     }
 }
