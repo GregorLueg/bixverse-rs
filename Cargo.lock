@@ -1436,6 +1436,8 @@ checksum = "e1d926b4d407d372f141f93bb444696142c29d32962ccbd3531117cf3aa0bfa9"
 [[package]]
 name = "edge-rs"
 version = "0.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4319f18ec387a50ce6d00230d4947b61c6f682707e7278dca05119b8dc2eaa85"
 dependencies = [
  "faer",
  "faer-traits",

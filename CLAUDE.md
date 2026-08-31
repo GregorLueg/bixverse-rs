@@ -20,8 +20,6 @@ Everything in `cubecl-utils-rs` except `GpuLimits::from_client` and the `GpuTens
 
 When a task looks like it wants a new SIMD kernel, distance metric, kNN structure or k-means variant, check `ann-search-rs` first; for a new tensor, grid, device-limit or workgroup-sizing helper, check `cubecl-utils-rs`; for anything negative binomial, dispersion-shaped or design-matrix-shaped, check `edge-rs`. The code may already exist and just need exposing. Bug fixes to those primitives belong upstream, not here, and so do ergonomics that would otherwise mean re-encoding upstream internals here (`QlFit::as_glm_fit` and `QlFit::ql_summary` went up for exactly that reason).
 
-`edge-rs` is pinned at 0.0.2. While that version is unpublished the manifest carries a `[patch.crates-io]` block redirecting it to the local checkout (`~/repos/shared/edge-rs`); delete the block once 0.0.2 is on crates.io.
-
 ## Feature flags
 
 Feature flags gate large chunks of the crate. Match your `cargo` invocations to what you are touching:

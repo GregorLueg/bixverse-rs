@@ -95,14 +95,6 @@ thiserror = "2.0.18"
 thousands = "0.2.0"
 wide = "1.4.0"
 
-#########
-# Patch #
-#########
-
-# edge-rs 0.0.2 is not on crates.io yet. Delete this block once it is.
-[patch.crates-io]
-edge-rs = { path = "/Users/gregorlueg/repos/shared/edge-rs" }
-
 #################
 # Documentation #
 #################
