@@ -1,10 +1,16 @@
 //! R wrapper functions for the various bioinformatics methods in this module
 
+#[cfg(feature = "dge")]
+use edge_rs::core::normalisation::{NormMethod, parse_norm_method};
+#[cfg(feature = "dge")]
+use edge_rs::glm::test::Tested;
 use extendr_api::*;
 use std::collections::{BTreeMap, HashMap};
 
 use crate::core::mat_struct::NamedMatrix;
 use crate::methods::cis_target::MotifEnrichment;
+#[cfg(feature = "dge")]
+use crate::methods::dge_bulk::EdgeRQlParams;
 use crate::methods::dgrdl::DgrdlParams;
 use crate::methods::ica::IcaParams;
 use crate::methods::lda::metrics::LdaMetrics;
@@ -583,4 +589,113 @@ where
     res.set_elt(4, (sweep.best_k as i32).into_robj())?;
     res.set_names(["k", "models", "metrics", "combined_score", "best_k"])?;
     Ok(res)
+}
+
+///////////////////
+// edgeR bulk DE //
+///////////////////
+
+/// R-list parsing for [Tested].
+///
+/// A trait rather than an inherent impl because [Tested] is defined in
+/// `edge-rs`.
+#[cfg(feature = "dge")]
+pub trait TestedFromR: Sized {
+    /// Parse the [Tested] from a list
+    ///
+    /// Expects either `coef`, zero-based design columns to drop from the null,
+    /// or `contrast`, column-major weights with `n_contrasts` columns. There is
+    /// no default: which effect to report is the question the caller came to
+    /// ask.
+    ///
+    /// ### Params
+    ///
+    /// * `params` - The flattened R list to parse
+    ///
+    /// ### Returns
+    ///
+    /// The [Tested], or an error if neither key is present.
+    fn from_r_map(params: &HashMap<&str, Robj>) -> Result<Self>;
+}
+
+/// [TestedFromR] implementation
+#[cfg(feature = "dge")]
+impl TestedFromR for Tested {
+    fn from_r_map(params: &HashMap<&str, Robj>) -> Result<Self> {
+        if let Some(values) = params.get("contrast").and_then(|v| v.as_real_vector()) {
+            let n_contrasts = params
+                .get("n_contrasts")
+                .and_then(|v| v.as_integer())
+                .map(|v| v as usize)
+                .unwrap_or(1);
+            return Ok(Tested::Contrast {
+                values,
+                n_contrasts,
+            });
+        }
+        // `c(2)` is a double in R and `c(2L)` is not, and a type-strict read
+        // would take one of them for an absent key.
+        let coef: Option<Vec<usize>> = params.get("coef").and_then(|v| {
+            v.as_integer_vector()
+                .map(|xs| xs.into_iter().map(|x| x as usize).collect())
+                .or_else(|| {
+                    v.as_real_vector()
+                        .map(|xs| xs.into_iter().map(|x| x as usize).collect())
+                })
+        });
+
+        match coef {
+            Some(coef) => Ok(Tested::Coef(coef)),
+            None => Err(Error::Other(
+                "the edgeR test needs either `coef` or `contrast` to know what to test".into(),
+            )),
+        }
+    }
+}
+
+#[cfg(feature = "dge")]
+impl EdgeRQlParams {
+    /// Generate EdgeRQlParams from an R list
+    ///
+    /// Everything falls back to edgeR's own defaults. `norm_method` accepts
+    /// edgeR's spellings, `"none"` included, and errors on anything else rather
+    /// than normalising with something other than what was asked for.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the edgeR parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The `EdgeRQlParams` with all parameters set.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+        let defaults = Self::default();
+
+        let norm_method: NormMethod = match params.get("norm_method").and_then(|v| v.as_str()) {
+            Some(s) => parse_norm_method(s)
+                .ok_or_else(|| Error::Other(format!("Invalid normalisation method: {}", s)))?,
+            None => defaults.norm_method,
+        };
+
+        Ok(Self {
+            norm_method,
+            filter: params
+                .get("filter")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(defaults.filter),
+            min_mean: params
+                .get("min_mean")
+                .and_then(|v| v.as_real())
+                .unwrap_or(defaults.min_mean),
+            robust: params
+                .get("robust")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(defaults.robust),
+            legacy: params
+                .get("legacy")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(defaults.legacy),
+        })
+    }
 }

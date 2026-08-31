@@ -4,6 +4,8 @@
 
 pub mod cis_target;
 pub mod coremo;
+#[cfg(feature = "dge")]
+pub mod dge_bulk;
 pub mod dgrdl;
 pub mod diffcor;
 pub mod graph_diffusions;
