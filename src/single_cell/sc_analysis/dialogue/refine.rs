@@ -9,7 +9,7 @@ use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 use crate::core::math::linear_algebra::{nnls_gram, ols_residualise};
-use crate::core::math::stats::{calc_fdr, fisher_combine, p_adjust_holm};
+use crate::core::math::stats::{fisher_combine, p_adjust_fdr, p_adjust_holm};
 use crate::core::math::vector_helpers::pearson_correlation;
 use crate::prelude::*;
 use crate::single_cell::sc_analysis::dialogue::hlm::{DialogueStep2Result, p_from_signed_log};
@@ -158,7 +158,7 @@ fn meta_analyse(
             let (up_adj, down_adj) = if n_partners < 2 {
                 (p_adjust_holm(&up_in), p_adjust_holm(&down_in))
             } else {
-                (calc_fdr(&up_in), calc_fdr(&down_in))
+                (p_adjust_fdr(&up_in), p_adjust_fdr(&down_in))
             };
             for (slot, &j) in keep.iter().enumerate() {
                 p_up[members[j] * n_partners + col] = up_adj[slot];

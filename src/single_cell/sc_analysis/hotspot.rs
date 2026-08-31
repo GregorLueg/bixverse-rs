@@ -13,7 +13,7 @@ use std::cmp::Ordering;
 use std::time::Instant;
 
 use crate::core::math::linear_algebra::{linear_regression, linear_regression_widen};
-use crate::core::math::stats::{calc_fdr, inv_logit, logit, z_scores_to_pval};
+use crate::core::math::stats::{inv_logit, logit, p_adjust_fdr, z_scores_to_pval};
 use crate::prelude::*;
 
 use crate::single_cell::sc_processing::knn::knn_distance_weights;
@@ -1149,7 +1149,7 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
 
         // upstream tests positive autocorrelation only, see `local_stats.py:239`
         let p_vals = z_scores_to_pval(&z_scores, "greater");
-        let fdrs = calc_fdr(&p_vals);
+        let fdrs = p_adjust_fdr(&p_vals);
 
         Ok(HotSpotGeneRes {
             gene_idx,
@@ -1241,7 +1241,7 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
 
         // upstream tests positive autocorrelation only, see `local_stats.py:239`
         let p_vals = z_scores_to_pval(&z_scores, "greater");
-        let fdrs = calc_fdr(&p_vals);
+        let fdrs = p_adjust_fdr(&p_vals);
 
         if verbosity.normal_verbosity() {
             println!("Finished the full run in : {:.2?}.", start_all.elapsed());
@@ -2779,7 +2779,7 @@ mod tests {
     fn z_threshold_reference(z_mat: MatRef<f64>, fdr_threshold: f64) -> f64 {
         let z_upper_triangle = faer_mat_to_upper_triangle(z_mat, 1);
         let pvals = z_scores_to_pval(&z_upper_triangle, "greater");
-        let fdrs = calc_fdr(&pvals);
+        let fdrs = p_adjust_fdr(&pvals);
 
         z_upper_triangle
             .iter()

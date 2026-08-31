@@ -3,7 +3,7 @@
 use rustc_hash::FxHashSet;
 
 use crate::{
-    core::math::stats::{calc_fdr, hypergeom_pval},
+    core::math::stats::{hypergeom_pval, p_adjust_fdr},
     prelude::BixverseFloat,
 };
 
@@ -135,7 +135,7 @@ where
         })
         .collect();
 
-    let fdr = calc_fdr(&pvals);
+    let fdr = p_adjust_fdr(&pvals);
 
     HypergeomResult {
         pval: pvals,

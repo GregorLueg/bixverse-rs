@@ -1,4 +1,4 @@
-//! Statistical helpers
+//! Various statistical helpers used in this crate.
 
 use faer::{Mat, linalg::solvers::DenseSolveCore};
 use rand::rngs::StdRng;
@@ -355,7 +355,7 @@ where
 /// ### Returns
 ///
 /// The calculated FDRs
-pub fn calc_fdr<T>(pvals: &[T]) -> Vec<T>
+pub fn p_adjust_fdr<T>(pvals: &[T]) -> Vec<T>
 where
     T: BixverseFloat,
 {
@@ -397,6 +397,15 @@ where
     }
 
     adj_pvals
+}
+
+/// Deprecated, please use [`p_adjust_fdr()`]
+#[deprecated(since = "0.4.8", note = "Renamed to p_adjust_fdr()")]
+pub fn calc_fdr<T>(pvals: &[T]) -> Vec<T>
+where
+    T: BixverseFloat,
+{
+    p_adjust_fdr(pvals)
 }
 
 ////////////
@@ -1499,7 +1508,7 @@ mod tests {
         // Capped at one, and more conservative than Benjamini-Hochberg.
         let p = [0.2, 0.3, 0.4];
         let holm: Vec<f64> = p_adjust_holm(&p);
-        let bh: Vec<f64> = calc_fdr(&p);
+        let bh: Vec<f64> = p_adjust_fdr(&p);
         assert!(holm.iter().all(|v| *v <= 1.0));
         assert!(holm.iter().zip(bh.iter()).all(|(h, b)| h >= b));
     }
@@ -1736,8 +1745,8 @@ mod tests {
         pvals.extend(vec![0.5; 50]);
         pvals.extend([0.001, 0.3, 0.7, 0.9, 0.02, 0.5]);
 
-        let first = calc_fdr(&pvals);
-        let second = calc_fdr(&pvals);
+        let first = p_adjust_fdr(&pvals);
+        let second = p_adjust_fdr(&pvals);
         assert_eq!(first, second, "calc_fdr is not deterministic");
 
         // every entry sharing a p-value shares its adjusted value
@@ -1755,7 +1764,7 @@ mod tests {
         // and a reversed input gives the same multiset of answers
         let mut reversed = pvals.clone();
         reversed.reverse();
-        let rev_fdr = calc_fdr(&reversed);
+        let rev_fdr = p_adjust_fdr(&reversed);
         let mut a = first.clone();
         let mut b = rev_fdr;
         a.sort_by(|x, y| x.partial_cmp(y).unwrap());
@@ -1804,7 +1813,7 @@ mod tests {
         // Adjusted tmp: 0.01*(3/1)=0.03, 0.03*(3/2)=0.045, 0.04*(3/3)=0.04
         // Monotonic min backwards: 0.04, min(0.04, 0.045)=0.04, min(0.04, 0.03)=0.03
         // Result: [0.03, 0.04, 0.04]
-        let fdr = calc_fdr(&pvals);
+        let fdr = p_adjust_fdr(&pvals);
 
         assert!((fdr[0] - 0.03).abs() < 1e-6);
         assert!((fdr[1] - 0.04).abs() < 1e-6);

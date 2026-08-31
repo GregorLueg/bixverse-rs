@@ -143,17 +143,15 @@ pub fn prepare_mitch_pathways(
     Ok((filtered_names, filtered_pathways))
 }
 
-////////////////
+///////////////
 // blitzGSEA //
-////////////////
+///////////////
 
 impl BlitzGseaParams {
     /// Parse the [BlitzGseaParams] from a list
     ///
-    /// A missing key falls back to the default, which is what the `None` arms of
-    /// [`BlitzGseaParams::new`] resolve. Counts go through [`r_list_count`],
-    /// which accepts either of R's storage modes, so `list(anchors = 40)` and
-    /// `list(anchors = 40L)` both land.
+    /// A missing key falls back to the default, which is what the `None` arms
+    /// of [`BlitzGseaParams::new`] resolve.
     ///
     /// ### Params
     ///

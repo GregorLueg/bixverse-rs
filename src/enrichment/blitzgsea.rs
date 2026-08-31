@@ -7,33 +7,6 @@
 //! pathway is then a single gamma tail evaluation, whatever its size, and the
 //! calibration is reusable for every library run against the same signature.
 //!
-//! ### Where this differs from the reference implementation
-//!
-//! * The enrichment score comes from [`calc_gsea_stats`], which touches only
-//!   the `k` hits rather than running a cumulative sum over all `n` genes. The
-//!   reference does a full-length numpy `cumsum` per permutation, and the
-//!   calibration loop is essentially the whole runtime.
-//! * Tail probabilities go through [`gamma_sf`] rather than `1 - cdf`. The
-//!   reference escalates to 50-digit `mpmath` whenever the cdf saturates at one;
-//!   the upper regularised incomplete gamma hands back the same number with no
-//!   cancellation and no arbitrary-precision arithmetic.
-//! * The anchor grid is log-spaced over the whole usable size range rather
-//!   than evenly spaced up to the library's largest gene set. The gamma
-//!   parameters are a property of the signature, not of the library, so a null
-//!   built this way serves Reactome and GO alike from one calibration, and
-//!   puts about half its knots below a hundred without needing a hardcoded
-//!   list of small sizes to patch the bottom.
-//! * Calibration is reproducible from the seed. The reference seeds Python's
-//!   `random` but samples through `numpy.random`, so its per-anchor draws are
-//!   not seed-controlled and its multiprocessing workers share a parent state.
-//! * The reference nudges a negative-tail probability off exactly one half by
-//!   subtracting the gamma cdf from it. That branch fires only when `pos_ratio`
-//!   is below a half and the score is weakly negative, where the p-value is
-//!   already close to one, and it has no positive-tail counterpart. Dropped as
-//!   a discontinuous patch rather than a derivation; the p-value reported here
-//!   is the larger of the two, so the divergence only ever makes a
-//!   non-significant result more non-significant.
-//!
 //! ### References
 //!
 //! Lachmann et al., Bioinformatics, 2022
@@ -42,7 +15,7 @@ use rayon::prelude::*;
 
 use crate::core::base::loess::{LoessRegression, LoessSurface};
 use crate::core::math::distributions::{gamma_cdf, gamma_sf, norm_ppf};
-use crate::core::math::stats::{calc_fdr, fit_gamma_mle, ks_test_1samp};
+use crate::core::math::stats::{fit_gamma_mle, ks_test_1samp, p_adjust_fdr};
 use crate::core::math::vector_helpers::interp_log_linear_at;
 use crate::enrichment::gsea::{calc_gsea_stats, create_random_gs_indices};
 use crate::prelude::*;
@@ -220,9 +193,9 @@ impl BlitzGseaParams {
     }
 }
 
-//////////////
+/////////////
 // Anchors //
-//////////////
+/////////////
 
 /// Gamma parameters fitted to the null enrichment scores at one anchor size
 #[derive(Clone, Copy, Debug)]
@@ -260,9 +233,9 @@ pub struct BlitzGseaTail {
     pub pos_ratio: f64,
 }
 
-/////////////////
+////////////////
 // Null model //
-/////////////////
+////////////////
 
 /// The calibrated null: smoothed gamma parameters over a grid of anchor sizes.
 ///
@@ -363,14 +336,11 @@ impl BlitzGseaNull {
     }
 }
 
-/////////////
-// Results //
-/////////////
+/////////////////////
+// Results structs //
+/////////////////////
 
 /// One pathway's scores, before they are transposed into [`BlitzGseaResults`]
-///
-/// The scoring fan-out has to hand five values back per pathway and rayon wants
-/// one item, so they travel together rather than as an anonymous tuple.
 #[derive(Clone, Debug)]
 struct ScoredPathway {
     /// Enrichment score
@@ -438,16 +408,6 @@ fn centre_stats<T: BixverseFloat>(stats: &[T], centre: bool) -> Vec<T> {
 /// equal steps in `ln k` put knots where the curvature is, and one grid covers a
 /// five hundred gene Reactome set and a five thousand gene GO set equally well.
 ///
-/// The reference instead spaces evenly up to the library's largest set and then
-/// bolts on a fixed list of seventeen small sizes to patch the bottom. That ties
-/// the null to the library and still spends most of its anchors on the flat end
-/// of the curve. Forty log-spaced anchors over a twenty thousand gene signature
-/// land seventeen below one hundred on their own, and stay dense in the hundreds
-/// where the hardcoded list stops entirely.
-///
-/// Duplicates after rounding are collapsed, so asking for forty anchors returns
-/// slightly fewer. That is the grid saturating the small end, not a problem.
-///
 /// ### Params
 ///
 /// * `n_genes` - Length of the signature
@@ -503,9 +463,6 @@ fn null_scores<T: BixverseFloat>(
 ) -> Vec<f64> {
     let samples = create_random_gs_indices(permutations, size, stats.len(), seed, false);
 
-    // Nested inside the per-anchor fan-out on purpose. Anchor cost spans three
-    // orders of magnitude between the smallest and largest set size, so the
-    // outer loop alone would leave most threads idle behind the slowest anchor.
     samples
         .into_par_iter()
         .map(|mut indices| {
@@ -604,12 +561,12 @@ fn fit_anchor(
 /// Robust loess smoothing of one fitted parameter across the anchor sizes.
 ///
 /// The x-axis is `ln(size)`, not size. Loess picks its neighbourhood by nearest
-/// neighbours, so the spacing does not change *which* anchors are in it, but the
-/// local polynomial is fitted against x itself: on a geometric grid a
+/// neighbours, so the spacing does not change *which* anchors are in it, but
+/// the local polynomial is fitted against x itself: on a geometric grid a
 /// neighbourhood at the top spans a decade where one at the bottom spans a
 /// handful of genes, the tricube weights then collapse onto the largest few
-/// anchors, and a local linear fit to a convex curve at that boundary reads low.
-/// Smoothing on the axis the grid is uniform in removes the asymmetry.
+/// anchors, and a local linear fit to a convex curve at that boundary reads
+/// low. Smoothing on the axis the grid is uniform in removes the asymmetry.
 ///
 /// [`LoessSurface::Direct`] rather than the interpolating surface: an anchor
 /// grid is tens of points, far below the size at which the spline pays for
@@ -789,9 +746,9 @@ pub fn calibrate_null<T: BixverseFloat>(
     })
 }
 
-//////////////
+/////////////
 // Scoring //
-//////////////
+/////////////
 
 /// Score gene sets against a calibrated null.
 ///
@@ -805,7 +762,8 @@ pub fn calibrate_null<T: BixverseFloat>(
 /// [`calc_gsea_stats`] counts the misses before each hit from that hit's
 /// position, so an unsorted or repeated index silently returns a different
 /// enrichment score rather than failing: `[1, 5, 9, 40, 100]` and
-/// `[100, 5, 40, 1, 9]` are the same gene set and used to score 0.952 and 0.997.
+/// `[100, 5, 40, 1, 9]` are the same gene set and used to score 0.952 and
+/// 0.997.
 ///
 /// ### Params
 ///
@@ -845,9 +803,8 @@ pub fn blitzgsea_score<T: BixverseFloat>(
     let scored: Vec<ScoredPathway> = pathways
         .par_iter()
         .map(|indices| {
-            // `calc_gsea_stats` derives each hit's miss count from its position,
-            // so it needs an ascending list with no repeats. Cheap next to the
-            // scan, and a silently wrong score is worse than the sort.
+            // `calc_gsea_stats` derives each hit's miss count from its
+            // position, so it needs an ascending list with no repeats.
             let mut indices = indices.clone();
             indices.sort_unstable();
             indices.dedup();
@@ -893,7 +850,7 @@ pub fn blitzgsea_score<T: BixverseFloat>(
 
     Ok(BlitzGseaResults {
         sidak: sidak(&pvals),
-        fdr: calc_fdr(&pvals),
+        fdr: p_adjust_fdr(&pvals),
         es,
         nes,
         pvals,

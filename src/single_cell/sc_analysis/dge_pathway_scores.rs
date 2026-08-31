@@ -11,7 +11,7 @@ use rayon::prelude::*;
 use rustc_hash::FxHashSet;
 use std::time::Instant;
 
-use crate::core::math::stats::{calc_fdr, z_scores_to_pval};
+use crate::core::math::stats::{p_adjust_fdr, z_scores_to_pval};
 use crate::prelude::*;
 use crate::single_cell::sc_analysis::fast_ranking::{
     append_cell_chunks, csr_rank_sum_stats_two_groups, rank_csr_chunk_vec,
@@ -332,7 +332,7 @@ pub fn calculate_dge_grps_mann_whitney<S: SingleCellReading>(
     }
 
     let p_vals = z_scores_to_pval(&z_scores, alternative);
-    let fdr = calc_fdr(&p_vals);
+    let fdr = p_adjust_fdr(&p_vals);
 
     let end_calculations = start_calculations.elapsed();
 
@@ -697,7 +697,7 @@ pub fn calculate_dge_one_vs_many_auroc<S: SingleCellReading>(
         }
 
         let p_g = z_scores_to_pval(&z_g, alternative);
-        let fdr_g = calc_fdr(&p_g);
+        let fdr_g = p_adjust_fdr(&p_g);
 
         auroc.push(auroc_g);
         lfc.push(lfc_g);
@@ -786,8 +786,8 @@ pub fn calculate_dge_one_vs_many_auroc<S: SingleCellReading>(
         max_p.push(summary.max_p);
     }
 
-    let simes_fdr = calc_fdr(&simes_p);
-    let max_p_fdr = calc_fdr(&max_p);
+    let simes_fdr = p_adjust_fdr(&simes_p);
+    let max_p_fdr = p_adjust_fdr(&max_p);
 
     if verbosity.normal_verbosity() {
         println!(

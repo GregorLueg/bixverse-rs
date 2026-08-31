@@ -303,7 +303,7 @@ where
 
     let go_ids = flatten_vector(go_ids);
     let pvals = flatten_vector(pvals);
-    let fdr = calc_fdr(&pvals);
+    let fdr = p_adjust_fdr(&pvals);
     let hits = flatten_vector(hits);
     let odds_ratios = flatten_vector(odds_ratios);
     let gs_lengths = flatten_vector(gs_lengths);
