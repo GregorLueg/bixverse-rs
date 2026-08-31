@@ -205,9 +205,9 @@ fn chunks_to_csr(
     )?)
 }
 
-///////////////
-// Front end //
-///////////////
+//////////
+// Main //
+//////////
 
 /// Fits NEBULA's negative binomial gamma mixed model to every requested gene.
 ///

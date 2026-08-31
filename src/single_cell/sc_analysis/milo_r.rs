@@ -13,7 +13,9 @@
 //! `min_mean` you want, since `filterByExpr` is a gene-expression heuristic and
 //! means nothing for a neighbourhood.
 
-use ann_search_rs::cpu::{annoy::AnnoyIndex, hnsw::HnswIndex, nndescent::NNDescent};
+use ann_search_rs::cpu::{
+    annoy::AnnoyIndex, exhaustive::ExhaustiveIndex, hnsw::HnswIndex, nndescent::NNDescent,
+};
 use ann_search_rs::utils::dist::{Dist, parse_ann_dist};
 use faer::MatRef;
 use rayon::prelude::*;
@@ -53,14 +55,30 @@ pub struct MiloRParams {
     pub knn_params: KnnParams,
 }
 
-/// Enum wrapper for different kNN index implementations
+/// Enum specifying which kNN index type to use
 ///
 /// ### Variants
 ///
-/// * `Annoy` - Approximate nearest neighbour index using trees
-/// * `Hnsw` - Hierarchical navigable small world graph index
-/// * `NNDescent` - Nearest neighbour descent index
+/// * `AnnoyIndex` - Use Annoy index
+/// * `HnswIndex` - Use HNSW index
+#[allow(clippy::enum_variant_names)]
+#[derive(Debug, Default)]
+pub enum KnnIndexType {
+    /// Exhaustive
+    #[default]
+    ExhaustiveIndex,
+    /// Annoy
+    AnnoyIndex,
+    /// HNSW
+    HnswIndex,
+    /// NNDescent
+    NNDescentIndex,
+}
+
+/// Enum wrapper for different kNN index implementations
 pub enum KnnIndex {
+    /// Exhaustive
+    Exhaustive(ExhaustiveIndex<f32>),
     /// The Annoy index
     Annoy(AnnoyIndex<f32>),
     /// The HNSW index
@@ -89,56 +107,41 @@ impl KnnIndex {
         seed: usize,
         verbose: bool,
     ) -> Result<Self, BixverseErrors> {
+        let dist = ann_search_rs::utils::dist::parse_ann_dist(&knn_params.ann_dist)
+            .unwrap_or_else(|| {
+                println!("[WARNING] Weird string used for distance metric. Using default squared Euclidean distance");
+                Dist::default()
+            });
+
         match index_type {
-            KnnIndexType::AnnoyIndex => {
-                let dist = ann_search_rs::utils::dist::parse_ann_dist(&knn_params.ann_dist)
-                    .unwrap_or_else(|| {
-                        println!("[WARNING] Weird string used for distance metric. Using default squared Euclidean distance");
-                        Dist::default()
-                    });
-
-                Ok(KnnIndex::Annoy(AnnoyIndex::new(
-                    embd,
-                    knn_params.n_tree,
-                    dist,
-                    seed,
-                )?))
-            }
-            KnnIndexType::HnswIndex => {
-                let dist = ann_search_rs::utils::dist::parse_ann_dist(&knn_params.ann_dist)
-                    .unwrap_or_else(|| {
-                        println!("[WARNING] Weird string used for distance metric. Using default squared Euclidean distance");
-                        Dist::default()
-                    });
-
-                Ok(KnnIndex::Hnsw(HnswIndex::build(
-                    embd,
-                    knn_params.m,
-                    knn_params.ef_construction,
-                    &dist,
-                    seed,
-                    verbose,
-                )))
-            }
-            KnnIndexType::NNDescentIndex => {
-                let dist = ann_search_rs::utils::dist::parse_ann_dist(&knn_params.ann_dist)
-                    .unwrap_or_else(|| {
-                        println!("[WARNING] Weird string used for distance metric. Using default squared Euclidean distance");
-                        Dist::default()
-                    });
-
-                Ok(KnnIndex::NNDescent(NNDescent::new(
-                    embd,
-                    dist,
-                    None,
-                    None,
-                    None,
-                    None,
-                    knn_params.delta,
-                    knn_params.diversify_prob,
-                    seed,
-                    verbose,
-                )?))
+            KnnIndexType::AnnoyIndex => Ok(KnnIndex::Annoy(AnnoyIndex::new(
+                embd,
+                knn_params.n_tree,
+                dist,
+                seed,
+            )?)),
+            KnnIndexType::HnswIndex => Ok(KnnIndex::Hnsw(HnswIndex::build(
+                embd,
+                knn_params.m,
+                knn_params.ef_construction,
+                &dist,
+                seed,
+                verbose,
+            ))),
+            KnnIndexType::NNDescentIndex => Ok(KnnIndex::NNDescent(NNDescent::new(
+                embd,
+                dist,
+                None,
+                None,
+                None,
+                None,
+                knn_params.delta,
+                knn_params.diversify_prob,
+                seed,
+                verbose,
+            )?)),
+            KnnIndexType::ExhaustiveIndex => {
+                Ok(KnnIndex::Exhaustive(ExhaustiveIndex::new(embd, dist)))
             }
         }
     }
@@ -164,24 +167,9 @@ impl KnnIndex {
             KnnIndex::Annoy(index) => Ok(index.query(query_point, k, knn_params.search_budget)?),
             KnnIndex::Hnsw(index) => Ok(index.query(query_point, k, knn_params.ef_search)?),
             KnnIndex::NNDescent(index) => Ok(index.query(query_point, k, None)?),
+            KnnIndex::Exhaustive(index) => Ok(index.query(query_point, k)?),
         }
     }
-}
-
-/// Enum specifying which kNN index type to use
-///
-/// ### Variants
-///
-/// * `AnnoyIndex` - Use Annoy index
-/// * `HnswIndex` - Use HNSW index
-#[allow(clippy::enum_variant_names)]
-pub enum KnnIndexType {
-    /// Annoy
-    AnnoyIndex,
-    /// HNSW
-    HnswIndex,
-    /// NNDescent
-    NNDescentIndex,
 }
 
 //////////////
@@ -228,6 +216,7 @@ pub fn parse_refinement_strategy(s: &str) -> Option<RefinementStrategy> {
 /// The Option of the chosen `KnnIndexType`
 pub fn parse_index_type(s: &str) -> Option<KnnIndexType> {
     match s.to_lowercase().as_str() {
+        "exhaustive" => Some(KnnIndexType::ExhaustiveIndex),
         "annoy" => Some(KnnIndexType::AnnoyIndex),
         "hnsw" => Some(KnnIndexType::HnswIndex),
         "nndescent" => Some(KnnIndexType::NNDescentIndex),

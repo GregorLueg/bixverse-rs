@@ -73,9 +73,9 @@ impl Default for EdgeRQlParams {
     }
 }
 
-/////////////
-// Results //
-/////////////
+/////////////////
+// EdgeRDgeRes //
+/////////////////
 
 /// The edgeR quasi-likelihood F-test, one row per gene that survived the
 /// filters.
@@ -98,9 +98,9 @@ pub struct EdgeRDgeRes {
     pub fdr: Vec<f64>,
 }
 
-///////////////
-// Front end //
-///////////////
+//////////
+// Main //
+//////////
 
 /// Runs the edgeR quasi-likelihood chain and tests one coefficient or contrast.
 ///
