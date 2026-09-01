@@ -16,8 +16,8 @@ jobs:
     with:
       # Two runs: the default-feature-free build and the feature build.
       cpu-args: '--no-default-features'
-      cpu-args-extra: '--features single-cell,multi-modal'
-      gpu-args: '--features gpu,single-cell'
+      cpu-args-extra: '--features single-cell,multi-modal,hdf5-static'
+      gpu-args: '--features gpu,single-cell,hdf5-static'
       # extendr links against R, so the toolchain needs the gnu ABI on Windows
       # and a shared libR on Linux.
       needs-r: true

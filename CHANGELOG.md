@@ -1,5 +1,28 @@
 # News
 
+## 0.5.0
+
+### Breaking changes
+
+- The `"single-cell"` no longer implies HDF5-from-source. Old behaviour can be
+  set again with the addition of the `"hdf5-static"` feature flag. Or you
+  provide a system libhdf5.
+- With the updates to `ann-search-rs` to version `"0.7.0"` old trait boundaries
+  will not behave anymore.
+
+### Features
+
+- NEBULA and bulkDGEs wired in
+- Added exhaustive approximate nearest neighbour search to miloR due to improved
+  speed.
+
+## 0.4.7
+
+- DIALOGUE implemented
+- Better hotspot membership algorithm
+- Latent dirichlet allocation (LDA) for generating representations of sparse
+  count-like data.
+
 ## 0.4.6
 
 ### Features
