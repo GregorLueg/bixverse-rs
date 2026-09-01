@@ -1,5 +1,18 @@
 # News
 
+## 0.5.0
+
+- NEBULA and bulkDGEs wired in
+- Added exhaustive approximate nearest neighbour search to miloR due to improved
+  speed.
+
+## 0.4.7
+
+- DIALOGUE implemented
+- Better hotspot membership algorithm
+- Latent dirichlet allocation (LDA) for generating representations of sparse
+  count-like data.
+
 ## 0.4.6
 
 ### Features

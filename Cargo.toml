@@ -1,6 +1,6 @@
 [package]
 name = "bixverse-rs"
-version = "0.4.8"
+version = "0.5.0"
 edition = "2024"
 authors = ["Gregor Lueg <gregorlueg@me.com>"]
 license = "MIT"
@@ -14,8 +14,6 @@ categories = [
   "algorithms",
 ]
 keywords = ["bioinformatics", "single-cell", "genomics", "statistics", "gpu"]
-# Fixture generators and other development scripts. Not part of the library,
-# and they reach for reference implementations that are not dependencies.
 exclude = ["dev/"]
 
 [lib]
@@ -29,6 +27,12 @@ path = "src/lib.rs"
 [features]
 ## Enables the single cell features in bixverse-rs
 single-cell = ["half", "bincode", "indexmap", "memmap2", "hdf5", "lz4_flex", "ndarray", "dge"]
+## Compile the bundled HDF5 C library from source. Leave it off to link an
+## external libhdf5 found via `HDF5_DIR` or pkg-config, which is what the R
+## package does on Windows: `hdf5-metno-src` names its output with the host
+## toolchain's convention, so an msvc host targeting gnu emits `libhdf5` and
+## the link fails.
+hdf5-static = ["hdf5?/static"]
 ## Enables the negative binomial differential expression methods built on
 ## `edge-rs`: the edgeR quasi-likelihood chain and, with `single-cell`, NEBULA.
 ## Implied by `single-cell`, but usable on its own for the bulk half.
@@ -60,7 +64,7 @@ codegen-units = 4
 
 [dependencies]
 approx = "0.5.1"
-ann-search-rs = { version = "0.5.2" }
+ann-search-rs = { version = "0.6.0" }
 bincode = { version = "2.0.1", features = ["serde"], optional = true }
 cubecl = { version = "0.10.0", features = ["wgpu", "cpu"], optional = true }
 cubecl-utils-rs = { version = "0.1.0", optional = true }
@@ -74,8 +78,7 @@ faer-traits = "0.23.2"
 faer-entity = "0.20.1"
 fmt = "0.1.0"
 half = { version = "2.7.1", optional = true }
-hdf5 = { package = "hdf5-metno", version = "0.10.1", features = [
-    "static",
+hdf5 = { package = "hdf5-metno", version = "0.14.1", features = [
     "zlib",
 ], optional = true }
 indexmap = { version = "2.13.0", optional = true }
@@ -100,7 +103,7 @@ wide = "1.4.0"
 #################
 
 [package.metadata.docs.rs]
-features = ["single-cell", "multi-modal", "dge"]
+features = ["single-cell", "multi-modal", "dge", "hdf5-static"]
 
 ###########
 # Benches #

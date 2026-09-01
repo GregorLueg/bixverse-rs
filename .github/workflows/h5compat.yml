@@ -1,0 +1,47 @@
+name: hdf5 1.10 compat
+
+# Throwaway. Answers one question: does bixverse-rs compile against HDF5
+# 1.10.7, which is what Rhdf5lib ships and what the R package would link on
+# Windows. Ubuntu 22.04 packages exactly that version, so no Windows runner is
+# needed to find out. Delete this file once the answer is known.
+
+on:
+  push:
+    branches: [ diag/hdf5-1.10.7 ]
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the system HDF5
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libhdf5-dev pkg-config
+          echo "=== apt version ==="
+          dpkg-query -W -f='${Version}\n' libhdf5-dev
+          echo "=== header version ==="
+          grep -E "define H5_VERS_(MAJOR|MINOR|RELEASE)" \
+            /usr/include/hdf5/serial/H5public.h
+          echo "=== shared libs ==="
+          ls -l /usr/lib/x86_64-linux-gnu/hdf5/serial/libhdf5.so* || true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # No hdf5-static: this is the external-libhdf5 path, the one the Windows
+      # build would take. If hdf5-metno-src appears in the log, the feature
+      # split is wrong.
+      - name: cargo check against system HDF5
+        run: cargo check --features single-cell,multi-modal --message-format=short
+
+      - name: confirm hdf5-metno-src stayed out of the graph
+        run: |
+          if cargo tree --features single-cell,multi-modal -i hdf5-metno-src 2>/dev/null \
+             | grep -q hdf5-metno-src; then
+            echo "::error::hdf5-metno-src is in the dependency graph"
+            exit 1
+          fi
+          echo "hdf5-metno-src absent, as intended"
