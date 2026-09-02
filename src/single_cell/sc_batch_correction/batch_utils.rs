@@ -124,7 +124,8 @@ pub fn standardise_per_column(mat: MatRef<f32>) -> Mat<f32> {
 /// ### Returns
 ///
 /// `(indices, distances)` where `indices[i]` are the k nearest reference
-/// neighbours of query cell `i`.
+/// neighbours of query cell `i`. The distances are true distances:
+/// [`to_true_distances`] has already run.
 pub fn batch_knn_search(
     query: MatRef<f32>,
     reference: MatRef<f32>,
@@ -223,7 +224,10 @@ pub fn batch_knn_search(
         }
     };
 
-    Ok((indices, dist.unwrap()))
+    let mut dist = dist.expect("distances were requested from the index");
+    to_true_distances(&mut dist, &params.ann_dist);
+
+    Ok((indices, dist))
 }
 
 ///////////

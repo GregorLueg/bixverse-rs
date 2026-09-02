@@ -274,8 +274,7 @@ fn geodesic_graph(
         "Palantir: the multiscale kNN search returned no distances".to_string(),
     ))?;
 
-    // euclidean distances come back squared from the ANN backends.
-    build_symmetric_knn_graph(&indices, &distances, true)
+    build_symmetric_knn_graph(&indices, &distances)
 }
 
 /// Map terminal state cell indices onto their waypoint positions.
@@ -354,8 +353,6 @@ fn apply_probability_threshold(branch_probs: &mut Mat<f32>, threshold: f32) {
 ///
 /// * `knn_indices` - kNN indices per cell, self excluded.
 /// * `knn_distances` - kNN distances per cell, aligned with `knn_indices`.
-/// * `squared_dist` - Whether `knn_distances` holds squared distances, as
-///   [crate::prelude::generate_knn_with_dist] returns for `"euclidean"`.
 /// * `early_cell` - Index of the user's early cell.
 /// * `terminal_states` - Optional terminal state cell indices. When `None` they
 ///   are detected from the waypoint Markov chain.
@@ -375,7 +372,6 @@ fn apply_probability_threshold(branch_probs: &mut Mat<f32>, threshold: f32) {
 pub fn run_palantir(
     knn_indices: &[Vec<usize>],
     knn_distances: &[Vec<f32>],
-    squared_dist: bool,
     early_cell: usize,
     terminal_states: Option<&[usize]>,
     params: PalantirParams,
@@ -411,7 +407,6 @@ pub fn run_palantir(
     let space = multiscale_components(
         knn_indices,
         knn_distances,
-        squared_dist,
         params.n_dcs,
         params.n_eigs,
         seed,
@@ -556,7 +551,7 @@ mod tests {
     }
 
     /// kNN graph over a synthetic embedding, as `run_palantir` expects it:
-    /// `(indices, squared distances)` from an exhaustive Euclidean search.
+    /// `(indices, distances)` from an exhaustive Euclidean search.
     fn knn_of(coords: &[Vec<f32>], k: usize) -> (Vec<Vec<usize>>, Vec<Vec<f32>>) {
         let n = coords.len();
         let d = coords[0].len();
@@ -690,8 +685,7 @@ mod tests {
         // `num_waypoints / n_dims` iterations per component, so a target equal
         // to `n` samples barely half the cells per axis and detection loses the
         // single terminal state on this fixture.
-        let res =
-            run_palantir(&indices, &distances, true, 0, None, test_params(250), 42, 0).unwrap();
+        let res = run_palantir(&indices, &distances, 0, None, test_params(250), 42, 0).unwrap();
 
         let truth: Vec<f32> = (0..120).map(|i| i as f32).collect();
         let corr = crate::core::math::vector_helpers::pearson_correlation(&res.pseudotime, &truth)
@@ -728,8 +722,7 @@ mod tests {
         let coords = y_manifold(trunk, arm);
         let (indices, distances) = knn_of(&coords, 15);
 
-        let res =
-            run_palantir(&indices, &distances, true, 0, None, test_params(120), 42, 0).unwrap();
+        let res = run_palantir(&indices, &distances, 0, None, test_params(120), 42, 0).unwrap();
 
         // The arms must stay attached to the trunk, for the reason spelled out
         // at [ARM_DIVERGENCE].
@@ -776,8 +769,7 @@ mod tests {
         let coords = y_manifold(trunk, arm);
         let (indices, distances) = knn_of(&coords, 15);
 
-        let res =
-            run_palantir(&indices, &distances, true, 0, None, test_params(250), 42, 0).unwrap();
+        let res = run_palantir(&indices, &distances, 0, None, test_params(250), 42, 0).unwrap();
 
         assert_eq!(res.repair_edges, 0);
         assert!(
@@ -816,7 +808,6 @@ mod tests {
         let res = run_palantir(
             &indices,
             &distances,
-            true,
             0,
             Some(&tips),
             test_params(120),
@@ -894,17 +885,7 @@ mod tests {
         let mut params = test_params(120);
         params.branch_prob_threshold = 0.0;
 
-        let res = run_palantir(
-            &indices,
-            &distances,
-            true,
-            0,
-            Some(&supplied),
-            params,
-            42,
-            0,
-        )
-        .unwrap();
+        let res = run_palantir(&indices, &distances, 0, Some(&supplied), params, 42, 0).unwrap();
 
         assert_eq!(res.branch_probs.ncols(), 2);
         for i in 0..res.branch_probs.nrows() {
@@ -945,7 +926,6 @@ mod tests {
         let res = run_palantir(
             &indices,
             &distances,
-            true,
             0,
             Some(&supplied),
             test_params(120),
@@ -964,16 +944,7 @@ mod tests {
         let (indices, distances) = knn_of(&coords, 10);
 
         assert!(matches!(
-            run_palantir(
-                &indices,
-                &distances,
-                true,
-                999,
-                None,
-                test_params(250),
-                42,
-                0
-            ),
+            run_palantir(&indices, &distances, 999, None, test_params(250), 42, 0),
             Err(BixverseErrors::PalantirEarlyCellOutOfRange { .. })
         ));
     }
@@ -988,7 +959,6 @@ mod tests {
             run_palantir(
                 &indices,
                 &distances,
-                true,
                 0,
                 Some(&[999]),
                 test_params(250),
@@ -1009,7 +979,7 @@ mod tests {
         params.knn = 4;
 
         assert!(matches!(
-            run_palantir(&indices, &distances, true, 0, None, params, 42, 0),
+            run_palantir(&indices, &distances, 0, None, params, 42, 0),
             Err(BixverseErrors::PalantirKnnTooSmall { .. })
         ));
     }

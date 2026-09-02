@@ -513,7 +513,6 @@ impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
 /// * `pca` - PCA/SVD embedding (n_cells × n_components)
 /// * `knn_indices` - kNN indices for each cell
 /// * `knn_distances` - kNN distances for each cell
-/// * `squared_dist` - Are the distances squared (squared Euclidean for example)
 /// * `params` - Algorithm parameters
 /// * `seed` - Random seed for reproducibility
 /// * `device` - Device to run the argmin on
@@ -544,7 +543,6 @@ pub fn seacells_fit_gpu<R: Runtime>(
     pca: faer::MatRef<f32>,
     knn_indices: &[Vec<usize>],
     knn_distances: &[Vec<f32>],
-    squared_dist: bool,
     params: &SEACellsParams,
     seed: usize,
     device: R::Device,
@@ -563,18 +561,11 @@ pub fn seacells_fit_gpu<R: Runtime>(
             pca,
             knn_indices,
             knn_distances,
-            squared_dist,
             n_landmarks,
             verbose,
             seed as u64,
         )?,
-        None => model.initialise_archetypes(
-            knn_indices,
-            knn_distances,
-            verbose,
-            squared_dist,
-            seed as u64,
-        )?,
+        None => model.initialise_archetypes(knn_indices, knn_distances, verbose, seed as u64)?,
     }
 
     // Archetype initialisation dedups and can come back with fewer than

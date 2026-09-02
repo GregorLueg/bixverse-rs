@@ -118,7 +118,7 @@ fn test_seacells_gpu_matches_cpu() {
         let mut cpu_model = SEACells::new(n, &p);
         cpu_model.construct_kernel_mat(embedding.as_ref(), &knn_indices, &knn_distances, 0);
         cpu_model
-            .initialise_archetypes(&knn_indices, &knn_distances, 0, true, 42)
+            .initialise_archetypes(&knn_indices, &knn_distances, 0, 42)
             .expect("archetype init failed");
         cpu_model.fit(42, 0).expect("CPU fit failed");
         let cpu_assign = cpu_model
@@ -130,7 +130,6 @@ fn test_seacells_gpu_matches_cpu() {
             embedding.as_ref(),
             &knn_indices,
             &knn_distances,
-            true,
             &p,
             42,
             device.clone(),

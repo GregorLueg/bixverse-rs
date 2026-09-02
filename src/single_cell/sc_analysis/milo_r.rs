@@ -156,19 +156,25 @@ impl KnnIndex {
     ///
     /// ### Returns
     ///
-    /// Tuple of `(neighbour indices, distances to neighbours)`
+    /// Tuple of `(neighbour indices, true distances to neighbours)`
     pub fn query_single(
         &self,
         query_point: &[f32],
         knn_params: &KnnParams,
         k: usize,
     ) -> Result<(Vec<usize>, Vec<f32>), BixverseErrors> {
-        match self {
-            KnnIndex::Annoy(index) => Ok(index.query(query_point, k, knn_params.search_budget)?),
-            KnnIndex::Hnsw(index) => Ok(index.query(query_point, k, knn_params.ef_search)?),
-            KnnIndex::NNDescent(index) => Ok(index.query(query_point, k, None)?),
-            KnnIndex::Exhaustive(index) => Ok(index.query(query_point, k)?),
-        }
+        let (indices, mut distances) = match self {
+            KnnIndex::Annoy(index) => index.query(query_point, k, knn_params.search_budget)?,
+            KnnIndex::Hnsw(index) => index.query(query_point, k, knn_params.ef_search)?,
+            KnnIndex::NNDescent(index) => index.query(query_point, k, None)?,
+            KnnIndex::Exhaustive(index) => index.query(query_point, k)?,
+        };
+
+        // One row, so it borrows as a single-element batch rather than needing
+        // its own helper.
+        to_true_distances(std::slice::from_mut(&mut distances), &knn_params.ann_dist);
+
+        Ok((indices, distances))
     }
 }
 

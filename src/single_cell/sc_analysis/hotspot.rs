@@ -72,10 +72,6 @@ pub struct HotSpotGraphParams {
     /// Kernel width is the `ceil(k / neighborhood_factor)`-th neighbour
     /// distance. Only read when `weighted_graph` is `true`.
     pub neighborhood_factor: f32,
-    /// Whether the supplied distances already hold `d^2`. Depends entirely on
-    /// the metric the neighbours came from, see
-    /// [`distances_are_squared`]. Only read when `weighted_graph` is `true`.
-    pub squared_distances: bool,
 }
 
 impl Default for HotSpotGraphParams {
@@ -83,9 +79,6 @@ impl Default for HotSpotGraphParams {
         Self {
             weighted_graph: false,
             neighborhood_factor: 3.0,
-            // upstream runs on scikit-learn / pynndescent distances, which are
-            // never pre-squared
-            squared_distances: false,
         }
     }
 }
@@ -97,16 +90,14 @@ impl HotSpotGraphParams {
     ///
     /// * `weighted_graph` - Weight the edges by the Gaussian kernel
     /// * `neighborhood_factor` - Divisor picking the kernel width neighbour
-    /// * `squared_distances` - `true` when the distances already hold `d^2`
     ///
     /// ### Returns
     ///
     /// The initialised parameters.
-    pub fn new(weighted_graph: bool, neighborhood_factor: f32, squared_distances: bool) -> Self {
+    pub fn new(weighted_graph: bool, neighborhood_factor: f32) -> Self {
         Self {
             weighted_graph,
             neighborhood_factor,
-            squared_distances,
         }
     }
 }
@@ -470,11 +461,7 @@ fn compute_moments_weights(
 /// One weight per neighbour, in the same layout as `distances`.
 fn graph_weights(distances: &[Vec<f32>], params: &HotSpotGraphParams) -> Vec<Vec<f32>> {
     if params.weighted_graph {
-        knn_distance_weights(
-            distances,
-            params.neighborhood_factor,
-            params.squared_distances,
-        )
+        knn_distance_weights(distances, params.neighborhood_factor)
     } else {
         distances
             .iter()

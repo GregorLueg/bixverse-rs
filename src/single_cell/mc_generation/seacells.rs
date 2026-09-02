@@ -282,9 +282,6 @@ fn matrix_trace(mat: &CompressedSparseData2<f32>) -> f64 {
 ///
 /// * `knn_indices` - kNN indices for each cell
 /// * `knn_distances` - kNN distances for each cell
-/// * `squared_dist` - Are the distances squared (squared Euclidean for
-///   example).
-///
 /// ### Returns
 ///
 /// Symmetric kernel matrix, or an error when a cell has no neighbours or the
@@ -292,7 +289,6 @@ fn matrix_trace(mat: &CompressedSparseData2<f32>) -> f64 {
 pub fn compute_diffusion_kernel(
     knn_indices: &[Vec<usize>],
     knn_distances: &[Vec<f32>],
-    squared_dist: bool,
 ) -> Result<CompressedSparseData2<f32>, BixverseErrors> {
     let n = knn_indices.len();
 
@@ -339,13 +335,7 @@ pub fn compute_diffusion_kernel(
 
     for (i, neighbours) in knn_indices.iter().enumerate() {
         for (idx, &j) in neighbours.iter().enumerate() {
-            // need to square root here, as I am not doing this during kNN generation
-            let dist = if squared_dist {
-                knn_distances[i][idx].sqrt()
-            } else {
-                knn_distances[i][idx]
-            };
-            let weight = (-dist / adaptive_std[i]).exp();
+            let weight = (-knn_distances[i][idx] / adaptive_std[i]).exp();
             rows.push(i);
             cols.push(j);
             vals.push(weight);
@@ -1709,8 +1699,8 @@ impl<'a> SEACells<'a> {
     ///
     /// ```K[i,j] = exp(-||xᵢ - xⱼ||² / (σᵢ σⱼ))```
     ///
-    /// where σᵢ is the median k-NN distance for cell i (taken from the
-    /// already-squared `knn_distances` via .sqrt() at the median index).
+    /// where σᵢ is the median k-NN distance for cell i, read straight off
+    /// `knn_distances` at the median index.
     ///
     /// The graph is first symmetrised by union (edge if either direction
     /// exists) or intersection (edge only if both directions exist); self-loops
@@ -1751,7 +1741,7 @@ impl<'a> SEACells<'a> {
         let median_idx = k / 2;
         let median_dist = knn_distances
             .iter()
-            .map(|d| d[median_idx].sqrt())
+            .map(|d| d[median_idx])
             .collect::<Vec<f32>>();
 
         let mut edges = FxHashSet::default();
@@ -2010,15 +2000,12 @@ impl<'a> SEACells<'a> {
     /// * `knn_distances` - k-NN distances for each cell
     /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
     ///   detailed verbosity.
-    /// * `squared_dist` - Are the distances squared (squared Euclidean for
-    ///   example).
     /// * `seed` - Random seed for initialisation
     pub fn initialise_archetypes(
         &mut self,
         knn_indices: &[Vec<usize>],
         knn_distances: &[Vec<f32>],
         verbose: usize,
-        squared_dist: bool,
         seed: u64,
     ) -> Result<(), BixverseErrors> {
         let verbosity = parse_verbosity_level(verbose);
@@ -2033,13 +2020,7 @@ impl<'a> SEACells<'a> {
             }
             self.initialise_archetypes_random(verbose, seed);
         } else {
-            self.initialise_archetypes_combined(
-                knn_indices,
-                knn_distances,
-                squared_dist,
-                verbose,
-                seed,
-            )?;
+            self.initialise_archetypes_combined(knn_indices, knn_distances, verbose, seed)?;
         }
         Ok(())
     }
@@ -2080,8 +2061,6 @@ impl<'a> SEACells<'a> {
     ///
     /// * `knn_indices` - k-NN indices for each cell
     /// * `knn_distances` - k-NN distances for each cell
-    /// * `squared_dist` - Are the distances squared (squared Euclidean for
-    ///   example).
     /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
     ///   detailed verbosity.
     /// * `seed` - Random seed for waypoint sampling
@@ -2089,7 +2068,6 @@ impl<'a> SEACells<'a> {
         &mut self,
         knn_indices: &[Vec<usize>],
         knn_distances: &[Vec<f32>],
-        squared_dist: bool,
         verbose: usize,
         seed: u64,
     ) -> Result<(), BixverseErrors> {
@@ -2100,7 +2078,7 @@ impl<'a> SEACells<'a> {
             println!("Computing diffusion maps for waypoint initialisation...");
         }
 
-        let mut kernel = compute_diffusion_kernel(knn_indices, knn_distances, squared_dist)?;
+        let mut kernel = compute_diffusion_kernel(knn_indices, knn_distances)?;
 
         let (eigenvalues, eigenvectors) = diffusion_map_from_kernel(
             &mut kernel,
@@ -2161,8 +2139,6 @@ impl<'a> SEACells<'a> {
     /// * `pca` - PCA/SVD matrix (n_cells × n_components)
     /// * `knn_indices` - kNN indices for each cell
     /// * `knn_distances` - kNN distances for each cell
-    /// * `squared_dist` - Are the distances squared (squared Euclidean for
-    ///   example).
     /// * `n_landmarks` - Number of landmarks (typically 5-10× n_sea_cells)
     /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for
     ///   detailed verbosity.
@@ -2173,7 +2149,6 @@ impl<'a> SEACells<'a> {
         pca: MatRef<f32>,
         knn_indices: &[Vec<usize>],
         knn_distances: &[Vec<f32>],
-        squared_dist: bool,
         n_landmarks: usize,
         verbose: usize,
         seed: u64,
@@ -2187,7 +2162,7 @@ impl<'a> SEACells<'a> {
         if verbosity.normal_verbosity() {
             println!("Building diffusion kernel for landmark selection...");
         }
-        let kernel = compute_diffusion_kernel(knn_indices, knn_distances, squared_dist)?;
+        let kernel = compute_diffusion_kernel(knn_indices, knn_distances)?;
 
         if verbosity.normal_verbosity() {
             println!(
@@ -2210,9 +2185,7 @@ impl<'a> SEACells<'a> {
             seed as usize,
             verbose,
         )?;
-        let squared_dist = self.params.knn_params.ann_dist == "euclidean";
-
-        let mut ll_kernel = compute_diffusion_kernel(&ll_idx, &ll_dist, squared_dist)?;
+        let mut ll_kernel = compute_diffusion_kernel(&ll_idx, &ll_dist)?;
 
         let n_eigs = k_ll.min(l - 1).max(11);
         let (evals, evecs) = diffusion_map_from_kernel(
@@ -3691,7 +3664,7 @@ mod tests {
         // A five-neighbour graph used to index `sorted[7]` when the caller's
         // params asked for k = 25. The bandwidth now comes from the row itself.
         let (indices, distances) = ring_knn(20, 5);
-        let kernel = compute_diffusion_kernel(&indices, &distances, false)
+        let kernel = compute_diffusion_kernel(&indices, &distances)
             .expect("narrow kNN graph must not panic");
         assert_eq!(kernel.shape, (20, 20));
     }
@@ -3704,8 +3677,8 @@ mod tests {
         let (idx_narrow, dist_narrow) = ring_knn(12, 3);
         let (idx_wide, dist_wide) = ring_knn(12, 9);
 
-        let narrow = compute_diffusion_kernel(&idx_narrow, &dist_narrow, false).unwrap();
-        let wide = compute_diffusion_kernel(&idx_wide, &dist_wide, false).unwrap();
+        let narrow = compute_diffusion_kernel(&idx_narrow, &dist_narrow).unwrap();
+        let wide = compute_diffusion_kernel(&idx_wide, &dist_wide).unwrap();
 
         // exp(-1/1) for the narrow graph, exp(-1/3) for the wide one, on the
         // nearest neighbour of cell 0. Different bandwidths, same edge.
@@ -3722,7 +3695,7 @@ mod tests {
     fn test_diffusion_kernel_empty_row_errors() {
         let indices = vec![vec![1usize], vec![]];
         let distances = vec![vec![1.0f32], vec![]];
-        assert!(compute_diffusion_kernel(&indices, &distances, false).is_err());
+        assert!(compute_diffusion_kernel(&indices, &distances).is_err());
     }
 
     /// A NaN distance is caught at the kernel, where it can still name its cause.
@@ -3738,7 +3711,7 @@ mod tests {
         // and the panic finally lands in the waypoint sampler with nothing left
         // pointing back at the kNN input.
         assert!(matches!(
-            compute_diffusion_kernel(&indices, &distances, false),
+            compute_diffusion_kernel(&indices, &distances),
             Err(BixverseErrors::DiffusionKernelNotFinite { n_cells: 10 })
         ));
     }
@@ -3792,7 +3765,7 @@ mod tests {
         let (indices, distances) = duplicate_cell_knn(true);
         assert_eq!(distances[0][0], 0.0);
 
-        let kernel = compute_diffusion_kernel(&indices, &distances, false).unwrap();
+        let kernel = compute_diffusion_kernel(&indices, &distances).unwrap();
 
         assert!(kernel.data.iter().all(|v| v.is_finite()));
 
@@ -3824,7 +3797,7 @@ mod tests {
         assert_eq!(distances[0][0], 0.0);
         assert!(distances[1][0] > 0.0);
 
-        let kernel = compute_diffusion_kernel(&indices, &distances, false).unwrap();
+        let kernel = compute_diffusion_kernel(&indices, &distances).unwrap();
 
         assert!(kernel.data.iter().all(|v| v.is_finite()));
         let lo = kernel.indptr[0] as usize;
@@ -3854,7 +3827,7 @@ mod tests {
             indices.push(order);
         }
 
-        let kernel = compute_diffusion_kernel(&indices, &distances, false).unwrap();
+        let kernel = compute_diffusion_kernel(&indices, &distances).unwrap();
 
         // Cell 20 sits in the middle, so its sorted distances run
         // 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, ... and rank 9 is 5 while rank 8 is 4.

@@ -87,8 +87,6 @@ const MIN_MULTISCALE_EIGENVALUES: usize = 2;
 ///
 /// * `knn_indices` - kNN indices per cell, self excluded.
 /// * `knn_distances` - kNN distances per cell, aligned with `knn_indices`.
-/// * `squared_dist` - Whether `knn_distances` holds squared distances, as the
-///   ANN backends return for Euclidean.
 /// * `n_dcs` - Usable diffusion components to extract before scaling. The
 ///   eigensolver is asked for `n_dcs + 1` pairs, since the trivial leading
 ///   eigenvector is always dropped.
@@ -107,7 +105,6 @@ const MIN_MULTISCALE_EIGENVALUES: usize = 2;
 pub fn multiscale_components(
     knn_indices: &[Vec<usize>],
     knn_distances: &[Vec<f32>],
-    squared_dist: bool,
     n_dcs: usize,
     n_eigs: Option<usize>,
     seed: u64,
@@ -119,7 +116,7 @@ pub fn multiscale_components(
         ));
     }
 
-    let mut kernel = compute_diffusion_kernel(knn_indices, knn_distances, squared_dist)?;
+    let mut kernel = compute_diffusion_kernel(knn_indices, knn_distances)?;
     let degrees = kernel_row_sums(&kernel);
 
     // mutates the kernel into its symmetrically normalised form, so the degrees

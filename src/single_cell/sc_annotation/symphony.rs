@@ -709,7 +709,7 @@ pub fn symphony_map_query_parts<S: SingleCellReading>(
 /// ### Returns
 ///
 /// A [ScKnnResults] holding, for each query cell, the indices of its k
-/// nearest reference neighbours and their distances.
+/// nearest reference neighbours and their true distances.
 pub fn generate_knn_cross_with_dist(
     reference: MatRef<f32>,
     query: MatRef<f32>,
@@ -813,7 +813,10 @@ pub fn generate_knn_cross_with_dist(
     };
 
     // we passed return_dist = true above so distances are always Some
-    Ok((indices, distances.expect("requested distances")))
+    let mut distances = distances.expect("requested distances");
+    to_true_distances(&mut distances, &knn_params.ann_dist);
+
+    Ok((indices, distances))
 }
 
 /// Majority-vote label transfer from a kNN graph. Ties broken by lowest

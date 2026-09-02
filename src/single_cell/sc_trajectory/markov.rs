@@ -230,7 +230,7 @@ pub fn build_waypoint_transitions(
 ///
 /// ### Returns
 ///
-/// `(indices, distances)` with un-squared Euclidean distances, ascending.
+/// `(indices, distances)` with true Euclidean distances, ascending.
 fn waypoint_knn(wp_data: &[Vec<f32>], k: usize, verbose: bool) -> ScKnnResults {
     let n_wp = wp_data.len();
     let n_dims = wp_data[0].len();
@@ -239,16 +239,10 @@ fn waypoint_knn(wp_data: &[Vec<f32>], k: usize, verbose: bool) -> ScKnnResults {
     let index = build_exhaustive_index(mat.as_ref(), "euclidean");
     let (indices, distances) = query_exhaustive_self(&index, k, true, verbose)?;
 
-    // The backend reports squared Euclidean distances.
-    let distances = distances
-        .map(|d| {
-            d.into_iter()
-                .map(|row| row.into_iter().map(|v| v.sqrt()).collect())
-                .collect::<Vec<Vec<f32>>>()
-        })
-        .ok_or(BixverseErrors::InvalidArgument(
-            "Palantir: the exhaustive waypoint search returned no distances".to_string(),
-        ))?;
+    let mut distances = distances.ok_or(BixverseErrors::InvalidArgument(
+        "Palantir: the exhaustive waypoint search returned no distances".to_string(),
+    ))?;
+    to_true_distances(&mut distances, "euclidean");
 
     Ok((indices, distances))
 }
