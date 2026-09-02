@@ -165,7 +165,6 @@ fn test_palantir_to_magic_to_gene_trends() {
     let palantir = run_palantir(
         &knn_indices,
         &knn_distances,
-        true,
         0,
         Some(&tips),
         palantir_params(),
@@ -220,7 +219,7 @@ fn test_palantir_to_magic_to_gene_trends() {
     // -- MAGIC --
 
     let cell_indices: Vec<usize> = (0..n).collect();
-    let operator = MagicOperator::from_knn(&knn_indices, &knn_distances, true, &cell_indices, n)
+    let operator = MagicOperator::from_knn(&knn_indices, &knn_distances, &cell_indices, n)
         .expect("operator builds");
     assert_eq!(operator.n_cells(), n);
 
@@ -393,7 +392,7 @@ fn test_branch_masks_to_magic_to_gene_trends() {
     // -- MAGIC --
 
     let cell_indices: Vec<usize> = (0..n).collect();
-    let operator = MagicOperator::from_knn(&knn_indices, &knn_distances, true, &cell_indices, n)
+    let operator = MagicOperator::from_knn(&knn_indices, &knn_distances, &cell_indices, n)
         .expect("operator builds");
 
     let raw = planted_expression();

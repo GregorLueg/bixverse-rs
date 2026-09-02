@@ -432,12 +432,28 @@ where
     };
     let leading_edge = if return_leading_edge {
         if max_p > -min_p {
-            let max_idx = bottoms
+            // Argmax of `tops`, not of `bottoms`. `tops[i]` is the running sum
+            // just after hit `i` and `bottoms[i]` just before it, so the peak of
+            // a positively enriched pathway is a top. Reading it off `bottoms`
+            // lands one hit late whenever misses separate the hits, which put an
+            // extra gene into every positive leading edge. fgsea takes
+            // `which.max(tops)` here; `max_p` above already does the same.
+            //
+            // First maximum, not last: `Iterator::max_by` keeps the later of two
+            // equal elements where R's `which.max` keeps the earlier, and tied
+            // `tops` are reachable whenever the statistic has ties. Fold with a
+            // strict `>` so a tie leaves the incumbent in place.
+            let max_idx = tops
                 .iter()
                 .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|(idx, _)| idx)
-                .unwrap_or(0);
+                .fold((0usize, tops[0]), |(best_idx, best), (idx, &value)| {
+                    if value > best {
+                        (idx, value)
+                    } else {
+                        (best_idx, best)
+                    }
+                })
+                .0;
             gs_idx.iter().take(max_idx + 1).cloned().collect()
         } else if max_p < -min_p {
             let min_idx = bottoms
@@ -1965,5 +1981,105 @@ mod tests {
             seen.contains(&9),
             "the last gene of the universe is never sampled"
         );
+    }
+
+    ///////////////////
+    // Leading edge //
+    ///////////////////
+
+    /// Twenty genes, descending, spanning zero. Small enough to reason about by
+    /// hand and to write an R reference for.
+    fn leading_edge_stats() -> Vec<f64> {
+        vec![
+            3.0, 2.5, 2.2, 1.9, 1.6, 1.3, 1.0, 0.7, 0.4, 0.1, -0.1, -0.4, -0.7, -1.0, -1.3, -1.6,
+            -1.9, -2.2, -2.5, -3.0,
+        ]
+    }
+
+    /// Hits separated by misses, which is where the peak of `tops` and the
+    /// argmax of `bottoms` come apart.
+    ///
+    /// Reading the leading edge off `bottoms` used to land one hit late here and
+    /// returned `[0, 3, 6, 9]`. The enrichment score was always taken from
+    /// `tops`, so the two disagreed inside the same function.
+    ///
+    /// R: `fgsea::calcGseaStat(stats, c(1, 4, 7, 10), returnLeadingEdge = TRUE)`
+    #[test]
+    fn test_leading_edge_spaced_positive_matches_fgsea() {
+        let stats = leading_edge_stats();
+
+        let res = calc_gsea_stats(&stats, &[0, 3, 6, 9], 1.0, true, false, false);
+
+        assert_relative_eq!(res.es, 0.733_333_333_333_333_4, max_relative = 1e-12);
+        assert_eq!(res.leading_edge, vec![0, 3, 6]);
+    }
+
+    /// A contiguous run at the top has no misses among the hits, so `bottoms`
+    /// and `tops` peak at the same index. This case passed even while the
+    /// spaced one was wrong, which is why it never caught anything on its own.
+    ///
+    /// R: `fgsea::calcGseaStat(stats, 1:5, returnLeadingEdge = TRUE)`
+    #[test]
+    fn test_leading_edge_contiguous_top_matches_fgsea() {
+        let stats = leading_edge_stats();
+
+        let res = calc_gsea_stats(&stats, &[0, 1, 2, 3, 4], 1.0, true, false, false);
+
+        assert_relative_eq!(res.es, 1.0, max_relative = 1e-12);
+        assert_eq!(res.leading_edge, vec![0, 1, 2, 3, 4]);
+    }
+
+    /// The negative branch reads off `bottoms` and was always correct. It comes
+    /// back in descending order of rank, so compare it sorted.
+    ///
+    /// R: `fgsea::calcGseaStat(stats, c(11, 14, 17, 20), returnLeadingEdge = TRUE)`
+    #[test]
+    fn test_leading_edge_spaced_negative_matches_fgsea() {
+        let stats = leading_edge_stats();
+
+        let res = calc_gsea_stats(&stats, &[10, 13, 16, 19], 1.0, true, false, false);
+        let mut leading = res.leading_edge.clone();
+        leading.sort_unstable();
+
+        assert_relative_eq!(res.es, -0.733_333_333_333_333_3, max_relative = 1e-12);
+        assert_eq!(leading, vec![13, 16, 19]);
+    }
+
+    /// Hits on both sides of zero, where the peak sits early and most of the
+    /// pathway falls outside the leading edge.
+    ///
+    /// R: `fgsea::calcGseaStat(stats, c(2, 3, 9, 15, 16, 19), returnLeadingEdge = TRUE)`
+    #[test]
+    fn test_leading_edge_mixed_matches_fgsea() {
+        let stats = leading_edge_stats();
+
+        let res = calc_gsea_stats(&stats, &[1, 2, 8, 14, 15, 18], 1.0, true, false, false);
+
+        assert_relative_eq!(res.es, 0.376_190_476_190_476_2, max_relative = 1e-12);
+        assert_eq!(res.leading_edge, vec![1, 2]);
+    }
+
+    /// Ties in `tops` have to resolve to the first maximum, as `which.max`
+    /// does, not the last as `Iterator::max_by` does.
+    ///
+    /// R: `fgsea::calcGseaStat(c(1,1,1,1), c(1,3), returnLeadingEdge = TRUE)`
+    /// gives `leadingEdge = 1`, one gene.
+    #[test]
+    fn test_leading_edge_ties_take_the_first_peak() {
+        let res = calc_gsea_stats(&[1.0, 1.0, 1.0, 1.0], &[0, 2], 1.0, true, false, false);
+
+        assert_eq!(res.leading_edge, vec![0]);
+    }
+
+    /// One-based indices have to give the same leading edge as zero-based ones.
+    #[test]
+    fn test_leading_edge_indexing_agrees() {
+        let stats = leading_edge_stats();
+
+        let zero = calc_gsea_stats(&stats, &[0, 3, 6, 9], 1.0, true, false, false);
+        let one = calc_gsea_stats(&stats, &[1, 4, 7, 10], 1.0, true, false, true);
+
+        assert_relative_eq!(zero.es, one.es, max_relative = 1e-12);
+        assert_eq!(one.leading_edge, vec![1, 4, 7]);
     }
 }

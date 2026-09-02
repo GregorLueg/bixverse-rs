@@ -514,8 +514,6 @@ fn l1_normalise(mat: &Mat<f32>) -> Mat<f32> {
 /// * `knn_distances` - kNN distances (matching `knn_indices`).
 /// * `labels` - Per-cell category labels in `0..n_groups`.
 /// * `n_groups` - Number of unique groups (>= 2).
-/// * `squared_dist` - Whether `knn_distances` are squared (e.g. squared
-///   Euclidean from the kNN search).
 /// * `params` - [`MeldParams`].
 /// * `seed` - Seed for Lanczos lmax estimation.
 /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
@@ -531,7 +529,6 @@ pub fn meld(
     knn_distances: &[Vec<f32>],
     labels: &[usize],
     n_groups: usize,
-    squared_dist: bool,
     params: &MeldParams,
     seed: u64,
     verbose: usize,
@@ -554,7 +551,7 @@ pub fn meld(
             n.separate_with_underscores()
         );
     }
-    let adj = compute_diffusion_kernel(knn_indices, knn_distances, squared_dist)?;
+    let adj = compute_diffusion_kernel(knn_indices, knn_distances)?;
     if verbosity.normal_verbosity() {
         println!(" Done in {:.2?}", start.elapsed())
     }

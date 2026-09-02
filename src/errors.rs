@@ -132,6 +132,27 @@ pub enum BixverseErrors {
     #[error("Error from the ann-search-rs crate: {0}")]
     AnnSearchRsError(#[from] ann_search_rs::errors::AnnSearchErrors),
 
+    // -- edge-rs --
+    /// Propagate errors from the edge-rs crate
+    #[cfg(feature = "dge")]
+    #[error("Error from the edge-rs crate: {0}")]
+    EdgeRsError(#[from] edge_rs::errors::EdgeErrors),
+
+    /// An input vector does not line up with the observations being modelled.
+    ///
+    /// Covers the design rows, the subject labels and the offsets, all of which
+    /// have to be as long as the cell or sample selection.
+    #[cfg(feature = "dge")]
+    #[error("Differential expression: {name} has {got} entries but {expected} were expected")]
+    DgeShapeMismatch {
+        /// Which input is the wrong length
+        name: &'static str,
+        /// What the selection implies
+        expected: usize,
+        /// What was handed over
+        got: usize,
+    },
+
     // -- distances --
     /// Distance type not supported
     #[error("Distance metric '{0}' is not supported for this method.")]
@@ -924,6 +945,20 @@ pub enum BixverseErrors {
         group: usize,
         /// The cell shared with the reference group
         cell: usize,
+    },
+
+    // -- NEBULA --
+    /// Every gene failed NEBULA's own expression filter.
+    ///
+    /// Raised only once the whole sweep is done. A single batch losing all of
+    /// its genes is normal and is skipped silently.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "NEBULA: none of the {n_genes} genes passed the expression filter; lower `cpc` or `mincp`"
+    )]
+    NebulaNoGenesKept {
+        /// How many genes were offered
+        n_genes: usize,
     },
 
     // -- Palantir --

@@ -27,7 +27,7 @@ pub type ScKnnResults = Result<(Vec<Vec<usize>>, Vec<Vec<f32>>), BixverseErrors>
 //////////
 
 /// Enum for the different methods
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum KnnSearch {
     #[default]
     /// K-means kNN -> fast, exhaustive one (default)
@@ -94,6 +94,11 @@ pub struct KnnParams {
     pub delta: f32,
     /// NNDescent: optional beam search budget for querying.
     pub ef_budget: Option<usize>,
+    /// NNDescent: hand back the graph the descent already built instead of
+    /// beam searching it. No search runs at all, so it is much cheaper, but it
+    /// is only valid for a self-kNN and rows can come back shorter than `k`
+    /// where the descent never filled them. Ignored by every other backend.
+    pub extract_knn: bool,
     /// HNSW: connections per given layer to use
     pub m: usize,
     /// HNSW: construction budget
@@ -127,6 +132,7 @@ impl KnnParams {
             diversify_prob: 0.0,
             delta: 0.001,
             ef_budget: None,
+            extract_knn: false,
             // hnsw
             m: 16,
             ef_construction: 200,
@@ -148,6 +154,25 @@ impl Default for KnnParams {
 /////////////
 // Helpers //
 /////////////
+
+/// Warn when `extract_knn` was asked for on a backend that cannot honour it.
+///
+/// Only NN-Descent leaves behind a graph that can be handed back without a
+/// search, so every other backend falls through to its query path. Staying
+/// silent would hide a parameter that did nothing.
+///
+/// ### Params
+///
+/// * `extract_knn` - Whether direct extraction was requested
+/// * `method` - The resolved kNN backend
+pub(crate) fn warn_unsupported_extract(extract_knn: bool, method: KnnSearch) {
+    if extract_knn && method != KnnSearch::NNDescent {
+        println!(
+            "[WARNING!] 'extract_knn' is only supported by NNDescent. Ignoring it for the {:?} backend.",
+            method
+        );
+    }
+}
 
 /// Helper function to create a kNN mat with self
 ///
@@ -520,6 +545,9 @@ pub fn generate_knn_ivf(
 ///   after index generation.
 /// * `ef_budget` - Optional query search budget.
 /// * `delta` - Early stop criterium for the algorithm.
+/// * `extract_knn` - Hand back the descent graph directly rather than beam
+///   searching it. Skips the query pass entirely, at the cost of some recall
+///   and possibly short rows.
 /// * `seed` - Seed for the NN Descent algorithm
 /// * `validate_index` - Shall the index be validated with an exhaustive search.
 /// * `verbose` - Controls verbosity of the algorithm
@@ -536,11 +564,12 @@ pub fn generate_knn_nndescent(
     diversify_prob: f32,
     ef_budget: Option<usize>,
     delta: f32,
+    extract_knn: bool,
     seed: usize,
     validate_index: bool,
     verbose: bool,
 ) -> Result<Vec<Vec<usize>>, BixverseErrors> {
-    if ef_budget.is_none() && no_neighbours > 150 {
+    if !extract_knn && ef_budget.is_none() && no_neighbours > 150 {
         println!(
             "[WARNING!] Your 'ef_budget' is set to auto ((k * 2).clamp(50, 200)) for k {}. 'ef_search' should be 2 to 4x 'k'",
             no_neighbours
@@ -564,8 +593,18 @@ pub fn generate_knn_nndescent(
                 verbose,
             )
         },
-        |idx| query_nndescent_self(idx, no_neighbours + 1, ef_budget, false, verbose),
-        "NNDescent",
+        |idx| {
+            if extract_knn {
+                extract_nndescent_knn(idx, Some(no_neighbours + 1), true, false)
+            } else {
+                query_nndescent_self(idx, no_neighbours + 1, ef_budget, false, verbose)
+            }
+        },
+        if extract_knn {
+            "NNDescent (graph extraction)"
+        } else {
+            "NNDescent"
+        },
     )?;
 
     if validate_index && verbose {
@@ -675,7 +714,8 @@ pub fn generate_knn_kmknn(
 ///
 /// ### Returns
 ///
-/// Tuple of `(indices of nearest neighbours, distances to these neighbours)`
+/// Tuple of `(indices of nearest neighbours, distances to these neighbours)`.
+/// The distances are true distances: [`to_true_distances`] has already run.
 pub fn generate_knn_with_dist(
     embd: MatRef<f32>,
     knn_params: &KnnParams,
@@ -688,12 +728,19 @@ pub fn generate_knn_with_dist(
         mut indices: Vec<Vec<usize>>,
         distances: Option<Vec<Vec<f32>>>,
     ) -> (Vec<Vec<usize>>, Option<Vec<Vec<f32>>>) {
+        // The extraction path can leave a row empty where the descent never
+        // filled it, which the query paths never do, so this cannot assume a
+        // self-edge is there to strip.
         for idx_vec in indices.iter_mut() {
-            idx_vec.remove(0);
+            if !idx_vec.is_empty() {
+                idx_vec.remove(0);
+            }
         }
         let distances = distances.map(|mut dists| {
             for dist_vec in dists.iter_mut() {
-                dist_vec.remove(0);
+                if !dist_vec.is_empty() {
+                    dist_vec.remove(0);
+                }
             }
             dists
         });
@@ -710,6 +757,7 @@ pub fn generate_knn_with_dist(
     }
 
     let knn_method = parse_knn_method(&knn_params.knn_method).unwrap_or_default();
+    warn_unsupported_extract(knn_params.extract_knn, knn_method);
     let k_plus_one = knn_params.k + 1;
 
     let (indices, distances) = match knn_method {
@@ -788,16 +836,22 @@ pub fn generate_knn_with_dist(
                 )
             })?;
 
-            if knn_params.ef_budget.is_none() && k_plus_one > 150 {
+            if !knn_params.extract_knn && knn_params.ef_budget.is_none() && k_plus_one > 150 {
                 println!(
                     "[WARNING!] Your 'ef_budget' is set to auto ((k * 2).clamp(50, 200)) for k {}. 'ef_search' should be 2 to 4x 'k'",
                     k_plus_one
                 )
             }
 
-            let (indices, distances) = timed("Queried NNDescent index", verbose, || {
-                query_nndescent_self(&index, k_plus_one, knn_params.ef_budget, true, verbose)
-            })?;
+            let (indices, distances) = if knn_params.extract_knn {
+                timed("Extracted NNDescent graph", verbose, || {
+                    extract_nndescent_knn(&index, Some(k_plus_one), true, true)
+                })?
+            } else {
+                timed("Queried NNDescent index", verbose, || {
+                    query_nndescent_self(&index, k_plus_one, knn_params.ef_budget, true, verbose)
+                })?
+            };
             if validate_index && verbose {
                 let recall = index.validate_index(k_plus_one, seed, None)?;
                 println!(
@@ -855,7 +909,12 @@ pub fn generate_knn_with_dist(
         }
     };
 
-    Ok(remove_self(indices, distances))
+    let (indices, mut distances) = remove_self(indices, distances);
+    if let Some(dists) = distances.as_mut() {
+        to_true_distances(dists, &knn_params.ann_dist);
+    }
+
+    Ok((indices, distances))
 }
 
 ///////////
@@ -898,17 +957,10 @@ pub fn compare_knn_graphs(a: MatRef<i32>, b: MatRef<i32>) -> Vec<i32> {
 /// neighbours sit exactly on top of the node, is replaced by one, and a row
 /// whose weights all underflow is left alone rather than divided by zero.
 ///
-/// The kernel only ever needs `d^2`, so `squared` says which form the caller
-/// holds, and it is not a detail: `ann-search-rs` maps `"euclidean"` and
-/// `"l2"` onto [`Dist::SquaredEuclidean`] and hands back `d^2` already, while
-/// `"cosine"` and `"manhattan"` hand back a plain distance. Squaring the wrong
-/// one yields `exp(-d^4 / sigma^4)`, which is not a Gaussian kernel.
-///
 /// ### Params
 ///
-/// * `distances` - Neighbour distances per node, ascending, self excluded
+/// * `distances` - True neighbour distances per node, ascending, self excluded
 /// * `neighborhood_factor` - Divisor picking which neighbour sets the width
-/// * `squared` - `true` when `distances` already holds `d^2`
 ///
 /// ### Returns
 ///
@@ -917,11 +969,7 @@ pub fn compare_knn_graphs(a: MatRef<i32>, b: MatRef<i32>) -> Vec<i32> {
 /// ### References
 ///
 /// DeTomaso and Yosef, Cell Systems, 2021 (`hotspot/knn.py::compute_weights`)
-pub fn knn_distance_weights(
-    distances: &[Vec<f32>],
-    neighborhood_factor: f32,
-    squared: bool,
-) -> Vec<Vec<f32>> {
+pub fn knn_distance_weights(distances: &[Vec<f32>], neighborhood_factor: f32) -> Vec<Vec<f32>> {
     distances
         .par_iter()
         .map(|row| {
@@ -932,21 +980,11 @@ pub fn knn_distance_weights(
             let radius =
                 ((row.len() as f32 / neighborhood_factor).ceil() as usize).clamp(1, row.len());
 
-            // everything below works in `d^2`, so the width is already sigma^2
-            let sigma_sq = if squared {
-                row[radius - 1]
-            } else {
-                row[radius - 1] * row[radius - 1]
-            };
+            // everything below works in `d^2`, so the width is squared once here
+            let sigma_sq = row[radius - 1] * row[radius - 1];
             let sigma_sq = if sigma_sq == 0.0 { 1.0 } else { sigma_sq };
 
-            let mut weights: Vec<f32> = row
-                .iter()
-                .map(|&d| {
-                    let d_sq = if squared { d } else { d * d };
-                    (-d_sq / sigma_sq).exp()
-                })
-                .collect();
+            let mut weights: Vec<f32> = row.iter().map(|&d| (-(d * d) / sigma_sq).exp()).collect();
 
             let total: f32 = weights.iter().sum();
             if total != 0.0 {
@@ -960,23 +998,26 @@ pub fn knn_distance_weights(
         .collect()
 }
 
-/// Does this metric hand back `d^2` rather than `d`?
+/// Turn the distances an `ann-search-rs` query hands back into true distances.
 ///
-/// `ann-search-rs` folds `"euclidean"` and `"l2"` onto
-/// [`Dist::SquaredEuclidean`], which never takes the square root; `"cosine"`
-/// and `"manhattan"` return the distance itself. Anything that feeds neighbour
-/// distances into a Gaussian kernel has to know which it is holding.
+/// The crate folds `"euclidean"` and `"l2"` onto [`Dist::SquaredEuclidean`] and
+/// never takes the square root, so every path in this crate that receives
+/// neighbour distances applies it once, here. Past this boundary a distance is
+/// a distance, and no kernel needs to ask which form it is holding. `"cosine"`
+/// and `"manhattan"` already come back unsquared, so this is a no-op for them.
 ///
 /// ### Params
 ///
+/// * `distances` - Neighbour distances per node, rewritten in place
 /// * `ann_dist` - Metric name, as carried in `KnnParams::ann_dist`
-///
-/// ### Returns
-///
-/// `true` for the squared-Euclidean metric, `false` otherwise, including for
-/// a name that does not parse.
-pub fn distances_are_squared(ann_dist: &str) -> bool {
-    matches!(parse_ann_dist(ann_dist), Some(Dist::SquaredEuclidean))
+pub fn to_true_distances(distances: &mut [Vec<f32>], ann_dist: &str) {
+    if !matches!(parse_ann_dist(ann_dist), Some(Dist::SquaredEuclidean)) {
+        return;
+    }
+
+    distances
+        .par_iter_mut()
+        .for_each(|row| row.iter_mut().for_each(|d| *d = d.max(0.0).sqrt()));
 }
 
 ///////////
@@ -1009,7 +1050,7 @@ mod tests {
             0.000_096_986_055,
         ];
 
-        let weights = knn_distance_weights(&distances, 3.0, false);
+        let weights = knn_distance_weights(&distances, 3.0);
 
         for row in [0, 2] {
             for (got, want) in weights[row].iter().zip(expected.iter()) {
@@ -1028,58 +1069,103 @@ mod tests {
         }
     }
 
-    /// The kernel is a function of `d^2`, so feeding it squared distances with
-    /// `squared = true` has to land on the same weights as feeding it the plain
-    /// distances. Getting this wrong silently computes `exp(-d^4 / sigma^4)`,
-    /// and `ann-search-rs` returns `d^2` for `"euclidean"`, so it is the
-    /// default metric that would have been wrong, not an exotic one.
-    #[test]
-    fn test_squared_and_plain_distances_agree() {
-        let plain = vec![
-            vec![0.5, 1.0, 1.5, 2.0, 2.5, 3.0],
-            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-        ];
-        let squared: Vec<Vec<f32>> = plain
-            .iter()
-            .map(|row| row.iter().map(|d| d * d).collect())
-            .collect();
-
-        let from_plain = knn_distance_weights(&plain, 3.0, false);
-        let from_squared = knn_distance_weights(&squared, 3.0, true);
-
-        for (a, b) in from_plain.iter().zip(from_squared.iter()) {
-            for (x, y) in a.iter().zip(b.iter()) {
-                assert_relative_eq!(x, y, epsilon = 1e-6);
-            }
-        }
-
-        // and the wrong reading really is a different kernel, so the test above
-        // is not vacuously true
-        let mis_read = knn_distance_weights(&squared, 3.0, false);
-        assert!((mis_read[0][5] - from_plain[0][5]).abs() > 1e-6);
-    }
-
     /// The kernel width tracks `neighborhood_factor`, so a wider neighbourhood
     /// has to spread the weight further out.
     #[test]
     fn test_neighborhood_factor_widens_the_kernel() {
         let distances = vec![vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]];
 
-        let tight = knn_distance_weights(&distances, 6.0, false);
-        let wide = knn_distance_weights(&distances, 1.0, false);
+        let tight = knn_distance_weights(&distances, 6.0);
+        let wide = knn_distance_weights(&distances, 1.0);
 
         // ceil(6/6) = 1 -> sigma = 1.0, ceil(6/1) = 6 -> sigma = 6.0
         assert!(tight[0][0] > wide[0][0]);
         assert!(tight[0][5] < wide[0][5]);
     }
 
-    /// `"euclidean"` and `"l2"` come back pre-squared, the others do not.
+    /// Deterministic clustered data, `n` points in `dim` dimensions spread over
+    /// `n_clusters` well-separated blobs.
+    fn clustered_data(n: usize, dim: usize, n_clusters: usize) -> faer::Mat<f32> {
+        let hash = |a: usize, b: usize| -> f32 {
+            let mut h = (a as u64)
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .wrapping_add((b as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F));
+            h ^= h >> 29;
+            h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            h ^= h >> 32;
+            ((h >> 40) as f32) / 16_777_216.0 - 0.5
+        };
+
+        faer::Mat::<f32>::from_fn(n, dim, |i, j| {
+            let cluster = i % n_clusters;
+            hash(cluster + 1000, j) * 20.0 + hash(i, j) * 2.0
+        })
+    }
+
+    /// `extract_knn` reshapes the graph the descent already built rather than
+    /// beam searching it, so it trades a little recall for skipping the query
+    /// pass. It still has to agree with the beam search on most neighbours,
+    /// never return self, and never hand back more than `k`.
     #[test]
-    fn test_squared_metric_detection() {
-        assert!(distances_are_squared("euclidean"));
-        assert!(distances_are_squared("l2"));
-        assert!(!distances_are_squared("cosine"));
-        assert!(!distances_are_squared("manhattan"));
-        assert!(!distances_are_squared("not a metric"));
+    fn test_nndescent_extract_agrees_with_the_query_path() {
+        let (n, k) = (800usize, 10usize);
+        let data = clustered_data(n, 16, 8);
+
+        let base = KnnParams {
+            knn_method: "nndescent".to_string(),
+            ann_dist: "euclidean".to_string(),
+            k,
+            ..Default::default()
+        };
+        let extract = KnnParams {
+            extract_knn: true,
+            ..base.clone()
+        };
+
+        let (queried, _) = generate_knn_with_dist(data.as_ref(), &base, false, false, 42, false)
+            .expect("the beam search path must succeed");
+        let (extracted, dists) =
+            generate_knn_with_dist(data.as_ref(), &extract, true, false, 42, false)
+                .expect("the extraction path must succeed");
+
+        assert_eq!(extracted.len(), n);
+        let dists = dists.expect("distances were requested");
+
+        let mut overlap = 0usize;
+        for (i, (got, want)) in extracted.iter().zip(queried.iter()).enumerate() {
+            assert!(got.len() <= k, "row {} returned {} > {}", i, got.len(), k);
+            assert!(!got.contains(&i), "row {} contains itself", i);
+            assert_eq!(got.len(), dists[i].len(), "row {} shape mismatch", i);
+
+            let truth: FxHashSet<usize> = want.iter().copied().collect();
+            overlap += got.iter().filter(|x| truth.contains(x)).count();
+        }
+
+        let recall = overlap as f32 / (n * k) as f32;
+        assert!(
+            recall > 0.9,
+            "extraction recall was {:.4} against the beam search",
+            recall
+        );
+    }
+
+    /// `"euclidean"` and `"l2"` come back squared from `ann-search-rs` and get
+    /// rooted here; every other metric is already a distance and must be left
+    /// alone. A name that does not parse is left alone too.
+    #[test]
+    fn test_to_true_distances_only_roots_the_squared_metric() {
+        let squared = || vec![vec![4.0f32, 9.0, 16.0], vec![0.0, 25.0]];
+
+        for metric in ["euclidean", "l2", "EUCLIDEAN"] {
+            let mut d = squared();
+            to_true_distances(&mut d, metric);
+            assert_eq!(d, vec![vec![2.0, 3.0, 4.0], vec![0.0, 5.0]], "{}", metric);
+        }
+
+        for metric in ["cosine", "manhattan", "not a metric"] {
+            let mut d = squared();
+            to_true_distances(&mut d, metric);
+            assert_eq!(d, squared(), "{}", metric);
+        }
     }
 }

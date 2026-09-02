@@ -95,8 +95,6 @@ pub struct PseudotimeResult {
 ///
 /// * `knn_indices` - kNN indices per cell, self excluded.
 /// * `knn_distances` - kNN distances per cell, aligned with `knn_indices`.
-/// * `squared_dist` - Whether the distances are squared, as the ANN backends
-///   return for Euclidean.
 ///
 /// ### Returns
 ///
@@ -104,7 +102,6 @@ pub struct PseudotimeResult {
 pub fn build_symmetric_knn_graph(
     knn_indices: &[Vec<usize>],
     knn_distances: &[Vec<f32>],
-    squared_dist: bool,
 ) -> Result<CompressedSparseData2<f32>, BixverseErrors> {
     let n = knn_indices.len();
     if knn_distances.len() != n {
@@ -131,7 +128,6 @@ pub fn build_symmetric_knn_graph(
                 return Err(BixverseErrors::SliceIndexOutOfBounds { index: j, len: n });
             }
             let d = knn_distances[i][slot];
-            let d = if squared_dist { d.sqrt() } else { d };
             let (lo, hi) = if i < j { (i, j) } else { (j, i) };
             edges.push((lo as u32, hi as u32, d));
         }
@@ -756,22 +752,9 @@ mod tests {
         let indices = vec![vec![1], vec![0]];
         let distances = vec![vec![3.0], vec![3.0]];
 
-        let graph = build_symmetric_knn_graph(&indices, &distances, false).unwrap();
+        let graph = build_symmetric_knn_graph(&indices, &distances).unwrap();
 
         assert_eq!(graph.get_nnz(), 2);
-        for &w in &graph.data {
-            assert_relative_eq!(w, 3.0, epsilon = 1e-6);
-        }
-    }
-
-    /// With squared distances in, the stored edge weight is their square root.
-    #[test]
-    fn test_symmetric_graph_square_roots_squared_distances() {
-        let indices = vec![vec![1], vec![0]];
-        let distances = vec![vec![9.0], vec![9.0]];
-
-        let graph = build_symmetric_knn_graph(&indices, &distances, true).unwrap();
-
         for &w in &graph.data {
             assert_relative_eq!(w, 3.0, epsilon = 1e-6);
         }
@@ -784,7 +767,7 @@ mod tests {
         let indices = vec![vec![1], vec![]];
         let distances = vec![vec![2.0], vec![]];
 
-        let graph = build_symmetric_knn_graph(&indices, &distances, false).unwrap();
+        let graph = build_symmetric_knn_graph(&indices, &distances).unwrap();
 
         assert_eq!(graph.indptr[1] - graph.indptr[0], 1);
         assert_eq!(graph.indptr[2] - graph.indptr[1], 1);
@@ -798,7 +781,7 @@ mod tests {
         let distances = vec![vec![1.0], vec![1.0], vec![1.0], vec![1.0]];
         let data = vec![vec![0.0], vec![1.0], vec![2.0], vec![3.0]];
 
-        let graph = build_symmetric_knn_graph(&indices, &distances, false).unwrap();
+        let graph = build_symmetric_knn_graph(&indices, &distances).unwrap();
         let (repaired, added) = connect_graph(&graph, &data, 0).unwrap();
 
         assert_eq!(added, 1);
@@ -816,7 +799,7 @@ mod tests {
         let (indices, distances) = chain_knn(6);
         let data: Vec<Vec<f32>> = (0..6).map(|i| vec![i as f32]).collect();
 
-        let graph = build_symmetric_knn_graph(&indices, &distances, false).unwrap();
+        let graph = build_symmetric_knn_graph(&indices, &distances).unwrap();
         let (repaired, added) = connect_graph(&graph, &data, 0).unwrap();
 
         assert_eq!(added, 0);
@@ -827,7 +810,7 @@ mod tests {
     #[test]
     fn test_weight_columns_sum_to_one() {
         let (indices, distances) = chain_knn(40);
-        let graph = build_symmetric_knn_graph(&indices, &distances, false).unwrap();
+        let graph = build_symmetric_knn_graph(&indices, &distances).unwrap();
         let waypoints: Vec<usize> = (0..40).step_by(5).collect();
 
         let res = compute_pseudotime(&graph, &waypoints, 0, 25, Verbosity::Quiet).unwrap();
@@ -844,7 +827,7 @@ mod tests {
     #[test]
     fn test_pseudotime_monotone_on_a_chain() {
         let (indices, distances) = chain_knn(40);
-        let graph = build_symmetric_knn_graph(&indices, &distances, false).unwrap();
+        let graph = build_symmetric_knn_graph(&indices, &distances).unwrap();
         let waypoints: Vec<usize> = std::iter::once(0).chain((5..40).step_by(5)).collect();
 
         let res = compute_pseudotime(&graph, &waypoints, 0, 25, Verbosity::Quiet).unwrap();
@@ -974,7 +957,7 @@ mod tests {
         let backward = vec![vec![5.0], vec![2.0]];
 
         for distances in [forward, backward] {
-            let graph = build_symmetric_knn_graph(&indices, &distances, false).unwrap();
+            let graph = build_symmetric_knn_graph(&indices, &distances).unwrap();
             assert_eq!(graph.get_nnz(), 2);
             for &w in &graph.data {
                 assert_relative_eq!(w, 2.0, epsilon = 1e-6);
@@ -985,7 +968,7 @@ mod tests {
     /// Zero cells give an empty graph rather than an error or a panic.
     #[test]
     fn test_symmetric_graph_accepts_empty_input() {
-        let graph = build_symmetric_knn_graph(&[], &[], false).unwrap();
+        let graph = build_symmetric_knn_graph(&[], &[]).unwrap();
 
         assert_eq!(graph.shape, (0, 0));
         assert_eq!(graph.get_nnz(), 0);
@@ -997,7 +980,7 @@ mod tests {
         // The scatter order is what makes rows ascending; a regression there is
         // invisible in every other assertion in this module.
         let (indices, distances) = chain_knn(12);
-        let graph = build_symmetric_knn_graph(&indices, &distances, false).unwrap();
+        let graph = build_symmetric_knn_graph(&indices, &distances).unwrap();
 
         for i in 0..12 {
             let (lo, hi) = (graph.indptr[i] as usize, graph.indptr[i + 1] as usize);
@@ -1020,7 +1003,7 @@ mod tests {
         let distances = vec![vec![1.0], vec![1.0], vec![1.0], vec![1.0]];
         let data = vec![vec![0.0f32], vec![1.0], vec![f32::NAN], vec![f32::NAN]];
 
-        let graph = build_symmetric_knn_graph(&indices, &distances, false).unwrap();
+        let graph = build_symmetric_knn_graph(&indices, &distances).unwrap();
 
         assert!(matches!(
             connect_graph(&graph, &data, 0),
@@ -1036,7 +1019,7 @@ mod tests {
     fn test_connect_graph_rejects_mismatched_data_rows() {
         let indices = vec![vec![1], vec![0], vec![3], vec![2]];
         let distances = vec![vec![1.0], vec![1.0], vec![1.0], vec![1.0]];
-        let graph = build_symmetric_knn_graph(&indices, &distances, false).unwrap();
+        let graph = build_symmetric_knn_graph(&indices, &distances).unwrap();
 
         // Two rows of coordinates for a four-node graph used to index past the
         // end of `data` while pricing the bridging edge.
@@ -1052,7 +1035,7 @@ mod tests {
     #[test]
     fn test_pseudotime_rejects_a_useless_iteration_cap() {
         let (indices, distances) = chain_knn(20);
-        let graph = build_symmetric_knn_graph(&indices, &distances, false).unwrap();
+        let graph = build_symmetric_knn_graph(&indices, &distances).unwrap();
         let waypoints: Vec<usize> = (0..20).step_by(4).collect();
 
         for cap in [0usize, 1usize] {
@@ -1074,7 +1057,7 @@ mod tests {
     #[test]
     fn test_pseudotime_rejects_a_start_cell_that_is_not_waypoint_zero() {
         let (indices, distances) = chain_knn(20);
-        let graph = build_symmetric_knn_graph(&indices, &distances, false).unwrap();
+        let graph = build_symmetric_knn_graph(&indices, &distances).unwrap();
         let waypoints: Vec<usize> = (0..20).step_by(4).collect();
 
         assert!(matches!(
@@ -1106,7 +1089,7 @@ mod tests {
     fn test_pseudotime_rejects_a_disconnected_graph() {
         let indices = vec![vec![1], vec![0], vec![3], vec![2]];
         let distances = vec![vec![1.0], vec![1.0], vec![1.0], vec![1.0]];
-        let graph = build_symmetric_knn_graph(&indices, &distances, false).unwrap();
+        let graph = build_symmetric_knn_graph(&indices, &distances).unwrap();
 
         let err = compute_pseudotime(&graph, &[0, 1], 0, 25, Verbosity::Quiet);
 

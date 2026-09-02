@@ -93,8 +93,6 @@ fn classify_density_regions(dist: &[f32]) -> Vec<DensityRegion> {
 ///
 /// * `knn_indices` - Input kNN indices used to build the diffusion kernel
 /// * `knn_distances` - Input kNN distances.
-/// * `squared_dist` - If the distance is squared (for example Euclidean
-///   squared).
 /// * `n_dcs` - Number of diffusion components to retain (paper uses `10`)
 /// * `k_density` - Neighbour rank for the density estimate (paper uses `150`)
 /// * `knn_params` - Parameters for the DC-space kNN search
@@ -109,7 +107,6 @@ fn classify_density_regions(dist: &[f32]) -> Vec<DensityRegion> {
 pub fn compute_diffusion_density(
     knn_indices: &[Vec<usize>],
     knn_distances: &[Vec<f32>],
-    squared_dist: bool,
     n_dcs: usize,
     k_density: usize,
     knn_params: &KnnParams,
@@ -123,7 +120,7 @@ pub fn compute_diffusion_density(
     if verbosity.normal_verbosity() {
         println!("Building diffusion kernel...");
     }
-    let mut kernel = compute_diffusion_kernel(knn_indices, knn_distances, squared_dist)?;
+    let mut kernel = compute_diffusion_kernel(knn_indices, knn_distances)?;
 
     if verbosity.normal_verbosity() {
         println!("Computing top {} diffusion components...", n_dcs);
@@ -164,7 +161,7 @@ pub fn compute_diffusion_density(
     // the underlying ANN engine returns.
     let density_distances: Vec<f32> = dc_distances
         .iter()
-        .map(|d| d.iter().copied().fold(0.0f32, f32::max).sqrt())
+        .map(|d| d.iter().copied().fold(0.0f32, f32::max))
         .collect();
 
     let regions = classify_density_regions(&density_distances);
@@ -433,7 +430,6 @@ mod tests {
         let result = compute_diffusion_density(
             &knn_indices,
             &knn_distances,
-            false,
             10,
             5,
             &KnnParams::default(),

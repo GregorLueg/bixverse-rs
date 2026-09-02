@@ -490,17 +490,13 @@ where
 
             if verbosity.normal_verbosity() {
                 let done = batches_done.fetch_add(1, Ordering::Relaxed) + 1;
-                let pct = done * 100 / total_batches;
-                let prev_pct = (done - 1) * 100 / total_batches;
-                if pct / 10 > prev_pct / 10 || done == total_batches {
-                    println!(
-                        "  Progress: {}% ({}/{} batches, {:.2?} elapsed)",
-                        pct,
-                        done,
-                        total_batches,
-                        start_fit.elapsed()
-                    );
-                }
+                report_decile_progress(
+                    done,
+                    done - 1,
+                    total_batches,
+                    "batches",
+                    start_fit.elapsed(),
+                );
             }
 
             Ok((batch_idx, imp))
@@ -605,17 +601,7 @@ where
 
             if verbosity.normal_verbosity() {
                 let done = genes_done.fetch_add(1, Ordering::Relaxed) + 1;
-                let pct = done * 100 / n_genes;
-                let prev_pct = (done - 1) * 100 / n_genes;
-                if pct / 10 > prev_pct / 10 || done == n_genes {
-                    println!(
-                        "  Progress: {}% ({}/{} genes, {:.2?} elapsed)",
-                        pct,
-                        done,
-                        n_genes,
-                        start_fit.elapsed()
-                    );
-                }
+                report_decile_progress(done, done - 1, n_genes, "genes", start_fit.elapsed());
             }
 
             Ok(imp)

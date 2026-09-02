@@ -1527,16 +1527,7 @@ impl<'a, S: SingleCellReading> ScDblFinder<'a, S> {
             verbosity.detailed_verbosity(),
         )?;
 
-        let mut combined_dists = combined_dists.unwrap();
-
-        // ann-search-rs returns squared Euclideans
-        if knn_params.ann_dist == "euclidean" {
-            combined_dists.par_iter_mut().for_each(|row| {
-                for d in row.iter_mut() {
-                    *d = d.max(0.0).sqrt();
-                }
-            });
-        }
+        let combined_dists = combined_dists.expect("distances were requested");
 
         let end_sim = start_sim.elapsed();
 

@@ -13,7 +13,7 @@ use std::cmp::Ordering;
 use std::time::Instant;
 
 use crate::core::math::linear_algebra::{linear_regression, linear_regression_widen};
-use crate::core::math::stats::{calc_fdr, inv_logit, logit, z_scores_to_pval};
+use crate::core::math::stats::{inv_logit, logit, p_adjust_fdr, z_scores_to_pval};
 use crate::prelude::*;
 
 use crate::single_cell::sc_processing::knn::knn_distance_weights;
@@ -72,10 +72,6 @@ pub struct HotSpotGraphParams {
     /// Kernel width is the `ceil(k / neighborhood_factor)`-th neighbour
     /// distance. Only read when `weighted_graph` is `true`.
     pub neighborhood_factor: f32,
-    /// Whether the supplied distances already hold `d^2`. Depends entirely on
-    /// the metric the neighbours came from, see
-    /// [`distances_are_squared`]. Only read when `weighted_graph` is `true`.
-    pub squared_distances: bool,
 }
 
 impl Default for HotSpotGraphParams {
@@ -83,9 +79,6 @@ impl Default for HotSpotGraphParams {
         Self {
             weighted_graph: false,
             neighborhood_factor: 3.0,
-            // upstream runs on scikit-learn / pynndescent distances, which are
-            // never pre-squared
-            squared_distances: false,
         }
     }
 }
@@ -97,16 +90,14 @@ impl HotSpotGraphParams {
     ///
     /// * `weighted_graph` - Weight the edges by the Gaussian kernel
     /// * `neighborhood_factor` - Divisor picking the kernel width neighbour
-    /// * `squared_distances` - `true` when the distances already hold `d^2`
     ///
     /// ### Returns
     ///
     /// The initialised parameters.
-    pub fn new(weighted_graph: bool, neighborhood_factor: f32, squared_distances: bool) -> Self {
+    pub fn new(weighted_graph: bool, neighborhood_factor: f32) -> Self {
         Self {
             weighted_graph,
             neighborhood_factor,
-            squared_distances,
         }
     }
 }
@@ -470,11 +461,7 @@ fn compute_moments_weights(
 /// One weight per neighbour, in the same layout as `distances`.
 fn graph_weights(distances: &[Vec<f32>], params: &HotSpotGraphParams) -> Vec<Vec<f32>> {
     if params.weighted_graph {
-        knn_distance_weights(
-            distances,
-            params.neighborhood_factor,
-            params.squared_distances,
-        )
+        knn_distance_weights(distances, params.neighborhood_factor)
     } else {
         distances
             .iter()
@@ -1149,7 +1136,7 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
 
         // upstream tests positive autocorrelation only, see `local_stats.py:239`
         let p_vals = z_scores_to_pval(&z_scores, "greater");
-        let fdrs = calc_fdr(&p_vals);
+        let fdrs = p_adjust_fdr(&p_vals);
 
         Ok(HotSpotGeneRes {
             gene_idx,
@@ -1200,11 +1187,6 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
         let mut z_scores: Vec<f64> = Vec::new();
 
         for batch_idx in 0..no_batches {
-            if verbosity.normal_verbosity() && batch_idx % 5 == 0 {
-                let progress = (batch_idx + 1) as f32 / no_batches as f32 * 100.0;
-                println!("  Progress: {:.1}%", progress);
-            }
-
             let start_gene = batch_idx * GENE_BATCH_SIZE;
             let end_gene = ((batch_idx + 1) * GENE_BATCH_SIZE).min(no_genes);
             let batch_gene_indices = &gene_indices[start_gene..end_gene];
@@ -1237,11 +1219,21 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
                     z_scores.push(z as f64);
                 }
             }
+
+            if verbosity.normal_verbosity() {
+                report_decile_progress(
+                    end_gene,
+                    start_gene,
+                    no_genes,
+                    "genes",
+                    start_all.elapsed(),
+                );
+            }
         }
 
         // upstream tests positive autocorrelation only, see `local_stats.py:239`
         let p_vals = z_scores_to_pval(&z_scores, "greater");
-        let fdrs = calc_fdr(&p_vals);
+        let fdrs = p_adjust_fdr(&p_vals);
 
         if verbosity.normal_verbosity() {
             println!("Finished the full run in : {:.2?}.", start_all.elapsed());
@@ -2779,7 +2771,7 @@ mod tests {
     fn z_threshold_reference(z_mat: MatRef<f64>, fdr_threshold: f64) -> f64 {
         let z_upper_triangle = faer_mat_to_upper_triangle(z_mat, 1);
         let pvals = z_scores_to_pval(&z_upper_triangle, "greater");
-        let fdrs = calc_fdr(&pvals);
+        let fdrs = p_adjust_fdr(&pvals);
 
         z_upper_triangle
             .iter()

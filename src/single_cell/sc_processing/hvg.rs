@@ -1028,7 +1028,7 @@ pub fn run_hvg_vst<S: SingleCellReading>(
 
     let mut stats: Vec<GeneStats> = vec![GeneStats::default(); no_genes * n_batches];
 
-    for &(start_gene, end_gene) in blocks.iter() {
+    for (block, &(start_gene, end_gene)) in blocks.iter().enumerate() {
         let gene_indices: Vec<usize> = (start_gene..end_gene).collect();
         sweep_gene_block(
             reader,
@@ -1036,6 +1036,16 @@ pub fn run_hvg_vst<S: SingleCellReading>(
             index,
             &mut stats[start_gene * n_batches..end_gene * n_batches],
         )?;
+
+        if verbosity.detailed_verbosity() {
+            report_decile_progress(
+                block + 1,
+                block,
+                blocks.len(),
+                "gene blocks",
+                start_pass1.elapsed(),
+            );
+        }
     }
 
     if verbosity.normal_verbosity() {
@@ -1219,7 +1229,7 @@ pub fn run_hvg_dispersion<S: SingleCellReading>(
     // parallel closure and nothing is appended behind it.
     let mut stats: Vec<(f32, f32)> = vec![(0.0, 0.0); no_genes * n_batches];
 
-    for &(start_gene, end_gene) in blocks.iter() {
+    for (block, &(start_gene, end_gene)) in blocks.iter().enumerate() {
         let gene_indices: Vec<usize> = (start_gene..end_gene).collect();
         let genes = reader.read_gene_parallel(&gene_indices)?;
 
@@ -1237,6 +1247,16 @@ pub fn run_hvg_dispersion<S: SingleCellReading>(
                     }
                 },
             );
+
+        if verbosity.detailed_verbosity() {
+            report_decile_progress(
+                block + 1,
+                block,
+                blocks.len(),
+                "gene blocks",
+                start_stats.elapsed(),
+            );
+        }
     }
 
     if verbosity.normal_verbosity() {

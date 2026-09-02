@@ -750,7 +750,7 @@ fn run_end_to_end(n: usize, k: usize, knn: usize, device: &WgpuDevice) {
     let mut cpu_model = SEACells::new(n, &params);
     cpu_model.construct_kernel_mat(embedding.as_ref(), &knn_indices, &knn_distances, 0);
     cpu_model
-        .initialise_archetypes(&knn_indices, &knn_distances, 0, true, 42)
+        .initialise_archetypes(&knn_indices, &knn_distances, 0, 42)
         .expect("archetype init failed");
     cpu_model.fit(42, 0).expect("CPU fit failed");
     let cpu_time = cpu_start.elapsed();
@@ -764,7 +764,6 @@ fn run_end_to_end(n: usize, k: usize, knn: usize, device: &WgpuDevice) {
         embedding.as_ref(),
         &knn_indices,
         &knn_distances,
-        true,
         &params,
         42,
         device.clone(),
@@ -884,7 +883,6 @@ fn main() {
                 embedding.as_ref(),
                 &knn_indices,
                 &knn_distances,
-                true,
                 &params,
                 42,
                 device.clone(),

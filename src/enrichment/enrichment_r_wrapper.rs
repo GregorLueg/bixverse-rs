@@ -4,6 +4,7 @@ use extendr_api::*;
 use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 
+use crate::enrichment::blitzgsea::{BlitzGseaNull, BlitzGseaParams};
 use crate::enrichment::gsea::GseaParams;
 use crate::enrichment::mitch::MitchPathways;
 use crate::prelude::*;
@@ -140,4 +141,148 @@ pub fn prepare_mitch_pathways(
     }
 
     Ok((filtered_names, filtered_pathways))
+}
+
+///////////////
+// blitzGSEA //
+///////////////
+
+impl BlitzGseaParams {
+    /// Parse the [BlitzGseaParams] from a list
+    ///
+    /// A missing key falls back to the default, which is what the `None` arms
+    /// of [`BlitzGseaParams::new`] resolve.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The R list to parse
+    ///
+    /// ### Returns
+    ///
+    /// The [BlitzGseaParams] populated by the R list.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+
+        let flag = |key: &str| params_list.get(key).and_then(|v| v.as_bool());
+
+        // R has no 64 bit integer type, so a seed arrives as a double
+        let seed = params_list
+            .get("seed")
+            .and_then(|v| v.as_real())
+            .map(|v| v as u64);
+
+        Ok(Self::new(
+            r_list_count(&params_list, "permutations")?,
+            r_list_count(&params_list, "anchors")?,
+            flag("symmetric"),
+            flag("centre"),
+            flag("ks_test"),
+            seed,
+        ))
+    }
+}
+
+/// Serialise a calibrated null into an R list.
+///
+/// The null is under a kilobyte of plain numbers with no interior state, so it
+/// crosses the boundary as data rather than as an external pointer. R can then
+/// hold it in an environment, cache it against a hash of the signature, and
+/// `saveRDS` it, none of which a pointer would survive.
+///
+/// ### Params
+///
+/// * `null` - The calibrated null from `calibrate_null`
+///
+/// ### Returns
+///
+/// A named R list carrying every field of the null.
+pub fn blitzgsea_null_to_list(null: &BlitzGseaNull) -> List {
+    list!(
+        anchor_sizes = null.anchor_sizes.clone(),
+        shape_pos = null.shape_pos.clone(),
+        scale_pos = null.scale_pos.clone(),
+        shape_neg = null.shape_neg.clone(),
+        scale_neg = null.scale_neg.clone(),
+        pos_ratio = null.pos_ratio.clone(),
+        ks_pos = null.ks_pos,
+        ks_neg = null.ks_neg,
+        centred = null.centred
+    )
+}
+
+/// Rebuild a calibrated null from the R list [`blitzgsea_null_to_list`] wrote.
+///
+/// Every parameter vector has to be the same length as the anchor grid, since
+/// they are read in lockstep during interpolation. A list assembled by hand, or
+/// one that has been subset R-side, would otherwise index out of bounds deep
+/// inside the scoring loop.
+///
+/// ### Params
+///
+/// * `r_list` - The R list holding a serialised null
+///
+/// ### Returns
+///
+/// The reconstructed `BlitzGseaNull`, or an error naming the offending field.
+pub fn blitzgsea_null_from_list(r_list: List) -> Result<BlitzGseaNull> {
+    let fields: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+
+    let numeric = |key: &str| -> Result<Vec<f64>> {
+        fields
+            .get(key)
+            .and_then(|v| v.as_real_vector())
+            .ok_or_else(|| {
+                extendr_api::Error::Other(format!(
+                    "The blitzGSEA null model is missing a numeric '{key}'."
+                ))
+            })
+    };
+
+    let scalar = |key: &str| -> Result<f64> {
+        fields.get(key).and_then(|v| v.as_real()).ok_or_else(|| {
+            extendr_api::Error::Other(format!(
+                "The blitzGSEA null model is missing a scalar '{key}'."
+            ))
+        })
+    };
+
+    let centred = fields
+        .get("centred")
+        .and_then(|v| v.as_bool())
+        .ok_or_else(|| {
+            extendr_api::Error::Other(
+                "The blitzGSEA null model is missing a logical 'centred'.".to_string(),
+            )
+        })?;
+
+    let anchor_sizes = numeric("anchor_sizes")?;
+    if anchor_sizes.is_empty() {
+        return Err(extendr_api::Error::Other(
+            "The blitzGSEA null model has an empty anchor grid.".to_string(),
+        ));
+    }
+
+    let checked = |key: &str| -> Result<Vec<f64>> {
+        let values = numeric(key)?;
+        if values.len() != anchor_sizes.len() {
+            return Err(extendr_api::Error::Other(format!(
+                "The blitzGSEA null model has {} values for '{key}' but {} anchor sizes.",
+                values.len(),
+                anchor_sizes.len()
+            )));
+        }
+        Ok(values)
+    };
+
+    Ok(BlitzGseaNull {
+        shape_pos: checked("shape_pos")?,
+        scale_pos: checked("scale_pos")?,
+        shape_neg: checked("shape_neg")?,
+        scale_neg: checked("scale_neg")?,
+        pos_ratio: checked("pos_ratio")?,
+        ks_pos: scalar("ks_pos")?,
+        ks_neg: scalar("ks_neg")?,
+        centred,
+        anchor_sizes,
+    })
 }

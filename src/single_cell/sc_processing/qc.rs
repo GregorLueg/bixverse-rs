@@ -146,11 +146,13 @@ pub fn get_top_genes_perc_streaming<S: SingleCellReading>(
             results[top_idx].extend(proportions);
         }
 
-        if verbosity.detailed_verbosity() && batch_start % (QC_CELL_BATCH_SIZE * 5) == 0 {
-            let progress = ((batch_start + 1) as f32 / cell_indices.len() as f32) * 100.0;
-            println!(
-                " Reading cells and calculating proportions: {:.1}%",
-                progress
+        if verbosity.detailed_verbosity() {
+            report_decile_progress(
+                batch_end,
+                batch_start,
+                cell_indices.len(),
+                "cells",
+                start_total.elapsed(),
             );
         }
     }
@@ -301,11 +303,13 @@ pub fn get_gene_set_perc_streaming<S: SingleCellReading>(
             results[gs_idx].extend(percentage);
         }
 
-        if verbosity.detailed_verbosity() && batch_start % (QC_CELL_BATCH_SIZE * 5) == 0 {
-            let progress = ((batch_start + 1) as f32 / cell_indices.len() as f32) * 100.0;
-            println!(
-                " Reading cells and calculating proportions: {:.1}%",
-                progress
+        if verbosity.detailed_verbosity() {
+            report_decile_progress(
+                batch_end,
+                batch_start,
+                cell_indices.len(),
+                "cells",
+                start_total.elapsed(),
             );
         }
     }

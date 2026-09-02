@@ -65,8 +65,6 @@ pub struct SuperCellParams {
 ///
 /// * `knn` - The kNN indices without self.
 /// * `dist` - The distances to the nearest neighbours.
-/// * `squared_dist` - If the distance is squared (for example Euclidean
-///   squared).
 /// * `kith` - An option for the k_ith neighbour
 ///
 /// ### Returns
@@ -75,7 +73,6 @@ pub struct SuperCellParams {
 pub fn knn_to_sparse_graph_kernel<T>(
     knn: &[Vec<usize>],
     dist: &[Vec<T>],
-    squared_dist: bool,
     kith: Option<usize>,
 ) -> SparseGraph<T>
 where
@@ -85,16 +82,7 @@ where
     let k = knn.first().map(|v| v.len()).unwrap_or(0);
     let kith = kith.unwrap_or_else(|| (k / 2).saturating_sub(2));
 
-    let sigmas: Vec<T> = dist
-        .iter()
-        .map(|d| {
-            if squared_dist {
-                d[kith].sqrt()
-            } else {
-                d[kith]
-            }
-        })
-        .collect();
+    let sigmas: Vec<T> = dist.iter().map(|d| d[kith]).collect();
 
     let mut acc: FxHashMap<(usize, usize), (T, usize)> = FxHashMap::default();
     for (i, (nbrs, dists)) in knn.iter().zip(dist.iter()).enumerate() {
@@ -104,7 +92,7 @@ where
             }
             let key = if i < j { (i, j) } else { (j, i) };
             let entry = acc.entry(key).or_insert((T::zero(), 0));
-            entry.0 += if squared_dist { d.sqrt() } else { d };
+            entry.0 += d;
             entry.1 += 1;
         }
     }
@@ -139,8 +127,6 @@ where
 /// * `knn_dist` - The kNN neighbour distances
 /// * `params` - The [SuperCellParams] defining if a kernel shall be applied,
 ///   walk length, etc.
-/// * `squared_dist` - If the distance is squared (for example Euclidean
-///   squared).
 /// * `no_meta_cells` - Number of communities, i.e., metacells to identify
 /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
 ///   verbosity.
@@ -152,7 +138,6 @@ pub fn supercell<T>(
     knn_indices: &[Vec<usize>],
     knn_dist: &[Vec<T>],
     params: &SuperCellParams,
-    squared_dist: bool,
     no_meta_cells: usize,
     verbose: usize,
 ) -> Vec<usize>
@@ -165,7 +150,7 @@ where
         if verbosity.normal_verbosity() {
             println!("Using the kernel approach like in SuperCell 2.0")
         }
-        knn_to_sparse_graph_kernel(knn_indices, knn_dist, squared_dist, params.k_ith)
+        knn_to_sparse_graph_kernel(knn_indices, knn_dist, params.k_ith)
     } else {
         if verbosity.normal_verbosity() {
             println!("Using the original version of SuperCell on the kNN graph")
