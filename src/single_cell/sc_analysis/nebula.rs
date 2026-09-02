@@ -343,11 +343,6 @@ pub fn run_nebula<S: SingleCellReading>(
     let mut mean_count: Vec<f64> = Vec::new();
 
     for batch in 0..n_batches {
-        if verbosity.normal_verbosity() && batch % 5 == 0 {
-            let progress = (batch + 1) as f32 / n_batches as f32 * 100.0;
-            println!("  Progress: {:.1}%", progress);
-        }
-
         let start = batch * params.gene_batch_size;
         let end = ((batch + 1) * params.gene_batch_size).min(gene_indices.len());
         let batch_genes = &gene_indices[start..end];
@@ -368,28 +363,36 @@ pub fn run_nebula<S: SingleCellReading>(
             Some(&offsets),
             Some(params.nebula),
         ) {
-            Ok(fit) => fit,
+            Ok(fit) => Some(fit),
             // A batch can legitimately lose every gene to the expression
             // filter. Only an empty sweep is an error.
-            Err(edge_rs::errors::EdgeErrors::NoGenesAfterFiltering { .. }) => continue,
+            Err(edge_rs::errors::EdgeErrors::NoGenesAfterFiltering { .. }) => None,
             Err(e) => return Err(e.into()),
         };
         if verbosity.detailed_verbosity() {
             println!("   Fitted batch in: {:.2?}.", start_fit.elapsed());
         }
 
-        for &row in &fit.gene_index {
-            gene_idx.push(chunks[row].original_index);
-            let (_, values) = sparse.outer(row);
-            mean_count.push(values.iter().sum::<f64>() / n_cells as f64);
+        if let Some(fit) = fit {
+            for &row in &fit.gene_index {
+                gene_idx.push(chunks[row].original_index);
+                let (_, values) = sparse.outer(row);
+                mean_count.push(values.iter().sum::<f64>() / n_cells as f64);
+            }
+            coefficients.extend_from_slice(&fit.coefficients);
+            covariance.extend_from_slice(&fit.covariance);
+            se.extend_from_slice(&fit.se);
+            subject_overdispersion.extend_from_slice(&fit.subject_overdispersion);
+            cell_overdispersion.extend_from_slice(&fit.cell_overdispersion);
+            convergence.extend_from_slice(&fit.convergence);
+            sigma_at_bound.extend_from_slice(&fit.sigma_at_bound);
         }
-        coefficients.extend_from_slice(&fit.coefficients);
-        covariance.extend_from_slice(&fit.covariance);
-        se.extend_from_slice(&fit.se);
-        subject_overdispersion.extend_from_slice(&fit.subject_overdispersion);
-        cell_overdispersion.extend_from_slice(&fit.cell_overdispersion);
-        convergence.extend_from_slice(&fit.convergence);
-        sigma_at_bound.extend_from_slice(&fit.sigma_at_bound);
+
+        // Genes read, not genes kept: a batch the filter empties costs the same
+        // disk pass as any other.
+        if verbosity.normal_verbosity() {
+            report_decile_progress(end, start, gene_indices.len(), "genes", start_all.elapsed());
+        }
     }
 
     let n_kept = gene_idx.len();
