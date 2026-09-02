@@ -2,19 +2,25 @@
 
 ## 0.5.0
 
-### Breaking changes
-
-- The `"single-cell"` no longer implies HDF5-from-source. Old behaviour can be
-  set again with the addition of the `"hdf5-static"` feature flag. Or you
-  provide a system libhdf5.
-- With the updates to `ann-search-rs` to version `"0.7.0"` old trait boundaries
-  will not behave anymore.
 
 ### Features
 
 - NEBULA and bulkDGEs wired in
 - Added exhaustive approximate nearest neighbour search to miloR due to improved
   speed.
+- CAGRA GPU graph wired in.
+
+### Breaking changes
+
+- The `"single-cell"` no longer implies HDF5-from-source. Old behaviour can be
+  set again with the addition of the `"hdf5-static"` feature flag. Or you
+  provide a system libhdf5.
+- With the updates to `ann-search-rs` to version `"0.8.1"` old trait boundaries
+  will not behave anymore.
+- The whole `is_squared` machinery is gone now avoiding patchwork fixes across
+  the crate. This means the kNN graphs are now returning Euclidean distance,
+  **not** squared Euclidean anymore. Fixed on the way some kernels where this
+  caused issues.
 
 ## 0.4.7
 
