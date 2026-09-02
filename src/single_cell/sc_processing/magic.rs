@@ -231,7 +231,6 @@ impl MagicOperator {
     ///
     /// * `knn_indices` - kNN indices per cell, local positions.
     /// * `knn_distances` - Matching kNN distances.
-    /// * `squared_dist` - Whether the distances are squared.
     /// * `cell_indices` - Global cell ids, aligned with the kNN rows.
     /// * `total_cells` - `SparseDataHeader::total_cells` of the store the
     ///   selection indexes into.
@@ -244,7 +243,6 @@ impl MagicOperator {
     pub fn from_knn(
         knn_indices: &[Vec<usize>],
         knn_distances: &[Vec<f32>],
-        squared_dist: bool,
         cell_indices: &[usize],
         total_cells: usize,
     ) -> Result<Self, BixverseErrors> {
@@ -269,7 +267,7 @@ impl MagicOperator {
             lookup[global] = local as u32;
         }
 
-        let mut t = compute_diffusion_kernel(knn_indices, knn_distances, squared_dist)?;
+        let mut t = compute_diffusion_kernel(knn_indices, knn_distances)?;
         normalise_csr_rows_l1(&mut t)?;
 
         Ok(Self {
@@ -592,7 +590,7 @@ mod tests {
     fn path_operator(n: usize) -> MagicOperator {
         let (idx, dist) = path_knn(n);
         let cells: Vec<usize> = (0..n).collect();
-        MagicOperator::from_knn(&idx, &dist, false, &cells, n).expect("operator builds")
+        MagicOperator::from_knn(&idx, &dist, &cells, n).expect("operator builds")
     }
 
     /// The operator must be row-stochastic by construction.
@@ -751,7 +749,7 @@ mod tests {
 
         // kNN rows against a shorter selection.
         assert!(matches!(
-            MagicOperator::from_knn(&idx, &dist, false, &[0, 1, 2], 5),
+            MagicOperator::from_knn(&idx, &dist, &[0, 1, 2], 5),
             Err(BixverseErrors::MagicKnnSelectionMismatch {
                 n_knn: 5,
                 n_selected: 3
@@ -760,13 +758,13 @@ mod tests {
 
         // A cell beyond the store.
         assert!(matches!(
-            MagicOperator::from_knn(&idx, &dist, false, &[0, 1, 2, 3, 99], 5),
+            MagicOperator::from_knn(&idx, &dist, &[0, 1, 2, 3, 99], 5),
             Err(BixverseErrors::MagicCellOutOfRange { cell: 99, .. })
         ));
 
         // A duplicate.
         assert!(matches!(
-            MagicOperator::from_knn(&idx, &dist, false, &[0, 1, 2, 3, 3], 5),
+            MagicOperator::from_knn(&idx, &dist, &[0, 1, 2, 3, 3], 5),
             Err(BixverseErrors::MagicDuplicateCell { cell: 3 })
         ));
     }
@@ -776,7 +774,7 @@ mod tests {
     #[test]
     fn test_operator_accepts_a_scattered_selection() {
         let (idx, dist) = path_knn(4);
-        let op = MagicOperator::from_knn(&idx, &dist, false, &[7, 2, 9, 0], 10).unwrap();
+        let op = MagicOperator::from_knn(&idx, &dist, &[7, 2, 9, 0], 10).unwrap();
 
         assert_eq!(op.n_cells(), 4);
         assert_eq!(op.cell_indices(), &[7, 2, 9, 0]);
@@ -964,7 +962,7 @@ mod tests {
         // Ten of the twenty cells, deliberately not contiguous.
         let selection: Vec<usize> = (0..n_cells).step_by(2).collect();
         let (idx, dist) = path_knn(selection.len());
-        let op = MagicOperator::from_knn(&idx, &dist, false, &selection, n_cells).unwrap();
+        let op = MagicOperator::from_knn(&idx, &dist, &selection, n_cells).unwrap();
 
         let genes = vec![5usize, 0, 3];
         let out = magic_impute_genes(
@@ -1105,7 +1103,7 @@ mod tests {
         // then index `lookup[12]` on a lookup of length 8.
         let selection: Vec<usize> = (0..8).collect();
         let (idx, dist) = path_knn(selection.len());
-        let op = MagicOperator::from_knn(&idx, &dist, false, &selection, 8).unwrap();
+        let op = MagicOperator::from_knn(&idx, &dist, &selection, 8).unwrap();
 
         match magic_impute_genes(&reader, &op, &[0, 1], None, 0) {
             Err(BixverseErrors::MagicStoreSizeMismatch {

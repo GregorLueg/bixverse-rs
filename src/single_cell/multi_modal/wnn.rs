@@ -234,8 +234,8 @@ fn mean_of_rows(mat: MatRef<f32>, indices: &[usize]) -> Vec<f32> {
 /// The Euclidean distance as `f32`.
 #[inline]
 fn euclid(a: &[f32], b: &[f32]) -> f32 {
-    // square root has to be happen here, as ann-search-rs returns squared
-    // euclidean
+    // `euclidean_simd` is the raw squared primitive, so the root belongs here.
+    // The kNN distances this is compared against are already true distances.
     f32::euclidean_simd(a, b).sqrt()
 }
 

@@ -700,6 +700,7 @@ pub fn dispatch_knn(
     verbose: bool,
 ) -> Result<Vec<Vec<usize>>, BixverseErrors> {
     let method = parse_knn_method(&knn_params.knn_method).unwrap_or_default();
+    warn_unsupported_extract(knn_params.extract_knn, method);
 
     match method {
         KnnSearch::Hnsw => generate_knn_hnsw(
@@ -730,6 +731,7 @@ pub fn dispatch_knn(
             knn_params.diversify_prob,
             knn_params.ef_budget,
             knn_params.delta,
+            knn_params.extract_knn,
             seed,
             false,
             verbose,

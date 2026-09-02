@@ -329,7 +329,7 @@ mod tests {
         for model in ["danb", "bernoulli", "normal"] {
             for graph_params in [
                 HotSpotGraphParams::default(),
-                HotSpotGraphParams::new(true, 3.0, false),
+                HotSpotGraphParams::new(true, 3.0),
             ] {
                 let params = HotSpotParams {
                     model: model.to_string(),
@@ -395,7 +395,7 @@ mod tests {
             model: "danb".to_string(),
             normalise: true,
             knn_params: KnnParams::default(),
-            graph_params: HotSpotGraphParams::new(true, 3.0, false),
+            graph_params: HotSpotGraphParams::new(true, 3.0),
         };
 
         let expected = {

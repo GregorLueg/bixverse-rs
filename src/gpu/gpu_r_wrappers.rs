@@ -323,6 +323,26 @@ impl KnnParamsGpu {
         let k = r_list_count_allow_zero(&params_list, "k")?.unwrap_or(defaults.k);
         let n_list = r_list_count(&params_list, "n_list")?;
         let n_probe = r_list_count(&params_list, "n_probe")?;
+        let graph_k = r_list_count(&params_list, "graph_k")?;
+        let k_build = r_list_count(&params_list, "k_build")?;
+        let n_tree = r_list_count(&params_list, "n_tree")?;
+        let delta = params_list
+            .get("delta")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.delta);
+        let rho = params_list
+            .get("rho")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32);
+        let refine_knn = r_list_count(&params_list, "refine_knn")?;
+        let beam_width = r_list_count(&params_list, "beam_width")?;
+        let max_beam_iters = r_list_count(&params_list, "max_beam_iters")?;
+        let n_entry_points = r_list_count(&params_list, "n_entry_points")?;
+        let extract_knn = params_list
+            .get("extract_knn")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.extract_knn);
 
         Ok(Self {
             knn_method,
@@ -330,6 +350,16 @@ impl KnnParamsGpu {
             k,
             n_list,
             n_probe,
+            graph_k,
+            k_build,
+            n_tree,
+            delta,
+            rho,
+            refine_knn,
+            beam_width,
+            max_beam_iters,
+            n_entry_points,
+            extract_knn,
         })
     }
 }

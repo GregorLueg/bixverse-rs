@@ -30,7 +30,6 @@ use crate::single_cell::sc_analysis::{
     vision::SignatureGenes,
 };
 use crate::single_cell::sc_data::h5ad_io::parse_h5ad_format;
-use crate::single_cell::sc_processing::knn::distances_are_squared;
 use crate::single_cell::sc_processing::magic::{MagicLayer, MagicParams};
 use crate::single_cell::sc_trajectory::gene_trends::{
     BranchSelectionParams, BranchWeighting, GeneTrendsParams,
@@ -322,6 +321,10 @@ impl KnnParams {
             .unwrap_or(0.001) as f32;
 
         let ef_budget = r_list_count(&params_list, "ef_budget")?;
+        let extract_knn = params_list
+            .get("extract_knn")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         // hnsw
         let m = r_list_count(&params_list, "m")?.unwrap_or(16);
@@ -342,6 +345,7 @@ impl KnnParams {
             n_tree,
             search_budget,
             ef_budget,
+            extract_knn,
             diversify_prob,
             delta,
             m,
@@ -1568,23 +1572,11 @@ impl HotSpotParams {
             .filter(|v| *v > 0.0)
             .unwrap_or(defaults.neighborhood_factor);
 
-        // whether the distances are pre-squared follows from the metric, so it
-        // is derived rather than asked for. A caller handing over a
-        // pre-computed graph built with a different metric has to say so.
-        let squared_distances = params_list
-            .get("squared_distances")
-            .and_then(|v| v.as_bool())
-            .unwrap_or_else(|| distances_are_squared(&knn_params.ann_dist));
-
         Ok(Self {
             model,
             normalise,
             knn_params,
-            graph_params: HotSpotGraphParams::new(
-                weighted_graph,
-                neighborhood_factor,
-                squared_distances,
-            ),
+            graph_params: HotSpotGraphParams::new(weighted_graph, neighborhood_factor),
         })
     }
 }
