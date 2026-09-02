@@ -1152,6 +1152,7 @@ pub fn select_top_genes_streaming<S: SingleCellReading>(
 
     let num_batches = n_total_genes.div_ceil(GENE_BATCH_SIZE);
     let n_cells = cells_to_keep.len();
+    let start_total = Instant::now();
 
     let mut means: Vec<f64> = Vec::new();
     let mut cluster_sums: Vec<Vec<f64>> = Vec::new();
@@ -1198,9 +1199,8 @@ pub fn select_top_genes_streaming<S: SingleCellReading>(
             means.extend(batch_means);
         }
 
-        if verbose && batch_idx % 5 == 0 {
-            let progress = (batch_idx + 1) as f32 / num_batches as f32 * 100.0;
-            println!("  Progress: {:.1}%", progress);
+        if verbose {
+            report_decile_progress(end, start, n_total_genes, "genes", start_total.elapsed());
         }
 
         drop(gene_chunks);

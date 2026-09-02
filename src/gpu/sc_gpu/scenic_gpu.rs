@@ -4390,17 +4390,13 @@ fn run_wave_bfs<R: Runtime>(
 /// * `total` - Non-empty batches in this call
 /// * `start` - Timer started before the dispatch loop
 fn report_batch_progress(done: usize, total: usize, start: Instant) {
-    let pct = done * 100 / total;
-    let prev_pct = (done - 1) * 100 / total;
-    if pct / 10 > prev_pct / 10 || done == total {
-        println!(
-            "  Progress: {}% ({}/{} batches dispatched, {:.2?} elapsed)",
-            pct,
-            done,
-            total,
-            start.elapsed()
-        );
-    }
+    report_decile_progress(
+        done,
+        done.saturating_sub(1),
+        total,
+        "batches dispatched",
+        start.elapsed(),
+    );
 }
 
 /// Fit a sequence of pre-sliced gene batches on GPU, sharing one feature

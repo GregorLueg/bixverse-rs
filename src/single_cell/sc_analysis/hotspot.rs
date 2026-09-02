@@ -1187,11 +1187,6 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
         let mut z_scores: Vec<f64> = Vec::new();
 
         for batch_idx in 0..no_batches {
-            if verbosity.normal_verbosity() && batch_idx % 5 == 0 {
-                let progress = (batch_idx + 1) as f32 / no_batches as f32 * 100.0;
-                println!("  Progress: {:.1}%", progress);
-            }
-
             let start_gene = batch_idx * GENE_BATCH_SIZE;
             let end_gene = ((batch_idx + 1) * GENE_BATCH_SIZE).min(no_genes);
             let batch_gene_indices = &gene_indices[start_gene..end_gene];
@@ -1223,6 +1218,16 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
                     gaery_c.push(c as f64);
                     z_scores.push(z as f64);
                 }
+            }
+
+            if verbosity.normal_verbosity() {
+                report_decile_progress(
+                    end_gene,
+                    start_gene,
+                    no_genes,
+                    "genes",
+                    start_all.elapsed(),
+                );
             }
         }
 
