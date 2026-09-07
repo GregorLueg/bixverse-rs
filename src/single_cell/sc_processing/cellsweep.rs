@@ -72,17 +72,14 @@ pub const RECOMMENDED_MIN_EMPTY_DROPLETS: usize = 10_000;
 const KNEE_SMOOTHING_SIGMA: f64 = 2.0;
 
 /// Half-width of the Gaussian smoothing kernel, in units of sigma.
-///
-/// `scipy.ndimage.gaussian_filter1d` truncates at 4 sigma by default and the
-/// knee detector has to match it to land on the same rank.
 const KNEE_SMOOTHING_TRUNCATE: f64 = 4.0;
 
 /// Barcodes below this many UMIs are dropped before the knee search.
 const KNEE_MIN_COUNTS: u32 = 10;
 
-///////////
-// Types //
-///////////
+//////////////////////
+// EmptyDropletCall //
+//////////////////////
 
 /// How the empty droplets are identified.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,13 +99,13 @@ pub enum EmptyDropletCall {
 ///
 /// ### Params
 ///
-/// * `s` - One of `"supplied"`, `"umi_cutoff"`, `"expected_cells"`, `"knee"`.
+/// * `s` - String, one of `"supplied"`, `"umi_cutoff"`, `"expected_cells"`,
+///   `"knee"`.
 ///
 /// ### Returns
 ///
 /// The matching [EmptyDropletCall] with a zero threshold where one is carried,
-/// or `None` for an unrecognised value. The threshold is filled in by the
-/// caller, which owns the numeric argument.
+/// or `None` for an unrecognised value.
 pub fn parse_empty_droplet_call(s: &str) -> Option<EmptyDropletCall> {
     match s {
         "supplied" => Some(EmptyDropletCall::Supplied),
@@ -120,11 +117,6 @@ pub fn parse_empty_droplet_call(s: &str) -> Option<EmptyDropletCall> {
 }
 
 /// Parameters for the CellSweep EM fit.
-///
-/// Mirrors the reference `denoise_count_matrix` signature. The pseudocounts
-/// (`celltype_lambda`, `ambient_lambda`, `bulk_lambda`) are given on the scale
-/// the caller sees and divided by the gene count internally, exactly as the
-/// reference does.
 #[derive(Clone, Copy, Debug)]
 pub struct CellSweepParams {
     // -- model structure --
@@ -134,7 +126,7 @@ pub struct CellSweepParams {
     /// Keep the ambient profile `a` at its empty-droplet estimate rather than
     /// re-estimating it as a mixture over cell-type profiles. When `false`,
     /// `alpha_cap`, the repulsion terms and cell-type reassignment are all
-    /// disabled, matching the reference.
+    /// disabled.
     pub freeze_ambient_profile: bool,
 
     // -- initialisation --
@@ -195,6 +187,7 @@ pub struct CellSweepParams {
     pub seed: u64,
 }
 
+/// Default implementation for [`CellSweepParams`].
 impl Default for CellSweepParams {
     fn default() -> Self {
         Self {
@@ -318,6 +311,10 @@ pub struct CellSweepFit {
     pub converged: bool,
 }
 
+///////////////
+// SampleCsr //
+///////////////
+
 /// A sample's counts as a flat CSR block, plus the model's view of each row.
 ///
 /// Held in memory for the whole EM: the E-step touches every non-zero on every
@@ -343,6 +340,10 @@ struct SampleCsr {
 
 impl SampleCsr {
     /// Total number of rows, real barcodes followed by empty droplets.
+    ///
+    /// ### Returns
+    ///
+    /// Number of rows
     fn n_rows(&self) -> usize {
         self.indptr.len() - 1
     }
@@ -361,115 +362,13 @@ impl SampleCsr {
     }
 }
 
-////////////////////////////
-// Empty droplet  calling //
-////////////////////////////
+///////////////////////////
+// Empty droplet calling //
+///////////////////////////
 
-/// Turn a library size vector into an empty droplet mask.
-///
-/// ### Params
-///
-/// * `library_sizes` - Library size per barcode, in store order.
-/// * `call` - Which strategy to apply. [EmptyDropletCall::Supplied] is a
-///   caller error here, since there is nothing to infer.
-///
-/// ### Returns
-///
-/// A mask that is `true` where the barcode is an empty droplet.
-pub fn infer_empty_droplets(
-    library_sizes: &[u32],
-    call: EmptyDropletCall,
-) -> Result<Vec<bool>, BixverseErrors> {
-    let cutoff = match call {
-        EmptyDropletCall::Supplied => {
-            return Err(BixverseErrors::CellSweepEmptyMaskMissing);
-        }
-        EmptyDropletCall::UmiCutoff(cutoff) => cutoff,
-        EmptyDropletCall::ExpectedCells(expected) => {
-            cutoff_for_expected_cells(library_sizes, expected)?
-        }
-        EmptyDropletCall::Knee => knee_umi_cutoff(library_sizes)?,
-    };
-
-    Ok(library_sizes.iter().map(|&s| s < cutoff).collect())
-}
-
-/// Library size of the nth largest barcode.
-///
-/// ### Params
-///
-/// * `library_sizes` - Library size per barcode.
-/// * `expected` - Number of real cells expected in the run.
-///
-/// ### Returns
-///
-/// The cutoff, i.e. the library size at rank `expected`.
-fn cutoff_for_expected_cells(
-    library_sizes: &[u32],
-    expected: usize,
-) -> Result<u32, BixverseErrors> {
-    if expected == 0 || expected > library_sizes.len() {
-        return Err(BixverseErrors::CellSweepBadExpectedCells {
-            expected,
-            barcodes: library_sizes.len(),
-        });
-    }
-
-    let mut sorted = library_sizes.to_vec();
-    sorted.sort_unstable_by(|a, b| b.cmp(a));
-
-    Ok(sorted[expected - 1])
-}
-
-/// Locate the knee of the rank / log-count curve.
-///
-/// Sorts library sizes descending, drops the tail below [KNEE_MIN_COUNTS],
-/// smooths `log10(counts)` against rank with a Gaussian kernel, and takes the
-/// rank of most negative second derivative. Experimental, and flagged as such
-/// in the reference too: prefer a supplied mask or an explicit cutoff.
-///
-/// ### Params
-///
-/// * `library_sizes` - Library size per barcode.
-///
-/// ### Returns
-///
-/// The library size at the knee, used as the empty droplet cutoff.
-fn knee_umi_cutoff(library_sizes: &[u32]) -> Result<u32, BixverseErrors> {
-    let mut counts: Vec<u32> = library_sizes
-        .iter()
-        .copied()
-        .filter(|&c| c > KNEE_MIN_COUNTS)
-        .collect();
-    counts.sort_unstable_by(|a, b| b.cmp(a));
-
-    // Three points is the minimum a central-difference second derivative can
-    // be taken over.
-    if counts.len() < 3 {
-        return Err(BixverseErrors::CellSweepKneeNotFound {
-            barcodes: counts.len(),
-        });
-    }
-
-    let log_counts: Vec<f64> = counts.iter().map(|&c| (c as f64).log10()).collect();
-    let smoothed = gaussian_smooth_1d(&log_counts, KNEE_SMOOTHING_SIGMA);
-
-    // Ranks are 1..=n and unit-spaced, so `np.gradient(y, x)` reduces to
-    // `np.gradient(y)`.
-    let d1 = central_gradient(&smoothed);
-    let d2 = central_gradient(&d1);
-
-    let knee_idx = d2
-        .iter()
-        .enumerate()
-        .min_by(|(_, a), (_, b)| a.total_cmp(b))
-        .map(|(i, _)| i)
-        .ok_or(BixverseErrors::CellSweepKneeNotFound {
-            barcodes: counts.len(),
-        })?;
-
-    Ok(counts[knee_idx])
-}
+/////////////
+// Helpers //
+/////////////
 
 /// Reflect-padded Gaussian smoothing of a 1D signal.
 ///
@@ -562,6 +461,116 @@ fn central_gradient(y: &[f64]) -> Vec<f64> {
     }
 
     out
+}
+
+/// Library size of the nth largest barcode.
+///
+/// ### Params
+///
+/// * `library_sizes` - Library size per barcode.
+/// * `expected` - Number of real cells expected in the run.
+///
+/// ### Returns
+///
+/// The cutoff, i.e. the library size at rank `expected`.
+fn cutoff_for_expected_cells(
+    library_sizes: &[u32],
+    expected: usize,
+) -> Result<u32, BixverseErrors> {
+    if expected == 0 || expected > library_sizes.len() {
+        return Err(BixverseErrors::CellSweepBadExpectedCells {
+            expected,
+            barcodes: library_sizes.len(),
+        });
+    }
+
+    let mut sorted = library_sizes.to_vec();
+    sorted.sort_unstable_by(|a, b| b.cmp(a));
+
+    Ok(sorted[expected - 1])
+}
+
+/// Locate the knee of the rank / log-count curve.
+///
+/// Sorts library sizes descending, drops the tail below [KNEE_MIN_COUNTS],
+/// smooths `log10(counts)` against rank with a Gaussian kernel, and takes the
+/// rank of most negative second derivative. Experimental, and flagged as such
+/// in the reference too: prefer a supplied mask or an explicit cutoff.
+///
+/// ### Params
+///
+/// * `library_sizes` - Library size per barcode.
+///
+/// ### Returns
+///
+/// The library size at the knee, used as the empty droplet cutoff.
+fn knee_umi_cutoff(library_sizes: &[u32]) -> Result<u32, BixverseErrors> {
+    let mut counts: Vec<u32> = library_sizes
+        .iter()
+        .copied()
+        .filter(|&c| c > KNEE_MIN_COUNTS)
+        .collect();
+    counts.sort_unstable_by(|a, b| b.cmp(a));
+
+    // Three points is the minimum a central-difference second derivative can
+    // be taken over.
+    if counts.len() < 3 {
+        return Err(BixverseErrors::CellSweepKneeNotFound {
+            barcodes: counts.len(),
+        });
+    }
+
+    let log_counts: Vec<f64> = counts.iter().map(|&c| (c as f64).log10()).collect();
+    let smoothed = gaussian_smooth_1d(&log_counts, KNEE_SMOOTHING_SIGMA);
+
+    // Ranks are 1..=n and unit-spaced, so `np.gradient(y, x)` reduces to
+    // `np.gradient(y)`.
+    let d1 = central_gradient(&smoothed);
+    let d2 = central_gradient(&d1);
+
+    let knee_idx = d2
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| a.total_cmp(b))
+        .map(|(i, _)| i)
+        .ok_or(BixverseErrors::CellSweepKneeNotFound {
+            barcodes: counts.len(),
+        })?;
+
+    Ok(counts[knee_idx])
+}
+
+//////////
+// Main //
+//////////
+
+/// Turn a library size vector into an empty droplet mask.
+///
+/// ### Params
+///
+/// * `library_sizes` - Library size per barcode, in store order.
+/// * `call` - Which strategy to apply. [EmptyDropletCall::Supplied] is a
+///   caller error here, since there is nothing to infer.
+///
+/// ### Returns
+///
+/// A mask that is `true` where the barcode is an empty droplet.
+pub fn infer_empty_droplets(
+    library_sizes: &[u32],
+    call: EmptyDropletCall,
+) -> Result<Vec<bool>, BixverseErrors> {
+    let cutoff = match call {
+        EmptyDropletCall::Supplied => {
+            return Err(BixverseErrors::CellSweepEmptyMaskMissing);
+        }
+        EmptyDropletCall::UmiCutoff(cutoff) => cutoff,
+        EmptyDropletCall::ExpectedCells(expected) => {
+            cutoff_for_expected_cells(library_sizes, expected)?
+        }
+        EmptyDropletCall::Knee => knee_umi_cutoff(library_sizes)?,
+    };
+
+    Ok(library_sizes.iter().map(|&s| s < cutoff).collect())
 }
 
 ////////////
@@ -902,9 +911,9 @@ fn best_celltype(
     best_k
 }
 
-////////////////////
-// Initialisation //
-////////////////////
+/////////////
+// EmState //
+/////////////
 
 /// Mutable model state carried through the EM.
 struct EmState {
@@ -1194,9 +1203,6 @@ fn m_step(
             state.excluded[n] =
                 state.alpha[n] > params.alpha_cap + ALPHA_CAP_SLACK && !csr.is_empty_droplet(n);
         }
-        // The reference caps every row, empty droplets included, so their
-        // ambient plus bulk weights no longer sum to one. Harmless: the
-        // profiles are only used up to normalisation.
         state
             .alpha
             .iter_mut()
@@ -1429,9 +1435,6 @@ fn fit_em(
     let mut row_stats = vec![RowStats::default(); n_rows];
     let mut gamma_out = vec![0_usize; n_rows];
 
-    // Seed the exclusion set from a single ambient-only pass, so a barcode
-    // whose alpha would blow past the cap never gets to drag its cell-type
-    // profile towards the ambient profile on iteration one.
     if params.freeze_ambient_profile {
         let view = state.as_e_step_state(false);
         e_step(csr, &view, &mut row_stats, &mut gamma_out, params);
@@ -1466,13 +1469,6 @@ fn fit_em(
             });
         }
 
-        // Denoise before adopting the reassignment, and before the M-step. The
-        // reference writes its per-entry ambient and bulk shares inside the
-        // E-step's entry loop, which runs on the cell type the barcode held
-        // going in; `gamma_idx[n] = best_k` only lands after that loop. So an
-        // excluded barcode that switches type on the final pass is denoised
-        // against its old profile, not its new one, and its `z_hat` still
-        // reports the new one.
         if done {
             denoised = Some(denoise_real_cells(csr, &state, params));
         }
@@ -1501,8 +1497,7 @@ fn fit_em(
                 .zip(&prev_f)
                 .map(|(now, before)| (now - before).abs())
                 .collect();
-            // Sorted in place, so `quantile_sorted` rather than `quantile`,
-            // which would clone the whole vector on every EM iteration.
+
             deltas.sort_unstable_by(f64::total_cmp);
             let delta_f = quantile_sorted(&deltas, F_CONVERGENCE_QUANTILE);
 
@@ -1706,14 +1701,18 @@ pub struct CellSweepRun {
 ///
 /// [CellSweepRun] with one fit per sample plus the per-barcode bookkeeping the
 /// caller needs to rebuild its obs table.
-pub fn run_cellsweep<S: SingleCellReading, P: AsRef<std::path::Path>>(
+pub fn run_cellsweep<S, P>(
     reader: &S,
     samples: &[CellSweepSample],
     params: CellSweepParams,
     output_path: P,
     target_size: f32,
     verbose: usize,
-) -> Result<CellSweepRun, BixverseErrors> {
+) -> Result<CellSweepRun, BixverseErrors>
+where
+    S: SingleCellReading,
+    P: AsRef<std::path::Path>,
+{
     if !params.freeze_empties {
         return Err(BixverseErrors::CellSweepFreezeEmptiesUnsupported);
     }
@@ -1837,14 +1836,6 @@ fn build_denoised_chunk(
     norm_from_rounded: bool,
     rng: &mut StdRng,
 ) -> CsrCellChunk {
-    // Round first, then keep on the rounded value rather than the float. The
-    // two layers share one index set, so keeping a float that rounded to zero
-    // would put an explicit zero in the raw layer, and `library_size` is the
-    // sum of that layer: every consumer computing a fraction of the library
-    // (`qc.rs`, `get_clr_offsets`, metacell aggregation) would then divide by a
-    // total that does not match the entries it is summing. Sub-integer entries
-    // are lost from the normalised layer as a result, which is the price of
-    // one index set over two.
     let all_rounded = stochastic_round(denoised, rng);
     let kept: Vec<usize> = (0..denoised.len())
         .filter(|&i| all_rounded[i] > 0)
@@ -1854,8 +1845,6 @@ fn build_denoised_chunk(
     let kept_indices: Vec<u32> = kept.iter().map(|&i| indices[i]).collect();
     let rounded: Vec<u32> = kept.iter().map(|&i| all_rounded[i]).collect();
 
-    // The library size a normalised value is scaled against has to be the one
-    // of the layer it came from, or the layer no longer sums to `target_size`.
     let norm_source: Vec<f32> = if norm_from_rounded {
         rounded.iter().map(|&c| c as f32).collect()
     } else {
