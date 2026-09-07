@@ -15,6 +15,33 @@ use crate::prelude::*;
 /// read without growing peak memory much.
 const QC_CELL_BATCH_SIZE: usize = 100_000;
 
+/// Fraction of a barcode's library taken by some subset of its counts.
+///
+/// Guards the zero-library case. A barcode with no counts at all is reachable
+/// whenever the store was ingested with `min_lib_size = 0`, which is what the
+/// CellSweep workflow requires so the empty droplets survive. Returning `0.0`
+/// rather than `NaN` matters because these metrics feed MAD outlier detection:
+/// a single `NaN` propagates through the median and the MAD and silently
+/// invalidates the calls for every cell, whereas `0.0` flags the offending
+/// barcode as the low outlier it is.
+///
+/// ### Params
+///
+/// * `numerator` - Counts in the subset of interest.
+/// * `library_size` - Total counts in the barcode.
+///
+/// ### Returns
+///
+/// The fraction, or `0.0` for an empty barcode.
+#[inline]
+fn fraction_of_library(numerator: f32, library_size: usize) -> f32 {
+    if library_size == 0 {
+        0.0
+    } else {
+        numerator / library_size as f32
+    }
+}
+
 ///////////////////////////////////////////
 // QC metrics based on cumulative counts //
 ///////////////////////////////////////////
@@ -69,7 +96,7 @@ pub fn get_top_genes_perc<S: SingleCellReading>(
                 } else {
                     gene_counts.select_nth_unstable_by(top_n, |a, b| b.cmp(a));
                     let top_sum = gene_counts[..top_n].iter().map(|&x| x as f32).sum::<f32>();
-                    top_sum / chunk.library_size as f32
+                    fraction_of_library(top_sum, chunk.library_size)
                 }
             })
             .collect();
@@ -138,7 +165,7 @@ pub fn get_top_genes_perc_streaming<S: SingleCellReading>(
                     } else {
                         gene_counts.select_nth_unstable_by(top_n, |a, b| b.cmp(a));
                         let top_sum = gene_counts[..top_n].iter().map(|&x| x as f32).sum::<f32>();
-                        top_sum / chunk.library_size as f32
+                        fraction_of_library(top_sum, chunk.library_size)
                     }
                 })
                 .collect();
@@ -224,8 +251,7 @@ pub fn get_gene_set_perc<S: SingleCellReading>(
                     .filter(|(col_idx, _)| hash_gene_set.contains(col_idx))
                     .map(|(_, val)| val)
                     .sum::<u32>() as f32;
-                let lib_size = chunk.library_size as f32;
-                total_sum / lib_size
+                fraction_of_library(total_sum, chunk.library_size)
             })
             .collect();
 
@@ -296,8 +322,7 @@ pub fn get_gene_set_perc_streaming<S: SingleCellReading>(
                         .filter(|(col_idx, _)| hash_gene_set.contains(col_idx))
                         .map(|(_, val)| val)
                         .sum::<u32>() as f32;
-                    let lib_size = chunk.library_size as f32;
-                    total_sum / lib_size
+                    fraction_of_library(total_sum, chunk.library_size)
                 })
                 .collect();
             results[gs_idx].extend(percentage);
