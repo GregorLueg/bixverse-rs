@@ -252,7 +252,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-rs"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "ann-search-rs",
  "approx",
