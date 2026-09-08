@@ -1507,6 +1507,97 @@ pub enum BixverseErrors {
         n_nodes: usize,
     },
 
+    // -- cellsweep --
+    /// The caller asked for a supplied empty droplet mask but did not give one.
+    #[cfg(feature = "single-cell")]
+    #[error("CellSweep: The empty droplet mask was not supplied but was requested.")]
+    CellSweepEmptyMaskMissing,
+
+    /// The expected cell count cannot be turned into a library size cutoff.
+    #[cfg(feature = "single-cell")]
+    #[error("CellSweep: Cannot take {expected} expected cells from {barcodes} barcodes.")]
+    CellSweepBadExpectedCells {
+        /// Number of expected cells requested
+        expected: usize,
+        /// Number of barcodes available
+        barcodes: usize,
+    },
+
+    /// The knee detector could not find a cutoff.
+    #[cfg(feature = "single-cell")]
+    #[error("CellSweep: Cannot locate a knee from {barcodes} barcodes above the minimum count.")]
+    CellSweepKneeNotFound {
+        /// Number of barcodes that survived the minimum count filter
+        barcodes: usize,
+    },
+
+    /// A sample has too few empty droplets to estimate an ambient profile.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "CellSweep: Sample '{sample_id}' has {found} empty droplets, at least {required} are needed to estimate the ambient profile. Ingest with permissive QC cutoffs so the empty droplets survive, or set freeze_ambient_profile = false."
+    )]
+    CellSweepTooFewEmptyDroplets {
+        /// Identifier of the offending sample
+        sample_id: String,
+        /// Empty droplets found
+        found: usize,
+        /// Empty droplets required
+        required: usize,
+    },
+
+    /// A sample carries no annotated barcodes.
+    #[cfg(feature = "single-cell")]
+    #[error("CellSweep: Sample '{sample_id}' has no annotated barcodes to fit.")]
+    CellSweepNoRealCells {
+        /// Identifier of the offending sample
+        sample_id: String,
+    },
+
+    /// A cell-type code points outside the profile matrix.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "CellSweep: Sample '{sample_id}' has cell-type code {code} but only {n_celltypes} cell types."
+    )]
+    CellSweepCelltypeOutOfRange {
+        /// Identifier of the offending sample
+        sample_id: String,
+        /// The offending cell-type code
+        code: usize,
+        /// Number of cell types declared
+        n_celltypes: usize,
+    },
+
+    /// The label vector does not line up with the barcode vector.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "CellSweep: Sample '{sample_id}' has {n_cells} real barcodes but {n_labels} cell-type labels."
+    )]
+    CellSweepLabelLengthMismatch {
+        /// Identifier of the offending sample
+        sample_id: String,
+        /// Number of real barcodes
+        n_cells: usize,
+        /// Number of labels given
+        n_labels: usize,
+    },
+
+    /// `freeze_empties = false` is not supported.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "CellSweep: freeze_empties = false is not supported. The reference gives empty droplets a cell-type component they have no label for, which indexes past the end of the profile matrix and wraps onto the last cell type."
+    )]
+    CellSweepFreezeEmptiesUnsupported,
+
+    /// The EM produced a non-finite log-likelihood.
+    #[cfg(feature = "single-cell")]
+    #[error("CellSweep: Sample '{sample_id}' diverged at iteration {iteration}.")]
+    CellSweepDiverged {
+        /// Identifier of the offending sample
+        sample_id: String,
+        /// Iteration at which the log-likelihood went non-finite
+        iteration: usize,
+    },
+
     // -- wnn --
     /// Error if the modalities do not have the same number of cells
     #[cfg(feature = "multi-modal")]

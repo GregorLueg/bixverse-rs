@@ -147,7 +147,7 @@ unsafe fn hsum_avx_f32(v: __m256) -> f32 {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx")]
 #[inline]
-unsafe fn hsum_avx_f64(v: __m256d) -> f64 {
+pub(crate) unsafe fn hsum_avx_f64(v: __m256d) -> f64 {
     unsafe {
         let mut tmp = [0.0f64; 4];
         _mm256_storeu_pd(tmp.as_mut_ptr(), v);
@@ -167,7 +167,7 @@ unsafe fn hsum_avx_f64(v: __m256d) -> f64 {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 #[inline]
-unsafe fn hsum_sse_f64(v: __m128d) -> f64 {
+pub(crate) unsafe fn hsum_sse_f64(v: __m128d) -> f64 {
     unsafe {
         let mut tmp = [0.0f64; 2];
         _mm_storeu_pd(tmp.as_mut_ptr(), v);

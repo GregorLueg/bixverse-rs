@@ -52,8 +52,15 @@ use crate::single_cell::sc_data::{
     mtx_multifile_io::MtxFileTask, sc_synthetic_data::CellTypeConfig,
 };
 use crate::single_cell::sc_processing::{
-    doublet_detection::BoostParams, knn::KnnParams, pca::SingleCellPcaParams,
-    scdblfinder::ScDblFinderParams, scrublet::ScrubletParams, utils_doublets::ScDblSimParams,
+    cellsweep::{
+        CellSweepFit, CellSweepParams, CellSweepSample, EmptyDropletCall, parse_empty_droplet_call,
+    },
+    doublet_detection::BoostParams,
+    knn::KnnParams,
+    pca::SingleCellPcaParams,
+    scdblfinder::ScDblFinderParams,
+    scrublet::ScrubletParams,
+    utils_doublets::ScDblSimParams,
 };
 
 /////////////
@@ -3838,5 +3845,246 @@ impl NebulaScParams {
                 .unwrap_or(defaults.shrink_dispersion),
             tested: ScTested::from_r_map(&params)?,
         })
+    }
+}
+
+///////////////
+// CellSweep //
+///////////////
+
+impl CellSweepParams {
+    /// Generate CellSweepParams from an R list
+    ///
+    /// Anything missing from the list falls back to the reference
+    /// implementation's default.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the CellSweep parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The `CellSweepParams` with all parameters set.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+        let defaults = Self::default();
+
+        Ok(Self {
+            freeze_empties: params
+                .get("freeze_empties")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(defaults.freeze_empties),
+            freeze_ambient_profile: params
+                .get("freeze_ambient_profile")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(defaults.freeze_ambient_profile),
+            init_alpha: params
+                .get("init_alpha")
+                .and_then(|v| v.as_real())
+                .unwrap_or(defaults.init_alpha),
+            init_beta: params
+                .get("init_beta")
+                .and_then(|v| v.as_real())
+                .unwrap_or(defaults.init_beta),
+            alpha_cap: params
+                .get("alpha_cap")
+                .and_then(|v| v.as_real())
+                .unwrap_or(defaults.alpha_cap),
+            repulsion_strength: params
+                .get("repulsion_strength")
+                .and_then(|v| v.as_real())
+                .map(|v| v as f32)
+                .unwrap_or(defaults.repulsion_strength),
+            max_frac_gene_repulsion: params
+                .get("max_frac_gene_repulsion")
+                .and_then(|v| v.as_real())
+                .map(|v| v as f32)
+                .unwrap_or(defaults.max_frac_gene_repulsion),
+            celltype_lambda: params
+                .get("celltype_lambda")
+                .and_then(|v| v.as_real())
+                .map(|v| v as f32)
+                .unwrap_or(defaults.celltype_lambda),
+            ambient_lambda: params
+                .get("ambient_lambda")
+                .and_then(|v| v.as_real())
+                .map(|v| v as f32)
+                .unwrap_or(defaults.ambient_lambda),
+            bulk_lambda: params
+                .get("bulk_lambda")
+                .and_then(|v| v.as_real())
+                .map(|v| v as f32)
+                .unwrap_or(defaults.bulk_lambda),
+            eps: params
+                .get("eps")
+                .and_then(|v| v.as_real())
+                .unwrap_or(defaults.eps),
+            log_eps: params
+                .get("log_eps")
+                .and_then(|v| v.as_real())
+                .unwrap_or(defaults.log_eps),
+            max_iter: r_list_count(&params, "max_iter")?.unwrap_or(defaults.max_iter),
+            del0_ll_tol: params
+                .get("del0_ll_tol")
+                .and_then(|v| v.as_real())
+                .unwrap_or(defaults.del0_ll_tol),
+            min_ll_tol: params
+                .get("min_ll_tol")
+                .and_then(|v| v.as_real())
+                .unwrap_or(defaults.min_ll_tol),
+            tol_p: params
+                .get("tol_p")
+                .and_then(|v| v.as_real())
+                .map(|v| v as f32)
+                .unwrap_or(defaults.tol_p),
+            tol_f: params
+                .get("tol_f")
+                .and_then(|v| v.as_real())
+                .unwrap_or(defaults.tol_f),
+            norm_from_rounded: params
+                .get("norm_from_rounded")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(defaults.norm_from_rounded),
+            seed: r_list_count(&params, "seed")?.unwrap_or(defaults.seed as usize) as u64,
+        })
+    }
+}
+
+/// Resolve the empty droplet calling strategy from an R list.
+///
+/// The method name and its numeric argument arrive as separate list entries,
+/// so the variant is parsed first and then filled in. An unrecognised method
+/// errors rather than falling back, and so does a method whose argument is
+/// missing: a silent zero cutoff would call nothing empty and the model would
+/// then fail much further downstream.
+///
+/// ### Params
+///
+/// * `r_list` - List with `method` plus, where the method needs one,
+///   `umi_cutoff` or `expected_cells`.
+///
+/// ### Returns
+///
+/// The resolved `EmptyDropletCall`.
+pub fn empty_droplet_call_from_r_list(r_list: List) -> Result<EmptyDropletCall> {
+    let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+
+    let method = params
+        .get("method")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| Error::Other("Empty droplet params need a 'method' entry.".to_string()))?;
+
+    let call = parse_empty_droplet_call(method).ok_or_else(|| {
+        Error::Other(format!(
+            "'{method}' is not a known empty droplet method. Use one of 'supplied', 'umi_cutoff', 'expected_cells', 'knee'."
+        ))
+    })?;
+
+    Ok(match call {
+        EmptyDropletCall::UmiCutoff(_) => {
+            let cutoff = r_list_count(&params, "umi_cutoff")?.ok_or_else(|| {
+                Error::Other("method = 'umi_cutoff' needs a 'umi_cutoff' entry.".to_string())
+            })?;
+            EmptyDropletCall::UmiCutoff(cutoff as u32)
+        }
+        EmptyDropletCall::ExpectedCells(_) => {
+            let expected = r_list_count(&params, "expected_cells")?.ok_or_else(|| {
+                Error::Other(
+                    "method = 'expected_cells' needs an 'expected_cells' entry.".to_string(),
+                )
+            })?;
+            EmptyDropletCall::ExpectedCells(expected)
+        }
+        other => other,
+    })
+}
+
+/// Generate a CellSweepSample from an R list
+///
+/// Expects `sample_id`, `real_cells` and `empty_cells` (both 0-indexed
+/// integer vectors of store indices), `celltype_idx` (0-indexed integer
+/// vector, one entry per `real_cells` entry) and `n_celltypes`.
+///
+/// `n_celltypes` is taken from the list rather than derived from the labels:
+/// it has to match the factor levels the caller will map `z_hat` back onto, and
+/// a level that happens to be unused in one sample would otherwise silently
+/// shift every code above it.
+///
+/// ### Params
+///
+/// * `r_list` - The list describing one sample.
+///
+/// ### Returns
+///
+/// The `CellSweepSample`.
+pub fn cellsweep_sample_from_r_list(r_list: List) -> Result<CellSweepSample> {
+    let map: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+
+    let sample_id = map
+        .get("sample_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| Error::Other("sample_id missing or not a string".into()))?
+        .to_string();
+
+    let indices = |key: &str| -> Result<Vec<usize>> {
+        Ok(map
+            .get(key)
+            .ok_or_else(|| Error::Other(format!("{key} missing")))?
+            .as_integer_slice()
+            .ok_or_else(|| Error::Other(format!("{key} must be an integer vector")))?
+            .iter()
+            .map(|&x| x as usize)
+            .collect())
+    };
+
+    Ok(CellSweepSample {
+        sample_id,
+        real_cells: indices("real_cells")?,
+        empty_cells: indices("empty_cells")?,
+        celltype_idx: indices("celltype_idx")?,
+        n_celltypes: r_list_count(&map, "n_celltypes")?
+            .ok_or_else(|| Error::Other("n_celltypes missing".into()))?,
+    })
+}
+
+impl CellSweepFit {
+    /// Serialise one sample's fit into an R list.
+    ///
+    /// The cell-type profiles come back as a flat vector plus the cell-type
+    /// count rather than as a matrix, so the caller decides whether to
+    /// materialise an `n_celltypes x n_genes` matrix at all.
+    ///
+    /// ### Params
+    ///
+    /// * `sample_id` - Identifier of the sample this fit belongs to.
+    ///
+    /// ### Returns
+    ///
+    /// A list with `sample_id`, `alpha`, `z_hat` (1-based), `beta`,
+    /// `ambient`, `celltype_profiles`, `n_celltypes`, `log_likelihood`,
+    /// `n_iter` and `converged`.
+    pub fn to_r_list(&self, sample_id: &str) -> List {
+        let n_genes = self.ambient.len().max(1);
+
+        list!(
+            sample_id = sample_id,
+            alpha = self.alpha.clone(),
+            z_hat = self
+                .z_hat
+                .iter()
+                .map(|&k| (k + 1) as i32)
+                .collect::<Vec<i32>>(),
+            beta = self.beta,
+            ambient = self.ambient.iter().map(|&v| v as f64).collect::<Vec<f64>>(),
+            celltype_profiles = self
+                .celltype_profiles
+                .iter()
+                .map(|&v| v as f64)
+                .collect::<Vec<f64>>(),
+            n_celltypes = (self.celltype_profiles.len() / n_genes) as i32,
+            log_likelihood = self.log_likelihood,
+            n_iter = self.n_iter as i32,
+            converged = self.converged
+        )
     }
 }
