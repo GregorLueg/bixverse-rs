@@ -1237,9 +1237,13 @@ pub fn evaluate_split_score_f32_simd(
 // CellSweep //
 ///////////////
 
-//////////////////////////
-// Vectorised f64 `ln`  //
-//////////////////////////
+/////////////////////////
+// Vectorised f64 `ln` //
+/////////////////////////
+
+////////////
+// Consts //
+////////////
 
 /// Numerator coefficients of the Cephes rational approximation to `ln`.
 ///
@@ -1247,10 +1251,6 @@ pub fn evaluate_split_score_f32_simd(
 /// of the four arms could otherwise share: there is no `ln` intrinsic at any
 /// width, and `wide`'s wider types degrade to stacked 128-bit halves in a stock
 /// build, so the 256- and 512-bit arms have to carry the polynomial themselves.
-///
-/// Kept at the published digit count rather than truncated to what `f64` can
-/// hold. The values round to the same bits either way, and leaving them
-/// verbatim is what makes the four arms checkable against the reference by eye.
 #[allow(clippy::excessive_precision)]
 const LN_P: [f64; 6] = [
     7.70838733755885391666E0,
