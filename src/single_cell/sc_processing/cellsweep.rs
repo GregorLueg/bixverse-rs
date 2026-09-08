@@ -38,6 +38,8 @@ use std::time::Instant;
 use crate::core::math::vector_helpers::quantile_sorted;
 use crate::prelude::*;
 use crate::single_cell::sc_data::data_io::CellGeneSparseWriter;
+use crate::single_cell::sc_utils::simd::ln_dot_simd;
+use crate::utils::simd::sum_simd_f64;
 
 ////////////
 // Consts //
@@ -593,6 +595,63 @@ struct RowStats {
     log_likelihood: f64,
 }
 
+/// Non-zeros per pass of the tiled row kernels.
+///
+/// The row loop stays fused; the tile exists only to bound the two buffers the
+/// vectorised `ln` reads, and to keep them in L1 between the pass that fills
+/// them and the pass that consumes them. Rows shorter than this run as one
+/// short tile.
+///
+/// Buffering more than this was tried and lost: a version that also staged the
+/// weighted components and the responsibility split, so that the three row
+/// statistics could go through `dot_simd_f64`, ran 16% slower than the original
+/// scalar loop before the vectorised `ln` was added back. Three register
+/// accumulators in a fused loop beat three vector passes over L1.
+const E_STEP_TILE: usize = 256;
+
+/// Per-thread buffers for the vectorised `ln`.
+///
+/// One allocation per rayon chunk rather than per row. Rows are short and
+/// numerous, so a per-row allocation would cost more than the vectorisation
+/// saves.
+struct RowScratch {
+    /// Observed counts of the current tile, widened to `f64`.
+    counts: Vec<f64>,
+    /// Total mixture probability per non-zero of the current tile.
+    p_tot: Vec<f64>,
+    /// Ambient plus bulk per non-zero. The part of the mixture that does not
+    /// depend on the cell type, so the reassignment builds it once per tile
+    /// rather than once per tile and cell type. Only filled for an excluded
+    /// barcode.
+    base: Vec<f64>,
+    /// `base` plus the candidate cell type's weighted profile.
+    mix: Vec<f64>,
+    /// Log-likelihood of this barcode under each cell type, accumulated across
+    /// tiles. Only used by an excluded barcode.
+    ll_k: Vec<f64>,
+}
+
+impl RowScratch {
+    /// Allocate the buffers for one thread.
+    ///
+    /// ### Params
+    ///
+    /// * `n_celltypes` - Number of cell types, the length of `ll_k`.
+    ///
+    /// ### Returns
+    ///
+    /// Zeroed [RowScratch].
+    fn new(n_celltypes: usize) -> Self {
+        Self {
+            counts: vec![0.0; E_STEP_TILE],
+            p_tot: vec![0.0; E_STEP_TILE],
+            base: vec![0.0; E_STEP_TILE],
+            mix: vec![0.0; E_STEP_TILE],
+            ll_k: vec![0.0; n_celltypes],
+        }
+    }
+}
+
 /// Immutable model state the E-step reads.
 struct EStepState<'a> {
     /// Ambient fraction per barcode.
@@ -611,6 +670,23 @@ struct EStepState<'a> {
     excluded: &'a [bool],
     /// Whether the ambient profile is being re-estimated.
     update_ambient: bool,
+}
+
+/// Everything the row kernels read that is the same for every row.
+///
+/// Bundled rather than passed one by one: the kernels take the model state, the
+/// counts, the tolerances and a precomputed profile, and threading four
+/// references through two call sites buys nothing over one.
+struct RowCtx<'a> {
+    /// The sample's counts.
+    csr: &'a SampleCsr,
+    /// Current model state.
+    state: &'a EStepState<'a>,
+    /// Numerical tolerances.
+    params: &'a CellSweepParams,
+    /// `beta * bulk[g]` per gene. `beta` is fixed across an E-step, so this
+    /// lifts a multiply out of the per-non-zero path.
+    beta_bulk: &'a [f64],
 }
 
 /// Sufficient statistics reduced out of one E-step.
@@ -697,12 +773,21 @@ fn e_step(
 
     gamma_idx_out.copy_from_slice(state.gamma_idx);
 
+    let beta_bulk: Vec<f64> = state.bulk.iter().map(|&m| state.beta * m as f64).collect();
+    let ctx = RowCtx {
+        csr,
+        state,
+        params,
+        beta_bulk: &beta_bulk,
+    };
+
     row_stats
         .par_chunks_mut(chunk_size)
         .zip(gamma_idx_out.par_chunks_mut(chunk_size))
         .enumerate()
         .map(|(chunk_idx, (stats, gammas))| {
             let mut totals = EStepTotals::zeros(n_celltypes, n_genes, state.update_ambient);
+            let mut scratch = RowScratch::new(n_celltypes);
             let row_offset = chunk_idx * chunk_size;
 
             for (local, stat) in stats.iter_mut().enumerate() {
@@ -715,18 +800,17 @@ fn e_step(
                 }
 
                 if csr.is_empty_droplet(n) {
-                    e_step_empty_row(indices, values, n, state, &mut totals, stat, params);
+                    e_step_empty_row(indices, values, n, &ctx, &mut scratch, &mut totals, stat);
                 } else {
                     e_step_cell_row(
                         indices,
                         values,
                         n,
-                        state,
+                        &ctx,
+                        &mut scratch,
                         &mut totals,
                         stat,
                         &mut gammas[local],
-                        csr,
-                        params,
                     );
                 }
             }
@@ -744,48 +828,60 @@ fn e_step(
 
 /// E-step for one empty droplet.
 ///
-/// An empty droplet has no cell, so only the ambient and bulk components
-/// apply.
+/// An empty droplet has no cell, so only the ambient and bulk components apply.
+/// Same shape as [e_step_cell_row], minus the cell component and the `p_numer`
+/// scatter.
 ///
 /// ### Params
 ///
 /// * `indices` - Gene indices of the barcode's non-zeros.
 /// * `values` - Counts of the barcode's non-zeros.
 /// * `n` - Row index, used to look up `alpha`.
-/// * `state` - Current model state.
+/// * `ctx` - Model state and tolerances.
+/// * `scratch` - This thread's buffers.
 /// * `totals` - Accumulators to add into.
 /// * `stat` - Per-barcode output for this row.
-/// * `params` - Numerical tolerances.
-#[inline]
 fn e_step_empty_row(
     indices: &[u32],
     values: &[f32],
     n: usize,
-    state: &EStepState<'_>,
+    ctx: &RowCtx<'_>,
+    scratch: &mut RowScratch,
     totals: &mut EStepTotals,
     stat: &mut RowStats,
-    params: &CellSweepParams,
 ) {
+    let (state, params) = (ctx.state, ctx.params);
     let w_ambient = (1.0 - state.beta) * state.alpha[n];
 
-    for (&gene, &value) in indices.iter().zip(values) {
-        let g = gene as usize;
-        let value = value as f64;
+    for (idx, val) in indices.chunks(E_STEP_TILE).zip(values.chunks(E_STEP_TILE)) {
+        for (j, (&gene, &value)) in idx.iter().zip(val).enumerate() {
+            let g = gene as usize;
+            let value = value as f64;
 
-        let wa = w_ambient * state.ambient[g] as f64;
-        let wm = state.beta * state.bulk[g] as f64;
-        let p_tot = wa + wm;
-        let scale = value / p_tot.max(params.eps);
+            let wa = w_ambient * state.ambient[g] as f64;
+            let wm = ctx.beta_bulk[g];
+            let p_tot = wa + wm;
+            let scale = value / p_tot.max(params.eps);
 
-        let c_ambient = scale * wa;
+            let c_ambient = scale * wa;
 
-        stat.ambient += c_ambient;
-        stat.bulk += scale * wm;
-        stat.log_likelihood += value * p_tot.max(params.log_eps).ln();
+            stat.ambient += c_ambient;
+            stat.bulk += scale * wm;
 
-        if state.update_ambient {
-            totals.a_numer[g] += c_ambient;
+            scratch.counts[j] = value;
+            scratch.p_tot[j] = p_tot;
+
+            if state.update_ambient {
+                totals.a_numer[g] += c_ambient;
+            }
         }
+
+        let len = idx.len();
+        stat.log_likelihood += ln_dot_simd(
+            &scratch.counts[..len],
+            &scratch.p_tot[..len],
+            params.log_eps,
+        );
     }
 }
 
@@ -797,32 +893,38 @@ fn e_step_empty_row(
 /// find a better-fitting profile instead of dragging its own profile towards
 /// the ambient one.
 ///
+/// The loop stays fused and scalar, because that is where the gathers and the
+/// scattered `p_numer` write live and neither vectorises. The one thing lifted
+/// out of it is the `ln`: `p_tot` is stashed per tile and the log-likelihood
+/// taken in a second, vectorised pass. Worth 1.27x on this path. Note that the
+/// `ln` is a smaller share of a row than a micro-benchmark of it suggests,
+/// since the divide, the accumulations and the scatters give the out-of-order
+/// engine plenty to hide a libm call behind.
+///
 /// ### Params
 ///
 /// * `indices` - Gene indices of the barcode's non-zeros.
 /// * `values` - Counts of the barcode's non-zeros.
 /// * `n` - Row index, used to look up `alpha` and the cell-type code.
-/// * `state` - Current model state.
+/// * `ctx` - Model state and tolerances.
+/// * `scratch` - This thread's buffers.
 /// * `totals` - Accumulators to add into.
 /// * `stat` - Per-barcode output for this row.
 /// * `gamma_out` - Cell-type code for this row, overwritten on reassignment.
 ///   Only touched for an excluded barcode, which is also the only case where
 ///   the reference reassigns.
-/// * `csr` - The sample's counts, for the gene and cell-type counts.
-/// * `params` - Numerical tolerances.
-#[inline]
 #[allow(clippy::too_many_arguments)]
 fn e_step_cell_row(
     indices: &[u32],
     values: &[f32],
     n: usize,
-    state: &EStepState<'_>,
+    ctx: &RowCtx<'_>,
+    scratch: &mut RowScratch,
     totals: &mut EStepTotals,
     stat: &mut RowStats,
     gamma_out: &mut usize,
-    csr: &SampleCsr,
-    params: &CellSweepParams,
 ) {
+    let (csr, state, params) = (ctx.csr, ctx.state, ctx.params);
     let n_genes = csr.n_genes;
     let alpha_n = state.alpha[n];
     let w_ambient = (1.0 - state.beta) * alpha_n;
@@ -831,34 +933,87 @@ fn e_step_cell_row(
     let allow_p_update = !state.excluded[n];
     let profile = &state.profiles[k * n_genes..(k + 1) * n_genes];
 
-    for (&gene, &value) in indices.iter().zip(values) {
-        let g = gene as usize;
-        let value = value as f64;
+    if !allow_p_update {
+        scratch.ll_k.iter_mut().for_each(|ll| *ll = 0.0);
+    }
 
-        let wa = w_ambient * state.ambient[g] as f64;
-        let wm = state.beta * state.bulk[g] as f64;
-        let wc = w_cell * profile[g] as f64;
-        let p_tot = wa + wm + wc;
-        let scale = value / p_tot.max(params.eps);
+    for (idx, val) in indices.chunks(E_STEP_TILE).zip(values.chunks(E_STEP_TILE)) {
+        for (j, (&gene, &value)) in idx.iter().zip(val).enumerate() {
+            let g = gene as usize;
+            let value = value as f64;
 
-        let c_ambient = scale * wa;
-        let c_cell = scale * wc;
+            let wa = w_ambient * state.ambient[g] as f64;
+            let wm = ctx.beta_bulk[g];
+            let wc = w_cell * profile[g] as f64;
+            let p_tot = wa + wm + wc;
+            let scale = value / p_tot.max(params.eps);
 
-        stat.ambient += c_ambient;
-        stat.bulk += scale * wm;
-        stat.gamma += c_cell;
-        stat.log_likelihood += value * p_tot.max(params.log_eps).ln();
+            let c_ambient = scale * wa;
+            let c_cell = scale * wc;
 
-        if allow_p_update {
-            totals.p_numer[k * n_genes + g] += c_cell;
+            stat.ambient += c_ambient;
+            stat.bulk += scale * wm;
+            stat.gamma += c_cell;
+
+            scratch.counts[j] = value;
+            scratch.p_tot[j] = p_tot;
+
+            if allow_p_update {
+                totals.p_numer[k * n_genes + g] += c_cell;
+            } else {
+                scratch.base[j] = wa + wm;
+            }
+            if state.update_ambient {
+                totals.a_numer[g] += c_ambient;
+            }
         }
-        if state.update_ambient {
-            totals.a_numer[g] += c_ambient;
+
+        let len = idx.len();
+        stat.log_likelihood += ln_dot_simd(
+            &scratch.counts[..len],
+            &scratch.p_tot[..len],
+            params.log_eps,
+        );
+
+        if !allow_p_update {
+            accumulate_celltype_ll(idx, w_cell, ctx, scratch);
         }
     }
 
     if !allow_p_update {
-        *gamma_out = best_celltype(indices, values, alpha_n, k, state, csr, params.log_eps);
+        *gamma_out = best_celltype(&scratch.ll_k, k);
+    }
+}
+
+/// Add one tile's contribution to the per-cell-type log-likelihood.
+///
+/// The ambient and bulk halves of the mixture do not depend on the cell type,
+/// and the pass above has already weighted them into `base`, so this rebuilds
+/// only what changes. What is left per cell type is one gather, one
+/// multiply-add and the `ln`, which is the one loop in CellSweep that really is
+/// `ln`-bound: there is nothing else in it for the out-of-order engine to hide
+/// the libm call behind.
+///
+/// ### Params
+///
+/// * `idx` - Gene indices of this tile's non-zeros.
+/// * `w_cell` - Weight on the cell-type profile, `(1 - beta) * (1 - alpha_n)`.
+/// * `ctx` - Model state and tolerances.
+/// * `scratch` - This thread's buffers. `ll_k` is added into.
+fn accumulate_celltype_ll(idx: &[u32], w_cell: f64, ctx: &RowCtx<'_>, scratch: &mut RowScratch) {
+    let n_genes = ctx.csr.n_genes;
+    let len = idx.len();
+
+    for k in 0..ctx.csr.n_celltypes {
+        let profile = &ctx.state.profiles[k * n_genes..(k + 1) * n_genes];
+        for (j, &gene) in idx.iter().enumerate() {
+            scratch.mix[j] = scratch.base[j] + w_cell * profile[gene as usize] as f64;
+        }
+        scratch.ll_k[k] += ln_dot_simd(
+            &scratch.counts[..len],
+            &scratch.mix[..len],
+            ctx.params.log_eps,
+        );
     }
 }
 
@@ -866,42 +1021,17 @@ fn e_step_cell_row(
 ///
 /// ### Params
 ///
-/// * `indices` - Gene indices of the barcode's non-zeros.
-/// * `values` - Counts of the barcode's non-zeros.
-/// * `alpha_n` - Ambient fraction of this barcode.
-/// * `current_k` - Cell-type code held going in, kept on a tie.
-/// * `state` - Current model state.
-/// * `csr` - The sample's counts, for the gene and cell-type counts.
-/// * `log_eps` - Floor on the argument of `ln`.
+/// * `ll_k` - Log-likelihood of the barcode under each cell type.
+/// * `current_k` - Cell-type code held going in, kept when `ll_k` is empty.
 ///
 /// ### Returns
 ///
-/// The best-fitting cell-type code.
-fn best_celltype(
-    indices: &[u32],
-    values: &[f32],
-    alpha_n: f64,
-    current_k: usize,
-    state: &EStepState<'_>,
-    csr: &SampleCsr,
-    log_eps: f64,
-) -> usize {
-    let n_genes = csr.n_genes;
+/// The best-fitting cell-type code, ties to the lowest code.
+fn best_celltype(ll_k: &[f64], current_k: usize) -> usize {
     let mut best_k = current_k;
     let mut best_ll = f64::NEG_INFINITY;
 
-    for k in 0..csr.n_celltypes {
-        let profile = &state.profiles[k * n_genes..(k + 1) * n_genes];
-        let mut ll = 0.0_f64;
-
-        for (&gene, &value) in indices.iter().zip(values) {
-            let g = gene as usize;
-            let mix = (1.0 - state.beta)
-                * ((1.0 - alpha_n) * profile[g] as f64 + alpha_n * state.ambient[g] as f64)
-                + state.beta * state.bulk[g] as f64;
-            ll += value as f64 * mix.max(log_eps).ln();
-        }
-
+    for (k, &ll) in ll_k.iter().enumerate() {
         if ll > best_ll {
             best_ll = ll;
             best_k = k;
@@ -970,7 +1100,7 @@ fn init_em(csr: &SampleCsr, params: &CellSweepParams) -> EmState {
     let means = celltype_mean_expression(csr);
     for k in 0..n_celltypes {
         let row = &means[k * n_genes..(k + 1) * n_genes];
-        let denom = row.iter().sum::<f64>() + n_genes as f64 * celltype_lambda;
+        let denom = sum_simd_f64(row) + n_genes as f64 * celltype_lambda;
         for (g, &value) in row.iter().enumerate() {
             profiles[k * n_genes + g] = ((value + celltype_lambda) / denom) as f32;
         }
@@ -1147,7 +1277,7 @@ fn mixture_profile(
 ///
 /// The normalised profile.
 fn normalise_to_f32(v: &[f64]) -> Vec<f32> {
-    let total: f64 = v.iter().sum();
+    let total = sum_simd_f64(v);
     if total <= 0.0 {
         return vec![1.0 / v.len() as f32; v.len()];
     }
@@ -1212,9 +1342,14 @@ fn m_step(
     }
 
     // -- beta --
-    let bulk_total: f64 = row_stats.iter().map(|s| s.bulk).sum();
-    let ambient_total: f64 = row_stats.iter().map(|s| s.ambient).sum();
-    let gamma_total: f64 = row_stats.iter().map(|s| s.gamma).sum();
+    // One pass rather than three: `row_stats` is an array of structs, so each
+    // `.map(|s| s.field).sum()` was a separate strided walk over the whole
+    // thing.
+    let (bulk_total, ambient_total, gamma_total) = row_stats
+        .iter()
+        .fold((0.0_f64, 0.0_f64, 0.0_f64), |(bulk, ambient, gamma), s| {
+            (bulk + s.bulk, ambient + s.ambient, gamma + s.gamma)
+        });
     state.beta = bulk_total / (bulk_total + ambient_total + gamma_total).max(params.eps);
 
     // -- ambient profile --
@@ -1230,7 +1365,7 @@ fn m_step(
                     .map(|((&p, &a), &numer)| u_k * p as f64 / (a as f64).max(params.eps) * numer)
                     .sum();
             }
-            let total = state.u.iter().sum::<f64>().max(params.eps);
+            let total = sum_simd_f64(&state.u).max(params.eps);
             state.u.iter_mut().for_each(|u| *u /= total);
             state.ambient = normalise_to_f32(&mixture_profile(
                 &state.u,
@@ -1252,7 +1387,7 @@ fn m_step(
         .par_chunks_mut(n_genes)
         .zip(totals.p_numer.par_chunks(n_genes))
         .for_each(|(profile, numer)| {
-            let cluster_mass: f64 = numer.iter().sum();
+            let cluster_mass = sum_simd_f64(numer);
             let repel = repulsion * cluster_mass;
 
             let mut updated: Vec<f64> = numer.iter().map(|&v| v + celltype_lambda).collect();
@@ -1267,7 +1402,7 @@ fn m_step(
                     });
             }
 
-            let total = updated.iter().sum::<f64>().max(eps);
+            let total = sum_simd_f64(&updated).max(eps);
             profile
                 .iter_mut()
                 .zip(updated)

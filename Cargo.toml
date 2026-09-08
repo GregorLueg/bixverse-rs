@@ -110,6 +110,11 @@ features = ["single-cell", "multi-modal", "dge", "hdf5-static"]
 ###########
 
 [[bench]]
+name = "cellsweep_bench"
+harness = false
+required-features = ["single-cell"]
+
+[[bench]]
 name = "hvg_bench"
 harness = false
 required-features = ["single-cell"]
