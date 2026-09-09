@@ -88,6 +88,102 @@ pub struct CellTypeConfig {
     pub marker_genes: Vec<usize>,
 }
 
+/////////////
+// Helpers //
+/////////////
+
+/// Helper function to sample from a Poisson distribution
+///
+/// Uses Knuth's algorithm for lambda < 30 and transformed rejection method for
+/// lambda >= 30.
+///
+/// ### Params
+///
+/// * `rng` - Random number generator
+/// * `lambda` - Rate parameter
+///
+/// ### Returns
+///
+/// A sample from Poisson(λ)
+fn poisson_sample<R: Rng>(rng: &mut R, lambda: f64) -> u32 {
+    if lambda < 30.0 {
+        let l = (-lambda).exp();
+        let mut k = 0;
+        let mut p = 1.0;
+        loop {
+            k += 1;
+            p *= rng.random::<f64>();
+            if p <= l {
+                return (k - 1) as u32;
+            }
+        }
+    } else {
+        let beta = std::f64::consts::PI / (3.0 * lambda).sqrt();
+        let alpha = beta * lambda;
+        let k = (2.83 + 5.1 / lambda).ln();
+
+        loop {
+            let u = rng.random::<f64>();
+            let x = (alpha - ((1.0 - u) / u).ln()) / beta;
+            let n = (x + 0.5).floor();
+            if n < 0.0 {
+                continue;
+            }
+
+            let v = rng.random::<f64>();
+            let y = alpha - beta * x;
+            let lhs = y + (v / (1.0 + y.exp()).powi(2)).ln();
+            let rhs = k + n * lambda.ln() - (1..=(n as u32)).map(|i| (i as f64).ln()).sum::<f64>();
+
+            if lhs <= rhs {
+                return n as u32;
+            }
+        }
+    }
+}
+
+/// Turns a probability vector into a cumulative one for sampling
+///
+/// The last entry is forced to exactly one, so a uniform draw always lands
+/// somewhere even after the accumulated rounding error.
+///
+/// ### Params
+///
+/// * `weights` - Probabilities, summing to one
+///
+/// ### Returns
+///
+/// The cumulative distribution
+fn to_cdf(weights: &[f64]) -> Vec<f64> {
+    let mut cum = 0.0;
+    let mut cdf: Vec<f64> = weights
+        .iter()
+        .map(|w| {
+            cum += w;
+            cum
+        })
+        .collect();
+    if let Some(last) = cdf.last_mut() {
+        *last = 1.0;
+    }
+    cdf
+}
+
+/// Draws one categorical index from a cumulative distribution
+///
+/// ### Params
+///
+/// * `rng` - Random number generator
+/// * `cdf` - Cumulative distribution, as built by [to_cdf]
+///
+/// ### Returns
+///
+/// The drawn index
+fn draw_from_cdf<R: Rng>(rng: &mut R, cdf: &[f64]) -> usize {
+    let u: f64 = rng.random();
+    cdf.partition_point(|&c| c < u).min(cdf.len() - 1)
+}
+
 ////////////////////
 // Main functions //
 ////////////////////
@@ -463,9 +559,13 @@ pub fn create_adt_synthetic_data(
     (counts, cell_type_labels, batch_labels)
 }
 
-///////////////////////////////
-// DIALOGUE synthetic data   //
-///////////////////////////////
+/////////////////////////////
+// DIALOGUE synthetic data //
+/////////////////////////////
+
+////////////
+// Consts //
+////////////
 
 /// Gaussian noise added on top of a sample-level feature component.
 const DIALOGUE_FEATURE_NOISE: f64 = 0.45;
@@ -780,9 +880,17 @@ pub fn create_dialogue_synthetic_data(
     })
 }
 
-///////////////////////////////
-// CellSweep synthetic data  //
-///////////////////////////////
+//////////////////////////////
+// CellSweep synthetic data //
+//////////////////////////////
+
+////////////
+// Consts //
+////////////
+
+/// Gamma shape the per-gene base expression is drawn from. Below one the draw
+/// piles up near zero and the fixture ends up with dead genes.
+const CELLSWEEP_BASE_SHAPE: f64 = 1.5;
 
 /// Lower clamp on a planted ambient fraction, so no barcode is clean.
 const CELLSWEEP_ALPHA_MIN: f64 = 0.02;
@@ -814,8 +922,8 @@ pub struct CellSweepSyntheticParams {
     /// type's profile.
     pub marker_weight: f64,
     /// Fraction of the soup coming from cell type zero, the population that
-    /// lyses. The remainder is flat background, which is what keeps the
-    /// ambient profile out of the span of the cell type profiles and the
+    /// lyses. The remainder is a background of its own, which is what keeps
+    /// the ambient profile out of the span of the cell type profiles and the
     /// contamination fraction identifiable.
     pub ambient_dominance: f64,
     /// Mean planted ambient fraction across real barcodes.
@@ -936,10 +1044,10 @@ pub struct CellSweepSyntheticData {
 /// type profile. Empty droplets are pure soup at a much smaller library size,
 /// which is the signal the ambient profile is estimated off.
 ///
-/// The soup is cell type zero plus flat background rather than a mixture of
-/// every profile. A soup that sits in the span of the cell type profiles makes
-/// the contamination fraction unidentifiable, and the fixture would then be
-/// testing the repulsion term rather than the model.
+/// The soup is cell type zero plus a background of its own rather than a
+/// mixture of every profile. A soup that sits in the span of the cell type
+/// profiles makes the contamination fraction unidentifiable, and the fixture
+/// would then be testing the repulsion term rather than the model.
 ///
 /// ### Params
 ///
@@ -971,25 +1079,40 @@ pub fn create_cellsweep_synthetic_data(
 
     let mut rng = StdRng::seed_from_u64(seed);
 
-    // Cell type profiles: a disjoint marker block each, background elsewhere.
+    // Every gene gets a base expression level, shared across cell types, so
+    // the profiles differ from each other only in their marker blocks. A flat
+    // base would leave the soup a two-valued step function and nothing
+    // downstream could be ranked against it.
+    let base: Vec<f64> = (0..n_genes)
+        .map(|_| gamma_sample(&mut rng, CELLSWEEP_BASE_SHAPE, 1.0))
+        .collect();
+
     let mut profiles = vec![0.0_f64; n_celltypes * n_genes];
     for t in 0..n_celltypes {
         let row = &mut profiles[t * n_genes..(t + 1) * n_genes];
         for (gene, weight) in row.iter_mut().enumerate() {
             *weight = if gene >= t * n_markers && gene < (t + 1) * n_markers {
-                marker_weight
+                marker_weight * base[gene]
             } else {
-                1.0
+                base[gene]
             };
         }
         let total: f64 = row.iter().sum();
         row.iter_mut().for_each(|w| *w /= total);
     }
 
-    // Soup: the lysing population plus flat background.
-    let background = 1.0 / n_genes as f64;
+    // Soup: the lysing population plus a background drawn independently of the
+    // cell type profiles.
+    let mut background: Vec<f64> = (0..n_genes)
+        .map(|_| gamma_sample(&mut rng, CELLSWEEP_BASE_SHAPE, 1.0))
+        .collect();
+    let total: f64 = background.iter().sum();
+    background.iter_mut().for_each(|w| *w /= total);
+
     let ambient: Vec<f64> = (0..n_genes)
-        .map(|gene| ambient_dominance * profiles[gene] + (1.0 - ambient_dominance) * background)
+        .map(|gene| {
+            ambient_dominance * profiles[gene] + (1.0 - ambient_dominance) * background[gene]
+        })
         .collect();
 
     let ambient_cdf = to_cdf(&ambient);
@@ -1118,97 +1241,9 @@ fn gamma_sample<R: Rng>(rng: &mut R, shape: f64, scale: f64) -> f64 {
     }
 }
 
-/// Helper function to sample from a Poisson distribution
-///
-/// Uses Knuth's algorithm for lambda < 30 and transformed rejection method for
-/// lambda >= 30.
-///
-/// ### Params
-///
-/// * `rng` - Random number generator
-/// * `lambda` - Rate parameter
-///
-/// ### Returns
-///
-/// A sample from Poisson(λ)
-fn poisson_sample<R: Rng>(rng: &mut R, lambda: f64) -> u32 {
-    if lambda < 30.0 {
-        let l = (-lambda).exp();
-        let mut k = 0;
-        let mut p = 1.0;
-        loop {
-            k += 1;
-            p *= rng.random::<f64>();
-            if p <= l {
-                return (k - 1) as u32;
-            }
-        }
-    } else {
-        let beta = std::f64::consts::PI / (3.0 * lambda).sqrt();
-        let alpha = beta * lambda;
-        let k = (2.83 + 5.1 / lambda).ln();
-
-        loop {
-            let u = rng.random::<f64>();
-            let x = (alpha - ((1.0 - u) / u).ln()) / beta;
-            let n = (x + 0.5).floor();
-            if n < 0.0 {
-                continue;
-            }
-
-            let v = rng.random::<f64>();
-            let y = alpha - beta * x;
-            let lhs = y + (v / (1.0 + y.exp()).powi(2)).ln();
-            let rhs = k + n * lambda.ln() - (1..=(n as u32)).map(|i| (i as f64).ln()).sum::<f64>();
-
-            if lhs <= rhs {
-                return n as u32;
-            }
-        }
-    }
-}
-
-/// Turns a probability vector into a cumulative one for sampling
-///
-/// The last entry is forced to exactly one, so a uniform draw always lands
-/// somewhere even after the accumulated rounding error.
-///
-/// ### Params
-///
-/// * `weights` - Probabilities, summing to one
-///
-/// ### Returns
-///
-/// The cumulative distribution
-fn to_cdf(weights: &[f64]) -> Vec<f64> {
-    let mut cum = 0.0;
-    let mut cdf: Vec<f64> = weights
-        .iter()
-        .map(|w| {
-            cum += w;
-            cum
-        })
-        .collect();
-    if let Some(last) = cdf.last_mut() {
-        *last = 1.0;
-    }
-    cdf
-}
-
-/// Draws one categorical index from a cumulative distribution
-///
-/// ### Params
-///
-/// * `rng` - Random number generator
-/// * `cdf` - Cumulative distribution, as built by [to_cdf]
-///
-/// ### Returns
-///
-/// The drawn index
-fn draw_from_cdf<R: Rng>(rng: &mut R, cdf: &[f64]) -> usize {
-    let u: f64 = rng.random();
-    cdf.partition_point(|&c| c < u).min(cdf.len() - 1)
-}
+///////////
+// Tests //
+///////////
 
 #[cfg(test)]
 mod cellsweep_synthetic_tests {
