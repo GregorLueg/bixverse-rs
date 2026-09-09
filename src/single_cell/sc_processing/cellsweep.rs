@@ -351,6 +351,10 @@ impl SampleCsr {
     }
 
     /// Non-zero slice of one row.
+    ///
+    /// ### Returns
+    ///
+    /// `(index, value)` as slices
     #[inline]
     fn row(&self, i: usize) -> (&[u32], &[f32]) {
         let (rs, re) = (self.indptr[i], self.indptr[i + 1]);
@@ -358,6 +362,10 @@ impl SampleCsr {
     }
 
     /// Whether the row is an empty droplet.
+    ///
+    /// ### Return
+    ///
+    /// `true` if empty droplet.
     #[inline]
     fn is_empty_droplet(&self, i: usize) -> bool {
         i >= self.n_real
@@ -371,6 +379,33 @@ impl SampleCsr {
 /////////////
 // Helpers //
 /////////////
+
+/// Reflect an out-of-range index back into `0..n`, half-sample symmetric.
+///
+/// ### Params
+///
+/// * `idx` - Possibly out-of-range index.
+/// * `n` - Length of the signal. Must be non-zero.
+///
+/// ### Returns
+///
+/// The reflected in-range index.
+#[inline]
+fn reflect_index(idx: isize, n: usize) -> usize {
+    let n_i = n as isize;
+    let mut i = idx;
+    // Loops rather than a closed form because a kernel wider than the signal
+    // can reflect more than once.
+    loop {
+        if i < 0 {
+            i = -i - 1;
+        } else if i >= n_i {
+            i = 2 * n_i - i - 1;
+        } else {
+            return i as usize;
+        }
+    }
+}
 
 /// Reflect-padded Gaussian smoothing of a 1D signal.
 ///
@@ -412,33 +447,6 @@ fn gaussian_smooth_1d(y: &[f64], sigma: f64) -> Vec<f64> {
                 .sum()
         })
         .collect()
-}
-
-/// Reflect an out-of-range index back into `0..n`, half-sample symmetric.
-///
-/// ### Params
-///
-/// * `idx` - Possibly out-of-range index.
-/// * `n` - Length of the signal. Must be non-zero.
-///
-/// ### Returns
-///
-/// The reflected in-range index.
-#[inline]
-fn reflect_index(idx: isize, n: usize) -> usize {
-    let n_i = n as isize;
-    let mut i = idx;
-    // Loops rather than a closed form because a kernel wider than the signal
-    // can reflect more than once.
-    loop {
-        if i < 0 {
-            i = -i - 1;
-        } else if i >= n_i {
-            i = 2 * n_i - i - 1;
-        } else {
-            return i as usize;
-        }
-    }
 }
 
 /// Central-difference gradient with one-sided ends.
@@ -601,12 +609,6 @@ struct RowStats {
 /// vectorised `ln` reads, and to keep them in L1 between the pass that fills
 /// them and the pass that consumes them. Rows shorter than this run as one
 /// short tile.
-///
-/// Buffering more than this was tried and lost: a version that also staged the
-/// weighted components and the responsibility split, so that the three row
-/// statistics could go through `dot_simd_f64`, ran 16% slower than the original
-/// scalar loop before the vectorised `ln` was added back. Three register
-/// accumulators in a fused loop beat three vector passes over L1.
 const E_STEP_TILE: usize = 256;
 
 /// Per-thread buffers for the vectorised `ln`.
@@ -1319,6 +1321,7 @@ fn m_step(
     let (n_genes, n_celltypes) = (csr.n_genes, csr.n_celltypes);
 
     // -- alpha --
+
     state
         .alpha
         .iter_mut()
@@ -1342,9 +1345,7 @@ fn m_step(
     }
 
     // -- beta --
-    // One pass rather than three: `row_stats` is an array of structs, so each
-    // `.map(|s| s.field).sum()` was a separate strided walk over the whole
-    // thing.
+
     let (bulk_total, ambient_total, gamma_total) = row_stats
         .iter()
         .fold((0.0_f64, 0.0_f64, 0.0_f64), |(bulk, ambient, gamma), s| {
@@ -1353,6 +1354,7 @@ fn m_step(
     state.beta = bulk_total / (bulk_total + ambient_total + gamma_total).max(params.eps);
 
     // -- ambient profile --
+
     if !params.freeze_ambient_profile {
         for _ in 0..AMBIENT_UPDATE_ITERS {
             for k in 0..n_celltypes {
@@ -1377,6 +1379,7 @@ fn m_step(
     }
 
     // -- cell-type profiles --
+
     let celltype_lambda = params.celltype_lambda as f64 / n_genes as f64;
     let repulsion = params.repulsion_strength as f64;
     let max_frac = params.max_frac_gene_repulsion as f64;
@@ -1725,6 +1728,7 @@ fn build_sample_csr<S: SingleCellReading>(
     n_genes: usize,
     params: &CellSweepParams,
 ) -> Result<SampleCsr, BixverseErrors> {
+    // -- assertions --
     if sample.real_cells.is_empty() || sample.n_celltypes == 0 {
         return Err(BixverseErrors::CellSweepNoRealCells {
             sample_id: sample.sample_id.clone(),
@@ -1811,6 +1815,73 @@ pub struct CellSweepRun {
     pub nnz: Vec<usize>,
 }
 
+/// Build one output chunk from a barcode's denoised values.
+///
+/// Values that the clamp drove to zero are dropped, so the output is sparser
+/// than the input. The raw layer takes the stochastically rounded counts, since
+/// the store is integral and the negative binomial methods downstream depend on
+/// that; the normalised layer keeps the floats by default, which is where the
+/// sub-integer part of the denoised signal survives.
+///
+/// ### Params
+///
+/// * `indices` - Gene indices of the barcode's non-zeros.
+/// * `denoised` - Denoised values, same length as `indices`.
+/// * `original_index` - Row index in the new store.
+/// * `target_size` - Library size the normalised layer is scaled to.
+/// * `norm_from_rounded` - Derive the normalised layer from the rounded counts
+///   rather than the floats.
+/// * `rng` - Seeded generator for the stochastic rounding.
+///
+/// ### Returns
+///
+/// The [CsrCellChunk] ready to write.
+fn build_denoised_chunk(
+    indices: &[u32],
+    denoised: &[f32],
+    original_index: usize,
+    target_size: f32,
+    norm_from_rounded: bool,
+    rng: &mut StdRng,
+) -> CsrCellChunk {
+    let all_rounded = stochastic_round(denoised, rng);
+    let kept: Vec<usize> = (0..denoised.len())
+        .filter(|&i| all_rounded[i] > 0)
+        .collect();
+
+    let values: Vec<f32> = kept.iter().map(|&i| denoised[i]).collect();
+    let kept_indices: Vec<u32> = kept.iter().map(|&i| indices[i]).collect();
+    let rounded: Vec<u32> = kept.iter().map(|&i| all_rounded[i]).collect();
+
+    let norm_source: Vec<f32> = if norm_from_rounded {
+        rounded.iter().map(|&c| c as f32).collect()
+    } else {
+        values.clone()
+    };
+    let norm_total: f32 = norm_source.iter().sum();
+
+    let data_norm: Vec<F16> = norm_source
+        .iter()
+        .map(|&value| {
+            let scaled = if norm_total > 0.0 {
+                (value / norm_total * target_size).ln_1p()
+            } else {
+                0.0
+            };
+            F16::from_f32(scaled)
+        })
+        .collect();
+
+    CsrCellChunk {
+        data_raw: RawCounts::from_u32_auto(&rounded),
+        data_norm,
+        library_size: rounded.iter().map(|&c| c as usize).sum(),
+        indices: kept_indices,
+        original_index,
+        to_keep: true,
+    }
+}
+
 /// Fit CellSweep per sample and write the denoised barcodes to a new store.
 ///
 /// One EM per sample, since the ambient profile is a property of a single
@@ -1848,6 +1919,7 @@ where
     S: SingleCellReading,
     P: AsRef<std::path::Path>,
 {
+    // -- assertions --
     if !params.freeze_empties {
         return Err(BixverseErrors::CellSweepFreezeEmptiesUnsupported);
     }
@@ -1940,73 +2012,6 @@ where
     }
 
     Ok(run)
-}
-
-/// Build one output chunk from a barcode's denoised values.
-///
-/// Values that the clamp drove to zero are dropped, so the output is sparser
-/// than the input. The raw layer takes the stochastically rounded counts, since
-/// the store is integral and the negative binomial methods downstream depend on
-/// that; the normalised layer keeps the floats by default, which is where the
-/// sub-integer part of the denoised signal survives.
-///
-/// ### Params
-///
-/// * `indices` - Gene indices of the barcode's non-zeros.
-/// * `denoised` - Denoised values, same length as `indices`.
-/// * `original_index` - Row index in the new store.
-/// * `target_size` - Library size the normalised layer is scaled to.
-/// * `norm_from_rounded` - Derive the normalised layer from the rounded counts
-///   rather than the floats.
-/// * `rng` - Seeded generator for the stochastic rounding.
-///
-/// ### Returns
-///
-/// The [CsrCellChunk] ready to write.
-fn build_denoised_chunk(
-    indices: &[u32],
-    denoised: &[f32],
-    original_index: usize,
-    target_size: f32,
-    norm_from_rounded: bool,
-    rng: &mut StdRng,
-) -> CsrCellChunk {
-    let all_rounded = stochastic_round(denoised, rng);
-    let kept: Vec<usize> = (0..denoised.len())
-        .filter(|&i| all_rounded[i] > 0)
-        .collect();
-
-    let values: Vec<f32> = kept.iter().map(|&i| denoised[i]).collect();
-    let kept_indices: Vec<u32> = kept.iter().map(|&i| indices[i]).collect();
-    let rounded: Vec<u32> = kept.iter().map(|&i| all_rounded[i]).collect();
-
-    let norm_source: Vec<f32> = if norm_from_rounded {
-        rounded.iter().map(|&c| c as f32).collect()
-    } else {
-        values.clone()
-    };
-    let norm_total: f32 = norm_source.iter().sum();
-
-    let data_norm: Vec<F16> = norm_source
-        .iter()
-        .map(|&value| {
-            let scaled = if norm_total > 0.0 {
-                (value / norm_total * target_size).ln_1p()
-            } else {
-                0.0
-            };
-            F16::from_f32(scaled)
-        })
-        .collect();
-
-    CsrCellChunk {
-        data_raw: RawCounts::from_u32_auto(&rounded),
-        data_norm,
-        library_size: rounded.iter().map(|&c| c as usize).sum(),
-        indices: kept_indices,
-        original_index,
-        to_keep: true,
-    }
 }
 
 ///////////

@@ -1,6 +1,9 @@
 //! Various functions, structures, etc. to expose more broadly when using this
 //! crate in other libraries
 
+use std::time::Duration;
+use thousands::Separable;
+
 pub use crate::core::math::sparse::{
     CompressedSparseData2, CompressedSparseFormat, LanczosParams, SparseAxis,
     parse_compressed_sparse_format,
@@ -113,7 +116,7 @@ pub fn report_decile_progress(
     prev_done: usize,
     total: usize,
     unit: &str,
-    elapsed: std::time::Duration,
+    elapsed: Duration,
 ) {
     if total == 0 {
         return;
@@ -123,6 +126,10 @@ pub fn report_decile_progress(
     let prev_pct = prev_done * 100 / total;
 
     if pct / PROGRESS_STEP_PCT > prev_pct / PROGRESS_STEP_PCT || done == total {
-        println!("  Progress: {pct}% ({done}/{total} {unit}, {elapsed:.2?})");
+        println!(
+            "  Progress: {pct}% ({} / {} {unit}, {elapsed:.2?})",
+            done.separate_with_underscores(),
+            total.separate_with_underscores()
+        );
     }
 }
