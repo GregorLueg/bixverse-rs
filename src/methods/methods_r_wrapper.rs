@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap};
 use crate::core::mat_struct::NamedMatrix;
 use crate::methods::cis_target::MotifEnrichment;
 #[cfg(feature = "dge")]
-use crate::methods::dge_bulk::EdgeRQlParams;
+use crate::methods::dge_bulk::{EdgeRQlParams, LimmaParams, LimmaRoute, parse_limma_route};
 use crate::methods::dgrdl::DgrdlParams;
 use crate::methods::ica::IcaParams;
 use crate::methods::lda::metrics::LdaMetrics;
@@ -696,6 +696,75 @@ impl EdgeRQlParams {
                 .get("legacy")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(defaults.legacy),
+        })
+    }
+}
+
+////////////////////
+// limma bulk DE  //
+////////////////////
+
+#[cfg(feature = "dge")]
+impl LimmaParams {
+    /// Generate LimmaParams from an R list
+    ///
+    /// Everything falls back to limma's own defaults. `route` and
+    /// `norm_method` error on an unrecognised spelling rather than quietly
+    /// running something other than what was asked for. `prior_count` is the
+    /// one field where an absent key is not a default but a request to let the
+    /// route pick.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the limma parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The `LimmaParams` with all parameters set.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+        let defaults = Self::default();
+
+        let route: LimmaRoute = match params.get("route").and_then(|v| v.as_str()) {
+            Some(s) => parse_limma_route(s)
+                .ok_or_else(|| Error::Other(format!("Invalid limma route: {}", s)))?,
+            None => defaults.route,
+        };
+
+        let norm_method: NormMethod = match params.get("norm_method").and_then(|v| v.as_str()) {
+            Some(s) => parse_norm_method(s)
+                .ok_or_else(|| Error::Other(format!("Invalid normalisation method: {}", s)))?,
+            None => defaults.norm_method,
+        };
+
+        Ok(Self {
+            route,
+            norm_method,
+            filter: params
+                .get("filter")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(defaults.filter),
+            min_mean: params
+                .get("min_mean")
+                .and_then(|v| v.as_real())
+                .unwrap_or(defaults.min_mean),
+            robust: params
+                .get("robust")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(defaults.robust),
+            prior_count: params.get("prior_count").and_then(|v| v.as_real()),
+            adaptive_span: params
+                .get("adaptive_span")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(defaults.adaptive_span),
+            span: params
+                .get("span")
+                .and_then(|v| v.as_real())
+                .unwrap_or(defaults.span),
+            proportion: params
+                .get("proportion")
+                .and_then(|v| v.as_real())
+                .unwrap_or(defaults.proportion),
         })
     }
 }
