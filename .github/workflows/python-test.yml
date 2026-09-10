@@ -1,0 +1,33 @@
+name: Test the Python bindings
+
+# The name matters. python-release.yml keys its workflow_run trigger off it,
+# so renaming this silently stops every release.
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'python/**'
+      - 'src/**'
+      - 'Cargo.toml'
+      - '.github/workflows/python-test.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'python/**'
+      - 'src/**'
+      - 'Cargo.toml'
+      - '.github/workflows/python-test.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    uses: GregorLueg/personal-actions/.github/workflows/python-maturin-test.yml@v1
+    with:
+      package: bixverse
+      # scipy arrives via `--all-extras`; the loader tests rebuild each batch
+      # into a CSR matrix to check it against the store they were written from.
+      extra-deps: 'scipy'

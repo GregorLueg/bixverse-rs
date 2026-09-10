@@ -1,0 +1,57 @@
+[build-system]
+requires = ["maturin>=1.15,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "bixverse"
+description = "Single-cell streaming and numerics for Python, in Rust."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Gregor Lueg", email = "gregorlueg@me.com" }]
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.23", "beartype>=0.19"]
+dynamic = ["version"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+
+[project.urls]
+Repository = "https://github.com/GregorLueg/bixverse-rs"
+Changelog = "https://github.com/GregorLueg/bixverse-rs/blob/main/python/CHANGELOG.md"
+
+[project.optional-dependencies]
+# `scipy_csr` on a batch, and nothing else.
+sparse = ["scipy>=1.9"]
+# The `IterableDataset` adapter in `bixverse.torch`.
+torch = ["torch>=2.0"]
+
+[dependency-groups]
+dev = [
+    "maturin>=1.15,<2.0",
+    "pytest>=8",
+    "ruff>=0.9",
+    "ty>=0.0.1",
+    "scipy>=1.9",
+]
+
+[tool.maturin]
+manifest-path = "Cargo.toml"
+module-name = "bixverse._bixverse"
+python-source = "."
+strip = true
+include = ["bixverse/py.typed", "bixverse/*.pyi"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["bixverse"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
