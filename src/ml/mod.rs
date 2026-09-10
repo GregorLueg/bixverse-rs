@@ -3,4 +3,5 @@
 
 pub mod clustering;
 pub mod gp;
+#[cfg(feature = "r")]
 pub mod ml_r_wrappers;

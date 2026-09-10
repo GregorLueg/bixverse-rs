@@ -6,6 +6,7 @@ pub mod graph_clustering;
 pub mod graph_components;
 pub mod graph_label_propagations;
 pub mod graph_metrics;
+#[cfg(feature = "r")]
 pub mod graph_r_wrapper;
 pub mod graph_structures;
 pub mod leiden;

@@ -1,13 +1,16 @@
 //! Various traits in bixverse
 
+#[cfg(feature = "r")]
 use extendr_api::*;
 use faer::traits::{ComplexField, RealField};
+#[cfg(feature = "r")]
 use faer_entity::SimpleEntity;
 use num_traits::float::TotalOrder;
 use num_traits::{Float, FromPrimitive, ToPrimitive};
 
 use std::fmt::Display;
 
+#[cfg(feature = "r")]
 use crate::utils::r_rust_interface::fill_column_major;
 use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Sub, SubAssign};
 
@@ -234,6 +237,7 @@ impl VecFloatConvert<f32> for &[f64] {
 /// Bridge between faer matrix types and R matrix types.
 ///
 /// Defines how to convert faer matrices to R-compatible arrays.
+#[cfg(feature = "r")]
 pub trait FaerRType: SimpleEntity + Copy + Clone + 'static {
     /// Type definition to allow R conversion
     type RType: Copy + Clone;
@@ -242,6 +246,7 @@ pub trait FaerRType: SimpleEntity + Copy + Clone + 'static {
     fn to_r_matrix(x: faer::MatRef<Self>) -> extendr_api::RArray<Self::RType, 2>;
 }
 
+#[cfg(feature = "r")]
 impl FaerRType for f64 {
     type RType = f64;
     fn to_r_matrix(x: faer::MatRef<Self>) -> extendr_api::RArray<Self, 2> {
@@ -251,6 +256,7 @@ impl FaerRType for f64 {
     }
 }
 
+#[cfg(feature = "r")]
 impl FaerRType for i32 {
     type RType = i32;
     fn to_r_matrix(x: faer::MatRef<Self>) -> extendr_api::RArray<Self, 2> {
@@ -260,6 +266,7 @@ impl FaerRType for i32 {
     }
 }
 
+#[cfg(feature = "r")]
 impl FaerRType for f32 {
     type RType = f64;
     fn to_r_matrix(x: faer::MatRef<Self>) -> extendr_api::RArray<f64, 2> {
@@ -274,12 +281,14 @@ impl FaerRType for f32 {
 ///////////////////
 
 /// Trait to transform errors directly into extendr results
+#[cfg(feature = "r")]
 pub trait IntoExtendrErr<T> {
     /// Transforms itself into an extendr_api::Result and transforms any errors
     /// in doing so.
     fn to_extendr(self) -> extendr_api::Result<T>;
 }
 
+#[cfg(feature = "r")]
 impl<T, E: std::fmt::Display> IntoExtendrErr<T> for std::result::Result<T, E> {
     fn to_extendr(self) -> extendr_api::Result<T> {
         self.map_err(|e| extendr_api::Error::Other(e.to_string()))

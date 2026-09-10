@@ -6,6 +6,7 @@ pub mod gemm;
 pub mod heap_structures;
 pub mod macros;
 pub mod matrix_utils;
+#[cfg(feature = "r")]
 pub mod r_rust_interface;
 pub mod simd;
 pub mod traits;
