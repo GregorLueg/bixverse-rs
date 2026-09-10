@@ -44,6 +44,38 @@ pub struct BbknnParams {
 // Helpers BBKNN //
 ///////////////////
 
+/// Reject a batch that cannot supply the requested number of neighbours
+///
+/// Shared by the CPU and GPU searches. A cell of the batch itself is excluded
+/// from its own neighbour list, so the batch needs one cell more than the
+/// per-batch neighbour count.
+///
+/// ### Params
+///
+/// * `batch` - The batch label, for the error message.
+/// * `n_cells` - Cells in this batch.
+/// * `neighbours_within_batch` - Neighbours requested per batch.
+///
+/// ### Returns
+///
+/// `Ok(())`, or `BbknnBatchTooSmall` if the batch is too small.
+pub(crate) fn check_batch_size(
+    batch: usize,
+    n_cells: usize,
+    neighbours_within_batch: usize,
+) -> Result<(), BixverseErrors> {
+    let required = neighbours_within_batch + 1;
+    if n_cells < required {
+        return Err(BixverseErrors::BbknnBatchTooSmall {
+            batch,
+            n_cells,
+            required,
+        });
+    }
+
+    Ok(())
+}
+
 /// Generate batch balanced kNN graph
 ///
 /// The function generates on a per batch basis an approximate nearest neighbour
@@ -114,6 +146,15 @@ fn get_batch_balanced_knn(
             .filter(|(_, b)| **b == batch)
             .map(|(i, _)| i)
             .collect();
+
+        // Cells of this batch have to drop themselves, so the batch must hold
+        // one more cell than the per-batch neighbour count. Without the guard
+        // the fill loop below walks off the end of the neighbour row.
+        check_batch_size(
+            batch,
+            batch_cell_indices.len(),
+            bbknn_params.neighbours_within_batch,
+        )?;
 
         let sub_matrix = MatSliceView::new(mat, &batch_cell_indices, &col_indices);
         let sub_matrix = sub_matrix.to_owned();
@@ -565,6 +606,82 @@ fn trim_graph(
 // Main BBKNN //
 ////////////////
 
+/// Turn batch-balanced kNN results into the BBKNN output graphs
+///
+/// Everything after the neighbour search: sorting, the UMAP connectivity
+/// estimate, the fuzzy set operations and the optional trimming. Shared by the
+/// CPU [`bbknn`] and the GPU `bbknn_gpu`, so the two cannot drift apart.
+///
+/// ### Params
+///
+/// * `knn_indices` - Indices of the batch-balanced neighbours. Resorted by
+///   distance in place.
+/// * `knn_dists` - Distances of the batch-balanced neighbours. Resorted in
+///   place alongside the indices.
+/// * `n_obs` - Number of cells.
+/// * `set_op_mix_ratio` - Mixing ratio between union (1.0) and intersection
+///   (0.0).
+/// * `local_connectivity` - How many nearest neighbours of each cell are
+///   assumed to be fully connected.
+/// * `trim` - Trim the neighbours of each cell to these many connectivities.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
+///
+/// ### Returns
+///
+/// A tuple of two CompressedSparseData2 with `(distances, connectivities)`.
+pub(crate) fn bbknn_graph_from_knn(
+    knn_indices: &mut [Vec<usize>],
+    knn_dists: &mut [Vec<f32>],
+    n_obs: usize,
+    set_op_mix_ratio: f32,
+    local_connectivity: f32,
+    trim: Option<usize>,
+    verbose: usize,
+) -> Result<(CompressedSparseData2<f32>, CompressedSparseData2<f32>), BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+
+    sort_knn_by_distance(knn_indices, knn_dists);
+
+    if verbosity.normal_verbosity() {
+        println!("BBKNN: Calculating UMAP-based connectivities and removing weak connections.")
+    }
+
+    let n_neighbours = knn_indices[0].len();
+    let (sigmas, rhos) = smooth_knn_dist(
+        knn_dists,
+        n_neighbours as f32,
+        local_connectivity,
+        SMOOTH_K_TOLERANCE,
+        MIN_K_DIST_SCALE,
+    );
+
+    let (rows, cols, vals) = compute_membership_strengths(knn_indices, knn_dists, &sigmas, &rhos);
+
+    let mut connectivities = coo_to_csr(
+        &rows.index_cast(),
+        &cols.index_cast(),
+        &vals,
+        (n_obs, n_obs),
+    );
+
+    connectivities = apply_set_operations(connectivities, set_op_mix_ratio)?;
+
+    if verbosity.normal_verbosity() {
+        println!("BBKNN: Finalising data.")
+    }
+
+    let dist = knn_to_sparse_dist(knn_indices, knn_dists, n_obs);
+
+    if let Some(trim_val) = trim
+        && trim_val > 0
+    {
+        connectivities = trim_graph(connectivities, trim_val);
+    }
+
+    Ok((dist, connectivities))
+}
+
 /// Run batch-balanced KNN
 ///
 /// This is the main function that implements the BBKNN logic into Rust.
@@ -604,53 +721,16 @@ pub fn bbknn(
         println!("BBKNN: generating the batch balanced kNN values.")
     }
 
-    // 1. Get batch-balanced k-NN
     let (mut knn_indices, mut knn_dists) =
         get_batch_balanced_knn(mat, batch_labels, &knn_method, bbknn_params, seed, verbose)?;
 
-    // 2. Sort the distance by KNN
-    sort_knn_by_distance(&mut knn_indices, &mut knn_dists);
-
-    if verbosity.normal_verbosity() {
-        println!("BBKNN: Calculating UMAP-based connectivities and removing weak connections.")
-    }
-
-    // 3. Compute UMAP connectivities
-    let n_neighbours = knn_indices[0].len();
-    let (sigmas, rhos) = smooth_knn_dist(
-        &knn_dists,
-        n_neighbours as f32,
+    bbknn_graph_from_knn(
+        &mut knn_indices,
+        &mut knn_dists,
+        mat.nrows(),
+        bbknn_params.set_op_mix_ratio,
         bbknn_params.local_connectivity,
-        SMOOTH_K_TOLERANCE,
-        MIN_K_DIST_SCALE,
-    );
-
-    let (rows, cols, vals) = compute_membership_strengths(&knn_indices, &knn_dists, &sigmas, &rhos);
-    let n_obs = mat.nrows();
-
-    let mut connectivities = coo_to_csr(
-        &rows.index_cast(),
-        &cols.index_cast(),
-        &vals,
-        (n_obs, n_obs),
-    );
-
-    // 4. Apply set operations
-    connectivities = apply_set_operations(connectivities, bbknn_params.set_op_mix_ratio)?;
-
-    if verbosity.normal_verbosity() {
-        println!("BBKNN: Finalising data.")
-    }
-
-    // 5. Create the distance matrix
-    let dist = knn_to_sparse_dist(&knn_indices, &knn_dists, n_obs);
-
-    // 6. Trimming
-    if let Some(trim_val) = bbknn_params.trim
-        && trim_val > 0
-    {
-        connectivities = trim_graph(connectivities, trim_val);
-    }
-
-    Ok((dist, connectivities))
+        bbknn_params.trim,
+        verbose,
+    )
 }

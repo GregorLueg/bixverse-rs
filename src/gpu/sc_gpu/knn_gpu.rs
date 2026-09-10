@@ -159,6 +159,39 @@ impl Default for KnnParamsGpu {
 // Helpers //
 /////////////
 
+/// Beam parameters for a CAGRA query, with the beam scaled to `k`.
+///
+/// Wrapping the params in `Some(..)` suppresses the crate's own k-scaled
+/// fallback, so the beam has to be backfilled here or the raw BEAM_WIDTH of 16
+/// caps the row at 15 after the self-filter, costing 90% of the recall at the
+/// `k` these callers run at.
+///
+/// ### Params
+///
+/// * `params` - The [`KnnParamsGpu`] for this run. Any beam field the caller
+///   pinned wins over the scaled value.
+/// * `k_query` - Number of neighbours asked of the index, self included.
+/// * `graph_k` - The resolved graph degree, or `None` for the crate default.
+///
+/// ### Returns
+///
+/// The [`CagraGpuSearchParams`] to hand to the query.
+pub(crate) fn cagra_query_params(
+    params: &KnnParamsGpu,
+    k_query: usize,
+    graph_k: Option<usize>,
+) -> CagraGpuSearchParams {
+    let k_graph = graph_k.unwrap_or(NNDESCENT_GPU_DEFAULT_DEGREE);
+    let scaled_bw = k_query.max(k_graph).max(16) * 2;
+
+    CagraGpuSearchParams::new(
+        params.beam_width.or(Some(scaled_bw)),
+        params.max_beam_iters.or(Some(scaled_bw * 3)),
+        params.n_entry_points,
+        None,
+    )
+}
+
 /// Drop each query point from its own neighbour list and truncate to `k`.
 ///
 /// The GPU self-queries return the query point itself, so they are issued with
@@ -283,19 +316,7 @@ pub fn dispatch_knn_gpu<R: Runtime>(
             if params.extract_knn {
                 extract_nndescent_knn_gpu(&index, Some(k_query), true, false)?
             } else {
-                // Wrapping the params in `Some(..)` suppresses the crate's own
-                // k-scaled fallback, so the beam has to be backfilled here or
-                // the raw BEAM_WIDTH of 16 caps the row at 15 after the
-                // self-filter, costing 90% of the recall at the `k` these
-                // callers run at.
-                let k_graph = graph_k.unwrap_or(NNDESCENT_GPU_DEFAULT_DEGREE);
-                let scaled_bw = k_query.max(k_graph).max(16) * 2;
-                let query_params = CagraGpuSearchParams::new(
-                    params.beam_width.or(Some(scaled_bw)),
-                    params.max_beam_iters.or(Some(scaled_bw * 3)),
-                    params.n_entry_points,
-                    None,
-                );
+                let query_params = cagra_query_params(params, k_query, graph_k);
 
                 query_nndescent_index_gpu_self(&mut index, k_query, Some(query_params), false)?
             }
