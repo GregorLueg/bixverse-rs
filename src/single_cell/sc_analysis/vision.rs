@@ -1,6 +1,7 @@
 //! Implementation of the VISION framework to score spatially correlated
 //! gene sets. See DeTomaso, et al., Nat. Commun., 2019
 
+#[cfg(feature = "r")]
 use extendr_api::{Conversions, List};
 use rayon::prelude::*;
 use std::time::Instant;
@@ -22,6 +23,7 @@ pub struct SignatureGenes {
     pub negative: Vec<usize>,
 }
 
+#[cfg(feature = "r")]
 /// Helper function to transform an R gene set list to `Vec<SignatureGenes>`
 ///
 /// ### Params

@@ -10,6 +10,7 @@ pub use crate::errors::*;
 pub use crate::graph::graph_structures::{EdgeData, NodeData, SparseGraph};
 pub use crate::utils::heap_structures::RevOrderedFloat;
 pub use crate::utils::matrix_utils::*;
+#[cfg(feature = "r")]
 pub use crate::utils::r_rust_interface::*;
 pub use crate::utils::simd::BixverseSimd;
 pub use crate::utils::traits::*;

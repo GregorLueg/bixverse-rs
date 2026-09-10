@@ -1,5 +1,6 @@
 //! Contains GPU-accelerated methods via cubecl and burn.
 
+#[cfg(feature = "r")]
 pub mod gpu_r_wrappers;
 pub mod linalg;
 pub mod methods_gpu;
