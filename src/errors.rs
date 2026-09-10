@@ -608,6 +608,25 @@ pub enum BixverseErrors {
         n_batches: usize,
     },
 
+    // -- Integration metrics --
+    /// Need at least two distinct labels for this metric
+    #[cfg(feature = "single-cell")]
+    #[error("You need at least two distinct labels. Provided {n_labels} labels.")]
+    NeedAtLeastTwoLabels {
+        /// Number of distinct labels found
+        n_labels: usize,
+    },
+
+    /// The label vector does not line up with the number of cells
+    #[cfg(feature = "single-cell")]
+    #[error("Expected {n_cells} labels, one per cell; got {n_labels}.")]
+    MetricLabelLengthMismatch {
+        /// Number of cells in the embedding or kNN graph
+        n_cells: usize,
+        /// Length of the provided label vector
+        n_labels: usize,
+    },
+
     /// A batch holds too few cells for the requested per-batch neighbour count
     #[cfg(feature = "single-cell")]
     #[error("BBKNN: batch {batch} has {n_cells} cells, needs at least {required}.")]
