@@ -2,11 +2,6 @@
 //! `sc_batch_correction/bbknn.rs`. Only the neighbour search moves to the
 //! device: one GPU index per batch, queried by every cell, with the UMAP
 //! connectivity pipeline shared with the CPU path via `bbknn_graph_from_knn`.
-//!
-//! The GPU backends hand back squared euclidean distances, which is not what
-//! the CPU BBKNN works in. It costs nothing to sidestep: the batch indices are
-//! batch-local, so both paths have to recompute the distance against the global
-//! matrix anyway. The queries therefore run with `return_dist: false`.
 
 #![allow(missing_docs)]
 
@@ -45,7 +40,8 @@ pub struct BbknnParamsGpu {
     /// each cell are assumed to be fully connected.
     pub local_connectivity: f32,
     /// Trim the neighbours of each cell to these many to connectivities. May
-    /// help with population independence and improve the tidiness of clustering.
+    /// help with population independence and improve the tidiness of
+    /// clustering.
     pub trim: Option<usize>,
     /// [`KnnParamsGpu`] for the per-batch searches. Two of its fields do not
     /// apply here: `k` is ignored, since `neighbours_within_batch` sets the
