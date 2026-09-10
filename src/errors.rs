@@ -594,6 +594,18 @@ pub enum BixverseErrors {
         n_batches: usize,
     },
 
+    /// A batch holds too few cells for the requested per-batch neighbour count
+    #[cfg(feature = "single-cell")]
+    #[error("BBKNN: batch {batch} has {n_cells} cells, needs at least {required}.")]
+    BbknnBatchTooSmall {
+        /// Batch label
+        batch: usize,
+        /// Cells in the batch
+        n_cells: usize,
+        /// Minimum required, i.e. `neighbours_within_batch + 1`
+        required: usize,
+    },
+
     /// A batch has too few cells for the requested anchor search
     #[cfg(feature = "single-cell")]
     #[error("Batch {batch} has {n_cells} cells, needs at least {required} for anchor finding.")]

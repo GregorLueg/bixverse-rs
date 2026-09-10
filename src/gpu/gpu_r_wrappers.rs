@@ -5,6 +5,8 @@ use extendr_api::*;
 use std::collections::HashMap;
 
 #[cfg(feature = "single-cell")]
+use crate::gpu::sc_gpu::bbknn_gpu::BbknnParamsGpu;
+#[cfg(feature = "single-cell")]
 use crate::gpu::sc_gpu::fast_clusters_gpu::FastLouvainParamsGpu;
 #[cfg(feature = "single-cell")]
 use crate::gpu::sc_gpu::harmony_gpu::HarmonyParamsV2Gpu;
@@ -360,6 +362,60 @@ impl KnnParamsGpu {
             max_beam_iters,
             n_entry_points,
             extract_knn,
+        })
+    }
+}
+
+////////////////////
+// BbknnParamsGpu //
+////////////////////
+
+#[cfg(feature = "single-cell")]
+impl BbknnParamsGpu {
+    /// Generate [BbknnParamsGpu] from an R list.
+    ///
+    /// Reads the same flattened list as `BbknnParams::from_r_list`, with the
+    /// nearest neighbour half going through [`KnnParamsGpu::from_r_list`].
+    /// Missing keys fall back to the same defaults as the CPU version.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the BBKNN parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The [BbknnParamsGpu] with all parameters set.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let knn_params = KnnParamsGpu::from_r_list(r_list.clone())?;
+
+        let bbknn_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+
+        let neighbours_within_batch = bbknn_list
+            .get("neighbours_within_batch")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(3) as usize;
+
+        let set_op_mix_ratio = bbknn_list
+            .get("set_op_mix_ratio")
+            .and_then(|v| v.as_real())
+            .unwrap_or(1.0) as f32;
+
+        let local_connectivity = bbknn_list
+            .get("local_connectivity")
+            .and_then(|v| v.as_real())
+            .unwrap_or(1.0) as f32;
+
+        let trim = bbknn_list
+            .get("trim")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(10 * neighbours_within_batch as i32) as usize;
+
+        Ok(Self {
+            neighbours_within_batch,
+            set_op_mix_ratio,
+            local_connectivity,
+            trim: Some(trim),
+            knn_params,
         })
     }
 }
