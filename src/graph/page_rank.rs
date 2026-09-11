@@ -190,7 +190,7 @@ where
             let from_idx = *name_to_idx.get(from_name).unwrap();
             let to_idx = *name_to_idx.get(to_name).unwrap();
 
-            let weight = weights.map(|w| w[i]).unwrap_or(T::zero());
+            let weight = weights.map(|w| w[i]).unwrap_or(T::one());
 
             out_edges[from_idx].push((to_idx, weight));
             in_edges[to_idx].push((from_idx, weight));
