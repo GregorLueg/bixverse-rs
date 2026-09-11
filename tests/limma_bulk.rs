@@ -161,6 +161,37 @@ fn test_a_contrast_reproduces_the_coefficient_test() {
     }
 }
 
+/// The confidence interval is symmetric around the fold change. `edge-rs` gates
+/// `topTable(confint = TRUE)` against R itself; this pins that it is switched on
+/// and lined up with the right rows.
+#[test]
+fn test_the_confidence_interval_brackets_the_fold_change() {
+    let counts = fx::counts();
+    let design = fx::design();
+
+    let got = run_limma_dge(
+        &counts,
+        fx::N_GENES,
+        fx::N_SAMPLES,
+        &design,
+        fx::N_COEF,
+        &Tested::Coef(vec![1]),
+        &LimmaParams::default(),
+    )
+    .expect("the voom chain runs");
+
+    assert_eq!(got.ci_lower.len(), got.log_fc.len());
+    assert_eq!(got.ci_upper.len(), got.log_fc.len());
+    for i in 0..got.log_fc.len() {
+        assert!(got.ci_lower[i] < got.log_fc[i] && got.log_fc[i] < got.ci_upper[i]);
+        assert_relative_eq!(
+            (got.ci_lower[i] + got.ci_upper[i]) / 2.0,
+            got.log_fc[i],
+            max_relative = TOL_FIT
+        );
+    }
+}
+
 /// `topTable` tabulates one column, so several coefficients at once has to be
 /// refused rather than silently tested as the first of them.
 #[test]

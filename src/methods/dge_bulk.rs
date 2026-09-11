@@ -40,7 +40,7 @@ use edge_rs::limma::{
     ebayes::{EBayesParams, EBayesTrend, ebayes},
     lm_fit::{LmFitResult, lm_fit},
     marray::MArrayLm,
-    toptable::{TopTableParams, TopTableSort, top_table},
+    toptable::{DEFAULT_CONF_LEVEL, TopTableParams, TopTableSort, top_table},
     voom::{VoomParams, voom_lmfit},
 };
 use edge_rs::numeric::stats::p_adjust_bh;
@@ -437,6 +437,10 @@ pub struct LimmaDgeRes {
     pub genes_to_keep: Vec<bool>,
     /// Log2 fold change of the tested coefficient or contrast.
     pub log_fc: Vec<f64>,
+    /// Lower end of the 95% confidence interval on `log_fc`. limma's `CI.L`.
+    pub ci_lower: Vec<f64>,
+    /// Upper end of the 95% confidence interval on `log_fc`. limma's `CI.R`.
+    pub ci_upper: Vec<f64>,
     /// Average log2 expression. limma's `AveExpr`, an average log2 count per
     /// million on both routes.
     pub ave_expr: Vec<f64>,
@@ -615,20 +619,27 @@ pub fn run_limma_dge(
         Some(TopTableParams {
             number: usize::MAX,
             sort_by: TopTableSort::None,
+            confint: Some(DEFAULT_CONF_LEVEL),
             ..Default::default()
         }),
     )?;
 
-    // `from_lm_fit` was handed an `amean`, so this cannot be `None`.
-    let ave_expr = top.ave_expr.ok_or(BixverseErrors::DgeShapeMismatch {
-        name: "ave_expr",
+    // `from_lm_fit` was handed an `amean` and `confint` was asked for, so none
+    // of these can be `None`.
+    let missing = |name| BixverseErrors::DgeShapeMismatch {
+        name,
         expected: n_kept,
         got: 0,
-    })?;
+    };
+    let ave_expr = top.ave_expr.ok_or_else(|| missing("ave_expr"))?;
+    let ci_lower = top.ci_lower.ok_or_else(|| missing("ci_lower"))?;
+    let ci_upper = top.ci_upper.ok_or_else(|| missing("ci_upper"))?;
 
     Ok(LimmaDgeRes {
         genes_to_keep: keep,
         log_fc: top.log_fc,
+        ci_lower,
+        ci_upper,
         ave_expr,
         t_stat: top.t,
         p_val: top.p_value,
