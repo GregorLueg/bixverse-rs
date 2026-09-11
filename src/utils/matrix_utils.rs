@@ -1,6 +1,7 @@
 //! faer matrix transformation utils. Concantenations, row removals, etc.
 
 use faer::{Mat, MatRef, concat};
+use std::borrow::Cow;
 
 use crate::prelude::*;
 use crate::utils::vec_utils::flatten_vector;
@@ -328,6 +329,30 @@ where
     );
 
     Mat::from_fn(nrows, ncols, |i, j| flat[i * ncols + j])
+}
+
+/// Borrow every column of a matrix as a contiguous slice
+///
+/// Columns of an owned `Mat` or a column-major `MatRef` are borrowed; a
+/// strided column is copied.
+///
+/// ### Params
+///
+/// * `mat` - The matrix
+///
+/// ### Returns
+///
+/// One slice per column.
+pub fn column_slices<T>(mat: MatRef<'_, T>) -> Vec<Cow<'_, [T]>>
+where
+    T: BixverseFloat,
+{
+    (0..mat.ncols())
+        .map(|j| match mat.col(j).try_as_col_major() {
+            Some(col) => Cow::Borrowed(col.as_slice()),
+            None => Cow::Owned(mat.col(j).iter().cloned().collect()),
+        })
+        .collect()
 }
 
 ///////////
