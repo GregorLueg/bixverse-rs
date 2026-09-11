@@ -230,7 +230,7 @@ pub fn gram_symmetric<F: Float>(
     let mut acc = Array::<F>::new((GRAM_RT * GRAM_RT) as usize);
     #[unroll]
     for t in 0..GRAM_RT * GRAM_RT {
-        acc[t as usize] = F::new(0.0);
+        acc[t as usize] = F::new(0.0_f32);
     }
 
     let stage = GRAM_BK * GRAM_BM;
@@ -252,12 +252,12 @@ pub fn gram_symmetric<F: Float>(
             if in_row && i0 + m < d {
                 sa[dst as usize] = a[((i0 + m) * n + row) as usize];
             } else {
-                sa[dst as usize] = F::new(0.0);
+                sa[dst as usize] = F::new(0.0_f32);
             }
             if in_row && j0 + m < d {
                 sb[dst as usize] = a[((j0 + m) * n + row) as usize];
             } else {
-                sb[dst as usize] = F::new(0.0);
+                sb[dst as usize] = F::new(0.0_f32);
             }
             li += GRAM_THREADS;
         }
@@ -337,7 +337,7 @@ pub fn gram_reduce<F: Float>(partials: &Tensor<F>, g: &mut Tensor<F>, total: u32
         terminate!();
     }
 
-    let mut acc = F::new(0.0);
+    let mut acc = F::new(0.0_f32);
     let mut c = 0u32;
     while c < n_chunks {
         acc += partials[(c * total + idx) as usize];

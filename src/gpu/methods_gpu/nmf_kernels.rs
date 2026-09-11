@@ -130,7 +130,7 @@ pub fn hals_sweep_gpu<F: Float>(
         s += 1u32;
     }
 
-    let zero = F::new(0.0);
+    let zero = F::new(0.0_f32);
     let floor = eps[0];
 
     let mut r = 0u32;
@@ -190,8 +190,8 @@ pub fn hals_norm_factors_gpu<F: Float>(
         terminate!();
     }
 
-    let zero = F::new(0.0);
-    let one = F::new(1.0);
+    let zero = F::new(0.0_f32);
+    let one = F::new(1.0_f32);
 
     let value = sq[c as usize];
     if value > zero {
@@ -275,7 +275,7 @@ pub fn row_dot_partials_gpu<F: Float>(
     }
 
     let base = row as usize * k as usize;
-    let mut acc = F::new(0.0);
+    let mut acc = F::new(0.0_f32);
     let mut s = 0u32;
     while s < k {
         acc += x[base + s as usize] * y[base + s as usize];

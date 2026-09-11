@@ -263,7 +263,7 @@ pub fn skinny_gemm_partial<F: Float>(
     let tm = tid / SG_TN;
     let tn = tid % SG_TN;
 
-    let zero = F::new(0.0);
+    let zero = F::new(0.0_f32);
 
     let mut acc = Array::<F>::new((SG_RT_M * SG_RT_N) as usize);
     #[unroll]

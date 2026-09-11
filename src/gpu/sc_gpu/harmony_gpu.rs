@@ -479,7 +479,7 @@ pub fn row_l2_normalise_into<F: Float>(
     if UNIT_POS_X == 0u32 {
         let base = row as usize * dim;
 
-        let mut acc = F::new(0.0);
+        let mut acc = F::new(0.0_f32);
         for e in 0..dim {
             let v = src[base + e];
             acc += v * v;
@@ -492,7 +492,7 @@ pub fn row_l2_normalise_into<F: Float>(
             }
         } else {
             for e in 0..dim {
-                dst[base + e] = F::new(0.0);
+                dst[base + e] = F::new(0.0_f32);
             }
         }
     }
