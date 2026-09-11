@@ -703,6 +703,9 @@ struct EStepTotals {
     /// Expected ambient counts per gene. Empty when the ambient profile is
     /// frozen, since nothing reads it.
     a_numer: Vec<f64>,
+    /// Summed statistics of every empty droplet. Filled after the reduce, see
+    /// [e_step_empties].
+    empty: RowStats,
 }
 
 impl EStepTotals {
@@ -721,6 +724,7 @@ impl EStepTotals {
         Self {
             p_numer: vec![0.0; n_celltypes * n_genes],
             a_numer: vec![0.0; if update_ambient { n_genes } else { 0 }],
+            empty: RowStats::default(),
         }
     }
 
@@ -743,16 +747,18 @@ impl EStepTotals {
 
 /// Run one E-step over every barcode of a sample.
 ///
-/// Rows are independent, so the sweep fans out over row chunks sized to one
-/// chunk per thread. That bounds the `n_celltypes x n_genes` accumulator to one
-/// allocation per thread, the same footprint as the reference's preallocated
-/// thread-local block but without pinning it to a thread count.
+/// Real rows are independent, so the sweep fans out over row chunks sized to
+/// one chunk per thread. That bounds the `n_celltypes x n_genes` accumulator to
+/// one allocation per thread, the same footprint as the reference's
+/// preallocated thread-local block but without pinning it to a thread count.
+/// The empty droplets never enter the sweep, see [e_step_empties].
 ///
 /// ### Params
 ///
 /// * `csr` - The sample's counts.
 /// * `state` - Current model state.
-/// * `row_stats` - Per-barcode output, overwritten. Length `csr.n_rows()`.
+/// * `empty_counts` - Column sums of the empty droplets, length `n_genes`.
+/// * `row_stats` - Per-real-barcode output, overwritten. Length `csr.n_real`.
 /// * `gamma_idx_out` - Cell-type codes after reassignment, overwritten. Length
 ///   `csr.n_rows()`.
 /// * `params` - Numerical tolerances.
@@ -763,16 +769,18 @@ impl EStepTotals {
 fn e_step(
     csr: &SampleCsr,
     state: &EStepState<'_>,
+    empty_counts: &[f64],
     row_stats: &mut [RowStats],
     gamma_idx_out: &mut [usize],
     params: &CellSweepParams,
 ) -> EStepTotals {
     let n_genes = csr.n_genes;
     let n_celltypes = csr.n_celltypes;
-    let n_rows = csr.n_rows();
+    let n_real = csr.n_real;
+    debug_assert_eq!(row_stats.len(), n_real);
 
     let n_threads = rayon::current_num_threads();
-    let chunk_size = n_rows.div_ceil(n_threads.max(1)).max(1);
+    let chunk_size = n_real.div_ceil(n_threads.max(1)).max(1);
 
     gamma_idx_out.copy_from_slice(state.gamma_idx);
 
@@ -784,9 +792,9 @@ fn e_step(
         beta_bulk: &beta_bulk,
     };
 
-    row_stats
+    let mut totals = row_stats
         .par_chunks_mut(chunk_size)
-        .zip(gamma_idx_out.par_chunks_mut(chunk_size))
+        .zip(gamma_idx_out[..n_real].par_chunks_mut(chunk_size))
         .enumerate()
         .map(|(chunk_idx, (stats, gammas))| {
             let mut totals = EStepTotals::zeros(n_celltypes, n_genes, state.update_ambient);
@@ -802,20 +810,16 @@ fn e_step(
                     continue;
                 }
 
-                if csr.is_empty_droplet(n) {
-                    e_step_empty_row(indices, values, n, &ctx, &mut scratch, &mut totals, stat);
-                } else {
-                    e_step_cell_row(
-                        indices,
-                        values,
-                        n,
-                        &ctx,
-                        &mut scratch,
-                        &mut totals,
-                        stat,
-                        &mut gammas[local],
-                    );
-                }
+                e_step_cell_row(
+                    indices,
+                    values,
+                    n,
+                    &ctx,
+                    &mut scratch,
+                    &mut totals,
+                    stat,
+                    &mut gammas[local],
+                );
             }
 
             totals
@@ -826,66 +830,54 @@ fn e_step(
                 acc.merge(other);
                 acc
             },
-        )
+        );
+
+    totals.empty = e_step_empties(empty_counts, &ctx, &mut totals.a_numer);
+    totals
 }
 
-/// E-step for one empty droplet.
+/// E-step for every empty droplet at once.
 ///
-/// An empty droplet has no cell, so only the ambient and bulk components apply.
-/// Same shape as [e_step_cell_row], minus the cell component and the `p_numer`
-/// scatter.
+/// An empty droplet's `alpha` is pinned at 1, so its mixture
+/// `(1 - beta) * a[g] + beta * m[g]` depends on the gene alone and the
+/// responsibility split is linear in the count. Summed over the empties, only
+/// their column sums matter: one pass over the genes replaces one over every
+/// empty non-zero. Exact up to summation order.
 ///
 /// ### Params
 ///
-/// * `indices` - Gene indices of the barcode's non-zeros.
-/// * `values` - Counts of the barcode's non-zeros.
-/// * `n` - Row index, used to look up `alpha`.
+/// * `empty_counts` - Column sums of the empty droplets, length `n_genes`.
 /// * `ctx` - Model state and tolerances.
-/// * `scratch` - This thread's buffers.
-/// * `totals` - Accumulators to add into.
-/// * `stat` - Per-barcode output for this row.
-fn e_step_empty_row(
-    indices: &[u32],
-    values: &[f32],
-    n: usize,
-    ctx: &RowCtx<'_>,
-    scratch: &mut RowScratch,
-    totals: &mut EStepTotals,
-    stat: &mut RowStats,
-) {
+/// * `a_numer` - Ambient numerator to add into. Empty when the ambient profile
+///   is frozen, and then left alone.
+///
+/// ### Returns
+///
+/// The empties' summed [RowStats]. `gamma` stays zero.
+fn e_step_empties(empty_counts: &[f64], ctx: &RowCtx<'_>, a_numer: &mut [f64]) -> RowStats {
     let (state, params) = (ctx.state, ctx.params);
-    let w_ambient = (1.0 - state.beta) * state.alpha[n];
+    let w_ambient = 1.0 - state.beta;
+    let mut stat = RowStats::default();
+    let mut p_tot = vec![0.0_f64; empty_counts.len()];
 
-    for (idx, val) in indices.chunks(E_STEP_TILE).zip(values.chunks(E_STEP_TILE)) {
-        for (j, (&gene, &value)) in idx.iter().zip(val).enumerate() {
-            let g = gene as usize;
-            let value = value as f64;
+    for (g, (&count, p)) in empty_counts.iter().zip(p_tot.iter_mut()).enumerate() {
+        let wa = w_ambient * state.ambient[g] as f64;
+        let wm = ctx.beta_bulk[g];
+        let p_g = wa + wm;
+        *p = p_g;
 
-            let wa = w_ambient * state.ambient[g] as f64;
-            let wm = ctx.beta_bulk[g];
-            let p_tot = wa + wm;
-            let scale = value / p_tot.max(params.eps);
+        let scale = count / p_g.max(params.eps);
+        let c_ambient = scale * wa;
+        stat.ambient += c_ambient;
+        stat.bulk += scale * wm;
 
-            let c_ambient = scale * wa;
-
-            stat.ambient += c_ambient;
-            stat.bulk += scale * wm;
-
-            scratch.counts[j] = value;
-            scratch.p_tot[j] = p_tot;
-
-            if state.update_ambient {
-                totals.a_numer[g] += c_ambient;
-            }
+        if state.update_ambient {
+            a_numer[g] += c_ambient;
         }
-
-        let len = idx.len();
-        stat.log_likelihood += ln_dot_simd(
-            &scratch.counts[..len],
-            &scratch.p_tot[..len],
-            params.log_eps,
-        );
     }
+
+    stat.log_likelihood = ln_dot_simd(empty_counts, &p_tot, params.log_eps);
+    stat
 }
 
 /// E-step for one cell-containing barcode.
@@ -1302,8 +1294,9 @@ fn normalise_to_f32(v: &[f64]) -> Vec<f32> {
 ///
 /// * `csr` - The sample's counts.
 /// * `state` - Model state, updated in place.
-/// * `row_stats` - Per-barcode statistics from the E-step.
-/// * `totals` - Reduced sufficient statistics from the E-step.
+/// * `row_stats` - Per-real-barcode statistics from the E-step.
+/// * `totals` - Reduced sufficient statistics from the E-step, including the
+///   summed empties.
 /// * `stage_one` - Whether the stage one schedule is still active.
 /// * `params` - Model parameters.
 ///
@@ -1349,6 +1342,7 @@ fn m_step(
 
     let (bulk_total, ambient_total, gamma_total) = row_stats
         .iter()
+        .chain(std::iter::once(&totals.empty))
         .fold((0.0_f64, 0.0_f64, 0.0_f64), |(bulk, ambient, gamma), s| {
             (bulk + s.bulk, ambient + s.ambient, gamma + s.gamma)
         });
@@ -1571,12 +1565,20 @@ fn fit_em(
 ) -> Result<(CellSweepFit, Vec<f32>), BixverseErrors> {
     let (n_rows, n_genes) = (csr.n_rows(), csr.n_genes);
     let mut state = init_em(csr, params);
-    let mut row_stats = vec![RowStats::default(); n_rows];
+    let mut row_stats = vec![RowStats::default(); csr.n_real];
     let mut gamma_out = vec![0_usize; n_rows];
+    let empty_counts = column_sums(csr, csr.n_real..n_rows);
 
     if params.freeze_ambient_profile {
         let view = state.as_e_step_state(false);
-        e_step(csr, &view, &mut row_stats, &mut gamma_out, params);
+        e_step(
+            csr,
+            &view,
+            &empty_counts,
+            &mut row_stats,
+            &mut gamma_out,
+            params,
+        );
         for n in 0..csr.n_real {
             let stat = row_stats[n];
             let alpha_test = stat.ambient / (stat.ambient + stat.gamma).max(params.eps);
@@ -1598,9 +1600,18 @@ fn fit_em(
         let stage_one = !ll_converged && params.freeze_ambient_profile;
 
         let view = state.as_e_step_state(!params.freeze_ambient_profile);
-        let totals = e_step(csr, &view, &mut row_stats, &mut gamma_out, params);
+        let totals = e_step(
+            csr,
+            &view,
+            &empty_counts,
+            &mut row_stats,
+            &mut gamma_out,
+            params,
+        );
 
-        log_likelihood = row_stats.iter().map(|s| s.log_likelihood).sum::<f64>() / n_rows as f64;
+        log_likelihood = (row_stats.iter().map(|s| s.log_likelihood).sum::<f64>()
+            + totals.empty.log_likelihood)
+            / n_rows as f64;
         if !log_likelihood.is_finite() {
             return Err(BixverseErrors::CellSweepDiverged {
                 sample_id: sample_id.to_string(),
@@ -2629,6 +2640,62 @@ mod tests {
     }
 
     // -- output chunks --
+
+    #[test]
+    fn test_collapsed_empties_match_the_per_row_sums() {
+        let (real, empty, labels) = two_type_fixture(5, 12);
+        let csr = csr_from_dense(&real, &empty, &labels, 2);
+        let params = CellSweepParams {
+            freeze_ambient_profile: false,
+            ..Default::default()
+        };
+        let mut state = init_em(&csr, &params);
+        state.beta = 0.3;
+
+        let view = state.as_e_step_state(true);
+        let beta_bulk: Vec<f64> = state.bulk.iter().map(|&m| state.beta * m as f64).collect();
+        let ctx = RowCtx {
+            csr: &csr,
+            state: &view,
+            params: &params,
+            beta_bulk: &beta_bulk,
+        };
+
+        let empty_counts = column_sums(&csr, csr.n_real..csr.n_rows());
+        let mut a_numer = vec![0.0_f64; csr.n_genes];
+        let got = e_step_empties(&empty_counts, &ctx, &mut a_numer);
+
+        // the per-row loop the collapse replaced
+        let mut want = RowStats::default();
+        let mut want_a = vec![0.0_f64; csr.n_genes];
+        for n in csr.n_real..csr.n_rows() {
+            let (indices, values) = csr.row(n);
+            for (&gene, &value) in indices.iter().zip(values) {
+                let g = gene as usize;
+                let value = value as f64;
+                let wa = (1.0 - state.beta) * state.ambient[g] as f64;
+                let wm = beta_bulk[g];
+                let p = wa + wm;
+                let scale = value / p;
+                want.ambient += scale * wa;
+                want.bulk += scale * wm;
+                want.log_likelihood += value * p.ln();
+                want_a[g] += scale * wa;
+            }
+        }
+
+        approx::assert_relative_eq!(got.ambient, want.ambient, max_relative = 1e-10);
+        approx::assert_relative_eq!(got.bulk, want.bulk, max_relative = 1e-10);
+        approx::assert_relative_eq!(
+            got.log_likelihood,
+            want.log_likelihood,
+            max_relative = 1e-10
+        );
+        assert_eq!(got.gamma, 0.0);
+        for (a, b) in a_numer.iter().zip(&want_a) {
+            approx::assert_relative_eq!(*a, *b, max_relative = 1e-10);
+        }
+    }
 
     #[test]
     fn test_denoised_chunk_drops_the_clamped_zeros() {
