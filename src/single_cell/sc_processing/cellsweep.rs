@@ -1617,7 +1617,7 @@ fn fit_em(
         let prev_profiles = state.profiles.clone();
         let f = m_step(csr, &mut state, &row_stats, &totals, stage_one, params);
 
-        if verbosity.detailed_verbosity() {
+        if verbosity.detailed_verbosity() & iteration.is_multiple_of(100) {
             println!(
                 "  EM iter {iteration:4}: ll = {log_likelihood:.6}, beta = {:.6}, mean alpha = {:.6}",
                 state.beta,
