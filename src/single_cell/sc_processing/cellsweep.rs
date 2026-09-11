@@ -34,6 +34,7 @@ use ann_search_rs::utils::dist::SimdDistance;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use rayon::prelude::*;
 use std::time::Instant;
+use thousands::Separable;
 
 use crate::core::math::vector_helpers::quantile_sorted;
 use crate::prelude::*;
@@ -1963,8 +1964,8 @@ where
                 sample_idx + 1,
                 samples.len(),
                 sample.sample_id,
-                sample.real_cells.len(),
-                sample.empty_cells.len()
+                sample.real_cells.len().separate_with_underscores(),
+                sample.empty_cells.len().separate_with_underscores()
             );
             if params.freeze_ambient_profile
                 && sample.empty_cells.len() < RECOMMENDED_MIN_EMPTY_DROPLETS
