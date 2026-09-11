@@ -138,6 +138,20 @@ pub enum BixverseErrors {
     #[error("Error from the edge-rs crate: {0}")]
     EdgeRsError(#[from] edge_rs::errors::EdgeErrors),
 
+    /// More than one coefficient was handed to the limma route.
+    ///
+    /// `topTable` tabulates a single column. Testing several coefficients at
+    /// once is the moderated F question, which needs `top_table_f` rather than
+    /// this chain.
+    #[cfg(feature = "dge")]
+    #[error(
+        "limma tests a single coefficient or contrast at a time; {n_coef} coefficients were given"
+    )]
+    LimmaMultiCoef {
+        /// Number of coefficients the caller asked to test together
+        n_coef: usize,
+    },
+
     /// An input vector does not line up with the observations being modelled.
     ///
     /// Covers the design rows, the subject labels and the offsets, all of which
@@ -592,6 +606,25 @@ pub enum BixverseErrors {
     NeedAtLeastTwoBatches {
         /// Number of provided batches
         n_batches: usize,
+    },
+
+    // -- Integration metrics --
+    /// Need at least two distinct labels for this metric
+    #[cfg(feature = "single-cell")]
+    #[error("You need at least two distinct labels. Provided {n_labels} labels.")]
+    NeedAtLeastTwoLabels {
+        /// Number of distinct labels found
+        n_labels: usize,
+    },
+
+    /// The label vector does not line up with the number of cells
+    #[cfg(feature = "single-cell")]
+    #[error("Expected {n_cells} labels, one per cell; got {n_labels}.")]
+    MetricLabelLengthMismatch {
+        /// Number of cells in the embedding or kNN graph
+        n_cells: usize,
+        /// Length of the provided label vector
+        n_labels: usize,
     },
 
     /// A batch holds too few cells for the requested per-batch neighbour count
