@@ -35,12 +35,14 @@ use edge_rs::core::normalisation::{NormMethod, calc_norm_factors};
 use edge_rs::dispersion::estimate::estimate_disp;
 use edge_rs::glm::ql_fit::{QlFitParams, glm_ql_fit};
 use edge_rs::glm::test::{GlmTestInput, Tested, glm_ql_ftest};
-use edge_rs::limma::contrasts::contrasts_fit;
-use edge_rs::limma::ebayes::{EBayesParams, EBayesTrend, ebayes};
-use edge_rs::limma::lm_fit::{LmFitResult, lm_fit};
-use edge_rs::limma::marray::MArrayLm;
-use edge_rs::limma::toptable::{TopTableParams, TopTableSort, top_table};
-use edge_rs::limma::voom::{VoomParams, voom_lmfit};
+use edge_rs::limma::{
+    contrasts::contrasts_fit,
+    ebayes::{EBayesParams, EBayesTrend, ebayes},
+    lm_fit::{LmFitResult, lm_fit},
+    marray::MArrayLm,
+    toptable::{TopTableParams, TopTableSort, top_table},
+    voom::{VoomParams, voom_lmfit},
+};
 use edge_rs::numeric::stats::p_adjust_bh;
 use edge_rs::prelude::Recycled;
 
@@ -120,9 +122,9 @@ fn keep_mask(
     Ok(keep)
 }
 
-////////////
-// Params //
-////////////
+///////////////////
+// EdgeRQlParams //
+///////////////////
 
 /// Parameters for [run_edger_ql].
 #[derive(Clone, Copy, Debug)]
@@ -483,7 +485,6 @@ pub struct LimmaDgeRes {
 /// ### References
 ///
 /// Law, Chen, Shi and Smyth, Genome Biology 15:R29, 2014
-///
 /// Smyth, Statistical Applications in Genetics and Molecular Biology 3(1), 2004
 pub fn run_limma_dge(
     counts: &[f64],
