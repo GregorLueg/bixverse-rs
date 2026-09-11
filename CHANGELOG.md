@@ -1,5 +1,16 @@
 # News
 
+## 0.5.1
+
+### Features
+
+- Cosine distance added to `DistanceType`, i.e., `DistanceType::Correlation`.
+- Limma-Voom wired up from `edge-rs` with the batch correction ported over.
+- Additional metrics for batch analysis for single cell added: PC regression
+  (PCR), cell-type ASW, graph connectivity.
+- Updates to the constrained PageRank approach with fast paths for lots of
+  personalisation vectors over the same graph.
+
 ## 0.5.0
 
 
