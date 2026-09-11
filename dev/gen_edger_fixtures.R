@@ -1,4 +1,5 @@
-# Parity fixtures for src/methods/dge_bulk.rs.
+# Parity fixtures for src/methods/dge_bulk.rs: the edgeR quasi-likelihood
+# chain, limma-voom and limma-trend, all on the same counts and design.
 #
 # Regenerates the constants in tests/edger_fixtures/mod.rs. Run with
 #   Rscript dev/gen_edger_fixtures.R
@@ -78,3 +79,39 @@ cat("/// edgeR's `FDR`.\n")
 cat("pub const FDR: &[f64] = &[\n    ")
 cat(fmt(tt$FDR))
 cat(",\n];\n")
+
+# limma-voom and limma-trend on the same filtered, TMM-normalised DGEList and
+# the same design. voomLmFit's defaults (span 0.5, adaptive.span TRUE, prior
+# count 0.5) already match what the Rust side asks for, and normalize.method
+# stays at "none" because the library sizes carry the TMM factors already.
+vfit <- edgeR::voomLmFit(dge, mm, block = NULL, sample.weights = FALSE)
+veb <- limma::eBayes(vfit)
+vtt <- limma::topTable(veb, coef = 2, number = Inf, sort.by = "none")
+
+# limma-trend: log-CPM against the same effective library sizes, then lmFit and
+# a prior trended on the average log-expression.
+tfit <- limma::lmFit(edgeR::cpm(dge, log = TRUE, prior.count = 2), mm)
+teb <- limma::eBayes(tfit, trend = TRUE)
+ttt <- limma::topTable(teb, coef = 2, number = Inf, sort.by = "none")
+
+emit <- function(doc, name, x) {
+  cat(sprintf("/// %s\n", doc))
+  cat(sprintf("pub const %s: &[f64] = &[\n    ", name))
+  cat(fmt(x))
+  cat(",\n];\n\n")
+}
+
+cat("\n")
+emit("limma-voom `logFC` for the group coefficient.", "VOOM_LOG_FC", vtt$logFC)
+emit("limma-voom `AveExpr`.", "VOOM_AVE_EXPR", vtt$AveExpr)
+emit("limma-voom moderated `t`.", "VOOM_T", vtt$t)
+emit("limma-voom `P.Value`.", "VOOM_P", vtt$P.Value)
+emit("limma-voom `adj.P.Val`.", "VOOM_ADJ_P", vtt$adj.P.Val)
+emit("limma-voom `B`.", "VOOM_B", vtt$B)
+
+emit("limma-trend `logFC` for the group coefficient.", "TREND_LOG_FC", ttt$logFC)
+emit("limma-trend `AveExpr`.", "TREND_AVE_EXPR", ttt$AveExpr)
+emit("limma-trend moderated `t`.", "TREND_T", ttt$t)
+emit("limma-trend `P.Value`.", "TREND_P", ttt$P.Value)
+emit("limma-trend `adj.P.Val`.", "TREND_ADJ_P", ttt$adj.P.Val)
+emit("limma-trend `B`.", "TREND_B", ttt$B)

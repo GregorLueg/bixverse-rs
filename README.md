@@ -20,25 +20,26 @@ throughout: atlas-scale analysis on a laptop, not on a cluster.
 
 ## What's in it
 
-Roughly 110 named methods, plus the shared numerical scaffolding they sit on.
+Well over a hundred named methods, plus the shared numerical scaffolding they sit on.
 
 | Domain | Methods |
 | --- | --- |
-| `core` | Correlations and pairwise similarity, PCA/SVD, randomised SVD, LOESS, RBF kernels, linear mixed models (REML with Satterthwaite), E-distance and perturbation distances, sparse structures, synthetic data generators |
-| `enrichment` | GSEA (fgsea multi-level), GSVA, ssGSEA, singscore, mitch, over-representation |
-| `graph` | Louvain, WalkTrap, spectral clustering, label propagation, PageRank, connected components, Dijkstra, Kruskal spanning forests, PAGA-style graph abstraction, graph metrics |
-| `methods` | NMF (bulk, dense HALS, sparse HALS, consensus, refit), ICA, LDA via variational Bayes, sparse multiple CCA, differential correlation, graph diffusion, SNF, RBH, CoReMo, dgRDL, cis-target |
+| `core` | Correlations and pairwise similarity, PCA/SVD, randomised SVD, LOESS, RBF kernels, mutual information and entropy, scalar optimisation (R's `optimize`), linear mixed models (REML with Satterthwaite), E-distance and perturbation distances, sparse structures, synthetic data generators |
+| `enrichment` | GSEA (fgsea multi-level), blitzGSEA (gamma-approximated null), GSVA, ssGSEA, singscore, mitch, over-representation |
+| `graph` | Louvain, WalkTrap, spectral clustering, label propagation, personalised and constrained PageRank, connected components, Dijkstra (single and multi-source), Kruskal spanning forests, PAGA-style graph abstraction, graph metrics |
+| `methods` | NMF (bulk, dense HALS, sparse HALS, consensus, refit), ICA, LDA via variational Bayes, sparse multiple CCA, differential correlation, graph diffusion, SNF, RBH, CoReMo, dgRDL, cis-target; bulk DGE via edgeR's quasi-likelihood chain and limma-voom (feature `dge`) |
 | `ml` | k-means, clustering metrics, landmark Gaussian process regression, Matern kernels |
 | `ontology` | GO Elim, Wang and Resnik-style semantic similarity |
-| `single_cell` | I/O for h5ad, 10x h5, mtx and a versioned binary sparse format (single and multi-file, mmap-backed); QC, HVG, PCA, kNN, SNN, MAGIC; doublet detection (Scrublet, scDblFinder, cxds); batch correction (Harmony, BBKNN, fastMNN, Seurat CCA/rPCA anchors); annotation (scType, Symphony); analysis (SCENIC, AUCell, Hotspot, VISION, DIALOGUE, MELD, miloR, NicheNet, module scoring); meta cells (SEACells, MetaCells2, SuperCell, hdWGCNA); trajectories (Palantir, PAGA, diffusion maps, Markov chains, gene trends); multi-modal (WNN, DSB) |
-| `gpu` | Sparse randomised SVD, SpMM and sparse GEMM, skinny GEMM, Gram, CholeskyQR2, correlation, PCA, kNN, NMF and consensus NMF, Harmony, SCENIC, Scrublet, SEACells, fast clustering |
+| `single_cell` | I/O for h5ad, 10x h5, mtx, R/Seurat counts and a versioned binary sparse format (single and multi-file, mmap-backed, mergeable); QC, CellSweep ambient removal, HVG, PCA, kNN, SNN, MAGIC; doublet detection (Scrublet, scDblFinder, cxds); batch correction (Harmony v1 and v2, BBKNN, fastMNN, Seurat CCA/rPCA anchors); integration metrics (kBET, iLISI/cLISI, silhouette, PC regression); annotation (scType, Symphony); DGE (Mann-Whitney with AUROC, pseudobulk edgeR, NEBULA); analysis (SCENIC with regulon binarisation, AUCell, Hotspot, VISION, DIALOGUE, MELD, miloR, NicheNet, NMF, module scoring, fast k-means/Louvain clustering); meta cells (SEACells, MetaCells2, SuperCell, hdWGCNA, plus density and compactness metrics); trajectories (Palantir, PAGA, diffusion maps, Markov chains, gene trends); multi-modal (WNN, DSB) |
+| `gpu` | Sparse randomised SVD, SpMM and sparse GEMM, skinny GEMM, Gram, CholeskyQR2, correlation, PCA, kNN, NMF and consensus NMF, Harmony, BBKNN, SCENIC, Scrublet, SEACells, fast clustering |
 
 Heavy lifting goes through [`faer`](https://github.com/sarah-quinones/faer-rs) for
 dense linear algebra, `rayon` for CPU fan-out, `wide` for SIMD, and
 [`cubecl`](https://github.com/tracel-ai/cubecl) for GPU kernels. Vector search,
 distance metrics and k-means come from the sister crate
 [`ann-search-rs`](https://crates.io/crates/ann-search-rs); the GPU primitives
-layer from [`cubecl-utils-rs`](https://crates.io/crates/cubecl-utils-rs).
+layer from [`cubecl-utils-rs`](https://crates.io/crates/cubecl-utils-rs); the
+edgeR, limma and NEBULA numerics from [`edge-rs`](https://crates.io/crates/edge-rs).
 
 ## Feature flags
 
@@ -50,6 +51,8 @@ pays for what it uses.
 | *(default)* | Bulk statistics, enrichment, graph, ontology, matrix factorisation |
 | `single-cell` | The `single_cell` module, HDF5 and mmap I/O, the binary sparse format |
 | `multi-modal` | `single_cell::multi_modal` (WNN, ADT), implies `single-cell` |
+| `dge` | Negative binomial DGE via `edge-rs`: bulk edgeR and limma-voom. Implied by `single-cell`, usable on its own |
+| `hdf5-static` | Builds the bundled HDF5 from source instead of linking an external `libhdf5` |
 | `gpu` | The `gpu` module via `cubecl` (wgpu and CPU backends) and `cubek` |
 | `large-test` | Slow but asserting tests: GPU parity gates, large-scale numerical checks |
 | `large_scale_diagnostics` | Unasserted diagnostic sweeps that print tables for a human |
@@ -58,7 +61,7 @@ pays for what it uses.
 
 ```toml
 [dependencies]
-bixverse-rs = { version = "0.4", features = ["single-cell"] }
+bixverse-rs = { version = "0.5", features = ["single-cell"] }
 ```
 
 ```rust
@@ -75,11 +78,10 @@ crate through [extendr](https://extendr.github.io/), and does the things R is
 good at: argument checking, S7 classes, documentation, plotting handoff. The
 Rust side owns the maths.
 
-Each top-level module carries a `*_r_wrapper.rs` sibling holding the R-callable
-entry points. Those files deserialise R types into Rust-native inputs, call the
-pure implementation, then serialise the result back, which keeps R types out of
-the numerical surface entirely. Around 90 such entry points exist today, backing
-the ~685 functions the R package exports.
+Each top-level module carries a `*_r_wrapper.rs` sibling holding the R
+conversions: `from_r_list` deserialisers for the parameter structs and a handful
+of serialisers back to R lists. The `#[extendr]` entry points themselves live
+downstream in the R packages, so R types never touch the numerical surface.
 
 Two R packages consume the crate:
 
@@ -103,6 +105,12 @@ crate is equally usable from a pure Rust binary or behind a PyO3 layer.
 - [ ] Slingshot for single-cell trajectories, see
   [Street, et al.](https://link.springer.com/article/10.1186/s12864-018-4772-0).
 
+### Differential expression
+
+- [x] Bulk edgeR quasi-likelihood and limma-voom via `edge-rs`
+- [x] Pseudobulk and NEBULA for single cell
+- [ ] limma `treat`/`topTreat`, `decideTests`, and `block`/`correlation` in voom
+
 ### GPU accelerations
 
 - [x] GPU-accelerated sparse, randomised SVD
@@ -110,7 +118,7 @@ crate is equally usable from a pure Rust binary or behind a PyO3 layer.
 - [x] GPU-accelerated correlations (Metal does not have the absolute greatest
   performance here unfortunately...)
 - [x] SEACells with GPU acceleration.
-- [ ] GPU-accelerated BBKNN version
+- [x] GPU-accelerated BBKNN version
 
 ### Python interface
 

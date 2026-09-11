@@ -12,6 +12,7 @@ use rand_distr::{StandardNormal, Uniform};
 use rustc_hash::FxHashMap;
 
 use crate::prelude::*;
+use crate::single_cell::sc_processing::cellsweep::MIN_EMPTY_DROPLETS;
 
 ////////////////////////////////
 // Synthetic single cell data //
@@ -85,6 +86,102 @@ pub fn parse_sample_bias(s: &str) -> Option<SampleBias> {
 pub struct CellTypeConfig {
     /// Indices are the marker genes for this specific cell type
     pub marker_genes: Vec<usize>,
+}
+
+/////////////
+// Helpers //
+/////////////
+
+/// Helper function to sample from a Poisson distribution
+///
+/// Uses Knuth's algorithm for lambda < 30 and transformed rejection method for
+/// lambda >= 30.
+///
+/// ### Params
+///
+/// * `rng` - Random number generator
+/// * `lambda` - Rate parameter
+///
+/// ### Returns
+///
+/// A sample from Poisson(λ)
+fn poisson_sample<R: Rng>(rng: &mut R, lambda: f64) -> u32 {
+    if lambda < 30.0 {
+        let l = (-lambda).exp();
+        let mut k = 0;
+        let mut p = 1.0;
+        loop {
+            k += 1;
+            p *= rng.random::<f64>();
+            if p <= l {
+                return (k - 1) as u32;
+            }
+        }
+    } else {
+        let beta = std::f64::consts::PI / (3.0 * lambda).sqrt();
+        let alpha = beta * lambda;
+        let k = (2.83 + 5.1 / lambda).ln();
+
+        loop {
+            let u = rng.random::<f64>();
+            let x = (alpha - ((1.0 - u) / u).ln()) / beta;
+            let n = (x + 0.5).floor();
+            if n < 0.0 {
+                continue;
+            }
+
+            let v = rng.random::<f64>();
+            let y = alpha - beta * x;
+            let lhs = y + (v / (1.0 + y.exp()).powi(2)).ln();
+            let rhs = k + n * lambda.ln() - (1..=(n as u32)).map(|i| (i as f64).ln()).sum::<f64>();
+
+            if lhs <= rhs {
+                return n as u32;
+            }
+        }
+    }
+}
+
+/// Turns a probability vector into a cumulative one for sampling
+///
+/// The last entry is forced to exactly one, so a uniform draw always lands
+/// somewhere even after the accumulated rounding error.
+///
+/// ### Params
+///
+/// * `weights` - Probabilities, summing to one
+///
+/// ### Returns
+///
+/// The cumulative distribution
+fn to_cdf(weights: &[f64]) -> Vec<f64> {
+    let mut cum = 0.0;
+    let mut cdf: Vec<f64> = weights
+        .iter()
+        .map(|w| {
+            cum += w;
+            cum
+        })
+        .collect();
+    if let Some(last) = cdf.last_mut() {
+        *last = 1.0;
+    }
+    cdf
+}
+
+/// Draws one categorical index from a cumulative distribution
+///
+/// ### Params
+///
+/// * `rng` - Random number generator
+/// * `cdf` - Cumulative distribution, as built by [to_cdf]
+///
+/// ### Returns
+///
+/// The drawn index
+fn draw_from_cdf<R: Rng>(rng: &mut R, cdf: &[f64]) -> usize {
+    let u: f64 = rng.random();
+    cdf.partition_point(|&c| c < u).min(cdf.len() - 1)
 }
 
 ////////////////////
@@ -462,9 +559,13 @@ pub fn create_adt_synthetic_data(
     (counts, cell_type_labels, batch_labels)
 }
 
-///////////////////////////////
-// DIALOGUE synthetic data   //
-///////////////////////////////
+/////////////////////////////
+// DIALOGUE synthetic data //
+/////////////////////////////
+
+////////////
+// Consts //
+////////////
 
 /// Gaussian noise added on top of a sample-level feature component.
 const DIALOGUE_FEATURE_NOISE: f64 = 0.45;
@@ -779,6 +880,311 @@ pub fn create_dialogue_synthetic_data(
     })
 }
 
+//////////////////////////////
+// CellSweep synthetic data //
+//////////////////////////////
+
+////////////
+// Consts //
+////////////
+
+/// Gamma shape the per-gene base expression is drawn from. Below one the draw
+/// piles up near zero and the fixture ends up with dead genes.
+const CELLSWEEP_BASE_SHAPE: f64 = 1.5;
+
+/// Lower clamp on a planted ambient fraction, so no barcode is clean.
+const CELLSWEEP_ALPHA_MIN: f64 = 0.02;
+
+/// Upper clamp on a planted ambient fraction. Sits below the `alpha_cap` the
+/// model defaults to, so the truth is inside what the EM can reach.
+const CELLSWEEP_ALPHA_MAX: f64 = 0.85;
+
+/// Shape of a synthetic CellSweep experiment.
+///
+/// Real barcodes come first, empty droplets after, which is the order
+/// `run_cellsweep` wants its per-sample index lists in anyway. Cell types are
+/// assigned round-robin over the real barcodes.
+#[derive(Clone, Copy, Debug)]
+pub struct CellSweepSyntheticParams {
+    /// Number of real barcodes.
+    pub n_real: usize,
+    /// Number of empty droplets. The ambient profile is estimated off these,
+    /// so too few makes the fixture noisy rather than wrong.
+    pub n_empty: usize,
+    /// Number of genes.
+    pub n_genes: usize,
+    /// Number of cell types.
+    pub n_celltypes: usize,
+    /// Width of each cell type's marker block. Blocks are disjoint and laid
+    /// out from gene zero.
+    pub n_markers: usize,
+    /// How much a marker gene is enriched over background in its own cell
+    /// type's profile.
+    pub marker_weight: f64,
+    /// Fraction of the soup coming from cell type zero, the population that
+    /// lyses. The remainder is a background of its own, which is what keeps
+    /// the ambient profile out of the span of the cell type profiles and the
+    /// contamination fraction identifiable.
+    pub ambient_dominance: f64,
+    /// Mean planted ambient fraction across real barcodes.
+    pub alpha_mean: f64,
+    /// Spread of the planted ambient fraction.
+    pub alpha_sd: f64,
+    /// Expected library size of a real barcode.
+    pub real_lib_size: usize,
+    /// Expected library size of an empty droplet.
+    pub empty_lib_size: usize,
+}
+
+impl Default for CellSweepSyntheticParams {
+    fn default() -> Self {
+        Self {
+            n_real: 600,
+            n_empty: 2000,
+            n_genes: 200,
+            n_celltypes: 3,
+            n_markers: 20,
+            marker_weight: 25.0,
+            ambient_dominance: 0.6,
+            alpha_mean: 0.3,
+            alpha_sd: 0.12,
+            real_lib_size: 3000,
+            empty_lib_size: 120,
+        }
+    }
+}
+
+impl CellSweepSyntheticParams {
+    /// Checks the shape is buildable.
+    ///
+    /// ### Returns
+    ///
+    /// `Ok(())`, or [BixverseErrors::InvalidArgument] describing the first
+    /// problem found.
+    pub fn validate(&self) -> Result<(), BixverseErrors> {
+        if self.n_real == 0 {
+            return Err(BixverseErrors::InvalidArgument(
+                "n_real must be positive.".to_string(),
+            ));
+        }
+        if self.n_empty < MIN_EMPTY_DROPLETS {
+            return Err(BixverseErrors::InvalidArgument(format!(
+                "CellSweep needs at least {} empty droplets; got {}.",
+                MIN_EMPTY_DROPLETS, self.n_empty
+            )));
+        }
+        if self.n_celltypes == 0 {
+            return Err(BixverseErrors::InvalidArgument(
+                "n_celltypes must be positive.".to_string(),
+            ));
+        }
+        if self.n_markers == 0 || self.n_markers * self.n_celltypes > self.n_genes {
+            return Err(BixverseErrors::InvalidArgument(format!(
+                "the marker blocks need {} genes but only {} exist.",
+                self.n_markers * self.n_celltypes,
+                self.n_genes
+            )));
+        }
+        if self.marker_weight <= 1.0 {
+            return Err(BixverseErrors::InvalidArgument(format!(
+                "marker_weight must exceed 1; got {}.",
+                self.marker_weight
+            )));
+        }
+        if !(0.0..=1.0).contains(&self.ambient_dominance) {
+            return Err(BixverseErrors::InvalidArgument(format!(
+                "ambient_dominance must lie in [0, 1]; got {}.",
+                self.ambient_dominance
+            )));
+        }
+        if !(CELLSWEEP_ALPHA_MIN..=CELLSWEEP_ALPHA_MAX).contains(&self.alpha_mean) {
+            return Err(BixverseErrors::InvalidArgument(format!(
+                "alpha_mean must lie in [{}, {}]; got {}.",
+                CELLSWEEP_ALPHA_MIN, CELLSWEEP_ALPHA_MAX, self.alpha_mean
+            )));
+        }
+        if self.alpha_sd < 0.0 {
+            return Err(BixverseErrors::InvalidArgument(format!(
+                "alpha_sd must not be negative; got {}.",
+                self.alpha_sd
+            )));
+        }
+        if self.real_lib_size == 0 || self.empty_lib_size == 0 {
+            return Err(BixverseErrors::InvalidArgument(
+                "real_lib_size and empty_lib_size must both be positive.".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// A synthetic CellSweep experiment, plus the ground truth to check against.
+#[derive(Clone, Debug)]
+pub struct CellSweepSyntheticData {
+    /// Counts, CSR with shape (cells, genes). Real barcodes first, then the
+    /// empty droplets.
+    pub matrix: CompressedSparseData2<u32>,
+    /// Cell type per real barcode. Empty droplets have none.
+    pub cell_type_indices: Vec<usize>,
+    /// Empty droplet mask over all barcodes.
+    pub is_empty: Vec<bool>,
+    /// Planted ambient fraction per real barcode.
+    pub alpha_true: Vec<f64>,
+    /// The soup the empty droplets were drawn from. Sums to one.
+    pub ambient_true: Vec<f64>,
+    /// Cell type profiles, row-major `n_celltypes x n_genes`. Each row sums to
+    /// one.
+    pub celltype_profiles_true: Vec<f64>,
+}
+
+/// Builds a synthetic experiment with a planted ambient profile.
+///
+/// Every real barcode is a two-component multinomial: a planted fraction
+/// `alpha_i` of its library is drawn from the soup, the rest from its own cell
+/// type profile. Empty droplets are pure soup at a much smaller library size,
+/// which is the signal the ambient profile is estimated off.
+///
+/// The soup is cell type zero plus a background of its own rather than a
+/// mixture of every profile. A soup that sits in the span of the cell type
+/// profiles makes the contamination fraction unidentifiable, and the fixture
+/// would then be testing the repulsion term rather than the model.
+///
+/// ### Params
+///
+/// * `params` - See [CellSweepSyntheticParams]
+/// * `seed` - Seed for reproducibility
+///
+/// ### Returns
+///
+/// The [CellSweepSyntheticData], or the first shape problem found.
+pub fn create_cellsweep_synthetic_data(
+    params: &CellSweepSyntheticParams,
+    seed: u64,
+) -> Result<CellSweepSyntheticData, BixverseErrors> {
+    params.validate()?;
+
+    let CellSweepSyntheticParams {
+        n_real,
+        n_empty,
+        n_genes,
+        n_celltypes,
+        n_markers,
+        marker_weight,
+        ambient_dominance,
+        alpha_mean,
+        alpha_sd,
+        real_lib_size,
+        empty_lib_size,
+    } = *params;
+
+    let mut rng = StdRng::seed_from_u64(seed);
+
+    // Every gene gets a base expression level, shared across cell types, so
+    // the profiles differ from each other only in their marker blocks. A flat
+    // base would leave the soup a two-valued step function and nothing
+    // downstream could be ranked against it.
+    let base: Vec<f64> = (0..n_genes)
+        .map(|_| gamma_sample(&mut rng, CELLSWEEP_BASE_SHAPE, 1.0))
+        .collect();
+
+    let mut profiles = vec![0.0_f64; n_celltypes * n_genes];
+    for t in 0..n_celltypes {
+        let row = &mut profiles[t * n_genes..(t + 1) * n_genes];
+        for (gene, weight) in row.iter_mut().enumerate() {
+            *weight = if gene >= t * n_markers && gene < (t + 1) * n_markers {
+                marker_weight * base[gene]
+            } else {
+                base[gene]
+            };
+        }
+        let total: f64 = row.iter().sum();
+        row.iter_mut().for_each(|w| *w /= total);
+    }
+
+    // Soup: the lysing population plus a background drawn independently of the
+    // cell type profiles.
+    let mut background: Vec<f64> = (0..n_genes)
+        .map(|_| gamma_sample(&mut rng, CELLSWEEP_BASE_SHAPE, 1.0))
+        .collect();
+    let total: f64 = background.iter().sum();
+    background.iter_mut().for_each(|w| *w /= total);
+
+    let ambient: Vec<f64> = (0..n_genes)
+        .map(|gene| {
+            ambient_dominance * profiles[gene] + (1.0 - ambient_dominance) * background[gene]
+        })
+        .collect();
+
+    let ambient_cdf = to_cdf(&ambient);
+    let profile_cdfs: Vec<Vec<f64>> = (0..n_celltypes)
+        .map(|t| to_cdf(&profiles[t * n_genes..(t + 1) * n_genes]))
+        .collect();
+
+    let n_cells = n_real + n_empty;
+    let mut indptr: Vec<usize> = Vec::with_capacity(n_cells + 1);
+    let mut indices: Vec<usize> = Vec::with_capacity(n_cells * 64);
+    let mut data: Vec<u32> = Vec::with_capacity(n_cells * 64);
+    indptr.push(0);
+
+    let mut cell_type_indices = Vec::with_capacity(n_real);
+    let mut alpha_true = Vec::with_capacity(n_real);
+    let mut is_empty = vec![false; n_cells];
+    let mut counts = vec![0_u32; n_genes];
+
+    for cell in 0..n_cells {
+        counts.iter_mut().for_each(|c| *c = 0);
+
+        if cell < n_real {
+            let cell_type = cell % n_celltypes;
+            let alpha = (alpha_mean + alpha_sd * standard_normal(&mut rng))
+                .clamp(CELLSWEEP_ALPHA_MIN, CELLSWEEP_ALPHA_MAX);
+            let lib = poisson_sample(&mut rng, real_lib_size as f64);
+            for _ in 0..lib {
+                let cdf = if rng.random::<f64>() < alpha {
+                    &ambient_cdf
+                } else {
+                    &profile_cdfs[cell_type]
+                };
+                counts[draw_from_cdf(&mut rng, cdf)] += 1;
+            }
+            cell_type_indices.push(cell_type);
+            alpha_true.push(alpha);
+        } else {
+            is_empty[cell] = true;
+            let lib = poisson_sample(&mut rng, empty_lib_size as f64);
+            for _ in 0..lib {
+                counts[draw_from_cdf(&mut rng, &ambient_cdf)] += 1;
+            }
+        }
+
+        for (gene, &count) in counts.iter().enumerate() {
+            if count > 0 {
+                indices.push(gene);
+                data.push(count);
+            }
+        }
+        indptr.push(indices.len());
+    }
+
+    let matrix = CompressedSparseData2 {
+        data,
+        indices: indices.index_cast(),
+        indptr: indptr.index_cast(),
+        cs_type: CompressedSparseFormat::Csr,
+        data_2: None::<Vec<u32>>,
+        shape: (n_cells, n_genes),
+    };
+
+    Ok(CellSweepSyntheticData {
+        matrix,
+        cell_type_indices,
+        is_empty,
+        alpha_true,
+        ambient_true: ambient,
+        celltype_profiles_true: profiles,
+    })
+}
+
 /////////////
 // Helpers //
 /////////////
@@ -835,52 +1241,140 @@ fn gamma_sample<R: Rng>(rng: &mut R, shape: f64, scale: f64) -> f64 {
     }
 }
 
-/// Helper function to sample from a Poisson distribution
-///
-/// Uses Knuth's algorithm for lambda < 30 and transformed rejection method for
-/// lambda >= 30.
-///
-/// ### Params
-///
-/// * `rng` - Random number generator
-/// * `lambda` - Rate parameter
-///
-/// ### Returns
-///
-/// A sample from Poisson(λ)
-fn poisson_sample<R: Rng>(rng: &mut R, lambda: f64) -> u32 {
-    if lambda < 30.0 {
-        let l = (-lambda).exp();
-        let mut k = 0;
-        let mut p = 1.0;
-        loop {
-            k += 1;
-            p *= rng.random::<f64>();
-            if p <= l {
-                return (k - 1) as u32;
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod cellsweep_synthetic_tests {
+    use super::*;
+
+    /// Pooled counts per gene over the rows in `rows`.
+    fn pooled(data: &CellSweepSyntheticData, rows: &[usize]) -> Vec<f64> {
+        let n_genes = data.matrix.shape.1;
+        let mut out = vec![0.0; n_genes];
+        for &row in rows {
+            let start = data.matrix.indptr[row] as usize;
+            let end = data.matrix.indptr[row + 1] as usize;
+            for k in start..end {
+                out[data.matrix.indices[k] as usize] += data.matrix.data[k] as f64;
             }
         }
-    } else {
-        let beta = std::f64::consts::PI / (3.0 * lambda).sqrt();
-        let alpha = beta * lambda;
-        let k = (2.83 + 5.1 / lambda).ln();
+        out
+    }
 
-        loop {
-            let u = rng.random::<f64>();
-            let x = (alpha - ((1.0 - u) / u).ln()) / beta;
-            let n = (x + 0.5).floor();
-            if n < 0.0 {
-                continue;
-            }
+    fn pearson(a: &[f64], b: &[f64]) -> f64 {
+        let n = a.len() as f64;
+        let ma = a.iter().sum::<f64>() / n;
+        let mb = b.iter().sum::<f64>() / n;
+        let cov: f64 = a.iter().zip(b).map(|(x, y)| (x - ma) * (y - mb)).sum();
+        let va: f64 = a.iter().map(|x| (x - ma).powi(2)).sum::<f64>().sqrt();
+        let vb: f64 = b.iter().map(|y| (y - mb).powi(2)).sum::<f64>().sqrt();
+        cov / (va * vb)
+    }
 
-            let v = rng.random::<f64>();
-            let y = alpha - beta * x;
-            let lhs = y + (v / (1.0 + y.exp()).powi(2)).ln();
-            let rhs = k + n * lambda.ln() - (1..=(n as u32)).map(|i| (i as f64).ln()).sum::<f64>();
+    #[test]
+    fn test_synthetic_shape_and_empty_layout() {
+        let params = CellSweepSyntheticParams::default();
+        let data = create_cellsweep_synthetic_data(&params, 42).unwrap();
 
-            if lhs <= rhs {
-                return n as u32;
-            }
+        assert_eq!(
+            data.matrix.shape,
+            (params.n_real + params.n_empty, params.n_genes)
+        );
+        assert_eq!(data.matrix.indptr.len(), params.n_real + params.n_empty + 1);
+        assert_eq!(data.cell_type_indices.len(), params.n_real);
+        assert_eq!(data.alpha_true.len(), params.n_real);
+        assert_eq!(data.ambient_true.len(), params.n_genes);
+        assert_eq!(
+            data.celltype_profiles_true.len(),
+            params.n_celltypes * params.n_genes
+        );
+        assert!(data.is_empty[..params.n_real].iter().all(|e| !e));
+        assert!(data.is_empty[params.n_real..].iter().all(|e| *e));
+    }
+
+    #[test]
+    fn test_synthetic_is_deterministic() {
+        let params = CellSweepSyntheticParams::default();
+        let a = create_cellsweep_synthetic_data(&params, 7).unwrap();
+        let b = create_cellsweep_synthetic_data(&params, 7).unwrap();
+        let c = create_cellsweep_synthetic_data(&params, 8).unwrap();
+
+        assert_eq!(a.matrix.data, b.matrix.data);
+        assert_eq!(a.matrix.indices, b.matrix.indices);
+        assert_eq!(a.alpha_true, b.alpha_true);
+        assert_ne!(a.matrix.data, c.matrix.data);
+    }
+
+    #[test]
+    fn test_profiles_and_ambient_are_distributions() {
+        let params = CellSweepSyntheticParams::default();
+        let data = create_cellsweep_synthetic_data(&params, 42).unwrap();
+
+        assert!((data.ambient_true.iter().sum::<f64>() - 1.0).abs() < 1e-9);
+        for t in 0..params.n_celltypes {
+            let row = &data.celltype_profiles_true[t * params.n_genes..(t + 1) * params.n_genes];
+            assert!((row.iter().sum::<f64>() - 1.0).abs() < 1e-9);
         }
+        assert!(data.alpha_true.iter().all(|a| *a > 0.0 && *a < 1.0));
+    }
+
+    #[test]
+    fn test_empty_droplets_reproduce_the_soup() {
+        let params = CellSweepSyntheticParams::default();
+        let data = create_cellsweep_synthetic_data(&params, 42).unwrap();
+
+        let empties: Vec<usize> = (params.n_real..params.n_real + params.n_empty).collect();
+        let observed = pooled(&data, &empties);
+
+        assert!(pearson(&observed, &data.ambient_true) > 0.99);
+    }
+
+    #[test]
+    fn test_contamination_scales_with_alpha() {
+        let base = CellSweepSyntheticParams::default();
+        let heavy = CellSweepSyntheticParams {
+            alpha_mean: 0.7,
+            ..base
+        };
+
+        // Cell type one barcodes: they own markers n_markers..2*n_markers, so
+        // anything they carry in cell type zero's block came from the soup.
+        let soup_block = 0..base.n_markers;
+        let leak = |params: &CellSweepSyntheticParams| {
+            let data = create_cellsweep_synthetic_data(params, 42).unwrap();
+            let rows: Vec<usize> = (0..params.n_real)
+                .filter(|c| c % params.n_celltypes == 1)
+                .collect();
+            let counts = pooled(&data, &rows);
+            let total: f64 = counts.iter().sum();
+            counts[soup_block.clone()].iter().sum::<f64>() / total
+        };
+
+        assert!(leak(&heavy) > 2.0 * leak(&base));
+    }
+
+    #[test]
+    fn test_validate_rejects_bad_shapes() {
+        let too_few_empties = CellSweepSyntheticParams {
+            n_empty: MIN_EMPTY_DROPLETS - 1,
+            ..Default::default()
+        };
+        assert!(create_cellsweep_synthetic_data(&too_few_empties, 42).is_err());
+
+        let markers_do_not_fit = CellSweepSyntheticParams {
+            n_markers: 100,
+            n_celltypes: 3,
+            n_genes: 200,
+            ..Default::default()
+        };
+        assert!(create_cellsweep_synthetic_data(&markers_do_not_fit, 42).is_err());
+
+        let no_marker_signal = CellSweepSyntheticParams {
+            marker_weight: 1.0,
+            ..Default::default()
+        };
+        assert!(create_cellsweep_synthetic_data(&no_marker_signal, 42).is_err());
     }
 }

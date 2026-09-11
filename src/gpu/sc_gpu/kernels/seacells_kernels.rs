@@ -433,7 +433,7 @@ pub fn fw_argmin_b<F: Float>(
     // per thread without a search. See [accumulate_segmented_row()].
     let base = tx * comptime!(slots as u32);
 
-    let mut gap = F::new(0.0);
+    let mut gap = F::new(0.0_f32);
 
     // Grid-stride over the cells this block owns.
     let mut row = block;
@@ -442,7 +442,7 @@ pub fn fw_argmin_b<F: Float>(
 
         #[unroll]
         for s in 0..slots {
-            acc[s] = F::new(0.0);
+            acc[s] = F::new(0.0_f32);
         }
 
         // acc[c] = sum_m K²B[row, m] * t1[m, c]
@@ -748,8 +748,8 @@ pub fn fw_columns_a_gpu<F: Float>(
 
         #[unroll]
         for s in 0..slots {
-            k2b[s] = F::new(0.0);
-            w[s] = F::new(0.0);
+            k2b[s] = F::new(0.0_f32);
+            w[s] = F::new(0.0_f32);
         }
 
         // Stage this cell's K²B row into the owned block.
@@ -760,7 +760,7 @@ pub fn fw_columns_a_gpu<F: Float>(
             k2b_indptr[cell_us],
             k2b_indptr[cell_us + 1],
             base,
-            F::new(1.0),
+            F::new(1.0_f32),
             slots,
         );
 
@@ -772,7 +772,7 @@ pub fn fw_columns_a_gpu<F: Float>(
         // Guarded because the atom arrays are `cap_pad` wide, not `wg_size`.
         if tx < cap {
             s_atom_idx[tx as usize] = u32::MAX.runtime();
-            s_atom_val[tx as usize] = F::new(0.0);
+            s_atom_val[tx as usize] = F::new(0.0_f32);
         }
         if tx < seed_len {
             s_atom_idx[tx as usize] = ap_indices[(seed_start + tx) as usize];
@@ -884,8 +884,8 @@ pub fn fw_columns_a_gpu<F: Float>(
                 amin = s_idx[0];
             }
 
-            let gamma = F::new(2.0) / (F::cast_from(t) + F::new(2.0));
-            let retain = F::new(1.0) - gamma;
+            let gamma = F::new(2.0_f32) / (F::cast_from(t) + F::new(2.0_f32));
+            let retain = F::new(1.0_f32) - gamma;
 
             // Scale every atom, then add γ at `amin`, matching FwAtoms::step.
             let count = s_count[0];
@@ -941,7 +941,7 @@ pub fn fw_columns_a_gpu<F: Float>(
                 // Only `[0, cap)` is cleared, which covers every slot the scan
                 // below reads since `live <= cap`.
                 if tx < cap {
-                    s_dropped[tx as usize] = F::new(0.0);
+                    s_dropped[tx as usize] = F::new(0.0_f32);
                 }
                 sync_cube();
 
@@ -959,9 +959,9 @@ pub fn fw_columns_a_gpu<F: Float>(
                     // iteration and pin `s_any_drop` high for the whole column.
                     // Re-dropping an already-zero slot is a no-op anyway, since
                     // its correction term is `-0 · K²[:, j]`.
-                    if !above && weight != F::new(0.0) {
+                    if !above && weight != F::new(0.0_f32) {
                         s_dropped[tx as usize] = weight;
-                        s_atom_val[tx as usize] = F::new(0.0);
+                        s_atom_val[tx as usize] = F::new(0.0_f32);
                         s_any_drop[0] = 1u32;
                     }
                 }
@@ -974,7 +974,7 @@ pub fn fw_columns_a_gpu<F: Float>(
                     let mut a = 0u32;
                     while a < live {
                         let weight = s_dropped[a as usize];
-                        if weight != F::new(0.0) {
+                        if weight != F::new(0.0_f32) {
                             let row = s_atom_idx[a as usize];
                             accumulate_segmented_row::<F>(
                                 &mut w,
@@ -984,7 +984,7 @@ pub fn fw_columns_a_gpu<F: Float>(
                                 row * comptime!(wg_size + 1),
                                 tx,
                                 base,
-                                F::new(0.0) - weight,
+                                F::new(0.0_f32) - weight,
                                 slots,
                             );
                         }
@@ -993,11 +993,11 @@ pub fn fw_columns_a_gpu<F: Float>(
                 }
 
                 // Renormalise the survivors back to a convex combination.
-                let mut mass = F::new(0.0);
+                let mut mass = F::new(0.0_f32);
                 if tx < live {
                     mass = s_atom_val[tx as usize];
                 }
-                let mut total = F::new(0.0);
+                let mut total = F::new(0.0_f32);
                 if use_plane {
                     let plane_mass = plane_sum(mass);
                     let plane_id = tx / PLANE_DIM;
@@ -1010,7 +1010,7 @@ pub fn fw_columns_a_gpu<F: Float>(
                     // above. Summing in a different order than the CPU is fine:
                     // this feeds a renormalisation factor, not a comparison.
                     let n_planes = CUBE_DIM_X / PLANE_DIM;
-                    let mut lvl2 = F::new(0.0);
+                    let mut lvl2 = F::new(0.0_f32);
                     if tx < n_planes {
                         lvl2 = s_val[tx as usize];
                     }
@@ -1035,9 +1035,9 @@ pub fn fw_columns_a_gpu<F: Float>(
                     }
                     total = s_val[0];
                 }
-                let mut renorm = F::new(1.0);
+                let mut renorm = F::new(1.0_f32);
                 if total > F::new(A_RENORM_FLOOR) {
-                    renorm = F::new(1.0) / total;
+                    renorm = F::new(1.0_f32) / total;
                 }
                 if tx < live {
                     s_atom_val[tx as usize] *= renorm;

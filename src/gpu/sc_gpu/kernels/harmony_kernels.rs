@@ -61,11 +61,12 @@ fn cosine_distances<F: Float>(
     let mut cluster = UNIT_POS_X;
     while cluster < k {
         let y_base = cluster as usize * dim;
-        let mut dot = F::new(0.0);
+        let mut dot = F::new(0.0_f32);
         for e in 0..dim {
             dot += data_cos[z_base + e] * centroids[y_base + e];
         }
-        dist[cell as usize * k as usize + cluster as usize] = F::new(2.0) * (F::new(1.0) - dot);
+        dist[cell as usize * k as usize + cluster as usize] =
+            F::new(2.0_f32) * (F::new(1.0_f32) - dot);
         cluster += wg_size;
     }
 }
@@ -95,7 +96,7 @@ fn row_l2_normalise<F: Float>(data: &mut Tensor<F>, n_rows: u32, #[comptime] dim
     if UNIT_POS_X == 0u32 {
         let base = row as usize * dim;
 
-        let mut acc = F::new(0.0);
+        let mut acc = F::new(0.0_f32);
         for e in 0..dim {
             let v = data[base + e];
             acc += v * v;
@@ -108,7 +109,7 @@ fn row_l2_normalise<F: Float>(data: &mut Tensor<F>, n_rows: u32, #[comptime] dim
             }
         } else {
             for e in 0..dim {
-                data[base + e] = F::new(0.0);
+                data[base + e] = F::new(0.0_f32);
             }
         }
     }
@@ -155,10 +156,10 @@ fn scale_exp_normalise<F: Float>(
     let base = cell as usize * k as usize;
 
     // pass 1: partial sum of exp(-dist / sigma) over this thread's clusters
-    let mut acc = F::new(0.0);
+    let mut acc = F::new(0.0_f32);
     let mut kk = tx;
     while kk < k {
-        let arg = (F::new(0.0) - dist[base + kk as usize]) / sigma[kk as usize];
+        let arg = (F::new(0.0_f32) - dist[base + kk as usize]) / sigma[kk as usize];
         acc += F::exp(arg);
         kk += wg_size;
     }
@@ -207,16 +208,16 @@ fn scale_exp_normalise<F: Float>(
 
     // pass 2: recompute exp and normalise, or write zeros if all underflowed
     let mut kk2 = tx;
-    if total > F::new(0.0) {
+    if total > F::new(0.0_f32) {
         while kk2 < k {
             let idx = base + kk2 as usize;
-            let arg = (F::new(0.0) - dist[idx]) / sigma[kk2 as usize];
+            let arg = (F::new(0.0_f32) - dist[idx]) / sigma[kk2 as usize];
             out[idx] = F::exp(arg) / total;
             kk2 += wg_size;
         }
     } else {
         while kk2 < k {
-            out[base + kk2 as usize] = F::new(0.0);
+            out[base + kk2 as usize] = F::new(0.0_f32);
             kk2 += wg_size;
         }
     }
@@ -276,7 +277,7 @@ fn segmented_sum<F: Float>(
 
     let mut e = tx;
     while e < k {
-        let mut acc = F::new(0.0);
+        let mut acc = F::new(0.0_f32);
         let mut p = 0u32;
         while p < count {
             let global = all_indices[(seg_start + p) as usize];
@@ -341,7 +342,7 @@ fn objective_partials<F: Float>(
     let wid = CUBE_POS_X;
     let stride = CUBE_COUNT_X * wg_size;
 
-    let mut acc = F::new(0.0);
+    let mut acc = F::new(0.0_f32);
     let mut cell = wid * wg_size + tx;
     while cell < n {
         let level = cell_to_level[cell as usize] as usize;
@@ -353,12 +354,14 @@ fn objective_partials<F: Float>(
         for cl in 0..k {
             let r_val = r[r_base + cl];
             acc += r_val * dist[r_base + cl];
-            if r_val > F::new(0.0) {
+            if r_val > F::new(0.0_f32) {
                 acc += r_val * F::ln(r_val) * sigma[cl];
             }
             let e_val = r_sum[cl] * pr;
-            let ln_ratio =
-                F::ln((o[o_base + cl] + e_val + F::new(1.0)) / (F::new(2.0) * e_val + F::new(1.0)));
+            let ln_ratio = F::ln(
+                (o[o_base + cl] + e_val + F::new(1.0_f32))
+                    / (F::new(2.0_f32) * e_val + F::new(1.0_f32)),
+            );
             acc += r_val * sigma[cl] * theta_l * ln_ratio;
         }
 
@@ -466,12 +469,12 @@ fn jacobi_r_update<F: Float>(
     let o_base = level * k as usize;
 
     // pass 1: partial sum of base * penalty over this thread's clusters
-    let mut acc = F::new(0.0);
+    let mut acc = F::new(0.0_f32);
     let mut kk = tx;
     while kk < k {
         let e_val = r_sum[kk as usize] * pr;
-        let ratio =
-            (F::new(2.0) * e_val + F::new(1.0)) / (o[o_base + kk as usize] + e_val + F::new(1.0));
+        let ratio = (F::new(2.0_f32) * e_val + F::new(1.0_f32))
+            / (o[o_base + kk as usize] + e_val + F::new(1.0_f32));
         let penalty = F::powf(ratio, theta_l);
         acc += scale_dist[cell_base + kk as usize] * penalty;
         kk += wg_size;
@@ -521,11 +524,11 @@ fn jacobi_r_update<F: Float>(
 
     // pass 2: recompute and normalise, or write zeros if the column collapsed
     let mut kk2 = tx;
-    if total > F::new(0.0) {
+    if total > F::new(0.0_f32) {
         while kk2 < k {
             let e_val = r_sum[kk2 as usize] * pr;
-            let ratio = (F::new(2.0) * e_val + F::new(1.0))
-                / (o[o_base + kk2 as usize] + e_val + F::new(1.0));
+            let ratio = (F::new(2.0_f32) * e_val + F::new(1.0_f32))
+                / (o[o_base + kk2 as usize] + e_val + F::new(1.0_f32));
             let penalty = F::powf(ratio, theta_l);
             let val = scale_dist[cell_base + kk2 as usize] * penalty;
             r_out[cell_base + kk2 as usize] = val / total;
@@ -533,7 +536,7 @@ fn jacobi_r_update<F: Float>(
         }
     } else {
         while kk2 < k {
-            r_out[cell_base + kk2 as usize] = F::new(0.0);
+            r_out[cell_base + kk2 as usize] = F::new(0.0_f32);
             kk2 += wg_size;
         }
     }
@@ -592,7 +595,7 @@ fn weighted_segmented_sum<F: Float>(
     let mut feat = UNIT_POS_X as usize;
     let wg = WORKGROUP_128 as usize;
     while feat < d {
-        let mut acc = F::new(0.0);
+        let mut acc = F::new(0.0_f32);
         let mut p = 0u32;
         while p < count {
             let cell = all_indices[(seg_start + p) as usize] as usize;

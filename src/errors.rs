@@ -138,6 +138,20 @@ pub enum BixverseErrors {
     #[error("Error from the edge-rs crate: {0}")]
     EdgeRsError(#[from] edge_rs::errors::EdgeErrors),
 
+    /// More than one coefficient was handed to the limma route.
+    ///
+    /// `topTable` tabulates a single column. Testing several coefficients at
+    /// once is the moderated F question, which needs `top_table_f` rather than
+    /// this chain.
+    #[cfg(feature = "dge")]
+    #[error(
+        "limma tests a single coefficient or contrast at a time; {n_coef} coefficients were given"
+    )]
+    LimmaMultiCoef {
+        /// Number of coefficients the caller asked to test together
+        n_coef: usize,
+    },
+
     /// An input vector does not line up with the observations being modelled.
     ///
     /// Covers the design rows, the subject labels and the offsets, all of which
@@ -165,6 +179,32 @@ pub enum BixverseErrors {
     /// one.
     #[error("The Graph is directed but needs to be undirected for this algorithm.")]
     GraphDirectedError,
+
+    /// A node index in an edge list points outside the graph
+    #[error("Graph: {name} index {index} is out of range for {n_nodes} nodes.")]
+    GraphIndexOutOfRange {
+        /// Which input carried the index
+        name: &'static str,
+        /// The offending index
+        index: usize,
+        /// Number of nodes in the graph
+        n_nodes: usize,
+    },
+
+    /// A per-node or per-edge input does not line up with the graph
+    #[error("Graph: {name} has length {got}, but {expected} was expected.")]
+    GraphLengthMismatch {
+        /// Which input is the wrong length
+        name: &'static str,
+        /// Length the graph implies
+        expected: usize,
+        /// Length that was supplied
+        got: usize,
+    },
+
+    /// A node type present in the graph has no type weight
+    #[error("Graph: node type '{0}' has no type weight.")]
+    MissingNodeTypeWeight(String),
 
     /// Error for community membership/graph node number mismatch
     ///
@@ -592,6 +632,37 @@ pub enum BixverseErrors {
     NeedAtLeastTwoBatches {
         /// Number of provided batches
         n_batches: usize,
+    },
+
+    // -- Integration metrics --
+    /// Need at least two distinct labels for this metric
+    #[cfg(feature = "single-cell")]
+    #[error("You need at least two distinct labels. Provided {n_labels} labels.")]
+    NeedAtLeastTwoLabels {
+        /// Number of distinct labels found
+        n_labels: usize,
+    },
+
+    /// The label vector does not line up with the number of cells
+    #[cfg(feature = "single-cell")]
+    #[error("Expected {n_cells} labels, one per cell; got {n_labels}.")]
+    MetricLabelLengthMismatch {
+        /// Number of cells in the embedding or kNN graph
+        n_cells: usize,
+        /// Length of the provided label vector
+        n_labels: usize,
+    },
+
+    /// A batch holds too few cells for the requested per-batch neighbour count
+    #[cfg(feature = "single-cell")]
+    #[error("BBKNN: batch {batch} has {n_cells} cells, needs at least {required}.")]
+    BbknnBatchTooSmall {
+        /// Batch label
+        batch: usize,
+        /// Cells in the batch
+        n_cells: usize,
+        /// Minimum required, i.e. `neighbours_within_batch + 1`
+        required: usize,
     },
 
     /// A batch has too few cells for the requested anchor search
@@ -1505,6 +1576,97 @@ pub enum BixverseErrors {
         n_cells: usize,
         /// Number of nodes in the smoothing graph
         n_nodes: usize,
+    },
+
+    // -- cellsweep --
+    /// The caller asked for a supplied empty droplet mask but did not give one.
+    #[cfg(feature = "single-cell")]
+    #[error("CellSweep: The empty droplet mask was not supplied but was requested.")]
+    CellSweepEmptyMaskMissing,
+
+    /// The expected cell count cannot be turned into a library size cutoff.
+    #[cfg(feature = "single-cell")]
+    #[error("CellSweep: Cannot take {expected} expected cells from {barcodes} barcodes.")]
+    CellSweepBadExpectedCells {
+        /// Number of expected cells requested
+        expected: usize,
+        /// Number of barcodes available
+        barcodes: usize,
+    },
+
+    /// The knee detector could not find a cutoff.
+    #[cfg(feature = "single-cell")]
+    #[error("CellSweep: Cannot locate a knee from {barcodes} barcodes above the minimum count.")]
+    CellSweepKneeNotFound {
+        /// Number of barcodes that survived the minimum count filter
+        barcodes: usize,
+    },
+
+    /// A sample has too few empty droplets to estimate an ambient profile.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "CellSweep: Sample '{sample_id}' has {found} empty droplets, at least {required} are needed to estimate the ambient profile. Ingest with permissive QC cutoffs so the empty droplets survive, or set freeze_ambient_profile = false."
+    )]
+    CellSweepTooFewEmptyDroplets {
+        /// Identifier of the offending sample
+        sample_id: String,
+        /// Empty droplets found
+        found: usize,
+        /// Empty droplets required
+        required: usize,
+    },
+
+    /// A sample carries no annotated barcodes.
+    #[cfg(feature = "single-cell")]
+    #[error("CellSweep: Sample '{sample_id}' has no annotated barcodes to fit.")]
+    CellSweepNoRealCells {
+        /// Identifier of the offending sample
+        sample_id: String,
+    },
+
+    /// A cell-type code points outside the profile matrix.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "CellSweep: Sample '{sample_id}' has cell-type code {code} but only {n_celltypes} cell types."
+    )]
+    CellSweepCelltypeOutOfRange {
+        /// Identifier of the offending sample
+        sample_id: String,
+        /// The offending cell-type code
+        code: usize,
+        /// Number of cell types declared
+        n_celltypes: usize,
+    },
+
+    /// The label vector does not line up with the barcode vector.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "CellSweep: Sample '{sample_id}' has {n_cells} real barcodes but {n_labels} cell-type labels."
+    )]
+    CellSweepLabelLengthMismatch {
+        /// Identifier of the offending sample
+        sample_id: String,
+        /// Number of real barcodes
+        n_cells: usize,
+        /// Number of labels given
+        n_labels: usize,
+    },
+
+    /// `freeze_empties = false` is not supported.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "CellSweep: freeze_empties = false is not supported. The reference gives empty droplets a cell-type component they have no label for, which indexes past the end of the profile matrix and wraps onto the last cell type."
+    )]
+    CellSweepFreezeEmptiesUnsupported,
+
+    /// The EM produced a non-finite log-likelihood.
+    #[cfg(feature = "single-cell")]
+    #[error("CellSweep: Sample '{sample_id}' diverged at iteration {iteration}.")]
+    CellSweepDiverged {
+        /// Identifier of the offending sample
+        sample_id: String,
+        /// Iteration at which the log-likelihood went non-finite
+        iteration: usize,
     },
 
     // -- wnn --

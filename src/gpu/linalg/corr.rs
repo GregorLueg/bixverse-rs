@@ -130,7 +130,7 @@ pub fn column_stats<F: Float>(
     let base = feat * n_rows;
 
     // Pass 1: sum -> mean.
-    let mut local_sum = F::new(0.0);
+    let mut local_sum = F::new(0.0_f32);
     let mut i = tx;
     while i < n_rows {
         local_sum += data[(base + i) as usize];
@@ -179,7 +179,7 @@ pub fn column_stats<F: Float>(
     let mean = shared[0] / n;
 
     // Pass 2: centred sum of squares.
-    let mut local_sumsq = F::new(0.0);
+    let mut local_sumsq = F::new(0.0_f32);
     let mut j = tx;
     while j < n_rows {
         let d = data[(base + j) as usize] - mean;
@@ -227,13 +227,13 @@ pub fn column_stats<F: Float>(
     sync_cube();
 
     if tx == 0u32 {
-        let nm1 = n - F::new(1.0);
-        let inv_sqrt_nm1 = F::new(1.0) / F::sqrt(nm1);
+        let nm1 = n - F::new(1.0_f32);
+        let inv_sqrt_nm1 = F::new(1.0_f32) / F::sqrt(nm1);
         means[feat as usize] = mean;
         if scale_sd {
             let std = F::sqrt(shared[0] / nm1);
             let eps = F::new(1e-10);
-            let safe_std = if std < eps { F::new(1.0) } else { std };
+            let safe_std = if std < eps { F::new(1.0_f32) } else { std };
             inv_scales[feat as usize] = inv_sqrt_nm1 / safe_std;
         } else {
             inv_scales[feat as usize] = inv_sqrt_nm1;

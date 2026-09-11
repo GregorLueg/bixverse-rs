@@ -284,7 +284,7 @@ pub fn gram_partial<F: Float>(
     let n_threads = GRAM_TILE * GRAM_TILE;
     let stage = GRAM_ROWS_STEP * GRAM_TILE;
 
-    let mut acc = F::new(0.0);
+    let mut acc = F::new(0.0_f32);
 
     let mut r = r_start;
     while r < r_end {
@@ -300,12 +300,12 @@ pub fn gram_partial<F: Float>(
             if in_row && i0 + cc < s {
                 sa[li as usize] = y[(row * s + i0 + cc) as usize];
             } else {
-                sa[li as usize] = F::new(0.0);
+                sa[li as usize] = F::new(0.0_f32);
             }
             if in_row && j0 + cc < s {
                 sb[li as usize] = y[(row * s + j0 + cc) as usize];
             } else {
-                sb[li as usize] = F::new(0.0);
+                sb[li as usize] = F::new(0.0_f32);
             }
             li += n_threads;
         }
@@ -347,7 +347,7 @@ pub fn gram_reduce<F: Float>(partials: &Tensor<F>, g: &mut Tensor<F>, s: u32, n_
         terminate!();
     }
 
-    let mut acc = F::new(0.0);
+    let mut acc = F::new(0.0_f32);
     let mut c = 0u32;
     while c < n_chunks {
         acc += partials[(c * total + idx) as usize];
@@ -503,7 +503,7 @@ pub fn tall_skinny_mm<F: Float>(
         if row < n {
             sa[li as usize] = a[(row * k_dim + cc) as usize];
         } else {
-            sa[li as usize] = F::new(0.0);
+            sa[li as usize] = F::new(0.0_f32);
         }
         li += n_threads;
     }
@@ -513,7 +513,7 @@ pub fn tall_skinny_mm<F: Float>(
     let col = col0 + tc;
     if row < n && col < s {
         let abase = tr * k_dim;
-        let mut acc = F::new(0.0);
+        let mut acc = F::new(0.0_f32);
 
         let mut i = 0u32;
         while i + TSMM_UNROLL <= k_dim {
