@@ -310,6 +310,10 @@ where
         DistanceType::L2Norm => column_pairwise_l2_norm(&normalised_data.as_ref()),
         DistanceType::Cosine => column_pairwise_cosine_dist(&normalised_data.as_ref()),
         DistanceType::Canberra => column_pairwise_canberra_dist(&normalised_data.as_ref()),
+        DistanceType::Correlation => {
+            let cor = column_pairwise_cor(&normalised_data.as_ref(), false);
+            Mat::from_fn(cor.nrows(), cor.ncols(), |i, j| T::one() - cor[(i, j)])
+        }
     };
 
     affinity_from_distance(&dist_mat.as_ref(), k, mu)

@@ -180,6 +180,32 @@ pub enum BixverseErrors {
     #[error("The Graph is directed but needs to be undirected for this algorithm.")]
     GraphDirectedError,
 
+    /// A node index in an edge list points outside the graph
+    #[error("Graph: {name} index {index} is out of range for {n_nodes} nodes.")]
+    GraphIndexOutOfRange {
+        /// Which input carried the index
+        name: &'static str,
+        /// The offending index
+        index: usize,
+        /// Number of nodes in the graph
+        n_nodes: usize,
+    },
+
+    /// A per-node or per-edge input does not line up with the graph
+    #[error("Graph: {name} has length {got}, but {expected} was expected.")]
+    GraphLengthMismatch {
+        /// Which input is the wrong length
+        name: &'static str,
+        /// Length the graph implies
+        expected: usize,
+        /// Length that was supplied
+        got: usize,
+    },
+
+    /// A node type present in the graph has no type weight
+    #[error("Graph: node type '{0}' has no type weight.")]
+    MissingNodeTypeWeight(String),
+
     /// Error for community membership/graph node number mismatch
     ///
     /// In cases where the graph and the community membership do not agree.

@@ -8,6 +8,7 @@ use faer::{Mat, MatRef, Scale};
 use rayon::prelude::*;
 use rustc_hash::FxHashSet;
 use std::borrow::Borrow;
+use std::borrow::Cow;
 use std::hash::Hash;
 
 use crate::core::base::info::*;
@@ -299,6 +300,8 @@ pub enum DistanceType {
     Cosine,
     /// Canberra distance
     Canberra,
+    /// Correlation distance, i.e., `1 - Pearson r`
+    Correlation,
 }
 
 /// Parsing the distance type
@@ -316,8 +319,169 @@ pub fn parse_distance_type(s: &str) -> Option<DistanceType> {
         "manhattan" | "l1" => Some(DistanceType::L1Norm),
         "canberra" => Some(DistanceType::Canberra),
         "cosine" => Some(DistanceType::Cosine),
+        "correlation" | "pearson" => Some(DistanceType::Correlation),
         _ => None,
     }
+}
+
+/// Centre and L2-normalise every column
+///
+/// Columns with zero variance come back as all zeros, which puts their
+/// correlation distance to anything at one.
+///
+/// ### Params
+///
+/// * `cols` - Column slices, each non-empty
+///
+/// ### Returns
+///
+/// The centred, unit-norm columns.
+fn centre_and_normalise<T>(cols: &[Cow<'_, [T]>]) -> Vec<Vec<T>>
+where
+    T: BixverseFloat + SimdDistance,
+{
+    cols.par_iter()
+        .map(|c| {
+            let n = T::from_usize(c.len()).unwrap();
+            let mean = c.iter().fold(T::zero(), |acc, x| acc + *x) / n;
+            let mut v: Vec<T> = c.iter().map(|x| *x - mean).collect();
+            let norm = T::calculate_l2_norm(&v);
+            if norm > T::zero() {
+                v.iter_mut().for_each(|x| *x /= norm);
+            } else {
+                v.fill(T::zero());
+            }
+            v
+        })
+        .collect()
+}
+
+/// Apply a pairwise kernel between one query column and all target columns
+///
+/// Runs the batch-of-four kernel over full groups of four targets and the
+/// single-pair kernel over the tail.
+///
+/// ### Params
+///
+/// * `q` - Query column
+/// * `ys` - Target columns
+/// * `f4` - Batch-of-four kernel
+/// * `f1` - Single-pair kernel
+///
+/// ### Returns
+///
+/// One value per target column.
+fn batched_kernel<T, F4, F1>(q: &[T], ys: &[&[T]], f4: F4, f1: F1) -> Vec<T>
+where
+    T: Copy,
+    F4: Fn(&[T], [&[T]; 4]) -> [T; 4],
+    F1: Fn(&[T], &[T]) -> T,
+{
+    let mut out = Vec::with_capacity(ys.len());
+    let mut chunks = ys.chunks_exact(4);
+    for c in &mut chunks {
+        out.extend_from_slice(&f4(q, [c[0], c[1], c[2], c[3]]));
+    }
+    out.extend(chunks.remainder().iter().map(|y| f1(q, y)));
+    out
+}
+
+/// Calculate distances between the columns of two matrices
+///
+/// All kernels go through [SimdDistance], parallel over the columns of
+/// `mat_a`. The cosine distance is `1 - |cos|` as in
+/// [column_pairwise_cosine_dist]; a zero-norm column gets distance one.
+/// Correlation copies both matrices once to centre and normalise the columns.
+///
+/// ### Params
+///
+/// * `mat_a` - First matrix, columns are the samples
+/// * `mat_b` - Second matrix with the same number of rows
+/// * `dist` - The distance type
+///
+/// ### Returns
+///
+/// The `ncol(mat_a) x ncol(mat_b)` distance matrix, or an error if the row
+/// counts differ or are zero.
+pub fn two_matrices_dist<T>(
+    mat_a: MatRef<T>,
+    mat_b: MatRef<T>,
+    dist: &DistanceType,
+) -> Result<Mat<T>, BixverseErrors>
+where
+    T: BixverseFloat + SimdDistance,
+{
+    if mat_a.nrows() != mat_b.nrows() {
+        return Err(BixverseErrors::NonMatchingFeatureDim {
+            dim_x: mat_a.nrows(),
+            dim_y: mat_b.nrows(),
+        });
+    }
+    if mat_a.nrows() == 0 {
+        return Err(BixverseErrors::InvalidArgument(
+            "The matrices have no rows.".to_string(),
+        ));
+    }
+
+    let cols_a = column_slices(mat_a);
+    let cols_b = column_slices(mat_b);
+    let ys: Vec<&[T]> = cols_b.iter().map(|c| c.as_ref()).collect();
+
+    let rows: Vec<Vec<T>> = match dist {
+        DistanceType::L2Norm => cols_a
+            .par_iter()
+            .map(|q| {
+                batched_kernel(q, &ys, T::euclidean_simd_batch_4, T::euclidean_simd)
+                    .into_iter()
+                    .map(|d| d.max(T::zero()).sqrt())
+                    .collect()
+            })
+            .collect(),
+        DistanceType::L1Norm => cols_a
+            .par_iter()
+            .map(|q| batched_kernel(q, &ys, T::manhattan_simd_batch_4, T::manhattan_simd))
+            .collect(),
+        DistanceType::Canberra => cols_a
+            .par_iter()
+            .map(|q| ys.iter().map(|y| T::canberra_simd(q, y)).collect())
+            .collect(),
+        DistanceType::Cosine => {
+            let norms_b: Vec<T> = ys.iter().map(|y| T::calculate_l2_norm(y)).collect();
+            cols_a
+                .par_iter()
+                .map(|q| {
+                    let norm_q = T::calculate_l2_norm(q);
+                    batched_kernel(q, &ys, T::dot_simd_batch_4, T::dot_simd)
+                        .into_iter()
+                        .zip(&norms_b)
+                        .map(|(d, norm_b)| {
+                            let denom = norm_q * *norm_b;
+                            if denom > T::zero() {
+                                T::one() - (d / denom).abs()
+                            } else {
+                                T::one()
+                            }
+                        })
+                        .collect()
+                })
+                .collect()
+        }
+        DistanceType::Correlation => {
+            let a = centre_and_normalise(&cols_a);
+            let b = centre_and_normalise(&cols_b);
+            let ys_b: Vec<&[T]> = b.iter().map(|c| c.as_slice()).collect();
+            a.par_iter()
+                .map(|q| {
+                    batched_kernel(q, &ys_b, T::dot_simd_batch_4, T::dot_simd)
+                        .into_iter()
+                        .map(|r| T::one() - r)
+                        .collect()
+                })
+                .collect()
+        }
+    };
+
+    Ok(Mat::from_fn(cols_a.len(), cols_b.len(), |i, j| rows[i][j]))
 }
 
 /// Calculate the cosine distance between columns
@@ -1205,6 +1369,64 @@ mod tests {
             parse_distance_type("l2"),
             Some(DistanceType::L2Norm)
         ));
+        assert!(matches!(
+            parse_distance_type("correlation"),
+            Some(DistanceType::Correlation)
+        ));
         assert!(matches!(parse_tom_types("v1"), Some(TomType::Version1)));
+    }
+
+    /// Two-matrix distances agree with the square pairwise versions on the
+    /// concatenated matrix, across the batch-of-four path and its tail.
+    #[test]
+    fn test_two_matrices_dist_matches_pairwise() {
+        let (nrow, n_a, n_b) = (50, 3, 5);
+        let a = Mat::from_fn(nrow, n_a, |i, j| {
+            ((i * 7 + j * 13) % 17) as f64 / 17.0 + 0.01
+        });
+        let b = Mat::from_fn(nrow, n_b, |i, j| {
+            ((i * 5 + j * 11) % 19) as f64 / 19.0 + 0.02
+        });
+        let c = Mat::from_fn(nrow, n_a + n_b, |i, j| {
+            if j < n_a { a[(i, j)] } else { b[(i, j - n_a)] }
+        });
+
+        let cor = column_pairwise_cor(&c.as_ref(), false);
+        let cor_dist = Mat::from_fn(n_a + n_b, n_a + n_b, |i, j| 1.0 - cor[(i, j)]);
+        let cases = [
+            (DistanceType::L2Norm, column_pairwise_l2_norm(&c.as_ref())),
+            (DistanceType::L1Norm, column_pairwise_l1_norm(&c.as_ref())),
+            (
+                DistanceType::Canberra,
+                column_pairwise_canberra_dist(&c.as_ref()),
+            ),
+            (
+                DistanceType::Cosine,
+                column_pairwise_cosine_dist(&c.as_ref()),
+            ),
+            (DistanceType::Correlation, cor_dist),
+        ];
+
+        for (dist, square) in cases {
+            let res = two_matrices_dist(a.as_ref(), b.as_ref(), &dist).unwrap();
+            assert_eq!((res.nrows(), res.ncols()), (n_a, n_b));
+            for i in 0..n_a {
+                for j in 0..n_b {
+                    let (got, want) = (res[(i, j)], square[(i, n_a + j)]);
+                    assert!(
+                        (got - want).abs() < 1e-10,
+                        "{dist:?} ({i}, {j}): {got} vs {want}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Mismatched row counts are an error, not a panic.
+    #[test]
+    fn test_two_matrices_dist_rejects_row_mismatch() {
+        let a = Mat::<f64>::zeros(4, 2);
+        let b = Mat::<f64>::zeros(5, 2);
+        assert!(two_matrices_dist(a.as_ref(), b.as_ref(), &DistanceType::L2Norm).is_err());
     }
 }
