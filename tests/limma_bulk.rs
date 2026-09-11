@@ -48,6 +48,7 @@ fn test_run_limma_voom_matches_limma() {
         &counts,
         fx::N_GENES,
         fx::N_SAMPLES,
+        None,
         &design,
         fx::N_COEF,
         &Tested::Coef(vec![1]),
@@ -88,6 +89,7 @@ fn test_run_limma_trend_matches_limma() {
         &counts,
         fx::N_GENES,
         fx::N_SAMPLES,
+        None,
         &design,
         fx::N_COEF,
         &Tested::Coef(vec![1]),
@@ -125,6 +127,7 @@ fn test_a_contrast_reproduces_the_coefficient_test() {
         &counts,
         fx::N_GENES,
         fx::N_SAMPLES,
+        None,
         &design,
         fx::N_COEF,
         &Tested::Coef(vec![1]),
@@ -136,6 +139,7 @@ fn test_a_contrast_reproduces_the_coefficient_test() {
         &counts,
         fx::N_GENES,
         fx::N_SAMPLES,
+        None,
         &design,
         fx::N_COEF,
         &Tested::Contrast {
@@ -173,6 +177,7 @@ fn test_the_confidence_interval_brackets_the_fold_change() {
         &counts,
         fx::N_GENES,
         fx::N_SAMPLES,
+        None,
         &design,
         fx::N_COEF,
         &Tested::Coef(vec![1]),
@@ -192,6 +197,50 @@ fn test_the_confidence_interval_brackets_the_fold_change() {
     }
 }
 
+/// Library sizes equal to the column sums are what `None` resolves to, so the
+/// two have to agree exactly. A wrong length is an error, not a silent recycle.
+#[test]
+fn test_supplied_library_sizes() {
+    let counts = fx::counts();
+    let design = fx::design();
+    let col_sums: Vec<f64> = (0..fx::N_SAMPLES)
+        .map(|s| {
+            (0..fx::N_GENES)
+                .map(|g| counts[g * fx::N_SAMPLES + s])
+                .sum()
+        })
+        .collect();
+
+    let run = |lib: Option<&[f64]>| {
+        run_limma_dge(
+            &counts,
+            fx::N_GENES,
+            fx::N_SAMPLES,
+            lib,
+            &design,
+            fx::N_COEF,
+            &Tested::Coef(vec![1]),
+            &LimmaParams::default(),
+        )
+    };
+
+    let by_default = run(None).expect("default library sizes");
+    let by_sums = run(Some(&col_sums)).expect("explicit library sizes");
+    assert_eq!(by_default.log_fc, by_sums.log_fc);
+    assert_eq!(by_default.p_val, by_sums.p_val);
+
+    // Doubling every library size leaves the fold changes alone but moves the
+    // average log-CPM, which is the part that reads the sizes directly.
+    let doubled: Vec<f64> = col_sums.iter().map(|l| l * 2.0).collect();
+    let by_doubled = run(Some(&doubled)).expect("scaled library sizes");
+    assert_ne!(by_default.ave_expr, by_doubled.ave_expr);
+
+    assert!(
+        run(Some(&col_sums[1..])).is_err(),
+        "wrong length is rejected"
+    );
+}
+
 /// `topTable` tabulates one column, so several coefficients at once has to be
 /// refused rather than silently tested as the first of them.
 #[test]
@@ -203,6 +252,7 @@ fn test_several_coefficients_are_rejected() {
         &counts,
         fx::N_GENES,
         fx::N_SAMPLES,
+        None,
         &design,
         fx::N_COEF,
         &Tested::Coef(vec![0, 1]),
@@ -223,6 +273,7 @@ fn test_the_filters_compose() {
         &counts,
         fx::N_GENES,
         fx::N_SAMPLES,
+        None,
         &design,
         fx::N_COEF,
         &Tested::Coef(vec![1]),
@@ -251,6 +302,7 @@ fn test_the_filters_compose() {
         &counts,
         fx::N_GENES,
         fx::N_SAMPLES,
+        None,
         &design,
         fx::N_COEF,
         &Tested::Coef(vec![1]),

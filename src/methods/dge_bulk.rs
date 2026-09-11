@@ -76,6 +76,7 @@ const TREND_PRIOR: f64 = 2.0;
 /// * `counts` - Raw counts, gene-major and row-major, `n_genes * n_samples`
 /// * `n_genes` - Number of genes
 /// * `n_samples` - Number of samples
+/// * `lib_size` - Library size per sample, `None` for the column sums
 /// * `design` - Predictors, row-major `n_samples * n_coef`
 /// * `n_coef` - Number of design columns
 /// * `filter` - Run `filterByExpr`
@@ -85,10 +86,12 @@ const TREND_PRIOR: f64 = 2.0;
 ///
 /// One flag per gene, or [`edge_rs::errors::EdgeErrors::NoGenesAfterFiltering`]
 /// if nothing survived.
+#[allow(clippy::too_many_arguments)]
 fn keep_mask(
     counts: &[f64],
     n_genes: usize,
     n_samples: usize,
+    lib_size: Option<&[f64]>,
     design: &[f64],
     n_coef: usize,
     filter: bool,
@@ -99,7 +102,7 @@ fn keep_mask(
             counts,
             n_genes,
             n_samples,
-            None,
+            lib_size,
             None,
             Some((design, n_coef)),
             None,
@@ -222,6 +225,7 @@ pub fn run_edger_ql(
         &dge.counts,
         n_genes,
         n_samples,
+        None,
         design,
         n_coef,
         params.filter,
@@ -474,6 +478,9 @@ pub struct LimmaDgeRes {
 /// * `counts` - Raw counts, gene-major and row-major, `n_genes * n_samples`
 /// * `n_genes` - Number of genes
 /// * `n_samples` - Number of samples
+/// * `lib_size` - Library size per sample. `None` takes the column sums of
+///   `counts`. Pass the column sums from before an upstream gene filter to get
+///   what edgeR does on a subset `DGEList`, which keeps the original sizes.
 /// * `design` - Predictors, row-major `n_samples * n_coef`, including an
 ///   intercept and full rank
 /// * `n_coef` - Number of design columns
@@ -490,10 +497,12 @@ pub struct LimmaDgeRes {
 ///
 /// Law, Chen, Shi and Smyth, Genome Biology 15:R29, 2014
 /// Smyth, Statistical Applications in Genetics and Molecular Biology 3(1), 2004
+#[allow(clippy::too_many_arguments)]
 pub fn run_limma_dge(
     counts: &[f64],
     n_genes: usize,
     n_samples: usize,
+    lib_size: Option<&[f64]>,
     design: &[f64],
     n_coef: usize,
     tested: &Tested,
@@ -505,12 +514,23 @@ pub fn run_limma_dge(
         return Err(BixverseErrors::LimmaMultiCoef { n_coef: coef.len() });
     }
 
-    let dge = DgeList::new(counts.to_vec(), n_genes, n_samples, None)?;
+    let mut dge = DgeList::new(counts.to_vec(), n_genes, n_samples, None)?;
+    if let Some(ls) = lib_size {
+        if ls.len() != n_samples {
+            return Err(BixverseErrors::DgeShapeMismatch {
+                name: "lib_size",
+                expected: n_samples,
+                got: ls.len(),
+            });
+        }
+        dge.lib_size = ls.to_vec();
+    }
 
     let keep = keep_mask(
         &dge.counts,
         n_genes,
         n_samples,
+        Some(&dge.lib_size),
         design,
         n_coef,
         params.filter,
