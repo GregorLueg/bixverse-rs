@@ -14,7 +14,9 @@ use crate::core::math::pca_svd::randomised_sparse_svd;
 use crate::core::math::pca_svd::*;
 use crate::core::math::sparse::sparse_svd_lanczos;
 use crate::prelude::*;
-use crate::single_cell::sctransform::model::{SctCellContext, SctModel, sct_residual_row};
+use crate::single_cell::sc_processing::sctransform::model::{
+    SctCellContext, SctModel, sct_residual_row,
+};
 
 ///////////
 // Types //

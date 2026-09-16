@@ -51,6 +51,7 @@ use crate::single_cell::sc_data::{
     h5_10x_multifile_io::TenxFileTask, h5ad_io::parse_raw_slot, h5ad_multifile_io::H5adFileTask,
     mtx_multifile_io::MtxFileTask, sc_synthetic_data::CellTypeConfig,
 };
+use crate::single_cell::sc_processing::sctransform::model::{SctModel, SctParams};
 use crate::single_cell::sc_processing::{
     cellsweep::{
         CellSweepFit, CellSweepParams, CellSweepSample, EmptyDropletCall, parse_empty_droplet_call,
@@ -62,7 +63,6 @@ use crate::single_cell::sc_processing::{
     scrublet::ScrubletParams,
     utils_doublets::ScDblSimParams,
 };
-use crate::single_cell::sctransform::model::{SctModel, SctParams};
 
 /////////////
 // Helpers //

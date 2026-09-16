@@ -37,8 +37,10 @@ use bixverse_rs::single_cell::sc_data::bin_merge_io::gene_store_to_cell_store;
 use bixverse_rs::single_cell::sc_data::data_io::{
     CellGeneSparseWriter, CscGeneChunk, ParallelSparseReader, RawCounts,
 };
-use bixverse_rs::single_cell::sctransform::model::{SctCellContext, SctCovariates, SctParams};
-use bixverse_rs::single_cell::sctransform::stream::{
+use bixverse_rs::single_cell::sc_processing::sctransform::model::{
+    SctCellContext, SctCovariates, SctParams,
+};
+use bixverse_rs::single_cell::sc_processing::sctransform::stream::{
     SctStreamOpts, fit_sctransform, sct_corrected_counts, sct_residual_variance,
 };
 
