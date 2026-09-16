@@ -274,6 +274,12 @@ impl SctModel {
 /// keeps the smoothing on a scale where the parameter is well behaved across
 /// four orders of magnitude of abundance.
 ///
+/// The fits are expected to have been through v2's post-fit Poisson check
+/// already, which overrides theta where the second moment disagrees with the
+/// likelihood. [`super::sct_stream::fit_sctransform`] does that; a caller
+/// driving this directly has to, or genes that carry no real overdispersion
+/// will pull the smoothing curve.
+///
 /// ### Params
 ///
 /// * `step1` - Per-gene fits from the step-1 subsample.

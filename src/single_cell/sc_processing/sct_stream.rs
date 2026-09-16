@@ -339,15 +339,6 @@ fn histogram_median(histogram: &FxHashMap<u32, u64>) -> f64 {
 // Step-1 selection //
 //////////////////////
 
-/// The genes and cells the step-1 fit runs on.
-#[derive(Clone, Debug)]
-pub struct SctStep1Selection {
-    /// Store indices of the sampled genes, ascending.
-    pub genes: Vec<usize>,
-    /// Positions within `cell_indices` of the sampled cells, ascending.
-    pub cells: Vec<usize>,
-}
-
 /// Picks the step-1 subsample.
 ///
 /// Cells are a uniform sample. Genes are filtered to those detected in at
@@ -585,6 +576,8 @@ pub fn fit_sctransform<S: SingleCellReading>(
     // regularisation indexes the model by store position, so pair them up
     // explicitly rather than trusting that.
     let fit_idx: Vec<usize> = chunks.iter().map(|c| c.original_index).collect();
+
+    let fits = flag_poisson_genes(fits, &fit_idx, &pass.stats, params.poisson_diff_theta);
 
     if verbosity.normal_verbosity() {
         println!(
@@ -969,6 +962,56 @@ fn correct_one_gene(
     )
 }
 
+/// Overrides the fitted theta with infinity for genes that are really Poisson.
+///
+/// v2's own check, after the fit rather than before it. The likelihood fit can
+/// run theta off to a very large but finite value, which is the boundary in all
+/// but name: at that point `mu^2 / theta` has vanished and the gene is Poisson.
+/// The method-of-moments estimate `amean^2 / (var - amean)` supplies the scale
+/// to judge "very large" against, since what counts as large depends on the
+/// gene's abundance. A ratio below the threshold means the fit has gone orders
+/// of magnitude past what the second moment supports, so theta is pinned at
+/// infinity outright.
+///
+/// The comparison is a plain ratio so the degenerate cases fall out the way R's
+/// do. A gene with `var <= amean` gives a negative moment estimate and a
+/// negative ratio, which is below any positive threshold and flags, and that is
+/// the right answer for a gene with no excess variance at all. A gene already
+/// at infinity gives a ratio of zero and stays there.
+///
+/// ### Params
+///
+/// * `fits` - The step-1 fits, consumed.
+/// * `fit_idx` - Store gene index of each fit, parallel to `fits`.
+/// * `stats` - Per-gene statistics over the full cell set, by store index.
+/// * `threshold` - Ratio below which the gene is declared Poisson.
+///
+/// ### Returns
+///
+/// The fits, with flagged genes carrying an infinite theta.
+fn flag_poisson_genes(
+    fits: Vec<NbOffsetFit>,
+    fit_idx: &[usize],
+    stats: &SctGeneStats,
+    threshold: f64,
+) -> Vec<NbOffsetFit> {
+    fits.into_iter()
+        .zip(fit_idx.iter())
+        .map(|(fit, &g)| {
+            let amean = stats.amean[g];
+            let moment_theta = amean * amean / (stats.var[g] - amean);
+            if moment_theta / fit.theta < threshold {
+                NbOffsetFit {
+                    theta: f64::INFINITY,
+                    ..fit
+                }
+            } else {
+                fit
+            }
+        })
+        .collect()
+}
+
 /// Counts how many of a cell subset each gene is detected in.
 ///
 /// ### Params
@@ -1026,4 +1069,139 @@ fn densify(chunk: &CscGeneChunk, n_cells: usize) -> Vec<f64> {
         }
     }
     out
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_relative_eq;
+
+    fn stats(amean: Vec<f64>, var: Vec<f64>) -> SctGeneStats {
+        SctGeneStats {
+            log_gmean: amean.iter().map(|v| v.log10()).collect(),
+            amean,
+            var,
+        }
+    }
+
+    /// A theta that has run far past what the second moment supports is pinned
+    /// at infinity rather than left as a large finite number.
+    ///
+    /// This is v2's own post-fit check and it matters more than it looks:
+    /// leaving it out moved the regularised theta a median 5.9e-3 away from
+    /// sctransform on the parity fixture, where applying it brings that to
+    /// 3.0e-5.
+    #[test]
+    fn test_flag_poisson_genes_overrides_a_confident_fit() {
+        // Both genes have a moment estimate of amean^2 / (var - amean) = 1.
+        // Gene 0's fit agrees, so it keeps its theta. Gene 1's fit ran off to
+        // 10,000, four orders past what the second moment supports, so it is
+        // pinned at infinity.
+        let s = stats(vec![10.0, 10.0], vec![110.0, 110.0]);
+        let fits = vec![
+            NbOffsetFit {
+                theta: 1.0,
+                intercept: -5.0,
+            },
+            NbOffsetFit {
+                theta: 10_000.0,
+                intercept: -5.0,
+            },
+        ];
+
+        let out = flag_poisson_genes(fits, &[0, 1], &s, 1e-3);
+
+        assert_relative_eq!(out[0].theta, 1.0, max_relative = 1e-12);
+        assert!(out[1].theta.is_infinite());
+        // The intercept is never touched, only the dispersion.
+        assert_relative_eq!(out[1].intercept, -5.0, max_relative = 1e-12);
+    }
+
+    /// A gene with no excess variance at all gives a negative moment estimate.
+    /// R compares the ratio without guarding the sign, so it flags, which is
+    /// the right answer for a gene whose variance is below its mean.
+    #[test]
+    fn test_flag_poisson_genes_handles_underdispersion() {
+        let s = stats(vec![10.0], vec![5.0]);
+        let fits = vec![NbOffsetFit {
+            theta: 2.0,
+            intercept: -5.0,
+        }];
+
+        let out = flag_poisson_genes(fits, &[0], &s, 1e-3);
+
+        assert!(out[0].theta.is_infinite());
+    }
+
+    /// An already-infinite theta stays infinite rather than becoming NaN
+    /// through the ratio.
+    #[test]
+    fn test_flag_poisson_genes_leaves_infinite_theta_alone() {
+        let s = stats(vec![10.0], vec![110.0]);
+        let fits = vec![NbOffsetFit {
+            theta: f64::INFINITY,
+            intercept: -5.0,
+        }];
+
+        let out = flag_poisson_genes(fits, &[0], &s, 1e-3);
+
+        assert!(out[0].theta.is_infinite());
+    }
+
+    /// R's `median` averages the two central values on an even count, and the
+    /// histogram path has to do the same or `min_variance` drifts.
+    #[test]
+    fn test_histogram_median_matches_r_on_an_even_count() {
+        let mut h: FxHashMap<u32, u64> = FxHashMap::default();
+        // 1, 1, 2, 3 -> R's median is 1.5
+        h.insert(1, 2);
+        h.insert(2, 1);
+        h.insert(3, 1);
+
+        assert_relative_eq!(histogram_median(&h), 1.5, max_relative = 1e-12);
+    }
+
+    #[test]
+    fn test_histogram_median_on_an_odd_count() {
+        let mut h: FxHashMap<u32, u64> = FxHashMap::default();
+        // 1, 2, 2, 2, 9 -> 2
+        h.insert(1, 1);
+        h.insert(2, 3);
+        h.insert(9, 1);
+
+        assert_relative_eq!(histogram_median(&h), 2.0, max_relative = 1e-12);
+    }
+
+    #[test]
+    fn test_histogram_median_of_nothing_is_zero() {
+        assert_relative_eq!(
+            histogram_median(&FxHashMap::default()),
+            0.0,
+            max_relative = 1e-12
+        );
+    }
+
+    /// The sampling weight has to be largest where the abundance spectrum is
+    /// emptiest, or the regularisation curve is left unconstrained exactly
+    /// where it has to extrapolate furthest.
+    #[test]
+    fn test_inverse_density_weights_favour_sparse_regions() {
+        // A dense cluster near zero and one isolated point far out.
+        let mut x: Vec<f64> = (0..200).map(|i| i as f64 * 0.001).collect();
+        x.push(5.0);
+
+        let w = inverse_density_weights(&x).unwrap();
+
+        let isolated = w[w.len() - 1];
+        let crowded = w[100];
+        assert!(
+            isolated > crowded * 10.0,
+            "isolated weight {isolated} should dwarf the crowded one {crowded}"
+        );
+        assert!(w.iter().all(|v| v.is_finite()));
+    }
 }

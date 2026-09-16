@@ -13,10 +13,10 @@
 //!   gets those from `glmGamPoi::glm_gp`, which fits its coefficient at an
 //!   intermediate overdispersion and never refits at the final one, so its
 //!   estimate is not at the optimum of its own reported dispersion. This crate
-//!   returns the Cox-Reid adjusted joint MLE instead. The two were measured
-//!   against each other on simulated data: at the 2000-cell subsample v2
-//!   actually runs on, theta agreed to a median 2e-5 and the top-2000 HVG sets
-//!   overlapped 1997/2000. This fixture is 400 cells, where the gap is wider.
+//!   returns the Cox-Reid adjusted joint MLE instead. Measured on simulated
+//!   data at the 2000-cell subsample v2 runs on, the two agreed to a median
+//!   2e-5 on theta with the top-2000 HVG sets overlapping 1997/2000; on this
+//!   400-cell fixture the median is 3e-5.
 
 use approx::assert_relative_eq;
 use faer::Mat;
@@ -358,30 +358,31 @@ fn test_fit_sctransform_end_to_end() {
         var_drift[var_drift.len() - 1]
     );
 
-    // Theta alone is the wrong thing to gate on. Its worst case here is 20%,
-    // but that is entirely the near-Poisson genes, where `theta` is weakly
-    // identified: `theta = gmean / (10^dispersion_par - 1)` blows up as
-    // `dispersion_par` approaches zero, so a negligible change in the
-    // overdispersion moves theta a long way. What reaches the residual is the
-    // variance `mu + mu^2 / theta`, and at a large theta that second term is
-    // almost nothing. So the max is gated on the variance and theta itself only
-    // on its median, which is where a real estimator change would show.
+    // The max is gated on the variance rather than on theta, because theta is
+    // weakly identified near the Poisson boundary: `theta = gmean /
+    // (10^dispersion_par - 1)` blows up as `dispersion_par` approaches zero, so
+    // a negligible change in overdispersion moves theta a long way while
+    // `mu + mu^2 / theta`, which is what reaches the residual, barely moves.
+    // Theta is gated on its median, where a real estimator change would show.
     //
-    // Measured on this fixture: variance max 2.8e-2, theta median 5.9e-3,
-    // intercept max 1.4e-2.
+    // Measured on this fixture: variance max 1.8e-3, theta median 3.0e-5,
+    // intercept max 3.6e-4. That is close enough to the 2e-5 measured at the
+    // 2000-cell subsample v2 actually runs on that the remaining gap is the
+    // Cox-Reid adjusted joint MLE this crate returns against the intermediate
+    // estimate `glm_gp` stops at, and nothing else.
     assert!(
-        var_drift[var_drift.len() - 1] < 5e-2,
-        "model variance drifted {:.4} from R, past the measured band",
+        var_drift[var_drift.len() - 1] < 5e-3,
+        "model variance drifted {:.2e} from R, past the measured band",
         var_drift[var_drift.len() - 1]
     );
     assert!(
-        drifts[drifts.len() / 2] < 2e-2,
-        "median regularised theta drifted {:.4} from R, past the measured band",
+        drifts[drifts.len() / 2] < 1e-4,
+        "median regularised theta drifted {:.2e} from R, past the measured band",
         drifts[drifts.len() / 2]
     );
     assert!(
-        worst_intercept < 3e-2,
-        "regularised intercept drifted {worst_intercept:.4} from R, past the measured band"
+        worst_intercept < 1e-3,
+        "regularised intercept drifted {worst_intercept:.2e} from R, past the measured band"
     );
     let _ = worst_theta;
 }
