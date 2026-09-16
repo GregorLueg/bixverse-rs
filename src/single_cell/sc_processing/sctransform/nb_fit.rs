@@ -18,12 +18,6 @@
 //! log(total_umi))`, which maximises the Cox-Reid adjusted profile likelihood
 //! over the overdispersion.
 //!
-//! Both halves already exist in `edge-rs`: [`apl_at`] is that adjusted profile
-//! likelihood, refitting the coefficients internally at whatever dispersion it
-//! is handed, and [`mglm_levenberg`] is the coefficient fit at a known
-//! dispersion. This module is only the composition, plus the Poisson boundary
-//! that `glm_gp` reports as an overdispersion of exactly zero.
-//!
 //! Every gene is independent, which is what makes the whole of scTransform
 //! streamable: one gene's fit needs that gene's counts and the shared per-cell
 //! offset, nothing else.
@@ -112,9 +106,9 @@ impl NbOffsetFit {
     }
 }
 
-//////////
+/////////
 // Fit //
-//////////
+/////////
 
 /// Fits the negative binomial GLM with a log offset for one gene.
 ///
@@ -170,9 +164,6 @@ pub fn fit_nb_offset_gene(
         });
     }
 
-    // An all-zero gene carries no information about any parameter: the
-    // likelihood is flat in all of them. Say so rather than returning wherever
-    // a search on a flat objective happened to stop.
     if counts.iter().all(|&y| y == 0.0) {
         let mut coefficients = vec![0.0; n_coef];
         coefficients[0] = f64::NEG_INFINITY;
@@ -187,8 +178,6 @@ pub fn fit_nb_offset_gene(
     let neg_apl = |log_alpha: f64| -> f64 {
         match apl_at(counts, 1, n, design, n_coef, log_alpha.exp(), &offset, None) {
             Ok(v) => -v[0],
-            // An unevaluable point is pushed away from rather than propagated,
-            // so a single bad dispersion cannot abort the whole search.
             Err(_) => f64::INFINITY,
         }
     };

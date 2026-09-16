@@ -56,9 +56,9 @@ const DENSITY_GRID_POINTS: usize = 512;
 /// Kernel support cutoff for the density estimate, in bandwidths.
 const DENSITY_CUTOFF: f64 = 4.0;
 
-//////////////
+/////////////
 // Options //
-//////////////
+/////////////
 
 /// Disk and reporting knobs for the streaming stages.
 #[derive(Clone, Copy, Debug)]
@@ -81,9 +81,209 @@ impl Default for SctStreamOpts {
     }
 }
 
-////////////////
+/////////////
+// Helpers //
+/////////////
+
+/// Corrects one gene's counts to the median library size.
+///
+/// ### Params
+///
+/// * `chunk` - The gene's raw counts, reindexed to the selected cells.
+/// * `gene_pos` - Position of this gene within the model.
+/// * `n_cells` - Number of cells represented.
+/// * `model` - The fitted model.
+/// * `cells` - Per-cell library sizes and covariates.
+/// * `median_log10_umi` - Median of `log10_umi`, the library size everything is
+///   corrected to.
+/// * `median_covariates` - Median of each covariate, what they are held at.
+///
+/// ### Returns
+///
+/// The corrected gene chunk, with zeros dropped and `original_index` set to the
+/// gene's position in the model rather than in the source store, since the
+/// output's gene axis is the modelled set.
+fn correct_one_gene(
+    chunk: &CscGeneChunk,
+    gene_pos: usize,
+    n_cells: usize,
+    model: &SctModel,
+    cells: &SctCellContext<'_>,
+    median_log10_umi: f64,
+    median_covariates: &[f64],
+) -> CscGeneChunk {
+    let beta = model.coefficients_for(gene_pos);
+    let theta = model.theta[gene_pos];
+    let slope = model.log_umi_coef;
+    let simple = !model.has_covariates();
+
+    // Constant across cells: every latent variable is held at its median.
+    let mut eta_target = beta[0] + slope * median_log10_umi;
+    for (b, x) in beta[1..].iter().zip(median_covariates) {
+        eta_target += b * x;
+    }
+    let mu_target = eta_target.exp();
+    let sd_target = (mu_target + mu_target * mu_target / theta).sqrt();
+
+    let mut counts = vec![0.0_f64; n_cells];
+    match &chunk.data_raw {
+        RawCounts::U16(v) => {
+            for (&i, &x) in chunk.indices.iter().zip(v.iter()) {
+                counts[i as usize] = x as f64;
+            }
+        }
+        RawCounts::U32(v) => {
+            for (&i, &x) in chunk.indices.iter().zip(v.iter()) {
+                counts[i as usize] = x as f64;
+            }
+        }
+    }
+
+    let mut raw = Vec::new();
+    let mut indices = Vec::new();
+    let mut norms = Vec::new();
+
+    for (c, &y) in counts.iter().enumerate() {
+        let mut eta = beta[0] + slope * cells.log10_umi[c];
+        if !simple {
+            for (b, x) in beta[1..].iter().zip(cells.covariates.row(c)) {
+                eta += b * x;
+            }
+        }
+        let mu = eta.exp();
+        let residual = (y - mu) / (mu + mu * mu / theta).sqrt();
+        // R's `round()` is round-half-to-even, not half-away-from-zero.
+        let corrected = (mu_target + residual * sd_target).round_ties_even();
+
+        if corrected >= 1.0 {
+            let value = corrected as u32;
+            raw.push(value);
+            indices.push(c);
+            norms.push(F16::from(f16::from_f32((value as f32).ln_1p())));
+        }
+    }
+
+    CscGeneChunk::from_conversion(
+        RawCounts::from_u32_auto(&raw),
+        &norms,
+        &indices,
+        gene_pos,
+        true,
+    )
+}
+
+/// Overrides the fitted theta with infinity for genes that are really Poisson.
+///
+/// v2's own check, after the fit rather than before it. The likelihood fit can
+/// run theta off to a very large but finite value, which is the boundary in all
+/// but name: at that point `mu^2 / theta` has vanished and the gene is Poisson.
+/// The method-of-moments estimate `amean^2 / (var - amean)` supplies the scale
+/// to judge "very large" against, since what counts as large depends on the
+/// gene's abundance. A ratio below the threshold means the fit has gone orders
+/// of magnitude past what the second moment supports, so theta is pinned at
+/// infinity outright.
+///
+/// The comparison is a plain ratio so the degenerate cases fall out the way R's
+/// do. A gene with `var <= amean` gives a negative moment estimate and a
+/// negative ratio, which is below any positive threshold and flags, and that is
+/// the right answer for a gene with no excess variance at all. A gene already
+/// at infinity gives a ratio of zero and stays there.
+///
+/// ### Params
+///
+/// * `fits` - The step-1 fits, consumed.
+/// * `fit_idx` - Store gene index of each fit, parallel to `fits`.
+/// * `stats` - Per-gene statistics over the full cell set, by store index.
+/// * `threshold` - Ratio below which the gene is declared Poisson.
+///
+/// ### Returns
+///
+/// The fits, with flagged genes carrying an infinite theta.
+fn flag_poisson_genes(
+    fits: Vec<NbOffsetFit>,
+    fit_idx: &[usize],
+    stats: &SctGeneStats,
+    threshold: f64,
+) -> Vec<NbOffsetFit> {
+    fits.into_iter()
+        .zip(fit_idx.iter())
+        .map(|(fit, &g)| {
+            let amean = stats.amean[g];
+            let moment_theta = amean * amean / (stats.var[g] - amean);
+            if moment_theta / fit.theta < threshold {
+                NbOffsetFit {
+                    theta: f64::INFINITY,
+                    ..fit
+                }
+            } else {
+                fit
+            }
+        })
+        .collect()
+}
+
+/// Counts how many of a cell subset each gene is detected in.
+///
+/// ### Params
+///
+/// * `reader` - Gene-major reader.
+/// * `genes` - Store indices to count.
+/// * `cell_set` - Cells to count within.
+/// * `opts` - Disk knobs.
+///
+/// ### Returns
+///
+/// Detection counts indexed by **store** gene index, zero for genes not asked
+/// about.
+fn count_detected<S: SingleCellReading>(
+    reader: &S,
+    genes: &[usize],
+    cell_set: &IndexSet<u32>,
+    opts: SctStreamOpts,
+) -> Result<Vec<usize>, BixverseErrors> {
+    let n_genes = reader.get_header().total_genes;
+    let mut out = vec![0_usize; n_genes];
+    let step = opts.gene_batch_size.unwrap_or(genes.len()).max(1);
+
+    for block in genes.chunks(step) {
+        for chunk in reader.read_gene_parallel_filtered(block, cell_set)? {
+            out[chunk.original_index] = chunk.indices.len();
+        }
+    }
+
+    Ok(out)
+}
+
+/// Expands a gene chunk into a dense per-cell vector.
+///
+/// ### Params
+///
+/// * `chunk` - Gene chunk, already reindexed to the cell subset.
+/// * `n_cells` - Length of the output.
+///
+/// ### Returns
+///
+/// The dense counts, zeros included.
+fn densify(chunk: &CscGeneChunk, n_cells: usize) -> Vec<f64> {
+    let mut out = vec![0.0_f64; n_cells];
+    match &chunk.data_raw {
+        RawCounts::U16(v) => {
+            for (&i, &x) in chunk.indices.iter().zip(v.iter()) {
+                out[i as usize] = x as f64;
+            }
+        }
+        RawCounts::U32(v) => {
+            for (&i, &x) in chunk.indices.iter().zip(v.iter()) {
+                out[i as usize] = x as f64;
+            }
+        }
+    }
+    out
+}
+
+///////////////
 // Gene pass //
-////////////////
+///////////////
 
 /// Everything the model fit needs from one pass over the gene-major store.
 #[derive(Clone, Debug)]
@@ -463,9 +663,9 @@ fn inverse_density_weights(x: &[f64]) -> Result<Vec<f64>, BixverseErrors> {
         .collect())
 }
 
-/////////////////
+///////////////
 // Model fit //
-/////////////////
+///////////////
 
 /// Fits and regularises the scTransform v2 model.
 ///
@@ -769,9 +969,9 @@ fn chunk_counts(chunk: &CscGeneChunk) -> Vec<f64> {
     }
 }
 
-///////////////////////
+//////////////////////
 // Corrected counts //
-///////////////////////
+//////////////////////
 
 /// Writes the scTransform corrected UMI counts as a gene-major store.
 ///
@@ -900,202 +1100,6 @@ pub fn sct_corrected_counts<S: SingleCellReading, P: AsRef<Path>>(
     }
 
     Ok(())
-}
-
-/// Corrects one gene's counts to the median library size.
-///
-/// ### Params
-///
-/// * `chunk` - The gene's raw counts, reindexed to the selected cells.
-/// * `gene_pos` - Position of this gene within the model.
-/// * `n_cells` - Number of cells represented.
-/// * `model` - The fitted model.
-/// * `cells` - Per-cell library sizes and covariates.
-/// * `median_log10_umi` - Median of `log10_umi`, the library size everything is
-///   corrected to.
-/// * `median_covariates` - Median of each covariate, what they are held at.
-///
-/// ### Returns
-///
-/// The corrected gene chunk, with zeros dropped and `original_index` set to the
-/// gene's position in the model rather than in the source store, since the
-/// output's gene axis is the modelled set.
-fn correct_one_gene(
-    chunk: &CscGeneChunk,
-    gene_pos: usize,
-    n_cells: usize,
-    model: &SctModel,
-    cells: &SctCellContext<'_>,
-    median_log10_umi: f64,
-    median_covariates: &[f64],
-) -> CscGeneChunk {
-    let beta = model.coefficients_for(gene_pos);
-    let theta = model.theta[gene_pos];
-    let slope = model.log_umi_coef;
-    let simple = !model.has_covariates();
-
-    // Constant across cells: every latent variable is held at its median.
-    let mut eta_target = beta[0] + slope * median_log10_umi;
-    for (b, x) in beta[1..].iter().zip(median_covariates) {
-        eta_target += b * x;
-    }
-    let mu_target = eta_target.exp();
-    let sd_target = (mu_target + mu_target * mu_target / theta).sqrt();
-
-    let mut counts = vec![0.0_f64; n_cells];
-    match &chunk.data_raw {
-        RawCounts::U16(v) => {
-            for (&i, &x) in chunk.indices.iter().zip(v.iter()) {
-                counts[i as usize] = x as f64;
-            }
-        }
-        RawCounts::U32(v) => {
-            for (&i, &x) in chunk.indices.iter().zip(v.iter()) {
-                counts[i as usize] = x as f64;
-            }
-        }
-    }
-
-    let mut raw = Vec::new();
-    let mut indices = Vec::new();
-    let mut norms = Vec::new();
-
-    for (c, &y) in counts.iter().enumerate() {
-        let mut eta = beta[0] + slope * cells.log10_umi[c];
-        if !simple {
-            for (b, x) in beta[1..].iter().zip(cells.covariates.row(c)) {
-                eta += b * x;
-            }
-        }
-        let mu = eta.exp();
-        let residual = (y - mu) / (mu + mu * mu / theta).sqrt();
-        // R's `round()` is round-half-to-even, not half-away-from-zero.
-        let corrected = (mu_target + residual * sd_target).round_ties_even();
-
-        if corrected >= 1.0 {
-            let value = corrected as u32;
-            raw.push(value);
-            indices.push(c);
-            norms.push(F16::from(f16::from_f32((value as f32).ln_1p())));
-        }
-    }
-
-    CscGeneChunk::from_conversion(
-        RawCounts::from_u32_auto(&raw),
-        &norms,
-        &indices,
-        gene_pos,
-        true,
-    )
-}
-
-/// Overrides the fitted theta with infinity for genes that are really Poisson.
-///
-/// v2's own check, after the fit rather than before it. The likelihood fit can
-/// run theta off to a very large but finite value, which is the boundary in all
-/// but name: at that point `mu^2 / theta` has vanished and the gene is Poisson.
-/// The method-of-moments estimate `amean^2 / (var - amean)` supplies the scale
-/// to judge "very large" against, since what counts as large depends on the
-/// gene's abundance. A ratio below the threshold means the fit has gone orders
-/// of magnitude past what the second moment supports, so theta is pinned at
-/// infinity outright.
-///
-/// The comparison is a plain ratio so the degenerate cases fall out the way R's
-/// do. A gene with `var <= amean` gives a negative moment estimate and a
-/// negative ratio, which is below any positive threshold and flags, and that is
-/// the right answer for a gene with no excess variance at all. A gene already
-/// at infinity gives a ratio of zero and stays there.
-///
-/// ### Params
-///
-/// * `fits` - The step-1 fits, consumed.
-/// * `fit_idx` - Store gene index of each fit, parallel to `fits`.
-/// * `stats` - Per-gene statistics over the full cell set, by store index.
-/// * `threshold` - Ratio below which the gene is declared Poisson.
-///
-/// ### Returns
-///
-/// The fits, with flagged genes carrying an infinite theta.
-fn flag_poisson_genes(
-    fits: Vec<NbOffsetFit>,
-    fit_idx: &[usize],
-    stats: &SctGeneStats,
-    threshold: f64,
-) -> Vec<NbOffsetFit> {
-    fits.into_iter()
-        .zip(fit_idx.iter())
-        .map(|(fit, &g)| {
-            let amean = stats.amean[g];
-            let moment_theta = amean * amean / (stats.var[g] - amean);
-            if moment_theta / fit.theta < threshold {
-                NbOffsetFit {
-                    theta: f64::INFINITY,
-                    ..fit
-                }
-            } else {
-                fit
-            }
-        })
-        .collect()
-}
-
-/// Counts how many of a cell subset each gene is detected in.
-///
-/// ### Params
-///
-/// * `reader` - Gene-major reader.
-/// * `genes` - Store indices to count.
-/// * `cell_set` - Cells to count within.
-/// * `opts` - Disk knobs.
-///
-/// ### Returns
-///
-/// Detection counts indexed by **store** gene index, zero for genes not asked
-/// about.
-fn count_detected<S: SingleCellReading>(
-    reader: &S,
-    genes: &[usize],
-    cell_set: &IndexSet<u32>,
-    opts: SctStreamOpts,
-) -> Result<Vec<usize>, BixverseErrors> {
-    let n_genes = reader.get_header().total_genes;
-    let mut out = vec![0_usize; n_genes];
-    let step = opts.gene_batch_size.unwrap_or(genes.len()).max(1);
-
-    for block in genes.chunks(step) {
-        for chunk in reader.read_gene_parallel_filtered(block, cell_set)? {
-            out[chunk.original_index] = chunk.indices.len();
-        }
-    }
-
-    Ok(out)
-}
-
-/// Expands a gene chunk into a dense per-cell vector.
-///
-/// ### Params
-///
-/// * `chunk` - Gene chunk, already reindexed to the cell subset.
-/// * `n_cells` - Length of the output.
-///
-/// ### Returns
-///
-/// The dense counts, zeros included.
-fn densify(chunk: &CscGeneChunk, n_cells: usize) -> Vec<f64> {
-    let mut out = vec![0.0_f64; n_cells];
-    match &chunk.data_raw {
-        RawCounts::U16(v) => {
-            for (&i, &x) in chunk.indices.iter().zip(v.iter()) {
-                out[i as usize] = x as f64;
-            }
-        }
-        RawCounts::U32(v) => {
-            for (&i, &x) in chunk.indices.iter().zip(v.iter()) {
-                out[i as usize] = x as f64;
-            }
-        }
-    }
-    out
 }
 
 ///////////
