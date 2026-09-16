@@ -17,6 +17,7 @@
 
 use crate::core::base::kernel_smooth::{bw_sj, ksmooth_normal};
 use crate::core::math::stats::is_outlier;
+use crate::core::math::vector_helpers::median;
 use crate::errors::BixverseErrors;
 
 use super::nb_fit::{LOG_UMI_COEF, NbOffsetFit};
@@ -106,6 +107,213 @@ impl SctParams {
     }
 }
 
+////////////////
+// Covariates //
+////////////////
+
+/// Cell-level covariates the model regresses out alongside the library size.
+///
+/// sctransform's `latent_var` beyond `log_umi`. The library size is never one
+/// of these: it enters as a fixed offset with its slope pinned at `ln(10)`,
+/// which is what distinguishes v2 from v1, so putting it here would fit it
+/// twice.
+///
+/// Empty is the common case and costs nothing: the design collapses to a single
+/// intercept column and the residual arithmetic skips the dot product.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SctCovariates {
+    /// Row-major `n_cells * n_covariates`, excluding the intercept column.
+    pub values: Vec<f64>,
+    /// One name per covariate, for reporting the fitted coefficients back.
+    pub names: Vec<String>,
+}
+
+impl SctCovariates {
+    /// Builds a covariate set from one column per covariate.
+    ///
+    /// ### Params
+    ///
+    /// * `columns` - One `(name, values)` pair per covariate, each of length
+    ///   `n_cells`.
+    ///
+    /// ### Returns
+    ///
+    /// The covariate set, or [`BixverseErrors::LengthMismatch`] when the
+    /// columns disagree in length.
+    pub fn from_columns(columns: &[(String, Vec<f64>)]) -> Result<Self, BixverseErrors> {
+        if columns.is_empty() {
+            return Ok(Self::default());
+        }
+        let n_cells = columns[0].1.len();
+        if let Some((name, col)) = columns.iter().find(|(_, c)| c.len() != n_cells) {
+            return Err(BixverseErrors::SctCovariateLengthMismatch {
+                name: name.clone(),
+                expected: n_cells,
+                found: col.len(),
+            });
+        }
+
+        // Row-major, so a cell's covariates are contiguous and the per-cell dot
+        // product in the residual is a single cache line on any realistic
+        // covariate count.
+        let mut values = Vec::with_capacity(n_cells * columns.len());
+        for cell in 0..n_cells {
+            for (_, col) in columns {
+                values.push(col[cell]);
+            }
+        }
+
+        Ok(Self {
+            values,
+            names: columns.iter().map(|(n, _)| n.clone()).collect(),
+        })
+    }
+
+    /// Number of covariates, excluding the intercept.
+    ///
+    /// ### Returns
+    ///
+    /// The covariate count.
+    pub fn n_covariates(&self) -> usize {
+        self.names.len()
+    }
+
+    /// Whether there are no covariates at all.
+    ///
+    /// ### Returns
+    ///
+    /// `true` when only the intercept is fitted.
+    pub fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
+
+    /// One cell's covariate values.
+    ///
+    /// ### Params
+    ///
+    /// * `cell` - Position within the cell set.
+    ///
+    /// ### Returns
+    ///
+    /// The slice, empty when there are no covariates.
+    pub fn row(&self, cell: usize) -> &[f64] {
+        let k = self.n_covariates();
+        if k == 0 {
+            &[]
+        } else {
+            &self.values[cell * k..(cell + 1) * k]
+        }
+    }
+
+    /// Checks the covariates cover the expected number of cells.
+    ///
+    /// ### Params
+    ///
+    /// * `n_cells` - Cells the model runs over.
+    ///
+    /// ### Returns
+    ///
+    /// `()`, or [`BixverseErrors::LengthMismatch`].
+    pub fn validate(&self, n_cells: usize) -> Result<(), BixverseErrors> {
+        let expected = n_cells * self.n_covariates();
+        if self.values.len() != expected {
+            return Err(BixverseErrors::LengthMismatch {
+                name: "covariate values",
+                expected,
+                found: self.values.len(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Builds the design matrix the fit uses: an intercept column followed by
+    /// the covariates, row-major `n_cells * (1 + n_covariates)`.
+    ///
+    /// The library size is deliberately absent. It is the offset.
+    ///
+    /// ### Params
+    ///
+    /// * `n_cells` - Number of rows.
+    ///
+    /// ### Returns
+    ///
+    /// The design matrix.
+    pub fn design(&self, n_cells: usize) -> Vec<f64> {
+        let k = self.n_covariates();
+        let mut design = Vec::with_capacity(n_cells * (k + 1));
+        for cell in 0..n_cells {
+            design.push(1.0);
+            design.extend_from_slice(self.row(cell));
+        }
+        design
+    }
+
+    /// The median of each covariate.
+    ///
+    /// The correction places every cell at the median of every latent
+    /// variable, so this is what the corrected counts are evaluated at.
+    ///
+    /// ### Params
+    ///
+    /// * `n_cells` - Number of cells.
+    ///
+    /// ### Returns
+    ///
+    /// One median per covariate.
+    pub fn medians(&self, n_cells: usize) -> Vec<f64> {
+        (0..self.n_covariates())
+            .map(|k| {
+                let column: Vec<f64> = (0..n_cells).map(|c| self.row(c)[k]).collect();
+                median(&column).unwrap_or(0.0)
+            })
+            .collect()
+    }
+}
+
+/// The per-cell terms every residual needs.
+///
+/// Bundled because the library size and the covariates always travel together
+/// and every consumer of a residual needs both.
+#[derive(Clone, Copy, Debug)]
+pub struct SctCellContext<'a> {
+    /// `log10(total UMI)` per cell.
+    pub log10_umi: &'a [f64],
+    /// Cell-level covariates, in the same cell order.
+    pub covariates: &'a SctCovariates,
+}
+
+impl<'a> SctCellContext<'a> {
+    /// Builds a context and checks the two agree on the cell count.
+    ///
+    /// ### Params
+    ///
+    /// * `log10_umi` - `log10(total UMI)` per cell.
+    /// * `covariates` - Cell-level covariates.
+    ///
+    /// ### Returns
+    ///
+    /// The context, or [`BixverseErrors::LengthMismatch`].
+    pub fn new(
+        log10_umi: &'a [f64],
+        covariates: &'a SctCovariates,
+    ) -> Result<Self, BixverseErrors> {
+        covariates.validate(log10_umi.len())?;
+        Ok(Self {
+            log10_umi,
+            covariates,
+        })
+    }
+
+    /// Number of cells described.
+    ///
+    /// ### Returns
+    ///
+    /// The cell count.
+    pub fn n_cells(&self) -> usize {
+        self.log10_umi.len()
+    }
+}
+
 /////////////////
 // Gene stats //
 /////////////////
@@ -189,8 +397,13 @@ pub struct SctModel {
     pub genes: Vec<usize>,
     /// Regularised inverse overdispersion. `f64::INFINITY` for a Poisson gene.
     pub theta: Vec<f64>,
-    /// Regularised intercept on the natural-log scale.
-    pub intercept: Vec<f64>,
+    /// Regularised coefficients, row-major `n_genes * n_coef`. Column zero is
+    /// the intercept, the rest are the covariates in `covariate_names` order.
+    pub coefficients: Vec<f64>,
+    /// Design columns per gene, at least one.
+    pub n_coef: usize,
+    /// Names of the fitted covariates, length `n_coef - 1`.
+    pub covariate_names: Vec<String>,
     /// Coefficient on `log10(total UMI)`, always `ln(10)`. See
     /// [`LOG_UMI_COEF`].
     pub log_umi_coef: f64,
@@ -208,6 +421,41 @@ impl SctModel {
     /// The gene count.
     pub fn len(&self) -> usize {
         self.theta.len()
+    }
+
+    /// One gene's coefficients, intercept first.
+    ///
+    /// ### Params
+    ///
+    /// * `pos` - Position within the model.
+    ///
+    /// ### Returns
+    ///
+    /// The `n_coef` coefficients.
+    pub fn coefficients_for(&self, pos: usize) -> &[f64] {
+        &self.coefficients[pos * self.n_coef..(pos + 1) * self.n_coef]
+    }
+
+    /// One gene's intercept.
+    ///
+    /// ### Params
+    ///
+    /// * `pos` - Position within the model.
+    ///
+    /// ### Returns
+    ///
+    /// The intercept on the natural-log scale.
+    pub fn intercept(&self, pos: usize) -> f64 {
+        self.coefficients[pos * self.n_coef]
+    }
+
+    /// Whether the model regresses out anything beyond the library size.
+    ///
+    /// ### Returns
+    ///
+    /// `true` when covariates were fitted.
+    pub fn has_covariates(&self) -> bool {
+        self.n_coef > 1
     }
 
     /// Whether any genes are modelled.
@@ -286,6 +534,9 @@ impl SctModel {
 /// * `step1_idx` - Position of each step-1 gene in the full gene set, parallel
 ///   to `step1`.
 /// * `stats` - Per-gene statistics over the full cell set, for every gene.
+/// * `covariate_names` - Names of the fitted covariates, so the model can
+///   report which coefficient is which. Its length plus one must match the
+///   coefficient count in `step1`.
 /// * `mean_cell_sum` - Mean library size, for the Poisson genes' closed-form
 ///   intercept.
 /// * `min_variance` - Variance floor. See [`min_variance_from_umi_median`].
@@ -297,10 +548,12 @@ impl SctModel {
 /// The [`SctModel`] over every gene in `stats`, or a [`BixverseErrors`] when
 /// the inputs disagree in length, too few genes survive the exclusions to
 /// smooth, or the smoothing leaves a gene without a value.
+#[allow(clippy::too_many_arguments)]
 pub fn regularise_sct_model(
     step1: &[NbOffsetFit],
     step1_idx: &[usize],
     stats: &SctGeneStats,
+    covariate_names: &[String],
     mean_cell_sum: f64,
     min_variance: f64,
     n_cells: usize,
@@ -322,6 +575,15 @@ pub fn regularise_sct_model(
         });
     }
 
+    let n_coef = covariate_names.len() + 1;
+    if let Some(f) = step1.iter().find(|f| f.coefficients.len() != n_coef) {
+        return Err(BixverseErrors::LengthMismatch {
+            name: "step-1 coefficients",
+            expected: n_coef,
+            found: f.coefficients.len(),
+        });
+    }
+
     // Genes that get the closed-form offset model rather than a smoothed fit:
     // no excess variance over Poisson, or too low a mean to tell.
     let poisson: Vec<bool> = (0..n_genes)
@@ -335,20 +597,32 @@ pub fn regularise_sct_model(
         .zip(step1_idx.iter())
         .map(|(f, &g)| (1.0 + 10.0_f64.powf(stats.log_gmean[g]) / f.theta).log10())
         .collect();
-    let intercept_s1: Vec<f64> = step1.iter().map(|f| f.intercept).collect();
     let gmean_s1: Vec<f64> = step1_idx.iter().map(|&g| stats.log_gmean[g]).collect();
 
-    // The third parameter column, `log_umi`, is the constant ln(10). Within any
-    // bin its median is itself and its MAD is zero, so its robust z-score is
-    // exactly zero and it can never flag an outlier. Skipping it is a saving,
-    // not a behaviour change.
-    let out_disp = is_outlier(&disp_par, &gmean_s1, params.outlier_th)?;
-    let out_int = is_outlier(&intercept_s1, &gmean_s1, params.outlier_th)?;
+    // One column per parameter that gets smoothed: the overdispersion factor
+    // followed by every design coefficient.
+    let columns: Vec<Vec<f64>> = std::iter::once(disp_par.clone())
+        .chain((0..n_coef).map(|k| step1.iter().map(|f| f.coefficients[k]).collect()))
+        .collect();
+
+    // The `log_umi` column sctransform also carries is the constant ln(10).
+    // Within any bin its median is itself and its MAD is zero, so its robust
+    // z-score is exactly zero and it can never flag an outlier, nor can
+    // smoothing a constant change it. Leaving it out is a saving, not a
+    // behaviour change.
+    let mut outlier = vec![false; step1.len()];
+    for column in &columns {
+        for (slot, flagged) in
+            outlier
+                .iter_mut()
+                .zip(is_outlier(column, &gmean_s1, params.outlier_th)?)
+        {
+            *slot |= flagged;
+        }
+    }
 
     let keep: Vec<usize> = (0..step1.len())
-        .filter(|&i| {
-            !out_disp[i] && !out_int[i] && step1[i].theta.is_finite() && !poisson[step1_idx[i]]
-        })
+        .filter(|&i| !outlier[i] && step1[i].theta.is_finite() && !poisson[step1_idx[i]])
         .collect();
 
     if keep.len() < 2 {
@@ -359,9 +633,6 @@ pub fn regularise_sct_model(
     }
 
     let fit_x: Vec<f64> = keep.iter().map(|&i| gmean_s1[i]).collect();
-    let fit_disp: Vec<f64> = keep.iter().map(|&i| disp_par[i]).collect();
-    let fit_int: Vec<f64> = keep.iter().map(|&i| intercept_s1[i]).collect();
-
     let bw = bw_sj(&fit_x)? * params.bw_adjust;
 
     // Predict at every gene's abundance, clamped into the range the smoothing
@@ -383,29 +654,45 @@ pub fn regularise_sct_model(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    let scatter = |smoothed: Vec<f64>| -> Vec<f64> {
+    let smooth = |column: &[f64]| -> Result<Vec<f64>, BixverseErrors> {
+        let y: Vec<f64> = keep.iter().map(|&i| column[i]).collect();
+        let (_, smoothed) = ksmooth_normal(&fit_x, &y, &x_points, bw)?;
         let mut out = vec![f64::NAN; n_genes];
         for (k, &g) in order.iter().enumerate() {
             out[g] = smoothed[k];
         }
-        out
+        Ok(out)
     };
 
-    let (_, sm_disp) = ksmooth_normal(&fit_x, &fit_disp, &x_points, bw)?;
-    let (_, sm_int) = ksmooth_normal(&fit_x, &fit_int, &x_points, bw)?;
-    let mut disp_fit = scatter(sm_disp);
-    let mut intercept = scatter(sm_int);
-
-    // Poisson genes take the exact offset model: theta infinite and the
-    // intercept straight off the gene mean, not a curve value.
-    for g in 0..n_genes {
-        if poisson[g] {
-            disp_fit[g] = 0.0;
-            intercept[g] = stats.amean[g].ln() - mean_cell_sum.ln();
+    let mut disp_fit = smooth(&columns[0])?;
+    let mut coefficients = vec![0.0_f64; n_genes * n_coef];
+    for k in 0..n_coef {
+        let column = smooth(&columns[k + 1])?;
+        for (g, &v) in column.iter().enumerate() {
+            coefficients[g * n_coef + k] = v;
         }
     }
 
-    if let Some(g) = (0..n_genes).find(|&g| disp_fit[g].is_nan() || intercept[g].is_nan()) {
+    // Poisson genes take the exact offset model: theta infinite, the intercept
+    // straight off the gene mean, and every covariate coefficient zeroed. A
+    // gene with no overdispersion has nothing for a covariate to explain, and
+    // sctransform pads its offset parameters with zeros for the same reason.
+    for g in 0..n_genes {
+        if poisson[g] {
+            disp_fit[g] = 0.0;
+            coefficients[g * n_coef] = stats.amean[g].ln() - mean_cell_sum.ln();
+            for k in 1..n_coef {
+                coefficients[g * n_coef + k] = 0.0;
+            }
+        }
+    }
+
+    if let Some(g) = (0..n_genes).find(|&g| {
+        disp_fit[g].is_nan()
+            || coefficients[g * n_coef..(g + 1) * n_coef]
+                .iter()
+                .any(|v| v.is_nan())
+    }) {
         return Err(BixverseErrors::SctSmoothingLeftAGeneUnfitted { gene: g });
     }
 
@@ -424,7 +711,9 @@ pub fn regularise_sct_model(
         // store indices once it knows them.
         genes: (0..n_genes).collect(),
         theta,
-        intercept,
+        coefficients,
+        n_coef,
+        covariate_names: covariate_names.to_vec(),
         log_umi_coef: LOG_UMI_COEF,
         min_variance,
         clip_range: params.resolve_clip_range(n_cells),
@@ -438,7 +727,7 @@ pub fn regularise_sct_model(
 /// Pearson residuals for one gene across the selected cells.
 ///
 /// ```text
-/// mu_c  = exp(intercept + log_umi_coef * log10_umi_c)
+/// mu_c  = exp(intercept + log_umi_coef * log10_umi_c + x_c . beta)
 /// var_c = max(mu_c + mu_c^2 / theta, min_variance)
 /// r_c   = clamp((y_c - mu_c) / sqrt(var_c), clip_range)
 /// ```
@@ -456,10 +745,9 @@ pub fn regularise_sct_model(
 ///
 /// * `counts` - The gene's non-zero counts.
 /// * `indices` - Cell positions of those counts, within `0..n_cells`.
-/// * `n_cells` - Length of the output row.
 /// * `gene_pos` - Position of this gene within the model.
 /// * `model` - The fitted model.
-/// * `log10_umi` - `log10(total UMI)` per cell, in the same cell order.
+/// * `cells` - Per-cell library sizes and covariates.
 /// * `out` - Destination row, overwritten in full.
 ///
 /// ### Returns
@@ -469,10 +757,9 @@ pub fn regularise_sct_model(
 pub fn sct_residual_row(
     counts: &[f64],
     indices: &[u32],
-    n_cells: usize,
     gene_pos: usize,
     model: &SctModel,
-    log10_umi: &[f64],
+    cells: &SctCellContext<'_>,
     out: &mut [f32],
 ) -> Result<(), BixverseErrors> {
     if gene_pos >= model.len() {
@@ -481,13 +768,7 @@ pub fn sct_residual_row(
             n_genes: model.len(),
         });
     }
-    if log10_umi.len() != n_cells {
-        return Err(BixverseErrors::LengthMismatch {
-            name: "log10_umi",
-            expected: n_cells,
-            found: log10_umi.len(),
-        });
-    }
+    let n_cells = cells.n_cells();
     if out.len() != n_cells {
         return Err(BixverseErrors::LengthMismatch {
             name: "out",
@@ -495,25 +776,43 @@ pub fn sct_residual_row(
             found: out.len(),
         });
     }
+    if cells.covariates.n_covariates() + 1 != model.n_coef {
+        return Err(BixverseErrors::SctCovariateCountMismatch {
+            model: model.n_coef - 1,
+            supplied: cells.covariates.n_covariates(),
+        });
+    }
 
-    let b0 = model.intercept[gene_pos];
+    let beta = model.coefficients_for(gene_pos);
     let theta = model.theta[gene_pos];
     let min_var = model.min_variance;
     let (lo, hi) = model.clip_range;
     let slope = model.log_umi_coef;
+    let covariates = cells.covariates;
+    let simple = !model.has_covariates();
 
     // Every cell starts at its zero-count residual; the stored non-zeros then
     // overwrite their own positions. One pass over the cells plus one over the
     // non-zeros, rather than densifying the counts first.
+    let eta = |c: usize| -> f64 {
+        let mut e = beta[0] + slope * cells.log10_umi[c];
+        if !simple {
+            for (b, x) in beta[1..].iter().zip(covariates.row(c)) {
+                e += b * x;
+            }
+        }
+        e
+    };
+
     for (c, slot) in out.iter_mut().enumerate() {
-        let mu = (b0 + slope * log10_umi[c]).exp();
+        let mu = eta(c).exp();
         let var = (mu + mu * mu / theta).max(min_var);
         *slot = ((-mu) / var.sqrt()).clamp(lo, hi) as f32;
     }
 
     for (&i, &y) in indices.iter().zip(counts.iter()) {
         let c = i as usize;
-        let mu = (b0 + slope * log10_umi[c]).exp();
+        let mu = eta(c).exp();
         let var = (mu + mu * mu / theta).max(min_var);
         out[c] = ((y - mu) / var.sqrt()).clamp(lo, hi) as f32;
     }
@@ -631,7 +930,7 @@ mod tests {
                 };
                 NbOffsetFit {
                     theta,
-                    intercept: amean[g].ln() - 3000.0_f64.ln() + (int_j[k] - 0.5) * 0.2,
+                    coefficients: vec![amean[g].ln() - 3000.0_f64.ln() + (int_j[k] - 0.5) * 0.2],
                 }
             })
             .collect();
@@ -657,9 +956,17 @@ mod tests {
         let (stats, step1) = reg_fixture();
         let params = SctParams::default();
 
-        let model =
-            regularise_sct_model(&step1, &STEP1_IDX, &stats, MEAN_CELL_SUM, 1.0, 800, &params)
-                .unwrap();
+        let model = regularise_sct_model(
+            &step1,
+            &STEP1_IDX,
+            &stats,
+            &[],
+            MEAN_CELL_SUM,
+            1.0,
+            800,
+            &params,
+        )
+        .unwrap();
 
         assert_eq!(model.len(), 500);
         assert_eq!(
@@ -685,7 +992,7 @@ mod tests {
         ];
         for (g, &e) in int_head.iter().enumerate() {
             assert!(model.theta[g].is_infinite(), "gene {g} should be Poisson");
-            assert_relative_eq!(model.intercept[g], e, max_relative = 1e-12);
+            assert_relative_eq!(model.intercept(g), e, max_relative = 1e-12);
         }
 
         // The tail is the smoothed branch, which is what the bandwidth and the
@@ -705,7 +1012,7 @@ mod tests {
 
         let theta_sum: f64 = model.theta.iter().filter(|t| t.is_finite()).sum();
         assert_relative_eq!(theta_sum, 592.180_275_674_843, max_relative = 1e-10);
-        let int_sum: f64 = model.intercept.iter().sum();
+        let int_sum: f64 = (0..model.len()).map(|g| model.intercept(g)).sum();
         assert_relative_eq!(int_sum, -6_122.860_122_515_623, max_relative = 1e-12);
     }
 
@@ -719,6 +1026,7 @@ mod tests {
             &step1,
             &STEP1_IDX,
             &stats,
+            &[],
             MEAN_CELL_SUM,
             1.0,
             800,
@@ -731,7 +1039,7 @@ mod tests {
                 continue;
             }
             assert_relative_eq!(
-                model.intercept[g],
+                model.intercept(g),
                 stats.amean[g].ln() - MEAN_CELL_SUM.ln(),
                 max_relative = 1e-14
             );
@@ -749,6 +1057,7 @@ mod tests {
                 &step1,
                 &idx,
                 &stats,
+                &[],
                 MEAN_CELL_SUM,
                 1.0,
                 800,
@@ -771,15 +1080,15 @@ mod tests {
         let step1 = vec![
             NbOffsetFit {
                 theta: 2.0,
-                intercept: -7.0,
+                coefficients: vec![-7.0],
             },
             NbOffsetFit {
                 theta: 3.0,
-                intercept: -6.0,
+                coefficients: vec![-6.0],
             },
             NbOffsetFit {
                 theta: 4.0,
-                intercept: -5.0,
+                coefficients: vec![-5.0],
             },
         ];
 
@@ -788,6 +1097,7 @@ mod tests {
                 &step1,
                 &[0, 1, 2],
                 &stats,
+                &[],
                 3000.0,
                 1.0,
                 100,

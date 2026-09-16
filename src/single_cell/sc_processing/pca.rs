@@ -14,7 +14,7 @@ use crate::core::math::pca_svd::randomised_sparse_svd;
 use crate::core::math::pca_svd::*;
 use crate::core::math::sparse::sparse_svd_lanczos;
 use crate::prelude::*;
-use crate::single_cell::sctransform::model::{SctModel, sct_residual_row};
+use crate::single_cell::sctransform::model::{SctCellContext, SctModel, sct_residual_row};
 
 ///////////
 // Types //
@@ -327,7 +327,7 @@ fn centre_and_scale(
 /// * `no_cells` - Number of cells represented.
 /// * `gene_pos` - Position of this gene within the model.
 /// * `model` - The fitted scTransform model.
-/// * `log10_umi` - `log10(total UMI)` per cell, in the same cell order.
+/// * `cells` - Per-cell library sizes and covariates, in the same cell order.
 /// * `mean_center` - Subtract the mean.
 /// * `normalise_variance` - Divide by the standard deviation.
 ///
@@ -340,7 +340,7 @@ pub fn residual_csc_chunk(
     no_cells: usize,
     gene_pos: usize,
     model: &SctModel,
-    log10_umi: &[f64],
+    cells: &SctCellContext<'_>,
     mean_center: bool,
     normalise_variance: bool,
 ) -> Result<(Vec<f32>, f32, f32), BixverseErrors> {
@@ -353,10 +353,9 @@ pub fn residual_csc_chunk(
     sct_residual_row(
         &counts,
         &chunk.indices,
-        no_cells,
         gene_pos,
         model,
-        log10_umi,
+        cells,
         &mut dense_data,
     )?;
 
@@ -386,8 +385,8 @@ pub enum PcaColumnSource<'a> {
     Residual {
         /// The fitted model.
         model: &'a SctModel,
-        /// `log10(total UMI)` per cell, in the selected cell order.
-        log10_umi: &'a [f64],
+        /// Per-cell library sizes and covariates, in the selected cell order.
+        cells: SctCellContext<'a>,
     },
 }
 
@@ -420,7 +419,7 @@ impl<'a> PcaColumnSource<'a> {
                 normalise_variance,
                 *clr_offsets,
             )),
-            Self::Residual { model, log10_umi } => {
+            Self::Residual { model, cells } => {
                 let pos = model.position(chunk.original_index).ok_or(
                     BixverseErrors::SctGeneNotModelled {
                         gene: chunk.original_index,
@@ -431,7 +430,7 @@ impl<'a> PcaColumnSource<'a> {
                     no_cells,
                     pos,
                     model,
-                    log10_umi,
+                    cells,
                     mean_center,
                     normalise_variance,
                 )
@@ -617,10 +616,10 @@ fn dense_pca<S: SingleCellReading>(
 ) -> SingleCellPcaResScaledStats {
     let clr_offsets = match source {
         PcaColumnSource::Normalised { clr_offsets } => clr_offsets,
-        PcaColumnSource::Residual { log10_umi, .. } => {
-            if log10_umi.len() != cell_indices.len() {
+        PcaColumnSource::Residual { cells, .. } => {
+            if cells.n_cells() != cell_indices.len() {
                 return Err(BixverseErrors::OffsetsLengthDoesNotMatchNCells {
-                    len_offset: log10_umi.len(),
+                    len_offset: cells.n_cells(),
                     n_cells: cell_indices.len(),
                 });
             }
@@ -898,7 +897,7 @@ pub fn pca_on_sc_stats<S: SingleCellReading>(
 /// * `params_pca` - Parameters for this PCA run, see [SingleCellPcaParams].
 ///   `clr` must be off.
 /// * `model` - The fitted scTransform model.
-/// * `log10_umi` - `log10(total UMI)` per cell, in `cell_indices` order.
+/// * `cells` - Per-cell library sizes and covariates, in `cell_indices` order.
 /// * `seed` - Seed for randomised SVD.
 /// * `return_scaled` - Return the residual matrix.
 /// * `verbose` - `0` silent, `1` normal, `2` detailed.
@@ -918,7 +917,7 @@ pub fn pca_on_sc_residuals<S: SingleCellReading>(
     no_pcs: usize,
     params_pca: &SingleCellPcaParams,
     model: &SctModel,
-    log10_umi: &[f64],
+    cells: &SctCellContext<'_>,
     seed: usize,
     return_scaled: bool,
     verbose: usize,
@@ -929,7 +928,10 @@ pub fn pca_on_sc_residuals<S: SingleCellReading>(
         gene_indices,
         no_pcs,
         params_pca,
-        PcaColumnSource::Residual { model, log10_umi },
+        PcaColumnSource::Residual {
+            model,
+            cells: *cells,
+        },
         seed,
         return_scaled,
         verbose,
@@ -953,7 +955,7 @@ pub fn pca_on_sc_residuals<S: SingleCellReading>(
 /// * `no_pcs` - Number of principal components to calculate.
 /// * `params_pca` - Parameters for this PCA run, see [SingleCellPcaParams].
 /// * `model` - The fitted scTransform model.
-/// * `log10_umi` - `log10(total UMI)` per cell, in `cell_indices` order.
+/// * `cells` - Per-cell library sizes and covariates, in `cell_indices` order.
 /// * `seed` - Seed for randomised SVD.
 /// * `verbose` - `0` silent, `1` normal, `2` detailed.
 ///
@@ -968,7 +970,7 @@ pub fn pca_on_sc_residuals_stats<S: SingleCellReading>(
     no_pcs: usize,
     params_pca: &SingleCellPcaParams,
     model: &SctModel,
-    log10_umi: &[f64],
+    cells: &SctCellContext<'_>,
     seed: usize,
     verbose: usize,
 ) -> SingleCellPcaResStats {
@@ -978,7 +980,10 @@ pub fn pca_on_sc_residuals_stats<S: SingleCellReading>(
         gene_indices,
         no_pcs,
         params_pca,
-        PcaColumnSource::Residual { model, log10_umi },
+        PcaColumnSource::Residual {
+            model,
+            cells: *cells,
+        },
         seed,
         false,
         verbose,

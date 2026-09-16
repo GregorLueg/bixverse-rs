@@ -93,6 +93,51 @@ corrected_nnz <- as.numeric(Matrix::rowSums(corrected > 0))
 probe_pos <- c(1L, which.min(abs(log_gmean - median(log_gmean))), length(genes))
 probe_rows <- as.matrix(corrected[probe_pos, ])
 
+## ---- a second run with a covariate -------------------------------------------
+#
+# sctransform's `latent_var` beyond `log_umi`: the extra variable becomes a
+# fitted coefficient in the NB GLM while the library size stays a fixed offset.
+# Drawn from the same LCG after the counts, so the count matrix is unchanged and
+# both sides rebuild the covariate identically.
+
+# A percent-mitochondrial analogue: the share of each cell's counts falling in a
+# fixed block of genes. Real structure, unlike a noise covariate whose
+# coefficients would all be ~0 and would let a dropped term pass unnoticed.
+COV_BLOCK <- 30L
+cov_x <- as.numeric(100 * Matrix::colSums(counts[seq_len(COV_BLOCK), ]) /
+                      Matrix::colSums(counts))
+cell_attr_cov <- data.frame(
+  log_umi = log10(Matrix::colSums(counts)),
+  cov_x = cov_x,
+  row.names = colnames(counts)
+)
+
+vst_cov <- vst(
+  counts,
+  vst.flavor = "v2",
+  cell_attr = cell_attr_cov,
+  latent_var = c("log_umi", "cov_x"),
+  min_cells = MIN_CELLS,
+  gmean_eps = GMEAN_EPS,
+  return_cell_attr = TRUE,
+  return_gene_attr = TRUE,
+  verbosity = 0
+)
+
+stopifnot(identical(colnames(vst_cov$model_pars),
+                    c("theta", "(Intercept)", "log_umi", "cov_x")))
+
+cov_step1_pos <- match(rownames(vst_cov$model_pars), genes) - 1L
+cov_mp        <- vst_cov$model_pars
+cov_fit       <- vst_cov$model_pars_fit[genes, , drop = FALSE]
+cov_resid_var <- vst_cov$gene_attr[genes, "residual_variance"]
+
+cat(sprintf("covariate run: %d step-1 genes, %d poisson in fit\n",
+            length(cov_step1_pos), sum(!is.finite(cov_fit[, "theta"]))))
+cat(sprintf("cov_x range %.2f..%.2f, coefficient range: %.6f .. %.6f\n",
+            min(cov_x), max(cov_x),
+            min(cov_fit[, "cov_x"]), max(cov_fit[, "cov_x"])))
+
 ## ---- emit -------------------------------------------------------------------
 
 # R prints a non-finite as "Inf"/"NaN", which is not Rust syntax.
@@ -180,6 +225,26 @@ for (i in seq_len(nrow(probe_rows))) {
   writeLines(c("    [", sprintf("        %s,", num_vec(probe_rows[i, ])), "    ],"), con)
 }
 writeLines(c("];", ""), con)
+
+writeLines(c(
+  "//////////////////////////////",
+  "// Covariate parity fixture //",
+  "//////////////////////////////",
+  "",
+  "/// Positions within `MODELLED` of the step-1 genes in the covariate run.",
+  sprintf("pub const COV_STEP1_POS: [usize; %d] = [%s];",
+          length(cov_step1_pos), int_vec(cov_step1_pos)),
+  ""
+), con)
+
+emit("COV_X", "Per-cell covariate: percent of counts in the first 30 genes.", cov_x)
+emit("COV_STEP1_THETA", "Unregularised step-1 theta, covariate run.", cov_mp[, "theta"])
+emit("COV_STEP1_INTERCEPT", "Unregularised step-1 intercept, covariate run.", cov_mp[, "(Intercept)"])
+emit("COV_STEP1_COEF", "Unregularised step-1 `cov_x` coefficient.", cov_mp[, "cov_x"])
+emit("COV_FIT_THETA", "Regularised theta per modelled gene, covariate run.", cov_fit[, "theta"])
+emit("COV_FIT_INTERCEPT", "Regularised intercept per modelled gene, covariate run.", cov_fit[, "(Intercept)"])
+emit("COV_FIT_COEF", "Regularised `cov_x` coefficient per modelled gene.", cov_fit[, "cov_x"])
+emit("COV_RESIDUAL_VARIANCE", "Residual variance per modelled gene, covariate run.", cov_resid_var)
 
 close(con)
 

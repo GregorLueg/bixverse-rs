@@ -29,8 +29,8 @@ use crate::single_cell::sc_data::data_io::{
 };
 
 use super::model::{
-    SctGeneStats, SctModel, SctParams, min_variance_from_umi_median, regularise_sct_model,
-    sct_residual_row,
+    SctCellContext, SctCovariates, SctGeneStats, SctModel, SctParams, min_variance_from_umi_median,
+    regularise_sct_model, sct_residual_row,
 };
 use super::nb_fit::{NbOffsetFit, fit_nb_offset_gene};
 
@@ -483,6 +483,9 @@ fn inverse_density_weights(x: &[f64]) -> Result<Vec<f64>, BixverseErrors> {
 ///   headers via [`SingleCellReading::read_cell_library_sizes`]. This is the
 ///   offset, and sctransform takes it before any gene filtering, so it must not
 ///   be recomputed from a gene subset.
+/// * `covariates` - Cell-level covariates to regress out alongside the library
+///   size, sctransform's `latent_var` beyond `log_umi`. Pass
+///   [`SctCovariates::default`] for the usual depth-only model.
 /// * `params` - Tuning knobs.
 /// * `step1_genes` - Store indices to fit on, overriding the sampling. Exists
 ///   so a parity fixture can pin R's own random subset, which no RNG here can
@@ -494,10 +497,12 @@ fn inverse_density_weights(x: &[f64]) -> Result<Vec<f64>, BixverseErrors> {
 ///
 /// The fitted [`SctModel`] alongside the [`SctGenePass`] it was built from, so
 /// the caller can reuse the statistics rather than sweeping again.
+#[allow(clippy::too_many_arguments)]
 pub fn fit_sctransform<S: SingleCellReading>(
     reader: &S,
     cell_indices: &[usize],
     library_sizes: &[f64],
+    covariates: &SctCovariates,
     params: &SctParams,
     step1_genes: Option<&[usize]>,
     step1_cells: Option<&[usize]>,
@@ -510,6 +515,7 @@ pub fn fit_sctransform<S: SingleCellReading>(
             found: library_sizes.len(),
         });
     }
+    covariates.validate(cell_indices.len())?;
 
     let verbosity = parse_verbosity_level(opts.verbose);
     let pass = sct_gene_pass(reader, cell_indices, params, opts)?;
@@ -563,12 +569,21 @@ pub fn fit_sctransform<S: SingleCellReading>(
     let start_fit = Instant::now();
     let log_offset: Vec<f64> = cells.iter().map(|&c| library_sizes[c].ln()).collect();
 
+    // The design is built over the sampled cells only, so its rows have to be
+    // gathered rather than sliced: `cells` indexes into the full cell set.
+    let n_coef = covariates.n_covariates() + 1;
+    let mut design = Vec::with_capacity(cells.len() * n_coef);
+    for &c in &cells {
+        design.push(1.0);
+        design.extend_from_slice(covariates.row(c));
+    }
+
     let chunks = reader.read_gene_parallel_filtered(&genes, &step1_cell_set)?;
     let fits: Vec<NbOffsetFit> = chunks
         .par_iter()
         .map(|chunk| {
             let dense = densify(chunk, cells.len());
-            fit_nb_offset_gene(&dense, &log_offset)
+            fit_nb_offset_gene(&dense, &log_offset, &design, n_coef)
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -581,8 +596,9 @@ pub fn fit_sctransform<S: SingleCellReading>(
 
     if verbosity.normal_verbosity() {
         println!(
-            "scTransform: fitted {} genes in {:.2?}",
+            "scTransform: fitted {} genes with {} coefficient(s) in {:.2?}",
             fits.len(),
+            n_coef,
             start_fit.elapsed()
         );
     }
@@ -598,9 +614,9 @@ pub fn fit_sctransform<S: SingleCellReading>(
 
     let mut kept_fits = Vec::with_capacity(fits.len());
     let mut kept_idx = Vec::with_capacity(fits.len());
-    for (fit, g) in fits.iter().zip(fit_idx.iter()) {
+    for (fit, g) in fits.into_iter().zip(fit_idx.iter()) {
         if let Some(&pos) = position.get(g) {
-            kept_fits.push(*fit);
+            kept_fits.push(fit);
             kept_idx.push(pos);
         }
     }
@@ -619,6 +635,7 @@ pub fn fit_sctransform<S: SingleCellReading>(
         &kept_fits,
         &kept_idx,
         &sub_stats,
+        &covariates.names,
         pass.mean_cell_sum,
         min_variance_from_umi_median(pass.median_nonzero),
         n_cells,
@@ -650,8 +667,8 @@ pub fn fit_sctransform<S: SingleCellReading>(
 /// * `reader` - Gene-major reader.
 /// * `model` - The fitted model; its `genes` field decides which genes are
 ///   visited.
-/// * `cell_indices` - Cells to include, in the order `log10_umi` is given in.
-/// * `log10_umi` - `log10(total UMI)` per cell.
+/// * `cell_indices` - Cells to include, in the order `cells` is given in.
+/// * `cells` - Per-cell library sizes and covariates.
 /// * `opts` - Disk and reporting knobs.
 ///
 /// ### Returns
@@ -662,14 +679,14 @@ pub fn sct_residual_variance<S: SingleCellReading>(
     reader: &S,
     model: &SctModel,
     cell_indices: &[usize],
-    log10_umi: &[f64],
+    cells: &SctCellContext<'_>,
     opts: SctStreamOpts,
 ) -> Result<Vec<f64>, BixverseErrors> {
-    if log10_umi.len() != cell_indices.len() {
+    if cells.n_cells() != cell_indices.len() {
         return Err(BixverseErrors::LengthMismatch {
-            name: "log10_umi",
+            name: "cells",
             expected: cell_indices.len(),
-            found: log10_umi.len(),
+            found: cells.n_cells(),
         });
     }
 
@@ -692,15 +709,7 @@ pub fn sct_residual_variance<S: SingleCellReading>(
                 )?;
                 let counts = chunk_counts(chunk);
                 let mut row = vec![0.0_f32; n_cells];
-                sct_residual_row(
-                    &counts,
-                    &chunk.indices,
-                    n_cells,
-                    pos,
-                    model,
-                    log10_umi,
-                    &mut row,
-                )?;
+                sct_residual_row(&counts, &chunk.indices, pos, model, cells, &mut row)?;
                 Ok((pos, sample_variance(&row)))
             })
             .collect::<Result<Vec<_>, BixverseErrors>>()?;
@@ -807,8 +816,8 @@ fn chunk_counts(chunk: &CscGeneChunk) -> Vec<f64> {
 ///
 /// * `reader` - Gene-major reader over the raw counts.
 /// * `model` - The fitted model; its `genes` field decides what is written.
-/// * `cell_indices` - Cells to include, in the order `log10_umi` is given in.
-/// * `log10_umi` - `log10(total UMI)` per cell.
+/// * `cell_indices` - Cells to include, in the order `cells` is given in.
+/// * `cells` - Per-cell library sizes and covariates.
 /// * `out_path` - Gene-major store to write.
 /// * `opts` - Disk and reporting knobs.
 ///
@@ -823,15 +832,15 @@ pub fn sct_corrected_counts<S: SingleCellReading, P: AsRef<Path>>(
     reader: &S,
     model: &SctModel,
     cell_indices: &[usize],
-    log10_umi: &[f64],
+    cells: &SctCellContext<'_>,
     out_path: P,
     opts: SctStreamOpts,
 ) -> Result<(), BixverseErrors> {
-    if log10_umi.len() != cell_indices.len() {
+    if cells.n_cells() != cell_indices.len() {
         return Err(BixverseErrors::LengthMismatch {
-            name: "log10_umi",
+            name: "cells",
             expected: cell_indices.len(),
-            found: log10_umi.len(),
+            found: cells.n_cells(),
         });
     }
 
@@ -840,7 +849,11 @@ pub fn sct_corrected_counts<S: SingleCellReading, P: AsRef<Path>>(
 
     let n_cells = cell_indices.len();
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&c| c as u32).collect();
-    let median_log10_umi = median(log10_umi).unwrap_or(0.0);
+
+    // Every latent variable is held at its median, the library size included,
+    // so the target linear predictor is constant across cells.
+    let median_log10_umi = median(cells.log10_umi).unwrap_or(0.0);
+    let median_covariates = cells.covariates.medians(n_cells);
 
     // The corrected counts no longer carry library-size structure, so there is
     // no target size for the normalised layer to have been scaled to.
@@ -864,8 +877,9 @@ pub fn sct_corrected_counts<S: SingleCellReading, P: AsRef<Path>>(
                     pos,
                     n_cells,
                     model,
-                    log10_umi,
+                    cells,
                     median_log10_umi,
+                    &median_covariates,
                 ))
             })
             .collect::<Result<Vec<_>, BixverseErrors>>()?;
@@ -896,9 +910,10 @@ pub fn sct_corrected_counts<S: SingleCellReading, P: AsRef<Path>>(
 /// * `gene_pos` - Position of this gene within the model.
 /// * `n_cells` - Number of cells represented.
 /// * `model` - The fitted model.
-/// * `log10_umi` - `log10(total UMI)` per cell.
+/// * `cells` - Per-cell library sizes and covariates.
 /// * `median_log10_umi` - Median of `log10_umi`, the library size everything is
 ///   corrected to.
+/// * `median_covariates` - Median of each covariate, what they are held at.
 ///
 /// ### Returns
 ///
@@ -910,15 +925,21 @@ fn correct_one_gene(
     gene_pos: usize,
     n_cells: usize,
     model: &SctModel,
-    log10_umi: &[f64],
+    cells: &SctCellContext<'_>,
     median_log10_umi: f64,
+    median_covariates: &[f64],
 ) -> CscGeneChunk {
-    let b0 = model.intercept[gene_pos];
+    let beta = model.coefficients_for(gene_pos);
     let theta = model.theta[gene_pos];
     let slope = model.log_umi_coef;
+    let simple = !model.has_covariates();
 
-    // Constant across cells: every cell is placed at the same library size.
-    let mu_target = (b0 + slope * median_log10_umi).exp();
+    // Constant across cells: every latent variable is held at its median.
+    let mut eta_target = beta[0] + slope * median_log10_umi;
+    for (b, x) in beta[1..].iter().zip(median_covariates) {
+        eta_target += b * x;
+    }
+    let mu_target = eta_target.exp();
     let sd_target = (mu_target + mu_target * mu_target / theta).sqrt();
 
     let mut counts = vec![0.0_f64; n_cells];
@@ -940,7 +961,13 @@ fn correct_one_gene(
     let mut norms = Vec::new();
 
     for (c, &y) in counts.iter().enumerate() {
-        let mu = (b0 + slope * log10_umi[c]).exp();
+        let mut eta = beta[0] + slope * cells.log10_umi[c];
+        if !simple {
+            for (b, x) in beta[1..].iter().zip(cells.covariates.row(c)) {
+                eta += b * x;
+            }
+        }
+        let mu = eta.exp();
         let residual = (y - mu) / (mu + mu * mu / theta).sqrt();
         // R's `round()` is round-half-to-even, not half-away-from-zero.
         let corrected = (mu_target + residual * sd_target).round_ties_even();
@@ -1105,11 +1132,11 @@ mod tests {
         let fits = vec![
             NbOffsetFit {
                 theta: 1.0,
-                intercept: -5.0,
+                coefficients: vec![-5.0],
             },
             NbOffsetFit {
                 theta: 10_000.0,
-                intercept: -5.0,
+                coefficients: vec![-5.0],
             },
         ];
 
@@ -1117,8 +1144,8 @@ mod tests {
 
         assert_relative_eq!(out[0].theta, 1.0, max_relative = 1e-12);
         assert!(out[1].theta.is_infinite());
-        // The intercept is never touched, only the dispersion.
-        assert_relative_eq!(out[1].intercept, -5.0, max_relative = 1e-12);
+        // The coefficients are never touched, only the dispersion.
+        assert_relative_eq!(out[1].intercept(), -5.0, max_relative = 1e-12);
     }
 
     /// A gene with no excess variance at all gives a negative moment estimate.
@@ -1129,7 +1156,7 @@ mod tests {
         let s = stats(vec![10.0], vec![5.0]);
         let fits = vec![NbOffsetFit {
             theta: 2.0,
-            intercept: -5.0,
+            coefficients: vec![-5.0],
         }];
 
         let out = flag_poisson_genes(fits, &[0], &s, 1e-3);
@@ -1144,7 +1171,7 @@ mod tests {
         let s = stats(vec![10.0], vec![110.0]);
         let fits = vec![NbOffsetFit {
             theta: f64::INFINITY,
-            intercept: -5.0,
+            coefficients: vec![-5.0],
         }];
 
         let out = flag_poisson_genes(fits, &[0], &s, 1e-3);

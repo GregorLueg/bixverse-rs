@@ -1697,6 +1697,28 @@ pub enum BixverseErrors {
     #[error("PCA on Pearson residuals cannot be combined with the CLR transformation.")]
     PcaResidualsWithClr,
 
+    /// Covariate columns handed in disagree in length.
+    #[cfg(feature = "single-cell")]
+    #[error("scTransform covariate '{name}': expected {expected} values, got {found}.")]
+    SctCovariateLengthMismatch {
+        /// Name of the offending covariate
+        name: String,
+        /// Length the other columns had
+        expected: usize,
+        /// Length this one had
+        found: usize,
+    },
+
+    /// The covariates supplied do not match what the model was fitted with.
+    #[cfg(feature = "single-cell")]
+    #[error("scTransform model was fitted with {model} covariate(s) but {supplied} were supplied.")]
+    SctCovariateCountMismatch {
+        /// Covariates the model carries
+        model: usize,
+        /// Covariates the caller supplied
+        supplied: usize,
+    },
+
     // -- cellsweep --
     /// The caller asked for a supplied empty droplet mask but did not give one.
     #[cfg(feature = "single-cell")]

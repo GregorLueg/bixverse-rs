@@ -37,7 +37,7 @@ use bixverse_rs::single_cell::sc_data::bin_merge_io::gene_store_to_cell_store;
 use bixverse_rs::single_cell::sc_data::data_io::{
     CellGeneSparseWriter, CscGeneChunk, ParallelSparseReader, RawCounts,
 };
-use bixverse_rs::single_cell::sctransform::model::SctParams;
+use bixverse_rs::single_cell::sctransform::model::{SctCellContext, SctCovariates, SctParams};
 use bixverse_rs::single_cell::sctransform::stream::{
     SctStreamOpts, fit_sctransform, sct_corrected_counts, sct_residual_variance,
 };
@@ -187,19 +187,29 @@ fn diagnostic_sctransform_scaling() {
         let opts = SctStreamOpts::default();
 
         let t = Instant::now();
-        let (model, _) =
-            fit_sctransform(&reader, &cells, &library_sizes, &params, None, None, opts)
-                .expect("fit");
+        let no_cov = SctCovariates::default();
+        let (model, _) = fit_sctransform(
+            &reader,
+            &cells,
+            &library_sizes,
+            &no_cov,
+            &params,
+            None,
+            None,
+            opts,
+        )
+        .expect("fit");
+        let ctx = SctCellContext::new(&log10_umi, &no_cov).expect("context");
         let fit_s = t.elapsed().as_secs_f64();
 
         let t = Instant::now();
-        let rv = sct_residual_variance(&reader, &model, &cells, &log10_umi, opts)
-            .expect("residual variance");
+        let rv =
+            sct_residual_variance(&reader, &model, &cells, &ctx, opts).expect("residual variance");
         let resvar_s = t.elapsed().as_secs_f64();
         assert_eq!(rv.len(), model.len());
 
         let t = Instant::now();
-        sct_corrected_counts(&reader, &model, &cells, &log10_umi, corrected.path(), opts)
+        sct_corrected_counts(&reader, &model, &cells, &ctx, corrected.path(), opts)
             .expect("corrected counts");
         let correct_s = t.elapsed().as_secs_f64();
 

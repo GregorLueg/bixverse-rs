@@ -4193,7 +4193,9 @@ impl SctModel {
         list!(
             genes = genes,
             theta = self.theta.clone(),
-            intercept = self.intercept.clone(),
+            coefficients = self.coefficients.clone(),
+            n_coef = self.n_coef as i32,
+            covariate_names = self.covariate_names.clone(),
             log_umi_coef = self.log_umi_coef,
             min_variance = self.min_variance,
             clip_min = self.clip_range.0,
@@ -4233,15 +4235,32 @@ impl SctModel {
             .as_real_vector()
             .ok_or_else(|| Error::Other("scTransform model 'theta' is not numeric".to_string()))?;
 
-        let intercept = required("intercept")?.as_real_vector().ok_or_else(|| {
-            Error::Other("scTransform model 'intercept' is not numeric".to_string())
+        let coefficients = required("coefficients")?.as_real_vector().ok_or_else(|| {
+            Error::Other("scTransform model 'coefficients' is not numeric".to_string())
         })?;
 
+        let n_coef = required("n_coef")?.as_integer().ok_or_else(|| {
+            Error::Other("scTransform model 'n_coef' is not an integer".to_string())
+        })? as usize;
+
+        let covariate_names: Vec<String> = required("covariate_names")?
+            .as_str_vector()
+            .map(|v| v.into_iter().map(String::from).collect())
+            .unwrap_or_default();
+
         let n = genes.len();
-        for (name, len) in [("theta", theta.len()), ("intercept", intercept.len())] {
-            if len != n {
+        for (name, len, want) in [
+            ("theta", theta.len(), n),
+            ("coefficients", coefficients.len(), n * n_coef),
+            (
+                "covariate_names",
+                covariate_names.len(),
+                n_coef.saturating_sub(1),
+            ),
+        ] {
+            if len != want {
                 return Err(Error::Other(format!(
-                    "scTransform model '{name}' has {len} entries, expected {n}"
+                    "scTransform model '{name}' has {len} entries, expected {want}"
                 )));
             }
         }
@@ -4249,7 +4268,9 @@ impl SctModel {
         Ok(Self {
             genes,
             theta,
-            intercept,
+            coefficients,
+            n_coef,
+            covariate_names,
             log_umi_coef: required("log_umi_coef")?
                 .as_real()
                 .unwrap_or(std::f64::consts::LN_10),

@@ -28,8 +28,8 @@ use bixverse_rs::single_cell::sc_data::data_io::{
 };
 use bixverse_rs::single_cell::sc_processing::pca::{SingleCellPcaParams, pca_on_sc_residuals};
 use bixverse_rs::single_cell::sctransform::model::{
-    SctGeneStats, SctModel, SctParams, min_variance_from_umi_median, regularise_sct_model,
-    sct_residual_row,
+    SctCellContext, SctCovariates, SctGeneStats, SctModel, SctParams, min_variance_from_umi_median,
+    regularise_sct_model, sct_residual_row,
 };
 use bixverse_rs::single_cell::sctransform::stream::{
     SctStreamOpts, fit_sctransform, sct_corrected_counts, sct_gene_pass, sct_residual_variance,
@@ -240,13 +240,17 @@ fn test_regularisation_matches_sctransform_on_real_fits() {
     let step1: Vec<NbOffsetFit> = fx::STEP1_THETA
         .iter()
         .zip(fx::STEP1_INTERCEPT.iter())
-        .map(|(&theta, &intercept)| NbOffsetFit { theta, intercept })
+        .map(|(&theta, &intercept)| NbOffsetFit {
+            theta,
+            coefficients: vec![intercept],
+        })
         .collect();
 
     let model = regularise_sct_model(
         &step1,
         &fx::STEP1_POS,
         &stats,
+        &[],
         fx::MEAN_CELL_SUM,
         min_variance_from_umi_median(fx::MEDIAN_NONZERO),
         fx::N_CELLS,
@@ -273,9 +277,9 @@ fn test_regularisation_matches_sctransform_on_real_fits() {
             );
         }
         assert!(
-            rel(model.intercept[g], fx::FIT_INTERCEPT[g]) < 1e-10,
+            rel(model.intercept(g), fx::FIT_INTERCEPT[g]) < 1e-10,
             "gene {g}: intercept {} vs R {}",
-            model.intercept[g],
+            model.intercept(g),
             fx::FIT_INTERCEPT[g]
         );
     }
@@ -301,6 +305,7 @@ fn test_fit_sctransform_end_to_end() {
         &reader,
         &cells,
         &library_sizes,
+        &SctCovariates::default(),
         &params(),
         Some(&step1_genes),
         Some(&step1_cells),
@@ -327,7 +332,7 @@ fn test_fit_sctransform_end_to_end() {
         if fx::FIT_THETA[g].is_finite() {
             worst_theta = worst_theta.max(rel(model.theta[g], fx::FIT_THETA[g]));
         }
-        worst_intercept = worst_intercept.max(rel(model.intercept[g], fx::FIT_INTERCEPT[g]));
+        worst_intercept = worst_intercept.max(rel(model.intercept(g), fx::FIT_INTERCEPT[g]));
     }
 
     let mut drifts: Vec<f64> = (0..model.len())
@@ -410,7 +415,9 @@ fn model_from_fixture() -> SctModel {
     SctModel {
         genes: fx::MODELLED.to_vec(),
         theta: fx::FIT_THETA.to_vec(),
-        intercept: fx::FIT_INTERCEPT.to_vec(),
+        coefficients: fx::FIT_INTERCEPT.to_vec(),
+        n_coef: 1,
+        covariate_names: Vec::new(),
         log_umi_coef: std::f64::consts::LN_10,
         min_variance: min_variance_from_umi_median(fx::MEDIAN_NONZERO),
         clip_range: (-(fx::N_CELLS as f64).sqrt(), (fx::N_CELLS as f64).sqrt()),
@@ -438,14 +445,10 @@ fn test_residual_variance_matches_sctransform() {
     let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
     let model = model_from_fixture();
 
-    let got = sct_residual_variance(
-        &reader,
-        &model,
-        &cells,
-        &log10_umi,
-        SctStreamOpts::default(),
-    )
-    .expect("residual variance");
+    let no_cov = SctCovariates::default();
+    let ctx = SctCellContext::new(&log10_umi, &no_cov).expect("context");
+    let got = sct_residual_variance(&reader, &model, &cells, &ctx, SctStreamOpts::default())
+        .expect("residual variance");
 
     assert_eq!(got.len(), fx::RESIDUAL_VARIANCE.len());
     let mut worst = 0.0_f64;
@@ -486,16 +489,9 @@ fn test_residual_row_is_dense_at_zero_counts() {
         .collect();
 
     let mut row = vec![0.0_f32; fx::N_CELLS];
-    sct_residual_row(
-        &nz,
-        &indices,
-        fx::N_CELLS,
-        pos,
-        &model,
-        &log10_umi,
-        &mut row,
-    )
-    .expect("residual row");
+    let no_cov = SctCovariates::default();
+    let ctx = SctCellContext::new(&log10_umi, &no_cov).expect("context");
+    sct_residual_row(&nz, &indices, pos, &model, &ctx, &mut row).expect("residual row");
 
     let zero_cells: Vec<usize> = (0..fx::N_CELLS)
         .filter(|&c| counts[store_gene][c] == 0)
@@ -520,16 +516,9 @@ fn test_residual_row_respects_the_clip_range() {
     let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
 
     let mut row = vec![0.0_f32; fx::N_CELLS];
-    sct_residual_row(
-        &[10_000.0],
-        &[0],
-        fx::N_CELLS,
-        0,
-        &model,
-        &log10_umi,
-        &mut row,
-    )
-    .expect("residual row");
+    let no_cov = SctCovariates::default();
+    let ctx = SctCellContext::new(&log10_umi, &no_cov).expect("context");
+    sct_residual_row(&[10_000.0], &[0], 0, &model, &ctx, &mut row).expect("residual row");
 
     assert!(row.iter().all(|&r| (-0.5..=0.5).contains(&r)));
     assert_eq!(row[0], 0.5, "a huge count should clip at the upper bound");
@@ -549,7 +538,7 @@ fn test_residual_variance_is_exact_in_f64() {
     let mut worst_f64 = 0.0_f64;
     for pos in 0..model.len() {
         let g = fx::MODELLED[pos];
-        let b0 = model.intercept[pos];
+        let b0 = model.intercept(pos);
         let theta = model.theta[pos];
         let (lo, hi) = model.clip_range;
 
@@ -592,7 +581,7 @@ fn reference_residual_matrix(
 
     for (col, &store_gene) in genes.iter().enumerate() {
         let pos = model.position(store_gene).expect("gene is modelled");
-        let b0 = model.intercept[pos];
+        let b0 = model.intercept(pos);
         let theta = model.theta[pos];
         let (lo, hi) = model.clip_range;
 
@@ -629,6 +618,8 @@ fn test_residual_pca_matches_a_direct_svd() {
     let cells: Vec<usize> = (0..fx::N_CELLS).collect();
     let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
     let model = model_from_fixture();
+    let no_cov = SctCovariates::default();
+    let ctx = SctCellContext::new(&log10_umi, &no_cov).expect("context");
 
     // The 40 genes with the most residual variance, which is scTransform's own
     // feature-selection criterion.
@@ -647,7 +638,7 @@ fn test_residual_pca_matches_a_direct_svd() {
     let params = SingleCellPcaParams::new(true, false, false, false, 1e4);
 
     let (scores, loadings, singular, scaled) = pca_on_sc_residuals(
-        &reader, &cells, &hvg, no_pcs, &params, &model, &log10_umi, 42, true, 0,
+        &reader, &cells, &hvg, no_pcs, &params, &model, &ctx, 42, true, 0,
     )
     .expect("residual PCA");
 
@@ -709,6 +700,8 @@ fn test_residual_pca_refuses_clr() {
     let cells: Vec<usize> = (0..fx::N_CELLS).collect();
     let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
     let model = model_from_fixture();
+    let no_cov = SctCovariates::default();
+    let ctx = SctCellContext::new(&log10_umi, &no_cov).expect("context");
     let params = SingleCellPcaParams::new(true, false, false, true, 1e4);
 
     assert!(matches!(
@@ -719,7 +712,7 @@ fn test_residual_pca_refuses_clr() {
             5,
             &params,
             &model,
-            &log10_umi,
+            &ctx,
             42,
             false,
             0,
@@ -740,6 +733,8 @@ fn test_residual_pca_rejects_an_unmodelled_gene() {
     let cells: Vec<usize> = (0..fx::N_CELLS).collect();
     let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
     let model = model_from_fixture();
+    let no_cov = SctCovariates::default();
+    let ctx = SctCellContext::new(&log10_umi, &no_cov).expect("context");
 
     // A gene that failed the min_cells filter, so the model does not cover it.
     let unmodelled = (0..fx::N_GENES)
@@ -754,7 +749,7 @@ fn test_residual_pca_rejects_an_unmodelled_gene() {
             2,
             &SingleCellPcaParams::new(true, false, false, false, 1e4),
             &model,
-            &log10_umi,
+            &ctx,
             42,
             false,
             0,
@@ -786,11 +781,13 @@ fn test_corrected_counts_match_sctransform() {
     let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
     let model = model_from_fixture();
 
+    let no_cov = SctCovariates::default();
+    let ctx = SctCellContext::new(&log10_umi, &no_cov).expect("context");
     sct_corrected_counts(
         &reader,
         &model,
         &cells,
-        &log10_umi,
+        &ctx,
         out.path(),
         SctStreamOpts::default(),
     )
@@ -906,4 +903,336 @@ fn test_transpose_rejects_a_cell_major_source() {
         gene_store_to_cell_store(store.path(), out.path(), 8, 8, 0),
         Err(BixverseErrors::ReaderModeMismatch { .. })
     ));
+}
+
+////////////////
+// Covariates //
+////////////////
+
+/// Genes whose share of each cell's counts the covariate measures. Must match
+/// `COV_BLOCK` in the generator.
+const COV_BLOCK: usize = 30;
+
+/// Rebuilds the covariate the generator used: a percent-mitochondrial analogue,
+/// the share of each cell's counts falling in the first `COV_BLOCK` genes.
+fn fixture_covariate(counts: &[Vec<u32>], library_sizes: &[f64]) -> SctCovariates {
+    let values: Vec<f64> = (0..fx::N_CELLS)
+        .map(|c| {
+            let block: f64 = counts[..COV_BLOCK].iter().map(|row| row[c] as f64).sum();
+            100.0 * block / library_sizes[c]
+        })
+        .collect();
+
+    SctCovariates::from_columns(&[("cov_x".to_string(), values)]).expect("covariate")
+}
+
+/// The rebuilt covariate has to agree with R's before anything using it means
+/// anything.
+#[test]
+fn test_fixture_covariate_round_trips() {
+    let (counts, library_sizes) = fixture_counts();
+    let cov = fixture_covariate(&counts, &library_sizes);
+
+    assert_eq!(cov.n_covariates(), 1);
+    assert_eq!(cov.names, vec!["cov_x".to_string()]);
+    for c in 0..fx::N_CELLS {
+        assert!(
+            rel(cov.row(c)[0], fx::COV_X[c]) < 1e-12,
+            "cell {c}: covariate {} vs R {}",
+            cov.row(c)[0],
+            fx::COV_X[c]
+        );
+    }
+}
+
+/// The regularisation with a covariate, fed R's own unregularised coefficients.
+///
+/// Every extra design column is smoothed against `log10(gmean)` alongside the
+/// intercept, and zeroed for Poisson genes. This gates both.
+#[test]
+fn test_regularisation_with_covariate_matches_sctransform() {
+    use bixverse_rs::single_cell::sctransform::nb_fit::NbOffsetFit;
+
+    let stats = SctGeneStats {
+        log_gmean: fx::LOG_GMEAN.to_vec(),
+        amean: fx::AMEAN.to_vec(),
+        var: fx::GENE_VAR.to_vec(),
+    };
+
+    let step1: Vec<NbOffsetFit> = (0..fx::COV_STEP1_POS.len())
+        .map(|i| NbOffsetFit {
+            theta: fx::COV_STEP1_THETA[i],
+            coefficients: vec![fx::COV_STEP1_INTERCEPT[i], fx::COV_STEP1_COEF[i]],
+        })
+        .collect();
+
+    let model = regularise_sct_model(
+        &step1,
+        &fx::COV_STEP1_POS,
+        &stats,
+        &["cov_x".to_string()],
+        fx::MEAN_CELL_SUM,
+        min_variance_from_umi_median(fx::MEDIAN_NONZERO),
+        fx::N_CELLS,
+        &params(),
+    )
+    .expect("regularisation");
+
+    assert_eq!(model.n_coef, 2);
+    assert!(model.has_covariates());
+    assert_eq!(model.covariate_names, vec!["cov_x".to_string()]);
+
+    for g in 0..model.len() {
+        if fx::COV_FIT_THETA[g].is_infinite() {
+            assert!(model.theta[g].is_infinite(), "gene {g} should be Poisson");
+            // A Poisson gene takes the closed-form offset model, whose extra
+            // coefficients are zero rather than a smoothed curve value.
+            assert_eq!(model.coefficients_for(g)[1], 0.0, "gene {g}");
+        } else {
+            assert!(
+                rel(model.theta[g], fx::COV_FIT_THETA[g]) < 1e-10,
+                "gene {g}: theta {} vs R {}",
+                model.theta[g],
+                fx::COV_FIT_THETA[g]
+            );
+        }
+        assert!(
+            rel(model.intercept(g), fx::COV_FIT_INTERCEPT[g]) < 1e-10,
+            "gene {g}: intercept {} vs R {}",
+            model.intercept(g),
+            fx::COV_FIT_INTERCEPT[g]
+        );
+        assert!(
+            rel(model.coefficients_for(g)[1], fx::COV_FIT_COEF[g]) < 1e-10,
+            "gene {g}: cov_x coefficient {} vs R {}",
+            model.coefficients_for(g)[1],
+            fx::COV_FIT_COEF[g]
+        );
+    }
+}
+
+/// Builds the covariate model from R's regularised parameters.
+fn cov_model_from_fixture() -> SctModel {
+    let mut coefficients = Vec::with_capacity(fx::MODELLED.len() * 2);
+    for g in 0..fx::MODELLED.len() {
+        coefficients.push(fx::COV_FIT_INTERCEPT[g]);
+        coefficients.push(fx::COV_FIT_COEF[g]);
+    }
+
+    SctModel {
+        genes: fx::MODELLED.to_vec(),
+        theta: fx::COV_FIT_THETA.to_vec(),
+        coefficients,
+        n_coef: 2,
+        covariate_names: vec!["cov_x".to_string()],
+        log_umi_coef: std::f64::consts::LN_10,
+        min_variance: min_variance_from_umi_median(fx::MEDIAN_NONZERO),
+        clip_range: (-(fx::N_CELLS as f64).sqrt(), (fx::N_CELLS as f64).sqrt()),
+    }
+}
+
+/// The residual arithmetic with a covariate in the linear predictor, against
+/// `gene_attr$residual_variance` from the covariate run.
+#[test]
+fn test_residual_variance_with_covariate_matches_sctransform() {
+    let store = TempStore::new("cov_resid_var");
+    let (counts, library_sizes) = fixture_counts();
+    write_store(store.path(), &counts, fx::N_CELLS);
+
+    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let cells: Vec<usize> = (0..fx::N_CELLS).collect();
+    let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
+    let cov = fixture_covariate(&counts, &library_sizes);
+    let ctx = SctCellContext::new(&log10_umi, &cov).expect("context");
+    let model = cov_model_from_fixture();
+
+    let got = sct_residual_variance(&reader, &model, &cells, &ctx, SctStreamOpts::default())
+        .expect("residual variance");
+
+    for (g, (&mine, &theirs)) in got.iter().zip(fx::COV_RESIDUAL_VARIANCE.iter()).enumerate() {
+        assert!(
+            rel(mine, theirs) < 1e-7,
+            "gene {g}: residual variance {mine} vs R {theirs}"
+        );
+    }
+}
+
+/// The covariate has to actually change the answer.
+///
+/// Without this, a term silently dropped somewhere in the linear predictor
+/// would pass every other test in this file, since the two models agree on
+/// everything except that term.
+#[test]
+fn test_covariate_changes_the_residuals() {
+    let store = TempStore::new("cov_matters");
+    let (counts, library_sizes) = fixture_counts();
+    write_store(store.path(), &counts, fx::N_CELLS);
+
+    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let cells: Vec<usize> = (0..fx::N_CELLS).collect();
+    let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
+
+    let cov = fixture_covariate(&counts, &library_sizes);
+    let with_ctx = SctCellContext::new(&log10_umi, &cov).expect("context");
+    let with_cov = sct_residual_variance(
+        &reader,
+        &cov_model_from_fixture(),
+        &cells,
+        &with_ctx,
+        SctStreamOpts::default(),
+    )
+    .expect("with covariate");
+
+    let no_cov = SctCovariates::default();
+    let without_ctx = SctCellContext::new(&log10_umi, &no_cov).expect("context");
+    let without_cov = sct_residual_variance(
+        &reader,
+        &model_from_fixture(),
+        &cells,
+        &without_ctx,
+        SctStreamOpts::default(),
+    )
+    .expect("without covariate");
+
+    let worst = with_cov
+        .iter()
+        .zip(without_cov.iter())
+        .map(|(a, b)| rel(*a, *b))
+        .fold(0.0_f64, f64::max);
+
+    assert!(
+        worst > 1e-3,
+        "the covariate moved the residual variance by at most {worst:.2e}, \
+         which is small enough that it may not be entering the model at all"
+    );
+}
+
+/// Supplying covariates a model was not fitted with is refused rather than
+/// silently ignored or read past the end of the row.
+#[test]
+fn test_residual_rejects_a_covariate_count_mismatch() {
+    let (counts, library_sizes) = fixture_counts();
+    let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
+    let cov = fixture_covariate(&counts, &library_sizes);
+    let ctx = SctCellContext::new(&log10_umi, &cov).expect("context");
+
+    // A model fitted without covariates, handed a context carrying one.
+    let model = model_from_fixture();
+    let mut row = vec![0.0_f32; fx::N_CELLS];
+
+    assert!(matches!(
+        sct_residual_row(&[], &[], 0, &model, &ctx, &mut row),
+        Err(BixverseErrors::SctCovariateCountMismatch {
+            model: 0,
+            supplied: 1
+        })
+    ));
+}
+
+/// Covariate columns that disagree in length are named rather than producing a
+/// ragged design.
+#[test]
+fn test_covariates_reject_ragged_columns() {
+    assert!(matches!(
+        SctCovariates::from_columns(&[
+            ("a".to_string(), vec![1.0, 2.0, 3.0]),
+            ("b".to_string(), vec![1.0, 2.0]),
+        ]),
+        Err(BixverseErrors::SctCovariateLengthMismatch { .. })
+    ));
+}
+
+/// The full chain with a covariate, off the binary store.
+#[test]
+fn test_fit_sctransform_with_covariate_end_to_end() {
+    let store = TempStore::new("cov_end_to_end");
+    let (counts, library_sizes) = fixture_counts();
+    write_store(store.path(), &counts, fx::N_CELLS);
+
+    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let cells: Vec<usize> = (0..fx::N_CELLS).collect();
+    let cov = fixture_covariate(&counts, &library_sizes);
+
+    let step1_genes: Vec<usize> = fx::COV_STEP1_POS.iter().map(|&p| fx::MODELLED[p]).collect();
+    let step1_cells: Vec<usize> = (0..fx::N_CELLS).collect();
+
+    let (model, _) = fit_sctransform(
+        &reader,
+        &cells,
+        &library_sizes,
+        &cov,
+        &params(),
+        Some(&step1_genes),
+        Some(&step1_cells),
+        SctStreamOpts::default(),
+    )
+    .expect("fit");
+
+    assert_eq!(model.n_coef, 2);
+    assert_eq!(model.covariate_names, vec!["cov_x".to_string()]);
+
+    // Comparing the two coefficients separately overstates the disagreement:
+    // the intercept and the covariate coefficient trade off against each other,
+    // so a slightly larger one is absorbed by a slightly smaller other. What
+    // matters is the linear predictor they produce together. The shared
+    // `ln(10) * log10_umi` term cancels, so the difference is
+    // `d_intercept + d_coefficient * cov_x`, worst at one end of the covariate.
+    let (cov_lo, cov_hi) = fx::COV_X
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), &v| {
+            (l.min(v), h.max(v))
+        });
+
+    let mut eta_drift: Vec<f64> = Vec::with_capacity(model.len());
+    for g in 0..model.len() {
+        assert_eq!(
+            model.theta[g].is_infinite(),
+            fx::COV_FIT_THETA[g].is_infinite(),
+            "gene {g}: Poisson classification disagrees with R"
+        );
+        let d_int = model.intercept(g) - fx::COV_FIT_INTERCEPT[g];
+        let d_coef = model.coefficients_for(g)[1] - fx::COV_FIT_COEF[g];
+        eta_drift.push(
+            (d_int + d_coef * cov_lo)
+                .abs()
+                .max((d_int + d_coef * cov_hi).abs()),
+        );
+    }
+    eta_drift.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+    println!(
+        "log(mu) drift: median {:.3e} p90 {:.3e} max {:.3e}",
+        eta_drift[eta_drift.len() / 2],
+        eta_drift[eta_drift.len() * 9 / 10],
+        eta_drift[eta_drift.len() - 1]
+    );
+
+    // Measured on this fixture: median 1.9e-3, p90 9.1e-3, max 3.0e-2. These
+    // are absolute drifts on `log(mu)`, so they read as fractional errors on
+    // the fitted mean.
+    //
+    // The max is looser than the covariate-free case (3.6e-4) for a reason
+    // worth knowing. Step-1 gene 93 has mean 0.15 and variance 0.16, and its
+    // Cox-Reid profile likelihood rises monotonically as the overdispersion
+    // goes to zero: the value at theta = 1.5e2 and at theta = 4.9e8 differ by
+    // 4e-4 nats. This crate takes the maximum, which is the boundary;
+    // `glm_gp` stops at theta = 316. The post-fit Poisson check is a hard
+    // `moment_theta / theta < 1e-3`, so those two land on opposite sides of it,
+    // one gene in 270 enters or leaves the smoothing set, and `bw.SJ` moves
+    // about 2%, which nudges every smoothed value. R shows the same
+    // instability against itself: adding this covariate flips gene 93 out of
+    // its own outlier set and gene 22 into it.
+    //
+    // So this is a discontinuity in the algorithm, not an error that
+    // accumulates. The median is the number to watch.
+    assert!(
+        eta_drift[eta_drift.len() - 1] < 5e-2,
+        "log(mu) drifted {:.2e} from R, past the measured band",
+        eta_drift[eta_drift.len() - 1]
+    );
+    assert!(
+        eta_drift[eta_drift.len() / 2] < 5e-3,
+        "median log(mu) drifted {:.2e} from R, past the measured band",
+        eta_drift[eta_drift.len() / 2]
+    );
 }

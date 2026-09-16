@@ -1,21 +1,26 @@
 //! Per-gene negative binomial fit for scTransform v2.
 //!
-//! The v2 model is an intercept-only NB GLM with the cell's total UMI count as
-//! a fixed offset:
+//! The v2 model is an NB GLM with the cell's total UMI count as a **fixed
+//! offset** rather than a fitted coefficient:
 //!
 //! ```text
-//! mu_c = exp(b0) * total_umi_c
+//! mu_c  = exp(x_c . beta) * total_umi_c
 //! var_c = mu_c + alpha * mu_c^2        (alpha = 1 / theta)
 //! ```
 //!
-//! so only two numbers are learned per gene. sctransform gets them from
-//! `glmGamPoi::glm_gp(design = ~1, offset = log(total_umi))`, which maximises
-//! the Cox-Reid adjusted profile likelihood over the overdispersion and refits
-//! the intercept at each step.
+//! With no covariates the design is a single intercept column and only two
+//! numbers are learned per gene, which is the common case. Additional
+//! cell-level covariates, sctransform's `latent_var` beyond `log_umi`, add
+//! columns to `x` and coefficients to `beta`; the offset is unaffected, which
+//! is what keeps the library-size slope pinned.
+//!
+//! sctransform gets these from `glmGamPoi::glm_gp(design, offset =
+//! log(total_umi))`, which maximises the Cox-Reid adjusted profile likelihood
+//! over the overdispersion.
 //!
 //! Both halves already exist in `edge-rs`: [`apl_at`] is that adjusted profile
-//! likelihood, refitting the coefficient internally at whatever dispersion it
-//! is handed, and [`mglm_one_group`] is the intercept fit at a known
+//! likelihood, refitting the coefficients internally at whatever dispersion it
+//! is handed, and [`mglm_levenberg`] is the coefficient fit at a known
 //! dispersion. This module is only the composition, plus the Poisson boundary
 //! that `glm_gp` reports as an overdispersion of exactly zero.
 //!
@@ -24,7 +29,7 @@
 //! offset, nothing else.
 
 use edge_rs::dispersion::apl::apl_at;
-use edge_rs::glm::one_group::mglm_one_group;
+use edge_rs::glm::levenberg::{LevenbergParams, mglm_levenberg};
 use edge_rs::prelude::*;
 
 use crate::core::math::optimise::brent_fmin;
@@ -63,6 +68,14 @@ const LOG_ALPHA_TOL: f64 = 1e-8;
 /// this code will see.
 const ALPHA_POISSON_FLOOR: f64 = 1e-10;
 
+/// Relative deviance tolerance for the coefficient fit.
+///
+/// Far tighter than edgeR's `1e-6` default because these coefficients are a
+/// parity target, not an input to a test statistic. At the default the
+/// intercept lands within 1.8e-7 of the reference where this brings it inside
+/// 1e-9, and the extra iterations do not show in the fit timings.
+const COEF_TOL: f64 = 1e-14;
+
 /// `ln(10)`, the coefficient on `log10(total UMI)` that a natural-log offset is
 /// algebraically equivalent to.
 ///
@@ -77,37 +90,51 @@ pub const LOG_UMI_COEF: f64 = std::f64::consts::LN_10;
 /////////////
 
 /// One gene's fitted negative binomial parameters.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct NbOffsetFit {
     /// Inverse overdispersion, `1 / alpha`. `f64::INFINITY` for a gene that
     /// hit the Poisson boundary.
     pub theta: f64,
-    /// Intercept on the natural-log scale, so `mu_c = exp(intercept) *
+    /// Coefficients on the natural-log scale, one per design column. Entry `0`
+    /// is the intercept, so with no covariates `mu_c = exp(coefficients[0]) *
     /// total_umi_c`.
-    pub intercept: f64,
+    pub coefficients: Vec<f64>,
+}
+
+impl NbOffsetFit {
+    /// The intercept, design column zero.
+    ///
+    /// ### Returns
+    ///
+    /// The intercept on the natural-log scale.
+    pub fn intercept(&self) -> f64 {
+        self.coefficients[0]
+    }
 }
 
 //////////
 // Fit //
 //////////
 
-/// Fits the intercept-only negative binomial GLM with a log offset for one
-/// gene.
+/// Fits the negative binomial GLM with a log offset for one gene.
 ///
 /// Maximises the Cox-Reid adjusted profile likelihood over `log(alpha)` with
-/// [`brent_fmin`], then takes the intercept at the maximiser. [`apl_at`]
-/// already refits the coefficient at every dispersion it evaluates, so the two
+/// [`brent_fmin`], then takes the coefficients at the maximiser. [`apl_at`]
+/// already refits the coefficients at every dispersion it evaluates, so the two
 /// are consistent by construction rather than by alternation.
 ///
 /// ### Params
 ///
 /// * `counts` - This gene's counts, one per cell.
 /// * `log_offset` - `ln(total UMI)` per cell, parallel to `counts`.
+/// * `design` - Design matrix, row-major `n_cells * n_coef`, column zero the
+///   intercept. The library size is the offset and must not appear here.
+/// * `n_coef` - Number of design columns.
 ///
 /// ### Returns
 ///
-/// The [`NbOffsetFit`], or [`BixverseErrors::LengthMismatch`] when the two
-/// inputs disagree, or an [`BixverseErrors::EdgeRsError`] from the underlying
+/// The [`NbOffsetFit`], or [`BixverseErrors::LengthMismatch`] when the inputs
+/// disagree, or an [`BixverseErrors::EdgeRsError`] from the underlying
 /// `edge-rs` call.
 ///
 /// ### References
@@ -117,6 +144,8 @@ pub struct NbOffsetFit {
 pub fn fit_nb_offset_gene(
     counts: &[f64],
     log_offset: &[f64],
+    design: &[f64],
+    n_coef: usize,
 ) -> Result<NbOffsetFit, BixverseErrors> {
     let n = counts.len();
     if log_offset.len() != n {
@@ -126,30 +155,37 @@ pub fn fit_nb_offset_gene(
             found: log_offset.len(),
         });
     }
-    if n == 0 {
+    if n == 0 || n_coef == 0 {
         return Err(BixverseErrors::LengthMismatch {
             name: "counts",
             expected: 1,
-            found: 0,
+            found: n,
+        });
+    }
+    if design.len() != n * n_coef {
+        return Err(BixverseErrors::LengthMismatch {
+            name: "design",
+            expected: n * n_coef,
+            found: design.len(),
         });
     }
 
-    // An all-zero gene carries no information about either parameter: the
-    // likelihood is flat in both. Say so rather than returning wherever a
-    // search on a flat objective happened to stop.
+    // An all-zero gene carries no information about any parameter: the
+    // likelihood is flat in all of them. Say so rather than returning wherever
+    // a search on a flat objective happened to stop.
     if counts.iter().all(|&y| y == 0.0) {
+        let mut coefficients = vec![0.0; n_coef];
+        coefficients[0] = f64::NEG_INFINITY;
         return Ok(NbOffsetFit {
             theta: f64::INFINITY,
-            intercept: f64::NEG_INFINITY,
+            coefficients,
         });
     }
 
-    // Intercept-only design: a single column of ones.
-    let design = vec![1.0_f64; n];
     let offset = Recycled::BySample(log_offset.to_vec());
 
     let neg_apl = |log_alpha: f64| -> f64 {
-        match apl_at(counts, 1, n, &design, 1, log_alpha.exp(), &offset, None) {
+        match apl_at(counts, 1, n, design, n_coef, log_alpha.exp(), &offset, None) {
             Ok(v) => -v[0],
             // An unevaluable point is pushed away from rather than propagated,
             // so a single bad dispersion cannot abort the whole search.
@@ -168,21 +204,26 @@ pub fn fit_nb_offset_gene(
         (1.0 / alpha, alpha)
     };
 
-    let coef = mglm_one_group(
+    let fit = mglm_levenberg(
         counts,
         1,
         n,
+        design,
+        n_coef,
         &Recycled::Scalar(dispersion),
         &offset,
         None,
         None,
-        None,
+        Some(LevenbergParams {
+            tol: COEF_TOL,
+            ..LevenbergParams::default()
+        }),
     )
     .map_err(BixverseErrors::from)?;
 
     Ok(NbOffsetFit {
         theta,
-        intercept: coef[0],
+        coefficients: fit.coefficients,
     })
 }
 
@@ -256,6 +297,8 @@ mod tests {
     fn test_nb_offset_fit_is_the_cox_reid_joint_mle() {
         let (counts, total_umi) = fixture();
         let log_offset: Vec<f64> = total_umi.iter().map(|u| u.ln()).collect();
+        // Intercept-only design: a single column of ones.
+        let ones = vec![1.0_f64; log_offset.len()];
 
         let r_theta = [
             60_488_309.625_924_04,
@@ -287,13 +330,13 @@ mod tests {
         ];
 
         for (g, (&rt, &ri)) in r_theta.iter().zip(r_intercept.iter()).enumerate() {
-            let fit = fit_nb_offset_gene(&counts[g], &log_offset).unwrap();
+            let fit = fit_nb_offset_gene(&counts[g], &log_offset, &ones, 1).unwrap();
 
-            let rel_i = ((fit.intercept - ri) / ri).abs();
+            let rel_i = ((fit.intercept() - ri) / ri).abs();
             assert!(
                 rel_i < 1e-8,
                 "gene {g}: intercept {} vs R {ri} (rel {rel_i:.3e})",
-                fit.intercept
+                fit.intercept()
             );
 
             if rt > POISSON_THETA_FLOOR {
@@ -327,6 +370,8 @@ mod tests {
     fn test_nb_offset_fit_band_against_glmgampoi() {
         let (counts, total_umi) = fixture();
         let log_offset: Vec<f64> = total_umi.iter().map(|u| u.ln()).collect();
+        // Intercept-only design: a single column of ones.
+        let ones = vec![1.0_f64; log_offset.len()];
 
         let gp_theta = [
             f64::INFINITY,
@@ -348,7 +393,7 @@ mod tests {
             if gt > POISSON_THETA_FLOOR {
                 continue;
             }
-            let fit = fit_nb_offset_gene(&counts[g], &log_offset).unwrap();
+            let fit = fit_nb_offset_gene(&counts[g], &log_offset, &ones, 1).unwrap();
             worst = worst.max(((fit.theta - gt) / gt).abs());
         }
 
@@ -361,7 +406,7 @@ mod tests {
     #[test]
     fn test_nb_offset_fit_rejects_length_mismatch() {
         assert!(matches!(
-            fit_nb_offset_gene(&[1.0, 2.0], &[0.0]),
+            fit_nb_offset_gene(&[1.0, 2.0], &[0.0], &[1.0, 1.0], 1),
             Err(BixverseErrors::LengthMismatch { .. })
         ));
     }
@@ -374,10 +419,10 @@ mod tests {
         let counts = vec![0.0_f64; 50];
         let log_offset: Vec<f64> = (0..50).map(|i| (100.0 + i as f64).ln()).collect();
 
-        let fit = fit_nb_offset_gene(&counts, &log_offset).unwrap();
+        let fit = fit_nb_offset_gene(&counts, &log_offset, &vec![1.0; counts.len()], 1).unwrap();
 
         assert!(fit.theta.is_infinite());
-        assert_eq!(fit.intercept, f64::NEG_INFINITY);
+        assert_eq!(fit.intercept(), f64::NEG_INFINITY);
     }
 
     /// A gene that is underdispersed relative to Poisson has its CR-adjusted
@@ -391,8 +436,10 @@ mod tests {
         let counts = vec![5.0_f64; 200];
         let total_umi = vec![1000.0_f64; 200];
         let log_offset: Vec<f64> = total_umi.iter().map(|u| u.ln()).collect();
+        // Intercept-only design: a single column of ones.
+        let ones = vec![1.0_f64; counts.len()];
 
-        let fit = fit_nb_offset_gene(&counts, &log_offset).unwrap();
+        let fit = fit_nb_offset_gene(&counts, &log_offset, &ones, 1).unwrap();
 
         assert!(
             fit.theta > POISSON_THETA_FLOOR,
@@ -402,6 +449,6 @@ mod tests {
         let sum_y: f64 = counts.iter().sum();
         let sum_off: f64 = total_umi.iter().sum();
         let poisson_mle = (sum_y / sum_off).ln();
-        assert!((fit.intercept - poisson_mle).abs() < 1e-10);
+        assert!((fit.intercept() - poisson_mle).abs() < 1e-10);
     }
 }
