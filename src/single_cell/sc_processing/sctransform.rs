@@ -198,9 +198,6 @@ pub struct SctModel {
     pub min_variance: f64,
     /// Residual clipping range.
     pub clip_range: (f64, f64),
-    /// Which genes were treated as Poisson and given the closed-form offset
-    /// parameters rather than a smoothed fit.
-    pub poisson: Vec<bool>,
 }
 
 impl SctModel {
@@ -237,6 +234,24 @@ impl SctModel {
     /// The position, or `None` when the gene is not modelled.
     pub fn position(&self, gene: usize) -> Option<usize> {
         self.genes.binary_search(&gene).ok()
+    }
+
+    /// Whether a gene carries the Poisson variance rather than a negative
+    /// binomial one.
+    ///
+    /// Derived from `theta` rather than stored: an infinite theta *is* the
+    /// Poisson case, since `mu^2 / theta` vanishes. Keeping a parallel flag
+    /// would be state that can disagree with the parameter it describes.
+    ///
+    /// ### Params
+    ///
+    /// * `pos` - Position within the model.
+    ///
+    /// ### Returns
+    ///
+    /// `true` when the gene's variance is Poisson.
+    pub fn is_poisson(&self, pos: usize) -> bool {
+        self.theta[pos].is_infinite()
     }
 }
 
@@ -407,7 +422,6 @@ pub fn regularise_sct_model(
         log_umi_coef: LOG_UMI_COEF,
         min_variance,
         clip_range: params.resolve_clip_range(n_cells),
-        poisson,
     })
 }
 
@@ -642,7 +656,10 @@ mod tests {
                 .unwrap();
 
         assert_eq!(model.len(), 500);
-        assert_eq!(model.poisson.iter().filter(|&&p| p).count(), 141);
+        assert_eq!(
+            (0..model.len()).filter(|&g| model.is_poisson(g)).count(),
+            141
+        );
 
         // The leading genes are all below the 1e-3 mean floor, so they take the
         // closed-form offset model rather than a smoothed value.
@@ -704,10 +721,9 @@ mod tests {
         .unwrap();
 
         for g in 0..model.len() {
-            if !model.poisson[g] {
+            if !model.is_poisson(g) {
                 continue;
             }
-            assert!(model.theta[g].is_infinite());
             assert_relative_eq!(
                 model.intercept[g],
                 stats.amean[g].ln() - MEAN_CELL_SUM.ln(),

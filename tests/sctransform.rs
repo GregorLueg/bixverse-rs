@@ -256,7 +256,7 @@ fn test_regularisation_matches_sctransform_on_real_fits() {
 
     assert_eq!(model.len(), fx::MODELLED.len());
     assert_eq!(
-        model.poisson.iter().filter(|&&p| p).count(),
+        (0..model.len()).filter(|&g| model.is_poisson(g)).count(),
         fx::FIT_THETA.iter().filter(|t| !t.is_finite()).count(),
         "Poisson gene count disagrees with R"
     );
@@ -413,7 +413,6 @@ fn model_from_fixture() -> SctModel {
         log_umi_coef: std::f64::consts::LN_10,
         min_variance: min_variance_from_umi_median(fx::MEDIAN_NONZERO),
         clip_range: (-(fx::N_CELLS as f64).sqrt(), (fx::N_CELLS as f64).sqrt()),
-        poisson: fx::FIT_THETA.iter().map(|t| !t.is_finite()).collect(),
     }
 }
 
@@ -472,7 +471,7 @@ fn test_residual_row_is_dense_at_zero_counts() {
     // A gene with a genuinely finite theta, so the Poisson branch is not what
     // is being measured.
     let pos = (0..model.len())
-        .find(|&g| model.theta[g].is_finite())
+        .find(|&g| !model.is_poisson(g))
         .expect("a non-Poisson gene");
     let store_gene = fx::MODELLED[pos];
 

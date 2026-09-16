@@ -60,6 +60,7 @@ use crate::single_cell::sc_processing::{
     pca::SingleCellPcaParams,
     scdblfinder::ScDblFinderParams,
     scrublet::ScrubletParams,
+    sctransform::{SctModel, SctParams},
     utils_doublets::ScDblSimParams,
 };
 
@@ -4086,5 +4087,177 @@ impl CellSweepFit {
             n_iter = self.n_iter as i32,
             converged = self.converged
         )
+    }
+}
+
+//////////////////
+// scTransform //
+//////////////////
+
+impl SctParams {
+    /// Generate the [SctParams] from an R list.
+    ///
+    /// Should values not be found within the List, the parameters will default
+    /// to sensible defaults, which are sctransform's own with
+    /// `vst.flavor = "v2"` applied.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the scTransform parameters.
+    ///
+    /// ### Return
+    ///
+    /// The [SctParams] with all of the parameters.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+        let defaults = SctParams::default();
+
+        let n_genes = params
+            .get("n_genes")
+            .and_then(|v| v.as_real())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.n_genes);
+
+        let n_cells = params
+            .get("n_cells")
+            .and_then(|v| v.as_real())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.n_cells);
+
+        let min_cells = params
+            .get("min_cells")
+            .and_then(|v| v.as_real())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.min_cells);
+
+        let bw_adjust = params
+            .get("bw_adjust")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.bw_adjust);
+
+        let gmean_eps = params
+            .get("gmean_eps")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.gmean_eps);
+
+        let outlier_th = params
+            .get("outlier_th")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.outlier_th);
+
+        let poisson_diff_theta = params
+            .get("poisson_diff_theta")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.poisson_diff_theta);
+
+        // Both ends or neither: half a clipping range is meaningless, so a list
+        // carrying only one is treated as carrying none.
+        let clip_range = match (
+            params.get("clip_min").and_then(|v| v.as_real()),
+            params.get("clip_max").and_then(|v| v.as_real()),
+        ) {
+            (Some(lo), Some(hi)) => Some((lo, hi)),
+            _ => defaults.clip_range,
+        };
+
+        Ok(Self {
+            n_genes,
+            n_cells,
+            min_cells,
+            bw_adjust,
+            gmean_eps,
+            outlier_th,
+            poisson_diff_theta,
+            clip_range,
+        })
+    }
+}
+
+impl SctModel {
+    /// Serialise the [SctModel] into an R list.
+    ///
+    /// Round trips through [`SctModel::from_r_list`], so the R side can hold a
+    /// fitted model between calls and hand it back for the residual PCA rather
+    /// than refitting.
+    ///
+    /// `theta` is infinite for a Poisson gene, which R represents faithfully as
+    /// `Inf`, so no sentinel is needed on either side and no separate flag has
+    /// to travel with it.
+    ///
+    /// ### Return
+    ///
+    /// A list with the per-gene parameters and the scalars that go with them.
+    pub fn to_r_list(&self) -> List {
+        let genes: Vec<i32> = self.genes.iter().map(|&g| g as i32).collect();
+
+        list!(
+            genes = genes,
+            theta = self.theta.clone(),
+            intercept = self.intercept.clone(),
+            log_umi_coef = self.log_umi_coef,
+            min_variance = self.min_variance,
+            clip_min = self.clip_range.0,
+            clip_max = self.clip_range.1,
+        )
+    }
+
+    /// Rebuild an [SctModel] from the list [`SctModel::to_r_list`] produced.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The serialised model.
+    ///
+    /// ### Return
+    ///
+    /// The [SctModel], or an error naming the first field that is missing or
+    /// the wrong length. Unlike the parameter structs there are no defaults
+    /// here: a partially reconstructed model would silently produce wrong
+    /// residuals.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+
+        let required = |name: &'static str| -> Result<&Robj> {
+            params
+                .get(name)
+                .ok_or_else(|| Error::Other(format!("scTransform model is missing '{name}'")))
+        };
+
+        let genes: Vec<usize> = required("genes")?
+            .as_integer_slice()
+            .ok_or_else(|| Error::Other("scTransform model 'genes' is not integer".to_string()))?
+            .iter()
+            .map(|&g| g as usize)
+            .collect();
+
+        let theta = required("theta")?
+            .as_real_vector()
+            .ok_or_else(|| Error::Other("scTransform model 'theta' is not numeric".to_string()))?;
+
+        let intercept = required("intercept")?.as_real_vector().ok_or_else(|| {
+            Error::Other("scTransform model 'intercept' is not numeric".to_string())
+        })?;
+
+        let n = genes.len();
+        for (name, len) in [("theta", theta.len()), ("intercept", intercept.len())] {
+            if len != n {
+                return Err(Error::Other(format!(
+                    "scTransform model '{name}' has {len} entries, expected {n}"
+                )));
+            }
+        }
+
+        Ok(Self {
+            genes,
+            theta,
+            intercept,
+            log_umi_coef: required("log_umi_coef")?
+                .as_real()
+                .unwrap_or(std::f64::consts::LN_10),
+            min_variance: required("min_variance")?.as_real().unwrap_or(0.0),
+            clip_range: (
+                required("clip_min")?.as_real().unwrap_or(f64::NEG_INFINITY),
+                required("clip_max")?.as_real().unwrap_or(f64::INFINITY),
+            ),
+        })
     }
 }
