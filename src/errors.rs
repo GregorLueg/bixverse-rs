@@ -48,6 +48,40 @@ pub enum BixverseErrors {
     #[error("The faer Cholesky failed: {0}")]
     FaerCholeskyError(#[from] faer::linalg::solvers::LltError),
 
+    // -- Kernel smoothing --
+    /// A kernel bandwidth was requested for fewer than two points.
+    #[error("Kernel bandwidth needs at least 2 data points, got {found}.")]
+    BandwidthTooFewPoints {
+        /// Number of points supplied
+        found: usize,
+    },
+
+    /// A Sheather-Jones pilot functional came back non-finite or non-positive.
+    ///
+    /// R raises "sample is too sparse to find TD" / "... alph2" here. It means
+    /// the pair-distance counts carry too little signal for the pilot estimate,
+    /// which in practice is a degenerate or near-constant sample.
+    #[error("Sheather-Jones bandwidth: sample too sparse to find {stage}.")]
+    BandwidthTooSparse {
+        /// Which pilot functional failed, `TD` or `alph2`
+        stage: &'static str,
+    },
+
+    /// The Sheather-Jones bracket search never enclosed a root.
+    #[error("Sheather-Jones bandwidth: no solution in the search interval.")]
+    BandwidthNoBracket,
+
+    /// Two vectors that had to agree in length did not.
+    #[error("Length mismatch for '{name}': expected {expected}, got {found}.")]
+    LengthMismatch {
+        /// Name of the offending input
+        name: &'static str,
+        /// Length that was required
+        expected: usize,
+        /// Length that was supplied
+        found: usize,
+    },
+
     // -- Gaussian processes --
     /// A Gaussian process was handed empty training data.
     #[error("Gaussian process: {name} is empty")]
@@ -1596,6 +1630,44 @@ pub enum BixverseErrors {
         n_cells: usize,
         /// Number of nodes in the smoothing graph
         n_nodes: usize,
+    },
+
+    // -- scTransform --
+    /// A step-1 gene index pointed outside the modelled gene set.
+    #[cfg(feature = "single-cell")]
+    #[error("scTransform: step-1 gene index {index} is outside the {n_genes} modelled genes.")]
+    SctGeneIndexOutOfRange {
+        /// The offending index
+        index: usize,
+        /// Number of modelled genes
+        n_genes: usize,
+    },
+
+    /// Too few step-1 genes survived outlier and Poisson exclusion to smooth.
+    ///
+    /// Two is the bare minimum a bandwidth can be estimated from. In practice
+    /// this means the subsample was dominated by Poisson genes, which is what a
+    /// very shallow dataset looks like.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "scTransform: only {kept} of {total} step-1 genes survived exclusion, too few to regularise."
+    )]
+    SctTooFewGenesToRegularise {
+        /// Genes left after exclusion
+        kept: usize,
+        /// Genes the step-1 fit started from
+        total: usize,
+    },
+
+    /// The kernel smoothing produced no value for a gene.
+    ///
+    /// Means no retained step-1 gene fell inside the kernel support at that
+    /// gene's abundance, which a bandwidth this wide should make impossible.
+    #[cfg(feature = "single-cell")]
+    #[error("scTransform: regularisation left gene {gene} without a fitted parameter.")]
+    SctSmoothingLeftAGeneUnfitted {
+        /// Position of the gene in the modelled set
+        gene: usize,
     },
 
     // -- cellsweep --
