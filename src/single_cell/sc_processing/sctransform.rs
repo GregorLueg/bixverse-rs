@@ -183,6 +183,10 @@ impl SctGeneStats {
 /// residual and corrected-count stages stream.
 #[derive(Clone, Debug)]
 pub struct SctModel {
+    /// Store gene indices this model covers, ascending. Lets a caller holding
+    /// store indices, such as an HVG set, look a gene up without carrying a
+    /// separate mapping around.
+    pub genes: Vec<usize>,
     /// Regularised inverse overdispersion. `f64::INFINITY` for a Poisson gene.
     pub theta: Vec<f64>,
     /// Regularised intercept on the natural-log scale.
@@ -216,6 +220,23 @@ impl SctModel {
     /// `true` when empty.
     pub fn is_empty(&self) -> bool {
         self.theta.is_empty()
+    }
+
+    /// Position of a store gene index within this model.
+    ///
+    /// `genes` is ascending, so this is a binary search rather than a hash
+    /// lookup: the caller is usually walking an HVG set in order and the
+    /// probes land close together.
+    ///
+    /// ### Params
+    ///
+    /// * `gene` - Store gene index.
+    ///
+    /// ### Returns
+    ///
+    /// The position, or `None` when the gene is not modelled.
+    pub fn position(&self, gene: usize) -> Option<usize> {
+        self.genes.binary_search(&gene).ok()
     }
 }
 
@@ -378,6 +399,9 @@ pub fn regularise_sct_model(
         .collect();
 
     Ok(SctModel {
+        // Positional by default. `fit_sctransform` overwrites this with the
+        // store indices once it knows them.
+        genes: (0..n_genes).collect(),
         theta,
         intercept,
         log_umi_coef: LOG_UMI_COEF,
@@ -385,6 +409,96 @@ pub fn regularise_sct_model(
         clip_range: params.resolve_clip_range(n_cells),
         poisson,
     })
+}
+
+//////////////////
+// Residual row //
+//////////////////
+
+/// Pearson residuals for one gene across the selected cells.
+///
+/// ```text
+/// mu_c  = exp(intercept + log_umi_coef * log10_umi_c)
+/// var_c = max(mu_c + mu_c^2 / theta, min_variance)
+/// r_c   = clamp((y_c - mu_c) / sqrt(var_c), clip_range)
+/// ```
+///
+/// The row is dense even though the counts are sparse: a zero count still has a
+/// non-zero residual `-mu / sqrt(var)`. That is why residuals are generated on
+/// demand rather than stored, and why the store's sparse layout cannot hold
+/// them.
+///
+/// The exponential is written as `exp(b0 + ln(10) * log10(umi))` rather than the
+/// algebraically identical `exp(b0) * umi` so that it rounds the way
+/// sctransform's `exp(tcrossprod(coefs, regressor_data))` rounds.
+///
+/// ### Params
+///
+/// * `counts` - The gene's non-zero counts.
+/// * `indices` - Cell positions of those counts, within `0..n_cells`.
+/// * `n_cells` - Length of the output row.
+/// * `gene_pos` - Position of this gene within the model.
+/// * `model` - The fitted model.
+/// * `log10_umi` - `log10(total UMI)` per cell, in the same cell order.
+/// * `out` - Destination row, overwritten in full.
+///
+/// ### Returns
+///
+/// `()`, or a [`BixverseErrors`] when `gene_pos` is outside the model or the
+/// lengths disagree.
+pub fn sct_residual_row(
+    counts: &[f64],
+    indices: &[u32],
+    n_cells: usize,
+    gene_pos: usize,
+    model: &SctModel,
+    log10_umi: &[f64],
+    out: &mut [f32],
+) -> Result<(), BixverseErrors> {
+    if gene_pos >= model.len() {
+        return Err(BixverseErrors::SctGeneIndexOutOfRange {
+            index: gene_pos,
+            n_genes: model.len(),
+        });
+    }
+    if log10_umi.len() != n_cells {
+        return Err(BixverseErrors::LengthMismatch {
+            name: "log10_umi",
+            expected: n_cells,
+            found: log10_umi.len(),
+        });
+    }
+    if out.len() != n_cells {
+        return Err(BixverseErrors::LengthMismatch {
+            name: "out",
+            expected: n_cells,
+            found: out.len(),
+        });
+    }
+
+    let b0 = model.intercept[gene_pos];
+    let theta = model.theta[gene_pos];
+    let min_var = model.min_variance;
+    let (lo, hi) = model.clip_range;
+    let slope = model.log_umi_coef;
+
+    // Every cell starts at its zero-count residual; the stored non-zeros then
+    // overwrite their own positions. One pass over the cells plus one over the
+    // non-zeros, rather than densifying the counts first.
+    for (c, slot) in out.iter_mut().enumerate() {
+        let mu = (b0 + slope * log10_umi[c]).exp();
+        let var = (mu + mu * mu / theta).max(min_var);
+        *slot = ((-mu) / var.sqrt()).clamp(lo, hi) as f32;
+    }
+
+    for (&i, &y) in indices.iter().zip(counts.iter()) {
+        let c = i as usize;
+        let mu = (b0 + slope * log10_umi[c]).exp();
+        let var = (mu + mu * mu / theta).max(min_var);
+        out[c] = ((y - mu) / var.sqrt()).clamp(lo, hi) as f32;
+    }
+
+    Ok(())
 }
 
 /// The variance floor from the median non-zero UMI count.

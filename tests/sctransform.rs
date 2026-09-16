@@ -23,10 +23,11 @@ use bixverse_rs::single_cell::sc_data::data_io::{
     CellGeneSparseWriter, CscGeneChunk, ParallelSparseReader, RawCounts,
 };
 use bixverse_rs::single_cell::sc_processing::sct_stream::{
-    SctStreamOpts, fit_sctransform, sct_gene_pass,
+    SctStreamOpts, fit_sctransform, sct_gene_pass, sct_residual_variance,
 };
 use bixverse_rs::single_cell::sc_processing::sctransform::{
-    SctGeneStats, SctParams, min_variance_from_umi_median, regularise_sct_model,
+    SctGeneStats, SctModel, SctParams, min_variance_from_umi_median, regularise_sct_model,
+    sct_residual_row,
 };
 
 mod sctransform_fixtures;
@@ -395,4 +396,175 @@ fn test_gene_pass_rejects_a_cell_major_store() {
         sct_gene_pass(&reader, &cells, &params(), SctStreamOpts::default()),
         Err(BixverseErrors::ReaderModeMismatch { .. })
     ));
+}
+
+/// Builds the model straight out of R's regularised parameters, so anything
+/// this exercises is the residual formula and nothing upstream of it.
+fn model_from_fixture() -> SctModel {
+    SctModel {
+        genes: fx::MODELLED.to_vec(),
+        theta: fx::FIT_THETA.to_vec(),
+        intercept: fx::FIT_INTERCEPT.to_vec(),
+        log_umi_coef: std::f64::consts::LN_10,
+        min_variance: min_variance_from_umi_median(fx::MEDIAN_NONZERO),
+        clip_range: (-(fx::N_CELLS as f64).sqrt(), (fx::N_CELLS as f64).sqrt()),
+        poisson: fx::FIT_THETA.iter().map(|t| !t.is_finite()).collect(),
+    }
+}
+
+/// The residual formula against `gene_attr$residual_variance`, with R's own
+/// regularised parameters fed in. The estimator difference is out of the
+/// picture entirely here, so this is a gate on the residual arithmetic: the
+/// mean, the variance floor, the clipping and the `n - 1` denominator.
+///
+/// The bar is 1e-7 rather than machine precision because the row is stored as
+/// `f32`, matching `scale_csc_chunk` and halving the dense residual matrix the
+/// PCA builds. That storage, not the arithmetic, is the whole of the gap:
+/// `test_residual_variance_is_exact_in_f64` computes the same quantity in `f64`
+/// and lands within 3e-14 of R.
+#[test]
+fn test_residual_variance_matches_sctransform() {
+    let store = TempStore::new("resid_var");
+    let (counts, library_sizes) = fixture_counts();
+    write_store(store.path(), &counts, fx::N_CELLS);
+
+    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let cells: Vec<usize> = (0..fx::N_CELLS).collect();
+    let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
+    let model = model_from_fixture();
+
+    let got = sct_residual_variance(
+        &reader,
+        &model,
+        &cells,
+        &log10_umi,
+        SctStreamOpts::default(),
+    )
+    .expect("residual variance");
+
+    assert_eq!(got.len(), fx::RESIDUAL_VARIANCE.len());
+    let mut worst = 0.0_f64;
+    for (g, (&mine, &theirs)) in got.iter().zip(fx::RESIDUAL_VARIANCE.iter()).enumerate() {
+        let d = rel(mine, theirs);
+        worst = worst.max(d);
+        assert!(
+            d < 1e-7,
+            "gene {g}: residual variance {mine} vs R {theirs} (rel {d:.3e})"
+        );
+    }
+    println!("worst residual variance drift: {worst:.3e}");
+}
+
+/// A gene's residual row is dense: a zero count still carries `-mu / sqrt(var)`.
+/// That is the property that rules out storing residuals in the sparse binary
+/// format, so it is worth pinning.
+#[test]
+fn test_residual_row_is_dense_at_zero_counts() {
+    let model = model_from_fixture();
+    let (counts, library_sizes) = fixture_counts();
+    let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
+
+    // A gene with a genuinely finite theta, so the Poisson branch is not what
+    // is being measured.
+    let pos = (0..model.len())
+        .find(|&g| model.theta[g].is_finite())
+        .expect("a non-Poisson gene");
+    let store_gene = fx::MODELLED[pos];
+
+    let indices: Vec<u32> = (0..fx::N_CELLS)
+        .filter(|&c| counts[store_gene][c] > 0)
+        .map(|c| c as u32)
+        .collect();
+    let nz: Vec<f64> = indices
+        .iter()
+        .map(|&c| counts[store_gene][c as usize] as f64)
+        .collect();
+
+    let mut row = vec![0.0_f32; fx::N_CELLS];
+    sct_residual_row(
+        &nz,
+        &indices,
+        fx::N_CELLS,
+        pos,
+        &model,
+        &log10_umi,
+        &mut row,
+    )
+    .expect("residual row");
+
+    let zero_cells: Vec<usize> = (0..fx::N_CELLS)
+        .filter(|&c| counts[store_gene][c] == 0)
+        .collect();
+    assert!(!zero_cells.is_empty(), "the gene needs some zero counts");
+    for &c in &zero_cells {
+        assert!(
+            row[c] < 0.0,
+            "cell {c} has a zero count, so its residual must be negative, got {}",
+            row[c]
+        );
+    }
+}
+
+/// The clipping range is applied, and it is the `+/- sqrt(n_cells)` sctransform
+/// uses rather than Seurat's `sqrt(n_cells / 30)`.
+#[test]
+fn test_residual_row_respects_the_clip_range() {
+    let mut model = model_from_fixture();
+    model.clip_range = (-0.5, 0.5);
+    let (_, library_sizes) = fixture_counts();
+    let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
+
+    let mut row = vec![0.0_f32; fx::N_CELLS];
+    sct_residual_row(
+        &[10_000.0],
+        &[0],
+        fx::N_CELLS,
+        0,
+        &model,
+        &log10_umi,
+        &mut row,
+    )
+    .expect("residual row");
+
+    assert!(row.iter().all(|&r| (-0.5..=0.5).contains(&r)));
+    assert_eq!(row[0], 0.5, "a huge count should clip at the upper bound");
+}
+
+/// The residual arithmetic itself, carried out in `f64`, against R.
+///
+/// This is the companion to `test_residual_variance_matches_sctransform`: it
+/// pins that the 1e-8 gap there is `f32` row storage and nothing else, so that
+/// a real arithmetic regression cannot hide inside the looser bar.
+#[test]
+fn test_residual_variance_is_exact_in_f64() {
+    let (counts, library_sizes) = fixture_counts();
+    let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
+    let model = model_from_fixture();
+
+    let mut worst_f64 = 0.0_f64;
+    for pos in 0..model.len() {
+        let g = fx::MODELLED[pos];
+        let b0 = model.intercept[pos];
+        let theta = model.theta[pos];
+        let (lo, hi) = model.clip_range;
+
+        let row: Vec<f64> = (0..fx::N_CELLS)
+            .map(|c| {
+                let mu = (b0 + model.log_umi_coef * log10_umi[c]).exp();
+                let var = (mu + mu * mu / theta).max(model.min_variance);
+                ((counts[g][c] as f64 - mu) / var.sqrt()).clamp(lo, hi)
+            })
+            .collect();
+
+        let n = fx::N_CELLS as f64;
+        let mean = row.iter().sum::<f64>() / n;
+        let v = row.iter().map(|&x| (x - mean) * (x - mean)).sum::<f64>() / (n - 1.0);
+        worst_f64 = worst_f64.max(rel(v, fx::RESIDUAL_VARIANCE[pos]));
+    }
+
+    assert!(
+        worst_f64 < 1e-12,
+        "residual variance in f64 drifted {worst_f64:.3e} from R, \
+         so the gap is arithmetic rather than f32 storage"
+    );
 }

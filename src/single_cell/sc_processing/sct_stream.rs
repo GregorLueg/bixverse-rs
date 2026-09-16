@@ -27,6 +27,7 @@ use crate::single_cell::sc_data::data_io::{CscGeneChunk, RawCounts, SingleCellRe
 use super::sct_nb_fit::{NbOffsetFit, fit_nb_offset_gene};
 use super::sctransform::{
     SctGeneStats, SctModel, SctParams, min_variance_from_umi_median, regularise_sct_model,
+    sct_residual_row,
 };
 
 ////////////
@@ -617,7 +618,7 @@ pub fn fit_sctransform<S: SingleCellReading>(
         var: pass.modelled.iter().map(|&g| pass.stats.var[g]).collect(),
     };
 
-    let model = regularise_sct_model(
+    let mut model = regularise_sct_model(
         &kept_fits,
         &kept_idx,
         &sub_stats,
@@ -626,8 +627,140 @@ pub fn fit_sctransform<S: SingleCellReading>(
         n_cells,
         params,
     )?;
+    // The regularisation works positionally; hand the model the store indices
+    // so a downstream caller holding an HVG set can look genes up directly.
+    model.genes = pass.modelled.clone();
 
     Ok((model, pass))
+}
+
+///////////////////////
+// Residual variance //
+///////////////////////
+
+/// Per-gene variance of the Pearson residuals, streaming.
+///
+/// This is sctransform's `gene_attr$residual_variance`, and it is what
+/// scTransform uses to rank genes for feature selection: a gene whose residuals
+/// still vary after the mean-variance relationship has been regressed out is
+/// carrying signal the model does not explain.
+///
+/// The residual row is dense, so it is generated one gene at a time and reduced
+/// to a scalar immediately. Peak memory is one row per worker.
+///
+/// ### Params
+///
+/// * `reader` - Gene-major reader.
+/// * `model` - The fitted model; its `genes` field decides which genes are
+///   visited.
+/// * `cell_indices` - Cells to include, in the order `log10_umi` is given in.
+/// * `log10_umi` - `log10(total UMI)` per cell.
+/// * `opts` - Disk and reporting knobs.
+///
+/// ### Returns
+///
+/// One variance per modelled gene, in `model.genes` order, or a
+/// [`BixverseErrors`] from the reader.
+pub fn sct_residual_variance<S: SingleCellReading>(
+    reader: &S,
+    model: &SctModel,
+    cell_indices: &[usize],
+    log10_umi: &[f64],
+    opts: SctStreamOpts,
+) -> Result<Vec<f64>, BixverseErrors> {
+    if log10_umi.len() != cell_indices.len() {
+        return Err(BixverseErrors::LengthMismatch {
+            name: "log10_umi",
+            expected: cell_indices.len(),
+            found: log10_umi.len(),
+        });
+    }
+
+    let n_cells = cell_indices.len();
+    let cell_set: IndexSet<u32> = cell_indices.iter().map(|&c| c as u32).collect();
+    let step = opts.gene_batch_size.unwrap_or(model.len()).max(1);
+    let mut out = vec![0.0_f64; model.len()];
+
+    for block in model.genes.chunks(step) {
+        let chunks = reader.read_gene_parallel_filtered(block, &cell_set)?;
+
+        let vars: Vec<(usize, f64)> = chunks
+            .par_iter()
+            .map(|chunk| {
+                let pos = model.position(chunk.original_index).ok_or(
+                    BixverseErrors::SctGeneIndexOutOfRange {
+                        index: chunk.original_index,
+                        n_genes: model.len(),
+                    },
+                )?;
+                let counts = chunk_counts(chunk);
+                let mut row = vec![0.0_f32; n_cells];
+                sct_residual_row(
+                    &counts,
+                    &chunk.indices,
+                    n_cells,
+                    pos,
+                    model,
+                    log10_umi,
+                    &mut row,
+                )?;
+                Ok((pos, sample_variance(&row)))
+            })
+            .collect::<Result<Vec<_>, BixverseErrors>>()?;
+
+        for (pos, v) in vars {
+            out[pos] = v;
+        }
+    }
+
+    Ok(out)
+}
+
+/// Sample variance of a row, `n - 1` in the denominator, matching R's
+/// `rowVars`.
+///
+/// Accumulated in `f64` off an `f32` row: the residuals span the clipping range
+/// and the squared deviations of a strongly expressed gene lose `f32`
+/// precision well before the sum completes.
+///
+/// ### Params
+///
+/// * `row` - The values.
+///
+/// ### Returns
+///
+/// The variance, or `0.0` for fewer than two values.
+fn sample_variance(row: &[f32]) -> f64 {
+    let n = row.len();
+    if n < 2 {
+        return 0.0;
+    }
+    let n_f = n as f64;
+    let mean = row.iter().map(|&x| x as f64).sum::<f64>() / n_f;
+
+    row.iter()
+        .map(|&x| {
+            let d = x as f64 - mean;
+            d * d
+        })
+        .sum::<f64>()
+        / (n_f - 1.0)
+}
+
+/// A gene chunk's stored counts as `f64`.
+///
+/// ### Params
+///
+/// * `chunk` - The gene chunk.
+///
+/// ### Returns
+///
+/// The non-zero counts, in the chunk's own order.
+fn chunk_counts(chunk: &CscGeneChunk) -> Vec<f64> {
+    match &chunk.data_raw {
+        RawCounts::U16(v) => v.iter().map(|&x| x as f64).collect(),
+        RawCounts::U32(v) => v.iter().map(|&x| x as f64).collect(),
+    }
 }
 
 /// Counts how many of a cell subset each gene is detected in.
