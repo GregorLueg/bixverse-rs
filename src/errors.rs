@@ -581,6 +581,26 @@ pub enum BixverseErrors {
     #[error("Unknown or unsupported h5ad format: {0}")]
     UnsupportH5ADFormat(String),
 
+    /// A dataset is compressed with a filter this build cannot decode.
+    ///
+    /// Raised before the first read, because HDF5 itself reports the missing
+    /// filter as a missing plugin directory: the path baked in at build time
+    /// is a cargo `OUT_DIR` that no longer exists. Either re-save the file
+    /// with `compression="gzip"`, or build with the `hdf5-filters` feature,
+    /// which adds LZF and Blosc.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "HDF5 dataset '{dataset}' uses filter {filter_id} ({filter_name}), which this build cannot decode"
+    )]
+    UnsupportedH5Filter {
+        /// Path of the dataset inside the file.
+        dataset: String,
+        /// The HDF5 filter identifier.
+        filter_id: i32,
+        /// Human readable name for that identifier.
+        filter_name: String,
+    },
+
     /// A named `obs` column was requested but does not exist in the h5ad.
     ///
     /// Primarily raised by `write_h5_normalised_counts` when the caller

@@ -10,6 +10,7 @@ use std::time::Instant;
 use thousands::Separable;
 
 use super::data_io::*;
+use super::h5_filters::check_h5ad_filters;
 use super::h5ad_io::*;
 use crate::prelude::*;
 
@@ -840,6 +841,10 @@ pub fn multi_h5ad_to_file<P: AsRef<Path>>(
     verbose: bool,
 ) -> Result<MultiH5adResult, BixverseErrors> {
     let total_start = Instant::now();
+
+    for task in tasks {
+        check_h5ad_filters(&File::open(&task.h5_path)?, &task.raw_slot, &task.cs_type)?;
+    }
 
     if verbose {
         println!(

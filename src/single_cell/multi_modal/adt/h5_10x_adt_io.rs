@@ -7,6 +7,7 @@ use std::path::Path;
 
 use crate::prelude::*;
 use crate::single_cell::sc_data::h5_10x_io::*;
+use crate::single_cell::sc_data::h5_filters::check_tenx_filters;
 
 /////////////
 // Structs //
@@ -59,6 +60,8 @@ pub fn read_tenx_h5_modality<P: AsRef<Path>>(
     })?;
 
     let file = File::open(file_path)?;
+
+    check_tenx_filters(&file, &version)?;
 
     let feature_types = read_string_dataset(&file.dataset(ft_path)?)?;
     let feature_names = read_string_dataset(&file.dataset(version.get_feature_name().unwrap())?)?;

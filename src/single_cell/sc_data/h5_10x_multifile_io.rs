@@ -23,6 +23,7 @@ use thousands::Separable;
 use crate::prelude::*;
 use crate::single_cell::sc_data::data_io::*;
 use crate::single_cell::sc_data::h5_10x_io::{TenxVersion, validate_feature_types_tenx};
+use crate::single_cell::sc_data::h5_filters::check_tenx_filters;
 
 ////////////////
 // File tasks //
@@ -396,6 +397,10 @@ pub fn multi_10x_h5_to_file<P: AsRef<Path>>(
     verbose: bool,
 ) -> Result<MultiTenxResult, BixverseErrors> {
     let total_start = Instant::now();
+
+    for task in tasks {
+        check_tenx_filters(&File::open(&task.h5_path)?, &task.version)?;
+    }
 
     if verbose {
         println!(
