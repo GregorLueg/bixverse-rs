@@ -12,6 +12,7 @@ pub mod qc;
 pub mod scdblfinder;
 pub mod scrublet;
 pub mod sct_nb_fit;
+pub mod sct_stream;
 pub mod sctransform;
 pub mod snn;
 pub mod utils_doublets;

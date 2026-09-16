@@ -1670,6 +1670,16 @@ pub enum BixverseErrors {
         gene: usize,
     },
 
+    /// No gene passed the `min_cells` detection filter.
+    #[cfg(feature = "single-cell")]
+    #[error("scTransform: no gene of {n_genes} is detected in at least {min_cells} cells.")]
+    SctNoGenesPassFilter {
+        /// The filter that rejected everything
+        min_cells: usize,
+        /// Genes the filter was applied to
+        n_genes: usize,
+    },
+
     // -- cellsweep --
     /// The caller asked for a supplied empty droplet mask but did not give one.
     #[cfg(feature = "single-cell")]
