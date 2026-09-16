@@ -18,10 +18,14 @@
 //!   actually runs on, theta agreed to a median 2e-5 and the top-2000 HVG sets
 //!   overlapped 1997/2000. This fixture is 400 cells, where the gap is wider.
 
+use approx::assert_relative_eq;
+use faer::Mat;
+
 use bixverse_rs::prelude::*;
 use bixverse_rs::single_cell::sc_data::data_io::{
     CellGeneSparseWriter, CscGeneChunk, ParallelSparseReader, RawCounts,
 };
+use bixverse_rs::single_cell::sc_processing::pca::{SingleCellPcaParams, pca_on_sc_residuals};
 use bixverse_rs::single_cell::sc_processing::sct_stream::{
     SctStreamOpts, fit_sctransform, sct_gene_pass, sct_residual_variance,
 };
@@ -567,4 +571,193 @@ fn test_residual_variance_is_exact_in_f64() {
         "residual variance in f64 drifted {worst_f64:.3e} from R, \
          so the gap is arithmetic rather than f32 storage"
     );
+}
+
+/////////////////////
+// Residual PCA //
+/////////////////////
+
+/// Builds the centred residual matrix the PCA should see, independently of any
+/// of the code under test: straight from the model parameters and the raw
+/// counts, in `f64`.
+fn reference_residual_matrix(
+    counts: &[Vec<u32>],
+    log10_umi: &[f64],
+    model: &SctModel,
+    genes: &[usize],
+) -> Mat<f64> {
+    let n_cells = log10_umi.len();
+    let mut m = Mat::<f64>::zeros(n_cells, genes.len());
+
+    for (col, &store_gene) in genes.iter().enumerate() {
+        let pos = model.position(store_gene).expect("gene is modelled");
+        let b0 = model.intercept[pos];
+        let theta = model.theta[pos];
+        let (lo, hi) = model.clip_range;
+
+        let row: Vec<f64> = (0..n_cells)
+            .map(|c| {
+                let mu = (b0 + model.log_umi_coef * log10_umi[c]).exp();
+                let var = (mu + mu * mu / theta).max(model.min_variance);
+                // f32 to match what the implementation stores before centring.
+                (((counts[store_gene][c] as f64 - mu) / var.sqrt()).clamp(lo, hi)) as f32 as f64
+            })
+            .collect();
+
+        let mean = row.iter().sum::<f64>() / n_cells as f64;
+        for (c, v) in row.iter().enumerate() {
+            m[(c, col)] = v - mean;
+        }
+    }
+
+    m
+}
+
+/// PCA on the residuals against a direct dense SVD of the same matrix.
+///
+/// Exact SVD on both sides, so this is a real equality check rather than a
+/// randomised-projection comparison. Components are compared up to sign, which
+/// an SVD does not fix.
+#[test]
+fn test_residual_pca_matches_a_direct_svd() {
+    let store = TempStore::new("residual_pca");
+    let (counts, library_sizes) = fixture_counts();
+    write_store(store.path(), &counts, fx::N_CELLS);
+
+    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let cells: Vec<usize> = (0..fx::N_CELLS).collect();
+    let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
+    let model = model_from_fixture();
+
+    // The 40 genes with the most residual variance, which is scTransform's own
+    // feature-selection criterion.
+    let mut ranked: Vec<(f64, usize)> = fx::RESIDUAL_VARIANCE
+        .iter()
+        .enumerate()
+        .map(|(pos, &v)| (v, fx::MODELLED[pos]))
+        .collect();
+    ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+    let mut hvg: Vec<usize> = ranked.into_iter().take(40).map(|(_, g)| g).collect();
+    hvg.sort_unstable();
+
+    let no_pcs = 10;
+    // Residuals already carry their variance as signal, so centre but do not
+    // rescale. Exact SVD so the comparison is not against a random projection.
+    let params = SingleCellPcaParams::new(true, false, false, false, 1e4);
+
+    let (scores, loadings, singular, scaled) = pca_on_sc_residuals(
+        &reader, &cells, &hvg, no_pcs, &params, &model, &log10_umi, 42, true, 0,
+    )
+    .expect("residual PCA");
+
+    // The residual matrix the PCA built must be the one the model defines.
+    let reference = reference_residual_matrix(&counts, &log10_umi, &model, &hvg);
+    let got = scaled.expect("return_scaled was set");
+    for c in 0..fx::N_CELLS {
+        for j in 0..hvg.len() {
+            let d = (got[(c, j)] as f64 - reference[(c, j)]).abs();
+            assert!(
+                d < 1e-5,
+                "cell {c} gene {j}: residual {} vs reference {}",
+                got[(c, j)],
+                reference[(c, j)]
+            );
+        }
+    }
+
+    // And the decomposition of it must be the SVD of it.
+    let svd = reference.thin_svd().expect("reference SVD");
+    for k in 0..no_pcs {
+        let want = svd.S().column_vector()[k];
+        assert_relative_eq!(singular[k] as f64, want, max_relative = 1e-4);
+
+        // Sign is not determined by an SVD, so align on the largest entry.
+        let pivot = (0..fx::N_CELLS)
+            .max_by(|&a, &b| {
+                svd.U()[(a, k)]
+                    .abs()
+                    .partial_cmp(&svd.U()[(b, k)].abs())
+                    .unwrap()
+            })
+            .expect("a pivot row");
+        let flip = (scores[(pivot, k)] as f64).signum() * (svd.U()[(pivot, k)] * want).signum();
+
+        for c in 0..fx::N_CELLS {
+            let want_score = svd.U()[(c, k)] * want;
+            let got_score = scores[(c, k)] as f64 * flip;
+            assert!(
+                (got_score - want_score).abs() < 1e-3 * want.max(1.0),
+                "PC{k} cell {c}: score {got_score} vs {want_score}"
+            );
+        }
+    }
+
+    assert_eq!(loadings.nrows(), hvg.len());
+    assert_eq!(loadings.ncols(), no_pcs);
+}
+
+/// Residuals and the shifted CLR transformation both rewrite what a column
+/// holds, so asking for both is refused rather than silently doing one.
+#[test]
+fn test_residual_pca_refuses_clr() {
+    let store = TempStore::new("residual_pca_clr");
+    let (counts, library_sizes) = fixture_counts();
+    write_store(store.path(), &counts, fx::N_CELLS);
+
+    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let cells: Vec<usize> = (0..fx::N_CELLS).collect();
+    let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
+    let model = model_from_fixture();
+    let params = SingleCellPcaParams::new(true, false, false, true, 1e4);
+
+    assert!(matches!(
+        pca_on_sc_residuals(
+            &reader,
+            &cells,
+            &fx::MODELLED[..10],
+            5,
+            &params,
+            &model,
+            &log10_umi,
+            42,
+            false,
+            0,
+        ),
+        Err(BixverseErrors::PcaResidualsWithClr)
+    ));
+}
+
+/// A gene outside the model is named rather than silently skipped or indexed
+/// out of bounds.
+#[test]
+fn test_residual_pca_rejects_an_unmodelled_gene() {
+    let store = TempStore::new("residual_pca_unmodelled");
+    let (counts, library_sizes) = fixture_counts();
+    write_store(store.path(), &counts, fx::N_CELLS);
+
+    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let cells: Vec<usize> = (0..fx::N_CELLS).collect();
+    let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
+    let model = model_from_fixture();
+
+    // A gene that failed the min_cells filter, so the model does not cover it.
+    let unmodelled = (0..fx::N_GENES)
+        .find(|g| !fx::MODELLED.contains(g))
+        .expect("some gene was filtered out");
+
+    assert!(matches!(
+        pca_on_sc_residuals(
+            &reader,
+            &cells,
+            &[unmodelled],
+            2,
+            &SingleCellPcaParams::new(true, false, false, false, 1e4),
+            &model,
+            &log10_umi,
+            42,
+            false,
+            0,
+        ),
+        Err(BixverseErrors::SctGeneNotModelled { .. })
+    ));
 }

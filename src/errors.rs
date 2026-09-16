@@ -1680,6 +1680,23 @@ pub enum BixverseErrors {
         n_genes: usize,
     },
 
+    /// A gene handed to the residual PCA is not covered by the model.
+    #[cfg(feature = "single-cell")]
+    #[error("scTransform: gene {gene} is not covered by the fitted model.")]
+    SctGeneNotModelled {
+        /// Store index of the gene
+        gene: usize,
+    },
+
+    /// Pearson residuals and the shifted CLR transformation were both asked
+    /// for.
+    ///
+    /// CLR rewrites the stored log-normalised layer, which the residual path
+    /// never reads, so combining them would quietly do nothing.
+    #[cfg(feature = "single-cell")]
+    #[error("PCA on Pearson residuals cannot be combined with the CLR transformation.")]
+    PcaResidualsWithClr,
+
     // -- cellsweep --
     /// The caller asked for a supplied empty droplet mask but did not give one.
     #[cfg(feature = "single-cell")]
