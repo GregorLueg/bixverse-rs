@@ -11,18 +11,22 @@
 //! The one stage that is not linear in the data is the step-1 fit, and it is
 //! bounded by construction: 2000 genes by 2000 cells regardless of the input.
 
+use half::f16;
 use indexmap::IndexSet;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
+use std::path::Path;
 use std::time::Instant;
 
 use crate::core::base::kernel_smooth::bw_nrd;
-use crate::core::math::vector_helpers::interp_linear_at;
+use crate::core::math::vector_helpers::{interp_linear_at, median};
 use crate::errors::BixverseErrors;
 use crate::prelude::*;
-use crate::single_cell::sc_data::data_io::{CscGeneChunk, RawCounts, SingleCellReading};
+use crate::single_cell::sc_data::data_io::{
+    CellGeneSparseWriter, CscGeneChunk, RawCounts, SingleCellReading,
+};
 
 use super::sct_nb_fit::{NbOffsetFit, fit_nb_offset_gene};
 use super::sctransform::{
@@ -761,6 +765,208 @@ fn chunk_counts(chunk: &CscGeneChunk) -> Vec<f64> {
         RawCounts::U16(v) => v.iter().map(|&x| x as f64).collect(),
         RawCounts::U32(v) => v.iter().map(|&x| x as f64).collect(),
     }
+}
+
+///////////////////////
+// Corrected counts //
+///////////////////////
+
+/// Writes the scTransform corrected UMI counts as a gene-major store.
+///
+/// The correction reverses the regression with every cell placed at the median
+/// library size, so what comes out is what the counts would have been had every
+/// cell been sequenced equally deeply:
+///
+/// ```text
+/// r_c  = (y_c - mu_c) / sqrt(mu_c + mu_c^2 / theta)
+/// mu'  = exp(b0 + log_umi_coef * median(log10_umi))
+/// y'_c = max(round(mu' + r_c * sqrt(mu' + mu'^2 / theta)), 0)
+/// ```
+///
+/// Two differences from [`sct_residual_row`], both deliberate and both matching
+/// sctransform's `correct_counts`: the residual here is neither clipped nor
+/// floored by `min_variance`. Clipping exists to stop a single outlying cell
+/// dominating a PCA, which is not what a count matrix is for, and the variance
+/// floor would bias the reversal.
+///
+/// `mu'` does not depend on the cell, so it is computed once per gene.
+///
+/// Sparsity is approximately but not exactly preserved. A zero count in a
+/// deeply sequenced cell corrects to a negative number and clamps back to zero,
+/// but a zero in a shallow cell can round up to one, so the output can be
+/// slightly denser than the input.
+///
+/// The normalised layer is written as `ln(1 + y')` with no library
+/// normalisation, because the correction has already removed the library-size
+/// structure that a target size would refer to. The header's `target_size` is
+/// left at the "unknown" sentinel, so anything downstream that needs a real
+/// target, such as the shifted CLR transformation, refuses this store rather
+/// than assuming one.
+///
+/// **The output's gene axis is `model.genes`, not the source's.** Genes that
+/// failed the `min_cells` filter have no model and so no corrected counts, and
+/// writing them back as all-zero rows would misrepresent that as measurement
+/// rather than exclusion. Gene `i` of the output is source gene
+/// `model.genes[i]`, so a caller keeping per-gene metadata has to subset it the
+/// same way.
+///
+/// ### Params
+///
+/// * `reader` - Gene-major reader over the raw counts.
+/// * `model` - The fitted model; its `genes` field decides what is written.
+/// * `cell_indices` - Cells to include, in the order `log10_umi` is given in.
+/// * `log10_umi` - `log10(total UMI)` per cell.
+/// * `out_path` - Gene-major store to write.
+/// * `opts` - Disk and reporting knobs.
+///
+/// ### Returns
+///
+/// `()`, or a [`BixverseErrors`] from the reader or the writer.
+///
+/// ### References
+///
+/// Hafemeister & Satija, Genome Biology, 2019, `correct_counts`
+pub fn sct_corrected_counts<S: SingleCellReading, P: AsRef<Path>>(
+    reader: &S,
+    model: &SctModel,
+    cell_indices: &[usize],
+    log10_umi: &[f64],
+    out_path: P,
+    opts: SctStreamOpts,
+) -> Result<(), BixverseErrors> {
+    if log10_umi.len() != cell_indices.len() {
+        return Err(BixverseErrors::LengthMismatch {
+            name: "log10_umi",
+            expected: cell_indices.len(),
+            found: log10_umi.len(),
+        });
+    }
+
+    let verbosity = parse_verbosity_level(opts.verbose);
+    let start = Instant::now();
+
+    let n_cells = cell_indices.len();
+    let cell_set: IndexSet<u32> = cell_indices.iter().map(|&c| c as u32).collect();
+    let median_log10_umi = median(log10_umi).unwrap_or(0.0);
+
+    // The corrected counts no longer carry library-size structure, so there is
+    // no target size for the normalised layer to have been scaled to.
+    let mut writer = CellGeneSparseWriter::new(out_path, false, n_cells, model.len(), 0.0)?;
+
+    let step = opts.gene_batch_size.unwrap_or(model.len()).max(1);
+
+    for block in model.genes.chunks(step) {
+        let chunks = reader.read_gene_parallel_filtered(block, &cell_set)?;
+
+        let corrected: Vec<CscGeneChunk> = chunks
+            .par_iter()
+            .map(|chunk| {
+                let pos = model.position(chunk.original_index).ok_or(
+                    BixverseErrors::SctGeneNotModelled {
+                        gene: chunk.original_index,
+                    },
+                )?;
+                Ok(correct_one_gene(
+                    chunk,
+                    pos,
+                    n_cells,
+                    model,
+                    log10_umi,
+                    median_log10_umi,
+                ))
+            })
+            .collect::<Result<Vec<_>, BixverseErrors>>()?;
+
+        for chunk in corrected {
+            writer.write_gene_chunk(chunk)?;
+        }
+    }
+
+    writer.finalise()?;
+
+    if verbosity.normal_verbosity() {
+        println!(
+            "scTransform: wrote {} corrected genes in {:.2?}",
+            model.len(),
+            start.elapsed()
+        );
+    }
+
+    Ok(())
+}
+
+/// Corrects one gene's counts to the median library size.
+///
+/// ### Params
+///
+/// * `chunk` - The gene's raw counts, reindexed to the selected cells.
+/// * `gene_pos` - Position of this gene within the model.
+/// * `n_cells` - Number of cells represented.
+/// * `model` - The fitted model.
+/// * `log10_umi` - `log10(total UMI)` per cell.
+/// * `median_log10_umi` - Median of `log10_umi`, the library size everything is
+///   corrected to.
+///
+/// ### Returns
+///
+/// The corrected gene chunk, with zeros dropped and `original_index` set to the
+/// gene's position in the model rather than in the source store, since the
+/// output's gene axis is the modelled set.
+fn correct_one_gene(
+    chunk: &CscGeneChunk,
+    gene_pos: usize,
+    n_cells: usize,
+    model: &SctModel,
+    log10_umi: &[f64],
+    median_log10_umi: f64,
+) -> CscGeneChunk {
+    let b0 = model.intercept[gene_pos];
+    let theta = model.theta[gene_pos];
+    let slope = model.log_umi_coef;
+
+    // Constant across cells: every cell is placed at the same library size.
+    let mu_target = (b0 + slope * median_log10_umi).exp();
+    let sd_target = (mu_target + mu_target * mu_target / theta).sqrt();
+
+    let mut counts = vec![0.0_f64; n_cells];
+    match &chunk.data_raw {
+        RawCounts::U16(v) => {
+            for (&i, &x) in chunk.indices.iter().zip(v.iter()) {
+                counts[i as usize] = x as f64;
+            }
+        }
+        RawCounts::U32(v) => {
+            for (&i, &x) in chunk.indices.iter().zip(v.iter()) {
+                counts[i as usize] = x as f64;
+            }
+        }
+    }
+
+    let mut raw = Vec::new();
+    let mut indices = Vec::new();
+    let mut norms = Vec::new();
+
+    for (c, &y) in counts.iter().enumerate() {
+        let mu = (b0 + slope * log10_umi[c]).exp();
+        let residual = (y - mu) / (mu + mu * mu / theta).sqrt();
+        // R's `round()` is round-half-to-even, not half-away-from-zero.
+        let corrected = (mu_target + residual * sd_target).round_ties_even();
+
+        if corrected >= 1.0 {
+            let value = corrected as u32;
+            raw.push(value);
+            indices.push(c);
+            norms.push(F16::from(f16::from_f32((value as f32).ln_1p())));
+        }
+    }
+
+    CscGeneChunk::from_conversion(
+        RawCounts::from_u32_auto(&raw),
+        &norms,
+        &indices,
+        gene_pos,
+        true,
+    )
 }
 
 /// Counts how many of a cell subset each gene is detected in.

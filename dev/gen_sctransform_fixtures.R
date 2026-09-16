@@ -79,6 +79,20 @@ mp_fit <- vst_out$model_pars_fit[genes, , drop = FALSE]
 
 resid_var <- vst_out$gene_attr[genes, "residual_variance"]
 
+# Corrected UMI counts. This is `correct_counts`, which recomputes the Pearson
+# residual from the raw counts with no clipping and no variance floor, rather
+# than `correct`, which reverses the already-clipped residual matrix. Seurat's
+# SCTransform() puts `correct_counts` in the SCT `counts` slot, so that is the
+# one worth matching.
+corrected <- sctransform::correct_counts(vst_out, counts, verbosity = 0)[genes, ]
+corrected_sum <- as.numeric(Matrix::rowSums(corrected))
+corrected_nnz <- as.numeric(Matrix::rowSums(corrected > 0))
+
+# Three full rows, spanning the abundance range, so a per-gene total that
+# happens to agree cannot hide a redistribution across cells.
+probe_pos <- c(1L, which.min(abs(log_gmean - median(log_gmean))), length(genes))
+probe_rows <- as.matrix(corrected[probe_pos, ])
+
 ## ---- emit -------------------------------------------------------------------
 
 # R prints a non-finite as "Inf"/"NaN", which is not Rust syntax.
@@ -152,6 +166,20 @@ emit("STEP1_INTERCEPT", "Unregularised step-1 intercept, from glmGamPoi.", mp[, 
 emit("FIT_THETA",       "Regularised theta per modelled gene.", mp_fit[, "theta"])
 emit("FIT_INTERCEPT",   "Regularised intercept per modelled gene.", mp_fit[, "(Intercept)"])
 emit("RESIDUAL_VARIANCE", "`gene_attr$residual_variance` per modelled gene.", resid_var)
+emit("CORRECTED_SUM", "`rowSums(correct_counts(...))` per modelled gene.", corrected_sum)
+emit("CORRECTED_NNZ", "Non-zero corrected counts per modelled gene.", corrected_nnz)
+
+writeLines(c(
+  "/// Positions within `MODELLED` of the genes `CORRECTED_ROWS` holds in full.",
+  sprintf("pub const PROBE_POS: [usize; %d] = [%s];", length(probe_pos), int_vec(probe_pos - 1L)),
+  "",
+  "/// Full corrected count rows for `PROBE_POS`, row-major.",
+  sprintf("pub const CORRECTED_ROWS: [[f64; %d]; %d] = [", ncol(probe_rows), nrow(probe_rows))
+), con)
+for (i in seq_len(nrow(probe_rows))) {
+  writeLines(c("    [", sprintf("        %s,", num_vec(probe_rows[i, ])), "    ],"), con)
+}
+writeLines(c("];", ""), con)
 
 close(con)
 

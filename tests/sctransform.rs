@@ -22,12 +22,13 @@ use approx::assert_relative_eq;
 use faer::Mat;
 
 use bixverse_rs::prelude::*;
+use bixverse_rs::single_cell::sc_data::bin_merge_io::gene_store_to_cell_store;
 use bixverse_rs::single_cell::sc_data::data_io::{
     CellGeneSparseWriter, CscGeneChunk, ParallelSparseReader, RawCounts,
 };
 use bixverse_rs::single_cell::sc_processing::pca::{SingleCellPcaParams, pca_on_sc_residuals};
 use bixverse_rs::single_cell::sc_processing::sct_stream::{
-    SctStreamOpts, fit_sctransform, sct_gene_pass, sct_residual_variance,
+    SctStreamOpts, fit_sctransform, sct_corrected_counts, sct_gene_pass, sct_residual_variance,
 };
 use bixverse_rs::single_cell::sc_processing::sctransform::{
     SctGeneStats, SctModel, SctParams, min_variance_from_umi_median, regularise_sct_model,
@@ -759,5 +760,150 @@ fn test_residual_pca_rejects_an_unmodelled_gene() {
             0,
         ),
         Err(BixverseErrors::SctGeneNotModelled { .. })
+    ));
+}
+
+///////////////////////
+// Corrected counts //
+///////////////////////
+
+/// The corrected counts against `sctransform::correct_counts`, which is what
+/// Seurat's `SCTransform()` puts in the SCT `counts` slot.
+///
+/// R's own regularised parameters are fed in, so this gates the correction
+/// arithmetic: the unclipped residual, the reversal at the median library size
+/// and round-half-to-even. Counts are integers, so the bar is exact equality,
+/// not a tolerance.
+#[test]
+fn test_corrected_counts_match_sctransform() {
+    let store = TempStore::new("corrected_in");
+    let out = TempStore::new("corrected_out");
+    let (counts, library_sizes) = fixture_counts();
+    write_store(store.path(), &counts, fx::N_CELLS);
+
+    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let cells: Vec<usize> = (0..fx::N_CELLS).collect();
+    let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
+    let model = model_from_fixture();
+
+    sct_corrected_counts(
+        &reader,
+        &model,
+        &cells,
+        &log10_umi,
+        out.path(),
+        SctStreamOpts::default(),
+    )
+    .expect("corrected counts");
+
+    let written = ParallelSparseReader::new(out.path()).expect("corrected store opens");
+    assert!(written.is_gene_based());
+    // The correction removes the library-size structure, so there is no target
+    // size for the normalised layer to refer to.
+    assert_eq!(written.target_size(), None);
+
+    let chunks = written
+        .read_gene_parallel(&(0..model.len()).collect::<Vec<_>>())
+        .expect("read corrected genes");
+    assert_eq!(chunks.len(), model.len());
+
+    for chunk in &chunks {
+        let pos = chunk.original_index;
+        let sum: f64 = chunk.data_raw.iter().map(|x| x as f64).sum();
+        assert_eq!(
+            sum,
+            fx::CORRECTED_SUM[pos],
+            "gene {pos}: corrected total {sum} vs R {}",
+            fx::CORRECTED_SUM[pos]
+        );
+        assert_eq!(
+            chunk.indices.len() as f64,
+            fx::CORRECTED_NNZ[pos],
+            "gene {pos}: corrected non-zeros {} vs R {}",
+            chunk.indices.len(),
+            fx::CORRECTED_NNZ[pos]
+        );
+    }
+
+    // Per-gene totals could agree while the counts sat on the wrong cells, so
+    // check three full rows entry by entry.
+    for (k, &pos) in fx::PROBE_POS.iter().enumerate() {
+        let chunk = &chunks[pos];
+        let mut dense = vec![0.0_f64; fx::N_CELLS];
+        for (slot, &cell) in chunk.indices.iter().enumerate() {
+            dense[cell as usize] = chunk.data_raw.get(slot) as f64;
+        }
+        for (c, (&mine, &theirs)) in dense.iter().zip(fx::CORRECTED_ROWS[k].iter()).enumerate() {
+            assert_eq!(
+                mine, theirs,
+                "gene {pos} cell {c}: corrected {mine} vs R {theirs}"
+            );
+        }
+    }
+}
+
+/// The corrected gene-major store transposes into the cell-major companion
+/// every downstream method expects, entry for entry.
+///
+/// This is the direction the crate did not have: every ingest path writes cells
+/// first and derives genes, but scTransform's model is per gene, so its output
+/// arrives gene-major.
+#[test]
+fn test_gene_store_transposes_to_cell_store() {
+    let store = TempStore::new("transpose_in");
+    let out = TempStore::new("transpose_out");
+    let (counts, _) = fixture_counts();
+    write_store(store.path(), &counts, fx::N_CELLS);
+
+    // A phase size well under the cell count, so the multi-phase path runs.
+    gene_store_to_cell_store(store.path(), out.path(), 64, 32, 0).expect("transpose");
+
+    let cell_reader = ParallelSparseReader::new(out.path()).expect("cell store opens");
+    assert!(cell_reader.is_cell_based());
+
+    let header = cell_reader.get_header();
+    assert_eq!(header.total_cells, fx::N_CELLS);
+    assert_eq!(header.total_genes, fx::N_GENES);
+
+    let cells = cell_reader
+        .read_cells_parallel(&(0..fx::N_CELLS).collect::<Vec<_>>())
+        .expect("read cells");
+    assert_eq!(cells.len(), fx::N_CELLS);
+
+    for cell in &cells {
+        let c = cell.original_index;
+
+        let expected_lib: usize = (0..fx::N_GENES).map(|g| counts[g][c] as usize).sum();
+        assert_eq!(cell.library_size, expected_lib, "cell {c}: library size");
+
+        let mut dense = vec![0_u32; fx::N_GENES];
+        for (slot, &gene) in cell.indices.iter().enumerate() {
+            dense[gene as usize] = cell.data_raw.get(slot);
+        }
+        for g in 0..fx::N_GENES {
+            assert_eq!(dense[g], counts[g][c], "cell {c} gene {g}");
+        }
+
+        // Gene indices must come out ascending, which every CSR consumer
+        // assumes.
+        assert!(
+            cell.indices.windows(2).all(|w| w[0] < w[1]),
+            "cell {c}: gene indices are not ascending"
+        );
+    }
+}
+
+/// A cell-major store handed to the transpose is refused rather than read as if
+/// it were gene-major.
+#[test]
+fn test_transpose_rejects_a_cell_major_source() {
+    let store = TempStore::new("transpose_wrong_mode");
+    let out = TempStore::new("transpose_wrong_mode_out");
+    let writer = CellGeneSparseWriter::new(store.path(), true, 2, 3, 1e4).expect("writer opens");
+    writer.finalise().expect("finalise");
+
+    assert!(matches!(
+        gene_store_to_cell_store(store.path(), out.path(), 8, 8, 0),
+        Err(BixverseErrors::ReaderModeMismatch { .. })
     ));
 }
