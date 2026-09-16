@@ -37,10 +37,10 @@ use bixverse_rs::single_cell::sc_data::bin_merge_io::gene_store_to_cell_store;
 use bixverse_rs::single_cell::sc_data::data_io::{
     CellGeneSparseWriter, CscGeneChunk, ParallelSparseReader, RawCounts,
 };
-use bixverse_rs::single_cell::sc_processing::sct_stream::{
+use bixverse_rs::single_cell::sctransform::model::SctParams;
+use bixverse_rs::single_cell::sctransform::stream::{
     SctStreamOpts, fit_sctransform, sct_corrected_counts, sct_residual_variance,
 };
-use bixverse_rs::single_cell::sc_processing::sctransform::SctParams;
 
 /// Cell counts swept. The step-1 fit is pinned at 2000 cells throughout, so if
 /// anything downstream were quadratic in the cell count it would show here.

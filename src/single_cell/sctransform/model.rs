@@ -8,7 +8,7 @@
 //!
 //! This module holds the parameters, the per-gene statistics the regularisation
 //! needs, and the regularisation itself. The per-gene fit lives in
-//! [`super::sct_nb_fit`].
+//! [`super::nb_fit`].
 //!
 //! ### References
 //!
@@ -19,7 +19,7 @@ use crate::core::base::kernel_smooth::{bw_sj, ksmooth_normal};
 use crate::core::math::stats::is_outlier;
 use crate::errors::BixverseErrors;
 
-use super::sct_nb_fit::{LOG_UMI_COEF, NbOffsetFit};
+use super::nb_fit::{LOG_UMI_COEF, NbOffsetFit};
 
 ////////////
 // Consts //
@@ -276,7 +276,7 @@ impl SctModel {
 ///
 /// The fits are expected to have been through v2's post-fit Poisson check
 /// already, which overrides theta where the second moment disagrees with the
-/// likelihood. [`super::sct_stream::fit_sctransform`] does that; a caller
+/// likelihood. [`super::stream::fit_sctransform`] does that; a caller
 /// driving this directly has to, or genes that carry no real overdispersion
 /// will pull the smoothing curve.
 ///

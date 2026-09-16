@@ -27,12 +27,12 @@ use bixverse_rs::single_cell::sc_data::data_io::{
     CellGeneSparseWriter, CscGeneChunk, ParallelSparseReader, RawCounts,
 };
 use bixverse_rs::single_cell::sc_processing::pca::{SingleCellPcaParams, pca_on_sc_residuals};
-use bixverse_rs::single_cell::sc_processing::sct_stream::{
-    SctStreamOpts, fit_sctransform, sct_corrected_counts, sct_gene_pass, sct_residual_variance,
-};
-use bixverse_rs::single_cell::sc_processing::sctransform::{
+use bixverse_rs::single_cell::sctransform::model::{
     SctGeneStats, SctModel, SctParams, min_variance_from_umi_median, regularise_sct_model,
     sct_residual_row,
+};
+use bixverse_rs::single_cell::sctransform::stream::{
+    SctStreamOpts, fit_sctransform, sct_corrected_counts, sct_gene_pass, sct_residual_variance,
 };
 
 mod sctransform_fixtures;
@@ -229,7 +229,7 @@ fn test_gene_pass_matches_sctransform() {
 /// bandwidth and the kernel smoothing.
 #[test]
 fn test_regularisation_matches_sctransform_on_real_fits() {
-    use bixverse_rs::single_cell::sc_processing::sct_nb_fit::NbOffsetFit;
+    use bixverse_rs::single_cell::sctransform::nb_fit::NbOffsetFit;
 
     let stats = SctGeneStats {
         log_gmean: fx::LOG_GMEAN.to_vec(),

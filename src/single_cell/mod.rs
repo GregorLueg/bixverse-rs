@@ -14,6 +14,7 @@ pub mod sc_r_wrappers;
 pub mod sc_traits;
 pub mod sc_trajectory;
 pub mod sc_utils;
+pub mod sctransform;
 
 #[cfg(feature = "multi-modal")]
 pub mod multi_modal;

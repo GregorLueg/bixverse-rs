@@ -28,11 +28,11 @@ use crate::single_cell::sc_data::data_io::{
     CellGeneSparseWriter, CscGeneChunk, RawCounts, SingleCellReading,
 };
 
-use super::sct_nb_fit::{NbOffsetFit, fit_nb_offset_gene};
-use super::sctransform::{
+use super::model::{
     SctGeneStats, SctModel, SctParams, min_variance_from_umi_median, regularise_sct_model,
     sct_residual_row,
 };
+use super::nb_fit::{NbOffsetFit, fit_nb_offset_gene};
 
 ////////////
 // Consts //

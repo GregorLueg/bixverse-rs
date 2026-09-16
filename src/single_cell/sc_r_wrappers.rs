@@ -60,9 +60,9 @@ use crate::single_cell::sc_processing::{
     pca::SingleCellPcaParams,
     scdblfinder::ScDblFinderParams,
     scrublet::ScrubletParams,
-    sctransform::{SctModel, SctParams},
     utils_doublets::ScDblSimParams,
 };
+use crate::single_cell::sctransform::model::{SctModel, SctParams};
 
 /////////////
 // Helpers //
