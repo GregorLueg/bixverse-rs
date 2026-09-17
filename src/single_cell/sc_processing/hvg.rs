@@ -1779,6 +1779,21 @@ pub fn select_residual_hvg(
     genes: &[usize],
     n_hvg: usize,
 ) -> Result<Vec<usize>, BixverseErrors> {
+    if per_group_variance.is_empty() {
+        return Err(BixverseErrors::ResidualEmptySelectionRequest {
+            what: "no groups were given to select features from",
+        });
+    }
+    if genes.is_empty() {
+        return Err(BixverseErrors::ResidualEmptySelectionRequest {
+            what: "the shared gene axis is empty",
+        });
+    }
+    if n_hvg == 0 {
+        return Err(BixverseErrors::ResidualEmptySelectionRequest {
+            what: "n_hvg is zero",
+        });
+    }
     for variance in per_group_variance {
         if variance.len() != genes.len() {
             return Err(BixverseErrors::LengthMismatch {
@@ -1793,15 +1808,21 @@ pub fn select_residual_hvg(
     let mut selected = vec![false; genes.len()];
 
     for variance in per_group_variance {
+        // A NaN would make `partial_cmp` return `None` for every comparison
+        // against it. Treating that as `Equal` breaks transitivity, which both
+        // ranks the NaN gene arbitrarily high and, past a few dozen of them,
+        // makes `sort_unstable_by` panic outright on the broken total order.
+        // Sorting it to the bottom is the honest answer: a gene with no
+        // computable variance is not a variable gene.
+        let key = |i: usize| {
+            let v = variance[i];
+            if v.is_nan() { f64::NEG_INFINITY } else { v }
+        };
+
         let mut order: Vec<usize> = (0..genes.len()).collect();
         // Descending by variance, position breaking ties so the result does not
         // depend on the sort's stability.
-        order.sort_unstable_by(|&a, &b| {
-            variance[b]
-                .partial_cmp(&variance[a])
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(a.cmp(&b))
-        });
+        order.sort_unstable_by(|&a, &b| key(b).total_cmp(&key(a)).then(a.cmp(&b)));
         for &pos in order.iter().take(take) {
             selected[pos] = true;
         }
@@ -2473,5 +2494,87 @@ mod tests {
             select_residual_hvg(&variance, &genes, 2),
             Err(BixverseErrors::LengthMismatch { .. })
         ));
+    }
+
+    /// A NaN must not rank as a variable gene, and must not break the sort.
+    ///
+    /// `partial_cmp(..).unwrap_or(Equal)` would make NaN compare equal to
+    /// everything, which both ranks it arbitrarily high and, past a few dozen
+    /// NaNs, makes `sort_unstable_by` panic on the broken total order.
+    #[test]
+    fn test_select_residual_hvg_sorts_nan_to_the_bottom() {
+        let genes: Vec<usize> = (0..400).collect();
+        let variance: Vec<f64> = (0..400)
+            .map(|i| if i % 13 == 0 { f64::NAN } else { i as f64 })
+            .collect();
+
+        let got = select_residual_hvg(std::slice::from_ref(&variance), &genes, 5).unwrap();
+
+        assert_eq!(got.len(), 5);
+        for gene in &got {
+            assert!(
+                !variance[*gene].is_nan(),
+                "gene {gene} has no computable variance and cannot be a variable gene"
+            );
+        }
+        // The top five finite variances are the largest indices that are not
+        // multiples of 13.
+        let mut want: Vec<usize> = (0..400).filter(|i| i % 13 != 0).collect();
+        want.sort_unstable_by_key(|&a| std::cmp::Reverse(a));
+        want.truncate(5);
+        want.sort_unstable();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn test_select_residual_hvg_rejects_empty_inputs() {
+        let genes = [4, 7, 9];
+        let variance = vec![vec![1.0, 2.0, 3.0]];
+
+        // No groups at all.
+        assert!(matches!(
+            select_residual_hvg(&[], &genes, 2),
+            Err(BixverseErrors::ResidualEmptySelectionRequest { .. })
+        ));
+        // Nothing asked for, which would otherwise hand PCA an empty gene set.
+        assert!(matches!(
+            select_residual_hvg(&variance, &genes, 0),
+            Err(BixverseErrors::ResidualEmptySelectionRequest { .. })
+        ));
+        // Empty shared axis.
+        assert!(matches!(
+            select_residual_hvg(&[vec![]], &[], 2),
+            Err(BixverseErrors::ResidualEmptySelectionRequest { .. })
+        ));
+    }
+
+    /// Every top-N gene of every group has to be selected, not just some.
+    ///
+    /// The union rule is easy to test one way round only; a function that
+    /// dropped a group's contribution entirely would still return the right
+    /// number of genes.
+    #[test]
+    fn test_select_residual_hvg_keeps_every_groups_top_n() {
+        let genes: Vec<usize> = (0..20).collect();
+        let a: Vec<f64> = (0..20).map(|i| i as f64).collect();
+        let b: Vec<f64> = (0..20).map(|i| (20 - i) as f64).collect();
+        let per_group = vec![a.clone(), b.clone()];
+
+        let n_hvg = 3;
+        let got = select_residual_hvg(&per_group, &genes, n_hvg).unwrap();
+
+        for variance in [&a, &b] {
+            let mut order: Vec<usize> = (0..20).collect();
+            order.sort_unstable_by(|&x, &y| variance[y].total_cmp(&variance[x]).then(x.cmp(&y)));
+            for &pos in order.iter().take(n_hvg) {
+                assert!(
+                    got.contains(&genes[pos]),
+                    "gene {} is top-{n_hvg} in a group but was not selected",
+                    genes[pos]
+                );
+            }
+        }
+        // Disjoint tops, so the union is exactly both.
+        assert_eq!(got.len(), 2 * n_hvg);
     }
 }

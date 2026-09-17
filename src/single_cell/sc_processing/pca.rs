@@ -609,9 +609,10 @@ fn dense_pca<S: SingleCellReading>(
         PcaColumnSource::Normalised { clr_offsets } => clr_offsets,
         PcaColumnSource::Residual { source } => {
             if source.n_cells() != cell_indices.len() {
-                return Err(BixverseErrors::OffsetsLengthDoesNotMatchNCells {
-                    len_offset: source.n_cells(),
-                    n_cells: cell_indices.len(),
+                return Err(BixverseErrors::LengthMismatch {
+                    name: "residual source cells",
+                    expected: cell_indices.len(),
+                    found: source.n_cells(),
                 });
             }
             None
@@ -624,6 +625,13 @@ fn dense_pca<S: SingleCellReading>(
     // like it worked.
     if residuals && params_pca.clr {
         return Err(BixverseErrors::PcaResidualsWithClr);
+    }
+    // Residuals carry the biological signal as variance, which is the point of
+    // the transformation. Dividing it back out per gene flattens exactly the
+    // ranking the transformation produces, and the default is on, so this is
+    // refused rather than documented.
+    if residuals && params_pca.normalise_variance {
+        return Err(BixverseErrors::PcaResidualsWithVarianceNormalisation);
     }
     if params_pca.clr && clr_offsets.is_none() {
         return Err(BixverseErrors::OffsetsNotProvidedForClrPCA);
