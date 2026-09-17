@@ -51,7 +51,10 @@ use crate::single_cell::sc_data::{
     h5_10x_multifile_io::TenxFileTask, h5ad_io::parse_raw_slot, h5ad_multifile_io::H5adFileTask,
     mtx_multifile_io::MtxFileTask, sc_synthetic_data::CellTypeConfig,
 };
-use crate::single_cell::sc_processing::sctransform::model::{SctModel, SctParams};
+use crate::single_cell::sc_processing::analytic_pearson::model::{AprModel, AprParams};
+use crate::single_cell::sc_processing::analytic_pearson::stream::AprGroupedFit;
+use crate::single_cell::sc_processing::sctransform::model::{SctCovariates, SctModel, SctParams};
+use crate::single_cell::sc_processing::sctransform::stream::SctGroupedFit;
 use crate::single_cell::sc_processing::{
     cellsweep::{
         CellSweepFit, CellSweepParams, CellSweepSample, EmptyDropletCall, parse_empty_droplet_call,
@@ -4280,5 +4283,230 @@ impl SctModel {
                 required("clip_max")?.as_real().unwrap_or(f64::INFINITY),
             ),
         })
+    }
+}
+
+impl SctCovariates {
+    /// Serialise the [SctCovariates] into an R list.
+    ///
+    /// ### Return
+    ///
+    /// A list with the flattened row-major values, the covariate names and the
+    /// column count, so the R side can rebuild the matrix without guessing at
+    /// the orientation.
+    pub fn to_r_list(&self) -> List {
+        list!(
+            values = self.values.clone(),
+            names = self.names.clone(),
+            n_covariates = self.n_covariates() as i32,
+        )
+    }
+
+    /// Rebuild the [SctCovariates] from one column per covariate.
+    ///
+    /// The R side holds cell-level covariates as a data.frame, so columns are
+    /// the natural thing to hand over: a named list of numeric vectors, each of
+    /// length `n_cells`. The row-major flattening the model wants happens here
+    /// via [`SctCovariates::from_columns`] rather than in R.
+    ///
+    /// An empty or absent list gives the empty covariate set, which is the
+    /// common case and the one the residual arithmetic has a fast path for.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - Named list of numeric vectors, one per covariate.
+    ///
+    /// ### Return
+    ///
+    /// The [SctCovariates], or an error when a column is not numeric or the
+    /// columns disagree in length.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let mut columns: Vec<(String, Vec<f64>)> = Vec::with_capacity(r_list.len());
+
+        for (name, value) in r_list.iter() {
+            let values = value.as_real_vector().ok_or_else(|| {
+                Error::Other(format!("scTransform covariate '{name}' is not numeric"))
+            })?;
+            columns.push((name.to_string(), values));
+        }
+
+        if columns.is_empty() {
+            return Ok(Self::default());
+        }
+
+        Self::from_columns(&columns).map_err(|e| Error::Other(e.to_string()))
+    }
+}
+
+impl SctGroupedFit {
+    /// Serialise the [SctGroupedFit] into an R list.
+    ///
+    /// The models go out as a list of the lists [`SctModel::to_r_list`]
+    /// produces, so a round trip is per model and nothing new has to be parsed.
+    /// `genes` is the shared axis, already the intersection across groups, and
+    /// is what an HVG set and a residual PCA are indexed against.
+    ///
+    /// ### Return
+    ///
+    /// A list with the per-group models, the shared gene axis and the group
+    /// map.
+    pub fn to_r_list(&self) -> List {
+        let models = List::from_values(self.models.iter().map(|m| m.to_r_list()));
+        let genes: Vec<i32> = self.genes.iter().map(|&g| g as i32).collect();
+        let group_of_cell: Vec<i32> = self.group_of_cell.iter().map(|&g| g as i32).collect();
+
+        list!(
+            models = models,
+            genes = genes,
+            group_of_cell = group_of_cell,
+            n_groups = self.models.len() as i32,
+        )
+    }
+}
+
+/////////////////////////////////
+// Analytic Pearson residuals //
+/////////////////////////////////
+
+impl AprParams {
+    /// Generate the [AprParams] from an R list.
+    ///
+    /// Missing values fall back to the defaults of Lause, Berens & Kobak:
+    /// `theta = 100` and clipping at `+/- sqrt(n_cells)`.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the analytic Pearson parameters.
+    ///
+    /// ### Return
+    ///
+    /// The [AprParams] with all of the parameters.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+        let defaults = AprParams::default();
+
+        let theta = params
+            .get("theta")
+            .and_then(|v| v.as_real())
+            .unwrap_or(defaults.theta);
+
+        let min_cells = params
+            .get("min_cells")
+            .and_then(|v| v.as_real())
+            .map(|v| v as usize)
+            .unwrap_or(defaults.min_cells);
+
+        // Both ends or neither: half a clipping range is meaningless, so a list
+        // carrying only one is treated as carrying none.
+        let clip_range = match (
+            params.get("clip_min").and_then(|v| v.as_real()),
+            params.get("clip_max").and_then(|v| v.as_real()),
+        ) {
+            (Some(lo), Some(hi)) => Some((lo, hi)),
+            _ => defaults.clip_range,
+        };
+
+        Ok(Self {
+            theta,
+            min_cells,
+            clip_range,
+        })
+    }
+}
+
+impl AprModel {
+    /// Serialise the [AprModel] into an R list.
+    ///
+    /// ### Return
+    ///
+    /// A list with the gene axis, the marginals and the two scalars.
+    pub fn to_r_list(&self) -> List {
+        let genes: Vec<i32> = self.genes.iter().map(|&g| g as i32).collect();
+
+        list!(
+            genes = genes,
+            gene_sums = self.gene_sums.clone(),
+            total = self.total,
+            theta = self.theta,
+            clip_min = self.clip_range.0,
+            clip_max = self.clip_range.1,
+        )
+    }
+
+    /// Rebuild an [AprModel] from the list [`AprModel::to_r_list`] produced.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The serialised model.
+    ///
+    /// ### Return
+    ///
+    /// The [AprModel], or an error naming the first field that is missing or
+    /// the wrong length. No defaults: a partially reconstructed model would
+    /// silently produce wrong residuals.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+
+        let required = |name: &'static str| -> Result<&Robj> {
+            params
+                .get(name)
+                .ok_or_else(|| Error::Other(format!("Analytic Pearson model is missing '{name}'")))
+        };
+
+        let genes: Vec<usize> = required("genes")?
+            .as_integer_slice()
+            .ok_or_else(|| {
+                Error::Other("Analytic Pearson model 'genes' is not integer".to_string())
+            })?
+            .iter()
+            .map(|&g| g as usize)
+            .collect();
+
+        let gene_sums = required("gene_sums")?.as_real_vector().ok_or_else(|| {
+            Error::Other("Analytic Pearson model 'gene_sums' is not numeric".to_string())
+        })?;
+
+        if gene_sums.len() != genes.len() {
+            return Err(Error::Other(format!(
+                "Analytic Pearson model 'gene_sums' has {} entries, expected {}",
+                gene_sums.len(),
+                genes.len()
+            )));
+        }
+
+        Ok(Self {
+            genes,
+            gene_sums,
+            total: required("total")?.as_real().unwrap_or(0.0),
+            theta: required("theta")?.as_real().unwrap_or(0.0),
+            clip_range: (
+                required("clip_min")?.as_real().unwrap_or(f64::NEG_INFINITY),
+                required("clip_max")?.as_real().unwrap_or(f64::INFINITY),
+            ),
+        })
+    }
+}
+
+impl AprGroupedFit {
+    /// Serialise the [AprGroupedFit] into an R list.
+    ///
+    /// The per-cell totals travel with the models because they are part of the
+    /// model, not a property of the store: they are sums over each group's own
+    /// retained gene set, which the R side cannot recover from the library
+    /// sizes.
+    ///
+    /// ### Return
+    ///
+    /// A list with the per-group models, the per-cell totals and the group map.
+    pub fn to_r_list(&self) -> List {
+        let models = List::from_values(self.models.iter().map(|m| m.to_r_list()));
+        let group_of_cell: Vec<i32> = self.group_of_cell.iter().map(|&g| g as i32).collect();
+
+        list!(
+            models = models,
+            cell_totals = self.cell_totals.clone(),
+            group_of_cell = group_of_cell,
+            n_groups = self.models.len() as i32,
+        )
     }
 }
