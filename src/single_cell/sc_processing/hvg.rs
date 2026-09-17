@@ -1740,6 +1740,80 @@ pub fn get_hvg_mvb_batch_aware_streaming<S: SingleCellReading>(
     )
 }
 
+///////////////////////
+// Residual-based HVG //
+///////////////////////
+
+/// Selects variable features from per-group residual variance.
+///
+/// Seurat's rule for a multi-sample scTransform run: rank genes by residual
+/// variance *within* each sample, take the top `n_hvg` of each, and union them.
+/// A marker of a cell type that only one sample contains still gets picked,
+/// which a pooled ranking would bury.
+///
+/// The other half of Seurat's rule, "present in every sample", is already
+/// enforced upstream: `genes` is the intersection of the per-group modelled
+/// sets, so a gene one sample filtered out never reaches here.
+///
+/// With one group this degenerates to a plain top-N, so the single-sample path
+/// is the same code.
+///
+/// ### Params
+///
+/// * `per_group_variance` - One residual variance per gene, per group, as
+///   returned by
+///   [`residual_variance`](crate::single_cell::sc_processing::residuals::residual_variance).
+/// * `genes` - Store gene indices the variances are indexed by, ascending.
+/// * `n_hvg` - Genes to take from each group before unioning.
+///
+/// ### Returns
+///
+/// The selected store gene indices, ascending, or a [`BixverseErrors`] when a
+/// variance vector disagrees in length with `genes`.
+///
+/// ### References
+///
+/// Seurat v5, `SCTransform.StdAssay`
+pub fn select_residual_hvg(
+    per_group_variance: &[Vec<f64>],
+    genes: &[usize],
+    n_hvg: usize,
+) -> Result<Vec<usize>, BixverseErrors> {
+    for variance in per_group_variance {
+        if variance.len() != genes.len() {
+            return Err(BixverseErrors::LengthMismatch {
+                name: "per_group_variance",
+                expected: genes.len(),
+                found: variance.len(),
+            });
+        }
+    }
+
+    let take = n_hvg.min(genes.len());
+    let mut selected = vec![false; genes.len()];
+
+    for variance in per_group_variance {
+        let mut order: Vec<usize> = (0..genes.len()).collect();
+        // Descending by variance, position breaking ties so the result does not
+        // depend on the sort's stability.
+        order.sort_unstable_by(|&a, &b| {
+            variance[b]
+                .partial_cmp(&variance[a])
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.cmp(&b))
+        });
+        for &pos in order.iter().take(take) {
+            selected[pos] = true;
+        }
+    }
+
+    Ok(genes
+        .iter()
+        .zip(selected)
+        .filter_map(|(&g, keep)| keep.then_some(g))
+        .collect())
+}
+
 ///////////
 // Tests //
 ///////////
@@ -2342,5 +2416,62 @@ mod tests {
                 assert_eq!(res.len(), n_batches);
             }
         }
+    }
+
+    ///////////////////////
+    // select_residual_hvg //
+    ///////////////////////
+
+    #[test]
+    fn test_select_residual_hvg_single_group_is_top_n() {
+        let genes = [10, 11, 12, 13];
+        let variance = vec![vec![0.1, 5.0, 0.2, 3.0]];
+        let got = select_residual_hvg(&variance, &genes, 2).unwrap();
+        assert_eq!(got, vec![11, 13]);
+    }
+
+    #[test]
+    fn test_select_residual_hvg_unions_across_groups() {
+        // Gene 10 is top only in group 0, gene 13 only in group 1. Both must
+        // survive: a marker of a cell type that one sample happens to contain
+        // is exactly what a pooled ranking would bury.
+        let genes = [10, 11, 12, 13];
+        let variance = vec![vec![9.0, 0.1, 0.2, 0.3], vec![0.1, 0.2, 0.3, 9.0]];
+        let got = select_residual_hvg(&variance, &genes, 1).unwrap();
+        assert_eq!(got, vec![10, 13]);
+    }
+
+    #[test]
+    fn test_select_residual_hvg_returns_ascending_gene_indices() {
+        let genes = [4, 7, 9];
+        let variance = vec![vec![1.0, 3.0, 2.0]];
+        let got = select_residual_hvg(&variance, &genes, 3).unwrap();
+        assert_eq!(got, vec![4, 7, 9]);
+    }
+
+    #[test]
+    fn test_select_residual_hvg_caps_at_gene_count() {
+        let genes = [4, 7];
+        let variance = vec![vec![1.0, 3.0]];
+        let got = select_residual_hvg(&variance, &genes, 100).unwrap();
+        assert_eq!(got, vec![4, 7]);
+    }
+
+    #[test]
+    fn test_select_residual_hvg_breaks_ties_by_position() {
+        let genes = [4, 7, 9];
+        let variance = vec![vec![1.0, 1.0, 1.0]];
+        let got = select_residual_hvg(&variance, &genes, 2).unwrap();
+        assert_eq!(got, vec![4, 7]);
+    }
+
+    #[test]
+    fn test_select_residual_hvg_rejects_length_mismatch() {
+        let genes = [4, 7, 9];
+        let variance = vec![vec![1.0, 2.0]];
+        assert!(matches!(
+            select_residual_hvg(&variance, &genes, 2),
+            Err(BixverseErrors::LengthMismatch { .. })
+        ));
     }
 }

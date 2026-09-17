@@ -40,6 +40,7 @@ use bixverse_rs::single_cell::sc_data::data_io::{
 use bixverse_rs::single_cell::sc_processing::sctransform::model::{
     SctCellContext, SctCovariates, SctParams,
 };
+use bixverse_rs::single_cell::sc_processing::sctransform::residuals::SctResiduals;
 use bixverse_rs::single_cell::sc_processing::sctransform::stream::{
     SctStreamOpts, fit_sctransform, sct_corrected_counts, sct_residual_variance,
 };
@@ -211,8 +212,14 @@ fn diagnostic_sctransform_scaling() {
         assert_eq!(rv.len(), model.len());
 
         let t = Instant::now();
-        sct_corrected_counts(&reader, &model, &cells, &ctx, corrected.path(), opts)
-            .expect("corrected counts");
+        sct_corrected_counts(
+            &reader,
+            &SctResiduals::single(&model, ctx).expect("residual source"),
+            &cells,
+            corrected.path(),
+            opts,
+        )
+        .expect("corrected counts");
         let correct_s = t.elapsed().as_secs_f64();
 
         let t = Instant::now();

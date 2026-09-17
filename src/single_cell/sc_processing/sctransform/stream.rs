@@ -28,11 +28,16 @@ use crate::single_cell::sc_data::data_io::{
     CellGeneSparseWriter, CscGeneChunk, RawCounts, SingleCellReading,
 };
 
+use crate::single_cell::sc_processing::residuals::{
+    ResidualSource, intersect_gene_sets, residual_variance, validate_groups,
+};
+
 use super::model::{
     SctCellContext, SctCovariates, SctGeneStats, SctModel, SctParams, min_variance_from_umi_median,
-    regularise_sct_model, sct_residual_row,
+    regularise_sct_model,
 };
 use super::nb_fit::{NbOffsetFit, fit_nb_offset_gene};
+use super::residuals::SctResiduals;
 
 ////////////
 // Consts //
@@ -90,40 +95,56 @@ impl Default for SctStreamOpts {
 /// ### Params
 ///
 /// * `chunk` - The gene's raw counts, reindexed to the selected cells.
-/// * `gene_pos` - Position of this gene within the model.
+/// * `gene_pos` - Position of this gene within the shared gene axis.
 /// * `n_cells` - Number of cells represented.
-/// * `model` - The fitted model.
-/// * `cells` - Per-cell library sizes and covariates.
-/// * `median_log10_umi` - Median of `log10_umi`, the library size everything is
-///   corrected to.
+/// * `source` - The fitted models and the per-cell group map.
+/// * `median_log10_umi` - Median of `log10_umi` over every selected cell, the
+///   library size everything is corrected to.
 /// * `median_covariates` - Median of each covariate, what they are held at.
 ///
 /// ### Returns
 ///
 /// The corrected gene chunk, with zeros dropped and `original_index` set to the
-/// gene's position in the model rather than in the source store, since the
-/// output's gene axis is the modelled set.
+/// gene's position on the shared axis rather than in the source store, since
+/// the output's gene axis is the modelled set.
 fn correct_one_gene(
     chunk: &CscGeneChunk,
     gene_pos: usize,
     n_cells: usize,
-    model: &SctModel,
-    cells: &SctCellContext<'_>,
+    source: &SctResiduals<'_>,
     median_log10_umi: f64,
     median_covariates: &[f64],
 ) -> CscGeneChunk {
-    let beta = model.coefficients_for(gene_pos);
-    let theta = model.theta[gene_pos];
-    let slope = model.log_umi_coef;
-    let simple = !model.has_covariates();
+    let cells = source.cells();
+    let simple = cells.covariates.is_empty();
 
-    // Constant across cells: every latent variable is held at its median.
-    let mut eta_target = beta[0] + slope * median_log10_umi;
-    for (b, x) in beta[1..].iter().zip(median_covariates) {
-        eta_target += b * x;
-    }
-    let mu_target = eta_target.exp();
-    let sd_target = (mu_target + mu_target * mu_target / theta).sqrt();
+    // One set of parameters per group, resolved once per gene. The target
+    // predictor holds every latent variable at its median and so is constant
+    // across the cells of a group, but not across groups: each sample keeps its
+    // own intercept, which is the sample-level expression difference the
+    // correction is not trying to remove.
+    let per_group: Vec<CorrectionParams<'_>> = source
+        .models()
+        .iter()
+        .enumerate()
+        .map(|(group, model)| {
+            let pos = source.model_gene_position(group, gene_pos);
+            let beta = model.coefficients_for(pos);
+            let theta = model.theta[pos];
+            let mut eta_target = beta[0] + model.log_umi_coef * median_log10_umi;
+            for (b, x) in beta[1..].iter().zip(median_covariates) {
+                eta_target += b * x;
+            }
+            let mu_target = eta_target.exp();
+            CorrectionParams {
+                beta,
+                theta,
+                log_umi_coef: model.log_umi_coef,
+                mu_target,
+                sd_target: (mu_target + mu_target * mu_target / theta).sqrt(),
+            }
+        })
+        .collect();
 
     let mut counts = vec![0.0_f64; n_cells];
     match &chunk.data_raw {
@@ -139,21 +160,23 @@ fn correct_one_gene(
         }
     }
 
+    let groups = source.group_of_cell_slice();
     let mut raw = Vec::new();
     let mut indices = Vec::new();
     let mut norms = Vec::new();
 
     for (c, &y) in counts.iter().enumerate() {
-        let mut eta = beta[0] + slope * cells.log10_umi[c];
+        let p = &per_group[groups[c] as usize];
+        let mut eta = p.beta[0] + p.log_umi_coef * cells.log10_umi[c];
         if !simple {
-            for (b, x) in beta[1..].iter().zip(cells.covariates.row(c)) {
+            for (b, x) in p.beta[1..].iter().zip(cells.covariates.row(c)) {
                 eta += b * x;
             }
         }
         let mu = eta.exp();
-        let residual = (y - mu) / (mu + mu * mu / theta).sqrt();
+        let residual = (y - mu) / (mu + mu * mu / p.theta).sqrt();
         // R's `round()` is round-half-to-even, not half-away-from-zero.
-        let corrected = (mu_target + residual * sd_target).round_ties_even();
+        let corrected = (p.mu_target + residual * p.sd_target).round_ties_even();
 
         if corrected >= 1.0 {
             let value = corrected as u32;
@@ -170,6 +193,25 @@ fn correct_one_gene(
         gene_pos,
         true,
     )
+}
+
+/// One group's parameters for the count correction of a single gene.
+///
+/// Distinct from
+/// [`SctGeneParams`](super::model::SctGeneParams) because the correction
+/// deliberately drops the clipping and the variance floor, and carries the
+/// target-depth terms instead.
+struct CorrectionParams<'a> {
+    /// Coefficients, intercept first.
+    beta: &'a [f64],
+    /// Inverse overdispersion.
+    theta: f64,
+    /// Coefficient on `log10(total UMI)`.
+    log_umi_coef: f64,
+    /// Fitted mean at the median library size.
+    mu_target: f64,
+    /// Standard deviation at that mean.
+    sd_target: f64,
 }
 
 /// Overrides the fitted theta with infinity for genes that are really Poisson.
@@ -886,109 +928,12 @@ pub fn sct_residual_variance<S: SingleCellReading>(
     cells: &SctCellContext<'_>,
     opts: SctStreamOpts,
 ) -> Result<Vec<f64>, BixverseErrors> {
-    if cells.n_cells() != cell_indices.len() {
-        return Err(BixverseErrors::LengthMismatch {
-            name: "cells",
-            expected: cell_indices.len(),
-            found: cells.n_cells(),
-        });
-    }
+    let source = SctResiduals::single(model, *cells)?;
+    let mut per_group = residual_variance(reader, &source, cell_indices, opts)?;
 
-    let verbosity = parse_verbosity_level(opts.verbose);
-    let start = Instant::now();
-
-    let n_cells = cell_indices.len();
-    let cell_set: IndexSet<u32> = cell_indices.iter().map(|&c| c as u32).collect();
-    let step = opts.gene_batch_size.unwrap_or(model.len()).max(1);
-    let mut out = vec![0.0_f64; model.len()];
-    let mut done = 0_usize;
-
-    for block in model.genes.chunks(step) {
-        let chunks = reader.read_gene_parallel_filtered(block, &cell_set)?;
-
-        let vars: Vec<(usize, f64)> = chunks
-            .par_iter()
-            .map(|chunk| {
-                let pos = model.position(chunk.original_index).ok_or(
-                    BixverseErrors::SctGeneIndexOutOfRange {
-                        index: chunk.original_index,
-                        n_genes: model.len(),
-                    },
-                )?;
-                let counts = chunk_counts(chunk);
-                let mut row = vec![0.0_f32; n_cells];
-                sct_residual_row(&counts, &chunk.indices, pos, model, cells, &mut row)?;
-                Ok((pos, sample_variance(&row)))
-            })
-            .collect::<Result<Vec<_>, BixverseErrors>>()?;
-
-        for (pos, v) in vars {
-            out[pos] = v;
-        }
-
-        let prev = done;
-        done += block.len();
-        if verbosity.detailed_verbosity() {
-            report_decile_progress(done, prev, model.len(), "genes", start.elapsed());
-        }
-    }
-
-    if verbosity.normal_verbosity() {
-        println!(
-            "scTransform: residual variance for {} genes in {:.2?}",
-            model.len(),
-            start.elapsed()
-        );
-    }
-
-    Ok(out)
-}
-
-/// Sample variance of a row, `n - 1` in the denominator, matching R's
-/// `rowVars`.
-///
-/// Accumulated in `f64` off an `f32` row: the residuals span the clipping range
-/// and the squared deviations of a strongly expressed gene lose `f32`
-/// precision well before the sum completes.
-///
-/// ### Params
-///
-/// * `row` - The values.
-///
-/// ### Returns
-///
-/// The variance, or `0.0` for fewer than two values.
-fn sample_variance(row: &[f32]) -> f64 {
-    let n = row.len();
-    if n < 2 {
-        return 0.0;
-    }
-    let n_f = n as f64;
-    let mean = row.iter().map(|&x| x as f64).sum::<f64>() / n_f;
-
-    row.iter()
-        .map(|&x| {
-            let d = x as f64 - mean;
-            d * d
-        })
-        .sum::<f64>()
-        / (n_f - 1.0)
-}
-
-/// A gene chunk's stored counts as `f64`.
-///
-/// ### Params
-///
-/// * `chunk` - The gene chunk.
-///
-/// ### Returns
-///
-/// The non-zero counts, in the chunk's own order.
-fn chunk_counts(chunk: &CscGeneChunk) -> Vec<f64> {
-    match &chunk.data_raw {
-        RawCounts::U16(v) => v.iter().map(|&x| x as f64).collect(),
-        RawCounts::U32(v) => v.iter().map(|&x| x as f64).collect(),
-    }
+    // One group by construction, so the single vector is the whole answer and
+    // its gene order is `model.genes`.
+    Ok(per_group.remove(0))
 }
 
 //////////////////////
@@ -1007,7 +952,7 @@ fn chunk_counts(chunk: &CscGeneChunk) -> Vec<f64> {
 /// y'_c = max(round(mu' + r_c * sqrt(mu' + mu'^2 / theta)), 0)
 /// ```
 ///
-/// Two differences from [`sct_residual_row`], both deliberate and both matching
+/// Two differences from [`super::model::sct_residual_row`], both deliberate and both matching
 /// sctransform's `correct_counts`: the residual here is neither clipped nor
 /// floored by `min_variance`. Clipping exists to stop a single outlying cell
 /// dominating a PCA, which is not what a count matrix is for, and the variance
@@ -1027,19 +972,23 @@ fn chunk_counts(chunk: &CscGeneChunk) -> Vec<f64> {
 /// target, such as the shifted CLR transformation, refuses this store rather
 /// than assuming one.
 ///
-/// **The output's gene axis is `model.genes`, not the source's.** Genes that
+/// **The output's gene axis is `source.genes()`, not the store's.** Genes that
 /// failed the `min_cells` filter have no model and so no corrected counts, and
 /// writing them back as all-zero rows would misrepresent that as measurement
-/// rather than exclusion. Gene `i` of the output is source gene
-/// `model.genes[i]`, so a caller keeping per-gene metadata has to subset it the
-/// same way.
+/// rather than exclusion. With several groups this is the intersection, so a
+/// gene one sample dropped is absent for every sample. Gene `i` of the output
+/// is store gene `source.genes()[i]`, so a caller keeping per-gene metadata has
+/// to subset it the same way.
+///
+/// Every cell is corrected under its own group's model, and the target library
+/// size is the median over all selected cells rather than a per-group one, so
+/// the output sits on a single scale.
 ///
 /// ### Params
 ///
 /// * `reader` - Gene-major reader over the raw counts.
-/// * `model` - The fitted model; its `genes` field decides what is written.
-/// * `cell_indices` - Cells to include, in the order `cells` is given in.
-/// * `cells` - Per-cell library sizes and covariates.
+/// * `source` - The fitted models; its gene axis decides what is written.
+/// * `cell_indices` - Cells to include, in the order `source` was built in.
 /// * `out_path` - Gene-major store to write.
 /// * `opts` - Disk and reporting knobs.
 ///
@@ -1052,45 +1001,47 @@ fn chunk_counts(chunk: &CscGeneChunk) -> Vec<f64> {
 /// Hafemeister & Satija, Genome Biology, 2019, `correct_counts`
 pub fn sct_corrected_counts<S: SingleCellReading, P: AsRef<Path>>(
     reader: &S,
-    model: &SctModel,
+    source: &SctResiduals<'_>,
     cell_indices: &[usize],
-    cells: &SctCellContext<'_>,
     out_path: P,
     opts: SctStreamOpts,
 ) -> Result<(), BixverseErrors> {
-    if cells.n_cells() != cell_indices.len() {
+    if source.n_cells() != cell_indices.len() {
         return Err(BixverseErrors::LengthMismatch {
-            name: "cells",
-            expected: cell_indices.len(),
-            found: cells.n_cells(),
+            name: "cell_indices",
+            expected: source.n_cells(),
+            found: cell_indices.len(),
         });
     }
 
     let verbosity = parse_verbosity_level(opts.verbose);
     let start = Instant::now();
 
+    let cells = source.cells();
+    let genes = source.genes();
+    let n_genes = genes.len();
     let n_cells = cell_indices.len();
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&c| c as u32).collect();
 
     // Every latent variable is held at its median, the library size included,
-    // so the target linear predictor is constant across cells.
+    // so the target linear predictor is constant across the cells of a group.
     let median_log10_umi = median(cells.log10_umi).unwrap_or(0.0);
     let median_covariates = cells.covariates.medians(n_cells);
 
     // The corrected counts no longer carry library-size structure, so there is
     // no target size for the normalised layer to have been scaled to.
-    let mut writer = CellGeneSparseWriter::new(out_path, false, n_cells, model.len(), 0.0)?;
+    let mut writer = CellGeneSparseWriter::new(out_path, false, n_cells, n_genes, 0.0)?;
 
-    let step = opts.gene_batch_size.unwrap_or(model.len()).max(1);
+    let step = opts.gene_batch_size.unwrap_or(n_genes).max(1);
     let mut done = 0_usize;
 
-    for block in model.genes.chunks(step) {
+    for block in genes.chunks(step) {
         let chunks = reader.read_gene_parallel_filtered(block, &cell_set)?;
 
         let corrected: Vec<CscGeneChunk> = chunks
             .par_iter()
             .map(|chunk| {
-                let pos = model.position(chunk.original_index).ok_or(
+                let pos = source.position(chunk.original_index).ok_or(
                     BixverseErrors::SctGeneNotModelled {
                         gene: chunk.original_index,
                     },
@@ -1099,8 +1050,7 @@ pub fn sct_corrected_counts<S: SingleCellReading, P: AsRef<Path>>(
                     chunk,
                     pos,
                     n_cells,
-                    model,
-                    cells,
+                    source,
                     median_log10_umi,
                     &median_covariates,
                 ))
@@ -1114,7 +1064,7 @@ pub fn sct_corrected_counts<S: SingleCellReading, P: AsRef<Path>>(
         let prev = done;
         done += block.len();
         if verbosity.detailed_verbosity() {
-            report_decile_progress(done, prev, model.len(), "genes", start.elapsed());
+            report_decile_progress(done, prev, n_genes, "genes", start.elapsed());
         }
     }
 
@@ -1122,13 +1072,157 @@ pub fn sct_corrected_counts<S: SingleCellReading, P: AsRef<Path>>(
 
     if verbosity.normal_verbosity() {
         println!(
-            "scTransform: wrote {} corrected genes in {:.2?}",
-            model.len(),
+            "scTransform: wrote {n_genes} corrected genes in {:.2?}",
             start.elapsed()
         );
     }
 
     Ok(())
+}
+
+//////////////////
+// Grouped fit  //
+//////////////////
+
+/// One scTransform model per group, over a shared gene axis.
+#[derive(Clone, Debug)]
+pub struct SctGroupedFit {
+    /// One fitted model per group, in group id order.
+    pub models: Vec<SctModel>,
+    /// Store gene indices modelled in every group, ascending.
+    pub genes: Vec<usize>,
+    /// Each group's statistics pass, kept for diagnostics.
+    pub passes: Vec<SctGenePass>,
+    /// Group id per selected cell, echoed back so a caller can build the
+    /// residual source without recomputing it.
+    pub group_of_cell: Vec<u32>,
+}
+
+/// Fits scTransform independently per group.
+///
+/// An experiment assembled from several files is several samples, each with its
+/// own sequencing depth and composition. Fitting one model across them folds
+/// the sample-level depth differences into the gene coefficients, and since the
+/// residuals feed HVG selection and then PCA, that propagates all the way to
+/// the embedding. Fitting per sample and scoring each cell under its own
+/// sample's model is what Seurat v5 does for split layers.
+///
+/// Two things are shared rather than per group, both deliberately:
+///
+/// * **The clipping range.** Resolved once against the total selected cell
+///   count and pushed into every group fit. Left per group, a small sample
+///   would be clipped harder than a large one and the residuals would no longer
+///   be on a common scale.
+/// * **Nothing else.** The variance floor in particular stays per group: it
+///   comes from that sample's median non-zero UMI count, which is a property of
+///   its depth.
+///
+/// The gene axis is the intersection of the per-group modelled sets, Seurat's
+/// "present in all layers" rule. A gene that one sample's `min_cells` filter
+/// dropped has no model there, so it cannot carry a residual for that sample's
+/// cells.
+///
+/// ### Params
+///
+/// * `reader` - Gene-major store.
+/// * `cell_indices` - Global ids of the selected cells.
+/// * `group_of_cell` - Group id per selected cell, densely covering
+///   `0..n_groups`.
+/// * `library_sizes` - Full library size per selected cell, in the same order.
+/// * `covariates` - Cell-level covariates over the selected cells.
+/// * `params` - Tuning knobs.
+/// * `opts` - Disk batching and reporting.
+///
+/// ### Returns
+///
+/// The fit, or a [`BixverseErrors`] when the grouping is malformed, a group
+/// fails to fit, or no gene is modelled in every group.
+///
+/// ### References
+///
+/// Seurat v5, `SCTransform.StdAssay`
+pub fn fit_sctransform_grouped<S: SingleCellReading>(
+    reader: &S,
+    cell_indices: &[usize],
+    group_of_cell: &[u32],
+    library_sizes: &[f64],
+    covariates: &SctCovariates,
+    params: &SctParams,
+    opts: SctStreamOpts,
+) -> Result<SctGroupedFit, BixverseErrors> {
+    let n_groups = validate_groups(group_of_cell, cell_indices.len())?;
+    if library_sizes.len() != cell_indices.len() {
+        return Err(BixverseErrors::LengthMismatch {
+            name: "library_sizes",
+            expected: cell_indices.len(),
+            found: library_sizes.len(),
+        });
+    }
+    covariates.validate(cell_indices.len())?;
+
+    let verbosity = parse_verbosity_level(opts.verbose);
+    let start = Instant::now();
+
+    let shared_params = SctParams {
+        clip_range: Some(params.resolve_clip_range(cell_indices.len())),
+        ..*params
+    };
+
+    let mut models = Vec::with_capacity(n_groups);
+    let mut passes = Vec::with_capacity(n_groups);
+
+    for group in 0..n_groups {
+        let slots: Vec<usize> = group_of_cell
+            .iter()
+            .enumerate()
+            .filter(|&(_, &g)| g as usize == group)
+            .map(|(slot, _)| slot)
+            .collect();
+
+        let group_cells: Vec<usize> = slots.iter().map(|&s| cell_indices[s]).collect();
+        let group_sizes: Vec<f64> = slots.iter().map(|&s| library_sizes[s]).collect();
+        let group_covariates = covariates.subset(&slots)?;
+
+        let (model, pass) = fit_sctransform(
+            reader,
+            &group_cells,
+            &group_sizes,
+            &group_covariates,
+            &shared_params,
+            None,
+            None,
+            opts,
+        )?;
+
+        if verbosity.normal_verbosity() {
+            println!(
+                "scTransform: group {group} fitted over {} cells, {} genes ({:.2?})",
+                group_cells.len(),
+                model.len(),
+                start.elapsed()
+            );
+        }
+
+        models.push(model);
+        passes.push(pass);
+    }
+
+    let sets: Vec<&[usize]> = models.iter().map(|m| m.genes.as_slice()).collect();
+    let genes = intersect_gene_sets(&sets)?;
+
+    if verbosity.normal_verbosity() {
+        println!(
+            "scTransform: {} gene(s) modelled in all {n_groups} group(s)",
+            genes.len()
+        );
+    }
+
+    Ok(SctGroupedFit {
+        models,
+        genes,
+        passes,
+        group_of_cell: group_of_cell.to_vec(),
+    })
 }
 
 ///////////

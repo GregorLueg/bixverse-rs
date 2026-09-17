@@ -27,12 +27,15 @@ use bixverse_rs::single_cell::sc_data::data_io::{
     CellGeneSparseWriter, CscGeneChunk, ParallelSparseReader, RawCounts,
 };
 use bixverse_rs::single_cell::sc_processing::pca::{SingleCellPcaParams, pca_on_sc_residuals};
+use bixverse_rs::single_cell::sc_processing::residuals::residual_variance;
 use bixverse_rs::single_cell::sc_processing::sctransform::model::{
     SctCellContext, SctCovariates, SctGeneStats, SctModel, SctParams, min_variance_from_umi_median,
     regularise_sct_model, sct_residual_row,
 };
+use bixverse_rs::single_cell::sc_processing::sctransform::residuals::SctResiduals;
 use bixverse_rs::single_cell::sc_processing::sctransform::stream::{
-    SctStreamOpts, fit_sctransform, sct_corrected_counts, sct_gene_pass, sct_residual_variance,
+    SctStreamOpts, fit_sctransform, fit_sctransform_grouped, sct_corrected_counts, sct_gene_pass,
+    sct_residual_variance,
 };
 
 mod sctransform_fixtures;
@@ -638,7 +641,15 @@ fn test_residual_pca_matches_a_direct_svd() {
     let params = SingleCellPcaParams::new(true, false, false, false, 1e4);
 
     let (scores, loadings, singular, scaled) = pca_on_sc_residuals(
-        &reader, &cells, &hvg, no_pcs, &params, &model, &ctx, 42, true, 0,
+        &reader,
+        &cells,
+        &hvg,
+        no_pcs,
+        &params,
+        &SctResiduals::single(&model, ctx).expect("residual source"),
+        42,
+        true,
+        0,
     )
     .expect("residual PCA");
 
@@ -711,8 +722,7 @@ fn test_residual_pca_refuses_clr() {
             &fx::MODELLED[..10],
             5,
             &params,
-            &model,
-            &ctx,
+            &SctResiduals::single(&model, ctx).expect("residual source"),
             42,
             false,
             0,
@@ -748,8 +758,7 @@ fn test_residual_pca_rejects_an_unmodelled_gene() {
             &[unmodelled],
             2,
             &SingleCellPcaParams::new(true, false, false, false, 1e4),
-            &model,
-            &ctx,
+            &SctResiduals::single(&model, ctx).expect("residual source"),
             42,
             false,
             0,
@@ -785,9 +794,8 @@ fn test_corrected_counts_match_sctransform() {
     let ctx = SctCellContext::new(&log10_umi, &no_cov).expect("context");
     sct_corrected_counts(
         &reader,
-        &model,
+        &SctResiduals::single(&model, ctx).expect("residual source"),
         &cells,
-        &ctx,
         out.path(),
         SctStreamOpts::default(),
     )
@@ -1235,4 +1243,370 @@ fn test_fit_sctransform_with_covariate_end_to_end() {
         "median log(mu) drifted {:.2e} from R, past the measured band",
         eta_drift[eta_drift.len() / 2]
     );
+}
+
+/////////////////////
+// Multi-sample    //
+/////////////////////
+
+/// Splits the fixture cells into two samples of deliberately different depth.
+///
+/// The second half is thinned to a third of its counts, so the two samples have
+/// genuinely different sequencing depths and a single pooled model would be
+/// wrong for both.
+fn two_sample_counts() -> (Vec<Vec<u32>>, Vec<f64>, Vec<u32>) {
+    let (mut counts, _) = fixture_counts();
+    let split = fx::N_CELLS / 2;
+
+    for row in counts.iter_mut() {
+        for value in row.iter_mut().skip(split) {
+            *value /= 3;
+        }
+    }
+
+    let library_sizes: Vec<f64> = (0..fx::N_CELLS)
+        .map(|c| counts.iter().map(|row| row[c] as f64).sum())
+        .collect();
+    let groups: Vec<u32> = (0..fx::N_CELLS)
+        .map(|c| if c < split { 0 } else { 1 })
+        .collect();
+
+    (counts, library_sizes, groups)
+}
+
+/// A grouped fit over a single group has to be the single-model fit, exactly.
+///
+/// This is the regression that keeps the multi-sample work from silently
+/// changing the one-sample answer everything else in this file is pinned to.
+#[test]
+fn test_grouped_fit_with_one_group_matches_the_single_fit() {
+    let store = TempStore::new("grouped_one_group");
+    let (counts, library_sizes) = fixture_counts();
+    write_store(store.path(), &counts, fx::N_CELLS);
+
+    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let cells: Vec<usize> = (0..fx::N_CELLS).collect();
+    let no_cov = SctCovariates::default();
+    let opts = SctStreamOpts::default();
+
+    let (single, _) = fit_sctransform(
+        &reader,
+        &cells,
+        &library_sizes,
+        &no_cov,
+        &params(),
+        None,
+        None,
+        opts,
+    )
+    .expect("single fit");
+
+    let grouped = fit_sctransform_grouped(
+        &reader,
+        &cells,
+        &vec![0_u32; fx::N_CELLS],
+        &library_sizes,
+        &no_cov,
+        &params(),
+        opts,
+    )
+    .expect("grouped fit");
+
+    assert_eq!(grouped.models.len(), 1);
+    assert_eq!(grouped.genes, single.genes);
+    assert_eq!(grouped.models[0].genes, single.genes);
+    assert_eq!(grouped.models[0].theta, single.theta);
+    assert_eq!(grouped.models[0].coefficients, single.coefficients);
+    assert_eq!(grouped.models[0].min_variance, single.min_variance);
+    assert_eq!(grouped.models[0].clip_range, single.clip_range);
+}
+
+/// Each group's model has to be the model that sample would get on its own.
+#[test]
+fn test_grouped_fit_matches_independent_per_sample_fits() {
+    let store = TempStore::new("grouped_per_sample");
+    let (counts, library_sizes, groups) = two_sample_counts();
+    write_store(store.path(), &counts, fx::N_CELLS);
+
+    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let cells: Vec<usize> = (0..fx::N_CELLS).collect();
+    let no_cov = SctCovariates::default();
+    let opts = SctStreamOpts::default();
+
+    // The grouped driver shares the clip range across groups, so an
+    // independent fit has to be handed the same one to be comparable.
+    let shared = SctParams {
+        clip_range: Some(params().resolve_clip_range(fx::N_CELLS)),
+        ..params()
+    };
+
+    let grouped = fit_sctransform_grouped(
+        &reader,
+        &cells,
+        &groups,
+        &library_sizes,
+        &no_cov,
+        &params(),
+        opts,
+    )
+    .expect("grouped fit");
+    assert_eq!(grouped.models.len(), 2);
+
+    for group in 0..2 {
+        let group_cells: Vec<usize> = cells
+            .iter()
+            .copied()
+            .filter(|&c| groups[c] as usize == group)
+            .collect();
+        let group_sizes: Vec<f64> = group_cells.iter().map(|&c| library_sizes[c]).collect();
+
+        let (want, _) = fit_sctransform(
+            &reader,
+            &group_cells,
+            &group_sizes,
+            &no_cov,
+            &shared,
+            None,
+            None,
+            opts,
+        )
+        .expect("independent fit");
+
+        assert_eq!(grouped.models[group].genes, want.genes);
+        assert_eq!(grouped.models[group].theta, want.theta);
+        assert_eq!(grouped.models[group].coefficients, want.coefficients);
+        // The variance floor is a property of the sample's own depth, so the
+        // thinned sample must not inherit the other's.
+        assert_eq!(grouped.models[group].min_variance, want.min_variance);
+    }
+
+    assert_ne!(
+        grouped.models[0].min_variance, grouped.models[1].min_variance,
+        "the thinned sample should have its own variance floor"
+    );
+}
+
+/// The shared gene axis is the intersection, and the clip range is not.
+#[test]
+fn test_grouped_gene_axis_is_the_intersection() {
+    let store = TempStore::new("grouped_intersection");
+    let (counts, library_sizes, groups) = two_sample_counts();
+    write_store(store.path(), &counts, fx::N_CELLS);
+
+    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let cells: Vec<usize> = (0..fx::N_CELLS).collect();
+    let no_cov = SctCovariates::default();
+
+    let grouped = fit_sctransform_grouped(
+        &reader,
+        &cells,
+        &groups,
+        &library_sizes,
+        &no_cov,
+        &params(),
+        SctStreamOpts::default(),
+    )
+    .expect("grouped fit");
+
+    // Thinning the second sample pushes some genes under min_cells there, so
+    // the intersection has to be a strict subset of at least one group.
+    let a = &grouped.models[0].genes;
+    let b = &grouped.models[1].genes;
+    assert!(grouped.genes.len() <= a.len().min(b.len()));
+    assert!(grouped.genes.iter().all(|g| a.contains(g) && b.contains(g)));
+    assert!(grouped.genes.windows(2).all(|w| w[0] < w[1]));
+    assert!(
+        grouped.genes.len() < a.len(),
+        "the thinned sample should drop genes the deeper one keeps"
+    );
+
+    // One clip range across groups, or the residuals are not comparable.
+    assert_eq!(
+        grouped.models[0].clip_range, grouped.models[1].clip_range,
+        "the clip range must be shared"
+    );
+    let expected = params().resolve_clip_range(fx::N_CELLS);
+    assert_relative_eq!(grouped.models[0].clip_range.1, expected.1, epsilon = 1e-12);
+}
+
+/// A cell's residual has to come from its own sample's model.
+#[test]
+fn test_grouped_residual_row_uses_each_cells_own_model() {
+    let store = TempStore::new("grouped_residual_row");
+    let (counts, library_sizes, groups) = two_sample_counts();
+    write_store(store.path(), &counts, fx::N_CELLS);
+
+    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let cells: Vec<usize> = (0..fx::N_CELLS).collect();
+    let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
+    let no_cov = SctCovariates::default();
+    let ctx = SctCellContext::new(&log10_umi, &no_cov).expect("context");
+
+    let grouped = fit_sctransform_grouped(
+        &reader,
+        &cells,
+        &groups,
+        &library_sizes,
+        &no_cov,
+        &params(),
+        SctStreamOpts::default(),
+    )
+    .expect("grouped fit");
+
+    let source =
+        SctResiduals::new(&grouped.models, ctx, groups.clone()).expect("grouped residual source");
+
+    let gene_pos = 0;
+    let gene = source.genes()[gene_pos];
+    let chunk = reader.read_gene(gene).expect("gene reads");
+    let counts_nz: Vec<f64> = match &chunk.data_raw {
+        RawCounts::U16(v) => v.iter().map(|&x| x as f64).collect(),
+        RawCounts::U32(v) => v.iter().map(|&x| x as f64).collect(),
+    };
+
+    let mut row = vec![0.0_f32; fx::N_CELLS];
+    source
+        .residual_row(&counts_nz, &chunk.indices, gene_pos, &mut row)
+        .expect("grouped residual row");
+
+    // Each half has to equal the single-model row of its own model.
+    for group in 0..2 {
+        let model = &grouped.models[group];
+        let pos = model.position(gene).expect("gene is in every group");
+        let mut want = vec![0.0_f32; fx::N_CELLS];
+        sct_residual_row(&counts_nz, &chunk.indices, pos, model, &ctx, &mut want)
+            .expect("single-model row");
+
+        for c in 0..fx::N_CELLS {
+            if groups[c] as usize == group {
+                assert_eq!(row[c], want[c], "cell {c} was scored under the wrong model");
+            }
+        }
+    }
+}
+
+/// Residual variance comes back per group, and each group's numbers are what
+/// that sample alone would produce.
+#[test]
+fn test_grouped_residual_variance_is_per_sample() {
+    let store = TempStore::new("grouped_residual_variance");
+    let (counts, library_sizes, groups) = two_sample_counts();
+    write_store(store.path(), &counts, fx::N_CELLS);
+
+    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let cells: Vec<usize> = (0..fx::N_CELLS).collect();
+    let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
+    let no_cov = SctCovariates::default();
+    let ctx = SctCellContext::new(&log10_umi, &no_cov).expect("context");
+    let opts = SctStreamOpts::default();
+
+    let grouped = fit_sctransform_grouped(
+        &reader,
+        &cells,
+        &groups,
+        &library_sizes,
+        &no_cov,
+        &params(),
+        opts,
+    )
+    .expect("grouped fit");
+
+    let source =
+        SctResiduals::new(&grouped.models, ctx, groups.clone()).expect("grouped residual source");
+    let per_group = residual_variance(&reader, &source, &cells, opts).expect("residual variance");
+
+    assert_eq!(per_group.len(), 2);
+    assert!(per_group.iter().all(|v| v.len() == grouped.genes.len()));
+
+    for (group, want_group) in per_group.iter().enumerate() {
+        let group_cells: Vec<usize> = cells
+            .iter()
+            .copied()
+            .filter(|&c| groups[c] as usize == group)
+            .collect();
+        let group_umi: Vec<f64> = group_cells.iter().map(|&c| log10_umi[c]).collect();
+        let group_ctx = SctCellContext::new(&group_umi, &no_cov).expect("context");
+
+        let want = sct_residual_variance(
+            &reader,
+            &grouped.models[group],
+            &group_cells,
+            &group_ctx,
+            opts,
+        )
+        .expect("single-model residual variance");
+
+        for (pos, &gene) in grouped.genes.iter().enumerate() {
+            let want_pos = grouped.models[group].position(gene).expect("shared gene");
+            assert_relative_eq!(want_group[pos], want[want_pos], epsilon = 1e-9);
+        }
+    }
+}
+
+/// Corrected counts route every cell through its own sample's model.
+#[test]
+fn test_grouped_corrected_counts_use_each_groups_model() {
+    let store = TempStore::new("grouped_corrected_src");
+    let out = TempStore::new("grouped_corrected_out");
+    let (counts, library_sizes, groups) = two_sample_counts();
+    write_store(store.path(), &counts, fx::N_CELLS);
+
+    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let cells: Vec<usize> = (0..fx::N_CELLS).collect();
+    let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
+    let no_cov = SctCovariates::default();
+    let ctx = SctCellContext::new(&log10_umi, &no_cov).expect("context");
+    let opts = SctStreamOpts::default();
+
+    let grouped = fit_sctransform_grouped(
+        &reader,
+        &cells,
+        &groups,
+        &library_sizes,
+        &no_cov,
+        &params(),
+        opts,
+    )
+    .expect("grouped fit");
+    let source =
+        SctResiduals::new(&grouped.models, ctx, groups.clone()).expect("grouped residual source");
+
+    sct_corrected_counts(&reader, &source, &cells, out.path(), opts).expect("corrected counts");
+
+    let written = ParallelSparseReader::new(out.path()).expect("corrected store opens");
+    let header = written.get_header();
+    // The output gene axis is the shared one, not the store's.
+    assert_eq!(header.total_genes, grouped.genes.len());
+    assert_eq!(header.total_cells, fx::N_CELLS);
+    assert_eq!(written.target_size(), None);
+}
+
+/// A malformed grouping is named rather than fitted against nothing.
+#[test]
+fn test_grouped_fit_rejects_a_gap_in_the_group_labels() {
+    let store = TempStore::new("grouped_bad_labels");
+    let (counts, library_sizes) = fixture_counts();
+    write_store(store.path(), &counts, fx::N_CELLS);
+
+    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let cells: Vec<usize> = (0..fx::N_CELLS).collect();
+    let no_cov = SctCovariates::default();
+
+    // Group 1 is never used.
+    let groups: Vec<u32> = (0..fx::N_CELLS)
+        .map(|c| if c < fx::N_CELLS / 2 { 0 } else { 2 })
+        .collect();
+
+    assert!(matches!(
+        fit_sctransform_grouped(
+            &reader,
+            &cells,
+            &groups,
+            &library_sizes,
+            &no_cov,
+            &params(),
+            SctStreamOpts::default(),
+        ),
+        Err(BixverseErrors::ResidualEmptyGroup { group: 1, .. })
+    ));
 }

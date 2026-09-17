@@ -37,4 +37,5 @@
 
 pub mod model;
 pub mod nb_fit;
+pub mod residuals;
 pub mod stream;

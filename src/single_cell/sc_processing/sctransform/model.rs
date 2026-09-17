@@ -268,6 +268,44 @@ impl SctCovariates {
             })
             .collect()
     }
+
+    /// Gathers the rows of a subset of cells.
+    ///
+    /// Used to hand one group's cells to a per-group fit. Empty covariates stay
+    /// empty rather than becoming a zero-column matrix of the wrong height.
+    ///
+    /// ### Params
+    ///
+    /// * `cells` - Positions of the cells to keep, within the current set.
+    ///
+    /// ### Returns
+    ///
+    /// The subset, or [`BixverseErrors::SctCovariateLengthMismatch`] when a
+    /// position is out of range.
+    pub fn subset(&self, cells: &[usize]) -> Result<Self, BixverseErrors> {
+        if self.is_empty() {
+            return Ok(Self::default());
+        }
+
+        let k = self.n_covariates();
+        let n_cells = self.values.len() / k;
+        let mut values = Vec::with_capacity(cells.len() * k);
+        for &c in cells {
+            if c >= n_cells {
+                return Err(BixverseErrors::SctCovariateLengthMismatch {
+                    name: "subset".to_string(),
+                    expected: n_cells,
+                    found: c,
+                });
+            }
+            values.extend_from_slice(self.row(c));
+        }
+
+        Ok(Self {
+            values,
+            names: self.names.clone(),
+        })
+    }
 }
 
 /// The per-cell terms every residual needs.
@@ -783,41 +821,119 @@ pub fn sct_residual_row(
         });
     }
 
-    let beta = model.coefficients_for(gene_pos);
-    let theta = model.theta[gene_pos];
-    let min_var = model.min_variance;
-    let (lo, hi) = model.clip_range;
-    let slope = model.log_umi_coef;
-    let covariates = cells.covariates;
-    let simple = !model.has_covariates();
+    let gene = SctGeneParams::new(model, gene_pos);
+    fill_residual_row(counts, indices, cells, out, |_| &gene);
 
-    // Every cell starts at its zero-count residual; the stored non-zeros then
-    // overwrite their own positions. One pass over the cells plus one over the
-    // non-zeros, rather than densifying the counts first.
-    let eta = |c: usize| -> f64 {
-        let mut e = beta[0] + slope * cells.log10_umi[c];
-        if !simple {
-            for (b, x) in beta[1..].iter().zip(covariates.row(c)) {
-                e += b * x;
+    Ok(())
+}
+
+/// One gene's residual parameters, pulled out of the model once.
+///
+/// Hoisting the slice and scalar lookups out of the per-cell loop is what keeps
+/// the grouped path as cheap as the single-model one: a group's parameters are
+/// resolved once per gene, not once per cell.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SctGeneParams<'a> {
+    /// Coefficients, intercept first.
+    beta: &'a [f64],
+    /// Inverse overdispersion, possibly infinite.
+    theta: f64,
+    /// Variance floor.
+    min_variance: f64,
+    /// Residual clipping range.
+    clip: (f64, f64),
+    /// Coefficient on `log10(total UMI)`.
+    log_umi_coef: f64,
+    /// Whether anything beyond the intercept was fitted.
+    has_covariates: bool,
+}
+
+impl<'a> SctGeneParams<'a> {
+    /// Pulls one gene's parameters out of a model.
+    ///
+    /// ### Params
+    ///
+    /// * `model` - The fitted model.
+    /// * `pos` - Position of the gene within it.
+    ///
+    /// ### Returns
+    ///
+    /// The parameters.
+    pub(crate) fn new(model: &'a SctModel, pos: usize) -> Self {
+        Self {
+            beta: model.coefficients_for(pos),
+            theta: model.theta[pos],
+            min_variance: model.min_variance,
+            clip: model.clip_range,
+            log_umi_coef: model.log_umi_coef,
+            has_covariates: model.has_covariates(),
+        }
+    }
+
+    /// One cell's residual.
+    ///
+    /// ### Params
+    ///
+    /// * `log10_umi` - The cell's `log10(total UMI)`.
+    /// * `covariates` - The cell's covariate row, empty when none were fitted.
+    /// * `y` - The observed count.
+    ///
+    /// ### Returns
+    ///
+    /// The clipped Pearson residual.
+    #[inline(always)]
+    pub(crate) fn residual(&self, log10_umi: f64, covariates: &[f64], y: f64) -> f32 {
+        let mut eta = self.beta[0] + self.log_umi_coef * log10_umi;
+        if self.has_covariates {
+            for (b, x) in self.beta[1..].iter().zip(covariates) {
+                eta += b * x;
             }
         }
-        e
-    };
+        let mu = eta.exp();
+        let var = (mu + mu * mu / self.theta).max(self.min_variance);
+        let (lo, hi) = self.clip;
+        ((y - mu) / var.sqrt()).clamp(lo, hi) as f32
+    }
+}
+
+/// Writes a dense residual row, resolving each cell's parameters through
+/// `gene_for`.
+///
+/// Every cell starts at its zero-count residual and the stored non-zeros then
+/// overwrite their own positions: one pass over the cells plus one over the
+/// non-zeros, rather than densifying the counts first.
+///
+/// ### Params
+///
+/// * `counts` - The gene's non-zero counts.
+/// * `indices` - Cell positions of those counts, within `0..n_cells`.
+/// * `cells` - Per-cell library sizes and covariates.
+/// * `out` - Destination row, overwritten in full.
+/// * `gene_for` - The gene's parameters for a given cell position. Constant for
+///   a single-model source, the cell's own group's parameters for a grouped one.
+#[inline]
+pub(crate) fn fill_residual_row<'a, F>(
+    counts: &[f64],
+    indices: &[u32],
+    cells: &SctCellContext<'_>,
+    out: &mut [f32],
+    gene_for: F,
+) where
+    F: Fn(usize) -> &'a SctGeneParams<'a>,
+{
+    let covariates = cells.covariates;
+    let simple = covariates.is_empty();
 
     for (c, slot) in out.iter_mut().enumerate() {
-        let mu = eta(c).exp();
-        let var = (mu + mu * mu / theta).max(min_var);
-        *slot = ((-mu) / var.sqrt()).clamp(lo, hi) as f32;
+        let cov = if simple { &[][..] } else { covariates.row(c) };
+        *slot = gene_for(c).residual(cells.log10_umi[c], cov, 0.0);
     }
 
     for (&i, &y) in indices.iter().zip(counts.iter()) {
         let c = i as usize;
-        let mu = eta(c).exp();
-        let var = (mu + mu * mu / theta).max(min_var);
-        out[c] = ((y - mu) / var.sqrt()).clamp(lo, hi) as f32;
+        let cov = if simple { &[][..] } else { covariates.row(c) };
+        out[c] = gene_for(c).residual(cells.log10_umi[c], cov, y);
     }
-
-    Ok(())
 }
 
 /// The variance floor from the median non-zero UMI count.
