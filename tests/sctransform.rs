@@ -246,6 +246,7 @@ fn test_regularisation_matches_sctransform_on_real_fits() {
         .map(|(&theta, &intercept)| NbOffsetFit {
             theta,
             coefficients: vec![intercept],
+            converged: true,
         })
         .collect();
 
@@ -971,6 +972,7 @@ fn test_regularisation_with_covariate_matches_sctransform() {
         .map(|i| NbOffsetFit {
             theta: fx::COV_STEP1_THETA[i],
             coefficients: vec![fx::COV_STEP1_INTERCEPT[i], fx::COV_STEP1_COEF[i]],
+            converged: true,
         })
         .collect();
 
@@ -1579,6 +1581,98 @@ fn test_grouped_corrected_counts_use_each_groups_model() {
     assert_eq!(header.total_genes, grouped.genes.len());
     assert_eq!(header.total_cells, fx::N_CELLS);
     assert_eq!(written.target_size(), None);
+
+    // The header alone would pass even if every cell went through group 0's
+    // model, so check the counts themselves. A single-group source over each
+    // sample's own cells, corrected to the same global median depth, has to
+    // reproduce that sample's block of the grouped output exactly.
+    let median_log10_umi = {
+        let mut sorted = log10_umi.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mid = sorted.len() / 2;
+        if sorted.len().is_multiple_of(2) {
+            (sorted[mid - 1] + sorted[mid]) / 2.0
+        } else {
+            sorted[mid]
+        }
+    };
+
+    let gene_pos = 0;
+    let grouped_row = written.read_gene(gene_pos).expect("corrected gene reads");
+    let mut grouped_dense = vec![0_u32; fx::N_CELLS];
+    match &grouped_row.data_raw {
+        RawCounts::U16(v) => {
+            for (&i, &x) in grouped_row.indices.iter().zip(v) {
+                grouped_dense[i as usize] = x as u32;
+            }
+        }
+        RawCounts::U32(v) => {
+            for (&i, &x) in grouped_row.indices.iter().zip(v) {
+                grouped_dense[i as usize] = x;
+            }
+        }
+    }
+
+    // The raw counts of that gene, to compute the reference from.
+    let store_gene = grouped.genes[gene_pos];
+    let raw_row = reader.read_gene(store_gene).expect("raw gene reads");
+    let mut raw_dense = vec![0.0_f64; fx::N_CELLS];
+    match &raw_row.data_raw {
+        RawCounts::U16(v) => {
+            for (&i, &x) in raw_row.indices.iter().zip(v) {
+                raw_dense[i as usize] = x as f64;
+            }
+        }
+        RawCounts::U32(v) => {
+            for (&i, &x) in raw_row.indices.iter().zip(v) {
+                raw_dense[i as usize] = x as f64;
+            }
+        }
+    }
+
+    // sctransform's `correct_counts`, written out independently: the residual
+    // here is neither clipped nor floored by min_variance, and every cell is
+    // placed at the global median depth.
+    let mut wrong_model_would_differ = false;
+    for (cell, &y) in raw_dense.iter().enumerate() {
+        let group = groups[cell] as usize;
+        let model = &grouped.models[group];
+        let pos = model.position(store_gene).expect("shared gene");
+        let b0 = model.intercept(pos);
+        let theta = model.theta[pos];
+
+        let expected = |b0: f64, theta: f64| -> u32 {
+            let mu = (b0 + model.log_umi_coef * log10_umi[cell]).exp();
+            let residual = (y - mu) / (mu + mu * mu / theta).sqrt();
+            let mu_target = (b0 + model.log_umi_coef * median_log10_umi).exp();
+            let sd_target = (mu_target + mu_target * mu_target / theta).sqrt();
+            let corrected = (mu_target + residual * sd_target).round_ties_even();
+            if corrected >= 1.0 {
+                corrected as u32
+            } else {
+                0
+            }
+        };
+
+        assert_eq!(
+            grouped_dense[cell],
+            expected(b0, theta),
+            "cell {cell} was not corrected under group {group}'s model"
+        );
+
+        // Confirm the assertion above can actually fail: the other group's
+        // model has to give a different answer for at least one cell, or this
+        // test would pass under a single pooled model too.
+        let other = &grouped.models[1 - group];
+        let other_pos = other.position(store_gene).expect("shared gene");
+        if expected(other.intercept(other_pos), other.theta[other_pos]) != grouped_dense[cell] {
+            wrong_model_would_differ = true;
+        }
+    }
+    assert!(
+        wrong_model_would_differ,
+        "the two models agree everywhere on this gene, so the test proves nothing"
+    );
 }
 
 /// A malformed grouping is named rather than fitted against nothing.
@@ -1608,5 +1702,260 @@ fn test_grouped_fit_rejects_a_gap_in_the_group_labels() {
             SctStreamOpts::default(),
         ),
         Err(BixverseErrors::ResidualEmptyGroup { group: 1, .. })
+    ));
+}
+
+/// The grouped source has to survive the residual PCA entry point.
+///
+/// Every other residual PCA test uses `SctResiduals::single`, so without this
+/// the surface the multi-sample work exists to enable is never exercised at the
+/// point it is consumed.
+#[test]
+fn test_grouped_residual_pca_matches_a_direct_svd() {
+    let store = TempStore::new("grouped_residual_pca");
+    let (counts, library_sizes, groups) = two_sample_counts();
+    write_store(store.path(), &counts, fx::N_CELLS);
+
+    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let cells: Vec<usize> = (0..fx::N_CELLS).collect();
+    let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
+    let no_cov = SctCovariates::default();
+    let ctx = SctCellContext::new(&log10_umi, &no_cov).expect("context");
+    let opts = SctStreamOpts::default();
+
+    let grouped = fit_sctransform_grouped(
+        &reader,
+        &cells,
+        &groups,
+        &library_sizes,
+        &no_cov,
+        &params(),
+        opts,
+    )
+    .expect("grouped fit");
+    let source =
+        SctResiduals::new(&grouped.models, ctx, groups.clone()).expect("grouped residual source");
+
+    let hvg: Vec<usize> = grouped.genes.iter().copied().take(40).collect();
+    let no_pcs = 8;
+    // Residuals carry their variance as signal, so centre but do not rescale.
+    let pca_params = SingleCellPcaParams::new(true, false, false, false, 1e4);
+
+    let (scores, _, _, scaled) = pca_on_sc_residuals(
+        &reader,
+        &cells,
+        &hvg,
+        no_pcs,
+        &pca_params,
+        &source,
+        42,
+        true,
+        0,
+    )
+    .expect("grouped residual PCA");
+
+    assert_eq!(scores.nrows(), fx::N_CELLS);
+    assert_eq!(scores.ncols(), no_pcs);
+
+    // The matrix the PCA built must be the grouped residuals, cell by cell,
+    // with each cell scored under its own sample's model.
+    let got = scaled.expect("return_scaled was set");
+    for (j, &gene) in hvg.iter().enumerate() {
+        let chunk = reader.read_gene(gene).expect("gene reads");
+        let nz: Vec<f64> = match &chunk.data_raw {
+            RawCounts::U16(v) => v.iter().map(|&x| x as f64).collect(),
+            RawCounts::U32(v) => v.iter().map(|&x| x as f64).collect(),
+        };
+        let pos = source.position(gene).expect("hvg gene is on the axis");
+        let mut want = vec![0.0_f32; fx::N_CELLS];
+        source
+            .residual_row(&nz, &chunk.indices, pos, &mut want)
+            .expect("residual row");
+
+        // The PCA centres each column, so compare against the centred row.
+        let mean = want.iter().map(|&v| v as f64).sum::<f64>() / fx::N_CELLS as f64;
+        for c in 0..fx::N_CELLS {
+            let d = (got[(c, j)] as f64 - (want[c] as f64 - mean)).abs();
+            assert!(d < 1e-4, "gene {gene}, cell {c}: off by {d}");
+        }
+    }
+}
+
+/// Variance normalisation is refused on the residual path rather than silently
+/// flattening the ranking the transformation exists to produce.
+#[test]
+fn test_residual_pca_refuses_variance_normalisation() {
+    let store = TempStore::new("residual_pca_normalise");
+    let (counts, library_sizes) = fixture_counts();
+    write_store(store.path(), &counts, fx::N_CELLS);
+
+    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let cells: Vec<usize> = (0..fx::N_CELLS).collect();
+    let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
+    let model = model_from_fixture();
+    let no_cov = SctCovariates::default();
+    let ctx = SctCellContext::new(&log10_umi, &no_cov).expect("context");
+
+    // The default has normalise_variance on, which is the trap.
+    let defaults = SingleCellPcaParams::default();
+    assert!(defaults.normalise_variance);
+
+    assert!(matches!(
+        pca_on_sc_residuals(
+            &reader,
+            &cells,
+            &fx::MODELLED[..10],
+            5,
+            &defaults,
+            &SctResiduals::single(&model, ctx).expect("residual source"),
+            42,
+            false,
+            0,
+        ),
+        Err(BixverseErrors::PcaResidualsWithVarianceNormalisation)
+    ));
+}
+
+/// Covariates on the grouped path, with non-contiguous group labels.
+///
+/// The contiguous split every other multi-sample test uses would let a
+/// wrong-index-space covariate subset still look structurally valid, because
+/// the rows it gathered would be a contiguous block either way. Interleaving the
+/// labels removes that cover.
+#[test]
+fn test_grouped_fit_with_covariates_matches_independent_fits() {
+    let store = TempStore::new("grouped_covariates");
+    let (counts, library_sizes) = fixture_counts();
+    write_store(store.path(), &counts, fx::N_CELLS);
+
+    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let cells: Vec<usize> = (0..fx::N_CELLS).collect();
+    let opts = SctStreamOpts::default();
+
+    // Interleaved, so group membership and position disagree everywhere.
+    let groups: Vec<u32> = (0..fx::N_CELLS).map(|c| (c % 2) as u32).collect();
+
+    // A covariate that varies strongly with position, so applying it to the
+    // wrong cells changes the fit visibly.
+    let pct: Vec<f64> = (0..fx::N_CELLS)
+        .map(|c| (c as f64 / fx::N_CELLS as f64) * 0.4)
+        .collect();
+    let covariates =
+        SctCovariates::from_columns(&[("pct_mito".to_string(), pct.clone())]).expect("covariates");
+
+    let shared = SctParams {
+        clip_range: Some(params().resolve_clip_range(fx::N_CELLS)),
+        ..params()
+    };
+
+    let grouped = fit_sctransform_grouped(
+        &reader,
+        &cells,
+        &groups,
+        &library_sizes,
+        &covariates,
+        &params(),
+        opts,
+    )
+    .expect("grouped fit with covariates");
+
+    for group in 0..2 {
+        let slots: Vec<usize> = (0..fx::N_CELLS)
+            .filter(|&c| groups[c] as usize == group)
+            .collect();
+        let group_cells: Vec<usize> = slots.iter().map(|&s| cells[s]).collect();
+        let group_sizes: Vec<f64> = slots.iter().map(|&s| library_sizes[s]).collect();
+        let group_pct: Vec<f64> = slots.iter().map(|&s| pct[s]).collect();
+        let group_cov = SctCovariates::from_columns(&[("pct_mito".to_string(), group_pct)])
+            .expect("group covariates");
+
+        let (want, _) = fit_sctransform(
+            &reader,
+            &group_cells,
+            &group_sizes,
+            &group_cov,
+            &shared,
+            None,
+            None,
+            opts,
+        )
+        .expect("independent fit");
+
+        assert_eq!(grouped.models[group].genes, want.genes);
+        assert_eq!(grouped.models[group].coefficients, want.coefficients);
+        assert_eq!(grouped.models[group].covariate_names, vec!["pct_mito"]);
+        assert_eq!(grouped.models[group].n_coef, 2);
+    }
+}
+
+/// A reordered covariate frame has to be caught, not silently applied.
+#[test]
+fn test_residual_source_rejects_reordered_covariates() {
+    let store = TempStore::new("covariate_order");
+    let (counts, library_sizes) = fixture_counts();
+    write_store(store.path(), &counts, fx::N_CELLS);
+
+    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let cells: Vec<usize> = (0..fx::N_CELLS).collect();
+    let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
+
+    let a: Vec<f64> = (0..fx::N_CELLS).map(|c| c as f64 * 1e-3).collect();
+    let b: Vec<f64> = (0..fx::N_CELLS).map(|c| (c % 7) as f64 * 1e-2).collect();
+
+    let fitted = SctCovariates::from_columns(&[
+        ("pct_mito".to_string(), a.clone()),
+        ("n_genes".to_string(), b.clone()),
+    ])
+    .expect("covariates");
+
+    let (model, _) = fit_sctransform(
+        &reader,
+        &cells,
+        &library_sizes,
+        &fitted,
+        &params(),
+        None,
+        None,
+        SctStreamOpts::default(),
+    )
+    .expect("fit");
+
+    // Same count, same values, swapped order: exactly what a `select()` or a
+    // `merge()` on the R side produces, and the count check alone passes it.
+    let swapped =
+        SctCovariates::from_columns(&[("n_genes".to_string(), b), ("pct_mito".to_string(), a)])
+            .expect("covariates");
+    let ctx = SctCellContext::new(&log10_umi, &swapped).expect("context");
+
+    assert!(matches!(
+        SctResiduals::single(&model, ctx),
+        Err(BixverseErrors::SctCovariateNameMismatch { position: 0, .. })
+    ));
+}
+
+/// Duplicate cells are rejected rather than silently shifting the row.
+#[test]
+fn test_sct_rejects_duplicate_cells() {
+    let store = TempStore::new("sct_duplicate_cells");
+    let (counts, library_sizes) = fixture_counts();
+    write_store(store.path(), &counts, fx::N_CELLS);
+
+    let reader = ParallelSparseReader::new(store.path()).expect("reader opens");
+    let mut cells: Vec<usize> = (0..fx::N_CELLS).collect();
+    cells[1] = 0;
+
+    assert!(matches!(
+        sct_gene_pass(&reader, &cells, &params(), SctStreamOpts::default()),
+        Err(BixverseErrors::ResidualDuplicateCells { .. })
+    ));
+
+    let log10_umi: Vec<f64> = library_sizes.iter().map(|u| u.log10()).collect();
+    let model = model_from_fixture();
+    let no_cov = SctCovariates::default();
+    let ctx = SctCellContext::new(&log10_umi, &no_cov).expect("context");
+
+    assert!(matches!(
+        sct_residual_variance(&reader, &model, &cells, &ctx, SctStreamOpts::default()),
+        Err(BixverseErrors::ResidualDuplicateCells { .. })
     ));
 }

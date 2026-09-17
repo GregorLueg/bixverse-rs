@@ -17,7 +17,9 @@ use bixverse_rs::single_cell::sc_data::bin_merge_io::gene_store_to_cell_store;
 use bixverse_rs::single_cell::sc_data::data_io::{
     CellGeneSparseWriter, CscGeneChunk, ParallelSparseReader, RawCounts,
 };
-use bixverse_rs::single_cell::sc_processing::analytic_pearson::model::{AprParams, AprResiduals};
+use bixverse_rs::single_cell::sc_processing::analytic_pearson::model::{
+    AprModel, AprParams, AprResiduals,
+};
 use bixverse_rs::single_cell::sc_processing::analytic_pearson::stream::{
     apr_gene_pass, build_apr_model, cell_totals_over_genes, fit_analytic_pearson_grouped,
 };
@@ -226,7 +228,7 @@ fn test_residuals_match_scanpy() {
         for &cell in fx::PROBE_CELLS.iter() {
             let want = fx::PROBE_RESIDUALS[probe];
             // The row is f32, so seven significant digits is the ceiling.
-            assert_relative_eq!(row[cell] as f64, want, epsilon = 1e-5, max_relative = 1e-5);
+            assert_relative_eq!(row[cell] as f64, want, epsilon = 1e-6, max_relative = 1e-6);
             probe += 1;
         }
     }
@@ -374,8 +376,8 @@ fn test_grouped_residual_variance_matches_scanpy_per_sample() {
             assert_relative_eq!(
                 got[group][pos],
                 reference[want_pos],
-                epsilon = 1e-4,
-                max_relative = 1e-4
+                epsilon = 1e-6,
+                max_relative = 1e-6
             );
         }
     }
@@ -448,5 +450,148 @@ fn test_readers_are_checked_for_orientation() {
     assert!(matches!(
         cell_totals_over_genes(&gene_reader, &cells, &[0, 1, 2]),
         Err(BixverseErrors::ReaderModeMismatch { .. })
+    ));
+}
+
+/// `mu` is only the maximum likelihood solution if the two marginals agree on
+/// the grand total. Nothing else would notice if a future change broke it.
+#[test]
+fn test_grouped_fit_preserves_the_mle_invariant() {
+    let counts = fixture_counts();
+    let stores = build_stores("mle_invariant", &counts);
+    let gene_reader = ParallelSparseReader::new(stores.gene.path()).expect("gene reader");
+    let cell_reader = ParallelSparseReader::new(stores.cell.path()).expect("cell reader");
+    let cells: Vec<usize> = (0..fx::N_CELLS).collect();
+    let groups: Vec<u32> = (0..fx::N_CELLS)
+        .map(|c| if c < fx::SPLIT { 0 } else { 1 })
+        .collect();
+
+    let fit = fit_analytic_pearson_grouped(
+        &gene_reader,
+        &cell_reader,
+        &cells,
+        &groups,
+        &params(),
+        SctStreamOpts::default(),
+    )
+    .expect("grouped fit");
+
+    for group in 0..2 {
+        let from_cells: f64 = fit
+            .cell_totals
+            .iter()
+            .zip(&fit.group_of_cell)
+            .filter(|&(_, &g)| g as usize == group)
+            .map(|(t, _)| t)
+            .sum();
+        assert_relative_eq!(from_cells, fit.models[group].total, epsilon = 1e-9);
+    }
+}
+
+/// Duplicate cells are rejected on every entry point rather than silently
+/// producing a shifted row and a broken MLE invariant.
+#[test]
+fn test_duplicate_cells_are_rejected() {
+    let counts = fixture_counts();
+    let stores = build_stores("duplicates", &counts);
+    let gene_reader = ParallelSparseReader::new(stores.gene.path()).expect("gene reader");
+    let cell_reader = ParallelSparseReader::new(stores.cell.path()).expect("cell reader");
+
+    let mut cells: Vec<usize> = (0..fx::N_CELLS).collect();
+    cells[1] = 0;
+
+    assert!(matches!(
+        apr_gene_pass(&gene_reader, &cells, &params(), SctStreamOpts::default()),
+        Err(BixverseErrors::ResidualDuplicateCells { .. })
+    ));
+    assert!(matches!(
+        cell_totals_over_genes(&cell_reader, &cells, &[0, 1, 2]),
+        Err(BixverseErrors::ResidualDuplicateCells { .. })
+    ));
+}
+
+/// An inverted or NaN clipping range would panic inside `f64::clamp`, so it has
+/// to be rejected at the parameter boundary.
+#[test]
+fn test_invalid_clip_range_is_rejected() {
+    let inverted = AprParams {
+        clip_range: Some((1.0, -1.0)),
+        ..params()
+    };
+    assert!(matches!(
+        inverted.validate(),
+        Err(BixverseErrors::ResidualInvalidClipRange { .. })
+    ));
+
+    let nan = AprParams {
+        clip_range: Some((f64::NAN, 1.0)),
+        ..params()
+    };
+    assert!(matches!(
+        nan.validate(),
+        Err(BixverseErrors::ResidualInvalidClipRange { .. })
+    ));
+
+    // And the fit refuses it rather than reaching a worker.
+    let counts = fixture_counts();
+    let stores = build_stores("bad_clip", &counts);
+    let gene_reader = ParallelSparseReader::new(stores.gene.path()).expect("gene reader");
+    let cell_reader = ParallelSparseReader::new(stores.cell.path()).expect("cell reader");
+    let cells: Vec<usize> = (0..fx::N_CELLS).collect();
+
+    assert!(matches!(
+        fit_analytic_pearson_grouped(
+            &gene_reader,
+            &cell_reader,
+            &cells,
+            &vec![0_u32; fx::N_CELLS],
+            &inverted,
+            SctStreamOpts::default(),
+        ),
+        Err(BixverseErrors::ResidualInvalidClipRange { .. })
+    ));
+}
+
+/// A non-ascending gene axis makes every lookup a wrong binary search, so it is
+/// refused at construction.
+#[test]
+fn test_non_ascending_genes_are_rejected() {
+    let model = AprModel {
+        genes: vec![5, 2, 9],
+        gene_sums: vec![1.0, 2.0, 3.0],
+        total: 6.0,
+        theta: 100.0,
+        clip_range: (-10.0, 10.0),
+    };
+    let totals = [5.0, 5.0];
+
+    assert!(matches!(
+        AprResiduals::single(&model, &totals),
+        Err(BixverseErrors::ResidualGenesNotAscending { .. })
+    ));
+}
+
+/// The residual row rejects ragged inputs instead of letting `zip` truncate
+/// them into a plausible-looking row.
+#[test]
+fn test_residual_row_rejects_ragged_inputs() {
+    let model = AprModel {
+        genes: vec![0, 1],
+        gene_sums: vec![6.0, 9.0],
+        total: 15.0,
+        theta: 100.0,
+        clip_range: (-10.0, 10.0),
+    };
+    let totals = [5.0, 5.0, 5.0];
+    let source = AprResiduals::single(&model, &totals).expect("residual source");
+    let mut row = vec![0.0_f32; 3];
+
+    assert!(matches!(
+        source.residual_row(&[1.0, 2.0], &[0], 0, &mut row),
+        Err(BixverseErrors::ResidualRowLengthMismatch { .. })
+    ));
+    assert!(matches!(
+        source.residual_row(&[1.0], &[99], 0, &mut row),
+        Err(BixverseErrors::ResidualCellIndexOutOfRange { .. })
     ));
 }
