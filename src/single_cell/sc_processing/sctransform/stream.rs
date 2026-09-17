@@ -453,6 +453,10 @@ pub fn sct_gene_pass<S: SingleCellReading>(
                 }
             }
         }
+
+        if verbosity.detailed_verbosity() {
+            report_decile_progress(block_end, block_start, n_genes, "genes", start.elapsed());
+        }
     }
 
     let modelled: Vec<usize> = (0..n_genes)
@@ -890,10 +894,14 @@ pub fn sct_residual_variance<S: SingleCellReading>(
         });
     }
 
+    let verbosity = parse_verbosity_level(opts.verbose);
+    let start = Instant::now();
+
     let n_cells = cell_indices.len();
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&c| c as u32).collect();
     let step = opts.gene_batch_size.unwrap_or(model.len()).max(1);
     let mut out = vec![0.0_f64; model.len()];
+    let mut done = 0_usize;
 
     for block in model.genes.chunks(step) {
         let chunks = reader.read_gene_parallel_filtered(block, &cell_set)?;
@@ -917,6 +925,20 @@ pub fn sct_residual_variance<S: SingleCellReading>(
         for (pos, v) in vars {
             out[pos] = v;
         }
+
+        let prev = done;
+        done += block.len();
+        if verbosity.detailed_verbosity() {
+            report_decile_progress(done, prev, model.len(), "genes", start.elapsed());
+        }
+    }
+
+    if verbosity.normal_verbosity() {
+        println!(
+            "scTransform: residual variance for {} genes in {:.2?}",
+            model.len(),
+            start.elapsed()
+        );
     }
 
     Ok(out)
@@ -1060,6 +1082,7 @@ pub fn sct_corrected_counts<S: SingleCellReading, P: AsRef<Path>>(
     let mut writer = CellGeneSparseWriter::new(out_path, false, n_cells, model.len(), 0.0)?;
 
     let step = opts.gene_batch_size.unwrap_or(model.len()).max(1);
+    let mut done = 0_usize;
 
     for block in model.genes.chunks(step) {
         let chunks = reader.read_gene_parallel_filtered(block, &cell_set)?;
@@ -1086,6 +1109,12 @@ pub fn sct_corrected_counts<S: SingleCellReading, P: AsRef<Path>>(
 
         for chunk in corrected {
             writer.write_gene_chunk(chunk)?;
+        }
+
+        let prev = done;
+        done += block.len();
+        if verbosity.detailed_verbosity() {
+            report_decile_progress(done, prev, model.len(), "genes", start.elapsed());
         }
     }
 
