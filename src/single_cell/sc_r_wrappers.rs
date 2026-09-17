@@ -31,11 +31,14 @@ use crate::single_cell::sc_analysis::{
 };
 use crate::single_cell::sc_data::h5ad_io::parse_h5ad_format;
 use crate::single_cell::sc_processing::magic::{MagicLayer, MagicParams};
+use crate::single_cell::sc_processing::residuals::{assert_ascending, validate_clip_range};
 use crate::single_cell::sc_trajectory::gene_trends::{
     BranchSelectionParams, BranchWeighting, GeneTrendsParams,
 };
 use crate::single_cell::sc_trajectory::palantir::PalantirParams;
-use crate::utils::r_rust_interface::{r_list_count, r_list_count_allow_zero, r_list_to_map};
+use crate::utils::r_rust_interface::{
+    r_list_count, r_list_count_allow_zero, r_list_real, r_list_required_real, r_list_to_map,
+};
 
 use crate::single_cell::sc_annotation::{
     sc_type::{CellTypeMarkers, ScTypeCellParams, SctypeRes, parse_score_calibration},
@@ -4115,51 +4118,30 @@ impl SctParams {
         let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
         let defaults = SctParams::default();
 
-        let n_genes = params
-            .get("n_genes")
-            .and_then(|v| v.as_real())
-            .map(|v| v as usize)
-            .unwrap_or(defaults.n_genes);
+        // Counts and reals both go through the coercing readers: R writes `2000`
+        // as a double and `2000L` as an integer, and the plain accessors match
+        // one storage mode each, so a caller writing either form the accessor
+        // does not expect would silently get the default instead.
+        let n_genes = r_list_count(&params, "n_genes")?.unwrap_or(defaults.n_genes);
+        let n_cells = r_list_count(&params, "n_cells")?.unwrap_or(defaults.n_cells);
+        let min_cells = r_list_count(&params, "min_cells")?.unwrap_or(defaults.min_cells);
 
-        let n_cells = params
-            .get("n_cells")
-            .and_then(|v| v.as_real())
-            .map(|v| v as usize)
-            .unwrap_or(defaults.n_cells);
-
-        let min_cells = params
-            .get("min_cells")
-            .and_then(|v| v.as_real())
-            .map(|v| v as usize)
-            .unwrap_or(defaults.min_cells);
-
-        let bw_adjust = params
-            .get("bw_adjust")
-            .and_then(|v| v.as_real())
-            .unwrap_or(defaults.bw_adjust);
-
-        let gmean_eps = params
-            .get("gmean_eps")
-            .and_then(|v| v.as_real())
-            .unwrap_or(defaults.gmean_eps);
-
-        let outlier_th = params
-            .get("outlier_th")
-            .and_then(|v| v.as_real())
-            .unwrap_or(defaults.outlier_th);
-
-        let poisson_diff_theta = params
-            .get("poisson_diff_theta")
-            .and_then(|v| v.as_real())
-            .unwrap_or(defaults.poisson_diff_theta);
+        let bw_adjust = r_list_real(&params, "bw_adjust")?.unwrap_or(defaults.bw_adjust);
+        let gmean_eps = r_list_real(&params, "gmean_eps")?.unwrap_or(defaults.gmean_eps);
+        let outlier_th = r_list_real(&params, "outlier_th")?.unwrap_or(defaults.outlier_th);
+        let poisson_diff_theta =
+            r_list_real(&params, "poisson_diff_theta")?.unwrap_or(defaults.poisson_diff_theta);
 
         // Both ends or neither: half a clipping range is meaningless, so a list
         // carrying only one is treated as carrying none.
         let clip_range = match (
-            params.get("clip_min").and_then(|v| v.as_real()),
-            params.get("clip_max").and_then(|v| v.as_real()),
+            r_list_real(&params, "clip_min")?,
+            r_list_real(&params, "clip_max")?,
         ) {
-            (Some(lo), Some(hi)) => Some((lo, hi)),
+            (Some(lo), Some(hi)) => {
+                validate_clip_range((lo, hi)).map_err(|e| Error::Other(e.to_string()))?;
+                Some((lo, hi))
+            }
             _ => defaults.clip_range,
         };
 
@@ -4251,15 +4233,19 @@ impl SctModel {
             .map(|v| v.into_iter().map(String::from).collect())
             .unwrap_or_default();
 
+        // Without at least the intercept the design is empty and every
+        // downstream `n_coef - 1` underflows.
+        if n_coef == 0 {
+            return Err(Error::Other(
+                "scTransform model 'n_coef' must be at least 1 (the intercept)".to_string(),
+            ));
+        }
+
         let n = genes.len();
         for (name, len, want) in [
             ("theta", theta.len(), n),
             ("coefficients", coefficients.len(), n * n_coef),
-            (
-                "covariate_names",
-                covariate_names.len(),
-                n_coef.saturating_sub(1),
-            ),
+            ("covariate_names", covariate_names.len(), n_coef - 1),
         ] {
             if len != want {
                 return Err(Error::Other(format!(
@@ -4268,20 +4254,28 @@ impl SctModel {
             }
         }
 
+        // Gene lookups on a model are binary searches, so an axis that came back
+        // in HVG-selection order would silently return wrong positions rather
+        // than `None`.
+        assert_ascending(&genes, "scTransform model genes")
+            .map_err(|e| Error::Other(e.to_string()))?;
+
+        let what = "scTransform model";
+        let clip_range = (
+            r_list_required_real(&params, "clip_min", what)?,
+            r_list_required_real(&params, "clip_max", what)?,
+        );
+        validate_clip_range(clip_range).map_err(|e| Error::Other(e.to_string()))?;
+
         Ok(Self {
             genes,
             theta,
             coefficients,
             n_coef,
             covariate_names,
-            log_umi_coef: required("log_umi_coef")?
-                .as_real()
-                .unwrap_or(std::f64::consts::LN_10),
-            min_variance: required("min_variance")?.as_real().unwrap_or(0.0),
-            clip_range: (
-                required("clip_min")?.as_real().unwrap_or(f64::NEG_INFINITY),
-                required("clip_max")?.as_real().unwrap_or(f64::INFINITY),
-            ),
+            log_umi_coef: r_list_required_real(&params, "log_umi_coef", what)?,
+            min_variance: r_list_required_real(&params, "min_variance", what)?,
+            clip_range,
         })
     }
 }
@@ -4291,15 +4285,28 @@ impl SctCovariates {
     ///
     /// ### Return
     ///
-    /// A list with the flattened row-major values, the covariate names and the
-    /// column count, so the R side can rebuild the matrix without guessing at
-    /// the orientation.
+    /// One named element per covariate, each a numeric vector of length
+    /// `n_cells`. That is the shape [`SctCovariates::from_r_list`] reads, so the
+    /// two are inverses, and it is the shape a data.frame column arrives in
+    /// anyway.
     pub fn to_r_list(&self) -> List {
-        list!(
-            values = self.values.clone(),
-            names = self.names.clone(),
-            n_covariates = self.n_covariates() as i32,
-        )
+        let k = self.n_covariates();
+        if k == 0 {
+            return List::new(0);
+        }
+        let n_cells = self.values.len() / k;
+
+        let columns: Vec<Robj> = (0..k)
+            .map(|j| {
+                let column: Vec<f64> = (0..n_cells).map(|c| self.row(c)[j]).collect();
+                Robj::from(column)
+            })
+            .collect();
+
+        let mut out = List::from_values(columns);
+        out.set_names(self.names.iter().map(|s| s.as_str()))
+            .expect("one name per covariate column by construction");
+        out
     }
 
     /// Rebuild the [SctCovariates] from one column per covariate.
@@ -4324,9 +4331,31 @@ impl SctCovariates {
         let mut columns: Vec<(String, Vec<f64>)> = Vec::with_capacity(r_list.len());
 
         for (name, value) in r_list.iter() {
-            let values = value.as_real_vector().ok_or_else(|| {
-                Error::Other(format!("scTransform covariate '{name}' is not numeric"))
-            })?;
+            // A data.frame column is as likely to arrive as an integer as a
+            // double (`as.integer`, a count, a dummy-coded factor), and
+            // `as_real_vector` matches REALSXP alone.
+            let values = value
+                .as_real_vector()
+                .or_else(|| {
+                    value
+                        .as_integer_slice()
+                        .map(|s| s.iter().map(|&x| x as f64).collect())
+                })
+                .ok_or_else(|| {
+                    Error::Other(format!(
+                        "scTransform covariate '{name}' must be a numeric or integer vector"
+                    ))
+                })?;
+
+            // `NA` arrives as NaN and would otherwise propagate silently through
+            // the design into every fitted coefficient.
+            if let Some(pos) = values.iter().position(|v| !v.is_finite()) {
+                return Err(Error::Other(format!(
+                    "scTransform covariate '{name}' has a missing or non-finite value at position {}",
+                    pos + 1
+                )));
+            }
+
             columns.push((name.to_string(), values));
         }
 
@@ -4385,32 +4414,31 @@ impl AprParams {
         let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
         let defaults = AprParams::default();
 
-        let theta = params
-            .get("theta")
-            .and_then(|v| v.as_real())
-            .unwrap_or(defaults.theta);
-
-        let min_cells = params
-            .get("min_cells")
-            .and_then(|v| v.as_real())
-            .map(|v| v as usize)
-            .unwrap_or(defaults.min_cells);
+        // Both readers accept either R storage mode; see `r_list_real`.
+        let theta = r_list_real(&params, "theta")?.unwrap_or(defaults.theta);
+        let min_cells =
+            r_list_count_allow_zero(&params, "min_cells")?.unwrap_or(defaults.min_cells);
 
         // Both ends or neither: half a clipping range is meaningless, so a list
         // carrying only one is treated as carrying none.
         let clip_range = match (
-            params.get("clip_min").and_then(|v| v.as_real()),
-            params.get("clip_max").and_then(|v| v.as_real()),
+            r_list_real(&params, "clip_min")?,
+            r_list_real(&params, "clip_max")?,
         ) {
             (Some(lo), Some(hi)) => Some((lo, hi)),
             _ => defaults.clip_range,
         };
 
-        Ok(Self {
+        let parsed = Self {
             theta,
             min_cells,
             clip_range,
-        })
+        };
+        // Catches a non-positive theta and an inverted or NaN clipping range
+        // here, at the boundary, rather than letting `clamp` abort in a worker.
+        parsed.validate().map_err(|e| Error::Other(e.to_string()))?;
+
+        Ok(parsed)
     }
 }
 
@@ -4474,16 +4502,40 @@ impl AprModel {
             )));
         }
 
-        Ok(Self {
+        // Gene lookups are binary searches, so an unsorted axis silently returns
+        // the wrong position rather than `None`.
+        assert_ascending(&genes, "Analytic Pearson model genes")
+            .map_err(|e| Error::Other(e.to_string()))?;
+
+        let what = "Analytic Pearson model";
+        let model = Self {
             genes,
             gene_sums,
-            total: required("total")?.as_real().unwrap_or(0.0),
-            theta: required("theta")?.as_real().unwrap_or(0.0),
+            total: r_list_required_real(&params, "total", what)?,
+            theta: r_list_required_real(&params, "theta", what)?,
             clip_range: (
-                required("clip_min")?.as_real().unwrap_or(f64::NEG_INFINITY),
-                required("clip_max")?.as_real().unwrap_or(f64::INFINITY),
+                r_list_required_real(&params, "clip_min", what)?,
+                r_list_required_real(&params, "clip_max", what)?,
             ),
-        })
+        };
+
+        validate_clip_range(model.clip_range).map_err(|e| Error::Other(e.to_string()))?;
+        // A zero total gives `p_gene = 0/0 = NaN` and an all-NaN residual
+        // matrix, which the variance sweep would otherwise have to catch.
+        if model.total <= 0.0 || model.total.is_nan() {
+            return Err(Error::Other(format!(
+                "{what} 'total' must be positive, got {}",
+                model.total
+            )));
+        }
+        if model.theta <= 0.0 || model.theta.is_nan() {
+            return Err(Error::Other(format!(
+                "{what} 'theta' must be positive, got {}",
+                model.theta
+            )));
+        }
+
+        Ok(model)
     }
 }
 
