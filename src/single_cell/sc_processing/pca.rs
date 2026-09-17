@@ -14,9 +14,7 @@ use crate::core::math::pca_svd::randomised_sparse_svd;
 use crate::core::math::pca_svd::*;
 use crate::core::math::sparse::sparse_svd_lanczos;
 use crate::prelude::*;
-use crate::single_cell::sc_processing::sctransform::model::{
-    SctCellContext, SctModel, sct_residual_row,
-};
+use crate::single_cell::sc_processing::residuals::{ResidualSource, chunk_counts};
 
 ///////////
 // Types //
@@ -327,39 +325,27 @@ fn centre_and_scale(
 ///
 /// * `chunk` - The gene chunk, already reindexed to the selected cells.
 /// * `no_cells` - Number of cells represented.
-/// * `gene_pos` - Position of this gene within the model.
-/// * `model` - The fitted scTransform model.
-/// * `cells` - Per-cell library sizes and covariates, in the same cell order.
+/// * `gene_pos` - Position of this gene on the source's gene axis.
+/// * `source` - The fitted residual source, scTransform or analytic Pearson.
 /// * `mean_center` - Subtract the mean.
 /// * `normalise_variance` - Divide by the standard deviation.
 ///
 /// ### Returns
 ///
 /// Tuple of (residual column, mean, standard deviation), or a
-/// [`BixverseErrors`] when the gene is outside the model.
+/// [`BixverseErrors`] when the gene is outside the source.
 pub fn residual_csc_chunk(
     chunk: &CscGeneChunk,
     no_cells: usize,
     gene_pos: usize,
-    model: &SctModel,
-    cells: &SctCellContext<'_>,
+    source: &dyn ResidualSource,
     mean_center: bool,
     normalise_variance: bool,
 ) -> Result<(Vec<f32>, f32, f32), BixverseErrors> {
-    let counts: Vec<f64> = match &chunk.data_raw {
-        RawCounts::U16(v) => v.iter().map(|&x| x as f64).collect(),
-        RawCounts::U32(v) => v.iter().map(|&x| x as f64).collect(),
-    };
+    let counts = chunk_counts(chunk);
 
     let mut dense_data = vec![0_f32; no_cells];
-    sct_residual_row(
-        &counts,
-        &chunk.indices,
-        gene_pos,
-        model,
-        cells,
-        &mut dense_data,
-    )?;
+    source.residual_row(&counts, &chunk.indices, gene_pos, &mut dense_data)?;
 
     Ok(centre_and_scale(
         dense_data,
@@ -383,12 +369,16 @@ pub enum PcaColumnSource<'a> {
         /// Per-cell offsets for the shifted CLR transformation.
         clr_offsets: Option<&'a [f64]>,
     },
-    /// Pearson residuals regenerated from a fitted scTransform model.
+    /// Pearson residuals regenerated from a fitted residual model.
+    ///
+    /// Covers both scTransform and the analytic Pearson residuals, and with
+    /// either, one model per sample. Note that `normalise_variance` should
+    /// normally be off here: residuals carry the biological signal as variance,
+    /// which is the whole point of the transformation, and dividing it back out
+    /// throws it away.
     Residual {
-        /// The fitted model.
-        model: &'a SctModel,
-        /// Per-cell library sizes and covariates, in the selected cell order.
-        cells: SctCellContext<'a>,
+        /// The fitted source, holding the models and the per-cell group map.
+        source: &'a dyn ResidualSource,
     },
 }
 
@@ -421,8 +411,8 @@ impl<'a> PcaColumnSource<'a> {
                 normalise_variance,
                 *clr_offsets,
             )),
-            Self::Residual { model, cells } => {
-                let pos = model.position(chunk.original_index).ok_or(
+            Self::Residual { source } => {
+                let pos = source.position(chunk.original_index).ok_or(
                     BixverseErrors::SctGeneNotModelled {
                         gene: chunk.original_index,
                     },
@@ -431,8 +421,7 @@ impl<'a> PcaColumnSource<'a> {
                     chunk,
                     no_cells,
                     pos,
-                    model,
-                    cells,
+                    *source,
                     mean_center,
                     normalise_variance,
                 )
@@ -618,10 +607,10 @@ fn dense_pca<S: SingleCellReading>(
 ) -> SingleCellPcaResScaledStats {
     let clr_offsets = match source {
         PcaColumnSource::Normalised { clr_offsets } => clr_offsets,
-        PcaColumnSource::Residual { cells, .. } => {
-            if cells.n_cells() != cell_indices.len() {
+        PcaColumnSource::Residual { source } => {
+            if source.n_cells() != cell_indices.len() {
                 return Err(BixverseErrors::OffsetsLengthDoesNotMatchNCells {
-                    len_offset: cells.n_cells(),
+                    len_offset: source.n_cells(),
                     n_cells: cell_indices.len(),
                 });
             }
@@ -894,12 +883,11 @@ pub fn pca_on_sc_stats<S: SingleCellReading>(
 /// * `reader` - Reader over the gene-based count store.
 /// * `cell_indices` - Slice of indices for the cells.
 /// * `gene_indices` - Slice of indices for the genes, typically the HVG set.
-///   Every one must be covered by `model`.
+///   Every one must be covered by `source`.
 /// * `no_pcs` - Number of principal components to calculate.
 /// * `params_pca` - Parameters for this PCA run, see [SingleCellPcaParams].
 ///   `clr` must be off.
-/// * `model` - The fitted scTransform model.
-/// * `cells` - Per-cell library sizes and covariates, in `cell_indices` order.
+/// * `source` - The fitted residual source, scTransform or analytic Pearson.
 /// * `seed` - Seed for randomised SVD.
 /// * `return_scaled` - Return the residual matrix.
 /// * `verbose` - `0` silent, `1` normal, `2` detailed.
@@ -918,8 +906,7 @@ pub fn pca_on_sc_residuals<S: SingleCellReading>(
     gene_indices: &[usize],
     no_pcs: usize,
     params_pca: &SingleCellPcaParams,
-    model: &SctModel,
-    cells: &SctCellContext<'_>,
+    source: &dyn ResidualSource,
     seed: usize,
     return_scaled: bool,
     verbose: usize,
@@ -930,10 +917,7 @@ pub fn pca_on_sc_residuals<S: SingleCellReading>(
         gene_indices,
         no_pcs,
         params_pca,
-        PcaColumnSource::Residual {
-            model,
-            cells: *cells,
-        },
+        PcaColumnSource::Residual { source },
         seed,
         return_scaled,
         verbose,
@@ -956,8 +940,7 @@ pub fn pca_on_sc_residuals<S: SingleCellReading>(
 /// * `gene_indices` - Slice of indices for the genes.
 /// * `no_pcs` - Number of principal components to calculate.
 /// * `params_pca` - Parameters for this PCA run, see [SingleCellPcaParams].
-/// * `model` - The fitted scTransform model.
-/// * `cells` - Per-cell library sizes and covariates, in `cell_indices` order.
+/// * `source` - The fitted residual source, scTransform or analytic Pearson.
 /// * `seed` - Seed for randomised SVD.
 /// * `verbose` - `0` silent, `1` normal, `2` detailed.
 ///
@@ -971,8 +954,7 @@ pub fn pca_on_sc_residuals_stats<S: SingleCellReading>(
     gene_indices: &[usize],
     no_pcs: usize,
     params_pca: &SingleCellPcaParams,
-    model: &SctModel,
-    cells: &SctCellContext<'_>,
+    source: &dyn ResidualSource,
     seed: usize,
     verbose: usize,
 ) -> SingleCellPcaResStats {
@@ -982,10 +964,7 @@ pub fn pca_on_sc_residuals_stats<S: SingleCellReading>(
         gene_indices,
         no_pcs,
         params_pca,
-        PcaColumnSource::Residual {
-            model,
-            cells: *cells,
-        },
+        PcaColumnSource::Residual { source },
         seed,
         false,
         verbose,

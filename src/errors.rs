@@ -1719,6 +1719,59 @@ pub enum BixverseErrors {
         supplied: usize,
     },
 
+    // -- residual normalisation --
+    /// Group labels disagree in length with the selected cells.
+    #[cfg(feature = "single-cell")]
+    #[error("Residual grouping: {n_labels} group label(s) for {n_cells} cell(s).")]
+    ResidualGroupLabelLengthMismatch {
+        /// Labels supplied
+        n_labels: usize,
+        /// Cells selected
+        n_cells: usize,
+    },
+
+    /// A group id has no cells in it.
+    ///
+    /// Labels must densely cover `0..n_groups`. A gap means the caller coded a
+    /// factor without dropping its unused levels, and a model would be fitted
+    /// against nothing.
+    #[cfg(feature = "single-cell")]
+    #[error("Residual grouping: group {group} of {n_groups} has no cells.")]
+    ResidualEmptyGroup {
+        /// The empty group id
+        group: usize,
+        /// Groups the labels imply
+        n_groups: usize,
+    },
+
+    /// No gene is modelled in every group.
+    ///
+    /// The shared feature axis is the intersection of the per-group modelled
+    /// sets, so an empty intersection means the groups have no gene in common
+    /// that passes `min_cells` everywhere. Usually one very shallow sample.
+    #[cfg(feature = "single-cell")]
+    #[error("Residual grouping: no gene is modelled in all {n_groups} groups.")]
+    ResidualEmptyGeneIntersection {
+        /// Groups that were intersected
+        n_groups: usize,
+    },
+
+    /// The count block handed to the analytic Pearson model sums to zero.
+    ///
+    /// `mu_cg = n_c * p_g` divides by the grand total, so a block of pure
+    /// zeros has no model at all rather than a degenerate one.
+    #[cfg(feature = "single-cell")]
+    #[error("Analytic Pearson residuals: the selected counts sum to zero.")]
+    AnalyticPearsonZeroTotal,
+
+    /// A non-positive overdispersion was supplied.
+    #[cfg(feature = "single-cell")]
+    #[error("Analytic Pearson residuals: theta must be positive, got {theta}.")]
+    AnalyticPearsonInvalidTheta {
+        /// The offending value
+        theta: f64,
+    },
+
     // -- cellsweep --
     /// The caller asked for a supplied empty droplet mask but did not give one.
     #[cfg(feature = "single-cell")]
