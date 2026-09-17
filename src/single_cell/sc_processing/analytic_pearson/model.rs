@@ -6,7 +6,8 @@
 
 use crate::errors::BixverseErrors;
 use crate::single_cell::sc_processing::residuals::{
-    ResidualSource, intersect_gene_sets, validate_groups,
+    ResidualSource, intersect_gene_sets, validate_clip_range, validate_groups,
+    validate_residual_row_inputs,
 };
 
 ////////////
@@ -69,14 +70,22 @@ impl AprParams {
         })
     }
 
-    /// Rejects a non-positive overdispersion.
+    /// Rejects a non-positive overdispersion and an unusable clipping range.
+    ///
+    /// The clipping range matters here rather than at the point of use because
+    /// `f64::clamp` panics on inverted or NaN bounds, which would abort inside a
+    /// rayon worker instead of surfacing as an error.
     ///
     /// ### Returns
     ///
-    /// `()`, or [`BixverseErrors::AnalyticPearsonInvalidTheta`].
+    /// `()`, or [`BixverseErrors::AnalyticPearsonInvalidTheta`] /
+    /// [`BixverseErrors::ResidualInvalidClipRange`].
     pub fn validate(&self) -> Result<(), BixverseErrors> {
         if self.theta <= 0.0 || self.theta.is_nan() {
             return Err(BixverseErrors::AnalyticPearsonInvalidTheta { theta: self.theta });
+        }
+        if let Some(clip) = self.clip_range {
+            validate_clip_range(clip)?;
         }
         Ok(())
     }
@@ -256,10 +265,14 @@ impl<'a> AprResiduals<'a> {
     ) -> Result<Self, BixverseErrors> {
         let n_groups = validate_groups(&group_of_cell, cell_totals.len())?;
         if n_groups != models.len() {
-            return Err(BixverseErrors::ResidualEmptyGroup {
-                group: models.len().min(n_groups),
-                n_groups: models.len(),
+            return Err(BixverseErrors::ResidualGroupModelCountMismatch {
+                implied: n_groups,
+                models: models.len(),
             });
+        }
+
+        for model in models {
+            validate_clip_range(model.clip_range)?;
         }
 
         let sets: Vec<&[usize]> = models.iter().map(|m| m.genes.as_slice()).collect();
@@ -354,6 +367,7 @@ impl ResidualSource for AprResiduals<'_> {
                 found: out.len(),
             });
         }
+        validate_residual_row_inputs(counts, indices, out.len())?;
 
         let per_group: Vec<AprGeneParams> = self
             .models

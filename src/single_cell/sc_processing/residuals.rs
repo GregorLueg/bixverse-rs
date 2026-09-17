@@ -149,27 +149,26 @@ pub fn validate_groups(group_of_cell: &[u32], n_cells: usize) -> Result<usize, B
         });
     }
     if n_cells == 0 {
-        return Err(BixverseErrors::ResidualGroupLabelLengthMismatch {
-            n_labels: 0,
-            n_cells: 0,
+        return Err(BixverseErrors::ResidualEmptySelectionRequest {
+            what: "no cells were selected",
         });
     }
 
-    // A dense label cannot exceed `n_cells - 1`, so capping the tally both
-    // bounds the allocation against a nonsense label and, by pigeonhole,
-    // guarantees a genuinely empty slot to report when the cap bites.
-    let implied = group_of_cell
-        .iter()
-        .copied()
-        .max()
-        .map_or(1, |m| m as usize + 1);
-    let tally_len = implied.min(n_cells);
-    let mut sizes = vec![0_usize; tally_len];
+    // A densely labelled selection cannot carry a label above `n_cells - 1`, so
+    // this rejects a nonsense label up front and names the label itself rather
+    // than whichever slot happens to be empty as a consequence.
+    let max = group_of_cell.iter().copied().max().unwrap_or(0) as usize;
+    if max >= n_cells {
+        return Err(BixverseErrors::ResidualGroupLabelOutOfRange {
+            label: max,
+            n_groups: n_cells,
+        });
+    }
+
+    let implied = max + 1;
+    let mut sizes = vec![0_usize; implied];
     for &g in group_of_cell {
-        let g = g as usize;
-        if g < tally_len {
-            sizes[g] += 1;
-        }
+        sizes[g as usize] += 1;
     }
 
     if let Some(group) = sizes.iter().position(|&s| s == 0) {
@@ -180,6 +179,108 @@ pub fn validate_groups(group_of_cell: &[u32], n_cells: usize) -> Result<usize, B
     }
 
     Ok(implied)
+}
+
+/// Rejects a selection that names the same cell twice.
+///
+/// The readers key their selection by an `IndexSet`, which deduplicates, while
+/// the residual row is sized by the raw selection. A duplicate therefore leaves
+/// the filtered non-zeros spanning fewer positions than the row, shifting every
+/// later cell into the wrong slot and leaving the last one never written. It is
+/// silent, so it has to be caught here.
+///
+/// ### Params
+///
+/// * `cell_indices` - Global ids of the selected cells.
+///
+/// ### Returns
+///
+/// The selection as an `IndexSet`, ready to hand to the reader, or
+/// [`BixverseErrors::ResidualDuplicateCells`].
+pub fn distinct_cell_set(cell_indices: &[usize]) -> Result<IndexSet<u32>, BixverseErrors> {
+    let cell_set: IndexSet<u32> = cell_indices.iter().map(|&c| c as u32).collect();
+    if cell_set.len() != cell_indices.len() {
+        return Err(BixverseErrors::ResidualDuplicateCells {
+            n_unique: cell_set.len(),
+            n_cells: cell_indices.len(),
+        });
+    }
+    Ok(cell_set)
+}
+
+/// Rejects a gene axis that is not strictly ascending.
+///
+/// Every gene lookup on a residual source is a binary search, so an unsorted
+/// axis returns a wrong position rather than `None`.
+///
+/// ### Params
+///
+/// * `genes` - The gene indices.
+/// * `name` - What to name in the error.
+///
+/// ### Returns
+///
+/// `()`, or [`BixverseErrors::ResidualGenesNotAscending`].
+pub fn assert_ascending(genes: &[usize], name: &'static str) -> Result<(), BixverseErrors> {
+    if genes.windows(2).any(|w| w[0] >= w[1]) {
+        return Err(BixverseErrors::ResidualGenesNotAscending { name });
+    }
+    Ok(())
+}
+
+/// Rejects a clipping range `f64::clamp` would panic on.
+///
+/// `clamp` asserts `min <= max` and rejects NaN, so an inverted or NaN range
+/// supplied from R would abort inside a rayon worker rather than surface as an
+/// error.
+///
+/// ### Params
+///
+/// * `clip` - The `(lo, hi)` range.
+///
+/// ### Returns
+///
+/// `()`, or [`BixverseErrors::ResidualInvalidClipRange`].
+pub fn validate_clip_range(clip: (f64, f64)) -> Result<(), BixverseErrors> {
+    let (lo, hi) = clip;
+    if lo.is_nan() || hi.is_nan() || lo > hi {
+        return Err(BixverseErrors::ResidualInvalidClipRange { lo, hi });
+    }
+    Ok(())
+}
+
+/// Checks a residual row's inputs before they are trusted.
+///
+/// `zip` would silently truncate ragged inputs into a plausible-looking row,
+/// and an out-of-range index would panic on the write.
+///
+/// ### Params
+///
+/// * `counts` - The gene's non-zero counts.
+/// * `indices` - Cell positions of those counts.
+/// * `n_cells` - Length of the destination row.
+///
+/// ### Returns
+///
+/// `()`, or the matching [`BixverseErrors`].
+pub fn validate_residual_row_inputs(
+    counts: &[f64],
+    indices: &[u32],
+    n_cells: usize,
+) -> Result<(), BixverseErrors> {
+    if counts.len() != indices.len() {
+        return Err(BixverseErrors::ResidualRowLengthMismatch {
+            n_counts: counts.len(),
+            n_indices: indices.len(),
+        });
+    }
+    if let Some(&bad) = indices.iter().find(|&&i| i as usize >= n_cells) {
+        return Err(BixverseErrors::ResidualCellIndexOutOfRange {
+            index: bad as usize,
+            n_cells,
+        });
+    }
+    Ok(())
 }
 
 /// Intersects per-group gene sets into the shared feature axis.
@@ -197,8 +298,16 @@ pub fn validate_groups(group_of_cell: &[u32], n_cells: usize) -> Result<usize, B
 pub fn intersect_gene_sets(per_group: &[&[usize]]) -> Result<Vec<usize>, BixverseErrors> {
     let n_groups = per_group.len();
     let Some((first, rest)) = per_group.split_first() else {
-        return Err(BixverseErrors::ResidualEmptyGeneIntersection { n_groups });
+        return Err(BixverseErrors::ResidualEmptySelectionRequest {
+            what: "no gene sets were given to intersect",
+        });
     };
+
+    // Every lookup below is a binary search, so an unsorted input would produce
+    // a silently wrong intersection rather than an error.
+    for set in per_group {
+        assert_ascending(set, "model genes")?;
+    }
 
     let shared: Vec<usize> = first
         .iter()
@@ -243,13 +352,24 @@ pub fn chunk_counts(chunk: &CscGeneChunk) -> Vec<f64> {
 /// ### Returns
 ///
 /// One variance per group. A group with fewer than two cells gets `0.0`.
-fn grouped_sample_variance(row: &[f32], group_of_cell: &[u32], n_groups: usize) -> Vec<f64> {
+fn grouped_sample_variance(
+    row: &[f32],
+    group_of_cell: &[u32],
+    n_groups: usize,
+    gene: usize,
+) -> Result<Vec<f64>, BixverseErrors> {
     let mut n = vec![0_usize; n_groups];
     let mut sum = vec![0.0_f64; n_groups];
     let mut sum_sq = vec![0.0_f64; n_groups];
 
     for (&x, &g) in row.iter().zip(group_of_cell) {
         let g = g as usize;
+        // `ResidualSource` is public, so an out-of-crate implementor can hand
+        // back a label the models do not cover. Indexing it would panic inside
+        // a rayon worker.
+        if g >= n_groups {
+            return Err(BixverseErrors::ResidualGroupLabelOutOfRange { label: g, n_groups });
+        }
         let x = x as f64;
         n[g] += 1;
         sum[g] += x;
@@ -257,16 +377,27 @@ fn grouped_sample_variance(row: &[f32], group_of_cell: &[u32], n_groups: usize) 
     }
 
     // The residuals are centred near zero by construction, so the sum of
-    // squares never dwarfs the correction term the way it would for raw
-    // counts, and the one-pass form is safe here.
+    // squares never dwarfs the correction term the way it would for raw counts,
+    // and the one-pass form is safe here: measured against the two-pass form at
+    // n = 100k it agrees to ~1e-13 relative, six orders below the f32 row
+    // storage's own ~1e-7.
     (0..n_groups)
         .map(|g| {
             if n[g] < 2 {
-                return 0.0;
+                return Ok(0.0);
             }
             let n_f = n[g] as f64;
             let mean = sum[g] / n_f;
-            ((sum_sq[g] - n_f * mean * mean) / (n_f - 1.0)).max(0.0)
+            let var = (sum_sq[g] - n_f * mean * mean) / (n_f - 1.0);
+            // Never floor a non-finite variance to zero: that is exactly how a
+            // model deserialised with a missing scalar produces an all-NaN
+            // residual matrix and still ranks last in feature selection
+            // instead of erroring.
+            if !var.is_finite() {
+                return Err(BixverseErrors::ResidualNonFiniteVariance { gene, value: var });
+            }
+            // A genuine negative here is float noise around a constant row.
+            Ok(var.max(0.0))
         })
         .collect()
 }
@@ -325,7 +456,7 @@ pub fn residual_variance<S: SingleCellReading>(
     let n_groups = source.n_groups();
     let group_of_cell = source.group_of_cell();
 
-    let cell_set: IndexSet<u32> = cell_indices.iter().map(|&c| c as u32).collect();
+    let cell_set = distinct_cell_set(cell_indices)?;
     let step = opts.gene_batch_size.unwrap_or(n_genes).max(1);
 
     let mut out = vec![vec![0.0_f64; n_genes]; n_groups];
@@ -345,7 +476,9 @@ pub fn residual_variance<S: SingleCellReading>(
                 let counts = chunk_counts(chunk);
                 let mut row = vec![0.0_f32; n_cells];
                 source.residual_row(&counts, &chunk.indices, pos, &mut row)?;
-                Ok((pos, grouped_sample_variance(&row, group_of_cell, n_groups)))
+                let vars =
+                    grouped_sample_variance(&row, group_of_cell, n_groups, chunk.original_index)?;
+                Ok((pos, vars))
             })
             .collect::<Result<Vec<_>, BixverseErrors>>()?;
 
@@ -414,6 +547,151 @@ mod tests {
         assert_eq!(intersect_gene_sets(&[a, b, c]).unwrap(), vec![2, 4]);
     }
 
+    /// The capping path: a label above `n_cells - 1` cannot be dense, and the
+    /// error has to name the offending label rather than whichever slot went
+    /// empty as a consequence.
+    #[test]
+    fn test_validate_groups_rejects_an_out_of_range_label() {
+        assert!(matches!(
+            validate_groups(&[0, 5], 2),
+            Err(BixverseErrors::ResidualGroupLabelOutOfRange { label: 5, .. })
+        ));
+        assert!(matches!(
+            validate_groups(&[1], 1),
+            Err(BixverseErrors::ResidualGroupLabelOutOfRange { label: 1, .. })
+        ));
+        assert!(matches!(
+            validate_groups(&[0, u32::MAX], 2),
+            Err(BixverseErrors::ResidualGroupLabelOutOfRange { .. })
+        ));
+    }
+
+    #[test]
+    fn test_validate_groups_rejects_an_empty_selection() {
+        assert!(matches!(
+            validate_groups(&[], 0),
+            Err(BixverseErrors::ResidualEmptySelectionRequest { .. })
+        ));
+    }
+
+    /// Duplicates are silent otherwise: the reader deduplicates its selection
+    /// while the residual row is sized by the raw one, so every cell after the
+    /// repeat lands in the wrong slot.
+    #[test]
+    fn test_distinct_cell_set_rejects_duplicates() {
+        assert_eq!(distinct_cell_set(&[0, 1, 2]).unwrap().len(), 3);
+        assert!(matches!(
+            distinct_cell_set(&[0, 1, 1, 2]),
+            Err(BixverseErrors::ResidualDuplicateCells {
+                n_unique: 3,
+                n_cells: 4
+            })
+        ));
+    }
+
+    #[test]
+    fn test_assert_ascending_rejects_unsorted_and_repeated() {
+        assert!(assert_ascending(&[0, 1, 2], "genes").is_ok());
+        assert!(matches!(
+            assert_ascending(&[0, 2, 1], "genes"),
+            Err(BixverseErrors::ResidualGenesNotAscending { .. })
+        ));
+        assert!(matches!(
+            assert_ascending(&[0, 1, 1], "genes"),
+            Err(BixverseErrors::ResidualGenesNotAscending { .. })
+        ));
+    }
+
+    /// `f64::clamp` panics rather than erroring on these, so they have to be
+    /// caught before a worker reaches one.
+    #[test]
+    fn test_validate_clip_range_rejects_what_clamp_would_panic_on() {
+        assert!(validate_clip_range((-1.0, 1.0)).is_ok());
+        assert!(validate_clip_range((1.0, 1.0)).is_ok());
+        assert!(matches!(
+            validate_clip_range((1.0, -1.0)),
+            Err(BixverseErrors::ResidualInvalidClipRange { .. })
+        ));
+        assert!(matches!(
+            validate_clip_range((f64::NAN, 1.0)),
+            Err(BixverseErrors::ResidualInvalidClipRange { .. })
+        ));
+        assert!(matches!(
+            validate_clip_range((-1.0, f64::NAN)),
+            Err(BixverseErrors::ResidualInvalidClipRange { .. })
+        ));
+    }
+
+    #[test]
+    fn test_validate_residual_row_inputs_catches_ragged_and_out_of_range() {
+        assert!(validate_residual_row_inputs(&[1.0], &[0], 3).is_ok());
+        // `zip` would silently truncate this into a plausible-looking row.
+        assert!(matches!(
+            validate_residual_row_inputs(&[1.0, 2.0], &[0], 3),
+            Err(BixverseErrors::ResidualRowLengthMismatch { .. })
+        ));
+        // This would panic on the write.
+        assert!(matches!(
+            validate_residual_row_inputs(&[1.0], &[9], 3),
+            Err(BixverseErrors::ResidualCellIndexOutOfRange { index: 9, .. })
+        ));
+    }
+
+    /// A NaN variance must be reported, not floored to zero, or a model that
+    /// produces an all-NaN residual matrix silently ranks every gene last.
+    #[test]
+    fn test_grouped_sample_variance_rejects_a_non_finite_result() {
+        let row = [f32::NAN, 1.0, 2.0, 3.0];
+        let groups = [0_u32; 4];
+        assert!(matches!(
+            grouped_sample_variance(&row, &groups, 1, 17),
+            Err(BixverseErrors::ResidualNonFiniteVariance { gene: 17, .. })
+        ));
+    }
+
+    #[test]
+    fn test_grouped_sample_variance_rejects_an_out_of_range_label() {
+        let row = [1.0_f32, 2.0];
+        let groups = [0_u32, 3];
+        assert!(matches!(
+            grouped_sample_variance(&row, &groups, 1, 0),
+            Err(BixverseErrors::ResidualGroupLabelOutOfRange { label: 3, .. })
+        ));
+    }
+
+    #[test]
+    fn test_grouped_sample_variance_single_cell_group_is_zero() {
+        let row = [1.0_f32, 5.0, 9.0];
+        let groups = [0_u32, 0, 1];
+        let vars = grouped_sample_variance(&row, &groups, 2, 0).unwrap();
+        assert_relative_eq!(vars[0], reference_variance(&row[..2]), epsilon = 1e-9);
+        assert_eq!(vars[1], 0.0);
+    }
+
+    #[test]
+    fn test_intersect_gene_sets_rejects_an_unsorted_input() {
+        let a: &[usize] = &[0, 2, 1];
+        let b: &[usize] = &[0, 1, 2];
+        assert!(matches!(
+            intersect_gene_sets(&[a, b]),
+            Err(BixverseErrors::ResidualGenesNotAscending { .. })
+        ));
+    }
+
+    #[test]
+    fn test_intersect_gene_sets_single_group_is_the_group() {
+        let a: &[usize] = &[3, 5, 8];
+        assert_eq!(intersect_gene_sets(&[a]).unwrap(), vec![3, 5, 8]);
+    }
+
+    #[test]
+    fn test_intersect_gene_sets_rejects_no_groups() {
+        assert!(matches!(
+            intersect_gene_sets(&[]),
+            Err(BixverseErrors::ResidualEmptySelectionRequest { .. })
+        ));
+    }
+
     #[test]
     fn test_intersect_gene_sets_errors_when_disjoint() {
         let a: &[usize] = &[0, 1];
@@ -428,7 +706,7 @@ mod tests {
     fn test_grouped_sample_variance_splits_by_group() {
         let row = [1.0_f32, 3.0, 10.0, 20.0];
         let groups = [0_u32, 0, 1, 1];
-        let vars = grouped_sample_variance(&row, &groups, 2);
+        let vars = grouped_sample_variance(&row, &groups, 2, 0).unwrap();
         assert_relative_eq!(vars[0], reference_variance(&row[..2]), epsilon = 1e-9);
         assert_relative_eq!(vars[1], reference_variance(&row[2..]), epsilon = 1e-9);
     }
@@ -452,7 +730,7 @@ mod tests {
     fn test_grouped_sample_variance_matches_ungrouped() {
         let row = [1.0_f32, 3.0, 10.0, 20.0];
         let groups = [0_u32; 4];
-        let vars = grouped_sample_variance(&row, &groups, 1);
+        let vars = grouped_sample_variance(&row, &groups, 1, 0).unwrap();
         assert_relative_eq!(vars[0], reference_variance(&row), epsilon = 1e-9);
     }
 }

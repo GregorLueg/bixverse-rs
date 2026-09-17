@@ -1772,6 +1772,180 @@ pub enum BixverseErrors {
         theta: f64,
     },
 
+    /// An unusable residual clipping range was supplied.
+    ///
+    /// `f64::clamp` panics when the bounds are inverted or either is NaN, so
+    /// this has to be caught before a rayon worker reaches it.
+    #[cfg(feature = "single-cell")]
+    #[error("Residual clipping range [{lo}, {hi}] must be finite with lo <= hi.")]
+    ResidualInvalidClipRange {
+        /// Lower bound supplied
+        lo: f64,
+        /// Upper bound supplied
+        hi: f64,
+    },
+
+    /// The selected cells contain a repeated index.
+    ///
+    /// The readers key their selection by an `IndexSet`, which deduplicates,
+    /// while the residual row is sized by the raw selection. A duplicate would
+    /// therefore shift every later cell into the wrong slot rather than
+    /// erroring.
+    #[cfg(feature = "single-cell")]
+    #[error("Residual selection: {n_cells} cell(s) selected but only {n_unique} are distinct.")]
+    ResidualDuplicateCells {
+        /// Distinct cells in the selection
+        n_unique: usize,
+        /// Cells supplied
+        n_cells: usize,
+    },
+
+    /// A gene set that has to be ascending is not.
+    ///
+    /// Gene lookups are binary searches, so an unsorted axis silently returns
+    /// the wrong position rather than failing.
+    #[cfg(feature = "single-cell")]
+    #[error("Residual model: '{name}' must be strictly ascending.")]
+    ResidualGenesNotAscending {
+        /// What was out of order
+        name: &'static str,
+    },
+
+    /// The group labels imply a different number of groups than there are
+    /// models.
+    #[cfg(feature = "single-cell")]
+    #[error("Residual grouping: labels imply {implied} group(s) but {models} model(s) were given.")]
+    ResidualGroupModelCountMismatch {
+        /// Groups the labels imply
+        implied: usize,
+        /// Models supplied
+        models: usize,
+    },
+
+    /// A group label is outside the range the models cover.
+    #[cfg(feature = "single-cell")]
+    #[error("Residual grouping: label {label} is outside the {n_groups} group(s) available.")]
+    ResidualGroupLabelOutOfRange {
+        /// The offending label
+        label: usize,
+        /// Groups available
+        n_groups: usize,
+    },
+
+    /// A residual variance came out non-finite.
+    ///
+    /// Always an upstream problem, typically a model deserialised with a zero
+    /// or missing scalar. Reported rather than floored, because a floored NaN
+    /// silently ranks the gene last in feature selection.
+    #[cfg(feature = "single-cell")]
+    #[error("Residual variance for gene {gene} is not finite ({value}).")]
+    ResidualNonFiniteVariance {
+        /// Store index of the gene
+        gene: usize,
+        /// The offending value
+        value: f64,
+    },
+
+    /// The residual row's counts and indices disagree in length.
+    #[cfg(feature = "single-cell")]
+    #[error("Residual row: {n_counts} count(s) for {n_indices} cell index/indices.")]
+    ResidualRowLengthMismatch {
+        /// Counts supplied
+        n_counts: usize,
+        /// Indices supplied
+        n_indices: usize,
+    },
+
+    /// A residual row's cell index points outside the selected cells.
+    #[cfg(feature = "single-cell")]
+    #[error("Residual row: cell index {index} is outside the {n_cells} selected cell(s).")]
+    ResidualCellIndexOutOfRange {
+        /// The offending index
+        index: usize,
+        /// Cells selected
+        n_cells: usize,
+    },
+
+    /// Feature selection was asked for no genes, or handed no groups.
+    #[cfg(feature = "single-cell")]
+    #[error("Residual feature selection: {what}.")]
+    ResidualEmptySelectionRequest {
+        /// What was empty
+        what: &'static str,
+    },
+
+    /// The overdispersion search failed at every point it evaluated.
+    ///
+    /// Means the adjusted profile likelihood could not be computed anywhere in
+    /// the bracket, typically a design that is rank-deficient for this gene's
+    /// weights. The search would otherwise have minimised a constant and
+    /// returned a fit built on a meaningless dispersion.
+    #[cfg(feature = "single-cell")]
+    #[error("scTransform: the dispersion search failed at every point: {reason}")]
+    SctDispersionSearchFailed {
+        /// The first underlying error, rendered
+        reason: String,
+    },
+
+    /// One group's fit failed.
+    ///
+    /// Wraps the underlying error so that a failure in group 7 of 8 is not
+    /// indistinguishable from one in group 0. The usual cause is a single
+    /// shallow sample where no gene clears `min_cells`.
+    #[cfg(feature = "single-cell")]
+    #[error("Residual grouping: group {group} failed to fit: {reason}")]
+    ResidualGroupFitFailed {
+        /// The group that failed
+        group: usize,
+        /// The underlying error, rendered
+        reason: String,
+    },
+
+    /// The covariates supplied are not the ones the model was fitted with.
+    ///
+    /// Only the count is cheap to check, and the count matching is exactly the
+    /// case where a reordered data frame goes unnoticed, so the names are
+    /// compared too.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "scTransform covariate {position}: model was fitted with '{model}' but '{supplied}' was supplied."
+    )]
+    SctCovariateNameMismatch {
+        /// Position in the design, excluding the intercept
+        position: usize,
+        /// Name the model carries
+        model: String,
+        /// Name the caller supplied
+        supplied: String,
+    },
+
+    /// A cell index handed to scTransform is outside the selection.
+    #[cfg(feature = "single-cell")]
+    #[error("scTransform: cell index {index} is outside the {n_cells} selected cell(s).")]
+    SctCellIndexOutOfRange {
+        /// The offending index
+        index: usize,
+        /// Cells selected
+        n_cells: usize,
+    },
+
+    /// A fitted model carries no design columns at all.
+    #[cfg(feature = "single-cell")]
+    #[error("scTransform model has n_coef = 0; at least the intercept is required.")]
+    SctModelWithoutCoefficients,
+
+    /// Variance normalisation was asked for on the residual PCA path.
+    ///
+    /// Residuals carry the biological signal as variance, which is the point of
+    /// the transformation. Dividing it back out per gene flattens exactly the
+    /// ranking the transformation produces, so this is refused rather than
+    /// silently honoured.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "PCA on Pearson residuals cannot normalise the variance; residuals already carry it as signal."
+    )]
+    PcaResidualsWithVarianceNormalisation,
+
     // -- cellsweep --
     /// The caller asked for a supplied empty droplet mask but did not give one.
     #[cfg(feature = "single-cell")]

@@ -14,7 +14,6 @@
 //!
 //! Lause, Berens & Kobak, Genome Biology, 2021, 22:258
 
-use indexmap::IndexSet;
 use rayon::prelude::*;
 use rustc_hash::FxHashSet;
 use std::time::Instant;
@@ -22,7 +21,7 @@ use std::time::Instant;
 use crate::errors::BixverseErrors;
 use crate::prelude::*;
 use crate::single_cell::sc_data::data_io::{RawCounts, SingleCellReading};
-use crate::single_cell::sc_processing::residuals::validate_groups;
+use crate::single_cell::sc_processing::residuals::{distinct_cell_set, validate_groups};
 use crate::single_cell::sc_processing::sctransform::stream::SctStreamOpts;
 
 use super::model::{AprModel, AprParams};
@@ -80,7 +79,7 @@ pub fn apr_gene_pass<S: SingleCellReading>(
     let start = Instant::now();
 
     let n_genes = reader.get_header().total_genes;
-    let cell_set: IndexSet<u32> = cell_indices.iter().map(|&c| c as u32).collect();
+    let cell_set = distinct_cell_set(cell_indices)?;
     let step = opts.gene_batch_size.unwrap_or(n_genes).max(1);
 
     let mut gene_sums = vec![0.0_f64; n_genes];
@@ -166,6 +165,12 @@ pub fn cell_totals_over_genes<S: SingleCellReading>(
             requested: "cell-based",
         });
     }
+
+    // `read_cells_parallel` does not deduplicate, so a repeated cell would be
+    // counted twice here while the gene sums, keyed by an `IndexSet`, count it
+    // once. `total` would then stop equalling `sum(cell_totals)` and `mu` would
+    // no longer be the maximum likelihood solution of anything.
+    distinct_cell_set(cell_indices)?;
 
     let retained: FxHashSet<u32> = genes.iter().map(|&g| g as u32).collect();
     let chunks = reader.read_cells_parallel(cell_indices)?;

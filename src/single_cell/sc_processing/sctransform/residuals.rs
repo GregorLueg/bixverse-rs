@@ -6,7 +6,8 @@
 
 use crate::errors::BixverseErrors;
 use crate::single_cell::sc_processing::residuals::{
-    ResidualSource, intersect_gene_sets, validate_groups,
+    ResidualSource, intersect_gene_sets, validate_clip_range, validate_groups,
+    validate_residual_row_inputs,
 };
 
 use super::model::{SctCellContext, SctGeneParams, SctModel, fill_residual_row};
@@ -59,19 +60,44 @@ impl<'a> SctResiduals<'a> {
     ) -> Result<Self, BixverseErrors> {
         let n_groups = validate_groups(&group_of_cell, cells.n_cells())?;
         if n_groups != models.len() {
-            return Err(BixverseErrors::ResidualEmptyGroup {
-                group: models.len().min(n_groups),
-                n_groups: models.len(),
+            return Err(BixverseErrors::ResidualGroupModelCountMismatch {
+                implied: n_groups,
+                models: models.len(),
             });
         }
 
         for model in models {
+            if model.n_coef == 0 {
+                return Err(BixverseErrors::SctModelWithoutCoefficients);
+            }
             if cells.covariates.n_covariates() + 1 != model.n_coef {
                 return Err(BixverseErrors::SctCovariateCountMismatch {
                     model: model.n_coef - 1,
                     supplied: cells.covariates.n_covariates(),
                 });
             }
+            // The count matching is exactly the case where a reordered data
+            // frame slips through: the coefficients would then be applied to
+            // the wrong covariate, giving plausible residuals and a wrong
+            // embedding. Names are the only thing that catches it.
+            for (position, (model_name, supplied)) in model
+                .covariate_names
+                .iter()
+                .zip(&cells.covariates.names)
+                .enumerate()
+            {
+                if model_name != supplied {
+                    return Err(BixverseErrors::SctCovariateNameMismatch {
+                        position,
+                        model: model_name.clone(),
+                        supplied: supplied.clone(),
+                    });
+                }
+            }
+        }
+
+        for model in models {
+            validate_clip_range(model.clip_range)?;
         }
 
         let sets: Vec<&[usize]> = models.iter().map(|m| m.genes.as_slice()).collect();
@@ -202,6 +228,7 @@ impl ResidualSource for SctResiduals<'_> {
                 found: out.len(),
             });
         }
+        validate_residual_row_inputs(counts, indices, out.len())?;
 
         let per_group: Vec<SctGeneParams<'_>> = self
             .models
