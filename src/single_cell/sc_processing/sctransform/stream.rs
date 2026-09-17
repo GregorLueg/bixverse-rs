@@ -29,7 +29,7 @@ use crate::single_cell::sc_data::data_io::{
 };
 
 use crate::single_cell::sc_processing::residuals::{
-    ResidualSource, intersect_gene_sets, residual_variance, validate_groups,
+    ResidualSource, distinct_cell_set, intersect_gene_sets, residual_variance, validate_groups,
 };
 
 use super::model::{
@@ -58,8 +58,13 @@ const SCT_GENE_BATCH_SIZE: usize = 1000;
 /// upweight.
 const DENSITY_GRID_POINTS: usize = 512;
 
-/// Kernel support cutoff for the density estimate, in bandwidths.
-const DENSITY_CUTOFF: f64 = 4.0;
+/// Grid padding either side of the data, in bandwidths.
+///
+/// R's `density()` spans `min(x) - cut * bw` to `max(x) + cut * bw` and its
+/// `cut` default is 3, so this has to be 3 to lay the 512 points over the same
+/// interval. There is no kernel truncation here: the sum below runs over every
+/// point, where R uses a binned FFT.
+const DENSITY_CUTOFF: f64 = 3.0;
 
 /////////////
 // Options //
@@ -438,7 +443,7 @@ pub fn sct_gene_pass<S: SingleCellReading>(
 
     let n_cells = cell_indices.len();
     let n_genes = reader.get_header().total_genes;
-    let cell_set: IndexSet<u32> = cell_indices.iter().map(|&c| c as u32).collect();
+    let cell_set = distinct_cell_set(cell_indices)?;
     let step = opts.gene_batch_size.unwrap_or(n_genes).max(1);
 
     let mut log_gmean = vec![0.0_f64; n_genes];
@@ -674,6 +679,27 @@ fn select_step1_genes(
 ///
 /// One weight per entry of `x`, or a [`BixverseErrors`] when the bandwidth
 /// cannot be estimated.
+/// The interval R's `density()` lays its grid over.
+///
+/// `min(x) - cut * bw` to `max(x) + cut * bw`, with `cut` defaulting to 3. Split
+/// out so that [`DENSITY_CUTOFF`] can be pinned exactly: the density values
+/// themselves shift by only ~7e-5 relative between `cut = 3` and `cut = 4`,
+/// which is below the tolerance a binned-FFT-versus-exact-sum comparison can
+/// honestly claim, so comparing them would not catch the constant drifting.
+///
+/// ### Params
+///
+/// * `lo` - Smallest value in the data.
+/// * `hi` - Largest value in the data.
+/// * `bw` - The bandwidth.
+///
+/// ### Returns
+///
+/// The `(from, to)` span.
+fn density_grid_span(lo: f64, hi: f64, bw: f64) -> (f64, f64) {
+    (lo - DENSITY_CUTOFF * bw, hi + DENSITY_CUTOFF * bw)
+}
+
 fn inverse_density_weights(x: &[f64]) -> Result<Vec<f64>, BixverseErrors> {
     let bw = bw_nrd(x)?;
     let (lo, hi) = x
@@ -682,9 +708,7 @@ fn inverse_density_weights(x: &[f64]) -> Result<Vec<f64>, BixverseErrors> {
             (l.min(v), h.max(v))
         });
 
-    // R's density() pads the grid by the kernel cutoff at both ends.
-    let from = lo - DENSITY_CUTOFF * bw;
-    let to = hi + DENSITY_CUTOFF * bw;
+    let (from, to) = density_grid_span(lo, hi, bw);
     let step = (to - from) / (DENSITY_GRID_POINTS - 1) as f64;
 
     let grid: Vec<f64> = (0..DENSITY_GRID_POINTS)
@@ -786,15 +810,16 @@ pub fn fit_sctransform<S: SingleCellReading>(
     };
 
     if let Some(&bad) = cells.iter().find(|&&c| c >= n_cells) {
-        return Err(BixverseErrors::SctGeneIndexOutOfRange {
+        return Err(BixverseErrors::SctCellIndexOutOfRange {
             index: bad,
-            n_genes: n_cells,
+            n_cells,
         });
     }
 
     // Detection within the step-1 cells decides gene eligibility, so it needs
     // its own count. One extra read of the sampled cells only.
-    let step1_cell_set: IndexSet<u32> = cells.iter().map(|&c| cell_indices[c] as u32).collect();
+    let step1_cells_global: Vec<usize> = cells.iter().map(|&c| cell_indices[c]).collect();
+    let step1_cell_set = distinct_cell_set(&step1_cells_global)?;
 
     let genes = match step1_genes {
         Some(g) => g.to_vec(),
@@ -1021,7 +1046,7 @@ pub fn sct_corrected_counts<S: SingleCellReading, P: AsRef<Path>>(
     let genes = source.genes();
     let n_genes = genes.len();
     let n_cells = cell_indices.len();
-    let cell_set: IndexSet<u32> = cell_indices.iter().map(|&c| c as u32).collect();
+    let cell_set = distinct_cell_set(cell_indices)?;
 
     // Every latent variable is held at its median, the library size included,
     // so the target linear predictor is constant across the cells of a group.
@@ -1183,6 +1208,9 @@ pub fn fit_sctransform_grouped<S: SingleCellReading>(
         let group_sizes: Vec<f64> = slots.iter().map(|&s| library_sizes[s]).collect();
         let group_covariates = covariates.subset(&slots)?;
 
+        // Without this a `SctNoGenesPassFilter` from group 7 of 8 is
+        // indistinguishable from one from group 0, and the usual cause is one
+        // specific shallow sample.
         let (model, pass) = fit_sctransform(
             reader,
             &group_cells,
@@ -1192,7 +1220,11 @@ pub fn fit_sctransform_grouped<S: SingleCellReading>(
             None,
             None,
             opts,
-        )?;
+        )
+        .map_err(|e| BixverseErrors::ResidualGroupFitFailed {
+            group,
+            reason: e.to_string(),
+        })?;
 
         if verbosity.normal_verbosity() {
             println!(
@@ -1260,10 +1292,12 @@ mod tests {
             NbOffsetFit {
                 theta: 1.0,
                 coefficients: vec![-5.0],
+                converged: true,
             },
             NbOffsetFit {
                 theta: 10_000.0,
                 coefficients: vec![-5.0],
+                converged: true,
             },
         ];
 
@@ -1284,6 +1318,7 @@ mod tests {
         let fits = vec![NbOffsetFit {
             theta: 2.0,
             coefficients: vec![-5.0],
+            converged: true,
         }];
 
         let out = flag_poisson_genes(fits, &[0], &s, 1e-3);
@@ -1299,6 +1334,7 @@ mod tests {
         let fits = vec![NbOffsetFit {
             theta: f64::INFINITY,
             coefficients: vec![-5.0],
+            converged: true,
         }];
 
         let out = flag_poisson_genes(fits, &[0], &s, 1e-3);
@@ -1342,6 +1378,68 @@ mod tests {
     /// The sampling weight has to be largest where the abundance spectrum is
     /// emptiest, or the regularisation curve is left unconstrained exactly
     /// where it has to extrapolate furthest.
+    /// The kernel density has to be R's `density()`, which is what the sampling
+    /// weights are defined against.
+    ///
+    /// This is the only thing that pins [`DENSITY_CUTOFF`]: the parity fixture
+    /// is small enough that both step-1 subsamples are skipped, so nothing else
+    /// in the suite reaches this function at all. Reference from
+    /// `density(x, bw = bw.nrd(x), n = 512)` then `approx()` at the data points,
+    /// R 4.5.1.
+    ///
+    /// The tolerance is loose because R bins the data onto its grid and
+    /// convolves with an FFT where this evaluates the kernel sum exactly at each
+    /// grid point. The grid span, which is what `DENSITY_CUTOFF` controls, is
+    /// identical; only the binning differs.
+    // R emits seventeen significant digits; keeping them is the point of a
+    // generated reference value.
+    #[allow(clippy::excessive_precision)]
+    #[test]
+    fn test_inverse_density_weights_match_r_density() {
+        let x = [
+            -2.5, -2.1, -1.9, -1.85, -1.8, -0.4, -0.35, -0.3, 0.0, 0.05, 0.1, 0.12, 0.9, 1.4, 2.2,
+            3.1, 3.15, 4.0,
+        ];
+        let want = [
+            1.03458082384436933e-01,
+            1.25931894605516459e-01,
+            1.36044862074708311e-01,
+            1.38444272035506244e-01,
+            1.40792693177528960e-01,
+            1.82506541618378482e-01,
+            1.82751321578175946e-01,
+            1.82867864041406952e-01,
+            1.80786853199413428e-01,
+            1.79965686232037181e-01,
+            1.79011125770661916e-01,
+            1.78587221821085107e-01,
+            1.48949556824229640e-01,
+            1.24884348041357951e-01,
+            9.70968112444874215e-02,
+            7.94907425133158096e-02,
+            7.84809737058110718e-02,
+            5.60556936261453892e-02,
+        ];
+
+        // R's `bw.nrd`, which the grid span is measured in.
+        let bw = bw_nrd(&x).unwrap();
+        assert_relative_eq!(bw, 1.15072852580446972e+00, epsilon = 1e-12);
+
+        // The grid span is what DENSITY_CUTOFF controls, and it is exact on both
+        // sides, so this is the assertion that actually pins the constant.
+        // R: `density(x, bw = bw.nrd(x), n = 512)$x[c(1, 512)]`.
+        let (from, to) = density_grid_span(-2.5, 4.0, bw);
+        assert_relative_eq!(from, -5.95218557741340959e+00, epsilon = 1e-12);
+        assert_relative_eq!(to, 7.45218557741340959e+00, epsilon = 1e-12);
+
+        let w = inverse_density_weights(&x).unwrap();
+        for (i, &want_i) in want.iter().enumerate() {
+            // The function returns one over the density.
+            let got = 1.0 / w[i];
+            assert_relative_eq!(got, want_i, max_relative = 1e-3);
+        }
+    }
+
     #[test]
     fn test_inverse_density_weights_favour_sparse_regions() {
         // A dense cluster near zero and one isolated point far out.

@@ -6,9 +6,13 @@
 //! dataset size, and every later stage is a per-gene reduction over the
 //! gene-major store.
 //!
-//! This module holds the parameters, the per-gene statistics the regularisation
-//! needs, and the regularisation itself. The per-gene fit lives in
-//! [`super::nb_fit`].
+//! This module holds the parameters, the cell-level covariates and context, the
+//! per-gene statistics the regularisation needs, the regularisation itself, the
+//! fitted model and the residual arithmetic that reads it. The per-gene fit
+//! lives in [`super::nb_fit`], and the grouped [`ResidualSource`] wrapper in
+//! [`super::residuals`].
+//!
+//! [`ResidualSource`]: crate::single_cell::sc_processing::residuals::ResidualSource
 //!
 //! ### References
 //!
@@ -19,6 +23,7 @@ use crate::core::base::kernel_smooth::{bw_sj, ksmooth_normal};
 use crate::core::math::stats::is_outlier;
 use crate::core::math::vector_helpers::median;
 use crate::errors::BixverseErrors;
+use crate::single_cell::sc_processing::residuals::validate_residual_row_inputs;
 
 use super::nb_fit::{LOG_UMI_COEF, NbOffsetFit};
 
@@ -280,7 +285,7 @@ impl SctCovariates {
     ///
     /// ### Returns
     ///
-    /// The subset, or [`BixverseErrors::SctCovariateLengthMismatch`] when a
+    /// The subset, or [`BixverseErrors::SctCellIndexOutOfRange`] when a
     /// position is out of range.
     pub fn subset(&self, cells: &[usize]) -> Result<Self, BixverseErrors> {
         if self.is_empty() {
@@ -292,11 +297,7 @@ impl SctCovariates {
         let mut values = Vec::with_capacity(cells.len() * k);
         for &c in cells {
             if c >= n_cells {
-                return Err(BixverseErrors::SctCovariateLengthMismatch {
-                    name: "subset".to_string(),
-                    expected: n_cells,
-                    found: c,
-                });
+                return Err(BixverseErrors::SctCellIndexOutOfRange { index: c, n_cells });
             }
             values.extend_from_slice(self.row(c));
         }
@@ -359,8 +360,15 @@ impl<'a> SctCellContext<'a> {
 /// Per-gene summaries over the full cell set, one pass over the gene-major
 /// store.
 ///
-/// All three vectors are parallel and indexed by position in the gene set being
-/// modelled, not by the store's own gene index.
+/// All three vectors are parallel, but **the index space depends on who built
+/// it and the type carries no discriminator**, so check the producer:
+///
+/// * [`super::stream::sct_gene_pass`] returns them indexed by **store gene
+///   index**, covering every gene in the store. [`super::stream::fit_sctransform`]'s
+///   Poisson check reads them that way.
+/// * [`regularise_sct_model`] expects them indexed by **position within the
+///   modelled set**, i.e. subset to `SctGenePass::modelled`.
+///   [`super::stream::fit_sctransform`] does that subsetting before it calls.
 #[derive(Clone, Debug)]
 pub struct SctGeneStats {
     /// `log10` of the geometric mean of the counts, with the `gmean_eps`
@@ -422,11 +430,15 @@ impl SctGeneStats {
 
 /// The regularised per-gene model, one entry per modelled gene.
 ///
-/// `mu_gc = exp(intercept_g) * total_umi_c` and
-/// `var_gc = max(mu_gc + mu_gc^2 / theta_g, min_variance)`, so these three
-/// numbers plus the per-cell library sizes regenerate any gene's residual row
-/// without touching the counts of any other gene. That is what lets the
-/// residual and corrected-count stages stream.
+/// `mu_gc = exp(b0_g + ln(10) * log10_umi_c + x_c . beta_g)` and
+/// `var_gc = max(mu_gc + mu_gc^2 / theta_g, min_variance)`, so `n_coef + 1`
+/// numbers per gene plus the per-cell library sizes and covariates regenerate
+/// any gene's residual row without touching the counts of any other gene. That
+/// is what lets the residual and corrected-count stages stream.
+///
+/// The exponential is deliberately written in the `exp(b0 + ln(10) * log10(umi))`
+/// form rather than the algebraically identical `exp(b0) * umi`; see
+/// [`sct_residual_row`].
 #[derive(Clone, Debug)]
 pub struct SctModel {
     /// Store gene indices this model covers, ascending. Lets a caller holding
@@ -659,8 +671,18 @@ pub fn regularise_sct_model(
         }
     }
 
+    // A gene whose coefficient fit did not converge carries an unreliable
+    // intercept, and the smoothing below would spread it over that gene's
+    // abundance neighbourhood. Excluded for the same reason as the outliers and
+    // the Poisson genes: it still gets a regularised value read off the curve,
+    // it just does not get to shape it.
     let keep: Vec<usize> = (0..step1.len())
-        .filter(|&i| !outlier[i] && step1[i].theta.is_finite() && !poisson[step1_idx[i]])
+        .filter(|&i| {
+            !outlier[i]
+                && step1[i].converged
+                && step1[i].theta.is_finite()
+                && !poisson[step1_idx[i]]
+        })
         .collect();
 
     if keep.len() < 2 {
@@ -814,12 +836,16 @@ pub fn sct_residual_row(
             found: out.len(),
         });
     }
+    if model.n_coef == 0 {
+        return Err(BixverseErrors::SctModelWithoutCoefficients);
+    }
     if cells.covariates.n_covariates() + 1 != model.n_coef {
         return Err(BixverseErrors::SctCovariateCountMismatch {
             model: model.n_coef - 1,
             supplied: cells.covariates.n_covariates(),
         });
     }
+    validate_residual_row_inputs(counts, indices, n_cells)?;
 
     let gene = SctGeneParams::new(model, gene_pos);
     fill_residual_row(counts, indices, cells, out, |_| &gene);
@@ -1047,6 +1073,7 @@ mod tests {
                 NbOffsetFit {
                     theta,
                     coefficients: vec![amean[g].ln() - 3000.0_f64.ln() + (int_j[k] - 0.5) * 0.2],
+                    converged: true,
                 }
             })
             .collect();
@@ -1197,14 +1224,17 @@ mod tests {
             NbOffsetFit {
                 theta: 2.0,
                 coefficients: vec![-7.0],
+                converged: true,
             },
             NbOffsetFit {
                 theta: 3.0,
                 coefficients: vec![-6.0],
+                converged: true,
             },
             NbOffsetFit {
                 theta: 4.0,
                 coefficients: vec![-5.0],
+                converged: true,
             },
         ];
 

@@ -22,6 +22,8 @@
 //! streamable: one gene's fit needs that gene's counts and the shared per-cell
 //! offset, nothing else.
 
+use std::cell::{Cell, RefCell};
+
 use edge_rs::dispersion::apl::apl_at;
 use edge_rs::glm::levenberg::{LevenbergParams, mglm_levenberg};
 use edge_rs::prelude::*;
@@ -93,6 +95,17 @@ pub struct NbOffsetFit {
     /// is the intercept, so with no covariates `mu_c = exp(coefficients[0]) *
     /// total_umi_c`.
     pub coefficients: Vec<f64>,
+    /// Whether the coefficient fit converged.
+    ///
+    /// `false` when the normal equations went singular and the fitter fell back
+    /// to its last good coefficients, or when it exhausted its iteration
+    /// budget. `COEF_TOL` is far tighter than edgeR's default while `max_iter`
+    /// stays at 200, so exhaustion is more likely here than there. Such a gene
+    /// carries an unreliable intercept, and the regularisation kernel-smooths
+    /// across genes, so one bad value pulls the curve for its neighbours.
+    /// [`super::model::regularise_sct_model`] therefore excludes them from the
+    /// smoothing the way it excludes Poisson genes.
+    pub converged: bool,
 }
 
 impl NbOffsetFit {
@@ -170,19 +183,45 @@ pub fn fit_nb_offset_gene(
         return Ok(NbOffsetFit {
             theta: f64::INFINITY,
             coefficients,
+            converged: true,
         });
     }
 
     let offset = Recycled::BySample(log_offset.to_vec());
 
+    // A design that is singular for this gene's weights fails at every
+    // `log_alpha`. Returning `+inf` there is right for the search, but if it
+    // never once succeeded then `brent_fmin` minimised a constant and whatever
+    // it stopped at is meaningless, so the first error is kept and surfaced
+    // rather than dressed up as a fit.
+    let first_error: RefCell<Option<String>> = RefCell::new(None);
+    let any_ok = Cell::new(false);
+
     let neg_apl = |log_alpha: f64| -> f64 {
         match apl_at(counts, 1, n, design, n_coef, log_alpha.exp(), &offset, None) {
-            Ok(v) => -v[0],
-            Err(_) => f64::INFINITY,
+            Ok(v) => {
+                any_ok.set(true);
+                -v[0]
+            }
+            Err(e) => {
+                first_error
+                    .borrow_mut()
+                    .get_or_insert_with(|| e.to_string());
+                f64::INFINITY
+            }
         }
     };
 
     let log_alpha = brent_fmin(LOG_ALPHA_LOWER, LOG_ALPHA_UPPER, neg_apl, LOG_ALPHA_TOL);
+
+    if !any_ok.get() {
+        return Err(BixverseErrors::SctDispersionSearchFailed {
+            reason: first_error
+                .take()
+                .unwrap_or_else(|| "the profile likelihood failed everywhere".to_string()),
+        });
+    }
+
     let alpha = log_alpha.exp();
 
     // A gene whose likelihood is still climbing at the lower bound is Poisson.
@@ -191,6 +230,11 @@ pub fn fit_nb_offset_gene(
         (f64::INFINITY, 0.0)
     } else {
         (1.0 / alpha, alpha)
+    };
+
+    let coef_params = LevenbergParams {
+        tol: COEF_TOL,
+        ..LevenbergParams::default()
     };
 
     let fit = mglm_levenberg(
@@ -203,16 +247,16 @@ pub fn fit_nb_offset_gene(
         &offset,
         None,
         None,
-        Some(LevenbergParams {
-            tol: COEF_TOL,
-            ..LevenbergParams::default()
-        }),
+        Some(coef_params),
     )
     .map_err(BixverseErrors::from)?;
+
+    let converged = !fit.failed[0] && fit.iterations[0] < coef_params.max_iter;
 
     Ok(NbOffsetFit {
         theta,
         coefficients: fit.coefficients,
+        converged,
     })
 }
 
