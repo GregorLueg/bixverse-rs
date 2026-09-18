@@ -18,6 +18,7 @@ use crate::prelude::*;
 use crate::single_cell::sc_data::H5_CELL_SLICE_SIZE;
 use crate::single_cell::sc_data::data_io::CellOnFileQuality;
 use crate::single_cell::sc_data::data_io::*;
+use crate::single_cell::sc_data::h5_filters::check_tenx_filters;
 
 /////////////////
 // 10x version //
@@ -308,6 +309,8 @@ pub fn stream_h5_tenx_counts<P: AsRef<Path>>(
     verbose: bool,
 ) -> Result<(usize, usize, CellQuality), BixverseErrors> {
     let version = resolve_tenx_version(&h5_path, version)?;
+
+    check_tenx_filters(&File::open(h5_path.as_ref())?, &version)?;
 
     if verbose {
         println!("Step 1/3: Analysing data structure and calculating QC metrics...");

@@ -33,6 +33,15 @@ single-cell = ["half", "bincode", "indexmap", "memmap2", "hdf5", "lz4_flex", "nd
 ## toolchain's convention, so an msvc host targeting gnu emits `libhdf5` and
 ## the link fails.
 hdf5-static = ["hdf5?/static"]
+## Compile the LZF (32000) and Blosc (32001) filters into the HDF5 build, so
+## h5ad files written by `hdf5plugin` with those codecs can be read. Both
+## register through `H5Zregister` at library init and never touch the HDF5
+## plugin path, which for a `hdf5-metno-src` build points at a cargo `OUT_DIR`
+## that no longer exists. Off by default: Blosc vendors c-blosc plus lz4,
+## zlib, zstd and snappy, all built with `cc`. Filters outside these two
+## (standalone zstd, bitshuffle, lz4, blosc2) are still unreadable and are
+## reported as `BixverseErrors::UnsupportedH5Filter`.
+hdf5-filters = ["hdf5?/lzf", "hdf5?/blosc-all"]
 ## Enables the negative binomial differential expression methods built on
 ## `edge-rs`: the edgeR quasi-likelihood chain and, with `single-cell`, NEBULA.
 ## Implied by `single-cell`, but usable on its own for the bulk half.
