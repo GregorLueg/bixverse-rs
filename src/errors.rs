@@ -48,6 +48,40 @@ pub enum BixverseErrors {
     #[error("The faer Cholesky failed: {0}")]
     FaerCholeskyError(#[from] faer::linalg::solvers::LltError),
 
+    // -- Kernel smoothing --
+    /// A kernel bandwidth was requested for fewer than two points.
+    #[error("Kernel bandwidth needs at least 2 data points, got {found}.")]
+    BandwidthTooFewPoints {
+        /// Number of points supplied
+        found: usize,
+    },
+
+    /// A Sheather-Jones pilot functional came back non-finite or non-positive.
+    ///
+    /// R raises "sample is too sparse to find TD" / "... alph2" here. It means
+    /// the pair-distance counts carry too little signal for the pilot estimate,
+    /// which in practice is a degenerate or near-constant sample.
+    #[error("Sheather-Jones bandwidth: sample too sparse to find {stage}.")]
+    BandwidthTooSparse {
+        /// Which pilot functional failed, `TD` or `alph2`
+        stage: &'static str,
+    },
+
+    /// The Sheather-Jones bracket search never enclosed a root.
+    #[error("Sheather-Jones bandwidth: no solution in the search interval.")]
+    BandwidthNoBracket,
+
+    /// Two vectors that had to agree in length did not.
+    #[error("Length mismatch for '{name}': expected {expected}, got {found}.")]
+    LengthMismatch {
+        /// Name of the offending input
+        name: &'static str,
+        /// Length that was required
+        expected: usize,
+        /// Length that was supplied
+        found: usize,
+    },
+
     // -- Gaussian processes --
     /// A Gaussian process was handed empty training data.
     #[error("Gaussian process: {name} is empty")]
@@ -1597,6 +1631,320 @@ pub enum BixverseErrors {
         /// Number of nodes in the smoothing graph
         n_nodes: usize,
     },
+
+    // -- scTransform --
+    /// A step-1 gene index pointed outside the modelled gene set.
+    #[cfg(feature = "single-cell")]
+    #[error("scTransform: step-1 gene index {index} is outside the {n_genes} modelled genes.")]
+    SctGeneIndexOutOfRange {
+        /// The offending index
+        index: usize,
+        /// Number of modelled genes
+        n_genes: usize,
+    },
+
+    /// Too few step-1 genes survived outlier and Poisson exclusion to smooth.
+    ///
+    /// Two is the bare minimum a bandwidth can be estimated from. In practice
+    /// this means the subsample was dominated by Poisson genes, which is what a
+    /// very shallow dataset looks like.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "scTransform: only {kept} of {total} step-1 genes survived exclusion, too few to regularise."
+    )]
+    SctTooFewGenesToRegularise {
+        /// Genes left after exclusion
+        kept: usize,
+        /// Genes the step-1 fit started from
+        total: usize,
+    },
+
+    /// The kernel smoothing produced no value for a gene.
+    ///
+    /// Means no retained step-1 gene fell inside the kernel support at that
+    /// gene's abundance, which a bandwidth this wide should make impossible.
+    #[cfg(feature = "single-cell")]
+    #[error("scTransform: regularisation left gene {gene} without a fitted parameter.")]
+    SctSmoothingLeftAGeneUnfitted {
+        /// Position of the gene in the modelled set
+        gene: usize,
+    },
+
+    /// No gene passed the `min_cells` detection filter.
+    #[cfg(feature = "single-cell")]
+    #[error("scTransform: no gene of {n_genes} is detected in at least {min_cells} cells.")]
+    SctNoGenesPassFilter {
+        /// The filter that rejected everything
+        min_cells: usize,
+        /// Genes the filter was applied to
+        n_genes: usize,
+    },
+
+    /// A gene handed to the residual PCA is not covered by the model.
+    #[cfg(feature = "single-cell")]
+    #[error("scTransform: gene {gene} is not covered by the fitted model.")]
+    SctGeneNotModelled {
+        /// Store index of the gene
+        gene: usize,
+    },
+
+    /// Pearson residuals and the shifted CLR transformation were both asked
+    /// for.
+    ///
+    /// CLR rewrites the stored log-normalised layer, which the residual path
+    /// never reads, so combining them would quietly do nothing.
+    #[cfg(feature = "single-cell")]
+    #[error("PCA on Pearson residuals cannot be combined with the CLR transformation.")]
+    PcaResidualsWithClr,
+
+    /// Covariate columns handed in disagree in length.
+    #[cfg(feature = "single-cell")]
+    #[error("scTransform covariate '{name}': expected {expected} values, got {found}.")]
+    SctCovariateLengthMismatch {
+        /// Name of the offending covariate
+        name: String,
+        /// Length the other columns had
+        expected: usize,
+        /// Length this one had
+        found: usize,
+    },
+
+    /// The covariates supplied do not match what the model was fitted with.
+    #[cfg(feature = "single-cell")]
+    #[error("scTransform model was fitted with {model} covariate(s) but {supplied} were supplied.")]
+    SctCovariateCountMismatch {
+        /// Covariates the model carries
+        model: usize,
+        /// Covariates the caller supplied
+        supplied: usize,
+    },
+
+    // -- residual normalisation --
+    /// Group labels disagree in length with the selected cells.
+    #[cfg(feature = "single-cell")]
+    #[error("Residual grouping: {n_labels} group label(s) for {n_cells} cell(s).")]
+    ResidualGroupLabelLengthMismatch {
+        /// Labels supplied
+        n_labels: usize,
+        /// Cells selected
+        n_cells: usize,
+    },
+
+    /// A group id has no cells in it.
+    ///
+    /// Labels must densely cover `0..n_groups`. A gap means the caller coded a
+    /// factor without dropping its unused levels, and a model would be fitted
+    /// against nothing.
+    #[cfg(feature = "single-cell")]
+    #[error("Residual grouping: group {group} of {n_groups} has no cells.")]
+    ResidualEmptyGroup {
+        /// The empty group id
+        group: usize,
+        /// Groups the labels imply
+        n_groups: usize,
+    },
+
+    /// No gene is modelled in every group.
+    ///
+    /// The shared feature axis is the intersection of the per-group modelled
+    /// sets, so an empty intersection means the groups have no gene in common
+    /// that passes `min_cells` everywhere. Usually one very shallow sample.
+    #[cfg(feature = "single-cell")]
+    #[error("Residual grouping: no gene is modelled in all {n_groups} groups.")]
+    ResidualEmptyGeneIntersection {
+        /// Groups that were intersected
+        n_groups: usize,
+    },
+
+    /// The count block handed to the analytic Pearson model sums to zero.
+    ///
+    /// `mu_cg = n_c * p_g` divides by the grand total, so a block of pure
+    /// zeros has no model at all rather than a degenerate one.
+    #[cfg(feature = "single-cell")]
+    #[error("Analytic Pearson residuals: the selected counts sum to zero.")]
+    AnalyticPearsonZeroTotal,
+
+    /// A non-positive overdispersion was supplied.
+    #[cfg(feature = "single-cell")]
+    #[error("Analytic Pearson residuals: theta must be positive, got {theta}.")]
+    AnalyticPearsonInvalidTheta {
+        /// The offending value
+        theta: f64,
+    },
+
+    /// An unusable residual clipping range was supplied.
+    ///
+    /// `f64::clamp` panics when the bounds are inverted or either is NaN, so
+    /// this has to be caught before a rayon worker reaches it.
+    #[cfg(feature = "single-cell")]
+    #[error("Residual clipping range [{lo}, {hi}] must be finite with lo <= hi.")]
+    ResidualInvalidClipRange {
+        /// Lower bound supplied
+        lo: f64,
+        /// Upper bound supplied
+        hi: f64,
+    },
+
+    /// The selected cells contain a repeated index.
+    ///
+    /// The readers key their selection by an `IndexSet`, which deduplicates,
+    /// while the residual row is sized by the raw selection. A duplicate would
+    /// therefore shift every later cell into the wrong slot rather than
+    /// erroring.
+    #[cfg(feature = "single-cell")]
+    #[error("Residual selection: {n_cells} cell(s) selected but only {n_unique} are distinct.")]
+    ResidualDuplicateCells {
+        /// Distinct cells in the selection
+        n_unique: usize,
+        /// Cells supplied
+        n_cells: usize,
+    },
+
+    /// A gene set that has to be ascending is not.
+    ///
+    /// Gene lookups are binary searches, so an unsorted axis silently returns
+    /// the wrong position rather than failing.
+    #[cfg(feature = "single-cell")]
+    #[error("Residual model: '{name}' must be strictly ascending.")]
+    ResidualGenesNotAscending {
+        /// What was out of order
+        name: &'static str,
+    },
+
+    /// The group labels imply a different number of groups than there are
+    /// models.
+    #[cfg(feature = "single-cell")]
+    #[error("Residual grouping: labels imply {implied} group(s) but {models} model(s) were given.")]
+    ResidualGroupModelCountMismatch {
+        /// Groups the labels imply
+        implied: usize,
+        /// Models supplied
+        models: usize,
+    },
+
+    /// A group label is outside the range the models cover.
+    #[cfg(feature = "single-cell")]
+    #[error("Residual grouping: label {label} is outside the {n_groups} group(s) available.")]
+    ResidualGroupLabelOutOfRange {
+        /// The offending label
+        label: usize,
+        /// Groups available
+        n_groups: usize,
+    },
+
+    /// A residual variance came out non-finite.
+    ///
+    /// Always an upstream problem, typically a model deserialised with a zero
+    /// or missing scalar. Reported rather than floored, because a floored NaN
+    /// silently ranks the gene last in feature selection.
+    #[cfg(feature = "single-cell")]
+    #[error("Residual variance for gene {gene} is not finite ({value}).")]
+    ResidualNonFiniteVariance {
+        /// Store index of the gene
+        gene: usize,
+        /// The offending value
+        value: f64,
+    },
+
+    /// The residual row's counts and indices disagree in length.
+    #[cfg(feature = "single-cell")]
+    #[error("Residual row: {n_counts} count(s) for {n_indices} cell index/indices.")]
+    ResidualRowLengthMismatch {
+        /// Counts supplied
+        n_counts: usize,
+        /// Indices supplied
+        n_indices: usize,
+    },
+
+    /// A residual row's cell index points outside the selected cells.
+    #[cfg(feature = "single-cell")]
+    #[error("Residual row: cell index {index} is outside the {n_cells} selected cell(s).")]
+    ResidualCellIndexOutOfRange {
+        /// The offending index
+        index: usize,
+        /// Cells selected
+        n_cells: usize,
+    },
+
+    /// Feature selection was asked for no genes, or handed no groups.
+    #[cfg(feature = "single-cell")]
+    #[error("Residual feature selection: {what}.")]
+    ResidualEmptySelectionRequest {
+        /// What was empty
+        what: &'static str,
+    },
+
+    /// The overdispersion search failed at every point it evaluated.
+    ///
+    /// Means the adjusted profile likelihood could not be computed anywhere in
+    /// the bracket, typically a design that is rank-deficient for this gene's
+    /// weights. The search would otherwise have minimised a constant and
+    /// returned a fit built on a meaningless dispersion.
+    #[cfg(feature = "single-cell")]
+    #[error("scTransform: the dispersion search failed at every point: {reason}")]
+    SctDispersionSearchFailed {
+        /// The first underlying error, rendered
+        reason: String,
+    },
+
+    /// One group's fit failed.
+    ///
+    /// Wraps the underlying error so that a failure in group 7 of 8 is not
+    /// indistinguishable from one in group 0. The usual cause is a single
+    /// shallow sample where no gene clears `min_cells`.
+    #[cfg(feature = "single-cell")]
+    #[error("Residual grouping: group {group} failed to fit: {reason}")]
+    ResidualGroupFitFailed {
+        /// The group that failed
+        group: usize,
+        /// The underlying error, rendered
+        reason: String,
+    },
+
+    /// The covariates supplied are not the ones the model was fitted with.
+    ///
+    /// Only the count is cheap to check, and the count matching is exactly the
+    /// case where a reordered data frame goes unnoticed, so the names are
+    /// compared too.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "scTransform covariate {position}: model was fitted with '{model}' but '{supplied}' was supplied."
+    )]
+    SctCovariateNameMismatch {
+        /// Position in the design, excluding the intercept
+        position: usize,
+        /// Name the model carries
+        model: String,
+        /// Name the caller supplied
+        supplied: String,
+    },
+
+    /// A cell index handed to scTransform is outside the selection.
+    #[cfg(feature = "single-cell")]
+    #[error("scTransform: cell index {index} is outside the {n_cells} selected cell(s).")]
+    SctCellIndexOutOfRange {
+        /// The offending index
+        index: usize,
+        /// Cells selected
+        n_cells: usize,
+    },
+
+    /// A fitted model carries no design columns at all.
+    #[cfg(feature = "single-cell")]
+    #[error("scTransform model has n_coef = 0; at least the intercept is required.")]
+    SctModelWithoutCoefficients,
+
+    /// Variance normalisation was asked for on the residual PCA path.
+    ///
+    /// Residuals carry the biological signal as variance, which is the point of
+    /// the transformation. Dividing it back out per gene flattens exactly the
+    /// ranking the transformation produces, so this is refused rather than
+    /// silently honoured.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "PCA on Pearson residuals cannot normalise the variance; residuals already carry it as signal."
+    )]
+    PcaResidualsWithVarianceNormalisation,
 
     // -- cellsweep --
     /// The caller asked for a supplied empty droplet mask but did not give one.

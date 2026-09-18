@@ -29,6 +29,8 @@ pub use crate::single_cell::sc_data::data_io::{
 #[cfg(feature = "single-cell")]
 pub use crate::single_cell::sc_processing::knn::*;
 #[cfg(feature = "single-cell")]
+pub use crate::single_cell::sc_processing::residuals::ResidualSource;
+#[cfg(feature = "single-cell")]
 pub use crate::single_cell::sc_traits::*;
 
 ////////////

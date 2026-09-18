@@ -4,6 +4,7 @@
 
 pub mod cors_similarity;
 pub mod info;
+pub mod kernel_smooth;
 pub mod loess;
 pub mod pert_dist;
 pub mod pert_dist_perm;

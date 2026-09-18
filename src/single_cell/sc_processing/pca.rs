@@ -14,6 +14,7 @@ use crate::core::math::pca_svd::randomised_sparse_svd;
 use crate::core::math::pca_svd::*;
 use crate::core::math::sparse::sparse_svd_lanczos;
 use crate::prelude::*;
+use crate::single_cell::sc_processing::residuals::{ResidualSource, chunk_counts};
 
 ///////////
 // Types //
@@ -247,52 +248,184 @@ pub fn scale_csc_chunk(
         }
     }
 
-    let n = no_cells as f64;
+    centre_and_scale(dense_data, mean_center, normalise_variance)
+}
 
-    match (mean_center, normalise_variance) {
-        (false, false) => (dense_data, 0.0, 0.0),
-        (true, false) => {
-            let mean = (dense_data.iter().map(|&x| x as f64).sum::<f64>() / n) as f32;
-            let scaled = dense_data.iter().map(|&x| x - mean).collect();
-            (scaled, mean, 0.0)
-        }
-        (false, true) => {
-            let mean_f64 = dense_data.iter().map(|&x| x as f64).sum::<f64>() / n;
-            let mean = mean_f64 as f32;
-            let std_dev = (dense_data
-                .iter()
-                .map(|&x| {
-                    let d = x as f64 - mean_f64;
-                    d * d
-                })
-                .sum::<f64>()
-                / (n - 1.0))
-                .sqrt() as f32;
-            let scaled = if std_dev < 1e-8 {
-                vec![0_f32; no_cells]
-            } else {
-                dense_data.iter().map(|&x| x / std_dev).collect()
-            };
-            (scaled, mean, std_dev)
-        }
-        (true, true) => {
-            let mean_f64 = dense_data.iter().map(|&x| x as f64).sum::<f64>() / n;
-            let mean = mean_f64 as f32;
-            let std_dev = (dense_data
-                .iter()
-                .map(|&x| {
-                    let d = x as f64 - mean_f64;
-                    d * d
-                })
-                .sum::<f64>()
-                / (n - 1.0))
-                .sqrt() as f32;
-            let scaled = if std_dev < 1e-8 {
-                vec![0_f32; no_cells]
-            } else {
-                dense_data.iter().map(|&x| (x - mean) / std_dev).collect()
-            };
-            (scaled, mean, std_dev)
+/// Standard deviation below which a feature is treated as constant.
+///
+/// Dividing by anything smaller turns rounding noise into a unit-variance
+/// feature that then dominates the leading components.
+const SCALE_ZERO_SD: f32 = 1e-8;
+
+/// Centres and scales a densified feature column in place.
+///
+/// Shared by the log-normalised and the Pearson-residual column sources so the
+/// two cannot drift apart. Moments accumulate in `f64` whatever the column is
+/// stored as: a strongly expressed gene loses `f32` in the sum of squared
+/// deviations well before the column ends.
+///
+/// ### Params
+///
+/// * `dense_data` - The column, consumed.
+/// * `mean_center` - Subtract the mean.
+/// * `normalise_variance` - Divide by the standard deviation.
+///
+/// ### Returns
+///
+/// Tuple of (column, mean, standard deviation). The mean is `0.0` when not
+/// centred and the standard deviation `0.0` when not normalised, matching what
+/// the callers record as feature statistics.
+fn centre_and_scale(
+    dense_data: Vec<f32>,
+    mean_center: bool,
+    normalise_variance: bool,
+) -> (Vec<f32>, f32, f32) {
+    if !mean_center && !normalise_variance {
+        return (dense_data, 0.0, 0.0);
+    }
+
+    let no_cells = dense_data.len();
+    let n = no_cells as f64;
+    let mean_f64 = dense_data.iter().map(|&x| x as f64).sum::<f64>() / n;
+    let mean = mean_f64 as f32;
+
+    if !normalise_variance {
+        let scaled = dense_data.iter().map(|&x| x - mean).collect();
+        return (scaled, mean, 0.0);
+    }
+
+    let std_dev = (dense_data
+        .iter()
+        .map(|&x| {
+            let d = x as f64 - mean_f64;
+            d * d
+        })
+        .sum::<f64>()
+        / (n - 1.0))
+        .sqrt() as f32;
+
+    let scaled = if std_dev < SCALE_ZERO_SD {
+        vec![0_f32; no_cells]
+    } else if mean_center {
+        dense_data.iter().map(|&x| (x - mean) / std_dev).collect()
+    } else {
+        dense_data.iter().map(|&x| x / std_dev).collect()
+    };
+
+    (scaled, mean, std_dev)
+}
+
+/// Densifies a gene chunk into a column of Pearson residuals.
+///
+/// The residual sibling of [`scale_csc_chunk`], with the same return shape so
+/// the dense PCA can take either. Unlike the log-normalised column, this one is
+/// dense before it starts: every zero count carries `-mu / sqrt(var)`.
+///
+/// ### Params
+///
+/// * `chunk` - The gene chunk, already reindexed to the selected cells.
+/// * `no_cells` - Number of cells represented.
+/// * `gene_pos` - Position of this gene on the source's gene axis.
+/// * `source` - The fitted residual source, scTransform or analytic Pearson.
+/// * `mean_center` - Subtract the mean.
+/// * `normalise_variance` - Divide by the standard deviation.
+///
+/// ### Returns
+///
+/// Tuple of (residual column, mean, standard deviation), or a
+/// [`BixverseErrors`] when the gene is outside the source.
+pub fn residual_csc_chunk(
+    chunk: &CscGeneChunk,
+    no_cells: usize,
+    gene_pos: usize,
+    source: &dyn ResidualSource,
+    mean_center: bool,
+    normalise_variance: bool,
+) -> Result<(Vec<f32>, f32, f32), BixverseErrors> {
+    let counts = chunk_counts(chunk);
+
+    let mut dense_data = vec![0_f32; no_cells];
+    source.residual_row(&counts, &chunk.indices, gene_pos, &mut dense_data)?;
+
+    Ok(centre_and_scale(
+        dense_data,
+        mean_center,
+        normalise_variance,
+    ))
+}
+
+/////////////////////
+// Column sources //
+/////////////////////
+
+/// What the dense PCA fills each feature column with.
+///
+/// The two paths differ only in how one gene becomes one dense column, so they
+/// share the read, the scaling and the SVD rather than duplicating them.
+#[derive(Clone, Copy)]
+pub enum PcaColumnSource<'a> {
+    /// The stored log-normalised layer, optionally shifted-CLR corrected.
+    Normalised {
+        /// Per-cell offsets for the shifted CLR transformation.
+        clr_offsets: Option<&'a [f64]>,
+    },
+    /// Pearson residuals regenerated from a fitted residual model.
+    ///
+    /// Covers both scTransform and the analytic Pearson residuals, and with
+    /// either, one model per sample. Note that `normalise_variance` should
+    /// normally be off here: residuals carry the biological signal as variance,
+    /// which is the whole point of the transformation, and dividing it back out
+    /// throws it away.
+    Residual {
+        /// The fitted source, holding the models and the per-cell group map.
+        source: &'a dyn ResidualSource,
+    },
+}
+
+impl<'a> PcaColumnSource<'a> {
+    /// Turns one gene chunk into its dense column.
+    ///
+    /// ### Params
+    ///
+    /// * `chunk` - The gene chunk, already reindexed to the selected cells.
+    /// * `no_cells` - Number of cells represented.
+    /// * `mean_center` - Subtract the mean.
+    /// * `normalise_variance` - Divide by the standard deviation.
+    ///
+    /// ### Returns
+    ///
+    /// Tuple of (column, mean, standard deviation), or a [`BixverseErrors`]
+    /// when a residual is asked for a gene the model does not cover.
+    fn column(
+        &self,
+        chunk: &CscGeneChunk,
+        no_cells: usize,
+        mean_center: bool,
+        normalise_variance: bool,
+    ) -> Result<(Vec<f32>, f32, f32), BixverseErrors> {
+        match self {
+            Self::Normalised { clr_offsets } => Ok(scale_csc_chunk(
+                chunk,
+                no_cells,
+                mean_center,
+                normalise_variance,
+                *clr_offsets,
+            )),
+            Self::Residual { source } => {
+                let pos = source.position(chunk.original_index).ok_or(
+                    BixverseErrors::SctGeneNotModelled {
+                        gene: chunk.original_index,
+                    },
+                )?;
+                residual_csc_chunk(
+                    chunk,
+                    no_cells,
+                    pos,
+                    *source,
+                    mean_center,
+                    normalise_variance,
+                )
+            }
         }
     }
 }
@@ -467,11 +600,39 @@ fn dense_pca<S: SingleCellReading>(
     gene_indices: &[usize],
     no_pcs: usize,
     params_pca: &SingleCellPcaParams,
-    clr_offsets: Option<&[f64]>,
+    source: PcaColumnSource<'_>,
     seed: usize,
     return_scaled: bool,
     verbose: usize,
 ) -> SingleCellPcaResScaledStats {
+    let clr_offsets = match source {
+        PcaColumnSource::Normalised { clr_offsets } => clr_offsets,
+        PcaColumnSource::Residual { source } => {
+            if source.n_cells() != cell_indices.len() {
+                return Err(BixverseErrors::LengthMismatch {
+                    name: "residual source cells",
+                    expected: cell_indices.len(),
+                    found: source.n_cells(),
+                });
+            }
+            None
+        }
+    };
+    let residuals = matches!(source, PcaColumnSource::Residual { .. });
+
+    // The CLR transformation rewrites the stored normalised layer, which the
+    // residual path does not read at all. Silently combining them would look
+    // like it worked.
+    if residuals && params_pca.clr {
+        return Err(BixverseErrors::PcaResidualsWithClr);
+    }
+    // Residuals carry the biological signal as variance, which is the point of
+    // the transformation. Dividing it back out per gene flattens exactly the
+    // ranking the transformation produces, and the default is on, so this is
+    // refused rather than documented.
+    if residuals && params_pca.normalise_variance {
+        return Err(BixverseErrors::PcaResidualsWithVarianceNormalisation);
+    }
     if params_pca.clr && clr_offsets.is_none() {
         return Err(BixverseErrors::OffsetsNotProvidedForClrPCA);
     }
@@ -514,16 +675,14 @@ fn dense_pca<S: SingleCellReading>(
     let scaled_data: Vec<(Vec<f32>, f32, f32)> = gene_chunks
         .par_iter()
         .map(|chunk| {
-            let (scaled, mean, sd) = scale_csc_chunk(
+            source.column(
                 chunk,
                 cell_indices.len(),
                 params_pca.mean_center,
                 params_pca.normalise_variance,
-                clr_offsets,
-            );
-            (scaled, mean, sd)
+            )
         })
-        .collect();
+        .collect::<Result<Vec<_>, BixverseErrors>>()?;
 
     let mut feature_means = Vec::with_capacity(scaled_data.len());
     let mut feature_sds = Vec::with_capacity(scaled_data.len());
@@ -650,7 +809,7 @@ pub fn pca_on_sc<S: SingleCellReading>(
         gene_indices,
         no_pcs,
         params_pca,
-        clr_offsets,
+        PcaColumnSource::Normalised { clr_offsets },
         seed,
         return_scaled,
         verbose,
@@ -700,7 +859,120 @@ pub fn pca_on_sc_stats<S: SingleCellReading>(
         gene_indices,
         no_pcs,
         params_pca,
-        clr_offsets,
+        PcaColumnSource::Normalised { clr_offsets },
+        seed,
+        false,
+        verbose,
+    )?;
+
+    Ok((scores, loadings, s, feature_means, feature_sds))
+}
+
+///////////////////
+// Residual PCA //
+///////////////////
+
+/// PCA on scTransform Pearson residuals.
+///
+/// The residual matrix is dense by construction, so this takes the dense path
+/// and the sparse and GPU ones refuse it rather than silently falling back to
+/// the log-normalised layer. Nothing is written to disk: the residuals are
+/// regenerated per gene as the dense matrix is filled, which costs one
+/// exponential per entry and saves an `n_hvg * n_cells` file that would go
+/// stale on any cell subsetting.
+///
+/// Defaults worth knowing: residuals already carry their variance as signal, so
+/// `normalise_variance` is usually wrong here even though the shared
+/// [`SingleCellPcaParams`] defaults it on. `mean_center` stays sensible, since
+/// the residuals are only approximately centred.
+///
+/// ### Params
+///
+/// * `reader` - Reader over the gene-based count store.
+/// * `cell_indices` - Slice of indices for the cells.
+/// * `gene_indices` - Slice of indices for the genes, typically the HVG set.
+///   Every one must be covered by `source`.
+/// * `no_pcs` - Number of principal components to calculate.
+/// * `params_pca` - Parameters for this PCA run, see [SingleCellPcaParams].
+///   `clr` must be off.
+/// * `source` - The fitted residual source, scTransform or analytic Pearson.
+/// * `seed` - Seed for randomised SVD.
+/// * `return_scaled` - Return the residual matrix.
+/// * `verbose` - `0` silent, `1` normal, `2` detailed.
+///
+/// ### Return
+///
+/// The [SingleCellPcaResScaled].
+///
+/// ### References
+///
+/// Choudhary & Satija, Genome Biology, 2022
+#[allow(clippy::too_many_arguments)]
+pub fn pca_on_sc_residuals<S: SingleCellReading>(
+    reader: &S,
+    cell_indices: &[usize],
+    gene_indices: &[usize],
+    no_pcs: usize,
+    params_pca: &SingleCellPcaParams,
+    source: &dyn ResidualSource,
+    seed: usize,
+    return_scaled: bool,
+    verbose: usize,
+) -> SingleCellPcaResScaled {
+    let (scores, loadings, s, scaled_f32, _, _) = dense_pca(
+        reader,
+        cell_indices,
+        gene_indices,
+        no_pcs,
+        params_pca,
+        PcaColumnSource::Residual { source },
+        seed,
+        return_scaled,
+        verbose,
+    )?;
+
+    Ok((scores, loadings, s, scaled_f32))
+}
+
+/// PCA on scTransform Pearson residuals, with the feature statistics.
+///
+/// As [`pca_on_sc_residuals`], but returns the per-gene residual mean and
+/// standard deviation rather than the residual matrix. The means are the
+/// centring applied, which a projection of new cells onto these components
+/// needs.
+///
+/// ### Params
+///
+/// * `reader` - Reader over the gene-based count store.
+/// * `cell_indices` - Slice of indices for the cells.
+/// * `gene_indices` - Slice of indices for the genes.
+/// * `no_pcs` - Number of principal components to calculate.
+/// * `params_pca` - Parameters for this PCA run, see [SingleCellPcaParams].
+/// * `source` - The fitted residual source, scTransform or analytic Pearson.
+/// * `seed` - Seed for randomised SVD.
+/// * `verbose` - `0` silent, `1` normal, `2` detailed.
+///
+/// ### Return
+///
+/// The [SingleCellPcaResStats].
+#[allow(clippy::too_many_arguments)]
+pub fn pca_on_sc_residuals_stats<S: SingleCellReading>(
+    reader: &S,
+    cell_indices: &[usize],
+    gene_indices: &[usize],
+    no_pcs: usize,
+    params_pca: &SingleCellPcaParams,
+    source: &dyn ResidualSource,
+    seed: usize,
+    verbose: usize,
+) -> SingleCellPcaResStats {
+    let (scores, loadings, s, _, feature_means, feature_sds) = dense_pca(
+        reader,
+        cell_indices,
+        gene_indices,
+        no_pcs,
+        params_pca,
+        PcaColumnSource::Residual { source },
         seed,
         false,
         verbose,

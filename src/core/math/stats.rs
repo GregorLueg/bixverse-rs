@@ -8,6 +8,7 @@ use statrs::distribution::FisherSnedecor;
 use statrs::distribution::{Continuous, ContinuousCDF, Normal};
 use statrs::function::gamma::ln_gamma;
 
+use crate::core::base::kernel_smooth::bw_sj;
 use crate::core::math::distributions::{chisq_sf, f_sf, norm_sf, t_pval_two_sided};
 use crate::core::math::special::digamma;
 use crate::core::math::vector_helpers::*;
@@ -16,6 +17,15 @@ use crate::prelude::*;
 ////////////
 // Consts //
 ////////////
+
+/// MAD scaling for consistency with the standard deviation under normality,
+/// R's `mad(constant = )` default.
+const MAD_NORMAL_SCALE: f64 = 1.4826;
+
+/// Multiple of machine epsilon sctransform nudges the first bin edge down by,
+/// so that `min(x)` itself lands inside the leftmost bin rather than outside
+/// R's left-open `cut` interval.
+const OUTLIER_EPS_MULT: f64 = 10.0;
 
 /// Iteration budget for the Newton solve in [`fit_gamma_mle`].
 ///
@@ -1090,6 +1100,139 @@ where
     (res, margin)
 }
 
+//////////////////////////
+// Binned robust z-score //
+//////////////////////////
+
+/// Robust z-score of `y` within bins of `x`, sctransform's
+/// `robust_scale_binned`.
+///
+/// Each observation is placed in the half-open bin `(breaks[b], breaks[b + 1]]`
+/// that contains its `x`, matching R's `cut`, and scored against the median and
+/// scaled MAD of the `y` values falling in the same bin. Observations outside
+/// the break range score `0.0`, as R's `score <- rep(0, length(x))` leaves them.
+///
+/// ### Params
+///
+/// * `y` - Values to score.
+/// * `x` - Binning variable, parallel to `y`.
+/// * `breaks` - Ascending bin edges, at least two.
+///
+/// ### Returns
+///
+/// One score per observation, in input order, or
+/// [`BixverseErrors::LengthMismatch`] when `x` and `y` disagree.
+pub fn robust_scale_binned(
+    y: &[f64],
+    x: &[f64],
+    breaks: &[f64],
+) -> Result<Vec<f64>, BixverseErrors> {
+    if x.len() != y.len() {
+        return Err(BixverseErrors::LengthMismatch {
+            name: "y",
+            expected: x.len(),
+            found: y.len(),
+        });
+    }
+    if breaks.len() < 2 {
+        return Err(BixverseErrors::LengthMismatch {
+            name: "breaks",
+            expected: 2,
+            found: breaks.len(),
+        });
+    }
+
+    let n_bins = breaks.len() - 1;
+    let mut members: Vec<Vec<usize>> = vec![Vec::new(); n_bins];
+
+    for (i, &xi) in x.iter().enumerate() {
+        // R's `cut` is left-open, right-closed, and NA outside the range.
+        if xi <= breaks[0] || xi > breaks[n_bins] {
+            continue;
+        }
+        // partition_point lands on the first edge >= xi, so the bin below it.
+        let b = breaks.partition_point(|&e| e < xi) - 1;
+        members[b.min(n_bins - 1)].push(i);
+    }
+
+    let mut score = vec![0.0_f64; y.len()];
+    for bin in &members {
+        if bin.is_empty() {
+            continue;
+        }
+        let vals: Vec<f64> = bin.iter().map(|&i| y[i]).collect();
+        // Both are Some by construction: the bin is non-empty.
+        let med = median(&vals).expect("non-empty bin");
+        let scale = mad(&vals, Some(MAD_NORMAL_SCALE)).expect("non-empty bin") + f64::EPSILON;
+        for (&i, v) in bin.iter().zip(vals.iter()) {
+            score[i] = (v - med) / scale;
+        }
+    }
+
+    Ok(score)
+}
+
+/// Binned robust outlier detection, sctransform's `is_outlier`.
+///
+/// Scores `y` against `x` on two bin grids offset by half a bin width, and
+/// flags an observation only when it is extreme on **both**. The offset grid is
+/// what stops a point that merely sits near a bin edge from being called an
+/// outlier. Bin width is half the Sheather-Jones bandwidth scaled by the range
+/// of `x`, so the grid adapts to how `x` is distributed.
+///
+/// ### Params
+///
+/// * `y` - Values to test.
+/// * `x` - Binning variable, parallel to `y`.
+/// * `th` - Absolute robust z-score above which a point counts as extreme.
+///   sctransform uses `10.0`.
+///
+/// ### Returns
+///
+/// One flag per observation, or a [`BixverseErrors`] when the inputs disagree
+/// in length or the bandwidth cannot be estimated.
+///
+/// ### References
+///
+/// Hafemeister & Satija, Genome Biology, 2019
+pub fn is_outlier(y: &[f64], x: &[f64], th: f64) -> Result<Vec<bool>, BixverseErrors> {
+    if x.len() != y.len() {
+        return Err(BixverseErrors::LengthMismatch {
+            name: "y",
+            expected: x.len(),
+            found: y.len(),
+        });
+    }
+
+    let (min, max) = x
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &v| {
+            (lo.min(v), hi.max(v))
+        });
+    let bin_width = (max - min) * bw_sj(x)? / 2.0;
+    if !bin_width.is_finite() || bin_width <= 0.0 {
+        return Err(BixverseErrors::BandwidthNoBracket);
+    }
+    let eps = f64::EPSILON * OUTLIER_EPS_MULT;
+
+    // R: seq(from, to, by), i.e. from, from + by, ... while <= to.
+    let seq_by = |from: f64, to: f64, by: f64| -> Vec<f64> {
+        let n = ((to - from) / by).floor() as usize;
+        (0..=n).map(|i| from + i as f64 * by).collect()
+    };
+
+    let breaks1 = seq_by(min - eps, max + bin_width, bin_width);
+    let breaks2 = seq_by(min - eps - bin_width / 2.0, max + bin_width, bin_width);
+
+    let score1 = robust_scale_binned(y, x, &breaks1)?;
+    let score2 = robust_scale_binned(y, x, &breaks2)?;
+
+    Ok(score1
+        .iter()
+        .zip(score2.iter())
+        .map(|(a, b)| a.abs().min(b.abs()) > th)
+        .collect())
+}
 ///////////////////
 // One-way ANOVA //
 ///////////////////
@@ -1391,6 +1534,113 @@ mod tests {
     use approx::assert_relative_eq;
 
     use crate::core::math::distributions::gamma_cdf;
+
+    /// Numerical Recipes LCG, the same one `dev/gen_edger_fixtures.R` uses, so
+    /// the reference sample is rebuilt on both sides instead of crossing as
+    /// text.
+    fn lcg_unifs(state: &mut u64, n: usize) -> Vec<f64> {
+        (0..n)
+            .map(|_| {
+                *state = (1_664_525_u64
+                    .wrapping_mul(*state)
+                    .wrapping_add(1_013_904_223))
+                    % 4_294_967_296;
+                *state as f64 / 4_294_967_296.0
+            })
+            .collect()
+    }
+
+    /// The sample `outlier_ref.R` builds: 600 points with three planted
+    /// outliers at 1-based positions 7, 123 and 455.
+    fn outlier_sample() -> (Vec<f64>, Vec<f64>) {
+        let mut state = 20_260_101_u64;
+        let x: Vec<f64> = lcg_unifs(&mut state, 600)
+            .iter()
+            .map(|u| u * 4.0 - 2.0)
+            .collect();
+        let mut y: Vec<f64> = lcg_unifs(&mut state, 600)
+            .iter()
+            .map(|u| u * 2.0 - 1.0)
+            .collect();
+        y[6] = 50.0;
+        y[122] = -40.0;
+        y[454] = 80.0;
+        (x, y)
+    }
+
+    /// R: sctransform:::robust_scale_binned(y, x, seq(-2.1, 2.1, by = 0.6))
+    #[test]
+    fn test_robust_scale_binned_matches_sctransform() {
+        let (x, y) = outlier_sample();
+        let breaks: Vec<f64> = (0..=7).map(|i| -2.1 + 0.6 * i as f64).collect();
+
+        let got = robust_scale_binned(&y, &x, &breaks).unwrap();
+
+        let first_ten = [
+            -0.075_797_230_741_805_32,
+            -1.194_174_449_336_404_2,
+            0.347_967_802_118_819_17,
+            0.508_437_503_502_156_7,
+            -0.375_397_206_147_169_8,
+            -0.672_986_180_212_602,
+            78.088_159_810_413_9,
+            1.169_443_742_595_915,
+            -1.467_419_443_801_975_6,
+            -0.428_119_355_105_514_74,
+        ];
+        for (g, e) in got.iter().take(10).zip(first_ten.iter()) {
+            assert_relative_eq!(*g, *e, max_relative = 1e-12);
+        }
+        assert_relative_eq!(
+            got.iter().sum::<f64>(),
+            145.563_245_444_483_98,
+            max_relative = 1e-12
+        );
+        assert_relative_eq!(got[6], 78.088_159_810_413_9, max_relative = 1e-12);
+        assert_relative_eq!(got[122], -58.804_104_377_993_6, max_relative = 1e-12);
+        assert_relative_eq!(got[454], 113.340_405_508_264_04, max_relative = 1e-12);
+    }
+
+    /// R: sctransform:::is_outlier(y, x, th = 10) flags exactly the three
+    /// planted points and nothing else.
+    #[test]
+    fn test_is_outlier_matches_sctransform() {
+        let (x, y) = outlier_sample();
+
+        let got = is_outlier(&y, &x, 10.0).unwrap();
+
+        let flagged: Vec<usize> = got
+            .iter()
+            .enumerate()
+            .filter(|&(_, &f)| f)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(flagged, vec![6, 122, 454]);
+    }
+
+    /// Observations outside the break range keep a score of zero rather than
+    /// being dropped or panicking, matching R's `rep(0, length(x))` prefill.
+    #[test]
+    fn test_robust_scale_binned_leaves_out_of_range_at_zero() {
+        let x = [0.0, 1.0, 2.0, 99.0];
+        let y = [1.0, 5.0, 9.0, 1000.0];
+
+        let got = robust_scale_binned(&y, &x, &[-0.5, 1.5, 2.5]).unwrap();
+
+        assert_eq!(got[3], 0.0);
+    }
+
+    #[test]
+    fn test_binned_helpers_reject_length_mismatch() {
+        assert!(matches!(
+            robust_scale_binned(&[1.0], &[1.0, 2.0], &[0.0, 3.0]),
+            Err(BixverseErrors::LengthMismatch { .. })
+        ));
+        assert!(matches!(
+            is_outlier(&[1.0], &[1.0, 2.0], 10.0),
+            Err(BixverseErrors::LengthMismatch { .. })
+        ));
+    }
 
     /// Three unbalanced groups with a real effect, against R's `aov`.
     #[test]
