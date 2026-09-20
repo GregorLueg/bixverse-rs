@@ -31,7 +31,9 @@ use crate::single_cell::sc_analysis::{
 };
 use crate::single_cell::sc_data::h5ad_io::parse_h5ad_format;
 use crate::single_cell::sc_processing::magic::{MagicLayer, MagicParams};
-use crate::single_cell::sc_processing::residuals::{assert_ascending, validate_clip_range};
+use crate::single_cell::sc_processing::residuals::{
+    assert_ascending, validate_clip_range, validate_groups,
+};
 use crate::single_cell::sc_trajectory::gene_trends::{
     BranchSelectionParams, BranchWeighting, GeneTrendsParams,
 };
@@ -4391,6 +4393,133 @@ impl SctGroupedFit {
             n_groups = self.models.len() as i32,
         )
     }
+
+    /// Rebuild an [SctGroupedFit] from the list [`SctGroupedFit::to_r_list`]
+    /// produced.
+    ///
+    /// `passes` comes back empty. It is a diagnostic of the fitting sweep and
+    /// nothing downstream of the fit reads it, so it is not serialised and
+    /// cannot be recovered. Everything the residual source needs, the models,
+    /// the shared gene axis and the group map, round trips.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The serialised grouped fit.
+    ///
+    /// ### Return
+    ///
+    /// The [SctGroupedFit], or an error naming the first field that is missing,
+    /// the wrong type, or inconsistent with the others.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let (models, genes, group_of_cell) =
+            grouped_fit_parts(r_list, "scTransform grouped fit", SctModel::from_r_list)?;
+
+        assert_ascending(&genes, "scTransform grouped fit genes")
+            .map_err(|e| Error::Other(e.to_string()))?;
+
+        Ok(Self {
+            models,
+            genes,
+            passes: Vec::new(),
+            group_of_cell,
+        })
+    }
+}
+
+/// Pull the shared parts of a serialised grouped fit back out of an R list.
+///
+/// Both grouped fits carry the same three things under the same names: a list
+/// of per-model lists, a group id per selected cell, and `n_groups`. Only the
+/// per-model parser and the presence of a shared gene axis differ, so the
+/// common validation lives here rather than twice.
+///
+/// The checks mirror what the residual sources do at construction: a dense
+/// group map covering `0..n_groups` and one model per group. Catching it here
+/// means the error names the serialised field rather than surfacing later as a
+/// mismatch inside `SctResiduals::new`.
+///
+/// ### Params
+///
+/// * `r_list` - The serialised grouped fit.
+/// * `what` - Label for the error messages.
+/// * `parse_model` - Per-model parser, `SctModel::from_r_list` or
+///   `AprModel::from_r_list`.
+///
+/// ### Returns
+///
+/// The models, the gene axis (empty when the fit does not carry one) and the
+/// group map, or an error naming the first field that does not hold up.
+fn grouped_fit_parts<M>(
+    r_list: List,
+    what: &'static str,
+    parse_model: impl Fn(List) -> Result<M>,
+) -> Result<(Vec<M>, Vec<usize>, Vec<u32>)> {
+    let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+
+    let required = |name: &'static str| -> Result<&Robj> {
+        params
+            .get(name)
+            .ok_or_else(|| Error::Other(format!("{what} is missing '{name}'")))
+    };
+
+    let models_robj = required("models")?;
+    let models_list = models_robj
+        .as_list()
+        .ok_or_else(|| Error::Other(format!("{what} 'models' is not a list")))?;
+
+    let models: Vec<M> = models_list
+        .values()
+        .enumerate()
+        .map(|(group, model)| {
+            let model = model
+                .as_list()
+                .ok_or_else(|| Error::Other(format!("{what} model {group} is not a list")))?;
+            parse_model(model)
+        })
+        .collect::<Result<Vec<M>>>()?;
+
+    if models.is_empty() {
+        return Err(Error::Other(format!("{what} carries no models")));
+    }
+
+    let group_of_cell: Vec<u32> = required("group_of_cell")?
+        .as_integer_slice()
+        .ok_or_else(|| Error::Other(format!("{what} 'group_of_cell' is not integer")))?
+        .iter()
+        .map(|&g| {
+            u32::try_from(g)
+                .map_err(|_| Error::Other(format!("{what} 'group_of_cell' has a negative entry")))
+        })
+        .collect::<Result<Vec<u32>>>()?;
+
+    // Dense coverage of `0..n_groups`, the same invariant the residual sources
+    // check. An empty group would leave a model no cell ever selects.
+    let n_groups = validate_groups(&group_of_cell, group_of_cell.len())
+        .map_err(|e| Error::Other(e.to_string()))?;
+
+    if n_groups != models.len() {
+        return Err(Error::Other(format!(
+            "{what} has {} models but the group map implies {n_groups}",
+            models.len()
+        )));
+    }
+
+    // `genes` is absent on the analytic Pearson fit, whose shared axis is
+    // derived in `AprResiduals::new` from the per-model sets.
+    let genes: Vec<usize> = match params.get("genes") {
+        Some(robj) if !robj.is_null() => robj
+            .as_integer_slice()
+            .ok_or_else(|| Error::Other(format!("{what} 'genes' is not integer")))?
+            .iter()
+            .map(|&g| {
+                usize::try_from(g)
+                    .map_err(|_| Error::Other(format!("{what} 'genes' has a negative entry")))
+            })
+            .collect::<Result<Vec<usize>>>()?,
+        _ => Vec::new(),
+    };
+
+    Ok((models, genes, group_of_cell))
 }
 
 /////////////////////////////////
@@ -4560,5 +4689,58 @@ impl AprGroupedFit {
             group_of_cell = group_of_cell,
             n_groups = self.models.len() as i32,
         )
+    }
+
+    /// Rebuild an [AprGroupedFit] from the list [`AprGroupedFit::to_r_list`]
+    /// produced.
+    ///
+    /// There is no shared gene axis to carry: [`AprResiduals::new`] derives it
+    /// from the per-model sets, so the round trip is the models, the per-cell
+    /// totals and the group map.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The serialised grouped fit.
+    ///
+    /// ### Return
+    ///
+    /// The [AprGroupedFit], or an error naming the first field that is missing,
+    /// the wrong type, or inconsistent with the others.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let cell_totals = r_list_to_map(r_list.clone())?
+            .get("cell_totals")
+            .ok_or_else(|| {
+                Error::Other("Analytic Pearson grouped fit is missing 'cell_totals'".to_string())
+            })?
+            .as_real_vector()
+            .ok_or_else(|| {
+                Error::Other(
+                    "Analytic Pearson grouped fit 'cell_totals' is not numeric".to_string(),
+                )
+            })?;
+
+        let (models, _genes, group_of_cell) = grouped_fit_parts(
+            r_list,
+            "Analytic Pearson grouped fit",
+            AprModel::from_r_list,
+        )?;
+
+        // The totals are per selected cell, so they and the group map are two
+        // views of the same axis and a disagreement means one of them belongs
+        // to a different fit.
+        if cell_totals.len() != group_of_cell.len() {
+            return Err(Error::Other(format!(
+                "Analytic Pearson grouped fit 'cell_totals' has {} entries but \
+                 'group_of_cell' has {}",
+                cell_totals.len(),
+                group_of_cell.len()
+            )));
+        }
+
+        Ok(Self {
+            models,
+            cell_totals,
+            group_of_cell,
+        })
     }
 }
