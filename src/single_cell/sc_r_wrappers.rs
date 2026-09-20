@@ -31,11 +31,14 @@ use crate::single_cell::sc_analysis::{
 };
 use crate::single_cell::sc_data::h5ad_io::parse_h5ad_format;
 use crate::single_cell::sc_processing::magic::{MagicLayer, MagicParams};
+use crate::single_cell::sc_processing::residuals::{assert_ascending, validate_clip_range};
 use crate::single_cell::sc_trajectory::gene_trends::{
     BranchSelectionParams, BranchWeighting, GeneTrendsParams,
 };
 use crate::single_cell::sc_trajectory::palantir::PalantirParams;
-use crate::utils::r_rust_interface::{r_list_count, r_list_count_allow_zero, r_list_to_map};
+use crate::utils::r_rust_interface::{
+    r_list_count, r_list_count_allow_zero, r_list_real, r_list_required_real, r_list_to_map,
+};
 
 use crate::single_cell::sc_annotation::{
     sc_type::{CellTypeMarkers, ScTypeCellParams, SctypeRes, parse_score_calibration},
@@ -51,6 +54,10 @@ use crate::single_cell::sc_data::{
     h5_10x_multifile_io::TenxFileTask, h5ad_io::parse_raw_slot, h5ad_multifile_io::H5adFileTask,
     mtx_multifile_io::MtxFileTask, sc_synthetic_data::CellTypeConfig,
 };
+use crate::single_cell::sc_processing::analytic_pearson::model::{AprModel, AprParams};
+use crate::single_cell::sc_processing::analytic_pearson::stream::AprGroupedFit;
+use crate::single_cell::sc_processing::sctransform::model::{SctCovariates, SctModel, SctParams};
+use crate::single_cell::sc_processing::sctransform::stream::SctGroupedFit;
 use crate::single_cell::sc_processing::{
     cellsweep::{
         CellSweepFit, CellSweepParams, CellSweepSample, EmptyDropletCall, parse_empty_droplet_call,
@@ -4085,6 +4092,473 @@ impl CellSweepFit {
             log_likelihood = self.log_likelihood,
             n_iter = self.n_iter as i32,
             converged = self.converged
+        )
+    }
+}
+
+//////////////////
+// scTransform //
+//////////////////
+
+impl SctParams {
+    /// Generate the [SctParams] from an R list.
+    ///
+    /// Should values not be found within the List, the parameters will default
+    /// to sensible defaults, which are sctransform's own with
+    /// `vst.flavor = "v2"` applied.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the scTransform parameters.
+    ///
+    /// ### Return
+    ///
+    /// The [SctParams] with all of the parameters.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+        let defaults = SctParams::default();
+
+        // Counts and reals both go through the coercing readers: R writes `2000`
+        // as a double and `2000L` as an integer, and the plain accessors match
+        // one storage mode each, so a caller writing either form the accessor
+        // does not expect would silently get the default instead.
+        let n_genes = r_list_count(&params, "n_genes")?.unwrap_or(defaults.n_genes);
+        let n_cells = r_list_count(&params, "n_cells")?.unwrap_or(defaults.n_cells);
+        let min_cells = r_list_count(&params, "min_cells")?.unwrap_or(defaults.min_cells);
+
+        let bw_adjust = r_list_real(&params, "bw_adjust")?.unwrap_or(defaults.bw_adjust);
+        let gmean_eps = r_list_real(&params, "gmean_eps")?.unwrap_or(defaults.gmean_eps);
+        let outlier_th = r_list_real(&params, "outlier_th")?.unwrap_or(defaults.outlier_th);
+        let poisson_diff_theta =
+            r_list_real(&params, "poisson_diff_theta")?.unwrap_or(defaults.poisson_diff_theta);
+
+        // Both ends or neither: half a clipping range is meaningless, so a list
+        // carrying only one is treated as carrying none.
+        let clip_range = match (
+            r_list_real(&params, "clip_min")?,
+            r_list_real(&params, "clip_max")?,
+        ) {
+            (Some(lo), Some(hi)) => {
+                validate_clip_range((lo, hi)).map_err(|e| Error::Other(e.to_string()))?;
+                Some((lo, hi))
+            }
+            _ => defaults.clip_range,
+        };
+
+        Ok(Self {
+            n_genes,
+            n_cells,
+            min_cells,
+            bw_adjust,
+            gmean_eps,
+            outlier_th,
+            poisson_diff_theta,
+            clip_range,
+        })
+    }
+}
+
+impl SctModel {
+    /// Serialise the [SctModel] into an R list.
+    ///
+    /// Round trips through [`SctModel::from_r_list`], so the R side can hold a
+    /// fitted model between calls and hand it back for the residual PCA rather
+    /// than refitting.
+    ///
+    /// `theta` is infinite for a Poisson gene, which R represents faithfully as
+    /// `Inf`, so no sentinel is needed on either side and no separate flag has
+    /// to travel with it.
+    ///
+    /// ### Return
+    ///
+    /// A list with the per-gene parameters and the scalars that go with them.
+    pub fn to_r_list(&self) -> List {
+        let genes: Vec<i32> = self.genes.iter().map(|&g| g as i32).collect();
+
+        list!(
+            genes = genes,
+            theta = self.theta.clone(),
+            coefficients = self.coefficients.clone(),
+            n_coef = self.n_coef as i32,
+            covariate_names = self.covariate_names.clone(),
+            log_umi_coef = self.log_umi_coef,
+            min_variance = self.min_variance,
+            clip_min = self.clip_range.0,
+            clip_max = self.clip_range.1,
+        )
+    }
+
+    /// Rebuild an [SctModel] from the list [`SctModel::to_r_list`] produced.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The serialised model.
+    ///
+    /// ### Return
+    ///
+    /// The [SctModel], or an error naming the first field that is missing or
+    /// the wrong length. Unlike the parameter structs there are no defaults
+    /// here: a partially reconstructed model would silently produce wrong
+    /// residuals.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+
+        let required = |name: &'static str| -> Result<&Robj> {
+            params
+                .get(name)
+                .ok_or_else(|| Error::Other(format!("scTransform model is missing '{name}'")))
+        };
+
+        let genes: Vec<usize> = required("genes")?
+            .as_integer_slice()
+            .ok_or_else(|| Error::Other("scTransform model 'genes' is not integer".to_string()))?
+            .iter()
+            .map(|&g| g as usize)
+            .collect();
+
+        let theta = required("theta")?
+            .as_real_vector()
+            .ok_or_else(|| Error::Other("scTransform model 'theta' is not numeric".to_string()))?;
+
+        let coefficients = required("coefficients")?.as_real_vector().ok_or_else(|| {
+            Error::Other("scTransform model 'coefficients' is not numeric".to_string())
+        })?;
+
+        let n_coef = required("n_coef")?.as_integer().ok_or_else(|| {
+            Error::Other("scTransform model 'n_coef' is not an integer".to_string())
+        })? as usize;
+
+        let covariate_names: Vec<String> = required("covariate_names")?
+            .as_str_vector()
+            .map(|v| v.into_iter().map(String::from).collect())
+            .unwrap_or_default();
+
+        // Without at least the intercept the design is empty and every
+        // downstream `n_coef - 1` underflows.
+        if n_coef == 0 {
+            return Err(Error::Other(
+                "scTransform model 'n_coef' must be at least 1 (the intercept)".to_string(),
+            ));
+        }
+
+        let n = genes.len();
+        for (name, len, want) in [
+            ("theta", theta.len(), n),
+            ("coefficients", coefficients.len(), n * n_coef),
+            ("covariate_names", covariate_names.len(), n_coef - 1),
+        ] {
+            if len != want {
+                return Err(Error::Other(format!(
+                    "scTransform model '{name}' has {len} entries, expected {want}"
+                )));
+            }
+        }
+
+        // Gene lookups on a model are binary searches, so an axis that came back
+        // in HVG-selection order would silently return wrong positions rather
+        // than `None`.
+        assert_ascending(&genes, "scTransform model genes")
+            .map_err(|e| Error::Other(e.to_string()))?;
+
+        let what = "scTransform model";
+        let clip_range = (
+            r_list_required_real(&params, "clip_min", what)?,
+            r_list_required_real(&params, "clip_max", what)?,
+        );
+        validate_clip_range(clip_range).map_err(|e| Error::Other(e.to_string()))?;
+
+        Ok(Self {
+            genes,
+            theta,
+            coefficients,
+            n_coef,
+            covariate_names,
+            log_umi_coef: r_list_required_real(&params, "log_umi_coef", what)?,
+            min_variance: r_list_required_real(&params, "min_variance", what)?,
+            clip_range,
+        })
+    }
+}
+
+impl SctCovariates {
+    /// Serialise the [SctCovariates] into an R list.
+    ///
+    /// ### Return
+    ///
+    /// One named element per covariate, each a numeric vector of length
+    /// `n_cells`. That is the shape [`SctCovariates::from_r_list`] reads, so the
+    /// two are inverses, and it is the shape a data.frame column arrives in
+    /// anyway.
+    pub fn to_r_list(&self) -> List {
+        let k = self.n_covariates();
+        if k == 0 {
+            return List::new(0);
+        }
+        let n_cells = self.values.len() / k;
+
+        let columns: Vec<Robj> = (0..k)
+            .map(|j| {
+                let column: Vec<f64> = (0..n_cells).map(|c| self.row(c)[j]).collect();
+                Robj::from(column)
+            })
+            .collect();
+
+        let mut out = List::from_values(columns);
+        out.set_names(self.names.iter().map(|s| s.as_str()))
+            .expect("one name per covariate column by construction");
+        out
+    }
+
+    /// Rebuild the [SctCovariates] from one column per covariate.
+    ///
+    /// The R side holds cell-level covariates as a data.frame, so columns are
+    /// the natural thing to hand over: a named list of numeric vectors, each of
+    /// length `n_cells`. The row-major flattening the model wants happens here
+    /// via [`SctCovariates::from_columns`] rather than in R.
+    ///
+    /// An empty or absent list gives the empty covariate set, which is the
+    /// common case and the one the residual arithmetic has a fast path for.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - Named list of numeric vectors, one per covariate.
+    ///
+    /// ### Return
+    ///
+    /// The [SctCovariates], or an error when a column is not numeric or the
+    /// columns disagree in length.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let mut columns: Vec<(String, Vec<f64>)> = Vec::with_capacity(r_list.len());
+
+        for (name, value) in r_list.iter() {
+            // A data.frame column is as likely to arrive as an integer as a
+            // double (`as.integer`, a count, a dummy-coded factor), and
+            // `as_real_vector` matches REALSXP alone.
+            let values = value
+                .as_real_vector()
+                .or_else(|| {
+                    value
+                        .as_integer_slice()
+                        .map(|s| s.iter().map(|&x| x as f64).collect())
+                })
+                .ok_or_else(|| {
+                    Error::Other(format!(
+                        "scTransform covariate '{name}' must be a numeric or integer vector"
+                    ))
+                })?;
+
+            // `NA` arrives as NaN and would otherwise propagate silently through
+            // the design into every fitted coefficient.
+            if let Some(pos) = values.iter().position(|v| !v.is_finite()) {
+                return Err(Error::Other(format!(
+                    "scTransform covariate '{name}' has a missing or non-finite value at position {}",
+                    pos + 1
+                )));
+            }
+
+            columns.push((name.to_string(), values));
+        }
+
+        if columns.is_empty() {
+            return Ok(Self::default());
+        }
+
+        Self::from_columns(&columns).map_err(|e| Error::Other(e.to_string()))
+    }
+}
+
+impl SctGroupedFit {
+    /// Serialise the [SctGroupedFit] into an R list.
+    ///
+    /// The models go out as a list of the lists [`SctModel::to_r_list`]
+    /// produces, so a round trip is per model and nothing new has to be parsed.
+    /// `genes` is the shared axis, already the intersection across groups, and
+    /// is what an HVG set and a residual PCA are indexed against.
+    ///
+    /// ### Return
+    ///
+    /// A list with the per-group models, the shared gene axis and the group
+    /// map.
+    pub fn to_r_list(&self) -> List {
+        let models = List::from_values(self.models.iter().map(|m| m.to_r_list()));
+        let genes: Vec<i32> = self.genes.iter().map(|&g| g as i32).collect();
+        let group_of_cell: Vec<i32> = self.group_of_cell.iter().map(|&g| g as i32).collect();
+
+        list!(
+            models = models,
+            genes = genes,
+            group_of_cell = group_of_cell,
+            n_groups = self.models.len() as i32,
+        )
+    }
+}
+
+/////////////////////////////////
+// Analytic Pearson residuals //
+/////////////////////////////////
+
+impl AprParams {
+    /// Generate the [AprParams] from an R list.
+    ///
+    /// Missing values fall back to the defaults of Lause, Berens & Kobak:
+    /// `theta = 100` and clipping at `+/- sqrt(n_cells)`.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the analytic Pearson parameters.
+    ///
+    /// ### Return
+    ///
+    /// The [AprParams] with all of the parameters.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+        let defaults = AprParams::default();
+
+        // Both readers accept either R storage mode; see `r_list_real`.
+        let theta = r_list_real(&params, "theta")?.unwrap_or(defaults.theta);
+        let min_cells =
+            r_list_count_allow_zero(&params, "min_cells")?.unwrap_or(defaults.min_cells);
+
+        // Both ends or neither: half a clipping range is meaningless, so a list
+        // carrying only one is treated as carrying none.
+        let clip_range = match (
+            r_list_real(&params, "clip_min")?,
+            r_list_real(&params, "clip_max")?,
+        ) {
+            (Some(lo), Some(hi)) => Some((lo, hi)),
+            _ => defaults.clip_range,
+        };
+
+        let parsed = Self {
+            theta,
+            min_cells,
+            clip_range,
+        };
+        // Catches a non-positive theta and an inverted or NaN clipping range
+        // here, at the boundary, rather than letting `clamp` abort in a worker.
+        parsed.validate().map_err(|e| Error::Other(e.to_string()))?;
+
+        Ok(parsed)
+    }
+}
+
+impl AprModel {
+    /// Serialise the [AprModel] into an R list.
+    ///
+    /// ### Return
+    ///
+    /// A list with the gene axis, the marginals and the two scalars.
+    pub fn to_r_list(&self) -> List {
+        let genes: Vec<i32> = self.genes.iter().map(|&g| g as i32).collect();
+
+        list!(
+            genes = genes,
+            gene_sums = self.gene_sums.clone(),
+            total = self.total,
+            theta = self.theta,
+            clip_min = self.clip_range.0,
+            clip_max = self.clip_range.1,
+        )
+    }
+
+    /// Rebuild an [AprModel] from the list [`AprModel::to_r_list`] produced.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The serialised model.
+    ///
+    /// ### Return
+    ///
+    /// The [AprModel], or an error naming the first field that is missing or
+    /// the wrong length. No defaults: a partially reconstructed model would
+    /// silently produce wrong residuals.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+
+        let required = |name: &'static str| -> Result<&Robj> {
+            params
+                .get(name)
+                .ok_or_else(|| Error::Other(format!("Analytic Pearson model is missing '{name}'")))
+        };
+
+        let genes: Vec<usize> = required("genes")?
+            .as_integer_slice()
+            .ok_or_else(|| {
+                Error::Other("Analytic Pearson model 'genes' is not integer".to_string())
+            })?
+            .iter()
+            .map(|&g| g as usize)
+            .collect();
+
+        let gene_sums = required("gene_sums")?.as_real_vector().ok_or_else(|| {
+            Error::Other("Analytic Pearson model 'gene_sums' is not numeric".to_string())
+        })?;
+
+        if gene_sums.len() != genes.len() {
+            return Err(Error::Other(format!(
+                "Analytic Pearson model 'gene_sums' has {} entries, expected {}",
+                gene_sums.len(),
+                genes.len()
+            )));
+        }
+
+        // Gene lookups are binary searches, so an unsorted axis silently returns
+        // the wrong position rather than `None`.
+        assert_ascending(&genes, "Analytic Pearson model genes")
+            .map_err(|e| Error::Other(e.to_string()))?;
+
+        let what = "Analytic Pearson model";
+        let model = Self {
+            genes,
+            gene_sums,
+            total: r_list_required_real(&params, "total", what)?,
+            theta: r_list_required_real(&params, "theta", what)?,
+            clip_range: (
+                r_list_required_real(&params, "clip_min", what)?,
+                r_list_required_real(&params, "clip_max", what)?,
+            ),
+        };
+
+        validate_clip_range(model.clip_range).map_err(|e| Error::Other(e.to_string()))?;
+        // A zero total gives `p_gene = 0/0 = NaN` and an all-NaN residual
+        // matrix, which the variance sweep would otherwise have to catch.
+        if model.total <= 0.0 || model.total.is_nan() {
+            return Err(Error::Other(format!(
+                "{what} 'total' must be positive, got {}",
+                model.total
+            )));
+        }
+        if model.theta <= 0.0 || model.theta.is_nan() {
+            return Err(Error::Other(format!(
+                "{what} 'theta' must be positive, got {}",
+                model.theta
+            )));
+        }
+
+        Ok(model)
+    }
+}
+
+impl AprGroupedFit {
+    /// Serialise the [AprGroupedFit] into an R list.
+    ///
+    /// The per-cell totals travel with the models because they are part of the
+    /// model, not a property of the store: they are sums over each group's own
+    /// retained gene set, which the R side cannot recover from the library
+    /// sizes.
+    ///
+    /// ### Return
+    ///
+    /// A list with the per-group models, the per-cell totals and the group map.
+    pub fn to_r_list(&self) -> List {
+        let models = List::from_values(self.models.iter().map(|m| m.to_r_list()));
+        let group_of_cell: Vec<i32> = self.group_of_cell.iter().map(|&g| g as i32).collect();
+
+        list!(
+            models = models,
+            cell_totals = self.cell_totals.clone(),
+            group_of_cell = group_of_cell,
+            n_groups = self.models.len() as i32,
         )
     }
 }

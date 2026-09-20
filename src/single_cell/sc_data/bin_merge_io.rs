@@ -1,6 +1,6 @@
-//! Helpers for multi-file binary file merging. This is used to combine
-//! multiple SingleCells experiments on the R side. It enables the user to
-//! combine and merge several experiments.
+//! Helpers for multi-file binary file merging. This is used to combine multiple
+//! SingleCells experiments on the R side. It enables the user to combine and
+//! merge several experiments.
 
 use rayon::prelude::*;
 use std::path::Path;
@@ -8,7 +8,10 @@ use std::time::Instant;
 use thousands::Separable;
 
 use crate::prelude::*;
-use crate::single_cell::sc_data::data_io::{CellGeneSparseWriter, peek_target_size};
+use crate::single_cell::sc_data::data_io::{
+    CellGeneSparseWriter, CsrCellChunk, ParallelSparseReader, RawCounts, SingleCellReading,
+    peek_target_size,
+};
 
 ////////////
 // Consts //
@@ -282,4 +285,142 @@ pub fn merge_sc_bin_files<P: AsRef<Path>>(
         total_genes: universe_size,
         per_file,
     })
+}
+
+////////////////////////
+// Gene store to cell //
+////////////////////////
+
+/// Rebuilds the cell-major companion of a gene-major store.
+///
+/// Memory is bounded by phasing over cells. Each phase holds the entries for
+/// one window of cells and re-reads the gene file to fill it, so peak memory is
+/// the window rather than the matrix, at the cost of reading the source once
+/// per phase. That is the same trade the downstream CSR to CSC conversion
+/// makes.
+///
+/// The output inherits the input's `target_size`, so the normalised layer keeps
+/// meaning the same thing on both sides.
+///
+/// ### Params
+///
+/// * `in_path` - Gene-major source store.
+/// * `out_path` - Cell-major store to write.
+/// * `cells_per_phase` - Cells held in memory at once. Peak memory is roughly
+///   `cells_per_phase * mean_genes_per_cell * 12` bytes.
+/// * `gene_batch_size` - Genes read from disk per batch within a phase.
+/// * `verbose` - `0` silent, `1` normal, `2` detailed.
+///
+/// ### Returns
+///
+/// `()`, or a [`BixverseErrors`] when the source is not gene-major or a read or
+/// write fails.
+pub fn gene_store_to_cell_store<P: AsRef<Path>>(
+    in_path: P,
+    out_path: P,
+    cells_per_phase: usize,
+    gene_batch_size: usize,
+    verbose: usize,
+) -> Result<(), BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+    let start = Instant::now();
+
+    let reader = ParallelSparseReader::new(in_path.as_ref().to_str().ok_or(
+        BixverseErrors::InvalidArgument("input path is not valid UTF-8".to_string()),
+    )?)?;
+
+    if !reader.is_gene_based() {
+        return Err(BixverseErrors::ReaderModeMismatch {
+            actual: "cell-based",
+            requested: "gene-based",
+        });
+    }
+
+    let header = reader.get_header();
+    let (no_cells, no_genes) = (header.total_cells, header.total_genes);
+    let cells_per_phase = cells_per_phase.max(1);
+    let gene_batch_size = gene_batch_size.max(1);
+
+    let mut writer = CellGeneSparseWriter::new(
+        out_path,
+        true,
+        no_cells,
+        no_genes,
+        reader.target_size().unwrap_or(0.0),
+    )?;
+
+    let n_phases = no_cells.div_ceil(cells_per_phase);
+
+    if verbosity.normal_verbosity() {
+        println!(
+            "Transpose: {} genes by {} cells, {} phase(s)",
+            no_genes.separate_with_underscores(),
+            no_cells.separate_with_underscores(),
+            n_phases
+        );
+    }
+
+    for phase in 0..n_phases {
+        let cell_start = phase * cells_per_phase;
+        let cell_end = ((phase + 1) * cells_per_phase).min(no_cells);
+        let width = cell_end - cell_start;
+
+        // One bucket per cell in the window. Entries accumulate in gene order
+        // because the gene batches are walked ascending, so no sort is needed
+        // before writing.
+        let mut buckets: Vec<Vec<(u32, u32, F16)>> = vec![Vec::new(); width];
+
+        for block_start in (0..no_genes).step_by(gene_batch_size) {
+            let block_end = (block_start + gene_batch_size).min(no_genes);
+            let block: Vec<usize> = (block_start..block_end).collect();
+
+            for chunk in reader.read_gene_parallel(&block)? {
+                let gene = chunk.original_index as u32;
+                for (slot, &cell) in chunk.indices.iter().enumerate() {
+                    let cell = cell as usize;
+                    if cell >= cell_start && cell < cell_end {
+                        buckets[cell - cell_start].push((
+                            gene,
+                            chunk.data_raw.get(slot),
+                            chunk.data_norm[slot],
+                        ));
+                    }
+                }
+            }
+        }
+
+        for (offset, entries) in buckets.into_iter().enumerate() {
+            let library_size: u64 = entries.iter().map(|&(_, raw, _)| raw as u64).sum();
+            let raw: Vec<u32> = entries.iter().map(|&(_, r, _)| r).collect();
+
+            writer.write_cell_chunk(CsrCellChunk {
+                data_raw: RawCounts::from_u32_auto(&raw),
+                data_norm: entries.iter().map(|&(_, _, n)| n).collect(),
+                library_size: library_size as usize,
+                indices: entries.iter().map(|&(g, _, _)| g).collect(),
+                original_index: cell_start + offset,
+                to_keep: true,
+            })?;
+        }
+
+        if verbosity.detailed_verbosity() {
+            println!(
+                "Transpose: phase {}/{} done in {:.2?}",
+                phase + 1,
+                n_phases,
+                start.elapsed()
+            );
+        }
+    }
+
+    writer.finalise()?;
+
+    if verbosity.normal_verbosity() {
+        println!(
+            "Transpose: wrote the cell-major store in {:.2?}",
+            start.elapsed()
+        );
+    }
+
+    Ok(())
 }

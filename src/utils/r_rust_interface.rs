@@ -273,6 +273,93 @@ pub fn r_list_count_allow_zero(
     r_list_bounded_count(params, key, 0)
 }
 
+/// Read a numeric parameter out of a flattened R list.
+///
+/// The real-valued sibling of [r_list_count], and it exists for the same
+/// reason: extendr's `as_real()` matches REALSXP alone and does not coerce, so a
+/// caller writing `list(theta = 100L)` hands over an integer that the plain
+/// accessor drops on the floor, and the default silently runs instead. R's own
+/// idiom makes that easy to write, and several `params_*()` wrappers in the
+/// downstream package do exactly this.
+///
+/// Missing keys, `NULL` and `NA` all read as absent, so the caller's default
+/// applies. `Inf` is a legitimate value here (the Poisson limit of an
+/// overdispersion, an open end of a clipping range) and passes through. Anything
+/// present but not a single number is an error rather than a silent fallback.
+///
+/// ### Params
+///
+/// * `params` - Parsed R list contents, already flattened to a map.
+/// * `key` - The list element to read.
+///
+/// ### Returns
+///
+/// `Some(value)` when the key holds a single number, `None` when it is absent,
+/// `NULL` or `NA`, or an error naming the key.
+pub fn r_list_real(params: &HashMap<&str, Robj>, key: &str) -> extendr_api::Result<Option<f64>> {
+    let Some(value) = params.get(key) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+
+    if let Some(v) = value.as_integer() {
+        // extendr surfaces R's integer `NA` as `i32::MIN`.
+        if v == i32::MIN {
+            return Ok(None);
+        }
+        return Ok(Some(v as f64));
+    }
+
+    if let Some(v) = value.as_real() {
+        if v.is_nan() {
+            return Ok(None);
+        }
+        return Ok(Some(v));
+    }
+
+    // `as_real` rejects a length-1 `NA_real_` outright, so distinguish that
+    // from a genuinely wrong type rather than calling it an error.
+    if let Some(slice) = value.as_real_slice()
+        && slice.len() == 1
+    {
+        return Ok(None);
+    }
+
+    Err(Error::Other(format!(
+        "'{key}' must be a single number, got something else"
+    )))
+}
+
+/// Read a required numeric field out of a flattened R list.
+///
+/// For deserialising a fitted model rather than a parameter set. There is no
+/// default to fall back on: a model reassembled with a silently substituted
+/// scalar produces plausible-looking numbers that are wrong throughout, so both
+/// a missing key and a wrong type are errors.
+///
+/// ### Params
+///
+/// * `params` - Parsed R list contents, already flattened to a map.
+/// * `key` - The list element to read.
+/// * `what` - What is being deserialised, for the error message.
+///
+/// ### Returns
+///
+/// The value, or an error naming the field.
+pub fn r_list_required_real(
+    params: &HashMap<&str, Robj>,
+    key: &str,
+    what: &str,
+) -> extendr_api::Result<f64> {
+    if !params.contains_key(key) {
+        return Err(Error::Other(format!("{what} is missing '{key}'")));
+    }
+    r_list_real(params, key)?
+        .ok_or_else(|| Error::Other(format!("{what} field '{key}' is not a single number")))
+}
+
 /// Transforms a Robj List into a Hashmap
 ///
 /// This function assumes that the R list contains string vector!
