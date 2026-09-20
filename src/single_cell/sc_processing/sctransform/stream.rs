@@ -19,6 +19,7 @@ use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::path::Path;
 use std::time::Instant;
+use thousands::Separable;
 
 use crate::core::base::kernel_smooth::bw_nrd;
 use crate::core::math::vector_helpers::{interp_linear_at, median};
@@ -522,7 +523,8 @@ pub fn sct_gene_pass<S: SingleCellReading>(
 
     if verbosity.normal_verbosity() {
         println!(
-            "scTransform: swept {n_genes} genes in {:.2?}, {} pass the min_cells filter",
+            "scTransform: swept {} genes in {:.2?}, {} pass the min_cells filter",
+            n_genes.separate_with_underscores(),
             start.elapsed(),
             modelled.len()
         );
@@ -826,8 +828,8 @@ pub fn fit_sctransform<S: SingleCellReading>(
     if verbosity.normal_verbosity() {
         println!(
             "scTransform: step-1 fit on {} genes by {} cells",
-            genes.len(),
-            cells.len()
+            genes.len().separate_with_underscores(),
+            cells.len().separate_with_underscores()
         );
     }
 
@@ -862,7 +864,7 @@ pub fn fit_sctransform<S: SingleCellReading>(
     if verbosity.normal_verbosity() {
         println!(
             "scTransform: fitted {} genes with {} coefficient(s) in {:.2?}",
-            fits.len(),
+            fits.len().separate_with_underscores(),
             n_coef,
             start_fit.elapsed()
         );
@@ -1061,7 +1063,8 @@ pub fn sct_corrected_counts<S: SingleCellReading, P: AsRef<Path>>(
 
     if verbosity.normal_verbosity() {
         println!(
-            "scTransform: wrote {n_genes} corrected genes in {:.2?}",
+            "scTransform: wrote {} corrected genes in {:.2?}",
+            n_genes.separate_with_underscores(),
             start.elapsed()
         );
     }
@@ -1193,8 +1196,8 @@ pub fn fit_sctransform_grouped<S: SingleCellReading>(
         if verbosity.normal_verbosity() {
             println!(
                 "scTransform: group {group} fitted over {} cells, {} genes ({:.2?})",
-                group_cells.len(),
-                model.len(),
+                group_cells.len().separate_with_underscores(),
+                model.len().separate_with_underscores(),
                 start.elapsed()
             );
         }
@@ -1209,7 +1212,7 @@ pub fn fit_sctransform_grouped<S: SingleCellReading>(
     if verbosity.normal_verbosity() {
         println!(
             "scTransform: {} gene(s) modelled in all {n_groups} group(s)",
-            genes.len()
+            genes.len().separate_with_underscores()
         );
     }
 

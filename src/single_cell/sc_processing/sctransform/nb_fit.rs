@@ -24,7 +24,7 @@
 
 use std::cell::{Cell, RefCell};
 
-use edge_rs::dispersion::apl::apl_at;
+use edge_rs::dispersion::apl::AplWorkspace;
 use edge_rs::glm::levenberg::{LevenbergParams, mglm_levenberg};
 use edge_rs::prelude::*;
 
@@ -57,6 +57,14 @@ const LOG_ALPHA_TOL: f64 = 1e-8;
 /// Overdispersion below which the gene is called Poisson and theta set to
 /// infinity.
 const ALPHA_POISSON_FLOOR: f64 = 1e-10;
+
+/// Dispersion the gene's starting coefficients are built at.
+///
+/// The middle of the search bracket on the log scale. It only shapes the cold
+/// start handed to the first Brent step; every later step warm-starts from the
+/// one before, and each fit runs to its own convergence, so the choice moves
+/// nothing but the iteration count of that first evaluation.
+const START_DISPERSION: f64 = 4.539_992_976_248_485e-5;
 
 /// Relative deviance tolerance for the coefficient fit.
 const COEF_TOL: f64 = 1e-14;
@@ -176,22 +184,38 @@ pub fn fit_nb_offset_gene(
     let first_error: RefCell<Option<String>> = RefCell::new(None);
     let any_ok = Cell::new(false);
 
-    let neg_apl = |log_alpha: f64| -> f64 {
-        match apl_at(counts, 1, n, design, n_coef, log_alpha.exp(), &offset, None) {
-            Ok(v) => {
-                any_ok.set(true);
-                -v[0]
-            }
-            Err(e) => {
-                first_error
-                    .borrow_mut()
-                    .get_or_insert_with(|| e.to_string());
-                f64::INFINITY
-            }
-        }
-    };
+    // One workspace for the whole search: the coefficients at one dispersion are
+    // the starting point at the next, which is most of the work in an
+    // evaluation. A fresh `apl_at` per Brent step would cold-start every time.
+    let mut workspace = AplWorkspace::new(design, n, n_coef).map_err(BixverseErrors::from)?;
+    workspace
+        .begin_gene(
+            counts,
+            RecycledRow::Values(log_offset),
+            None,
+            START_DISPERSION,
+        )
+        .map_err(BixverseErrors::from)?;
 
-    let log_alpha = brent_fmin(LOG_ALPHA_LOWER, LOG_ALPHA_UPPER, neg_apl, LOG_ALPHA_TOL);
+    let log_alpha = brent_fmin(
+        LOG_ALPHA_LOWER,
+        LOG_ALPHA_UPPER,
+        |log_alpha: f64| -> f64 {
+            match workspace.eval(log_alpha.exp()) {
+                Ok(v) => {
+                    any_ok.set(true);
+                    -v
+                }
+                Err(e) => {
+                    first_error
+                        .borrow_mut()
+                        .get_or_insert_with(|| e.to_string());
+                    f64::INFINITY
+                }
+            }
+        },
+        LOG_ALPHA_TOL,
+    );
 
     if !any_ok.get() {
         return Err(BixverseErrors::SctDispersionSearchFailed {

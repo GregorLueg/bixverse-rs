@@ -15,6 +15,7 @@
 use rayon::prelude::*;
 use rustc_hash::FxHashSet;
 use std::time::Instant;
+use thousands::Separable;
 
 use crate::errors::BixverseErrors;
 use crate::prelude::*;
@@ -122,9 +123,10 @@ pub fn apr_gene_pass<S: SingleCellReading>(
 
     if verbosity.normal_verbosity() {
         println!(
-            "Analytic Pearson: swept {n_genes} genes in {:.2?}, {} pass the min_cells filter",
+            "Analytic Pearson: swept {} genes in {:.2?}, {} pass the min_cells filter",
+            n_genes.separate_with_underscores(),
             start.elapsed(),
-            retained.len()
+            retained.len().separate_with_underscores()
         );
     }
 
@@ -322,8 +324,8 @@ pub fn fit_analytic_pearson_grouped<G: SingleCellReading, C: SingleCellReading>(
         if verbosity.normal_verbosity() {
             println!(
                 "Analytic Pearson: group {group} fitted over {} cells, {} genes ({:.2?})",
-                group_cells.len(),
-                models[group].len(),
+                group_cells.len().separate_with_underscores(),
+                models[group].len().separate_with_underscores(),
                 start.elapsed()
             );
         }

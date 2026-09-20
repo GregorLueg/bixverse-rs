@@ -36,6 +36,7 @@
 
 use rayon::prelude::*;
 use std::time::Instant;
+use thousands::Separable;
 
 use indexmap::IndexSet;
 
@@ -497,7 +498,8 @@ pub fn residual_variance<S: SingleCellReading>(
 
     if verbosity.normal_verbosity() {
         println!(
-            "Residual variance for {n_genes} gene(s) across {n_groups} group(s) in {:.2?}",
+            "Residual variance for {} gene(s) across {n_groups} group(s) in {:.2?}",
+            n_genes.separate_with_underscores(),
             start.elapsed()
         );
     }
