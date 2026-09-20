@@ -12,9 +12,9 @@ use crate::single_cell::sc_processing::residuals::{
 
 use super::model::{SctCellContext, SctGeneParams, SctModel, fill_residual_row};
 
-/////////////////////
-// SctResiduals    //
-/////////////////////
+//////////////////
+// SctResiduals //
+//////////////////
 
 /// Pearson residuals from one or more fitted scTransform models.
 ///

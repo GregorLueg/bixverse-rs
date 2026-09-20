@@ -8,8 +8,6 @@
 //! need a scratch vector of every cell per worker, while a cell-major sweep is
 //! flat in memory and exact.
 //!
-//! Only then is there anything to "fit", and it is arithmetic, not iteration.
-//!
 //! ### References
 //!
 //! Lause, Berens & Kobak, Genome Biology, 2021, 22:258
@@ -166,10 +164,6 @@ pub fn cell_totals_over_genes<S: SingleCellReading>(
         });
     }
 
-    // `read_cells_parallel` does not deduplicate, so a repeated cell would be
-    // counted twice here while the gene sums, keyed by an `IndexSet`, count it
-    // once. `total` would then stop equalling `sum(cell_totals)` and `mu` would
-    // no longer be the maximum likelihood solution of anything.
     distinct_cell_set(cell_indices)?;
 
     let retained: FxHashSet<u32> = genes.iter().map(|&g| g as u32).collect();
@@ -240,9 +234,9 @@ pub fn build_apr_model(
     })
 }
 
-//////////////////
-// Grouped fit  //
-//////////////////
+/////////////////
+// Grouped fit //
+/////////////////
 
 /// One analytic Pearson model per group, plus the per-cell totals they are
 /// scored against.

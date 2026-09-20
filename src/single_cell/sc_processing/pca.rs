@@ -16,6 +16,16 @@ use crate::core::math::sparse::sparse_svd_lanczos;
 use crate::prelude::*;
 use crate::single_cell::sc_processing::residuals::{ResidualSource, chunk_counts};
 
+////////////
+// Consts //
+////////////
+
+/// Standard deviation below which a feature is treated as constant.
+///
+/// Dividing by anything smaller turns rounding noise into a unit-variance
+/// feature that then dominates the leading components.
+const SCALE_ZERO_SD: f32 = 1e-8;
+
 ///////////
 // Types //
 ///////////
@@ -251,12 +261,6 @@ pub fn scale_csc_chunk(
     centre_and_scale(dense_data, mean_center, normalise_variance)
 }
 
-/// Standard deviation below which a feature is treated as constant.
-///
-/// Dividing by anything smaller turns rounding noise into a unit-variance
-/// feature that then dominates the leading components.
-const SCALE_ZERO_SD: f32 = 1e-8;
-
 /// Centres and scales a densified feature column in place.
 ///
 /// Shared by the log-normalised and the Pearson-residual column sources so the
@@ -354,9 +358,9 @@ pub fn residual_csc_chunk(
     ))
 }
 
-/////////////////////
+////////////////////
 // Column sources //
-/////////////////////
+////////////////////
 
 /// What the dense PCA fills each feature column with.
 ///
@@ -372,10 +376,7 @@ pub enum PcaColumnSource<'a> {
     /// Pearson residuals regenerated from a fitted residual model.
     ///
     /// Covers both scTransform and the analytic Pearson residuals, and with
-    /// either, one model per sample. Note that `normalise_variance` should
-    /// normally be off here: residuals carry the biological signal as variance,
-    /// which is the whole point of the transformation, and dividing it back out
-    /// throws it away.
+    /// either, one model per sample.
     Residual {
         /// The fitted source, holding the models and the per-cell group map.
         source: &'a dyn ResidualSource,
@@ -620,16 +621,10 @@ fn dense_pca<S: SingleCellReading>(
     };
     let residuals = matches!(source, PcaColumnSource::Residual { .. });
 
-    // The CLR transformation rewrites the stored normalised layer, which the
-    // residual path does not read at all. Silently combining them would look
-    // like it worked.
+    // assertions
     if residuals && params_pca.clr {
         return Err(BixverseErrors::PcaResidualsWithClr);
     }
-    // Residuals carry the biological signal as variance, which is the point of
-    // the transformation. Dividing it back out per gene flattens exactly the
-    // ranking the transformation produces, and the default is on, so this is
-    // refused rather than documented.
     if residuals && params_pca.normalise_variance {
         return Err(BixverseErrors::PcaResidualsWithVarianceNormalisation);
     }
@@ -868,9 +863,9 @@ pub fn pca_on_sc_stats<S: SingleCellReading>(
     Ok((scores, loadings, s, feature_means, feature_sds))
 }
 
-///////////////////
+//////////////////
 // Residual PCA //
-///////////////////
+//////////////////
 
 /// PCA on scTransform Pearson residuals.
 ///
@@ -880,11 +875,6 @@ pub fn pca_on_sc_stats<S: SingleCellReading>(
 /// regenerated per gene as the dense matrix is filled, which costs one
 /// exponential per entry and saves an `n_hvg * n_cells` file that would go
 /// stale on any cell subsetting.
-///
-/// Defaults worth knowing: residuals already carry their variance as signal, so
-/// `normalise_variance` is usually wrong here even though the shared
-/// [`SingleCellPcaParams`] defaults it on. `mean_center` stays sensible, since
-/// the residuals are only approximately centred.
 ///
 /// ### Params
 ///

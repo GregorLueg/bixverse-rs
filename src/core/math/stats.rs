@@ -40,8 +40,8 @@ const GAMMA_MLE_MAX_ITER: usize = 100;
 /// The score equation solves `ln k - psi(k) = s`, whose left side behaves like
 /// `1 / (2k)` for large `k`, so `s` at this floor already implies a shape near
 /// 5e11. An exact zero test would not do: a sample of identical values reaches
-/// `s = 0` only up to rounding, and the sign of that last bit decides between an
-/// error and a nonsense fit.
+/// `s = 0` only up to rounding, and the sign of that last bit decides between
+/// an error and a nonsense fit.
 const GAMMA_MLE_MIN_LOG_SPREAD: f64 = 1e-12;
 
 /// Relative step size below which the [`fit_gamma_mle`] Newton solve stops.
@@ -802,9 +802,9 @@ pub fn calculate_critval<T: BixverseFloat>(
     random_sample[index + 1]
 }
 
-////////////////////////
+///////////////////////
 // Distribution fits //
-////////////////////////
+///////////////////////
 
 /// Maximum likelihood fit of a gamma with the location fixed at zero.
 ///
@@ -815,9 +815,6 @@ pub fn calculate_critval<T: BixverseFloat>(
 /// zero only for degenerate data. Newton on that equation converges in a
 /// handful of steps from Minka's closed-form starting point.
 ///
-/// Matches `scipy.stats.gamma.fit(x, floc=0)` and R's
-/// `MASS::fitdistr(x, "gamma")` up to their own convergence tolerances.
-///
 /// ### Params
 ///
 /// * `x` - Observations, all strictly positive and finite
@@ -825,8 +822,9 @@ pub fn calculate_critval<T: BixverseFloat>(
 /// ### Returns
 ///
 /// `(shape, scale)`, or [`BixverseErrors::InvalidArgument`] when the sample is
-/// empty, holds a non-positive or non-finite value, or has less log-scale spread
-/// than [`GAMMA_MLE_MIN_LOG_SPREAD`], which pins the shape at absurd values.
+/// empty, holds a non-positive or non-finite value, or has less log-scale
+/// spread than [`GAMMA_MLE_MIN_LOG_SPREAD`], which pins the shape at absurd
+/// values.
 ///
 /// ### References
 ///
@@ -888,9 +886,9 @@ pub fn fit_gamma_mle(x: &[f64]) -> Result<(f64, f64), BixverseErrors> {
     Ok((shape, mean / shape))
 }
 
-//////////////////////
+/////////////////////
 // Goodness of fit //
-//////////////////////
+/////////////////////
 
 /// Result of a one-sample Kolmogorov-Smirnov test
 #[derive(Clone, Copy, Debug)]
@@ -967,8 +965,8 @@ fn kolmogorov_sf(lambda: f64) -> f64 {
 ///
 /// The p-value is the asymptotic Kolmogorov form with Stephens' finite-sample
 /// correction on the statistic, which tracks the exact distribution to about
-/// three decimal places from `n = 5` upwards. `scipy.stats.kstest` evaluates the
-/// exact `kstwo` distribution instead, so the two agree in the range that
+/// three decimal places from `n = 5` upwards. `scipy.stats.kstest` evaluates
+/// the exact `kstwo` distribution instead, so the two agree in the range that
 /// matters for a goodness-of-fit decision but not digit for digit.
 ///
 /// The reference distribution must not have been fitted on this same sample if
@@ -1110,7 +1108,8 @@ where
 /// Each observation is placed in the half-open bin `(breaks[b], breaks[b + 1]]`
 /// that contains its `x`, matching R's `cut`, and scored against the median and
 /// scaled MAD of the `y` values falling in the same bin. Observations outside
-/// the break range score `0.0`, as R's `score <- rep(0, length(x))` leaves them.
+/// the break range score `0.0`, as R's `score <- rep(0, length(x))` leaves
+/// them.
 ///
 /// ### Params
 ///
@@ -1233,6 +1232,7 @@ pub fn is_outlier(y: &[f64], x: &[f64], th: f64) -> Result<Vec<bool>, BixverseEr
         .map(|(a, b)| a.abs().min(b.abs()) > th)
         .collect())
 }
+
 ///////////////////
 // One-way ANOVA //
 ///////////////////

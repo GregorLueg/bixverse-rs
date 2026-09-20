@@ -158,9 +158,6 @@ impl SctCovariates {
             });
         }
 
-        // Row-major, so a cell's covariates are contiguous and the per-cell dot
-        // product in the residual is a single cache line on any realistic
-        // covariate count.
         let mut values = Vec::with_capacity(n_cells * columns.len());
         for cell in 0..n_cells {
             for (_, col) in columns {
@@ -353,9 +350,9 @@ impl<'a> SctCellContext<'a> {
     }
 }
 
-/////////////////
+////////////////
 // Gene stats //
-/////////////////
+////////////////
 
 /// Per-gene summaries over the full cell set, one pass over the gene-major
 /// store.
@@ -364,8 +361,8 @@ impl<'a> SctCellContext<'a> {
 /// it and the type carries no discriminator**, so check the producer:
 ///
 /// * [`super::stream::sct_gene_pass`] returns them indexed by **store gene
-///   index**, covering every gene in the store. [`super::stream::fit_sctransform`]'s
-///   Poisson check reads them that way.
+///   index**, covering every gene in the store.
+///   [`super::stream::fit_sctransform`]'s Poisson check reads them that way.
 /// * [`regularise_sct_model`] expects them indexed by **position within the
 ///   modelled set**, i.e. subset to `SctGenePass::modelled`.
 ///   [`super::stream::fit_sctransform`] does that subsetting before it calls.
@@ -436,9 +433,9 @@ impl SctGeneStats {
 /// any gene's residual row without touching the counts of any other gene. That
 /// is what lets the residual and corrected-count stages stream.
 ///
-/// The exponential is deliberately written in the `exp(b0 + ln(10) * log10(umi))`
-/// form rather than the algebraically identical `exp(b0) * umi`; see
-/// [`sct_residual_row`].
+/// The exponential is deliberately written in the
+/// `exp(b0 + ln(10) * log10(umi))` form rather than the algebraically identical
+/// `exp(b0) * umi`; see [`sct_residual_row`].
 #[derive(Clone, Debug)]
 pub struct SctModel {
     /// Store gene indices this model covers, ascending. Lets a caller holding
@@ -655,11 +652,6 @@ pub fn regularise_sct_model(
         .chain((0..n_coef).map(|k| step1.iter().map(|f| f.coefficients[k]).collect()))
         .collect();
 
-    // The `log_umi` column sctransform also carries is the constant ln(10).
-    // Within any bin its median is itself and its MAD is zero, so its robust
-    // z-score is exactly zero and it can never flag an outlier, nor can
-    // smoothing a constant change it. Leaving it out is a saving, not a
-    // behaviour change.
     let mut outlier = vec![false; step1.len()];
     for column in &columns {
         for (slot, flagged) in
@@ -695,8 +687,6 @@ pub fn regularise_sct_model(
     let fit_x: Vec<f64> = keep.iter().map(|&i| gmean_s1[i]).collect();
     let bw = bw_sj(&fit_x)? * params.bw_adjust;
 
-    // Predict at every gene's abundance, clamped into the range the smoothing
-    // actually saw so the tails are held flat rather than extrapolated.
     let (lo, hi) = fit_x
         .iter()
         .fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), &v| {
@@ -704,9 +694,6 @@ pub fn regularise_sct_model(
         });
     let x_points: Vec<f64> = stats.log_gmean.iter().map(|&v| v.clamp(lo, hi)).collect();
 
-    // `ksmooth_normal` returns its values in sorted `x_points` order, so the
-    // permutation has to be undone, exactly as sctransform's
-    // `model_pars_fit[o, i] <- ...` does.
     let mut order: Vec<usize> = (0..n_genes).collect();
     order.sort_by(|&a, &b| {
         x_points[a]
@@ -733,10 +720,6 @@ pub fn regularise_sct_model(
         }
     }
 
-    // Poisson genes take the exact offset model: theta infinite, the intercept
-    // straight off the gene mean, and every covariate coefficient zeroed. A
-    // gene with no overdispersion has nothing for a covariate to explain, and
-    // sctransform pads its offset parameters with zeros for the same reason.
     for g in 0..n_genes {
         if poisson[g] {
             disp_fit[g] = 0.0;

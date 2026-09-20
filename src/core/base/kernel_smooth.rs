@@ -20,9 +20,6 @@ use crate::errors::BixverseErrors;
 ////////////
 
 /// Number of bins R's `bw.SJ` uses for the pair-distance counts.
-///
-/// R's `nb` argument, default `1000L`. It also decides which counting path is
-/// taken: binned when `n > nb / 2`, exact pairwise below that.
 const BW_NB: usize = 1000;
 
 /// Squared-distance cutoff in R's `bw_phi4` / `bw_phi6`.
@@ -35,9 +32,6 @@ const BW_DELMAX: f64 = 1000.0;
 const SQRT_2PI: f64 = 2.506_628_274_631_000_5;
 
 /// Denominator R's `bw.nrd` divides the interquartile range by.
-///
-/// Note this is `1.34`, where `bw.SJ` uses `1.349`. The discrepancy is R's, not
-/// a typo here.
 const BW_NRD_IQR_SCALE: f64 = 1.34;
 
 /// Denominator R's `bw.SJ` divides the interquartile range by.
@@ -299,9 +293,9 @@ pub fn bw_sj(x: &[f64]) -> Result<f64, BixverseErrors> {
     .ok_or(BixverseErrors::BandwidthNoBracket)
 }
 
-//////////////
+/////////////
 // ksmooth //
-//////////////
+/////////////
 
 /// Nadaraya-Watson kernel regression with a Gaussian kernel, R's
 /// `ksmooth(kernel = "normal")`.
@@ -368,9 +362,6 @@ pub fn ksmooth_normal(
 
     for &x0 in &xp {
         let (mut num, mut den) = (0.0, 0.0);
-        // The C original assigns to `imin` inside the loop it is the bound of,
-        // which only ever affects the next evaluation point. Kept as a separate
-        // variable so that is obvious rather than looking like a live bound.
         let mut next_imin = imin;
         for i in imin..n {
             if xs[i] < x0 - cutoff {

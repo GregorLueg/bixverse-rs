@@ -172,12 +172,6 @@ impl CellBatchIndex {
             None => 1,
         };
 
-        // Densely labelled cells cannot reach a batch id above `n_cells - 1`,
-        // so capping the tally both bounds the allocation against a nonsense
-        // label and, by pigeonhole, guarantees a genuinely empty slot to
-        // report when the cap bites. Tally before touching the lookup, so that
-        // the density check below establishes `n_batches <= n_cells` before
-        // any batch id is narrowed to `u32`.
         let tally_len = n_batches.min(cell_indices.len() + 1);
         let mut batch_sizes = vec![0usize; tally_len];
 
@@ -966,23 +960,15 @@ fn sweep_gene_block<S: SingleCellReading>(
 
 /// Variance-stabilising HVG selection across every batch in `index`.
 ///
-/// One disk pass in the normal case, and no retained per-gene state. The first
-/// pass keeps five scalars per gene per batch; after the loess, the
-/// standardised variance falls out of `var / expected_var` for every gene the
-/// clip cannot reach. That identity holds because unclipped standardised values
-/// are `(x - mean) / sd`, which sum to zero by construction, leaving the
-/// variance of the standardised values exactly `var / expected_var`.
+/// One disk pass in the normal case. Standardised variance falls out of
+/// `var / expected_var` wherever the clip cannot reach, since unclipped
+/// standardised values sum to zero by construction; only the genes the clip
+/// does reach need an exact re-read.
 ///
-/// The genes the clip does reach are re-read and evaluated exactly. On droplet
-/// data that is a fraction of a percent of the store. It grows as `clip_max`
-/// shrinks, so a small cell count re-reads more of the store, but a small cell
-/// count is also a small store.
-///
-/// Genes with no selected counts fall out with `mean = var = 0`, so `log10`
-/// gives `-inf`. `LoessRegression::fit` drops non-finite points and leaves
-/// their fitted value at `0.0`, which makes the expected variance `1.0` and
-/// the standardised variance `0.0`. That behaviour is relied upon; do not
-/// "fix" it into a NaN.
+/// Genes with no selected counts get `mean = var = 0`, so `log10` gives
+/// `-inf`. `LoessRegression::fit` drops non-finite points and fits `0.0`
+/// there, giving expected variance `1.0` and standardised variance `0.0` —
+/// relied upon; do not "fix" it into a NaN.
 ///
 /// ### Params
 ///
@@ -1740,9 +1726,9 @@ pub fn get_hvg_mvb_batch_aware_streaming<S: SingleCellReading>(
     )
 }
 
-///////////////////////
+////////////////////////
 // Residual-based HVG //
-///////////////////////
+////////////////////////
 
 /// Selects variable features from per-group residual variance.
 ///
@@ -1808,12 +1794,6 @@ pub fn select_residual_hvg(
     let mut selected = vec![false; genes.len()];
 
     for variance in per_group_variance {
-        // A NaN would make `partial_cmp` return `None` for every comparison
-        // against it. Treating that as `Equal` breaks transitivity, which both
-        // ranks the NaN gene arbitrarily high and, past a few dozen of them,
-        // makes `sort_unstable_by` panic outright on the broken total order.
-        // Sorting it to the bottom is the honest answer: a gene with no
-        // computable variance is not a variable gene.
         let key = |i: usize| {
             let v = variance[i];
             if v.is_nan() { f64::NEG_INFINITY } else { v }

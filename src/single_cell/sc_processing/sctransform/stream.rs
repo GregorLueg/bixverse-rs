@@ -664,28 +664,7 @@ fn select_step1_genes(
     Ok(picked)
 }
 
-/// Sampling weights inversely proportional to the density of `x`.
-///
-/// A Gaussian kernel density estimate on R's `bw.nrd` bandwidth, evaluated on a
-/// grid and interpolated back, matching `density(bw = 'nrd')` followed by
-/// `approx()`. Machine epsilon is added before inverting so a gene in an empty
-/// stretch of the spectrum gets a large weight rather than an infinite one.
-///
-/// ### Params
-///
-/// * `x` - The abundances to weight.
-///
-/// ### Returns
-///
-/// One weight per entry of `x`, or a [`BixverseErrors`] when the bandwidth
-/// cannot be estimated.
 /// The interval R's `density()` lays its grid over.
-///
-/// `min(x) - cut * bw` to `max(x) + cut * bw`, with `cut` defaulting to 3. Split
-/// out so that [`DENSITY_CUTOFF`] can be pinned exactly: the density values
-/// themselves shift by only ~7e-5 relative between `cut = 3` and `cut = 4`,
-/// which is below the tolerance a binned-FFT-versus-exact-sum comparison can
-/// honestly claim, so comparing them would not catch the constant drifting.
 ///
 /// ### Params
 ///
@@ -700,6 +679,21 @@ fn density_grid_span(lo: f64, hi: f64, bw: f64) -> (f64, f64) {
     (lo - DENSITY_CUTOFF * bw, hi + DENSITY_CUTOFF * bw)
 }
 
+/// Sampling weights inversely proportional to the density of `x`.
+///
+/// A Gaussian kernel density estimate on R's `bw.nrd` bandwidth, evaluated on
+/// a grid and interpolated back, matching `density(bw = 'nrd')` followed by
+/// `approx()`. Epsilon is added before inverting so a point in an empty
+/// stretch of the spectrum gets a large weight rather than an infinite one.
+///
+/// ### Params
+///
+/// * `x` - The abundances to weight.
+///
+/// ### Returns
+///
+/// One weight per entry of `x`, or a [`BixverseErrors`] when the bandwidth
+/// cannot be estimated.
 fn inverse_density_weights(x: &[f64]) -> Result<Vec<f64>, BixverseErrors> {
     let bw = bw_nrd(x)?;
     let (lo, hi) = x
@@ -965,11 +959,8 @@ pub fn sct_residual_variance<S: SingleCellReading>(
 // Corrected counts //
 //////////////////////
 
-/// Writes the scTransform corrected UMI counts as a gene-major store.
-///
-/// The correction reverses the regression with every cell placed at the median
-/// library size, so what comes out is what the counts would have been had every
-/// cell been sequenced equally deeply:
+/// Writes scTransform-corrected UMI counts as a gene-major store, with every
+/// cell placed at the median library size:
 ///
 /// ```text
 /// r_c  = (y_c - mu_c) / sqrt(mu_c + mu_c^2 / theta)
@@ -977,37 +968,14 @@ pub fn sct_residual_variance<S: SingleCellReading>(
 /// y'_c = max(round(mu' + r_c * sqrt(mu' + mu'^2 / theta)), 0)
 /// ```
 ///
-/// Two differences from [`super::model::sct_residual_row`], both deliberate and both matching
-/// sctransform's `correct_counts`: the residual here is neither clipped nor
-/// floored by `min_variance`. Clipping exists to stop a single outlying cell
-/// dominating a PCA, which is not what a count matrix is for, and the variance
-/// floor would bias the reversal.
+/// Unlike [`super::model::sct_residual_row`], the residual is neither clipped
+/// nor floored by `min_variance` here, matching sctransform's `correct_counts`.
 ///
-/// `mu'` does not depend on the cell, so it is computed once per gene.
+/// The normalised layer is `ln(1 + y')` with no library normalisation, and
+/// `target_size` is left at the "unknown" sentinel.
 ///
-/// Sparsity is approximately but not exactly preserved. A zero count in a
-/// deeply sequenced cell corrects to a negative number and clamps back to zero,
-/// but a zero in a shallow cell can round up to one, so the output can be
-/// slightly denser than the input.
-///
-/// The normalised layer is written as `ln(1 + y')` with no library
-/// normalisation, because the correction has already removed the library-size
-/// structure that a target size would refer to. The header's `target_size` is
-/// left at the "unknown" sentinel, so anything downstream that needs a real
-/// target, such as the shifted CLR transformation, refuses this store rather
-/// than assuming one.
-///
-/// **The output's gene axis is `source.genes()`, not the store's.** Genes that
-/// failed the `min_cells` filter have no model and so no corrected counts, and
-/// writing them back as all-zero rows would misrepresent that as measurement
-/// rather than exclusion. With several groups this is the intersection, so a
-/// gene one sample dropped is absent for every sample. Gene `i` of the output
-/// is store gene `source.genes()[i]`, so a caller keeping per-gene metadata has
-/// to subset it the same way.
-///
-/// Every cell is corrected under its own group's model, and the target library
-/// size is the median over all selected cells rather than a per-group one, so
-/// the output sits on a single scale.
+/// The output's gene axis is `source.genes()`, not the store's: genes without
+/// a fitted model are dropped rather than written as zero rows.
 ///
 /// ### Params
 ///
@@ -1016,10 +984,6 @@ pub fn sct_residual_variance<S: SingleCellReading>(
 /// * `cell_indices` - Cells to include, in the order `source` was built in.
 /// * `out_path` - Gene-major store to write.
 /// * `opts` - Disk and reporting knobs.
-///
-/// ### Returns
-///
-/// `()`, or a [`BixverseErrors`] from the reader or the writer.
 ///
 /// ### References
 ///
@@ -1105,9 +1069,9 @@ pub fn sct_corrected_counts<S: SingleCellReading, P: AsRef<Path>>(
     Ok(())
 }
 
-//////////////////
-// Grouped fit  //
-//////////////////
+/////////////////
+// Grouped fit //
+/////////////////
 
 /// One scTransform model per group, over a shared gene axis.
 #[derive(Clone, Debug)]

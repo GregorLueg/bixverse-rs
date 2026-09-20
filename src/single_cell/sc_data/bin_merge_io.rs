@@ -1,6 +1,6 @@
-//! Helpers for multi-file binary file merging. This is used to combine
-//! multiple SingleCells experiments on the R side. It enables the user to
-//! combine and merge several experiments.
+//! Helpers for multi-file binary file merging. This is used to combine multiple
+//! SingleCells experiments on the R side. It enables the user to combine and
+//! merge several experiments.
 
 use rayon::prelude::*;
 use std::path::Path;
@@ -287,18 +287,11 @@ pub fn merge_sc_bin_files<P: AsRef<Path>>(
     })
 }
 
-//////////////////////////
+////////////////////////
 // Gene store to cell //
-//////////////////////////
+////////////////////////
 
 /// Rebuilds the cell-major companion of a gene-major store.
-///
-/// The crate has long had the other direction, CSR to CSC, downstream in the R
-/// package's `SingleCellCountData`. Nothing produced a cell-major file from a
-/// gene-major one, because every ingest path writes cells first and derives
-/// genes afterwards. scTransform inverts that: its model is per gene, so its
-/// corrected counts come out gene-major and the cell companion has to be built
-/// from them.
 ///
 /// Memory is bounded by phasing over cells. Each phase holds the entries for
 /// one window of cells and re-reads the gene file to fill it, so peak memory is

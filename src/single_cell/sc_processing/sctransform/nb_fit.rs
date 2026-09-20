@@ -56,29 +56,13 @@ const LOG_ALPHA_TOL: f64 = 1e-8;
 
 /// Overdispersion below which the gene is called Poisson and theta set to
 /// infinity.
-///
-/// `glm_gp` reports an overdispersion of exactly `0.0` when the CR-APL is
-/// maximised at the boundary, but a bounded search on the log scale can only
-/// approach it. This is the boundary in that parameterisation: below it the
-/// negative binomial and the Poisson are indistinguishable at any sample size
-/// this code will see.
 const ALPHA_POISSON_FLOOR: f64 = 1e-10;
 
 /// Relative deviance tolerance for the coefficient fit.
-///
-/// Far tighter than edgeR's `1e-6` default because these coefficients are a
-/// parity target, not an input to a test statistic. At the default the
-/// intercept lands within 1.8e-7 of the reference where this brings it inside
-/// 1e-9, and the extra iterations do not show in the fit timings.
 const COEF_TOL: f64 = 1e-14;
 
 /// `ln(10)`, the coefficient on `log10(total UMI)` that a natural-log offset is
 /// algebraically equivalent to.
-///
-/// sctransform carries it as a real column of `model_pars` so that the
-/// regularisation step and the residual step can use one code path for the
-/// offset model and the general one. It is a constant, so smoothing it is a
-/// no-op, which is how "fixed slope" survives regularisation.
 pub const LOG_UMI_COEF: f64 = std::f64::consts::LN_10;
 
 /////////////
@@ -189,11 +173,6 @@ pub fn fit_nb_offset_gene(
 
     let offset = Recycled::BySample(log_offset.to_vec());
 
-    // A design that is singular for this gene's weights fails at every
-    // `log_alpha`. Returning `+inf` there is right for the search, but if it
-    // never once succeeded then `brent_fmin` minimised a constant and whatever
-    // it stopped at is meaningless, so the first error is kept and surfaced
-    // rather than dressed up as a fit.
     let first_error: RefCell<Option<String>> = RefCell::new(None);
     let any_ok = Cell::new(false);
 
