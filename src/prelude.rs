@@ -4,11 +4,11 @@
 use std::time::Duration;
 use thousands::Separable;
 
+pub use crate::core::math::MAD_SCALE;
 pub use crate::core::math::sparse::{
     CompressedSparseData2, CompressedSparseFormat, LanczosParams, SparseAxis,
     parse_compressed_sparse_format,
 };
-pub use crate::core::math::vector_helpers::MAD_SCALE;
 pub use crate::errors::*;
 pub use crate::graph::graph_structures::{EdgeData, NodeData, SparseGraph};
 pub use crate::utils::heap_structures::RevOrderedFloat;

@@ -33,3 +33,6 @@ pub const MAX_OVERSAMPLING_SINGLE_CELL: usize = 100;
 
 /// The default power iterations for randomised SVD
 pub const DEFAULT_N_POWER_ITERS_RAND_SVD: usize = 2;
+
+/// MAD scaling constant. R's `mad()` applies this factor by default.
+pub const MAD_SCALE: f64 = 1.482_602_218_505_602;

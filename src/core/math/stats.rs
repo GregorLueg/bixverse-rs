@@ -9,6 +9,7 @@ use statrs::distribution::{Continuous, ContinuousCDF, Normal};
 use statrs::function::gamma::ln_gamma;
 
 use crate::core::base::kernel_smooth::bw_sj;
+use crate::core::math::MAD_SCALE;
 use crate::core::math::distributions::{chisq_sf, f_sf, norm_sf, t_pval_two_sided};
 use crate::core::math::special::digamma;
 use crate::core::math::vector_helpers::*;
@@ -17,10 +18,6 @@ use crate::prelude::*;
 ////////////
 // Consts //
 ////////////
-
-/// MAD scaling for consistency with the standard deviation under normality,
-/// R's `mad(constant = )` default.
-const MAD_NORMAL_SCALE: f64 = 1.4826;
 
 /// Multiple of machine epsilon sctransform nudges the first bin edge down by,
 /// so that `min(x)` itself lands inside the leftmost bin rather than outside
@@ -1162,7 +1159,7 @@ pub fn robust_scale_binned(
         let vals: Vec<f64> = bin.iter().map(|&i| y[i]).collect();
         // Both are Some by construction: the bin is non-empty.
         let med = median(&vals).expect("non-empty bin");
-        let scale = mad(&vals, Some(MAD_NORMAL_SCALE)).expect("non-empty bin") + f64::EPSILON;
+        let scale = mad(&vals, Some(MAD_SCALE)).expect("non-empty bin") + f64::EPSILON;
         for (&i, v) in bin.iter().zip(vals.iter()) {
             score[i] = (v - med) / scale;
         }

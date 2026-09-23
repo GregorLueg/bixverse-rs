@@ -9,9 +9,6 @@ use crate::prelude::{BixverseFloat, BixverseNumeric};
 // Consts //
 ////////////
 
-/// MAD scaling constant. R's `mad()` applies this factor by default.
-pub const MAD_SCALE: f64 = 1.482_602_218_505_602;
-
 ///////////////
 // Functions //
 ///////////////
