@@ -1,10 +1,12 @@
 //! Scalar optimisation.
 //!
-//! One function: R's `optimize`, so a profiled likelihood minimised here stops
-//! where R stops. That matters when the objective is flat, which a profiled
-//! REML criterion near the variance-component boundary very much is.
+//! R's `optimize` and R's `uniroot`, so a profiled likelihood minimised here
+//! stops where R stops and a root found here is the root R finds. That matters
+//! when the objective is flat, which a profiled REML criterion near the
+//! variance-component boundary very much is, and when the answer feeds a
+//! parity fixture.
 //!
-//! Ported from `edge-rs` (`src/numeric/optimise.rs`).
+//! [`brent_fmin`] is ported from `edge-rs` (`src/numeric/optimise.rs`).
 
 ////////////
 // Consts //
@@ -20,6 +22,24 @@ const BRENT_SQRT_EPS: f64 = 1.490_116_119_384_765_6e-8;
 
 /// Golden section step `(3 - sqrt(5)) / 2`, as `Brent_fmin` spells it.
 const BRENT_GOLDEN: f64 = 0.381_966_011_250_105_15;
+
+/// Default `tol` of R's `uniroot`, `.Machine$double.eps^0.25`.
+///
+/// The same constant as [`OPTIMIZE_TOL`], spelled separately because the two
+/// routines are free to disagree and callers read one or the other.
+pub const UNIROOT_TOL: f64 = 1.220_703_125e-4;
+
+/// Default `maxiter` of R's `uniroot`.
+pub const UNIROOT_MAXIT: usize = 1000;
+
+/// `DBL_EPSILON`, the relative half of `R_zeroin2`'s convergence test.
+const ZEROIN_EPS: f64 = f64::EPSILON;
+
+/// Interpolation acceptance factor in `R_zeroin2`.
+///
+/// A parabolic or secant step is only taken when it lands inside this fraction
+/// of the bracketing interval, otherwise the bisection step stands.
+const ZEROIN_INTERP_FRAC: f64 = 0.75;
 
 ///////////
 // Brent //
@@ -139,6 +159,139 @@ where
             }
         }
     }
+}
+
+////////////
+// Zeroin //
+////////////
+
+/// Finds a root of a scalar function on a bracketing interval, as R's
+/// `uniroot` does.
+///
+/// A line-by-line port of R's `R_zeroin2`: inverse quadratic interpolation with
+/// a secant fallback and bisection whenever the interpolated step leaves the
+/// bracket. The convergence test is R's `2 * eps * |b| + tol / 2`.
+///
+/// The caller supplies `f(ax)` and `f(bx)` because the surrounding code in
+/// `bw.SJ` has already evaluated both while widening the search interval, and
+/// the objective is not cheap.
+///
+/// ### Params
+///
+/// * `ax` - Lower end of the bracket
+/// * `bx` - Upper end of the bracket
+/// * `fa` - `f(ax)`, already evaluated
+/// * `fb` - `f(bx)`, already evaluated
+/// * `f` - The objective
+/// * `tol` - Convergence tolerance, R's `uniroot(tol = )`. See [`UNIROOT_TOL`]
+///   for R's default.
+/// * `maxit` - Iteration cap, R's `uniroot(maxiter = )`. See [`UNIROOT_MAXIT`].
+///
+/// ### Returns
+///
+/// The root, or `None` when the interval does not bracket one or the iteration
+/// cap is hit without converging.
+///
+/// ### References
+///
+/// Brent, Algorithms for Minimization without Derivatives, 1973, chapter 4
+pub fn zeroin<F>(
+    ax: f64,
+    bx: f64,
+    fa: f64,
+    fb: f64,
+    mut f: F,
+    tol: f64,
+    maxit: usize,
+) -> Option<f64>
+where
+    F: FnMut(f64) -> f64,
+{
+    let (mut a, mut b, mut fa, mut fb) = (ax, bx, fa, fb);
+
+    if fa == 0.0 {
+        return Some(a);
+    }
+    if fb == 0.0 {
+        return Some(b);
+    }
+    if fa * fb > 0.0 {
+        return None;
+    }
+
+    // Third point of the bracket. Starts on `a` and thereafter holds whichever
+    // of the previous two iterates sits on the opposite side of the root.
+    let (mut c, mut fc) = (a, fa);
+
+    for _ in 0..=maxit {
+        let prev_step = b - a;
+
+        // Keep `b` as the best approximation so far.
+        if fc.abs() < fb.abs() {
+            a = b;
+            b = c;
+            c = a;
+            fa = fb;
+            fb = fc;
+            fc = fa;
+        }
+
+        let tol_act = 2.0 * ZEROIN_EPS * b.abs() + tol / 2.0;
+        let mut new_step = (c - b) / 2.0;
+
+        if new_step.abs() <= tol_act || fb == 0.0 {
+            return Some(b);
+        }
+
+        // Interpolate only when the previous step was large enough to trust the
+        // curvature and `b` really is the better of the two.
+        if prev_step.abs() >= tol_act && fa.abs() > fb.abs() {
+            let cb = c - b;
+            let (mut p, mut q) = if a == c {
+                // Two distinct points only, so linear (secant) interpolation.
+                let t1 = fb / fa;
+                (cb * t1, 1.0 - t1)
+            } else {
+                // Three distinct points, so inverse quadratic interpolation.
+                let q0 = fa / fc;
+                let t1 = fb / fc;
+                let t2 = fb / fa;
+                (
+                    t2 * (cb * q0 * (q0 - t1) - (b - a) * (t1 - 1.0)),
+                    (q0 - 1.0) * (t1 - 1.0) * (t2 - 1.0),
+                )
+            };
+
+            if p > 0.0 {
+                q = -q;
+            } else {
+                p = -p;
+            }
+
+            if p < (ZEROIN_INTERP_FRAC * cb * q - (tol_act * q).abs() / 2.0)
+                && p < (prev_step * q / 2.0).abs()
+            {
+                new_step = p / q;
+            }
+        }
+
+        // Never step by less than the tolerance, or the iteration stalls.
+        if new_step.abs() < tol_act {
+            new_step = if new_step > 0.0 { tol_act } else { -tol_act };
+        }
+
+        a = b;
+        fa = fb;
+        b += new_step;
+        fb = f(b);
+
+        if (fb > 0.0 && fc > 0.0) || (fb < 0.0 && fc < 0.0) {
+            c = a;
+            fc = fa;
+        }
+    }
+
+    None
 }
 
 ///////////

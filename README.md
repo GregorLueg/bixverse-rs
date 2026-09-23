@@ -30,8 +30,8 @@ Well over a hundred named methods, plus the shared numerical scaffolding they si
 | `methods` | NMF (bulk, dense HALS, sparse HALS, consensus, refit), ICA, LDA via variational Bayes, sparse multiple CCA, differential correlation, graph diffusion, SNF, RBH, CoReMo, dgRDL, cis-target; bulk DGE via edgeR's quasi-likelihood chain and limma-voom (feature `dge`) |
 | `ml` | k-means, clustering metrics, landmark Gaussian process regression, Matern kernels |
 | `ontology` | GO Elim, Wang and Resnik-style semantic similarity |
-| `single_cell` | I/O for h5ad, 10x h5, mtx, R/Seurat counts and a versioned binary sparse format (single and multi-file, mmap-backed, mergeable); QC, CellSweep ambient removal, HVG, PCA, kNN, SNN, MAGIC; doublet detection (Scrublet, scDblFinder, cxds); batch correction (Harmony v1 and v2, BBKNN, fastMNN, Seurat CCA/rPCA anchors); integration metrics (kBET, iLISI/cLISI, silhouette, PC regression); annotation (scType, Symphony); DGE (Mann-Whitney with AUROC, pseudobulk edgeR, NEBULA); analysis (SCENIC with regulon binarisation, AUCell, Hotspot, VISION, DIALOGUE, MELD, miloR, NicheNet, NMF, module scoring, fast k-means/Louvain clustering); meta cells (SEACells, MetaCells2, SuperCell, hdWGCNA, plus density and compactness metrics); trajectories (Palantir, PAGA, diffusion maps, Markov chains, gene trends); multi-modal (WNN, DSB) |
-| `gpu` | Sparse randomised SVD, SpMM and sparse GEMM, skinny GEMM, Gram, CholeskyQR2, correlation, PCA, kNN, NMF and consensus NMF, Harmony, BBKNN, SCENIC, Scrublet, SEACells, fast clustering |
+| `single_cell` | I/O for h5ad, 10x h5, mtx, R/Seurat counts and a versioned binary sparse format (single and multi-file, mmap-backed, mergeable); QC, CellSweep ambient removal, HVG, scTransform v2 (per-sample fits, covariate regression, analytic Pearson residuals, corrected counts), PCA, kNN, SNN, MAGIC; doublet detection (Scrublet, scDblFinder, cxds); batch correction (Harmony v1 and v2, BBKNN, fastMNN, Seurat CCA/rPCA anchors); integration metrics (kBET, iLISI/cLISI, silhouette, PC regression); annotation (scType, Symphony); DGE (Mann-Whitney with AUROC, pseudobulk edgeR, NEBULA); analysis (SCENIC with regulon binarisation, AUCell, Hotspot, VISION, DIALOGUE, MELD, miloR, NicheNet, NMF, module scoring, fast k-means/Louvain clustering); meta cells (SEACells, MetaCells2, SuperCell, hdWGCNA, plus density and compactness metrics); trajectories (Palantir, PAGA, diffusion maps, Markov chains, gene trends); multi-modal (WNN, DSB) |
+| `gpu` | Sparse randomised SVD, SpMM and sparse GEMM, skinny GEMM, Gram, CholeskyQR2, correlation, PCA, kNN, NMF and consensus NMF, Harmony, BBKNN, SCENIC, Scrublet, SEACells, NEBULA, fast clustering |
 
 Heavy lifting goes through [`faer`](https://github.com/sarah-quinones/faer-rs) for
 dense linear algebra, `rayon` for CPU fan-out, `wide` for SIMD, and
@@ -53,6 +53,7 @@ pays for what it uses.
 | `multi-modal` | `single_cell::multi_modal` (WNN, ADT), implies `single-cell` |
 | `dge` | Negative binomial DGE via `edge-rs`: bulk edgeR and limma-voom. Implied by `single-cell`, usable on its own |
 | `hdf5-static` | Builds the bundled HDF5 from source instead of linking an external `libhdf5` |
+| `hdf5-filters` | Compiles the LZF and Blosc filters into HDF5, so h5ad files written with those codecs load |
 | `gpu` | The `gpu` module via `cubecl` (wgpu and CPU backends) and `cubek` |
 | `large-test` | Slow but asserting tests: GPU parity gates, large-scale numerical checks |
 | `large_scale_diagnostics` | Unasserted diagnostic sweeps that print tables for a human |
@@ -119,6 +120,7 @@ crate is equally usable from a pure Rust binary or behind a PyO3 layer.
   performance here unfortunately...)
 - [x] SEACells with GPU acceleration.
 - [x] GPU-accelerated BBKNN version
+- [x] GPU-accelerated NEBULA
 
 ### Python interface
 

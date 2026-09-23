@@ -1,5 +1,23 @@
 # News
 
+## 0.5.2
+
+### Features
+
+- The [scTransform v2](https://pmc.ncbi.nlm.nih.gov/articles/PMC8764781/) has
+  been integrated. It also gives the option to write the corrected counts to
+  a binary file similar to the normal versions.
+- [CellSweep](https://www.biorxiv.org/content/10.64898/2026.03.04.709349v1.full)
+  is also wired in for denoising data.
+- GPU-accelerated NEBULA from `edge-rs` wired into the single-cell adapter as
+  `run_nebula_gpu()`. Stage two of the fit runs on the device, so the results
+  sit within the tolerance `edge-rs` gates rather than on the CPU's values.
+
+### Bug fixes
+
+- More compression types are allowed now for h5ad to get more informative
+  errors.
+
 ## 0.5.1
 
 ### Features

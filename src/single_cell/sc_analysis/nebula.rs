@@ -15,8 +15,9 @@
 //! labels as a run encoding. The caller does not: this module sorts
 //! `cells_to_keep` and permutes the design and offsets to match.
 
+use edge_rs::errors::EdgeErrors;
 use edge_rs::prelude::{CompressedSparse, SparseFormat};
-use edge_rs::sc::nebula::{NebulaMethod, NebulaParams, nebula_sparse};
+use edge_rs::sc::nebula::{NebulaFit, NebulaMethod, NebulaParams, nebula_sparse};
 use edge_rs::sc::shrink::{sc_residual_df, shrink_sc_dispersion};
 use edge_rs::sc::test::{ScTested, glm_sc_test};
 use indexmap::IndexSet;
@@ -254,6 +255,71 @@ pub fn run_nebula<S: SingleCellReading>(
     params: &NebulaScParams,
     verbose: usize,
 ) -> Result<NebulaScRes, BixverseErrors> {
+    run_nebula_with(
+        gene_reader,
+        cell_reader,
+        cells_to_keep,
+        gene_indices,
+        subject_ids,
+        design,
+        n_coef,
+        offset,
+        params,
+        verbose,
+        |counts, subject_run, design_ordered, n_coef, offsets, nebula_params| {
+            nebula_sparse(
+                counts,
+                subject_run,
+                design_ordered,
+                n_coef,
+                Some(offsets),
+                Some(nebula_params),
+            )
+        },
+    )
+}
+
+/// [run_nebula] with the per-batch fit handed in.
+///
+/// Everything around the fit is adapter work that the GPU path shares verbatim,
+/// so the one call that differs is a parameter. See
+/// [`crate::gpu::sc_gpu::nebula_gpu::run_nebula_gpu`] for the other caller.
+///
+/// ### Params
+///
+/// * `fit_batch` - Fits one gene batch, taking the counts as CSR over
+///   `(n_batch_genes, n_cells)`, the subject run encoding, the row-major
+///   design, its column count, the per-cell offsets and the upstream knobs.
+///   Everything else is as [run_nebula]
+///
+/// ### Returns
+///
+/// As [run_nebula].
+#[allow(clippy::too_many_arguments)]
+pub fn run_nebula_with<S, F>(
+    gene_reader: &S,
+    cell_reader: &S,
+    cells_to_keep: &[usize],
+    gene_indices: &[usize],
+    subject_ids: &[usize],
+    design: &[f64],
+    n_coef: usize,
+    offset: Option<&[f64]>,
+    params: &NebulaScParams,
+    verbose: usize,
+    mut fit_batch: F,
+) -> Result<NebulaScRes, BixverseErrors>
+where
+    S: SingleCellReading,
+    F: FnMut(
+        &CompressedSparse<f64>,
+        &[usize],
+        &[f64],
+        usize,
+        &[f64],
+        NebulaParams,
+    ) -> Result<NebulaFit, EdgeErrors>,
+{
     let verbosity = parse_verbosity_level(verbose);
     let start_all = Instant::now();
 
@@ -355,13 +421,13 @@ pub fn run_nebula<S: SingleCellReading>(
         }
 
         let start_fit = Instant::now();
-        let fit = match nebula_sparse(
+        let fit = match fit_batch(
             &sparse,
             &subject_run,
             &design_ordered,
             n_coef,
-            Some(&offsets),
-            Some(params.nebula),
+            &offsets,
+            params.nebula,
         ) {
             Ok(fit) => Some(fit),
             // A batch can legitimately lose every gene to the expression

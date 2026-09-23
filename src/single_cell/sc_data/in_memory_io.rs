@@ -7,15 +7,23 @@
 //! presents such a matrix through the same trait so those methods can be reused
 //! rather than reimplemented.
 //!
-//! Gene-major only. Nothing that consumes it needs cell chunks, and building a
-//! CSR twin purely to serve them would double the memory for no gain, so
-//! [`SingleCellReading::read_cells_parallel`] refuses and the one cell-side
-//! quantity that is actually needed, the library sizes, is summed once up
-//! front.
+//! Gene-major by default. Nothing that consumes it needs cell chunks, and
+//! building a CSR twin purely to serve them would double the memory for no
+//! gain, so [`SingleCellReading::read_cells_parallel`] refuses and the one
+//! cell-side quantity that is actually needed, the library sizes, is summed
+//! once up front.
+//!
+//! [`InMemorySparseReader::new_cell_major`] is the exception, for the callers
+//! that genuinely need cell chunks: the analytic Pearson fit sums each cell
+//! over its group's retained genes, which no gene-major sweep can answer. It
+//! owns a real CSR copy of the matrix, so it costs the doubled memory the
+//! default avoids. Worth it for metacells, which is what asks for it; do not
+//! reach for it on a raw-cell matrix.
 
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
+use crate::core::math::sparse::transpose_sparse;
 use crate::prelude::*;
 use crate::single_cell::sc_data::data_io::{
     CscGeneChunk, CsrCellChunk, RawCounts, SingleCellReading, SparseDataHeader,
@@ -34,7 +42,17 @@ use crate::single_cell::sc_traits::F16;
 pub struct InMemorySparseReader<'a> {
     /// The counts, CSC with shape (cells, genes). `data` holds raw counts and
     /// `data_2` the normalised layer.
+    ///
+    /// In cell-major mode this still points at the caller's CSC matrix and the
+    /// reads come off `transposed` instead. Keeping it lets both modes share
+    /// the shape and the library-size sweep.
     matrix: &'a CompressedSparseData2<u32, f32>,
+    /// The CSR twin, present only in cell-major mode.
+    ///
+    /// Owned, because it is a real scatter of `matrix` rather than a view: a
+    /// CSC relabelled as CSR describes the transpose, which is the wrong axis
+    /// here.
+    transposed: Option<CompressedSparseData2<u32, f32>>,
     /// Total raw counts per cell, summed once in [`InMemorySparseReader::new`].
     library_sizes: Vec<usize>,
     /// Header describing the store. The file-layout fields carry no meaning
@@ -86,9 +104,94 @@ impl<'a> InMemorySparseReader<'a> {
 
         Ok(Self {
             matrix,
+            transposed: None,
             library_sizes,
             header,
             target_size,
+        })
+    }
+
+    /// Wrap the same matrix as a cell-major store.
+    ///
+    /// Builds and owns a CSR twin, so peak memory is roughly twice the matrix
+    /// for as long as the reader lives. Use it only where cell chunks are
+    /// genuinely needed, such as the per-cell totals the analytic Pearson fit
+    /// sums over each group's retained genes.
+    ///
+    /// Note this is not [`CompressedSparseData2::transpose_and_convert`], which
+    /// relabels a CSC as a CSR and swaps the shape, describing the transpose.
+    /// What is wanted here is the same matrix in the other layout, which is a
+    /// real scatter.
+    ///
+    /// ### Params
+    ///
+    /// * `matrix` - The counts, CSC with shape (cells, genes). Raw counts in
+    ///   `data`, normalised counts in `data_2`.
+    /// * `target_size` - Library size `data_2` was normalised against, if the
+    ///   caller knows it.
+    ///
+    /// ### Returns
+    ///
+    /// The reader, or [`BixverseErrors::SparseMatrixMustBeCsc`] for a CSR input
+    /// and [`BixverseErrors::Data2NotAvailable`] when the normalised layer is
+    /// missing.
+    pub fn new_cell_major(
+        matrix: &'a CompressedSparseData2<u32, f32>,
+        target_size: Option<f32>,
+    ) -> Result<Self, BixverseErrors> {
+        let mut reader = Self::new(matrix, target_size)?;
+        let n_cells = matrix.shape.0;
+
+        // `transpose_sparse` keeps the shape and changes the layout, so this is
+        // CSR over (cells, genes): one run per cell, gene indices ascending.
+        reader.transposed = Some(transpose_sparse(matrix));
+        reader.header.cell_based = true;
+        reader.header.no_chunks = n_cells;
+        reader.header.index_map = (0..n_cells).map(|cell| (cell, cell)).collect();
+
+        Ok(reader)
+    }
+
+    /// Build the chunk for one cell.
+    ///
+    /// ### Params
+    ///
+    /// * `cell` - Cell index
+    ///
+    /// ### Returns
+    ///
+    /// The [CsrCellChunk], or [`BixverseErrors::ReaderModeMismatch`] in
+    /// gene-major mode and [`BixverseErrors::ChunkIndexNotFound`] when the
+    /// index is past the cell axis.
+    fn cell_chunk(&self, cell: usize) -> Result<CsrCellChunk, BixverseErrors> {
+        let transposed = self
+            .transposed
+            .as_ref()
+            .ok_or(BixverseErrors::ReaderModeMismatch {
+                actual: "gene-based",
+                requested: "cell-based",
+            })?;
+
+        if cell >= self.matrix.shape.0 {
+            return Err(BixverseErrors::ChunkIndexNotFound(cell));
+        }
+
+        let lo = transposed.indptr[cell] as usize;
+        let hi = transposed.indptr[cell + 1] as usize;
+
+        let data_raw = RawCounts::from_u32_auto(&transposed.data[lo..hi]);
+        let data_norm: Vec<F16> = transposed.data_2.as_ref().expect("checked in `new`")[lo..hi]
+            .iter()
+            .map(|&v| F16::from_f32(v))
+            .collect();
+
+        Ok(CsrCellChunk {
+            data_raw,
+            data_norm,
+            library_size: self.library_sizes[cell],
+            indices: transposed.indices[lo..hi].to_vec(),
+            original_index: cell,
+            to_keep: true,
         })
     }
 
@@ -178,20 +281,25 @@ fn cell_library_sizes(matrix: &CompressedSparseData2<u32, f32>, n_cells: usize) 
 }
 
 impl SingleCellReading for InMemorySparseReader<'_> {
-    /// Always fails: this store has no cell-major view.
+    /// Read cells by index in a multi-threaded manner
+    ///
+    /// Only available on a reader built with
+    /// [`InMemorySparseReader::new_cell_major`]; the default gene-major reader
+    /// has no CSR twin to read from.
     ///
     /// ### Params
     ///
-    /// * `_indices` - Ignored
+    /// * `indices` - Index positions of the cells to retrieve
     ///
     /// ### Returns
     ///
-    /// [`BixverseErrors::ReaderModeMismatch`].
-    fn read_cells_parallel(&self, _indices: &[usize]) -> Result<Vec<CsrCellChunk>, BixverseErrors> {
-        Err(BixverseErrors::ReaderModeMismatch {
-            actual: "gene-based",
-            requested: "cell-based",
-        })
+    /// The [CsrCellChunk]s in the order given by `indices`, or
+    /// [`BixverseErrors::ReaderModeMismatch`] in gene-major mode.
+    fn read_cells_parallel(&self, indices: &[usize]) -> Result<Vec<CsrCellChunk>, BixverseErrors> {
+        indices
+            .par_iter()
+            .map(|&cell| self.cell_chunk(cell))
+            .collect()
     }
 
     /// Read genes by index in a multi-threaded manner
@@ -202,8 +310,16 @@ impl SingleCellReading for InMemorySparseReader<'_> {
     ///
     /// ### Returns
     ///
-    /// The [CscGeneChunk]s in the order given by `indices`.
+    /// The [CscGeneChunk]s in the order given by `indices`, or
+    /// [`BixverseErrors::ReaderModeMismatch`] in cell-major mode.
     fn read_gene_parallel(&self, indices: &[usize]) -> Result<Vec<CscGeneChunk>, BixverseErrors> {
+        if self.transposed.is_some() {
+            return Err(BixverseErrors::ReaderModeMismatch {
+                actual: "cell-based",
+                requested: "gene-based",
+            });
+        }
+
         indices
             .par_iter()
             .map(|&gene| self.gene_chunk(gene))
@@ -223,9 +339,9 @@ impl SingleCellReading for InMemorySparseReader<'_> {
     ///
     /// ### Returns
     ///
-    /// Always `false`.
+    /// `true` when built with [`InMemorySparseReader::new_cell_major`].
     fn is_cell_based(&self) -> bool {
-        false
+        self.transposed.is_some()
     }
 
     /// Library size the normalised layer was scaled to.
@@ -347,5 +463,75 @@ mod tests {
 
         assert!(reader.read_gene_parallel(&[3]).is_err());
         assert!(reader.read_cell_library_sizes(&[4]).is_err());
+    }
+
+    /// Cell chunks carry the row the CSC describes, in request order.
+    #[test]
+    fn test_cell_chunks_carry_the_row_verbatim() {
+        let matrix = toy_csc();
+        let reader = InMemorySparseReader::new_cell_major(&matrix, None).unwrap();
+
+        let chunks = reader.read_cells_parallel(&[3, 0]).unwrap();
+
+        assert_eq!(chunks[0].original_index, 3);
+        assert_eq!(chunks[0].indices, vec![1, 2]);
+        assert_eq!(chunks[0].data_raw.iter().collect::<Vec<u32>>(), vec![1, 7]);
+        assert_eq!(chunks[0].library_size, 8);
+
+        assert_eq!(chunks[1].original_index, 0);
+        assert_eq!(chunks[1].indices, vec![0, 1]);
+        assert_eq!(chunks[1].data_raw.iter().collect::<Vec<u32>>(), vec![3, 1]);
+        assert_eq!(chunks[1].library_size, 4);
+    }
+
+    /// The two modes are exclusive: each serves its own axis and refuses the
+    /// other, so a caller cannot silently get the wrong orientation.
+    #[test]
+    fn test_cell_major_mode_refuses_gene_reads() {
+        let matrix = toy_csc();
+        let reader = InMemorySparseReader::new_cell_major(&matrix, Some(1e4)).unwrap();
+
+        assert!(reader.is_cell_based());
+        assert!(!reader.is_gene_based());
+        assert!(reader.get_header().cell_based);
+        assert_eq!(reader.get_header().total_cells, 4);
+        assert_eq!(reader.target_size(), Some(1e4));
+        assert!(reader.read_gene_parallel(&[0]).is_err());
+    }
+
+    /// Every stored value survives the transpose, so the two orientations hold
+    /// the same matrix.
+    #[test]
+    fn test_cell_major_preserves_every_entry() {
+        let matrix = toy_csc();
+        let gene_major = InMemorySparseReader::new(&matrix, None).unwrap();
+        let cell_major = InMemorySparseReader::new_cell_major(&matrix, None).unwrap();
+
+        let mut from_genes: Vec<(u32, usize, u32)> = Vec::new();
+        for chunk in gene_major.read_gene_parallel(&[0, 1, 2]).unwrap() {
+            for (&cell, count) in chunk.indices.iter().zip(chunk.data_raw.iter()) {
+                from_genes.push((cell, chunk.original_index, count));
+            }
+        }
+
+        let mut from_cells: Vec<(u32, usize, u32)> = Vec::new();
+        for chunk in cell_major.read_cells_parallel(&[0, 1, 2, 3]).unwrap() {
+            for (&gene, count) in chunk.indices.iter().zip(chunk.data_raw.iter()) {
+                from_cells.push((chunk.original_index as u32, gene as usize, count));
+            }
+        }
+
+        from_genes.sort_unstable();
+        from_cells.sort_unstable();
+        assert_eq!(from_genes, from_cells);
+    }
+
+    /// Out-of-range cell indices error rather than reading past the buffers.
+    #[test]
+    fn test_cell_major_out_of_range_errors() {
+        let matrix = toy_csc();
+        let reader = InMemorySparseReader::new_cell_major(&matrix, None).unwrap();
+
+        assert!(reader.read_cells_parallel(&[4]).is_err());
     }
 }

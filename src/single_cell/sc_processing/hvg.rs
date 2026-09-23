@@ -172,12 +172,6 @@ impl CellBatchIndex {
             None => 1,
         };
 
-        // Densely labelled cells cannot reach a batch id above `n_cells - 1`,
-        // so capping the tally both bounds the allocation against a nonsense
-        // label and, by pigeonhole, guarantees a genuinely empty slot to
-        // report when the cap bites. Tally before touching the lookup, so that
-        // the density check below establishes `n_batches <= n_cells` before
-        // any batch id is narrowed to `u32`.
         let tally_len = n_batches.min(cell_indices.len() + 1);
         let mut batch_sizes = vec![0usize; tally_len];
 
@@ -966,23 +960,15 @@ fn sweep_gene_block<S: SingleCellReading>(
 
 /// Variance-stabilising HVG selection across every batch in `index`.
 ///
-/// One disk pass in the normal case, and no retained per-gene state. The first
-/// pass keeps five scalars per gene per batch; after the loess, the
-/// standardised variance falls out of `var / expected_var` for every gene the
-/// clip cannot reach. That identity holds because unclipped standardised values
-/// are `(x - mean) / sd`, which sum to zero by construction, leaving the
-/// variance of the standardised values exactly `var / expected_var`.
+/// One disk pass in the normal case. Standardised variance falls out of
+/// `var / expected_var` wherever the clip cannot reach, since unclipped
+/// standardised values sum to zero by construction; only the genes the clip
+/// does reach need an exact re-read.
 ///
-/// The genes the clip does reach are re-read and evaluated exactly. On droplet
-/// data that is a fraction of a percent of the store. It grows as `clip_max`
-/// shrinks, so a small cell count re-reads more of the store, but a small cell
-/// count is also a small store.
-///
-/// Genes with no selected counts fall out with `mean = var = 0`, so `log10`
-/// gives `-inf`. `LoessRegression::fit` drops non-finite points and leaves
-/// their fitted value at `0.0`, which makes the expected variance `1.0` and
-/// the standardised variance `0.0`. That behaviour is relied upon; do not
-/// "fix" it into a NaN.
+/// Genes with no selected counts get `mean = var = 0`, so `log10` gives
+/// `-inf`. `LoessRegression::fit` drops non-finite points and fits `0.0`
+/// there, giving expected variance `1.0` and standardised variance `0.0` —
+/// relied upon; do not "fix" it into a NaN.
 ///
 /// ### Params
 ///
@@ -1740,6 +1726,95 @@ pub fn get_hvg_mvb_batch_aware_streaming<S: SingleCellReading>(
     )
 }
 
+////////////////////////
+// Residual-based HVG //
+////////////////////////
+
+/// Selects variable features from per-group residual variance.
+///
+/// Seurat's rule for a multi-sample scTransform run: rank genes by residual
+/// variance *within* each sample, take the top `n_hvg` of each, and union them.
+/// A marker of a cell type that only one sample contains still gets picked,
+/// which a pooled ranking would bury.
+///
+/// The other half of Seurat's rule, "present in every sample", is already
+/// enforced upstream: `genes` is the intersection of the per-group modelled
+/// sets, so a gene one sample filtered out never reaches here.
+///
+/// With one group this degenerates to a plain top-N, so the single-sample path
+/// is the same code.
+///
+/// ### Params
+///
+/// * `per_group_variance` - One residual variance per gene, per group, as
+///   returned by
+///   [`residual_variance`](crate::single_cell::sc_processing::residuals::residual_variance).
+/// * `genes` - Store gene indices the variances are indexed by, ascending.
+/// * `n_hvg` - Genes to take from each group before unioning.
+///
+/// ### Returns
+///
+/// The selected store gene indices, ascending, or a [`BixverseErrors`] when a
+/// variance vector disagrees in length with `genes`.
+///
+/// ### References
+///
+/// Seurat v5, `SCTransform.StdAssay`
+pub fn select_residual_hvg(
+    per_group_variance: &[Vec<f64>],
+    genes: &[usize],
+    n_hvg: usize,
+) -> Result<Vec<usize>, BixverseErrors> {
+    if per_group_variance.is_empty() {
+        return Err(BixverseErrors::ResidualEmptySelectionRequest {
+            what: "no groups were given to select features from",
+        });
+    }
+    if genes.is_empty() {
+        return Err(BixverseErrors::ResidualEmptySelectionRequest {
+            what: "the shared gene axis is empty",
+        });
+    }
+    if n_hvg == 0 {
+        return Err(BixverseErrors::ResidualEmptySelectionRequest {
+            what: "n_hvg is zero",
+        });
+    }
+    for variance in per_group_variance {
+        if variance.len() != genes.len() {
+            return Err(BixverseErrors::LengthMismatch {
+                name: "per_group_variance",
+                expected: genes.len(),
+                found: variance.len(),
+            });
+        }
+    }
+
+    let take = n_hvg.min(genes.len());
+    let mut selected = vec![false; genes.len()];
+
+    for variance in per_group_variance {
+        let key = |i: usize| {
+            let v = variance[i];
+            if v.is_nan() { f64::NEG_INFINITY } else { v }
+        };
+
+        let mut order: Vec<usize> = (0..genes.len()).collect();
+        // Descending by variance, position breaking ties so the result does not
+        // depend on the sort's stability.
+        order.sort_unstable_by(|&a, &b| key(b).total_cmp(&key(a)).then(a.cmp(&b)));
+        for &pos in order.iter().take(take) {
+            selected[pos] = true;
+        }
+    }
+
+    Ok(genes
+        .iter()
+        .zip(selected)
+        .filter_map(|(&g, keep)| keep.then_some(g))
+        .collect())
+}
+
 ///////////
 // Tests //
 ///////////
@@ -2342,5 +2417,144 @@ mod tests {
                 assert_eq!(res.len(), n_batches);
             }
         }
+    }
+
+    ///////////////////////
+    // select_residual_hvg //
+    ///////////////////////
+
+    #[test]
+    fn test_select_residual_hvg_single_group_is_top_n() {
+        let genes = [10, 11, 12, 13];
+        let variance = vec![vec![0.1, 5.0, 0.2, 3.0]];
+        let got = select_residual_hvg(&variance, &genes, 2).unwrap();
+        assert_eq!(got, vec![11, 13]);
+    }
+
+    #[test]
+    fn test_select_residual_hvg_unions_across_groups() {
+        // Gene 10 is top only in group 0, gene 13 only in group 1. Both must
+        // survive: a marker of a cell type that one sample happens to contain
+        // is exactly what a pooled ranking would bury.
+        let genes = [10, 11, 12, 13];
+        let variance = vec![vec![9.0, 0.1, 0.2, 0.3], vec![0.1, 0.2, 0.3, 9.0]];
+        let got = select_residual_hvg(&variance, &genes, 1).unwrap();
+        assert_eq!(got, vec![10, 13]);
+    }
+
+    #[test]
+    fn test_select_residual_hvg_returns_ascending_gene_indices() {
+        let genes = [4, 7, 9];
+        let variance = vec![vec![1.0, 3.0, 2.0]];
+        let got = select_residual_hvg(&variance, &genes, 3).unwrap();
+        assert_eq!(got, vec![4, 7, 9]);
+    }
+
+    #[test]
+    fn test_select_residual_hvg_caps_at_gene_count() {
+        let genes = [4, 7];
+        let variance = vec![vec![1.0, 3.0]];
+        let got = select_residual_hvg(&variance, &genes, 100).unwrap();
+        assert_eq!(got, vec![4, 7]);
+    }
+
+    #[test]
+    fn test_select_residual_hvg_breaks_ties_by_position() {
+        let genes = [4, 7, 9];
+        let variance = vec![vec![1.0, 1.0, 1.0]];
+        let got = select_residual_hvg(&variance, &genes, 2).unwrap();
+        assert_eq!(got, vec![4, 7]);
+    }
+
+    #[test]
+    fn test_select_residual_hvg_rejects_length_mismatch() {
+        let genes = [4, 7, 9];
+        let variance = vec![vec![1.0, 2.0]];
+        assert!(matches!(
+            select_residual_hvg(&variance, &genes, 2),
+            Err(BixverseErrors::LengthMismatch { .. })
+        ));
+    }
+
+    /// A NaN must not rank as a variable gene, and must not break the sort.
+    ///
+    /// `partial_cmp(..).unwrap_or(Equal)` would make NaN compare equal to
+    /// everything, which both ranks it arbitrarily high and, past a few dozen
+    /// NaNs, makes `sort_unstable_by` panic on the broken total order.
+    #[test]
+    fn test_select_residual_hvg_sorts_nan_to_the_bottom() {
+        let genes: Vec<usize> = (0..400).collect();
+        let variance: Vec<f64> = (0..400)
+            .map(|i| if i % 13 == 0 { f64::NAN } else { i as f64 })
+            .collect();
+
+        let got = select_residual_hvg(std::slice::from_ref(&variance), &genes, 5).unwrap();
+
+        assert_eq!(got.len(), 5);
+        for gene in &got {
+            assert!(
+                !variance[*gene].is_nan(),
+                "gene {gene} has no computable variance and cannot be a variable gene"
+            );
+        }
+        // The top five finite variances are the largest indices that are not
+        // multiples of 13.
+        let mut want: Vec<usize> = (0..400).filter(|i| i % 13 != 0).collect();
+        want.sort_unstable_by_key(|&a| std::cmp::Reverse(a));
+        want.truncate(5);
+        want.sort_unstable();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn test_select_residual_hvg_rejects_empty_inputs() {
+        let genes = [4, 7, 9];
+        let variance = vec![vec![1.0, 2.0, 3.0]];
+
+        // No groups at all.
+        assert!(matches!(
+            select_residual_hvg(&[], &genes, 2),
+            Err(BixverseErrors::ResidualEmptySelectionRequest { .. })
+        ));
+        // Nothing asked for, which would otherwise hand PCA an empty gene set.
+        assert!(matches!(
+            select_residual_hvg(&variance, &genes, 0),
+            Err(BixverseErrors::ResidualEmptySelectionRequest { .. })
+        ));
+        // Empty shared axis.
+        assert!(matches!(
+            select_residual_hvg(&[vec![]], &[], 2),
+            Err(BixverseErrors::ResidualEmptySelectionRequest { .. })
+        ));
+    }
+
+    /// Every top-N gene of every group has to be selected, not just some.
+    ///
+    /// The union rule is easy to test one way round only; a function that
+    /// dropped a group's contribution entirely would still return the right
+    /// number of genes.
+    #[test]
+    fn test_select_residual_hvg_keeps_every_groups_top_n() {
+        let genes: Vec<usize> = (0..20).collect();
+        let a: Vec<f64> = (0..20).map(|i| i as f64).collect();
+        let b: Vec<f64> = (0..20).map(|i| (20 - i) as f64).collect();
+        let per_group = vec![a.clone(), b.clone()];
+
+        let n_hvg = 3;
+        let got = select_residual_hvg(&per_group, &genes, n_hvg).unwrap();
+
+        for variance in [&a, &b] {
+            let mut order: Vec<usize> = (0..20).collect();
+            order.sort_unstable_by(|&x, &y| variance[y].total_cmp(&variance[x]).then(x.cmp(&y)));
+            for &pos in order.iter().take(n_hvg) {
+                assert!(
+                    got.contains(&genes[pos]),
+                    "gene {} is top-{n_hvg} in a group but was not selected",
+                    genes[pos]
+                );
+            }
+        }
+        // Disjoint tops, so the union is exactly both.
+        assert_eq!(got.len(), 2 * n_hvg);
     }
 }

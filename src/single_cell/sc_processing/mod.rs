@@ -1,6 +1,7 @@
 //! This module contains all types of processing-related functions in terms
 //! of HVG, PCA, kNN generation, doublet detections, etc.
 
+pub mod analytic_pearson;
 pub mod cellsweep;
 pub mod doublet_detection;
 pub mod hvg;
@@ -9,7 +10,9 @@ pub mod magic;
 pub mod metrics;
 pub mod pca;
 pub mod qc;
+pub mod residuals;
 pub mod scdblfinder;
 pub mod scrublet;
+pub mod sctransform;
 pub mod snn;
 pub mod utils_doublets;

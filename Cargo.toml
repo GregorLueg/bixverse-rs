@@ -1,6 +1,6 @@
 [package]
 name = "bixverse-rs"
-version = "0.5.1"
+version = "0.5.2"
 edition = "2024"
 authors = ["Gregor Lueg <gregorlueg@me.com>"]
 license = "MIT"
@@ -33,6 +33,15 @@ single-cell = ["half", "bincode", "indexmap", "memmap2", "hdf5", "lz4_flex", "nd
 ## toolchain's convention, so an msvc host targeting gnu emits `libhdf5` and
 ## the link fails.
 hdf5-static = ["hdf5?/static"]
+## Compile the LZF (32000) and Blosc (32001) filters into the HDF5 build, so
+## h5ad files written by `hdf5plugin` with those codecs can be read. Both
+## register through `H5Zregister` at library init and never touch the HDF5
+## plugin path, which for a `hdf5-metno-src` build points at a cargo `OUT_DIR`
+## that no longer exists. Off by default: Blosc vendors c-blosc plus lz4,
+## zlib, zstd and snappy, all built with `cc`. Filters outside these two
+## (standalone zstd, bitshuffle, lz4, blosc2) are still unreadable and are
+## reported as `BixverseErrors::UnsupportedH5Filter`.
+hdf5-filters = ["hdf5?/lzf", "hdf5?/blosc-all"]
 ## Enables the negative binomial differential expression methods built on
 ## `edge-rs`: the edgeR quasi-likelihood chain and, with `single-cell`, NEBULA.
 ## Implied by `single-cell`, but usable on its own for the bulk half.
@@ -47,7 +56,7 @@ large_scale_diagnostics = []
 ## Enables multi-modal single cell analysis (requires single-cell)
 multi-modal = ["single-cell"]
 ## Enable GPU-accelerated algorithms and methods
-gpu = ["ann-search-rs/gpu", "cubecl", "cubecl-utils-rs", "half", "cubek"]
+gpu = ["ann-search-rs/gpu", "cubecl", "cubecl-utils-rs", "half", "cubek", "edge-rs?/gpu"]
 
 #####################
 # Compilation flags #
@@ -64,13 +73,13 @@ codegen-units = 4
 
 [dependencies]
 approx = "0.5.1"
-ann-search-rs = { version = "0.8.4" }
+ann-search-rs = { version = "0.9.0" }
 bincode = { version = "2.0.1", features = ["serde"], optional = true }
 cubecl = { version = "0.10.0", features = ["wgpu"], optional = true }
 cubecl-utils-rs = { version = "0.1.0", optional = true }
 cubek = { version = "0.2.0", features = ["matmul"], optional = true }
 document-features = "0.2.12"
-edge-rs = { version = "0.0.4", optional = true }
+edge-rs = { version = "0.1.0", optional = true }
 either = "1.15.0"
 extendr-api = "0.9.0"
 faer = "0.23.2"
@@ -103,7 +112,7 @@ wide = "1.4.0"
 #################
 
 [package.metadata.docs.rs]
-features = ["single-cell", "multi-modal", "dge", "hdf5-static"]
+features = ["single-cell", "multi-modal", "dge", "hdf5-static", "hdf5-filters"]
 
 ###########
 # Benches #

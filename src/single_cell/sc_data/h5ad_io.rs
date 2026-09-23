@@ -14,6 +14,7 @@ use thousands::Separable;
 use crate::prelude::*;
 use crate::single_cell::sc_data::H5_CELL_SLICE_SIZE;
 use crate::single_cell::sc_data::data_io::{CellGeneSparseWriter, CellOnFileQuality};
+use crate::single_cell::sc_data::h5_filters::{check_h5_filters, check_h5ad_filters};
 
 ////////////
 // Consts //
@@ -294,6 +295,8 @@ pub fn write_h5_counts<P: AsRef<Path>>(
     let file_format = parse_h5ad_format(h5ad_format)
         .ok_or_else(|| BixverseErrors::UnsupportH5ADFormat(h5ad_format.to_string()))?;
 
+    check_h5ad_filters(&File::open(h5_path.as_ref())?, &raw_slot, &file_format)?;
+
     let file_quality = match file_format {
         H5ADFormat::Csr => parse_h5_csr_quality(
             &h5_path,
@@ -449,6 +452,8 @@ pub fn stream_h5_counts<P: AsRef<Path>>(
 
     let file_format = parse_h5ad_format(h5ad_format)
         .ok_or_else(|| BixverseErrors::UnsupportH5ADFormat(h5ad_format.to_string()))?;
+
+    check_h5ad_filters(&File::open(h5_path.as_ref())?, &raw_slot, &file_format)?;
 
     let file_quality = match file_format {
         H5ADFormat::Csr => parse_h5_csr_quality(
@@ -2749,6 +2754,9 @@ pub fn write_h5_normalised_counts<P: AsRef<Path>>(
 
     let file = hdf5::File::open(h5_path.as_ref())?;
     let lib_size_path = format!("obs/{}", obs_lib_size_col);
+
+    check_h5_filters(&file, &[&lib_size_path, "X/data", "X/indices", "X/indptr"])?;
+
     let lib_sizes_raw: Vec<f32> = file
         .dataset(&lib_size_path)
         .map_err(|_| BixverseErrors::ObsColumnMissing(obs_lib_size_col.to_string()))?
