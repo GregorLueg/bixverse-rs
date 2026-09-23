@@ -1,5 +1,12 @@
 # News
 
+## 0.5.3
+
+### Fix
+
+- Removed snappy compression from Blosc compressions for h5ad to avoid C++
+  linkage with R.
+
 ## 0.5.2
 
 ### Features
