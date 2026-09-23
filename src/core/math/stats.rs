@@ -1566,6 +1566,9 @@ mod tests {
     }
 
     /// R: sctransform:::robust_scale_binned(y, x, seq(-2.1, 2.1, by = 0.6))
+    ///
+    /// R's `mad()` uses the rounded 1.4826, [`MAD_SCALE`] the exact constant,
+    /// so scores drift by a relative ~1.5e-6.
     #[test]
     fn test_robust_scale_binned_matches_sctransform() {
         let (x, y) = outlier_sample();
@@ -1586,16 +1589,16 @@ mod tests {
             -0.428_119_355_105_514_74,
         ];
         for (g, e) in got.iter().take(10).zip(first_ten.iter()) {
-            assert_relative_eq!(*g, *e, max_relative = 1e-12);
+            assert_relative_eq!(*g, *e, max_relative = 1e-5);
         }
         assert_relative_eq!(
             got.iter().sum::<f64>(),
             145.563_245_444_483_98,
-            max_relative = 1e-12
+            max_relative = 1e-5
         );
-        assert_relative_eq!(got[6], 78.088_159_810_413_9, max_relative = 1e-12);
-        assert_relative_eq!(got[122], -58.804_104_377_993_6, max_relative = 1e-12);
-        assert_relative_eq!(got[454], 113.340_405_508_264_04, max_relative = 1e-12);
+        assert_relative_eq!(got[6], 78.088_159_810_413_9, max_relative = 1e-5);
+        assert_relative_eq!(got[122], -58.804_104_377_993_6, max_relative = 1e-5);
+        assert_relative_eq!(got[454], 113.340_405_508_264_04, max_relative = 1e-5);
     }
 
     /// R: sctransform:::is_outlier(y, x, th = 10) flags exactly the three
