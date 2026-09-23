@@ -1382,10 +1382,12 @@ checksum = "e1d926b4d407d372f141f93bb444696142c29d32962ccbd3531117cf3aa0bfa9"
 
 [[package]]
 name = "edge-rs"
-version = "0.0.5"
+version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4255319a22b15124592b78c0ff5d899e4ffa3eda3f4df73623f7ecd25af56e14"
+checksum = "ba6fa9a0ac3a04608a30208214fef0b3fc09650039c6628b4c81b224de243308"
 dependencies = [
+ "cubecl",
+ "cubecl-utils-rs",
  "faer",
  "faer-traits",
  "num-traits",
