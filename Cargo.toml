@@ -1,6 +1,6 @@
 [package]
 name = "bixverse-rs"
-version = "0.5.2"
+version = "0.5.3"
 edition = "2024"
 authors = ["Gregor Lueg <gregorlueg@me.com>"]
 license = "MIT"
@@ -35,13 +35,15 @@ single-cell = ["half", "bincode", "indexmap", "memmap2", "hdf5", "lz4_flex", "nd
 hdf5-static = ["hdf5?/static"]
 ## Compile the LZF (32000) and Blosc (32001) filters into the HDF5 build, so
 ## h5ad files written by `hdf5plugin` with those codecs can be read. Both
-## register through `H5Zregister` at library init and never touch the HDF5
-## plugin path, which for a `hdf5-metno-src` build points at a cargo `OUT_DIR`
-## that no longer exists. Off by default: Blosc vendors c-blosc plus lz4,
-## zlib, zstd and snappy, all built with `cc`. Filters outside these two
-## (standalone zstd, bitshuffle, lz4, blosc2) are still unreadable and are
-## reported as `BixverseErrors::UnsupportedH5Filter`.
-hdf5-filters = ["hdf5?/lzf", "hdf5?/blosc-all"]
+## register through `H5Zregister` and never touch the HDF5 plugin path, which
+## for a `hdf5-metno-src` build points at a long gone cargo `OUT_DIR`. Off by
+## default: Blosc vendors c-blosc plus lz4, zlib and zstd, all built with `cc`.
+## Snappy is left out on purpose. It is C++, and the R package links this
+## staticlib without the C++ runtime. Filters outside these two (standalone
+## zstd, bitshuffle, lz4, blosc2) raise `BixverseErrors::UnsupportedH5Filter`.
+## Blosc with snappy passes that check, since the codec sits in the chunk
+## header, and fails in `H5Dread` with c-blosc naming the missing compressor.
+hdf5-filters = ["hdf5?/lzf", "hdf5?/blosc-lz4", "hdf5?/blosc-zlib", "hdf5?/blosc-zstd"]
 ## Enables the negative binomial differential expression methods built on
 ## `edge-rs`: the edgeR quasi-likelihood chain and, with `single-cell`, NEBULA.
 ## Implied by `single-cell`, but usable on its own for the bulk half.
