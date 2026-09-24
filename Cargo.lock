@@ -252,7 +252,7 @@ dependencies = [
 
 [[package]]
 name = "bixverse-rs"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "ann-search-rs",
  "approx",
@@ -1381,9 +1381,9 @@ checksum = "e1d926b4d407d372f141f93bb444696142c29d32962ccbd3531117cf3aa0bfa9"
 
 [[package]]
 name = "edge-rs"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba6fa9a0ac3a04608a30208214fef0b3fc09650039c6628b4c81b224de243308"
+checksum = "06dc972feaf20a5022552c62166d243e26f843493cec8e136f1a07ef474c3cf9"
 dependencies = [
  "cubecl",
  "cubecl-utils-rs",
