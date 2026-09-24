@@ -1,5 +1,12 @@
 # News
 
+## 0.5.4
+
+### Fix
+
+- Take in the fix on the GPU-accelerated Nebula to work with any number of
+  lanes.
+
 ## 0.5.3
 
 ### Fix
