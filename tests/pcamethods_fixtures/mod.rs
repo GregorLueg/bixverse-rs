@@ -1,8 +1,7 @@
 #![allow(clippy::excessive_precision)]
 //! pcaMethods parity fixtures, generated against pcaMethods 2.0.0 and R 4.5.1.
 //!
-//! DO NOT EDIT. Regenerate with
-//! `Rscript dev/gen_pcamethods_fixtures.R > tests/pcamethods_fixtures/mod.rs`.
+//! DO NOT EDIT. Regenerate with `Rscript dev/gen_pcamethods_fixtures.R`.
 //!
 //! Matrices are flattened column-major. See the script for how the data
 //! and the mask are built from the LCG. `ppca()` ran with seed 7; its start is

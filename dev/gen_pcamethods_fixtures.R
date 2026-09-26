@@ -1,8 +1,12 @@
 # Parity fixtures for src/core/math/pca_missing.rs: pcaMethods' ppca() and
 # bpca() on data with missing values.
 #
-# Regenerates tests/pcamethods_fixtures/mod.rs. Run with
-#   Rscript dev/gen_pcamethods_fixtures.R > tests/pcamethods_fixtures/mod.rs
+# Regenerates tests/pcamethods_fixtures/{mod,large}.rs. Run from the crate root
+# with
+#   Rscript dev/gen_pcamethods_fixtures.R
+#
+# large.rs holds the 100 x 1000 case behind `large-test`. It leaves out the
+# completed matrix (100k entries); scores and loadings determine it.
 #
 # The data come from a Numerical Recipes LCG: an integer rank-k part plus
 # (lcg %% 2001 - 1000) / 250 noise. Every value is one correctly rounded
@@ -45,25 +49,22 @@ emit <- function(name, doc, x) {
   cat(sprintf("/// %s\npub const %s: &[f64] = &[\n    %s,\n];\n\n", doc, name, fmt(x)))
 }
 
-cases <- list(
-  list(tag = "TALL", n = 60L, d = 12L, k = 3L, miss = 20L, seed = 20260926),
-  list(tag = "WIDE", n = 16L, d = 80L, k = 3L, miss = 25L, seed = 20260927)
-)
 PPCA_SEED <- 7L
 
-cat("#![allow(clippy::excessive_precision)]\n")
-cat("//! pcaMethods parity fixtures, generated against pcaMethods ",
-    as.character(packageVersion("pcaMethods")), " and R ",
-    R.version$major, ".", R.version$minor, ".\n", sep = "")
-cat("//!\n")
-cat("//! DO NOT EDIT. Regenerate with\n")
-cat("//! `Rscript dev/gen_pcamethods_fixtures.R > tests/pcamethods_fixtures/mod.rs`.\n")
-cat("//!\n")
-cat("//! Matrices are flattened column-major. See the script for how the data\n")
-cat("//! and the mask are built from the LCG. `ppca()` ran with seed ", PPCA_SEED,
-    "; its start is\n//! recorded as `*_PPCA_C0`.\n\n", sep = "")
+write_header <- function() {
+  cat("#![allow(clippy::excessive_precision)]\n")
+  cat("//! pcaMethods parity fixtures, generated against pcaMethods ",
+      as.character(packageVersion("pcaMethods")), " and R ",
+      R.version$major, ".", R.version$minor, ".\n", sep = "")
+  cat("//!\n")
+  cat("//! DO NOT EDIT. Regenerate with `Rscript dev/gen_pcamethods_fixtures.R`.\n")
+  cat("//!\n")
+  cat("//! Matrices are flattened column-major. See the script for how the data\n")
+  cat("//! and the mask are built from the LCG. `ppca()` ran with seed ", PPCA_SEED,
+      "; its start is\n//! recorded as `*_PPCA_C0`.\n\n", sep = "")
+}
 
-for (cs in cases) {
+write_case <- function(cs, completed) {
   y <- build_case(cs$n, cs$d, cs$k, cs$miss, cs$seed)
   t <- cs$tag
   cat(sprintf("/// Rows of the %s case.\npub const %s_N: usize = %d;\n\n", t, t, cs$n))
@@ -83,11 +84,24 @@ for (cs in cases) {
   emit(paste0(t, "_PPCA_SCORES"), "PPCA scores, N x k.", scores(pp))
   emit(paste0(t, "_PPCA_LOADINGS"), "PPCA loadings, D x k.", loadings(pp))
   emit(paste0(t, "_PPCA_R2CUM"), "PPCA cumulative R^2.", pp@R2cum)
-  emit(paste0(t, "_PPCA_COMPLETED"), "PPCA completeObs, N x D.", completeObs(pp))
+  if (completed)
+    emit(paste0(t, "_PPCA_COMPLETED"), "PPCA completeObs, N x D.", completeObs(pp))
 
   bp <- pca(y, method = "bpca", nPcs = cs$k, center = TRUE, verbose = FALSE)
   emit(paste0(t, "_BPCA_SCORES"), "BPCA scores, N x k.", scores(bp))
   emit(paste0(t, "_BPCA_LOADINGS"), "BPCA loadings, D x k.", loadings(bp))
   emit(paste0(t, "_BPCA_R2CUM"), "BPCA cumulative R^2.", bp@R2cum)
-  emit(paste0(t, "_BPCA_COMPLETED"), "BPCA completeObs, N x D.", completeObs(bp))
+  if (completed)
+    emit(paste0(t, "_BPCA_COMPLETED"), "BPCA completeObs, N x D.", completeObs(bp))
 }
+
+sink("tests/pcamethods_fixtures/mod.rs")
+write_header()
+write_case(list(tag = "TALL", n = 60L, d = 12L, k = 3L, miss = 20L, seed = 20260926), TRUE)
+write_case(list(tag = "WIDE", n = 16L, d = 80L, k = 3L, miss = 25L, seed = 20260927), TRUE)
+sink()
+
+sink("tests/pcamethods_fixtures/large.rs")
+write_header()
+write_case(list(tag = "LARGE", n = 100L, d = 1000L, k = 5L, miss = 40L, seed = 11), FALSE)
+sink()

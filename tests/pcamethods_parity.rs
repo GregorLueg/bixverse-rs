@@ -8,6 +8,10 @@ use faer::{Mat, MatRef};
 mod pcamethods_fixtures;
 use pcamethods_fixtures::*;
 
+#[cfg(feature = "large-test")]
+#[path = "pcamethods_fixtures/large.rs"]
+mod pcamethods_large;
+
 /// Numerical Recipes LCG, identical to the R side.
 struct Lcg(u64);
 
@@ -123,8 +127,9 @@ fn compare(
     }
 }
 
-/// Tolerance on every compared quantity. The first run measured at most
-/// 2.3e-13 (wide PPCA scores); the gap is summation order, not method.
+/// Tolerance on every compared quantity. The first runs measured at most
+/// 2.3e-13 on the small cases and 5.9e-12 on the large one (PPCA scores both
+/// times); the gap is summation order, not method.
 const TOL: f64 = 1e-10;
 
 fn assert_diffs(label: &str, x: &Diffs) {
@@ -217,5 +222,69 @@ fn test_ppca_bpca_match_pcamethods() {
             )
         };
         assert_diffs(&format!("{tag} bpca"), &bp_d);
+    }
+}
+
+/// Proteomics-sized case: every row has missing values, so the BPCA per-row
+/// solve path carries the whole E-step. No completed matrix in the fixture;
+/// scores and loadings determine it.
+#[test]
+#[cfg(feature = "large-test")]
+// 100 x 1000, k = 5, 40 % missing
+fn test_ppca_bpca_match_pcamethods_large() {
+    use pcamethods_large::*;
+    let (n, d, k) = (LARGE_N, LARGE_D, LARGE_K);
+    let y = build_case(n, d, k, LARGE_MISS_PCT, LARGE_SEED);
+
+    let pp = ppca_from_init(
+        y.as_ref(),
+        fixture(LARGE_PPCA_C0, d, k),
+        Some(PpcaParams {
+            n_pcs: k,
+            ..PpcaParams::default()
+        }),
+        Verbosity::Quiet,
+    )
+    .unwrap();
+    assert!(pp.converged, "large ppca did not converge");
+    let bp = bpca(
+        y.as_ref(),
+        Some(BpcaParams {
+            n_pcs: k,
+            ..BpcaParams::default()
+        }),
+        Verbosity::Quiet,
+    )
+    .unwrap();
+
+    for (label, res, scores, loadings, r2) in [
+        (
+            "large ppca",
+            &pp,
+            LARGE_PPCA_SCORES,
+            LARGE_PPCA_LOADINGS,
+            LARGE_PPCA_R2CUM,
+        ),
+        (
+            "large bpca",
+            &bp,
+            LARGE_BPCA_SCORES,
+            LARGE_BPCA_LOADINGS,
+            LARGE_BPCA_R2CUM,
+        ),
+    ] {
+        for (what, v) in [
+            (
+                "scores",
+                max_diff_signed(res.scores.as_ref(), fixture(scores, n, k)),
+            ),
+            (
+                "loadings",
+                max_diff_signed(res.loadings.as_ref(), fixture(loadings, d, k)),
+            ),
+            ("r2", max_diff_vec(&res.r2_cum, r2)),
+        ] {
+            assert!(v < TOL, "{label} {what}: max abs diff {v:.3e}");
+        }
     }
 }
