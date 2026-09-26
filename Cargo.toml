@@ -14,7 +14,7 @@ categories = [
   "algorithms",
 ]
 keywords = ["bioinformatics", "single-cell", "genomics", "statistics", "gpu"]
-exclude = ["dev/"]
+exclude = ["dev/", "tests/"]
 
 [lib]
 name = "bixverse_rs"

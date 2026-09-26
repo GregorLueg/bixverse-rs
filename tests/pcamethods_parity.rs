@@ -1,16 +1,16 @@
 //! Parity of `ppca` / `bpca` against pcaMethods on LCG-built data with
-//! missing values. Fixtures from `dev/gen_pcamethods_fixtures.R`.
+//! missing values. Fixtures in `tests/pcamethods_fixtures/*.txt`, from
+//! `dev/gen_pcamethods_fixtures.R`.
 
 use bixverse_rs::core::math::pca_missing::*;
 use bixverse_rs::prelude::*;
 use faer::{Mat, MatRef};
+use rustc_hash::FxHashMap;
 
-mod pcamethods_fixtures;
-use pcamethods_fixtures::*;
-
-#[cfg(feature = "large-test")]
-#[path = "pcamethods_fixtures/large.rs"]
-mod pcamethods_large;
+/// Tolerance on every compared quantity. The first runs measured at most
+/// 2.3e-13 on the small cases and 5.9e-12 on the large one (PPCA scores both
+/// times); the gap is summation order, not method.
+const TOL: f64 = 1e-10;
 
 /// Numerical Recipes LCG, identical to the R side.
 struct Lcg(u64);
@@ -58,6 +58,22 @@ fn build_case(n: usize, d: usize, k: usize, miss_pct: u64, seed: u64) -> Mat<f64
     y
 }
 
+/// Parse a fixture file: `#` lines are comments, every other line is a key
+/// followed by whitespace-separated values.
+fn parse_fixture(text: &str) -> FxHashMap<&str, Vec<f64>> {
+    text.lines()
+        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+        .map(|l| {
+            let mut it = l.split_whitespace();
+            let key = it.next().expect("fixture line has a key");
+            let vals = it
+                .map(|v| v.parse().expect("fixture value parses as f64"))
+                .collect();
+            (key, vals)
+        })
+        .collect()
+}
+
 /// Column-major fixture slice as a matrix.
 fn fixture(x: &[f64], nrow: usize, ncol: usize) -> MatRef<'_, f64> {
     MatRef::from_column_major_slice(x, nrow, ncol)
@@ -98,147 +114,18 @@ fn max_diff_vec(ours: &[f64], theirs: &[f64]) -> f64 {
         .fold(0.0, f64::max)
 }
 
-/// Per-quantity max absolute differences of one fit against R.
-struct Diffs {
-    scores: f64,
-    loadings: f64,
-    r2: f64,
-    completed: f64,
-}
-
-/// Compare one fit against its R fixture, aligning column signs of scores
-/// and loadings.
-#[allow(clippy::too_many_arguments)]
-fn compare(
-    res: &MissingPcaResults<f64>,
-    n: usize,
-    d: usize,
-    k: usize,
-    scores: &[f64],
-    loadings: &[f64],
-    r2: &[f64],
-    completed: &[f64],
-) -> Diffs {
-    Diffs {
-        scores: max_diff_signed(res.scores.as_ref(), fixture(scores, n, k)),
-        loadings: max_diff_signed(res.loadings.as_ref(), fixture(loadings, d, k)),
-        r2: max_diff_vec(&res.r2_cum, r2),
-        completed: max_diff(res.completed.as_ref(), fixture(completed, n, d)),
-    }
-}
-
-/// Tolerance on every compared quantity. The first runs measured at most
-/// 2.3e-13 on the small cases and 5.9e-12 on the large one (PPCA scores both
-/// times); the gap is summation order, not method.
-const TOL: f64 = 1e-10;
-
-fn assert_diffs(label: &str, x: &Diffs) {
-    for (what, v) in [
-        ("scores", x.scores),
-        ("loadings", x.loadings),
-        ("r2", x.r2),
-        ("completed", x.completed),
-    ] {
-        assert!(v < TOL, "{label} {what}: max abs diff {v:.3e}");
-    }
-}
-
-/// Both fits on a tall (60 x 12, 20 % missing) and a wide (16 x 80, 25 %
-/// missing) case. In the wide case R's BPCA prunes the third component, so
-/// the ARD path is covered too.
-#[test]
-fn test_ppca_bpca_match_pcamethods() {
-    for (tag, n, d, k, miss, seed) in [
-        ("tall", TALL_N, TALL_D, TALL_K, TALL_MISS_PCT, TALL_SEED),
-        ("wide", WIDE_N, WIDE_D, WIDE_K, WIDE_MISS_PCT, WIDE_SEED),
-    ] {
-        let y = build_case(n, d, k, miss, seed);
-        let tall = tag == "tall";
-
-        let c0 = if tall { TALL_PPCA_C0 } else { WIDE_PPCA_C0 };
-        let pp_params = PpcaParams {
-            n_pcs: k,
-            ..PpcaParams::default()
-        };
-        let pp = ppca_from_init(
-            y.as_ref(),
-            fixture(c0, d, k),
-            Some(pp_params),
-            Verbosity::Quiet,
-        )
-        .unwrap();
-        let pp_d = if tall {
-            compare(
-                &pp,
-                n,
-                d,
-                k,
-                TALL_PPCA_SCORES,
-                TALL_PPCA_LOADINGS,
-                TALL_PPCA_R2CUM,
-                TALL_PPCA_COMPLETED,
-            )
-        } else {
-            compare(
-                &pp,
-                n,
-                d,
-                k,
-                WIDE_PPCA_SCORES,
-                WIDE_PPCA_LOADINGS,
-                WIDE_PPCA_R2CUM,
-                WIDE_PPCA_COMPLETED,
-            )
-        };
-        assert!(pp.converged, "{tag} ppca did not converge");
-        assert_diffs(&format!("{tag} ppca"), &pp_d);
-
-        let bp_params = BpcaParams {
-            n_pcs: k,
-            ..BpcaParams::default()
-        };
-        let bp = bpca(y.as_ref(), Some(bp_params), Verbosity::Quiet).unwrap();
-        let bp_d = if tall {
-            compare(
-                &bp,
-                n,
-                d,
-                k,
-                TALL_BPCA_SCORES,
-                TALL_BPCA_LOADINGS,
-                TALL_BPCA_R2CUM,
-                TALL_BPCA_COMPLETED,
-            )
-        } else {
-            compare(
-                &bp,
-                n,
-                d,
-                k,
-                WIDE_BPCA_SCORES,
-                WIDE_BPCA_LOADINGS,
-                WIDE_BPCA_R2CUM,
-                WIDE_BPCA_COMPLETED,
-            )
-        };
-        assert_diffs(&format!("{tag} bpca"), &bp_d);
-    }
-}
-
-/// Proteomics-sized case: every row has missing values, so the BPCA per-row
-/// solve path carries the whole E-step. No completed matrix in the fixture;
-/// scores and loadings determine it.
-#[test]
-#[cfg(feature = "large-test")]
-// 100 x 1000, k = 5, 40 % missing
-fn test_ppca_bpca_match_pcamethods_large() {
-    use pcamethods_large::*;
-    let (n, d, k) = (LARGE_N, LARGE_D, LARGE_K);
-    let y = build_case(n, d, k, LARGE_MISS_PCT, LARGE_SEED);
+/// Fit both methods on one fixture case and assert every stored quantity
+/// against R, aligning column signs of scores and loadings. `*_COMPLETED` is
+/// compared only when the fixture carries it.
+fn check_case(label: &str, text: &str) {
+    let fx = parse_fixture(text);
+    let int = |key: &str| fx[key][0] as usize;
+    let (n, d, k) = (int("N"), int("D"), int("K"));
+    let y = build_case(n, d, k, int("MISS_PCT") as u64, int("SEED") as u64);
 
     let pp = ppca_from_init(
         y.as_ref(),
-        fixture(LARGE_PPCA_C0, d, k),
+        fixture(&fx["PPCA_C0"], d, k),
         Some(PpcaParams {
             n_pcs: k,
             ..PpcaParams::default()
@@ -246,7 +133,7 @@ fn test_ppca_bpca_match_pcamethods_large() {
         Verbosity::Quiet,
     )
     .unwrap();
-    assert!(pp.converged, "large ppca did not converge");
+    assert!(pp.converged, "{label} ppca did not converge");
     let bp = bpca(
         y.as_ref(),
         Some(BpcaParams {
@@ -257,34 +144,49 @@ fn test_ppca_bpca_match_pcamethods_large() {
     )
     .unwrap();
 
-    for (label, res, scores, loadings, r2) in [
-        (
-            "large ppca",
-            &pp,
-            LARGE_PPCA_SCORES,
-            LARGE_PPCA_LOADINGS,
-            LARGE_PPCA_R2CUM,
-        ),
-        (
-            "large bpca",
-            &bp,
-            LARGE_BPCA_SCORES,
-            LARGE_BPCA_LOADINGS,
-            LARGE_BPCA_R2CUM,
-        ),
-    ] {
-        for (what, v) in [
+    for (method, res) in [("PPCA", &pp), ("BPCA", &bp)] {
+        let get = |what: &str| fx.get(format!("{method}_{what}").as_str());
+        let mut diffs = vec![
             (
                 "scores",
-                max_diff_signed(res.scores.as_ref(), fixture(scores, n, k)),
+                max_diff_signed(res.scores.as_ref(), fixture(get("SCORES").unwrap(), n, k)),
             ),
             (
                 "loadings",
-                max_diff_signed(res.loadings.as_ref(), fixture(loadings, d, k)),
+                max_diff_signed(
+                    res.loadings.as_ref(),
+                    fixture(get("LOADINGS").unwrap(), d, k),
+                ),
             ),
-            ("r2", max_diff_vec(&res.r2_cum, r2)),
-        ] {
-            assert!(v < TOL, "{label} {what}: max abs diff {v:.3e}");
+            ("r2", max_diff_vec(&res.r2_cum, get("R2CUM").unwrap())),
+        ];
+        if let Some(completed) = get("COMPLETED") {
+            diffs.push((
+                "completed",
+                max_diff(res.completed.as_ref(), fixture(completed, n, d)),
+            ));
+        }
+        for (what, v) in diffs {
+            assert!(v < TOL, "{label} {method} {what}: max abs diff {v:.3e}");
         }
     }
+}
+
+/// Both fits on a tall (60 x 12, 20 % missing) and a wide (16 x 80, 25 %
+/// missing) case. In the wide case R's BPCA prunes the third component, so
+/// the ARD path is covered too.
+#[test]
+fn test_ppca_bpca_match_pcamethods() {
+    check_case("tall", include_str!("pcamethods_fixtures/tall.txt"));
+    check_case("wide", include_str!("pcamethods_fixtures/wide.txt"));
+}
+
+/// Proteomics-sized case: every row has missing values, so the BPCA per-row
+/// solve path carries the whole E-step. The fixture leaves out the completed
+/// matrix; scores and loadings determine it.
+#[test]
+#[cfg(feature = "large-test")]
+// 100 x 1000, k = 5, 40 % missing
+fn test_ppca_bpca_match_pcamethods_large() {
+    check_case("large", include_str!("pcamethods_fixtures/large.txt"));
 }
