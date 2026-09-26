@@ -4,6 +4,7 @@ use extendr_api::*;
 use std::collections::{BTreeMap, HashMap};
 
 use crate::core::mat_struct::NamedMatrix;
+use crate::core::math::pca_missing::{BpcaParams, PpcaParams};
 use crate::core::synthetic_data::{
     BulkDataGenerator, DropoutStrategy, HubModularConfig, LoadingLogNormal, ModularConfig,
     NonGaussianFactorConfig, NonNegativeFactorConfig, SparsityParams, SyntheticRnaSeqParams,
@@ -435,6 +436,85 @@ impl LanczosParams {
             basis_size,
             max_restarts,
             tol,
+        })
+    }
+}
+
+/////////////////////////////
+// PCA with missing values //
+/////////////////////////////
+
+impl PpcaParams {
+    /// Generate PpcaParams from an R list
+    ///
+    /// Keys: `n_pcs`, `max_iter`, `tol`, `seed`, `centre`, `scale`. Missing
+    /// keys fall back to [PpcaParams::default].
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the PPCA parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The [PpcaParams], or an error when a count is present but unusable.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params = r_list_to_map(r_list)?;
+        let defaults = Self::default();
+
+        Ok(Self {
+            n_pcs: r_list_count(&params, "n_pcs")?.unwrap_or(defaults.n_pcs),
+            max_iter: r_list_count(&params, "max_iter")?.unwrap_or(defaults.max_iter),
+            tol: params
+                .get("tol")
+                .and_then(|v| v.as_real())
+                .unwrap_or(defaults.tol),
+            seed: r_list_count_allow_zero(&params, "seed")?
+                .map(|v| v as u64)
+                .unwrap_or(defaults.seed),
+            centre: params
+                .get("centre")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(defaults.centre),
+            scale: params
+                .get("scale")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(defaults.scale),
+        })
+    }
+}
+
+impl BpcaParams {
+    /// Generate BpcaParams from an R list
+    ///
+    /// Keys: `n_pcs`, `max_iter`, `tol`, `centre`, `scale`. Missing keys fall
+    /// back to [BpcaParams::default].
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the BPCA parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The [BpcaParams], or an error when a count is present but unusable.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params = r_list_to_map(r_list)?;
+        let defaults = Self::default();
+
+        Ok(Self {
+            n_pcs: r_list_count(&params, "n_pcs")?.unwrap_or(defaults.n_pcs),
+            max_iter: r_list_count(&params, "max_iter")?.unwrap_or(defaults.max_iter),
+            tol: params
+                .get("tol")
+                .and_then(|v| v.as_real())
+                .unwrap_or(defaults.tol),
+            centre: params
+                .get("centre")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(defaults.centre),
+            scale: params
+                .get("scale")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(defaults.scale),
         })
     }
 }

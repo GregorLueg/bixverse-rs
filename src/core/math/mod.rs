@@ -5,6 +5,7 @@ pub mod linear_algebra;
 pub mod matrix_helpers;
 pub mod mixed_model;
 pub mod optimise;
+pub mod pca_missing;
 pub mod pca_svd;
 pub mod rbf;
 pub mod sparse;

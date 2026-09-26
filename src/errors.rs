@@ -48,6 +48,25 @@ pub enum BixverseErrors {
     #[error("The faer Cholesky failed: {0}")]
     FaerCholeskyError(#[from] faer::linalg::solvers::LltError),
 
+    // -- PCA with missing values --
+    /// A row or column of the input to PPCA / BPCA holds no observed value.
+    #[error("PCA with missing values: {axis} {index} is entirely missing; remove it first.")]
+    PcaAllMissing {
+        /// `"row"` or `"column"`
+        axis: &'static str,
+        /// Zero-based index of the offending row or column
+        index: usize,
+    },
+
+    /// More components were requested than the data can hold.
+    #[error("PCA: requested {n_pcs} components, but at most {max} are possible.")]
+    PcaTooManyComponents {
+        /// Requested number of components
+        n_pcs: usize,
+        /// `min(nrow, ncol)`
+        max: usize,
+    },
+
     // -- Kernel smoothing --
     /// A kernel bandwidth was requested for fewer than two points.
     #[error("Kernel bandwidth needs at least 2 data points, got {found}.")]
