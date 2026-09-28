@@ -1,11 +1,17 @@
 //! GPU-resident compressed sparse matrix. Single-layout, layer-selected at
 //! upload time. Hold two of these (one CSR, one CSC) when both directions
-//! of SpMM are needed.
+//! of SpMM are needed; [`csc_to_csr_gpu`] builds the second on the device
+//! from the first, so only one layout crosses the bus.
+
+// The `#[cube]` macro generates undocumented launcher structs and functions.
+#![allow(missing_docs)]
 
 use cubecl::Runtime;
 use cubecl::prelude::*;
 use cubecl_utils_rs::prelude::*;
+use rayon::prelude::*;
 
+use crate::gpu::WORKGROUP_256;
 use crate::prelude::*;
 
 ///////////////////////
@@ -144,5 +150,250 @@ where
     /// The size on the GPU
     pub fn vram_bytes(&self) -> usize {
         self.indptr.vram_bytes() + self.indices.vram_bytes() + self.values.vram_bytes()
+    }
+}
+
+//////////////////////////
+// CSC to CSR on device //
+//////////////////////////
+
+/// Scatter one CSC column into the CSR buffers.
+///
+/// Within a column every row occurs at most once, so no two threads share a
+/// cursor and no atomics are needed. Launching the columns in order leaves
+/// every CSR row sorted by column, identical to the host transpose.
+///
+/// ### Params
+///
+/// * `col_indptr` - CSC column pointers `[m + 1]`
+/// * `row_idx` - CSC row indices `[nnz]`
+/// * `values` - CSC values `[nnz]`
+/// * `cursor` - Next free slot per row `[n]`, initialised to the CSR row
+///   pointers and advanced in place
+/// * `out_indices` - CSR column indices `[nnz]`
+/// * `out_values` - CSR values `[nnz]`
+/// * `col` - Column to scatter
+/// * `len` - Non-zeros in that column
+///
+/// ### Grid mapping
+///
+/// * `(CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * CUBE_DIM_X + UNIT_POS_X` ->
+///   offset into the column
+#[cube(launch_unchecked)]
+pub fn csc_to_csr_scatter_column<F: Numeric>(
+    col_indptr: &Tensor<u32>,
+    row_idx: &Tensor<u32>,
+    values: &Tensor<F>,
+    cursor: &mut Tensor<u32>,
+    out_indices: &mut Tensor<u32>,
+    out_values: &mut Tensor<F>,
+    col: u32,
+    len: u32,
+) {
+    let t = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * CUBE_DIM_X + UNIT_POS_X;
+    if t >= len {
+        terminate!();
+    }
+    let p = col_indptr[col as usize] + t;
+    let row = row_idx[p as usize];
+    let slot = cursor[row as usize];
+    out_indices[slot as usize] = col;
+    out_values[slot as usize] = values[p as usize];
+    cursor[row as usize] = slot + 1u32;
+}
+
+/// CSR row pointers of a CSC matrix, from its row indices.
+///
+/// Per-thread row histograms over contiguous slices of `row_idx`, summed and
+/// scanned on the host: `O(nnz)` reads and an `n`-long scan.
+///
+/// ### Params
+///
+/// * `row_idx` - CSC row indices `[nnz]`
+/// * `n_rows` - Number of rows
+///
+/// ### Returns
+///
+/// CSR row pointers `[n_rows + 1]`.
+fn csr_indptr_from_csc_rows(row_idx: &[u32], n_rows: usize) -> Vec<u32> {
+    let n_threads = rayon::current_num_threads().max(1);
+    let chunk = row_idx.len().div_ceil(n_threads).max(1);
+    let counts = row_idx
+        .par_chunks(chunk)
+        .map(|slice| {
+            let mut c = vec![0u32; n_rows];
+            for &r in slice {
+                c[r as usize] += 1;
+            }
+            c
+        })
+        .reduce(
+            || vec![0u32; n_rows],
+            |mut a, b| {
+                a.iter_mut().zip(b.iter()).for_each(|(x, y)| *x += y);
+                a
+            },
+        );
+    let mut indptr = Vec::with_capacity(n_rows + 1);
+    let mut acc = 0u32;
+    indptr.push(0);
+    for c in counts {
+        acc += c;
+        indptr.push(acc);
+    }
+    indptr
+}
+
+/// Build the CSR of a matrix on the device from its uploaded CSC.
+///
+/// Saves the host transpose and the second upload. The row pointers come from
+/// the host (cheap, see [`csr_indptr_from_csc_rows`]); indices and values are
+/// scattered on the device, one launch per non-empty column in column order,
+/// so the result matches `transpose_sparse_single_layer` exactly and is
+/// reproducible.
+///
+/// ### Params
+///
+/// * `csc` - Uploaded CSC of A, shape `(n, m)`
+/// * `host_col_indptr` - The same CSC's column pointers on the host `[m + 1]`,
+///   used to size each launch
+/// * `host_row_idx` - The same CSC's row indices on the host `[nnz]`
+/// * `client` - CubeCL compute client
+///
+/// ### Returns
+///
+/// The CSR of A on the device.
+///
+/// ### Errors
+///
+/// * `SparseLayoutMismatch` if `csc` is not CSC.
+/// * `CubeclUtils` if a buffer busts the per-binding size limit or a grid is
+///   over the device limit.
+pub fn csc_to_csr_gpu<R, F>(
+    csc: &GpuCompressedSparseData<R, F>,
+    host_col_indptr: &[u32],
+    host_row_idx: &[u32],
+    client: &ComputeClient<R>,
+) -> Result<GpuCompressedSparseData<R, F>, BixverseErrors>
+where
+    R: Runtime,
+    F: cubecl::CubeElement + Numeric,
+{
+    if !csc.cs_type.is_csc() {
+        return Err(BixverseErrors::SparseLayoutMismatch {
+            expected: CompressedSparseFormat::Csc,
+            got: csc.cs_type,
+        });
+    }
+    let (n, m) = csc.shape;
+    let limits = GpuLimits::from_client(client);
+
+    let row_ptr = csr_indptr_from_csc_rows(host_row_idx, n);
+    let indptr = GpuTensor::<R, u32>::from_slice(&row_ptr, vec![n + 1], client)?;
+    let cursor = GpuTensor::<R, u32>::from_slice(&row_ptr[..n], vec![n], client)?;
+    let indices = GpuTensor::<R, u32>::empty(vec![csc.nnz], client)?;
+    let values = GpuTensor::<R, F>::empty(vec![csc.nnz], client)?;
+
+    for col in 0..m {
+        let len = host_col_indptr[col + 1] - host_col_indptr[col];
+        if len == 0 {
+            continue;
+        }
+        let (gx, gy) = grid_2d(len.div_ceil(WORKGROUP_256), &limits)?;
+        let count = checked_cube_count("csc_to_csr_scatter_column", gx, gy, 1, &limits)?;
+        unsafe {
+            csc_to_csr_scatter_column::launch_unchecked::<F, R>(
+                client,
+                count,
+                CubeDim::new_1d(WORKGROUP_256),
+                csc.indptr.clone().into_tensor_arg(),
+                csc.indices.clone().into_tensor_arg(),
+                csc.values.clone().into_tensor_arg(),
+                cursor.clone().into_tensor_arg(),
+                indices.clone().into_tensor_arg(),
+                values.clone().into_tensor_arg(),
+                col as u32,
+                len,
+            );
+        }
+    }
+
+    Ok(GpuCompressedSparseData {
+        indptr,
+        indices,
+        values,
+        cs_type: CompressedSparseFormat::Csr,
+        shape: (n, m),
+        nnz: csc.nnz,
+    })
+}
+
+///////////
+// Tests //
+///////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::math::sparse::transpose_sparse_single_layer;
+    use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+
+    fn try_device() -> Option<WgpuDevice> {
+        let device = WgpuDevice::DefaultDevice;
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            WgpuRuntime::client(&device);
+        }))
+        .ok()
+        .map(|_| device)
+    }
+
+    /// The device build is bitwise identical to the host transpose, including
+    /// the order within each row, with empty rows and empty columns present.
+    #[test]
+    fn test_csc_to_csr_gpu_matches_host() {
+        let Some(device) = try_device() else { return };
+        let client = WgpuRuntime::client(&device);
+        let (n, m) = (300usize, 40usize);
+
+        let mut values = Vec::new();
+        let mut indices = Vec::new();
+        let mut indptr = vec![0u32];
+        for j in 0..m {
+            for i in 0..n {
+                // column 7 and every row divisible by 50 stay empty
+                if j != 7 && i % 50 != 0 && (i * 3 + j * 7) % 5 == 0 {
+                    values.push((i * 31 + j) as f32 * 0.01);
+                    indices.push(i as u32);
+                }
+            }
+            indptr.push(values.len() as u32);
+        }
+        let csc = CompressedSparseData2::<f32, f32>::new_csc(
+            &values,
+            &indices,
+            &indptr,
+            Some(&values),
+            (n, m),
+        );
+        let want = transpose_sparse_single_layer(&csc, true).unwrap();
+
+        let csc_gpu = GpuCompressedSparseData::<WgpuRuntime, f32>::from_parts(
+            &values,
+            &indices,
+            &indptr,
+            CompressedSparseFormat::Csc,
+            (n, m),
+            &client,
+        )
+        .unwrap();
+        let got = csc_to_csr_gpu(&csc_gpu, &indptr, &indices, &client).unwrap();
+
+        assert!(got.cs_type.is_csr());
+        assert_eq!(got.indptr.read(&client).unwrap(), want.indptr);
+        assert_eq!(got.indices.read(&client).unwrap(), want.indices);
+        assert_eq!(
+            got.values.read(&client).unwrap(),
+            *want.data_2.as_ref().unwrap()
+        );
     }
 }

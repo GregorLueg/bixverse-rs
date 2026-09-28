@@ -86,6 +86,33 @@ fn spmm_workgroup(s_width: usize) -> u32 {
         _ => WORKGROUP_256,
     }
 }
+/// Target non-zeros per split-K slice of the transpose SpMM. Measured on an
+/// M1 Max at 685k cells x 2000 HVGs, s = 130: 256 and 1024 run level (240 vs
+/// 252 ms for three calls), 4096 is 30% slower. 1024 keeps the partials buffer
+/// at 39 slices rather than the 64-slice cap.
+const SPMM_T_NNZ_PER_CHUNK: usize = 1024;
+
+/// Upper bound on the split-K slices per gene; bounds the partials buffer at
+/// `SPMM_T_MAX_CHUNKS * m * s` elements.
+const SPMM_T_MAX_CHUNKS: usize = 64;
+
+/// Number of split-K slices for the transpose SpMM.
+///
+/// Sized from the average non-zeros per gene, so a small input keeps a single
+/// slice and pays nothing for the reduce beyond one extra launch.
+///
+/// ### Params
+///
+/// * `nnz` - Non-zeros of A
+/// * `m` - Number of genes (columns of A)
+///
+/// ### Returns
+///
+/// Slice count in `1..=SPMM_T_MAX_CHUNKS`.
+fn spmm_transpose_chunks(nnz: usize, m: usize) -> usize {
+    (nnz / m.max(1) / SPMM_T_NNZ_PER_CHUNK).clamp(1, SPMM_T_MAX_CHUNKS)
+}
+
 use crate::gpu::linalg::sparse_gpu::GpuCompressedSparseData;
 use crate::prelude::*;
 
@@ -159,15 +186,16 @@ pub fn spmm_csr_forward<S: Float, A: Float>(
     }
 }
 
-/// Transpose SpMM with mean correction and column scaling:
-/// `Z = (A^T * Q - mu * q_sum^T) / sigma`.
+/// Split-K partial of the transpose SpMM: one slice of `A^T * Q`.
 ///
-/// Uses CSC of A, which is structurally a CSR of A^T. One workgroup per
-/// output row (gene). Threads stride over the `s` output columns and
-/// iterate the column's nnz serially. After the sparse dot product, each
-/// output element subtracts `mu[j] * q_sum[col]`, then divides by
-/// `sigma[j]`. `mu_j` and `sigma_j` are loaded once per workgroup; the GPU
-/// L1/constant cache services the uniform reads across threads.
+/// Uses CSC of A, which is structurally a CSR of `A^T`. The grid is gene by
+/// chunk: each workgroup owns one contiguous slice of one gene's non-zeros and
+/// writes its partial dot products to `partials[chunk, gene, :]`. With one
+/// workgroup per gene the device only sees `m` workgroups (2000 for an HVG
+/// PCA), each walking a reduction as long as the number of cells expressing
+/// the gene, and the kernel ran 5x slower than the forward SpMM on the same
+/// data. [`fn@spmm_csc_transpose_reduce`] sums the slices and applies the
+/// centring and scaling.
 ///
 /// ### Params
 ///
@@ -175,63 +203,115 @@ pub fn spmm_csr_forward<S: Float, A: Float>(
 /// * `indices` - Row indices of nnz `[nnz]`
 /// * `values` - Values of nnz `[nnz]` in storage precision `S`
 /// * `q` - Dense RHS `[n, s]` row-major in accumulator precision `A`
-/// * `q_sum` - Precomputed column sums of Q `[s]` in `A`
-/// * `mu` - Column means of A `[m]` in `A`
-/// * `sigma` - Column standard deviations of A `[m]` in `A`. Must be > 0;
-///   floor on the host.
-/// * `z` - Dense output `[m, s]` row-major in `A`
-/// * `m_rows` - Number of output rows
+/// * `partials` - Output `[n_chunks, m, s]` row-major in `A`
+/// * `m_rows` - Number of genes
 /// * `s_width` - Output width
+/// * `n_chunks` - Number of slices per gene
 /// * `wg_size` - Workgroup size (comptime)
 ///
 /// ### Grid mapping
 ///
-/// * `CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X` -> output row index
+/// * `CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X` -> gene index
+/// * `CUBE_POS_Z` -> slice index
 /// * `UNIT_POS_X` -> stride offset over output columns
 #[cube(launch_unchecked)]
-pub fn spmm_csc_transpose<S: Float, A: Float>(
+pub fn spmm_csc_transpose_partial<S: Float, A: Float>(
     indptr: &Tensor<u32>,
     indices: &Tensor<u32>,
     values: &Tensor<S>,
     q: &Tensor<A>,
-    q_sum: &Tensor<A>,
-    mu: &Tensor<A>,
-    sigma: &Tensor<A>,
-    m_dot_q: &Tensor<A>,
-    z: &mut Tensor<A>,
+    partials: &mut Tensor<A>,
     m_rows: u32,
     s_width: u32,
+    n_chunks: u32,
     #[comptime] wg_size: u32,
 ) {
     let row = CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X;
     if row >= m_rows {
         terminate!();
     }
+    let chunk = CUBE_POS_Z;
 
     let tx = UNIT_POS_X;
 
     let seg_start = indptr[row as usize];
     let seg_end = indptr[(row + 1u32) as usize];
+    let chunk_len = (seg_end - seg_start).div_ceil(n_chunks);
+    let mut lo = seg_start + chunk * chunk_len;
+    if lo > seg_end {
+        lo = seg_end;
+    }
+    let mut hi = lo + chunk_len;
+    if hi > seg_end {
+        hi = seg_end;
+    }
 
-    let mu_j = mu[row as usize];
-    let sigma_j = sigma[row as usize];
+    let out_base = (chunk * m_rows + row) * s_width;
 
     let mut col = tx;
     while col < s_width {
         let mut acc = A::new(0.0);
-        let mut idx = seg_start;
-        while idx < seg_end {
+        let mut idx = lo;
+        while idx < hi {
             let i = indices[idx as usize];
             let v = A::cast_from(values[idx as usize]);
             acc += v * q[i as usize * s_width as usize + col as usize];
             idx += 1u32;
         }
-        acc -= mu_j * q_sum[col as usize];
-        acc -= m_dot_q[col as usize];
-        acc /= sigma_j;
-        z[row as usize * s_width as usize + col as usize] = acc;
+        partials[(out_base + col) as usize] = acc;
         col += wg_size;
     }
+}
+
+/// Reduce the split-K slices of the transpose SpMM and apply the centring and
+/// scaling: `Z = (sum_c partials[c] - mu * q_sum^T - 1 * m_dot_q^T) / sigma`.
+///
+/// One thread per output element.
+///
+/// ### Params
+///
+/// * `partials` - Slices `[n_chunks, m, s]` row-major
+/// * `q_sum` - Precomputed column sums of Q `[s]`
+/// * `mu` - Column means of A `[m]`
+/// * `sigma` - Column standard deviations of A `[m]`, floored > 0
+/// * `m_dot_q` - Precomputed `offsets^T * Q` `[s]`, zeros without CLR
+/// * `z` - Output `[m, s]` row-major
+/// * `total` - `m * s`
+/// * `s_width` - Output width
+/// * `n_chunks` - Number of slices
+///
+/// ### Grid mapping
+///
+/// * `(CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * CUBE_DIM_X + UNIT_POS_X` ->
+///   flat output index
+#[cube(launch_unchecked)]
+pub fn spmm_csc_transpose_reduce<A: Float>(
+    partials: &Tensor<A>,
+    q_sum: &Tensor<A>,
+    mu: &Tensor<A>,
+    sigma: &Tensor<A>,
+    m_dot_q: &Tensor<A>,
+    z: &mut Tensor<A>,
+    total: u32,
+    s_width: u32,
+    n_chunks: u32,
+) {
+    let idx = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * CUBE_DIM_X + UNIT_POS_X;
+    if idx >= total {
+        terminate!();
+    }
+    let row = idx / s_width;
+    let col = idx % s_width;
+
+    let mut acc = A::new(0.0);
+    let mut c = 0u32;
+    while c < n_chunks {
+        acc += partials[(c * total + idx) as usize];
+        c += 1u32;
+    }
+    acc -= mu[row as usize] * q_sum[col as usize];
+    acc -= m_dot_q[col as usize];
+    z[idx as usize] = acc / sigma[row as usize];
 }
 
 /// Plain forward SpMM: `Y = A * X`.
@@ -746,15 +826,67 @@ where
         });
     }
 
+    let n_chunks = spmm_transpose_chunks(sparse.nnz, sparse.shape.1);
+    launch_spmm_csc_transpose_chunks(
+        sparse, q, q_sum, mu, sigma, m_dot_q, z, s_width, n_chunks, client,
+    )
+}
+
+/// [`launch_spmm_csc_transpose`] with an explicit split-K slice count, so the
+/// tests can force the split on inputs too small to trigger it.
+///
+/// ### Params
+///
+/// * `sparse` - CSC of A, shape `(n, m)`, already layout-checked
+/// * `q` - Dense RHS `[n, s_width]` row-major
+/// * `q_sum` - Precomputed column sums of Q `[s_width]`
+/// * `mu` - Column means of A `[m]`
+/// * `sigma` - Column standard deviations of A `[m]`, floored > 0
+/// * `m_dot_q` - Precomputed `offsets^T * Q` `[s_width]`
+/// * `z` - Dense output `[m, s_width]` row-major
+/// * `s_width` - Output width
+/// * `n_chunks` - Split-K slices per gene, at least 1
+/// * `client` - CubeCL compute client
+///
+/// ### Errors
+///
+/// * `CubeclUtils` if a grid is over the device limit or the partials buffer
+///   busts the per-binding size limit.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn launch_spmm_csc_transpose_chunks<R, S, A>(
+    sparse: &GpuCompressedSparseData<R, S>,
+    q: &GpuTensor<R, A>,
+    q_sum: &GpuTensor<R, A>,
+    mu: &GpuTensor<R, A>,
+    sigma: &GpuTensor<R, A>,
+    m_dot_q: &GpuTensor<R, A>,
+    z: &GpuTensor<R, A>,
+    s_width: usize,
+    n_chunks: usize,
+    client: &ComputeClient<R>,
+) -> Result<(), BixverseErrors>
+where
+    R: Runtime,
+    S: Float + cubecl::CubeElement,
+    A: Float + cubecl::CubeElement,
+{
     let (_n, m) = sparse.shape;
     let limits = GpuLimits::from_client(client);
+    let partials = GpuTensor::<R, A>::empty(vec![n_chunks, m, s_width], client)?;
+
     let (gx, gy) = grid_2d(m as u32, &limits)?;
-    let count = CubeCount::Static(gx, gy, 1);
+    let count = checked_cube_count(
+        "spmm_csc_transpose_partial",
+        gx,
+        gy,
+        n_chunks as u32,
+        &limits,
+    )?;
 
     macro_rules! dispatch {
         ($wg:expr) => {
             unsafe {
-                spmm_csc_transpose::launch_unchecked::<S, A, R>(
+                spmm_csc_transpose_partial::launch_unchecked::<S, A, R>(
                     client,
                     count,
                     CubeDim::new_1d($wg),
@@ -762,13 +894,10 @@ where
                     sparse.indices.clone().into_tensor_arg(),
                     sparse.values.clone().into_tensor_arg(),
                     q.clone().into_tensor_arg(),
-                    q_sum.clone().into_tensor_arg(),
-                    mu.clone().into_tensor_arg(),
-                    sigma.clone().into_tensor_arg(),
-                    m_dot_q.clone().into_tensor_arg(),
-                    z.clone().into_tensor_arg(),
+                    partials.clone().into_tensor_arg(),
                     m as u32,
                     s_width as u32,
+                    n_chunks as u32,
                     $wg,
                 );
             }
@@ -779,6 +908,26 @@ where
         WORKGROUP_64 => dispatch!(WORKGROUP_64),
         WORKGROUP_128 => dispatch!(WORKGROUP_128),
         _ => dispatch!(WORKGROUP_256),
+    }
+
+    let total = (m * s_width) as u32;
+    let (rx, ry) = grid_2d(total.div_ceil(WORKGROUP_256), &limits)?;
+    let count = checked_cube_count("spmm_csc_transpose_reduce", rx, ry, 1, &limits)?;
+    unsafe {
+        spmm_csc_transpose_reduce::launch_unchecked::<A, R>(
+            client,
+            count,
+            CubeDim::new_1d(WORKGROUP_256),
+            partials.into_tensor_arg(),
+            q_sum.clone().into_tensor_arg(),
+            mu.clone().into_tensor_arg(),
+            sigma.clone().into_tensor_arg(),
+            m_dot_q.clone().into_tensor_arg(),
+            z.clone().into_tensor_arg(),
+            total,
+            s_width as u32,
+            n_chunks as u32,
+        );
     }
 
     Ok(())
@@ -1305,6 +1454,7 @@ mod tests {
         n: usize,
         m: usize,
         s: usize,
+        n_chunks: usize,
         device: &WgpuDevice,
     ) -> Vec<f32> {
         let client = WgpuRuntime::client(device);
@@ -1328,7 +1478,7 @@ mod tests {
             GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; m * s], vec![m, s], &client)
                 .unwrap();
 
-        launch_spmm_csc_transpose(
+        launch_spmm_csc_transpose_chunks(
             &sparse,
             &q_gpu,
             &qsum_gpu,
@@ -1337,6 +1487,7 @@ mod tests {
             &m_dot_q_gpu,
             &z_gpu,
             s,
+            n_chunks,
             &client,
         )
         .unwrap();
@@ -1405,7 +1556,9 @@ mod tests {
         assert_vec_close(&got, &want, 1e-3);
     }
 
-    /// Transposed CSC product against the host, with non-trivial mu and sigma.
+    /// Transposed CSC product against the host, with non-trivial mu, sigma and
+    /// offset term, across split-K slice counts. 40 slices over ~24 non-zeros
+    /// per gene leaves some slices empty.
     #[test]
     fn test_spmm_csc_transpose() {
         let Some(device) = try_device() else { return };
@@ -1427,12 +1580,15 @@ mod tests {
         let sigma: Vec<f32> = (0..m)
             .map(|j| 0.5 + ((j * 5 + 2) % 7) as f32 * 0.1)
             .collect();
-        let m_dot_q = vec![0.0f32; s];
+        let m_dot_q: Vec<f32> = (0..s).map(|c| c as f32 * 0.05).collect();
 
-        let got = run_spmm_csc_transpose(&a, &q, &q_sum, &mu, &sigma, &m_dot_q, n, m, s, &device);
         let want = cpu_spmm_csc_transpose(&a, &q, &q_sum, &mu, &sigma, &m_dot_q, n, m, s);
-
-        assert_vec_close(&got, &want, 1e-3);
+        for n_chunks in [1, 3, 7, 40] {
+            let got = run_spmm_csc_transpose(
+                &a, &q, &q_sum, &mu, &sigma, &m_dot_q, n, m, s, n_chunks, &device,
+            );
+            assert_vec_close(&got, &want, 1e-3);
+        }
     }
 
     // Empty rows must emit -correction[col] verbatim.

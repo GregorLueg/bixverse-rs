@@ -639,7 +639,13 @@ fn test_residual_pca_matches_a_direct_svd() {
     let no_pcs = 10;
     // Residuals already carry their variance as signal, so centre but do not
     // rescale. Exact SVD so the comparison is not against a random projection.
-    let params = SingleCellPcaParams::new(true, false, false, false, 1e4);
+    let params = SingleCellPcaParams::new(
+        true,
+        false,
+        bixverse_rs::single_cell::sc_processing::pca::PcaSolver::Covariance,
+        false,
+        1e4,
+    );
 
     let (scores, loadings, singular, scaled) = pca_on_sc_residuals(
         &reader,
@@ -714,7 +720,13 @@ fn test_residual_pca_refuses_clr() {
     let model = model_from_fixture();
     let no_cov = SctCovariates::default();
     let ctx = SctCellContext::new(&log10_umi, &no_cov).expect("context");
-    let params = SingleCellPcaParams::new(true, false, false, true, 1e4);
+    let params = SingleCellPcaParams::new(
+        true,
+        false,
+        bixverse_rs::single_cell::sc_processing::pca::PcaSolver::Covariance,
+        true,
+        1e4,
+    );
 
     assert!(matches!(
         pca_on_sc_residuals(
@@ -758,7 +770,13 @@ fn test_residual_pca_rejects_an_unmodelled_gene() {
             &cells,
             &[unmodelled],
             2,
-            &SingleCellPcaParams::new(true, false, false, false, 1e4),
+            &SingleCellPcaParams::new(
+                true,
+                false,
+                bixverse_rs::single_cell::sc_processing::pca::PcaSolver::Exact,
+                false,
+                1e4
+            ),
             &SctResiduals::single(&model, ctx).expect("residual source"),
             42,
             false,
@@ -1739,7 +1757,13 @@ fn test_grouped_residual_pca_matches_a_direct_svd() {
     let hvg: Vec<usize> = grouped.genes.iter().copied().take(40).collect();
     let no_pcs = 8;
     // Residuals carry their variance as signal, so centre but do not rescale.
-    let pca_params = SingleCellPcaParams::new(true, false, false, false, 1e4);
+    let pca_params = SingleCellPcaParams::new(
+        true,
+        false,
+        bixverse_rs::single_cell::sc_processing::pca::PcaSolver::Covariance,
+        false,
+        1e4,
+    );
 
     let (scores, _, _, scaled) = pca_on_sc_residuals(
         &reader,

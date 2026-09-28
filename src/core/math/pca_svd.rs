@@ -1,7 +1,7 @@
 //! Helper functions for Principal Component type analyses with implementations
 //! for randomised SVD on dense or sparse matrices.
 
-use faer::{Mat, MatMut, MatRef};
+use faer::{Mat, MatRef};
 use num_traits::Float;
 use rand::prelude::*;
 use rand_distr::Normal;
@@ -204,19 +204,20 @@ where
     });
 
     let y = x * omega;
-    let mut q = y.qr().compute_thin_Q();
+    let mut q = orthonormalise(y);
     for _ in 0..n_iter {
         let z = x.transpose() * q;
-        q = (x * z).qr().compute_thin_Q();
+        q = orthonormalise(x * z);
     }
 
     let b = q.transpose() * x;
     let svd = b
         .thin_svd()
         .map_err(|e| BixverseErrors::FaerSvdError(format!("{e:?}")))?;
+    let u = q * svd.U();
 
     Ok(RandomSvdResults {
-        u: q * svd.U(),
+        u,
         v: svd.V().cloned(),
         s: svd.S().column_vector().iter().copied().collect(),
     })
@@ -345,15 +346,11 @@ where
     let sample_size = (rank + os).min(m).min(n);
     let n_iter = n_power_iter.unwrap_or(DEFAULT_N_POWER_ITERS_RAND_SVD);
 
-    // consume the input: transform if needed, drop the original CSC.
     let csr = match matrix.cs_type {
         CompressedSparseFormat::Csr => matrix,
         CompressedSparseFormat::Csc => matrix.transform_single_layer(use_second_layer)?,
     };
-
-    // pick the active data slice without materialising an f64 copy.
-    // values are converted to F at access sites (free cast for f32 -> f64).
-    let active_data: &[T] = if use_second_layer {
+    let csr_data: &[T] = if use_second_layer {
         csr.data_2
             .as_ref()
             .ok_or(BixverseErrors::Data2NotAvailable)?
@@ -361,149 +358,109 @@ where
     } else {
         csr.data.as_slice()
     };
+    let val = |idx: usize| -> f64 { Into::<F>::into(csr_data[idx]).to_f64().unwrap() };
 
-    // helper: read a non-zero value as f64 for stable accumulation.
-    let val_f64 = |idx: usize| -> f64 {
-        let v: F = active_data[idx].into();
-        v.to_f64().unwrap()
-    };
+    let mu: Option<Vec<f64>> = col_means.map(|v| v.iter().map(|x| x.to_f64().unwrap()).collect());
+    let sd: Option<Vec<f64>> = col_stds.map(|v| v.iter().map(|x| x.to_f64().unwrap()).collect());
+    let off: Option<Vec<f64>> =
+        row_offsets.map(|v| v.iter().map(|x| x.to_f64().unwrap()).collect());
 
-    // pre-divide input (m x ncols) by col_stds once, avoiding per-nonzero division.
-    let prescale = |x: MatRef<F>| -> Option<Mat<F>> {
-        col_stds.map(|sd| Mat::from_fn(x.nrows(), x.ncols(), |i, col| x[(i, col)] / sd[i]))
-    };
-
-    // y = A * x_scaled - 1 * (mu^T * x_scaled)
-    // expects x_scaled to already be divided by sigma if applicable.
-    // accumulates per-row in f64 for numerical stability.
-    let sparse_matvec_a = |x_scaled: MatRef<F>, y: MatMut<F>| {
-        let ncols = x_scaled.ncols();
-
-        let mean_dots: Vec<f64> = if let Some(mu) = col_means {
-            (0..ncols)
-                .map(|col| {
-                    (0..m)
-                        .map(|j| mu[j].to_f64().unwrap() * x_scaled[(j, col)].to_f64().unwrap())
-                        .sum::<f64>()
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-
-        let x_sums: Vec<f64> = if row_offsets.is_some() {
-            (0..ncols)
-                .map(|col| {
-                    (0..m)
-                        .map(|j| x_scaled[(j, col)].to_f64().unwrap())
-                        .sum::<f64>()
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-
-        let y_ptr = y.as_ptr_mut() as usize;
-        let y_row_stride = y.row_stride();
-        let y_col_stride = y.col_stride();
-
-        (0..n).into_par_iter().for_each(|i| {
-            let base = y_ptr as *mut F;
-            let mut row_acc = vec![0f64; ncols];
-
-            for idx in csr.indptr[i]..csr.indptr[i + 1] {
-                let j = csr.indices[idx as usize] as usize;
-                let idx_usize = idx as usize;
-                let a_val = val_f64(idx_usize);
-                for col in 0..ncols {
-                    row_acc[col] += a_val * x_scaled[(j, col)].to_f64().unwrap();
-                }
-            }
-
-            if col_means.is_some() {
-                for col in 0..ncols {
-                    row_acc[col] -= mean_dots[col];
-                }
-            }
-
-            if let Some(off) = row_offsets {
-                let m_i = off[i].to_f64().unwrap();
-                for col in 0..ncols {
-                    row_acc[col] -= m_i * x_sums[col];
-                }
-            }
-
-            for col in 0..ncols {
-                unsafe {
-                    let ptr = base.offset(i as isize * y_row_stride + col as isize * y_col_stride);
-                    *ptr = F::from_f64(row_acc[col]).unwrap();
-                }
+    // row-major f64 copy of a faer matrix, optionally dividing row j by sd[j]
+    let to_row_major = |x: MatRef<F>, scale: Option<&[f64]>| -> Vec<f64> {
+        let k = x.ncols();
+        let mut out = vec![0f64; x.nrows() * k];
+        out.par_chunks_mut(k).enumerate().for_each(|(j, row)| {
+            let d = scale.map(|s| s[j]).unwrap_or(1.0);
+            for c in 0..k {
+                row[c] = x[(j, c)].to_f64().unwrap() / d;
             }
         });
+        out
     };
 
-    let sparse_matvec_at = |x: MatRef<F>, mut y: MatMut<F>| {
-        let ncols = x.ncols();
-
-        let m_dot_x: Vec<f64> = if let Some(off) = row_offsets {
-            (0..ncols)
-                .map(|col| {
-                    (0..n)
-                        .map(|i| off[i].to_f64().unwrap() * x[(i, col)].to_f64().unwrap())
-                        .sum::<f64>()
-                })
-                .collect()
-        } else {
-            Vec::new()
+    // y = (A - o 1^T - 1 mu^T) D^-1 x, row by row over CSR
+    let sparse_matvec_a = |x: MatRef<F>| -> Mat<F> {
+        let k = x.ncols();
+        let x_rm = to_row_major(x, sd.as_deref());
+        let mean_dots: Vec<f64> = match &mu {
+            Some(mu) => (0..k)
+                .map(|c| (0..m).map(|j| mu[j] * x_rm[j * k + c]).sum())
+                .collect(),
+            None => vec![0.0; k],
+        };
+        let x_sums: Vec<f64> = match &off {
+            Some(_) => (0..k)
+                .map(|c| (0..m).map(|j| x_rm[j * k + c]).sum())
+                .collect(),
+            None => vec![0.0; k],
         };
 
-        let (result, col_sums) = (0..n)
+        let mut y_rm = vec![0f64; n * k];
+        y_rm.par_chunks_mut(k).enumerate().for_each(|(i, acc)| {
+            for idx in csr.indptr[i] as usize..csr.indptr[i + 1] as usize {
+                let a = val(idx);
+                let xr = &x_rm[csr.indices[idx] as usize * k..][..k];
+                for (acc_c, &x_c) in acc.iter_mut().zip(xr) {
+                    *acc_c += a * x_c;
+                }
+            }
+            let o_i = off.as_ref().map(|o| o[i]).unwrap_or(0.0);
+            for c in 0..k {
+                acc[c] -= mean_dots[c] + o_i * x_sums[c];
+            }
+        });
+        Mat::from_fn(n, k, |i, c| F::from_f64(y_rm[i * k + c]).unwrap())
+    };
+
+    // y = D^-1 (A - o 1^T - 1 mu^T)^T x. One contiguous block of rows per
+    // thread, each with its own m x k accumulator (small enough for L2), so x
+    // is streamed once in order rather than gathered at random.
+    let n_threads = rayon::current_num_threads().max(1);
+    let sparse_matvec_at = |x: MatRef<F>| -> Mat<F> {
+        let k = x.ncols();
+        let x_rm = to_row_major(x, None);
+        let col_sums: Vec<f64> = (0..k)
+            .map(|c| (0..n).map(|i| x_rm[i * k + c]).sum())
+            .collect();
+        let o_dot_x: Vec<f64> = match &off {
+            Some(o) => (0..k)
+                .map(|c| (0..n).map(|i| o[i] * x_rm[i * k + c]).sum())
+                .collect(),
+            None => vec![0.0; k],
+        };
+
+        let chunk = n.div_ceil(n_threads).max(1);
+        let y_rm = (0..n)
+            .step_by(chunk)
+            .collect::<Vec<_>>()
             .into_par_iter()
-            .fold(
-                || (vec![0f64; m * ncols], vec![0f64; ncols]),
-                |(mut acc, mut cs), i| {
-                    for col in 0..ncols {
-                        cs[col] += x[(i, col)].to_f64().unwrap();
-                    }
-                    for idx in csr.indptr[i]..csr.indptr[i + 1] {
-                        let idx_usize = idx as usize;
-                        let j = csr.indices[idx_usize] as usize;
-                        let a_val = val_f64(idx_usize);
-                        for col in 0..ncols {
-                            acc[j * ncols + col] += a_val * x[(i, col)].to_f64().unwrap();
+            .map(|start| {
+                let mut acc = vec![0f64; m * k];
+                for i in start..(start + chunk).min(n) {
+                    let xr = &x_rm[i * k..(i + 1) * k];
+                    for idx in csr.indptr[i] as usize..csr.indptr[i + 1] as usize {
+                        let a = val(idx);
+                        let j = csr.indices[idx] as usize;
+                        for (acc_c, &x_c) in acc[j * k..(j + 1) * k].iter_mut().zip(xr) {
+                            *acc_c += a * x_c;
                         }
                     }
-                    (acc, cs)
-                },
-            )
+                }
+                acc
+            })
             .reduce(
-                || (vec![0f64; m * ncols], vec![0f64; ncols]),
-                |(mut a, mut cs_a), (b, cs_b)| {
-                    for i in 0..a.len() {
-                        a[i] += b[i];
-                    }
-                    for i in 0..ncols {
-                        cs_a[i] += cs_b[i];
-                    }
-                    (a, cs_a)
+                || vec![0f64; m * k],
+                |mut a, b| {
+                    a.iter_mut().zip(b.iter()).for_each(|(x, y)| *x += y);
+                    a
                 },
             );
 
-        for j in 0..m {
-            for col in 0..ncols {
-                let mut val = result[j * ncols + col];
-                if let Some(mu) = col_means {
-                    val -= mu[j].to_f64().unwrap() * col_sums[col];
-                }
-                if row_offsets.is_some() {
-                    val -= m_dot_x[col];
-                }
-                if let Some(sd) = col_stds {
-                    val /= sd[j].to_f64().unwrap();
-                }
-                y[(j, col)] = F::from_f64(val).unwrap();
-            }
-        }
+        Mat::from_fn(m, k, |j, c| {
+            let mu_j = mu.as_ref().map(|v| v[j]).unwrap_or(0.0);
+            let sd_j = sd.as_ref().map(|v| v[j]).unwrap_or(1.0);
+            F::from_f64((y_rm[j * k + c] - mu_j * col_sums[c] - o_dot_x[c]) / sd_j).unwrap()
+        })
     };
 
     let mut rng = StdRng::seed_from_u64(seed);
@@ -512,42 +469,16 @@ where
         F::from_f64(normal.sample(&mut rng)).unwrap()
     });
 
-    let omega_scaled = prescale(omega.as_ref());
-    let mut y = Mat::<F>::zeros(n, sample_size);
-    sparse_matvec_a(
-        omega_scaled
-            .as_ref()
-            .map(|m| m.as_ref())
-            .unwrap_or(omega.as_ref()),
-        y.as_mut(),
-    );
+    let y = sparse_matvec_a(omega.as_ref());
     drop(omega);
-    drop(omega_scaled);
 
-    let mut q = y.qr().compute_thin_Q();
-
-    let mut z = Mat::<F>::zeros(m, sample_size);
-    let mut y_new = Mat::<F>::zeros(n, sample_size);
-
+    let mut q = orthonormalise(y);
     for _ in 0..n_iter {
-        sparse_matvec_at(q.as_ref(), z.as_mut());
-        let z_scaled = prescale(z.as_ref());
-        sparse_matvec_a(
-            z_scaled.as_ref().map(|m| m.as_ref()).unwrap_or(z.as_ref()),
-            y_new.as_mut(),
-        );
-        q = y_new.qr().compute_thin_Q();
+        let z = sparse_matvec_at(q.as_ref());
+        q = orthonormalise(sparse_matvec_a(z.as_ref()));
     }
 
-    // memory dropping
-    drop(z);
-    drop(y_new);
-    drop(y);
-
-    let mut b_t = Mat::<F>::zeros(m, sample_size);
-    sparse_matvec_at(q.as_ref(), b_t.as_mut());
-    let b = b_t.transpose().to_owned();
-
+    let b = sparse_matvec_at(q.as_ref()).transpose().to_owned();
     let svd = b
         .thin_svd()
         .map_err(|e| BixverseErrors::FaerSvdError(format!("{e:?}")))?;
@@ -557,6 +488,294 @@ where
     let v = svd.V().to_owned();
 
     Ok(RandomSvdResults { u, s, v })
+}
+
+/// Orthonormalise the columns of a tall matrix
+///
+/// CholeskyQR2: two passes of `Q = Y L^-T` with `L L^T = Y^T Y`. Each pass is
+/// two tall GEMMs plus a `k x k` Cholesky, which parallelises far better than
+/// a Householder QR of a tall-skinny matrix. The second pass repairs the
+/// orthogonality the first loses when `Y` is ill-conditioned. Falls back to
+/// Householder QR if the Cholesky factorisation fails.
+///
+/// ### Params
+///
+/// * `y` - Tall matrix (n x k, n >= k) to orthonormalise, consumed
+///
+/// ### Returns
+///
+/// `Q` (n x k) with orthonormal columns spanning the range of `y`.
+fn orthonormalise<F: BixverseFloat>(y: Mat<F>) -> Mat<F> {
+    fn cholesky_qr<F: BixverseFloat>(y: &Mat<F>) -> Option<Mat<F>> {
+        let k = y.ncols();
+        let gram = y.transpose() * y;
+        let llt = gram.llt(faer::Side::Lower).ok()?;
+        // Q = Y L^-T, with the small k x k inverse formed explicitly so the
+        // tall product is a single GEMM
+        let mut l_inv = Mat::<F>::identity(k, k);
+        faer::linalg::triangular_solve::solve_lower_triangular_in_place(
+            llt.L(),
+            l_inv.as_mut(),
+            faer::Par::Seq,
+        );
+        Some(y * l_inv.transpose())
+    }
+
+    match cholesky_qr(&y).and_then(|q1| cholesky_qr(&q1)) {
+        Some(q) => q,
+        None => y.qr().compute_thin_Q(),
+    }
+}
+
+///////////////////////////
+// Dense covariance PCA //
+///////////////////////////
+
+/// Exact PCA of an already centred and scaled dense matrix via `X^T X`
+///
+/// One GEMM for the `m x m` cross-product, a symmetric eigendecomposition,
+/// and `U = X V / s`. Costs `2 n m^2`, so it only beats a randomised SVD when
+/// `m` is small relative to the sketch width times the number of passes.
+/// Stays in f64: the eigenvalues of the cross-product are the squared
+/// singular values, which halves the usable precision.
+///
+/// ### Params
+///
+/// * `x` - Centred (and optionally scaled) matrix, samples x features
+/// * `rank` - Number of components to return
+///
+/// ### Returns
+///
+/// `RandomSvdResults` containing U (n x rank), S (length rank), and V
+/// (m x rank).
+pub fn dense_covariance_svd(
+    x: MatRef<f64>,
+    rank: usize,
+) -> Result<RandomSvdResults<f64>, BixverseErrors> {
+    let (n, m) = (x.nrows(), x.ncols());
+    let rank = rank.min(m).min(n);
+
+    let gram = x.transpose() * x;
+    let (eig_vals, eig_vecs) =
+        crate::core::math::sparse::symmetric_eigen_descending(gram.as_ref(), m)?;
+
+    let s: Vec<f64> = eig_vals[..rank]
+        .iter()
+        .map(|&l| l.max(0.0).sqrt())
+        .collect();
+    let v = eig_vecs.subcols(0, rank).to_owned();
+    let mut u = x * &v;
+    for (c, &s_c) in s.iter().enumerate() {
+        let inv = if s_c > 0.0 { 1.0 / s_c } else { 0.0 };
+        u.col_mut(c).iter_mut().for_each(|x| *x *= inv);
+    }
+
+    Ok(RandomSvdResults { u, v, s })
+}
+
+///////////////////////////
+// Sparse covariance PCA //
+///////////////////////////
+
+/// Exact sparse PCA via the gene-gene cross-product
+///
+/// Forms `Z^T Z` for the implicitly shifted and scaled matrix
+/// `Z = (A - o 1^T - 1 c^T) D^-1` without densifying `A`, then
+/// eigendecomposes it. `A^T A` comes from one pass over the rows: each row
+/// with `r` non-zeros adds its `r^2 / 2` outer products to the upper triangle,
+/// and all updates for one entry land in one row of the accumulator, which
+/// stays in L1. Centring, the CLR offsets and scaling are rank-one
+/// corrections applied afterwards in f64. Cost is `sum(r_i^2) / 2` plus an
+/// `m x m` eigendecomposition, so this pays off when `m` is a few thousand
+/// features and rows are sparse, as with HVG-restricted single cell data.
+///
+/// ### Params
+///
+/// * `matrix` - Sparse matrix (CSR or CSC), cells x features, consumed
+/// * `rank` - Number of components to return
+/// * `use_second_layer` - Whether to use the second layer of the sparse matrix
+/// * `col_means` - Optional column means for implicit mean centring. With
+///   `row_offsets`, these are the means of the offset-corrected matrix, as
+///   returned by `sparse_csc_column_means`.
+/// * `col_stds` - Optional column sds for implicit variance normalising
+/// * `row_offsets` - Additional offsets (for example for CLR-type PCA in single
+///   cell).
+///
+/// ### Returns
+///
+/// `RandomSvdResults` containing U (n x rank), S (length rank), and V
+/// (m x rank). Memory is one `m x m` f64 accumulator per Rayon thread.
+#[allow(clippy::too_many_arguments)]
+pub fn sparse_covariance_svd<T, F>(
+    matrix: CompressedSparseData2<T>,
+    rank: usize,
+    use_second_layer: bool,
+    col_means: Option<&[F]>,
+    col_stds: Option<&[F]>,
+    row_offsets: Option<&[F]>,
+) -> Result<RandomSvdResults<F>, BixverseErrors>
+where
+    T: BixverseNumeric + Into<F>,
+    F: BixverseFloat,
+{
+    let (n, m) = matrix.shape;
+    let rank = rank.min(m).min(n);
+    let n_f = n as f64;
+
+    let csr = match matrix.cs_type {
+        CompressedSparseFormat::Csr => matrix,
+        CompressedSparseFormat::Csc => matrix.transform_single_layer(use_second_layer)?,
+    };
+    let values: &[T] = if use_second_layer {
+        csr.data_2
+            .as_ref()
+            .ok_or(BixverseErrors::Data2NotAvailable)?
+            .as_slice()
+    } else {
+        csr.data.as_slice()
+    };
+    let val = |idx: usize| -> f64 { Into::<F>::into(values[idx]).to_f64().unwrap() };
+
+    let off: Option<Vec<f64>> =
+        row_offsets.map(|o| o.iter().map(|x| x.to_f64().unwrap()).collect());
+    // column shift c: the means of A - o 1^T when centring, else nothing
+    let shift: Vec<f64> = match col_means {
+        Some(mu) => mu.iter().map(|x| x.to_f64().unwrap()).collect(),
+        None => vec![0.0; m],
+    };
+    let sd: Vec<f64> = match col_stds {
+        Some(s) => s.iter().map(|x| x.to_f64().unwrap()).collect(),
+        None => vec![1.0; m],
+    };
+
+    // relabel features by descending frequency: most pair updates then hit the
+    // small, cache-resident top-left block of the accumulator
+    let mut freq = vec![0usize; m];
+    for &j in csr.indices.iter() {
+        freq[j as usize] += 1;
+    }
+    let mut order: Vec<usize> = (0..m).collect();
+    order.sort_unstable_by(|&a, &b| freq[b].cmp(&freq[a]));
+    let mut relabel = vec![0usize; m];
+    for (new_j, &old_j) in order.iter().enumerate() {
+        relabel[old_j] = new_j;
+    }
+
+    // pass 1: one triangle of A^T A (in relabelled space, rows are no longer
+    // sorted, so an entry can land in either triangle), the column sums
+    // A^T 1 and w = A^T o
+    let n_threads = rayon::current_num_threads().max(1);
+    let chunk = n.div_ceil(n_threads).max(1);
+    let (gram, col_sums, w) = (0..n)
+        .step_by(chunk)
+        .collect::<Vec<_>>()
+        .into_par_iter()
+        .map(|start| {
+            let mut g = vec![0f64; m * m];
+            let mut cs = vec![0f64; m];
+            let mut w = vec![0f64; m];
+            let mut row_vals: Vec<f64> = Vec::new();
+            let mut row_idx: Vec<usize> = Vec::new();
+            for i in start..(start + chunk).min(n) {
+                let (lo, hi) = (csr.indptr[i] as usize, csr.indptr[i + 1] as usize);
+                row_vals.clear();
+                row_vals.extend((lo..hi).map(val));
+                row_idx.clear();
+                row_idx.extend(csr.indices[lo..hi].iter().map(|&j| relabel[j as usize]));
+                for (p, (&a, &va)) in row_idx.iter().zip(row_vals.iter()).enumerate() {
+                    cs[a] += va;
+                    if let Some(o) = &off {
+                        w[a] += va * o[i];
+                    }
+                    let row = &mut g[a * m..(a + 1) * m];
+                    for (&b, &vb) in row_idx[p..].iter().zip(row_vals[p..].iter()) {
+                        row[b] += va * vb;
+                    }
+                }
+            }
+            (g, cs, w)
+        })
+        .reduce(
+            || (vec![0f64; m * m], vec![0f64; m], vec![0f64; m]),
+            |(mut g1, mut cs1, mut w1), (g2, cs2, w2)| {
+                g1.par_iter_mut()
+                    .zip(g2.par_iter())
+                    .for_each(|(a, b)| *a += b);
+                cs1.iter_mut().zip(cs2.iter()).for_each(|(a, b)| *a += b);
+                w1.iter_mut().zip(w2.iter()).for_each(|(a, b)| *a += b);
+                (g1, cs1, w1)
+            },
+        );
+
+    let (o_sum, o_sq): (f64, f64) = off
+        .as_ref()
+        .map(|o| (o.iter().sum(), o.iter().map(|x| x * x).sum()))
+        .unwrap_or((0.0, 0.0));
+
+    // Z^T Z = A^T A - w 1^T - 1 w^T - s c^T - c s^T + (o . o) 1 1^T
+    //         + (1^T o)(1 c^T + c 1^T) + n c c^T, then scaled,
+    // with s = A^T 1 and w = A^T o
+    let gram_ref = &gram;
+    let cov = Mat::<f64>::from_fn(m, m, |a, b| {
+        let (ra, rb) = (relabel[a], relabel[b]);
+        let ata = if ra == rb {
+            gram_ref[ra * m + ra]
+        } else {
+            gram_ref[ra * m + rb] + gram_ref[rb * m + ra]
+        };
+        let (sa, sb) = (col_sums[ra], col_sums[rb]);
+        let (ca, cb) = (shift[a], shift[b]);
+        let raw =
+            ata - w[ra] - w[rb] - sa * cb - ca * sb + o_sq + o_sum * (ca + cb) + n_f * ca * cb;
+        raw / (sd[a] * sd[b])
+    });
+    drop(gram);
+
+    let (eig_vals, eig_vecs) =
+        crate::core::math::sparse::symmetric_eigen_descending(cov.as_ref(), m)?;
+
+    let s: Vec<f64> = eig_vals[..rank]
+        .iter()
+        .map(|&l| l.max(0.0).sqrt())
+        .collect();
+    // V scaled by 1 / sd, row-major (m x rank) for the score pass
+    let v_scaled: Vec<f64> = (0..m)
+        .flat_map(|j| (0..rank).map(move |c| (j, c)))
+        .map(|(j, c)| eig_vecs[(j, c)] / sd[j])
+        .collect();
+    let shift_v: Vec<f64> = (0..rank)
+        .map(|c| (0..m).map(|j| shift[j] * v_scaled[j * rank + c]).sum())
+        .collect();
+    let one_v: Vec<f64> = (0..rank)
+        .map(|c| (0..m).map(|j| v_scaled[j * rank + c]).sum())
+        .collect();
+
+    // pass 2: U = Z V / s, row by row
+    let u_rm: Vec<f64> = (0..n)
+        .into_par_iter()
+        .flat_map_iter(|i| {
+            let mut acc = vec![0f64; rank];
+            for idx in csr.indptr[i] as usize..csr.indptr[i + 1] as usize {
+                let j = csr.indices[idx] as usize;
+                let a = val(idx);
+                let vr = &v_scaled[j * rank..(j + 1) * rank];
+                for c in 0..rank {
+                    acc[c] += a * vr[c];
+                }
+            }
+            let oi = off.as_ref().map(|o| o[i]).unwrap_or(0.0);
+            for c in 0..rank {
+                let z = acc[c] - shift_v[c] - oi * one_v[c];
+                acc[c] = if s[c] > 0.0 { z / s[c] } else { 0.0 };
+            }
+            acc
+        })
+        .collect();
+    Ok(RandomSvdResults {
+        u: Mat::from_fn(n, rank, |i, c| F::from_f64(u_rm[i * rank + c]).unwrap()),
+        v: Mat::from_fn(m, rank, |j, c| F::from_f64(eig_vecs[(j, c)]).unwrap()),
+        s: s.iter().map(|&x| F::from_f64(x).unwrap()).collect(),
+    })
 }
 
 ///////////

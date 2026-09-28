@@ -1,5 +1,18 @@
 # News
 
+## 0.5.5
+
+### Features
+
+- Faster solvers for PCA for single cell which affects both CPU and GPU.
+- Bayesian and propabilistic PCA implemented.
+- For the single cell sNN graphs no singletons are possible anymore. Nodes
+  without edges get reconned to the graph by their strongest kNN edge.
+
+### Fix
+
+- Fixed a drift bug in the GPU-accelerated SVD.
+
 ## 0.5.4
 
 ### Fix

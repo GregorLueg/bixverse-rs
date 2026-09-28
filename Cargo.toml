@@ -1,6 +1,6 @@
 [package]
 name = "bixverse-rs"
-version = "0.5.4"
+version = "0.5.5"
 edition = "2024"
 authors = ["Gregor Lueg <gregorlueg@me.com>"]
 license = "MIT"
@@ -14,7 +14,7 @@ categories = [
   "algorithms",
 ]
 keywords = ["bioinformatics", "single-cell", "genomics", "statistics", "gpu"]
-exclude = ["dev/"]
+exclude = ["dev/", "tests/"]
 
 [lib]
 name = "bixverse_rs"

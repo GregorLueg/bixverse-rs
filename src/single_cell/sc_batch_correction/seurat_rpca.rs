@@ -18,7 +18,7 @@ use crate::single_cell::sc_batch_correction::seurat_anchors::{
     AnchorSet, build_sample_tree, find_anchor_pairs, score_anchors, tree_merge_embeddings,
 };
 use crate::single_cell::sc_batch_correction::seurat_cca::load_hvg_standardised;
-use crate::single_cell::sc_processing::pca::{SingleCellPcaParams, pca_on_sc, pca_on_sc_sparse};
+use crate::single_cell::sc_processing::pca::{SingleCellPcaParams, pca_on_sc_sparse};
 
 ///////////
 // Types //
@@ -323,32 +323,17 @@ pub fn seurat_rpca_integration<S: SingleCellReading>(
         if verbosity.normal_verbosity() {
             println!("Computing base union PCA");
         }
-        if params.pca_params.randomised {
-            let (sc, _load, _s, _) = pca_on_sc(
-                reader,
-                cell_indices,
-                gene_indices,
-                params.dims,
-                &params.pca_params,
-                clr_offsets,
-                seed,
-                false,
-                verbose,
-            )?;
-            sc
-        } else {
-            let (sc, _load, _s) = pca_on_sc_sparse(
-                reader,
-                cell_indices,
-                gene_indices,
-                params.dims,
-                &params.pca_params,
-                clr_offsets,
-                seed,
-                verbose,
-            )?;
-            sc
-        }
+        let (sc, _load, _s) = pca_on_sc_sparse(
+            reader,
+            cell_indices,
+            gene_indices,
+            params.dims,
+            &params.pca_params,
+            clr_offsets,
+            seed,
+            verbose,
+        )?;
+        sc
     };
 
     // Cache per-batch standardised HVG expression: loaded once, reused
