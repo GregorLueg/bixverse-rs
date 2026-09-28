@@ -15,7 +15,7 @@ use crate::prelude::*;
 use crate::single_cell::sc_data::H5_CELL_SLICE_SIZE;
 use crate::single_cell::sc_data::data_io::{CellGeneSparseWriter, CellOnFileQuality};
 use crate::single_cell::sc_data::data_io::{
-    GENE_DROPPED, compress_cell_row, dense_gene_map, write_cell_rows,
+    INDEX_DROPPED, compress_cell_row, dense_index_map, write_cell_rows,
 };
 use crate::single_cell::sc_data::h5_filters::{check_h5_filters, check_h5ad_filters};
 
@@ -975,7 +975,7 @@ pub fn write_h5_csc_to_csr_streaming<P: AsRef<Path>>(
     // accumulate cells in memory (necessary for CSR)
     // (gene_index, raw_count) - gene index is u32 to support >65k features
     let mut cell_data: Vec<Vec<(u32, u32)>> = vec![Vec::new(); quality.cells_to_keep.len()];
-    let cell_map = dense_gene_map(&quality.cells_to_keep);
+    let cell_map = dense_index_map(&quality.cells_to_keep);
 
     const GENE_CHUNK_SIZE: usize = 5000;
     let total_genes = quality.genes_to_keep.len();
@@ -1020,8 +1020,8 @@ pub fn write_h5_csc_to_csr_streaming<P: AsRef<Path>>(
                 let local_idx = idx - start_pos;
                 let old_cell_idx = chunk_indices[local_idx] as usize;
 
-                let new_cell_idx = cell_map.get(old_cell_idx).copied().unwrap_or(GENE_DROPPED);
-                if new_cell_idx != GENE_DROPPED {
+                let new_cell_idx = cell_map.get(old_cell_idx).copied().unwrap_or(INDEX_DROPPED);
+                if new_cell_idx != INDEX_DROPPED {
                     let raw_count = chunk_data[local_idx] as u32;
                     cell_data[new_cell_idx as usize].push((new_gene_idx, raw_count));
                 }
@@ -1506,7 +1506,7 @@ const H5_READ_AHEAD: usize = 2;
 /// * `indices_path` - Dataset path of the gene indices
 /// * `indptr` - Per-cell offsets into `data` and `indices`
 /// * `cells_to_keep` - File-local cells to write, in output order
-/// * `gene_map` - Dense file-local to output gene map, see [`dense_gene_map`]
+/// * `gene_map` - Dense file-local to output gene map, see [`dense_index_map`]
 /// * `cell_offset` - Output index of the first written cell
 /// * `target_size` - Target size for the library normalisation
 /// * `writer` - Cell-based writer to append to
@@ -1594,8 +1594,8 @@ pub(crate) fn write_h5_cell_major_cells(
                         let new = gene_map
                             .get(indices[idx] as usize)
                             .copied()
-                            .unwrap_or(GENE_DROPPED);
-                        if new != GENE_DROPPED {
+                            .unwrap_or(INDEX_DROPPED);
+                        if new != INDEX_DROPPED {
                             buf.push((new, data[idx] as u32));
                         }
                     }
@@ -1680,7 +1680,7 @@ pub fn write_h5_csr_streaming<P: AsRef<Path>>(
         raw_slot.get_indices(),
         &indptr_raw,
         &quality.cells_to_keep,
-        &dense_gene_map(&quality.genes_to_keep),
+        &dense_index_map(&quality.genes_to_keep),
         0,
         cell_qc.target_size,
         &mut writer,
@@ -2098,7 +2098,7 @@ pub fn write_h5_dense_row_streaming<P: AsRef<Path>>(
 
     let start_write = Instant::now();
 
-    let gene_map = dense_gene_map(&quality.genes_to_keep);
+    let gene_map = dense_index_map(&quality.genes_to_keep);
     let mut offset = 0;
 
     for (batch_idx, cell_batch) in quality.cells_to_keep.chunks(H5_CELL_SLICE_SIZE).enumerate() {
@@ -2135,8 +2135,8 @@ pub fn write_h5_dense_row_streaming<P: AsRef<Path>>(
                 buf.clear();
                 let row = block.row(old_cell_idx - row_start);
                 for (gene_idx, &val) in row.iter().enumerate() {
-                    let new_gene = gene_map.get(gene_idx).copied().unwrap_or(GENE_DROPPED);
-                    if val != 0.0 && new_gene != GENE_DROPPED {
+                    let new_gene = gene_map.get(gene_idx).copied().unwrap_or(INDEX_DROPPED);
+                    if val != 0.0 && new_gene != INDEX_DROPPED {
                         buf.push((new_gene, val as u32));
                     }
                 }
@@ -2594,7 +2594,7 @@ fn reconstruct_and_write_csc<P: AsRef<Path>>(
     // Accumulate per-cell data in memory - necessary for CSR output
     // (gene_index, raw_count) - gene index as u32 to support >65k features
     let mut cell_data: Vec<Vec<(u32, u32)>> = vec![Vec::new(); quality.cells_to_keep.len()];
-    let cell_map = dense_gene_map(&quality.cells_to_keep);
+    let cell_map = dense_index_map(&quality.cells_to_keep);
 
     const GENE_CHUNK_SIZE: usize = 5000;
     let total_genes = quality.genes_to_keep.len();
@@ -2632,8 +2632,8 @@ fn reconstruct_and_write_csc<P: AsRef<Path>>(
                 let local_idx = idx - start_pos;
                 let old_cell_idx = chunk_indices[local_idx] as usize;
 
-                let new_cell_idx = cell_map.get(old_cell_idx).copied().unwrap_or(GENE_DROPPED);
-                if new_cell_idx != GENE_DROPPED {
+                let new_cell_idx = cell_map.get(old_cell_idx).copied().unwrap_or(INDEX_DROPPED);
+                if new_cell_idx != INDEX_DROPPED {
                     let norm_val = chunk_data[local_idx];
                     let lib_size = lib_sizes[old_cell_idx];
                     let raw_count = reconstruct_raw_count(norm_val, lib_size, target_size);

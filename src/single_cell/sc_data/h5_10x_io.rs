@@ -708,7 +708,7 @@ pub fn write_h5_tenx_streaming<P: AsRef<Path>>(
         version.get_indices(),
         &indptr_raw,
         &quality.cells_to_keep,
-        &dense_gene_map(&quality.genes_to_keep),
+        &dense_index_map(&quality.genes_to_keep),
         0,
         cell_qc.target_size,
         &mut writer,

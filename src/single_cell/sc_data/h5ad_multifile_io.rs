@@ -491,7 +491,7 @@ fn write_h5_csc_cells(
     let indices_ds = file.dataset(task.raw_slot.get_indices())?;
     let indptr = read_indptr(&file.dataset(task.raw_slot.get_indptr())?)?;
 
-    let cell_map = dense_gene_map(cells_to_keep);
+    let cell_map = dense_index_map(cells_to_keep);
 
     // (gene_index, raw_count) - gene index as u32 to support >65k features
     let mut cell_data: Vec<Vec<(u32, u32)>> = vec![Vec::new(); cells_to_keep.len()];
@@ -529,8 +529,8 @@ fn write_h5_csc_cells(
 
             for idx in gene_start..gene_end {
                 let old_cell = chunk_indices[idx] as usize;
-                let new_cell = cell_map.get(old_cell).copied().unwrap_or(GENE_DROPPED);
-                if new_cell != GENE_DROPPED {
+                let new_cell = cell_map.get(old_cell).copied().unwrap_or(INDEX_DROPPED);
+                if new_cell != INDEX_DROPPED {
                     cell_data[new_cell as usize].push((final_gene as u32, chunk_data[idx] as u32));
                 }
             }
@@ -602,8 +602,8 @@ pub fn write_h5_dense_row_cells(
                 buf.clear();
                 let row = block.row(old_cell - row_start);
                 for (gene_idx, &val) in row.iter().enumerate() {
-                    let final_gene = gene_map.get(gene_idx).copied().unwrap_or(GENE_DROPPED);
-                    if val != 0.0 && final_gene != GENE_DROPPED {
+                    let final_gene = gene_map.get(gene_idx).copied().unwrap_or(INDEX_DROPPED);
+                    if val != 0.0 && final_gene != INDEX_DROPPED {
                         buf.push((final_gene, val as u32));
                     }
                 }

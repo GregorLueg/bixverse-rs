@@ -491,7 +491,7 @@ fn write_mtx_file_cells(
     }
 
     let path = PathBuf::from(&task.mtx_path);
-    let cell_map = dense_gene_map(cells_to_keep);
+    let cell_map = dense_index_map(cells_to_keep);
     let gene_map = dense_gene_map_from_options(gene_local_to_final);
 
     // (gene_final_idx, raw_count) per kept cell
@@ -514,9 +514,9 @@ fn write_mtx_file_cells(
         } else {
             ((col - 1) as usize, (row - 1) as usize)
         };
-        let new_cell = cell_map.get(old_cell).copied().unwrap_or(GENE_DROPPED);
-        let final_gene = gene_map.get(old_gene).copied().unwrap_or(GENE_DROPPED);
-        if new_cell == GENE_DROPPED || final_gene == GENE_DROPPED {
+        let new_cell = cell_map.get(old_cell).copied().unwrap_or(INDEX_DROPPED);
+        let final_gene = gene_map.get(old_gene).copied().unwrap_or(INDEX_DROPPED);
+        if new_cell == INDEX_DROPPED || final_gene == INDEX_DROPPED {
             continue;
         }
         cell_data[new_cell as usize].push((final_gene, value));

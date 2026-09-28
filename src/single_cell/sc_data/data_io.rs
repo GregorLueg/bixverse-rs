@@ -1457,8 +1457,8 @@ impl CellGeneSparseWriter {
 // Parallel cell write //
 ///////////////////////
 
-/// Marker in a dense gene map for a gene that is dropped.
-pub const GENE_DROPPED: u32 = u32::MAX;
+/// Marker in a dense index map for a cell or gene that is dropped.
+pub const INDEX_DROPPED: u32 = u32::MAX;
 
 /// Cells built and compressed per parallel batch in [`write_cell_rows`].
 ///
@@ -1466,21 +1466,21 @@ pub const GENE_DROPPED: u32 = u32::MAX;
 /// compressed payloads held before the append stay a few MB.
 const CELL_WRITE_BATCH: usize = 4_096;
 
-/// Dense old-to-new gene map from the kept gene indices.
+/// Dense old-to-new map from the kept cell or gene indices.
 ///
 /// Replaces a hash lookup per stored value with an index.
 ///
 /// ### Params
 ///
-/// * `genes_to_keep` - Old gene indices to keep, in new-index order
+/// * `kept` - Old indices to keep, in new-index order
 ///
 /// ### Returns
 ///
-/// `map[old] = new`, [`GENE_DROPPED`] for genes not kept. Sized to the largest
-/// kept index, so callers treat out-of-range as dropped.
-pub fn dense_gene_map(genes_to_keep: &[usize]) -> Vec<u32> {
-    let mut map = vec![GENE_DROPPED; genes_to_keep.iter().max().map_or(0, |&g| g + 1)];
-    for (new, &old) in genes_to_keep.iter().enumerate() {
+/// `map[old] = new`, [`INDEX_DROPPED`] for indices not kept. Sized to the
+/// largest kept index, so callers treat out-of-range as dropped.
+pub fn dense_index_map(kept: &[usize]) -> Vec<u32> {
+    let mut map = vec![INDEX_DROPPED; kept.iter().max().map_or(0, |&g| g + 1)];
+    for (new, &old) in kept.iter().enumerate() {
         map[old] = new as u32;
     }
     map
@@ -1494,11 +1494,11 @@ pub fn dense_gene_map(genes_to_keep: &[usize]) -> Vec<u32> {
 ///
 /// ### Returns
 ///
-/// `map[local] = final`, [`GENE_DROPPED`] for dropped genes.
+/// `map[local] = final`, [`INDEX_DROPPED`] for dropped genes.
 pub fn dense_gene_map_from_options(mapping: &[Option<usize>]) -> Vec<u32> {
     mapping
         .iter()
-        .map(|g| g.map_or(GENE_DROPPED, |g| g as u32))
+        .map(|g| g.map_or(INDEX_DROPPED, |g| g as u32))
         .collect()
 }
 
