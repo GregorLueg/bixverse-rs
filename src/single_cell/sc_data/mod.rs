@@ -3,6 +3,7 @@
 
 pub mod bin_merge_io;
 pub mod data_io;
+pub mod gene_file_io;
 pub mod h5_10x_io;
 pub mod h5_10x_multifile_io;
 pub mod h5_filters;

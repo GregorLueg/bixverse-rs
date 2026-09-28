@@ -848,6 +848,21 @@ impl CscGeneChunk {
         Ok(())
     }
 
+    /// Serialise and lz4-compress the chunk into the on-disk payload.
+    ///
+    /// Pure with respect to the writer, so callers can build many payloads in
+    /// parallel and hand them to
+    /// [`CellGeneSparseWriter::write_compressed_gene_chunks`] in order.
+    ///
+    /// ### Returns
+    ///
+    /// The compressed payload, size-prepended as the reader expects.
+    pub fn to_compressed_bytes(&self) -> std::io::Result<Vec<u8>> {
+        let mut buffer = Vec::new();
+        self.write_to_bytes(&mut buffer)?;
+        Ok(compress_prepend_size(&buffer))
+    }
+
     /// Read data from buffer
     ///
     /// ### Params
@@ -1219,6 +1234,24 @@ impl CellGeneSparseWriter {
     ///
     /// `Ok(())` on success, an I/O error otherwise.
     fn append_chunk(&mut self, buffer: &[u8], original_index: usize) -> Result<(), BixverseErrors> {
+        self.append_compressed(&compress_prepend_size(buffer), original_index)
+    }
+
+    /// Append an already compressed chunk and record its offset.
+    ///
+    /// ### Params
+    ///
+    /// * `compressed` - Size-prepended lz4 payload of a serialised chunk.
+    /// * `original_index` - Original index of the cell or gene in the data.
+    ///
+    /// ### Returns
+    ///
+    /// `Ok(())` on success, an I/O error otherwise.
+    fn append_compressed(
+        &mut self,
+        compressed: &[u8],
+        original_index: usize,
+    ) -> Result<(), BixverseErrors> {
         let current_pos = self.writer.stream_position()?;
         let chunk_offset = current_pos - self.chunks_start_pos;
         self.header.chunk_offsets.push(chunk_offset);
@@ -1226,11 +1259,9 @@ impl CellGeneSparseWriter {
             .index_map
             .insert(original_index, self.header.no_chunks);
 
-        let compressed = compress_prepend_size(buffer);
-
         self.writer
             .write_all(&(compressed.len() as u64).to_le_bytes())?;
-        self.writer.write_all(&compressed)?;
+        self.writer.write_all(compressed)?;
 
         self.header.no_chunks += 1;
         self.chunks_since_flush += 1;
@@ -1281,6 +1312,31 @@ impl CellGeneSparseWriter {
         gene_chunk.write_to_bytes(&mut buffer)?;
 
         self.append_chunk(&buffer, gene_chunk.original_index)
+    }
+
+    /// Write genes whose payloads were already built via
+    /// [`CscGeneChunk::to_compressed_bytes`].
+    ///
+    /// ### Params
+    ///
+    /// * `chunks` - `(original_index, payload)` pairs, appended in the given
+    ///   order.
+    ///
+    /// ### Returns
+    ///
+    /// `Ok(())`, or [`BixverseErrors::ReaderModeMismatch`] if the writer was
+    /// opened for cell-based chunks.
+    pub fn write_compressed_gene_chunks(
+        &mut self,
+        chunks: &[(usize, Vec<u8>)],
+    ) -> Result<(), BixverseErrors> {
+        self.check_mode(false)?;
+
+        for (original_index, payload) in chunks {
+            self.append_compressed(payload, *original_index)?;
+        }
+
+        Ok(())
     }
 
     /// Finalise the file
