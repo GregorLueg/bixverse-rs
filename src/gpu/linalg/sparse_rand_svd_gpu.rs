@@ -7,9 +7,10 @@
 //!
 //! ### Pipeline
 //!
-//! 1. Build a CSR view of A from the input CSC (host, O(nnz)).
-//! 2. Upload both layouts, plus `mu` and `sigma`. Generate `Omega` on the
-//!    host pre-scaled by `1/sigma`, upload.
+//! 1. Upload the CSC of A, plus `mu` and `sigma`.
+//! 2. Build the CSR from it on the device (`csc_to_csr_gpu`), so only one
+//!    layout crosses the bus. Generate `Omega` on the host pre-scaled by
+//!    `1/sigma`, upload.
 //! 3. `Y = A * Omega_scaled - 1 * c^T`, with `c = mu^T * Omega_scaled`
 //!    precomputed.
 //! 4. CholeskyQR2 -> `Q` orthonormal.
@@ -44,10 +45,9 @@ use rand_distr::{Distribution, Normal};
 use std::time::Instant;
 
 use crate::core::math::pca_svd::SvdResults;
-use crate::core::math::sparse::transpose_sparse_single_layer;
 use crate::core::math::*;
 use crate::gpu::linalg::cholesky_gpu::{cholesky_qr2, dense_gemm};
-use crate::gpu::linalg::sparse_gpu::GpuCompressedSparseData;
+use crate::gpu::linalg::sparse_gpu::{GpuCompressedSparseData, csc_to_csr_gpu};
 use crate::gpu::linalg::spmm::{
     launch_dense_column_sum, launch_dense_column_weighted_sum, launch_spmm_csc_transpose,
     launch_spmm_csr_forward,
@@ -177,15 +177,12 @@ where
     let use_clr = row_offsets.is_some();
     let s = n_components + params.oversampling;
 
-    // -- Host prep --
-    let csr_host = transpose_sparse_single_layer(&data, true)?;
-
     // -- GPU upload --
+    // Only the CSC crosses the bus; the CSR is built from it on the device.
     let client = R::client(&device);
-    let csr_gpu =
-        GpuCompressedSparseData::<R, T>::from_compressed_sparse_data_2(&csr_host, true, &client)?;
     let csc_gpu =
         GpuCompressedSparseData::<R, T>::from_compressed_sparse_data_2(&data, true, &client)?;
+    let csr_gpu = csc_to_csr_gpu(&csc_gpu, &data.indptr, &data.indices, &client)?;
     let mu_gpu = GpuTensor::<R, T>::from_slice(col_means, vec![m], &client)?;
     let sigma_gpu = GpuTensor::<R, T>::from_slice(col_stds, vec![m], &client)?;
     // The forward SpMM applies A - 1 mu^T with no scaling, so its dense operand
@@ -202,7 +199,6 @@ where
         None => GpuTensor::<R, T>::from_slice(&zero_n, vec![n], &client)?,
     };
 
-    drop(csr_host);
     drop(data);
 
     // Standard normal, matching the CPU randomised SVDs in `core::math::
