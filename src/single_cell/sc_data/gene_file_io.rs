@@ -34,6 +34,10 @@ const GENE_FILE_WRITE_BATCH: usize = 1_024;
 /// index `u32`.
 pub const GENE_FILE_BYTES_PER_NNZ: usize = 10;
 
+/////////////
+// Helpers //
+/////////////
+
 /// Count the non-zeros per `(chunk, gene)`.
 ///
 /// ### Params
@@ -104,6 +108,10 @@ fn plan_phases(gene_nnz: &[usize], max_nnz: Option<usize>) -> Vec<(usize, usize)
     }
     phases
 }
+
+/////////////////
+// Gene writer //
+/////////////////
 
 /// Write the gene-based file for a cell-based one.
 ///

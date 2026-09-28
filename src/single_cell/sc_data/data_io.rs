@@ -1453,9 +1453,9 @@ impl CellGeneSparseWriter {
     }
 }
 
-///////////////////////
+/////////////////////////
 // Parallel cell write //
-///////////////////////
+/////////////////////////
 
 /// Marker in a dense index map for a cell or gene that is dropped.
 pub const INDEX_DROPPED: u32 = u32::MAX;
