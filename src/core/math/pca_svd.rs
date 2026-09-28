@@ -573,9 +573,9 @@ pub fn dense_covariance_svd(
     Ok(RandomSvdResults { u, v, s })
 }
 
-////////////////////////////
+///////////////////////////
 // Sparse covariance PCA //
-////////////////////////////
+///////////////////////////
 
 /// Exact sparse PCA via the gene-gene cross-product
 ///

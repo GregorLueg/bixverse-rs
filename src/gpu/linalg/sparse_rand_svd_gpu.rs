@@ -185,6 +185,8 @@ where
     let csr_gpu = csc_to_csr_gpu(&csc_gpu, &data.indptr, &data.indices, &client)?;
     let mu_gpu = GpuTensor::<R, T>::from_slice(col_means, vec![m], &client)?;
     let sigma_gpu = GpuTensor::<R, T>::from_slice(col_stds, vec![m], &client)?;
+
+    // Nasty bug:
     // The forward SpMM applies A - 1 mu^T with no scaling, so its dense operand
     // has to arrive pre-divided by sigma, as Omega does. Inside the power loop
     // the transpose kernel divides by sigma^2 instead of sigma, which hands
