@@ -2450,7 +2450,8 @@ fn reconstruct_and_write_csr<P: AsRef<Path>>(
         true,
         quality.cells_to_keep.len(),
         quality.genes_to_keep.len(),
-        target_size,
+        // the norm layer is rebuilt at our target, not the authors' one
+        cell_qc.target_size,
     )?;
 
     let mut lib_size_out = Vec::with_capacity(quality.cells_to_keep.len());
@@ -2661,7 +2662,8 @@ fn reconstruct_and_write_csc<P: AsRef<Path>>(
         true,
         quality.cells_to_keep.len(),
         quality.genes_to_keep.len(),
-        target_size,
+        // the norm layer is rebuilt at our target, not the authors' one
+        cell_qc.target_size,
     )?;
     let (nnz_out, lib_size_out) =
         write_cell_rows(&mut cell_data, 0, cell_qc.target_size, &mut writer)?;
