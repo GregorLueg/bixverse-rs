@@ -24,6 +24,7 @@ use crate::prelude::*;
 use crate::single_cell::sc_data::data_io::*;
 use crate::single_cell::sc_data::h5_10x_io::{TenxVersion, validate_feature_types_tenx};
 use crate::single_cell::sc_data::h5_filters::check_tenx_filters;
+use crate::single_cell::sc_data::h5ad_io::write_h5_cell_major_cells;
 
 ////////////////
 // File tasks //
@@ -82,9 +83,6 @@ pub struct MultiTenxResult {
 
 /// Number of cells read per HDF5 slice while scanning a single file.
 const CELL_CHUNK_SIZE: usize = 10_000;
-
-/// Number of kept cells buffered per HDF5 slice while writing a single file.
-const WRITE_CELL_SLICE_SIZE: usize = 1_000;
 
 /// Build the effective file-local -> universe mapping for a single task.
 ///
@@ -277,83 +275,23 @@ fn write_tenx_file_cells(
         );
     }
 
-    let file = File::open(&task.h5_path)?;
-    let data_ds = file.dataset(task.version.get_data())?;
-    let indices_ds = file.dataset(task.version.get_indices())?;
-    let indptr: Vec<usize> = file.dataset(task.version.get_indptr())?.read_1d()?.to_vec();
+    let indptr: Vec<usize> = File::open(&task.h5_path)?
+        .dataset(task.version.get_indptr())?
+        .read_1d()?
+        .to_vec();
 
-    let mut lib_size = Vec::with_capacity(cells_to_keep.len());
-    let mut nnz = Vec::with_capacity(cells_to_keep.len());
-
-    // (final_gene_index, raw_count)
-    let mut cell_buf: Vec<(usize, u32)> = Vec::with_capacity(10_000);
-    let mut gene_idx_buf: Vec<u32> = Vec::with_capacity(10_000);
-    let mut count_buf: Vec<u32> = Vec::with_capacity(10_000);
-
-    let mut written = 0usize;
-
-    for cell_batch in cells_to_keep.chunks(WRITE_CELL_SLICE_SIZE) {
-        let start_pos = cell_batch.iter().map(|&c| indptr[c]).min().unwrap_or(0);
-        let end_pos = cell_batch.iter().map(|&c| indptr[c + 1]).max().unwrap_or(0);
-
-        if start_pos >= end_pos {
-            for _ in cell_batch {
-                let empty = CsrCellChunk::from_data(
-                    &[] as &[u32],
-                    &[] as &[u32],
-                    cell_offset + written,
-                    target_size,
-                    true,
-                );
-                lib_size.push(0);
-                nnz.push(0);
-                writer.write_cell_chunk(empty)?;
-                written += 1;
-            }
-            continue;
-        }
-
-        let chunk_data: Vec<f32> = data_ds.read_slice_1d(start_pos..end_pos)?.to_vec();
-        let chunk_indices: Vec<usize> = indices_ds.read_slice_1d(start_pos..end_pos)?.to_vec();
-
-        for &old_cell in cell_batch {
-            let start = indptr[old_cell] - start_pos;
-            let end = indptr[old_cell + 1] - start_pos;
-
-            cell_buf.clear();
-            gene_idx_buf.clear();
-            count_buf.clear();
-
-            for local_idx in start..end {
-                let old_gene = chunk_indices[local_idx];
-                if let Some(&Some(final_gene)) = gene_local_to_final.get(old_gene) {
-                    cell_buf.push((final_gene, chunk_data[local_idx] as u32));
-                }
-            }
-
-            if !cell_buf.is_empty() {
-                if cell_buf.windows(2).any(|w| w[0].0 > w[1].0) {
-                    cell_buf.sort_unstable_by_key(|&(g, _)| g);
-                }
-                gene_idx_buf.extend(cell_buf.iter().map(|(g, _)| *g as u32));
-                count_buf.extend(cell_buf.iter().map(|(_, c)| *c));
-            }
-
-            let chunk = CsrCellChunk::from_data(
-                &count_buf,
-                &gene_idx_buf,
-                cell_offset + written,
-                target_size,
-                true,
-            );
-
-            let (nnz_i, lib_i) = chunk.get_qc_info();
-            nnz.push(nnz_i);
-            lib_size.push(lib_i);
-            writer.write_cell_chunk(chunk)?;
-            written += 1;
-        }
-    }
+    let (nnz, lib_size) = write_h5_cell_major_cells(
+        Path::new(&task.h5_path),
+        task.version.get_data(),
+        task.version.get_indices(),
+        &indptr,
+        cells_to_keep,
+        &dense_gene_map_from_options(gene_local_to_final),
+        cell_offset,
+        target_size,
+        writer,
+        false,
+    )?;
 
     Ok(TenxFileQcResult {
         exp_id: task.exp_id.clone(),

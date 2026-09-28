@@ -1454,6 +1454,131 @@ impl CellGeneSparseWriter {
 }
 
 ///////////////////////
+// Parallel cell write //
+///////////////////////
+
+/// Marker in a dense gene map for a gene that is dropped.
+pub const GENE_DROPPED: u32 = u32::MAX;
+
+/// Cells built and compressed per parallel batch in [`write_cell_rows`].
+///
+/// Large enough to amortise the rayon fan-out, small enough that the
+/// compressed payloads held before the append stay a few MB.
+const CELL_WRITE_BATCH: usize = 4_096;
+
+/// Dense old-to-new gene map from the kept gene indices.
+///
+/// Replaces a hash lookup per stored value with an index.
+///
+/// ### Params
+///
+/// * `genes_to_keep` - Old gene indices to keep, in new-index order
+///
+/// ### Returns
+///
+/// `map[old] = new`, [`GENE_DROPPED`] for genes not kept. Sized to the largest
+/// kept index, so callers treat out-of-range as dropped.
+pub fn dense_gene_map(genes_to_keep: &[usize]) -> Vec<u32> {
+    let mut map = vec![GENE_DROPPED; genes_to_keep.iter().max().map_or(0, |&g| g + 1)];
+    for (new, &old) in genes_to_keep.iter().enumerate() {
+        map[old] = new as u32;
+    }
+    map
+}
+
+/// Dense gene map from a per-file `local -> final` mapping.
+///
+/// ### Params
+///
+/// * `mapping` - `Some(final)` for kept local genes, `None` otherwise
+///
+/// ### Returns
+///
+/// `map[local] = final`, [`GENE_DROPPED`] for dropped genes.
+pub fn dense_gene_map_from_options(mapping: &[Option<usize>]) -> Vec<u32> {
+    mapping
+        .iter()
+        .map(|g| g.map_or(GENE_DROPPED, |g| g as u32))
+        .collect()
+}
+
+/// Build one cell chunk from `(gene, count)` pairs and compress it.
+///
+/// ### Params
+///
+/// * `row` - The cell's `(gene, count)` pairs, sorted by gene here if needed
+/// * `original_index` - Index the cell is stored under
+/// * `target_size` - Target size for the library normalisation
+///
+/// ### Returns
+///
+/// `(nnz, lib_size, payload)`.
+pub fn compress_cell_row(
+    row: &mut [(u32, u32)],
+    original_index: usize,
+    target_size: f32,
+) -> std::io::Result<(usize, usize, Vec<u8>)> {
+    if row.windows(2).any(|w| w[0].0 > w[1].0) {
+        row.sort_by_key(|&(g, _)| g);
+    }
+    let genes: Vec<u32> = row.iter().map(|&(g, _)| g).collect();
+    let counts: Vec<u32> = row.iter().map(|&(_, c)| c).collect();
+    let chunk = CsrCellChunk::from_data(&counts, &genes, original_index, target_size, true);
+    let (nnz, lib_size) = chunk.get_qc_info();
+    Ok((nnz, lib_size, chunk.to_compressed_bytes()?))
+}
+
+/// Write accumulated per-cell rows to the cell-based binary.
+///
+/// For the paths that have to gather a cell's values from a gene-major or
+/// unsorted source (CSC h5ad, mtx) before writing. Rows are sorted, built and
+/// compressed in parallel batches of [`CELL_WRITE_BATCH`], appended in order,
+/// and freed as they go.
+///
+/// ### Params
+///
+/// * `rows` - One `(gene, count)` row per cell, in output order
+/// * `cell_offset` - Index of the first row's cell in the output
+/// * `target_size` - Target size for the library normalisation
+/// * `writer` - Cell-based writer to append to
+///
+/// ### Returns
+///
+/// `(nnz, lib_size)` per written cell.
+pub fn write_cell_rows(
+    rows: &mut [Vec<(u32, u32)>],
+    cell_offset: usize,
+    target_size: f32,
+    writer: &mut CellGeneSparseWriter,
+) -> Result<(Vec<usize>, Vec<usize>), BixverseErrors> {
+    let mut nnz = Vec::with_capacity(rows.len());
+    let mut lib_size = Vec::with_capacity(rows.len());
+
+    for (batch_idx, batch) in rows.chunks_mut(CELL_WRITE_BATCH).enumerate() {
+        let first = cell_offset + batch_idx * CELL_WRITE_BATCH;
+        let built = batch
+            .par_iter_mut()
+            .enumerate()
+            .map(|(k, row)| {
+                let mut row = std::mem::take(row);
+                let (nnz_i, lib_i, payload) = compress_cell_row(&mut row, first + k, target_size)?;
+                Ok((nnz_i, lib_i, (first + k, payload)))
+            })
+            .collect::<Result<Vec<_>, BixverseErrors>>()?;
+
+        let mut payloads = Vec::with_capacity(built.len());
+        for (nnz_i, lib_i, payload) in built {
+            nnz.push(nnz_i);
+            lib_size.push(lib_i);
+            payloads.push(payload);
+        }
+        writer.write_compressed_cell_chunks(&payloads)?;
+    }
+
+    Ok((nnz, lib_size))
+}
+
+///////////////////////
 // SingleCellReading //
 ///////////////////////
 
