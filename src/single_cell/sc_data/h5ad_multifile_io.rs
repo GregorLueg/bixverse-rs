@@ -4,7 +4,6 @@
 use hdf5::File;
 use ndarray::{Array2, s};
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
 use std::path::Path;
 use std::time::Instant;
 use thousands::Separable;
@@ -64,10 +63,7 @@ fn scan_gene_nnz_csr(
 
     check_h5ad_is_raw(&file, &task.raw_slot, None)?;
 
-    let indptr: Vec<u32> = file
-        .dataset(task.raw_slot.get_indptr())?
-        .read_1d()?
-        .to_vec();
+    let indptr = read_indptr(&file.dataset(task.raw_slot.get_indptr())?)?;
     let indices_ds = file.dataset(task.raw_slot.get_indices())?;
 
     let mut gene_nnz = vec![0usize; universe_size];
@@ -76,8 +72,8 @@ fn scan_gene_nnz_csr(
 
     for chunk_start in (0..task.no_cells).step_by(CHUNK_SIZE) {
         let chunk_end = (chunk_start + CHUNK_SIZE).min(task.no_cells);
-        let data_start = indptr[chunk_start] as usize;
-        let data_end = indptr[chunk_end] as usize;
+        let data_start = indptr[chunk_start];
+        let data_end = indptr[chunk_end];
 
         if data_start >= data_end {
             continue;
@@ -86,8 +82,8 @@ fn scan_gene_nnz_csr(
         let chunk_indices: Vec<u32> = indices_ds.read_slice_1d(data_start..data_end)?.to_vec();
 
         for cell_idx in chunk_start..chunk_end {
-            let start = indptr[cell_idx] as usize - data_start;
-            let end = indptr[cell_idx + 1] as usize - data_start;
+            let start = indptr[cell_idx] - data_start;
+            let end = indptr[cell_idx + 1] - data_start;
 
             for local_idx in start..end {
                 let gene_idx = chunk_indices[local_idx] as usize;
@@ -121,16 +117,13 @@ fn scan_gene_nnz_csc(
 
     check_h5ad_is_raw(&file, &task.raw_slot, None)?;
 
-    let indptr: Vec<u32> = file
-        .dataset(task.raw_slot.get_indptr())?
-        .read_1d()?
-        .to_vec();
+    let indptr = read_indptr(&file.dataset(task.raw_slot.get_indptr())?)?;
 
     let mut gene_nnz = vec![0usize; universe_size];
 
     for (local, opt) in task.gene_local_to_universe.iter().enumerate() {
         if let Some(u_idx) = opt {
-            gene_nnz[*u_idx] = (indptr[local + 1] - indptr[local]) as usize;
+            gene_nnz[*u_idx] = indptr[local + 1] - indptr[local];
         }
     }
 
@@ -218,10 +211,7 @@ fn scan_cell_stats_csr(
 
     check_h5ad_is_raw(&file, &task.raw_slot, None)?;
 
-    let indptr: Vec<u32> = file
-        .dataset(task.raw_slot.get_indptr())?
-        .read_1d()?
-        .to_vec();
+    let indptr = read_indptr(&file.dataset(task.raw_slot.get_indptr())?)?;
     let data_ds = file.dataset(task.raw_slot.get_data())?;
     let indices_ds = file.dataset(task.raw_slot.get_indices())?;
 
@@ -231,8 +221,8 @@ fn scan_cell_stats_csr(
 
     for chunk_start in (0..task.no_cells).step_by(CHUNK_SIZE) {
         let chunk_end = (chunk_start + CHUNK_SIZE).min(task.no_cells);
-        let data_start = indptr[chunk_start] as usize;
-        let data_end = indptr[chunk_end] as usize;
+        let data_start = indptr[chunk_start];
+        let data_end = indptr[chunk_end];
 
         if data_start >= data_end {
             cell_stats.extend((chunk_start..chunk_end).map(|_| (0usize, 0.0f32)));
@@ -243,8 +233,8 @@ fn scan_cell_stats_csr(
         let chunk_indices: Vec<u32> = indices_ds.read_slice_1d(data_start..data_end)?.to_vec();
 
         for cell_idx in chunk_start..chunk_end {
-            let start = indptr[cell_idx] as usize - data_start;
-            let end = indptr[cell_idx + 1] as usize - data_start;
+            let start = indptr[cell_idx] - data_start;
+            let end = indptr[cell_idx + 1] - data_start;
 
             let mut unique = 0usize;
             let mut lib_size = 0.0f32;
@@ -284,10 +274,7 @@ fn scan_cell_stats_csc(
 
     check_h5ad_is_raw(&file, &task.raw_slot, None)?;
 
-    let indptr: Vec<u32> = file
-        .dataset(task.raw_slot.get_indptr())?
-        .read_1d()?
-        .to_vec();
+    let indptr = read_indptr(&file.dataset(task.raw_slot.get_indptr())?)?;
     let data_ds = file.dataset(task.raw_slot.get_data())?;
     let indices_ds = file.dataset(task.raw_slot.get_indices())?;
 
@@ -303,16 +290,8 @@ fn scan_cell_stats_csc(
     const GENE_CHUNK_SIZE: usize = 5_000;
 
     for gene_chunk in genes_with_final.chunks(GENE_CHUNK_SIZE) {
-        let start_pos = gene_chunk
-            .iter()
-            .map(|&g| indptr[g] as usize)
-            .min()
-            .unwrap_or(0);
-        let end_pos = gene_chunk
-            .iter()
-            .map(|&g| indptr[g + 1] as usize)
-            .max()
-            .unwrap_or(0);
+        let start_pos = gene_chunk.iter().map(|&g| indptr[g]).min().unwrap_or(0);
+        let end_pos = gene_chunk.iter().map(|&g| indptr[g + 1]).max().unwrap_or(0);
 
         if start_pos >= end_pos {
             continue;
@@ -322,8 +301,8 @@ fn scan_cell_stats_csc(
         let chunk_indices: Vec<u32> = indices_ds.read_slice_1d(start_pos..end_pos)?.to_vec();
 
         for &local_gene in gene_chunk {
-            let gene_start = indptr[local_gene] as usize - start_pos;
-            let gene_end = indptr[local_gene + 1] as usize - start_pos;
+            let gene_start = indptr[local_gene] - start_pos;
+            let gene_end = indptr[local_gene + 1] - start_pos;
 
             for idx in gene_start..gene_end {
                 let cell_idx = chunk_indices[idx] as usize;
@@ -455,98 +434,24 @@ fn write_h5_csr_cells(
     cell_offset: usize,
     writer: &mut CellGeneSparseWriter,
 ) -> Result<H5FileQcResult, BixverseErrors> {
-    let file = hdf5::File::open(&task.h5_path)?;
+    let indptr = {
+        let file = hdf5::File::open(&task.h5_path)?;
+        check_h5ad_is_raw(&file, &task.raw_slot, None)?;
+        read_indptr(&file.dataset(task.raw_slot.get_indptr())?)?
+    };
 
-    check_h5ad_is_raw(&file, &task.raw_slot, None)?;
-
-    let data_ds = file.dataset(task.raw_slot.get_data())?;
-    let indices_ds = file.dataset(task.raw_slot.get_indices())?;
-    let indptr: Vec<u32> = file
-        .dataset(task.raw_slot.get_indptr())?
-        .read_1d()?
-        .to_vec();
-
-    let mut lib_size = Vec::with_capacity(cells_to_keep.len());
-    let mut nnz = Vec::with_capacity(cells_to_keep.len());
-
-    // (final_gene_index, raw_count)
-    let mut cell_buf: Vec<(usize, u32)> = Vec::with_capacity(10_000);
-    let mut gene_idx_buf: Vec<u32> = Vec::with_capacity(10_000);
-    let mut count_buf: Vec<u32> = Vec::with_capacity(10_000);
-
-    const BATCH_SIZE: usize = 1_000;
-    let mut written = 0usize;
-
-    for cell_batch in cells_to_keep.chunks(BATCH_SIZE) {
-        let start_pos = cell_batch
-            .iter()
-            .map(|&c| indptr[c] as usize)
-            .min()
-            .unwrap_or(0);
-        let end_pos = cell_batch
-            .iter()
-            .map(|&c| indptr[c + 1] as usize)
-            .max()
-            .unwrap_or(0);
-
-        if start_pos >= end_pos {
-            for _ in cell_batch {
-                let empty = CsrCellChunk::from_data(
-                    &[] as &[u32],
-                    &[] as &[u32],
-                    cell_offset + written,
-                    target_size,
-                    true,
-                );
-                lib_size.push(0);
-                nnz.push(0);
-                writer.write_cell_chunk(empty)?;
-                written += 1;
-            }
-            continue;
-        }
-
-        let chunk_data: Vec<f32> = data_ds.read_slice_1d(start_pos..end_pos)?.to_vec();
-        let chunk_indices: Vec<u32> = indices_ds.read_slice_1d(start_pos..end_pos)?.to_vec();
-
-        for &old_cell in cell_batch {
-            let start = indptr[old_cell] as usize - start_pos;
-            let end = indptr[old_cell + 1] as usize - start_pos;
-
-            cell_buf.clear();
-            gene_idx_buf.clear();
-            count_buf.clear();
-
-            for local_idx in start..end {
-                let old_gene = chunk_indices[local_idx] as usize;
-                if let Some(&Some(final_gene)) = gene_mapping.get(old_gene) {
-                    cell_buf.push((final_gene, chunk_data[local_idx] as u32));
-                }
-            }
-
-            if !cell_buf.is_empty() {
-                if cell_buf.windows(2).any(|w| w[0].0 > w[1].0) {
-                    cell_buf.sort_unstable_by_key(|&(g, _)| g);
-                }
-                gene_idx_buf.extend(cell_buf.iter().map(|(g, _)| *g as u32));
-                count_buf.extend(cell_buf.iter().map(|(_, c)| *c));
-            }
-
-            let chunk = CsrCellChunk::from_data(
-                &count_buf,
-                &gene_idx_buf,
-                cell_offset + written,
-                target_size,
-                true,
-            );
-
-            let (nnz_i, lib_i) = chunk.get_qc_info();
-            nnz.push(nnz_i);
-            lib_size.push(lib_i);
-            writer.write_cell_chunk(chunk)?;
-            written += 1;
-        }
-    }
+    let (nnz, lib_size) = write_h5_cell_major_cells(
+        Path::new(&task.h5_path),
+        task.raw_slot.get_data(),
+        task.raw_slot.get_indices(),
+        &indptr,
+        cells_to_keep,
+        &dense_gene_map_from_options(gene_mapping),
+        cell_offset,
+        target_size,
+        writer,
+        false,
+    )?;
 
     Ok(H5FileQcResult {
         exp_id: task.exp_id.clone(),
@@ -584,16 +489,9 @@ fn write_h5_csc_cells(
 
     let data_ds = file.dataset(task.raw_slot.get_data())?;
     let indices_ds = file.dataset(task.raw_slot.get_indices())?;
-    let indptr: Vec<u32> = file
-        .dataset(task.raw_slot.get_indptr())?
-        .read_1d()?
-        .to_vec();
+    let indptr = read_indptr(&file.dataset(task.raw_slot.get_indptr())?)?;
 
-    let cell_old_to_new: FxHashMap<usize, usize> = cells_to_keep
-        .iter()
-        .enumerate()
-        .map(|(new, &old)| (old, new))
-        .collect();
+    let cell_map = dense_index_map(cells_to_keep);
 
     // (gene_index, raw_count) - gene index as u32 to support >65k features
     let mut cell_data: Vec<Vec<(u32, u32)>> = vec![Vec::new(); cells_to_keep.len()];
@@ -609,12 +507,12 @@ fn write_h5_csc_cells(
     for gene_chunk in genes_with_final.chunks(GENE_CHUNK_SIZE) {
         let start_pos = gene_chunk
             .iter()
-            .map(|&(local, _)| indptr[local] as usize)
+            .map(|&(local, _)| indptr[local])
             .min()
             .unwrap_or(0);
         let end_pos = gene_chunk
             .iter()
-            .map(|&(local, _)| indptr[local + 1] as usize)
+            .map(|&(local, _)| indptr[local + 1])
             .max()
             .unwrap_or(0);
 
@@ -626,40 +524,20 @@ fn write_h5_csc_cells(
         let chunk_indices: Vec<u32> = indices_ds.read_slice_1d(start_pos..end_pos)?.to_vec();
 
         for &(local_gene, final_gene) in gene_chunk {
-            let gene_start = indptr[local_gene] as usize - start_pos;
-            let gene_end = indptr[local_gene + 1] as usize - start_pos;
+            let gene_start = indptr[local_gene] - start_pos;
+            let gene_end = indptr[local_gene + 1] - start_pos;
 
             for idx in gene_start..gene_end {
                 let old_cell = chunk_indices[idx] as usize;
-                if let Some(&new_cell) = cell_old_to_new.get(&old_cell) {
-                    cell_data[new_cell].push((final_gene as u32, chunk_data[idx] as u32));
+                let new_cell = cell_map.get(old_cell).copied().unwrap_or(INDEX_DROPPED);
+                if new_cell != INDEX_DROPPED {
+                    cell_data[new_cell as usize].push((final_gene as u32, chunk_data[idx] as u32));
                 }
             }
         }
     }
 
-    let mut lib_size = Vec::with_capacity(cells_to_keep.len());
-    let mut nnz = Vec::with_capacity(cells_to_keep.len());
-
-    for (i, mut data) in cell_data.into_iter().enumerate() {
-        data.sort_by_key(|(g, _)| *g);
-
-        let gene_indices: Vec<u32> = data.iter().map(|(g, _)| *g).collect();
-        let gene_counts: Vec<u32> = data.iter().map(|(_, c)| *c).collect();
-
-        let chunk = CsrCellChunk::from_data(
-            &gene_counts,
-            &gene_indices,
-            cell_offset + i,
-            target_size,
-            true,
-        );
-
-        let (nnz_i, lib_i) = chunk.get_qc_info();
-        nnz.push(nnz_i);
-        lib_size.push(lib_i);
-        writer.write_cell_chunk(chunk)?;
-    }
+    let (nnz, lib_size) = write_cell_rows(&mut cell_data, cell_offset, target_size, writer)?;
 
     Ok(H5FileQcResult {
         exp_id: task.exp_id.clone(),
@@ -697,56 +575,52 @@ pub fn write_h5_dense_row_cells(
     let ds = file.dataset(task.raw_slot.get_dense_path())?;
     let no_genes_total = ds.shape().get(1).copied().unwrap_or(0);
 
+    let gene_map = dense_gene_map_from_options(gene_mapping);
     let mut lib_size = Vec::with_capacity(cells_to_keep.len());
     let mut nnz = Vec::with_capacity(cells_to_keep.len());
-
-    let mut gene_idx_buf: Vec<u32> = Vec::with_capacity(1024);
-    let mut count_buf: Vec<u32> = Vec::with_capacity(1024);
 
     const BATCH_SIZE: usize = 1_000;
     let mut written = 0usize;
 
-    let _t = Instant::now();
-
     for cell_batch in cells_to_keep.chunks(BATCH_SIZE) {
-        let row_start = *cell_batch.iter().min().unwrap();
-        let row_end = *cell_batch.iter().max().unwrap() + 1;
+        let row_start = *cell_batch
+            .iter()
+            .min()
+            .expect("batch non-empty by construction");
+        let row_end = *cell_batch
+            .iter()
+            .max()
+            .expect("batch non-empty by construction")
+            + 1;
         let block: Array2<f32> = ds.read_slice_2d(s![row_start..row_end, 0..no_genes_total])?;
 
-        for &old_cell in cell_batch {
-            let row = block.row(old_cell - row_start);
-
-            gene_idx_buf.clear();
-            count_buf.clear();
-
-            for (gene_idx, &val) in row.iter().enumerate() {
-                if val == 0.0 {
-                    continue;
+        let first = cell_offset + written;
+        let built = cell_batch
+            .par_iter()
+            .enumerate()
+            .map_init(Vec::<(u32, u32)>::new, |buf, (k, &old_cell)| {
+                buf.clear();
+                let row = block.row(old_cell - row_start);
+                for (gene_idx, &val) in row.iter().enumerate() {
+                    let final_gene = gene_map.get(gene_idx).copied().unwrap_or(INDEX_DROPPED);
+                    if val != 0.0 && final_gene != INDEX_DROPPED {
+                        buf.push((final_gene, val as u32));
+                    }
                 }
-                if let Some(&Some(final_gene)) = gene_mapping.get(gene_idx) {
-                    gene_idx_buf.push(final_gene as u32);
-                    count_buf.push(val as u32);
-                }
-            }
+                let (nnz_i, lib_i, payload) = compress_cell_row(buf, first + k, target_size)?;
+                Ok((nnz_i, lib_i, (first + k, payload)))
+            })
+            .collect::<Result<Vec<_>, BixverseErrors>>()?;
 
-            let chunk = CsrCellChunk::from_data(
-                &count_buf,
-                &gene_idx_buf,
-                cell_offset + written,
-                target_size,
-                true,
-            );
-
-            let (nnz_i, lib_i) = chunk.get_qc_info();
+        let mut payloads = Vec::with_capacity(built.len());
+        for (nnz_i, lib_i, payload) in built {
             nnz.push(nnz_i);
             lib_size.push(lib_i);
-            writer.write_cell_chunk(chunk)?;
-            written += 1;
+            payloads.push(payload);
         }
+        writer.write_compressed_cell_chunks(&payloads)?;
+        written += cell_batch.len();
     }
-
-    // Suppress unused warning if you don't want the timing block.
-    let _ = task.no_genes.separate_with_underscores();
 
     Ok(H5FileQcResult {
         exp_id: task.exp_id.clone(),

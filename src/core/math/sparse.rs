@@ -918,7 +918,7 @@ where
 /// pass gives every pair its own half-open run of slots, and a worker only ever
 /// advances the cursors of its own chunk. No two workers therefore address the
 /// same slot, which is what makes the shared `*mut` sound.
-struct ScatterPtr<T>(*mut T);
+pub(crate) struct ScatterPtr<T>(pub(crate) *mut T);
 
 // SAFETY: see the type doc. Writes go through disjoint per-chunk cursor runs.
 unsafe impl<T: Send> Send for ScatterPtr<T> {}
@@ -938,7 +938,7 @@ impl<T> ScatterPtr<T> {
     /// `pos` must be in bounds of the buffer this was built from, and no other
     /// worker may write the same slot.
     #[inline(always)]
-    unsafe fn write(&self, pos: usize, value: T) {
+    pub(crate) unsafe fn write(&self, pos: usize, value: T) {
         unsafe { *self.0.add(pos) = value }
     }
 }
