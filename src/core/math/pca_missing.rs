@@ -470,35 +470,34 @@ fn r2_cum(
     let k = scores.ncols();
     let w_rows = loadings.transpose().to_owned();
 
-    let (tss, rss) = y
+    // per-row partials summed sequentially: a rayon fold/reduce associates in
+    // whatever order work stealing produces, so the result drifts run to run
+    let rows: Vec<(f64, Vec<f64>)> = y
         .par_chunks(d)
         .enumerate()
-        .fold(
-            || (0.0, vec![0.0; k]),
-            |(mut tss, mut rss), (i, row)| {
-                for (j, &v) in row.iter().enumerate() {
-                    if mask.is_some_and(|m| m[i * d + j]) {
-                        continue;
-                    }
-                    tss += v * v;
-                    let w = w_rows.col(j);
-                    let mut rec = 0.0;
-                    for l in 0..k {
-                        rec += scores[(i, l)] * w[l];
-                        let r = v - rec;
-                        rss[l] += r * r;
-                    }
+        .map(|(i, row)| {
+            let (mut tss, mut rss) = (0.0, vec![0.0; k]);
+            for (j, &v) in row.iter().enumerate() {
+                if mask.is_some_and(|m| m[i * d + j]) {
+                    continue;
                 }
-                (tss, rss)
-            },
-        )
-        .reduce(
-            || (0.0, vec![0.0; k]),
-            |(ta, mut ra), (tb, rb)| {
-                ra.iter_mut().zip(rb).for_each(|(a, b)| *a += b);
-                (ta + tb, ra)
-            },
-        );
+                tss += v * v;
+                let w = w_rows.col(j);
+                let mut rec = 0.0;
+                for l in 0..k {
+                    rec += scores[(i, l)] * w[l];
+                    let r = v - rec;
+                    rss[l] += r * r;
+                }
+            }
+            (tss, rss)
+        })
+        .collect();
+    let (mut tss, mut rss) = (0.0, vec![0.0; k]);
+    for (t, r) in rows {
+        tss += t;
+        rss.iter_mut().zip(r).for_each(|(a, b)| *a += b);
+    }
 
     rss.iter().map(|r| 1.0 - r / tss).collect()
 }
@@ -587,6 +586,8 @@ fn fill_missing(y: &mut [f64], missing: &[bool], d: usize, x: MatRef<f64>, c: Ma
             }
             sq
         })
+        .collect::<Vec<f64>>()
+        .iter()
         .sum()
 }
 
@@ -622,7 +623,7 @@ fn ppca_fit(
     let (nf, df, n_miss) = (n as f64, d as f64, prep.n_missing as f64);
     let eye = Mat::<f64>::identity(k, k);
 
-    let y_obs_sq: f64 = prep.y.par_iter().map(|v| v * v).sum();
+    let y_obs_sq: f64 = prep.y.iter().map(|v| v * v).sum();
 
     // initial X = Y C (C^T C)^-1 and residual on the observed entries. The
     // missing entries of Y are still zero, so the residual over all entries
