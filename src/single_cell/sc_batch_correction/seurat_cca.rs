@@ -25,7 +25,7 @@ use crate::single_cell::sc_batch_correction::seurat_anchors::{
     tree_merge_embeddings,
 };
 use crate::single_cell::sc_processing::pca::{
-    SingleCellPcaParams, pca_on_sc, pca_on_sc_sparse, resolve_clr_size_factor, scale_csc_chunk,
+    SingleCellPcaParams, pca_on_sc_sparse, resolve_clr_size_factor, scale_csc_chunk,
 };
 
 ///////////
@@ -509,32 +509,16 @@ pub fn seurat_cca_integration<S: SingleCellReading>(
         if params.pca_params.clr && clr_offsets.is_none() {
             return Err(BixverseErrors::OffsetsNotProvidedForClrPCA);
         }
-        if params.pca_params.randomised {
-            let (sc, load, s, _) = pca_on_sc(
-                reader,
-                cell_indices,
-                gene_indices,
-                params.dims,
-                &params.pca_params,
-                clr_offsets,
-                seed,
-                false,
-                verbose,
-            )?;
-            (sc, load, s)
-        } else {
-            let (sc, load, s) = pca_on_sc_sparse(
-                reader,
-                cell_indices,
-                gene_indices,
-                params.dims,
-                &params.pca_params,
-                clr_offsets,
-                seed,
-                verbose,
-            )?;
-            (sc, load, s)
-        }
+        pca_on_sc_sparse(
+            reader,
+            cell_indices,
+            gene_indices,
+            params.dims,
+            &params.pca_params,
+            clr_offsets,
+            seed,
+            verbose,
+        )?
     };
 
     // Top-loading genes (positions into gene_indices) for the gene-space

@@ -65,6 +65,137 @@ pub fn parse_snn_type(s: &str) -> Option<SnnType> {
     }
 }
 
+/////////////
+// Helpers //
+/////////////
+
+/// sNN weight between two cells from their kNN rows
+///
+/// Builds the self-inclusive neighbour sets on the fly, so it is only meant
+/// for the handful of pairs the isolated-node rescue looks at.
+///
+/// ### Params
+///
+/// * `knn_rm` - kNN indices, row-major, `k` per cell, self excluded
+/// * `k` - Number of neighbours per cell
+/// * `a` - First cell
+/// * `b` - Second cell
+/// * `method` - Which similarity method to use
+///
+/// ### Returns
+///
+/// The weight, identical to what `generate_snn_full` would assign the pair.
+fn pair_snn_weight(
+    knn_rm: &[usize],
+    k: usize,
+    a: usize,
+    b: usize,
+    method: SnnSimilarityMethod,
+) -> f32 {
+    let ranked = |c: usize| -> Vec<(usize, usize)> {
+        let mut v: Vec<(usize, usize)> = std::iter::once((c, 0))
+            .chain(
+                knn_rm[c * k..(c + 1) * k]
+                    .iter()
+                    .enumerate()
+                    .map(|(r, &nb)| (nb, r + 1)),
+            )
+            .collect();
+        v.sort_unstable();
+        v
+    };
+    let (sa, sb) = (ranked(a), ranked(b));
+
+    let (mut pa, mut pb) = (0usize, 0usize);
+    let mut count = 0usize;
+    let mut min_combined = 2 * k;
+    while pa < sa.len() && pb < sb.len() {
+        match sa[pa].0.cmp(&sb[pb].0) {
+            std::cmp::Ordering::Equal => {
+                count += 1;
+                min_combined = min_combined.min(sa[pa].1 + sb[pb].1);
+                pa += 1;
+                pb += 1;
+            }
+            std::cmp::Ordering::Less => pa += 1,
+            std::cmp::Ordering::Greater => pb += 1,
+        }
+    }
+
+    match method {
+        SnnSimilarityMethod::Intersection => {
+            let c = count as f32;
+            c / (2.0 * (k as f32 + 1.0) - c)
+        }
+        SnnSimilarityMethod::Rank => (k as f32 - min_combined as f32 / 2.0).max(1e-6) / k as f32,
+    }
+}
+
+/// Give every node that pruning left without edges its strongest kNN edge
+///
+/// Leiden turns an isolated node into a singleton cluster, and on large data
+/// sets with the default pruning these add up to hundreds of one-cell
+/// clusters. The partner is the strongest of the node's own kNN neighbours.
+/// These always share at least one neighbour (the partner itself), so the
+/// edge exists in the full and in the limited graph alike, pruning aside.
+///
+/// ### Params
+///
+/// * `knn_rm` - kNN indices, row-major, `k` per cell, self excluded
+/// * `k` - Number of neighbours per cell
+/// * `n_samples` - Number of cells
+/// * `method` - Which similarity method to use
+/// * `edges` - Flat edge pairs after pruning; rescue edges are appended
+/// * `weights` - Edge weights after pruning; rescue weights are appended
+///
+/// ### Returns
+///
+/// Number of nodes that were isolated before the rescue.
+fn rescue_isolated_nodes(
+    knn_rm: &[usize],
+    k: usize,
+    n_samples: usize,
+    method: SnnSimilarityMethod,
+    edges: &mut Vec<usize>,
+    weights: &mut Vec<f32>,
+) -> usize {
+    if k == 0 {
+        return 0;
+    }
+
+    let mut connected = vec![false; n_samples];
+    for &node in edges.iter() {
+        connected[node] = true;
+    }
+    let isolated: Vec<usize> = (0..n_samples).filter(|&i| !connected[i]).collect();
+
+    let mut rescued: Vec<(usize, usize, f32)> = isolated
+        .par_iter()
+        .map(|&i| {
+            // ties go to the closer neighbour
+            let (best, w) = knn_rm[i * k..(i + 1) * k]
+                .iter()
+                .map(|&nb| (nb, pair_snn_weight(knn_rm, k, i, nb, method)))
+                .fold((usize::MAX, f32::MIN), |acc, cur| {
+                    if cur.1 > acc.1 { cur } else { acc }
+                });
+            (i.min(best), i.max(best), w)
+        })
+        .collect();
+
+    // two isolated nodes can pick each other
+    rescued.sort_unstable_by_key(|&(a, b, _)| (a, b));
+    rescued.dedup_by_key(|&mut (a, b, _)| (a, b));
+
+    for (a, b, w) in rescued {
+        edges.push(a);
+        edges.push(b);
+        weights.push(w);
+    }
+
+    isolated.len()
+}
+
 ///////////////////
 // sNN functions //
 ///////////////////
@@ -79,8 +210,9 @@ pub fn parse_snn_type(s: &str) -> Option<SnnType> {
 ///
 /// * `knn_graph` - K-nearest neighbours data as a flat vector in column-major.
 /// * `no_neighbours` - Number of neighbours in the kNN graph
-/// * `pruning` - Below which Jaccard similarity to prune the edge. In this case
-///   the weight is set to `0`.
+/// * `pruning` - Below which Jaccard similarity to prune the edge. A node left
+///   without any edge keeps its strongest kNN edge regardless, see
+///   [rescue_isolated_nodes].
 /// * `method` - Which similarity method to use
 /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
 ///   verbosity.
@@ -192,10 +324,16 @@ pub fn generate_snn_full(
         weights.push(weight);
     }
 
+    let n_isolated = rescue_isolated_nodes(&knn_rm, k, n_samples, method, &mut edges, &mut weights);
+
     let end_snn = start_time.elapsed();
 
     if verbosity.normal_verbosity() {
         println!("Transformed kNN into a full sNN graph: {:.2?}", end_snn);
+        println!(
+            "Reconnected {} nodes that pruning had isolated.",
+            n_isolated
+        );
     }
 
     (edges, weights)
@@ -211,8 +349,9 @@ pub fn generate_snn_full(
 /// * `knn_graph` - K-nearest neighbours data as a flat vector in column-major.
 /// * `k` - Number of neighbours in the kNN graph
 /// * `n_samples` - Number of samples in the data
-/// * `pruning` - Below which Jaccard similarity to prune the edge. In this case
-///   the weight is set to `0`.
+/// * `pruning` - Below which Jaccard similarity to prune the edge. A node left
+///   without any edge keeps its strongest kNN edge regardless, see
+///   [rescue_isolated_nodes].
 /// * `method` - Which similarity method to use.
 /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
 ///   verbosity.
@@ -350,10 +489,16 @@ pub fn generate_snn_limited(
         weights.push(weight);
     }
 
+    let n_isolated = rescue_isolated_nodes(&knn_rm, k, n_samples, method, &mut edges, &mut weights);
+
     let end_snn = start_time.elapsed();
 
     if verbosity.normal_verbosity() {
         println!("Transformed kNN into an sNN graph: {:.2?}", end_snn);
+        println!(
+            "Reconnected {} nodes that pruning had isolated.",
+            n_isolated
+        );
     }
 
     (edges, weights)
@@ -485,17 +630,23 @@ mod tests {
         }
     }
 
-    /// The prune threshold drops edges, and nothing below it survives.
+    /// The prune threshold drops edges. The only survivor below it is the
+    /// rescue edge of node 3, which pruning would otherwise isolate: it ties
+    /// at 0.5 with 0 and 1 and keeps the closer one.
     #[test]
     fn snn_pruning() {
         let (knn, k, n) = small_knn();
         let (_, w_unpruned) =
             generate_snn_full(&knn, k, n, 0.0, SnnSimilarityMethod::Intersection, 0);
-        let (_, w_pruned) =
-            generate_snn_full(&knn, k, n, 0.6, SnnSimilarityMethod::Intersection, 0);
+        for f in [generate_snn_full, generate_snn_limited] {
+            let (e_pruned, w_pruned) = f(&knn, k, n, 0.6, SnnSimilarityMethod::Intersection, 0);
+            let m = edge_map(&e_pruned, &w_pruned);
 
-        assert!(w_pruned.len() < w_unpruned.len());
-        assert!(w_pruned.iter().all(|&w| w >= 0.6));
+            assert!(w_pruned.len() < w_unpruned.len());
+            assert_eq!(m.len(), 4);
+            assert!((m[&(0, 3)] - 0.5).abs() < 1e-6);
+            assert!(m.iter().all(|(&p, &w)| p == (0, 3) || w >= 0.6));
+        }
     }
 
     /// The limited graph is a subgraph of the full one, with the same weights.

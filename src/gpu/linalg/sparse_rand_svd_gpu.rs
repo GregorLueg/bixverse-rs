@@ -7,15 +7,16 @@
 //!
 //! ### Pipeline
 //!
-//! 1. Build a CSR view of A from the input CSC (host, O(nnz)).
-//! 2. Upload both layouts, plus `mu` and `sigma`. Generate `Omega` on the
-//!    host pre-scaled by `1/sigma`, upload.
+//! 1. Upload the CSC of A, plus `mu` and `sigma`.
+//! 2. Build the CSR from it on the device (`csc_to_csr_gpu`), so only one
+//!    layout crosses the bus. Generate `Omega` on the host pre-scaled by
+//!    `1/sigma`, upload.
 //! 3. `Y = A * Omega_scaled - 1 * c^T`, with `c = mu^T * Omega_scaled`
 //!    precomputed.
 //! 4. CholeskyQR2 -> `Q` orthonormal.
-//! 5. Power iterations: `Z = (A^T Q - mu * q_sum^T) / sigma`, then
-//!    `Y = A * Z - 1 * c^T`, then CholeskyQR2. Two iterations is the
-//!    default; the gain past that is small.
+//! 5. Power iterations: `Z = (A^T Q - mu * q_sum^T) / sigma^2`, i.e.
+//!    `D^-1 X^T Q`, then `Y = A * Z - 1 * c^T`, then CholeskyQR2. Two
+//!    iterations is the default; the gain past that is small.
 //! 6. Final `Z = (A^T Q - mu * q_sum^T) / sigma`, which equals `B^T` for
 //!    the standard randomised SVD with `B = Q^T * X` where `X` is the
 //!    centred-scaled A.
@@ -44,10 +45,9 @@ use rand_distr::{Distribution, Normal};
 use std::time::Instant;
 
 use crate::core::math::pca_svd::SvdResults;
-use crate::core::math::sparse::transpose_sparse_single_layer;
 use crate::core::math::*;
 use crate::gpu::linalg::cholesky_gpu::{cholesky_qr2, dense_gemm};
-use crate::gpu::linalg::sparse_gpu::GpuCompressedSparseData;
+use crate::gpu::linalg::sparse_gpu::{GpuCompressedSparseData, csc_to_csr_gpu};
 use crate::gpu::linalg::spmm::{
     launch_dense_column_sum, launch_dense_column_weighted_sum, launch_spmm_csc_transpose,
     launch_spmm_csr_forward,
@@ -177,17 +177,23 @@ where
     let use_clr = row_offsets.is_some();
     let s = n_components + params.oversampling;
 
-    // -- Host prep --
-    let csr_host = transpose_sparse_single_layer(&data, true)?;
-
     // -- GPU upload --
+    // Only the CSC crosses the bus; the CSR is built from it on the device.
     let client = R::client(&device);
-    let csr_gpu =
-        GpuCompressedSparseData::<R, T>::from_compressed_sparse_data_2(&csr_host, true, &client)?;
     let csc_gpu =
         GpuCompressedSparseData::<R, T>::from_compressed_sparse_data_2(&data, true, &client)?;
+    let csr_gpu = csc_to_csr_gpu(&csc_gpu, &data.indptr, &data.indices, &client)?;
     let mu_gpu = GpuTensor::<R, T>::from_slice(col_means, vec![m], &client)?;
     let sigma_gpu = GpuTensor::<R, T>::from_slice(col_stds, vec![m], &client)?;
+
+    // Nasty bug:
+    // The forward SpMM applies A - 1 mu^T with no scaling, so its dense operand
+    // has to arrive pre-divided by sigma, as Omega does. Inside the power loop
+    // the transpose kernel divides by sigma^2 instead of sigma, which hands
+    // the next forward product D^-1 X^T Q. With plain sigma the loop iterates
+    // X D X^T rather than X X^T and drifts off the leading subspace.
+    let sigma_sq: Vec<T> = col_stds.iter().map(|&x| x * x).collect();
+    let sigma_sq_gpu = GpuTensor::<R, T>::from_slice(&sigma_sq, vec![m], &client)?;
 
     let zero_n = vec![T::from(0.0).unwrap(); n];
     let row_offsets_gpu = match row_offsets {
@@ -195,7 +201,6 @@ where
         None => GpuTensor::<R, T>::from_slice(&zero_n, vec![n], &client)?,
     };
 
-    drop(csr_host);
     drop(data);
 
     // Standard normal, matching the CPU randomised SVDs in `core::math::
@@ -267,7 +272,7 @@ where
             &q_buf,
             &q_sum_buf,
             &mu_gpu,
-            &sigma_gpu,
+            &sigma_sq_gpu,
             &m_dot_q_buf,
             &z_buf,
             s,
@@ -503,6 +508,105 @@ mod tests {
                 assert!(svd.s[i - 1] >= svd.s[i], "not sorted at {}", i);
             }
         }
+    }
+
+    // Parity with a dense SVD of the centred and scaled matrix, with column
+    // scales far from 1. With sigma = 1 the power iterations cannot tell
+    // X X^T from X D X^T, which is how a wrong scaling in the loop went
+    // unnoticed: it leaves the leading one or two components intact and
+    // skews everything after.
+    #[test]
+    fn test_randomised_sparse_svd_gpu_scaled_parity() {
+        let Some(device) = try_device() else { return };
+
+        let (n, m, n_components) = (400usize, 40usize, 5usize);
+
+        // rank-6 signal plus a small dense floor, every fourth entry zeroed,
+        // columns stretched by factors from 0.2 to 5
+        let mut dense = vec![0.0f32; n * m];
+        for i in 0..n {
+            for j in 0..m {
+                if (i * 3 + j) % 4 == 0 {
+                    continue;
+                }
+                let mut v = 0.0f32;
+                for f in 0..6 {
+                    let a = ((i * (f + 3) + 7 * f) % 17) as f32 / 17.0 - 0.5;
+                    let b = ((j * (2 * f + 5) + 3 * f) % 13) as f32 / 13.0 - 0.5;
+                    v += 4.0 * a * b / (1.0 + f as f32);
+                }
+                v += 0.05 * ((i * 31 + j * 17) % 11) as f32 / 11.0 + 0.3;
+                let scale = 0.2 + 4.8 * j as f32 / (m - 1) as f32;
+                dense[i * m + j] = v * scale;
+            }
+        }
+
+        let (values, indices, indptr) = dense_to_csc(&dense, n, m);
+        let csc = CompressedSparseData2::<f32, f32>::new_csc(
+            &values,
+            &indices,
+            &indptr,
+            Some(&values),
+            (n, m),
+        );
+
+        let mut mu = vec![0.0f32; m];
+        let mut sigma = vec![0.0f32; m];
+        for j in 0..m {
+            let mean = (0..n).map(|i| dense[i * m + j] as f64).sum::<f64>() / n as f64;
+            let var = (0..n)
+                .map(|i| (dense[i * m + j] as f64 - mean).powi(2))
+                .sum::<f64>()
+                / (n - 1) as f64;
+            mu[j] = mean as f32;
+            sigma[j] = var.sqrt() as f32;
+        }
+
+        let got = randomised_sparse_svd_gpu::<WgpuRuntime, f32, f32>(
+            csc,
+            &mu,
+            &sigma,
+            None,
+            n_components,
+            Some(RandSvdGpuParams::new(2, 10)),
+            42,
+            device,
+            0,
+        )
+        .unwrap();
+
+        let scaled = Mat::<f64>::from_fn(n, m, |i, j| {
+            (dense[i * m + j] as f64 - mu[j] as f64) / sigma[j] as f64
+        });
+        let want = scaled.thin_svd().unwrap();
+
+        for i in 0..n_components {
+            let rel = (got.s[i] as f64 - want.S()[i]).abs() / want.S()[i];
+            assert!(
+                rel < 1e-4,
+                "singular value {i}: got {}, want {}, rel err {rel:.2e}",
+                got.s[i],
+                want.S()[i]
+            );
+        }
+
+        // smallest cosine of the principal angles between the two score
+        // subspaces; U from the driver has orthonormal columns
+        let u_got = Mat::<f64>::from_fn(n, n_components, |i, j| got.u[(i, j)] as f64);
+        let cross = want.U().subcols(0, n_components).transpose() * &u_got;
+        let cos_min = cross
+            .thin_svd()
+            .unwrap()
+            .S()
+            .column_vector()
+            .iter()
+            .fold(f64::MAX, |a, &b| a.min(b));
+        // measured 3e-6 / 0.999993 here, and 2e-3 / 0.9969 with the loop
+        // dividing by sigma instead of sigma^2
+        assert!(
+            cos_min > 0.9999,
+            "score subspace drifted: smallest principal cosine {cos_min:.5}"
+        );
     }
 
     // Accuracy against the dense reference at a size where the quality of the

@@ -1,17 +1,17 @@
 //! Highly variable gene selection and principal component analysis (PCA) for
 //! meta cells. Works directly on `CompressedSparseData2` structures.
 
-use faer::{Mat, MatRef};
+use faer::MatRef;
 use rayon::prelude::*;
 use std::borrow::Cow;
 
 use crate::core::base::info::parse_bin_strategy_type;
 use crate::core::base::loess::LoessRegression;
-use crate::core::math::MAX_OVERSAMPLING_SINGLE_CELL;
-use crate::core::math::pca_svd::*;
 use crate::prelude::*;
 use crate::single_cell::sc_processing::hvg::*;
-use crate::single_cell::sc_processing::pca::{SingleCellPcaParams, SingleCellPcaRes};
+use crate::single_cell::sc_processing::pca::{
+    SingleCellPcaParams, SingleCellPcaRes, solve_dense_pca,
+};
 use crate::utils::simd::{sum_squared_dev_widen_simd_f32, sum_widen_simd_f32};
 
 /////////
@@ -721,35 +721,7 @@ pub fn pca_on_metacells<T: BixverseNumeric>(
 
     let scaled = MatRef::<f64>::from_column_major_slice(&buffer, n_cells, n_genes);
 
-    let (scores, loadings, s) = if params_pca.randomised {
-        let res: RandomSvdResults<f64> = randomised_svd(
-            scaled,
-            no_pcs,
-            seed,
-            Some(MAX_OVERSAMPLING_SINGLE_CELL),
-            None,
-        )?;
-        let loadings = Mat::<f32>::from_fn(n_genes, no_pcs, |i, j| res.v[(i, j)] as f32);
-        let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| (res.u[(i, j)] * res.s[j]) as f32);
-        let s: Vec<f32> = res.s[..no_pcs].iter().map(|&x| x as f32).collect();
-        (scores, loadings, s)
-    } else {
-        let res = scaled
-            .thin_svd()
-            .map_err(|e| BixverseErrors::FaerSvdError(format!("{e:?}")))?;
-        let loadings = Mat::<f32>::from_fn(n_genes, no_pcs, |i, j| res.V()[(i, j)] as f32);
-        let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| {
-            (res.U()[(i, j)] * res.S().column_vector()[j]) as f32
-        });
-        let s: Vec<f32> = res
-            .S()
-            .column_vector()
-            .iter()
-            .take(no_pcs)
-            .map(|&x| x as f32)
-            .collect();
-        (scores, loadings, s)
-    };
+    let (scores, loadings, s) = solve_dense_pca(scaled, no_pcs, params_pca.svd_solver, seed)?;
 
     Ok((scores, loadings, s))
 }

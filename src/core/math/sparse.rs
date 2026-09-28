@@ -3216,7 +3216,7 @@ fn basis_expand(
 ///
 /// `(eigenvalues, eigenvectors)` sorted by descending eigenvalue, the
 /// eigenvectors held column-wise.
-fn symmetric_eigen_descending(
+pub(crate) fn symmetric_eigen_descending(
     h: MatRef<f64>,
     size: usize,
 ) -> Result<(Vec<f64>, Mat<f64>), BixverseErrors> {

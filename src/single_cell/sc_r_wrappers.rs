@@ -66,7 +66,7 @@ use crate::single_cell::sc_processing::{
     },
     doublet_detection::BoostParams,
     knn::KnnParams,
-    pca::SingleCellPcaParams,
+    pca::{SingleCellPcaParams, parse_pca_solver},
     scdblfinder::ScDblFinderParams,
     scrublet::ScrubletParams,
     utils_doublets::ScDblSimParams,
@@ -978,10 +978,10 @@ impl SingleCellPcaParams {
             .and_then(|v| v.as_bool())
             .unwrap_or(defaults.normalise_variance);
 
-        let randomised = params
-            .get("randomised")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(defaults.randomised);
+        let svd_solver = match params.get("svd_solver").and_then(|v| v.as_str()) {
+            Some(x) => parse_pca_solver(x).ok_or_else(|| format!("Invalid PCA solver: {}", x))?,
+            None => defaults.svd_solver,
+        };
 
         let clr = params
             .get("clr")
@@ -996,7 +996,7 @@ impl SingleCellPcaParams {
         Ok(Self {
             mean_center,
             normalise_variance,
-            randomised,
+            svd_solver,
             clr,
             size_factor,
         })

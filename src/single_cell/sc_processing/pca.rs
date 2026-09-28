@@ -3,7 +3,7 @@
 //! nasty floating operation errors that can accumulate over time with large
 //! data sets.
 
-use faer::Mat;
+use faer::{Mat, MatRef};
 use half::f16;
 use indexmap::IndexSet;
 use rayon::prelude::*;
@@ -88,16 +88,47 @@ pub type SingleCellPcaResStats =
 // Params //
 ////////////
 
-/// Parameters for the main single cell PCA around normalisations and if the
-/// randomised, approximate path shall be used.
+/// Which solver the single cell PCA uses
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PcaSolver {
+    /// Exact PCA via the feature x feature cross-product and a symmetric
+    /// eigendecomposition. Cheap for a few thousand features, e.g. HVGs.
+    #[default]
+    Covariance,
+    /// Randomised SVD. Approximate, the trailing components the least so.
+    Randomised,
+    /// Full thin SVD on the dense path, Lanczos on the sparse one.
+    Exact,
+}
+
+/// Parse the PCA solver
+///
+/// ### Params
+///
+/// * `s` - One of `"covariance"`, `"randomised"` or `"exact"`
+///
+/// ### Returns
+///
+/// Option of the [PcaSolver]
+pub fn parse_pca_solver(s: &str) -> Option<PcaSolver> {
+    match s.to_lowercase().as_str() {
+        "covariance" => Some(PcaSolver::Covariance),
+        "randomised" => Some(PcaSolver::Randomised),
+        "exact" => Some(PcaSolver::Exact),
+        _ => None,
+    }
+}
+
+/// Parameters for the main single cell PCA around normalisations and which
+/// solver to use.
 #[derive(Clone, Debug)]
 pub struct SingleCellPcaParams {
     /// Mean center the data
     pub mean_center: bool,
     /// Normalise the variance
     pub normalise_variance: bool,
-    /// Shall an approximate, randomised SVD be used
-    pub randomised: bool,
+    /// Which solver to use
+    pub svd_solver: PcaSolver,
     /// Apply the CLR transformation
     pub clr: bool,
     /// Size factor
@@ -111,7 +142,7 @@ impl SingleCellPcaParams {
     ///
     /// * `mean_center` - Shall the data be mean centered
     /// * `normalise_variance` - Shall the variance be normalised
-    /// * `randomised` - Shall fast approximate randomised SVD be used
+    /// * `svd_solver` - Which solver to use, see [PcaSolver]
     /// * `clr` - Shall the CLR transformation be used, see Booeshaghi, et al.,
     ///   bioRxive, 2026.
     /// * `size_factor` - The used size factor for preparing everything for the
@@ -123,14 +154,14 @@ impl SingleCellPcaParams {
     pub fn new(
         mean_center: bool,
         normalise_variance: bool,
-        randomised: bool,
+        svd_solver: PcaSolver,
         clr: bool,
         size_factor: f32,
     ) -> Self {
         Self {
             mean_center,
             normalise_variance,
-            randomised,
+            svd_solver,
             clr,
             size_factor,
         }
@@ -143,11 +174,58 @@ impl Default for SingleCellPcaParams {
         Self {
             mean_center: true,
             normalise_variance: true,
-            randomised: true,
+            svd_solver: PcaSolver::default(),
             clr: false,
             size_factor: 1e4,
         }
     }
+}
+
+/// Solve the PCA of an already centred and scaled dense matrix
+///
+/// Shared by every path that materialises the scaled matrix.
+///
+/// ### Params
+///
+/// * `scaled` - Centred and scaled matrix, cells x features
+/// * `no_pcs` - Number of principal components to return
+/// * `solver` - Which solver to use, see [PcaSolver]
+/// * `seed` - Seed for the randomised SVD
+///
+/// ### Returns
+///
+/// Tuple of `(scores, loadings, singular values)`.
+pub(crate) fn solve_dense_pca(
+    scaled: MatRef<f64>,
+    no_pcs: usize,
+    solver: PcaSolver,
+    seed: usize,
+) -> SingleCellPcaRes {
+    let (n_cells, n_genes) = (scaled.nrows(), scaled.ncols());
+    let res: RandomSvdResults<f64> = match solver {
+        PcaSolver::Covariance => dense_covariance_svd(scaled, no_pcs)?,
+        PcaSolver::Randomised => randomised_svd(
+            scaled,
+            no_pcs,
+            seed,
+            Some(MAX_OVERSAMPLING_SINGLE_CELL),
+            None,
+        )?,
+        PcaSolver::Exact => {
+            let svd = scaled
+                .thin_svd()
+                .map_err(|e| BixverseErrors::FaerSvdError(format!("{e:?}")))?;
+            RandomSvdResults {
+                u: svd.U().to_owned(),
+                v: svd.V().to_owned(),
+                s: svd.S().column_vector().iter().copied().collect(),
+            }
+        }
+    };
+    let loadings = Mat::<f32>::from_fn(n_genes, no_pcs, |i, j| res.v[(i, j)] as f32);
+    let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| (res.u[(i, j)] * res.s[j]) as f32);
+    let s: Vec<f32> = res.s[..no_pcs].iter().map(|&x| x as f32).collect();
+    Ok((scores, loadings, s))
 }
 
 /////////////
@@ -717,35 +795,8 @@ fn dense_pca<S: SingleCellReading>(
 
     let start_svd = Instant::now();
 
-    let (scores, loadings, s) = if params_pca.randomised {
-        let res: RandomSvdResults<f64> = randomised_svd(
-            scaled_f64.as_ref(),
-            no_pcs,
-            seed,
-            Some(MAX_OVERSAMPLING_SINGLE_CELL),
-            None,
-        )?;
-        let loadings = Mat::<f32>::from_fn(num_genes, no_pcs, |i, j| res.v[(i, j)] as f32);
-        let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| (res.u[(i, j)] * res.s[j]) as f32);
-        let s: Vec<f32> = res.s[..no_pcs].iter().map(|&x| x as f32).collect();
-        (scores, loadings, s)
-    } else {
-        let res = scaled_f64
-            .thin_svd()
-            .map_err(|e| BixverseErrors::FaerSvdError(format!("{e:?}")))?;
-        let loadings = Mat::<f32>::from_fn(num_genes, no_pcs, |i, j| res.V()[(i, j)] as f32);
-        let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| {
-            (res.U()[(i, j)] * res.S().column_vector()[j]) as f32
-        });
-        let s: Vec<f32> = res
-            .S()
-            .column_vector()
-            .iter()
-            .take(no_pcs)
-            .map(|&x| x as f32)
-            .collect();
-        (scores, loadings, s)
-    };
+    let (scores, loadings, s) =
+        solve_dense_pca(scaled_f64.as_ref(), no_pcs, params_pca.svd_solver, seed)?;
 
     let end_svd = start_svd.elapsed();
 
@@ -1115,35 +1166,8 @@ pub fn pca_on_sc_streaming<S: SingleCellReading>(
 
     let start_svd = Instant::now();
 
-    let (scores, loadings, s) = if params_pca.randomised {
-        let res: RandomSvdResults<f64> = randomised_svd(
-            scaled_matrix.as_ref(),
-            no_pcs,
-            seed,
-            Some(MAX_OVERSAMPLING_SINGLE_CELL),
-            None,
-        )?;
-        let loadings = Mat::<f32>::from_fn(n_genes, no_pcs, |i, j| res.v[(i, j)] as f32);
-        let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| (res.u[(i, j)] * res.s[j]) as f32);
-        let s: Vec<f32> = res.s[..no_pcs].iter().map(|&x| x as f32).collect();
-        (scores, loadings, s)
-    } else {
-        let res = scaled_matrix
-            .thin_svd()
-            .map_err(|e| BixverseErrors::FaerSvdError(format!("{e:?}")))?;
-        let loadings = Mat::<f32>::from_fn(n_genes, no_pcs, |i, j| res.V()[(i, j)] as f32);
-        let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| {
-            (res.U()[(i, j)] * res.S().column_vector()[j]) as f32
-        });
-        let s: Vec<f32> = res
-            .S()
-            .column_vector()
-            .iter()
-            .take(no_pcs)
-            .map(|&x| x as f32)
-            .collect();
-        (scores, loadings, s)
-    };
+    let (scores, loadings, s) =
+        solve_dense_pca(scaled_matrix.as_ref(), no_pcs, params_pca.svd_solver, seed)?;
 
     if verbosity.normal_verbosity() {
         println!(
@@ -1258,45 +1282,48 @@ fn sparse_pca<S: SingleCellReading>(
 
     let start_svd = Instant::now();
 
-    let (scores, loadings, s) = if params_pca.randomised {
-        let svd_res = randomised_sparse_svd::<f32, f64>(
+    // the stats are returned either way, but only applied when asked for
+    let centre = params_pca.mean_center.then_some(col_means.as_slice());
+    let scale = params_pca.normalise_variance.then_some(col_stds.as_slice());
+
+    let svd_res = match params_pca.svd_solver {
+        PcaSolver::Covariance => {
+            sparse_covariance_svd::<f32, f64>(csc, no_pcs, true, centre, scale, clr_offsets)?
+        }
+        PcaSolver::Randomised => randomised_sparse_svd::<f32, f64>(
             csc,
             no_pcs,
             seed as u64,
             true,
             Some(MAX_OVERSAMPLING_SINGLE_CELL),
             None,
-            Some(&col_means),
-            Some(&col_stds),
+            centre,
+            scale,
             clr_offsets,
-        )?;
-        let scores_f64 = compute_pc_scores(&svd_res);
-        let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| scores_f64[(i, j)] as f32);
-        let loadings = Mat::<f32>::from_fn(gene_indices.len(), no_pcs, |i, j| {
-            svd_res.v()[(i, j)] as f32
-        });
-        let s: Vec<f32> = svd_res.s()[..no_pcs].iter().map(|&x| x as f32).collect();
-        (scores, loadings, s)
-    } else {
-        let svd_res = sparse_svd_lanczos::<f32, f32, f64>(
-            &csc,
-            no_pcs,
-            seed as u64,
-            true,
-            Some(&col_means),
-            Some(&col_stds),
-            clr_offsets,
-        )?;
-        let scores_f64 = compute_pc_scores(&svd_res);
-        let scores = Mat::<f32>::from_fn(scores_f64.nrows(), scores_f64.ncols(), |i, j| {
-            scores_f64[(i, j)] as f32
-        });
-        let loadings = Mat::<f32>::from_fn(svd_res.v().nrows(), svd_res.v().ncols(), |i, j| {
-            svd_res.v()[(i, j)] as f32
-        });
-        let s: Vec<f32> = svd_res.s().iter().map(|&x| x as f32).collect();
-        (scores, loadings, s)
+        )?,
+        PcaSolver::Exact => {
+            let res = sparse_svd_lanczos::<f32, f32, f64>(
+                &csc,
+                no_pcs,
+                seed as u64,
+                true,
+                centre,
+                scale,
+                clr_offsets,
+            )?;
+            RandomSvdResults {
+                u: res.u,
+                v: res.v,
+                s: res.s,
+            }
+        }
     };
+    let scores_f64 = compute_pc_scores(&svd_res);
+    let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| scores_f64[(i, j)] as f32);
+    let loadings = Mat::<f32>::from_fn(gene_indices.len(), no_pcs, |i, j| {
+        svd_res.v()[(i, j)] as f32
+    });
+    let s: Vec<f32> = svd_res.s()[..no_pcs].iter().map(|&x| x as f32).collect();
 
     let end_svd = start_svd.elapsed();
 
