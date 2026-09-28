@@ -1506,11 +1506,165 @@ pub fn read_h5ad_x_data_csr<P: AsRef<Path>>(
     })
 }
 
+/// Slices the h5 reader thread may run ahead of the cell builder.
+///
+/// Two keeps the reader busy while one slice is being built and one is queued,
+/// and caps the queued raw data at two slices.
+const H5_READ_AHEAD: usize = 2;
+
+/// Write cells from cell-major compressed h5 data into the cell-based binary.
+///
+/// Shared by the h5ad CSR and the 10x paths, which store the same layout: one
+/// `indptr` run per cell over `data` and `indices`. A dedicated thread reads
+/// the next [`H5_CELL_SLICE_SIZE`] cells from the h5 file (HDF5 decompression
+/// is single-threaded) while the current slice is filtered, normalised,
+/// serialised and lz4-compressed in parallel. Payloads are then appended in
+/// cell order.
+///
+/// ### Params
+///
+/// * `file_path` - Path to the h5 file
+/// * `data_path` - Dataset path of the stored values
+/// * `indices_path` - Dataset path of the gene indices
+/// * `indptr` - Per-cell offsets into `data` and `indices`
+/// * `quality` - Cells and genes to keep after the QC passes. `cells_to_keep`
+///   must be ascending, which the new cell index relies on.
+/// * `target_size` - Target size for the library normalisation
+/// * `writer` - Cell-based writer to append to
+/// * `verbose` - Controls verbosity
+///
+/// ### Returns
+///
+/// `(nnz, lib_size)` per written cell.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write_h5_cell_major_cells(
+    file_path: &Path,
+    data_path: &str,
+    indices_path: &str,
+    indptr: &[usize],
+    quality: &CellOnFileQuality,
+    target_size: f32,
+    writer: &mut CellGeneSparseWriter,
+    verbose: bool,
+) -> Result<(Vec<usize>, Vec<usize>), BixverseErrors> {
+    let n_file_genes = quality.genes_to_keep.last().map_or(0, |&g| g + 1);
+    let mut gene_map = vec![u32::MAX; n_file_genes];
+    for (new, &old) in quality.genes_to_keep.iter().enumerate() {
+        gene_map[old] = new as u32;
+    }
+
+    let total_cells = quality.cells_to_keep.len();
+    let batches: Vec<&[usize]> = quality.cells_to_keep.chunks(H5_CELL_SLICE_SIZE).collect();
+    let num_batches = batches.len();
+
+    let mut nnz = Vec::with_capacity(total_cells);
+    let mut lib_size = Vec::with_capacity(total_cells);
+
+    if verbose {
+        println!(
+            "  Processing {} cells in batches of {}...",
+            total_cells.separate_with_underscores(),
+            H5_CELL_SLICE_SIZE.separate_with_underscores()
+        );
+    }
+
+    type Slice = (usize, Vec<f32>, Vec<u32>);
+
+    std::thread::scope(|scope| -> Result<(), BixverseErrors> {
+        let (tx, rx) =
+            std::sync::mpsc::sync_channel::<Result<Slice, BixverseErrors>>(H5_READ_AHEAD);
+        let batches_ref = &batches;
+
+        scope.spawn(move || {
+            let read_all = || -> Result<(), BixverseErrors> {
+                let file = File::open(file_path)?;
+                let data_ds = file.dataset(data_path)?;
+                let indices_ds = file.dataset(indices_path)?;
+                for batch in batches_ref {
+                    let start = batch.iter().map(|&c| indptr[c]).min().unwrap_or(0);
+                    let end = batch.iter().map(|&c| indptr[c + 1]).max().unwrap_or(0);
+                    let slice = if start < end {
+                        (
+                            start,
+                            data_ds.read_slice_1d(start..end)?.to_vec(),
+                            indices_ds.read_slice_1d(start..end)?.to_vec(),
+                        )
+                    } else {
+                        (start, Vec::new(), Vec::new())
+                    };
+                    // the builder only hangs up after an error of its own
+                    if tx.send(Ok(slice)).is_err() {
+                        return Ok(());
+                    }
+                }
+                Ok(())
+            };
+            if let Err(e) = read_all() {
+                let _ = tx.send(Err(e));
+            }
+        });
+
+        let mut offset = 0;
+        for (batch_idx, batch) in batches.iter().enumerate() {
+            let (start, data, indices) = rx
+                .recv()
+                .expect("h5 reader thread sends one slice per batch or an error")?;
+
+            let built = batch
+                .par_iter()
+                .enumerate()
+                .map_init(Vec::<(u32, u32)>::new, |buf, (k, &old)| {
+                    buf.clear();
+                    for idx in indptr[old] - start..indptr[old + 1] - start {
+                        let new = gene_map
+                            .get(indices[idx] as usize)
+                            .copied()
+                            .unwrap_or(u32::MAX);
+                        if new != u32::MAX {
+                            buf.push((new, data[idx] as u32));
+                        }
+                    }
+                    if buf.windows(2).any(|w| w[0].0 > w[1].0) {
+                        buf.sort_unstable_by_key(|&(g, _)| g);
+                    }
+                    let genes: Vec<u32> = buf.iter().map(|&(g, _)| g).collect();
+                    let counts: Vec<u32> = buf.iter().map(|&(_, c)| c).collect();
+                    let chunk =
+                        CsrCellChunk::from_data(&counts, &genes, offset + k, target_size, true);
+                    let (nnz_i, lib_i) = chunk.get_qc_info();
+                    Ok((nnz_i, lib_i, (offset + k, chunk.to_compressed_bytes()?)))
+                })
+                .collect::<Result<Vec<_>, BixverseErrors>>()?;
+
+            let mut payloads = Vec::with_capacity(built.len());
+            for (nnz_i, lib_i, payload) in built {
+                nnz.push(nnz_i);
+                lib_size.push(lib_i);
+                payloads.push(payload);
+            }
+            writer.write_compressed_cell_chunks(&payloads)?;
+            offset += batch.len();
+
+            if verbose
+                && (batch_idx % (num_batches / 10).max(1) == 0 || batch_idx == num_batches - 1)
+            {
+                println!(
+                    "  Processed {} / {} cells",
+                    offset.separate_with_underscores(),
+                    total_cells.separate_with_underscores()
+                );
+            }
+        }
+        Ok(())
+    })?;
+
+    Ok((nnz, lib_size))
+}
+
 /// Stream h5 CSR data directly to disk with batched reading
 ///
-/// This is memory-efficient because we process cells in batches and write
-/// immediately. CSR format is ideal since we can calculate library size and
-/// normalisation per-cell.
+/// Memory stays bounded by a few slices of [`H5_CELL_SLICE_SIZE`] cells, see
+/// [`write_h5_cell_major_cells`].
 ///
 /// ### Params
 ///
@@ -1536,11 +1690,10 @@ pub fn write_h5_csr_streaming<P: AsRef<Path>>(
     raw_slot: &RawDataSlot,
     verbose: bool,
 ) -> Result<CellQuality, BixverseErrors> {
-    let file = File::open(&file_path)?;
-    let data_ds = file.dataset(raw_slot.get_data())?;
-    let indices_ds = file.dataset(raw_slot.get_indices())?;
-    let indptr_ds = file.dataset(raw_slot.get_indptr())?;
-    let indptr_raw = read_indptr(&indptr_ds)?;
+    let indptr_raw = {
+        let file = File::open(&file_path)?;
+        read_indptr(&file.dataset(raw_slot.get_indptr())?)?
+    };
 
     let mut writer = CellGeneSparseWriter::new(
         bin_path,
@@ -1550,119 +1703,23 @@ pub fn write_h5_csr_streaming<P: AsRef<Path>>(
         cell_qc.target_size,
     )?;
 
-    let mut lib_size = Vec::with_capacity(quality.cells_to_keep.len());
-    let mut nnz = Vec::with_capacity(quality.cells_to_keep.len());
-
-    let total_cells = quality.cells_to_keep.len();
-    let num_batches = total_cells.div_ceil(H5_CELL_SLICE_SIZE);
-
-    if verbose {
-        println!(
-            "  Processing {} cells in batches of {}...",
-            total_cells.separate_with_underscores(),
-            H5_CELL_SLICE_SIZE.separate_with_underscores()
-        );
-    }
-
     let start_write = Instant::now();
 
-    // Reusable buffers to avoid allocations
-    let mut cell_data: Vec<(usize, u32)> = Vec::with_capacity(10000);
-    let mut gene_indices: Vec<u32> = Vec::with_capacity(10000);
-    let mut gene_counts: Vec<u32> = Vec::with_capacity(10000);
-
-    for (batch_idx, cell_batch) in quality.cells_to_keep.chunks(H5_CELL_SLICE_SIZE).enumerate() {
-        if verbose && (batch_idx % ((num_batches / 10).max(1)) == 0 || batch_idx == num_batches - 1)
-        {
-            let progress = ((batch_idx as f64 / num_batches as f64 * 10.0).round() as usize) * 10;
-            let processed = (batch_idx + 1) * H5_CELL_SLICE_SIZE;
-            println!(
-                "  Processed {}% ({} / {} cells)",
-                progress,
-                processed.min(total_cells).separate_with_underscores(),
-                total_cells.separate_with_underscores()
-            );
-        }
-
-        let start_pos = cell_batch.iter().map(|&c| indptr_raw[c]).min().unwrap_or(0);
-        let end_pos = cell_batch
-            .iter()
-            .map(|&c| indptr_raw[c + 1])
-            .max()
-            .unwrap_or(0);
-
-        if start_pos >= end_pos {
-            for &old_cell_idx in cell_batch {
-                lib_size.push(0);
-                nnz.push(0);
-                let new_cell_idx = quality.cell_old_to_new[&old_cell_idx];
-                let empty_chunk = CsrCellChunk::from_data(
-                    &[] as &[u32],
-                    &[] as &[u32],
-                    new_cell_idx,
-                    cell_qc.target_size,
-                    true,
-                );
-                writer.write_cell_chunk(empty_chunk)?;
-            }
-            continue;
-        }
-
-        let chunk_data: Vec<f32> = data_ds.read_slice_1d(start_pos..end_pos)?.to_vec();
-        let chunk_indices: Vec<u32> = indices_ds.read_slice_1d(start_pos..end_pos)?.to_vec();
-
-        for &old_cell_idx in cell_batch {
-            let cell_start = indptr_raw[old_cell_idx];
-            let cell_end = indptr_raw[old_cell_idx + 1];
-
-            cell_data.clear();
-            gene_indices.clear();
-            gene_counts.clear();
-
-            for idx in cell_start..cell_end {
-                let local_idx = idx - start_pos;
-                let old_gene_idx = chunk_indices[local_idx] as usize;
-
-                if let Some(&new_gene_idx) = quality.gene_old_to_new.get(&old_gene_idx) {
-                    let raw_val = chunk_data[local_idx] as u32;
-                    cell_data.push((new_gene_idx, raw_val));
-                }
-            }
-
-            if !cell_data.is_empty() {
-                // Check if already sorted (common in CSR)
-                let needs_sort = cell_data.windows(2).any(|w| w[0].0 > w[1].0);
-                if needs_sort {
-                    cell_data.sort_unstable_by_key(|&(gene_idx, _)| gene_idx);
-                }
-
-                gene_indices.extend(cell_data.iter().map(|(g, _)| *g as u32));
-                gene_counts.extend(cell_data.iter().map(|(_, c)| *c));
-            }
-
-            let new_cell_idx = quality.cell_old_to_new[&old_cell_idx];
-            let cell_chunk = CsrCellChunk::from_data(
-                &gene_counts,
-                &gene_indices,
-                new_cell_idx,
-                cell_qc.target_size,
-                true,
-            );
-
-            let (nnz_i, lib_size_i) = cell_chunk.get_qc_info();
-            nnz.push(nnz_i);
-            lib_size.push(lib_size_i);
-
-            writer.write_cell_chunk(cell_chunk)?;
-        }
-    }
+    let (nnz, lib_size) = write_h5_cell_major_cells(
+        file_path.as_ref(),
+        raw_slot.get_data(),
+        raw_slot.get_indices(),
+        &indptr_raw,
+        quality,
+        cell_qc.target_size,
+        &mut writer,
+        verbose,
+    )?;
 
     writer.finalise()?;
 
-    let end_write = start_write.elapsed();
-
     if verbose {
-        println!("  Writing complete in {:.2?}", end_write);
+        println!("  Writing complete in {:.2?}", start_write.elapsed());
     }
 
     Ok(CellQuality {

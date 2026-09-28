@@ -492,6 +492,21 @@ impl CsrCellChunk {
         Ok(())
     }
 
+    /// Serialise and lz4-compress the chunk into the on-disk payload.
+    ///
+    /// Pure with respect to the writer, so callers can build many payloads in
+    /// parallel and hand them to
+    /// [`CellGeneSparseWriter::write_compressed_cell_chunks`] in order.
+    ///
+    /// ### Returns
+    ///
+    /// The compressed payload, size-prepended as the reader expects.
+    pub fn to_compressed_bytes(&self) -> std::io::Result<Vec<u8>> {
+        let mut buffer = Vec::new();
+        self.write_to_bytes(&mut buffer)?;
+        Ok(compress_prepend_size(&buffer))
+    }
+
     /// Read data from buffer
     ///
     /// ### Params
@@ -1331,11 +1346,45 @@ impl CellGeneSparseWriter {
         chunks: &[(usize, Vec<u8>)],
     ) -> Result<(), BixverseErrors> {
         self.check_mode(false)?;
+        self.append_compressed_batch(chunks)
+    }
 
+    /// Write cells whose payloads were already built via
+    /// [`CsrCellChunk::to_compressed_bytes`].
+    ///
+    /// ### Params
+    ///
+    /// * `chunks` - `(original_index, payload)` pairs, appended in the given
+    ///   order.
+    ///
+    /// ### Returns
+    ///
+    /// `Ok(())`, or [`BixverseErrors::ReaderModeMismatch`] if the writer was
+    /// opened for gene-based chunks.
+    pub fn write_compressed_cell_chunks(
+        &mut self,
+        chunks: &[(usize, Vec<u8>)],
+    ) -> Result<(), BixverseErrors> {
+        self.check_mode(true)?;
+        self.append_compressed_batch(chunks)
+    }
+
+    /// Append a batch of compressed payloads in order.
+    ///
+    /// ### Params
+    ///
+    /// * `chunks` - `(original_index, payload)` pairs.
+    ///
+    /// ### Returns
+    ///
+    /// `Ok(())` on success, an I/O error otherwise.
+    fn append_compressed_batch(
+        &mut self,
+        chunks: &[(usize, Vec<u8>)],
+    ) -> Result<(), BixverseErrors> {
         for (original_index, payload) in chunks {
             self.append_compressed(payload, *original_index)?;
         }
-
         Ok(())
     }
 
