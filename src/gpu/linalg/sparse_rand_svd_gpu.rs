@@ -13,9 +13,9 @@
 //! 3. `Y = A * Omega_scaled - 1 * c^T`, with `c = mu^T * Omega_scaled`
 //!    precomputed.
 //! 4. CholeskyQR2 -> `Q` orthonormal.
-//! 5. Power iterations: `Z = (A^T Q - mu * q_sum^T) / sigma`, then
-//!    `Y = A * Z - 1 * c^T`, then CholeskyQR2. Two iterations is the
-//!    default; the gain past that is small.
+//! 5. Power iterations: `Z = (A^T Q - mu * q_sum^T) / sigma^2`, i.e.
+//!    `D^-1 X^T Q`, then `Y = A * Z - 1 * c^T`, then CholeskyQR2. Two
+//!    iterations is the default; the gain past that is small.
 //! 6. Final `Z = (A^T Q - mu * q_sum^T) / sigma`, which equals `B^T` for
 //!    the standard randomised SVD with `B = Q^T * X` where `X` is the
 //!    centred-scaled A.
@@ -188,6 +188,13 @@ where
         GpuCompressedSparseData::<R, T>::from_compressed_sparse_data_2(&data, true, &client)?;
     let mu_gpu = GpuTensor::<R, T>::from_slice(col_means, vec![m], &client)?;
     let sigma_gpu = GpuTensor::<R, T>::from_slice(col_stds, vec![m], &client)?;
+    // The forward SpMM applies A - 1 mu^T with no scaling, so its dense operand
+    // has to arrive pre-divided by sigma, as Omega does. Inside the power loop
+    // the transpose kernel divides by sigma^2 instead of sigma, which hands
+    // the next forward product D^-1 X^T Q. With plain sigma the loop iterates
+    // X D X^T rather than X X^T and drifts off the leading subspace.
+    let sigma_sq: Vec<T> = col_stds.iter().map(|&x| x * x).collect();
+    let sigma_sq_gpu = GpuTensor::<R, T>::from_slice(&sigma_sq, vec![m], &client)?;
 
     let zero_n = vec![T::from(0.0).unwrap(); n];
     let row_offsets_gpu = match row_offsets {
@@ -267,7 +274,7 @@ where
             &q_buf,
             &q_sum_buf,
             &mu_gpu,
-            &sigma_gpu,
+            &sigma_sq_gpu,
             &m_dot_q_buf,
             &z_buf,
             s,
