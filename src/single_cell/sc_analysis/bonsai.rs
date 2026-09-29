@@ -285,6 +285,15 @@ where
     }
 
     out.n_genes = out.genes.len();
+    if verbosity.normal_verbosity() {
+        println!(
+            "Sanity: kept {} of {} candidate genes over {} cells in {:.2?}.",
+            out.n_genes,
+            gene_indices.len(),
+            n_cells,
+            started.elapsed()
+        );
+    }
     Ok(out)
 }
 
@@ -438,17 +447,20 @@ pub fn run_bonsai_sc(
         }
         .into());
     }
+    let started = Instant::now();
     let lik = from_sanity_output(&post, Some(params.bonsai.ingest))?;
     drop(post);
 
     if verbosity.normal_verbosity() {
         println!(
-            "Sanity ingest kept {} genes, dropped {} as ill-conditioned.",
+            "Sanity ingest kept {} genes, dropped {} as ill-conditioned ({:.2?}).",
             lik.features.len(),
-            lik.dropped.len()
+            lik.dropped.len(),
+            started.elapsed()
         );
     }
 
+    let started = Instant::now();
     let out = bonsai(
         &lik.means,
         &lik.sds,
@@ -458,9 +470,20 @@ pub fn run_bonsai_sc(
         Some(params.bonsai),
         bonsai_verbosity(verbosity),
     )?;
+    if verbosity.normal_verbosity() {
+        println!("Bonsai finished in {:.2?}.", started.elapsed());
+    }
 
+    let started = Instant::now();
     let coords = layout_tree(&out.tree, params.layout, params.hyperbolic)?;
     let (parent, branch) = tree_arrays(&out.tree);
+    if verbosity.normal_verbosity() {
+        println!(
+            "Layout of {} nodes in {:.2?}.",
+            parent.len(),
+            started.elapsed()
+        );
+    }
 
     Ok(BonsaiScResult {
         parent,
