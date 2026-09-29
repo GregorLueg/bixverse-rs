@@ -7,15 +7,17 @@
 
 use bixverse_rs::prelude::*;
 use bixverse_rs::single_cell::sc_analysis::bonsai::{
-    BonsaiLayout, BonsaiScParams, bonsai_layout, sanity_bonsai_sc, sanity_counts,
+    BonsaiLayout, BonsaiScParams, SANITY_GENE_CHUNK, bonsai_layout, keep_for_bonsai,
+    read_count_chunk, sanity_bonsai_sc, stream_sanity,
 };
 use bixverse_rs::single_cell::sc_data::bin_merge_io::gene_store_to_cell_store;
 use bixverse_rs::single_cell::sc_data::data_io::{
     CellGeneSparseWriter, CscGeneChunk, ParallelSparseReader, RawCounts,
 };
-use bonsai_rs::sanity_sc_rs::sanity;
 use bonsai_rs::sanity_sc_rs::simulate::{Simulation, SimulationParams, simulate};
+use bonsai_rs::sanity_sc_rs::{SanityOutput, sanity, sanity_select};
 use bonsai_rs::tree::NO_NODE;
+use indexmap::IndexSet;
 
 /////////////
 // Helpers //
@@ -99,7 +101,7 @@ fn build_stores(name: &str, sim: &Simulation, extra_empty: usize) -> Stores {
 ///////////
 
 #[test]
-fn test_sanity_through_the_reader_matches_sanity_direct() {
+fn test_chunked_stream_matches_sanity_direct() {
     let sim = fixture();
     let stores = build_stores("direct", &sim, 0);
     let gene_reader = ParallelSparseReader::new(stores.gene.path()).expect("gene reader");
@@ -107,43 +109,50 @@ fn test_sanity_through_the_reader_matches_sanity_direct() {
 
     let cells: Vec<usize> = (0..sim.counts.n_cells()).collect();
     let genes: Vec<usize> = (0..sim.counts.n_genes()).collect();
-    let input =
-        sanity_counts(&gene_reader, &cell_reader, &cells, &genes, Verbosity::Quiet).expect("read");
+    // seven genes per chunk, so the stream crosses several chunk boundaries
+    let streamed = stream_sanity(
+        &gene_reader,
+        &cell_reader,
+        &cells,
+        &genes,
+        7,
+        Verbosity::Quiet,
+        |counts, totals| {
+            assert_eq!(totals, sim.cell_totals.as_slice());
+            Ok(sanity::<f32>(counts, totals, None)?)
+        },
+    )
+    .expect("stream");
 
-    assert_eq!(input.genes, genes);
-    assert_eq!(input.cell_totals, sim.cell_totals);
-
-    let via_reader = sanity::<f32>(&input.counts, &input.cell_totals, None).expect("sanity");
     let direct = sanity::<f32>(&sim.counts, &sim.cell_totals, None).expect("sanity");
-    assert_eq!(via_reader.log_fold_changes, direct.log_fold_changes);
-    assert_eq!(via_reader.error_bars, direct.error_bars);
+    assert_eq!(streamed.genes, genes);
+    assert_eq!(streamed.n_genes, genes.len());
+    assert_eq!(streamed.log_fold_changes, direct.log_fold_changes);
+    assert_eq!(streamed.error_bars, direct.error_bars);
+    assert_eq!(streamed.variance, direct.variance);
 }
 
 #[test]
-fn test_sanity_counts_subsets_cells_and_skips_empty_genes() {
+fn test_read_count_chunk_subsets_cells_and_skips_empty_genes() {
     let sim = fixture();
     let n_genes = sim.counts.n_genes();
     let stores = build_stores("subset", &sim, 2);
     let gene_reader = ParallelSparseReader::new(stores.gene.path()).expect("gene reader");
-    let cell_reader = ParallelSparseReader::new(stores.cell.path()).expect("cell reader");
 
     let cells: Vec<usize> = (1..sim.counts.n_cells()).step_by(2).collect();
+    let cell_set: IndexSet<u32> = cells.iter().map(|&c| c as u32).collect();
     let genes: Vec<usize> = (0..n_genes + 2).collect();
-    let input =
-        sanity_counts(&gene_reader, &cell_reader, &cells, &genes, Verbosity::Quiet).expect("read");
+    let (counts, kept) = read_count_chunk(&gene_reader, &genes, &cell_set)
+        .expect("read")
+        .expect("not every gene is empty");
 
-    assert_eq!(input.counts.n_cells(), cells.len());
-    assert!(
-        input.genes.iter().all(|&g| g < n_genes),
-        "an empty gene was kept"
-    );
-    let expected_totals: Vec<f64> = cells.iter().map(|&c| sim.cell_totals[c]).collect();
-    assert_eq!(input.cell_totals, expected_totals);
+    assert_eq!(counts.n_cells(), cells.len());
+    assert!(kept.iter().all(|&g| g < n_genes), "an empty gene was kept");
 
     // every stored count must be the original count of that gene in that cell
-    for (col, &g) in input.genes.iter().enumerate() {
+    for (col, &g) in kept.iter().enumerate() {
         let (orig_idx, orig_val) = sim.counts.gene(g);
-        let (idx, val) = input.counts.gene(col);
+        let (idx, val) = counts.gene(col);
         for (&local, &v) in idx.iter().zip(val) {
             let pos = orig_idx
                 .iter()
@@ -152,6 +161,46 @@ fn test_sanity_counts_subsets_cells_and_skips_empty_genes() {
             assert_eq!(v, orig_val[pos]);
         }
     }
+
+    let empty_only =
+        read_count_chunk(&gene_reader, &[n_genes, n_genes + 1], &cell_set).expect("read");
+    assert!(empty_only.is_none());
+}
+
+#[test]
+fn test_filtered_stream_does_not_depend_on_the_chunk_size() {
+    let sim = fixture();
+    let stores = build_stores("filtered", &sim, 2);
+    let gene_reader = ParallelSparseReader::new(stores.gene.path()).expect("gene reader");
+    let cell_reader = ParallelSparseReader::new(stores.cell.path()).expect("cell reader");
+
+    let cells: Vec<usize> = (0..sim.counts.n_cells()).collect();
+    let genes: Vec<usize> = (0..sim.counts.n_genes() + 2).collect();
+    let params = BonsaiScParams::default();
+    let keep = keep_for_bonsai(&params);
+    let run = |chunk: usize| -> SanityOutput<f32> {
+        stream_sanity(
+            &gene_reader,
+            &cell_reader,
+            &cells,
+            &genes,
+            chunk,
+            Verbosity::Quiet,
+            |counts, totals| Ok(sanity_select(counts, totals, None, &keep)?),
+        )
+        .expect("stream")
+    };
+
+    let small = run(5);
+    let whole = run(SANITY_GENE_CHUNK);
+    assert!(small.n_genes > 0, "the filter kept nothing");
+    assert!(
+        small.n_genes < sim.counts.n_genes(),
+        "the filter kept everything"
+    );
+    assert_eq!(small.genes, whole.genes);
+    assert_eq!(small.log_fold_changes, whole.log_fold_changes);
+    assert_eq!(small.error_bars, whole.error_bars);
 }
 
 #[test]

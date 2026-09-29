@@ -5,19 +5,27 @@
 //! over the cells from those. A layout then puts every node, leaves and
 //! inferred ancestors alike, on the plane.
 //!
+//! Genes are streamed through Sanity in chunks, and each chunk keeps only the
+//! genes that would survive Bonsai's ingest (`sanity_gene_passes`). Sanity
+//! shares nothing across genes but the per-cell totals, so the chunked run is
+//! the same run, and at no point are more than one chunk of counts plus the
+//! survivors resident. That is what makes all genes, not only the HVGs, a
+//! workable input.
+//!
 //! Sanity runs on the CPU here. `gpu::sc_gpu::sanity_bonsai_gpu` swaps in the
-//! GPU Sanity; both hand over at [`run_bonsai_sc`], so everything after the
-//! posteriors is shared.
+//! GPU Sanity per chunk; both hand over at [`run_bonsai_sc`], so everything
+//! after the posteriors is shared.
 //!
 //! Sanity is reached through `bonsai_rs::sanity_sc_rs` rather than as a direct
 //! dependency, so its `SanityOutput` is always the type
 //! `from_sanity_output` expects.
 
 use bonsai_rs::bonsai::{BonsaiParams, bonsai};
-use bonsai_rs::ingest::from_sanity_output;
-use bonsai_rs::sanity_sc_rs::config::SanityParams;
+use bonsai_rs::errors::BonsaiErrors;
+use bonsai_rs::ingest::{from_sanity_output, sanity_gene_passes};
+use bonsai_rs::sanity_sc_rs::config::{SanityParams, Verbosity as SanityVerbosity};
 use bonsai_rs::sanity_sc_rs::input::CountMatrix;
-use bonsai_rs::sanity_sc_rs::{SanityOutput, sanity};
+use bonsai_rs::sanity_sc_rs::{GeneView, SanityOutput, sanity_select};
 use bonsai_rs::tree::layout::{Layout, dendrogram, equal_angle, equal_daylight};
 use bonsai_rs::tree::{NO_NODE, Tree};
 use indexmap::IndexSet;
@@ -30,12 +38,13 @@ use crate::single_cell::sc_data::data_io::{RawCounts, SingleCellReading};
 // Constants //
 ///////////////
 
-/// Genes read from disk per batch while assembling the Sanity input.
+/// Genes read from disk and run through Sanity per chunk.
 ///
-/// Each chunk also carries the f16 normalised values Sanity never reads, so
-/// batching bounds that transient copy rather than the count matrix itself,
-/// which has to be whole.
-const SANITY_READ_BATCH: usize = 1024;
+/// Sets the resident input: one chunk of sparse counts (and, on the GPU, its
+/// dense rows until the filter has run). At 100k cells and a typical 5 to 10
+/// per cent density that is tens of MB of counts, while 1,024 genes still give
+/// every Rayon worker hundreds of genes to share out.
+pub const SANITY_GENE_CHUNK: usize = 1024;
 
 ////////////
 // Params //
@@ -112,18 +121,6 @@ impl Default for BonsaiScParams {
 // Results //
 /////////////
 
-/// Sanity input assembled from the binary file.
-pub struct SanityCounts {
-    /// Raw counts, gene-major, cells renumbered `0..n_cells` in the order of
-    /// the cell selection.
-    pub counts: CountMatrix,
-    /// Total UMI count of every selected cell over all genes.
-    pub cell_totals: Vec<f64>,
-    /// Input gene index of each column of `counts`. Genes with no counts in the
-    /// selected cells are left out, since Sanity cannot fit them.
-    pub genes: Vec<usize>,
-}
-
 /// A Bonsai tree with its layout.
 pub struct BonsaiScResult {
     /// Parent of each node, [`NO_NODE`] for the root. Nodes `0..n_cells` are
@@ -149,83 +146,180 @@ pub struct BonsaiScResult {
 // Sanity input //
 //////////////////
 
-/// Read the raw counts of the selected genes and cells for Sanity.
+/// Read one chunk of genes as a Sanity count matrix.
 ///
-/// Library sizes come from the cell-major file's chunk headers, which is the
-/// total over all genes that Sanity asks for. Genes are read in batches of
-/// [`SANITY_READ_BATCH`] and only their raw counts and cell indices kept.
+/// Genes with no counts in the selected cells are left out, since Sanity
+/// cannot fit them.
+///
+/// ### Params
+///
+/// * `gene_reader` - Reader over the gene-major file
+/// * `genes` - Genes to read, 0-indexed
+/// * `cell_set` - Cells to keep, in leaf order
+///
+/// ### Returns
+///
+/// The count matrix, cells renumbered `0..cell_set.len()`, and the input gene
+/// index of each of its columns; `None` if every gene in the chunk was empty.
+pub fn read_count_chunk<G: SingleCellReading>(
+    gene_reader: &G,
+    genes: &[usize],
+    cell_set: &IndexSet<u32>,
+) -> Result<Option<(CountMatrix, Vec<usize>)>, BixverseErrors> {
+    let mut indices: Vec<u32> = Vec::new();
+    let mut values: Vec<u32> = Vec::new();
+    let mut indptr: Vec<usize> = vec![0];
+    let mut kept: Vec<usize> = Vec::with_capacity(genes.len());
+
+    for (&gene, chunk) in genes
+        .iter()
+        .zip(gene_reader.read_gene_parallel_filtered(genes, cell_set)?)
+    {
+        if chunk.indices.is_empty() {
+            continue;
+        }
+        // filtering renumbers cells by their position in `cell_set`, in
+        // ascending order, which is the layout `CountMatrix` requires
+        indices.extend_from_slice(&chunk.indices);
+        match chunk.data_raw {
+            RawCounts::U16(v) => values.extend(v.into_iter().map(u32::from)),
+            RawCounts::U32(v) => values.extend(v),
+        }
+        indptr.push(indices.len());
+        kept.push(gene);
+    }
+
+    if kept.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some((
+        CountMatrix::new(indices, values, indptr, cell_set.len())?,
+        kept,
+    )))
+}
+
+/// Stream genes through Sanity in chunks and keep what each chunk returns.
+///
+/// Library sizes come once from the cell-major file's chunk headers: the total
+/// over all genes, which is what Sanity asks for, and the only quantity its
+/// model shares across genes. So each chunk is fitted exactly as it would be in
+/// one run over every gene. `run_chunk` decides what a chunk keeps, normally
+/// through `sanity_select` or `sanity_gpu_select` with [`keep_for_bonsai`].
 ///
 /// ### Params
 ///
 /// * `gene_reader` - Reader over the gene-major file
 /// * `cell_reader` - Reader over the cell-major file
 /// * `cell_indices` - Cells to keep, 0-indexed. Sets the leaf order
-/// * `gene_indices` - Genes to read, 0-indexed
+/// * `gene_indices` - Genes to run, 0-indexed
+/// * `gene_chunk` - Genes per chunk, usually [`SANITY_GENE_CHUNK`]
 /// * `verbosity` - How much to print
+/// * `run_chunk` - Sanity over one chunk's counts and the cell totals
 ///
 /// ### Returns
 ///
-/// The count matrix, the per-cell totals, and the gene index of each column.
-pub fn sanity_counts<G, C>(
+/// The kept genes of every chunk as one Sanity output, rows in input order,
+/// with `genes` holding their input gene indices.
+pub fn stream_sanity<G, C, F>(
     gene_reader: &G,
     cell_reader: &C,
     cell_indices: &[usize],
     gene_indices: &[usize],
+    gene_chunk: usize,
     verbosity: Verbosity,
-) -> Result<SanityCounts, BixverseErrors>
+    mut run_chunk: F,
+) -> Result<SanityOutput<f32>, BixverseErrors>
 where
     G: SingleCellReading,
     C: SingleCellReading,
+    F: FnMut(&CountMatrix, &[f64]) -> Result<SanityOutput<f32>, BixverseErrors>,
 {
     let started = Instant::now();
     let n_cells = cell_indices.len();
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&c| c as u32).collect();
-
     let cell_totals: Vec<f64> = cell_reader
         .read_cell_library_sizes(cell_indices)?
         .into_iter()
         .map(|t| t as f64)
         .collect();
 
-    let mut indices: Vec<u32> = Vec::new();
-    let mut values: Vec<u32> = Vec::new();
-    let mut indptr: Vec<usize> = vec![0];
-    let mut genes: Vec<usize> = Vec::with_capacity(gene_indices.len());
+    let mut out = SanityOutput {
+        log_fold_changes: Vec::new(),
+        error_bars: Vec::new(),
+        mean_log_quotient: Vec::new(),
+        mean_log_quotient_error: Vec::new(),
+        variance: Vec::new(),
+        genes: Vec::new(),
+        n_genes: 0,
+        n_cells,
+    };
 
-    for batch in gene_indices.chunks(SANITY_READ_BATCH) {
-        let chunks = gene_reader.read_gene_parallel_filtered(batch, &cell_set)?;
-        for (&gene, chunk) in batch.iter().zip(chunks) {
-            if chunk.indices.is_empty() {
-                continue;
-            }
-            // filtering renumbers cells by their position in `cell_set`, in
-            // ascending order, which is the layout `CountMatrix` requires
-            indices.extend_from_slice(&chunk.indices);
-            match chunk.data_raw {
-                RawCounts::U16(v) => values.extend(v.into_iter().map(u32::from)),
-                RawCounts::U32(v) => values.extend(v),
-            }
-            indptr.push(indices.len());
-            genes.push(gene);
+    let n_chunks = gene_indices.len().div_ceil(gene_chunk.max(1));
+    for (i, genes) in gene_indices.chunks(gene_chunk.max(1)).enumerate() {
+        let Some((counts, chunk_genes)) = read_count_chunk(gene_reader, genes, &cell_set)? else {
+            continue;
+        };
+        let post = run_chunk(&counts, &cell_totals)?;
+        drop(counts);
+
+        out.log_fold_changes.extend(post.log_fold_changes);
+        out.error_bars.extend(post.error_bars);
+        out.mean_log_quotient.extend(post.mean_log_quotient);
+        out.mean_log_quotient_error
+            .extend(post.mean_log_quotient_error);
+        out.variance.extend(post.variance);
+        // `post.genes` are positions in this chunk's count matrix
+        out.genes.extend(post.genes.iter().map(|&g| chunk_genes[g]));
+
+        if verbosity.normal_verbosity() {
+            println!(
+                "Sanity chunk {}/{}: kept {} of {} genes ({} kept so far, {:.2?}).",
+                i + 1,
+                n_chunks,
+                post.n_genes,
+                genes.len(),
+                out.genes.len(),
+                started.elapsed()
+            );
         }
     }
 
-    if verbosity.normal_verbosity() {
-        println!(
-            "Read {} of {} genes ({} with no counts in the selection) over {} cells in {:.2?}.",
-            genes.len(),
-            gene_indices.len(),
-            gene_indices.len() - genes.len(),
-            n_cells,
-            started.elapsed()
-        );
-    }
+    out.n_genes = out.genes.len();
+    Ok(out)
+}
 
-    Ok(SanityCounts {
-        counts: CountMatrix::new(indices, values, indptr, n_cells)?,
-        cell_totals,
-        genes,
-    })
+/// The Sanity keep test that matches Bonsai's ingest.
+///
+/// ### Params
+///
+/// * `params` - Parameters carrying the ingest knobs
+///
+/// ### Returns
+///
+/// A predicate for `sanity_select` and `sanity_gpu_select` that keeps a gene
+/// only if `from_sanity` and `prepare` would.
+pub fn keep_for_bonsai(params: &BonsaiScParams) -> impl Fn(GeneView<'_>) -> bool + Sync + use<> {
+    let ingest = params.bonsai.ingest;
+    move |g| sanity_gene_passes(g.log_fold_changes, g.error_bars, g.variance, &ingest)
+}
+
+/// The Sanity parameters for one chunk.
+///
+/// Silent, since [`stream_sanity`] reports per chunk and Sanity's own header
+/// would repeat for every one of them.
+///
+/// ### Params
+///
+/// * `params` - Parameters carrying the Sanity set
+///
+/// ### Returns
+///
+/// `params.sanity` with its verbosity off.
+pub(crate) fn chunk_sanity_params(params: &BonsaiScParams) -> SanityParams {
+    SanityParams {
+        verbosity: SanityVerbosity::Quiet,
+        ..params.sanity
+    }
 }
 
 ////////////
@@ -321,8 +415,10 @@ fn tree_arrays(tree: &Tree) -> (Vec<u32>, Vec<f64>) {
 ///
 /// ### Params
 ///
-/// * `post` - Sanity posteriors over the columns of `genes`
-/// * `genes` - Input gene index of each Sanity gene, from [`SanityCounts`]
+/// * `post` - Sanity posteriors, `genes` holding input gene indices as
+///   [`stream_sanity`] leaves them
+/// * `n_candidates` - Genes that went into Sanity, for the error when none
+///   survived
 /// * `params` - Bonsai and layout parameters; `params.sanity` is not read
 /// * `verbosity` - How much to print
 ///
@@ -331,10 +427,17 @@ fn tree_arrays(tree: &Tree) -> (Vec<u32>, Vec<f64>) {
 /// The tree, its layout, and the genes it was built on.
 pub fn run_bonsai_sc(
     post: SanityOutput<f32>,
-    genes: &[usize],
+    n_candidates: usize,
     params: &BonsaiScParams,
     verbosity: Verbosity,
 ) -> Result<BonsaiScResult, BixverseErrors> {
+    if post.n_genes == 0 {
+        return Err(BonsaiErrors::NoFeaturesRetained {
+            n_features: n_candidates,
+            threshold: params.bonsai.ingest.min_signal_to_noise,
+        }
+        .into());
+    }
     let lik = from_sanity_output(&post, Some(params.bonsai.ingest))?;
     drop(post);
 
@@ -371,12 +474,8 @@ pub fn run_bonsai_sc(
             .iter()
             .map(|s| (s.step.to_string(), s.loglik))
             .collect(),
-        // bonsai's features index the ingest's, which index Sanity's genes
-        genes_used: out
-            .features
-            .iter()
-            .map(|&f| genes[lik.features[f]])
-            .collect(),
+        // bonsai's features index the ingest's, which are input gene indices
+        genes_used: out.features.iter().map(|&f| lik.features[f]).collect(),
     })
 }
 
@@ -387,7 +486,8 @@ pub fn run_bonsai_sc(
 /// * `gene_reader` - Reader over the gene-major file
 /// * `cell_reader` - Reader over the cell-major file
 /// * `cell_indices` - Cells to keep, 0-indexed. Sets the leaf order
-/// * `gene_indices` - Genes to use, 0-indexed. Highly variable genes, usually
+/// * `gene_indices` - Genes to consider, 0-indexed. All expressed genes is
+///   fine: only the ones passing Bonsai's ingest filters are kept
 /// * `params` - Sanity, Bonsai and layout parameters
 /// * `verbosity` - How much to print
 ///
@@ -406,42 +506,18 @@ where
     G: SingleCellReading,
     C: SingleCellReading,
 {
-    let input = sanity_counts(
+    let sanity_params = chunk_sanity_params(params);
+    let keep = keep_for_bonsai(params);
+    let post = stream_sanity(
         gene_reader,
         cell_reader,
         cell_indices,
         gene_indices,
+        SANITY_GENE_CHUNK,
         verbosity,
+        |counts, totals| Ok(sanity_select(counts, totals, Some(sanity_params), &keep)?),
     )?;
-    let post = sanity::<f32>(
-        &input.counts,
-        &input.cell_totals,
-        Some(sanity_params(params, verbosity)),
-    )?;
-    drop(input.counts);
-    run_bonsai_sc(post, &input.genes, params, verbosity)
-}
-
-/// The Sanity parameters with this crate's verbosity applied.
-///
-/// ### Params
-///
-/// * `params` - Parameters carrying the Sanity set
-/// * `verbosity` - This crate's verbosity
-///
-/// ### Returns
-///
-/// `params.sanity` with its verbosity replaced.
-pub(crate) fn sanity_params(params: &BonsaiScParams, verbosity: Verbosity) -> SanityParams {
-    use bonsai_rs::sanity_sc_rs::config::Verbosity as SanityVerbosity;
-    SanityParams {
-        verbosity: match verbosity {
-            Verbosity::Quiet => SanityVerbosity::Quiet,
-            Verbosity::Normal => SanityVerbosity::Normal,
-            Verbosity::Detailed => SanityVerbosity::Detailed,
-        },
-        ..params.sanity
-    }
+    run_bonsai_sc(post, gene_indices.len(), params, verbosity)
 }
 
 /// This crate's verbosity as bonsai-rs's.
