@@ -6,6 +6,7 @@
 
 use bonsai_rs::sanity_sc_rs::gpu::sanity_gpu_select;
 use cubecl::Runtime;
+use std::time::Instant;
 
 use crate::prelude::*;
 use crate::single_cell::sc_analysis::bonsai::{
@@ -50,6 +51,7 @@ where
     G: SingleCellReading,
     C: SingleCellReading,
 {
+    let started = Instant::now();
     let client = R::client(&device);
     let sanity_params = chunk_sanity_params(params);
     let keep = keep_for_bonsai(params);
@@ -70,5 +72,8 @@ where
             )?)
         },
     )?;
-    run_bonsai_sc(post, gene_indices.len(), params, verbosity)
+    let t_sanity = started.elapsed().as_secs_f64();
+    let mut res = run_bonsai_sc(post, gene_indices.len(), params, verbosity)?;
+    res.timings.insert(0, ("sanity".to_string(), t_sanity));
+    Ok(res)
 }

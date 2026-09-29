@@ -136,8 +136,12 @@ pub struct BonsaiScResult {
     pub n_leaves: usize,
     /// Final tree loglikelihood, up to an additive constant.
     pub loglik: f64,
-    /// Name and loglikelihood after each search step.
-    pub steps: Vec<(String, f64)>,
+    /// Name, loglikelihood after it, and wall time in seconds of each search
+    /// step.
+    pub steps: Vec<(String, f64, f64)>,
+    /// Wall time in seconds of each pipeline stage, in order: `sanity`,
+    /// `ingest`, `bonsai` (the whole search) and `layout`.
+    pub timings: Vec<(String, f64)>,
     /// Input gene indices the tree was built on, ascending.
     pub genes_used: Vec<usize>,
 }
@@ -450,6 +454,7 @@ pub fn run_bonsai_sc(
     let started = Instant::now();
     let lik = from_sanity_output(&post, Some(params.bonsai.ingest))?;
     drop(post);
+    let t_ingest = started.elapsed().as_secs_f64();
 
     if verbosity.normal_verbosity() {
         println!(
@@ -470,19 +475,17 @@ pub fn run_bonsai_sc(
         Some(params.bonsai),
         bonsai_verbosity(verbosity),
     )?;
+    let t_bonsai = started.elapsed().as_secs_f64();
     if verbosity.normal_verbosity() {
-        println!("Bonsai finished in {:.2?}.", started.elapsed());
+        println!("Bonsai finished in {t_bonsai:.2} s.");
     }
 
     let started = Instant::now();
     let coords = layout_tree(&out.tree, params.layout, params.hyperbolic)?;
     let (parent, branch) = tree_arrays(&out.tree);
+    let t_layout = started.elapsed().as_secs_f64();
     if verbosity.normal_verbosity() {
-        println!(
-            "Layout of {} nodes in {:.2?}.",
-            parent.len(),
-            started.elapsed()
-        );
+        println!("Layout of {} nodes in {t_layout:.2} s.", parent.len());
     }
 
     Ok(BonsaiScResult {
@@ -495,8 +498,13 @@ pub fn run_bonsai_sc(
         steps: out
             .steps
             .iter()
-            .map(|s| (s.step.to_string(), s.loglik))
+            .map(|s| (s.step.to_string(), s.loglik, s.seconds))
             .collect(),
+        timings: vec![
+            ("ingest".to_string(), t_ingest),
+            ("bonsai".to_string(), t_bonsai),
+            ("layout".to_string(), t_layout),
+        ],
         // bonsai's features index the ingest's, which are input gene indices
         genes_used: out.features.iter().map(|&f| lik.features[f]).collect(),
     })
@@ -529,6 +537,7 @@ where
     G: SingleCellReading,
     C: SingleCellReading,
 {
+    let started = Instant::now();
     let sanity_params = chunk_sanity_params(params);
     let keep = keep_for_bonsai(params);
     let post = stream_sanity(
@@ -540,7 +549,10 @@ where
         verbosity,
         |counts, totals| Ok(sanity_select(counts, totals, Some(sanity_params), &keep)?),
     )?;
-    run_bonsai_sc(post, gene_indices.len(), params, verbosity)
+    let t_sanity = started.elapsed().as_secs_f64();
+    let mut res = run_bonsai_sc(post, gene_indices.len(), params, verbosity)?;
+    res.timings.insert(0, ("sanity".to_string(), t_sanity));
+    Ok(res)
 }
 
 /// This crate's verbosity as bonsai-rs's.

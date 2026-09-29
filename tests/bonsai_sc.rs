@@ -231,6 +231,10 @@ fn test_sanity_bonsai_sc_returns_a_single_rooted_tree() {
     assert!(res.x.iter().chain(&res.y).all(|v| v.is_finite()));
     assert!(res.loglik.is_finite());
     assert!(!res.genes_used.is_empty());
+    let stages: Vec<&str> = res.timings.iter().map(|(s, _)| s.as_str()).collect();
+    assert_eq!(stages, ["sanity", "ingest", "bonsai", "layout"]);
+    assert!(res.timings.iter().all(|(_, t)| t.is_finite() && *t >= 0.0));
+    assert_eq!(res.steps.len(), 7, "linkage start reports seven steps");
     assert!(res.genes_used.windows(2).all(|w| w[0] < w[1]));
 
     // relaying out the returned tree keeps its leaves and node count

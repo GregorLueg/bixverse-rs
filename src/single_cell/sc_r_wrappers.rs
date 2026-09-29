@@ -4952,10 +4952,19 @@ mod bonsai_wrappers {
     /// ### Returns
     ///
     /// R list with `parent` (0-indexed, `-1` for the root), `branch`, `x`,
-    /// `y`, `n_leaves`, `loglik`, `steps` (a list of `step` names and their
-    /// `loglik`) and `genes_used` (0-indexed).
+    /// `y`, `n_leaves`, `loglik`, `steps` (a list of `step` names, their
+    /// `loglik` and `seconds`), `timings` (a list of `stage` and `seconds`) and
+    /// `genes_used` (0-indexed).
     pub fn bonsai_sc_to_r_list(res: BonsaiScResult) -> List {
-        let (step, step_loglik): (Vec<String>, Vec<f64>) = res.steps.into_iter().unzip();
+        let mut step = Vec::with_capacity(res.steps.len());
+        let mut step_loglik = Vec::with_capacity(res.steps.len());
+        let mut step_seconds = Vec::with_capacity(res.steps.len());
+        for (name, loglik, secs) in res.steps {
+            step.push(name);
+            step_loglik.push(loglik);
+            step_seconds.push(secs);
+        }
+        let (stage, stage_seconds): (Vec<String>, Vec<f64>) = res.timings.into_iter().unzip();
         list!(
             parent = parents_to_r(&res.parent),
             branch = res.branch,
@@ -4963,7 +4972,8 @@ mod bonsai_wrappers {
             y = res.y,
             n_leaves = res.n_leaves as i32,
             loglik = res.loglik,
-            steps = list!(step = step, loglik = step_loglik),
+            steps = list!(step = step, loglik = step_loglik, seconds = step_seconds),
+            timings = list!(stage = stage, seconds = stage_seconds),
             genes_used = res
                 .genes_used
                 .iter()
