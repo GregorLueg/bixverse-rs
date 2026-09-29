@@ -1,0 +1,235 @@
+#![cfg(feature = "bonsai")]
+//! Bonsai over the single cell binary stores.
+//!
+//! The counts come from sanity-sc-rs's own simulator and are written through
+//! the normal store writer, so the reader path is checked against Sanity run
+//! directly on the same `CountMatrix`.
+
+use bixverse_rs::prelude::*;
+use bixverse_rs::single_cell::sc_analysis::bonsai::{
+    BonsaiLayout, BonsaiScParams, bonsai_layout, sanity_bonsai_sc, sanity_counts,
+};
+use bixverse_rs::single_cell::sc_data::bin_merge_io::gene_store_to_cell_store;
+use bixverse_rs::single_cell::sc_data::data_io::{
+    CellGeneSparseWriter, CscGeneChunk, ParallelSparseReader, RawCounts,
+};
+use bonsai_rs::sanity_sc_rs::sanity;
+use bonsai_rs::sanity_sc_rs::simulate::{Simulation, SimulationParams, simulate};
+use bonsai_rs::tree::NO_NODE;
+
+/////////////
+// Helpers //
+/////////////
+
+/// Removes the scratch stores when the test ends, pass or panic.
+struct TempStore(std::path::PathBuf);
+
+impl Drop for TempStore {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+impl TempStore {
+    fn new(name: &str) -> Self {
+        Self(std::env::temp_dir().join(format!("bixverse_bonsai_{name}.bin")))
+    }
+
+    fn path(&self) -> &str {
+        self.0.to_str().expect("temp path is valid UTF-8")
+    }
+}
+
+/// A gene-major store plus its cell-major twin.
+struct Stores {
+    gene: TempStore,
+    cell: TempStore,
+}
+
+/// Small simulated dataset: 64 cells, up to 40 genes.
+fn fixture() -> Simulation {
+    simulate(Some(SimulationParams {
+        n_genes: 40,
+        n_cells: 64,
+        seed: 11,
+        ..SimulationParams::default()
+    }))
+    .expect("simulate")
+}
+
+/// Write the simulated counts, plus `extra_empty` all-zero genes at the end,
+/// as a gene-major store and its cell-major twin.
+fn build_stores(name: &str, sim: &Simulation, extra_empty: usize) -> Stores {
+    let n_cells = sim.counts.n_cells();
+    let n_genes = sim.counts.n_genes();
+    let gene = TempStore::new(&format!("{name}_gene"));
+    let cell = TempStore::new(&format!("{name}_cell"));
+
+    let mut writer =
+        CellGeneSparseWriter::new(gene.path(), false, n_cells, n_genes + extra_empty, 1e4)
+            .expect("writer opens");
+    for g in 0..n_genes + extra_empty {
+        let (idx, raw): (Vec<usize>, Vec<u32>) = if g < n_genes {
+            let (i, v) = sim.counts.gene(g);
+            (i.iter().map(|&c| c as usize).collect(), v.to_vec())
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let norms: Vec<F16> = raw
+            .iter()
+            .map(|&v| F16::from_f32((v as f32).ln_1p()))
+            .collect();
+        writer
+            .write_gene_chunk(CscGeneChunk::from_conversion(
+                RawCounts::from_u32_auto(&raw),
+                &norms,
+                &idx,
+                g,
+                true,
+            ))
+            .expect("write gene chunk");
+    }
+    writer.finalise().expect("finalise");
+    gene_store_to_cell_store(gene.path(), cell.path(), 20_000, 512, 0).expect("transpose");
+    Stores { gene, cell }
+}
+
+///////////
+// Tests //
+///////////
+
+#[test]
+fn test_sanity_through_the_reader_matches_sanity_direct() {
+    let sim = fixture();
+    let stores = build_stores("direct", &sim, 0);
+    let gene_reader = ParallelSparseReader::new(stores.gene.path()).expect("gene reader");
+    let cell_reader = ParallelSparseReader::new(stores.cell.path()).expect("cell reader");
+
+    let cells: Vec<usize> = (0..sim.counts.n_cells()).collect();
+    let genes: Vec<usize> = (0..sim.counts.n_genes()).collect();
+    let input =
+        sanity_counts(&gene_reader, &cell_reader, &cells, &genes, Verbosity::Quiet).expect("read");
+
+    assert_eq!(input.genes, genes);
+    assert_eq!(input.cell_totals, sim.cell_totals);
+
+    let via_reader = sanity::<f32>(&input.counts, &input.cell_totals, None).expect("sanity");
+    let direct = sanity::<f32>(&sim.counts, &sim.cell_totals, None).expect("sanity");
+    assert_eq!(via_reader.log_fold_changes, direct.log_fold_changes);
+    assert_eq!(via_reader.error_bars, direct.error_bars);
+}
+
+#[test]
+fn test_sanity_counts_subsets_cells_and_skips_empty_genes() {
+    let sim = fixture();
+    let n_genes = sim.counts.n_genes();
+    let stores = build_stores("subset", &sim, 2);
+    let gene_reader = ParallelSparseReader::new(stores.gene.path()).expect("gene reader");
+    let cell_reader = ParallelSparseReader::new(stores.cell.path()).expect("cell reader");
+
+    let cells: Vec<usize> = (1..sim.counts.n_cells()).step_by(2).collect();
+    let genes: Vec<usize> = (0..n_genes + 2).collect();
+    let input =
+        sanity_counts(&gene_reader, &cell_reader, &cells, &genes, Verbosity::Quiet).expect("read");
+
+    assert_eq!(input.counts.n_cells(), cells.len());
+    assert!(
+        input.genes.iter().all(|&g| g < n_genes),
+        "an empty gene was kept"
+    );
+    let expected_totals: Vec<f64> = cells.iter().map(|&c| sim.cell_totals[c]).collect();
+    assert_eq!(input.cell_totals, expected_totals);
+
+    // every stored count must be the original count of that gene in that cell
+    for (col, &g) in input.genes.iter().enumerate() {
+        let (orig_idx, orig_val) = sim.counts.gene(g);
+        let (idx, val) = input.counts.gene(col);
+        for (&local, &v) in idx.iter().zip(val) {
+            let pos = orig_idx
+                .iter()
+                .position(|&c| c as usize == cells[local as usize])
+                .expect("count in a cell the original gene has no count for");
+            assert_eq!(v, orig_val[pos]);
+        }
+    }
+}
+
+#[test]
+fn test_sanity_bonsai_sc_returns_a_single_rooted_tree() {
+    let sim = fixture();
+    let stores = build_stores("tree", &sim, 0);
+    let gene_reader = ParallelSparseReader::new(stores.gene.path()).expect("gene reader");
+    let cell_reader = ParallelSparseReader::new(stores.cell.path()).expect("cell reader");
+
+    let cells: Vec<usize> = (0..sim.counts.n_cells()).collect();
+    let genes: Vec<usize> = (0..sim.counts.n_genes()).collect();
+    let res = sanity_bonsai_sc(
+        &gene_reader,
+        &cell_reader,
+        &cells,
+        &genes,
+        &BonsaiScParams::default(),
+        Verbosity::Quiet,
+    )
+    .expect("bonsai");
+
+    let n_nodes = res.parent.len();
+    assert_eq!(res.n_leaves, cells.len());
+    assert_eq!(res.branch.len(), n_nodes);
+    assert_eq!(res.x.len(), n_nodes);
+    assert_eq!(res.y.len(), n_nodes);
+    assert_eq!(res.parent.iter().filter(|&&p| p == NO_NODE).count(), 1);
+    assert!(res.x.iter().chain(&res.y).all(|v| v.is_finite()));
+    assert!(res.loglik.is_finite());
+    assert!(!res.genes_used.is_empty());
+    assert!(res.genes_used.windows(2).all(|w| w[0] < w[1]));
+
+    // relaying out the returned tree keeps its leaves and node count
+    let (parent, _, coords) = bonsai_layout(
+        res.parent.clone(),
+        res.branch.clone(),
+        res.n_leaves,
+        BonsaiLayout::Dendrogram,
+        true,
+    )
+    .expect("layout");
+    assert_eq!(parent.len(), n_nodes);
+    assert_eq!(coords.x.len(), n_nodes);
+    assert!(
+        coords
+            .x
+            .iter()
+            .zip(&coords.y)
+            .all(|(x, y)| x * x + y * y <= 1.0),
+        "hyperbolic layout left the unit disk"
+    );
+}
+
+#[cfg(feature = "gpu")]
+#[test]
+fn test_sanity_bonsai_sc_gpu_returns_a_single_rooted_tree() {
+    use bixverse_rs::gpu::sc_gpu::sanity_bonsai_gpu::sanity_bonsai_sc_gpu;
+    use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+
+    let sim = fixture();
+    let stores = build_stores("tree_gpu", &sim, 0);
+    let gene_reader = ParallelSparseReader::new(stores.gene.path()).expect("gene reader");
+    let cell_reader = ParallelSparseReader::new(stores.cell.path()).expect("cell reader");
+
+    let cells: Vec<usize> = (0..sim.counts.n_cells()).collect();
+    let genes: Vec<usize> = (0..sim.counts.n_genes()).collect();
+    let res = sanity_bonsai_sc_gpu::<WgpuRuntime, _, _>(
+        &gene_reader,
+        &cell_reader,
+        &cells,
+        &genes,
+        &BonsaiScParams::default(),
+        WgpuDevice::default(),
+        Verbosity::Quiet,
+    )
+    .expect("bonsai");
+
+    assert_eq!(res.n_leaves, cells.len());
+    assert_eq!(res.parent.iter().filter(|&&p| p == NO_NODE).count(), 1);
+    assert!(res.x.iter().chain(&res.y).all(|v| v.is_finite()));
+}

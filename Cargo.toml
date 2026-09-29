@@ -55,10 +55,13 @@ large-test = []
 ## Unasserted diagnostic sweeps that print tables for a human to read. They
 ## cannot fail, so running them in CI buys nothing; use them when investigating.
 large_scale_diagnostics = []
+## Enables Bonsai trees over single cell counts via `bonsai-rs`, with Sanity
+## posteriors as the input (requires single-cell)
+bonsai = ["single-cell", "dep:bonsai-rs"]
 ## Enables multi-modal single cell analysis (requires single-cell)
 multi-modal = ["single-cell"]
 ## Enable GPU-accelerated algorithms and methods
-gpu = ["ann-search-rs/gpu", "cubecl", "cubecl-utils-rs", "half", "cubek", "edge-rs?/gpu"]
+gpu = ["ann-search-rs/gpu", "cubecl", "cubecl-utils-rs", "half", "cubek", "edge-rs?/gpu", "bonsai-rs?/gpu"]
 
 #####################
 # Compilation flags #
@@ -77,6 +80,7 @@ codegen-units = 4
 approx = "0.5.1"
 ann-search-rs = { version = "0.9.0" }
 bincode = { version = "2.0.1", features = ["serde"], optional = true }
+bonsai-rs = { version = "0.2.0", features = ["sanity"], optional = true }
 cubecl = { version = "0.10.0", features = ["wgpu"], optional = true }
 cubecl-utils-rs = { version = "0.1.0", optional = true }
 cubek = { version = "0.2.0", features = ["matmul"], optional = true }

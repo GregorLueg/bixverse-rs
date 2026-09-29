@@ -4744,3 +4744,234 @@ impl AprGroupedFit {
         })
     }
 }
+
+////////////
+// Bonsai //
+////////////
+
+#[cfg(feature = "bonsai")]
+mod bonsai_wrappers {
+    use bonsai_rs::bonsai::StartTree;
+    use bonsai_rs::sanity_sc_rs::config::VarianceRule;
+    use bonsai_rs::search::nni::NniSearch;
+    use bonsai_rs::search::spr::SprSearch;
+    use bonsai_rs::tree::NO_NODE;
+    use extendr_api::*;
+    use std::collections::HashMap;
+
+    use crate::single_cell::sc_analysis::bonsai::{
+        BonsaiScParams, BonsaiScResult, parse_bonsai_layout,
+    };
+    use crate::utils::r_rust_interface::r_list_to_map;
+
+    impl BonsaiScParams {
+        /// Generate the [BonsaiScParams] from a flat R list.
+        ///
+        /// Missing elements fall back to [BonsaiScParams::default]. A string
+        /// that names no known option is an error rather than a fallback.
+        ///
+        /// ### Params
+        ///
+        /// * `r_list` - Flat list with any of `variance_rule`,
+        ///   `fixed_variance`, `variance_bins`, `variance_min`,
+        ///   `variance_max`, `min_signal_to_noise`, `start`, `spr_search`,
+        ///   `nni_search`, `seed`, `reroot`, `layout` and `hyperbolic`.
+        ///
+        /// ### Returns
+        ///
+        /// The [BonsaiScParams] with all of the parameters.
+        pub fn from_r_list(r_list: List) -> Result<Self> {
+            let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+            let mut out = Self::default();
+
+            let real = |k: &str| params.get(k).and_then(|v| v.as_real());
+            let text = |k: &str| params.get(k).and_then(|v| v.as_str());
+            let unknown = |k: &str, v: &str| Error::Other(format!("Invalid Bonsai {k}: {v}"));
+
+            if let Some(v) = text("variance_rule") {
+                out.sanity.variance_rule = match v.to_lowercase().as_str() {
+                    "fixed" => VarianceRule::Fixed(real("fixed_variance").ok_or_else(|| {
+                        Error::Other(
+                            "Bonsai variance_rule 'fixed' needs fixed_variance".to_string(),
+                        )
+                    })?),
+                    s => parse_variance_rule(s).ok_or_else(|| unknown("variance_rule", v))?,
+                };
+            }
+            if let Some(v) = params.get("variance_bins").and_then(|v| v.as_integer()) {
+                out.sanity.variance_bins = v as usize;
+            }
+            if let Some(v) = real("variance_min") {
+                out.sanity.variance_min = v;
+            }
+            if let Some(v) = real("variance_max") {
+                out.sanity.variance_max = v;
+            }
+            if let Some(v) = real("min_signal_to_noise") {
+                out.bonsai.ingest.min_signal_to_noise = v;
+            }
+            if let Some(v) = text("start") {
+                out.bonsai.start = parse_start_tree(v).ok_or_else(|| unknown("start", v))?;
+            }
+            if let Some(v) = text("spr_search") {
+                out.bonsai.spr.search =
+                    parse_spr_search(v).ok_or_else(|| unknown("spr_search", v))?;
+            }
+            if let Some(v) = text("nni_search") {
+                out.bonsai.nni.search =
+                    parse_nni_search(v).ok_or_else(|| unknown("nni_search", v))?;
+            }
+            if let Some(v) = params.get("seed").and_then(|v| v.as_integer()) {
+                out.bonsai.linkage.seed = v as usize;
+                out.bonsai.spr.seed = v as u64;
+                out.bonsai.nni.seed = v as u64;
+            }
+            if let Some(v) = params.get("reroot").and_then(|v| v.as_bool()) {
+                out.bonsai.reroot = v;
+            }
+            if let Some(v) = text("layout") {
+                out.layout = parse_bonsai_layout(v).ok_or_else(|| unknown("layout", v))?;
+            }
+            if let Some(v) = params.get("hyperbolic").and_then(|v| v.as_bool()) {
+                out.hyperbolic = v;
+            }
+
+            Ok(out)
+        }
+    }
+
+    /// Parse a Sanity variance rule other than `"fixed"`, which needs a value.
+    ///
+    /// ### Params
+    ///
+    /// * `s` - `"marginalise"`, `"posterior_mean"` or `"max_posterior"`
+    ///
+    /// ### Returns
+    ///
+    /// The rule, or `None` if the name is not recognised.
+    pub fn parse_variance_rule(s: &str) -> Option<VarianceRule> {
+        match s {
+            "marginalise" => Some(VarianceRule::Marginalise),
+            "posterior_mean" => Some(VarianceRule::PosteriorMean),
+            "max_posterior" => Some(VarianceRule::MaxPosterior),
+            _ => None,
+        }
+    }
+
+    /// Parse the Bonsai start tree.
+    ///
+    /// ### Params
+    ///
+    /// * `s` - `"linkage"` or `"greedy_merge"`, case-insensitive
+    ///
+    /// ### Returns
+    ///
+    /// The start tree, or `None` if the name is not recognised.
+    pub fn parse_start_tree(s: &str) -> Option<StartTree> {
+        match s.to_lowercase().as_str() {
+            "linkage" => Some(StartTree::Linkage),
+            "greedy_merge" => Some(StartTree::GreedyMerge),
+            _ => None,
+        }
+    }
+
+    /// Parse the SPR search mode.
+    ///
+    /// ### Params
+    ///
+    /// * `s` - `"approximate"` (upstream's default approximations) or
+    ///   `"exact"`, case-insensitive
+    ///
+    /// ### Returns
+    ///
+    /// The search mode, or `None` if the name is not recognised.
+    pub fn parse_spr_search(s: &str) -> Option<SprSearch> {
+        match s.to_lowercase().as_str() {
+            "approximate" => Some(SprSearch::default()),
+            "exact" => Some(SprSearch::Exact),
+            _ => None,
+        }
+    }
+
+    /// Parse the NNI search mode.
+    ///
+    /// ### Params
+    ///
+    /// * `s` - `"approximate"` (upstream's default approximations) or
+    ///   `"exact"`, case-insensitive
+    ///
+    /// ### Returns
+    ///
+    /// The search mode, or `None` if the name is not recognised.
+    pub fn parse_nni_search(s: &str) -> Option<NniSearch> {
+        match s.to_lowercase().as_str() {
+            "approximate" => Some(NniSearch::default()),
+            "exact" => Some(NniSearch::Exact),
+            _ => None,
+        }
+    }
+
+    /// Convert a parent array to R integers, the root as `-1`.
+    ///
+    /// ### Params
+    ///
+    /// * `parent` - Parent per node, [NO_NODE] for the root
+    ///
+    /// ### Returns
+    ///
+    /// 0-indexed parents with `-1` for the root.
+    pub fn parents_to_r(parent: &[u32]) -> Vec<i32> {
+        parent
+            .iter()
+            .map(|&p| if p == NO_NODE { -1 } else { p as i32 })
+            .collect()
+    }
+
+    /// Convert R parents back, `-1` (or any negative) as the root.
+    ///
+    /// ### Params
+    ///
+    /// * `parent` - 0-indexed parents, negative for the root
+    ///
+    /// ### Returns
+    ///
+    /// Parent per node, [NO_NODE] for the root.
+    pub fn parents_from_r(parent: &[i32]) -> Vec<u32> {
+        parent
+            .iter()
+            .map(|&p| if p < 0 { NO_NODE } else { p as u32 })
+            .collect()
+    }
+
+    /// Serialise a Bonsai result for R.
+    ///
+    /// ### Params
+    ///
+    /// * `res` - The result
+    ///
+    /// ### Returns
+    ///
+    /// R list with `parent` (0-indexed, `-1` for the root), `branch`, `x`,
+    /// `y`, `n_leaves`, `loglik`, `steps` (a list of `step` names and their
+    /// `loglik`) and `genes_used` (0-indexed).
+    pub fn bonsai_sc_to_r_list(res: BonsaiScResult) -> List {
+        let (step, step_loglik): (Vec<String>, Vec<f64>) = res.steps.into_iter().unzip();
+        list!(
+            parent = parents_to_r(&res.parent),
+            branch = res.branch,
+            x = res.x,
+            y = res.y,
+            n_leaves = res.n_leaves as i32,
+            loglik = res.loglik,
+            steps = list!(step = step, loglik = step_loglik),
+            genes_used = res
+                .genes_used
+                .iter()
+                .map(|&g| g as i32)
+                .collect::<Vec<i32>>()
+        )
+    }
+}
+
+#[cfg(feature = "bonsai")]
+pub use bonsai_wrappers::*;

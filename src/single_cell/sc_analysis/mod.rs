@@ -3,6 +3,8 @@
 //! differential gene expression, pseudo-bulking cells and various different
 //! metacell approaches.
 
+#[cfg(feature = "bonsai")]
+pub mod bonsai;
 pub mod dge_pathway_scores;
 pub mod dialogue;
 pub mod fast_clusters;
