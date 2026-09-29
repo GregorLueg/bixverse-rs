@@ -1,5 +1,12 @@
 # News
 
+## 0.5.6
+
+### Features
+
+- Faster i/o engine for the various single cell formats: mtx, h5 and h5ad.
+  Substantial speed-ups in the 1.5x to 2x faster.
+
 ## 0.5.5
 
 ### Features
