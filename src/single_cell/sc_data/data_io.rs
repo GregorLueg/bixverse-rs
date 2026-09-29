@@ -492,6 +492,21 @@ impl CsrCellChunk {
         Ok(())
     }
 
+    /// Serialise and lz4-compress the chunk into the on-disk payload.
+    ///
+    /// Pure with respect to the writer, so callers can build many payloads in
+    /// parallel and hand them to
+    /// [`CellGeneSparseWriter::write_compressed_cell_chunks`] in order.
+    ///
+    /// ### Returns
+    ///
+    /// The compressed payload, size-prepended as the reader expects.
+    pub fn to_compressed_bytes(&self) -> std::io::Result<Vec<u8>> {
+        let mut buffer = Vec::new();
+        self.write_to_bytes(&mut buffer)?;
+        Ok(compress_prepend_size(&buffer))
+    }
+
     /// Read data from buffer
     ///
     /// ### Params
@@ -846,6 +861,21 @@ impl CscGeneChunk {
         writer.write_all(&row_indices_bytes)?;
 
         Ok(())
+    }
+
+    /// Serialise and lz4-compress the chunk into the on-disk payload.
+    ///
+    /// Pure with respect to the writer, so callers can build many payloads in
+    /// parallel and hand them to
+    /// [`CellGeneSparseWriter::write_compressed_gene_chunks`] in order.
+    ///
+    /// ### Returns
+    ///
+    /// The compressed payload, size-prepended as the reader expects.
+    pub fn to_compressed_bytes(&self) -> std::io::Result<Vec<u8>> {
+        let mut buffer = Vec::new();
+        self.write_to_bytes(&mut buffer)?;
+        Ok(compress_prepend_size(&buffer))
     }
 
     /// Read data from buffer
@@ -1219,6 +1249,24 @@ impl CellGeneSparseWriter {
     ///
     /// `Ok(())` on success, an I/O error otherwise.
     fn append_chunk(&mut self, buffer: &[u8], original_index: usize) -> Result<(), BixverseErrors> {
+        self.append_compressed(&compress_prepend_size(buffer), original_index)
+    }
+
+    /// Append an already compressed chunk and record its offset.
+    ///
+    /// ### Params
+    ///
+    /// * `compressed` - Size-prepended lz4 payload of a serialised chunk.
+    /// * `original_index` - Original index of the cell or gene in the data.
+    ///
+    /// ### Returns
+    ///
+    /// `Ok(())` on success, an I/O error otherwise.
+    fn append_compressed(
+        &mut self,
+        compressed: &[u8],
+        original_index: usize,
+    ) -> Result<(), BixverseErrors> {
         let current_pos = self.writer.stream_position()?;
         let chunk_offset = current_pos - self.chunks_start_pos;
         self.header.chunk_offsets.push(chunk_offset);
@@ -1226,11 +1274,9 @@ impl CellGeneSparseWriter {
             .index_map
             .insert(original_index, self.header.no_chunks);
 
-        let compressed = compress_prepend_size(buffer);
-
         self.writer
             .write_all(&(compressed.len() as u64).to_le_bytes())?;
-        self.writer.write_all(&compressed)?;
+        self.writer.write_all(compressed)?;
 
         self.header.no_chunks += 1;
         self.chunks_since_flush += 1;
@@ -1281,6 +1327,65 @@ impl CellGeneSparseWriter {
         gene_chunk.write_to_bytes(&mut buffer)?;
 
         self.append_chunk(&buffer, gene_chunk.original_index)
+    }
+
+    /// Write genes whose payloads were already built via
+    /// [`CscGeneChunk::to_compressed_bytes`].
+    ///
+    /// ### Params
+    ///
+    /// * `chunks` - `(original_index, payload)` pairs, appended in the given
+    ///   order.
+    ///
+    /// ### Returns
+    ///
+    /// `Ok(())`, or [`BixverseErrors::ReaderModeMismatch`] if the writer was
+    /// opened for cell-based chunks.
+    pub fn write_compressed_gene_chunks(
+        &mut self,
+        chunks: &[(usize, Vec<u8>)],
+    ) -> Result<(), BixverseErrors> {
+        self.check_mode(false)?;
+        self.append_compressed_batch(chunks)
+    }
+
+    /// Write cells whose payloads were already built via
+    /// [`CsrCellChunk::to_compressed_bytes`].
+    ///
+    /// ### Params
+    ///
+    /// * `chunks` - `(original_index, payload)` pairs, appended in the given
+    ///   order.
+    ///
+    /// ### Returns
+    ///
+    /// `Ok(())`, or [`BixverseErrors::ReaderModeMismatch`] if the writer was
+    /// opened for gene-based chunks.
+    pub fn write_compressed_cell_chunks(
+        &mut self,
+        chunks: &[(usize, Vec<u8>)],
+    ) -> Result<(), BixverseErrors> {
+        self.check_mode(true)?;
+        self.append_compressed_batch(chunks)
+    }
+
+    /// Append a batch of compressed payloads in order.
+    ///
+    /// ### Params
+    ///
+    /// * `chunks` - `(original_index, payload)` pairs.
+    ///
+    /// ### Returns
+    ///
+    /// `Ok(())` on success, an I/O error otherwise.
+    fn append_compressed_batch(
+        &mut self,
+        chunks: &[(usize, Vec<u8>)],
+    ) -> Result<(), BixverseErrors> {
+        for (original_index, payload) in chunks {
+            self.append_compressed(payload, *original_index)?;
+        }
+        Ok(())
     }
 
     /// Finalise the file
@@ -1346,6 +1451,131 @@ impl CellGeneSparseWriter {
     pub fn update_header_no_genes(&mut self, no_genes: usize) {
         self.header.total_genes = no_genes;
     }
+}
+
+/////////////////////////
+// Parallel cell write //
+/////////////////////////
+
+/// Marker in a dense index map for a cell or gene that is dropped.
+pub const INDEX_DROPPED: u32 = u32::MAX;
+
+/// Cells built and compressed per parallel batch in [`write_cell_rows`].
+///
+/// Large enough to amortise the rayon fan-out, small enough that the
+/// compressed payloads held before the append stay a few MB.
+const CELL_WRITE_BATCH: usize = 4_096;
+
+/// Dense old-to-new map from the kept cell or gene indices.
+///
+/// Replaces a hash lookup per stored value with an index.
+///
+/// ### Params
+///
+/// * `kept` - Old indices to keep, in new-index order
+///
+/// ### Returns
+///
+/// `map[old] = new`, [`INDEX_DROPPED`] for indices not kept. Sized to the
+/// largest kept index, so callers treat out-of-range as dropped.
+pub fn dense_index_map(kept: &[usize]) -> Vec<u32> {
+    let mut map = vec![INDEX_DROPPED; kept.iter().max().map_or(0, |&g| g + 1)];
+    for (new, &old) in kept.iter().enumerate() {
+        map[old] = new as u32;
+    }
+    map
+}
+
+/// Dense gene map from a per-file `local -> final` mapping.
+///
+/// ### Params
+///
+/// * `mapping` - `Some(final)` for kept local genes, `None` otherwise
+///
+/// ### Returns
+///
+/// `map[local] = final`, [`INDEX_DROPPED`] for dropped genes.
+pub fn dense_gene_map_from_options(mapping: &[Option<usize>]) -> Vec<u32> {
+    mapping
+        .iter()
+        .map(|g| g.map_or(INDEX_DROPPED, |g| g as u32))
+        .collect()
+}
+
+/// Build one cell chunk from `(gene, count)` pairs and compress it.
+///
+/// ### Params
+///
+/// * `row` - The cell's `(gene, count)` pairs, sorted by gene here if needed
+/// * `original_index` - Index the cell is stored under
+/// * `target_size` - Target size for the library normalisation
+///
+/// ### Returns
+///
+/// `(nnz, lib_size, payload)`.
+pub fn compress_cell_row(
+    row: &mut [(u32, u32)],
+    original_index: usize,
+    target_size: f32,
+) -> std::io::Result<(usize, usize, Vec<u8>)> {
+    if row.windows(2).any(|w| w[0].0 > w[1].0) {
+        row.sort_by_key(|&(g, _)| g);
+    }
+    let genes: Vec<u32> = row.iter().map(|&(g, _)| g).collect();
+    let counts: Vec<u32> = row.iter().map(|&(_, c)| c).collect();
+    let chunk = CsrCellChunk::from_data(&counts, &genes, original_index, target_size, true);
+    let (nnz, lib_size) = chunk.get_qc_info();
+    Ok((nnz, lib_size, chunk.to_compressed_bytes()?))
+}
+
+/// Write accumulated per-cell rows to the cell-based binary.
+///
+/// For the paths that have to gather a cell's values from a gene-major or
+/// unsorted source (CSC h5ad, mtx) before writing. Rows are sorted, built and
+/// compressed in parallel batches of [`CELL_WRITE_BATCH`], appended in order,
+/// and freed as they go.
+///
+/// ### Params
+///
+/// * `rows` - One `(gene, count)` row per cell, in output order
+/// * `cell_offset` - Index of the first row's cell in the output
+/// * `target_size` - Target size for the library normalisation
+/// * `writer` - Cell-based writer to append to
+///
+/// ### Returns
+///
+/// `(nnz, lib_size)` per written cell.
+pub fn write_cell_rows(
+    rows: &mut [Vec<(u32, u32)>],
+    cell_offset: usize,
+    target_size: f32,
+    writer: &mut CellGeneSparseWriter,
+) -> Result<(Vec<usize>, Vec<usize>), BixverseErrors> {
+    let mut nnz = Vec::with_capacity(rows.len());
+    let mut lib_size = Vec::with_capacity(rows.len());
+
+    for (batch_idx, batch) in rows.chunks_mut(CELL_WRITE_BATCH).enumerate() {
+        let first = cell_offset + batch_idx * CELL_WRITE_BATCH;
+        let built = batch
+            .par_iter_mut()
+            .enumerate()
+            .map(|(k, row)| {
+                let mut row = std::mem::take(row);
+                let (nnz_i, lib_i, payload) = compress_cell_row(&mut row, first + k, target_size)?;
+                Ok((nnz_i, lib_i, (first + k, payload)))
+            })
+            .collect::<Result<Vec<_>, BixverseErrors>>()?;
+
+        let mut payloads = Vec::with_capacity(built.len());
+        for (nnz_i, lib_i, payload) in built {
+            nnz.push(nnz_i);
+            lib_size.push(lib_i);
+            payloads.push(payload);
+        }
+        writer.write_compressed_cell_chunks(&payloads)?;
+    }
+
+    Ok((nnz, lib_size))
 }
 
 ///////////////////////

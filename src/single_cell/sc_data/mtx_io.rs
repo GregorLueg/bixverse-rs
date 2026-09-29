@@ -6,13 +6,16 @@ use rustc_hash::FxHashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Read, Result as IoResult, Seek, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use thousands::Separable;
 
 use crate::prelude::*;
-use crate::single_cell::sc_data::data_io::{CellGeneSparseWriter, CellOnFileQuality};
+use crate::single_cell::sc_data::data_io::{
+    CellGeneSparseWriter, CellOnFileQuality, INDEX_DROPPED, compress_cell_row, dense_index_map,
+    write_cell_rows,
+};
 
 /////////
 // MTX //
@@ -25,6 +28,15 @@ use crate::single_cell::sc_data::data_io::{CellGeneSparseWriter, CellOnFileQuali
 /// [`MtxReader::process_mtx_and_write_bin_streaming`] call, so the layout
 /// carries no on-disk compatibility obligation.
 const BUCKET_RECORD_LEN: usize = 12;
+
+/// Bytes of mtx text parsed per parallel task in the bucketing pass.
+const MTX_PARSE_CHUNK_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Size at which a worker's per-bucket record buffer is appended to the shared
+/// bucket file. Caps what the bucketing pass holds at
+/// `n_threads * n_buckets * BUCKET_FLUSH_BYTES`: 128 MB at 16 threads and the
+/// 128-bucket ceiling.
+const BUCKET_FLUSH_BYTES: usize = 64 * 1024;
 
 /// MTX file metadata
 #[derive(Debug, Clone)]
@@ -388,6 +400,11 @@ impl MtxReader {
 
     /// Process the mtx file and write to binarised Rust file
     ///
+    /// Gathers every kept cell in memory, then writes them via
+    /// [`write_cell_rows`]. See
+    /// [`Self::process_mtx_and_write_bin_streaming`] for the bounded-memory
+    /// variant.
+    ///
     /// ### Params
     ///
     /// * `bin_path` - Where to save the binarised file.
@@ -406,23 +423,7 @@ impl MtxReader {
         quality: &CellOnFileQuality,
         verbose: bool,
     ) -> Result<MtxFinalData, BixverseErrors> {
-        let mut writer = CellGeneSparseWriter::new(
-            bin_path,
-            true,
-            quality.cells_to_keep.len(),
-            quality.genes_to_keep.len(),
-            self.qc_params.target_size,
-        )?;
-
-        // (gene_index, raw_count), both u32: gene index to support >65k
-        // features, count to avoid saturating high-expression genes.
-        let mut cell_data: Vec<Vec<(u32, u32)>> = vec![Vec::new(); quality.cells_to_keep.len()];
-        let mut line_buffer = Vec::with_capacity(64);
-
         let start_read = Instant::now();
-
-        self.reader.rewind()?;
-        Self::skip_header(&mut self.reader)?;
 
         if verbose {
             println!(
@@ -430,99 +431,46 @@ impl MtxReader {
             )
         }
 
-        let mut lines_read = 0usize;
-        let report_interval = (self.header.total_entries / 10).max(1);
+        let cell_map = dense_index_map(&quality.cells_to_keep);
+        let gene_map = dense_index_map(&quality.genes_to_keep);
 
-        while {
-            line_buffer.clear();
-            self.reader.read_until(b'\n', &mut line_buffer)? > 0
-        } {
-            if line_buffer.last() == Some(&b'\n') {
-                line_buffer.pop();
-            }
-            if line_buffer.last() == Some(&b'\r') {
-                line_buffer.pop();
-            }
-            if line_buffer.is_empty() {
-                continue;
-            }
+        // (gene_index, raw_count), both u32: gene index to support >65k
+        // features, count to avoid saturating high-expression genes.
+        let mut cell_data: Vec<Vec<(u32, u32)>> = vec![Vec::new(); quality.cells_to_keep.len()];
 
-            let (row, col, value) = match parse_mtx_line(&line_buffer) {
-                Some(parsed) => parsed,
-                None => continue,
-            };
-
-            let (old_cell_idx, old_gene_idx) = if self.cells_as_rows {
-                ((row - 1) as usize, (col - 1) as usize)
-            } else {
-                ((col - 1) as usize, (row - 1) as usize)
-            };
-
-            if !quality.genes_to_keep_set.contains(&old_gene_idx)
-                || !quality.cells_to_keep_set.contains(&old_cell_idx)
-            {
-                continue;
-            }
-
-            let new_cell_idx = quality.cell_old_to_new[&old_cell_idx];
-            let new_gene_idx = quality.gene_old_to_new[&old_gene_idx] as u32;
-
-            cell_data[new_cell_idx].push((new_gene_idx, value));
-
-            lines_read += 1;
-            if verbose && lines_read.is_multiple_of(report_interval) {
-                let progress =
-                    (lines_read as f64 / self.header.total_entries as f64 * 100.0) as usize;
-                println!("  Processed {}% of entries", progress);
-            }
+        let cells_as_rows = self.cells_as_rows;
+        for (start, end) in self.find_chunk_boundaries(1)? {
+            for_each_mtx_entry(&self.path, start, end, |row, col, value| {
+                if let Some((cell, gene)) =
+                    map_mtx_entry(row, col, cells_as_rows, &cell_map, &gene_map)
+                {
+                    cell_data[cell as usize].push((gene, value));
+                }
+            })?;
         }
 
-        let mut lib_size = Vec::with_capacity(quality.cells_to_keep.len());
-        let mut nnz = Vec::with_capacity(quality.cells_to_keep.len());
-
-        for (cell_idx, data) in cell_data.iter_mut().enumerate() {
-            if data.is_empty() {
-                continue;
-            }
-
-            data.sort_by_key(|(gene_idx, _)| *gene_idx);
-
-            let gene_indices: Vec<u32> = data.iter().map(|(g, _)| *g).collect();
-            let gene_counts: Vec<u32> = data.iter().map(|(_, c)| *c).collect();
-
-            let total_umi: u64 = gene_counts.iter().map(|&x| x as u64).sum();
-            let n_genes = gene_counts.len();
-
-            lib_size.push(total_umi as usize);
-            nnz.push(n_genes);
-
-            let cell_chunk = CsrCellChunk::from_data(
-                &gene_counts,
-                &gene_indices,
-                cell_idx,
-                self.qc_params.target_size,
-                true,
-            );
-            writer.write_cell_chunk(cell_chunk)?;
-        }
-
+        let mut writer = CellGeneSparseWriter::new(
+            bin_path,
+            true,
+            quality.cells_to_keep.len(),
+            quality.genes_to_keep.len(),
+            self.qc_params.target_size,
+        )?;
+        let (nnz, lib_size) =
+            write_cell_rows(&mut cell_data, 0, self.qc_params.target_size, &mut writer)?;
         writer.finalise()?;
 
-        let end_read = start_read.elapsed();
-
         if verbose {
-            println!("Reading in cell data done: {:.2?}", end_read);
+            println!("Reading in cell data done: {:.2?}", start_read.elapsed());
         }
 
-        let cell_quality = CellQuality {
-            cell_indices: quality.cells_to_keep.to_vec(),
-            gene_indices: quality.genes_to_keep.to_vec(),
-            lib_size,
-            nnz,
-        };
-
         Ok(MtxFinalData {
-            cell_qc: cell_quality,
+            cell_qc: CellQuality {
+                cell_indices: quality.cells_to_keep.to_vec(),
+                gene_indices: quality.genes_to_keep.to_vec(),
+                lib_size,
+                nnz,
+            },
             no_genes: quality.genes_to_keep.len(),
             no_cells: quality.cells_to_keep.len(),
         })
@@ -534,6 +482,13 @@ impl MtxReader {
     /// both `cells_as_rows = true` and `cells_as_rows = false` without requiring
     /// the input to be sorted. Memory usage is bounded by the size of a single
     /// bucket rather than the total kept entries.
+    ///
+    /// The bucketing pass parses byte ranges of the file in parallel. Each
+    /// worker buffers records per bucket and appends them to the shared bucket
+    /// file under its lock, so record order inside a bucket is arbitrary; the
+    /// writing pass sorts each bucket on the full `(cell, gene, count)` tuple,
+    /// which makes the output deterministic. Every kept cell is written, empty
+    /// or not.
     ///
     /// ### Params
     ///
@@ -555,15 +510,10 @@ impl MtxReader {
     ) -> Result<MtxFinalData, BixverseErrors> {
         let n_kept_cells = quality.cells_to_keep.len();
         let n_kept_genes = quality.genes_to_keep.len();
+        let target_size = self.qc_params.target_size;
 
         if n_kept_cells == 0 {
-            let writer = CellGeneSparseWriter::new(
-                bin_path,
-                true,
-                0,
-                n_kept_genes,
-                self.qc_params.target_size,
-            )?;
+            let writer = CellGeneSparseWriter::new(bin_path, true, 0, n_kept_genes, target_size)?;
             writer.finalise()?;
             return Ok(MtxFinalData {
                 cell_qc: CellQuality {
@@ -605,83 +555,71 @@ impl MtxReader {
             );
         }
 
-        let mut bucket_writers: Vec<BufWriter<File>> = temp_paths
+        let cell_map = dense_index_map(&quality.cells_to_keep);
+        let gene_map = dense_index_map(&quality.genes_to_keep);
+
+        let file_size = self.reader.get_ref().metadata()?.len();
+        let num_chunks = ((file_size / MTX_PARSE_CHUNK_BYTES) as usize).max(1);
+        let boundaries = self.find_chunk_boundaries(num_chunks)?;
+
+        let bucket_files: Vec<Mutex<BufWriter<File>>> = temp_paths
             .iter()
-            .map(|p| File::create(p).map(|f| BufWriter::with_capacity(256 * 1024, f)))
+            .map(|p| File::create(p).map(|f| Mutex::new(BufWriter::with_capacity(256 * 1024, f))))
             .collect::<IoResult<Vec<_>>>()?;
 
-        self.reader.rewind()?;
-        Self::skip_header(&mut self.reader)?;
+        let (path, cells_as_rows) = (&self.path, self.cells_as_rows);
+        boundaries
+            .par_iter()
+            .try_for_each(|&(start, end)| -> IoResult<()> {
+                let flush = |bucket: usize, buf: &mut Vec<u8>| -> IoResult<()> {
+                    bucket_files[bucket]
+                        .lock()
+                        .expect("bucket writer lock is never held across a panic")
+                        .write_all(buf)?;
+                    buf.clear();
+                    Ok(())
+                };
 
-        let mut line_buffer = Vec::with_capacity(64);
-        let mut lines_read = 0usize;
-        let report_interval = (self.header.total_entries / 10).max(1);
+                let mut bufs: Vec<Vec<u8>> = vec![Vec::new(); n_buckets];
+                let mut flush_err = Ok(());
+                for_each_mtx_entry(path, start, end, |row, col, value| {
+                    let Some((cell, gene)) =
+                        map_mtx_entry(row, col, cells_as_rows, &cell_map, &gene_map)
+                    else {
+                        return;
+                    };
+                    let bucket = cell as usize / cells_per_bucket;
+                    let buf = &mut bufs[bucket];
+                    buf.extend_from_slice(&cell.to_le_bytes());
+                    buf.extend_from_slice(&gene.to_le_bytes());
+                    buf.extend_from_slice(&value.to_le_bytes());
+                    if buf.len() >= BUCKET_FLUSH_BYTES && flush_err.is_ok() {
+                        flush_err = flush(bucket, buf);
+                    }
+                })?;
+                flush_err?;
 
-        while {
-            line_buffer.clear();
-            self.reader.read_until(b'\n', &mut line_buffer)? > 0
-        } {
-            if line_buffer.last() == Some(&b'\n') {
-                line_buffer.pop();
-            }
-            if line_buffer.last() == Some(&b'\r') {
-                line_buffer.pop();
-            }
-            if line_buffer.is_empty() {
-                continue;
-            }
+                for (bucket, buf) in bufs.iter_mut().enumerate() {
+                    if !buf.is_empty() {
+                        flush(bucket, buf)?;
+                    }
+                }
+                Ok(())
+            })?;
 
-            let (row, col, value) = match parse_mtx_line(&line_buffer) {
-                Some(parsed) => parsed,
-                None => continue,
-            };
-
-            let (old_cell_idx, old_gene_idx) = if self.cells_as_rows {
-                ((row - 1) as usize, (col - 1) as usize)
-            } else {
-                ((col - 1) as usize, (row - 1) as usize)
-            };
-
-            if !quality.genes_to_keep_set.contains(&old_gene_idx)
-                || !quality.cells_to_keep_set.contains(&old_cell_idx)
-            {
-                continue;
-            }
-
-            let new_cell_idx = quality.cell_old_to_new[&old_cell_idx] as u32;
-            let new_gene_idx = quality.gene_old_to_new[&old_gene_idx] as u32;
-            let bucket = (new_cell_idx as usize) / cells_per_bucket;
-
-            let mut buf = [0u8; BUCKET_RECORD_LEN];
-            buf[0..4].copy_from_slice(&new_cell_idx.to_le_bytes());
-            buf[4..8].copy_from_slice(&new_gene_idx.to_le_bytes());
-            buf[8..12].copy_from_slice(&value.to_le_bytes());
-            bucket_writers[bucket].write_all(&buf)?;
-
-            lines_read += 1;
-            if verbose && lines_read.is_multiple_of(report_interval) {
-                let progress =
-                    (lines_read as f64 / self.header.total_entries as f64 * 100.0) as usize;
-                println!("  Bucketed {}% of entries", progress);
-            }
+        for bucket_file in bucket_files {
+            bucket_file
+                .into_inner()
+                .expect("bucket writer lock is never held across a panic")
+                .flush()?;
         }
-
-        for w in bucket_writers.iter_mut() {
-            w.flush()?;
-        }
-        drop(bucket_writers);
 
         if verbose {
             println!("Bucketing done: {:.2?}", pass1.elapsed());
         }
 
-        let mut writer = CellGeneSparseWriter::new(
-            bin_path,
-            true,
-            n_kept_cells,
-            n_kept_genes,
-            self.qc_params.target_size,
-        )?;
+        let mut writer =
+            CellGeneSparseWriter::new(bin_path, true, n_kept_cells, n_kept_genes, target_size)?;
         let mut lib_size = Vec::with_capacity(n_kept_cells);
         let mut nnz = Vec::with_capacity(n_kept_cells);
 
@@ -692,61 +630,44 @@ impl MtxReader {
 
         for (bucket_idx, temp_path) in temp_paths.iter().enumerate() {
             let bucket_bytes = std::fs::read(temp_path)?;
-            let n_entries = bucket_bytes.len() / BUCKET_RECORD_LEN;
-
-            let mut entries: Vec<(u32, u32, u32)> = Vec::with_capacity(n_entries);
-            for i in 0..n_entries {
-                let off = i * BUCKET_RECORD_LEN;
-                let cell = u32::from_le_bytes([
-                    bucket_bytes[off],
-                    bucket_bytes[off + 1],
-                    bucket_bytes[off + 2],
-                    bucket_bytes[off + 3],
-                ]);
-                let gene = u32::from_le_bytes([
-                    bucket_bytes[off + 4],
-                    bucket_bytes[off + 5],
-                    bucket_bytes[off + 6],
-                    bucket_bytes[off + 7],
-                ]);
-                let value = u32::from_le_bytes([
-                    bucket_bytes[off + 8],
-                    bucket_bytes[off + 9],
-                    bucket_bytes[off + 10],
-                    bucket_bytes[off + 11],
-                ]);
-                entries.push((cell, gene, value));
-            }
+            let mut entries: Vec<(u32, u32, u32)> = bucket_bytes
+                .par_chunks_exact(BUCKET_RECORD_LEN)
+                .map(|r| {
+                    let word = |k: usize| {
+                        u32::from_le_bytes(r[k..k + 4].try_into().expect("4-byte slice"))
+                    };
+                    (word(0), word(4), word(8))
+                })
+                .collect();
             drop(bucket_bytes);
+            entries.par_sort_unstable();
 
-            entries.sort_unstable_by_key(|&(c, g, _)| (c, g));
+            let first_cell = bucket_idx * cells_per_bucket;
+            let end_cell = (first_cell + cells_per_bucket).min(n_kept_cells);
+            let run_starts: Vec<usize> = (first_cell..=end_cell)
+                .map(|cell| entries.partition_point(|e| (e.0 as usize) < cell))
+                .collect();
 
-            let mut i = 0;
-            while i < entries.len() {
-                let cell = entries[i].0;
-                let mut j = i;
-                while j < entries.len() && entries[j].0 == cell {
-                    j += 1;
-                }
+            let built = (first_cell..end_cell)
+                .into_par_iter()
+                .map(|cell| {
+                    let k = cell - first_cell;
+                    let mut row: Vec<(u32, u32)> = entries[run_starts[k]..run_starts[k + 1]]
+                        .iter()
+                        .map(|&(_, g, v)| (g, v))
+                        .collect();
+                    let (nnz_i, lib_i, payload) = compress_cell_row(&mut row, cell, target_size)?;
+                    Ok((nnz_i, lib_i, (cell, payload)))
+                })
+                .collect::<Result<Vec<_>, BixverseErrors>>()?;
 
-                let gene_indices: Vec<u32> = entries[i..j].iter().map(|&(_, g, _)| g).collect();
-                let gene_counts: Vec<u32> = entries[i..j].iter().map(|&(_, _, v)| v).collect();
-                let total_umi: u64 = gene_counts.iter().map(|&x| x as u64).sum();
-
-                lib_size.push(total_umi as usize);
-                nnz.push(gene_counts.len());
-
-                let cell_chunk = CsrCellChunk::from_data(
-                    &gene_counts,
-                    &gene_indices,
-                    cell as usize,
-                    self.qc_params.target_size,
-                    true,
-                );
-                writer.write_cell_chunk(cell_chunk)?;
-
-                i = j;
+            let mut payloads = Vec::with_capacity(built.len());
+            for (nnz_i, lib_i, payload) in built {
+                nnz.push(nnz_i);
+                lib_size.push(lib_i);
+                payloads.push(payload);
             }
+            writer.write_compressed_cell_chunks(&payloads)?;
 
             let _ = std::fs::remove_file(temp_path);
 
@@ -769,31 +690,16 @@ impl MtxReader {
             println!("Writing pass done: {:.2?}", pass2.elapsed());
         }
 
-        let cell_quality = CellQuality {
-            cell_indices: quality.cells_to_keep.to_vec(),
-            gene_indices: quality.genes_to_keep.to_vec(),
-            lib_size,
-            nnz,
-        };
-
         Ok(MtxFinalData {
-            cell_qc: cell_quality,
+            cell_qc: CellQuality {
+                cell_indices: quality.cells_to_keep.to_vec(),
+                gene_indices: quality.genes_to_keep.to_vec(),
+                lib_size,
+                nnz,
+            },
             no_genes: n_kept_genes,
             no_cells: n_kept_cells,
         })
-    }
-
-    /// Helper function to skip the header
-    fn skip_header(reader: &mut BufReader<File>) -> IoResult<()> {
-        let mut line = String::new();
-        loop {
-            line.clear();
-            reader.read_line(&mut line)?;
-            if !line.starts_with('%') {
-                break;
-            }
-        }
-        Ok(())
     }
 
     /// Generate chunk boundaries for parallel processing
@@ -916,6 +822,81 @@ fn parse_mtx_line(line: &[u8]) -> Option<(u32, u32, u32)> {
     }
 
     Some((row, col, val))
+}
+
+/// Call `f(row, col, value)` for every entry line in a byte range of an mtx
+/// file.
+///
+/// ### Params
+///
+/// * `path` - Path to the mtx file
+/// * `start` - First byte of the range, at the start of a line
+/// * `end` - End of the range; the line straddling it is read in full
+/// * `f` - Callback per parsed entry, with the 1-based coordinates as stored
+///
+/// ### Returns
+///
+/// `Ok(())` once the range is read, an I/O error otherwise.
+fn for_each_mtx_entry<F: FnMut(u32, u32, u32)>(
+    path: &Path,
+    start: u64,
+    end: u64,
+    mut f: F,
+) -> IoResult<()> {
+    let mut reader = BufReader::with_capacity(256 * 1024, File::open(path)?);
+    reader.seek(std::io::SeekFrom::Start(start))?;
+
+    let mut line = Vec::with_capacity(64);
+    let mut pos = start;
+    while pos < end {
+        line.clear();
+        let n = reader.read_until(b'\n', &mut line)?;
+        if n == 0 {
+            break;
+        }
+        pos += n as u64;
+
+        let mut len = line.len();
+        while len > 0 && (line[len - 1] == b'\n' || line[len - 1] == b'\r') {
+            len -= 1;
+        }
+        if let Some((row, col, value)) = parse_mtx_line(&line[..len]) {
+            f(row, col, value);
+        }
+    }
+    Ok(())
+}
+
+/// Map a 1-based mtx entry to its output cell and gene.
+///
+/// ### Params
+///
+/// * `row` - 1-based row as stored
+/// * `col` - 1-based column as stored
+/// * `cells_as_rows` - Whether rows are cells
+/// * `cell_map` - Dense old-to-new cell map, see [`dense_index_map`]
+/// * `gene_map` - Dense old-to-new gene map
+///
+/// ### Returns
+///
+/// `Some((cell, gene))` in output indices, `None` if either is dropped or the
+/// coordinate is out of range.
+#[inline]
+fn map_mtx_entry(
+    row: u32,
+    col: u32,
+    cells_as_rows: bool,
+    cell_map: &[u32],
+    gene_map: &[u32],
+) -> Option<(u32, u32)> {
+    let (cell, gene) = if cells_as_rows {
+        (row, col)
+    } else {
+        (col, row)
+    };
+    let cell = *cell_map.get((cell as usize).checked_sub(1)?)?;
+    let gene = *gene_map.get((gene as usize).checked_sub(1)?)?;
+    (cell != INDEX_DROPPED && gene != INDEX_DROPPED).then_some((cell, gene))
 }
 
 ///////////
@@ -1281,32 +1262,34 @@ mod tests {
         assert_eq!(reader.get_header().total_cells, 0);
     }
 
-    /// Defect pin: a kept cell with no kept entries is never written, so
-    /// `lib_size` / `nnz` come back shorter than `cell_indices` and the two
-    /// stop lining up. Both writers agree on the flaw.
+    /// A kept cell with no kept entries is still written, as an empty chunk,
+    /// so `lib_size` / `nnz` line up with `cell_indices` in both writers.
     #[test]
-    fn mtx_kept_cell_without_entries_desyncs_the_quality_vectors() {
-        let mtx = write_mtx("empty_cell", CELLS_AS_ROWS_MTX);
-        let bin = TempPath::new("empty_cell", "bin");
+    fn mtx_kept_cell_without_entries_is_written_empty() {
+        for streaming in [false, true] {
+            let name = format!("empty_cell_{streaming}");
+            let mtx = write_mtx(&name, CELLS_AS_ROWS_MTX);
+            let bin = TempPath::new(&name, "bin");
 
-        // Keep every cell but only gene 0, which cell 1 does not express.
-        let reader = MtxReader::new(mtx.path(), keep_all_qc(), true).expect("reader opens");
-        let mut quality = CellOnFileQuality::new(vec![0, 1, 2], vec![0]);
-        quality.generate_maps_sets();
+            // Keep every cell but only gene 0, which cell 1 does not express.
+            let reader = MtxReader::new(mtx.path(), keep_all_qc(), true).expect("reader opens");
+            let mut quality = CellOnFileQuality::new(vec![0, 1, 2], vec![0]);
+            quality.generate_maps_sets();
 
-        let final_data = reader
-            .process_mtx_and_write_bin(bin.path(), &quality, false)
+            let final_data = if streaming {
+                reader.process_mtx_and_write_bin_streaming(bin.path(), &quality, false)
+            } else {
+                reader.process_mtx_and_write_bin(bin.path(), &quality, false)
+            }
             .expect("conversion");
 
-        assert_eq!(final_data.cell_qc.cell_indices.len(), 3);
-        assert_eq!(final_data.cell_qc.lib_size, vec![5, 2]);
-        assert_eq!(final_data.cell_qc.nnz, vec![1, 1]);
+            assert_eq!(final_data.cell_qc.cell_indices.len(), 3);
+            assert_eq!(final_data.cell_qc.lib_size, vec![5, 0, 2]);
+            assert_eq!(final_data.cell_qc.nnz, vec![1, 0, 1]);
 
-        // Cell 1 has no chunk on disk at all.
-        let store = ParallelSparseReader::new(bin.path()).expect("reader opens");
-        assert!(matches!(
-            store.read_cells_parallel(&[1]),
-            Err(BixverseErrors::ChunkIndexNotFound(1))
-        ));
+            let store = ParallelSparseReader::new(bin.path()).expect("reader opens");
+            let cell = store.read_cells_parallel(&[1]).expect("empty cell is on disk");
+            assert!(cell[0].indices.is_empty());
+        }
     }
 }

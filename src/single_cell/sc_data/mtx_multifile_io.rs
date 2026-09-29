@@ -3,7 +3,6 @@
 //! multi-loader design.
 
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek};
 use std::path::{Path, PathBuf};
@@ -492,12 +491,8 @@ fn write_mtx_file_cells(
     }
 
     let path = PathBuf::from(&task.mtx_path);
-    let kept_set: rustc_hash::FxHashSet<usize> = cells_to_keep.iter().copied().collect();
-    let cell_old_to_new: FxHashMap<usize, usize> = cells_to_keep
-        .iter()
-        .enumerate()
-        .map(|(new, &old)| (old, new))
-        .collect();
+    let cell_map = dense_index_map(cells_to_keep);
+    let gene_map = dense_gene_map_from_options(gene_local_to_final);
 
     // (gene_final_idx, raw_count) per kept cell
     let mut cell_data: Vec<Vec<(u32, u32)>> = vec![Vec::new(); cells_to_keep.len()];
@@ -519,36 +514,15 @@ fn write_mtx_file_cells(
         } else {
             ((col - 1) as usize, (row - 1) as usize)
         };
-        if !kept_set.contains(&old_cell) {
+        let new_cell = cell_map.get(old_cell).copied().unwrap_or(INDEX_DROPPED);
+        let final_gene = gene_map.get(old_gene).copied().unwrap_or(INDEX_DROPPED);
+        if new_cell == INDEX_DROPPED || final_gene == INDEX_DROPPED {
             continue;
         }
-        let Some(&Some(final_gene)) = gene_local_to_final.get(old_gene) else {
-            continue;
-        };
-        let new_cell = cell_old_to_new[&old_cell];
-        cell_data[new_cell].push((final_gene as u32, value));
+        cell_data[new_cell as usize].push((final_gene, value));
     }
 
-    let mut lib_size = Vec::with_capacity(cells_to_keep.len());
-    let mut nnz = Vec::with_capacity(cells_to_keep.len());
-
-    for (i, mut data) in cell_data.into_iter().enumerate() {
-        data.sort_unstable_by_key(|(g, _)| *g);
-        let gene_indices: Vec<u32> = data.iter().map(|(g, _)| *g).collect();
-        let gene_counts: Vec<u32> = data.iter().map(|(_, c)| *c).collect();
-
-        let chunk = CsrCellChunk::from_data(
-            &gene_counts,
-            &gene_indices,
-            cell_offset + i,
-            target_size,
-            true,
-        );
-        let (nnz_i, lib_i) = chunk.get_qc_info();
-        nnz.push(nnz_i);
-        lib_size.push(lib_i);
-        writer.write_cell_chunk(chunk)?;
-    }
+    let (nnz, lib_size) = write_cell_rows(&mut cell_data, cell_offset, target_size, writer)?;
 
     Ok(MtxFileQcResult {
         exp_id: task.exp_id.clone(),
