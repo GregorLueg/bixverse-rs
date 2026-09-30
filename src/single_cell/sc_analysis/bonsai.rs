@@ -316,7 +316,7 @@ where
 
         if verbosity.normal_verbosity() {
             println!(
-                "Sanity chunk {}/{}: kept {} of {} genes ({} kept so far, {:.2?}).",
+                " Sanity chunk {}/{}: kept {} of {} genes ({} kept so far, {:.2?}).",
                 i + 1,
                 n_chunks,
                 post.n_genes,

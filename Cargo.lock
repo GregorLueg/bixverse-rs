@@ -331,9 +331,9 @@ dependencies = [
 
 [[package]]
 name = "bonsai-rs"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8af91fd499ba3fbc7cf04a7cd840dd902232d21133cde68e791014f93ebf7307"
+checksum = "303cc7905a12ba9af7eb8494e8b3b1ffd875fe94810745bf9c2756df85fec376"
 dependencies = [
  "ann-search-rs",
  "cubecl",
@@ -4035,9 +4035,9 @@ dependencies = [
 
 [[package]]
 name = "sanity-sc-rs"
-version = "0.2.1"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3deba97f057368ff283403b21905e01a4bd7a1a4ff3b5ac97fed3abd398acd73"
+checksum = "c1caa85deb6659cc6c6b2f955ce882c5a68b11929cc67278f444c6ac6a67abad"
 dependencies = [
  "cubecl",
  "cubecl-utils-rs",
