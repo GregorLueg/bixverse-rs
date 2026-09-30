@@ -286,3 +286,75 @@ fn test_sanity_bonsai_sc_gpu_returns_a_single_rooted_tree() {
     assert_eq!(res.parent.iter().filter(|&&p| p == NO_NODE).count(), 1);
     assert!(res.x.iter().chain(&res.y).all(|v| v.is_finite()));
 }
+
+/// The simulated counts as an in-memory metacell matrix, cells as rows.
+fn as_metacell_matrix(sim: &Simulation) -> CompressedSparseData2<u32, f32> {
+    let (mut data, mut indices, mut indptr) = (Vec::new(), Vec::new(), vec![0u32]);
+    for g in 0..sim.counts.n_genes() {
+        let (idx, val) = sim.counts.gene(g);
+        indices.extend_from_slice(idx);
+        data.extend_from_slice(val);
+        indptr.push(indices.len() as u32);
+    }
+    CompressedSparseData2::new_csc(
+        &data,
+        &indices,
+        &indptr,
+        None,
+        (sim.counts.n_cells(), sim.counts.n_genes()),
+    )
+}
+
+#[test]
+fn test_metacell_path_matches_the_disk_path() {
+    use bixverse_rs::single_cell::mc_analysis::bonsai_mc::sanity_bonsai_mc;
+
+    let sim = fixture();
+    let stores = build_stores("mc", &sim, 0);
+    let gene_reader = ParallelSparseReader::new(stores.gene.path()).expect("gene reader");
+    let cell_reader = ParallelSparseReader::new(stores.cell.path()).expect("cell reader");
+    let cells: Vec<usize> = (0..sim.counts.n_cells()).collect();
+    let genes: Vec<usize> = (0..sim.counts.n_genes()).collect();
+    let params = BonsaiScParams::default();
+
+    let disk = sanity_bonsai_sc(
+        &gene_reader,
+        &cell_reader,
+        &cells,
+        &genes,
+        &params,
+        Verbosity::Quiet,
+    )
+    .expect("disk");
+
+    let csc = as_metacell_matrix(&sim);
+    // the same counts from memory, in both orientations
+    for counts in [csc.clone(), csc.transform()] {
+        let mc = sanity_bonsai_mc(&counts, &genes, &params, Verbosity::Quiet).expect("mc");
+        assert_eq!(mc.genes_used, disk.genes_used);
+        assert_eq!(mc.parent, disk.parent);
+        assert_eq!(mc.branch, disk.branch);
+        assert_eq!(mc.loglik, disk.loglik);
+    }
+}
+
+#[cfg(feature = "gpu")]
+#[test]
+fn test_metacell_gpu_path_returns_a_single_rooted_tree() {
+    use bixverse_rs::gpu::sc_gpu::sanity_bonsai_gpu::sanity_bonsai_mc_gpu;
+    use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+
+    let sim = fixture();
+    let genes: Vec<usize> = (0..sim.counts.n_genes()).collect();
+    let res = sanity_bonsai_mc_gpu::<WgpuRuntime>(
+        &as_metacell_matrix(&sim),
+        &genes,
+        &BonsaiScParams::default(),
+        WgpuDevice::default(),
+        Verbosity::Quiet,
+    )
+    .expect("bonsai");
+
+    assert_eq!(res.n_leaves, sim.counts.n_cells());
+    assert_eq!(res.parent.iter().filter(|&&p| p == NO_NODE).count(), 1);
+}

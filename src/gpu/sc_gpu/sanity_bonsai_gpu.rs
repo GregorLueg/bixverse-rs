@@ -9,9 +9,11 @@ use cubecl::Runtime;
 use std::time::Instant;
 
 use crate::prelude::*;
+use crate::single_cell::mc_analysis::as_csc;
+use crate::single_cell::mc_analysis::bonsai_mc::{mc_count_chunk, mc_totals};
 use crate::single_cell::sc_analysis::bonsai::{
     BonsaiScParams, BonsaiScResult, SANITY_GENE_CHUNK, chunk_sanity_params, keep_for_bonsai,
-    run_bonsai_sc, stream_sanity,
+    run_bonsai_sc, stream_chunks, stream_sanity,
 };
 use crate::single_cell::sc_data::data_io::SingleCellReading;
 
@@ -73,6 +75,62 @@ where
         },
     )?;
     let t_sanity = started.elapsed().as_secs_f64();
+    let mut res = run_bonsai_sc(post, gene_indices.len(), params, verbosity)?;
+    res.timings.insert(0, ("sanity".to_string(), t_sanity));
+    Ok(res)
+}
+
+/// Metacell counts to a laid-out Bonsai tree, Sanity on the GPU.
+///
+/// The GPU twin of `sanity_bonsai_mc`, with the same caveat as
+/// [`sanity_bonsai_sc_gpu`]: `f32` on the device, so a gene right at a filter
+/// threshold can land on the other side of it.
+///
+/// ### Params
+///
+/// * `counts` - Metacell raw counts, metacells by genes, either orientation
+/// * `gene_indices` - Genes to consider, 0-indexed; only the ones passing
+///   Bonsai's ingest filters are kept
+/// * `params` - Sanity, Bonsai and layout parameters
+/// * `device` - The device to run Sanity on
+/// * `verbosity` - How much to print
+///
+/// ### Returns
+///
+/// The tree over the metacells, in their row order, its layout, and the genes
+/// it was built on.
+pub fn sanity_bonsai_mc_gpu<R: Runtime>(
+    counts: &CompressedSparseData2<u32, f32>,
+    gene_indices: &[usize],
+    params: &BonsaiScParams,
+    device: R::Device,
+    verbosity: Verbosity,
+) -> Result<BonsaiScResult, BixverseErrors> {
+    let started = Instant::now();
+    let client = R::client(&device);
+    let csc = as_csc(counts);
+    let totals = mc_totals(&csc);
+    let sanity_params = chunk_sanity_params(params);
+    let keep = keep_for_bonsai(params);
+
+    let post = stream_chunks(
+        gene_indices,
+        SANITY_GENE_CHUNK,
+        &totals,
+        verbosity,
+        |genes| mc_count_chunk(&csc, genes),
+        |chunk, totals| {
+            Ok(sanity_gpu_select(
+                chunk,
+                totals,
+                Some(sanity_params),
+                &client,
+                &keep,
+            )?)
+        },
+    )?;
+    let t_sanity = started.elapsed().as_secs_f64();
+
     let mut res = run_bonsai_sc(post, gene_indices.len(), params, verbosity)?;
     res.timings.insert(0, ("sanity".to_string(), t_sanity));
     Ok(res)

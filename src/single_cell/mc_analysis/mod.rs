@@ -3,6 +3,8 @@
 //! SCENIC, etc.
 
 pub mod aucell;
+#[cfg(feature = "bonsai")]
+pub mod bonsai_mc;
 pub mod dialogue_mc;
 pub mod hotspot_mc;
 pub mod metacell_density;

@@ -231,21 +231,60 @@ pub fn stream_sanity<G, C, F>(
     gene_indices: &[usize],
     gene_chunk: usize,
     verbosity: Verbosity,
-    mut run_chunk: F,
+    run_chunk: F,
 ) -> Result<SanityOutput<f32>, BixverseErrors>
 where
     G: SingleCellReading,
     C: SingleCellReading,
     F: FnMut(&CountMatrix, &[f64]) -> Result<SanityOutput<f32>, BixverseErrors>,
 {
-    let started = Instant::now();
-    let n_cells = cell_indices.len();
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&c| c as u32).collect();
     let cell_totals: Vec<f64> = cell_reader
         .read_cell_library_sizes(cell_indices)?
         .into_iter()
         .map(|t| t as f64)
         .collect();
+
+    stream_chunks(
+        gene_indices,
+        gene_chunk,
+        &cell_totals,
+        verbosity,
+        |genes| read_count_chunk(gene_reader, genes, &cell_set),
+        run_chunk,
+    )
+}
+
+/// The chunk loop behind [`stream_sanity`], for any source of count chunks.
+///
+/// ### Params
+///
+/// * `gene_indices` - Genes to run, 0-indexed
+/// * `gene_chunk` - Genes per chunk
+/// * `cell_totals` - Total UMI count of every cell (or metacell) over all
+///   genes
+/// * `verbosity` - How much to print
+/// * `read_chunk` - One chunk's counts and the input gene index of each of its
+///   columns, `None` if every gene in it was empty
+/// * `run_chunk` - Sanity over one chunk's counts and the cell totals
+///
+/// ### Returns
+///
+/// As [`stream_sanity`].
+pub(crate) fn stream_chunks<R, F>(
+    gene_indices: &[usize],
+    gene_chunk: usize,
+    cell_totals: &[f64],
+    verbosity: Verbosity,
+    mut read_chunk: R,
+    mut run_chunk: F,
+) -> Result<SanityOutput<f32>, BixverseErrors>
+where
+    R: FnMut(&[usize]) -> Result<Option<(CountMatrix, Vec<usize>)>, BixverseErrors>,
+    F: FnMut(&CountMatrix, &[f64]) -> Result<SanityOutput<f32>, BixverseErrors>,
+{
+    let started = Instant::now();
+    let n_cells = cell_totals.len();
 
     let mut out = SanityOutput {
         log_fold_changes: Vec::new(),
@@ -260,10 +299,10 @@ where
 
     let n_chunks = gene_indices.len().div_ceil(gene_chunk.max(1));
     for (i, genes) in gene_indices.chunks(gene_chunk.max(1)).enumerate() {
-        let Some((counts, chunk_genes)) = read_count_chunk(gene_reader, genes, &cell_set)? else {
+        let Some((counts, chunk_genes)) = read_chunk(genes)? else {
             continue;
         };
-        let post = run_chunk(&counts, &cell_totals)?;
+        let post = run_chunk(&counts, cell_totals)?;
         drop(counts);
 
         out.log_fold_changes.extend(post.log_fold_changes);
