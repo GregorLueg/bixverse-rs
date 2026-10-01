@@ -11,8 +11,8 @@
 //!
 //! Setty, et al., Nat. Biotechnol., 2019.
 
+use crate::utils::gemm::gemm;
 use ann_search_rs::{build_exhaustive_index, query_exhaustive_self};
-use faer::linalg::matmul::matmul;
 use faer::linalg::solvers::Solve;
 use faer::{Accum, Mat, MatRef};
 use rayon::prelude::*;
@@ -629,7 +629,7 @@ pub fn absorption_probabilities(
     let solved = lhs.partial_piv_lu().solve(&rhs);
 
     let mut residual = Mat::<f64>::zeros(n_trans, n_abs);
-    matmul(
+    gemm(
         residual.as_mut(),
         Accum::Replace,
         lhs.as_ref(),
@@ -773,7 +773,7 @@ pub fn project_to_cells(
     let w = MatRef::<f32>::from_row_major_slice(weights, n_waypoints, n_cells);
     let mut out = Mat::<f32>::zeros(n_cells, branch_probs_wp.ncols());
 
-    matmul(
+    gemm(
         out.as_mut(),
         Accum::Replace,
         w.transpose(),

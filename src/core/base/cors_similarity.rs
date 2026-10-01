@@ -1,9 +1,10 @@
 //! Contains correlation, co-variance, distance calculations and similarity
 //! types.
 
+use crate::utils::gemm;
 use ann_search_rs::utils::dist::SimdDistance;
 use faer::Accum;
-use faer::linalg::matmul::triangular::{BlockStructure, matmul as triangular_matmul};
+use faer::linalg::matmul::triangular::BlockStructure;
 use faer::{Mat, MatRef, Scale};
 use rayon::prelude::*;
 use rustc_hash::FxHashSet;
@@ -40,14 +41,12 @@ where
 
     let mut result = Mat::<T>::zeros(n_cols, n_cols);
 
-    triangular_matmul(
-        &mut result,
+    gemm::gram(
+        result.as_mut(),
         BlockStructure::TriangularLower,
         Accum::Replace,
         centered.transpose(),
-        BlockStructure::Rectangular,
-        &centered,
-        BlockStructure::Rectangular,
+        centered.as_ref(),
         alpha,
         faer_parallelism(),
     );
@@ -79,14 +78,12 @@ where
     let n = normalised.ncols();
     let mut result = Mat::<T>::zeros(n, n);
 
-    triangular_matmul(
-        &mut result,
+    gemm::gram(
+        result.as_mut(),
         BlockStructure::TriangularLower,
         Accum::Replace,
         normalised.transpose(),
-        BlockStructure::Rectangular,
-        &normalised,
-        BlockStructure::Rectangular,
+        normalised.as_ref(),
         T::one(),
         faer_parallelism(),
     );
@@ -127,14 +124,12 @@ where
 
     let mut result = Mat::<T>::zeros(n, n);
 
-    triangular_matmul(
-        &mut result,
+    gemm::gram(
+        result.as_mut(),
         BlockStructure::TriangularLower,
         Accum::Replace,
         scaled.transpose(),
-        BlockStructure::Rectangular,
-        &scaled,
-        BlockStructure::Rectangular,
+        scaled.as_ref(),
         alpha,
         faer_parallelism(),
     );
@@ -527,14 +522,12 @@ where
     let ncols = mat.ncols();
 
     let mut gram = Mat::<T>::zeros(ncols, ncols);
-    triangular_matmul(
-        &mut gram,
+    gemm::gram(
+        gram.as_mut(),
         BlockStructure::TriangularLower,
         Accum::Replace,
         mat.transpose(),
-        BlockStructure::Rectangular,
-        mat,
-        BlockStructure::Rectangular,
+        *mat,
         T::one(),
         faer_parallelism(),
     );
@@ -1034,14 +1027,12 @@ where
     // affinity_mat is assumed symmetric, so A * A is symmetric.
     // Only the upper triangle is read below (j > i), no reflection needed.
     let mut dot_products = Mat::<T>::zeros(n, n);
-    triangular_matmul(
-        &mut dot_products,
+    gemm::gram(
+        dot_products.as_mut(),
         BlockStructure::TriangularUpper,
         Accum::Replace,
         affinity_mat,
-        BlockStructure::Rectangular,
         affinity_mat,
-        BlockStructure::Rectangular,
         T::one(),
         faer_parallelism(),
     );

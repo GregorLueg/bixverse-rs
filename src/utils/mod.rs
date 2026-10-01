@@ -2,6 +2,7 @@
 //! other modules. Has assertion macros, structures designed for the heap,
 //! traits and their implementations, R <> Rust interface functions and more.
 
+pub mod gemm;
 pub mod heap_structures;
 pub mod macros;
 pub mod matrix_utils;

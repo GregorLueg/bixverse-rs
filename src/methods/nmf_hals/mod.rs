@@ -1,7 +1,8 @@
 //! Implementation of NMF, dense and sparse paths. This version implements
 //! HALS with random or NNDSVD initialisation.
 
-use faer::linalg::matmul::triangular::{BlockStructure, matmul as triangular_matmul};
+use crate::utils::gemm::gram;
+use faer::linalg::matmul::triangular::BlockStructure;
 use faer::{Accum, Mat, MatRef};
 use num_traits::Float;
 use rand::SeedableRng;
@@ -341,8 +342,7 @@ pub trait NmfInput<F: BixverseFloat> {
 
 /// Gram matrix W^T W.
 ///
-/// Computes the symmetric Gram matrix using a triangular matmul, then mirrors
-/// the lower triangle into the upper half.
+/// Computes the lower triangle via `gram`, then mirrors it into the upper half.
 ///
 /// ### Params
 ///
@@ -350,14 +350,12 @@ pub trait NmfInput<F: BixverseFloat> {
 /// * `out` - Output buffer `k x k`. Overwritten on return.
 pub(crate) fn gram_wt_w<F: BixverseFloat>(w: MatRef<F>, out: &mut Mat<F>) {
     let k = w.ncols();
-    triangular_matmul(
+    gram(
         out.as_mut(),
         BlockStructure::TriangularLower,
         Accum::Replace,
         w.transpose(),
-        BlockStructure::Rectangular,
         w,
-        BlockStructure::Rectangular,
         F::one(),
         faer_parallelism(),
     );
@@ -370,8 +368,7 @@ pub(crate) fn gram_wt_w<F: BixverseFloat>(w: MatRef<F>, out: &mut Mat<F>) {
 
 /// Gram matrix H H^T.
 ///
-/// Computes the symmetric Gram matrix using a triangular matmul, then mirrors
-/// the lower triangle into the upper half.
+/// Computes the lower triangle via `gram`, then mirrors it into the upper half.
 ///
 /// ### Params
 ///
@@ -379,14 +376,12 @@ pub(crate) fn gram_wt_w<F: BixverseFloat>(w: MatRef<F>, out: &mut Mat<F>) {
 /// * `out` - Output buffer `k x k`. Overwritten on return.
 pub(crate) fn gram_h_ht<F: BixverseFloat>(h: MatRef<F>, out: &mut Mat<F>) {
     let k = h.nrows();
-    triangular_matmul(
+    gram(
         out.as_mut(),
         BlockStructure::TriangularLower,
         Accum::Replace,
         h,
-        BlockStructure::Rectangular,
         h.transpose(),
-        BlockStructure::Rectangular,
         F::one(),
         faer_parallelism(),
     );

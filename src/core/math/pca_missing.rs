@@ -8,7 +8,7 @@
 //! identity and the BPCA noise precision from a difference of traces, and both
 //! cancel badly in f32 near convergence.
 
-use faer::linalg::matmul::matmul;
+use crate::utils::gemm as dense;
 use faer::linalg::solvers::DenseSolveCore;
 use faer::{Accum, Mat, MatRef, Side};
 use rand::prelude::*;
@@ -402,7 +402,7 @@ where
 /// The product.
 fn gemm(a: MatRef<f64>, b: MatRef<f64>) -> Mat<f64> {
     let mut out = Mat::zeros(a.nrows(), b.ncols());
-    matmul(out.as_mut(), Accum::Replace, a, b, 1.0, faer_parallelism());
+    dense::gemm(out.as_mut(), Accum::Replace, a, b, 1.0, faer_parallelism());
     out
 }
 

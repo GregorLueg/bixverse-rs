@@ -1,7 +1,7 @@
 //! Sparse matrix formats, sparse operations and helpers to transform different
 //! formats into each other.
 
-use faer::linalg::matmul::matmul;
+use crate::utils::gemm::gemm;
 use faer::{Accum, Mat, MatMut, MatRef};
 use num_traits::ToPrimitive;
 use rand::rngs::StdRng;
@@ -3139,7 +3139,7 @@ fn basis_project(basis: &[f64], n: usize, width: usize, v: &[f64], out: &mut [f6
     let v = MatRef::from_column_major_slice(v, n, 1);
     let mut out = MatMut::from_column_major_slice_mut(out, width, 1);
 
-    matmul(
+    gemm(
         out.as_mut(),
         Accum::Replace,
         b.transpose(),
@@ -3167,7 +3167,7 @@ fn basis_subtract(basis: &[f64], n: usize, width: usize, coeffs: &[f64], v: &mut
     let c = MatRef::from_column_major_slice(coeffs, width, 1);
     let mut v = MatMut::from_column_major_slice_mut(v, n, 1);
 
-    matmul(v.as_mut(), Accum::Add, b, c, -1.0, faer_parallelism());
+    gemm(v.as_mut(), Accum::Add, b, c, -1.0, faer_parallelism());
 }
 
 /// Expand Ritz coefficient columns back into the full space.
@@ -3195,7 +3195,7 @@ fn basis_expand(
     let b = MatRef::from_column_major_slice(&basis[..width * n], n, width);
     let mut out = MatMut::from_column_major_slice_mut(out, n, n_out);
 
-    matmul(
+    gemm(
         out.as_mut(),
         Accum::Replace,
         b,
