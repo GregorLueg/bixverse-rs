@@ -30,11 +30,12 @@ Well over a hundred named methods, plus the shared numerical scaffolding they si
 | `methods` | NMF (bulk, dense HALS, sparse HALS, consensus, refit), ICA, LDA via variational Bayes, sparse multiple CCA, differential correlation, graph diffusion, SNF, RBH, CoReMo, dgRDL, cis-target; bulk DGE via edgeR's quasi-likelihood chain and limma-voom (feature `dge`) |
 | `ml` | k-means, clustering metrics, landmark Gaussian process regression, Matern kernels |
 | `ontology` | GO Elim, Wang and Resnik-style semantic similarity |
-| `single_cell` | I/O for h5ad, 10x h5, mtx, R/Seurat counts and a versioned binary sparse format (single and multi-file, mmap-backed, mergeable); QC, CellSweep ambient removal, HVG, scTransform v2 (per-sample fits, covariate regression, analytic Pearson residuals, corrected counts), PCA, kNN, SNN, MAGIC; doublet detection (Scrublet, scDblFinder, cxds); batch correction (Harmony v1 and v2, BBKNN, fastMNN, Seurat CCA/rPCA anchors); integration metrics (kBET, iLISI/cLISI, silhouette, PC regression); annotation (scType, Symphony); DGE (Mann-Whitney with AUROC, pseudobulk edgeR, NEBULA); analysis (SCENIC with regulon binarisation, AUCell, Hotspot, VISION, DIALOGUE, MELD, miloR, NicheNet, NMF, module scoring, fast k-means/Louvain clustering); meta cells (SEACells, MetaCells2, SuperCell, hdWGCNA, plus density and compactness metrics); trajectories (Palantir, PAGA, diffusion maps, Markov chains, gene trends); multi-modal (WNN, DSB) |
-| `gpu` | Sparse randomised SVD, SpMM and sparse GEMM, skinny GEMM, Gram, CholeskyQR2, correlation, PCA, kNN, NMF and consensus NMF, Harmony, BBKNN, SCENIC, Scrublet, SEACells, NEBULA, fast clustering |
+| `single_cell` | I/O for h5ad, 10x h5, mtx, R/Seurat counts and a versioned binary sparse format (single and multi-file, mmap-backed, mergeable); QC, CellSweep ambient removal, HVG, scTransform v2 (per-sample fits, covariate regression, analytic Pearson residuals, corrected counts), PCA, kNN, SNN, MAGIC; doublet detection (Scrublet, scDblFinder, cxds); batch correction (Harmony v1 and v2, BBKNN, fastMNN, Seurat CCA/rPCA anchors); integration metrics (kBET, iLISI/cLISI, silhouette, PC regression); annotation (scType, Symphony); DGE (Mann-Whitney with AUROC, pseudobulk edgeR, NEBULA); analysis (SCENIC with regulon binarisation, AUCell, Hotspot, VISION, DIALOGUE, MELD, miloR, NicheNet, NMF, module scoring, fast k-means/Louvain clustering); meta cells (SEACells, MetaCells2, SuperCell, hdWGCNA, plus density and compactness metrics); trajectories (Palantir, PAGA, diffusion maps, Markov chains, gene trends); Bonsai trees from Sanity posteriors (feature `bonsai`); multi-modal (WNN, DSB) |
+| `gpu` | Sparse randomised SVD, SpMM and sparse GEMM, skinny GEMM, Gram, CholeskyQR2, correlation, PCA, kNN, NMF and consensus NMF, Harmony, BBKNN, SCENIC, Scrublet, SEACells, NEBULA, Sanity for Bonsai, fast clustering |
 
 Heavy lifting goes through [`faer`](https://github.com/sarah-quinones/faer-rs) for
-dense linear algebra, `rayon` for CPU fan-out, `wide` for SIMD, and
+dense linear algebra (GEMM through Apple Accelerate on macOS), `rayon` for CPU
+fan-out, `wide` for SIMD, and
 [`cubecl`](https://github.com/tracel-ai/cubecl) for GPU kernels. Vector search,
 distance metrics and k-means come from the sister crate
 [`ann-search-rs`](https://crates.io/crates/ann-search-rs); the GPU primitives
@@ -48,15 +49,36 @@ pays for what it uses.
 
 | Flag | What it turns on |
 | --- | --- |
-| *(default)* | Bulk statistics, enrichment, graph, ontology, matrix factorisation |
+| *(always on)* | Bulk statistics, enrichment, graph, ontology, matrix factorisation |
+| `accelerate` | On by default. Dense CPU GEMM through Apple Accelerate on macOS, no effect elsewhere. See below |
 | `single-cell` | The `single_cell` module, HDF5 and mmap I/O, the binary sparse format |
 | `multi-modal` | `single_cell::multi_modal` (WNN, ADT), implies `single-cell` |
 | `dge` | Negative binomial DGE via `edge-rs`: bulk edgeR and limma-voom. Implied by `single-cell`, usable on its own |
 | `hdf5-static` | Builds the bundled HDF5 from source instead of linking an external `libhdf5` |
 | `hdf5-filters` | Compiles the LZF and Blosc filters into HDF5, so h5ad files written with those codecs load |
+| `bonsai` | Bonsai trees over Sanity posteriors via `bonsai-rs`, implies `single-cell` |
 | `gpu` | The `gpu` module via `cubecl` (wgpu and CPU backends) and `cubek` |
 | `large-test` | Slow but asserting tests: GPU parity gates, large-scale numerical checks |
 | `large_scale_diagnostics` | Unasserted diagnostic sweeps that print tables for a human |
+
+### macOS and Apple Accelerate
+
+On macOS the default `accelerate` feature sends every dense CPU GEMM
+(correlations, covariance, perturbation distances, NMF HALS, Hotspot, Markov
+chains, the landmark GP) through Apple's Accelerate framework. It ships with
+every macOS, so there is nothing to install. Turn it off with
+`default-features = false`. End to end on an M1 Max:
+
+| function | f32 | f64 |
+| --- | --- | --- |
+| `column_pairwise_cov`, 50k x 2k | 2.3x | 1.8x |
+| `column_pairwise_cor`, 50k x 2k | 1.9x | 1.7x |
+| dense NMF HALS, 20k x 2k, k = 10 | 1.3x | 1.6x |
+| dense NMF HALS, 20k x 2k, k = 50 | 1.8x | 1.8x |
+
+SVD and eigendecompositions stay on `faer`: Accelerate's LAPACK was slower
+there, down to 0.4x in f64. These are Apple Silicon numbers, don't expect them
+elsewhere.
 
 ## Using it from Rust
 

@@ -1,5 +1,27 @@
 # News
 
+## 0.5.7
+
+### Features
+
+- [Bonsai](https://doi.org/10.1038/s41587-026-03220-2) trees wired in via
+  [`bonsai-rs`](https://crates.io/crates/bonsai-rs) behind the new `bonsai`
+  feature. Raw counts go through Sanity in gene chunks, so all genes fit, not
+  only the HVGs. Works on the binary single cell files and on in-memory
+  metacells, CPU and GPU (Sanity on the device). The result carries per-stage
+  timings.
+- Dense CPU GEMM now goes through Apple Accelerate on macOS via the new default
+  `accelerate` feature. Covers correlations, covariance, perturbation
+  distances, NMF HALS, Hotspot, Markov chains and the landmark GP. On an M1 Max
+  `column_pairwise_cov` at 50k x 2k is 2.3x faster (f32) and dense NMF 1.3x to
+  1.8x. SVD and eigendecompositions stay on `faer`, which beats Accelerate
+  there. No effect on Linux and Windows; turn off with
+  `default-features = false`.
+
+### Fix
+
+- Bumped `hdf5-metno` to 0.15 to work with `ndarray` 0.17.
+
 ## 0.5.6
 
 ### Features
