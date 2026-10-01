@@ -11,7 +11,8 @@
 //!
 //! Mimno et al., Optimizing Semantic Coherence in Topic Models, EMNLP, 2011
 
-use faer::{Accum, Mat, linalg::matmul::matmul};
+use crate::utils::gemm::gemm;
+use faer::{Accum, Mat};
 use rayon::prelude::*;
 
 use crate::prelude::*;
@@ -160,7 +161,7 @@ where
     // copy of the `n_terms x k` matrix would be pure waste: an allocation the
     // size of the input plus two passes over it, to save `k^2` divisions.
     let mut gram = Mat::<F>::zeros(k, k);
-    matmul(
+    gemm(
         gram.as_mut(),
         Accum::Replace,
         topic_region.as_ref().transpose(),

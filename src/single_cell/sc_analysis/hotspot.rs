@@ -2,8 +2,8 @@
 //! various potential graphs in single cell 'omics, see DeTomaso and Yosef,
 //! Cell Syst., 2021
 
-use faer::linalg::matmul::matmul;
-use faer::linalg::matmul::triangular::{BlockStructure, matmul as triangular_matmul};
+use crate::utils::gemm::{gemm, gram};
+use faer::linalg::matmul::triangular::BlockStructure;
 use faer::{Accum, Mat, MatRef};
 use indexmap::IndexSet;
 use rayon::prelude::*;
@@ -1579,14 +1579,12 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
         // LC = C^T @ WY is symmetric: compute the lower triangle, then reflect.
         let start_pairs = Instant::now();
         let mut lc = Mat::<f32>::zeros(n_genes, n_genes);
-        triangular_matmul(
-            &mut lc,
+        gram(
+            lc.as_mut(),
             BlockStructure::TriangularLower,
             Accum::Replace,
             c_mat.transpose(),
-            BlockStructure::Rectangular,
-            &wy_mat,
-            BlockStructure::Rectangular,
+            wy_mat.as_ref(),
             1.0_f32,
             faer_parallelism(),
         );
@@ -1767,14 +1765,12 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
                 if diagonal {
                     // Symmetric block: lower triangle then reflect.
                     let mut block = Mat::<f32>::zeros(li, li);
-                    triangular_matmul(
-                        &mut block,
+                    gram(
+                        block.as_mut(),
                         BlockStructure::TriangularLower,
                         Accum::Replace,
                         ci.transpose(),
-                        BlockStructure::Rectangular,
-                        &wyi,
-                        BlockStructure::Rectangular,
+                        wyi.as_ref(),
                         1.0_f32,
                         faer_parallelism(),
                     );
@@ -1806,11 +1802,11 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
 
                     // Rectangular block C_i^T @ WY_j.
                     let mut block = Mat::<f32>::zeros(li, lj);
-                    matmul(
-                        &mut block,
+                    gemm(
+                        block.as_mut(),
                         Accum::Replace,
                         ci.transpose(),
-                        &wyj,
+                        wyj.as_ref(),
                         1.0_f32,
                         faer_parallelism(),
                     );

@@ -191,6 +191,18 @@ pub enum BixverseErrors {
     #[error("Error from the edge-rs crate: {0}")]
     EdgeRsError(#[from] edge_rs::errors::EdgeErrors),
 
+    // -- bonsai-rs --
+    /// Propagate errors from the bonsai-rs crate
+    #[cfg(feature = "bonsai")]
+    #[error("Error from the bonsai-rs crate: {0}")]
+    BonsaiRsError(#[from] bonsai_rs::errors::BonsaiErrors),
+
+    /// Propagate errors from the sanity-sc-rs crate, as re-exported by
+    /// bonsai-rs
+    #[cfg(feature = "bonsai")]
+    #[error("Error from the sanity-sc-rs crate: {0}")]
+    SanityRsError(#[from] bonsai_rs::sanity_sc_rs::errors::SanityErrors),
+
     /// More than one coefficient was handed to the limma route.
     ///
     /// `topTable` tabulates a single column. Testing several coefficients at

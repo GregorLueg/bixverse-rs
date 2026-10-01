@@ -28,6 +28,7 @@ Feature flags gate large chunks of the crate. Match your `cargo` invocations to 
 - `single-cell`: enables the `single_cell` module and pulls in `hdf5`, `ndarray`, `memmap2`, `lz4_flex`, `bincode`, `indexmap`, `half`
 - `multi-modal`: enables `single_cell::multi_modal` (implies `single-cell`)
 - `dge`: enables the negative binomial differential expression surface and pulls in `edge-rs`. Implied by `single-cell`, but usable on its own for the bulk half (`methods::dge_bulk`)
+- `bonsai`: implies `single-cell` and pulls in `bonsai-rs` with its `sanity` feature. Counts to Sanity posteriors to a Bonsai tree in `single_cell::sc_analysis::bonsai` (disk) and `single_cell::mc_analysis::bonsai_mc` (in-memory metacells), both through the same chunk loop `stream_chunks`; with `gpu`, also `gpu::sc_gpu::sanity_bonsai_gpu`. Sanity is only ever named through `bonsai_rs::sanity_sc_rs`, never as a direct dependency, so the `SanityOutput` type always matches `from_sanity_output`
 - `gpu`: enables the `gpu` module, `cubecl` (wgpu + cpu backends), `cubecl-utils-rs`, `cubek`, `half` and the `gpu` feature of `ann-search-rs` (its GPU kNN indices)
 - `large-test`: slow but asserting tests. The GPU parity gates and the large-scale numerical checks. These can fail, so they are worth running on a schedule. No CI job enables it yet
 - `large_scale_diagnostics`: development-only. Gates the unasserted diagnostic sweeps that print tables for a human to read. They cannot fail, so running them in CI buys nothing
@@ -114,7 +115,7 @@ A params struct owned by an upstream crate cannot take an inherent impl, so it g
 ## Testing layout
 
 - Unit tests live inline (`#[cfg(test)] mod tests`) in each module file
-- Integration tests in `tests/`, each gated by a file-level `#![cfg(...)]`: `meta_cells2.rs` (single-cell), `gene_trends.rs` (single-cell), `nebula_sc.rs` (single-cell), `pseudobulk_dge.rs` (single-cell), `edger_bulk.rs` (dge), `scenic_gpu.rs` (single-cell + gpu), `seacells_gpu.rs` (single-cell + gpu + large-test), `gpu_corr.rs` (gpu + large-test), `large_scale_diagnostics.rs` (single-cell + large-test, the file name predates the flag split)
+- Integration tests in `tests/`, each gated by a file-level `#![cfg(...)]`: `meta_cells2.rs` (single-cell), `gene_trends.rs` (single-cell), `nebula_sc.rs` (single-cell), `pseudobulk_dge.rs` (single-cell), `edger_bulk.rs` (dge), `bonsai_sc.rs` (bonsai, plus one gpu test), `scenic_gpu.rs` (single-cell + gpu), `seacells_gpu.rs` (single-cell + gpu + large-test), `gpu_corr.rs` (gpu + large-test), `large_scale_diagnostics.rs` (single-cell + large-test, the file name predates the flag split)
 - Parity fixtures are generated, never recalled. `dev/gen_edger_fixtures.R` writes `tests/edger_fixtures/mod.rs` against edgeR 4.8.2; `dev/gen_blitzgsea_fixtures.py` does the same for `tests/blitzgsea_fixtures/`. Both rebuild their input from a seeded LCG on each side so no float data crosses as text
 - CI matrix: Ubuntu / macOS / Windows for CPU tests; Ubuntu / macOS for GPU tests (Linux uses Vulkan via `WGPU_BACKEND=vulkan`)
 

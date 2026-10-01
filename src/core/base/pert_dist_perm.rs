@@ -2,8 +2,9 @@
 //!
 //! See Peidli et al., Nat Methods, 2024.
 
+use crate::utils::gemm;
 use faer::Accum;
-use faer::linalg::matmul::triangular::{BlockStructure, matmul as triangular_matmul};
+use faer::linalg::matmul::triangular::BlockStructure;
 use faer::{Mat, MatRef};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -126,14 +127,12 @@ fn pooled_distance_matrix<T: BixverseFloat>(pooled: MatRef<T>, dist: PertDistanc
     let n = pooled.nrows();
 
     let mut gram = Mat::<T>::zeros(n, n);
-    triangular_matmul(
-        &mut gram,
+    gemm::gram(
+        gram.as_mut(),
         BlockStructure::TriangularLower,
         Accum::Replace,
         pooled,
-        BlockStructure::Rectangular,
         pooled.transpose(),
-        BlockStructure::Rectangular,
         T::one(),
         faer_parallelism(),
     );

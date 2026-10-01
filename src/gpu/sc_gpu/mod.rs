@@ -7,6 +7,8 @@ pub mod kernels;
 pub mod knn_gpu;
 pub mod nebula_gpu;
 pub mod pca_gpu;
+#[cfg(feature = "bonsai")]
+pub mod sanity_bonsai_gpu;
 pub mod scenic_gpu;
 pub mod scrublet_gpu;
 pub mod seacells_gpu;

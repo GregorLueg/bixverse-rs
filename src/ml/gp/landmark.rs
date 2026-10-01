@@ -37,8 +37,8 @@
 //! Quiñonero-Candela and Rasmussen, JMLR, 2005 (subset of regressors).
 //! Otto, Zhou, et al., bioRxiv, 2023 (mellon).
 
-use faer::linalg::matmul::matmul;
-use faer::linalg::matmul::triangular::{BlockStructure, matmul as triangular_matmul};
+use crate::utils::gemm::{gemm, gram};
+use faer::linalg::matmul::triangular::BlockStructure;
 use faer::linalg::triangular_solve::{
     solve_lower_triangular_in_place, solve_upper_triangular_in_place,
 };
@@ -428,20 +428,18 @@ where
                 }
 
                 // G += A A^T, lower triangle only; the upper is mirrored later.
-                triangular_matmul(
+                gram(
                     g_local.as_mut(),
                     BlockStructure::TriangularLower,
                     Accum::Add,
                     a.as_ref().subcols(0, c),
-                    BlockStructure::Rectangular,
                     a.as_ref().subcols(0, c).transpose(),
-                    BlockStructure::Rectangular,
                     1.0_f64,
                     Par::Seq,
                 );
 
                 // P += A r
-                matmul(
+                gemm(
                     p_local.as_mut(),
                     Accum::Add,
                     a.as_ref().subcols(0, c),
@@ -593,7 +591,7 @@ impl LandmarkGpFit {
         T: BixverseFloat,
     {
         let mut out = Mat::<f64>::zeros(k_cross.nrows(), self.weights.ncols());
-        matmul(
+        gemm(
             out.as_mut(),
             Accum::Replace,
             k_cross,

@@ -1,7 +1,7 @@
 //! Dense backend for NMF. Borrows V as a faer `MatRef` and routes both data
-//! products through `faer::linalg::matmul`.
+//! products through `utils::gemm::gemm`.
 
-use faer::linalg::matmul::matmul;
+use crate::utils::gemm::gemm;
 use faer::{Accum, Mat, MatRef};
 
 use super::NmfInput;
@@ -72,7 +72,7 @@ impl<F: BixverseFloat> NmfInput<F> for DenseInput<'_, F> {
     }
 
     fn wt_v(&self, w: MatRef<F>, out: &mut Mat<F>) {
-        matmul(
+        gemm(
             out.as_mut(),
             Accum::Replace,
             w.transpose(),
@@ -83,7 +83,7 @@ impl<F: BixverseFloat> NmfInput<F> for DenseInput<'_, F> {
     }
 
     fn v_ht(&self, h: MatRef<F>, out: &mut Mat<F>) {
-        matmul(
+        gemm(
             out.as_mut(),
             Accum::Replace,
             self.v,

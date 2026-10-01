@@ -3,8 +3,9 @@
 //! E-distance compares two cell distributions in an embedding via
 //! `2 * mean(d(X, Y)) - mean(d(X, X')) - mean(d(Y, Y'))`.
 
+use crate::utils::gemm;
 use faer::Accum;
-use faer::linalg::matmul::triangular::{BlockStructure, matmul as triangular_matmul};
+use faer::linalg::matmul::triangular::BlockStructure;
 use faer::{Mat, MatRef};
 use rayon::prelude::*;
 
@@ -100,14 +101,12 @@ where
 
     // X * X^T, lower triangle: diagonal is ||x_i||^2, sub-diagonal is <x_i, x_j>.
     let mut gram = Mat::<T>::zeros(n, n);
-    triangular_matmul(
-        &mut gram,
+    gemm::gram(
+        gram.as_mut(),
         BlockStructure::TriangularLower,
         Accum::Replace,
         x,
-        BlockStructure::Rectangular,
         x.transpose(),
-        BlockStructure::Rectangular,
         T::one(),
         faer_parallelism(),
     );
