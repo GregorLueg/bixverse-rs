@@ -76,10 +76,6 @@ every macOS, so there is nothing to install. Turn it off with
 | dense NMF HALS, 20k x 2k, k = 10 | 1.3x | 1.6x |
 | dense NMF HALS, 20k x 2k, k = 50 | 1.8x | 1.8x |
 
-SVD and eigendecompositions stay on `faer`: Accelerate's LAPACK was slower
-there, down to 0.4x in f64. These are Apple Silicon numbers, don't expect them
-elsewhere.
-
 ## Using it from Rust
 
 ```toml
