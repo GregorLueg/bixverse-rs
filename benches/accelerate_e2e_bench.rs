@@ -43,7 +43,9 @@ const NMF_ITERS: usize = 50;
 /// Column-major `nrows x ncols` matrix.
 fn random_mat<T: BixverseFloat>(nrows: usize, ncols: usize, seed: u64) -> Mat<T> {
     let mut rng = StdRng::seed_from_u64(seed);
-    Mat::from_fn(nrows, ncols, |_, _| T::from_f64(rng.random::<f64>()).unwrap())
+    Mat::from_fn(nrows, ncols, |_, _| {
+        T::from_f64(rng.random::<f64>()).unwrap()
+    })
 }
 
 /// Median wall clock of `REPS` runs after one warm-up
@@ -113,8 +115,16 @@ fn bench_nmf<T: BixverseFloat + Send + Sync>(n: usize, m: usize, k: usize, tag: 
 
 fn main() {
     let large = std::env::var("ACCEL_BENCH_LARGE").is_ok();
-    let (cn, cp) = if large { (50_000, 2_000) } else { (5_000, 1_000) };
-    let (nn, nm) = if large { (20_000, 2_000) } else { (5_000, 1_000) };
+    let (cn, cp) = if large {
+        (50_000, 2_000)
+    } else {
+        (5_000, 1_000)
+    };
+    let (nn, nm) = if large {
+        (20_000, 2_000)
+    } else {
+        (5_000, 1_000)
+    };
 
     bench_cor::<f32>(cn, cp, "f32");
     bench_cor::<f64>(cn, cp, "f64");

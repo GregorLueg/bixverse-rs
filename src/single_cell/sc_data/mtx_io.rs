@@ -1288,7 +1288,9 @@ mod tests {
             assert_eq!(final_data.cell_qc.nnz, vec![1, 0, 1]);
 
             let store = ParallelSparseReader::new(bin.path()).expect("reader opens");
-            let cell = store.read_cells_parallel(&[1]).expect("empty cell is on disk");
+            let cell = store
+                .read_cells_parallel(&[1])
+                .expect("empty cell is on disk");
             assert!(cell[0].indices.is_empty());
         }
     }

@@ -322,7 +322,12 @@ fn bench_cov<T: Syrk>(n: usize, p: usize, tag: &str) {
     });
     let rel = max_rel_diff(ref_out.as_ref(), syrk_out.as_ref(), true);
     report(&format!("cov syrk  {tag} {n}x{p} (vs tri)"), tf, ts, rel);
-    report(&format!("cov syrk  {tag} {n}x{p} (vs accel gemm)"), ta, ts, rel);
+    report(
+        &format!("cov syrk  {tag} {n}x{p} (vs accel gemm)"),
+        ta,
+        ts,
+        rel,
+    );
 }
 
 /// `Par::Seq` tile GEMMs under rayon: `X_tile C^T`
