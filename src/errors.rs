@@ -1072,35 +1072,65 @@ pub enum BixverseErrors {
     MELDOnlyOneGroup,
 
     // -- DGE --
-    /// The reference group holds no cells.
+    /// Fewer than two cell groups, so there is nothing to compare.
     #[cfg(feature = "single-cell")]
-    #[error("DGE: the reference group is empty")]
-    DgeEmptyReferenceGroup,
+    #[error("DGE: at least two cell groups are required, got {n_groups}")]
+    DgeTooFewGroups {
+        /// Number of groups supplied
+        n_groups: usize,
+    },
 
-    /// No comparison group was supplied at all.
+    /// More cell groups than the `u16` group labels can hold.
     #[cfg(feature = "single-cell")]
-    #[error("DGE: at least one comparison group is required")]
-    DgeNoComparisonGroups,
+    #[error("DGE: {n_groups} cell groups exceed the maximum of {max}")]
+    DgeTooManyGroups {
+        /// Number of groups supplied
+        n_groups: usize,
+        /// Largest supported number of groups
+        max: usize,
+    },
 
-    /// One of the comparison groups holds no cells.
+    /// One of the cell groups holds no cells.
     #[cfg(feature = "single-cell")]
-    #[error("DGE: comparison group {group} is empty")]
-    DgeEmptyComparisonGroup {
-        /// Index of the offending comparison group
+    #[error("DGE: cell group {group} is empty")]
+    DgeEmptyGroup {
+        /// Index of the offending group
         group: usize,
     },
 
-    /// A cell appears both in the reference and in a comparison group.
+    /// A cell index beyond the end of the store.
+    #[cfg(feature = "single-cell")]
+    #[error("DGE: cell {cell} is out of range for a store of {n_cells} cells")]
+    DgeCellOutOfRange {
+        /// The offending cell index
+        cell: usize,
+        /// Total cells in the store
+        n_cells: usize,
+    },
+
+    /// A cell appears in two groups, or twice in one.
     ///
     /// Silently biases every AUROC toward 0.5 rather than failing, so it is
     /// worth rejecting outright.
     #[cfg(feature = "single-cell")]
-    #[error("DGE: cell {cell} appears in both the reference and comparison group {group}")]
+    #[error("DGE: cell {cell} appears in cell group {first} and again in group {second}")]
     DgeOverlappingGroups {
-        /// Index of the offending comparison group
-        group: usize,
-        /// The cell shared with the reference group
+        /// The cell listed more than once
         cell: usize,
+        /// Group the cell was first seen in
+        first: usize,
+        /// Group the cell was seen in again
+        second: usize,
+    },
+
+    /// A reference arm index beyond the number of groups.
+    #[cfg(feature = "single-cell")]
+    #[error("DGE: reference {reference} is out of range for {n_groups} cell groups")]
+    DgeReferenceOutOfRange {
+        /// The offending reference index
+        reference: usize,
+        /// Number of groups supplied
+        n_groups: usize,
     },
 
     // -- NEBULA --

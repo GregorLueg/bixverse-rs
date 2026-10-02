@@ -3,18 +3,18 @@
 //! 2017.
 //!
 //! The Mann-Whitney path also reports the AUROC, which is the same U statistic
-//! divided by `n1 * n2`, plus a one-vs-many entry point for marker discovery:
-//! one reference group against each of several rival groups, with per-gene
-//! summaries across the comparisons in the style of scran's `scoreMarkers`.
+//! divided by `n1 * n2`. The two-group test reads cells. The multi-group entry
+//! points, one-vs-rest for every group and one-vs-many marker discovery with
+//! scran `scoreMarkers` style summaries, stream the gene store once instead
+//! and get every comparison out of one sort per gene.
 
 use rayon::prelude::*;
-use rustc_hash::FxHashSet;
 use std::time::Instant;
 
 use crate::core::math::stats::{p_adjust_fdr, z_scores_to_pval};
 use crate::prelude::*;
 use crate::single_cell::sc_analysis::fast_ranking::{
-    append_cell_chunks, csr_rank_sum_stats_two_groups, rank_csr_chunk_vec,
+    GeneGroupStats, NO_GROUP, append_cell_chunks, csr_rank_sum_stats_two_groups, rank_csr_chunk_vec,
 };
 
 /////////
@@ -122,20 +122,24 @@ pub struct DgeAurocMultiRes {
 ///
 /// ### Returns
 ///
-/// A tuple of `(average expression, proportion of cells expressing gene)`
-fn calculate_avg_exp_prop(cells: &[CsrCellChunk], num_genes: usize) -> (Vec<f32>, Vec<f32>) {
-    let mut sum_exp = vec![0.0f32; num_genes];
+/// A tuple of `(average expression, proportion of cells expressing gene)`.
+/// The averages are `f64` so they match the gene-wise scans bit for bit.
+fn calculate_avg_exp_prop(cells: &[CsrCellChunk], num_genes: usize) -> (Vec<f64>, Vec<f32>) {
+    let mut sum_exp = vec![0.0f64; num_genes];
     let mut count_exp = vec![0usize; num_genes];
 
     for cell in cells {
         for (&gene_idx, &norm_val) in cell.indices.iter().zip(cell.data_norm.iter()) {
-            sum_exp[gene_idx as usize] += norm_val.to_f32();
+            sum_exp[gene_idx as usize] += norm_val.to_f32() as f64;
             count_exp[gene_idx as usize] += 1;
         }
     }
 
     let total_cells = cells.len() as f32;
-    let avg_exp: Vec<f32> = sum_exp.iter().map(|&sum| sum / total_cells).collect();
+    let avg_exp: Vec<f64> = sum_exp
+        .iter()
+        .map(|&sum| sum / cells.len() as f64)
+        .collect();
     let prop_exp: Vec<f32> = count_exp
         .iter()
         .map(|&count| count as f32 / total_cells)
@@ -146,8 +150,9 @@ fn calculate_avg_exp_prop(cells: &[CsrCellChunk], num_genes: usize) -> (Vec<f32>
 
 /// Calculates the AUROC and the tie-corrected Mann Whitney Z-score
 ///
-/// Both fall out of the same U statistic, so they share one scan of the
-/// pre-reduced rank sums produced by `csr_rank_sum_stats_two_groups`.
+/// Both fall out of the same U statistic. The two-group path derives it from
+/// the rank sums of `csr_rank_sum_stats_two_groups`, the gene-wise scans read
+/// it straight off [GeneGroupStats].
 ///
 /// The variance carries the standard tie correction
 /// `var = (n1 n2 / 12) * ((n + 1) - S / (n (n - 1)))` with `S = sum(t^3 - t)`.
@@ -166,7 +171,7 @@ fn calculate_avg_exp_prop(cells: &[CsrCellChunk], num_genes: usize) -> (Vec<f32>
 ///
 /// ### Params
 ///
-/// * `rank_sum_1` - Sum of group 1's midranks over the pooled ranking.
+/// * `u1` - Mann-Whitney U of group 1, ties counting a half.
 /// * `tie_term` - `sum(t^3 - t)` over the gene's tie groups.
 /// * `n1` - Number of cells in group 1.
 /// * `n2` - Number of cells in group 2.
@@ -176,7 +181,7 @@ fn calculate_avg_exp_prop(cells: &[CsrCellChunk], num_genes: usize) -> (Vec<f32>
 /// A tuple of `(AUROC of group 1, tie-corrected Z-score)`. A degenerate gene,
 /// i.e. one constant across both groups, yields `(0.5, 0.0)` rather than a NaN;
 /// an empty group yields `(NaN, 0.0)`.
-fn mann_whitney_stats(rank_sum_1: f64, tie_term: f64, n1: usize, n2: usize) -> (f32, f64) {
+fn mann_whitney_stats(u1: f64, tie_term: f64, n1: usize, n2: usize) -> (f32, f64) {
     if n1 == 0 || n2 == 0 {
         return (f32::NAN, 0.0);
     }
@@ -185,7 +190,6 @@ fn mann_whitney_stats(rank_sum_1: f64, tie_term: f64, n1: usize, n2: usize) -> (
     let n2 = n2 as f64;
     let n = n1 + n2;
 
-    let u1 = rank_sum_1 - n1 * (n1 + 1.0) / 2.0;
     let auroc = (u1 / (n1 * n2)) as f32;
 
     if n < 2.0 {
@@ -306,12 +310,13 @@ pub fn calculate_dge_grps_mann_whitney<S: SingleCellReading>(
         .par_iter()
         .enumerate()
         .map(|(new_idx, &original_idx)| {
-            let log_fc = avg_exp_1[original_idx] - avg_exp_2[original_idx];
+            let log_fc = (avg_exp_1[original_idx] - avg_exp_2[original_idx]) as f32;
             let prop1 = prop_1[original_idx];
             let prop2 = prop_2[original_idx];
 
             let (rank_sum, tie_term) = rank_stats[new_idx];
-            let (auroc, z) = mann_whitney_stats(rank_sum, tie_term, n1, n2);
+            let u1 = rank_sum - (n1 * (n1 + 1)) as f64 / 2.0;
+            let (auroc, z) = mann_whitney_stats(u1, tie_term, n1, n2);
 
             (log_fc, auroc, prop1, prop2, z)
         })
@@ -483,250 +488,52 @@ fn simes_combine(p_vals: &mut [f64]) -> f64 {
     combined.min(1.0)
 }
 
-/// Reject empty, overlapping or missing cell groups
+/// Assemble one reference's [DgeAurocMultiRes] from its per-comparison columns
 ///
-/// Overlap matters more than it looks: a cell present on both sides of a
-/// comparison contributes to both rank sums and quietly drags the AUROC toward
-/// 0.5 instead of failing.
-///
-/// ### Params
-///
-/// * `ref_indices` - The cell indices of the reference group.
-/// * `other_indices` - The cell indices of each comparison group.
-///
-/// ### Returns
-///
-/// `Ok(())` if the grouping is usable.
-fn validate_one_vs_many(
-    ref_indices: &[usize],
-    other_indices: &[Vec<usize>],
-) -> Result<(), BixverseErrors> {
-    if ref_indices.is_empty() {
-        return Err(BixverseErrors::DgeEmptyReferenceGroup);
-    }
-    if other_indices.is_empty() {
-        return Err(BixverseErrors::DgeNoComparisonGroups);
-    }
-
-    let ref_set: FxHashSet<usize> = ref_indices.iter().copied().collect();
-
-    for (group, indices) in other_indices.iter().enumerate() {
-        if indices.is_empty() {
-            return Err(BixverseErrors::DgeEmptyComparisonGroup { group });
-        }
-        if let Some(&cell) = indices.iter().find(|c| ref_set.contains(c)) {
-            return Err(BixverseErrors::DgeOverlappingGroups { group, cell });
-        }
-    }
-
-    Ok(())
-}
-
-//////////
-// Main //
-//////////
-
-/// Get one-vs-many AUROC-based differential expression
-///
-/// Scores one reference group against each comparison group separately and
-/// summarises the results per gene. This is the marker question: a gene that
-/// marks the reference has to hold up against every rival, which a single
-/// pooled test cannot tell you because it is dominated by whichever rival
-/// contributes the most cells.
-///
-/// AUROC rather than the p-value is what the summaries rank on. Group sizes
-/// vary widely in practice, and p-values scale with `sqrt(n1 * n2)`, so a
-/// large rival would otherwise crowd out a small one regardless of effect size.
-///
-/// Genes are filtered once, globally: a gene is kept if it clears
-/// `min_proportion` in the reference or in any comparison group. Because each
-/// gene is ranked independently of the others, the per-comparison statistics
-/// are identical to what a per-pair filter would give; the only difference is
-/// that every comparison's FDR is computed over the same gene set, which is
-/// what makes the cross-comparison summaries well defined.
-///
-/// Memory is bounded by the reference group plus one comparison group at a
-/// time. The comparison groups are read twice, once for the proportions that
-/// decide the gene filter and once for the ranking.
+/// Computes the p-values and FDRs per comparison and the per-gene summaries
+/// across comparisons.
 ///
 /// ### Params
 ///
-/// * `reader` - Reader over the cell-based count store.
-/// * `ref_indices` - The cell indices of the reference group.
-/// * `other_indices` - The cell indices of each comparison group.
-/// * `min_proportion` - The minimum proportion that a gene needs to be
-///   expressed in at least one of the groups.
-/// * `alternative` - The test alternative. One of `"twosided"`, `"greater"`,
-///   or `"less"`, with `"greater"` being the natural choice for markers.
-/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
-///   verbosity.
+/// * `auroc` - AUROC per comparison, each over the kept genes.
+/// * `lfc` - LFC per comparison.
+/// * `z_scores` - Tie-corrected Z-scores per comparison.
+/// * `prop_ref` - Proportion of reference cells expressing each kept gene.
+/// * `prop_other` - Proportion per comparison group.
+/// * `alternative` - The test alternative.
+/// * `genes_to_keep` - The gene mask over the full gene universe.
 ///
 /// ### Returns
 ///
-/// The [DgeAurocMultiRes] structure with per-comparison and summary results.
-///
-/// ### References
-///
-/// Soneson and Robinson, Nat Methods, 2018 (AUROC for scRNA-seq DGE);
-/// Lun, et al., F1000Research, 2016 (scran `scoreMarkers` summaries)
-pub fn calculate_dge_one_vs_many_auroc<S: SingleCellReading>(
-    reader: &S,
-    ref_indices: &[usize],
-    other_indices: &[Vec<usize>],
-    min_proportion: f32,
+/// The finished [DgeAurocMultiRes].
+fn build_auroc_multi_res(
+    auroc: Vec<Vec<f32>>,
+    lfc: Vec<Vec<f32>>,
+    z_scores: Vec<Vec<f64>>,
+    prop_ref: Vec<f32>,
+    prop_other: Vec<Vec<f32>>,
     alternative: &str,
-    verbose: usize,
-) -> Result<DgeAurocMultiRes, BixverseErrors> {
-    let verbosity = parse_verbosity_level(verbose);
-    validate_one_vs_many(ref_indices, other_indices)?;
+    genes_to_keep: Vec<bool>,
+) -> DgeAurocMultiRes {
+    let n_comparisons = auroc.len();
+    let no_genes = prop_ref.len();
 
-    let no_genes = reader.get_header().total_genes;
-    let n_comparisons = other_indices.len();
-
-    // -- Pass 1: proportions and average expression, one group at a time --
-
-    let start_pass_1 = Instant::now();
-
-    let mut avg_exp_other: Vec<Vec<f32>> = Vec::with_capacity(n_comparisons);
-    let mut prop_other: Vec<Vec<f32>> = Vec::with_capacity(n_comparisons);
-
-    for indices in other_indices {
-        let chunks = reader.read_cells_parallel(indices)?;
-        let (avg_exp, prop) = calculate_avg_exp_prop(&chunks, no_genes);
-        avg_exp_other.push(avg_exp);
-        prop_other.push(prop);
+    if no_genes == 0 {
+        return empty_auroc_multi_res(n_comparisons, genes_to_keep);
     }
 
-    // Read last so its chunks are the ones we hold on to
-    let mut ref_chunks = reader.read_cells_parallel(ref_indices)?;
-    let (avg_exp_ref, prop_ref_full) = calculate_avg_exp_prop(&ref_chunks, no_genes);
-
-    if verbosity.normal_verbosity() {
-        println!("Loaded in data: {:.2?}", start_pass_1.elapsed());
-    }
-
-    // -- Shared gene filter --
-
-    let genes_to_keep: Vec<bool> = (0..no_genes)
-        .map(|g| {
-            prop_ref_full[g] >= min_proportion
-                || prop_other.iter().any(|prop| prop[g] >= min_proportion)
-        })
-        .collect();
-
-    let genes_kept: Vec<usize> = genes_to_keep
+    let p_vals: Vec<Vec<f64>> = z_scores
         .iter()
-        .enumerate()
-        .filter_map(|(i, &keep)| if keep { Some(i) } else { None })
+        .map(|z| z_scores_to_pval(z, alternative))
         .collect();
-    let no_genes_new = genes_kept.len();
-
-    if no_genes_new == 0 {
-        return Ok(empty_auroc_multi_res(n_comparisons, genes_to_keep));
-    }
-
-    ref_chunks
-        .par_iter_mut()
-        .for_each(|cell| cell.filter_genes(&genes_to_keep));
-
-    let n_ref = ref_chunks.len();
-
-    // Flatten the reference once; each comparison truncates back to this
-    // prefix rather than re-copying it
-    let mut indptr = vec![0_usize];
-    let mut indices: Vec<u32> = Vec::new();
-    let mut data: Vec<F16> = Vec::new();
-    append_cell_chunks(&ref_chunks, &mut indptr, &mut indices, &mut data);
-    drop(ref_chunks);
-
-    let ref_rows = indptr.len();
-    let ref_nnz = indices.len();
-
-    // -- Pass 2: one comparison at a time --
-
-    let mut auroc: Vec<Vec<f32>> = Vec::with_capacity(n_comparisons);
-    let mut lfc: Vec<Vec<f32>> = Vec::with_capacity(n_comparisons);
-    let mut z_scores: Vec<Vec<f64>> = Vec::with_capacity(n_comparisons);
-    let mut p_vals: Vec<Vec<f64>> = Vec::with_capacity(n_comparisons);
-    let mut fdr: Vec<Vec<f64>> = Vec::with_capacity(n_comparisons);
-
-    for (group, group_indices) in other_indices.iter().enumerate() {
-        let start_group = Instant::now();
-
-        let mut chunks = reader.read_cells_parallel(group_indices)?;
-        chunks
-            .par_iter_mut()
-            .for_each(|cell| cell.filter_genes(&genes_to_keep));
-        let n_other = chunks.len();
-
-        indptr.truncate(ref_rows);
-        indices.truncate(ref_nnz);
-        data.truncate(ref_nnz);
-        append_cell_chunks(&chunks, &mut indptr, &mut indices, &mut data);
-        drop(chunks);
-
-        let rank_stats = csr_rank_sum_stats_two_groups(
-            &indptr,
-            &indices,
-            &data,
-            n_ref,
-            n_ref + n_other,
-            no_genes_new,
-        );
-
-        let res: Vec<(f32, f32, f64)> = genes_kept
-            .par_iter()
-            .enumerate()
-            .map(|(new_idx, &original_idx)| {
-                let log_fc = avg_exp_ref[original_idx] - avg_exp_other[group][original_idx];
-                let (rank_sum, tie_term) = rank_stats[new_idx];
-                let (auroc_g, z) = mann_whitney_stats(rank_sum, tie_term, n_ref, n_other);
-
-                (auroc_g, log_fc, z)
-            })
-            .collect();
-
-        let mut auroc_g = Vec::with_capacity(no_genes_new);
-        let mut lfc_g = Vec::with_capacity(no_genes_new);
-        let mut z_g = Vec::with_capacity(no_genes_new);
-
-        for (auroc_i, lfc_i, z_i) in res {
-            auroc_g.push(auroc_i);
-            lfc_g.push(lfc_i);
-            z_g.push(z_i);
-        }
-
-        let p_g = z_scores_to_pval(&z_g, alternative);
-        let fdr_g = p_adjust_fdr(&p_g);
-
-        auroc.push(auroc_g);
-        lfc.push(lfc_g);
-        z_scores.push(z_g);
-        p_vals.push(p_g);
-        fdr.push(fdr_g);
-
-        if verbosity.normal_verbosity() {
-            let pct_complete = ((group + 1) as f32 / n_comparisons as f32) * 100.0;
-            println!(
-                "Processed comparison {} out of {} (took {:.2?}, completed {:.1}%)",
-                group + 1,
-                n_comparisons,
-                start_group.elapsed(),
-                pct_complete
-            );
-        }
-    }
-
-    // -- Summaries across comparisons --
-
-    let start_summary = Instant::now();
+    let fdr: Vec<Vec<f64>> = p_vals.iter().map(|p| p_adjust_fdr(p)).collect();
 
     let per_comparison_ranks: Vec<Vec<usize>> = auroc
         .par_iter()
         .map(|a| competition_ranks_desc(a))
         .collect();
 
-    let summaries: Vec<GeneSummary> = (0..no_genes_new)
+    let summaries: Vec<GeneSummary> = (0..no_genes)
         .into_par_iter()
         .map(|gene| {
             let mut gene_auroc: Vec<f32> = auroc.iter().map(|a| a[gene]).collect();
@@ -766,14 +573,14 @@ pub fn calculate_dge_one_vs_many_auroc<S: SingleCellReading>(
         })
         .collect();
 
-    let mut median_auroc = Vec::with_capacity(no_genes_new);
-    let mut min_auroc = Vec::with_capacity(no_genes_new);
-    let mut mean_auroc = Vec::with_capacity(no_genes_new);
-    let mut max_auroc = Vec::with_capacity(no_genes_new);
-    let mut worst_comparison = Vec::with_capacity(no_genes_new);
-    let mut min_rank = Vec::with_capacity(no_genes_new);
-    let mut simes_p = Vec::with_capacity(no_genes_new);
-    let mut max_p = Vec::with_capacity(no_genes_new);
+    let mut median_auroc = Vec::with_capacity(no_genes);
+    let mut min_auroc = Vec::with_capacity(no_genes);
+    let mut mean_auroc = Vec::with_capacity(no_genes);
+    let mut max_auroc = Vec::with_capacity(no_genes);
+    let mut worst_comparison = Vec::with_capacity(no_genes);
+    let mut min_rank = Vec::with_capacity(no_genes);
+    let mut simes_p = Vec::with_capacity(no_genes);
+    let mut max_p = Vec::with_capacity(no_genes);
 
     for summary in summaries {
         median_auroc.push(summary.median_auroc);
@@ -789,20 +596,7 @@ pub fn calculate_dge_one_vs_many_auroc<S: SingleCellReading>(
     let simes_fdr = p_adjust_fdr(&simes_p);
     let max_p_fdr = p_adjust_fdr(&max_p);
 
-    if verbosity.normal_verbosity() {
-        println!(
-            "Summarised across comparisons: {:.2?}",
-            start_summary.elapsed()
-        );
-    }
-
-    let prop_ref: Vec<f32> = genes_kept.iter().map(|&g| prop_ref_full[g]).collect();
-    let prop_other: Vec<Vec<f32>> = prop_other
-        .iter()
-        .map(|prop| genes_kept.iter().map(|&g| prop[g]).collect())
-        .collect();
-
-    Ok(DgeAurocMultiRes {
+    DgeAurocMultiRes {
         auroc,
         lfc,
         prop_other,
@@ -821,7 +615,7 @@ pub fn calculate_dge_one_vs_many_auroc<S: SingleCellReading>(
         max_p,
         max_p_fdr,
         genes_to_keep,
-    })
+    }
 }
 
 /// Empty result for the case where no gene clears the proportion filter
@@ -855,6 +649,419 @@ fn empty_auroc_multi_res(n_comparisons: usize, genes_to_keep: Vec<bool>) -> DgeA
         max_p_fdr: Vec::new(),
         genes_to_keep,
     }
+}
+
+///////////////////////
+// Gene-wise scanner //
+///////////////////////
+
+/// Genes decoded per `read_gene_parallel` call in the gene-wise scans.
+///
+/// Bounds the decoded chunks held at once; the per-gene work runs in parallel
+/// within a block. A whole 20k gene x 20k cell store decodes in ~25 ms, so the
+/// block size is not where the time goes.
+const GENE_CHUNK_SIZE: usize = 1_000;
+
+/// Cell-to-group assignment for the gene-wise scans
+struct GroupLayout {
+    /// Group label per cell of the store, [NO_GROUP] outside every group
+    lookup: Vec<u16>,
+    /// Number of cells per group
+    sizes: Vec<usize>,
+}
+
+/// Validate the cell groups and build the cell-to-group lookup
+///
+/// A cell present in two groups would contribute to both sides of a
+/// comparison and quietly drag the AUROC toward 0.5, so it is rejected, and so
+/// is a cell listed twice in one group.
+///
+/// ### Params
+///
+/// * `groups` - The cell indices of each group.
+/// * `n_cells` - Total cells in the store.
+///
+/// ### Returns
+///
+/// The [GroupLayout].
+fn build_group_layout(
+    groups: &[Vec<usize>],
+    n_cells: usize,
+) -> Result<GroupLayout, BixverseErrors> {
+    let n_groups = groups.len();
+    if n_groups < 2 {
+        return Err(BixverseErrors::DgeTooFewGroups { n_groups });
+    }
+    if n_groups >= NO_GROUP as usize {
+        return Err(BixverseErrors::DgeTooManyGroups {
+            n_groups,
+            max: NO_GROUP as usize - 1,
+        });
+    }
+
+    let mut lookup = vec![NO_GROUP; n_cells];
+    for (group, cells) in groups.iter().enumerate() {
+        if cells.is_empty() {
+            return Err(BixverseErrors::DgeEmptyGroup { group });
+        }
+        for &cell in cells {
+            if cell >= n_cells {
+                return Err(BixverseErrors::DgeCellOutOfRange { cell, n_cells });
+            }
+            if lookup[cell] != NO_GROUP {
+                return Err(BixverseErrors::DgeOverlappingGroups {
+                    cell,
+                    first: lookup[cell] as usize,
+                    second: group,
+                });
+            }
+            lookup[cell] = group as u16;
+        }
+    }
+
+    Ok(GroupLayout {
+        lookup,
+        sizes: groups.iter().map(|g| g.len()).collect(),
+    })
+}
+
+/// Stream the gene store once and hand every kept gene's statistics on
+///
+/// Reads [GENE_CHUNK_SIZE] genes at a time. Within a block, every gene is
+/// gathered, filtered via `keep`, swept and reduced via `per_gene` in
+/// parallel, each thread reusing one [GeneGroupStats] as scratch. The reduced
+/// results are then handed to `consume` sequentially in gene order, so the
+/// caller can push straight into its output columns.
+///
+/// ### Params
+///
+/// * `reader` - Reader over the gene-based store.
+/// * `layout` - The cell groups.
+/// * `keep` - Gene filter on the gathered counts, before the sort.
+/// * `per_gene` - Reduction of a kept gene's swept statistics.
+/// * `consume` - Sink for `(gene index, reduction)`, in gene order.
+///
+/// ### Returns
+///
+/// The gene mask over the full gene universe.
+fn scan_genes_by_group<S, T, K, F, C>(
+    reader: &S,
+    layout: &GroupLayout,
+    keep: K,
+    per_gene: F,
+    mut consume: C,
+) -> Result<Vec<bool>, BixverseErrors>
+where
+    S: SingleCellReading,
+    T: Send,
+    K: Fn(&GeneGroupStats) -> bool + Sync,
+    F: Fn(&GeneGroupStats) -> T + Sync,
+    C: FnMut(usize, T),
+{
+    let n_genes = reader.get_header().total_genes;
+    let n_groups = layout.sizes.len();
+    let all_genes: Vec<usize> = (0..n_genes).collect();
+    let mut genes_to_keep = Vec::with_capacity(n_genes);
+
+    for block in all_genes.chunks(GENE_CHUNK_SIZE) {
+        let chunks = reader.read_gene_parallel(block)?;
+
+        let reduced: Vec<Option<T>> = chunks
+            .par_iter()
+            .map_init(
+                || GeneGroupStats::new(n_groups),
+                |stats, chunk| {
+                    stats.gather(&chunk.data_norm, &chunk.indices, &layout.lookup);
+                    if !keep(stats) {
+                        return None;
+                    }
+                    stats.sweep(&layout.sizes);
+                    Some(per_gene(stats))
+                },
+            )
+            .collect();
+
+        for (&gene, res) in block.iter().zip(reduced) {
+            genes_to_keep.push(res.is_some());
+            if let Some(res) = res {
+                consume(gene, res);
+            }
+        }
+    }
+
+    Ok(genes_to_keep)
+}
+
+/// One gene's one-vs-rest result for one arm: `(lfc, auroc, prop group,
+/// prop rest, z)`.
+type RestRow = (f32, f32, f32, f32, f64);
+
+//////////
+// Main //
+//////////
+
+/// Get one-vs-rest Mann-Whitney differential expression for every group
+///
+/// The marker table of a clustering: each group against all other grouped
+/// cells pooled, in one pass over the gene store. U is additive over disjoint
+/// groups, so every one-vs-rest statistic falls out of the pairwise sweep of
+/// [GeneGroupStats], against the pooled tie structure of all grouped cells.
+/// Peak memory is bounded by [GENE_CHUNK_SIZE] genes, whatever the cell count.
+///
+/// Each arm filters on its own: a gene is tested for group `g` if it clears
+/// `min_proportion` in `g` or in the rest, and the FDR is over that arm's
+/// tested genes. That is exactly [calculate_dge_grps_mann_whitney] run on
+/// `(g, rest)`, minus the repeated reads.
+///
+/// ### Params
+///
+/// * `reader` - Reader over the gene-based count store.
+/// * `groups` - The cell indices of each group. Cells in no group are ignored.
+/// * `min_proportion` - The minimum proportion that a gene needs to be
+///   expressed in the group or in the rest.
+/// * `alternative` - The test alternative. One of `"twosided"`, `"greater"`,
+///   or `"less"`.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
+///
+/// ### Returns
+///
+/// One [DgeMannWhitneyRes] per group, in input order. `prop1` is the group,
+/// `prop2` the rest.
+pub fn calculate_dge_one_vs_rest_mann_whitney<S: SingleCellReading>(
+    reader: &S,
+    groups: &[Vec<usize>],
+    min_proportion: f32,
+    alternative: &str,
+    verbose: usize,
+) -> Result<Vec<DgeMannWhitneyRes>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+    let header = reader.get_header();
+    let layout = build_group_layout(groups, header.total_cells)?;
+    let n_groups = groups.len();
+    let sizes = &layout.sizes;
+    let n_total: usize = sizes.iter().sum();
+
+    let start = Instant::now();
+
+    let arm_props = |stats: &GeneGroupStats, g: usize| -> (f32, f32) {
+        let nnz_total: u64 = stats.nnz.iter().sum();
+        (
+            stats.nnz[g] as f32 / sizes[g] as f32,
+            (nnz_total - stats.nnz[g]) as f32 / (n_total - sizes[g]) as f32,
+        )
+    };
+    let arm_kept = |(p1, p2): (f32, f32)| p1 >= min_proportion || p2 >= min_proportion;
+
+    let keep = |stats: &GeneGroupStats| (0..n_groups).any(|g| arm_kept(arm_props(stats, g)));
+
+    // one row per arm, None where the arm drops the gene
+    let per_gene = |stats: &GeneGroupStats| -> Vec<Option<RestRow>> {
+        let sum_total: f64 = stats.sum.iter().sum();
+        let tie = stats.tie_pooled();
+
+        (0..n_groups)
+            .map(|g| {
+                let props = arm_props(stats, g);
+                if !arm_kept(props) {
+                    return None;
+                }
+                let n_rest = n_total - sizes[g];
+                let mean_grp = stats.sum[g] / sizes[g] as f64;
+                let mean_rest = (sum_total - stats.sum[g]) / n_rest as f64;
+                let (auroc, z) = mann_whitney_stats(stats.u_rest(g), tie, sizes[g], n_rest);
+                Some(((mean_grp - mean_rest) as f32, auroc, props.0, props.1, z))
+            })
+            .collect()
+    };
+
+    let mut arms: Vec<DgeMannWhitneyRes> = (0..n_groups)
+        .map(|_| DgeMannWhitneyRes {
+            lfc: Vec::new(),
+            auroc: Vec::new(),
+            prop1: Vec::new(),
+            prop2: Vec::new(),
+            z_scores: Vec::new(),
+            p_vals: Vec::new(),
+            fdr: Vec::new(),
+            genes_to_keep: vec![false; header.total_genes],
+        })
+        .collect();
+
+    scan_genes_by_group(reader, &layout, keep, per_gene, |gene, rows| {
+        for (arm, row) in arms.iter_mut().zip(rows) {
+            if let Some((lfc, auroc, prop1, prop2, z)) = row {
+                arm.lfc.push(lfc);
+                arm.auroc.push(auroc);
+                arm.prop1.push(prop1);
+                arm.prop2.push(prop2);
+                arm.z_scores.push(z);
+                arm.genes_to_keep[gene] = true;
+            }
+        }
+    })?;
+
+    for arm in arms.iter_mut() {
+        arm.p_vals = z_scores_to_pval(&arm.z_scores, alternative);
+        arm.fdr = p_adjust_fdr(&arm.p_vals);
+    }
+
+    if verbosity.normal_verbosity() {
+        println!(
+            "One-vs-rest across {} groups: {:.2?}",
+            n_groups,
+            start.elapsed()
+        );
+    }
+
+    Ok(arms)
+}
+
+/// Get one-vs-many AUROC-based differential expression
+///
+/// Scores each reference group against every other group separately and
+/// summarises the results per gene. This is the marker question: a gene that
+/// marks the reference has to hold up against every rival, which a single
+/// pooled test cannot tell you because it is dominated by whichever rival
+/// contributes the most cells.
+///
+/// AUROC rather than the p-value is what the summaries rank on. Group sizes
+/// vary widely in practice, and p-values scale with `sqrt(n1 * n2)`, so a
+/// large rival would otherwise crowd out a small one regardless of effect size.
+///
+/// Every reference arm comes out of one pass over the gene store: one sort per
+/// gene gives all pairwise U statistics and tie terms, see [GeneGroupStats].
+/// Peak memory is bounded by [GENE_CHUNK_SIZE] genes plus the results.
+///
+/// Genes are filtered once, globally: a gene is kept if it clears
+/// `min_proportion` in any group. Since the rivals of every reference are all
+/// the other groups, that is the same filter for every arm. Because each gene
+/// is ranked independently of the others, the per-comparison statistics are
+/// identical to what a per-pair filter would give; the only difference is that
+/// every comparison's FDR is computed over the same gene set, which is what
+/// makes the cross-comparison summaries well defined.
+///
+/// ### Params
+///
+/// * `reader` - Reader over the gene-based count store.
+/// * `groups` - The cell indices of each group. Cells in no group are ignored.
+/// * `references` - Indices into `groups` of the reference arms to report.
+///   Each arm's comparisons are every other group, in group order.
+/// * `min_proportion` - The minimum proportion that a gene needs to be
+///   expressed in at least one of the groups.
+/// * `alternative` - The test alternative. One of `"twosided"`, `"greater"`,
+///   or `"less"`, with `"greater"` being the natural choice for markers.
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
+///
+/// ### Returns
+///
+/// One [DgeAurocMultiRes] per reference, in the order of `references`.
+///
+/// ### References
+///
+/// Soneson and Robinson, Nat Methods, 2018 (AUROC for scRNA-seq DGE);
+/// Lun, et al., F1000Research, 2016 (scran `scoreMarkers` summaries)
+pub fn calculate_dge_one_vs_many_auroc<S: SingleCellReading>(
+    reader: &S,
+    groups: &[Vec<usize>],
+    references: &[usize],
+    min_proportion: f32,
+    alternative: &str,
+    verbose: usize,
+) -> Result<Vec<DgeAurocMultiRes>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(verbose);
+    let layout = build_group_layout(groups, reader.get_header().total_cells)?;
+    let n_groups = groups.len();
+    let sizes = &layout.sizes;
+
+    if let Some(&reference) = references.iter().find(|&&r| r >= n_groups) {
+        return Err(BixverseErrors::DgeReferenceOutOfRange {
+            reference,
+            n_groups,
+        });
+    }
+
+    let start = Instant::now();
+
+    let keep = |stats: &GeneGroupStats| {
+        (0..n_groups).any(|g| stats.nnz[g] as f32 / sizes[g] as f32 >= min_proportion)
+    };
+
+    // per-group proportions, then (auroc, lfc, z) reference-major, rivals in
+    // group order
+    let per_gene = |stats: &GeneGroupStats| -> (Vec<f32>, Vec<(f32, f32, f64)>) {
+        let props: Vec<f32> = (0..n_groups)
+            .map(|g| stats.nnz[g] as f32 / sizes[g] as f32)
+            .collect();
+        let means: Vec<f64> = (0..n_groups)
+            .map(|g| stats.sum[g] / sizes[g] as f64)
+            .collect();
+
+        let mut rows = Vec::with_capacity(references.len() * (n_groups - 1));
+        for &r in references {
+            for k in (0..n_groups).filter(|&k| k != r) {
+                let (auroc, z) = mann_whitney_stats(
+                    stats.u_pair(r, k),
+                    stats.tie_pair(r, k),
+                    sizes[r],
+                    sizes[k],
+                );
+                rows.push((auroc, (means[r] - means[k]) as f32, z));
+            }
+        }
+
+        (props, rows)
+    };
+
+    let n_rivals = n_groups - 1;
+    let mut props: Vec<Vec<f32>> = vec![Vec::new(); n_groups];
+    let mut auroc: Vec<Vec<Vec<f32>>> = vec![vec![Vec::new(); n_rivals]; references.len()];
+    let mut lfc: Vec<Vec<Vec<f32>>> = vec![vec![Vec::new(); n_rivals]; references.len()];
+    let mut z_scores: Vec<Vec<Vec<f64>>> = vec![vec![Vec::new(); n_rivals]; references.len()];
+
+    let genes_to_keep = scan_genes_by_group(reader, &layout, keep, per_gene, |_, (p, rows)| {
+        for (col, value) in props.iter_mut().zip(p) {
+            col.push(value);
+        }
+        for (i, (a, l, z)) in rows.into_iter().enumerate() {
+            let (arm, comparison) = (i / n_rivals, i % n_rivals);
+            auroc[arm][comparison].push(a);
+            lfc[arm][comparison].push(l);
+            z_scores[arm][comparison].push(z);
+        }
+    })?;
+
+    if verbosity.normal_verbosity() {
+        println!(
+            "Scanned {} groups, {} reference arms: {:.2?}",
+            n_groups,
+            references.len(),
+            start.elapsed()
+        );
+    }
+
+    let res = references
+        .iter()
+        .zip(auroc.into_iter().zip(lfc).zip(z_scores))
+        .map(|(&r, ((auroc_r, lfc_r), z_r))| {
+            let prop_other = (0..n_groups)
+                .filter(|&k| k != r)
+                .map(|k| props[k].clone())
+                .collect();
+            build_auroc_multi_res(
+                auroc_r,
+                lfc_r,
+                z_r,
+                props[r].clone(),
+                prop_other,
+                alternative,
+                genes_to_keep.clone(),
+            )
+        })
+        .collect();
+
+    Ok(res)
 }
 
 ////////////
@@ -1367,6 +1574,7 @@ pub fn calculate_aucell_streaming<S: SingleCellReading>(
 mod tests {
     use super::*;
     use crate::single_cell::sc_data::data_io::CellGeneSparseWriter;
+    use crate::single_cell::sc_data::gene_file_io::write_gene_file;
     use approx::assert_relative_eq;
 
     /// Scratch store that removes itself on drop.
@@ -1547,12 +1755,12 @@ mod tests {
     #[test]
     fn test_auroc_perfect_separation() {
         // n1 = n2 = 3, group 1 holds the top ranks 4, 5, 6
-        let (auroc, z) = mann_whitney_stats(15.0, 0.0, 3, 3);
+        let (auroc, z) = mann_whitney_stats(9.0, 0.0, 3, 3);
         assert_relative_eq!(auroc, 1.0);
         assert!(z > 0.0);
 
         // Group 1 holds the bottom ranks 1, 2, 3
-        let (auroc, z) = mann_whitney_stats(6.0, 0.0, 3, 3);
+        let (auroc, z) = mann_whitney_stats(0.0, 0.0, 3, 3);
         assert_relative_eq!(auroc, 0.0);
         assert!(z < 0.0);
     }
@@ -1560,8 +1768,8 @@ mod tests {
     /// Fully interleaved groups give AUROC 0.5 and z of zero.
     #[test]
     fn test_auroc_no_separation() {
-        // n1 = n2 = 2, group 1 holds ranks 1 and 4
-        let (auroc, _) = mann_whitney_stats(5.0, 0.0, 2, 2);
+        // n1 = n2 = 2, group 1 holds ranks 1 and 4, so U = 5 - 3
+        let (auroc, _) = mann_whitney_stats(2.0, 0.0, 2, 2);
         assert_relative_eq!(auroc, 0.5);
     }
 
@@ -1571,7 +1779,7 @@ mod tests {
     fn test_auroc_z_orientation() {
         // On untied data the two are related by a function of n1 and n2 alone
         let (n1, n2) = (3_usize, 3_usize);
-        let (auroc, z) = mann_whitney_stats(15.0, 0.0, n1, n2);
+        let (auroc, z) = mann_whitney_stats(9.0, 0.0, n1, n2);
 
         let n = (n1 + n2) as f64;
         let expected = (auroc as f64 - 0.5) * (12.0 * n1 as f64 * n2 as f64 / (n + 1.0)).sqrt();
@@ -1585,7 +1793,7 @@ mod tests {
     fn test_tie_correction_known_value() {
         // Three tied plus two tied over n = 6: S = (27 - 3) + (8 - 2) = 30.
         // var = (9/12) * (7 - 30/30) = 4.5, against an untied 5.25.
-        let (auroc, z) = mann_whitney_stats(12.0, 30.0, 3, 3);
+        let (auroc, z) = mann_whitney_stats(6.0, 30.0, 3, 3);
 
         assert_relative_eq!(auroc, 6.0 / 9.0);
         assert_relative_eq!(z, 1.5 / 4.5_f64.sqrt(), epsilon = 1e-12);
@@ -1594,8 +1802,8 @@ mod tests {
     /// Distinct values leave nothing to correct, so the term is exactly zero.
     #[test]
     fn test_tie_correction_no_ties() {
-        // Same rank sum, no ties: the variance falls back to n1 n2 (n + 1) / 12
-        let (_, z) = mann_whitney_stats(12.0, 0.0, 3, 3);
+        // Same U, no ties: the variance falls back to n1 n2 (n + 1) / 12
+        let (_, z) = mann_whitney_stats(6.0, 0.0, 3, 3);
         assert_relative_eq!(z, 1.5 / 5.25_f64.sqrt(), epsilon = 1e-12);
     }
 
@@ -1603,9 +1811,9 @@ mod tests {
     /// give z of zero rather than a NaN division.
     #[test]
     fn test_constant_gene_degenerate() {
-        // Every cell tied: rank sum is n1 (n + 1) / 2 and S = n^3 - n, so the
-        // corrected variance is exactly zero. Must not produce a NaN.
-        let (auroc, z) = mann_whitney_stats(10.5, 210.0, 3, 3);
+        // Every cell tied: U is n1 n2 / 2 and S = n^3 - n, so the corrected
+        // variance is exactly zero. Must not produce a NaN.
+        let (auroc, z) = mann_whitney_stats(4.5, 210.0, 3, 3);
         assert_relative_eq!(auroc, 0.5);
         assert_eq!(z, 0.0);
     }
@@ -1662,27 +1870,46 @@ mod tests {
         assert_relative_eq!(median_in_place(&mut single), 7.0);
     }
 
-    /// Every rejection path of the one-vs-many input check, asserted by error
-    /// variant.
+    /// Every rejection path of the group layout check, asserted by error
+    /// variant, and the lookup it builds on success.
     #[test]
-    fn test_validate_one_vs_many() {
+    fn test_build_group_layout() {
         assert!(matches!(
-            validate_one_vs_many(&[], &[vec![1]]),
-            Err(BixverseErrors::DgeEmptyReferenceGroup)
+            build_group_layout(&[vec![0]], 4),
+            Err(BixverseErrors::DgeTooFewGroups { n_groups: 1 })
         ));
         assert!(matches!(
-            validate_one_vs_many(&[0], &[]),
-            Err(BixverseErrors::DgeNoComparisonGroups)
+            build_group_layout(&[vec![0], vec![]], 4),
+            Err(BixverseErrors::DgeEmptyGroup { group: 1 })
         ));
         assert!(matches!(
-            validate_one_vs_many(&[0], &[vec![1], vec![]]),
-            Err(BixverseErrors::DgeEmptyComparisonGroup { group: 1 })
+            build_group_layout(&[vec![0], vec![4]], 4),
+            Err(BixverseErrors::DgeCellOutOfRange {
+                cell: 4,
+                n_cells: 4
+            })
         ));
         assert!(matches!(
-            validate_one_vs_many(&[0, 1], &[vec![2], vec![1]]),
-            Err(BixverseErrors::DgeOverlappingGroups { group: 1, cell: 1 })
+            build_group_layout(&[vec![0, 1], vec![2, 1]], 4),
+            Err(BixverseErrors::DgeOverlappingGroups {
+                cell: 1,
+                first: 0,
+                second: 1
+            })
         ));
-        assert!(validate_one_vs_many(&[0, 1], &[vec![2], vec![3]]).is_ok());
+        // A duplicate inside one group is just as wrong
+        assert!(matches!(
+            build_group_layout(&[vec![0, 0], vec![1]], 4),
+            Err(BixverseErrors::DgeOverlappingGroups {
+                cell: 0,
+                first: 0,
+                second: 0
+            })
+        ));
+
+        let layout = build_group_layout(&[vec![3], vec![0, 2]], 4).expect("valid layout");
+        assert_eq!(layout.lookup, vec![1, NO_GROUP, 1, 0]);
+        assert_eq!(layout.sizes, vec![1, 2]);
     }
 
     /// Regression: the rank sum reaches 1.95e7 at 20k genes, past exact f32
@@ -1737,18 +1964,14 @@ mod tests {
     /// by construction.
     #[test]
     fn test_one_vs_many_auroc_end_to_end() {
-        let temp = TempStore::new("one_vs_many");
-        let reader = reader_for(&temp, &one_vs_many_counts());
+        let cells = TempStore::new("one_vs_many_cells");
+        let genes = TempStore::new("one_vs_many_genes");
+        let (_, reader) = readers_for(&cells, &genes, &one_vs_many_counts());
 
-        let res = calculate_dge_one_vs_many_auroc(
-            &reader,
-            &[0, 1, 2, 3],
-            &[vec![4, 5, 6, 7], vec![8, 9, 10, 11]],
-            0.5,
-            "greater",
-            0,
-        )
-        .expect("one-vs-many runs");
+        let res =
+            calculate_dge_one_vs_many_auroc(&reader, &three_groups(), &[0], 0.5, "greater", 0)
+                .expect("one-vs-many runs")
+                .remove(0);
 
         // Gene 4 is never expressed, so it is the only one dropped
         assert_eq!(res.genes_to_keep, vec![true, true, true, true, false, true]);
@@ -1784,31 +2007,52 @@ mod tests {
         assert_eq!(res.prop_other[0], vec![0.0, 1.0, 1.0, 1.0, 1.0]);
     }
 
-    /// Against a single rival the one-vs-many arm must agree with the pairwise
-    /// entry point, which shares the kernel but filters genes on its own two
-    /// groups.
+    /// The three groups of [one_vs_many_counts]: reference, rival A, rival B.
+    fn three_groups() -> Vec<Vec<usize>> {
+        vec![vec![0, 1, 2, 3], vec![4, 5, 6, 7], vec![8, 9, 10, 11]]
+    }
+
+    /// Open readers over a cell store and its gene store transpose.
+    ///
+    /// ### Params
+    ///
+    /// * `cells` - Guard owning the cell store path
+    /// * `genes` - Guard owning the gene store path
+    /// * `dense` - `dense[cell][gene]` raw counts
+    ///
+    /// ### Returns
+    ///
+    /// `(cell reader, gene reader)`.
+    fn readers_for(
+        cells: &TempStore,
+        genes: &TempStore,
+        dense: &[Vec<u32>],
+    ) -> (ParallelSparseReader, ParallelSparseReader) {
+        let cell_reader = reader_for(cells, dense);
+        write_gene_file(cells.path(), genes.path(), None, false).expect("gene file");
+        let gene_reader = ParallelSparseReader::new(genes.path()).expect("reader opens");
+        (cell_reader, gene_reader)
+    }
+
+    /// Against a single rival the one-vs-many arm must agree bit for bit with
+    /// the pairwise entry point, which ranks the cell store with its own
+    /// kernel.
     #[test]
     fn test_one_vs_many_matches_pairwise() {
-        // The one-vs-many arm against a single rival must agree with the
-        // pairwise entry point, which shares the same kernel but filters genes
-        // on its own two groups.
-        let temp = TempStore::new("vs_pairwise");
-        let reader = reader_for(&temp, &one_vs_many_counts());
+        let cells = TempStore::new("vs_pairwise_cells");
+        let genes = TempStore::new("vs_pairwise_genes");
+        let (cell_reader, gene_reader) = readers_for(&cells, &genes, &one_vs_many_counts());
+        let groups = three_groups();
 
-        let multi = calculate_dge_one_vs_many_auroc(
-            &reader,
-            &[0, 1, 2, 3],
-            &[vec![4, 5, 6, 7]],
-            0.5,
-            "greater",
-            0,
-        )
-        .expect("one-vs-many runs");
+        let multi =
+            calculate_dge_one_vs_many_auroc(&gene_reader, &groups[..2], &[0], 0.5, "greater", 0)
+                .expect("one-vs-many runs")
+                .remove(0);
 
         let pairwise = calculate_dge_grps_mann_whitney(
-            &reader,
-            &[0, 1, 2, 3],
-            &[4, 5, 6, 7],
+            &cell_reader,
+            &groups[0],
+            &groups[1],
             0.5,
             "greater",
             0,
@@ -1823,28 +2067,134 @@ mod tests {
         assert_eq!(multi.prop_other[0], pairwise.prop2);
     }
 
+    /// Every reference arm out of one scan: each comparison matches the
+    /// pairwise test on its own two groups, where both keep the gene, and
+    /// swapping the roles mirrors the AUROC.
+    #[test]
+    fn test_one_vs_many_all_references() {
+        let cells = TempStore::new("all_refs_cells");
+        let genes = TempStore::new("all_refs_genes");
+        let (cell_reader, gene_reader) = readers_for(&cells, &genes, &one_vs_many_counts());
+        let groups = three_groups();
+
+        let res =
+            calculate_dge_one_vs_many_auroc(&gene_reader, &groups, &[0, 1, 2], 0.0, "twosided", 0)
+                .expect("one-vs-many runs");
+        assert_eq!(res.len(), 3);
+
+        for (r, arm) in res.iter().enumerate() {
+            let rivals: Vec<usize> = (0..3).filter(|&k| k != r).collect();
+            for (c, &k) in rivals.iter().enumerate() {
+                let pairwise = calculate_dge_grps_mann_whitney(
+                    &cell_reader,
+                    &groups[r],
+                    &groups[k],
+                    0.0,
+                    "twosided",
+                    0,
+                )
+                .expect("pairwise runs");
+
+                // min_proportion 0 keeps every gene on both sides
+                assert_eq!(arm.auroc[c], pairwise.auroc, "ref {r} vs {k}");
+                assert_eq!(arm.z_scores[c], pairwise.z_scores, "ref {r} vs {k}");
+                assert_eq!(arm.lfc[c], pairwise.lfc, "ref {r} vs {k}");
+
+                let mirror = &res[k];
+                let c_back = (0..3).filter(|&j| j != k).position(|j| j == r).unwrap();
+                for (a, b) in arm.auroc[c].iter().zip(&mirror.auroc[c_back]) {
+                    assert_relative_eq!(*a, 1.0 - *b, epsilon = 1e-6);
+                }
+            }
+        }
+    }
+
     /// Filtering out every gene is an empty result rather than an error or a
     /// panic.
     #[test]
     fn test_one_vs_many_all_genes_filtered() {
-        let temp = TempStore::new("all_filtered");
-        let reader = reader_for(&temp, &one_vs_many_counts());
+        let cells = TempStore::new("all_filtered_cells");
+        let genes = TempStore::new("all_filtered_genes");
+        let (_, reader) = readers_for(&cells, &genes, &one_vs_many_counts());
 
         // Nothing clears a proportion above 1.0
-        let res = calculate_dge_one_vs_many_auroc(
-            &reader,
-            &[0, 1, 2, 3],
-            &[vec![4, 5, 6, 7], vec![8, 9, 10, 11]],
-            1.5,
-            "greater",
-            0,
-        )
-        .expect("one-vs-many runs");
+        let res =
+            calculate_dge_one_vs_many_auroc(&reader, &three_groups(), &[0], 1.5, "greater", 0)
+                .expect("one-vs-many runs")
+                .remove(0);
 
         assert!(res.genes_to_keep.iter().all(|&keep| !keep));
         assert_eq!(res.auroc.len(), 2);
         assert!(res.auroc.iter().all(|a| a.is_empty()));
         assert!(res.median_auroc.is_empty());
+    }
+
+    /// An out-of-range reference arm is an error, not a panic.
+    #[test]
+    fn test_one_vs_many_reference_out_of_range() {
+        let cells = TempStore::new("bad_ref_cells");
+        let genes = TempStore::new("bad_ref_genes");
+        let (_, reader) = readers_for(&cells, &genes, &one_vs_many_counts());
+
+        assert!(matches!(
+            calculate_dge_one_vs_many_auroc(&reader, &three_groups(), &[3], 0.5, "greater", 0),
+            Err(BixverseErrors::DgeReferenceOutOfRange {
+                reference: 3,
+                n_groups: 3
+            })
+        ));
+    }
+
+    /// Each one-vs-rest arm is the pairwise test of that group against all
+    /// other grouped cells, including the per-arm gene filter. Cells in no
+    /// group are ignored on both sides.
+    #[test]
+    fn test_one_vs_rest_matches_pairwise() {
+        let cells = TempStore::new("vs_rest_cells");
+        let genes = TempStore::new("vs_rest_genes");
+        let (cell_reader, gene_reader) = readers_for(&cells, &genes, &one_vs_many_counts());
+
+        // cell 3 and cell 11 sit in no group
+        let groups = vec![vec![0, 1, 2], vec![4, 5, 6, 7], vec![8, 9, 10]];
+
+        let res = calculate_dge_one_vs_rest_mann_whitney(&gene_reader, &groups, 0.6, "greater", 0)
+            .expect("one-vs-rest runs");
+        assert_eq!(res.len(), 3);
+
+        for (g, arm) in res.iter().enumerate() {
+            let rest: Vec<usize> = groups
+                .iter()
+                .enumerate()
+                .filter(|&(h, _)| h != g)
+                .flat_map(|(_, cells)| cells.iter().copied())
+                .collect();
+            let pairwise =
+                calculate_dge_grps_mann_whitney(&cell_reader, &groups[g], &rest, 0.6, "greater", 0)
+                    .expect("pairwise runs");
+
+            assert_eq!(arm.genes_to_keep, pairwise.genes_to_keep, "group {g}");
+            assert_eq!(arm.auroc, pairwise.auroc, "group {g}");
+            assert_eq!(arm.z_scores, pairwise.z_scores, "group {g}");
+            assert_eq!(arm.prop1, pairwise.prop1, "group {g}");
+            assert_eq!(arm.prop2, pairwise.prop2, "group {g}");
+            assert_eq!(arm.fdr, pairwise.fdr, "group {g}");
+            // the rest mean comes from a subtraction rather than a direct sum
+            for (a, b) in arm.lfc.iter().zip(&pairwise.lfc) {
+                assert_relative_eq!(*a, *b, epsilon = 1e-6);
+            }
+        }
+    }
+
+    /// The scans need the gene store, so a cell store is a mode error.
+    #[test]
+    fn test_one_vs_rest_rejects_cell_store() {
+        let cells = TempStore::new("wrong_mode_cells");
+        let reader = reader_for(&cells, &one_vs_many_counts());
+
+        assert!(matches!(
+            calculate_dge_one_vs_rest_mann_whitney(&reader, &three_groups(), 0.5, "greater", 0),
+            Err(BixverseErrors::ReaderModeMismatch { .. })
+        ));
     }
 
     /// String round trips for the AUC type, including the unrecognised case.
