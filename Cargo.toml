@@ -1,6 +1,6 @@
 [package]
 name = "bixverse-rs"
-version = "0.5.7"
+version = "0.5.8"
 edition = "2024"
 authors = ["Gregor Lueg <gregorlueg@me.com>"]
 license = "MIT"
@@ -143,6 +143,11 @@ required-features = ["single-cell"]
 
 [[bench]]
 name = "hvg_bench"
+harness = false
+required-features = ["single-cell"]
+
+[[bench]]
+name = "dge_scan_bench"
 harness = false
 required-features = ["single-cell"]
 

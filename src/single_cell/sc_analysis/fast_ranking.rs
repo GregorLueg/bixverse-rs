@@ -5,6 +5,13 @@ use rayon::prelude::*;
 
 use crate::prelude::*;
 
+////////////
+// Consts //
+////////////
+
+/// Group label of a cell that sits in no group and is skipped by the scan.
+pub const NO_GROUP: u16 = u16::MAX;
+
 //////////////////
 // Single cells //
 //////////////////
@@ -265,6 +272,252 @@ pub fn csr_rank_sum_stats_two_groups(
             (rank_sum, tie_term)
         })
         .collect()
+}
+
+/// `t^3 - t` in exact integer arithmetic.
+///
+/// `u128` because the implicit-zero block alone reaches `t^3 ~ 1e19` at two
+/// million cells, past `u64`.
+///
+/// ### Params
+///
+/// * `t` - Size of the tie group.
+///
+/// ### Returns
+///
+/// The `t^3 - t` term.
+#[inline(always)]
+fn tie_contribution_exact(t: u64) -> u128 {
+    let t = t as u128;
+    t * t * t - t
+}
+
+////////////////////
+// GeneGroupStats //
+////////////////////
+
+/// Per-gene Mann-Whitney statistics for every pair of cell groups, from one
+/// sort of the gene's non-zeros.
+///
+/// U is additive over disjoint groups, so the one-vs-rest statistic of group
+/// `g` is the row sum of `U(g, .)` against the tie structure of all grouped
+/// cells pooled, which the sweep tracks as well.
+///
+/// The struct doubles as per-thread scratch: [Self::gather] and [Self::sweep]
+/// reset what they write, so one instance serves every gene a thread sees.
+pub struct GeneGroupStats {
+    /// Number of groups
+    n_groups: usize,
+    /// Non-zero cells per group
+    pub nnz: Vec<u64>,
+    /// Sum of the normalised values per group
+    pub sum: Vec<f64>,
+    /// `2 U(g, h)`, row-major `G x G`, i.e. twice the number of `(g, h)` cell
+    /// pairs where the `g` cell is larger, ties counting a half. The diagonal
+    /// is meaningless.
+    u2: Vec<u64>,
+    /// `sum (e_g^3 - e_g)` over the gene's tie blocks, per group
+    tie_own: Vec<u128>,
+    /// `sum e_g^2 e_h` over the gene's tie blocks, row-major `G x G`
+    tie_cross: Vec<u128>,
+    /// `sum (t^3 - t)` over tie blocks of all grouped cells pooled
+    tie_pooled: u128,
+    /// The gene's grouped non-zeros as `(f16 bits, group)`
+    values: Vec<(u16, u16)>,
+    /// Cells per group strictly below the current block
+    less_than: Vec<u64>,
+    /// Cells per group inside the current block
+    equal: Vec<u64>,
+    /// Groups present in the current block
+    active: Vec<usize>,
+}
+
+impl GeneGroupStats {
+    /// Allocate the statistics and scratch for `n_groups` groups.
+    ///
+    /// ### Params
+    ///
+    /// * `n_groups` - Number of cell groups.
+    ///
+    /// ### Returns
+    ///
+    /// The zeroed structure.
+    pub fn new(n_groups: usize) -> Self {
+        Self {
+            n_groups,
+            nnz: vec![0; n_groups],
+            sum: vec![0.0; n_groups],
+            u2: vec![0; n_groups * n_groups],
+            tie_own: vec![0; n_groups],
+            tie_cross: vec![0; n_groups * n_groups],
+            tie_pooled: 0,
+            values: Vec::new(),
+            less_than: vec![0; n_groups],
+            equal: vec![0; n_groups],
+            active: Vec::with_capacity(n_groups),
+        }
+    }
+
+    /// Collect a gene's grouped non-zeros, their counts and sums per group.
+    ///
+    /// Cheap relative to [Self::sweep], so the caller can apply the proportion
+    /// filter in between and skip the sort for genes it drops.
+    ///
+    /// ### Params
+    ///
+    /// * `data_norm` - The gene's normalised values.
+    /// * `indices` - The gene's cell indices, aligned with `data_norm`.
+    /// * `lookup` - Group label per cell of the store, [NO_GROUP] for cells
+    ///   outside every group.
+    pub fn gather(&mut self, data_norm: &[F16], indices: &[u32], lookup: &[u16]) {
+        self.nnz.fill(0);
+        self.sum.fill(0.0);
+        self.values.clear();
+
+        for (&cell, &value) in indices.iter().zip(data_norm) {
+            let group = lookup[cell as usize];
+            if group == NO_GROUP {
+                continue;
+            }
+            self.nnz[group as usize] += 1;
+            self.sum[group as usize] += value.to_f32() as f64;
+            self.values.push((value.to_bits(), group));
+        }
+    }
+
+    /// Rank the gathered values and accumulate U and the tie terms.
+    ///
+    /// ### Params
+    ///
+    /// * `group_sizes` - Number of cells per group.
+    pub fn sweep(&mut self, group_sizes: &[usize]) {
+        let g_n = self.n_groups;
+        self.u2.fill(0);
+        self.tie_own.fill(0);
+        self.tie_cross.fill(0);
+        self.tie_pooled = 0;
+        self.less_than.fill(0);
+
+        // the implicit zeros form the lowest block
+        for g in 0..g_n {
+            self.equal[g] = group_sizes[g] as u64 - self.nnz[g];
+            if self.equal[g] > 0 {
+                self.active.push(g);
+            }
+        }
+        self.close_block();
+
+        // f16 bits are monotonic in value for non-negative finite values
+        let mut values = std::mem::take(&mut self.values);
+        values.sort_unstable_by_key(|&(bits, _)| bits);
+
+        let mut i = 0;
+        while i < values.len() {
+            let bits = values[i].0;
+            while i < values.len() && values[i].0 == bits {
+                let g = values[i].1 as usize;
+                if self.equal[g] == 0 {
+                    self.active.push(g);
+                }
+                self.equal[g] += 1;
+                i += 1;
+            }
+            self.close_block();
+        }
+
+        self.values = values;
+    }
+
+    /// Fold the current tie block into the accumulators and advance
+    /// `less_than` past it.
+    fn close_block(&mut self) {
+        let g_n = self.n_groups;
+        let mut t = 0_u64;
+
+        for &g in &self.active {
+            let e = self.equal[g];
+            t += e;
+
+            let row = &mut self.u2[g * g_n..(g + 1) * g_n];
+            for ((u, &lt), &eq) in row.iter_mut().zip(&self.less_than).zip(&self.equal) {
+                *u += e * (2 * lt + eq);
+            }
+
+            self.tie_own[g] += tie_contribution_exact(e);
+            let e2 = (e * e) as u128;
+            for &h in &self.active {
+                if h != g {
+                    self.tie_cross[g * g_n + h] += e2 * self.equal[h] as u128;
+                }
+            }
+        }
+        self.tie_pooled += tie_contribution_exact(t);
+
+        for &g in &self.active {
+            self.less_than[g] += self.equal[g];
+            self.equal[g] = 0;
+        }
+        self.active.clear();
+    }
+
+    /// U statistic of group `g` against group `h`.
+    ///
+    /// ### Params
+    ///
+    /// * `g` - The first group.
+    /// * `h` - The second group, `!= g`.
+    ///
+    /// ### Returns
+    ///
+    /// `U(g, h)`, ties counting a half.
+    #[inline]
+    pub fn u_pair(&self, g: usize, h: usize) -> f64 {
+        self.u2[g * self.n_groups + h] as f64 / 2.0
+    }
+
+    /// `sum (t^3 - t)` over the tie blocks of groups `g` and `h` pooled.
+    ///
+    /// ### Params
+    ///
+    /// * `g` - The first group.
+    /// * `h` - The second group, `!= g`.
+    ///
+    /// ### Returns
+    ///
+    /// The pair's tie term.
+    #[inline]
+    pub fn tie_pair(&self, g: usize, h: usize) -> f64 {
+        let g_n = self.n_groups;
+        let cross = self.tie_cross[g * g_n + h] + self.tie_cross[h * g_n + g];
+        (self.tie_own[g] + self.tie_own[h] + 3 * cross) as f64
+    }
+
+    /// U statistic of group `g` against every other group pooled.
+    ///
+    /// ### Params
+    ///
+    /// * `g` - The group.
+    ///
+    /// ### Returns
+    ///
+    /// `U(g, rest)`, ties counting a half.
+    #[inline]
+    pub fn u_rest(&self, g: usize) -> f64 {
+        let g_n = self.n_groups;
+        let row = &self.u2[g * g_n..(g + 1) * g_n];
+        let total: u64 = row.iter().sum::<u64>() - row[g];
+        total as f64 / 2.0
+    }
+
+    /// `sum (t^3 - t)` over the tie blocks of all grouped cells.
+    ///
+    /// ### Returns
+    ///
+    /// The pooled tie term, shared by every one-vs-rest comparison.
+    #[inline]
+    pub fn tie_pooled(&self) -> f64 {
+        self.tie_pooled as f64
+    }
 }
 
 /// Append a group of cells to flat CSR buffers
@@ -585,6 +838,131 @@ mod tests {
         assert_relative_eq!(stats[0].1, 0.0, epsilon = 1e-9);
         // Group 1 holds the three lowest values, so ranks 1 + 2 + 3
         assert_relative_eq!(stats[0].0, 6.0, epsilon = 1e-9);
+    }
+
+    /// Reference `(U, tie term)` of cells `a` against cells `b` for one gene,
+    /// via the two-group kernel on a single-column CSR.
+    fn two_group_reference(column: &[f32], a: &[usize], b: &[usize]) -> (f64, f64) {
+        let mut row_ptr = vec![0_usize];
+        let mut col_indices: Vec<u32> = Vec::new();
+        let mut data: Vec<F16> = Vec::new();
+        for &cell in a.iter().chain(b) {
+            if column[cell] != 0.0 {
+                col_indices.push(0);
+                data.push(F16::from_f32(column[cell]));
+            }
+            row_ptr.push(col_indices.len());
+        }
+
+        let (rank_sum, tie) = csr_rank_sum_stats_two_groups(
+            &row_ptr,
+            &col_indices,
+            &data,
+            a.len(),
+            a.len() + b.len(),
+            1,
+        )[0];
+        let n1 = a.len() as f64;
+        (rank_sum - n1 * (n1 + 1.0) / 2.0, tie)
+    }
+
+    /// Run [GeneGroupStats] on one gene column.
+    fn group_stats(column: &[f32], lookup: &[u16], sizes: &[usize]) -> GeneGroupStats {
+        let mut indices: Vec<u32> = Vec::new();
+        let mut data: Vec<F16> = Vec::new();
+        for (cell, &v) in column.iter().enumerate() {
+            if v != 0.0 {
+                indices.push(cell as u32);
+                data.push(F16::from_f32(v));
+            }
+        }
+
+        let mut stats = GeneGroupStats::new(sizes.len());
+        stats.gather(&data, &indices, lookup);
+        stats.sweep(sizes);
+        stats
+    }
+
+    /// Every pair and every one-vs-rest out of the single sweep must match the
+    /// two-group kernel run on those groups alone, U and tie term both, with
+    /// ties inside and across groups, zeros, and an ungrouped cell.
+    #[test]
+    fn test_group_stats_matches_two_group_kernel() {
+        // 10 cells, cell 9 in no group
+        let groups: Vec<Vec<usize>> = vec![vec![0, 1, 2], vec![3, 4, 5, 6], vec![7, 8]];
+        let mut lookup = vec![NO_GROUP; 10];
+        for (g, cells) in groups.iter().enumerate() {
+            for &c in cells {
+                lookup[c] = g as u16;
+            }
+        }
+        let sizes: Vec<usize> = groups.iter().map(|g| g.len()).collect();
+
+        let columns: [[f32; 10]; 4] = [
+            [1.0, 2.0, 0.0, 2.0, 0.0, 1.0, 3.0, 2.0, 0.0, 5.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+            [4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0],
+            [0.0, 7.0, 6.0, 1.0, 2.0, 3.0, 0.0, 0.0, 9.0, 0.0],
+        ];
+
+        for (gene, column) in columns.iter().enumerate() {
+            let stats = group_stats(column, &lookup, &sizes);
+
+            for g in 0..3 {
+                for h in (0..3).filter(|&h| h != g) {
+                    let (u, tie) = two_group_reference(column, &groups[g], &groups[h]);
+                    assert_relative_eq!(stats.u_pair(g, h), u, epsilon = 1e-12);
+                    assert_relative_eq!(stats.tie_pair(g, h), tie, epsilon = 1e-12);
+                }
+
+                let rest: Vec<usize> = (0..3)
+                    .filter(|&h| h != g)
+                    .flat_map(|h| groups[h].iter().copied())
+                    .collect();
+                let (u, tie) = two_group_reference(column, &groups[g], &rest);
+                assert_relative_eq!(stats.u_rest(g), u, epsilon = 1e-12);
+                assert_relative_eq!(stats.tie_pooled(), tie, epsilon = 1e-12);
+            }
+
+            // the ungrouped cell 9 never reaches the counts
+            let nnz: u64 = stats.nnz.iter().sum();
+            let expected = column[..9].iter().filter(|&&v| v != 0.0).count() as u64;
+            assert_eq!(nnz, expected, "gene {gene}");
+        }
+    }
+
+    /// Reusing one instance across genes must not leak state from the
+    /// previous gene.
+    #[test]
+    fn test_group_stats_scratch_reuse() {
+        let lookup = vec![0_u16, 0, 1, 1];
+        let sizes = [2_usize, 2];
+        let a = [1.0_f32, 2.0, 3.0, 4.0];
+        let b = [4.0_f32, 3.0, 0.0, 1.0];
+
+        let fresh = group_stats(&b, &lookup, &sizes);
+
+        let mut reused = GeneGroupStats::new(2);
+        for column in [&a, &b] {
+            let mut indices: Vec<u32> = Vec::new();
+            let mut data: Vec<F16> = Vec::new();
+            for (cell, &v) in column.iter().enumerate() {
+                if v != 0.0 {
+                    indices.push(cell as u32);
+                    data.push(F16::from_f32(v));
+                }
+            }
+            reused.gather(&data, &indices, &lookup);
+            reused.sweep(&sizes);
+        }
+
+        assert_eq!(reused.u_pair(0, 1), fresh.u_pair(0, 1));
+        assert_eq!(reused.tie_pair(0, 1), fresh.tie_pair(0, 1));
+        assert_eq!(reused.tie_pooled(), fresh.tie_pooled());
+        assert_eq!(reused.nnz, fresh.nnz);
+        assert_eq!(reused.sum, fresh.sum);
+        // group 0 sits entirely above group 1
+        assert_eq!(fresh.u_pair(0, 1), 4.0);
     }
 
     /// Appending is incremental and truncating back to a recorded prefix must

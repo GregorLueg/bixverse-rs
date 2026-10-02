@@ -1,5 +1,10 @@
 # News
 
+## 0.5.8
+
+- Faster one-vs-many DGE patterns for both Wilcox and AUROC tests leveraging
+  the gene-specific view into the data.
+
 ## 0.5.7
 
 ### Features
