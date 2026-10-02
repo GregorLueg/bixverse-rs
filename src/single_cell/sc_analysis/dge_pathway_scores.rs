@@ -740,6 +740,8 @@ fn build_group_layout(
 /// * `keep` - Gene filter on the gathered counts, before the sort.
 /// * `per_gene` - Reduction of a kept gene's swept statistics.
 /// * `consume` - Sink for `(gene index, reduction)`, in gene order.
+/// * `verbosity` - Prints decile progress over the scanned genes at normal
+///   verbosity or above.
 ///
 /// ### Returns
 ///
@@ -750,6 +752,7 @@ fn scan_genes_by_group<S, T, K, F, C>(
     keep: K,
     per_gene: F,
     mut consume: C,
+    verbosity: Verbosity,
 ) -> Result<Vec<bool>, BixverseErrors>
 where
     S: SingleCellReading,
@@ -762,6 +765,8 @@ where
     let n_groups = layout.sizes.len();
     let all_genes: Vec<usize> = (0..n_genes).collect();
     let mut genes_to_keep = Vec::with_capacity(n_genes);
+    let start = Instant::now();
+    let mut done = 0;
 
     for block in all_genes.chunks(GENE_CHUNK_SIZE) {
         let chunks = reader.read_gene_parallel(block)?;
@@ -786,6 +791,12 @@ where
             if let Some(res) = res {
                 consume(gene, res);
             }
+        }
+
+        let prev = done;
+        done += block.len();
+        if verbosity.normal_verbosity() {
+            report_decile_progress(done, prev, n_genes, "genes", start.elapsed());
         }
     }
 
@@ -888,18 +899,25 @@ pub fn calculate_dge_one_vs_rest_mann_whitney<S: SingleCellReading>(
         })
         .collect();
 
-    scan_genes_by_group(reader, &layout, keep, per_gene, |gene, rows| {
-        for (arm, row) in arms.iter_mut().zip(rows) {
-            if let Some((lfc, auroc, prop1, prop2, z)) = row {
-                arm.lfc.push(lfc);
-                arm.auroc.push(auroc);
-                arm.prop1.push(prop1);
-                arm.prop2.push(prop2);
-                arm.z_scores.push(z);
-                arm.genes_to_keep[gene] = true;
+    scan_genes_by_group(
+        reader,
+        &layout,
+        keep,
+        per_gene,
+        |gene, rows| {
+            for (arm, row) in arms.iter_mut().zip(rows) {
+                if let Some((lfc, auroc, prop1, prop2, z)) = row {
+                    arm.lfc.push(lfc);
+                    arm.auroc.push(auroc);
+                    arm.prop1.push(prop1);
+                    arm.prop2.push(prop2);
+                    arm.z_scores.push(z);
+                    arm.genes_to_keep[gene] = true;
+                }
             }
-        }
-    })?;
+        },
+        verbosity,
+    )?;
 
     for arm in arms.iter_mut() {
         arm.p_vals = z_scores_to_pval(&arm.z_scores, alternative);
@@ -1020,17 +1038,24 @@ pub fn calculate_dge_one_vs_many_auroc<S: SingleCellReading>(
     let mut lfc: Vec<Vec<Vec<f32>>> = vec![vec![Vec::new(); n_rivals]; references.len()];
     let mut z_scores: Vec<Vec<Vec<f64>>> = vec![vec![Vec::new(); n_rivals]; references.len()];
 
-    let genes_to_keep = scan_genes_by_group(reader, &layout, keep, per_gene, |_, (p, rows)| {
-        for (col, value) in props.iter_mut().zip(p) {
-            col.push(value);
-        }
-        for (i, (a, l, z)) in rows.into_iter().enumerate() {
-            let (arm, comparison) = (i / n_rivals, i % n_rivals);
-            auroc[arm][comparison].push(a);
-            lfc[arm][comparison].push(l);
-            z_scores[arm][comparison].push(z);
-        }
-    })?;
+    let genes_to_keep = scan_genes_by_group(
+        reader,
+        &layout,
+        keep,
+        per_gene,
+        |_, (p, rows)| {
+            for (col, value) in props.iter_mut().zip(p) {
+                col.push(value);
+            }
+            for (i, (a, l, z)) in rows.into_iter().enumerate() {
+                let (arm, comparison) = (i / n_rivals, i % n_rivals);
+                auroc[arm][comparison].push(a);
+                lfc[arm][comparison].push(l);
+                z_scores[arm][comparison].push(z);
+            }
+        },
+        verbosity,
+    )?;
 
     if verbosity.normal_verbosity() {
         println!(
