@@ -439,7 +439,12 @@ pub fn compute_kth_distances_from_matrix(
 
 /// Build sparse neighbourhood matrix in COO (triplet) format
 ///
-/// Each neighbourhood includes the index cell plus its k nearest neighbours.
+/// Each neighbourhood is the index cell plus its neighbours in the symmetrised
+/// kNN graph: the cells it lists and the cells that list it. This is Milo's
+/// definition, since `buildGraph()` makes the graph undirected before
+/// `makeNhoods()` reads it. Sizes therefore vary, hubs in dense regions get
+/// larger neighbourhoods. Each cell appears at most once per neighbourhood and
+/// the entries are neighbourhood-contiguous.
 ///
 /// ### Params
 ///
@@ -454,26 +459,36 @@ pub fn build_nhood_matrix(
     knn_indices: &[Vec<usize>],
     index_cells: &[usize],
 ) -> (Vec<usize>, Vec<usize>, Vec<f64>) {
-    let k = knn_indices[0].len();
-    let n_nhoods = index_cells.len();
+    let n_cells = knn_indices.len();
 
-    // Pre-allocate (over-estimate)
-    let mut row_indices = Vec::with_capacity(n_nhoods * (k + 1));
-    let mut col_indices = Vec::with_capacity(n_nhoods * (k + 1));
-    let mut values = Vec::with_capacity(n_nhoods * (k + 1));
-
-    for (nh_idx, &cell_idx) in index_cells.iter().enumerate() {
-        row_indices.push(cell_idx);
-        col_indices.push(nh_idx);
-        values.push(1.0);
-
-        for j in 0..k {
-            let neighbor_idx = knn_indices[cell_idx][j];
-            row_indices.push(neighbor_idx);
-            col_indices.push(nh_idx);
-            values.push(1.0);
+    let mut incoming: Vec<Vec<usize>> = vec![Vec::new(); n_cells];
+    for (cell, neighbours) in knn_indices.iter().enumerate() {
+        for &nb in neighbours {
+            incoming[nb].push(cell);
         }
     }
+
+    let mut row_indices = Vec::new();
+    let mut col_indices = Vec::new();
+    // mutual neighbours sit in both lists, so dedup per neighbourhood
+    let mut seen = vec![usize::MAX; n_cells];
+
+    for (nh_idx, &cell_idx) in index_cells.iter().enumerate() {
+        let members = std::iter::once(&cell_idx)
+            .chain(&knn_indices[cell_idx])
+            .chain(&incoming[cell_idx]);
+
+        for &member in members {
+            if seen[member] == nh_idx {
+                continue;
+            }
+            seen[member] = nh_idx;
+            row_indices.push(member);
+            col_indices.push(nh_idx);
+        }
+    }
+
+    let values = vec![1.0; row_indices.len()];
 
     (row_indices, col_indices, values)
 }
@@ -757,6 +772,20 @@ mod tests {
         assert!(count_nhood_cells(&rows, &cols[..3], &sample_ids, 3, 2).is_err());
         assert!(count_nhood_cells(&rows, &cols, &sample_ids, 2, 2).is_err());
         assert!(count_nhood_cells(&rows, &cols, &[0, 0, 1, 1, 9], 3, 2).is_err());
+    }
+
+    /// Cell 3 lists cell 0 without cell 0 listing it back, so it only enters
+    /// neighbourhood 0 through the symmetrisation. Cell 1 is mutual and must
+    /// not be emitted twice.
+    #[test]
+    fn test_build_nhood_matrix_symmetrises_the_knn_graph() {
+        let knn = vec![vec![1, 2], vec![0, 2], vec![1, 0], vec![0, 2]];
+
+        let (rows, cols, values) = build_nhood_matrix(&knn, &[0, 3]);
+
+        assert_eq!(rows, vec![0, 1, 2, 3, 3, 0, 2]);
+        assert_eq!(cols, vec![0, 0, 0, 0, 1, 1, 1]);
+        assert!(values.iter().all(|&v| v == 1.0));
     }
 
     #[test]

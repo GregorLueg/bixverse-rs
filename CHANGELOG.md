@@ -1,6 +1,14 @@
 # News
 
+## 0.5.9
+
+### Fix
+
+- Added reverse edges for the kNN graph in miloR
+
 ## 0.5.8
+
+### Features
 
 - Faster one-vs-many DGE patterns for both Wilcox and AUROC tests leveraging
   the gene-specific view into the data.
