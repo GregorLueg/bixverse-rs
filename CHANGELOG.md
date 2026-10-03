@@ -1,5 +1,11 @@
 # News
 
+## 0.5.10
+
+### Feature
+
+- Version bump on `ann-search-rs` to benefit from faster Annoy and NNDescent.
+
 ## 0.5.9
 
 ### Fix
