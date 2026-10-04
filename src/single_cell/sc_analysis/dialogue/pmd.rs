@@ -196,20 +196,24 @@ impl CellTypeView {
 fn sample_average(features: MatRef<f64>, view: &CellTypeView, averaging: Averaging) -> Mat<f64> {
     let p = features.ncols();
     let n_samples = view.samples.len();
-    let mut out = Mat::<f64>::zeros(n_samples, p);
-    let mut buffer: Vec<f64> = Vec::new();
+    let mut flat = vec![0.0_f64; n_samples * p];
 
-    for (slot, rows) in view.rows_by_sample.iter().enumerate() {
-        for j in 0..p {
-            buffer.clear();
-            buffer.extend(rows.iter().map(|&r| features[(r, j)]));
-            out[(slot, j)] = match averaging {
-                Averaging::Median => median(&buffer).unwrap_or(f64::NAN),
-                Averaging::Mean => buffer.iter().sum::<f64>() / buffer.len() as f64,
-            };
-        }
-    }
-    out
+    // One feature column per task: the rows of every sample are gathered from
+    // the same contiguous column, and the output column is written contiguously
+    flat.par_chunks_mut(n_samples.max(1))
+        .enumerate()
+        .for_each_init(Vec::<f64>::new, |buffer, (j, out_col)| {
+            for (slot, rows) in view.rows_by_sample.iter().enumerate() {
+                buffer.clear();
+                buffer.extend(rows.iter().map(|&r| features[(r, j)]));
+                out_col[slot] = match averaging {
+                    Averaging::Median => median(buffer).unwrap_or(f64::NAN),
+                    Averaging::Mean => buffer.iter().sum::<f64>() / buffer.len() as f64,
+                };
+            }
+        });
+
+    MatRef::from_column_major_slice(&flat, n_samples, p).to_owned()
 }
 
 /// Keeps only features that vary across samples.

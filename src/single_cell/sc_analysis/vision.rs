@@ -70,6 +70,8 @@ pub fn r_list_to_sig_genes(gs_list: List) -> extendr_api::Result<Vec<SignatureGe
 /// * `cell` - The CsrCellChunk
 /// * `signatures` - Slice of `SignatureGenes` to calculate the scores for
 /// * `total_genes` - Total number of represented genes
+/// * `scratch` - Zeroed dense buffer of length `total_genes`; the stored
+///   values are scattered into it and cleared again before returning
 ///
 /// ### Returns
 ///
@@ -78,14 +80,12 @@ fn calculate_vision_scores_for_cell(
     cell: &CsrCellChunk,
     signatures: &[SignatureGenes],
     total_genes: usize,
+    scratch: &mut [f32],
 ) -> Vec<f32> {
-    // helper
-    let get_expr = |gene_idx: usize| -> f64 {
-        match cell.indices.binary_search(&(gene_idx as u32)) {
-            Ok(pos) => cell.data_norm[pos].to_f32() as f64,
-            Err(_) => 0.0,
-        }
-    };
+    for (&idx, value) in cell.indices.iter().zip(cell.data_norm.iter()) {
+        scratch[idx as usize] = value.to_f32();
+    }
+    let get_expr = |gene_idx: usize| -> f64 { scratch[gene_idx] as f64 };
 
     // Cell-level statistics (ALL genes including zeros)
     let mut sum = 0.0_f64;
@@ -104,7 +104,7 @@ fn calculate_vision_scores_for_cell(
         .sqrt();
 
     // Score signatures
-    signatures
+    let scores = signatures
         .iter()
         .map(|sig| {
             let signature_size = (sig.positive.len() + sig.negative.len()) as f64;
@@ -121,7 +121,65 @@ fn calculate_vision_scores_for_cell(
             // R "znorm_columns" formula
             ((mean_sig - mu_cell) / sigma_cell) as f32
         })
-        .collect()
+        .collect();
+
+    for &idx in &cell.indices {
+        scratch[idx as usize] = 0.0;
+    }
+
+    scores
+}
+
+/// Signatures transposed per tile, so that each cell is read one cache line
+/// at a time rather than once per signature
+const CONSISTENCY_TILE: usize = 64;
+
+/// Geary's C based consistency (`1 - C`) of every signature column
+///
+/// The scores are stored cell-major, so a signature is a strided gather over
+/// all cells. Signatures are processed in tiles: each tile is transposed in
+/// one sequential pass over the cells and the signatures of the tile are then
+/// ranked and scored in parallel.
+///
+/// ### Params
+///
+/// * `scores` - Cells x signatures scores, one `Vec` per cell
+/// * `n_signatures` - Number of signature columns
+/// * `knn_indices` - Neighbour indices per cell
+/// * `knn_weights` - Neighbour weights matching `knn_indices`
+///
+/// ### Returns
+///
+/// `1 - C` per signature, in column order
+fn consistency_per_signature(
+    scores: &[Vec<f32>],
+    n_signatures: usize,
+    knn_indices: &[Vec<usize>],
+    knn_weights: &[Vec<f32>],
+) -> Vec<f64> {
+    let n_cells = scores.len();
+    let mut out = Vec::with_capacity(n_signatures);
+
+    for start in (0..n_signatures).step_by(CONSISTENCY_TILE) {
+        let width = CONSISTENCY_TILE.min(n_signatures - start);
+        let mut tile: Vec<Vec<f32>> = (0..width).map(|_| Vec::with_capacity(n_cells)).collect();
+        for cell in scores {
+            for (col, &v) in tile.iter_mut().zip(&cell[start..start + width]) {
+                col.push(v);
+            }
+        }
+
+        let tile_res: Vec<f64> = tile
+            .par_iter()
+            .map(|col| {
+                let ranks = rank_vector(col);
+                1.0 - geary_c(&ranks.r_float_convert(), knn_indices, knn_weights)
+            })
+            .collect();
+        out.extend(tile_res);
+    }
+
+    out
 }
 
 /// Calculate Geary's C for a single signature (pathway)
@@ -230,7 +288,10 @@ pub fn calculate_vision<S: SingleCellReading>(
     let start_signatures = Instant::now();
     let signature_scores: Vec<Vec<f32>> = cell_chunks
         .par_iter()
-        .map(|chunk| calculate_vision_scores_for_cell(chunk, gene_signs, no_genes))
+        .map_init(
+            || vec![0.0_f32; no_genes],
+            |scratch, chunk| calculate_vision_scores_for_cell(chunk, gene_signs, no_genes, scratch),
+        )
         .collect();
     let end_signatures = start_signatures.elapsed();
 
@@ -279,7 +340,12 @@ pub fn calculate_vision_streaming<S: SingleCellReading>(
 
         let chunk_scores: Vec<Vec<f32>> = cell_chunks
             .par_iter()
-            .map(|chunk| calculate_vision_scores_for_cell(chunk, gene_signs, no_genes))
+            .map_init(
+                || vec![0.0_f32; no_genes],
+                |scratch, chunk| {
+                    calculate_vision_scores_for_cell(chunk, gene_signs, no_genes, scratch)
+                },
+            )
             .collect();
 
         all_results.extend(chunk_scores);
@@ -339,19 +405,8 @@ pub fn calc_autocorr_with_clusters(
     let n_pathways = pathway_scores[0].len();
 
     // calculate Geary's C for actual pathways
-    let pathway_consistency: Vec<f64> = (0..n_pathways)
-        .into_par_iter()
-        .map(|pathway_idx| {
-            let scores: Vec<f32> = pathway_scores
-                .iter()
-                .map(|cell| cell[pathway_idx])
-                .collect();
-
-            let ranks = rank_vector(&scores);
-            let c = geary_c(&ranks.r_float_convert(), &knn_indices, &knn_weights);
-            1.0 - c
-        })
-        .collect();
+    let pathway_consistency =
+        consistency_per_signature(pathway_scores, n_pathways, &knn_indices, &knn_weights);
 
     if verbosity.normal_verbosity() {
         println!("Calculated pathway consistency: {:.2?}", start.elapsed());
@@ -362,18 +417,7 @@ pub fn calc_autocorr_with_clusters(
         .map(|cluster_scores| {
             let n_random = cluster_scores[0].len();
 
-            // Single level of parallelism
-            (0..n_random)
-                .into_par_iter() // Only this one is parallel
-                .map(|sig_idx| {
-                    let scores: Vec<f32> =
-                        cluster_scores.iter().map(|cell| cell[sig_idx]).collect();
-
-                    let ranks = rank_vector(&scores);
-                    let c = geary_c(&ranks.r_float_convert(), &knn_indices, &knn_weights);
-                    1.0 - c
-                })
-                .collect()
+            consistency_per_signature(cluster_scores, n_random, &knn_indices, &knn_weights)
         })
         .collect();
 

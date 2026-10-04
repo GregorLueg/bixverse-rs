@@ -237,21 +237,24 @@ pub fn parse_index_type(s: &str) -> Option<KnnIndexType> {
 /// * `embd` - The embedding matrix that was used for the generation of the kNN
 ///   graph.
 /// * `neighbours` - Slice of indices for the neighbours
+/// * `values` - Reused scratch buffer
 ///
 /// ### Returns
 ///
 /// Vector of median features
-fn compute_median_position(embd: MatRef<f32>, neighbours: &[usize]) -> Vec<f32> {
+fn compute_median_position(
+    embd: MatRef<f32>,
+    neighbours: &[usize],
+    values: &mut Vec<f32>,
+) -> Vec<f32> {
     let n_feature = embd.ncols();
 
     let mut median_point = vec![0.0f32; n_feature];
     for feat_idx in 0..n_feature {
-        let values = neighbours
-            .iter()
-            .map(|&nb_idx| embd[(nb_idx, feat_idx)])
-            .collect::<Vec<f32>>();
+        values.clear();
+        values.extend(neighbours.iter().map(|&nb_idx| embd[(nb_idx, feat_idx)]));
 
-        median_point[feat_idx] = median(&values).unwrap_or(0_f32);
+        median_point[feat_idx] = median(values).unwrap_or(0_f32);
     }
 
     median_point
@@ -278,7 +281,7 @@ fn find_nearest_in_subset(
     let median_row = MatRef::from_row_major_slice(median_point, 1, embd.ncols()).row(0);
 
     candidates
-        .par_iter()
+        .iter()
         .map(|&idx| {
             let dist = compute_distance_knn(median_row, embd.row(idx), metric);
             (idx, dist)
@@ -369,40 +372,43 @@ pub fn refine_sampling_with_strategy(
         println!("Running refined sampling");
     }
 
-    let mut refined = Vec::with_capacity(sampled_indices.len());
-
     let dist_metric = parse_ann_dist(&knn_params.ann_dist).unwrap_or_default();
+    let n_neighbours = k_refine.min(knn_indices[0].len());
 
-    for &sample_idx in sampled_indices {
-        let mut neighbours = Vec::with_capacity(k_refine);
-        for j in 0..k_refine.min(knn_indices[0].len()) {
-            let neighbour_idx = knn_indices[sample_idx][j];
-            neighbours.push(neighbour_idx);
-        }
+    let median_of = |sample_idx: usize, values: &mut Vec<f32>| -> (Vec<usize>, Vec<f32>) {
+        let neighbours = knn_indices[sample_idx][..n_neighbours].to_vec();
+        let median_point = compute_median_position(embd, &neighbours, values);
+        (neighbours, median_point)
+    };
 
-        let median_point = compute_median_position(embd, &neighbours);
-
-        let best_idx = match strategy {
-            RefinementStrategy::Approximate => {
+    match (strategy, knn_index) {
+        // Per-sample work is small: parallelise over samples, scan sequentially
+        (RefinementStrategy::Approximate, _) => Ok(sampled_indices
+            .par_iter()
+            .map_init(Vec::new, |values, &sample_idx| {
+                let (neighbours, median_point) = median_of(sample_idx, values);
                 find_nearest_in_subset(embd, &median_point, &neighbours, &dist_metric)
-            }
-            RefinementStrategy::BruteForce => {
-                find_nearest_bruteforce(embd, &median_point, &dist_metric)
-            }
-            RefinementStrategy::IndexBased => {
-                if let Some(index) = knn_index {
-                    find_nearest_with_index(index, knn_params, &median_point)?
-                } else {
-                    // Fallback to brute force
+            })
+            .collect()),
+        (RefinementStrategy::IndexBased, Some(index)) => sampled_indices
+            .par_iter()
+            .map_init(Vec::new, |values, &sample_idx| {
+                let (_, median_point) = median_of(sample_idx, values);
+                find_nearest_with_index(index, knn_params, &median_point)
+            })
+            .collect(),
+        // The scan over all cells is the parallel part here
+        _ => {
+            let mut values = Vec::new();
+            Ok(sampled_indices
+                .iter()
+                .map(|&sample_idx| {
+                    let (_, median_point) = median_of(sample_idx, &mut values);
                     find_nearest_bruteforce(embd, &median_point, &dist_metric)
-                }
-            }
-        };
-
-        refined.push(best_idx);
+                })
+                .collect())
+        }
     }
-
-    Ok(refined)
 }
 
 /// Compute distances to the k-th nearest neighbour for each index cell
