@@ -50,6 +50,12 @@ type PreservedEdge = (usize, usize, f32);
 // Helpers //
 /////////////
 
+/// Rows handled per task when walking the column-major `n x n` matrices.
+///
+/// Sixteen `f32` or `u32` values fill one 64-byte cache line, so a tile read
+/// down a column is one line per column.
+const ROW_TILE: usize = 16;
+
 /// Rank each row of `similarity` by descending value.
 ///
 /// The diagonal is forced to `n` (worst rank) to exclude self-loops. Ties
@@ -61,8 +67,10 @@ type PreservedEdge = (usize, usize, f32);
 ///
 /// ### Returns
 ///
-/// A dense `n × n` matrix of `u32` ranks where entry `(i, j)` is the rank
-/// of column `j` within row `i` (rank 1 = most similar).
+/// A dense `n × n` matrix of `u32` ranks, stored **transposed**: entry
+/// `(j, i)` is the rank of column `j` within row `i` (rank 1 = most similar),
+/// so each row's ranks are written down one contiguous column. The only
+/// consumer reads `rank[i,j] * rank[j,i]`, which is symmetric.
 fn rank_rows_descending(similarity: &Mat<f32>) -> Mat<u32> {
     let n = similarity.nrows();
     let mut ranks = Mat::<u32>::from_fn(n, n, |_, _| 0);
@@ -70,25 +78,43 @@ fn rank_rows_descending(similarity: &Mat<f32>) -> Mat<u32> {
     let col_stride = ranks.col_stride() as usize;
     let ranks_addr = ranks.as_ptr_mut() as usize;
 
-    (0..n).into_par_iter().for_each(|i| {
-        let mut order: Vec<usize> = (0..n).collect();
-        order.sort_unstable_by(|&a, &b| {
-            similarity[(i, b)]
-                .partial_cmp(&similarity[(i, a)])
-                .unwrap_or(Ordering::Equal)
-        });
+    (0..n.div_ceil(ROW_TILE)).into_par_iter().for_each_init(
+        || (Vec::<f32>::new(), Vec::<usize>::new()),
+        |(panel, order), tile| {
+            let first = tile * ROW_TILE;
+            let rows = ROW_TILE.min(n - first);
 
-        // SAFETY: each task owns a unique row `i`; writes at offset
-        // `col * col_stride + i` are disjoint across tasks because every
-        // task writes to a different `i`. The `Mat` outlives all tasks.
-        unsafe {
-            let ranks_ptr = ranks_addr as *mut u32;
-            for (rank_minus_one, &col) in order.iter().enumerate() {
-                *ranks_ptr.add(col * col_stride + i) = (rank_minus_one as u32) + 1;
+            // gather the tile's rows: one cache line per column read
+            panel.clear();
+            panel.resize(rows * n, 0.0);
+            for j in 0..n {
+                for r in 0..rows {
+                    panel[r * n + j] = similarity[(first + r, j)];
+                }
             }
-            *ranks_ptr.add(i * col_stride + i) = n as u32;
-        }
-    });
+
+            for r in 0..rows {
+                let i = first + r;
+                let row = &panel[r * n..(r + 1) * n];
+                order.clear();
+                order.extend(0..n);
+                order.sort_unstable_by(|&a, &b| {
+                    row[b].partial_cmp(&row[a]).unwrap_or(Ordering::Equal)
+                });
+
+                // SAFETY: each task owns the columns `first..first + rows`, so
+                // writes at `i * col_stride + col` are disjoint across tasks.
+                // The `Mat` outlives all tasks.
+                unsafe {
+                    let ranks_ptr = ranks_addr as *mut u32;
+                    for (rank_minus_one, &col) in order.iter().enumerate() {
+                        *ranks_ptr.add(i * col_stride + col) = (rank_minus_one as u32) + 1;
+                    }
+                    *ranks_ptr.add(i * col_stride + i) = n as u32;
+                }
+            }
+        },
+    );
 
     ranks
 }
@@ -102,7 +128,8 @@ fn rank_rows_descending(similarity: &Mat<f32>) -> Mat<u32> {
 ///
 /// ### Params
 ///
-/// * `ranks` - Dense `n × n` rank matrix from `rank_rows_descending`.
+/// * `ranks` - Dense `n × n` transposed rank matrix from
+///   `rank_rows_descending`.
 /// * `max_rank` - Balanced-rank cutoff; entries at or above this are dropped.
 ///
 /// ### Returns
@@ -120,58 +147,83 @@ fn balance_threshold_and_preserve(
     let cutoff = max_rank_f + 1.0;
 
     // Per-row scan: build sorted (col, stored) lists and find each row's
-    // argmax. Returned rows are already sorted by column index.
-    let per_row: Vec<RowScan> = (0..n)
+    // argmax. Returned rows are already sorted by column index. Rows are
+    // taken in tiles so that the strided `ranks[(i, j)]` is gathered once per
+    // tile into contiguous panels.
+    let per_row: Vec<RowScan> = (0..n.div_ceil(ROW_TILE))
         .into_par_iter()
-        .map(|i| {
-            let mut cols: Vec<usize> = Vec::new();
-            let mut vals: Vec<f32> = Vec::new();
-            let mut best_col = 0usize;
-            let mut best_val = f32::NEG_INFINITY;
+        .map_init(Vec::<u32>::new, |panel, tile| {
+            let first = tile * ROW_TILE;
+            let rows = ROW_TILE.min(n - first);
 
+            panel.clear();
+            panel.resize(rows * n, 0);
             for j in 0..n {
-                if i == j {
-                    continue;
+                for r in 0..rows {
+                    panel[r * n + j] = ranks[(first + r, j)];
                 }
-                let r_ij = ranks[(i, j)];
-                let r_ji = ranks[(j, i)];
-                let balanced = ((r_ij as f64) * (r_ji as f64)).sqrt() as f32;
-                if balanced >= cutoff {
-                    continue;
-                }
-                let stored = cutoff - balanced;
-                if stored > best_val {
-                    best_val = stored;
-                    best_col = j;
-                }
-                cols.push(j);
-                vals.push(stored);
             }
 
-            // Even if no edge survived the threshold, every row gets a
-            // preserved entry. We have to pick *some* column; scan for the
-            // smallest balanced rank in the row (excluding self).
-            if best_val == f32::NEG_INFINITY {
-                let mut min_balanced = f32::INFINITY;
+            let mut out = Vec::with_capacity(rows);
+            for r in 0..rows {
+                let i = first + r;
+                // transposed storage: column i holds rank[i, j], the panel
+                // holds rank[j, i]
+                let ranks_ji = &panel[r * n..(r + 1) * n];
+                let col_i = ranks.col(i);
+                let balanced_at = |j: usize| {
+                    let r_ij = col_i[j];
+                    let r_ji = ranks_ji[j];
+                    ((r_ij as f64) * (r_ji as f64)).sqrt() as f32
+                };
+
+                let mut cols: Vec<usize> = Vec::new();
+                let mut vals: Vec<f32> = Vec::new();
+                let mut best_col = 0usize;
+                let mut best_val = f32::NEG_INFINITY;
+
                 for j in 0..n {
                     if i == j {
                         continue;
                     }
-                    let r_ij = ranks[(i, j)];
-                    let r_ji = ranks[(j, i)];
-                    let balanced = ((r_ij as f64) * (r_ji as f64)).sqrt() as f32;
-                    if balanced < min_balanced {
-                        min_balanced = balanced;
+                    let balanced = balanced_at(j);
+                    if balanced >= cutoff {
+                        continue;
+                    }
+                    let stored = cutoff - balanced;
+                    if stored > best_val {
+                        best_val = stored;
                         best_col = j;
                     }
+                    cols.push(j);
+                    vals.push(stored);
                 }
-                best_val = 1.0; // floor for preservation
-            } else {
-                best_val = best_val.max(1.0);
-            }
 
-            (cols, vals, (best_col, best_val))
+                // Even if no edge survived the threshold, every row gets a
+                // preserved entry. We have to pick *some* column; scan for the
+                // smallest balanced rank in the row (excluding self).
+                if best_val == f32::NEG_INFINITY {
+                    let mut min_balanced = f32::INFINITY;
+                    for j in 0..n {
+                        if i == j {
+                            continue;
+                        }
+                        let balanced = balanced_at(j);
+                        if balanced < min_balanced {
+                            min_balanced = balanced;
+                            best_col = j;
+                        }
+                    }
+                    best_val = 1.0; // floor for preservation
+                } else {
+                    best_val = best_val.max(1.0);
+                }
+
+                out.push((cols, vals, (best_col, best_val)));
+            }
+            out
         })
+        .flatten_iter()
         .collect();
 
     // assemble CSR directly (rows already sorted by column).
