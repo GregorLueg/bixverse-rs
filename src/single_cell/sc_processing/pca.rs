@@ -769,7 +769,7 @@ fn dense_pca<S: SingleCellReading>(
     scaled_f64
         .par_col_iter_mut()
         .zip(scaled_data.par_iter())
-        .for_each(|(mut col, (src, _, _))| {
+        .for_each(|(col, (src, _, _))| {
             for (dst, &v) in col.iter_mut().zip(src) {
                 *dst = v as f64;
             }
@@ -781,7 +781,7 @@ fn dense_pca<S: SingleCellReading>(
         scaled
             .par_col_iter_mut()
             .zip(scaled_data.par_iter())
-            .for_each(|(mut col, (src, _, _))| {
+            .for_each(|(col, (src, _, _))| {
                 for (dst, &v) in col.iter_mut().zip(src) {
                     *dst = v;
                 }
@@ -1158,7 +1158,7 @@ pub fn pca_on_sc_streaming<S: SingleCellReading>(
             .subcols_mut(start_gene, batch_scaled.len())
             .par_col_iter_mut()
             .zip(batch_scaled.par_iter())
-            .for_each(|(mut col, src)| {
+            .for_each(|(col, src)| {
                 for (dst, &val) in col.iter_mut().zip(src) {
                     *dst = val as f64;
                 }
@@ -1195,7 +1195,7 @@ pub fn pca_on_sc_streaming<S: SingleCellReading>(
         scaled
             .par_col_iter_mut()
             .enumerate()
-            .for_each(|(j, mut col)| {
+            .for_each(|(j, col)| {
                 for (dst, &v) in col.iter_mut().zip(scaled_matrix.col(j).iter()) {
                     *dst = v as f32;
                 }
