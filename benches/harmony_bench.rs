@@ -14,7 +14,7 @@
 //! - `BIXVERSE_HARMONY_TILE` tile the data this many times with small jitter
 //! - `BIXVERSE_HARMONY_REPS` silent timed runs per method, default 3
 //! - `BIXVERSE_HARMONY_ONLY` one of `v1`, `v2`, `gpu`
-//! - `BIXVERSE_HARMONY_KM_ITERS` override the CPU initial k-means iterations
+//! - `BIXVERSE_HARMONY_KM_ITERS` override the initial k-means iterations
 //!
 //! ```bash
 //! BIXVERSE_HARMONY_DIR=/path cargo bench --features single-cell --bench harmony_bench
@@ -190,10 +190,14 @@ fn main() {
 
     #[cfg(feature = "gpu")]
     if run("gpu") {
+        use ann_search_rs::gpu::k_means_gpu::KMeansGpuParams;
         use bixverse_rs::gpu::sc_gpu::harmony_gpu::{HarmonyParamsV2Gpu, harmony_v2_gpu};
         use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
 
-        let params = HarmonyParamsV2Gpu::default();
+        let mut params = HarmonyParamsV2Gpu::default();
+        if let Some(it) = km_iters {
+            params.kmeans_params = Some(KMeansGpuParams::new(it, None, true, false));
+        }
         bench("gpu", reps, &format!("{tag}_gpu_out.f32"), |v| {
             harmony_v2_gpu::<WgpuRuntime>(
                 pca.as_ref(),

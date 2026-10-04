@@ -234,11 +234,6 @@ impl HarmonyParamsV2Gpu {
             .get("use_dynamic_lambda")
             .and_then(|v| v.as_bool())
             .unwrap_or(defaults.use_dynamic_lambda);
-        let csr_cube_count = params_list
-            .get("csr_cube_count")
-            .and_then(|v| v.as_integer())
-            .map(|v| v as usize)
-            .unwrap_or(defaults.csr_cube_count);
 
         let kmeans_iters = params_list
             .get("k_means_iter")
@@ -278,7 +273,6 @@ impl HarmonyParamsV2Gpu {
             tau,
             batch_proportion_cutoff,
             use_dynamic_lambda,
-            csr_cube_count,
             kmeans_params,
         })
     }

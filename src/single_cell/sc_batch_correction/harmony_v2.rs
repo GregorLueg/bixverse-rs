@@ -8,8 +8,7 @@
 //! - Dynamic lambda estimation
 //! - Theta scaling by batch size
 
-use faer::linalg::solvers::PartialPivLu;
-use faer::{Mat, MatRef, linalg::solvers::DenseSolveCore};
+use faer::{Mat, MatRef};
 use std::time::Instant;
 use thousands::*;
 
@@ -141,104 +140,6 @@ pub fn expand_theta(theta: &[f32], batch_infos: &[BatchInfo], k: usize, tau: f32
 /// `window_size + 1`
 pub fn check_convergence(objectives: &[f32], window_size: usize, epsilon: f32) -> bool {
     window_converged(objectives, window_size, epsilon, true)
-}
-
-///////////////////////////
-// Ridge solvers (single) //
-///////////////////////////
-
-/// Solve `W = inv(design_cov) * phi_z` using arrowhead closed-form inversion.
-///
-/// When a single covariate is being corrected, the normal-equation matrix
-/// from `[intercept | one-hot]` has arrowhead structure, enabling O(p)
-/// inversion instead of O(p^3) LU. Uses `f64` to avoid catastrophic
-/// cancellation under the hood.
-///
-/// ### Params
-///
-/// * `design_cov` - Normal-equation matrix (p x p)
-/// * `phi_z` - Right-hand side (p x d)
-///
-/// ### Returns
-///
-/// `Some(W)` (p x d) on success, `None` if the Schur complement is
-/// degenerate (caller should fall back to LU)
-pub fn solve_arrowhead(design_cov: &Mat<f32>, phi_z: &Mat<f32>) -> Option<Mat<f32>> {
-    let p = design_cov.nrows();
-    let d = phi_z.ncols();
-
-    let mut ac = vec![0.0f64; p];
-    for i in 0..p {
-        ac[i] = -(design_cov[(0, i)] as f64);
-    }
-    ac[0] = 1.0;
-
-    let mut b = vec![0.0f64; p];
-    for i in 1..p {
-        let diag = design_cov[(i, i)] as f64;
-        if diag.abs() < 1e-12 {
-            return None;
-        }
-        b[i] = 1.0 / diag;
-    }
-
-    let mut u: f64 = design_cov[(0, 0)] as f64;
-    for i in 0..p {
-        u -= ac[i] * ac[i] * b[i];
-    }
-    if u.abs() < 1e-10 {
-        return None;
-    }
-
-    let mut ac_b = vec![0.0f64; p];
-    for i in 0..p {
-        ac_b[i] = ac[i] * b[i];
-    }
-    ac_b[0] = 1.0;
-
-    let mut v = vec![0.0f64; d];
-    for feat in 0..d {
-        for j in 0..p {
-            v[feat] += ac_b[j] * phi_z[(j, feat)] as f64;
-        }
-    }
-
-    let inv_u = 1.0 / u;
-    let mut w = Mat::<f32>::zeros(p, d);
-    for i in 0..p {
-        for feat in 0..d {
-            w[(i, feat)] = (inv_u * ac_b[i] * v[feat] + b[i] * phi_z[(i, feat)] as f64) as f32;
-        }
-    }
-
-    Some(w)
-}
-
-/// Fallback LU solve for `W = inv(design_cov) * phi_z`.
-///
-/// Solve `W = inv(design_cov) * phi_z` via LU decomposition. Uses `f64` to
-/// avoid catastrophic cancellation issues.
-///
-/// ### Params
-///
-/// * `design_cov` - Normal-equation matrix (p x p)
-/// * `phi_z` - Right-hand side (p x d)
-///
-/// ### Returns
-///
-/// W (p x d)
-pub fn solve_lu(design_cov: &Mat<f32>, phi_z: &Mat<f32>) -> Mat<f32> {
-    let p = design_cov.nrows();
-    let d = phi_z.ncols();
-
-    let cov_f64 = Mat::<f64>::from_fn(p, p, |i, j| design_cov[(i, j)] as f64);
-    let phi_z_f64 = Mat::<f64>::from_fn(p, d, |i, j| phi_z[(i, j)] as f64);
-
-    let lu: PartialPivLu<f64> = cov_f64.partial_piv_lu();
-    let inv_cov = lu.inverse();
-    let w_f64 = &inv_cov * &phi_z_f64;
-
-    Mat::<f32>::from_fn(p, d, |i, j| w_f64[(i, j)] as f32)
 }
 
 //////////////////
@@ -601,37 +502,5 @@ mod tests {
     fn test_check_convergence_not_converged() {
         let vals = vec![100.0, 90.0, 80.0, 70.0, 60.0, 50.0];
         assert!(!check_convergence(&vals, 3, 0.01));
-    }
-
-    /// The closed-form arrowhead solve agrees with LU on an arrowhead system.
-    #[test]
-    fn test_arrowhead_matches_lu() {
-        let p = 4;
-        let d = 3;
-        let mut design_cov = Mat::<f32>::zeros(p, p);
-        design_cov[(0, 0)] = 10.0;
-        for i in 1..p {
-            design_cov[(0, i)] = 1.0 + i as f32 * 0.5;
-            design_cov[(i, 0)] = design_cov[(0, i)];
-            design_cov[(i, i)] = 5.0 + i as f32;
-        }
-        let phi_z = Mat::from_fn(p, d, |i, j| (i * d + j) as f32 * 0.1 + 1.0);
-        let w_arrow = solve_arrowhead(&design_cov, &phi_z).expect("should succeed");
-        let w_lu = solve_lu(&design_cov, &phi_z);
-        for i in 0..p {
-            for j in 0..d {
-                assert!((w_arrow[(i, j)] - w_lu[(i, j)]).abs() < 1e-3);
-            }
-        }
-    }
-
-    /// A zero on the diagonal makes the arrowhead solve degenerate, so it declines rather than divides.
-    #[test]
-    fn test_arrowhead_degenerate_returns_none() {
-        let mut design_cov = Mat::<f32>::zeros(3, 3);
-        design_cov[(0, 0)] = 1.0;
-        design_cov[(2, 2)] = 1.0;
-        let phi_z = Mat::from_fn(3, 2, |i, j| (i + j) as f32);
-        assert!(solve_arrowhead(&design_cov, &phi_z).is_none());
     }
 }

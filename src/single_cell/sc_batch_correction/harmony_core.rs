@@ -72,13 +72,16 @@ pub(crate) struct RidgeSettings {
     pub prune_cutoff: Option<f32>,
 }
 
-/// Output of one ridge correction step.
+/// Output of one ridge solve.
 pub(crate) struct RidgeOutput {
     /// Intercept row per cluster `[k, d]` row-major; meaningful only where
     /// `solved[k]`
     pub intercept: Vec<f32>,
     /// Whether cluster k had a system to solve
     pub solved: Vec<bool>,
+    /// Correction per variable `[n_levels, k, d]`; zero where a level is not
+    /// in the cluster's system
+    pub corr: Vec<Vec<f32>>,
 }
 
 /// Raw pointer that may be shared across rayon tasks writing disjoint ranges.
@@ -916,60 +919,40 @@ fn solve_spd_f64(a: MatRef<f64>, rhs: MatRef<f64>) -> Mat<f64> {
     }
 }
 
-/// Batch-pruned, multi-variable ridge correction in one pass over the cells.
-///
-/// Builds every variable's per-level weighted sums (and, with more than one
-/// variable, every pair's overlap counts) in one sweep, then assembles and
-/// solves each cluster's normal equations from those tables alone:
+/// Assemble and solve every cluster's ridge normal equations from the
+/// per-level tables alone:
 ///
 /// `[ r_sum_k   O_k^T            ] + diag(0, lambda)`
 /// `[ O_k       diag(O_k) + P_k   ]`
 ///
-/// with the intercept unpenalised. A cluster with one active variable is an
-/// arrowhead system; otherwise it is solved by Cholesky. Solves are in f64.
-/// The correction `z_corr = z - sum_v R^T C_v[level_v]` is applied as one GEMM
-/// per run, variable by variable.
+/// with the intercept unpenalised and the right-hand side built from the
+/// weighted sums. A cluster with one active variable is an arrowhead system;
+/// otherwise it is solved by Cholesky. Solves are in f64.
 ///
 /// ### Params
 ///
-/// * `z` - Original embedding `[n, d]` row-major
-/// * `r` - Soft assignments `[n, k]`
+/// * `sums` - Per variable `(S [n_levels, k, d], O [n_levels, k])`
+/// * `pairs` - Overlap counts `P [(la, lb), k]` per variable pair `(a, b)`,
+///   `a < b`; empty for one variable
 /// * `infos` - Batch information per variable
 /// * `settings` - Ridge penalties and pruning
 /// * `k` - Cluster count
 /// * `d` - Embedding dimension
-/// * `z_corr` - Output corrected embedding `[n, d]` row-major
 ///
 /// ### Returns
 ///
-/// The per-cluster intercept rows and which clusters were solved
-pub(crate) fn ridge_correction(
-    z: &[f32],
-    r: &[f32],
+/// Intercepts, solved flags and the per-variable correction tables
+pub(crate) fn solve_ridge(
+    sums: &[(Vec<f64>, Vec<f64>)],
+    pairs: &[((usize, usize), Vec<f64>)],
     infos: &[BatchInfo],
     settings: RidgeSettings,
     k: usize,
     d: usize,
-    z_corr: &mut [f32],
 ) -> RidgeOutput {
-    let n_vars = infos.len();
-    let sums: Vec<(Vec<f64>, Vec<f64>)> = infos
-        .iter()
-        .map(|info| level_sums(r, z, info, k, d))
-        .collect();
-
     let r_sum: Vec<f64> = (0..k)
         .map(|kk| (0..infos[0].n_levels).map(|l| sums[0].1[l * k + kk]).sum())
         .collect();
-
-    let pairs: Vec<((usize, usize), Vec<f64>)> = if n_vars > 1 {
-        (0..n_vars)
-            .flat_map(|a| ((a + 1)..n_vars).map(move |b| (a, b)))
-            .map(|(a, b)| ((a, b), pair_overlaps(r, &infos[a], &infos[b], k)))
-            .collect()
-    } else {
-        Vec::new()
-    };
 
     // per cluster: column of each (var, level), or usize::MAX if not in the
     // system, and the solution
@@ -1029,7 +1012,7 @@ pub(crate) fn ridge_correction(
                     rhs[(c, f)] = sums[v].0[base + f];
                 }
             }
-            for ((va, vb), p_ab) in &pairs {
+            for ((va, vb), p_ab) in pairs {
                 let (ia, ib) = (&infos[*va], &infos[*vb]);
                 for la in 0..ia.n_levels {
                     let ca = cols[*va][la];
@@ -1085,11 +1068,64 @@ pub(crate) fn ridge_correction(
         }
     }
 
+    RidgeOutput {
+        intercept,
+        solved,
+        corr,
+    }
+}
+
+/// Batch-pruned, multi-variable ridge correction in one pass over the cells.
+///
+/// Builds every variable's per-level weighted sums (and, with more than one
+/// variable, every pair's overlap counts) in one sweep, solves every cluster
+/// with [`solve_ridge`], and applies `z_corr = z - sum_v R^T C_v[level_v]` as
+/// one GEMM per run, variable by variable.
+///
+/// ### Params
+///
+/// * `z` - Original embedding `[n, d]` row-major
+/// * `r` - Soft assignments `[n, k]`
+/// * `infos` - Batch information per variable
+/// * `settings` - Ridge penalties and pruning
+/// * `k` - Cluster count
+/// * `d` - Embedding dimension
+/// * `z_corr` - Output corrected embedding `[n, d]` row-major
+///
+/// ### Returns
+///
+/// The ridge solution, see [`RidgeOutput`]
+pub(crate) fn ridge_correction(
+    z: &[f32],
+    r: &[f32],
+    infos: &[BatchInfo],
+    settings: RidgeSettings,
+    k: usize,
+    d: usize,
+    z_corr: &mut [f32],
+) -> RidgeOutput {
+    let n_vars = infos.len();
+    let sums: Vec<(Vec<f64>, Vec<f64>)> = infos
+        .iter()
+        .map(|info| level_sums(r, z, info, k, d))
+        .collect();
+
+    let pairs: Vec<((usize, usize), Vec<f64>)> = if n_vars > 1 {
+        (0..n_vars)
+            .flat_map(|a| ((a + 1)..n_vars).map(move |b| (a, b)))
+            .map(|(a, b)| ((a, b), pair_overlaps(r, &infos[a], &infos[b], k)))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let out = solve_ridge(&sums, &pairs, infos, settings, k, d);
+
     z_corr.copy_from_slice(z);
     let zc_ptr = SyncPtr(z_corr.as_mut_ptr());
     for (v, info) in infos.iter().enumerate() {
         let runs = level_runs(info);
-        let c_v = &corr[v];
+        let c_v = &out.corr[v];
         runs.par_iter().for_each_init(
             || (Vec::new(), Vec::new()),
             |(r_buf, delta), &(level, cells)| {
@@ -1118,7 +1154,7 @@ pub(crate) fn ridge_correction(
         );
     }
 
-    RidgeOutput { intercept, solved }
+    out
 }
 
 /// Centroids `normalise(R^T z_cos)`, `[k, d]` row-major.
@@ -1393,8 +1429,7 @@ mod tests {
             let mut r = random_r(n, k, 9);
             let (mut o, mut r_sum) = observed_counts(&r, &infos, k);
             let (e, h) = update_assignments(
-                variant, &mut r, &b, &lb, &sh, &sigma, &theta, &infos, &mut o, &mut r_sum, 0.07,
-                11,
+                variant, &mut r, &b, &lb, &sh, &sigma, &theta, &infos, &mut o, &mut r_sum, 0.07, 11,
             );
 
             for row in r.chunks_exact(k) {
@@ -1428,7 +1463,17 @@ mod tests {
         let mut r = random_r(n, k, 14);
         let (mut o, mut r_sum) = observed_counts(&r, &infos, k);
         update_assignments(
-            Variant::V2, &mut r, &b, &lb, &sh, &sigma, &theta, &infos, &mut o, &mut r_sum, 0.05,
+            Variant::V2,
+            &mut r,
+            &b,
+            &lb,
+            &sh,
+            &sigma,
+            &theta,
+            &infos,
+            &mut o,
+            &mut r_sum,
+            0.05,
             1,
         );
         for (a, b) in r.iter().zip(&b) {
@@ -1481,7 +1526,12 @@ mod tests {
             let mut cols: Vec<(usize, usize)> = Vec::new();
             for (v, info) in infos.iter().enumerate() {
                 let o: Vec<f64> = (0..info.n_levels)
-                    .map(|l| info.batch_indices[l].iter().map(|&c| r[c * k + kk] as f64).sum())
+                    .map(|l| {
+                        info.batch_indices[l]
+                            .iter()
+                            .map(|&c| r[c * k + kk] as f64)
+                            .sum()
+                    })
                     .collect();
                 let passing: Vec<usize> = (0..info.n_levels)
                     .filter(|&l| match settings.prune_cutoff {
@@ -1550,7 +1600,9 @@ mod tests {
         let labels = vec![(0..n).map(|c| c % 3).collect::<Vec<_>>()];
         let infos = create_batch_infos(&labels, n).unwrap();
         let mut rng = StdRng::seed_from_u64(16);
-        let z: Vec<f32> = (0..n * d).map(|_| rng.random::<f32>() * 4.0 - 2.0).collect();
+        let z: Vec<f32> = (0..n * d)
+            .map(|_| rng.random::<f32>() * 4.0 - 2.0)
+            .collect();
         let mut r = random_r(n, k, 17);
         // cluster 2 has essentially no cells of level 0, so it is pruned there
         for c in infos[0].batch_indices[0].iter() {
@@ -1590,7 +1642,9 @@ mod tests {
         ];
         let infos = create_batch_infos(&labels, n).unwrap();
         let mut rng = StdRng::seed_from_u64(18);
-        let z: Vec<f32> = (0..n * d).map(|_| rng.random::<f32>() * 2.0 - 1.0).collect();
+        let z: Vec<f32> = (0..n * d)
+            .map(|_| rng.random::<f32>() * 2.0 - 1.0)
+            .collect();
         let r = random_r(n, k, 19);
         for prune in [None, Some(1e-5)] {
             let settings = RidgeSettings {
