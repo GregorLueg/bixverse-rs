@@ -6,8 +6,16 @@ use rayon::prelude::*;
 use crate::core::math::vector_helpers::*;
 use crate::prelude::*;
 
+////////////
+// Consts //
+////////////
+
 /// Matrix size (elements) from which column-wise loops fan out over rayon
 const PAR_COL_MIN_ELEMS: usize = 1 << 17;
+
+///////////////
+// Functions //
+///////////////
 
 /// Scale a matrix
 ///

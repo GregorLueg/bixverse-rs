@@ -12,6 +12,13 @@ use rayon::prelude::*;
 use crate::prelude::*;
 use crate::utils::faer_parallelism;
 
+////////////
+// Consts //
+////////////
+
+/// Row chunk of the within-group gram product
+const GRAM_ROW_TILE: usize = 512;
+
 ///////////
 // Enums //
 ///////////
@@ -49,9 +56,6 @@ pub fn parse_perturbation_distance(s: &str) -> Option<PertDistance> {
 /////////////
 // Helpers //
 /////////////
-
-/// Row chunk of the within-group gram product
-const GRAM_ROW_TILE: usize = 512;
 
 /// Calculate the squared norms of the rows
 ///

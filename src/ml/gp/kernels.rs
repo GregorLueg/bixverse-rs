@@ -14,11 +14,19 @@
 use faer::MatMut;
 use rayon::prelude::*;
 
+////////////
+// Consts //
+////////////
+
 /// Kernel matrix size above which the fill runs in parallel
 const KERNEL_FILL_PAR_MIN_ELEMENTS: usize = 1 << 16;
 
 /// `sqrt(5)`, the Matérn-5/2 scaling constant.
 const SQRT_5: f64 = 2.236_067_977_499_79;
+
+///////////////
+// Functions //
+///////////////
 
 /// Matérn-5/2 covariance at a scalar distance.
 ///

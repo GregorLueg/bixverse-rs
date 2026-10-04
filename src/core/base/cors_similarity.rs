@@ -17,8 +17,16 @@ use crate::core::math::matrix_helpers::*;
 use crate::prelude::*;
 use crate::utils::faer_parallelism;
 
+///////////
+// Types //
+///////////
+
 /// Kernel from one query column to every target column
 type ColumnKernel<'a, T> = &'a (dyn Fn(&[T], &[&[T]]) -> Vec<T> + Sync);
+
+////////////
+// Consts //
+////////////
 
 /// Bits per word of the packed boolean columns
 const BITS_PER_WORD: usize = 64;
@@ -1189,10 +1197,12 @@ where
     T::from_usize(intersection).unwrap() / T::from_usize(union).unwrap()
 }
 
+///////////
+// Tests //
+///////////
+
 #[cfg(test)]
 mod tests {
-    // Tests focus mainly on API; the Rest was heavily tested within R
-
     use super::*;
     use faer::Mat;
     use rustc_hash::FxHashSet;

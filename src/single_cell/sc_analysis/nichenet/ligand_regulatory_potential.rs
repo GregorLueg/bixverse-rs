@@ -26,6 +26,13 @@ use crate::graph::page_rank::*;
 use crate::prelude::*;
 
 ////////////
+// Consts //
+////////////
+
+/// Rows transposed per task in [dense_rows_to_csr_thresholded]
+const ROW_BLOCK: usize = 16;
+
+////////////
 // Params //
 ////////////
 
@@ -130,9 +137,6 @@ where
     }
     PageRankGraph::from_petgraph(g)
 }
-
-/// Rows transposed per task in [dense_rows_to_csr_thresholded]
-const ROW_BLOCK: usize = 16;
 
 /// Threshold each row of a dense matrix at its `q` quantile, return as CSR.
 ///

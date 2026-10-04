@@ -9,8 +9,16 @@ use rustc_hash::FxHashMap;
 use crate::prelude::*;
 use crate::utils::gemm::gemm;
 
+////////////
+// Consts //
+////////////
+
 /// Rows per GEMM tile in the silhouette
 const SILHOUETTE_TILE_ROWS: usize = 2048;
+
+///////////////
+// Functions //
+///////////////
 
 /// Adjusted Rand Index between two clusterings
 ///

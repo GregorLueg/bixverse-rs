@@ -5,9 +5,9 @@ use rayon::prelude::*;
 
 use crate::prelude::BixverseFloat;
 
-/////////////////
-// Info theory //
-/////////////////
+///////////////
+// MiScratch //
+///////////////
 
 /// Reusable count tables for the pairwise mutual information kernels
 pub(crate) struct MiScratch {
@@ -114,6 +114,10 @@ impl MiScratch {
         (self.mutual_information(n_rows), entropy)
     }
 }
+
+/////////////
+// Helpers //
+/////////////
 
 /// Resolve the number of bins, defaulting to `sqrt(nrows)`
 ///
@@ -348,10 +352,12 @@ where
     Mat::from_fn(n_rows, n_cols, |i, j| binned_vals[j][i])
 }
 
+///////////
+// Tests //
+///////////
+
 #[cfg(test)]
 mod tests {
-    // Tests focus mainly on API; the Rest was heavily tested within R
-
     use super::*;
     use faer::mat;
 

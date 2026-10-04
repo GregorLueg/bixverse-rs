@@ -55,24 +55,9 @@ pub struct MitchResult<'a, T> {
     pub mysd: T,
 }
 
-///////////////
-// Functions //
-///////////////
-
-/// Calculate the MANOVA results for a given pathway
-///
-/// ### Params
-///
-/// * `x` - The pre-ranked matrix.
-/// * `group1_indices` - The row index positions for which genes belong to the
-///   pathway.
-///
-/// ### Return
-///
-/// Returns the MANOVA results for this pathway.
-pub fn manova_mitch<T: BixverseFloat>(x: MatRef<T>, group1_indices: &[usize]) -> ManovaResult<T> {
-    manova_mitch_cached(x, &MitchTotals::new(x), group1_indices)
-}
+/////////////////
+// MitchTotals //
+/////////////////
 
 /// Quantities of the ranked matrix that do not depend on the pathway
 ///
@@ -103,6 +88,25 @@ impl<T: BixverseFloat> MitchTotals<T> {
             sscp_total: x_centered.transpose() * &x_centered,
         }
     }
+}
+
+///////////////
+// Functions //
+///////////////
+
+/// Calculate the MANOVA results for a given pathway
+///
+/// ### Params
+///
+/// * `x` - The pre-ranked matrix.
+/// * `group1_indices` - The row index positions for which genes belong to the
+///   pathway.
+///
+/// ### Return
+///
+/// Returns the MANOVA results for this pathway.
+pub fn manova_mitch<T: BixverseFloat>(x: MatRef<T>, group1_indices: &[usize]) -> ManovaResult<T> {
+    manova_mitch_cached(x, &MitchTotals::new(x), group1_indices)
 }
 
 /// Calculate the MANOVA results for a given pathway against cached totals

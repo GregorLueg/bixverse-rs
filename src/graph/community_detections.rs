@@ -11,6 +11,10 @@ use std::time::Instant;
 use crate::core::math::sparse::coo_to_csr;
 use crate::prelude::*;
 
+////////////
+// Consts //
+////////////
+
 /// Neighbouring communities above which a merge scores them in parallel
 const WALKTRAP_PAR_MIN_NEIGHBOURS: usize = 64;
 
@@ -331,6 +335,43 @@ where
 // Walktrap //
 //////////////
 
+/////////////////
+// WalkScratch //
+/////////////////
+
+/// Per-thread dense buffers for the random-walk propagation
+///
+/// ### Fields
+///
+/// * `cur` - Current probabilities, nonzero only at `cur_nodes`
+/// * `next` - Probabilities of the next step, nonzero only at `next_nodes`
+/// * `cur_nodes` - Nodes holding mass in `cur`
+/// * `next_nodes` - Nodes holding mass in `next`
+/// * `seen` - Membership flags for `next_nodes` while a step is running
+struct WalkScratch<T> {
+    cur: Vec<T>,
+    next: Vec<T>,
+    cur_nodes: Vec<u32>,
+    next_nodes: Vec<u32>,
+    seen: Vec<bool>,
+}
+
+impl<T: BixverseFloat> WalkScratch<T> {
+    fn new(n: usize) -> Self {
+        Self {
+            cur: vec![T::zero(); n],
+            next: vec![T::zero(); n],
+            cur_nodes: Vec::new(),
+            next_nodes: Vec::new(),
+            seen: vec![false; n],
+        }
+    }
+}
+
+/////////////
+// Helpers //
+/////////////
+
 /// Squared Euclidean distance between two index-sorted sparse vectors.
 ///
 /// Iterates over the union of indices in a single pass; missing indices are
@@ -462,41 +503,12 @@ where
     v
 }
 
-/// Per-thread dense buffers for the random-walk propagation
-///
-/// ### Fields
-///
-/// * `cur` - Current probabilities, nonzero only at `cur_nodes`
-/// * `next` - Probabilities of the next step, nonzero only at `next_nodes`
-/// * `cur_nodes` - Nodes holding mass in `cur`
-/// * `next_nodes` - Nodes holding mass in `next`
-/// * `seen` - Membership flags for `next_nodes` while a step is running
-struct WalkScratch<T> {
-    cur: Vec<T>,
-    next: Vec<T>,
-    cur_nodes: Vec<u32>,
-    next_nodes: Vec<u32>,
-    seen: Vec<bool>,
-}
-
-impl<T: BixverseFloat> WalkScratch<T> {
-    fn new(n: usize) -> Self {
-        Self {
-            cur: vec![T::zero(); n],
-            next: vec![T::zero(); n],
-            cur_nodes: Vec::new(),
-            next_nodes: Vec::new(),
-            seen: vec![false; n],
-        }
-    }
-}
-
 /// Compute random-walk probability vectors for all nodes (sparse)
 ///
 /// For each node i, simulates a `walk_length`-step random walk starting at i
 /// and records the landing probabilities, scaled by the inverse square root of
-/// each node's degree (Pons & Latapy 2005). Probabilities are propagated through
-/// hashmaps so only reached nodes are stored.
+/// each node's degree (Pons & Latapy 2005). Probabilities are propagated
+/// through hashmaps so only reached nodes are stored.
 ///
 /// Transition probabilities are weight-proportional: `p(i→j) = w(i,j) / deg(i)`.
 /// Isolated nodes (zero degree) yield an effectively zero vector.

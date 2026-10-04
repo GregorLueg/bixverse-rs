@@ -25,6 +25,10 @@ use super::{
     LdaParams, LdaResult,
 };
 
+////////////
+// Consts //
+////////////
+
 /// Terms per task when accumulating the topic-term bound.
 const BOUND_TERM_CHUNK: usize = 1024;
 

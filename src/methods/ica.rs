@@ -16,9 +16,21 @@ use crate::prelude::*;
 use crate::utils::faer_parallelism;
 use crate::utils::gemm::gemm;
 
-/////////////
-// Helpers //
-/////////////
+///////////
+// Types //
+///////////
+
+/// Type alias of the ICA results
+///
+/// ### Fields
+///
+/// * `0` - Mixing matrix w
+/// * `1` - Tolerance
+type IcaRes<T> = (Mat<T>, T);
+
+///////////
+// Enums //
+///////////
 
 /// Enum for the ICA types
 #[derive(Clone, Debug, Default)]
@@ -47,13 +59,9 @@ pub fn parse_ica_type(s: &str) -> Option<IcaType> {
     }
 }
 
-/// Type alias of the ICA results
-///
-/// ### Fields
-///
-/// * `0` - Mixing matrix w
-/// * `1` - Tolerance
-type IcaRes<T> = (Mat<T>, T);
+////////////
+// Params //
+////////////
 
 /// Structure to save ICA parameters
 #[derive(Clone, Debug)]
@@ -67,6 +75,10 @@ pub struct IcaParams<T: BixverseFloat> {
     /// Controls ICA internal verbosity
     pub verbose: bool,
 }
+
+///////////////
+// Functions //
+///////////////
 
 /// Prepare the whitening.
 ///

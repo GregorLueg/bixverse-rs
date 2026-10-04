@@ -20,14 +20,18 @@ use crate::single_cell::sc_batch_correction::harmony_core::{
 };
 use crate::single_cell::sc_batch_correction::harmony_v2::{check_convergence, expand_theta};
 
-//////////
-// Runs //
-//////////
+////////////
+// Consts //
+////////////
 
 /// Cells per run for the per-level reductions. Each `(run, cluster)`
 /// workgroup of the weighted sum loops over at most this many cells, so the
 /// work per workgroup is bounded however unbalanced the levels are.
 pub const HARMONY_RUN_CELLS: usize = 1024;
+
+///////////////
+// LevelRuns //
+///////////////
 
 /// Cells sorted by level, and the run structure over them.
 struct LevelRuns {

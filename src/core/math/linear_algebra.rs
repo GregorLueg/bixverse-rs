@@ -9,11 +9,19 @@ use faer::{
 
 use crate::prelude::*;
 
+////////////
+// Consts //
+////////////
+
 /// Relative pivot tolerance below which a Gram matrix is called rank deficient.
 ///
 /// Relative to the largest diagonal entry, so a design that is merely badly
 /// scaled is not mistaken for a rank-deficient one.
 const RANK_TOL: f64 = 1.0e-14;
+
+///////////////////////
+// Linear regression //
+///////////////////////
 
 /// Simple linear regression
 ///

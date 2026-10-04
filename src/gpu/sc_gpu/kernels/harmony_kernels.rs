@@ -485,7 +485,8 @@ fn objective_partials<F: Float>(
 ///
 /// ### Params
 ///
-/// * `scale_dist` - Column-normalised base assignments `[n, k]`, fixed per round
+/// * `scale_dist` - Column-normalised base assignments `[n, k]`, fixed per
+///   round
 /// * `o` - Observed counts `[b, k]` from the previous sweep
 /// * `r_sum` - Per-cluster totals `[k]` from the previous sweep
 /// * `theta` - Per-level theta for the single covariate `[b]`

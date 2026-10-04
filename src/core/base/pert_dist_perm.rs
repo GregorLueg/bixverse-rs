@@ -24,6 +24,9 @@ use super::pert_dist::{PertDistance, edistance_two_matrices, edistance_two_matri
 /// Reasonable sub sample size
 const N_SUB_SAMPLE: usize = 500;
 
+/// Number of permutations folded into one GEMM tile
+const PERM_TILE: usize = 64;
+
 ///////////////////
 // Enums/Structs //
 ///////////////////
@@ -225,9 +228,6 @@ pub fn edistance_from_pairwise<T: BixverseFloat>(d: MatRef<T>, mask: &[bool]) ->
 
     two * between - within_x - within_y
 }
-
-/// Number of permutations folded into one GEMM tile
-const PERM_TILE: usize = 64;
 
 /// E-distances for many permutation masks against one pooled distance matrix
 ///

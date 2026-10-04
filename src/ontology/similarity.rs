@@ -11,6 +11,10 @@ use std::sync::RwLock;
 
 use crate::prelude::*;
 
+////////////
+// Consts //
+////////////
+
 /// Tile edge for the transpose pass that mirrors the Wang similarity triangle
 const WANG_MIRROR_TILE: usize = 64;
 

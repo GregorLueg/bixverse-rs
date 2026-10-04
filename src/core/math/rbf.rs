@@ -6,6 +6,13 @@ use rayon::iter::*;
 use crate::prelude::*;
 use crate::utils::matrix_utils::*;
 
+////////////
+// Consts //
+////////////
+
+/// Matrix size (elements) from which an elementwise map fans out over rayon
+const PAR_MAP_MIN_ELEMS: usize = 1 << 16;
+
 ///////////
 // Enums //
 ///////////
@@ -39,9 +46,6 @@ pub fn parse_rbf_types(s: &str) -> Option<RbfType> {
         _ => None,
     }
 }
-
-/// Matrix size (elements) from which an elementwise map fans out over rayon
-const PAR_MAP_MIN_ELEMS: usize = 1 << 16;
 
 /// Apply a scalar function to every entry of a matrix
 ///

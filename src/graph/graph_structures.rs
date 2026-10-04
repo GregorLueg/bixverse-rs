@@ -12,6 +12,10 @@ use std::collections::BinaryHeap;
 use crate::core::math::sparse::coo_to_csr;
 use crate::prelude::*;
 
+////////////
+// Consts //
+////////////
+
 /// Rows of the similarity matrix processed per parallel task in the kNN build
 const KNN_ROW_BLOCK: usize = 32;
 

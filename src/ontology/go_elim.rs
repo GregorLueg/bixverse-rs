@@ -10,6 +10,10 @@ use crate::enrichment::gsea::*;
 use crate::enrichment::oae::*;
 use crate::prelude::*;
 
+////////////
+// Consts //
+////////////
+
 /// Terms per level above which the hypergeometric tests run in parallel
 const GO_PAR_LEVEL_MIN_TERMS: usize = 512;
 
