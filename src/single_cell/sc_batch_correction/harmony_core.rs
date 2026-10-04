@@ -536,6 +536,10 @@ fn apply_sums(sums: &[f32], offsets: &[usize], o: &mut [Vec<f32>], r_sum: &mut [
     }
 }
 
+/////////////////
+// ReassignAcc //
+/////////////////
+
 /// Per-task state of the block reassignment.
 struct ReassignAcc {
     /// Level sums of the new assignments, laid out as in [`block_sums`]
