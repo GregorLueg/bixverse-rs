@@ -433,7 +433,7 @@ where
     let mut p_sum: Mat<T> = Mat::zeros(n, n);
     let mut wk_p: Mat<T> = Mat::zeros(n, n);
     let mut fused: Mat<T> = Mat::zeros(n, n);
-    let inv_others = T::from_f64((m - 1) as f64).unwrap().recip();
+    let n_others = T::from_f64((m - 1) as f64).unwrap();
 
     for _ in 0..t {
         for v in 0..m {
@@ -449,7 +449,7 @@ where
                     }
                 }
                 for o in col.iter_mut() {
-                    *o *= inv_others;
+                    *o /= n_others;
                 }
             });
 
