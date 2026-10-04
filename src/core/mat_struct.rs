@@ -84,8 +84,8 @@ where
 
         // Create new matrix by copying values
         let mut result = Mat::<T>::zeros(row_indices.len(), col_indices.len());
-        for (new_row, &old_row) in row_indices.iter().enumerate() {
-            for (new_col, &old_col) in col_indices.iter().enumerate() {
+        for (new_col, &old_col) in col_indices.iter().enumerate() {
+            for (new_row, &old_row) in row_indices.iter().enumerate() {
                 result[(new_row, new_col)] = self.values[(old_row, old_col)];
             }
         }
