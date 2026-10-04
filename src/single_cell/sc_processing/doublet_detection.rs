@@ -17,6 +17,7 @@ use crate::graph::community_detections::*;
 use crate::graph::graph_structures::*;
 use crate::prelude::*;
 use crate::single_cell::sc_analysis::fast_clusters::*;
+use crate::single_cell::sc_processing::pca::PcaSolver;
 use crate::single_cell::sc_processing::utils_doublets::*;
 
 ////////////////////////
@@ -56,8 +57,8 @@ pub struct BoostParams {
     // -- pca --
     /// Number of principal components.
     pub no_pcs: usize,
-    /// Whether to use randomised SVD.
-    pub random_svd: bool,
+    /// Which PCA solver to use, see [PcaSolver].
+    pub svd_solver: PcaSolver,
     /// Resolution parameter for Louvain clustering.
 
     // -- boosted --
@@ -455,7 +456,7 @@ impl<'a, S: SingleCellReading> BoostClassifier<'a, S> {
             mean_center: self.params.mean_center,
             normalise_variance: self.params.normalise_variance,
             no_pcs: self.params.no_pcs,
-            random_svd: self.params.random_svd,
+            svd_solver: self.params.svd_solver,
         };
 
         let pairs = self.generate_pairs(seed);

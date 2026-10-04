@@ -40,15 +40,13 @@ pub struct FastMnnParams {
     pub cos_norm: bool,
     /// Number of PCs to use for the MNN calculations
     pub no_pcs: usize,
-    /// Boolean. Shall randomised SVD be used.
-    pub random_svd: bool,
     /// Shall sparse SVD be utilised -> reduces memory pressure
     pub sparse_svd: bool,
     /// [KnnParams] for the various approximate nearest neighbour searches
     /// in ann-search-rs
     pub knn_params: KnnParams,
     /// [SingleCellPcaParams] specifying the to-be-applied normalisations and
-    /// if the randomised path should be taken.
+    /// the PCA solver.
     pub pca_params: SingleCellPcaParams,
 }
 

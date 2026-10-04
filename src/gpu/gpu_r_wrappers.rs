@@ -469,7 +469,7 @@ impl FastMnnParamsGpu {
 impl ScrubletParamsGpu {
     /// Generate [ScrubletParamsGpu] from an R list.
     ///
-    /// Field names mirror `ScrubletParams::from_r_list`, minus `random_svd`
+    /// Field names mirror `ScrubletParams::from_r_list`, minus `svd_solver`
     /// (the GPU SVD is always randomised), plus one key the CPU list has no
     /// need for: `knn_backend`.
     ///

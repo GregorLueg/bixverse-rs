@@ -59,8 +59,8 @@ pub struct PcaOpts {
     pub normalise_variance: bool,
     /// Number of PCs to use
     pub no_pcs: usize,
-    /// Shall randomised SVD be used
-    pub random_svd: bool,
+    /// Which solver the PCA uses, see [PcaSolver]
+    pub svd_solver: PcaSolver,
 }
 
 //////////////////////
@@ -425,7 +425,8 @@ pub fn project_cell_chunks_with_stats(
 /// Computes PCA on observed cells without densifying the full matrix. Gene
 /// chunks are re-normalised using HVG-specific library sizes (matching the
 /// Scrublet normalisation scheme), assembled into a CSC sparse matrix, and
-/// decomposed via sparse randomised SVD or Lanczos. This avoids holding
+/// decomposed via the sparse covariance solver, randomised SVD or Lanczos.
+/// This avoids holding
 /// an `n_cells x n_genes` dense matrix in memory, which is the primary
 /// memory bottleneck in both Scrublet and Boost.
 ///
@@ -448,8 +449,9 @@ pub fn project_cell_chunks_with_stats(
 /// * `normalise_variance` - Whether to implicitly scale columns to unit
 ///   variance during SVD.
 /// * `no_pcs` - Number of principal components to compute.
-/// * `random_svd` - If true, use randomised sparse SVD; otherwise use
-///   Lanczos-based sparse SVD.
+/// * `svd_solver` - [`PcaSolver::Covariance`] for the exact gene-gene
+///   cross-product path, [`PcaSolver::Randomised`] for randomised sparse SVD,
+///   [`PcaSolver::Exact`] for Lanczos.
 /// * `seed` - Seed for reproducibility (randomised SVD and Lanczos init).
 /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
 ///   verbosity.
@@ -470,7 +472,7 @@ pub fn pca_observed<S: SingleCellReading>(
     mean_center: bool,
     normalise_variance: bool,
     no_pcs: usize,
-    random_svd: bool,
+    svd_solver: PcaSolver,
     seed: usize,
     verbose: usize,
 ) -> Result<DoubletPcaRes, BixverseErrors> {
@@ -524,42 +526,60 @@ pub fn pca_observed<S: SingleCellReading>(
 
     let start_svd = Instant::now();
 
-    let (scores, loadings) = if random_svd {
-        let svd_res = randomised_sparse_svd::<f32, f64>(
-            csc,
-            no_pcs,
-            seed as u64,
-            true,
-            Some(MAX_OVERSAMPLING_SINGLE_CELL),
-            None,
-            means_for_svd,
-            stds_for_svd,
-            None,
-        )?;
-        let scores_f64 = compute_pc_scores(&svd_res);
-        let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| scores_f64[(i, j)] as f32);
-        let loadings = Mat::<f32>::from_fn(gene_indices.len(), no_pcs, |i, j| {
-            svd_res.v()[(i, j)] as f32
-        });
-        (scores, loadings)
-    } else {
-        let svd_res = sparse_svd_lanczos::<f32, f32, f64>(
-            &csc,
-            no_pcs,
-            seed as u64,
-            true,
-            means_for_svd,
-            stds_for_svd,
-            None,
-        )?;
-        let scores_f64 = compute_pc_scores(&svd_res);
-        let scores = Mat::<f32>::from_fn(scores_f64.nrows(), scores_f64.ncols(), |i, j| {
-            scores_f64[(i, j)] as f32
-        });
-        let loadings = Mat::<f32>::from_fn(svd_res.v().nrows(), svd_res.v().ncols(), |i, j| {
-            svd_res.v()[(i, j)] as f32
-        });
-        (scores, loadings)
+    let n_genes = gene_indices.len();
+    let (scores, loadings) = match svd_solver {
+        PcaSolver::Covariance => {
+            let svd_res = sparse_covariance_svd::<f32, f64>(
+                csc,
+                no_pcs,
+                true,
+                means_for_svd,
+                stds_for_svd,
+                None,
+            )?;
+            let scores = compute_pc_scores(&svd_res);
+            let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| scores[(i, j)] as f32);
+            let loadings = Mat::<f32>::from_fn(n_genes, no_pcs, |i, j| svd_res.v[(i, j)] as f32);
+            (scores, loadings)
+        }
+        PcaSolver::Randomised => {
+            let svd_res = randomised_sparse_svd::<f32, f64>(
+                csc,
+                no_pcs,
+                seed as u64,
+                true,
+                Some(MAX_OVERSAMPLING_SINGLE_CELL),
+                None,
+                means_for_svd,
+                stds_for_svd,
+                None,
+            )?;
+            let scores_f64 = compute_pc_scores(&svd_res);
+            let scores = Mat::<f32>::from_fn(n_cells, no_pcs, |i, j| scores_f64[(i, j)] as f32);
+            let loadings = Mat::<f32>::from_fn(gene_indices.len(), no_pcs, |i, j| {
+                svd_res.v()[(i, j)] as f32
+            });
+            (scores, loadings)
+        }
+        PcaSolver::Exact => {
+            let svd_res = sparse_svd_lanczos::<f32, f32, f64>(
+                &csc,
+                no_pcs,
+                seed as u64,
+                true,
+                means_for_svd,
+                stds_for_svd,
+                None,
+            )?;
+            let scores_f64 = compute_pc_scores(&svd_res);
+            let scores = Mat::<f32>::from_fn(scores_f64.nrows(), scores_f64.ncols(), |i, j| {
+                scores_f64[(i, j)] as f32
+            });
+            let loadings = Mat::<f32>::from_fn(svd_res.v().nrows(), svd_res.v().ncols(), |i, j| {
+                svd_res.v()[(i, j)] as f32
+            });
+            (scores, loadings)
+        }
     };
 
     if verbosity.normal_verbosity() {
@@ -623,7 +643,7 @@ pub fn pca_and_project<S: SingleCellReading>(
         opts.mean_center,
         opts.normalise_variance,
         opts.no_pcs,
-        opts.random_svd,
+        opts.svd_solver,
         seed,
         verbose,
     )?;
@@ -2820,5 +2840,82 @@ mod tests {
     fn test_empty_inputs() {
         let flagged = identify_unrecognisable_origins(&[], &[], &[], &[], &Default::default());
         assert!(flagged.is_empty());
+    }
+
+    /////////////////////////
+    // pca_observed solvers //
+    /////////////////////////
+
+    /// The covariance solver and Lanczos agree on the leading PC scores, up to
+    /// sign, on a three-cell-type store.
+    #[test]
+    fn test_pca_observed_covariance_matches_lanczos() {
+        use crate::single_cell::sc_data::data_io::{CellGeneSparseWriter, ParallelSparseReader};
+
+        let (n_cells, n_genes, no_pcs) = (300, 30, 3);
+        let hash = |a: usize, b: usize| ((a * 2654435761 + b * 40503) % 1000) as f32 / 1000.0;
+        let counts: Vec<Vec<u32>> = (0..n_cells)
+            .map(|cell| {
+                (0..n_genes)
+                    .map(|gene| {
+                        let base = if gene % 3 == cell % 3 { 30.0 } else { 3.0 };
+                        if hash(gene, cell + 7) < 0.3 {
+                            0
+                        } else {
+                            (base * (0.5 + hash(cell, gene))) as u32
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+
+        let path = std::env::temp_dir().join("bixverse_pca_observed_solvers.bin");
+        let path = path.to_str().expect("utf8 path");
+        let mut writer =
+            CellGeneSparseWriter::new(path, false, n_cells, n_genes, 1e4).expect("writer");
+        for gene in 0..n_genes {
+            let (raw, idx): (Vec<u32>, Vec<usize>) = (0..n_cells)
+                .filter(|&c| counts[c][gene] > 0)
+                .map(|c| (counts[c][gene], c))
+                .unzip();
+            let norm: Vec<F16> = raw
+                .iter()
+                .map(|&x| F16::from(f16::from_f32(x as f32)))
+                .collect();
+            let chunk = CscGeneChunk::from_conversion(
+                RawCounts::from_u32_auto(&raw),
+                &norm,
+                &idx,
+                gene,
+                true,
+            );
+            writer.write_gene_chunk(chunk).expect("write gene");
+        }
+        writer.finalise().expect("finalise");
+
+        let reader = ParallelSparseReader::new(path).expect("reader");
+        let cells: Vec<usize> = (0..n_cells).collect();
+        let genes: Vec<usize> = (0..n_genes).collect();
+        let lib: Vec<usize> = counts
+            .iter()
+            .map(|r| r.iter().sum::<u32>() as usize)
+            .collect();
+
+        let run = |solver| {
+            pca_observed(
+                &reader, &cells, &genes, &lib, 1e4, true, true, true, no_pcs, solver, 42, 0,
+            )
+            .expect("pca")
+            .0
+        };
+        let cov = run(PcaSolver::Covariance);
+        let lanczos = run(PcaSolver::Exact);
+
+        for c in 0..no_pcs {
+            let (a, b) = (cov.col(c), lanczos.col(c));
+            let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+            let cos = dot / (a.norm_l2() * b.norm_l2());
+            assert!(cos.abs() > 0.999, "PC {c}: |cos| = {}", cos.abs());
+        }
     }
 }

@@ -50,8 +50,8 @@ const MIN_GENE_STD: f32 = 1e-8;
 /// Parameters for GPU-accelerated Scrublet.
 ///
 /// Mirrors `ScrubletParams`, swapping the CPU `KnnParams` for the GPU
-/// [`KnnParamsGpu`]. The `random_svd` flag has no counterpart here: the GPU
-/// path is always randomised, since there is no GPU Lanczos.
+/// [`KnnParamsGpu`]. The `svd_solver` field has no counterpart here: the GPU
+/// path is always randomised.
 #[derive(Clone, Debug)]
 pub struct ScrubletParamsGpu {
     // -- processing --
@@ -687,6 +687,7 @@ mod tests {
     use crate::gpu::sc_gpu::knn_gpu::{KnnSearchGpu, parse_knn_method_gpu};
     use crate::single_cell::sc_data::data_io::{CellGeneSparseWriter, ParallelSparseReader};
     use crate::single_cell::sc_processing::knn::KnnParams;
+    use crate::single_cell::sc_processing::pca::PcaSolver;
     use crate::single_cell::sc_processing::scrublet::{Scrublet, ScrubletParams};
     use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
 
@@ -846,7 +847,7 @@ mod tests {
             binning_strategy: "equal_width".to_string(),
             n_bins: 10,
             no_pcs: TEST_PCS,
-            random_svd: true,
+            svd_solver: PcaSolver::Randomised,
             sim_doublet_ratio: 2.0,
             expected_doublet_rate: 0.1,
             stdev_doublet_rate: 0.02,
