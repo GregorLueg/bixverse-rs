@@ -317,6 +317,18 @@ where
     let mut batch_norms = Vec::with_capacity(batch_size);
 
     let num_threads = rayon::current_num_threads();
+    let chunk_size = batch_size.div_ceil(num_threads.max(1)).max(1);
+    let n_chunks = batch_size.div_ceil(chunk_size);
+    let mut chunk_buffers: Vec<(Vec<T>, Vec<usize>)> = (0..n_chunks)
+        .map(|_| {
+            (
+                vec![T::zero(); n_centroids * dim],
+                vec![0usize; n_centroids],
+            )
+        })
+        .collect();
+    let mut batch_sums = vec![T::zero(); n_centroids * dim];
+    let mut batch_counts = vec![0usize; n_centroids];
 
     if verbose {
         println!(
@@ -354,14 +366,14 @@ where
             &dist,
         );
 
-        // parallel fold-reduce -> per-cluster sums and counts
-        let chunk_size = (batch_size + num_threads - 1) / num_threads.max(1);
-        let (batch_sums, batch_counts) = batch_assignments
-            .par_chunks(chunk_size)
+        // per-chunk sums and counts into persistent buffers, then merged
+        chunk_buffers
+            .par_iter_mut()
+            .zip(batch_assignments.par_chunks(chunk_size))
             .enumerate()
-            .map(|(chunk_idx, assign_chunk)| {
-                let mut local_sums = vec![T::zero(); n_centroids * dim];
-                let mut local_counts = vec![0usize; n_centroids];
+            .for_each(|(chunk_idx, ((local_sums, local_counts), assign_chunk))| {
+                local_sums.fill(T::zero());
+                local_counts.fill(0);
                 let start = chunk_idx * chunk_size;
                 let data_chunk = &batch_data[start * dim..(start + assign_chunk.len()) * dim];
 
@@ -371,23 +383,16 @@ where
                     let offset = c * dim;
                     T::add_assign_simd(&mut local_sums[offset..offset + dim], vec);
                 }
-                (local_sums, local_counts)
-            })
-            .reduce(
-                || {
-                    (
-                        vec![T::zero(); n_centroids * dim],
-                        vec![0usize; n_centroids],
-                    )
-                },
-                |(mut s1, mut c1), (s2, c2)| {
-                    T::add_assign_simd(&mut s1, &s2);
-                    for i in 0..c1.len() {
-                        c1[i] += c2[i];
-                    }
-                    (s1, c1)
-                },
-            );
+            });
+
+        batch_sums.fill(T::zero());
+        batch_counts.fill(0);
+        for (local_sums, local_counts) in &chunk_buffers {
+            T::add_assign_simd(&mut batch_sums, local_sums);
+            for (total, &count) in batch_counts.iter_mut().zip(local_counts) {
+                *total += count;
+            }
+        }
 
         // collect touched centroids
         let touched: Vec<usize> = (0..n_centroids).filter(|&c| batch_counts[c] > 0).collect();

@@ -2,11 +2,15 @@
 //! adjusted Rand index and a silhouette score specialised to unit-norm rows,
 //! where the closed form avoids the usual all-pairs distance matrix.
 
-use faer::{Mat, MatRef};
+use faer::{Accum, Mat, MatRef, Par};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 use crate::prelude::*;
+use crate::utils::gemm::gemm;
+
+/// Rows per GEMM tile in the silhouette
+const SILHOUETTE_TILE_ROWS: usize = 2048;
 
 /// Adjusted Rand Index between two clusterings
 ///
@@ -126,52 +130,74 @@ where
         return (vec![F::zero(); n], F::zero());
     }
 
-    let mut sums = Mat::<f64>::zeros(n_clusters, dim);
     let mut sizes = vec![0usize; n_clusters];
-    for (i, &label) in labels.iter().enumerate() {
+    for &label in labels {
         assert!(label < n_clusters, "label {label} is out of range");
         sizes[label] += 1;
-        for j in 0..dim {
-            sums[(label, j)] += data[(i, j)].to_f64().unwrap();
-        }
     }
+
+    // Column j of `sums` only reads column j of `data`, in row order
+    let mut sums = Mat::<f64>::zeros(n_clusters, dim);
+    sums.par_col_iter_mut()
+        .enumerate()
+        .for_each(|(j, mut col)| {
+            let data_col = data.col(j);
+            for (&label, &x) in labels.iter().zip(data_col.iter()) {
+                col[label] += x.to_f64().unwrap();
+            }
+        });
 
     let n_populated = sizes.iter().filter(|&&s| s > 0).count();
     if n_populated < 2 {
         return (vec![F::zero(); n], F::zero());
     }
 
-    let per_row: Vec<F> = (0..n)
-        .into_par_iter()
-        .map_init(
-            || vec![0f64; n_clusters],
-            |dots, i| {
-                dots.iter_mut().for_each(|d| *d = 0.0);
-                let mut self_dot = 0f64;
-                for j in 0..dim {
-                    let x = data[(i, j)].to_f64().unwrap();
-                    self_dot += x * x;
-                    for (c, dot) in dots.iter_mut().enumerate() {
-                        *dot += x * sums[(c, j)];
-                    }
-                }
+    // All row-to-cluster-sum dot products per tile as one GEMM
+    let sizes_ref = &sizes;
+    let tile_starts: Vec<usize> = (0..n).step_by(SILHOUETTE_TILE_ROWS).collect();
+    let per_row: Vec<F> = tile_starts
+        .par_iter()
+        .flat_map_iter(|&start| {
+            let rows = SILHOUETTE_TILE_ROWS.min(n - start);
 
-                let own = labels[i];
-                let own_size = sizes[own];
+            let mut tile = Mat::<f64>::zeros(rows, dim);
+            let mut self_dots = vec![0f64; rows];
+            for j in 0..dim {
+                let data_col = data.col(j);
+                for r in 0..rows {
+                    let x = data_col[start + r].to_f64().unwrap();
+                    tile[(r, j)] = x;
+                    self_dots[r] += x * x;
+                }
+            }
+
+            let mut dots = Mat::<f64>::zeros(rows, n_clusters);
+            gemm(
+                dots.as_mut(),
+                Accum::Replace,
+                tile.as_ref(),
+                sums.as_ref().transpose(),
+                1.0_f64,
+                Par::Seq,
+            );
+
+            (0..rows).map(move |r| {
+                let own = labels[start + r];
+                let own_size = sizes_ref[own];
                 if own_size <= 1 {
                     return F::zero();
                 }
 
                 let others = (own_size - 1) as f64;
-                let a = (others - (dots[own] - self_dot)) / others;
+                let a = (others - (dots[(r, own)] - self_dots[r])) / others;
 
                 let mut b = f64::INFINITY;
                 for c in 0..n_clusters {
-                    if c == own || sizes[c] == 0 {
+                    if c == own || sizes_ref[c] == 0 {
                         continue;
                     }
-                    let count = sizes[c] as f64;
-                    let mean = (count - dots[c]) / count;
+                    let count = sizes_ref[c] as f64;
+                    let mean = (count - dots[(r, c)]) / count;
                     if mean < b {
                         b = mean;
                     }
@@ -188,8 +214,8 @@ where
                 // it means the caller's normalisation is off, and clamping would
                 // hide that as readily as it would hide a bug here.
                 F::from_f64(score).unwrap()
-            },
-        )
+            })
+        })
         .collect();
 
     let total: f64 = per_row.iter().map(|x| x.to_f64().unwrap()).sum();
