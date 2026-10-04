@@ -186,3 +186,8 @@ required-features = ["gpu", "single-cell"]
 name = "gpu_scenic_micro"
 harness = false
 required-features = ["gpu", "single-cell"]
+
+[[bench]]
+name = "harmony_bench"
+harness = false
+required-features = ["single-cell"]

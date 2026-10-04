@@ -70,6 +70,50 @@ impl Default for HarmonyParams {
 // Helpers //
 /////////////
 
+/// Wall-clock accumulator per named stage, printed at detailed verbosity.
+#[derive(Default)]
+pub(crate) struct StageTimes {
+    /// Stage name and total time spent in it, in first-seen order
+    stages: Vec<(&'static str, std::time::Duration)>,
+}
+
+impl StageTimes {
+    /// Run `f` and add its wall-clock time to stage `name`.
+    ///
+    /// ### Params
+    ///
+    /// * `name` - Stage label
+    /// * `f` - The work to time
+    ///
+    /// ### Returns
+    ///
+    /// Whatever `f` returns
+    pub(crate) fn time<T>(&mut self, name: &'static str, f: impl FnOnce() -> T) -> T {
+        let t = Instant::now();
+        let out = f();
+        let dt = t.elapsed();
+        match self.stages.iter_mut().find(|(n, _)| *n == name) {
+            Some((_, acc)) => *acc += dt,
+            None => self.stages.push((name, dt)),
+        }
+        out
+    }
+
+    /// Print one line per stage with its share of the summed stage time.
+    pub(crate) fn print(&self) {
+        let total: f64 = self.stages.iter().map(|(_, d)| d.as_secs_f64()).sum();
+        println!(" Stage times:");
+        for (name, d) in &self.stages {
+            println!(
+                "  {:<14} {:>9.3} s  {:>5.1}%",
+                name,
+                d.as_secs_f64(),
+                100.0 * d.as_secs_f64() / total
+            );
+        }
+    }
+}
+
 /// Observed and expected cluster-batch assignment counts for one batch
 /// variable.
 pub struct OEPair {
@@ -919,17 +963,24 @@ pub fn harmony_with_state(
         println!("Running initial k-means...");
     }
 
-    let y = run_kmeans_cosine(
-        z_cos.as_ref(),
-        params.k,
-        params.kmeans_params,
-        seed,
-        verbose,
-    )?;
+    let mut times = StageTimes::default();
 
-    let dist_mat = compute_cosine_distances(y.as_ref(), z_cos.as_ref());
-    let r = initialise_r_from_dist(dist_mat.as_ref(), &sigma)?;
-    let oe_pairs = compute_all_diversity_statistics(r.as_ref(), &batch_infos);
+    let y = times.time("kmeans_init", || {
+        run_kmeans_cosine(
+            z_cos.as_ref(),
+            params.k,
+            params.kmeans_params,
+            seed,
+            verbose,
+        )
+    })?;
+
+    let (dist_mat, r, oe_pairs) = times.time("init_r", || {
+        let dist_mat = compute_cosine_distances(y.as_ref(), z_cos.as_ref());
+        let r = initialise_r_from_dist(dist_mat.as_ref(), &sigma)?;
+        let oe_pairs = compute_all_diversity_statistics(r.as_ref(), &batch_infos);
+        Ok::<_, BixverseErrors>((dist_mat, r, oe_pairs))
+    })?;
 
     let initial_obj = compute_objective(
         r.as_ref(),
@@ -965,32 +1016,40 @@ pub fn harmony_with_state(
         let start_iter = Instant::now();
 
         for kmeans_iter in 0..params.max_iter_kmeans {
-            state.y = update_centroids_from_r(state.z_cos.as_ref(), state.r.as_ref());
+            state.y = times.time("centroids", || {
+                update_centroids_from_r(state.z_cos.as_ref(), state.r.as_ref())
+            });
 
-            let dist_mat = compute_cosine_distances(state.y.as_ref(), state.z_cos.as_ref());
+            let dist_mat = times.time("distances", || {
+                compute_cosine_distances(state.y.as_ref(), state.z_cos.as_ref())
+            });
 
-            let (r_new, oe_new) = update_r_with_diversity(
-                dist_mat.as_ref(),
-                &sigma,
-                &theta,
-                &batch_infos,
-                params.block_size,
-                seed + harmony_iter * 1000 + kmeans_iter,
-                state.r.as_ref(),
-                &state.oe_pairs,
-            )?;
+            let (r_new, oe_new) = times.time("update_r", || {
+                update_r_with_diversity(
+                    dist_mat.as_ref(),
+                    &sigma,
+                    &theta,
+                    &batch_infos,
+                    params.block_size,
+                    seed + harmony_iter * 1000 + kmeans_iter,
+                    state.r.as_ref(),
+                    &state.oe_pairs,
+                )
+            })?;
 
             state.r = r_new;
             state.oe_pairs = oe_new;
 
-            let obj = compute_objective(
-                state.r.as_ref(),
-                dist_mat.as_ref(),
-                &state.oe_pairs,
-                &sigma,
-                &theta,
-                &batch_infos,
-            );
+            let obj = times.time("objective", || {
+                compute_objective(
+                    state.r.as_ref(),
+                    dist_mat.as_ref(),
+                    &state.oe_pairs,
+                    &sigma,
+                    &theta,
+                    &batch_infos,
+                )
+            });
 
             state.objectives_kmeans.push(obj);
 
@@ -1017,14 +1076,16 @@ pub fn harmony_with_state(
             println!("  Applying ridge regression correction...");
         }
 
-        state.z_corr = ridge_regression_correction(
-            state.z_orig.as_ref(),
-            state.r.as_ref(),
-            &batch_infos,
-            lambda_scalar,
-        );
+        state.z_corr = times.time("ridge", || {
+            ridge_regression_correction(
+                state.z_orig.as_ref(),
+                state.r.as_ref(),
+                &batch_infos,
+                lambda_scalar,
+            )
+        });
 
-        state.z_cos = cosine_normalise(&state.z_corr);
+        state.z_cos = times.time("normalise", || cosine_normalise(&state.z_corr));
 
         let harmony_obj = *state.objectives_kmeans.last().unwrap();
         state.objectives_harmony.push(harmony_obj);
@@ -1055,6 +1116,9 @@ pub fn harmony_with_state(
 
     if verbosity.normal_verbosity() {
         println!(" Finished Harmony {:.2?}", start.elapsed());
+    }
+    if verbosity.detailed_verbosity() {
+        times.print();
     }
 
     Ok(HarmonyResult {

@@ -23,9 +23,9 @@ use crate::prelude::*;
 use crate::single_cell::sc_batch_correction::batch_utils::cosine_normalise;
 
 use super::harmony::{
-    BatchInfo, HarmonyResult, OEPair, compute_all_diversity_statistics, compute_cosine_distances,
-    compute_scaled_distances, create_batch_infos, initialise_r_from_dist, run_kmeans_cosine,
-    update_centroids_from_r,
+    BatchInfo, HarmonyResult, OEPair, StageTimes, compute_all_diversity_statistics,
+    compute_cosine_distances, compute_scaled_distances, create_batch_infos, initialise_r_from_dist,
+    run_kmeans_cosine, update_centroids_from_r,
 };
 
 ////////////
@@ -980,17 +980,24 @@ pub fn harmony_v2_with_state(
         println!("Running initial k-means...");
     }
 
-    let mut y = run_kmeans_cosine(
-        z_cos.as_ref(),
-        params.k,
-        params.kmeans_params,
-        seed,
-        verbose,
-    )?;
+    let mut times = StageTimes::default();
 
-    let mut dist_mat = compute_cosine_distances(y.as_ref(), z_cos.as_ref());
-    let mut r = initialise_r_from_dist(dist_mat.as_ref(), &sigma)?;
-    let mut oe_pairs = compute_all_diversity_statistics(r.as_ref(), &batch_infos);
+    let mut y = times.time("kmeans_init", || {
+        run_kmeans_cosine(
+            z_cos.as_ref(),
+            params.k,
+            params.kmeans_params,
+            seed,
+            verbose,
+        )
+    })?;
+
+    let (mut dist_mat, mut r, mut oe_pairs) = times.time("init_r", || {
+        let dist_mat = compute_cosine_distances(y.as_ref(), z_cos.as_ref());
+        let r = initialise_r_from_dist(dist_mat.as_ref(), &sigma)?;
+        let oe_pairs = compute_all_diversity_statistics(r.as_ref(), &batch_infos);
+        Ok::<_, BixverseErrors>((dist_mat, r, oe_pairs))
+    })?;
 
     let initial_obj = compute_objective_v2(
         r.as_ref(),
@@ -1019,31 +1026,37 @@ pub fn harmony_v2_with_state(
 
         // distances are fixed across the inner loop, so the base assignments
         // are computed once per round here rather than inside each update.
-        let scale_dist = compute_scaled_distances(dist_mat.as_ref(), &sigma)?;
+        let scale_dist = times.time("scale_dist", || {
+            compute_scaled_distances(dist_mat.as_ref(), &sigma)
+        })?;
 
         // inner loop: refine R with diversity penalty, distances fixed
         for kmeans_iter in 0..params.max_iter_kmeans {
-            let (r_new, oe_new) = update_r_with_diversity_v2(
-                scale_dist.as_ref(),
-                &theta_expanded,
-                &batch_infos,
-                params.block_size,
-                seed + harmony_iter * 1000 + kmeans_iter,
-                r.as_ref(),
-                &oe_pairs,
-            );
+            let (r_new, oe_new) = times.time("update_r", || {
+                update_r_with_diversity_v2(
+                    scale_dist.as_ref(),
+                    &theta_expanded,
+                    &batch_infos,
+                    params.block_size,
+                    seed + harmony_iter * 1000 + kmeans_iter,
+                    r.as_ref(),
+                    &oe_pairs,
+                )
+            });
 
             r = r_new;
             oe_pairs = oe_new;
 
-            let obj = compute_objective_v2(
-                r.as_ref(),
-                dist_mat.as_ref(),
-                &oe_pairs,
-                &sigma,
-                &theta_expanded,
-                &batch_infos,
-            );
+            let obj = times.time("objective", || {
+                compute_objective_v2(
+                    r.as_ref(),
+                    dist_mat.as_ref(),
+                    &oe_pairs,
+                    &sigma,
+                    &theta_expanded,
+                    &batch_infos,
+                )
+            });
             objectives_kmeans.push(obj);
 
             if verbosity.detailed_verbosity() {
@@ -1069,26 +1082,35 @@ pub fn harmony_v2_with_state(
             println!("  Applying ridge regression correction...");
         }
 
-        z_corr = ridge_regression_correction_v2(
-            z_orig.as_ref(),
-            r.as_ref(),
-            &batch_infos,
-            &oe_pairs,
-            lambda_scalar,
-            params.alpha,
-            params.use_dynamic_lambda,
-            params.batch_proportion_cutoff,
-        );
+        z_corr = times.time("ridge", || {
+            ridge_regression_correction_v2(
+                z_orig.as_ref(),
+                r.as_ref(),
+                &batch_infos,
+                &oe_pairs,
+                lambda_scalar,
+                params.alpha,
+                params.use_dynamic_lambda,
+                params.batch_proportion_cutoff,
+            )
+        });
 
-        z_cos = cosine_normalise(&z_corr);
+        z_cos = times.time("normalise", || cosine_normalise(&z_corr));
 
         // update centroids and distances for next round
-        y = update_centroids_from_r(z_cos.as_ref(), r.as_ref());
-        dist_mat = compute_cosine_distances(y.as_ref(), z_cos.as_ref());
+        y = times.time("centroids", || {
+            update_centroids_from_r(z_cos.as_ref(), r.as_ref())
+        });
+        dist_mat = times.time("distances", || {
+            compute_cosine_distances(y.as_ref(), z_cos.as_ref())
+        });
 
         // re-initialise R from new distances (diversity applied in next inner loop)
-        r = initialise_r_from_dist(dist_mat.as_ref(), &sigma)?;
-        oe_pairs = compute_all_diversity_statistics(r.as_ref(), &batch_infos);
+        (r, oe_pairs) = times.time("init_r", || {
+            let r = initialise_r_from_dist(dist_mat.as_ref(), &sigma)?;
+            let oe_pairs = compute_all_diversity_statistics(r.as_ref(), &batch_infos);
+            Ok::<_, BixverseErrors>((r, oe_pairs))
+        })?;
 
         let harmony_obj = *objectives_kmeans.last().unwrap();
         objectives_harmony.push(harmony_obj);
@@ -1117,6 +1139,9 @@ pub fn harmony_v2_with_state(
 
     if verbosity.normal_verbosity() {
         println!(" Finished Harmony {:.2?}", start.elapsed());
+    }
+    if verbosity.detailed_verbosity() {
+        times.print();
     }
 
     Ok(HarmonyResult { z_corr, r })
