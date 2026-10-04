@@ -33,6 +33,10 @@ use crate::prelude::*;
 use crate::single_cell::sc_data::data_io::*;
 use crate::single_cell::sc_data::gene_file_io::write_gene_file;
 
+////////////
+// Consts //
+////////////
+
 /// Leading bytes identifying a bixverse count archive.
 const ARCHIVE_MAGIC: &[u8; 8] = b"BXARCHV1";
 
@@ -49,6 +53,10 @@ const ARCHIVE_HEADER_LEN: usize = 40;
 /// plus the stream buffer). Larger blocks buy little: zstd windows top out at
 /// a few MB below level 20, which a 2,048-cell block already exceeds.
 const ARCHIVE_BLOCK_CELLS: usize = 2_048;
+
+//////////////////
+// ArchiveStats //
+//////////////////
 
 /// Summary of a written archive.
 #[derive(Debug, Clone)]
@@ -109,6 +117,10 @@ fn unshuffle(bytes: &[u8], width: usize) -> Vec<u8> {
     }
     out
 }
+
+////////////
+// Cursor //
+////////////
 
 /// Bounds-checked cursor over a decompressed block.
 struct Cursor<'a> {
