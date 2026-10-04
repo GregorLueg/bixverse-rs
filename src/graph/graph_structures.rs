@@ -12,6 +12,12 @@ use std::collections::BinaryHeap;
 use crate::core::math::sparse::coo_to_csr;
 use crate::prelude::*;
 
+/// Rows of the similarity matrix processed per parallel task in the kNN build
+const KNN_ROW_BLOCK: usize = 32;
+
+/// Tile edge for the symmetrisation pass
+const KNN_SYM_TILE: usize = 64;
+
 ///////////////
 // Union-find //
 ///////////////
@@ -680,26 +686,40 @@ where
     let n = similarities.nrows();
     let mut adjacency: Mat<T> = Mat::zeros(n, n);
 
-    // Parallelize across rows
-    let rows: Vec<Vec<(usize, T)>> = (0..n)
-        .into_par_iter()
-        .map(|i| {
-            let mut heap = BinaryHeap::with_capacity(k + 1);
+    // Row blocks, walking each column once per block so the reads are
+    // contiguous in the column-major matrix.
+    let blocks: Vec<usize> = (0..n).step_by(KNN_ROW_BLOCK).collect();
+    let rows: Vec<Vec<(usize, T)>> = blocks
+        .par_iter()
+        .flat_map_iter(|&start| {
+            let end = (start + KNN_ROW_BLOCK).min(n);
+            let mut heaps: Vec<BinaryHeap<(RevOrderedFloat<T>, usize)>> = (start..end)
+                .map(|_| BinaryHeap::with_capacity(k + 1))
+                .collect();
 
-            // Use min-heap to keep top-k similarities
             for j in 0..n {
-                if i != j {
-                    let sim = similarities[(i, j)];
-                    heap.push((RevOrderedFloat(sim), j));
+                let col = similarities.col(j);
+                for (heap, i) in heaps.iter_mut().zip(start..end) {
+                    if i == j {
+                        continue;
+                    }
+                    let entry = (RevOrderedFloat(col[i]), j);
+                    // The entry that would be pushed and immediately popped
+                    if heap.len() == k && heap.peek().is_some_and(|top| entry >= *top) {
+                        continue;
+                    }
+                    heap.push(entry);
                     if heap.len() > k {
-                        heap.pop(); // Remove smallest
+                        heap.pop();
                     }
                 }
             }
 
-            heap.into_iter()
-                .map(|(ordered_sim, index)| (index, ordered_sim.0))
-                .collect()
+            heaps.into_iter().map(|heap| {
+                heap.into_iter()
+                    .map(|(ordered_sim, index)| (index, ordered_sim.0))
+                    .collect::<Vec<_>>()
+            })
         })
         .collect();
 
@@ -710,13 +730,17 @@ where
         }
     }
 
-    // Symmetrize in parallel
+    // Symmetrise tile by tile to avoid strided walks
     let two = T::from_f64(2.0).unwrap();
-    for i in 0..n {
-        for j in i + 1..n {
-            let val = (adjacency[(i, j)] + adjacency[(j, i)]) / two;
-            adjacency[(i, j)] = val;
-            adjacency[(j, i)] = val;
+    for ib in (0..n).step_by(KNN_SYM_TILE) {
+        for jb in (ib..n).step_by(KNN_SYM_TILE) {
+            for j in jb..(jb + KNN_SYM_TILE).min(n) {
+                for i in ib..(ib + KNN_SYM_TILE).min(n).min(j) {
+                    let val = (adjacency[(i, j)] + adjacency[(j, i)]) / two;
+                    adjacency[(i, j)] = val;
+                    adjacency[(j, i)] = val;
+                }
+            }
         }
     }
 
@@ -739,25 +763,23 @@ where
     assert_symmetric_mat!(adjacency);
     let n = adjacency.nrows();
 
-    let degrees: Vec<T> = (0..n)
-        .map(|i| {
-            adjacency
-                .row(i)
-                .iter()
-                .copied()
-                .fold(T::zero(), |acc, x| acc + x)
-        })
-        .collect();
+    // Column-wise accumulation, in the same order as a row sum
+    let mut degrees = vec![T::zero(); n];
+    for j in 0..n {
+        for (d, &x) in degrees.iter_mut().zip(adjacency.col(j).iter()) {
+            *d += x;
+        }
+    }
 
     if !normalise {
         let mut laplacian = adjacency.cloned();
-        for i in 0..n {
-            laplacian[(i, i)] = degrees[i] - adjacency[(i, i)];
-            for j in 0..n {
+        for j in 0..n {
+            for i in 0..n {
                 if i != j {
                     laplacian[(i, j)] = -adjacency[(i, j)];
                 }
             }
+            laplacian[(j, j)] = degrees[j] - adjacency[(j, j)];
         }
         laplacian
     } else {
@@ -772,9 +794,9 @@ where
             })
             .collect();
         let mut laplacian = Mat::zeros(n, n);
-        for i in 0..n {
-            laplacian[(i, i)] = T::one();
-            for j in 0..n {
+        for j in 0..n {
+            laplacian[(j, j)] = T::one();
+            for i in 0..n {
                 laplacian[(i, j)] -= inv_sqrt_d[i] * adjacency[(i, j)] * inv_sqrt_d[j];
             }
         }
