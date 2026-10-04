@@ -14,6 +14,7 @@
 //! - `BIXVERSE_HARMONY_TILE` tile the data this many times with small jitter
 //! - `BIXVERSE_HARMONY_REPS` silent timed runs per method, default 3
 //! - `BIXVERSE_HARMONY_ONLY` one of `v1`, `v2`, `gpu`
+//! - `BIXVERSE_HARMONY_KM_ITERS` override the CPU initial k-means iterations
 //!
 //! ```bash
 //! BIXVERSE_HARMONY_DIR=/path cargo bench --features single-cell --bench harmony_bench
@@ -26,6 +27,7 @@ use rand::prelude::*;
 use rand::rngs::StdRng;
 use rand_distr::{Distribution, Normal};
 
+use bixverse_rs::ml::clustering::k_means::KMeansParamsWrappers;
 use bixverse_rs::single_cell::sc_batch_correction::harmony::{HarmonyParams, harmony};
 use bixverse_rs::single_cell::sc_batch_correction::harmony_v2::{HarmonyParamsV2, harmony_v2};
 
@@ -145,6 +147,9 @@ fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(3);
     let only = std::env::var("BIXVERSE_HARMONY_ONLY").ok();
+    let km_iters: Option<usize> = std::env::var("BIXVERSE_HARMONY_KM_ITERS")
+        .ok()
+        .and_then(|v| v.parse().ok());
     let run = |m: &str| only.as_deref().is_none_or(|o| o == m);
 
     let uptime = std::process::Command::new("uptime")
@@ -164,14 +169,20 @@ fn main() {
     let tag = format!("{dir}/{name}x{tile}");
 
     if run("v1") {
-        let params = HarmonyParams::default();
+        let mut params = HarmonyParams::default();
+        if let Some(it) = km_iters {
+            params.kmeans_params = KMeansParamsWrappers::new(it, None, None);
+        }
         bench("v1", reps, &format!("{tag}_v1_out.f32"), |v| {
             harmony(pca.as_ref(), &batch, &params, 42, v).unwrap()
         });
     }
 
     if run("v2") {
-        let params = HarmonyParamsV2::default();
+        let mut params = HarmonyParamsV2::default();
+        if let Some(it) = km_iters {
+            params.kmeans_params = KMeansParamsWrappers::new(it, None, None);
+        }
         bench("v2", reps, &format!("{tag}_v2_out.f32"), |v| {
             harmony_v2(pca.as_ref(), &batch, &params, 42, v).unwrap()
         });
