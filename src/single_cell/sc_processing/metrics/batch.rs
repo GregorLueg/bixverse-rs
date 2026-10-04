@@ -109,43 +109,55 @@ pub fn kbet(
     let chi_sq_dist = ChiSquared::new(dof).unwrap();
     let counter = Arc::new(AtomicUsize::new(0));
 
+    let batch_index: FxHashMap<usize, usize> = batch_ids
+        .iter()
+        .enumerate()
+        .map(|(slot, &id)| (id, slot))
+        .collect();
+    let dense_batches: Vec<usize> = batches.iter().map(|b| batch_index[b]).collect();
+    let batch_fractions: Vec<f64> = batch_ids
+        .iter()
+        .map(|id| batch_counts[id] as f64 / total)
+        .collect();
+
     let results: Vec<(f64, f64)> = knn_data
         .par_iter()
-        .map(|neighbours| {
-            let k = neighbours.len() as f64;
-            let mut neighbours_count = FxHashMap::default();
-            for &neighbour_idx in neighbours {
-                *neighbours_count
-                    .entry(batches[neighbour_idx])
-                    .or_insert(0usize) += 1;
-            }
-
-            let mut chi_square = 0.0;
-            for &batch_id in &batch_ids {
-                let expected = k * (batch_counts[&batch_id] as f64 / total);
-                let observed = *neighbours_count.get(&batch_id).unwrap_or(&0) as f64;
-                let diff = if use_yates {
-                    (observed - expected).abs() - 0.5
-                } else {
-                    observed - expected
-                };
-                chi_square += diff * diff / expected;
-            }
-
-            if verbose {
-                let count = counter.fetch_add(1, Ordering::Relaxed) + 1;
-                if count.is_multiple_of(100_000) {
-                    println!(
-                        " kBET: processed {} / {} cells.",
-                        count.separate_with_underscores(),
-                        n.separate_with_underscores()
-                    );
+        .map_init(
+            || vec![0usize; n_batches],
+            |neighbours_count, neighbours| {
+                let k = neighbours.len() as f64;
+                neighbours_count.fill(0);
+                for &neighbour_idx in neighbours {
+                    neighbours_count[dense_batches[neighbour_idx]] += 1;
                 }
-            }
 
-            let p_value = 1.0 - chi_sq_dist.cdf(chi_square);
-            (chi_square, p_value)
-        })
+                let mut chi_square = 0.0;
+                for (slot, &fraction) in batch_fractions.iter().enumerate() {
+                    let expected = k * fraction;
+                    let observed = neighbours_count[slot] as f64;
+                    let diff = if use_yates {
+                        (observed - expected).abs() - 0.5
+                    } else {
+                        observed - expected
+                    };
+                    chi_square += diff * diff / expected;
+                }
+
+                if verbose {
+                    let count = counter.fetch_add(1, Ordering::Relaxed) + 1;
+                    if count.is_multiple_of(100_000) {
+                        println!(
+                            " kBET: processed {} / {} cells.",
+                            count.separate_with_underscores(),
+                            n.separate_with_underscores()
+                        );
+                    }
+                }
+
+                let p_value = 1.0 - chi_sq_dist.cdf(chi_square);
+                (chi_square, p_value)
+            },
+        )
         .collect();
 
     let chi_square_stats: Vec<f64> = results.iter().map(|(c, _)| *c).collect();
