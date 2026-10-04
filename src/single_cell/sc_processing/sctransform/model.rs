@@ -831,7 +831,7 @@ pub fn sct_residual_row(
     validate_residual_row_inputs(counts, indices, n_cells)?;
 
     let gene = SctGeneParams::new(model, gene_pos);
-    fill_residual_row(counts, indices, cells, out, |_| &gene);
+    fill_residual_row_single(counts, indices, cells, out, &gene);
 
     Ok(())
 }
@@ -942,6 +942,41 @@ pub(crate) fn fill_residual_row<'a, F>(
         let c = i as usize;
         let cov = if simple { &[][..] } else { covariates.row(c) };
         out[c] = gene_for(c).residual(cells.log10_umi[c], cov, y);
+    }
+}
+
+/// Writes a dense residual row for a single-model source.
+///
+/// With no covariates the per-cell work is a plain zip over the library sizes,
+/// without the per-cell parameter lookup of [fill_residual_row]; with
+/// covariates it defers to it.
+///
+/// ### Params
+///
+/// * `counts` - The gene's non-zero counts.
+/// * `indices` - Cell positions of those counts, within `0..n_cells`.
+/// * `cells` - Per-cell library sizes and covariates.
+/// * `out` - Destination row, overwritten in full.
+/// * `gene` - The gene's parameters.
+#[inline]
+pub(crate) fn fill_residual_row_single(
+    counts: &[f64],
+    indices: &[u32],
+    cells: &SctCellContext<'_>,
+    out: &mut [f32],
+    gene: &SctGeneParams<'_>,
+) {
+    if !cells.covariates.is_empty() {
+        fill_residual_row(counts, indices, cells, out, |_| gene);
+        return;
+    }
+
+    for (slot, &log10_umi) in out.iter_mut().zip(cells.log10_umi) {
+        *slot = gene.residual(log10_umi, &[], 0.0);
+    }
+    for (&i, &y) in indices.iter().zip(counts.iter()) {
+        let c = i as usize;
+        out[c] = gene.residual(cells.log10_umi[c], &[], y);
     }
 }
 

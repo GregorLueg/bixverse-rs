@@ -10,7 +10,9 @@ use crate::single_cell::sc_processing::residuals::{
     validate_residual_row_inputs,
 };
 
-use super::model::{SctCellContext, SctGeneParams, SctModel, fill_residual_row};
+use super::model::{
+    SctCellContext, SctGeneParams, SctModel, fill_residual_row, fill_residual_row_single,
+};
 
 //////////////////
 // SctResiduals //
@@ -237,9 +239,13 @@ impl ResidualSource for SctResiduals<'_> {
             .map(|(model, pos)| SctGeneParams::new(model, pos[gene_pos] as usize))
             .collect();
 
-        fill_residual_row(counts, indices, &self.cells, out, |c| {
-            &per_group[self.group_of_cell[c] as usize]
-        });
+        if let [gene] = per_group.as_slice() {
+            fill_residual_row_single(counts, indices, &self.cells, out, gene);
+        } else {
+            fill_residual_row(counts, indices, &self.cells, out, |c| {
+                &per_group[self.group_of_cell[c] as usize]
+            });
+        }
 
         Ok(())
     }
