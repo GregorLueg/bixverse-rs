@@ -1351,16 +1351,22 @@ fn m_step(
     // -- ambient profile --
 
     if !params.freeze_ambient_profile {
+        let mut weights = vec![0.0_f64; n_genes];
         for _ in 0..AMBIENT_UPDATE_ITERS {
+            // numer / ambient is shared by every cell type, so divide once
+            weights
+                .iter_mut()
+                .zip(&state.ambient)
+                .zip(&totals.a_numer)
+                .for_each(|((w, &a), &numer)| *w = numer / (a as f64).max(params.eps));
             for k in 0..n_celltypes {
-                let u_k = state.u[k];
                 let profile = &state.profiles[k * n_genes..(k + 1) * n_genes];
-                state.u[k] = profile
+                let dot: f64 = profile
                     .iter()
-                    .zip(&state.ambient)
-                    .zip(&totals.a_numer)
-                    .map(|((&p, &a), &numer)| u_k * p as f64 / (a as f64).max(params.eps) * numer)
+                    .zip(&weights)
+                    .map(|(&p, &w)| p as f64 * w)
                     .sum();
+                state.u[k] *= dot;
             }
             let total = sum_simd_f64(&state.u).max(params.eps);
             state.u.iter_mut().for_each(|u| *u /= total);
