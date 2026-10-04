@@ -13,6 +13,7 @@ use crate::core::mat_struct::MatSliceView;
 use crate::core::math::sparse::*;
 use crate::prelude::*;
 use crate::single_cell::sc_batch_correction::batch_utils::process_batch_labels;
+use crate::single_cell::sc_batch_correction::harmony_core::to_row_major;
 
 ///////////
 // BBKNN //
@@ -129,6 +130,9 @@ fn get_batch_balanced_knn(
     let mut all_distances =
         vec![vec![0.0; bbknn_params.neighbours_within_batch * n_batches]; n_cells];
     let col_indices: Vec<usize> = (0..mat.ncols()).collect();
+    // row views of a column-major matrix are strided and miss the SIMD path
+    let mat_rm_data = to_row_major(mat);
+    let mat_rm = MatRef::from_row_major_slice(&mat_rm_data, n_cells, mat.ncols());
 
     for (batch_idx, &batch) in unique_batches.iter().enumerate() {
         if verbosity.normal_verbosity() {
@@ -272,26 +276,34 @@ fn get_batch_balanced_knn(
 
         let col_start = batch_idx * bbknn_params.neighbours_within_batch;
 
-        for cell_idx in 0..n_cells {
-            let mut added = 0;
-            let mut k_idx = 0;
+        let k_within = bbknn_params.neighbours_within_batch;
+        all_indices
+            .par_iter_mut()
+            .zip(all_distances.par_iter_mut())
+            .zip(neighbour_indices.par_iter())
+            .enumerate()
+            .for_each(|(cell_idx, ((idx_row, dist_row), neighbours))| {
+                let mut added = 0;
+                let mut k_idx = 0;
 
-            while added < bbknn_params.neighbours_within_batch {
-                let local_idx = neighbour_indices[cell_idx][k_idx];
-                let global_idx = batch_cell_indices[local_idx];
+                while added < k_within {
+                    let global_idx = batch_cell_indices[neighbours[k_idx]];
 
-                if global_idx != cell_idx {
-                    let dist =
-                        compute_distance_knn(mat.row(cell_idx), mat.row(global_idx), &dist_metric);
+                    if global_idx != cell_idx {
+                        let dist = compute_distance_knn(
+                            mat_rm.row(cell_idx),
+                            mat_rm.row(global_idx),
+                            &dist_metric,
+                        );
 
-                    all_indices[cell_idx][col_start + added] = global_idx;
-                    all_distances[cell_idx][col_start + added] = dist;
-                    added += 1;
+                        idx_row[col_start + added] = global_idx;
+                        dist_row[col_start + added] = dist;
+                        added += 1;
+                    }
+
+                    k_idx += 1;
                 }
-
-                k_idx += 1;
-            }
-        }
+            });
     }
 
     Ok((all_indices, all_distances))
@@ -420,20 +432,20 @@ pub fn smooth_knn_dist(
 ///
 /// Resorts the indices and distances of the mutable inputs.
 fn sort_knn_by_distance(knn_indices: &mut [Vec<usize>], knn_dists: &mut [Vec<f32>]) {
-    for i in 0..knn_indices.len() {
-        let mut pairs: Vec<_> = knn_dists[i]
-            .iter()
-            .zip(knn_indices[i].iter())
-            .map(|(d, idx)| (*d, *idx))
-            .collect();
+    knn_indices
+        .par_iter_mut()
+        .zip(knn_dists.par_iter_mut())
+        .for_each_init(Vec::new, |pairs: &mut Vec<(f32, usize)>, (idx, dist)| {
+            pairs.clear();
+            pairs.extend(dist.iter().copied().zip(idx.iter().copied()));
 
-        pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
-        for (j, (dist, idx)) in pairs.into_iter().enumerate() {
-            knn_dists[i][j] = dist;
-            knn_indices[i][j] = idx;
-        }
-    }
+            for (j, &(d, i)) in pairs.iter().enumerate() {
+                dist[j] = d;
+                idx[j] = i;
+            }
+        });
 }
 
 /// Compute membership strengths
@@ -462,27 +474,30 @@ fn compute_membership_strengths(
     let n_samples = knn_indices.len();
     let n_neighbours = knn_indices[0].len();
 
-    let mut rows = Vec::with_capacity(n_samples * n_neighbours);
-    let mut cols = Vec::with_capacity(n_samples * n_neighbours);
-    let mut vals = Vec::with_capacity(n_samples * n_neighbours);
+    let total = n_samples * n_neighbours;
+    let mut rows = vec![0usize; total];
+    let mut cols = vec![0usize; total];
+    let mut vals = vec![0.0f32; total];
 
-    for i in 0..n_samples {
-        for j in 0..n_neighbours {
-            let neighbor = knn_indices[i][j];
+    rows.par_chunks_mut(n_neighbours)
+        .zip(cols.par_chunks_mut(n_neighbours))
+        .zip(vals.par_chunks_mut(n_neighbours))
+        .enumerate()
+        .for_each(|(i, ((row_r, row_c), row_v))| {
+            for j in 0..n_neighbours {
+                let neighbor = knn_indices[i][j];
 
-            let val = if neighbor == i {
-                0.0
-            } else if knn_dists[i][j] - rhos[i] <= 0.0 || sigmas[i] == 0.0 {
-                1.0
-            } else {
-                (-(knn_dists[i][j] - rhos[i]) / sigmas[i]).exp()
-            };
-
-            rows.push(i);
-            cols.push(neighbor);
-            vals.push(val);
-        }
-    }
+                row_v[j] = if neighbor == i {
+                    0.0
+                } else if knn_dists[i][j] - rhos[i] <= 0.0 || sigmas[i] == 0.0 {
+                    1.0
+                } else {
+                    (-(knn_dists[i][j] - rhos[i]) / sigmas[i]).exp()
+                };
+                row_r[j] = i;
+                row_c[j] = neighbor;
+            }
+        });
 
     (rows, cols, vals)
 }
@@ -568,19 +583,23 @@ fn trim_graph(
 
     // compute thresholds
 
-    for i in 0..n {
-        let row_start = connectivities.indptr[i] as usize;
-        let row_end = connectivities.indptr[i + 1] as usize;
-        let row_data = &connectivities.data[row_start..row_end];
+    let (indptr, data) = (&connectivities.indptr, &connectivities.data);
+    thresholds.par_iter_mut().enumerate().for_each_init(
+        Vec::new,
+        |scratch: &mut Vec<f32>, (i, thr)| {
+            let row_data = &data[indptr[i] as usize..indptr[i + 1] as usize];
 
-        if row_data.len() <= trim {
-            continue;
-        }
+            if row_data.len() <= trim {
+                return;
+            }
 
-        let mut sorted = row_data.to_vec();
-        sorted.sort_by(|a, b| b.partial_cmp(a).unwrap());
-        thresholds[i] = sorted[trim - 1];
-    }
+            scratch.clear();
+            scratch.extend_from_slice(row_data);
+            let (_, nth, _) =
+                scratch.select_nth_unstable_by(trim - 1, |a, b| b.partial_cmp(a).unwrap());
+            *thr = *nth;
+        },
+    );
 
     // Apply trimming twice (row then column)
     for _ in 0..2 {
