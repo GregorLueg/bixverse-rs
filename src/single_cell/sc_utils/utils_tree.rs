@@ -902,14 +902,31 @@ impl HistogramPool {
         debug_assert_ne!(parent, out);
         debug_assert_ne!(child, out);
         let n = self.histograms[0].n_features * 256;
-        for i in 0..n {
-            self.histograms[out].counts[i] =
-                self.histograms[parent].counts[i] - self.histograms[child].counts[i];
-            self.histograms[out].y_sums[i] =
-                self.histograms[parent].y_sums[i] - self.histograms[child].y_sums[i];
-            self.histograms[out].y_sum_sqs[i] =
-                self.histograms[parent].y_sum_sqs[i] - self.histograms[child].y_sum_sqs[i];
+        // take `out` so it can be written while `parent` and `child` are read
+        let mut out_h = std::mem::replace(&mut self.histograms[out], NodeHistograms::new(0));
+        let (p, c) = (&self.histograms[parent], &self.histograms[child]);
+        for ((o, a), b) in out_h.counts[..n]
+            .iter_mut()
+            .zip(&p.counts[..n])
+            .zip(&c.counts[..n])
+        {
+            *o = a - b;
         }
+        for ((o, a), b) in out_h.y_sums[..n]
+            .iter_mut()
+            .zip(&p.y_sums[..n])
+            .zip(&c.y_sums[..n])
+        {
+            *o = a - b;
+        }
+        for ((o, a), b) in out_h.y_sum_sqs[..n]
+            .iter_mut()
+            .zip(&p.y_sum_sqs[..n])
+            .zip(&c.y_sum_sqs[..n])
+        {
+            *o = a - b;
+        }
+        self.histograms[out] = out_h;
     }
 }
 

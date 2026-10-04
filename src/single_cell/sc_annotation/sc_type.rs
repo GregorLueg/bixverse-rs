@@ -419,27 +419,36 @@ pub fn run_sctype<S: SingleCellReading>(
             })
             .collect();
 
-        for (gene_idx, z) in &z_per_gene {
+        // per cell type, the batch's marker genes in `z_per_gene` order, so
+        // the sums add up in the same order as a sequential sweep
+        let mut pos_lists: Vec<Vec<(usize, f32)>> = vec![Vec::new(); n_cell_types];
+        let mut neg_lists: Vec<Vec<(usize, f32)>> = vec![Vec::new(); n_cell_types];
+        for (zi, (gene_idx, _)) in z_per_gene.iter().enumerate() {
             let sens = sensitivity.get(gene_idx).copied().unwrap_or(1.0);
-
-            if let Some(cts) = gene_to_ct_pos.get(gene_idx) {
-                for &ct in cts {
-                    let row = &mut sum_t1[ct];
-                    for (c, &v) in z.iter().enumerate() {
-                        row[c] += v * sens;
-                    }
-                }
+            for &ct in gene_to_ct_pos.get(gene_idx).into_iter().flatten() {
+                pos_lists[ct].push((zi, sens));
             }
-
-            if let Some(cts) = gene_to_ct_neg.get(gene_idx) {
-                for &ct in cts {
-                    let row = &mut sum_t2[ct];
-                    for (c, &v) in z.iter().enumerate() {
-                        row[c] -= v * sens;
-                    }
-                }
+            for &ct in gene_to_ct_neg.get(gene_idx).into_iter().flatten() {
+                neg_lists[ct].push((zi, sens));
             }
         }
+
+        sum_t1
+            .par_iter_mut()
+            .zip(sum_t2.par_iter_mut())
+            .zip(pos_lists.par_iter().zip(neg_lists.par_iter()))
+            .for_each(|((row_pos, row_neg), (pos, neg))| {
+                for &(zi, sens) in pos {
+                    for (acc, &v) in row_pos.iter_mut().zip(&z_per_gene[zi].1) {
+                        *acc += v * sens;
+                    }
+                }
+                for &(zi, sens) in neg {
+                    for (acc, &v) in row_neg.iter_mut().zip(&z_per_gene[zi].1) {
+                        *acc -= v * sens;
+                    }
+                }
+            });
     }
 
     if verbosity.normal_verbosity() {
@@ -449,26 +458,27 @@ pub fn run_sctype<S: SingleCellReading>(
     let n_pos: Vec<usize> = markers.iter().map(|m| m.positive_indices.len()).collect();
     let n_neg: Vec<usize> = markers.iter().map(|m| m.negative_indices.len()).collect();
 
+    let denom_pos: Vec<f32> = n_pos.iter().map(|&n| (n as f32).sqrt()).collect();
+    let denom_neg: Vec<f32> = n_neg.iter().map(|&n| (n as f32).sqrt()).collect();
     let mut scores = vec![0.0_f32; no_cells * n_cell_types];
-    for ct in 0..n_cell_types {
-        let denom_pos = (n_pos[ct] as f32).sqrt();
-        let denom_neg = (n_neg[ct] as f32).sqrt();
-        let has_pos = !sum_t1[ct].is_empty();
-        let has_neg = !sum_t2[ct].is_empty();
-        for c in 0..no_cells {
-            let t1 = if has_pos {
-                sum_t1[ct][c] / denom_pos
-            } else {
-                0.0
-            };
-            let t2 = if has_neg {
-                sum_t2[ct][c] / denom_neg
-            } else {
-                0.0
-            };
-            scores[c * n_cell_types + ct] = t1 + t2;
-        }
-    }
+    scores
+        .par_chunks_mut(n_cell_types.max(1))
+        .enumerate()
+        .for_each(|(c, row)| {
+            for (ct, out) in row.iter_mut().enumerate() {
+                let t1 = if sum_t1[ct].is_empty() {
+                    0.0
+                } else {
+                    sum_t1[ct][c] / denom_pos[ct]
+                };
+                let t2 = if sum_t2[ct].is_empty() {
+                    0.0
+                } else {
+                    sum_t2[ct][c] / denom_neg[ct]
+                };
+                *out = t1 + t2;
+            }
+        });
 
     let cell_types: Vec<String> = markers.iter().map(|m| m.cell_type.clone()).collect();
 

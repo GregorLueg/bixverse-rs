@@ -16,6 +16,9 @@ use rayon::prelude::*;
 
 use crate::single_cell::sc_utils::utils_tree::{QuantisedStore, train_oob_split, tree_seed};
 
+/// Samples x features above which histogram building fans out over features
+const HIST_PAR_MIN_WORK: usize = 1 << 16;
+
 ////////////
 // Params //
 ////////////
@@ -152,6 +155,10 @@ impl FeatureHistogram {
 struct NodeHistogram {
     /// One histogram per feature.
     features: Vec<FeatureHistogram>,
+    /// Scratch: gradients of the node's samples.
+    g_buf: Vec<f32>,
+    /// Scratch: hessians of the node's samples.
+    h_buf: Vec<f32>,
 }
 
 impl NodeHistogram {
@@ -167,15 +174,16 @@ impl NodeHistogram {
     fn new(n_features: usize) -> Self {
         Self {
             features: (0..n_features).map(|_| FeatureHistogram::new()).collect(),
+            g_buf: Vec::new(),
+            h_buf: Vec::new(),
         }
     }
 
     /// Populate histograms from the given training samples.
     ///
-    /// Iterates sample-major: for each sample, its gradient and
-    /// hessian are accumulated into all feature histograms at once.
-    /// This trades cache locality on the histogram side for a single
-    /// pass over the sample set.
+    /// Iterates feature-major: the node's gradients and hessians are
+    /// gathered once, then each feature streams them into its own histogram,
+    /// which stays hot in L1. Large nodes fan out over features.
     ///
     /// ### Params
     ///
@@ -184,19 +192,29 @@ impl NodeHistogram {
     /// * `grads` - Dense gradient array indexed by sample id.
     /// * `hess` - Dense hessian array indexed by sample id.
     fn build(&mut self, store: &QuantisedStore, samples: &[u32], grads: &[f32], hess: &[f32]) {
-        for fh in self.features.iter_mut() {
-            fh.reset();
-        }
+        self.g_buf.clear();
+        self.h_buf.clear();
         for &s in samples {
-            let si = s as usize;
-            let g = grads[si];
-            let h = hess[si];
-            for (f, fh) in self.features.iter_mut().enumerate() {
-                let bin = store.get_col(f)[si] as usize;
+            self.g_buf.push(grads[s as usize]);
+            self.h_buf.push(hess[s as usize]);
+        }
+        let (g_buf, h_buf) = (&self.g_buf, &self.h_buf);
+
+        let fill = |(f, fh): (usize, &mut FeatureHistogram)| {
+            fh.reset();
+            let col = store.get_col(f);
+            for ((&s, &g), &h) in samples.iter().zip(g_buf).zip(h_buf) {
+                let bin = col[s as usize] as usize;
                 fh.count[bin] += 1;
                 fh.grad_sum[bin] += g;
                 fh.hess_sum[bin] += h;
             }
+        };
+
+        if samples.len() * self.features.len() >= HIST_PAR_MIN_WORK {
+            self.features.par_iter_mut().enumerate().for_each(fill);
+        } else {
+            self.features.iter_mut().enumerate().for_each(fill);
         }
     }
 
