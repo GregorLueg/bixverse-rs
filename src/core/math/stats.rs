@@ -277,37 +277,38 @@ where
     let population_f = T::from_usize(population).unwrap();
 
     let upper = k.min(m);
-    let mut log_probs = Vec::new();
-
-    for i in (q + 1)..=upper {
-        let i_f = T::from_usize(i).unwrap();
-
-        // ln_gamma likely only supports f64, so convert
-        let log_pmf_f64 = ln_gamma(m_f.to_f64().unwrap() + 1.0)
-            - ln_gamma(i_f.to_f64().unwrap() + 1.0)
-            - ln_gamma((m_f - i_f).to_f64().unwrap() + 1.0)
-            + ln_gamma(n_f.to_f64().unwrap() + 1.0)
-            - ln_gamma((k_f - i_f).to_f64().unwrap() + 1.0)
-            - ln_gamma((n_f - (k_f - i_f)).to_f64().unwrap() + 1.0)
-            - (ln_gamma(population_f.to_f64().unwrap() + 1.0)
-                - ln_gamma(k_f.to_f64().unwrap() + 1.0)
-                - ln_gamma((population_f - k_f).to_f64().unwrap() + 1.0));
-
-        log_probs.push(T::from_f64(log_pmf_f64).unwrap());
-    }
-
-    if log_probs.is_empty() {
+    if q + 1 > upper {
         return T::zero();
     }
 
-    let max_log_prob = log_probs
-        .iter()
-        .cloned()
+    // ln_gamma likely only supports f64, so convert. The terms that do not
+    // depend on `i` are computed once.
+    let m_f64 = m_f.to_f64().unwrap();
+    let n_f64 = n_f.to_f64().unwrap();
+    let k_f64 = k_f.to_f64().unwrap();
+    let pop_f64 = population_f.to_f64().unwrap();
+    let invariant = ln_gamma(m_f64 + 1.0) + ln_gamma(n_f64 + 1.0)
+        - (ln_gamma(pop_f64 + 1.0)
+            - ln_gamma(k_f64 + 1.0)
+            - ln_gamma((population_f - k_f).to_f64().unwrap() + 1.0));
+
+    let log_pmf = |i: usize| -> T {
+        let i_f = T::from_usize(i).unwrap();
+        let log_pmf_f64 = invariant
+            - ln_gamma(i_f.to_f64().unwrap() + 1.0)
+            - ln_gamma((m_f - i_f).to_f64().unwrap() + 1.0)
+            - ln_gamma((k_f - i_f).to_f64().unwrap() + 1.0)
+            - ln_gamma((n_f - (k_f - i_f)).to_f64().unwrap() + 1.0);
+        T::from_f64(log_pmf_f64).unwrap()
+    };
+
+    let max_log_prob = ((q + 1)..=upper)
+        .map(log_pmf)
         .fold(T::neg_infinity(), |a, b| a.max(b));
 
     let mut sum = T::zero();
-    for log_p in log_probs {
-        sum += (log_p - max_log_prob).exp();
+    for i in (q + 1)..=upper {
+        sum += (log_pmf(i) - max_log_prob).exp();
     }
 
     sum * max_log_prob.exp()
@@ -1299,11 +1300,16 @@ pub fn one_way_anova<T: BixverseFloat>(
             c as f64 * d * d
         })
         .sum();
+    let group_means: Vec<f64> = sums
+        .iter()
+        .zip(counts.iter())
+        .map(|(&s, &c)| s / c as f64)
+        .collect();
     let ss_within: f64 = values
         .iter()
         .zip(groups.iter())
         .map(|(v, &g)| {
-            let d = v.to_f64().unwrap_or(f64::NAN) - sums[g] / counts[g] as f64;
+            let d = v.to_f64().unwrap_or(f64::NAN) - group_means[g];
             d * d
         })
         .sum();
