@@ -67,6 +67,10 @@ use crate::single_cell::sc_data::data_io::SingleCellReading;
 /// at all. `allow_large` on [MagicParams] is the deliberate override.
 const MAGIC_MAX_ELEMENTS: usize = 1_000_000_000;
 
+/// Columns transposed together in [MagicImputed::to_mat], one 64-byte line of
+/// `f32`.
+const TO_MAT_COLUMN_BLOCK: usize = 16;
+
 /// Genes read per disk batch.
 ///
 /// Matches the streaming HVG path. Peak scratch is
@@ -343,7 +347,23 @@ impl MagicImputed {
     /// `n_cells` by `n_genes`.
     pub fn to_mat(&self) -> Mat<f32> {
         let n_genes = self.n_genes();
-        Mat::from_fn(self.n_cells, n_genes, |i, j| self.data[i * n_genes + j])
+        let mut out = Mat::<f32>::zeros(self.n_cells, n_genes);
+        if n_genes == 0 {
+            return out;
+        }
+        // One cache line of source floats per row visit
+        out.par_col_chunks_mut(TO_MAT_COLUMN_BLOCK)
+            .enumerate()
+            .for_each(|(block, mut cols)| {
+                let first = block * TO_MAT_COLUMN_BLOCK;
+                for i in 0..self.n_cells {
+                    let src = &self.data[i * n_genes + first..];
+                    for (jj, &v) in src.iter().take(cols.ncols()).enumerate() {
+                        cols[(i, jj)] = v;
+                    }
+                }
+            });
+        out
     }
 }
 
