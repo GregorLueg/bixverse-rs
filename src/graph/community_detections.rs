@@ -11,6 +11,9 @@ use std::time::Instant;
 use crate::core::math::sparse::coo_to_csr;
 use crate::prelude::*;
 
+/// Neighbouring communities above which a merge scores them in parallel
+const WALKTRAP_PAR_MIN_NEIGHBOURS: usize = 64;
+
 /////////////////////
 // General helpers //
 /////////////////////
@@ -83,7 +86,7 @@ where
     let n = graph.get_node_number();
 
     let m: T = (0..n)
-        .map(|i| graph.get_neighbours(i).1.iter().copied().sum::<T>())
+        .map(|i| graph.get_neighbours_raw(i).1.iter().copied().sum::<T>())
         .sum::<T>()
         / T::from_f64(2.0).unwrap();
 
@@ -92,7 +95,7 @@ where
 
     let mut degrees = vec![T::zero(); n];
     for i in 0..n {
-        degrees[i] = graph.get_neighbours(i).1.iter().copied().sum();
+        degrees[i] = graph.get_neighbours_raw(i).1.iter().copied().sum();
     }
 
     let mut communities: Vec<u32> = (0..n as u32).collect();
@@ -124,10 +127,10 @@ where
         let k_i = degrees[node_idx];
         let k_i_scaled = k_i * res_over_two_m;
 
-        let (neighbours, weights) = graph.get_neighbours(node_idx);
+        let (neighbours, weights) = graph.get_neighbours_raw(node_idx);
 
         for (&neighbour, &weight) in neighbours.iter().zip(weights.iter()) {
-            let comm = communities[neighbour] as usize;
+            let comm = communities[neighbour as usize] as usize;
             if !comm_active[comm] {
                 comm_active[comm] = true;
                 active_comms.push(comm);
@@ -159,10 +162,10 @@ where
             comm_degree_sums[current_comm] -= k_i;
             comm_degree_sums[best_comm] += k_i;
 
-            for nb in neighbours {
-                if nb != node_idx && !in_queue[nb] {
-                    queue.push_back(nb as u32);
-                    in_queue[nb] = true;
+            for &nb in neighbours {
+                if nb as usize != node_idx && !in_queue[nb as usize] {
+                    queue.push_back(nb);
+                    in_queue[nb as usize] = true;
                 }
             }
         }
@@ -225,9 +228,9 @@ where
 
     for ci in 0..n_comms {
         for &fine_i in &nodes_per_comm[ci] {
-            let (neighbours, weights) = graph.get_neighbours(fine_i);
+            let (neighbours, weights) = graph.get_neighbours_raw(fine_i);
             for (&j, &w) in neighbours.iter().zip(weights.iter()) {
-                let cj = communities[j];
+                let cj = communities[j as usize];
                 if !touched[cj] {
                     touched[cj] = true;
                     active.push(cj);
@@ -459,6 +462,35 @@ where
     v
 }
 
+/// Per-thread dense buffers for the random-walk propagation
+///
+/// ### Fields
+///
+/// * `cur` - Current probabilities, nonzero only at `cur_nodes`
+/// * `next` - Probabilities of the next step, nonzero only at `next_nodes`
+/// * `cur_nodes` - Nodes holding mass in `cur`
+/// * `next_nodes` - Nodes holding mass in `next`
+/// * `seen` - Membership flags for `next_nodes` while a step is running
+struct WalkScratch<T> {
+    cur: Vec<T>,
+    next: Vec<T>,
+    cur_nodes: Vec<u32>,
+    next_nodes: Vec<u32>,
+    seen: Vec<bool>,
+}
+
+impl<T: BixverseFloat> WalkScratch<T> {
+    fn new(n: usize) -> Self {
+        Self {
+            cur: vec![T::zero(); n],
+            next: vec![T::zero(); n],
+            cur_nodes: Vec::new(),
+            next_nodes: Vec::new(),
+            seen: vec![false; n],
+        }
+    }
+}
+
 /// Compute random-walk probability vectors for all nodes (sparse)
 ///
 /// For each node i, simulates a `walk_length`-step random walk starting at i
@@ -494,7 +526,7 @@ where
 
     let inv_sqrt_deg: Vec<T> = (0..n)
         .map(|k| {
-            let (_, w) = graph.get_neighbours(k);
+            let (_, w) = graph.get_neighbours_raw(k);
             let d: T = w.iter().copied().sum();
             if d > T::zero() {
                 T::one() / d.sqrt()
@@ -507,13 +539,13 @@ where
     let transition_probs: Vec<Vec<(usize, T)>> = (0..n)
         .into_par_iter()
         .map(|i| {
-            let (neighbours, weights) = graph.get_neighbours(i);
+            let (neighbours, weights) = graph.get_neighbours_raw(i);
             let degree: T = weights.iter().copied().sum();
             if degree > T::zero() {
                 neighbours
                     .iter()
                     .zip(weights.iter())
-                    .map(|(&j, &w)| (j, w / degree))
+                    .map(|(&j, &w)| (j as usize, w / degree))
                     .collect()
             } else {
                 Vec::new()
@@ -521,28 +553,60 @@ where
         })
         .collect();
 
+    // Dense accumulators per thread, cleared through the touched lists
     (0..n)
         .into_par_iter()
-        .map(|i| {
-            let mut probs: FxHashMap<usize, T> = FxHashMap::default();
-            probs.insert(i, T::one());
-            for _ in 0..walk_length {
-                let mut next: FxHashMap<usize, T> = FxHashMap::default();
-                for (&node, &p) in &probs {
-                    if p > epsilon {
-                        for &(nb, tp) in &transition_probs[node] {
-                            *next.entry(nb).or_insert_with(T::zero) += p * tp;
+        .map_init(
+            || WalkScratch::<T>::new(n),
+            |scratch, i| {
+                let WalkScratch {
+                    cur,
+                    next,
+                    cur_nodes,
+                    next_nodes,
+                    seen,
+                } = scratch;
+
+                cur[i] = T::one();
+                cur_nodes.push(i as u32);
+
+                for _ in 0..walk_length {
+                    for &node in cur_nodes.iter() {
+                        seen[node as usize] = false;
+                    }
+                    for &node in cur_nodes.iter() {
+                        let p = cur[node as usize];
+                        if p > epsilon {
+                            for &(nb, tp) in &transition_probs[node as usize] {
+                                if !seen[nb] {
+                                    seen[nb] = true;
+                                    next_nodes.push(nb as u32);
+                                }
+                                next[nb] += p * tp;
+                            }
                         }
                     }
+                    for &node in cur_nodes.iter() {
+                        cur[node as usize] = T::zero();
+                    }
+                    cur_nodes.clear();
+                    std::mem::swap(cur, next);
+                    std::mem::swap(cur_nodes, next_nodes);
                 }
-                probs = next;
-            }
-            let row: Vec<(usize, T)> = probs
-                .into_iter()
-                .map(|(k, p)| (k, p * inv_sqrt_deg[k]))
-                .collect();
-            finalise_sparse_vec(row, max_support)
-        })
+
+                let row: Vec<(usize, T)> = cur_nodes
+                    .iter()
+                    .map(|&k| (k as usize, cur[k as usize] * inv_sqrt_deg[k as usize]))
+                    .collect();
+                for &node in cur_nodes.iter() {
+                    cur[node as usize] = T::zero();
+                    seen[node as usize] = false;
+                }
+                cur_nodes.clear();
+
+                finalise_sparse_vec(row, max_support)
+            },
+        )
         .collect()
 }
 
@@ -681,8 +745,9 @@ where
 
     let mut edges: Vec<(usize, usize)> = Vec::new();
     for i in 0..n {
-        let (neighbours, _) = graph.get_neighbours(i);
-        for j in neighbours {
+        let (neighbours, _) = graph.get_neighbours_raw(i);
+        for &j in neighbours {
+            let j = j as usize;
             if i != j {
                 adj[i].insert(j);
                 if i < j {
@@ -781,25 +846,28 @@ where
         comm_parent.push(c);
         comm_parent[a] = c;
         comm_parent[b] = c;
-        adj.push(new_adj.clone());
+        let new_adj_vec: Vec<usize> = new_adj.iter().copied().collect();
+        adj.push(new_adj);
 
-        for &k in &new_adj {
+        for &k in &new_adj_vec {
             adj[k].remove(&a);
             adj[k].remove(&b);
             adj[k].insert(c);
         }
 
-        let new_adj_vec: Vec<usize> = new_adj.into_iter().collect();
-        let new_criteria: Vec<(RevOrderedFloat<T>, usize, usize)> = new_adj_vec
-            .par_iter()
-            .map(|&k| {
-                let qc = comm_q[c].as_ref().unwrap();
-                let qk = comm_q[k].as_ref().unwrap();
-                let d_sq = sparse_sq_dist(qc, qk);
-                let crit = ward_criterion(d_sq, n_c, comm_size[k]);
-                (RevOrderedFloat(crit), c, k)
-            })
-            .collect();
+        let criterion = |&k: &usize| {
+            let qc = comm_q[c].as_ref().unwrap();
+            let qk = comm_q[k].as_ref().unwrap();
+            let d_sq = sparse_sq_dist(qc, qk);
+            let crit = ward_criterion(d_sq, n_c, comm_size[k]);
+            (RevOrderedFloat(crit), c, k)
+        };
+        let new_criteria: Vec<(RevOrderedFloat<T>, usize, usize)> =
+            if new_adj_vec.len() >= WALKTRAP_PAR_MIN_NEIGHBOURS {
+                new_adj_vec.par_iter().map(criterion).collect()
+            } else {
+                new_adj_vec.iter().map(criterion).collect()
+            };
 
         for entry in new_criteria {
             heap.push(entry);

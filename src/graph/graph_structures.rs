@@ -148,6 +148,25 @@ where
         )
     }
 
+    /// Get the neighbours and weights without allocating
+    ///
+    /// ### Params
+    ///
+    /// * `node` - Index of the node for which to get the neighbours
+    ///
+    /// ### Return
+    ///
+    /// Tuple of `(neighbour_indices, edge_weights)`, borrowed from the CSR
+    #[inline]
+    pub fn get_neighbours_raw(&self, node: usize) -> (&[u32], &[T]) {
+        let start = self.adjacency.indptr[node] as usize;
+        let end = self.adjacency.indptr[node + 1] as usize;
+        (
+            &self.adjacency.indices[start..end],
+            &self.adjacency.data[start..end],
+        )
+    }
+
     /// Get the node degree
     ///
     /// ### Params
