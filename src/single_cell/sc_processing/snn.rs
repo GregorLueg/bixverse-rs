@@ -609,6 +609,7 @@ pub fn snn_edges_to_sparse_graph(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustc_hash::FxHashMap;
 
     // tiny fixture, 4 nodes, k=2:
     //   node 0 -> [1, 2]
