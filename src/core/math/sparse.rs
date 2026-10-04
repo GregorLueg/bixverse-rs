@@ -1963,9 +1963,19 @@ where
     for i in 0..mat.shape.0 {
         let row_start = mat.indptr[i] as usize;
         let row_end = mat.indptr[i + 1] as usize;
-        let mut sum = T::default();
-        for idx in row_start..row_end {
-            sum += mat.data[idx] * vec[mat.indices[idx] as usize];
+        let data = &mat.data[row_start..row_end];
+        let cols = &mat.indices[row_start..row_end];
+        let mut acc = [T::default(); 4];
+        let mut data_chunks = data.chunks_exact(4);
+        let mut col_chunks = cols.chunks_exact(4);
+        for (d, c) in (&mut data_chunks).zip(&mut col_chunks) {
+            for l in 0..4 {
+                acc[l] += d[l] * vec[c[l] as usize];
+            }
+        }
+        let mut sum = (acc[0] + acc[1]) + (acc[2] + acc[3]);
+        for (&d, &c) in data_chunks.remainder().iter().zip(col_chunks.remainder()) {
+            sum += d * vec[c as usize];
         }
         result[i] = sum;
     }
@@ -2199,6 +2209,9 @@ where
 // Sparse dense operations //
 /////////////////////////////
 
+/// Output rows accumulated per tile in [`csr_sparse_matmul_dense`]
+const MATMUL_DENSE_ROW_BLOCK: usize = 256;
+
 /// Sparse CSR @ sparse CSR -> dense
 ///
 /// Parallel over output rows. For cases where you assume that the resulting
@@ -2244,32 +2257,34 @@ where
     let g_indices = &b.indices;
     let g_data = &b.data;
 
-    let dense_rows: Vec<Vec<T>> = (0..n_rows)
-        .into_par_iter()
-        .map(|i| {
-            let mut row = vec![T::zero(); n_cols];
-            let rs = m_indptr[i] as usize;
-            let re = m_indptr[i + 1] as usize;
-            for p in rs..re {
-                let j = m_indices[p] as usize;
-                let w = m_data[p];
-                let gs = g_indptr[j] as usize;
-                let ge = g_indptr[j + 1] as usize;
-                for q in gs..ge {
-                    let t = g_indices[q] as usize;
-                    row[t] += w * g_data[q];
+    // Row blocks are accumulated into a row-major tile, then transposed into
+    // the column-major output in parallel over output columns.
+    let mut out = Mat::<T>::zeros(n_rows, n_cols);
+    for block_start in (0..n_rows).step_by(MATMUL_DENSE_ROW_BLOCK) {
+        let rows = MATMUL_DENSE_ROW_BLOCK.min(n_rows - block_start);
+        let mut tile = vec![T::zero(); rows * n_cols];
+        tile.par_chunks_mut(n_cols.max(1))
+            .take(rows)
+            .enumerate()
+            .for_each(|(r, row)| {
+                let i = block_start + r;
+                for p in m_indptr[i] as usize..m_indptr[i + 1] as usize {
+                    let j = m_indices[p] as usize;
+                    let w = m_data[p];
+                    let gs = g_indptr[j] as usize;
+                    let ge = g_indptr[j + 1] as usize;
+                    for q in gs..ge {
+                        let t = g_indices[q] as usize;
+                        row[t] += w * g_data[q];
+                    }
                 }
-            }
-            row
-        })
-        .collect();
+            });
 
-    // this part can be sequential...
-    let mut out = Mat::zeros(n_rows, n_cols);
-    for (i, row) in dense_rows.into_iter().enumerate() {
-        for (j, v) in row.into_iter().enumerate() {
-            out[(i, j)] = v;
-        }
+        out.par_col_iter_mut().enumerate().for_each(|(j, mut col)| {
+            for r in 0..rows {
+                col[block_start + r] = tile[r * n_cols + j];
+            }
+        });
     }
 
     Ok(out)
@@ -2360,6 +2375,9 @@ where
 // Sparse statistics //
 ///////////////////////
 
+/// Stored non-zeros from which the column statistics fan out over rayon
+const PAR_COLUMN_STATS_MIN_NNZ: usize = 1 << 20;
+
 /// Calculate the column means for CSC [CompressedSparseData2]
 ///
 /// ### Params
@@ -2392,16 +2410,18 @@ where
 
     let (nrows, ncols) = csc.shape();
     let nrows_t = T::from_usize(nrows).unwrap();
-    let mut col_means: Vec<T> = Vec::with_capacity(ncols);
 
-    for j in 0..ncols {
+    let col_mean = |j: usize| {
         let start = csc.indptr[j] as usize;
         let end = csc.indptr[j + 1] as usize;
-        let sum = T::bxv_sum(&active_data[start..end]);
-        col_means.push(sum / nrows_t);
-    }
+        T::bxv_sum(&active_data[start..end]) / nrows_t
+    };
 
-    Ok(col_means)
+    if active_data.len() >= PAR_COLUMN_STATS_MIN_NNZ {
+        Ok((0..ncols).into_par_iter().map(col_mean).collect())
+    } else {
+        Ok((0..ncols).map(col_mean).collect())
+    }
 }
 
 /// Calculate the column standard deviations for CSC [CompressedSparseData2]
@@ -2437,9 +2457,8 @@ where
     let (nrows, ncols) = csc.shape();
     let nrows_t = T::from_usize(nrows).unwrap();
     let denom = nrows_t - T::one();
-    let mut col_sds: Vec<T> = Vec::with_capacity(ncols);
 
-    for j in 0..ncols {
+    let col_sd = |j: usize| {
         let start = csc.indptr[j] as usize;
         let end = csc.indptr[j + 1] as usize;
         let col_slice = &active_data[start..end];
@@ -2448,10 +2467,14 @@ where
         let mean = T::bxv_sum(col_slice) / nrows_t;
         let ssd_nonzero = T::bxv_sum_squared_deviation(col_slice, mean);
         let ssd_total = ssd_nonzero + implicit_zeros * mean * mean;
-        col_sds.push((ssd_total / denom).sqrt());
-    }
+        (ssd_total / denom).sqrt()
+    };
 
-    Ok(col_sds)
+    if active_data.len() >= PAR_COLUMN_STATS_MIN_NNZ {
+        Ok((0..ncols).into_par_iter().map(col_sd).collect())
+    } else {
+        Ok((0..ncols).map(col_sd).collect())
+    }
 }
 
 /////////////////////////

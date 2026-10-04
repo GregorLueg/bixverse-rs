@@ -13,6 +13,8 @@ pub mod vec_utils;
 
 use faer::Par;
 use rustc_hash::{FxBuildHasher, FxHashSet};
+use std::num::NonZeroUsize;
+use std::sync::OnceLock;
 
 ///////////////////
 // General utils //
@@ -38,5 +40,6 @@ pub fn string_vec_to_set(x: &[String]) -> FxHashSet<&String> {
 /// Returns the faer parallelism enum (all available cores via Rayon).
 #[inline]
 pub fn faer_parallelism() -> Par {
-    Par::Rayon(std::thread::available_parallelism().unwrap())
+    static N_THREADS: OnceLock<NonZeroUsize> = OnceLock::new();
+    Par::Rayon(*N_THREADS.get_or_init(|| std::thread::available_parallelism().unwrap()))
 }

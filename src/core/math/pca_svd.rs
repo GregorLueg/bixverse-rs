@@ -21,6 +21,12 @@ use crate::prelude::*;
 /// zero-variance cut-off.
 const COV_ZERO_SD: f64 = 1e-8;
 
+/// Rows per block when transposing between row-major scratch and `Mat`
+const TRANSPOSE_ROW_BLOCK: usize = 64;
+
+/// Columns written per task when filling a `Mat` from a row-major source
+const TRANSPOSE_COL_BLOCK: usize = 8;
+
 ////////////////
 // Structures //
 ////////////////
@@ -380,12 +386,19 @@ where
     let to_row_major = |x: MatRef<F>, scale: Option<&[f64]>| -> Vec<f64> {
         let k = x.ncols();
         let mut out = vec![0f64; x.nrows() * k];
-        out.par_chunks_mut(k).enumerate().for_each(|(j, row)| {
-            let d = scale.map(|s| s[j]).unwrap_or(1.0);
-            for c in 0..k {
-                row[c] = x[(j, c)].to_f64().unwrap() / d;
-            }
-        });
+        // Row blocks, feature outer: the reads walk contiguous column slices and
+        // the strided writes stay inside one cache-resident block.
+        out.par_chunks_mut(TRANSPOSE_ROW_BLOCK * k)
+            .enumerate()
+            .for_each(|(b, block)| {
+                let j0 = b * TRANSPOSE_ROW_BLOCK;
+                for c in 0..k {
+                    for r in 0..block.len() / k {
+                        let d = scale.map(|s| s[j0 + r]).unwrap_or(1.0);
+                        block[r * k + c] = x[(j0 + r, c)].to_f64().unwrap() / d;
+                    }
+                }
+            });
         out
     };
 
@@ -420,7 +433,7 @@ where
                 acc[c] -= mean_dots[c] + o_i * x_sums[c];
             }
         });
-        Mat::from_fn(n, k, |i, c| F::from_f64(y_rm[i * k + c]).unwrap())
+        mat_from_row_major(n, k, |i, c| F::from_f64(y_rm[i * k + c]).unwrap())
     };
 
     // y = D^-1 (A - o 1^T - 1 mu^T)^T x. One contiguous block of rows per
@@ -467,7 +480,7 @@ where
                 },
             );
 
-        Mat::from_fn(m, k, |j, c| {
+        mat_from_row_major(m, k, |j, c| {
             let mu_j = mu.as_ref().map(|v| v[j]).unwrap_or(0.0);
             let sd_j = sd.as_ref().map(|v| v[j]).unwrap_or(1.0);
             F::from_f64((y_rm[j * k + c] - mu_j * col_sums[c] - o_dot_x[c]) / sd_j).unwrap()
@@ -499,6 +512,39 @@ where
     let v = svd.V().to_owned();
 
     Ok(RandomSvdResults { u, s, v })
+}
+
+/// Build a column-major matrix from a function over `(row, column)`
+///
+/// Parallel over small column blocks with rows outer, so a row-major source is
+/// read one cache line at a time rather than once per column.
+///
+/// ### Params
+///
+/// * `n` - Number of rows
+/// * `k` - Number of columns
+/// * `f` - Entry at `(row, column)`
+///
+/// ### Returns
+///
+/// The `n x k` matrix.
+fn mat_from_row_major<F, G>(n: usize, k: usize, f: G) -> Mat<F>
+where
+    F: BixverseFloat,
+    G: Fn(usize, usize) -> F + Sync,
+{
+    let mut out = Mat::<F>::zeros(n, k);
+    out.par_col_chunks_mut(TRANSPOSE_COL_BLOCK)
+        .enumerate()
+        .for_each(|(b, mut block)| {
+            let c0 = b * TRANSPOSE_COL_BLOCK;
+            for i in 0..n {
+                for c in 0..block.ncols() {
+                    block[(i, c)] = f(i, c0 + c);
+                }
+            }
+        });
+    out
 }
 
 /// Orthonormalise the columns of a tall matrix
@@ -728,7 +774,7 @@ where
     // with s = A^T 1 and w = A^T o
     let gram_ref = &gram;
     let constant: Vec<bool> = sd.iter().map(|&s| s < COV_ZERO_SD).collect();
-    let cov = Mat::<f64>::from_fn(m, m, |a, b| {
+    let cov_entry = |a: usize, b: usize| -> f64 {
         if constant[a] || constant[b] {
             return 0.0;
         }
@@ -743,6 +789,12 @@ where
         let raw =
             ata - w[ra] - w[rb] - sa * cb - ca * sb + o_sq + o_sum * (ca + cb) + n_f * ca * cb;
         raw / (sd[a] * sd[b])
+    };
+    let mut cov = Mat::<f64>::zeros(m, m);
+    cov.par_col_iter_mut().enumerate().for_each(|(b, mut col)| {
+        for a in 0..m {
+            col[a] = cov_entry(a, b);
+        }
     });
     drop(gram);
 
@@ -793,7 +845,7 @@ where
         })
         .collect();
     Ok(RandomSvdResults {
-        u: Mat::from_fn(n, rank, |i, c| F::from_f64(u_rm[i * rank + c]).unwrap()),
+        u: mat_from_row_major(n, rank, |i, c| F::from_f64(u_rm[i * rank + c]).unwrap()),
         v: Mat::from_fn(m, rank, |j, c| F::from_f64(eig_vecs[(j, c)]).unwrap()),
         s: s.iter().map(|&x| F::from_f64(x).unwrap()).collect(),
     })

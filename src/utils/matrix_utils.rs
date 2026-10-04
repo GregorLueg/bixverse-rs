@@ -1,10 +1,17 @@
 //! faer matrix transformation utils. Concantenations, row removals, etc.
 
 use faer::{Mat, MatRef, concat};
+use rayon::prelude::*;
 use std::borrow::Cow;
 
 use crate::prelude::*;
 use crate::utils::vec_utils::flatten_vector;
+
+/// Rows per block when transposing between row-major buffers and `Mat`
+const TRANSPOSE_ROW_BLOCK: usize = 64;
+
+/// Columns written per task when filling a `Mat` from a row-major buffer
+const TRANSPOSE_COL_BLOCK: usize = 8;
 
 /// Transform a nested vector into a faer matrix
 ///
@@ -229,11 +236,10 @@ where
             "All matrices must have the same number of columns"
         );
         let nrows = matrix.nrows();
-        for i in 0..nrows {
-            for j in 0..ncols {
-                result[(row_offset + i, j)] = matrix[(i, j)]
-            }
-        }
+        result
+            .as_mut()
+            .submatrix_mut(row_offset, 0, nrows, ncols)
+            .copy_from(matrix.as_ref());
         row_offset += nrows;
     }
 
@@ -267,11 +273,10 @@ where
             "All matrices must have the same number of columns"
         );
         let ncols = matrix.ncols();
-        for i in 0..nrows {
-            for j in 0..ncols {
-                result[(i, col_offset + j)] = matrix[(i, j)]
-            }
-        }
+        result
+            .as_mut()
+            .submatrix_mut(0, col_offset, nrows, ncols)
+            .copy_from(matrix.as_ref());
         col_offset += ncols;
     }
 
@@ -296,13 +301,20 @@ where
 {
     let n = mat.nrows();
     let d = mat.ncols();
-    let mut flat = Vec::with_capacity(n * d);
+    let mut flat = vec![T::zero(); n * d];
 
-    for row in 0..n {
-        for col in 0..d {
-            flat.push(mat[(row, col)]);
-        }
-    }
+    // Row blocks, column outer: reads stay on contiguous column slices and the
+    // strided writes stay inside one cache-resident block.
+    flat.par_chunks_mut((TRANSPOSE_ROW_BLOCK * d).max(1))
+        .enumerate()
+        .for_each(|(b, block)| {
+            let r0 = b * TRANSPOSE_ROW_BLOCK;
+            for c in 0..d {
+                for r in 0..block.len() / d {
+                    block[r * d + c] = mat[(r0 + r, c)];
+                }
+            }
+        });
 
     flat
 }
@@ -328,7 +340,19 @@ where
         "Flat data size doesn't match dimensions"
     );
 
-    Mat::from_fn(nrows, ncols, |i, j| flat[i * ncols + j])
+    let mut out = Mat::<T>::zeros(nrows, ncols);
+    out.par_col_chunks_mut(TRANSPOSE_COL_BLOCK)
+        .enumerate()
+        .for_each(|(b, mut block)| {
+            let c0 = b * TRANSPOSE_COL_BLOCK;
+            for i in 0..nrows {
+                for c in 0..block.ncols() {
+                    block[(i, c)] = flat[i * ncols + c0 + c];
+                }
+            }
+        });
+
+    out
 }
 
 /// Borrow every column of a matrix as a contiguous slice
