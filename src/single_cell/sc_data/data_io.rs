@@ -2394,6 +2394,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use half::f16;
 
     /// RAII guard that removes a test's temp file even if an assert fails.
     struct TempBin(std::path::PathBuf);
