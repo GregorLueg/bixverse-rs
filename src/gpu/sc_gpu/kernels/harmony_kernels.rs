@@ -14,6 +14,19 @@ use crate::errors::BixverseErrors;
 use crate::gpu::linalg::cholesky_gpu::dense_gemm;
 use crate::gpu::*;
 
+////////////
+// Consts //
+////////////
+
+/// Weight of the fresh assignments in each Jacobi R-update; the rest is the
+/// previous sweep's R. Undamped, every cell reacts to the same stale O at
+/// once and the diversity penalty herds whole batches between clusters: the
+/// objective oscillates with period two and the outer loop reads the upswing
+/// as convergence. Measured on 300k and 1M synthetic cells (10 and 30
+/// batches): undamped stopped after one round with the objective rising,
+/// 0.5 gives a monotone trace that tracks the CPU block update.
+const R_UPDATE_DAMPING: f32 = 0.5;
+
 /////////////
 // Kernels //
 /////////////
@@ -471,15 +484,17 @@ fn objective_partials<F: Float>(
     }
 }
 
-/// Full-batch Jacobi R-update (single covariate).
+/// Damped full-batch Jacobi R-update (single covariate).
 ///
 /// One workgroup per cell; threads stride over the K clusters. Pass 1
 /// accumulates `sum_k scale_dist[n,k] * penalty` via a workgroup tree
 /// reduction, where `penalty = ((2E + 1) / (O[k,level] + E + 1))^theta_l` and
-/// `E = r_sum[k] * pr_b[level]`. Pass 2 recomputes and normalises. O and
-/// `r_sum` are read from the previous sweep (no block removal); this differs
-/// from the CPU block update by design. The kernel never reads R, so writing
-/// R in place is safe. The penalty is recomputed in pass 2 to avoid a
+/// `E = r_sum[k] * pr_b[level]`. Pass 2 recomputes, normalises and blends
+/// with the previous R by [`R_UPDATE_DAMPING`]. O and `r_sum` are read from
+/// the previous sweep (no block removal), unlike the CPU block update; the
+/// damping is what keeps that stable. Each thread reads its own R entries
+/// before overwriting them, so the in-place write is safe. The penalty is
+/// recomputed in pass 2 to avoid a
 /// cross-thread global read-after-write (`sync_cube` orders shared, not
 /// necessarily storage); this costs a second `powf` per element.
 ///
@@ -492,7 +507,7 @@ fn objective_partials<F: Float>(
 /// * `theta` - Per-level theta for the single covariate `[b]`
 /// * `pr_b` - Level frequencies `[b]`
 /// * `cell_to_level` - Level index per cell `[n]`
-/// * `r_out` - Output R `[n, k]`, written in place
+/// * `r_out` - R `[n, k]`, the previous sweep's on entry, updated in place
 /// * `n` - Cell count
 /// * `k` - Cluster count
 /// * `wg_size` - Workgroup size (comptime, power of two)
@@ -590,7 +605,9 @@ fn jacobi_r_update<F: Float>(
                 / (o[o_base + kk2 as usize] + e_val + F::new(1.0_f32));
             let penalty = F::powf(ratio, theta_l);
             let val = scale_dist[cell_base + kk2 as usize] * penalty;
-            r_out[cell_base + kk2 as usize] = val / total;
+            let old = r_out[cell_base + kk2 as usize];
+            r_out[cell_base + kk2 as usize] =
+                F::new(R_UPDATE_DAMPING) * (val / total) + F::new(1.0_f32 - R_UPDATE_DAMPING) * old;
             kk2 += wg_size;
         }
     } else {
@@ -1415,7 +1432,10 @@ mod tests_harmony_kernels {
         let pr_b_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&pr_b, vec![b], &client).unwrap();
         let ctl_gpu =
             GpuTensor::<WgpuRuntime, u32>::from_slice(&cell_to_level, vec![n], &client).unwrap();
-        let r_out_gpu = GpuTensor::<WgpuRuntime, f32>::empty(vec![n, k], &client).unwrap();
+        // previous sweep's R, which the damped update blends with
+        let prior = vec![1.0 / k as f32; n * k];
+        let r_out_gpu =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&prior, vec![n, k], &client).unwrap();
 
         launch_jacobi_r_update(
             &scale_gpu, &o_gpu, &r_sum_gpu, &theta_gpu, &pr_b_gpu, &ctl_gpu, &r_out_gpu, n, k,
@@ -1424,8 +1444,12 @@ mod tests_harmony_kernels {
         .unwrap();
 
         let got = r_out_gpu.read(&client).unwrap();
-        let want =
-            cpu_jacobi_r_update(&scale_dist, &o, &r_sum, &theta, &pr_b, &cell_to_level, n, k);
+        let want: Vec<f32> =
+            cpu_jacobi_r_update(&scale_dist, &o, &r_sum, &theta, &pr_b, &cell_to_level, n, k)
+                .iter()
+                .zip(&prior)
+                .map(|(&fresh, &old)| R_UPDATE_DAMPING * fresh + (1.0 - R_UPDATE_DAMPING) * old)
+                .collect();
 
         for i in 0..n * k {
             assert_relative_eq!(got[i], want[i], epsilon = 1e-4);
