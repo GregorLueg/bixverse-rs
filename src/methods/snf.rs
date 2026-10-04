@@ -449,7 +449,7 @@ where
                     }
                 }
                 for o in col.iter_mut() {
-                    *o = *o * inv_others;
+                    *o *= inv_others;
                 }
             });
 
