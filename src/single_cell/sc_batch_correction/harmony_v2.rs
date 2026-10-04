@@ -77,8 +77,8 @@ impl Default for HarmonyParamsV2 {
             alpha: 0.2,
             tau: 0.0,
             batch_proportion_cutoff: 1e-5,
-            use_dynamic_lambda: false,
-            kmeans_params: KMeansParamsWrappers::default(),
+            use_dynamic_lambda: true,
+            kmeans_params: KMeansParamsWrappers::new(30, None, None),
         }
     }
 }

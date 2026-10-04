@@ -129,7 +129,7 @@ impl Default for HarmonyParamsV2Gpu {
             alpha: 0.2,
             tau: 0.0,
             batch_proportion_cutoff: 1e-5,
-            use_dynamic_lambda: false,
+            use_dynamic_lambda: true,
             kmeans_params: None,
         }
     }
