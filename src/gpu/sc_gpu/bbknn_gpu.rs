@@ -6,18 +6,12 @@
 #![allow(missing_docs)]
 
 use ann_search_rs::utils::dist::{Dist, parse_ann_dist};
-use ann_search_rs::{
-    build_exhaustive_index_gpu, build_ivf_index_gpu, build_nndescent_index_gpu,
-    query_exhaustive_index_gpu, query_ivf_index_gpu, query_nndescent_index_gpu,
-};
 use cubecl::Runtime;
 use faer::MatRef;
 use rayon::prelude::*;
 
 use crate::core::mat_struct::MatSliceView;
-use crate::gpu::sc_gpu::knn_gpu::{
-    KnnParamsGpu, KnnSearchGpu, cagra_query_params, parse_knn_method_gpu,
-};
+use crate::gpu::sc_gpu::knn_gpu::{KnnParamsGpu, dispatch_knn_query_gpu};
 use crate::prelude::*;
 use crate::single_cell::sc_batch_correction::batch_utils::process_batch_labels;
 use crate::single_cell::sc_batch_correction::bbknn::{bbknn_graph_from_knn, check_batch_size};
@@ -77,88 +71,6 @@ impl Default for BbknnParamsGpu {
 /////////////
 // Helpers //
 /////////////
-
-/// Query one batch index with every cell on the GPU.
-///
-/// Pure dispatch over the three GPU backends, mirroring `dispatch_knn_gpu` but
-/// on the cross-query entry points: the index covers one batch, the query
-/// matrix covers all cells. An unrecognised method string falls back to the
-/// default rather than erroring, matching the rest of the crate.
-///
-/// ### Params
-///
-/// * `sub_matrix` - The cells of this batch, the data the index is built on.
-/// * `mat` - The full embedding matrix, the query side.
-/// * `k` - Neighbours to return per cell, self included.
-/// * `params` - The [`KnnParamsGpu`] for this run.
-/// * `device` - CubeCL runtime device.
-/// * `seed` - Random seed for the index build.
-/// * `verbose` - Detailed verbosity flag handed to the index build and query.
-///
-/// ### Returns
-///
-/// Batch-local neighbour indices, one row per cell of `mat`.
-fn query_batch_index_gpu<R: Runtime>(
-    sub_matrix: MatRef<f32>,
-    mat: MatRef<f32>,
-    k: usize,
-    params: &KnnParamsGpu,
-    device: R::Device,
-    seed: usize,
-    verbose: bool,
-) -> Result<Vec<Vec<usize>>, BixverseErrors> {
-    let method = parse_knn_method_gpu(&params.knn_method).unwrap_or_else(|| {
-        println!(
-            "Unrecognised GPU kNN method provided: {:?}. Defaulting to exhaustive GPU.",
-            params.knn_method
-        );
-        KnnSearchGpu::default()
-    });
-
-    let (indices, _) = match method {
-        KnnSearchGpu::ExhaustiveGpu => {
-            let index = build_exhaustive_index_gpu::<f32, R>(sub_matrix, &params.ann_dist, device)?;
-            query_exhaustive_index_gpu(mat, &index, k, false, verbose)?
-        }
-        KnnSearchGpu::IvfGpu => {
-            let index = build_ivf_index_gpu::<f32, R>(
-                sub_matrix,
-                params.n_list,
-                None,
-                &params.ann_dist,
-                seed,
-                verbose,
-                device,
-            )?;
-            query_ivf_index_gpu(mat, &index, k, params.n_probe, None, false, verbose)?
-        }
-        KnnSearchGpu::CagraGpu => {
-            // `retain_gpu` has to be set: the cross-query path needs the
-            // vectors to stay device-resident after the build.
-            let mut index = build_nndescent_index_gpu::<f32, R>(
-                sub_matrix,
-                &params.ann_dist,
-                params.graph_k,
-                params.k_build,
-                None,
-                params.n_tree,
-                Some(params.delta),
-                params.rho,
-                params.refine_knn,
-                seed,
-                verbose,
-                true,
-                device,
-            )?;
-
-            let query_params = cagra_query_params(params, k, params.graph_k);
-
-            query_nndescent_index_gpu(mat, &mut index, k, Some(query_params), false, verbose)?
-        }
-    };
-
-    Ok(indices)
-}
 
 /// Generate a batch balanced kNN graph on the GPU
 ///
@@ -229,13 +141,14 @@ where
 
         let sub_matrix = MatSliceView::new(mat, &batch_cell_indices, &col_indices).to_owned();
 
-        let neighbour_indices = query_batch_index_gpu::<R>(
+        let (neighbour_indices, _) = dispatch_knn_query_gpu::<R>(
             sub_matrix.as_ref(),
             mat,
             n_per_batch + 1,
             &bbknn_params.knn_params,
             device.clone(),
             seed,
+            false,
             verbosity.detailed_verbosity(),
         )?;
 
