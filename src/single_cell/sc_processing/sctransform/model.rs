@@ -831,7 +831,7 @@ pub fn sct_residual_row(
     validate_residual_row_inputs(counts, indices, n_cells)?;
 
     let gene = SctGeneParams::new(model, gene_pos);
-    fill_residual_row_single(counts, indices, cells, out, &gene);
+    fill_residual_row_single(counts, indices, cells, None, out, &gene);
 
     Ok(())
 }
@@ -898,7 +898,21 @@ impl<'a> SctGeneParams<'a> {
                 eta += b * x;
             }
         }
-        let mu = eta.exp();
+        self.residual_from_mu(eta.exp(), y)
+    }
+
+    /// One cell's residual from its fitted mean.
+    ///
+    /// ### Params
+    ///
+    /// * `mu` - The cell's fitted mean.
+    /// * `y` - The observed count.
+    ///
+    /// ### Returns
+    ///
+    /// The clipped Pearson residual.
+    #[inline(always)]
+    pub(crate) fn residual_from_mu(&self, mu: f64, y: f64) -> f32 {
         let var = (mu + mu * mu / self.theta).max(self.min_variance);
         let (lo, hi) = self.clip;
         ((y - mu) / var.sqrt()).clamp(lo, hi) as f32
@@ -949,13 +963,15 @@ pub(crate) fn fill_residual_row<'a, F>(
 ///
 /// With no covariates the per-cell work is a plain zip over the library sizes,
 /// without the per-cell parameter lookup of [fill_residual_row]; with
-/// covariates it defers to it.
+/// covariates it defers to it. Given `umi_scale`, the mean factors as
+/// `exp(intercept) * umi_scale[c]`, one `exp` per row instead of one per cell.
 ///
 /// ### Params
 ///
 /// * `counts` - The gene's non-zero counts.
 /// * `indices` - Cell positions of those counts, within `0..n_cells`.
 /// * `cells` - Per-cell library sizes and covariates.
+/// * `umi_scale` - Optional `exp(log_umi_coef * log10_umi)` per cell.
 /// * `out` - Destination row, overwritten in full.
 /// * `gene` - The gene's parameters.
 #[inline]
@@ -963,11 +979,24 @@ pub(crate) fn fill_residual_row_single(
     counts: &[f64],
     indices: &[u32],
     cells: &SctCellContext<'_>,
+    umi_scale: Option<&[f64]>,
     out: &mut [f32],
     gene: &SctGeneParams<'_>,
 ) {
     if !cells.covariates.is_empty() {
         fill_residual_row(counts, indices, cells, out, |_| gene);
+        return;
+    }
+
+    if let Some(scale) = umi_scale {
+        let base = gene.beta[0].exp();
+        for (slot, &s) in out.iter_mut().zip(scale) {
+            *slot = gene.residual_from_mu(base * s, 0.0);
+        }
+        for (&i, &y) in indices.iter().zip(counts.iter()) {
+            let c = i as usize;
+            out[c] = gene.residual_from_mu(base * scale[c], y);
+        }
         return;
     }
 

@@ -37,6 +37,9 @@ pub struct SctResiduals<'a> {
     positions: Vec<Vec<u32>>,
     /// Group id per selected cell, in the selected cell order.
     group_of_cell: Vec<u32>,
+    /// `exp(log_umi_coef * log10_umi)` per cell for the single-model case, so
+    /// a residual row costs one `exp` per gene rather than one per cell.
+    umi_scale: Option<Vec<f64>>,
 }
 
 impl<'a> SctResiduals<'a> {
@@ -120,12 +123,24 @@ impl<'a> SctResiduals<'a> {
             })
             .collect::<Result<Vec<_>, BixverseErrors>>()?;
 
+        let umi_scale = match models {
+            [model] => Some(
+                cells
+                    .log10_umi
+                    .iter()
+                    .map(|&l| (model.log_umi_coef * l).exp())
+                    .collect(),
+            ),
+            _ => None,
+        };
+
         Ok(Self {
             models,
             cells,
             genes,
             positions,
             group_of_cell,
+            umi_scale,
         })
     }
 
@@ -240,7 +255,14 @@ impl ResidualSource for SctResiduals<'_> {
             .collect();
 
         if let [gene] = per_group.as_slice() {
-            fill_residual_row_single(counts, indices, &self.cells, out, gene);
+            fill_residual_row_single(
+                counts,
+                indices,
+                &self.cells,
+                self.umi_scale.as_deref(),
+                out,
+                gene,
+            );
         } else {
             fill_residual_row(counts, indices, &self.cells, out, |c| {
                 &per_group[self.group_of_cell[c] as usize]
