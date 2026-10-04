@@ -8,7 +8,7 @@ use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::time::Instant;
 
-use crate::core::math::MAX_OVERSAMPLING_SINGLE_CELL;
+use crate::core::math::{MAX_OVERSAMPLING_SINGLE_CELL, N_POWER_ITERS_SINGLE_CELL};
 use crate::core::math::pca_svd::*;
 use crate::core::math::sparse::sparse_svd_lanczos;
 use crate::prelude::*;
@@ -549,7 +549,7 @@ pub fn pca_observed<S: SingleCellReading>(
                 seed as u64,
                 true,
                 Some(MAX_OVERSAMPLING_SINGLE_CELL),
-                None,
+                Some(N_POWER_ITERS_SINGLE_CELL),
                 means_for_svd,
                 stds_for_svd,
                 None,

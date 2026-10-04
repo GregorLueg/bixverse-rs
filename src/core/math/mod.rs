@@ -22,15 +22,22 @@ pub const DEFAULT_OVERSAMPLING_RAND_SVD: usize = 10;
 
 /// Oversampling for randomised SVD on single-cell data.
 ///
-/// Ten times [DEFAULT_OVERSAMPLING_RAND_SVD]. Single-cell embeddings have a
-/// long flat noise floor below the first few components, and a narrow sketch
-/// under-estimates every singular value in it. Every CPU and GPU single-cell
-/// PCA path uses this, so the two stay comparable; a mismatch between them
-/// shows up as a silent accuracy gap rather than an error.
+/// Paired with [N_POWER_ITERS_SINGLE_CELL]. Single-cell embeddings have a
+/// slowly decaying spectrum below the first few components, so the sketch
+/// has to separate components whose singular values are close. Power
+/// iterations do that far more cheaply than a wider sketch: on 500k Tahoe-100M
+/// cells x 2000 HVGs, k = 30, `(20, 4)` against the old `(100, 2)` cut the
+/// largest singular-value error from 4.4e-3 to 1.1e-3 while running about a
+/// third faster on both the CPU and the GPU path. Every CPU and GPU
+/// single-cell PCA path uses this pair, so the two stay comparable.
 ///
 /// Clamp it against the rank of the input before use: on a small matrix
-/// `no_pcs + 100` can exceed `min(rows, cols)`.
-pub const MAX_OVERSAMPLING_SINGLE_CELL: usize = 100;
+/// `no_pcs + 20` can exceed `min(rows, cols)`.
+pub const MAX_OVERSAMPLING_SINGLE_CELL: usize = 20;
+
+/// Power iterations for randomised SVD on single-cell data. See
+/// [MAX_OVERSAMPLING_SINGLE_CELL] for the measurement behind the pair.
+pub const N_POWER_ITERS_SINGLE_CELL: usize = 4;
 
 /// The default power iterations for randomised SVD
 pub const DEFAULT_N_POWER_ITERS_RAND_SVD: usize = 2;

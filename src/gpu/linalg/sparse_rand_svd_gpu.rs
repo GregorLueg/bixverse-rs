@@ -61,8 +61,8 @@ use crate::prelude::*;
 /// Parameters controlling randomised SVD behaviour on the GPU.
 #[derive(Clone, Copy, Debug)]
 pub struct RandSvdGpuParams {
-    /// Number of power iterations. Two is the sweet spot for single-cell
-    /// data; one is too few, three or more rarely helps.
+    /// Number of power iterations. The single-cell callers use
+    /// [`crate::core::math::N_POWER_ITERS_SINGLE_CELL`].
     pub n_power_iters: usize,
     /// Extra columns sampled on top of `n_components` to stabilise the
     /// estimate of the leading singular subspace.

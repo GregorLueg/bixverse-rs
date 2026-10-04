@@ -9,7 +9,7 @@ use indexmap::IndexSet;
 use rayon::prelude::*;
 use std::time::Instant;
 
-use crate::core::math::MAX_OVERSAMPLING_SINGLE_CELL;
+use crate::core::math::{MAX_OVERSAMPLING_SINGLE_CELL, N_POWER_ITERS_SINGLE_CELL};
 use crate::core::math::pca_svd::randomised_sparse_svd;
 use crate::core::math::pca_svd::*;
 use crate::core::math::sparse::sparse_svd_lanczos;
@@ -210,7 +210,7 @@ pub(crate) fn solve_dense_pca(
             no_pcs,
             seed,
             Some(MAX_OVERSAMPLING_SINGLE_CELL),
-            None,
+            Some(N_POWER_ITERS_SINGLE_CELL),
         )?,
         PcaSolver::Exact => {
             let svd = scaled
@@ -1313,7 +1313,7 @@ fn sparse_pca<S: SingleCellReading>(
             seed as u64,
             true,
             Some(MAX_OVERSAMPLING_SINGLE_CELL),
-            None,
+            Some(N_POWER_ITERS_SINGLE_CELL),
             centre,
             scale,
             clr_offsets,
