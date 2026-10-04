@@ -15,6 +15,7 @@ use crate::core::math::pca_svd::*;
 use crate::core::math::sparse::sparse_svd_lanczos;
 use crate::prelude::*;
 use crate::single_cell::sc_processing::residuals::{ResidualSource, chunk_counts};
+use crate::utils::simd::{sum_squared_dev_widen_simd_f32, sum_widen_simd_f32};
 
 ////////////
 // Consts //
@@ -368,7 +369,7 @@ fn centre_and_scale(
 
     let no_cells = dense_data.len();
     let n = no_cells as f64;
-    let mean_f64 = dense_data.iter().map(|&x| x as f64).sum::<f64>() / n;
+    let mean_f64 = sum_widen_simd_f32(&dense_data) / n;
     let mean = mean_f64 as f32;
 
     if !normalise_variance {
@@ -376,15 +377,7 @@ fn centre_and_scale(
         return (scaled, mean, 0.0);
     }
 
-    let std_dev = (dense_data
-        .iter()
-        .map(|&x| {
-            let d = x as f64 - mean_f64;
-            d * d
-        })
-        .sum::<f64>()
-        / (n - 1.0))
-        .sqrt() as f32;
+    let std_dev = (sum_squared_dev_widen_simd_f32(&dense_data, mean_f64) / (n - 1.0)).sqrt() as f32;
 
     let scaled = if std_dev < SCALE_ZERO_SD {
         vec![0_f32; no_cells]
@@ -772,15 +765,28 @@ fn dense_pca<S: SingleCellReading>(
     let n_cells = cell_indices.len();
 
     // Build f64 matrix for numerically stable SVD
-    let scaled_f64 = Mat::<f64>::from_fn(n_cells, num_genes, |row, col| {
-        scaled_data[col].0[row] as f64
-    });
+    let mut scaled_f64 = Mat::<f64>::zeros(n_cells, num_genes);
+    scaled_f64
+        .par_col_iter_mut()
+        .zip(scaled_data.par_iter())
+        .for_each(|(mut col, (src, _, _))| {
+            for (dst, &v) in col.iter_mut().zip(src) {
+                *dst = v as f64;
+            }
+        });
 
     // Also build f32 if needed for return or score computation
     let scaled_f32 = if return_scaled {
-        Some(Mat::<f32>::from_fn(n_cells, num_genes, |row, col| {
-            scaled_data[col].0[row]
-        }))
+        let mut scaled = Mat::<f32>::zeros(n_cells, num_genes);
+        scaled
+            .par_col_iter_mut()
+            .zip(scaled_data.par_iter())
+            .for_each(|(mut col, (src, _, _))| {
+                for (dst, &v) in col.iter_mut().zip(src) {
+                    *dst = v;
+                }
+            });
+        Some(scaled)
     } else {
         None
     };
@@ -1147,12 +1153,16 @@ pub fn pca_on_sc_streaming<S: SingleCellReading>(
             })
             .collect();
 
-        for (local_col, scaled_col) in batch_scaled.iter().enumerate() {
-            let global_col = start_gene + local_col;
-            for (row, &val) in scaled_col.iter().enumerate() {
-                scaled_matrix[(row, global_col)] = val as f64;
-            }
-        }
+        scaled_matrix
+            .as_mut()
+            .subcols_mut(start_gene, batch_scaled.len())
+            .par_col_iter_mut()
+            .zip(batch_scaled.par_iter())
+            .for_each(|(mut col, src)| {
+                for (dst, &val) in col.iter_mut().zip(src) {
+                    *dst = val as f64;
+                }
+            });
 
         drop(gene_chunks);
     }
@@ -1181,9 +1191,16 @@ pub fn pca_on_sc_streaming<S: SingleCellReading>(
     }
 
     let scaled = if return_scaled {
-        Some(Mat::<f32>::from_fn(n_cells, n_genes, |i, j| {
-            scaled_matrix[(i, j)] as f32
-        }))
+        let mut scaled = Mat::<f32>::zeros(n_cells, n_genes);
+        scaled
+            .par_col_iter_mut()
+            .enumerate()
+            .for_each(|(j, mut col)| {
+                for (dst, &v) in col.iter_mut().zip(scaled_matrix.col(j).iter()) {
+                    *dst = v as f32;
+                }
+            });
+        Some(scaled)
     } else {
         None
     };
