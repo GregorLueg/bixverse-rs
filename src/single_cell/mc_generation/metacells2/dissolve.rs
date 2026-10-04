@@ -9,8 +9,11 @@
 //! 4. Otherwise: keep iff at least one gene has log-fold-factor
 //!    `>= min_convincing_gene_fold_factor` over the population mean.
 
+use rayon::prelude::*;
+
 use crate::core::math::sparse::CompressedSparseData2;
 
+use super::deviants::bucket_cells_by_candidate;
 use super::params::DissolveParams;
 
 /////////////
@@ -108,63 +111,63 @@ pub fn dissolve_metacells(
     };
 
     let n_candidates = (candidate_of_cell.iter().copied().max().unwrap_or(-1) + 1) as usize;
-    let mut keep = vec![false; n_candidates];
+    let buckets = bucket_cells_by_candidate(candidate_of_cell, n_candidates);
 
-    for c in 0..n_candidates {
-        // Cells in this candidate that aren't deviants.
-        let cell_indices: Vec<usize> = (0..n_cells)
-            .filter(|&i| candidate_of_cell[i] == c as i32 && !deviant_of_cell[i])
-            .collect();
-        if cell_indices.is_empty() {
-            continue;
-        }
+    let keep: Vec<bool> = buckets
+        .par_iter()
+        .map_init(
+            || vec![0.0_f64; n_genes],
+            |candidate_per_gene, members| {
+                // Cells in this candidate that aren't deviants.
+                let cell_indices: Vec<usize> = members
+                    .iter()
+                    .copied()
+                    .filter(|&i| !deviant_of_cell[i])
+                    .collect();
+                if cell_indices.is_empty() {
+                    return false;
+                }
 
-        let size = cell_indices.len();
-        let umis: f64 = cell_indices.iter().map(|&i| umis_per_cell[i] as f64).sum();
+                let size = cell_indices.len();
+                let umis: f64 = cell_indices.iter().map(|&i| umis_per_cell[i] as f64).sum();
 
-        // Rule 1: hard floor.
-        if size < min_metacell_size {
-            continue;
-        }
+                // Rule 1: hard floor.
+                if size < min_metacell_size {
+                    return false;
+                }
 
-        // Rule 2: robust size or UMIs.
-        if size >= min_robust_size || umis >= min_robust_umis {
-            keep[c] = true;
-            continue;
-        }
+                // Rule 2: robust size or UMIs.
+                if size >= min_robust_size || umis >= min_robust_umis {
+                    return true;
+                }
 
-        // Rule 3: no convincing-gene test → keep.
-        let Some(min_fold) = params.min_convincing_gene_fold_factor else {
-            keep[c] = true;
-            continue;
-        };
+                // Rule 3: no convincing-gene test → keep.
+                let Some(min_fold) = params.min_convincing_gene_fold_factor else {
+                    return true;
+                };
 
-        // Rule 4: convincing-gene test. For each gene, compare actual UMIs in
-        // this candidate to expected UMIs from the population fraction scaled
-        // by the candidate's total. Keep iff any gene has
-        // |log2((actual+1)/(expected+1))| >= min_fold.
-        let candidate_total: f64 = umis;
-        let mut keep_this = false;
-        let mut candidate_per_gene = vec![0.0_f64; n_genes];
-        for &cell in &cell_indices {
-            let start = raw_umis.indptr[cell] as usize;
-            let end = raw_umis.indptr[cell + 1] as usize;
-            for idx in start..end {
-                let g = raw_umis.indices[idx] as usize;
-                candidate_per_gene[g] += raw_umis.data[idx] as f64;
-            }
-        }
-        for gene in 0..n_genes {
-            let actual = candidate_per_gene[gene] + 1.0;
-            let expected = fraction_per_gene[gene] * candidate_total + 1.0;
-            let fold = (actual / expected).log2().abs();
-            if fold >= min_fold as f64 {
-                keep_this = true;
-                break;
-            }
-        }
-        keep[c] = keep_this;
-    }
+                // Rule 4: convincing-gene test. For each gene, compare actual
+                // UMIs in this candidate to expected UMIs from the population
+                // fraction scaled by the candidate's total. Keep iff any gene
+                // has |log2((actual+1)/(expected+1))| >= min_fold.
+                let candidate_total: f64 = umis;
+                candidate_per_gene.fill(0.0);
+                for &cell in &cell_indices {
+                    let start = raw_umis.indptr[cell] as usize;
+                    let end = raw_umis.indptr[cell + 1] as usize;
+                    for idx in start..end {
+                        let g = raw_umis.indices[idx] as usize;
+                        candidate_per_gene[g] += raw_umis.data[idx] as f64;
+                    }
+                }
+                (0..n_genes).any(|gene| {
+                    let actual = candidate_per_gene[gene] + 1.0;
+                    let expected = fraction_per_gene[gene] * candidate_total + 1.0;
+                    (actual / expected).log2().abs() >= min_fold as f64
+                })
+            },
+        )
+        .collect();
 
     let mut new_id = vec![-1_i32; n_candidates];
     let mut next = 0_i32;
