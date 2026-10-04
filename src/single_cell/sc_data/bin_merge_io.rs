@@ -10,7 +10,7 @@ use thousands::Separable;
 use crate::prelude::*;
 use crate::single_cell::sc_data::data_io::{
     CellGeneSparseWriter, CsrCellChunk, ParallelSparseReader, RawCounts, SingleCellReading,
-    peek_target_size,
+    peek_target_size, write_cell_chunks_parallel,
 };
 
 ////////////
@@ -250,11 +250,13 @@ pub fn merge_sc_bin_files<P: AsRef<Path>>(
                 })
                 .collect();
 
+            let mut chunks = Vec::with_capacity(remapped.len());
             for (chunk, lib_size_i, nnz_i) in remapped {
                 lib_size_out.push(lib_size_i);
                 nnz_out.push(nnz_i);
-                writer.write_cell_chunk(chunk)?;
+                chunks.push(chunk);
             }
+            write_cell_chunks_parallel(&chunks, &mut writer)?;
 
             new_cell_idx += batch.len();
         }

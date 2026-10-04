@@ -443,15 +443,19 @@ impl CsrCellChunk {
         T: FloatAndUInt,
         U: FloatAndUInt,
     {
-        let data_f32 = data.iter().map(|&x| x.to_f32()).collect::<Vec<f32>>();
-        let sum = data_f32.iter().sum::<f32>();
-        let data_norm: Vec<F16> = data_f32
-            .into_iter()
-            .map(|x| norm_value(x, sum, size_factor))
+        // one sequential f32 accumulator: the sum feeds the normalisation, so
+        // its rounding is part of the stored values
+        let sum = data.iter().map(|&x| x.to_f32()).sum::<f32>();
+        let data_norm: Vec<F16> = data
+            .iter()
+            .map(|&x| norm_value(x.to_f32(), sum, size_factor))
             .collect();
 
-        let raw_u32: Vec<u32> = data.iter().map(|&x| x.to_u32()).collect();
-        let data_raw = RawCounts::from_u32_auto(&raw_u32);
+        let data_raw = if data.iter().all(|&x| x.to_u32() <= u16::MAX as u32) {
+            RawCounts::U16(data.iter().map(|&x| x.to_u32() as u16).collect())
+        } else {
+            RawCounts::U32(data.iter().map(|&x| x.to_u32()).collect())
+        };
 
         Self {
             data_raw,
@@ -483,28 +487,48 @@ impl CsrCellChunk {
     /// - data_norm: `data_norm_len * 2` bytes
     /// - indices: `indices_len * 4` bytes (u32)
     pub fn write_to_bytes(&self, writer: &mut impl Write) -> std::io::Result<()> {
-        writer.write_all(&(self.data_raw.len() as u32).to_le_bytes())?;
-        writer.write_all(&(self.data_norm.len() as u32).to_le_bytes())?;
-        writer.write_all(&(self.indices.len() as u32).to_le_bytes())?;
-        writer.write_all(&(self.library_size as u64).to_le_bytes())?;
-        writer.write_all(&(self.original_index as u64).to_le_bytes())?;
-        writer.write_all(&[self.to_keep as u8, self.data_raw.elem_size(), 0, 0])?;
+        writer.write_all(&self.to_bytes())
+    }
 
-        self.data_raw.write_bytes(writer)?;
+    /// Serialise into one exactly sized buffer, in the layout of
+    /// [`Self::write_to_bytes`].
+    ///
+    /// ### Returns
+    ///
+    /// The serialised chunk.
+    fn to_bytes(&self) -> Vec<u8> {
+        let raw_bytes = self.data_raw.len() * self.data_raw.elem_size() as usize;
+        let mut buffer = Vec::with_capacity(
+            CSR_CHUNK_HEADER_LEN + raw_bytes + self.data_norm.len() * 2 + self.indices.len() * 4,
+        );
 
-        let mut data_norm_bytes = Vec::with_capacity(self.data_norm.len() * 2);
+        buffer.extend_from_slice(&(self.data_raw.len() as u32).to_le_bytes());
+        buffer.extend_from_slice(&(self.data_norm.len() as u32).to_le_bytes());
+        buffer.extend_from_slice(&(self.indices.len() as u32).to_le_bytes());
+        buffer.extend_from_slice(&(self.library_size as u64).to_le_bytes());
+        buffer.extend_from_slice(&(self.original_index as u64).to_le_bytes());
+        buffer.extend_from_slice(&[self.to_keep as u8, self.data_raw.elem_size(), 0, 0]);
+
+        match &self.data_raw {
+            RawCounts::U16(v) => {
+                for x in v {
+                    buffer.extend_from_slice(&x.to_le_bytes());
+                }
+            }
+            RawCounts::U32(v) => {
+                for x in v {
+                    buffer.extend_from_slice(&x.to_le_bytes());
+                }
+            }
+        }
         for v in &self.data_norm {
-            data_norm_bytes.extend_from_slice(&v.to_bits().to_le_bytes());
+            buffer.extend_from_slice(&v.to_bits().to_le_bytes());
         }
-        writer.write_all(&data_norm_bytes)?;
-
-        let mut col_indices_bytes = Vec::with_capacity(self.indices.len() * 4);
         for i in &self.indices {
-            col_indices_bytes.extend_from_slice(&i.to_le_bytes());
+            buffer.extend_from_slice(&i.to_le_bytes());
         }
-        writer.write_all(&col_indices_bytes)?;
 
-        Ok(())
+        buffer
     }
 
     /// Serialise and lz4-compress the chunk into the on-disk payload.
@@ -517,9 +541,7 @@ impl CsrCellChunk {
     ///
     /// The compressed payload, size-prepended as the reader expects.
     pub fn to_compressed_bytes(&self) -> std::io::Result<Vec<u8>> {
-        let mut buffer = Vec::new();
-        self.write_to_bytes(&mut buffer)?;
-        Ok(compress_prepend_size(&buffer))
+        Ok(compress_prepend_size(&self.to_bytes()))
     }
 
     /// Read data from buffer
@@ -1319,10 +1341,7 @@ impl CellGeneSparseWriter {
     pub fn write_cell_chunk(&mut self, cell_chunk: CsrCellChunk) -> Result<(), BixverseErrors> {
         self.check_mode(true)?;
 
-        let mut buffer = Vec::new();
-        cell_chunk.write_to_bytes(&mut buffer)?;
-
-        self.append_chunk(&buffer, cell_chunk.original_index)
+        self.append_chunk(&cell_chunk.to_bytes(), cell_chunk.original_index)
     }
 
     /// Write a Gene to the file
@@ -1591,6 +1610,85 @@ pub fn write_cell_rows(
     }
 
     Ok((nnz, lib_size))
+}
+
+/// Build, compress and append cell chunks in parallel batches.
+///
+/// For writers whose chunks come from a closure, so that neither the build nor
+/// the lz4 compression runs on the single writer thread. Batches of
+/// [`CELL_WRITE_BATCH`] are compressed in parallel and appended in order.
+///
+/// ### Params
+///
+/// * `n_chunks` - Number of chunks to write
+/// * `build` - Builds chunk `k` in `0..n_chunks`, its `original_index` set
+/// * `writer` - Cell-based writer to append to
+///
+/// ### Returns
+///
+/// `(nnz, lib_size)` per written cell.
+pub fn write_cell_chunks_built<F>(
+    n_chunks: usize,
+    build: F,
+    writer: &mut CellGeneSparseWriter,
+) -> Result<(Vec<usize>, Vec<usize>), BixverseErrors>
+where
+    F: Fn(usize) -> CsrCellChunk + Sync,
+{
+    let mut nnz = Vec::with_capacity(n_chunks);
+    let mut lib_size = Vec::with_capacity(n_chunks);
+
+    for start in (0..n_chunks).step_by(CELL_WRITE_BATCH) {
+        let end = (start + CELL_WRITE_BATCH).min(n_chunks);
+        let built = (start..end)
+            .into_par_iter()
+            .map(|k| {
+                let chunk = build(k);
+                let (nnz_i, lib_i) = chunk.get_qc_info();
+                Ok::<_, BixverseErrors>((
+                    nnz_i,
+                    lib_i,
+                    (chunk.original_index, chunk.to_compressed_bytes()?),
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut payloads = Vec::with_capacity(built.len());
+        for (nnz_i, lib_i, payload) in built {
+            nnz.push(nnz_i);
+            lib_size.push(lib_i);
+            payloads.push(payload);
+        }
+        writer.write_compressed_cell_chunks(&payloads)?;
+    }
+
+    Ok((nnz, lib_size))
+}
+
+/// Compress and append already built cell chunks in parallel batches.
+///
+/// ### Params
+///
+/// * `chunks` - Chunks to write, in output order
+/// * `writer` - Cell-based writer to append to
+///
+/// ### Returns
+///
+/// `Ok(())`, or the first compression or I/O error.
+pub fn write_cell_chunks_parallel(
+    chunks: &[CsrCellChunk],
+    writer: &mut CellGeneSparseWriter,
+) -> Result<(), BixverseErrors> {
+    for batch in chunks.chunks(CELL_WRITE_BATCH) {
+        let payloads = batch
+            .par_iter()
+            .map(|chunk| {
+                Ok::<_, BixverseErrors>((chunk.original_index, chunk.to_compressed_bytes()?))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        writer.write_compressed_cell_chunks(&payloads)?;
+    }
+    Ok(())
 }
 
 ///////////////////////
@@ -2243,6 +2341,44 @@ pub enum DataLayerReturn {
     Norm,
 }
 
+/// Append a chunk's raw counts to `data`, converted exactly into `T`.
+///
+/// The `RawCounts` variant is matched once per chunk rather than per value.
+///
+/// ### Params
+///
+/// * `data` - Destination vector
+/// * `raw` - The chunk's raw counts
+///
+/// ### Returns
+///
+/// `Ok(())`, or [`BixverseErrors::RawCountOverflow`] for a count that does not
+/// fit `T`.
+fn extend_raw_counts<T>(data: &mut Vec<T>, raw: &RawCounts) -> Result<(), BixverseErrors>
+where
+    T: BixverseNumeric + FromPrimitive,
+{
+    let convert = |val: u32| {
+        T::from_u32(val).ok_or(BixverseErrors::RawCountOverflow {
+            value: val,
+            target_type: std::any::type_name::<T>(),
+        })
+    };
+    match raw {
+        RawCounts::U16(v) => {
+            for &x in v {
+                data.push(convert(x as u32)?);
+            }
+        }
+        RawCounts::U32(v) => {
+            for &x in v {
+                data.push(convert(x)?);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Converts a slice of gene chunks into a CSC sparse matrix
 ///
 /// Constructs a cells x genes compressed sparse column matrix from individual
@@ -2281,35 +2417,27 @@ where
         DataLayerReturn::BothLayers | DataLayerReturn::Norm
     );
 
-    let mut data: Vec<T> = Vec::new();
-    let mut data_2: Vec<f32> = Vec::new();
-    let mut indices: Vec<usize> = Vec::new();
-    let mut indptr = Vec::with_capacity(n_genes + 1);
+    let total_nnz: usize = chunks.iter().map(|c| c.indices.len()).sum();
+    let mut data: Vec<T> = Vec::with_capacity(if keep_raw { total_nnz } else { 0 });
+    let mut data_2: Vec<f32> = Vec::with_capacity(if keep_norm { total_nnz } else { 0 });
+    let mut indices: Vec<u32> = Vec::with_capacity(total_nnz);
+    let mut indptr: Vec<usize> = Vec::with_capacity(n_genes + 1);
     indptr.push(0);
 
     for chunk in chunks {
         if keep_raw {
-            for val in chunk.data_raw.iter() {
-                data.push(T::from_u32(val).ok_or(BixverseErrors::RawCountOverflow {
-                    value: val,
-                    target_type: std::any::type_name::<T>(),
-                })?);
-            }
+            extend_raw_counts(&mut data, &chunk.data_raw)?;
         }
         if keep_norm {
-            for &val in &chunk.data_norm {
-                data_2.push(val.to_f32());
-            }
+            data_2.extend(chunk.data_norm.iter().map(|v| v.to_f32()));
         }
-        for &idx in &chunk.indices {
-            indices.push(idx as usize);
-        }
+        indices.extend_from_slice(&chunk.indices);
         indptr.push(indices.len());
     }
 
     Ok(CompressedSparseData2 {
         data,
-        indices: indices.index_cast(),
+        indices,
         indptr: indptr.index_cast(),
         cs_type: CompressedSparseFormat::Csc,
         data_2: if keep_norm { Some(data_2) } else { None },
@@ -2351,35 +2479,27 @@ where
         DataLayerReturn::BothLayers | DataLayerReturn::Norm
     );
 
-    let mut data: Vec<T> = Vec::new();
-    let mut data_2: Vec<f32> = Vec::new();
-    let mut indices: Vec<usize> = Vec::new();
-    let mut indptr = Vec::with_capacity(n_cells + 1);
+    let total_nnz: usize = chunks.iter().map(|c| c.indices.len()).sum();
+    let mut data: Vec<T> = Vec::with_capacity(if keep_raw { total_nnz } else { 0 });
+    let mut data_2: Vec<f32> = Vec::with_capacity(if keep_norm { total_nnz } else { 0 });
+    let mut indices: Vec<u32> = Vec::with_capacity(total_nnz);
+    let mut indptr: Vec<usize> = Vec::with_capacity(n_cells + 1);
     indptr.push(0);
 
     for chunk in chunks {
         if keep_raw {
-            for val in chunk.data_raw.iter() {
-                data.push(T::from_u32(val).ok_or(BixverseErrors::RawCountOverflow {
-                    value: val,
-                    target_type: std::any::type_name::<T>(),
-                })?);
-            }
+            extend_raw_counts(&mut data, &chunk.data_raw)?;
         }
         if keep_norm {
-            for &val in &chunk.data_norm {
-                data_2.push(val.to_f32());
-            }
+            data_2.extend(chunk.data_norm.iter().map(|v| v.to_f32()));
         }
-        for &idx in &chunk.indices {
-            indices.push(idx as usize);
-        }
+        indices.extend_from_slice(&chunk.indices);
         indptr.push(indices.len());
     }
 
     Ok(CompressedSparseData2 {
         data,
-        indices: indices.index_cast(),
+        indices,
         indptr: indptr.index_cast(),
         cs_type: CompressedSparseFormat::Csr,
         data_2: if keep_norm { Some(data_2) } else { None },
