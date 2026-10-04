@@ -25,6 +25,9 @@ use super::{
     LdaParams, LdaResult,
 };
 
+/// Terms per task when accumulating the topic-term bound.
+const BOUND_TERM_CHUNK: usize = 1024;
+
 ///////////
 // Utils //
 ///////////
@@ -502,13 +505,28 @@ fn topic_dirichlet_bound<F: BixverseFloat + BixverseSimd + Send + Sync>(
         .map(|s| digamma(*s).to_f64().unwrap_or(0.0))
         .collect();
 
-    let mut acc = vec![0.0_f64; k];
-    for w in 0..n_terms {
-        for ((a, v), norm) in acc.iter_mut().zip(lambda.col(w)).zip(&norms) {
-            let p = v.to_f64().unwrap_or(0.0);
-            *a += (eta_f - p) * (digamma(p) - norm) + ln_gamma(p);
-        }
-    }
+    let acc: Vec<f64> = lambda
+        .data
+        .par_chunks(k * BOUND_TERM_CHUNK)
+        .fold(
+            || vec![0.0_f64; k],
+            |mut acc, chunk| {
+                for col in chunk.chunks_exact(k) {
+                    for ((a, v), norm) in acc.iter_mut().zip(col).zip(&norms) {
+                        let p = v.to_f64().unwrap_or(0.0);
+                        *a += (eta_f - p) * (digamma(p) - norm) + ln_gamma(p);
+                    }
+                }
+                acc
+            },
+        )
+        .reduce(
+            || vec![0.0_f64; k],
+            |mut a, b| {
+                a.iter_mut().zip(&b).for_each(|(x, y)| *x += y);
+                a
+            },
+        );
 
     let const_part = ln_gamma(eta_f * n_terms as f64) - n_terms as f64 * ln_gamma(eta_f);
     acc.iter()
