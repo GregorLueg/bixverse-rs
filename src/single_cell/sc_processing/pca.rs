@@ -9,10 +9,10 @@ use indexmap::IndexSet;
 use rayon::prelude::*;
 use std::time::Instant;
 
-use crate::core::math::{MAX_OVERSAMPLING_SINGLE_CELL, N_POWER_ITERS_SINGLE_CELL};
 use crate::core::math::pca_svd::randomised_sparse_svd;
 use crate::core::math::pca_svd::*;
 use crate::core::math::sparse::sparse_svd_lanczos;
+use crate::core::math::{MAX_OVERSAMPLING_SINGLE_CELL, N_POWER_ITERS_SINGLE_CELL};
 use crate::prelude::*;
 use crate::single_cell::sc_processing::residuals::{ResidualSource, chunk_counts};
 use crate::utils::simd::{sum_squared_dev_widen_simd_f32, sum_widen_simd_f32};
@@ -1192,14 +1192,11 @@ pub fn pca_on_sc_streaming<S: SingleCellReading>(
 
     let scaled = if return_scaled {
         let mut scaled = Mat::<f32>::zeros(n_cells, n_genes);
-        scaled
-            .par_col_iter_mut()
-            .enumerate()
-            .for_each(|(j, col)| {
-                for (dst, &v) in col.iter_mut().zip(scaled_matrix.col(j).iter()) {
-                    *dst = v as f32;
-                }
-            });
+        scaled.par_col_iter_mut().enumerate().for_each(|(j, col)| {
+            for (dst, &v) in col.iter_mut().zip(scaled_matrix.col(j).iter()) {
+                *dst = v as f32;
+            }
+        });
         Some(scaled)
     } else {
         None

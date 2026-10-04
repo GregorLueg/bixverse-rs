@@ -8,9 +8,9 @@ use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::time::Instant;
 
-use crate::core::math::{MAX_OVERSAMPLING_SINGLE_CELL, N_POWER_ITERS_SINGLE_CELL};
 use crate::core::math::pca_svd::*;
 use crate::core::math::sparse::sparse_svd_lanczos;
+use crate::core::math::{MAX_OVERSAMPLING_SINGLE_CELL, N_POWER_ITERS_SINGLE_CELL};
 use crate::prelude::*;
 
 /// Genes read per batch while streaming gene chunks for doublet scoring.
