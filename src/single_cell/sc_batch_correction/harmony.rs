@@ -10,6 +10,7 @@ use crate::ml::clustering::k_means::KMeansParamsWrappers;
 use crate::prelude::parse_verbosity_level;
 use crate::prelude::*;
 
+use super::batch_utils::par_for_each_col_mut;
 use super::harmony_core::{
     RidgeSettings, Variant, base_error_and_entropy, centroids_from_r, distances_and_base,
     kmeans_centroids, normalise_rows_into, objective, observed_counts, r_to_mat, ridge_correction,
@@ -210,10 +211,11 @@ pub fn create_batch_infos(
 ///
 /// Distance matrix (K x N)
 pub fn compute_cosine_distances(centroids: MatRef<f32>, data_cos: MatRef<f32>) -> Mat<f32> {
-    let k = centroids.nrows();
-    let n = data_cos.nrows();
-    let dot_products = centroids * data_cos.transpose();
-    Mat::from_fn(k, n, |i, j| 2.0 * (1.0 - dot_products[(i, j)]))
+    let mut dist = centroids * data_cos.transpose();
+    par_for_each_col_mut(&mut dist, |_, col| {
+        col.iter_mut().for_each(|x| *x = 2.0 * (1.0 - *x));
+    });
+    dist
 }
 
 /// Initialise soft cluster assignments from distances.
@@ -254,7 +256,7 @@ pub fn initialise_r_from_dist(
         }
     });
 
-    Ok(Mat::from_fn(k, n, |cluster, cell| flat[cell * k + cluster]))
+    Ok(MatRef::from_column_major_slice(&flat, k, n).to_owned())
 }
 
 /////////////
