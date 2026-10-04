@@ -35,18 +35,25 @@ where
 {
     let n = dist.nrows();
 
-    // compute average distance to K nearest neighbors for each sample (parallelized)
+    // the distance matrix is symmetric, so column i is row i, contiguous
     let knn_avg_dist: Vec<T> = (0..n)
         .into_par_iter()
-        .map(|i| {
-            let mut distances: Vec<T> = (0..n)
-                .filter(|&j| i != j)
-                .map(|j| *dist.get(i, j))
-                .collect();
-
-            distances.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+        .map_init(Vec::new, |distances: &mut Vec<T>, i| {
+            distances.clear();
+            distances.extend(
+                dist.col(i)
+                    .iter()
+                    .enumerate()
+                    .filter(|&(j, _)| j != i)
+                    .map(|(_, &d)| d),
+            );
 
             let k_actual = k.min(distances.len());
+            if k_actual < distances.len() {
+                distances.select_nth_unstable_by(k_actual, |a, b| a.partial_cmp(b).unwrap());
+            }
+            distances[..k_actual].sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+
             let dist_sum: T = distances[..k_actual].iter().cloned().sum();
             dist_sum / T::from_usize(k_actual).unwrap()
         })
@@ -58,22 +65,26 @@ where
     let three = T::from_f32(3.0).unwrap();
     let two = T::from_f32(2.0).unwrap();
 
-    for i in 0..n {
-        affinity[(i, i)] = T::one();
-        for j in (i + 1)..n {
-            let dij = *dist.get(i, j);
-            let sigma = mu * (knn_avg_dist[i] + knn_avg_dist[j] + dij) / three;
+    affinity
+        .par_col_iter_mut()
+        .enumerate()
+        .for_each(|(j, mut col)| {
+            for i in 0..n {
+                if i == j {
+                    col[i] = T::one();
+                    continue;
+                }
+                let (lo, hi) = if i < j { (i, j) } else { (j, i) };
+                let dij = dist[(i, j)];
+                let sigma = mu * (knn_avg_dist[lo] + knn_avg_dist[hi] + dij) / three;
 
-            if sigma < T::epsilon() {
-                affinity[(i, j)] = T::zero();
-                affinity[(j, i)] = T::zero();
-            } else {
-                let weight = (-dij.powi(2) / (two * sigma.powi(2))).exp();
-                affinity[(i, j)] = weight;
-                affinity[(j, i)] = weight;
+                col[i] = if sigma < T::epsilon() {
+                    T::zero()
+                } else {
+                    (-dij.powi(2) / (two * sigma.powi(2))).exp()
+                };
             }
-        }
-    }
+        });
 
     affinity
 }
@@ -90,33 +101,40 @@ where
 ///
 /// ### Returns
 ///
-/// A sparse matrix where each row contains at most K non-zero entries.
-fn knn_threshold<T>(mat: &MatRef<T>, k: usize) -> Mat<T>
+/// Per row, the retained `(column, normalised weight)` pairs, sorted by column.
+fn knn_threshold<T>(mat: &MatRef<T>, k: usize) -> Vec<Vec<(usize, T)>>
 where
     T: BixverseFloat + std::iter::Sum,
 {
     let n = mat.nrows();
-    let mut result = Mat::zeros(n, n);
 
-    let rows: Vec<Vec<(usize, T)>> = (0..n)
+    // the matrix is not symmetric after row normalisation; the transpose makes
+    // row i of `mat` a contiguous column
+    let mat_t = mat.transpose().to_owned();
+
+    (0..n)
         .into_par_iter()
         .map(|i| {
             let mut heap = BinaryHeap::with_capacity(k + 1);
 
-            for j in 0..n {
-                if i != j {
-                    let sim = *mat.get(i, j);
-                    heap.push((RevOrderedFloat(sim), j));
-                    if heap.len() > k {
-                        heap.pop();
-                    }
+            for (j, &sim) in mat_t.col(i).iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+                let entry = (RevOrderedFloat(sim), j);
+                if heap.len() < k {
+                    heap.push(entry);
+                } else if heap.peek().is_some_and(|top| entry < *top) {
+                    heap.pop();
+                    heap.push(entry);
                 }
             }
 
-            let neighbors: Vec<(usize, T)> = heap
+            let mut neighbors: Vec<(usize, T)> = heap
                 .into_iter()
                 .map(|elem| (elem.1, elem.0.get_value()))
                 .collect();
+            neighbors.sort_unstable_by_key(|&(j, _)| j);
 
             let knn_sum: T = neighbors.iter().map(|(_, v)| *v).sum();
 
@@ -125,15 +143,7 @@ where
                 .map(|(idx, val)| (idx, val / knn_sum))
                 .collect()
         })
-        .collect();
-
-    for (i, neighbors) in rows.iter().enumerate() {
-        for &(j, normalized_val) in neighbors {
-            result[(i, j)] = normalized_val;
-        }
-    }
-
-    result
+        .collect()
 }
 
 /// B0 normalisation for SNF update step
@@ -230,41 +240,46 @@ where
             .collect()
     };
 
+    // continuous features first, so both inner loops run over contiguous
+    // slices with no per-feature branch
+    let order: Vec<usize> = (0..nrows)
+        .filter(|&k| !is_cat[k])
+        .chain((0..nrows).filter(|&k| is_cat[k]))
+        .collect();
+    let n_cont = is_cat.iter().filter(|&&c| !c).count();
+    let ranges_ordered: Vec<T> = order.iter().map(|&k| computed_ranges[k]).collect();
+    let ordered = Mat::from_fn(nrows, ncols, |r, c| mat[(order[r], c)]);
+    let n_features = T::from_usize(nrows).unwrap();
+
     let mut res = Mat::zeros(ncols, ncols);
 
-    let pairs: Vec<(usize, usize)> = (0..ncols)
-        .flat_map(|i| ((i + 1)..ncols).map(move |j| (i, j)))
-        .collect();
-
-    let results: Vec<(usize, usize, T)> = pairs
-        .par_iter()
-        .map(|&(i, j)| {
+    res.par_col_iter_mut().enumerate().for_each(|(j, mut col)| {
+        let col_j = ordered.col_as_slice(j);
+        for i in 0..j {
+            let col_i = ordered.col_as_slice(i);
             let mut total_dist = T::zero();
 
-            for k in 0..nrows {
-                let val_i = *mat.get(k, i);
-                let val_j = *mat.get(k, j);
-
-                let dist = if is_cat[k] {
-                    if (val_i - val_j).abs() < T::epsilon() {
-                        T::zero()
-                    } else {
-                        T::one()
-                    }
-                } else {
-                    (val_i - val_j).abs() / computed_ranges[k]
-                };
-
-                total_dist += dist;
+            for ((&a, &b), &range) in col_i[..n_cont]
+                .iter()
+                .zip(&col_j[..n_cont])
+                .zip(&ranges_ordered[..n_cont])
+            {
+                total_dist += (a - b).abs() / range;
+            }
+            for (&a, &b) in col_i[n_cont..].iter().zip(&col_j[n_cont..]) {
+                if (a - b).abs() >= T::epsilon() {
+                    total_dist += T::one();
+                }
             }
 
-            (i, j, total_dist / T::from_usize(nrows).unwrap())
-        })
-        .collect();
+            col[i] = total_dist / n_features;
+        }
+    });
 
-    for (i, j, dist) in results {
-        res[(i, j)] = dist;
-        res[(j, i)] = dist;
+    for j in 0..ncols {
+        for i in 0..j {
+            res[(j, i)] = res[(i, j)];
+        }
     }
 
     res
@@ -412,20 +427,55 @@ where
     let wk = aff
         .par_iter()
         .map(|mat_i| knn_threshold(&mat_i.as_ref(), k))
-        .collect::<Vec<Mat<T>>>();
+        .collect::<Vec<Vec<Vec<(usize, T)>>>>();
+
+    // scratch reused across all updates
+    let mut p_sum: Mat<T> = Mat::zeros(n, n);
+    let mut wk_p: Mat<T> = Mat::zeros(n, n);
+    let mut fused: Mat<T> = Mat::zeros(n, n);
+    let inv_others = T::from_f64((m - 1) as f64).unwrap().recip();
 
     for _ in 0..t {
         for v in 0..m {
-            // compute sum of all P matrices except the current one
-            let mut p_sum: Mat<T> = Mat::zeros(n, n);
-            for (idx, mat) in aff.iter().enumerate() {
-                if idx != v {
-                    p_sum += mat;
+            // mean of all P matrices except the current one
+            p_sum.par_col_iter_mut().enumerate().for_each(|(c, col)| {
+                let col = col.try_as_col_major_mut().unwrap().as_slice_mut();
+                col.fill(T::zero());
+                for (idx, mat) in aff.iter().enumerate() {
+                    if idx != v {
+                        for (o, &x) in col.iter_mut().zip(mat.col_as_slice(c)) {
+                            *o += x;
+                        }
+                    }
                 }
-            }
-            p_sum = &p_sum / (m - 1) as f64;
+                for o in col.iter_mut() {
+                    *o = *o * inv_others;
+                }
+            });
 
-            let fused = &wk[v] * &p_sum * wk[v].transpose();
+            // wk[v] has k non-zeros per row, so both products are sparse
+            let rows = &wk[v];
+            wk_p.par_col_iter_mut().enumerate().for_each(|(c, col)| {
+                let col = col.try_as_col_major_mut().unwrap().as_slice_mut();
+                let p_col = p_sum.col_as_slice(c);
+                for (o, row) in col.iter_mut().zip(rows) {
+                    let mut acc = T::zero();
+                    for &(j, val) in row {
+                        acc += val * p_col[j];
+                    }
+                    *o = acc;
+                }
+            });
+            fused.par_col_iter_mut().enumerate().for_each(|(l, col)| {
+                let col = col.try_as_col_major_mut().unwrap().as_slice_mut();
+                col.fill(T::zero());
+                for &(j, val) in &rows[l] {
+                    for (o, &x) in col.iter_mut().zip(wk_p.col_as_slice(j)) {
+                        *o += val * x;
+                    }
+                }
+            });
+
             aff[v] = b0_normalise(&fused.as_ref(), alpha)
         }
     }
