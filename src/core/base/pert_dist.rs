@@ -6,11 +6,18 @@
 use crate::utils::gemm;
 use faer::Accum;
 use faer::linalg::matmul::triangular::BlockStructure;
-use faer::{Mat, MatRef};
+use faer::{Mat, MatRef, Par};
 use rayon::prelude::*;
 
 use crate::prelude::*;
 use crate::utils::faer_parallelism;
+
+////////////
+// Consts //
+////////////
+
+/// Row chunk of the within-group gram product
+const GRAM_ROW_TILE: usize = 512;
 
 ///////////
 // Enums //
@@ -52,6 +59,9 @@ pub fn parse_perturbation_distance(s: &str) -> Option<PertDistance> {
 
 /// Calculate the squared norms of the rows
 ///
+/// Accumulated feature by feature over contiguous column slices; the per-row
+/// summation order over features is unchanged.
+///
 /// ### Params
 ///
 /// * `x` - The matrix for which to calculate the squared row norms
@@ -63,19 +73,28 @@ fn row_norms_squared<T>(x: MatRef<T>) -> Vec<T>
 where
     T: BixverseFloat,
 {
-    let n = x.nrows();
-    let d = x.ncols();
-    (0..n)
-        .into_par_iter()
-        .map(|i| {
-            let mut s = T::zero();
-            for j in 0..d {
-                let v = *x.get(i, j);
-                s += v * v;
+    let mut out = vec![T::zero(); x.nrows()];
+    out.par_chunks_mut(GRAM_ROW_TILE)
+        .enumerate()
+        .for_each(|(c, chunk)| {
+            let start = c * GRAM_ROW_TILE;
+            for j in 0..x.ncols() {
+                let col = x.col(j).subrows(start, chunk.len());
+                for (o, &v) in chunk.iter_mut().zip(col.iter()) {
+                    *o += v * v;
+                }
             }
-            s
-        })
-        .collect()
+        });
+    out
+}
+
+/// Cell-cell distance from the squared distance
+#[inline(always)]
+fn finish_dist<T: BixverseFloat>(d_sq: T, dist: PertDistance) -> T {
+    match dist {
+        PertDistance::Euclidean => d_sq.sqrt(),
+        PertDistance::SquaredEuclidean => d_sq,
+    }
 }
 
 /// Mean pairwise distance within a group.
@@ -94,6 +113,24 @@ pub fn mean_pairwise_within<T>(x: MatRef<T>, dist: PertDistance) -> T
 where
     T: BixverseFloat + std::iter::Sum,
 {
+    mean_pairwise_within_impl(x, dist, true)
+}
+
+/// Within-group mean distance, optionally single-threaded
+///
+/// ### Params
+///
+/// * `x` - The matrix for which to calculate the within distance
+/// * `dist` - Which [PertDistance] to calculate
+/// * `parallel` - Use rayon; false for calls made inside an outer parallel loop
+///
+/// ### Returns
+///
+/// The within pert distance
+fn mean_pairwise_within_impl<T>(x: MatRef<T>, dist: PertDistance, parallel: bool) -> T
+where
+    T: BixverseFloat + std::iter::Sum,
+{
     let n = x.nrows();
     if n < 2 {
         return T::zero();
@@ -108,27 +145,31 @@ where
         x,
         x.transpose(),
         T::one(),
-        faer_parallelism(),
+        if parallel {
+            faer_parallelism()
+        } else {
+            Par::Seq
+        },
     );
 
     let norms_sq: Vec<T> = (0..n).map(|i| *gram.get(i, i)).collect();
     let two = T::from_f64(2.0).unwrap();
 
-    let total: T = (0..n)
-        .into_par_iter()
-        .map(|i| {
-            let mut s = T::zero();
-            for j in 0..i {
-                // clamp: floating point can produce tiny negatives here.
-                let d_sq = (norms_sq[i] + norms_sq[j] - two * *gram.get(i, j)).max(T::zero());
-                s += match dist {
-                    PertDistance::Euclidean => d_sq.sqrt(),
-                    PertDistance::SquaredEuclidean => d_sq,
-                };
-            }
-            s
-        })
-        .sum();
+    // Column j of the lower triangle is contiguous.
+    let col_sum = |j: usize| -> T {
+        let mut s = T::zero();
+        for (i, &g) in gram.col(j).iter().enumerate().skip(j + 1) {
+            // clamp: floating point can produce tiny negatives here.
+            let d_sq = (norms_sq[i] + norms_sq[j] - two * g).max(T::zero());
+            s += finish_dist(d_sq, dist);
+        }
+        s
+    };
+    let total: T = if parallel {
+        (0..n).into_par_iter().map(col_sum).sum()
+    } else {
+        (0..n).map(col_sum).sum()
+    };
 
     let n_pairs = T::from_usize(n * (n - 1) / 2).unwrap();
 
@@ -153,6 +194,32 @@ pub fn mean_pairwise_between<T>(
 where
     T: BixverseFloat + std::iter::Sum,
 {
+    mean_pairwise_between_impl(x, y, dist, true)
+}
+
+/// Between-group mean distance, optionally single-threaded
+///
+/// Tiled over row blocks of `x`, so the full `n_x x n_y` gram is never held.
+///
+/// ### Params
+///
+/// * `x` - First matrix
+/// * `y` - Second matrix
+/// * `dist` - Which [PertDistance] to calculate
+/// * `parallel` - Use rayon; false for calls made inside an outer parallel loop
+///
+/// ### Returns
+///
+/// The pairwise mean distance between the two matrices
+fn mean_pairwise_between_impl<T>(
+    x: MatRef<T>,
+    y: MatRef<T>,
+    dist: PertDistance,
+    parallel: bool,
+) -> Result<T, BixverseErrors>
+where
+    T: BixverseFloat + std::iter::Sum,
+{
     if x.ncols() != y.ncols() {
         return Err(BixverseErrors::NonMatchingFeatureDim {
             dim_x: x.ncols(),
@@ -167,25 +234,46 @@ where
         return Ok(T::zero());
     }
 
-    let gram: Mat<T> = x * y.transpose();
     let x_norms = row_norms_squared(x);
     let y_norms = row_norms_squared(y);
     let two = T::from_f64(2.0).unwrap();
+    let par = if parallel {
+        faer_parallelism()
+    } else {
+        Par::Seq
+    };
 
-    let total: T = (0..n_x)
-        .into_par_iter()
-        .map(|i| {
+    let mut gram = Mat::<T>::zeros(GRAM_ROW_TILE.min(n_x), n_y);
+    let mut total = T::zero();
+    for start in (0..n_x).step_by(GRAM_ROW_TILE) {
+        let rows = GRAM_ROW_TILE.min(n_x - start);
+        let mut tile = gram.as_mut().submatrix_mut(0, 0, rows, n_y);
+        gemm::gemm(
+            tile.as_mut(),
+            Accum::Replace,
+            x.subrows(start, rows),
+            y.transpose(),
+            T::one(),
+            par,
+        );
+        let tile = tile.as_ref();
+        let x_tile = &x_norms[start..start + rows];
+
+        let col_sum = |j: usize| -> T {
             let mut s = T::zero();
-            for j in 0..n_y {
-                let d_sq = (x_norms[i] + y_norms[j] - two * *gram.get(i, j)).max(T::zero());
-                s += match dist {
-                    PertDistance::Euclidean => d_sq.sqrt(),
-                    PertDistance::SquaredEuclidean => d_sq,
-                };
+            for (&g, &xn) in tile.col(j).iter().zip(x_tile) {
+                let d_sq = (xn + y_norms[j] - two * g).max(T::zero());
+                s += finish_dist(d_sq, dist);
             }
             s
-        })
-        .sum();
+        };
+        let tile_total: T = if parallel {
+            (0..n_y).into_par_iter().map(col_sum).sum()
+        } else {
+            (0..n_y).map(col_sum).sum()
+        };
+        total += tile_total;
+    }
 
     let n_pairs = T::from_usize(n_x * n_y).unwrap();
 
@@ -266,6 +354,36 @@ where
     Ok(two * between - within_x - within_y)
 }
 
+/// E-distance between two groups, single-threaded
+///
+/// For calls made from inside an outer parallel loop, where nested rayon or
+/// faer parallelism would only oversubscribe.
+///
+/// ### Params
+///
+/// * `x` - First matrix
+/// * `y` - Second matrix
+/// * `dist` - The perturbation distance to calculate
+///
+/// ### Returns
+///
+/// The E-distance between the two groups
+pub(crate) fn edistance_two_matrices_seq<T>(
+    x: MatRef<T>,
+    y: MatRef<T>,
+    dist: PertDistance,
+) -> Result<T, BixverseErrors>
+where
+    T: BixverseFloat + std::iter::Sum,
+{
+    let within_x = mean_pairwise_within_impl(x, dist, false);
+    let within_y = mean_pairwise_within_impl(y, dist, false);
+    let between = mean_pairwise_between_impl(x, y, dist, false)?;
+    let two = T::from_f64(2.0).unwrap();
+
+    Ok(two * between - within_x - within_y)
+}
+
 /// Pairwise E-distances between all groups defined by `labels`.
 ///
 /// ### Params
@@ -288,9 +406,11 @@ where
     let groups = group_rows_by_label(embedding, labels)?;
     let n_groups = groups.len();
 
+    // Only nest faer/rayon inside the outer loop when it cannot fill the pool.
+    let inner_par = groups.len() < rayon::current_num_threads();
     let withins: Vec<T> = groups
         .par_iter()
-        .map(|g| mean_pairwise_within(g.as_ref(), dist))
+        .map(|g| mean_pairwise_within_impl(g.as_ref(), dist, inner_par))
         .collect();
 
     let pairs: Vec<(usize, usize)> = (0..n_groups)
@@ -301,7 +421,12 @@ where
     let results: Vec<(usize, usize, T)> = pairs
         .par_iter()
         .map(|&(i, j)| {
-            let between = mean_pairwise_between(groups[i].as_ref(), groups[j].as_ref(), dist)?;
+            let between = mean_pairwise_between_impl(
+                groups[i].as_ref(),
+                groups[j].as_ref(),
+                dist,
+                inner_par,
+            )?;
             let ed = two * between - withins[i] - withins[j];
 
             Ok((i, j, ed))
@@ -342,6 +467,7 @@ where
     let n_groups = groups.len();
     assert!(reference < n_groups, "reference label out of range");
 
+    let inner_par = n_groups < rayon::current_num_threads();
     let within_ref = mean_pairwise_within(groups[reference].as_ref(), dist);
     let two = T::from_f64(2.0).unwrap();
 
@@ -351,9 +477,13 @@ where
             if g == reference {
                 Ok(T::zero())
             } else {
-                let within_g = mean_pairwise_within(groups[g].as_ref(), dist);
-                let between =
-                    mean_pairwise_between(groups[g].as_ref(), groups[reference].as_ref(), dist)?;
+                let within_g = mean_pairwise_within_impl(groups[g].as_ref(), dist, inner_par);
+                let between = mean_pairwise_between_impl(
+                    groups[g].as_ref(),
+                    groups[reference].as_ref(),
+                    dist,
+                    inner_par,
+                )?;
 
                 Ok(two * between - within_g - within_ref)
             }

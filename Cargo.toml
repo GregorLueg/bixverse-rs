@@ -30,7 +30,7 @@ default = ["accelerate"]
 ## elsewhere). Decompositions (SVD, eigen) stay on faer, which is faster there.
 accelerate = ["ann-search-rs/accelerate"]
 ## Enables the single cell features in bixverse-rs
-single-cell = ["half", "bincode", "indexmap", "memmap2", "hdf5", "lz4_flex", "ndarray", "dge"]
+single-cell = ["half", "bincode", "indexmap", "memmap2", "hdf5", "lz4_flex", "ndarray", "dge", "zstd"]
 ## Compile the bundled HDF5 C library from source. Leave it off to link an
 ## external libhdf5 found via `HDF5_DIR` or pkg-config, which is what the R
 ## package does on Windows: `hdf5-metno-src` names its output with the host
@@ -116,6 +116,7 @@ statrs = "0.18.0"
 thiserror = "2.0.18"
 thousands = "0.2.0"
 wide = "1.4.0"
+zstd = { version = "0.14.0", optional = true }
 
 #################
 # Documentation #
@@ -185,3 +186,8 @@ required-features = ["gpu", "single-cell"]
 name = "gpu_scenic_micro"
 harness = false
 required-features = ["gpu", "single-cell"]
+
+[[bench]]
+name = "harmony_bench"
+harness = false
+required-features = ["single-cell"]

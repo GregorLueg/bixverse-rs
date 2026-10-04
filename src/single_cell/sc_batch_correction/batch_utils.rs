@@ -6,6 +6,9 @@ use rayon::prelude::*;
 
 use crate::prelude::*;
 
+/// Rows per block when accumulating row norms
+const NORM_ROW_BLOCK: usize = 4096;
+
 /// Apply cosine normalisation (L2 normalisation) to each row
 ///
 /// Normalizes each row (cell) to unit L2 norm. Rows with near-zero norm
@@ -22,21 +25,58 @@ pub fn cosine_normalise(mat: &Mat<f32>) -> Mat<f32> {
     let nrows = mat.nrows();
     let ncols = mat.ncols();
 
-    // compute norms once per row (in parallel)
-    let norms: Vec<f32> = (0..nrows)
-        .into_par_iter()
-        .map(|row| mat.get(row, ..).norm_l2())
-        .collect();
+    // sum of squares per row, walking each column contiguously
+    let mut norms = vec![0.0f32; nrows];
+    norms
+        .par_chunks_mut(NORM_ROW_BLOCK)
+        .enumerate()
+        .for_each(|(block, acc)| {
+            let lo = block * NORM_ROW_BLOCK;
+            for col in 0..ncols {
+                for (i, a) in acc.iter_mut().enumerate() {
+                    let v = mat[(lo + i, col)];
+                    *a += v * v;
+                }
+            }
+            acc.iter_mut().for_each(|a| *a = a.sqrt());
+        });
 
-    // create normalised matrix
-    Mat::from_fn(nrows, ncols, |row, col| {
-        let norm = norms[row];
-        if norm > 1e-8 {
-            mat[(row, col)] / norm
-        } else {
-            0.0 // Zero-norm row stays zero
+    let mut out = Mat::<f32>::zeros(nrows, ncols);
+    par_for_each_col_mut(&mut out, |col, dst| {
+        for (row, d) in dst.iter_mut().enumerate() {
+            let norm = norms[row];
+            *d = if norm > 1e-8 {
+                mat[(row, col)] / norm
+            } else {
+                0.0 // Zero-norm row stays zero
+            };
         }
-    })
+    });
+    out
+}
+
+/// Run `f` on every column of `mat` in parallel.
+///
+/// ### Params
+///
+/// * `mat` - Matrix whose columns are filled in place
+/// * `f` - Called as `f(col_index, column_slice)`
+pub(crate) fn par_for_each_col_mut<F>(mat: &mut Mat<f32>, f: F)
+where
+    F: Fn(usize, &mut [f32]) + Sync,
+{
+    mat.as_mut()
+        .par_col_chunks_mut(1)
+        .enumerate()
+        .for_each(|(j, col)| {
+            f(
+                j,
+                col.col_mut(0)
+                    .try_as_col_major_mut()
+                    .expect("owned Mat columns are contiguous")
+                    .as_slice_mut(),
+            )
+        });
 }
 
 /// Process the batch labels
@@ -98,14 +138,18 @@ pub fn standardise_per_column(mat: MatRef<f32>) -> Mat<f32> {
         })
         .collect();
 
-    Mat::from_fn(n_features, n_cells, |row, col| {
+    let mut out = Mat::<f32>::zeros(n_features, n_cells);
+    par_for_each_col_mut(&mut out, |col, dst| {
         let (mean, sd) = stats[col];
-        if sd > 1e-15 {
-            (*mat.get(row, col) - mean) / sd
-        } else {
-            0.0
+        for (row, d) in dst.iter_mut().enumerate() {
+            *d = if sd > 1e-15 {
+                (*mat.get(row, col) - mean) / sd
+            } else {
+                0.0
+            };
         }
-    })
+    });
+    out
 }
 
 /// Build an index on `reference` and query `query` for the k nearest

@@ -1,6 +1,7 @@
 //! This module contains all of the single cell streamining-related
 //! functionalities, structures and readers.
 
+pub mod archive_io;
 pub mod bin_merge_io;
 pub mod data_io;
 pub mod gene_file_io;

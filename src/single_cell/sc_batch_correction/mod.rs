@@ -5,6 +5,7 @@ pub mod batch_utils;
 pub mod bbknn;
 pub mod fast_mnn;
 pub mod harmony;
+pub(crate) mod harmony_core;
 pub mod harmony_v2;
 pub mod seurat_anchors;
 pub mod seurat_cca;

@@ -307,10 +307,12 @@ fn build_gram<S: SingleCellReading>(
         .fold(
             || Mat::<f64>::zeros(n_genes, n_genes),
             |mut acc, entries| {
+                // Entries are sorted by slot, so `gb >= ga`: fill the lower triangle,
+                // which is contiguous in the inner loop of the column-major matrix
                 for (a, (ga, va)) in entries.iter().enumerate() {
                     let va = *va as f64;
                     for (gb, vb) in entries.iter().skip(a) {
-                        acc[(*ga as usize, *gb as usize)] += va * (*vb as f64);
+                        acc[(*gb as usize, *ga as usize)] += va * (*vb as f64);
                     }
                 }
                 acc
@@ -319,8 +321,8 @@ fn build_gram<S: SingleCellReading>(
         .reduce(
             || Mat::<f64>::zeros(n_genes, n_genes),
             |mut a, b| {
-                for i in 0..n_genes {
-                    for j in i..n_genes {
+                for j in 0..n_genes {
+                    for i in j..n_genes {
                         a[(i, j)] += b[(i, j)];
                     }
                 }
@@ -334,7 +336,7 @@ fn build_gram<S: SingleCellReading>(
     let mut ztz = Mat::<f64>::zeros(n_genes, n_genes);
     for i in 0..n_genes {
         for j in i..n_genes {
-            let cross = raw[(i, j)];
+            let cross = raw[(j, i)];
             let value = scale[i] * scale[j] * cross
                 + scale[i] * offset[j] * sum_x[i]
                 + scale[j] * offset[i] * sum_x[j]
@@ -436,12 +438,16 @@ fn apply_stage(gram: &GeneGram, members: &[usize], coef: &mut [f64], residual: &
         coef[g] += solution[i];
     }
     // Z'(y - Z_S b) = Z'y - (Z'Z_S) b.
-    for (i, r) in residual.iter_mut().enumerate() {
-        let mut delta = 0.0;
-        for (j, &g) in members.iter().enumerate() {
-            delta += gram.ztz[(i, g)] * solution[j];
+    // Column-wise accumulation keeps the per-row summation order over members
+    let mut delta = vec![0.0_f64; residual.len()];
+    for (j, &g) in members.iter().enumerate() {
+        let s = solution[j];
+        for (d, &z) in delta.iter_mut().zip(gram.ztz.col_as_slice(g)) {
+            *d += z * s;
         }
-        *r -= delta;
+    }
+    for (r, d) in residual.iter_mut().zip(&delta) {
+        *r -= d;
     }
 }
 
@@ -467,11 +473,13 @@ fn tracks_well(gram: &GeneGram, coef: &[f64], threshold: f64) -> bool {
         if *ci == 0.0 {
             continue;
         }
+        // ztz is symmetric, so read the contiguous column instead of the row
+        let col = gram.ztz.col_as_slice(i);
         for (j, cj) in coef.iter().enumerate() {
             if *cj == 0.0 {
                 continue;
             }
-            quad += ci * gram.ztz[(i, j)] * cj;
+            quad += ci * col[j] * cj;
         }
     }
     if !(quad.is_finite() && quad > 0.0) || gram.y_centred_ss <= 0.0 {

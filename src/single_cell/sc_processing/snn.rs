@@ -1,7 +1,6 @@
 //! Implementations to generate shared nearest-neighbour graphs from kNN graphs.
 
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
 use std::time::Instant;
 
 use crate::prelude::*;
@@ -68,6 +67,29 @@ pub fn parse_snn_type(s: &str) -> Option<SnnType> {
 /////////////
 // Helpers //
 /////////////
+
+/// Transpose the column-major kNN indices into row-major, `k` per cell
+///
+/// ### Params
+///
+/// * `flat_knn` - kNN indices, column-major (`k` columns of `n_samples`).
+/// * `k` - Number of neighbours per cell.
+/// * `n_samples` - Number of cells.
+///
+/// ### Returns
+///
+/// Row-major indices, `k` per cell.
+fn row_major_knn(flat_knn: &[usize], k: usize, n_samples: usize) -> Vec<usize> {
+    let mut v = vec![0usize; n_samples * k];
+    if k > 0 {
+        v.par_chunks_mut(k).enumerate().for_each(|(i, row)| {
+            for (nb, slot) in row.iter_mut().enumerate() {
+                *slot = flat_knn[nb * n_samples + i];
+            }
+        });
+    }
+    v
+}
 
 /// sNN weight between two cells from their kNN rows
 ///
@@ -234,24 +256,29 @@ pub fn generate_snn_full(
 
     let start_time = Instant::now();
 
-    let knn_rm: Vec<usize> = {
-        let mut v = vec![0usize; n_samples * k];
-        for i in 0..n_samples {
-            for nb in 0..k {
-                v[i * k + nb] = flat_knn[nb * n_samples + i];
-            }
-        }
-        v
-    };
+    let knn_rm = row_major_knn(flat_knn, k, n_samples);
 
-    let mut reverse_mappings: Vec<Vec<(usize, usize)>> =
-        (0..n_samples).map(|_| Vec::with_capacity(k + 1)).collect();
-
+    // CSR of (cell, rank) per neighbour node, filled in cell order with each
+    // cell's own entry ahead of its neighbour entries.
+    let mut rev_ptr = vec![0usize; n_samples + 1];
+    for node in 0..n_samples {
+        rev_ptr[node + 1] += 1;
+    }
+    for &neighbor in flat_knn.iter().take(k * n_samples) {
+        rev_ptr[neighbor + 1] += 1;
+    }
+    for node in 0..n_samples {
+        rev_ptr[node + 1] += rev_ptr[node];
+    }
+    let mut reverse_flat = vec![(0usize, 0usize); rev_ptr[n_samples]];
+    let mut cursor = rev_ptr.clone();
     for i in 0..n_samples {
-        reverse_mappings[i].push((i, 0));
+        reverse_flat[cursor[i]] = (i, 0);
+        cursor[i] += 1;
         for nb in 0..k {
             let neighbor = flat_knn[nb * n_samples + i];
-            reverse_mappings[neighbor].push((i, nb + 1));
+            reverse_flat[cursor[neighbor]] = (i, nb + 1);
+            cursor[neighbor] += 1;
         }
     }
 
@@ -265,7 +292,9 @@ pub fn generate_snn_full(
                 for i in 0..=k {
                     let cur_neighbor = if i == 0 { j } else { knn_rm[j * k + (i - 1)] };
 
-                    for &(othernode, other_rank) in &reverse_mappings[cur_neighbor] {
+                    for &(othernode, other_rank) in
+                        &reverse_flat[rev_ptr[cur_neighbor]..rev_ptr[cur_neighbor + 1]]
+                    {
                         if othernode < j {
                             match method {
                                 SnnSimilarityMethod::Rank => {
@@ -372,16 +401,7 @@ pub fn generate_snn_limited(
     let verbosity = parse_verbosity_level(verbose);
     let start_time = Instant::now();
 
-    let knn_rm: Vec<usize> = {
-        let mut v = vec![0usize; n_samples * k];
-        for r in 0..k {
-            let col_offset = r * n_samples;
-            for c in 0..n_samples {
-                v[c * k + r] = flat_knn[col_offset + c];
-            }
-        }
-        v
-    };
+    let knn_rm = row_major_knn(flat_knn, k, n_samples);
 
     let attached: Vec<Vec<(usize, u32)>> = (0..n_samples)
         .into_par_iter()
@@ -397,15 +417,25 @@ pub fn generate_snn_limited(
         })
         .collect();
 
-    let edge_map: FxHashMap<(usize, usize), f32> = (0..n_samples)
+    // Weights are symmetric, so a mutual pair is emitted by its lower node only.
+    // What is left is sorted and deduplicated on the canonical key, keeping the
+    // largest weight.
+    let mut candidates: Vec<(usize, usize, f32)> = (0..n_samples)
         .into_par_iter()
-        .fold(FxHashMap::<(usize, usize), f32>::default, |mut acc, i| {
+        .flat_map_iter(|i| {
             let ai = &attached[i];
             let row_start = i * k;
+            let attached = &attached;
+            let knn_rm = &knn_rm;
 
-            for r in 0..k {
+            (0..k).filter_map(move |r| {
                 let j = knn_rm[row_start + r];
                 let aj = &attached[j];
+
+                let mutual = knn_rm[j * k..(j + 1) * k].contains(&i);
+                if mutual && j < i {
+                    return None;
+                }
 
                 let weight = match method {
                     SnnSimilarityMethod::Intersection => {
@@ -451,39 +481,22 @@ pub fn generate_snn_limited(
                     }
                 };
 
-                if weight >= pruning {
-                    let edge_key = if i < j { (i, j) } else { (j, i) };
-                    acc.entry(edge_key)
-                        .and_modify(|w| {
-                            if weight > *w {
-                                *w = weight
-                            }
-                        })
-                        .or_insert(weight);
-                }
-            }
-            acc
+                (weight >= pruning).then_some((i.min(j), i.max(j), weight))
+            })
         })
-        .reduce(FxHashMap::<(usize, usize), f32>::default, |mut a, mut b| {
-            if a.len() < b.len() {
-                std::mem::swap(&mut a, &mut b);
-            }
-            for (key, v) in b {
-                a.entry(key)
-                    .and_modify(|w| {
-                        if v > *w {
-                            *w = v
-                        }
-                    })
-                    .or_insert(v);
-            }
-            a
-        });
+        .collect();
 
-    let mut edges = Vec::with_capacity(edge_map.len() * 2);
-    let mut weights = Vec::with_capacity(edge_map.len());
+    candidates.par_sort_unstable_by(|a, b| {
+        (a.0, a.1)
+            .cmp(&(b.0, b.1))
+            .then_with(|| b.2.total_cmp(&a.2))
+    });
+    candidates.dedup_by_key(|c| (c.0, c.1));
 
-    for ((i, j), weight) in edge_map {
+    let mut edges = Vec::with_capacity(candidates.len() * 2);
+    let mut weights = Vec::with_capacity(candidates.len());
+
+    for (i, j, weight) in candidates {
         edges.push(i);
         edges.push(j);
         weights.push(weight);
@@ -552,23 +565,30 @@ pub fn snn_edges_to_sparse_graph(
     }
 
     // sort column indices within each row, keeping data aligned
+    let mut rows: Vec<(&mut [usize], &mut [f32])> = Vec::with_capacity(n_nodes);
+    let (mut idx_rest, mut data_rest) = (indices.as_mut_slice(), data.as_mut_slice());
     for node in 0..n_nodes {
-        let start = indptr[node];
-        let end = indptr[node + 1];
-        let len = end - start;
-        if len < 2 {
-            continue;
-        }
-
-        let mut order: Vec<usize> = (0..len).collect();
-        order.sort_unstable_by_key(|&k| indices[start + k]);
-
-        let row_idx: Vec<usize> = order.iter().map(|&k| indices[start + k]).collect();
-        let row_data: Vec<f32> = order.iter().map(|&k| data[start + k]).collect();
-
-        indices[start..end].copy_from_slice(&row_idx);
-        data[start..end].copy_from_slice(&row_data);
+        let len = indptr[node + 1] - indptr[node];
+        let (idx_row, idx_tail) = idx_rest.split_at_mut(len);
+        let (data_row, data_tail) = data_rest.split_at_mut(len);
+        rows.push((idx_row, data_row));
+        idx_rest = idx_tail;
+        data_rest = data_tail;
     }
+
+    rows.par_iter_mut()
+        .for_each_init(Vec::<(usize, f32)>::new, |scratch, (idx_row, data_row)| {
+            if idx_row.len() < 2 {
+                return;
+            }
+            scratch.clear();
+            scratch.extend(idx_row.iter().copied().zip(data_row.iter().copied()));
+            scratch.sort_unstable_by_key(|&(node, _)| node);
+            for ((i, d), &(node, w)) in idx_row.iter_mut().zip(data_row.iter_mut()).zip(&*scratch) {
+                *i = node;
+                *d = w;
+            }
+        });
 
     let adjacency = CompressedSparseData2 {
         data,
@@ -589,6 +609,7 @@ pub fn snn_edges_to_sparse_graph(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustc_hash::FxHashMap;
 
     // tiny fixture, 4 nodes, k=2:
     //   node 0 -> [1, 2]

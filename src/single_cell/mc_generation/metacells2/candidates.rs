@@ -22,6 +22,7 @@ use std::collections::BTreeSet;
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use rayon::prelude::*;
 use rustc_hash::FxHashSet;
 
 use crate::core::math::sparse::transpose_sparse;
@@ -42,6 +43,29 @@ const INCREASE_PHASE: f64 = 1.01;
 ///////////
 // Enums //
 ///////////
+
+/// Stoer-Wagner result: `(cut_strength, partition_a, partition_b)`.
+type MinCut = (f64, Vec<usize>, Vec<usize>);
+
+/// Group cell indices by partition id, ascending within each group.
+///
+/// ### Params
+///
+/// * `partition_of_cells` - Current assignment; entries `< 0` are skipped.
+/// * `n_partitions` - Number of partitions.
+///
+/// ### Returns
+///
+/// One cell list per partition id.
+fn bucket_cells_by_partition(partition_of_cells: &[i32], n_partitions: usize) -> Vec<Vec<usize>> {
+    let mut buckets = vec![Vec::new(); n_partitions];
+    for (cell, &p) in partition_of_cells.iter().enumerate() {
+        if p >= 0 {
+            buckets[p as usize].push(cell);
+        }
+    }
+    buckets
+}
 
 /// Outcome of a min-cut attempt on a single community.
 #[derive(PartialEq, Eq, Debug)]
@@ -234,11 +258,12 @@ fn cut_split_communities(
     let mut hot_communities: Vec<usize> = Vec::new();
     let mut rng = StdRng::seed_from_u64(random_seed.wrapping_add(0x5EED5_5EED5_5EED5));
 
+    // Buckets are taken once: both phases only rewrite cells of the community
+    // being visited, to ids >= n_partitions or -1, so later buckets stay valid.
+    let buckets = bucket_cells_by_partition(partition_of_cells, n_partitions);
+
     // Phase A: random splits.
-    for community_index in 0..n_partitions {
-        let cells: Vec<usize> = (0..partition_of_cells.len())
-            .filter(|&i| partition_of_cells[i] == community_index as i32)
-            .collect();
+    for (community_index, cells) in buckets.iter().enumerate() {
         if cells.is_empty() {
             continue;
         }
@@ -271,7 +296,7 @@ fn cut_split_communities(
         }
 
         // Demote everyone, then re-seed one cell per part.
-        for &c in &cells {
+        for &c in cells {
             partition_of_cells[c] = -1;
         }
         for split_index in 0..split_parts_count {
@@ -299,26 +324,31 @@ fn cut_split_communities(
         return (split_count, cut_count, hot_communities);
     }
 
-    // Phase B: min-cut.
-    for community_index in 0..n_partitions {
-        let cells: Vec<usize> = (0..partition_of_cells.len())
-            .filter(|&i| partition_of_cells[i] == community_index as i32)
-            .collect();
-        if cells.len() < 2 {
-            continue;
-        }
+    // Phase B: min-cut. Buckets are ascending, so a bucket is its own memo key.
+    // The cuts are pure functions of the graph and are solved in parallel; the
+    // partition ids they hand out are then applied in community order.
+    let cuts: Vec<Option<Option<MinCut>>> = buckets
+        .par_iter()
+        .map_init(
+            || vec![-1_i32; outgoing.shape.0],
+            |local_of_global, cells| {
+                if cells.len() < 2 || atomic_candidates.contains(cells) {
+                    return None;
+                }
+                Some(stoer_wagner(outgoing, cells, local_of_global))
+            },
+        )
+        .collect();
 
-        // memoise: skip if we already tried this exact cell set.
-        let mut key = cells.clone();
-        key.sort_unstable();
-        if atomic_candidates.contains(&key) {
+    for ((community_index, cells), cut) in buckets.iter().enumerate().zip(cuts) {
+        let Some(cut) = cut else {
             continue;
-        }
+        };
 
         let action = min_cut_community(
-            outgoing,
             partition_of_cells,
-            &cells,
+            cells,
+            cut,
             max_split_min_cut_strength,
             min_cut_seed_cells,
             must_complete_cover,
@@ -327,7 +357,7 @@ fn cut_split_communities(
 
         match action {
             CutAction::Unchanged => {
-                atomic_candidates.insert(key);
+                atomic_candidates.insert(cells.to_vec());
             }
             CutAction::Split => {
                 hot_communities.push(community_index);
@@ -354,9 +384,9 @@ fn cut_split_communities(
 ///
 /// ### Params
 ///
-/// * `outgoing` - CSR outgoing-neighbour graph.
 /// * `partition_of_cells` - Current assignment; modified in place.
 /// * `cells` - Global cell indices belonging to this community.
+/// * `cut` - The [stoer_wagner] result for `cells`.
 /// * `max_split_min_cut_strength` - Strength threshold above which the cut is
 ///   rejected.
 /// * `min_cut_seed_cells` - Minimum cells in the small partition to accept a
@@ -370,9 +400,9 @@ fn cut_split_communities(
 /// A `CutAction` describing the outcome.
 #[allow(clippy::too_many_arguments)]
 fn min_cut_community(
-    outgoing: &CompressedSparseData2<f32, f32>,
     partition_of_cells: &mut [i32],
     cells: &[usize],
+    cut: Option<MinCut>,
     max_split_min_cut_strength: f64,
     min_cut_seed_cells: usize,
     must_complete_cover: bool,
@@ -382,9 +412,8 @@ fn min_cut_community(
         return CutAction::Unchanged;
     }
 
-    let (cut_strength, partition_a, partition_b) = match stoer_wagner(outgoing, cells) {
-        Some(r) => r,
-        None => return CutAction::Unchanged,
+    let Some((cut_strength, partition_a, partition_b)) = cut else {
+        return CutAction::Unchanged;
     };
 
     if cut_strength > max_split_min_cut_strength {
@@ -426,6 +455,8 @@ fn min_cut_community(
 ///
 /// * `outgoing` - CSR outgoing-neighbour graph.
 /// * `cells` - Global cell indices forming the subgraph.
+/// * `local_of_global` - Scratch of length `outgoing.shape.0`, all `-1` on
+///   entry and restored to all `-1` before return.
 ///
 /// ### Returns
 ///
@@ -435,14 +466,14 @@ fn min_cut_community(
 fn stoer_wagner(
     outgoing: &CompressedSparseData2<f32, f32>,
     cells: &[usize],
-) -> Option<(f64, Vec<usize>, Vec<usize>)> {
+    local_of_global: &mut [i32],
+) -> Option<MinCut> {
     let n = cells.len();
     if n < 2 {
         return None;
     }
 
     // map global cell index → local index in [0, n).
-    let mut local_of_global: Vec<i32> = vec![-1; outgoing.shape.0];
     for (local, &global) in cells.iter().enumerate() {
         local_of_global[global] = local as i32;
     }
@@ -469,6 +500,10 @@ fn stoer_wagner(
             weight[local_j][local_i] += w;
             total_weight += w;
         }
+    }
+
+    for &global in cells {
+        local_of_global[global] = -1;
     }
 
     if total_weight <= 0.0 {
@@ -960,7 +995,8 @@ mod tests {
         ];
         let (out, _inc) = make_graph(&edges, 6);
         let cells: Vec<usize> = (0..6).collect();
-        let (strength, a, b) = stoer_wagner(&out, &cells).expect("min cut");
+        let (strength, a, b) =
+            stoer_wagner(&out, &cells, &mut vec![-1; out.shape.0]).expect("min cut");
 
         assert!(
             strength < 0.05,
@@ -985,7 +1021,8 @@ mod tests {
         let edges = vec![(0, 1, 1.0), (1, 0, 1.0), (2, 3, 1.0), (3, 2, 1.0)];
         let (out, _inc) = make_graph(&edges, 4);
         let cells: Vec<usize> = (0..4).collect();
-        let (strength, _a, _b) = stoer_wagner(&out, &cells).expect("min cut");
+        let (strength, _a, _b) =
+            stoer_wagner(&out, &cells, &mut vec![-1; out.shape.0]).expect("min cut");
         assert!(strength < 1e-9, "disconnected should give zero strength");
     }
 

@@ -66,7 +66,7 @@ use crate::single_cell::sc_processing::{
     },
     doublet_detection::BoostParams,
     knn::KnnParams,
-    pca::{SingleCellPcaParams, parse_pca_solver},
+    pca::{PcaSolver, SingleCellPcaParams, parse_pca_solver},
     scdblfinder::ScDblFinderParams,
     scrublet::ScrubletParams,
     utils_doublets::ScDblSimParams,
@@ -457,10 +457,10 @@ impl ScrubletParams {
             .and_then(|v| v.as_integer())
             .unwrap_or(30) as usize;
 
-        let random_svd = scrublet_list
-            .get("random_svd")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
+        let svd_solver = match scrublet_list.get("svd_solver").and_then(|v| v.as_str()) {
+            Some(x) => parse_pca_solver(x).ok_or_else(|| format!("Invalid PCA solver: {}", x))?,
+            None => PcaSolver::Covariance,
+        };
 
         // Doublet simulation parameters
         let sim_doublet_ratio = scrublet_list
@@ -508,7 +508,7 @@ impl ScrubletParams {
             binning_strategy,
             // pca
             no_pcs,
-            random_svd,
+            svd_solver,
             // doublet simulation/detection
             sim_doublet_ratio,
             expected_doublet_rate,
@@ -606,10 +606,10 @@ impl BoostParams {
             .and_then(|v| v.as_integer())
             .unwrap_or(30) as usize;
 
-        let random_svd = params_list
-            .get("random_svd")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
+        let svd_solver = match params_list.get("svd_solver").and_then(|v| v.as_str()) {
+            Some(x) => parse_pca_solver(x).ok_or_else(|| format!("Invalid PCA solver: {}", x))?,
+            None => PcaSolver::Covariance,
+        };
 
         // doublet detection params
         let boost_rate = params_list
@@ -674,7 +674,7 @@ impl BoostParams {
             binning_strategy,
             // pca
             no_pcs,
-            random_svd,
+            svd_solver,
             // boosted
             boost_rate,
             replace,
@@ -758,10 +758,12 @@ impl ScDblFinderParams {
                 .get("no_pcs")
                 .and_then(|v| v.as_integer())
                 .unwrap_or(defaults.no_pcs as i32) as usize,
-            random_svd: map
-                .get("random_svd")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(defaults.random_svd),
+            svd_solver: match map.get("svd_solver").and_then(|v| v.as_str()) {
+                Some(x) => {
+                    parse_pca_solver(x).ok_or_else(|| format!("Invalid PCA solver: {}", x))?
+                }
+                None => defaults.svd_solver,
+            },
             // Clustering
             cluster_resolution: map
                 .get("cluster_resolution")
@@ -1090,11 +1092,6 @@ impl FastMnnParams {
             .get("no_pcs")
             .and_then(|v| v.as_integer())
             .unwrap_or(30) as usize;
-        let random_svd = fastmnn_list
-            .get("random_svd")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-
         let sparse_svd = fastmnn_list
             .get("sparse_svd")
             .and_then(|v| v.as_bool())
@@ -1103,7 +1100,6 @@ impl FastMnnParams {
         Ok(Self {
             ndist,
             no_pcs,
-            random_svd,
             sparse_svd,
             cos_norm,
             knn_params,

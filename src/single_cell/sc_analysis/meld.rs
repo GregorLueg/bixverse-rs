@@ -376,13 +376,22 @@ fn chebyshev_coefficients(
     Ok(res)
 }
 
-/// Apply a Chebyshev polynomial approximation of `h(L)` to a single signal.
+/// Rows handled per rayon task in the blocked sparse product
+const CHEBYSHEV_MIN_ROWS: usize = 512;
+
+/// Apply a Chebyshev polynomial approximation of `h(L)` to all columns of an
+/// `N x p` signal.
 ///
 /// Evaluates `h(L) v ≈ (c[0]/2) v + Σ c[k] T_k(M) v` via the three-term
 /// recurrence on the rescaled operator `M = (2 L - λ_max I) / λ_max`:
-/// `T_0 = v`, `T_1 = M v`, `T_k = 2 M T_{k-1} - T_{k-2}`. Each iteration
-/// costs one sparse matvec through `lap`, so total cost is `O(K · nnz(L))`
-/// for `K = coeffs.len()`.
+/// `T_0 = v`, `T_1 = M v`, `T_k = 2 M T_{k-1} - T_{k-2}`. All `p` columns are
+/// carried through the recurrence together as node-major blocks, so each
+/// iteration traverses `lap` once for every column, with the rows split across
+/// rayon tasks. Per column the arithmetic and its order are those of a
+/// sequential sparse matvec per iteration, so total cost is
+/// `O(K · nnz(L) · p)` for `K = coeffs.len()`. Suited to MELD's indicator
+/// matrix, where the `p` columns (one per condition) are independent
+/// low-pass-filtering problems sharing the same Laplacian.
 ///
 /// ### Params
 ///
@@ -391,61 +400,6 @@ fn chebyshev_coefficients(
 ///   is the polynomial degree plus one.
 /// * `lmax` - Largest Laplacian eigenvalue used to rescale the spectrum onto
 ///   `[-1, 1]`. Must match the value used to compute `coeffs`.
-/// * `signal` - The signal `v` to filter, length `lap.shape.0`.
-///
-/// ### Returns
-///
-/// Filtered signal `h(L) v` of the same length as `signal`.
-fn chebyshev_apply(
-    lap: &CompressedSparseData2<f32>,
-    coeffs: &[f32],
-    lmax: f32,
-    signal: &[f32],
-) -> Result<Vec<f32>, BixverseErrors> {
-    let n = signal.len();
-    let n_coeffs = coeffs.len();
-    let a = lmax / 2.0;
-    let b = lmax / 2.0;
-    let inv_b = 1.0 / b;
-
-    let mut t_old = signal.to_vec();
-
-    let lv = csr_matvec(lap, signal)?;
-    let mut t_cur: Vec<f32> = lv
-        .iter()
-        .zip(signal.iter())
-        .map(|(&l, &s)| (l - a * s) * inv_b)
-        .collect();
-
-    let mut result: Vec<f32> = (0..n)
-        .map(|i| 0.5 * coeffs[0] * t_old[i] + coeffs[1] * t_cur[i])
-        .collect();
-
-    for k in 2..n_coeffs {
-        let lt = csr_matvec(lap, &t_cur)?;
-        let mut t_new = vec![0.0_f32; n];
-        for i in 0..n {
-            t_new[i] = 2.0 * (lt[i] - a * t_cur[i]) * inv_b - t_old[i];
-            result[i] += coeffs[k] * t_new[i];
-        }
-        t_old = std::mem::replace(&mut t_cur, t_new);
-    }
-
-    Ok(result)
-}
-
-/// Apply a Chebyshev filter to all columns of an `N x p` signal in parallel.
-///
-/// Each column is filtered independently via [`chebyshev_apply`] and the
-/// per-column work is dispatched across threads with rayon. Suited to MELD's
-/// indicator matrix, where the `p` columns (one per condition) are
-/// independent low-pass-filtering problems sharing the same Laplacian.
-///
-/// ### Params
-///
-/// * `lap` - Sparse Laplacian in CSR format.
-/// * `coeffs` - Chebyshev coefficients from [`chebyshev_coefficients`].
-/// * `lmax` - Largest Laplacian eigenvalue (must match `coeffs`).
 /// * `signal` - The `N x p` signal matrix to filter, with `N == lap.shape.0`.
 ///
 /// ### Returns
@@ -458,16 +412,82 @@ fn chebyshev_apply_columns(
     lmax: f32,
     signal: MatRef<f32>,
 ) -> Result<Mat<f32>, BixverseErrors> {
+    if !lap.cs_type.is_csr() {
+        return Err(BixverseErrors::SparseMatrixMustBeCsr);
+    }
+
     let n = signal.nrows();
     let p = signal.ncols();
-    let columns: Vec<Vec<f32>> = (0..p)
-        .into_par_iter()
-        .map(|j| {
-            let col: Vec<f32> = (0..n).map(|i| *signal.get(i, j)).collect();
-            chebyshev_apply(lap, coeffs, lmax, &col)
-        })
-        .collect::<Result<Vec<_>, BixverseErrors>>()?;
-    Ok(Mat::from_fn(n, p, |i, j| columns[j][i]))
+    if p == 0 {
+        return Ok(Mat::zeros(n, 0));
+    }
+    let n_coeffs = coeffs.len();
+    let a = lmax / 2.0;
+    let b = lmax / 2.0;
+    let inv_b = 1.0 / b;
+
+    // `acc[j] = (L x)[i, j]`, accumulated in CSR order like `csr_matvec`
+    let spmm_row = |i: usize, x: &[f32], acc: &mut [f32]| {
+        acc.fill(0.0);
+        let (start, end) = (lap.indptr[i] as usize, lap.indptr[i + 1] as usize);
+        for idx in start..end {
+            let w = lap.data[idx];
+            let row = &x[lap.indices[idx] as usize * p..][..p];
+            for (slot, &v) in acc.iter_mut().zip(row) {
+                *slot += w * v;
+            }
+        }
+    };
+
+    let mut t_old: Vec<f32> = vec![0.0; n * p];
+    for j in 0..p {
+        for i in 0..n {
+            t_old[i * p + j] = signal[(i, j)];
+        }
+    }
+
+    let mut t_cur = vec![0.0_f32; n * p];
+    let mut result = vec![0.0_f32; n * p];
+    t_cur
+        .par_chunks_mut(p)
+        .zip(result.par_chunks_mut(p))
+        .enumerate()
+        .with_min_len(CHEBYSHEV_MIN_ROWS)
+        .for_each_init(
+            || vec![0.0_f32; p],
+            |acc, (i, (cur_row, res_row))| {
+                spmm_row(i, &t_old, acc);
+                for j in 0..p {
+                    let s = t_old[i * p + j];
+                    cur_row[j] = (acc[j] - a * s) * inv_b;
+                    res_row[j] = 0.5 * coeffs[0] * s + coeffs[1] * cur_row[j];
+                }
+            },
+        );
+
+    let mut t_new = vec![0.0_f32; n * p];
+    for &coeff in &coeffs[2.min(n_coeffs)..] {
+        t_new
+            .par_chunks_mut(p)
+            .zip(result.par_chunks_mut(p))
+            .enumerate()
+            .with_min_len(CHEBYSHEV_MIN_ROWS)
+            .for_each_init(
+                || vec![0.0_f32; p],
+                |acc, (i, (new_row, res_row))| {
+                    spmm_row(i, &t_cur, acc);
+                    for j in 0..p {
+                        new_row[j] =
+                            2.0 * (acc[j] - a * t_cur[i * p + j]) * inv_b - t_old[i * p + j];
+                        res_row[j] += coeff * new_row[j];
+                    }
+                },
+            );
+        std::mem::swap(&mut t_old, &mut t_cur);
+        std::mem::swap(&mut t_cur, &mut t_new);
+    }
+
+    Ok(MatRef::from_row_major_slice(&result, n, p).to_owned())
 }
 
 /// Apply L1 normalisation to each row.

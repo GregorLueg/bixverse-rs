@@ -2,6 +2,7 @@
 
 pub mod bbknn_gpu;
 pub mod fast_clusters_gpu;
+pub mod fast_mnn_gpu;
 pub mod harmony_gpu;
 pub mod kernels;
 pub mod knn_gpu;

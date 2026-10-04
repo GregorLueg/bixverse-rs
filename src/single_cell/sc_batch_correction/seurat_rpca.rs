@@ -125,11 +125,8 @@ fn per_batch_pca_standardised(
 ///
 /// Dense `(n_b, dims)` projected embedding.
 fn project_into_basis(loadings_a: MatRef<f32>, x_b: MatRef<f32>, l2_norm: bool) -> Mat<f32> {
-    // proj = loadings_a^T @ x_b, shape (dims, n_b). Transpose to (n_b, dims).
-    let proj = loadings_a.transpose() * x_b;
-    let n_b = x_b.ncols();
-    let dims = loadings_a.ncols();
-    let projected = Mat::from_fn(n_b, dims, |c, d| proj[(d, c)]);
+    // (loadings_a^T x_b)^T computed directly, shape (n_b, dims)
+    let projected = x_b.transpose() * loadings_a;
     if l2_norm {
         cosine_normalise(&projected)
     } else {

@@ -605,6 +605,56 @@ pub fn get_hvg_mvb_from_sparse(
 // PCA //
 /////////
 
+/// Sum of a slice with four independent accumulators.
+///
+/// ### Params
+///
+/// * `x` - Values to sum
+///
+/// ### Returns
+///
+/// The sum
+#[inline]
+fn sum_f64(x: &[f64]) -> f64 {
+    let mut acc = [0.0f64; 4];
+    let mut quads = x.chunks_exact(4);
+    for q in &mut quads {
+        for (a, v) in acc.iter_mut().zip(q) {
+            *a += v;
+        }
+    }
+    let tail: f64 = quads.remainder().iter().sum();
+    (acc[0] + acc[1]) + (acc[2] + acc[3]) + tail
+}
+
+/// Sum of squared deviations from `mean` with four independent accumulators.
+///
+/// ### Params
+///
+/// * `x` - Values
+/// * `mean` - Centre
+///
+/// ### Returns
+///
+/// `sum (x - mean)^2`
+#[inline]
+fn sum_sq_dev_f64(x: &[f64], mean: f64) -> f64 {
+    let mut acc = [0.0f64; 4];
+    let mut quads = x.chunks_exact(4);
+    for q in &mut quads {
+        for (a, v) in acc.iter_mut().zip(q) {
+            let d = v - mean;
+            *a += d * d;
+        }
+    }
+    let tail: f64 = quads
+        .remainder()
+        .iter()
+        .map(|v| (v - mean) * (v - mean))
+        .sum();
+    (acc[0] + acc[1]) + (acc[2] + acc[3]) + tail
+}
+
 /// PCA on pre-selected HVGs from an in-memory sparse matrix.
 ///
 /// Reads normalised counts from the `data_2` layer (raw counts in `data`
@@ -691,31 +741,23 @@ pub fn pca_on_metacells<T: BixverseNumeric>(
 
             let need_mean = params_pca.mean_center || params_pca.normalise_variance;
             let mean = if need_mean {
-                col.iter().sum::<f64>() / n_cells as f64
+                sum_f64(col) / n_cells as f64
             } else {
                 0.0
             };
             let std_dev = if params_pca.normalise_variance {
-                let var: f64 = col
-                    .iter()
-                    .map(|&x| {
-                        let d = x - mean;
-                        d * d
-                    })
-                    .sum::<f64>()
-                    / (n_cells as f64 - 1.0);
+                let var: f64 = sum_sq_dev_f64(col, mean) / (n_cells as f64 - 1.0);
                 var.max(0.0).sqrt()
             } else {
                 1.0
             };
 
-            for v in col.iter_mut() {
-                if params_pca.mean_center {
-                    *v -= mean;
-                }
-                if params_pca.normalise_variance {
-                    *v = if std_dev < 1e-8 { 0.0 } else { *v / std_dev };
-                }
+            if params_pca.mean_center {
+                col.iter_mut().for_each(|v| *v -= mean);
+            }
+            if params_pca.normalise_variance {
+                col.iter_mut()
+                    .for_each(|v| *v = if std_dev < 1e-8 { 0.0 } else { *v / std_dev });
             }
         });
 

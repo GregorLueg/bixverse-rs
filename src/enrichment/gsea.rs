@@ -288,28 +288,6 @@ where
     res
 }
 
-/// Extract values at specified indices from a vector
-///
-/// ### Params
-///
-/// * `from` - Source vector
-/// * `indices` - Indices to extract (1-indexed)
-///
-/// # Returns
-///
-/// Option containing extracted values or None if invalid index
-fn subvector<T: BixverseFloat>(from: &[T], indices: &[usize]) -> Option<Vec<T>> {
-    let mut result = Vec::with_capacity(indices.len());
-    for &idx in indices {
-        if idx > 0 && idx <= from.len() {
-            result.push(from[idx - 1]);
-        } else {
-            return None;
-        }
-    }
-    Some(result)
-}
-
 /// Generate random gene set indices using parallel processing
 ///
 /// ### Params
@@ -332,24 +310,121 @@ pub fn create_random_gs_indices(
 ) -> Vec<Vec<usize>> {
     (0..iter_number)
         .into_par_iter()
-        .map(|i| {
-            let iter_seed = seed.wrapping_add(i as u64);
-            let mut rng = StdRng::seed_from_u64(iter_seed);
-
-            let actual_len = std::cmp::min(max_len, universe_length);
-
-            let mut indices: Vec<usize> =
-                rand::seq::index::sample(&mut rng, universe_length, actual_len)
-                    .into_iter()
-                    .collect();
-
-            if one_indexed {
-                indices.iter_mut().for_each(|x| *x += 1);
-            }
-
-            indices
-        })
+        .map(|i| random_gs_indices(i, max_len, universe_length, seed, one_indexed))
         .collect()
+}
+
+/// Draw the random gene set of a single permutation
+///
+/// The stream depends only on `seed + iter`, so a permutation can be drawn
+/// inside a parallel loop and match [`create_random_gs_indices`] exactly.
+///
+/// ### Params
+///
+/// * `iter` - Permutation index
+/// * `max_len` - Maximum length of the sample
+/// * `universe_length` - Total number of genes
+/// * `seed` - Random seed
+/// * `one_indexed` - Whether to use 1-based indexing
+///
+/// ### Returns
+///
+/// The random index vector
+pub(crate) fn random_gs_indices(
+    iter: usize,
+    max_len: usize,
+    universe_length: usize,
+    seed: u64,
+    one_indexed: bool,
+) -> Vec<usize> {
+    let mut rng = StdRng::seed_from_u64(seed.wrapping_add(iter as u64));
+    let actual_len = std::cmp::min(max_len, universe_length);
+
+    let mut indices: Vec<usize> = rand::seq::index::sample(&mut rng, universe_length, actual_len)
+        .into_iter()
+        .collect();
+
+    if one_indexed {
+        indices.iter_mut().for_each(|x| *x += 1);
+    }
+
+    indices
+}
+
+/// `|x|^param`, skipping `powf` for the common `param == 1` (exact)
+#[inline(always)]
+fn abs_pow<T: BixverseFloat>(x: T, param: T) -> T {
+    if param == T::one() {
+        x.abs()
+    } else {
+        x.abs().powf(param)
+    }
+}
+
+/// Enrichment score of one sorted gene set, without the leading edge or the
+/// running-sum vectors
+///
+/// Same arithmetic as [`calc_gsea_stats`] with `return_leading_edge = false`
+/// and `return_all_extreme = false`, in a single pass over a reused buffer.
+///
+/// ### Params
+///
+/// * `stats` - Ranking statistic
+/// * `gs_idx` - 0-based, ascending, unique positions of the set in `stats`
+/// * `gsea_param` - GSEA weighting exponent
+/// * `scratch` - Reusable buffer for the adjusted statistics
+///
+/// ### Returns
+///
+/// The enrichment score
+pub(crate) fn gsea_es_only<T: BixverseFloat>(
+    stats: &[T],
+    gs_idx: &[usize],
+    gsea_param: T,
+    scratch: &mut Vec<T>,
+) -> T {
+    let m = gs_idx.len();
+    scratch.clear();
+    scratch.extend(gs_idx.iter().map(|&i| abs_pow(stats[i], gsea_param)));
+    let nr: T = scratch.iter().copied().fold(T::zero(), |acc, x| acc + x);
+
+    let n_t = T::from_usize(stats.len()).unwrap();
+    let m_t = T::from_usize(m).unwrap();
+    let denom = n_t - m_t;
+    let zero_nr = nr == T::zero();
+
+    let mut cum = T::zero();
+    let mut max_p = T::zero();
+    let mut min_p = T::zero();
+    for (i, (&pos, &adj)) in gs_idx.iter().zip(scratch.iter()).enumerate() {
+        cum += adj;
+        let r_cum = if zero_nr {
+            T::from_usize(i).unwrap() / m_t
+        } else {
+            cum / nr
+        };
+        let top_tmp = (T::from_usize(pos + 1).unwrap() - T::from_usize(i + 1).unwrap()) / denom;
+        let top = r_cum - top_tmp;
+        let bottom = if zero_nr {
+            top - (T::one() / m_t)
+        } else {
+            top - (adj / nr)
+        };
+        if i == 0 || top > max_p {
+            max_p = top;
+        }
+        if i == 0 || bottom < min_p {
+            min_p = bottom;
+        }
+    }
+
+    if max_p == -min_p {
+        T::zero()
+    } else if max_p > -min_p {
+        max_p
+    } else {
+        min_p
+    }
 }
 
 /// Calculate the ES and leading edge genes
@@ -382,7 +457,7 @@ where
     let mut r_adj = Vec::with_capacity(m);
     for &i in gs_idx {
         let idx = if one_indexed { i - 1 } else { i } as usize;
-        r_adj.push(stats[idx].abs().powf(gsea_param));
+        r_adj.push(abs_pow(stats[idx], gsea_param));
     }
     let nr: T = r_adj.iter().copied().fold(T::zero(), |acc, x| acc + x);
     let r_cum_sum: Vec<T> = if nr == T::zero() {
@@ -1263,18 +1338,35 @@ pub fn calculate_es<T: BixverseFloat>(stats: &[T], pathway: &[usize]) -> T {
     }
     let weight_hit = T::one() / nr;
     let weight_miss = T::one() / T::from_usize(no_genes - p_total).unwrap();
+
+    // The running sum only rises at hits and only falls across runs of
+    // misses, so the extrema sit at the hits and at the end of each miss run.
+    let mut sorted = pathway.to_vec();
+    sorted.sort_unstable();
+
     let mut running_sum = T::zero();
     let mut max_run_sum = T::zero();
     let mut min_run_sum = T::zero();
-    for (i, x) in stats.iter().enumerate() {
-        if pathway.contains(&i) {
-            running_sum += x.abs() * weight_hit
-        } else {
-            running_sum -= weight_miss
+    let mut next = 0usize;
+    let mut previous = None;
+    for &p in &sorted {
+        if p >= no_genes || previous == Some(p) {
+            continue;
         }
+        previous = Some(p);
+        if p > next {
+            running_sum -= weight_miss * T::from_usize(p - next).unwrap();
+            min_run_sum = running_sum.min(min_run_sum);
+        }
+        running_sum += stats[p].abs() * weight_hit;
         max_run_sum = running_sum.max(max_run_sum);
+        next = p + 1;
+    }
+    if next < no_genes {
+        running_sum -= weight_miss * T::from_usize(no_genes - next).unwrap();
         min_run_sum = running_sum.min(min_run_sum);
     }
+
     if max_run_sum > min_run_sum.abs() {
         max_run_sum
     } else {
@@ -1545,7 +1637,7 @@ where
 
         block_summit[cur_block] = cur_top.max(block_summit[cur_block]);
 
-        for (block, _) in (0..k2).collect::<std::vec::Vec<usize>>().iter().enumerate() {
+        for block in 0..k2 {
             let mut cur_summit = block_summit[block];
 
             let mut cur_dist =
@@ -1641,22 +1733,19 @@ pub fn create_perm_es_simple<T>(
 where
     T: BixverseFloat + Default,
 {
-    let shared_perm = create_random_gs_indices(iters, max_len, universe_length, seed, one_indexed);
-
     let chunk_size = std::cmp::max(1, iters / (rayon::current_num_threads() * 4));
 
-    let rand_es: Vec<Vec<T>> = shared_perm
+    let rand_es: Vec<Vec<T>> = (0..iters)
         .into_par_iter()
         .chunks(chunk_size)
         .flat_map(|chunk| {
-            let mut local_results = Vec::with_capacity(chunk.len());
-
-            for i in chunk {
-                let x = calc_gsea_stat_cumulative(stats, &i, gsea_param);
-                local_results.push(x)
-            }
-
-            local_results
+            chunk
+                .into_iter()
+                .map(|i| {
+                    let indices = random_gs_indices(i, max_len, universe_length, seed, one_indexed);
+                    calc_gsea_stat_cumulative(stats, &indices, gsea_param)
+                })
+                .collect::<Vec<_>>()
         })
         .collect();
 
@@ -1681,32 +1770,64 @@ pub fn calc_gsea_stats_wrapper<T: BixverseFloat>(
 ) -> GseaBatchResults<T> {
     let m = pathway_scores.len();
 
-    let mut le_es = vec![0; m];
-    let mut ge_es = vec![0; m];
-    let mut le_zero = vec![0; m];
-    let mut ge_zero = vec![0; m];
-    let mut le_zero_sum = vec![T::zero(); m];
-    let mut ge_zero_sum = vec![T::zero(); m];
+    type Counts<T> = (
+        Vec<usize>,
+        Vec<usize>,
+        Vec<usize>,
+        Vec<usize>,
+        Vec<T>,
+        Vec<T>,
+    );
 
-    for rand_es_i in shared_perm {
-        let rand_es_p = subvector(rand_es_i, pathway_sizes).unwrap();
+    let empty = || -> Counts<T> {
+        (
+            vec![0; m],
+            vec![0; m],
+            vec![0; m],
+            vec![0; m],
+            vec![T::zero(); m],
+            vec![T::zero(); m],
+        )
+    };
 
-        for i in 0..m {
-            if rand_es_p[i] <= pathway_scores[i] {
-                le_es[i] += 1;
-            } else {
-                ge_es[i] += 1;
+    let (le_es, ge_es, le_zero, ge_zero, le_zero_sum, ge_zero_sum) = shared_perm
+        .par_iter()
+        .fold(empty, |mut c, rand_es_i| {
+            for i in 0..m {
+                let size = pathway_sizes[i];
+                assert!(
+                    size > 0 && size <= rand_es_i.len(),
+                    "pathway size out of range of the permutation scores"
+                );
+                let rand_es = rand_es_i[size - 1];
+
+                if rand_es <= pathway_scores[i] {
+                    c.0[i] += 1;
+                } else {
+                    c.1[i] += 1;
+                }
+
+                if rand_es <= T::zero() {
+                    c.2[i] += 1;
+                    c.4[i] += rand_es;
+                } else {
+                    c.3[i] += 1;
+                    c.5[i] += rand_es;
+                }
             }
-
-            if rand_es_p[i] <= T::zero() {
-                le_zero[i] += 1;
-                le_zero_sum[i] += rand_es_p[i];
-            } else {
-                ge_zero[i] += 1;
-                ge_zero_sum[i] += rand_es_p[i];
+            c
+        })
+        .reduce(empty, |mut a, b| {
+            for i in 0..m {
+                a.0[i] += b.0[i];
+                a.1[i] += b.1[i];
+                a.2[i] += b.2[i];
+                a.3[i] += b.3[i];
+                a.4[i] += b.4[i];
+                a.5[i] += b.5[i];
             }
-        }
-    }
+            a
+        });
 
     GseaBatchResults {
         le_es,

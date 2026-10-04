@@ -299,36 +299,53 @@ where
         tolerance: T,
         max_hops: Option<usize>,
     ) -> Vec<Vec<T>> {
-        let n = labels.len();
         let num_classes = labels[0].len();
-        let mut y = labels.to_vec();
-        let mut y_new = vec![vec![T::zero(); num_classes]; n];
+        if num_classes == 0 {
+            return labels.to_vec();
+        }
+        assert!(
+            labels.iter().all(|l| l.len() == num_classes),
+            "every label vector must have the same number of classes"
+        );
+
+        // Flat row-major n x num_classes buffers
+        let labels_flat: Vec<T> = labels.iter().flatten().copied().collect();
+        let mut y = labels_flat.clone();
+        let mut y_new = vec![T::zero(); y.len()];
 
         let distances = max_hops.map(|_| self.compute_hop_distances(mask));
 
         for _ in 0..iterations {
-            y_new.par_iter_mut().enumerate().for_each(|(node, y_dist)| {
-                if let (Some(h), Some(dists)) = (max_hops, &distances)
-                    && dists[node] > h
-                {
-                    return;
-                }
-
-                let start = self.offsets[node];
-                let end = self.offsets[node + 1];
-                y_dist.fill(T::zero());
-                for i in start..end {
-                    let neighbor_dist = &y[self.neighbours[i]];
-                    for c in 0..num_classes {
-                        y_dist[c] += self.weights[i] * neighbor_dist[c];
+            y_new
+                .par_chunks_mut(num_classes)
+                .enumerate()
+                .for_each(|(node, y_dist)| {
+                    if let (Some(h), Some(dists)) = (max_hops, &distances)
+                        && dists[node] > h
+                    {
+                        return;
                     }
-                }
-            });
+
+                    let start = self.offsets[node];
+                    let end = self.offsets[node + 1];
+                    y_dist.fill(T::zero());
+                    for (&nb, &w) in self.neighbours[start..end]
+                        .iter()
+                        .zip(&self.weights[start..end])
+                    {
+                        let neighbor_dist = &y[nb * num_classes..(nb + 1) * num_classes];
+                        for (out, &v) in y_dist.iter_mut().zip(neighbor_dist) {
+                            *out += w * v;
+                        }
+                    }
+                });
 
             let max_change = y
-                .par_iter_mut()
+                .par_chunks_mut(num_classes)
+                .zip(y_new.par_chunks(num_classes))
+                .zip(labels_flat.par_chunks(num_classes))
                 .enumerate()
-                .map(|(i, y_dist)| {
+                .map(|(i, ((y_dist, new_row), label_row))| {
                     if let (Some(h), Some(dists)) = (max_hops, &distances)
                         && dists[i] > h
                     {
@@ -337,15 +354,17 @@ where
 
                     let mut max_diff = T::zero();
                     if mask[i] {
-                        for c in 0..num_classes {
-                            max_diff = max_diff.max((y_new[i][c] - y_dist[c]).abs());
-                            y_dist[c] = y_new[i][c];
+                        for (old, &new_val) in y_dist.iter_mut().zip(new_row) {
+                            max_diff = max_diff.max((new_val - *old).abs());
+                            *old = new_val;
                         }
                     } else {
-                        for c in 0..num_classes {
-                            let new_val = alpha * labels[i][c] + (T::one() - alpha) * y_new[i][c];
-                            max_diff = max_diff.max((new_val - y_dist[c]).abs());
-                            y_dist[c] = new_val;
+                        for ((old, &propagated), &label) in
+                            y_dist.iter_mut().zip(new_row).zip(label_row)
+                        {
+                            let new_val = alpha * label + (T::one() - alpha) * propagated;
+                            max_diff = max_diff.max((new_val - *old).abs());
+                            *old = new_val;
                         }
                     }
                     max_diff
@@ -357,7 +376,7 @@ where
             }
         }
 
-        y
+        y.chunks(num_classes).map(|row| row.to_vec()).collect()
     }
 
     /// Internal helper to generate the CSR representation

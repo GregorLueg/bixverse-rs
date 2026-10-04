@@ -10,12 +10,12 @@ use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::time::Instant;
 
-use crate::core::math::pca_svd::{compute_pc_scores, randomised_svd};
 use crate::graph::community_detections::*;
 use crate::graph::graph_structures::*;
 use crate::prelude::*;
 use crate::single_cell::sc_analysis::fast_clusters::*;
 use crate::single_cell::sc_processing::knn::generate_knn_with_dist;
+use crate::single_cell::sc_processing::pca::{PcaSolver, solve_dense_pca};
 use crate::single_cell::sc_processing::utils_doublets::*;
 use crate::single_cell::sc_utils::{cxds::*, logistic_gbm::*, utils_tree::*};
 use crate::utils::vec_utils::min_max_scale;
@@ -55,8 +55,8 @@ pub struct ScDblFinderParams {
     // -- PCA --
     /// Number of principal components.
     pub no_pcs: usize,
-    /// Whether to use randomised SVD.
-    pub random_svd: bool,
+    /// Which PCA solver to use, see [PcaSolver].
+    pub svd_solver: PcaSolver,
 
     // -- Clustering --
     /// Resolution for Louvain clustering.
@@ -123,7 +123,7 @@ impl Default for ScDblFinderParams {
             target_size: None,
             n_genes: 1352,
             no_pcs: 30,
-            random_svd: true,
+            svd_solver: PcaSolver::Covariance,
             doublet_ratio: 1.0,
             heterotypic_bias: 0.8,
             sim_params: ScDblSimParams::default(),
@@ -631,8 +631,8 @@ fn aggregate_origin_counts(origins: &[Option<(usize, usize)>]) -> FxHashMap<(usi
 /// PCA on the combined (observed + simulated) matrix.
 ///
 /// Densifies both observed and simulated data into a single matrix,
-/// computes column-wise mean/std, centres and scales, then runs
-/// truncated SVD. Returns PC scores for all cells.
+/// computes column-wise mean/std, centres and scales, then runs the PCA
+/// solver. Returns PC scores for all cells.
 ///
 /// This matches R's scDblFinder which runs PCA on `cbind(counts, ad)`.
 #[allow(clippy::too_many_arguments)]
@@ -647,6 +647,7 @@ pub fn pca_combined<S: SingleCellReading>(
     mean_center: bool,
     normalise_variance: bool,
     no_pcs: usize,
+    svd_solver: PcaSolver,
     seed: usize,
 ) -> Result<Mat<f32>, BixverseErrors> {
     let n_obs = cells_to_keep.len();
@@ -691,51 +692,29 @@ pub fn pca_combined<S: SingleCellReading>(
         }
     }
 
-    // Column means and stds
-    let mut means = vec![0.0f64; n_genes];
-    let mut vars = vec![0.0f64; n_genes];
+    // centre and scale each column in place
     let nf = n_total as f64;
-
-    for j in 0..n_genes {
-        let mut sum = 0.0f64;
-        for i in 0..n_total {
-            sum += *combined.get(i, j);
-        }
-        means[j] = sum / nf;
-    }
-
-    for j in 0..n_genes {
-        let mu = means[j];
-        let mut ss = 0.0f64;
-        for i in 0..n_total {
-            let d = *combined.get(i, j) - mu;
-            ss += d * d;
-        }
-        vars[j] = ss / (nf - 1.0);
-    }
-
-    // centre and scale in place
-    for j in 0..n_genes {
-        let mu = if mean_center { means[j] } else { 0.0 };
+    combined.par_col_iter_mut().for_each(|col| {
+        let mean = col.as_ref().iter().sum::<f64>() / nf;
+        let var = col
+            .as_ref()
+            .iter()
+            .map(|&x| (x - mean) * (x - mean))
+            .sum::<f64>()
+            / (nf - 1.0);
+        let mu = if mean_center { mean } else { 0.0 };
         let sd = if normalise_variance {
-            let s = vars[j].sqrt();
+            let s = var.sqrt();
             if s > 1e-10 { s } else { 1.0 }
         } else {
             1.0
         };
-        for i in 0..n_total {
-            let v = combined.get_mut(i, j);
-            *v = (*v - mu) / sd;
-        }
-    }
+        col.iter_mut().for_each(|v| *v = (*v - mu) / sd);
+    });
 
-    let svd_res = randomised_svd(combined.as_ref(), no_pcs, seed, None, None)?;
+    let (scores, _, _) = solve_dense_pca(combined.as_ref(), no_pcs, svd_solver, seed)?;
 
-    let scores = compute_pc_scores(&svd_res);
-
-    Ok(Mat::from_fn(scores.nrows(), scores.ncols(), |i, j| {
-        scores[(i, j)] as f32
-    }))
+    Ok(scores)
 }
 
 /// Compute default k values for multi-scale kNN doublet scoring.
@@ -1350,7 +1329,7 @@ impl<'a, S: SingleCellReading> ScDblFinder<'a, S> {
             self.params.mean_center,
             self.params.normalise_variance,
             self.params.no_pcs,
-            self.params.random_svd,
+            self.params.svd_solver,
             seed,
             verbose,
         )?;
@@ -1508,6 +1487,7 @@ impl<'a, S: SingleCellReading> ScDblFinder<'a, S> {
             self.params.mean_center,
             self.params.normalise_variance,
             self.params.no_pcs,
+            self.params.svd_solver,
             seed,
         )?;
 

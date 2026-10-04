@@ -14,7 +14,7 @@ use std::time::Instant;
 use crate::core::math::stats::{p_adjust_fdr, z_scores_to_pval};
 use crate::prelude::*;
 use crate::single_cell::sc_analysis::fast_ranking::{
-    GeneGroupStats, NO_GROUP, append_cell_chunks, csr_rank_sum_stats_two_groups, rank_csr_chunk_vec,
+    GeneGroupStats, NO_GROUP, append_cell_chunks, csr_rank_sum_stats_two_groups, rank_cell_into,
 };
 
 /////////
@@ -125,15 +125,30 @@ pub struct DgeAurocMultiRes {
 /// A tuple of `(average expression, proportion of cells expressing gene)`.
 /// The averages are `f64` so they match the gene-wise scans bit for bit.
 fn calculate_avg_exp_prop(cells: &[CsrCellChunk], num_genes: usize) -> (Vec<f64>, Vec<f32>) {
-    let mut sum_exp = vec![0.0f64; num_genes];
-    let mut count_exp = vec![0usize; num_genes];
-
-    for cell in cells {
-        for (&gene_idx, &norm_val) in cell.indices.iter().zip(cell.data_norm.iter()) {
-            sum_exp[gene_idx as usize] += norm_val.to_f32() as f64;
-            count_exp[gene_idx as usize] += 1;
-        }
-    }
+    let (sum_exp, count_exp) = cells
+        .par_iter()
+        .fold(
+            || (vec![0.0f64; num_genes], vec![0usize; num_genes]),
+            |(mut sum, mut count), cell| {
+                for (&gene_idx, &norm_val) in cell.indices.iter().zip(cell.data_norm.iter()) {
+                    sum[gene_idx as usize] += norm_val.to_f32() as f64;
+                    count[gene_idx as usize] += 1;
+                }
+                (sum, count)
+            },
+        )
+        .reduce(
+            || (vec![0.0f64; num_genes], vec![0usize; num_genes]),
+            |(mut sum_a, mut count_a), (sum_b, count_b)| {
+                for (a, b) in sum_a.iter_mut().zip(&sum_b) {
+                    *a += b;
+                }
+                for (a, b) in count_a.iter_mut().zip(&count_b) {
+                    *a += b;
+                }
+                (sum_a, count_a)
+            },
+        );
 
     let total_cells = cells.len() as f32;
     let avg_exp: Vec<f64> = sum_exp
@@ -1260,18 +1275,17 @@ pub fn calculate_auc_per_cell_mw(ranks: &[f32], gene_set: &[usize]) -> f32 {
 ///
 /// * `ranks` - The within cell ranked data, ascending midranks.
 /// * `gene_set` - Indices of the members of this gene set.
+/// * `out` - Reused buffer, cleared and refilled.
 ///
 /// ### Returns
 ///
-/// The set's descending ranks, sorted ascending (i.e. top-ranked gene first).
-fn descending_ranks_sorted(ranks: &[f32], gene_set: &[usize]) -> Vec<f32> {
+/// Nothing; `out` holds the set's descending ranks, sorted ascending (i.e.
+/// top-ranked gene first).
+fn descending_ranks_into(ranks: &[f32], gene_set: &[usize], out: &mut Vec<f32>) {
     let n_genes = ranks.len() as f32;
-    let mut out: Vec<f32> = gene_set
-        .iter()
-        .map(|&idx| n_genes + 1.0 - ranks[idx])
-        .collect();
+    out.clear();
+    out.extend(gene_set.iter().map(|&idx| n_genes + 1.0 - ranks[idx]));
     out.sort_unstable_by(|a, b| a.total_cmp(b));
-    out
 }
 
 /// Calculate the recovery-curve AUC for one cell (AUCell proper)
@@ -1306,15 +1320,35 @@ fn descending_ranks_sorted(ranks: &[f32], gene_set: &[usize]) -> Vec<f32> {
 ///
 /// Aibar, et al., Nat Methods, 2017
 pub fn calculate_auc_recovery(ranks: &[f32], gene_set: &[usize], max_rank: usize) -> f32 {
+    auc_recovery_with(ranks, gene_set, max_rank, &mut Vec::new())
+}
+
+/// [calculate_auc_recovery] with a caller-owned buffer
+///
+/// ### Params
+///
+/// * `ranks` - The within cell ranked data, ascending midranks.
+/// * `gene_set` - Indices of the members of this gene set.
+/// * `max_rank` - Rank cutoff, counted from the top of the ranking.
+/// * `hits` - Reused buffer
+///
+/// ### Returns
+///
+/// Recovery-curve AUC for this gene set.
+fn auc_recovery_with(
+    ranks: &[f32],
+    gene_set: &[usize],
+    max_rank: usize,
+    hits: &mut Vec<f32>,
+) -> f32 {
     if gene_set.is_empty() || max_rank == 0 {
         return 0.0;
     }
 
     let cutoff = max_rank as f32;
-    let mut hits: Vec<f32> = descending_ranks_sorted(ranks, gene_set)
-        .into_iter()
-        .filter(|&d| d < cutoff)
-        .collect();
+    descending_ranks_into(ranks, gene_set, hits);
+    // Sorted ascending, so the members below the cutoff form a prefix
+    hits.truncate(hits.partition_point(|&d| d < cutoff));
 
     if hits.is_empty() {
         return 0.0;
@@ -1354,11 +1388,26 @@ pub fn calculate_auc_recovery(ranks: &[f32], gene_set: &[usize], max_rank: usize
 ///
 /// Average precision for this gene set.
 pub fn calculate_ap_per_cell(ranks: &[f32], gene_set: &[usize]) -> f32 {
+    ap_with(ranks, gene_set, &mut Vec::new())
+}
+
+/// [calculate_ap_per_cell] with a caller-owned buffer
+///
+/// ### Params
+///
+/// * `ranks` - The within cell ranked data, ascending midranks.
+/// * `gene_set` - Indices of the members of this gene set.
+/// * `hits` - Reused buffer
+///
+/// ### Returns
+///
+/// Average precision for this gene set.
+fn ap_with(ranks: &[f32], gene_set: &[usize], hits: &mut Vec<f32>) -> f32 {
     if gene_set.is_empty() {
         return 0.0;
     }
 
-    let hits = descending_ranks_sorted(ranks, gene_set);
+    descending_ranks_into(ranks, gene_set, hits);
 
     let sum: f64 = hits
         .iter()
@@ -1440,6 +1489,54 @@ pub(crate) fn score_cell(
         .collect()
 }
 
+/// Rank and score every cell without materialising the dense rank matrix
+///
+/// Each cell is ranked into a per-worker buffer and scored against all gene
+/// sets sequentially, so parallelism is over cells only.
+///
+/// ### Params
+///
+/// * `cells` - The cell chunks
+/// * `gene_sets` - Slice of Vecs indicating the indices of the gene sets.
+/// * `auc_type` - Which statistic to compute.
+/// * `max_rank` - Resolved rank cutoff, only used by [AucType::Recovery].
+/// * `n_genes` - Total number of genes
+///
+/// ### Returns
+///
+/// One score per gene set for each cell.
+fn score_cells_fused(
+    cells: &[CsrCellChunk],
+    gene_sets: &[Vec<usize>],
+    auc_type: AucType,
+    max_rank: usize,
+    n_genes: usize,
+) -> Vec<Vec<f32>> {
+    cells
+        .par_iter()
+        .map_init(
+            || {
+                (
+                    Vec::<f32>::new(),
+                    Vec::<(u16, usize)>::new(),
+                    Vec::<f32>::new(),
+                )
+            },
+            |(ranks, sort_buf, hits), cell| {
+                rank_cell_into(&cell.indices, &cell.data_norm, n_genes, ranks, sort_buf);
+                gene_sets
+                    .iter()
+                    .map(|gene_set| match auc_type {
+                        AucType::Recovery => auc_recovery_with(ranks, gene_set, max_rank, hits),
+                        AucType::MannWhitney => calculate_auc_per_cell_mw(ranks, gene_set),
+                        AucType::AveragePrecision => ap_with(ranks, gene_set, hits),
+                    })
+                    .collect()
+            },
+        )
+        .collect()
+}
+
 /// Calculate AUCell
 ///
 /// Scores every cell against every gene set. See [AucType] for what the three
@@ -1484,20 +1581,12 @@ pub fn calculate_aucell<S: SingleCellReading>(
 
     let max_rank = resolve_max_rank(params.max_rank, no_genes);
 
-    let start_ranking = Instant::now();
-    let ranks = rank_csr_chunk_vec(cell_chunks, no_genes, true);
-    let end_ranking = start_ranking.elapsed();
-
-    if verbosity.normal_verbosity() {
-        println!("Ranked gene expression within cells {:.2?}", end_ranking);
-    }
-
     let start_auc = Instant::now();
+    let per_cell = score_cells_fused(&cell_chunks, gene_sets, params.auc_type, max_rank, no_genes);
+    drop(cell_chunks);
     let mut all_results: Vec<Vec<f32>> = vec![Vec::with_capacity(total_cells); gene_sets.len()];
 
-    for cell_ranks in ranks {
-        let aucs = score_cell(&cell_ranks, gene_sets, params.auc_type, max_rank);
-
+    for aucs in per_cell {
         for (gene_set_idx, auc) in aucs.into_iter().enumerate() {
             all_results[gene_set_idx].push(auc);
         }
@@ -1510,7 +1599,7 @@ pub fn calculate_aucell<S: SingleCellReading>(
     let end_auc = start_auc.elapsed();
 
     if verbosity.normal_verbosity() {
-        println!("Calulated AUCs {:.2?}", end_auc);
+        println!("Ranked within cells and calculated AUCs {:.2?}", end_auc);
     }
 
     Ok(all_results)
@@ -1561,11 +1650,10 @@ pub fn calculate_aucell_streaming<S: SingleCellReading>(
         let start_chunk = Instant::now();
 
         let cell_chunks = reader.read_cells_parallel(cell_indices_chunk)?;
-        let ranks = rank_csr_chunk_vec(cell_chunks, no_genes, true);
+        let per_cell =
+            score_cells_fused(&cell_chunks, gene_sets, params.auc_type, max_rank, no_genes);
 
-        for cell_ranks in ranks {
-            let aucs = score_cell(&cell_ranks, gene_sets, params.auc_type, max_rank);
-
+        for aucs in per_cell {
             for (gene_set_idx, auc) in aucs.into_iter().enumerate() {
                 all_results[gene_set_idx].push(auc);
             }

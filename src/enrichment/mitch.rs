@@ -55,6 +55,41 @@ pub struct MitchResult<'a, T> {
     pub mysd: T,
 }
 
+/////////////////
+// MitchTotals //
+/////////////////
+
+/// Quantities of the ranked matrix that do not depend on the pathway
+///
+/// ### Fields
+///
+/// * `overall_mean` - Column means of the ranked matrix
+/// * `sscp_total` - Total sums of squares and cross products
+#[derive(Clone, Debug)]
+pub struct MitchTotals<T: BixverseFloat> {
+    overall_mean: Vec<T>,
+    sscp_total: Mat<T>,
+}
+
+impl<T: BixverseFloat> MitchTotals<T> {
+    /// Compute the pathway-independent quantities once per ranked matrix
+    ///
+    /// ### Params
+    ///
+    /// * `x` - The pre-ranked matrix.
+    ///
+    /// ### Returns
+    ///
+    /// The cached totals, to reuse across all pathways of this matrix.
+    pub fn new(x: MatRef<T>) -> Self {
+        let x_centered = scale_matrix_col(&x.as_ref(), false);
+        Self {
+            overall_mean: col_means(x),
+            sscp_total: x_centered.transpose() * &x_centered,
+        }
+    }
+}
+
 ///////////////
 // Functions //
 ///////////////
@@ -71,6 +106,28 @@ pub struct MitchResult<'a, T> {
 ///
 /// Returns the MANOVA results for this pathway.
 pub fn manova_mitch<T: BixverseFloat>(x: MatRef<T>, group1_indices: &[usize]) -> ManovaResult<T> {
+    manova_mitch_cached(x, &MitchTotals::new(x), group1_indices)
+}
+
+/// Calculate the MANOVA results for a given pathway against cached totals
+///
+/// Same result as [`manova_mitch`], without recomputing the totals per pathway.
+///
+/// ### Params
+///
+/// * `x` - The pre-ranked matrix.
+/// * `totals` - Totals computed from the same `x` via [`MitchTotals::new`].
+/// * `group1_indices` - The row index positions for which genes belong to the
+///   pathway.
+///
+/// ### Return
+///
+/// Returns the MANOVA results for this pathway.
+pub fn manova_mitch_cached<T: BixverseFloat>(
+    x: MatRef<T>,
+    totals: &MitchTotals<T>,
+    group1_indices: &[usize],
+) -> ManovaResult<T> {
     let (n, p) = x.shape();
 
     assert!(
@@ -105,15 +162,12 @@ pub fn manova_mitch<T: BixverseFloat>(x: MatRef<T>, group1_indices: &[usize]) ->
 
     let mean_0 = col_means(x0.as_ref());
     let mean_1 = col_means(x1.as_ref());
-    let mean_overall = col_means(x);
-
-    let x_centered = scale_matrix_col(&x.as_ref(), false);
     let x0_centered = scale_matrix_col(&x0.as_ref(), false);
     let x1_centered = scale_matrix_col(&x1.as_ref(), false);
 
     let sscp_within =
         x0_centered.transpose() * &x0_centered + x1_centered.transpose() * &x1_centered;
-    let sscp_total = x_centered.transpose() * &x_centered;
+    let sscp_total = totals.sscp_total.clone();
     let sscp_between = &sscp_total - &sscp_within;
 
     ManovaResult {
@@ -125,7 +179,7 @@ pub fn manova_mitch<T: BixverseFloat>(x: MatRef<T>, group1_indices: &[usize]) ->
         df_total: n - 1,
         n_vars: p,
         group_means: vec![mean_0, mean_1],
-        overall_mean: mean_overall,
+        overall_mean: totals.overall_mean.clone(),
     }
 }
 
@@ -189,8 +243,41 @@ pub fn process_mitch_pathway<'a, T>(
 where
     T: BixverseFloat + std::iter::Sum,
 {
+    process_mitch_pathway_cached(
+        ranked_mat,
+        &MitchTotals::new(ranked_mat),
+        pathway_name,
+        pathway_indices,
+    )
+}
+
+/// Process a given pathway against cached totals
+///
+/// Same result as [`process_mitch_pathway`]; build `totals` once with
+/// [`MitchTotals::new`] and reuse it across all pathways of the same matrix.
+///
+/// ### Params
+///
+/// * `ranked_mat` - The ranked matrix
+/// * `totals` - Totals computed from `ranked_mat`
+/// * `pathway_name` - Name of the pathway/gene set that is being tested.
+/// * `pathway_indices` - Index positions which genes (rows) belong to this given
+///   pathway
+///
+/// ### Returns
+///
+/// A `MitchResult` structure with the results for this pathway.
+pub fn process_mitch_pathway_cached<'a, T>(
+    ranked_mat: MatRef<T>,
+    totals: &MitchTotals<T>,
+    pathway_name: &'a str,
+    pathway_indices: &[usize],
+) -> MitchResult<'a, T>
+where
+    T: BixverseFloat + std::iter::Sum,
+{
     let nrow = T::from_usize(ranked_mat.nrows()).unwrap();
-    let manova_res: ManovaResult<T> = manova_mitch(ranked_mat, pathway_indices);
+    let manova_res: ManovaResult<T> = manova_mitch_cached(ranked_mat, totals, pathway_indices);
     let sum_manova: ManovaSummary<T> = ManovaSummary::from_manova_res(&manova_res);
     let sum_anova = summary_aov(&manova_res);
 

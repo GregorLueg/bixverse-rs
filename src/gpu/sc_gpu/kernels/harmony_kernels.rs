@@ -1,10 +1,9 @@
 //! GPU kernels for Harmony v2 (single-covariate, arrowhead path).
 //!
 //! Layout convention: every K-per-cell matrix (`dist`, `scale_dist`, `R`) is
-//! stored `[N, K]` row-major on the GPU, transposed relative to the CPU's
-//! `[K, N]`. Each per-cell kernel then reads K contiguous values, and
-//! `R * z_cos` is expressed as a `dense_gemm` with the left operand
-//! transposed (storage `[N, K]` read as logical `[K, N]`).
+//! stored `[N, K]` row-major, the same cell-major layout as the CPU core, so
+//! each per-cell kernel reads K contiguous values. Cells are sorted by batch
+//! level, so every per-level reduction is a set of contiguous runs.
 
 #![allow(missing_docs)]
 
@@ -12,63 +11,34 @@ use cubecl::prelude::*;
 use cubecl_utils_rs::prelude::*;
 
 use crate::errors::BixverseErrors;
+use crate::gpu::linalg::cholesky_gpu::dense_gemm;
 use crate::gpu::*;
 
 /////////////
 // Kernels //
 /////////////
 
-// TODO: check if SharedMemory would be more performant ... ?
-
-/// Cosine distances between centroids and cells: `dist[n, k] = 2 * (1 - dot)`.
+/// In-place cosine distance from a cosine similarity: `x = 2 * (1 - x)`.
 ///
-/// Both `centroids` and `data_cos` must be cosine-normalised, so the dot
-/// product is the cosine similarity. One workgroup per cell; threads stride
-/// over the K clusters. `data_cos[n, :]` is reread from global per cluster
-/// (contiguous, L1-cached) rather than staged in shared memory.
+/// Epilogue of [`launch_cosine_distances`], whose GEMM writes the dot products
+/// of unit-norm rows into the output buffer.
 ///
 /// ### Params
 ///
-/// * `centroids` - Centroids `[k, dim]` row-major, cosine-normalised
-/// * `data_cos` - Cells `[n, dim]` row-major, cosine-normalised
-/// * `dist` - Output `[n, k]` row-major
-/// * `n` - Cell count
-/// * `k` - Cluster count
-/// * `dim` - Embedding dimension (comptime)
-/// * `wg_size` - Workgroup size (comptime)
+/// * `x` - Similarities `[len]`, overwritten with distances
+/// * `len` - Number of elements
 ///
 /// ### Grid mapping
 ///
-/// * `CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X` -> cell index
-/// * `UNIT_POS_X` -> stride offset over clusters
+/// * `(CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * CUBE_DIM_X + UNIT_POS_X` ->
+///   element index
 #[cube(launch_unchecked)]
-fn cosine_distances<F: Float>(
-    centroids: &Tensor<F>,
-    data_cos: &Tensor<F>,
-    dist: &mut Tensor<F>,
-    n: u32,
-    k: u32,
-    #[comptime] dim: usize,
-    #[comptime] wg_size: u32,
-) {
-    let cell = CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X;
-    if cell >= n {
+fn similarity_to_cosine_distance<F: Float>(x: &mut Tensor<F>, len: u32) {
+    let idx = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * CUBE_DIM_X + UNIT_POS_X;
+    if idx >= len {
         terminate!();
     }
-
-    let z_base = cell as usize * dim;
-
-    let mut cluster = UNIT_POS_X;
-    while cluster < k {
-        let y_base = cluster as usize * dim;
-        let mut dot = F::new(0.0_f32);
-        for e in 0..dim {
-            dot += data_cos[z_base + e] * centroids[y_base + e];
-        }
-        dist[cell as usize * k as usize + cluster as usize] =
-            F::new(2.0_f32) * (F::new(1.0_f32) - dot);
-        cluster += wg_size;
-    }
+    x[idx as usize] = F::new(2.0_f32) * (F::new(1.0_f32) - x[idx as usize]);
 }
 
 /// In-place row L2-normalisation: each row scaled to unit norm, or zeroed if
@@ -223,70 +193,158 @@ fn scale_exp_normalise<F: Float>(
     }
 }
 
-/// Observed counts via segmented sum of R's rows grouped by level:
-/// `O[b, :] = sum_{cells at level b} R[cell, :]`.
+/// Per-run column sums of R: `partial[run, :] = sum_{cells of run} R[cell, :]`.
 ///
-/// One workgroup per level; thread `tx` owns clusters `tx, tx + wg, ...` and
-/// sums each over the level's segment. Mirrors `segmented_centroid_update` but
-/// accumulates a plain sum (not a mean) and writes zeros for empty levels
-/// rather than skipping them, matching the CPU `O[k,b]` semantics. Per-segment
-/// accumulation is naive serial, as in the centroid update; the CSR route is
-/// chosen for the large-B regime, so segments are short.
-///
-/// Expected counts E are not materialised: every consumer derives
-/// `E[k,b] = r_sum[k] * pr_b[b]` on the fly from `r_sum` (a `dense_column_sum`
-/// of R) and the uploaded `pr_b`.
+/// Cells are stored sorted by level, and each run is a contiguous range of at
+/// most `HARMONY_RUN_CELLS` cells of one level, so the reads are plain strided
+/// rows with no index gather. One workgroup per run; thread `tx` owns
+/// clusters `tx, tx + wg, ...`, so a warp reads consecutive addresses of each
+/// row. [`fn@reduce_runs`] folds the partials into the per-level O.
 ///
 /// ### Params
 ///
-/// * `r` - Soft assignments `[n, k]` row-major (R)
-/// * `all_indices` - Cell indices in CSR order `[n]` from
-///   `build_csr_gpu_privatised` with level labels
-/// * `offsets` - Exclusive prefix sums `[b + 1]`; level `l` occupies
-///   `all_indices[offsets[l]..offsets[l + 1]]`
-/// * `o` - Output observed counts `[b, k]` row-major, written in place
-/// * `b` - Number of levels
-/// * `k` - Number of clusters (feature dim, comptime)
+/// * `r` - Soft assignments `[n, k]` row-major, cells sorted by level
+/// * `run_bounds` - Cell offsets `[n_runs + 1]`; run `j` is
+///   `run_bounds[j]..run_bounds[j + 1]`
+/// * `partial` - Output `[n_runs, k]` row-major
+/// * `n_runs` - Number of runs
+/// * `k` - Cluster count (comptime)
+/// * `wg_size` - Workgroup size (comptime)
 ///
 /// ### Grid mapping
 ///
-/// * `CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X` -> level index
-/// * `UNIT_POS_X` -> cluster stride offset within the level's O row
+/// * `CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X` -> run index
+/// * `UNIT_POS_X` -> cluster stride offset
 #[cube(launch_unchecked)]
-fn segmented_sum<F: Float>(
+fn run_sums<F: Float>(
     r: &Tensor<F>,
-    all_indices: &Tensor<u32>,
-    offsets: &Tensor<u32>,
-    o: &mut Tensor<F>,
-    b: u32,
+    run_bounds: &Tensor<u32>,
+    partial: &mut Tensor<F>,
+    n_runs: u32,
     #[comptime] k: usize,
+    #[comptime] wg_size: u32,
 ) {
-    let level = CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X;
-    if level >= b {
+    let run = CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X;
+    if run >= n_runs {
         terminate!();
     }
+    let start = run_bounds[run as usize] as usize;
+    let end = run_bounds[(run + 1u32) as usize] as usize;
 
-    let tx = UNIT_POS_X as usize;
-    let wg = WORKGROUP_32 as usize;
-
-    let seg_start = offsets[level as usize];
-    let seg_end = offsets[(level + 1u32) as usize];
-    let count = seg_end - seg_start;
-
-    let o_base = level as usize * k;
-
-    let mut e = tx;
-    while e < k {
+    let mut kk = UNIT_POS_X as usize;
+    while kk < k {
         let mut acc = F::new(0.0_f32);
-        let mut p = 0u32;
-        while p < count {
-            let global = all_indices[(seg_start + p) as usize];
-            acc += r[global as usize * k + e];
-            p += 1u32;
+        let mut c = start;
+        while c < end {
+            acc += r[c * k + kk];
+            c += 1;
         }
-        o[o_base + e] = acc;
-        e += wg;
+        partial[run as usize * k + kk] = acc;
+        kk += wg_size as usize;
     }
+}
+
+/// Per-run weighted sums for the ridge right-hand side:
+/// `partial[run, k, :] = sum_{cells of run} R[cell, k] * z[cell, :]`.
+///
+/// One workgroup per `(run, cluster)`; threads stride over the feature
+/// dimension. `R[cell, k]` is a broadcast read, `z[cell, :]` is coalesced
+/// across the threads. Runs are contiguous (cells sorted by level), so there
+/// is no index gather, and every workgroup does at most `HARMONY_RUN_CELLS`
+/// iterations however unbalanced the levels are.
+///
+/// ### Params
+///
+/// * `r` - Soft assignments `[n, k]` row-major, cells sorted by level
+/// * `z` - Original embedding `[n, d]` row-major, same order
+/// * `run_bounds` - Cell offsets `[n_runs + 1]`
+/// * `partial` - Output `[n_runs, k, d]` row-major
+/// * `n_runs` - Number of runs
+/// * `k` - Cluster count
+/// * `d` - Feature dimension (comptime)
+/// * `wg_size` - Workgroup size (comptime)
+///
+/// ### Grid mapping
+///
+/// * `CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X` -> `run * k + cluster`
+/// * `UNIT_POS_X` -> feature stride offset
+#[cube(launch_unchecked)]
+fn run_weighted_sums<F: Float>(
+    r: &Tensor<F>,
+    z: &Tensor<F>,
+    run_bounds: &Tensor<u32>,
+    partial: &mut Tensor<F>,
+    n_runs: u32,
+    k: u32,
+    #[comptime] d: usize,
+    #[comptime] wg_size: u32,
+) {
+    let wid = CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X;
+    if wid >= n_runs * k {
+        terminate!();
+    }
+    let run = wid / k;
+    let cluster = (wid % k) as usize;
+    let start = run_bounds[run as usize] as usize;
+    let end = run_bounds[(run + 1u32) as usize] as usize;
+    let ku = k as usize;
+
+    let mut f = UNIT_POS_X as usize;
+    while f < d {
+        let mut acc = F::new(0.0_f32);
+        let mut c = start;
+        while c < end {
+            acc += r[c * ku + cluster] * z[c * d + f];
+            c += 1;
+        }
+        partial[wid as usize * d + f] = acc;
+        f += wg_size as usize;
+    }
+}
+
+/// Fold per-run partials into per-level totals:
+/// `out[level, w] = sum_{runs of level} partial[run, w]`.
+///
+/// One thread per output element; each loops over its level's runs, of which
+/// there are few (a level of `m` cells has `ceil(m / HARMONY_RUN_CELLS)`).
+/// Empty levels have no runs and are written as zero.
+///
+/// ### Params
+///
+/// * `partial` - Per-run partials `[n_runs, width]` row-major
+/// * `level_runs` - Run offsets per level `[b + 1]`
+/// * `out` - Output `[b, width]` row-major
+/// * `b` - Number of levels
+/// * `width` - Row length of `partial` and `out`
+///
+/// ### Grid mapping
+///
+/// * `(CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * CUBE_DIM_X + UNIT_POS_X` ->
+///   flat output index
+#[cube(launch_unchecked)]
+fn reduce_runs<F: Float>(
+    partial: &Tensor<F>,
+    level_runs: &Tensor<u32>,
+    out: &mut Tensor<F>,
+    b: u32,
+    width: u32,
+) {
+    let idx = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * CUBE_DIM_X + UNIT_POS_X;
+    if idx >= b * width {
+        terminate!();
+    }
+    let level = idx / width;
+    let w = (idx % width) as usize;
+    let first = level_runs[level as usize];
+    let last = level_runs[(level + 1u32) as usize];
+
+    let mut acc = F::new(0.0_f32);
+    let mut run = first;
+    while run < last {
+        acc += partial[run as usize * width as usize + w];
+        run += 1u32;
+    }
+    out[idx as usize] = acc;
 }
 
 /// Per-workgroup partial sums of the Harmony v2 objective (single covariate).
@@ -427,7 +485,8 @@ fn objective_partials<F: Float>(
 ///
 /// ### Params
 ///
-/// * `scale_dist` - Column-normalised base assignments `[n, k]`, fixed per round
+/// * `scale_dist` - Column-normalised base assignments `[n, k]`, fixed per
+///   round
 /// * `o` - Observed counts `[b, k]` from the previous sweep
 /// * `r_sum` - Per-cluster totals `[k]` from the previous sweep
 /// * `theta` - Per-level theta for the single covariate `[b]`
@@ -542,89 +601,24 @@ fn jacobi_r_update<F: Float>(
     }
 }
 
-/// Weighted segmented sum for the ridge `phi_z`: `S[b, k, :] = sum_{cells at
-/// level b} R[cell, k] * z[cell, :]`.
-///
-/// One workgroup per `(level, cluster)` pair; threads stride over the feature
-/// dimension `d`. Output `S` is `[b * k, d]` row-major, indexed by
-/// `(level * k + cluster) * d + feat`. `R[cell, k]` is read once per cell and
-/// broadcast across the feature threads (L1); `z[cell, :]` reads are
-/// coalesced across `feat`.
-///
-/// ### Params
-///
-/// * `r` - Soft assignments `[n, k]` row-major
-/// * `z` - Original (uncorrected) data `[n, d]` row-major
-/// * `all_indices` - Cell indices in CSR order `[n]` from
-///   `build_csr_gpu_privatised`
-/// * `offsets` - Exclusive prefix sums `[b + 1]`
-/// * `s` - Output `[b * k, d]` row-major
-/// * `b` - Number of levels
-/// * `k` - Cluster count
-/// * `d` - Feature dimension (comptime)
-///
-/// ### Grid mapping
-///
-/// * `CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X` -> `level * k + cluster`
-/// * `UNIT_POS_X` -> feature stride offset
-#[cube(launch_unchecked)]
-fn weighted_segmented_sum<F: Float>(
-    r: &Tensor<F>,
-    z: &Tensor<F>,
-    all_indices: &Tensor<u32>,
-    offsets: &Tensor<u32>,
-    s: &mut Tensor<F>,
-    b: u32,
-    k: u32,
-    #[comptime] d: usize,
-) {
-    let wid = CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X;
-    if wid >= b * k {
-        terminate!();
-    }
-
-    let level = wid / k;
-    let cluster = wid % k;
-
-    let seg_start = offsets[level as usize];
-    let seg_end = offsets[(level + 1u32) as usize];
-    let count = seg_end - seg_start;
-
-    let s_base = wid as usize * d;
-
-    let mut feat = UNIT_POS_X as usize;
-    let wg = WORKGROUP_128 as usize;
-    while feat < d {
-        let mut acc = F::new(0.0_f32);
-        let mut p = 0u32;
-        while p < count {
-            let cell = all_indices[(seg_start + p) as usize] as usize;
-            acc += r[cell * k as usize + cluster as usize] * z[cell * d + feat];
-            p += 1u32;
-        }
-        s[s_base + feat] = acc;
-        feat += wg;
-    }
-}
-
 /// Ridge correction subtract: `z_corr[cell, :] = z[cell, :] - sum_k R[cell, k]
-/// * C[k, level, :]`.
+/// * C[level, k, :]`.
 ///
 /// One workgroup per cell; threads stride over the feature dimension `d`. `C`
-/// is the per-`(cluster, level)` correction `[k, b, d]` row-major (intercept
-/// already excluded; pruned entries are zero). The intercept is never
-/// subtracted because it is not stored in `C`.
+/// is the per-`(level, cluster)` correction `[b, k, d]` row-major, the layout
+/// `harmony_core::solve_ridge` produces (intercept excluded; pruned entries
+/// are zero). The intercept is never subtracted because it is not stored in
+/// `C`.
 ///
 /// ### Params
 ///
 /// * `z` - Original data `[n, d]` row-major
 /// * `r` - Soft assignments `[n, k]` row-major
-/// * `c` - Correction tensor `[k, b, d]` row-major
+/// * `c` - Correction tensor `[b, k, d]` row-major
 /// * `cell_to_level` - Level index per cell `[n]`
 /// * `z_corr` - Output corrected data `[n, d]` row-major
 /// * `n` - Cell count
 /// * `k` - Cluster count
-/// * `b` - Number of levels
 /// * `d` - Feature dimension (comptime)
 ///
 /// ### Grid mapping
@@ -641,7 +635,6 @@ fn ridge_subtract<F: Float>(
     z_corr: &mut Tensor<F>,
     n: u32,
     k: u32,
-    b: u32,
     #[comptime] d: usize,
 ) {
     let cell = CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X;
@@ -652,8 +645,7 @@ fn ridge_subtract<F: Float>(
     let level = cell_to_level[cell as usize] as usize;
     let z_base = cell as usize * d;
     let r_base = cell as usize * k as usize;
-    let c_level_off = level * d;
-    let bd = b as usize * d;
+    let c_base = level * k as usize * d;
 
     let mut feat = UNIT_POS_X as usize;
     let wg = WORKGROUP_128 as usize;
@@ -662,7 +654,7 @@ fn ridge_subtract<F: Float>(
         let mut cluster = 0u32;
         while cluster < k {
             let r_val = r[r_base + cluster as usize];
-            acc -= r_val * c[cluster as usize * bd + c_level_off + feat];
+            acc -= r_val * c[c_base + cluster as usize * d + feat];
             cluster += 1u32;
         }
         z_corr[z_base + feat] = acc;
@@ -674,7 +666,11 @@ fn ridge_subtract<F: Float>(
 // Launchers //
 ///////////////
 
-/// Dispatch `cosine_distances`. One workgroup per cell.
+/// Cosine distances between centroids and cells, `dist[n, k] = 2 * (1 - z_n .
+/// y_k)`, as one library GEMM (`z_cos [n, dim] x Y^T`) and an elementwise
+/// epilogue. Short reduction, large output: the regime the cubek matmul is
+/// good at, unlike a per-cell kernel whose threads each stream a centroid row.
+/// Pinned to `f32` like the rest of GPU Harmony.
 ///
 /// ### Params
 ///
@@ -688,36 +684,40 @@ fn ridge_subtract<F: Float>(
 ///
 /// ### Returns
 ///
-/// `Ok(())`; `dist` is written in place. `CubeclUtils` if the grid is over the
-/// device's cube-count limit.
-pub fn launch_cosine_distances<R, F>(
-    centroids: &GpuTensor<R, F>,
-    data_cos: &GpuTensor<R, F>,
-    dist: &GpuTensor<R, F>,
+/// `Ok(())`; `dist` is written in place. `GpuMatmul` if the GEMM dispatch
+/// fails, `CubeclUtils` if the epilogue grid is over the device limit.
+pub fn launch_cosine_distances<R: Runtime>(
+    centroids: &GpuTensor<R, f32>,
+    data_cos: &GpuTensor<R, f32>,
+    dist: &GpuTensor<R, f32>,
     n: usize,
     k: usize,
     dim: usize,
     client: &ComputeClient<R>,
-) -> Result<(), BixverseErrors>
-where
-    R: Runtime,
-    F: Float + cubecl::CubeElement,
-{
-    let limits = GpuLimits::from_client(client);
-    let (gx, gy) = grid_2d(n as u32, &limits)?;
+) -> Result<(), BixverseErrors> {
+    dense_gemm::<R, f32>(
+        data_cos.handle(),
+        [n, dim],
+        false,
+        centroids.handle(),
+        [dim, k],
+        true, // storage [k, dim] read as logical [dim, k]
+        dist.handle(),
+        [n, k],
+        None,
+        client,
+    )?;
 
+    let limits = GpuLimits::from_client(client);
+    let len = n * k;
+    let (gx, gy) = grid_2d(len.div_ceil(WORKGROUP_256 as usize) as u32, &limits)?;
     unsafe {
-        cosine_distances::launch_unchecked::<F, R>(
+        similarity_to_cosine_distance::launch_unchecked::<f32, R>(
             client,
             CubeCount::Static(gx, gy, 1),
-            CubeDim::new_1d(WORKGROUP_128),
-            centroids.clone().into_tensor_arg(),
-            data_cos.clone().into_tensor_arg(),
+            CubeDim::new_1d(WORKGROUP_256),
             dist.clone().into_tensor_arg(),
-            n as u32,
-            k as u32,
-            dim,
-            WORKGROUP_128,
+            len as u32,
         );
     }
 
@@ -811,30 +811,26 @@ where
     Ok(())
 }
 
-/// Dispatch `segmented_sum`. One workgroup per level. The level-CSR
-/// (`all_indices`, `offsets`) is built once via `build_csr_gpu_privatised`
-/// with `cell_to_level` as labels and `b` as the cluster count.
+/// Dispatch [`fn@run_sums`]. One workgroup per run.
 ///
 /// ### Params
 ///
-/// * `r` - Assignment matrix `[n, k]` row-major
-/// * `all_indices` - Cell indices in level-CSR order `[n]`
-/// * `offsets` - Exclusive prefix sums `[b + 1]`
-/// * `o` - Output observed counts `[b, k]` row-major
-/// * `b` - Number of levels
+/// * `r` - Assignment matrix `[n, k]` row-major, cells sorted by level
+/// * `run_bounds` - Cell offsets `[n_runs + 1]`
+/// * `partial` - Output `[n_runs, k]` row-major
+/// * `n_runs` - Number of runs
 /// * `k` - Cluster count
 /// * `client` - CubeCL compute client
 ///
 /// ### Returns
 ///
-/// `Ok(())`; `o` is written in place, zeros for empty levels. `CubeclUtils` if
-/// the grid is over the device's cube-count limit.
-pub fn launch_segmented_sum<R, F>(
+/// `Ok(())`; `partial` is written in place. `CubeclUtils` if the grid is over
+/// the device's cube-count limit.
+pub fn launch_run_sums<R, F>(
     r: &GpuTensor<R, F>,
-    all_indices: &GpuTensor<R, u32>,
-    offsets: &GpuTensor<R, u32>,
-    o: &GpuTensor<R, F>,
-    b: usize,
+    run_bounds: &GpuTensor<R, u32>,
+    partial: &GpuTensor<R, F>,
+    n_runs: usize,
     k: usize,
     client: &ComputeClient<R>,
 ) -> Result<(), BixverseErrors>
@@ -843,19 +839,120 @@ where
     F: Float + cubecl::CubeElement,
 {
     let limits = GpuLimits::from_client(client);
-    let (gx, gy) = grid_2d(b as u32, &limits)?;
+    let (gx, gy) = grid_2d(n_runs as u32, &limits)?;
 
     unsafe {
-        segmented_sum::launch_unchecked::<F, R>(
+        run_sums::launch_unchecked::<F, R>(
             client,
             CubeCount::Static(gx, gy, 1),
-            CubeDim::new_1d(WORKGROUP_32),
+            CubeDim::new_1d(WORKGROUP_128),
             r.clone().into_tensor_arg(),
-            all_indices.clone().into_tensor_arg(),
-            offsets.clone().into_tensor_arg(),
-            o.clone().into_tensor_arg(),
-            b as u32,
+            run_bounds.clone().into_tensor_arg(),
+            partial.clone().into_tensor_arg(),
+            n_runs as u32,
             k,
+            WORKGROUP_128,
+        );
+    }
+
+    Ok(())
+}
+
+/// Dispatch [`fn@run_weighted_sums`]. One workgroup per `(run, cluster)`.
+///
+/// ### Params
+///
+/// * `r` - Assignment matrix `[n, k]` row-major, cells sorted by level
+/// * `z` - Embedding `[n, d]` row-major, same order
+/// * `run_bounds` - Cell offsets `[n_runs + 1]`
+/// * `partial` - Output `[n_runs, k, d]` row-major
+/// * `n_runs` - Number of runs
+/// * `k` - Cluster count
+/// * `d` - Embedding dimension
+/// * `client` - CubeCL compute client
+///
+/// ### Returns
+///
+/// `Ok(())`; `partial` is written in place. `CubeclUtils` if the grid is over
+/// the device's cube-count limit.
+#[allow(clippy::too_many_arguments)]
+pub fn launch_run_weighted_sums<R, F>(
+    r: &GpuTensor<R, F>,
+    z: &GpuTensor<R, F>,
+    run_bounds: &GpuTensor<R, u32>,
+    partial: &GpuTensor<R, F>,
+    n_runs: usize,
+    k: usize,
+    d: usize,
+    client: &ComputeClient<R>,
+) -> Result<(), BixverseErrors>
+where
+    R: Runtime,
+    F: Float + cubecl::CubeElement,
+{
+    let limits = GpuLimits::from_client(client);
+    let (gx, gy) = grid_2d((n_runs * k) as u32, &limits)?;
+
+    unsafe {
+        run_weighted_sums::launch_unchecked::<F, R>(
+            client,
+            CubeCount::Static(gx, gy, 1),
+            CubeDim::new_1d(WORKGROUP_64),
+            r.clone().into_tensor_arg(),
+            z.clone().into_tensor_arg(),
+            run_bounds.clone().into_tensor_arg(),
+            partial.clone().into_tensor_arg(),
+            n_runs as u32,
+            k as u32,
+            d,
+            WORKGROUP_64,
+        );
+    }
+
+    Ok(())
+}
+
+/// Dispatch [`fn@reduce_runs`]. One thread per output element.
+///
+/// ### Params
+///
+/// * `partial` - Per-run partials `[n_runs, width]` row-major
+/// * `level_runs` - Run offsets per level `[b + 1]`
+/// * `out` - Output `[b, width]` row-major
+/// * `b` - Number of levels
+/// * `width` - Row length
+/// * `client` - CubeCL compute client
+///
+/// ### Returns
+///
+/// `Ok(())`; `out` is written in place. `CubeclUtils` if the grid is over the
+/// device's cube-count limit.
+pub fn launch_reduce_runs<R, F>(
+    partial: &GpuTensor<R, F>,
+    level_runs: &GpuTensor<R, u32>,
+    out: &GpuTensor<R, F>,
+    b: usize,
+    width: usize,
+    client: &ComputeClient<R>,
+) -> Result<(), BixverseErrors>
+where
+    R: Runtime,
+    F: Float + cubecl::CubeElement,
+{
+    let limits = GpuLimits::from_client(client);
+    let cubes = (b * width).div_ceil(WORKGROUP_256 as usize);
+    let (gx, gy) = grid_2d(cubes as u32, &limits)?;
+
+    unsafe {
+        reduce_runs::launch_unchecked::<F, R>(
+            client,
+            CubeCount::Static(gx, gy, 1),
+            CubeDim::new_1d(WORKGROUP_256),
+            partial.clone().into_tensor_arg(),
+            level_runs.clone().into_tensor_arg(),
+            out.clone().into_tensor_arg(),
+            b as u32,
+            width as u32,
         );
     }
 
@@ -984,75 +1081,17 @@ where
     Ok(())
 }
 
-/// Dispatch `weighted_segmented_sum`. One workgroup per `(level, cluster)`
-/// pair; `s` must have length `b * k * d`.
-///
-/// ### Params
-///
-/// * `r` - Assignment matrix `[n, k]` row-major
-/// * `z` - Embedding `[n, d]` row-major
-/// * `all_indices` - Cell indices in level-CSR order `[n]`
-/// * `offsets` - Exclusive prefix sums `[b + 1]`
-/// * `s` - Output weighted sums `[b, k, d]` row-major
-/// * `b` - Number of levels
-/// * `k` - Cluster count
-/// * `d` - Embedding dimension
-/// * `client` - CubeCL compute client
-///
-/// ### Returns
-///
-/// `Ok(())`; `s` is written in place. `CubeclUtils` if the grid is over the
-/// device's cube-count limit.
-#[allow(clippy::too_many_arguments)]
-pub fn launch_weighted_segmented_sum<R, F>(
-    r: &GpuTensor<R, F>,
-    z: &GpuTensor<R, F>,
-    all_indices: &GpuTensor<R, u32>,
-    offsets: &GpuTensor<R, u32>,
-    s: &GpuTensor<R, F>,
-    b: usize,
-    k: usize,
-    d: usize,
-    client: &ComputeClient<R>,
-) -> Result<(), BixverseErrors>
-where
-    R: Runtime,
-    F: Float + cubecl::CubeElement,
-{
-    let limits = GpuLimits::from_client(client);
-    let (gx, gy) = grid_2d((b * k) as u32, &limits)?;
-
-    unsafe {
-        weighted_segmented_sum::launch_unchecked::<F, R>(
-            client,
-            CubeCount::Static(gx, gy, 1),
-            CubeDim::new_1d(WORKGROUP_128),
-            r.clone().into_tensor_arg(),
-            z.clone().into_tensor_arg(),
-            all_indices.clone().into_tensor_arg(),
-            offsets.clone().into_tensor_arg(),
-            s.clone().into_tensor_arg(),
-            b as u32,
-            k as u32,
-            d,
-        );
-    }
-
-    Ok(())
-}
-
 /// Dispatch `ridge_subtract`. One workgroup per cell.
 ///
 /// ### Params
 ///
 /// * `z` - Embedding `[n, d]` row-major
 /// * `r` - Assignment matrix `[n, k]` row-major
-/// * `c` - Per-`(cluster, level)` corrections `[k, b, d]` row-major
+/// * `c` - Per-`(level, cluster)` corrections `[b, k, d]` row-major
 /// * `cell_to_level` - Level index per cell `[n]`
 /// * `z_corr` - Output corrected embedding `[n, d]` row-major
 /// * `n` - Cell count
 /// * `k` - Cluster count
-/// * `b` - Number of levels
 /// * `d` - Embedding dimension
 /// * `client` - CubeCL compute client
 ///
@@ -1069,7 +1108,6 @@ pub fn launch_ridge_subtract<R, F>(
     z_corr: &GpuTensor<R, F>,
     n: usize,
     k: usize,
-    b: usize,
     d: usize,
     client: &ComputeClient<R>,
 ) -> Result<(), BixverseErrors>
@@ -1092,7 +1130,6 @@ where
             z_corr.clone().into_tensor_arg(),
             n as u32,
             k as u32,
-            b as u32,
             d,
         );
     }
@@ -1171,23 +1208,6 @@ mod tests_harmony_kernels {
         out
     }
 
-    fn cpu_segmented_sum(
-        r: &[f32],
-        cell_to_level: &[u32],
-        n: usize,
-        k: usize,
-        b: usize,
-    ) -> Vec<f32> {
-        let mut o = vec![0.0f32; b * k];
-        for cell in 0..n {
-            let level = cell_to_level[cell] as usize;
-            for cluster in 0..k {
-                o[level * k + cluster] += r[cell * k + cluster];
-            }
-        }
-        o
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn cpu_jacobi_r_update(
         scale_dist: &[f32],
@@ -1225,28 +1245,6 @@ mod tests_harmony_kernels {
         out
     }
 
-    fn cpu_weighted_segmented_sum(
-        r: &[f32],
-        z: &[f32],
-        cell_to_level: &[u32],
-        n: usize,
-        k: usize,
-        b: usize,
-        d: usize,
-    ) -> Vec<f32> {
-        let mut s = vec![0.0f32; b * k * d];
-        for cell in 0..n {
-            let level = cell_to_level[cell] as usize;
-            for cluster in 0..k {
-                let r_val = r[cell * k + cluster];
-                for feat in 0..d {
-                    s[(level * k + cluster) * d + feat] += r_val * z[cell * d + feat];
-                }
-            }
-        }
-        s
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn cpu_ridge_subtract(
         z: &[f32],
@@ -1255,7 +1253,6 @@ mod tests_harmony_kernels {
         cell_to_level: &[u32],
         n: usize,
         k: usize,
-        b: usize,
         d: usize,
     ) -> Vec<f32> {
         let mut out = vec![0.0f32; n * d];
@@ -1265,7 +1262,7 @@ mod tests_harmony_kernels {
                 let mut acc = z[cell * d + feat];
                 for cluster in 0..k {
                     let r_val = r[cell * k + cluster];
-                    acc -= r_val * c[cluster * b * d + level * d + feat];
+                    acc -= r_val * c[(level * k + cluster) * d + feat];
                 }
                 out[cell * d + feat] = acc;
             }
@@ -1274,21 +1271,6 @@ mod tests_harmony_kernels {
     }
 
     // Build the level CSR by hand on the host, sorted by level for determinism.
-    fn cpu_build_level_csr(cell_to_level: &[u32], n: usize, b: usize) -> (Vec<u32>, Vec<u32>) {
-        let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); b];
-        for cell in 0..n {
-            buckets[cell_to_level[cell] as usize].push(cell as u32);
-        }
-        let mut offsets = vec![0u32; b + 1];
-        for level in 0..b {
-            offsets[level + 1] = offsets[level] + buckets[level].len() as u32;
-        }
-        let mut all_indices = Vec::with_capacity(n);
-        for bucket in buckets {
-            all_indices.extend(bucket);
-        }
-        (all_indices, offsets)
-    }
 
     /// Cosine distance kernel against the host, on pre-normalised rows.
     #[test]
@@ -1404,52 +1386,6 @@ mod tests_harmony_kernels {
         }
     }
 
-    /// An empty batch level must be written as zeros, not left as it was.
-    #[test]
-    fn test_segmented_sum_with_empty_level() {
-        let Some(device) = try_device() else { return };
-        let client = WgpuRuntime::client(&device);
-
-        let (n, k, b) = (10, 4, 3);
-        // Levels: 0 has 4 cells, 1 is empty, 2 has 6 cells
-        let cell_to_level: Vec<u32> = vec![0, 2, 0, 2, 0, 2, 0, 2, 2, 2];
-        let r: Vec<f32> = (0..n * k)
-            .map(|i| ((i * 7 + 1) % 11) as f32 * 0.1 + 0.01)
-            .collect();
-
-        let r_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&r, vec![n, k], &client).unwrap();
-
-        let (cpu_idx, cpu_off) = cpu_build_level_csr(&cell_to_level, n, b);
-        let all_indices_gpu =
-            GpuTensor::<WgpuRuntime, u32>::from_slice(&cpu_idx, vec![n], &client).unwrap();
-        let offsets_gpu =
-            GpuTensor::<WgpuRuntime, u32>::from_slice(&cpu_off, vec![b + 1], &client).unwrap();
-
-        let o_gpu = GpuTensor::<WgpuRuntime, f32>::empty(vec![b, k], &client).unwrap();
-        launch_segmented_sum(
-            &r_gpu,
-            &all_indices_gpu,
-            &offsets_gpu,
-            &o_gpu,
-            b,
-            k,
-            &client,
-        )
-        .unwrap();
-
-        let got = o_gpu.read(&client).unwrap();
-        let want = cpu_segmented_sum(&r, &cell_to_level, n, k, b);
-
-        for i in 0..b * k {
-            assert_relative_eq!(got[i], want[i], epsilon = 1e-5);
-        }
-
-        // Empty level 1: all zeros
-        for cluster in 0..k {
-            assert_eq!(got[k + cluster], 0.0);
-        }
-    }
-
     /// Diversity-penalised R update against the host; rows still sum to 1.
     #[test]
     fn test_jacobi_r_update_matches_cpu() {
@@ -1544,41 +1480,7 @@ mod tests_harmony_kernels {
         }
     }
 
-    /// R-weighted reduction building S, where the `[b, k, d]` indexing bites.
-    #[test]
-    fn test_weighted_segmented_sum_matches_cpu() {
-        let Some(device) = try_device() else { return };
-        let client = WgpuRuntime::client(&device);
-
-        let (n, k, b, d) = (10, 3, 3, 5);
-        let cell_to_level: Vec<u32> = vec![0, 2, 0, 1, 2, 1, 0, 2, 2, 1];
-        let r: Vec<f32> = (0..n * k)
-            .map(|i| ((i * 7 + 1) % 11) as f32 * 0.1 + 0.05)
-            .collect();
-        let z: Vec<f32> = (0..n * d).map(|i| (i as f32) * 0.13 - 1.0).collect();
-
-        let r_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&r, vec![n, k], &client).unwrap();
-        let z_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&z, vec![n, d], &client).unwrap();
-
-        let (cpu_idx, cpu_off) = cpu_build_level_csr(&cell_to_level, n, b);
-        let idx_gpu =
-            GpuTensor::<WgpuRuntime, u32>::from_slice(&cpu_idx, vec![n], &client).unwrap();
-        let off_gpu =
-            GpuTensor::<WgpuRuntime, u32>::from_slice(&cpu_off, vec![b + 1], &client).unwrap();
-
-        let s_gpu = GpuTensor::<WgpuRuntime, f32>::empty(vec![b * k * d], &client).unwrap();
-        launch_weighted_segmented_sum(&r_gpu, &z_gpu, &idx_gpu, &off_gpu, &s_gpu, b, k, d, &client)
-            .unwrap();
-
-        let got = s_gpu.read(&client).unwrap();
-        let want = cpu_weighted_segmented_sum(&r, &z, &cell_to_level, n, k, b, d);
-
-        for i in 0..b * k * d {
-            assert_relative_eq!(got[i], want[i], epsilon = 1e-4);
-        }
-    }
-
-    /// Correction subtraction on the host, pinning C's `[k, b, d]` stride.
+    /// Correction subtraction on the host, pinning C's `[b, k, d]` stride.
     #[test]
     fn test_ridge_subtract_matches_cpu() {
         let Some(device) = try_device() else { return };
@@ -1610,17 +1512,115 @@ mod tests_harmony_kernels {
             &z_corr_gpu,
             n,
             k,
-            b,
             d,
             &client,
         )
         .unwrap();
 
         let got = z_corr_gpu.read(&client).unwrap();
-        let want = cpu_ridge_subtract(&z, &r, &c, &cell_to_level, n, k, b, d);
+        let want = cpu_ridge_subtract(&z, &r, &c, &cell_to_level, n, k, d);
 
         for i in 0..n * d {
             assert_relative_eq!(got[i], want[i], epsilon = 1e-5);
+        }
+    }
+
+    /// Runs and levels for cells sorted by level, splitting each level into
+    /// runs of at most `max_run` cells.
+    fn cpu_runs(level_sizes: &[usize], max_run: usize) -> (Vec<u32>, Vec<u32>) {
+        let (mut bounds, mut level_runs) = (vec![0u32], vec![0u32]);
+        let mut pos = 0usize;
+        for &m in level_sizes {
+            let mut left = m;
+            while left > 0 {
+                let take = left.min(max_run);
+                pos += take;
+                left -= take;
+                bounds.push(pos as u32);
+            }
+            level_runs.push((bounds.len() - 1) as u32);
+        }
+        (bounds, level_runs)
+    }
+
+    /// Per-level O from run partials, with an empty level and a level split
+    /// over several runs.
+    #[test]
+    fn test_run_sums_reduce_with_empty_and_split_levels() {
+        let Some(device) = try_device() else { return };
+        let client = WgpuRuntime::client(&device);
+
+        let level_sizes = [5usize, 0, 9];
+        let (n, k, b) = (14usize, 4usize, 3usize);
+        let (bounds, level_runs) = cpu_runs(&level_sizes, 4);
+        let n_runs = bounds.len() - 1;
+        let r: Vec<f32> = (0..n * k)
+            .map(|i| ((i * 7 + 1) % 11) as f32 * 0.1)
+            .collect();
+
+        let r_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&r, vec![n, k], &client).unwrap();
+        let b_gpu =
+            GpuTensor::<WgpuRuntime, u32>::from_slice(&bounds, vec![n_runs + 1], &client).unwrap();
+        let lr_gpu =
+            GpuTensor::<WgpuRuntime, u32>::from_slice(&level_runs, vec![b + 1], &client).unwrap();
+        let partial = GpuTensor::<WgpuRuntime, f32>::empty(vec![n_runs, k], &client).unwrap();
+        let o =
+            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![-1.0f32; b * k], vec![b, k], &client)
+                .unwrap();
+
+        launch_run_sums(&r_gpu, &b_gpu, &partial, n_runs, k, &client).unwrap();
+        launch_reduce_runs(&partial, &lr_gpu, &o, b, k, &client).unwrap();
+        let got = o.read(&client).unwrap();
+
+        let mut start = 0usize;
+        for (level, &m) in level_sizes.iter().enumerate() {
+            for kk in 0..k {
+                let want: f32 = (start..start + m).map(|c| r[c * k + kk]).sum();
+                assert_relative_eq!(got[level * k + kk], want, epsilon = 1e-5);
+            }
+            start += m;
+        }
+    }
+
+    /// Per-level weighted sums S from run partials, in the `[b, k, d]` layout.
+    #[test]
+    fn test_run_weighted_sums_reduce_matches_cpu() {
+        let Some(device) = try_device() else { return };
+        let client = WgpuRuntime::client(&device);
+
+        let level_sizes = [3usize, 7, 0, 2];
+        let (n, k, b, d) = (12usize, 3usize, 4usize, 5usize);
+        let (bounds, level_runs) = cpu_runs(&level_sizes, 3);
+        let n_runs = bounds.len() - 1;
+        let r: Vec<f32> = (0..n * k)
+            .map(|i| ((i * 7 + 1) % 11) as f32 * 0.1 + 0.05)
+            .collect();
+        let z: Vec<f32> = (0..n * d).map(|i| (i as f32) * 0.13 - 1.0).collect();
+
+        let r_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&r, vec![n, k], &client).unwrap();
+        let z_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&z, vec![n, d], &client).unwrap();
+        let b_gpu =
+            GpuTensor::<WgpuRuntime, u32>::from_slice(&bounds, vec![n_runs + 1], &client).unwrap();
+        let lr_gpu =
+            GpuTensor::<WgpuRuntime, u32>::from_slice(&level_runs, vec![b + 1], &client).unwrap();
+        let partial = GpuTensor::<WgpuRuntime, f32>::empty(vec![n_runs * k * d], &client).unwrap();
+        let s = GpuTensor::<WgpuRuntime, f32>::empty(vec![b * k * d], &client).unwrap();
+
+        launch_run_weighted_sums(&r_gpu, &z_gpu, &b_gpu, &partial, n_runs, k, d, &client).unwrap();
+        launch_reduce_runs(&partial, &lr_gpu, &s, b, k * d, &client).unwrap();
+        let got = s.read(&client).unwrap();
+
+        let mut start = 0usize;
+        for (level, &m) in level_sizes.iter().enumerate() {
+            for kk in 0..k {
+                for f in 0..d {
+                    let want: f32 = (start..start + m)
+                        .map(|c| r[c * k + kk] * z[c * d + f])
+                        .sum();
+                    assert_relative_eq!(got[(level * k + kk) * d + f], want, epsilon = 1e-4);
+                }
+            }
+            start += m;
         }
     }
 }

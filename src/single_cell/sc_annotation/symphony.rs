@@ -7,8 +7,8 @@
 //! depends only on the cached terms, not on the reference cells.
 
 use ann_search_rs::*;
-use faer::linalg::solvers::{DenseSolveCore, PartialPivLu};
-use faer::{Mat, MatRef};
+use faer::linalg::solvers::{PartialPivLu, Solve};
+use faer::{Accum, Mat, MatMut, MatRef, Par};
 use indexmap::IndexSet;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
@@ -20,8 +20,10 @@ use crate::single_cell::sc_batch_correction::harmony::{
     BatchInfo, HarmonyParams, HarmonyResult, compute_cosine_distances, create_batch_infos,
     harmony_with_state, initialise_r_from_dist,
 };
+use crate::single_cell::sc_batch_correction::harmony_core::to_row_major;
 use crate::single_cell::sc_batch_correction::harmony_v2::{HarmonyParamsV2, harmony_v2_with_state};
 use crate::single_cell::sc_processing::pca::{SingleCellPcaParams, pca_on_sc_sparse_stats};
+use crate::utils::gemm::gemm;
 
 ////////////
 // Consts //
@@ -29,6 +31,12 @@ use crate::single_cell::sc_processing::pca::{SingleCellPcaParams, pca_on_sc_spar
 
 /// Symphony default for z-score clipping.
 const SCALE_CLIP: f32 = 10.0;
+
+/// Cells per tile when forming the reference sums
+const REF_TILE_CELLS: usize = 4096;
+
+/// Cells per same-level run when applying the query correction
+const MOE_RUN_CELLS: usize = 1024;
 
 ////////////
 // Params //
@@ -181,15 +189,20 @@ fn build_scaled_query_matrix<S: SingleCellReading>(
         }
     }
 
-    // column-major flat buffer: slot s occupies out[s * n_q .. (s+1) * n_q].
-    let mut out = vec![0.0f32; n_hvgs * n_q];
-    out.par_chunks_exact_mut(n_q)
+    let mut out = Mat::<f32>::zeros(n_q, n_hvgs);
+    out.as_mut()
+        .par_col_chunks_mut(1)
         .zip(chunks_by_slot.par_iter())
         .enumerate()
-        .for_each(|(slot, (col, maybe_chunk))| {
+        .for_each(|(slot, (col_mat, maybe_chunk))| {
             let Some(chunk) = maybe_chunk else {
                 return; // absent HVG -> zero column
             };
+            let col = col_mat
+                .col_mut(0)
+                .try_as_col_major_mut()
+                .expect("owned Mat columns are contiguous")
+                .as_slice_mut();
             let mean = ref_means[slot];
             let sd = ref_sds[slot];
             let inv_sd = if sd > 1e-8 { 1.0 / sd } else { 0.0 };
@@ -202,8 +215,150 @@ fn build_scaled_query_matrix<S: SingleCellReading>(
             }
         });
 
-    // Column-major flat -> N_q x n_hvgs Mat.
-    Ok(Mat::<f32>::from_fn(n_q, n_hvgs, |i, j| out[j * n_q + i]))
+    Ok(out)
+}
+
+/// Per-group weighted sums of an embedding.
+///
+/// For each group of cells, `Nr[k] = sum r[k, c]` and `C[k, :] = sum r[k, c]
+/// z[c, :]`. Groups are cut into tiles of [`REF_TILE_CELLS`]; each tile is
+/// widened to f64 and multiplied with one sequential GEMM, so the sums
+/// accumulate in f64 and do not drift over many cells.
+///
+/// ### Params
+///
+/// * `r` - Soft assignments `[k, n]`, column-major
+/// * `z_rm` - Embedding `[n, d]`, row-major
+/// * `d` - Embedding dimension
+/// * `groups` - Cell indices per group
+///
+/// ### Returns
+///
+/// `(Nr [k], C [k, d])` per group, in f64
+fn grouped_weighted_sums(
+    r: MatRef<f32>,
+    z_rm: &[f32],
+    d: usize,
+    groups: &[&[usize]],
+) -> Vec<(Vec<f64>, Mat<f64>)> {
+    let k = r.nrows();
+    let items: Vec<(usize, &[usize])> = groups
+        .iter()
+        .enumerate()
+        .flat_map(|(g, cells)| cells.chunks(REF_TILE_CELLS).map(move |c| (g, c)))
+        .collect();
+
+    let partials: Vec<(usize, Vec<f64>, Mat<f64>)> = items
+        .par_iter()
+        .map_init(
+            || {
+                (
+                    vec![0.0f64; k * REF_TILE_CELLS],
+                    vec![0.0f64; d * REF_TILE_CELLS],
+                )
+            },
+            |(r_buf, z_buf), &(g, cells)| {
+                let m = cells.len();
+                let mut nr = vec![0.0f64; k];
+                for (j, &cell) in cells.iter().enumerate() {
+                    let col = &mut r_buf[j * k..(j + 1) * k];
+                    for (i, dst) in col.iter_mut().enumerate() {
+                        *dst = r[(i, cell)] as f64;
+                    }
+                    for (a, v) in nr.iter_mut().zip(col.iter()) {
+                        *a += v;
+                    }
+                    for (dst, &v) in z_buf[j * d..(j + 1) * d]
+                        .iter_mut()
+                        .zip(&z_rm[cell * d..(cell + 1) * d])
+                    {
+                        *dst = v as f64;
+                    }
+                }
+                let mut c = Mat::<f64>::zeros(k, d);
+                gemm(
+                    c.as_mut(),
+                    Accum::Replace,
+                    MatRef::from_column_major_slice(&r_buf[..k * m], k, m),
+                    MatRef::from_row_major_slice(&z_buf[..m * d], m, d),
+                    1.0,
+                    Par::Seq,
+                );
+                (g, nr, c)
+            },
+        )
+        .collect();
+
+    let mut out: Vec<(Vec<f64>, Mat<f64>)> = (0..groups.len())
+        .map(|_| (vec![0.0f64; k], Mat::<f64>::zeros(k, d)))
+        .collect();
+    for (g, nr, c) in partials {
+        for (a, v) in out[g].0.iter_mut().zip(&nr) {
+            *a += v;
+        }
+        out[g].1 += &c;
+    }
+    out
+}
+
+/// Cluster totals `Nr` and compression term `C = R Z` of a reference.
+///
+/// ### Params
+///
+/// * `r` - Soft assignments `[k, n]`
+/// * `z` - Corrected embedding `[n, d]`
+///
+/// ### Returns
+///
+/// `(Nr [k], C [k, d])`, stored as f32
+fn reference_sums(r: MatRef<f32>, z: MatRef<f32>) -> (Vec<f32>, Mat<f32>) {
+    let (k, n, d) = (r.nrows(), r.ncols(), z.ncols());
+    let z_rm = to_row_major(z);
+    let all: Vec<usize> = (0..n).collect();
+    let (nr, c) = grouped_weighted_sums(r, &z_rm, d, &[&all]).remove(0);
+    let nr = nr.iter().map(|&v| v as f32).collect();
+    let c = Mat::<f32>::from_fn(k, d, |i, j| c[(i, j)] as f32);
+    (nr, c)
+}
+
+/// Overlap counts between two variables: `P[(la, lb), k] = sum r[k, c]` over
+/// the cells at level `la` of `a` and `lb` of `b`.
+///
+/// ### Params
+///
+/// * `r` - Soft assignments `[k, n]`, column-major
+/// * `a` - First variable
+/// * `b` - Second variable
+///
+/// ### Returns
+///
+/// `P` as `[n_levels_a * n_levels_b, k]`, f64
+fn pair_overlaps_f64(r: MatRef<f32>, a: &BatchInfo, b: &BatchInfo) -> Vec<f64> {
+    let k = r.nrows();
+    let len = a.n_levels * b.n_levels * k;
+    let n = r.ncols();
+    (0..n)
+        .into_par_iter()
+        .with_min_len(REF_TILE_CELLS)
+        .fold(
+            || vec![0.0f64; len],
+            |mut acc, cell| {
+                let off = (a.cell_to_level[cell] * b.n_levels + b.cell_to_level[cell]) * k;
+                for (i, x) in acc[off..off + k].iter_mut().enumerate() {
+                    *x += r[(i, cell)] as f64;
+                }
+                acc
+            },
+        )
+        .reduce(
+            || vec![0.0f64; len],
+            |mut x, y| {
+                for (p, q) in x.iter_mut().zip(y) {
+                    *p += q;
+                }
+                x
+            },
+        )
 }
 
 /// Symphony MoE correction with cached reference compression terms.
@@ -243,7 +398,7 @@ fn moe_correct_query(
     assert_eq!(c.nrows(), k);
     assert_eq!(c.ncols(), d);
 
-    // Design column layout: intercept (col 0) + one-hot per variable.
+    // design columns: 0 = intercept, then one per (variable, level)
     let mut offsets = Vec::with_capacity(n_vars);
     let mut col = 1usize;
     for info in batch_infos {
@@ -252,75 +407,116 @@ fn moe_correct_query(
     }
     let p = col;
 
-    // Phase 1 (parallel over clusters): solve each cluster's regression.
+    // group `g` is design column `g`, so sums[col] are that level's sums
+    let z_rm = to_row_major(z_pca);
+    let all: Vec<usize> = (0..n_q).collect();
+    let mut groups: Vec<&[usize]> = vec![&all];
+    for info in batch_infos {
+        groups.extend(info.batch_indices.iter().map(|cells| cells.as_slice()));
+    }
+    let sums = grouped_weighted_sums(r, &z_rm, d, &groups);
+
+    let pairs: Vec<((usize, usize), Vec<f64>)> = (0..n_vars)
+        .flat_map(|a| ((a + 1)..n_vars).map(move |b| (a, b)))
+        .map(|(a, b)| {
+            (
+                (a, b),
+                pair_overlaps_f64(r, &batch_infos[a], &batch_infos[b]),
+            )
+        })
+        .collect();
+
     let weights: Vec<Mat<f32>> = (0..k)
         .into_par_iter()
         .map(|cluster| {
             let mut design_cov = Mat::<f64>::zeros(p, p);
             let mut phi_z = Mat::<f64>::zeros(p, d);
-            let mut active: Vec<usize> = Vec::with_capacity(1 + n_vars);
 
-            for cell in 0..n_q {
-                let r_val = r[(cluster, cell)] as f64;
-
-                active.clear();
-                active.push(0);
-                for var_idx in 0..n_vars {
-                    let level = batch_infos[var_idx].cell_to_level[cell];
-                    active.push(offsets[var_idx] + level);
-                }
-
-                for &ci in &active {
-                    for feat in 0..d {
-                        phi_z[(ci, feat)] += r_val * z_pca[(cell, feat)] as f64;
-                    }
-                }
-                for (i, &ci) in active.iter().enumerate() {
-                    for &cj in &active[i..] {
-                        design_cov[(ci, cj)] += r_val;
-                        if ci != cj {
-                            design_cov[(cj, ci)] += r_val;
-                        }
-                    }
-                }
-            }
-
-            // reference compression injections.
-            design_cov[(0, 0)] += nr[cluster] as f64;
+            design_cov[(0, 0)] = sums[0].0[cluster] + nr[cluster] as f64;
             for feat in 0..d {
-                phi_z[(0, feat)] += c[(cluster, feat)] as f64;
+                phi_z[(0, feat)] = sums[0].1[(cluster, feat)] + c[(cluster, feat)] as f64;
             }
 
-            // ridge: identity on batch terms, intercept unpenalised.
-            for i in 1..p {
-                design_cov[(i, i)] += lambda as f64;
+            for col in 1..p {
+                let o = sums[col].0[cluster];
+                design_cov[(0, col)] = o;
+                design_cov[(col, 0)] = o;
+                design_cov[(col, col)] = o + lambda as f64;
+                for feat in 0..d {
+                    phi_z[(col, feat)] = sums[col].1[(cluster, feat)];
+                }
+            }
+
+            for ((va, vb), p_ab) in &pairs {
+                let n_lb = batch_infos[*vb].n_levels;
+                for la in 0..batch_infos[*va].n_levels {
+                    for lb in 0..n_lb {
+                        let ov = p_ab[(la * n_lb + lb) * k + cluster];
+                        let (ca, cb) = (offsets[*va] + la, offsets[*vb] + lb);
+                        design_cov[(ca, cb)] += ov;
+                        design_cov[(cb, ca)] += ov;
+                    }
+                }
             }
 
             let lu: PartialPivLu<f64> = design_cov.partial_piv_lu();
-            let inv_cov = lu.inverse();
-            let w_f64 = &inv_cov * &phi_z;
+            let w_f64 = lu.solve(&phi_z);
             Mat::<f32>::from_fn(p, d, |i, j| w_f64[(i, j)] as f32)
         })
         .collect();
 
-    // Phase 2: subtract each cluster's batch correction.
-    let mut out = vec![0.0f32; n_q * d];
-    out.par_chunks_mut(d).enumerate().for_each(|(cell, row)| {
-        for feat in 0..d {
-            row[feat] = z_pca[(cell, feat)];
-        }
-        for cluster in 0..k {
-            let w = &weights[cluster];
-            let r_val = r[(cluster, cell)];
-            for var_idx in 0..n_vars {
-                let level = batch_infos[var_idx].cell_to_level[cell];
-                let c_idx = offsets[var_idx] + level;
-                for feat in 0..d {
-                    row[feat] -= r_val * w[(c_idx, feat)];
+    // z_corr = z - sum_v R^T W_v[level_v], one GEMM per run of same-level cells
+    let mut out = z_rm;
+    for (v, info) in batch_infos.iter().enumerate() {
+        let w_tables: Vec<Vec<f32>> = (0..info.n_levels)
+            .map(|level| {
+                let col = offsets[v] + level;
+                let mut tab = vec![0.0f32; k * d];
+                for (cluster, w) in weights.iter().enumerate() {
+                    for feat in 0..d {
+                        tab[cluster * d + feat] = w[(col, feat)];
+                    }
+                }
+                tab
+            })
+            .collect();
+
+        let runs: Vec<(usize, &[usize])> = info
+            .batch_indices
+            .iter()
+            .enumerate()
+            .flat_map(|(level, cells)| cells.chunks(MOE_RUN_CELLS).map(move |c| (level, c)))
+            .collect();
+
+        let deltas: Vec<(&[usize], Vec<f32>)> = runs
+            .par_iter()
+            .map_init(Vec::new, |r_buf: &mut Vec<f32>, &(level, cells)| {
+                let m = cells.len();
+                r_buf.clear();
+                for &cell in cells {
+                    r_buf.extend((0..k).map(|i| r[(i, cell)]));
+                }
+                let mut delta = vec![0.0f32; m * d];
+                gemm(
+                    MatMut::from_row_major_slice_mut(&mut delta, m, d),
+                    Accum::Replace,
+                    MatRef::from_column_major_slice(r_buf, k, m).transpose(),
+                    MatRef::from_row_major_slice(&w_tables[level], k, d),
+                    1.0,
+                    Par::Seq,
+                );
+                (cells, delta)
+            })
+            .collect();
+
+        for (cells, delta) in deltas {
+            for (&cell, dv) in cells.iter().zip(delta.chunks_exact(d)) {
+                for (x, y) in out[cell * d..(cell + 1) * d].iter_mut().zip(dv) {
+                    *x -= y;
                 }
             }
         }
-    });
+    }
 
     Mat::from_fn(n_q, d, |i, j| out[i * d + j])
 }
@@ -416,36 +612,9 @@ pub fn build_symphony_reference<S: SingleCellReading>(
     let r = harmony_result.r;
 
     let k = r.nrows();
-    let n = r.ncols();
     let d = z_corr.ncols();
 
-    // Nr = row sums of R; accumulate in f64 to guard against drift over
-    // many cells before storing back as f32.
-    let nr: Vec<f32> = (0..k)
-        .into_par_iter()
-        .map(|cluster| (0..n).map(|cell| r[(cluster, cell)] as f64).sum::<f64>() as f32)
-        .collect();
-
-    // C = R * Z_corr, K x d. Manual parallel matmul with f64 inner products:
-    // faer's f32 GEMM is not Kahan-summed, so the dot product over n cells
-    // drifts visibly at large n. Result stored back as f32.
-    let c: Mat<f32> = {
-        let r_ref = r.as_ref();
-        let z_ref = z_corr.as_ref();
-        let buf: Vec<f32> = (0..(k * d))
-            .into_par_iter()
-            .map(|idx| {
-                let i = idx / d;
-                let j = idx % d;
-                let mut acc = 0.0f64;
-                for cell in 0..n {
-                    acc += r_ref[(i, cell)] as f64 * z_ref[(cell, j)] as f64;
-                }
-                acc as f32
-            })
-            .collect();
-        Mat::<f32>::from_fn(k, d, |i, j| buf[i * d + j])
-    };
+    let (nr, c) = reference_sums(r.as_ref(), z_corr.as_ref());
     assert_eq!(c.nrows(), k);
     assert_eq!(c.ncols(), d);
 

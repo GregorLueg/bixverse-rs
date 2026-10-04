@@ -9,6 +9,8 @@ use crate::gpu::sc_gpu::bbknn_gpu::BbknnParamsGpu;
 #[cfg(feature = "single-cell")]
 use crate::gpu::sc_gpu::fast_clusters_gpu::FastLouvainParamsGpu;
 #[cfg(feature = "single-cell")]
+use crate::gpu::sc_gpu::fast_mnn_gpu::FastMnnParamsGpu;
+#[cfg(feature = "single-cell")]
 use crate::gpu::sc_gpu::harmony_gpu::HarmonyParamsV2Gpu;
 #[cfg(feature = "single-cell")]
 use crate::gpu::sc_gpu::knn_gpu::KnnParamsGpu;
@@ -234,11 +236,6 @@ impl HarmonyParamsV2Gpu {
             .get("use_dynamic_lambda")
             .and_then(|v| v.as_bool())
             .unwrap_or(defaults.use_dynamic_lambda);
-        let csr_cube_count = params_list
-            .get("csr_cube_count")
-            .and_then(|v| v.as_integer())
-            .map(|v| v as usize)
-            .unwrap_or(defaults.csr_cube_count);
 
         let kmeans_iters = params_list
             .get("k_means_iter")
@@ -278,7 +275,6 @@ impl HarmonyParamsV2Gpu {
             tau,
             batch_proportion_cutoff,
             use_dynamic_lambda,
-            csr_cube_count,
             kmeans_params,
         })
     }
@@ -420,6 +416,51 @@ impl BbknnParamsGpu {
     }
 }
 
+//////////////////////
+// FastMnnParamsGpu //
+//////////////////////
+
+#[cfg(feature = "single-cell")]
+impl FastMnnParamsGpu {
+    /// Generate [FastMnnParamsGpu] from an R list.
+    ///
+    /// Reads the same flattened list as `FastMnnParams::from_r_list`, minus
+    /// the PCA keys, with the nearest neighbour half going through
+    /// [`KnnParamsGpu::from_r_list`]. Missing keys fall back to
+    /// [`FastMnnParamsGpu::default()`].
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the fastMNN parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The [FastMnnParamsGpu] with all parameters set.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let knn_params = KnnParamsGpu::from_r_list(r_list.clone())?;
+        let defaults = Self::default();
+
+        let fastmnn_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+
+        let ndist = fastmnn_list
+            .get("ndist")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.ndist);
+
+        let cos_norm = fastmnn_list
+            .get("cos_norm")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.cos_norm);
+
+        Ok(Self {
+            ndist,
+            cos_norm,
+            knn_params,
+        })
+    }
+}
+
 ///////////////////////
 // ScrubletParamsGpu //
 ///////////////////////
@@ -428,7 +469,7 @@ impl BbknnParamsGpu {
 impl ScrubletParamsGpu {
     /// Generate [ScrubletParamsGpu] from an R list.
     ///
-    /// Field names mirror `ScrubletParams::from_r_list`, minus `random_svd`
+    /// Field names mirror `ScrubletParams::from_r_list`, minus `svd_solver`
     /// (the GPU SVD is always randomised), plus one key the CPU list has no
     /// need for: `knn_backend`.
     ///

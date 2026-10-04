@@ -17,6 +17,12 @@ use crate::prelude::*;
 /// Default number of genes to select for cxds scoring.
 pub const CXDS_NTOP: usize = 500;
 
+/// Cells decoded per block when fitting
+const CXDS_READ_BLOCK: usize = 50_000;
+
+/// Sentinel in the dense gene lookup for genes outside the selected set
+const CXDS_NO_GENE: u16 = u16::MAX;
+
 ///////////
 // Types //
 ///////////
@@ -30,6 +36,43 @@ type CellGeneSet = Vec<u16>;
 /////////////
 // Helpers //
 /////////////
+
+/// Sum of `pair_scores[i, j]` over all pairs `i < j` of a sorted gene set.
+///
+/// Four independent accumulators break the add dependency chain of the
+/// gathers.
+///
+/// ### Params
+///
+/// * `pair_scores` - Symmetric `[ntop, ntop]` score matrix, row-major
+/// * `ntop` - Row length
+/// * `expressed` - Sorted gene positions expressed in the cell
+///
+/// ### Returns
+///
+/// The summed pair score
+#[inline]
+fn pair_score_sum(pair_scores: &[f32], ntop: usize, expressed: &[u16]) -> f32 {
+    let mut total = 0.0f32;
+    for (a, &gi) in expressed.iter().enumerate() {
+        let i = gi as usize;
+        let row = &pair_scores[i * ntop..(i + 1) * ntop];
+        let rest = &expressed[a + 1..];
+        let mut acc = [0.0f32; 4];
+        let mut quads = rest.chunks_exact(4);
+        for q in &mut quads {
+            for (slot, &j) in acc.iter_mut().zip(q) {
+                *slot += row[j as usize];
+            }
+        }
+        let mut tail = 0.0f32;
+        for &j in quads.remainder() {
+            tail += row[j as usize];
+        }
+        total += (acc[0] + acc[1]) + (acc[2] + acc[3]) + tail;
+    }
+    total
+}
 
 /// Approximate the standard normal CDF.
 ///
@@ -147,19 +190,29 @@ impl CxdsModel {
         let mut gene_counts: FxHashMap<usize, u32> = FxHashMap::default();
         let mut cell_hvg_indices: Vec<Vec<usize>> = Vec::with_capacity(n_cells);
 
-        for &cell_idx in cells_to_keep {
-            let chunk = reader.read_cell(cell_idx)?;
-            let mut expressed_hvgs = Vec::new();
+        for block in cells_to_keep.chunks(CXDS_READ_BLOCK) {
+            let chunks = reader.read_cells_parallel(block)?;
+            let expressed: Vec<Vec<usize>> = chunks
+                .par_iter()
+                .map(|chunk| {
+                    chunk
+                        .indices
+                        .iter()
+                        .enumerate()
+                        .filter(|&(i, &g)| {
+                            hvg_set.contains(&(g as usize)) && chunk.data_raw.get(i) > 0
+                        })
+                        .map(|(_, &g)| g as usize)
+                        .collect()
+                })
+                .collect();
 
-            for (i, &gene_idx) in chunk.indices.iter().enumerate() {
-                let gi = gene_idx as usize;
-                if hvg_set.contains(&gi) && chunk.data_raw.get(i) > 0 {
+            for hvgs in expressed {
+                for &gi in &hvgs {
                     *gene_counts.entry(gi).or_insert(0) += 1;
-                    expressed_hvgs.push(gi);
                 }
+                cell_hvg_indices.push(hvgs);
             }
-
-            cell_hvg_indices.push(expressed_hvgs);
         }
 
         // gene selection: top ntop by binomial variance p*(1-p)
@@ -284,19 +337,7 @@ impl CxdsModel {
     pub fn score(&self, gene_sets: &[CellGeneSet]) -> Vec<f32> {
         gene_sets
             .par_iter()
-            .map(|expressed| {
-                let mut total = 0.0f32;
-                let ne = expressed.len();
-                for a in 0..ne {
-                    let i = expressed[a] as usize;
-                    let row = i * self.ntop;
-                    for b in (a + 1)..ne {
-                        let j = expressed[b] as usize;
-                        total += self.pair_scores[row + j];
-                    }
-                }
-                total
-            })
+            .map(|expressed| pair_score_sum(&self.pair_scores, self.ntop, expressed))
             .collect()
     }
 
@@ -323,6 +364,15 @@ impl CxdsModel {
         selected_genes_to_cxds_pos: &FxHashMap<usize, u16>,
         bin_thresh: u32,
     ) -> Vec<f32> {
+        let table_len = selected_genes_to_cxds_pos
+            .keys()
+            .max()
+            .map_or(0, |&m| m + 1);
+        let mut pos_table = vec![CXDS_NO_GENE; table_len];
+        for (&gene, &pos) in selected_genes_to_cxds_pos {
+            pos_table[gene] = pos;
+        }
+
         sim_chunks
             .par_iter()
             .map(|chunk| {
@@ -335,25 +385,18 @@ impl CxdsModel {
                     if raw < bin_thresh {
                         continue;
                     }
-                    let gene_pos = chunk.indices[i] as usize;
-                    if let Some(&cxds_pos) = selected_genes_to_cxds_pos.get(&gene_pos) {
+                    let cxds_pos = pos_table
+                        .get(chunk.indices[i] as usize)
+                        .copied()
+                        .unwrap_or(CXDS_NO_GENE);
+                    if cxds_pos != CXDS_NO_GENE {
                         expressed.push(cxds_pos);
                     }
                 }
                 expressed.sort_unstable();
 
                 // score through the pair matrix (same as score())
-                let mut total = 0.0f32;
-                let ne = expressed.len();
-                for a in 0..ne {
-                    let i = expressed[a] as usize;
-                    let row = i * self.ntop;
-                    for b in (a + 1)..ne {
-                        let j = expressed[b] as usize;
-                        total += self.pair_scores[row + j];
-                    }
-                }
-                total
+                pair_score_sum(&self.pair_scores, self.ntop, &expressed)
             })
             .collect()
     }

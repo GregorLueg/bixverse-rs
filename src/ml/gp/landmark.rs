@@ -45,7 +45,7 @@ use faer::linalg::triangular_solve::{
 use faer::{Accum, Mat, MatRef, Par, Side};
 use rayon::prelude::*;
 
-use crate::ml::gp::kernels::fill_matern52_cross_1d;
+use crate::ml::gp::kernels::{fill_matern52_cross_1d, fill_matern52_cross_1d_par};
 use crate::prelude::*;
 use crate::utils::faer_parallelism;
 
@@ -556,7 +556,7 @@ impl LandmarkGpFit {
         T: BixverseFloat,
     {
         let mut k_new = Mat::<f64>::zeros(x_new.len(), self.landmarks.len());
-        fill_matern52_cross_1d(k_new.as_mut(), x_new, &self.landmarks, self.length_scale);
+        fill_matern52_cross_1d_par(k_new.as_mut(), x_new, &self.landmarks, self.length_scale);
 
         self.apply_weights(k_new.as_ref())
     }

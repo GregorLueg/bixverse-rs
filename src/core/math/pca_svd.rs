@@ -10,6 +10,23 @@ use rayon::prelude::*;
 use super::*;
 use crate::prelude::*;
 
+////////////
+// Consts //
+////////////
+
+/// Column standard deviation below which [`sparse_covariance_svd`] treats a
+/// feature as constant. Its centred cross-products are pure rounding residue
+/// (about `n x^2 eps` for a constant `x`), and dividing that by `sd^2` would
+/// hand the eigenproblem a huge spurious variance. Matches the dense path's
+/// zero-variance cut-off.
+const COV_ZERO_SD: f64 = 1e-8;
+
+/// Rows per block when transposing between row-major scratch and `Mat`
+const TRANSPOSE_ROW_BLOCK: usize = 64;
+
+/// Columns written per task when filling a `Mat` from a row-major source
+const TRANSPOSE_COL_BLOCK: usize = 8;
+
 ////////////////
 // Structures //
 ////////////////
@@ -369,12 +386,19 @@ where
     let to_row_major = |x: MatRef<F>, scale: Option<&[f64]>| -> Vec<f64> {
         let k = x.ncols();
         let mut out = vec![0f64; x.nrows() * k];
-        out.par_chunks_mut(k).enumerate().for_each(|(j, row)| {
-            let d = scale.map(|s| s[j]).unwrap_or(1.0);
-            for c in 0..k {
-                row[c] = x[(j, c)].to_f64().unwrap() / d;
-            }
-        });
+        // Row blocks, feature outer: the reads walk contiguous column slices and
+        // the strided writes stay inside one cache-resident block.
+        out.par_chunks_mut(TRANSPOSE_ROW_BLOCK * k)
+            .enumerate()
+            .for_each(|(b, block)| {
+                let j0 = b * TRANSPOSE_ROW_BLOCK;
+                for c in 0..k {
+                    for r in 0..block.len() / k {
+                        let d = scale.map(|s| s[j0 + r]).unwrap_or(1.0);
+                        block[r * k + c] = x[(j0 + r, c)].to_f64().unwrap() / d;
+                    }
+                }
+            });
         out
     };
 
@@ -409,7 +433,7 @@ where
                 acc[c] -= mean_dots[c] + o_i * x_sums[c];
             }
         });
-        Mat::from_fn(n, k, |i, c| F::from_f64(y_rm[i * k + c]).unwrap())
+        mat_from_row_major(n, k, |i, c| F::from_f64(y_rm[i * k + c]).unwrap())
     };
 
     // y = D^-1 (A - o 1^T - 1 mu^T)^T x. One contiguous block of rows per
@@ -456,7 +480,7 @@ where
                 },
             );
 
-        Mat::from_fn(m, k, |j, c| {
+        mat_from_row_major(m, k, |j, c| {
             let mu_j = mu.as_ref().map(|v| v[j]).unwrap_or(0.0);
             let sd_j = sd.as_ref().map(|v| v[j]).unwrap_or(1.0);
             F::from_f64((y_rm[j * k + c] - mu_j * col_sums[c] - o_dot_x[c]) / sd_j).unwrap()
@@ -488,6 +512,39 @@ where
     let v = svd.V().to_owned();
 
     Ok(RandomSvdResults { u, s, v })
+}
+
+/// Build a column-major matrix from a function over `(row, column)`
+///
+/// Parallel over small column blocks with rows outer, so a row-major source is
+/// read one cache line at a time rather than once per column.
+///
+/// ### Params
+///
+/// * `n` - Number of rows
+/// * `k` - Number of columns
+/// * `f` - Entry at `(row, column)`
+///
+/// ### Returns
+///
+/// The `n x k` matrix.
+fn mat_from_row_major<F, G>(n: usize, k: usize, f: G) -> Mat<F>
+where
+    F: BixverseFloat,
+    G: Fn(usize, usize) -> F + Sync,
+{
+    let mut out = Mat::<F>::zeros(n, k);
+    out.par_col_chunks_mut(TRANSPOSE_COL_BLOCK)
+        .enumerate()
+        .for_each(|(b, mut block)| {
+            let c0 = b * TRANSPOSE_COL_BLOCK;
+            for i in 0..n {
+                for c in 0..block.ncols() {
+                    block[(i, c)] = f(i, c0 + c);
+                }
+            }
+        });
+    out
 }
 
 /// Orthonormalise the columns of a tall matrix
@@ -716,7 +773,11 @@ where
     //         + (1^T o)(1 c^T + c 1^T) + n c c^T, then scaled,
     // with s = A^T 1 and w = A^T o
     let gram_ref = &gram;
-    let cov = Mat::<f64>::from_fn(m, m, |a, b| {
+    let constant: Vec<bool> = sd.iter().map(|&s| s < COV_ZERO_SD).collect();
+    let cov_entry = |a: usize, b: usize| -> f64 {
+        if constant[a] || constant[b] {
+            return 0.0;
+        }
         let (ra, rb) = (relabel[a], relabel[b]);
         let ata = if ra == rb {
             gram_ref[ra * m + ra]
@@ -728,6 +789,12 @@ where
         let raw =
             ata - w[ra] - w[rb] - sa * cb - ca * sb + o_sq + o_sum * (ca + cb) + n_f * ca * cb;
         raw / (sd[a] * sd[b])
+    };
+    let mut cov = Mat::<f64>::zeros(m, m);
+    cov.par_col_iter_mut().enumerate().for_each(|(b, mut col)| {
+        for a in 0..m {
+            col[a] = cov_entry(a, b);
+        }
     });
     drop(gram);
 
@@ -741,7 +808,13 @@ where
     // V scaled by 1 / sd, row-major (m x rank) for the score pass
     let v_scaled: Vec<f64> = (0..m)
         .flat_map(|j| (0..rank).map(move |c| (j, c)))
-        .map(|(j, c)| eig_vecs[(j, c)] / sd[j])
+        .map(|(j, c)| {
+            if constant[j] {
+                0.0
+            } else {
+                eig_vecs[(j, c)] / sd[j]
+            }
+        })
         .collect();
     let shift_v: Vec<f64> = (0..rank)
         .map(|c| (0..m).map(|j| shift[j] * v_scaled[j * rank + c]).sum())
@@ -772,7 +845,7 @@ where
         })
         .collect();
     Ok(RandomSvdResults {
-        u: Mat::from_fn(n, rank, |i, c| F::from_f64(u_rm[i * rank + c]).unwrap()),
+        u: mat_from_row_major(n, rank, |i, c| F::from_f64(u_rm[i * rank + c]).unwrap()),
         v: Mat::from_fn(m, rank, |j, c| F::from_f64(eig_vecs[(j, c)]).unwrap()),
         s: s.iter().map(|&x| F::from_f64(x).unwrap()).collect(),
     })
@@ -939,5 +1012,70 @@ mod tests {
         let y_norm = (1.0_f64.powi(2) + 0.5_f64.powi(2)).sqrt(); // sqrt(1.25)
         let dot_v = (v_col[0] * 1.0 + v_col[2] * 0.5) / y_norm;
         assert!(dot_v.abs() > 0.999);
+    }
+
+    /// A constant non-zero feature contributes nothing, rather than its
+    /// centring residue blown up by a tiny standard deviation.
+    #[test]
+    fn test_sparse_covariance_svd_ignores_constant_feature() {
+        let (n, m) = (40, 6);
+        let constant = m - 1;
+        let dense = Mat::<f64>::from_fn(n, m, |i, j| {
+            if j == constant {
+                2.0
+            } else if (i * 7 + j * 3) % 4 == 0 {
+                ((i * 13 + j * 5) % 11) as f64 * 0.25 + 0.5
+            } else {
+                0.0
+            }
+        });
+
+        let (mut data, mut indices, mut indptr) = (Vec::new(), Vec::new(), vec![0u32]);
+        for j in 0..m {
+            for i in 0..n {
+                if dense[(i, j)] != 0.0 {
+                    data.push(dense[(i, j)]);
+                    indices.push(i as u32);
+                }
+            }
+            indptr.push(data.len() as u32);
+        }
+
+        let means: Vec<f64> = (0..m)
+            .map(|j| dense.col(j).iter().sum::<f64>() / n as f64)
+            .collect();
+        let sds: Vec<f64> = (0..m)
+            .map(|j| {
+                let ss: f64 = dense.col(j).iter().map(|&x| (x - means[j]).powi(2)).sum();
+                (ss / (n - 1) as f64).sqrt().max(f64::EPSILON)
+            })
+            .collect();
+
+        let scaled = Mat::<f64>::from_fn(n, m, |i, j| {
+            if j == constant {
+                0.0
+            } else {
+                (dense[(i, j)] - means[j]) / sds[j]
+            }
+        });
+        let reference = scaled.thin_svd().unwrap();
+
+        let csc =
+            CompressedSparseData2::<f64, f64>::new_csc(&data, &indices, &indptr, None, (n, m));
+        let rank = 3;
+        let res =
+            sparse_covariance_svd::<f64, f64>(csc, rank, false, Some(&means), Some(&sds), None)
+                .unwrap();
+
+        for c in 0..rank {
+            let expected = reference.S()[c];
+            assert!(res.s[c].is_finite());
+            assert!(
+                (res.s[c] - expected).abs() < 1e-8 * expected.max(1.0),
+                "s[{c}] = {} against {expected}",
+                res.s[c]
+            );
+            assert_eq!(res.v[(constant, c)], 0.0);
+        }
     }
 }

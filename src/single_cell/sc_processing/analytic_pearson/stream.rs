@@ -13,7 +13,6 @@
 //! Lause, Berens & Kobak, Genome Biology, 2021, 22:258
 
 use rayon::prelude::*;
-use rustc_hash::FxHashSet;
 use std::time::Instant;
 use thousands::Separable;
 
@@ -168,7 +167,13 @@ pub fn cell_totals_over_genes<S: SingleCellReading>(
 
     distinct_cell_set(cell_indices)?;
 
-    let retained: FxHashSet<u32> = genes.iter().map(|&g| g as u32).collect();
+    let n_genes = reader.get_header().total_genes;
+    let mut retained = vec![false; n_genes];
+    for &g in genes {
+        if let Some(slot) = retained.get_mut(g) {
+            *slot = true;
+        }
+    }
     let chunks = reader.read_cells_parallel(cell_indices)?;
 
     Ok(chunks
@@ -178,14 +183,14 @@ pub fn cell_totals_over_genes<S: SingleCellReading>(
                 .indices
                 .iter()
                 .zip(v)
-                .filter(|(g, _)| retained.contains(g))
+                .filter(|(g, _)| retained.get(**g as usize).copied().unwrap_or(false))
                 .map(|(_, &x)| x as f64)
                 .sum(),
             RawCounts::U32(v) => chunk
                 .indices
                 .iter()
                 .zip(v)
-                .filter(|(g, _)| retained.contains(g))
+                .filter(|(g, _)| retained.get(**g as usize).copied().unwrap_or(false))
                 .map(|(_, &x)| x as f64)
                 .sum(),
         })

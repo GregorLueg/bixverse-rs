@@ -314,32 +314,6 @@ impl<T: BixverseFloat> DgrdlObjectives<T> {
 // Helpers //
 /////////////
 
-/// Get the upper triangle indices as a pair for rapid distance calculations
-///
-/// Stores the indices of a 3 x 3 matrix for example in a pattern of
-/// `(0,1)`, `(0,2)`, `(0,3)`, `(1,2)`, `(1,3)`, `(2,3)` (assuming a linear
-/// matrix).
-///
-/// ### Params
-///
-/// * `pair_idx` - Linear index in compressed storage, i.e., `0 to n (n - 1) / 2 - 1)`
-/// * `n` - Shape of the original column
-///
-/// ### Returns
-///
-/// Tuple of `(i, j)`
-fn triangle_to_indices(linear_idx: usize, n: usize) -> (usize, usize) {
-    let mut idx = linear_idx;
-    let mut i = 0;
-
-    while idx >= n - i - 1 {
-        idx -= n - i - 1;
-        i += 1;
-    }
-
-    (i, i + 1 + idx)
-}
-
 /// Retrieve distance from compressed upper-triangle storage
 ///
 /// ### Params
@@ -495,12 +469,11 @@ fn sparse_projection<T: BixverseFloat>(x: &Mat<T>, sparsity: usize) -> Mat<T> {
     let (k, m) = x.shape();
     let mut result = Mat::zeros(k, m);
 
-    let columns: Vec<Vec<T>> = (0..m)
-        .into_par_iter()
-        .map(|j| {
-            let x_col = x.col(j);
-            let mut indexed_vals: Vec<(usize, T)> =
-                x_col.iter().enumerate().map(|(i, &val)| (i, val)).collect();
+    result.par_col_iter_mut().enumerate().for_each_init(
+        Vec::new,
+        |indexed_vals: &mut Vec<(usize, T)>, (j, mut out)| {
+            indexed_vals.clear();
+            indexed_vals.extend(x.col(j).iter().enumerate().map(|(i, &val)| (i, val)));
 
             let take_count = sparsity.min(k);
             if take_count < indexed_vals.len() {
@@ -508,19 +481,11 @@ fn sparse_projection<T: BixverseFloat>(x: &Mat<T>, sparsity: usize) -> Mat<T> {
                     .select_nth_unstable_by(take_count, |a, b| b.1.abs().total_cmp(&a.1.abs()));
             }
 
-            let mut col_result = vec![T::zero(); k];
             for &(idx, val) in indexed_vals.iter().take(sparsity) {
-                col_result[idx] = val;
+                out[idx] = val;
             }
-            col_result
-        })
-        .collect();
-
-    for (j, col_data) in columns.iter().enumerate() {
-        for (i, &val) in col_data.iter().enumerate() {
-            result[(i, j)] = val;
-        }
-    }
+        },
+    );
 
     result
 }
@@ -568,53 +533,62 @@ fn update_dictionary<T: BixverseFloat>(
 ) -> Mat<T> {
     let (n_contexts, _) = data.shape();
     let k = coefficients.nrows();
-    let identity: Mat<T> = Mat::identity(n_contexts, n_contexts);
     let reg_term = (Scale(alpha) * sample_laplacian).to_owned();
 
     let atom_columns: Vec<Vec<T>> = (0..k)
         .into_par_iter()
-        .map(|atom_idx| {
-            let x_j = coefficients.row(atom_idx);
-            let active_signals: Vec<(usize, T)> = x_j
-                .iter()
-                .enumerate()
-                .filter_map(|(signal_idx, &coeff)| {
-                    if coeff.abs() > T::from_f64(1e-12).unwrap() {
-                        Some((signal_idx, coeff))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            if active_signals.is_empty() {
-                return vec![T::zero(); n_contexts];
-            }
-            let mut rhs = Mat::zeros(n_contexts, 1);
-            for &(signal_idx, coeff) in &active_signals {
-                let signal = data.col(signal_idx);
-                for i in 0..n_contexts {
-                    rhs[(i, 0)] += signal[i] * coeff;
+        .map_init(
+            || {
+                (
+                    Mat::<T>::zeros(n_contexts, n_contexts),
+                    Mat::<T>::zeros(n_contexts, 1),
+                )
+            },
+            |(system_matrix, rhs), atom_idx| {
+                let x_j = coefficients.row(atom_idx);
+                let active_signals: Vec<(usize, T)> = x_j
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(signal_idx, &coeff)| {
+                        if coeff.abs() > T::from_f64(1e-12).unwrap() {
+                            Some((signal_idx, coeff))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if active_signals.is_empty() {
+                    return vec![T::zero(); n_contexts];
                 }
-            }
-            let x_j_norm_sq = active_signals
-                .iter()
-                .map(|&(_, coeff)| coeff * coeff)
-                .fold(T::zero(), |acc, x| acc + x);
-            if x_j_norm_sq > T::from_f64(1e-12).unwrap() {
-                let scaled_identity = (Scale(x_j_norm_sq) * identity.as_ref()).to_owned();
-                let system_matrix = &scaled_identity + &reg_term;
-                let lu = PartialPivLu::new(system_matrix.as_ref());
-                let solution = lu.solve(&rhs);
-                let norm = solution.norm_l2();
-                if norm > T::from_f64(1e-12).unwrap() {
-                    (0..n_contexts).map(|i| solution[(i, 0)] / norm).collect()
+                let rhs_col = rhs.col_as_slice_mut(0);
+                rhs_col.fill(T::zero());
+                for &(signal_idx, coeff) in &active_signals {
+                    for (o, &s) in rhs_col.iter_mut().zip(data.col(signal_idx).iter()) {
+                        *o += s * coeff;
+                    }
+                }
+                let x_j_norm_sq = active_signals
+                    .iter()
+                    .map(|&(_, coeff)| coeff * coeff)
+                    .fold(T::zero(), |acc, x| acc + x);
+                if x_j_norm_sq > T::from_f64(1e-12).unwrap() {
+                    system_matrix.as_mut().copy_from(reg_term.as_ref());
+                    for i in 0..n_contexts {
+                        system_matrix[(i, i)] = x_j_norm_sq + reg_term[(i, i)];
+                    }
+                    let lu = PartialPivLu::new(system_matrix.as_ref());
+                    let solution = lu.solve(&*rhs);
+                    let norm = solution.norm_l2();
+                    if norm > T::from_f64(1e-12).unwrap() {
+                        (0..n_contexts).map(|i| solution[(i, 0)] / norm).collect()
+                    } else {
+                        vec![T::zero(); n_contexts]
+                    }
                 } else {
                     vec![T::zero(); n_contexts]
                 }
-            } else {
-                vec![T::zero(); n_contexts]
-            }
-        })
+            },
+        )
         .collect();
     let mut dictionary = Mat::zeros(n_contexts, k);
     for (atom_idx, atom_col) in atom_columns.iter().enumerate() {
@@ -1025,13 +999,24 @@ impl<T: BixverseFloat> Dgrdl<T> {
         let n_features = data.ncols();
         let n_pairs = n_features * (n_features - 1) / 2;
 
-        (0..n_pairs)
-            .into_par_iter()
-            .map(|pair_idx| {
-                let (i, j) = triangle_to_indices(pair_idx, n_features);
-                column_distance(data.col(i), data.col(j))
-            })
-            .collect()
+        let mut out = vec![T::zero(); n_pairs];
+
+        // row i of the upper triangle is one contiguous run of the flat layout
+        let mut rows: Vec<(usize, &mut [T])> = Vec::with_capacity(n_features);
+        let mut rest = out.as_mut_slice();
+        for i in 0..n_features {
+            let (row, tail) = rest.split_at_mut(n_features - i - 1);
+            rows.push((i, row));
+            rest = tail;
+        }
+
+        rows.into_par_iter().for_each(|(i, row)| {
+            for (slot, j) in row.iter_mut().zip(i + 1..) {
+                *slot = column_distance(data.col(i), data.col(j));
+            }
+        });
+
+        out
     }
 
     /// Pull out the Laplacians out of the cache or recompute for given k_neighbours

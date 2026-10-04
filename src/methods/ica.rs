@@ -2,7 +2,7 @@
 //! Hyvrinen and Oja, Neural Comput., 1997
 
 use faer::{
-    Mat, MatRef, Scale,
+    Accum, Mat, MatRef, Par, Scale,
     linalg::solvers::{PartialPivLu, Solve},
 };
 use rand::prelude::*;
@@ -13,10 +13,24 @@ use rayon::prelude::*;
 use crate::core::math::matrix_helpers::scale_matrix_col;
 use crate::core::math::pca_svd::randomised_svd;
 use crate::prelude::*;
+use crate::utils::faer_parallelism;
+use crate::utils::gemm::gemm;
 
-/////////////
-// Helpers //
-/////////////
+///////////
+// Types //
+///////////
+
+/// Type alias of the ICA results
+///
+/// ### Fields
+///
+/// * `0` - Mixing matrix w
+/// * `1` - Tolerance
+type IcaRes<T> = (Mat<T>, T);
+
+///////////
+// Enums //
+///////////
 
 /// Enum for the ICA types
 #[derive(Clone, Debug, Default)]
@@ -45,13 +59,9 @@ pub fn parse_ica_type(s: &str) -> Option<IcaType> {
     }
 }
 
-/// Type alias of the ICA results
-///
-/// ### Fields
-///
-/// * `0` - Mixing matrix w
-/// * `1` - Tolerance
-type IcaRes<T> = (Mat<T>, T);
+////////////
+// Params //
+////////////
 
 /// Structure to save ICA parameters
 #[derive(Clone, Debug)]
@@ -65,6 +75,10 @@ pub struct IcaParams<T: BixverseFloat> {
     /// Controls ICA internal verbosity
     pub verbose: bool,
 }
+
+///////////////
+// Functions //
+///////////////
 
 /// Prepare the whitening.
 ///
@@ -241,17 +255,18 @@ impl<T: BixverseFloat> IcaCvData<T> {
         let k_x_matrices: Vec<(Mat<T>, Mat<T>)> = folds
             .par_iter()
             .map(|test_indices| {
+                let mut is_test = vec![false; no_samples];
+                for &idx in test_indices {
+                    is_test[idx] = true;
+                }
                 let train_indices: Vec<usize> = indices
                     .iter()
-                    .filter(|&idx| !test_indices.contains(idx))
+                    .filter(|&&idx| !is_test[idx])
                     .cloned()
                     .collect();
-                let mut x_i = Mat::<T>::zeros(train_indices.len(), no_features);
-                for (new_row, old_row) in train_indices.iter().enumerate() {
-                    for j in 0..no_features {
-                        x_i[(new_row, j)] = x[(*old_row, j)];
-                    }
-                }
+                let x_i = Mat::<T>::from_fn(train_indices.len(), no_features, |new_row, j| {
+                    x[(train_indices[new_row], j)]
+                });
                 prepare_whitening(x_i.as_ref(), true, seed + 1, svd_rank, None, None)
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -274,6 +289,142 @@ impl<T: BixverseFloat> IcaCvData<T> {
 ////////////////////
 // Main functions //
 ////////////////////
+
+/// Shared fastICA fixed-point loop
+///
+/// `contrast` maps a projection `u` to `(g(u), g'(u))`. The products run with
+/// the given parallelism, so callers inside an outer parallel loop pass
+/// `Par::Seq`.
+///
+/// ### Params
+///
+/// * `par` - Parallelism of the matrix products
+/// * `x` - Whitened matrix
+/// * `w_init` - Initial, random mixing matrix
+/// * `tol` - Tolerance parameter.
+/// * `maxit` - Maximum number of iterations to run ICA for.
+/// * `verbose` - Shall print messages be returned for each iteration.
+/// * `contrast` - The contrast function and its derivative
+///
+/// ### Returns
+///
+/// A tuple of the final identified mixing matrix w and the reached tolerance
+/// value.
+fn fast_ica_core<T: BixverseFloat>(
+    par: Par,
+    x: MatRef<T>,
+    w_init: MatRef<T>,
+    tol: T,
+    maxit: usize,
+    verbose: bool,
+    contrast: impl Fn(T) -> (T, T),
+) -> Result<IcaRes<T>, BixverseErrors> {
+    let p = x.ncols();
+    let mut w = update_mix_mat(w_init)?;
+    let n_comp = w.nrows();
+    let mut lim = vec![T::from_f64(1000.0).unwrap(); maxit];
+
+    let p_recip = T::from_usize(p).unwrap().recip();
+    let ones = Mat::<T>::from_fn(p, 1, |_, _| T::one());
+
+    // scratch reused across iterations
+    let mut wx = Mat::<T>::zeros(n_comp, p);
+    let mut gwx = Mat::<T>::zeros(n_comp, p);
+    let mut gwx_2 = Mat::<T>::zeros(n_comp, p);
+    let mut v1 = Mat::<T>::zeros(n_comp, n_comp);
+    let mut row_sums = Mat::<T>::zeros(n_comp, 1);
+
+    let mut it = 0;
+
+    while it < maxit && lim[it] > tol {
+        gemm(wx.as_mut(), Accum::Replace, w.as_ref(), x, T::one(), par);
+
+        for j in 0..p {
+            let wx_col = wx.col_as_slice(j);
+            let gwx_col = gwx.col_as_slice_mut(j);
+            let gwx_2_col = gwx_2.col_as_slice_mut(j);
+            for ((&u, g), g2) in wx_col.iter().zip(gwx_col).zip(gwx_2_col) {
+                (*g, *g2) = contrast(u);
+            }
+        }
+
+        gemm(
+            v1.as_mut(),
+            Accum::Replace,
+            gwx.as_ref(),
+            x.transpose(),
+            p_recip,
+            par,
+        );
+        gemm(
+            row_sums.as_mut(),
+            Accum::Replace,
+            gwx_2.as_ref(),
+            ones.as_ref(),
+            T::one(),
+            par,
+        );
+
+        let v2 = Mat::<T>::from_fn(n_comp, n_comp, |i, j| {
+            row_sums[(i, 0)] * p_recip * w[(i, j)]
+        });
+
+        let w1 = update_mix_mat((v1.as_ref() - v2.as_ref()).as_ref())?;
+
+        // only the diagonal of w1 * w^T is read
+        let tol_it = (0..n_comp)
+            .map(|i| {
+                let d = (0..n_comp).fold(T::zero(), |acc, c| acc + w1[(i, c)] * w[(i, c)]);
+                (d.abs() - T::one()).abs()
+            })
+            .fold(T::neg_infinity(), |a, b| a.max(b));
+
+        if it + 1 < maxit {
+            lim[it + 1] = tol_it
+        }
+
+        if verbose {
+            println!("Iteration: {:?}, tol: {:?}", it + 1, tol_it)
+        }
+
+        w = w1;
+
+        it += 1;
+    }
+
+    let min_tol = array_min(&lim);
+
+    Ok((w, min_tol))
+}
+
+/// Contrast function and derivative for the logcosh variant
+///
+/// ### Params
+///
+/// * `alpha` - Alpha parameter for this variant
+///
+/// ### Returns
+///
+/// A closure mapping `u` to `(tanh(alpha u), alpha (1 - tanh(alpha u)^2))`.
+fn logcosh_contrast<T: BixverseFloat>(alpha: T) -> impl Fn(T) -> (T, T) {
+    move |u| {
+        let g = (alpha * u).tanh();
+        (g, alpha * (T::one() - g * g))
+    }
+}
+
+/// Contrast function and derivative for the exp variant
+///
+/// ### Returns
+///
+/// A closure mapping `u` to `(u e, (1 - u^2) e)` with `e = exp(-u^2 / 2)`.
+fn exp_contrast<T: BixverseFloat>() -> impl Fn(T) -> (T, T) {
+    let neg_half = T::from_f64(-0.5).unwrap();
+    move |u| {
+        let e = (neg_half * u * u).exp();
+        (u * e, (T::one() - u * u) * e)
+    }
+}
 
 /// Fast ICA implementation based on logcosh.
 ///
@@ -298,67 +449,15 @@ pub fn fast_ica_logcosh<T: BixverseFloat>(
     maxit: usize,
     verbose: bool,
 ) -> Result<IcaRes<T>, BixverseErrors> {
-    let p = x.ncols();
-    let mut w = update_mix_mat(w_init)?;
-    let mut lim = vec![T::from_f64(1000.0).unwrap(); maxit];
-
-    let mut it = 0;
-
-    while it < maxit && lim[it] > tol {
-        let wx: Mat<T> = w.clone() * x;
-
-        let gwx = Mat::from_fn(wx.nrows(), wx.ncols(), |i, j| {
-            let x = wx.get(i, j);
-            (alpha * *x).tanh()
-        });
-
-        let p_recip = T::from_usize(p).unwrap().recip();
-        let v1 = Scale(p_recip) * (gwx.clone() * x.transpose());
-
-        let gwx_2 = Mat::from_fn(gwx.nrows(), gwx.ncols(), |i, j| {
-            let x = gwx.get(i, j);
-            alpha * (T::one() - *x * *x)
-        });
-
-        let ones = Mat::from_fn(p, 1, |_, _| T::one());
-        let row_means = Scale(p_recip) * (gwx_2.clone() * ones);
-
-        let row_means_vec: Vec<T> = row_means
-            .as_ref()
-            .col_iter()
-            .flat_map(|col| col.iter())
-            .copied()
-            .collect();
-
-        let v2 = faer_diagonal_from_vec(row_means_vec) * w.clone();
-
-        let w1 = update_mix_mat((v1 - v2).as_ref())?;
-
-        let w1_up = w1.clone() * w.transpose();
-
-        let tol_it = w1_up
-            .diagonal()
-            .column_vector()
-            .iter()
-            .map(|x| (x.abs() - T::one()).abs())
-            .fold(T::neg_infinity(), |a, b| a.max(b));
-
-        if it + 1 < maxit {
-            lim[it + 1] = tol_it
-        }
-
-        if verbose {
-            println!("Iteration: {:?}, tol: {:?}", it + 1, tol_it)
-        }
-
-        w = w1;
-
-        it += 1;
-    }
-
-    let min_tol = array_min(&lim);
-
-    Ok((w, min_tol))
+    fast_ica_core(
+        faer_parallelism(),
+        x,
+        w_init,
+        tol,
+        maxit,
+        verbose,
+        logcosh_contrast(alpha),
+    )
 }
 
 /// Fast ICA implementation based on exp algorithm.
@@ -382,67 +481,15 @@ pub fn fast_ica_exp<T: BixverseFloat>(
     maxit: usize,
     verbose: bool,
 ) -> Result<IcaRes<T>, BixverseErrors> {
-    let p = x.ncols();
-    let mut w = update_mix_mat(w_init)?;
-    let mut lim = vec![T::from_f64(1000.0).unwrap(); maxit];
-
-    let mut it = 0;
-    while it < maxit && lim[it] > tol {
-        let wx: Mat<T> = w.clone() * x;
-
-        let neg_half = T::from_f64(-0.5).unwrap();
-        let gwx = Mat::from_fn(wx.nrows(), wx.ncols(), |i, j| {
-            let x = wx.get(i, j);
-            *x * (neg_half * *x * *x).exp()
-        });
-
-        let p_recip = T::from_usize(p).unwrap().recip();
-        let v1 = Scale(p_recip) * (gwx.clone() * x.transpose());
-
-        let gwx_2 = Mat::from_fn(wx.nrows(), wx.ncols(), |i, j| {
-            let x = wx.get(i, j);
-            (T::one() - *x * *x) * (neg_half * *x * *x).exp()
-        });
-
-        let ones = Mat::from_fn(p, 1, |_, _| T::one());
-        let row_means = Scale(p_recip) * (gwx_2.clone() * ones);
-
-        let row_means_vec: Vec<T> = row_means
-            .as_ref()
-            .col_iter()
-            .flat_map(|col| col.iter())
-            .copied()
-            .collect();
-
-        let v2 = faer_diagonal_from_vec(row_means_vec) * w.clone();
-
-        let w1 = update_mix_mat((v1 - v2).as_ref())?;
-
-        let w1_up = w1.clone() * w.transpose();
-
-        let tol_it = w1_up
-            .diagonal()
-            .column_vector()
-            .iter()
-            .map(|x| (x.abs() - T::one()).abs())
-            .fold(T::neg_infinity(), |a, b| a.max(b));
-
-        if it + 1 < maxit {
-            lim[it + 1] = tol_it
-        }
-
-        if verbose {
-            println!("Iteration: {:?}, tol: {:?}", it + 1, tol_it)
-        }
-
-        w = w1;
-
-        it += 1;
-    }
-
-    let min_tol = array_min(&lim);
-
-    Ok((w, min_tol))
+    fast_ica_core(
+        faer_parallelism(),
+        x,
+        w_init,
+        tol,
+        maxit,
+        verbose,
+        exp_contrast(),
+    )
 }
 
 ////////////////////
@@ -491,20 +538,23 @@ pub fn stabilised_ica_iters<T: BixverseFloat>(
     let iter_res: Vec<(Mat<T>, T)> = w_inits
         .par_iter()
         .map(|w_init| match ica_type {
-            IcaType::Exp => fast_ica_exp(
+            IcaType::Exp => fast_ica_core(
+                Par::Seq,
                 x_whiten.as_ref(),
                 w_init.as_ref(),
                 ica_params.tol,
                 ica_params.maxit,
                 ica_params.verbose,
+                exp_contrast(),
             ),
-            IcaType::LogCosh => fast_ica_logcosh(
+            IcaType::LogCosh => fast_ica_core(
+                Par::Seq,
                 x_whiten.as_ref(),
                 w_init.as_ref(),
                 ica_params.tol,
-                ica_params.alpha,
                 ica_params.maxit,
                 ica_params.verbose,
+                logcosh_contrast(ica_params.alpha),
             ),
         })
         .collect::<Result<Vec<(Mat<T>, T)>, BixverseErrors>>()?;
@@ -520,12 +570,37 @@ pub fn stabilised_ica_iters<T: BixverseFloat>(
     let s_matrices: Vec<Mat<T>> = a_matrices
         .par_iter()
         .map(|a| {
-            let w = a.clone() * k_red;
-            let to_solve = w.clone() * w.transpose();
+            let mut w = Mat::<T>::zeros(a.nrows(), k_red.ncols());
+            gemm(
+                w.as_mut(),
+                Accum::Replace,
+                a.as_ref(),
+                k_red,
+                T::one(),
+                Par::Seq,
+            );
+            let mut to_solve = Mat::<T>::zeros(w.nrows(), w.nrows());
+            gemm(
+                to_solve.as_mut(),
+                Accum::Replace,
+                w.as_ref(),
+                w.transpose(),
+                T::one(),
+                Par::Seq,
+            );
             let identity = Mat::<T>::identity(to_solve.nrows(), to_solve.ncols());
             let lu = PartialPivLu::new(to_solve.as_ref());
             let solved = lu.solve(&identity);
-            w.transpose() * solved
+            let mut out = Mat::<T>::zeros(w.ncols(), solved.ncols());
+            gemm(
+                out.as_mut(),
+                Accum::Replace,
+                w.transpose(),
+                solved.as_ref(),
+                T::one(),
+                Par::Seq,
+            );
+            out
         })
         .collect();
 

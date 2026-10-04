@@ -5,17 +5,17 @@
 use crate::utils::gemm;
 use faer::Accum;
 use faer::linalg::matmul::triangular::BlockStructure;
-use faer::{Mat, MatRef};
+use faer::{Mat, MatRef, Par};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rayon::prelude::*;
 
-use crate::core::math::matrix_helpers::{stack_rows, subset_rows};
+use crate::core::math::matrix_helpers::{mirror_lower_to_upper, stack_rows, subset_rows};
 use crate::prelude::*;
 use crate::utils::faer_parallelism;
 
-use super::pert_dist::{PertDistance, edistance_two_matrices};
+use super::pert_dist::{PertDistance, edistance_two_matrices, edistance_two_matrices_seq};
 
 ////////////
 // Consts //
@@ -23,6 +23,9 @@ use super::pert_dist::{PertDistance, edistance_two_matrices};
 
 /// Reasonable sub sample size
 const N_SUB_SAMPLE: usize = 500;
+
+/// Number of permutations folded into one GEMM tile
+const PERM_TILE: usize = 64;
 
 ///////////////////
 // Enums/Structs //
@@ -140,22 +143,20 @@ fn pooled_distance_matrix<T: BixverseFloat>(pooled: MatRef<T>, dist: PertDistanc
     let norms_sq: Vec<T> = (0..n).map(|i| *gram.get(i, i)).collect();
     let two = T::from_f64(2.0).unwrap();
 
-    let mut flat = vec![T::zero(); n * n];
-    flat.par_chunks_mut(n).enumerate().for_each(|(i, row)| {
-        for j in 0..n {
-            if i == j {
-                continue;
-            }
-            let (hi, lo) = if i > j { (i, j) } else { (j, i) };
-            let d_sq = (norms_sq[i] + norms_sq[j] - two * *gram.get(hi, lo)).max(T::zero());
-            row[j] = match dist {
+    // Lower triangle straight into the output columns, then mirrored.
+    let mut res = Mat::<T>::zeros(n, n);
+    res.par_col_iter_mut().enumerate().for_each(|(j, mut col)| {
+        for i in (j + 1)..n {
+            let d_sq = (norms_sq[i] + norms_sq[j] - two * *gram.get(i, j)).max(T::zero());
+            col[i] = match dist {
                 PertDistance::Euclidean => d_sq.sqrt(),
                 PertDistance::SquaredEuclidean => d_sq,
             };
         }
     });
+    mirror_lower_to_upper(res.as_mut());
 
-    Mat::from_fn(n, n, |i, j| flat[i * n + j])
+    res
 }
 
 /// E-distance from a precomputed pooled N x N distance matrix.
@@ -179,7 +180,8 @@ pub fn edistance_from_pairwise<T: BixverseFloat>(d: MatRef<T>, mask: &[bool]) ->
     let n_x = mask.iter().filter(|&&b| b).count();
     let n_y = n - n_x;
 
-    // Sums count each unordered pair twice ((i,j) and (j,i)).
+    // Sums count each unordered pair twice ((i,j) and (j,i)). `d` is symmetric,
+    // so column `i` is row `i` and the walk is contiguous.
     let (sum_xx, sum_yy, sum_xy) = (0..n)
         .into_par_iter()
         .map(|i| {
@@ -187,12 +189,11 @@ pub fn edistance_from_pairwise<T: BixverseFloat>(d: MatRef<T>, mask: &[bool]) ->
             let mut sxx = T::zero();
             let mut syy = T::zero();
             let mut sxy = T::zero();
-            for j in 0..n {
+            for (j, (&dij, &mj)) in d.col(i).iter().zip(mask.iter()).enumerate() {
                 if i == j {
                     continue;
                 }
-                let dij = *d.get(i, j);
-                match (mi, mask[j]) {
+                match (mi, mj) {
                     (true, true) => sxx += dij,
                     (false, false) => syy += dij,
                     _ => sxy += dij,
@@ -226,6 +227,98 @@ pub fn edistance_from_pairwise<T: BixverseFloat>(d: MatRef<T>, mask: &[bool]) ->
     };
 
     two * between - within_x - within_y
+}
+
+/// E-distances for many permutation masks against one pooled distance matrix
+///
+/// The within and between sums are products of `d` with the 0/1 mask columns,
+/// so a tile of masks goes through one GEMM per group instead of one scalar
+/// pass over `d` per permutation. `d` must be symmetric with a zero diagonal,
+/// as [pooled_distance_matrix] returns it.
+///
+/// ### Params
+///
+/// * `d` - The N x N pooled distance matrix
+/// * `masks` - One group mask per permutation
+///
+/// ### Returns
+///
+/// One E-distance per mask.
+fn edistance_from_pairwise_batch<T: BixverseFloat>(d: MatRef<T>, masks: &[Vec<bool>]) -> Vec<T> {
+    let n = d.nrows();
+    let two = T::from_f64(2.0).unwrap();
+
+    masks
+        .par_chunks(PERM_TILE)
+        .flat_map_iter(|tile| {
+            let p = tile.len();
+            let mut in_x = Mat::<T>::zeros(n, p);
+            let mut in_y = Mat::<T>::zeros(n, p);
+            for (c, mask) in tile.iter().enumerate() {
+                for (i, &b) in mask.iter().enumerate() {
+                    if b {
+                        in_x[(i, c)] = T::one();
+                    } else {
+                        in_y[(i, c)] = T::one();
+                    }
+                }
+            }
+            let mut z_x = Mat::<T>::zeros(n, p);
+            let mut z_y = Mat::<T>::zeros(n, p);
+            gemm::gemm(
+                z_x.as_mut(),
+                Accum::Replace,
+                d,
+                in_x.as_ref(),
+                T::one(),
+                Par::Seq,
+            );
+            gemm::gemm(
+                z_y.as_mut(),
+                Accum::Replace,
+                d,
+                in_y.as_ref(),
+                T::one(),
+                Par::Seq,
+            );
+
+            (0..p)
+                .map(|c| {
+                    let (mut sxx, mut syy, mut sxy) = (T::zero(), T::zero(), T::zero());
+                    let (mut n_x, mut n_y) = (0usize, 0usize);
+                    for i in 0..n {
+                        if tile[c][i] {
+                            sxx += z_x[(i, c)];
+                            sxy += z_y[(i, c)];
+                            n_x += 1;
+                        } else {
+                            syy += z_y[(i, c)];
+                            sxy += z_x[(i, c)];
+                            n_y += 1;
+                        }
+                    }
+                    let n_x_t = T::from_usize(n_x).unwrap();
+                    let n_y_t = T::from_usize(n_y).unwrap();
+                    let within_x = if n_x < 2 {
+                        T::zero()
+                    } else {
+                        sxx / (n_x_t * (n_x_t - T::one()))
+                    };
+                    let within_y = if n_y < 2 {
+                        T::zero()
+                    } else {
+                        syy / (n_y_t * (n_y_t - T::one()))
+                    };
+                    let between = if n_x == 0 || n_y == 0 {
+                        T::zero()
+                    } else {
+                        sxy / (two * n_x_t * n_y_t)
+                    };
+                    two * between - within_x - within_y
+                })
+                .collect::<Vec<T>>()
+        })
+        .collect()
 }
 
 //////////
@@ -309,10 +402,7 @@ where
 
     let null_dist: Vec<T> = if use_fast {
         let d_mat = pooled_distance_matrix(pooled.as_ref(), dist);
-        masks
-            .par_iter()
-            .map(|m| edistance_from_pairwise(d_mat.as_ref(), m))
-            .collect()
+        edistance_from_pairwise_batch(d_mat.as_ref(), &masks)
     } else {
         masks
             .par_iter()
@@ -329,7 +419,7 @@ where
                     .collect();
                 let x_p = subset_rows(pooled.as_ref(), &xs);
                 let y_p = subset_rows(pooled.as_ref(), &ys);
-                let res = edistance_two_matrices(x_p.as_ref(), y_p.as_ref(), dist)?;
+                let res = edistance_two_matrices_seq(x_p.as_ref(), y_p.as_ref(), dist)?;
 
                 Ok(res)
             })

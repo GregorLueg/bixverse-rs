@@ -13,6 +13,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::time::Instant;
 
 use crate::prelude::*;
+use crate::single_cell::sc_processing::pca::PcaSolver;
 use crate::single_cell::sc_processing::utils_doublets::*;
 
 ///////////
@@ -81,8 +82,8 @@ pub struct ScrubletParams {
     // -- pca --
     /// Number of principal components.
     pub no_pcs: usize,
-    /// Whether to use randomised SVD.
-    pub random_svd: bool,
+    /// Which PCA solver to use, see [PcaSolver].
+    pub svd_solver: PcaSolver,
 
     // -- scrublet --
     /// Ratio of simulated doublets to observed cells.
@@ -306,7 +307,7 @@ impl<'a, S: SingleCellReading> Scrublet<'a, S> {
             mean_center: self.params.mean_center,
             normalise_variance: self.params.normalise_variance,
             no_pcs: self.params.no_pcs,
-            random_svd: self.params.random_svd,
+            svd_solver: self.params.svd_solver,
         };
 
         if verbosity.normal_verbosity() {

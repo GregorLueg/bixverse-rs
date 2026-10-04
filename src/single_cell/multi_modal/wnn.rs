@@ -169,54 +169,67 @@ impl Default for WnnParams {
 // Helpers //
 /////////////
 
-/// Row to vector
+/// Row-major copy of an embedding
 ///
-/// Copies a single row from a matrix reference into a heap-allocated vector.
+/// The embedding is column-major, so row access is strided. Rows are read many
+/// times per cell downstream, so copy once into a contiguous `[n, d]` buffer.
 ///
 /// ### Params
 ///
 /// * `mat` - The source matrix.
-/// * `i` - Row index to copy.
 ///
 /// ### Returns
 ///
-/// A `Vec<f32>` containing the values of row `i`.
-#[inline]
-fn row_to_vec(mat: MatRef<f32>, i: usize) -> Vec<f32> {
+/// Row-major `Vec<f32>` of length `nrows * ncols`.
+fn to_row_major_vec(mat: MatRef<f32>) -> Vec<f32> {
     let nc = mat.ncols();
-    let mut v = Vec::with_capacity(nc);
-    for j in 0..nc {
-        v.push(mat[(i, j)]);
-    }
-    v
+    let mut out = vec![0.0f32; mat.nrows() * nc];
+    out.par_chunks_mut(nc).enumerate().for_each(|(i, row)| {
+        for (j, v) in row.iter_mut().enumerate() {
+            *v = mat[(i, j)];
+        }
+    });
+    out
+}
+
+/// Row `i` of a row-major `[n, d]` buffer.
+///
+/// ### Params
+///
+/// * `data` - Row-major buffer.
+/// * `d` - Row length.
+/// * `i` - Row index.
+///
+/// ### Returns
+///
+/// The row as a slice.
+#[inline]
+fn row_of(data: &[f32], d: usize, i: usize) -> &[f32] {
+    &data[i * d..(i + 1) * d]
 }
 
 /// Mean of rows
 ///
-/// Computes the element-wise mean of a subset of rows from a matrix.
+/// Computes the element-wise mean of a subset of rows from a row-major buffer.
 ///
 /// ### Params
 ///
-/// * `mat` - The source matrix.
+/// * `data` - Row-major `[n, d]` buffer.
+/// * `d` - Row length.
 /// * `indices` - Row indices to average over.
-///
-/// ### Returns
-///
-/// A `Vec<f32>` of length `mat.ncols()` containing the column-wise mean.
+/// * `out` - Output of length `d`, overwritten.
 #[inline]
-fn mean_of_rows(mat: MatRef<f32>, indices: &[usize]) -> Vec<f32> {
-    let nc = mat.ncols();
-    let mut acc = vec![0.0f32; nc];
+fn mean_of_rows_into(data: &[f32], d: usize, indices: &[usize], out: &mut [f32]) {
+    out.fill(0.0);
     for &i in indices {
-        for j in 0..nc {
-            acc[j] += mat[(i, j)];
+        for (a, v) in out.iter_mut().zip(row_of(data, d, i)) {
+            *a += v;
         }
     }
     let inv_n = 1.0 / indices.len() as f32;
-    for v in &mut acc {
+    for v in out.iter_mut() {
         *v *= inv_n;
     }
-    acc
 }
 
 /// Euclidean distance
@@ -302,7 +315,8 @@ fn build_snn_for_sigma(
 /// ### Params
 ///
 /// * `snn` - The pre-built SNN graph.
-/// * `embedding` - Cell embedding matrix.
+/// * `embedding` - Row-major `[n, d]` cell embedding.
+/// * `d` - Embedding dimension.
 /// * `i` - Index of the query cell.
 /// * `nearest` - Distance to the nearest neighbour of cell `i`.
 /// * `k_far` - Number of far SNN neighbours to average over.
@@ -312,9 +326,11 @@ fn build_snn_for_sigma(
 /// ### Returns
 ///
 /// The sigma estimate for cell `i` as `f32`.
+#[allow(clippy::too_many_arguments)]
 fn sigma_from_snn(
     snn: &SparseGraph<f32>,
-    embedding: MatRef<f32>,
+    embedding: &[f32],
+    d: usize,
     i: usize,
     nearest: f32,
     k_far: usize,
@@ -341,11 +357,10 @@ fn sigma_from_snn(
         .map(|(_, c)| *c)
         .collect();
 
-    let row_i = row_to_vec(embedding, i);
+    let row_i = row_of(embedding, d, i);
     let mut total = 0.0f32;
     for &c in &selected {
-        let row_c = row_to_vec(embedding, c);
-        total += (euclid(&row_i, &row_c) - nearest).max(0.0);
+        total += (euclid(row_i, row_of(embedding, d, c)) - nearest).max(0.0);
     }
     let mean = total / selected.len() as f32;
     (mean * sd_scale).max(sigma_floor)
@@ -456,6 +471,14 @@ pub fn compute_wnn(
     // phase 1: per-cell quantities + modality weights
     let t_phase1 = Instant::now();
     let k_nn = params.k_nn;
+    let dims = [
+        modalities[0].embedding.ncols(),
+        modalities[1].embedding.ncols(),
+    ];
+    let rows_rm = [
+        to_row_major_vec(modalities[0].embedding),
+        to_row_major_vec(modalities[1].embedding),
+    ];
 
     let per_modality: Vec<ModalityCellStats> = (0..2)
         .map(|r| {
@@ -463,39 +486,46 @@ pub fn compute_wnn(
             let m_other = &modalities[1 - r];
             let snn = snn_graphs.as_ref().map(|gs| &gs[r]);
 
+            let d = dims[r];
+            let data = &rows_rm[r];
+
             let rows: Vec<(f32, f32, f32, f32)> = (0..n_cells)
                 .into_par_iter()
-                .map(|i| {
-                    let nn_r = &m.knn_indices[i][..k_nn];
-                    let nn_other = &m_other.knn_indices[i][..k_nn];
-                    let nearest = m.knn_distances[i][0];
+                .map_init(
+                    || (vec![0.0f32; d], vec![0.0f32; d]),
+                    |(within, cross), i| {
+                        let nn_r = &m.knn_indices[i][..k_nn];
+                        let nn_other = &m_other.knn_indices[i][..k_nn];
+                        let nearest = m.knn_distances[i][0];
 
-                    let row_i = row_to_vec(m.embedding, i);
-                    let within = mean_of_rows(m.embedding, nn_r);
-                    let cross = mean_of_rows(m.embedding, nn_other);
+                        let row_i = row_of(data, d, i);
+                        mean_of_rows_into(data, d, nn_r, within);
+                        mean_of_rows_into(data, d, nn_other, cross);
 
-                    let d_within = (euclid(&row_i, &within) - nearest).max(0.0);
-                    let d_cross = (euclid(&row_i, &cross) - nearest).max(0.0);
+                        let d_within = (euclid(row_i, within) - nearest).max(0.0);
+                        let d_cross = (euclid(row_i, cross) - nearest).max(0.0);
 
-                    let sigma = match params.sigma_method {
-                        SigmaMethod::SigmaIdx => {
-                            let raw =
-                                (m.knn_distances[i][params.sigma_idx] - nearest) * params.sd_scale;
-                            raw.max(params.sigma_floor)
-                        }
-                        SigmaMethod::SnnFarthest => sigma_from_snn(
-                            snn.unwrap(),
-                            m.embedding,
-                            i,
-                            nearest,
-                            params.k_nn,
-                            params.sd_scale,
-                            params.sigma_floor,
-                        ),
-                    };
+                        let sigma = match params.sigma_method {
+                            SigmaMethod::SigmaIdx => {
+                                let raw = (m.knn_distances[i][params.sigma_idx] - nearest)
+                                    * params.sd_scale;
+                                raw.max(params.sigma_floor)
+                            }
+                            SigmaMethod::SnnFarthest => sigma_from_snn(
+                                snn.unwrap(),
+                                data,
+                                d,
+                                i,
+                                nearest,
+                                params.k_nn,
+                                params.sd_scale,
+                                params.sigma_floor,
+                            ),
+                        };
 
-                    (nearest, d_within, d_cross, sigma)
-                })
+                        (nearest, d_within, d_cross, sigma)
+                    },
+                )
                 .collect();
 
             let mut stats = ModalityCellStats {
@@ -547,60 +577,75 @@ pub fn compute_wnn(
 
     let wnn: Vec<(Vec<usize>, Vec<f32>)> = (0..n_cells)
         .into_par_iter()
-        .map(|i| {
-            let r0 = &modalities[0].knn_indices[i][..params.knn_range];
-            let r1 = &modalities[1].knn_indices[i][..params.knn_range];
+        .map_init(
+            || {
+                (
+                    FxHashSet::<usize>::default(),
+                    Vec::<usize>::new(),
+                    Vec::<f32>::new(),
+                    Vec::<usize>::new(),
+                )
+            },
+            |(seen, cands, combined, order), i| {
+                let r0 = &modalities[0].knn_indices[i][..params.knn_range];
+                let r1 = &modalities[1].knn_indices[i][..params.knn_range];
 
-            let mut seen: FxHashSet<usize> =
-                FxHashSet::with_capacity_and_hasher(r0.len() + r1.len(), Default::default());
-            let mut cands: Vec<usize> = Vec::with_capacity(r0.len() + r1.len());
-            for &c in r0.iter().chain(r1.iter()) {
-                if c != i && seen.insert(c) {
-                    cands.push(c);
+                seen.clear();
+                cands.clear();
+                for &c in r0.iter().chain(r1.iter()) {
+                    if c != i && seen.insert(c) {
+                        cands.push(c);
+                    }
                 }
-            }
 
-            let row_i_0 = row_to_vec(modalities[0].embedding, i);
-            let row_i_1 = row_to_vec(modalities[1].embedding, i);
+                let row_i_0 = row_of(&rows_rm[0], dims[0], i);
+                let row_i_1 = row_of(&rows_rm[1], dims[1], i);
 
-            let nearest_0 = per_modality[0].nearest[i];
-            let nearest_1 = per_modality[1].nearest[i];
-            let sigma_0 = per_modality[0].sigma[i];
-            let sigma_1 = per_modality[1].sigma[i];
-            let w0 = weights[0][i];
-            let w1 = weights[1][i];
+                let nearest_0 = per_modality[0].nearest[i];
+                let nearest_1 = per_modality[1].nearest[i];
+                let sigma_0 = per_modality[0].sigma[i];
+                let sigma_1 = per_modality[1].sigma[i];
+                let w0 = weights[0][i];
+                let w1 = weights[1][i];
 
-            let mut combined: Vec<f32> = Vec::with_capacity(cands.len());
-            for &c in &cands {
-                let rc_0 = row_to_vec(modalities[0].embedding, c);
-                let rc_1 = row_to_vec(modalities[1].embedding, c);
+                combined.clear();
+                for &c in cands.iter() {
+                    let d0 =
+                        (euclid(row_i_0, row_of(&rows_rm[0], dims[0], c)) - nearest_0).max(0.0);
+                    let d1 =
+                        (euclid(row_i_1, row_of(&rows_rm[1], dims[1], c)) - nearest_1).max(0.0);
 
-                let d0 = (euclid(&row_i_0, &rc_0) - nearest_0).max(0.0);
-                let d1 = (euclid(&row_i_1, &rc_1) - nearest_1).max(0.0);
+                    let (a0, a1) = if kernel_power == 1.0 {
+                        ((-(d0 / sigma_0)).exp(), (-(d1 / sigma_1)).exp())
+                    } else {
+                        (
+                            (-((d0 / sigma_0).powf(kernel_power))).exp(),
+                            (-((d1 / sigma_1).powf(kernel_power))).exp(),
+                        )
+                    };
 
-                let a0 = (-((d0 / sigma_0).powf(kernel_power))).exp();
-                let a1 = (-((d1 / sigma_1).powf(kernel_power))).exp();
+                    combined.push(w0 * a0 + w1 * a1);
+                }
 
-                combined.push(w0 * a0 + w1 * a1);
-            }
+                order.clear();
+                order.extend(0..cands.len());
+                order.sort_unstable_by(|&a, &b| {
+                    combined[b]
+                        .partial_cmp(&combined[a])
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                order.truncate(k_nn);
 
-            let mut order: Vec<usize> = (0..cands.len()).collect();
-            order.sort_unstable_by(|&a, &b| {
-                combined[b]
-                    .partial_cmp(&combined[a])
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            order.truncate(k_nn);
-
-            let mut idx_out = Vec::with_capacity(k_nn);
-            let mut dist_out = Vec::with_capacity(k_nn);
-            for o in order {
-                idx_out.push(cands[o]);
-                let aff = combined[o].clamp(0.0, 1.0);
-                dist_out.push(((1.0 - aff) / 2.0).max(0.0).sqrt());
-            }
-            (idx_out, dist_out)
-        })
+                let mut idx_out = Vec::with_capacity(k_nn);
+                let mut dist_out = Vec::with_capacity(k_nn);
+                for &o in order.iter() {
+                    idx_out.push(cands[o]);
+                    let aff = combined[o].clamp(0.0, 1.0);
+                    dist_out.push(((1.0 - aff) / 2.0).max(0.0).sqrt());
+                }
+                (idx_out, dist_out)
+            },
+        )
         .collect();
 
     if verbosity.normal_verbosity() {
@@ -651,24 +696,25 @@ mod tests {
 
     /// Row extraction walks the row, not the column, on faer's column-major storage.
     #[test]
-    fn row_to_vec_copies_correct_values() {
+    fn row_major_copy_has_correct_values() {
         let mat = Mat::from_fn(3, 4, |i, j| (i * 10 + j) as f32);
-        let row1 = row_to_vec(mat.as_ref(), 1);
-        assert_eq!(row1, vec![10.0, 11.0, 12.0, 13.0]);
-        let row2 = row_to_vec(mat.as_ref(), 2);
-        assert_eq!(row2, vec![20.0, 21.0, 22.0, 23.0]);
+        let rm = to_row_major_vec(mat.as_ref());
+        assert_eq!(row_of(&rm, 4, 1), &[10.0, 11.0, 12.0, 13.0]);
+        assert_eq!(row_of(&rm, 4, 2), &[20.0, 21.0, 22.0, 23.0]);
     }
 
     /// The centroid averages only the selected rows, column by column.
     #[test]
     fn mean_of_rows_known_centroid() {
         let mat = Mat::from_fn(3, 3, |i, j| (i * (j + 1) * 2) as f32);
-        let mean_all = mean_of_rows(mat.as_ref(), &[0, 1, 2]);
-        assert_eq!(mean_all, vec![2.0, 4.0, 6.0]);
+        let rm = to_row_major_vec(mat.as_ref());
+        let mut mean = vec![0.0f32; 3];
+        mean_of_rows_into(&rm, 3, &[0, 1, 2], &mut mean);
+        assert_eq!(mean, vec![2.0, 4.0, 6.0]);
 
         // subset
-        let mean_sub = mean_of_rows(mat.as_ref(), &[1, 2]);
-        assert_eq!(mean_sub, vec![3.0, 6.0, 9.0]);
+        mean_of_rows_into(&rm, 3, &[1, 2], &mut mean);
+        assert_eq!(mean, vec![3.0, 6.0, 9.0]);
     }
 
     /// Euclidean distance on a known triangle, and zero on two identical points.
@@ -721,7 +767,8 @@ mod tests {
             shape: (4, 4),
         };
         let snn = SparseGraph::new(4, empty_csr, false);
-        let s = sigma_from_snn(&snn, mat.as_ref(), 0, 0.1, 2, 1.0, 1e-8);
+        let rm = to_row_major_vec(mat.as_ref());
+        let s = sigma_from_snn(&snn, &rm, mat.ncols(), 0, 0.1, 2, 1.0, 1e-8);
         assert!(approx_eq(s, 1e-8, EPS));
     }
 
@@ -750,7 +797,8 @@ mod tests {
             shape: (4, 4),
         };
         let snn = SparseGraph::new(4, csr, false);
-        let s = sigma_from_snn(&snn, mat.as_ref(), 0, 0.1, 2, 1.0, 1e-8);
+        let rm = to_row_major_vec(mat.as_ref());
+        let s = sigma_from_snn(&snn, &rm, mat.ncols(), 0, 0.1, 2, 1.0, 1e-8);
         let expected = (14.0421 + 0.0 + 0.0) / 3.0;
         assert!(
             approx_eq(s, expected, 1e-2),

@@ -6,7 +6,8 @@
 use ann_search_rs::prelude::CagraGpuSearchParams;
 use ann_search_rs::{
     build_exhaustive_index_gpu, build_ivf_index_gpu, build_nndescent_index_gpu,
-    extract_nndescent_knn_gpu, query_exhaustive_index_gpu_self, query_ivf_index_gpu_self,
+    extract_nndescent_knn_gpu, query_exhaustive_index_gpu, query_exhaustive_index_gpu_self,
+    query_ivf_index_gpu, query_ivf_index_gpu_self, query_nndescent_index_gpu,
     query_nndescent_index_gpu_self,
 };
 use cubecl::Runtime;
@@ -25,6 +26,14 @@ use crate::prelude::*;
 /// floor: widening the degree for extraction must never narrow it below what
 /// the query path would have built.
 const NNDESCENT_GPU_DEFAULT_DEGREE: usize = 30;
+
+///////////
+// Types //
+///////////
+
+/// Neighbour indices from a GPU cross-query and, if requested, the distances.
+pub(crate) type GpuKnnQueryResult =
+    Result<(Vec<Vec<usize>>, Option<Vec<Vec<f32>>>), BixverseErrors>;
 
 //////////
 // Enum //
@@ -324,6 +333,106 @@ pub fn dispatch_knn_gpu<R: Runtime>(
     };
 
     Ok(drop_self_neighbours(raw_indices, k))
+}
+
+/// Build a GPU index on `reference` and query it with every row of `query`.
+///
+/// The cross-query sibling of [`dispatch_knn_gpu`], shared by the batch
+/// correction methods. Nothing is dropped from the rows, since query and
+/// reference are different matrices. An unrecognised method string warns and
+/// falls back to the default rather than erroring.
+///
+/// ### Params
+///
+/// * `reference` - The data the index is built on (cells x features).
+/// * `query` - The query points (cells x features).
+/// * `k` - Neighbours to return per query point.
+/// * `params` - The [`KnnParamsGpu`] for this run. `k` and `extract_knn` are
+///   ignored, since extraction hands back the index's own graph rather than
+///   the results of a query.
+/// * `device` - CubeCL runtime device.
+/// * `seed` - Random seed for the index build.
+/// * `return_dist` - Return the distances as well. These come back in the
+///   index's metric, so squared for Euclidean.
+/// * `verbose` - Detailed verbosity flag handed to the index build and query.
+///
+/// ### Returns
+///
+/// Reference-local neighbour indices, one row per query point, and the
+/// distances if requested.
+///
+/// ### Errors
+///
+/// * `AnnSearchRsError` if an index build or query fails.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dispatch_knn_query_gpu<R: Runtime>(
+    reference: MatRef<f32>,
+    query: MatRef<f32>,
+    k: usize,
+    params: &KnnParamsGpu,
+    device: R::Device,
+    seed: usize,
+    return_dist: bool,
+    verbose: bool,
+) -> GpuKnnQueryResult {
+    let method = parse_knn_method_gpu(&params.knn_method).unwrap_or_else(|| {
+        println!(
+            "Unrecognised GPU kNN method provided: {:?}. Defaulting to exhaustive GPU.",
+            params.knn_method
+        );
+        KnnSearchGpu::default()
+    });
+
+    let res = match method {
+        KnnSearchGpu::ExhaustiveGpu => {
+            let index = build_exhaustive_index_gpu::<f32, R>(reference, &params.ann_dist, device)?;
+            query_exhaustive_index_gpu(query, &index, k, return_dist, verbose)?
+        }
+        KnnSearchGpu::IvfGpu => {
+            let index = build_ivf_index_gpu::<f32, R>(
+                reference,
+                params.n_list,
+                None,
+                &params.ann_dist,
+                seed,
+                verbose,
+                device,
+            )?;
+            query_ivf_index_gpu(query, &index, k, params.n_probe, None, return_dist, verbose)?
+        }
+        KnnSearchGpu::CagraGpu => {
+            // `retain_gpu` has to be set: the cross-query path needs the
+            // vectors to stay device-resident after the build.
+            let mut index = build_nndescent_index_gpu::<f32, R>(
+                reference,
+                &params.ann_dist,
+                params.graph_k,
+                params.k_build,
+                None,
+                params.n_tree,
+                Some(params.delta),
+                params.rho,
+                params.refine_knn,
+                seed,
+                verbose,
+                true,
+                device,
+            )?;
+
+            let query_params = cagra_query_params(params, k, params.graph_k);
+
+            query_nndescent_index_gpu(
+                query,
+                &mut index,
+                k,
+                Some(query_params),
+                return_dist,
+                verbose,
+            )?
+        }
+    };
+
+    Ok(res)
 }
 
 ///////////

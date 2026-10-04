@@ -19,6 +19,7 @@
 //! * `Spearman`: no pre-processing needed.
 
 use faer::Mat;
+use rayon::prelude::*;
 
 use super::params::{SimilarityMethod, SimilarityParams};
 use super::pile::Pile;
@@ -48,9 +49,15 @@ use crate::prelude::*;
 fn preprocess(dense: &Mat<f32>, params: &SimilarityParams) -> Mat<f32> {
     let reg = params.value_regularisation;
     match params.method {
-        SimilarityMethod::LogPearson => Mat::from_fn(dense.nrows(), dense.ncols(), |i, j| {
-            (dense[(i, j)] + reg + 1.0).log2()
-        }),
+        SimilarityMethod::LogPearson => {
+            let mut out = Mat::<f32>::zeros(dense.nrows(), dense.ncols());
+            out.par_col_iter_mut().enumerate().for_each(|(j, mut col)| {
+                for i in 0..col.nrows() {
+                    col[i] = (dense[(i, j)] + reg + 1.0).log2();
+                }
+            });
+            out
+        }
         SimilarityMethod::Pearson => {
             if reg == 0.0 {
                 dense.clone()
