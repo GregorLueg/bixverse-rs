@@ -7,7 +7,7 @@
 //! depends only on the cached terms, not on the reference cells.
 
 use ann_search_rs::*;
-use faer::linalg::solvers::{DenseSolveCore, PartialPivLu};
+use faer::linalg::solvers::{PartialPivLu, Solve};
 use faer::{Accum, Mat, MatMut, MatRef, Par};
 use indexmap::IndexSet;
 use rayon::prelude::*;
@@ -460,8 +460,7 @@ fn moe_correct_query(
             }
 
             let lu: PartialPivLu<f64> = design_cov.partial_piv_lu();
-            let inv_cov = lu.inverse();
-            let w_f64 = &inv_cov * &phi_z;
+            let w_f64 = lu.solve(&phi_z);
             Mat::<f32>::from_fn(p, d, |i, j| w_f64[(i, j)] as f32)
         })
         .collect();
