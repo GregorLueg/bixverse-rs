@@ -39,7 +39,7 @@ const GENE_BATCH_SIZE: usize = 1000;
 ///////////
 
 /// Loaded panel: centred counts, wy (both n_cells x panel), eg2, per-gene max.
-type PanelData = (Mat<f32>, Mat<f32>, Vec<f32>, Vec<f32>);
+type PanelData = (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>);
 
 ////////////
 // Params //
@@ -250,6 +250,44 @@ struct GraphCsr {
     weights: Vec<f32>,
 }
 
+/// Gathered dot product of one CSR row against a dense vector
+///
+/// Four independent accumulators break the add dependency chain; the
+/// summation order differs from a sequential loop only by that grouping.
+///
+/// ### Params
+///
+/// * `weights` - Row weights
+/// * `indices` - Row column indices, same length as `weights`
+/// * `c` - Dense vector
+///
+/// ### Returns
+///
+/// `sum_k w_k * c[idx_k]`, or `sum_k w_k^2 * c[idx_k]` when `SQUARED`
+#[inline]
+fn row_dot<const SQUARED: bool>(weights: &[f32], indices: &[u32], c: &[f32]) -> f32 {
+    let term = |w: f32, idx: u32| -> f32 {
+        let x = c[idx as usize];
+        if SQUARED { w * w * x } else { w * x }
+    };
+
+    let w_chunks = weights.chunks_exact(4);
+    let i_chunks = indices.chunks_exact(4);
+    let (w_rem, i_rem) = (w_chunks.remainder(), i_chunks.remainder());
+
+    let mut acc = [0.0_f32; 4];
+    for (w, idx) in w_chunks.zip(i_chunks) {
+        for lane in 0..4 {
+            acc[lane] += term(w[lane], idx[lane]);
+        }
+    }
+    let mut tail = 0.0_f32;
+    for (&w, &idx) in w_rem.iter().zip(i_rem) {
+        tail += term(w, idx);
+    }
+    (acc[0] + acc[1]) + (acc[2] + acc[3]) + tail
+}
+
 impl GraphCsr {
     /// Build the symmetric CSR from the non-redundant neighbour/weight arrays.
     ///
@@ -322,13 +360,8 @@ impl GraphCsr {
     /// Nothing; writes result into `out`.
     fn spmv(&self, c: &[f32], out: &mut [f32]) {
         for i in 0..self.n_nodes() {
-            let start = self.offsets[i];
-            let end = self.offsets[i + 1];
-            let mut acc = 0.0_f32;
-            for k in start..end {
-                acc += self.weights[k] * c[self.indices[k] as usize];
-            }
-            out[i] = acc;
+            let (start, end) = (self.offsets[i], self.offsets[i + 1]);
+            out[i] = row_dot::<false>(&self.weights[start..end], &self.indices[start..end], c);
         }
     }
 
@@ -349,12 +382,8 @@ impl GraphCsr {
     fn quadratic_form(&self, c: &[f32]) -> f32 {
         let mut total = 0.0_f32;
         for i in 0..self.n_nodes() {
-            let start = self.offsets[i];
-            let end = self.offsets[i + 1];
-            let mut acc = 0.0_f32;
-            for k in start..end {
-                acc += self.weights[k] * c[self.indices[k] as usize];
-            }
+            let (start, end) = (self.offsets[i], self.offsets[i + 1]);
+            let acc = row_dot::<false>(&self.weights[start..end], &self.indices[start..end], c);
             total += c[i] * acc;
         }
         total
@@ -375,14 +404,8 @@ impl GraphCsr {
     /// Nothing; writes result into `out`.
     fn spmv_sq(&self, c: &[f32], out: &mut [f32]) {
         for i in 0..self.n_nodes() {
-            let start = self.offsets[i];
-            let end = self.offsets[i + 1];
-            let mut acc = 0.0_f32;
-            for k in start..end {
-                let w = self.weights[k];
-                acc += w * w * c[self.indices[k] as usize];
-            }
-            out[i] = acc;
+            let (start, end) = (self.offsets[i], self.offsets[i + 1]);
+            out[i] = row_dot::<true>(&self.weights[start..end], &self.indices[start..end], c);
         }
     }
 }
@@ -607,150 +630,6 @@ fn binarise(vals: &mut [f32]) {
     }
 }
 
-/// Centre gene counts for correlation computation
-///
-/// Standardises gene expression using the specified model, transforming to
-/// zero mean and unit variance.
-///
-/// ### Params
-///
-/// * `gene` - Reference to gene expression data
-/// * `umi_counts` - Total UMI counts per cell
-/// * `n_cells` - Number of cells
-/// * `model` - Statistical model to use
-///
-/// ### Returns
-///
-/// Vector of centred expression values
-fn create_centered_counts_gene(
-    gene: &CscGeneChunk,
-    umi_counts: &[f32],
-    n_cells: usize,
-    model: &GexModel,
-) -> Vec<f32> {
-    let mut vals = vec![0_f32; n_cells];
-    for (&idx, val) in gene.indices.iter().zip(gene.data_raw.iter()) {
-        vals[idx as usize] = val as f32;
-    }
-
-    // Bernoulli models detection, so it fits and centres the indicator rather
-    // than the counts, see `local_stats_pairs.py:417`.
-    if matches!(model, GexModel::Bernoulli) {
-        binarise(&mut vals);
-    }
-
-    let (mu, var, _) = match model {
-        GexModel::DephAdjustNegBinom => danb_model(gene, umi_counts, n_cells),
-        GexModel::Bernoulli => bernoulli_model(gene, umi_counts, n_cells),
-        GexModel::Normal => normal_model(gene, umi_counts, n_cells),
-        GexModel::PreStandardised => return vals,
-    };
-
-    center_values(&mut vals, &mu, &var);
-
-    vals
-}
-
-////////////////
-// DANB model //
-////////////////
-
-/// Depth-adjusted negative binomial (DANB) model
-///
-/// Fits a negative binomial distribution to gene expression data, adjusting
-/// for sequencing depth differences between cells.
-///
-/// ### Params
-///
-/// * `gene` - Reference to the CscGeneChunk on which to apply the model.
-/// * `umi_counts` - Slice of the UMI counts across these cells (i.e.,
-///   sequencing depth).
-/// * `n_cells` - Total number of cells
-///
-/// ### Returns
-///
-/// Tuple of (mu, var, x2) where:
-/// - mu: Mean expression for each cell
-/// - var: Variance for each cell
-/// - x2: Second moment (var + mu²) for each cell
-fn danb_model(
-    gene: &CscGeneChunk,
-    umi_counts: &[f32],
-    n_cells: usize,
-) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
-    let n = n_cells as f64;
-    // f64 throughout the moment matching, see `Hotspot::fit_danb`
-    let total = sum_widen_simd_f32(umi_counts);
-    let tj: f64 = gene.data_raw.iter().map(|x| x as f64).sum();
-
-    let scale = (tj / total) as f32;
-    let mu: Vec<f32> = umi_counts.iter().map(|&ti| scale * ti).collect();
-
-    // Build dense array for O(1) lookups
-    let mut data_dense = vec![0.0f32; n_cells];
-    for (&idx, val) in gene.indices.iter().zip(gene.data_raw.iter()) {
-        data_dense[idx as usize] = val as f32;
-    }
-
-    let mut sum_sq = 0_f64;
-    for i in 0..n_cells {
-        let diff = (data_dense[i] - mu[i]) as f64;
-        sum_sq += diff * diff;
-    }
-
-    let vv = sum_sq / (n - 1.0);
-    let tis_sq_sum = sum_squared_dev_widen_simd_f32(umi_counts, 0.0);
-    let mut size = ((tj * tj) / total) * (tis_sq_sum / total) / ((n - 1.0) * vv - tj);
-
-    if size < 0.0 {
-        size = 1e9;
-    } else if size < 1e-10 {
-        size = 1e-10;
-    }
-    let size = size as f32;
-
-    let var: Vec<f32> = mu.iter().map(|&m| m * (1.0 + m / size)).collect();
-    let x2: Vec<f32> = var.iter().zip(&mu).map(|(&v, &m)| v + m * m).collect();
-
-    (mu, var, x2)
-}
-
-/////////////////////
-// Bernoulli model //
-/////////////////////
-
-/// Bin gene detections by UMI count bins
-///
-/// Calculates the detection rate within each bin, applying Laplace smoothing
-/// to handle edge cases (0% or 100% detection).
-///
-/// ### Params
-///
-/// * `detected_gene` - Binary detection indicators (0 or 1) for each cell
-/// * `umi_count_bins` - Bin assignment for each cell
-/// * `n_bins` - Total number of bins
-///
-/// ### Returns
-///
-/// Vector of detection rates per bin (with Laplace smoothing)
-fn bin_gene_detection(detected_gene: &[f32], umi_count_bins: &[usize], n_bins: usize) -> Vec<f32> {
-    let mut bin_detects = vec![0_f32; n_bins];
-    let mut bin_totals = vec![0_f32; n_bins];
-
-    for i in 0..detected_gene.len() {
-        let bin_i = umi_count_bins[i];
-        bin_detects[bin_i] += detected_gene[i];
-        bin_totals[bin_i] += 1.0;
-    }
-
-    // laplace smoothing
-    bin_detects
-        .iter()
-        .zip(&bin_totals)
-        .map(|(&d, &t)| (d + 1.0) / (t + 2.0))
-        .collect()
-}
-
 /// Quantile-based binning with duplicate edge handling
 ///
 /// Generates quantile-based bins from data, dropping duplicate bin edges when
@@ -803,131 +682,6 @@ fn quantile_cut(data: &[f32], n_bins: usize) -> (Vec<usize>, Vec<f32>) {
         .collect();
 
     (bin_assignments, edges)
-}
-
-/// Bernoulli model for gene expression
-///
-/// Models the probability of detecting gene expression using a Bernoulli
-/// distribution. Fits a logistic regression model on binned UMI counts to
-/// predict detection probability.
-///
-/// ### Params
-///
-/// * `gene` - Reference to the CscGeneChunk containing gene expression data
-/// * `umi_counts` - Total UMI counts per cell
-/// * `n_cells` - Total number of cells
-///
-/// ### Returns
-///
-/// Tuple of (mu, var, x2) where:
-/// - mu: Detection probability for each cell
-/// - var: Variance (p * (1-p)) for each cell
-/// - x2: Second moment (equal to mu for Bernoulli)
-fn bernoulli_model(
-    gene: &CscGeneChunk,
-    umi_counts: &[f32],
-    n_cells: usize,
-) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
-    const N_BIN_TARGET: usize = 30;
-
-    let mut detected_gene = vec![0_f32; n_cells];
-    for idx in &gene.indices {
-        detected_gene[*idx as usize] = 1.0;
-    }
-
-    let log_umi: Vec<f32> = umi_counts
-        .iter()
-        .map(|&x| if x > 0.0 { x.log10() } else { 0.0 })
-        .collect();
-
-    let (umi_count_bins, bin_edges) = quantile_cut(&log_umi, N_BIN_TARGET);
-    let n_bins = bin_edges.len() - 1;
-
-    let bin_centers: Vec<f32> = (0..n_bins)
-        .map(|i| (bin_edges[i] + bin_edges[i + 1]) / 2.0)
-        .collect();
-
-    let bin_detects = bin_gene_detection(&detected_gene, &umi_count_bins, n_bins);
-
-    let lbin_detects: Vec<f32> = bin_detects.iter().map(|&p| logit(p)).collect();
-    let coef = linear_regression(&bin_centers, &lbin_detects);
-
-    let mu: Vec<f32> = log_umi
-        .iter()
-        .map(|&log_u| inv_logit(coef.0 + coef.1 * log_u))
-        .collect();
-
-    let var: Vec<f32> = mu.iter().map(|&p| p * (1.0 - p)).collect();
-    let x2: Vec<f32> = mu.clone();
-
-    (mu, var, x2)
-}
-
-//////////////////
-// Normal model //
-//////////////////
-
-/// Normal model for gene expression
-///
-/// Simplest model just using the normalised counts in the data.
-///
-/// ### Params
-///
-/// * `gene` - Reference to the CscGeneChunk containing gene expression data
-/// * `n_cells` - Total number of cells
-///
-/// ### Returns
-///
-/// Tuple of (mu, var, x2) where:
-/// - mu: Mean expression for each cell (from linear regression)
-/// - var: Residual variance (constant across cells)
-/// - x2: Second moment (var + mu²) for each cell
-fn normal_model(
-    gene: &CscGeneChunk,
-    umi_counts: &[f32],
-    n_cells: usize,
-) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
-    let mut gene_raw = vec![0_f32; n_cells];
-    for (&idx, val) in gene.indices.iter().zip(gene.data_raw.iter()) {
-        gene_raw[idx as usize] = val as f32;
-    }
-
-    let n = n_cells as f64;
-    let umi_mean = sum_widen_simd_f32(umi_counts) / n;
-    let umi_var = sum_squared_dev_widen_simd_f32(umi_counts, umi_mean);
-
-    // Degenerate design: the regression has nothing to fit against, so fall
-    // back on the gene's own moments.
-    if umi_var == 0.0 {
-        let mean = sum_widen_simd_f32(&gene_raw) / n;
-        let sq = sum_squared_dev_widen_simd_f32(&gene_raw, mean);
-        let (mu_val, var_val) = (mean as f32, (sq / n) as f32);
-        return (
-            vec![mu_val; n_cells],
-            vec![var_val; n_cells],
-            vec![var_val + mu_val * mu_val; n_cells],
-        );
-    }
-
-    // Expression ~ raw library size, matching `normal_model.py`
-    let (intercept, slope) = linear_regression_widen(umi_counts, &gene_raw);
-    let mu: Vec<f32> = umi_counts.iter().map(|&x| intercept + slope * x).collect();
-
-    // `np.var` of the residuals, so `n` and not the regression's `n - 2`
-    let residuals_sq: f64 = gene_raw
-        .iter()
-        .zip(&mu)
-        .map(|(&obs, &pred)| {
-            let d = (obs - pred) as f64;
-            d * d
-        })
-        .sum();
-    let var_val = (residuals_sq / n) as f32;
-
-    let var = vec![var_val; n_cells];
-    let x2: Vec<f32> = mu.iter().map(|&m| var_val + m * m).collect();
-
-    (mu, var, x2)
 }
 
 //////////
@@ -1267,25 +1021,7 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
         centered: bool,
         sc: &mut GeneScratch,
     ) -> (usize, f32, f32) {
-        sc.vals.fill(0.0);
-        for (&idx, val) in gene_chunk.indices.iter().zip(gene_chunk.data_raw.iter()) {
-            sc.vals[idx as usize] = val as f32;
-        }
-
-        // Bernoulli models detection, so both the fit and the statistic run on
-        // the indicator, see `local_stats.py:254`.
-        if matches!(gex_model, GexModel::Bernoulli) {
-            binarise(&mut sc.vals);
-        }
-
-        match gex_model {
-            GexModel::DephAdjustNegBinom => {
-                self.fit_danb(gene_chunk, sc);
-            }
-            GexModel::Bernoulli => self.fit_bernoulli(gene_chunk, sc),
-            GexModel::Normal => self.fit_normal(sc),
-            GexModel::PreStandardised => self.fit_pre_standardised(sc),
-        }
+        self.load_and_fit(gene_chunk, gex_model, sc);
 
         if centered && !matches!(gex_model, GexModel::PreStandardised) {
             center_values(&mut sc.vals, &sc.mu, &sc.var);
@@ -1319,6 +1055,64 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
     /////////////
     // Helpers //
     /////////////
+
+    /// Scatter a gene into dense scratch and fit its model.
+    ///
+    /// ### Params
+    ///
+    /// * `gene_chunk` - Gene chunk
+    /// * `gex_model` - Expression model
+    /// * `sc` - Scratch; `vals` receives the dense (binarised for Bernoulli)
+    ///   counts, `mu`, `var` and `x2` the fit
+    ///
+    /// ### Returns
+    ///
+    /// Nothing; writes into `sc`.
+    fn load_and_fit(&self, gene_chunk: &CscGeneChunk, gex_model: &GexModel, sc: &mut GeneScratch) {
+        sc.vals.fill(0.0);
+        for (&idx, val) in gene_chunk.indices.iter().zip(gene_chunk.data_raw.iter()) {
+            sc.vals[idx as usize] = val as f32;
+        }
+
+        // Bernoulli models detection, so both the fit and the statistic run on
+        // the indicator, see `local_stats.py:254`.
+        if matches!(gex_model, GexModel::Bernoulli) {
+            binarise(&mut sc.vals);
+        }
+
+        match gex_model {
+            GexModel::DephAdjustNegBinom => self.fit_danb(gene_chunk, sc),
+            GexModel::Bernoulli => self.fit_bernoulli(gene_chunk, sc),
+            GexModel::Normal => self.fit_normal(sc),
+            GexModel::PreStandardised => self.fit_pre_standardised(sc),
+        }
+    }
+
+    /// Centre one gene into a column of the pairwise count matrix.
+    ///
+    /// ### Params
+    ///
+    /// * `gene_chunk` - Gene chunk
+    /// * `gex_model` - Expression model
+    /// * `sc` - Per-worker scratch
+    /// * `out` - Output column of length `n_cells`
+    ///
+    /// ### Returns
+    ///
+    /// Nothing; writes the centred counts into `out`.
+    fn centre_gene_into(
+        &self,
+        gene_chunk: &CscGeneChunk,
+        gex_model: &GexModel,
+        sc: &mut GeneScratch,
+        out: &mut [f32],
+    ) {
+        self.load_and_fit(gene_chunk, gex_model, sc);
+        if !matches!(gex_model, GexModel::PreStandardised) {
+            center_values(&mut sc.vals, &sc.mu, &sc.var);
+        }
+        out.copy_from_slice(&sc.vals);
+    }
 
     /// Fit the DANB model into scratch (reads dense raw from `sc.vals`).
     ///
@@ -1540,11 +1334,10 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
         let mut cc = vec![0_f32; self.n_cells * n_genes];
         cc.par_chunks_mut(self.n_cells)
             .zip(gene_chunks.par_iter())
-            .for_each(|(col, gene)| {
-                let centered =
-                    create_centered_counts_gene(gene, &self.umi_counts, self.n_cells, &gex_model);
-                col.copy_from_slice(&centered);
-            });
+            .for_each_init(
+                || GeneScratch::new(self.n_cells, false),
+                |sc, (col, gene)| self.centre_gene_into(gene, &gex_model, sc, col),
+            );
         drop(gene_chunks);
 
         if verbosity.normal_verbosity() {
@@ -1566,17 +1359,16 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
                 *m = compute_local_cov_max(&self.node_degrees, c_col);
             });
 
-        let c_mat = Mat::<f32>::from_fn(self.n_cells, n_genes, |i, j| cc[j * self.n_cells + i]);
-        drop(cc);
-        let wy_mat = Mat::<f32>::from_fn(self.n_cells, n_genes, |i, j| wy[j * self.n_cells + i]);
-        drop(wy);
+        // Both buffers are already column-major, so view them in place
+        let c_mat = MatRef::from_column_major_slice(&cc, self.n_cells, n_genes);
+        let wy_mat = MatRef::from_column_major_slice(&wy, self.n_cells, n_genes);
 
         if verbosity.normal_verbosity() {
             println!("Computed wy/eg2/maxs in {:.2?}", start_eg2.elapsed());
             println!("Computing pairwise correlations (GEMM)...");
         }
 
-        // LC = C^T @ WY is symmetric: compute the lower triangle, then reflect.
+        // LC = C^T @ WY is symmetric: only the lower triangle is computed and read.
         let start_pairs = Instant::now();
         let mut lc = Mat::<f32>::zeros(n_genes, n_genes);
         gram(
@@ -1584,38 +1376,16 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
             BlockStructure::TriangularLower,
             Accum::Replace,
             c_mat.transpose(),
-            wy_mat.as_ref(),
+            wy_mat,
             1.0_f32,
             faer_parallelism(),
         );
-        for j in 0..n_genes {
-            for i in 0..j {
-                lc[(i, j)] = lc[(j, i)];
-            }
-        }
 
         if verbosity.normal_verbosity() {
             println!("Computed GEMM in {:.2?}", start_pairs.elapsed());
         }
 
-        let mut lc_mat = Mat::<f32>::zeros(n_genes, n_genes);
-        let mut z_mat = Mat::<f32>::zeros(n_genes, n_genes);
-
-        for i in 0..n_genes {
-            for j in (i + 1)..n_genes {
-                Self::write_pair(
-                    &mut lc_mat,
-                    &mut z_mat,
-                    i,
-                    j,
-                    lc[(i, j)],
-                    eg2s[i],
-                    eg2s[j],
-                    gene_maxs[i],
-                    gene_maxs[j],
-                );
-            }
-        }
+        let (lc_mat, z_mat) = symmetric_pair_matrices(lc.as_ref(), &eg2s, &gene_maxs);
 
         if verbosity.normal_verbosity() {
             println!("Done!");
@@ -1692,15 +1462,10 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
                 cc[base * n_cells..(base + chunk_indices.len()) * n_cells]
                     .par_chunks_mut(n_cells)
                     .zip(chunks.par_iter())
-                    .for_each(|(col, gene)| {
-                        let centered = create_centered_counts_gene(
-                            gene,
-                            &self.umi_counts,
-                            n_cells,
-                            &gex_model,
-                        );
-                        col.copy_from_slice(&centered);
-                    });
+                    .for_each_init(
+                        || GeneScratch::new(n_cells, false),
+                        |sc, (col, gene)| self.centre_gene_into(gene, &gex_model, sc, col),
+                    );
                 written += chunk_indices.len();
             }
 
@@ -1716,10 +1481,7 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
                     *m = compute_local_cov_max(&self.node_degrees, c_col);
                 });
 
-            let c_mat = Mat::<f32>::from_fn(n_cells, p, |i, j| cc[j * n_cells + i]);
-            drop(cc);
-            let wy_mat = Mat::<f32>::from_fn(n_cells, p, |i, j| wy[j * n_cells + i]);
-            Ok((c_mat, wy_mat, eg2, maxs))
+            Ok((cc, wy, eg2, maxs))
         };
 
         let panel_starts: Vec<usize> = (0..n_genes).step_by(panel_size).collect();
@@ -1740,7 +1502,9 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
             let li = pend_i - pstart_i;
 
             let start_panel = Instant::now();
-            let (ci, wyi, eg2i, maxi) = load_panel(&gene_indices[pstart_i..pend_i])?;
+            let (ci_flat, wyi_flat, eg2i, maxi) = load_panel(&gene_indices[pstart_i..pend_i])?;
+            let ci = MatRef::from_column_major_slice(&ci_flat, n_cells, li);
+            let wyi = MatRef::from_column_major_slice(&wyi_flat, n_cells, li);
 
             if verbosity.normal_verbosity() {
                 println!(
@@ -1770,26 +1534,19 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
                         BlockStructure::TriangularLower,
                         Accum::Replace,
                         ci.transpose(),
-                        wyi.as_ref(),
+                        wyi,
                         1.0_f32,
                         faer_parallelism(),
                     );
-                    for b in 0..li {
+                    // Only the lower triangle of the block is valid
+                    for b in 1..li {
                         for a in 0..b {
-                            block[(a, b)] = block[(b, a)];
-                        }
-                    }
-
-                    for a in 0..li {
-                        for b in (a + 1)..li {
-                            let gi = pstart_i + a;
-                            let gj = pstart_i + b;
                             Self::write_pair(
                                 &mut lc_mat,
                                 &mut z_mat,
-                                gi,
-                                gj,
-                                block[(a, b)],
+                                pstart_i + a,
+                                pstart_i + b,
+                                block[(b, a)],
                                 eg2i[a],
                                 eg2i[b],
                                 maxi[a],
@@ -1798,7 +1555,8 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
                         }
                     }
                 } else {
-                    let (_, wyj, eg2j, maxj) = load_panel(&gene_indices[pstart_j..pend_j])?;
+                    let (_, wyj_flat, eg2j, maxj) = load_panel(&gene_indices[pstart_j..pend_j])?;
+                    let wyj = MatRef::from_column_major_slice(&wyj_flat, n_cells, lj);
 
                     // Rectangular block C_i^T @ WY_j.
                     let mut block = Mat::<f32>::zeros(li, lj);
@@ -1806,13 +1564,13 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
                         block.as_mut(),
                         Accum::Replace,
                         ci.transpose(),
-                        wyj.as_ref(),
+                        wyj,
                         1.0_f32,
                         faer_parallelism(),
                     );
 
-                    for a in 0..li {
-                        for b in 0..lj {
+                    for b in 0..lj {
+                        for a in 0..li {
                             let gi = pstart_i + a;
                             let gj = pstart_j + b; // pstart_i < pstart_j => gi < gj
                             Self::write_pair(
@@ -1891,6 +1649,82 @@ impl<'a, S: SingleCellReading> Hotspot<'a, S> {
 ////////////////
 // Clustering //
 ////////////////
+
+/// Normalised local covariance and Z-score of one gene pair
+///
+/// ### Params
+///
+/// * `lc` - Raw local covariance of the pair
+/// * `eg2_i` - Expected squared covariance for the first gene
+/// * `eg2_j` - Expected squared covariance for the second gene
+/// * `max_i` - Maximum possible local covariance for the first gene
+/// * `max_j` - Maximum possible local covariance for the second gene
+///
+/// ### Returns
+///
+/// `(normalised_lc, z)`, or `None` when the Z-score is not finite
+#[inline]
+fn pair_stats(lc: f32, eg2_i: f32, eg2_j: f32, max_i: f32, max_j: f32) -> Option<(f32, f32)> {
+    let lc_max = (max_i + max_j) * 0.5;
+    let normalised_lc = if lc_max > 0.0 { lc / lc_max } else { 0.0 };
+    // Smaller-magnitude z == divide by the larger denominator.
+    let z = lc / eg2_i.max(eg2_j).sqrt();
+    z.is_finite().then_some((normalised_lc, z))
+}
+
+/// Tile edge of the lower-to-upper mirror
+const MIRROR_TILE: usize = 32;
+
+/// Build the symmetric correlation and Z-score matrices from the lower
+/// triangle of the local covariance
+///
+/// Columns are filled in parallel from the (contiguous) lower triangle, then
+/// mirrored tile by tile. The diagonal stays zero.
+///
+/// ### Params
+///
+/// * `lc` - Local covariance; only the strict lower triangle is read
+/// * `eg2` - Expected squared covariance per gene
+/// * `maxs` - Maximum possible local covariance per gene
+///
+/// ### Returns
+///
+/// `(normalised_lc, z_scores)` as symmetric `n x n` matrices
+fn symmetric_pair_matrices(lc: MatRef<f32>, eg2: &[f32], maxs: &[f32]) -> (Mat<f32>, Mat<f32>) {
+    let n = lc.nrows();
+    let mut lc_flat = vec![0.0_f32; n * n];
+    let mut z_flat = vec![0.0_f32; n * n];
+
+    lc_flat
+        .par_chunks_mut(n.max(1))
+        .zip(z_flat.par_chunks_mut(n.max(1)))
+        .enumerate()
+        .for_each(|(j, (lc_col, z_col))| {
+            for i in (j + 1)..n {
+                if let Some((l, z)) = pair_stats(lc[(i, j)], eg2[i], eg2[j], maxs[i], maxs[j]) {
+                    lc_col[i] = l;
+                    z_col[i] = z;
+                }
+            }
+        });
+
+    for flat in [&mut lc_flat, &mut z_flat] {
+        for jb in (0..n).step_by(MIRROR_TILE) {
+            for ib in (jb..n).step_by(MIRROR_TILE) {
+                for j in jb..(jb + MIRROR_TILE).min(n) {
+                    for i in ib.max(j + 1)..(ib + MIRROR_TILE).min(n) {
+                        flat[i * n + j] = flat[j * n + i];
+                    }
+                }
+            }
+        }
+    }
+
+    (
+        MatRef::from_column_major_slice(&lc_flat, n, n).to_owned(),
+        MatRef::from_column_major_slice(&z_flat, n, n).to_owned(),
+    )
+}
 
 /////////////////////////
 // BH threshold search //
