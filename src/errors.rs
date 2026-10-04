@@ -582,6 +582,26 @@ pub enum BixverseErrors {
     #[error("Invalid raw count element size discriminant: {0}")]
     RawElemSizeInvalid(u8),
 
+    /// The file is not a bixverse count archive.
+    #[cfg(feature = "single-cell")]
+    #[error("Not a bixverse count archive (magic string mismatch)")]
+    ArchiveMagicMismatch,
+
+    /// The archive was written by an incompatible archive format version.
+    #[cfg(feature = "single-cell")]
+    #[error("Archive version mismatch: expected {expected}, got {found}")]
+    ArchiveVersionMismatch {
+        /// Version the current build expects.
+        expected: u32,
+        /// Version actually read from the archive.
+        found: u32,
+    },
+
+    /// The archive is truncated or corrupt, or a chunk cannot be archived.
+    #[cfg(feature = "single-cell")]
+    #[error("Corrupt count archive: {0}")]
+    ArchiveCorrupt(String),
+
     /// A raw count read from disk does not fit the requested numeric type.
     ///
     /// Raised by `from_gene_chunks` / `from_cell_chunks` instead of silently

@@ -3,7 +3,6 @@
 //! writers and readers.
 
 use bincode::{Decode, Encode, config, decode_from_slice, serde::encode_to_vec};
-use half::f16;
 use indexmap::IndexSet;
 use lz4_flex::{compress_prepend_size, decompress_size_prepended};
 use memmap2::MmapOptions;
@@ -43,8 +42,8 @@ pub enum RawCounts {
 
 /// Raw count element size discriminant for the binary format.
 /// Stored as a single byte in chunk headers.
-const RAW_ELEM_U16: u8 = 2;
-const RAW_ELEM_U32: u8 = 4;
+pub(crate) const RAW_ELEM_U16: u8 = 2;
+pub(crate) const RAW_ELEM_U32: u8 = 4;
 
 /// Header length of a CSR cell chunk: 4+4+4+8+8+4 bytes. See
 /// [`CsrCellChunk::write_to_bytes`] for the field layout.
@@ -372,6 +371,25 @@ impl CellOnFileQuality {
 // CsrCellChunk //
 //////////////////
 
+/// The `data_norm` value of one count: `f16(ln1p(x / lib_size * target_size))`.
+///
+/// The single definition of the normalised layer. The archive drops the norm
+/// and recomputes it with this on restore, so any change here breaks bit
+/// identity with files written before it.
+///
+/// ### Params
+///
+/// * `x` - Raw count
+/// * `lib_size` - Library size of the cell
+/// * `target_size` - Target size of the normalisation
+///
+/// ### Returns
+///
+/// The normalised value.
+pub fn norm_value(x: f32, lib_size: f32, target_size: f32) -> F16 {
+    F16::from_f32((x / lib_size * target_size).ln_1p())
+}
+
 /// CsrCellChunk
 ///
 /// This structure is designed to store the data of a single cell in a
@@ -429,10 +447,7 @@ impl CsrCellChunk {
         let sum = data_f32.iter().sum::<f32>();
         let data_norm: Vec<F16> = data_f32
             .into_iter()
-            .map(|x| {
-                let norm = (x / sum * size_factor).ln_1p();
-                F16::from(f16::from_f32(norm))
-            })
+            .map(|x| norm_value(x, sum, size_factor))
             .collect();
 
         let raw_u32: Vec<u32> = data.iter().map(|&x| x.to_u32()).collect();
