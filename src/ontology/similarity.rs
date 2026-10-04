@@ -2,22 +2,17 @@
 //! implemented for now)
 
 use faer::Mat;
-use once_cell::sync::Lazy;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
 use rayon::prelude::*;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::RwLock;
 
 use crate::prelude::*;
 
-/////////////
-// Globals //
-/////////////
-
-/// Static global for re-use
-static EMPTY_ANCESTORS: Lazy<FxHashSet<String>> = Lazy::new(FxHashSet::default);
+/// Tile edge for the transpose pass that mirrors the Wang similarity triangle
+const WANG_MIRROR_TILE: usize = 64;
 
 ///////////////////////////
 // Semantic similarities //
@@ -61,94 +56,107 @@ pub struct OntoSimRes<'a, T> {
     pub sim: T,
 }
 
-/// Get the information content of the MICA
+/// Terms interned to dense ids, with each term's ancestors that carry
+/// information content as an id-sorted list
 ///
-/// ### Params
+/// ### Fields
 ///
-/// * `t1` - Name of term 1.
-/// * `t2` - Name of term 2.
-/// * `ancestor_map` - HashMap with the ancestors of the terms.
-/// * `info_content_map` - HashMap with the information content for the terms.
-///
-/// ### Returns
-///
-/// The information content of the most informative common ancestors.
-#[inline]
-fn get_mica<T>(
-    t1: &str,
-    t2: &str,
-    ancestor_map: &FxHashMap<String, FxHashSet<String>>,
-    info_content_map: &BTreeMap<String, T>,
-) -> T
-where
-    T: BixverseFloat,
-{
-    let ancestor_1 = ancestor_map.get(t1).unwrap_or(&EMPTY_ANCESTORS);
-    let ancestor_2 = ancestor_map.get(t2).unwrap_or(&EMPTY_ANCESTORS);
-
-    let (smaller, larger) = if ancestor_1.len() <= ancestor_2.len() {
-        (ancestor_1, ancestor_2)
-    } else {
-        (ancestor_2, ancestor_1)
-    };
-
-    smaller
-        .iter()
-        .filter(|ancestor| larger.contains(*ancestor))
-        .filter_map(|ancestor| info_content_map.get(ancestor))
-        .fold(T::zero(), |max_ic, &ic| max_ic.max(ic))
+/// * `ids` - Term name to id
+/// * `ancestors` - Per term id, sorted `(ancestor id, information content)`
+/// * `term_ic` - Per term id, information content (1 when missing)
+struct InternedOntology<'a, T> {
+    ids: FxHashMap<&'a str, u32>,
+    ancestors: Vec<Vec<(u32, T)>>,
+    term_ic: Vec<T>,
 }
 
-/// Calculate semantic similarity between two terms
-///
-/// ### Params
-///
-/// * `t1` - Name of term 1.
-/// * `t2` - Name of term 2.
-/// * `sim_type` - `OntoSemSimType` defining the type of semantic similarity
-///   to calculate.
-/// * `max_ic` - The maximum information content observed to rescale the Resnik
-///   similarity between 0 and 1.
-/// * `ancestor_map` - HashMap with the ancestors of the terms.
-/// * `info_content_map` - BTreeMap with the information content for the terms.
-///
-/// ### Returns
-///
-/// `OntoSimRes` result.
-fn calculate_onto_similarity<'a, T>(
-    t1: &'a str,
-    t2: &'a str,
-    sim_type: &OntoSemSimType,
-    max_ic: T,
-    ancestor_map: &FxHashMap<String, FxHashSet<String>>,
-    info_content_map: &BTreeMap<String, T>,
-) -> OntoSimRes<'a, T>
-where
-    T: BixverseFloat,
-{
-    let mica = get_mica(t1, t2, ancestor_map, info_content_map);
-
-    let half = T::from_f32(0.5).unwrap();
-    let two = T::from_f32(2.0).unwrap();
-    let one = T::one();
-
-    let sim = match sim_type {
-        OntoSemSimType::Resnik => mica / max_ic,
-        OntoSemSimType::Lin => {
-            let t1_ic = info_content_map.get(t1).unwrap_or(&one);
-            let t2_ic = info_content_map.get(t2).unwrap_or(&one);
-            two * mica / (*t1_ic + *t2_ic)
+impl<'a, T: BixverseFloat> InternedOntology<'a, T> {
+    /// Intern the query terms and their ancestors
+    ///
+    /// ### Params
+    ///
+    /// * `terms_split` - The query terms, as given to `calculate_onto_sim`
+    /// * `ancestor_map` - HashMap with the ancestors of the terms.
+    /// * `info_content_map` - BTreeMap with the information content.
+    ///
+    /// ### Returns
+    ///
+    /// The interned structure.
+    fn new(
+        terms_split: &'a [(String, &[String])],
+        ancestor_map: &'a FxHashMap<String, FxHashSet<String>>,
+        info_content_map: &'a BTreeMap<String, T>,
+    ) -> Self {
+        let mut ids: FxHashMap<&'a str, u32> = FxHashMap::default();
+        let mut terms: Vec<&'a str> = Vec::new();
+        for (t1, others) in terms_split {
+            for term in std::iter::once(t1).chain(others.iter()) {
+                ids.entry(term.as_str()).or_insert_with(|| {
+                    terms.push(term.as_str());
+                    (terms.len() - 1) as u32
+                });
+            }
         }
-        OntoSemSimType::Combined => {
-            let t1_ic = info_content_map.get(t1).unwrap_or(&one);
-            let t2_ic = info_content_map.get(t2).unwrap_or(&one);
-            let lin_sim = two * mica / (*t1_ic + *t2_ic);
-            let resnik_sim = mica / max_ic;
-            (lin_sim + resnik_sim) * half
-        }
-    };
 
-    OntoSimRes { t1, t2, sim }
+        let n_terms = terms.len();
+        let mut ancestors: Vec<Vec<(u32, T)>> = Vec::with_capacity(n_terms);
+        let mut term_ic: Vec<T> = Vec::with_capacity(n_terms);
+        let mut next_id = n_terms as u32;
+
+        for &term in &terms {
+            term_ic.push(info_content_map.get(term).copied().unwrap_or(T::one()));
+
+            let mut list: Vec<(u32, T)> = Vec::new();
+            if let Some(set) = ancestor_map.get(term) {
+                for ancestor in set {
+                    if let Some(&ic) = info_content_map.get(ancestor) {
+                        let id = *ids.entry(ancestor.as_str()).or_insert_with(|| {
+                            next_id += 1;
+                            next_id - 1
+                        });
+                        list.push((id, ic));
+                    }
+                }
+            }
+            list.sort_unstable_by_key(|&(id, _)| id);
+            ancestors.push(list);
+        }
+
+        Self {
+            ids,
+            ancestors,
+            term_ic,
+        }
+    }
+
+    /// Information content of the most informative common ancestor
+    ///
+    /// ### Params
+    ///
+    /// * `a` - Id of term 1.
+    /// * `b` - Id of term 2.
+    ///
+    /// ### Returns
+    ///
+    /// The maximum information content over the common ancestors, zero if none.
+    #[inline]
+    fn mica(&self, a: usize, b: usize) -> T {
+        let (xs, ys) = (&self.ancestors[a], &self.ancestors[b]);
+        let (mut i, mut j) = (0, 0);
+        let mut best = T::zero();
+        while i < xs.len() && j < ys.len() {
+            match xs[i].0.cmp(&ys[j].0) {
+                std::cmp::Ordering::Less => i += 1,
+                std::cmp::Ordering::Greater => j += 1,
+                std::cmp::Ordering::Equal => {
+                    best = best.max(xs[i].1);
+                    i += 1;
+                    j += 1;
+                }
+            }
+        }
+        best
+    }
 }
 
 /// Calculate the semantic similarity in an efficient manner for a set of terms
@@ -174,23 +182,43 @@ pub fn calculate_onto_sim<'a, T>(
 where
     T: BixverseFloat,
 {
-    let max_ic = ic_map
+    let max_ic = *ic_map
         .values()
         .max_by(|a, b| a.partial_cmp(b).unwrap())
         .unwrap();
     let sim_type = parse_onto_similarity_type(sim_type).unwrap_or_default();
 
+    let interned = InternedOntology::new(terms_split, &ancestors_map, &ic_map);
+
+    let half = T::from_f32(0.5).unwrap();
+    let two = T::from_f32(2.0).unwrap();
+
     let onto_sim: Vec<Vec<OntoSimRes<'_, T>>> = terms_split
         .par_iter()
         .map(|(t1, others)| {
-            let mut sim_vec: Vec<OntoSimRes<'_, T>> = Vec::with_capacity(others.len());
-            others.iter().for_each(|t2| {
-                let sim_res =
-                    calculate_onto_similarity(t1, t2, &sim_type, *max_ic, &ancestors_map, &ic_map);
-                sim_vec.push(sim_res);
-            });
+            let id1 = interned.ids[t1.as_str()] as usize;
+            let ic1 = interned.term_ic[id1];
 
-            sim_vec
+            others
+                .iter()
+                .map(|t2| {
+                    let id2 = interned.ids[t2.as_str()] as usize;
+                    let mica = interned.mica(id1, id2);
+                    let ic2 = interned.term_ic[id2];
+
+                    let sim = match sim_type {
+                        OntoSemSimType::Resnik => mica / max_ic,
+                        OntoSemSimType::Lin => two * mica / (ic1 + ic2),
+                        OntoSemSimType::Combined => {
+                            let lin_sim = two * mica / (ic1 + ic2);
+                            let resnik_sim = mica / max_ic;
+                            (lin_sim + resnik_sim) * half
+                        }
+                    };
+
+                    OntoSimRes { t1, t2, sim }
+                })
+                .collect()
         })
         .collect();
 
@@ -290,51 +318,52 @@ where
         let n = self.idx_to_term.len();
         let mut matrix: Mat<T> = Mat::zeros(n, n);
 
-        // Pre-compute all S-values once and store in Arc for safe sharing
-        let all_s_values: Arc<Vec<FxHashMap<NodeIndex, T>>> = Arc::new(
-            (0..n)
-                .into_par_iter()
-                .map(|i| {
-                    let term_idx = NodeIndex::new(i);
-                    self.get_or_compute_s_values(term_idx)
-                })
-                .collect(),
-        );
+        // Per term: S-values over every ancestor (zero where absent), sorted by
+        // node index, plus their total.
+        let per_term: Vec<(Vec<(u32, T)>, T)> = (0..n)
+            .into_par_iter()
+            .map(|i| {
+                let s_values = self.get_or_compute_s_values(NodeIndex::new(i));
+                let total: T = s_values.values().copied().sum();
+                let mut dense: Vec<(u32, T)> = self.ancestors[i]
+                    .iter()
+                    .map(|node| {
+                        (
+                            node.index() as u32,
+                            s_values.get(node).copied().unwrap_or_else(T::zero),
+                        )
+                    })
+                    .collect();
+                dense.sort_unstable_by_key(|&(id, _)| id);
+                (dense, total)
+            })
+            .collect();
 
-        // Process each row in parallel; mutex is a new one...
-        let matrix_mutex = Mutex::new(&mut matrix);
+        // Upper triangle straight into each column, then a tiled mirror.
+        matrix
+            .par_col_iter_mut()
+            .enumerate()
+            .for_each(|(j, mut col)| {
+                for i in 0..j {
+                    col[i] = Self::pair_similarity(
+                        &per_term[i].0,
+                        &per_term[j].0,
+                        per_term[i].1,
+                        per_term[j].1,
+                    );
+                }
+                col[j] = T::one();
+            });
 
-        (0..n).into_par_iter().for_each(|i| {
-            let mut row_values = Vec::with_capacity(n - i);
-
-            // Calculate similarities for this row (only upper triangle)
-            for j in i..n {
-                let sim = if i == j {
-                    T::one()
-                } else {
-                    let term_idx_1 = NodeIndex::new(i);
-                    let term_idx_2 = NodeIndex::new(j);
-                    self.calculate_similarity_from_s_values(
-                        term_idx_1,
-                        term_idx_2,
-                        &all_s_values[i],
-                        &all_s_values[j],
-                    )
-                };
-                row_values.push((j, sim));
-            }
-
-            // Write the computed values to the matrix
-            {
-                let mut matrix_guard = matrix_mutex.lock().unwrap();
-                for (j, sim) in row_values {
-                    matrix_guard[(i, j)] = sim;
-                    if i != j {
-                        matrix_guard[(j, i)] = sim; // Symmetric matrix
+        for jj in (0..n).step_by(WANG_MIRROR_TILE) {
+            for ii in (jj..n).step_by(WANG_MIRROR_TILE) {
+                for j in jj..(jj + WANG_MIRROR_TILE).min(n) {
+                    for i in ii.max(j + 1)..(ii + WANG_MIRROR_TILE).min(n) {
+                        matrix[(i, j)] = matrix[(j, i)];
                     }
                 }
             }
-        });
+        }
 
         (matrix, self.idx_to_term.clone())
     }
@@ -375,55 +404,42 @@ where
         s_values
     }
 
-    /// Calculate similarity from pre-computed S-values
+    /// Calculate similarity from pre-computed, id-sorted S-values
     ///
     /// ### Params
     ///
-    /// * `term_idx_1` - NodeIndex of the first term
-    /// * `term_idx_2` - NodeIndex of the second term
-    /// * `s_val_1` - HashMap with the ancestors of term1 and the s-values.
-    /// * `s_val_2` - HashMap with the ancestors of term2 and the s-values.
+    /// * `s_val_1` - Ancestors of term 1 with their S-values (zero if absent),
+    ///   sorted by node index.
+    /// * `s_val_2` - Same for term 2.
+    /// * `sv1` - Total of the S-values of term 1.
+    /// * `sv2` - Total of the S-values of term 2.
     ///
     /// ### Returns
     ///
-    /// The Wang similarity between the two terms defined by the NodeIndex.
-    fn calculate_similarity_from_s_values(
-        &self,
-        term_idx_1: NodeIndex,
-        term_idx_2: NodeIndex,
-        s_val_1: &FxHashMap<NodeIndex, T>,
-        s_val_2: &FxHashMap<NodeIndex, T>,
-    ) -> T {
-        let dag1_nodes = &self.ancestors[term_idx_1.index()];
-        let dag2_nodes = &self.ancestors[term_idx_2.index()];
+    /// The Wang similarity between the two terms.
+    #[inline]
+    fn pair_similarity(s_val_1: &[(u32, T)], s_val_2: &[(u32, T)], sv1: T, sv2: T) -> T {
+        let zero = T::zero();
+        let (mut i, mut j) = (0, 0);
+        let mut numerator = zero;
+        let mut any_common = false;
 
-        // Start with smaller to make it faster
-        let (smaller, larger) = if dag1_nodes.len() < dag2_nodes.len() {
-            (dag1_nodes, dag2_nodes)
-        } else {
-            (dag2_nodes, dag1_nodes)
-        };
-
-        let common_nodes: Vec<NodeIndex> = smaller
-            .iter()
-            .filter(|node| larger.contains(node))
-            .cloned()
-            .collect();
-
-        if common_nodes.is_empty() {
-            return T::zero();
+        while i < s_val_1.len() && j < s_val_2.len() {
+            match s_val_1[i].0.cmp(&s_val_2[j].0) {
+                std::cmp::Ordering::Less => i += 1,
+                std::cmp::Ordering::Greater => j += 1,
+                std::cmp::Ordering::Equal => {
+                    numerator += s_val_1[i].1 + s_val_2[j].1;
+                    any_common = true;
+                    i += 1;
+                    j += 1;
+                }
+            }
         }
 
-        let sv1: T = s_val_1.values().copied().sum();
-        let sv2: T = s_val_2.values().copied().sum();
-        let zero = T::zero();
-
-        let numerator: T = common_nodes
-            .iter()
-            .map(|&node_idx| {
-                *s_val_1.get(&node_idx).unwrap_or(&zero) + *s_val_2.get(&node_idx).unwrap_or(&zero)
-            })
-            .sum();
+        if !any_common {
+            return zero;
+        }
 
         let denominator = sv1 + sv2;
 
@@ -580,7 +596,7 @@ where
 
         // No shared ancestor means no shared semantics, so the similarity is 0.
         // This used to return 1.0, which disagreed with
-        // [Self::calculate_similarity_from_s_values] (the path `calc_sim_matrix`
+        // [Self::pair_similarity] (the path `calc_sim_matrix`
         // takes) and reported maximum similarity for terms in disconnected parts
         // of the DAG, e.g. any GO BP term against any GO MF term.
         if common_nodes.is_empty() {
