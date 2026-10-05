@@ -1,4 +1,3 @@
-#![cfg(feature = "single-cell")]
 //! End-to-end parity for scTransform v2 against sctransform 0.4.3.
 //!
 //! The count matrix is rebuilt from the same LCG the fixture generator used, so
@@ -18,20 +17,23 @@
 //!   2e-5 on theta with the top-2000 HVG sets overlapping 1997/2000; on this
 //!   400-cell fixture the median is 3e-5.
 
+#![cfg(feature = "single-cell")]
+
 use approx::assert_relative_eq;
 use faer::Mat;
 
 use bixverse_rs::prelude::*;
 use bixverse_rs::single_cell::sc_data::bin_merge_io::gene_store_to_cell_store;
-use bixverse_rs::single_cell::sc_data::data_io::{
-    CellGeneSparseWriter, CscGeneChunk, ParallelSparseReader, RawCounts,
+use bixverse_rs::single_cell::sc_data::data_io::CellGeneSparseWriter;
+use bixverse_rs::single_cell::sc_processing::pca::{
+    PcaSolver, SingleCellPcaParams, pca_on_sc_residuals,
 };
-use bixverse_rs::single_cell::sc_processing::pca::{SingleCellPcaParams, pca_on_sc_residuals};
 use bixverse_rs::single_cell::sc_processing::residuals::residual_variance;
 use bixverse_rs::single_cell::sc_processing::sctransform::model::{
     SctCellContext, SctCovariates, SctGeneStats, SctModel, SctParams, min_variance_from_umi_median,
     regularise_sct_model, sct_residual_row,
 };
+use bixverse_rs::single_cell::sc_processing::sctransform::nb_fit::NbOffsetFit;
 use bixverse_rs::single_cell::sc_processing::sctransform::residuals::SctResiduals;
 use bixverse_rs::single_cell::sc_processing::sctransform::stream::{
     SctStreamOpts, fit_sctransform, fit_sctransform_grouped, sct_corrected_counts, sct_gene_pass,
@@ -40,6 +42,22 @@ use bixverse_rs::single_cell::sc_processing::sctransform::stream::{
 
 mod sctransform_fixtures;
 use sctransform_fixtures as fx;
+
+///////////////
+// Constants //
+///////////////
+
+/// Genes whose share of each cell's counts the covariate measures. Must match
+/// `COV_BLOCK` in the generator.
+const COV_BLOCK: usize = 30;
+/// Highest-variance genes the residual PCA tests run on.
+const N_PCA_GENES: usize = 40;
+/// Seed handed to the residual PCA.
+const PCA_SEED: usize = 42;
+/// Transpose phase size, well under the cell count so the multi-phase path runs.
+const TRANSPOSE_CELLS_PER_PHASE: usize = 64;
+/// Genes per batch in the transpose test.
+const TRANSPOSE_GENE_BATCH: usize = 32;
 
 /////////////
 // Helpers //
@@ -55,10 +73,20 @@ impl Drop for TempStore {
 }
 
 impl TempStore {
+    /// Scratch path in the system temp directory.
+    ///
+    /// ### Params
+    ///
+    /// * `name` - Suffix that keeps concurrent tests apart
+    ///
+    /// ### Returns
+    ///
+    /// The guard. Nothing is created on disk until something writes to it.
     fn new(name: &str) -> Self {
         Self(std::env::temp_dir().join(format!("bixverse_sct_{name}.bin")))
     }
 
+    /// The path as a string, which is what the store writers take.
     fn path(&self) -> &str {
         self.0.to_str().expect("temp path is valid UTF-8")
     }
@@ -71,6 +99,11 @@ impl TempStore {
 /// scaled by a rate and a library size is heavy-tailed enough to be genuinely
 /// overdispersed while using only multiplication and a floor, so both sides
 /// land on identical integers.
+///
+/// ### Returns
+///
+/// `(counts, library_sizes)`: dense counts as `counts[gene][cell]` and the
+/// unfiltered library size of every cell.
 fn fixture_counts() -> (Vec<Vec<u32>>, Vec<f64>) {
     let mut state = fx::LCG_SEED;
     let mut next = || {
@@ -103,6 +136,12 @@ fn fixture_counts() -> (Vec<Vec<u32>>, Vec<f64>) {
 }
 
 /// Writes a `dense[gene][cell]` matrix out as a gene-major store.
+///
+/// ### Params
+///
+/// * `path` - Where to write the store
+/// * `dense` - Counts as `dense[gene][cell]`
+/// * `n_cells` - Number of cells
 fn write_store(path: &str, dense: &[Vec<u32>], n_cells: usize) {
     let mut writer =
         CellGeneSparseWriter::new(path, false, n_cells, dense.len(), 1e4).expect("writer opens");
@@ -137,6 +176,15 @@ fn write_store(path: &str, dense: &[Vec<u32>], n_cells: usize) {
 
 /// Relative difference, with an absolute fallback so a reference value of zero
 /// does not divide by zero.
+///
+/// ### Params
+///
+/// * `got` - Value under test
+/// * `want` - Reference value
+///
+/// ### Returns
+///
+/// `|got - want| / |want|`, or `|got - want|` when `want` is near zero.
 fn rel(got: f64, want: f64) -> f64 {
     if want.abs() < 1e-12 {
         (got - want).abs()
@@ -145,6 +193,7 @@ fn rel(got: f64, want: f64) -> f64 {
     }
 }
 
+/// Model parameters matching the sctransform run the fixtures came from.
 fn params() -> SctParams {
     SctParams {
         min_cells: fx::MIN_CELLS,
@@ -232,8 +281,6 @@ fn test_gene_pass_matches_sctransform() {
 /// bandwidth and the kernel smoothing.
 #[test]
 fn test_regularisation_matches_sctransform_on_real_fits() {
-    use bixverse_rs::single_cell::sc_processing::sctransform::nb_fit::NbOffsetFit;
-
     let stats = SctGeneStats {
         log_gmean: fx::LOG_GMEAN.to_vec(),
         amean: fx::AMEAN.to_vec(),
@@ -330,20 +377,15 @@ fn test_fit_sctransform_end_to_end() {
         );
     }
 
-    let mut worst_theta = 0.0_f64;
-    let mut worst_intercept = 0.0_f64;
-    for g in 0..model.len() {
-        if fx::FIT_THETA[g].is_finite() {
-            worst_theta = worst_theta.max(rel(model.theta[g], fx::FIT_THETA[g]));
-        }
-        worst_intercept = worst_intercept.max(rel(model.intercept(g), fx::FIT_INTERCEPT[g]));
-    }
+    let worst_intercept = (0..model.len())
+        .map(|g| rel(model.intercept(g), fx::FIT_INTERCEPT[g]))
+        .fold(0.0_f64, f64::max);
 
     let mut drifts: Vec<f64> = (0..model.len())
         .filter(|&g| fx::FIT_THETA[g].is_finite())
         .map(|g| rel(model.theta[g], fx::FIT_THETA[g]))
         .collect();
-    drifts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    drifts.sort_by(|a, b| a.partial_cmp(b).expect("drifts are finite"));
     let mut var_drift: Vec<f64> = (0..model.len())
         .map(|g| {
             let mu = pass.stats.amean[fx::MODELLED[g]];
@@ -352,20 +394,7 @@ fn test_fit_sctransform_end_to_end() {
             rel(mine, theirs)
         })
         .collect();
-    var_drift.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    println!(
-        "theta drift  : median {:.4e} p90 {:.4e} max {:.4e} (n {})",
-        drifts[drifts.len() / 2],
-        drifts[drifts.len() * 9 / 10],
-        drifts[drifts.len() - 1],
-        drifts.len()
-    );
-    println!(
-        "variance drift: median {:.4e} p90 {:.4e} max {:.4e}",
-        var_drift[var_drift.len() / 2],
-        var_drift[var_drift.len() * 9 / 10],
-        var_drift[var_drift.len() - 1]
-    );
+    var_drift.sort_by(|a, b| a.partial_cmp(b).expect("drifts are finite"));
 
     // The max is gated on the variance rather than on theta, because theta is
     // weakly identified near the Poisson boundary: `theta = gmean /
@@ -393,7 +422,6 @@ fn test_fit_sctransform_end_to_end() {
         worst_intercept < 1e-3,
         "regularised intercept drifted {worst_intercept:.2e} from R, past the measured band"
     );
-    let _ = worst_theta;
 }
 
 /// A cell-major store must be refused rather than silently read as if it were
@@ -455,16 +483,13 @@ fn test_residual_variance_matches_sctransform() {
         .expect("residual variance");
 
     assert_eq!(got.len(), fx::RESIDUAL_VARIANCE.len());
-    let mut worst = 0.0_f64;
     for (g, (&mine, &theirs)) in got.iter().zip(fx::RESIDUAL_VARIANCE.iter()).enumerate() {
         let d = rel(mine, theirs);
-        worst = worst.max(d);
         assert!(
             d < 1e-7,
             "gene {g}: residual variance {mine} vs R {theirs} (rel {d:.3e})"
         );
     }
-    println!("worst residual variance drift: {worst:.3e}");
 }
 
 /// A gene's residual row is dense: a zero count still carries `-mu / sqrt(var)`.
@@ -567,13 +592,24 @@ fn test_residual_variance_is_exact_in_f64() {
     );
 }
 
-/////////////////////
+//////////////////
 // Residual PCA //
-/////////////////////
+//////////////////
 
 /// Builds the centred residual matrix the PCA should see, independently of any
 /// of the code under test: straight from the model parameters and the raw
 /// counts, in `f64`.
+///
+/// ### Params
+///
+/// * `counts` - Counts as `counts[gene][cell]`
+/// * `log10_umi` - `log10` library size per cell
+/// * `model` - The fitted model
+/// * `genes` - Store gene indices, one column each
+///
+/// ### Returns
+///
+/// The column-centred `cells x genes` residual matrix.
 fn reference_residual_matrix(
     counts: &[Vec<u32>],
     log10_umi: &[f64],
@@ -625,27 +661,25 @@ fn test_residual_pca_matches_a_direct_svd() {
     let no_cov = SctCovariates::default();
     let ctx = SctCellContext::new(&log10_umi, &no_cov).expect("context");
 
-    // The 40 genes with the most residual variance, which is scTransform's own
+    // The genes with the most residual variance, which is scTransform's own
     // feature-selection criterion.
     let mut ranked: Vec<(f64, usize)> = fx::RESIDUAL_VARIANCE
         .iter()
         .enumerate()
         .map(|(pos, &v)| (v, fx::MODELLED[pos]))
         .collect();
-    ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
-    let mut hvg: Vec<usize> = ranked.into_iter().take(40).map(|(_, g)| g).collect();
+    ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).expect("variances are finite"));
+    let mut hvg: Vec<usize> = ranked
+        .into_iter()
+        .take(N_PCA_GENES)
+        .map(|(_, g)| g)
+        .collect();
     hvg.sort_unstable();
 
     let no_pcs = 10;
     // Residuals already carry their variance as signal, so centre but do not
     // rescale. Exact SVD so the comparison is not against a random projection.
-    let params = SingleCellPcaParams::new(
-        true,
-        false,
-        bixverse_rs::single_cell::sc_processing::pca::PcaSolver::Covariance,
-        false,
-        1e4,
-    );
+    let params = SingleCellPcaParams::new(true, false, PcaSolver::Covariance, false, 1e4);
 
     let (scores, loadings, singular, scaled) = pca_on_sc_residuals(
         &reader,
@@ -654,7 +688,7 @@ fn test_residual_pca_matches_a_direct_svd() {
         no_pcs,
         &params,
         &SctResiduals::single(&model, ctx).expect("residual source"),
-        42,
+        PCA_SEED,
         true,
         0,
     )
@@ -687,7 +721,7 @@ fn test_residual_pca_matches_a_direct_svd() {
                 svd.U()[(a, k)]
                     .abs()
                     .partial_cmp(&svd.U()[(b, k)].abs())
-                    .unwrap()
+                    .expect("SVD entries are finite")
             })
             .expect("a pivot row");
         let flip = (scores[(pivot, k)] as f64).signum() * (svd.U()[(pivot, k)] * want).signum();
@@ -720,13 +754,7 @@ fn test_residual_pca_refuses_clr() {
     let model = model_from_fixture();
     let no_cov = SctCovariates::default();
     let ctx = SctCellContext::new(&log10_umi, &no_cov).expect("context");
-    let params = SingleCellPcaParams::new(
-        true,
-        false,
-        bixverse_rs::single_cell::sc_processing::pca::PcaSolver::Covariance,
-        true,
-        1e4,
-    );
+    let params = SingleCellPcaParams::new(true, false, PcaSolver::Covariance, true, 1e4);
 
     assert!(matches!(
         pca_on_sc_residuals(
@@ -736,7 +764,7 @@ fn test_residual_pca_refuses_clr() {
             5,
             &params,
             &SctResiduals::single(&model, ctx).expect("residual source"),
-            42,
+            PCA_SEED,
             false,
             0,
         ),
@@ -770,15 +798,9 @@ fn test_residual_pca_rejects_an_unmodelled_gene() {
             &cells,
             &[unmodelled],
             2,
-            &SingleCellPcaParams::new(
-                true,
-                false,
-                bixverse_rs::single_cell::sc_processing::pca::PcaSolver::Exact,
-                false,
-                1e4
-            ),
+            &SingleCellPcaParams::new(true, false, PcaSolver::Exact, false, 1e4),
             &SctResiduals::single(&model, ctx).expect("residual source"),
-            42,
+            PCA_SEED,
             false,
             0,
         ),
@@ -786,9 +808,9 @@ fn test_residual_pca_rejects_an_unmodelled_gene() {
     ));
 }
 
-///////////////////////
+//////////////////////
 // Corrected counts //
-///////////////////////
+//////////////////////
 
 /// The corrected counts against `sctransform::correct_counts`, which is what
 /// Seurat's `SCTransform()` puts in the SCT `counts` slot.
@@ -869,9 +891,9 @@ fn test_corrected_counts_match_sctransform() {
 /// The corrected gene-major store transposes into the cell-major companion
 /// every downstream method expects, entry for entry.
 ///
-/// This is the direction the crate did not have: every ingest path writes cells
-/// first and derives genes, but scTransform's model is per gene, so its output
-/// arrives gene-major.
+/// Every ingest path writes cells first and derives genes, but scTransform's
+/// model is per gene, so its output arrives gene-major and has to go the other
+/// way.
 #[test]
 fn test_gene_store_transposes_to_cell_store() {
     let store = TempStore::new("transpose_in");
@@ -879,8 +901,14 @@ fn test_gene_store_transposes_to_cell_store() {
     let (counts, _) = fixture_counts();
     write_store(store.path(), &counts, fx::N_CELLS);
 
-    // A phase size well under the cell count, so the multi-phase path runs.
-    gene_store_to_cell_store(store.path(), out.path(), 64, 32, 0).expect("transpose");
+    gene_store_to_cell_store(
+        store.path(),
+        out.path(),
+        TRANSPOSE_CELLS_PER_PHASE,
+        TRANSPOSE_GENE_BATCH,
+        0,
+    )
+    .expect("transpose");
 
     let cell_reader = ParallelSparseReader::new(out.path()).expect("cell store opens");
     assert!(cell_reader.is_cell_based());
@@ -936,12 +964,17 @@ fn test_transpose_rejects_a_cell_major_source() {
 // Covariates //
 ////////////////
 
-/// Genes whose share of each cell's counts the covariate measures. Must match
-/// `COV_BLOCK` in the generator.
-const COV_BLOCK: usize = 30;
-
 /// Rebuilds the covariate the generator used: a percent-mitochondrial analogue,
 /// the share of each cell's counts falling in the first `COV_BLOCK` genes.
+///
+/// ### Params
+///
+/// * `counts` - Counts as `counts[gene][cell]`
+/// * `library_sizes` - Library size per cell
+///
+/// ### Returns
+///
+/// A single covariate column named `cov_x`.
 fn fixture_covariate(counts: &[Vec<u32>], library_sizes: &[f64]) -> SctCovariates {
     let values: Vec<f64> = (0..fx::N_CELLS)
         .map(|c| {
@@ -956,7 +989,7 @@ fn fixture_covariate(counts: &[Vec<u32>], library_sizes: &[f64]) -> SctCovariate
 /// The rebuilt covariate has to agree with R's before anything using it means
 /// anything.
 #[test]
-fn test_fixture_covariate_round_trips() {
+fn test_fixture_covariate_round_trip() {
     let (counts, library_sizes) = fixture_counts();
     let cov = fixture_covariate(&counts, &library_sizes);
 
@@ -978,8 +1011,6 @@ fn test_fixture_covariate_round_trips() {
 /// intercept, and zeroed for Poisson genes. This gates both.
 #[test]
 fn test_regularisation_with_covariate_matches_sctransform() {
-    use bixverse_rs::single_cell::sc_processing::sctransform::nb_fit::NbOffsetFit;
-
     let stats = SctGeneStats {
         log_gmean: fx::LOG_GMEAN.to_vec(),
         amean: fx::AMEAN.to_vec(),
@@ -1226,14 +1257,7 @@ fn test_fit_sctransform_with_covariate_end_to_end() {
                 .max((d_int + d_coef * cov_hi).abs()),
         );
     }
-    eta_drift.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
-    println!(
-        "log(mu) drift: median {:.3e} p90 {:.3e} max {:.3e}",
-        eta_drift[eta_drift.len() / 2],
-        eta_drift[eta_drift.len() * 9 / 10],
-        eta_drift[eta_drift.len() - 1]
-    );
+    eta_drift.sort_by(|a, b| a.partial_cmp(b).expect("drifts are finite"));
 
     // Measured on this fixture: median 1.9e-3, p90 9.1e-3, max 3.0e-2. These
     // are absolute drifts on `log(mu)`, so they read as fractional errors on
@@ -1265,15 +1289,21 @@ fn test_fit_sctransform_with_covariate_end_to_end() {
     );
 }
 
-/////////////////////
-// Multi-sample    //
-/////////////////////
+//////////////////
+// Multi-sample //
+//////////////////
 
 /// Splits the fixture cells into two samples of deliberately different depth.
 ///
 /// The second half is thinned to a third of its counts, so the two samples have
 /// genuinely different sequencing depths and a single pooled model would be
 /// wrong for both.
+///
+/// ### Returns
+///
+/// `(counts, library_sizes, groups)`: the thinned counts as
+/// `counts[gene][cell]`, the library size of every cell after thinning, and
+/// the sample label of every cell.
 fn two_sample_counts() -> (Vec<Vec<u32>>, Vec<f64>, Vec<u32>) {
     let (mut counts, _) = fixture_counts();
     let split = fx::N_CELLS / 2;
@@ -1606,7 +1636,7 @@ fn test_grouped_corrected_counts_use_each_groups_model() {
     // reproduce that sample's block of the grouped output exactly.
     let median_log10_umi = {
         let mut sorted = log10_umi.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted.sort_by(|a, b| a.partial_cmp(b).expect("library sizes are finite"));
         let mid = sorted.len() / 2;
         if sorted.len().is_multiple_of(2) {
             (sorted[mid - 1] + sorted[mid]) / 2.0
@@ -1754,16 +1784,10 @@ fn test_grouped_residual_pca_matches_a_direct_svd() {
     let source =
         SctResiduals::new(&grouped.models, ctx, groups.clone()).expect("grouped residual source");
 
-    let hvg: Vec<usize> = grouped.genes.iter().copied().take(40).collect();
+    let hvg: Vec<usize> = grouped.genes.iter().copied().take(N_PCA_GENES).collect();
     let no_pcs = 8;
     // Residuals carry their variance as signal, so centre but do not rescale.
-    let pca_params = SingleCellPcaParams::new(
-        true,
-        false,
-        bixverse_rs::single_cell::sc_processing::pca::PcaSolver::Covariance,
-        false,
-        1e4,
-    );
+    let pca_params = SingleCellPcaParams::new(true, false, PcaSolver::Covariance, false, 1e4);
 
     let (scores, _, _, scaled) = pca_on_sc_residuals(
         &reader,
@@ -1772,7 +1796,7 @@ fn test_grouped_residual_pca_matches_a_direct_svd() {
         no_pcs,
         &pca_params,
         &source,
-        42,
+        PCA_SEED,
         true,
         0,
     )
@@ -1832,7 +1856,7 @@ fn test_residual_pca_refuses_variance_normalisation() {
             5,
             &defaults,
             &SctResiduals::single(&model, ctx).expect("residual source"),
-            42,
+            PCA_SEED,
             false,
             0,
         ),

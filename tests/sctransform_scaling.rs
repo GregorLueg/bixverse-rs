@@ -1,4 +1,3 @@
-#![cfg(all(feature = "single-cell", feature = "large_scale_diagnostics"))]
 //! Print-only scaling sweep for scTransform v2.
 //!
 //! The claim this exists to check is that every stage after the step-1 fit is a
@@ -30,13 +29,13 @@
 //! allocations are the per-worker residual row plus a handful of gene-length
 //! vectors, which at 160,000 cells is tens of megabytes.
 
+#![cfg(all(feature = "single-cell", feature = "large_scale_diagnostics"))]
+
 use std::time::Instant;
 
 use bixverse_rs::prelude::*;
 use bixverse_rs::single_cell::sc_data::bin_merge_io::gene_store_to_cell_store;
-use bixverse_rs::single_cell::sc_data::data_io::{
-    CellGeneSparseWriter, CscGeneChunk, ParallelSparseReader, RawCounts,
-};
+use bixverse_rs::single_cell::sc_data::data_io::CellGeneSparseWriter;
 use bixverse_rs::single_cell::sc_processing::sctransform::model::{
     SctCellContext, SctCovariates, SctParams,
 };
@@ -44,6 +43,10 @@ use bixverse_rs::single_cell::sc_processing::sctransform::residuals::SctResidual
 use bixverse_rs::single_cell::sc_processing::sctransform::stream::{
     SctStreamOpts, fit_sctransform, sct_corrected_counts, sct_residual_variance,
 };
+
+///////////////
+// Constants //
+///////////////
 
 /// Cell counts swept. The step-1 fit is pinned at 2000 cells throughout, so if
 /// anything downstream were quadratic in the cell count it would show here.
@@ -60,6 +63,19 @@ const CELL_COUNTS: [usize; 3] = [10_000, 40_000, 160_000];
 /// its mmap, so resident file pages track the store size rather than anything
 /// the code allocates.
 const N_GENES: usize = 4_000;
+
+/// Seed of the LCG that draws the synthetic counts.
+const SEED: u64 = 20_260_101;
+
+/// Cells per phase when transposing the corrected store to cell-major.
+const CELLS_PER_PHASE: usize = 20_000;
+
+/// Genes per batch when transposing the corrected store to cell-major.
+const GENE_BATCH_SIZE: usize = 512;
+
+/////////////
+// Helpers //
+/////////////
 
 /// Resolves the swept cell counts, honouring `SCT_CELLS`.
 ///
@@ -95,14 +111,25 @@ impl Drop for TempStore {
 }
 
 impl TempStore {
+    /// Scratch path in the system temp directory.
+    ///
+    /// ### Params
+    ///
+    /// * `name` - Suffix that keeps concurrent stores apart
+    ///
+    /// ### Returns
+    ///
+    /// The guard. Nothing is created on disk until something writes to it.
     fn new(name: &str) -> Self {
         Self(std::env::temp_dir().join(format!("bixverse_sct_scale_{name}.bin")))
     }
 
+    /// The path as a string, which is what the store writers take.
     fn path(&self) -> &str {
         self.0.to_str().expect("temp path is valid UTF-8")
     }
 
+    /// Size of the store on disk in MB, or zero if it does not exist.
     fn size_mb(&self) -> f64 {
         std::fs::metadata(&self.0).map(|m| m.len()).unwrap_or(0) as f64 / 1e6
     }
@@ -113,8 +140,18 @@ impl TempStore {
 /// Counts come from an LCG through `u^3`, the same heavy-tailed draw the parity
 /// fixture uses, so the genes are genuinely overdispersed and the model has
 /// something to fit.
+///
+/// ### Params
+///
+/// * `path` - Where to write the gene-major store
+/// * `n_genes` - Number of genes
+/// * `n_cells` - Number of cells
+///
+/// ### Returns
+///
+/// The library size of every cell.
 fn write_synthetic_store(path: &str, n_genes: usize, n_cells: usize) -> Vec<f64> {
-    let mut state = 20_260_101_u64;
+    let mut state = SEED;
     let mut next = || {
         state = (1_664_525_u64
             .wrapping_mul(state)
@@ -163,10 +200,14 @@ fn write_synthetic_store(path: &str, n_genes: usize, n_cells: usize) -> Vec<f64>
     library_sizes
 }
 
-/// Times each stage across a range of cell counts.
+///////////
+// Tests //
+///////////
+
+/// Times each stage of scTransform v2 across a range of cell counts.
 #[test]
 // 4000 genes by up to 160,000 cells, written to disk three times over.
-fn diagnostic_sctransform_scaling() {
+fn test_sctransform_scaling_sweep() {
     println!(
         "\n{:>9} {:>10} {:>9} {:>9} {:>9} {:>9} {:>9}",
         "cells", "store_MB", "write_s", "fit_s", "resvar_s", "correct_s", "transp_s"
@@ -223,8 +264,14 @@ fn diagnostic_sctransform_scaling() {
         let correct_s = t.elapsed().as_secs_f64();
 
         let t = Instant::now();
-        gene_store_to_cell_store(corrected.path(), cell_major.path(), 20_000, 512, 0)
-            .expect("transpose");
+        gene_store_to_cell_store(
+            corrected.path(),
+            cell_major.path(),
+            CELLS_PER_PHASE,
+            GENE_BATCH_SIZE,
+            0,
+        )
+        .expect("transpose");
         let transp_s = t.elapsed().as_secs_f64();
 
         println!(

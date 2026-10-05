@@ -10,17 +10,18 @@
 //!
 //! The fixture is 200 genes over eight samples in two groups of four. See
 //! `tests/edger_fixtures/mod.rs` for how the counts are reproduced on both
-//! sides without any float data crossing as text.
+//! sides without any float data crossing as text, and
+//! `dev/gen_edger_fixtures.R` to regenerate it.
 
 #![cfg(feature = "dge")]
 
-mod edger_fixtures;
-
 use approx::assert_relative_eq;
-use bixverse_rs::methods::dge_bulk::{EdgeRQlParams, run_edger_ql};
 use edge_rs::core::normalisation::NormMethod;
 use edge_rs::glm::test::Tested;
 
+use bixverse_rs::methods::dge_bulk::{EdgeRQlParams, run_edger_ql};
+
+mod edger_fixtures;
 use edger_fixtures as fx;
 
 ////////////////
@@ -38,6 +39,13 @@ const TOL_F: f64 = 1e-8;
 /// P-values. The F tail amplifies whatever error is in the statistic, and the
 /// adjusted values inherit that.
 const TOL_P: f64 = 1e-7;
+
+///////////////
+// Constants //
+///////////////
+
+/// Mean-count cut-off for the `min_mean` filter check.
+const MIN_MEAN: f64 = 20.0;
 
 ///////////
 // Tests //
@@ -165,7 +173,7 @@ fn test_the_filters_compose() {
         &Tested::Coef(vec![1]),
         &EdgeRQlParams {
             filter: false,
-            min_mean: 20.0,
+            min_mean: MIN_MEAN,
             norm_method: NormMethod::None,
             ..Default::default()
         },
@@ -182,7 +190,7 @@ fn test_the_filters_compose() {
             .iter()
             .sum::<f64>()
             / fx::N_SAMPLES as f64;
-        assert_eq!(*flag, mean >= 20.0, "gene {gene} at mean {mean}");
+        assert_eq!(*flag, mean >= MIN_MEAN, "gene {gene} at mean {mean}");
     }
 }
 

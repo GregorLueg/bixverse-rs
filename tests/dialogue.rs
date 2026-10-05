@@ -6,25 +6,29 @@
 //! expression follows it. DIALOGUE should recover the shared factor, call the
 //! programme significant, and land on the planted genes.
 
-#![cfg(feature = "single-cell")]
 // Matches the crate-level allow in lib.rs; the loop index drives the whole
 // body here, not just the one subscript clippy notices.
 #![allow(clippy::needless_range_loop)]
+#![cfg(feature = "single-cell")]
+
+use std::path::PathBuf;
+
+use faer::{Mat, MatRef};
 
 use bixverse_rs::core::math::vector_helpers::pearson_correlation;
 use bixverse_rs::prelude::*;
 use bixverse_rs::single_cell::mc_analysis::dialogue_mc::dialogue_metacells;
-use bixverse_rs::single_cell::sc_analysis::dialogue::{DialogueParams, DialogueResult, PmdParams};
+use bixverse_rs::single_cell::sc_analysis::dialogue::{
+    DialogueParams, DialogueResult, PmdParams, dialogue_run,
+};
 use bixverse_rs::single_cell::sc_data::data_io::CellGeneSparseWriter;
 use bixverse_rs::single_cell::sc_data::sc_synthetic_data::{
     DialogueSyntheticData, DialogueSyntheticParams, create_dialogue_synthetic_data,
 };
 
-use faer::{Mat, MatRef};
-
-/////////////////////
-// Synthetic input //
-/////////////////////
+///////////////
+// Constants //
+///////////////
 
 /// How many samples the synthetic experiment has.
 const N_SAMPLES: usize = 14;
@@ -41,6 +45,23 @@ const N_SAMPLE_FEATURES: usize = 5;
 const N_GENES: usize = 90;
 /// Planted genes per cell type, all tracking the shared latent.
 const N_PLANTED: usize = 8;
+/// Seed for the synthetic experiment.
+const SEED: u64 = 11;
+/// Programmes PMD extracts.
+const N_PROGRAMMES: usize = 2;
+/// Seed for the PMD permutation null.
+const PMD_SEED: u64 = 7;
+/// Permutations for the recovery tests.
+const N_PERMUTATIONS: usize = 20;
+/// Permutations for the determinism and equivalence tests, which only compare
+/// two runs against each other.
+const N_PERMUTATIONS_CHEAP: usize = 12;
+/// Target library size of the written store.
+const TARGET_SIZE: f32 = 1e4;
+
+/////////////
+// Helpers //
+/////////////
 
 /// The synthetic shape, sized so the test constants above stay the source of
 /// truth for the assertions.
@@ -57,27 +78,52 @@ fn shape() -> DialogueSyntheticParams {
 }
 
 /// Builds the synthetic experiment.
+///
+/// ### Params
+///
+/// * `seed` - Seed for reproducibility
+///
+/// ### Returns
+///
+/// The [DialogueSyntheticData].
 fn build(seed: u64) -> DialogueSyntheticData {
     create_dialogue_synthetic_data(&shape(), seed).expect("the fixture shape is buildable")
 }
 
 /// Parameters sized for the synthetic data: a small permutation null, since the
 /// point is the pipeline rather than the tail of the p-value.
+///
+/// ### Params
+///
+/// * `n_permutations` - Size of the permutation null
+///
+/// ### Returns
+///
+/// The [DialogueParams].
 fn params(n_permutations: usize) -> DialogueParams {
     DialogueParams {
         pmd: PmdParams {
-            k: 2,
+            k: N_PROGRAMMES,
             n_permutations,
             abn_c: 10,
             n_genes: 12,
-            seed: 7,
+            seed: PMD_SEED,
             ..Default::default()
         },
         ..Default::default()
     }
 }
 
-/// Runs the pipeline over the synthetic store.
+/// Runs the metacell pipeline over the synthetic matrix.
+///
+/// ### Params
+///
+/// * `data` - The synthetic experiment
+/// * `n_permutations` - Size of the permutation null
+///
+/// ### Returns
+///
+/// The [DialogueResult].
 fn run(data: &DialogueSyntheticData, n_permutations: usize) -> DialogueResult {
     let feature_refs: Vec<MatRef<f64>> = data.features.iter().map(|m| m.as_ref()).collect();
     let genes: Vec<usize> = (0..N_GENES).collect();
@@ -97,6 +143,16 @@ fn run(data: &DialogueSyntheticData, n_permutations: usize) -> DialogueResult {
 /// Weakest agreement with the planted latent across cell types, for one
 /// programme. A programme only counts as recovered if *every* cell type tracks
 /// the latent, so the minimum is the right summary.
+///
+/// ### Params
+///
+/// * `result` - The DIALOGUE output
+/// * `data` - The synthetic experiment
+/// * `programme` - Which programme to score
+///
+/// ### Returns
+///
+/// The smallest `|r|` against the latent over cell types.
 fn worst_latent_agreement(
     result: &DialogueResult,
     data: &DialogueSyntheticData,
@@ -118,6 +174,15 @@ fn worst_latent_agreement(
 }
 
 /// Which programme actually tracks the planted latent, by ground truth.
+///
+/// ### Params
+///
+/// * `result` - The DIALOGUE output
+/// * `data` - The synthetic experiment
+///
+/// ### Returns
+///
+/// The programme index.
 fn planted_programme(result: &DialogueResult, data: &DialogueSyntheticData) -> usize {
     if worst_latent_agreement(result, data, 0) >= worst_latent_agreement(result, data, 1) {
         0
@@ -127,6 +192,17 @@ fn planted_programme(result: &DialogueResult, data: &DialogueSyntheticData) -> u
 }
 
 /// Sample-averages a cell type's scores for one programme.
+///
+/// ### Params
+///
+/// * `scores` - Cells x programmes score matrix for one cell type
+/// * `cells` - Global cell index of each row of `scores`
+/// * `sample_ids` - Sample per global cell
+/// * `programme` - Which column to average
+///
+/// ### Returns
+///
+/// Mean score per sample, zero for a sample with no cells.
 fn sample_means(
     scores: &Mat<f64>,
     cells: &[usize],
@@ -146,6 +222,81 @@ fn sample_means(
         .collect()
 }
 
+/// A scratch store that cleans up after itself.
+struct TempStore(PathBuf);
+
+impl Drop for TempStore {
+    /// Removes the file, ignoring a missing one.
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+impl TempStore {
+    /// Reserves a uniquely named store in the system temp directory.
+    ///
+    /// The process id is part of the name: two `cargo test` invocations on one
+    /// machine, which the CI feature matrix does routinely, would otherwise
+    /// collide on the same file and read a half-written store.
+    ///
+    /// ### Params
+    ///
+    /// * `name` - Test-unique suffix
+    ///
+    /// ### Returns
+    ///
+    /// The guard; the path is available via [`Self::path`].
+    fn new(name: &str) -> Self {
+        Self(std::env::temp_dir().join(format!(
+            "bixverse_dialogue_{name}_{}.bin",
+            std::process::id()
+        )))
+    }
+
+    /// Path as a `&str`.
+    fn path(&self) -> &str {
+        self.0.to_str().expect("temp path is valid UTF-8")
+    }
+}
+
+/// Writes the synthetic matrix out as a gene-major bixverse store.
+///
+/// The in-memory reader narrows `data_2` to `f16` when it builds a chunk, and
+/// so does the writer, so both paths see bit-identical values and the
+/// comparison against the streamed store can be exact rather than approximate.
+///
+/// ### Params
+///
+/// * `path` - Where to write the store
+/// * `data` - The synthetic experiment
+fn write_store(path: &str, data: &DialogueSyntheticData) {
+    let n_cells = data.matrix.shape.0;
+    let mut writer = CellGeneSparseWriter::new(path, false, n_cells, N_GENES, TARGET_SIZE)
+        .expect("writer opens");
+
+    let norm = data.matrix.data_2.as_ref().expect("normalised layer");
+    for gene in 0..N_GENES {
+        let lo = data.matrix.indptr[gene] as usize;
+        let hi = data.matrix.indptr[gene + 1] as usize;
+        let raw: Vec<u32> = data.matrix.data[lo..hi].to_vec();
+        let indices: Vec<usize> = data.matrix.indices[lo..hi]
+            .iter()
+            .map(|v| *v as usize)
+            .collect();
+        let norms: Vec<F16> = norm[lo..hi].iter().map(|v| F16::from_f32(*v)).collect();
+        writer
+            .write_gene_chunk(CscGeneChunk::from_conversion(
+                RawCounts::from_u32_auto(&raw),
+                &norms,
+                &indices,
+                gene,
+                true,
+            ))
+            .expect("write gene chunk");
+    }
+    writer.finalise().expect("finalise");
+}
+
 ///////////
 // Tests //
 ///////////
@@ -157,10 +308,10 @@ fn sample_means(
 /// rests on, and it does not depend on any threshold downstream.
 #[test]
 fn test_dialogue_recovers_the_planted_latent() {
-    let data = build(11);
-    let result = run(&data, 20);
+    let data = build(SEED);
+    let result = run(&data, N_PERMUTATIONS);
 
-    let best = (0..2)
+    let best = (0..N_PROGRAMMES)
         .map(|programme| worst_latent_agreement(&result, &data, programme))
         .fold(0.0_f64, f64::max);
     assert!(
@@ -173,8 +324,8 @@ fn test_dialogue_recovers_the_planted_latent() {
 /// every cell type.
 #[test]
 fn test_dialogue_calls_the_planted_programme_significant() {
-    let data = build(11);
-    let result = run(&data, 20);
+    let data = build(SEED);
+    let result = run(&data, N_PERMUTATIONS);
 
     // Identify the programme by the ground truth, then check what DIALOGUE
     // said about it.
@@ -198,8 +349,8 @@ fn test_dialogue_calls_the_planted_programme_significant() {
 /// The refined signatures land on the planted genes rather than the noise.
 #[test]
 fn test_dialogue_signatures_favour_the_planted_genes() {
-    let data = build(11);
-    let result = run(&data, 20);
+    let data = build(SEED);
+    let result = run(&data, N_PERMUTATIONS);
 
     let programme = planted_programme(&result, &data);
 
@@ -245,14 +396,13 @@ fn test_dialogue_signatures_favour_the_planted_genes() {
 /// The *final* scores, not just the canonical ones, must track the planted
 /// latent.
 ///
-/// This is the headline output of the pipeline and it was previously
-/// constrained by nothing but shape and finiteness. Reversing the projection
-/// vector in stage three, so every cell received another cell's score, left all
-/// seven tests passing.
+/// This is the headline output of the pipeline. A stage-three projection that
+/// hands every cell another cell's score keeps shape and finiteness intact, so
+/// only tracking the latent catches it.
 #[test]
 fn test_dialogue_final_scores_track_the_planted_latent() {
-    let data = build(11);
-    let result = run(&data, 20);
+    let data = build(SEED);
+    let result = run(&data, N_PERMUTATIONS);
     let programme = planted_programme(&result, &data);
 
     for t in 0..N_TYPES {
@@ -279,8 +429,8 @@ fn test_dialogue_final_scores_track_the_planted_latent() {
 /// planted programme.
 #[test]
 fn test_dialogue_refit_tracks_the_canonical_score() {
-    let data = build(11);
-    let result = run(&data, 20);
+    let data = build(SEED);
+    let result = run(&data, N_PERMUTATIONS);
     let programme = planted_programme(&result, &data);
 
     for t in 0..N_TYPES {
@@ -292,9 +442,9 @@ fn test_dialogue_refit_tracks_the_canonical_score() {
     }
     for t in 0..N_TYPES {
         assert_eq!(result.scores[t].nrows(), data.cell_type_indices[t].len());
-        assert_eq!(result.scores[t].ncols(), 2);
+        assert_eq!(result.scores[t].ncols(), N_PROGRAMMES);
         for i in 0..result.scores[t].nrows() {
-            for j in 0..2 {
+            for j in 0..N_PROGRAMMES {
                 assert!(result.scores[t][(i, j)].is_finite());
             }
         }
@@ -304,12 +454,11 @@ fn test_dialogue_refit_tracks_the_canonical_score() {
 /// Stage two must actually fit something.
 ///
 /// The determinism and equivalence tests compare verdict *counts*, which pass
-/// at `0 == 0`. Nothing else asserted the association table was non-empty, so a
-/// regression silencing stage two entirely would have slipped through.
+/// at `0 == 0`, so this is what catches stage two going silent.
 #[test]
 fn test_dialogue_produces_associations_and_verdicts() {
-    let data = build(11);
-    let result = run(&data, 20);
+    let data = build(SEED);
+    let result = run(&data, N_PERMUTATIONS);
 
     assert!(
         !result.verdicts.is_empty(),
@@ -329,9 +478,9 @@ fn test_dialogue_produces_associations_and_verdicts() {
 /// Same input, same output.
 #[test]
 fn test_dialogue_is_deterministic() {
-    let data = build(11);
-    let a = run(&data, 12);
-    let b = run(&data, 12);
+    let data = build(SEED);
+    let a = run(&data, N_PERMUTATIONS_CHEAP);
+    let b = run(&data, N_PERMUTATIONS_CHEAP);
 
     for t in 0..N_TYPES {
         for i in 0..a.scores[t].nrows() {
@@ -340,73 +489,12 @@ fn test_dialogue_is_deterministic() {
             }
         }
     }
-    for programme in 0..2 {
+    for programme in 0..N_PROGRAMMES {
         for pair in 0..(N_TYPES * (N_TYPES - 1) / 2) {
             assert_eq!(a.emp_p[(programme, pair)], b.emp_p[(programme, pair)]);
         }
     }
     assert_eq!(a.verdicts.len(), b.verdicts.len());
-}
-
-/// A scratch store that cleans up after itself.
-struct TempStore(std::path::PathBuf);
-
-impl Drop for TempStore {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-impl TempStore {
-    /// Reserves a uniquely named store in the system temp directory.
-    ///
-    /// The process id is part of the name: two `cargo test` invocations on one
-    /// machine, which the CI feature matrix does routinely, would otherwise
-    /// collide on the same file and read a half-written store.
-    fn new(name: &str) -> Self {
-        Self(std::env::temp_dir().join(format!(
-            "bixverse_dialogue_{name}_{}.bin",
-            std::process::id()
-        )))
-    }
-
-    /// Path as a `&str`.
-    fn path(&self) -> &str {
-        self.0.to_str().expect("temp path is valid UTF-8")
-    }
-}
-
-/// Writes the synthetic matrix out as a gene-major bixverse store.
-///
-/// The in-memory reader narrows `data_2` to `f16` when it builds a chunk, and
-/// so does the writer, so both paths see bit-identical values and the
-/// comparison below can be exact rather than approximate.
-fn write_store(path: &str, data: &DialogueSyntheticData) {
-    let n_cells = data.matrix.shape.0;
-    let mut writer =
-        CellGeneSparseWriter::new(path, false, n_cells, N_GENES, 1e4).expect("writer opens");
-
-    let norm = data.matrix.data_2.as_ref().expect("normalised layer");
-    for gene in 0..N_GENES {
-        let lo = data.matrix.indptr[gene] as usize;
-        let hi = data.matrix.indptr[gene + 1] as usize;
-        let raw: Vec<u32> = data.matrix.data[lo..hi].to_vec();
-        let indices: Vec<usize> = data.matrix.indices[lo..hi]
-            .iter()
-            .map(|v| *v as usize)
-            .collect();
-        let norms: Vec<F16> = norm[lo..hi].iter().map(|v| F16::from_f32(*v)).collect();
-        writer
-            .write_gene_chunk(CscGeneChunk::from_conversion(
-                RawCounts::from_u32_auto(&raw),
-                &norms,
-                &indices,
-                gene,
-                true,
-            ))
-            .expect("write gene chunk");
-    }
-    writer.finalise().expect("finalise");
 }
 
 /// The metacell shim and the streaming path must agree exactly.
@@ -416,18 +504,18 @@ fn write_store(path: &str, data: &DialogueSyntheticData) {
 /// special case.
 #[test]
 fn test_dialogue_in_memory_matches_the_streamed_store() {
-    let data = build(11);
+    let data = build(SEED);
     let store = TempStore::new("equivalence");
     write_store(store.path(), &data);
 
     let feature_refs: Vec<MatRef<f64>> = data.features.iter().map(|m| m.as_ref()).collect();
     let genes: Vec<usize> = (0..N_GENES).collect();
-    let settings = params(12);
+    let settings = params(N_PERMUTATIONS_CHEAP);
 
-    let in_memory = run(&data, 12);
+    let in_memory = run(&data, N_PERMUTATIONS_CHEAP);
 
     let reader = ParallelSparseReader::new(store.path()).expect("store opens");
-    let streamed = bixverse_rs::single_cell::sc_analysis::dialogue::dialogue_run(
+    let streamed = dialogue_run(
         &reader,
         &data.cell_type_indices,
         &feature_refs,
@@ -439,7 +527,7 @@ fn test_dialogue_in_memory_matches_the_streamed_store() {
     )
     .expect("DIALOGUE runs off the store");
 
-    for programme in 0..2 {
+    for programme in 0..N_PROGRAMMES {
         for pair in 0..(N_TYPES * (N_TYPES - 1) / 2) {
             assert_eq!(
                 in_memory.emp_p[(programme, pair)],
@@ -453,7 +541,7 @@ fn test_dialogue_in_memory_matches_the_streamed_store() {
 
     for t in 0..N_TYPES {
         assert_eq!(in_memory.permissive[t].len(), streamed.permissive[t].len());
-        for programme in 0..2 {
+        for programme in 0..N_PROGRAMMES {
             assert_eq!(
                 in_memory.permissive[t][programme].up,
                 streamed.permissive[t][programme].up
@@ -468,7 +556,7 @@ fn test_dialogue_in_memory_matches_the_streamed_store() {
             );
         }
         for i in 0..in_memory.scores[t].nrows() {
-            for j in 0..2 {
+            for j in 0..N_PROGRAMMES {
                 assert_eq!(
                     in_memory.scores[t][(i, j)],
                     streamed.scores[t][(i, j)],
@@ -482,7 +570,7 @@ fn test_dialogue_in_memory_matches_the_streamed_store() {
 /// Malformed input is rejected rather than half-processed.
 #[test]
 fn test_dialogue_rejects_malformed_input() {
-    let data = build(11);
+    let data = build(SEED);
     let feature_refs: Vec<MatRef<f64>> = data.features.iter().map(|m| m.as_ref()).collect();
     let genes: Vec<usize> = (0..N_GENES).collect();
 
@@ -498,7 +586,7 @@ fn test_dialogue_rejects_malformed_input() {
         &params(5),
         0,
     )
-    .unwrap_err();
+    .expect_err("one cell type should be rejected");
     assert!(
         matches!(err, BixverseErrors::DialogueTooFewCellTypes { .. }),
         "expected the cell-type check to fire, got {err}"

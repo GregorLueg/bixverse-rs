@@ -7,6 +7,12 @@
 //! split; the remaining runs are silent and timed. Each method's corrected
 //! embedding is written to `{dir}/{name}_{method}_out.f32` for parity checks.
 //!
+//! Run with:
+//! ```text
+//! BIXVERSE_HARMONY_DIR=/path cargo bench --features single-cell --bench harmony_bench
+//! BIXVERSE_HARMONY_DIR=/path cargo bench --features single-cell,gpu --bench harmony_bench
+//! ```
+//!
 //! Environment:
 //!
 //! - `BIXVERSE_HARMONY_DIR` (required) data directory
@@ -15,11 +21,10 @@
 //! - `BIXVERSE_HARMONY_REPS` silent timed runs per method, default 3
 //! - `BIXVERSE_HARMONY_ONLY` one of `v1`, `v2`, `gpu`
 //! - `BIXVERSE_HARMONY_KM_ITERS` override the initial k-means iterations
-//!
-//! ```bash
-//! BIXVERSE_HARMONY_DIR=/path cargo bench --features single-cell --bench harmony_bench
-//! ```
 
+#![cfg(feature = "single-cell")]
+
+use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 use faer::{Mat, MatRef};
@@ -31,8 +36,48 @@ use bixverse_rs::ml::clustering::k_means::KMeansParamsWrappers;
 use bixverse_rs::single_cell::sc_batch_correction::harmony::{HarmonyParams, harmony};
 use bixverse_rs::single_cell::sc_batch_correction::harmony_v2::{HarmonyParamsV2, harmony_v2};
 
+///////////////
+// Constants //
+///////////////
+
 /// Jitter added to tiled copies, in PC units.
 const TILE_JITTER: f32 = 0.05;
+
+/// Seed for the tiling jitter and for every Harmony run.
+const SEED: usize = 42;
+
+/// Default dataset name.
+const DEFAULT_NAME: &str = "ircolitis";
+
+/// Default number of tiled copies, i.e. the data as is.
+const DEFAULT_TILE: usize = 1;
+
+/// Default silent timed runs per method.
+const DEFAULT_REPS: usize = 3;
+
+/// Verbosity of the first, stage-split run.
+const VERBOSE: usize = 2;
+
+/////////////
+// Helpers //
+/////////////
+
+/// Read a `usize` from the environment, falling back to a default.
+///
+/// ### Params
+///
+/// * `key` - Environment variable name
+/// * `fallback` - Value to use when unset or unparseable
+///
+/// ### Returns
+///
+/// The resolved value.
+fn env_usize(key: &str, fallback: usize) -> usize {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(fallback)
+}
 
 /// Read a raw little-endian file of 4-byte values.
 ///
@@ -42,7 +87,7 @@ const TILE_JITTER: f32 = 0.05;
 ///
 /// ### Returns
 ///
-/// The raw 4-byte words
+/// The raw 4-byte words.
 fn read_words(path: &str) -> Vec<[u8; 4]> {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("reading {path}: {e}"));
     bytes
@@ -61,7 +106,7 @@ fn read_words(path: &str) -> Vec<[u8; 4]> {
 ///
 /// ### Returns
 ///
-/// `(embedding N x d, labels)`
+/// `(embedding N x d, labels)`.
 fn load(dir: &str, name: &str, tile: usize) -> (Mat<f32>, Vec<usize>) {
     let x: Vec<f32> = read_words(&format!("{dir}/{name}_pcs.f32"))
         .into_iter()
@@ -74,8 +119,8 @@ fn load(dir: &str, name: &str, tile: usize) -> (Mat<f32>, Vec<usize>) {
     let n = labels.len();
     let d = x.len() / n;
 
-    let mut rng = StdRng::seed_from_u64(42);
-    let noise = Normal::new(0.0f32, TILE_JITTER).unwrap();
+    let mut rng = StdRng::seed_from_u64(SEED as u64);
+    let noise = Normal::new(0.0f32, TILE_JITTER).expect("valid normal");
     let mut out = Mat::<f32>::zeros(n * tile, d);
     for t in 0..tile {
         for i in 0..n {
@@ -105,7 +150,12 @@ fn write_mat(path: &str, m: MatRef<f32>) {
     std::fs::write(path, bytes).unwrap_or_else(|e| panic!("writing {path}: {e}"));
 }
 
-/// Run one verbose pass (stage split) then `reps` silent timed passes.
+/////////////
+// Benches //
+/////////////
+
+/// Run one verbose pass (stage split) then `reps` silent timed passes, and
+/// print the best and worst of the silent ones.
 ///
 /// ### Params
 ///
@@ -113,17 +163,17 @@ fn write_mat(path: &str, m: MatRef<f32>) {
 /// * `reps` - Silent timed runs
 /// * `out_path` - Where the corrected embedding goes
 /// * `f` - Runs the method at the given verbosity
-fn bench(label: &str, reps: usize, out_path: &str, mut f: impl FnMut(usize) -> Mat<f32>) {
+fn bench_method(label: &str, reps: usize, out_path: &str, mut f: impl FnMut(usize) -> Mat<f32>) {
     println!("\n##### {label} #####");
     let t = Instant::now();
-    let z = f(2);
+    let z = f(VERBOSE);
     println!("{label}: verbose run {:.3} s", t.elapsed().as_secs_f64());
     write_mat(out_path, z.as_ref());
 
     let mut times: Vec<Duration> = Vec::with_capacity(reps);
     for _ in 0..reps {
         let t = Instant::now();
-        std::hint::black_box(f(0));
+        black_box(f(0));
         times.push(t.elapsed());
     }
     if let (Some(best), Some(worst)) = (times.iter().min(), times.iter().max()) {
@@ -135,17 +185,15 @@ fn bench(label: &str, reps: usize, out_path: &str, mut f: impl FnMut(usize) -> M
     }
 }
 
+//////////
+// Main //
+//////////
+
 fn main() {
     let dir = std::env::var("BIXVERSE_HARMONY_DIR").expect("set BIXVERSE_HARMONY_DIR");
-    let name = std::env::var("BIXVERSE_HARMONY_NAME").unwrap_or_else(|_| "ircolitis".into());
-    let tile: usize = std::env::var("BIXVERSE_HARMONY_TILE")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1);
-    let reps: usize = std::env::var("BIXVERSE_HARMONY_REPS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(3);
+    let name = std::env::var("BIXVERSE_HARMONY_NAME").unwrap_or_else(|_| DEFAULT_NAME.into());
+    let tile = env_usize("BIXVERSE_HARMONY_TILE", DEFAULT_TILE);
+    let reps = env_usize("BIXVERSE_HARMONY_REPS", DEFAULT_REPS);
     let only = std::env::var("BIXVERSE_HARMONY_ONLY").ok();
     let km_iters: Option<usize> = std::env::var("BIXVERSE_HARMONY_KM_ITERS")
         .ok()
@@ -173,8 +221,8 @@ fn main() {
         if let Some(it) = km_iters {
             params.kmeans_params = KMeansParamsWrappers::new(it, None, None);
         }
-        bench("v1", reps, &format!("{tag}_v1_out.f32"), |v| {
-            harmony(pca.as_ref(), &batch, &params, 42, v).unwrap()
+        bench_method("v1", reps, &format!("{tag}_v1_out.f32"), |v| {
+            harmony(pca.as_ref(), &batch, &params, SEED, v).expect("harmony v1")
         });
     }
 
@@ -183,8 +231,8 @@ fn main() {
         if let Some(it) = km_iters {
             params.kmeans_params = KMeansParamsWrappers::new(it, None, None);
         }
-        bench("v2", reps, &format!("{tag}_v2_out.f32"), |v| {
-            harmony_v2(pca.as_ref(), &batch, &params, 42, v).unwrap()
+        bench_method("v2", reps, &format!("{tag}_v2_out.f32"), |v| {
+            harmony_v2(pca.as_ref(), &batch, &params, SEED, v).expect("harmony v2")
         });
     }
 
@@ -198,16 +246,16 @@ fn main() {
         if let Some(it) = km_iters {
             params.kmeans_params = Some(KMeansGpuParams::new(it, None, true, false));
         }
-        bench("gpu", reps, &format!("{tag}_gpu_out.f32"), |v| {
+        bench_method("gpu", reps, &format!("{tag}_gpu_out.f32"), |v| {
             harmony_v2_gpu::<WgpuRuntime>(
                 pca.as_ref(),
                 &batch,
                 &params,
-                42,
+                SEED,
                 WgpuDevice::default(),
                 v,
             )
-            .unwrap()
+            .expect("harmony gpu")
         });
     }
 }

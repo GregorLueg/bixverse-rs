@@ -2,27 +2,56 @@
 //! missing values. Fixtures in `tests/pcamethods_fixtures/*.txt`, from
 //! `dev/gen_pcamethods_fixtures.R`.
 
-use bixverse_rs::core::math::pca_missing::*;
-use bixverse_rs::prelude::*;
 use faer::{Mat, MatRef};
 use rustc_hash::FxHashMap;
 
-/// Tolerance on every compared quantity. The first runs measured at most
-/// 2.3e-13 on the small cases and 5.9e-12 on the large one (PPCA scores both
-/// times); the gap is summation order, not method.
+use bixverse_rs::core::math::pca_missing::*;
+use bixverse_rs::prelude::*;
+
+///////////////
+// Constants //
+///////////////
+
+/// Tolerance on every compared quantity. Measured at most 2.3e-13 on the
+/// small cases and 5.9e-12 on the large one (PPCA scores both times); the gap
+/// is summation order, not method.
 const TOL: f64 = 1e-10;
+
+/////////////
+// Helpers //
+/////////////
 
 /// Numerical Recipes LCG, identical to the R side.
 struct Lcg(u64);
 
 impl Lcg {
+    /// Advances the state.
+    ///
+    /// ### Returns
+    ///
+    /// The new state, in `0..2^32`.
     fn next(&mut self) -> u64 {
         self.0 = (1664525 * self.0 + 1013904223) % 4294967296;
         self.0
     }
 }
 
-/// Rebuild the fixture matrix (N x D, `NaN` for missing) the R script used.
+/// Rebuild the fixture matrix the R script used.
+///
+/// Rank-`k` integer signal plus LCG noise, then a missingness mask redrawn
+/// until no row or column is fully missing.
+///
+/// ### Params
+///
+/// * `n` - Rows
+/// * `d` - Columns
+/// * `k` - Rank of the planted signal
+/// * `miss_pct` - Percentage of entries set missing
+/// * `seed` - LCG seed
+///
+/// ### Returns
+///
+/// `n x d` matrix, `NaN` for missing.
 fn build_case(n: usize, d: usize, k: usize, miss_pct: u64, seed: u64) -> Mat<f64> {
     let mut lcg = Lcg(seed);
     let mut z = vec![0.0; n * k];
@@ -60,6 +89,14 @@ fn build_case(n: usize, d: usize, k: usize, miss_pct: u64, seed: u64) -> Mat<f64
 
 /// Parse a fixture file: `#` lines are comments, every other line is a key
 /// followed by whitespace-separated values.
+///
+/// ### Params
+///
+/// * `text` - Fixture file contents
+///
+/// ### Returns
+///
+/// Values by key.
 fn parse_fixture(text: &str) -> FxHashMap<&str, Vec<f64>> {
     text.lines()
         .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
@@ -75,12 +112,31 @@ fn parse_fixture(text: &str) -> FxHashMap<&str, Vec<f64>> {
 }
 
 /// Column-major fixture slice as a matrix.
+///
+/// ### Params
+///
+/// * `x` - Column-major values
+/// * `nrow` - Rows
+/// * `ncol` - Columns
+///
+/// ### Returns
+///
+/// A view over `x`.
 fn fixture(x: &[f64], nrow: usize, ncol: usize) -> MatRef<'_, f64> {
     MatRef::from_column_major_slice(x, nrow, ncol)
 }
 
 /// Max absolute difference after flipping each column of `ours` onto the sign
 /// of `theirs`.
+///
+/// ### Params
+///
+/// * `ours` - Our scores or loadings
+/// * `theirs` - The reference, same shape
+///
+/// ### Returns
+///
+/// The largest absolute entrywise difference after sign alignment.
 fn max_diff_signed(ours: MatRef<f64>, theirs: MatRef<f64>) -> f64 {
     let mut worst: f64 = 0.0;
     for l in 0..ours.ncols() {
@@ -96,6 +152,15 @@ fn max_diff_signed(ours: MatRef<f64>, theirs: MatRef<f64>) -> f64 {
 }
 
 /// Max absolute difference.
+///
+/// ### Params
+///
+/// * `ours` - Our matrix
+/// * `theirs` - The reference, same shape
+///
+/// ### Returns
+///
+/// The largest absolute entrywise difference.
 fn max_diff(ours: MatRef<f64>, theirs: MatRef<f64>) -> f64 {
     let mut worst: f64 = 0.0;
     for j in 0..ours.ncols() {
@@ -107,6 +172,15 @@ fn max_diff(ours: MatRef<f64>, theirs: MatRef<f64>) -> f64 {
 }
 
 /// Max absolute difference of two slices.
+///
+/// ### Params
+///
+/// * `ours` - Our values
+/// * `theirs` - The reference, same length
+///
+/// ### Returns
+///
+/// The largest absolute difference.
 fn max_diff_vec(ours: &[f64], theirs: &[f64]) -> f64 {
     ours.iter()
         .zip(theirs)
@@ -117,6 +191,11 @@ fn max_diff_vec(ours: &[f64], theirs: &[f64]) -> f64 {
 /// Fit both methods on one fixture case and assert every stored quantity
 /// against R, aligning column signs of scores and loadings. `*_COMPLETED` is
 /// compared only when the fixture carries it.
+///
+/// ### Params
+///
+/// * `label` - Case name for failure messages
+/// * `text` - Fixture file contents
 fn check_case(label: &str, text: &str) {
     let fx = parse_fixture(text);
     let int = |key: &str| fx[key][0] as usize;
@@ -132,7 +211,7 @@ fn check_case(label: &str, text: &str) {
         }),
         Verbosity::Quiet,
     )
-    .unwrap();
+    .expect("ppca failed");
     assert!(pp.converged, "{label} ppca did not converge");
     let bp = bpca(
         y.as_ref(),
@@ -142,23 +221,29 @@ fn check_case(label: &str, text: &str) {
         }),
         Verbosity::Quiet,
     )
-    .unwrap();
+    .expect("bpca failed");
 
     for (method, res) in [("PPCA", &pp), ("BPCA", &bp)] {
         let get = |what: &str| fx.get(format!("{method}_{what}").as_str());
         let mut diffs = vec![
             (
                 "scores",
-                max_diff_signed(res.scores.as_ref(), fixture(get("SCORES").unwrap(), n, k)),
+                max_diff_signed(
+                    res.scores.as_ref(),
+                    fixture(get("SCORES").expect("scores in fixture"), n, k),
+                ),
             ),
             (
                 "loadings",
                 max_diff_signed(
                     res.loadings.as_ref(),
-                    fixture(get("LOADINGS").unwrap(), d, k),
+                    fixture(get("LOADINGS").expect("loadings in fixture"), d, k),
                 ),
             ),
-            ("r2", max_diff_vec(&res.r2_cum, get("R2CUM").unwrap())),
+            (
+                "r2",
+                max_diff_vec(&res.r2_cum, get("R2CUM").expect("r2 in fixture")),
+            ),
         ];
         if let Some(completed) = get("COMPLETED") {
             diffs.push((
@@ -171,6 +256,10 @@ fn check_case(label: &str, text: &str) {
         }
     }
 }
+
+///////////
+// Tests //
+///////////
 
 /// Both fits on a tall (60 x 12, 20 % missing) and a wide (16 x 80, 25 %
 /// missing) case. In the wide case R's BPCA prunes the third component, so

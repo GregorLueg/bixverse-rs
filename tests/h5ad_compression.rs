@@ -1,5 +1,3 @@
-#![cfg(feature = "single-cell")]
-
 //! Round trips of compressed h5ad inputs.
 //!
 //! An HDF5 dataset written with a filter the library does not have fails
@@ -8,17 +6,33 @@
 //! build. These tests pin what the build can actually decode: gzip always, LZF
 //! and Blosc under the `hdf5-filters` feature, and a named error otherwise.
 
+#![cfg(feature = "single-cell")]
+
 use hdf5::File;
 use hdf5::filters::Filter;
 
-use bixverse_rs::single_cell::sc_data::data_io::{
-    MinCellQuality, ParallelSparseReader, SingleCellReading,
-};
+use bixverse_rs::prelude::*;
 use bixverse_rs::single_cell::sc_data::h5_filters::unsupported_filters;
 use bixverse_rs::single_cell::sc_data::h5ad_io::{RawDataSlot, stream_h5_counts, write_h5_counts};
 
+///////////////
+// Constants //
+///////////////
+
+/// Cells in the fixture.
 const NO_CELLS: usize = 40;
+/// Genes in the fixture.
 const NO_GENES: usize = 30;
+/// Seed of the LCG that draws the fixture counts.
+const SEED: u64 = 0x5EED_1234;
+/// Chunk length for the `data` and `indices` datasets, capped at their length.
+const DATA_CHUNK: usize = 64;
+/// Chunk length for the `indptr` dataset.
+const INDPTR_CHUNK: usize = 16;
+
+/////////////
+// Fixture //
+/////////////
 
 /// Filter pipelines the fixture writer can apply.
 #[derive(Clone, Copy, Debug)]
@@ -36,6 +50,7 @@ enum Compression {
 }
 
 impl Compression {
+    /// The HDF5 filter pipeline this variant applies to every dataset.
     fn pipeline(self) -> Vec<Filter> {
         match self {
             Self::Raw => vec![],
@@ -51,6 +66,7 @@ impl Compression {
         }
     }
 
+    /// Short name used in temp file names and failure messages.
     fn label(self) -> &'static str {
         match self {
             Self::Raw => "raw",
@@ -73,10 +89,20 @@ impl Drop for TempPath {
 }
 
 impl TempPath {
+    /// Scratch path in the system temp directory.
+    ///
+    /// ### Params
+    ///
+    /// * `name` - File name suffix, unique per test and mode
+    ///
+    /// ### Returns
+    ///
+    /// The guard. Nothing is created on disk until something writes to it.
     fn new(name: &str) -> Self {
         Self(std::env::temp_dir().join(format!("bixverse_h5ad_compression_{name}")))
     }
 
+    /// The path as a string, which is what the h5ad readers take.
     fn path(&self) -> &str {
         self.0.to_str().expect("temp path is valid UTF-8")
     }
@@ -91,7 +117,7 @@ impl TempPath {
 ///
 /// `(data, indices, indptr)` in the h5ad dtypes: f32 counts, i32 structure.
 fn reference_csr() -> (Vec<f32>, Vec<i32>, Vec<i32>) {
-    let mut state: u64 = 0x5EED_1234;
+    let mut state = SEED;
     let mut next = || {
         state = state
             .wrapping_mul(6_364_136_223_846_793_005)
@@ -122,8 +148,13 @@ fn reference_csr() -> (Vec<f32>, Vec<i32>, Vec<i32>) {
     (data, indices, indptr)
 }
 
-/// Write a minimal CSR h5ad with the given filter pipeline on every count
+/// Writes a minimal CSR h5ad with the given filter pipeline on every count
 /// dataset.
+///
+/// ### Params
+///
+/// * `path` - Where to write the h5ad
+/// * `compression` - Filter pipeline to apply
 fn write_fixture(path: &str, compression: Compression) {
     let (data, indices, indptr) = reference_csr();
     let filters = compression.pipeline();
@@ -134,26 +165,31 @@ fn write_fixture(path: &str, compression: Compression) {
     group
         .new_dataset_builder()
         .set_filters(&filters)
-        .chunk(64.min(data.len()))
+        .chunk(DATA_CHUNK.min(data.len()))
         .with_data(&data)
         .create("data")
         .expect("write data");
     group
         .new_dataset_builder()
         .set_filters(&filters)
-        .chunk(64.min(indices.len()))
+        .chunk(DATA_CHUNK.min(indices.len()))
         .with_data(&indices)
         .create("indices")
         .expect("write indices");
     group
         .new_dataset_builder()
         .set_filters(&filters)
-        .chunk(16)
+        .chunk(INDPTR_CHUNK)
         .with_data(&indptr)
         .create("indptr")
         .expect("write indptr");
 }
 
+/////////////
+// Helpers //
+/////////////
+
+/// QC thresholds that keep every cell and gene, so the ingest is a pure copy.
 fn qc_params() -> MinCellQuality {
     MinCellQuality {
         min_unique_genes: 0,
@@ -163,7 +199,15 @@ fn qc_params() -> MinCellQuality {
     }
 }
 
-/// Read every cell back out of the binarised file as `(indices, counts)`.
+/// Reads every cell back out of the binarised file.
+///
+/// ### Params
+///
+/// * `bin_path` - Path to the binarised store
+///
+/// ### Returns
+///
+/// One `(gene indices, counts)` pair per cell.
 fn read_back(bin_path: &str) -> Vec<(Vec<u32>, Vec<u32>)> {
     let reader = ParallelSparseReader::new(bin_path).expect("reader opens");
     let indices: Vec<usize> = (0..NO_CELLS).collect();
@@ -194,6 +238,10 @@ fn expected_cells() -> Vec<(Vec<u32>, Vec<u32>)> {
 
 /// Both ingest paths must reproduce the source matrix exactly, whatever the
 /// filter pipeline on the way in.
+///
+/// ### Params
+///
+/// * `compression` - Filter pipeline the fixture is written with
 fn assert_round_trip(compression: Compression) {
     let h5 = TempPath::new(&format!("{}.h5ad", compression.label()));
     write_fixture(h5.path(), compression);
@@ -229,6 +277,10 @@ fn assert_round_trip(compression: Compression) {
         );
     }
 }
+
+///////////
+// Tests //
+///////////
 
 /// Uncompressed input, the baseline the other cases are measured against.
 #[test]

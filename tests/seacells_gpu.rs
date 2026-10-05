@@ -13,17 +13,37 @@
 
 #![cfg(all(feature = "single-cell", feature = "gpu", feature = "large-test"))]
 
-use bixverse_rs::prelude::LanczosParams;
 use cubecl::prelude::*;
 use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
 use faer::Mat;
 use rand::prelude::*;
-use rand::rngs::StdRng;
 use rand_distr::{Distribution, Normal};
 
 use bixverse_rs::gpu::sc_gpu::seacells_gpu::seacells_fit_gpu;
+use bixverse_rs::prelude::LanczosParams;
 use bixverse_rs::single_cell::mc_generation::seacells::{SEACells, SEACellsParams};
 use bixverse_rs::single_cell::sc_processing::knn::{KnnParams, generate_knn_with_dist};
+
+///////////////
+// Constants //
+///////////////
+
+/// Number of cells.
+const N_CELLS: usize = 3000;
+/// Number of SEACells.
+const N_SEACELLS: usize = 40;
+/// Embedding width.
+const EMBED_DIM: usize = 20;
+/// Number of blobs in the synthetic embedding.
+const N_CLUSTERS: usize = 12;
+/// Seed for the synthetic embedding.
+const EMBED_SEED: u64 = 7;
+/// Seed for the kNN graph, archetype initialisation and both fits.
+const SEED: usize = 42;
+
+/////////////
+// Helpers //
+/////////////
 
 /// Skip rather than fail where no GPU is available.
 ///
@@ -50,7 +70,7 @@ fn try_device() -> Option<WgpuDevice> {
 ///
 /// ### Returns
 ///
-/// An `n × dim` matrix.
+/// An `n x dim` matrix.
 fn make_embedding(n: usize, dim: usize, n_clusters: usize, seed: u64) -> Mat<f32> {
     let mut rng = StdRng::seed_from_u64(seed);
     let centre_dist = Normal::new(0.0f32, 1.0).expect("valid normal");
@@ -97,30 +117,33 @@ fn params(k: usize, pruning: bool) -> SEACellsParams {
     }
 }
 
+///////////
+// Tests //
+///////////
+
 /// The GPU path must reach the same solution as the CPU path, with pruning both
 /// off and on.
 #[test]
 fn test_seacells_gpu_matches_cpu() {
     let Some(device) = try_device() else { return };
 
-    let n = 3000usize;
-    let k = 40usize;
-    let embedding = make_embedding(n, 20, 12, 7);
+    let n = N_CELLS;
+    let embedding = make_embedding(n, EMBED_DIM, N_CLUSTERS, EMBED_SEED);
 
     for pruning in [false, true] {
-        let p = params(k, pruning);
+        let p = params(N_SEACELLS, pruning);
 
         let (knn_indices, knn_distances) =
-            generate_knn_with_dist(embedding.as_ref(), &p.knn_params, true, false, 42, false)
+            generate_knn_with_dist(embedding.as_ref(), &p.knn_params, true, false, SEED, false)
                 .expect("kNN failed");
         let knn_distances = knn_distances.expect("distances requested");
 
         let mut cpu_model = SEACells::new(n, &p);
         cpu_model.construct_kernel_mat(embedding.as_ref(), &knn_indices, &knn_distances, 0);
         cpu_model
-            .initialise_archetypes(&knn_indices, &knn_distances, 0, 42)
+            .initialise_archetypes(&knn_indices, &knn_distances, 0, SEED as u64)
             .expect("archetype init failed");
-        cpu_model.fit(42, 0).expect("CPU fit failed");
+        cpu_model.fit(SEED, 0).expect("CPU fit failed");
         let cpu_assign = cpu_model
             .get_hard_assignments()
             .expect("assignments failed");
@@ -131,7 +154,7 @@ fn test_seacells_gpu_matches_cpu() {
             &knn_indices,
             &knn_distances,
             &p,
-            42,
+            SEED,
             device.clone(),
             0,
         )

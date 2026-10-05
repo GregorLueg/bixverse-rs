@@ -11,8 +11,9 @@
 //! Every cell reports the max relative difference to faer, so a layout bug
 //! cannot pass as a speed-up.
 //!
-//! Run with:
-//! ```
+//! Run with (default features, so `accelerate` is on; the syrk cell only does
+//! work on macOS):
+//! ```text
 //! cargo bench --bench accelerate_gemm_bench
 //! ```
 //!
@@ -21,9 +22,6 @@
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
-use bixverse_rs::prelude::*;
-use bixverse_rs::utils::faer_parallelism;
-use bixverse_rs::utils::gemm::gemm;
 use faer::linalg::matmul::matmul;
 use faer::linalg::matmul::triangular::{BlockStructure, matmul as triangular_matmul};
 use faer::{Accum, Mat, MatRef, Par};
@@ -31,11 +29,47 @@ use rand::prelude::*;
 use rand::rngs::StdRng;
 use rayon::prelude::*;
 
-/// Timed repetitions per cell, after one warm-up.
+use bixverse_rs::prelude::*;
+use bixverse_rs::utils::faer_parallelism;
+use bixverse_rs::utils::gemm::gemm;
+
+///////////////
+// Constants //
+///////////////
+
+/// Timed repetitions per cell, after one warm-up. The median is reported.
 const REPS: usize = 5;
 
 /// Rows per tile in the `tiled` cell.
 const TILE_ROWS: usize = 1024;
+
+/// NMF ranks swept.
+const NMF_RANKS: [usize; 2] = [10, 50];
+
+/// `(rows, columns)` of V in the `nmf` cells, default shape.
+const NMF_SHAPE: (usize, usize) = (5_000, 1_000);
+
+/// `(rows, columns)` of V in the `nmf` cells under `ACCEL_BENCH_LARGE`.
+const NMF_SHAPE_LARGE: (usize, usize) = (20_000, 2_000);
+
+/// `(rows, columns)` of X in the `cov` cells, default shape.
+const COV_SHAPE: (usize, usize) = (5_000, 1_000);
+
+/// `(rows, columns)` of X in the `cov` cells under `ACCEL_BENCH_LARGE`.
+const COV_SHAPE_LARGE: (usize, usize) = (50_000, 2_000);
+
+/// Rows of X in the `tiled` cells, default shape.
+const TILED_N: usize = 50_000;
+
+/// Rows of X in the `tiled` cells under `ACCEL_BENCH_LARGE`.
+const TILED_N_LARGE: usize = 200_000;
+
+/// `(columns of X and C, rows of C)` swept in the `tiled` cells.
+const TILED_SHAPES: [(usize, usize); 2] = [(32, 64), (128, 256)];
+
+////////////////////
+// Accelerate FFI //
+////////////////////
 
 #[cfg(target_os = "macos")]
 #[link(name = "Accelerate", kind = "framework")]
@@ -68,8 +102,10 @@ unsafe extern "C" {
     );
 }
 
-/// `C = X^T X`, lower triangle, via Accelerate cblas syrk
+/// Float types with an Accelerate cblas `?syrk`.
 trait Syrk: BixverseFloat {
+    /// `C = X^T X`, lower triangle only. A no-op off macOS.
+    ///
     /// ### Params
     ///
     /// * `x` - Column-major `n x p` input
@@ -110,7 +146,11 @@ macro_rules! impl_syrk {
 impl_syrk!(f32, cblas_ssyrk);
 impl_syrk!(f64, cblas_dsyrk);
 
-/// Random matrix with entries in [0, 1)
+/////////////
+// Helpers //
+/////////////
+
+/// Random matrix with entries in `[0, 1)`.
 ///
 /// ### Params
 ///
@@ -124,11 +164,11 @@ impl_syrk!(f64, cblas_dsyrk);
 fn random_mat<T: BixverseFloat>(nrows: usize, ncols: usize, seed: u64) -> Mat<T> {
     let mut rng = StdRng::seed_from_u64(seed);
     Mat::from_fn(nrows, ncols, |_, _| {
-        T::from_f64(rng.random::<f64>()).unwrap()
+        T::from_f64(rng.random::<f64>()).expect("f64 fits T")
     })
 }
 
-/// Median wall clock of `REPS` runs after one warm-up
+/// Median wall clock of [`REPS`] runs after one warm-up.
 ///
 /// ### Params
 ///
@@ -137,7 +177,7 @@ fn random_mat<T: BixverseFloat>(nrows: usize, ncols: usize, seed: u64) -> Mat<T>
 /// ### Returns
 ///
 /// Median duration.
-fn median_time(mut f: impl FnMut()) -> Duration {
+fn median_of(mut f: impl FnMut()) -> Duration {
     f();
     let mut times: Vec<Duration> = (0..REPS)
         .map(|_| {
@@ -151,7 +191,7 @@ fn median_time(mut f: impl FnMut()) -> Duration {
 }
 
 /// Max relative difference between two matrices, optionally on the lower
-/// triangle only
+/// triangle only.
 ///
 /// ### Params
 ///
@@ -167,8 +207,8 @@ fn max_rel_diff<T: BixverseFloat>(a: MatRef<T>, b: MatRef<T>, lower_only: bool) 
     for j in 0..a.ncols() {
         let start = if lower_only { j } else { 0 };
         for i in start..a.nrows() {
-            let x = a[(i, j)].to_f64().unwrap();
-            let y = b[(i, j)].to_f64().unwrap();
+            let x = a[(i, j)].to_f64().expect("T fits f64");
+            let y = b[(i, j)].to_f64().expect("T fits f64");
             diff = diff.max((x - y).abs());
             scale = scale.max(x.abs());
         }
@@ -176,7 +216,7 @@ fn max_rel_diff<T: BixverseFloat>(a: MatRef<T>, b: MatRef<T>, lower_only: bool) 
     diff / scale.max(f64::MIN_POSITIVE)
 }
 
-/// Print one result row
+/// Print one result row.
 ///
 /// ### Params
 ///
@@ -193,7 +233,11 @@ fn report(label: &str, faer: Duration, accel: Duration, rel: f64) {
     );
 }
 
-/// NMF HALS products `W^T V` and `V H^T`
+/////////////
+// Benches //
+/////////////
+
+/// NMF HALS products `W^T V` and `V H^T`.
 ///
 /// ### Params
 ///
@@ -209,7 +253,7 @@ fn bench_nmf<T: BixverseFloat>(n: usize, m: usize, k: usize, tag: &str) {
 
     let mut ref_out = Mat::<T>::zeros(k, m);
     let mut out = Mat::<T>::zeros(k, m);
-    let tf = median_time(|| {
+    let tf = median_of(|| {
         matmul(
             ref_out.as_mut(),
             Accum::Replace,
@@ -220,7 +264,7 @@ fn bench_nmf<T: BixverseFloat>(n: usize, m: usize, k: usize, tag: &str) {
         );
         black_box(&ref_out);
     });
-    let ta = median_time(|| {
+    let ta = median_of(|| {
         gemm(
             out.as_mut(),
             Accum::Replace,
@@ -236,7 +280,7 @@ fn bench_nmf<T: BixverseFloat>(n: usize, m: usize, k: usize, tag: &str) {
 
     let mut ref_out = Mat::<T>::zeros(n, k);
     let mut out = Mat::<T>::zeros(n, k);
-    let tf = median_time(|| {
+    let tf = median_of(|| {
         matmul(
             ref_out.as_mut(),
             Accum::Replace,
@@ -247,7 +291,7 @@ fn bench_nmf<T: BixverseFloat>(n: usize, m: usize, k: usize, tag: &str) {
         );
         black_box(&ref_out);
     });
-    let ta = median_time(|| {
+    let ta = median_of(|| {
         gemm(
             out.as_mut(),
             Accum::Replace,
@@ -262,7 +306,7 @@ fn bench_nmf<T: BixverseFloat>(n: usize, m: usize, k: usize, tag: &str) {
     report(&format!("nmf V H^T  {tag} {n}x{m} k={k}"), tf, ta, rel);
 }
 
-/// Covariance-shaped `X^T X`: faer lower triangle against full gemm
+/// Covariance-shaped `X^T X`: faer lower triangle against full gemm.
 ///
 /// ### Params
 ///
@@ -275,7 +319,7 @@ fn bench_cov<T: Syrk>(n: usize, p: usize, tag: &str) {
 
     let mut ref_out = Mat::<T>::zeros(p, p);
     let mut out = Mat::<T>::zeros(p, p);
-    let tf = median_time(|| {
+    let tf = median_of(|| {
         triangular_matmul(
             ref_out.as_mut(),
             BlockStructure::TriangularLower,
@@ -289,7 +333,7 @@ fn bench_cov<T: Syrk>(n: usize, p: usize, tag: &str) {
         );
         black_box(&ref_out);
     });
-    let tff = median_time(|| {
+    let tff = median_of(|| {
         matmul(
             ref_out.as_mut(),
             Accum::Replace,
@@ -300,7 +344,7 @@ fn bench_cov<T: Syrk>(n: usize, p: usize, tag: &str) {
         );
         black_box(&ref_out);
     });
-    let ta = median_time(|| {
+    let ta = median_of(|| {
         gemm(
             out.as_mut(),
             Accum::Replace,
@@ -316,7 +360,7 @@ fn bench_cov<T: Syrk>(n: usize, p: usize, tag: &str) {
     report(&format!("cov full  {tag} {n}x{p}"), tff, ta, rel);
 
     let mut syrk_out = Mat::<T>::zeros(p, p);
-    let ts = median_time(|| {
+    let ts = median_of(|| {
         T::syrk_xtx(x.as_ref(), &mut syrk_out);
         black_box(&syrk_out);
     });
@@ -330,7 +374,7 @@ fn bench_cov<T: Syrk>(n: usize, p: usize, tag: &str) {
     );
 }
 
-/// `Par::Seq` tile GEMMs under rayon: `X_tile C^T`
+/// `Par::Seq` tile GEMMs under rayon: `X_tile C^T`.
 ///
 /// ### Params
 ///
@@ -359,8 +403,8 @@ fn bench_tiled<T: BixverseFloat>(n: usize, d: usize, k: usize, tag: &str) {
             },
         )
     };
-    let tf = median_time(|| run(false));
-    let ta = median_time(|| run(true));
+    let tf = median_of(|| run(false));
+    let ta = median_of(|| run(true));
 
     let tile = x.as_ref().subrows(0, TILE_ROWS.min(n));
     let mut ref_out = Mat::<T>::zeros(tile.nrows(), k);
@@ -385,32 +429,28 @@ fn bench_tiled<T: BixverseFloat>(n: usize, d: usize, k: usize, tag: &str) {
     report(&format!("tiled     {tag} {n}x{d} k={k}"), tf, ta, rel);
 }
 
+//////////
+// Main //
+//////////
+
 fn main() {
     let large = std::env::var("ACCEL_BENCH_LARGE").is_ok();
-    let (n, m) = if large {
-        (20_000, 2_000)
-    } else {
-        (5_000, 1_000)
-    };
-    let (cov_n, cov_p) = if large {
-        (50_000, 2_000)
-    } else {
-        (5_000, 1_000)
-    };
-    let tiled_n = if large { 200_000 } else { 50_000 };
+    let (n, m) = if large { NMF_SHAPE_LARGE } else { NMF_SHAPE };
+    let (cov_n, cov_p) = if large { COV_SHAPE_LARGE } else { COV_SHAPE };
+    let tiled_n = if large { TILED_N_LARGE } else { TILED_N };
 
     println!(
         "VECLIB_MAXIMUM_THREADS={}",
         std::env::var("VECLIB_MAXIMUM_THREADS").unwrap_or_else(|_| "unset".into())
     );
 
-    for k in [10, 50] {
+    for k in NMF_RANKS {
         bench_nmf::<f32>(n, m, k, "f32");
         bench_nmf::<f64>(n, m, k, "f64");
     }
     bench_cov::<f32>(cov_n, cov_p, "f32");
     bench_cov::<f64>(cov_n, cov_p, "f64");
-    for (d, k) in [(32, 64), (128, 256)] {
+    for (d, k) in TILED_SHAPES {
         bench_tiled::<f32>(tiled_n, d, k, "f32");
         bench_tiled::<f64>(tiled_n, d, k, "f64");
     }

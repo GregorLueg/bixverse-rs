@@ -21,7 +21,7 @@
 //! Warm page cache throughout: every cell runs after a warm-up read.
 //!
 //! Run with:
-//! ```
+//! ```text
 //! cargo bench --features single-cell --bench dge_scan_bench
 //! ```
 //!
@@ -74,6 +74,12 @@ const TARGET_SIZE: f32 = 1e4;
 
 /// Seed for the generator. Fixed so the cached stores are reproducible.
 const SEED: u64 = 0xD6E_5CA4_u64;
+
+/// `min_proportion` passed to every DGE call.
+const MIN_PROPORTION: f32 = 0.05;
+
+/// Test alternative passed to every DGE call.
+const ALTERNATIVE: &str = "greater";
 
 /////////////////
 // Count model //
@@ -350,8 +356,10 @@ fn main() {
     };
 
     let (cell_path, gene_path) = ensure_stores(&shape);
-    let cell_reader = ParallelSparseReader::new(cell_path.to_str().unwrap()).expect("cell reader");
-    let gene_reader = ParallelSparseReader::new(gene_path.to_str().unwrap()).expect("gene reader");
+    let cell_reader =
+        ParallelSparseReader::new(cell_path.to_str().expect("utf-8 path")).expect("cell reader");
+    let gene_reader =
+        ParallelSparseReader::new(gene_path.to_str().expect("utf-8 path")).expect("gene reader");
 
     let all_cells: Vec<usize> = (0..shape.n_cells).collect();
     let all_genes: Vec<usize> = (0..shape.n_genes).collect();
@@ -400,8 +408,15 @@ fn main() {
         .collect();
 
     let t_arm = best_of(|| {
-        let res = calculate_dge_grps_mann_whitney(&cell_reader, &grp_1, &grp_2, 0.05, "greater", 0)
-            .expect("dge");
+        let res = calculate_dge_grps_mann_whitney(
+            &cell_reader,
+            &grp_1,
+            &grp_2,
+            MIN_PROPORTION,
+            ALTERNATIVE,
+            0,
+        )
+        .expect("dge");
         black_box(res.z_scores.len());
     });
 
@@ -417,14 +432,26 @@ fn main() {
     let references: Vec<usize> = (0..shape.n_groups).collect();
 
     let t_rest = best_of(|| {
-        let res = calculate_dge_one_vs_rest_mann_whitney(&gene_reader, &groups, 0.05, "greater", 0)
-            .expect("one-vs-rest");
+        let res = calculate_dge_one_vs_rest_mann_whitney(
+            &gene_reader,
+            &groups,
+            MIN_PROPORTION,
+            ALTERNATIVE,
+            0,
+        )
+        .expect("one-vs-rest");
         black_box(res.len());
     });
     let t_many = best_of(|| {
-        let res =
-            calculate_dge_one_vs_many_auroc(&gene_reader, &groups, &references, 0.05, "greater", 0)
-                .expect("one-vs-many");
+        let res = calculate_dge_one_vs_many_auroc(
+            &gene_reader,
+            &groups,
+            &references,
+            MIN_PROPORTION,
+            ALTERNATIVE,
+            0,
+        )
+        .expect("one-vs-many");
         black_box(res.len());
     });
 

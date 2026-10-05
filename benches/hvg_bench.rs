@@ -23,7 +23,7 @@
 //! matters when the same store is scanned repeatedly.
 //!
 //! Run with:
-//! ```
+//! ```text
 //! cargo bench --features single-cell --bench hvg_bench
 //! ```
 //!

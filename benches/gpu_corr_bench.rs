@@ -2,52 +2,47 @@
 //!
 //! `column_pairwise_cor_gpu` reduces to one product, `G = A A^T` over the
 //! centred and scaled matrix, which is uploaded feature-major. That product goes
-//! through `gram_aat`. It used to go through cubek with `Strategy::DoubleUnit`,
-//! pinned there because `Strategy::Auto` blows up on Apple devices, and
-//! `DoubleUnit` gives one thread per output element with a serial reduction:
-//! the same wrong-algorithm-for-the-shape problem that cost the randomised SVD
-//! 25.7x before it got a dedicated Gram kernel.
+//! through `gram_aat`. The cubek `Strategy::DoubleUnit` GEMM it replaced (one
+//! thread per output element, serial reduction; `Strategy::Auto` blows up on
+//! Apple devices) is still run as a baseline: it is timed into
+//! `Stages::product_cubek` and left out of `Stages::total`, so every shape
+//! scores the replacement against it in one pass.
 //!
-//! Both still run here. The cubek arm is timed into `Stages::product_cubek` and
-//! left out of `Stages::total`, so every shape scores the replacement against
-//! the thing it replaced in one pass rather than against a number from an old
-//! run on a different machine.
-//!
-//! Nothing in the crate benchmarked this path before. The two things this file
-//! has to establish are the baseline itself and, per the k-means experience,
-//! **where** the time actually goes: a single end-to-end number hides the host
-//! side completely, and the ratio inverts as soon as the kernels improve. So
-//! every shape is run twice, once end to end with the queue left to pipeline
-//! and once stage by stage with a device sync between stages.
+//! A single end-to-end number hides the host side completely, and the ratio
+//! inverts as soon as the kernels improve. So every shape is run twice, once
+//! end to end with the queue left to pipeline and once stage by stage with a
+//! device sync between stages.
 //!
 //! The two do not add up, and that is expected rather than a bug. The staged
 //! run measures isolated stage cost; the end-to-end run measures a pipelined
 //! queue.
 //!
-//! Run with: cargo bench --bench gpu_corr_bench --features gpu
-
-#![allow(missing_docs)]
+//! Run with:
+//! ```text
+//! cargo bench --features gpu --bench gpu_corr_bench
+//! ```
+//!
+//! `BIXVERSE_BENCH_BIG=1` adds the 20000-column and 200k-row shapes.
 
 use std::time::{Duration, Instant};
 
 use cubecl::future;
 use cubecl::prelude::*;
 use cubecl::wgpu::WgpuRuntime;
-use faer::Mat;
-
 use cubecl_utils_rs::prelude::*;
+use cubek::matmul::launch::Strategy;
+use faer::Mat;
 
 use bixverse_rs::gpu::linalg::cholesky_gpu::dense_gemm;
 use bixverse_rs::gpu::linalg::corr::{GpuCorCov, column_pairwise_cor_gpu, scale_matrix_col_gpu};
 use bixverse_rs::gpu::linalg::gram::gram_aat;
-use cubek::matmul::launch::Strategy;
 
 ////////////
 // Shapes //
 ////////////
 
 /// End-to-end repetitions per shape. The reported figure is the best of these;
-/// see the note in `run_shape`.
+/// see the note in `bench_shape`.
 const END_TO_END_REPS: usize = 3;
 
 /// One synthetic problem. `n` rows (samples, cells) by `d` columns (features,
@@ -211,9 +206,9 @@ fn sync<R: Runtime>(client: &ComputeClient<R>) {
     future::block_on(client.sync()).expect("device sync failed");
 }
 
-/////////////////////
+//////////////////////
 // Staged breakdown //
-/////////////////////
+//////////////////////
 
 /// Per-stage timings for one run, in pipeline order.
 #[derive(Default)]
@@ -275,7 +270,8 @@ fn run_staged<R: Runtime>(
     st.flatten = t.elapsed();
 
     let t = Instant::now();
-    let data_gpu = GpuTensor::<R, f32>::from_slice(&data_flat, vec![d, n], client).unwrap();
+    let data_gpu =
+        GpuTensor::<R, f32>::from_slice(&data_flat, vec![d, n], client).expect("upload failed");
     sync(client);
     st.upload = t.elapsed();
 
@@ -288,10 +284,9 @@ fn run_staged<R: Runtime>(
     // timed. `client.empty()` returns quickly but the device pages are not
     // backed until something writes them, and at d = 8000 that first touch is
     // 256 MB: leaving it inside the timed region attributes a page-fault cost
-    // to whichever kernel happened to run first and moved the same config by
-    // 1.6x between runs.
-    let result = GpuTensor::<R, f32>::empty(vec![d, d], client).unwrap();
-    let baseline = GpuTensor::<R, f32>::empty(vec![d, d], client).unwrap();
+    // to whichever kernel happened to run first.
+    let result = GpuTensor::<R, f32>::empty(vec![d, d], client).expect("alloc result");
+    let baseline = GpuTensor::<R, f32>::empty(vec![d, d], client).expect("alloc baseline");
 
     let run_gram = || {
         gram_aat::<R, f32>(client, &scaled, &result, n, d).expect("gram_aat failed");
@@ -386,7 +381,7 @@ fn check_against_baseline(got: &[f32], want: &[f32], d: usize, label: &str) {
 ///
 /// * `shape` - Problem dimensions
 /// * `device` - CubeCL device
-fn run_shape<R: Runtime>(shape: CorShape, device: &R::Device)
+fn bench_shape<R: Runtime>(shape: CorShape, device: &R::Device)
 where
     R::Device: Clone,
 {
@@ -482,12 +477,12 @@ fn main() {
     println!("====== GPU pairwise correlation bench (Pearson) ======\n");
 
     for shape in DEFAULT_SHAPES {
-        run_shape::<WgpuRuntime>(shape, &device);
+        bench_shape::<WgpuRuntime>(shape, &device);
     }
 
     if std::env::var("BIXVERSE_BENCH_BIG").is_ok() {
         for shape in BIG_SHAPES {
-            run_shape::<WgpuRuntime>(shape, &device);
+            bench_shape::<WgpuRuntime>(shape, &device);
         }
     } else {
         println!("Set BIXVERSE_BENCH_BIG=1 to also run the 20000-column and 200k-row shapes.");
