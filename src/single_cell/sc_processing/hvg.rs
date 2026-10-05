@@ -3,15 +3,15 @@
 //! mean-variance trend as scrapper implements it.
 //!
 //! Every entry point funnels into one of three drivers, [`run_hvg_vst`],
-//! [`run_hvg_dispersion`] and [`run_hvg_scran`]. Streaming and non-streaming differ only in how many
-//! genes are read per disk batch, and the batch-aware variants differ only in
-//! how cells map onto accumulator slots. Both drivers sweep each gene's
-//! entries once per disk pass, no matter how many batches are requested, and
-//! keep no per-gene state beyond a handful of scalars.
+//! [`run_hvg_dispersion`] and [`run_hvg_scran`]. Streaming and non-streaming
+//! differ only in how many genes are read per disk batch, and the batch-aware
+//! variants differ only in how cells map onto accumulator slots. Both drivers
+//! sweep each gene's entries once per disk pass, no matter how many batches are
+//! requested, and keep no per-gene state beyond a handful of scalars.
 //!
-//! The dispersion and scran drivers read the store exactly once. The VST driver reads it
-//! once and then re-reads the genes whose values the clip actually reaches,
-//! which on droplet data is a fraction of a percent of them. See
+//! The dispersion and scran drivers read the store exactly once. The VST driver
+//! reads it once and then re-reads the genes whose values the clip actually
+//! reaches, which on droplet data is a fraction of a percent of them. See
 //! [`clip_is_reachable`].
 
 use edge_rs::limma::scran_lowess::{ScranLowessParams, scran_lowess};
