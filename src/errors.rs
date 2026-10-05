@@ -1702,6 +1702,46 @@ pub enum BixverseErrors {
         min_cells: usize,
     },
 
+    // -- CellPhoneDB --
+    /// A partner subunit points outside the genes in the store.
+    #[cfg(feature = "single-cell")]
+    #[error("CellPhoneDB: gene index {index} is outside the {n_genes} genes in the store.")]
+    CpdbGeneIndexOutOfRange {
+        /// The offending index
+        index: usize,
+        /// Number of genes in the store
+        n_genes: usize,
+    },
+
+    /// A cluster lists a cell outside the store.
+    #[cfg(feature = "single-cell")]
+    #[error("CellPhoneDB: cell index {index} is outside the {n_cells} cells in the store.")]
+    CpdbCellIndexOutOfRange {
+        /// The offending index
+        index: usize,
+        /// Number of cells in the store
+        n_cells: usize,
+    },
+
+    /// An interaction has a partner without any subunit genes.
+    #[cfg(feature = "single-cell")]
+    #[error("CellPhoneDB: interaction {interaction} has a partner without genes.")]
+    CpdbEmptyPartner {
+        /// Index of the offending interaction
+        interaction: usize,
+    },
+
+    /// A cell was assigned to more than one cluster.
+    ///
+    /// The permutation shuffles one label per cell, so clusters must be
+    /// disjoint.
+    #[cfg(feature = "single-cell")]
+    #[error("CellPhoneDB: cell {cell} appears in more than one cluster.")]
+    CpdbClusterOverlap {
+        /// The offending cell index
+        cell: usize,
+    },
+
     // -- sctype --
     /// Error when number of cluster assignment != the number of cells
     #[cfg(feature = "single-cell")]

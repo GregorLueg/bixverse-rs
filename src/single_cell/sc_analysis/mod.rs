@@ -5,6 +5,7 @@
 
 #[cfg(feature = "bonsai")]
 pub mod bonsai;
+pub mod cellphonedb;
 pub mod dge_pathway_scores;
 pub mod dialogue;
 pub mod fast_clusters;

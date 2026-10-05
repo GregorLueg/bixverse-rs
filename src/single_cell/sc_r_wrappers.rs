@@ -14,6 +14,7 @@ use crate::single_cell::mc_generation::{
     seacells::SEACellsParams, super_cells::SuperCellParams,
 };
 use crate::single_cell::sc_analysis::{
+    cellphonedb::CellPhoneDbParams,
     dge_pathway_scores::{AucellParams, parse_auc_type},
     dialogue::{DialogueParams, HlmParams, PmdParams, RefineParams, parse_averaging},
     fast_clusters::FastLouvainParams,
@@ -2524,6 +2525,57 @@ where
             tol,
             secondary_targets,
             topology_correction,
+        })
+    }
+}
+
+/////////////////
+// CellPhoneDB //
+/////////////////
+
+impl<T> CellPhoneDbParams<T>
+where
+    T: BixverseFloat,
+{
+    /// Generate the [CellPhoneDbParams] from an R list
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The R list to convert to [CellPhoneDbParams].
+    ///
+    /// ### Returns
+    ///
+    /// Self.
+    pub fn from_r_list(r_list: List) -> extendr_api::Result<Self> {
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+        let defaults = CellPhoneDbParams::default();
+
+        let n_perm = params
+            .get("n_perm")
+            .and_then(|x| x.as_integer())
+            .map(|x| x as usize)
+            .unwrap_or(defaults.n_perm);
+        let threshold = params
+            .get("threshold")
+            .and_then(|x| x.as_real())
+            .and_then(|x| T::from_f64(x))
+            .unwrap_or(defaults.threshold);
+        let seed = params
+            .get("seed")
+            .and_then(|x| x.as_integer())
+            .map(|x| x as usize)
+            .unwrap_or(defaults.seed);
+        let perm_batch = params
+            .get("perm_batch")
+            .and_then(|x| x.as_integer())
+            .map(|x| x as usize)
+            .or(defaults.perm_batch);
+
+        Ok(Self {
+            n_perm,
+            threshold,
+            seed,
+            perm_batch,
         })
     }
 }
