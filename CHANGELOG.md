@@ -24,6 +24,7 @@
   * SIMD used where scalar vector operations were used.
   * GEMM used where applicable.
 - Version bumps to `ann-search-rs` to benefit from the faster GPU indices.
+- CellPhoneDB wired in.
 
 ## 0.5.10
 
