@@ -1,19 +1,22 @@
-//! Implementations of highly variable gene detections in single cell. These
-//! are based on the Seurat versions.
+//! Implementations of highly variable gene detections in single cell: the
+//! Seurat versions (VST, dispersion, mean-variance bins) and scran's
+//! mean-variance trend as scrapper implements it.
 //!
-//! Every entry point funnels into one of two drivers, [`run_hvg_vst`] and
-//! [`run_hvg_dispersion`]. Streaming and non-streaming differ only in how many
+//! Every entry point funnels into one of three drivers, [`run_hvg_vst`],
+//! [`run_hvg_dispersion`] and [`run_hvg_scran`]. Streaming and non-streaming differ only in how many
 //! genes are read per disk batch, and the batch-aware variants differ only in
 //! how cells map onto accumulator slots. Both drivers sweep each gene's
 //! entries once per disk pass, no matter how many batches are requested, and
 //! keep no per-gene state beyond a handful of scalars.
 //!
-//! The dispersion driver reads the store exactly once. The VST driver reads it
+//! The dispersion and scran drivers read the store exactly once. The VST driver reads it
 //! once and then re-reads the genes whose values the clip actually reaches,
 //! which on droplet data is a fraction of a percent of them. See
 //! [`clip_is_reachable`].
 
+use edge_rs::limma::scran_lowess::{ScranLowessParams, scran_lowess};
 use rayon::prelude::*;
+use std::f64::consts::LN_2;
 use std::time::Instant;
 use thousands::Separable;
 
@@ -79,6 +82,21 @@ pub struct HvgDispersionRes {
     pub bin: Vec<i32>,
 }
 
+/// Result structure for the scran mean-variance trend HVG selection.
+///
+/// Every statistic is on the log2 scale, see [`run_hvg_scran`].
+#[derive(Clone, Debug)]
+pub struct HvgScranRes {
+    /// Mean log2-expression of the gene.
+    pub mean: Vec<f64>,
+    /// Variance of the log2-expression of the gene.
+    pub var: Vec<f64>,
+    /// Variance the trend expects at the gene's mean.
+    pub fitted: Vec<f64>,
+    /// `var - fitted`. Genes are ranked on this.
+    pub residual: Vec<f64>,
+}
+
 /// Enum for the different methods
 #[derive(Debug, Clone, Copy, Default)]
 pub enum HvgMethod {
@@ -89,6 +107,8 @@ pub enum HvgMethod {
     MeanVarBin,
     /// Simple dispersion
     Dispersion,
+    /// scran's residual from a LOWESS mean-variance trend
+    Scran,
 }
 
 /// Helper function to parse the HVG
@@ -105,6 +125,7 @@ pub fn parse_hvg_method(s: &str) -> Option<HvgMethod> {
         "vst" => Some(HvgMethod::Vst),
         "meanvarbin" => Some(HvgMethod::MeanVarBin),
         "dispersion" => Some(HvgMethod::Dispersion),
+        "scran" => Some(HvgMethod::Scran),
         _ => None,
     }
 }
@@ -116,6 +137,83 @@ pub struct HvgRunOpts {
     pub gene_batch_size: Option<usize>,
     /// If `0` -> silent, `1` for normal verbosity, `2` for detailed verbosity.
     pub verbose: usize,
+}
+
+/// Mean-variance trend parameters for the scran HVG method.
+///
+/// Mirrors scrapper's `fitVarianceTrend` arguments, defaults included. Note
+/// that the R package defaults `use_minimum_width` to `false`, the opposite of
+/// the underlying C++ library.
+#[derive(Clone, Copy, Debug)]
+pub struct ScranTrendParams {
+    /// Drop genes below `minimum_mean` from the fit and extrapolate their
+    /// trend linearly to the origin instead.
+    pub mean_filter: bool,
+    /// Mean log2-expression threshold for the fit.
+    pub minimum_mean: f64,
+    /// Fit on the quarter root of the variance, as `limma::voom` does.
+    pub transform: bool,
+    /// Size windows by `minimum_width` and `minimum_window_count` rather than
+    /// by `span`.
+    pub use_minimum_width: bool,
+    /// Minimum window width in mean log2-expression.
+    pub minimum_width: f64,
+    /// Minimum number of genes per window under `use_minimum_width`.
+    pub minimum_window_count: usize,
+    /// Proportion of genes per window when `use_minimum_width` is off.
+    pub span: f64,
+}
+
+impl ScranTrendParams {
+    /// Builds a parameter set.
+    ///
+    /// ### Params
+    ///
+    /// * `mean_filter` - Drop low-abundance genes from the fit
+    /// * `minimum_mean` - Mean log2-expression threshold for the fit
+    /// * `transform` - Fit on the quarter-root variance
+    /// * `use_minimum_width` - Size windows by width rather than span
+    /// * `minimum_width` - Minimum window width
+    /// * `minimum_window_count` - Minimum genes per window
+    /// * `span` - Proportion of genes per window
+    ///
+    /// ### Returns
+    ///
+    /// The parameter set. Nothing is validated here; the lowess checks the
+    /// values it is handed.
+    pub fn new(
+        mean_filter: bool,
+        minimum_mean: f64,
+        transform: bool,
+        use_minimum_width: bool,
+        minimum_width: f64,
+        minimum_window_count: usize,
+        span: f64,
+    ) -> Self {
+        Self {
+            mean_filter,
+            minimum_mean,
+            transform,
+            use_minimum_width,
+            minimum_width,
+            minimum_window_count,
+            span,
+        }
+    }
+}
+
+impl Default for ScranTrendParams {
+    fn default() -> Self {
+        Self {
+            mean_filter: true,
+            minimum_mean: 0.1,
+            transform: true,
+            use_minimum_width: false,
+            minimum_width: 1.0,
+            minimum_window_count: 200,
+            span: 0.3,
+        }
+    }
 }
 
 ////////////////////
@@ -719,6 +817,53 @@ pub fn disp_stats_from_sums(sum: f64, sum_sq: f64, no_cells: usize) -> (f32, f32
     (exp_mean, log_vmr)
 }
 
+/// Accumulate `data_norm` sums for one gene across every batch.
+///
+/// Zero cells contribute nothing, so the stored entries suffice.
+///
+/// ### Params
+///
+/// * `gene` - The gene chunk, read from the `data_norm` layer
+/// * `index` - Cell to slot lookup
+/// * `out` - Per-slot `(sum, sum_sq)` accumulators, length `index.n_slots()`
+pub fn accumulate_log_stats(gene: &CscGeneChunk, index: &CellBatchIndex, out: &mut [(f64, f64)]) {
+    for (&cell_id, value) in gene.indices.iter().zip(&gene.data_norm) {
+        let value = value.to_f32() as f64;
+        let slot = &mut out[index.slot(cell_id)];
+        slot.0 += value;
+        slot.1 += value * value;
+    }
+}
+
+/// Mean and sample variance on the log2 scale from accumulated `data_norm`
+/// sums.
+///
+/// `data_norm` is a natural log, so the mean is divided by `ln 2` and the
+/// variance by its square. That puts the statistics on the scale scrapper's
+/// trend defaults are tuned for.
+///
+/// ### Params
+///
+/// * `sum` - Sum of `data_norm` over the selected cells
+/// * `sum_sq` - Sum of the squares of the same
+/// * `no_cells` - Number of selected cells in this batch
+///
+/// ### Returns
+///
+/// `(mean, var)` of the log2-expression. The variance is zero for a batch of
+/// one cell.
+#[inline]
+pub fn log2_stats_from_sums(sum: f64, sum_sq: f64, no_cells: usize) -> (f64, f64) {
+    let n = no_cells as f64;
+    let mean = if n > 0.0 { sum / n } else { 0.0 };
+    let var = if n > 1.0 {
+        ((sum_sq - n * mean * mean) / (n - 1.0)).max(0.0)
+    } else {
+        0.0
+    };
+    (mean / LN_2, var / (LN_2 * LN_2))
+}
+
 /////////////
 // Binning //
 /////////////
@@ -900,6 +1045,99 @@ pub fn build_disp_result(
         dispersion_scaled: scaled.r_float_convert(),
         bin: bins,
     }
+}
+
+////////////////////
+// Variance trend //
+////////////////////
+
+/// Fit scran's mean-variance trend and return each gene's fitted variance and
+/// residual.
+///
+/// Port of scran_variances' `fit_variance_trend`:
+///
+/// 1. drop genes below `minimum_mean`
+/// 2. take the quarter root of the variance
+/// 3. smooth it against the mean with libscran's lowess
+/// 4. raise the fit back to the fourth power
+/// 5. extrapolate the dropped genes on a line from the origin through the
+///    left-most fitted point, since the trend is linear near zero
+///
+/// ### Params
+///
+/// * `mean` - Mean log-expression per gene
+/// * `var` - Variance of the log-expression per gene
+/// * `params` - Trend parameters
+///
+/// ### Returns
+///
+/// `(fitted, residual)` per gene, in input order, or
+/// [`BixverseErrors::HvgTooFewTrendPoints`] if fewer than two genes pass the
+/// mean filter.
+///
+/// ### References
+///
+/// Lun, McCarthy and Marioni, F1000Research, 2016
+pub fn fit_variance_trend(
+    mean: &[f64],
+    var: &[f64],
+    params: &ScranTrendParams,
+) -> Result<(Vec<f64>, Vec<f64>), BixverseErrors> {
+    let keep = |i: usize| !params.mean_filter || mean[i] >= params.minimum_mean;
+    let kept: Vec<usize> = (0..mean.len()).filter(|&i| keep(i)).collect();
+    if kept.len() < 2 {
+        return Err(BixverseErrors::HvgTooFewTrendPoints {
+            n_kept: kept.len(),
+            minimum_mean: params.minimum_mean,
+        });
+    }
+
+    let x: Vec<f64> = kept.iter().map(|&i| mean[i]).collect();
+    let y: Vec<f64> = kept
+        .iter()
+        .map(|&i| {
+            if params.transform {
+                var[i].powf(0.25)
+            } else {
+                var[i]
+            }
+        })
+        .collect();
+
+    let lowess_params = if params.use_minimum_width {
+        ScranLowessParams {
+            span: params.minimum_window_count as f64,
+            span_as_proportion: false,
+            minimum_width: params.minimum_width,
+            ..Default::default()
+        }
+    } else {
+        ScranLowessParams {
+            span: params.span,
+            ..Default::default()
+        }
+    };
+    let trend = scran_lowess(&x, &y, None, Some(lowess_params))?;
+
+    let back = |f: f64| if params.transform { f * f * f * f } else { f };
+
+    // First minimum, which is where the stable sort inside the lowess puts it.
+    let left = (1..x.len()).fold(0, |best, k| if x[k] < x[best] { k } else { best });
+    let left_x = x[left];
+    let left_fitted = back(trend.fitted[left]);
+
+    let mut fitted = vec![0.0; mean.len()];
+    for (&i, &f) in kept.iter().zip(&trend.fitted) {
+        fitted[i] = back(f);
+    }
+    for (i, f) in fitted.iter_mut().enumerate() {
+        if !keep(i) {
+            *f = mean[i] / left_x * left_fitted;
+        }
+    }
+
+    let residual = var.iter().zip(&fitted).map(|(v, f)| v - f).collect();
+    Ok((fitted, residual))
 }
 
 /////////////
@@ -1283,6 +1521,121 @@ pub fn run_hvg_dispersion<S: SingleCellReading>(
     Ok(out)
 }
 
+/// The scran HVG driver.
+///
+/// One disk pass accumulates `(sum, sum_sq)` of `data_norm` per gene per batch,
+/// as the dispersion driver does but without the `expm1`. Mean and variance go
+/// to the log2 scale (see [`log2_stats_from_sums`]) and each batch gets its own
+/// trend from [`fit_variance_trend`].
+///
+/// The normalisation underneath is still bixverse's library-size one, not
+/// scrapper's centred size factors, so the statistics match scrapper run on the
+/// same `data_norm` rather than on the raw counts.
+///
+/// ### Params
+///
+/// * `reader` - Reader over the gene-based count store
+/// * `index` - Cell to slot lookup
+/// * `params` - Trend parameters
+/// * `opts` - Disk batch size and verbosity
+///
+/// ### Returns
+///
+/// One `HvgScranRes` per batch, in batch id order.
+pub fn run_hvg_scran<S: SingleCellReading>(
+    reader: &S,
+    index: &CellBatchIndex,
+    params: &ScranTrendParams,
+    opts: HvgRunOpts,
+) -> Result<Vec<HvgScranRes>, BixverseErrors> {
+    let verbosity = parse_verbosity_level(opts.verbose);
+    let start_total = Instant::now();
+
+    let no_genes = reader.get_header().total_genes;
+    let n_batches = index.n_batches();
+    let n_slots = index.n_slots();
+    let blocks = gene_blocks(no_genes, opts.gene_batch_size);
+
+    if verbosity.normal_verbosity() {
+        println!(
+            "HVG (scran): {} genes, {} batches, {} disk block(s)",
+            no_genes.separate_with_underscores(),
+            n_batches,
+            blocks.len()
+        );
+    }
+
+    let start_stats = Instant::now();
+
+    // Gene-major, `n_batches` entries per gene.
+    let mut stats: Vec<(f64, f64)> = vec![(0.0, 0.0); no_genes * n_batches];
+
+    for (block, &(start_gene, end_gene)) in blocks.iter().enumerate() {
+        let gene_indices: Vec<usize> = (start_gene..end_gene).collect();
+        let genes = reader.read_gene_parallel(&gene_indices)?;
+
+        genes
+            .par_iter()
+            .zip(stats[start_gene * n_batches..end_gene * n_batches].par_chunks_mut(n_batches))
+            .for_each_init(
+                || vec![(0f64, 0f64); n_slots],
+                |acc, (gene, out)| {
+                    acc.fill((0.0, 0.0));
+                    accumulate_log_stats(gene, index, acc);
+                    for (batch, slot) in out.iter_mut().enumerate() {
+                        let (sum, sum_sq) = acc[batch + 1];
+                        *slot = log2_stats_from_sums(sum, sum_sq, index.batch_sizes()[batch]);
+                    }
+                },
+            );
+
+        if verbosity.detailed_verbosity() {
+            report_decile_progress(
+                block + 1,
+                block,
+                blocks.len(),
+                "gene blocks",
+                start_stats.elapsed(),
+            );
+        }
+    }
+
+    if verbosity.normal_verbosity() {
+        println!(
+            "HVG (scran): Calculated gene statistics in {:.2?}",
+            start_stats.elapsed()
+        );
+    }
+
+    let start_trend = Instant::now();
+    let out = (0..n_batches)
+        .map(|batch| {
+            let (mean, var): (Vec<f64>, Vec<f64>) =
+                stats[batch..].iter().step_by(n_batches).copied().unzip();
+            let (fitted, residual) = fit_variance_trend(&mean, &var, params)?;
+            Ok(HvgScranRes {
+                mean,
+                var,
+                fitted,
+                residual,
+            })
+        })
+        .collect::<Result<Vec<_>, BixverseErrors>>()?;
+
+    if verbosity.normal_verbosity() {
+        println!(
+            "HVG (scran): Fitted the variance trend in {:.2?}",
+            start_trend.elapsed()
+        );
+        println!(
+            "HVG (scran): Total run time -> {:.2?}",
+            start_total.elapsed()
+        );
+    }
+
+    Ok(out)
+}
+
 //////////////////
 // Entry points //
 //////////////////
@@ -1491,6 +1844,76 @@ pub fn get_hvg_mvb_streaming<S: SingleCellReading>(
     verbose: usize,
 ) -> Result<HvgDispersionRes, BixverseErrors> {
     get_hvg_dispersion_streaming(reader, cell_indices, binning, n_bins, verbose)
+}
+
+///////////
+// Scran //
+///////////
+
+/// scran mean-variance trend HVG detection (non-streaming)
+///
+/// ### Params
+///
+/// * `reader` - Reader over the gene-based count store.
+/// * `cell_indices` - Slice with the cell indices to keep.
+/// * `params` - Trend parameters, or `None` for scrapper's defaults
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
+///
+/// ### Returns
+///
+/// The `HvgScranRes`
+pub fn get_hvg_scran<S: SingleCellReading>(
+    reader: &S,
+    cell_indices: &[usize],
+    params: Option<ScranTrendParams>,
+    verbose: usize,
+) -> Result<HvgScranRes, BixverseErrors> {
+    let index = CellBatchIndex::new(reader.get_header().total_cells, cell_indices, None)?;
+    let opts = HvgRunOpts {
+        gene_batch_size: None,
+        verbose,
+    };
+
+    single_batch(run_hvg_scran(
+        reader,
+        &index,
+        &params.unwrap_or_default(),
+        opts,
+    )?)
+}
+
+/// scran mean-variance trend HVG detection (streaming)
+///
+/// ### Params
+///
+/// * `reader` - Reader over the gene-based count store.
+/// * `cell_indices` - Slice with the cell indices to keep.
+/// * `params` - Trend parameters, or `None` for scrapper's defaults
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
+///
+/// ### Returns
+///
+/// The `HvgScranRes`
+pub fn get_hvg_scran_streaming<S: SingleCellReading>(
+    reader: &S,
+    cell_indices: &[usize],
+    params: Option<ScranTrendParams>,
+    verbose: usize,
+) -> Result<HvgScranRes, BixverseErrors> {
+    let index = CellBatchIndex::new(reader.get_header().total_cells, cell_indices, None)?;
+    let opts = HvgRunOpts {
+        gene_batch_size: Some(GENE_BATCH_SIZE),
+        verbose,
+    };
+
+    single_batch(run_hvg_scran(
+        reader,
+        &index,
+        &params.unwrap_or_default(),
+        opts,
+    )?)
 }
 
 /////////////////////
@@ -1724,6 +2147,84 @@ pub fn get_hvg_mvb_batch_aware_streaming<S: SingleCellReading>(
         n_bins,
         verbose,
     )
+}
+
+///////////
+// Scran //
+///////////
+
+/// scran mean-variance trend HVG detection, batch-aware
+///
+/// Each batch gets its own trend. Combining them is left to the caller.
+///
+/// ### Params
+///
+/// * `reader` - Reader over the gene-based count store.
+/// * `cell_indices` - Slice with the cell indices to keep
+/// * `batch_labels` - Batch assignment for each cell (same length as cell_
+///   indices)
+/// * `params` - Trend parameters, or `None` for scrapper's defaults
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
+///
+/// ### Returns
+///
+/// A `Vec<HvgScranRes>` with each element being a batch.
+pub fn get_hvg_scran_batch_aware<S: SingleCellReading>(
+    reader: &S,
+    cell_indices: &[usize],
+    batch_labels: &[usize],
+    params: Option<ScranTrendParams>,
+    verbose: usize,
+) -> Result<Vec<HvgScranRes>, BixverseErrors> {
+    let index = CellBatchIndex::new(
+        reader.get_header().total_cells,
+        cell_indices,
+        Some(batch_labels),
+    )?;
+    let opts = HvgRunOpts {
+        gene_batch_size: None,
+        verbose,
+    };
+
+    run_hvg_scran(reader, &index, &params.unwrap_or_default(), opts)
+}
+
+/// scran mean-variance trend HVG detection, batch-aware with streaming
+///
+/// Each batch gets its own trend. Combining them is left to the caller.
+///
+/// ### Params
+///
+/// * `reader` - Reader over the gene-based count store.
+/// * `cell_indices` - Slice with the cell indices to keep
+/// * `batch_labels` - Batch assignment for each cell (same length as cell_
+///   indices)
+/// * `params` - Trend parameters, or `None` for scrapper's defaults
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
+///
+/// ### Returns
+///
+/// A `Vec<HvgScranRes>` with each element being a batch.
+pub fn get_hvg_scran_batch_aware_streaming<S: SingleCellReading>(
+    reader: &S,
+    cell_indices: &[usize],
+    batch_labels: &[usize],
+    params: Option<ScranTrendParams>,
+    verbose: usize,
+) -> Result<Vec<HvgScranRes>, BixverseErrors> {
+    let index = CellBatchIndex::new(
+        reader.get_header().total_cells,
+        cell_indices,
+        Some(batch_labels),
+    )?;
+    let opts = HvgRunOpts {
+        gene_batch_size: Some(GENE_BATCH_SIZE),
+        verbose,
+    };
+
+    run_hvg_scran(reader, &index, &params.unwrap_or_default(), opts)
 }
 
 ////////////////////////
@@ -2556,5 +3057,203 @@ mod tests {
         }
         // Disjoint tops, so the union is exactly both.
         assert_eq!(got.len(), 2 * n_hvg);
+    }
+
+    ///////////
+    // Scran //
+    ///////////
+
+    /// 300 genes, `mean = ((j * 97) %% 301) / 60`, so five of them fall below
+    /// the 0.1 mean filter, and a humped variance with deterministic jitter.
+    fn trend_fixture() -> (Vec<f64>, Vec<f64>) {
+        (1..=300u64)
+            .map(|j| {
+                let m = ((j * 97) % 301) as f64 / 60.0;
+                let v = m / (1.0 + m * m / 4.0) + ((j * j * 7) % 53) as f64 / 400.0;
+                (m, v)
+            })
+            .unzip()
+    }
+
+    // scrapper 1.2.1, same inputs rebuilt in R:
+    //
+    //   j <- 1:300; m <- ((j*97) %% 301)/60
+    //   v <- m/(1 + m*m/4) + ((j*j*7) %% 53)/400
+    //   idx <- sort(unique(c(seq(1, 300, by = 10), which(m < 0.1))))
+    //   TREND_DEFAULT    fitVarianceTrend(m, v)$fitted[idx]
+    //   TREND_MIN_WIDTH  fitVarianceTrend(m, v, use.min.width = TRUE,
+    //                      min.width = 1, min.window.count = 50)$fitted[idx]
+    //
+    // `TREND_IDX` is `idx - 1` and includes every gene the mean filter drops,
+    // so the extrapolation to the origin is checked too.
+
+    #[rustfmt::skip]
+    const TREND_IDX: [usize; 35] = [
+        0, 10, 20,
+        30, 40, 50,
+        58, 60, 70,
+        80, 89, 90,
+        100, 110, 120,
+        130, 140, 148,
+        150, 160, 170,
+        179, 180, 190,
+        200, 210, 220,
+        230, 240, 250,
+        260, 269, 270,
+        280, 290,
+    ];
+
+    #[rustfmt::skip]
+    const TREND_DEFAULT: [f64; 35] = [
+        1.02349161437144, 1.0153429637540503, 0.883602320392109,
+        0.7580492796916591, 0.8599184266552268, 1.0510012604253292,
+        0.19883381117779414, 0.9510025898575633, 0.8173782520994706,
+        0.512919874663236, 0.049708452794448535, 1.0258780810861885,
+        1.013756260721619, 0.8815274276519989, 0.7563178764590985,
+        0.8678948349489123, 1.0506356446783436, 0.2485422639722427,
+        0.9489192271226619, 0.8155196946636738, 0.5230295283015409,
+        0.09941690558889707, 1.0279915312170627, 1.0121714181029136,
+        0.8794678087237802, 0.7545894408472029, 0.8759266055001155,
+        1.05017831488257, 0.9468392892832143, 0.8136688088189552,
+        0.5332406080493666, 0.14912535838334562, 1.0301082451660688,
+        1.0105514351202365, 0.8774118010076244,
+    ];
+
+    #[rustfmt::skip]
+    const TREND_MIN_WIDTH: [f64; 35] = [
+        1.0310669142101532, 1.018662028203764, 0.8834441819346769,
+        0.7605439619770976, 0.8829461673773935, 1.0547541591273042,
+        0.15258388441625725, 0.9519780025600423, 0.8167303144889221,
+        0.5169754366047657, 0.03814597110406431, 1.033056270658165,
+        1.0168045893071287, 0.8816327380242154, 0.7590483983563263,
+        0.8900312455315613, 1.0545437330563783, 0.19072985552032154,
+        0.9498851817179516, 0.8146066653641808, 0.5311673809438084,
+        0.07629194220812863, 1.0350112249039027, 1.014949691724175,
+        0.879782258193085, 0.7575550415220896, 0.8971588783033345,
+        1.054214718972079, 0.9477958134042745, 0.812494492082974,
+        0.543901699558992, 0.11443791331219294, 1.0369689525023429,
+        1.0129639749296346, 0.8779346929035918,
+    ];
+
+    /// Asserts the trend at the sampled genes matches scrapper, and that the
+    /// residual is `var - fitted`.
+    fn assert_trend(params: ScranTrendParams, want: &[f64]) {
+        let (mean, var) = trend_fixture();
+        let (fitted, residual) = fit_variance_trend(&mean, &var, &params).unwrap();
+        for (&i, &w) in TREND_IDX.iter().zip(want) {
+            assert_relative_eq!(fitted[i], w, max_relative = 1e-12);
+            assert_eq!(residual[i], var[i] - fitted[i]);
+        }
+    }
+
+    #[test]
+    fn test_scran_trend_matches_scrapper_default() {
+        assert_trend(ScranTrendParams::default(), &TREND_DEFAULT);
+    }
+
+    #[test]
+    fn test_scran_trend_matches_scrapper_min_width() {
+        let params = ScranTrendParams {
+            use_minimum_width: true,
+            minimum_window_count: 50,
+            ..Default::default()
+        };
+        assert_trend(params, &TREND_MIN_WIDTH);
+    }
+
+    #[test]
+    fn test_scran_trend_rejects_too_few_points() {
+        let mean = [0.01, 0.02, 0.5];
+        let var = [0.1, 0.2, 0.3];
+        let err = fit_variance_trend(&mean, &var, &ScranTrendParams::default()).unwrap_err();
+        assert!(matches!(
+            err,
+            BixverseErrors::HvgTooFewTrendPoints { n_kept: 1, .. }
+        ));
+    }
+
+    /// Dense reference for the log2 mean and sample variance of `data_norm`,
+    /// iterating every selected cell including the zeros.
+    fn reference_log2_stats(dense: &[Vec<u32>], cells: &[usize]) -> (Vec<f64>, Vec<f64>) {
+        let n = cells.len() as f64;
+        dense
+            .iter()
+            .map(|gene| {
+                let vals: Vec<f64> = cells
+                    .iter()
+                    .map(|&c| {
+                        if gene[c] == 0 {
+                            0.0
+                        } else {
+                            norm_of(gene[c]).to_f32() as f64 / LN_2
+                        }
+                    })
+                    .collect();
+                let mean = vals.iter().sum::<f64>() / n;
+                let var = vals.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / (n - 1.0);
+                (mean, var)
+            })
+            .unzip()
+    }
+
+    /// The single-pass sums must match a two-pass dense computation, and the
+    /// trend must be [`fit_variance_trend`] on those statistics.
+    #[test]
+    fn test_scran_matches_dense_reference() {
+        let (n_genes, n_cells) = (40, 120);
+        let dense = synthetic_counts(n_genes, n_cells);
+        let temp = TempStore::new("scran_reference");
+        let reader = reader_for(&temp, &dense, n_cells);
+
+        let cells: Vec<usize> = (0..n_cells).rev().filter(|c| c % 3 != 0).collect();
+        let res = get_hvg_scran(&reader, &cells, None, 0).expect("scran runs");
+        let (mean, var) = reference_log2_stats(&dense, &cells);
+
+        for g in 0..n_genes {
+            assert_relative_eq!(res.mean[g], mean[g], max_relative = 1e-10);
+            assert_relative_eq!(res.var[g], var[g], max_relative = 1e-10);
+        }
+
+        let (fitted, residual) =
+            fit_variance_trend(&res.mean, &res.var, &ScranTrendParams::default()).unwrap();
+        assert_eq!(res.fitted, fitted);
+        assert_eq!(res.residual, residual);
+    }
+
+    #[test]
+    fn test_scran_streaming_matches_non_streaming() {
+        let (n_genes, n_cells) = (40, 120);
+        let dense = synthetic_counts(n_genes, n_cells);
+        let temp = TempStore::new("scran_streaming");
+        let reader = reader_for(&temp, &dense, n_cells);
+
+        let cells: Vec<usize> = (0..n_cells).collect();
+        let a = get_hvg_scran(&reader, &cells, None, 0).unwrap();
+        let b = get_hvg_scran_streaming(&reader, &cells, None, 0).unwrap();
+        assert_eq!(a.mean, b.mean);
+        assert_eq!(a.var, b.var);
+        assert_eq!(a.fitted, b.fitted);
+    }
+
+    /// Each batch must equal a single-batch run on that batch's cells alone.
+    #[test]
+    fn test_scran_batch_aware_matches_per_batch_runs() {
+        let (n_genes, n_cells) = (40, 120);
+        let dense = synthetic_counts(n_genes, n_cells);
+        let temp = TempStore::new("scran_batches");
+        let reader = reader_for(&temp, &dense, n_cells);
+
+        let cells: Vec<usize> = (0..n_cells).collect();
+        let labels: Vec<usize> = cells.iter().map(|c| c % 2).collect();
+        let per_batch = get_hvg_scran_batch_aware(&reader, &cells, &labels, None, 0).unwrap();
+        assert_eq!(per_batch.len(), 2);
+
+        for (batch, res) in per_batch.iter().enumerate() {
+            let subset: Vec<usize> = cells.iter().copied().filter(|c| c % 2 == batch).collect();
+            let alone = get_hvg_scran(&reader, &subset, None, 0).unwrap();
+            assert_eq!(res.mean, alone.mean);
+            assert_eq!(res.var, alone.var);
+            assert_eq!(res.fitted, alone.fitted);
+        }
     }
 }
