@@ -23,7 +23,7 @@
 //! The multi-batch ratio is the one to trust when estimating end-to-end.
 //!
 //! Run with:
-//! ```
+//! ```text
 //! cargo bench --features gpu,single-cell --bench gpu_scenic_micro
 //! ```
 //!
@@ -41,6 +41,12 @@
 
 use std::time::Instant;
 
+use cubecl::Runtime;
+use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+use cubecl_utils_rs::prelude::GpuLimits;
+use rand::prelude::*;
+use rand::rngs::SmallRng;
+
 use bixverse_rs::gpu::sc_gpu::scenic_gpu::{
     ScenicGpuParams, WaveLayout, fit_multi_trees_gpu, fused_rf_smem_bytes, pick_gpu_bins,
     pick_wave_size, viable_max_active_nodes, wave_byte_cost_et, wave_byte_cost_rf_fused,
@@ -50,12 +56,6 @@ use bixverse_rs::single_cell::sc_analysis::scenic::{
     ExtraTreesConfig, RandomForestConfig, TreeRegressorConfig, fit_multi_trees_sparse,
 };
 use bixverse_rs::single_cell::sc_utils::utils_tree::{QuantisedStore, resolve_n_features_split};
-
-use cubecl::Runtime;
-use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
-use cubecl_utils_rs::prelude::GpuLimits;
-use rand::prelude::*;
-use rand::rngs::SmallRng;
 
 ////////////
 // Shapes //
@@ -225,6 +225,14 @@ fn make_targets(
 /// ExtraTrees config at the given tree count. `n_thresholds` stays at its
 /// default of 1, which is the whole reason the bin axis of the histogram is
 /// dead weight on this path.
+///
+/// ### Params
+///
+/// * `n_trees` - Trees in the ensemble
+///
+/// ### Returns
+///
+/// The config.
 fn et_config(n_trees: usize) -> ExtraTreesConfig {
     let mut c = ExtraTreesConfig::default();
     c.n_trees = n_trees;
@@ -236,6 +244,14 @@ fn et_config(n_trees: usize) -> ExtraTreesConfig {
 
 /// RandomForest config at the given tree count. Exhaustive threshold search,
 /// so it genuinely consumes the whole cumulative histogram.
+///
+/// ### Params
+///
+/// * `n_trees` - Trees in the ensemble
+///
+/// ### Returns
+///
+/// The config.
 fn rf_config(n_trees: usize) -> RandomForestConfig {
     let mut c = RandomForestConfig::default();
     c.n_trees = n_trees;
@@ -259,8 +275,15 @@ fn try_device() -> Option<WgpuDevice> {
 // Timing //
 ////////////
 
-/// Run `f` once to warm up, then [`N_REPEATS`] times, returning the fastest
-/// measured run in seconds.
+/// Run `f` once to warm up, then [`N_REPEATS`] times.
+///
+/// ### Params
+///
+/// * `f` - The workload, called repeatedly
+///
+/// ### Returns
+///
+/// The fastest measured run in seconds.
 fn best_of<F: FnMut()>(mut f: F) -> f32 {
     f();
     let mut best = f32::MAX;
@@ -287,7 +310,7 @@ fn best_of<F: FnMut()>(mut f: F) -> f32 {
 /// * `config` - Tree config at the measured tree count.
 /// * `warmup` - Same learner at [`WARMUP_TREES`] trees.
 /// * `device` - wgpu device.
-fn run_cell(
+fn bench_cell(
     label: &str,
     n_samples: usize,
     x: &QuantisedStore,
@@ -360,7 +383,7 @@ fn run_cell(
 /// * `config` - Tree config at [`TREES_MULTI_BATCH`] trees.
 /// * `warmup` - Same learner at [`WARMUP_TREES`] trees.
 /// * `device` - wgpu device.
-fn run_multi_batch_cell(
+fn bench_multi_batch_cell(
     label: &str,
     n_samples: usize,
     x: &QuantisedStore,
@@ -425,12 +448,26 @@ fn cell_filter() -> Vec<String> {
 
 /// Whether `label` passes the filter. Substring match, so `rf_` selects every
 /// RandomForest cell.
+///
+/// ### Params
+///
+/// * `filter` - Output of [`cell_filter`]
+/// * `label` - The cell's label
+///
+/// ### Returns
+///
+/// `true` when the filter is empty or matches.
 fn selected(filter: &[String], label: &str) -> bool {
     filter.is_empty() || filter.iter().any(|f| label.contains(f.as_str()))
 }
 
 /// Print the wave scheduler's decision for this shape, so the VRAM story stays
 /// visible as the histogram allocations change.
+///
+/// ### Params
+///
+/// * `n_samples` - Cell count
+/// * `device` - wgpu device
 fn report_shape(n_samples: usize, device: &WgpuDevice) {
     let client = WgpuRuntime::client(device);
     let limits = GpuLimits::from_client(&client);
@@ -492,7 +529,7 @@ fn main() {
         .unwrap_or(DEFAULT_CELLS);
 
     let Some(device) = try_device() else {
-        eprintln!("no wgpu device available -- aborting");
+        println!("no wgpu device available, aborting");
         std::process::exit(1);
     };
 
@@ -525,7 +562,7 @@ fn main() {
         }
         println!("--- {n_trees} trees ---");
         if selected(&filter, &et_label) {
-            run_cell(
+            bench_cell(
                 &et_label,
                 n_samples,
                 &x,
@@ -536,7 +573,7 @@ fn main() {
             );
         }
         if selected(&filter, &rf_label) {
-            run_cell(
+            bench_cell(
                 &rf_label,
                 n_samples,
                 &x,
@@ -554,7 +591,7 @@ fn main() {
     }
     println!("--- {N_BATCHES} batches x {N_TARGETS} targets, {TREES_MULTI_BATCH} trees ---");
     if selected(&filter, "et_multibatch") {
-        run_multi_batch_cell(
+        bench_multi_batch_cell(
             "et_multibatch",
             n_samples,
             &x,
@@ -565,7 +602,7 @@ fn main() {
         );
     }
     if selected(&filter, "rf_multibatch") {
-        run_multi_batch_cell(
+        bench_multi_batch_cell(
             "rf_multibatch",
             n_samples,
             &x,

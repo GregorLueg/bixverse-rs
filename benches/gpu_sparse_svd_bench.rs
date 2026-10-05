@@ -3,31 +3,32 @@
 //! `randomised_sparse_svd_gpu` has one production caller,
 //! `pca_on_sc_sparse_gpu`, which runs it on single-cell counts: cells by
 //! genes, CSC, roughly 10% density, `n_components = 30` and an oversampling
-//! of 100, so the internal working width is `s = 130`. Nothing in the crate
-//! exercised that regime before this file; the three unit tests are all 60x20
-//! or smaller.
+//! of 100, so the internal working width is `s = 130`. The unit tests are all
+//! far smaller than that regime.
 //!
 //! The default shape is 200k x 2000, which keeps a run under a minute and
 //! still moves ~4e7 non-zeros. Set `BIXVERSE_BENCH_BIG=1` to add the real
 //! 1M x 2000 shape (~2e8 nnz, several GB of VRAM across both layouts).
 //!
-//! Run with: cargo bench --bench gpu_sparse_svd_bench --features gpu
-
-#![allow(missing_docs)]
+//! Run with:
+//! ```text
+//! cargo bench --features gpu --bench gpu_sparse_svd_bench
+//! ```
 
 use std::time::Instant;
 
 use cubecl::prelude::Runtime;
+use cubecl::wgpu::WgpuRuntime;
 
 use bixverse_rs::gpu::linalg::sparse_rand_svd_gpu::{RandSvdGpuParams, randomised_sparse_svd_gpu};
 use bixverse_rs::prelude::*;
 
-////////////
-// Consts //
-////////////
+///////////////
+// Constants //
+///////////////
 
-/// Non-zeros per column as a fraction. Matches the density the module doc for
-/// `sparse_rand_svd_gpu` designs against.
+/// One row in this many is non-zero per column, i.e. 10% density. Matches the
+/// density the module doc for `sparse_rand_svd_gpu` designs against.
 const DENSITY_DIVISOR: usize = 10;
 
 /// Leading singular triples requested. The single-cell PCA path asks for
@@ -47,6 +48,13 @@ const N_POWER_ITERS: usize = 2;
 /// positive column scales and expects the caller to have floored them.
 const SIGMA_FLOOR: f32 = 1e-6;
 
+/// Seed for the random range finder.
+const SEED: u64 = 42;
+
+/// Timed repetitions per shape. Each is printed; the first carries shader
+/// compilation.
+const REPS: usize = 2;
+
 ////////////
 // Shapes //
 ////////////
@@ -62,12 +70,14 @@ struct SvdShape {
     m: usize,
 }
 
+/// Default shape, small enough to run in under a minute.
 const DEFAULT_SHAPE: SvdShape = SvdShape {
     label: "sc-medium",
     n: 200_000,
     m: 2_000,
 };
 
+/// Production shape, behind `BIXVERSE_BENCH_BIG`.
 const BIG_SHAPE: SvdShape = SvdShape {
     label: "sc-production",
     n: 1_000_000,
@@ -252,7 +262,12 @@ fn guard_singular_values(s: &[f32]) {
 
 /// Run one shape and print the timing split between host build, upload plus
 /// factorisation, and the guard.
-fn run_shape<R: Runtime>(shape: SvdShape, device: &R::Device)
+///
+/// ### Params
+///
+/// * `shape` - Problem dimensions
+/// * `device` - CubeCL device
+fn bench_shape<R: Runtime>(shape: SvdShape, device: &R::Device)
 where
     R::Device: Clone,
 {
@@ -276,7 +291,7 @@ where
 
     // `CompressedSparseData2` borrows, and `randomised_sparse_svd_gpu`
     // consumes it, so rebuild the view per repetition.
-    for rep in 0..2 {
+    for rep in 0..REPS {
         let csc = CompressedSparseData2::<f32, f32>::new_csc(
             &values,
             &indices,
@@ -293,7 +308,7 @@ where
             None,
             N_COMPONENTS,
             Some(RandSvdGpuParams::new(N_POWER_ITERS, OVERSAMPLING)),
-            42,
+            SEED,
             device.clone(),
             0,
         )
@@ -314,17 +329,17 @@ where
 }
 
 fn main() {
-    let device: <cubecl::wgpu::WgpuRuntime as Runtime>::Device = Default::default();
+    let device: <WgpuRuntime as Runtime>::Device = Default::default();
 
     println!(
         "====== GPU randomised sparse SVD bench ({} components, {} oversampling, {} power iters) ======\n",
         N_COMPONENTS, OVERSAMPLING, N_POWER_ITERS
     );
 
-    run_shape::<cubecl::wgpu::WgpuRuntime>(DEFAULT_SHAPE, &device);
+    bench_shape::<WgpuRuntime>(DEFAULT_SHAPE, &device);
 
     if std::env::var("BIXVERSE_BENCH_BIG").is_ok() {
-        run_shape::<cubecl::wgpu::WgpuRuntime>(BIG_SHAPE, &device);
+        bench_shape::<WgpuRuntime>(BIG_SHAPE, &device);
     } else {
         println!("Set BIXVERSE_BENCH_BIG=1 to also run the 1M x 2000 production shape.");
     }

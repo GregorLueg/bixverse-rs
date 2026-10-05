@@ -1,77 +1,110 @@
-//! Phase 1 GPU-vs-CPU sanity for ExtraTrees single-tree fitting.
+//! GPU-vs-CPU parity for the SCENIC tree learners and GRN entry points.
 //!
-//! Single-tree ExtraTrees is inherently high-variance: even two CPU runs
-//! with different seeds disagree on ~65% of their top-10 features. The GPU
-//! path processes nodes in BFS order rather than the CPU's DFS, so the two
-//! RNG streams expose features to nodes in different orders even when the
-//! total set of feature draws is identical. That drives the expected
-//! GPU-vs-CPU disagreement.
+//! Tree ensembles are seeded but the GPU walks nodes breadth-first where the
+//! CPU goes depth-first, so the two RNG streams expose features to nodes in a
+//! different order and exact agreement is not on the table. Every fidelity
+//! gate here is therefore statistical: top-10 feature overlap or per-target
+//! Pearson of the importances, and where the ensemble is small enough to still
+//! be noisy, anchored against a CPU-vs-CPU run on a different seed. The GPU
+//! passes if it agrees with the CPU at least about as well as the CPU agrees
+//! with itself.
 //!
-//! The test therefore anchors GPU-vs-CPU disagreement against the CPU-vs-CPU
-//! seed-variance baseline: the GPU path passes if it agrees with the CPU
-//! path at least as well as two CPU runs with different seeds agree with
-//! each other. That is what "statistical parity" means for this workload,
-//! per the plan's "sanity floor, not precision target" wording.
+//! Sections: toy-shape ExtraTrees and RandomForest checks that run in CI, the
+//! large-shape Pearson gates behind `large-test`, a pure-integer check of the
+//! coarse threshold widening, and round trips through the GRN entry points.
 
 #![allow(clippy::needless_range_loop, clippy::field_reassign_with_default)]
-// Helpers and imports feeding the `large-test` tests are unused
-// when that feature is off. Not worth cfg-ing each one individually in a test
-// file.
-#![allow(dead_code, unused_imports)]
 #![cfg(all(feature = "single-cell", feature = "gpu"))]
 
-use bixverse_rs::gpu::sc_gpu::scenic_gpu::{
-    ScenicGpuParams, fit_extra_trees_gpu_single, fit_multi_trees_gpu, run_scenic_grn_gpu,
-    run_scenic_grn_in_memory_gpu, run_scenic_grn_streaming_gpu,
-};
-use bixverse_rs::prelude::*;
-use bixverse_rs::single_cell::mc_analysis::scenic_metacells::run_scenic_grn_in_memory;
-use bixverse_rs::single_cell::sc_analysis::scenic::{
-    ExtraTreesConfig, GradientBoostingConfig, RandomForestConfig, RegressionLearner, ScenicParams,
-    SparseYBatch, fit_multi_trees_sparse, run_scenic_grn,
-};
-use bixverse_rs::single_cell::sc_data::data_io::CellGeneSparseWriter;
-use bixverse_rs::single_cell::sc_traits::F16;
-use bixverse_rs::single_cell::sc_utils::utils_tree::QuantisedStore;
+use std::collections::HashSet;
 
 use cubecl::Runtime;
 use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
 use rand::prelude::*;
 use rand::rngs::SmallRng;
 
-const N_SAMPLES: usize = 256;
-const N_FEATURES: usize = 32;
-const N_TARGETS: usize = 4;
-const SPARSITY: f32 = 0.5;
-const TOP_K: usize = 10;
+use bixverse_rs::gpu::sc_gpu::scenic_gpu::{
+    ScenicGpuParams, fit_extra_trees_gpu_single, fit_multi_trees_gpu, run_scenic_grn_gpu,
+    run_scenic_grn_in_memory_gpu,
+};
+use bixverse_rs::prelude::*;
+use bixverse_rs::single_cell::sc_analysis::scenic::{
+    ExtraTreesConfig, GradientBoostingConfig, RandomForestConfig, RegressionLearner, ScenicParams,
+    SparseYBatch, fit_multi_trees_sparse,
+};
+use bixverse_rs::single_cell::sc_data::data_io::CellGeneSparseWriter;
+use bixverse_rs::single_cell::sc_traits::F16;
+use bixverse_rs::single_cell::sc_utils::utils_tree::QuantisedStore;
+#[cfg(feature = "large-test")]
+use bixverse_rs::{
+    gpu::sc_gpu::scenic_gpu::run_scenic_grn_streaming_gpu,
+    single_cell::mc_analysis::scenic_metacells::run_scenic_grn_in_memory,
+    single_cell::sc_analysis::scenic::run_scenic_grn,
+};
 
-// Features 0..N_INFORMATIVE all carry structured signal for every target
-// (with target-specific mixing weights). This makes the "top-10" list
-// dominated by real signal rather than by which noise features happened to
-// be sampled -- otherwise the CPU's DFS RNG stream and the GPU's BFS RNG
-// stream expose different noise features and the overlap collapses to a
-// baseline that's close to random.
+///////////////
+// Constants //
+///////////////
+
+/// Samples (cells) in the toy shape.
+const N_SAMPLES: usize = 256;
+/// Features (TFs) in the toy shape.
+const N_FEATURES: usize = 32;
+/// Targets in the toy shape.
+const N_TARGETS: usize = 4;
+/// Probability a toy target is non-zero in a given cell.
+const SPARSITY: f32 = 0.5;
+/// Size of the top-ranked feature lists compared between runs.
+const TOP_K: usize = 10;
+/// Features `0..N_INFORMATIVE` carry signal for every target. Enough of them
+/// that the top-10 list is real signal rather than whichever noise features
+/// the DFS and BFS RNG streams happened to draw; otherwise the overlap
+/// collapses to near random.
 const N_INFORMATIVE: usize = 10;
 
-/// Build a toy QuantisedStore with seeded pseudo-random u8 bins.
+///////////////////////
+// Toy-shape helpers //
+///////////////////////
+
+/// Toy [QuantisedStore] with uniform pseudo-random u8 bins.
+///
+/// ### Params
+///
+/// * `seed` - Seed for reproducibility
+///
+/// ### Returns
+///
+/// An `N_SAMPLES x N_FEATURES` store.
 fn make_toy_quantised(seed: u64) -> QuantisedStore {
     let mut rng = SmallRng::seed_from_u64(seed);
     let data: Vec<u8> = (0..N_SAMPLES * N_FEATURES).map(|_| rng.random()).collect();
     QuantisedStore::from_raw(data, N_SAMPLES, N_FEATURES)
 }
 
-/// Toy sparse targets. Every target is a weighted linear combination of the
-/// first `N_INFORMATIVE` feature columns with target-specific weights, plus
-/// light noise. That guarantees that features 0..N_INFORMATIVE are the true
-/// top drivers of every target.
+/// Toy sparse targets, in both the CPU and the GPU layout.
+///
+/// Every target is a weighted linear combination of the first
+/// `N_INFORMATIVE` feature columns with target-specific weights, plus light
+/// noise, so features `0..N_INFORMATIVE` are the true top drivers of every
+/// target.
+///
+/// ### Params
+///
+/// * `x` - The toy feature store
+/// * `seed` - Seed for sparsity and noise. The weights use a fixed seed.
+///
+/// ### Returns
+///
+/// `(sparse_y, axes)`, the GPU-side [SparseYBatch] and the CPU-side targets,
+/// holding identical values.
 fn make_toy_targets(x: &QuantisedStore, seed: u64) -> (SparseYBatch, Vec<SparseAxis<u32, f32>>) {
     let mut rng = SmallRng::seed_from_u64(seed);
 
     let mut cols_indices: Vec<Vec<usize>> = vec![Vec::new(); N_TARGETS];
     let mut cols_values: Vec<Vec<f32>> = vec![Vec::new(); N_TARGETS];
 
-    // per-target weights on the informative feature block; seeded off a
-    // fixed constant so target signal is stable across the seed loop
+    // Per-target weights on the informative feature block, seeded off a
+    // fixed constant so target signal is stable across the seed loop.
     let mut weight_rng = SmallRng::seed_from_u64(0xDEAD_BEEF);
     let mut weights = vec![vec![0.0f32; N_INFORMATIVE]; N_TARGETS];
     for w_row in weights.iter_mut() {
@@ -97,7 +130,6 @@ fn make_toy_targets(x: &QuantisedStore, seed: u64) -> (SparseYBatch, Vec<SparseA
         }
     }
 
-    // CPU-facing targets: Vec<SparseAxis>
     let mut axes = Vec::with_capacity(N_TARGETS);
     for t in 0..N_TARGETS {
         axes.push(SparseAxis::<u32, f32>::new_csc(
@@ -108,8 +140,8 @@ fn make_toy_targets(x: &QuantisedStore, seed: u64) -> (SparseYBatch, Vec<SparseA
         ));
     }
 
-    // GPU-facing: mirror the private SparseYBatch::from_targets layout so
-    // both paths see identical sparse Y.
+    // Mirror the private `SparseYBatch::from_targets` layout so both paths
+    // see identical sparse Y.
     let mut counts_per_cell = vec![0u32; N_SAMPLES];
     for t in 0..N_TARGETS {
         for &idx in &cols_indices[t] {
@@ -145,6 +177,16 @@ fn make_toy_targets(x: &QuantisedStore, seed: u64) -> (SparseYBatch, Vec<SparseA
     (sparse_y, axes)
 }
 
+/// Indices of the `k` largest importances.
+///
+/// ### Params
+///
+/// * `imp` - Importance per feature
+/// * `k` - Number of indices to keep
+///
+/// ### Returns
+///
+/// Feature indices, largest importance first.
 fn top_k_indices(imp: &[f32], k: usize) -> Vec<usize> {
     let mut idx: Vec<usize> = (0..imp.len()).collect();
     idx.sort_unstable_by(|&a, &b| {
@@ -156,12 +198,30 @@ fn top_k_indices(imp: &[f32], k: usize) -> Vec<usize> {
     idx
 }
 
+/// Size of the intersection of two index lists.
+///
+/// ### Params
+///
+/// * `a` - First list
+/// * `b` - Second list
+///
+/// ### Returns
+///
+/// How many entries of `b` are also in `a`.
 fn overlap(a: &[usize], b: &[usize]) -> usize {
-    let sa: std::collections::HashSet<usize> = a.iter().copied().collect();
+    let sa: HashSet<usize> = a.iter().copied().collect();
     b.iter().filter(|x| sa.contains(x)).count()
 }
 
-/// Summed-across-targets importance vector, per feature.
+/// Importance per feature, summed across targets.
+///
+/// ### Params
+///
+/// * `imp` - Importances, indexed `[target][feature]`
+///
+/// ### Returns
+///
+/// A length-`N_FEATURES` vector.
 fn sum_importances(imp: &[Vec<f32>]) -> Vec<f32> {
     let mut out = vec![0.0f32; N_FEATURES];
     for t in 0..N_TARGETS {
@@ -172,6 +232,11 @@ fn sum_importances(imp: &[Vec<f32>]) -> Vec<f32> {
     out
 }
 
+/// Skip rather than fail where no GPU is available.
+///
+/// ### Returns
+///
+/// The default device, or `None` if a client cannot be created.
 fn try_device() -> Option<WgpuDevice> {
     let device = WgpuDevice::DefaultDevice;
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -181,6 +246,7 @@ fn try_device() -> Option<WgpuDevice> {
     .map(|_| device)
 }
 
+/// Single-tree ExtraTrees config for the toy shape.
 fn config() -> ExtraTreesConfig {
     let mut c = ExtraTreesConfig::default();
     c.n_trees = 1;
@@ -194,16 +260,73 @@ fn config() -> ExtraTreesConfig {
     c
 }
 
+/// RandomForest config at the toy shape, sized to run in a debug CI build.
+///
+/// RF draws no random thresholds, so it converges far faster than ET and a
+/// handful of trees is enough for the informative block to dominate the top-10.
+/// Seeds and tree count are kept low deliberately: the CI gpu job builds in
+/// debug and falls back to lavapipe software Vulkan on Linux.
+///
+/// ### Params
+///
+/// * `n_trees` - Number of trees
+///
+/// ### Returns
+///
+/// The populated [RandomForestConfig].
+fn rf_toy_config(n_trees: usize) -> RandomForestConfig {
+    let mut c = RandomForestConfig::default();
+    c.n_trees = n_trees;
+    c.max_depth = Some(6);
+    // Matches `config()`: the default of 50 would make max_depth 6
+    // unreachable on 256 samples.
+    c.min_samples_leaf = 8;
+    c.n_features_split = 16;
+    c
+}
+
+/// Pearson correlation of two equal-length vectors.
+///
+/// ### Params
+///
+/// * `a` - First vector
+/// * `b` - Second vector
+///
+/// ### Returns
+///
+/// The correlation, or 0.0 if either vector is constant.
+fn pearson(a: &[f32], b: &[f32]) -> f32 {
+    let n = a.len() as f32;
+    let ma = a.iter().sum::<f32>() / n;
+    let mb = b.iter().sum::<f32>() / n;
+    let mut num = 0.0f32;
+    let mut da = 0.0f32;
+    let mut db = 0.0f32;
+    for i in 0..a.len() {
+        let xa = a[i] - ma;
+        let xb = b[i] - mb;
+        num += xa * xb;
+        da += xa * xa;
+        db += xb * xb;
+    }
+    if da <= 0.0 || db <= 0.0 {
+        0.0
+    } else {
+        num / (da * db).sqrt()
+    }
+}
+
+/////////////////////
+// Toy-shape tests //
+/////////////////////
+
 /// Statistical-parity check: GPU vs CPU top-10 overlap must be at least
 /// as high as the CPU-vs-CPU seed-variance baseline. Any lower would mean
 /// the GPU pipeline introduces noise beyond what BFS-vs-DFS RNG ordering
 /// already causes.
 #[test]
-fn extra_trees_gpu_matches_cpu_top10() {
-    let Some(device) = try_device() else {
-        eprintln!("scenic_gpu: no wgpu device available -- skipping");
-        return;
-    };
+fn test_et_gpu_matches_cpu_top10() {
+    let Some(device) = try_device() else { return };
 
     let cfg = config();
 
@@ -254,22 +377,12 @@ fn extra_trees_gpu_matches_cpu_top10() {
         );
         cpu_gpu_overlaps.push(cpu_gpu_ov);
         cpu_cpu_overlaps.push(cpu_cpu_ov);
-
-        eprintln!(
-            "seed {seed_i}: cpu-gpu top-{TOP_K} = {cpu_gpu_ov}/{TOP_K}, \
-             cpu-cpu top-{TOP_K} = {cpu_cpu_ov}/{TOP_K} (baseline)"
-        );
     }
 
     let cpu_gpu_mean =
         cpu_gpu_overlaps.iter().sum::<usize>() as f32 / (cpu_gpu_overlaps.len() * TOP_K) as f32;
     let cpu_cpu_mean =
         cpu_cpu_overlaps.iter().sum::<usize>() as f32 / (cpu_cpu_overlaps.len() * TOP_K) as f32;
-
-    eprintln!(
-        "scenic_gpu summary: cpu-gpu mean = {cpu_gpu_mean:.2}, \
-         cpu-cpu baseline mean = {cpu_cpu_mean:.2}"
-    );
 
     // Sanity floor 1: the GPU path is not obviously broken (well above the
     // 10/32 = 0.31 random baseline).
@@ -290,35 +403,15 @@ fn extra_trees_gpu_matches_cpu_top10() {
     );
 }
 
-/// RandomForest at the toy shape. Sized to run in a debug CI build.
-///
-/// RF draws no random thresholds, so it converges far faster than ET and a
-/// handful of trees is enough for the informative block to dominate the top-10.
-/// Seeds and tree count are kept low deliberately: the CI gpu job builds in
-/// debug and falls back to lavapipe software Vulkan on Linux.
-fn rf_toy_config(n_trees: usize) -> RandomForestConfig {
-    let mut c = RandomForestConfig::default();
-    c.n_trees = n_trees;
-    c.max_depth = Some(6);
-    // Matches `config()`: the ET default of 50 would make max_depth 6
-    // unreachable on 256 samples.
-    c.min_samples_leaf = 8;
-    c.n_features_split = 16;
-    c
-}
-
 /// Statistical-parity check for RandomForest, anchored the same way as
-/// [`extra_trees_gpu_matches_cpu_top10`]: the GPU must agree with the CPU at
+/// [`test_et_gpu_matches_cpu_top10`]: the GPU must agree with the CPU at
 /// least as well as two CPU runs on different seeds agree with each other.
 ///
 /// This is the only RF fidelity test that runs in CI. The two 0.95 Pearson
 /// gates sit behind `large-test`, which no workflow enables.
 #[test]
-fn rf_gpu_matches_cpu_top10() {
-    let Some(device) = try_device() else {
-        eprintln!("scenic_gpu (RF toy): no wgpu device available -- skipping");
-        return;
-    };
+fn test_rf_gpu_matches_cpu_top10() {
+    let Some(device) = try_device() else { return };
 
     const RF_TOY_TREES: usize = 16;
     const RF_TOY_SEEDS: u64 = 5;
@@ -327,7 +420,6 @@ fn rf_gpu_matches_cpu_top10() {
 
     let mut cpu_gpu_overlaps: Vec<usize> = Vec::new();
     let mut cpu_cpu_overlaps: Vec<usize> = Vec::new();
-    let mut pearsons: Vec<f32> = Vec::new();
 
     for seed_i in 0..RF_TOY_SEEDS {
         let seed = 20260711 + seed_i;
@@ -355,7 +447,6 @@ fn rf_gpu_matches_cpu_top10() {
         for t in 0..N_TARGETS {
             assert_eq!(cpu[t].len(), N_FEATURES);
             assert_eq!(gpu[t].len(), N_FEATURES);
-            pearsons.push(pearson(&cpu[t], &gpu[t]));
         }
 
         let cpu_sum = sum_importances(&cpu);
@@ -385,13 +476,6 @@ fn rf_gpu_matches_cpu_top10() {
         cpu_gpu_overlaps.iter().sum::<usize>() as f32 / (cpu_gpu_overlaps.len() * TOP_K) as f32;
     let cpu_cpu_mean =
         cpu_cpu_overlaps.iter().sum::<usize>() as f32 / (cpu_cpu_overlaps.len() * TOP_K) as f32;
-    let pearson_mean = pearsons.iter().sum::<f32>() / pearsons.len() as f32;
-
-    eprintln!(
-        "rf_gpu_matches_cpu_top10 ({RF_TOY_TREES} trees, {RF_TOY_SEEDS} seeds): \
-         cpu-gpu mean = {cpu_gpu_mean:.2}, cpu-cpu baseline = {cpu_cpu_mean:.2}, \
-         mean per-target pearson r = {pearson_mean:.3}"
-    );
 
     assert!(
         cpu_gpu_mean >= 0.32,
@@ -404,37 +488,141 @@ fn rf_gpu_matches_cpu_top10() {
     );
 }
 
-/////////////////////////
-// Phase 2 test harness //
-/////////////////////////
+/// The multi-tree dispatch still routes ExtraTrees correctly. Smallest ET
+/// config that exercises the dispatch: one wave, one batch, short trees. A
+/// clearly positive CPU-vs-GPU Pearson is enough to show it is not broken.
+#[test]
+fn test_et_multi_tree_dispatch() {
+    let Some(device) = try_device() else { return };
 
-const P2_N_SAMPLES: usize = 10_000;
-const P2_N_FEATURES: usize = 500;
-const P2_N_TARGETS: usize = 20;
-const P2_N_TREES: usize = 500;
-// Concentrating signal in fewer informative features gives ExtraTrees at 500
-// trees enough leverage to converge tightly. With 40 informative features
-// spread across 500-feature space, even CPU-vs-CPU at 500 trees only agrees
-// on ~0.58 Pearson (measured). Ten informative features let both paths
-// consistently rank the informative block at the top of importance.
-const P2_INFORMATIVE: usize = 10;
-const P2_SPARSITY: f32 = 0.5;
+    const ET_SAMPLES: usize = 1_000;
+    const ET_FEATURES: usize = 80;
+    const ET_TARGETS: usize = 4;
+    const ET_INFORMATIVE: usize = 8;
 
-fn make_p2_quantised(seed: u64) -> QuantisedStore {
-    let mut rng = SmallRng::seed_from_u64(seed);
-    let data: Vec<u8> = (0..P2_N_SAMPLES * P2_N_FEATURES)
-        .map(|_| rng.random())
+    let mut rng_x = SmallRng::seed_from_u64(0xABCD_1234);
+    let data: Vec<u8> = (0..ET_SAMPLES * ET_FEATURES)
+        .map(|_| rng_x.random())
         .collect();
-    QuantisedStore::from_raw(data, P2_N_SAMPLES, P2_N_FEATURES)
+    let x = QuantisedStore::from_raw(data, ET_SAMPLES, ET_FEATURES);
+
+    let mut rng_y = SmallRng::seed_from_u64(0x1234_ABCD);
+    let mut cols_indices: Vec<Vec<usize>> = vec![Vec::new(); ET_TARGETS];
+    let mut cols_values: Vec<Vec<f32>> = vec![Vec::new(); ET_TARGETS];
+    for c in 0..ET_SAMPLES {
+        for t in 0..ET_TARGETS {
+            if rng_y.random::<f32>() < 0.5 {
+                let mut signal = 0.0f32;
+                for f in 0..ET_INFORMATIVE {
+                    signal += (x.get_col(f)[c] as f32 / 255.0) * 1.5;
+                }
+                let noise: f32 = rng_y.random::<f32>() * 0.05;
+                cols_indices[t].push(c);
+                cols_values[t].push(signal + noise);
+            }
+        }
+    }
+    let axes: Vec<SparseAxis<u32, f32>> = cols_indices
+        .into_iter()
+        .zip(cols_values)
+        .map(|(idx, vs)| SparseAxis::<u32, f32>::new_csc(idx, Vec::new(), Some(vs), ET_SAMPLES))
+        .collect();
+
+    let mut cfg = ExtraTreesConfig::default();
+    cfg.n_trees = 50;
+    cfg.max_depth = Some(6);
+    cfg.min_samples_leaf = 20;
+    cfg.n_features_split = 0;
+    cfg.n_thresholds = 1;
+
+    let cpu = fit_multi_trees_sparse(&axes, &x, ET_SAMPLES, &cfg, 7).expect("ET CPU fit failed");
+    let gpu = fit_multi_trees_gpu::<WgpuRuntime>(
+        &axes,
+        &x,
+        ET_SAMPLES,
+        &cfg,
+        7,
+        device.clone(),
+        &ScenicGpuParams::default(),
+    )
+    .expect("ET GPU fit failed");
+
+    let mut per_target: Vec<f32> = Vec::with_capacity(ET_TARGETS);
+    for t in 0..ET_TARGETS {
+        per_target.push(pearson(&cpu[t], &gpu[t]));
+    }
+    let mean_corr = per_target.iter().sum::<f32>() / per_target.len() as f32;
+
+    // ET at 50 trees is still noisy, so the floor only has to be clearly
+    // above zero.
+    assert!(
+        mean_corr >= 0.4,
+        "ET dispatch appears broken after RF was added: mean pearson r = {mean_corr:.3}"
+    );
 }
 
-fn make_p2_targets(x: &QuantisedStore, seed: u64) -> Vec<SparseAxis<u32, f32>> {
+/////////////////////////
+// Large-shape harness //
+/////////////////////////
+
+/// Samples in the large shape.
+#[cfg(any(feature = "large-test", feature = "large_scale_diagnostics"))]
+const LG_N_SAMPLES: usize = 10_000;
+/// Features in the large shape.
+#[cfg(any(feature = "large-test", feature = "large_scale_diagnostics"))]
+const LG_N_FEATURES: usize = 500;
+/// Targets in the large shape.
+#[cfg(any(feature = "large-test", feature = "large_scale_diagnostics"))]
+const LG_N_TARGETS: usize = 20;
+/// ExtraTrees ensemble size in the large shape.
+#[cfg(any(feature = "large-test", feature = "large_scale_diagnostics"))]
+const LG_N_TREES: usize = 500;
+/// Informative features. Few of them, so ExtraTrees at 500 trees converges
+/// tightly: with 40 spread over 500 features even CPU-vs-CPU only reached
+/// ~0.58 Pearson.
+#[cfg(any(feature = "large-test", feature = "large_scale_diagnostics"))]
+const LG_INFORMATIVE: usize = 10;
+/// Probability a large-shape target is non-zero in a given cell.
+#[cfg(any(feature = "large-test", feature = "large_scale_diagnostics"))]
+const LG_SPARSITY: f32 = 0.5;
+
+/// Large-shape [QuantisedStore] with uniform pseudo-random u8 bins.
+///
+/// ### Params
+///
+/// * `seed` - Seed for reproducibility
+///
+/// ### Returns
+///
+/// An `LG_N_SAMPLES x LG_N_FEATURES` store.
+#[cfg(any(feature = "large-test", feature = "large_scale_diagnostics"))]
+fn make_large_quantised(seed: u64) -> QuantisedStore {
+    let mut rng = SmallRng::seed_from_u64(seed);
+    let data: Vec<u8> = (0..LG_N_SAMPLES * LG_N_FEATURES)
+        .map(|_| rng.random())
+        .collect();
+    QuantisedStore::from_raw(data, LG_N_SAMPLES, LG_N_FEATURES)
+}
+
+/// Large-shape sparse targets, built as in [make_toy_targets] but with
+/// stronger weights.
+///
+/// ### Params
+///
+/// * `x` - The large-shape feature store
+/// * `seed` - Seed for sparsity and noise. The weights use a fixed seed.
+///
+/// ### Returns
+///
+/// One CSC [SparseAxis] per target.
+#[cfg(any(feature = "large-test", feature = "large_scale_diagnostics"))]
+fn make_large_targets(x: &QuantisedStore, seed: u64) -> Vec<SparseAxis<u32, f32>> {
     let mut rng = SmallRng::seed_from_u64(seed);
 
-    // per-target weights on informative features 0..P2_INFORMATIVE, seeded
-    // off a fixed constant so target structure is stable across seed changes
+    // Per-target weights on informative features 0..LG_INFORMATIVE, seeded
+    // off a fixed constant so target structure is stable across seed changes.
     let mut weight_rng = SmallRng::seed_from_u64(0xF00D_BABE);
-    let mut weights = vec![vec![0.0f32; P2_INFORMATIVE]; P2_N_TARGETS];
+    let mut weights = vec![vec![0.0f32; LG_INFORMATIVE]; LG_N_TARGETS];
     for w_row in weights.iter_mut() {
         for w in w_row.iter_mut() {
             // Larger baseline weight = stronger signal per informative
@@ -444,15 +632,15 @@ fn make_p2_targets(x: &QuantisedStore, seed: u64) -> Vec<SparseAxis<u32, f32>> {
         }
     }
 
-    let feats: Vec<&[u8]> = (0..P2_INFORMATIVE).map(|f| x.get_col(f)).collect();
+    let feats: Vec<&[u8]> = (0..LG_INFORMATIVE).map(|f| x.get_col(f)).collect();
 
-    let mut cols_indices: Vec<Vec<usize>> = vec![Vec::new(); P2_N_TARGETS];
-    let mut cols_values: Vec<Vec<f32>> = vec![Vec::new(); P2_N_TARGETS];
-    for c in 0..P2_N_SAMPLES {
-        for t in 0..P2_N_TARGETS {
-            if rng.random::<f32>() < P2_SPARSITY {
+    let mut cols_indices: Vec<Vec<usize>> = vec![Vec::new(); LG_N_TARGETS];
+    let mut cols_values: Vec<Vec<f32>> = vec![Vec::new(); LG_N_TARGETS];
+    for c in 0..LG_N_SAMPLES {
+        for t in 0..LG_N_TARGETS {
+            if rng.random::<f32>() < LG_SPARSITY {
                 let mut signal = 0.0f32;
-                for f in 0..P2_INFORMATIVE {
+                for f in 0..LG_INFORMATIVE {
                     signal += weights[t][f] * (feats[f][c] as f32 / 255.0);
                 }
                 let noise: f32 = rng.random::<f32>() * 0.05;
@@ -464,140 +652,97 @@ fn make_p2_targets(x: &QuantisedStore, seed: u64) -> Vec<SparseAxis<u32, f32>> {
     cols_indices
         .into_iter()
         .zip(cols_values)
-        .map(|(idx, vs)| SparseAxis::<u32, f32>::new_csc(idx, Vec::new(), Some(vs), P2_N_SAMPLES))
+        .map(|(idx, vs)| SparseAxis::<u32, f32>::new_csc(idx, Vec::new(), Some(vs), LG_N_SAMPLES))
         .collect()
 }
 
-fn pearson(a: &[f32], b: &[f32]) -> f32 {
-    let n = a.len() as f32;
-    let ma = a.iter().sum::<f32>() / n;
-    let mb = b.iter().sum::<f32>() / n;
-    let mut num = 0.0f32;
-    let mut da = 0.0f32;
-    let mut db = 0.0f32;
-    for i in 0..a.len() {
-        let xa = a[i] - ma;
-        let xb = b[i] - mb;
-        num += xa * xb;
-        da += xa * xa;
-        db += xb * xb;
-    }
-    if da <= 0.0 || db <= 0.0 {
-        0.0
-    } else {
-        num / (da * db).sqrt()
-    }
-}
+///////////////////////
+// Large-shape tests //
+///////////////////////
 
-/// Phase 2 CPU-vs-CPU baseline at the same scale: is 500 trees enough for
-/// the CPU ExtraTrees ensemble to converge, or does it still have material
-/// seed variance? Any GPU-vs-CPU comparison is bounded by this baseline.
+/// CPU-vs-CPU baseline at the large shape: is 500 trees enough for the CPU
+/// ExtraTrees ensemble to converge? Any GPU-vs-CPU comparison is bounded by
+/// this. Prints the mean Pearson, asserts nothing.
 #[test]
-// A diagnostic, not a gate: it asserts nothing and prints the mean Pearson.
-// ~500s in debug, so it sits with its siblings behind the feature rather than
-// under `#[ignore]`.
 #[cfg(feature = "large_scale_diagnostics")]
-fn phase2_cpu_baseline() {
+// Heavy: 10k x 500 x 20 with 500 ET trees, two CPU fits.
+fn test_et_cpu_seed_baseline_large() {
     let seed_a = 20260708u64;
     let seed_b = seed_a.wrapping_add(0xBEEF);
-    let x = make_p2_quantised(seed_a);
-    let axes = make_p2_targets(&x, seed_a.wrapping_add(1));
+    let x = make_large_quantised(seed_a);
+    let axes = make_large_targets(&x, seed_a.wrapping_add(1));
 
     let mut cfg = ExtraTreesConfig::default();
-    cfg.n_trees = P2_N_TREES;
+    cfg.n_trees = LG_N_TREES;
     cfg.max_depth = Some(10);
     cfg.min_samples_leaf = 50;
     cfg.n_features_split = 0;
     cfg.n_thresholds = 1;
 
-    let cpu_a = fit_multi_trees_sparse(&axes, &x, P2_N_SAMPLES, &cfg, seed_a as usize)
+    let cpu_a = fit_multi_trees_sparse(&axes, &x, LG_N_SAMPLES, &cfg, seed_a as usize)
         .expect("CPU A fit failed");
-    let cpu_b = fit_multi_trees_sparse(&axes, &x, P2_N_SAMPLES, &cfg, seed_b as usize)
+    let cpu_b = fit_multi_trees_sparse(&axes, &x, LG_N_SAMPLES, &cfg, seed_b as usize)
         .expect("CPU B fit failed");
 
-    let mut per_target: Vec<f32> = Vec::with_capacity(P2_N_TARGETS);
-    for t in 0..P2_N_TARGETS {
+    let mut per_target: Vec<f32> = Vec::with_capacity(LG_N_TARGETS);
+    for t in 0..LG_N_TARGETS {
         per_target.push(pearson(&cpu_a[t], &cpu_b[t]));
     }
     let mean_corr = per_target.iter().sum::<f32>() / per_target.len() as f32;
-    eprintln!(
-        "Phase 2 CPU baseline (n_trees={P2_N_TREES}): mean pearson r = {mean_corr:.3} \
+    println!(
+        "CPU baseline (n_trees={LG_N_TREES}): mean pearson r = {mean_corr:.3} \
          (per-target: {per_target:?})"
     );
 }
 
-/// Phase 2 acceptance: 500-tree ExtraTrees on 10k * 500 * 20 synthetic data,
-/// per-target Pearson correlation vs CPU averaged over targets must clear 0.95.
-///
-/// Runs in ~60s on macOS Metal under `cargo test --release`. Under a debug
-/// build the CPU comparison dominates (~500s just for CPU-side fit_multi_trees_sparse),
-/// so this test is only sensibly run in release. n_trees can be dropped to
-/// e.g. 100 if CI-runtime budget is tighter (CPU-vs-CPU baseline at n_trees=100
-/// still clears ~0.99 Pearson with the current synthetic data).
+/// 500-tree ExtraTrees on 10k x 500 x 20 synthetic data: mean per-target
+/// Pearson of the importances against the CPU must clear 0.95. Only sensible
+/// in release, where the CPU fit no longer dominates.
 #[test]
-// 10k-40k sample fits against a sequential CPU baseline. Minutes on a GH
-// runner, where the Linux GPU job falls back to lavapipe software Vulkan.
 #[cfg(feature = "large-test")]
-fn phase2_multi_tree_pearson() {
-    let Some(device) = try_device() else {
-        eprintln!("scenic_gpu (Phase 2): no wgpu device available -- skipping");
-        return;
-    };
+// Heavy: 10k x 500 x 20 with 500 ET trees, one CPU fit plus one GPU fit.
+fn test_et_gpu_matches_cpu_pearson_large() {
+    let Some(device) = try_device() else { return };
 
     let seed_base = 20260708u64;
-    let x = make_p2_quantised(seed_base);
-    let axes = make_p2_targets(&x, seed_base.wrapping_add(1));
+    let x = make_large_quantised(seed_base);
+    let axes = make_large_targets(&x, seed_base.wrapping_add(1));
 
     let mut cfg = ExtraTreesConfig::default();
-    cfg.n_trees = P2_N_TREES;
+    cfg.n_trees = LG_N_TREES;
     cfg.max_depth = Some(10);
     cfg.min_samples_leaf = 50;
-    cfg.n_features_split = 0; // -> sqrt(500) = 22
+    cfg.n_features_split = 0;
     cfg.n_thresholds = 1;
 
-    let t_cpu = std::time::Instant::now();
-    let cpu = fit_multi_trees_sparse(&axes, &x, P2_N_SAMPLES, &cfg, seed_base as usize)
+    let cpu = fit_multi_trees_sparse(&axes, &x, LG_N_SAMPLES, &cfg, seed_base as usize)
         .expect("CPU fit failed");
-    let cpu_secs = t_cpu.elapsed().as_secs_f32();
 
-    let t_gpu = std::time::Instant::now();
     let gpu = fit_multi_trees_gpu::<WgpuRuntime>(
         &axes,
         &x,
-        P2_N_SAMPLES,
+        LG_N_SAMPLES,
         &cfg,
         seed_base as usize,
         device.clone(),
         &ScenicGpuParams::default(),
     )
     .expect("GPU fit failed");
-    let gpu_secs = t_gpu.elapsed().as_secs_f32();
 
-    assert_eq!(cpu.len(), P2_N_TARGETS);
-    assert_eq!(gpu.len(), P2_N_TARGETS);
+    assert_eq!(cpu.len(), LG_N_TARGETS);
+    assert_eq!(gpu.len(), LG_N_TARGETS);
 
-    let mut per_target: Vec<f32> = Vec::with_capacity(P2_N_TARGETS);
-    for t in 0..P2_N_TARGETS {
-        assert_eq!(cpu[t].len(), P2_N_FEATURES);
-        assert_eq!(gpu[t].len(), P2_N_FEATURES);
+    let mut per_target: Vec<f32> = Vec::with_capacity(LG_N_TARGETS);
+    for t in 0..LG_N_TARGETS {
+        assert_eq!(cpu[t].len(), LG_N_FEATURES);
+        assert_eq!(gpu[t].len(), LG_N_FEATURES);
         per_target.push(pearson(&cpu[t], &gpu[t]));
     }
     let mean_corr = per_target.iter().sum::<f32>() / per_target.len() as f32;
 
-    eprintln!(
-        "Phase 2 ({}k * {} feats * {} targets * {} trees): \
-         cpu {cpu_secs:.1}s, gpu {gpu_secs:.1}s, mean pearson r = {mean_corr:.3} \
-         (per-target: {:?})",
-        P2_N_SAMPLES / 1000,
-        P2_N_FEATURES,
-        P2_N_TARGETS,
-        P2_N_TREES,
-        per_target
-    );
-
     assert!(
         mean_corr >= 0.95,
-        "Phase 2 mean per-target Pearson r = {mean_corr:.3} < 0.95 floor \
+        "ET (large) mean per-target Pearson r = {mean_corr:.3} < 0.95 floor \
          (per-target: {per_target:?})"
     );
 }
@@ -613,13 +758,10 @@ fn phase2_multi_tree_pearson() {
 /// standalone call sees the same `n_targets_in_batch` and therefore the
 /// same per-tree multi-output scoring, so the trees and importances match.
 #[test]
-// Heavy: 2000 x 100 x 130 with 50 trees, so four full GPU ensemble fits.
 #[cfg(feature = "large-test")]
-fn phase2_multi_batch_determinism() {
-    let Some(device) = try_device() else {
-        eprintln!("scenic_gpu (Phase 2 multi-batch): no wgpu device -- skipping");
-        return;
-    };
+// Heavy: 2000 x 100 x 130 with 50 trees, so four full GPU ensemble fits.
+fn test_multi_batch_matches_chunked() {
+    let Some(device) = try_device() else { return };
 
     // 130 targets -> chunks(64) yields batches of 64, 64, 2
     const MB_N_SAMPLES: usize = 2_000;
@@ -708,7 +850,6 @@ fn phase2_multi_batch_determinism() {
             }
         }
     }
-    eprintln!("phase2_multi_batch_determinism: max per-feature diff = {max_diff:.2e}");
     assert!(
         max_diff < 1e-5,
         "combined batch fit differs from chunked by max {max_diff:.2e} -- \
@@ -716,29 +857,22 @@ fn phase2_multi_batch_determinism() {
     );
 }
 
-////////////////////////
-// Phase 3 tests (RF) //
-////////////////////////
-
-/// Phase 3 acceptance: 250-tree RandomForest (no bootstrap, subsample_rate=0.632)
-/// on the Phase 2 synthetic harness. Assert mean per-target Pearson r >= 0.95.
+/// 250-tree RandomForest (no bootstrap, subsample_rate=0.632) on the
+/// large-shape harness: mean per-target Pearson r against the CPU >= 0.95.
 ///
 /// RF is more expensive than ET per split (exhaustive threshold scan over
 /// ~254 candidates per feature vs 1 random threshold), so the tree count is
 /// left at the CPU RF default of 250 rather than ET's 500. Run under
 /// `cargo test --release` -- debug mode is dominated by CPU-side RF.
 #[test]
-// 250-tree RandomForest fit against a sequential CPU baseline. Same reason.
 #[cfg(feature = "large-test")]
-fn phase3_random_forest_pearson() {
-    let Some(device) = try_device() else {
-        eprintln!("scenic_gpu (Phase 3 RF): no wgpu device available -- skipping");
-        return;
-    };
+// Heavy: 10k x 500 x 20 with 250 RF trees, one CPU fit plus one GPU fit.
+fn test_rf_gpu_matches_cpu_pearson_large() {
+    let Some(device) = try_device() else { return };
 
     let seed_base = 20260709u64;
-    let x = make_p2_quantised(seed_base);
-    let axes = make_p2_targets(&x, seed_base.wrapping_add(1));
+    let x = make_large_quantised(seed_base);
+    let axes = make_large_targets(&x, seed_base.wrapping_add(1));
 
     let mut cfg = RandomForestConfig::default();
     cfg.max_depth = Some(10);
@@ -746,56 +880,43 @@ fn phase3_random_forest_pearson() {
     cfg.n_features_split = 0;
     // n_trees, subsample_rate=0.632, bootstrap=false stay at defaults
 
-    let t_cpu = std::time::Instant::now();
-    let cpu = fit_multi_trees_sparse(&axes, &x, P2_N_SAMPLES, &cfg, seed_base as usize)
+    let cpu = fit_multi_trees_sparse(&axes, &x, LG_N_SAMPLES, &cfg, seed_base as usize)
         .expect("CPU RF fit failed");
-    let cpu_secs = t_cpu.elapsed().as_secs_f32();
 
-    let t_gpu = std::time::Instant::now();
     let gpu = fit_multi_trees_gpu::<WgpuRuntime>(
         &axes,
         &x,
-        P2_N_SAMPLES,
+        LG_N_SAMPLES,
         &cfg,
         seed_base as usize,
         device.clone(),
         &ScenicGpuParams::default(),
     )
     .expect("GPU RF fit failed");
-    let gpu_secs = t_gpu.elapsed().as_secs_f32();
 
-    let mut per_target: Vec<f32> = Vec::with_capacity(P2_N_TARGETS);
-    for t in 0..P2_N_TARGETS {
+    let mut per_target: Vec<f32> = Vec::with_capacity(LG_N_TARGETS);
+    for t in 0..LG_N_TARGETS {
         per_target.push(pearson(&cpu[t], &gpu[t]));
     }
     let mean_corr = per_target.iter().sum::<f32>() / per_target.len() as f32;
 
-    eprintln!(
-        "Phase 3 RF (n_trees={}): cpu {cpu_secs:.1}s, gpu {gpu_secs:.1}s, \
-         mean pearson r = {mean_corr:.3} (per-target: {per_target:?})",
-        cfg.n_trees
-    );
-
     assert!(
         mean_corr >= 0.95,
-        "Phase 3 RF (no-bootstrap) mean per-target Pearson r = {mean_corr:.3} < 0.95"
+        "RF (large, no bootstrap) mean per-target Pearson r = {mean_corr:.3} < 0.95"
     );
 }
 
-/// Phase 3 bootstrap variant: same RF config but with bootstrap-with-replacement
-/// enabled. Assert the same 0.95 tolerance.
+/// Bootstrap variant of [test_rf_gpu_matches_cpu_pearson_large]: same RF config
+/// with bootstrap-with-replacement enabled, same 0.95 floor.
 #[test]
-// As above, bootstrap variant.
 #[cfg(feature = "large-test")]
-fn phase3_rf_bootstrap_pearson() {
-    let Some(device) = try_device() else {
-        eprintln!("scenic_gpu (Phase 3 RF+bootstrap): no wgpu device -- skipping");
-        return;
-    };
+// Heavy: 10k x 500 x 20 with 250 RF trees, one CPU fit plus one GPU fit.
+fn test_rf_bootstrap_gpu_matches_cpu_pearson_large() {
+    let Some(device) = try_device() else { return };
 
     let seed_base = 20260710u64;
-    let x = make_p2_quantised(seed_base);
-    let axes = make_p2_targets(&x, seed_base.wrapping_add(1));
+    let x = make_large_quantised(seed_base);
+    let axes = make_large_targets(&x, seed_base.wrapping_add(1));
 
     let mut cfg = RandomForestConfig::default();
     cfg.max_depth = Some(10);
@@ -803,48 +924,37 @@ fn phase3_rf_bootstrap_pearson() {
     cfg.n_features_split = 0;
     cfg.bootstrap = true;
 
-    let t_cpu = std::time::Instant::now();
-    let cpu = fit_multi_trees_sparse(&axes, &x, P2_N_SAMPLES, &cfg, seed_base as usize)
+    let cpu = fit_multi_trees_sparse(&axes, &x, LG_N_SAMPLES, &cfg, seed_base as usize)
         .expect("CPU RF+bootstrap fit failed");
-    let cpu_secs = t_cpu.elapsed().as_secs_f32();
 
-    let t_gpu = std::time::Instant::now();
     let gpu = fit_multi_trees_gpu::<WgpuRuntime>(
         &axes,
         &x,
-        P2_N_SAMPLES,
+        LG_N_SAMPLES,
         &cfg,
         seed_base as usize,
         device.clone(),
         &ScenicGpuParams::default(),
     )
     .expect("GPU RF+bootstrap fit failed");
-    let gpu_secs = t_gpu.elapsed().as_secs_f32();
 
-    let mut per_target: Vec<f32> = Vec::with_capacity(P2_N_TARGETS);
-    for t in 0..P2_N_TARGETS {
+    let mut per_target: Vec<f32> = Vec::with_capacity(LG_N_TARGETS);
+    for t in 0..LG_N_TARGETS {
         per_target.push(pearson(&cpu[t], &gpu[t]));
     }
     let mean_corr = per_target.iter().sum::<f32>() / per_target.len() as f32;
 
-    eprintln!(
-        "Phase 3 RF+bootstrap (n_trees={}): cpu {cpu_secs:.1}s, gpu {gpu_secs:.1}s, \
-         mean pearson r = {mean_corr:.3} (per-target: {per_target:?})",
-        cfg.n_trees
-    );
-
     assert!(
         mean_corr >= 0.95,
-        "Phase 3 RF+bootstrap mean per-target Pearson r = {mean_corr:.3} < 0.95"
+        "RF (large, bootstrap) mean per-target Pearson r = {mean_corr:.3} < 0.95"
     );
 }
 
-/// Reduced-shape RF Pearson gate that actually runs in CI.
+/// Reduced-shape RF Pearson gate.
 ///
-/// `phase3_random_forest_pearson` is the real fidelity gate but it needs
-/// `large-test`, and at 10k cells / 250 trees it is far too slow
-/// for a debug build on lavapipe. This runs the same comparison at a fraction
-/// of the work.
+/// [test_rf_gpu_matches_cpu_pearson_large] is the real fidelity gate, but at
+/// 10k cells / 250 trees it is far too slow for a debug build on lavapipe. This
+/// runs the same comparison at a fraction of the work.
 ///
 /// Two assertions, and the second is the one that matters. An absolute floor
 /// alone is not meaningful here: what the comparison can reach is bounded by
@@ -860,16 +970,13 @@ fn phase3_rf_bootstrap_pearson() {
 /// stable to three decimals across repeat runs despite the CAS-loop atomic in
 /// `accumulate_importance` varying summation order.
 #[test]
-// Heavy: 120 RF trees, two CPU fits plus one GPU fit.
 #[cfg(feature = "large-test")]
-fn phase3_rf_pearson_small() {
-    let Some(device) = try_device() else {
-        eprintln!("scenic_gpu (Phase 3 RF small): no wgpu device -- skipping");
-        return;
-    };
+// Heavy: 1000 x 50 x 8 with 120 RF trees, two CPU fits plus one GPU fit.
+fn test_rf_gpu_matches_cpu_pearson_small() {
+    let Some(device) = try_device() else { return };
 
     const RS_N_SAMPLES: usize = 1_000;
-    const RS_N_FEATURES: usize = 50; // n_features_split = 0 -> sqrt(50) = 7
+    const RS_N_FEATURES: usize = 50;
     const RS_N_TARGETS: usize = 8;
     const RS_N_TREES: usize = 120;
     const RS_INFORMATIVE: usize = 6;
@@ -961,21 +1068,14 @@ fn phase3_rf_pearson_small() {
     let mean_corr = per_target.iter().sum::<f32>() / per_target.len() as f32;
     let baseline_corr = baseline.iter().sum::<f32>() / baseline.len() as f32;
 
-    eprintln!(
-        "phase3_rf_pearson_small ({RS_N_SAMPLES} cells * {RS_N_FEATURES} feats * \
-         {RS_N_TARGETS} targets * {RS_N_TREES} trees): cpu-gpu r = {mean_corr:.3}, \
-         cpu-cpu baseline r = {baseline_corr:.3} \
-         (cpu-gpu per-target: {per_target:?})"
-    );
-
     assert!(
         mean_corr >= RS_PEARSON_FLOOR,
-        "Phase 3 RF (small) cpu-gpu Pearson r = {mean_corr:.3} < {RS_PEARSON_FLOOR} floor \
+        "RF (small) cpu-gpu Pearson r = {mean_corr:.3} < {RS_PEARSON_FLOOR} floor \
          (per-target: {per_target:?})"
     );
     assert!(
         mean_corr + 0.05 >= baseline_corr,
-        "Phase 3 RF (small) cpu-gpu Pearson r = {mean_corr:.3} materially worse than the \
+        "RF (small) cpu-gpu Pearson r = {mean_corr:.3} materially worse than the \
          cpu-cpu seed-variance baseline {baseline_corr:.3}; the GPU is diverging beyond \
          what the tree count explains"
     );
@@ -993,13 +1093,10 @@ fn phase3_rf_pearson_small() {
 /// This is the test that has to hold before `SMEM_HIST_SLOTS` is tightened, not
 /// the uniform ones.
 #[test]
-// Heavy: 1500 x 50 x 64 with 120 RF trees, two CPU fits plus one GPU fit.
 #[cfg(feature = "large-test")]
-fn phase3_rf_pearson_skewed_bins() {
-    let Some(device) = try_device() else {
-        eprintln!("scenic_gpu (Phase 3 RF skewed): no wgpu device -- skipping");
-        return;
-    };
+// Heavy: 1500 x 50 x 64 with 120 RF trees, two CPU fits plus one GPU fit.
+fn test_rf_gpu_matches_cpu_pearson_skewed_bins() {
+    let Some(device) = try_device() else { return };
 
     const SK_N_SAMPLES: usize = 1_500;
     const SK_N_FEATURES: usize = 50;
@@ -1098,12 +1195,6 @@ fn phase3_rf_pearson_skewed_bins() {
     let mean_corr = per_target.iter().sum::<f32>() / per_target.len() as f32;
     let baseline_corr = baseline.iter().sum::<f32>() / baseline.len() as f32;
 
-    eprintln!(
-        "phase3_rf_pearson_skewed_bins ({SK_N_SAMPLES} cells * {SK_N_FEATURES} feats * \
-         {SK_N_TARGETS} targets * {SK_N_TREES} trees, {SK_ZERO_FRAC} zeros): \
-         cpu-gpu r = {mean_corr:.3}, cpu-cpu baseline r = {baseline_corr:.3}"
-    );
-
     assert!(
         mean_corr >= 0.95,
         "RF on skewed bins: cpu-gpu Pearson r = {mean_corr:.3} < 0.95 floor \
@@ -1116,7 +1207,11 @@ fn phase3_rf_pearson_skewed_bins() {
     );
 }
 
-/// The GPU is going to bin at a coarser resolution than the shared
+//////////////////////////
+// Coarse bin threshold //
+//////////////////////////
+
+/// The GPU bins at a coarser resolution than the shared
 /// [`QuantisedStore`], which stays at 256 u8 bins. A split found at coarse
 /// threshold `thr_c` has to be written back as a fine threshold so
 /// `reassign_samples` and the CPU-side tree semantics keep working unchanged.
@@ -1125,7 +1220,7 @@ fn phase3_rf_pearson_skewed_bins() {
 /// is exact for every shift, threshold and bin: `b >> shift <= thr_c` must hold
 /// for exactly the same bins as `b <= widened`.
 #[test]
-fn coarse_threshold_roundtrip() {
+fn test_coarse_threshold_roundtrip() {
     for shift in 1..=3u32 {
         let n_coarse = 256u32 >> shift;
         // Threshold n_coarse - 1 sends everything left and is never a
@@ -1148,100 +1243,22 @@ fn coarse_threshold_roundtrip() {
     }
 }
 
-/// ET path still works after the RF dispatch was added. Uses the smallest
-/// ET config that exercises the dispatch code path -- one wave, one batch,
-/// short trees. Non-zero importances plus a positive CPU-vs-GPU Pearson are
-/// enough to confirm nothing broke in the dispatch.
-#[test]
-fn phase3_et_still_works() {
-    let Some(device) = try_device() else {
-        eprintln!("scenic_gpu (Phase 3 ET sanity): no wgpu device -- skipping");
-        return;
-    };
+/////////////////////////////
+// Entry-point round trips //
+/////////////////////////////
 
-    const ET_SAMPLES: usize = 1_000;
-    const ET_FEATURES: usize = 80;
-    const ET_TARGETS: usize = 4;
-    const ET_INFORMATIVE: usize = 8;
+// Plumbing checks for the GRN entry points against the CPU equivalents. The
+// 0.85 floor is lower than the fit kernel's 0.95 because gene batching adds
+// its own randomisation on top of the fit noise; what is under test is that
+// file I/O, batching and matrix assembly wire up, not the fit itself.
 
-    let mut rng_x = SmallRng::seed_from_u64(0xABCD_1234);
-    let data: Vec<u8> = (0..ET_SAMPLES * ET_FEATURES)
-        .map(|_| rng_x.random())
-        .collect();
-    let x = QuantisedStore::from_raw(data, ET_SAMPLES, ET_FEATURES);
-
-    let mut rng_y = SmallRng::seed_from_u64(0x1234_ABCD);
-    let mut cols_indices: Vec<Vec<usize>> = vec![Vec::new(); ET_TARGETS];
-    let mut cols_values: Vec<Vec<f32>> = vec![Vec::new(); ET_TARGETS];
-    for c in 0..ET_SAMPLES {
-        for t in 0..ET_TARGETS {
-            if rng_y.random::<f32>() < 0.5 {
-                let mut signal = 0.0f32;
-                for f in 0..ET_INFORMATIVE {
-                    signal += (x.get_col(f)[c] as f32 / 255.0) * 1.5;
-                }
-                let noise: f32 = rng_y.random::<f32>() * 0.05;
-                cols_indices[t].push(c);
-                cols_values[t].push(signal + noise);
-            }
-        }
-    }
-    let axes: Vec<SparseAxis<u32, f32>> = cols_indices
-        .into_iter()
-        .zip(cols_values)
-        .map(|(idx, vs)| SparseAxis::<u32, f32>::new_csc(idx, Vec::new(), Some(vs), ET_SAMPLES))
-        .collect();
-
-    let mut cfg = ExtraTreesConfig::default();
-    cfg.n_trees = 50;
-    cfg.max_depth = Some(6);
-    cfg.min_samples_leaf = 20;
-    cfg.n_features_split = 0;
-    cfg.n_thresholds = 1;
-
-    let cpu = fit_multi_trees_sparse(&axes, &x, ET_SAMPLES, &cfg, 7u32 as usize)
-        .expect("ET CPU fit failed");
-    let gpu = fit_multi_trees_gpu::<WgpuRuntime>(
-        &axes,
-        &x,
-        ET_SAMPLES,
-        &cfg,
-        7u32 as usize,
-        device.clone(),
-        &ScenicGpuParams::default(),
-    )
-    .expect("ET GPU fit failed");
-
-    let mut per_target: Vec<f32> = Vec::with_capacity(ET_TARGETS);
-    for t in 0..ET_TARGETS {
-        per_target.push(pearson(&cpu[t], &gpu[t]));
-    }
-    let mean_corr = per_target.iter().sum::<f32>() / per_target.len() as f32;
-    eprintln!("phase3_et_still_works: mean pearson r = {mean_corr:.3} ({per_target:?})");
-
-    // ET at 50 trees is still noisy; we're checking the dispatch didn't
-    // silently break ET (mean must be materially above zero).
-    assert!(
-        mean_corr >= 0.4,
-        "ET dispatch appears broken after RF was added: mean pearson r = {mean_corr:.3}"
-    );
-}
-
-// -----------------------------------------------------------------------------
-// Phase 5: top-level entry-point round-trip
-//
-// End-to-end plumbing check for `run_scenic_grn_gpu` and
-// `run_scenic_grn_streaming_gpu`. Writes a small synthetic sparse expression
-// file, runs both GPU entry points against the CPU `run_scenic_grn`, and asserts
-// per-target Pearson >= 0.85 on average. The threshold is lower than the fit
-// kernel's per-target 0.95 because Phase 5 also introduces batch-genes
-// randomisation on top of the fit noise -- what we're testing is that the file
-// I/O, batching and matrix assembly wire up correctly, not the fit itself.
-// -----------------------------------------------------------------------------
-
+/// Cells in the round-trip fixture.
 const RT_CELLS: usize = 200;
+/// TFs, genes `0..RT_TFS`.
 const RT_TFS: usize = 12;
+/// Targets, genes `RT_TFS..RT_TOTAL_GENES`.
 const RT_TARGETS: usize = 20;
+/// Total genes.
 const RT_TOTAL_GENES: usize = RT_TFS + RT_TARGETS;
 
 /// Write a small synthetic gene-based sparse expression file.
@@ -1250,6 +1267,10 @@ const RT_TOTAL_GENES: usize = RT_TFS + RT_TARGETS;
 /// drives the expression; other TFs contribute noise. That ensures the top TF
 /// per target is stable across seeds so per-target Pearson clears the
 /// threshold in reasonable wall-clock.
+///
+/// ### Params
+///
+/// * `path` - Where to write the file
 fn write_synthetic_scenic_file(path: &str) {
     let mut writer =
         CellGeneSparseWriter::new(path, false, RT_CELLS, RT_TOTAL_GENES, 1e4).expect("writer new");
@@ -1257,7 +1278,7 @@ fn write_synthetic_scenic_file(path: &str) {
     let mut rng = SmallRng::seed_from_u64(0xA5A5);
 
     // Sample once per (cell, TF) so every target uses the same TF profile.
-    let mut tf_cell_vals: Vec<Vec<f32>> = (0..RT_TFS)
+    let tf_cell_vals: Vec<Vec<f32>> = (0..RT_TFS)
         .map(|_| {
             (0..RT_CELLS)
                 .map(|_| rng.random_range(0.0..10.0f32))
@@ -1281,12 +1302,17 @@ fn write_synthetic_scenic_file(path: &str) {
         write_gene_chunk_from_dense(&mut writer, RT_TFS + tg, &vals);
     }
 
-    // Prevent needless-move lint on tf_cell_vals.
-    tf_cell_vals.clear();
-
     writer.finalise().expect("writer finalise");
 }
 
+/// Writes one gene from a dense per-cell vector, rounding to u16 raw counts
+/// and storing `ln(1 + v)` as the normalised layer.
+///
+/// ### Params
+///
+/// * `writer` - Open writer
+/// * `gene_id` - Gene index
+/// * `vals` - Expression per cell; non-positive or round-to-zero values are dropped
 fn write_gene_chunk_from_dense(writer: &mut CellGeneSparseWriter, gene_id: usize, vals: &[f32]) {
     let mut data_raw: Vec<u16> = Vec::new();
     let mut data_norm: Vec<F16> = Vec::new();
@@ -1308,6 +1334,17 @@ fn write_gene_chunk_from_dense(writer: &mut CellGeneSparseWriter, gene_id: usize
     writer.write_gene_chunk(chunk).expect("write chunk");
 }
 
+/// Row-wise Pearson between two equal-shape matrices.
+///
+/// ### Params
+///
+/// * `cpu` - Reference, targets x TFs
+/// * `gpu` - Comparison, same shape
+///
+/// ### Returns
+///
+/// One correlation per row.
+#[cfg(feature = "large-test")]
 fn pearson_per_target(cpu: faer::MatRef<f32>, gpu: faer::MatRef<f32>) -> Vec<f32> {
     let n_targets = cpu.nrows();
     let n_features = cpu.ncols();
@@ -1322,6 +1359,8 @@ fn pearson_per_target(cpu: faer::MatRef<f32>, gpu: faer::MatRef<f32>) -> Vec<f32
         .collect()
 }
 
+/// SCENIC params for the round trips: 100 ET trees, random gene batches of 8,
+/// no cell or gene filtering.
 fn scenic_params_for_roundtrip() -> ScenicParams {
     let mut cfg = ExtraTreesConfig::default();
     cfg.n_trees = 100;
@@ -1343,16 +1382,13 @@ fn scenic_params_for_roundtrip() -> ScenicParams {
 
 /// Reader-backed GRN: GPU must track CPU at mean per-target Pearson >= 0.85.
 #[test]
-// Heavy: full pipeline, including writing a sparse binary fixture to temp_dir.
 #[cfg(feature = "large-test")]
-fn run_scenic_grn_gpu_roundtrip() {
-    let Some(device) = try_device() else {
-        eprintln!("skipping: no GPU device available");
-        return;
-    };
+// Heavy: 200 x 32 full reader pipeline, CPU and GPU, fixture on disk.
+fn test_run_scenic_grn_gpu_roundtrip() {
+    let Some(device) = try_device() else { return };
 
     let path = std::env::temp_dir().join("bixverse_scenic_gpu_roundtrip.bin");
-    let path_str = path.to_str().unwrap();
+    let path_str = path.to_str().expect("utf-8 temp path");
     write_synthetic_scenic_file(path_str);
 
     let cell_indices: Vec<usize> = (0..RT_CELLS).collect();
@@ -1389,7 +1425,6 @@ fn run_scenic_grn_gpu_roundtrip() {
 
     let corrs = pearson_per_target(cpu.as_ref(), gpu.as_ref());
     let mean = corrs.iter().sum::<f32>() / corrs.len() as f32;
-    eprintln!("run_scenic_grn_gpu_roundtrip mean pearson: {mean:.3} ({corrs:?})");
     assert!(
         mean >= 0.85,
         "mean per-target Pearson {mean:.3} below 0.85 threshold: {corrs:?}"
@@ -1400,16 +1435,13 @@ fn run_scenic_grn_gpu_roundtrip() {
 
 /// Same gate for the streaming path, which chunks genes off disk.
 #[test]
-// Heavy: full streaming pipeline, including a sparse binary fixture on disk.
 #[cfg(feature = "large-test")]
-fn run_scenic_grn_streaming_gpu_roundtrip() {
-    let Some(device) = try_device() else {
-        eprintln!("skipping: no GPU device available");
-        return;
-    };
+// Heavy: 200 x 32 full streaming pipeline, CPU and GPU, fixture on disk.
+fn test_run_scenic_grn_streaming_gpu_roundtrip() {
+    let Some(device) = try_device() else { return };
 
     let path = std::env::temp_dir().join("bixverse_scenic_gpu_streaming_roundtrip.bin");
-    let path_str = path.to_str().unwrap();
+    let path_str = path.to_str().expect("utf-8 temp path");
     write_synthetic_scenic_file(path_str);
 
     let cell_indices: Vec<usize> = (0..RT_CELLS).collect();
@@ -1446,7 +1478,6 @@ fn run_scenic_grn_streaming_gpu_roundtrip() {
 
     let corrs = pearson_per_target(cpu.as_ref(), gpu.as_ref());
     let mean = corrs.iter().sum::<f32>() / corrs.len() as f32;
-    eprintln!("run_scenic_grn_streaming_gpu_roundtrip mean pearson: {mean:.3} ({corrs:?})");
     assert!(
         mean >= 0.85,
         "mean per-target Pearson {mean:.3} below 0.85 threshold: {corrs:?}"
@@ -1455,9 +1486,13 @@ fn run_scenic_grn_streaming_gpu_roundtrip() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// Build a small in-memory CSC for the meta-cell round-trip. Same design as
-/// the disk fixture: TF `t % RT_TFS` drives target `t` so the top-TF-per-target
-/// signal is stable and the Pearson threshold clears in seconds.
+/// Small in-memory CSC for the metacell round trip. Same design as the disk
+/// fixture: TF `t % RT_TFS` drives target `t`, so the top-TF-per-target signal
+/// is stable and the Pearson threshold clears in seconds.
+///
+/// ### Returns
+///
+/// A `RT_CELLS x RT_TOTAL_GENES` CSC matrix with raw u16 and f32 layers.
 fn build_synthetic_scenic_csc() -> CompressedSparseData2<u16, f32> {
     let mut rng = SmallRng::seed_from_u64(0xC0FFEE);
     let mut data: Vec<u16> = Vec::new();
@@ -1507,13 +1542,10 @@ fn build_synthetic_scenic_csc() -> CompressedSparseData2<u16, f32> {
 
 /// Same gate for the in-memory CSC path, comparing the target rows only.
 #[test]
-// Heavy: full in-memory pipeline, CPU and GPU.
 #[cfg(feature = "large-test")]
-fn run_scenic_grn_in_memory_gpu_roundtrip() {
-    let Some(device) = try_device() else {
-        eprintln!("skipping: no GPU device available");
-        return;
-    };
+// Heavy: 200 x 32 full in-memory pipeline, CPU and GPU.
+fn test_run_scenic_grn_in_memory_gpu_roundtrip() {
+    let Some(device) = try_device() else { return };
 
     let csc = build_synthetic_scenic_csc();
     let tf_indices: Vec<usize> = (0..RT_TFS).collect();
@@ -1534,12 +1566,11 @@ fn run_scenic_grn_in_memory_gpu_roundtrip() {
     )
     .expect("GPU run_scenic_grn_in_memory_gpu failed");
 
-    // CPU returns (n_total_genes, n_tfs) — restrict to the target rows.
+    // CPU returns (n_total_genes, n_tfs), so restrict to the target rows.
     let cpu_targets = cpu.as_ref().submatrix(RT_TFS, 0, RT_TARGETS, RT_TFS);
     let gpu_targets = gpu.as_ref().submatrix(RT_TFS, 0, RT_TARGETS, RT_TFS);
     let corrs = pearson_per_target(cpu_targets, gpu_targets);
     let mean = corrs.iter().sum::<f32>() / corrs.len() as f32;
-    eprintln!("run_scenic_grn_in_memory_gpu_roundtrip mean pearson: {mean:.3} ({corrs:?})");
     assert!(
         mean >= 0.85,
         "mean per-target Pearson {mean:.3} below 0.85 threshold: {corrs:?}"
@@ -1548,11 +1579,8 @@ fn run_scenic_grn_in_memory_gpu_roundtrip() {
 
 /// Gradient boosting has no GPU learner: must error, not fall back.
 #[test]
-fn run_scenic_grn_in_memory_gpu_rejects_gbm() {
-    let Some(device) = try_device() else {
-        eprintln!("skipping: no GPU device available");
-        return;
-    };
+fn test_run_scenic_grn_in_memory_gpu_rejects_gbm() {
+    let Some(device) = try_device() else { return };
 
     let csc = build_synthetic_scenic_csc();
     let tf_indices: Vec<usize> = (0..RT_TFS).collect();
@@ -1582,16 +1610,13 @@ fn run_scenic_grn_in_memory_gpu_rejects_gbm() {
 
 /// The same rejection on the reader path, ahead of any I/O.
 #[test]
-fn run_scenic_grn_gpu_rejects_gbm() {
-    let Some(device) = try_device() else {
-        eprintln!("skipping: no GPU device available");
-        return;
-    };
+fn test_run_scenic_grn_gpu_rejects_gbm() {
+    let Some(device) = try_device() else { return };
 
     // The file has to exist: the learner check happens inside
     // `run_scenic_grn_gpu`, so a real reader has to be built first.
     let path = std::env::temp_dir().join("bixverse_scenic_gpu_gbm_reject.bin");
-    let path_str = path.to_str().unwrap();
+    let path_str = path.to_str().expect("utf-8 temp path");
     write_synthetic_scenic_file(path_str);
 
     let cell_indices: Vec<usize> = (0..RT_CELLS).collect();

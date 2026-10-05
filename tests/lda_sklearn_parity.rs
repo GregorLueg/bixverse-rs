@@ -32,6 +32,10 @@ use faer::Mat;
 use bixverse_rs::methods::lda::{LdaCorpus, LdaLearning, LdaParams, lda_bound, lda_fit};
 use bixverse_rs::prelude::*;
 
+///////////////
+// Constants //
+///////////////
+
 /// Documents in the reference corpus.
 const SKLEARN_N_DOCS: usize = 60;
 
@@ -46,6 +50,16 @@ const SKLEARN_PRIOR: f64 = 0.1;
 
 /// The bound scikit-learn reports for the parameters below.
 const SKLEARN_BOUND: f64 = -1899.5186748694439;
+
+/// Seed for every fit in this file, matching scikit-learn's `random_state`.
+const SEED: u64 = 0;
+
+/// Relative tolerance on quantities that are the same formula on both sides.
+const BOUND_TOL: f64 = 1e-12;
+
+/////////////
+// Fixture //
+/////////////
 
 /// Reference corpus: four term blocks, each document drawn from one block with
 /// a few terms bleeding in from the next so the topics are not trivially
@@ -212,7 +226,7 @@ const SKLEARN_GAMMA: [f64; 240] = [
 #[test]
 fn test_bound_matches_sklearn_on_shared_params() {
     let matrix = sklearn_corpus();
-    let corpus = LdaCorpus::<f64>::new(&matrix).unwrap();
+    let corpus = LdaCorpus::<f64>::new(&matrix).expect("corpus builds");
 
     let lambda = Mat::from_fn(SKLEARN_K, SKLEARN_N_TERMS, |t, w| {
         SKLEARN_LAMBDA[w * SKLEARN_K + t]
@@ -228,16 +242,16 @@ fn test_bound_matches_sklearn_on_shared_params() {
         SKLEARN_PRIOR,
         SKLEARN_PRIOR,
     )
-    .unwrap();
+    .expect("lda_bound failed");
 
-    assert_relative_eq!(bound, SKLEARN_BOUND, max_relative = 1e-12);
+    assert_relative_eq!(bound, SKLEARN_BOUND, max_relative = BOUND_TOL);
 }
 
 /// Shapes that disagree with the corpus are rejected rather than read past.
 #[test]
 fn test_bound_rejects_bad_shapes() {
     let matrix = sklearn_corpus();
-    let corpus = LdaCorpus::<f64>::new(&matrix).unwrap();
+    let corpus = LdaCorpus::<f64>::new(&matrix).expect("corpus builds");
     let lambda = Mat::<f64>::from_fn(SKLEARN_K, SKLEARN_N_TERMS, |_, _| 0.1);
     let gamma = Mat::<f64>::from_fn(SKLEARN_K, SKLEARN_N_DOCS, |_, _| 0.1);
 
@@ -275,9 +289,9 @@ fn test_fit_reaches_sklearn_optimum() {
         inner_tol: 1e-5,
         check_every: 25,
         learning: LdaLearning::Batch,
-        seed: 0,
+        seed: SEED,
     };
-    let model = lda_fit(&matrix, SKLEARN_K, Some(params), 0).unwrap();
+    let model = lda_fit(&matrix, SKLEARN_K, Some(params), 0).expect("lda_fit failed");
 
     assert!(
         model.bound >= SKLEARN_BOUND,
@@ -290,7 +304,7 @@ fn test_fit_reaches_sklearn_optimum() {
     assert_relative_eq!(
         model.perplexity,
         (-model.bound / n_tokens).exp(),
-        max_relative = 1e-12
+        max_relative = BOUND_TOL
     );
 
     let block = SKLEARN_N_TERMS / SKLEARN_K;
@@ -302,7 +316,7 @@ fn test_fit_reaches_sklearn_optimum() {
             .collect();
         let best = (0..SKLEARN_K)
             .max_by(|&a, &b| mass[a].total_cmp(&mass[b]))
-            .unwrap();
+            .expect("at least one block");
         assert!(mass[best] > 0.8, "topic {topic} spread: {mass:?}");
         assert!(!claimed[best], "two topics claimed block {best}");
         claimed[best] = true;
@@ -311,16 +325,16 @@ fn test_fit_reaches_sklearn_optimum() {
 
 /// The public result matches the shapes the module documents.
 #[test]
-fn test_result_shapes() {
+fn test_result_shapes_match_the_docs() {
     let matrix = sklearn_corpus();
     let params = LdaParams {
         alpha: SKLEARN_PRIOR,
         alpha_by_topic: false,
         max_iter: 30,
-        seed: 0,
+        seed: SEED,
         ..Default::default()
     };
-    let model = lda_fit(&matrix, SKLEARN_K, Some(params), 0).unwrap();
+    let model = lda_fit(&matrix, SKLEARN_K, Some(params), 0).expect("lda_fit failed");
 
     assert!(model.bound.is_finite());
     assert_eq!(model.cell_topic.nrows(), SKLEARN_K);

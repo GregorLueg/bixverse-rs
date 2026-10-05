@@ -20,7 +20,7 @@
 //! change from the unrolling, which `kernels` already measured on its own.
 //!
 //! Run with:
-//! ```
+//! ```text
 //! cargo bench --features single-cell --bench pairwise_cor_bench
 //! ```
 //!
@@ -32,25 +32,52 @@
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
-use bixverse_rs::core::math::vector_helpers::rank_vector;
-use bixverse_rs::prelude::*;
-use bixverse_rs::single_cell::mc_analysis::metrics::pairwise_gene_correlations_in_memory;
-use bixverse_rs::utils::simd::{sum_simd_f32, sum_squared_dev_simd_f32, sum_widen_simd_f32};
 use rand::prelude::*;
 use rand::rngs::StdRng;
 use rayon::prelude::*;
 use wide::f32x4;
 
-/// Repeats per timing, chosen so even the smallest case runs long enough to
-/// clear timer noise without the largest one dominating the run.
+use bixverse_rs::core::math::vector_helpers::rank_vector;
+use bixverse_rs::prelude::*;
+use bixverse_rs::single_cell::mc_analysis::metrics::pairwise_gene_correlations_in_memory;
+use bixverse_rs::utils::simd::{sum_simd_f32, sum_squared_dev_simd_f32, sum_widen_simd_f32};
+
+///////////////
+// Constants //
+///////////////
+
+/// Minimum repeats per timing, so even the slowest case is averaged over more
+/// than one run.
 const MIN_ITERS: usize = 3;
 
 /// Target time per measured cell. Iterations are added until this is reached.
 const TARGET: Duration = Duration::from_millis(150);
 
-///////////////////////
+/// Vector lengths swept in the `kernels` cell, single accumulator vs unrolled.
+const KERNEL_LENS: [usize; 5] = [256, 1024, 8192, 65_536, 262_144];
+
+/// Vector lengths swept in the widening part of the `kernels` cell.
+const WIDEN_LENS: [usize; 3] = [1024, 65_536, 262_144];
+
+/// Vector lengths swept in the `dot` cell.
+const DOT_LENS: [usize; 6] = [256, 1024, 8192, 65_536, 262_144, 1_048_576];
+
+/// Default cell counts of the `endtoend` cell, overridden by
+/// `PAIRWISE_BENCH_CELLS`.
+const DEFAULT_CELLS: [usize; 3] = [2_000, 20_000, 200_000];
+
+/// Non-zero densities swept in the `endtoend` cell.
+const DENSITIES: [f64; 2] = [0.05, 0.20];
+
+/// Genes in the `endtoend` matrix.
+const N_GENES: usize = 40;
+
+/// Gene pairs correlated per `endtoend` run.
+const N_PAIRS: usize = 200;
+
+//////////////////////
 // Baseline kernels //
-///////////////////////
+//////////////////////
 
 /// The 128-bit sum as it was before the unroll: one accumulator, so one FADD
 /// per four elements against roughly three cycles of latency.
@@ -142,6 +169,17 @@ fn dot_scalar_iter(a: &[f32], b: &[f32]) -> f32 {
 //////////////
 
 /// Sparse log1p-like gene columns, dense form.
+///
+/// ### Params
+///
+/// * `n_genes` - Number of columns
+/// * `n_cells` - Length of each column
+/// * `density` - Probability that an entry is non-zero
+/// * `seed` - RNG seed
+///
+/// ### Returns
+///
+/// One dense `Vec` per gene.
 fn dense_columns(n_genes: usize, n_cells: usize, density: f64, seed: u64) -> Vec<Vec<f32>> {
     let mut rng = StdRng::seed_from_u64(seed);
     (0..n_genes)
@@ -159,6 +197,16 @@ fn dense_columns(n_genes: usize, n_cells: usize, density: f64, seed: u64) -> Vec
         .collect()
 }
 
+/// Pack dense gene columns into a CSC matrix, with the values duplicated into
+/// `data_2` as the normalised layer.
+///
+/// ### Params
+///
+/// * `columns` - Dense gene columns, all the same length
+///
+/// ### Returns
+///
+/// The `n_cells x n_genes` CSC matrix.
 fn csc_from_columns(columns: &[Vec<f32>]) -> CompressedSparseData2<f32, f32> {
     let n_cells = columns[0].len();
     let mut data: Vec<f32> = Vec::new();
@@ -183,9 +231,9 @@ fn csc_from_columns(columns: &[Vec<f32>]) -> CompressedSparseData2<f32, f32> {
     )
 }
 
-/////////////////////
+////////////////////
 // Dense baseline //
-/////////////////////
+////////////////////
 
 /// The correlation algorithm as it was: densify every unique gene, standardise
 /// it, then one scalar dot per pair.
@@ -193,13 +241,23 @@ fn csc_from_columns(columns: &[Vec<f32>]) -> CompressedSparseData2<f32, f32> {
 /// Kept here rather than in the library so the comparison is against a fixed
 /// target. It calls the current reduction kernels on purpose, so what this
 /// measures against the sparse version is the algorithm and nothing else.
+///
+/// ### Params
+///
+/// * `matrix` - CSC matrix with the normalised values in `data_2`
+/// * `pairs` - Gene index pairs
+/// * `spearman` - Rank the columns first
+///
+/// ### Returns
+///
+/// One correlation per pair.
 fn pairwise_dense_baseline(
     matrix: &CompressedSparseData2<f32, f32>,
     pairs: &[(usize, usize)],
     spearman: bool,
 ) -> Vec<f32> {
     let n_cells = matrix.shape.0;
-    let data_norm = matrix.data_2.as_ref().unwrap();
+    let data_norm = matrix.data_2.as_ref().expect("data_2 is set");
 
     let mut unique: Vec<usize> = pairs.iter().flat_map(|&(a, b)| [a, b]).collect();
     unique.sort_unstable();
@@ -230,19 +288,28 @@ fn pairwise_dense_baseline(
     pairs
         .par_iter()
         .map(|&(g1, g2)| {
-            let a = &standardised[unique.binary_search(&g1).unwrap()];
-            let b = &standardised[unique.binary_search(&g2).unwrap()];
+            let a = &standardised[unique.binary_search(&g1).expect("g1 is in unique")];
+            let b = &standardised[unique.binary_search(&g2).expect("g2 is in unique")];
             (dot_scalar_iter(a, b) / denom).clamp(-1.0, 1.0)
         })
         .collect()
 }
 
-//////////////
+/////////////
 // Harness //
-//////////////
+/////////////
 
-/// Time `f` until [`TARGET`] is reached, return nanoseconds per iteration.
-fn time<T>(mut f: impl FnMut() -> T) -> f64 {
+/// Mean wall clock of `f` over at least [`MIN_ITERS`] runs and [`TARGET`],
+/// after one untimed warm-up.
+///
+/// ### Params
+///
+/// * `f` - The work to time
+///
+/// ### Returns
+///
+/// Nanoseconds per iteration.
+fn mean_ns_of<T>(mut f: impl FnMut() -> T) -> f64 {
     // One untimed pass so caches and any lazy dispatch are warm.
     black_box(f());
 
@@ -258,21 +325,42 @@ fn time<T>(mut f: impl FnMut() -> T) -> f64 {
     start.elapsed().as_nanos() as f64 / iters as f64
 }
 
-fn enabled(cell: &str) -> bool {
+/// Whether a cell should run, given `PAIRWISE_BENCH_ONLY`.
+///
+/// ### Params
+///
+/// * `cell` - The cell's name
+///
+/// ### Returns
+///
+/// `true` when the filter is unset or lists the cell exactly.
+fn selected(cell: &str) -> bool {
     match std::env::var("PAIRWISE_BENCH_ONLY") {
         Ok(only) => only.split(',').any(|c| c.trim() == cell),
         Err(_) => true,
     }
 }
 
+/// Format a speed-up ratio.
+///
+/// ### Params
+///
+/// * `base` - Baseline time
+/// * `new` - Candidate time
+///
+/// ### Returns
+///
+/// `base / new` as e.g. `1.85x`.
 fn speedup(base: f64, new: f64) -> String {
     format!("{:.2}x", base / new)
 }
 
-//////////////
-// The runs //
-//////////////
+/////////////
+// Benches //
+/////////////
 
+/// `kernels` cell: single-accumulator reductions against the unrolled ones,
+/// then the plain `f32` sum against the widening one.
 fn bench_kernels() {
     println!("\n=== kernels: one accumulator vs UNROLL, single threaded, in cache ===");
     println!(
@@ -281,14 +369,14 @@ fn bench_kernels() {
     );
 
     let mut rng = StdRng::seed_from_u64(7);
-    for &len in &[256_usize, 1024, 8192, 65_536, 262_144] {
+    for len in KERNEL_LENS {
         let v: Vec<f32> = (0..len).map(|_| rng.random::<f32>()).collect();
         let mean = 0.5_f32;
 
-        let a = time(|| sum_sse_f32_single_acc(black_box(&v)));
-        let b = time(|| sum_simd_f32(black_box(&v)));
-        let c = time(|| sum_squared_dev_sse_f32_single_acc(black_box(&v), mean));
-        let d = time(|| sum_squared_dev_simd_f32(black_box(&v), mean));
+        let a = mean_ns_of(|| sum_sse_f32_single_acc(black_box(&v)));
+        let b = mean_ns_of(|| sum_simd_f32(black_box(&v)));
+        let c = mean_ns_of(|| sum_squared_dev_sse_f32_single_acc(black_box(&v), mean));
+        let d = mean_ns_of(|| sum_squared_dev_simd_f32(black_box(&v), mean));
 
         println!(
             "{:>8}  {:>10.0}ns  {:>10.0}ns  {:>8}  {:>10.0}ns  {:>10.0}ns  {:>8}",
@@ -307,10 +395,10 @@ fn bench_kernels() {
         "{:>8}  {:>12}  {:>12}  {:>8}",
         "len", "sum f32", "sum widen", "ratio"
     );
-    for &len in &[1024_usize, 65_536, 262_144] {
+    for len in WIDEN_LENS {
         let v: Vec<f32> = (0..len).map(|_| rng.random::<f32>()).collect();
-        let a = time(|| sum_simd_f32(black_box(&v)));
-        let b = time(|| sum_widen_simd_f32(black_box(&v)));
+        let a = mean_ns_of(|| sum_simd_f32(black_box(&v)));
+        let b = mean_ns_of(|| sum_widen_simd_f32(black_box(&v)));
         println!(
             "{:>8}  {:>10.0}ns  {:>10.0}ns  {:>8}",
             len,
@@ -321,6 +409,8 @@ fn bench_kernels() {
     }
 }
 
+/// `dot` cell: the scalar iterator dot against the single-accumulator and the
+/// unrolled SIMD dot.
 fn bench_dot() {
     println!("\n=== dot: the correlation inner loop, single threaded ===");
     println!(
@@ -329,13 +419,13 @@ fn bench_dot() {
     );
 
     let mut rng = StdRng::seed_from_u64(11);
-    for &len in &[256_usize, 1024, 8192, 65_536, 262_144, 1_048_576] {
+    for len in DOT_LENS {
         let a: Vec<f32> = (0..len).map(|_| rng.random::<f32>() - 0.5).collect();
         let b: Vec<f32> = (0..len).map(|_| rng.random::<f32>() - 0.5).collect();
 
-        let s = time(|| dot_scalar_iter(black_box(&a), black_box(&b)));
-        let one = time(|| dot_sse_f32_single_acc(black_box(&a), black_box(&b)));
-        let unr = time(|| {
+        let s = mean_ns_of(|| dot_scalar_iter(black_box(&a), black_box(&b)));
+        let one = mean_ns_of(|| dot_sse_f32_single_acc(black_box(&a), black_box(&b)));
+        let unr = mean_ns_of(|| {
             let x: f32 = f32::bxv_dot_simd(black_box(&a), black_box(&b));
             x
         });
@@ -352,16 +442,15 @@ fn bench_dot() {
     }
 }
 
+/// `endtoend` cell: the dense baseline against the sparse library path, Pearson
+/// and Spearman, with the max absolute difference between the two.
 fn bench_endtoend() {
     println!("\n=== endtoend: dense algorithm vs sparse, under rayon ===");
 
     let cells: Vec<usize> = match std::env::var("PAIRWISE_BENCH_CELLS") {
         Ok(v) => v.split(',').filter_map(|c| c.trim().parse().ok()).collect(),
-        Err(_) => vec![2_000, 20_000, 200_000],
+        Err(_) => DEFAULT_CELLS.to_vec(),
     };
-
-    let n_genes = 40;
-    let n_pairs = 200;
 
     println!(
         "{:>8}  {:>8}  {:>9}  {:>12}  {:>12}  {:>8}  {:>10}",
@@ -369,8 +458,8 @@ fn bench_endtoend() {
     );
 
     for &n_cells in &cells {
-        for &density in &[0.05_f64, 0.20] {
-            let columns = dense_columns(n_genes, n_cells, density, 42);
+        for density in DENSITIES {
+            let columns = dense_columns(N_GENES, n_cells, density, 42);
             let matrix = csc_from_columns(&columns);
 
             // Distinct genes only. A self-pair correlates a column with
@@ -378,10 +467,10 @@ fn bench_endtoend() {
             // more than it does on a real pair, which would put a number in the
             // diff column that says nothing about the general case.
             let mut rng = StdRng::seed_from_u64(3);
-            let pairs: Vec<(usize, usize)> = (0..n_pairs)
+            let pairs: Vec<(usize, usize)> = (0..N_PAIRS)
                 .map(|_| {
-                    let a = rng.random_range(0..n_genes);
-                    let mut b = rng.random_range(0..n_genes - 1);
+                    let a = rng.random_range(0..N_GENES);
+                    let mut b = rng.random_range(0..N_GENES - 1);
                     if b >= a {
                         b += 1;
                     }
@@ -392,9 +481,10 @@ fn bench_endtoend() {
             let g2: Vec<usize> = pairs.iter().map(|p| p.1).collect();
 
             for spearman in [false, true] {
-                let dense = time(|| pairwise_dense_baseline(&matrix, &pairs, spearman));
-                let sparse = time(|| {
-                    pairwise_gene_correlations_in_memory(&matrix, &g1, &g2, spearman, 0).unwrap()
+                let dense = mean_ns_of(|| pairwise_dense_baseline(&matrix, &pairs, spearman));
+                let sparse = mean_ns_of(|| {
+                    pairwise_gene_correlations_in_memory(&matrix, &g1, &g2, spearman, 0)
+                        .expect("sparse correlations")
                 });
 
                 // Not an assertion. This is the dense path's f32 accumulation
@@ -403,8 +493,8 @@ fn bench_endtoend() {
                 // side is at 1e-5, so effectively all of this column is the
                 // dense path drifting.
                 let want = pairwise_dense_baseline(&matrix, &pairs, spearman);
-                let got =
-                    pairwise_gene_correlations_in_memory(&matrix, &g1, &g2, spearman, 0).unwrap();
+                let got = pairwise_gene_correlations_in_memory(&matrix, &g1, &g2, spearman, 0)
+                    .expect("sparse correlations");
                 let max_diff = want
                     .iter()
                     .zip(got.iter())
@@ -426,6 +516,10 @@ fn bench_endtoend() {
     }
 }
 
+//////////
+// Main //
+//////////
+
 fn main() {
     println!(
         "threads: {}, target per cell: {:?}",
@@ -433,13 +527,13 @@ fn main() {
         TARGET
     );
 
-    if enabled("kernels") {
+    if selected("kernels") {
         bench_kernels();
     }
-    if enabled("dot") {
+    if selected("dot") {
         bench_dot();
     }
-    if enabled("endtoend") {
+    if selected("endtoend") {
         bench_endtoend();
     }
 }

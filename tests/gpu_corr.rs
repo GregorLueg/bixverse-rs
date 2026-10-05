@@ -1,26 +1,68 @@
-#![allow(clippy::needless_range_loop)]
-#![cfg(all(feature = "gpu", feature = "large-test"))]
+//! Large-n parity between the GPU and CPU column-pairwise correlation paths.
+//!
+//! The inline tests in `gpu/linalg/corr.rs` run at n = 80, d = 6, so this file
+//! is the only coverage of the GPU accumulation at sizes where f32 drift could
+//! actually show. Pearson, covariance and Spearman are each checked against
+//! [`column_pairwise_cor`] / [`column_pairwise_cov`] on Gaussian data.
 
-use bixverse_rs::core::base::cors_similarity::{column_pairwise_cor, column_pairwise_cov};
-use bixverse_rs::gpu::linalg::corr::{GpuCorCov, column_pairwise_cor_gpu};
+#![cfg(all(feature = "gpu", feature = "large-test"))]
 
 use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
 use faer::Mat;
 use rand::prelude::*;
 use rand_distr::Normal;
 
+use bixverse_rs::core::base::cors_similarity::{column_pairwise_cor, column_pairwise_cov};
+use bixverse_rs::gpu::linalg::corr::{GpuCorCov, column_pairwise_cor_gpu};
+
+///////////////
+// Constants //
+///////////////
+
+/// Seed for every input matrix.
+const SEED: u64 = 42;
+/// Relative tolerance against the CPU maximum. f32 accumulation over up to
+/// 2000 rows, so anything tighter trips on summation order alone.
+const REL_TOL: f32 = 1e-3;
+
+/////////////
+// Helpers //
+/////////////
+
+/// Standard normal matrix.
+///
+/// ### Params
+///
+/// * `n_rows` - Number of rows (samples)
+/// * `n_cols` - Number of columns (features)
+/// * `seed` - Seed for reproducibility
+///
+/// ### Returns
+///
+/// An `n_rows x n_cols` matrix of N(0, 1) draws.
 fn make_gaussian(n_rows: usize, n_cols: usize, seed: u64) -> Mat<f32> {
     let mut rng = StdRng::seed_from_u64(seed);
-    let normal = Normal::<f32>::new(0.0, 1.0).unwrap();
+    let normal = Normal::<f32>::new(0.0, 1.0).expect("valid normal");
     Mat::from_fn(n_rows, n_cols, |_, _| normal.sample(&mut rng))
 }
 
-fn diagnose(n: usize, d: usize, cor_type: GpuCorCov, label: &str) {
-    let data = make_gaussian(n, d, 42);
+/// Runs one GPU correlation and asserts it against the CPU reference.
+///
+/// Checks the GPU output is not all zero first, since a launch that busts a
+/// device limit fails silently and writes nothing.
+///
+/// ### Params
+///
+/// * `n` - Number of rows
+/// * `d` - Number of columns, so the output is `d x d`
+/// * `cor_type` - Which statistic to compute
+/// * `label` - Name used in failure messages
+fn assert_gpu_matches_cpu(n: usize, d: usize, cor_type: GpuCorCov, label: &str) {
+    let data = make_gaussian(n, d, SEED);
     let device = WgpuDevice::DefaultDevice;
 
     let gpu = column_pairwise_cor_gpu::<f32, WgpuRuntime>(data.as_ref(), cor_type, device, false)
-        .unwrap();
+        .expect("GPU correlation failed");
 
     let cpu = match cor_type {
         GpuCorCov::Covariance => column_pairwise_cov(&data.as_ref()),
@@ -33,42 +75,27 @@ fn diagnose(n: usize, d: usize, cor_type: GpuCorCov, label: &str) {
     let mut cpu_max_abs = 0.0f32;
     for i in 0..d {
         for j in 0..d {
-            let g = gpu[(i, j)].abs();
-            let c = cpu[(i, j)].abs();
-            if g > gpu_max_abs {
-                gpu_max_abs = g;
-            }
-            if c > cpu_max_abs {
-                cpu_max_abs = c;
-            }
-            let dd = (gpu[(i, j)] - cpu[(i, j)]).abs();
-            if dd > max_diff {
-                max_diff = dd;
-            }
+            gpu_max_abs = gpu_max_abs.max(gpu[(i, j)].abs());
+            cpu_max_abs = cpu_max_abs.max(cpu[(i, j)].abs());
+            max_diff = max_diff.max((gpu[(i, j)] - cpu[(i, j)]).abs());
         }
     }
-    let diag_mean: f32 = (0..d).map(|i| gpu[(i, i)]).sum::<f32>() / d as f32;
 
-    eprintln!(
-        "{label} {n}x{d}: max_diff={max_diff:.3e}  gpu_max_abs={gpu_max_abs:.3e}  cpu_max_abs={cpu_max_abs:.3e}  gpu_diag_mean={diag_mean:.4}"
-    );
-
-    assert!(gpu_max_abs > 0.0, "{label} {n}x{d}: GPU output is all zero",);
-
-    // `max_diff` was computed and printed but never asserted on, which left
-    // these the only large-n correlation coverage in the crate while being
-    // unable to fail. The inline tests in `gpu/linalg/corr.rs` run at n = 80,
-    // d = 6, so nothing else exercises the accumulation at these sizes.
+    assert!(gpu_max_abs > 0.0, "{label} {n}x{d}: GPU output is all zero");
     assert!(
-        max_diff <= 1e-3 * cpu_max_abs.max(1.0),
+        max_diff <= REL_TOL * cpu_max_abs.max(1.0),
         "{label} {n}x{d}: GPU and CPU disagree by {max_diff:.3e} against a CPU \
          maximum of {cpu_max_abs:.3e}"
     );
 }
 
-/// The only large-n Pearson gate: 500 to 2000, square and not.
+///////////
+// Tests //
+///////////
+
+/// Pearson at 500 to 2000 rows and columns, square and not.
 #[test]
-fn diag_pearson_sweep() {
+fn test_gpu_pearson_matches_cpu_sweep() {
     for &(n, d) in &[
         (500, 500),
         (1000, 500),
@@ -78,22 +105,22 @@ fn diag_pearson_sweep() {
         (1000, 2000),
         (2000, 2000),
     ] {
-        diagnose(n, d, GpuCorCov::Pearson, "pearson");
+        assert_gpu_matches_cpu(n, d, GpuCorCov::Pearson, "pearson");
     }
 }
 
-/// Same at large n for covariance, where entries grow with the data.
+/// Covariance at large n, where entries are not bounded by one.
 #[test]
-fn diag_covariance_sweep() {
+fn test_gpu_covariance_matches_cpu_sweep() {
     for &(n, d) in &[(500, 500), (1000, 1000), (2000, 2000)] {
-        diagnose(n, d, GpuCorCov::Covariance, "cov");
+        assert_gpu_matches_cpu(n, d, GpuCorCov::Covariance, "cov");
     }
 }
 
-/// Same at large n for Spearman, ranking thousands of rows not 60.
+/// Spearman at large n, ranking thousands of rows rather than tens.
 #[test]
-fn diag_spearman_sweep() {
+fn test_gpu_spearman_matches_cpu_sweep() {
     for &(n, d) in &[(500, 500), (1000, 1000), (2000, 2000)] {
-        diagnose(n, d, GpuCorCov::Spearman, "spearman");
+        assert_gpu_matches_cpu(n, d, GpuCorCov::Spearman, "spearman");
     }
 }

@@ -23,6 +23,10 @@ use bixverse_rs::single_cell::sc_trajectory::gene_trends::{
 };
 use bixverse_rs::single_cell::sc_trajectory::palantir::{PalantirParams, run_palantir};
 
+///////////////
+// Constants //
+///////////////
+
 /// Cells on the shared trunk of the Y.
 ///
 /// Matches `Y_TRUNK` in the Palantir unit tests. Everything here supplies its
@@ -33,14 +37,34 @@ const TRUNK: usize = 100;
 const ARM: usize = 100;
 /// Rate at which the arms separate, per unit of arc.
 ///
-/// Same value the Palantir unit tests use, and load bearing in both directions:
+/// Same value the Palantir unit tests use, and it matters in both directions:
 /// too slow and the kNN bridges the arms so the branch never resolves, too fast
 /// and they detach from the trunk entirely, which makes the diffusion spectrum
 /// degenerate and every downstream number an artefact of the eigensolver.
 const ARM_DIVERGENCE: f32 = 1.4;
+/// Planted genes, see [planted_expression].
+const N_GENES: usize = 3;
+/// Neighbours in the kNN graph Palantir and MAGIC share.
+const KNN_K: usize = 15;
+/// Seed for the kNN search and Palantir.
+const SEED: u64 = 42;
+/// Grid points per gene trend.
+const RESOLUTION: usize = 200;
 
-/// Deterministic jitter in `[-0.5, 0.5)`, so the fixture needs no RNG. `salt`
-/// distinguishes independent noise streams.
+/////////////
+// Helpers //
+/////////////
+
+/// Deterministic jitter in `[-0.5, 0.5)`, so the fixture needs no RNG.
+///
+/// ### Params
+///
+/// * `i` - Element index
+/// * `salt` - Distinguishes independent noise streams
+///
+/// ### Returns
+///
+/// The jitter value.
 fn jitter(i: usize, salt: usize) -> f32 {
     let h = (i.wrapping_mul(2_654_435_761) ^ salt.wrapping_mul(40_503)) % 10_007;
     h as f32 / 10_007.0 - 0.5
@@ -75,7 +99,15 @@ fn y_manifold() -> Vec<Vec<f32>> {
     coords
 }
 
-/// Exhaustive kNN over the fixture, as `run_palantir` expects it:
+/// Exhaustive kNN over the fixture, as `run_palantir` expects it.
+///
+/// ### Params
+///
+/// * `coords` - Cell coordinates, one row per cell
+/// * `k` - Neighbours per cell
+///
+/// ### Returns
+///
 /// `(indices, squared distances)`.
 fn knn_of(coords: &[Vec<f32>], k: usize) -> (Vec<Vec<usize>>, Vec<Vec<f32>>) {
     let n = coords.len();
@@ -88,8 +120,9 @@ fn knn_of(coords: &[Vec<f32>], k: usize) -> (Vec<Vec<usize>>, Vec<Vec<f32>>) {
     params.k = k;
 
     let (indices, distances) =
-        generate_knn_with_dist(mat.as_ref(), &params, true, false, 42, false).unwrap();
-    (indices, distances.unwrap())
+        generate_knn_with_dist(mat.as_ref(), &params, true, false, SEED as usize, false)
+            .expect("kNN search failed");
+    (indices, distances.expect("distances were requested"))
 }
 
 /// [PalantirParams] with an exact kNN backend, a pinned component count and a
@@ -116,12 +149,15 @@ fn palantir_params() -> PalantirParams {
 /// * Gene 1 switches on along the **second** arm only.
 /// * Gene 2 is a trunk marker that decays once the arms start.
 ///
-/// Counts are noisy and sparse on purpose, so MAGIC has something to do. The
-/// result is `n_cells` by 3, log1p scaled.
+/// Counts are noisy and sparse on purpose, so MAGIC has something to do.
+///
+/// ### Returns
+///
+/// `n_cells x N_GENES`, log1p scaled.
 fn planted_expression() -> Mat<f32> {
     let n = TRUNK + 2 * ARM;
 
-    Mat::<f32>::from_fn(n, 3, |cell, gene| {
+    Mat::<f32>::from_fn(n, N_GENES, |cell, gene| {
         let (arm_a, arm_b) = ((TRUNK..TRUNK + ARM).contains(&cell), cell >= TRUNK + ARM);
         // Position along whichever arm the cell sits on, zero on the trunk.
         let along = if arm_a {
@@ -150,6 +186,10 @@ fn planted_expression() -> Mat<f32> {
     })
 }
 
+///////////
+// Tests //
+///////////
+
 /// The whole chain, on a Y with two planted arm-specific genes.
 ///
 /// Terminal states are supplied rather than detected: the detection heuristic
@@ -159,7 +199,7 @@ fn planted_expression() -> Mat<f32> {
 fn test_palantir_to_magic_to_gene_trends() {
     let n = TRUNK + 2 * ARM;
     let coords = y_manifold();
-    let (knn_indices, knn_distances) = knn_of(&coords, 15);
+    let (knn_indices, knn_distances) = knn_of(&coords, KNN_K);
     let tips = [TRUNK + ARM - 1, TRUNK + 2 * ARM - 1];
 
     let palantir = run_palantir(
@@ -168,7 +208,7 @@ fn test_palantir_to_magic_to_gene_trends() {
         0,
         Some(&tips),
         palantir_params(),
-        42,
+        SEED,
         0,
     )
     .expect("palantir runs");
@@ -189,8 +229,7 @@ fn test_palantir_to_magic_to_gene_trends() {
     assert_eq!(palantir.terminal_states, tips);
     assert_eq!(palantir.branch_probs.ncols(), 2);
 
-    // -- branch masks --
-
+    // Branch masks.
     let branch_cells = select_branch_cells(
         &palantir.pseudotime,
         palantir.branch_probs.as_ref(),
@@ -216,8 +255,7 @@ fn test_palantir_to_magic_to_gene_trends() {
     assert!(branch_cells[1].contains(&tips[1]));
     assert!(!branch_cells[1].contains(&tips[0]));
 
-    // -- MAGIC --
-
+    // MAGIC.
     let cell_indices: Vec<usize> = (0..n).collect();
     let operator = MagicOperator::from_knn(&knn_indices, &knn_distances, &cell_indices, n)
         .expect("operator builds");
@@ -226,14 +264,14 @@ fn test_palantir_to_magic_to_gene_trends() {
     let raw = planted_expression();
     // Row-major, which is the layout the dense entry point works in.
     let block: Vec<f32> = (0..n)
-        .flat_map(|i| (0..3).map(move |j| (i, j)))
+        .flat_map(|i| (0..N_GENES).map(move |j| (i, j)))
         .map(|(i, j)| raw[(i, j)])
         .collect();
 
     let imputed = magic_impute_dense(
         &operator,
         &block,
-        3,
+        N_GENES,
         Some(MagicParams {
             clip_threshold: 0.0,
             ..Default::default()
@@ -242,9 +280,9 @@ fn test_palantir_to_magic_to_gene_trends() {
     .expect("imputation runs");
 
     // Smoothing must reduce cell-to-cell variance without moving the mean.
-    for gene in 0..3 {
-        let before: Vec<f32> = (0..n).map(|i| block[i * 3 + gene]).collect();
-        let after: Vec<f32> = (0..n).map(|i| imputed[i * 3 + gene]).collect();
+    for gene in 0..N_GENES {
+        let before: Vec<f32> = (0..n).map(|i| block[i * N_GENES + gene]).collect();
+        let after: Vec<f32> = (0..n).map(|i| imputed[i * N_GENES + gene]).collect();
 
         let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len() as f32;
         let var = |v: &[f32]| {
@@ -264,12 +302,11 @@ fn test_palantir_to_magic_to_gene_trends() {
         );
     }
 
-    let expression = Mat::<f32>::from_fn(n, 3, |i, j| imputed[i * 3 + j]);
+    let expression = Mat::<f32>::from_fn(n, N_GENES, |i, j| imputed[i * N_GENES + j]);
 
-    // -- gene trends --
-
+    // Gene trends.
     let params = GeneTrendsParams {
-        resolution: 200,
+        resolution: RESOLUTION,
         gp: LandmarkGpParams {
             length_scale: 0.15,
             sigma: 0.2,
@@ -289,9 +326,9 @@ fn test_palantir_to_magic_to_gene_trends() {
 
     assert_eq!(trends.trends.len(), 2);
     for (branch, cells) in branch_cells.iter().enumerate() {
-        assert_eq!(trends.trends[branch].nrows(), 200);
-        assert_eq!(trends.trends[branch].ncols(), 3);
-        assert_eq!(trends.grids[branch].len(), 200);
+        assert_eq!(trends.trends[branch].nrows(), RESOLUTION);
+        assert_eq!(trends.trends[branch].ncols(), N_GENES);
+        assert_eq!(trends.grids[branch].len(), RESOLUTION);
         assert_eq!(trends.n_cells[branch], cells.len());
         // The grid must be ascending and span the branch's own pseudotime.
         assert!(trends.grids[branch].windows(2).all(|w| w[0] < w[1]));
@@ -307,7 +344,7 @@ fn test_palantir_to_magic_to_gene_trends() {
     // other. Comparing the last grid point of each branch is the cleanest way
     // to say that, since the two branches share their trunk and only diverge at
     // the end.
-    let end = |branch: usize, gene: usize| trends.trends[branch][(199, gene)];
+    let end = |branch: usize, gene: usize| trends.trends[branch][(RESOLUTION - 1, gene)];
 
     assert!(
         end(0, 0) > end(1, 0),
@@ -331,7 +368,8 @@ fn test_palantir_to_magic_to_gene_trends() {
     }
 }
 
-/// The same joins without the Palantir eigensolve, so CI keeps covering them.
+/// The same joins without the Palantir eigensolve, so a Palantir regression
+/// cannot hide them.
 ///
 /// Pseudotime and fate probabilities are handed in rather than inferred, which
 /// removes the only expensive step and the only part that needs a manifold
@@ -343,7 +381,7 @@ fn test_palantir_to_magic_to_gene_trends() {
 fn test_branch_masks_to_magic_to_gene_trends() {
     let n = TRUNK + 2 * ARM;
     let coords = y_manifold();
-    let (knn_indices, knn_distances) = knn_of(&coords, 15);
+    let (knn_indices, knn_distances) = knn_of(&coords, KNN_K);
 
     // Pseudotime straight off the fixture's construction: the trunk runs
     // 0..0.5, each arm 0.5..1.
@@ -389,22 +427,21 @@ fn test_branch_masks_to_magic_to_gene_trends() {
         assert!(cells.windows(2).all(|w| w[0] < w[1]));
     }
 
-    // -- MAGIC --
-
+    // MAGIC.
     let cell_indices: Vec<usize> = (0..n).collect();
     let operator = MagicOperator::from_knn(&knn_indices, &knn_distances, &cell_indices, n)
         .expect("operator builds");
 
     let raw = planted_expression();
     let block: Vec<f32> = (0..n)
-        .flat_map(|i| (0..3).map(move |j| (i, j)))
+        .flat_map(|i| (0..N_GENES).map(move |j| (i, j)))
         .map(|(i, j)| raw[(i, j)])
         .collect();
 
     let imputed = magic_impute_dense(
         &operator,
         &block,
-        3,
+        N_GENES,
         Some(MagicParams {
             clip_threshold: 0.0,
             ..Default::default()
@@ -412,9 +449,9 @@ fn test_branch_masks_to_magic_to_gene_trends() {
     )
     .expect("imputation runs");
 
-    for gene in 0..3 {
-        let before: Vec<f32> = (0..n).map(|i| block[i * 3 + gene]).collect();
-        let after: Vec<f32> = (0..n).map(|i| imputed[i * 3 + gene]).collect();
+    for gene in 0..N_GENES {
+        let before: Vec<f32> = (0..n).map(|i| block[i * N_GENES + gene]).collect();
+        let after: Vec<f32> = (0..n).map(|i| imputed[i * N_GENES + gene]).collect();
 
         let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len() as f32;
         let var = |v: &[f32]| {
@@ -429,11 +466,10 @@ fn test_branch_masks_to_magic_to_gene_trends() {
         );
     }
 
-    // -- gene trends --
-
-    let expression = Mat::<f32>::from_fn(n, 3, |i, j| imputed[i * 3 + j]);
+    // Gene trends.
+    let expression = Mat::<f32>::from_fn(n, N_GENES, |i, j| imputed[i * N_GENES + j]);
     let params = GeneTrendsParams {
-        resolution: 200,
+        resolution: RESOLUTION,
         gp: LandmarkGpParams {
             length_scale: 0.15,
             sigma: 0.2,
@@ -453,9 +489,9 @@ fn test_branch_masks_to_magic_to_gene_trends() {
 
     assert_eq!(trends.trends.len(), 2);
     for (branch, cells) in branch_cells.iter().enumerate() {
-        assert_eq!(trends.trends[branch].nrows(), 200);
-        assert_eq!(trends.trends[branch].ncols(), 3);
-        assert_eq!(trends.grids[branch].len(), 200);
+        assert_eq!(trends.trends[branch].nrows(), RESOLUTION);
+        assert_eq!(trends.trends[branch].ncols(), N_GENES);
+        assert_eq!(trends.grids[branch].len(), RESOLUTION);
         assert_eq!(trends.n_cells[branch], cells.len());
         assert!(trends.grids[branch].windows(2).all(|w| w[0] < w[1]));
         assert!(
@@ -465,7 +501,7 @@ fn test_branch_masks_to_magic_to_gene_trends() {
         );
     }
 
-    let end = |branch: usize, gene: usize| trends.trends[branch][(199, gene)];
+    let end = |branch: usize, gene: usize| trends.trends[branch][(RESOLUTION - 1, gene)];
     assert!(
         end(0, 0) > end(1, 0),
         "gene 0 was planted on arm 0 but ends higher on arm 1 ({} vs {})",

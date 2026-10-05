@@ -19,14 +19,22 @@
 //! at 10k cells; at the default 4 GiB `pick_wave_size` errors past 50k.
 //!
 //! Run with:
-//! ```
+//! ```text
 //! cargo bench --features gpu,single-cell --bench gpu_scenic_bench
 //! ```
+//!
+//! `SCENIC_BENCH_COOLDOWN=<secs>` overrides the pause before each block of CPU
+//! rows; `0` disables it.
 
 #![cfg(all(feature = "gpu", feature = "single-cell"))]
 #![allow(clippy::field_reassign_with_default, clippy::needless_range_loop)]
 
 use std::time::Instant;
+
+use cubecl::Runtime;
+use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+use rand::prelude::*;
+use rand::rngs::SmallRng;
 
 use bixverse_rs::gpu::sc_gpu::scenic_gpu::{
     ScenicGpuParams, fit_multi_trees_gpu, run_scenic_grn_in_memory_gpu,
@@ -39,11 +47,6 @@ use bixverse_rs::single_cell::sc_analysis::scenic::{
 };
 use bixverse_rs::single_cell::sc_utils::utils_tree::QuantisedStore;
 
-use cubecl::Runtime;
-use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
-use rand::prelude::*;
-use rand::rngs::SmallRng;
-
 ////////////
 // Shapes //
 ////////////
@@ -52,25 +55,50 @@ use rand::rngs::SmallRng;
 /// this array when doing a full sweep.
 const CELL_COUNTS: &[usize] = &[10_000];
 
-/// Kernel matrix: single 64-target batch, low-level fitter.
+/// Kernel matrix: predictor features in the single batch.
 const N_FEATURES_KERNEL: usize = 1_000;
+
+/// Kernel matrix: targets in the single batch.
 const N_TARGETS_KERNEL: usize = 64;
 
-/// End-to-end matrix: realistic multi-batch shape. 4000 targets at batch
-/// size 64 = 63 batches, enough to expose the rayon fan-out gap.
+/// End-to-end matrix: leading columns used as TF predictors.
 const N_TFS_E2E: usize = 1_000;
+
+/// End-to-end matrix: targets. At batch size 64 this is 63 batches, enough to
+/// expose the rayon fan-out gap.
 const N_TARGETS_E2E: usize = 4_000;
 
+/// Gene batch size the end-to-end drivers use, only for reporting the batch
+/// count.
+const GENE_BATCH_SIZE: usize = 64;
+
+/// Trees per ensemble.
 const N_TREES: usize = 250;
+
+/// Maximum tree depth.
 const MAX_DEPTH: usize = 10;
+
+/// Minimum samples per leaf.
 const MIN_SAMPLES_LEAF: usize = 50;
+
+/// Features tried per split. `0` lets the config pick its default.
 const N_FEATURES_SPLIT: usize = 0;
+
+/// Features that carry signal into the synthetic targets.
 const N_INFORMATIVE: usize = 10;
+
+/// Fraction of entries drawn non-zero.
 const SPARSITY: f32 = 0.2;
+
+/// Base seed for data generation and the fitters.
 const SEED: usize = 20260708;
 
-/// Ceiling per bench iteration (median-of-3). Any shape whose warmup alone
-/// exceeds this is skipped for that variant.
+/// Measured iterations per kernel-matrix cell, after one warmup. The median is
+/// reported.
+const REPS: usize = 3;
+
+/// Ceiling per bench iteration. Any shape whose warmup alone exceeds this is
+/// skipped for that variant.
 const SKIP_ABOVE_SECS: f32 = 300.0;
 
 /// 12 GiB. Lets `pick_wave_size` land wave=1 even at 100k cells with 64
@@ -81,26 +109,12 @@ const BENCH_WAVE_BUDGET: usize = 12 * 1024 * 1024 * 1024;
 /// Idle seconds before each block of CPU rows, so the package sheds the heat a
 /// preceding GPU block put into it.
 ///
-/// Running the two interleaved is how an earlier run of this bench produced an
-/// RF CPU baseline 2.3x slower than it reproduces at. Ordering the rows CPU-first
-/// within a block fixed most of it, but `kernel_matrix` still ends on a GPU row
-/// and `end_to_end_matrix` still opens with a CPU one, and the same seam exists
+/// A thermally throttled package slows the CPU rows substantially. Rows run
+/// CPU-first within a block, but `bench_kernel_matrix` still ends on a GPU row
+/// and `bench_end_to_end_matrix` opens with a CPU one, and the same seam exists
 /// between successive `CELL_COUNTS` iterations. Override with
 /// `SCENIC_BENCH_COOLDOWN=0` to measure without it.
 const COOLDOWN_SECS: u64 = 60;
-
-/// Sleep [`COOLDOWN_SECS`] (or the `SCENIC_BENCH_COOLDOWN` override) and say so.
-fn cooldown() {
-    let secs = std::env::var("SCENIC_BENCH_COOLDOWN")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(COOLDOWN_SECS);
-    if secs == 0 {
-        return;
-    }
-    println!("  (cooling down {secs}s before the CPU rows)");
-    std::thread::sleep(std::time::Duration::from_secs(secs));
-}
 
 ////////////////
 // Data build //
@@ -212,6 +226,7 @@ fn make_csc_e2e(n_cells: usize, seed: u64) -> CompressedSparseData2<u16, f32> {
 // Configs //
 /////////////
 
+/// Extra-trees config at the bench's tree shape.
 fn et_config() -> ExtraTreesConfig {
     let mut c = ExtraTreesConfig::default();
     c.n_trees = N_TREES;
@@ -221,6 +236,7 @@ fn et_config() -> ExtraTreesConfig {
     c
 }
 
+/// Random-forest config at the bench's tree shape.
 fn rf_config() -> RandomForestConfig {
     let mut c = RandomForestConfig::default();
     c.n_trees = N_TREES;
@@ -246,6 +262,11 @@ fn scenic_params_e2e(learner: RegressionLearner) -> ScenicParams {
     }
 }
 
+/// Default wgpu device, if one can be brought up.
+///
+/// ### Returns
+///
+/// The device, or `None` when creating a client panics.
 fn try_device() -> Option<WgpuDevice> {
     let device = WgpuDevice::DefaultDevice;
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -259,13 +280,42 @@ fn try_device() -> Option<WgpuDevice> {
 // Timing //
 ////////////
 
+/// Sleep [`COOLDOWN_SECS`] (or the `SCENIC_BENCH_COOLDOWN` override) and say so.
+fn cooldown() {
+    let secs = std::env::var("SCENIC_BENCH_COOLDOWN")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(COOLDOWN_SECS);
+    if secs == 0 {
+        return;
+    }
+    println!("  (cooling down {secs}s before the CPU rows)");
+    std::thread::sleep(std::time::Duration::from_secs(secs));
+}
+
+/// Short label for a cell count.
+///
+/// ### Params
+///
+/// * `cells` - Number of cells
+///
+/// ### Returns
+///
+/// The count in thousands, e.g. `10k`.
 fn label(cells: usize) -> String {
     format!("{}k", cells / 1000)
 }
 
-/// One warmup + 3 measured iterations, median in seconds. Returns `None` if
-/// the warmup alone crosses [`SKIP_ABOVE_SECS`].
-fn median_of_3<F>(mut f: F) -> Option<f32>
+/// One warmup plus [`REPS`] measured iterations, median in seconds.
+///
+/// ### Params
+///
+/// * `f` - The workload, called repeatedly
+///
+/// ### Returns
+///
+/// The median, or `None` if the warmup alone crosses [`SKIP_ABOVE_SECS`].
+fn median_of<F>(mut f: F) -> Option<f32>
 where
     F: FnMut(),
 {
@@ -276,20 +326,29 @@ where
         return None;
     }
 
-    let mut times = Vec::with_capacity(3);
-    for _ in 0..3 {
+    let mut times = Vec::with_capacity(REPS);
+    for _ in 0..REPS {
         let t0 = Instant::now();
         f();
         times.push(t0.elapsed().as_secs_f32());
     }
     times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    Some(times[1])
+    Some(times[REPS / 2])
 }
 
-////////////////////
-// Kernel matrix  //
-////////////////////
+///////////////////
+// Kernel matrix //
+///////////////////
 
+/// Time the CPU fitter on one kernel-matrix shape and print the result.
+///
+/// ### Params
+///
+/// * `n_samples` - Number of cells
+/// * `x` - Quantised predictor store
+/// * `axes` - Target columns
+/// * `config` - Tree ensemble config
+/// * `id` - Row label
 fn run_kernel_cpu(
     n_samples: usize,
     x: &QuantisedStore,
@@ -298,15 +357,24 @@ fn run_kernel_cpu(
     id: &str,
 ) {
     println!("  {id}: running (CPU)...");
-    match median_of_3(|| {
+    match median_of(|| {
         fit_multi_trees_sparse(axes, x, n_samples, config, SEED).expect("CPU fit failed");
     }) {
         Some(t) => println!("  {id}: {t:.2}s"),
         None => println!("  {id}: SKIPPED (warmup > {SKIP_ABOVE_SECS:.0}s)"),
     }
-    let _ = n_samples;
 }
 
+/// Time the GPU fitter on one kernel-matrix shape and print the result.
+///
+/// ### Params
+///
+/// * `n_samples` - Number of cells
+/// * `x` - Quantised predictor store
+/// * `axes` - Target columns
+/// * `config` - Tree ensemble config
+/// * `device` - wgpu device
+/// * `id` - Row label
 fn run_kernel_gpu(
     n_samples: usize,
     x: &QuantisedStore,
@@ -319,7 +387,7 @@ fn run_kernel_gpu(
         wave_byte_budget: BENCH_WAVE_BUDGET,
     };
     println!("  {id}: running (GPU)...");
-    match median_of_3(|| {
+    match median_of(|| {
         fit_multi_trees_gpu::<WgpuRuntime>(
             axes,
             x,
@@ -336,7 +404,12 @@ fn run_kernel_gpu(
     }
 }
 
-fn kernel_matrix(device: &WgpuDevice) {
+/// Single-batch kernel throughput, CPU against GPU, for every cell count.
+///
+/// ### Params
+///
+/// * `device` - wgpu device
+fn bench_kernel_matrix(device: &WgpuDevice) {
     println!(
         "\n=== kernel matrix: {} TFs x {} targets (1 batch) x {} trees ===",
         N_FEATURES_KERNEL, N_TARGETS_KERNEL, N_TREES,
@@ -362,20 +435,35 @@ fn kernel_matrix(device: &WgpuDevice) {
     }
 }
 
-////////////////////////
-// End-to-end matrix  //
-////////////////////////
+///////////////////////
+// End-to-end matrix //
+///////////////////////
 
 /// Single measured iteration with no warmup, so the bench can complete on
 /// GPU without hitting the kernel-matrix skip threshold. E2E numbers land
 /// in the many-hundreds-of-seconds range and one honest sample is enough
 /// to see whether GPU is winning or losing.
+///
+/// ### Params
+///
+/// * `f` - The workload
+///
+/// ### Returns
+///
+/// Elapsed seconds.
 fn single_shot<F: FnOnce()>(f: F) -> f32 {
     let t0 = Instant::now();
     f();
     t0.elapsed().as_secs_f32()
 }
 
+/// Time the CPU end-to-end driver once and print the result.
+///
+/// ### Params
+///
+/// * `csc` - Cells x genes counts
+/// * `params` - SCENIC parameters
+/// * `id` - Row label
 fn run_e2e_cpu(csc: &CompressedSparseData2<u16, f32>, params: &ScenicParams, id: &str) {
     println!("  {id}: running (CPU)...");
     let t = single_shot(|| {
@@ -385,6 +473,14 @@ fn run_e2e_cpu(csc: &CompressedSparseData2<u16, f32>, params: &ScenicParams, id:
     println!("  {id}: {t:.2}s");
 }
 
+/// Time the GPU end-to-end driver once and print the result.
+///
+/// ### Params
+///
+/// * `csc` - Cells x genes counts
+/// * `params` - SCENIC parameters
+/// * `device` - wgpu device
+/// * `id` - Row label
 fn run_e2e_gpu(
     csc: &CompressedSparseData2<u16, f32>,
     params: &ScenicParams,
@@ -411,12 +507,17 @@ fn run_e2e_gpu(
     println!("  {id}: {t:.2}s");
 }
 
-fn end_to_end_matrix(device: &WgpuDevice) {
+/// Multi-batch end-to-end wall clock, CPU against GPU, for every cell count.
+///
+/// ### Params
+///
+/// * `device` - wgpu device
+fn bench_end_to_end_matrix(device: &WgpuDevice) {
     println!(
         "\n=== end_to_end matrix: {} TFs x {} targets (~{} batches) x {} trees ===",
         N_TFS_E2E,
         N_TARGETS_E2E,
-        N_TARGETS_E2E.div_ceil(64),
+        N_TARGETS_E2E.div_ceil(GENE_BATCH_SIZE),
         N_TREES,
     );
 
@@ -429,7 +530,7 @@ fn end_to_end_matrix(device: &WgpuDevice) {
 
         let csc = make_csc_e2e(n, SEED as u64 + n as u64 + 2);
 
-        // CPU rows first; see the note in kernel_matrix. The cooldown matters
+        // CPU rows first; see [`COOLDOWN_SECS`]. The cooldown matters
         // more here than anywhere else: this is the first CPU row after the
         // whole kernel matrix, whose last row is a GPU one.
         cooldown();
@@ -442,17 +543,17 @@ fn end_to_end_matrix(device: &WgpuDevice) {
 }
 
 fn main() {
-    println!("gpu_scenic_bench: median-of-3 wall clock");
+    println!("gpu_scenic_bench: median-of-{REPS} wall clock");
     println!("  skip threshold: warmup > {SKIP_ABOVE_SECS:.0}s");
 
     let device = match try_device() {
         Some(d) => d,
         None => {
-            eprintln!("no wgpu device available -- aborting");
+            println!("no wgpu device available, aborting");
             std::process::exit(1);
         }
     };
 
-    kernel_matrix(&device);
-    end_to_end_matrix(&device);
+    bench_kernel_matrix(&device);
+    bench_end_to_end_matrix(&device);
 }

@@ -1,4 +1,3 @@
-#![cfg(feature = "single-cell")]
 //! Parity for the analytic Pearson residuals against scanpy 1.11.5.
 //!
 //! The count matrix is rebuilt from the same LCG the fixture generator used, so
@@ -10,13 +9,13 @@
 //! sums accumulate in. Residual *rows* are `f32` on this side, which is where
 //! the looser probe tolerance comes from.
 
+#![cfg(feature = "single-cell")]
+
 use approx::assert_relative_eq;
 
 use bixverse_rs::prelude::*;
 use bixverse_rs::single_cell::sc_data::bin_merge_io::gene_store_to_cell_store;
-use bixverse_rs::single_cell::sc_data::data_io::{
-    CellGeneSparseWriter, CscGeneChunk, ParallelSparseReader, RawCounts,
-};
+use bixverse_rs::single_cell::sc_data::data_io::CellGeneSparseWriter;
 use bixverse_rs::single_cell::sc_processing::analytic_pearson::model::{
     AprModel, AprParams, AprResiduals,
 };
@@ -29,6 +28,17 @@ use bixverse_rs::single_cell::sc_processing::sctransform::stream::SctStreamOpts;
 
 mod analytic_pearson_fixtures;
 use analytic_pearson_fixtures as fx;
+
+///////////////
+// Constants //
+///////////////
+
+/// Cells per phase when transposing the gene-major store to cell-major.
+const CELLS_PER_PHASE: usize = 20_000;
+/// Genes per batch when transposing the gene-major store to cell-major.
+const GENE_BATCH_SIZE: usize = 512;
+/// Genes each sample contributes to the unioned HVG set.
+const N_HVG: usize = 30;
 
 /////////////
 // Helpers //
@@ -44,10 +54,20 @@ impl Drop for TempStore {
 }
 
 impl TempStore {
+    /// Scratch path in the system temp directory.
+    ///
+    /// ### Params
+    ///
+    /// * `name` - Suffix that keeps concurrent tests apart
+    ///
+    /// ### Returns
+    ///
+    /// The guard. Nothing is created on disk until something writes to it.
     fn new(name: &str) -> Self {
         Self(std::env::temp_dir().join(format!("bixverse_apr_{name}.bin")))
     }
 
+    /// The path as a string, which is what the store writers take.
     fn path(&self) -> &str {
         self.0.to_str().expect("temp path is valid UTF-8")
     }
@@ -58,6 +78,10 @@ impl TempStore {
 /// The draw order mirrors the Python script call for call: every library scale,
 /// then every gene rate, then the counts gene-major, then the second half
 /// thinned by integer division.
+///
+/// ### Returns
+///
+/// Dense counts as `counts[gene][cell]`.
 fn fixture_counts() -> Vec<Vec<u32>> {
     let mut state = fx::LCG_SEED;
     let mut next = || {
@@ -91,6 +115,12 @@ fn fixture_counts() -> Vec<Vec<u32>> {
 }
 
 /// Writes a `dense[gene][cell]` matrix out as a gene-major store.
+///
+/// ### Params
+///
+/// * `path` - Where to write the store
+/// * `dense` - Counts as `dense[gene][cell]`
+/// * `n_cells` - Number of cells
 fn write_store(path: &str, dense: &[Vec<u32>], n_cells: usize) {
     let mut writer =
         CellGeneSparseWriter::new(path, false, n_cells, dense.len(), 1e4).expect("writer opens");
@@ -125,18 +155,38 @@ fn write_store(path: &str, dense: &[Vec<u32>], n_cells: usize) {
 
 /// A gene-major store plus its cell-major twin, both cleaned up on drop.
 struct Stores {
+    /// Gene-major store, what the gene pass and the residuals read.
     gene: TempStore,
+    /// Cell-major twin, what the cell totals read.
     cell: TempStore,
 }
 
+/// Writes the counts gene-major and transposes them to cell-major.
+///
+/// ### Params
+///
+/// * `name` - Suffix that keeps concurrent tests apart
+/// * `counts` - Counts as `counts[gene][cell]`
+///
+/// ### Returns
+///
+/// Both stores, removed when dropped.
 fn build_stores(name: &str, counts: &[Vec<u32>]) -> Stores {
     let gene = TempStore::new(&format!("{name}_gene"));
     let cell = TempStore::new(&format!("{name}_cell"));
     write_store(gene.path(), counts, fx::N_CELLS);
-    gene_store_to_cell_store(gene.path(), cell.path(), 20_000, 512, 0).expect("transpose");
+    gene_store_to_cell_store(
+        gene.path(),
+        cell.path(),
+        CELLS_PER_PHASE,
+        GENE_BATCH_SIZE,
+        0,
+    )
+    .expect("transpose");
     Stores { gene, cell }
 }
 
+/// Model parameters matching the scanpy run the fixtures came from.
 fn params() -> AprParams {
     AprParams {
         theta: fx::THETA,
@@ -411,25 +461,24 @@ fn test_grouped_hvg_unions_the_per_sample_tops() {
     assert!(source.genes().windows(2).all(|w| w[0] < w[1]));
 
     let per_group = residual_variance(&gene_reader, &source, &cells, opts).expect("variance");
-    let n_hvg = 30;
-    let hvg = select_residual_hvg(&per_group, source.genes(), n_hvg).expect("hvg");
+    let hvg = select_residual_hvg(&per_group, source.genes(), N_HVG).expect("hvg");
 
-    // Between n_hvg and 2 * n_hvg: the two samples agree on some genes but not
+    // Between N_HVG and 2 * N_HVG: the two samples agree on some genes but not
     // all, which is the whole reason for unioning rather than pooling.
-    assert!(hvg.len() >= n_hvg);
-    assert!(hvg.len() <= 2 * n_hvg);
+    assert!(hvg.len() >= N_HVG);
+    assert!(hvg.len() <= 2 * N_HVG);
     assert!(hvg.windows(2).all(|w| w[0] < w[1]));
 
-    // Every selected gene is top-n_hvg in at least one sample.
+    // Every selected gene is top-N_HVG in at least one sample.
     for &gene in &hvg {
         let pos = source
             .position(gene)
             .expect("selected genes are on the axis");
         let top_in_some = per_group.iter().any(|variance| {
             let rank = variance.iter().filter(|&&v| v > variance[pos]).count();
-            rank < n_hvg
+            rank < N_HVG
         });
-        assert!(top_in_some, "gene {gene} is not top-{n_hvg} in any sample");
+        assert!(top_in_some, "gene {gene} is not top-{N_HVG} in any sample");
     }
 }
 

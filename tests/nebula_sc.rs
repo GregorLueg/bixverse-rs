@@ -45,6 +45,10 @@ const LIBRARY_SIZE: f64 = 3000.0;
 const NB_SIZE: f64 = 8.0;
 /// Subject-level random effect on the log scale.
 const SUBJECT_SD: f64 = 0.4;
+/// Fixture seed.
+const SEED: u64 = 7;
+/// Seed for the cell-order shuffle.
+const SHUFFLE_SEED: u64 = 11;
 
 /////////////
 // Fixture //
@@ -219,7 +223,7 @@ fn params() -> NebulaScParams {
 ///
 /// ### Returns
 ///
-/// The [NebulaFit], and the original cell order the sort produced.
+/// The [NebulaFit].
 fn reference(f: &Fixture) -> NebulaFit {
     let mut order: Vec<usize> = (0..N_CELLS).collect();
     order.sort_by_key(|&c| f.subject_ids[c]);
@@ -295,7 +299,7 @@ fn adapter(f: &Fixture, cells: &[usize], p: &NebulaScParams) -> NebulaScRes {
 /// design permutation and the offset permutation in one go.
 #[test]
 fn test_run_nebula_matches_the_direct_call() {
-    let f = build(7);
+    let f = build(SEED);
     let want = reference(&f);
     let cells: Vec<usize> = (0..N_CELLS).collect();
 
@@ -317,7 +321,7 @@ fn test_run_nebula_matches_the_direct_call() {
 /// is only true because NEBULA's expression filter is per gene.
 #[test]
 fn test_gene_batching_changes_nothing() {
-    let f = build(7);
+    let f = build(SEED);
     let cells: Vec<usize> = (0..N_CELLS).collect();
 
     let one_at_a_time = adapter(
@@ -349,7 +353,7 @@ fn test_gene_batching_changes_nothing() {
 /// comes back as `NoGenesAfterFiltering`. The sweep has to carry on.
 #[test]
 fn test_a_fully_filtered_batch_is_skipped() {
-    let f = build(7);
+    let f = build(SEED);
     let cells: Vec<usize> = (0..N_CELLS).collect();
 
     let got = adapter(
@@ -377,10 +381,10 @@ fn test_a_fully_filtered_batch_is_skipped() {
 /// two runs are the same fit gene for gene.
 #[test]
 fn test_cell_order_does_not_change_the_fit() {
-    let f = build(7);
+    let f = build(SEED);
     let natural: Vec<usize> = (0..N_CELLS).collect();
     let mut shuffled = natural.clone();
-    shuffled.shuffle(&mut StdRng::seed_from_u64(11));
+    shuffled.shuffle(&mut StdRng::seed_from_u64(SHUFFLE_SEED));
 
     let straight = adapter(&f, &natural, &params());
     let jumbled = adapter(&f, &shuffled, &params());
@@ -393,7 +397,7 @@ fn test_cell_order_does_not_change_the_fit() {
 /// Leaving out the offset falls back to the library sizes.
 #[test]
 fn test_no_offset_uses_the_library_sizes() {
-    let f = build(7);
+    let f = build(SEED);
     let reader = InMemorySparseReader::new(&f.matrix, None).expect("reader failed");
     let cells: Vec<usize> = (0..N_CELLS).collect();
     let genes: Vec<usize> = (0..N_GENES).collect();
@@ -438,7 +442,7 @@ fn test_no_offset_uses_the_library_sizes() {
 /// does beyond building a reader.
 #[test]
 fn test_metacell_shim_accepts_either_orientation() {
-    let f = build(7);
+    let f = build(SEED);
     let cells: Vec<usize> = (0..N_CELLS).collect();
     let genes: Vec<usize> = (0..N_GENES).collect();
 
@@ -476,7 +480,7 @@ fn test_metacell_shim_accepts_either_orientation() {
 /// batching either.
 #[test]
 fn test_dispersion_shrinkage_is_batch_independent() {
-    let f = build(7);
+    let f = build(SEED);
     let cells: Vec<usize> = (0..N_CELLS).collect();
 
     let split = adapter(
@@ -510,7 +514,7 @@ fn test_dispersion_shrinkage_is_batch_independent() {
 /// Shapes that cannot line up have to say so rather than fit something else.
 #[test]
 fn test_run_nebula_rejects_mismatched_inputs() {
-    let f = build(7);
+    let f = build(SEED);
     let reader = InMemorySparseReader::new(&f.matrix, None).expect("reader failed");
     let cells: Vec<usize> = (0..N_CELLS).collect();
     let genes: Vec<usize> = (0..N_GENES).collect();

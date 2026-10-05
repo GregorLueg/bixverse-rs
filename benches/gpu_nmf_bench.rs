@@ -1,15 +1,12 @@
 //! End-to-end benchmark for the GPU HALS NMF path.
 //!
-//! Two questions, and they need different measurements.
-//!
-//! **Does the GPU beat the CPU, and where.** Every shape runs the CPU solver and
-//! the GPU solver over the same matrix in the same pass, so the comparison never
-//! spans machines or build profiles. A single end-to-end number would hide
-//! everything that matters, so each GPU run is also split into the three stages
-//! the public API can actually separate, with a device sync between them: upload
-//! of `V`, scratch allocation, and the solve. The staged and pipelined totals do
-//! not add up, which is expected: staged measures isolated cost, pipelined
-//! measures a queue.
+//! Every shape runs the CPU solver and the GPU solver over the same matrix in
+//! the same pass, so the comparison never spans machines or build profiles. A
+//! single end-to-end number would hide everything that matters, so each GPU run
+//! is also split into the three stages the public API can actually separate,
+//! with a device sync between them: upload of `V`, scratch allocation, and the
+//! solve. The staged and pipelined totals do not add up, which is expected:
+//! staged measures isolated cost, pipelined measures a queue.
 //!
 //! Anything finer than those three stages is not measured here. Apportioning a
 //! single solve across its kernels by re-running pieces would mean either
@@ -18,63 +15,43 @@
 //! no code changes. Use it, and read the spread rather than the mean: one kernel
 //! name covering two clearly separated timings means two shapes.
 //!
-//! **Whether the dense products need their own kernel.** They did, and this bench
-//! is what established it: cubek asked for 40 KiB of shared memory against a
-//! 32 KiB device on the metacell shape and would not launch at all, and on the
-//! one shape where it did run it managed 0.1% of peak, putting the whole solve at
-//! 0.18x the CPU. Both products now go through
-//! [`bixverse_rs::gpu::linalg::skinny_gemm`]. The achieved GFLOP/s and GB/s
-//! columns are what keep that honest: a solve at a few percent of both is bound
-//! by neither, and that regime has its own fix list.
+//! The dense products go through [`bixverse_rs::gpu::linalg::skinny_gemm`]
+//! rather than cubek, which ran out of shared memory on the metacell shape. The
+//! achieved GFLOP/s and GB/s columns keep that honest: a solve at a few percent
+//! of both is bound by neither, and that regime has its own fix list.
 //!
 //! The restart section is the one that matters most for the real workload. A
 //! consensus k sweep is `k_range.len() * n_runs` solves, and the GPU path uploads
 //! `V` once for all of them while the CPU pays full memory traffic over `V` every
 //! time. A single-solve comparison understates that completely.
 //!
-//! ### Baseline, M1 Max, 60 iterations per solve
+//! Run with:
+//! ```text
+//! cargo bench --features gpu --bench gpu_nmf_bench
+//! ```
 //!
-//! | shape | cpu | gpu | ratio |
-//! |---|---|---|---|
-//! | bulk 500 x 20000, k = 10 | 375 ms | 172 ms | 2.18x |
-//! | metacell 5000 x 3000, k = 30 | 842 ms | 302 ms | 2.79x |
-//! | sc-sparse 50k x 3000, k = 30, 5% | 4.40 s | 512 ms | 8.61x |
-//! | sc-sparse 200k x 3000, k = 30, 5% | 29.4 s | 2.03 s | 14.5x |
-//! | metacell restarts, 8 runs | 3.59 s | 2.02 s | 1.78x |
-//!
-//! The sparse arm sits at 56% of device bandwidth, which is where an SpMM with a
-//! `k`-wide dense gather per non-zero belongs, so there is little left there. The
-//! dense arm is at 2.0 and 4.5% of peak FLOPs against 10.3 and 7.7% of bandwidth,
-//! so it is bound by neither and the register tile is the lever if anyone wants
-//! more. Restarts gain least because the CPU fans out across cores there while
-//! the GPU runs them one after another.
-//!
-//! Run with: cargo bench --bench gpu_nmf_bench --features gpu
-//! Add BIXVERSE_BENCH_BIG=1 for the large single-cell shape.
-//! Kernel attribution: CUBECL_DEBUG_OPTION=profile-medium CUBECL_DEBUG_LOG=stdout
-
-#![allow(missing_docs)]
+//! `BIXVERSE_BENCH_BIG=1` adds the large single-cell shape. For kernel
+//! attribution set `CUBECL_DEBUG_OPTION=profile-medium CUBECL_DEBUG_LOG=stdout`.
 
 use std::time::{Duration, Instant};
 
 use cubecl::future;
 use cubecl::prelude::*;
 use cubecl::wgpu::WgpuRuntime;
+use cubecl_utils_rs::prelude::*;
 use faer::Mat;
 
-use cubecl_utils_rs::prelude::*;
-
-use bixverse_rs::core::math::sparse::CompressedSparseData2;
 use bixverse_rs::gpu::methods_gpu::nmf_gpu::{
     GpuDenseNmfInput, GpuSparseNmfInput, NmfGpuScratch, nmf_hals_gpu, stabilised_nmf_gpu,
 };
 use bixverse_rs::methods::nmf_hals::dense::DenseInput;
 use bixverse_rs::methods::nmf_hals::sparse::SparseInput;
-use bixverse_rs::methods::nmf_hals::{HalsOpts, NmfInit, nmf_hals, stabilised_nmf};
+use bixverse_rs::methods::nmf_hals::{HalsOpts, NmfInit, NmfInput, nmf_hals, stabilised_nmf};
+use bixverse_rs::prelude::*;
 
-////////////
-// Consts //
-////////////
+///////////////
+// Constants //
+///////////////
 
 /// End-to-end repetitions per shape. The reported figure is the best of these,
 /// with the worst printed alongside: a single shot is a shader-compilation and
@@ -98,6 +75,12 @@ const PEAK_GFLOPS: f64 = 10_400.0;
 
 /// M1 Max memory bandwidth, in GB/s.
 const PEAK_GBS: f64 = 400.0;
+
+/// Seed for the random factor initialisation.
+const SEED: u64 = 7;
+
+/// Restarts in the restart section.
+const N_RESTARTS: usize = 8;
 
 ////////////
 // Shapes //
@@ -173,7 +156,7 @@ fn bench_opts() -> HalsOpts<f32> {
         tol: 0.0,
         eps: 1e-10,
         check_every: CHECK_EVERY,
-        init: NmfInit::Random { seed: 7 },
+        init: NmfInit::Random { seed: SEED },
     }
 }
 
@@ -386,7 +369,7 @@ fn report_stages(label: &str, upload: Duration, scratch: Duration, solve: Durati
 ///
 /// * `shape` - The problem to run
 /// * `device` - CubeCL device
-fn run_dense<R: Runtime>(shape: NmfShape, device: &R::Device) {
+fn bench_dense<R: Runtime>(shape: NmfShape, device: &R::Device) {
     let NmfShape { label, m, n, k, .. } = shape;
     println!("-- {label} dense: {m} x {n}, k = {k}, {FIXED_ITERS} iters --");
 
@@ -396,7 +379,7 @@ fn run_dense<R: Runtime>(shape: NmfShape, device: &R::Device) {
 
     // CPU baseline, in the same pass so the comparison never spans machines.
     let cpu_in = DenseInput::new(v.as_ref()).expect("CPU input");
-    let sq_frob = bixverse_rs::methods::nmf_hals::NmfInput::sq_frob(&cpu_in);
+    let sq_frob = NmfInput::sq_frob(&cpu_in);
     let mut cpu_loss = 0f32;
     let (cpu_best, cpu_worst) = best_of(|| {
         let (res, d) = timed(|| nmf_hals(&cpu_in, k, &opts, 0).expect("CPU solve"));
@@ -435,7 +418,6 @@ fn run_dense<R: Runtime>(shape: NmfShape, device: &R::Device) {
     run_dense_staged::<R>(shape, v.as_ref(), &client);
 }
 
-/// The staged breakdown for the dense arm.
 /// The staged breakdown for the dense arm, plus the per-iteration rate budget.
 ///
 /// ### Params
@@ -490,7 +472,7 @@ fn run_dense_staged<R: Runtime>(shape: NmfShape, v: faer::MatRef<f32>, client: &
 ///
 /// * `shape` - The problem to run
 /// * `device` - CubeCL device
-fn run_sparse<R: Runtime>(shape: NmfShape, device: &R::Device) {
+fn bench_sparse<R: Runtime>(shape: NmfShape, device: &R::Device) {
     let NmfShape {
         label,
         m,
@@ -512,7 +494,7 @@ fn run_sparse<R: Runtime>(shape: NmfShape, device: &R::Device) {
     let client = R::client(device);
 
     let cpu_in = SparseInput::<f32, f32>::from_primary(&csr).expect("CPU sparse input");
-    let sq_frob = bixverse_rs::methods::nmf_hals::NmfInput::sq_frob(&cpu_in);
+    let sq_frob = NmfInput::sq_frob(&cpu_in);
     let mut cpu_loss = 0f32;
     let (cpu_best, cpu_worst) = best_of(|| {
         let (res, d) = timed(|| nmf_hals(&cpu_in, k, &opts, 0).expect("CPU solve"));
@@ -567,9 +549,9 @@ fn run_sparse<R: Runtime>(shape: NmfShape, device: &R::Device) {
     report_rates("spmm x2", 2.0 * flops, 2.0 * bytes, gpu_best, FIXED_ITERS);
 }
 
-//////////////////////
-// Restart section  //
-//////////////////////
+/////////////////////
+// Restart section //
+/////////////////////
 
 /// Compare restarts, where the GPU path amortises one upload of `V`.
 ///
@@ -582,7 +564,7 @@ fn run_sparse<R: Runtime>(shape: NmfShape, device: &R::Device) {
 /// * `shape` - The problem to run
 /// * `n_runs` - Restarts to run
 /// * `device` - CubeCL device
-fn run_restarts<R: Runtime>(shape: NmfShape, n_runs: usize, device: &R::Device) {
+fn bench_restarts<R: Runtime>(shape: NmfShape, n_runs: usize, device: &R::Device) {
     let NmfShape { label, m, n, k, .. } = shape;
     println!("-- {label} restarts: {n_runs} runs at k = {k}, {FIXED_ITERS} iters each --");
 
@@ -629,19 +611,19 @@ fn main() {
 
     for shape in DEFAULT_SHAPES {
         if shape.density.is_none() {
-            run_dense::<WgpuRuntime>(shape, &device);
+            bench_dense::<WgpuRuntime>(shape, &device);
         } else {
-            run_sparse::<WgpuRuntime>(shape, &device);
+            bench_sparse::<WgpuRuntime>(shape, &device);
         }
         println!();
     }
 
-    run_restarts::<WgpuRuntime>(DEFAULT_SHAPES[1], 8, &device);
+    bench_restarts::<WgpuRuntime>(DEFAULT_SHAPES[1], N_RESTARTS, &device);
     println!();
 
     if std::env::var("BIXVERSE_BENCH_BIG").is_ok() {
         for shape in BIG_SHAPES {
-            run_sparse::<WgpuRuntime>(shape, &device);
+            bench_sparse::<WgpuRuntime>(shape, &device);
             println!();
         }
     } else {
