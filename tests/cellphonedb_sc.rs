@@ -128,6 +128,7 @@ fn test_cpdb_parity_with_reference() {
         &clusters,
         Some(PAIRS),
         Some(params),
+        0,
     )
     .expect("cellphonedb_statistical failed");
 

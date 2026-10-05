@@ -18,6 +18,9 @@ use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
 use rayon::prelude::*;
 use rustc_hash::FxHashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
+use thousands::Separable;
 
 use crate::prelude::*;
 use crate::single_cell::sc_utils::utils_tree::tree_seed;
@@ -515,6 +518,8 @@ where
 ///   ignored, both for the statistics and for the permutation.
 /// * `pairs` - Cluster pairs to test. `None` tests all ordered pairs.
 /// * `params` - [`CellPhoneDbParams`]. `None` uses the defaults.
+/// * `verbose` - `0` silent, `1` normal, `2` detailed. Normal reports the
+///   permutations in 10% steps.
 ///
 /// ### Returns
 ///
@@ -529,11 +534,14 @@ pub fn cellphonedb_statistical<T, S>(
     clusters: &[Vec<usize>],
     pairs: Option<&[(usize, usize)]>,
     params: Option<CellPhoneDbParams<T>>,
+    verbose: usize,
 ) -> Result<CellPhoneDbRes<T>, BixverseErrors>
 where
     T: BixverseFloat + Send + Sync,
     S: SingleCellReading,
 {
+    let verbosity = parse_verbosity_level(verbose);
+    let start = Instant::now();
     let params = params.unwrap_or_default();
     if params.n_perm == 0 {
         return Err(BixverseErrors::MustBePositive("n_perm".into()));
@@ -551,8 +559,20 @@ where
         .filter(|&e| real[e] > 0.0 && obs.gate[e])
         .collect();
 
+    if verbosity.normal_verbosity() {
+        println!(
+            "Running CellPhoneDB: {} interactions x {} pairs ({} tested), {} permutations",
+            setup.rows_a.len().separate_with_underscores(),
+            n_pairs.separate_with_underscores(),
+            active.len().separate_with_underscores(),
+            params.n_perm.separate_with_underscores()
+        );
+    }
+
     let batch = resolve_perm_batch(params.perm_batch, params.n_perm);
     let n_batches = params.n_perm.div_ceil(batch);
+    let start_perm = Instant::now();
+    let perm_done = AtomicUsize::new(0);
 
     let counts: Vec<u32> = (0..n_batches)
         .into_par_iter()
@@ -585,6 +605,18 @@ where
                         }
                     }
                 }
+
+                if verbosity.normal_verbosity() {
+                    let done = perm_done.fetch_add(b, Ordering::Relaxed) + b;
+                    report_decile_progress(
+                        done,
+                        done - b,
+                        params.n_perm,
+                        "permutations",
+                        start_perm.elapsed(),
+                    );
+                }
+
                 counts
             },
         )
@@ -600,6 +632,10 @@ where
     let n_perm = T::from_usize(params.n_perm).unwrap();
     for (&cnt, &e) in counts.iter().zip(active.iter()) {
         pvals[(e / n_pairs, e % n_pairs)] = T::from_u32(cnt).unwrap() / n_perm;
+    }
+
+    if verbosity.normal_verbosity() {
+        println!("CellPhoneDB finished in {:.2?}", start.elapsed());
     }
 
     Ok(CellPhoneDbRes { obs, pvals })
@@ -786,8 +822,9 @@ mod tests {
             partner_b: vec![1],
         }];
         let params = CellPhoneDbParams::new(100, 0.1, 3, None);
-        let res = cellphonedb_statistical::<f64, _>(&reader, &inter, &clusters, None, Some(params))
-            .unwrap();
+        let res =
+            cellphonedb_statistical::<f64, _>(&reader, &inter, &clusters, None, Some(params), 0)
+                .unwrap();
         assert_eq!(res.pvals[(0, 0)], 0.0);
     }
 
@@ -810,8 +847,9 @@ mod tests {
             partner_b: vec![1],
         }];
         let params = CellPhoneDbParams::new(200, 0.1, 5, Some(7));
-        let res = cellphonedb_statistical::<f64, _>(&reader, &inter, &clusters, None, Some(params))
-            .unwrap();
+        let res =
+            cellphonedb_statistical::<f64, _>(&reader, &inter, &clusters, None, Some(params), 0)
+                .unwrap();
         for (p, &(a, b)) in res.obs.pairs.iter().enumerate() {
             let want = if (a, b) == (0, 1) { 0.0 } else { 1.0 };
             assert_eq!(res.pvals[(0, p)], want, "pair ({a}, {b})");
@@ -845,7 +883,7 @@ mod tests {
                 .unwrap();
             pool.install(|| {
                 let params = CellPhoneDbParams::new(250, 0.1, 17, None);
-                cellphonedb_statistical::<f64, _>(&reader, &inter, &clusters, None, Some(params))
+                cellphonedb_statistical::<f64, _>(&reader, &inter, &clusters, None, Some(params), 0)
                     .unwrap()
                     .pvals
             })
