@@ -874,6 +874,18 @@ pub enum BixverseErrors {
     #[error("HVG: n_bins must be at least 1.")]
     HvgInvalidBinCount,
 
+    /// Too few genes pass the mean filter to fit the scran variance trend.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "HVG: only {n_kept} genes have a mean log-expression of at least {minimum_mean}; the variance trend needs two."
+    )]
+    HvgTooFewTrendPoints {
+        /// Genes left after the mean filter
+        n_kept: usize,
+        /// The mean filter threshold
+        minimum_mean: f64,
+    },
+
     // -- NMF --
     /// NMF Rank is too large for the NNDSVD initialisation
     #[error(

@@ -65,6 +65,7 @@ use crate::single_cell::sc_processing::{
         CellSweepFit, CellSweepParams, CellSweepSample, EmptyDropletCall, parse_empty_droplet_call,
     },
     doublet_detection::BoostParams,
+    hvg::ScranTrendParams,
     knn::KnnParams,
     pca::{PcaSolver, SingleCellPcaParams, parse_pca_solver},
     scdblfinder::ScDblFinderParams,
@@ -369,6 +370,42 @@ impl KnnParams {
             ef_search,
             n_list,
             n_probe,
+        })
+    }
+}
+
+///////////////
+// Scran HVG //
+///////////////
+
+impl ScranTrendParams {
+    /// Generate ScranTrendParams from an R list
+    ///
+    /// Missing values fall back to scrapper's `fitVarianceTrend` defaults.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the trend parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The `ScranTrendParams` with all parameters set.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+        let defaults = Self::default();
+
+        let flag =
+            |key: &str, default: bool| params.get(key).and_then(|v| v.as_bool()).unwrap_or(default);
+
+        Ok(Self {
+            mean_filter: flag("mean_filter", defaults.mean_filter),
+            minimum_mean: r_list_real(&params, "min_mean")?.unwrap_or(defaults.minimum_mean),
+            transform: flag("transform", defaults.transform),
+            use_minimum_width: flag("use_min_width", defaults.use_minimum_width),
+            minimum_width: r_list_real(&params, "min_width")?.unwrap_or(defaults.minimum_width),
+            minimum_window_count: r_list_count(&params, "min_window_count")?
+                .unwrap_or(defaults.minimum_window_count),
+            span: r_list_real(&params, "span")?.unwrap_or(defaults.span),
         })
     }
 }

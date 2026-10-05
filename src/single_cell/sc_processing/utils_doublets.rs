@@ -154,6 +154,14 @@ pub fn select_hvg<S: SingleCellReading>(
             }?;
             res.dispersion_scaled
         }
+        HvgMethod::Scran => {
+            let res = if streaming {
+                get_hvg_scran_streaming(reader, cells_to_keep, None, verbose)
+            } else {
+                get_hvg_scran(reader, cells_to_keep, None, verbose)
+            }?;
+            res.residual
+        }
     };
 
     let n_genes = sort_key.len() as f32;
