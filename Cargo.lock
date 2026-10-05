@@ -1405,9 +1405,9 @@ checksum = "e1d926b4d407d372f141f93bb444696142c29d32962ccbd3531117cf3aa0bfa9"
 
 [[package]]
 name = "edge-rs"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06dc972feaf20a5022552c62166d243e26f843493cec8e136f1a07ef474c3cf9"
+checksum = "41dabd1e5a999f845567652ecd74fa34f0bc201ff0d7c4a06bf969cbd2984454"
 dependencies = [
  "cubecl",
  "cubecl-utils-rs",
