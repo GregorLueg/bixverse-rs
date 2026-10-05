@@ -1,5 +1,30 @@
 # News
 
+## 0.6.0
+
+**Large performance updates included in this version**
+(Due to that some of the previous observed numbers might shift ever so slighty.)
+
+### Feature
+
+- GPU-accelerated mNN implemented.
+- The GPU-accelerated randomised SVD has been made faster.
+- The exact co-variance PCA path has been wired into the doublet detection
+  methods.
+- Compression method implemented for the binary files to archive an analysis
+  easily to reduce needed disk space.
+- sNN pruning updated so that isolated communities do not occur anymore in the
+  subsequent clustering. This reduces number of detected tiny clusters while
+  keeping the sNN graph small in memory.
+- Massive performance sweep:
+  * What was sequential is parallel now.
+  * Allocation churn reduced, scratch memory implemented where appicable.
+  * Unchecked indexing used where bounds can be guaranteed.
+  * Harmony v1 updated massively with massive speed improvements.
+  * SIMD used where scalar vector operations were used.
+  * GEMM used where applicable.
+- Version bumps to `ann-search-rs` to benefit from the faster GPU indices.
+
 ## 0.5.10
 
 ### Feature
