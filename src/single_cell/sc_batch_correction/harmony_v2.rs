@@ -18,9 +18,9 @@ use crate::prelude::*;
 
 use super::harmony::{BatchInfo, HarmonyResult, StageTimes, create_batch_infos};
 use super::harmony_core::{
-    RidgeSettings, Variant, base_error_and_entropy, distances_and_base, kmeans_centroids,
-    normalise_rows_into, objective, observed_counts, r_to_mat, ridge_correction, row_major_to_mat,
-    to_row_major, update_assignments, window_converged,
+    HARMONY_KMEANS_ITERS, RidgeSettings, Variant, base_error_and_entropy, distances_and_base,
+    kmeans_centroids, normalise_rows_into, objective, observed_counts, r_to_mat, ridge_correction,
+    row_major_to_mat, to_row_major, update_assignments, window_converged,
 };
 
 ////////////
@@ -78,7 +78,7 @@ impl Default for HarmonyParamsV2 {
             tau: 0.0,
             batch_proportion_cutoff: 1e-5,
             use_dynamic_lambda: true,
-            kmeans_params: KMeansParamsWrappers::new(30, None, None),
+            kmeans_params: KMeansParamsWrappers::new(HARMONY_KMEANS_ITERS, None, None),
         }
     }
 }

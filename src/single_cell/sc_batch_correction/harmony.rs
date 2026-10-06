@@ -12,9 +12,10 @@ use crate::prelude::*;
 
 use super::batch_utils::par_for_each_col_mut;
 use super::harmony_core::{
-    RidgeSettings, Variant, base_error_and_entropy, centroids_from_r, distances_and_base,
-    kmeans_centroids, normalise_rows_into, objective, observed_counts, r_to_mat, ridge_correction,
-    row_major_to_mat, to_row_major, update_assignments, window_converged,
+    HARMONY_KMEANS_ITERS, RidgeSettings, Variant, base_error_and_entropy, centroids_from_r,
+    distances_and_base, kmeans_centroids, normalise_rows_into, objective, observed_counts,
+    r_to_mat, ridge_correction, row_major_to_mat, to_row_major, update_assignments,
+    window_converged,
 };
 
 ////////////
@@ -61,7 +62,7 @@ impl Default for HarmonyParams {
             epsilon_kmeans: 1e-3,
             epsilon_harmony: 1e-2,
             window_size: 3,
-            kmeans_params: KMeansParamsWrappers::new(30, None, None),
+            kmeans_params: KMeansParamsWrappers::new(HARMONY_KMEANS_ITERS, None, None),
         }
     }
 }

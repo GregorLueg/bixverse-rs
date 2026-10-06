@@ -49,7 +49,8 @@ use crate::single_cell::sc_annotation::{
 };
 use crate::single_cell::sc_batch_correction::{
     bbknn::BbknnParams, fast_mnn::FastMnnParams, harmony::HarmonyParams,
-    harmony_v2::HarmonyParamsV2, seurat_cca::SeuratCcaParams, seurat_rpca::SeuratRpcaParams,
+    harmony_core::HARMONY_KMEANS_ITERS, harmony_v2::HarmonyParamsV2, seurat_cca::SeuratCcaParams,
+    seurat_rpca::SeuratRpcaParams,
 };
 use crate::single_cell::sc_data::h5ad_io::RawDataSlot;
 use crate::single_cell::sc_data::{
@@ -1650,7 +1651,8 @@ impl HarmonyParams {
     /// The `HarmonyParams` with all parameters set.
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let defaults = Self::default();
-        let kmeans_params = KMeansParamsWrappers::from_r_list(r_list.clone())?;
+        let kmeans_params =
+            KMeansParamsWrappers::from_r_list_with_iters(r_list.clone(), HARMONY_KMEANS_ITERS)?;
         let params_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
         let k = params_list
@@ -1748,7 +1750,8 @@ impl HarmonyParamsV2 {
     /// The `HarmonyParams` with all parameters set.
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let defaults = Self::default();
-        let kmeans_params = KMeansParamsWrappers::from_r_list(r_list.clone())?;
+        let kmeans_params =
+            KMeansParamsWrappers::from_r_list_with_iters(r_list.clone(), HARMONY_KMEANS_ITERS)?;
         let params_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
         let k = params_list

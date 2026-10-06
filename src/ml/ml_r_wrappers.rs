@@ -26,9 +26,24 @@ impl KMeansParamsWrappers {
     ///
     /// The [KMeansParamsWrappers] populated by the R list.
     pub fn from_r_list(r_list: List) -> Result<Self> {
+        Self::from_r_list_with_iters(r_list, 30)
+    }
+
+    /// Parse the [KMeansParamsWrappers] from a list, with a caller-specific
+    /// fallback for a missing `k_means_iter`.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The R list to parse
+    /// * `default_iters` - Iterations when the list has no `k_means_iter`
+    ///
+    /// ### Returns
+    ///
+    /// The [KMeansParamsWrappers] populated by the R list.
+    pub fn from_r_list_with_iters(r_list: List, default_iters: usize) -> Result<Self> {
         let params_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
-        let iters = r_list_count(&params_list, "k_means_iter")?.unwrap_or(30);
+        let iters = r_list_count(&params_list, "k_means_iter")?.unwrap_or(default_iters);
 
         let init =
             match params_list.get("k_means_init").and_then(|v| v.as_str()) {

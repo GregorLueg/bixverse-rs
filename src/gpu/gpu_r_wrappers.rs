@@ -18,6 +18,8 @@ use crate::gpu::sc_gpu::knn_gpu::KnnParamsGpu;
 use crate::gpu::sc_gpu::scrublet_gpu::{ScrubletKnnBackend, ScrubletParamsGpu};
 use crate::ml::clustering::k_means::parse_kmeans_init;
 #[cfg(feature = "single-cell")]
+use crate::single_cell::sc_batch_correction::harmony_core::HARMONY_KMEANS_ITERS;
+#[cfg(feature = "single-cell")]
 use crate::single_cell::sc_processing::knn::KnnParams;
 use crate::utils::r_rust_interface::r_list_to_map;
 #[cfg(feature = "single-cell")]
@@ -159,7 +161,8 @@ impl HarmonyParamsV2Gpu {
     /// Should values not be found within the List, the parameters will default
     /// to the values defined in `HarmonyParamsV2Gpu::default()`. The
     /// `kmeans_params` field is populated from the same list, with
-    /// GPU-Harmony-specific defaults (`iters = 30`, `fixed = false`).
+    /// GPU-Harmony-specific defaults (`iters = HARMONY_KMEANS_ITERS`,
+    /// `fixed = false`).
     ///
     /// ### Params
     ///
@@ -241,7 +244,7 @@ impl HarmonyParamsV2Gpu {
             .get("k_means_iter")
             .and_then(|v| v.as_integer())
             .map(|v| v as usize)
-            .unwrap_or(30);
+            .unwrap_or(HARMONY_KMEANS_ITERS);
         let kmeans_init = params_list
             .get("k_means_init")
             .and_then(|v| v.as_str())

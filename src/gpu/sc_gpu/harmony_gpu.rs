@@ -16,7 +16,8 @@ use crate::gpu::{WORKGROUP_64, WORKGROUP_512};
 use crate::prelude::*;
 use crate::single_cell::sc_batch_correction::harmony::{BatchInfo, create_batch_infos};
 use crate::single_cell::sc_batch_correction::harmony_core::{
-    RidgeSettings, normalise_rows_into, row_major_to_mat, solve_ridge, to_row_major,
+    HARMONY_KMEANS_ITERS, RidgeSettings, normalise_rows_into, row_major_to_mat, solve_ridge,
+    to_row_major,
 };
 use crate::single_cell::sc_batch_correction::harmony_v2::{check_convergence, expand_theta};
 
@@ -113,7 +114,8 @@ pub struct HarmonyParamsV2Gpu {
     pub batch_proportion_cutoff: f32,
     /// Whether to estimate lambda dynamically per cluster
     pub use_dynamic_lambda: bool,
-    /// GPU k-means parameters; `None` uses the k-means defaults.
+    /// GPU k-means parameters; `None` uses the k-means defaults rather than
+    /// the Harmony default of `HARMONY_KMEANS_ITERS` iterations
     pub kmeans_params: Option<KMeansGpuParams>,
 }
 
@@ -134,7 +136,12 @@ impl Default for HarmonyParamsV2Gpu {
             tau: 0.0,
             batch_proportion_cutoff: 1e-5,
             use_dynamic_lambda: true,
-            kmeans_params: None,
+            kmeans_params: Some(KMeansGpuParams::new(
+                HARMONY_KMEANS_ITERS,
+                None,
+                true,
+                false,
+            )),
         }
     }
 }

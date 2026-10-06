@@ -33,6 +33,12 @@ use crate::utils::gemm::gemm;
 /// small enough that the gathered `R` and `Z` blocks stay in L2.
 pub(crate) const RUN_CELLS: usize = 1024;
 
+/// Lloyd iterations of the initial k-means. R harmony 2.0.5 runs 10
+/// (`kmeans_centers` in `src/utils.cpp`). Against 30 on 829k cells x 50 PCs it
+/// halved `kmeans_init` with a marginally lower final objective in both v1 and
+/// v2, and corrected embeddings within 3% relative Frobenius.
+pub(crate) const HARMONY_KMEANS_ITERS: usize = 10;
+
 /// Cells per task in the block assignment update. Blocks are 5% of the data
 /// by default, so this is smaller than [`RUN_CELLS`] to keep every thread busy
 /// on small data sets.
