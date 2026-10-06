@@ -7,6 +7,8 @@ use num_traits::float::TotalOrder;
 use num_traits::{Float, FromPrimitive, ToPrimitive};
 
 use std::fmt::Display;
+
+use crate::utils::r_rust_interface::fill_column_major;
 use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Sub, SubAssign};
 
 ///////////////////
@@ -243,27 +245,27 @@ pub trait FaerRType: SimpleEntity + Copy + Clone + 'static {
 impl FaerRType for f64 {
     type RType = f64;
     fn to_r_matrix(x: faer::MatRef<Self>) -> extendr_api::RArray<Self, 2> {
-        let nrow = x.nrows();
-        let ncol = x.ncols();
-        RArray::new_matrix(nrow, ncol, |row, column| x[(row, column)])
+        let mut out = RMatrix::new(x.nrows(), x.ncols());
+        fill_column_major(out.data_mut(), x, |v| v);
+        out
     }
 }
 
 impl FaerRType for i32 {
     type RType = i32;
     fn to_r_matrix(x: faer::MatRef<Self>) -> extendr_api::RArray<Self, 2> {
-        let nrow = x.nrows();
-        let ncol = x.ncols();
-        RArray::new_matrix(nrow, ncol, |row, column| x[(row, column)])
+        let mut out = RMatrix::new(x.nrows(), x.ncols());
+        fill_column_major(out.data_mut(), x, |v| v);
+        out
     }
 }
 
 impl FaerRType for f32 {
     type RType = f64;
     fn to_r_matrix(x: faer::MatRef<Self>) -> extendr_api::RArray<f64, 2> {
-        let nrow = x.nrows();
-        let ncol = x.ncols();
-        RArray::new_matrix(nrow, ncol, |row, column| x[(row, column)] as f64)
+        let mut out = RMatrix::new(x.nrows(), x.ncols());
+        fill_column_major(out.data_mut(), x, |v| v as f64);
+        out
     }
 }
 
