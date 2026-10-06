@@ -48,6 +48,9 @@ const PREFETCH_CELLS: usize = 4;
 /// machine this touches every other line, which still starts the stream.
 const LINE_F32: usize = 32;
 
+/// Independent running maxima in [`lane_max`].
+const MAX_LANES: usize = 8;
+
 /// Pivot threshold below which the arrowhead Schur complement is treated as
 /// degenerate and the solve falls back to LU.
 const ARROWHEAD_EPS: f64 = 1e-10;
@@ -183,6 +186,37 @@ pub(crate) fn normalise_rows_into(src: &[f32], d: usize, out: &mut [f32]) {
 // Distances and softmax //
 ///////////////////////////
 
+/// Maximum of a slice over [`MAX_LANES`] independent running maxima.
+///
+/// A single running max is a serial chain of compare latencies, k long per
+/// cell; independent lanes let it vectorise and overlap.
+///
+/// ### Params
+///
+/// * `x` - Values, assumed free of NaN
+///
+/// ### Returns
+///
+/// The largest value, `-inf` for an empty slice
+#[inline]
+fn lane_max(x: &[f32]) -> f32 {
+    let mut acc = [f32::NEG_INFINITY; MAX_LANES];
+    let mut chunks = x.chunks_exact(MAX_LANES);
+    for c in &mut chunks {
+        for j in 0..MAX_LANES {
+            acc[j] = if c[j] > acc[j] { c[j] } else { acc[j] };
+        }
+    }
+    let mut m = chunks
+        .remainder()
+        .iter()
+        .fold(f32::NEG_INFINITY, |a, &b| if b > a { b } else { a });
+    for a in acc {
+        m = if a > m { a } else { m };
+    }
+    m
+}
+
 /// Diversity-free soft assignments from cosine distances, in log and linear
 /// form.
 ///
@@ -236,17 +270,11 @@ pub(crate) fn distances_and_base(
                 .zip(base_c.chunks_exact_mut(k))
                 .zip(shift_c.iter_mut())
             {
-                let mut max_logit = f32::NEG_INFINITY;
-                for kk in 0..k {
-                    let logit = -2.0 * (1.0 - lb[kk]) * inv_sigma[kk];
-                    lb[kk] = logit;
-                    max_logit = max_logit.max(logit);
+                for (l, is) in lb.iter_mut().zip(&inv_sigma) {
+                    *l = -2.0 * (1.0 - *l) * is;
                 }
-                let mut total = 0.0f32;
-                for (b, l) in bc.iter_mut().zip(lb.iter()) {
-                    *b = (l - max_logit).exp();
-                    total += *b;
-                }
+                let max_logit = lane_max(lb);
+                let total = f32::bxv_exp_shift_sum(lb, max_logit, bc);
                 let inv = 1.0 / total;
                 bc.iter_mut().for_each(|b| *b *= inv);
                 *sh = max_logit + total.ln();

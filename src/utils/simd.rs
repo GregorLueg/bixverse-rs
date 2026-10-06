@@ -443,6 +443,21 @@ pub trait BixverseSimd:
             *y_i += a * x_i;
         }
     }
+
+    /// Shifted exponential, `dst = exp(src - shift)`, returning `sum(dst)`.
+    ///
+    /// The inner step of a stable softmax, with `shift` the row maximum.
+    ///
+    /// ### Params
+    ///
+    /// * `src` - Input slice
+    /// * `shift` - Subtracted from every element before the exponential
+    /// * `dst` - Output, same length as `src`
+    ///
+    /// ### Returns
+    ///
+    /// The sum of `dst`
+    fn bxv_exp_shift_sum(src: &[Self], shift: Self, dst: &mut [Self]) -> Self;
 }
 
 impl BixverseSimd for f32 {
@@ -465,6 +480,11 @@ impl BixverseSimd for f32 {
     fn bxv_axpy_simd(y: &mut [f32], a: f32, x: &[f32]) {
         axpy_simd_f32(y, a, x)
     }
+
+    #[inline]
+    fn bxv_exp_shift_sum(src: &[f32], shift: f32, dst: &mut [f32]) -> f32 {
+        exp_shift_sum_simd_f32(src, shift, dst)
+    }
 }
 
 impl BixverseSimd for f64 {
@@ -486,6 +506,11 @@ impl BixverseSimd for f64 {
     #[inline]
     fn bxv_axpy_simd(y: &mut [f64], a: f64, x: &[f64]) {
         axpy_simd_f64(y, a, x)
+    }
+
+    #[inline]
+    fn bxv_exp_shift_sum(src: &[f64], shift: f64, dst: &mut [f64]) -> f64 {
+        exp_shift_sum_scalar(src, shift, dst)
     }
 }
 
@@ -3161,6 +3186,122 @@ pub fn sum_squared_dev_widen_simd_f32(a: &[f32], mean: f64) -> f64 {
 
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     sum_squared_dev_widen_scalar_f32(a, mean)
+}
+
+/////////////////
+// Shifted exp //
+/////////////////
+
+/// Shifted exponential with its sum (scalar).
+///
+/// ### Params
+///
+/// * `src` - Input slice
+/// * `shift` - Subtracted before the exponential
+/// * `dst` - Output, same length as `src`
+///
+/// ### Returns
+///
+/// The sum of `dst`
+#[inline(always)]
+fn exp_shift_sum_scalar<T: num_traits::Float + std::iter::Sum>(
+    src: &[T],
+    shift: T,
+    dst: &mut [T],
+) -> T {
+    let mut total = T::zero();
+    for (d, &x) in dst.iter_mut().zip(src) {
+        *d = (x - shift).exp();
+        total = total + *d;
+    }
+    total
+}
+
+/// Lanes per pass of [`exp_shift_sum_poly_f32`]; a fixed-size array lets
+/// LLVM vectorise the polynomial at whatever width the target has.
+const EXP_LANES: usize = 8;
+
+/// `exp(x)` for one lane, branch-free so that a loop over it vectorises.
+///
+/// Same scheme as `wide`'s `f32x4::exp`: Cody-Waite range reduction
+/// `x = r ln2 + f`, the Taylor series of `exp(f)` to `f^7 / 5040`, scaled by
+/// `2^r` through the exponent bits. Written per lane rather than through
+/// `wide`, whose NEON lowering measured slower than libm. Inputs are clamped
+/// to `[-87.3, 88]`, so very negative inputs give about `1e-38` rather than a
+/// subnormal or zero.
+///
+/// ### Params
+///
+/// * `x` - Input
+///
+/// ### Returns
+///
+/// `exp(x)` to a few ulp
+#[inline(always)]
+fn exp_poly_f32(x: f32) -> f32 {
+    const LN2_HI: f32 = 0.693_359_4;
+    const LN2_LO: f32 = -2.121_944_4e-4;
+    let x = x.clamp(-87.3, 88.0);
+    let r = (x * std::f32::consts::LOG2_E).round();
+    let f = x - r * LN2_HI - r * LN2_LO;
+    let p = 1.0 / 5040.0_f32;
+    let p = p * f + 1.0 / 720.0;
+    let p = p * f + 1.0 / 120.0;
+    let p = p * f + 1.0 / 24.0;
+    let p = p * f + 1.0 / 6.0;
+    let p = p * f + 0.5;
+    let e = p * f * f + f + 1.0;
+    e * f32::from_bits(((r as i32 + 127) << 23) as u32)
+}
+
+/// Shifted exponential with its sum, via [`exp_poly_f32`] in fixed lanes.
+///
+/// ### Params
+///
+/// * `src` - Input slice
+/// * `shift` - Subtracted before the exponential
+/// * `dst` - Output, same length as `src`
+///
+/// ### Returns
+///
+/// The sum of `dst`
+#[inline(always)]
+fn exp_shift_sum_poly_f32(src: &[f32], shift: f32, dst: &mut [f32]) -> f32 {
+    let mut acc = [0.0f32; EXP_LANES];
+    let mut src_chunks = src.chunks_exact(EXP_LANES);
+    let mut dst_chunks = dst.chunks_exact_mut(EXP_LANES);
+    for (d, s) in (&mut dst_chunks).zip(&mut src_chunks) {
+        for j in 0..EXP_LANES {
+            d[j] = exp_poly_f32(s[j] - shift);
+            acc[j] += d[j];
+        }
+    }
+    let mut total: f32 = acc.iter().sum();
+    for (d, &x) in dst_chunks
+        .into_remainder()
+        .iter_mut()
+        .zip(src_chunks.remainder())
+    {
+        *d = exp_poly_f32(x - shift);
+        total += *d;
+    }
+    total
+}
+
+/// Shifted exponential `dst = exp(src - shift)` with its sum.
+///
+/// ### Params
+///
+/// * `src` - Input slice
+/// * `shift` - Subtracted before the exponential
+/// * `dst` - Output, same length as `src`
+///
+/// ### Returns
+///
+/// The sum of `dst`
+#[inline]
+pub fn exp_shift_sum_simd_f32(src: &[f32], shift: f32, dst: &mut [f32]) -> f32 {
+    exp_shift_sum_poly_f32(src, shift, dst)
 }
 
 ///////////
