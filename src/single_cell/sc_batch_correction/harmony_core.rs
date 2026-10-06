@@ -428,7 +428,7 @@ fn penalty_table(
 }
 
 /// Add the K-vector `x` into every variable's level table and `r_sum` of a
-/// flat accumulator laid out as in [`block_sums`].
+/// flat accumulator laid out as one block of [`all_block_sums`].
 ///
 /// ### Params
 ///
@@ -458,45 +458,51 @@ fn accumulate_cell(
     }
 }
 
-/// Sum the assignments of `cells` into per-variable level tables and the
-/// per-cluster total, in parallel. Reads through a raw pointer so it can run
-/// alongside a task writing other cells of the same buffer.
+/// Sum the assignments of every block into its own per-variable level tables
+/// and per-cluster total, in one sequential pass over the cells.
+///
+/// A block's cells are not touched before its turn in
+/// [`update_assignments`], so these are exactly the sums each block removes.
+/// Walking cells in memory order rather than block by block avoids a
+/// scattered row gather per block.
 ///
 /// ### Params
 ///
-/// * `r` - Pointer to the soft assignments `[n, k]`
-/// * `cells` - Cells to sum; no other task may write them meanwhile
+/// * `r` - Soft assignments `[n, k]`
+/// * `block_of` - Block index per cell (length n)
+/// * `n_blocks` - Number of blocks
 /// * `infos` - Batch information per variable
-/// * `offsets` - Start of each variable's table in the flat accumulator
+/// * `offsets` - Start of each variable's table in one block's accumulator
 /// * `k` - Cluster count
 ///
 /// ### Returns
 ///
-/// Flat accumulator: every variable's `[n_levels, k]` table back to back,
-/// then `r_sum` (length k)
-fn block_sums(
-    r: SyncPtr,
-    cells: &[usize],
+/// `[n_blocks, len]` flat, each block laid out as every variable's
+/// `[n_levels, k]` table back to back, then `r_sum` (length k)
+fn all_block_sums(
+    r: &[f32],
+    block_of: &[u32],
+    n_blocks: usize,
     infos: &[BatchInfo],
     offsets: &[usize],
     k: usize,
 ) -> Vec<f32> {
     let len = offsets[infos.len()] + k;
-    cells
-        .par_chunks(BLOCK_TASK_CELLS)
+    r.par_chunks(k * RUN_CELLS)
+        .zip(block_of.par_chunks(RUN_CELLS))
+        .enumerate()
         .fold(
-            || vec![0.0f32; len],
-            |mut acc, chunk| {
-                let ptr = r;
-                for &c in chunk {
-                    // SAFETY: see the contract on `cells`
-                    let rc = unsafe { std::slice::from_raw_parts(ptr.0.add(c * k), k) };
-                    accumulate_cell(&mut acc, rc, c, infos, offsets);
+            || vec![0.0f32; n_blocks * len],
+            |mut acc, (chunk, (rc, bc))| {
+                let c0 = chunk * RUN_CELLS;
+                for (i, (row, &b)) in rc.chunks_exact(k).zip(bc).enumerate() {
+                    let off = b as usize * len;
+                    accumulate_cell(&mut acc[off..off + len], row, c0 + i, infos, offsets);
                 }
                 acc
             },
         )
-        .reduce(|| vec![0.0f32; len], add_into)
+        .reduce(|| vec![0.0f32; n_blocks * len], add_into)
 }
 
 /// Element-wise `a += b`, returning `a`.
@@ -520,7 +526,7 @@ fn add_into(mut a: Vec<f32>, b: Vec<f32>) -> Vec<f32> {
 ///
 /// ### Params
 ///
-/// * `sums` - Accumulator from [`block_sums`]
+/// * `sums` - One block of [`all_block_sums`], or the same layout
 /// * `offsets` - Variable table offsets
 /// * `o` - Observed counts per variable
 /// * `r_sum` - Per-cluster totals
@@ -537,26 +543,25 @@ fn apply_sums(sums: &[f32], offsets: &[usize], o: &mut [Vec<f32>], r_sum: &mut [
 }
 
 /////////////////
-// ReassignAcc //
+// CellScratch //
 /////////////////
 
 /// Per-task state of the block reassignment.
-struct ReassignAcc {
-    /// Level sums of the new assignments, laid out as in [`block_sums`]
+struct CellScratch {
+    /// Level sums of the new assignments, laid out as one block of
+    /// [`all_block_sums`]; empty in the write-back pass
     sums: Vec<f32>,
-    /// K-means error of the new assignments
-    err: f64,
-    /// Entropy of the new assignments
-    ent: f64,
-    /// Scratch: the cell's combined penalty (multi-variable only)
+    /// The cell's combined penalty (multi-variable only)
     pen: Vec<f32>,
-    /// Scratch: the cell's combined log penalty (multi-variable only)
+    /// The cell's combined log penalty (multi-variable only)
     lp: Vec<f32>,
-    /// Scratch: `sigma * r` for the cell
+    /// The cell's penalised assignments
+    x: Vec<f32>,
+    /// `sigma * r` for the cell
     w: Vec<f32>,
 }
 
-impl ReassignAcc {
+impl CellScratch {
     /// Zeroed state.
     ///
     /// ### Params
@@ -570,13 +575,74 @@ impl ReassignAcc {
     fn new(len: usize, k: usize) -> Self {
         Self {
             sums: vec![0.0; len],
-            err: 0.0,
-            ent: 0.0,
             pen: vec![0.0; k],
             lp: vec![0.0; k],
+            x: vec![0.0; k],
             w: vec![0.0; k],
         }
     }
+}
+
+/// A cell's penalty and log penalty, multiplied (added) over all variables.
+///
+/// ### Params
+///
+/// * `c` - Cell index
+/// * `pen` - One block's penalty tables, every variable back to back
+/// * `log_pen` - The matching log penalty tables
+/// * `infos` - Batch information per variable
+/// * `offsets` - Start of each variable's table
+/// * `pen_s` - Scratch for the combined penalty (length k), used with more
+///   than one variable
+/// * `lp_s` - Scratch for the combined log penalty (length k)
+///
+/// ### Returns
+///
+/// `(penalty, log penalty)`, each length k
+#[inline]
+fn cell_penalty<'a>(
+    c: usize,
+    pen: &'a [f32],
+    log_pen: &'a [f32],
+    infos: &[BatchInfo],
+    offsets: &[usize],
+    pen_s: &'a mut [f32],
+    lp_s: &'a mut [f32],
+) -> (&'a [f32], &'a [f32]) {
+    let k = pen_s.len();
+    let off0 = offsets[0] + infos[0].cell_to_level[c] * k;
+    if infos.len() == 1 {
+        return (&pen[off0..off0 + k], &log_pen[off0..off0 + k]);
+    }
+    pen_s.copy_from_slice(&pen[off0..off0 + k]);
+    lp_s.copy_from_slice(&log_pen[off0..off0 + k]);
+    for (v, info) in infos.iter().enumerate().skip(1) {
+        let off = offsets[v] + info.cell_to_level[c] * k;
+        for kk in 0..k {
+            pen_s[kk] *= pen[off + kk];
+            lp_s[kk] += log_pen[off + kk];
+        }
+    }
+    (pen_s, lp_s)
+}
+
+/// `out = base * pen` element-wise, returning the sum of `out`.
+///
+/// ### Params
+///
+/// * `base` - The cell's diversity-free assignments
+/// * `pen` - The cell's combined penalty
+/// * `out` - Output, same length
+///
+/// ### Returns
+///
+/// The normaliser `sum(base * pen)`
+#[inline]
+fn penalised(base: &[f32], pen: &[f32], out: &mut [f32]) -> f32 {
+    for ((x, b), p) in out.iter_mut().zip(base).zip(pen) {
+        *x = b * p;
+    }
+    f32::bxv_sum(out)
 }
 
 /// Block-wise diversity-penalised update of all soft assignments.
@@ -588,11 +654,14 @@ impl ReassignAcc {
 /// in parallel as `base * prod_v penalty_v[level_v]` normalised, then add the
 /// block back.
 ///
-/// The new assignments' level sums are accumulated during the reassignment,
-/// and the next block's removal sums are taken concurrently with it (the two
-/// blocks are disjoint), so each block costs one parallel region. The k-means
-/// error and entropy come from the log tables, with no per-element `ln`:
-/// `ln r = log_base + log_pen - ln T` and `dist = -sigma (log_base + shift)`.
+/// A block's cells are scattered across memory, and that gather is the cost.
+/// So the block loop reads only `base` and accumulates level sums, without
+/// touching `r`: a cell's new assignment depends only on its block's penalty
+/// tables. Every block's removal sums come from one pass in memory order up
+/// front, and a final pass in memory order recomputes and writes `r` from the
+/// stored tables. The k-means error and entropy come from the log tables in
+/// that pass, with no per-element `ln`: `ln r = log_base + log_pen - ln T` and
+/// `dist = -sigma (log_base + shift)`.
 ///
 /// ### Params
 ///
@@ -636,7 +705,7 @@ pub(crate) fn update_assignments(
 
     let n_blocks = (1.0 / block_size).ceil() as usize;
     let cells_per_block = ((n as f32 * block_size) as usize).max(1);
-    let blocks: Vec<&[usize]> = (0..n_blocks)
+    let bounds: Vec<(usize, usize)> = (0..n_blocks)
         .map(|b| b * cells_per_block)
         .take_while(|&lo| lo < n)
         .enumerate()
@@ -646,10 +715,23 @@ pub(crate) fn update_assignments(
             } else {
                 (lo + cells_per_block).min(n)
             };
-            &order[lo..hi]
+            (lo, hi)
         })
         .collect();
-    let last = blocks.len() - 1;
+    // only block membership is random: bucket the cells by block in memory
+    // order, so every block's row reads are monotone
+    let mut block_of = vec![0u32; n];
+    for (bi, &(lo, hi)) in bounds.iter().enumerate() {
+        for &c in &order[lo..hi] {
+            block_of[c] = bi as u32;
+        }
+    }
+    let mut cursor: Vec<usize> = bounds.iter().map(|&(lo, _)| lo).collect();
+    for (c, &bi) in block_of.iter().enumerate() {
+        order[cursor[bi as usize]] = c;
+        cursor[bi as usize] += 1;
+    }
+    let blocks: Vec<&[usize]> = bounds.iter().map(|&(lo, hi)| &order[lo..hi]).collect();
 
     let mut offsets = Vec::with_capacity(n_vars + 1);
     offsets.push(0);
@@ -657,18 +739,24 @@ pub(crate) fn update_assignments(
         offsets.push(offsets.last().unwrap() + info.n_levels * k);
     }
     let len = offsets[n_vars] + k;
-    let mut pen = vec![0.0f32; offsets[n_vars]];
-    let mut log_pen = vec![0.0f32; offsets[n_vars]];
+    let tab = offsets[n_vars];
+    let n_blk = blocks.len();
+    // every block's penalty tables, kept for the write-back pass
+    let mut pen = vec![0.0f32; n_blk * tab];
+    let mut log_pen = vec![0.0f32; n_blk * tab];
 
-    let (mut error, mut entropy) = (0.0f64, 0.0f64);
-    // all access to `r` below goes through this pointer, with each task
-    // touching a disjoint set of cells
-    let r_ptr = SyncPtr(r.as_mut_ptr());
-
-    let mut removed = block_sums(r_ptr, blocks[0], infos, &offsets, k);
+    let removed_all = all_block_sums(r, &block_of, n_blk, infos, &offsets, k);
 
     for (b, block) in blocks.iter().enumerate() {
-        apply_sums(&removed, &offsets, o, r_sum, -1.0);
+        apply_sums(
+            &removed_all[b * len..(b + 1) * len],
+            &offsets,
+            o,
+            r_sum,
+            -1.0,
+        );
+        let pen_b = &mut pen[b * tab..(b + 1) * tab];
+        let log_pen_b = &mut log_pen[b * tab..(b + 1) * tab];
         for (v, info) in infos.iter().enumerate() {
             let range = offsets[v]..offsets[v + 1];
             penalty_table(
@@ -677,85 +765,92 @@ pub(crate) fn update_assignments(
                 r_sum,
                 info,
                 &theta[v],
-                &mut pen[range.clone()],
-                &mut log_pen[range],
+                &mut pen_b[range.clone()],
+                &mut log_pen_b[range],
             );
         }
 
-        let (pen, log_pen) = (&pen, &log_pen);
-        let reassign = || {
-            block
-                .par_chunks(BLOCK_TASK_CELLS)
-                .fold(
-                    || ReassignAcc::new(len, k),
-                    |mut st, chunk| {
-                        let ptr = r_ptr;
-                        for &c in chunk {
-                            // SAFETY: c is unique to this block and task
-                            let rc = unsafe { std::slice::from_raw_parts_mut(ptr.0.add(c * k), k) };
-                            let bc = &base[c * k..(c + 1) * k];
-                            let lc = &log_base[c * k..(c + 1) * k];
-
-                            // the cell's penalty and log penalty over all variables
-                            let off0 = offsets[0] + infos[0].cell_to_level[c] * k;
-                            let (pen_c, lp_c): (&[f32], &[f32]) = if n_vars == 1 {
-                                (&pen[off0..off0 + k], &log_pen[off0..off0 + k])
-                            } else {
-                                st.pen.copy_from_slice(&pen[off0..off0 + k]);
-                                st.lp.copy_from_slice(&log_pen[off0..off0 + k]);
-                                for (v, info) in infos.iter().enumerate().skip(1) {
-                                    let off = offsets[v] + info.cell_to_level[c] * k;
-                                    for kk in 0..k {
-                                        st.pen[kk] *= pen[off + kk];
-                                        st.lp[kk] += log_pen[off + kk];
-                                    }
-                                }
-                                (&st.pen, &st.lp)
-                            };
-
-                            for ((x, b), p) in rc.iter_mut().zip(bc).zip(pen_c) {
-                                *x = b * p;
-                            }
-                            let total = f32::bxv_sum(rc);
-                            if total <= 0.0 {
-                                continue;
-                            }
-                            let inv = 1.0 / total;
-                            for ((x, w), s) in rc.iter_mut().zip(st.w.iter_mut()).zip(sigma) {
-                                *x *= inv;
-                                *w = s * *x;
-                            }
-                            // ln r = lc + lp - ln(total), dist = -sigma (lc + shift)
-                            let sw = f32::bxv_sum(&st.w);
-                            let swb = f32::bxv_dot_simd(&st.w, lc);
-                            let swp = f32::bxv_dot_simd(&st.w, lp_c);
-                            st.ent += (swb + swp - total.ln() * sw) as f64;
-                            st.err += (-(swb + shift[c] * sw)) as f64;
-                            accumulate_cell(&mut st.sums, rc, c, infos, &offsets);
+        let (pen_b, log_pen_b) = (&*pen_b, &*log_pen_b);
+        let added = block
+            .par_chunks(BLOCK_TASK_CELLS)
+            .fold(
+                || CellScratch::new(len, k),
+                |mut st, chunk| {
+                    for &c in chunk {
+                        let bc = &base[c * k..(c + 1) * k];
+                        let (pen_c, _) = cell_penalty(
+                            c,
+                            pen_b,
+                            log_pen_b,
+                            infos,
+                            &offsets,
+                            &mut st.pen,
+                            &mut st.lp,
+                        );
+                        let total = penalised(bc, pen_c, &mut st.x);
+                        if total <= 0.0 {
+                            continue;
                         }
-                        st
-                    },
-                )
-                .map(|st| (st.sums, st.err, st.ent))
-                .reduce(
-                    || (vec![0.0f32; len], 0.0, 0.0),
-                    |a, b| (add_into(a.0, b.0), a.1 + b.1, a.2 + b.2),
-                )
-        };
-
-        let ((added, e, h), next_removed) = if b < last {
-            rayon::join(reassign, || {
-                block_sums(r_ptr, blocks[b + 1], infos, &offsets, k)
-            })
-        } else {
-            (reassign(), Vec::new())
-        };
-
-        error += e;
-        entropy += h;
+                        let inv = 1.0 / total;
+                        st.x.iter_mut().for_each(|x| *x *= inv);
+                        accumulate_cell(&mut st.sums, &st.x, c, infos, &offsets);
+                    }
+                    st
+                },
+            )
+            .map(|st| st.sums)
+            .reduce(|| vec![0.0f32; len], add_into);
         apply_sums(&added, &offsets, o, r_sum, 1.0);
-        removed = next_removed;
     }
+
+    // write-back in memory order: recompute each cell's assignment from its
+    // block's tables, bit-identical to the one summed above
+    let (error, entropy) = r
+        .par_chunks_mut(k * RUN_CELLS)
+        .zip(block_of.par_chunks(RUN_CELLS))
+        .enumerate()
+        .fold(
+            || (CellScratch::new(0, k), 0.0f64, 0.0f64),
+            |(mut st, mut err, mut ent), (chunk, (rc, bc))| {
+                let c0 = chunk * RUN_CELLS;
+                for (i, (row, &bi)) in rc.chunks_exact_mut(k).zip(bc).enumerate() {
+                    let c = c0 + i;
+                    let bi = bi as usize;
+                    let (pen_b, log_pen_b) = (
+                        &pen[bi * tab..(bi + 1) * tab],
+                        &log_pen[bi * tab..(bi + 1) * tab],
+                    );
+                    let (pen_c, lp_c) = cell_penalty(
+                        c,
+                        pen_b,
+                        log_pen_b,
+                        infos,
+                        &offsets,
+                        &mut st.pen,
+                        &mut st.lp,
+                    );
+                    let total = penalised(&base[c * k..(c + 1) * k], pen_c, row);
+                    if total <= 0.0 {
+                        continue;
+                    }
+                    let inv = 1.0 / total;
+                    for ((x, w), s) in row.iter_mut().zip(st.w.iter_mut()).zip(sigma) {
+                        *x *= inv;
+                        *w = s * *x;
+                    }
+                    // ln r = lc + lp - ln(total), dist = -sigma (lc + shift)
+                    let lc = &log_base[c * k..(c + 1) * k];
+                    let sw = f32::bxv_sum(&st.w);
+                    let swb = f32::bxv_dot_simd(&st.w, lc);
+                    let swp = f32::bxv_dot_simd(&st.w, lp_c);
+                    ent += (swb + swp - total.ln() * sw) as f64;
+                    err += (-(swb + shift[c] * sw)) as f64;
+                }
+                (st, err, ent)
+            },
+        )
+        .map(|(_, e, h)| (e, h))
+        .reduce(|| (0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1));
 
     (error, entropy)
 }
