@@ -38,6 +38,16 @@ pub(crate) const RUN_CELLS: usize = 1024;
 /// on small data sets.
 const BLOCK_TASK_CELLS: usize = 256;
 
+/// How many cells ahead the scattered block pass touches the `base` row it
+/// will read. Its rows are far apart in memory, so the hardware prefetcher
+/// cannot follow; anything from 2 to 16 measured the same (v2, 829k cells,
+/// k = 100), about 12% off `update_r`.
+const PREFETCH_CELLS: usize = 4;
+
+/// f32 values per 128-byte cache line on Apple Silicon. On a 64-byte line
+/// machine this touches every other line, which still starts the stream.
+const LINE_F32: usize = 32;
+
 /// Pivot threshold below which the arrowhead Schur complement is treated as
 /// degenerate and the solve falls back to LU.
 const ARROWHEAD_EPS: f64 = 1e-10;
@@ -111,6 +121,20 @@ fn level_runs(info: &BatchInfo) -> Vec<(usize, &[usize])> {
         .enumerate()
         .flat_map(|(level, cells)| cells.chunks(RUN_CELLS).map(move |c| (level, c)))
         .collect()
+}
+
+/// Load one value per cache line of `row` and discard it, so the lines are in
+/// flight before the row is needed. A software prefetch on stable Rust: the
+/// loads have no dependants, so the core does not wait on them.
+///
+/// ### Params
+///
+/// * `row` - The row to pull into cache
+#[inline(always)]
+fn touch_row(row: &[f32]) {
+    for x in row.iter().step_by(LINE_F32) {
+        std::hint::black_box(*x);
+    }
 }
 
 /// Copy the K-vectors of `cells` from a cell-major `[n, k]` matrix into a
@@ -776,7 +800,10 @@ pub(crate) fn update_assignments(
             .fold(
                 || CellScratch::new(len, k),
                 |mut st, chunk| {
-                    for &c in chunk {
+                    for (i, &c) in chunk.iter().enumerate() {
+                        if let Some(&ahead) = chunk.get(i + PREFETCH_CELLS) {
+                            touch_row(&base[ahead * k..(ahead + 1) * k]);
+                        }
                         let bc = &base[c * k..(c + 1) * k];
                         let (pen_c, _) = cell_penalty(
                             c,
