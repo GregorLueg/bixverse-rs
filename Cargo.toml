@@ -202,6 +202,3 @@ required-features = ["single-cell"]
 [[bench]]
 name = "r_ffi_bench"
 harness = false
-
-[patch.crates-io]
-ann-search-rs = { git = "https://github.com/GregorLueg/ann-search-rs", branch = "feat-faster-k-means" }
