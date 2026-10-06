@@ -12,9 +12,21 @@
 //! one write avoids materialising a separate distance matrix entirely.
 
 use faer::MatMut;
+use rayon::prelude::*;
+
+////////////
+// Consts //
+////////////
+
+/// Kernel matrix size above which the fill runs in parallel
+const KERNEL_FILL_PAR_MIN_ELEMENTS: usize = 1 << 16;
 
 /// `sqrt(5)`, the Matérn-5/2 scaling constant.
 const SQRT_5: f64 = 2.236_067_977_499_79;
+
+///////////////
+// Functions //
+///////////////
 
 /// Matérn-5/2 covariance at a scalar distance.
 ///
@@ -76,6 +88,38 @@ pub fn fill_matern52_cross_1d(mut dst: MatMut<'_, f64>, a: &[f64], b: &[f64], le
             dst[(i, j)] = matern52((a_i - b_j).abs(), length_scale);
         }
     }
+}
+
+/// Parallel variant of [`fill_matern52_cross_1d`] for callers outside a rayon
+/// loop
+///
+/// Falls back to the sequential fill below `KERNEL_FILL_PAR_MIN_ELEMENTS`.
+///
+/// ### Params
+///
+/// * `dst` - Destination, `a.len()` by `b.len()`, fully overwritten.
+/// * `a` - Row coordinates.
+/// * `b` - Column coordinates.
+/// * `length_scale` - Length scale of the kernel, strictly positive.
+///
+/// ### Panics
+///
+/// If `dst` does not have shape `(a.len(), b.len())`.
+pub fn fill_matern52_cross_1d_par(dst: MatMut<'_, f64>, a: &[f64], b: &[f64], length_scale: f64) {
+    assert_eq!(dst.nrows(), a.len(), "kernel fill: row count mismatch");
+    assert_eq!(dst.ncols(), b.len(), "kernel fill: column count mismatch");
+
+    if a.len() * b.len() < KERNEL_FILL_PAR_MIN_ELEMENTS {
+        return fill_matern52_cross_1d(dst, a, b, length_scale);
+    }
+
+    dst.par_col_iter_mut()
+        .zip(b.par_iter())
+        .for_each(|(mut col, &b_j)| {
+            for (i, &a_i) in a.iter().enumerate() {
+                col[i] = matern52((a_i - b_j).abs(), length_scale);
+            }
+        });
 }
 
 ///////////

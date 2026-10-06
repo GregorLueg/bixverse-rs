@@ -17,7 +17,7 @@ use crate::core::base::loess::{LoessRegression, LoessSurface};
 use crate::core::math::distributions::{gamma_cdf, gamma_sf, norm_ppf};
 use crate::core::math::stats::{fit_gamma_mle, ks_test_1samp, p_adjust_fdr};
 use crate::core::math::vector_helpers::interp_log_linear_at;
-use crate::enrichment::gsea::{calc_gsea_stats, create_random_gs_indices};
+use crate::enrichment::gsea::{calc_gsea_stats, gsea_es_only, random_gs_indices};
 use crate::prelude::*;
 
 ////////////
@@ -461,17 +461,16 @@ fn null_scores<T: BixverseFloat>(
     permutations: usize,
     seed: u64,
 ) -> Vec<f64> {
-    let samples = create_random_gs_indices(permutations, size, stats.len(), seed, false);
-
-    samples
+    (0..permutations)
         .into_par_iter()
-        .map(|mut indices| {
-            // `calc_gsea_stats` counts misses from each hit's position, which
+        .map_init(Vec::new, |scratch, i| {
+            let mut indices = random_gs_indices(i, size, stats.len(), seed, false);
+            // The running sum counts misses from each hit's position, which
             // only works on an ascending index list
             indices.sort_unstable();
-            let indices: Vec<i32> = indices.iter().map(|&i| i as i32).collect();
-            let stats_res = calc_gsea_stats(stats, &indices, T::one(), false, false, false);
-            stats_res.es.to_f64().unwrap_or(0.0)
+            gsea_es_only(stats, &indices, T::one(), scratch)
+                .to_f64()
+                .unwrap_or(0.0)
         })
         .collect()
 }

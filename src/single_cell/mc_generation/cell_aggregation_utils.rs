@@ -48,29 +48,41 @@ pub fn aggregate_meta_cells<S: SingleCellReading>(
 
         let results: Vec<(Vec<usize>, Vec<u32>, Vec<f32>)> = chunk
             .par_iter()
-            .map(|cell_idx| -> Result<_, BixverseErrors> {
-                let cells = reader.read_cells_parallel(cell_idx)?;
-                let mut gene_counts: FxHashMap<usize, u32> = FxHashMap::default();
-                let mut library_size: u32 = 0;
-                for cell in &cells {
-                    for (idx, count) in cell.indices.iter().zip(cell.data_raw.iter()) {
-                        *gene_counts.entry(*idx as usize).or_insert(0) += count;
-                        library_size += count;
+            .map_init(
+                || (vec![0u32; n_genes], vec![false; n_genes]),
+                |(counts, seen), cell_idx| -> Result<_, BixverseErrors> {
+                    let mut touched: Vec<usize> = Vec::new();
+                    let mut library_size: u32 = 0;
+                    // one task per metacell already fans out over the pool, so
+                    // the cells are read one by one
+                    for &cell_id in cell_idx.iter() {
+                        let cell = reader.read_cell(cell_id)?;
+                        for (idx, count) in cell.indices.iter().zip(cell.data_raw.iter()) {
+                            let g = *idx as usize;
+                            if !seen[g] {
+                                seen[g] = true;
+                                touched.push(g);
+                            }
+                            counts[g] += count;
+                            library_size += count;
+                        }
                     }
-                }
-                let mut entries: Vec<(usize, u32)> = gene_counts.into_iter().collect();
-                entries.sort_by_key(|(idx, _)| *idx);
-                let indices: Vec<usize> = entries.iter().map(|(idx, _)| *idx).collect();
-                let raw_counts: Vec<u32> = entries.iter().map(|(_, count)| *count).collect();
-                let norm_counts: Vec<f32> = entries
-                    .iter()
-                    .map(|(_, count)| {
-                        let norm = (*count as f32 / library_size as f32) * target_size;
-                        (norm + 1.0).ln()
-                    })
-                    .collect();
-                Ok((indices, raw_counts, norm_counts))
-            })
+                    touched.sort_unstable();
+                    let raw_counts: Vec<u32> = touched.iter().map(|&g| counts[g]).collect();
+                    let norm_counts: Vec<f32> = raw_counts
+                        .iter()
+                        .map(|&count| {
+                            let norm = (count as f32 / library_size as f32) * target_size;
+                            (norm + 1.0).ln()
+                        })
+                        .collect();
+                    for &g in &touched {
+                        counts[g] = 0;
+                        seen[g] = false;
+                    }
+                    Ok((touched, raw_counts, norm_counts))
+                },
+            )
             .collect::<Result<Vec<_>, _>>()?;
 
         for (indices, raw_counts, norm_counts) in results {
@@ -232,31 +244,38 @@ pub fn get_pseudo_bulked_counts_dense<S: SingleCellReading>(
     let n_genes = reader.get_header().total_genes;
     let n_groups = cell_indices.len();
     let mut result = Mat::zeros(n_groups, n_genes);
+    // `result` is column-major, so a group is accumulated in a contiguous row
+    // and scattered into it once
+    let mut row = vec![0.0_f64; n_genes];
 
     for (group_idx, indices) in cell_indices.iter().enumerate() {
         let start_group = Instant::now();
         let chunks = reader.read_cells_parallel(indices)?;
         let n_cells = indices.len() as f64;
 
+        row.fill(0.0);
         for chunk in chunks {
             match bulk_type {
                 PseudoBulk::Raw => {
                     for (value, &gene_idx) in chunk.data_raw.iter().zip(chunk.indices.iter()) {
-                        result[(group_idx, gene_idx as usize)] += value as f64;
+                        row[gene_idx as usize] += value as f64;
                     }
                 }
                 PseudoBulk::Norm => {
                     for (value, &gene_idx) in chunk.data_norm.iter().zip(chunk.indices.iter()) {
-                        result[(group_idx, gene_idx as usize)] += value.to_f64();
+                        row[gene_idx as usize] += value.to_f64();
                     }
                 }
             }
         }
 
         if matches!(bulk_type, PseudoBulk::Norm) {
-            for gene_idx in 0..n_genes {
-                result[(group_idx, gene_idx)] /= n_cells;
+            for value in row.iter_mut() {
+                *value /= n_cells;
             }
+        }
+        for (gene_idx, &value) in row.iter().enumerate() {
+            result[(group_idx, gene_idx)] = value;
         }
 
         if verbosity.normal_verbosity() && (group_idx + 1) % 10 == 0 {
@@ -479,9 +498,10 @@ pub fn pseudo_bulk_genes_dense<S: SingleCellReading>(
             })
             .collect();
 
-        for (i, row) in rows.into_iter().enumerate() {
-            for (g, v) in row.into_iter().enumerate() {
-                out[(row_offset + i, g)] = v;
+        // `out` is column-major: fill each column of the batch contiguously
+        for g in 0..n_groups {
+            for (i, row) in rows.iter().enumerate() {
+                out[(row_offset + i, g)] = row[g];
             }
         }
 

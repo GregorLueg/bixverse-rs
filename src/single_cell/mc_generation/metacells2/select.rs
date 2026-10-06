@@ -385,7 +385,7 @@ fn combine_masks(
 /// `n_cells × n_selected` matrix.
 ///
 /// Builds a reverse-lookup from gene index to position in `selected`, then
-/// walks the CSR rows once to fill non-zero entries. Unselected or absent
+/// fills each selected column from the CSC view of the matrix. Unselected or absent
 /// entries remain zero.
 ///
 /// ### Params
@@ -400,21 +400,30 @@ fn extract_dense_columns(csr: &CompressedSparseData2<u32, f32>, selected: &[usiz
     let n_rows = csr.shape.0;
     let n_sel = selected.len();
 
+    // a repeated gene keeps its last position, the others stay zero
     let mut gene_to_pos = vec![None; csr.shape.1];
     for (pos, &g) in selected.iter().enumerate() {
         gene_to_pos[g] = Some(pos);
     }
 
+    // `dense` is column-major, so fill each selected gene's column from the
+    // CSC view rather than scattering row by row
+    let csc = transpose_sparse(csr);
     let mut dense = Mat::<f32>::zeros(n_rows, n_sel);
-    for row in 0..n_rows {
-        let start = csr.indptr[row] as usize;
-        let end = csr.indptr[row + 1] as usize;
-        for idx in start..end {
-            if let Some(pos) = gene_to_pos[csr.indices[idx] as usize] {
-                dense[(row, pos)] = csr.data[idx] as f32;
+    dense
+        .par_col_iter_mut()
+        .enumerate()
+        .for_each(|(pos, mut col)| {
+            let g = selected[pos];
+            if gene_to_pos[g] != Some(pos) {
+                return;
             }
-        }
-    }
+            let start = csc.indptr[g] as usize;
+            let end = csc.indptr[g + 1] as usize;
+            for idx in start..end {
+                col[csc.indices[idx] as usize] = csc.data[idx] as f32;
+            }
+        });
 
     dense
 }

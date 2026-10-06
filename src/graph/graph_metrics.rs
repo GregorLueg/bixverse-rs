@@ -46,12 +46,12 @@ where
 
     for i in 0..n {
         let ci = communities[i];
-        let (neighbours, weights) = graph.get_neighbours(i);
+        let (neighbours, weights) = graph.get_neighbours_raw(i);
 
         for (&j, &w) in neighbours.iter().zip(weights.iter()) {
             volume[ci] += w;
             total_volume += w;
-            if communities[j] != ci {
+            if communities[j as usize] != ci {
                 cut[ci] += w;
             }
         }

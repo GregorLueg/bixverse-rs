@@ -1,6 +1,7 @@
 //! Implementation of the elimination method for improved gene ontology-based
 //! enrichment. See Alexa, et al., Bioinformatics, 2006
 
+use rayon::prelude::*;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::collections::BTreeMap;
 
@@ -8,6 +9,13 @@ use crate::core::math::stats::*;
 use crate::enrichment::gsea::*;
 use crate::enrichment::oae::*;
 use crate::prelude::*;
+
+////////////
+// Consts //
+////////////
+
+/// Terms per level above which the hypergeometric tests run in parallel
+const GO_PAR_LEVEL_MIN_TERMS: usize = 512;
 
 ///////////////////////
 // Types & Structure //
@@ -382,13 +390,10 @@ where
     let trials = target_set.len();
     let size = level_data_final.len();
 
-    let mut go_ids = Vec::with_capacity(size);
-    let mut hits_vec = Vec::with_capacity(size);
-    let mut pvals = Vec::with_capacity(size);
-    let mut odds_ratios = Vec::with_capacity(size);
-    let mut gene_set_lengths = Vec::with_capacity(size);
+    let entries: Vec<(&String, &FxHashSet<String>)> =
+        level_data_final.iter().map(|(k, v)| (k, **v)).collect();
 
-    for (key, value) in level_data_final {
+    let score = |&(key, value): &(&String, &FxHashSet<String>)| {
         let gene_set_length = value.len();
         let hits = target_set.intersection(value).count();
         // A single hit gives q = 0, which is P(X >= 1) and perfectly meaningful;
@@ -411,7 +416,22 @@ where
             // `N - m - k` underflows on a large target set.
             (gene_universe_length + hits) - gene_set_length - trials,
         );
-        go_ids.push(key.clone());
+        (key.clone(), hits, pval, odds_ratio, gene_set_length)
+    };
+
+    let scored: Vec<(String, usize, T, T, usize)> = if size >= GO_PAR_LEVEL_MIN_TERMS {
+        entries.par_iter().map(score).collect()
+    } else {
+        entries.iter().map(score).collect()
+    };
+
+    let mut go_ids = Vec::with_capacity(size);
+    let mut hits_vec = Vec::with_capacity(size);
+    let mut pvals = Vec::with_capacity(size);
+    let mut odds_ratios = Vec::with_capacity(size);
+    let mut gene_set_lengths = Vec::with_capacity(size);
+    for (key, hits, pval, odds_ratio, gene_set_length) in scored {
+        go_ids.push(key);
         hits_vec.push(hits);
         pvals.push(pval);
         odds_ratios.push(odds_ratio);

@@ -6,7 +6,7 @@ use thousands::Separable;
 
 use crate::core::math::sparse::transpose_sparse;
 use crate::prelude::*;
-use crate::single_cell::sc_data::data_io::CellGeneSparseWriter;
+use crate::single_cell::sc_data::data_io::{CellGeneSparseWriter, write_cell_chunks_parallel};
 
 //////////
 // Main //
@@ -128,17 +128,7 @@ where
         chunk.original_index = new_idx;
     }
 
-    for (i, cell_chunk) in passing_chunks.into_iter().enumerate() {
-        writer.write_cell_chunk(cell_chunk)?;
-
-        if verbose && (i + 1) % 100000 == 0 {
-            println!(
-                "  Written {} / {} cells to disk.",
-                (i + 1).separate_with_underscores(),
-                cells_passing.separate_with_underscores()
-            );
-        }
-    }
+    write_cell_chunks_parallel(&passing_chunks, &mut writer)?;
 
     if verbose {
         println!(

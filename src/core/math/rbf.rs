@@ -3,9 +3,15 @@
 use faer::{Mat, MatRef};
 use rayon::iter::*;
 
-use crate::core::math::matrix_helpers::*;
 use crate::prelude::*;
 use crate::utils::matrix_utils::*;
+
+////////////
+// Consts //
+////////////
+
+/// Matrix size (elements) from which an elementwise map fans out over rayon
+const PAR_MAP_MIN_ELEMS: usize = 1 << 16;
 
 ///////////
 // Enums //
@@ -39,6 +45,39 @@ pub fn parse_rbf_types(s: &str) -> Option<RbfType> {
         "inverse_quadratic" => Some(RbfType::InverseQuadratic),
         _ => None,
     }
+}
+
+/// Apply a scalar function to every entry of a matrix
+///
+/// ### Params
+///
+/// * `mat` - Input matrix
+/// * `f` - Function applied per entry
+///
+/// ### Returns
+///
+/// The mapped matrix, same shape.
+fn map_mat_par<T, F>(mat: MatRef<T>, f: F) -> Mat<T>
+where
+    T: BixverseFloat,
+    F: Fn(T) -> T + Sync,
+{
+    let mut out = Mat::<T>::zeros(mat.nrows(), mat.ncols());
+    let fill = |j: usize, col: faer::ColMut<T>| {
+        for (o, &x) in col.iter_mut().zip(mat.col(j).iter()) {
+            *o = f(x);
+        }
+    };
+    if mat.nrows() * mat.ncols() >= PAR_MAP_MIN_ELEMS {
+        out.par_col_iter_mut()
+            .enumerate()
+            .for_each(|(j, col)| fill(j, col));
+    } else {
+        for j in 0..mat.ncols() {
+            fill(j, out.col_mut(j));
+        }
+    }
+    out
 }
 
 //////////////
@@ -84,12 +123,7 @@ pub fn rbf_gaussian_mat<T>(dist: MatRef<T>, epsilon: &T) -> Mat<T>
 where
     T: BixverseFloat,
 {
-    let ncol = dist.ncols();
-    let nrow = dist.nrows();
-    Mat::from_fn(nrow, ncol, |i, j| {
-        let x = *dist.get(i, j);
-        T::exp(-((x * *epsilon).powi(2)))
-    })
+    map_mat_par(dist, |x| T::exp(-((x * *epsilon).powi(2))))
 }
 
 //////////
@@ -143,12 +177,9 @@ pub fn rbf_bump_mat<T>(dist: MatRef<T>, epsilon: &T) -> Mat<T>
 where
     T: BixverseFloat,
 {
-    let ncol = dist.ncols();
-    let nrow = dist.nrows();
-    Mat::from_fn(nrow, ncol, |i, j| {
-        let x = dist.get(i, j);
-        if *x < (T::one() / *epsilon) {
-            T::exp(-(T::one() / (T::one() - (*epsilon * *x).powi(2))) + T::one())
+    map_mat_par(dist, |x| {
+        if x < (T::one() / *epsilon) {
+            T::exp(-(T::one() / (T::one() - (*epsilon * x).powi(2))) + T::one())
         } else {
             T::zero()
         }
@@ -200,12 +231,7 @@ pub fn rbf_inverse_quadratic_mat<T>(dist: MatRef<T>, epsilon: &T) -> Mat<T>
 where
     T: BixverseFloat,
 {
-    let ncol = dist.ncols();
-    let nrow = dist.nrows();
-    Mat::from_fn(nrow, ncol, |i, j| {
-        let x = dist.get(i, j);
-        T::one() / (T::one() + (*epsilon * *x).powi(2))
-    })
+    map_mat_par(dist, |x| T::one() / (T::one() + (*epsilon * x).powi(2)))
 }
 
 ////////////
@@ -246,13 +272,32 @@ where
     let k_res: Vec<Vec<T>> = epsilons
         .par_iter()
         .map(|epsilon| {
-            let affinity_adj = match rbf_fun {
-                RbfType::Gaussian => rbf_gaussian(dist, epsilon),
-                RbfType::Bump => rbf_bump(dist, epsilon),
-                RbfType::InverseQuadratic => rbf_inverse_quadratic(dist, epsilon),
+            // Sequential maps: the outer loop over epsilons already fills the pool.
+            let affinity_adj: Vec<T> = match rbf_fun {
+                RbfType::Gaussian => dist
+                    .iter()
+                    .map(|x| T::exp(-((*x * *epsilon).powi(2))))
+                    .collect(),
+                RbfType::Bump => dist
+                    .iter()
+                    .map(|x| {
+                        if *x < (T::one() / *epsilon) {
+                            T::exp(-(T::one() / (T::one() - (*epsilon * *x).powi(2))) + T::one())
+                        } else {
+                            T::zero()
+                        }
+                    })
+                    .collect(),
+                RbfType::InverseQuadratic => dist
+                    .iter()
+                    .map(|x| T::one() / (T::one() + (*epsilon * *x).powi(2)))
+                    .collect(),
             };
             let affinity_adj_mat = upper_triangle_to_sym_faer(&affinity_adj, shift, n);
-            col_sums(affinity_adj_mat.as_ref())
+            affinity_adj_mat
+                .col_iter()
+                .map(|col| col.iter().fold(T::zero(), |acc, &v| acc + v))
+                .collect()
         })
         .collect();
 

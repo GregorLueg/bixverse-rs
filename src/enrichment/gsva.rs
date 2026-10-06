@@ -4,7 +4,7 @@
 use faer::{ColRef, Mat, MatRef, RowRef};
 use once_cell::sync::Lazy;
 use rayon::prelude::*;
-use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use statrs::distribution::{DiscreteCDF, Poisson};
 use std::cell::RefCell;
 use std::time::Instant;
@@ -121,6 +121,7 @@ static NORMAL_CDF_TABLE: Lazy<Vec<f64>> = Lazy::new(|| {
 ///
 /// ### Params
 ///
+/// * `table` - The normal CDF lookup table
 /// * `x` - The value for which to retrieve the CDF
 /// * `mean` - The mean of the normal distribution
 /// * `std_dev` - The standard deviation of the normal distribution
@@ -129,7 +130,7 @@ static NORMAL_CDF_TABLE: Lazy<Vec<f64>> = Lazy::new(|| {
 ///
 /// The cumulative probability P(X <= x) for X ~ N(mean, std_dev²)
 #[inline(always)]
-fn fast_normal_cdf(x: f64, mean: f64, std_dev: f64) -> f64 {
+fn fast_normal_cdf(table: &[f64], x: f64, mean: f64, std_dev: f64) -> f64 {
     let z = (x - mean) / std_dev;
     if z <= -8.0 {
         return 0.0;
@@ -140,11 +141,11 @@ fn fast_normal_cdf(x: f64, mean: f64, std_dev: f64) -> f64 {
 
     // Lookup table with linear interpolation
     let index = ((z + 8.0) * 1000.0) as usize;
-    if index < NORMAL_CDF_TABLE.len() - 1 {
+    if index < table.len() - 1 {
         let frac = ((z + 8.0) * 1000.0) - index as f64;
-        NORMAL_CDF_TABLE[index] * (1.0 - frac) + NORMAL_CDF_TABLE[index + 1] * frac
+        table[index] * (1.0 - frac) + table[index + 1] * frac
     } else {
-        NORMAL_CDF_TABLE[NORMAL_CDF_TABLE.len() - 1]
+        table[table.len() - 1]
     }
 }
 
@@ -186,8 +187,6 @@ fn fast_poisson_cdf(lambda: f64, k: u64) -> f64 {
 
 /// Calculate the row-wise kernel density
 ///
-/// Uses unsafe under the hood to be fast...
-///
 /// ### Params
 ///
 /// * `density_row` - The reference distribution.
@@ -216,81 +215,48 @@ where
     let density_f64: Vec<f64> = density_row.iter().map(|&x| x.to_f64().unwrap()).collect();
 
     if use_gaussian {
+        let table: &[f64] = &NORMAL_CDF_TABLE;
         for test_val in test_row.iter() {
             let test_val_f64 = test_val.to_f64().unwrap();
-            let mut left_tail = 0.0_f64;
+            let mut acc = [0.0_f64; 4];
 
-            let mut i = 0;
-            while i + 4 <= n_density {
-                unsafe {
-                    let d1 = *density_f64.get_unchecked(i);
-                    let d2 = *density_f64.get_unchecked(i + 1);
-                    let d3 = *density_f64.get_unchecked(i + 2);
-                    let d4 = *density_f64.get_unchecked(i + 3);
-
-                    left_tail += fast_normal_cdf(test_val_f64, d1, bandwidth);
-                    left_tail += fast_normal_cdf(test_val_f64, d2, bandwidth);
-                    left_tail += fast_normal_cdf(test_val_f64, d3, bandwidth);
-                    left_tail += fast_normal_cdf(test_val_f64, d4, bandwidth);
+            let chunks = density_f64.chunks_exact(4);
+            let remainder = chunks.remainder();
+            for chunk in chunks {
+                for (a, &d) in acc.iter_mut().zip(chunk) {
+                    *a += fast_normal_cdf(table, test_val_f64, d, bandwidth);
                 }
-                i += 4;
+            }
+            for &d in remainder {
+                acc[0] += fast_normal_cdf(table, test_val_f64, d, bandwidth);
             }
 
-            while i < n_density {
-                unsafe {
-                    let d = *density_f64.get_unchecked(i);
-                    left_tail += fast_normal_cdf(test_val_f64, d, bandwidth);
-                }
-                i += 1;
-            }
-
-            left_tail *= density_len_inv;
+            let left_tail = ((acc[0] + acc[1]) + (acc[2] + acc[3])) * density_len_inv;
             let ratio = (1.0 - left_tail) / left_tail.max(1e-15);
             results.push(T::from_f64(-ratio.ln()).unwrap());
         }
     } else {
+        // Count data repeats values heavily, so evaluate once per distinct
+        // density value and weight by its multiplicity.
+        let mut sorted = density_f64.clone();
+        sorted.sort_unstable_by(|a, b| a.total_cmp(b));
+        let mut distinct: Vec<(f64, f64)> = Vec::new();
+        for d in sorted {
+            match distinct.last_mut() {
+                Some((v, count)) if *v == d => *count += 1.0,
+                _ => distinct.push((d, 1.0)),
+            }
+        }
+
         for test_val in test_row.iter() {
             let test_val_u64 = test_val.to_f64().unwrap().max(0.0) as u64;
             let mut left_tail = 0.0_f64;
 
-            let mut i = 0;
-            while i + 4 <= n_density {
-                unsafe {
-                    let d1 = *density_f64.get_unchecked(i);
-                    let d2 = *density_f64.get_unchecked(i + 1);
-                    let d3 = *density_f64.get_unchecked(i + 2);
-                    let d4 = *density_f64.get_unchecked(i + 3);
-
-                    let lambda1 = d1 + POISSON_BANDWIDTH;
-                    let lambda2 = d2 + POISSON_BANDWIDTH;
-                    let lambda3 = d3 + POISSON_BANDWIDTH;
-                    let lambda4 = d4 + POISSON_BANDWIDTH;
-
-                    if lambda1 > 0.0 {
-                        left_tail += fast_poisson_cdf(lambda1, test_val_u64);
-                    }
-                    if lambda2 > 0.0 {
-                        left_tail += fast_poisson_cdf(lambda2, test_val_u64);
-                    }
-                    if lambda3 > 0.0 {
-                        left_tail += fast_poisson_cdf(lambda3, test_val_u64);
-                    }
-                    if lambda4 > 0.0 {
-                        left_tail += fast_poisson_cdf(lambda4, test_val_u64);
-                    }
+            for &(d, count) in &distinct {
+                let lambda = d + POISSON_BANDWIDTH;
+                if lambda > 0.0 {
+                    left_tail += count * fast_poisson_cdf(lambda, test_val_u64);
                 }
-                i += 4;
-            }
-
-            while i < n_density {
-                unsafe {
-                    let d = *density_f64.get_unchecked(i);
-                    let lambda = d + POISSON_BANDWIDTH;
-                    if lambda > 0.0 {
-                        left_tail += fast_poisson_cdf(lambda, test_val_u64);
-                    }
-                }
-                i += 1;
             }
 
             left_tail *= density_len_inv;
@@ -449,22 +415,23 @@ fn gsva_random_walk<T: BixverseFloat>(
     let total_in_inv = T::one() / total_in;
     let total_out_inv = T::one() / total_out;
 
+    // Between in-set ranks the walk only decreases, so the extrema sit at the
+    // in-set steps (maxima) and at the end of each out-run (minima). The miss
+    // count is an exact integer in T.
     let mut max_pos = T::zero();
     let mut max_neg = T::zero();
     let mut cumulative_in = T::zero();
-    let mut cumulative_out = T::zero();
-    let mut weight_idx = 0;
 
-    for i in 0..n {
-        if weight_idx < weights.len() && weights[weight_idx].0 == i {
-            cumulative_in += weights[weight_idx].1;
-            weight_idx += 1;
-        } else {
-            cumulative_out += T::one();
+    for (j, &(rank, weight)) in weights.iter().enumerate() {
+        let cumulative_out = T::from_usize(rank - j).unwrap();
+        if rank > j {
+            let walk_stat = cumulative_in * total_in_inv - cumulative_out * total_out_inv;
+            if walk_stat < max_neg {
+                max_neg = walk_stat;
+            }
         }
-
+        cumulative_in += weight;
         let walk_stat = cumulative_in * total_in_inv - cumulative_out * total_out_inv;
-
         if walk_stat > max_pos {
             max_pos = walk_stat;
         }
@@ -473,7 +440,34 @@ fn gsva_random_walk<T: BixverseFloat>(
         }
     }
 
+    let tail_out = n - weights.len();
+    let walk_stat = cumulative_in * total_in_inv - T::from_usize(tail_out).unwrap() * total_out_inv;
+    if walk_stat < max_neg {
+        max_neg = walk_stat;
+    }
+
     (max_pos, max_neg)
+}
+
+const RANK_ABSENT: u32 = u32::MAX;
+
+/// Inverse of a gene ordering: `out[gene] = rank`, `RANK_ABSENT` for genes not
+/// in the ordering.
+///
+/// ### Params
+///
+/// * `order` - Gene indices sorted by rank
+///
+/// ### Returns
+///
+/// Rank per gene index, sized to the largest index plus one
+fn inverse_permutation(order: &[usize]) -> Vec<u32> {
+    let size = order.iter().max().map_or(0, |&m| m + 1);
+    let mut out = vec![RANK_ABSENT; size];
+    for (rank, &gene_idx) in order.iter().enumerate() {
+        out[gene_idx] = rank as u32;
+    }
+    out
 }
 
 /// Calculate GSVA enrichment scores for all gene sets in a sample.
@@ -504,11 +498,7 @@ pub fn gsva_score_genesets<T: BixverseFloat>(
 ) -> Vec<T> {
     let n = decreasing_order_indices.len();
 
-    let rank_lookup: FxHashMap<usize, usize> = decreasing_order_indices
-        .iter()
-        .enumerate()
-        .map(|(rank, &gene_idx)| (gene_idx, rank))
-        .collect();
+    let rank_lookup = inverse_permutation(decreasing_order_indices);
 
     gene_sets
         .iter()
@@ -519,8 +509,9 @@ pub fn gsva_score_genesets<T: BixverseFloat>(
 
             let mut gene_set_ranks = Vec::with_capacity(gene_set.len());
             for &gene_idx in gene_set {
-                if let Some(&rank) = rank_lookup.get(&gene_idx) {
-                    gene_set_ranks.push(rank);
+                match rank_lookup.get(gene_idx) {
+                    Some(&rank) if rank != RANK_ABSENT => gene_set_ranks.push(rank as usize),
+                    _ => {}
                 }
             }
 
@@ -603,7 +594,7 @@ fn calculate_rank_weights<T: BixverseFloat>(ranks: &MatRef<T>, alpha: f64) -> Ma
 #[inline]
 fn ssgsea_fast_random_walk<T: BixverseFloat>(
     gene_set_indices: &[usize],
-    rank_lookup: &FxHashMap<usize, usize>,
+    rank_lookup: &[u32],
     gene_ranking: &[usize],
     rank_weights: &ColRef<T>,
 ) -> T {
@@ -614,60 +605,38 @@ fn ssgsea_fast_random_walk<T: BixverseFloat>(
         return T::nan();
     }
 
+    let mut positions: Vec<u32> = gene_set_indices
+        .iter()
+        .filter_map(|&g| rank_lookup.get(g).copied())
+        .filter(|&p| p != RANK_ABSENT)
+        .collect();
+
+    // Small sets were always scored as sets, so repeated genes count once.
     if k < 32 {
-        let gene_set: FxHashSet<usize> = gene_set_indices.iter().copied().collect();
-        let mut sum_weighted_ranks = T::zero();
-        let mut sum_weights = T::zero();
-        let mut sum_gene_set_ranks = T::zero();
-        let mut found_genes = 0;
+        positions.sort_unstable();
+        positions.dedup();
+    }
 
-        for (rank_pos, &gene_idx) in gene_ranking.iter().enumerate() {
-            if gene_set.contains(&gene_idx) {
-                let weight = rank_weights[gene_idx];
-                let rank_contribution = T::from_usize(n - rank_pos).unwrap();
-
-                sum_weighted_ranks += weight * rank_contribution;
-                sum_weights += weight;
-                sum_gene_set_ranks += rank_contribution;
-                found_genes += 1;
-
-                if found_genes == k {
-                    break;
-                }
-            }
-        }
-
-        if found_genes == 0 {
-            return T::nan();
-        }
-
-        let step_cdf_in_gene_set = sum_weighted_ranks / sum_weights;
-        let n_t = T::from_usize(n).unwrap();
-        let sum_all_ranks = n_t * (n_t + T::one()) / T::from_f64(2.0).unwrap();
-        let step_cdf_out_gene_set =
-            (sum_all_ranks - sum_gene_set_ranks) / T::from_usize(n - found_genes).unwrap();
-
-        return step_cdf_in_gene_set - step_cdf_out_gene_set;
+    let found_genes = positions.len();
+    if found_genes == 0 {
+        return T::nan();
     }
 
     let mut sum_weighted_ranks = T::zero();
     let mut sum_weights = T::zero();
     let mut sum_gene_set_ranks = T::zero();
-    let mut found_genes = 0;
 
-    for &gene_idx in gene_set_indices {
-        if let Some(&rank_pos) = rank_lookup.get(&gene_idx) {
-            let weight = rank_weights[gene_idx];
-            let rank_contribution = T::from_usize(n - rank_pos).unwrap();
+    for &rank_pos in &positions {
+        let rank_pos = rank_pos as usize;
+        let weight = rank_weights[gene_ranking[rank_pos]];
+        let rank_contribution = T::from_usize(n - rank_pos).unwrap();
 
-            sum_weighted_ranks += weight * rank_contribution;
-            sum_weights += weight;
-            sum_gene_set_ranks += rank_contribution;
-            found_genes += 1;
-        }
+        sum_weighted_ranks += weight * rank_contribution;
+        sum_weights += weight;
+        sum_gene_set_ranks += rank_contribution;
     }
 
-    if found_genes == 0 || sum_weights <= T::zero() {
+    if sum_weights <= T::zero() {
         return T::nan();
     }
 
@@ -879,10 +848,7 @@ pub fn ssgsea<T: BixverseFloat>(
 
             let score_start = Instant::now();
 
-            let mut rank_lookup = FxHashMap::with_capacity_and_hasher(n_genes, FxBuildHasher);
-            for (rank_pos, &gene_idx) in gene_ranking.iter().enumerate() {
-                rank_lookup.insert(gene_idx, rank_pos);
-            }
+            let rank_lookup = inverse_permutation(&gene_ranking);
 
             let rank_weights_col = rank_weights.col(sample_idx);
 

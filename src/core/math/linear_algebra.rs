@@ -9,11 +9,19 @@ use faer::{
 
 use crate::prelude::*;
 
+////////////
+// Consts //
+////////////
+
 /// Relative pivot tolerance below which a Gram matrix is called rank deficient.
 ///
 /// Relative to the largest diagonal entry, so a design that is merely badly
 /// scaled is not mistaken for a rank-deficient one.
 const RANK_TOL: f64 = 1.0e-14;
+
+///////////////////////
+// Linear regression //
+///////////////////////
 
 /// Simple linear regression
 ///
@@ -487,6 +495,9 @@ pub fn nnls_gram<T: BixverseFloat>(
     let mut blocked = vec![false; k];
     let mut chol: Vec<T> = Vec::with_capacity(k * (k + 1) / 2);
     let mut gradient = xty.to_vec();
+    let mut rhs: Vec<T> = Vec::with_capacity(k);
+    let mut step: Vec<T> = Vec::with_capacity(k);
+    let mut kept: Vec<usize> = Vec::with_capacity(k);
 
     for _ in 0..params.max_iter_factor * k {
         // Steepest ascent among the variables still held at zero.
@@ -510,8 +521,9 @@ pub fn nnls_gram<T: BixverseFloat>(
         in_passive[entering] = true;
 
         loop {
-            let rhs: Vec<T> = passive.iter().map(|&p| xty[p]).collect();
-            let step = chol_solve(&chol, passive.len(), &rhs);
+            rhs.clear();
+            rhs.extend(passive.iter().map(|&p| xty[p]));
+            chol_solve(&chol, passive.len(), &rhs, &mut step);
 
             if step.iter().all(|&v| v > zero) {
                 for (i, &p) in passive.iter().enumerate() {
@@ -541,7 +553,7 @@ pub fn nnls_gram<T: BixverseFloat>(
                 x[p] = x[p] + alpha * (step[i] - x[p]);
             }
 
-            let mut kept: Vec<usize> = Vec::with_capacity(passive.len());
+            kept.clear();
             for &p in &passive {
                 if x[p] > zero {
                     kept.push(p);
@@ -550,7 +562,7 @@ pub fn nnls_gram<T: BixverseFloat>(
                     in_passive[p] = false;
                 }
             }
-            passive = kept;
+            std::mem::swap(&mut passive, &mut kept);
 
             if passive.is_empty() {
                 chol.clear();
@@ -575,12 +587,12 @@ pub fn nnls_gram<T: BixverseFloat>(
             blocked[entering] = true;
         }
 
-        for (j, g) in gradient.iter_mut().enumerate() {
-            let mut acc = xty[j];
-            for &p in &passive {
-                acc -= xtx[(j, p)] * x[p];
+        gradient.copy_from_slice(xty);
+        for &p in &passive {
+            let x_p = x[p];
+            for (j, g) in gradient.iter_mut().enumerate() {
+                *g -= xtx[(j, p)] * x_p;
             }
-            *g = acc;
         }
     }
 
@@ -688,12 +700,10 @@ fn chol_rebuild<T: BixverseFloat>(gram: MatRef<T>, passive: &[usize], chol: &mut
 /// * `chol` - Packed lower-triangular factor
 /// * `m` - Dimension of the factor
 /// * `rhs` - Right-hand side, length `m`
-///
-/// ### Returns
-///
-/// The solution `z`, length `m`.
-fn chol_solve<T: BixverseFloat>(chol: &[T], m: usize, rhs: &[T]) -> Vec<T> {
-    let mut z = vec![T::zero(); m];
+/// * `z` - Scratch buffer, overwritten with the solution of length `m`
+fn chol_solve<T: BixverseFloat>(chol: &[T], m: usize, rhs: &[T], z: &mut Vec<T>) {
+    z.clear();
+    z.resize(m, T::zero());
     for i in 0..m {
         let mut acc = rhs[i];
         for j in 0..i {
@@ -708,7 +718,6 @@ fn chol_solve<T: BixverseFloat>(chol: &[T], m: usize, rhs: &[T]) -> Vec<T> {
         }
         z[i] = acc / chol[tri_idx(i, i)];
     }
-    z
 }
 
 ///////////

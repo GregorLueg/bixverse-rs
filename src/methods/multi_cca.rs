@@ -20,14 +20,17 @@
 //! Witten & Tibshirani, Statistical Applications in Genetics and Molecular
 //! Biology, 2009. Witten, Tibshirani & Hastie, Biostatistics 10(3), 2009.
 
-use faer::{ColRef, Mat, MatRef};
+use faer::{Accum, ColRef, Mat, MatRef, Par};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
+use rayon::prelude::*;
 
 use crate::core::math::matrix_helpers::scale_matrix_col;
 use crate::core::math::vector_helpers::pearson_correlation;
 use crate::prelude::*;
+use crate::utils::faer_parallelism;
+use crate::utils::gemm::gemm;
 
 ////////////
 // Consts //
@@ -213,15 +216,56 @@ pub fn multi_cca<T: BixverseFloat>(
         ));
     }
     let blocks = prepare_blocks(x, params.standardise)?;
-    let k = blocks.len();
-
-    let penalties = resolve_penalties(&blocks, params.penalties.as_deref())?;
 
     // Leading right singular vectors, one column per component.
-    let mut init: Vec<Mat<T>> = Vec::with_capacity(k);
-    for block in blocks.iter() {
-        init.push(svd_init(block.as_ref(), n_comp)?);
-    }
+    let init = svd_inits(&blocks, n_comp)?;
+
+    multi_cca_fit(&blocks, &init, &params, faer_parallelism())
+}
+
+/// Leading right singular vectors of every block.
+///
+/// ### Params
+///
+/// * `blocks` - The prepared blocks
+/// * `n_comp` - Number of components, one column each
+///
+/// ### Returns
+///
+/// One `p_k x n_comp` matrix per block.
+fn svd_inits<T: BixverseFloat>(
+    blocks: &[Mat<T>],
+    n_comp: usize,
+) -> Result<Vec<Mat<T>>, BixverseErrors> {
+    blocks
+        .iter()
+        .map(|block| svd_init(block.as_ref(), n_comp))
+        .collect()
+}
+
+/// The block coordinate ascent on prepared blocks and precomputed starts.
+///
+/// ### Params
+///
+/// * `blocks` - The prepared blocks
+/// * `init` - Starting weights from [svd_inits], at least `n_components` wide
+/// * `params` - The solver options; `standardise` is not read here
+/// * `par` - Parallelism of the matrix-vector products
+///
+/// ### Returns
+///
+/// The [MultiCcaResult], or [BixverseErrors::InvalidArgument] for an L1 bound
+/// outside `[1, sqrt(p_k)]`.
+fn multi_cca_fit<T: BixverseFloat>(
+    blocks: &[Mat<T>],
+    init: &[Mat<T>],
+    params: &MultiCcaParams<T>,
+    par: Par,
+) -> Result<MultiCcaResult<T>, BixverseErrors> {
+    let n_comp = params.n_components;
+    let k = blocks.len();
+
+    let penalties = resolve_penalties(blocks, params.penalties.as_deref())?;
 
     let mut ws_final: Vec<Mat<T>> = blocks
         .iter()
@@ -230,10 +274,17 @@ pub fn multi_cca<T: BixverseFloat>(
     let mut cors: Vec<T> = Vec::with_capacity(n_comp);
 
     for comp in 0..n_comp {
-        let diag = deflation_table(&blocks, &ws_final, comp);
+        let diag = deflation_table(blocks, &ws_final, comp);
         let mut w: Vec<Vec<T>> = init
             .iter()
             .map(|m| (0..m.nrows()).map(|i| m[(i, comp)]).collect())
+            .collect();
+
+        // X_i w_i for every block, refreshed whenever w_i changes
+        let mut variates: Vec<Vec<T>> = blocks
+            .iter()
+            .zip(w.iter())
+            .map(|(b, wi)| mat_vec(b, wi))
             .collect();
 
         // The criterion is evaluated at the top of the sweep, so it lags the
@@ -248,10 +299,21 @@ pub fn multi_cca<T: BixverseFloat>(
             && crit_old != T::zero()
         {
             crit_old = crit;
-            crit = criterion(&blocks, &w);
+            crit = criterion(&variates);
             sweep += 1;
             for i in 0..k {
-                w[i] = update_block(&blocks, i, &w, &ws_final, comp, &diag, penalties[i]);
+                w[i] = update_block(
+                    blocks,
+                    i,
+                    &w,
+                    &variates,
+                    &ws_final,
+                    comp,
+                    &diag,
+                    penalties[i],
+                    par,
+                );
+                variates[i] = mat_vec(&blocks[i], &w[i]);
             }
         }
 
@@ -260,7 +322,7 @@ pub fn multi_cca<T: BixverseFloat>(
                 ws_final[i][(j, comp)] = v;
             }
         }
-        cors.push(sum_pairwise_correlations(&blocks, &w));
+        cors.push(sum_pairwise_correlations(&variates));
     }
 
     Ok(MultiCcaResult {
@@ -440,23 +502,28 @@ fn normalise_sign<T: BixverseFloat>(m: &mut Mat<T>, col: usize) {
 /// * `blocks` - The prepared blocks
 /// * `i` - Block being updated
 /// * `w` - Current weights for every block, this component
+/// * `variates` - `X_j w_j` for every block at the current weights
 /// * `ws_final` - Components already extracted, zero-filled beyond `comp`
 /// * `comp` - Component being extracted
 /// * `diag` - Deflation table from [deflation_table], indexed
 ///   `(i * K + j) * comp + c`
 /// * `penalty` - L1 bound for this block
+/// * `par` - Parallelism of the cross product
 ///
 /// ### Returns
 ///
 /// The updated weight vector for block `i`.
+#[allow(clippy::too_many_arguments)]
 fn update_block<T: BixverseFloat>(
     blocks: &[Mat<T>],
     i: usize,
     w: &[Vec<T>],
+    variates: &[Vec<T>],
     ws_final: &[Mat<T>],
     comp: usize,
     diag: &[T],
     penalty: T,
+    par: Par,
 ) -> Vec<T> {
     let p_i = blocks[i].ncols();
     let mut totals = vec![T::zero(); p_i];
@@ -466,9 +533,16 @@ fn update_block<T: BixverseFloat>(
             continue;
         }
         // X_i' (X_j w_j)
-        let xj_wj = mat_vec(&blocks[j], &w[j]);
-        let cross = blocks[i].transpose() * ColRef::from_slice(&xj_wj);
-        for (t, c) in totals.iter_mut().zip(cross.iter()) {
+        let mut cross = Mat::<T>::zeros(p_i, 1);
+        gemm(
+            cross.as_mut(),
+            Accum::Replace,
+            blocks[i].transpose(),
+            ColRef::from_slice(&variates[j]).as_mat(),
+            T::one(),
+            par,
+        );
+        for (t, c) in totals.iter_mut().zip(cross.col_as_slice(0)) {
             *t += *c;
         }
 
@@ -555,20 +629,14 @@ fn deflation_table<T: BixverseFloat>(
 ///
 /// ### Params
 ///
-/// * `blocks` - The prepared blocks
-/// * `w` - Current weights for every block
+/// * `variates` - `X_i w_i` for every block
 ///
 /// ### Returns
 ///
 /// The criterion value.
-fn criterion<T: BixverseFloat>(blocks: &[Mat<T>], w: &[Vec<T>]) -> T {
-    let variates: Vec<Vec<T>> = blocks
-        .iter()
-        .zip(w.iter())
-        .map(|(b, wi)| mat_vec(b, wi))
-        .collect();
+fn criterion<T: BixverseFloat>(variates: &[Vec<T>]) -> T {
     let mut total = T::zero();
-    for i in 1..blocks.len() {
+    for i in 1..variates.len() {
         for j in 0..i {
             total += variates[i]
                 .iter()
@@ -583,20 +651,14 @@ fn criterion<T: BixverseFloat>(blocks: &[Mat<T>], w: &[Vec<T>]) -> T {
 ///
 /// ### Params
 ///
-/// * `blocks` - The prepared blocks
-/// * `w` - Current weights for every block
+/// * `variates` - `X_i w_i` for every block
 ///
 /// ### Returns
 ///
 /// The summed pairwise correlation.
-fn sum_pairwise_correlations<T: BixverseFloat>(blocks: &[Mat<T>], w: &[Vec<T>]) -> T {
-    let variates: Vec<Vec<T>> = blocks
-        .iter()
-        .zip(w.iter())
-        .map(|(b, wi)| mat_vec(b, wi))
-        .collect();
+fn sum_pairwise_correlations<T: BixverseFloat>(variates: &[Vec<T>]) -> T {
     let mut total = T::zero();
-    for i in 1..blocks.len() {
+    for i in 1..variates.len() {
         for j in 0..i {
             let r = pearson_correlation(&variates[i], &variates[j]).unwrap_or(0.0);
             total += T::from_f64(r).unwrap_or_else(T::zero);
@@ -709,8 +771,8 @@ fn mat_vec<T: BixverseFloat>(m: &Mat<T>, v: &[T]) -> Vec<T> {
         if vj == T::zero() {
             continue;
         }
-        for (i, o) in out.iter_mut().enumerate() {
-            *o += m[(i, j)] * vj;
+        for (o, &x) in out.iter_mut().zip(m.col_as_slice(j)) {
+            *o += x * vj;
         }
     }
     out
@@ -798,40 +860,71 @@ pub fn multi_cca_permute<T: BixverseFloat>(
     }
 
     // Blocks are standardised above, so the fits below must not repeat it.
-    let fit = |b: &[Mat<T>], penalties: &[T], n_iter: usize| -> Result<T, BixverseErrors> {
-        let refs: Vec<MatRef<T>> = b.iter().map(|m| m.as_ref()).collect();
-        let res = multi_cca(
-            &refs,
-            Some(MultiCcaParams {
+    // The svd start depends only on the blocks, so every grid point on the
+    // same data shares it.
+    let fit = |b: &[Mat<T>],
+               init: &[Mat<T>],
+               penalties: &[T],
+               n_iter: usize,
+               par: Par|
+     -> Result<T, BixverseErrors> {
+        let res = multi_cca_fit(
+            b,
+            init,
+            &MultiCcaParams {
                 n_components: 1,
                 n_iter,
                 tol: T::from_f64(DEFAULT_TOL).unwrap(),
                 penalties: Some(penalties.to_vec()),
                 standardise: false,
-            }),
+            },
+            par,
         )?;
         Ok(res.cors[0])
     };
 
+    let real_init = svd_inits(&blocks, 1)?;
     let real: Vec<T> = grid
         .iter()
-        .map(|p| fit(&blocks, p, params.n_iter))
+        .map(|p| fit(&blocks, &real_init, p, params.n_iter, faer_parallelism()))
         .collect::<Result<_, _>>()?;
 
+    // Orders are drawn up front, perm-major then block-major, so the RNG
+    // stream matches a sequential run.
     let mut rng = StdRng::seed_from_u64(params.seed);
     let n = blocks[0].nrows();
+    let orders: Vec<Vec<Vec<usize>>> = (0..params.n_perms)
+        .map(|_| {
+            blocks
+                .iter()
+                .map(|_| {
+                    let mut order: Vec<usize> = (0..n).collect();
+                    order.shuffle(&mut rng);
+                    order
+                })
+                .collect()
+        })
+        .collect();
+
+    let per_perm: Vec<Vec<T>> = orders
+        .par_iter()
+        .map(|perm_orders| {
+            let shuffled: Vec<Mat<T>> = blocks
+                .iter()
+                .zip(perm_orders)
+                .map(|(b, order)| Mat::<T>::from_fn(n, b.ncols(), |i, j| b[(order[i], j)]))
+                .collect();
+            let init = svd_inits(&shuffled, 1)?;
+            grid.iter()
+                .map(|point| fit(&shuffled, &init, point, params.n_iter, Par::Seq))
+                .collect::<Result<Vec<T>, BixverseErrors>>()
+        })
+        .collect::<Result<_, _>>()?;
+
     let mut permuted: Vec<Vec<T>> = vec![Vec::with_capacity(params.n_perms); grid.len()];
-    for _ in 0..params.n_perms {
-        let shuffled: Vec<Mat<T>> = blocks
-            .iter()
-            .map(|b| {
-                let mut order: Vec<usize> = (0..n).collect();
-                order.shuffle(&mut rng);
-                Mat::<T>::from_fn(n, b.ncols(), |i, j| b[(order[i], j)])
-            })
-            .collect();
-        for (g, point) in grid.iter().enumerate() {
-            permuted[g].push(fit(&shuffled, point, params.n_iter)?);
+    for perm_res in per_perm {
+        for (g, v) in perm_res.into_iter().enumerate() {
+            permuted[g].push(v);
         }
     }
 

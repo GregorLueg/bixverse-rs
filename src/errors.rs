@@ -582,6 +582,26 @@ pub enum BixverseErrors {
     #[error("Invalid raw count element size discriminant: {0}")]
     RawElemSizeInvalid(u8),
 
+    /// The file is not a bixverse count archive.
+    #[cfg(feature = "single-cell")]
+    #[error("Not a bixverse count archive (magic string mismatch)")]
+    ArchiveMagicMismatch,
+
+    /// The archive was written by an incompatible archive format version.
+    #[cfg(feature = "single-cell")]
+    #[error("Archive version mismatch: expected {expected}, got {found}")]
+    ArchiveVersionMismatch {
+        /// Version the current build expects.
+        expected: u32,
+        /// Version actually read from the archive.
+        found: u32,
+    },
+
+    /// The archive is truncated or corrupt, or a chunk cannot be archived.
+    #[cfg(feature = "single-cell")]
+    #[error("Corrupt count archive: {0}")]
+    ArchiveCorrupt(String),
+
     /// A raw count read from disk does not fit the requested numeric type.
     ///
     /// Raised by `from_gene_chunks` / `from_cell_chunks` instead of silently
@@ -853,6 +873,18 @@ pub enum BixverseErrors {
     #[cfg(feature = "single-cell")]
     #[error("HVG: n_bins must be at least 1.")]
     HvgInvalidBinCount,
+
+    /// Too few genes pass the mean filter to fit the scran variance trend.
+    #[cfg(feature = "single-cell")]
+    #[error(
+        "HVG: only {n_kept} genes have a mean log-expression of at least {minimum_mean}; the variance trend needs two."
+    )]
+    HvgTooFewTrendPoints {
+        /// Genes left after the mean filter
+        n_kept: usize,
+        /// The mean filter threshold
+        minimum_mean: f64,
+    },
 
     // -- NMF --
     /// NMF Rank is too large for the NNDSVD initialisation
@@ -1668,6 +1700,46 @@ pub enum BixverseErrors {
         found: usize,
         /// Cells a sample must contribute
         min_cells: usize,
+    },
+
+    // -- CellPhoneDB --
+    /// A partner subunit points outside the genes in the store.
+    #[cfg(feature = "single-cell")]
+    #[error("CellPhoneDB: gene index {index} is outside the {n_genes} genes in the store.")]
+    CpdbGeneIndexOutOfRange {
+        /// The offending index
+        index: usize,
+        /// Number of genes in the store
+        n_genes: usize,
+    },
+
+    /// A cluster lists a cell outside the store.
+    #[cfg(feature = "single-cell")]
+    #[error("CellPhoneDB: cell index {index} is outside the {n_cells} cells in the store.")]
+    CpdbCellIndexOutOfRange {
+        /// The offending index
+        index: usize,
+        /// Number of cells in the store
+        n_cells: usize,
+    },
+
+    /// An interaction has a partner without any subunit genes.
+    #[cfg(feature = "single-cell")]
+    #[error("CellPhoneDB: interaction {interaction} has a partner without genes.")]
+    CpdbEmptyPartner {
+        /// Index of the offending interaction
+        interaction: usize,
+    },
+
+    /// A cell was assigned to more than one cluster.
+    ///
+    /// The permutation shuffles one label per cell, so clusters must be
+    /// disjoint.
+    #[cfg(feature = "single-cell")]
+    #[error("CellPhoneDB: cell {cell} appears in more than one cluster.")]
+    CpdbClusterOverlap {
+        /// The offending cell index
+        cell: usize,
     },
 
     // -- sctype --

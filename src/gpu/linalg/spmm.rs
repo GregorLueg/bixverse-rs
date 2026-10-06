@@ -64,9 +64,8 @@ use crate::gpu::{WORKGROUP_64, WORKGROUP_128, WORKGROUP_256};
 ///
 /// Both SpMM kernels stride their column loop by the workgroup width, so a
 /// width below `s` re-streams the whole non-zero segment of every row once per
-/// extra pass. At the single-cell PCA default `s` is 130 against a 128-wide
-/// workgroup, which costs a second full pass of the indices and values for two
-/// columns of useful work.
+/// extra pass. At `s = 130` against a 128-wide workgroup that costs a second
+/// full pass of the indices and values for two columns of useful work.
 ///
 /// Rounding up leaves threads that never enter the loop. That is fine: idle
 /// threads cost nothing, and the SIMD groups they sit in still help hide

@@ -158,6 +158,14 @@ where
     let n = csc.shape.1;
     let k = w.ncols();
 
+    // W^T, so the k entries of row i of W are contiguous per non-zero
+    let mut wt = Mat::<F>::zeros(k, w.nrows());
+    wt.par_col_iter_mut().enumerate().for_each(|(i, mut col)| {
+        for r in 0..k {
+            col[r] = w[(i, r)];
+        }
+    });
+
     let out_ptr = out.as_ptr_mut() as usize;
     let out_row_stride = out.row_stride();
     let out_col_stride = out.col_stride();
@@ -172,8 +180,8 @@ where
             for idx in start..end {
                 let i = csc.indices[idx] as usize;
                 let val_f: F = csc.data[idx].into();
-                for r in 0..k {
-                    acc[r] += val_f * w[(i, r)];
+                for (a, &w_ir) in acc.iter_mut().zip(wt.col_as_slice(i)) {
+                    *a += val_f * w_ir;
                 }
             }
 

@@ -1,9 +1,10 @@
 //! Implementation of the (fast)MNN approach from Haghverdi, et al, Nat
-//! Biotechnol, 2018
+//! Biotechnol, 2018. The neighbour search is passed in as a closure, so the
+//! CPU path here and the GPU path in `gpu::sc_gpu::fast_mnn_gpu` share every
+//! other step.
 
-use faer::{Mat, MatRef};
+use faer::{Col, Mat, MatMut, MatRef};
 use rayon::prelude::*;
-use rustc_hash::{FxHashMap, FxHashSet};
 use std::time::Instant;
 use thousands::Separable;
 
@@ -12,6 +13,19 @@ use crate::single_cell::sc_batch_correction::batch_utils::batch_knn_search;
 use crate::single_cell::sc_batch_correction::batch_utils::cosine_normalise;
 use crate::single_cell::sc_batch_correction::batch_utils::process_batch_labels;
 use crate::single_cell::sc_processing::pca::*;
+
+///////////////
+// Constants //
+///////////////
+
+/// Below this L2 norm a batch vector has no direction to centre along, and
+/// the data passes through unchanged.
+const MIN_BATCH_VEC_NORM: f64 = 1e-15;
+
+/// Distances (and tricube bandwidths) below this count as zero. A cell whose
+/// neighbours all sit on top of it gets the unweighted mean of the zero
+/// distance corrections instead of the kernel.
+const MIN_DIST: f32 = 1e-15;
 
 ////////////
 // Params //
@@ -26,15 +40,13 @@ pub struct FastMnnParams {
     pub cos_norm: bool,
     /// Number of PCs to use for the MNN calculations
     pub no_pcs: usize,
-    /// Boolean. Shall randomised SVD be used.
-    pub random_svd: bool,
     /// Shall sparse SVD be utilised -> reduces memory pressure
     pub sparse_svd: bool,
     /// [KnnParams] for the various approximate nearest neighbour searches
     /// in ann-search-rs
     pub knn_params: KnnParams,
     /// [SingleCellPcaParams] specifying the to-be-applied normalisations and
-    /// if the randomised path should be taken.
+    /// the PCA solver.
     pub pca_params: SingleCellPcaParams,
 }
 
@@ -44,61 +56,50 @@ pub struct FastMnnParams {
 
 /// Find mutual nearest neighbours from two KNN graphs
 ///
+/// `k` is small, so a linear scan of the neighbour row beats hashing it.
+///
 /// ### Params
 ///
-/// * `left_knn` - KNN indices for left batch (each row is cell's neighbours)
-/// * `right_knn` - KNN indices for right batch
+/// * `left_knn` - KNN indices for left batch (each row is a left cell's
+///   neighbours in the right batch)
+/// * `right_knn` - KNN indices for right batch (each row is a right cell's
+///   neighbours in the left batch)
 ///
 /// ### Returns
 ///
-/// (left_indices, right_indices) of MNN pairs
+/// (left_indices, right_indices) of MNN pairs, ordered by left cell
 pub fn find_mutual_nns(
     left_knn: &[Vec<usize>],
     right_knn: &[Vec<usize>],
 ) -> (Vec<usize>, Vec<usize>) {
-    let right_sets: Vec<FxHashSet<usize>> = right_knn
-        .iter()
-        .map(|neighbours| neighbours.iter().copied().collect())
-        .collect();
-
     left_knn
         .par_iter()
         .enumerate()
-        .fold(
-            || (Vec::new(), Vec::new()),
-            |(mut left_mnn, mut right_mnn), (left_idx, left_neighbours)| {
-                for &right_idx in left_neighbours {
-                    if right_sets[right_idx].contains(&left_idx) {
-                        left_mnn.push(left_idx);
-                        right_mnn.push(right_idx);
-                    }
-                }
-                (left_mnn, right_mnn)
-            },
-        )
-        .reduce(
-            || (Vec::new(), Vec::new()),
-            |(mut l1, mut r1), (l2, r2)| {
-                l1.extend(l2);
-                r1.extend(r2);
-                (l1, r1)
-            },
-        )
+        .flat_map_iter(|(left_idx, left_neighbours)| {
+            left_neighbours
+                .iter()
+                .filter(move |&&right_idx| right_knn[right_idx].contains(&left_idx))
+                .map(move |&right_idx| (left_idx, right_idx))
+        })
+        .unzip()
 }
 
 /// Compute raw correction vectors from MNN pairs
 ///
+/// Pairs are bucketed by their right cell first, so every target is averaged
+/// independently and in parallel.
+///
 /// ### Params
 ///
-/// * `data_1` - Left batch data (cells x genes)
-/// * `data_2` - Right batch data (cells x genes)
+/// * `data_1` - Left batch data (cells x features)
+/// * `data_2` - Right batch data (cells x features)
 /// * `mnn_1` - MNN indices in left batch
 /// * `mnn_2` - MNN indices in right batch
 ///
 /// ### Returns
 ///
 /// Matrix of correction vectors averaged per unique cell in right batch
-/// (cells x genes) and sorted indices
+/// (n_unique x features) and the sorted right batch indices of its rows
 pub fn compute_correction_vecs(
     data_1: &MatRef<f32>,
     data_2: &MatRef<f32>,
@@ -106,79 +107,118 @@ pub fn compute_correction_vecs(
     mnn_2: &[usize],
 ) -> (Mat<f32>, Vec<usize>) {
     let n_features = data_1.ncols();
-    let mut accum: FxHashMap<usize, (Vec<f32>, usize)> = FxHashMap::default();
+    let n_right = data_2.nrows();
 
-    for (&idx1, &idx2) in mnn_1.iter().zip(mnn_2.iter()) {
-        let (sums, count) = accum
-            .entry(idx2)
-            .or_insert_with(|| (vec![0_f32; n_features], 0));
-        for g in 0..n_features {
-            sums[g] += data_1.get(idx1, g) - data_2.get(idx2, g);
-        }
-        *count += 1;
+    let mut indptr = vec![0_usize; n_right + 1];
+    for &r in mnn_2 {
+        indptr[r + 1] += 1;
+    }
+    for r in 0..n_right {
+        indptr[r + 1] += indptr[r];
+    }
+    let mut fill = indptr.clone();
+    let mut partners = vec![0_usize; mnn_1.len()];
+    for (&l, &r) in mnn_1.iter().zip(mnn_2) {
+        partners[fill[r]] = l;
+        fill[r] += 1;
     }
 
-    let mut sorted_indices: Vec<usize> = accum.keys().copied().collect();
-    sorted_indices.sort_unstable();
+    let targets: Vec<usize> = (0..n_right)
+        .filter(|&r| indptr[r + 1] > indptr[r])
+        .collect();
 
-    let n_unique = sorted_indices.len();
-    let mut averaged = Mat::zeros(n_unique, n_features);
+    let mut averaged = vec![0_f32; targets.len() * n_features];
+    averaged
+        .par_chunks_mut(n_features)
+        .zip(targets.par_iter())
+        .for_each(|(row, &r)| {
+            let left = &partners[indptr[r]..indptr[r + 1]];
+            for &l in left {
+                for (g, sum) in row.iter_mut().enumerate() {
+                    *sum += data_1[(l, g)] - data_2[(r, g)];
+                }
+            }
+            let n = left.len() as f32;
+            row.iter_mut().for_each(|x| *x /= n);
+        });
 
-    for (row, &cell_idx) in sorted_indices.iter().enumerate() {
-        let (sums, count) = &accum[&cell_idx];
-        let n = *count as f32;
-        for g in 0..n_features {
-            averaged[(row, g)] = sums[g] / n;
-        }
-    }
-
-    (averaged, sorted_indices)
+    (
+        Mat::from_fn(targets.len(), n_features, |i, g| {
+            averaged[i * n_features + g]
+        }),
+        targets,
+    )
 }
 
-/// Centre data along the batch vector direction.
+/// Centre data along the batch vector direction, in place.
 ///
 /// Projects all cells onto the unit batch vector, computes mean projection,
 /// then shifts each cell so variation along the batch direction is removed.
-/// This is `.center_along_batch_vector` from the R code.
+/// This is `.center_along_batch_vector` from the R code. The projection is a
+/// faer matvec and the shift a column-wise rank-1 update, so both run along
+/// the contiguous axis of the column-major matrix.
 ///
 /// ### Params
 ///
-/// * `data` - Cell data matrix (cells x features)
-/// * `batch_vec` - The batch direction vector (length = n_features). If the
-///   L2 norm is below 1e-15, data is returned unchanged.
+/// * `data` - Cell data matrix (cells x features), modified in place
+/// * `batch_vec` - The batch direction vector (length = n_features). If its
+///   L2 norm is below [`MIN_BATCH_VEC_NORM`], data is left unchanged.
+fn center_along_batch_vector(data: MatMut<f32>, batch_vec: &[f32]) {
+    let n_cells = data.nrows();
+
+    let l2 = batch_vec
+        .iter()
+        .map(|&x| (x as f64).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    if l2 < MIN_BATCH_VEC_NORM {
+        return;
+    }
+    let unit: Col<f32> = Col::from_fn(batch_vec.len(), |g| (batch_vec[g] as f64 / l2) as f32);
+
+    let projections: Col<f32> = data.as_ref() * unit.as_ref();
+    // f64 so the mean over many cells does not drift
+    let mean_proj = projections.iter().map(|&p| p as f64).sum::<f64>() / n_cells as f64;
+    let shift: Vec<f32> = projections
+        .iter()
+        .map(|&p| (mean_proj - p as f64) as f32)
+        .collect();
+
+    data.par_col_iter_mut().enumerate().for_each(|(g, col)| {
+        let u = unit[g];
+        for (x, &s) in col.iter_mut().zip(&shift) {
+            *x += s * u;
+        }
+    });
+}
+
+/// Median of a slice, reordering it in place.
+///
+/// ### Params
+///
+/// * `x` - Non-empty slice of values. Reordered on return.
 ///
 /// ### Returns
 ///
-/// Centred matrix (cells x features) with variation along `batch_vec` removed
-fn center_along_batch_vector(data: &MatRef<f32>, batch_vec: &[f32]) -> Mat<f32> {
-    let n_cells = data.nrows();
-    let n_features = data.ncols();
-
-    let l2: f32 = batch_vec.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if l2 < 1e-15 {
-        return data.to_owned();
+/// The median; the mean of the two middle values for an even length.
+fn median_in_place(x: &mut [f32]) -> f32 {
+    let len = x.len();
+    let (lower, &mut upper, _) = x.select_nth_unstable_by(len / 2, f32::total_cmp);
+    if len.is_multiple_of(2) {
+        let lower_max = lower.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        (lower_max + upper) * 0.5
+    } else {
+        upper
     }
-    let unit_vec: Vec<f32> = batch_vec.iter().map(|x| x / l2).collect();
-
-    let mut projections = vec![0.0f32; n_cells];
-    for i in 0..n_cells {
-        for g in 0..n_features {
-            projections[i] += data.get(i, g) * unit_vec[g];
-        }
-    }
-
-    let mean_proj: f32 = projections.iter().sum::<f32>() / n_cells as f32;
-
-    Mat::from_fn(n_cells, n_features, |i, g| {
-        data.get(i, g) + (mean_proj - projections[i]) * unit_vec[g]
-    })
 }
 
 /// Compute tricube-weighted correction for all cells in the target batch.
 ///
 /// For each cell, finds k nearest neighbours among MNN-involved cells,
 /// computes tricube-weighted average of their correction vectors, and
-/// returns the corrected data (data + weighted_correction).
+/// returns the corrected data (data + weighted_correction). Parallel over
+/// cells, with the corrections copied row-major once so each cell reads its
+/// neighbours' vectors contiguously.
 ///
 /// ### Params
 ///
@@ -190,103 +230,87 @@ fn center_along_batch_vector(data: &MatRef<f32>, batch_vec: &[f32]) -> Mat<f32> 
 /// * `k` - Number of nearest MNN neighbours to use for weighting
 /// * `ndist` - Bandwidth multiplier; bandwidth = ndist * median distance to
 ///   the k neighbours
-/// * `knn_params` - Parameters controlling the approximate nearest neighbour
-///   search
-/// * `seed` - Random seed for reproducibility
+/// * `search` - Neighbour search, called as `search(query, reference, k)` and
+///   returning true (not squared) distances
 ///
 /// ### Returns
 ///
 /// Corrected matrix (cells x features); each cell's coordinates shifted by
 /// its tricube-weighted average correction vector
-#[allow(clippy::too_many_arguments)]
-pub fn tricube_weighted_correction(
+pub fn tricube_weighted_correction<F>(
     data: &MatRef<f32>,
     corrections: &MatRef<f32>,
     mnn_indices: &[usize],
     k: usize,
     ndist: f32,
-    knn_params: &KnnParams,
-    seed: usize,
-) -> Result<Mat<f32>, BixverseErrors> {
+    search: &F,
+) -> Result<Mat<f32>, BixverseErrors>
+where
+    F: Fn(MatRef<f32>, MatRef<f32>, usize) -> ScKnnResults,
+{
     let n_cells = data.nrows();
     let n_features = data.ncols();
     let n_mnn = mnn_indices.len();
 
-    // build sub-matrix of MNN-involved cells' coordinates
     let mnn_data = Mat::from_fn(n_mnn, n_features, |r, c| *data.get(mnn_indices[r], c));
-
     let safe_k = k.min(n_mnn);
 
-    // find k nearest MNN neighbours for every cell
-    let (knn_idx, knn_dist) =
-        batch_knn_search(*data, mnn_data.as_ref(), safe_k, knn_params, seed, 0)?;
+    let (knn_idx, knn_dist) = search(*data, mnn_data.as_ref(), safe_k)?;
 
-    // compute tricube-weighted average corrections
-    let mut correction_out: Mat<f32> = Mat::zeros(n_cells, n_features);
+    let corr: Vec<f32> = (0..n_mnn)
+        .flat_map(|r| (0..n_features).map(move |g| corrections[(r, g)]))
+        .collect();
 
-    for cell in 0..n_cells {
-        let dists = &knn_dist[cell];
-        let indices = &knn_idx[cell];
+    let mut shift = vec![0_f32; n_cells * n_features];
+    shift
+        .par_chunks_mut(n_features)
+        .zip(knn_idx.par_iter().zip(knn_dist.par_iter()))
+        .for_each_init(
+            || (Vec::with_capacity(safe_k), Vec::with_capacity(safe_k)),
+            |(scratch, weights), (row, (indices, dists))| {
+                if dists.is_empty() {
+                    return;
+                }
 
-        if dists.is_empty() {
-            continue;
-        }
+                scratch.clear();
+                scratch.extend_from_slice(dists);
+                let bandwidth = ndist * median_in_place(scratch);
 
-        // Bandwidth = ndist * median distance
-        let mut sorted_d: Vec<f32> = dists.clone();
-        sorted_d.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let median_d = if sorted_d.len().is_multiple_of(2) && sorted_d.len() >= 2 {
-            (sorted_d[sorted_d.len() / 2 - 1] + sorted_d[sorted_d.len() / 2]) * 0.5
-        } else {
-            sorted_d[sorted_d.len() / 2]
-        };
+                weights.clear();
+                if bandwidth < MIN_DIST {
+                    weights.extend(dists.iter().map(|&d| if d < MIN_DIST { 1.0 } else { 0.0 }));
+                } else {
+                    weights.extend(dists.iter().map(|&d| {
+                        let ratio = d / bandwidth;
+                        if ratio < 1.0 {
+                            let t = 1.0 - ratio * ratio * ratio;
+                            t * t * t
+                        } else {
+                            0.0
+                        }
+                    }));
+                }
 
-        let bandwidth = ndist * median_d;
+                let weight_sum: f32 = weights.iter().sum();
+                if weight_sum <= 0.0 {
+                    return;
+                }
+                let inv_w = 1.0 / weight_sum;
 
-        if bandwidth < 1e-15 {
-            // All neighbours at the same point; unweighted average of zero-distance ones
-            let zero_count = dists.iter().filter(|&&d| d < 1e-15).count();
-            if zero_count > 0 {
-                let w = 1.0 / zero_count as f32;
-                for (j, &nn) in indices.iter().enumerate() {
-                    if dists[j] < 1e-15 {
-                        for g in 0..n_features {
-                            correction_out[(cell, g)] += corrections.get(nn, g) * w;
+                for (&nn, &w) in indices.iter().zip(weights.iter()) {
+                    if w > 0.0 {
+                        let w = w * inv_w;
+                        let c = &corr[nn * n_features..(nn + 1) * n_features];
+                        for (out, &c_g) in row.iter_mut().zip(c) {
+                            *out += c_g * w;
                         }
                     }
                 }
-            }
-            continue;
-        }
+            },
+        );
 
-        let mut weight_sum = 0.0f32;
-        let mut weights = vec![0.0f32; indices.len()];
-
-        for (j, &d) in dists.iter().enumerate() {
-            let ratio = d / bandwidth;
-            if ratio < 1.0 {
-                let t = 1.0 - ratio * ratio * ratio;
-                weights[j] = t * t * t;
-                weight_sum += weights[j];
-            }
-        }
-
-        if weight_sum > 0.0 {
-            let inv_w = 1.0 / weight_sum;
-            for (j, &nn) in indices.iter().enumerate() {
-                if weights[j] > 0.0 {
-                    let w = weights[j] * inv_w;
-                    for g in 0..n_features {
-                        correction_out[(cell, g)] += corrections.get(nn, g) * w;
-                    }
-                }
-            }
-        }
-    }
-
-    // Return data + correction
     Ok(Mat::from_fn(n_cells, n_features, |i, g| {
-        data.get(i, g) + correction_out[(i, g)]
+        data.get(i, g) + shift[i * n_features + g]
     }))
 }
 
@@ -307,12 +331,14 @@ pub fn tricube_weighted_correction(
 ///
 /// * `data_1` - Left (reference) batch coordinates (cells x features)
 /// * `data_2` - Right (target) batch coordinates (cells x features)
-/// * `params` - FastMNN parameters controlling k, ndist, cosine normalisation,
-///   and the underlying kNN search
+/// * `k` - Number of neighbours for the MNN and tricube searches
+/// * `ndist` - Tricube bandwidth multiplier, see
+///   [`tricube_weighted_correction`]
+/// * `search` - Neighbour search, called as `search(query, reference, k)` and
+///   returning true (not squared) distances
 /// * `batch_vecs` - Accumulated batch direction vectors from all prior merges;
 ///   `data_2` is orthogonalised against each before MNN search, and the new
 ///   batch vector is appended on return
-/// * `seed` - Random seed for reproducibility
 /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
 ///   verbosity.
 ///
@@ -320,43 +346,34 @@ pub fn tricube_weighted_correction(
 ///
 /// Stacked matrix of left (centred) and corrected right batch (n_total x
 /// features)
-pub fn merge_two_batches(
+pub fn merge_two_batches<F>(
     data_1: &MatRef<f32>,
     data_2: &MatRef<f32>,
-    params: &FastMnnParams,
+    k: usize,
+    ndist: f32,
+    search: &F,
     batch_vecs: &mut Vec<Vec<f32>>,
-    seed: usize,
     verbose: usize,
-) -> Result<Mat<f32>, BixverseErrors> {
+) -> Result<Mat<f32>, BixverseErrors>
+where
+    F: Fn(MatRef<f32>, MatRef<f32>, usize) -> ScKnnResults,
+{
     let verbosity = parse_verbosity_level(verbose);
 
     let n_features = data_1.ncols();
+    let n_left = data_1.nrows();
 
     // Step 1: Orthogonalise new batch against all previous batch vectors.
     // In a progressive merge the left (already merged) carries previous
     // orthogonalisations baked in, so only the right needs this.
     let mut right = data_2.to_owned();
     for vec in batch_vecs.iter() {
-        right = center_along_batch_vector(&right.as_ref(), vec);
+        center_along_batch_vector(right.as_mut(), vec);
     }
 
     // Step 2: Find MNN pairs
-    let (knn_1_to_2, _) = batch_knn_search(
-        *data_1,
-        right.as_ref(),
-        params.knn_params.k,
-        &params.knn_params,
-        seed,
-        verbose,
-    )?;
-    let (knn_2_to_1, _) = batch_knn_search(
-        right.as_ref(),
-        *data_1,
-        params.knn_params.k,
-        &params.knn_params,
-        seed,
-        verbose,
-    )?;
+    let (knn_1_to_2, _) = search(*data_1, right.as_ref(), k)?;
+    let (knn_2_to_1, _) = search(right.as_ref(), *data_1, k)?;
 
     let (mnn_1, mnn_2) = find_mutual_nns(&knn_1_to_2, &knn_2_to_1);
 
@@ -364,12 +381,12 @@ pub fn merge_two_batches(
         if verbosity.normal_verbosity() {
             eprintln!("Warning: No MNN pairs found, skipping correction");
         }
-        let n_total = data_1.nrows() + right.nrows();
+        let n_total = n_left + right.nrows();
         return Ok(Mat::from_fn(n_total, n_features, |row, col| {
-            if row < data_1.nrows() {
+            if row < n_left {
                 *data_1.get(row, col)
             } else {
-                *right.as_ref().get(row - data_1.nrows(), col)
+                right[(row - n_left, col)]
             }
         }));
     }
@@ -382,56 +399,121 @@ pub fn merge_two_batches(
     }
 
     // Step 3: Compute average correction vectors and overall batch vector
-    let (averaged, _unique_mnn) = compute_correction_vecs(data_1, &right.as_ref(), &mnn_1, &mnn_2);
+    let (averaged, _) = compute_correction_vecs(data_1, &right.as_ref(), &mnn_1, &mnn_2);
 
-    let n_unique = averaged.nrows();
-    let mut overall_batch = vec![0.0f32; n_features];
-    for g in 0..n_features {
-        for i in 0..n_unique {
-            overall_batch[g] += averaged[(i, g)];
-        }
-        overall_batch[g] /= n_unique as f32;
-    }
+    let n_unique = averaged.nrows() as f64;
+    let overall_batch: Vec<f32> = (0..n_features)
+        .map(|g| (averaged.col(g).iter().map(|&x| x as f64).sum::<f64>() / n_unique) as f32)
+        .collect();
 
     // Step 4: Centre both batches along the overall batch vector
-    let left_centered = center_along_batch_vector(data_1, &overall_batch);
-    let right_centered = center_along_batch_vector(&right.as_ref(), &overall_batch);
+    let mut left = data_1.to_owned();
+    center_along_batch_vector(left.as_mut(), &overall_batch);
+    center_along_batch_vector(right.as_mut(), &overall_batch);
 
     // Step 5: Recompute correction vectors with centred coordinates (same MNN pairs)
-    let (re_averaged, re_unique_mnn) = compute_correction_vecs(
-        &left_centered.as_ref(),
-        &right_centered.as_ref(),
-        &mnn_1,
-        &mnn_2,
-    );
+    let (re_averaged, re_unique_mnn) =
+        compute_correction_vecs(&left.as_ref(), &right.as_ref(), &mnn_1, &mnn_2);
 
     // Step 6: Tricube-weighted correction applied to every cell in batch2
     let right_corrected = tricube_weighted_correction(
-        &right_centered.as_ref(),
+        &right.as_ref(),
         &re_averaged.as_ref(),
         &re_unique_mnn,
-        params.knn_params.k,
-        params.ndist,
-        &params.knn_params,
-        seed,
+        k,
+        ndist,
+        search,
     )?;
 
     // Record this batch vector for future orthogonalisation steps
     batch_vecs.push(overall_batch);
 
     // Step 7: Stack left (centred) and right (corrected)
-    let n_total = left_centered.nrows() + right_corrected.nrows();
+    let n_total = n_left + right_corrected.nrows();
 
     Ok(Mat::from_fn(n_total, n_features, |row, col| {
-        if row < left_centered.nrows() {
-            left_centered[(row, col)]
+        if row < n_left {
+            left[(row, col)]
         } else {
-            right_corrected[(row - left_centered.nrows(), col)]
+            right_corrected[(row - n_left, col)]
         }
     }))
 }
 
-/// Fast MNN with cell order tracking
+/// Fast MNN with cell order tracking, generic over the neighbour search
+///
+/// ### Params
+///
+/// * `batches` - Vec of PCA matrices per batch (cells x n_pcs)
+/// * `original_indices` - Vec of original cell indices per batch
+/// * `k` - Number of neighbours for the MNN and tricube searches
+/// * `ndist` - Tricube bandwidth multiplier
+/// * `search` - Neighbour search, called as `search(query, reference, k)` and
+///   returning true (not squared) distances
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
+///
+/// ### Returns
+///
+/// (corrected_pca, output_to_original_mapping)
+pub fn fast_mnn_with_search<F>(
+    batches: Vec<Mat<f32>>,
+    original_indices: Vec<Vec<usize>>,
+    k: usize,
+    ndist: f32,
+    search: &F,
+    verbose: usize,
+) -> Result<(Mat<f32>, Vec<usize>), BixverseErrors>
+where
+    F: Fn(MatRef<f32>, MatRef<f32>, usize) -> ScKnnResults,
+{
+    if batches.len() != original_indices.len() {
+        return Err(BixverseErrors::LengthMismatch {
+            name: "original_indices",
+            expected: batches.len(),
+            found: original_indices.len(),
+        });
+    }
+
+    let verbosity = parse_verbosity_level(verbose);
+    let total_batches = batches.len();
+
+    let mut batches = batches.into_iter();
+    let mut original_indices = original_indices.into_iter();
+    let (Some(mut merged), Some(mut index_map)) = (batches.next(), original_indices.next()) else {
+        return Err(BixverseErrors::NeedAtLeastTwoBatches { n_batches: 0 });
+    };
+
+    let mut batch_vecs: Vec<Vec<f32>> = Vec::new();
+
+    for (batch_num, (batch, batch_indices)) in batches.zip(original_indices).enumerate() {
+        let start = Instant::now();
+        merged = merge_two_batches(
+            &merged.as_ref(),
+            &batch.as_ref(),
+            k,
+            ndist,
+            search,
+            &mut batch_vecs,
+            verbose,
+        )?;
+
+        if verbosity.normal_verbosity() {
+            println!(
+                "Merged {} of {} batches in {:.2}s",
+                batch_num + 2,
+                total_batches,
+                start.elapsed().as_secs_f64()
+            );
+        }
+
+        index_map.extend(batch_indices);
+    }
+
+    Ok((merged, index_map))
+}
+
+/// Fast MNN with cell order tracking, using the CPU neighbour searches
 ///
 /// ### Params
 ///
@@ -453,45 +535,72 @@ pub fn fast_mnn(
     seed: usize,
     verbose: usize,
 ) -> Result<(Mat<f32>, Vec<usize>), BixverseErrors> {
-    assert_eq!(batches.len(), original_indices.len());
+    let search = |query: MatRef<f32>, reference: MatRef<f32>, k: usize| {
+        batch_knn_search(query, reference, k, &params.knn_params, seed, verbose)
+    };
+    fast_mnn_with_search(
+        batches,
+        original_indices,
+        params.knn_params.k,
+        params.ndist,
+        &search,
+        verbose,
+    )
+}
 
+/// Batch correct a full embedding with fastMNN
+///
+/// Splits by batch, optionally cosine normalises, merges and puts the cells
+/// back in their original order. Shared by the CPU and GPU entry points.
+///
+/// ### Params
+///
+/// * `embd` - Embedding of all cells (cells x n_pcs), usually PCA
+/// * `batch_indices` - Batch assignment for each cell
+/// * `cos_norm` - Cosine normalise each batch before merging
+/// * `k` - Number of neighbours for the MNN and tricube searches
+/// * `ndist` - Tricube bandwidth multiplier
+/// * `search` - Neighbour search, called as `search(query, reference, k)` and
+///   returning true (not squared) distances
+/// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
+///   verbosity.
+///
+/// ### Returns
+///
+/// Batch-corrected embedding (cells x n_pcs) in original cell order
+pub fn fast_mnn_embedding<F>(
+    embd: &Mat<f32>,
+    batch_indices: &[usize],
+    cos_norm: bool,
+    k: usize,
+    ndist: f32,
+    search: &F,
+    verbose: usize,
+) -> Result<Mat<f32>, BixverseErrors>
+where
+    F: Fn(MatRef<f32>, MatRef<f32>, usize) -> ScKnnResults,
+{
     let verbosity = parse_verbosity_level(verbose);
-
-    let mut merged = batches[0].to_owned();
-    let mut index_map = original_indices[0].clone();
-    let mut batch_vecs: Vec<Vec<f32>> = Vec::new();
-    let total_batches = batches.len();
-
-    for (batch_num, (batch, batch_indices)) in batches
-        .into_iter()
-        .zip(original_indices)
-        .skip(1)
-        .enumerate()
-    {
-        let start = Instant::now();
-        merged = merge_two_batches(
-            &merged.as_ref(),
-            &batch.as_ref(),
-            params,
-            &mut batch_vecs,
-            seed,
-            verbose,
-        )?;
-        let elapsed = start.elapsed();
-
-        if verbosity.normal_verbosity() {
-            println!(
-                "Merged {} of {} batches in {:.2}s",
-                batch_num + 2,
-                total_batches,
-                elapsed.as_secs_f64()
-            );
-        }
-
-        index_map.extend(batch_indices);
+    let (_, n_batches) = process_batch_labels(batch_indices);
+    if n_batches < 2 {
+        return Err(BixverseErrors::NeedAtLeastTwoBatches { n_batches });
     }
 
-    Ok((merged, index_map))
+    let (mut batches, original_indices) = split_pca_by_batch(embd, batch_indices);
+
+    if cos_norm {
+        if verbosity.normal_verbosity() {
+            println!("Applying cosine normalisation to the dimension reduction.")
+        }
+        for batch in batches.iter_mut() {
+            *batch = cosine_normalise(batch);
+        }
+    }
+
+    let (corrected, index_map) =
+        fast_mnn_with_search(batches, original_indices, k, ndist, search, verbose)?;
+
+    Ok(reorder_to_original(&corrected, &index_map))
 }
 
 /// Reorder corrected PCA back to original cell order
@@ -569,6 +678,8 @@ pub fn split_pca_by_batch(
 /// * `gene_indices` - Indices of genes to include
 /// * `batch_indices` - Batch assignment for each cell
 /// * `pre_computed_pca` - Pre-computed PCA matrix (optional)
+/// * `clr_offsets` - Pre-computed CLR offsets if the PCA is recomputed with
+///   the CLR transformation. Ignored with `pre_computed_pca`.
 /// * `params` - FastMNN parameters
 /// * `verbose` - If `0` -> silent or `1` for normal verbosity, `2` for detailed
 ///   verbosity.
@@ -592,7 +703,8 @@ pub fn fast_mnn_main<S: SingleCellReading>(
     let verbosity = parse_verbosity_level(verbose);
     let (_, n_batches) = process_batch_labels(batch_indices);
 
-    if n_batches == 1 {
+    // checked here as well, so a single batch errors before the PCA runs
+    if n_batches < 2 {
         return Err(BixverseErrors::NeedAtLeastTwoBatches { n_batches });
     }
 
@@ -635,20 +747,19 @@ pub fn fast_mnn_main<S: SingleCellReading>(
         }
     };
 
-    let (mut pca_batches, original_indices) = split_pca_by_batch(&pca_all, batch_indices);
+    let search = |query: MatRef<f32>, reference: MatRef<f32>, k: usize| {
+        batch_knn_search(query, reference, k, &params.knn_params, seed, verbose)
+    };
 
-    if params.cos_norm {
-        if verbosity.normal_verbosity() {
-            println!("Applying cosine normalisation to the dimension reduction.")
-        }
-        for batch in pca_batches.iter_mut() {
-            *batch = cosine_normalise(batch);
-        }
-    }
-
-    let (corrected, index_map) = fast_mnn(pca_batches, original_indices, params, seed, verbose)?;
-
-    Ok(reorder_to_original(&corrected, &index_map))
+    fast_mnn_embedding(
+        &pca_all,
+        batch_indices,
+        params.cos_norm,
+        params.knn_params.k,
+        params.ndist,
+        &search,
+        verbose,
+    )
 }
 
 ///////////
@@ -660,6 +771,21 @@ mod tests {
     use super::*;
     use approx::assert_relative_eq;
     use faer::mat;
+
+    /// Centred copy of `data`, leaving the input untouched.
+    fn centred_copy(data: &Mat<f32>, batch_vec: &[f32]) -> Mat<f32> {
+        let mut out = data.clone();
+        center_along_batch_vector(out.as_mut(), batch_vec);
+        out
+    }
+
+    /// The median handles odd and even lengths without needing sorted input.
+    #[test]
+    fn test_median_in_place() {
+        assert_relative_eq!(median_in_place(&mut [3.0, 1.0, 2.0]), 2.0);
+        assert_relative_eq!(median_in_place(&mut [4.0, 1.0, 3.0, 2.0]), 2.5);
+        assert_relative_eq!(median_in_place(&mut [5.0]), 5.0);
+    }
 
     /// A pair only counts as mutual when both sides list each other.
     #[test]
@@ -787,7 +913,7 @@ mod tests {
         let data = mat![[0.0f32, 0.0], [2.0, 2.0],];
         let batch_vec = vec![1.0f32, 1.0];
 
-        let centred = center_along_batch_vector(&data.as_ref(), &batch_vec);
+        let centred = centred_copy(&data, &batch_vec);
 
         assert_relative_eq!(centred[(0, 0)], 1.0, epsilon = 1e-5);
         assert_relative_eq!(centred[(0, 1)], 1.0, epsilon = 1e-5);
@@ -801,7 +927,7 @@ mod tests {
         let data = mat![[1.0f32, 2.0], [3.0, 4.0],];
         let batch_vec = vec![0.0f32, 0.0];
 
-        let centred = center_along_batch_vector(&data.as_ref(), &batch_vec);
+        let centred = centred_copy(&data, &batch_vec);
 
         // Should return data unchanged
         for i in 0..2 {
@@ -817,8 +943,8 @@ mod tests {
         let data = mat![[0.0f32, 1.0, 2.0], [3.0, 4.0, 5.0], [6.0, 7.0, 8.0],];
         let batch_vec = vec![1.0f32, 0.5, -0.3];
 
-        let centred_once = center_along_batch_vector(&data.as_ref(), &batch_vec);
-        let centred_twice = center_along_batch_vector(&centred_once.as_ref(), &batch_vec);
+        let centred_once = centred_copy(&data, &batch_vec);
+        let centred_twice = centred_copy(&centred_once, &batch_vec);
 
         for i in 0..3 {
             for g in 0..3 {
@@ -970,8 +1096,8 @@ mod tests {
             overall[g] /= n_unique as f32;
         }
 
-        let left_c = center_along_batch_vector(&data_1.as_ref(), &overall);
-        let right_c = center_along_batch_vector(&data_2.as_ref(), &overall);
+        let left_c = centred_copy(&data_1, &overall);
+        let right_c = centred_copy(&data_2, &overall);
 
         // Within each batch, all x-coordinates should now be equal (collapsed to batch mean)
         let mean_x_left: f32 = (0..3).map(|i| left_c[(i, 0)]).sum::<f32>() / 3.0;
@@ -1051,7 +1177,7 @@ mod tests {
         let mut batch_vec = vec![0.0f32; n_features];
         batch_vec[0] = 1.0;
 
-        let centred = center_along_batch_vector(&data.as_ref(), &batch_vec);
+        let centred = centred_copy(&data, &batch_vec);
 
         // All cells should have same projection onto feature 0
         let mean_proj: f32 = (0..n_cells).map(|i| data[(i, 0)]).sum::<f32>() / n_cells as f32;

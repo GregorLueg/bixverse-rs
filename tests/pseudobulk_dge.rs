@@ -8,14 +8,13 @@
 
 #![cfg(feature = "single-cell")]
 
+use edge_rs::glm::test::Tested;
+use rand::prelude::*;
+
 use bixverse_rs::methods::dge_bulk::{EdgeRQlParams, run_edger_ql};
 use bixverse_rs::prelude::*;
 use bixverse_rs::single_cell::sc_analysis::pseudobulk_dge::pseudobulk_dge;
 use bixverse_rs::single_cell::sc_data::in_memory_io::InMemorySparseReader;
-
-use edge_rs::glm::test::Tested;
-
-use rand::prelude::*;
 
 ////////////////
 // Dimensions //
@@ -31,6 +30,12 @@ const CELLS_PER_SAMPLE: usize = 40;
 const N_CELLS: usize = N_SAMPLES * CELLS_PER_SAMPLE;
 /// Intercept and group.
 const N_COEF: usize = 2;
+/// Every this-many-th gene carries the planted group effect.
+const PLANTED_STRIDE: usize = 20;
+/// Fixture seed.
+const SEED: u64 = 3;
+/// FDR cut-off a planted gene has to clear.
+const FDR_CUTOFF: f64 = 0.05;
 
 /////////////
 // Fixture //
@@ -82,8 +87,8 @@ fn build(seed: u64) -> Fixture {
 
     let mut dense = vec![0.0_f64; N_GENES * N_CELLS];
     for gene in 0..N_GENES {
-        // Every twentieth gene is higher in the second group, the rest is
-        // noise. Six of a hundred and twenty, deliberately: plant the effect in
+        // Every `PLANTED_STRIDE`th gene is higher in the second group, the
+        // rest is noise. Six of a hundred and twenty, deliberately: plant the effect in
         // a fifth of the panel instead and the extra counts move the library
         // sizes enough that TMM cannot fully undo it, at which point unaffected
         // genes come out looking down in the second group. That is real
@@ -92,7 +97,7 @@ fn build(seed: u64) -> Fixture {
         let base = 2 + (gene % 9);
         for cell in 0..N_CELLS {
             let group = sample_of[cell] / (N_SAMPLES / 2);
-            let ceiling = if gene % 20 == 0 && group == 1 {
+            let ceiling = if gene % PLANTED_STRIDE == 0 && group == 1 {
                 base * 5
             } else {
                 base
@@ -163,7 +168,7 @@ fn build(seed: u64) -> Fixture {
 /// The join is the aggregation and nothing else.
 #[test]
 fn test_pseudobulk_dge_matches_the_hand_aggregate() {
-    let f = build(3);
+    let f = build(SEED);
     let reader = InMemorySparseReader::new(&f.matrix, None).expect("reader failed");
     let genes: Vec<usize> = (0..N_GENES).collect();
     let params = EdgeRQlParams::default();
@@ -206,7 +211,7 @@ fn test_pseudobulk_dge_matches_the_hand_aggregate() {
 /// applied to the wrong axis would find nothing at all.
 #[test]
 fn test_pseudobulk_dge_finds_the_planted_genes() {
-    let f = build(3);
+    let f = build(SEED);
     let reader = InMemorySparseReader::new(&f.matrix, None).expect("reader failed");
     let genes: Vec<usize> = (0..N_GENES).collect();
 
@@ -231,12 +236,12 @@ fn test_pseudobulk_dge_finds_the_planted_genes() {
         .collect();
 
     let hits: Vec<usize> = (0..kept.len())
-        .filter(|&i| got.fdr[i] < 0.05)
+        .filter(|&i| got.fdr[i] < FDR_CUTOFF)
         .map(|i| kept[i])
         .collect();
 
-    let planted = [0, 20, 40, 60, 80, 100];
-    for gene in planted {
+    let planted: Vec<usize> = (0..N_GENES).step_by(PLANTED_STRIDE).collect();
+    for &gene in &planted {
         assert!(
             hits.contains(&gene),
             "planted gene {gene} was missed: {hits:?}"
@@ -254,7 +259,7 @@ fn test_pseudobulk_dge_finds_the_planted_genes() {
 /// A design that does not match the samples has to say so.
 #[test]
 fn test_pseudobulk_dge_rejects_a_mismatched_design() {
-    let f = build(3);
+    let f = build(SEED);
     let reader = InMemorySparseReader::new(&f.matrix, None).expect("reader failed");
     let genes: Vec<usize> = (0..N_GENES).collect();
 

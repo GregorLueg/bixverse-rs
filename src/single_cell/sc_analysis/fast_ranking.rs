@@ -58,6 +58,133 @@ fn rank_f16(vec: &[F16]) -> Vec<f32> {
     ranks
 }
 
+/// Rank one cell's expression into a reused dense buffer
+///
+/// Same ascending midranks as the `rank_within_rows` branch of
+/// [fast_csr_ranking]: implicit zeros share one midrank and the stored values
+/// are ranked above them.
+///
+/// ### Params
+///
+/// * `indices` - Gene indices of the stored values
+/// * `data` - Stored (normalised) values, same length as `indices`
+/// * `n_genes` - Total number of genes
+/// * `out` - Reused output buffer, resized to `n_genes`
+/// * `sort_buf` - Reused sort scratch
+///
+/// ### Returns
+///
+/// Nothing; `out` holds one midrank per gene.
+pub(crate) fn rank_cell_into(
+    indices: &[u32],
+    data: &[F16],
+    n_genes: usize,
+    out: &mut Vec<f32>,
+    sort_buf: &mut Vec<(u16, usize)>,
+) {
+    let num_nonzeros = data.len();
+    let num_zeros = n_genes - num_nonzeros;
+    out.clear();
+
+    if num_nonzeros == 0 {
+        out.resize(n_genes, (1.0 + n_genes as f32) / 2.0);
+        return;
+    }
+
+    let (zero_shift, target): (f32, &dyn Fn(usize) -> usize) = if num_zeros == 0 {
+        out.resize(n_genes, 0.0);
+        (0.0, &|i| i)
+    } else {
+        out.resize(n_genes, (1.0 + num_zeros as f32) / 2.0);
+        (num_zeros as f32, &|i| indices[i] as usize)
+    };
+
+    sort_buf.clear();
+    sort_buf.extend(data.iter().enumerate().map(|(i, v)| (v.to_bits(), i)));
+    sort_buf.sort_unstable_by_key(|&(bits, _)| bits);
+
+    let n = sort_buf.len();
+    let mut i = 0;
+    while i < n {
+        let current = sort_buf[i].0;
+        let start = i;
+        while i < n && sort_buf[i].0 == current {
+            i += 1;
+        }
+        let avg_rank = (start + i + 1) as f32 / 2.0;
+        for &(_, pos) in &sort_buf[start..i] {
+            out[target(pos)] = avg_rank + zero_shift;
+        }
+    }
+}
+
+/// Bucket the stored values of a CSR matrix by column in a single flat buffer
+///
+/// A counting pass sizes every column exactly, so the fill is one sequential
+/// pass over the non-zeros with no reallocation. Within a column the entries
+/// keep row order.
+///
+/// ### Params
+///
+/// * `row_ptr` - CSR row pointers
+/// * `col_indices` - CSR column indices
+/// * `nrow` - Number of rows
+/// * `ncol` - Number of columns
+/// * `make` - Builds the stored entry from `(position in the CSR arrays, row)`
+///
+/// ### Returns
+///
+/// `(flat, offsets)`, where column `j` is `flat[offsets[j]..offsets[j + 1]]`
+fn bucket_by_column<V: Copy + Default>(
+    row_ptr: &[usize],
+    col_indices: &[u32],
+    nrow: usize,
+    ncol: usize,
+    make: impl Fn(usize, usize) -> V,
+) -> (Vec<V>, Vec<usize>) {
+    let nnz = row_ptr[nrow];
+    let mut offsets = vec![0_usize; ncol + 1];
+    for &col in &col_indices[..nnz] {
+        offsets[col as usize + 1] += 1;
+    }
+    for j in 0..ncol {
+        offsets[j + 1] += offsets[j];
+    }
+
+    let mut cursor = offsets[..ncol].to_vec();
+    let mut flat = vec![V::default(); nnz];
+    for row in 0..nrow {
+        for i in row_ptr[row]..row_ptr[row + 1] {
+            let col = col_indices[i] as usize;
+            flat[cursor[col]] = make(i, row);
+            cursor[col] += 1;
+        }
+    }
+
+    (flat, offsets)
+}
+
+/// Split a flat buffer into disjoint mutable per-column slices
+///
+/// ### Params
+///
+/// * `flat` - The flat buffer
+/// * `offsets` - Column offsets from [bucket_by_column]
+///
+/// ### Returns
+///
+/// One mutable slice per column.
+fn split_by_offsets<'a, V>(flat: &'a mut [V], offsets: &[usize]) -> Vec<&'a mut [V]> {
+    let mut rest = flat;
+    let mut out = Vec::with_capacity(offsets.len() - 1);
+    for w in offsets.windows(2) {
+        let (head, tail) = rest.split_at_mut(w[1] - w[0]);
+        out.push(head);
+        rest = tail;
+    }
+    out
+}
+
 /// Fast ranking of CSR-type data for single cell
 ///
 /// The function takes in CSR-style data (rows = cells, columns = genes) and
@@ -121,23 +248,15 @@ pub fn fast_csr_ranking(
             .collect()
     } else {
         // Rank cells within each gene - build gene-to-cells mapping first
-        let mut gene_data: Vec<Vec<(u16, usize)>> = vec![Vec::new(); ncol];
-
-        // Single pass: collect all data per gene (store raw bits for fast sort)
-        for row_idx in 0..nrow {
-            let start = row_ptr[row_idx];
-            let end = row_ptr[row_idx + 1];
-
-            for i in 0..(end - start) {
-                let col_idx = col_indices[start + i] as usize;
-                gene_data[col_idx].push((data[start + i].to_bits(), row_idx));
-            }
-        }
+        // Counting pass sizes every gene, then one fill pass (raw bits for the sort)
+        let (mut flat, offsets) = bucket_by_column(row_ptr, col_indices, nrow, ncol, |i, row| {
+            (data[i].to_bits(), row)
+        });
 
         // Rank each gene in parallel
-        gene_data
+        split_by_offsets(&mut flat, &offsets)
             .into_par_iter()
-            .map(|mut values| {
+            .map(|values| {
                 let num_nonzeros = values.len();
                 let num_zeros = nrow - num_nonzeros;
 
@@ -223,20 +342,13 @@ pub fn csr_rank_sum_stats_two_groups(
 ) -> Vec<(f64, f64)> {
     // (u16, u32) is 8 bytes against 16 for (u16, usize) after alignment
     // padding, and this buffer is the dominant transient allocation.
-    let mut gene_data: Vec<Vec<(u16, u32)>> = vec![Vec::new(); ncol];
+    let (mut flat, offsets) = bucket_by_column(row_ptr, col_indices, nrow, ncol, |i, row| {
+        (data[i].to_bits(), row as u32)
+    });
 
-    for row_idx in 0..nrow {
-        let start = row_ptr[row_idx];
-        let end = row_ptr[row_idx + 1];
-
-        for i in start..end {
-            gene_data[col_indices[i] as usize].push((data[i].to_bits(), row_idx as u32));
-        }
-    }
-
-    gene_data
+    split_by_offsets(&mut flat, &offsets)
         .into_par_iter()
-        .map(|mut values| {
+        .map(|values| {
             let num_nonzeros = values.len();
             let num_zeros = nrow - num_nonzeros;
 

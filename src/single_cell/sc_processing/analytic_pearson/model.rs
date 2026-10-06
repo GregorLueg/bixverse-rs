@@ -378,6 +378,16 @@ impl ResidualSource for AprResiduals<'_> {
 
         // Zero counts first, then the stored non-zeros over the top: one pass
         // over the cells plus one over the non-zeros, no densified counts.
+        if let [gene] = per_group.as_slice() {
+            for (slot, &total) in out.iter_mut().zip(self.cell_totals) {
+                *slot = gene.residual(total, 0.0);
+            }
+            for (&i, &y) in indices.iter().zip(counts.iter()) {
+                let c = i as usize;
+                out[c] = gene.residual(self.cell_totals[c], y);
+            }
+            return Ok(());
+        }
         for (c, slot) in out.iter_mut().enumerate() {
             let gene = &per_group[self.group_of_cell[c] as usize];
             *slot = gene.residual(self.cell_totals[c], 0.0);

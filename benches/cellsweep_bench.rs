@@ -21,27 +21,25 @@
 //!   `n_celltypes` passes over each row on top of the E-step.
 //! * `one_type` - `fit` with a single cell type, so `p_numer` shrinks from
 //!   `n_celltypes * n_genes` f64 to `n_genes`. Answers whether the scattered
-//!   `p_numer` accumulate is missing L1. At the default shape it is worth about
-//!   8%, so it is not where the time goes.
+//!   `p_numer` accumulate is missing L1.
 //! * `ln_kernel` - `ln_dot_simd` against the libm loop it replaces, plus the
 //!   responsibility-split divide on its own. Both timed without the
 //!   surrounding gathers.
 //!
-//! A caveat on `ln_kernel`, learnt the hard way. It times the `ln` in a
-//! latency-bound accumulator loop with nothing else in it, and that overstates
-//! its share of a real row: the E-step has enough independent work around the
-//! `ln` for the out-of-order engine to hide most of the libm call behind it.
-//! The kernel measures a clean 2x here and delivers roughly that on the
-//! reassignment path, which really is `ln`-bound, but only a fraction of it on
-//! the ordinary E-step row. Do not read a micro-benchmark ratio as an
-//! end-to-end one.
+//! A caveat on `ln_kernel`. It times the `ln` in a latency-bound accumulator
+//! loop with nothing else in it, and that overstates its share of a real row:
+//! the E-step has enough independent work around the `ln` for the out-of-order
+//! engine to hide most of the libm call behind it. The kernel's gain carries
+//! over to the reassignment path, which really is `ln`-bound, but only a
+//! fraction of it reaches the ordinary E-step row. Do not read a
+//! micro-benchmark ratio as an end-to-end one.
 //!
 //! Iteration counts are pinned rather than left to the stopping rule: both
 //! tolerances are set to zero so the loop always runs `max_iter` times and the
 //! two runs being compared do the same work.
 //!
 //! Run with:
-//! ```
+//! ```text
 //! cargo bench --features single-cell --bench cellsweep_bench
 //! ```
 //!
@@ -107,6 +105,21 @@ const KERNEL_LEN: usize = 1_024;
 /// Kernel calls per micro-benchmark repeat.
 const KERNEL_CALLS: usize = 20_000;
 
+/// `alpha_cap` of the `fit` and `one_type` cells, the `CellSweepParams`
+/// default.
+const DEFAULT_ALPHA_CAP: f64 = 0.9;
+
+/// `alpha_cap` of the `reassign` cell, low enough to exclude nearly every real
+/// barcode.
+const LOW_ALPHA_CAP: f64 = 0.05;
+
+/// Floor inside the `ln` in the kernel cells, mirroring
+/// `CellSweepParams::log_eps`.
+const LOG_EPS: f64 = 1e-300;
+
+/// Floor on the divisor in the `divide` cell, mirroring `CellSweepParams::eps`.
+const EPS: f64 = 1e-12;
+
 /////////////
 // Helpers //
 /////////////
@@ -127,6 +140,14 @@ impl Drop for TempBin {
 
 impl TempBin {
     /// Reserve a uniquely named scratch file in the system temp directory.
+    ///
+    /// ### Params
+    ///
+    /// * `name` - Suffix that makes the file name unique
+    ///
+    /// ### Returns
+    ///
+    /// The guard.
     fn new(name: &str) -> Self {
         Self(std::env::temp_dir().join(format!("bixverse_cellsweep_bench_{name}.bin")))
     }
@@ -138,15 +159,33 @@ impl TempBin {
 }
 
 /// Whether a named cell should run, given `CELLSWEEP_BENCH_ONLY`.
-fn wanted(cell: &str) -> bool {
+///
+/// ### Params
+///
+/// * `cell` - The cell's name
+///
+/// ### Returns
+///
+/// `true` when the filter is unset or lists the cell exactly.
+fn selected(cell: &str) -> bool {
     match std::env::var("CELLSWEEP_BENCH_ONLY") {
         Ok(list) => list.split(',').any(|c| c.trim() == cell),
         Err(_) => true,
     }
 }
 
-/// Time a closure `REPEATS` times and report the fastest run.
-fn time<T>(label: &str, extra: &str, mut f: impl FnMut() -> T) -> Duration {
+/// Run a closure [`REPEATS`] times and print the fastest run.
+///
+/// ### Params
+///
+/// * `label` - Cell name, printed first
+/// * `extra` - Note printed after the timing
+/// * `f` - The work to time
+///
+/// ### Returns
+///
+/// The fastest run.
+fn best_of<T>(label: &str, extra: &str, mut f: impl FnMut() -> T) -> Duration {
     let mut best = Duration::MAX;
     for _ in 0..REPEATS {
         let start = Instant::now();
@@ -234,6 +273,11 @@ fn build_counts() -> (SparseRows, Vec<usize>) {
 }
 
 /// Write the generated counts to a cell-based store.
+///
+/// ### Params
+///
+/// * `rows` - One `(indices, counts)` pair per barcode
+/// * `path` - Output path
 fn write_store(rows: &[(Vec<u32>, Vec<u32>)], path: &str) {
     let mut writer = CellGeneSparseWriter::new(path, true, rows.len(), N_GENES, TARGET_SIZE)
         .expect("writer opens");
@@ -255,6 +299,15 @@ fn write_store(rows: &[(Vec<u32>, Vec<u32>)], path: &str) {
 ///
 /// Both stopping tolerances are zero, so neither the log-likelihood check nor
 /// the parameter check ever fires and the loop always runs `max_iter` times.
+///
+/// ### Params
+///
+/// * `alpha_cap` - Ceiling on `alpha`
+/// * `max_iter` - EM iterations to run
+///
+/// ### Returns
+///
+/// The parameters, otherwise default.
 fn pinned_params(alpha_cap: f64, max_iter: usize) -> CellSweepParams {
     CellSweepParams {
         alpha_cap,
@@ -267,7 +320,11 @@ fn pinned_params(alpha_cap: f64, max_iter: usize) -> CellSweepParams {
     }
 }
 
-/// Time a fit at one iteration and at [MAX_ITER], and report the difference.
+/////////////
+// Benches //
+/////////////
+
+/// Time a fit at one iteration and at [`MAX_ITER`], and report the difference.
 ///
 /// The end-to-end call carries the store read, `build_sample_csr`, the denoise
 /// pass and the write, and none of those scale with the iteration count. At
@@ -285,7 +342,7 @@ fn pinned_params(alpha_cap: f64, max_iter: usize) -> CellSweepParams {
 /// * `alpha_cap` - Ceiling on `alpha`. Low values push most barcodes into the
 ///   excluded set and so into the cell-type reassignment.
 /// * `nnz_total` - Non-zeros in the sample, for the per-non-zero figure.
-fn time_fit(
+fn bench_fit(
     label: &str,
     extra: &str,
     reader: &ParallelSparseReader,
@@ -306,98 +363,18 @@ fn time_fit(
         .expect("cellsweep runs")
     };
 
-    let fixed = time(
+    let fixed = best_of(
         &format!("{label} (1x)"),
         "one iteration, all the fixed cost",
         || run(1),
     );
-    let full = time(label, extra, || run(MAX_ITER));
+    let full = best_of(label, extra, || run(MAX_ITER));
 
     let per_iter = full.saturating_sub(fixed) / (MAX_ITER - 1) as u32;
     println!(
         "               {per_iter:>10.3?} per EM iteration, {:>6.2} ns per non-zero",
         per_iter.as_nanos() as f64 / nnz_total as f64
     );
-}
-
-//////////
-// Main //
-//////////
-
-fn main() {
-    let nnz_total = NNZ_REAL * N_REAL + NNZ_EMPTY * N_EMPTY;
-
-    println!(
-        "CellSweep bench: {N_GENES} genes, {N_REAL} real, {N_EMPTY} empty, \
-         {N_CELLTYPES} cell types, <={nnz_total} nnz, {MAX_ITER} iterations"
-    );
-
-    let (rows, labels) = build_counts();
-    let raw = TempBin::new("raw");
-
-    if wanted("build") {
-        time("build", "store generation, not part of the fit", || {
-            write_store(&rows, raw.path())
-        });
-    } else {
-        write_store(&rows, raw.path());
-    }
-
-    let reader = ParallelSparseReader::new(raw.path()).expect("store opens");
-    let sample = CellSweepSample {
-        sample_id: "bench".to_string(),
-        real_cells: (0..N_REAL).collect(),
-        empty_cells: (N_REAL..N_REAL + N_EMPTY).collect(),
-        celltype_idx: labels,
-        n_celltypes: N_CELLTYPES,
-    };
-
-    if wanted("fit") {
-        time_fit(
-            "fit",
-            "default alpha_cap, few reassignments",
-            &reader,
-            &sample,
-            0.9,
-            nnz_total,
-        );
-    }
-
-    if wanted("reassign") {
-        time_fit(
-            "reassign",
-            "alpha_cap 0.05, best_celltype on most rows",
-            &reader,
-            &sample,
-            0.05,
-            nnz_total,
-        );
-    }
-
-    // Same non-zeros, same gathers, one cell type. The only thing that changes
-    // is that `p_numer` drops from `n_celltypes * n_genes` f64 to `n_genes`,
-    // i.e. from 320 KB per thread to 40 KB, which is the difference between
-    // missing L1 on every scattered accumulate and hitting it.
-    if wanted("one_type") {
-        let flat = CellSweepSample {
-            sample_id: "bench".to_string(),
-            celltype_idx: vec![0; N_REAL],
-            n_celltypes: 1,
-            ..sample.clone()
-        };
-        time_fit(
-            "one_type",
-            "one cell type, so p_numer fits in L1",
-            &reader,
-            &flat,
-            0.9,
-            nnz_total,
-        );
-    }
-
-    if wanted("ln_kernel") {
-        bench_kernels();
-    }
 }
 
 /// Micro-benchmark of the E-step's inner loops against their scalar forms.
@@ -430,27 +407,27 @@ fn bench_kernels() {
         );
     };
 
-    per_element(time("ln_dot", "ln_dot_simd", || {
+    per_element(best_of("ln_dot", "ln_dot_simd", || {
         let mut acc = 0.0;
         for _ in 0..KERNEL_CALLS {
-            acc += ln_dot_simd(black_box(&counts), black_box(&p), 1e-300);
+            acc += ln_dot_simd(black_box(&counts), black_box(&p), LOG_EPS);
         }
         acc
     }));
 
-    per_element(time("ln_dot_ref", "the libm loop it replaces", || {
+    per_element(best_of("ln_dot_ref", "the libm loop it replaces", || {
         let mut acc = 0.0;
         for _ in 0..KERNEL_CALLS {
             let counts = black_box(&counts);
             let p = black_box(&p);
             for j in 0..KERNEL_LEN {
-                acc += counts[j] * p[j].max(1e-300).ln();
+                acc += counts[j] * p[j].max(LOG_EPS).ln();
             }
         }
         acc
     }));
 
-    per_element(time(
+    per_element(best_of(
         "divide",
         "responsibility split, why it needs no kernel",
         || {
@@ -459,9 +436,89 @@ fn bench_kernels() {
                 let p = black_box(&p);
                 let scale = black_box(&mut scale);
                 for j in 0..KERNEL_LEN {
-                    scale[j] = counts[j] / p[j].max(1e-12);
+                    scale[j] = counts[j] / p[j].max(EPS);
                 }
             }
         },
     ));
+}
+
+//////////
+// Main //
+//////////
+
+fn main() {
+    let nnz_total = NNZ_REAL * N_REAL + NNZ_EMPTY * N_EMPTY;
+
+    println!(
+        "CellSweep bench: {N_GENES} genes, {N_REAL} real, {N_EMPTY} empty, \
+         {N_CELLTYPES} cell types, <={nnz_total} nnz, {MAX_ITER} iterations"
+    );
+
+    let (rows, labels) = build_counts();
+    let raw = TempBin::new("raw");
+
+    if selected("build") {
+        best_of("build", "store generation, not part of the fit", || {
+            write_store(&rows, raw.path())
+        });
+    } else {
+        write_store(&rows, raw.path());
+    }
+
+    let reader = ParallelSparseReader::new(raw.path()).expect("store opens");
+    let sample = CellSweepSample {
+        sample_id: "bench".to_string(),
+        real_cells: (0..N_REAL).collect(),
+        empty_cells: (N_REAL..N_REAL + N_EMPTY).collect(),
+        celltype_idx: labels,
+        n_celltypes: N_CELLTYPES,
+    };
+
+    if selected("fit") {
+        bench_fit(
+            "fit",
+            "default alpha_cap, few reassignments",
+            &reader,
+            &sample,
+            DEFAULT_ALPHA_CAP,
+            nnz_total,
+        );
+    }
+
+    if selected("reassign") {
+        bench_fit(
+            "reassign",
+            "alpha_cap 0.05, best_celltype on most rows",
+            &reader,
+            &sample,
+            LOW_ALPHA_CAP,
+            nnz_total,
+        );
+    }
+
+    // Same non-zeros, same gathers, one cell type. The only thing that changes
+    // is that `p_numer` drops from `n_celltypes * n_genes` f64 to `n_genes`,
+    // i.e. from 320 KB per thread to 40 KB, which is the difference between
+    // missing L1 on every scattered accumulate and hitting it.
+    if selected("one_type") {
+        let flat = CellSweepSample {
+            sample_id: "bench".to_string(),
+            celltype_idx: vec![0; N_REAL],
+            n_celltypes: 1,
+            ..sample.clone()
+        };
+        bench_fit(
+            "one_type",
+            "one cell type, so p_numer fits in L1",
+            &reader,
+            &flat,
+            DEFAULT_ALPHA_CAP,
+            nnz_total,
+        );
+    }
+
+    if selected("ln_kernel") {
+        bench_kernels();
+    }
 }

@@ -20,6 +20,12 @@ pub mod nmf_preprocessing;
 pub mod refit;
 pub mod sparse;
 
+/// Columns of H per task in the row sweep.
+const HALS_COL_CHUNK: usize = 64;
+
+/// Rows of W per task in the column sweep.
+const HALS_ROW_TILE: usize = 256;
+
 ////////////////////
 // Initialisation //
 ////////////////////
@@ -409,38 +415,34 @@ where
     F: BixverseFloat + Send + Sync,
 {
     let k = h.nrows();
-    let n = h.ncols();
 
-    let h_ptr = h.as_ptr_mut() as usize;
-    let h_row_stride = h.row_stride();
-    let h_col_stride = h.col_stride();
+    // Column j of H only reads and writes column j, so the whole r sweep runs
+    // inside one pass over the columns.
+    let b_rows: Vec<F> = (0..k)
+        .flat_map(|r| (0..k).map(move |s| (r, s)))
+        .map(|(r, s)| b[(r, s)])
+        .collect();
 
-    for r in 0..k {
-        let brr = b[(r, r)];
-        if brr <= F::zero() {
-            continue;
-        }
-        let inv_brr = F::one() / brr;
-        let b_row_r: Vec<F> = (0..k).map(|s| b[(r, s)]).collect();
-        let a_row_r: Vec<F> = (0..n).map(|j| a[(r, j)]).collect();
-
-        (0..n).into_par_iter().for_each(|j| {
-            let base = h_ptr as *mut F;
-            let mut bh_rj = F::zero();
-            for s in 0..k {
-                let h_sj =
-                    unsafe { *base.offset(s as isize * h_row_stride + j as isize * h_col_stride) };
-                bh_rj += b_row_r[s] * h_sj;
-            }
-            let off = r as isize * h_row_stride + j as isize * h_col_stride;
-            let h_rj = unsafe { *base.offset(off) };
-            let new_val = h_rj + (a_row_r[j] - bh_rj) * inv_brr;
-            let clamped = if new_val > eps { new_val } else { eps };
-            unsafe {
-                *base.offset(off) = clamped;
+    h.par_col_iter_mut()
+        .with_min_len(HALS_COL_CHUNK)
+        .enumerate()
+        .for_each(|(j, col)| {
+            let col = col.try_as_col_major_mut().unwrap().as_slice_mut();
+            let a_col = a.col(j);
+            for r in 0..k {
+                let brr = b_rows[r * k + r];
+                if brr <= F::zero() {
+                    continue;
+                }
+                let inv_brr = F::one() / brr;
+                let mut bh_rj = F::zero();
+                for (&b_rs, &h_sj) in b_rows[r * k..(r + 1) * k].iter().zip(col.iter()) {
+                    bh_rj += b_rs * h_sj;
+                }
+                let new_val = col[r] + (a_col[r] - bh_rj) * inv_brr;
+                col[r] = if new_val > eps { new_val } else { eps };
             }
         });
-    }
 }
 
 /// HALS column sweep for W.
@@ -466,31 +468,59 @@ where
     let w_row_stride = w.row_stride();
     let w_col_stride = w.col_stride();
 
-    for c in 0..k {
-        let dcc = d[(c, c)];
-        if dcc <= F::zero() {
-            continue;
-        }
-        let inv_dcc = F::one() / dcc;
-        let d_col_c: Vec<F> = (0..k).map(|s| d[(s, c)]).collect();
+    let d_cols: Vec<F> = (0..k)
+        .flat_map(|c| (0..k).map(move |s| (s, c)))
+        .map(|(s, c)| d[(s, c)])
+        .collect();
 
-        (0..m).into_par_iter().for_each(|i| {
-            let base = w_ptr as *mut F;
-            let mut wd_ic = F::zero();
-            for s in 0..k {
-                let w_is =
-                    unsafe { *base.offset(i as isize * w_row_stride + s as isize * w_col_stride) };
-                wd_ic += w_is * d_col_c[s];
-            }
-            let off = i as isize * w_row_stride + c as isize * w_col_stride;
-            let w_ic = unsafe { *base.offset(off) };
-            let new_val = w_ic + (c_mat[(i, c)] - wd_ic) * inv_dcc;
-            let clamped = if new_val > eps { new_val } else { eps };
-            unsafe {
-                *base.offset(off) = clamped;
-            }
-        });
-    }
+    // Row i of W only reads and writes row i, so tiles of rows are processed
+    // independently, each staged row-major so the k-length dots are contiguous.
+    (0..m.div_ceil(HALS_ROW_TILE))
+        .into_par_iter()
+        .for_each_init(
+            || vec![F::zero(); HALS_ROW_TILE * k],
+            |scratch, tile| {
+                let i0 = tile * HALS_ROW_TILE;
+                let rows = HALS_ROW_TILE.min(m - i0);
+                let base = w_ptr as *mut F;
+                let offset =
+                    |i: usize, s: usize| i as isize * w_row_stride + s as isize * w_col_stride;
+
+                for s in 0..k {
+                    for ii in 0..rows {
+                        // SAFETY: i0 + ii < m and s < k, and tiles cover disjoint rows.
+                        scratch[ii * k + s] = unsafe { *base.offset(offset(i0 + ii, s)) };
+                    }
+                }
+
+                for c in 0..k {
+                    let dcc = d_cols[c * k + c];
+                    if dcc <= F::zero() {
+                        continue;
+                    }
+                    let inv_dcc = F::one() / dcc;
+                    let d_col_c = &d_cols[c * k..(c + 1) * k];
+                    for ii in 0..rows {
+                        let row = &mut scratch[ii * k..(ii + 1) * k];
+                        let mut wd_ic = F::zero();
+                        for (&w_is, &d_sc) in row.iter().zip(d_col_c) {
+                            wd_ic += w_is * d_sc;
+                        }
+                        let new_val = row[c] + (c_mat[(i0 + ii, c)] - wd_ic) * inv_dcc;
+                        row[c] = if new_val > eps { new_val } else { eps };
+                    }
+                }
+
+                for s in 0..k {
+                    for ii in 0..rows {
+                        // SAFETY: as above; this tile is the only writer of its rows.
+                        unsafe {
+                            *base.offset(offset(i0 + ii, s)) = scratch[ii * k + s];
+                        }
+                    }
+                }
+            },
+        );
 }
 
 /// Normalise columns of W to unit L2 norm.
@@ -638,11 +668,17 @@ where
     let mut converged = false;
     let mut n_iter = 0usize;
 
+    // the convergence check leaves wtw and wtv current for the unchanged w
+    let mut grams_current = false;
+
     for iter in 0..opts.max_iter {
         n_iter = iter + 1;
 
-        gram_wt_w(w.as_ref(), &mut wtw);
-        v.wt_v(w.as_ref(), &mut wtv);
+        if !grams_current {
+            gram_wt_w(w.as_ref(), &mut wtw);
+            v.wt_v(w.as_ref(), &mut wtv);
+        }
+        grams_current = false;
         hals_sweep_rows(&mut h, wtw.as_ref(), wtv.as_ref(), opts.eps);
 
         gram_h_ht(h.as_ref(), &mut hht);
@@ -655,6 +691,7 @@ where
             gram_wt_w(w.as_ref(), &mut wtw);
             v.wt_v(w.as_ref(), &mut wtv);
             gram_h_ht(h.as_ref(), &mut hht);
+            grams_current = true;
 
             let loss = compute_objective(
                 sq_frob,

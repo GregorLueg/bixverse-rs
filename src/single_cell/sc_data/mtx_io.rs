@@ -2,7 +2,6 @@
 //! transform them into the binarised files for usage in bixverse-rs
 
 use rayon::prelude::*;
-use rustc_hash::FxHashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Read, Result as IoResult, Seek, Write};
 use std::path::{Path, PathBuf};
@@ -264,13 +263,17 @@ impl MtxReader {
             .collect();
 
         // Sum counts across threads, then filter genes.
-        let genes_to_keep_set: FxHashSet<usize> = (0..self.header.total_genes)
+        let genes_to_keep: Vec<usize> = (0..self.header.total_genes)
             .into_par_iter()
             .filter(|&i| {
                 let total: u32 = results.iter().map(|local| local[i]).sum();
                 total as usize >= self.qc_params.min_cells
             })
             .collect();
+        let mut genes_to_keep_lookup = vec![false; self.header.total_genes];
+        for &g in &genes_to_keep {
+            genes_to_keep_lookup[g] = true;
+        }
 
         drop(results);
 
@@ -285,85 +288,87 @@ impl MtxReader {
         let completed_chunks = Arc::new(AtomicUsize::new(0));
 
         // Parallel second pass - cell stats with filtered genes
-        let results: Vec<_> = boundaries
+        // folded per worker rather than per chunk, so the n_cells-sized
+        // accumulators do not all live until the merge
+        let merged = boundaries
             .par_iter()
-            .map(|&(start, end)| {
-                let mut local_cell_stats = vec![(0u32, 0u32); self.header.total_cells];
+            .fold(
+                || vec![(0u32, 0u32); self.header.total_cells],
+                |mut local_cell_stats, &(start, end)| {
+                    if let Ok(file) = File::open(&self.path) {
+                        let mut reader = BufReader::with_capacity(256 * 1024, file);
+                        if reader.seek(std::io::SeekFrom::Start(start)).is_ok() {
+                            let mut line_buffer = Vec::with_capacity(64);
+                            let mut bytes_read = 0u64;
 
-                if let Ok(file) = File::open(&self.path) {
-                    let mut reader = BufReader::with_capacity(256 * 1024, file);
-                    if reader.seek(std::io::SeekFrom::Start(start)).is_ok() {
-                        let mut line_buffer = Vec::with_capacity(64);
-                        let mut bytes_read = 0u64;
-
-                        while bytes_read < (end - start) {
-                            line_buffer.clear();
-                            if let Ok(n) = reader.read_until(b'\n', &mut line_buffer) {
-                                if n == 0 {
-                                    break;
-                                }
-                                bytes_read += n as u64;
-
-                                let len = line_buffer.len();
-                                if len < 3 {
-                                    continue;
-                                }
-                                let trim_end = if line_buffer[len - 1] == b'\n' {
-                                    if len > 1 && line_buffer[len - 2] == b'\r' {
-                                        len - 2
-                                    } else {
-                                        len - 1
+                            while bytes_read < (end - start) {
+                                line_buffer.clear();
+                                if let Ok(n) = reader.read_until(b'\n', &mut line_buffer) {
+                                    if n == 0 {
+                                        break;
                                     }
-                                } else {
-                                    len
-                                };
+                                    bytes_read += n as u64;
 
-                                if let Some((row, col, value)) =
-                                    parse_mtx_line(&line_buffer[..trim_end])
-                                {
-                                    let (cell_idx, gene_idx) = if self.cells_as_rows {
-                                        ((row - 1) as usize, (col - 1) as usize)
+                                    let len = line_buffer.len();
+                                    if len < 3 {
+                                        continue;
+                                    }
+                                    let trim_end = if line_buffer[len - 1] == b'\n' {
+                                        if len > 1 && line_buffer[len - 2] == b'\r' {
+                                            len - 2
+                                        } else {
+                                            len - 1
+                                        }
                                     } else {
-                                        ((col - 1) as usize, (row - 1) as usize)
+                                        len
                                     };
 
-                                    if genes_to_keep_set.contains(&gene_idx)
-                                        && cell_idx < self.header.total_cells
+                                    if let Some((row, col, value)) =
+                                        parse_mtx_line(&line_buffer[..trim_end])
                                     {
-                                        local_cell_stats[cell_idx].0 += 1;
-                                        local_cell_stats[cell_idx].1 += value;
+                                        let (cell_idx, gene_idx) = if self.cells_as_rows {
+                                            ((row - 1) as usize, (col - 1) as usize)
+                                        } else {
+                                            ((col - 1) as usize, (row - 1) as usize)
+                                        };
+
+                                        if genes_to_keep_lookup.get(gene_idx) == Some(&true)
+                                            && cell_idx < self.header.total_cells
+                                        {
+                                            local_cell_stats[cell_idx].0 += 1;
+                                            local_cell_stats[cell_idx].1 += value;
+                                        }
                                     }
                                 }
                             }
                         }
                     }
-                }
 
-                if verbose {
-                    let completed = completed_chunks.fetch_add(1, Ordering::Relaxed) + 1;
-                    if completed.is_multiple_of(report_interval) || completed == num_chunks {
-                        let progress = (completed as f64 / num_chunks as f64 * 100.0) as usize;
-                        println!(
-                            "  Processed {}% of chunks ({}/{})",
-                            progress, completed, num_chunks
-                        );
+                    if verbose {
+                        let completed = completed_chunks.fetch_add(1, Ordering::Relaxed) + 1;
+                        if completed.is_multiple_of(report_interval) || completed == num_chunks {
+                            let progress = (completed as f64 / num_chunks as f64 * 100.0) as usize;
+                            println!(
+                                "  Processed {}% of chunks ({}/{})",
+                                progress, completed, num_chunks
+                            );
+                        }
                     }
+
+                    local_cell_stats
+                },
+            )
+            .reduce_with(|mut a, b| {
+                for (acc, add) in a.iter_mut().zip(b) {
+                    acc.0 += add.0;
+                    acc.1 += add.1;
                 }
-
-                local_cell_stats
+                a
             })
-            .collect();
+            .unwrap_or_else(|| vec![(0u32, 0u32); self.header.total_cells]);
 
-        // Merge cell results
-        let mut cell_gene_count = vec![0u32; self.header.total_cells];
-        let mut cell_lib_size = vec![0u32; self.header.total_cells];
-
-        for local_cells in results {
-            for (i, (count, size)) in local_cells.into_iter().enumerate() {
-                cell_gene_count[i] += count;
-                cell_lib_size[i] += size;
-            }
-        }
+        let cell_gene_count: Vec<u32> = merged.iter().map(|&(count, _)| count).collect();
+        let cell_lib_size: Vec<u32> = merged.iter().map(|&(_, size)| size).collect();
 
         // Filter cells
         let cells_to_keep: Vec<usize> = (0..self.header.total_cells)
@@ -372,9 +377,6 @@ impl MtxReader {
                     && cell_lib_size[i] as f32 >= self.qc_params.min_lib_size as f32
             })
             .collect();
-
-        let mut genes_to_keep: Vec<usize> = genes_to_keep_set.into_iter().collect();
-        genes_to_keep.sort_unstable();
 
         let mut quality = CellOnFileQuality::new(cells_to_keep, genes_to_keep);
         quality.generate_maps_sets();

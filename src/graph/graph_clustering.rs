@@ -39,17 +39,17 @@ where
 
     let laplacian = adjacency_to_laplacian(&adjacency.as_ref(), true);
 
-    let eigendecomp = laplacian.eigen().unwrap();
-    let eigenvalues = eigendecomp.S().column_vector();
+    // the symmetrised kNN graph gives a symmetric Laplacian; eigenvalues come
+    // back ascending, so the leading columns are the smallest
+    let eigendecomp = laplacian
+        .self_adjoint_eigen(faer::Side::Lower)
+        .map_err(|_| BixverseErrors::FaerEigenError)?;
     let eigenvectors = eigendecomp.U();
 
-    let mut indices: Vec<usize> = (0..eigenvalues.nrows()).collect();
-    indices.sort_by(|&a, &b| eigenvalues[a].re.partial_cmp(&eigenvalues[b].re).unwrap());
-
     let mut features = Mat::zeros(similarities.nrows(), n_clusters);
-    for i in 0..similarities.nrows() {
-        for j in 0..n_clusters {
-            features[(i, j)] = eigenvectors[(i, indices[j])].re
+    for j in 0..n_clusters {
+        for i in 0..similarities.nrows() {
+            features[(i, j)] = eigenvectors[(i, j)];
         }
     }
 

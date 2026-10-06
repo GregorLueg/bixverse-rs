@@ -17,7 +17,7 @@ use thousands::Separable;
 use crate::core::math::pca_svd::randomised_svd_matfree;
 use crate::prelude::*;
 use crate::single_cell::sc_batch_correction::batch_utils::{
-    batch_knn_search, cosine_normalise, standardise_per_column,
+    batch_knn_search, cosine_normalise, par_for_each_col_mut, standardise_per_column,
 };
 use crate::single_cell::sc_batch_correction::fast_mnn::{reorder_to_original, split_pca_by_batch};
 use crate::single_cell::sc_batch_correction::seurat_anchors::{
@@ -27,6 +27,9 @@ use crate::single_cell::sc_batch_correction::seurat_anchors::{
 use crate::single_cell::sc_processing::pca::{
     SingleCellPcaParams, pca_on_sc_sparse, resolve_clr_size_factor, scale_csc_chunk,
 };
+
+/// Cells per parallel task when transposing gene-major rows into a matrix
+const CELL_TILE: usize = 16;
 
 ///////////
 // Types //
@@ -136,7 +139,19 @@ pub(crate) fn load_hvg_standardised<S: SingleCellReading>(
         })
         .collect();
 
-    let mat = Mat::from_fn(n_hvg, n_cells, |g, c| rows[g][c]);
+    // fill a tile of cells per task so each source row is read as whole cache lines
+    let mut mat = Mat::<f32>::zeros(n_hvg, n_cells);
+    mat.as_mut()
+        .par_col_chunks_mut(CELL_TILE)
+        .enumerate()
+        .for_each(|(tile, mut block)| {
+            let c0 = tile * CELL_TILE;
+            for (g, row) in rows.iter().enumerate() {
+                for j in 0..block.ncols() {
+                    block[(g, j)] = row[c0 + j];
+                }
+            }
+        });
     Ok(standardise_per_column(mat.as_ref()))
 }
 
@@ -187,7 +202,8 @@ fn load_filter_expression<S: SingleCellReading>(
         })
         .collect();
 
-    let mat = Mat::from_fn(n_cells, n_feat, |c, g| rows[g][c]);
+    let mut mat = Mat::<f32>::zeros(n_cells, n_feat);
+    par_for_each_col_mut(&mut mat, |g, col| col.copy_from_slice(&rows[g]));
     Ok(cosine_normalise(&mat))
 }
 

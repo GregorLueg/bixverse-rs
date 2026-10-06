@@ -363,7 +363,14 @@ struct GeneAcc {
     nnz: usize,
 }
 
-/// Sweeps one gene chunk into its accumulator.
+/// Counts below this are served from the `ln(count + eps)` table and the dense
+/// histogram; larger ones fall back to `ln` and the overflow map.
+const COUNT_TABLE_LEN: usize = 4096;
+
+/// Accumulators in the `ln` sum, to break the dependency chain.
+const LN_SUM_LANES: usize = 4;
+
+/// Sweeps one gene's raw counts into its accumulator.
 ///
 /// Two passes over the gene's stored non-zeros, which is what R's
 /// `row_var_dgcmatrix` does: the mean first, then the squared deviations from
@@ -373,31 +380,129 @@ struct GeneAcc {
 ///
 /// ### Params
 ///
-/// * `gene` - The gene chunk, already reindexed to the selected cells.
+/// * `values` - The gene's non-zero raw counts, already reindexed to the
+///   selected cells.
+/// * `n_cells` - Number of selected cells.
+/// * `gmean_eps` - Pseudocount of the geometric mean.
+/// * `ln_table` - `ln(x + gmean_eps)` for `x < COUNT_TABLE_LEN`, computed with
+///   the same expression as the fallback.
 ///
 /// ### Returns
 ///
 /// The accumulator.
-fn sweep_gene(gene: &CscGeneChunk, n_cells: usize, gmean_eps: f64) -> GeneAcc {
-    let values: Vec<f64> = match &gene.data_raw {
-        RawCounts::U16(v) => v.iter().map(|&x| x as f64).collect(),
-        RawCounts::U32(v) => v.iter().map(|&x| x as f64).collect(),
-    };
-
+fn sweep_values<V: Copy + Into<u32>>(
+    values: &[V],
+    n_cells: usize,
+    gmean_eps: f64,
+    ln_table: &[f64],
+) -> GeneAcc {
     let nnz = values.len();
-    let sum: f64 = values.iter().sum();
+    let sum: f64 = values.iter().map(|&x| Into::<u32>::into(x) as f64).sum();
     let mean = sum / n_cells as f64;
 
-    let ss_nonzero: f64 = values.iter().map(|&x| (x - mean) * (x - mean)).sum();
+    let ss_nonzero: f64 = values
+        .iter()
+        .map(|&x| {
+            let x = Into::<u32>::into(x) as f64;
+            (x - mean) * (x - mean)
+        })
+        .sum();
     let ss = ss_nonzero + mean * mean * (n_cells - nnz) as f64;
 
-    let sum_log: f64 = values.iter().map(|&x| (x + gmean_eps).ln()).sum();
+    let ln_of = |x: u32| -> f64 {
+        ln_table
+            .get(x as usize)
+            .copied()
+            .unwrap_or_else(|| (x as f64 + gmean_eps).ln())
+    };
+    let mut lanes = [0.0_f64; LN_SUM_LANES];
+    let mut chunks = values.chunks_exact(LN_SUM_LANES);
+    for c in &mut chunks {
+        for (lane, &x) in lanes.iter_mut().zip(c) {
+            *lane += ln_of(x.into());
+        }
+    }
+    for &x in chunks.remainder() {
+        lanes[0] += ln_of(x.into());
+    }
+    let sum_log: f64 = lanes.iter().sum();
 
     GeneAcc {
         sum,
         ss,
         sum_log,
         nnz,
+    }
+}
+
+/// Sweeps one gene chunk into its accumulator, see [sweep_values].
+///
+/// ### Params
+///
+/// * `gene` - The gene chunk, already reindexed to the selected cells.
+/// * `n_cells` - Number of selected cells.
+/// * `gmean_eps` - Pseudocount of the geometric mean.
+/// * `ln_table` - Table of `ln(x + gmean_eps)`.
+///
+/// ### Returns
+///
+/// The accumulator.
+fn sweep_gene(gene: &CscGeneChunk, n_cells: usize, gmean_eps: f64, ln_table: &[f64]) -> GeneAcc {
+    match &gene.data_raw {
+        RawCounts::U16(v) => sweep_values(v, n_cells, gmean_eps, ln_table),
+        RawCounts::U32(v) => sweep_values(v, n_cells, gmean_eps, ln_table),
+    }
+}
+
+/// Histogram of raw count values, dense for small counts.
+struct CountHistogram {
+    dense: Vec<u64>,
+    overflow: FxHashMap<u32, u64>,
+}
+
+impl CountHistogram {
+    fn new() -> Self {
+        Self {
+            dense: vec![0; COUNT_TABLE_LEN],
+            overflow: FxHashMap::default(),
+        }
+    }
+
+    #[inline]
+    fn add(&mut self, x: u32) {
+        match self.dense.get_mut(x as usize) {
+            Some(slot) => *slot += 1,
+            None => *self.overflow.entry(x).or_insert(0) += 1,
+        }
+    }
+
+    fn add_gene(&mut self, gene: &CscGeneChunk) {
+        match &gene.data_raw {
+            RawCounts::U16(v) => v.iter().for_each(|&x| self.add(x as u32)),
+            RawCounts::U32(v) => v.iter().for_each(|&x| self.add(x)),
+        }
+    }
+
+    fn merge(mut self, other: Self) -> Self {
+        self.dense
+            .iter_mut()
+            .zip(&other.dense)
+            .for_each(|(a, b)| *a += b);
+        for (k, v) in other.overflow {
+            *self.overflow.entry(k).or_insert(0) += v;
+        }
+        self
+    }
+
+    fn drain_into(self, target: &mut FxHashMap<u32, u64>) {
+        for (value, freq) in self.dense.into_iter().enumerate() {
+            if freq > 0 {
+                *target.entry(value as u32).or_insert(0) += freq;
+            }
+        }
+        for (value, freq) in self.overflow {
+            *target.entry(value).or_insert(0) += freq;
+        }
     }
 }
 
@@ -454,18 +559,30 @@ pub fn sct_gene_pass<S: SingleCellReading>(
 
     let mut histogram: FxHashMap<u32, u64> = FxHashMap::default();
     let mut total_counts = 0.0_f64;
+    let ln_table: Vec<f64> = (0..COUNT_TABLE_LEN)
+        .map(|x| (x as f64 + params.gmean_eps).ln())
+        .collect();
 
     for block_start in (0..n_genes).step_by(step) {
         let block_end = (block_start + step).min(n_genes);
         let block: Vec<usize> = (block_start..block_end).collect();
         let chunks = reader.read_gene_parallel_filtered(&block, &cell_set)?;
 
-        // The per-gene work is independent, so fan out; the histogram folds in
-        // sequentially afterwards, which is cheap relative to the sweep.
         let accs: Vec<GeneAcc> = chunks
             .par_iter()
-            .map(|c| sweep_gene(c, n_cells, params.gmean_eps))
+            .map(|c| sweep_gene(c, n_cells, params.gmean_eps, &ln_table))
             .collect();
+
+        chunks
+            .par_iter()
+            .zip(accs.par_iter())
+            .filter(|(_, acc)| acc.nnz >= params.min_cells)
+            .fold(CountHistogram::new, |mut hist, (chunk, _)| {
+                hist.add_gene(chunk);
+                hist
+            })
+            .reduce(CountHistogram::new, CountHistogram::merge)
+            .drain_into(&mut histogram);
 
         for (chunk, acc) in chunks.iter().zip(accs.iter()) {
             let g = chunk.original_index;
@@ -487,18 +604,6 @@ pub fn sct_gene_pass<S: SingleCellReading>(
 
             if acc.nnz >= params.min_cells {
                 total_counts += acc.sum;
-                match &chunk.data_raw {
-                    RawCounts::U16(v) => {
-                        for &x in v {
-                            *histogram.entry(x as u32).or_insert(0) += 1;
-                        }
-                    }
-                    RawCounts::U32(v) => {
-                        for &x in v {
-                            *histogram.entry(x).or_insert(0) += 1;
-                        }
-                    }
-                }
             }
         }
 

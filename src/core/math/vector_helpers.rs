@@ -9,6 +9,9 @@ use crate::prelude::{BixverseFloat, BixverseNumeric};
 // Consts //
 ////////////
 
+/// Smallest slice length handed to a rayon task in [`pearson_correlation`]
+const PEARSON_MIN_LEN: usize = 10_000;
+
 ///////////////
 // Functions //
 ///////////////
@@ -267,6 +270,7 @@ where
     let (sum_x, sum_y) = x
         .par_iter()
         .zip(y.par_iter())
+        .with_min_len(PEARSON_MIN_LEN)
         .fold(
             || (0.0f64, 0.0f64),
             |acc, (&a, &b)| {
@@ -283,6 +287,7 @@ where
     let (cov, var_x, var_y) = x
         .par_iter()
         .zip(y.par_iter())
+        .with_min_len(PEARSON_MIN_LEN)
         .fold(
             || (0.0f64, 0.0f64, 0.0f64),
             |acc, (&a, &b)| {

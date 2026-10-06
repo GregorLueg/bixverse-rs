@@ -27,6 +27,12 @@ use crate::prelude::*;
 // Consts //
 ////////////
 
+/// Columns per task when accumulating row norms.
+const NORM_COL_CHUNK: usize = 1024;
+
+/// Rows per task when accumulating k-means inertia.
+const INERTIA_ROW_TILE: usize = 256;
+
 /// Fraction of `n_runs` used as the local neighbourhood size for the density
 /// filter. cNMF's `local_neighborhood_size` default.
 const LOCAL_NEIGHBOURHOOD_FRACTION: f64 = 0.3;
@@ -279,7 +285,7 @@ pub struct KSweepEntry<F: BixverseFloat> {
 ///
 /// A `(k * n_runs) x dim` matrix of unit-L2 rows. Collapsed components stay as
 /// zero rows for the caller to drop.
-fn pool_components<F: BixverseFloat>(
+fn pool_components<F: BixverseFloat + Send + Sync>(
     res: &StabilisedNmfResult<F>,
     k: usize,
     target: ConsensusTarget,
@@ -296,48 +302,91 @@ fn pool_components<F: BixverseFloat>(
         }
         ConsensusTarget::WColumns => {
             let m = res.w_all.nrows();
-            Mat::<F>::from_fn(n_pooled, m, |row, col| res.w_all[(col, row)])
+            // consecutive columns reuse the same cache lines of `w_all`
+            let mut pooled = Mat::<F>::zeros(n_pooled, m);
+            pooled
+                .par_col_iter_mut()
+                .enumerate()
+                .for_each(|(col, mut out)| {
+                    for row in 0..n_pooled {
+                        out[row] = res.w_all[(col, row)];
+                    }
+                });
+            pooled
         }
     };
 
-    let tol = F::from_f64(DEGENERATE_NORM_TOLERANCE).unwrap();
-    let dim = pooled.ncols();
-    for i in 0..n_pooled {
-        let norm = row_norm(pooled.as_ref(), i);
-        if norm <= tol {
-            continue;
-        }
-        let inv = F::one() / norm;
-        for j in 0..dim {
-            pooled[(i, j)] *= inv;
-        }
-    }
+    normalise_rows_to_unit(&mut pooled);
 
     pooled
 }
 
-/// L2 norm of a single row.
+/// L2 norm of every row.
+///
+/// One pass over the columns, so the reads stay contiguous. Accumulates in
+/// `f64`: the pooled dimension runs to hundreds of thousands on single-cell
+/// inputs, and these norms drive the collapsed-component test and the unit-norm
+/// invariant the cosine kNN and silhouette assume.
 ///
 /// ### Params
 ///
 /// * `mat` - The matrix to read from.
-/// * `row` - Row index.
 ///
 /// ### Returns
 ///
-/// The L2 norm of that row.
-#[inline]
-fn row_norm<F: BixverseFloat>(mat: MatRef<F>, row: usize) -> F {
-    // f64 accumulator. `ncols` here is the pooled dimension, which is the feature
-    // count for `HRows` and the sample count for `WColumns`, so on single-cell
-    // inputs it runs to hundreds of thousands. This norm both drives the
-    // collapsed-component test and normalises the pooled rows the cosine kNN and
-    // the silhouette assume are unit length.
-    let acc = (0..mat.ncols()).fold(0f64, |acc, j| {
-        let x = mat[(row, j)].to_f64().unwrap();
-        acc + x * x
+/// One norm per row.
+fn row_norms<F: BixverseFloat + Send + Sync>(mat: MatRef<F>) -> Vec<F> {
+    let n_rows = mat.nrows();
+    let sq_sums: Vec<f64> = (0..mat.ncols())
+        .into_par_iter()
+        .with_min_len(NORM_COL_CHUNK)
+        .fold(
+            || vec![0f64; n_rows],
+            |mut acc, j| {
+                for (a, &x) in acc.iter_mut().zip(mat.col(j).iter()) {
+                    let x = x.to_f64().unwrap();
+                    *a += x * x;
+                }
+                acc
+            },
+        )
+        .reduce(
+            || vec![0f64; n_rows],
+            |mut a, b| {
+                a.iter_mut().zip(&b).for_each(|(x, y)| *x += y);
+                a
+            },
+        );
+
+    sq_sums
+        .into_iter()
+        .map(|s| F::from_f64(s.sqrt()).unwrap())
+        .collect()
+}
+
+/// Scale every row to unit L2 norm, leaving collapsed rows untouched.
+///
+/// ### Params
+///
+/// * `mat` - Matrix whose rows are rescaled in place.
+fn normalise_rows_to_unit<F: BixverseFloat + Send + Sync>(mat: &mut Mat<F>) {
+    let tol = F::from_f64(DEGENERATE_NORM_TOLERANCE).unwrap();
+    let inv: Vec<F> = row_norms(mat.as_ref())
+        .into_iter()
+        .map(|norm| {
+            if norm <= tol {
+                F::one()
+            } else {
+                F::one() / norm
+            }
+        })
+        .collect();
+
+    mat.par_col_iter_mut().for_each(|mut col| {
+        for (i, &scale) in inv.iter().enumerate() {
+            col[i] *= scale;
+        }
     });
-    F::from_f64(acc.sqrt()).unwrap()
 }
 
 /// Copy a subset of rows into a fresh matrix.
@@ -479,17 +528,26 @@ fn inertia<F: BixverseFloat + Send + Sync>(
     centroids: MatRef<F>,
     assignments: &[usize],
 ) -> F {
+    let n = data.nrows();
     let dim = data.ncols();
-    let total: f64 = assignments
-        .par_iter()
-        .enumerate()
-        .map(|(i, &label)| {
-            let mut acc = 0f64;
+
+    // tiles of rows, columns outermost: reads stay contiguous and each row's
+    // squared distances still accumulate in column order
+    let total: f64 = (0..n.div_ceil(INERTIA_ROW_TILE))
+        .into_par_iter()
+        .map(|tile| {
+            let i0 = tile * INERTIA_ROW_TILE;
+            let rows = INERTIA_ROW_TILE.min(n - i0);
+            let labels = &assignments[i0..i0 + rows];
+            let mut acc = [0f64; INERTIA_ROW_TILE];
             for j in 0..dim {
-                let d = (data[(i, j)] - centroids[(label, j)]).to_f64().unwrap();
-                acc += d * d;
+                let col = &data.col(j).try_as_col_major().unwrap().as_slice()[i0..i0 + rows];
+                for ((a, &x), &label) in acc.iter_mut().zip(col).zip(labels) {
+                    let d = (x - centroids[(label, j)]).to_f64().unwrap();
+                    *a += d * d;
+                }
             }
-            acc
+            acc[..rows].iter().sum::<f64>()
         })
         .sum();
 
@@ -542,17 +600,7 @@ fn median_consensus<F: BixverseFloat + Send + Sync>(
 
     // Renormalise so the consensus carries the same unit-norm invariant as the
     // components it was built from.
-    let tol = F::from_f64(DEGENERATE_NORM_TOLERANCE).unwrap();
-    for c in 0..k {
-        let norm = row_norm(consensus.as_ref(), c);
-        if norm <= tol {
-            continue;
-        }
-        let inv = F::one() / norm;
-        for j in 0..dim {
-            consensus[(c, j)] *= inv;
-        }
-    }
+    normalise_rows_to_unit(&mut consensus);
 
     consensus
 }
@@ -670,9 +718,8 @@ where
     // Collapsed components are dropped before anything touches cosine distance.
     let tol = F::from_f64(DEGENERATE_NORM_TOLERANCE).unwrap();
     let mut local_density = vec![F::infinity(); n_pooled];
-    let alive: Vec<usize> = (0..n_pooled)
-        .filter(|&i| row_norm(pooled.as_ref(), i) > tol)
-        .collect();
+    let pooled_norms = row_norms(pooled.as_ref());
+    let alive: Vec<usize> = (0..n_pooled).filter(|&i| pooled_norms[i] > tol).collect();
 
     if alive.len() < k {
         return Err(BixverseErrors::NmfConsensusTooFewComponents {
@@ -1010,7 +1057,7 @@ mod tests {
         assert_eq!(clusters.consensus.ncols(), n);
         for c in 0..k {
             assert_relative_eq!(
-                row_norm(clusters.consensus.as_ref(), c),
+                row_norms(clusters.consensus.as_ref())[c],
                 1.0,
                 epsilon = 1e-10
             );
@@ -1310,8 +1357,8 @@ mod tests {
         let data: Mat<f64> = Mat::from_fn(2, 3, |_, j| if j == 0 { 1.0 } else { 0.0 });
         let consensus = median_consensus(data.as_ref(), &[0, 0], 2);
 
-        assert_relative_eq!(row_norm(consensus.as_ref(), 0), 1.0, epsilon = 1e-10);
-        assert_relative_eq!(row_norm(consensus.as_ref(), 1), 0.0, epsilon = 1e-10);
+        assert_relative_eq!(row_norms(consensus.as_ref())[0], 1.0, epsilon = 1e-10);
+        assert_relative_eq!(row_norms(consensus.as_ref())[1], 0.0, epsilon = 1e-10);
     }
 
     /// The whole point of the sweep: stability must peak at the rank the data was

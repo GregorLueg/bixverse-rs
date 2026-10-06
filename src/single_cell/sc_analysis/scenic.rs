@@ -13,7 +13,7 @@
 
 use ann_search_rs::prelude::*;
 use ann_search_rs::utils::k_means_utils::{assign_all_parallel, train_centroids};
-use faer::Mat;
+use faer::{Mat, MatRef};
 use indexmap::IndexSet;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use rayon::prelude::*;
@@ -689,9 +689,8 @@ impl TreeBuffers {
 
             let (tgt_indices, tgt_values) = sparse_y.cell_entries(s as usize);
             let h_base = bin * n_targets;
-            for i in 0..tgt_indices.len() {
-                let k = tgt_indices[i] as usize;
-                let y = tgt_values[i];
+            for (&k, &y) in tgt_indices.iter().zip(tgt_values.iter()) {
+                let k = k as usize;
                 self.y_sums[h_base + k] += y;
                 self.y_sum_sqs[h_base + k] += y * y;
             }
@@ -709,28 +708,22 @@ impl TreeBuffers {
             let prev = (b - 1) * n_targets;
             let curr = b * n_targets;
 
-            // copy current bin values into cumulative position
-            self.cum_y_sums[curr..curr + n_targets]
-                .copy_from_slice(&self.y_sums[curr..curr + n_targets]);
-            self.cum_y_sum_sqs[curr..curr + n_targets]
-                .copy_from_slice(&self.y_sum_sqs[curr..curr + n_targets]);
-
-            // for n_targets <= 64 this fits on the stack comfortably.
-            let mut prev_sums = [0_f32; MULTI_OUTPUT_BATCH];
-            let mut prev_sum_sqs = [0_f32; MULTI_OUTPUT_BATCH];
-            prev_sums[..n_targets].copy_from_slice(&self.cum_y_sums[prev..prev + n_targets]);
-            prev_sum_sqs[..n_targets].copy_from_slice(&self.cum_y_sum_sqs[prev..prev + n_targets]);
-
-            accumulate_f32_simd(
-                &mut self.cum_y_sums[curr..curr + n_targets],
-                &prev_sums[..n_targets],
-                n_targets,
-            );
-            accumulate_f32_simd(
-                &mut self.cum_y_sum_sqs[curr..curr + n_targets],
-                &prev_sum_sqs[..n_targets],
-                n_targets,
-            );
+            let (head, tail) = self.cum_y_sums.split_at_mut(curr);
+            for ((c, p), y) in tail[..n_targets]
+                .iter_mut()
+                .zip(&head[prev..prev + n_targets])
+                .zip(&self.y_sums[curr..curr + n_targets])
+            {
+                *c = y + p;
+            }
+            let (head, tail) = self.cum_y_sum_sqs.split_at_mut(curr);
+            for ((c, p), y) in tail[..n_targets]
+                .iter_mut()
+                .zip(&head[prev..prev + n_targets])
+                .zip(&self.y_sum_sqs[curr..curr + n_targets])
+            {
+                *c = y + p;
+            }
         }
 
         (min_b, max_b)
@@ -1537,9 +1530,8 @@ pub fn fit_multi_trees_sparse(
         y_sum_sqs_root.fill(0.0);
         for &s in active.iter() {
             let (tgt_idx, tgt_val) = sparse_y.cell_entries(s as usize);
-            for i in 0..tgt_idx.len() {
-                let k = tgt_idx[i] as usize;
-                let y = tgt_val[i];
+            for (&k, &y) in tgt_idx.iter().zip(tgt_val.iter()) {
+                let k = k as usize;
                 y_sums_root[k] += y;
                 y_sum_sqs_root[k] += y * y;
             }
@@ -1663,14 +1655,16 @@ impl NodeHistograms {
         self.y_sums[..n].fill(0.0);
         self.y_sum_sqs[..n].fill(0.0);
 
+        // Gather the residuals once; every feature then reads them contiguously
+        let gathered: Vec<f32> = samples.iter().map(|&s| residuals[s as usize]).collect();
+
         for f in 0..self.n_features {
             let col = x.get_col(f);
             let base = f * 256;
-            for &s in samples {
+            for (&s, &r) in samples.iter().zip(gathered.iter()) {
                 let bin = col[s as usize] as usize;
                 let idx = base + bin;
                 self.counts[idx] += 1;
-                let r = residuals[s as usize];
                 self.y_sums[idx] += r;
                 self.y_sum_sqs[idx] += r * r;
             }
@@ -1851,17 +1845,36 @@ impl HistogramPool {
         debug_assert_ne!(parent, out);
         debug_assert_ne!(child, out);
         let n = self.histograms[0].n_features * 256;
-        for i in 0..n {
-            let pc = self.histograms[parent].counts[i];
-            let cc = self.histograms[child].counts[i];
-            let py = self.histograms[parent].y_sums[i];
-            let cy = self.histograms[child].y_sums[i];
-            let pys = self.histograms[parent].y_sum_sqs[i];
-            let cys = self.histograms[child].y_sum_sqs[i];
-            self.histograms[out].counts[i] = pc - cc;
-            self.histograms[out].y_sums[i] = py - cy;
-            self.histograms[out].y_sum_sqs[i] = pys - cys;
+
+        // Detach the output buffers so the inputs borrow disjointly
+        let mut out_counts = std::mem::take(&mut self.histograms[out].counts);
+        let mut out_y = std::mem::take(&mut self.histograms[out].y_sums);
+        let mut out_ys = std::mem::take(&mut self.histograms[out].y_sum_sqs);
+
+        let p = &self.histograms[parent];
+        let c = &self.histograms[child];
+        for (o, (a, b)) in out_counts[..n]
+            .iter_mut()
+            .zip(p.counts[..n].iter().zip(&c.counts[..n]))
+        {
+            *o = a - b;
         }
+        for (o, (a, b)) in out_y[..n]
+            .iter_mut()
+            .zip(p.y_sums[..n].iter().zip(&c.y_sums[..n]))
+        {
+            *o = a - b;
+        }
+        for (o, (a, b)) in out_ys[..n]
+            .iter_mut()
+            .zip(p.y_sum_sqs[..n].iter().zip(&c.y_sum_sqs[..n]))
+        {
+            *o = a - b;
+        }
+
+        self.histograms[out].counts = out_counts;
+        self.histograms[out].y_sums = out_y;
+        self.histograms[out].y_sum_sqs = out_ys;
     }
 }
 
@@ -1886,6 +1899,8 @@ struct SampledGbmScratch {
     y_sums: [f32; 256],
     /// Per-bin residual sum-of-squares (single feature).
     y_sum_sqs: [f32; 256],
+    /// Residuals gathered once per node, aligned with the node's samples.
+    r_buf: Vec<f32>,
 }
 
 impl SampledGbmScratch {
@@ -1906,6 +1921,7 @@ impl SampledGbmScratch {
             counts: [0u32; 256],
             y_sums: [0.0f32; 256],
             y_sum_sqs: [0.0f32; 256],
+            r_buf: Vec::with_capacity(n_samples),
         }
     }
 
@@ -1918,7 +1934,7 @@ impl SampledGbmScratch {
     ///
     /// * `tf_col` - Quantised feature column for all cells.
     /// * `samples` - Active sample indices.
-    /// * `residuals` - Dense residual array indexed by cell id.
+    /// * `residuals` - Residuals gathered in the order of `samples`.
     ///
     /// ### Returns
     ///
@@ -1953,9 +1969,8 @@ impl SampledGbmScratch {
         self.y_sums[min_b..=max_b].fill(0.0);
         self.y_sum_sqs[min_b..=max_b].fill(0.0);
 
-        for &s in samples {
+        for (&s, &r) in samples.iter().zip(residuals.iter()) {
             let bin = tf_col[s as usize] as usize;
-            let r = residuals[s as usize];
             self.counts[bin] += 1;
             self.y_sums[bin] += r;
             self.y_sum_sqs[bin] += r * r;
@@ -2199,6 +2214,22 @@ pub fn build_gbm_node(
 
     // Histogram subtraction: build smaller child, derive larger
     let left_is_smaller = tl <= (n_train - tl);
+
+    // Children that are certain to be leaves never read their histogram
+    let min_leaf = 2 * config.min_samples_leaf;
+    let both_leaves = depth + 1 >= config.max_depth || (tl < min_leaf && n_train - tl < min_leaf);
+    if both_leaves {
+        pool.release(node_hist_idx);
+        for (train, oob, y) in [
+            (left_train, left_oob, split.y_sum_left),
+            (right_train, right_oob, y_sum - split.y_sum_left),
+        ] {
+            let n = train.len();
+            apply_regression_leaf(residuals, train, oob, y, n, learning_rate, oob_improvement);
+        }
+        return;
+    }
+
     let smaller_idx = pool.acquire();
     let larger_idx = pool.acquire();
 
@@ -2333,11 +2364,15 @@ fn build_gbm_node_sampled(
     let mut best_sum_l = 0.0f32;
     let mut best_sum_sq_l = 0.0f32;
 
+    let mut gathered = std::mem::take(&mut bufs.r_buf);
+    gathered.clear();
+    gathered.extend(train_samples.iter().map(|&s| residuals[s as usize]));
+
     for fi in 0..k_feats {
         let feat = bufs.feat_buf[fi];
         let tf_col = x.get_col(feat);
 
-        let (min_b, max_b) = bufs.build_histogram(tf_col, train_samples, residuals);
+        let (min_b, max_b) = bufs.build_histogram(tf_col, train_samples, &gathered);
 
         if let Some((threshold, score, n_left, sum_l, sum_sq_l)) = bufs.find_best_threshold(
             min_b,
@@ -2357,6 +2392,7 @@ fn build_gbm_node_sampled(
             best_sum_sq_l = sum_sq_l;
         }
     }
+    bufs.r_buf = gathered;
 
     if best_feature == usize::MAX {
         apply_regression_leaf(
@@ -3033,6 +3069,33 @@ pub fn batch_genes<S: SingleCellReading>(
 ///
 /// A `Mat<f32>` of shape `(n_genes, n_tfs)` containing normalised
 /// per-target feature importances.
+/// Assemble per-gene importance vectors into a genes x TFs matrix.
+///
+/// Rows shorter than `n_tfs` are zero-padded.
+///
+/// ### Params
+///
+/// * `rows` - One importance vector per gene.
+/// * `n_genes` - Number of genes (rows of the output).
+/// * `n_tfs` - Number of TFs (columns of the output).
+///
+/// ### Returns
+///
+/// Column-major `n_genes x n_tfs` matrix.
+fn importance_rows_to_mat(rows: &[Vec<f32>], n_genes: usize, n_tfs: usize) -> Mat<f32> {
+    let mut flat = vec![0.0_f32; n_genes * n_tfs];
+    flat.par_chunks_mut(n_genes.max(1))
+        .enumerate()
+        .for_each(|(j, col)| {
+            for (slot, row) in col.iter_mut().zip(rows.iter()) {
+                if let Some(&v) = row.get(j) {
+                    *slot = v;
+                }
+            }
+        });
+    MatRef::from_column_major_slice(&flat, n_genes, n_tfs).to_owned()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_scenic_multi_output<S: SingleCellReading>(
     reader: &S,
@@ -3187,13 +3250,7 @@ fn run_scenic_multi_output<S: SingleCellReading>(
         );
     }
 
-    Ok(Mat::from_fn(n_genes, n_tfs, |i, j| {
-        if j < importance_scores[i].len() {
-            importance_scores[i][j]
-        } else {
-            0.0
-        }
-    }))
+    Ok(importance_rows_to_mat(&importance_scores, n_genes, n_tfs))
 }
 
 /// GBM path: single-target, parallelised across individual genes.
@@ -3308,13 +3365,7 @@ fn run_scenic_gbm<S: SingleCellReading>(
         );
     }
 
-    Ok(Mat::from_fn(n_genes, n_tfs, |i, j| {
-        if j < importance_scores[i].len() {
-            importance_scores[i][j]
-        } else {
-            0.0
-        }
-    }))
+    Ok(importance_rows_to_mat(&importance_scores, n_genes, n_tfs))
 }
 
 /// Multi-output RF/ET streaming path: read genes in I/O chunks, slice
@@ -3520,13 +3571,7 @@ fn run_scenic_multi_output_streaming<S: SingleCellReading>(
         );
     }
 
-    Ok(Mat::from_fn(n_genes, n_tfs, |i, j| {
-        if j < importance_scores[i].len() {
-            importance_scores[i][j]
-        } else {
-            0.0
-        }
-    }))
+    Ok(importance_rows_to_mat(&importance_scores, n_genes, n_tfs))
 }
 
 /// GBM streaming path: read genes in I/O chunks, fit each gene
@@ -3668,13 +3713,7 @@ fn run_scenic_gbm_streaming<S: SingleCellReading>(
         );
     }
 
-    Ok(Mat::from_fn(n_genes, n_tfs, |i, j| {
-        if j < importance_scores[i].len() {
-            importance_scores[i][j]
-        } else {
-            0.0
-        }
-    }))
+    Ok(importance_rows_to_mat(&importance_scores, n_genes, n_tfs))
 }
 
 ////////////

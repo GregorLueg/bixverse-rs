@@ -26,6 +26,13 @@ use crate::graph::page_rank::*;
 use crate::prelude::*;
 
 ////////////
+// Consts //
+////////////
+
+/// Rows transposed per task in [dense_rows_to_csr_thresholded]
+const ROW_BLOCK: usize = 16;
+
+////////////
 // Params //
 ////////////
 
@@ -146,36 +153,44 @@ where
 {
     let n_rows = mat.nrows();
     let n_cols = mat.ncols();
-    let rows: Vec<Vec<(u32, T)>> = (0..n_rows)
+    let n_blocks = n_rows.div_ceil(ROW_BLOCK);
+
+    // The matrix is column-major: transpose a block of rows at a time so each
+    // column read is contiguous and each row is then a slice
+    let blocks: Vec<Vec<Vec<(u32, T)>>> = (0..n_blocks)
         .into_par_iter()
-        .map(|i| {
-            let row: Vec<T> = (0..n_cols).map(|j| mat[(i, j)]).collect();
-            if q > T::zero() {
-                let thresh = quantile(&row, q);
-                row.iter()
-                    .enumerate()
-                    .filter_map(|(j, &v)| {
-                        if v > thresh {
-                            Some((j as u32, v))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
-            } else {
-                row.iter()
-                    .enumerate()
-                    .filter_map(|(j, &v)| {
-                        if v != T::zero() {
-                            Some((j as u32, v))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
+        .map(|block| {
+            let row_start = block * ROW_BLOCK;
+            let height = ROW_BLOCK.min(n_rows - row_start);
+            let mut buf = vec![T::zero(); height * n_cols];
+            for j in 0..n_cols {
+                for r in 0..height {
+                    buf[r * n_cols + j] = mat[(row_start + r, j)];
+                }
             }
+
+            buf.chunks(n_cols.max(1))
+                .take(height)
+                .map(|row| {
+                    if q > T::zero() {
+                        let thresh = quantile(row, q);
+                        row.iter()
+                            .enumerate()
+                            .filter(|&(_, &v)| v > thresh)
+                            .map(|(j, &v)| (j as u32, v))
+                            .collect()
+                    } else {
+                        row.iter()
+                            .enumerate()
+                            .filter(|&(_, &v)| v != T::zero())
+                            .map(|(j, &v)| (j as u32, v))
+                            .collect()
+                    }
+                })
+                .collect()
         })
         .collect();
+    let rows: Vec<Vec<(u32, T)>> = blocks.into_iter().flatten().collect();
 
     let mut indptr = vec![0u32];
     let mut indices = Vec::new();
@@ -200,14 +215,12 @@ where
 /// * `primary` - Primary matrix to update.
 /// * `secondary` - Secondary matrix.
 fn harmonic_combine_in_place<T: BixverseFloat>(primary: &mut Mat<T>, secondary: &Mat<T>) {
-    let n_rows = primary.nrows();
     let n_cols = primary.ncols();
 
     let min_pos = |m: &Mat<T>| -> T {
         let mut best = T::infinity();
-        for i in 0..m.nrows() {
-            for j in 0..m.ncols() {
-                let v = m[(i, j)];
+        for j in 0..m.ncols() {
+            for &v in m.col_as_slice(j) {
                 if v > T::zero() && v < best {
                     best = v;
                 }
@@ -224,19 +237,15 @@ fn harmonic_combine_in_place<T: BixverseFloat>(primary: &mut Mat<T>, secondary: 
     let mp = min_pos(primary);
     let ms = min_pos(secondary);
 
-    for i in 0..n_rows {
-        for j in 0..n_cols {
-            let p = if primary[(i, j)] == T::zero() {
-                mp
-            } else {
-                primary[(i, j)]
-            };
-            let s = if secondary[(i, j)] == T::zero() {
-                ms
-            } else {
-                secondary[(i, j)]
-            };
-            primary[(i, j)] = T::one() / (T::one() / p + T::one() / s);
+    for j in 0..n_cols {
+        for (p_slot, &s_val) in primary
+            .col_as_slice_mut(j)
+            .iter_mut()
+            .zip(secondary.col_as_slice(j))
+        {
+            let p = if *p_slot == T::zero() { mp } else { *p_slot };
+            let s = if s_val == T::zero() { ms } else { s_val };
+            *p_slot = T::one() / (T::one() / p + T::one() / s);
         }
     }
 }
@@ -248,12 +257,12 @@ fn harmonic_combine_in_place<T: BixverseFloat>(primary: &mut Mat<T>, secondary: 
 /// * `out` - Mutable reference to the matrix
 /// * `baseline` - The baseline value to subtract
 fn subtract_baseline_clamp<T: BixverseFloat>(out: &mut Mat<T>, baseline: &[T]) {
-    let n_rows = out.nrows();
     let n_cols = out.ncols();
-    for i in 0..n_rows {
-        for j in 0..n_cols {
-            let v = out[(i, j)] - baseline[j];
-            out[(i, j)] = if v < T::zero() { T::zero() } else { v };
+    for j in 0..n_cols {
+        let base = baseline[j];
+        for slot in out.col_as_slice_mut(j) {
+            let v = *slot - base;
+            *slot = if v < T::zero() { T::zero() } else { v };
         }
     }
 }
@@ -348,45 +357,51 @@ where
     let grn = coo_to_csr(grn_from, grn_to, &grn_w, (n_nodes, n_nodes));
 
     // 3. flatten seeds across groups
-    let mut flat_personalisation: Vec<Vec<T>> = Vec::new();
+    let mut flat_seeds: Vec<u32> = Vec::new();
     let mut seed_to_group: Vec<usize> = Vec::new();
     for (g, group) in ligand_seeds.iter().enumerate() {
         for &seed in group {
-            let mut v = vec![T::zero(); n_nodes];
-            v[seed as usize] = T::one();
-            flat_personalisation.push(v);
+            flat_seeds.push(seed);
             seed_to_group.push(g);
         }
     }
 
-    // 4. run PPR for all seeds in parallel
-    let ppr_results: Vec<Vec<T>> = flat_personalisation
+    // 4. run PPR for all seeds in parallel; the one-hot personalisation vector
+    //    is per-worker scratch and the per-seed threshold runs here too. Matches
+    //    R `PPR_wrapper`: threshold each seed independently, then average.
+    let ppr_results: Vec<Vec<T>> = flat_seeds
         .par_iter()
-        .map_init(PageRankWorkingMemory::<T>::new, |wm, p| {
-            personalised_page_rank_optimised(
-                &pr_graph,
-                params.damping_factor,
-                p,
-                params.max_iter,
-                params.tol,
-                wm,
-            )
-        })
+        .map_init(
+            || (PageRankWorkingMemory::<T>::new(), vec![T::zero(); n_nodes]),
+            |(wm, personalisation), &seed| {
+                personalisation[seed as usize] = T::one();
+                let mut result = personalised_page_rank_optimised(
+                    &pr_graph,
+                    params.damping_factor,
+                    personalisation,
+                    params.max_iter,
+                    params.tol,
+                    wm,
+                );
+                personalisation[seed as usize] = T::zero();
+
+                if params.ltf_cutoff > T::zero() {
+                    let thresh = quantile(&result, params.ltf_cutoff);
+                    for v in result.iter_mut() {
+                        if *v <= thresh {
+                            *v = T::zero();
+                        }
+                    }
+                }
+                result
+            },
+        )
         .collect();
 
-    // 5. Per-seed threshold, then per-group accumulate + mean. Matches R
-    //    `PPR_wrapper`: threshold each seed independently, then average.
+    // 5. Per-group accumulate + mean
     let mut group_ppr: Vec<Vec<T>> = vec![vec![T::zero(); n_nodes]; n_groups];
     let mut group_counts: Vec<usize> = vec![0; n_groups];
-    for (i, mut result) in ppr_results.into_iter().enumerate() {
-        if params.ltf_cutoff > T::zero() {
-            let thresh = quantile(&result, params.ltf_cutoff);
-            for v in result.iter_mut() {
-                if *v <= thresh {
-                    *v = T::zero();
-                }
-            }
-        }
+    for (i, result) in ppr_results.into_iter().enumerate() {
         let g = seed_to_group[i];
         for (k, v) in result.into_iter().enumerate() {
             group_ppr[g][k] += v;

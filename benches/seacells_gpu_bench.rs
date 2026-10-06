@@ -1,6 +1,6 @@
 //! Benchmarks for the GPU SEACells path, kernel and end-to-end.
 //!
-//! Three sections. `launch_fw_argmin_b` on a `K²B` of realistic shape and
+//! Three sections. `launch_fw_argmin_b` on a `K2B` of realistic shape and
 //! density, reported without a CPU baseline; `launch_fw_columns_a` swept across
 //! every workgroup tier against the CPU solve it falls back to, in the same run;
 //! then the full fit both ways.
@@ -13,7 +13,7 @@
 //! `empty()`. A dispatch that busts a device limit is rejected on the cubecl
 //! server thread and does no work while reporting success, so every arm checks
 //! that the kernel wrote something before any timing is believed. Reusing a
-//! buffer across configurations defeats that check, and did.
+//! buffer across configurations defeats that check.
 //!
 //! Environment switches, all optional:
 //!
@@ -22,7 +22,8 @@
 //! - `BIXVERSE_BENCH_A_K=10000` restricts it to one archetype count
 //! - `BIXVERSE_BENCH_A_WG=512` restricts it to one workgroup width
 //!
-//! ```bash
+//! Run with:
+//! ```text
 //! cargo bench --features gpu,single-cell --bench seacells_gpu_bench
 //! ```
 
@@ -37,26 +38,47 @@ use rand::prelude::*;
 use rand::rngs::StdRng;
 use rand_distr::{Distribution, Normal};
 
-use bixverse_rs::core::math::sparse::LanczosParams;
 use bixverse_rs::gpu::linalg::sparse_gpu::GpuCompressedSparseData;
 use bixverse_rs::gpu::sc_gpu::kernels::seacells_kernels::{
     A_COLUMNS_WG_TIERS, B_ARGMIN_BLOCKS, a_columns_capacity, a_columns_segments,
     b_argmin_workgroup, launch_fw_argmin_b, launch_fw_columns_a,
 };
 use bixverse_rs::gpu::sc_gpu::seacells_gpu::seacells_fit_gpu;
-use bixverse_rs::prelude::{CompressedSparseData2, CompressedSparseFormat};
+use bixverse_rs::prelude::*;
 use bixverse_rs::single_cell::mc_generation::seacells::{
     CpuFwArgminB, FwArgminB, SEACells, SEACellsParams,
 };
 use bixverse_rs::single_cell::sc_processing::knn::{KnnParams, generate_knn_with_dist};
 
-////////////
-// Consts //
-////////////
+///////////////
+// Constants //
+///////////////
 
 /// Repeats per shape. The first is dominated by shader compilation and first
 /// touch, so more than a couple is needed before the steady state is visible.
 const REPEATS: usize = 5;
+
+/// Seed for the kNN build, archetype initialisation and both fits.
+const SEED: usize = 42;
+
+/// Frank-Wolfe iterations per column in the A-column sweep.
+const N_FW_ITERS: usize = 50;
+
+/// Atoms per cell in the synthetic `A_prev^T`.
+const N_ATOMS: usize = 20;
+
+/// Width of the synthetic embedding.
+const EMBED_DIM: usize = 30;
+
+/// Seed for the synthetic embedding.
+const EMBED_SEED: u64 = 7;
+
+/// Cluster centres in the synthetic embedding.
+const N_CLUSTERS: usize = 40;
+
+/// Shared memory per core assumed when estimating resident workgroups. Only
+/// feeds the `resident` column.
+const SMEM_PER_CORE: usize = 32_768;
 
 //////////////////
 // Bench shapes //
@@ -69,7 +91,7 @@ struct Shape {
     n: usize,
     /// Number of archetypes
     k: usize,
-    /// Fraction of `n * k` that is non-zero in `K²B`
+    /// Fraction of `n * k` that is non-zero in `K2B`
     density: f64,
 }
 
@@ -95,9 +117,9 @@ fn shapes() -> Vec<Shape> {
             k: 200,
             density: 0.0405,
         },
-        // The shape this work exists for. `t1 = A Aᵀ` used to be densified to
-        // 381 MB here, and the inner loop read a full k-float row of it per
-        // non-zero of the K²B row.
+        // The target shape. Densified, `t1 = A A^T` would be 381 MB here, and
+        // the inner loop would read a full k-float row of it per non-zero of
+        // the K2B row.
         Shape {
             n: 50_000,
             k: 10_000,
@@ -155,7 +177,7 @@ fn shapes() -> Vec<Shape> {
 // Fixture //
 /////////////
 
-/// Build CSR parts for an `n × k` matrix at the requested density.
+/// Build CSR parts for an `n x k` matrix at the requested density.
 ///
 /// Non-zeros are spread evenly across each row with a per-row phase offset, so
 /// the column indices are sorted and the row lengths are realistic without
@@ -194,9 +216,33 @@ fn make_csr(n: usize, k: usize, density: f64, seed: usize) -> (Vec<f32>, Vec<u32
     (values, indices, indptr)
 }
 
-//////////
-// Main //
-//////////
+/////////////
+// Helpers //
+/////////////
+
+/// Best and worst of [`REPEATS`] runs of a timed closure.
+///
+/// ### Params
+///
+/// * `f` - Runs the workload once and returns its duration
+///
+/// ### Returns
+///
+/// `(best, worst)` durations.
+fn best_of(mut f: impl FnMut() -> Duration) -> (Duration, Duration) {
+    let mut best = Duration::MAX;
+    let mut worst = Duration::ZERO;
+    for _ in 0..REPEATS {
+        let d = f();
+        best = best.min(d);
+        worst = worst.max(d);
+    }
+    (best, worst)
+}
+
+//////////////////
+// B argmin arm //
+//////////////////
 
 /// Time the kernel pair on one shape.
 ///
@@ -204,7 +250,7 @@ fn make_csr(n: usize, k: usize, density: f64, seed: usize) -> (Vec<f32>, Vec<u32
 ///
 /// * `shape` - The configuration
 /// * `device` - Device to run on
-fn run_shape(shape: Shape, device: &WgpuDevice) {
+fn bench_b_shape(shape: Shape, device: &WgpuDevice) {
     let client = WgpuRuntime::client(device);
     let Shape { n, k, density, .. } = shape;
 
@@ -217,7 +263,7 @@ fn run_shape(shape: Shape, device: &WgpuDevice) {
             (n, k),
             &client,
         )
-        .unwrap()
+        .expect("upload failed")
     };
 
     let k2b_parts = make_csr(n, k, density, 1);
@@ -225,10 +271,10 @@ fn run_shape(shape: Shape, device: &WgpuDevice) {
     let k2b = upload(k2b_parts);
     let t2 = upload(make_csr(n, k, density * 0.6, 5));
     // B carries roughly `max_fw_iters` atoms per archetype column, so it is far
-    // sparser than K²B.
+    // sparser than K2B.
     let b_mat = upload(make_csr(n, k, 25.0 / n as f64, 9));
 
-    // `A Aᵀ` is sparse in the same 1-7% band as the A update's `t1`.
+    // `A A^T` is sparse in the same 1-7% band as the A update's `t1`.
     let t1_csr = make_sparse(k, k, 0.05, 3);
     let t1 = GpuCompressedSparseData::<WgpuRuntime, f32>::from_compressed_sparse_data_2(
         &t1_csr, false, &client,
@@ -246,7 +292,7 @@ fn run_shape(shape: Shape, device: &WgpuDevice) {
     let seg_host = a_columns_segments(&t1_csr, b_wg, k.div_ceil(b_wg as usize));
     let t1_seg =
         GpuTensor::<WgpuRuntime, u32>::from_slice(&seg_host, vec![seg_host.len()], &client)
-            .unwrap();
+            .expect("t1 segment upload failed");
 
     let blocks = B_ARGMIN_BLOCKS.min(n.max(1) as u32) as usize;
     // Zeroed, not `empty()`. `reduce_argmin_blocks` runs even when
@@ -257,23 +303,23 @@ fn run_shape(shape: Shape, device: &WgpuDevice) {
         vec![blocks * k],
         &client,
     )
-    .unwrap();
+    .expect("alloc part_val");
     let part_idx = GpuTensor::<WgpuRuntime, u32>::from_slice(
         &vec![0u32; blocks * k],
         vec![blocks * k],
         &client,
     )
-    .unwrap();
-    let gap_partial = GpuTensor::<WgpuRuntime, f32>::empty(vec![blocks], &client).unwrap();
+    .expect("alloc part_idx");
+    let gap_partial =
+        GpuTensor::<WgpuRuntime, f32>::empty(vec![blocks], &client).expect("alloc gap_partial");
     // Zeroed, not `empty()`: a rejected dispatch leaves uninitialised VRAM,
     // which can pass a "did it write anything" check by accident.
-    let out_val =
-        GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; k], vec![k], &client).unwrap();
-    let out_idx =
-        GpuTensor::<WgpuRuntime, u32>::from_slice(&vec![0u32; k], vec![k], &client).unwrap();
+    let out_val = GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; k], vec![k], &client)
+        .expect("alloc out_val");
+    let out_idx = GpuTensor::<WgpuRuntime, u32>::from_slice(&vec![0u32; k], vec![k], &client)
+        .expect("alloc out_idx");
 
-    let mut timings: Vec<Duration> = Vec::with_capacity(REPEATS);
-    for _ in 0..REPEATS {
+    let (best, worst) = best_of(|| {
         let start = Instant::now();
         launch_fw_argmin_b(
             &k2b,
@@ -292,12 +338,10 @@ fn run_shape(shape: Shape, device: &WgpuDevice) {
         )
         .expect("launch failed");
         future::block_on(client.sync()).expect("device sync failed");
-        timings.push(start.elapsed());
-    }
-
-    timings.sort();
-    let best = timings[0].as_secs_f64() * 1000.0;
-    let worst = timings[REPEATS - 1].as_secs_f64() * 1000.0;
+        start.elapsed()
+    });
+    let best = best.as_secs_f64() * 1000.0;
+    let worst = worst.as_secs_f64() * 1000.0;
 
     // A launch that busts a device limit fails silently and returns zeros, so
     // the output has to be checked before any timing is believed.
@@ -343,9 +387,9 @@ fn run_shape(shape: Shape, device: &WgpuDevice) {
     );
 }
 
-//////////////////////
-// A-column arm     //
-//////////////////////
+//////////////////
+// A-column arm //
+//////////////////
 
 /// One measured A-column configuration.
 #[derive(Clone, Copy, Debug)]
@@ -354,9 +398,9 @@ struct AShape {
     n: usize,
     /// Number of archetypes
     k: usize,
-    /// Fraction of `n * k` that is non-zero in `K²B`
+    /// Fraction of `n * k` that is non-zero in `K2B`
     k2b_density: f64,
-    /// Fraction of `k * k` that is non-zero in `t1 = Bᵀ K² B`
+    /// Fraction of `k * k` that is non-zero in `t1 = B^T K^2 B`
     t1_density: f64,
 }
 
@@ -439,7 +483,7 @@ fn make_sparse(n: usize, k: usize, density: f64, seed: usize) -> CompressedSpars
     CompressedSparseData2::new_csr(&values, &indices, &indptr, None, (n, k))
 }
 
-/// Build `A_prevᵀ` with a fixed number of atoms per cell, all weights positive
+/// Build `A_prev^T` with a fixed number of atoms per cell, all weights positive
 /// and summing to one, so the solve starts from a genuine convex combination.
 ///
 /// ### Params
@@ -450,7 +494,7 @@ fn make_sparse(n: usize, k: usize, density: f64, seed: usize) -> CompressedSpars
 ///
 /// ### Returns
 ///
-/// `A_prevᵀ` as CSR `n × k`.
+/// `A_prev^T` as CSR `n x k`.
 fn make_a_prev_t(n: usize, k: usize, atoms: usize) -> CompressedSparseData2<f32> {
     let atoms = atoms.min(k);
     let stride = (k / atoms).max(1);
@@ -491,7 +535,7 @@ fn make_a_prev_t(n: usize, k: usize, atoms: usize) -> CompressedSparseData2<f32>
 /// * `shape` - The configuration
 /// * `n_iters` - Frank-Wolfe iterations per column
 /// * `device` - Device to run on
-fn run_a_shape(shape: AShape, n_iters: usize, device: &WgpuDevice) {
+fn bench_a_shape(shape: AShape, n_iters: usize, device: &WgpuDevice) {
     let client = WgpuRuntime::client(device);
     let AShape {
         n,
@@ -501,7 +545,7 @@ fn run_a_shape(shape: AShape, n_iters: usize, device: &WgpuDevice) {
     } = shape;
 
     let t1 = make_sparse(k, k, t1_density, 3);
-    let a_prev_t = make_a_prev_t(n, k, 20);
+    let a_prev_t = make_a_prev_t(n, k, N_ATOMS);
     let k2_b = make_sparse(n, k, k2b_density, 1);
 
     let t1_row_nnz = t1.data.len() as f64 / k as f64;
@@ -519,8 +563,7 @@ fn run_a_shape(shape: AShape, n_iters: usize, device: &WgpuDevice) {
     let cpu_atoms: usize = cpu_cols.iter().map(|c| c.len()).sum();
     drop(cpu_cols);
 
-    // What the dense upload would have cost, kept for comparison: it is
-    // quadratic in `k` and was the term that forced the CPU fallback.
+    // What a dense upload would cost, for comparison: it is quadratic in `k`.
     let t1_dense_bytes = k * k * size_of::<f32>();
     let t1_sparse_bytes = t1.data.len() * (size_of::<f32>() + size_of::<u32>());
 
@@ -538,9 +581,10 @@ fn run_a_shape(shape: AShape, n_iters: usize, device: &WgpuDevice) {
     )
     .expect("K2B upload failed");
 
-    let atom_idx = GpuTensor::<WgpuRuntime, u32>::empty(vec![n * cap], &client).unwrap();
-    let threshold =
-        GpuTensor::<WgpuRuntime, f32>::from_slice(&[1e-7f32], vec![1], &client).unwrap();
+    let atom_idx =
+        GpuTensor::<WgpuRuntime, u32>::empty(vec![n * cap], &client).expect("alloc atom_idx");
+    let threshold = GpuTensor::<WgpuRuntime, f32>::from_slice(&[1e-7f32], vec![1], &client)
+        .expect("alloc threshold");
 
     println!(
         "n = {:>7}  k = {:>5}  cap {:>4}  nnz(t1)/row {:>6.1}  t1 {:>6.1} MB sparse vs \
@@ -572,24 +616,22 @@ fn run_a_shape(shape: AShape, n_iters: usize, device: &WgpuDevice) {
         }
 
         // Zeroed per tier, or the previous tier's output passes the mass check
-        // for a launch that did nothing. That is not hypothetical: it hid a
-        // silent failure at k = 16384 until the buffers were cleared.
-        let atom_cnt =
-            GpuTensor::<WgpuRuntime, u32>::from_slice(&vec![0u32; n], vec![n], &client).unwrap();
+        // for a launch that did nothing.
+        let atom_cnt = GpuTensor::<WgpuRuntime, u32>::from_slice(&vec![0u32; n], vec![n], &client)
+            .expect("alloc atom_cnt");
         let atom_val = GpuTensor::<WgpuRuntime, f32>::from_slice(
             &vec![0.0f32; n * cap],
             vec![n * cap],
             &client,
         )
-        .unwrap();
+        .expect("alloc atom_val");
 
         let seg_host = a_columns_segments(&t1, wg, slots);
         let t1_seg =
             GpuTensor::<WgpuRuntime, u32>::from_slice(&seg_host, vec![seg_host.len()], &client)
-                .unwrap();
+                .expect("t1 segment upload failed");
 
-        let mut timings: Vec<Duration> = Vec::with_capacity(REPEATS);
-        for _ in 0..REPEATS {
+        let (best, worst) = best_of(|| {
             let start = Instant::now();
             launch_fw_columns_a(
                 &t1_gpu,
@@ -611,12 +653,10 @@ fn run_a_shape(shape: AShape, n_iters: usize, device: &WgpuDevice) {
             )
             .expect("launch failed");
             future::block_on(client.sync()).expect("device sync failed");
-            timings.push(start.elapsed());
-        }
-
-        timings.sort();
-        let best = timings[0].as_secs_f64() * 1000.0;
-        let worst = timings[REPEATS - 1].as_secs_f64() * 1000.0;
+            start.elapsed()
+        });
+        let best = best.as_secs_f64() * 1000.0;
+        let worst = worst.as_secs_f64() * 1000.0;
 
         // A launch that busts a device limit does no work and returns zeros.
         // Every column renormalises to a convex combination, so the atom weights
@@ -637,8 +677,8 @@ fn run_a_shape(shape: AShape, n_iters: usize, device: &WgpuDevice) {
             "kernel almost certainly did no work at wg {wg}: atom mass {mass}, expected {n}"
         );
 
-        // What the dense path cost: one k-float row read per Frank-Wolfe iteration per
-        // cell, which is the term that grows without bound.
+        // What a dense path would cost: one k-float row read per Frank-Wolfe
+        // iteration per cell, which is the term that grows without bound.
         let t1_traffic = n as f64 * n_iters as f64 * k as f64 * 4.0;
         // Register-array scan work: argmin plus the convex-step update, both
         // `slots` wide, per iteration per thread.
@@ -652,7 +692,7 @@ fn run_a_shape(shape: AShape, n_iters: usize, device: &WgpuDevice) {
             wg,
             slots,
             smem,
-            32768 / smem.max(1),
+            SMEM_PER_CORE / smem.max(1),
             best,
             worst,
             cpu_ms / best,
@@ -662,9 +702,9 @@ fn run_a_shape(shape: AShape, n_iters: usize, device: &WgpuDevice) {
     }
 }
 
-//////////////
-// End-to-end   //
-//////////////////
+////////////////
+// End-to-end //
+////////////////
 
 /// Clustered synthetic embedding.
 ///
@@ -676,16 +716,16 @@ fn run_a_shape(shape: AShape, n_iters: usize, device: &WgpuDevice) {
 ///
 /// ### Returns
 ///
-/// An `n × dim` matrix.
+/// An `n x dim` matrix.
 fn make_embedding(n: usize, dim: usize, seed: u64) -> Mat<f32> {
     let mut rng = StdRng::seed_from_u64(seed);
     let centre_dist = Normal::new(0.0f32, 1.0).expect("valid normal");
     let noise_dist = Normal::new(0.0f32, 0.55).expect("valid normal");
 
-    let centres: Vec<Vec<f32>> = (0..40)
+    let centres: Vec<Vec<f32>> = (0..N_CLUSTERS)
         .map(|_| (0..dim).map(|_| centre_dist.sample(&mut rng)).collect())
         .collect();
-    let assignments: Vec<usize> = (0..n).map(|_| rng.random_range(0..40)).collect();
+    let assignments: Vec<usize> = (0..n).map(|_| rng.random_range(0..N_CLUSTERS)).collect();
 
     Mat::from_fn(n, dim, |i, j| {
         centres[assignments[i]][j] + noise_dist.sample(&mut rng)
@@ -701,7 +741,7 @@ fn make_embedding(n: usize, dim: usize, seed: u64) -> Mat<f32> {
 ///
 /// ### Returns
 ///
-/// The populated [SEACellsParams].
+/// The populated [`SEACellsParams`].
 fn e2e_params(n_sea_cells: usize, knn: usize) -> SEACellsParams {
     let mut knn_params = KnnParams::new();
     knn_params.k = knn;
@@ -731,16 +771,16 @@ fn e2e_params(n_sea_cells: usize, knn: usize) -> SEACellsParams {
 /// * `k` - Number of SEACells
 /// * `knn` - Neighbours in the kNN graph
 /// * `device` - Device for the GPU arm
-fn run_end_to_end(n: usize, k: usize, knn: usize, device: &WgpuDevice) {
+fn bench_end_to_end(n: usize, k: usize, knn: usize, device: &WgpuDevice) {
     let params = e2e_params(k, knn);
-    let embedding = make_embedding(n, 30, 7);
+    let embedding = make_embedding(n, EMBED_DIM, EMBED_SEED);
 
     let (knn_indices, knn_distances) = generate_knn_with_dist(
         embedding.as_ref(),
         &params.knn_params,
         true,
         false,
-        42,
+        SEED,
         false,
     )
     .expect("kNN failed");
@@ -750,9 +790,9 @@ fn run_end_to_end(n: usize, k: usize, knn: usize, device: &WgpuDevice) {
     let mut cpu_model = SEACells::new(n, &params);
     cpu_model.construct_kernel_mat(embedding.as_ref(), &knn_indices, &knn_distances, 0);
     cpu_model
-        .initialise_archetypes(&knn_indices, &knn_distances, 0, 42)
+        .initialise_archetypes(&knn_indices, &knn_distances, 0, SEED as u64)
         .expect("archetype init failed");
-    cpu_model.fit(42, 0).expect("CPU fit failed");
+    cpu_model.fit(SEED, 0).expect("CPU fit failed");
     let cpu_time = cpu_start.elapsed();
     let cpu_assign = cpu_model
         .get_hard_assignments()
@@ -765,7 +805,7 @@ fn run_end_to_end(n: usize, k: usize, knn: usize, device: &WgpuDevice) {
         &knn_indices,
         &knn_distances,
         &params,
-        42,
+        SEED,
         device.clone(),
         0,
     )
@@ -798,6 +838,10 @@ fn run_end_to_end(n: usize, k: usize, knn: usize, device: &WgpuDevice) {
     );
 }
 
+//////////
+// Main //
+//////////
+
 fn main() {
     let device = WgpuDevice::DefaultDevice;
     // The A-column arm is the one under active work, so it can be run alone
@@ -805,12 +849,9 @@ fn main() {
     let a_only = std::env::var("BIXVERSE_BENCH_A_ONLY").is_ok();
 
     if !a_only {
-        println!(
-            "\nSEACells B-gradient argmin: GPU kernel vs measured CPU baseline\n\
-             (CPU numbers from benches/seacells_bench.rs, pruning 1e-7)\n"
-        );
+        println!("\nSEACells B-gradient argmin: GPU kernel only, pruning 1e-7\n");
         for shape in shapes() {
-            run_shape(shape, &device);
+            bench_b_shape(shape, &device);
         }
     }
 
@@ -831,8 +872,8 @@ fn main() {
 
     println!(
         "\nSEACells A-column Frank-Wolfe solve: GPU kernel vs the CPU path it falls back to\n\
-         (50 Frank-Wolfe iterations, pruning 1e-7; every tier the shape fits is swept, since \
-         the narrowest is not always the fastest)\n"
+         ({N_FW_ITERS} Frank-Wolfe iterations, pruning 1e-7; every tier the shape fits is \
+         swept, since the narrowest is not always the fastest)\n"
     );
     // Restricts the sweep to one archetype count, so a shape can be measured
     // without the buffers of every earlier shape still sitting in the
@@ -844,7 +885,7 @@ fn main() {
         if only_k.is_some_and(|k| k != shape.k) {
             continue;
         }
-        run_a_shape(shape, 50, &device);
+        bench_a_shape(shape, N_FW_ITERS, &device);
     }
     if a_only {
         println!();
@@ -857,7 +898,7 @@ fn main() {
         (20_000, 266, 15),
         (50_000, 666, 15),
     ] {
-        run_end_to_end(n, k, knn, &device);
+        bench_end_to_end(n, k, knn, &device);
     }
 
     // GPU only at a larger shape, where the CPU arm would take tens of minutes.
@@ -866,13 +907,13 @@ fn main() {
         {
             let (n, k, knn) = (200_000usize, 2_666usize, 15usize);
             let params = e2e_params(k, knn);
-            let embedding = make_embedding(n, 30, 7);
+            let embedding = make_embedding(n, EMBED_DIM, EMBED_SEED);
             let (knn_indices, knn_distances) = generate_knn_with_dist(
                 embedding.as_ref(),
                 &params.knn_params,
                 true,
                 false,
-                42,
+                SEED,
                 false,
             )
             .expect("kNN failed");
@@ -884,7 +925,7 @@ fn main() {
                 &knn_indices,
                 &knn_distances,
                 &params,
-                42,
+                SEED,
                 device.clone(),
                 0,
             )

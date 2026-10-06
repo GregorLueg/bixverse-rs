@@ -7,8 +7,8 @@
 //! One implementation of each lives here so that a batch metric and its
 //! biology counterpart cannot drift apart numerically.
 
-use ann_search_rs::utils::dist::euclidean_distance_static;
-use faer::MatRef;
+use faer::linalg::matmul::matmul;
+use faer::{Accum, Mat, MatRef, Par};
 use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
@@ -43,6 +43,13 @@ const LISI_ENTROPY_TOL: f64 = 1e-5;
 
 /// Cells between progress reports in the verbose paths.
 const PROGRESS_INTERVAL: usize = 100_000;
+
+/// Rows per parallel task in [`silhouette_width`].
+const SILHOUETTE_ROW_TILE: usize = 64;
+
+/// Columns per GEMM block in [`silhouette_width`]. With
+/// [`SILHOUETTE_ROW_TILE`] the per-thread f64 block is 2 MB.
+const SILHOUETTE_COL_TILE: usize = 4096;
 
 /////////////
 // Helpers //
@@ -517,54 +524,82 @@ pub fn silhouette_width(
         )
     }
 
-    // pre-extract rows as contiguous slices for SIMD
-    let rows: Vec<Vec<f32>> = indices
-        .iter()
-        .map(|&i| (0..d).map(|j| embedding[(i, j)]).collect())
+    // pairwise distances as |x|^2 + |y|^2 - 2 x.y, blocked GEMMs in f64 so
+    // the expansion loses nothing for close pairs
+    let x = Mat::<f64>::from_fn(n_sub, d, |i, j| embedding[(indices[i], j)] as f64);
+    let sq_norms: Vec<f64> = (0..n_sub)
+        .map(|i| (0..d).map(|j| x[(i, j)] * x[(i, j)]).sum())
         .collect();
 
     let counter = Arc::new(AtomicUsize::new(0));
 
     let per_cell: Vec<f32> = (0..n_sub)
+        .step_by(SILHOUETTE_ROW_TILE)
+        .collect::<Vec<_>>()
         .into_par_iter()
-        .map(|ii| {
-            let l_i = sub_labels[ii];
-            let mut label_sum = vec![0.0f32; n_labels];
-            let mut label_count = vec![0u32; n_labels];
+        .map_init(
+            || Mat::<f64>::zeros(SILHOUETTE_ROW_TILE, SILHOUETTE_COL_TILE),
+            |block, r0| {
+                let rt = SILHOUETTE_ROW_TILE.min(n_sub - r0);
+                let mut label_sum = vec![0.0f64; rt * n_labels];
+                let mut label_count = vec![0u32; rt * n_labels];
 
-            for jj in 0..n_sub {
-                if ii == jj {
-                    continue;
+                for c0 in (0..n_sub).step_by(SILHOUETTE_COL_TILE) {
+                    let ct = SILHOUETTE_COL_TILE.min(n_sub - c0);
+                    let mut g = block.as_mut().submatrix_mut(0, 0, rt, ct);
+                    matmul(
+                        g.as_mut(),
+                        Accum::Replace,
+                        x.subrows(r0, rt),
+                        x.subrows(c0, ct).transpose(),
+                        1.0,
+                        Par::Seq,
+                    );
+                    for jj in 0..ct {
+                        let col = c0 + jj;
+                        let l_j = sub_labels[col];
+                        for ii in 0..rt {
+                            let row = r0 + ii;
+                            if row == col {
+                                continue;
+                            }
+                            let d2 = sq_norms[row] + sq_norms[col] - 2.0 * g[(ii, jj)];
+                            label_sum[ii * n_labels + l_j] += d2.max(0.0).sqrt();
+                            label_count[ii * n_labels + l_j] += 1;
+                        }
+                    }
                 }
-                let dist = euclidean_distance_static(&rows[ii], &rows[jj]).sqrt();
-                label_sum[sub_labels[jj]] += dist;
-                label_count[sub_labels[jj]] += 1;
-            }
 
-            let a = if label_count[l_i] > 0 {
-                label_sum[l_i] / label_count[l_i] as f32
-            } else {
-                0.0
-            };
+                (0..rt)
+                    .map(|ii| {
+                        let l_i = sub_labels[r0 + ii];
+                        let sums = &label_sum[ii * n_labels..(ii + 1) * n_labels];
+                        let counts = &label_count[ii * n_labels..(ii + 1) * n_labels];
+                        let a = if counts[l_i] > 0 {
+                            sums[l_i] / counts[l_i] as f64
+                        } else {
+                            0.0
+                        };
+                        let b = (0..n_labels)
+                            .filter(|&l| l != l_i && counts[l] > 0)
+                            .map(|l| sums[l] / counts[l] as f64)
+                            .fold(f64::INFINITY, f64::min);
 
-            let mut b = f32::INFINITY;
-            for label_idx in 0..n_labels {
-                if label_idx == l_i || label_count[label_idx] == 0 {
-                    continue;
-                }
-                let mean_dist = label_sum[label_idx] / label_count[label_idx] as f32;
-                if mean_dist < b {
-                    b = mean_dist;
-                }
-            }
+                        if verbose {
+                            report_progress(&counter, "Silhouette calculations", n_sub);
+                        }
 
-            if verbose {
-                report_progress(&counter, "Silhouette calculations", n_sub);
-            }
-
-            let max_ab = a.max(b);
-            if max_ab > 0.0 { (b - a) / max_ab } else { 0.0 }
-        })
+                        let max_ab = a.max(b);
+                        if max_ab > 0.0 {
+                            ((b - a) / max_ab) as f32
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect::<Vec<f32>>()
+            },
+        )
+        .flatten()
         .collect();
 
     let (mean, median) = summarise(&per_cell);

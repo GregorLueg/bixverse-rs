@@ -71,6 +71,30 @@ fn build_dense_views(
     (umi, frac)
 }
 
+/// Group cell indices by candidate id, ascending within each group.
+///
+/// ### Params
+///
+/// * `candidate_of_cell` - Candidate assignment per cell; entries outside
+///   `0..n_candidates` are skipped.
+/// * `n_candidates` - Number of candidates.
+///
+/// ### Returns
+///
+/// One cell list per candidate.
+pub(super) fn bucket_cells_by_candidate(
+    candidate_of_cell: &[i32],
+    n_candidates: usize,
+) -> Vec<Vec<usize>> {
+    let mut buckets = vec![Vec::new(); n_candidates];
+    for (cell, &c) in candidate_of_cell.iter().enumerate() {
+        if c >= 0 && (c as usize) < n_candidates {
+            buckets[c as usize].push(cell);
+        }
+    }
+    buckets
+}
+
 /// Compute per-cell regularisation values as
 /// `1 / max(library_size, quantile_floor)`.
 ///
@@ -100,25 +124,29 @@ fn compute_regularisation_per_cell(
     let n_cells = umis_per_cell.len();
     let mut reg = vec![0.0_f32; n_cells];
 
-    // per-candidate quantile of library sizes.
-    for c in 0..n_candidates {
-        let mut sizes: Vec<f32> = umis_per_cell
-            .iter()
-            .zip(candidate_of_cell.iter())
-            .filter_map(|(&u, &cand)| if cand == c as i32 { Some(u) } else { None })
-            .collect();
-        if sizes.is_empty() {
-            continue;
-        }
-        sizes.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let q = quantile_sorted(&sizes, regularisation_quantile);
-        let floor = q.max(1.0);
+    let buckets = bucket_cells_by_candidate(candidate_of_cell, n_candidates);
 
-        for (i, &cand) in candidate_of_cell.iter().enumerate() {
-            if cand == c as i32 {
-                let denom = umis_per_cell[i].max(floor);
-                reg[i] = 1.0 / denom;
+    // per-candidate quantile of library sizes.
+    let per_candidate: Vec<Vec<f32>> = buckets
+        .par_iter()
+        .map(|cells| {
+            if cells.is_empty() {
+                return Vec::new();
             }
+            let mut sizes: Vec<f32> = cells.iter().map(|&i| umis_per_cell[i]).collect();
+            sizes.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let q = quantile_sorted(&sizes, regularisation_quantile);
+            let floor = q.max(1.0);
+            cells
+                .iter()
+                .map(|&i| 1.0 / umis_per_cell[i].max(floor))
+                .collect()
+        })
+        .collect();
+
+    for (cells, values) in buckets.iter().zip(per_candidate) {
+        for (&i, v) in cells.iter().zip(values) {
+            reg[i] = v;
         }
     }
 
@@ -172,14 +200,13 @@ fn compute_log_fractions(
 /// * `umi_dense` - Row-major UMI matrix `(n_cells × n_genes)`.
 /// * `log_fraction_dense` - Row-major log-fraction matrix
 ///   `(n_cells × n_genes)`.
-/// * `candidate_of_cell` - Candidate assignment per cell.
+/// * `cells_of_candidate` - Cell indices of each candidate, ascending.
 /// * `deviant_per_cell` - Cells already marked deviant; excluded from the
 ///   sorted list.
 /// * `active_per_cell` - Cells active in the current inner-loop iteration.
 /// * `min_gap_per_gene` - Per-gene minimum gap threshold.
 /// * `n_cells` - Number of cells.
 /// * `n_genes` - Number of genes.
-/// * `n_candidates` - Number of candidate metacells.
 /// * `gap_skip_cells` - Number of positions to skip when measuring a gap; in
 ///   `[1, 3]`.
 /// * `max_gap_cells_count` - Absolute maximum number of deviant cells per
@@ -196,13 +223,12 @@ fn compute_log_fractions(
 fn compute_cell_gaps(
     umi_dense: &[f32],
     log_fraction_dense: &[f32],
-    candidate_of_cell: &[i32],
+    cells_of_candidate: &[Vec<usize>],
     deviant_per_cell: &[bool],
     active_per_cell: &[bool],
     min_gap_per_gene: &[f32],
     n_cells: usize,
     n_genes: usize,
-    n_candidates: usize,
     gap_skip_cells: usize,
     max_gap_cells_count: usize,
     max_gap_cells_fraction: f32,
@@ -212,22 +238,15 @@ fn compute_cell_gaps(
     // deal with rayon limitations here with some raw pointer magic
     let max_gap_addr = max_gap_per_cell.as_mut_ptr() as usize;
 
-    (0..n_candidates).into_par_iter().for_each(|cand| {
-        // collect non-deviant cells in this candidate, plus check if any
-        // active cells exist (carry-forward from outer loop convergence).
-        let mut cells: Vec<usize> = Vec::with_capacity(n_cells / n_candidates.max(1));
-        let mut active_candidate = false;
-        for cell in 0..n_cells {
-            if candidate_of_cell[cell] != cand as i32 {
-                continue;
-            }
-            if active_per_cell[cell] {
-                active_candidate = true;
-            }
-            if !deviant_per_cell[cell] {
-                cells.push(cell);
-            }
-        }
+    cells_of_candidate.par_iter().for_each(|members| {
+        // non-deviant cells in this candidate, plus check if any active cells
+        // exist (carry-forward from outer loop convergence).
+        let active_candidate = members.iter().any(|&cell| active_per_cell[cell]);
+        let cells: Vec<usize> = members
+            .iter()
+            .copied()
+            .filter(|&cell| !deviant_per_cell[cell])
+            .collect();
         let candidate_cells_count = cells.len();
         if !active_candidate || candidate_cells_count < 4 {
             return;
@@ -242,29 +261,37 @@ fn compute_cell_gaps(
         // disjoint subsets across rayon tasks.
         let max_gap = unsafe { std::slice::from_raw_parts_mut(max_gap_addr as *mut f32, n_cells) };
 
-        // Working buffer for sorted cell positions per gene. Reused across
-        // genes in this candidate.
-        let mut sorted = cells.clone();
+        // Per-gene buffers, reused across genes in this candidate: the
+        // candidate's values gathered contiguously (the dense matrices are
+        // cell-major, so a gene column is strided), and the sorted positions
+        // into `cells`.
+        let mut umi_gene = vec![0.0_f32; candidate_cells_count];
+        let mut lf_gene = vec![0.0_f32; candidate_cells_count];
+        let mut sorted: Vec<usize> = (0..candidate_cells_count).collect();
 
         for gene in 0..n_genes {
             let min_gap = min_gap_per_gene[gene];
 
             // Skip if no cell in this candidate has enough UMIs to be
             // considered "reliably expressed" for this gene.
-            let has_significant = cells.iter().any(|&c| {
-                let u = umi_dense[c * n_genes + gene];
-                u * 2.0 + 1e-6 > min_compare_umis
-            });
-            if !has_significant {
+            for (slot, &c) in umi_gene.iter_mut().zip(cells.iter()) {
+                *slot = umi_dense[c * n_genes + gene];
+            }
+            if !umi_gene.iter().any(|&u| u * 2.0 + 1e-6 > min_compare_umis) {
                 continue;
+            }
+            for (slot, &c) in lf_gene.iter_mut().zip(cells.iter()) {
+                *slot = log_fraction_dense[c * n_genes + gene];
             }
 
             // Reset and sort by log_fraction[gene].
-            sorted.copy_from_slice(&cells);
+            for (pos, slot) in sorted.iter_mut().enumerate() {
+                *slot = pos;
+            }
             sorted.sort_unstable_by(|&a, &b| {
-                let la = log_fraction_dense[a * n_genes + gene];
-                let lb = log_fraction_dense[b * n_genes + gene];
-                la.partial_cmp(&lb).unwrap_or(std::cmp::Ordering::Equal)
+                lf_gene[a]
+                    .partial_cmp(&lf_gene[b])
+                    .unwrap_or(std::cmp::Ordering::Equal)
             });
 
             let max_cell_position = ((candidate_cells_count - 1) / 2).min(max_deviant_of_candidate);
@@ -274,14 +301,14 @@ fn compute_cell_gaps(
                 let first = sorted[cell_pos];
                 let second = sorted[cell_pos + gap_skip_cells];
 
-                let first_u = umi_dense[first * n_genes + gene];
-                let second_u = umi_dense[second * n_genes + gene];
+                let first_u = umi_gene[first];
+                let second_u = umi_gene[second];
                 if first_u + second_u + 1e-6 < min_compare_umis {
                     continue;
                 }
 
-                let first_lf = log_fraction_dense[first * n_genes + gene];
-                let second_lf = log_fraction_dense[second * n_genes + gene];
+                let first_lf = lf_gene[first];
+                let second_lf = lf_gene[second];
                 let full_gap = second_lf - first_lf - min_gap;
                 if full_gap < 0.0 {
                     continue;
@@ -292,7 +319,7 @@ fn compute_cell_gaps(
                 let mut stop_cell_position = cell_pos + 1;
                 if gap_skip_cells > 1 {
                     let middle = sorted[cell_pos + 1];
-                    let middle_lf = log_fraction_dense[middle * n_genes + gene];
+                    let middle_lf = lf_gene[middle];
                     let start_gap = 2.0 * (middle_lf - first_lf) - min_gap;
                     if start_gap < full_gap {
                         stop_cell_position += 1;
@@ -300,7 +327,7 @@ fn compute_cell_gaps(
                 }
 
                 for gap_cell_position in 0..=stop_cell_position {
-                    let gap_cell = sorted[gap_cell_position];
+                    let gap_cell = cells[sorted[gap_cell_position]];
                     let cur = max_gap[gap_cell];
                     if full_gap > cur {
                         max_gap[gap_cell] = full_gap;
@@ -314,14 +341,14 @@ fn compute_cell_gaps(
                 let first = sorted[cell_pos];
                 let second = sorted[cell_pos + gap_skip_cells];
 
-                let first_u = umi_dense[first * n_genes + gene];
-                let second_u = umi_dense[second * n_genes + gene];
+                let first_u = umi_gene[first];
+                let second_u = umi_gene[second];
                 if first_u + second_u < min_compare_umis {
                     continue;
                 }
 
-                let first_lf = log_fraction_dense[first * n_genes + gene];
-                let second_lf = log_fraction_dense[second * n_genes + gene];
+                let first_lf = lf_gene[first];
+                let second_lf = lf_gene[second];
                 let full_gap = second_lf - first_lf - min_gap;
                 if full_gap <= 0.0 {
                     continue;
@@ -330,7 +357,7 @@ fn compute_cell_gaps(
                 let mut start_cell_position = cell_pos + 1;
                 if gap_skip_cells > 1 {
                     let middle = sorted[cell_pos + 1];
-                    let middle_lf = log_fraction_dense[middle * n_genes + gene];
+                    let middle_lf = lf_gene[middle];
                     let start_gap = 2.0 * (middle_lf - first_lf) - min_gap;
                     if start_gap < full_gap {
                         start_cell_position += 1;
@@ -338,7 +365,7 @@ fn compute_cell_gaps(
                 }
 
                 for gap_cell_position in start_cell_position..candidate_cells_count {
-                    let gap_cell = sorted[gap_cell_position];
+                    let gap_cell = cells[sorted[gap_cell_position]];
                     let cur = max_gap[gap_cell];
                     if full_gap > cur {
                         max_gap[gap_cell] = full_gap;
@@ -418,6 +445,8 @@ pub fn find_deviant_cells(
     // user-facing 0/1/2 value). We use the post-Python value directly.
     let gap_skip_cells = params.gap_skip_cells.clamp(1, 3);
 
+    let cells_of_candidate = bucket_cells_by_candidate(candidate_of_cell, n_candidates);
+
     let mut deviant_per_cell = vec![false; n_cells];
 
     // outer loop: bump threshold if deviant fraction is too high.
@@ -433,13 +462,12 @@ pub fn find_deviant_cells(
             compute_cell_gaps(
                 &umi_dense,
                 &log_fraction_dense,
-                candidate_of_cell,
+                &cells_of_candidate,
                 &deviant_per_cell,
                 &new_deviant_per_cell,
                 &min_gap_per_gene,
                 n_cells,
                 n_genes,
-                n_candidates,
                 gap_skip_cells,
                 params.max_gap_cells_count,
                 params.max_gap_cells_fraction,

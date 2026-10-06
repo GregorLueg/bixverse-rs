@@ -21,7 +21,7 @@ use rayon::prelude::*;
 use std::time::Instant;
 
 use crate::core::math::pca_svd::compute_pc_scores;
-use crate::core::math::{DEFAULT_N_POWER_ITERS_RAND_SVD, MAX_OVERSAMPLING_SINGLE_CELL};
+use crate::core::math::{MAX_OVERSAMPLING_SINGLE_CELL, N_POWER_ITERS_SINGLE_CELL};
 use crate::gpu::linalg::sparse_gpu::GpuCompressedSparseData;
 use crate::gpu::linalg::sparse_rand_svd_gpu::{RandSvdGpuParams, randomised_sparse_svd_gpu};
 use crate::gpu::linalg::spmm::{launch_dense_column_weighted_sum, launch_spmm_csr_forward};
@@ -50,8 +50,8 @@ const MIN_GENE_STD: f32 = 1e-8;
 /// Parameters for GPU-accelerated Scrublet.
 ///
 /// Mirrors `ScrubletParams`, swapping the CPU `KnnParams` for the GPU
-/// [`KnnParamsGpu`]. The `random_svd` flag has no counterpart here: the GPU
-/// path is always randomised, since there is no GPU Lanczos.
+/// [`KnnParamsGpu`]. The `svd_solver` field has no counterpart here: the GPU
+/// path is always randomised.
 #[derive(Clone, Debug)]
 pub struct ScrubletParamsGpu {
     // -- processing --
@@ -301,7 +301,7 @@ where
     let start_svd = Instant::now();
 
     let oversampling = resolve_oversampling(n_cells, n_genes, no_pcs);
-    let svd_params = RandSvdGpuParams::new(DEFAULT_N_POWER_ITERS_RAND_SVD, oversampling);
+    let svd_params = RandSvdGpuParams::new(N_POWER_ITERS_SINGLE_CELL, oversampling);
 
     let svd_res = randomised_sparse_svd_gpu::<R, f32, f32>(
         csc,
@@ -687,6 +687,7 @@ mod tests {
     use crate::gpu::sc_gpu::knn_gpu::{KnnSearchGpu, parse_knn_method_gpu};
     use crate::single_cell::sc_data::data_io::{CellGeneSparseWriter, ParallelSparseReader};
     use crate::single_cell::sc_processing::knn::KnnParams;
+    use crate::single_cell::sc_processing::pca::PcaSolver;
     use crate::single_cell::sc_processing::scrublet::{Scrublet, ScrubletParams};
     use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
 
@@ -846,7 +847,7 @@ mod tests {
             binning_strategy: "equal_width".to_string(),
             n_bins: 10,
             no_pcs: TEST_PCS,
-            random_svd: true,
+            svd_solver: PcaSolver::Covariance,
             sim_doublet_ratio: 2.0,
             expected_doublet_rate: 0.1,
             stdev_doublet_rate: 0.02,
@@ -897,7 +898,7 @@ mod tests {
         // rather than the const, so swapping the const out changes the expected
         // value here instead of silently agreeing with itself. That is exactly
         // how the ceiling once dropped to 10 without this test noticing.
-        assert_eq!(resolve_oversampling(10_000, 3_000, 30), 100);
+        assert_eq!(resolve_oversampling(10_000, 3_000, 30), 20);
 
         // Rank-limited: 20 genes, 30 PCs requested, nothing left to sample.
         assert_eq!(resolve_oversampling(10_000, 20, 30), 0);
@@ -924,9 +925,9 @@ mod tests {
 
     /// GPU Scrublet against the CPU reference on the same seed and store, both
     /// on an exact kNN. Run once per kNN backend, so the GPU search inside the
-    /// driver is exercised as well as the default CPU one. The two randomised
-    /// SVDs draw different sketches, so this asserts on correlation rather
-    /// than equality.
+    /// driver is exercised as well as the default CPU one. The CPU side solves
+    /// the PCA exactly and the GPU side sketches it, so this asserts on
+    /// correlation rather than equality.
     #[test]
     // Moderate: 600 cells x 150 genes, the CPU pipeline plus two GPU runs.
     fn test_run_scrublet_gpu_matches_cpu() {
@@ -1012,12 +1013,13 @@ mod tests {
                 "Scrublet CPU vs GPU ({}): obs score Pearson {:.4}, thresholds {:.4} / {:.4}",
                 label, r, cpu_res.threshold, gpu_res.threshold
             );
-            // Measured 0.9952 on both backends. The gate sits just below that
-            // rather than at a token value, because the two paths differ only
-            // by the random sketch: anything that actually drifts shows up
-            // well before 0.97.
+            // The CPU reference uses the exact covariance solver, so this gates
+            // the GPU sketch's accuracy rather than one sketch against another.
+            // Measured 0.9710 on both backends at 20 oversampling and four
+            // power iterations: with 5 PCs over three cell types, PCs 3-5 sit
+            // on the noise floor, where any sketch is least determined.
             assert!(
-                r > 0.97,
+                r > 0.95,
                 "{}: GPU doublet scores only correlate {:.4} with the CPU reference",
                 label,
                 r

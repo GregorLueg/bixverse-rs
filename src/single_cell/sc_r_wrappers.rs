@@ -14,6 +14,7 @@ use crate::single_cell::mc_generation::{
     seacells::SEACellsParams, super_cells::SuperCellParams,
 };
 use crate::single_cell::sc_analysis::{
+    cellphonedb::CellPhoneDbParams,
     dge_pathway_scores::{AucellParams, parse_auc_type},
     dialogue::{DialogueParams, HlmParams, PmdParams, RefineParams, parse_averaging},
     fast_clusters::FastLouvainParams,
@@ -48,7 +49,8 @@ use crate::single_cell::sc_annotation::{
 };
 use crate::single_cell::sc_batch_correction::{
     bbknn::BbknnParams, fast_mnn::FastMnnParams, harmony::HarmonyParams,
-    harmony_v2::HarmonyParamsV2, seurat_cca::SeuratCcaParams, seurat_rpca::SeuratRpcaParams,
+    harmony_core::HARMONY_KMEANS_ITERS, harmony_v2::HarmonyParamsV2, seurat_cca::SeuratCcaParams,
+    seurat_rpca::SeuratRpcaParams,
 };
 use crate::single_cell::sc_data::h5ad_io::RawDataSlot;
 use crate::single_cell::sc_data::{
@@ -65,8 +67,9 @@ use crate::single_cell::sc_processing::{
         CellSweepFit, CellSweepParams, CellSweepSample, EmptyDropletCall, parse_empty_droplet_call,
     },
     doublet_detection::BoostParams,
+    hvg::ScranTrendParams,
     knn::KnnParams,
-    pca::{SingleCellPcaParams, parse_pca_solver},
+    pca::{PcaSolver, SingleCellPcaParams, parse_pca_solver},
     scdblfinder::ScDblFinderParams,
     scrublet::ScrubletParams,
     utils_doublets::ScDblSimParams,
@@ -373,6 +376,42 @@ impl KnnParams {
     }
 }
 
+///////////////
+// Scran HVG //
+///////////////
+
+impl ScranTrendParams {
+    /// Generate ScranTrendParams from an R list
+    ///
+    /// Missing values fall back to scrapper's `fitVarianceTrend` defaults.
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the trend parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The `ScranTrendParams` with all parameters set.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+        let defaults = Self::default();
+
+        let flag =
+            |key: &str, default: bool| params.get(key).and_then(|v| v.as_bool()).unwrap_or(default);
+
+        Ok(Self {
+            mean_filter: flag("mean_filter", defaults.mean_filter),
+            minimum_mean: r_list_real(&params, "min_mean")?.unwrap_or(defaults.minimum_mean),
+            transform: flag("transform", defaults.transform),
+            use_minimum_width: flag("use_min_width", defaults.use_minimum_width),
+            minimum_width: r_list_real(&params, "min_width")?.unwrap_or(defaults.minimum_width),
+            minimum_window_count: r_list_count(&params, "min_window_count")?
+                .unwrap_or(defaults.minimum_window_count),
+            span: r_list_real(&params, "span")?.unwrap_or(defaults.span),
+        })
+    }
+}
+
 //////////////
 // Scrublet //
 //////////////
@@ -457,10 +496,10 @@ impl ScrubletParams {
             .and_then(|v| v.as_integer())
             .unwrap_or(30) as usize;
 
-        let random_svd = scrublet_list
-            .get("random_svd")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
+        let svd_solver = match scrublet_list.get("svd_solver").and_then(|v| v.as_str()) {
+            Some(x) => parse_pca_solver(x).ok_or_else(|| format!("Invalid PCA solver: {}", x))?,
+            None => PcaSolver::Covariance,
+        };
 
         // Doublet simulation parameters
         let sim_doublet_ratio = scrublet_list
@@ -508,7 +547,7 @@ impl ScrubletParams {
             binning_strategy,
             // pca
             no_pcs,
-            random_svd,
+            svd_solver,
             // doublet simulation/detection
             sim_doublet_ratio,
             expected_doublet_rate,
@@ -606,10 +645,10 @@ impl BoostParams {
             .and_then(|v| v.as_integer())
             .unwrap_or(30) as usize;
 
-        let random_svd = params_list
-            .get("random_svd")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
+        let svd_solver = match params_list.get("svd_solver").and_then(|v| v.as_str()) {
+            Some(x) => parse_pca_solver(x).ok_or_else(|| format!("Invalid PCA solver: {}", x))?,
+            None => PcaSolver::Covariance,
+        };
 
         // doublet detection params
         let boost_rate = params_list
@@ -674,7 +713,7 @@ impl BoostParams {
             binning_strategy,
             // pca
             no_pcs,
-            random_svd,
+            svd_solver,
             // boosted
             boost_rate,
             replace,
@@ -758,10 +797,12 @@ impl ScDblFinderParams {
                 .get("no_pcs")
                 .and_then(|v| v.as_integer())
                 .unwrap_or(defaults.no_pcs as i32) as usize,
-            random_svd: map
-                .get("random_svd")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(defaults.random_svd),
+            svd_solver: match map.get("svd_solver").and_then(|v| v.as_str()) {
+                Some(x) => {
+                    parse_pca_solver(x).ok_or_else(|| format!("Invalid PCA solver: {}", x))?
+                }
+                None => defaults.svd_solver,
+            },
             // Clustering
             cluster_resolution: map
                 .get("cluster_resolution")
@@ -1090,11 +1131,6 @@ impl FastMnnParams {
             .get("no_pcs")
             .and_then(|v| v.as_integer())
             .unwrap_or(30) as usize;
-        let random_svd = fastmnn_list
-            .get("random_svd")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-
         let sparse_svd = fastmnn_list
             .get("sparse_svd")
             .and_then(|v| v.as_bool())
@@ -1103,7 +1139,6 @@ impl FastMnnParams {
         Ok(Self {
             ndist,
             no_pcs,
-            random_svd,
             sparse_svd,
             cos_norm,
             knn_params,
@@ -1616,7 +1651,8 @@ impl HarmonyParams {
     /// The `HarmonyParams` with all parameters set.
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let defaults = Self::default();
-        let kmeans_params = KMeansParamsWrappers::from_r_list(r_list.clone())?;
+        let kmeans_params =
+            KMeansParamsWrappers::from_r_list_with_iters(r_list.clone(), HARMONY_KMEANS_ITERS)?;
         let params_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
         let k = params_list
@@ -1714,7 +1750,8 @@ impl HarmonyParamsV2 {
     /// The `HarmonyParams` with all parameters set.
     pub fn from_r_list(r_list: List) -> Result<Self> {
         let defaults = Self::default();
-        let kmeans_params = KMeansParamsWrappers::from_r_list(r_list.clone())?;
+        let kmeans_params =
+            KMeansParamsWrappers::from_r_list_with_iters(r_list.clone(), HARMONY_KMEANS_ITERS)?;
         let params_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
 
         let k = params_list
@@ -2491,6 +2528,57 @@ where
             tol,
             secondary_targets,
             topology_correction,
+        })
+    }
+}
+
+/////////////////
+// CellPhoneDB //
+/////////////////
+
+impl<T> CellPhoneDbParams<T>
+where
+    T: BixverseFloat,
+{
+    /// Generate the [CellPhoneDbParams] from an R list
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The R list to convert to [CellPhoneDbParams].
+    ///
+    /// ### Returns
+    ///
+    /// Self.
+    pub fn from_r_list(r_list: List) -> extendr_api::Result<Self> {
+        let params: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+        let defaults = CellPhoneDbParams::default();
+
+        let n_perm = params
+            .get("n_perm")
+            .and_then(|x| x.as_integer())
+            .map(|x| x as usize)
+            .unwrap_or(defaults.n_perm);
+        let threshold = params
+            .get("threshold")
+            .and_then(|x| x.as_real())
+            .and_then(|x| T::from_f64(x))
+            .unwrap_or(defaults.threshold);
+        let seed = params
+            .get("seed")
+            .and_then(|x| x.as_integer())
+            .map(|x| x as usize)
+            .unwrap_or(defaults.seed);
+        let perm_batch = params
+            .get("perm_batch")
+            .and_then(|x| x.as_integer())
+            .map(|x| x as usize)
+            .or(defaults.perm_batch);
+
+        Ok(Self {
+            n_perm,
+            threshold,
+            seed,
+            perm_batch,
         })
     }
 }

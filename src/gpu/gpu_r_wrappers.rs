@@ -9,12 +9,16 @@ use crate::gpu::sc_gpu::bbknn_gpu::BbknnParamsGpu;
 #[cfg(feature = "single-cell")]
 use crate::gpu::sc_gpu::fast_clusters_gpu::FastLouvainParamsGpu;
 #[cfg(feature = "single-cell")]
+use crate::gpu::sc_gpu::fast_mnn_gpu::FastMnnParamsGpu;
+#[cfg(feature = "single-cell")]
 use crate::gpu::sc_gpu::harmony_gpu::HarmonyParamsV2Gpu;
 #[cfg(feature = "single-cell")]
 use crate::gpu::sc_gpu::knn_gpu::KnnParamsGpu;
 #[cfg(feature = "single-cell")]
 use crate::gpu::sc_gpu::scrublet_gpu::{ScrubletKnnBackend, ScrubletParamsGpu};
 use crate::ml::clustering::k_means::parse_kmeans_init;
+#[cfg(feature = "single-cell")]
+use crate::single_cell::sc_batch_correction::harmony_core::HARMONY_KMEANS_ITERS;
 #[cfg(feature = "single-cell")]
 use crate::single_cell::sc_processing::knn::KnnParams;
 use crate::utils::r_rust_interface::r_list_to_map;
@@ -157,7 +161,8 @@ impl HarmonyParamsV2Gpu {
     /// Should values not be found within the List, the parameters will default
     /// to the values defined in `HarmonyParamsV2Gpu::default()`. The
     /// `kmeans_params` field is populated from the same list, with
-    /// GPU-Harmony-specific defaults (`iters = 30`, `fixed = false`).
+    /// GPU-Harmony-specific defaults (`iters = HARMONY_KMEANS_ITERS`,
+    /// `fixed = false`).
     ///
     /// ### Params
     ///
@@ -234,17 +239,12 @@ impl HarmonyParamsV2Gpu {
             .get("use_dynamic_lambda")
             .and_then(|v| v.as_bool())
             .unwrap_or(defaults.use_dynamic_lambda);
-        let csr_cube_count = params_list
-            .get("csr_cube_count")
-            .and_then(|v| v.as_integer())
-            .map(|v| v as usize)
-            .unwrap_or(defaults.csr_cube_count);
 
         let kmeans_iters = params_list
             .get("k_means_iter")
             .and_then(|v| v.as_integer())
             .map(|v| v as usize)
-            .unwrap_or(30);
+            .unwrap_or(HARMONY_KMEANS_ITERS);
         let kmeans_init = params_list
             .get("k_means_init")
             .and_then(|v| v.as_str())
@@ -278,7 +278,6 @@ impl HarmonyParamsV2Gpu {
             tau,
             batch_proportion_cutoff,
             use_dynamic_lambda,
-            csr_cube_count,
             kmeans_params,
         })
     }
@@ -420,6 +419,51 @@ impl BbknnParamsGpu {
     }
 }
 
+//////////////////////
+// FastMnnParamsGpu //
+//////////////////////
+
+#[cfg(feature = "single-cell")]
+impl FastMnnParamsGpu {
+    /// Generate [FastMnnParamsGpu] from an R list.
+    ///
+    /// Reads the same flattened list as `FastMnnParams::from_r_list`, minus
+    /// the PCA keys, with the nearest neighbour half going through
+    /// [`KnnParamsGpu::from_r_list`]. Missing keys fall back to
+    /// [`FastMnnParamsGpu::default()`].
+    ///
+    /// ### Params
+    ///
+    /// * `r_list` - The list with the fastMNN parameters.
+    ///
+    /// ### Returns
+    ///
+    /// The [FastMnnParamsGpu] with all parameters set.
+    pub fn from_r_list(r_list: List) -> Result<Self> {
+        let knn_params = KnnParamsGpu::from_r_list(r_list.clone())?;
+        let defaults = Self::default();
+
+        let fastmnn_list: HashMap<&str, Robj> = r_list_to_map(r_list)?;
+
+        let ndist = fastmnn_list
+            .get("ndist")
+            .and_then(|v| v.as_real())
+            .map(|v| v as f32)
+            .unwrap_or(defaults.ndist);
+
+        let cos_norm = fastmnn_list
+            .get("cos_norm")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.cos_norm);
+
+        Ok(Self {
+            ndist,
+            cos_norm,
+            knn_params,
+        })
+    }
+}
+
 ///////////////////////
 // ScrubletParamsGpu //
 ///////////////////////
@@ -428,7 +472,7 @@ impl BbknnParamsGpu {
 impl ScrubletParamsGpu {
     /// Generate [ScrubletParamsGpu] from an R list.
     ///
-    /// Field names mirror `ScrubletParams::from_r_list`, minus `random_svd`
+    /// Field names mirror `ScrubletParams::from_r_list`, minus `svd_solver`
     /// (the GPU SVD is always randomised), plus one key the CPU list has no
     /// need for: `knn_backend`.
     ///

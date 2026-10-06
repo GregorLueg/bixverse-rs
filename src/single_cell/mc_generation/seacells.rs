@@ -251,6 +251,32 @@ fn matrix_trace(mat: &CompressedSparseData2<f32>) -> f64 {
     trace
 }
 
+/// Parallel `M @ v` for a CSR matrix, row sums in stored order.
+///
+/// ### Params
+///
+/// * `mat` - Sparse CSR matrix
+/// * `v` - Dense vector of length `mat.shape.1`
+///
+/// ### Returns
+///
+/// The dense product, or [BixverseErrors::SparseMatrixMustBeCsr].
+fn csr_matvec_par(mat: &CompressedSparseData2<f32>, v: &[f32]) -> Result<Vec<f32>, BixverseErrors> {
+    if !mat.cs_type.is_csr() {
+        return Err(BixverseErrors::SparseMatrixMustBeCsr);
+    }
+    Ok((0..mat.shape.0)
+        .into_par_iter()
+        .map(|i| {
+            let mut sum = 0.0f32;
+            for idx in mat.indptr[i] as usize..mat.indptr[i + 1] as usize {
+                sum += mat.data[idx] * v[mat.indices[idx] as usize];
+            }
+            sum
+        })
+        .collect())
+}
+
 /// Compute adaptive anisotropic diffusion kernel
 ///
 /// Implementation from palantir package.  Uses the k/3-th nearest neighbour
@@ -540,33 +566,43 @@ pub fn max_min_sampling(data: &[Vec<f32>], num_waypoints: usize, seed: u64) -> V
     let mut rng = StdRng::seed_from_u64(seed);
     let mut waypoint_set = FxHashSet::default();
 
-    for dim in 0..n_dims {
-        let vec: Vec<f32> = data.iter().map(|row| row[dim]).collect();
-        let mut iter_set = vec![rng.random_range(0..n)];
-        let mut min_dists = vec![f32::MAX; n];
+    // One draw per dimension, in dimension order, so the stream is untouched
+    let starts: Vec<usize> = (0..n_dims).map(|_| rng.random_range(0..n)).collect();
 
-        // initialize distances to first point
-        for i in 0..n {
-            min_dists[i] = (vec[i] - vec[iter_set[0]]).abs();
-        }
+    let per_dim: Vec<Vec<usize>> = (0..n_dims)
+        .into_par_iter()
+        .map(|dim| {
+            let vec: Vec<f32> = data.iter().map(|row| row[dim]).collect();
+            let mut iter_set = vec![starts[dim]];
+            let mut min_dists = vec![f32::MAX; n];
 
-        // iteratively select maximally distant points
-        for _ in 1..no_iterations {
-            let new_wp = min_dists
-                .iter()
-                .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-                .map(|(idx, _)| idx)
-                .unwrap();
-
-            iter_set.push(new_wp);
-
+            // initialize distances to first point
             for i in 0..n {
-                let dist = (vec[i] - vec[new_wp]).abs();
-                min_dists[i] = min_dists[i].min(dist);
+                min_dists[i] = (vec[i] - vec[iter_set[0]]).abs();
             }
-        }
 
+            // iteratively select maximally distant points
+            for _ in 1..no_iterations {
+                let new_wp = min_dists
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                    .map(|(idx, _)| idx)
+                    .unwrap();
+
+                iter_set.push(new_wp);
+
+                for i in 0..n {
+                    let dist = (vec[i] - vec[new_wp]).abs();
+                    min_dists[i] = min_dists[i].min(dist);
+                }
+            }
+
+            iter_set
+        })
+        .collect();
+
+    for iter_set in per_dim {
         waypoint_set.extend(iter_set);
     }
 
@@ -693,44 +729,51 @@ pub fn build_data_to_landmark_transitions(
 
     let per_row: Vec<(Vec<usize>, Vec<f32>)> = (0..n)
         .into_par_iter()
-        .map(|i| {
-            let mut dists: Vec<(usize, f32)> = (0..l)
-                .map(|li_idx| {
+        .map_init(
+            || (vec![0.0f32; dim], Vec::<(usize, f32)>::with_capacity(l)),
+            |(row, dists), i| {
+                // the PCA is column-major, so a cell's row is gathered once
+                for (c, slot) in row.iter_mut().enumerate() {
+                    *slot = *pca.get(i, c);
+                }
+                dists.clear();
+                dists.extend((0..l).map(|li_idx| {
                     let mut d = 0.0f32;
-                    for c in 0..dim {
-                        let diff = pca.get(i, c) - landmark_coords[li_idx * dim + c];
+                    let landmark = &landmark_coords[li_idx * dim..(li_idx + 1) * dim];
+                    for (x, y) in row.iter().zip(landmark) {
+                        let diff = x - y;
                         d += diff * diff;
                     }
                     (li_idx, d)
-                })
-                .collect();
+                }));
 
-            dists.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-            dists.truncate(k_used);
+                dists.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+                dists.truncate(k_used);
 
-            let bw_raw = dists.last().map(|&(_, d)| d).unwrap_or(0.0);
-            let bw = (bw_raw * bw_factor).max(f32::EPSILON);
+                let bw_raw = dists.last().map(|&(_, d)| d).unwrap_or(0.0);
+                let bw = (bw_raw * bw_factor).max(f32::EPSILON);
 
-            let mut kept: Vec<(usize, f32)> = dists
-                .into_iter()
-                .filter_map(|(li_idx, d)| {
-                    let w = (-d / bw).exp();
-                    (w >= thresh).then_some((li_idx, w))
-                })
-                .collect();
+                let mut kept: Vec<(usize, f32)> = dists
+                    .iter()
+                    .filter_map(|&(li_idx, d)| {
+                        let w = (-d / bw).exp();
+                        (w >= thresh).then_some((li_idx, w))
+                    })
+                    .collect();
 
-            let s: f32 = kept.iter().map(|&(_, w)| w).sum();
-            if s > 0.0 {
-                for (_, w) in &mut kept {
-                    *w /= s;
+                let s: f32 = kept.iter().map(|&(_, w)| w).sum();
+                if s > 0.0 {
+                    for (_, w) in &mut kept {
+                        *w /= s;
+                    }
                 }
-            }
 
-            kept.sort_by_key(|&(li_idx, _)| li_idx);
-            let idx: Vec<usize> = kept.iter().map(|&(li_idx, _)| li_idx).collect();
-            let val: Vec<f32> = kept.iter().map(|&(_, w)| w).collect();
-            (idx, val)
-        })
+                kept.sort_by_key(|&(li_idx, _)| li_idx);
+                let idx: Vec<usize> = kept.iter().map(|&(li_idx, _)| li_idx).collect();
+                let val: Vec<f32> = kept.iter().map(|&(_, w)| w).collect();
+                (idx, val)
+            },
+        )
         .collect();
 
     let mut rows = Vec::new();
@@ -1744,52 +1787,58 @@ impl<'a> SEACells<'a> {
             .map(|d| d[median_idx])
             .collect::<Vec<f32>>();
 
-        let mut edges = FxHashSet::default();
-        for (i, neighbours) in knn_indices.iter().enumerate() {
-            for &j in neighbours {
-                edges.insert((i, j));
-            }
-        }
+        let mut edges: Vec<(usize, usize)> = knn_indices
+            .iter()
+            .enumerate()
+            .flat_map(|(i, neighbours)| neighbours.iter().map(move |&j| (i, j)))
+            .collect();
+        edges.par_sort_unstable();
+        edges.dedup();
 
         match graph_construction {
             KnnSymmetrisation::Union => {
-                let to_add: Vec<_> = edges
-                    .iter()
-                    .filter_map(|&(i, j)| (!edges.contains(&(j, i))).then_some((j, i)))
-                    .collect();
-                edges.extend(to_add);
+                let transposed: Vec<(usize, usize)> = edges.iter().map(|&(i, j)| (j, i)).collect();
+                edges.extend(transposed);
             }
             KnnSymmetrisation::Intersection => {
-                let to_keep: FxHashSet<_> = edges
+                let kept: Vec<(usize, usize)> = edges
                     .iter()
                     .copied()
-                    .filter(|&(i, j)| edges.contains(&(j, i)))
+                    .filter(|&(i, j)| edges.binary_search(&(j, i)).is_ok())
                     .collect();
-                edges = to_keep;
+                edges = kept;
+            }
+        }
+        edges.extend((0..n).map(|i| (i, i)));
+        edges.par_sort_unstable();
+        edges.dedup();
+
+        // a row-major copy, as the column-major `pca` is strided per cell
+        let dim = pca.ncols();
+        let mut pca_rows = vec![0.0f32; n * dim];
+        for (i, row) in pca_rows.chunks_mut(dim.max(1)).take(n).enumerate() {
+            for (d, slot) in row.iter_mut().take(dim).enumerate() {
+                *slot = *pca.get(i, d);
             }
         }
 
-        for i in 0..n {
-            edges.insert((i, i));
-        }
-
-        let mut rows: Vec<usize> = Vec::new();
-        let mut cols: Vec<usize> = Vec::new();
-        let mut vals: Vec<f32> = Vec::new();
-
-        for &(i, j) in &edges {
-            let mut dist_square = 0_f32;
-            for dim in 0..pca.ncols() {
-                let diff = pca.get(i, dim) - pca.get(j, dim);
-                dist_square += diff * diff;
-            }
-            let sigma_prod = median_dist[i] * median_dist[j];
-            let val = (-dist_square / sigma_prod).exp();
-
-            rows.push(i);
-            cols.push(j);
-            vals.push(val);
-        }
+        let vals: Vec<f32> = edges
+            .par_iter()
+            .map(|&(i, j)| {
+                let mut dist_square = 0_f32;
+                for (a, b) in pca_rows[i * dim..(i + 1) * dim]
+                    .iter()
+                    .zip(&pca_rows[j * dim..(j + 1) * dim])
+                {
+                    let diff = a - b;
+                    dist_square += diff * diff;
+                }
+                let sigma_prod = median_dist[i] * median_dist[j];
+                (-dist_square / sigma_prod).exp()
+            })
+            .collect();
+        let rows: Vec<usize> = edges.iter().map(|&(i, _)| i).collect();
+        let cols: Vec<usize> = edges.iter().map(|&(_, j)| j).collect();
 
         if verbosity.normal_verbosity() {
             println!(
@@ -1851,8 +1900,8 @@ impl<'a> SEACells<'a> {
     /// Result of K^2 @ v as a dense vector
     fn k_squared_matvec(&self, v: &[f32]) -> Result<Vec<f32>, BixverseErrors> {
         let k = self.kernel_mat.as_ref().unwrap();
-        let kv = csr_matvec(k, v)?;
-        csr_matvec(k, &kv)
+        let kv = csr_matvec_par(k, v)?;
+        csr_matvec_par(k, &kv)
     }
 
     /// Fit the SEACells model
@@ -2273,25 +2322,48 @@ impl<'a> SEACells<'a> {
         let mut f = vec![0_f32; n];
         let mut g = vec![0_f32; n];
 
-        // Initial f[i] = sum_j (K^2[j,i])^2, g[i] = K^2[i,i]
+        // Initial f[i] = sum_j (K^2[j,i])^2, g[i] = K^2[i,i]. K is symmetric,
+        // so K^2[:, i] = sum_m K[i, m] * K[m, :], a sparse merge of K's rows.
+        // Chunks are accumulated in order so `f` is deterministic.
         for chunk_start in (0..n).step_by(INIT_CHUNK_SIZE) {
             let chunk_end = (chunk_start + INIT_CHUNK_SIZE).min(n);
-            let chunk_results: Vec<(usize, Vec<f32>)> = (chunk_start..chunk_end)
+            let chunk_results: Vec<(usize, Vec<u32>, Vec<f32>)> = (chunk_start..chunk_end)
                 .into_par_iter()
-                .map(|i| {
-                    let mut row_i = vec![0_f32; n];
-                    for idx in kernel.indptr[i]..kernel.indptr[i + 1] {
-                        let idx_usize = idx as usize;
-                        row_i[kernel.indices[idx_usize] as usize] = kernel.data[idx_usize];
+                .map_init(
+                    || (vec![0_f32; n], vec![false; n]),
+                    |(acc, seen), i| {
+                        let mut touched: Vec<u32> = Vec::new();
+                        for idx in kernel.indptr[i]..kernel.indptr[i + 1] {
+                            let m = kernel.indices[idx as usize] as usize;
+                            let w = kernel.data[idx as usize];
+                            for mi in kernel.indptr[m]..kernel.indptr[m + 1] {
+                                let j = kernel.indices[mi as usize] as usize;
+                                if !seen[j] {
+                                    seen[j] = true;
+                                    touched.push(j as u32);
+                                }
+                                acc[j] += w * kernel.data[mi as usize];
+                            }
+                        }
+                        let values: Vec<f32> = touched
+                            .iter()
+                            .map(|&j| {
+                                let v = acc[j as usize];
+                                acc[j as usize] = 0.0;
+                                seen[j as usize] = false;
+                                v
+                            })
+                            .collect();
+                        (i, touched, values)
+                    },
+                )
+                .collect();
+            for (i, touched, values) in chunk_results {
+                for (&j, &v) in touched.iter().zip(values.iter()) {
+                    if j as usize == i {
+                        g[i] = v;
                     }
-                    let k2_col_i = csr_matvec(kernel, &row_i)?;
-                    Ok((i, k2_col_i))
-                })
-                .collect::<Result<Vec<(usize, Vec<f32>)>, BixverseErrors>>()?;
-            for (i, k2_col_i) in chunk_results {
-                g[i] = k2_col_i[i];
-                for j in 0..n {
-                    f[j] += k2_col_i[j] * k2_col_i[j];
+                    f[j as usize] += v * v;
                 }
             }
         }

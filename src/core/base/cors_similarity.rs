@@ -17,6 +17,20 @@ use crate::core::math::matrix_helpers::*;
 use crate::prelude::*;
 use crate::utils::faer_parallelism;
 
+///////////
+// Types //
+///////////
+
+/// Kernel from one query column to every target column
+type ColumnKernel<'a, T> = &'a (dyn Fn(&[T], &[&[T]]) -> Vec<T> + Sync);
+
+////////////
+// Consts //
+////////////
+
+/// Bits per word of the packed boolean columns
+const BITS_PER_WORD: usize = 64;
+
 ///////////////////////
 // Column matrix ops //
 ///////////////////////
@@ -51,12 +65,7 @@ where
         faer_parallelism(),
     );
 
-    // reflect lower triangle into upper
-    for j in 0..n_cols {
-        for i in 0..j {
-            result[(i, j)] = result[(j, i)];
-        }
-    }
+    mirror_lower_to_upper(result.as_mut());
 
     result
 }
@@ -88,11 +97,7 @@ where
         faer_parallelism(),
     );
 
-    for j in 0..n {
-        for i in 0..j {
-            result[(i, j)] = result[(j, i)];
-        }
-    }
+    mirror_lower_to_upper(result.as_mut());
 
     result
 }
@@ -134,11 +139,7 @@ where
         faer_parallelism(),
     );
 
-    for j in 0..n {
-        for i in 0..j {
-            result[(i, j)] = result[(j, i)];
-        }
-    }
+    mirror_lower_to_upper(result.as_mut());
 
     result
 }
@@ -200,8 +201,8 @@ where
     let n = mat.nrows();
     let mut result = mat.to_owned();
     let inv_sqrt_diag: Vec<T> = (0..n).map(|i| T::one() / mat.get(i, i).sqrt()).collect();
-    for i in 0..n {
-        for j in 0..n {
+    for j in 0..n {
+        for i in 0..n {
             result[(i, j)] = *mat.get(i, j) * inv_sqrt_diag[i] * inv_sqrt_diag[j];
         }
     }
@@ -244,19 +245,18 @@ where
     let pairs: Vec<(usize, usize)> = (0..n_cols)
         .flat_map(|i| (i + 1..n_cols).map(move |j| (i, j)))
         .collect();
+    let n_bins_resolved = resolve_n_bins::<T>(n_bins, binned_mat.nrows());
     let mi_vals: Vec<((usize, usize), T)> = pairs
         .into_par_iter()
-        .map(|(i, j)| {
-            let mi = calculate_mi(binned_mat.col(i), binned_mat.col(j), n_bins);
-            let nmi = if normalised {
-                let joint_entropy =
-                    calculate_joint_entropy(binned_mat.col(i), binned_mat.col(j), n_bins);
-                mi / joint_entropy
-            } else {
-                mi
-            };
-            ((i, j), nmi)
-        })
+        .map_init(
+            || MiScratch::new(n_bins_resolved),
+            |scratch, (i, j)| {
+                let (mi, joint_entropy) =
+                    scratch.pair::<T>(binned_mat.col(i), binned_mat.col(j), normalised);
+                let nmi = if normalised { mi / joint_entropy } else { mi };
+                ((i, j), nmi)
+            },
+        )
         .collect();
     let entropy: Vec<T> = (0..n_cols)
         .into_par_iter()
@@ -330,25 +330,30 @@ pub fn parse_distance_type(s: &str) -> Option<DistanceType> {
 ///
 /// ### Returns
 ///
-/// The centred, unit-norm columns.
-fn centre_and_normalise<T>(cols: &[Cow<'_, [T]>]) -> Vec<Vec<T>>
+/// The centred, unit-norm columns as a matrix.
+fn centre_and_normalise<T>(cols: &[Cow<'_, [T]>]) -> Mat<T>
 where
     T: BixverseFloat + SimdDistance,
 {
-    cols.par_iter()
-        .map(|c| {
+    let n_rows = cols.first().map_or(0, |c| c.len());
+    let mut out = Mat::<T>::zeros(n_rows, cols.len());
+    out.par_col_iter_mut()
+        .zip(cols.par_iter())
+        .for_each(|(mut dst, c)| {
             let n = T::from_usize(c.len()).unwrap();
             let mean = c.iter().fold(T::zero(), |acc, x| acc + *x) / n;
-            let mut v: Vec<T> = c.iter().map(|x| *x - mean).collect();
-            let norm = T::calculate_l2_norm(&v);
-            if norm > T::zero() {
-                v.iter_mut().for_each(|x| *x /= norm);
-            } else {
-                v.fill(T::zero());
+            let dst = dst.as_mut().try_as_col_major_mut().unwrap().as_slice_mut();
+            for (d, x) in dst.iter_mut().zip(c.iter()) {
+                *d = *x - mean;
             }
-            v
-        })
-        .collect()
+            let norm = T::calculate_l2_norm(dst);
+            if norm > T::zero() {
+                dst.iter_mut().for_each(|x| *x /= norm);
+            } else {
+                dst.fill(T::zero());
+            }
+        });
+    out
 }
 
 /// Apply a pairwise kernel between one query column and all target columns
@@ -384,7 +389,7 @@ where
 /// Calculate distances between the columns of two matrices
 ///
 /// All kernels go through [SimdDistance], parallel over the columns of
-/// `mat_a`. The cosine distance is `1 - |cos|` as in
+/// `mat_b`. The cosine distance is `1 - |cos|` as in
 /// [column_pairwise_cosine_dist]; a zero-norm column gets distance one.
 /// Correlation copies both matrices once to centre and normalise the columns.
 ///
@@ -420,63 +425,89 @@ where
 
     let cols_a = column_slices(mat_a);
     let cols_b = column_slices(mat_b);
-    let ys: Vec<&[T]> = cols_b.iter().map(|c| c.as_ref()).collect();
+    let (n_a, n_b) = (cols_a.len(), cols_b.len());
+    let ys: Vec<&[T]> = cols_a.iter().map(|c| c.as_ref()).collect();
 
-    let rows: Vec<Vec<T>> = match dist {
-        DistanceType::L2Norm => cols_a
-            .par_iter()
-            .map(|q| {
-                batched_kernel(q, &ys, T::euclidean_simd_batch_4, T::euclidean_simd)
-                    .into_iter()
-                    .map(|d| d.max(T::zero()).sqrt())
-                    .collect()
-            })
-            .collect(),
-        DistanceType::L1Norm => cols_a
-            .par_iter()
-            .map(|q| batched_kernel(q, &ys, T::manhattan_simd_batch_4, T::manhattan_simd))
-            .collect(),
-        DistanceType::Canberra => cols_a
-            .par_iter()
-            .map(|q| ys.iter().map(|y| T::canberra_simd(q, y)).collect())
-            .collect(),
-        DistanceType::Cosine => {
-            let norms_b: Vec<T> = ys.iter().map(|y| T::calculate_l2_norm(y)).collect();
-            cols_a
-                .par_iter()
-                .map(|q| {
-                    let norm_q = T::calculate_l2_norm(q);
-                    batched_kernel(q, &ys, T::dot_simd_batch_4, T::dot_simd)
-                        .into_iter()
-                        .zip(&norms_b)
-                        .map(|(d, norm_b)| {
-                            let denom = norm_q * *norm_b;
-                            if denom > T::zero() {
-                                T::one() - (d / denom).abs()
-                            } else {
-                                T::one()
-                            }
-                        })
-                        .collect()
-                })
+    let mut res = Mat::<T>::zeros(n_a, n_b);
+
+    // One output column per column of `mat_b`, so every write is contiguous.
+    let fill = |res: &mut Mat<T>, kernel: ColumnKernel<T>| {
+        res.par_col_iter_mut()
+            .zip(cols_b.par_iter())
+            .for_each(|(mut dst, q)| {
+                let vals = kernel(q, &ys);
+                dst.as_mut()
+                    .try_as_col_major_mut()
+                    .unwrap()
+                    .as_slice_mut()
+                    .copy_from_slice(&vals);
+            });
+    };
+
+    match dist {
+        DistanceType::L2Norm => fill(&mut res, &|q, ys| {
+            batched_kernel(q, ys, T::euclidean_simd_batch_4, T::euclidean_simd)
+                .into_iter()
+                .map(|d| d.max(T::zero()).sqrt())
                 .collect()
+        }),
+        DistanceType::L1Norm => fill(&mut res, &|q, ys| {
+            batched_kernel(q, ys, T::manhattan_simd_batch_4, T::manhattan_simd)
+        }),
+        DistanceType::Canberra => fill(&mut res, &|q, ys| {
+            ys.iter().map(|y| T::canberra_simd(q, y)).collect()
+        }),
+        DistanceType::Cosine => {
+            let norms_a: Vec<T> = ys.iter().map(|y| T::calculate_l2_norm(y)).collect();
+            gemm::gemm(
+                res.as_mut(),
+                Accum::Replace,
+                mat_a.transpose(),
+                mat_b,
+                T::one(),
+                faer_parallelism(),
+            );
+            res.par_col_iter_mut()
+                .zip(cols_b.par_iter())
+                .for_each(|(mut dst, q)| {
+                    let norm_b = T::calculate_l2_norm(q);
+                    for (i, v) in dst
+                        .as_mut()
+                        .try_as_col_major_mut()
+                        .unwrap()
+                        .as_slice_mut()
+                        .iter_mut()
+                        .enumerate()
+                    {
+                        let denom = norms_a[i] * norm_b;
+                        *v = if denom > T::zero() {
+                            T::one() - (*v / denom).abs()
+                        } else {
+                            T::one()
+                        };
+                    }
+                });
         }
         DistanceType::Correlation => {
             let a = centre_and_normalise(&cols_a);
             let b = centre_and_normalise(&cols_b);
-            let ys_b: Vec<&[T]> = b.iter().map(|c| c.as_slice()).collect();
-            a.par_iter()
-                .map(|q| {
-                    batched_kernel(q, &ys_b, T::dot_simd_batch_4, T::dot_simd)
-                        .into_iter()
-                        .map(|r| T::one() - r)
-                        .collect()
-                })
-                .collect()
+            gemm::gemm(
+                res.as_mut(),
+                Accum::Replace,
+                a.transpose(),
+                b.as_ref(),
+                T::one(),
+                faer_parallelism(),
+            );
+            res.par_col_iter_mut().for_each(|mut dst| {
+                for v in dst.as_mut().try_as_col_major_mut().unwrap().as_slice_mut() {
+                    *v = T::one() - *v;
+                }
+            });
         }
-    };
+    }
 
-    Ok(Mat::from_fn(cols_a.len(), cols_b.len(), |i, j| rows[i][j]))
+    Ok(res)
 }
 
 /// Calculate the cosine distance between columns
@@ -495,8 +526,8 @@ where
     let cosine_sim = column_pairwise_cos(mat);
     let ncols = cosine_sim.ncols();
     let mut res: Mat<T> = Mat::zeros(ncols, ncols);
-    for i in 0..ncols {
-        for j in 0..ncols {
+    for j in 0..ncols {
+        for i in 0..ncols {
             if i != j {
                 res[(i, j)] = T::one() - cosine_sim.get(i, j).abs();
             }
@@ -571,16 +602,11 @@ where
         .flat_map(|i| ((i + 1)..ncols).map(move |j| (i, j)))
         .collect();
 
+    let cols = column_slices(*mat);
+
     let results: Vec<(usize, usize, T)> = pairs
         .par_iter()
-        .map(|&(i, j)| {
-            let col_i: Vec<T> = mat.col(i).iter().cloned().collect();
-            let col_j: Vec<T> = mat.col(j).iter().cloned().collect();
-
-            let dist = T::manhattan_simd(&col_i, &col_j);
-
-            (i, j, dist)
-        })
+        .map(|&(i, j)| (i, j, T::manhattan_simd(&cols[i], &cols[j])))
         .collect();
 
     for (i, j, dist) in results {
@@ -612,16 +638,11 @@ where
         .flat_map(|i| ((i + 1)..ncols).map(move |j| (i, j)))
         .collect();
 
+    let cols = column_slices(*mat);
+
     let results: Vec<(usize, usize, T)> = pairs
         .par_iter()
-        .map(|&(i, j)| {
-            let col_i: Vec<T> = mat.col(i).iter().cloned().collect();
-            let col_j: Vec<T> = mat.col(j).iter().cloned().collect();
-
-            let dist = T::canberra_simd(&col_i, &col_j);
-
-            (i, j, dist)
-        })
+        .map(|&(i, j)| (i, j, T::canberra_simd(&cols[i], &cols[j])))
         .collect();
 
     for (i, j, dist) in results {
@@ -659,10 +680,23 @@ where
     let n = x.len();
     let mut sim_mat: Mat<T> = Mat::zeros(n, n);
 
-    let p_values: Vec<T> = x
+    // Bit-packed columns: the pair counts become popcounts of ANDed words.
+    let packed: Vec<Vec<u64>> = x
         .par_iter()
         .map(|col| {
-            let sum = col.iter().map(|&x| x as usize).sum::<usize>();
+            let mut words = vec![0u64; col.len().div_ceil(BITS_PER_WORD)];
+            for (k, &b) in col.iter().enumerate() {
+                words[k / BITS_PER_WORD] |= (b as u64) << (k % BITS_PER_WORD);
+            }
+            words
+        })
+        .collect();
+
+    let p_values: Vec<T> = packed
+        .par_iter()
+        .zip(x.par_iter())
+        .map(|(words, col)| {
+            let sum = words.iter().map(|w| w.count_ones() as usize).sum::<usize>();
             T::from_usize(sum).unwrap() / T::from_usize(col.len()).unwrap()
         })
         .collect();
@@ -674,16 +708,14 @@ where
     let results: Vec<((usize, usize), T)> = pairs
         .par_iter()
         .map(|&(i, j)| {
-            let col_a = &x[i];
-            let col_b = &x[j];
             let p_x = p_values[i];
             let p_y = p_values[j];
-            let sum = col_a
+            let sum = packed[i]
                 .iter()
-                .zip(col_b.iter())
-                .map(|(&a, &b)| if a & b { 1 } else { 0 })
+                .zip(packed[j].iter())
+                .map(|(a, b)| (a & b).count_ones() as usize)
                 .sum::<usize>();
-            let p_xy = T::from_usize(sum).unwrap() / T::from_usize(col_a.len()).unwrap();
+            let p_xy = T::from_usize(sum).unwrap() / T::from_usize(x[i].len()).unwrap();
 
             let value = if p_x == T::zero() || p_y == T::zero() || p_xy == T::zero() {
                 T::neg_infinity()
@@ -734,15 +766,20 @@ where
     let pairs: Vec<(usize, usize)> = (0..ncols)
         .flat_map(|i| ((i + 1)..ncols).map(move |j| (i, j)))
         .collect();
+    let cols: Vec<Cow<[i32]>> = (0..ncols)
+        .map(|j| match mat.col(j).try_as_col_major() {
+            Some(c) => Cow::Borrowed(c.as_slice()),
+            None => Cow::Owned(mat.col(j).iter().cloned().collect()),
+        })
+        .collect();
     let results: Vec<(usize, usize, T)> = pairs
         .par_iter()
         .map(|&(i, j)| {
-            let mut mismatches = 0;
-            for k in 0..nrows {
-                if mat.get(k, i) != mat.get(k, j) {
-                    mismatches += 1;
-                }
-            }
+            let mismatches = cols[i]
+                .iter()
+                .zip(cols[j].iter())
+                .filter(|(a, b)| a != b)
+                .count();
             let dist = T::from_usize(mismatches).unwrap() / T::from_usize(nrows).unwrap();
             (i, j, dist)
         })
@@ -821,25 +858,29 @@ where
         .flat_map(|i| ((i + 1)..nrow).map(move |j| (i, j)))
         .collect();
 
+    // Samples as columns, so each sample's features are contiguous.
+    let samples = mat.transpose().to_owned();
+    let n_features = T::from_usize(ncol).unwrap();
+
     let results: Vec<(usize, usize, T)> = pairs
         .par_iter()
         .map(|&(i, j)| {
+            let row_i = samples.col(i).try_as_col_major().unwrap().as_slice();
+            let row_j = samples.col(j).try_as_col_major().unwrap().as_slice();
             let mut total_dist = T::zero();
             for k in 0..ncol {
-                let val_i = *mat.get(i, k);
-                let val_j = *mat.get(j, k);
-                let dist = if is_cat[k] {
-                    if (val_i - val_j).abs() < T::epsilon() {
+                let diff = (row_i[k] - row_j[k]).abs();
+                total_dist += if is_cat[k] {
+                    if diff < T::epsilon() {
                         T::zero()
                     } else {
                         T::one()
                     }
                 } else {
-                    (val_i - val_j).abs() / computed_ranges[k]
+                    diff / computed_ranges[k]
                 };
-                total_dist += dist;
             }
-            (i, j, total_dist / T::from_usize(ncol).unwrap())
+            (i, j, total_dist / n_features)
         })
         .collect();
 
@@ -917,28 +958,33 @@ where
     let pairs: Vec<(usize, usize)> = (0..ncol)
         .flat_map(|i| ((i + 1)..ncol).map(move |j| (i, j)))
         .collect();
+    let cols = column_slices(*mat);
 
     let results: Vec<(usize, usize, T)> = pairs
         .par_iter()
         .map(|&(col_i, col_j)| {
-            let mut total_dist = T::zero();
-            for row in 0..nrow {
-                let val_i = *mat.get(row, col_i);
-                let val_j = *mat.get(row, col_j);
-
-                let dist = if is_cat[col_i] && is_cat[col_j] {
-                    if (val_i - val_j).abs() < T::epsilon() {
+            let (x, y) = (&cols[col_i], &cols[col_j]);
+            let pairs_xy = x.iter().zip(y.iter());
+            let total_dist = if is_cat[col_i] && is_cat[col_j] {
+                let mut total = T::zero();
+                for (a, b) in pairs_xy {
+                    total += if (*a - *b).abs() < T::epsilon() {
                         T::zero()
                     } else {
                         T::one()
-                    }
-                } else if !is_cat[col_i] && !is_cat[col_j] {
-                    (val_i - val_j).abs() / computed_ranges[col_i].max(computed_ranges[col_j])
-                } else {
-                    T::one()
-                };
-                total_dist += dist;
-            }
+                    };
+                }
+                total
+            } else if !is_cat[col_i] && !is_cat[col_j] {
+                let range = computed_ranges[col_i].max(computed_ranges[col_j]);
+                let mut total = T::zero();
+                for (a, b) in pairs_xy {
+                    total += (*a - *b).abs() / range;
+                }
+                total
+            } else {
+                T::from_usize(nrow).unwrap()
+            };
             (col_i, col_j, total_dist / T::from_usize(nrow).unwrap())
         })
         .collect();
@@ -1016,20 +1062,20 @@ where
 {
     let n = affinity_mat.nrows();
     let mut tom_mat = Mat::<T>::zeros(n, n);
+    // affinity_mat is assumed symmetric: columns stand in for rows throughout
+    // so every read and write below is contiguous.
     let connectivity = if signed {
         (0..n)
-            .map(|i| (0..n).map(|j| affinity_mat.get(i, j).abs()).sum())
+            .map(|j| affinity_mat.col(j).iter().map(|v| v.abs()).sum())
             .collect::<Vec<T>>()
     } else {
         col_sums(affinity_mat.as_ref())
     };
 
-    // affinity_mat is assumed symmetric, so A * A is symmetric.
-    // Only the upper triangle is read below (j > i), no reflection needed.
     let mut dot_products = Mat::<T>::zeros(n, n);
     gemm::gram(
         dot_products.as_mut(),
-        BlockStructure::TriangularUpper,
+        BlockStructure::TriangularLower,
         Accum::Replace,
         affinity_mat,
         affinity_mat,
@@ -1037,47 +1083,42 @@ where
         faer_parallelism(),
     );
 
-    for i in 0..n {
-        tom_mat[(i, i)] = T::one();
-        for j in (i + 1)..n {
-            let a_ij = affinity_mat.get(i, j);
-            let shared_neighbours = *dot_products.get(i, j)
-                - *affinity_mat.get(i, i) * *affinity_mat.get(i, j)
-                - *affinity_mat.get(i, j) * *affinity_mat.get(j, j);
-            let f_ki_kj = connectivity[i].min(connectivity[j]);
+    let half = T::from_f64(0.5).unwrap();
+    tom_mat
+        .par_col_iter_mut()
+        .enumerate()
+        .for_each(|(i, mut col)| {
+            col[i] = T::one();
+            let a_ii = *affinity_mat.get(i, i);
+            for j in (i + 1)..n {
+                let a_ij = *affinity_mat.get(j, i);
+                let shared_neighbours =
+                    *dot_products.get(j, i) - a_ii * a_ij - a_ij * *affinity_mat.get(j, j);
+                let f_ki_kj = connectivity[i].min(connectivity[j]);
 
-            let tom_value = match tom_type {
-                TomType::Version1 => {
-                    let numerator = *a_ij + shared_neighbours;
-                    let denominator = if signed {
-                        if *a_ij >= T::zero() {
-                            f_ki_kj + T::one() - *a_ij
+                col[j] = match tom_type {
+                    TomType::Version1 => {
+                        let numerator = a_ij + shared_neighbours;
+                        let denominator = if signed && a_ij < T::zero() {
+                            f_ki_kj + T::one() + a_ij
                         } else {
-                            f_ki_kj + T::one() + *a_ij
-                        }
-                    } else {
-                        f_ki_kj + T::one() - *a_ij
-                    };
-                    numerator / denominator
-                }
-                TomType::Version2 => {
-                    let divisor = if signed {
-                        if *a_ij >= T::zero() {
-                            f_ki_kj + *a_ij
+                            f_ki_kj + T::one() - a_ij
+                        };
+                        numerator / denominator
+                    }
+                    TomType::Version2 => {
+                        let divisor = if signed && a_ij < T::zero() {
+                            f_ki_kj - a_ij
                         } else {
-                            f_ki_kj - *a_ij
-                        }
-                    } else {
-                        f_ki_kj + *a_ij
-                    };
-                    let neighbours = shared_neighbours / divisor;
-                    T::from_f64(0.5).unwrap() * (*a_ij + neighbours)
-                }
-            };
-            tom_mat[(i, j)] = tom_value;
-            tom_mat[(j, i)] = tom_value;
-        }
-    }
+                            f_ki_kj + a_ij
+                        };
+                        half * (a_ij + shared_neighbours / divisor)
+                    }
+                };
+            }
+        });
+
+    mirror_lower_to_upper(tom_mat.as_mut());
     tom_mat
 }
 
@@ -1156,10 +1197,12 @@ where
     T::from_usize(intersection).unwrap() / T::from_usize(union).unwrap()
 }
 
+///////////
+// Tests //
+///////////
+
 #[cfg(test)]
 mod tests {
-    // Tests focus mainly on API; the Rest was heavily tested within R
-
     use super::*;
     use faer::Mat;
     use rustc_hash::FxHashSet;

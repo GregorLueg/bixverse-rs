@@ -270,16 +270,14 @@ fn initial_mass_of_partitions(
 ///
 /// ### Returns
 ///
-/// A `Vec<Vec<NodeScore>>` of shape `[n_partitions][n]` with rescored entries.
+/// A flat node-major `[node][partition]` table of rescored entries.
 fn initial_score_table(
     outgoing: &CompressedSparseData2<f32, f32>,
     partition_of_nodes: &[i32],
     n_partitions: usize,
-) -> Vec<Vec<NodeScore>> {
+) -> Vec<NodeScore> {
     let n = outgoing.shape.0;
-    let mut table: Vec<Vec<NodeScore>> = (0..n_partitions)
-        .map(|_| vec![NodeScore::new(); n])
-        .collect();
+    let mut table = vec![NodeScore::new(); n * n_partitions];
 
     for src in 0..n {
         let src_p = partition_of_nodes[src];
@@ -291,12 +289,12 @@ fn initial_score_table(
             let dst_p = partition_of_nodes[dst];
 
             if dst_p >= 0 {
-                let s = &mut table[dst_p as usize][src];
+                let s = &mut table[src * n_partitions + dst_p as usize];
                 s.update_outgoing(1, w);
                 s.rescore();
             }
             if src_p >= 0 {
-                let s = &mut table[src_p as usize][dst];
+                let s = &mut table[dst * n_partitions + src_p as usize];
                 s.update_incoming(1, w);
                 s.rescore();
             }
@@ -319,16 +317,53 @@ fn initial_score_table(
 /// A `Vec<f64>` of length `n_partitions` with summed node scores.
 fn initial_score_of_partitions(
     partition_of_nodes: &[i32],
-    table: &[Vec<NodeScore>],
+    table: &[NodeScore],
     n_partitions: usize,
 ) -> Vec<f64> {
     let mut scores = vec![0.0f64; n_partitions];
     for (i, &p) in partition_of_nodes.iter().enumerate() {
         if p >= 0 {
-            scores[p as usize] += table[p as usize][i].score;
+            scores[p as usize] += table[i * n_partitions + p as usize].score;
         }
     }
     scores
+}
+
+/// Per-partition work buffers for one `improve_node` call.
+#[derive(Default)]
+struct DiffScratch {
+    /// Cold diff per partition.
+    cold: Vec<f64>,
+    /// Hot diff per partition.
+    hot: Vec<f64>,
+    /// Connectivity delta per partition.
+    conn: Vec<f64>,
+    /// Disconnect-flip delta per partition.
+    disc: Vec<f64>,
+    /// Total diff per partition.
+    total: Vec<f64>,
+}
+
+impl DiffScratch {
+    /// Zeroed buffers of length `n_partitions`.
+    ///
+    /// ### Params
+    ///
+    /// * `n_partitions` - Number of partitions.
+    ///
+    /// ### Returns
+    ///
+    /// The scratch buffers.
+    fn new(n_partitions: usize) -> Self {
+        let zeros = vec![0.0f64; n_partitions];
+        Self {
+            cold: zeros.clone(),
+            hot: zeros.clone(),
+            conn: zeros.clone(),
+            disc: zeros.clone(),
+            total: zeros,
+        }
+    }
 }
 
 /// SA partition optimiser. One instance per optimisation run; not reusable.
@@ -357,8 +392,15 @@ struct OptimizePartitions<'a> {
     partition_of_nodes: &'a mut [i32],
     /// Precomputed `sum_i log2(total_incoming[i])`; constant across moves.
     incoming_scale: f64,
-    /// Dense `[partition][node]` score table; updated incrementally on each move.
-    table: Vec<Vec<NodeScore>>,
+    /// Dense node-major `[node * n_partitions + partition]` score table, so a
+    /// node's scan over partitions is contiguous; updated incrementally on each
+    /// move.
+    table: Vec<NodeScore>,
+    /// Cached size/mass-adjusted score of each partition (the `old_adj` term of
+    /// a move), refreshed for the two partitions a move touches.
+    adj_of_partitions: Vec<f64>,
+    /// Scratch for `improve_node`, kept to avoid per-node allocation.
+    scratch: DiffScratch,
     /// Current number of nodes assigned to each partition.
     size_of_partitions: Vec<usize>,
     /// Current total UMI mass assigned to each partition.
@@ -430,7 +472,7 @@ impl<'a> OptimizePartitions<'a> {
             hot.resize(n_partitions, false);
         }
 
-        Self {
+        let mut this = Self {
             outgoing,
             incoming,
             n,
@@ -450,7 +492,36 @@ impl<'a> OptimizePartitions<'a> {
             n_partitions,
             hot_partitions: hot,
             temperature_of_nodes: vec![1.0; n],
+            adj_of_partitions: Vec::new(),
+            scratch: DiffScratch::new(n_partitions),
+        };
+        this.adj_of_partitions = (0..n_partitions).map(|p| this.partition_adj(p)).collect();
+        this
+    }
+
+    /// Size/mass-adjusted score of partition `p` before a move.
+    ///
+    /// ### Params
+    ///
+    /// * `p` - Partition index.
+    ///
+    /// ### Returns
+    ///
+    /// The adjusted score, `0` for an empty partition.
+    fn partition_adj(&self, p: usize) -> f64 {
+        let size = self.size_of_partitions[p];
+        if size == 0 {
+            return 0.0;
         }
+        let mf = mass_factor(
+            self.mass_of_partitions[p],
+            self.low_mass,
+            self.target_mass,
+            self.high_mass,
+        );
+        let sf = mass_factor(size as f64, self.low_size, self.target_size, self.high_size);
+        self.score_of_partitions[p] - (size as f64) * (size as f64).log2()
+            + (size as f64) * mf.min(sf)
     }
 
     /// Compute the global objective score from current state.
@@ -593,44 +664,49 @@ impl<'a> OptimizePartitions<'a> {
         }
         let current_p = current_p as usize;
 
-        // tmp buffers — could be cached on self for hot loops, but the
-        // allocations here are tiny relative to the per-node work.
-        let mut cold_diffs = vec![0.0f64; self.n_partitions];
-        let mut hot_diffs = vec![0.0f64; self.n_partitions];
-        let mut conn_diffs = vec![0.0f64; self.n_partitions];
-        let mut disc_diffs = vec![0.0f64; self.n_partitions];
+        // Taken out of `self` so the `&self` collectors can run alongside it.
+        let mut scratch = std::mem::take(&mut self.scratch);
+        let DiffScratch {
+            cold: cold_diffs,
+            hot: hot_diffs,
+            conn: conn_diffs,
+            disc: disc_diffs,
+            total: total_diffs,
+        } = &mut scratch;
 
-        self.collect_initial_diffs(node_index, current_p, &mut cold_diffs, &mut hot_diffs);
-        let current_conn = self.table[current_p][node_index].connectivity();
+        self.collect_initial_diffs(node_index, current_p, cold_diffs, hot_diffs);
+        let current_conn = self.table[node_index * self.n_partitions + current_p].connectivity();
         self.collect_cold_diffs(
             node_index,
             current_p,
             current_conn,
-            &mut cold_diffs,
-            &mut conn_diffs,
-            &mut disc_diffs,
+            cold_diffs,
+            conn_diffs,
+            disc_diffs,
         );
 
         // Build candidate partition lists (both / connectivity / goal), and at
         // the same time compute the total-diff value used for the weighted
         // random pick.
-        let (current_cold_diff, total_diffs, candidates) = self.collect_candidates(
+        let (current_cold_diff, candidates) = self.collect_candidates(
             node_index,
             current_p,
             current_conn,
-            &cold_diffs,
-            &hot_diffs,
-            &conn_diffs,
-            &disc_diffs,
+            cold_diffs,
+            hot_diffs,
+            conn_diffs,
+            disc_diffs,
             temperature,
+            total_diffs,
         );
 
-        let chosen = self.choose_target(&candidates, &total_diffs, rng);
-        let Some(chosen_p) = chosen else {
+        let chosen = self.choose_target(&candidates, total_diffs, rng);
+        let chosen_cold_diff = chosen.map(|p| cold_diffs[p]);
+        self.scratch = scratch;
+        let (Some(chosen_p), Some(chosen_cold_diff)) = (chosen, chosen_cold_diff) else {
             return false;
         };
 
-        let chosen_cold_diff = cold_diffs[chosen_p];
         self.apply_move(
             node_index,
             current_p,
@@ -664,7 +740,7 @@ impl<'a> OptimizePartitions<'a> {
     ) {
         for p in 0..self.n_partitions {
             let direction = if p == current_p { -1.0 } else { 1.0 };
-            let s = direction * self.table[p][node_index].score;
+            let s = direction * self.table[node_index * self.n_partitions + p].score;
             cold[p] = s;
             hot[p] = s;
         }
@@ -700,7 +776,7 @@ impl<'a> OptimizePartitions<'a> {
                 disc[p] = 0.0;
                 continue;
             }
-            let other_conn = self.table[p][node_index].connectivity();
+            let other_conn = self.table[node_index * self.n_partitions + p].connectivity();
             conn[p] = (other_conn - current_conn) as f64;
             disc[p] = if current_conn > 0 && other_conn == 0 {
                 1.0
@@ -756,7 +832,7 @@ impl<'a> OptimizePartitions<'a> {
 
                 // Snapshot the existing score, simulate the update,
                 // measure the delta, and unwind.
-                let mut s = self.table[other_p][other];
+                let mut s = self.table[other * self.n_partitions + other_p];
                 let old_score = s.score;
                 let old_conn = s.connectivity();
                 if is_out {
@@ -807,10 +883,11 @@ impl<'a> OptimizePartitions<'a> {
     /// * `conn` - Connectivity delta per partition.
     /// * `disc` - Disconnect-flip delta per partition.
     /// * `temperature` - Current SA temperature.
+    /// * `total_diffs` - Output buffer of length `n_partitions`; overwritten.
     ///
     /// ### Returns
     ///
-    /// A tuple of `(current_cold_diff, total_diffs, candidates)`.
+    /// A tuple of `(current_cold_diff, candidates)`.
     #[allow(clippy::too_many_arguments)]
     fn collect_candidates(
         &self,
@@ -822,7 +899,8 @@ impl<'a> OptimizePartitions<'a> {
         conn: &[f64],
         disc: &[f64],
         temperature: f64,
-    ) -> (f64, Vec<f64>, Candidates) {
+        total_diffs: &mut [f64],
+    ) -> (f64, Candidates) {
         let node_mass = self.mass_of_nodes[node_index] as f64;
 
         let current_hot_diff = hot[current_p];
@@ -864,7 +942,7 @@ impl<'a> OptimizePartitions<'a> {
         let current_conn_diff = conn[current_p];
         let current_disc_diff = disc[current_p];
 
-        let mut total_diffs = vec![0.0f64; self.n_partitions];
+        total_diffs.fill(0.0);
         let mut cands = Candidates::default();
 
         for p in 0..self.n_partitions {
@@ -874,20 +952,8 @@ impl<'a> OptimizePartitions<'a> {
             }
             let old_size = self.size_of_partitions[p];
             let old_mass = self.mass_of_partitions[p];
-            let old_mf = mass_factor(old_mass, self.low_mass, self.target_mass, self.high_mass);
-            let old_sf = mass_factor(
-                old_size as f64,
-                self.low_size,
-                self.target_size,
-                self.high_size,
-            );
             let old_score = self.score_of_partitions[p];
-            let old_adj = if old_size > 0 {
-                old_score - (old_size as f64) * (old_size as f64).log2()
-                    + (old_size as f64) * old_mf.min(old_sf)
-            } else {
-                0.0
-            };
+            let old_adj = self.adj_of_partitions[p];
 
             let new_size = old_size + 1;
             let new_mass = old_mass + node_mass;
@@ -931,7 +997,7 @@ impl<'a> OptimizePartitions<'a> {
             }
         }
 
-        (current_cold_diff, total_diffs, cands)
+        (current_cold_diff, cands)
     }
 
     /// Pick a target partition from the tiered candidate lists.
@@ -1040,7 +1106,7 @@ impl<'a> OptimizePartitions<'a> {
 
             // Symmetric: in from_p the moving node leaves, so neighbour
             // weights tied to from_p decrease; in to_p they increase.
-            let s_from = &mut self.table[from_p][other];
+            let s_from = &mut self.table[other * self.n_partitions + from_p];
             if is_out {
                 s_from.update_incoming(-1, out_w);
             }
@@ -1049,7 +1115,7 @@ impl<'a> OptimizePartitions<'a> {
             }
             s_from.rescore();
 
-            let s_to = &mut self.table[to_p][other];
+            let s_to = &mut self.table[other * self.n_partitions + to_p];
             if is_out {
                 s_to.update_incoming(1, out_w);
             }
@@ -1076,6 +1142,8 @@ impl<'a> OptimizePartitions<'a> {
         self.mass_of_partitions[to_p] += m;
         self.score_of_partitions[from_p] += from_cold_diff;
         self.score_of_partitions[to_p] += to_cold_diff;
+        self.adj_of_partitions[from_p] = self.partition_adj(from_p);
+        self.adj_of_partitions[to_p] = self.partition_adj(to_p);
     }
 }
 

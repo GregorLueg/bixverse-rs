@@ -3,6 +3,7 @@
 //! 2019
 
 use faer::{Mat, unzip, zip};
+use rayon::prelude::*;
 use rustc_hash::FxHashSet;
 use std::collections::BTreeMap;
 
@@ -117,11 +118,14 @@ where
     let names_targets: Vec<&String> = target_modules.keys().collect();
     let names_origin: Vec<&String> = origin_modules.keys().collect();
 
-    let similarities_flat: Vec<Vec<T>> = origin_modules
-        .values()
+    let origin_sets: Vec<&FxHashSet<String>> = origin_modules.values().collect();
+    let target_sets: Vec<&FxHashSet<String>> = target_modules.values().collect();
+
+    let similarities_flat: Vec<Vec<T>> = origin_sets
+        .into_par_iter()
         .map(|v1| {
-            target_modules
-                .values()
+            target_sets
+                .iter()
                 .map(|v2| set_similarity(v1, v2, overlap_coefficient))
                 .collect()
         })

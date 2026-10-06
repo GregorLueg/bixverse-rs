@@ -19,6 +19,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::core::math::vector_helpers::quantile_sorted;
 use crate::prelude::*;
+use crate::single_cell::sc_batch_correction::batch_utils::par_for_each_col_mut;
+use crate::single_cell::sc_batch_correction::harmony_core::{row_major_to_mat, to_row_major};
 
 ///////////////
 // Structure //
@@ -194,35 +196,65 @@ pub fn score_anchors(
 ) -> Vec<f32> {
     let raw: Vec<u32> = pairs
         .par_iter()
-        .map(|&(a, b)| {
-            let ai = a as usize;
-            let bi = b as usize;
+        .map_init(
+            || (Vec::<usize>::new(), Vec::<usize>::new()),
+            |(a_set, b_set), &(a, b)| {
+                let ai = a as usize;
+                let bi = b as usize;
 
-            let mut a_set: FxHashSet<usize> = nnaa
-                .get(ai)
-                .map(|n| n.iter().take(k_score).copied().collect())
-                .unwrap_or_default();
-            if let Some(cross) = nnab.get(ai) {
-                for &x in cross.iter().take(k_score) {
-                    a_set.insert(x + offset_b);
+                a_set.clear();
+                if let Some(n) = nnaa.get(ai) {
+                    a_set.extend(n.iter().take(k_score).copied());
                 }
-            }
-
-            let mut b_set: FxHashSet<usize> = nnbb
-                .get(bi)
-                .map(|n| n.iter().take(k_score).map(|x| x + offset_b).collect())
-                .unwrap_or_default();
-            if let Some(cross) = nnba.get(bi) {
-                for &x in cross.iter().take(k_score) {
-                    b_set.insert(x);
+                if let Some(cross) = nnab.get(ai) {
+                    a_set.extend(cross.iter().take(k_score).map(|&x| x + offset_b));
                 }
-            }
 
-            a_set.intersection(&b_set).count() as u32
-        })
+                b_set.clear();
+                if let Some(n) = nnbb.get(bi) {
+                    b_set.extend(n.iter().take(k_score).map(|&x| x + offset_b));
+                }
+                if let Some(cross) = nnba.get(bi) {
+                    b_set.extend(cross.iter().take(k_score).copied());
+                }
+
+                a_set.sort_unstable();
+                a_set.dedup();
+                b_set.sort_unstable();
+                b_set.dedup();
+
+                sorted_intersection_count(a_set, b_set)
+            },
+        )
         .collect();
 
     rescale_scores(&raw)
+}
+
+/// Size of the intersection of two sorted, deduplicated slices.
+///
+/// ### Params
+///
+/// * `a` - First slice, sorted ascending without duplicates
+/// * `b` - Second slice, sorted ascending without duplicates
+///
+/// ### Returns
+///
+/// Number of shared elements
+fn sorted_intersection_count(a: &[usize], b: &[usize]) -> u32 {
+    let (mut i, mut j, mut count) = (0, 0, 0u32);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                count += 1;
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    count
 }
 
 /// Rescale raw shared-neighbour counts to `[0, 1]` via
@@ -292,10 +324,16 @@ pub fn build_integration_matrix(
 ) -> Mat<f32> {
     let dims = ref_embed.ncols();
     let n_pairs = anchors.pairs.len();
-    Mat::from_fn(n_pairs, dims, |i, d| {
-        let (r, q) = anchors.pairs[i];
-        query_embed[(q as usize, d)] - ref_embed[(r as usize, d)]
-    })
+    let mut out = Mat::<f32>::zeros(n_pairs, dims);
+    out.as_mut()
+        .par_col_chunks_mut(1)
+        .enumerate()
+        .for_each(|(d, mut col)| {
+            for (i, &(r, q)) in anchors.pairs.iter().enumerate() {
+                col[(i, 0)] = query_embed[(q as usize, d)] - ref_embed[(r as usize, d)];
+            }
+        });
+    out
 }
 
 /// Compute the sparse per-pair Gaussian-kernel weight matrix.
@@ -476,33 +514,34 @@ pub fn apply_correction(
     let n_query = query_embed.nrows();
     let dims = query_embed.ncols();
 
-    let mut out = Mat::<f32>::zeros(n_query, dims);
+    // row-major so each delta row is contiguous in the inner axpy
+    let delta_rm = to_row_major(delta);
+    let query_rm = to_row_major(query_embed);
 
     // One CSC column = one query cell; parallelise across cells.
-    let cols: Vec<Vec<f32>> = (0..n_query)
-        .into_par_iter()
-        .map(|c| {
+    let mut out_rm = vec![0.0_f32; n_query * dims];
+    out_rm
+        .par_chunks_mut(dims)
+        .enumerate()
+        .for_each(|(c, contrib)| {
             let start = weights.indptr[c] as usize;
             let end = weights.indptr[c + 1] as usize;
-            let mut contrib = vec![0.0_f32; dims];
             for idx in start..end {
                 let row = weights.indices[idx] as usize;
                 let w = weights.data[idx];
-                for d in 0..dims {
-                    contrib[d] += w * delta[(row, d)];
+                for (acc, dv) in contrib
+                    .iter_mut()
+                    .zip(&delta_rm[row * dims..(row + 1) * dims])
+                {
+                    *acc += w * dv;
                 }
             }
-            contrib
-        })
-        .collect();
+            for (acc, q) in contrib.iter_mut().zip(&query_rm[c * dims..(c + 1) * dims]) {
+                *acc = q - *acc;
+            }
+        });
 
-    for c in 0..n_query {
-        for d in 0..dims {
-            out[(c, d)] = query_embed[(c, d)] - cols[c][d];
-        }
-    }
-
-    out
+    row_major_to_mat(&out_rm, dims)
 }
 
 /////////////////
@@ -786,13 +825,17 @@ fn stack_vertical(top: &Mat<f32>, bottom: &Mat<f32>) -> Mat<f32> {
     let n_top = top.nrows();
     let n_bot = bottom.nrows();
     let ncols = top.ncols();
-    Mat::from_fn(n_top + n_bot, ncols, |i, j| {
-        if i < n_top {
-            top[(i, j)]
-        } else {
-            bottom[(i - n_top, j)]
+    let mut out = Mat::<f32>::zeros(n_top + n_bot, ncols);
+    par_for_each_col_mut(&mut out, |j, dst| {
+        let (head, tail) = dst.split_at_mut(n_top);
+        for (i, h) in head.iter_mut().enumerate() {
+            *h = top[(i, j)];
         }
-    })
+        for (i, t) in tail.iter_mut().enumerate() {
+            *t = bottom[(i, j)];
+        }
+    });
+    out
 }
 
 ///////////

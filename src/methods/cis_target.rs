@@ -221,8 +221,8 @@ fn rolling_mean<T: BixverseFloat>(values: &[T], window: usize) -> Vec<T> {
 /// ### Returns
 ///
 /// Vector where position i equals the number of genes recovered by rank i
-fn calculate_rcc(gene_ranks: &[i32], max_rank: i32) -> Vec<usize> {
-    let mut rcc = vec![0; max_rank as usize];
+fn calculate_rcc(gene_ranks: &[i32], max_rank: i32) -> Vec<u32> {
+    let mut rcc = vec![0u32; max_rank as usize];
     let mut filtered: Vec<i32> = gene_ranks
         .iter()
         .copied()
@@ -240,7 +240,7 @@ fn calculate_rcc(gene_ranks: &[i32], max_rank: i32) -> Vec<usize> {
     for (gene_count, &rank) in filtered.iter().enumerate() {
         #[allow(clippy::needless_range_loop)]
         for pos in prev_rank..(rank as usize).min(max_rank as usize) {
-            rcc[pos] = gene_count;
+            rcc[pos] = gene_count as u32;
         }
         prev_rank = rank as usize;
     }
@@ -369,7 +369,7 @@ fn find_leading_edge<T>(
     gene_indices: &[usize],
     motif_idx: usize,
     rcc_m2sd: &[T],
-    all_rccs: Option<&Vec<Vec<usize>>>,
+    all_rccs: Option<&Vec<Vec<u32>>>,
 ) -> (u32, usize, Vec<usize>)
 where
     T: BixverseFloat,
@@ -390,7 +390,7 @@ where
 
     for (rank_pos, &threshold) in rcc_m2sd.iter().enumerate() {
         if rank_pos < current_rcc.len() {
-            let enrichment = T::from_usize(current_rcc[rank_pos]).unwrap() - threshold;
+            let enrichment = T::from_u32(current_rcc[rank_pos]).unwrap() - threshold;
             if enrichment > max_enrichment {
                 max_enrichment = enrichment;
                 best_rank = rank_pos;
@@ -429,7 +429,7 @@ fn calculate_all_rccs(
     matrix: MatRef<'_, i32>,
     gene_indices: &[usize],
     max_rank: i32,
-) -> Vec<Vec<usize>> {
+) -> Vec<Vec<u32>> {
     let n_motifs = matrix.ncols();
 
     (0..n_motifs)
@@ -455,32 +455,32 @@ fn calculate_all_rccs(
 /// ### Returns
 ///
 /// Vector of threshold values at each rank position
-fn calculate_rcc_thresholds<T>(all_rccs: &[Vec<usize>], max_rank: i32) -> Vec<T>
+fn calculate_rcc_thresholds<T>(all_rccs: &[Vec<u32>], max_rank: i32) -> Vec<T>
 where
     T: BixverseFloat,
 {
     let max_rank_usize = max_rank as usize;
     let n_motifs = T::from_usize(all_rccs.len()).unwrap();
-    let mut rcc_m2sd = vec![T::zero(); max_rank_usize];
 
-    for rank_pos in 0..max_rank_usize {
-        let mut sum = T::zero();
-        let mut sum_sq = T::zero();
-
-        for rcc in all_rccs {
-            let val = T::from_usize(rcc[rank_pos]).unwrap();
-            sum += val;
-            sum_sq += val * val;
+    // one pass per curve, so the reads are contiguous
+    let mut sums = vec![T::zero(); max_rank_usize];
+    let mut sums_sq = vec![T::zero(); max_rank_usize];
+    for rcc in all_rccs {
+        for ((sum, sum_sq), &count) in sums.iter_mut().zip(sums_sq.iter_mut()).zip(rcc) {
+            let val = T::from_u32(count).unwrap();
+            *sum += val;
+            *sum_sq += val * val;
         }
-
-        let mean = sum / n_motifs;
-        let variance = (sum_sq / n_motifs) - (mean * mean);
-        let sd = variance.sqrt();
-
-        rcc_m2sd[rank_pos] = mean + T::from_f64(2.0).unwrap() * sd;
     }
 
-    rcc_m2sd
+    sums.into_iter()
+        .zip(sums_sq)
+        .map(|(sum, sum_sq)| {
+            let mean = sum / n_motifs;
+            let variance = (sum_sq / n_motifs) - (mean * mean);
+            mean + T::from_f64(2.0).unwrap() * variance.sqrt()
+        })
+        .collect()
 }
 
 /// Process a single gene set - calculate AUC, NES, and find significant motifs

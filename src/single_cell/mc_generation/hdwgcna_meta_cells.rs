@@ -3,7 +3,7 @@
 
 use rand::prelude::IndexedRandom;
 use rand::{Rng, SeedableRng, rngs::StdRng};
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 use crate::prelude::*;
 
@@ -23,6 +23,48 @@ pub struct BootstrappedMetaCellParams {
     /// [KnnParams] for the various approximate nearest neighbour searches in
     /// ann-search-rs
     pub knn_params: KnnParams,
+}
+
+/// Sorted, deduplicated copy of a neighbour list.
+///
+/// ### Params
+///
+/// * `v` - Neighbour indices
+///
+/// ### Returns
+///
+/// The sorted unique indices.
+fn sorted_unique(v: &[usize]) -> Vec<usize> {
+    let mut out = v.to_vec();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Size of the intersection of two sorted unique slices.
+///
+/// ### Params
+///
+/// * `a` - First sorted unique slice
+/// * `b` - Second sorted unique slice
+///
+/// ### Returns
+///
+/// The number of shared elements.
+fn sorted_intersection_len(a: &[usize], b: &[usize]) -> usize {
+    let (mut i, mut j, mut shared) = (0, 0, 0);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                shared += 1;
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    shared
 }
 
 /// Select meta cells
@@ -62,7 +104,7 @@ pub fn identify_meta_cells(
     }
 
     let mut it = 0;
-    let mut set_cache: FxHashMap<usize, FxHashSet<usize>> = FxHashMap::default();
+    let mut set_cache: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
 
     while !good_choices.is_empty() && chosen.len() < target_no && it < max_iter {
         it += 1;
@@ -71,17 +113,21 @@ pub fn identify_meta_cells(
 
         set_cache
             .entry(candidate)
-            .or_insert_with(|| nn_map[candidate].iter().copied().collect());
+            .or_insert_with(|| sorted_unique(&nn_map[candidate]));
 
         let mut max_overlap = 0;
         for &existing in &chosen {
             set_cache
                 .entry(existing)
-                .or_insert_with(|| nn_map[existing].iter().copied().collect());
+                .or_insert_with(|| sorted_unique(&nn_map[existing]));
             let cs = &set_cache[&candidate];
             let es = &set_cache[&existing];
-            let shared = k2 - cs.union(es).count();
+            let shared = k2 - (cs.len() + es.len() - sorted_intersection_len(cs, es));
             max_overlap = max_overlap.max(shared);
+            // only `max_overlap <= max_shared` is read, so stop at the first miss
+            if max_overlap > max_shared {
+                break;
+            }
         }
 
         if verbosity.normal_verbosity() && it % 10000 == 0 {

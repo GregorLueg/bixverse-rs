@@ -46,11 +46,26 @@ const MAX_R_SPARSE_INDEX: u32 = i32::MAX as u32;
 /// thread on a typical 16-thread machine.
 const PARALLEL_PARSE_THRESHOLD: usize = 1 << 16;
 
+/// Elements per Rayon task in the buffer fills.
+///
+/// 32 Ki elements is 256 KiB of f64 output: big enough that the split cost
+/// vanishes, small enough that a 10 M element buffer still spreads over every
+/// thread and a tall, thin matrix parallelises within its columns.
+const FILL_CHUNK: usize = 1 << 15;
+
+/// Output columns per task in the transposing fill of a matrix whose columns
+/// are not contiguous. Eight f64 is one 64-byte line per source row read; a
+/// sweep over 4 to 128 on M1 Max (2000 x 10000) stayed within run-to-run noise.
+const TRANSPOSE_TILE: usize = 8;
+
 /////////////
 // Helpers //
 /////////////
 
 /// Check that a parsed sparse structure is internally consistent.
+///
+/// The minor-axis bound on `indices` is not re-checked here: [r_index_buffer]
+/// enforces it during the cast, and a second scan was half the parse time.
 ///
 /// ### Params
 ///
@@ -70,9 +85,9 @@ fn validate_sparse_layout(
     shape: (usize, usize),
     cs_type: CompressedSparseFormat,
 ) -> Result<(), BixverseErrors> {
-    let (major, minor) = match cs_type {
-        CompressedSparseFormat::Csr => shape,
-        CompressedSparseFormat::Csc => (shape.1, shape.0),
+    let major = match cs_type {
+        CompressedSparseFormat::Csr => shape.0,
+        CompressedSparseFormat::Csc => shape.1,
     };
 
     if indices.len() != nnz {
@@ -94,13 +109,152 @@ fn validate_sparse_layout(
             "the last indptr entry must equal the number of stored values",
         ));
     }
-    if indices.iter().any(|&j| j >= minor as u32) {
-        return Err(BixverseErrors::RListParse(
-            "an index sits outside the minor dimension",
-        ));
-    }
-
     Ok(())
+}
+
+/// Map `src` element-wise into `dst`, stopping at the first error.
+///
+/// Writes into a preallocated buffer, which is either R memory or a zeroed
+/// `Vec`. That matters: rayon's `collect` into a `Result<Vec<_>, _>` goes
+/// through `while_some`, loses the exact length, and ends up concatenating
+/// per-thread `Vec`s, i.e. a second copy of the whole buffer.
+///
+/// Parallel above [PARALLEL_PARSE_THRESHOLD].
+///
+/// ### Params
+///
+/// * `dst` - Destination, same length as `src`.
+/// * `src` - Source buffer.
+/// * `f` - Per-element conversion.
+///
+/// ### Returns
+///
+/// Nothing on success, or the first error `f` returned.
+fn try_map_into<S, D, E, F>(dst: &mut [D], src: &[S], f: F) -> Result<(), E>
+where
+    S: Copy + Sync,
+    D: Send,
+    E: Send,
+    F: Fn(S) -> Result<D, E> + Sync,
+{
+    debug_assert_eq!(dst.len(), src.len());
+    let fill = |(d, s): (&mut [D], &[S])| {
+        d.iter_mut().zip(s).try_for_each(|(d, &s)| {
+            *d = f(s)?;
+            Ok(())
+        })
+    };
+
+    if src.len() >= PARALLEL_PARSE_THRESHOLD {
+        dst.par_chunks_mut(FILL_CHUNK)
+            .zip(src.par_chunks(FILL_CHUNK))
+            .try_for_each(fill)
+    } else {
+        fill((dst, src))
+    }
+}
+
+/// Write a faer matrix into a flat column-major buffer, converting on the way.
+///
+/// Two paths. When every column of `x` is contiguous (an owned `Mat` or a
+/// column slice of one) the buffer is filled in flat [FILL_CHUNK] runs, so a
+/// tall matrix with two columns parallelises as well as a wide one. Otherwise
+/// (a transposed or row-major view) each task owns [TRANSPOSE_TILE] output
+/// columns and walks the source rows in order.
+///
+/// The destination is plain memory; no R API is touched, so the Rayon threads
+/// are safe even when `dst` lives in an R vector.
+///
+/// ### Params
+///
+/// * `dst` - Column-major destination of length `nrows * ncols`.
+/// * `x` - Source matrix, any strides.
+/// * `f` - Per-element conversion.
+pub(crate) fn fill_column_major<S, D, F>(dst: &mut [D], x: MatRef<S>, f: F)
+where
+    S: Copy + Sync,
+    D: Send,
+    F: Fn(S) -> D + Sync,
+{
+    let (nrow, ncol) = (x.nrows(), x.ncols());
+    debug_assert_eq!(dst.len(), nrow * ncol);
+    if nrow == 0 || ncol == 0 {
+        return;
+    }
+    let parallel = dst.len() >= PARALLEL_PARSE_THRESHOLD;
+
+    if x.row_stride() == 1 {
+        let fill = |(c, chunk): (usize, &mut [D])| {
+            let mut flat = c * FILL_CHUNK;
+            let mut rest = chunk;
+            while !rest.is_empty() {
+                let (i, j) = (flat % nrow, flat / nrow);
+                let len = (nrow - i).min(rest.len());
+                let src = x
+                    .col(j)
+                    .try_as_col_major()
+                    .expect("row stride is 1")
+                    .as_slice();
+                let (head, tail) = rest.split_at_mut(len);
+                head.iter_mut()
+                    .zip(&src[i..i + len])
+                    .for_each(|(d, &s)| *d = f(s));
+                rest = tail;
+                flat += len;
+            }
+        };
+        if parallel {
+            dst.par_chunks_mut(FILL_CHUNK).enumerate().for_each(fill);
+        } else {
+            dst.chunks_mut(FILL_CHUNK).enumerate().for_each(fill);
+        }
+    } else {
+        let fill = |(b, block): (usize, &mut [D])| {
+            let j0 = b * TRANSPOSE_TILE;
+            let width = block.len() / nrow;
+            for i in 0..nrow {
+                let row = x.row(i).subcols(j0, width);
+                match row.try_as_row_major() {
+                    Some(row) => {
+                        for (jj, &v) in row.as_slice().iter().enumerate() {
+                            block[jj * nrow + i] = f(v);
+                        }
+                    }
+                    None => {
+                        for jj in 0..width {
+                            block[jj * nrow + i] = f(row[jj]);
+                        }
+                    }
+                }
+            }
+        };
+        if parallel {
+            dst.par_chunks_mut(nrow * TRANSPOSE_TILE)
+                .enumerate()
+                .for_each(fill);
+        } else {
+            dst.chunks_mut(nrow * TRANSPOSE_TILE)
+                .enumerate()
+                .for_each(fill);
+        }
+    }
+}
+
+/// Allocate an uninitialised R vector.
+///
+/// `Doubles::new` and friends zero-fill sequentially first, which is a wasted
+/// pass when every element is about to be overwritten.
+///
+/// ### Params
+///
+/// * `rtype` - `Rtype::Doubles` or `Rtype::Integers`.
+/// * `len` - Number of elements.
+///
+/// ### Returns
+///
+/// The protected, uninitialised vector. Callers must write every element.
+fn alloc_r_vector(rtype: Rtype, len: usize) -> Robj {
+    Robj::alloc_vector(extendr_api::rtype_to_sxp(rtype), len)
 }
 
 ////////////
@@ -589,7 +743,14 @@ pub fn r_named_vec_data(named_vec: Robj) -> extendr_api::Result<NamedNumericVec>
 
     let names_attr = named_vec.names().ok_or(NamedVecError::NoNames)?;
 
-    let names: Vec<String> = names_attr.into_iter().map(|s| s.to_string()).collect();
+    // Reading the CHARSXPs goes through the R API and stays on this thread; the
+    // `String` allocations, which are the larger half, do not.
+    let names: Vec<&str> = names_attr.collect();
+    let names: Vec<String> = if names.len() >= PARALLEL_PARSE_THRESHOLD {
+        names.par_iter().map(|s| s.to_string()).collect()
+    } else {
+        names.iter().map(|s| s.to_string()).collect()
+    };
 
     Ok((names, values))
 }
@@ -663,11 +824,44 @@ where
 ///
 /// A faer Mat with f32
 pub fn r_matrix_to_faer_fp32(x: &RMatrix<f64>) -> Mat<f32> {
-    let ncol = x.ncols();
-    let nrow = x.nrows();
-    let data = x.data();
-    let data_fp32 = data.iter().map(|x| *x as f32).collect::<Vec<f32>>();
-    Mat::from_fn(nrow, ncol, |i, j| data_fp32[i + j * nrow])
+    let src = r_matrix_to_faer(x);
+    let (nrow, ncol) = (src.nrows(), src.ncols());
+    let mut out = Mat::<f32>::zeros(nrow, ncol);
+    if nrow == 0 || ncol == 0 {
+        return out;
+    }
+
+    // Tiles of about FILL_CHUNK elements: several short columns per task, or a
+    // row block of one tall column, so both a 2000-row and a 10 M-row matrix
+    // spread over every thread.
+    let width = (FILL_CHUNK / nrow).max(1);
+    let height = nrow.min(FILL_CHUNK);
+    let fill = |(d, s): (faer::MatMut<f32>, MatRef<f64>)| {
+        for (d, s) in d.col_iter_mut().zip(s.col_iter()) {
+            let s = s
+                .try_as_col_major()
+                .expect("R matrices are dense")
+                .as_slice();
+            d.try_as_col_major_mut()
+                .expect("Mat columns are contiguous")
+                .as_slice_mut()
+                .iter_mut()
+                .zip(s)
+                .for_each(|(d, &s)| *d = s as f32);
+        }
+    };
+    if nrow * ncol >= PARALLEL_PARSE_THRESHOLD {
+        out.par_col_chunks_mut(width)
+            .zip(src.par_col_chunks(width))
+            .for_each(|(d, s)| {
+                d.par_row_chunks_mut(height)
+                    .zip(s.par_row_chunks(height))
+                    .for_each(fill)
+            });
+    } else {
+        fill((out.as_mut(), src));
+    }
+    out
 }
 
 /// Transform a [CompressedSparseData2] into an R list
@@ -691,9 +885,14 @@ pub fn r_matrix_to_faer_fp32(x: &RMatrix<f64>) -> Mat<f32> {
 /// survives a round trip through both.
 pub fn sparse_data_to_list<T>(sparse: CompressedSparseData2<T>) -> Result<List, BixverseErrors>
 where
-    T: Into<Robj> + Clone + Default + Into<f64> + Sync + Add + PartialEq + Mul,
+    T: Into<Robj> + Copy + Default + Into<f64> + Sync + Add + PartialEq + Mul,
 {
-    let data: Vec<f64> = sparse.data.into_iter().map(Into::into).collect();
+    let mut data = alloc_r_vector(Rtype::Doubles, sparse.data.len());
+    try_map_into(
+        data.as_real_slice_mut().expect("allocated as doubles"),
+        &sparse.data,
+        |v| Ok::<f64, BixverseErrors>(v.into()),
+    )?;
     let indptr = index_buffer_to_r(
         &sparse.indptr,
         "indptr exceeds what R's integer vectors can hold",
@@ -760,10 +959,7 @@ fn r_dimension(value: Option<&Robj>, message: &'static str) -> Result<usize, Bix
 /// `NA_integer_` is [i32::MIN], so the `TryFrom` into an unsigned index type
 /// rejects it along with genuine negatives; no separate `NA` test is needed.
 ///
-/// Parallel above [PARALLEL_PARSE_THRESHOLD]. Rayon's indexed `collect` into a
-/// `Result<Vec<_>, _>` allocates exactly once, unlike the sequential
-/// `ResultShunt`, whose `size_hint` lower bound is zero and which therefore
-/// reallocates logarithmically often.
+/// Parallel above [PARALLEL_PARSE_THRESHOLD] via [try_map_into].
 ///
 /// ### Params
 ///
@@ -783,7 +979,7 @@ fn r_index_buffer<I>(
     invalid: &'static str,
 ) -> Result<Vec<I>, BixverseErrors>
 where
-    I: TryFrom<i32> + Send,
+    I: TryFrom<i32> + Default + Clone + Send,
 {
     let slice = value
         .and_then(|v| v.as_integer_slice())
@@ -806,23 +1002,15 @@ where
         Ok(index)
     }
 
-    if slice.len() >= PARALLEL_PARSE_THRESHOLD {
-        slice
-            .par_iter()
-            .map(|&x| convert(x, exclusive_bound, invalid))
-            .collect()
-    } else {
-        let mut buffer = Vec::with_capacity(slice.len());
-        for &x in slice {
-            buffer.push(convert(x, exclusive_bound, invalid)?);
-        }
-        Ok(buffer)
-    }
+    let mut buffer = vec![I::default(); slice.len()];
+    try_map_into(&mut buffer, slice, |x| convert(x, exclusive_bound, invalid))?;
+    Ok(buffer)
 }
 
 /// Parse an R double vector into the generic value buffer.
 ///
-/// Preallocates and, above [PARALLEL_PARSE_THRESHOLD], parses in parallel. The
+/// Preallocates and, above [PARALLEL_PARSE_THRESHOLD], parses in parallel via
+/// [try_map_into]. The
 /// per-element [NumCast] check is a branch the compiler cannot elide for a
 /// generic `T`; it is retained because narrowing to `f32` for single-cell data
 /// genuinely can overflow and a silent `inf` is worse than an error.
@@ -842,30 +1030,22 @@ fn r_value_buffer<T>(
     out_of_range: &'static str,
 ) -> Result<Vec<T>, BixverseErrors>
 where
-    T: NumCast + Send,
+    T: NumCast + Default + Clone + Send,
 {
     let slice = value
         .and_then(|v| v.as_real_slice())
         .ok_or(BixverseErrors::RListParse(missing))?;
 
-    if slice.len() >= PARALLEL_PARSE_THRESHOLD {
-        slice
-            .par_iter()
-            .map(|&x| T::from(x).ok_or(BixverseErrors::RListParse(out_of_range)))
-            .collect()
-    } else {
-        let mut buffer = Vec::with_capacity(slice.len());
-        for &x in slice {
-            buffer.push(T::from(x).ok_or(BixverseErrors::RListParse(out_of_range))?);
-        }
-        Ok(buffer)
-    }
+    let mut buffer = vec![T::default(); slice.len()];
+    try_map_into(&mut buffer, slice, |x| {
+        T::from(x).ok_or(BixverseErrors::RListParse(out_of_range))
+    })?;
+    Ok(buffer)
 }
 
-/// Narrow a `u32` index buffer to the `i32` R stores sparse indices in.
+/// Narrow a `u32` index buffer into a fresh R integer vector.
 ///
-/// Fuses the bounds check into the cast, and parallelises above
-/// [PARALLEL_PARSE_THRESHOLD].
+/// Fuses the bounds check into the cast and writes straight into R memory.
 ///
 /// ### Params
 ///
@@ -874,26 +1054,21 @@ where
 ///
 /// ### Returns
 ///
-/// The buffer as `i32`, or an error when any entry is past
+/// The R integer vector, or an error when any entry is past
 /// [MAX_R_SPARSE_INDEX].
-fn index_buffer_to_r(buffer: &[u32], message: &'static str) -> Result<Vec<i32>, BixverseErrors> {
-    #[inline(always)]
-    fn narrow(x: u32, message: &'static str) -> Result<i32, BixverseErrors> {
-        if x > MAX_R_SPARSE_INDEX {
-            return Err(BixverseErrors::RListParse(message));
-        }
-        Ok(x as i32)
-    }
-
-    if buffer.len() >= PARALLEL_PARSE_THRESHOLD {
-        buffer.par_iter().map(|&x| narrow(x, message)).collect()
-    } else {
-        let mut out = Vec::with_capacity(buffer.len());
-        for &x in buffer {
-            out.push(narrow(x, message)?);
-        }
-        Ok(out)
-    }
+fn index_buffer_to_r(buffer: &[u32], message: &'static str) -> Result<Robj, BixverseErrors> {
+    let mut out = alloc_r_vector(Rtype::Integers, buffer.len());
+    try_map_into(
+        out.as_integer_slice_mut().expect("allocated as integers"),
+        buffer,
+        |x| {
+            if x > MAX_R_SPARSE_INDEX {
+                return Err(BixverseErrors::RListParse(message));
+            }
+            Ok(x as i32)
+        },
+    )?;
+    Ok(out)
 }
 
 /// Transform an R list storing CSR/C data into a [CompressedSparseData2].
@@ -1025,8 +1200,8 @@ mod tests {
             validate_sparse_layout(&indptr, &indices, 3, (4, 3), CompressedSparseFormat::Csc)
                 .is_ok()
         );
-        // As a CSR the same buffers want three rows and four columns, so a 4x3
-        // shape has both the pointer length and the index range wrong.
+        // As a CSR the same buffers want three rows, so a 4x3 shape has the
+        // pointer length wrong.
         assert!(
             validate_sparse_layout(&indptr, &indices, 3, (4, 3), CompressedSparseFormat::Csr)
                 .is_err()
@@ -1071,17 +1246,6 @@ mod tests {
                 &[0u32, 1],
                 2,
                 (2, 2),
-                CompressedSparseFormat::Csr
-            )
-            .is_err()
-        );
-        // A column index past the declared width.
-        assert!(
-            validate_sparse_layout(
-                &[0u32, 2],
-                &[0u32, 9],
-                2,
-                (1, 2),
                 CompressedSparseFormat::Csr
             )
             .is_err()

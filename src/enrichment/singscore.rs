@@ -355,11 +355,18 @@ pub fn rank_matrix_col_stable<T: BixverseFloat>(
         .enumerate()
         .for_each(|(j, mut col_out)| {
             let col_in = expr_matrix.col(j);
-            let stable_vals: Vec<T> = stable_gene_indices.iter().map(|&i| col_in[i]).collect();
+            // NaN stable values never count as smaller, so they are dropped
+            // before the sort.
+            let mut stable_vals: Vec<T> = stable_gene_indices
+                .iter()
+                .map(|&i| col_in[i])
+                .filter(|v| !v.is_nan())
+                .collect();
+            stable_vals.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
 
             for i in 0..n_genes {
                 let xi = col_in[i];
-                let count = stable_vals.iter().filter(|&&sg| xi > sg).count();
+                let count = stable_vals.partition_point(|&sg| sg < xi);
                 let rank = T::from_usize(count + 1).unwrap();
                 col_out[i] = rank / denom;
             }

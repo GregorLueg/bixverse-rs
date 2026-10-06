@@ -1,10 +1,21 @@
 //! Various helper functions that act on faer matrices
 
-use faer::{Mat, MatRef, Scale};
+use faer::{Mat, MatMut, MatRef, Scale};
 use rayon::prelude::*;
 
 use crate::core::math::vector_helpers::*;
 use crate::prelude::*;
+
+////////////
+// Consts //
+////////////
+
+/// Matrix size (elements) from which column-wise loops fan out over rayon
+const PAR_COL_MIN_ELEMS: usize = 1 << 17;
+
+///////////////
+// Functions //
+///////////////
 
 /// Scale a matrix
 ///
@@ -21,44 +32,48 @@ where
     T: BixverseFloat,
 {
     let n_rows = mat.nrows();
-    let n_cols = mat.ncols();
+    let n_rows_t = T::from_usize(n_rows).unwrap();
+    let sd_floor = T::from_f64(1e-10).unwrap();
 
-    let mut means = vec![T::zero(); n_cols];
-    for j in 0..n_cols {
-        for i in 0..n_rows {
-            means[j] += mat[(i, j)];
+    let scale_col = |col: &mut [T]| {
+        let mut mean = T::zero();
+        for &v in col.iter() {
+            mean += v;
         }
-        means[j] /= T::from_usize(n_rows).unwrap();
-    }
+        mean /= n_rows_t;
+        for v in col.iter_mut() {
+            *v -= mean;
+        }
+        if !scale_sd {
+            return;
+        }
+        let mut ss = T::zero();
+        for &v in col.iter() {
+            ss += v * v;
+        }
+        let mut sd = (ss / (n_rows_t - T::one())).sqrt();
+        if sd < sd_floor {
+            sd = T::one();
+        }
+        for v in col.iter_mut() {
+            *v /= sd;
+        }
+    };
 
     let mut result = mat.to_owned();
-    for j in 0..n_cols {
-        let mean = means[j];
-        for i in 0..n_rows {
-            result[(i, j)] -= mean;
-        }
-    }
-
-    if !scale_sd {
-        return result;
-    }
-
-    let mut std_devs = vec![T::zero(); n_cols];
-    for j in 0..n_cols {
-        for i in 0..n_rows {
-            let val = result[(i, j)];
-            std_devs[j] += val * val;
-        }
-        std_devs[j] = (std_devs[j] / (T::from_usize(n_rows).unwrap() - T::one())).sqrt();
-        if std_devs[j] < T::from_f64(1e-10).unwrap() {
-            std_devs[j] = T::one();
-        }
-    }
-
-    for j in 0..n_cols {
-        let std_dev = std_devs[j];
-        for i in 0..n_rows {
-            result[(i, j)] /= std_dev;
+    if n_rows * mat.ncols() >= PAR_COL_MIN_ELEMS {
+        result.par_col_iter_mut().for_each(|mut col| {
+            scale_col(col.as_mut().try_as_col_major_mut().unwrap().as_slice_mut());
+        });
+    } else {
+        for j in 0..result.ncols() {
+            scale_col(
+                result
+                    .col_mut(j)
+                    .try_as_col_major_mut()
+                    .unwrap()
+                    .as_slice_mut(),
+            );
         }
     }
 
@@ -108,8 +123,14 @@ where
     T: BixverseFloat + std::iter::Sum,
 {
     let (nrows, ncols) = mat.shape();
+    let mut row_sums = vec![T::zero(); nrows];
+    for j in 0..ncols {
+        for (s, &v) in row_sums.iter_mut().zip(mat.col(j).iter()) {
+            *s += v;
+        }
+    }
     Mat::from_fn(nrows, ncols, |i, j| {
-        let row_sum: T = (0..ncols).map(|k| mat[(i, k)]).sum();
+        let row_sum = row_sums[i];
         if row_sum > T::zero() {
             *mat.get(i, j) / row_sum
         } else {
@@ -207,28 +228,60 @@ where
     let n = T::from_usize(mat.nrows()).unwrap();
     let n_cols = mat.ncols();
 
-    let (_, m2): (Vec<T>, Vec<T>) = (0..n_cols)
-        .map(|j| {
-            let mut mean = T::zero();
-            let mut m2 = T::zero();
-            let mut count = T::zero();
-            for i in 0..mat.nrows() {
-                count += T::one();
-                let delta = mat[(i, j)] - mean;
-                mean += delta / count;
-                let delta2 = mat[(i, j)] - mean;
-                m2 += delta * delta2;
-            }
-            (mean, (m2 / (n - T::one())).sqrt())
-        })
-        .unzip();
+    let col_sd = |j: usize| {
+        let mut mean = T::zero();
+        let mut m2 = T::zero();
+        let mut count = T::zero();
+        for &x in mat.col(j).iter() {
+            count += T::one();
+            let delta = x - mean;
+            mean += delta / count;
+            let delta2 = x - mean;
+            m2 += delta * delta2;
+        }
+        (m2 / (n - T::one())).sqrt()
+    };
 
-    m2
+    if mat.nrows() * n_cols >= PAR_COL_MIN_ELEMS {
+        (0..n_cols).into_par_iter().map(col_sd).collect()
+    } else {
+        (0..n_cols).map(col_sd).collect()
+    }
 }
 
 /////////////////////////
 // Matrix manipulation //
 /////////////////////////
+
+/// Copy the lower triangle of a square matrix into its upper triangle
+///
+/// Blocked so that both the strided reads and the contiguous writes stay in
+/// cache, instead of one cache line per element on the transposed side.
+///
+/// ### Params
+///
+/// * `mat` - Square matrix whose lower triangle is filled
+pub fn mirror_lower_to_upper<T>(mut mat: MatMut<T>)
+where
+    T: Copy,
+{
+    const BLOCK: usize = 64;
+    let n = mat.nrows();
+    debug_assert_eq!(n, mat.ncols());
+
+    for bj in (0..n).step_by(BLOCK) {
+        let j_end = (bj + BLOCK).min(n);
+        for bi in (0..=bj).step_by(BLOCK) {
+            let i_end = (bi + BLOCK).min(n);
+            for j in bj..j_end {
+                for i in bi..i_end.min(j) {
+                    let v = mat[(j, i)];
+                    mat[(i, j)] = v;
+                }
+            }
+        }
+    }
+}
 
 /// Stack two matrices
 ///

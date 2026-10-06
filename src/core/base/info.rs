@@ -5,9 +5,133 @@ use rayon::prelude::*;
 
 use crate::prelude::BixverseFloat;
 
-/////////////////
-// Info theory //
-/////////////////
+///////////////
+// MiScratch //
+///////////////
+
+/// Reusable count tables for the pairwise mutual information kernels
+pub(crate) struct MiScratch {
+    joint: Vec<usize>,
+    marginal_i: Vec<usize>,
+    marginal_j: Vec<usize>,
+    n_bins: usize,
+}
+
+impl MiScratch {
+    /// Allocate tables for `n_bins` bins
+    ///
+    /// ### Params
+    ///
+    /// * `n_bins` - Number of bins per variable
+    ///
+    /// ### Returns
+    ///
+    /// Zeroed scratch tables
+    pub(crate) fn new(n_bins: usize) -> Self {
+        Self {
+            joint: vec![0; n_bins * n_bins],
+            marginal_i: vec![0; n_bins],
+            marginal_j: vec![0; n_bins],
+            n_bins,
+        }
+    }
+
+    /// Tabulate the joint and marginal counts of two binned columns
+    fn count(&mut self, col_i: ColRef<usize>, col_j: ColRef<usize>) {
+        self.joint.fill(0);
+        self.marginal_i.fill(0);
+        self.marginal_j.fill(0);
+        for (&bin_i, &bin_j) in col_i.iter().zip(col_j.iter()) {
+            self.joint[bin_i * self.n_bins + bin_j] += 1;
+            self.marginal_i[bin_i] += 1;
+            self.marginal_j[bin_j] += 1;
+        }
+    }
+
+    /// Mutual information from the current tables
+    fn mutual_information<T: BixverseFloat>(&self, n_rows: usize) -> T {
+        let n = T::from_usize(n_rows).unwrap();
+        let prob_i: Vec<T> = self
+            .marginal_i
+            .iter()
+            .map(|&c| T::from_usize(c).unwrap() / n)
+            .collect();
+        let prob_j: Vec<T> = self
+            .marginal_j
+            .iter()
+            .map(|&c| T::from_usize(c).unwrap() / n)
+            .collect();
+        let mut mi = T::zero();
+        for i in 0..self.n_bins {
+            for j in 0..self.n_bins {
+                let joint_prob = T::from_usize(self.joint[i * self.n_bins + j]).unwrap() / n;
+                if joint_prob > T::zero() {
+                    mi += joint_prob * (joint_prob / (prob_i[i] * prob_j[j])).ln();
+                }
+            }
+        }
+        mi
+    }
+
+    /// Joint entropy from the current tables
+    fn joint_entropy<T: BixverseFloat>(&self, n_rows: usize) -> T {
+        let n = T::from_usize(n_rows).unwrap();
+        let mut joint_entropy = T::zero();
+        for &count in &self.joint {
+            let joint_prob = T::from_usize(count).unwrap() / n;
+            if joint_prob > T::zero() {
+                joint_entropy -= joint_prob * joint_prob.ln();
+            }
+        }
+        joint_entropy
+    }
+
+    /// Mutual information, and optionally the joint entropy, of a column pair
+    ///
+    /// ### Params
+    ///
+    /// * `col_i` - First binned column
+    /// * `col_j` - Second binned column
+    /// * `with_joint_entropy` - Also compute the joint entropy
+    ///
+    /// ### Returns
+    ///
+    /// `(mutual information, joint entropy)`; the entropy is zero when not
+    /// requested.
+    pub(crate) fn pair<T: BixverseFloat>(
+        &mut self,
+        col_i: ColRef<usize>,
+        col_j: ColRef<usize>,
+        with_joint_entropy: bool,
+    ) -> (T, T) {
+        self.count(col_i, col_j);
+        let n_rows = col_i.nrows();
+        let entropy = if with_joint_entropy {
+            self.joint_entropy(n_rows)
+        } else {
+            T::zero()
+        };
+        (self.mutual_information(n_rows), entropy)
+    }
+}
+
+/////////////
+// Helpers //
+/////////////
+
+/// Resolve the number of bins, defaulting to `sqrt(nrows)`
+///
+/// ### Params
+///
+/// * `n_bins` - Optional number of bins
+/// * `n_rows` - Number of rows of the binned data
+///
+/// ### Returns
+///
+/// The number of bins
+pub(crate) fn resolve_n_bins<T: BixverseFloat>(n_bins: Option<usize>, n_rows: usize) -> usize {
+    n_bins.unwrap_or_else(|| T::from_usize(n_rows).unwrap().sqrt().to_usize().unwrap())
+}
 
 /// Calculate the mutual information between two column references
 ///
@@ -27,32 +151,8 @@ pub fn calculate_mi<T>(col_i: ColRef<usize>, col_j: ColRef<usize>, n_bins: Optio
 where
     T: BixverseFloat,
 {
-    let n_rows = col_i.nrows();
-    let n_bins =
-        n_bins.unwrap_or_else(|| T::from_usize(n_rows).unwrap().sqrt().to_usize().unwrap());
-    let mut joint_counts = vec![vec![0usize; n_bins]; n_bins];
-    let mut marginal_i = vec![0usize; n_bins];
-    let mut marginal_j = vec![0usize; n_bins];
-    for i in 0..n_rows {
-        let bin_i = col_i[i];
-        let bin_j = col_j[i];
-        joint_counts[bin_i][bin_j] += 1;
-        marginal_i[bin_i] += 1;
-        marginal_j[bin_j] += 1;
-    }
-    let n = T::from_usize(n_rows).unwrap();
-    let mut mi = T::zero();
-    for i in 0..n_bins {
-        for j in 0..n_bins {
-            let joint_prob = T::from_usize(joint_counts[i][j]).unwrap() / n;
-            if joint_prob > T::zero() {
-                let marginal_prob_i = T::from_usize(marginal_i[i]).unwrap() / n;
-                let marginal_prob_j = T::from_usize(marginal_j[j]).unwrap() / n;
-                mi += joint_prob * (joint_prob / (marginal_prob_i * marginal_prob_j)).ln();
-            }
-        }
-    }
-    mi
+    let n_bins = resolve_n_bins::<T>(n_bins, col_i.nrows());
+    MiScratch::new(n_bins).pair(col_i, col_j, false).0
 }
 
 /// Calculates the joint entropy between two column references
@@ -75,24 +175,8 @@ pub fn calculate_joint_entropy<T>(
 where
     T: BixverseFloat,
 {
-    let n_rows = col_i.nrows();
-    let n_bins =
-        n_bins.unwrap_or_else(|| T::from_usize(n_rows).unwrap().sqrt().to_usize().unwrap());
-    let mut joint_counts = vec![vec![0usize; n_bins]; n_bins];
-    for i in 0..n_rows {
-        joint_counts[col_i[i]][col_j[i]] += 1;
-    }
-    let n = T::from_usize(n_rows).unwrap();
-    let mut joint_entropy = T::zero();
-    for i in 0..n_bins {
-        for j in 0..n_bins {
-            let joint_prob = T::from_usize(joint_counts[i][j]).unwrap() / n;
-            if joint_prob > T::zero() {
-                joint_entropy -= joint_prob * joint_prob.ln();
-            }
-        }
-    }
-    joint_entropy
+    let n_bins = resolve_n_bins::<T>(n_bins, col_i.nrows());
+    MiScratch::new(n_bins).pair(col_i, col_j, true).1
 }
 
 /// Calculates the entropy of a column reference
@@ -268,10 +352,12 @@ where
     Mat::from_fn(n_rows, n_cols, |i, j| binned_vals[j][i])
 }
 
+///////////
+// Tests //
+///////////
+
 #[cfg(test)]
 mod tests {
-    // Tests focus mainly on API; the Rest was heavily tested within R
-
     use super::*;
     use faer::mat;
 

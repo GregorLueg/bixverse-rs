@@ -14,6 +14,19 @@ use rayon::prelude::*;
 use crate::gpu::WORKGROUP_256;
 use crate::prelude::*;
 
+////////////
+// Consts //
+////////////
+
+/// Columns covered by one word of the per-row column masks in
+/// [`csc_to_csr_gpu`].
+const MASK_BITS: usize = 32;
+
+/// Device memory for one column group of [`csc_to_csr_gpu`]. The masks and the
+/// slot bases are both `[words, n]` u32, so a group of `g` words costs
+/// `8 g n` bytes. 256 MB takes 2000 HVGs at up to ~500k cells in one group.
+const CSR_BUILD_BUDGET_BYTES: usize = 256 << 20;
+
 ///////////////////////
 // GPU sparse format //
 ///////////////////////
@@ -157,49 +170,191 @@ where
 // CSC to CSR on device //
 //////////////////////////
 
-/// Scatter one CSC column into the CSR buffers.
+/// Column of CSC position `p` within `[col_lo, col_hi)`.
 ///
-/// Within a column every row occurs at most once, so no two threads share a
-/// cursor and no atomics are needed. Launching the columns in order leaves
-/// every CSR row sorted by column, identical to the host transpose.
+/// Largest `c` with `col_indptr[c] <= p`, so empty columns are skipped.
+///
+/// ### Params
+///
+/// * `col_indptr` - CSC column pointers `[m + 1]`
+/// * `p` - Position into the CSC row indices and values
+/// * `col_lo` - First column of the group
+/// * `col_hi` - One past the last column of the group
+///
+/// ### Returns
+///
+/// The column holding position `p`.
+#[cube]
+fn column_of_position(col_indptr: &Tensor<u32>, p: u32, col_lo: u32, col_hi: u32) -> u32 {
+    let mut lo = col_lo;
+    let mut hi = col_hi;
+    while hi - lo > 1u32 {
+        let mid = (lo + hi) / 2u32;
+        if col_indptr[mid as usize] <= p {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
+/// Zero a `u32` buffer used through atomics.
+///
+/// ### Params
+///
+/// * `buf` - Buffer to clear
+/// * `len` - Elements to clear
+///
+/// ### Grid mapping
+///
+/// * `(CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * CUBE_DIM_X + UNIT_POS_X` ->
+///   element
+#[cube(launch_unchecked)]
+pub fn csr_zero_masks(buf: &mut Tensor<Atomic<u32>>, len: u32) {
+    let t = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * CUBE_DIM_X + UNIT_POS_X;
+    if t >= len {
+        terminate!();
+    }
+    Atomic::store(&buf[t as usize], 0u32);
+}
+
+/// Mark which columns of a group each row holds.
+///
+/// Sets bit `(c - col_lo) % 32` of `mask[(c - col_lo) / 32, row]` for every
+/// non-zero of the group. OR is order-independent, so the masks are
+/// deterministic.
+///
+/// ### Params
+///
+/// * `col_indptr` - CSC column pointers `[m + 1]`
+/// * `row_idx` - CSC row indices `[nnz]`
+/// * `mask` - Column masks `[words, n_rows]`, zeroed
+/// * `col_lo` - First column of the group, a multiple of 32
+/// * `col_hi` - One past the last column of the group
+/// * `nnz_lo` - First CSC position of the group
+/// * `nnz_len` - Non-zeros in the group
+/// * `n_rows` - Rows of the matrix
+///
+/// ### Grid mapping
+///
+/// * `(CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * CUBE_DIM_X + UNIT_POS_X` ->
+///   offset into the group's non-zeros
+#[cube(launch_unchecked)]
+#[allow(clippy::too_many_arguments)]
+pub fn csr_mark_columns(
+    col_indptr: &Tensor<u32>,
+    row_idx: &Tensor<u32>,
+    mask: &mut Tensor<Atomic<u32>>,
+    col_lo: u32,
+    col_hi: u32,
+    nnz_lo: u32,
+    nnz_len: u32,
+    n_rows: u32,
+) {
+    let t = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * CUBE_DIM_X + UNIT_POS_X;
+    if t >= nnz_len {
+        terminate!();
+    }
+    let p = nnz_lo + t;
+    let local = column_of_position(col_indptr, p, col_lo, col_hi) - col_lo;
+    let row = row_idx[p as usize];
+    let slot = (local / 32u32) * n_rows + row;
+    Atomic::fetch_or(&mask[slot as usize], 1u32 << (local % 32u32));
+}
+
+/// Turn a row's column masks into CSR slots.
+///
+/// `base[w, row]` is the slot of the row's first non-zero in mask word `w`.
+/// `cursor` carries each row's next free slot across column groups.
+///
+/// ### Params
+///
+/// * `mask` - Column masks `[words, n_rows]`
+/// * `base` - Output slot bases `[words, n_rows]`
+/// * `cursor` - Next free CSR slot per row `[n_rows]`, advanced in place
+/// * `n_rows` - Rows of the matrix
+/// * `words` - Mask words in this group
+///
+/// ### Grid mapping
+///
+/// * `(CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * CUBE_DIM_X + UNIT_POS_X` ->
+///   row
+#[cube(launch_unchecked)]
+pub fn csr_rank_rows(
+    mask: &Tensor<Atomic<u32>>,
+    base: &mut Tensor<u32>,
+    cursor: &mut Tensor<u32>,
+    n_rows: u32,
+    words: u32,
+) {
+    let row = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * CUBE_DIM_X + UNIT_POS_X;
+    if row >= n_rows {
+        terminate!();
+    }
+    let mut next = cursor[row as usize];
+    for w in 0..words {
+        let slot = (w * n_rows + row) as usize;
+        base[slot] = next;
+        next += u32::count_ones(Atomic::load(&mask[slot]));
+    }
+    cursor[row as usize] = next;
+}
+
+/// Scatter a column group's non-zeros into the CSR.
+///
+/// The slot of a non-zero is its word's base plus the number of the row's
+/// columns below it in the same word, so rows come out in column order, as a
+/// host transpose would produce them.
 ///
 /// ### Params
 ///
 /// * `col_indptr` - CSC column pointers `[m + 1]`
 /// * `row_idx` - CSC row indices `[nnz]`
 /// * `values` - CSC values `[nnz]`
-/// * `cursor` - Next free slot per row `[n]`, initialised to the CSR row
-///   pointers and advanced in place
+/// * `mask` - Column masks `[words, n_rows]`
+/// * `base` - Slot bases `[words, n_rows]`
 /// * `out_indices` - CSR column indices `[nnz]`
 /// * `out_values` - CSR values `[nnz]`
-/// * `col` - Column to scatter
-/// * `len` - Non-zeros in that column
+/// * `col_lo` - First column of the group, a multiple of 32
+/// * `col_hi` - One past the last column of the group
+/// * `nnz_lo` - First CSC position of the group
+/// * `nnz_len` - Non-zeros in the group
+/// * `n_rows` - Rows of the matrix
 ///
 /// ### Grid mapping
 ///
 /// * `(CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * CUBE_DIM_X + UNIT_POS_X` ->
-///   offset into the column
+///   offset into the group's non-zeros
 #[cube(launch_unchecked)]
-pub fn csc_to_csr_scatter_column<F: Numeric>(
+#[allow(clippy::too_many_arguments)]
+pub fn csr_scatter_group<F: Numeric>(
     col_indptr: &Tensor<u32>,
     row_idx: &Tensor<u32>,
     values: &Tensor<F>,
-    cursor: &mut Tensor<u32>,
+    mask: &Tensor<Atomic<u32>>,
+    base: &Tensor<u32>,
     out_indices: &mut Tensor<u32>,
     out_values: &mut Tensor<F>,
-    col: u32,
-    len: u32,
+    col_lo: u32,
+    col_hi: u32,
+    nnz_lo: u32,
+    nnz_len: u32,
+    n_rows: u32,
 ) {
     let t = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * CUBE_DIM_X + UNIT_POS_X;
-    if t >= len {
+    if t >= nnz_len {
         terminate!();
     }
-    let p = col_indptr[col as usize] + t;
+    let p = nnz_lo + t;
+    let col = column_of_position(col_indptr, p, col_lo, col_hi);
+    let local = col - col_lo;
     let row = row_idx[p as usize];
-    let slot = cursor[row as usize];
+    let w_slot = ((local / 32u32) * n_rows + row) as usize;
+    let below = Atomic::load(&mask[w_slot]) & ((1u32 << (local % 32u32)) - 1u32);
+    let slot = base[w_slot] + u32::count_ones(below);
     out_indices[slot as usize] = col;
     out_values[slot as usize] = values[p as usize];
-    cursor[row as usize] = slot + 1u32;
 }
 
 /// CSR row pointers of a CSC matrix, from its row indices.
@@ -247,16 +402,17 @@ fn csr_indptr_from_csc_rows(row_idx: &[u32], n_rows: usize) -> Vec<u32> {
 /// Build the CSR of a matrix on the device from its uploaded CSC.
 ///
 /// Saves the host transpose and the second upload. The row pointers come from
-/// the host (cheap, see [`csr_indptr_from_csc_rows`]); indices and values are
-/// scattered on the device, one launch per non-empty column in column order,
-/// so the result matches `transpose_sparse_single_layer` exactly and is
-/// reproducible.
+/// the host (cheap, see [`csr_indptr_from_csc_rows`]). Indices and values are
+/// placed by per-row column bitmasks, one word per 32 columns: mark, rank the
+/// rows, scatter. Four launches per column group whatever the column count,
+/// and the result matches `transpose_sparse_single_layer` exactly, order
+/// within each row included.
 ///
 /// ### Params
 ///
 /// * `csc` - Uploaded CSC of A, shape `(n, m)`
 /// * `host_col_indptr` - The same CSC's column pointers on the host `[m + 1]`,
-///   used to size each launch
+///   used to bound each column group
 /// * `host_row_idx` - The same CSC's row indices on the host `[nnz]`
 /// * `client` - CubeCL compute client
 ///
@@ -285,6 +441,40 @@ where
             got: csc.cs_type,
         });
     }
+    csc_to_csr_gpu_grouped(
+        csc,
+        host_col_indptr,
+        host_row_idx,
+        CSR_BUILD_BUDGET_BYTES,
+        client,
+    )
+}
+
+/// [`csc_to_csr_gpu`] with an explicit memory budget per column group.
+///
+/// ### Params
+///
+/// * `csc` - Uploaded CSC of A, shape `(n, m)`
+/// * `host_col_indptr` - The same CSC's column pointers on the host `[m + 1]`
+/// * `host_row_idx` - The same CSC's row indices on the host `[nnz]`
+/// * `budget_bytes` - Device memory for the masks and slot bases of one
+///   column group; at least one 32-column word is always processed
+/// * `client` - CubeCL compute client
+///
+/// ### Returns
+///
+/// The CSR of A on the device.
+fn csc_to_csr_gpu_grouped<R, F>(
+    csc: &GpuCompressedSparseData<R, F>,
+    host_col_indptr: &[u32],
+    host_row_idx: &[u32],
+    budget_bytes: usize,
+    client: &ComputeClient<R>,
+) -> Result<GpuCompressedSparseData<R, F>, BixverseErrors>
+where
+    R: Runtime,
+    F: cubecl::CubeElement + Numeric,
+{
     let (n, m) = csc.shape;
     let limits = GpuLimits::from_client(client);
 
@@ -294,26 +484,77 @@ where
     let indices = GpuTensor::<R, u32>::empty(vec![csc.nnz], client)?;
     let values = GpuTensor::<R, F>::empty(vec![csc.nnz], client)?;
 
-    for col in 0..m {
-        let len = host_col_indptr[col + 1] - host_col_indptr[col];
-        if len == 0 {
+    let total_words = m.div_ceil(MASK_BITS);
+    let group_words = (budget_bytes / (8 * n.max(1))).clamp(1, total_words.max(1));
+    let mask = GpuTensor::<R, u32>::empty(vec![group_words * n.max(1)], client)?;
+    let base = GpuTensor::<R, u32>::empty(vec![group_words * n.max(1)], client)?;
+    let wg = CubeDim::new_1d(WORKGROUP_256);
+
+    for first_word in (0..total_words).step_by(group_words) {
+        let col_lo = first_word * MASK_BITS;
+        let col_hi = ((first_word + group_words) * MASK_BITS).min(m);
+        let words = (col_hi - col_lo).div_ceil(MASK_BITS);
+        let nnz_lo = host_col_indptr[col_lo];
+        let nnz_len = host_col_indptr[col_hi] - nnz_lo;
+        if nnz_len == 0 {
             continue;
         }
-        let (gx, gy) = grid_2d(len.div_ceil(WORKGROUP_256), &limits)?;
-        let count = checked_cube_count("csc_to_csr_scatter_column", gx, gy, 1, &limits)?;
+        let mask_len = (words * n) as u32;
+
+        let (zx, zy) = grid_2d(mask_len.div_ceil(WORKGROUP_256), &limits)?;
+        let zero_count = checked_cube_count("csr_zero_masks", zx, zy, 1, &limits)?;
+        let (gx, gy) = grid_2d(nnz_len.div_ceil(WORKGROUP_256), &limits)?;
+        let nnz_count = checked_cube_count("csr_scatter_group", gx, gy, 1, &limits)?;
+        let (rx, ry) = grid_2d((n as u32).div_ceil(WORKGROUP_256), &limits)?;
+        let row_count = checked_cube_count("csr_rank_rows", rx, ry, 1, &limits)?;
+
         unsafe {
-            csc_to_csr_scatter_column::launch_unchecked::<F, R>(
+            csr_zero_masks::launch_unchecked::<R>(
                 client,
-                count,
-                CubeDim::new_1d(WORKGROUP_256),
+                zero_count,
+                wg,
+                mask.clone().into_tensor_arg(),
+                mask_len,
+            );
+            csr_mark_columns::launch_unchecked::<R>(
+                client,
+                nnz_count.clone(),
+                wg,
+                csc.indptr.clone().into_tensor_arg(),
+                csc.indices.clone().into_tensor_arg(),
+                mask.clone().into_tensor_arg(),
+                col_lo as u32,
+                col_hi as u32,
+                nnz_lo,
+                nnz_len,
+                n as u32,
+            );
+            csr_rank_rows::launch_unchecked::<R>(
+                client,
+                row_count,
+                wg,
+                mask.clone().into_tensor_arg(),
+                base.clone().into_tensor_arg(),
+                cursor.clone().into_tensor_arg(),
+                n as u32,
+                words as u32,
+            );
+            csr_scatter_group::launch_unchecked::<F, R>(
+                client,
+                nnz_count,
+                wg,
                 csc.indptr.clone().into_tensor_arg(),
                 csc.indices.clone().into_tensor_arg(),
                 csc.values.clone().into_tensor_arg(),
-                cursor.clone().into_tensor_arg(),
+                mask.clone().into_tensor_arg(),
+                base.clone().into_tensor_arg(),
                 indices.clone().into_tensor_arg(),
                 values.clone().into_tensor_arg(),
-                col as u32,
-                len,
+                col_lo as u32,
+                col_hi as u32,
+                nnz_lo,
+                nnz_len,
+                n as u32,
             );
         }
     }
@@ -347,13 +588,11 @@ mod tests {
         .map(|_| device)
     }
 
-    /// The device build is bitwise identical to the host transpose, including
-    /// the order within each row, with empty rows and empty columns present.
-    #[test]
-    fn test_csc_to_csr_gpu_matches_host() {
+    /// Build a CSC with empty rows and an empty column, run the device build
+    /// under `budget_bytes`, and compare it with the host transpose.
+    fn check_csc_to_csr(n: usize, m: usize, budget_bytes: usize) {
         let Some(device) = try_device() else { return };
         let client = WgpuRuntime::client(&device);
-        let (n, m) = (300usize, 40usize);
 
         let mut values = Vec::new();
         let mut indices = Vec::new();
@@ -386,7 +625,8 @@ mod tests {
             &client,
         )
         .unwrap();
-        let got = csc_to_csr_gpu(&csc_gpu, &indptr, &indices, &client).unwrap();
+        let got =
+            csc_to_csr_gpu_grouped(&csc_gpu, &indptr, &indices, budget_bytes, &client).unwrap();
 
         assert!(got.cs_type.is_csr());
         assert_eq!(got.indptr.read(&client).unwrap(), want.indptr);
@@ -395,5 +635,20 @@ mod tests {
             got.values.read(&client).unwrap(),
             *want.data_2.as_ref().unwrap()
         );
+    }
+
+    /// The device build is bitwise identical to the host transpose, including
+    /// the order within each row, with empty rows and empty columns present.
+    #[test]
+    fn test_csc_to_csr_gpu_matches_host() {
+        check_csc_to_csr(300, 40, CSR_BUILD_BUDGET_BYTES);
+    }
+
+    /// A budget of one mask word per group splits 100 columns into four
+    /// groups, the last one partial, and the cursors carry across them.
+    #[test]
+    fn test_csc_to_csr_gpu_column_groups() {
+        let n = 300;
+        check_csc_to_csr(n, 100, 8 * n);
     }
 }

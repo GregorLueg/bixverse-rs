@@ -43,6 +43,7 @@ use indexmap::IndexSet;
 use crate::errors::BixverseErrors;
 use crate::prelude::*;
 use crate::single_cell::sc_data::data_io::{CscGeneChunk, RawCounts, SingleCellReading};
+use crate::utils::simd::{sum_squared_dev_widen_simd_f32, sum_widen_simd_f32};
 
 use super::sctransform::stream::SctStreamOpts;
 
@@ -359,23 +360,41 @@ fn grouped_sample_variance(
     n_groups: usize,
     gene: usize,
 ) -> Result<Vec<f64>, BixverseErrors> {
-    let mut n = vec![0_usize; n_groups];
-    let mut sum = vec![0.0_f64; n_groups];
-    let mut sum_sq = vec![0.0_f64; n_groups];
-
-    for (&x, &g) in row.iter().zip(group_of_cell) {
-        let g = g as usize;
-        // `ResidualSource` is public, so an out-of-crate implementor can hand
-        // back a label the models do not cover. Indexing it would panic inside
-        // a rayon worker.
-        if g >= n_groups {
-            return Err(BixverseErrors::ResidualGroupLabelOutOfRange { label: g, n_groups });
+    let (n, sum, sum_sq) = if n_groups == 1 {
+        // Widening SIMD sums; the label check stays a plain scan.
+        if let Some(&g) = group_of_cell.iter().find(|&&g| g != 0) {
+            return Err(BixverseErrors::ResidualGroupLabelOutOfRange {
+                label: g as usize,
+                n_groups,
+            });
         }
-        let x = x as f64;
-        n[g] += 1;
-        sum[g] += x;
-        sum_sq[g] += x * x;
-    }
+        let len = row.len().min(group_of_cell.len());
+        let row = &row[..len];
+        (
+            vec![len],
+            vec![sum_widen_simd_f32(row)],
+            vec![sum_squared_dev_widen_simd_f32(row, 0.0)],
+        )
+    } else {
+        let mut n = vec![0_usize; n_groups];
+        let mut sum = vec![0.0_f64; n_groups];
+        let mut sum_sq = vec![0.0_f64; n_groups];
+
+        for (&x, &g) in row.iter().zip(group_of_cell) {
+            let g = g as usize;
+            // `ResidualSource` is public, so an out-of-crate implementor can hand
+            // back a label the models do not cover. Indexing it would panic inside
+            // a rayon worker.
+            if g >= n_groups {
+                return Err(BixverseErrors::ResidualGroupLabelOutOfRange { label: g, n_groups });
+            }
+            let x = x as f64;
+            n[g] += 1;
+            sum[g] += x;
+            sum_sq[g] += x * x;
+        }
+        (n, sum, sum_sq)
+    };
 
     // The residuals are centred near zero by construction, so the sum of
     // squares never dwarfs the correction term the way it would for raw counts,
@@ -468,19 +487,30 @@ pub fn residual_variance<S: SingleCellReading>(
 
         let vars: Vec<(usize, Vec<f64>)> = chunks
             .par_iter()
-            .map(|chunk| {
-                let pos = source.position(chunk.original_index).ok_or(
-                    BixverseErrors::SctGeneNotModelled {
-                        gene: chunk.original_index,
-                    },
-                )?;
-                let counts = chunk_counts(chunk);
-                let mut row = vec![0.0_f32; n_cells];
-                source.residual_row(&counts, &chunk.indices, pos, &mut row)?;
-                let vars =
-                    grouped_sample_variance(&row, group_of_cell, n_groups, chunk.original_index)?;
-                Ok((pos, vars))
-            })
+            .map_init(
+                || (Vec::<f64>::new(), vec![0.0_f32; n_cells]),
+                |(counts, row), chunk| {
+                    let pos = source.position(chunk.original_index).ok_or(
+                        BixverseErrors::SctGeneNotModelled {
+                            gene: chunk.original_index,
+                        },
+                    )?;
+                    counts.clear();
+                    match &chunk.data_raw {
+                        RawCounts::U16(v) => counts.extend(v.iter().map(|&x| x as f64)),
+                        RawCounts::U32(v) => counts.extend(v.iter().map(|&x| x as f64)),
+                    }
+                    row.fill(0.0);
+                    source.residual_row(counts, &chunk.indices, pos, row)?;
+                    let vars = grouped_sample_variance(
+                        row,
+                        group_of_cell,
+                        n_groups,
+                        chunk.original_index,
+                    )?;
+                    Ok((pos, vars))
+                },
+            )
             .collect::<Result<Vec<_>, BixverseErrors>>()?;
 
         for (pos, per_group) in vars {

@@ -1,14 +1,23 @@
+//! Stage-by-stage gates for the MetaCells2 pipeline on a planted-cluster
+//! fixture.
+//!
+//! Four clusters of 50 cells, each with 20 Poisson marker genes, plus 420 noise
+//! genes. Each test runs the pipeline up to one stage (downsampling, feature
+//! selection, similarity, kNN graph, seeding, candidate metacells, deviants,
+//! the direct end-to-end run) and checks that stage against the planted
+//! truth. There is no external reference; the thresholds are recovery rates
+//! the fixture should clear comfortably.
+
 #![allow(clippy::needless_range_loop)]
 #![cfg(feature = "single-cell")]
 
-use bixverse_rs::prelude::VecIndexCast;
-use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use std::collections::HashSet;
+
+use rand::prelude::*;
 use rand_distr::{Distribution, Poisson};
 
-use bixverse_rs::core::math::sparse::{
-    CompressedSparseData2, CompressedSparseFormat, transpose_sparse,
-};
+use bixverse_rs::core::math::sparse::transpose_sparse;
+use bixverse_rs::prelude::*;
 use bixverse_rs::single_cell::mc_generation::metacells2::{
     DeviantsParams, DissolveParams, MC2KnnParams, MetacellsParams, PartitionParams, Pile,
     SelectParams, SimilarityParams, build_knn_graph, choose_seeds, compute_candidate_metacells,
@@ -16,21 +25,34 @@ use bixverse_rs::single_cell::mc_generation::metacells2::{
     make_incoming_view, select_features,
 };
 
-///////////////////
-// Test fixtures //
-///////////////////
+///////////////
+// Constants //
+///////////////
 
+/// Planted clusters.
 const N_CLUSTERS: usize = 4;
+/// Cells per planted cluster.
 const CELLS_PER_CLUSTER: usize = 50;
+/// Total cells.
 const N_CELLS: usize = N_CLUSTERS * CELLS_PER_CLUSTER;
+/// Marker genes per cluster, high in their own cluster and low elsewhere.
 const MARKERS_PER_CLUSTER: usize = 20;
+/// Genes with no cluster structure.
 const NOISE_GENES: usize = 420;
+/// Total genes, markers first.
 const N_GENES: usize = N_CLUSTERS * MARKERS_PER_CLUSTER + NOISE_GENES;
+/// Seed for the fixture and for every seeded stage.
 const FIXTURE_SEED: u64 = 0xBADC0FFEE0DDF00D;
+/// Neighbours per cell in the kNN graph.
+const KNN_K: usize = 10;
+
+/////////////
+// Fixture //
+/////////////
 
 /// Synthetic ground-truth fixture.
 struct Fixture {
-    /// Cells × genes raw counts as CSR `Pile`.
+    /// Cells x genes raw counts as CSR `Pile`.
     pile: Pile,
     /// True cluster id per cell (0..N_CLUSTERS).
     true_cluster: Vec<usize>,
@@ -40,10 +62,11 @@ struct Fixture {
     cluster_markers: Vec<Vec<usize>>,
 }
 
-//////////////////
-// Test helpers //
-//////////////////
-
+/// Builds the planted-cluster fixture from [FIXTURE_SEED].
+///
+/// ### Returns
+///
+/// The [Fixture], with cells ordered by cluster.
 fn build_fixture() -> Fixture {
     let mut rng = StdRng::seed_from_u64(FIXTURE_SEED);
 
@@ -54,7 +77,7 @@ fn build_fixture() -> Fixture {
 
     let true_cluster: Vec<usize> = (0..N_CELLS).map(|i| i / CELLS_PER_CLUSTER).collect();
 
-    // Per-gene Poisson lambdas — depend on cell's cluster. Marker genes: high
+    // Per-gene Poisson lambdas depend on the cell's cluster. Marker genes: high
     // in own cluster, low elsewhere. We deliberately spread each marker's
     // "in-cluster" lambda across a wide range (5 .. 80) so that markers do not
     // all collapse into a single mean-rank window of the relative-variance
@@ -67,7 +90,6 @@ fn build_fixture() -> Fixture {
         fix_lambdas(&mut rng, N_CLUSTERS * MARKERS_PER_CLUSTER, 0.1, 1.0);
     let noise_lambdas: Vec<f64> = fix_lambdas(&mut rng, NOISE_GENES, 1.0, 5.0);
 
-    // build CSR row-by-row.
     let mut data: Vec<u32> = Vec::new();
     let mut indices: Vec<usize> = Vec::new();
     let mut indptr: Vec<usize> = Vec::with_capacity(N_CELLS + 1);
@@ -131,12 +153,39 @@ fn build_fixture() -> Fixture {
     }
 }
 
+/////////////
+// Helpers //
+/////////////
+
+/// One Poisson draw, with `lambda` floored at `1e-6` so the distribution is
+/// always valid.
+///
+/// ### Params
+///
+/// * `rng` - Source of randomness
+/// * `lambda` - Poisson rate
+///
+/// ### Returns
+///
+/// One count.
 fn sample_poisson(rng: &mut StdRng, lambda: f64) -> u32 {
     let l = lambda.max(1e-6);
-    let dist = Poisson::new(l).unwrap();
+    let dist = Poisson::new(l).expect("valid poisson");
     dist.sample(rng) as u32
 }
 
+/// Log-uniform rates in `[lo, hi)`.
+///
+/// ### Params
+///
+/// * `rng` - Source of randomness
+/// * `n` - Number of rates
+/// * `lo` - Lower bound
+/// * `hi` - Upper bound
+///
+/// ### Returns
+///
+/// `n` rates.
 fn fix_lambdas(rng: &mut StdRng, n: usize, lo: f64, hi: f64) -> Vec<f64> {
     let log_lo = lo.ln();
     let log_hi = hi.ln();
@@ -145,9 +194,18 @@ fn fix_lambdas(rng: &mut StdRng, n: usize, lo: f64, hi: f64) -> Vec<f64> {
         .collect()
 }
 
-/// Fraction of (cell_i, cell_j) pairs *within* the same candidate metacell
-/// that are also in the same true cluster. 1.0 means candidates respect
-/// true cluster boundaries perfectly.
+/// Fraction of `(cell_i, cell_j)` pairs within the same candidate metacell
+/// that are also in the same true cluster.
+///
+/// ### Params
+///
+/// * `candidate_of_cell` - Candidate metacell per cell
+/// * `true_cluster` - Planted cluster per cell
+///
+/// ### Returns
+///
+/// The fraction, 1.0 if candidates respect true cluster boundaries perfectly
+/// (or no pair shares a candidate).
 fn within_candidate_same_cluster_fraction(
     candidate_of_cell: &[i32],
     true_cluster: &[usize],
@@ -176,6 +234,7 @@ fn within_candidate_same_cluster_fraction(
 // Parameters //
 ////////////////
 
+/// Feature selection parameters sized for the 200-cell fixture.
 fn select_params() -> SelectParams {
     SelectParams {
         downsample_min_samples: 750,
@@ -190,14 +249,18 @@ fn select_params() -> SelectParams {
     }
 }
 
+/// Default kNN parameters.
 fn knn_params() -> MC2KnnParams {
     MC2KnnParams::default()
 }
 
+/// Default similarity parameters.
 fn similarity_params() -> SimilarityParams {
     SimilarityParams::default()
 }
 
+/// Full pipeline parameters. Target metacell size 25, so several metacells per
+/// planted cluster.
 fn full_params() -> MetacellsParams {
     MetacellsParams {
         target_metacell_size: 25,
@@ -206,7 +269,7 @@ fn full_params() -> MetacellsParams {
         select: select_params(),
         similarity: SimilarityParams::default(),
         knn: MC2KnnParams {
-            knn_k_override: Some(10),
+            knn_k_override: Some(KNN_K),
             ..Default::default()
         },
         partition: PartitionParams {
@@ -231,9 +294,10 @@ fn full_params() -> MetacellsParams {
 // Tests //
 ///////////
 
-/// Downsampling caps every library at the target and leaves the sparsity pattern alone.
+/// Downsampling caps every library at the target and leaves the sparsity
+/// pattern alone.
 #[test]
-fn stage1_downsample_caps_libraries_and_preserves_sparsity() {
+fn test_stage1_downsample_caps_libraries_and_preserves_sparsity() {
     let mut fix = build_fixture();
     let params = select_params();
 
@@ -251,7 +315,7 @@ fn stage1_downsample_caps_libraries_and_preserves_sparsity() {
     assert_eq!(down.indptr, raw_indptr);
 
     let mut sorted_umis = fix.pile.umis_per_cell.clone();
-    sorted_umis.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    sorted_umis.sort_by(|a, b| a.partial_cmp(b).expect("finite UMI totals"));
     let median = sorted_umis[N_CELLS / 2];
     let target_upper = median.ceil() as u64 + 1;
 
@@ -269,9 +333,10 @@ fn stage1_downsample_caps_libraries_and_preserves_sparsity() {
     }
 }
 
-/// Feature selection is dominated by markers and leaves no cluster unrepresented.
+/// Feature selection is dominated by markers and leaves no cluster
+/// unrepresented.
 #[test]
-fn stage2_select_recovers_marker_genes() {
+fn test_stage2_select_recovers_marker_genes() {
     let mut fix = build_fixture();
     let params = select_params();
 
@@ -290,7 +355,7 @@ fn stage2_select_recovers_marker_genes() {
         params.min_genes
     );
 
-    let marker_set: std::collections::HashSet<usize> = fix.marker_genes.iter().copied().collect();
+    let marker_set: HashSet<usize> = fix.marker_genes.iter().copied().collect();
     let n_recovered_markers = selected.iter().filter(|g| marker_set.contains(g)).count();
     let recovery_rate = n_recovered_markers as f64 / selected.len() as f64;
 
@@ -312,15 +377,16 @@ fn stage2_select_recovers_marker_genes() {
     }
 }
 
-/// Within-cluster similarity has to beat between-cluster similarity by a clear margin.
+/// Within-cluster similarity has to beat between-cluster similarity by a clear
+/// margin.
 #[test]
-fn stage3_similarity_separates_clusters() {
+fn test_stage3_similarity_separates_clusters() {
     let mut fix = build_fixture();
     let params = select_params();
 
     downsample_pile(&mut fix.pile, &params, FIXTURE_SEED);
     select_features(&mut fix.pile, &params);
-    let sim = compute_similarity(&fix.pile, &similarity_params()).unwrap();
+    let sim = compute_similarity(&fix.pile, &similarity_params()).expect("similarity failed");
 
     assert_eq!(sim.nrows(), N_CELLS);
     assert_eq!(sim.ncols(), N_CELLS);
@@ -355,22 +421,21 @@ fn stage3_similarity_separates_clusters() {
     );
 }
 
-/// kNN rows are L1-normalised and self-loop free, with within-cluster edges dominant.
+/// kNN rows are L1-normalised and self-loop free, with over 85% of the edge
+/// weight within the true cluster.
 #[test]
-fn stage4_knn_graph_is_normalised_and_clusters_dominate() {
+fn test_stage4_knn_graph_is_normalised_and_clusters_dominate() {
     let mut fix = build_fixture();
     let params = select_params();
 
     downsample_pile(&mut fix.pile, &params, FIXTURE_SEED);
     select_features(&mut fix.pile, &params);
-    let sim = compute_similarity(&fix.pile, &similarity_params()).unwrap();
+    let sim = compute_similarity(&fix.pile, &similarity_params()).expect("similarity failed");
 
-    let k = 10;
-    let graph = build_knn_graph(&sim, k, &knn_params());
+    let graph = build_knn_graph(&sim, KNN_K, &knn_params());
 
     assert_eq!(graph.shape, (N_CELLS, N_CELLS));
 
-    // row L1 normalisation and no self-loops.
     for i in 0..N_CELLS {
         let start = graph.indptr[i] as usize;
         let end = graph.indptr[i + 1] as usize;
@@ -391,12 +456,8 @@ fn stage4_knn_graph_is_normalised_and_clusters_dominate() {
         }
     }
 
-    // Within-cluster edges should dominate. Compute fraction of total edge
-    // weight that stays within the true cluster.
     let mut weight_within = 0.0_f64;
     let mut weight_total = 0.0_f64;
-    let mut count_within = 0usize;
-    let mut count_total = 0usize;
     for i in 0..N_CELLS {
         let start = graph.indptr[i];
         let end = graph.indptr[i + 1];
@@ -405,40 +466,12 @@ fn stage4_knn_graph_is_normalised_and_clusters_dominate() {
             let j = graph.indices[idx];
             let w = graph.data[idx] as f64;
             weight_total += w;
-            count_total += 1;
             if fix.true_cluster[i] == fix.true_cluster[j as usize] {
                 weight_within += w;
-                count_within += 1;
             }
         }
     }
     let within_ratio = weight_within / weight_total;
-    let count_ratio = count_within as f64 / count_total as f64;
-    eprintln!(
-        "stage4 diagnostics: edges total={} within={} count_ratio={:.3} weight_ratio={:.3}",
-        count_total, count_within, count_ratio, within_ratio
-    );
-
-    let mut sim_top_within = 0usize;
-    let mut sim_top_total = 0usize;
-    for i in 0..N_CELLS {
-        let mut sims: Vec<(usize, f32)> = (0..N_CELLS)
-            .filter(|&j| j != i)
-            .map(|j| (j, sim[(i, j)]))
-            .collect();
-        sims.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        for &(j, _) in sims.iter().take(k) {
-            sim_top_total += 1;
-            if fix.true_cluster[i] == fix.true_cluster[j] {
-                sim_top_within += 1;
-            }
-        }
-    }
-    eprintln!(
-        "stage4 diagnostics: similarity-top-{} within-fraction = {:.3}",
-        k,
-        sim_top_within as f64 / sim_top_total as f64
-    );
 
     assert!(
         within_ratio > 0.85,
@@ -447,17 +480,17 @@ fn stage4_knn_graph_is_normalised_and_clusters_dominate() {
     );
 }
 
-/// Seeding leaves no cell unassigned and keeps each true cluster in one dominant seed.
+/// Seeding leaves no cell unassigned and keeps each true cluster in one
+/// dominant seed.
 #[test]
-fn stage5_seeds_assigned_with_high_purity() {
+fn test_stage5_seeds_assigned_with_high_purity() {
     let mut fix = build_fixture();
     let params = select_params();
 
     downsample_pile(&mut fix.pile, &params, FIXTURE_SEED);
     select_features(&mut fix.pile, &params);
-    let sim = compute_similarity(&fix.pile, &similarity_params()).unwrap();
-    let k = 10;
-    let graph = build_knn_graph(&sim, k, &knn_params());
+    let sim = compute_similarity(&fix.pile, &similarity_params()).expect("similarity failed");
+    let graph = build_knn_graph(&sim, KNN_K, &knn_params());
 
     // The seeds API takes the asymmetric outgoing graph plus an incoming
     // view (transpose, re-flagged as CSR semantically: row i = incoming
@@ -484,7 +517,6 @@ fn stage5_seeds_assigned_with_high_purity() {
         FIXTURE_SEED,
     );
 
-    // Every cell assigned, all ids in valid range.
     assert!(seeds.iter().all(|&s| s >= 0));
     assert!(seeds.iter().copied().all(|s| (s as usize) < n_seeds));
 
@@ -498,7 +530,7 @@ fn stage5_seeds_assigned_with_high_purity() {
         for &c in &cluster_cells {
             counts[seeds[c] as usize] += 1;
         }
-        let dominant = *counts.iter().max().unwrap();
+        let dominant = *counts.iter().max().expect("at least one seed");
         let purity = dominant as f64 / cluster_cells.len() as f64;
         if purity < min_purity {
             min_purity = purity;
@@ -512,16 +544,17 @@ fn stage5_seeds_assigned_with_high_purity() {
     );
 }
 
-/// Candidate metacells respect the true cluster boundaries instead of mixing across them.
+/// Candidate metacells respect the true cluster boundaries instead of mixing
+/// across them.
 #[test]
-fn stage6_candidate_metacells_recover_clusters() {
+fn test_stage6_candidate_metacells_recover_clusters() {
     let mut fix = build_fixture();
     let params = full_params();
 
     downsample_pile(&mut fix.pile, &params.select, FIXTURE_SEED);
     select_features(&mut fix.pile, &params.select);
-    let sim = compute_similarity(&fix.pile, &params.similarity).unwrap();
-    let outgoing = build_knn_graph(&sim, 10, &params.knn);
+    let sim = compute_similarity(&fix.pile, &params.similarity).expect("similarity failed");
+    let outgoing = build_knn_graph(&sim, KNN_K, &params.knn);
     let incoming = make_incoming_view(&outgoing);
 
     let candidates = compute_candidate_metacells(
@@ -532,13 +565,8 @@ fn stage6_candidate_metacells_recover_clusters() {
         FIXTURE_SEED,
     );
 
-    // Every cell assigned, IDs dense.
     assert!(candidates.iter().all(|&c| c >= 0));
-    let n_candidates = (*candidates.iter().max().unwrap() + 1) as usize;
-    eprintln!(
-        "stage6: {} cells, {} candidate metacells (target size {})",
-        N_CELLS, n_candidates, params.target_metacell_size
-    );
+    let n_candidates = (*candidates.iter().max().expect("non-empty candidates") + 1) as usize;
     assert!(
         n_candidates >= N_CLUSTERS,
         "expected >= {} candidate metacells, got {}",
@@ -546,67 +574,28 @@ fn stage6_candidate_metacells_recover_clusters() {
         n_candidates
     );
 
-    // Per-candidate true-cluster composition: a candidate is "pure" if all
-    // its cells come from the same true cluster.
-    let mut candidate_clusters: Vec<Vec<usize>> = vec![Vec::new(); n_candidates];
-    for (cell, &c) in candidates.iter().enumerate() {
-        candidate_clusters[c as usize].push(fix.true_cluster[cell]);
-    }
-    let mut n_pure = 0;
-    let mut n_mixed = 0;
-    let mut min_candidate_size = usize::MAX;
-    let mut max_candidate_size = 0;
-    for clusters in &candidate_clusters {
-        if clusters.is_empty() {
-            continue;
-        }
-        let mut counts = [0usize; N_CLUSTERS];
-        for &k in clusters {
-            counts[k] += 1;
-        }
-        let dominant = *counts.iter().max().unwrap();
-        if dominant == clusters.len() {
-            n_pure += 1;
-        } else {
-            n_mixed += 1;
-        }
-        min_candidate_size = min_candidate_size.min(clusters.len());
-        max_candidate_size = max_candidate_size.max(clusters.len());
-    }
-    eprintln!(
-        "stage6: candidate purity: {} pure, {} mixed; sizes {}..{}",
-        n_pure, n_mixed, min_candidate_size, max_candidate_size
-    );
-
-    // The right correctness metric: do candidate metacells respect true
-    // cluster boundaries? If yes, the algorithm is working — the granularity
-    // (how many metacells per true cluster) is just a function of the size
-    // budget vs cluster size.
+    // Pair purity rather than one-candidate-per-cluster: how many metacells
+    // each true cluster splits into is a function of the size budget, not of
+    // correctness.
     let pair_purity = within_candidate_same_cluster_fraction(&candidates, &fix.true_cluster);
-    eprintln!(
-        "stage6: within-candidate same-true-cluster pair fraction = {:.3}",
-        pair_purity
-    );
 
     assert!(
         pair_purity > 0.95,
-        "within-candidate pair purity {:.3} is below 0.95 — candidates are mixing true clusters",
+        "within-candidate pair purity {:.3} is below 0.95, candidates are mixing true clusters",
         pair_purity
     );
 }
 
 /// Deviant detection stays near its configured ceiling on data with no real outliers.
 #[test]
-fn stage7_deviants_dont_flag_well_behaved_cells() {
-    // Run pipeline up to candidates, then check deviant detection on a
-    // fixture where no cell should be a deviant (uniform clusters).
+fn test_stage7_deviants_dont_flag_well_behaved_cells() {
     let mut fix = build_fixture();
     let params = full_params();
 
     downsample_pile(&mut fix.pile, &params.select, FIXTURE_SEED);
     select_features(&mut fix.pile, &params.select);
-    let sim = compute_similarity(&fix.pile, &params.similarity).unwrap();
-    let outgoing = build_knn_graph(&sim, 10, &params.knn);
+    let sim = compute_similarity(&fix.pile, &params.similarity).expect("similarity failed");
+    let outgoing = build_knn_graph(&sim, KNN_K, &params.knn);
     let incoming = make_incoming_view(&outgoing);
     let candidates = compute_candidate_metacells(
         &outgoing,
@@ -625,15 +614,9 @@ fn stage7_deviants_dont_flag_well_behaved_cells() {
 
     let n_deviants = deviants.iter().filter(|&&d| d).count();
     let frac = n_deviants as f64 / N_CELLS as f64;
-    eprintln!(
-        "stage7: {} deviants out of {} ({:.1}%)",
-        n_deviants,
-        N_CELLS,
-        100.0 * frac
-    );
 
     // Synthetic data has no genuine outliers. Some cells may still be
-    // flagged due to Poisson tail noise — bound the fraction loosely.
+    // flagged due to Poisson tail noise, so bound the fraction loosely.
     assert!(
         frac < params.deviants.max_cell_fraction as f64 + 0.05,
         "deviant fraction {:.3} exceeds expected ceiling",
@@ -641,28 +624,21 @@ fn stage7_deviants_dont_flag_well_behaved_cells() {
     );
 }
 
-/// End to end, the outlier flags stay consistent and the metacell IDs stay dense.
+/// End to end, the outlier flags stay consistent, the metacell IDs stay dense,
+/// and at least 70% of each true cluster lands in some metacell.
 #[test]
-fn stage8_direct_pipeline_produces_valid_output() {
+fn test_stage8_direct_pipeline_produces_valid_output() {
     let mut fix = build_fixture();
     let params = full_params();
 
-    let result =
-        compute_direct_metacells(&mut fix.pile, &params, FIXTURE_SEED as usize, true).unwrap();
+    let result = compute_direct_metacells(&mut fix.pile, &params, FIXTURE_SEED as usize, true)
+        .expect("direct metacells failed");
 
-    eprintln!(
-        "stage8: {} metacells, {} deviants, {} dissolved",
-        result.n_metacells,
-        result.deviant_of_cell.iter().filter(|&&d| d).count(),
-        result.dissolved_of_cell.iter().filter(|&&d| d).count()
-    );
-
-    // Output structure invariants.
     assert_eq!(result.metacell_of_cell.len(), N_CELLS);
     assert_eq!(result.deviant_of_cell.len(), N_CELLS);
     assert_eq!(result.dissolved_of_cell.len(), N_CELLS);
 
-    // Deviant XOR dissolved (a cell can't be both).
+    // A cell is never both deviant and dissolved.
     for i in 0..N_CELLS {
         assert!(
             !(result.deviant_of_cell[i] && result.dissolved_of_cell[i]),
@@ -685,13 +661,15 @@ fn stage8_direct_pipeline_produces_valid_output() {
     }
 
     // Metacell IDs dense in [0, n_metacells).
-    let max_id = *result.metacell_of_cell.iter().max().unwrap();
+    let max_id = *result
+        .metacell_of_cell
+        .iter()
+        .max()
+        .expect("non-empty assignment");
     if result.n_metacells > 0 {
         assert_eq!(max_id as usize, result.n_metacells - 1);
     }
 
-    // Cluster recovery: most cells of a true cluster should end up in
-    // the same metacell (or be outliers in a small number).
     assert!(result.n_metacells >= N_CLUSTERS);
     for k in 0..N_CLUSTERS {
         let cluster_cells: Vec<usize> =
@@ -700,8 +678,6 @@ fn stage8_direct_pipeline_produces_valid_output() {
             .iter()
             .filter(|&&i| result.metacell_of_cell[i] >= 0)
             .count();
-        // At least 70% of each true cluster's cells should be in some
-        // metacell (vs being outliers).
         let assigned_frac = n_assigned as f64 / cluster_cells.len() as f64;
         assert!(
             assigned_frac >= 0.7,
