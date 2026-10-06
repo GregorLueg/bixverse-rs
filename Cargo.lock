@@ -82,9 +82,8 @@ dependencies = [
 
 [[package]]
 name = "ann-search-rs"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0abe18588fd9084a8a4fcffc42cda6cc55213650c48ad5d56e95e8ce27c0399b"
+version = "0.10.1"
+source = "git+https://github.com/GregorLueg/ann-search-rs?branch=feat-faster-k-means#f7863013b0b944efc71b9255972b3957477fe07f"
 dependencies = [
  "cubecl",
  "cubecl-utils-rs",
@@ -281,7 +280,7 @@ dependencies = [
 name = "bixverse-rs"
 version = "0.6.0"
 dependencies = [
- "ann-search-rs 0.10.0",
+ "ann-search-rs 0.10.1",
  "approx",
  "bincode",
  "bonsai-rs",
@@ -3197,9 +3196,9 @@ dependencies = [
 
 [[package]]
 name = "objc2"
-version = "0.6.4"
+version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a12a8ed07aefc768292f076dc3ac8c48f3781c8f2d5851dd3d98950e8c5a89f"
+checksum = "08849bbd4767dfae9457696856ae1c84fe4e0281bbe4a7abff2d0e06fb7981f8"
 dependencies = [
  "objc2-encode",
 ]
@@ -3510,9 +3509,9 @@ dependencies = [
 
 [[package]]
 name = "private-gemm-x86"
-version = "0.1.20"
+version = "0.1.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0af8c3e5087969c323f667ccb4b789fa0954f5aa650550e38e81cf9108be21b5"
+checksum = "bba0a7831d1297712e7e7b33759b0c837941e79196dd05df506d5f36f7f78619"
 dependencies = [
  "crossbeam",
  "defer",
@@ -5029,9 +5028,9 @@ dependencies = [
 
 [[package]]
 name = "want"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bfa7760aed19e106de2c7c0b581b509f2f25d3dacaf737cb82ac61bc6d760b0e"
+checksum = "ec4cdd0dd910afe868b7ef477227d8d538b46b3075031afee8a9f2acb0a2ed0b"
 dependencies = [
  "try-lock",
 ]
@@ -5695,18 +5694,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.59"
+version = "0.8.60"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6df92bf3d9227be3d53173901ddbffac2babc27ae50f397776ffd6dc33f800cb"
+checksum = "6400fc4bb7426f6faac3fb07566122bb18622e3022bd2c36426a92ed489b1dbe"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.59"
+version = "0.8.60"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac4f328cf2f05d084e496c3e9c3f33ed0a183656a16e1fcec4d464d8373aec82"
+checksum = "99c27cc7525bad4df59a45e073c45b2c2aa820efb588234cc23a547ec69a34db"
 dependencies = [
  "proc-macro2",
  "quote",
