@@ -204,7 +204,7 @@ where
         let mut total = T::zero();
         for i in 0..self.num_nodes {
             let (_, weights) = self.get_neighbours(i);
-            total += weights.iter().copied().sum();
+            total += weights.iter().copied().sum::<T>();
         }
         let half = T::from_f64(0.5).unwrap();
         if !self.directed { total * half } else { total }
