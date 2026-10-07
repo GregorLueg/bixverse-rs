@@ -251,11 +251,11 @@ fn best_of(mut f: impl FnMut() -> Duration) -> (Duration, Duration) {
 /// * `shape` - The configuration
 /// * `device` - Device to run on
 fn bench_b_shape(shape: Shape, device: &WgpuDevice) {
-    let client = WgpuRuntime::client(device);
+    let client = <WgpuRuntime>::client(device);
     let Shape { n, k, density, .. } = shape;
 
     let upload = |parts: (Vec<f32>, Vec<u32>, Vec<u32>)| {
-        GpuCompressedSparseData::<WgpuRuntime, f32>::from_parts(
+        GpuCompressedSparseData::<f32>::from_parts(
             &parts.0,
             &parts.1,
             &parts.2,
@@ -276,10 +276,8 @@ fn bench_b_shape(shape: Shape, device: &WgpuDevice) {
 
     // `A A^T` is sparse in the same 1-7% band as the A update's `t1`.
     let t1_csr = make_sparse(k, k, 0.05, 3);
-    let t1 = GpuCompressedSparseData::<WgpuRuntime, f32>::from_compressed_sparse_data_2(
-        &t1_csr, false, &client,
-    )
-    .expect("t1 upload failed");
+    let t1 = GpuCompressedSparseData::<f32>::from_compressed_sparse_data_2(&t1_csr, false, &client)
+        .expect("t1 upload failed");
     // Above the widest tier's slot cap the solve runs on the CPU, so there is
     // no kernel here to time.
     let Some(b_wg) = b_argmin_workgroup(k) else {
@@ -290,34 +288,25 @@ fn bench_b_shape(shape: Shape, device: &WgpuDevice) {
         return;
     };
     let seg_host = a_columns_segments(&t1_csr, b_wg, k.div_ceil(b_wg as usize));
-    let t1_seg =
-        GpuTensor::<WgpuRuntime, u32>::from_slice(&seg_host, vec![seg_host.len()], &client)
-            .expect("t1 segment upload failed");
+    let t1_seg = GpuTensor::<u32>::from_slice(&seg_host, vec![seg_host.len()], &client)
+        .expect("t1 segment upload failed");
 
     let blocks = B_ARGMIN_BLOCKS.min(n.max(1) as u32) as usize;
     // Zeroed, not `empty()`. `reduce_argmin_blocks` runs even when
     // `fw_argmin_b` was rejected, so uninitialised partials become plausible
     // looking output and the check below passes a kernel that did nothing.
-    let part_val = GpuTensor::<WgpuRuntime, f32>::from_slice(
-        &vec![0.0f32; blocks * k],
-        vec![blocks * k],
-        &client,
-    )
-    .expect("alloc part_val");
-    let part_idx = GpuTensor::<WgpuRuntime, u32>::from_slice(
-        &vec![0u32; blocks * k],
-        vec![blocks * k],
-        &client,
-    )
-    .expect("alloc part_idx");
-    let gap_partial =
-        GpuTensor::<WgpuRuntime, f32>::empty(vec![blocks], &client).expect("alloc gap_partial");
+    let part_val =
+        GpuTensor::<f32>::from_slice(&vec![0.0f32; blocks * k], vec![blocks * k], &client)
+            .expect("alloc part_val");
+    let part_idx = GpuTensor::<u32>::from_slice(&vec![0u32; blocks * k], vec![blocks * k], &client)
+        .expect("alloc part_idx");
+    let gap_partial = GpuTensor::<f32>::empty(vec![blocks], &client).expect("alloc gap_partial");
     // Zeroed, not `empty()`: a rejected dispatch leaves uninitialised VRAM,
     // which can pass a "did it write anything" check by accident.
-    let out_val = GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; k], vec![k], &client)
-        .expect("alloc out_val");
-    let out_idx = GpuTensor::<WgpuRuntime, u32>::from_slice(&vec![0u32; k], vec![k], &client)
-        .expect("alloc out_idx");
+    let out_val =
+        GpuTensor::<f32>::from_slice(&vec![0.0f32; k], vec![k], &client).expect("alloc out_val");
+    let out_idx =
+        GpuTensor::<u32>::from_slice(&vec![0u32; k], vec![k], &client).expect("alloc out_idx");
 
     let (best, worst) = best_of(|| {
         let start = Instant::now();
@@ -536,7 +525,7 @@ fn make_a_prev_t(n: usize, k: usize, atoms: usize) -> CompressedSparseData2<f32>
 /// * `n_iters` - Frank-Wolfe iterations per column
 /// * `device` - Device to run on
 fn bench_a_shape(shape: AShape, n_iters: usize, device: &WgpuDevice) {
-    let client = WgpuRuntime::client(device);
+    let client = <WgpuRuntime>::client(device);
     let AShape {
         n,
         k,
@@ -567,24 +556,19 @@ fn bench_a_shape(shape: AShape, n_iters: usize, device: &WgpuDevice) {
     let t1_dense_bytes = k * k * size_of::<f32>();
     let t1_sparse_bytes = t1.data.len() * (size_of::<f32>() + size_of::<u32>());
 
-    let t1_gpu = GpuCompressedSparseData::<WgpuRuntime, f32>::from_compressed_sparse_data_2(
-        &t1, false, &client,
-    )
-    .expect("t1 upload failed");
+    let t1_gpu = GpuCompressedSparseData::<f32>::from_compressed_sparse_data_2(&t1, false, &client)
+        .expect("t1 upload failed");
 
-    let a_prev_gpu = GpuCompressedSparseData::<WgpuRuntime, f32>::from_compressed_sparse_data_2(
-        &a_prev_t, false, &client,
-    )
-    .expect("A_prev upload failed");
-    let k2b_gpu = GpuCompressedSparseData::<WgpuRuntime, f32>::from_compressed_sparse_data_2(
-        &k2_b, false, &client,
-    )
-    .expect("K2B upload failed");
+    let a_prev_gpu =
+        GpuCompressedSparseData::<f32>::from_compressed_sparse_data_2(&a_prev_t, false, &client)
+            .expect("A_prev upload failed");
+    let k2b_gpu =
+        GpuCompressedSparseData::<f32>::from_compressed_sparse_data_2(&k2_b, false, &client)
+            .expect("K2B upload failed");
 
-    let atom_idx =
-        GpuTensor::<WgpuRuntime, u32>::empty(vec![n * cap], &client).expect("alloc atom_idx");
-    let threshold = GpuTensor::<WgpuRuntime, f32>::from_slice(&[1e-7f32], vec![1], &client)
-        .expect("alloc threshold");
+    let atom_idx = GpuTensor::<u32>::empty(vec![n * cap], &client).expect("alloc atom_idx");
+    let threshold =
+        GpuTensor::<f32>::from_slice(&[1e-7f32], vec![1], &client).expect("alloc threshold");
 
     println!(
         "n = {:>7}  k = {:>5}  cap {:>4}  nnz(t1)/row {:>6.1}  t1 {:>6.1} MB sparse vs \
@@ -617,19 +601,14 @@ fn bench_a_shape(shape: AShape, n_iters: usize, device: &WgpuDevice) {
 
         // Zeroed per tier, or the previous tier's output passes the mass check
         // for a launch that did nothing.
-        let atom_cnt = GpuTensor::<WgpuRuntime, u32>::from_slice(&vec![0u32; n], vec![n], &client)
-            .expect("alloc atom_cnt");
-        let atom_val = GpuTensor::<WgpuRuntime, f32>::from_slice(
-            &vec![0.0f32; n * cap],
-            vec![n * cap],
-            &client,
-        )
-        .expect("alloc atom_val");
+        let atom_cnt =
+            GpuTensor::<u32>::from_slice(&vec![0u32; n], vec![n], &client).expect("alloc atom_cnt");
+        let atom_val = GpuTensor::<f32>::from_slice(&vec![0.0f32; n * cap], vec![n * cap], &client)
+            .expect("alloc atom_val");
 
         let seg_host = a_columns_segments(&t1, wg, slots);
-        let t1_seg =
-            GpuTensor::<WgpuRuntime, u32>::from_slice(&seg_host, vec![seg_host.len()], &client)
-                .expect("t1 segment upload failed");
+        let t1_seg = GpuTensor::<u32>::from_slice(&seg_host, vec![seg_host.len()], &client)
+            .expect("t1 segment upload failed");
 
         let (best, worst) = best_of(|| {
             let start = Instant::now();
@@ -800,13 +779,13 @@ fn bench_end_to_end(n: usize, k: usize, knn: usize, device: &WgpuDevice) {
     let cpu_rss = cpu_model.get_rss_history().to_vec();
 
     let gpu_start = Instant::now();
-    let (gpu_assign, _, _, gpu_rss) = seacells_fit_gpu::<WgpuRuntime>(
+    let (gpu_assign, _, _, gpu_rss) = seacells_fit_gpu(
         embedding.as_ref(),
         &knn_indices,
         &knn_distances,
         &params,
         SEED,
-        device.clone(),
+        device.clone().into(),
         0,
     )
     .expect("GPU fit failed");
@@ -843,7 +822,7 @@ fn bench_end_to_end(n: usize, k: usize, knn: usize, device: &WgpuDevice) {
 //////////
 
 fn main() {
-    let device = WgpuDevice::DefaultDevice;
+    let device = WgpuDevice::default();
     // The A-column arm is the one under active work, so it can be run alone
     // rather than behind several minutes of end-to-end fits.
     let a_only = std::env::var("BIXVERSE_BENCH_A_ONLY").is_ok();
@@ -856,7 +835,7 @@ fn main() {
     }
 
     {
-        let limits = GpuLimits::from_client(&WgpuRuntime::client(&device));
+        let limits = GpuLimits::from_client(&<WgpuRuntime>::client(&device));
         println!(
             "\ndevice: max_units_per_cube {}  max_cube_dim {:?}  max_cube_count {:?}  \
              plane {}..{}  shared {} B  binding limit {} MB",
@@ -920,13 +899,13 @@ fn main() {
             let knn_distances = knn_distances.expect("distances requested");
 
             let start = Instant::now();
-            let (_, _, _, rss) = seacells_fit_gpu::<WgpuRuntime>(
+            let (_, _, _, rss) = seacells_fit_gpu(
                 embedding.as_ref(),
                 &knn_indices,
                 &knn_distances,
                 &params,
                 SEED,
-                device.clone(),
+                device.clone().into(),
                 0,
             )
             .expect("GPU fit failed");

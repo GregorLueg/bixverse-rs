@@ -10,7 +10,7 @@ use ann_search_rs::{
     query_ivf_index_gpu, query_ivf_index_gpu_self, query_nndescent_index_gpu,
     query_nndescent_index_gpu_self,
 };
-use cubecl::Runtime;
+use cubecl::Device;
 use faer::MatRef;
 use rayon::prelude::*;
 
@@ -251,11 +251,11 @@ fn drop_self_neighbours(raw: Vec<Vec<usize>>, k: usize) -> Vec<Vec<usize>> {
 /// * `AnnSearchRsError` if an index build or query fails, including the typed
 ///   shared-memory refusals when `k` or the embedding dimensionality is too
 ///   large for the device.
-pub fn dispatch_knn_gpu<R: Runtime>(
+pub fn dispatch_knn_gpu(
     embd: MatRef<f32>,
     k: usize,
     params: &KnnParamsGpu,
-    device: R::Device,
+    device: Device,
     seed: usize,
     verbose: usize,
 ) -> Result<Vec<Vec<usize>>, BixverseErrors> {
@@ -276,11 +276,11 @@ pub fn dispatch_knn_gpu<R: Runtime>(
 
     let (raw_indices, _) = match method {
         KnnSearchGpu::ExhaustiveGpu => {
-            let index = build_exhaustive_index_gpu::<f32, R>(embd, &params.ann_dist, device)?;
+            let index = build_exhaustive_index_gpu::<f32>(embd, &params.ann_dist, device)?;
             query_exhaustive_index_gpu_self(&index, k_query, false, detailed)?
         }
         KnnSearchGpu::IvfGpu => {
-            let index = build_ivf_index_gpu::<f32, R>(
+            let index = build_ivf_index_gpu::<f32>(
                 embd,
                 params.n_list,
                 None,
@@ -306,7 +306,7 @@ pub fn dispatch_knn_gpu<R: Runtime>(
                 params.graph_k
             };
 
-            let mut index = build_nndescent_index_gpu::<f32, R>(
+            let mut index = build_nndescent_index_gpu::<f32>(
                 embd,
                 &params.ann_dist,
                 graph_k,
@@ -365,12 +365,12 @@ pub fn dispatch_knn_gpu<R: Runtime>(
 ///
 /// * `AnnSearchRsError` if an index build or query fails.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn dispatch_knn_query_gpu<R: Runtime>(
+pub(crate) fn dispatch_knn_query_gpu(
     reference: MatRef<f32>,
     query: MatRef<f32>,
     k: usize,
     params: &KnnParamsGpu,
-    device: R::Device,
+    device: Device,
     seed: usize,
     return_dist: bool,
     verbose: bool,
@@ -385,11 +385,11 @@ pub(crate) fn dispatch_knn_query_gpu<R: Runtime>(
 
     let res = match method {
         KnnSearchGpu::ExhaustiveGpu => {
-            let index = build_exhaustive_index_gpu::<f32, R>(reference, &params.ann_dist, device)?;
+            let index = build_exhaustive_index_gpu::<f32>(reference, &params.ann_dist, device)?;
             query_exhaustive_index_gpu(query, &index, k, return_dist, verbose)?
         }
         KnnSearchGpu::IvfGpu => {
-            let index = build_ivf_index_gpu::<f32, R>(
+            let index = build_ivf_index_gpu::<f32>(
                 reference,
                 params.n_list,
                 None,
@@ -403,7 +403,7 @@ pub(crate) fn dispatch_knn_query_gpu<R: Runtime>(
         KnnSearchGpu::CagraGpu => {
             // `retain_gpu` has to be set: the cross-query path needs the
             // vectors to stay device-resident after the build.
-            let mut index = build_nndescent_index_gpu::<f32, R>(
+            let mut index = build_nndescent_index_gpu::<f32>(
                 reference,
                 &params.ann_dist,
                 params.graph_k,
@@ -447,9 +447,9 @@ mod tests {
     use faer::Mat;
 
     fn try_device() -> Option<WgpuDevice> {
-        let device = WgpuDevice::DefaultDevice;
+        let device = WgpuDevice::default();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            WgpuRuntime::client(&device);
+            <WgpuRuntime>::client(&device);
         }))
         .ok()
         .map(|_| device)
@@ -544,8 +544,7 @@ mod tests {
                 ..Default::default()
             };
             let got =
-                dispatch_knn_gpu::<WgpuRuntime>(data.as_ref(), k, &params, device.clone(), 42, 0)
-                    .unwrap();
+                dispatch_knn_gpu(data.as_ref(), k, &params, device.clone().into(), 42, 0).unwrap();
 
             assert_eq!(got.len(), n, "extract = {}: wrong row count", extract);
             for (i, row) in got.iter().enumerate() {
@@ -588,7 +587,7 @@ mod tests {
             ..Default::default()
         };
         let got =
-            dispatch_knn_gpu::<WgpuRuntime>(data.as_ref(), k, &params, device, 42, 0).unwrap();
+            dispatch_knn_gpu(data.as_ref(), k, &params, device.clone().into(), 42, 0).unwrap();
 
         assert_eq!(got.len(), n);
         for (i, row) in got.iter().enumerate() {
@@ -622,8 +621,7 @@ mod tests {
                 ..Default::default()
             };
             let got =
-                dispatch_knn_gpu::<WgpuRuntime>(data.as_ref(), k, &params, device.clone(), 42, 0)
-                    .unwrap();
+                dispatch_knn_gpu(data.as_ref(), k, &params, device.clone().into(), 42, 0).unwrap();
 
             // A backend that silently no-ops returns empty or short rows, so
             // check the shape before trusting the recall number.

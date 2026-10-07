@@ -35,7 +35,8 @@
 //! and `[s, s]` matrices that are negligible. Total ~3.9 GB. Fits on most
 //! discrete GPUs and on Apple Silicon with unified memory.
 
-use cubecl::Runtime;
+use cubecl::Device;
+use cubecl_utils_rs::prelude::Runtime;
 use cubecl_utils_rs::prelude::*;
 use cubek::matmul::definition::MatmulPrecision;
 use faer::Mat;
@@ -132,7 +133,7 @@ impl Default for RandSvdGpuParams {
 /// The current implementation will always run PCA on the data_2 layer, i.e.,
 /// the normalised counts
 #[allow(clippy::too_many_arguments)]
-pub fn randomised_sparse_svd_gpu<R, T, MP>(
+pub fn randomised_sparse_svd_gpu<T, MP>(
     data: CompressedSparseData2<T, T>,
     col_means: &[T],
     col_stds: &[T],
@@ -140,11 +141,10 @@ pub fn randomised_sparse_svd_gpu<R, T, MP>(
     n_components: usize,
     params: Option<RandSvdGpuParams>,
     seed: u64,
-    device: R::Device,
+    device: Device,
     verbose: usize,
 ) -> Result<SvdResults<T>, BixverseErrors>
 where
-    R: Runtime,
     T: cubecl::prelude::Float + cubecl::CubeElement + BixverseFloat,
     MP: MatmulPrecision,
 {
@@ -179,12 +179,12 @@ where
 
     // -- GPU upload --
     // Only the CSC crosses the bus; the CSR is built from it on the device.
-    let client = R::client(&device);
+    let client = device.client();
     let csc_gpu =
-        GpuCompressedSparseData::<R, T>::from_compressed_sparse_data_2(&data, true, &client)?;
+        GpuCompressedSparseData::<T>::from_compressed_sparse_data_2(&data, true, &client)?;
     let csr_gpu = csc_to_csr_gpu(&csc_gpu, &data.indptr, &data.indices, &client)?;
-    let mu_gpu = GpuTensor::<R, T>::from_slice(col_means, vec![m], &client)?;
-    let sigma_gpu = GpuTensor::<R, T>::from_slice(col_stds, vec![m], &client)?;
+    let mu_gpu = GpuTensor::<T>::from_slice(col_means, vec![m], &client)?;
+    let sigma_gpu = GpuTensor::<T>::from_slice(col_stds, vec![m], &client)?;
 
     // Nasty bug:
     // The forward SpMM applies A - 1 mu^T with no scaling, so its dense operand
@@ -193,12 +193,12 @@ where
     // the next forward product D^-1 X^T Q. With plain sigma the loop iterates
     // X D X^T rather than X X^T and drifts off the leading subspace.
     let sigma_sq: Vec<T> = col_stds.iter().map(|&x| x * x).collect();
-    let sigma_sq_gpu = GpuTensor::<R, T>::from_slice(&sigma_sq, vec![m], &client)?;
+    let sigma_sq_gpu = GpuTensor::<T>::from_slice(&sigma_sq, vec![m], &client)?;
 
     let zero_n = vec![T::from(0.0).unwrap(); n];
     let row_offsets_gpu = match row_offsets {
-        Some(off) => GpuTensor::<R, T>::from_slice(off, vec![n], &client)?,
-        None => GpuTensor::<R, T>::from_slice(&zero_n, vec![n], &client)?,
+        Some(off) => GpuTensor::<T>::from_slice(off, vec![n], &client)?,
+        None => GpuTensor::<T>::from_slice(&zero_n, vec![n], &client)?,
     };
 
     drop(data);
@@ -216,32 +216,32 @@ where
             T::from(normal.sample(&mut rng)).unwrap() / col_stds[j]
         })
         .collect();
-    let omega_gpu = GpuTensor::<R, T>::from_slice(&omega_scaled, vec![m, s], &client)?;
+    let omega_gpu = GpuTensor::<T>::from_slice(&omega_scaled, vec![m, s], &client)?;
 
     // Workspace buffers. x_sum and m_dot_q are zero-initialised so they
     // contribute no correction when CLR is off.
-    let y_buf = GpuTensor::<R, T>::empty(vec![n, s], &client)?;
-    let q_buf = GpuTensor::<R, T>::empty(vec![n, s], &client)?;
-    let z_buf = GpuTensor::<R, T>::empty(vec![m, s], &client)?;
-    let c_buf = GpuTensor::<R, T>::empty(vec![s], &client)?;
-    let q_sum_buf = GpuTensor::<R, T>::empty(vec![s], &client)?;
+    let y_buf = GpuTensor::<T>::empty(vec![n, s], &client)?;
+    let q_buf = GpuTensor::<T>::empty(vec![n, s], &client)?;
+    let z_buf = GpuTensor::<T>::empty(vec![m, s], &client)?;
+    let c_buf = GpuTensor::<T>::empty(vec![s], &client)?;
+    let q_sum_buf = GpuTensor::<T>::empty(vec![s], &client)?;
     let zero_s = vec![T::from(0.0).unwrap(); s];
-    let x_sum_buf = GpuTensor::<R, T>::from_slice(&zero_s, vec![s], &client)?;
-    let m_dot_q_buf = GpuTensor::<R, T>::from_slice(&zero_s, vec![s], &client)?;
+    let x_sum_buf = GpuTensor::<T>::from_slice(&zero_s, vec![s], &client)?;
+    let m_dot_q_buf = GpuTensor::<T>::from_slice(&zero_s, vec![s], &client)?;
 
     // CholeskyQR2 scratch, allocated once and reused across all
     // `n_power_iters + 1` calls. The `[n, s]` buffer is ~520 MB at the
     // production shape and its first kernel write faults its pages in, so
     // letting `cholesky_qr2` allocate it per call pays that repeatedly.
-    let q1_scratch = GpuTensor::<R, T>::empty(vec![n, s], &client)?;
-    let g_scratch = GpuTensor::<R, T>::empty(vec![s, s], &client)?;
+    let q1_scratch = GpuTensor::<T>::empty(vec![n, s], &client)?;
+    let g_scratch = GpuTensor::<T>::empty(vec![s, s], &client)?;
 
     // -- Initial sketch --
-    launch_dense_column_weighted_sum::<R, T>(&mu_gpu, &omega_gpu, &c_buf, m, s, &client)?;
+    launch_dense_column_weighted_sum::<T>(&mu_gpu, &omega_gpu, &c_buf, m, s, &client)?;
     if use_clr {
-        launch_dense_column_sum::<R, T>(&omega_gpu, &x_sum_buf, m, s, &client)?;
+        launch_dense_column_sum::<T>(&omega_gpu, &x_sum_buf, m, s, &client)?;
     }
-    launch_spmm_csr_forward::<R, T, T>(
+    launch_spmm_csr_forward::<T, T>(
         &csr_gpu,
         &omega_gpu,
         &c_buf,
@@ -252,13 +252,13 @@ where
         &client,
     )?;
 
-    cholesky_qr2::<R, T, MP>(&client, &y_buf, &q_buf, &q1_scratch, &g_scratch, n, s)?;
+    cholesky_qr2::<T, MP>(&client, &y_buf, &q_buf, &q1_scratch, &g_scratch, n, s)?;
 
     // -- Power iters --
     for iter in 0..params.n_power_iters {
-        launch_dense_column_sum::<R, T>(&q_buf, &q_sum_buf, n, s, &client)?;
+        launch_dense_column_sum::<T>(&q_buf, &q_sum_buf, n, s, &client)?;
         if use_clr {
-            launch_dense_column_weighted_sum::<R, T>(
+            launch_dense_column_weighted_sum::<T>(
                 &row_offsets_gpu,
                 &q_buf,
                 &m_dot_q_buf,
@@ -267,7 +267,7 @@ where
                 &client,
             )?;
         }
-        launch_spmm_csc_transpose::<R, T, T>(
+        launch_spmm_csc_transpose::<T, T>(
             &csc_gpu,
             &q_buf,
             &q_sum_buf,
@@ -279,11 +279,11 @@ where
             &client,
         )?;
 
-        launch_dense_column_weighted_sum::<R, T>(&mu_gpu, &z_buf, &c_buf, m, s, &client)?;
+        launch_dense_column_weighted_sum::<T>(&mu_gpu, &z_buf, &c_buf, m, s, &client)?;
         if use_clr {
-            launch_dense_column_sum::<R, T>(&z_buf, &x_sum_buf, m, s, &client)?;
+            launch_dense_column_sum::<T>(&z_buf, &x_sum_buf, m, s, &client)?;
         }
-        launch_spmm_csr_forward::<R, T, T>(
+        launch_spmm_csr_forward::<T, T>(
             &csr_gpu,
             &z_buf,
             &c_buf,
@@ -294,7 +294,7 @@ where
             &client,
         )?;
 
-        cholesky_qr2::<R, T, MP>(&client, &y_buf, &q_buf, &q1_scratch, &g_scratch, n, s)?;
+        cholesky_qr2::<T, MP>(&client, &y_buf, &q_buf, &q1_scratch, &g_scratch, n, s)?;
 
         if verbosity.detailed_verbosity() {
             println!(
@@ -307,9 +307,9 @@ where
     }
 
     // -- Final Z --
-    launch_dense_column_sum::<R, T>(&q_buf, &q_sum_buf, n, s, &client)?;
+    launch_dense_column_sum::<T>(&q_buf, &q_sum_buf, n, s, &client)?;
     if use_clr {
-        launch_dense_column_weighted_sum::<R, T>(
+        launch_dense_column_weighted_sum::<T>(
             &row_offsets_gpu,
             &q_buf,
             &m_dot_q_buf,
@@ -318,7 +318,7 @@ where
             &client,
         )?;
     }
-    launch_spmm_csc_transpose::<R, T, T>(
+    launch_spmm_csc_transpose::<T, T>(
         &csc_gpu,
         &q_buf,
         &q_sum_buf,
@@ -344,10 +344,10 @@ where
     let v_z_trunc: Vec<T> = (0..s)
         .flat_map(|i| (0..n_components).map(move |j| v_z[(i, j)]))
         .collect();
-    let v_z_gpu = GpuTensor::<R, T>::from_slice(&v_z_trunc, vec![s, n_components], &client)?;
+    let v_z_gpu = GpuTensor::<T>::from_slice(&v_z_trunc, vec![s, n_components], &client)?;
 
-    let u_gpu = GpuTensor::<R, T>::empty(vec![n, n_components], &client)?;
-    dense_gemm::<R, MP>(
+    let u_gpu = GpuTensor::<T>::empty(vec![n, n_components], &client)?;
+    dense_gemm::<MP>(
         q_buf.handle(),
         [n, s],
         false,
@@ -398,9 +398,9 @@ mod tests {
     use faer::Mat;
 
     fn try_device() -> Option<WgpuDevice> {
-        let device = WgpuDevice::DefaultDevice;
+        let device = WgpuDevice::default();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            WgpuRuntime::client(&device);
+            <WgpuRuntime>::client(&device);
         }))
         .ok()
         .map(|_| device)
@@ -470,7 +470,7 @@ mod tests {
         let mu = vec![0.0f32; m];
         let sigma = vec![1.0f32; m];
 
-        let svd = randomised_sparse_svd_gpu::<WgpuRuntime, f32, f32>(
+        let svd = randomised_sparse_svd_gpu::<f32, f32>(
             csc,
             &mu,
             &sigma,
@@ -478,7 +478,7 @@ mod tests {
             n_components,
             Some(RandSvdGpuParams::new(2, 8)),
             42,
-            device,
+            device.clone().into(),
             0,
         )
         .unwrap();
@@ -562,7 +562,7 @@ mod tests {
             sigma[j] = var.sqrt() as f32;
         }
 
-        let got = randomised_sparse_svd_gpu::<WgpuRuntime, f32, f32>(
+        let got = randomised_sparse_svd_gpu::<f32, f32>(
             csc,
             &mu,
             &sigma,
@@ -570,7 +570,7 @@ mod tests {
             n_components,
             Some(RandSvdGpuParams::new(2, 10)),
             42,
-            device,
+            device.clone().into(),
             0,
         )
         .unwrap();
@@ -699,7 +699,7 @@ mod tests {
                 Some(&values),
                 (n, m),
             );
-            let got = randomised_sparse_svd_gpu::<WgpuRuntime, f32, f32>(
+            let got = randomised_sparse_svd_gpu::<f32, f32>(
                 csc,
                 &mu,
                 &sigma,
@@ -774,8 +774,16 @@ mod tests {
         let mu = vec![0.0f32; m];
         let sigma = vec![1.0f32; m];
 
-        let res = randomised_sparse_svd_gpu::<WgpuRuntime, f32, f32>(
-            csr, &mu, &sigma, None, 2, None, 42, device, 0,
+        let res = randomised_sparse_svd_gpu::<f32, f32>(
+            csr,
+            &mu,
+            &sigma,
+            None,
+            2,
+            None,
+            42,
+            device.clone().into(),
+            0,
         );
         assert!(matches!(
             res,
@@ -803,8 +811,16 @@ mod tests {
         let mu = vec![0.0f32; m + 1];
         let sigma = vec![1.0f32; m + 1];
 
-        let res = randomised_sparse_svd_gpu::<WgpuRuntime, f32, f32>(
-            csc, &mu, &sigma, None, 2, None, 42, device, 0,
+        let res = randomised_sparse_svd_gpu::<f32, f32>(
+            csc,
+            &mu,
+            &sigma,
+            None,
+            2,
+            None,
+            42,
+            device.clone().into(),
+            0,
         );
         assert!(matches!(
             res,

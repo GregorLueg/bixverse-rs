@@ -18,8 +18,8 @@
 
 use std::collections::HashSet;
 
-use cubecl::Runtime;
 use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+use cubecl_utils_rs::prelude::Runtime;
 use rand::prelude::*;
 use rand::rngs::SmallRng;
 
@@ -238,9 +238,9 @@ fn sum_importances(imp: &[Vec<f32>]) -> Vec<f32> {
 ///
 /// The default device, or `None` if a client cannot be created.
 fn try_device() -> Option<WgpuDevice> {
-    let device = WgpuDevice::DefaultDevice;
+    let device = WgpuDevice::default();
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        WgpuRuntime::client(&device);
+        <WgpuRuntime>::client(&device);
     }))
     .ok()
     .map(|_| device)
@@ -345,13 +345,13 @@ fn test_et_gpu_matches_cpu_top10() {
         let cpu_b = fit_multi_trees_sparse(&axes, &x, N_SAMPLES, &cfg, seed_b as usize)
             .expect("CPU baseline fit failed");
 
-        let gpu = fit_extra_trees_gpu_single::<WgpuRuntime>(
+        let gpu = fit_extra_trees_gpu_single(
             &sparse_y,
             &x,
             N_SAMPLES,
             &cfg,
             seed as usize,
-            device.clone(),
+            device.clone().into(),
             &ScenicGpuParams::default(),
         )
         .expect("GPU fit failed");
@@ -431,13 +431,13 @@ fn test_rf_gpu_matches_cpu_top10() {
             .expect("CPU RF fit failed");
         let cpu_b = fit_multi_trees_sparse(&axes, &x, N_SAMPLES, &cfg, seed_b as usize)
             .expect("CPU RF baseline fit failed");
-        let gpu = fit_multi_trees_gpu::<WgpuRuntime>(
+        let gpu = fit_multi_trees_gpu(
             &axes,
             &x,
             N_SAMPLES,
             &cfg,
             seed as usize,
-            device.clone(),
+            device.clone().into(),
             &ScenicGpuParams::default(),
         )
         .expect("GPU RF fit failed");
@@ -536,13 +536,13 @@ fn test_et_multi_tree_dispatch() {
     cfg.n_thresholds = 1;
 
     let cpu = fit_multi_trees_sparse(&axes, &x, ET_SAMPLES, &cfg, 7).expect("ET CPU fit failed");
-    let gpu = fit_multi_trees_gpu::<WgpuRuntime>(
+    let gpu = fit_multi_trees_gpu(
         &axes,
         &x,
         ET_SAMPLES,
         &cfg,
         7,
-        device.clone(),
+        device.clone().into(),
         &ScenicGpuParams::default(),
     )
     .expect("ET GPU fit failed");
@@ -718,7 +718,7 @@ fn test_et_gpu_matches_cpu_pearson_large() {
     let cpu = fit_multi_trees_sparse(&axes, &x, LG_N_SAMPLES, &cfg, seed_base as usize)
         .expect("CPU fit failed");
 
-    let gpu = fit_multi_trees_gpu::<WgpuRuntime>(
+    let gpu = fit_multi_trees_gpu(
         &axes,
         &x,
         LG_N_SAMPLES,
@@ -807,7 +807,7 @@ fn test_multi_batch_matches_chunked() {
     cfg.n_features_split = 0;
     cfg.n_thresholds = 1;
 
-    let combined = fit_multi_trees_gpu::<WgpuRuntime>(
+    let combined = fit_multi_trees_gpu(
         &axes,
         &x,
         MB_N_SAMPLES,
@@ -824,7 +824,7 @@ fn test_multi_batch_matches_chunked() {
     // same trees.
     let mut split = Vec::with_capacity(MB_TARGETS);
     for chunk in axes.chunks(MB_BATCH) {
-        let part = fit_multi_trees_gpu::<WgpuRuntime>(
+        let part = fit_multi_trees_gpu(
             chunk,
             &x,
             MB_N_SAMPLES,
@@ -883,7 +883,7 @@ fn test_rf_gpu_matches_cpu_pearson_large() {
     let cpu = fit_multi_trees_sparse(&axes, &x, LG_N_SAMPLES, &cfg, seed_base as usize)
         .expect("CPU RF fit failed");
 
-    let gpu = fit_multi_trees_gpu::<WgpuRuntime>(
+    let gpu = fit_multi_trees_gpu(
         &axes,
         &x,
         LG_N_SAMPLES,
@@ -927,7 +927,7 @@ fn test_rf_bootstrap_gpu_matches_cpu_pearson_large() {
     let cpu = fit_multi_trees_sparse(&axes, &x, LG_N_SAMPLES, &cfg, seed_base as usize)
         .expect("CPU RF+bootstrap fit failed");
 
-    let gpu = fit_multi_trees_gpu::<WgpuRuntime>(
+    let gpu = fit_multi_trees_gpu(
         &axes,
         &x,
         LG_N_SAMPLES,
@@ -1046,7 +1046,7 @@ fn test_rf_gpu_matches_cpu_pearson_small() {
         seed_base.wrapping_add(0xBEEF) as usize,
     )
     .expect("CPU RF baseline fit failed");
-    let gpu = fit_multi_trees_gpu::<WgpuRuntime>(
+    let gpu = fit_multi_trees_gpu(
         &axes,
         &x,
         RS_N_SAMPLES,
@@ -1175,7 +1175,7 @@ fn test_rf_gpu_matches_cpu_pearson_skewed_bins() {
         seed_base.wrapping_add(0xBEEF) as usize,
     )
     .expect("CPU RF baseline fit failed");
-    let gpu = fit_multi_trees_gpu::<WgpuRuntime>(
+    let gpu = fit_multi_trees_gpu(
         &axes,
         &x,
         SK_N_SAMPLES,
@@ -1410,7 +1410,7 @@ fn test_run_scenic_grn_gpu_roundtrip() {
     )
     .expect("CPU run_scenic_grn failed");
 
-    let gpu = run_scenic_grn_gpu::<WgpuRuntime, _>(
+    let gpu = run_scenic_grn_gpu::<_>(
         &reader,
         &cell_indices,
         &gene_indices,
@@ -1463,7 +1463,7 @@ fn test_run_scenic_grn_streaming_gpu_roundtrip() {
     )
     .expect("CPU baseline failed");
 
-    let gpu = run_scenic_grn_streaming_gpu::<WgpuRuntime, _>(
+    let gpu = run_scenic_grn_streaming_gpu::<_>(
         &reader,
         &cell_indices,
         &gene_indices,
@@ -1555,7 +1555,7 @@ fn test_run_scenic_grn_in_memory_gpu_roundtrip() {
     let cpu = run_scenic_grn_in_memory(&csc, &tf_indices, &params, 42, 0)
         .expect("CPU run_scenic_grn_in_memory failed");
 
-    let gpu = run_scenic_grn_in_memory_gpu::<WgpuRuntime, u16>(
+    let gpu = run_scenic_grn_in_memory_gpu::<u16>(
         &csc,
         &tf_indices,
         &params,
@@ -1589,13 +1589,13 @@ fn test_run_scenic_grn_in_memory_gpu_rejects_gbm() {
     params.regression_learner =
         RegressionLearner::GradientBoosting(GradientBoostingConfig::default());
 
-    let err = run_scenic_grn_in_memory_gpu::<WgpuRuntime, u16>(
+    let err = run_scenic_grn_in_memory_gpu::<u16>(
         &csc,
         &tf_indices,
         &params,
         &ScenicGpuParams::default(),
         42,
-        device,
+        device.clone().into(),
         0,
     )
     .expect_err("expected GpuNotSupportedForLearner");
@@ -1629,7 +1629,7 @@ fn test_run_scenic_grn_gpu_rejects_gbm() {
 
     let reader = ParallelSparseReader::new(path_str).expect("failed to open synthetic file");
 
-    let err = run_scenic_grn_gpu::<WgpuRuntime, _>(
+    let err = run_scenic_grn_gpu::<_>(
         &reader,
         &cell_indices,
         &gene_indices,
@@ -1637,7 +1637,7 @@ fn test_run_scenic_grn_gpu_rejects_gbm() {
         &params,
         &ScenicGpuParams::default(),
         42,
-        device,
+        device.clone().into(),
         0,
     )
     .expect_err("expected GpuNotSupportedForLearner");

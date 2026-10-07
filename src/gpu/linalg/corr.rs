@@ -25,6 +25,7 @@
 // The `#[cube]` macro generates undocumented launcher structs and functions.
 #![allow(missing_docs)]
 
+use cubecl::Device;
 use cubecl::prelude::*;
 use cubecl_utils_rs::prelude::*;
 use faer::{Mat, MatRef};
@@ -125,7 +126,7 @@ pub fn column_stats<F: Float>(
         terminate!();
     }
     let tx = UNIT_POS_X;
-    let mut shared = SharedMemory::<F>::new(WORKGROUP_128 as usize);
+    let mut shared = Shared::<[F]>::new_slice(WORKGROUP_128 as usize);
 
     let base = feat * n_rows;
 
@@ -323,25 +324,24 @@ pub fn apply_centre_scale<F: Float>(
 ///
 /// * `CubeclUtils` if either grid is over the device limit, or an allocation
 ///   busts the per-binding size limit.
-pub fn scale_matrix_col_gpu<F, R>(
-    data: &GpuTensor<R, F>,
+pub fn scale_matrix_col_gpu<F>(
+    data: &GpuTensor<F>,
     n_rows: usize,
     n_cols: usize,
     scale_sd: bool,
-    client: &ComputeClient<R>,
-) -> Result<GpuTensor<R, F>, BixverseErrors>
+    client: &Client,
+) -> Result<GpuTensor<F>, BixverseErrors>
 where
-    R: Runtime,
     F: Float + cubecl::CubeElement,
 {
     let limits = GpuLimits::from_client(client);
-    let means = GpuTensor::<R, F>::empty(vec![n_cols], client)?;
-    let inv_scales = GpuTensor::<R, F>::empty(vec![n_cols], client)?;
-    let scaled = GpuTensor::<R, F>::empty(vec![n_cols, n_rows], client)?;
+    let means = GpuTensor::<F>::empty(vec![n_cols], client)?;
+    let inv_scales = GpuTensor::<F>::empty(vec![n_cols], client)?;
+    let scaled = GpuTensor::<F>::empty(vec![n_cols, n_rows], client)?;
 
     let stats_count = checked_cube_count("column_stats", n_cols as u32, 1, 1, &limits)?;
     unsafe {
-        column_stats::launch_unchecked::<F, R>(
+        column_stats::launch_unchecked::<F>(
             client,
             stats_count,
             CubeDim::new_1d(WORKGROUP_128),
@@ -359,7 +359,7 @@ where
     let (gx, gy) = grid_2d(n_blocks, &limits)?;
     let scale_count = checked_cube_count("apply_centre_scale", gx, gy, 1, &limits)?;
     unsafe {
-        apply_centre_scale::launch_unchecked::<F, R>(
+        apply_centre_scale::launch_unchecked::<F>(
             client,
             scale_count,
             CubeDim::new_1d(WORKGROUP_256),
@@ -442,14 +442,13 @@ pub(crate) fn contiguous_col_major<F: BixverseFloat>(mat: MatRef<'_, F>) -> Opti
 /// * `InvalidArgument` if the `[d, d]` output is larger than the device accepts
 ///   in one binding.
 /// * `CubeclUtils` if any grid is over the device limit.
-pub fn column_pairwise_cor_gpu<F, R>(
+pub fn column_pairwise_cor_gpu<F>(
     mat: MatRef<F>,
     cor_type: GpuCorCov,
-    device: R::Device,
+    device: Device,
     verbose: bool,
 ) -> Result<Mat<F>, BixverseErrors>
 where
-    R: Runtime,
     F: Float + cubecl::CubeElement + BixverseFloat,
 {
     let start = Instant::now();
@@ -474,7 +473,7 @@ where
             &owned
         }
     };
-    let client = R::client(&device);
+    let client = device.client();
 
     // The output is quadratic in `n_cols` and is a single binding. Past the
     // device limit `launch_unchecked` does no work, returns zeros and reports
@@ -491,16 +490,16 @@ where
         )));
     }
 
-    let data_gpu = GpuTensor::<R, F>::from_slice(data_flat, vec![n_cols, n_rows], &client)?;
+    let data_gpu = GpuTensor::<F>::from_slice(data_flat, vec![n_cols, n_rows], &client)?;
 
     if verbose {
         println!("Upload to GPU done: {:.2?}", start.elapsed());
     }
 
     let scaled = scale_matrix_col_gpu(&data_gpu, n_rows, n_cols, scale_sd, &client)?;
-    let result = GpuTensor::<R, F>::empty(vec![n_cols, n_cols], &client)?;
+    let result = GpuTensor::<F>::empty(vec![n_cols, n_cols], &client)?;
 
-    gram_aat::<R, F>(&client, &scaled, &result, n_rows, n_cols)?;
+    gram_aat::<F>(&client, &scaled, &result, n_rows, n_cols)?;
 
     let result_flat = result.read(&client)?;
 
@@ -537,9 +536,9 @@ mod tests {
     /// The default device, or `None` when the machine has no usable GPU, in
     /// which case every test here returns early rather than failing.
     fn try_device() -> Option<WgpuDevice> {
-        let device = WgpuDevice::DefaultDevice;
+        let device = WgpuDevice::default();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            WgpuRuntime::client(&device);
+            <WgpuRuntime>::client(&device);
         }))
         .ok()
         .map(|_| device)
@@ -670,10 +669,10 @@ mod tests {
             .collect();
         let mat = Mat::from_fn(n, d, |i, j| data[i * d + j]);
 
-        let got = column_pairwise_cor_gpu::<f32, WgpuRuntime>(
+        let got = column_pairwise_cor_gpu::<f32>(
             mat.as_ref(),
             GpuCorCov::Pearson,
-            device,
+            device.clone().into(),
             false,
         )
         .unwrap();
@@ -691,10 +690,10 @@ mod tests {
             .collect();
         let mat = Mat::from_fn(n, d, |i, j| data[i * d + j]);
 
-        let got = column_pairwise_cor_gpu::<f32, WgpuRuntime>(
+        let got = column_pairwise_cor_gpu::<f32>(
             mat.as_ref(),
             GpuCorCov::Covariance,
-            device,
+            device.clone().into(),
             false,
         )
         .unwrap();
@@ -712,10 +711,10 @@ mod tests {
             .collect();
         let mat = Mat::from_fn(n, d, |i, j| data[i * d + j]);
 
-        let got = column_pairwise_cor_gpu::<f32, WgpuRuntime>(
+        let got = column_pairwise_cor_gpu::<f32>(
             mat.as_ref(),
             GpuCorCov::Spearman,
-            device,
+            device.clone().into(),
             false,
         )
         .unwrap();
@@ -733,10 +732,10 @@ mod tests {
             .collect();
         let mat = Mat::from_fn(n, d, |i, j| data[i * d + j]);
 
-        let got = column_pairwise_cor_gpu::<f32, WgpuRuntime>(
+        let got = column_pairwise_cor_gpu::<f32>(
             mat.as_ref(),
             GpuCorCov::Pearson,
-            device,
+            device.clone().into(),
             false,
         )
         .unwrap();
@@ -766,10 +765,10 @@ mod tests {
             GpuCorCov::Spearman,
         ] {
             let mat = Mat::from_fn(n, d, |i, j| data[i * d + j]);
-            let got = column_pairwise_cor_gpu::<f32, WgpuRuntime>(
+            let got = column_pairwise_cor_gpu::<f32>(
                 mat.as_ref(),
                 cor_type,
-                device.clone(),
+                device.clone().into(),
                 false,
             )
             .unwrap();

@@ -311,8 +311,10 @@ pub fn accumulate_sparse_row<F: Float>(
     // Walked rather than bounded by a second binary search: a thread owns
     // `nnz(row) * slots / k` entries, which is well under one on these shapes,
     // so the walk is cheaper than another `log2(nnz)` probes.
-    let mut walking = p < row_end;
-    while walking {
+    // Negated flag: on cubecl 0.11 a `while` whose whole condition is a bare
+    // mutable bool never re-reads it, so the loop runs forever on the GPU.
+    let mut done = p >= row_end;
+    while !done {
         let col = indices[p as usize];
         if col < stop {
             let v = values[p as usize] * scale;
@@ -323,9 +325,9 @@ pub fn accumulate_sparse_row<F: Float>(
                 }
             }
             p += 1u32;
-            walking = p < row_end;
+            done = p >= row_end;
         } else {
-            walking = false;
+            done = true;
         }
     }
 }
@@ -529,7 +531,7 @@ pub fn fw_argmin_b<F: Float>(
     }
 
     // Workgroup tree reduction of the gap partial.
-    let mut shared = SharedMemory::<F>::new(wg_size as usize);
+    let mut shared = Shared::<[F]>::new_slice(wg_size as usize);
     shared[tx as usize] = gap;
     sync_cube();
 
@@ -724,18 +726,18 @@ pub fn fw_columns_a_gpu<F: Float>(
     // plane on the plane arm. Shared memory is a residency knob, not just a
     // ceiling: sizing every array at `wg_size` starves the wide tiers of
     // resident workgroups.
-    let mut s_atom_idx = SharedMemory::<u32>::new(cap_pad);
-    let mut s_atom_val = SharedMemory::<F>::new(cap_pad);
-    let mut s_dropped = SharedMemory::<F>::new(cap_pad);
-    let mut s_val = SharedMemory::<F>::new(comptime!(reduce_scratch_len(wg_size, use_plane)));
-    let mut s_idx = SharedMemory::<u32>::new(comptime!(reduce_scratch_len(wg_size, use_plane)));
-    let mut s_count = SharedMemory::<u32>::new(1usize);
-    let mut s_found = SharedMemory::<u32>::new(1usize);
-    let mut s_any_drop = SharedMemory::<u32>::new(1usize);
+    let mut s_atom_idx = Shared::<[u32]>::new_slice(cap_pad);
+    let mut s_atom_val = Shared::<[F]>::new_slice(cap_pad);
+    let mut s_dropped = Shared::<[F]>::new_slice(cap_pad);
+    let mut s_val = Shared::<[F]>::new_slice(comptime!(reduce_scratch_len(wg_size, use_plane)));
+    let mut s_idx = Shared::<[u32]>::new_slice(comptime!(reduce_scratch_len(wg_size, use_plane)));
+    let mut s_count = Shared::<[u32]>::new_slice(1usize);
+    let mut s_found = Shared::<[u32]>::new_slice(1usize);
+    let mut s_any_drop = Shared::<[u32]>::new_slice(1usize);
     // Broadcast slots for the second reduction level. Kept separate from
     // `s_val`/`s_idx` so the level-2 write cannot race the level-2 reads.
-    let mut s_amin = SharedMemory::<u32>::new(1usize);
-    let mut s_total = SharedMemory::<F>::new(1usize);
+    let mut s_amin = Shared::<[u32]>::new_slice(1usize);
+    let mut s_total = Shared::<[F]>::new_slice(1usize);
 
     // Blocked ownership: thread `tx` owns the contiguous column range
     // `[base, base + slots)`. Contiguity is what makes a sorted sparse row
@@ -1103,23 +1105,22 @@ pub fn fw_columns_a_gpu<F: Float>(
 ///
 /// [GpuFwArgminB]: crate::gpu::sc_gpu::seacells_gpu::GpuFwArgminB
 #[allow(clippy::too_many_arguments)]
-pub fn launch_fw_argmin_b<R, F>(
-    k2b: &GpuCompressedSparseData<R, F>,
-    t1: &GpuCompressedSparseData<R, F>,
-    t1_seg: &GpuTensor<R, u32>,
-    t2: &GpuCompressedSparseData<R, F>,
-    b_mat: &GpuCompressedSparseData<R, F>,
-    part_val: &GpuTensor<R, F>,
-    part_idx: &GpuTensor<R, u32>,
-    gap_partial: &GpuTensor<R, F>,
-    out_val: &GpuTensor<R, F>,
-    out_idx: &GpuTensor<R, u32>,
+pub fn launch_fw_argmin_b<F>(
+    k2b: &GpuCompressedSparseData<F>,
+    t1: &GpuCompressedSparseData<F>,
+    t1_seg: &GpuTensor<u32>,
+    t2: &GpuCompressedSparseData<F>,
+    b_mat: &GpuCompressedSparseData<F>,
+    part_val: &GpuTensor<F>,
+    part_idx: &GpuTensor<u32>,
+    gap_partial: &GpuTensor<F>,
+    out_val: &GpuTensor<F>,
+    out_idx: &GpuTensor<u32>,
     n: usize,
     k: usize,
-    client: &ComputeClient<R>,
+    client: &Client,
 ) -> Result<(), BixverseErrors>
 where
-    R: Runtime,
     F: Float + cubecl::CubeElement,
 {
     for mat in [k2b, t1, t2, b_mat] {
@@ -1177,7 +1178,7 @@ where
     macro_rules! dispatch {
         ($wg:expr) => {{
             unsafe {
-                fw_argmin_b::launch_unchecked::<F, R>(
+                fw_argmin_b::launch_unchecked::<F>(
                     client,
                     count,
                     CubeDim::new_1d($wg),
@@ -1222,7 +1223,7 @@ where
     let reduce_count = checked_cube_count("reduce_argmin_blocks", rx, ry, 1, &limits)?;
 
     unsafe {
-        reduce_argmin_blocks::launch_unchecked::<F, R>(
+        reduce_argmin_blocks::launch_unchecked::<F>(
             client,
             reduce_count,
             CubeDim::new_1d(B_REDUCE_WG),
@@ -1311,15 +1312,15 @@ pub fn plane_reduce_viable(wg_size: u32, limits: &GpuLimits) -> bool {
 /// would bust a device limit, or `InvalidArgument` if no tier covers `k` or
 /// `cap` exceeds the chosen workgroup width.
 #[allow(clippy::too_many_arguments)]
-pub fn launch_fw_columns_a<R, F>(
-    t1: &GpuCompressedSparseData<R, F>,
-    t1_seg: &GpuTensor<R, u32>,
-    a_prev_t: &GpuCompressedSparseData<R, F>,
-    k2b: &GpuCompressedSparseData<R, F>,
-    atom_idx: &GpuTensor<R, u32>,
-    atom_val: &GpuTensor<R, F>,
-    atom_cnt: &GpuTensor<R, u32>,
-    threshold: &GpuTensor<R, F>,
+pub fn launch_fw_columns_a<F>(
+    t1: &GpuCompressedSparseData<F>,
+    t1_seg: &GpuTensor<u32>,
+    a_prev_t: &GpuCompressedSparseData<F>,
+    k2b: &GpuCompressedSparseData<F>,
+    atom_idx: &GpuTensor<u32>,
+    atom_val: &GpuTensor<F>,
+    atom_cnt: &GpuTensor<u32>,
+    threshold: &GpuTensor<F>,
     n: usize,
     k: usize,
     n_iters: usize,
@@ -1327,10 +1328,9 @@ pub fn launch_fw_columns_a<R, F>(
     pruning: Option<f32>,
     use_plane: Option<bool>,
     wg_override: Option<u32>,
-    client: &ComputeClient<R>,
+    client: &Client,
 ) -> Result<(), BixverseErrors>
 where
-    R: Runtime,
     F: Float + cubecl::CubeElement,
 {
     for mat in [t1, a_prev_t, k2b] {
@@ -1398,7 +1398,7 @@ where
     macro_rules! dispatch {
         ($wg:expr) => {{
             unsafe {
-                fw_columns_a_gpu::launch_unchecked::<F, R>(
+                fw_columns_a_gpu::launch_unchecked::<F>(
                     client,
                     count,
                     CubeDim::new_1d($wg),
@@ -1557,9 +1557,9 @@ mod tests {
     /// Skip rather than fail where no GPU is available, matching the other
     /// kernel test modules.
     fn try_device() -> Option<WgpuDevice> {
-        let device = WgpuDevice::DefaultDevice;
+        let device = WgpuDevice::default();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            WgpuRuntime::client(&device);
+            <WgpuRuntime>::client(&device);
         }))
         .ok()
         .map(|_| device)
@@ -1664,11 +1664,11 @@ mod tests {
         k: usize,
         device: &WgpuDevice,
     ) -> (Vec<f32>, Vec<u32>, f32) {
-        let client = WgpuRuntime::client(device);
+        let client = <WgpuRuntime>::client(device);
 
         let upload = |dense: &[f32]| {
             let (values, indices, indptr) = dense_to_csr(dense, n, k);
-            GpuCompressedSparseData::<WgpuRuntime, f32>::from_parts(
+            GpuCompressedSparseData::<f32>::from_parts(
                 &values,
                 &indices,
                 &indptr,
@@ -1690,7 +1690,7 @@ mod tests {
             None,
             (k, k),
         );
-        let t1_gpu = GpuCompressedSparseData::<WgpuRuntime, f32>::from_parts(
+        let t1_gpu = GpuCompressedSparseData::<f32>::from_parts(
             &t1_vals,
             &t1_idx,
             &t1_ptr,
@@ -1702,15 +1702,14 @@ mod tests {
         let b_wg = b_argmin_workgroup(k).expect("no tier for k");
         let seg_host = a_columns_segments(&t1_csr, b_wg, k.div_ceil(b_wg as usize));
         let t1_seg =
-            GpuTensor::<WgpuRuntime, u32>::from_slice(&seg_host, vec![seg_host.len()], &client)
-                .unwrap();
+            GpuTensor::<u32>::from_slice(&seg_host, vec![seg_host.len()], &client).unwrap();
 
         let blocks = B_ARGMIN_BLOCKS.min(n.max(1) as u32) as usize;
-        let part_val = GpuTensor::<WgpuRuntime, f32>::empty(vec![blocks * k], &client).unwrap();
-        let part_idx = GpuTensor::<WgpuRuntime, u32>::empty(vec![blocks * k], &client).unwrap();
-        let gap_partial = GpuTensor::<WgpuRuntime, f32>::empty(vec![blocks], &client).unwrap();
-        let out_val = GpuTensor::<WgpuRuntime, f32>::empty(vec![k], &client).unwrap();
-        let out_idx = GpuTensor::<WgpuRuntime, u32>::empty(vec![k], &client).unwrap();
+        let part_val = GpuTensor::<f32>::empty(vec![blocks * k], &client).unwrap();
+        let part_idx = GpuTensor::<u32>::empty(vec![blocks * k], &client).unwrap();
+        let gap_partial = GpuTensor::<f32>::empty(vec![blocks], &client).unwrap();
+        let out_val = GpuTensor::<f32>::empty(vec![k], &client).unwrap();
+        let out_idx = GpuTensor::<u32>::empty(vec![k], &client).unwrap();
 
         launch_fw_argmin_b(
             &k2b_gpu,

@@ -114,7 +114,7 @@ pub fn hals_sweep_gpu<F: Float>(
     #[comptime] k_cap: u32,
     #[comptime] wg_size: u32,
 ) {
-    let mut stage = SharedMemory::<F>::new((wg_size * k_cap) as usize);
+    let mut stage = Shared::<[F]>::new_slice((wg_size * k_cap) as usize);
 
     let tx = UNIT_POS_X;
     let row = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * wg_size + tx;
@@ -339,17 +339,16 @@ pub fn fill_constant_gpu<F: Float>(
 /// * `GpuNmfRankTooLarge` if `k` is above [`NMF_MAX_RANK`].
 /// * `CubeclUtils` if the staged block does not fit the device's shared memory
 ///   or the grid busts the cube-count limit.
-pub fn launch_hals_sweep<R, F>(
-    x: &GpuTensor<R, F>,
-    g: &GpuTensor<R, F>,
-    p: &GpuTensor<R, F>,
-    eps: &GpuTensor<R, F>,
+pub fn launch_hals_sweep<F>(
+    x: &GpuTensor<F>,
+    g: &GpuTensor<F>,
+    p: &GpuTensor<F>,
+    eps: &GpuTensor<F>,
     n_rows: usize,
     k: usize,
-    client: &ComputeClient<R>,
+    client: &Client,
 ) -> Result<(), BixverseErrors>
 where
-    R: Runtime,
     F: Float + cubecl::CubeElement,
 {
     let (k_cap, wg) = sweep_tier(k).ok_or(BixverseErrors::GpuNmfRankTooLarge {
@@ -371,7 +370,7 @@ where
     macro_rules! dispatch {
         ($cap:expr, $wg:expr) => {
             unsafe {
-                hals_sweep_gpu::launch_unchecked::<F, R>(
+                hals_sweep_gpu::launch_unchecked::<F>(
                     client,
                     count,
                     CubeDim::new_1d($wg),
@@ -411,15 +410,14 @@ where
 /// ### Returns
 ///
 /// `Ok(())`, or `CubeclUtils` if the grid busts the cube-count limit.
-pub fn launch_hals_norm_factors<R, F>(
-    sq: &GpuTensor<R, F>,
-    norm: &GpuTensor<R, F>,
-    inv_norm: &GpuTensor<R, F>,
+pub fn launch_hals_norm_factors<F>(
+    sq: &GpuTensor<F>,
+    norm: &GpuTensor<F>,
+    inv_norm: &GpuTensor<F>,
     k: usize,
-    client: &ComputeClient<R>,
+    client: &Client,
 ) -> Result<(), BixverseErrors>
 where
-    R: Runtime,
     F: Float + cubecl::CubeElement,
 {
     let limits = GpuLimits::from_client(client);
@@ -427,7 +425,7 @@ where
     let count = checked_cube_count("hals_norm_factors_gpu", blocks, 1, 1, &limits)?;
 
     unsafe {
-        hals_norm_factors_gpu::launch_unchecked::<F, R>(
+        hals_norm_factors_gpu::launch_unchecked::<F>(
             client,
             count,
             CubeDim::new_1d(NMF_ELEMENTWISE_WG),
@@ -454,15 +452,14 @@ where
 /// ### Returns
 ///
 /// `Ok(())`, or `CubeclUtils` if the grid busts the cube-count limit.
-pub fn launch_scale_columns<R, F>(
-    x: &GpuTensor<R, F>,
-    factors: &GpuTensor<R, F>,
+pub fn launch_scale_columns<F>(
+    x: &GpuTensor<F>,
+    factors: &GpuTensor<F>,
     n_rows: usize,
     k: usize,
-    client: &ComputeClient<R>,
+    client: &Client,
 ) -> Result<(), BixverseErrors>
 where
-    R: Runtime,
     F: Float + cubecl::CubeElement,
 {
     let limits = GpuLimits::from_client(client);
@@ -471,7 +468,7 @@ where
     let count = checked_cube_count("scale_columns_gpu", gx, gy, 1, &limits)?;
 
     unsafe {
-        scale_columns_gpu::launch_unchecked::<F, R>(
+        scale_columns_gpu::launch_unchecked::<F>(
             client,
             count,
             CubeDim::new_1d(NMF_ELEMENTWISE_WG),
@@ -500,16 +497,15 @@ where
 /// ### Returns
 ///
 /// `Ok(())`, or `CubeclUtils` if the grid busts the cube-count limit.
-pub fn launch_row_dot_partials<R, F>(
-    x: &GpuTensor<R, F>,
-    y: &GpuTensor<R, F>,
-    out: &GpuTensor<R, F>,
+pub fn launch_row_dot_partials<F>(
+    x: &GpuTensor<F>,
+    y: &GpuTensor<F>,
+    out: &GpuTensor<F>,
     n_rows: usize,
     k: usize,
-    client: &ComputeClient<R>,
+    client: &Client,
 ) -> Result<(), BixverseErrors>
 where
-    R: Runtime,
     F: Float + cubecl::CubeElement,
 {
     let limits = GpuLimits::from_client(client);
@@ -517,7 +513,7 @@ where
     let count = checked_cube_count("row_dot_partials_gpu", gx, gy, 1, &limits)?;
 
     unsafe {
-        row_dot_partials_gpu::launch_unchecked::<F, R>(
+        row_dot_partials_gpu::launch_unchecked::<F>(
             client,
             count,
             CubeDim::new_1d(NMF_ELEMENTWISE_WG),
@@ -545,14 +541,13 @@ where
 /// ### Returns
 ///
 /// `Ok(())`, or `CubeclUtils` if the grid busts the cube-count limit.
-pub fn launch_fill_constant<R, F>(
-    x: &GpuTensor<R, F>,
-    value: &GpuTensor<R, F>,
+pub fn launch_fill_constant<F>(
+    x: &GpuTensor<F>,
+    value: &GpuTensor<F>,
     total: usize,
-    client: &ComputeClient<R>,
+    client: &Client,
 ) -> Result<(), BixverseErrors>
 where
-    R: Runtime,
     F: Float + cubecl::CubeElement,
 {
     let limits = GpuLimits::from_client(client);
@@ -560,7 +555,7 @@ where
     let count = checked_cube_count("fill_constant_gpu", gx, gy, 1, &limits)?;
 
     unsafe {
-        fill_constant_gpu::launch_unchecked::<F, R>(
+        fill_constant_gpu::launch_unchecked::<F>(
             client,
             count,
             CubeDim::new_1d(NMF_ELEMENTWISE_WG),
@@ -592,9 +587,9 @@ mod tests {
     /// The default device, or `None` when the machine has no usable GPU, in
     /// which case every test here returns early rather than failing.
     fn try_device() -> Option<WgpuDevice> {
-        let device = WgpuDevice::DefaultDevice;
+        let device = WgpuDevice::default();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            WgpuRuntime::client(&device);
+            <WgpuRuntime>::client(&device);
         }))
         .ok()
         .map(|_| device)
@@ -644,15 +639,14 @@ mod tests {
     /// Run one GPU sweep over a `[rows, k]` factor and read the result back.
     fn run_sweep(x: &[f32], g: &[f32], p: &[f32], rows: usize, k: usize, eps: f32) -> Vec<f32> {
         let device = try_device().expect("no device");
-        let client = WgpuRuntime::client(&device);
+        let client = <WgpuRuntime>::client(&device);
 
-        let x_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(x, vec![rows, k], &client).unwrap();
-        let g_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(g, vec![k, k], &client).unwrap();
-        let p_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(p, vec![rows, k], &client).unwrap();
-        let eps_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&[eps], vec![1], &client).unwrap();
+        let x_gpu = GpuTensor::<f32>::from_slice(x, vec![rows, k], &client).unwrap();
+        let g_gpu = GpuTensor::<f32>::from_slice(g, vec![k, k], &client).unwrap();
+        let p_gpu = GpuTensor::<f32>::from_slice(p, vec![rows, k], &client).unwrap();
+        let eps_gpu = GpuTensor::<f32>::from_slice(&[eps], vec![1], &client).unwrap();
 
-        launch_hals_sweep::<WgpuRuntime, f32>(&x_gpu, &g_gpu, &p_gpu, &eps_gpu, rows, k, &client)
-            .unwrap();
+        launch_hals_sweep::<f32>(&x_gpu, &g_gpu, &p_gpu, &eps_gpu, rows, k, &client).unwrap();
 
         x_gpu.read(&client).unwrap()
     }
@@ -823,13 +817,13 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = WgpuRuntime::client(&device);
+        let client = <WgpuRuntime>::client(&device);
         let k = NMF_MAX_RANK + 1;
-        let x = GpuTensor::<WgpuRuntime, f32>::empty(vec![4, k], &client).unwrap();
-        let g = GpuTensor::<WgpuRuntime, f32>::empty(vec![k, k], &client).unwrap();
-        let eps = GpuTensor::<WgpuRuntime, f32>::from_slice(&[1e-10], vec![1], &client).unwrap();
+        let x = GpuTensor::<f32>::empty(vec![4, k], &client).unwrap();
+        let g = GpuTensor::<f32>::empty(vec![k, k], &client).unwrap();
+        let eps = GpuTensor::<f32>::from_slice(&[1e-10], vec![1], &client).unwrap();
 
-        let err = launch_hals_sweep::<WgpuRuntime, f32>(&x, &g, &x, &eps, 4, k, &client)
+        let err = launch_hals_sweep::<f32>(&x, &g, &x, &eps, 4, k, &client)
             .expect_err("rank above the largest tier must error");
         assert!(matches!(
             err,
@@ -846,32 +840,24 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = WgpuRuntime::client(&device);
+        let client = <WgpuRuntime>::client(&device);
 
         let (m, n, k) = (37usize, 23usize, 6usize);
         let mut w = build_mat(m, k, 11);
         let mut h = build_mat(k, n, 12);
 
-        let w_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(
-            &to_row_major(w.as_ref()),
-            vec![m, k],
-            &client,
-        )
-        .unwrap();
-        let h_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(
-            &to_row_major(h.transpose()),
-            vec![n, k],
-            &client,
-        )
-        .unwrap();
-        let sq = GpuTensor::<WgpuRuntime, f32>::empty(vec![k], &client).unwrap();
-        let norm = GpuTensor::<WgpuRuntime, f32>::empty(vec![k], &client).unwrap();
-        let inv = GpuTensor::<WgpuRuntime, f32>::empty(vec![k], &client).unwrap();
+        let w_gpu =
+            GpuTensor::<f32>::from_slice(&to_row_major(w.as_ref()), vec![m, k], &client).unwrap();
+        let h_gpu = GpuTensor::<f32>::from_slice(&to_row_major(h.transpose()), vec![n, k], &client)
+            .unwrap();
+        let sq = GpuTensor::<f32>::empty(vec![k], &client).unwrap();
+        let norm = GpuTensor::<f32>::empty(vec![k], &client).unwrap();
+        let inv = GpuTensor::<f32>::empty(vec![k], &client).unwrap();
 
-        launch_dense_column_sq_norm::<WgpuRuntime, f32>(&w_gpu, &sq, m, k, &client).unwrap();
-        launch_hals_norm_factors::<WgpuRuntime, f32>(&sq, &norm, &inv, k, &client).unwrap();
-        launch_scale_columns::<WgpuRuntime, f32>(&w_gpu, &inv, m, k, &client).unwrap();
-        launch_scale_columns::<WgpuRuntime, f32>(&h_gpu, &norm, n, k, &client).unwrap();
+        launch_dense_column_sq_norm::<f32>(&w_gpu, &sq, m, k, &client).unwrap();
+        launch_hals_norm_factors::<f32>(&sq, &norm, &inv, k, &client).unwrap();
+        launch_scale_columns::<f32>(&w_gpu, &inv, m, k, &client).unwrap();
+        launch_scale_columns::<f32>(&h_gpu, &norm, n, k, &client).unwrap();
 
         let w_got = w_gpu.read(&client).unwrap();
         let h_got = h_gpu.read(&client).unwrap();
@@ -897,15 +883,15 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = WgpuRuntime::client(&device);
+        let client = <WgpuRuntime>::client(&device);
 
         let k = 4usize;
         let sq_host = [4.0f32, 0.0, 9.0, 0.0];
-        let sq = GpuTensor::<WgpuRuntime, f32>::from_slice(&sq_host, vec![k], &client).unwrap();
-        let norm = GpuTensor::<WgpuRuntime, f32>::empty(vec![k], &client).unwrap();
-        let inv = GpuTensor::<WgpuRuntime, f32>::empty(vec![k], &client).unwrap();
+        let sq = GpuTensor::<f32>::from_slice(&sq_host, vec![k], &client).unwrap();
+        let norm = GpuTensor::<f32>::empty(vec![k], &client).unwrap();
+        let inv = GpuTensor::<f32>::empty(vec![k], &client).unwrap();
 
-        launch_hals_norm_factors::<WgpuRuntime, f32>(&sq, &norm, &inv, k, &client).unwrap();
+        launch_hals_norm_factors::<f32>(&sq, &norm, &inv, k, &client).unwrap();
 
         assert_close(&norm.read(&client).unwrap(), &[2.0, 1.0, 3.0, 1.0], 1e-6);
         assert_close(
@@ -924,20 +910,17 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = WgpuRuntime::client(&device);
+        let client = <WgpuRuntime>::client(&device);
 
         let (rows, k) = (301usize, 9usize);
         let x_flat = to_row_major(build_mat(rows, k, 13).as_ref());
         let y_flat = to_row_major(build_mat(rows, k, 14).as_ref());
 
-        let x_gpu =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&x_flat, vec![rows, k], &client).unwrap();
-        let y_gpu =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&y_flat, vec![rows, k], &client).unwrap();
-        let out = GpuTensor::<WgpuRuntime, f32>::empty(vec![rows], &client).unwrap();
+        let x_gpu = GpuTensor::<f32>::from_slice(&x_flat, vec![rows, k], &client).unwrap();
+        let y_gpu = GpuTensor::<f32>::from_slice(&y_flat, vec![rows, k], &client).unwrap();
+        let out = GpuTensor::<f32>::empty(vec![rows], &client).unwrap();
 
-        launch_row_dot_partials::<WgpuRuntime, f32>(&x_gpu, &y_gpu, &out, rows, k, &client)
-            .unwrap();
+        launch_row_dot_partials::<f32>(&x_gpu, &y_gpu, &out, rows, k, &client).unwrap();
 
         let got = out.read(&client).unwrap();
         assert!(
@@ -962,12 +945,12 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = WgpuRuntime::client(&device);
+        let client = <WgpuRuntime>::client(&device);
 
         let total = 1000usize;
-        let x = GpuTensor::<WgpuRuntime, f32>::empty(vec![total], &client).unwrap();
-        let v = GpuTensor::<WgpuRuntime, f32>::from_slice(&[0.25f32], vec![1], &client).unwrap();
-        launch_fill_constant::<WgpuRuntime, f32>(&x, &v, total, &client).unwrap();
+        let x = GpuTensor::<f32>::empty(vec![total], &client).unwrap();
+        let v = GpuTensor::<f32>::from_slice(&[0.25f32], vec![1], &client).unwrap();
+        launch_fill_constant::<f32>(&x, &v, total, &client).unwrap();
         assert!(
             x.read(&client).unwrap().iter().all(|&v| v == 0.25),
             "buffer was not filled"
@@ -1010,7 +993,12 @@ mod tests {
     // dispatch limit in production while passing every benchmarked shape.
     #[test]
     fn test_sweep_grid_within_dispatch_limit() {
-        let (max_x, max_y, _) = WgpuRuntime::max_cube_count();
+        // WebGPU's portable per-dimension dispatch limit.
+        let (max_x, max_y, _) = (
+            u32::from(u16::MAX),
+            u32::from(u16::MAX),
+            u32::from(u16::MAX),
+        );
         let cap = max_x.min(max_y);
 
         // The threshold is real: a flat grid busts the limit at the widest
@@ -1032,7 +1020,12 @@ mod tests {
     // The elementwise and per-row passes have the same exposure.
     #[test]
     fn test_elementwise_grid_within_dispatch_limit() {
-        let (max_x, max_y, _) = WgpuRuntime::max_cube_count();
+        // WebGPU's portable per-dimension dispatch limit.
+        let (max_x, max_y, _) = (
+            u32::from(u16::MAX),
+            u32::from(u16::MAX),
+            u32::from(u16::MAX),
+        );
         let cap = max_x.min(max_y);
         for total in [1_000_000u32, 100_000_000, 1_000_000_000] {
             let blocks = total.div_ceil(NMF_ELEMENTWISE_WG);

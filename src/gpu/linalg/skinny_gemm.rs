@@ -246,8 +246,8 @@ pub fn skinny_gemm_partial<F: Float>(
     let i0 = row_block * SG_BM;
     let j0 = col_block * SG_BN;
 
-    let mut sa = SharedMemory::<F>::new((SG_BK * SG_BM) as usize);
-    let mut sb = SharedMemory::<F>::new((SG_BK * SG_BN) as usize);
+    let mut sa = Shared::<[F]>::new_slice((SG_BK * SG_BM) as usize);
+    let mut sb = Shared::<[F]>::new_slice((SG_BK * SG_BN) as usize);
 
     if i0 >= rows {
         terminate!();
@@ -391,19 +391,18 @@ pub fn skinny_gemm_partial<F: Float>(
 /// * `CubeclUtils` if either grid is over the device's cube-count limit or the
 ///   staged block does not fit its shared memory.
 #[allow(clippy::too_many_arguments)]
-pub fn skinny_gemm<R, F>(
-    client: &ComputeClient<R>,
-    a: &GpuTensor<R, F>,
-    b: &GpuTensor<R, F>,
-    c: &GpuTensor<R, F>,
-    partials: &GpuTensor<R, F>,
+pub fn skinny_gemm<F>(
+    client: &Client,
+    a: &GpuTensor<F>,
+    b: &GpuTensor<F>,
+    c: &GpuTensor<F>,
+    partials: &GpuTensor<F>,
     rows: usize,
     k: usize,
     len: usize,
     a_transposed: bool,
 ) -> Result<(), BixverseErrors>
 where
-    R: Runtime,
     F: Float + cubecl::CubeElement,
 {
     let limits = GpuLimits::from_client(client);
@@ -443,7 +442,7 @@ where
     macro_rules! dispatch {
         ($transposed:expr) => {
             unsafe {
-                skinny_gemm_partial::launch_unchecked::<F, R>(
+                skinny_gemm_partial::launch_unchecked::<F>(
                     client,
                     count,
                     CubeDim::new_1d(SG_THREADS),
@@ -472,7 +471,7 @@ where
         let (rx, ry) = grid_2d(total.div_ceil(SG_REDUCE_WG), &limits)?;
         let reduce_count = checked_cube_count("gram_reduce", rx, ry, 1, &limits)?;
         unsafe {
-            gram_reduce::launch_unchecked::<F, R>(
+            gram_reduce::launch_unchecked::<F>(
                 client,
                 reduce_count,
                 CubeDim::new_1d(SG_REDUCE_WG),
@@ -499,9 +498,9 @@ mod tests {
     /// The default device, or `None` when the machine has no usable GPU, in
     /// which case every test here returns early rather than failing.
     fn try_device() -> Option<WgpuDevice> {
-        let device = WgpuDevice::DefaultDevice;
+        let device = WgpuDevice::default();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            WgpuRuntime::client(&device);
+            <WgpuRuntime>::client(&device);
         }))
         .ok()
         .map(|_| device)
@@ -561,7 +560,7 @@ mod tests {
     /// Run the dispatcher and read the result back.
     fn run(rows: usize, k: usize, len: usize, a_transposed: bool) -> (Vec<f32>, Vec<f32>) {
         let device = try_device().expect("no device");
-        let client = WgpuRuntime::client(&device);
+        let client = <WgpuRuntime>::client(&device);
 
         let a_host = build(rows * len, 1);
         let b_host = build(len * k, 2);
@@ -571,15 +570,14 @@ mod tests {
         } else {
             vec![rows, len]
         };
-        let a = GpuTensor::<WgpuRuntime, f32>::from_slice(&a_host, a_shape, &client).unwrap();
-        let b = GpuTensor::<WgpuRuntime, f32>::from_slice(&b_host, vec![len, k], &client).unwrap();
-        let c = GpuTensor::<WgpuRuntime, f32>::empty(vec![rows, k], &client).unwrap();
+        let a = GpuTensor::<f32>::from_slice(&a_host, a_shape, &client).unwrap();
+        let b = GpuTensor::<f32>::from_slice(&b_host, vec![len, k], &client).unwrap();
+        let c = GpuTensor::<f32>::empty(vec![rows, k], &client).unwrap();
 
         let elems = skinny_partial_elems(rows, k, len).max(1);
-        let partials = GpuTensor::<WgpuRuntime, f32>::empty(vec![elems], &client).unwrap();
+        let partials = GpuTensor::<f32>::empty(vec![elems], &client).unwrap();
 
-        skinny_gemm::<WgpuRuntime, f32>(&client, &a, &b, &c, &partials, rows, k, len, a_transposed)
-            .unwrap();
+        skinny_gemm::<f32>(&client, &a, &b, &c, &partials, rows, k, len, a_transposed).unwrap();
 
         let got = c.read(&client).unwrap();
         (got, host_gemm(&a_host, &b_host, rows, k, len, a_transposed))
@@ -651,18 +649,18 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = WgpuRuntime::client(&device);
+        let client = <WgpuRuntime>::client(&device);
 
         let (rows, k, len) = (64usize, 8usize, 4_096usize);
         assert!(skinny_chunks(rows, k, len) > 1);
 
-        let a = GpuTensor::<WgpuRuntime, f32>::empty(vec![rows, len], &client).unwrap();
-        let b = GpuTensor::<WgpuRuntime, f32>::empty(vec![len, k], &client).unwrap();
-        let c = GpuTensor::<WgpuRuntime, f32>::empty(vec![rows, k], &client).unwrap();
-        let partials = GpuTensor::<WgpuRuntime, f32>::empty(vec![1], &client).unwrap();
+        let a = GpuTensor::<f32>::empty(vec![rows, len], &client).unwrap();
+        let b = GpuTensor::<f32>::empty(vec![len, k], &client).unwrap();
+        let c = GpuTensor::<f32>::empty(vec![rows, k], &client).unwrap();
+        let partials = GpuTensor::<f32>::empty(vec![1], &client).unwrap();
 
         assert!(matches!(
-            skinny_gemm::<WgpuRuntime, f32>(&client, &a, &b, &c, &partials, rows, k, len, false),
+            skinny_gemm::<f32>(&client, &a, &b, &c, &partials, rows, k, len, false),
             Err(BixverseErrors::GpuBindingTooLarge { .. })
         ));
     }
@@ -694,7 +692,12 @@ mod tests {
     // surfaces as an unrelated error from a later call.
     #[test]
     fn test_skinny_gemm_grid_within_dispatch_limit() {
-        let (max_x, max_y, max_z) = WgpuRuntime::max_cube_count();
+        // WebGPU's portable per-dimension dispatch limit.
+        let (max_x, max_y, max_z) = (
+            u32::from(u16::MAX),
+            u32::from(u16::MAX),
+            u32::from(u16::MAX),
+        );
         let cap = max_x.min(max_y);
 
         // The threshold is real: a flat row-block grid busts the limit here.

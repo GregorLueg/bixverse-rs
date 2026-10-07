@@ -39,7 +39,8 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 use cubecl::std::tensor::TensorHandle;
 use cubek::matmul::definition::{MatmulElems, MatmulPrecision};
-use cubek::matmul::launch::{Strategy, launch_ref};
+use cubek::matmul::launch::launch_ref;
+use cubek::matmul::strategy::Strategy;
 use cubek::std::InputBinding;
 use faer::linalg::triangular_solve::solve_upper_triangular_in_place;
 use faer::{Mat, Side};
@@ -102,12 +103,12 @@ pub fn gram_chunks(n: usize) -> usize {
 /// ### Returns
 ///
 /// A `TensorHandle` over the provided handle.
-fn wrap_handle<R: Runtime>(
+fn wrap_handle(
     handle: &Handle,
     shape: [usize; 2],
     transposed: bool,
-    dtype: cubecl::ir::StorageType,
-) -> TensorHandle<R> {
+    dtype: cubecl::ir::ElemType,
+) -> TensorHandle {
     let strides = if transposed {
         // shape is post-transpose; storage is row-major [shape[1], shape[0]]
         // with row stride shape[0], so the transposed view has strides
@@ -146,7 +147,7 @@ fn wrap_handle<R: Runtime>(
 ///
 /// * `GpuMatmul` if cubek's `launch_ref` fails.
 #[allow(clippy::too_many_arguments)]
-pub fn dense_gemm<R, MP>(
+pub fn dense_gemm<MP>(
     a_handle: &Handle,
     a_logical_shape: [usize; 2],
     a_transposed: bool,
@@ -156,18 +157,17 @@ pub fn dense_gemm<R, MP>(
     c_handle: &Handle,
     c_shape: [usize; 2],
     strategy: Option<Strategy>,
-    client: &ComputeClient<R>,
+    client: &Client,
 ) -> Result<(), BixverseErrors>
 where
-    R: Runtime,
     MP: MatmulPrecision,
 {
     let mut dtypes = MatmulElems::new_deprecated::<MP>();
     let strategy = strategy.unwrap_or(Strategy::Auto);
 
-    let a_tensor = wrap_handle::<R>(a_handle, a_logical_shape, a_transposed, dtypes.lhs_global);
-    let b_tensor = wrap_handle::<R>(b_handle, b_logical_shape, b_tranposed, dtypes.rhs_global);
-    let c_tensor = wrap_handle::<R>(c_handle, c_shape, false, dtypes.acc_global);
+    let a_tensor = wrap_handle(a_handle, a_logical_shape, a_transposed, dtypes.lhs_global);
+    let b_tensor = wrap_handle(b_handle, b_logical_shape, b_tranposed, dtypes.rhs_global);
+    let c_tensor = wrap_handle(c_handle, c_shape, false, dtypes.acc_global);
 
     launch_ref(
         &strategy,
@@ -277,8 +277,8 @@ pub fn gram_partial<F: Float>(
         r_end = n;
     }
 
-    let mut sa = SharedMemory::<F>::new((GRAM_ROWS_STEP * GRAM_TILE) as usize);
-    let mut sb = SharedMemory::<F>::new((GRAM_ROWS_STEP * GRAM_TILE) as usize);
+    let mut sa = Shared::<[F]>::new_slice((GRAM_ROWS_STEP * GRAM_TILE) as usize);
+    let mut sb = Shared::<[F]>::new_slice((GRAM_ROWS_STEP * GRAM_TILE) as usize);
 
     let lid = tj * GRAM_TILE + ti;
     let n_threads = GRAM_TILE * GRAM_TILE;
@@ -374,16 +374,15 @@ pub fn gram_reduce<F: Float>(partials: &Tensor<F>, g: &mut Tensor<F>, s: u32, n_
 /// ### Errors
 ///
 /// * `CubeclUtils` if either grid is over the device limit.
-pub fn gram<R, T>(
-    client: &ComputeClient<R>,
-    y: &GpuTensor<R, T>,
-    g_scratch: &GpuTensor<R, T>,
-    gram_partials: &GpuTensor<R, T>,
+pub fn gram<T>(
+    client: &Client,
+    y: &GpuTensor<T>,
+    g_scratch: &GpuTensor<T>,
+    gram_partials: &GpuTensor<T>,
     n: usize,
     s: usize,
 ) -> Result<(), BixverseErrors>
 where
-    R: Runtime,
     T: cubecl::prelude::Float + cubecl::CubeElement,
 {
     let n_chunks = gram_chunks(n);
@@ -396,7 +395,7 @@ where
     let reduce_count = checked_cube_count("gram_reduce", total.div_ceil(256), 1, 1, &limits)?;
 
     unsafe {
-        gram_partial::launch_unchecked::<T, R>(
+        gram_partial::launch_unchecked::<T>(
             client,
             partial_count,
             CubeDim::new_2d(GRAM_TILE, GRAM_TILE),
@@ -407,7 +406,7 @@ where
             rows_per_chunk,
         );
 
-        gram_reduce::launch_unchecked::<T, R>(
+        gram_reduce::launch_unchecked::<T>(
             client,
             reduce_count,
             CubeDim::new_1d(256),
@@ -492,7 +491,7 @@ pub fn tall_skinny_mm<F: Float>(
     // Rows of A staged once and reused by every column in the tile. Stride is
     // the runtime `k_dim`, so the tail of the allocation goes unused when
     // `k_dim < TSMM_K_MAX`.
-    let mut sa = SharedMemory::<F>::new((TSMM_ROWS * TSMM_K_MAX) as usize);
+    let mut sa = Shared::<[F]>::new_slice((TSMM_ROWS * TSMM_K_MAX) as usize);
 
     let stage = TSMM_ROWS * k_dim;
     let mut li = tid;
@@ -560,24 +559,23 @@ pub fn tall_skinny_mm<F: Float>(
 ///   busts the per-binding size limit.
 /// * `FaerCholeskyError` if the Gram matrix is not SPD (e.g. `input` is
 ///   rank-deficient).
-fn cholesky_qr_pass<R, T, MP>(
-    client: &ComputeClient<R>,
-    input: &GpuTensor<R, T>,
-    output: &GpuTensor<R, T>,
-    g_scratch: &GpuTensor<R, T>,
-    gram_partials: &GpuTensor<R, T>,
+fn cholesky_qr_pass<T, MP>(
+    client: &Client,
+    input: &GpuTensor<T>,
+    output: &GpuTensor<T>,
+    g_scratch: &GpuTensor<T>,
+    gram_partials: &GpuTensor<T>,
     n: usize,
     s: usize,
 ) -> Result<(), BixverseErrors>
 where
-    R: Runtime,
     T: cubecl::prelude::Float + cubecl::CubeElement + BixverseFloat,
     MP: MatmulPrecision,
 {
     // First step: G = input^T * input, via the split-K Gram kernels rather
     // than cubek. See [`gram_partial`] for why the generic matmul is a bad fit
     // for a `[s, s]` output with an `n`-long reduction.
-    gram::<R, T>(client, input, g_scratch, gram_partials, n, s)?;
+    gram::<T>(client, input, g_scratch, gram_partials, n, s)?;
 
     // Second step: Read G back to the host. (Minor matrix, should be fine ...)
     let g_host = g_scratch.clone().read(client)?;
@@ -586,7 +584,7 @@ where
     let r_inv_host = r_inverse_from_gram(&g_host, s)?;
 
     // Fourth step: Upload R^{-1}. Fresh allocation per pass; trivially small.
-    let r_inv_gpu = GpuTensor::<R, T>::from_slice(&r_inv_host, vec![s, s], client)?;
+    let r_inv_gpu = GpuTensor::<T>::from_slice(&r_inv_host, vec![s, s], client)?;
 
     // Last step output = input * R^{-1}. The dedicated kernel only covers
     // inner dimensions its shared-memory staging can hold; wider problems fall
@@ -605,7 +603,7 @@ where
         )?;
 
         unsafe {
-            tall_skinny_mm::launch_unchecked::<T, R>(
+            tall_skinny_mm::launch_unchecked::<T>(
                 client,
                 count,
                 CubeDim::new_1d(TSMM_ROWS * TSMM_COLS),
@@ -618,7 +616,7 @@ where
             );
         }
     } else {
-        dense_gemm::<R, MP>(
+        dense_gemm::<MP>(
             input.handle(),
             [n, s],
             false,
@@ -676,30 +674,29 @@ where
 /// s = 130, and a fresh `client.empty()` pays page faults on its first kernel
 /// write, so reallocating per call is not free even though allocation itself
 /// returns quickly.
-pub fn cholesky_qr2<R, T, MP>(
-    client: &ComputeClient<R>,
-    y: &GpuTensor<R, T>,
-    q: &GpuTensor<R, T>,
-    q1_scratch: &GpuTensor<R, T>,
-    g_scratch: &GpuTensor<R, T>,
+pub fn cholesky_qr2<T, MP>(
+    client: &Client,
+    y: &GpuTensor<T>,
+    q: &GpuTensor<T>,
+    q1_scratch: &GpuTensor<T>,
+    g_scratch: &GpuTensor<T>,
     n: usize,
     s: usize,
 ) -> Result<(), BixverseErrors>
 where
-    R: Runtime,
     T: cubecl::prelude::Float + cubecl::CubeElement + BixverseFloat,
     MP: MatmulPrecision,
 {
     // Gram split-K partials. `gram_chunks(n) * s * s * 4 B` is ~4.3 MB at the
     // production shape, so allocating here rather than threading yet another
     // buffer through the caller costs nothing measurable.
-    let gram_partials = GpuTensor::<R, T>::empty(vec![gram_chunks(n), s, s], client)?;
+    let gram_partials = GpuTensor::<T>::empty(vec![gram_chunks(n), s, s], client)?;
 
     // Pass 1: y -> q1 (approximately orthonormal, loses half the precision)
-    cholesky_qr_pass::<R, T, MP>(client, y, q1_scratch, g_scratch, &gram_partials, n, s)?;
+    cholesky_qr_pass::<T, MP>(client, y, q1_scratch, g_scratch, &gram_partials, n, s)?;
 
     // Pass 2: q1 -> q (recovers full fp32 precision)
-    cholesky_qr_pass::<R, T, MP>(client, q1_scratch, q, g_scratch, &gram_partials, n, s)?;
+    cholesky_qr_pass::<T, MP>(client, q1_scratch, q, g_scratch, &gram_partials, n, s)?;
 
     Ok(())
 }
@@ -714,9 +711,9 @@ mod tests {
     use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
 
     fn try_device() -> Option<WgpuDevice> {
-        let device = WgpuDevice::DefaultDevice;
+        let device = WgpuDevice::default();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            WgpuRuntime::client(&device);
+            <WgpuRuntime>::client(&device);
         }))
         .ok()
         .map(|_| device)
@@ -831,21 +828,18 @@ mod tests {
     #[test]
     fn test_cholesky_qr2_orthogonality() {
         let Some(device) = try_device() else { return };
-        let client = WgpuRuntime::client(&device);
+        let client = <WgpuRuntime>::client(&device);
 
         let (n, s) = (200, 8);
         let y_host = sinusoidal_tall_skinny(n, s);
 
-        let y = GpuTensor::<WgpuRuntime, f32>::from_slice(&y_host, vec![n, s], &client).unwrap();
-        let q =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; n * s], vec![n, s], &client)
-                .unwrap();
+        let y = GpuTensor::<f32>::from_slice(&y_host, vec![n, s], &client).unwrap();
+        let q = GpuTensor::<f32>::from_slice(&vec![0.0f32; n * s], vec![n, s], &client).unwrap();
 
-        let q1_scratch = GpuTensor::<WgpuRuntime, f32>::empty(vec![n, s], &client).unwrap();
-        let g_scratch = GpuTensor::<WgpuRuntime, f32>::empty(vec![s, s], &client).unwrap();
+        let q1_scratch = GpuTensor::<f32>::empty(vec![n, s], &client).unwrap();
+        let g_scratch = GpuTensor::<f32>::empty(vec![s, s], &client).unwrap();
 
-        cholesky_qr2::<WgpuRuntime, f32, f32>(&client, &y, &q, &q1_scratch, &g_scratch, n, s)
-            .unwrap();
+        cholesky_qr2::<f32, f32>(&client, &y, &q, &q1_scratch, &g_scratch, n, s).unwrap();
 
         let q_host = q.read(&client).unwrap();
         let qtq = gram_host(&q_host, n, s);
@@ -860,7 +854,12 @@ mod tests {
     // dies, and the next call on the client surfaces an unrelated CallError.
     #[test]
     fn test_tall_skinny_grid_within_dispatch_limit() {
-        let (max_x, max_y, max_z) = WgpuRuntime::max_cube_count();
+        // WebGPU's portable per-dimension dispatch limit.
+        let (max_x, max_y, max_z) = (
+            u32::from(u16::MAX),
+            u32::from(u16::MAX),
+            u32::from(u16::MAX),
+        );
         let gz = 130u32.div_ceil(TSMM_COLS);
 
         // The threshold is real, not hypothetical.
@@ -881,21 +880,18 @@ mod tests {
     #[cfg(feature = "large-test")]
     fn test_cholesky_qr2_above_dispatch_limit() {
         let Some(device) = try_device() else { return };
-        let client = WgpuRuntime::client(&device);
+        let client = <WgpuRuntime>::client(&device);
 
         let (n, s) = (600_000, 4);
         let y_host = sinusoidal_tall_skinny(n, s);
 
-        let y = GpuTensor::<WgpuRuntime, f32>::from_slice(&y_host, vec![n, s], &client).unwrap();
-        let q =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![0.0f32; n * s], vec![n, s], &client)
-                .unwrap();
+        let y = GpuTensor::<f32>::from_slice(&y_host, vec![n, s], &client).unwrap();
+        let q = GpuTensor::<f32>::from_slice(&vec![0.0f32; n * s], vec![n, s], &client).unwrap();
 
-        let q1_scratch = GpuTensor::<WgpuRuntime, f32>::empty(vec![n, s], &client).unwrap();
-        let g_scratch = GpuTensor::<WgpuRuntime, f32>::empty(vec![s, s], &client).unwrap();
+        let q1_scratch = GpuTensor::<f32>::empty(vec![n, s], &client).unwrap();
+        let g_scratch = GpuTensor::<f32>::empty(vec![s, s], &client).unwrap();
 
-        cholesky_qr2::<WgpuRuntime, f32, f32>(&client, &y, &q, &q1_scratch, &g_scratch, n, s)
-            .unwrap();
+        cholesky_qr2::<f32, f32>(&client, &y, &q, &q1_scratch, &g_scratch, n, s).unwrap();
 
         let q_host = q.read(&client).unwrap();
 

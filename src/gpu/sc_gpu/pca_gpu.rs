@@ -3,7 +3,7 @@
 //! leverage the GPU for the multiplication operations. Assumes that the host
 //! has enough GPU memory.
 
-use cubecl::Runtime;
+use cubecl::Device;
 use indexmap::IndexSet;
 use rayon::prelude::*;
 use std::time::Instant;
@@ -44,7 +44,7 @@ use crate::single_cell::sc_processing::pca::*;
 /// A tuple of the samples projected on the PC space, gene loadings and singular
 /// values.
 #[allow(clippy::too_many_arguments)]
-pub fn pca_on_sc_sparse_gpu<R, S>(
+pub fn pca_on_sc_sparse_gpu<S>(
     reader: &S,
     cell_indices: &[usize],
     gene_indices: &[usize],
@@ -52,11 +52,10 @@ pub fn pca_on_sc_sparse_gpu<R, S>(
     clr_offsets: Option<&[f32]>,
     params_pca: &SingleCellPcaParams,
     seed: usize,
-    device: R::Device,
+    device: Device,
     verbose: usize,
 ) -> SingleCellPcaRes
 where
-    R: Runtime,
     S: SingleCellReading,
 {
     if params_pca.clr && clr_offsets.is_none() {
@@ -146,7 +145,7 @@ where
     let oversampling = std::cmp::min(MAX_OVERSAMPLING_SINGLE_CELL, max_s.saturating_sub(no_pcs));
     let svd_params = RandSvdGpuParams::new(N_POWER_ITERS_SINGLE_CELL, oversampling);
 
-    let svd_res = randomised_sparse_svd_gpu::<R, f32, f32>(
+    let svd_res = randomised_sparse_svd_gpu::<f32, f32>(
         csc,
         &col_means,
         &col_std,

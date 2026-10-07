@@ -10,7 +10,7 @@
 //! variance components land within the tolerance `edge-rs` gates rather than on
 //! the CPU's values.
 
-use cubecl::prelude::*;
+use cubecl::Device;
 use edge_rs::gpu::stage_two::nebula_sparse_gpu;
 
 use crate::prelude::*;
@@ -51,7 +51,7 @@ use crate::single_cell::sc_analysis::nebula::{NebulaScParams, NebulaScRes, run_n
 ///
 /// He et al., Communications Biology 4, 629, 2021
 #[allow(clippy::too_many_arguments)]
-pub fn run_nebula_gpu<R, S>(
+pub fn run_nebula_gpu<S>(
     gene_reader: &S,
     cell_reader: &S,
     cells_to_keep: &[usize],
@@ -61,11 +61,10 @@ pub fn run_nebula_gpu<R, S>(
     n_coef: usize,
     offset: Option<&[f64]>,
     params: &NebulaScParams,
-    device: R::Device,
+    device: Device,
     verbose: usize,
 ) -> Result<NebulaScRes, BixverseErrors>
 where
-    R: Runtime,
     S: SingleCellReading,
 {
     // Upstream rejects this too, but only once the first batch has been read off
@@ -76,7 +75,7 @@ where
         ));
     }
 
-    let client = R::client(&device);
+    let client = device.client();
 
     run_nebula_with(
         gene_reader,
@@ -90,7 +89,7 @@ where
         params,
         verbose,
         |counts, subject_run, design_ordered, n_coef, offsets, nebula_params| {
-            nebula_sparse_gpu::<f64, R>(
+            nebula_sparse_gpu::<f64>(
                 counts,
                 subject_run,
                 design_ordered,

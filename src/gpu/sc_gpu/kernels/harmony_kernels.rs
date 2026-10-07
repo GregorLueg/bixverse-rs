@@ -88,7 +88,7 @@ fn row_l2_normalise<F: Float>(data: &mut Tensor<F>, n_rows: u32, #[comptime] dim
 
         if norm > F::new(1e-8) {
             for e in 0..dim {
-                data[base + e] = data[base + e] / norm;
+                data[base + e] /= norm;
             }
         } else {
             for e in 0..dim {
@@ -148,7 +148,7 @@ fn scale_exp_normalise<F: Float>(
     }
 
     // tree reduction (manually unrolled for WORKGROUP_128)
-    let mut shared = SharedMemory::<F>::new(WORKGROUP_128 as usize);
+    let mut shared = Shared::<[F]>::new_slice(WORKGROUP_128 as usize);
     shared[tx as usize] = acc;
     sync_cube();
     if tx < 64u32 {
@@ -440,7 +440,7 @@ fn objective_partials<F: Float>(
     }
 
     // tree reduction within workgroup (manully unrolled for 128)
-    let mut shared = SharedMemory::<F>::new(WORKGROUP_128 as usize);
+    let mut shared = Shared::<[F]>::new_slice(WORKGROUP_128 as usize);
     shared[tx as usize] = acc;
     sync_cube();
     if tx < 64u32 {
@@ -555,7 +555,7 @@ fn jacobi_r_update<F: Float>(
     }
 
     // tree reduction (unrolled for RUPD_WG = 128)
-    let mut shared = SharedMemory::<F>::new(WORKGROUP_128 as usize);
+    let mut shared = Shared::<[F]>::new_slice(WORKGROUP_128 as usize);
     shared[tx as usize] = acc;
     sync_cube();
     if tx < 64u32 {
@@ -703,16 +703,16 @@ fn ridge_subtract<F: Float>(
 ///
 /// `Ok(())`; `dist` is written in place. `GpuMatmul` if the GEMM dispatch
 /// fails, `CubeclUtils` if the epilogue grid is over the device limit.
-pub fn launch_cosine_distances<R: Runtime>(
-    centroids: &GpuTensor<R, f32>,
-    data_cos: &GpuTensor<R, f32>,
-    dist: &GpuTensor<R, f32>,
+pub fn launch_cosine_distances(
+    centroids: &GpuTensor<f32>,
+    data_cos: &GpuTensor<f32>,
+    dist: &GpuTensor<f32>,
     n: usize,
     k: usize,
     dim: usize,
-    client: &ComputeClient<R>,
+    client: &Client,
 ) -> Result<(), BixverseErrors> {
-    dense_gemm::<R, f32>(
+    dense_gemm::<f32>(
         data_cos.handle(),
         [n, dim],
         false,
@@ -729,7 +729,7 @@ pub fn launch_cosine_distances<R: Runtime>(
     let len = n * k;
     let (gx, gy) = grid_2d(len.div_ceil(WORKGROUP_256 as usize) as u32, &limits)?;
     unsafe {
-        similarity_to_cosine_distance::launch_unchecked::<f32, R>(
+        similarity_to_cosine_distance::launch_unchecked::<f32>(
             client,
             CubeCount::Static(gx, gy, 1),
             CubeDim::new_1d(WORKGROUP_256),
@@ -754,21 +754,20 @@ pub fn launch_cosine_distances<R: Runtime>(
 ///
 /// `Ok(())`; `data` is normalised in place. `CubeclUtils` if the grid is over
 /// the device's cube-count limit.
-pub fn launch_row_l2_normalise<R, F>(
-    data: &GpuTensor<R, F>,
+pub fn launch_row_l2_normalise<F>(
+    data: &GpuTensor<F>,
     n_rows: usize,
     dim: usize,
-    client: &ComputeClient<R>,
+    client: &Client,
 ) -> Result<(), BixverseErrors>
 where
-    R: Runtime,
     F: Float + cubecl::CubeElement,
 {
     let limits = GpuLimits::from_client(client);
     let (gx, gy) = grid_2d(n_rows as u32, &limits)?;
 
     unsafe {
-        row_l2_normalise::launch_unchecked::<F, R>(
+        row_l2_normalise::launch_unchecked::<F>(
             client,
             CubeCount::Static(gx, gy, 1),
             CubeDim::new_1d(WORKGROUP_64),
@@ -796,23 +795,22 @@ where
 ///
 /// `Ok(())`; `out` is written in place. `CubeclUtils` if the grid is over the
 /// device's cube-count limit.
-pub fn launch_scale_exp_normalise<R, F>(
-    dist: &GpuTensor<R, F>,
-    sigma: &GpuTensor<R, F>,
-    out: &GpuTensor<R, F>,
+pub fn launch_scale_exp_normalise<F>(
+    dist: &GpuTensor<F>,
+    sigma: &GpuTensor<F>,
+    out: &GpuTensor<F>,
     n: usize,
     k: usize,
-    client: &ComputeClient<R>,
+    client: &Client,
 ) -> Result<(), BixverseErrors>
 where
-    R: Runtime,
     F: Float + cubecl::CubeElement,
 {
     let limits = GpuLimits::from_client(client);
     let (gx, gy) = grid_2d(n as u32, &limits)?;
 
     unsafe {
-        scale_exp_normalise::launch_unchecked::<F, R>(
+        scale_exp_normalise::launch_unchecked::<F>(
             client,
             CubeCount::Static(gx, gy, 1),
             CubeDim::new_1d(WORKGROUP_128),
@@ -843,23 +841,22 @@ where
 ///
 /// `Ok(())`; `partial` is written in place. `CubeclUtils` if the grid is over
 /// the device's cube-count limit.
-pub fn launch_run_sums<R, F>(
-    r: &GpuTensor<R, F>,
-    run_bounds: &GpuTensor<R, u32>,
-    partial: &GpuTensor<R, F>,
+pub fn launch_run_sums<F>(
+    r: &GpuTensor<F>,
+    run_bounds: &GpuTensor<u32>,
+    partial: &GpuTensor<F>,
     n_runs: usize,
     k: usize,
-    client: &ComputeClient<R>,
+    client: &Client,
 ) -> Result<(), BixverseErrors>
 where
-    R: Runtime,
     F: Float + cubecl::CubeElement,
 {
     let limits = GpuLimits::from_client(client);
     let (gx, gy) = grid_2d(n_runs as u32, &limits)?;
 
     unsafe {
-        run_sums::launch_unchecked::<F, R>(
+        run_sums::launch_unchecked::<F>(
             client,
             CubeCount::Static(gx, gy, 1),
             CubeDim::new_1d(WORKGROUP_128),
@@ -893,25 +890,24 @@ where
 /// `Ok(())`; `partial` is written in place. `CubeclUtils` if the grid is over
 /// the device's cube-count limit.
 #[allow(clippy::too_many_arguments)]
-pub fn launch_run_weighted_sums<R, F>(
-    r: &GpuTensor<R, F>,
-    z: &GpuTensor<R, F>,
-    run_bounds: &GpuTensor<R, u32>,
-    partial: &GpuTensor<R, F>,
+pub fn launch_run_weighted_sums<F>(
+    r: &GpuTensor<F>,
+    z: &GpuTensor<F>,
+    run_bounds: &GpuTensor<u32>,
+    partial: &GpuTensor<F>,
     n_runs: usize,
     k: usize,
     d: usize,
-    client: &ComputeClient<R>,
+    client: &Client,
 ) -> Result<(), BixverseErrors>
 where
-    R: Runtime,
     F: Float + cubecl::CubeElement,
 {
     let limits = GpuLimits::from_client(client);
     let (gx, gy) = grid_2d((n_runs * k) as u32, &limits)?;
 
     unsafe {
-        run_weighted_sums::launch_unchecked::<F, R>(
+        run_weighted_sums::launch_unchecked::<F>(
             client,
             CubeCount::Static(gx, gy, 1),
             CubeDim::new_1d(WORKGROUP_64),
@@ -944,16 +940,15 @@ where
 ///
 /// `Ok(())`; `out` is written in place. `CubeclUtils` if the grid is over the
 /// device's cube-count limit.
-pub fn launch_reduce_runs<R, F>(
-    partial: &GpuTensor<R, F>,
-    level_runs: &GpuTensor<R, u32>,
-    out: &GpuTensor<R, F>,
+pub fn launch_reduce_runs<F>(
+    partial: &GpuTensor<F>,
+    level_runs: &GpuTensor<u32>,
+    out: &GpuTensor<F>,
     b: usize,
     width: usize,
-    client: &ComputeClient<R>,
+    client: &Client,
 ) -> Result<(), BixverseErrors>
 where
-    R: Runtime,
     F: Float + cubecl::CubeElement,
 {
     let limits = GpuLimits::from_client(client);
@@ -961,7 +956,7 @@ where
     let (gx, gy) = grid_2d(cubes as u32, &limits)?;
 
     unsafe {
-        reduce_runs::launch_unchecked::<F, R>(
+        reduce_runs::launch_unchecked::<F>(
             client,
             CubeCount::Static(gx, gy, 1),
             CubeDim::new_1d(WORKGROUP_256),
@@ -1000,25 +995,24 @@ where
 ///
 /// Nothing; `partials` is written in place and the caller sums it on the host.
 #[allow(clippy::too_many_arguments)]
-pub fn launch_objective_partials<R, F>(
-    r: &GpuTensor<R, F>,
-    dist: &GpuTensor<R, F>,
-    o: &GpuTensor<R, F>,
-    r_sum: &GpuTensor<R, F>,
-    sigma: &GpuTensor<R, F>,
-    theta: &GpuTensor<R, F>,
-    pr_b: &GpuTensor<R, F>,
-    cell_to_level: &GpuTensor<R, u32>,
-    partials: &GpuTensor<R, F>,
+pub fn launch_objective_partials<F>(
+    r: &GpuTensor<F>,
+    dist: &GpuTensor<F>,
+    o: &GpuTensor<F>,
+    r_sum: &GpuTensor<F>,
+    sigma: &GpuTensor<F>,
+    theta: &GpuTensor<F>,
+    pr_b: &GpuTensor<F>,
+    cell_to_level: &GpuTensor<u32>,
+    partials: &GpuTensor<F>,
     n: usize,
     k: usize,
-    client: &ComputeClient<R>,
+    client: &Client,
 ) where
-    R: Runtime,
     F: Float + cubecl::CubeElement,
 {
     unsafe {
-        objective_partials::launch_unchecked::<F, R>(
+        objective_partials::launch_unchecked::<F>(
             client,
             CubeCount::Static(WORKGROUP_512, 1, 1),
             CubeDim::new_1d(WORKGROUP_128),
@@ -1058,27 +1052,26 @@ pub fn launch_objective_partials<R, F>(
 /// `Ok(())`; `r_out` is written in place. `CubeclUtils` if the grid is over the
 /// device's cube-count limit.
 #[allow(clippy::too_many_arguments)]
-pub fn launch_jacobi_r_update<R, F>(
-    scale_dist: &GpuTensor<R, F>,
-    o: &GpuTensor<R, F>,
-    r_sum: &GpuTensor<R, F>,
-    theta: &GpuTensor<R, F>,
-    pr_b: &GpuTensor<R, F>,
-    cell_to_level: &GpuTensor<R, u32>,
-    r_out: &GpuTensor<R, F>,
+pub fn launch_jacobi_r_update<F>(
+    scale_dist: &GpuTensor<F>,
+    o: &GpuTensor<F>,
+    r_sum: &GpuTensor<F>,
+    theta: &GpuTensor<F>,
+    pr_b: &GpuTensor<F>,
+    cell_to_level: &GpuTensor<u32>,
+    r_out: &GpuTensor<F>,
     n: usize,
     k: usize,
-    client: &ComputeClient<R>,
+    client: &Client,
 ) -> Result<(), BixverseErrors>
 where
-    R: Runtime,
     F: Float + cubecl::CubeElement,
 {
     let limits = GpuLimits::from_client(client);
     let (gx, gy) = grid_2d(n as u32, &limits)?;
 
     unsafe {
-        jacobi_r_update::launch_unchecked::<F, R>(
+        jacobi_r_update::launch_unchecked::<F>(
             client,
             CubeCount::Static(gx, gy, 1),
             CubeDim::new_1d(WORKGROUP_128),
@@ -1117,26 +1110,25 @@ where
 /// `Ok(())`; `z_corr` is written in place. `CubeclUtils` if the grid is over
 /// the device's cube-count limit.
 #[allow(clippy::too_many_arguments)]
-pub fn launch_ridge_subtract<R, F>(
-    z: &GpuTensor<R, F>,
-    r: &GpuTensor<R, F>,
-    c: &GpuTensor<R, F>,
-    cell_to_level: &GpuTensor<R, u32>,
-    z_corr: &GpuTensor<R, F>,
+pub fn launch_ridge_subtract<F>(
+    z: &GpuTensor<F>,
+    r: &GpuTensor<F>,
+    c: &GpuTensor<F>,
+    cell_to_level: &GpuTensor<u32>,
+    z_corr: &GpuTensor<F>,
     n: usize,
     k: usize,
     d: usize,
-    client: &ComputeClient<R>,
+    client: &Client,
 ) -> Result<(), BixverseErrors>
 where
-    R: Runtime,
     F: Float + cubecl::CubeElement,
 {
     let limits = GpuLimits::from_client(client);
     let (gx, gy) = grid_2d(n as u32, &limits)?;
 
     unsafe {
-        ridge_subtract::launch_unchecked::<F, R>(
+        ridge_subtract::launch_unchecked::<F>(
             client,
             CubeCount::Static(gx, gy, 1),
             CubeDim::new_1d(WORKGROUP_128),
@@ -1165,9 +1157,9 @@ mod tests_harmony_kernels {
     use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
 
     fn try_device() -> Option<WgpuDevice> {
-        let device = WgpuDevice::DefaultDevice;
+        let device = WgpuDevice::default();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            WgpuRuntime::client(&device);
+            <WgpuRuntime>::client(&device);
         }))
         .ok()
         .map(|_| device)
@@ -1293,7 +1285,7 @@ mod tests_harmony_kernels {
     #[test]
     fn test_cosine_distances_matches_cpu() {
         let Some(device) = try_device() else { return };
-        let client = WgpuRuntime::client(&device);
+        let client = <WgpuRuntime>::client(&device);
 
         let (n, k, dim) = (12, 4, 8);
         let mut centroids: Vec<f32> = (0..k * dim)
@@ -1305,11 +1297,9 @@ mod tests_harmony_kernels {
         l2_normalise_rows(&mut centroids, k, dim);
         l2_normalise_rows(&mut data_cos, n, dim);
 
-        let cent_gpu =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&centroids, vec![k, dim], &client).unwrap();
-        let data_gpu =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&data_cos, vec![n, dim], &client).unwrap();
-        let dist_gpu = GpuTensor::<WgpuRuntime, f32>::empty(vec![n, k], &client).unwrap();
+        let cent_gpu = GpuTensor::<f32>::from_slice(&centroids, vec![k, dim], &client).unwrap();
+        let data_gpu = GpuTensor::<f32>::from_slice(&data_cos, vec![n, dim], &client).unwrap();
+        let dist_gpu = GpuTensor::<f32>::empty(vec![n, k], &client).unwrap();
 
         launch_cosine_distances(&cent_gpu, &data_gpu, &dist_gpu, n, k, dim, &client).unwrap();
 
@@ -1325,7 +1315,7 @@ mod tests_harmony_kernels {
     #[test]
     fn test_row_l2_normalise_basic_and_zero() {
         let Some(device) = try_device() else { return };
-        let client = WgpuRuntime::client(&device);
+        let client = <WgpuRuntime>::client(&device);
 
         let (n, dim) = (4, 6);
         let mut data: Vec<f32> = vec![
@@ -1336,8 +1326,7 @@ mod tests_harmony_kernels {
         ];
         let original = data.clone();
 
-        let data_gpu =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&data, vec![n, dim], &client).unwrap();
+        let data_gpu = GpuTensor::<f32>::from_slice(&data, vec![n, dim], &client).unwrap();
         launch_row_l2_normalise(&data_gpu, n, dim, &client).unwrap();
         let got = data_gpu.read(&client).unwrap();
 
@@ -1373,7 +1362,7 @@ mod tests_harmony_kernels {
     #[test]
     fn test_scale_exp_normalise_matches_cpu() {
         let Some(device) = try_device() else { return };
-        let client = WgpuRuntime::client(&device);
+        let client = <WgpuRuntime>::client(&device);
 
         let (n, k) = (16, 6);
         let dist: Vec<f32> = (0..n * k)
@@ -1381,11 +1370,9 @@ mod tests_harmony_kernels {
             .collect();
         let sigma: Vec<f32> = (0..k).map(|i| 0.1 + i as f32 * 0.02).collect();
 
-        let dist_gpu =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&dist, vec![n, k], &client).unwrap();
-        let sigma_gpu =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&sigma, vec![k], &client).unwrap();
-        let out_gpu = GpuTensor::<WgpuRuntime, f32>::empty(vec![n, k], &client).unwrap();
+        let dist_gpu = GpuTensor::<f32>::from_slice(&dist, vec![n, k], &client).unwrap();
+        let sigma_gpu = GpuTensor::<f32>::from_slice(&sigma, vec![k], &client).unwrap();
+        let out_gpu = GpuTensor::<f32>::empty(vec![n, k], &client).unwrap();
 
         launch_scale_exp_normalise(&dist_gpu, &sigma_gpu, &out_gpu, n, k, &client).unwrap();
 
@@ -1407,7 +1394,7 @@ mod tests_harmony_kernels {
     #[test]
     fn test_jacobi_r_update_matches_cpu() {
         let Some(device) = try_device() else { return };
-        let client = WgpuRuntime::client(&device);
+        let client = <WgpuRuntime>::client(&device);
 
         let (n, k, b) = (12, 5, 3);
         let scale_dist: Vec<f32> = (0..n * k)
@@ -1422,20 +1409,15 @@ mod tests_harmony_kernels {
         let theta: Vec<f32> = (0..b).map(|i| 1.0 + i as f32 * 0.3).collect();
         let pr_b: Vec<f32> = (0..b).map(|i| 0.2 + i as f32 * 0.1).collect();
 
-        let scale_gpu =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&scale_dist, vec![n, k], &client).unwrap();
-        let o_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&o, vec![b, k], &client).unwrap();
-        let r_sum_gpu =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&r_sum, vec![k], &client).unwrap();
-        let theta_gpu =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&theta, vec![b], &client).unwrap();
-        let pr_b_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&pr_b, vec![b], &client).unwrap();
-        let ctl_gpu =
-            GpuTensor::<WgpuRuntime, u32>::from_slice(&cell_to_level, vec![n], &client).unwrap();
+        let scale_gpu = GpuTensor::<f32>::from_slice(&scale_dist, vec![n, k], &client).unwrap();
+        let o_gpu = GpuTensor::<f32>::from_slice(&o, vec![b, k], &client).unwrap();
+        let r_sum_gpu = GpuTensor::<f32>::from_slice(&r_sum, vec![k], &client).unwrap();
+        let theta_gpu = GpuTensor::<f32>::from_slice(&theta, vec![b], &client).unwrap();
+        let pr_b_gpu = GpuTensor::<f32>::from_slice(&pr_b, vec![b], &client).unwrap();
+        let ctl_gpu = GpuTensor::<u32>::from_slice(&cell_to_level, vec![n], &client).unwrap();
         // previous sweep's R, which the damped update blends with
         let prior = vec![1.0 / k as f32; n * k];
-        let r_out_gpu =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&prior, vec![n, k], &client).unwrap();
+        let r_out_gpu = GpuTensor::<f32>::from_slice(&prior, vec![n, k], &client).unwrap();
 
         launch_jacobi_r_update(
             &scale_gpu, &o_gpu, &r_sum_gpu, &theta_gpu, &pr_b_gpu, &ctl_gpu, &r_out_gpu, n, k,
@@ -1466,7 +1448,7 @@ mod tests_harmony_kernels {
     #[test]
     fn test_jacobi_r_update_zero_scale_dist_row_writes_zeros() {
         let Some(device) = try_device() else { return };
-        let client = WgpuRuntime::client(&device);
+        let client = <WgpuRuntime>::client(&device);
 
         let (n, k, b) = (3, 4, 2);
         let mut scale_dist = vec![0.1f32; n * k];
@@ -1480,17 +1462,13 @@ mod tests_harmony_kernels {
         let theta = vec![1.0f32; b];
         let pr_b = vec![0.5f32; b];
 
-        let scale_gpu =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&scale_dist, vec![n, k], &client).unwrap();
-        let o_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&o, vec![b, k], &client).unwrap();
-        let r_sum_gpu =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&r_sum, vec![k], &client).unwrap();
-        let theta_gpu =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&theta, vec![b], &client).unwrap();
-        let pr_b_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&pr_b, vec![b], &client).unwrap();
-        let ctl_gpu =
-            GpuTensor::<WgpuRuntime, u32>::from_slice(&cell_to_level, vec![n], &client).unwrap();
-        let r_out_gpu = GpuTensor::<WgpuRuntime, f32>::empty(vec![n, k], &client).unwrap();
+        let scale_gpu = GpuTensor::<f32>::from_slice(&scale_dist, vec![n, k], &client).unwrap();
+        let o_gpu = GpuTensor::<f32>::from_slice(&o, vec![b, k], &client).unwrap();
+        let r_sum_gpu = GpuTensor::<f32>::from_slice(&r_sum, vec![k], &client).unwrap();
+        let theta_gpu = GpuTensor::<f32>::from_slice(&theta, vec![b], &client).unwrap();
+        let pr_b_gpu = GpuTensor::<f32>::from_slice(&pr_b, vec![b], &client).unwrap();
+        let ctl_gpu = GpuTensor::<u32>::from_slice(&cell_to_level, vec![n], &client).unwrap();
+        let r_out_gpu = GpuTensor::<f32>::empty(vec![n, k], &client).unwrap();
 
         launch_jacobi_r_update(
             &scale_gpu, &o_gpu, &r_sum_gpu, &theta_gpu, &pr_b_gpu, &ctl_gpu, &r_out_gpu, n, k,
@@ -1508,7 +1486,7 @@ mod tests_harmony_kernels {
     #[test]
     fn test_ridge_subtract_matches_cpu() {
         let Some(device) = try_device() else { return };
-        let client = WgpuRuntime::client(&device);
+        let client = <WgpuRuntime>::client(&device);
 
         let (n, k, b, d) = (8, 3, 2, 4);
         let cell_to_level: Vec<u32> = vec![0, 1, 0, 1, 0, 1, 0, 1];
@@ -1520,13 +1498,11 @@ mod tests_harmony_kernels {
             .map(|i| ((i * 11 + 1) % 13) as f32 * 0.05)
             .collect();
 
-        let z_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&z, vec![n, d], &client).unwrap();
-        let r_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&r, vec![n, k], &client).unwrap();
-        let c_gpu =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&c, vec![k * b * d], &client).unwrap();
-        let ctl_gpu =
-            GpuTensor::<WgpuRuntime, u32>::from_slice(&cell_to_level, vec![n], &client).unwrap();
-        let z_corr_gpu = GpuTensor::<WgpuRuntime, f32>::empty(vec![n, d], &client).unwrap();
+        let z_gpu = GpuTensor::<f32>::from_slice(&z, vec![n, d], &client).unwrap();
+        let r_gpu = GpuTensor::<f32>::from_slice(&r, vec![n, k], &client).unwrap();
+        let c_gpu = GpuTensor::<f32>::from_slice(&c, vec![k * b * d], &client).unwrap();
+        let ctl_gpu = GpuTensor::<u32>::from_slice(&cell_to_level, vec![n], &client).unwrap();
+        let z_corr_gpu = GpuTensor::<f32>::empty(vec![n, d], &client).unwrap();
 
         launch_ridge_subtract(
             &z_gpu,
@@ -1572,7 +1548,7 @@ mod tests_harmony_kernels {
     #[test]
     fn test_run_sums_reduce_with_empty_and_split_levels() {
         let Some(device) = try_device() else { return };
-        let client = WgpuRuntime::client(&device);
+        let client = <WgpuRuntime>::client(&device);
 
         let level_sizes = [5usize, 0, 9];
         let (n, k, b) = (14usize, 4usize, 3usize);
@@ -1582,15 +1558,11 @@ mod tests_harmony_kernels {
             .map(|i| ((i * 7 + 1) % 11) as f32 * 0.1)
             .collect();
 
-        let r_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&r, vec![n, k], &client).unwrap();
-        let b_gpu =
-            GpuTensor::<WgpuRuntime, u32>::from_slice(&bounds, vec![n_runs + 1], &client).unwrap();
-        let lr_gpu =
-            GpuTensor::<WgpuRuntime, u32>::from_slice(&level_runs, vec![b + 1], &client).unwrap();
-        let partial = GpuTensor::<WgpuRuntime, f32>::empty(vec![n_runs, k], &client).unwrap();
-        let o =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&vec![-1.0f32; b * k], vec![b, k], &client)
-                .unwrap();
+        let r_gpu = GpuTensor::<f32>::from_slice(&r, vec![n, k], &client).unwrap();
+        let b_gpu = GpuTensor::<u32>::from_slice(&bounds, vec![n_runs + 1], &client).unwrap();
+        let lr_gpu = GpuTensor::<u32>::from_slice(&level_runs, vec![b + 1], &client).unwrap();
+        let partial = GpuTensor::<f32>::empty(vec![n_runs, k], &client).unwrap();
+        let o = GpuTensor::<f32>::from_slice(&vec![-1.0f32; b * k], vec![b, k], &client).unwrap();
 
         launch_run_sums(&r_gpu, &b_gpu, &partial, n_runs, k, &client).unwrap();
         launch_reduce_runs(&partial, &lr_gpu, &o, b, k, &client).unwrap();
@@ -1610,7 +1582,7 @@ mod tests_harmony_kernels {
     #[test]
     fn test_run_weighted_sums_reduce_matches_cpu() {
         let Some(device) = try_device() else { return };
-        let client = WgpuRuntime::client(&device);
+        let client = <WgpuRuntime>::client(&device);
 
         let level_sizes = [3usize, 7, 0, 2];
         let (n, k, b, d) = (12usize, 3usize, 4usize, 5usize);
@@ -1621,14 +1593,12 @@ mod tests_harmony_kernels {
             .collect();
         let z: Vec<f32> = (0..n * d).map(|i| (i as f32) * 0.13 - 1.0).collect();
 
-        let r_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&r, vec![n, k], &client).unwrap();
-        let z_gpu = GpuTensor::<WgpuRuntime, f32>::from_slice(&z, vec![n, d], &client).unwrap();
-        let b_gpu =
-            GpuTensor::<WgpuRuntime, u32>::from_slice(&bounds, vec![n_runs + 1], &client).unwrap();
-        let lr_gpu =
-            GpuTensor::<WgpuRuntime, u32>::from_slice(&level_runs, vec![b + 1], &client).unwrap();
-        let partial = GpuTensor::<WgpuRuntime, f32>::empty(vec![n_runs * k * d], &client).unwrap();
-        let s = GpuTensor::<WgpuRuntime, f32>::empty(vec![b * k * d], &client).unwrap();
+        let r_gpu = GpuTensor::<f32>::from_slice(&r, vec![n, k], &client).unwrap();
+        let z_gpu = GpuTensor::<f32>::from_slice(&z, vec![n, d], &client).unwrap();
+        let b_gpu = GpuTensor::<u32>::from_slice(&bounds, vec![n_runs + 1], &client).unwrap();
+        let lr_gpu = GpuTensor::<u32>::from_slice(&level_runs, vec![b + 1], &client).unwrap();
+        let partial = GpuTensor::<f32>::empty(vec![n_runs * k * d], &client).unwrap();
+        let s = GpuTensor::<f32>::empty(vec![b * k * d], &client).unwrap();
 
         launch_run_weighted_sums(&r_gpu, &z_gpu, &b_gpu, &partial, n_runs, k, d, &client).unwrap();
         launch_reduce_runs(&partial, &lr_gpu, &s, b, k * d, &client).unwrap();

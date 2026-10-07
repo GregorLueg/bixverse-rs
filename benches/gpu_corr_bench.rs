@@ -26,11 +26,13 @@
 
 use std::time::{Duration, Instant};
 
+use cubecl::Device;
 use cubecl::future;
 use cubecl::prelude::*;
 use cubecl::wgpu::WgpuRuntime;
 use cubecl_utils_rs::prelude::*;
-use cubek::matmul::launch::Strategy;
+use cubek::matmul::multi_level::Strategy as MultiLevelStrategy;
+use cubek::matmul::strategy::Strategy;
 use faer::Mat;
 
 use bixverse_rs::gpu::linalg::cholesky_gpu::dense_gemm;
@@ -202,7 +204,7 @@ fn guard_pearson(g: &Mat<f32>, label: &str) {
 /// ### Params
 ///
 /// * `client` - CubeCL compute client
-fn sync<R: Runtime>(client: &ComputeClient<R>) {
+fn sync(client: &Client) {
     future::block_on(client.sync()).expect("device sync failed");
 }
 
@@ -254,11 +256,7 @@ impl Stages {
 /// ### Returns
 ///
 /// Per-stage timings, plus the assembled matrix so the caller can guard it.
-fn run_staged<R: Runtime>(
-    mat: &Mat<f32>,
-    shape: CorShape,
-    client: &ComputeClient<R>,
-) -> (Stages, Mat<f32>) {
+fn run_staged(mat: &Mat<f32>, shape: CorShape, client: &Client) -> (Stages, Mat<f32>) {
     let CorShape { n, d, label } = shape;
     let mut st = Stages::default();
 
@@ -271,7 +269,7 @@ fn run_staged<R: Runtime>(
 
     let t = Instant::now();
     let data_gpu =
-        GpuTensor::<R, f32>::from_slice(&data_flat, vec![d, n], client).expect("upload failed");
+        GpuTensor::<f32>::from_slice(&data_flat, vec![d, n], client).expect("upload failed");
     sync(client);
     st.upload = t.elapsed();
 
@@ -285,11 +283,11 @@ fn run_staged<R: Runtime>(
     // backed until something writes them, and at d = 8000 that first touch is
     // 256 MB: leaving it inside the timed region attributes a page-fault cost
     // to whichever kernel happened to run first.
-    let result = GpuTensor::<R, f32>::empty(vec![d, d], client).expect("alloc result");
-    let baseline = GpuTensor::<R, f32>::empty(vec![d, d], client).expect("alloc baseline");
+    let result = GpuTensor::<f32>::empty(vec![d, d], client).expect("alloc result");
+    let baseline = GpuTensor::<f32>::empty(vec![d, d], client).expect("alloc baseline");
 
     let run_gram = || {
-        gram_aat::<R, f32>(client, &scaled, &result, n, d).expect("gram_aat failed");
+        gram_aat::<f32>(client, &scaled, &result, n, d).expect("gram_aat failed");
         sync(client);
     };
     run_gram();
@@ -298,7 +296,7 @@ fn run_staged<R: Runtime>(
     st.product = t.elapsed();
 
     let run_cubek = || {
-        dense_gemm::<R, f32>(
+        dense_gemm::<f32>(
             scaled.handle(),
             [d, n],
             false,
@@ -307,7 +305,9 @@ fn run_staged<R: Runtime>(
             true,
             baseline.handle(),
             [d, d],
-            Some(Strategy::DoubleUnit(Default::default())),
+            Some(Strategy::MultiLevel(MultiLevelStrategy::DoubleUnit(
+                Default::default(),
+            ))),
             client,
         )
         .expect("dense_gemm failed");
@@ -381,9 +381,9 @@ fn check_against_baseline(got: &[f32], want: &[f32], d: usize, label: &str) {
 ///
 /// * `shape` - Problem dimensions
 /// * `device` - CubeCL device
-fn bench_shape<R: Runtime>(shape: CorShape, device: &R::Device)
+fn bench_shape(shape: CorShape, device: &Device)
 where
-    R::Device: Clone,
+    Device: Clone,
 {
     let CorShape { label, n, d } = shape;
     let build_start = Instant::now();
@@ -404,13 +404,9 @@ where
     let mut times = Vec::with_capacity(END_TO_END_REPS);
     for _ in 0..END_TO_END_REPS {
         let t = Instant::now();
-        let g = column_pairwise_cor_gpu::<f32, R>(
-            mat.as_ref(),
-            GpuCorCov::Pearson,
-            device.clone(),
-            false,
-        )
-        .expect("column_pairwise_cor_gpu failed");
+        let g =
+            column_pairwise_cor_gpu::<f32>(mat.as_ref(), GpuCorCov::Pearson, device.clone(), false)
+                .expect("column_pairwise_cor_gpu failed");
         times.push(t.elapsed());
         guard_pearson(&g, label);
         drop(g);
@@ -422,8 +418,8 @@ where
         times[END_TO_END_REPS - 1]
     );
 
-    let client = R::client(device);
-    let (st, g) = run_staged::<R>(&mat, shape, &client);
+    let client = device.client();
+    let (st, g) = run_staged(&mat, shape, &client);
     guard_pearson(&g, label);
     drop(g);
 
@@ -477,12 +473,12 @@ fn main() {
     println!("====== GPU pairwise correlation bench (Pearson) ======\n");
 
     for shape in DEFAULT_SHAPES {
-        bench_shape::<WgpuRuntime>(shape, &device);
+        bench_shape(shape, &cubecl::Device::from(device.clone()));
     }
 
     if std::env::var("BIXVERSE_BENCH_BIG").is_ok() {
         for shape in BIG_SHAPES {
-            bench_shape::<WgpuRuntime>(shape, &device);
+            bench_shape(shape, &cubecl::Device::from(device.clone()));
         }
     } else {
         println!("Set BIXVERSE_BENCH_BIG=1 to also run the 20000-column and 200k-row shapes.");

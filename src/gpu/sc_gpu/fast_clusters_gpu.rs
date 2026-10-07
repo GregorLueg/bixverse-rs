@@ -6,6 +6,7 @@
 //! [`crate::single_cell::sc_analysis::fast_clusters`].
 
 use ann_search_rs::gpu::k_means_gpu::{KMeansGpuParams, k_means_clusters_gpu};
+use cubecl::Device;
 use cubecl::prelude::*;
 use faer::MatRef;
 
@@ -129,17 +130,17 @@ impl Default for FastLouvainParamsGpu {
 /// ### Errors
 ///
 /// * Propagates the k-means dispatch, allocation and read-back errors.
-pub fn fast_cluster_kmeans_gpu<R: Runtime>(
+pub fn fast_cluster_kmeans_gpu(
     data: MatRef<f32>,
     params: &FastLouvainParamsGpu,
     seed: usize,
-    device: R::Device,
+    device: Device,
     verbose: usize,
 ) -> Result<(faer::Mat<f32>, Vec<usize>), BixverseErrors> {
     let verbosity = parse_verbosity_level(verbose);
     let n_centroids = params.n_centroids.min(data.nrows() - 1);
 
-    Ok(k_means_clusters_gpu::<f32, R>(
+    Ok(k_means_clusters_gpu::<f32>(
         data,
         &params.knn_params.ann_dist,
         n_centroids,
@@ -182,18 +183,17 @@ pub fn fast_cluster_kmeans_gpu<R: Runtime>(
 ///
 /// * Propagates the k-means, kNN and Louvain errors.
 #[allow(clippy::too_many_arguments)]
-pub fn fast_louvain_clusters_gpu<R: Runtime>(
+pub fn fast_louvain_clusters_gpu(
     data: MatRef<f32>,
     resolutions: &[f32],
     params: &FastLouvainParamsGpu,
     run_snn: bool,
     return_k_mean: bool,
     seed: usize,
-    device: R::Device,
+    device: Device,
     verbose: usize,
 ) -> Result<FastLouvainResults, BixverseErrors> {
-    let (centroids, assignments) =
-        fast_cluster_kmeans_gpu::<R>(data, params, seed, device, verbose)?;
+    let (centroids, assignments) = fast_cluster_kmeans_gpu(data, params, seed, device, verbose)?;
 
     let graph = build_centroid_graph(
         centroids.as_ref(),
@@ -251,7 +251,7 @@ pub fn fast_louvain_clusters_gpu<R: Runtime>(
 /// * Propagates the k-means, kNN and Louvain errors, plus `InvalidArgument` for
 ///   fewer than two Louvain seeds.
 #[allow(clippy::too_many_arguments)]
-pub fn fast_louvain_clusters_grid_gpu<R: Runtime>(
+pub fn fast_louvain_clusters_grid_gpu(
     data: MatRef<f32>,
     resolutions: &[f32],
     params: &FastLouvainParamsGpu,
@@ -259,11 +259,10 @@ pub fn fast_louvain_clusters_grid_gpu<R: Runtime>(
     return_k_mean: bool,
     seed: usize,
     n_louvain_seeds: usize,
-    device: R::Device,
+    device: Device,
     verbose: usize,
 ) -> Result<FastLouvainResults, BixverseErrors> {
-    let (centroids, assignments) =
-        fast_cluster_kmeans_gpu::<R>(data, params, seed, device, verbose)?;
+    let (centroids, assignments) = fast_cluster_kmeans_gpu(data, params, seed, device, verbose)?;
 
     let graph = build_centroid_graph(
         centroids.as_ref(),
@@ -298,7 +297,7 @@ pub fn fast_louvain_clusters_grid_gpu<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+    use cubecl::wgpu::WgpuDevice;
     use either::Either;
     use faer::Mat;
     use rand::rngs::StdRng;
@@ -306,9 +305,9 @@ mod tests {
     use std::collections::HashMap;
 
     fn try_device() -> Option<WgpuDevice> {
-        let device = WgpuDevice::DefaultDevice;
+        let device = WgpuDevice::default();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            WgpuRuntime::client(&device);
+            cubecl::Device::from(device.clone()).client();
         }))
         .ok()
         .map(|_| device)
@@ -378,14 +377,14 @@ mod tests {
         let resolutions: Vec<f32> = vec![1.0];
 
         let labels = unwrap_single(
-            fast_louvain_clusters_gpu::<WgpuRuntime>(
+            fast_louvain_clusters_gpu(
                 data.as_ref(),
                 &resolutions,
                 &default_params(),
                 false,
                 false,
                 0,
-                device,
+                device.clone().into(),
                 0,
             )
             .unwrap(),
@@ -411,14 +410,14 @@ mod tests {
         params.knn_params.k = 10;
 
         let labels = unwrap_single(
-            fast_louvain_clusters_gpu::<WgpuRuntime>(
+            fast_louvain_clusters_gpu(
                 data.as_ref(),
                 &resolutions,
                 &params,
                 true,
                 false,
                 0,
-                device,
+                device.clone().into(),
                 0,
             )
             .unwrap(),
@@ -436,14 +435,14 @@ mod tests {
 
         let run = |device: WgpuDevice| {
             unwrap_single(
-                fast_louvain_clusters_gpu::<WgpuRuntime>(
+                fast_louvain_clusters_gpu(
                     data.as_ref(),
                     &resolutions,
                     &default_params(),
                     false,
                     false,
                     7,
-                    device,
+                    device.clone().into(),
                     0,
                 )
                 .unwrap(),
@@ -460,14 +459,14 @@ mod tests {
         let data = make_two_blobs(100, 5, 5.0, 42);
         let params = default_params();
 
-        let res = fast_louvain_clusters_gpu::<WgpuRuntime>(
+        let res = fast_louvain_clusters_gpu(
             data.as_ref(),
             &[1.0],
             &params,
             false,
             true,
             0,
-            device,
+            device.clone().into(),
             0,
         )
         .unwrap();
@@ -487,7 +486,7 @@ mod tests {
         let resolutions: Vec<f32> = vec![0.5, 1.0];
 
         let results = unwrap_grid(
-            fast_louvain_clusters_grid_gpu::<WgpuRuntime>(
+            fast_louvain_clusters_grid_gpu(
                 data.as_ref(),
                 &resolutions,
                 &default_params(),
@@ -495,7 +494,7 @@ mod tests {
                 false,
                 0,
                 4,
-                device,
+                device.clone().into(),
                 0,
             )
             .unwrap(),
@@ -526,7 +525,7 @@ mod tests {
         let Some(device) = try_device() else { return };
         let data = make_two_blobs(100, 5, 5.0, 42);
 
-        let result = fast_louvain_clusters_grid_gpu::<WgpuRuntime>(
+        let result = fast_louvain_clusters_grid_gpu(
             data.as_ref(),
             &[1.0],
             &default_params(),
@@ -534,7 +533,7 @@ mod tests {
             false,
             0,
             1,
-            device,
+            device.clone().into(),
             0,
         );
 

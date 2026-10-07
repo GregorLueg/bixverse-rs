@@ -35,6 +35,7 @@
 
 use std::time::{Duration, Instant};
 
+use cubecl::Device;
 use cubecl::future;
 use cubecl::prelude::*;
 use cubecl::wgpu::WgpuRuntime;
@@ -233,7 +234,7 @@ fn build_sparse(m: usize, n: usize, density: f64) -> (CompressedSparseData2<f32>
 /// ### Params
 ///
 /// * `client` - CubeCL compute client
-fn sync<R: Runtime>(client: &ComputeClient<R>) {
+fn sync(client: &Client) {
     future::block_on(client.sync()).expect("device sync failed");
 }
 
@@ -369,13 +370,13 @@ fn report_stages(label: &str, upload: Duration, scratch: Duration, solve: Durati
 ///
 /// * `shape` - The problem to run
 /// * `device` - CubeCL device
-fn bench_dense<R: Runtime>(shape: NmfShape, device: &R::Device) {
+fn bench_dense(shape: NmfShape, device: &Device) {
     let NmfShape { label, m, n, k, .. } = shape;
     println!("-- {label} dense: {m} x {n}, k = {k}, {FIXED_ITERS} iters --");
 
     let v = build_dense(m, n, k);
     let opts = bench_opts();
-    let client = R::client(device);
+    let client = device.client();
 
     // CPU baseline, in the same pass so the comparison never spans machines.
     let cpu_in = DenseInput::new(v.as_ref()).expect("CPU input");
@@ -392,8 +393,8 @@ fn bench_dense<R: Runtime>(shape: NmfShape, device: &R::Device) {
     let mut gpu_loss = 0f32;
     let (gpu_best, gpu_worst) = best_of(|| {
         let (d, elapsed) = timed(|| {
-            let input = GpuDenseNmfInput::<R>::new(v.as_ref(), &client).expect("GPU input");
-            let scratch = NmfGpuScratch::<R>::new(m, n, k, opts.eps, &client).expect("GPU scratch");
+            let input = GpuDenseNmfInput::new(v.as_ref(), &client).expect("GPU input");
+            let scratch = NmfGpuScratch::new(m, n, k, opts.eps, &client).expect("GPU scratch");
             let res = nmf_hals_gpu(&input, k, &opts, &scratch, &client, 0).expect("GPU solve");
             sync(&client);
             res.final_loss
@@ -415,7 +416,7 @@ fn bench_dense<R: Runtime>(shape: NmfShape, device: &R::Device) {
     );
     println!("  relative loss: cpu {rel_cpu:.6}  gpu {rel_gpu:.6}  (they solve the same problem)");
 
-    run_dense_staged::<R>(shape, v.as_ref(), &client);
+    run_dense_staged(shape, v.as_ref(), &client);
 }
 
 /// The staged breakdown for the dense arm, plus the per-iteration rate budget.
@@ -425,17 +426,17 @@ fn bench_dense<R: Runtime>(shape: NmfShape, device: &R::Device) {
 /// * `shape` - The problem to run
 /// * `v` - The matrix, borrowed
 /// * `client` - CubeCL compute client
-fn run_dense_staged<R: Runtime>(shape: NmfShape, v: faer::MatRef<f32>, client: &ComputeClient<R>) {
+fn run_dense_staged(shape: NmfShape, v: faer::MatRef<f32>, client: &Client) {
     let NmfShape { label, m, n, k, .. } = shape;
     let opts = bench_opts();
 
     let (input, upload) = timed(|| {
-        let i = GpuDenseNmfInput::<R>::new(v, client).expect("GPU input");
+        let i = GpuDenseNmfInput::new(v, client).expect("GPU input");
         sync(client);
         i
     });
     let (scratch, alloc) = timed(|| {
-        let s = NmfGpuScratch::<R>::new(m, n, k, opts.eps, client).expect("GPU scratch");
+        let s = NmfGpuScratch::new(m, n, k, opts.eps, client).expect("GPU scratch");
         sync(client);
         s
     });
@@ -472,7 +473,7 @@ fn run_dense_staged<R: Runtime>(shape: NmfShape, v: faer::MatRef<f32>, client: &
 ///
 /// * `shape` - The problem to run
 /// * `device` - CubeCL device
-fn bench_sparse<R: Runtime>(shape: NmfShape, device: &R::Device) {
+fn bench_sparse(shape: NmfShape, device: &Device) {
     let NmfShape {
         label,
         m,
@@ -491,7 +492,7 @@ fn bench_sparse<R: Runtime>(shape: NmfShape, device: &R::Device) {
     );
 
     let opts = bench_opts();
-    let client = R::client(device);
+    let client = device.client();
 
     let cpu_in = SparseInput::<f32, f32>::from_primary(&csr).expect("CPU sparse input");
     let sq_frob = NmfInput::sq_frob(&cpu_in);
@@ -508,10 +509,10 @@ fn bench_sparse<R: Runtime>(shape: NmfShape, device: &R::Device) {
     let (gpu_best, gpu_worst) = best_of(|| {
         let host = SparseInput::<f32, f32>::from_primary(&csr).expect("host sparse input");
         let (d, elapsed) = timed(|| {
-            let (input, up) = timed(|| GpuSparseNmfInput::<R>::new(host, &client).expect("upload"));
+            let (input, up) = timed(|| GpuSparseNmfInput::new(host, &client).expect("upload"));
             sync(&client);
             upload = up;
-            let scratch = NmfGpuScratch::<R>::new(m, n, k, opts.eps, &client).expect("GPU scratch");
+            let scratch = NmfGpuScratch::new(m, n, k, opts.eps, &client).expect("GPU scratch");
             let res = nmf_hals_gpu(&input, k, &opts, &scratch, &client, 0).expect("GPU solve");
             sync(&client);
             res.final_loss
@@ -564,20 +565,20 @@ fn bench_sparse<R: Runtime>(shape: NmfShape, device: &R::Device) {
 /// * `shape` - The problem to run
 /// * `n_runs` - Restarts to run
 /// * `device` - CubeCL device
-fn bench_restarts<R: Runtime>(shape: NmfShape, n_runs: usize, device: &R::Device) {
+fn bench_restarts(shape: NmfShape, n_runs: usize, device: &Device) {
     let NmfShape { label, m, n, k, .. } = shape;
     println!("-- {label} restarts: {n_runs} runs at k = {k}, {FIXED_ITERS} iters each --");
 
     let v = build_dense(m, n, k);
     let opts = bench_opts();
-    let client = R::client(device);
+    let client = device.client();
 
     let cpu_in = DenseInput::new(v.as_ref()).expect("CPU input");
     let (_, cpu) = timed(|| stabilised_nmf(&cpu_in, k, n_runs, 0, &opts, 0).expect("CPU restarts"));
 
     let (_, gpu) = timed(|| {
-        let input = GpuDenseNmfInput::<R>::new(v.as_ref(), &client).expect("GPU input");
-        let scratch = NmfGpuScratch::<R>::new(m, n, k, opts.eps, &client).expect("GPU scratch");
+        let input = GpuDenseNmfInput::new(v.as_ref(), &client).expect("GPU input");
+        let scratch = NmfGpuScratch::new(m, n, k, opts.eps, &client).expect("GPU scratch");
         let res = stabilised_nmf_gpu(&input, k, n_runs, 0, &opts, &scratch, &client, 0)
             .expect("GPU restarts");
         sync(&client);
@@ -598,7 +599,7 @@ fn bench_restarts<R: Runtime>(shape: NmfShape, n_runs: usize, device: &R::Device
 
 fn main() {
     let device: <WgpuRuntime as Runtime>::Device = Default::default();
-    let limits = GpuLimits::from_client(&WgpuRuntime::client(&device));
+    let limits = GpuLimits::from_client(&<WgpuRuntime>::client(&device));
 
     println!("====== GPU HALS NMF bench ======\n");
     println!(
@@ -611,19 +612,23 @@ fn main() {
 
     for shape in DEFAULT_SHAPES {
         if shape.density.is_none() {
-            bench_dense::<WgpuRuntime>(shape, &device);
+            bench_dense(shape, &cubecl::Device::from(device.clone()));
         } else {
-            bench_sparse::<WgpuRuntime>(shape, &device);
+            bench_sparse(shape, &cubecl::Device::from(device.clone()));
         }
         println!();
     }
 
-    bench_restarts::<WgpuRuntime>(DEFAULT_SHAPES[1], N_RESTARTS, &device);
+    bench_restarts(
+        DEFAULT_SHAPES[1],
+        N_RESTARTS,
+        &cubecl::Device::from(device.clone()),
+    );
     println!();
 
     if std::env::var("BIXVERSE_BENCH_BIG").is_ok() {
         for shape in BIG_SHAPES {
-            bench_sparse::<WgpuRuntime>(shape, &device);
+            bench_sparse(shape, &cubecl::Device::from(device.clone()));
             println!();
         }
     } else {

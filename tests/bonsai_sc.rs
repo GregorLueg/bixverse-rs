@@ -358,7 +358,7 @@ fn test_sanity_bonsai_sc_returns_a_single_rooted_tree() {
 #[cfg(feature = "gpu")]
 fn test_sanity_bonsai_sc_gpu_returns_a_single_rooted_tree() {
     use bixverse_rs::gpu::sc_gpu::sanity_bonsai_gpu::sanity_bonsai_sc_gpu;
-    use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+    use cubecl::wgpu::WgpuDevice;
 
     let sim = fixture();
     let stores = build_stores("tree_gpu", &sim, 0);
@@ -367,13 +367,13 @@ fn test_sanity_bonsai_sc_gpu_returns_a_single_rooted_tree() {
 
     let cells: Vec<usize> = (0..sim.counts.n_cells()).collect();
     let genes: Vec<usize> = (0..sim.counts.n_genes()).collect();
-    let res = sanity_bonsai_sc_gpu::<WgpuRuntime, _, _>(
+    let res = sanity_bonsai_sc_gpu::<_, _>(
         &gene_reader,
         &cell_reader,
         &cells,
         &genes,
         &BonsaiScParams::default(),
-        WgpuDevice::default(),
+        WgpuDevice::default().clone().into(),
         Verbosity::Quiet,
     )
     .expect("bonsai");
@@ -421,15 +421,15 @@ fn test_metacell_path_matches_the_disk_path() {
 #[cfg(feature = "gpu")]
 fn test_metacell_gpu_path_returns_a_single_rooted_tree() {
     use bixverse_rs::gpu::sc_gpu::sanity_bonsai_gpu::sanity_bonsai_mc_gpu;
-    use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+    use cubecl::wgpu::WgpuDevice;
 
     let sim = fixture();
     let genes: Vec<usize> = (0..sim.counts.n_genes()).collect();
-    let res = sanity_bonsai_mc_gpu::<WgpuRuntime>(
+    let res = sanity_bonsai_mc_gpu(
         &as_metacell_matrix(&sim),
         &genes,
         &BonsaiScParams::default(),
-        WgpuDevice::default(),
+        WgpuDevice::default().clone().into(),
         Verbosity::Quiet,
     )
     .expect("bonsai");

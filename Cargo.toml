@@ -85,9 +85,9 @@ approx = "0.5.1"
 ann-search-rs = { version = "0.10.1", default-features = false }
 bincode = { version = "2.0.1", features = ["serde"], optional = true }
 bonsai-rs = { version = "0.2.2", features = ["sanity"], optional = true }
-cubecl = { version = "0.10.0", features = ["wgpu"], optional = true }
+cubecl = { version = "0.11.0", features = ["wgpu"], optional = true }
 cubecl-utils-rs = { version = "0.1.0", optional = true }
-cubek = { version = "0.2.0", features = ["matmul"], optional = true }
+cubek = { version = "0.3.0", features = ["matmul"], optional = true }
 document-features = "0.2.12"
 edge-rs = { version = "0.2.1", optional = true }
 either = "1.15.0"
@@ -202,3 +202,10 @@ required-features = ["single-cell"]
 [[bench]]
 name = "r_ffi_bench"
 harness = false
+
+[patch.crates-io]
+cubecl-utils-rs = { path = "/private/tmp/claude-501/-Users-gregorlueg-repos-shared-bixverse-project/94daeefe-936b-457d-812d-6cb8506f4407/scratchpad/wt/cubecl-utils-rs" }
+ann-search-rs = { path = "/private/tmp/claude-501/-Users-gregorlueg-repos-shared-bixverse-project/94daeefe-936b-457d-812d-6cb8506f4407/scratchpad/wt/ann-search-rs" }
+edge-rs = { path = "/private/tmp/claude-501/-Users-gregorlueg-repos-shared-bixverse-project/94daeefe-936b-457d-812d-6cb8506f4407/scratchpad/wt/edge-rs" }
+bonsai-rs = { path = "/private/tmp/claude-501/-Users-gregorlueg-repos-shared-bixverse-project/94daeefe-936b-457d-812d-6cb8506f4407/scratchpad/wt/bonsai-rs" }
+sanity-sc-rs = { path = "/private/tmp/claude-501/-Users-gregorlueg-repos-shared-bixverse-project/94daeefe-936b-457d-812d-6cb8506f4407/scratchpad/wt/sanity-sc-rs" }

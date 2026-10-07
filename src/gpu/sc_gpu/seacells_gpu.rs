@@ -20,6 +20,7 @@
 //! searching. Nothing on the path is quadratic in `k`; it used to be densified
 //! to `4k²` bytes on both, which is 381 MB at k = 10 000.
 
+use cubecl::Device;
 use cubecl::prelude::*;
 use cubecl_utils_rs::prelude::*;
 
@@ -61,9 +62,9 @@ pub type SeacellsFitResult = (Vec<usize>, Vec<Vec<usize>>, Vec<usize>, Vec<f32>)
 ///
 /// Either solve independently falls back to the CPU when no workgroup tier
 /// covers `k`, so a shape can run one on the device and the other on the host.
-pub struct GpuFwArgminB<R: Runtime> {
+pub struct GpuFwArgminB {
     /// Compute client
-    client: ComputeClient<R>,
+    client: Client,
     /// Number of cells
     n: usize,
     /// Number of archetypes
@@ -71,40 +72,40 @@ pub struct GpuFwArgminB<R: Runtime> {
     /// Workgroups the kernel dispatches, and therefore the partial-buffer depth
     blocks: usize,
     /// `A Aᵀ` as CSR `k × k`, rebound per B update
-    t1: Option<GpuCompressedSparseData<R, f32>>,
+    t1: Option<GpuCompressedSparseData<f32>>,
     /// Per-thread column segments of `t1`, `[k, b_wg + 1]`, rebound with it
-    t1_seg: Option<GpuTensor<R, u32>>,
+    t1_seg: Option<GpuTensor<u32>>,
     /// Workgroup width the B argmin was last bound for
     b_wg: u32,
     /// CPU back end for the B argmin, used when no workgroup tier covers `k`
     b_cpu: Option<CpuFwArgminB>,
     /// `K² Aᵀ` as CSR `n × k`, rebound per B update
-    t2: Option<GpuCompressedSparseData<R, f32>>,
+    t2: Option<GpuCompressedSparseData<f32>>,
     /// Per-block partial minima `[blocks, k]`
-    part_val: GpuTensor<R, f32>,
+    part_val: GpuTensor<f32>,
     /// Per-block partial argmins `[blocks, k]`
-    part_idx: GpuTensor<R, u32>,
+    part_idx: GpuTensor<u32>,
     /// Per-block partial `sum(B * G)` `[blocks]`
-    gap_partial: GpuTensor<R, f32>,
+    gap_partial: GpuTensor<f32>,
     /// Reduced minima `[k]`
-    out_val: GpuTensor<R, f32>,
+    out_val: GpuTensor<f32>,
     /// Reduced argmins `[k]`
-    out_idx: GpuTensor<R, u32>,
+    out_idx: GpuTensor<u32>,
     /// Atom capacity the A-update scratch below is sized for, `0` when unset
     a_cap: usize,
     /// Cell count the A-update scratch is sized for, `0` when unset
     a_n: usize,
     /// A-update atom indices `[n, a_cap]`
-    a_atom_idx: Option<GpuTensor<R, u32>>,
+    a_atom_idx: Option<GpuTensor<u32>>,
     /// A-update atom weights `[n, a_cap]`
-    a_atom_val: Option<GpuTensor<R, f32>>,
+    a_atom_val: Option<GpuTensor<f32>>,
     /// A-update atom counts `[n]`
-    a_atom_cnt: Option<GpuTensor<R, u32>>,
+    a_atom_cnt: Option<GpuTensor<u32>>,
     /// Verbosity, so a CPU fallback can announce itself
     verbose: usize,
 }
 
-impl<R: Runtime> GpuFwArgminB<R> {
+impl GpuFwArgminB {
     /// Allocate the device scratch for an `n × k` problem.
     ///
     /// ### Params
@@ -117,7 +118,7 @@ impl<R: Runtime> GpuFwArgminB<R> {
     ///
     /// Self, with all pooled buffers allocated, or `CubeclUtils` if one of them
     /// busts the device's per-binding size limit.
-    pub fn new(n: usize, k: usize, client: ComputeClient<R>) -> Result<Self, BixverseErrors> {
+    pub fn new(n: usize, k: usize, client: Client) -> Result<Self, BixverseErrors> {
         Self::with_verbosity(n, k, client, 0)
     }
 
@@ -139,16 +140,16 @@ impl<R: Runtime> GpuFwArgminB<R> {
     pub fn with_verbosity(
         n: usize,
         k: usize,
-        client: ComputeClient<R>,
+        client: Client,
         verbose: usize,
     ) -> Result<Self, BixverseErrors> {
         let blocks = B_ARGMIN_BLOCKS.min(n.max(1) as u32) as usize;
 
-        let part_val = GpuTensor::<R, f32>::empty(vec![blocks * k], &client)?;
-        let part_idx = GpuTensor::<R, u32>::empty(vec![blocks * k], &client)?;
-        let gap_partial = GpuTensor::<R, f32>::empty(vec![blocks], &client)?;
-        let out_val = GpuTensor::<R, f32>::empty(vec![k], &client)?;
-        let out_idx = GpuTensor::<R, u32>::empty(vec![k], &client)?;
+        let part_val = GpuTensor::<f32>::empty(vec![blocks * k], &client)?;
+        let part_idx = GpuTensor::<u32>::empty(vec![blocks * k], &client)?;
+        let gap_partial = GpuTensor::<f32>::empty(vec![blocks], &client)?;
+        let out_val = GpuTensor::<f32>::empty(vec![k], &client)?;
+        let out_idx = GpuTensor::<u32>::empty(vec![k], &client)?;
 
         Ok(Self {
             client,
@@ -199,7 +200,7 @@ impl<R: Runtime> GpuFwArgminB<R> {
     }
 }
 
-impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
+impl FwArgminB for GpuFwArgminB {
     fn begin(
         &mut self,
         t1: &CompressedSparseData2<f32>,
@@ -240,7 +241,7 @@ impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
         };
         self.b_cpu = None;
         let seg_host = a_columns_segments(t1, wg, self.k.div_ceil(wg as usize));
-        self.t1_seg = Some(GpuTensor::<R, u32>::from_slice(
+        self.t1_seg = Some(GpuTensor::<u32>::from_slice(
             &seg_host,
             vec![seg_host.len()],
             &self.client,
@@ -249,18 +250,10 @@ impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
         self.b_wg = wg;
 
         self.t1 = Some(
-            GpuCompressedSparseData::<R, f32>::from_compressed_sparse_data_2(
-                t1,
-                false,
-                &self.client,
-            )?,
+            GpuCompressedSparseData::<f32>::from_compressed_sparse_data_2(t1, false, &self.client)?,
         );
         self.t2 = Some(
-            GpuCompressedSparseData::<R, f32>::from_compressed_sparse_data_2(
-                t2,
-                false,
-                &self.client,
-            )?,
+            GpuCompressedSparseData::<f32>::from_compressed_sparse_data_2(t2, false, &self.client)?,
         );
 
         Ok(())
@@ -300,16 +293,13 @@ impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
             .as_ref()
             .ok_or(BixverseErrors::SEACellsModelNotFitted)?;
 
-        let k2b_gpu = GpuCompressedSparseData::<R, f32>::from_compressed_sparse_data_2(
+        let k2b_gpu = GpuCompressedSparseData::<f32>::from_compressed_sparse_data_2(
             k2_b,
             false,
             &self.client,
         )?;
-        let b_gpu = GpuCompressedSparseData::<R, f32>::from_compressed_sparse_data_2(
-            b,
-            false,
-            &self.client,
-        )?;
+        let b_gpu =
+            GpuCompressedSparseData::<f32>::from_compressed_sparse_data_2(b, false, &self.client)?;
 
         launch_fw_argmin_b(
             &k2b_gpu,
@@ -389,22 +379,18 @@ impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
             return Ok(fw_columns_a(t1, a_prev_t, k2_b, k, n, n_iters, pruning));
         };
 
-        let t1_gpu = GpuCompressedSparseData::<R, f32>::from_compressed_sparse_data_2(
-            t1,
-            false,
-            &self.client,
-        )?;
+        let t1_gpu =
+            GpuCompressedSparseData::<f32>::from_compressed_sparse_data_2(t1, false, &self.client)?;
         let seg_host = a_columns_segments(t1, wg, k.div_ceil(wg as usize));
-        let t1_seg =
-            GpuTensor::<R, u32>::from_slice(&seg_host, vec![seg_host.len()], &self.client)?;
+        let t1_seg = GpuTensor::<u32>::from_slice(&seg_host, vec![seg_host.len()], &self.client)?;
         drop(seg_host);
 
-        let a_prev_gpu = GpuCompressedSparseData::<R, f32>::from_compressed_sparse_data_2(
+        let a_prev_gpu = GpuCompressedSparseData::<f32>::from_compressed_sparse_data_2(
             a_prev_t,
             false,
             &self.client,
         )?;
-        let k2b_gpu = GpuCompressedSparseData::<R, f32>::from_compressed_sparse_data_2(
+        let k2b_gpu = GpuCompressedSparseData::<f32>::from_compressed_sparse_data_2(
             k2_b,
             false,
             &self.client,
@@ -414,9 +400,9 @@ impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
         if self.a_atom_idx.is_none() || self.a_n * self.a_cap < required || self.a_n < n {
             self.a_cap = cap;
             self.a_n = n;
-            self.a_atom_idx = Some(GpuTensor::<R, u32>::empty(vec![required], &self.client)?);
-            self.a_atom_val = Some(GpuTensor::<R, f32>::empty(vec![required], &self.client)?);
-            self.a_atom_cnt = Some(GpuTensor::<R, u32>::empty(vec![n], &self.client)?);
+            self.a_atom_idx = Some(GpuTensor::<u32>::empty(vec![required], &self.client)?);
+            self.a_atom_val = Some(GpuTensor::<f32>::empty(vec![required], &self.client)?);
+            self.a_atom_cnt = Some(GpuTensor::<u32>::empty(vec![n], &self.client)?);
         }
         let stride = self.a_cap;
         let atom_idx = self.a_atom_idx.as_ref().expect("just allocated").clone();
@@ -424,7 +410,7 @@ impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
         let atom_cnt = self.a_atom_cnt.as_ref().expect("just allocated").clone();
 
         let threshold =
-            GpuTensor::<R, f32>::from_slice(&[pruning.unwrap_or(0.0)], vec![1], &self.client)?;
+            GpuTensor::<f32>::from_slice(&[pruning.unwrap_or(0.0)], vec![1], &self.client)?;
 
         launch_fw_columns_a(
             &t1_gpu,
@@ -539,17 +525,17 @@ impl<R: Runtime> FwArgminB for GpuFwArgminB<R> {
 ///
 /// Persad, et al., Nat. Biotechnol., 2023
 #[allow(clippy::too_many_arguments)]
-pub fn seacells_fit_gpu<R: Runtime>(
+pub fn seacells_fit_gpu(
     pca: faer::MatRef<f32>,
     knn_indices: &[Vec<usize>],
     knn_distances: &[Vec<f32>],
     params: &SEACellsParams,
     seed: usize,
-    device: R::Device,
+    device: Device,
     verbose: usize,
 ) -> Result<SeacellsFitResult, BixverseErrors> {
     let verbosity = parse_verbosity_level(verbose);
-    let client = R::client(&device);
+    let client = device.client();
 
     let n = pca.nrows();
 
@@ -574,7 +560,7 @@ pub fn seacells_fit_gpu<R: Runtime>(
     let archetypes = model.get_archetypes()?;
     let k = archetypes.len();
 
-    let mut backend = GpuFwArgminB::<R>::with_verbosity(n, k, client, verbose)?;
+    let mut backend = GpuFwArgminB::with_verbosity(n, k, client, verbose)?;
 
     if verbosity.detailed_verbosity() {
         println!(
@@ -609,9 +595,9 @@ mod tests {
 
     /// Skip rather than fail where no GPU is available.
     fn try_device() -> Option<WgpuDevice> {
-        let device = WgpuDevice::DefaultDevice;
+        let device = WgpuDevice::default();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            WgpuRuntime::client(&device);
+            <WgpuRuntime>::client(&device);
         }))
         .ok()
         .map(|_| device)
@@ -690,7 +676,7 @@ mod tests {
             eprintln!("no GPU available, skipping");
             return;
         };
-        let client = WgpuRuntime::client(&device);
+        let client = <WgpuRuntime>::client(&device);
 
         // Both axes have to be crossed at once.
         //
@@ -721,7 +707,7 @@ mod tests {
             // thresholds ascend. A back end that uploaded the threshold once and
             // pooled it would pass every call after the first with the wrong
             // value, and a fresh back end per iteration would hide that.
-            let mut backend = GpuFwArgminB::<WgpuRuntime>::new(n, k, client.clone()).unwrap();
+            let mut backend = GpuFwArgminB::new(n, k, client.clone()).unwrap();
 
             for pruning in [None, Some(1e-7f32), Some(5e-2f32)] {
                 let expected = fw_columns_a(&t1, &a_prev_t, &k2_b, k, n, n_iters, pruning);
@@ -817,7 +803,7 @@ mod tests {
             eprintln!("no GPU available, skipping");
             return;
         };
-        let client = WgpuRuntime::client(&device);
+        let client = <WgpuRuntime>::client(&device);
 
         let n = 1_500usize;
         let n_iters = 12usize;
@@ -838,7 +824,7 @@ mod tests {
             let a_prev_t = random_csr(n, k, 6, true, false, &mut rng);
             let k2_b = random_csr(n, k, 10, false, false, &mut rng);
 
-            let mut backend = GpuFwArgminB::<WgpuRuntime>::new(n, k, client.clone()).unwrap();
+            let mut backend = GpuFwArgminB::new(n, k, client.clone()).unwrap();
 
             for pruning in [None, Some(1e-7f32)] {
                 let expected = fw_columns_a(&t1, &a_prev_t, &k2_b, k, n, n_iters, pruning);
@@ -973,34 +959,27 @@ mod tests {
         pruning: Option<f32>,
         use_plane: bool,
         wg: Option<u32>,
-        client: &ComputeClient<WgpuRuntime>,
+        client: &Client,
     ) -> (Vec<u32>, Vec<f32>, Vec<u32>, usize) {
         let cap = a_columns_capacity(a_prev_t, n_iters);
 
-        let t1_gpu = GpuCompressedSparseData::<WgpuRuntime, f32>::from_compressed_sparse_data_2(
-            t1, false, client,
-        )
-        .expect("upload failed");
+        let t1_gpu =
+            GpuCompressedSparseData::<f32>::from_compressed_sparse_data_2(t1, false, client)
+                .expect("upload failed");
         let width = wg.unwrap_or(A_COLUMNS_WG);
         let seg_host = a_columns_segments(t1, width, k.div_ceil(width as usize));
-        let t1_seg =
-            GpuTensor::<WgpuRuntime, u32>::from_slice(&seg_host, vec![seg_host.len()], client)
-                .unwrap();
-        let a_gpu = GpuCompressedSparseData::<WgpuRuntime, f32>::from_compressed_sparse_data_2(
-            a_prev_t, false, client,
-        )
-        .expect("upload failed");
-        let k2b_gpu = GpuCompressedSparseData::<WgpuRuntime, f32>::from_compressed_sparse_data_2(
-            k2_b, false, client,
-        )
-        .expect("upload failed");
+        let t1_seg = GpuTensor::<u32>::from_slice(&seg_host, vec![seg_host.len()], client).unwrap();
+        let a_gpu =
+            GpuCompressedSparseData::<f32>::from_compressed_sparse_data_2(a_prev_t, false, client)
+                .expect("upload failed");
+        let k2b_gpu =
+            GpuCompressedSparseData::<f32>::from_compressed_sparse_data_2(k2_b, false, client)
+                .expect("upload failed");
 
-        let atom_idx = GpuTensor::<WgpuRuntime, u32>::empty(vec![n * cap], client).unwrap();
-        let atom_val = GpuTensor::<WgpuRuntime, f32>::empty(vec![n * cap], client).unwrap();
-        let atom_cnt = GpuTensor::<WgpuRuntime, u32>::empty(vec![n], client).unwrap();
-        let thr =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&[pruning.unwrap_or(0.0)], vec![1], client)
-                .unwrap();
+        let atom_idx = GpuTensor::<u32>::empty(vec![n * cap], client).unwrap();
+        let atom_val = GpuTensor::<f32>::empty(vec![n * cap], client).unwrap();
+        let atom_cnt = GpuTensor::<u32>::empty(vec![n], client).unwrap();
+        let thr = GpuTensor::<f32>::from_slice(&[pruning.unwrap_or(0.0)], vec![1], client).unwrap();
 
         launch_fw_columns_a(
             &t1_gpu,
@@ -1044,13 +1023,7 @@ mod tests {
     /// * `n_iters` - Frank-Wolfe iterations
     /// * `seed` - RNG seed for the fixtures
     /// * `client` - Compute client
-    fn assert_reduction_arms_agree(
-        n: usize,
-        k: usize,
-        n_iters: usize,
-        seed: u64,
-        client: &ComputeClient<WgpuRuntime>,
-    ) {
+    fn assert_reduction_arms_agree(n: usize, k: usize, n_iters: usize, seed: u64, client: &Client) {
         let limits = GpuLimits::from_client(client);
         let plane_ok = plane_reduce_viable(A_COLUMNS_WG, &limits);
 
@@ -1122,7 +1095,7 @@ mod tests {
             eprintln!("no GPU available, skipping");
             return;
         };
-        let client = WgpuRuntime::client(&device);
+        let client = <WgpuRuntime>::client(&device);
 
         assert_reduction_arms_agree(64, 32, 4, 5, &client);
     }
@@ -1136,7 +1109,7 @@ mod tests {
             eprintln!("no GPU available, skipping");
             return;
         };
-        let client = WgpuRuntime::client(&device);
+        let client = <WgpuRuntime>::client(&device);
 
         assert_reduction_arms_agree(1_500, 300, 12, 5, &client);
     }
@@ -1155,7 +1128,7 @@ mod tests {
             eprintln!("no GPU available, skipping");
             return;
         };
-        let client = WgpuRuntime::client(&device);
+        let client = <WgpuRuntime>::client(&device);
 
         let n = 300usize;
         let k = 300usize;
@@ -1172,7 +1145,7 @@ mod tests {
             assert_eq!(cap, widest + n_iters);
 
             let expected = fw_columns_a(&t1, &a_prev_t, &k2_b, k, n, n_iters, Some(1e-7));
-            let mut backend = GpuFwArgminB::<WgpuRuntime>::new(n, k, client.clone()).unwrap();
+            let mut backend = GpuFwArgminB::new(n, k, client.clone()).unwrap();
             let actual = backend
                 .columns_a(&t1, &a_prev_t, &k2_b, k, n, n_iters, Some(1e-7))
                 .expect("column solve failed");

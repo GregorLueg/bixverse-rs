@@ -31,8 +31,8 @@
 
 use std::time::Instant;
 
-use cubecl::Runtime;
 use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+use cubecl_utils_rs::prelude::Runtime;
 use rand::prelude::*;
 use rand::rngs::SmallRng;
 
@@ -268,9 +268,9 @@ fn scenic_params_e2e(learner: RegressionLearner) -> ScenicParams {
 ///
 /// The device, or `None` when creating a client panics.
 fn try_device() -> Option<WgpuDevice> {
-    let device = WgpuDevice::DefaultDevice;
+    let device = WgpuDevice::default();
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        WgpuRuntime::client(&device);
+        <WgpuRuntime>::client(&device);
     }))
     .ok()
     .map(|_| device)
@@ -388,13 +388,13 @@ fn run_kernel_gpu(
     };
     println!("  {id}: running (GPU)...");
     match median_of(|| {
-        fit_multi_trees_gpu::<WgpuRuntime>(
+        fit_multi_trees_gpu(
             axes,
             x,
             n_samples,
             config,
             SEED,
-            device.clone(),
+            device.clone().into(),
             &params,
         )
         .expect("GPU fit failed");
@@ -493,13 +493,13 @@ fn run_e2e_gpu(
     println!("  {id}: running (GPU)...");
     let t = single_shot(|| {
         let tf_indices: Vec<usize> = (0..N_TFS_E2E).collect();
-        run_scenic_grn_in_memory_gpu::<WgpuRuntime, _>(
+        run_scenic_grn_in_memory_gpu::<_>(
             csc,
             &tf_indices,
             params,
             &gpu_params,
             SEED,
-            device.clone(),
+            device.clone().into(),
             0,
         )
         .expect("GPU e2e fit failed");
