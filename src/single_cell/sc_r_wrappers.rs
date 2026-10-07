@@ -3870,6 +3870,8 @@ impl NebulaParamsFromR for NebulaParams {
             kappa: real("kappa", defaults.kappa),
             cpc: real("cpc", defaults.cpc),
             mincp: r_list_count(params, "mincp")?.unwrap_or(defaults.mincp),
+            min_subjects: r_list_count_allow_zero(params, "min_subjects")?
+                .unwrap_or(defaults.min_subjects),
             reml: params
                 .get("reml")
                 .and_then(|v| v.as_bool())

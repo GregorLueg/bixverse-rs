@@ -1,5 +1,12 @@
 # News
 
+## 0.6.1
+
+### Feature
+
+- Wired in the changes from `edge-rs="0.2.0"` to enable minimum sample filtering
+  for Nebula on the CPU and GPU path.
+
 ## 0.6.0
 
 **Large performance updates included in this version**
