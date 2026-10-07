@@ -36,7 +36,6 @@
 //! discrete GPUs and on Apple Silicon with unified memory.
 
 use cubecl::Device;
-use cubecl_utils_rs::prelude::Runtime;
 use cubecl_utils_rs::prelude::*;
 use cubek::matmul::definition::MatmulPrecision;
 use faer::Mat;
@@ -394,13 +393,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+    use cubecl::wgpu::WgpuDevice;
     use faer::Mat;
 
     fn try_device() -> Option<WgpuDevice> {
         let device = WgpuDevice::default();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            <WgpuRuntime>::client(&device);
+            cubecl::Device::from(device.clone()).client();
         }))
         .ok()
         .map(|_| device)
@@ -707,7 +706,7 @@ mod tests {
                 n_components,
                 Some(RandSvdGpuParams::new(n_power, oversampling)),
                 42,
-                device.clone(),
+                device.clone().into(),
                 0,
             )
             .unwrap();

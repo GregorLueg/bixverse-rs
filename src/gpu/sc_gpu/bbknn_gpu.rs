@@ -7,7 +7,6 @@
 
 use ann_search_rs::utils::dist::{Dist, parse_ann_dist};
 use cubecl::Device;
-use cubecl_utils_rs::prelude::Runtime;
 use faer::MatRef;
 use rayon::prelude::*;
 
@@ -254,13 +253,13 @@ mod tests {
     use super::*;
     use crate::single_cell::sc_batch_correction::bbknn::{BbknnParams, bbknn};
     use approx::assert_relative_eq;
-    use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+    use cubecl::wgpu::WgpuDevice;
     use faer::Mat;
 
     fn try_device() -> Option<WgpuDevice> {
         let device = WgpuDevice::default();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            <WgpuRuntime>::client(&device);
+            cubecl::Device::from(device.clone()).client();
         }))
         .ok()
         .map(|_| device)

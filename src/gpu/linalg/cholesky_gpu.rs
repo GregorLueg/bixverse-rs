@@ -708,12 +708,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+    use cubecl::wgpu::WgpuDevice;
 
     fn try_device() -> Option<WgpuDevice> {
         let device = WgpuDevice::default();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            <WgpuRuntime>::client(&device);
+            cubecl::Device::from(device.clone()).client();
         }))
         .ok()
         .map(|_| device)
@@ -828,7 +828,7 @@ mod tests {
     #[test]
     fn test_cholesky_qr2_orthogonality() {
         let Some(device) = try_device() else { return };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (n, s) = (200, 8);
         let y_host = sinusoidal_tall_skinny(n, s);
@@ -880,7 +880,7 @@ mod tests {
     #[cfg(feature = "large-test")]
     fn test_cholesky_qr2_above_dispatch_limit() {
         let Some(device) = try_device() else { return };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (n, s) = (600_000, 4);
         let y_host = sinusoidal_tall_skinny(n, s);

@@ -1211,12 +1211,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+    use cubecl::wgpu::WgpuDevice;
 
     fn try_device() -> Option<WgpuDevice> {
         let device = WgpuDevice::default();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            <WgpuRuntime>::client(&device);
+            cubecl::Device::from(device.clone()).client();
         }))
         .ok()
         .map(|_| device)
@@ -1349,7 +1349,7 @@ mod tests {
         s_width: usize,
         device: &WgpuDevice,
     ) -> Vec<f32> {
-        let client = <WgpuRuntime>::client(device);
+        let client = cubecl::Device::from(device.clone()).client();
         let m_gpu = GpuTensor::<f32>::from_slice(matrix, vec![n_rows, s_width], &client).unwrap();
         let out_gpu =
             GpuTensor::<f32>::from_slice(&vec![0.0f32; s_width], vec![s_width], &client).unwrap();
@@ -1364,7 +1364,7 @@ mod tests {
         s_width: usize,
         device: &WgpuDevice,
     ) -> Vec<f32> {
-        let client = <WgpuRuntime>::client(device);
+        let client = cubecl::Device::from(device.clone()).client();
         let w_gpu = GpuTensor::<f32>::from_slice(weights, vec![n_rows], &client).unwrap();
         let m_gpu = GpuTensor::<f32>::from_slice(matrix, vec![n_rows, s_width], &client).unwrap();
         let out_gpu =
@@ -1386,7 +1386,7 @@ mod tests {
         s: usize,
         device: &WgpuDevice,
     ) -> Vec<f32> {
-        let client = <WgpuRuntime>::client(device);
+        let client = cubecl::Device::from(device.clone()).client();
         let (values, indices, indptr) = dense_to_csr(a, n, m);
         let sparse = GpuCompressedSparseData::<f32>::from_parts(
             &values,
@@ -1432,7 +1432,7 @@ mod tests {
         n_chunks: usize,
         device: &WgpuDevice,
     ) -> Vec<f32> {
-        let client = <WgpuRuntime>::client(device);
+        let client = cubecl::Device::from(device.clone()).client();
         let (values, indices, indptr) = dense_to_csc(a, n, m);
         let sparse = GpuCompressedSparseData::<f32>::from_parts(
             &values,
@@ -1597,7 +1597,7 @@ mod tests {
     #[test]
     fn test_spmm_csr_forward_layout_mismatch() {
         let Some(device) = try_device() else { return };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
         let (n, m, s) = (4, 3, 2);
         let mut a = vec![0.0f32; n * m];
         a[0] = 1.0;
@@ -1637,7 +1637,7 @@ mod tests {
     #[test]
     fn test_spmm_csc_transpose_layout_mismatch() {
         let Some(device) = try_device() else { return };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
         let (n, m, s) = (4, 3, 2);
         let mut a = vec![0.0f32; n * m];
         a[0] = 1.0;

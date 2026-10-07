@@ -599,7 +599,7 @@ fn bench_restarts(shape: NmfShape, n_runs: usize, device: &Device) {
 
 fn main() {
     let device: <WgpuRuntime as Runtime>::Device = Default::default();
-    let limits = GpuLimits::from_client(&<WgpuRuntime>::client(&device));
+    let limits = GpuLimits::from_client(&cubecl::Device::from(device.clone()).client());
 
     println!("====== GPU HALS NMF bench ======\n");
     println!(

@@ -435,14 +435,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+    use cubecl::wgpu::WgpuDevice;
 
     /// The default device, or `None` when the machine has no usable GPU, in
     /// which case every test here returns early rather than failing.
     fn try_device() -> Option<WgpuDevice> {
         let device = WgpuDevice::default();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            <WgpuRuntime>::client(&device);
+            cubecl::Device::from(device.clone()).client();
         }))
         .ok()
         .map(|_| device)
@@ -481,7 +481,7 @@ mod tests {
     /// Run `gram_aat` and read the result back.
     fn run(n: usize, d: usize) -> (Vec<f32>, Vec<f32>) {
         let device = try_device().expect("no device");
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let a_host = build_a(n, d);
         let a = GpuTensor::<f32>::from_slice(&a_host, vec![d, n], &client).unwrap();
@@ -636,7 +636,7 @@ mod tests {
     #[test]
     fn test_gram_shared_memory_within_budget() {
         let Some(device) = try_device() else { return };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
         let budget = client.properties().hardware.max_shared_memory_size;
 
         let footprint = 2 * GRAM_BK as usize * GRAM_SMEM_STRIDE as usize * size_of::<f32>();

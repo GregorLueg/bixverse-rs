@@ -493,14 +493,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+    use cubecl::wgpu::WgpuDevice;
 
     /// The default device, or `None` when the machine has no usable GPU, in
     /// which case every test here returns early rather than failing.
     fn try_device() -> Option<WgpuDevice> {
         let device = WgpuDevice::default();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            <WgpuRuntime>::client(&device);
+            cubecl::Device::from(device.clone()).client();
         }))
         .ok()
         .map(|_| device)
@@ -560,7 +560,7 @@ mod tests {
     /// Run the dispatcher and read the result back.
     fn run(rows: usize, k: usize, len: usize, a_transposed: bool) -> (Vec<f32>, Vec<f32>) {
         let device = try_device().expect("no device");
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let a_host = build(rows * len, 1);
         let b_host = build(len * k, 2);
@@ -649,7 +649,7 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (rows, k, len) = (64usize, 8usize, 4_096usize);
         assert!(skinny_chunks(rows, k, len) > 1);

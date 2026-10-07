@@ -1193,7 +1193,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+    use cubecl::wgpu::WgpuDevice;
 
     use crate::core::math::sparse::CompressedSparseData2;
     use crate::methods::nmf_hals::{NmfInput, compute_objective, gram_h_ht, gram_wt_w, nmf_hals};
@@ -1204,7 +1204,7 @@ mod tests {
     fn try_device() -> Option<WgpuDevice> {
         let device = WgpuDevice::default();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            <WgpuRuntime>::client(&device);
+            cubecl::Device::from(device.clone()).client();
         }))
         .ok()
         .map(|_| device)
@@ -1343,7 +1343,7 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (m, n, k) = (43usize, 29usize, 6usize);
         let v = build_v(m, n, k);
@@ -1399,7 +1399,7 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (m, n, k) = (48usize, 32usize, 16usize);
         let v = build_v(m, n, k);
@@ -1451,7 +1451,7 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (m, n, k) = (37usize, 23usize, 5usize);
         let (csr, dense) = build_sparse_v(m, n);
@@ -1508,7 +1508,7 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (m, n, k) = (97usize, 61usize, 8usize);
         let w = Mat::<f32>::from_fn(m, k, |i, c| (((i * 5 + c * 3) % 7) as f32) * 0.2 + 0.1);
@@ -1543,7 +1543,7 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (m, n, k) = (53usize, 41usize, 6usize);
         let v = build_v(m, n, k);
@@ -1590,7 +1590,7 @@ mod tests {
         max_iter: usize,
     ) -> (NmfResult<f32>, NmfResult<f32>, f32) {
         let device = try_device().expect("no device");
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let v = build_v(m, n, k);
         let opts = HalsOpts::<f32> {
@@ -1662,7 +1662,7 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (m, n, k) = (60usize, 40usize, 3usize);
         let v = build_v(m, n, k);
@@ -1692,7 +1692,7 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (m, n, k) = (48usize, 32usize, 3usize);
         let (csr, dense) = build_sparse_v(m, n);
@@ -1731,7 +1731,7 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (m, n, k) = (40usize, 28usize, 4usize);
         let v = build_v(m, n, k);
@@ -1770,7 +1770,7 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (m, n, k) = (20_000usize, 2_000usize, 24usize);
         let v = build_v(m, n, k);
@@ -1819,7 +1819,7 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (m, n) = (20usize, 15usize);
         let v = build_v(m, n, 3);
@@ -1846,7 +1846,7 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (m, n, k, n_runs) = (40usize, 26usize, 4usize, 3usize);
         let v = build_v(m, n, k);
@@ -1888,7 +1888,7 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (m, n, k) = (36usize, 24usize, 4usize);
         let v = build_v(m, n, k);
@@ -1923,7 +1923,7 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (m, n, k) = (50usize, 34usize, 3usize);
         let w_true =
@@ -1967,7 +1967,7 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (m, n, k) = (50usize, 34usize, 3usize);
         let w_true =
@@ -2010,7 +2010,7 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (m, n, k) = (20usize, 14usize, 3usize);
         let v = build_v(m, n, k);
@@ -2036,7 +2036,7 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (m, n, k) = (24usize, 18usize, 3usize);
         let v = build_v(m, n, k);

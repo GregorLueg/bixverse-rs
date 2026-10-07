@@ -576,7 +576,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+    use cubecl::wgpu::WgpuDevice;
     use faer::{Mat, MatRef};
 
     use crate::gpu::linalg::spmm::launch_dense_column_sq_norm;
@@ -589,7 +589,7 @@ mod tests {
     fn try_device() -> Option<WgpuDevice> {
         let device = WgpuDevice::default();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            <WgpuRuntime>::client(&device);
+            cubecl::Device::from(device.clone()).client();
         }))
         .ok()
         .map(|_| device)
@@ -639,7 +639,7 @@ mod tests {
     /// Run one GPU sweep over a `[rows, k]` factor and read the result back.
     fn run_sweep(x: &[f32], g: &[f32], p: &[f32], rows: usize, k: usize, eps: f32) -> Vec<f32> {
         let device = try_device().expect("no device");
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let x_gpu = GpuTensor::<f32>::from_slice(x, vec![rows, k], &client).unwrap();
         let g_gpu = GpuTensor::<f32>::from_slice(g, vec![k, k], &client).unwrap();
@@ -817,7 +817,7 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
         let k = NMF_MAX_RANK + 1;
         let x = GpuTensor::<f32>::empty(vec![4, k], &client).unwrap();
         let g = GpuTensor::<f32>::empty(vec![k, k], &client).unwrap();
@@ -840,7 +840,7 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (m, n, k) = (37usize, 23usize, 6usize);
         let mut w = build_mat(m, k, 11);
@@ -883,7 +883,7 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let k = 4usize;
         let sq_host = [4.0f32, 0.0, 9.0, 0.0];
@@ -910,7 +910,7 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (rows, k) = (301usize, 9usize);
         let x_flat = to_row_major(build_mat(rows, k, 13).as_ref());
@@ -945,7 +945,7 @@ mod tests {
         let Some(device) = try_device() else {
             return;
         };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let total = 1000usize;
         let x = GpuTensor::<f32>::empty(vec![total], &client).unwrap();

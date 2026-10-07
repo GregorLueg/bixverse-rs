@@ -1154,12 +1154,12 @@ where
 mod tests_harmony_kernels {
     use super::*;
     use approx::assert_relative_eq;
-    use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+    use cubecl::wgpu::WgpuDevice;
 
     fn try_device() -> Option<WgpuDevice> {
         let device = WgpuDevice::default();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            <WgpuRuntime>::client(&device);
+            cubecl::Device::from(device.clone()).client();
         }))
         .ok()
         .map(|_| device)
@@ -1285,7 +1285,7 @@ mod tests_harmony_kernels {
     #[test]
     fn test_cosine_distances_matches_cpu() {
         let Some(device) = try_device() else { return };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (n, k, dim) = (12, 4, 8);
         let mut centroids: Vec<f32> = (0..k * dim)
@@ -1315,7 +1315,7 @@ mod tests_harmony_kernels {
     #[test]
     fn test_row_l2_normalise_basic_and_zero() {
         let Some(device) = try_device() else { return };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (n, dim) = (4, 6);
         let mut data: Vec<f32> = vec![
@@ -1362,7 +1362,7 @@ mod tests_harmony_kernels {
     #[test]
     fn test_scale_exp_normalise_matches_cpu() {
         let Some(device) = try_device() else { return };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (n, k) = (16, 6);
         let dist: Vec<f32> = (0..n * k)
@@ -1394,7 +1394,7 @@ mod tests_harmony_kernels {
     #[test]
     fn test_jacobi_r_update_matches_cpu() {
         let Some(device) = try_device() else { return };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (n, k, b) = (12, 5, 3);
         let scale_dist: Vec<f32> = (0..n * k)
@@ -1448,7 +1448,7 @@ mod tests_harmony_kernels {
     #[test]
     fn test_jacobi_r_update_zero_scale_dist_row_writes_zeros() {
         let Some(device) = try_device() else { return };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (n, k, b) = (3, 4, 2);
         let mut scale_dist = vec![0.1f32; n * k];
@@ -1486,7 +1486,7 @@ mod tests_harmony_kernels {
     #[test]
     fn test_ridge_subtract_matches_cpu() {
         let Some(device) = try_device() else { return };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (n, k, b, d) = (8, 3, 2, 4);
         let cell_to_level: Vec<u32> = vec![0, 1, 0, 1, 0, 1, 0, 1];
@@ -1548,7 +1548,7 @@ mod tests_harmony_kernels {
     #[test]
     fn test_run_sums_reduce_with_empty_and_split_levels() {
         let Some(device) = try_device() else { return };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let level_sizes = [5usize, 0, 9];
         let (n, k, b) = (14usize, 4usize, 3usize);
@@ -1582,7 +1582,7 @@ mod tests_harmony_kernels {
     #[test]
     fn test_run_weighted_sums_reduce_matches_cpu() {
         let Some(device) = try_device() else { return };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let level_sizes = [3usize, 7, 0, 2];
         let (n, k, b, d) = (12usize, 3usize, 4usize, 5usize);

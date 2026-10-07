@@ -443,13 +443,13 @@ pub(crate) fn dispatch_knn_query_gpu(
 mod tests {
     use super::*;
     use ann_search_rs::{build_exhaustive_index, query_exhaustive_self};
-    use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+    use cubecl::wgpu::WgpuDevice;
     use faer::Mat;
 
     fn try_device() -> Option<WgpuDevice> {
         let device = WgpuDevice::default();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            <WgpuRuntime>::client(&device);
+            cubecl::Device::from(device.clone()).client();
         }))
         .ok()
         .map(|_| device)

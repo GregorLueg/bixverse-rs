@@ -587,7 +587,7 @@ mod tests {
     use super::*;
     #[cfg(feature = "large-test")]
     use crate::gpu::sc_gpu::kernels::seacells_kernels::A_COLUMNS_BLOCKS;
-    use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+    use cubecl::wgpu::WgpuDevice;
     use rand::prelude::*;
     use rand::rngs::StdRng;
 
@@ -597,7 +597,7 @@ mod tests {
     fn try_device() -> Option<WgpuDevice> {
         let device = WgpuDevice::default();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            <WgpuRuntime>::client(&device);
+            cubecl::Device::from(device.clone()).client();
         }))
         .ok()
         .map(|_| device)
@@ -676,7 +676,7 @@ mod tests {
             eprintln!("no GPU available, skipping");
             return;
         };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         // Both axes have to be crossed at once.
         //
@@ -803,7 +803,7 @@ mod tests {
             eprintln!("no GPU available, skipping");
             return;
         };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let n = 1_500usize;
         let n_iters = 12usize;
@@ -1095,7 +1095,7 @@ mod tests {
             eprintln!("no GPU available, skipping");
             return;
         };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         assert_reduction_arms_agree(64, 32, 4, 5, &client);
     }
@@ -1109,7 +1109,7 @@ mod tests {
             eprintln!("no GPU available, skipping");
             return;
         };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         assert_reduction_arms_agree(1_500, 300, 12, 5, &client);
     }
@@ -1128,7 +1128,7 @@ mod tests {
             eprintln!("no GPU available, skipping");
             return;
         };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let n = 300usize;
         let k = 300usize;

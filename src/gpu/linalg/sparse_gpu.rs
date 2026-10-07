@@ -7,7 +7,6 @@
 #![allow(missing_docs)]
 
 use cubecl::prelude::*;
-use cubecl_utils_rs::prelude::Runtime;
 use cubecl_utils_rs::prelude::*;
 use rayon::prelude::*;
 
@@ -572,12 +571,12 @@ where
 mod tests {
     use super::*;
     use crate::core::math::sparse::transpose_sparse_single_layer;
-    use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+    use cubecl::wgpu::WgpuDevice;
 
     fn try_device() -> Option<WgpuDevice> {
         let device = WgpuDevice::default();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            <WgpuRuntime>::client(&device);
+            cubecl::Device::from(device.clone()).client();
         }))
         .ok()
         .map(|_| device)
@@ -587,7 +586,7 @@ mod tests {
     /// under `budget_bytes`, and compare it with the host transpose.
     fn check_csc_to_csr(n: usize, m: usize, budget_bytes: usize) {
         let Some(device) = try_device() else { return };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let mut values = Vec::new();
         let mut indices = Vec::new();

@@ -687,7 +687,7 @@ where
 mod tests_harmony_gpu {
     use super::*;
     use approx::assert_relative_eq;
-    use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+    use cubecl::wgpu::WgpuDevice;
 
     use crate::single_cell::sc_batch_correction::harmony::create_batch_info;
     use crate::single_cell::sc_batch_correction::harmony_core::{Variant, objective};
@@ -695,7 +695,7 @@ mod tests_harmony_gpu {
     fn try_device() -> Option<WgpuDevice> {
         let device = WgpuDevice::default();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            <WgpuRuntime>::client(&device);
+            cubecl::Device::from(device.clone()).client();
         }))
         .ok()
         .map(|_| device)
@@ -732,7 +732,7 @@ mod tests_harmony_gpu {
     #[test]
     fn test_compute_objective_gpu_matches_cpu_v2() {
         let Some(device) = try_device() else { return };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (n, k) = (16, 4);
         let labels: Vec<usize> = (0..n).map(|i| i % 3).collect();
@@ -805,7 +805,7 @@ mod tests_harmony_gpu {
     #[test]
     fn test_row_l2_normalise_into_matches_cpu() {
         let Some(device) = try_device() else { return };
-        let client = <WgpuRuntime>::client(&device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let (n, dim) = (5, 6);
         let src: Vec<f32> = (0..n * dim).map(|i| (i as f32) * 0.1 - 1.0).collect();

@@ -6,7 +6,6 @@
 
 use bonsai_rs::sanity_sc_rs::gpu::sanity_gpu_select;
 use cubecl::Device;
-use cubecl_utils_rs::prelude::Runtime;
 use std::time::Instant;
 
 use crate::prelude::*;

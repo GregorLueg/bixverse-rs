@@ -41,9 +41,8 @@
 
 use std::time::Instant;
 
-use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+use cubecl::wgpu::WgpuDevice;
 use cubecl_utils_rs::prelude::GpuLimits;
-use cubecl_utils_rs::prelude::Runtime;
 use rand::prelude::*;
 use rand::rngs::SmallRng;
 
@@ -265,7 +264,7 @@ fn rf_config(n_trees: usize) -> RandomForestConfig {
 fn try_device() -> Option<WgpuDevice> {
     let device = WgpuDevice::default();
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        <WgpuRuntime>::client(&device);
+        cubecl::Device::from(device.clone()).client();
     }))
     .ok()
     .map(|_| device)
@@ -485,7 +484,7 @@ fn selected(filter: &[String], label: &str) -> bool {
 /// * `n_samples` - Cell count
 /// * `device` - wgpu device
 fn report_shape(n_samples: usize, device: &WgpuDevice) {
-    let client = <WgpuRuntime>::client(device);
+    let client = cubecl::Device::from(device.clone()).client();
     let limits = GpuLimits::from_client(&client);
     let max_binding = limits.max_binding_bytes as usize;
     let max_smem = limits.max_shared_bytes;

@@ -7,7 +7,6 @@
 
 use ann_search_rs::gpu::k_means_gpu::{KMeansGpuParams, k_means_clusters_gpu};
 use cubecl::Device;
-use cubecl::prelude::*;
 use faer::MatRef;
 
 use crate::prelude::*;

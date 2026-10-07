@@ -31,8 +31,7 @@
 
 use std::time::Instant;
 
-use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
-use cubecl_utils_rs::prelude::Runtime;
+use cubecl::wgpu::WgpuDevice;
 use rand::prelude::*;
 use rand::rngs::SmallRng;
 
@@ -270,7 +269,7 @@ fn scenic_params_e2e(learner: RegressionLearner) -> ScenicParams {
 fn try_device() -> Option<WgpuDevice> {
     let device = WgpuDevice::default();
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        <WgpuRuntime>::client(&device);
+        cubecl::Device::from(device.clone()).client();
     }))
     .ok()
     .map(|_| device)

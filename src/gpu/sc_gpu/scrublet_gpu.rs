@@ -686,7 +686,7 @@ mod tests {
     use crate::single_cell::sc_processing::knn::KnnParams;
     use crate::single_cell::sc_processing::pca::PcaSolver;
     use crate::single_cell::sc_processing::scrublet::{Scrublet, ScrubletParams};
-    use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+    use cubecl::wgpu::WgpuDevice;
 
     const TEST_CELLS: usize = 600;
     const TEST_GENES: usize = 150;
@@ -699,7 +699,7 @@ mod tests {
     fn try_device() -> Option<WgpuDevice> {
         let device = WgpuDevice::default();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            <WgpuRuntime>::client(&device);
+            cubecl::Device::from(device.clone()).client();
         }))
         .ok()
         .map(|_| device)

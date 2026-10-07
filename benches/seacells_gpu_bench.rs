@@ -30,8 +30,7 @@
 use std::time::{Duration, Instant};
 
 use cubecl::future;
-use cubecl::prelude::*;
-use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+use cubecl::wgpu::WgpuDevice;
 use cubecl_utils_rs::prelude::*;
 use faer::Mat;
 use rand::prelude::*;
@@ -251,7 +250,7 @@ fn best_of(mut f: impl FnMut() -> Duration) -> (Duration, Duration) {
 /// * `shape` - The configuration
 /// * `device` - Device to run on
 fn bench_b_shape(shape: Shape, device: &WgpuDevice) {
-    let client = <WgpuRuntime>::client(device);
+    let client = cubecl::Device::from(device.clone()).client();
     let Shape { n, k, density, .. } = shape;
 
     let upload = |parts: (Vec<f32>, Vec<u32>, Vec<u32>)| {
@@ -525,7 +524,7 @@ fn make_a_prev_t(n: usize, k: usize, atoms: usize) -> CompressedSparseData2<f32>
 /// * `n_iters` - Frank-Wolfe iterations per column
 /// * `device` - Device to run on
 fn bench_a_shape(shape: AShape, n_iters: usize, device: &WgpuDevice) {
-    let client = <WgpuRuntime>::client(device);
+    let client = cubecl::Device::from(device.clone()).client();
     let AShape {
         n,
         k,
@@ -835,7 +834,7 @@ fn main() {
     }
 
     {
-        let limits = GpuLimits::from_client(&<WgpuRuntime>::client(&device));
+        let limits = GpuLimits::from_client(&cubecl::Device::from(device.clone()).client());
         println!(
             "\ndevice: max_units_per_cube {}  max_cube_dim {:?}  max_cube_count {:?}  \
              plane {}..{}  shared {} B  binding limit {} MB",

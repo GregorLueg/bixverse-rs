@@ -1552,14 +1552,14 @@ pub fn a_columns_capacity(
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
-    use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+    use cubecl::wgpu::WgpuDevice;
 
     /// Skip rather than fail where no GPU is available, matching the other
     /// kernel test modules.
     fn try_device() -> Option<WgpuDevice> {
         let device = WgpuDevice::default();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            <WgpuRuntime>::client(&device);
+            cubecl::Device::from(device.clone()).client();
         }))
         .ok()
         .map(|_| device)
@@ -1664,7 +1664,7 @@ mod tests {
         k: usize,
         device: &WgpuDevice,
     ) -> (Vec<f32>, Vec<u32>, f32) {
-        let client = <WgpuRuntime>::client(device);
+        let client = cubecl::Device::from(device.clone()).client();
 
         let upload = |dense: &[f32]| {
             let (values, indices, indptr) = dense_to_csr(dense, n, k);

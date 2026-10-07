@@ -18,8 +18,7 @@
 
 use std::collections::HashSet;
 
-use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
-use cubecl_utils_rs::prelude::Runtime;
+use cubecl::wgpu::WgpuDevice;
 use rand::prelude::*;
 use rand::rngs::SmallRng;
 
@@ -240,7 +239,7 @@ fn sum_importances(imp: &[Vec<f32>]) -> Vec<f32> {
 fn try_device() -> Option<WgpuDevice> {
     let device = WgpuDevice::default();
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        <WgpuRuntime>::client(&device);
+        cubecl::Device::from(device.clone()).client();
     }))
     .ok()
     .map(|_| device)
@@ -724,7 +723,7 @@ fn test_et_gpu_matches_cpu_pearson_large() {
         LG_N_SAMPLES,
         &cfg,
         seed_base as usize,
-        device.clone(),
+        device.clone().into(),
         &ScenicGpuParams::default(),
     )
     .expect("GPU fit failed");
@@ -813,7 +812,7 @@ fn test_multi_batch_matches_chunked() {
         MB_N_SAMPLES,
         &cfg,
         42,
-        device.clone(),
+        device.clone().into(),
         &ScenicGpuParams::default(),
     )
     .expect("combined GPU fit failed");
@@ -830,7 +829,7 @@ fn test_multi_batch_matches_chunked() {
             MB_N_SAMPLES,
             &cfg,
             42,
-            device.clone(),
+            device.clone().into(),
             &ScenicGpuParams::default(),
         )
         .expect("chunked GPU fit failed");
@@ -889,7 +888,7 @@ fn test_rf_gpu_matches_cpu_pearson_large() {
         LG_N_SAMPLES,
         &cfg,
         seed_base as usize,
-        device.clone(),
+        device.clone().into(),
         &ScenicGpuParams::default(),
     )
     .expect("GPU RF fit failed");
@@ -933,7 +932,7 @@ fn test_rf_bootstrap_gpu_matches_cpu_pearson_large() {
         LG_N_SAMPLES,
         &cfg,
         seed_base as usize,
-        device.clone(),
+        device.clone().into(),
         &ScenicGpuParams::default(),
     )
     .expect("GPU RF+bootstrap fit failed");
@@ -1052,7 +1051,7 @@ fn test_rf_gpu_matches_cpu_pearson_small() {
         RS_N_SAMPLES,
         &cfg,
         seed_base as usize,
-        device.clone(),
+        device.clone().into(),
         &ScenicGpuParams::default(),
     )
     .expect("GPU RF fit failed");
@@ -1181,7 +1180,7 @@ fn test_rf_gpu_matches_cpu_pearson_skewed_bins() {
         SK_N_SAMPLES,
         &cfg,
         seed_base as usize,
-        device.clone(),
+        device.clone().into(),
         &ScenicGpuParams::default(),
     )
     .expect("GPU RF fit failed");
@@ -1418,7 +1417,7 @@ fn test_run_scenic_grn_gpu_roundtrip() {
         &params,
         &ScenicGpuParams::default(),
         42,
-        device,
+        device.clone().into(),
         0,
     )
     .expect("GPU run_scenic_grn_gpu failed");
@@ -1471,7 +1470,7 @@ fn test_run_scenic_grn_streaming_gpu_roundtrip() {
         &params,
         &ScenicGpuParams::default(),
         42,
-        device,
+        device.clone().into(),
         0,
     )
     .expect("GPU streaming failed");
@@ -1561,7 +1560,7 @@ fn test_run_scenic_grn_in_memory_gpu_roundtrip() {
         &params,
         &ScenicGpuParams::default(),
         42,
-        device,
+        device.clone().into(),
         0,
     )
     .expect("GPU run_scenic_grn_in_memory_gpu failed");

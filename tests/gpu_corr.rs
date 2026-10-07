@@ -7,7 +7,7 @@
 
 #![cfg(all(feature = "gpu", feature = "large-test"))]
 
-use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+use cubecl::wgpu::WgpuDevice;
 use faer::Mat;
 use rand::prelude::*;
 use rand_distr::Normal;
@@ -61,7 +61,7 @@ fn assert_gpu_matches_cpu(n: usize, d: usize, cor_type: GpuCorCov, label: &str) 
     let data = make_gaussian(n, d, SEED);
     let device = WgpuDevice::default();
 
-    let gpu = column_pairwise_cor_gpu::<f32>(data.as_ref(), cor_type, device, false)
+    let gpu = column_pairwise_cor_gpu::<f32>(data.as_ref(), cor_type, device.into(), false)
         .expect("GPU correlation failed");
 
     let cpu = match cor_type {
