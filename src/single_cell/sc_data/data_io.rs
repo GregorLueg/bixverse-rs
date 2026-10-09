@@ -1107,6 +1107,15 @@ pub struct SparseDataHeader {
 /// a foreign file is refused rather than parsed as one of ours.
 const FILE_MAGIC: &[u8; 8] = b"SCRNASEQ";
 
+/// The little-endian `u64` at byte `at`.
+fn le_u64_at(bytes: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes(
+        bytes[at..at + 8]
+            .try_into()
+            .expect("an 8-byte slice converts to [u8; 8]"),
+    )
+}
+
 /// Fixed-size file header that points to the main header location
 #[repr(C)]
 #[derive(Encode, Decode, Serialize, Deserialize)]
@@ -1123,8 +1132,12 @@ struct FileHeader {
     /// of the reserved block, so files predating this field decode it as
     /// `0.0`, which is the "unknown" sentinel (a real target size is never 0).
     target_size: f32,
-    /// 28 additional reserved bytes for the future
-    _reserved_1: [u8; 28],
+    /// Offset of the library-size index (cell-based files). Carved out of the
+    /// reserved block like `target_size`, so older files read `0`: no index,
+    /// and readers fall back to the chunk headers.
+    library_index_offset: u64,
+    /// 20 additional reserved bytes for the future
+    _reserved_1: [u8; 20],
     /// 3 additional reserved bytes for the future
     _reserved_2: [u8; 3],
 }
@@ -1148,7 +1161,8 @@ impl FileHeader {
             main_header_offset: 0,
             cell_based,
             target_size,
-            _reserved_1: [0; 28],
+            library_index_offset: 0,
+            _reserved_1: [0; 20],
             _reserved_2: [0; 3],
         }
     }
@@ -1157,6 +1171,19 @@ impl FileHeader {
 //////////////////////
 // Streaming writer //
 //////////////////////
+
+/// A compressed cell chunk for
+/// [`CellGeneSparseWriter::write_compressed_cell_chunks`]. The library size
+/// travels with it so the writer can build the library-size index without
+/// decompressing anything.
+pub struct CellPayload {
+    /// Original index of the cell in the data.
+    pub original_index: usize,
+    /// Library size of the cell, as stored in the chunk header.
+    pub library_size: usize,
+    /// Size-prepended lz4 payload.
+    pub bytes: Vec<u8>,
+}
 
 /// CellGeneSparseWriter
 ///
@@ -1181,6 +1208,9 @@ pub struct CellGeneSparseWriter {
     /// the [`FileHeader`] on finalisation, which rebuilds the header from
     /// scratch, so the value has to survive on the writer.
     target_size: f32,
+    /// Library size of every cell chunk, in chunk order. Written as the
+    /// library-size index on finalisation (cell-based files only).
+    library_sizes: Vec<u64>,
 }
 
 impl CellGeneSparseWriter {
@@ -1249,6 +1279,7 @@ impl CellGeneSparseWriter {
             chunks_since_flush: 0_usize,
             flush_frequency,
             target_size,
+            library_sizes: Vec::new(),
         })
     }
 
@@ -1274,8 +1305,8 @@ impl CellGeneSparseWriter {
 
     /// Compress a serialised chunk, append it, and record its offset.
     ///
-    /// Shared tail of [`Self::write_cell_chunk`] and [`Self::write_gene_chunk`].
-    /// Flushes the underlying [`BufWriter`] every `flush_frequency` chunks.
+    /// Tail of [`Self::write_gene_chunk`]; cell chunks go through
+    /// [`Self::append_cell`] so their library sizes are recorded.
     ///
     /// ### Params
     ///
@@ -1290,6 +1321,8 @@ impl CellGeneSparseWriter {
     }
 
     /// Append an already compressed chunk and record its offset.
+    ///
+    /// Flushes the underlying [`BufWriter`] every `flush_frequency` chunks.
     ///
     /// ### Params
     ///
@@ -1326,6 +1359,28 @@ impl CellGeneSparseWriter {
         Ok(())
     }
 
+    /// Append a compressed cell chunk and record its library size.
+    ///
+    /// ### Params
+    ///
+    /// * `compressed` - Size-prepended lz4 payload of a serialised cell chunk.
+    /// * `original_index` - Original index of the cell in the data.
+    /// * `library_size` - Library size stored in the chunk header.
+    ///
+    /// ### Returns
+    ///
+    /// `Ok(())` on success, an I/O error otherwise.
+    fn append_cell(
+        &mut self,
+        compressed: &[u8],
+        original_index: usize,
+        library_size: usize,
+    ) -> Result<(), BixverseErrors> {
+        self.append_compressed(compressed, original_index)?;
+        self.library_sizes.push(library_size as u64);
+        Ok(())
+    }
+
     /// Write a Cell (Chunk) to the file
     ///
     /// The data is represented in a CSR-type format.
@@ -1341,7 +1396,11 @@ impl CellGeneSparseWriter {
     pub fn write_cell_chunk(&mut self, cell_chunk: CsrCellChunk) -> Result<(), BixverseErrors> {
         self.check_mode(true)?;
 
-        self.append_chunk(&cell_chunk.to_bytes(), cell_chunk.original_index)
+        self.append_cell(
+            &compress_prepend_size(&cell_chunk.to_bytes()),
+            cell_chunk.original_index,
+            cell_chunk.library_size,
+        )
     }
 
     /// Write a Gene to the file
@@ -1388,8 +1447,7 @@ impl CellGeneSparseWriter {
     ///
     /// ### Params
     ///
-    /// * `chunks` - `(original_index, payload)` pairs, appended in the given
-    ///   order.
+    /// * `chunks` - Cell payloads, appended in the given order.
     ///
     /// ### Returns
     ///
@@ -1397,10 +1455,13 @@ impl CellGeneSparseWriter {
     /// opened for gene-based chunks.
     pub fn write_compressed_cell_chunks(
         &mut self,
-        chunks: &[(usize, Vec<u8>)],
+        chunks: &[CellPayload],
     ) -> Result<(), BixverseErrors> {
         self.check_mode(true)?;
-        self.append_compressed_batch(chunks)
+        for chunk in chunks {
+            self.append_cell(&chunk.bytes, chunk.original_index, chunk.library_size)?;
+        }
+        Ok(())
     }
 
     /// Append a batch of compressed payloads in order.
@@ -1424,8 +1485,9 @@ impl CellGeneSparseWriter {
 
     /// Finalise the file
     ///
-    /// Writes the [`SparseDataHeader`] tail, then rewrites the fixed 64-byte
-    /// file header at offset zero with the resolved main header offset.
+    /// Writes the [`SparseDataHeader`] tail and, for cell-based files, the
+    /// library-size index ([`Self::write_library_index`]), then rewrites the
+    /// fixed 64-byte file header at offset zero with both offsets.
     ///
     /// ### Returns
     ///
@@ -1442,9 +1504,13 @@ impl CellGeneSparseWriter {
         self.writer.write_all(&header_size.to_le_bytes())?;
         self.writer.write_all(&header_data)?;
 
-        self.writer.seek(SeekFrom::Start(0))?;
         let mut file_header = FileHeader::new(self.cell_based, self.target_size);
         file_header.main_header_offset = main_header_offset;
+        if self.cell_based {
+            file_header.library_index_offset = self.write_library_index()?;
+        }
+
+        self.writer.seek(SeekFrom::Start(0))?;
         let file_header_enc = encode_to_vec(&file_header, config::standard())
             .map_err(|_| BixverseErrors::HeaderEncodeFailed)?;
 
@@ -1460,6 +1526,30 @@ impl CellGeneSparseWriter {
         self.writer.flush()?;
 
         Ok(())
+    }
+
+    /// Write the library-size index at the current position: a `u64` count,
+    /// then one `u64` per cell chunk in chunk order.
+    ///
+    /// ### Returns
+    ///
+    /// The offset the index starts at, for the [`FileHeader`].
+    fn write_library_index(&mut self) -> Result<u64, BixverseErrors> {
+        assert!(self.cell_based, "library-size index on a gene-based file");
+        assert_eq!(
+            self.library_sizes.len(),
+            self.header.no_chunks,
+            "library-size index has {} entries for {} cell chunks",
+            self.library_sizes.len(),
+            self.header.no_chunks
+        );
+        let offset = self.writer.stream_position()?;
+        self.writer
+            .write_all(&(self.library_sizes.len() as u64).to_le_bytes())?;
+        for library_size in &self.library_sizes {
+            self.writer.write_all(&library_size.to_le_bytes())?;
+        }
+        Ok(offset)
     }
 
     /// Update the number of cells in the header
@@ -1546,20 +1636,25 @@ pub fn dense_gene_map_from_options(mapping: &[Option<usize>]) -> Vec<u32> {
 ///
 /// ### Returns
 ///
-/// `(nnz, lib_size, payload)`.
+/// `(nnz, payload)`; the payload carries the library size.
 pub fn compress_cell_row(
     row: &mut [(u32, u32)],
     original_index: usize,
     target_size: f32,
-) -> std::io::Result<(usize, usize, Vec<u8>)> {
+) -> std::io::Result<(usize, CellPayload)> {
     if row.windows(2).any(|w| w[0].0 > w[1].0) {
         row.sort_by_key(|&(g, _)| g);
     }
     let genes: Vec<u32> = row.iter().map(|&(g, _)| g).collect();
     let counts: Vec<u32> = row.iter().map(|&(_, c)| c).collect();
     let chunk = CsrCellChunk::from_data(&counts, &genes, original_index, target_size, true);
-    let (nnz, lib_size) = chunk.get_qc_info();
-    Ok((nnz, lib_size, chunk.to_compressed_bytes()?))
+    let (nnz, library_size) = chunk.get_qc_info();
+    let payload = CellPayload {
+        original_index,
+        library_size,
+        bytes: chunk.to_compressed_bytes()?,
+    };
+    Ok((nnz, payload))
 }
 
 /// Write accumulated per-cell rows to the cell-based binary.
@@ -1595,15 +1690,14 @@ pub fn write_cell_rows(
             .enumerate()
             .map(|(k, row)| {
                 let mut row = std::mem::take(row);
-                let (nnz_i, lib_i, payload) = compress_cell_row(&mut row, first + k, target_size)?;
-                Ok((nnz_i, lib_i, (first + k, payload)))
+                Ok(compress_cell_row(&mut row, first + k, target_size)?)
             })
             .collect::<Result<Vec<_>, BixverseErrors>>()?;
 
         let mut payloads = Vec::with_capacity(built.len());
-        for (nnz_i, lib_i, payload) in built {
+        for (nnz_i, payload) in built {
             nnz.push(nnz_i);
-            lib_size.push(lib_i);
+            lib_size.push(payload.library_size);
             payloads.push(payload);
         }
         writer.write_compressed_cell_chunks(&payloads)?;
@@ -1647,16 +1741,19 @@ where
                 let (nnz_i, lib_i) = chunk.get_qc_info();
                 Ok::<_, BixverseErrors>((
                     nnz_i,
-                    lib_i,
-                    (chunk.original_index, chunk.to_compressed_bytes()?),
+                    CellPayload {
+                        original_index: chunk.original_index,
+                        library_size: lib_i,
+                        bytes: chunk.to_compressed_bytes()?,
+                    },
                 ))
             })
             .collect::<Result<Vec<_>, _>>()?;
 
         let mut payloads = Vec::with_capacity(built.len());
-        for (nnz_i, lib_i, payload) in built {
+        for (nnz_i, payload) in built {
             nnz.push(nnz_i);
-            lib_size.push(lib_i);
+            lib_size.push(payload.library_size);
             payloads.push(payload);
         }
         writer.write_compressed_cell_chunks(&payloads)?;
@@ -1683,7 +1780,11 @@ pub fn write_cell_chunks_parallel(
         let payloads = batch
             .par_iter()
             .map(|chunk| {
-                Ok::<_, BixverseErrors>((chunk.original_index, chunk.to_compressed_bytes()?))
+                Ok::<_, BixverseErrors>(CellPayload {
+                    original_index: chunk.original_index,
+                    library_size: chunk.library_size,
+                    bytes: chunk.to_compressed_bytes()?,
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
         writer.write_compressed_cell_chunks(&payloads)?;
@@ -2005,6 +2106,9 @@ pub struct ParallelSparseReader {
     /// Library size the `data_norm` layer was normalised against, as recorded
     /// in the [`FileHeader`]. `0.0` for files written before the field existed.
     target_size: f32,
+    /// Byte offset in the mmap of the first library-size index entry, or
+    /// `None` for files written without the index.
+    library_index: Option<usize>,
 }
 
 impl ParallelSparseReader {
@@ -2078,12 +2182,92 @@ impl ParallelSparseReader {
             decode_from_slice::<SparseDataHeader, _>(header_bytes, config::standard())
                 .map_err(|_| BixverseErrors::HeaderDecodeFailed)?;
 
+        let library_index =
+            Self::check_library_index(&mmap, file_header.library_index_offset, &header)?;
+
         Ok(Self {
             header,
             mmap: Arc::new(mmap),
             chunks_start: 64,
             target_size: file_header.target_size,
+            library_index,
         })
+    }
+
+    /// Validate the library-size index a file header points at.
+    ///
+    /// The index is a `u64` count followed by one `u64` per chunk. Like the
+    /// main header, every bound is checked against the mmap, so a corrupt
+    /// offset or count errors instead of panicking later in a read.
+    ///
+    /// ### Params
+    ///
+    /// * `mmap` - The mapped file.
+    /// * `offset` - `library_index_offset` from the file header; `0` means the
+    ///   file has no index.
+    /// * `header` - The decoded main header.
+    ///
+    /// ### Returns
+    ///
+    /// The byte offset of the first entry, `None` without an index, or
+    /// [`BixverseErrors::HeaderDecodeFailed`] if the index is malformed.
+    fn check_library_index(
+        mmap: &memmap2::Mmap,
+        offset: u64,
+        header: &SparseDataHeader,
+    ) -> Result<Option<usize>, BixverseErrors> {
+        if offset == 0 {
+            return Ok(None);
+        }
+        let offset = offset as usize;
+        if !header.cell_based || offset.saturating_add(8) > mmap.len() {
+            return Err(BixverseErrors::HeaderDecodeFailed);
+        }
+        let count = le_u64_at(mmap, offset) as usize;
+        let end = count
+            .checked_mul(8)
+            .and_then(|bytes| bytes.checked_add(offset + 8));
+        if count != header.no_chunks || end.is_none_or(|end| end > mmap.len()) {
+            return Err(BixverseErrors::HeaderDecodeFailed);
+        }
+        Ok(Some(offset + 8))
+    }
+
+    /// Library sizes from the index: 8 bytes per cell, nothing decompressed.
+    ///
+    /// ### Params
+    ///
+    /// * `start` - Offset of the first index entry (validated on open).
+    /// * `indices` - Original cell indices.
+    ///
+    /// ### Returns
+    ///
+    /// Library sizes in the order of `indices`.
+    fn library_sizes_from_index(
+        &self,
+        start: usize,
+        indices: &[usize],
+    ) -> Result<Vec<usize>, BixverseErrors> {
+        indices
+            .iter()
+            .map(|&original_index| {
+                let chunk = self
+                    .header
+                    .index_map
+                    .get(&original_index)
+                    .copied()
+                    .filter(|&chunk| chunk < self.header.no_chunks)
+                    .ok_or(BixverseErrors::ChunkIndexNotFound(original_index))?;
+                Ok(le_u64_at(&self.mmap, start + 8 * chunk) as usize)
+            })
+            .collect()
+    }
+
+    /// Whether the file carries a library-size index. Lets tests in other
+    /// modules check which path `read_cell_library_sizes` takes.
+    #[cfg(test)]
+    pub(crate) fn has_library_index(&self) -> bool {
+        self.library_index.is_some()
     }
 
     /// Locate, decompress and return the raw bytes of a single chunk
@@ -2228,9 +2412,10 @@ impl SingleCellReading for ParallelSparseReader {
 
     /// Read only library sizes for specified cells
     ///
-    /// More efficient than the default, which parses whole chunks. Reads
-    /// directly from the chunk header bytes (offset 12-19) without
-    /// deserialising the rest.
+    /// More efficient than the default, which parses whole chunks. Files
+    /// with a library-size index read 8 bytes per cell from it; older files
+    /// decompress each chunk and read the header bytes (offset 12-19)
+    /// without deserialising the rest.
     ///
     /// ### Params
     ///
@@ -2245,6 +2430,10 @@ impl SingleCellReading for ParallelSparseReader {
                 actual: "gene-based",
                 requested: "cell-based",
             });
+        }
+
+        if let Some(start) = self.library_index {
+            return self.library_sizes_from_index(start, indices);
         }
 
         indices
@@ -3012,5 +3201,214 @@ mod tests {
         let (decoded, _) =
             decode_from_slice::<FileHeader, _>(&slot, config::standard()).expect("decode");
         assert_eq!(decoded.target_size, 1e5);
+    }
+
+    ////////////////////////
+    // Library-size index //
+    ////////////////////////
+
+    /// The `FileHeader` layout before `library_index_offset` was carved out
+    /// of the reserved block (28 reserved bytes, all zero when written).
+    #[derive(Encode, Decode, Serialize, Deserialize)]
+    struct TargetSizeFileHeader {
+        magic: [u8; 8],
+        version: u32,
+        main_header_offset: u64,
+        cell_based: bool,
+        target_size: f32,
+        _reserved_1: [u8; 28],
+        _reserved_2: [u8; 3],
+    }
+
+    /// Backwards: header bytes from before the index decode with offset 0,
+    /// which readers treat as "no index".
+    #[test]
+    fn test_pre_index_header_decodes_with_no_library_index() {
+        let old = TargetSizeFileHeader {
+            magic: *b"SCRNASEQ",
+            version: SC_FILE_VERSION,
+            main_header_offset: 123_456,
+            cell_based: true,
+            target_size: 1e4,
+            _reserved_1: [0; 28],
+            _reserved_2: [0; 3],
+        };
+
+        let slot = encode_slot(&old);
+        let (decoded, _) =
+            decode_from_slice::<FileHeader, _>(&slot, config::standard()).expect("decode");
+
+        assert_eq!(decoded.main_header_offset, 123_456);
+        assert_eq!(decoded.target_size, 1e4);
+        assert_eq!(decoded.library_index_offset, 0);
+    }
+
+    /// Forwards: a header carrying the index still decodes under the layout
+    /// before it, so readers built before this change open new files.
+    #[test]
+    fn test_header_with_library_index_decodes_on_the_pre_index_layout() {
+        let mut header = FileHeader::new(true, 1e4);
+        header.main_header_offset = 987_654_321;
+        header.library_index_offset = u64::MAX;
+
+        let slot = encode_slot(&header);
+        let (decoded, _) = decode_from_slice::<TargetSizeFileHeader, _>(&slot, config::standard())
+            .expect("decode as pre-index");
+
+        assert_eq!(decoded.magic, *b"SCRNASEQ");
+        assert_eq!(decoded.version, SC_FILE_VERSION);
+        assert_eq!(decoded.main_header_offset, 987_654_321);
+        assert!(decoded.cell_based);
+        assert_eq!(decoded.target_size, 1e4);
+    }
+
+    /// Read the decoded file header of a written file.
+    ///
+    /// ### Params
+    ///
+    /// * `path` - Path of the file.
+    ///
+    /// ### Returns
+    ///
+    /// The `FileHeader`.
+    fn read_file_header(path: &str) -> FileHeader {
+        let bytes = std::fs::read(path).expect("read back");
+        decode_from_slice::<FileHeader, _>(&bytes[0..64], config::standard())
+            .expect("header decodes")
+            .0
+    }
+
+    /// Write three cells, out of index order and one with a u32 count,
+    /// through the per-chunk or the pre-compressed write path.
+    fn write_index_test_file(path: &str, compressed: bool) {
+        let chunks = vec![
+            cell_chunk(&[5, 70_000], &[0, 2], 2),
+            cell_chunk(&[1, 2, 3], &[0, 1, 2], 0),
+            cell_chunk(&[9], &[1], 1),
+        ];
+        let mut writer = CellGeneSparseWriter::new(path, true, 3, 3, 1e4).expect("writer opens");
+        if compressed {
+            write_cell_chunks_parallel(&chunks, &mut writer).expect("write");
+        } else {
+            for chunk in chunks {
+                writer.write_cell_chunk(chunk).expect("write");
+            }
+        }
+        writer.finalise().expect("finalise");
+    }
+
+    /// Library sizes for `indices` as the reader answers them, and as the
+    /// chunk headers store them.
+    fn library_sizes_both_ways(
+        reader: &ParallelSparseReader,
+        indices: &[usize],
+    ) -> (Vec<usize>, Vec<usize>) {
+        let answered = reader.read_cell_library_sizes(indices).expect("read");
+        let stored = reader
+            .read_cells_parallel(indices)
+            .expect("read chunks")
+            .iter()
+            .map(|chunk| chunk.library_size)
+            .collect();
+        (answered, stored)
+    }
+
+    /// Both write paths record an index that matches the chunk headers, in
+    /// the order asked.
+    #[test]
+    fn test_library_index_matches_chunk_headers() {
+        for compressed in [false, true] {
+            let temp = TempBin::new(&format!("library_index_{compressed}"));
+            write_index_test_file(temp.path(), compressed);
+
+            let reader = ParallelSparseReader::new(temp.path()).expect("reader opens");
+            assert!(reader.library_index.is_some());
+            let (answered, stored) = library_sizes_both_ways(&reader, &[1, 2, 0, 2]);
+            assert_eq!(answered, vec![9, 70_005, 6, 70_005]);
+            assert_eq!(answered, stored);
+        }
+    }
+
+    /// Files without an index (offset 0) fall back to the chunk headers.
+    #[test]
+    fn test_library_sizes_fall_back_without_an_index() {
+        let temp = TempBin::new("library_index_absent");
+        write_index_test_file(temp.path(), false);
+        patch_file_header(temp.path(), |h| h.library_index_offset = 0);
+
+        let reader = ParallelSparseReader::new(temp.path()).expect("reader opens");
+        assert!(reader.library_index.is_none());
+        let (answered, _) = library_sizes_both_ways(&reader, &[0, 1, 2]);
+        assert_eq!(answered, vec![6, 9, 70_005]);
+    }
+
+    /// An index offset past the end of the file must error, not panic.
+    #[test]
+    fn test_reader_rejects_a_library_index_past_eof() {
+        let temp = TempBin::new("library_index_past_eof");
+        write_valid_file(temp.path());
+        let len = std::fs::metadata(temp.path()).expect("stat").len();
+        patch_file_header(temp.path(), |h| h.library_index_offset = len);
+
+        assert!(matches!(
+            ParallelSparseReader::new(temp.path()),
+            Err(BixverseErrors::HeaderDecodeFailed)
+        ));
+    }
+
+    /// An index whose count disagrees with the chunk count must error.
+    #[test]
+    fn test_reader_rejects_a_library_index_with_the_wrong_count() {
+        let temp = TempBin::new("library_index_wrong_count");
+        write_valid_file(temp.path());
+        // The main header starts with its own byte length, not the chunk count.
+        let main_header_offset = read_file_header(temp.path()).main_header_offset;
+        patch_file_header(temp.path(), |h| h.library_index_offset = main_header_offset);
+
+        assert!(matches!(
+            ParallelSparseReader::new(temp.path()),
+            Err(BixverseErrors::HeaderDecodeFailed)
+        ));
+    }
+
+    /// The ingest path (mtx, h5ad, 10x) writes through `write_cell_rows`:
+    /// the index must match the chunk headers and the sizes it reports.
+    #[test]
+    fn test_library_index_on_the_ingest_write_path() {
+        let temp = TempBin::new("library_index_ingest");
+        let mut rows: Vec<Vec<(u32, u32)>> = (0..300_u32)
+            .map(|c| {
+                (0..20_u32)
+                    .filter(|g| (c * 7 + g * 3) % 5 == 0)
+                    .map(|g| (g, 1 + (c + g) % 4 + if c == 7 { 70_000 } else { 0 }))
+                    .collect()
+            })
+            .collect();
+        let mut writer =
+            CellGeneSparseWriter::new(temp.path(), true, 300, 20, 1e4).expect("writer opens");
+        let (_, reported) = write_cell_rows(&mut rows, 0, 1e4, &mut writer).expect("write");
+        writer.finalise().expect("finalise");
+
+        let reader = ParallelSparseReader::new(temp.path()).expect("reader opens");
+        assert!(reader.library_index.is_some());
+        let (answered, stored) = library_sizes_both_ways(&reader, &(0..300).collect::<Vec<_>>());
+        assert_eq!(answered, stored);
+        assert_eq!(answered, reported);
+    }
+
+    /// Gene-based files carry no library-size index.
+    #[test]
+    fn test_gene_based_file_has_no_library_index() {
+        let temp = TempBin::new("library_index_gene_file");
+        let mut writer =
+            CellGeneSparseWriter::new(temp.path(), false, 2, 1, 1e4).expect("writer opens");
+        writer
+            .write_gene_chunk(gene_chunk(&[1, 2], &[0, 1], 0))
+            .expect("write");
+        writer.finalise().expect("finalise");
+
+        assert_eq!(read_file_header(temp.path()).library_index_offset, 0);
+        let reader = ParallelSparseReader::new(temp.path()).expect("reader opens");
+        assert!(reader.library_index.is_none());
     }
 }

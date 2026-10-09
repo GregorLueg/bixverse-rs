@@ -607,15 +607,14 @@ pub fn write_h5_dense_row_cells(
                         buf.push((final_gene, val as u32));
                     }
                 }
-                let (nnz_i, lib_i, payload) = compress_cell_row(buf, first + k, target_size)?;
-                Ok((nnz_i, lib_i, (first + k, payload)))
+                Ok(compress_cell_row(buf, first + k, target_size)?)
             })
             .collect::<Result<Vec<_>, BixverseErrors>>()?;
 
         let mut payloads = Vec::with_capacity(built.len());
-        for (nnz_i, lib_i, payload) in built {
+        for (nnz_i, payload) in built {
             nnz.push(nnz_i);
-            lib_size.push(lib_i);
+            lib_size.push(payload.library_size);
             payloads.push(payload);
         }
         writer.write_compressed_cell_chunks(&payloads)?;

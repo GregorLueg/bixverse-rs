@@ -658,15 +658,14 @@ impl MtxReader {
                         .iter()
                         .map(|&(_, g, v)| (g, v))
                         .collect();
-                    let (nnz_i, lib_i, payload) = compress_cell_row(&mut row, cell, target_size)?;
-                    Ok((nnz_i, lib_i, (cell, payload)))
+                    Ok(compress_cell_row(&mut row, cell, target_size)?)
                 })
                 .collect::<Result<Vec<_>, BixverseErrors>>()?;
 
             let mut payloads = Vec::with_capacity(built.len());
-            for (nnz_i, lib_i, payload) in built {
+            for (nnz_i, payload) in built {
                 nnz.push(nnz_i);
-                lib_size.push(lib_i);
+                lib_size.push(payload.library_size);
                 payloads.push(payload);
             }
             writer.write_compressed_cell_chunks(&payloads)?;

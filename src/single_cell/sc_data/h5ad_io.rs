@@ -1591,16 +1591,18 @@ pub(crate) fn write_h5_cell_major_cells(
                             buf.push((new, data[idx] as u32));
                         }
                     }
-                    let (nnz_i, lib_i, payload) =
-                        compress_cell_row(buf, cell_offset + offset + k, target_size)?;
-                    Ok((nnz_i, lib_i, (cell_offset + offset + k, payload)))
+                    Ok(compress_cell_row(
+                        buf,
+                        cell_offset + offset + k,
+                        target_size,
+                    )?)
                 })
                 .collect::<Result<Vec<_>, BixverseErrors>>()?;
 
             let mut payloads = Vec::with_capacity(built.len());
-            for (nnz_i, lib_i, payload) in built {
+            for (nnz_i, payload) in built {
                 nnz.push(nnz_i);
-                lib_size.push(lib_i);
+                lib_size.push(payload.library_size);
                 payloads.push(payload);
             }
             writer.write_compressed_cell_chunks(&payloads)?;
@@ -2134,16 +2136,14 @@ pub fn write_h5_dense_row_streaming<P: AsRef<Path>>(
                         buf.push((new_gene, val as u32));
                     }
                 }
-                let (nnz_i, lib_i, payload) =
-                    compress_cell_row(buf, offset + k, cell_qc.target_size)?;
-                Ok((nnz_i, lib_i, (offset + k, payload)))
+                Ok(compress_cell_row(buf, offset + k, cell_qc.target_size)?)
             })
             .collect::<Result<Vec<_>, BixverseErrors>>()?;
 
         let mut payloads = Vec::with_capacity(built.len());
-        for (nnz_i, lib_i, payload) in built {
+        for (nnz_i, payload) in built {
             nnz.push(nnz_i);
-            lib_size.push(lib_i);
+            lib_size.push(payload.library_size);
             payloads.push(payload);
         }
         writer.write_compressed_cell_chunks(&payloads)?;
