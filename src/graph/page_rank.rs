@@ -13,10 +13,7 @@ use crate::prelude::*;
 // Helpers //
 /////////////
 
-/// Default convergence threshold on the L1 change between iterations. Mass
-/// moves one hop per iteration, so a loose threshold leaves distant nodes at
-/// exactly zero (bixverse#254). Converging this far costs a few dozen extra
-/// iterations at most.
+/// Default convergence threshold on the L1 change between iterations.
 const DEFAULT_TOLERANCE: f64 = 1e-12;
 
 /// Structure for Page Rank Memory
