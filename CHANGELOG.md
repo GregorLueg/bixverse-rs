@@ -1,5 +1,11 @@
 # News
 
+## 0.6.2
+
+### feature
+
+- Wired in the changes from `edge-rs="0.2.1"` with faster fitting.
+
 ## 0.6.1
 
 ### Feature
