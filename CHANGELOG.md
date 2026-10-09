@@ -1,5 +1,19 @@
 # News
 
+## 0.6.4
+
+### Breaking
+
+- `CellGeneSparseWriter::write_compressed_cell_chunks()` takes `&[CellPayload]`
+  instead of `&[(usize, Vec<u8>)]`, and `compress_cell_row()` returns
+  `(nnz, CellPayload)`. The payload carries the library size.
+
+### Feature
+
+- Cell-based binaries carry a library-size index, so `read_cell_library_sizes`
+  no longer decompresses every cell chunk. Files written before this fall back
+  to the previous path; no file version bump.
+
 ## 0.6.3
 
 ### Breaking

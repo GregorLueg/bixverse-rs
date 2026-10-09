@@ -587,7 +587,13 @@ pub fn restore_archive(
                     .map_err(|e| BixverseErrors::ArchiveCorrupt(e.to_string()))?;
                 decode_block(&stream, target_size)?
                     .into_iter()
-                    .map(|c| Ok((c.original_index, c.to_compressed_bytes()?)))
+                    .map(|c| {
+                        Ok(CellPayload {
+                            original_index: c.original_index,
+                            library_size: c.library_size,
+                            bytes: c.to_compressed_bytes()?,
+                        })
+                    })
                     .collect::<Result<Vec<_>, BixverseErrors>>()
             })
             .collect::<Result<Vec<_>, BixverseErrors>>()?;
@@ -701,6 +707,39 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    /// A restored cell file answers library sizes from its index, and the
+    /// answers match the chunk headers.
+    #[test]
+    fn test_restored_cell_file_has_a_matching_library_index() {
+        let cells = TempBin::new("lib_index_cells");
+        let archive = TempBin::new("lib_index_archive");
+        let cells_out = TempBin::new("lib_index_cells_out");
+        let genes_out = TempBin::new("lib_index_genes_out");
+
+        let n_cells = ARCHIVE_BLOCK_CELLS + 3;
+        write_cells(cells.path(), n_cells, 11, 1e4, &[]);
+        archive_cell_file(cells.path(), archive.path(), 3, false).unwrap();
+        restore_archive(
+            archive.path(),
+            cells_out.path(),
+            genes_out.path(),
+            None,
+            false,
+        )
+        .unwrap();
+
+        let reader = ParallelSparseReader::new(cells_out.path()).unwrap();
+        assert!(reader.has_library_index());
+        let all: Vec<usize> = (0..n_cells).collect();
+        let from_chunks: Vec<usize> = reader
+            .read_cells_parallel(&all)
+            .unwrap()
+            .iter()
+            .map(|c| c.library_size)
+            .collect();
+        assert_eq!(reader.read_cell_library_sizes(&all).unwrap(), from_chunks);
     }
 
     #[test]
