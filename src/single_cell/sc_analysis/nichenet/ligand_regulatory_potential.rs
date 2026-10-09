@@ -50,7 +50,9 @@ pub struct LigandTargetParams<T: BixverseFloat> {
     pub damping_factor: T,
     /// Maximum iterations for PPR
     pub max_iter: usize,
-    /// Tolerance for PPR
+    /// PPR convergence threshold on the L1 change between iterations. With
+    /// `ltf_cutoff > 0` the output is only stable once PPR has converged well
+    /// below the score gaps around the quantile, so keep this tight.
     pub tol: T,
     /// Run secondary-target step (default false in our port).
     pub secondary_targets: bool,
@@ -68,7 +70,7 @@ impl<T: BixverseFloat> Default for LigandTargetParams<T> {
             ltf_cutoff: T::from_f64(0.99).unwrap(),
             damping_factor: T::from_f64(0.5).unwrap(),
             max_iter: 1000,
-            tol: T::from_f64(1e-7).unwrap(),
+            tol: T::from_f64(1e-12).unwrap(),
             secondary_targets: false,
             topology_correction: false,
         }

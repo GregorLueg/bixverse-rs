@@ -1,5 +1,22 @@
 # News
 
+## 0.6.3
+
+### Breaking
+
+- `tied_diffusion_parallel()` now takes `damping_factor`, `max_iter` and `tol`
+  instead of hard-coding 0.85, 1000 and 1e-7.
+
+### Fix
+
+- Personalised PageRank stopped far too early: convergence was checked on the
+  squared L2 norm of the update. All power iterations now use the L1 change and
+  the default tolerance is 1e-12 (also in `LigandTargetParams`). Matches
+  igraph/prpack now.
+- Dangling nodes in personalised PageRank are handled consistently (mass leaks
+  and is restored by the final renormalisation) instead of an unreachable
+  branch that redistributed it to the wrong nodes.
+
 ## 0.6.2
 
 ### Feature
