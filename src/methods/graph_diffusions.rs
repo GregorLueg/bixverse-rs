@@ -64,6 +64,10 @@ pub fn parse_tied_sum(s: &str) -> Option<TiedSumType> {
 /// * `personalise_vecs_1` - The personalisation vectors for the first graph
 /// * `personalise_vecs_2` - The personalisation vectors for the second graph
 /// * `undirected` - Whether the graph is undirected
+/// * `damping_factor` - PageRank damping factor, i.e. the probability of
+///   continuing the walk
+/// * `max_iter` - Maximum number of power iterations
+/// * `tol` - Convergence threshold on the L1 change between iterations
 ///
 /// ### Returns
 ///
@@ -79,6 +83,9 @@ pub fn tied_diffusion_parallel<T>(
     personalise_vecs_1: &[Vec<T>],
     personalise_vecs_2: &[Vec<T>],
     undirected: bool,
+    damping_factor: T,
+    max_iter: usize,
+    tol: T,
 ) -> Vec<Vec<T>>
 where
     T: BixverseFloat + std::iter::Sum,
@@ -93,8 +100,6 @@ where
         graph_from_strings(&node_names, &from, &to, weights, undirected)
     };
 
-    let dampening_factor = T::from_f64(0.85).unwrap();
-    let tolerance = T::from_f64(1e-7).unwrap();
     let half = T::from_f64(0.5).unwrap();
 
     // Pre-process graph once
@@ -109,18 +114,18 @@ where
             |(working_mem1, working_mem2), (diff1, diff2)| {
                 let pr1 = personalised_page_rank_optimised(
                     &pagerank_graph_1,
-                    dampening_factor,
+                    damping_factor,
                     diff1,
-                    1000,
-                    tolerance,
+                    max_iter,
+                    tol,
                     working_mem1,
                 );
                 let pr2 = personalised_page_rank_optimised(
                     &pagerank_graph_2,
-                    dampening_factor,
+                    damping_factor,
                     diff2,
-                    1000,
-                    tolerance,
+                    max_iter,
+                    tol,
                     working_mem2,
                 );
 

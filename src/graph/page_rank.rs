@@ -13,7 +13,11 @@ use crate::prelude::*;
 // Helpers //
 /////////////
 
-const DEFAULT_TOLERANCE: f64 = 1e-6;
+/// Default convergence threshold on the L1 change between iterations. Mass
+/// moves one hop per iteration, so a loose threshold leaves distant nodes at
+/// exactly zero (bixverse#254). Converging this far costs a few dozen extra
+/// iterations at most.
+const DEFAULT_TOLERANCE: f64 = 1e-12;
 
 /// Structure for Page Rank Memory
 ///
@@ -71,20 +75,18 @@ where
 }
 
 /// Precomputed graph structure for efficient PageRank computation
-///
-/// ### Fields
-///
-/// * `node_count` - The total number of nodes in the graph
-/// * `in_edges_flat` - Flattened incoming edges: `[node0_in_edges..., node1_in_edges..., ...]`
-/// * `in_edges_offsets` - Offsets into the `in_edges_flat` for each node
-/// * `out_degrees` - The out degree for each node.
 #[derive(Clone)]
 pub struct PageRankGraph<T> {
+    /// The total number of nodes in the graph
     node_count: usize,
+    /// Flattened incoming edges: `[node0_in_edges..., node1_in_edges..., ...]`
     in_edges_flat: Vec<usize>,
+    /// Edge weight per entry of `in_edges_flat`
     in_edge_weights_flat: Vec<T>,
+    /// Offsets into `in_edges_flat` for each node, length `node_count + 1`
     in_edges_offsets: Vec<usize>,
-    out_weight_sums: Vec<T>,
+    /// Inverse of the summed out-weight per node, zero for dangling nodes
+    inv_out_weight: Vec<T>,
 }
 
 #[allow(dead_code)]
@@ -134,18 +136,14 @@ where
             in_edges_offsets.push(in_edges_flat.len());
         }
 
-        // Calculate sum of outgoing weights for each node
-        let out_weight_sums: Vec<T> = out_edges
-            .iter()
-            .map(|edges| edges.iter().map(|(_, weight)| *weight).sum())
-            .collect();
+        let inv_out_weight = inv_out_weights(&out_edges);
 
         Self {
             node_count,
             in_edges_flat,
             in_edge_weights_flat,
             in_edges_offsets,
-            out_weight_sums,
+            inv_out_weight,
         }
     }
 
@@ -215,18 +213,14 @@ where
             in_edges_offsets.push(in_edges_flat.len());
         }
 
-        // Calculate sum of outgoing weights for each node
-        let out_weight_sums: Vec<T> = out_edges
-            .iter()
-            .map(|edges| edges.iter().map(|(_, weight)| *weight).sum())
-            .collect();
+        let inv_out_weight = inv_out_weights(&out_edges);
 
         Self {
             node_count,
             in_edges_flat,
             in_edge_weights_flat,
             in_edges_offsets,
-            out_weight_sums,
+            inv_out_weight,
         }
     }
 
@@ -253,6 +247,37 @@ where
     }
 }
 
+/// Inverse summed out-weight per node.
+///
+/// Nodes whose out-weight sums to zero (no out-edges, or only zero-weight
+/// ones) get zero, so their mass leaks. The callers renormalise at the end,
+/// which for personalised PageRank is the same as teleporting the dangling
+/// mass back to the personalisation vector: the solution is only rescaled.
+///
+/// ### Params
+///
+/// * `out_edges` - Out-edges per node as `(target, weight)`
+///
+/// ### Returns
+///
+/// The inverse out-weight per node.
+fn inv_out_weights<T>(out_edges: &[Vec<(usize, T)>]) -> Vec<T>
+where
+    T: BixverseFloat + std::iter::Sum,
+{
+    out_edges
+        .iter()
+        .map(|edges| {
+            let total: T = edges.iter().map(|(_, weight)| *weight).sum();
+            if total > T::zero() {
+                T::one() / total
+            } else {
+                T::zero()
+            }
+        })
+        .collect()
+}
+
 //////////////
 // PageRank //
 //////////////
@@ -267,8 +292,8 @@ where
 /// * `personalization_vector` - The vector of probabilities for the reset,
 ///   making this the personalised page rank.
 /// * `nb_iter` - Maximum number of iterations for the personalised page rank.
-/// * `tolerance` - Optional tolerance for the algorithm. If not provided, it will
-///   default to `1e-6`.
+/// * `tol` - Optional convergence threshold on the L1 change between
+///   iterations. Defaults to `1e-12`.
 ///
 /// ### Returns
 ///
@@ -315,10 +340,7 @@ where
         }
     }
 
-    let out_weight_sums: Vec<T> = out_edges
-        .iter()
-        .map(|edges| edges.iter().map(|(_, weight)| *weight).sum())
-        .collect();
+    let inv_out_weight = inv_out_weights(&out_edges);
 
     let mut ranks: Vec<T> = personalisation_vector.to_vec();
     let teleport_factor = T::one() - damping_factor;
@@ -331,28 +353,22 @@ where
 
                 let link_prob = in_edges[v]
                     .iter()
-                    .map(|&(w, edge_weight)| {
-                        if out_weight_sums[w] > T::zero() {
-                            damping_factor * ranks[w] * edge_weight / out_weight_sums[w]
-                        } else {
-                            damping_factor * ranks[w] * personalisation_vector[v]
-                        }
-                    })
+                    .map(|&(w, edge_weight)| ranks[w] * edge_weight * inv_out_weight[w])
                     .sum::<T>();
 
-                teleport_prob + link_prob
+                teleport_prob + damping_factor * link_prob
             })
             .collect();
 
-        let squared_norm_2 = new_ranks
+        let l1 = new_ranks
             .par_iter()
             .zip(&ranks)
-            .map(|(new, old)| (*new - *old) * (*new - *old))
+            .map(|(new, old)| (*new - *old).abs())
             .sum::<T>();
 
         ranks = new_ranks;
 
-        if squared_norm_2 <= tolerance {
+        if l1 <= tolerance {
             break;
         }
     }
@@ -377,7 +393,7 @@ where
 /// * `personalization_vector` - The vector of probabilities for the reset,
 ///   making this the personalised page rank.
 /// * `nb_iter` - Maximum number of iterations for the personalised page rank.
-/// * `tolerance` - Tolerance of the algorithm.
+/// * `tolerance` - Convergence threshold on the L1 change between iterations.
 /// * `working_memory` - The `PageRankWorkingMemory` structure to store the old
 ///   and new ranks
 ///
@@ -419,32 +435,22 @@ where
                 let link_prob: T = in_nodes
                     .iter()
                     .zip(in_weights.iter())
-                    .map(|(&w, &edge_weight)| {
-                        if graph.out_weight_sums[w] > T::zero() {
-                            damping_factor * ranks[w] * edge_weight / graph.out_weight_sums[w]
-                        } else {
-                            damping_factor * ranks[w] * personalisation_vector[v]
-                        }
-                    })
+                    .map(|(&w, &edge_weight)| ranks[w] * edge_weight * graph.inv_out_weight[w])
                     .sum();
 
-                *new_rank = teleport_prob + link_prob;
+                *new_rank = teleport_prob + damping_factor * link_prob;
             });
 
-        // Check convergence
-        let squared_norm_2: T = new_ranks[..node_count]
+        let l1: T = new_ranks[..node_count]
             .par_iter()
             .zip(&ranks[..node_count])
-            .map(|(new, old)| {
-                let diff = *new - *old;
-                diff * diff
-            })
+            .map(|(new, old)| (*new - *old).abs())
             .sum();
 
         // Swap vectors (no allocation)
         std::mem::swap(ranks, new_ranks);
 
-        if squared_norm_2 <= tolerance {
+        if l1 <= tolerance {
             break;
         }
     }
@@ -472,8 +478,8 @@ where
 /// * `personalization_vector` - The vector of probabilities for the reset,
 ///   making this the personalised page rank.
 /// * `nb_iter` - Maximum number of iterations for the personalised page rank.
-/// * `tolerance` - Optional tolerance for the algorithm. If not provided, it
-///   will default to `1e-6`.
+/// * `tol` - Optional convergence threshold on the L1 change between
+///   iterations. Defaults to `1e-12`.
 /// * `sink_node_types` - Optional HashSet of node types that act as sinks
 ///   (force reset of the surfer)
 /// * `constrained_edge_types` - Optional HashSet of edge types that force reset
@@ -563,6 +569,7 @@ where
                 let mut flowable = teleport_mass;
                 let mut absorbed = T::zero();
 
+                // zero-weight sources leak; the final normalisation restores it
                 for &(w, edge_weight, is_sink_edge) in &in_edges[v] {
                     if out_degrees[w] > T::zero() {
                         let flow =
@@ -573,9 +580,6 @@ where
                         } else {
                             flowable += flow;
                         }
-                    } else {
-                        // Source node w has no outgoing edges (sink node)
-                        flowable += damping_factor * flowable_ranks[w] * personalisation_vector[v];
                     }
                 }
 
@@ -600,19 +604,16 @@ where
             .collect();
 
         // Check for convergence using total ranks
-        let squared_norm_2 = total_ranks
+        let l1 = total_ranks
             .par_iter()
             .zip(flowable_ranks.par_iter().zip(&absorbed_ranks))
-            .map(|(new_total, (old_flow, old_abs))| {
-                let old_total = *old_flow + *old_abs;
-                (*new_total - old_total) * (*new_total - old_total)
-            })
+            .map(|(new_total, (old_flow, old_abs))| (*new_total - (*old_flow + *old_abs)).abs())
             .sum::<T>();
 
         flowable_ranks = final_flowable;
         absorbed_ranks = new_absorbed;
 
-        if squared_norm_2 <= tolerance {
+        if l1 <= tolerance {
             break;
         }
     }
@@ -1165,6 +1166,61 @@ mod tests {
         // The two leaves are symmetric and the mass is conserved.
         assert!((optimised[1] - optimised[2]).abs() < 1e-6);
         assert!((optimised.iter().sum::<f64>() - 1.0).abs() < 1e-6);
+    }
+
+    /// Both PPR paths match igraph's prpack on a weighted directed graph with
+    /// a dangling node (7) and a node with only a zero-weight out-edge (6).
+    /// Reference from `igraph::page_rank(algo = "prpack", damping = 0.8)`,
+    /// igraph 2.3.3.
+    #[test]
+    fn test_page_rank_matches_igraph_prpack() {
+        let from: Vec<usize> = vec![0, 0, 1, 1, 2, 2, 3, 3, 4, 5, 5, 6];
+        let to: Vec<usize> = vec![1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 7, 0];
+        let weights = vec![0.5, 1.5, 2.0, 0.3, 1.0, 0.7, 0.9, 1.2, 2.5, 0.4, 0.8, 0.0];
+        let expected = [
+            2.845_972_704_682_356_3e-1,
+            5.691_945_409_364_712_6e-2,
+            2.103_545_042_591_307_1e-1,
+            1.049_297_762_422_016_8e-1,
+            1.052_691_717_448_718_7e-1,
+            1.321_832_351_066_182_5e-1,
+            3.524_886_269_509_82e-2,
+            7.049_772_539_019_64e-2,
+        ];
+        let mut p_vec = vec![0.0; 8];
+        p_vec[0] = 1.0;
+
+        let mut graph = Graph::<&str, f64>::new();
+        let idx: Vec<_> = (0..8).map(|_| graph.add_node("")).collect();
+        for ((&a, &b), &w) in from.iter().zip(&to).zip(&weights) {
+            graph.add_edge(idx[a], idx[b], w);
+        }
+
+        let tol = DEFAULT_TOLERANCE;
+        let optimised = personalised_page_rank_optimised(
+            &PageRankGraph::from_petgraph(graph.clone()),
+            0.8,
+            &p_vec,
+            1000,
+            tol,
+            &mut PageRankWorkingMemory::new(),
+        );
+        let reference = personalised_page_rank(graph, 0.8, &p_vec, 1000, None);
+
+        for i in 0..8 {
+            assert!(
+                (optimised[i] - expected[i]).abs() < 1e-10,
+                "node {i}: optimised {} vs igraph {}",
+                optimised[i],
+                expected[i]
+            );
+            assert!(
+                (reference[i] - expected[i]).abs() < 1e-10,
+                "node {i}: reference {} vs igraph {}",
+                reference[i],
+                expected[i]
+            );
+        }
     }
 
     /// Toy multiscale graph: two drugs, three proteins, one function, one
