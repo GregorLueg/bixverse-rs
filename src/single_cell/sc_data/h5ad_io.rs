@@ -196,12 +196,10 @@ pub fn check_h5ad_is_raw(
     raw_slot: &RawDataSlot,
     n_check: Option<usize>,
 ) -> Result<(), BixverseErrors> {
-    let n_check = n_check.unwrap_or(N_CHECK);
+    let ds = file.dataset(raw_slot.get_data())?;
+    let n_check = n_check.unwrap_or(N_CHECK).min(ds.size());
 
-    let data: Vec<f32> = file
-        .dataset(raw_slot.get_data())?
-        .read_slice(0..n_check)?
-        .to_vec();
+    let data: Vec<f32> = ds.read_slice(0..n_check)?.to_vec();
 
     check_is_raw(&data, Some(n_check))?;
 
@@ -2822,5 +2820,22 @@ mod tests {
         let got = read_indptr(&ds);
         let _ = std::fs::remove_file(&path);
         assert_eq!(got.unwrap(), vec![0, 5_000_000_000, 5_000_000_007]);
+    }
+
+    #[test]
+    fn test_raw_check_fewer_values_than_n_check() {
+        let path = std::env::temp_dir().join("bixverse_h5ad_io_small_raw.h5");
+        {
+            let file = File::create(&path).unwrap();
+            let x = file.create_group("X").unwrap();
+            x.new_dataset_builder()
+                .with_data(&[1.0f32, 2.0, 3.0])
+                .create("data")
+                .unwrap();
+        }
+        let file = File::open(&path).unwrap();
+        let res = check_h5ad_is_raw(&file, &RawDataSlot::DataX, None);
+        let _ = std::fs::remove_file(&path);
+        assert!(res.is_ok());
     }
 }

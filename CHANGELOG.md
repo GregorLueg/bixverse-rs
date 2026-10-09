@@ -1,5 +1,15 @@
 # News
 
+## 0.6.2
+
+### Feature
+
+- Wired in the changes from `edge-rs="0.2.1"` with faster fitting.
+
+### Fix
+
+- Small h5ad could cause panics due to out-of-bounds indexing.
+
 ## 0.6.1
 
 ### Feature
