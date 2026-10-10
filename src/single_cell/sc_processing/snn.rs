@@ -3,7 +3,7 @@
 use rayon::prelude::*;
 use std::time::Instant;
 
-use crate::graph::graph_structures::UnionFind;
+use crate::graph::graph_structures::{UnionFind, edge_pairs_to_sparse_graph};
 use crate::prelude::*;
 
 ///////////
@@ -557,77 +557,16 @@ pub fn generate_snn_limited(
 ///   `generate_snn_limited` (pairs `[u, v, u, v, ...]`).
 /// * `weights` - Edge weights, one per pair.
 /// * `n_nodes` - Number of nodes in the graph.
+///
+/// ### Returns
+///
+/// Undirected graph with a symmetric, row-sorted CSR
 pub fn snn_edges_to_sparse_graph(
     edges: &[usize],
     weights: &[f32],
     n_nodes: usize,
 ) -> SparseGraph<f32> {
-    let n_edges = weights.len();
-
-    let mut indptr = vec![0usize; n_nodes + 1];
-    for e in 0..n_edges {
-        indptr[edges[2 * e] + 1] += 1;
-        indptr[edges[2 * e + 1] + 1] += 1;
-    }
-    for i in 1..=n_nodes {
-        indptr[i] += indptr[i - 1];
-    }
-
-    let nnz = indptr[n_nodes];
-    let mut indices = vec![0usize; nnz];
-    let mut data = vec![0.0f32; nnz];
-    let mut cursor = indptr.clone();
-
-    for e in 0..n_edges {
-        let i = edges[2 * e];
-        let j = edges[2 * e + 1];
-        let w = weights[e];
-
-        indices[cursor[i]] = j;
-        data[cursor[i]] = w;
-        cursor[i] += 1;
-
-        indices[cursor[j]] = i;
-        data[cursor[j]] = w;
-        cursor[j] += 1;
-    }
-
-    // sort column indices within each row, keeping data aligned
-    let mut rows: Vec<(&mut [usize], &mut [f32])> = Vec::with_capacity(n_nodes);
-    let (mut idx_rest, mut data_rest) = (indices.as_mut_slice(), data.as_mut_slice());
-    for node in 0..n_nodes {
-        let len = indptr[node + 1] - indptr[node];
-        let (idx_row, idx_tail) = idx_rest.split_at_mut(len);
-        let (data_row, data_tail) = data_rest.split_at_mut(len);
-        rows.push((idx_row, data_row));
-        idx_rest = idx_tail;
-        data_rest = data_tail;
-    }
-
-    rows.par_iter_mut()
-        .for_each_init(Vec::<(usize, f32)>::new, |scratch, (idx_row, data_row)| {
-            if idx_row.len() < 2 {
-                return;
-            }
-            scratch.clear();
-            scratch.extend(idx_row.iter().copied().zip(data_row.iter().copied()));
-            scratch.sort_unstable_by_key(|&(node, _)| node);
-            for ((i, d), &(node, w)) in idx_row.iter_mut().zip(data_row.iter_mut()).zip(&*scratch) {
-                *i = node;
-                *d = w;
-            }
-        });
-
-    let adjacency = CompressedSparseData2 {
-        data,
-        indices: indices.index_cast(),
-        indptr: indptr.index_cast(),
-        cs_type: CompressedSparseFormat::Csr,
-        data_2: None,
-        shape: (n_nodes, n_nodes),
-    };
-
-    SparseGraph::new(n_nodes, adjacency, false)
+    edge_pairs_to_sparse_graph(edges, weights, n_nodes)
 }
 
 ///////////

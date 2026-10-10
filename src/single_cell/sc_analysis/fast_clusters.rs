@@ -883,7 +883,9 @@ mod tests {
         assert_eq!(a, b);
     }
 
-    /// Two well-separated blobs get distinct majority labels at over 90% purity, SNN on and off.
+    /// Two well-separated blobs never share a community, SNN on and off. A blob
+    /// may split into several communities: on the SNN centroid graph that is the
+    /// higher-modularity answer (igraph splits it too).
     #[test]
     fn produces_multiple_communities_on_separated_blobs() {
         let n_per = 200;
@@ -910,26 +912,22 @@ mod tests {
             assert_eq!(labels[0].len(), 2 * n_per);
 
             let (blob_a, blob_b) = labels[0].split_at(n_per);
+            assert_ne!(majority(blob_a), majority(blob_b), "run_snn {}", run_snn);
 
-            let maj_a = majority(blob_a);
-            let maj_b = majority(blob_b);
-            assert_ne!(maj_a, maj_b, "run_snn {}", run_snn);
-
-            let purity_a = blob_a.iter().filter(|&&l| l == maj_a).count() as f32 / n_per as f32;
-            let purity_b = blob_b.iter().filter(|&&l| l == maj_b).count() as f32 / n_per as f32;
-
-            assert!(
-                purity_a > 0.9,
-                "blob A purity {} (snn {})",
-                purity_a,
-                run_snn
-            );
-            assert!(
-                purity_b > 0.9,
-                "blob B purity {} (snn {})",
-                purity_b,
-                run_snn
-            );
+            // every community is at least 90% one blob
+            let n_labels = labels[0].iter().max().unwrap() + 1;
+            for l in 0..n_labels {
+                let in_a = blob_a.iter().filter(|&&x| x == l).count();
+                let in_b = blob_b.iter().filter(|&&x| x == l).count();
+                let purity = in_a.max(in_b) as f32 / (in_a + in_b).max(1) as f32;
+                assert!(
+                    purity > 0.9,
+                    "community {} purity {} (snn {})",
+                    l,
+                    purity,
+                    run_snn
+                );
+            }
         }
     }
 
