@@ -2315,4 +2315,15 @@ pub enum BixverseErrors {
         /// Shared-memory bytes the device reports.
         limit: usize,
     },
+    // -- mlx --
+    /// An mlx-c call returned a non-zero code. mlx-c prints the reason to
+    /// stderr through the handler installed by `install_error_handler`.
+    #[cfg(mlx_available)]
+    #[error("MLX: {op} failed with code {code}")]
+    MlxError {
+        /// Name of the failing mlx-c call
+        op: &'static str,
+        /// Return code (or the offending dtype for a dtype mismatch)
+        code: i32,
+    },
 }

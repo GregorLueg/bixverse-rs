@@ -23,3 +23,10 @@ pub mod single_cell;
 
 #[cfg(feature = "gpu")]
 pub mod gpu;
+
+#[cfg(mlx_available)]
+pub mod mlx;
+
+/// Whether the MLX backend was compiled in: the `mlx` feature is on and the
+/// build script found `libmlxc`.
+pub const MLX_AVAILABLE: bool = cfg!(mlx_available);
