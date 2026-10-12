@@ -83,6 +83,14 @@ unsafe extern "C" {
         dim: c_int,
         dtype: mlx_dtype,
     ) -> mlx_array;
+    fn mlx_array_new_data_managed_payload(
+        data: *mut c_void,
+        shape: *const c_int,
+        dim: c_int,
+        dtype: mlx_dtype,
+        payload: *mut c_void,
+        dtor: unsafe extern "C" fn(*mut c_void),
+    ) -> mlx_array;
     fn mlx_array_free(arr: mlx_array) -> c_int;
     fn mlx_array_dtype(arr: mlx_array) -> mlx_dtype;
     fn mlx_array_size(arr: mlx_array) -> usize;
@@ -350,6 +358,78 @@ impl Array {
     /// The owned array
     pub fn from_u32(data: &[u32], shape: &[i32]) -> Self {
         Self::from_raw(data, shape, MLX_UINT32)
+    }
+
+    /// Hand a host buffer to MLX without a copy where Metal can wrap it.
+    ///
+    /// MLX wraps page-aligned memory as a no-copy Metal buffer and copies
+    /// anything else; either way the `Vec` is dropped once MLX is done with
+    /// it.
+    ///
+    /// ### Params
+    ///
+    /// * `data` - Row-major values, `shape.iter().product()` of them
+    /// * `shape` - Array shape
+    /// * `dtype` - mlx dtype matching `E`
+    ///
+    /// ### Returns
+    ///
+    /// The owned array
+    fn from_vec<E>(data: Vec<E>, shape: &[i32], dtype: mlx_dtype) -> Self {
+        debug_assert_eq!(
+            data.len(),
+            shape.iter().map(|&s| s as usize).product::<usize>()
+        );
+        /// Drop the boxed `Vec` MLX was holding.
+        unsafe extern "C" fn drop_vec<E>(payload: *mut c_void) {
+            // SAFETY: `payload` is the `Box<Vec<E>>` leaked below, freed once.
+            drop(unsafe { Box::from_raw(payload.cast::<Vec<E>>()) });
+        }
+        let mut boxed = Box::new(data);
+        let ptr = boxed.as_mut_ptr().cast::<c_void>();
+        let payload = Box::into_raw(boxed).cast::<c_void>();
+        // SAFETY: the buffer lives in the leaked box until MLX calls
+        // `drop_vec`, and moving the box does not move the heap buffer.
+        Self {
+            raw: unsafe {
+                mlx_array_new_data_managed_payload(
+                    ptr,
+                    shape.as_ptr(),
+                    shape.len() as c_int,
+                    dtype,
+                    payload,
+                    drop_vec::<E>,
+                )
+            },
+        }
+    }
+
+    /// [`Array::from_vec`] for u32.
+    ///
+    /// ### Params
+    ///
+    /// * `data` - Row-major values, `shape.iter().product()` of them
+    /// * `shape` - Array shape
+    ///
+    /// ### Returns
+    ///
+    /// The owned array
+    pub fn from_vec_u32(data: Vec<u32>, shape: &[i32]) -> Self {
+        Self::from_vec(data, shape, MLX_UINT32)
+    }
+
+    /// [`Array::from_vec`] for f32.
+    ///
+    /// ### Params
+    ///
+    /// * `data` - Row-major values, `shape.iter().product()` of them
+    /// * `shape` - Array shape
+    ///
+    /// ### Returns
+    ///
+    /// The owned array
+    pub fn from_vec_f32(data: Vec<f32>, shape: &[i32]) -> Self {
+        Self::from_vec(data, shape, MLX_FLOAT32)
     }
 
     /// Borrow the f32 buffer of an evaluated, row-contiguous array. A lazy
@@ -892,5 +972,27 @@ mod tests {
             .unwrap();
         eval_all(&[&fused], false).unwrap();
         assert_eq!(fused.as_f32().unwrap(), &[27.0, 63.0, 63.0, 153.0]);
+    }
+
+    /// Owned buffers reach the device intact both when Metal can wrap them
+    /// (page aligned, a large allocation) and when MLX has to copy (a small,
+    /// unaligned one), and outlive the host handle.
+    #[test]
+    fn test_from_vec_aligned_and_unaligned() {
+        install_error_handler();
+        let s = Stream::default_gpu();
+        for n in [3usize, 1 << 22] {
+            let host: Vec<f32> = (0..n).map(|i| (i % 7) as f32).collect();
+            let want: f32 = host.iter().sum();
+            let a = Array::from_vec_f32(host, &[n as i32]);
+            let total = a.sum_axis(0, &s).unwrap();
+            eval_all(&[&total], false).unwrap();
+            assert_eq!(total.as_f32().unwrap()[0], want, "n = {n}");
+
+            let idx: Vec<u32> = (0..n as u32).collect();
+            let b = Array::from_vec_u32(idx, &[n as i32]);
+            eval_all(&[&b], false).unwrap();
+            drop(b);
+        }
     }
 }

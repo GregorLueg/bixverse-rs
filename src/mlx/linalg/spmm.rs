@@ -170,32 +170,85 @@ impl MlxCsr {
         values: &[f32],
         n_rows: usize,
     ) -> Result<Self, BixverseErrors> {
-        let nnz = indices.len();
-        if indptr.len() != n_rows + 1
-            || values.len() != nnz
-            || indptr.last().map(|&x| x as usize) != Some(nnz)
-        {
-            return Err(BixverseErrors::InvalidArgument(format!(
-                "MLX CSR: indptr {} / indices {} / values {} inconsistent with {} rows",
-                indptr.len(),
-                nnz,
-                values.len(),
-                n_rows
-            )));
-        }
-        // the grid is `n_rows * SIMD_WIDTH` threads in an i32
-        if n_rows > i32::MAX as usize / SIMD_WIDTH || nnz > i32::MAX as usize {
-            return Err(BixverseErrors::InvalidArgument(format!(
-                "MLX CSR: {n_rows} rows / {nnz} non-zeros exceed the MLX index range"
-            )));
-        }
+        check_csr(indptr, indices, values, n_rows)?;
+        let nnz = indices.len() as i32;
         Ok(Self {
             indptr: Array::from_u32(indptr, &[indptr.len() as i32]),
-            indices: Array::from_u32(indices, &[nnz as i32]),
-            values: Array::from_f32(values, &[nnz as i32]),
+            indices: Array::from_u32(indices, &[nnz]),
+            values: Array::from_f32(values, &[nnz]),
             n_rows,
         })
     }
+
+    /// Hand an owned CSR to MLX. Large host buffers are page aligned, so
+    /// Metal wraps them in place instead of copying.
+    ///
+    /// ### Params
+    ///
+    /// * `indptr` - Row pointers, length `n_rows + 1`
+    /// * `indices` - Column indices, length `nnz`
+    /// * `values` - Values, length `nnz`
+    /// * `n_rows` - Number of rows
+    ///
+    /// ### Returns
+    ///
+    /// The device CSR, or `InvalidArgument` as [`MlxCsr::new`].
+    pub(crate) fn from_vecs(
+        indptr: Vec<u32>,
+        indices: Vec<u32>,
+        values: Vec<f32>,
+        n_rows: usize,
+    ) -> Result<Self, BixverseErrors> {
+        check_csr(&indptr, &indices, &values, n_rows)?;
+        let (np, nnz) = (indptr.len() as i32, indices.len() as i32);
+        Ok(Self {
+            indptr: Array::from_vec_u32(indptr, &[np]),
+            indices: Array::from_vec_u32(indices, &[nnz]),
+            values: Array::from_vec_f32(values, &[nnz]),
+            n_rows,
+        })
+    }
+}
+
+/// Validate CSR buffers against `n_rows` and the MLX index range.
+///
+/// ### Params
+///
+/// * `indptr` - Row pointers
+/// * `indices` - Column indices
+/// * `values` - Values
+/// * `n_rows` - Number of rows
+///
+/// ### Returns
+///
+/// `Ok(())`, or `InvalidArgument` if the buffers disagree with `n_rows` or a
+/// size exceeds what MLX can index.
+fn check_csr(
+    indptr: &[u32],
+    indices: &[u32],
+    values: &[f32],
+    n_rows: usize,
+) -> Result<(), BixverseErrors> {
+    let nnz = indices.len();
+    if indptr.len() != n_rows + 1
+        || values.len() != nnz
+        || indptr.last().map(|&x| x as usize) != Some(nnz)
+    {
+        return Err(BixverseErrors::InvalidArgument(format!(
+            "MLX CSR: indptr {} / indices {} / values {} inconsistent with {} rows",
+            indptr.len(),
+            nnz,
+            values.len(),
+            n_rows
+        )));
+    }
+    // the grid is `n_rows * SIMD_WIDTH` threads in an i32
+    if n_rows > i32::MAX as usize / SIMD_WIDTH || nnz > i32::MAX as usize {
+        return Err(BixverseErrors::InvalidArgument(format!(
+            "MLX CSR: {n_rows} rows / {nnz} non-zeros exceed the MLX index range"
+        )));
+    }
+    Ok(())
 }
 
 ////////////

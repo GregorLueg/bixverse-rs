@@ -86,7 +86,8 @@ impl Default for RandSvdMlxParams {
 pub struct MlxRandSvdStages {
     /// Host side: f32 cast, CSR build, `Omega` draw
     pub prep: Duration,
-    /// Copies into MLX arrays
+    /// Hand-over to MLX: the CSR and CSC go across without a copy, the small
+    /// vectors are copied
     pub upload: Duration,
     /// Forward SpMM `A X` with its correction vectors
     pub spmm_forward: Duration,
@@ -399,18 +400,8 @@ fn rand_svd_impl<T: BixverseFloat>(
     let (n_i, m_i, s_i) = (n as i32, m as i32, s_width as i32);
     let op = Operator {
         kernel: spmm_kernel(),
-        csr: MlxCsr::new(
-            &csr.indptr,
-            &csr.indices,
-            csr.data_2.as_deref().unwrap_or_default(),
-            n,
-        )?,
-        csc: MlxCsr::new(
-            &csc.indptr,
-            &csc.indices,
-            csc.data_2.as_deref().unwrap_or_default(),
-            m,
-        )?,
+        csr: MlxCsr::from_vecs(csr.indptr, csr.indices, csr.data_2.unwrap_or_default(), n)?,
+        csc: MlxCsr::from_vecs(csc.indptr, csc.indices, csc.data_2.unwrap_or_default(), m)?,
         mu: Array::from_f32(&mu, &[m_i, 1]),
         offsets: Array::from_f32(&offsets, &[n_i, 1]),
         ones_n: Array::from_f32(&vec![1.0; n], &[n_i]),
@@ -418,7 +409,6 @@ fn rand_svd_impl<T: BixverseFloat>(
         use_clr,
         s_width,
     };
-    drop((csr, csc));
     let sigma_dev = Array::from_f32(&sigma, &[m_i]);
     let sigma_sq_dev = Array::from_f32(&sigma_sq, &[m_i]);
     let omega_dev = Array::from_f32(&omega, &[m_i, s_i]);
