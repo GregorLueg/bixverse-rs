@@ -19,10 +19,14 @@
 //! ### Threading
 //!
 //! One SIMD group per CSR row. The lanes load 32 consecutive non-zeros of the
-//! row at a time (coalesced), then walk them in turn, each `(j, v)` handed to
-//! every lane by `simd_shuffle`. Lane `l` owns output columns `l, l + 32, ...`,
-//! so the read of the dense row `X[j, :]` is coalesced as well and the
-//! accumulators stay in registers (`ceil(s / 32)` per lane).
+//! row at a time (coalesced), then walk them `32 / L` at a time, each `(j, v)`
+//! handed to its `L` lanes by `simd_shuffle`. Within such a sub-group lane `l`
+//! owns the float4 column blocks `l, l + L, ...`, read as unaligned
+//! `packed_float4`, so the read of `X[j, :]` stays coalesced and the
+//! accumulators stay in registers. The sub-groups' partial rows are summed by
+//! `simd_shuffle_xor` at the end. At k = 30 that is eight lanes per non-zero
+//! and four non-zeros per step, where one lane per column left two lanes idle
+//! and walked the non-zeros one by one.
 
 use crate::mlx::ffi::{Array, MLX_FLOAT32, MetalKernel, OutputSpec, Stream};
 use crate::prelude::*;
@@ -34,25 +38,35 @@ use crate::prelude::*;
 /// SIMD-group width on Apple GPUs; one SIMD group owns one CSR row.
 const SIMD_WIDTH: usize = 32;
 
+/// Cap on the lanes that share one non-zero. At s = 130, 16 lanes (two
+/// non-zeros per step, three float4 blocks per lane) beat 32 (one non-zero,
+/// two blocks of which the second is mostly idle): 24.4 to 22.4 ms on the
+/// 200k x 2000 forward product (M1 Max).
+const MAX_LANES_PER_NNZ: usize = 16;
+
 /// Threads per threadgroup, i.e. eight rows per threadgroup.
 const SPMM_THREADGROUP: i32 = 256;
 
 /// Metal accumulation shared by both SpMM kernels, see the module doc.
 /// Inputs: `indptr` `[rows + 1]` u32, `indices` `[nnz]` u32, `values` `[nnz]`
 /// f32, `x` `[k, S]` f32, `n_rows` `[1]` u32. Leaves the row of `A X` in
-/// `acc`. Template ints: `S` (output width) and `CPL` (columns per lane,
-/// `ceil(S / 32)`).
+/// `acc`, complete on the lanes with `sub == 0`. Template ints: `S` (output
+/// width), `L` (lanes per non-zero) and `C4` (float4 blocks per lane,
+/// `ceil(ceil(S / 4) / L)`).
 const SPMM_ACCUMULATE: &str = r#"
     uint lane = thread_index_in_simdgroup;
     uint row = thread_position_in_grid.x / SIMD_WIDTH;
     if (row >= n_rows[0]) {
         return;
     }
+    const uint G = SIMD_WIDTH / uint(L);
+    uint sub = lane / uint(L);
+    uint sl = lane % uint(L);
     uint lo = indptr[row];
     uint hi = indptr[row + 1];
-    float acc[CPL];
-    for (uint k = 0; k < uint(CPL); ++k) {
-        acc[k] = 0.0f;
+    float4 acc[C4];
+    for (uint c = 0; c < uint(C4); ++c) {
+        acc[c] = float4(0.0f);
     }
     for (uint base = lo; base < hi; base += SIMD_WIDTH) {
         uint e = base + lane;
@@ -62,18 +76,33 @@ const SPMM_ACCUMULATE: &str = r#"
             j = indices[e];
             v = values[e];
         }
+        // every lane stays in the loop so the shuffles never read an
+        // inactive lane; past the end of the row `v` is zero
         uint cnt = min(SIMD_WIDTH, hi - base);
-        for (uint t = 0; t < cnt; ++t) {
+        for (uint t0 = 0; t0 < cnt; t0 += G) {
+            uint t = t0 + sub;
             uint jt = simd_shuffle(j, ushort(t));
             float vt = simd_shuffle(v, ushort(t));
-            size_t xb = size_t(jt) * uint(S);
-            for (uint k = 0; k < uint(CPL); ++k) {
-                uint c = lane + k * SIMD_WIDTH;
-                if (c < uint(S)) {
-                    acc[k] += vt * x[xb + c];
+            const device float* xr = x + size_t(jt) * uint(S);
+            for (uint c = 0; c < uint(C4); ++c) {
+                uint col = (sl + c * uint(L)) * 4;
+                if (col + 4 <= uint(S)) {
+                    acc[c] += vt * float4(*(const device packed_float4*)(xr + col));
+                } else {
+                    for (uint q = 0; col + q < uint(S); ++q) {
+                        acc[c][q] += vt * xr[col + q];
+                    }
                 }
             }
         }
+    }
+    for (uint c = 0; c < uint(C4); ++c) {
+        for (uint off = uint(L); off < SIMD_WIDTH; off *= 2) {
+            acc[c] += simd_shuffle_xor(acc[c], ushort(off));
+        }
+    }
+    if (sub != 0) {
+        return;
     }
     size_t yb = size_t(row) * uint(S);
 "#;
@@ -83,20 +112,24 @@ const SPMM_ACCUMULATE: &str = r#"
 const SPMM_AFFINE_STORE: &str = r#"
     float rw = row_w[row];
     float rd = row_div[row];
-    for (uint k = 0; k < uint(CPL); ++k) {
-        uint c = lane + k * SIMD_WIDTH;
-        if (c < uint(S)) {
-            y[yb + c] = (acc[k] - col_a[c] - rw * col_b[c]) / rd;
+    for (uint c = 0; c < uint(C4); ++c) {
+        uint col = (sl + c * uint(L)) * 4;
+        for (uint q = 0; q < 4 && col + q < uint(S); ++q) {
+            y[yb + col + q] = (acc[c][q] - col_a[col + q] - rw * col_b[col + q]) / rd;
         }
     }
 "#;
 
 /// Metal store of the plain SpMM. Output: `y` `[rows, S]`.
 const SPMM_PLAIN_STORE: &str = r#"
-    for (uint k = 0; k < uint(CPL); ++k) {
-        uint c = lane + k * SIMD_WIDTH;
-        if (c < uint(S)) {
-            y[yb + c] = acc[k];
+    for (uint c = 0; c < uint(C4); ++c) {
+        uint col = (sl + c * uint(L)) * 4;
+        if (col + 4 <= uint(S)) {
+            *(device packed_float4*)(y + yb + col) = packed_float4(acc[c]);
+        } else {
+            for (uint q = 0; col + q < uint(S); ++q) {
+                y[yb + col + q] = acc[c][q];
+            }
         }
     }
 "#;
@@ -178,6 +211,28 @@ fn simd_width_header() -> String {
     format!("constant constexpr uint SIMD_WIDTH = {SIMD_WIDTH};\n")
 }
 
+/// Template ints of both kernels for one output width. `L`, the lanes that
+/// share one non-zero, is the smallest power of two whose float4 blocks cover
+/// `S`, capped at [`MAX_LANES_PER_NNZ`], so a SIMD group walks `32 / L`
+/// non-zeros at once.
+///
+/// ### Params
+///
+/// * `s_width` - Output width
+///
+/// ### Returns
+///
+/// `S`, `L` and `C4` (float4 blocks per lane)
+fn spmm_template(s_width: usize) -> [(&'static str, i32); 3] {
+    let blocks = s_width.div_ceil(4).max(1);
+    let lanes = blocks.next_power_of_two().min(MAX_LANES_PER_NNZ);
+    [
+        ("S", s_width as i32),
+        ("L", lanes as i32),
+        ("C4", blocks.div_ceil(lanes) as i32),
+    ]
+}
+
 /// Register the affine SpMM kernel, see [`SPMM_ACCUMULATE`] and [`SPMM_AFFINE_STORE`].
 ///
 /// ### Returns
@@ -244,10 +299,7 @@ pub(crate) fn spmm_affine(
         }],
         [rows * SIMD_WIDTH as i32, 1, 1],
         [SPMM_THREADGROUP, 1, 1],
-        &[
-            ("S", s_width as i32),
-            ("CPL", s_width.div_ceil(SIMD_WIDTH) as i32),
-        ],
+        &spmm_template(s_width),
         s,
     )?;
     Ok(out.remove(0))
@@ -299,10 +351,7 @@ pub(crate) fn spmm_plain(
         }],
         [rows * SIMD_WIDTH as i32, 1, 1],
         [SPMM_THREADGROUP, 1, 1],
-        &[
-            ("S", s_width as i32),
-            ("CPL", s_width.div_ceil(SIMD_WIDTH) as i32),
-        ],
+        &spmm_template(s_width),
         s,
     )?;
     Ok(out.remove(0))
@@ -463,12 +512,13 @@ mod tests {
     }
 
     /// Fused forward product against the host, every correction term live,
-    /// at widths below, on and off a multiple of the SIMD width.
+    /// at every lanes-per-non-zero boundary of `spmm_template` (on and one
+    /// past each power of two of float4 blocks), plus the NMF and SVD widths.
     #[test]
     fn test_mlx_spmm_forward() {
         let (n, m) = (100, 60);
         let a = sparse_dense(n, m);
-        for s in [16, 32, 40] {
+        for s in [1, 4, 5, 8, 9, 16, 17, 30, 32, 33, 64, 65, 128, 129, 130] {
             let x: Vec<f32> = (0..m * s)
                 .map(|i| ((i * 11 + 5) % 19) as f32 * 0.1)
                 .collect();
