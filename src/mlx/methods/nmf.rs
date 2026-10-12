@@ -1,25 +1,30 @@
-//! MLX HALS NMF, dense input only.
+//! MLX HALS NMF over dense or sparse input.
 //!
 //! Mirrors [`crate::methods::nmf_hals::nmf_hals`] and the cubecl port in
 //! `gpu::methods_gpu::nmf_gpu` iteration for iteration. Layout follows the
 //! cubecl path: `W` is `[m, k]` row-major and `H` is held transposed as
 //! `[n, k]`, so both Grams, both data products and both sweeps see the same
-//! component-minor layout. The Grams and data products are MLX GEMMs over lazy
-//! transposes; the Gauss-Seidel sweep and the normalisation scale are custom
-//! Metal kernels. One iteration stays in flight: iteration `t` is submitted
-//! asynchronously before the host waits on `t - 1`.
+//! component-minor layout. The Grams are MLX GEMMs over lazy transposes; the
+//! data products are GEMMs for dense `V` and the plain SpMM of
+//! `mlx::linalg::spmm` for sparse `V`, which is uploaded in both
+//! orientations so neither product needs atomics. The Gauss-Seidel sweep and
+//! the normalisation scale are custom Metal kernels. One iteration stays in
+//! flight: iteration `t` is submitted asynchronously before the host waits on
+//! `t - 1`.
 
 use std::borrow::Cow;
 
 use faer::{Mat, MatRef};
 
+use crate::core::math::pca_svd::SvdResults;
 use crate::methods::nmf_hals::consensus::{
     ConsensusNmfResult, ConsensusParams, ConsensusTarget, consensus_from_restarts,
 };
 use crate::methods::nmf_hals::dense::DenseInput;
 use crate::methods::nmf_hals::nmf_preprocessing::{
-    NmfPreprocessing, nmf_process_dense, parse_nmf_processing,
+    NmfPreprocessing, ensure_csc, nmf_process_dense, nmf_process_sparse, parse_nmf_processing,
 };
+use crate::methods::nmf_hals::sparse::SparseInput;
 use crate::methods::nmf_hals::{
     HalsOpts, NmfInit, NmfInput, NmfResult, StabilisedNmfResult, nndsvd_from_svd, random_init,
 };
@@ -27,6 +32,7 @@ use crate::mlx::ffi::{
     Array, MLX_FLOAT32, MetalKernel, OutputSpec, Stream, clear_cache, eval_all,
     install_error_handler,
 };
+use crate::mlx::linalg::spmm::{MlxCsr, spmm_plain, spmm_plain_kernel};
 use crate::prelude::*;
 
 ////////////
@@ -413,21 +419,15 @@ impl HalsKernels {
     }
 }
 
-//////////////////////
-// MlxDenseNmfInput //
-//////////////////////
+////////////////
+// MlxNmfCore //
+////////////////
 
-/// Dense `V` on the MLX device, uploaded once as `V^T`.
+/// Device state every MLX NMF input carries, whatever the layout of `V`.
 ///
-/// Holds the host view alongside for the NNDSVD initialisation SVD, which stays
-/// on the CPU so CPU and MLX runs start from identical factors. Also owns the
-/// stream and the registered kernels, so every solve against this input reuses
-/// them. MLX streams are thread affine, so this is `!Send`.
-pub struct MlxDenseNmfInput<'a> {
-    /// `V^T` as `[n, m]` row-major
-    v_t: Array,
-    /// Host-side view, for the initialisation SVD only
-    host: DenseInput<'a, f32>,
+/// Owns the stream and the registered kernels, so every solve against one
+/// input reuses them. MLX streams are thread affine, so this is `!Send`.
+pub struct MlxNmfCore {
     /// Logical shape `(m, n)` of `V`
     shape: (usize, usize),
     /// Cached `||V||_F^2`, accumulated in f64
@@ -436,6 +436,202 @@ pub struct MlxDenseNmfInput<'a> {
     stream: Stream,
     /// The custom kernels
     kernels: HalsKernels,
+}
+
+impl MlxNmfCore {
+    /// Create the stream and register the kernels.
+    ///
+    /// ### Params
+    ///
+    /// * `shape` - Logical shape `(m, n)` of `V`
+    /// * `sq_frob` - `||V||_F^2`
+    ///
+    /// ### Returns
+    ///
+    /// The core.
+    fn new(shape: (usize, usize), sq_frob: f32) -> Self {
+        install_error_handler();
+        Self {
+            shape,
+            sq_frob,
+            stream: Stream::default_gpu(),
+            kernels: HalsKernels::new(),
+        }
+    }
+}
+
+////////////////
+// MlxNmfData //
+////////////////
+
+/// Device-resident `V` for MLX HALS.
+///
+/// The implementors differ only in how the two data products are dispatched;
+/// the solver is written against this trait as the cubecl one is written
+/// against `GpuNmfData`. The initialisation SVD stays on the host so MLX and
+/// CPU runs start from identical factors.
+pub trait MlxNmfData {
+    /// The shared device state.
+    ///
+    /// ### Returns
+    ///
+    /// The [`MlxNmfCore`].
+    fn core(&self) -> &MlxNmfCore;
+
+    /// `(W^T V)^T = V^T W`.
+    ///
+    /// ### Params
+    ///
+    /// * `w` - Left factor `[m, k]`
+    /// * `k` - Number of components
+    ///
+    /// ### Returns
+    ///
+    /// The lazy `[n, k]` product.
+    fn wt_v(&self, w: &Array, k: usize) -> Result<Array, BixverseErrors>;
+
+    /// `V H^T`.
+    ///
+    /// ### Params
+    ///
+    /// * `h_t` - Right factor transposed, `[n, k]`
+    /// * `k` - Number of components
+    ///
+    /// ### Returns
+    ///
+    /// The lazy `[m, k]` product.
+    fn v_ht(&self, h_t: &Array, k: usize) -> Result<Array, BixverseErrors>;
+
+    /// Top-k truncated SVD of `V` on the host, for NNDSVD initialisation.
+    ///
+    /// ### Params
+    ///
+    /// * `k` - Number of singular triplets
+    ///
+    /// ### Returns
+    ///
+    /// The top-k [`SvdResults`].
+    fn top_k_svd(&self, k: usize) -> Result<SvdResults<f32>, BixverseErrors>;
+
+    /// Shape of `V`.
+    ///
+    /// ### Returns
+    ///
+    /// `(m, n)`, samples by features.
+    fn shape(&self) -> (usize, usize) {
+        self.core().shape
+    }
+
+    /// The squared Frobenius norm `||V||_F^2`.
+    ///
+    /// ### Returns
+    ///
+    /// The squared Frobenius norm.
+    fn sq_frob(&self) -> f32 {
+        self.core().sq_frob
+    }
+}
+
+/// Recompute both Grams and `W^T V`, then evaluate `||V - W H||_F^2`.
+///
+/// The cross term `<V, W H>` is `sum_j (V^T W)[j, :] . H^T[j, :]`, so it reuses
+/// the `W^T V` product and never densifies a sparse `V`.
+///
+/// ### Params
+///
+/// * `v` - Device-resident `V`
+/// * `w` - Left factor `[m, k]`
+/// * `h_t` - Right factor transposed `[n, k]`
+/// * `k` - Number of components
+///
+/// ### Returns
+///
+/// The reconstruction error, clamped at zero. Blocks.
+fn objective(v: &impl MlxNmfData, w: &Array, h_t: &Array, k: usize) -> Result<f32, BixverseErrors> {
+    let s = &v.core().stream;
+    let b = gram(w, s)?;
+    let a = v.wt_v(w, k)?;
+    let d = gram(h_t, s)?;
+    let partials = row_dot_partials(&a, h_t, s)?;
+    finish_objective(v.sq_frob(), &partials, &b, &d)
+}
+
+/// Normalise the columns of `W` to unit L2 and absorb the norms into `H`.
+///
+/// ### Params
+///
+/// * `core` - Device state of the input
+/// * `w` - Left factor `[m, k]`
+/// * `h_t` - Right factor transposed `[n, k]`
+/// * `k` - Number of components
+///
+/// ### Returns
+///
+/// The lazy pair `(W, H^T)` with `W H` unchanged.
+fn normalise(
+    core: &MlxNmfCore,
+    w: &Array,
+    h_t: &Array,
+    k: usize,
+) -> Result<(Array, Array), BixverseErrors> {
+    let s = &core.stream;
+    let (m, n) = core.shape;
+    let sq = w.multiply(w, s)?.sum_axis(0, s)?;
+    let w_new = core.kernels.scale(w, &sq, m, k, true, s)?;
+    let h_new = core.kernels.scale(h_t, &sq, n, k, false, s)?;
+    Ok((w_new, h_new))
+}
+
+/// One full HALS iteration: Gram, product, H sweep, Gram, product, W sweep,
+/// normalise.
+///
+/// ### Params
+///
+/// * `v` - Device-resident `V`
+/// * `w` - Left factor `[m, k]`
+/// * `h_t` - Right factor transposed `[n, k]`
+/// * `eps` - Non-negativity floor, a 0-d array
+/// * `k` - Number of components
+///
+/// ### Returns
+///
+/// The lazy pair `(W, H^T)` after the iteration.
+fn iteration(
+    v: &impl MlxNmfData,
+    w: &Array,
+    h_t: &Array,
+    eps: &Array,
+    k: usize,
+) -> Result<(Array, Array), BixverseErrors> {
+    let core = v.core();
+    let s = &core.stream;
+    let (m, n) = core.shape;
+
+    let b = gram(w, s)?;
+    let a = v.wt_v(w, k)?;
+    let h_t = core.kernels.sweep(h_t, &b, &a, eps, n, k, s)?;
+
+    let d = gram(&h_t, s)?;
+    let c = v.v_ht(&h_t, k)?;
+    let w = core.kernels.sweep(w, &d, &c, eps, m, k, s)?;
+
+    normalise(core, &w, &h_t, k)
+}
+
+//////////////////////
+// MlxDenseNmfInput //
+//////////////////////
+
+/// Dense `V` on the MLX device, uploaded once as `V^T`.
+///
+/// Holds the host view alongside for the NNDSVD initialisation SVD.
+pub struct MlxDenseNmfInput<'a> {
+    /// `V^T` as `[n, m]` row-major
+    v_t: Array,
+    /// Host-side view, for the initialisation SVD only
+    host: DenseInput<'a, f32>,
+    /// Shape, norm, stream and kernels
+    core: MlxNmfCore,
 }
 
 impl<'a> MlxDenseNmfInput<'a> {
@@ -453,141 +649,96 @@ impl<'a> MlxDenseNmfInput<'a> {
     /// The input, or `NmfNonFinite` / `NmfNonNegativeViolated` if validation
     /// fails.
     pub fn new(v: MatRef<'a, f32>) -> Result<Self, BixverseErrors> {
-        install_error_handler();
         let host = DenseInput::new(v)?;
         let (m, n) = (v.nrows(), v.ncols());
-        let sq_frob = NmfInput::sq_frob(&host);
+        let core = MlxNmfCore::new((m, n), NmfInput::sq_frob(&host));
         let v_t = Array::from_f32(&col_major_flat(v), &[to_i32(n), to_i32(m)]);
+        Ok(Self { v_t, host, core })
+    }
+}
+
+impl MlxNmfData for MlxDenseNmfInput<'_> {
+    fn core(&self) -> &MlxNmfCore {
+        &self.core
+    }
+
+    fn wt_v(&self, w: &Array, _k: usize) -> Result<Array, BixverseErrors> {
+        self.v_t.matmul(w, &self.core.stream)
+    }
+
+    fn v_ht(&self, h_t: &Array, _k: usize) -> Result<Array, BixverseErrors> {
+        let s = &self.core.stream;
+        self.v_t.transpose(s)?.matmul(h_t, s)
+    }
+
+    fn top_k_svd(&self, k: usize) -> Result<SvdResults<f32>, BixverseErrors> {
+        NmfInput::top_k_svd(&self.host, k)
+    }
+}
+
+///////////////////////
+// MlxSparseNmfInput //
+///////////////////////
+
+/// Sparse `V` on the MLX device, uploaded once in both orientations.
+///
+/// The CSC of `V` is the CSR of `V^T`, so both data products are the same
+/// row-wise SpMM, one SIMD group per output row and no atomics.
+pub struct MlxSparseNmfInput {
+    /// CSR of `V`, `m` rows, for `V H^T`
+    v: MlxCsr,
+    /// CSC of `V` read as the CSR of `V^T`, `n` rows, for `V^T W`
+    v_t: MlxCsr,
+    /// The plain SpMM kernel
+    spmm: MetalKernel,
+    /// Host-side matched pair, for the initialisation SVD only
+    host: SparseInput<f32, f32>,
+    /// Shape, norm, stream and kernels
+    core: MlxNmfCore,
+}
+
+impl MlxSparseNmfInput {
+    /// Upload a validated host pair in both orientations.
+    ///
+    /// ### Params
+    ///
+    /// * `host` - A validated [`SparseInput`] over `V`
+    ///
+    /// ### Returns
+    ///
+    /// The input, or `InvalidArgument` if the matrix exceeds what MLX can
+    /// index.
+    pub fn new(host: SparseInput<f32, f32>) -> Result<Self, BixverseErrors> {
+        let (m, n) = NmfInput::shape(&host);
+        let core = MlxNmfCore::new((m, n), NmfInput::sq_frob(&host));
+        let (csr, csc) = (host.csr(), host.csc());
+        let v = MlxCsr::new(&csr.indptr, &csr.indices, &csr.data, m)?;
+        let v_t = MlxCsr::new(&csc.indptr, &csc.indices, &csc.data, n)?;
         Ok(Self {
+            v,
             v_t,
+            spmm: spmm_plain_kernel(),
             host,
-            shape: (m, n),
-            sq_frob,
-            stream: Stream::default_gpu(),
-            kernels: HalsKernels::new(),
+            core,
         })
     }
+}
 
-    /// Shape of `V`.
-    ///
-    /// ### Returns
-    ///
-    /// `(m, n)`, samples by features.
-    pub fn shape(&self) -> (usize, usize) {
-        self.shape
+impl MlxNmfData for MlxSparseNmfInput {
+    fn core(&self) -> &MlxNmfCore {
+        &self.core
     }
 
-    /// The squared Frobenius norm `||V||_F^2`.
-    ///
-    /// ### Returns
-    ///
-    /// The squared Frobenius norm.
-    pub fn sq_frob(&self) -> f32 {
-        self.sq_frob
+    fn wt_v(&self, w: &Array, k: usize) -> Result<Array, BixverseErrors> {
+        spmm_plain(&self.spmm, &self.v_t, w, k, &self.core.stream)
     }
 
-    /// `(W^T V)^T = V^T W`.
-    ///
-    /// ### Params
-    ///
-    /// * `w` - Left factor `[m, k]`
-    ///
-    /// ### Returns
-    ///
-    /// The lazy `[n, k]` product.
-    fn wt_v(&self, w: &Array) -> Result<Array, BixverseErrors> {
-        self.v_t.matmul(w, &self.stream)
+    fn v_ht(&self, h_t: &Array, k: usize) -> Result<Array, BixverseErrors> {
+        spmm_plain(&self.spmm, &self.v, h_t, k, &self.core.stream)
     }
 
-    /// `V H^T`, reading `V` as a lazy transpose of the stored `V^T`.
-    ///
-    /// ### Params
-    ///
-    /// * `h_t` - Right factor transposed, `[n, k]`
-    ///
-    /// ### Returns
-    ///
-    /// The lazy `[m, k]` product.
-    fn v_ht(&self, h_t: &Array) -> Result<Array, BixverseErrors> {
-        self.v_t.transpose(&self.stream)?.matmul(h_t, &self.stream)
-    }
-
-    /// Recompute both Grams and `W^T V`, then evaluate `||V - W H||_F^2`.
-    ///
-    /// ### Params
-    ///
-    /// * `w` - Left factor `[m, k]`
-    /// * `h_t` - Right factor transposed `[n, k]`
-    ///
-    /// ### Returns
-    ///
-    /// The reconstruction error, clamped at zero. Blocks.
-    fn objective(&self, w: &Array, h_t: &Array) -> Result<f32, BixverseErrors> {
-        let s = &self.stream;
-        let b = gram(w, s)?;
-        let a = self.wt_v(w)?;
-        let d = gram(h_t, s)?;
-        let partials = row_dot_partials(&a, h_t, s)?;
-        finish_objective(self.sq_frob, &partials, &b, &d)
-    }
-
-    /// Normalise the columns of `W` to unit L2 and absorb the norms into `H`.
-    ///
-    /// ### Params
-    ///
-    /// * `w` - Left factor `[m, k]`
-    /// * `h_t` - Right factor transposed `[n, k]`
-    /// * `k` - Number of components
-    ///
-    /// ### Returns
-    ///
-    /// The lazy pair `(W, H^T)` with `W H` unchanged.
-    fn normalise(
-        &self,
-        w: &Array,
-        h_t: &Array,
-        k: usize,
-    ) -> Result<(Array, Array), BixverseErrors> {
-        let s = &self.stream;
-        let (m, n) = self.shape;
-        let sq = w.multiply(w, s)?.sum_axis(0, s)?;
-        let w_new = self.kernels.scale(w, &sq, m, k, true, s)?;
-        let h_new = self.kernels.scale(h_t, &sq, n, k, false, s)?;
-        Ok((w_new, h_new))
-    }
-
-    /// One full HALS iteration: Gram, product, H sweep, Gram, product, W
-    /// sweep, normalise.
-    ///
-    /// ### Params
-    ///
-    /// * `w` - Left factor `[m, k]`
-    /// * `h_t` - Right factor transposed `[n, k]`
-    /// * `eps` - Non-negativity floor, a 0-d array
-    /// * `k` - Number of components
-    ///
-    /// ### Returns
-    ///
-    /// The lazy pair `(W, H^T)` after the iteration.
-    fn iteration(
-        &self,
-        w: &Array,
-        h_t: &Array,
-        eps: &Array,
-        k: usize,
-    ) -> Result<(Array, Array), BixverseErrors> {
-        let s = &self.stream;
-        let (m, n) = self.shape;
-
-        let b = gram(w, s)?;
-        let a = self.wt_v(w)?;
-        let h_t = self.kernels.sweep(h_t, &b, &a, eps, n, k, s)?;
-
-        let d = gram(&h_t, s)?;
-        let c = self.v_ht(&h_t)?;
-        let w = self.kernels.sweep(w, &d, &c, eps, m, k, s)?;
-
-        self.normalise(&w, &h_t, k)
+    fn top_k_svd(&self, k: usize) -> Result<SvdResults<f32>, BixverseErrors> {
+        NmfInput::top_k_svd(&self.host, k)
     }
 }
 
@@ -669,19 +820,19 @@ impl MlxNmfSolve {
 ///   singular values.
 /// * `MlxError` from the device path.
 pub fn nmf_hals_mlx_device(
-    v: &MlxDenseNmfInput,
+    v: &impl MlxNmfData,
     k: usize,
     opts: &HalsOpts<f32>,
     verbose: usize,
 ) -> Result<MlxNmfSolve, BixverseErrors> {
     check_rank(k)?;
-    let (m, n) = v.shape;
-    let sq_frob = v.sq_frob;
+    let (m, n) = v.shape();
+    let sq_frob = v.sq_frob();
     let verbosity = parse_verbosity_level(verbose);
 
     let (w_host, h_host) = match &opts.init {
         NmfInit::Nndsvd => {
-            let svd = NmfInput::top_k_svd(&v.host, k)?;
+            let svd = v.top_k_svd(k)?;
             nndsvd_from_svd(&svd, k, m, n)?
         }
         NmfInit::Random { seed } => random_init(m, n, k, sq_frob, *seed),
@@ -700,14 +851,14 @@ pub fn nmf_hals_mlx_device(
     for iter in 0..opts.max_iter {
         n_iter = iter + 1;
 
-        let (w_next, h_next) = v.iteration(&w, &h_t, &eps, k)?;
+        let (w_next, h_next) = iteration(v, &w, &h_t, &eps, k)?;
         eval_all(&[&w_next, &h_next], true)?;
         eval_all(&[&w, &h_t], false)?;
         w = w_next;
         h_t = h_next;
 
         if n_iter.is_multiple_of(opts.check_every) {
-            let loss = v.objective(&w, &h_t)?;
+            let loss = objective(v, &w, &h_t, k)?;
             final_loss = loss;
 
             if n_iter > opts.check_every {
@@ -734,7 +885,7 @@ pub fn nmf_hals_mlx_device(
     // `n_iter == 0` when `max_iter` is zero, and zero is a multiple of
     // everything, so without the first clause the loss stays at infinity.
     if n_iter == 0 || !n_iter.is_multiple_of(opts.check_every) {
-        final_loss = v.objective(&w, &h_t)?;
+        final_loss = objective(v, &w, &h_t, k)?;
     }
     eval_all(&[&w, &h_t], false)?;
     clear_cache()?;
@@ -769,7 +920,7 @@ pub fn nmf_hals_mlx_device(
 /// An [`NmfResult`] with `W` (`m x k`), `H` (`k x n`), the final loss, the
 /// iteration count and whether the tolerance was met.
 pub fn nmf_hals_mlx(
-    v: &MlxDenseNmfInput,
+    v: &impl MlxNmfData,
     k: usize,
     opts: &HalsOpts<f32>,
     verbose: usize,
@@ -801,7 +952,7 @@ pub fn nmf_hals_mlx(
 /// A [`StabilisedNmfResult`] with column-bound `W`, per-run `H`, per-run losses
 /// and convergence flags, and the index of the lowest-loss run.
 pub fn stabilised_nmf_mlx(
-    v: &MlxDenseNmfInput,
+    v: &impl MlxNmfData,
     k: usize,
     n_runs: usize,
     base_seed: u64,
@@ -826,7 +977,7 @@ pub fn stabilised_nmf_mlx(
         }
     }
 
-    let (m, _) = v.shape;
+    let (m, _) = v.shape();
     let w_all = Mat::<f32>::from_fn(m, k * n_runs, |row, col| runs[col / k].w[(row, col % k)]);
     let losses: Vec<f32> = runs.iter().map(|r| r.final_loss).collect();
     let converged: Vec<bool> = runs.iter().map(|r| r.converged).collect();
@@ -866,11 +1017,11 @@ pub fn stabilised_nmf_mlx(
 ///
 /// `(H of shape k x n, final ||V - W H||_F^2)`.
 fn nmf_refit_h_mlx(
-    v: &MlxDenseNmfInput,
+    v: &impl MlxNmfData,
     w_host: MatRef<f32>,
     opts: &HalsOpts<f32>,
 ) -> Result<(Mat<f32>, f32), BixverseErrors> {
-    let (m, n) = v.shape;
+    let (m, n) = v.shape();
     if w_host.nrows() != m {
         return Err(BixverseErrors::NmfDimensionMismatch {
             expected: m,
@@ -879,22 +1030,22 @@ fn nmf_refit_h_mlx(
     }
     let k = w_host.ncols();
     check_rank(k)?;
-    let s = &v.stream;
+    let s = &v.core().stream;
 
     let w = Array::from_f32(&to_row_major(w_host), &[to_i32(m), to_i32(k)]);
     let mut h_t = Array::from_f32(&vec![opts.eps; n * k], &[to_i32(n), to_i32(k)]);
     let eps = Array::from_f32(&[opts.eps], &[]);
     let b = gram(&w, s)?;
-    let a = v.wt_v(&w)?;
+    let a = v.wt_v(&w, k)?;
     eval_all(&[&b, &a], false)?;
 
     let objective = |h_t: &Array| -> Result<f32, BixverseErrors> {
         let d = gram(h_t, s)?;
         let partials = row_dot_partials(&a, h_t, s)?;
-        finish_objective(v.sq_frob, &partials, &b, &d)
+        finish_objective(v.sq_frob(), &partials, &b, &d)
     };
 
-    let final_loss = refit_loop(&mut h_t, &b, &a, &eps, n, k, opts, v, objective)?;
+    let final_loss = refit_loop(&mut h_t, &b, &a, &eps, n, k, opts, v.core(), objective)?;
     eval_all(&[&h_t], false)?;
     let h = h_t.as_f32()?;
     let out = Mat::from_fn(k, n, |r, j| h[j * k + r]);
@@ -918,11 +1069,11 @@ fn nmf_refit_h_mlx(
 ///
 /// `(W of shape m x k, final ||V - W H||_F^2)`.
 fn nmf_refit_w_mlx(
-    v: &MlxDenseNmfInput,
+    v: &impl MlxNmfData,
     h_host: MatRef<f32>,
     opts: &HalsOpts<f32>,
 ) -> Result<(Mat<f32>, f32), BixverseErrors> {
-    let (m, n) = v.shape;
+    let (m, n) = v.shape();
     if h_host.ncols() != n {
         return Err(BixverseErrors::NmfDimensionMismatch {
             expected: n,
@@ -931,22 +1082,22 @@ fn nmf_refit_w_mlx(
     }
     let k = h_host.nrows();
     check_rank(k)?;
-    let s = &v.stream;
+    let s = &v.core().stream;
 
     let h_t = Array::from_f32(&col_major_flat(h_host), &[to_i32(n), to_i32(k)]);
     let mut w = Array::from_f32(&vec![opts.eps; m * k], &[to_i32(m), to_i32(k)]);
     let eps = Array::from_f32(&[opts.eps], &[]);
     let d = gram(&h_t, s)?;
-    let c = v.v_ht(&h_t)?;
+    let c = v.v_ht(&h_t, k)?;
     eval_all(&[&d, &c], false)?;
 
     let objective = |w: &Array| -> Result<f32, BixverseErrors> {
         let b = gram(w, s)?;
         let partials = row_dot_partials(w, &c, s)?;
-        finish_objective(v.sq_frob, &partials, &b, &d)
+        finish_objective(v.sq_frob(), &partials, &b, &d)
     };
 
-    let final_loss = refit_loop(&mut w, &d, &c, &eps, m, k, opts, v, objective)?;
+    let final_loss = refit_loop(&mut w, &d, &c, &eps, m, k, opts, v.core(), objective)?;
     eval_all(&[&w], false)?;
     let wf = w.as_f32()?;
     let out = Mat::from_fn(m, k, |i, c| wf[i * k + c]);
@@ -966,7 +1117,7 @@ fn nmf_refit_w_mlx(
 /// * `n_rows` - Rows of `x`
 /// * `k` - Number of components
 /// * `opts` - Solver options
-/// * `v` - Device-resident `V`, for the stream, kernels and norm
+/// * `core` - Device state of the input, for the stream, kernels and norm
 /// * `objective` - Objective of a candidate `x`
 ///
 /// ### Returns
@@ -981,17 +1132,17 @@ fn refit_loop(
     n_rows: usize,
     k: usize,
     opts: &HalsOpts<f32>,
-    v: &MlxDenseNmfInput,
+    core: &MlxNmfCore,
     objective: impl Fn(&Array) -> Result<f32, BixverseErrors>,
 ) -> Result<f32, BixverseErrors> {
-    let denom = relative_denominator(v.sq_frob);
+    let denom = relative_denominator(core.sq_frob);
     let mut final_loss = f32::INFINITY;
     let mut last_loss = f32::INFINITY;
     let mut n_iter = 0usize;
 
     for iter in 0..opts.max_iter {
         n_iter = iter + 1;
-        let next = v.kernels.sweep(x, g, p, eps, n_rows, k, &v.stream)?;
+        let next = core.kernels.sweep(x, g, p, eps, n_rows, k, &core.stream)?;
         eval_all(&[&next], true)?;
         eval_all(&[x], false)?;
         *x = next;
@@ -1044,7 +1195,7 @@ fn refit_loop(
 ///   `n_runs < 2`, `NmfConsensusEmptyCluster` if a cluster came out empty.
 /// * Anything the solve or the consensus step raises.
 pub fn nmf_consensus_mlx(
-    v: &MlxDenseNmfInput,
+    v: &impl MlxNmfData,
     k: usize,
     n_runs: usize,
     base_seed: u64,
@@ -1079,7 +1230,8 @@ pub fn nmf_consensus_mlx(
         }
     };
 
-    let denom = if v.sq_frob > 0.0 { v.sq_frob } else { 1.0 };
+    let sq_frob = v.sq_frob();
+    let denom = if sq_frob > 0.0 { sq_frob } else { 1.0 };
     let run_errors: Vec<f32> = restarts.losses.iter().map(|&l| l / denom).collect();
 
     Ok(ConsensusNmfResult {
@@ -1182,6 +1334,111 @@ pub fn nmf_consensus_run_mlx(
     )
 }
 
+/// Pre-process a sparse matrix and upload it.
+///
+/// Pre-processing scales columns and needs CSC, so the caller's matrix is
+/// converted first exactly as the CPU and cubecl sparse paths do.
+///
+/// ### Params
+///
+/// * `data` - Sparse `V`, samples x features
+/// * `preprocessing` - Column-scaling mode
+/// * `use_second_layer` - Use `data_2` (normalised counts) instead of `data`
+/// * `verbose` - Verbosity level, used only for the transpose notice
+///
+/// ### Returns
+///
+/// The uploaded [`MlxSparseNmfInput`], or errors from validation or the
+/// upload.
+fn build_sparse_input(
+    data: CompressedSparseData2<f32>,
+    preprocessing: &str,
+    use_second_layer: bool,
+    verbose: usize,
+) -> Result<MlxSparseNmfInput, BixverseErrors> {
+    let csc = ensure_csc(data, parse_verbosity_level(verbose));
+    let processed = nmf_process_sparse(
+        &csc,
+        &resolve_preprocessing(preprocessing),
+        use_second_layer,
+    )?;
+    let host = if use_second_layer {
+        SparseInput::<f32, f32>::from_secondary(&processed)?
+    } else {
+        SparseInput::<f32, f32>::from_primary(&processed)?
+    };
+    MlxSparseNmfInput::new(host)
+}
+
+/// Run MLX NMF on a sparse matrix (single run).
+///
+/// ### Params
+///
+/// * `data` - Sparse `V`, samples x features
+/// * `k` - Number of components
+/// * `preprocessing` - Column-scaling mode, see [`parse_nmf_processing`]
+/// * `use_second_layer` - Use `data_2` (normalised counts) instead of `data`
+/// * `nmf_hals_params` - Optional [`HalsOpts`]
+/// * `verbose` - `0` silent, `1` normal, `2` detailed
+///
+/// ### Returns
+///
+/// An [`NmfResult`], or errors from validation or the device path.
+pub fn nmf_single_run_sparse_mlx(
+    data: CompressedSparseData2<f32>,
+    k: usize,
+    preprocessing: &str,
+    use_second_layer: bool,
+    nmf_hals_params: Option<HalsOpts<f32>>,
+    verbose: usize,
+) -> Result<NmfResult<f32>, BixverseErrors> {
+    let opts = nmf_hals_params.unwrap_or_default();
+    let input = build_sparse_input(data, preprocessing, use_second_layer, verbose)?;
+    nmf_hals_mlx(&input, k, &opts, verbose)
+}
+
+/// Run MLX consensus NMF on a sparse matrix.
+///
+/// ### Params
+///
+/// * `data` - Sparse `V`, samples x features
+/// * `k` - Number of components, at least two
+/// * `preprocessing` - Column-scaling mode, see [`parse_nmf_processing`]
+/// * `use_second_layer` - Use `data_2` (normalised counts) instead of `data`
+/// * `nmf_hals_params` - Optional [`HalsOpts`]
+/// * `consensus_params` - Optional [`ConsensusParams`]
+/// * `n_runs` - Number of restarts, at least two
+/// * `base_seed` - Seed offset
+/// * `verbose` - `0` silent, `1` normal, `2` detailed
+///
+/// ### Returns
+///
+/// A [`ConsensusNmfResult`], or errors from validation or the device path.
+#[allow(clippy::too_many_arguments)]
+pub fn nmf_consensus_run_sparse_mlx(
+    data: CompressedSparseData2<f32>,
+    k: usize,
+    preprocessing: &str,
+    use_second_layer: bool,
+    nmf_hals_params: Option<HalsOpts<f32>>,
+    consensus_params: Option<ConsensusParams<f32>>,
+    n_runs: usize,
+    base_seed: usize,
+    verbose: usize,
+) -> Result<ConsensusNmfResult<f32>, BixverseErrors> {
+    let opts = nmf_hals_params.unwrap_or_default();
+    let input = build_sparse_input(data, preprocessing, use_second_layer, verbose)?;
+    nmf_consensus_mlx(
+        &input,
+        k,
+        n_runs,
+        base_seed as u64,
+        &opts,
+        consensus_params,
+        verbose,
+    )
+}
+
 ///////////
 // Tests //
 ///////////
@@ -1249,8 +1506,8 @@ mod tests {
 
         let (w, h) = build_factors(m, n, k);
         let (w_d, h_d) = upload(&w, &h);
-        let a = mlx.wt_v(&w_d).unwrap();
-        let c = mlx.v_ht(&h_d).unwrap();
+        let a = mlx.wt_v(&w_d, k).unwrap();
+        let c = mlx.v_ht(&h_d, k).unwrap();
 
         let mut wtv = Mat::<f32>::zeros(k, n);
         let mut vht = Mat::<f32>::zeros(m, k);
@@ -1330,7 +1587,7 @@ mod tests {
 
         let (w, h) = build_factors(m, n, k);
         let (w_d, h_d) = upload(&w, &h);
-        let got = mlx.objective(&w_d, &h_d).unwrap();
+        let got = objective(&mlx, &w_d, &h_d, k).unwrap();
 
         let mut wtv = Mat::<f32>::zeros(k, n);
         let mut wtw = Mat::<f32>::zeros(k, k);
@@ -1498,5 +1755,229 @@ mod tests {
         assert_eq!((res.w.nrows(), res.w.ncols()), (40, 3));
         assert_eq!((res.h.nrows(), res.h.ncols()), (3, 30));
         assert!(res.final_loss.is_finite());
+    }
+
+    ////////////
+    // Sparse //
+    ////////////
+
+    /// Row left empty in every sparse fixture.
+    const EMPTY_ROW: usize = 3;
+
+    /// Column left empty in every sparse fixture.
+    const EMPTY_COL: usize = 4;
+
+    /// CSR of a dense matrix.
+    fn to_csr(v: &Mat<f32>) -> CompressedSparseData2<f32> {
+        CompressedSparseData2::<f32, f32>::from_dense_matrix(
+            v.as_ref(),
+            CompressedSparseFormat::Csr,
+        )
+    }
+
+    /// Sparse `m x n` matrix with a fixed pattern, about one entry in five,
+    /// with [`EMPTY_ROW`] and [`EMPTY_COL`] empty.
+    fn build_sparse_v(m: usize, n: usize) -> Mat<f32> {
+        Mat::<f32>::from_fn(m, n, |i, j| {
+            if i != EMPTY_ROW && j != EMPTY_COL && (i * 7 + j * 3) % 5 == 0 {
+                (((i * 19 + j * 23) % 13) as f32) * 0.25 + 0.5
+            } else {
+                0.0
+            }
+        })
+    }
+
+    /// Exact rank-`k` sparse matrix: `V[i, j]` is non-zero only when
+    /// `i % k == j % k`, so the density is `1 / k`. [`EMPTY_ROW`] and
+    /// [`EMPTY_COL`] are empty.
+    fn sparse_rank_k(m: usize, n: usize, k: usize) -> Mat<f32> {
+        let w = Mat::<f32>::from_fn(m, k, |i, c| {
+            if i % k == c && i != EMPTY_ROW {
+                1.0 + ((i * 7) % 5) as f32 * 0.2
+            } else {
+                0.0
+            }
+        });
+        let h = Mat::<f32>::from_fn(k, n, |c, j| {
+            if j % k == c && j != EMPTY_COL {
+                1.0 + ((j * 3) % 7) as f32 * 0.1
+            } else {
+                0.0
+            }
+        });
+        w * h
+    }
+
+    // Long enough CSC rows (about 40 non-zeros) for a ragged second batch of
+    // lanes, and ranks on both sides of the SIMD width.
+    #[test]
+    fn test_sparse_products_match_cpu() {
+        let (m, n) = (200usize, 90usize);
+        let dense = build_sparse_v(m, n);
+        let csr = to_csr(&dense);
+        let cpu = SparseInput::<f32, f32>::from_primary(&csr).unwrap();
+        let mlx = MlxSparseNmfInput::new(SparseInput::from_primary(&csr).unwrap()).unwrap();
+        assert_eq!(mlx.shape(), (m, n));
+
+        let dense_sq = NmfInput::sq_frob(&DenseInput::new(dense.as_ref()).unwrap());
+        assert!(
+            (mlx.sq_frob() - dense_sq).abs() <= 1e-4 * dense_sq,
+            "sparse and dense Frobenius norms disagree"
+        );
+
+        for k in [5usize, 30, 40] {
+            let (w, h) = build_factors(m, n, k);
+            let (w_d, h_d) = upload(&w, &h);
+            let a = read(&mlx.wt_v(&w_d, k).unwrap());
+            let c = read(&mlx.v_ht(&h_d, k).unwrap());
+
+            let mut wtv = Mat::<f32>::zeros(k, n);
+            let mut vht = Mat::<f32>::zeros(m, k);
+            cpu.wt_v(w.as_ref(), &mut wtv);
+            cpu.v_ht(h.as_ref(), &mut vht);
+
+            let d1 = assert_close(&a, &to_row_major(wtv.transpose()), 1e-4);
+            let d2 = assert_close(&c, &to_row_major(vht.as_ref()), 1e-4);
+            assert!(
+                a[EMPTY_COL * k..(EMPTY_COL + 1) * k]
+                    .iter()
+                    .all(|&x| x == 0.0)
+            );
+            assert!(
+                c[EMPTY_ROW * k..(EMPTY_ROW + 1) * k]
+                    .iter()
+                    .all(|&x| x == 0.0)
+            );
+            println!("sparse products k = {k}: max rel diff {d1:e} {d2:e}");
+        }
+    }
+
+    #[test]
+    fn test_sparse_objective_matches_cpu() {
+        let (m, n, k) = (53usize, 41usize, 6usize);
+        let csr = to_csr(&build_sparse_v(m, n));
+        let cpu = SparseInput::<f32, f32>::from_primary(&csr).unwrap();
+        let mlx = MlxSparseNmfInput::new(SparseInput::from_primary(&csr).unwrap()).unwrap();
+
+        let (w, h) = build_factors(m, n, k);
+        let (w_d, h_d) = upload(&w, &h);
+        let got = objective(&mlx, &w_d, &h_d, k).unwrap();
+
+        let mut wtv = Mat::<f32>::zeros(k, n);
+        let mut wtw = Mat::<f32>::zeros(k, k);
+        let mut hht = Mat::<f32>::zeros(k, k);
+        cpu.wt_v(w.as_ref(), &mut wtv);
+        gram_wt_w(w.as_ref(), &mut wtw);
+        gram_h_ht(h.as_ref(), &mut hht);
+        let want = compute_objective(
+            NmfInput::sq_frob(&cpu),
+            h.as_ref(),
+            wtv.as_ref(),
+            wtw.as_ref(),
+            hht.as_ref(),
+        );
+
+        assert!(got > 0.0, "objective is zero, the device did no work");
+        let rel = (got - want).abs() / want.abs().max(1.0);
+        println!("sparse objective rel diff: {rel:e}");
+        assert!(rel <= 1e-3, "got {got} want {want}");
+    }
+
+    // The same matrix through the dense and the sparse entry point, from the
+    // same seed for a fixed number of iterations. Also covers the CSR-to-CSC
+    // conversion the sparse entry point does before pre-processing.
+    #[test]
+    fn test_sparse_entry_point_matches_dense() {
+        let (m, n, k) = (24usize, 16usize, 2usize);
+        let v = sparse_rank_k(m, n, k);
+        let opts = HalsOpts::<f32>::new(100, 0.0, 1e-10, 10, NmfInit::Random { seed: 5 });
+
+        let dense = nmf_single_run_mlx(v.as_ref(), k, "none", Some(opts.clone()), 0).unwrap();
+        let sparse =
+            nmf_single_run_sparse_mlx(to_csr(&v), k, "none", false, Some(opts), 0).unwrap();
+        assert_eq!((sparse.n_iter, dense.n_iter), (100, 100));
+
+        let dw = assert_close(
+            &to_row_major(sparse.w.as_ref()),
+            &to_row_major(dense.w.as_ref()),
+            1e-3,
+        );
+        let dh = assert_close(
+            &to_row_major(sparse.h.as_ref()),
+            &to_row_major(dense.h.as_ref()),
+            1e-3,
+        );
+        let sq_frob: f32 = (0..m)
+            .map(|i| (0..n).map(|j| v[(i, j)] * v[(i, j)]).sum::<f32>())
+            .sum();
+        let rel_dense = dense.final_loss / sq_frob;
+        let rel_sparse = sparse.final_loss / sq_frob;
+        println!(
+            "sparse vs dense entry point: W {dw:e} H {dh:e}, rel loss {rel_dense:e} {rel_sparse:e}"
+        );
+        assert!(
+            (rel_dense - rel_sparse).abs() < 1e-4,
+            "dense {rel_dense} and sparse {rel_sparse} entry points disagree"
+        );
+    }
+
+    #[test]
+    fn test_recovers_rank_k_sparse() {
+        let (m, n, k) = (60usize, 40usize, 3usize);
+        let v = sparse_rank_k(m, n, k);
+        let opts = HalsOpts::<f32> {
+            max_iter: 400,
+            tol: 1e-9,
+            eps: 1e-10,
+            check_every: 10,
+            init: NmfInit::Nndsvd,
+        };
+        let input =
+            MlxSparseNmfInput::new(SparseInput::from_primary(&to_csr(&v)).unwrap()).unwrap();
+        let res = nmf_hals_mlx(&input, k, &opts, 0).unwrap();
+        let rel = res.final_loss / input.sq_frob();
+
+        let dense_in = MlxDenseNmfInput::new(v.as_ref()).unwrap();
+        let rel_dense = nmf_hals_mlx(&dense_in, k, &opts, 0).unwrap().final_loss / input.sq_frob();
+
+        println!("sparse rank-k recovery relative loss: {rel:e} (dense {rel_dense:e})");
+        assert!(rel < 1e-3, "relative loss {rel} is too high");
+        assert!(
+            (rel - rel_dense).abs() < 1e-3,
+            "sparse {rel} and dense {rel_dense} backends disagree"
+        );
+        assert!((0..m).all(|i| (0..k).all(|c| res.w[(i, c)] >= 0.0)));
+        assert!((0..k).all(|r| (0..n).all(|j| res.h[(r, j)] >= 0.0)));
+    }
+
+    // Both refit arms through the sparse consensus entry point.
+    #[test]
+    fn test_sparse_consensus_returns_usable_factors() {
+        let (m, n, k, n_runs) = (25usize, 18usize, 2usize, 4usize);
+        let v = sparse_rank_k(m, n, k);
+        let opts = HalsOpts::<f32>::new(200, 1e-7, 1e-10, 10, NmfInit::Nndsvd);
+        for target in [ConsensusTarget::HRows, ConsensusTarget::WColumns] {
+            let params = ConsensusParams::<f32>::new(target, None, None, 100, 3, 42);
+            let res = nmf_consensus_run_sparse_mlx(
+                to_csr(&v),
+                k,
+                "none",
+                false,
+                Some(opts.clone()),
+                Some(params),
+                n_runs,
+                0,
+                0,
+            )
+            .unwrap();
+            assert_eq!((res.w.nrows(), res.w.ncols()), (m, k));
+            assert_eq!((res.h.nrows(), res.h.ncols()), (k, n));
+            assert_eq!(res.run_errors.len(), n_runs);
+            assert!(
+                res.error < 1e-4,
+                "consensus error {} is too high",
+                res.error
+            );
+        }
     }
 }

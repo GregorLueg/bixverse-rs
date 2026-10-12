@@ -2,4 +2,4 @@
 
 pub mod corr;
 pub mod rand_svd;
-mod spmm;
+pub(crate) mod spmm;

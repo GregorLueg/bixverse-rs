@@ -1,6 +1,7 @@
-//! Sparse-by-dense products on MLX for the randomised sparse SVD.
+//! Sparse-by-dense products on MLX, for the randomised sparse SVD and the
+//! sparse HALS NMF.
 //!
-//! One Metal kernel serves both directions of the operator. It computes
+//! The affine kernel serves both directions of the SVD operator. It computes
 //! `Y = (A X - 1 a^T - w b^T) / d` row by row over a CSR of `A`, with `a`, `b`
 //! per output column and `w`, `d` per output row:
 //!
@@ -11,6 +12,9 @@
 //!
 //! Both orientations are uploaded once, so `A^T Q` needs neither atomics nor
 //! the split-K partials of the cubecl transpose.
+//!
+//! The plain kernel shares the accumulation and stores `Y = A X` unchanged,
+//! which is all NMF needs for `V H^T` and `V^T W`.
 //!
 //! ### Threading
 //!
@@ -33,12 +37,12 @@ const SIMD_WIDTH: usize = 32;
 /// Threads per threadgroup, i.e. eight rows per threadgroup.
 const SPMM_THREADGROUP: i32 = 256;
 
-/// Metal body of the affine SpMM, see the module doc. Inputs: `indptr`
-/// `[rows + 1]` u32, `indices` `[nnz]` u32, `values` `[nnz]` f32, `x`
-/// `[k, S]` f32, `col_a` `[S]`, `row_w` `[rows]`, `col_b` `[S]`, `row_div`
-/// `[rows]`, `n_rows` `[1]` u32. Output: `y` `[rows, S]`. Template ints: `S`
-/// (output width) and `CPL` (columns per lane, `ceil(S / 32)`).
-const SPMM_SOURCE: &str = r#"
+/// Metal accumulation shared by both SpMM kernels, see the module doc.
+/// Inputs: `indptr` `[rows + 1]` u32, `indices` `[nnz]` u32, `values` `[nnz]`
+/// f32, `x` `[k, S]` f32, `n_rows` `[1]` u32. Leaves the row of `A X` in
+/// `acc`. Template ints: `S` (output width) and `CPL` (columns per lane,
+/// `ceil(S / 32)`).
+const SPMM_ACCUMULATE: &str = r#"
     uint lane = thread_index_in_simdgroup;
     uint row = thread_position_in_grid.x / SIMD_WIDTH;
     if (row >= n_rows[0]) {
@@ -71,13 +75,28 @@ const SPMM_SOURCE: &str = r#"
             }
         }
     }
+    size_t yb = size_t(row) * uint(S);
+"#;
+
+/// Metal store of the affine SpMM. Extra inputs: `col_a` `[S]`, `row_w`
+/// `[rows]`, `col_b` `[S]`, `row_div` `[rows]`. Output: `y` `[rows, S]`.
+const SPMM_AFFINE_STORE: &str = r#"
     float rw = row_w[row];
     float rd = row_div[row];
-    size_t yb = size_t(row) * uint(S);
     for (uint k = 0; k < uint(CPL); ++k) {
         uint c = lane + k * SIMD_WIDTH;
         if (c < uint(S)) {
             y[yb + c] = (acc[k] - col_a[c] - rw * col_b[c]) / rd;
+        }
+    }
+"#;
+
+/// Metal store of the plain SpMM. Output: `y` `[rows, S]`.
+const SPMM_PLAIN_STORE: &str = r#"
+    for (uint k = 0; k < uint(CPL); ++k) {
+        uint c = lane + k * SIMD_WIDTH;
+        if (c < uint(S)) {
+            y[yb + c] = acc[k];
         }
     }
 "#;
@@ -150,21 +169,29 @@ impl MlxCsr {
 // Kernel //
 ////////////
 
-/// Register the affine SpMM kernel, see [`SPMM_SOURCE`].
+/// Metal header defining the SIMD width both kernels index by.
+///
+/// ### Returns
+///
+/// The header source.
+fn simd_width_header() -> String {
+    format!("constant constexpr uint SIMD_WIDTH = {SIMD_WIDTH};\n")
+}
+
+/// Register the affine SpMM kernel, see [`SPMM_ACCUMULATE`] and [`SPMM_AFFINE_STORE`].
 ///
 /// ### Returns
 ///
 /// The kernel handle
 pub(crate) fn spmm_kernel() -> MetalKernel {
-    let header = format!("constant constexpr uint SIMD_WIDTH = {SIMD_WIDTH};\n");
     MetalKernel::new(
         "bixverse_spmm_csr_affine",
         &[
             "indptr", "indices", "values", "x", "col_a", "row_w", "col_b", "row_div", "n_rows",
         ],
         &["y"],
-        &header,
-        SPMM_SOURCE,
+        &simd_width_header(),
+        &format!("{SPMM_ACCUMULATE}{SPMM_AFFINE_STORE}"),
     )
 }
 
@@ -211,6 +238,61 @@ pub(crate) fn spmm_affine(
             row_div,
             &n_arr,
         ],
+        &[OutputSpec {
+            shape: &[rows, s_width as i32],
+            dtype: MLX_FLOAT32,
+        }],
+        [rows * SIMD_WIDTH as i32, 1, 1],
+        [SPMM_THREADGROUP, 1, 1],
+        &[
+            ("S", s_width as i32),
+            ("CPL", s_width.div_ceil(SIMD_WIDTH) as i32),
+        ],
+        s,
+    )?;
+    Ok(out.remove(0))
+}
+
+/// Register the plain SpMM kernel, see [`SPMM_ACCUMULATE`] and
+/// [`SPMM_PLAIN_STORE`].
+///
+/// ### Returns
+///
+/// The kernel handle
+pub(crate) fn spmm_plain_kernel() -> MetalKernel {
+    MetalKernel::new(
+        "bixverse_spmm_csr_plain",
+        &["indptr", "indices", "values", "x", "n_rows"],
+        &["y"],
+        &simd_width_header(),
+        &format!("{SPMM_ACCUMULATE}{SPMM_PLAIN_STORE}"),
+    )
+}
+
+/// Queue `Y = A X`.
+///
+/// ### Params
+///
+/// * `kernel` - Kernel from [`spmm_plain_kernel`]
+/// * `csr` - CSR of `A`, `[n_rows, n_cols]`
+/// * `x` - Dense right operand `[n_cols, s_width]`, row-major
+/// * `s_width` - Output width
+/// * `s` - Stream to run on
+///
+/// ### Returns
+///
+/// The (lazy) output `[n_rows, s_width]`; an empty row of `A` gives zeros.
+pub(crate) fn spmm_plain(
+    kernel: &MetalKernel,
+    csr: &MlxCsr,
+    x: &Array,
+    s_width: usize,
+    s: &Stream,
+) -> Result<Array, BixverseErrors> {
+    let rows = csr.n_rows as i32;
+    let n_arr = Array::from_u32(&[csr.n_rows as u32], &[1]);
+    let mut out = kernel.apply(
+        &[&csr.indptr, &csr.indices, &csr.values, x, &n_arr],
         &[OutputSpec {
             shape: &[rows, s_width as i32],
             dtype: MLX_FLOAT32,

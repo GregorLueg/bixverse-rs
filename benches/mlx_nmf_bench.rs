@@ -1,10 +1,15 @@
-//! Dense HALS NMF: CPU against MLX, plus the cubecl path when `gpu` is on.
+//! HALS NMF: CPU against MLX, plus the cubecl path when `gpu` is on.
 //!
-//! Same shapes and fixed iteration count as `gpu_nmf_bench`, so the numbers
-//! line up. The MLX run is split into its three separable stages: upload of
-//! `V` (validation plus the host-to-device copy), the solve (blocks on its last
-//! objective, so the device is idle when it returns) and the readback of the
-//! factors.
+//! Same shapes, sparse generator and fixed iteration count as
+//! `gpu_nmf_bench`, so the numbers line up. The default run is the sparse
+//! single-cell shape; `BIXVERSE_BENCH_BIG=1` adds the 200k-cell sparse shape
+//! and `BIXVERSE_BENCH_DENSE=1` adds the dense bulk and metacell shapes.
+//!
+//! The MLX run is split into its three separable stages: upload of `V` (the
+//! host-to-device copy, after host-side validation for sparse input), the solve
+//! (blocks on its last objective, so the device is idle when it returns) and
+//! the readback of the factors. The cubecl solve reads its factors back
+//! internally, so its readback is inside the solve figure.
 //!
 //! Run with:
 //! ```text
@@ -20,8 +25,12 @@ use std::time::{Duration, Instant};
 use faer::Mat;
 
 use bixverse_rs::methods::nmf_hals::dense::DenseInput;
+use bixverse_rs::methods::nmf_hals::sparse::SparseInput;
 use bixverse_rs::methods::nmf_hals::{HalsOpts, NmfInit, NmfInput, nmf_hals};
-use bixverse_rs::mlx::methods::nmf::{MlxDenseNmfInput, nmf_hals_mlx_device};
+use bixverse_rs::mlx::methods::nmf::{
+    MlxDenseNmfInput, MlxNmfData, MlxSparseNmfInput, nmf_hals_mlx_device,
+};
+use bixverse_rs::prelude::*;
 
 ///////////////
 // Constants //
@@ -55,21 +64,43 @@ struct NmfShape {
     n: usize,
     /// Components
     k: usize,
+    /// Non-zero fraction; `None` runs dense
+    density: Option<f64>,
 }
 
-/// The dense shapes of `gpu_nmf_bench` and the `skinny_gemm` doc table.
-const SHAPES: [NmfShape; 2] = [
+/// The sparse shape of `gpu_nmf_bench`, run by default.
+const SPARSE_SHAPES: [NmfShape; 1] = [NmfShape {
+    label: "sc-sparse",
+    m: 50_000,
+    n: 3_000,
+    k: 30,
+    density: Some(0.05),
+}];
+
+/// The large sparse shape of `gpu_nmf_bench`, behind `BIXVERSE_BENCH_BIG`.
+const BIG_SHAPES: [NmfShape; 1] = [NmfShape {
+    label: "sc-sparse-big",
+    m: 200_000,
+    n: 3_000,
+    k: 30,
+    density: Some(0.05),
+}];
+
+/// The dense shapes of `gpu_nmf_bench`, behind `BIXVERSE_BENCH_DENSE`.
+const DENSE_SHAPES: [NmfShape; 2] = [
     NmfShape {
         label: "bulk",
         m: 500,
         n: 20_000,
         k: 10,
+        density: None,
     },
     NmfShape {
         label: "metacell",
         m: 5_000,
         n: 3_000,
         k: 30,
+        density: None,
     },
 ];
 
@@ -112,6 +143,44 @@ fn build_dense(m: usize, n: usize, k: usize) -> Mat<f32> {
         (((j * 2_246_822_519usize).wrapping_add(r * 97_711) % 1_013) as f32) / 1_013.0 + 0.01
     });
     w * h
+}
+
+/// Deterministic non-negative sparse matrix in CSR, identical to the one in
+/// `gpu_nmf_bench`. Every row gets its own support phase.
+///
+/// ### Params
+///
+/// * `m` - Rows
+/// * `n` - Columns
+/// * `density` - Target non-zero fraction
+///
+/// ### Returns
+///
+/// The matrix in CSR, plus its non-zero count.
+fn build_sparse(m: usize, n: usize, density: f64) -> (CompressedSparseData2<f32>, usize) {
+    let stride = (1.0 / density).round().max(1.0) as usize;
+    let mut values: Vec<f32> = Vec::with_capacity(m * n / stride + m);
+    let mut indices: Vec<u32> = Vec::with_capacity(m * n / stride + m);
+    let mut indptr: Vec<u32> = Vec::with_capacity(m + 1);
+    indptr.push(0);
+
+    for i in 0..m {
+        let phase = (i * 7_919) % stride;
+        let mut j = phase;
+        while j < n {
+            let h = (i * 2_654_435_761usize).wrapping_add(j * 2_246_822_519usize) % 1_021;
+            values.push((h as f32) / 1_021.0 + 0.01);
+            indices.push(j as u32);
+            j += stride;
+        }
+        indptr.push(values.len() as u32);
+    }
+
+    let nnz = values.len();
+    (
+        CompressedSparseData2::<f32, f32>::new_csr(&values, &indices, &indptr, None, (m, n)),
+        nnz,
+    )
 }
 
 /// Time a closure.
@@ -171,48 +240,47 @@ fn assert_real_work(label: &str, loss: f32, sq_frob: f32) {
 ///
 /// ### Params
 ///
-/// * `v` - The matrix
+/// * `input` - CPU input over `V`, dense or sparse
 /// * `k` - Components
-///
-/// ### Returns
-///
-/// `(best, worst, relative loss)`.
-fn bench_cpu(v: &Mat<f32>, k: usize) -> (Duration, Duration, f32) {
+fn bench_cpu<In: NmfInput<f32> + Sync>(input: &In, k: usize) {
     let opts = bench_opts();
-    let input = DenseInput::new(v.as_ref()).expect("CPU input");
-    let sq_frob = NmfInput::sq_frob(&input);
+    let sq_frob = input.sq_frob();
     let mut loss = 0f32;
     let (best, worst) = best_of(|| {
-        let (res, d) = timed(|| nmf_hals(&input, k, &opts, 0).expect("CPU solve"));
+        let (res, d) = timed(|| nmf_hals(input, k, &opts, 0).expect("CPU solve"));
         loss = res.final_loss;
         d
     });
     assert_real_work("cpu", loss, sq_frob);
-    (best, worst, loss / sq_frob)
+    println!(
+        "  cpu    {best:>9.2?} (worst {worst:>9.2?})  rel loss {:.6}",
+        loss / sq_frob
+    );
 }
 
 /// MLX solve, staged.
 ///
 /// ### Params
 ///
-/// * `v` - The matrix
+/// * `upload` - Builds the input, returning it and the time spent on the
+///   device copy alone
 /// * `k` - Components
-fn bench_mlx(v: &Mat<f32>, k: usize) {
+fn bench_mlx<In: MlxNmfData>(mut upload: impl FnMut() -> (In, Duration), k: usize) {
     let opts = bench_opts();
     let mut stages = [Duration::MAX; 3];
     let mut worst_total = Duration::ZERO;
     let mut rel = 0f32;
     for _ in 0..REPS {
-        let (input, upload) = timed(|| MlxDenseNmfInput::new(v.as_ref()).expect("MLX input"));
+        let (input, upload_t) = upload();
         let (solve, solve_t) =
             timed(|| nmf_hals_mlx_device(&input, k, &opts, 0).expect("MLX solve"));
         let (res, read_t) = timed(|| solve.read().expect("MLX readback"));
         assert_real_work("mlx", res.final_loss, input.sq_frob());
         rel = res.final_loss / input.sq_frob();
-        for (best, d) in stages.iter_mut().zip([upload, solve_t, read_t]) {
+        for (best, d) in stages.iter_mut().zip([upload_t, solve_t, read_t]) {
             *best = (*best).min(d);
         }
-        worst_total = worst_total.max(upload + solve_t + read_t);
+        worst_total = worst_total.max(upload_t + solve_t + read_t);
     }
     let [upload, solve, read] = stages;
     println!(
@@ -225,38 +293,141 @@ fn bench_mlx(v: &Mat<f32>, k: usize) {
     );
 }
 
-/// cubecl solve on wgpu, end to end including upload and scratch.
+/// cubecl solve on wgpu, staged into upload and solve. The solve includes the
+/// scratch allocation and the readback, which its public API does not split.
 ///
 /// ### Params
 ///
-/// * `v` - The matrix
-/// * `k` - Components
+/// * `upload` - Builds the device input on the given client
+/// * `shape` - The problem, for the scratch size
 #[cfg(feature = "gpu")]
-fn bench_cubecl(v: &Mat<f32>, k: usize) {
-    use bixverse_rs::gpu::methods_gpu::nmf_gpu::{
-        GpuDenseNmfInput, GpuNmfData, NmfGpuScratch, nmf_hals_gpu,
-    };
+fn bench_cubecl<In>(
+    mut upload: impl FnMut(&cubecl::prelude::ComputeClient<cubecl::wgpu::WgpuRuntime>) -> (In, Duration),
+    shape: NmfShape,
+) where
+    In: bixverse_rs::gpu::methods_gpu::nmf_gpu::GpuNmfData<cubecl::wgpu::WgpuRuntime>,
+{
+    use bixverse_rs::gpu::methods_gpu::nmf_gpu::{NmfGpuScratch, nmf_hals_gpu};
     use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
 
+    let NmfShape { m, n, k, .. } = shape;
     let opts = bench_opts();
     let client = <WgpuRuntime as cubecl::Runtime>::client(&WgpuDevice::DefaultDevice);
-    let (m, n) = (v.nrows(), v.ncols());
+    let mut stages = [Duration::MAX; 2];
+    let mut worst_total = Duration::ZERO;
     let mut rel = 0f32;
-    let (best, worst) = best_of(|| {
-        // `nmf_hals_gpu` reads the factors back, so it returns with the queue
-        // drained.
-        let ((loss, sq_frob), d) = timed(|| {
-            let input = GpuDenseNmfInput::<WgpuRuntime>::new(v.as_ref(), &client).expect("input");
+    for _ in 0..REPS {
+        let (input, upload_t) = upload(&client);
+        let (res, solve_t) = timed(|| {
             let scratch =
                 NmfGpuScratch::<WgpuRuntime>::new(m, n, k, opts.eps, &client).expect("scratch");
-            let res = nmf_hals_gpu(&input, k, &opts, &scratch, &client, 0).expect("solve");
-            (res.final_loss, GpuNmfData::sq_frob(&input))
+            nmf_hals_gpu(&input, k, &opts, &scratch, &client, 0).expect("cubecl solve")
         });
-        assert_real_work("cubecl", loss, sq_frob);
-        rel = loss / sq_frob;
-        d
-    });
-    println!("  cubecl {best:>9.2?} (worst {worst:>9.2?})  end to end  rel loss {rel:.6}");
+        let sq_frob = input.sq_frob();
+        assert_real_work("cubecl", res.final_loss, sq_frob);
+        rel = res.final_loss / sq_frob;
+        for (best, d) in stages.iter_mut().zip([upload_t, solve_t]) {
+            *best = (*best).min(d);
+        }
+        worst_total = worst_total.max(upload_t + solve_t);
+    }
+    let [upload, solve] = stages;
+    println!(
+        "  cubecl upload {upload:>9.2?}  solve+readback {solve:>9.2?}  \
+         (worst total {worst_total:>9.2?})  rel loss {rel:.6}"
+    );
+}
+
+/// Block until every queued cubecl kernel has retired.
+///
+/// ### Params
+///
+/// * `client` - CubeCL compute client
+#[cfg(feature = "gpu")]
+fn sync(client: &cubecl::prelude::ComputeClient<cubecl::wgpu::WgpuRuntime>) {
+    cubecl::future::block_on(client.sync()).expect("device sync failed");
+}
+
+//////////
+// Runs //
+//////////
+
+/// All arms on one dense shape.
+///
+/// ### Params
+///
+/// * `shape` - The problem
+fn run_dense(shape: NmfShape) {
+    let NmfShape { label, m, n, k, .. } = shape;
+    println!("-- {label} dense: {m} x {n}, k = {k}, {FIXED_ITERS} iters --");
+    let v = build_dense(m, n, k);
+
+    bench_cpu(&DenseInput::new(v.as_ref()).expect("CPU input"), k);
+
+    bench_mlx(
+        || timed(|| MlxDenseNmfInput::new(v.as_ref()).expect("MLX input")),
+        k,
+    );
+
+    #[cfg(feature = "gpu")]
+    bench_cubecl(
+        |client| {
+            use bixverse_rs::gpu::methods_gpu::nmf_gpu::GpuDenseNmfInput;
+            timed(|| {
+                let input = GpuDenseNmfInput::new(v.as_ref(), client).expect("cubecl input");
+                sync(client);
+                input
+            })
+        },
+        shape,
+    );
+}
+
+/// All arms on one sparse shape. Host-side validation and the transpose are
+/// done outside the upload timing, as in `gpu_nmf_bench`.
+///
+/// ### Params
+///
+/// * `shape` - The problem
+fn run_sparse(shape: NmfShape) {
+    let NmfShape {
+        label,
+        m,
+        n,
+        k,
+        density,
+    } = shape;
+    let density = density.expect("sparse shape without a density");
+    let (csr, nnz) = build_sparse(m, n, density);
+    println!(
+        "-- {label} sparse: {m} x {n}, k = {k}, nnz = {nnz} ({:.1}% dense), {FIXED_ITERS} iters --",
+        100.0 * nnz as f64 / (m as f64 * n as f64)
+    );
+    let host = || SparseInput::<f32, f32>::from_primary(&csr).expect("host sparse input");
+
+    bench_cpu(&host(), k);
+
+    bench_mlx(
+        || {
+            let h = host();
+            timed(|| MlxSparseNmfInput::new(h).expect("MLX input"))
+        },
+        k,
+    );
+
+    #[cfg(feature = "gpu")]
+    bench_cubecl(
+        |client| {
+            use bixverse_rs::gpu::methods_gpu::nmf_gpu::GpuSparseNmfInput;
+            let h = host();
+            timed(|| {
+                let input = GpuSparseNmfInput::new(h, client).expect("cubecl input");
+                sync(client);
+                input
+            })
+        },
+        shape,
+    );
 }
 
 //////////
@@ -264,17 +435,21 @@ fn bench_cubecl(v: &Mat<f32>, k: usize) {
 //////////
 
 fn main() {
-    for shape in SHAPES {
-        let NmfShape { label, m, n, k } = shape;
-        println!("-- {label} dense: {m} x {n}, k = {k}, {FIXED_ITERS} iters --");
-        let v = build_dense(m, n, k);
-
-        let (best, worst, rel) = bench_cpu(&v, k);
-        println!("  cpu    {best:>9.2?} (worst {worst:>9.2?})  rel loss {rel:.6}");
-
-        bench_mlx(&v, k);
-
-        #[cfg(feature = "gpu")]
-        bench_cubecl(&v, k);
+    for shape in SPARSE_SHAPES {
+        run_sparse(shape);
+    }
+    if std::env::var("BIXVERSE_BENCH_BIG").is_ok() {
+        for shape in BIG_SHAPES {
+            run_sparse(shape);
+        }
+    } else {
+        println!("Set BIXVERSE_BENCH_BIG=1 to also run the 200k-cell sparse shape.");
+    }
+    if std::env::var("BIXVERSE_BENCH_DENSE").is_ok() {
+        for shape in DENSE_SHAPES {
+            run_dense(shape);
+        }
+    } else {
+        println!("Set BIXVERSE_BENCH_DENSE=1 to also run the dense bulk and metacell shapes.");
     }
 }
