@@ -1,5 +1,31 @@
 # News
 
+## 0.7.0 (unreleased)
+
+### Breaking
+
+- Removed the register-blocked SEACells B-argmin kernel and its helpers from
+  `gpu::sc_gpu::kernels::seacells_kernels`: `fw_argmin_b`,
+  `launch_fw_argmin_b`, `b_argmin_workgroup`, `B_ARGMIN_WG_TIERS` and
+  `B_ARGMIN_BLOCKS`. Use `launch_fw_argmin_b_tiled`.
+
+### Feature
+
+- Experimental `mlx` feature: an MLX backend via `mlx-c` for Apple Silicon,
+  f32 only and independent of `gpu`. Covers pairwise correlation, sparse
+  randomised SVD, HALS NMF (dense and sparse, single, stabilised and
+  consensus) and, with `single-cell`, Harmony and SEACells. Without
+  `libmlxc` the build warns and the module is absent.
+
+### Performance
+
+- SEACells GPU B update uses a column-tiled shared-memory argmin: no ceiling
+  on the number of SEACells any more and no CPU fallback. 200k cells: 145.5 s
+  to 64.6 s on wgpu (55.1 s on MLX).
+- `sparse_add_csr` merges rows in parallel, which speeds up the SEACells B
+  update (MLX at 200k cells: 52.6 s to 37.9 s) and every other caller.
+- The parallel CSC/CSR transpose scatters in bands of rows.
+
 ## 0.6.4
 
 ### Breaking
