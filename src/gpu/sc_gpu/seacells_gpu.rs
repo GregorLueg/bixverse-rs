@@ -1,7 +1,7 @@
 //! GPU-accelerated SEACells fit.
 //!
-//! [GpuFwArgminB] implements the [FwArgminB] seam with `fw_argmin_b` for the B
-//! update and `fw_columns_a_gpu` for the A update, and [seacells_fit_gpu] drives
+//! [GpuFwArgminB] implements the [FwArgminB] seam with `fw_argmin_b_tiled` for
+//! the B update and `fw_columns_a_gpu` for the A update, and [seacells_fit_gpu] drives
 //! the same [SEACells::fit_with] loop the CPU path uses.
 //!
 //! Neither kernel dominates the fit. Each beats the CPU scan it replaces by
@@ -15,9 +15,8 @@
 //! sparse, and the A update's atom scratch is `[n, cap]` where `cap` is the
 //! widest `A` column plus `max_fw_iters`.
 //!
-//! `t1` stays sparse on both solves, paired with a `[k, wg + 1]` per-thread
-//! segment table so a thread reaches its own contiguous column block without
-//! searching. Nothing on the path is quadratic in `k`; it used to be densified
+//! `t1` stays sparse on both solves, paired with a segment table (per column
+//! tile for the B argmin, per thread for the A solve) so no thread searches. Nothing on the path is quadratic in `k`; it used to be densified
 //! to `4k²` bytes on both, which is 381 MB at k = 10 000.
 
 use cubecl::Device;
@@ -26,13 +25,13 @@ use cubecl_utils_rs::prelude::*;
 
 use crate::gpu::linalg::sparse_gpu::GpuCompressedSparseData;
 use crate::gpu::sc_gpu::kernels::seacells_kernels::{
-    A_COLUMNS_MAX_SLOTS, A_COLUMNS_WG_TIERS, B_ARGMIN_BLOCKS, B_ARGMIN_WG_TIERS,
-    a_columns_capacity, a_columns_segments, a_columns_workgroup, b_argmin_workgroup,
-    launch_fw_argmin_b, launch_fw_columns_a,
+    A_COLUMNS_MAX_SLOTS, A_COLUMNS_WG_TIERS, B_TILED_GROUPS, a_columns_capacity,
+    a_columns_segments, a_columns_workgroup, b_tiled_layout, launch_fw_argmin_b_tiled,
+    launch_fw_columns_a,
 };
 use crate::prelude::*;
 use crate::single_cell::mc_generation::seacells::{
-    CpuFwArgminB, FwArgminB, FwAtoms, SEACells, SEACellsParams, assignments_to_metacells,
+    FwArgminB, FwAtoms, SEACells, SEACellsParams, assignments_to_metacells, csr_column_segments,
     fw_columns_a,
 };
 
@@ -53,13 +52,13 @@ pub use crate::single_cell::mc_generation::seacells::SeacellsFitResult;
 /// quickly but the device pages are not backed until something writes them, so
 /// allocating per call would pay that fault repeatedly.
 ///
-/// `t1`, its segment table and `K²Aᵀ` are uploaded once per B update via
-/// [FwArgminB::begin]; `K²B` and `B` change every Frank-Wolfe iteration and are
-/// re-uploaded there. Their non-zero counts drift between iterations, so those
-/// two are the only buffers not pooled.
+/// `t1`, `K²Aᵀ` and their tile segment tables are uploaded once per B update
+/// via [FwArgminB::begin]; `K²B` and `B` change every Frank-Wolfe iteration and
+/// are re-uploaded there. Their non-zero counts drift between iterations, so
+/// those two are the only buffers not pooled.
 ///
-/// Either solve independently falls back to the CPU when no workgroup tier
-/// covers `k`, so a shape can run one on the device and the other on the host.
+/// The B argmin has no ceiling on `k`. The A solve falls back to the CPU when
+/// no workgroup tier covers `k`.
 pub struct GpuFwArgminB {
     /// Compute client
     client: Client,
@@ -67,23 +66,23 @@ pub struct GpuFwArgminB {
     n: usize,
     /// Number of archetypes
     k: usize,
-    /// Workgroups the kernel dispatches, and therefore the partial-buffer depth
-    blocks: usize,
+    /// Cubes per column tile, and therefore the partial-buffer depth
+    groups: usize,
+    /// Column tiles of the B argmin, see [b_tiled_layout]
+    n_tiles: usize,
     /// `A Aᵀ` as CSR `k × k`, rebound per B update
     t1: Option<GpuCompressedSparseData<f32>>,
-    /// Per-thread column segments of `t1`, `[k, b_wg + 1]`, rebound with it
+    /// Tile segments of `t1`, `[k, n_tiles + 1]`, rebound with it
     t1_seg: Option<GpuTensor<u32>>,
-    /// Workgroup width the B argmin was last bound for
-    b_wg: u32,
-    /// CPU back end for the B argmin, used when no workgroup tier covers `k`
-    b_cpu: Option<CpuFwArgminB>,
     /// `K² Aᵀ` as CSR `n × k`, rebound per B update
     t2: Option<GpuCompressedSparseData<f32>>,
-    /// Per-block partial minima `[blocks, k]`
+    /// Tile segments of `K² Aᵀ`, `[n, n_tiles + 1]`, rebound with it
+    t2_seg: Option<GpuTensor<u32>>,
+    /// Per-cube partial minima `[groups, k]`
     part_val: GpuTensor<f32>,
-    /// Per-block partial argmins `[blocks, k]`
+    /// Per-cube partial argmins `[groups, k]`
     part_idx: GpuTensor<u32>,
-    /// Per-block partial `sum(B * G)` `[blocks]`
+    /// Per-cube partial `sum(B * G)` `[n_tiles, groups]`
     gap_partial: GpuTensor<f32>,
     /// Reduced minima `[k]`
     out_val: GpuTensor<f32>,
@@ -141,11 +140,12 @@ impl GpuFwArgminB {
         client: Client,
         verbose: usize,
     ) -> Result<Self, BixverseErrors> {
-        let blocks = B_ARGMIN_BLOCKS.min(n.max(1) as u32) as usize;
+        let groups = (B_TILED_GROUPS as usize).min(n.max(1));
+        let (_, n_tiles) = b_tiled_layout(k);
 
-        let part_val = GpuTensor::<f32>::empty(vec![blocks * k], &client)?;
-        let part_idx = GpuTensor::<u32>::empty(vec![blocks * k], &client)?;
-        let gap_partial = GpuTensor::<f32>::empty(vec![blocks], &client)?;
+        let part_val = GpuTensor::<f32>::empty(vec![groups * k], &client)?;
+        let part_idx = GpuTensor::<u32>::empty(vec![groups * k], &client)?;
+        let gap_partial = GpuTensor::<f32>::empty(vec![n_tiles * groups], &client)?;
         let out_val = GpuTensor::<f32>::empty(vec![k], &client)?;
         let out_idx = GpuTensor::<u32>::empty(vec![k], &client)?;
 
@@ -153,12 +153,12 @@ impl GpuFwArgminB {
             client,
             n,
             k,
-            blocks,
+            groups,
+            n_tiles,
             t1: None,
             t1_seg: None,
-            b_wg: 0,
-            b_cpu: None,
             t2: None,
+            t2_seg: None,
             part_val,
             part_idx,
             gap_partial,
@@ -217,36 +217,15 @@ impl FwArgminB for GpuFwArgminB {
             });
         }
 
-        // `t1` stays sparse, paired with a per-thread segment table so each
-        // thread reaches its own contiguous column block in one row without
-        // searching. It used to be densified to `k²` floats, which is 381 MB at
-        // k = 10 000 and grows quadratically; the inner loop then read a full
-        // `k`-float row for every non-zero of the `K²B` row.
-        // No tier means the register arrays would not fit and the dispatch
-        // would be rejected silently, so this solve runs on the CPU instead.
-        // The A solve still runs on the device; they are independent.
-        let Some(wg) = b_argmin_workgroup(self.k) else {
-            if parse_verbosity_level(self.verbose).detailed_verbosity() {
-                println!(
-                    "  B-gradient argmin on CPU: k {} fits no tier {:?}",
-                    self.k, B_ARGMIN_WG_TIERS
-                );
-            }
-            let mut cpu = CpuFwArgminB::default();
-            cpu.begin(t1, t2)?;
-            self.b_cpu = Some(cpu);
-            return Ok(());
-        };
-        self.b_cpu = None;
-        let seg_host = a_columns_segments(t1, wg, self.k.div_ceil(wg as usize));
-        self.t1_seg = Some(GpuTensor::<u32>::from_slice(
-            &seg_host,
-            vec![seg_host.len()],
-            &self.client,
-        )?);
-        drop(seg_host);
-        self.b_wg = wg;
-
+        let (tile, n_tiles) = b_tiled_layout(self.k);
+        for (csr, slot) in [(t1, &mut self.t1_seg), (t2, &mut self.t2_seg)] {
+            let seg = csr_column_segments(csr, n_tiles, tile);
+            *slot = Some(GpuTensor::<u32>::from_slice(
+                &seg,
+                vec![seg.len()],
+                &self.client,
+            )?);
+        }
         self.t1 = Some(
             GpuCompressedSparseData::<f32>::from_compressed_sparse_data_2(t1, false, &self.client)?,
         );
@@ -262,10 +241,6 @@ impl FwArgminB for GpuFwArgminB {
         k2_b: &CompressedSparseData2<f32>,
         b: &CompressedSparseData2<f32>,
     ) -> Result<(Vec<usize>, f32), BixverseErrors> {
-        if let Some(cpu) = self.b_cpu.as_mut() {
-            return cpu.argmins(k2_b, b);
-        }
-
         // The kernel launches unchecked and indexes `indptr` up to `n`, so a
         // wrong shape here is an out-of-bounds device read rather than an
         // error.
@@ -290,6 +265,10 @@ impl FwArgminB for GpuFwArgminB {
             .t2
             .as_ref()
             .ok_or(BixverseErrors::SEACellsModelNotFitted)?;
+        let t2_seg = self
+            .t2_seg
+            .as_ref()
+            .ok_or(BixverseErrors::SEACellsModelNotFitted)?;
 
         let k2b_gpu = GpuCompressedSparseData::<f32>::from_compressed_sparse_data_2(
             k2_b,
@@ -299,17 +278,19 @@ impl FwArgminB for GpuFwArgminB {
         let b_gpu =
             GpuCompressedSparseData::<f32>::from_compressed_sparse_data_2(b, false, &self.client)?;
 
-        launch_fw_argmin_b(
+        launch_fw_argmin_b_tiled(
             &k2b_gpu,
             t1,
             t1_seg,
             t2,
+            t2_seg,
             &b_gpu,
             &self.part_val,
             &self.part_idx,
             &self.gap_partial,
             &self.out_val,
             &self.out_idx,
+            self.groups as u32,
             self.n,
             self.k,
             &self.client,
@@ -332,7 +313,7 @@ impl FwArgminB for GpuFwArgminB {
             .map_err(|e| BixverseErrors::GpuMatmul(e.to_string()))?;
 
         // gap = |sum(B * G) - sum_c min_c G[:, c]|, matching the CPU scan.
-        let g_dot_b: f32 = gaps.iter().take(self.blocks).sum();
+        let g_dot_b: f32 = gaps.iter().take(self.n_tiles * self.groups).sum();
         let g_dot_e: f32 = min_vals.iter().sum();
 
         Ok((
@@ -513,10 +494,10 @@ impl FwArgminB for GpuFwArgminB {
 /// ### Errors
 ///
 /// * `CubeclUtils` if the pooled device scratch busts the per-binding size
-///   limit; `[blocks, k]` is the largest of them.
+///   limit; `[groups, k]` is the largest of them.
 /// * `GpuBindingTooLarge` if one of the sparse operands does, named per
 ///   buffer by the launcher.
-/// * Propagates the CPU fit's errors, which both solves fall back to when no
+/// * Propagates the CPU fit's errors, which the A solve falls back to when no
 ///   workgroup tier covers `k`.
 ///
 /// ### References
