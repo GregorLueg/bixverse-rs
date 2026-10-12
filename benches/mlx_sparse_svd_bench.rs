@@ -311,8 +311,11 @@ fn bench_shape(shape: SvdShape) {
     )
     .expect("randomised_sparse_svd failed");
     println!("  CPU                {:>12.2?}", t.elapsed());
-    guard_singular_values(&cpu.s, "cpu");
-    let diff = max_rel_diff(&mlx_s, &cpu.s);
+    // The CPU driver returns every sketch singular value, not just the top
+    // `N_COMPONENTS`.
+    let cpu_s = &cpu.s[..N_COMPONENTS];
+    guard_singular_values(cpu_s, "cpu");
+    let diff = max_rel_diff(&mlx_s, cpu_s);
     assert!(diff <= AGREEMENT_TOL, "MLX and CPU disagree by {diff:.3e}");
     println!("    (MLX vs CPU: max rel diff in s {diff:.2e})");
 
