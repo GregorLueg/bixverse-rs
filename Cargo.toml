@@ -203,6 +203,11 @@ harness = false
 required-features = ["mlx"]
 
 [[bench]]
+name = "mlx_sparse_svd_bench"
+harness = false
+required-features = ["mlx"]
+
+[[bench]]
 name = "gpu_scenic_bench"
 harness = false
 required-features = ["gpu", "single-cell"]
