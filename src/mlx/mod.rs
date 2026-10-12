@@ -2,3 +2,4 @@
 //! mlx-c. f32 only: MLX has no f64 on the GPU.
 
 mod ffi;
+pub mod methods;

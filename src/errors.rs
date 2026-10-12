@@ -2326,4 +2326,16 @@ pub enum BixverseErrors {
         /// Return code (or the offending dtype for a dtype mismatch)
         code: i32,
     },
+    /// The requested NMF rank is outside what the MLX HALS sweep stages in
+    /// threadgroup memory.
+    #[cfg(mlx_available)]
+    #[error(
+        "NMF MLX: rank k = {k} is outside the supported range 1..={max}; use the CPU entry point for ranks this large"
+    )]
+    MlxNmfRankTooLarge {
+        /// Requested number of components.
+        k: usize,
+        /// Largest rank the sweep tiers cover.
+        max: usize,
+    },
 }

@@ -397,6 +397,14 @@ unsafe extern "C" {
         s: mlx_stream,
     ) -> c_int;
     fn mlx_transpose(res: *mut mlx_array, a: mlx_array, s: mlx_stream) -> c_int;
+    fn mlx_multiply(res: *mut mlx_array, a: mlx_array, b: mlx_array, s: mlx_stream) -> c_int;
+    fn mlx_sum_axis(
+        res: *mut mlx_array,
+        a: mlx_array,
+        axis: c_int,
+        keepdims: bool,
+        s: mlx_stream,
+    ) -> c_int;
 }
 
 /// Run one mlx-c op that writes into a fresh `mlx_array`.
@@ -479,6 +487,38 @@ impl Array {
     pub fn transpose(&self, s: &Stream) -> Result<Array, BixverseErrors> {
         op_into("mlx_transpose", |out| unsafe {
             mlx_transpose(out, self.raw, s.raw)
+        })
+    }
+
+    /// Elementwise product `self * b`, with broadcasting.
+    ///
+    /// ### Params
+    ///
+    /// * `b` - Right operand
+    /// * `s` - Stream to run on
+    ///
+    /// ### Returns
+    ///
+    /// The (lazy) product
+    pub fn multiply(&self, b: &Array, s: &Stream) -> Result<Array, BixverseErrors> {
+        op_into("mlx_multiply", |out| unsafe {
+            mlx_multiply(out, self.raw, b.raw, s.raw)
+        })
+    }
+
+    /// Sum over one axis, dropping it.
+    ///
+    /// ### Params
+    ///
+    /// * `axis` - Axis to reduce
+    /// * `s` - Stream to run on
+    ///
+    /// ### Returns
+    ///
+    /// The (lazy) reduction
+    pub fn sum_axis(&self, axis: i32, s: &Stream) -> Result<Array, BixverseErrors> {
+        op_into("mlx_sum_axis", |out| unsafe {
+            mlx_sum_axis(out, self.raw, axis, false, s.raw)
         })
     }
 }
