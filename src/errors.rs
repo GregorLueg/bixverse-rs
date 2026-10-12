@@ -2338,4 +2338,9 @@ pub enum BixverseErrors {
         /// Largest rank the sweep tiers cover.
         max: usize,
     },
+    /// MLX Harmony only supports one co-variate (arrowhead ridge solve), as
+    /// the cubecl path.
+    #[cfg(mlx_available)]
+    #[error("Harmony MLX: Only a single co-variate is supported for the MLX path")]
+    MlxHarmonySupportsSingleCovariateOnly,
 }

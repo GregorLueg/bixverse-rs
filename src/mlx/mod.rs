@@ -4,3 +4,5 @@
 mod ffi;
 pub mod linalg;
 pub mod methods;
+#[cfg(feature = "single-cell")]
+pub mod sc;

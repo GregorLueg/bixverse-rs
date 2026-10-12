@@ -411,6 +411,24 @@ unsafe extern "C" {
         keepdims: bool,
         s: mlx_stream,
     ) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn mlx_slice(
+        res: *mut mlx_array,
+        a: mlx_array,
+        start: *const c_int,
+        start_num: usize,
+        stop: *const c_int,
+        stop_num: usize,
+        strides: *const c_int,
+        strides_num: usize,
+        s: mlx_stream,
+    ) -> c_int;
+    fn mlx_concatenate_axis(
+        res: *mut mlx_array,
+        arrays: mlx_vector_array,
+        axis: c_int,
+        s: mlx_stream,
+    ) -> c_int;
 }
 
 /// Run one mlx-c op that writes into a fresh `mlx_array`.
@@ -542,6 +560,61 @@ impl Array {
         op_into("mlx_sum_axis", |out| unsafe {
             mlx_sum_axis(out, self.raw, axis, false, s.raw)
         })
+    }
+
+    /// Unit-stride slice `self[start[0]..stop[0], start[1]..stop[1], ...]`.
+    /// A slice of whole rows of a row-major array stays a contiguous view.
+    ///
+    /// ### Params
+    ///
+    /// * `start` - First index per axis
+    /// * `stop` - One past the last index per axis
+    /// * `s` - Stream to run on
+    ///
+    /// ### Returns
+    ///
+    /// The (lazy) slice
+    pub fn slice(&self, start: &[i32], stop: &[i32], s: &Stream) -> Result<Array, BixverseErrors> {
+        debug_assert_eq!(start.len(), stop.len());
+        let strides = vec![1 as c_int; start.len()];
+        op_into("mlx_slice", |out| unsafe {
+            mlx_slice(
+                out,
+                self.raw,
+                start.as_ptr(),
+                start.len(),
+                stop.as_ptr(),
+                stop.len(),
+                strides.as_ptr(),
+                strides.len(),
+                s.raw,
+            )
+        })
+    }
+
+    /// Join arrays along one axis.
+    ///
+    /// ### Params
+    ///
+    /// * `arrays` - Arrays to join, equal in every other axis
+    /// * `axis` - Axis to join along
+    /// * `s` - Stream to run on
+    ///
+    /// ### Returns
+    ///
+    /// The (lazy) joined array
+    pub fn concatenate(arrays: &[&Array], axis: i32, s: &Stream) -> Result<Array, BixverseErrors> {
+        let raw: Vec<mlx_array> = arrays.iter().map(|a| a.raw).collect();
+        // SAFETY: the vector holds copies of live handles and is freed after
+        // the call; mlx-c takes its own references.
+        unsafe {
+            let v = mlx_vector_array_new_data(raw.as_ptr(), raw.len());
+            let res = op_into("mlx_concatenate_axis", |out| {
+                mlx_concatenate_axis(out, v, axis, s.raw)
+            });
+            mlx_vector_array_free(v);
+            res
+        }
     }
 }
 
