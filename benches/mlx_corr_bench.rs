@@ -12,7 +12,7 @@
 //! cargo bench --features mlx,gpu --bench mlx_corr_bench
 //! ```
 //!
-//! `BIXVERSE_BENCH_BIG=1` adds the 20000-column and 200k-row shapes.
+//! `BIXVERSE_BENCH_BIG=1` adds the 200k x 10k shape.
 
 use std::time::{Duration, Instant};
 
@@ -69,19 +69,13 @@ const DEFAULT_SHAPES: [CorShape; 4] = [
     },
 ];
 
-/// Shapes behind `BIXVERSE_BENCH_BIG`, identical to `gpu_corr_bench.rs`.
-const BIG_SHAPES: [CorShape; 2] = [
-    CorShape {
-        label: "fat-big",
-        n: 500,
-        d: 20_000,
-    },
-    CorShape {
-        label: "tall-big",
-        n: 200_000,
-        d: 2_000,
-    },
-];
+/// Shape behind `BIXVERSE_BENCH_BIG`: 200k samples by 10k features, the
+/// largest correlation anyone is likely to ask for (8 GB in, 400 MB out).
+const BIG_SHAPES: [CorShape; 1] = [CorShape {
+    label: "tall-big",
+    n: 200_000,
+    d: 10_000,
+}];
 
 /////////////
 // Helpers //
@@ -290,6 +284,6 @@ fn main() {
             bench_shape(shape);
         }
     } else {
-        println!("Set BIXVERSE_BENCH_BIG=1 to also run the 20000-column and 200k-row shapes.");
+        println!("Set BIXVERSE_BENCH_BIG=1 to also run the 200k x 10k shape.");
     }
 }
