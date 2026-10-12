@@ -3,10 +3,9 @@
 //! [fw_argmin_b_tiled()] replaces `fw_argmins_b`, the per-archetype gradient
 //! scan in the B update, and [fw_columns_a_gpu()] replaces `fw_columns_a`, the
 //! per-cell column solve in the A update. Kernel construction, archetype
-//! initialisation and the RSS stay on the host. [fw_argmin_b()], the earlier
-//! register-blocked B kernel, is no longer on the fit path: the tiled one was
-//! 3.8 to 4.2x faster per call at 200k cells x 2666 archetypes and about 1.5x
-//! at 50k x 666 on captured fit operands (M1 Max).
+//! initialisation and the RSS stay on the host. The tiled B kernel was 3.8 to
+//! 4.2x faster per call than the register-blocked one it replaced at 200k cells
+//! x 2666 archetypes and about 1.5x at 50k x 666 (M1 Max).
 //!
 //! Layout convention: every `n × k` matrix (`K²B`, `K²Aᵀ`, `B`) is passed as
 //! CSR over cells, the untransposed output of `k_squared_matmul`, so the GPU
@@ -15,17 +14,16 @@
 //!
 //! Nothing here allocates a buffer quadratic in `k`, and no `n × k` matrix is
 //! ever dense. The tiled B kernel builds one column tile of one gradient row at
-//! a time in shared memory; see [fw_argmin_b_tiled()]. In the A kernel and the
-//! register-blocked B kernel each thread owns a
-//! contiguous block of `ceil(k / wg)` columns in registers and reduces it to a
+//! a time in shared memory; see [fw_argmin_b_tiled()]. In the A kernel each
+//! thread owns a contiguous block of `ceil(k / wg)` columns in registers and reduces it to a
 //! running `(min, idx)` as it goes. Contiguous rather than strided ownership is
 //! what lets `t1` stay sparse: a thread's columns form one run of any sorted
 //! row, bracketed by a precomputed `[k, wg + 1]` segment table instead of
 //! searched for. See [a_columns_segments()] and [accumulate_segmented_row()].
 //!
-//! The per-thread register arrays are what bound `k`. Exceeding the bound is a
-//! rejected dispatch that reports success and does no work, so the widths live
-//! in [A_COLUMNS_WG_TIERS] and [B_ARGMIN_WG_TIERS] with per-device caps, and
+//! The per-thread register arrays are what bound `k` in the A kernel.
+//! Exceeding the bound is a rejected dispatch that reports success and does no
+//! work, so the widths live in [A_COLUMNS_WG_TIERS] with per-device caps, and
 //! the callers verify the output rather than trusting them.
 
 #![allow(missing_docs)]
@@ -41,32 +39,9 @@ use crate::prelude::CompressedSparseFormat;
 // Consts //
 ////////////
 
-/// Workgroups for the B-gradient argmin, grid-striding over cells.
-///
-/// Fixed rather than derived from `n`, so the partial buffer stays
-/// `B_ARGMIN_BLOCKS * k` at every dataset size instead of growing with it.
-pub const B_ARGMIN_BLOCKS: u32 = 1024;
-
 /// Workgroup width for [reduce_argmin_blocks()]. One thread per output column,
 /// grid-striding.
 pub const B_REDUCE_WG: u32 = 256;
-
-/// Workgroup widths [fw_argmin_b()] is instantiated at, narrowest first, each
-/// with the most register slots per thread it can carry.
-///
-/// Same structure and the same hazard as [A_COLUMNS_WG_TIERS], but the widest
-/// tier's cap is lower: this kernel holds `acc`, `run_val` and `run_idx` per
-/// thread, three register arrays of `slots` against the A solve's two. Past the
-/// cap the dispatch is rejected and the kernel silently does no work.
-///
-/// The caps are device-specific and each sits at the last width observed to
-/// work rather than at a bisected boundary, so they are conservative. The
-/// widest tier fixes the ceiling on `k`; [fw_argmin_b_tiled()] has none.
-///
-/// The silent failure is easy to miss here because `fw_argmin_b` is followed by
-/// `reduce_argmin_blocks`, which runs regardless and fills the output with
-/// whatever the partial buffers held. Check the partials, not the output.
-pub const B_ARGMIN_WG_TIERS: [(u32, usize); 3] = [(128, 32), (256, 32), (512, 20)];
 
 /// Units per cube of [fw_argmin_b_tiled()], one plane on Apple Silicon. The
 /// kernel synchronises with `sync_cube`, so it does not depend on the plane
@@ -81,22 +56,6 @@ pub const B_TILED_TILE: u32 = 256;
 /// Cubes grid-striding over the rows per column tile in
 /// [fw_argmin_b_tiled()], so the partials stay `[B_TILED_GROUPS, k]`.
 pub const B_TILED_GROUPS: u32 = 1024;
-
-/// Workgroup tier for a B-gradient argmin, or `None` if `k` is too large.
-///
-/// ### Params
-///
-/// * `k` - Number of archetypes
-///
-/// ### Returns
-///
-/// The workgroup width, or `None` when no tier covers the shape.
-pub fn b_argmin_workgroup(k: usize) -> Option<u32> {
-    B_ARGMIN_WG_TIERS
-        .iter()
-        .find(|&&(wg, max_slots)| k.div_ceil(wg as usize) <= max_slots)
-        .map(|&(wg, _)| wg)
-}
 
 /// Workgroups for the A-column solve, grid-striding over cells.
 ///
@@ -351,225 +310,10 @@ pub fn accumulate_sparse_row<F: Float>(
 // Kernels //
 /////////////
 
-/// Fused Frank-Wolfe gradient and column-wise argmin for the B update.
-///
-/// Computes, without ever storing it,
-///
-/// ```text
-/// G[i, c] = sum_m K²B[i, m] * t1[m, c] - K²Aᵀ[i, c]
-/// ```
-///
-/// and reduces it to `argmin_i G[i, c]` for every archetype `c`, plus the
-/// `sum(B * G)` half of the Frank-Wolfe duality gap. Work is `nnz(K²B) * k`
-/// fused multiply-adds, the same count as the CPU scan it replaces; the win is
-/// throughput, not a better algorithm.
-///
-/// Thread `tx` owns the contiguous column block
-/// `[tx * slots, (tx + 1) * slots)`, held in registers rather than shared
-/// memory, so there is no `k`-dependent shared memory budget to gate on. Every
-/// register-array index is comptime, since a dynamically indexed local array is
-/// backed by global memory on Metal.
-///
-/// Contiguous ownership is what lets `t1` stay sparse: the entries of a sorted
-/// row that a thread needs form one run, bracketed by the precomputed segment
-/// table rather than searched for. See [accumulate_segmented_row()].
-///
-/// The per-thread register arrays are what bound `k` here; see
-/// [B_ARGMIN_WG_TIERS].
-///
-/// Rows are visited in increasing order with a strict `<`, so the lowest row
-/// index wins a tie within a block. Blocks grid-stride, so block order does not
-/// follow row order and [reduce_argmin_blocks()] has to break ties by index
-/// explicitly.
-///
-/// ### Params
-///
-/// * `k2b_indptr` - CSR row pointers of `K²B` `[n + 1]`
-/// * `k2b_indices` - Archetype indices of its non-zeros `[nnz]`
-/// * `k2b_values` - Values of its non-zeros `[nnz]`
-/// * `t1_indices` - Archetype indices of `A Aᵀ`'s non-zeros, ascending per row
-/// * `t1_values` - Values of its non-zeros `[nnz]`
-/// * `t1_seg` - Per-thread column segments of `t1`, `[k, wg_size + 1]` row-major
-/// * `t2_indptr` - CSR row pointers of `K²Aᵀ` `[n + 1]`
-/// * `t2_indices` - Archetype indices of its non-zeros `[nnz]`
-/// * `t2_values` - Values of its non-zeros `[nnz]`
-/// * `b_indptr` - CSR row pointers of `B` `[n + 1]`
-/// * `b_indices` - Archetype indices of its non-zeros `[nnz]`
-/// * `b_values` - Values of its non-zeros `[nnz]`
-/// * `best_val` - Output partial minima `[n_blocks, k]`
-/// * `best_idx` - Output partial argmins `[n_blocks, k]`
-/// * `gap_partial` - Output partial `sum(B * G)` `[n_blocks]`
-/// * `n` - Number of cells
-/// * `k` - Number of archetypes (comptime)
-/// * `slots` - Columns owned per thread, `ceil(k / wg_size)` (comptime)
-/// * `wg_size` - Workgroup width (comptime)
-///
-/// ### Grid mapping
-///
-/// * `CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X` -> block index, then grid-strides
-///   over cells
-/// * `UNIT_POS_X * slots` -> first owned column, then `slots` contiguous
-#[allow(clippy::too_many_arguments)]
-#[cube(launch_unchecked)]
-pub fn fw_argmin_b<F: Float>(
-    k2b_indptr: &Tensor<u32>,
-    k2b_indices: &Tensor<u32>,
-    k2b_values: &Tensor<F>,
-    t1_indices: &Tensor<u32>,
-    t1_values: &Tensor<F>,
-    t1_seg: &Tensor<u32>,
-    t2_indptr: &Tensor<u32>,
-    t2_indices: &Tensor<u32>,
-    t2_values: &Tensor<F>,
-    b_indptr: &Tensor<u32>,
-    b_indices: &Tensor<u32>,
-    b_values: &Tensor<F>,
-    best_val: &mut Tensor<F>,
-    best_idx: &mut Tensor<u32>,
-    gap_partial: &mut Tensor<F>,
-    n: u32,
-    #[comptime] k: usize,
-    #[comptime] slots: usize,
-    #[comptime] wg_size: u32,
-) {
-    let block = CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X;
-    let tx = UNIT_POS_X;
-
-    let mut acc = Array::<F>::new(slots);
-    let mut run_val = Array::<F>::new(slots);
-    let mut run_idx = Array::<u32>::new(slots);
-
-    #[unroll]
-    for s in 0..slots {
-        run_val[s] = F::max_value();
-        run_idx[s] = 0u32;
-    }
-
-    // Blocked ownership: thread `tx` owns the contiguous column range
-    // `[base, base + slots)`, which is what makes a sorted `t1` row splittable
-    // per thread without a search. See [accumulate_segmented_row()].
-    let base = tx * comptime!(slots as u32);
-
-    let mut gap = F::new(0.0_f32);
-
-    // Grid-stride over the cells this block owns.
-    let mut row = block;
-    while row < n {
-        let row_us = row as usize;
-
-        #[unroll]
-        for s in 0..slots {
-            acc[s] = F::new(0.0_f32);
-        }
-
-        // acc[c] = sum_m K²B[row, m] * t1[m, c]
-        let k2b_start = k2b_indptr[row_us];
-        let k2b_end = k2b_indptr[row_us + 1];
-        let mut p = k2b_start;
-        while p < k2b_end {
-            let m = k2b_indices[p as usize];
-            accumulate_segmented_row::<F>(
-                &mut acc,
-                t1_indices,
-                t1_values,
-                t1_seg,
-                m * comptime!(wg_size + 1),
-                tx,
-                base,
-                k2b_values[p as usize],
-                slots,
-            );
-            p += 1u32;
-        }
-
-        // acc[c] -= K²Aᵀ[row, c]. The owning thread applies each non-zero; the
-        // slot is found by comparison rather than by dividing the column index,
-        // which would be a dynamic index into a register array.
-        let t2_start = t2_indptr[row_us];
-        let t2_end = t2_indptr[row_us + 1];
-        let mut q = t2_start;
-        while q < t2_end {
-            let col = t2_indices[q as usize];
-            let v = t2_values[q as usize];
-
-            #[unroll]
-            for s in 0..slots {
-                if base + comptime!(s as u32) == col {
-                    acc[s] -= v;
-                }
-            }
-            q += 1u32;
-        }
-
-        // gap += sum_c B[row, c] * G[row, c]
-        let b_start = b_indptr[row_us];
-        let b_end = b_indptr[row_us + 1];
-        let mut r = b_start;
-        while r < b_end {
-            let col = b_indices[r as usize];
-            let v = b_values[r as usize];
-
-            #[unroll]
-            for s in 0..slots {
-                if base + comptime!(s as u32) == col {
-                    gap += v * acc[s];
-                }
-            }
-            r += 1u32;
-        }
-
-        // Running per-column minimum. Strict `<` keeps the lowest row index.
-        #[unroll]
-        for s in 0..slots {
-            let col = base + comptime!(s as u32);
-            if col < comptime!(k as u32) && acc[s] < run_val[s] {
-                run_val[s] = acc[s];
-                run_idx[s] = row;
-            }
-        }
-
-        row += CUBE_COUNT_X * CUBE_COUNT_Y;
-    }
-
-    // Write this block's partial minima. Blocked ownership makes adjacent
-    // threads write `slots` apart rather than contiguously, which costs
-    // coalescing here, but this runs once per block against the `n / blocks`
-    // cells the loop above just walked.
-    let out_base = block as usize * k;
-    #[unroll]
-    for s in 0..slots {
-        let col = base + comptime!(s as u32);
-        if col < comptime!(k as u32) {
-            best_val[out_base + col as usize] = run_val[s];
-            best_idx[out_base + col as usize] = run_idx[s];
-        }
-    }
-
-    // Workgroup tree reduction of the gap partial.
-    let mut shared = Shared::<[F]>::new_slice(wg_size as usize);
-    shared[tx as usize] = gap;
-    sync_cube();
-
-    // Forced runtime, or cubecl unrolls the loop at expansion.
-    let mut stride = (wg_size / 2u32).runtime();
-    while stride > 0u32 {
-        if tx < stride {
-            let other = shared[(tx + stride) as usize];
-            shared[tx as usize] += other;
-        }
-        sync_cube();
-        stride /= 2u32;
-    }
-
-    if tx == 0u32 {
-        gap_partial[block as usize] = shared[0];
-    }
-}
-
 /// Second stage of the B-gradient argmin: reduce per-block partials to one
 /// `(min, idx)` per archetype.
 ///
-/// Blocks grid-stride over cells in [fw_argmin_b()], so block order does not
+/// Cubes grid-stride over cells in [fw_argmin_b_tiled()], so block order does not
 /// follow row order. Ties are therefore broken on the row index explicitly,
 /// reproducing the CPU scan's lowest-index-wins behaviour.
 ///
@@ -1291,171 +1035,6 @@ pub fn fw_columns_a_gpu<F: Float>(
 // Launchers //
 ///////////////
 
-/// Dispatch [fw_argmin_b()] followed by [reduce_argmin_blocks()].
-///
-/// The workgroup width is chosen by [b_argmin_workgroup()] and each width is a
-/// separately compiled shader, so a shape no tier covers is an error here rather
-/// than a silently rejected dispatch. Callers that can fall back should check
-/// the tier themselves first; [GpuFwArgminB] does.
-///
-/// ### Params
-///
-/// * `k2b` - `K²B` as CSR `n × k`
-/// * `t1` - `A Aᵀ` as CSR `k × k`, column indices ascending per row
-/// * `t1_seg` - Its per-thread column segments, from [a_columns_segments()]
-/// * `t2` - `K²Aᵀ` as CSR `n × k`
-/// * `b_mat` - `B` as CSR `n × k`
-/// * `part_val` - Scratch `[B_ARGMIN_BLOCKS, k]`
-/// * `part_idx` - Scratch `[B_ARGMIN_BLOCKS, k]`
-/// * `gap_partial` - Scratch `[B_ARGMIN_BLOCKS]`
-/// * `out_val` - Output minima `[k]`
-/// * `out_idx` - Output argmins `[k]`
-/// * `n` - Number of cells
-/// * `k` - Number of archetypes
-/// * `client` - CubeCL compute client
-///
-/// ### Returns
-///
-/// `Ok(())`, or `GpuBindingTooLarge` / `CubeclUtils` if a dispatch
-/// busts a device limit, or `InvalidArgument` if no workgroup tier covers `k`.
-///
-/// [GpuFwArgminB]: crate::gpu::sc_gpu::seacells_gpu::GpuFwArgminB
-#[allow(clippy::too_many_arguments)]
-pub fn launch_fw_argmin_b<F>(
-    k2b: &GpuCompressedSparseData<F>,
-    t1: &GpuCompressedSparseData<F>,
-    t1_seg: &GpuTensor<u32>,
-    t2: &GpuCompressedSparseData<F>,
-    b_mat: &GpuCompressedSparseData<F>,
-    part_val: &GpuTensor<F>,
-    part_idx: &GpuTensor<u32>,
-    gap_partial: &GpuTensor<F>,
-    out_val: &GpuTensor<F>,
-    out_idx: &GpuTensor<u32>,
-    n: usize,
-    k: usize,
-    client: &Client,
-) -> Result<(), BixverseErrors>
-where
-    F: Float + cubecl::CubeElement,
-{
-    for mat in [k2b, t1, t2, b_mat] {
-        if !mat.cs_type.is_csr() {
-            return Err(BixverseErrors::SparseLayoutMismatch {
-                expected: CompressedSparseFormat::Csr,
-                got: mat.cs_type,
-            });
-        }
-    }
-
-    // An over-sized binding is rejected silently: the kernel does no work and
-    // returns zeros.
-    let limits = GpuLimits::from_client(client);
-    let limit = limits.max_binding_bytes as usize;
-    let indptr_bytes = (n + 1) * size_of::<u32>();
-    let checked = [
-        ("K2B values", k2b.nnz * size_of::<F>()),
-        ("K2B indices", k2b.nnz * size_of::<u32>()),
-        ("K2B indptr", indptr_bytes),
-        ("K2At values", t2.nnz * size_of::<F>()),
-        ("K2At indices", t2.nnz * size_of::<u32>()),
-        ("K2At indptr", indptr_bytes),
-        ("B values", b_mat.nnz * size_of::<F>()),
-        ("B indices", b_mat.nnz * size_of::<u32>()),
-        ("B indptr", indptr_bytes),
-        ("t1 values", t1.nnz * size_of::<F>()),
-        ("t1 indices", t1.nnz * size_of::<u32>()),
-        ("t1 segments", t1_seg.len() * size_of::<u32>()),
-        ("argmin partial values", part_val.len() * size_of::<F>()),
-        ("argmin partial indices", part_idx.len() * size_of::<u32>()),
-    ];
-    for (buffer, bytes) in checked {
-        if bytes > limit {
-            return Err(BixverseErrors::GpuBindingTooLarge {
-                buffer,
-                bytes,
-                limit,
-            });
-        }
-    }
-
-    let wg = b_argmin_workgroup(k).ok_or_else(|| {
-        BixverseErrors::InvalidArgument(format!(
-            "fw_argmin_b: no workgroup tier covers k = {}, tiers {:?}",
-            k, B_ARGMIN_WG_TIERS
-        ))
-    })?;
-    let blocks = B_ARGMIN_BLOCKS.min(n.max(1) as u32);
-
-    let (gx, gy) = grid_2d(blocks, &limits)?;
-    let count = checked_cube_count("fw_argmin_b", gx, gy, 1, &limits)?;
-
-    // One arm per tier: `wg_size` is comptime, so each width is its own shader.
-    macro_rules! dispatch {
-        ($wg:expr) => {{
-            unsafe {
-                fw_argmin_b::launch_unchecked::<F>(
-                    client,
-                    count,
-                    CubeDim::new_1d($wg),
-                    k2b.indptr.clone().into_tensor_arg(),
-                    k2b.indices.clone().into_tensor_arg(),
-                    k2b.values.clone().into_tensor_arg(),
-                    t1.indices.clone().into_tensor_arg(),
-                    t1.values.clone().into_tensor_arg(),
-                    t1_seg.clone().into_tensor_arg(),
-                    t2.indptr.clone().into_tensor_arg(),
-                    t2.indices.clone().into_tensor_arg(),
-                    t2.values.clone().into_tensor_arg(),
-                    b_mat.indptr.clone().into_tensor_arg(),
-                    b_mat.indices.clone().into_tensor_arg(),
-                    b_mat.values.clone().into_tensor_arg(),
-                    part_val.clone().into_tensor_arg(),
-                    part_idx.clone().into_tensor_arg(),
-                    gap_partial.clone().into_tensor_arg(),
-                    n as u32,
-                    k,
-                    k.div_ceil($wg as usize),
-                    $wg,
-                );
-            }
-        }};
-    }
-
-    match wg {
-        128 => dispatch!(128u32),
-        256 => dispatch!(256u32),
-        512 => dispatch!(512u32),
-        other => {
-            return Err(BixverseErrors::InvalidArgument(format!(
-                "fw_argmin_b: workgroup width {} is not one of the compiled tiers {:?}",
-                other, B_ARGMIN_WG_TIERS
-            )));
-        }
-    }
-
-    let reduce_cubes = (k as u32).div_ceil(B_REDUCE_WG);
-    let (rx, ry) = grid_2d(reduce_cubes, &limits)?;
-    let reduce_count = checked_cube_count("reduce_argmin_blocks", rx, ry, 1, &limits)?;
-
-    unsafe {
-        reduce_argmin_blocks::launch_unchecked::<F>(
-            client,
-            reduce_count,
-            CubeDim::new_1d(B_REDUCE_WG),
-            part_val.clone().into_tensor_arg(),
-            part_idx.clone().into_tensor_arg(),
-            out_val.clone().into_tensor_arg(),
-            out_idx.clone().into_tensor_arg(),
-            blocks,
-            k as u32,
-            B_REDUCE_WG,
-        );
-    }
-
-    Ok(())
-}
-
 /// Column tiling of [fw_argmin_b_tiled()] for `k` archetypes.
 ///
 /// ### Params
@@ -1941,7 +1520,7 @@ mod tests {
         (values, indices, indptr)
     }
 
-    /// CPU reference for [fw_argmin_b()], mirroring `fw_argmins_b` in
+    /// CPU reference for [fw_argmin_b_tiled()], mirroring `fw_argmins_b` in
     /// `single_cell::mc_generation::seacells`.
     ///
     /// ### Params

@@ -1,6 +1,6 @@
 //! Benchmarks for the GPU SEACells path, kernel and end-to-end.
 //!
-//! Three sections. `launch_fw_argmin_b` on a `K2B` of realistic shape and
+//! Three sections. `launch_fw_argmin_b_tiled` on a `K2B` of realistic shape and
 //! density, reported without a CPU baseline; `launch_fw_columns_a` swept across
 //! every workgroup tier against the CPU solve it falls back to, in the same run;
 //! then the full fit both ways.
@@ -39,13 +39,13 @@ use rand_distr::{Distribution, Normal};
 
 use bixverse_rs::gpu::linalg::sparse_gpu::GpuCompressedSparseData;
 use bixverse_rs::gpu::sc_gpu::kernels::seacells_kernels::{
-    A_COLUMNS_WG_TIERS, B_ARGMIN_BLOCKS, a_columns_capacity, a_columns_segments,
-    b_argmin_workgroup, launch_fw_argmin_b, launch_fw_columns_a,
+    A_COLUMNS_WG_TIERS, B_TILED_GROUPS, a_columns_capacity, a_columns_segments, b_tiled_layout,
+    launch_fw_argmin_b_tiled, launch_fw_columns_a,
 };
 use bixverse_rs::gpu::sc_gpu::seacells_gpu::seacells_fit_gpu;
 use bixverse_rs::prelude::*;
 use bixverse_rs::single_cell::mc_generation::seacells::{
-    CpuFwArgminB, FwArgminB, SEACells, SEACellsParams,
+    CpuFwArgminB, FwArgminB, SEACells, SEACellsParams, csr_column_segments,
 };
 use bixverse_rs::single_cell::sc_processing::knn::{KnnParams, generate_knn_with_dist};
 
@@ -124,11 +124,7 @@ fn shapes() -> Vec<Shape> {
             k: 10_000,
             density: 0.008,
         },
-        // Just past the widest tier's slot cap, so this one reports the CPU
-        // fallback rather than a timing. Kept as the regression guard: if the
-        // cap is ever raised without the launch actually working, this shape
-        // trips the "did the kernel do anything" check instead of quietly
-        // reporting an implausible speedup.
+        // Past the old register-blocked kernel's ceiling on `k`.
         Shape {
             n: 20_000,
             k: 12_288,
@@ -268,38 +264,47 @@ fn bench_b_shape(shape: Shape, device: &WgpuDevice) {
     let k2b_parts = make_csr(n, k, density, 1);
     let nnz = k2b_parts.0.len();
     let k2b = upload(k2b_parts);
-    let t2 = upload(make_csr(n, k, density * 0.6, 5));
+    let t2_parts = make_csr(n, k, density * 0.6, 5);
+    let t2_csr =
+        CompressedSparseData2::<f32>::new_csr(&t2_parts.0, &t2_parts.1, &t2_parts.2, None, (n, k));
+    let t2 = upload(t2_parts);
     // B carries roughly `max_fw_iters` atoms per archetype column, so it is far
     // sparser than K2B.
     let b_mat = upload(make_csr(n, k, 25.0 / n as f64, 9));
 
     // `A A^T` is sparse in the same 1-7% band as the A update's `t1`.
     let t1_csr = make_sparse(k, k, 0.05, 3);
-    let t1 = GpuCompressedSparseData::<f32>::from_compressed_sparse_data_2(&t1_csr, false, &client)
-        .expect("t1 upload failed");
-    // Above the widest tier's slot cap the solve runs on the CPU, so there is
-    // no kernel here to time.
-    let Some(b_wg) = b_argmin_workgroup(k) else {
-        println!(
-            "n = {:>7}  k = {:>5}  |  no workgroup tier, B argmin runs on CPU",
-            n, k
-        );
-        return;
+    let t1 = GpuCompressedSparseData::<f32>::from_compressed_sparse_data_2(
+        &t1_csr, false, &client,
+    )
+    .expect("t1 upload failed");
+    let (tile, n_tiles) = b_tiled_layout(k);
+    let seg = |m: &CompressedSparseData2<f32>| {
+        let host = csr_column_segments(m, n_tiles, tile);
+        GpuTensor::<u32>::from_slice(&host, vec![host.len()], &client)
+            .expect("segment upload failed")
     };
-    let seg_host = a_columns_segments(&t1_csr, b_wg, k.div_ceil(b_wg as usize));
-    let t1_seg = GpuTensor::<u32>::from_slice(&seg_host, vec![seg_host.len()], &client)
-        .expect("t1 segment upload failed");
+    let t1_seg = seg(&t1_csr);
+    let t2_seg = seg(&t2_csr);
 
-    let blocks = B_ARGMIN_BLOCKS.min(n.max(1) as u32) as usize;
-    // Zeroed, not `empty()`. `reduce_argmin_blocks` runs even when
-    // `fw_argmin_b` was rejected, so uninitialised partials become plausible
-    // looking output and the check below passes a kernel that did nothing.
-    let part_val =
-        GpuTensor::<f32>::from_slice(&vec![0.0f32; blocks * k], vec![blocks * k], &client)
-            .expect("alloc part_val");
-    let part_idx = GpuTensor::<u32>::from_slice(&vec![0u32; blocks * k], vec![blocks * k], &client)
-        .expect("alloc part_idx");
-    let gap_partial = GpuTensor::<f32>::empty(vec![blocks], &client).expect("alloc gap_partial");
+    let blocks = (B_TILED_GROUPS as usize).min(n.max(1));
+    // Zeroed, not `empty()`. `reduce_argmin_blocks` runs even when the argmin
+    // kernel was rejected, so uninitialised partials become plausible looking
+    // output and the check below passes a kernel that did nothing.
+    let part_val = GpuTensor::<f32>::from_slice(
+        &vec![0.0f32; blocks * k],
+        vec![blocks * k],
+        &client,
+    )
+    .expect("alloc part_val");
+    let part_idx = GpuTensor::<u32>::from_slice(
+        &vec![0u32; blocks * k],
+        vec![blocks * k],
+        &client,
+    )
+    .expect("alloc part_idx");
+    let gap_partial = GpuTensor::<f32>::empty(vec![n_tiles * blocks], &client)
+        .expect("alloc gap_partial");
     // Zeroed, not `empty()`: a rejected dispatch leaves uninitialised VRAM,
     // which can pass a "did it write anything" check by accident.
     let out_val =
@@ -309,17 +314,19 @@ fn bench_b_shape(shape: Shape, device: &WgpuDevice) {
 
     let (best, worst) = best_of(|| {
         let start = Instant::now();
-        launch_fw_argmin_b(
+        launch_fw_argmin_b_tiled(
             &k2b,
             &t1,
             &t1_seg,
             &t2,
+            &t2_seg,
             &b_mat,
             &part_val,
             &part_idx,
             &gap_partial,
             &out_val,
             &out_idx,
+            blocks as u32,
             n,
             k,
             &client,
@@ -336,12 +343,7 @@ fn bench_b_shape(shape: Shape, device: &WgpuDevice) {
     let vals = out_val.clone().read(&client).expect("read failed");
     let idx = out_idx.clone().read(&client).expect("read failed");
     let nonzero = vals.iter().filter(|v| **v != 0.0 && v.is_finite()).count();
-    println!(
-        "    (k = {}, wg tier {}, {} slots)",
-        k,
-        b_wg,
-        k.div_ceil(b_wg as usize)
-    );
+    println!("    (k = {}, {} column tiles of {})", k, n_tiles, tile);
     assert!(
         nonzero > k / 2,
         "kernel almost certainly did no work: only {} / {} finite non-zero minima",
@@ -359,6 +361,7 @@ fn bench_b_shape(shape: Shape, device: &WgpuDevice) {
         + b_mat.vram_bytes()
         + t1.vram_bytes()
         + t1_seg.vram_bytes()
+        + t2_seg.vram_bytes()
         + part_val.vram_bytes()
         + part_idx.vram_bytes();
     println!(
