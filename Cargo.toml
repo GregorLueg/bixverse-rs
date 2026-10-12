@@ -213,6 +213,11 @@ harness = false
 required-features = ["mlx", "single-cell"]
 
 [[bench]]
+name = "mlx_seacells_bench"
+harness = false
+required-features = ["mlx", "single-cell"]
+
+[[bench]]
 name = "gpu_scenic_bench"
 harness = false
 required-features = ["gpu", "single-cell"]

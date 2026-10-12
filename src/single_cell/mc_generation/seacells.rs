@@ -19,6 +19,10 @@ use crate::utils::simd::argmin_diff_simd_f32;
 // kNN symmetrisation //
 ////////////////////////
 
+/// Output of a SEACells fit: hard assignment per cell, the cells grouped by
+/// SEACell, the cell index of each archetype, and the RSS at each iteration.
+pub type SeacellsFitResult = (Vec<usize>, Vec<Vec<usize>>, Vec<usize>, Vec<f32>);
+
 /// kNN symmetrisation method
 #[derive(Clone, Copy, Default)]
 pub enum KnnSymmetrisation {
@@ -1444,6 +1448,51 @@ fn fw_argmins_b(
     }
 
     (argmins, (g_dot_b - g_dot_e).abs())
+}
+
+/// Column segment bounds for every row of a CSR.
+///
+/// Entry `row * (n_segments + 1) + s` is the position in `csr.indices` of the
+/// first entry of `row` whose column is at least `s * width`, and the last
+/// entry of each row closes it, so segment `s` of a row is
+/// `[seg[.. + s], seg[.. + s + 1])` with no search on the device. Column
+/// indices must be ascending within a row.
+///
+/// ### Params
+///
+/// * `csr` - CSR matrix, column indices ascending per row
+/// * `n_segments` - Segments per row; `n_segments * width` must cover the
+///   column count
+/// * `width` - Columns per segment
+///
+/// ### Returns
+///
+/// The segment table, row-major `[rows, n_segments + 1]`.
+pub fn csr_column_segments(
+    csr: &CompressedSparseData2<f32>,
+    n_segments: usize,
+    width: usize,
+) -> Vec<u32> {
+    let stride = n_segments + 1;
+    let mut seg = vec![0u32; csr.shape.0 * stride];
+
+    seg.par_chunks_mut(stride)
+        .enumerate()
+        .for_each(|(row, out)| {
+            let start = csr.indptr[row] as usize;
+            let end = csr.indptr[row + 1] as usize;
+            let mut p = start;
+            for (s, slot) in out.iter_mut().enumerate() {
+                let bound = (s * width) as u32;
+                while p < end && csr.indices[p] < bound {
+                    p += 1;
+                }
+                *slot = p as u32;
+            }
+            out[n_segments] = end as u32;
+        });
+
+    seg
 }
 
 ///////////////////////

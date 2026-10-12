@@ -95,6 +95,7 @@ unsafe extern "C" {
     fn mlx_array_dtype(arr: mlx_array) -> mlx_dtype;
     fn mlx_array_size(arr: mlx_array) -> usize;
     fn mlx_array_data_float32(arr: mlx_array) -> *const f32;
+    fn mlx_array_data_uint32(arr: mlx_array) -> *const u32;
 
     fn mlx_eval(outputs: mlx_vector_array) -> c_int;
     fn mlx_async_eval(outputs: mlx_vector_array) -> c_int;
@@ -453,6 +454,32 @@ impl Array {
             if ptr.is_null() {
                 return Err(BixverseErrors::MlxError {
                     op: "mlx_array_data_float32",
+                    code: -1,
+                });
+            }
+            Ok(std::slice::from_raw_parts(ptr, mlx_array_size(self.raw)))
+        }
+    }
+
+    /// Borrow the u32 buffer of an evaluated, row-contiguous array. Same
+    /// caveat on lazy views as [`Array::as_f32`].
+    ///
+    /// ### Returns
+    ///
+    /// The values, row-major
+    pub fn as_u32(&self) -> Result<&[u32], BixverseErrors> {
+        // SAFETY: as `as_f32`.
+        unsafe {
+            if mlx_array_dtype(self.raw) != MLX_UINT32 {
+                return Err(BixverseErrors::MlxError {
+                    op: "mlx_array_data_uint32 (dtype)",
+                    code: mlx_array_dtype(self.raw),
+                });
+            }
+            let ptr = mlx_array_data_uint32(self.raw);
+            if ptr.is_null() {
+                return Err(BixverseErrors::MlxError {
+                    op: "mlx_array_data_uint32",
                     code: -1,
                 });
             }

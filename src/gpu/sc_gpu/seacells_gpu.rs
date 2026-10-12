@@ -40,9 +40,7 @@ use crate::single_cell::mc_generation::seacells::{
 // Types //
 ///////////
 
-/// Output of a SEACells fit: hard assignment per cell, the cells grouped by
-/// SEACell, the cell index of each archetype, and the RSS at each iteration.
-pub type SeacellsFitResult = (Vec<usize>, Vec<Vec<usize>>, Vec<usize>, Vec<f32>);
+pub use crate::single_cell::mc_generation::seacells::SeacellsFitResult;
 
 //////////////
 // Back end //

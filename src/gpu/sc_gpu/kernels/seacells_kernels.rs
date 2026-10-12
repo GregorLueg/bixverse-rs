@@ -27,7 +27,6 @@
 
 use cubecl::prelude::*;
 use cubecl_utils_rs::prelude::*;
-use rayon::prelude::*;
 
 use crate::errors::BixverseErrors;
 use crate::gpu::linalg::sparse_gpu::GpuCompressedSparseData;
@@ -1493,30 +1492,7 @@ pub fn a_columns_segments(
     wg: u32,
     slots: usize,
 ) -> Vec<u32> {
-    let k = t1.shape.0;
-    let stride = wg as usize + 1;
-    let mut seg = vec![0u32; k * stride];
-
-    seg.par_chunks_mut(stride)
-        .enumerate()
-        .for_each(|(row, out)| {
-            let start = t1.indptr[row] as usize;
-            let end = t1.indptr[row + 1] as usize;
-            // One pass: advance through the row, closing off each thread's
-            // block as its upper column bound is passed.
-            let mut p = start;
-            for (t, slot) in out.iter_mut().enumerate() {
-                let bound = (t * slots) as u32;
-                while p < end && t1.indices[p] < bound {
-                    p += 1;
-                }
-                *slot = p as u32;
-            }
-            // The last boundary is `wg * slots >= k`, so it closes the row.
-            out[wg as usize] = end as u32;
-        });
-
-    seg
+    crate::single_cell::mc_generation::seacells::csr_column_segments(t1, wg as usize, slots)
 }
 
 /// Atom capacity the A-column kernel needs for a given `A_prev`.
