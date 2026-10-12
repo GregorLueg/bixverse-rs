@@ -188,6 +188,11 @@ harness = false
 required-features = ["gpu"]
 
 [[bench]]
+name = "mlx_corr_bench"
+harness = false
+required-features = ["mlx"]
+
+[[bench]]
 name = "gpu_nmf_bench"
 harness = false
 required-features = ["gpu"]
