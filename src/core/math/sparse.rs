@@ -1598,7 +1598,13 @@ where
 // Sparse operations //
 ///////////////////////
 
+/// Rows merged per rayon job in [sparse_add_csr].
+const SPARSE_ADD_ROW_CHUNK: usize = 1024;
+
 /// Add two CSR matrices together
+///
+/// Rows are merged in parallel chunks of [SPARSE_ADD_ROW_CHUNK]. An overlap
+/// whose sum has magnitude at or below `1e-9` is dropped.
 ///
 /// ### Params
 ///
@@ -1628,44 +1634,79 @@ where
     const EPSILON: f32 = 1e-9;
     let n_rows = a.shape.0;
 
-    let mut rows: Vec<u32> = Vec::new();
-    let mut cols: Vec<u32> = Vec::new();
-    let mut vals = Vec::new();
+    let chunks: Vec<(Vec<u32>, Vec<T>, Vec<u32>)> = (0..n_rows.div_ceil(SPARSE_ADD_ROW_CHUNK))
+        .into_par_iter()
+        .map(|chunk_idx| {
+            let start = chunk_idx * SPARSE_ADD_ROW_CHUNK;
+            let end = (start + SPARSE_ADD_ROW_CHUNK).min(n_rows);
+            let cap = (a.indptr[end] - a.indptr[start] + b.indptr[end] - b.indptr[start]) as usize;
+            let mut cols: Vec<u32> = Vec::with_capacity(cap);
+            let mut vals: Vec<T> = Vec::with_capacity(cap);
+            let mut lengths: Vec<u32> = Vec::with_capacity(end - start);
 
-    for i in 0..n_rows {
-        let a_start = a.indptr[i] as usize;
-        let a_end = a.indptr[i + 1] as usize;
-        let b_start = b.indptr[i] as usize;
-        let b_end = b.indptr[i + 1] as usize;
+            for i in start..end {
+                let before = cols.len();
+                let a_end = a.indptr[i + 1] as usize;
+                let b_end = b.indptr[i + 1] as usize;
+                let mut a_idx = a.indptr[i] as usize;
+                let mut b_idx = b.indptr[i] as usize;
 
-        let mut a_idx = a_start;
-        let mut b_idx = b_start;
-
-        while a_idx < a_end || b_idx < b_end {
-            if a_idx < a_end && (b_idx >= b_end || a.indices[a_idx] < b.indices[b_idx]) {
-                rows.push(i as u32);
-                cols.push(a.indices[a_idx]);
-                vals.push(a.data[a_idx]);
-                a_idx += 1;
-            } else if b_idx < b_end && (a_idx >= a_end || b.indices[b_idx] < a.indices[a_idx]) {
-                rows.push(i as u32);
-                cols.push(b.indices[b_idx]);
-                vals.push(b.data[b_idx]);
-                b_idx += 1;
-            } else {
-                let val = a.data[a_idx] + b.data[b_idx];
-                if val.into().abs() > EPSILON as f64 {
-                    rows.push(i as u32);
-                    cols.push(a.indices[a_idx]);
-                    vals.push(val);
+                while a_idx < a_end && b_idx < b_end {
+                    let a_col = a.indices[a_idx];
+                    let b_col = b.indices[b_idx];
+                    if a_col < b_col {
+                        cols.push(a_col);
+                        vals.push(a.data[a_idx]);
+                        a_idx += 1;
+                    } else if b_col < a_col {
+                        cols.push(b_col);
+                        vals.push(b.data[b_idx]);
+                        b_idx += 1;
+                    } else {
+                        let val = a.data[a_idx] + b.data[b_idx];
+                        if val.into().abs() > EPSILON as f64 {
+                            cols.push(a_col);
+                            vals.push(val);
+                        }
+                        a_idx += 1;
+                        b_idx += 1;
+                    }
                 }
-                a_idx += 1;
-                b_idx += 1;
+                cols.extend_from_slice(&a.indices[a_idx..a_end]);
+                vals.extend_from_slice(&a.data[a_idx..a_end]);
+                cols.extend_from_slice(&b.indices[b_idx..b_end]);
+                vals.extend_from_slice(&b.data[b_idx..b_end]);
+
+                lengths.push((cols.len() - before) as u32);
             }
+
+            (cols, vals, lengths)
+        })
+        .collect();
+
+    let nnz: usize = chunks.iter().map(|(c, _, _)| c.len()).sum();
+    let mut indptr: Vec<u32> = Vec::with_capacity(n_rows + 1);
+    let mut indices: Vec<u32> = Vec::with_capacity(nnz);
+    let mut data: Vec<T> = Vec::with_capacity(nnz);
+    indptr.push(0);
+    for (cols, vals, lengths) in chunks {
+        let mut running = *indptr.last().unwrap_or(&0);
+        for len in lengths {
+            running += len;
+            indptr.push(running);
         }
+        indices.extend_from_slice(&cols);
+        data.extend_from_slice(&vals);
     }
 
-    Ok(coo_to_csr_presorted(&rows, &cols, &vals, a.shape))
+    Ok(CompressedSparseData2::from_parts(
+        data,
+        indices,
+        indptr,
+        None,
+        CompressedSparseFormat::Csr,
+        a.shape,
+    ))
 }
 
 /// Scalar multiplication of CSR matrix

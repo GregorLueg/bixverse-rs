@@ -2904,15 +2904,14 @@ impl<'a> SEACells<'a> {
                 None
             };
 
-            for val in &mut k2_b.data {
-                *val *= retain;
-            }
+            k2_b.data.par_iter_mut().for_each(|val| *val *= retain);
             let delta = k_squared_column_combination(kernel, &contributions, n);
             k2_b = sparse_add_csr(&k2_b, &transpose_sparse(&delta))?;
             if let Some(factors) = renorm {
-                for (idx, &col) in k2_b.indices.iter().enumerate() {
-                    k2_b.data[idx] *= factors[col as usize];
-                }
+                k2_b.data
+                    .par_iter_mut()
+                    .zip(k2_b.indices.par_iter())
+                    .for_each(|(val, &col)| *val *= factors[col as usize]);
             }
 
             // The incremental form is exact but only ever grows the sparsity
