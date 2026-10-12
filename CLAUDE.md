@@ -30,6 +30,7 @@ Feature flags gate large chunks of the crate. Match your `cargo` invocations to 
 - `dge`: enables the negative binomial differential expression surface and pulls in `edge-rs`. Implied by `single-cell`, but usable on its own for the bulk half (`methods::dge_bulk`)
 - `bonsai`: implies `single-cell` and pulls in `bonsai-rs` with its `sanity` feature. Counts to Sanity posteriors to a Bonsai tree in `single_cell::sc_analysis::bonsai` (disk) and `single_cell::mc_analysis::bonsai_mc` (in-memory metacells), both through the same chunk loop `stream_chunks`; with `gpu`, also `gpu::sc_gpu::sanity_bonsai_gpu`. Sanity is only ever named through `bonsai_rs::sanity_sc_rs`, never as a direct dependency, so the `SanityOutput` type always matches `from_sanity_output`
 - `gpu`: enables the `gpu` module, `cubecl` (wgpu + cpu backends), `cubecl-utils-rs`, `cubek`, `half` and the `gpu` feature of `ann-search-rs` (its GPU kNN indices)
+- `mlx`: experimental, Apple Silicon only. Enables the `mlx` module (MLX via `mlx-c`, f32 only), independent of `gpu`. `build.rs` looks for `libmlxc.dylib` under `MLX_C_PREFIX` (default `/opt/homebrew`); if it is missing it warns and skips, otherwise it emits `cfg(mlx_available)`, exposed as `MLX_AVAILABLE`. The crate declares `links = "mlxc"` itself for now; that moves to `ann-search-rs` once the dependency is on 0.11. The `mlx::sc` submodule needs `single-cell` as well
 - `large-test`: slow but asserting tests. The GPU parity gates and the large-scale numerical checks. These can fail, so they are worth running on a schedule. No CI job enables it yet
 - `large_scale_diagnostics`: development-only. Gates the unasserted diagnostic sweeps that print tables for a human to read. They cannot fail, so running them in CI buys nothing
 
@@ -55,6 +56,11 @@ cargo test --release --features gpu,single-cell,multi-modal,large-test
 
 # The print-only diagnostic sweeps. Nothing here can fail; read the output.
 cargo test --release --features gpu,single-cell,large_scale_diagnostics -- --nocapture
+
+# MLX backend (Apple Silicon, needs mlx-c installed). Without the library the
+# build warns and the tests have nothing to run against.
+cargo test --features mlx,single-cell
+cargo bench --features mlx --bench mlx_corr_bench
 
 # Run a single test by name (substring match)
 cargo test --features single-cell,multi-modal -- test_name_substring
@@ -86,6 +92,7 @@ Top-level modules:
 - `ontology/`: GO Elim algorithm and semantic similarity
 - `utils/`: SIMD wrappers (`wide` via `BixverseSimd`), matrix helpers, traits, R↔Rust conversion (`r_rust_interface.rs`), heap structures, assertion macros
 - `single_cell/` (feature): sc/mc data I/O (h5ad, 10x h5, mtx, bixverse binary format), processing, kNN, batch correction (Harmony), annotation (scType), analysis (Hotspot, MELD, SEACells, MetaCells2, NEBULA, pseudobulk DE), multi-modal (WNN)
+- `mlx/` (feature `mlx`): experimental MLX backend via `mlx-c`: `linalg` (`corr`, `spmm`, `rand_svd`), `methods::nmf` (HALS and its sparse, stabilised and consensus variants), and under `single-cell` `sc::harmony` and `sc::seacells`. Independent of `gpu`; f32 only
 - `gpu/` (feature): GPU kernels via `cubecl`/`cubek`, sparse randomised SVD, sparse GEMM, correlation, Cholesky, Harmony, PCA. K-means comes from `ann-search-rs`
 
 `prelude.rs` re-exports the most-used types (errors, sparse structures, `SparseGraph`, matrix/vector utils, SIMD trait, assertion macros). Prefer `use crate::prelude::*;` in new modules over deep imports.
@@ -115,7 +122,7 @@ A params struct owned by an upstream crate cannot take an inherent impl, so it g
 ## Testing layout
 
 - Unit tests live inline (`#[cfg(test)] mod tests`) in each module file
-- Integration tests in `tests/`, each gated by a file-level `#![cfg(...)]`: `meta_cells2.rs` (single-cell), `gene_trends.rs` (single-cell), `nebula_sc.rs` (single-cell), `pseudobulk_dge.rs` (single-cell), `edger_bulk.rs` (dge), `bonsai_sc.rs` (bonsai, plus one gpu test), `scenic_gpu.rs` (single-cell + gpu), `seacells_gpu.rs` (single-cell + gpu + large-test), `gpu_corr.rs` (gpu + large-test), `large_scale_diagnostics.rs` (single-cell + large-test, the file name predates the flag split)
+- Integration tests in `tests/`, each gated by a file-level `#![cfg(...)]`: `meta_cells2.rs` (single-cell), `gene_trends.rs` (single-cell), `nebula_sc.rs` (single-cell), `pseudobulk_dge.rs` (single-cell), `edger_bulk.rs` (dge), `bonsai_sc.rs` (bonsai, plus one gpu test), `scenic_gpu.rs` (single-cell + gpu), `seacells_gpu.rs` (single-cell + gpu + large-test), `seacells_mlx.rs` (single-cell + large-test, and `mlx_available`), `gpu_corr.rs` (gpu + large-test), `large_scale_diagnostics.rs` (single-cell + large-test, the file name predates the flag split)
 - Parity fixtures are generated, never recalled. `dev/gen_edger_fixtures.R` writes `tests/edger_fixtures/mod.rs` against edgeR 4.8.2; `dev/gen_blitzgsea_fixtures.py` does the same for `tests/blitzgsea_fixtures/`. Both rebuild their input from a seeded LCG on each side so no float data crosses as text
 - CI matrix: Ubuntu / macOS / Windows for CPU tests; Ubuntu / macOS for GPU tests (Linux uses Vulkan via `WGPU_BACKEND=vulkan`)
 

@@ -124,7 +124,7 @@ fn shapes() -> Vec<Shape> {
             k: 10_000,
             density: 0.008,
         },
-        // Past the old register-blocked kernel's ceiling on `k`.
+        // Large `k`, where the tiled B kernel has no ceiling.
         Shape {
             n: 20_000,
             k: 12_288,
@@ -395,7 +395,7 @@ struct AShape {
     t1_density: f64,
 }
 
-/// Shapes for the A-column solve, spanning the current `k <= 2048` ceiling.
+/// Shapes for the A-column solve, spanning the workgroup tiers.
 ///
 /// `t1` densities follow the 1-7% range the code records as measured, falling
 /// with `k` because an archetype's two-hop neighbourhood does not grow with the

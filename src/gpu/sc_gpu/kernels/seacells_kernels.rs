@@ -3,9 +3,7 @@
 //! [fw_argmin_b_tiled()] replaces `fw_argmins_b`, the per-archetype gradient
 //! scan in the B update, and [fw_columns_a_gpu()] replaces `fw_columns_a`, the
 //! per-cell column solve in the A update. Kernel construction, archetype
-//! initialisation and the RSS stay on the host. The tiled B kernel was 3.8 to
-//! 4.2x faster per call than the register-blocked one it replaced at 200k cells
-//! x 2666 archetypes and about 1.5x at 50k x 666 (M1 Max).
+//! initialisation and the RSS stay on the host.
 //!
 //! Layout convention: every `n × k` matrix (`K²B`, `K²Aᵀ`, `B`) is passed as
 //! CSR over cells, the untransposed output of `k_squared_matmul`, so the GPU

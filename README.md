@@ -58,6 +58,7 @@ pays for what it uses.
 | `hdf5-filters` | Compiles the LZF and Blosc filters into HDF5, so h5ad files written with those codecs load |
 | `bonsai` | Bonsai trees over Sanity posteriors via `bonsai-rs`, implies `single-cell` |
 | `gpu` | The `gpu` module via `cubecl` (wgpu and CPU backends) and `cubek` |
+| `mlx` | Experimental, Apple Silicon only: an MLX backend via [`mlx-c`](https://github.com/ml-explore/mlx-c) (f32) for correlation, SpMM, randomised SVD, NMF, and with `single-cell` Harmony and SEACells. Independent of `gpu`. Needs `brew install mlx-c` or `MLX_C_PREFIX`; without the library the build warns and skips it |
 | `large-test` | Slow but asserting tests: GPU parity gates, large-scale numerical checks |
 | `large_scale_diagnostics` | Unasserted diagnostic sweeps that print tables for a human |
 

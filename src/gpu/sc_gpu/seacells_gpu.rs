@@ -5,11 +5,11 @@
 //! the same [SEACells::fit_with] loop the CPU path uses.
 //!
 //! Neither kernel dominates the fit. Each beats the CPU scan it replaces by
-//! several fold in isolation, but the whole fit moves by ~2.6x at 50k cells and
-//! 666 archetypes, which is Amdahl rather than anything wrong with them: the
-//! blocking readbacks around the kernels were about a fifth of wall-clock when
-//! last attributed, and the kernel construction, archetype initialisation, `K²B`
-//! maintenance and RSS all stay on the host.
+//! several fold in isolation, but the whole fit moves far less, which is
+//! Amdahl rather than anything wrong with them: the blocking readbacks around
+//! the kernels were about a fifth of wall-clock when last attributed, and the
+//! kernel construction, archetype initialisation, `K²B` maintenance and RSS all
+//! stay on the host.
 //!
 //! Nothing here holds an `n × k` dense buffer. `K²B`, `K²Aᵀ` and `B` stay
 //! sparse, and the A update's atom scratch is `[n, cap]` where `cap` is the
@@ -766,7 +766,7 @@ mod tests {
             }
         }
     }
-    /// Parity above the old `k <= 2048` ceiling, across every workgroup tier.
+    /// Parity at large `k`, across every workgroup tier.
     ///
     /// Each `k` here selects a different tier and a different slot count, and
     /// none is a multiple of `wg * slots`, so the partial block at the end of
