@@ -397,6 +397,12 @@ unsafe extern "C" {
         s: mlx_stream,
     ) -> c_int;
     fn mlx_transpose(res: *mut mlx_array, a: mlx_array, s: mlx_stream) -> c_int;
+    fn mlx_contiguous(
+        res: *mut mlx_array,
+        a: mlx_array,
+        allow_col_major: bool,
+        s: mlx_stream,
+    ) -> c_int;
     fn mlx_multiply(res: *mut mlx_array, a: mlx_array, b: mlx_array, s: mlx_stream) -> c_int;
     fn mlx_sum_axis(
         res: *mut mlx_array,
@@ -487,6 +493,22 @@ impl Array {
     pub fn transpose(&self, s: &Stream) -> Result<Array, BixverseErrors> {
         op_into("mlx_transpose", |out| unsafe {
             mlx_transpose(out, self.raw, s.raw)
+        })
+    }
+
+    /// Row-contiguous copy, a no-op if the array already is. Materialises a
+    /// lazy [`Array::transpose`].
+    ///
+    /// ### Params
+    ///
+    /// * `s` - Stream to run on
+    ///
+    /// ### Returns
+    ///
+    /// The (lazy) row-contiguous array
+    pub fn contiguous(&self, s: &Stream) -> Result<Array, BixverseErrors> {
+        op_into("mlx_contiguous", |out| unsafe {
+            mlx_contiguous(out, self.raw, false, s.raw)
         })
     }
 

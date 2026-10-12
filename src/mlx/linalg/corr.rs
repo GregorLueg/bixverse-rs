@@ -3,8 +3,8 @@
 //! Mirrors [`crate::gpu::linalg::corr`]: Spearman ranks the columns on the
 //! host, the matrix goes up feature-major (`[n_cols, n_rows]` row-major, i.e.
 //! the column-major faer buffer as is), one Metal kernel centres and scales
-//! every feature with `1/sqrt(n-1)` folded in, and one MLX `matmul` of that
-//! against its own transpose is the result. f32 only.
+//! every feature with `1/sqrt(n-1)` folded in, and after a device transpose
+//! to sample-major one MLX `matmul` `Sᵀ S` is the result. f32 only.
 //!
 //! The column variance is two-pass (mean first, then the sum of squared
 //! deviations), never `sumsq - n * mean^2`, which cancels badly in f32 once
@@ -282,7 +282,11 @@ pub fn column_pairwise_cor_mlx_staged(
     let t = Instant::now();
     let scale_sd = !matches!(cor_type, MlxCorCov::Covariance);
     let scaled = centre_scale(&data, n_i, d_i, scale_sd, &s)?;
-    let gram = scaled.matmul(&scaled.transpose(&s)?, &s)?;
+    // Sample-major `Sᵀ S`: with the long `n` axis outermost in both operands
+    // MLX's GEMM is up to 10x faster than `S Sᵀ` on the feature-major buffer
+    // (n = 50k, d = 2k: 58 vs 410 ms; n = 1M, d = 100: 6.7 vs 64 ms).
+    let sample_major = scaled.transpose(&s)?.contiguous(&s)?;
+    let gram = sample_major.transpose(&s)?.matmul(&sample_major, &s)?;
     eval_all(&[&gram], false)?;
     st.compute = t.elapsed();
 
@@ -293,7 +297,7 @@ pub fn column_pairwise_cor_mlx_staged(
     let out = Mat::from_fn(n_cols, n_cols, |i, j| g[j * n_cols + i]);
     st.readback = t.elapsed();
 
-    drop((gram, scaled, data));
+    drop((gram, sample_major, scaled, data));
     clear_cache()?;
     Ok((out, st))
 }
@@ -302,7 +306,7 @@ pub fn column_pairwise_cor_mlx_staged(
 ///
 /// For Spearman the columns are rank-transformed on the host first. The
 /// matrix is then centred and scaled on the device, `1/sqrt(n-1)` folded in,
-/// so a single `S Sᵀ` over the feature-major `S` is the result.
+/// so a single `Sᵀ S` over the sample-major `S` is the result.
 ///
 /// ### Params
 ///
