@@ -239,19 +239,19 @@ fn main() {
     if run("gpu") {
         use ann_search_rs::gpu::k_means_gpu::KMeansGpuParams;
         use bixverse_rs::gpu::sc_gpu::harmony_gpu::{HarmonyParamsV2Gpu, harmony_v2_gpu};
-        use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+        use cubecl::wgpu::WgpuDevice;
 
         let mut params = HarmonyParamsV2Gpu::default();
         if let Some(it) = km_iters {
             params.kmeans_params = Some(KMeansGpuParams::new(it, None, true, false));
         }
         bench_method("gpu", reps, &format!("{tag}_gpu_out.f32"), |v| {
-            harmony_v2_gpu::<WgpuRuntime>(
+            harmony_v2_gpu(
                 pca.as_ref(),
                 &batch,
                 &params,
                 SEED,
-                WgpuDevice::default(),
+                cubecl::Device::from(WgpuDevice::default()),
                 v,
             )
             .expect("harmony gpu")

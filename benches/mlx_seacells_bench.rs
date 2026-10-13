@@ -273,11 +273,11 @@ fn main() {
         #[cfg(feature = "gpu")]
         {
             use bixverse_rs::gpu::sc_gpu::seacells_gpu::GpuFwArgminB;
-            use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+            use cubecl::wgpu::WgpuDevice;
 
             let gpu_assign = run_fit("cubecl", &embedding, &knn, &params, |n, k| {
-                let client = <WgpuRuntime as cubecl::Runtime>::client(&WgpuDevice::DefaultDevice);
-                GpuFwArgminB::<WgpuRuntime>::new(n, k, client).expect("cubecl back end")
+                let client = cubecl::Device::from(WgpuDevice::default()).client();
+                GpuFwArgminB::new(n, k, client).expect("cubecl back end")
             });
             let agree = mlx_assign
                 .iter()

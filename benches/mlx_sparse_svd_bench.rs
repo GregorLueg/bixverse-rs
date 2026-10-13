@@ -324,11 +324,11 @@ fn bench_shape(shape: SvdShape) {
         use bixverse_rs::gpu::linalg::sparse_rand_svd_gpu::{
             RandSvdGpuParams, randomised_sparse_svd_gpu,
         };
-        use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+        use cubecl::wgpu::WgpuDevice;
 
         for rep in 0..REPS {
             let t = Instant::now();
-            let svd = randomised_sparse_svd_gpu::<WgpuRuntime, f32, f32>(
+            let svd = randomised_sparse_svd_gpu::<f32, f32>(
                 csc(),
                 &means,
                 &stds,
@@ -336,7 +336,7 @@ fn bench_shape(shape: SvdShape) {
                 N_COMPONENTS,
                 Some(RandSvdGpuParams::new(N_POWER_ITERS, OVERSAMPLING)),
                 SEED,
-                WgpuDevice::DefaultDevice,
+                cubecl::Device::from(WgpuDevice::default()),
                 0,
             )
             .expect("randomised_sparse_svd_gpu failed");

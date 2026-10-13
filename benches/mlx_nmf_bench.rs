@@ -302,25 +302,24 @@ fn bench_mlx<In: MlxNmfData>(mut upload: impl FnMut() -> (In, Duration), k: usiz
 /// * `shape` - The problem, for the scratch size
 #[cfg(feature = "gpu")]
 fn bench_cubecl<In>(
-    mut upload: impl FnMut(&cubecl::prelude::ComputeClient<cubecl::wgpu::WgpuRuntime>) -> (In, Duration),
+    mut upload: impl FnMut(&cubecl::prelude::Client) -> (In, Duration),
     shape: NmfShape,
 ) where
-    In: bixverse_rs::gpu::methods_gpu::nmf_gpu::GpuNmfData<cubecl::wgpu::WgpuRuntime>,
+    In: bixverse_rs::gpu::methods_gpu::nmf_gpu::GpuNmfData,
 {
     use bixverse_rs::gpu::methods_gpu::nmf_gpu::{NmfGpuScratch, nmf_hals_gpu};
-    use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+    use cubecl::wgpu::WgpuDevice;
 
     let NmfShape { m, n, k, .. } = shape;
     let opts = bench_opts();
-    let client = <WgpuRuntime as cubecl::Runtime>::client(&WgpuDevice::DefaultDevice);
+    let client = cubecl::Device::from(WgpuDevice::default()).client();
     let mut stages = [Duration::MAX; 2];
     let mut worst_total = Duration::ZERO;
     let mut rel = 0f32;
     for _ in 0..REPS {
         let (input, upload_t) = upload(&client);
         let (res, solve_t) = timed(|| {
-            let scratch =
-                NmfGpuScratch::<WgpuRuntime>::new(m, n, k, opts.eps, &client).expect("scratch");
+            let scratch = NmfGpuScratch::new(m, n, k, opts.eps, &client).expect("scratch");
             nmf_hals_gpu(&input, k, &opts, &scratch, &client, 0).expect("cubecl solve")
         });
         let sq_frob = input.sq_frob();
@@ -344,7 +343,7 @@ fn bench_cubecl<In>(
 ///
 /// * `client` - CubeCL compute client
 #[cfg(feature = "gpu")]
-fn sync(client: &cubecl::prelude::ComputeClient<cubecl::wgpu::WgpuRuntime>) {
+fn sync(client: &cubecl::prelude::Client) {
     cubecl::future::block_on(client.sync()).expect("device sync failed");
 }
 

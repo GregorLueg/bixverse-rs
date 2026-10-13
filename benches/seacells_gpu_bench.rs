@@ -274,10 +274,8 @@ fn bench_b_shape(shape: Shape, device: &WgpuDevice) {
 
     // `A A^T` is sparse in the same 1-7% band as the A update's `t1`.
     let t1_csr = make_sparse(k, k, 0.05, 3);
-    let t1 = GpuCompressedSparseData::<f32>::from_compressed_sparse_data_2(
-        &t1_csr, false, &client,
-    )
-    .expect("t1 upload failed");
+    let t1 = GpuCompressedSparseData::<f32>::from_compressed_sparse_data_2(&t1_csr, false, &client)
+        .expect("t1 upload failed");
     let (tile, n_tiles) = b_tiled_layout(k);
     let seg = |m: &CompressedSparseData2<f32>| {
         let host = csr_column_segments(m, n_tiles, tile);
@@ -291,20 +289,13 @@ fn bench_b_shape(shape: Shape, device: &WgpuDevice) {
     // Zeroed, not `empty()`. `reduce_argmin_blocks` runs even when the argmin
     // kernel was rejected, so uninitialised partials become plausible looking
     // output and the check below passes a kernel that did nothing.
-    let part_val = GpuTensor::<f32>::from_slice(
-        &vec![0.0f32; blocks * k],
-        vec![blocks * k],
-        &client,
-    )
-    .expect("alloc part_val");
-    let part_idx = GpuTensor::<u32>::from_slice(
-        &vec![0u32; blocks * k],
-        vec![blocks * k],
-        &client,
-    )
-    .expect("alloc part_idx");
-    let gap_partial = GpuTensor::<f32>::empty(vec![n_tiles * blocks], &client)
-        .expect("alloc gap_partial");
+    let part_val =
+        GpuTensor::<f32>::from_slice(&vec![0.0f32; blocks * k], vec![blocks * k], &client)
+            .expect("alloc part_val");
+    let part_idx = GpuTensor::<u32>::from_slice(&vec![0u32; blocks * k], vec![blocks * k], &client)
+        .expect("alloc part_idx");
+    let gap_partial =
+        GpuTensor::<f32>::empty(vec![n_tiles * blocks], &client).expect("alloc gap_partial");
     // Zeroed, not `empty()`: a rejected dispatch leaves uninitialised VRAM,
     // which can pass a "did it write anything" check by accident.
     let out_val =

@@ -256,13 +256,13 @@ fn bench_shape(shape: CorShape) {
     #[cfg(feature = "gpu")]
     {
         use bixverse_rs::gpu::linalg::corr::{GpuCorCov, column_pairwise_cor_gpu};
-        use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+        use cubecl::wgpu::WgpuDevice;
 
         let (best, worst, _) = best_of(&format!("{label} cubecl"), || {
-            column_pairwise_cor_gpu::<f32, WgpuRuntime>(
+            column_pairwise_cor_gpu::<f32>(
                 mat.as_ref(),
                 GpuCorCov::Pearson,
-                WgpuDevice::DefaultDevice,
+                cubecl::Device::from(WgpuDevice::default()),
                 false,
             )
             .expect("column_pairwise_cor_gpu failed")

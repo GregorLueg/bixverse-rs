@@ -1640,8 +1640,7 @@ mod tests {
         let groups = (B_TILED_GROUPS as usize).min(n.max(1));
         let part_val = GpuTensor::<f32>::empty(vec![groups * k], &client).unwrap();
         let part_idx = GpuTensor::<u32>::empty(vec![groups * k], &client).unwrap();
-        let gap_partial =
-            GpuTensor::<f32>::empty(vec![n_tiles * groups], &client).unwrap();
+        let gap_partial = GpuTensor::<f32>::empty(vec![n_tiles * groups], &client).unwrap();
         let out_val = GpuTensor::<f32>::empty(vec![k], &client).unwrap();
         let out_idx = GpuTensor::<u32>::empty(vec![k], &client).unwrap();
 
