@@ -82,6 +82,10 @@ def main() -> None:
     p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     p.add_argument("--max-epochs", type=int, default=None)
     p.add_argument("--likelihood", default="zinb", choices=["nb", "zinb"])
+    # One device for both torch arms. scvi-tools' "auto" quietly picks cpu
+    # over mps, so it has to be named.
+    p.add_argument("--device", default="mps", choices=["cpu", "mps", "cuda"])
+    p.add_argument("--tag", default="", help="suffix for embedding file names")
     p.add_argument(
         "--arms", nargs="+", default=["scvi_torch", "scvi_mlx", "bv_torch", "bv_mlx"]
     )
@@ -121,7 +125,12 @@ def main() -> None:
                     a_train = adata[train_pos].copy()
                     scvi.model.SCVI.setup_anndata(a_train, batch_key="exp_id")
                     m = scvi.model.SCVI(a_train, gene_likelihood=args.likelihood)
-                    m.train(max_epochs=args.max_epochs, train_size=1.0, batch_size=128)
+                    m.train(
+                        max_epochs=args.max_epochs,
+                        train_size=1.0,
+                        batch_size=128,
+                        accelerator="gpu" if args.device == "cuda" else args.device,
+                    )
                     train_s = time.perf_counter() - t0
                     a_full = adata.copy()
                     scvi.model.SCVI.setup_anndata(a_full, batch_key="exp_id")
@@ -150,6 +159,7 @@ def main() -> None:
                         batch[train_pos],
                         params=params,
                         backend="torch" if arm == "bv_torch" else "mlx",
+                        device=args.device,
                         seed=seed,
                     )
                     train_s = time.perf_counter() - t0
@@ -160,11 +170,19 @@ def main() -> None:
                 case _:
                     raise ValueError(f"unknown arm {arm}")
 
-            name = f"{arm}_s{seed}"
+            device = "gpu" if arm.endswith("mlx") else args.device
+            arm_name = f"{arm}{args.tag}"
             pd.DataFrame(
                 latent, columns=[f"z_{i + 1}" for i in range(latent.shape[1])]
-            ).to_csv(out / "embeddings" / f"{name}.tsv", sep="\t", index=False)
-            row = {"arm": arm, "seed": seed, "train_s": round(train_s, 2)}
+            ).to_csv(
+                out / "embeddings" / f"{arm_name}_s{seed}.tsv", sep="\t", index=False
+            )
+            row = {
+                "arm": arm_name,
+                "seed": seed,
+                "device": device,
+                "train_s": round(train_s, 2),
+            }
             if elbo is not None:
                 row |= {f"heldout_{k}": v for k, v in elbo.items()}
             rows.append(row)
