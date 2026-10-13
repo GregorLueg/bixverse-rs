@@ -31,6 +31,7 @@ class CellLoaderIter:
         np.ndarray | None,
         np.ndarray | None,
         tuple[int, int],
+        np.ndarray,
     ]: ...
 
 class CellLoader:
@@ -45,6 +46,7 @@ class CellLoader:
         sparse: bool = ...,
         prefetch: int = ...,
         drop_last: bool = ...,
+        genes: np.ndarray | None = ...,
     ) -> None: ...
     def __len__(self) -> int: ...
     def __iter__(self) -> CellLoaderIter: ...

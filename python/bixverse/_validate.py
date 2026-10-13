@@ -15,7 +15,7 @@ def check_indices(indices: Any, *, n_cells: int, name: str = "indices") -> np.nd
 
     Args:
         indices: Array-like of cell indices.
-        n_cells: Total cells in the store, for the upper bound.
+        n_cells: Exclusive upper bound (cells, or genes for a gene subset).
         name: Argument name, used in error messages.
 
     Returns:
@@ -40,7 +40,7 @@ def check_indices(indices: Any, *, n_cells: int, name: str = "indices") -> np.nd
         raise ValueError(f"{name} must be non-negative, got {lo}")
     if hi >= n_cells:
         raise ValueError(
-            f"{name} holds index {hi}, out of range for a store of {n_cells} cells"
+            f"{name} holds index {hi}, out of range for a store of {n_cells}"
         )
 
     return np.ascontiguousarray(arr, dtype=np.uint32)

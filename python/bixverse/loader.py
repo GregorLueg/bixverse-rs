@@ -21,7 +21,8 @@ class Batch(NamedTuple):
 
     Sparse batches carry `indices` and `indptr` and CSR-ordered `raw`/`norm`.
     Dense batches carry `(n_cells, n_genes)` buffers and leave both `None`.
-    Whichever layer was not requested is `None`.
+    Whichever layer was not requested is `None`. `cell_ids` gives the store
+    index of each row, which is how per-cell covariates are joined back on.
     """
 
     raw: np.ndarray | None
@@ -29,6 +30,7 @@ class Batch(NamedTuple):
     indices: np.ndarray | None
     indptr: np.ndarray | None
     shape: tuple[int, int]
+    cell_ids: np.ndarray
 
     @property
     def is_sparse(self) -> bool:
@@ -105,6 +107,7 @@ class CellLoader:
         sparse: bool = True,
         prefetch: int = 4,
         drop_last: bool = False,
+        genes: Any = None,
     ) -> None:
         """Build a loader.
 
@@ -118,10 +121,12 @@ class CellLoader:
             sparse: CSR components when true, a dense buffer when false.
             prefetch: Batches held in flight by the feeder thread.
             drop_last: Drop a trailing partial batch.
+            genes: Store gene indices to keep, in the column order wanted.
+                `None` keeps every gene.
 
         Raises:
-            ValueError: For a gene-major store, an unusable parameter, or an
-                out-of-range cell index.
+            ValueError: For a gene-major store, an unusable parameter, an
+                out-of-range cell or gene index, or a repeated gene.
         """
         if not reader.is_cell_based:
             raise ValueError(
@@ -136,6 +141,11 @@ class CellLoader:
             resolved = np.arange(reader.total_cells, dtype=np.uint32)
         else:
             resolved = check_indices(indices, n_cells=reader.total_cells)
+        resolved_genes = (
+            None
+            if genes is None
+            else check_indices(genes, n_cells=reader.total_genes, name="genes")
+        )
 
         self._reader = reader
         self._indices = resolved
@@ -149,6 +159,7 @@ class CellLoader:
             sparse,
             prefetch,
             drop_last,
+            resolved_genes,
         )
 
     @property
@@ -172,8 +183,8 @@ class CellLoader:
             One `Batch` per step. Each call reshuffles and spawns its own
             feeder, so two concurrent passes do not share state.
         """
-        for raw, norm, indices, indptr, shape in self._inner:
-            yield Batch(raw, norm, indices, indptr, shape)
+        for raw, norm, indices, indptr, shape, cell_ids in self._inner:
+            yield Batch(raw, norm, indices, indptr, shape, cell_ids)
 
     def __repr__(self) -> str:
         return f"CellLoader(n_cells={len(self._indices)}, n_batches={len(self)})"

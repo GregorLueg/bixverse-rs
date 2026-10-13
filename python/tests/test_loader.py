@@ -132,3 +132,55 @@ def test_dense_batch_refuses_scipy_csr(reader):
     batch = next(iter(bv.CellLoader(reader, batch_size=4, sparse=False)))
     with pytest.raises(ValueError, match="dense"):
         batch.scipy_csr()
+
+
+def test_cell_ids_follow_the_rows(reader, truth):
+    loader = bv.CellLoader(reader, batch_size=33, shuffle=True, seed=3, layer="raw")
+    for batch in loader:
+        assert batch.cell_ids.dtype == np.uint32
+        np.testing.assert_array_equal(
+            batch.scipy_csr().toarray(), truth[batch.cell_ids]
+        )
+
+
+def test_cell_ids_cover_the_subset_once(reader):
+    wanted = np.array([5, 9, 2, 150, 77], dtype=np.uint32)
+    loader = bv.CellLoader(reader, wanted, batch_size=2, seed=1)
+    seen = np.concatenate([b.cell_ids for b in loader])
+    assert sorted(seen) == sorted(wanted)
+
+
+@pytest.mark.parametrize("sparse", [True, False])
+def test_gene_subset_selects_and_reorders_columns(reader, truth, sparse):
+    genes = np.array([40, 3, 17, 0, 49], dtype=np.uint32)
+    loader = bv.CellLoader(
+        reader, batch_size=64, shuffle=False, layer="raw", sparse=sparse, genes=genes
+    )
+    rows = [b.scipy_csr().toarray() if sparse else b.raw for b in loader]
+    assert all(r.shape[1] == len(genes) for r in rows)
+    np.testing.assert_array_equal(np.vstack(rows), truth[:, genes])
+
+
+def test_gene_subset_keeps_both_layers_aligned(reader):
+    genes = np.arange(0, N_GENES, 3, dtype=np.uint32)
+    full = next(iter(bv.CellLoader(reader, batch_size=8, shuffle=False, layer="both")))
+    sub = next(
+        iter(
+            bv.CellLoader(
+                reader, batch_size=8, shuffle=False, layer="both", genes=genes
+            )
+        )
+    )
+    np.testing.assert_array_equal(
+        sub.scipy_csr("norm").toarray(), full.scipy_csr("norm").toarray()[:, genes]
+    )
+
+
+def test_rejects_repeated_genes(reader):
+    with pytest.raises(ValueError, match="repeated"):
+        bv.CellLoader(reader, genes=np.array([1, 1], dtype=np.uint32))
+
+
+def test_rejects_out_of_range_genes(reader):
+    with pytest.raises(ValueError, match="out of range"):
+        bv.CellLoader(reader, genes=np.array([N_GENES], dtype=np.uint32))
