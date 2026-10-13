@@ -59,6 +59,8 @@ module-name = "bixverse._bixverse"
 python-source = "."
 strip = true
 include = ["bixverse/py.typed", "bixverse/*.pyi"]
+# A local build otherwise packs whatever bytecode the dev venv left behind.
+exclude = ["**/__pycache__/**"]
 
 [tool.ruff]
 line-length = 88
