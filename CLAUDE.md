@@ -38,7 +38,7 @@ Feature flags gate large chunks of the crate. Match your `cargo` invocations to 
 
 ```bash
 # Match CI: two independent test passes
-cargo test --no-default-features
+cargo test --no-default-features --features r
 cargo test --features single-cell,multi-modal
 
 # The differential expression surface on its own, without single-cell. Worth

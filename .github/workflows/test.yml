@@ -14,8 +14,10 @@ jobs:
   test:
     uses: GregorLueg/personal-actions/.github/workflows/rust-test.yml@v1
     with:
-      # Two runs: the default-feature-free build and the feature build.
-      cpu-args: '--no-default-features'
+      # Two runs: the minimal build and the feature build. The minimal one keeps
+      # `r` on, so the R wrappers are still compiled and tested; the build
+      # without `r` is covered by the Python workflow.
+      cpu-args: '--no-default-features --features r'
       cpu-args-extra: '--features single-cell,multi-modal,hdf5-static'
       gpu-args: '--features gpu,single-cell,hdf5-static'
       # extendr links against R, so the toolchain needs the gnu ABI on Windows
