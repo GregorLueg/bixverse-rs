@@ -16,6 +16,7 @@ import itertools
 import logging
 import re
 from collections.abc import Iterator
+from functools import partial
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -304,7 +305,7 @@ class Vae(nn.Module):
         self.decoder = _Decoder(n_input, n_batch, params)
 
     def __call__(
-        self, x: mx.array, batch: mx.array, kl_w: float, sample: bool = True
+        self, x: mx.array, batch: mx.array, kl_w: float | mx.array, sample: bool = True
     ) -> dict[str, mx.array]:
         """Loss for one minibatch; see the torch `Vae.forward`.
 
@@ -447,12 +448,29 @@ def train(
     )
     wd = params.weight_decay
 
-    def loss_fn(x: mx.array, b: mx.array, kl_w: float) -> tuple[mx.array, mx.array]:
+    def loss_fn(x: mx.array, b: mx.array, kl_w: mx.array) -> tuple[mx.array, mx.array]:
         """Scalar loss plus the per-cell terms, for `value_and_grad`."""
         out = model(x, b, kl_w)
         return out["loss"], mx.stack([out["reconstruction"].sum(), out["kl"].sum()])
 
     loss_and_grad = nn.value_and_grad(model, loss_fn)
+    optimiser.init(model.trainable_parameters())
+    # Everything the step reads and writes, so `mx.compile` threads it through:
+    # parameters and BatchNorm statistics, Adam moments, and the RNG behind
+    # dropout and the reparameterisation.
+    state = [model.state, optimiser.state, mx.random.state]
+
+    @partial(mx.compile, inputs=state, outputs=state)
+    def step(x: mx.array, b: mx.array, kl_w: mx.array) -> tuple[mx.array, mx.array]:
+        """One compiled Adam step; returns the loss and the summed terms."""
+        (loss, terms), grads = loss_and_grad(x, b, kl_w)
+        if wd > 0:
+            grads = tree_map(
+                lambda g, p: g + wd * p, grads, model.trainable_parameters()
+            )
+        optimiser.update(model, grads)
+        return loss, terms
+
     n_epochs = resolve_max_epochs(params, len(cells))
     history: dict[str, list[float]] = {
         "loss": [],
@@ -464,6 +482,7 @@ def train(
     model.train()
     for epoch in range(n_epochs):
         kl_w = kl_weight(epoch, params.n_epochs_kl_warmup)
+        kl_w_arr = mx.array(kl_w)
         totals = mx.zeros(3)
         n_seen = 0
         for x, b, _ in _batches(
@@ -478,16 +497,9 @@ def train(
             n = x.shape[0]
             if n < MIN_TRAIN_BATCH:
                 continue
-            (loss, terms), grads = loss_and_grad(x, b, kl_w)
-            if wd > 0:
-                grads = tree_map(
-                    lambda g, p: g + wd * p, grads, model.trainable_parameters()
-                )
-            optimiser.update(model, grads)
+            loss, terms = step(x, b, kl_w_arr)
             totals = totals + mx.concatenate([loss[None] * n, terms])
-            # One eval per step materialises the step's whole lazy graph,
-            # including the BatchNorm running statistics.
-            mx.eval(model.parameters(), optimiser.state, totals)
+            mx.eval(state, totals)
             n_seen += n
         loss, recon, kl = (np.array(totals) / max(n_seen, 1)).tolist()
         history["loss"].append(loss)
