@@ -4,6 +4,20 @@
 
 ### Breaking
 
+- Moved to `cubecl = "0.11"` and `cubek = "0.3"`. The GPU surface is no longer
+  generic over `R: Runtime`: functions take a `cubecl::Device` instead of
+  `R::Device`, launchers take `&Client` instead of `&ComputeClient<R>`, and
+  `GpuTensor<T>`, `GpuCompressedSparseData<T>` and `GpuFwArgminB` lose their
+  runtime parameter.
+- Moved to `faer = "0.24"`, `ann-search-rs = "0.11"`,
+  `cubecl-utils-rs = "0.2"`, `edge-rs = "0.3"` and `bonsai-rs = "0.3"`.
+- The R bindings sit behind a new `r` feature, on by default. Builds with
+  `default-features = false` drop `extendr-api`, every `*_r_wrapper` module
+  and `utils::r_rust_interface`, so they also no longer test them.
+- `louvain_sparse_graph()` now lives in `graph::leiden` (still re-exported from
+  `graph::community_detections`) and runs on the Leiden engine with the
+  refinement off. The signature is unchanged; partitions for a given seed may
+  differ from 0.6.x.
 - Removed the register-blocked SEACells B-argmin kernel and its helpers from
   `gpu::sc_gpu::kernels::seacells_kernels`: `fw_argmin_b`,
   `launch_fw_argmin_b`, `b_argmin_workgroup`, `B_ARGMIN_WG_TIERS` and
@@ -11,11 +25,23 @@
 
 ### Feature
 
+- Leiden community detection, `leiden_sparse_graph()` with `LeidenParams`,
+  following igraph's `igraph_community_leiden`. Seeded and independent of the
+  thread count. Also `modularity()` and `edge_pairs_to_sparse_graph()`.
+- Fast clustering can build a cell-mediated centroid graph instead of the
+  kNN/sNN one: `cell_mediated` and `n_anchors` on the fast Louvain params, CPU
+  and GPU.
+- Fused CSR batch reader for cell-based files, `read_cells_csr()` returning a
+  `CsrBatch`, which walks the decompressed chunks without a per-cell
+  allocation.
+- Python bindings for the single cell streaming engine in `python/`, built
+  with maturin and without libR.
 - Experimental `mlx` feature: an MLX backend via `mlx-c` for Apple Silicon,
   f32 only and independent of `gpu`. Covers pairwise correlation, sparse
   randomised SVD, HALS NMF (dense and sparse, single, stabilised and
-  consensus) and, with `single-cell`, Harmony and SEACells. Without
-  `libmlxc` the build warns and the module is absent.
+  consensus) and, with `single-cell`, Harmony and SEACells. It turns on
+  `ann-search-rs/mlx`, which finds and links `libmlxc`; without the library
+  the build warns and the module is absent.
 
 ### Performance
 
