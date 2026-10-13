@@ -12,10 +12,11 @@ import sys
 from pathlib import Path
 
 import anndata as ad
-import bixverse as bv
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
+
+import bixverse as bv
 
 N_SAMPLE = 20
 SEED = 1
