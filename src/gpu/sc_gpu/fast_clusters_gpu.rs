@@ -50,6 +50,14 @@ pub struct FastLouvainParamsGpu {
     /// `"rank"`.
     pub snn_similarity: String,
 
+    // -- cell-mediated graph --
+    /// Build the cell-mediated centroid graph instead of the kNN/sNN one. If
+    /// `true`, `run_snn` and the sNN settings are ignored.
+    pub cell_mediated: bool,
+    /// Number of nearest centroids each cell links to in the cell-mediated
+    /// graph.
+    pub n_anchors: usize,
+
     // -- louvain --
     /// Number of Louvain iterations.
     pub louvain_iters: usize,
@@ -73,6 +81,8 @@ impl FastLouvainParamsGpu {
             full_snn: false,
             pruning: None,
             snn_similarity: "jaccard".to_string(),
+            cell_mediated: false,
+            n_anchors: 5,
             louvain_iters: 10,
             multi_level_louvain: true,
         }
@@ -90,6 +100,8 @@ impl FastLouvainParamsGpu {
             full_snn: self.full_snn,
             pruning: self.pruning,
             snn_similarity: self.snn_similarity.clone(),
+            cell_mediated: self.cell_mediated,
+            n_anchors: self.n_anchors,
         }
     }
 }
@@ -195,6 +207,7 @@ pub fn fast_louvain_clusters_gpu(
     let (centroids, assignments) = fast_cluster_kmeans_gpu(data, params, seed, device, verbose)?;
 
     let graph = build_centroid_graph(
+        data,
         centroids.as_ref(),
         &params.graph_params(),
         run_snn,
@@ -221,7 +234,7 @@ pub fn fast_louvain_clusters_gpu(
 
 /// Grid-search version of [`fast_louvain_clusters_gpu`] with stability metrics.
 ///
-/// Builds the k-means -> kNN/sNN graph once, then runs Louvain across
+/// Builds the k-means -> centroid graph once, then runs Louvain across
 /// `n_louvain_seeds` seeds for each resolution.
 ///
 /// ### Params
@@ -264,6 +277,7 @@ pub fn fast_louvain_clusters_grid_gpu(
     let (centroids, assignments) = fast_cluster_kmeans_gpu(data, params, seed, device, verbose)?;
 
     let graph = build_centroid_graph(
+        data,
         centroids.as_ref(),
         &params.graph_params(),
         run_snn,

@@ -1,7 +1,11 @@
 //! A fast approach to generate clustering based on k-means clustering first on
-//! the data, followed by kNN search on the centroids, (for now only) Louvain
-//! clustering on the resulting kNN graph with subsequent propagation of the
-//! module membership based on the original nearest centroid.
+//! the data, followed by a graph over the centroids, (for now only) Louvain
+//! clustering on that graph with subsequent propagation of the module
+//! membership based on the original nearest centroid.
+//!
+//! The centroid graph is either a kNN/sNN graph on the centroid coordinates or
+//! the cell-mediated graph from Secuer, where centroids are linked by the cells
+//! that sit near both.
 //!
 //! The pipeline is split into three stages ([`fast_cluster_kmeans`],
 //! [`build_centroid_graph`] and [`louvain_over_resolutions`] /
@@ -9,10 +13,15 @@
 //! `crate::gpu::sc_gpu::fast_clusters_gpu` can swap out stage one and reuse the
 //! rest untouched.
 
+use ann_search_rs::utils::dist::{Dist, SimdDistance, parse_ann_dist};
+use ann_search_rs::utils::k_means_utils::assign_all_parallel_top_m;
+use ann_search_rs::utils::matrix_to_flat;
 use either::Either;
 use faer::{Mat, MatRef};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use rayon::prelude::*;
+use rustc_hash::FxHashMap;
 use std::time::Instant;
 
 use crate::core::math::vector_helpers::{mean_nan, median};
@@ -187,6 +196,12 @@ pub struct CentroidGraphParams {
     /// String for the type of sNN similarity to use. One of `"jaccard"` or
     /// `"rank"`.
     pub snn_similarity: String,
+    /// Build the cell-mediated centroid graph instead of the kNN/sNN one. If
+    /// `true`, `run_snn` and the sNN settings are ignored.
+    pub cell_mediated: bool,
+    /// Number of nearest centroids each cell links to in the cell-mediated
+    /// graph.
+    pub n_anchors: usize,
 }
 
 /// Parameters for fast Louvain clustering via k-means + kNN.
@@ -225,6 +240,14 @@ pub struct FastLouvainParams<T> {
     /// `"rank"`.
     pub snn_similarity: String,
 
+    // -- cell-mediated graph --
+    /// Build the cell-mediated centroid graph instead of the kNN/sNN one. If
+    /// `true`, `run_snn` and the sNN settings are ignored.
+    pub cell_mediated: bool,
+    /// Number of nearest centroids each cell links to in the cell-mediated
+    /// graph.
+    pub n_anchors: usize,
+
     // -- louvain --
     /// Number of Louvain iterations.
     pub louvain_iters: usize,
@@ -256,6 +279,9 @@ where
             // knn - louvain
             knn_params: KnnParams::default(),
             same_weight: false,
+            // cell-mediated graph
+            cell_mediated: false,
+            n_anchors: 5,
             // louvain
             louvain_iters: 10,
             multi_level_louvain: true,
@@ -287,6 +313,8 @@ impl FastLouvainParams<f32> {
             full_snn: self.full_snn,
             pruning: self.pruning,
             snn_similarity: self.snn_similarity.clone(),
+            cell_mediated: self.cell_mediated,
+            n_anchors: self.n_anchors,
         }
     }
 }
@@ -355,6 +383,132 @@ fn flatten_knn_column_major<T: Copy>(knn: &[Vec<T>], k: usize) -> Vec<T> {
     out
 }
 
+/// Cells per accumulation block in [`cell_mediated_graph`]. Blocks are summed
+/// in a fixed order so the edge weights do not depend on the thread count;
+/// 16k cells keeps the per-block maps small while giving rayon enough blocks
+/// at atlas scale.
+const CELL_MEDIATED_BLOCK: usize = 16_384;
+
+/// Build the centroid graph through the cells.
+///
+/// Every cell links to its `n_anchors` nearest centroids with a locally scaled
+/// Gaussian weight `w_ij = exp(-d_ij^2 / (2 sigma_i^2))`, `sigma_i` being the
+/// mean distance to those centroids. Centroids are then joined by
+/// `W = B^T D_x^-1 B`, i.e. by the cells that sit near both, so two centroids
+/// that are close in space but have no cells between them stay apart. The
+/// diagonal of `W` is dropped, so no self-loops reach the community detection.
+///
+/// ### Params
+///
+/// * `data` - n_samples x n_features matrix the centroids were fitted on.
+/// * `centroids` - n_centroids x n_features matrix.
+/// * `n_anchors` - Centroids per cell; clamped to `1..=n_centroids`.
+/// * `ann_dist` - Distance metric, `"euclidean"` or `"cosine"`.
+///
+/// ### Returns
+///
+/// The undirected centroid graph.
+///
+/// ### References
+///
+/// Wei et al., PLoS Comput Biol, 2022
+fn cell_mediated_graph(
+    data: MatRef<f32>,
+    centroids: MatRef<f32>,
+    n_anchors: usize,
+    ann_dist: &str,
+) -> SparseGraph<f32> {
+    let (data_flat, n, dim) = matrix_to_flat(data);
+    let (cent_flat, k, _) = matrix_to_flat(centroids);
+    let dist = parse_ann_dist(ann_dist).unwrap_or_default();
+    let (data_norms, cent_norms) = if dist == Dist::Cosine {
+        (
+            compute_data_norms(&data_flat, dim, n, &dist),
+            recompute_centroid_norms(&cent_flat, dim, k, &dist),
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
+    // same clamp as assign_all_parallel_top_m, which sets the row stride
+    let m = n_anchors.min(k).max(1);
+    let anchors = assign_all_parallel_top_m(
+        &data_flat,
+        &data_norms,
+        dim,
+        n,
+        &cent_flat,
+        &cent_norms,
+        k,
+        m,
+        &dist,
+    );
+
+    let blocks: Vec<FxHashMap<(u32, u32), f32>> = anchors
+        .par_chunks(m * CELL_MEDIATED_BLOCK)
+        .enumerate()
+        .map(|(b, block)| {
+            let mut acc: FxHashMap<(u32, u32), f32> = FxHashMap::default();
+            let mut w = vec![0.0f32; m];
+            for (r, row) in block.chunks_exact(m).enumerate() {
+                let i = b * CELL_MEDIATED_BLOCK + r;
+                let x = &data_flat[i * dim..(i + 1) * dim];
+                for (wj, &c) in w.iter_mut().zip(row) {
+                    let c = c as usize;
+                    let cent = &cent_flat[c * dim..(c + 1) * dim];
+                    *wj = match dist {
+                        Dist::Cosine => {
+                            let denom = data_norms[i] * cent_norms[c];
+                            if denom > 0.0 {
+                                (1.0 - f32::dot_simd(x, cent) / denom).max(0.0)
+                            } else {
+                                1.0
+                            }
+                        }
+                        _ => f32::euclidean_simd(x, cent).sqrt(),
+                    };
+                }
+                let sigma = w.iter().sum::<f32>() / m as f32;
+                for wj in w.iter_mut() {
+                    // a cell on top of all its anchors gets equal weights
+                    *wj = if sigma > 0.0 {
+                        (-(*wj * *wj) / (2.0 * sigma * sigma)).exp()
+                    } else {
+                        1.0
+                    };
+                }
+                let dx: f32 = w.iter().sum();
+                for a in 0..m {
+                    for c in (a + 1)..m {
+                        let key = (row[a].min(row[c]), row[a].max(row[c]));
+                        *acc.entry(key).or_insert(0.0) += w[a] * w[c] / dx;
+                    }
+                }
+            }
+            acc
+        })
+        .collect();
+
+    let mut total: FxHashMap<(u32, u32), f32> = FxHashMap::default();
+    for block in blocks {
+        for (key, v) in block {
+            *total.entry(key).or_insert(0.0) += v;
+        }
+    }
+    let mut pairs: Vec<((u32, u32), f32)> = total.into_iter().collect();
+    pairs.sort_unstable_by_key(|p| p.0);
+
+    let mut edges = Vec::with_capacity(2 * pairs.len());
+    let mut weights = Vec::with_capacity(pairs.len());
+    for ((u, v), wt) in pairs {
+        edges.push(u as usize);
+        edges.push(v as usize);
+        weights.push(wt);
+    }
+
+    edge_pairs_to_sparse_graph(&edges, &weights, k)
+}
+
 ////////////
 // Stages //
 ////////////
@@ -413,17 +567,22 @@ pub fn fast_cluster_kmeans(
     Ok(res)
 }
 
-/// Stage two: build the neighbour graph over the k-means centroids.
+/// Stage two: build the graph over the k-means centroids.
 ///
-/// Runs a kNN search on the centroids and turns it into a [SparseGraph], either
-/// directly or via a shared-nearest-neighbour pass. The sNN pruning threshold
-/// defaults to `1 / ceil(0.8 * k)` when `params.pruning` is `None`.
+/// With `params.cell_mediated`, centroids are linked by the cells that sit near
+/// both (see [`cell_mediated_graph`]). Otherwise runs a kNN search on the
+/// centroids and turns it into a [SparseGraph], either directly or via a
+/// shared-nearest-neighbour pass. The sNN pruning threshold defaults to
+/// `1 / ceil(0.8 * k)` when `params.pruning` is `None`.
 ///
 /// ### Params
 ///
+/// * `data` - n_samples x n_features matrix the centroids were fitted on. Only
+///   read for the cell-mediated graph.
 /// * `centroids` - n_centroids x n_features matrix from stage one.
 /// * `params` - Graph-construction settings.
-/// * `run_snn` - Shall a shared nearest neighbour graph be generated.
+/// * `run_snn` - Shall a shared nearest neighbour graph be generated. Ignored
+///   for the cell-mediated graph.
 /// * `seed` - Seed for reproducibility of the kNN search.
 /// * `verbose` - `0` silent, `1` normal, `2` detailed.
 ///
@@ -431,6 +590,7 @@ pub fn fast_cluster_kmeans(
 ///
 /// The undirected centroid graph.
 pub fn build_centroid_graph(
+    data: MatRef<f32>,
     centroids: MatRef<f32>,
     params: &CentroidGraphParams,
     run_snn: bool,
@@ -438,6 +598,23 @@ pub fn build_centroid_graph(
     verbose: usize,
 ) -> Result<SparseGraph<f32>, BixverseErrors> {
     let verbosity = parse_verbosity_level(verbose);
+
+    if params.cell_mediated {
+        let start = Instant::now();
+        let graph = cell_mediated_graph(
+            data,
+            centroids,
+            params.n_anchors,
+            &params.knn_params.ann_dist,
+        );
+        if verbosity.normal_verbosity() {
+            println!(
+                " Built the cell-mediated centroid graph in {:.2?}...",
+                start.elapsed()
+            );
+        }
+        return Ok(graph);
+    }
 
     let knn = dispatch_knn(
         centroids,
@@ -654,7 +831,7 @@ pub fn louvain_grid_over_resolutions(
 
 /// Fast Louvain clustering on large data via k-means coarsening.
 ///
-/// Runs k-means to obtain centroids, builds a kNN graph on the centroids,
+/// Runs k-means to obtain centroids, builds a graph on the centroids,
 /// applies Louvain to that graph, then propagates each centroid's community
 /// label back to the points assigned to it.
 ///
@@ -689,6 +866,7 @@ pub fn fast_louvain_clusters(
     let (centroids, assignments) = fast_cluster_kmeans(data, km_type, params, seed, verbose)?;
 
     let graph = build_centroid_graph(
+        data,
         centroids.as_ref(),
         &params.graph_params(),
         run_snn,
@@ -715,7 +893,7 @@ pub fn fast_louvain_clusters(
 
 /// Grid-search version of [`fast_louvain_clusters`] with stability metrics.
 ///
-/// Builds the k-means -> kNN/sNN graph once, then runs Louvain across
+/// Builds the k-means -> centroid graph once, then runs Louvain across
 /// `n_louvain_seeds` seeds for each resolution. Reports mean/median pairwise
 /// ARI (Louvain stability), mean/median conductance (community quality), and
 /// the labels from the seed achieving the best (lowest) mean conductance.
@@ -755,6 +933,7 @@ pub fn fast_louvain_clusters_grid(
     let (centroids, assignments) = fast_cluster_kmeans(data, km_type, params, seed, verbose)?;
 
     let graph = build_centroid_graph(
+        data,
         centroids.as_ref(),
         &params.graph_params(),
         run_snn,
@@ -821,6 +1000,8 @@ mod tests {
             same_weight: false,
             multi_level_louvain: true,
             snn_similarity: "jaccard".to_string(),
+            cell_mediated: false,
+            n_anchors: 5,
         }
     }
 
@@ -883,17 +1064,19 @@ mod tests {
         assert_eq!(a, b);
     }
 
-    /// Two well-separated blobs never share a community, SNN on and off. A blob
-    /// may split into several communities: on the SNN centroid graph that is the
-    /// higher-modularity answer (igraph splits it too).
+    /// Two well-separated blobs never share a community, on the kNN, sNN and
+    /// cell-mediated centroid graphs. A blob may split into several
+    /// communities: on the SNN centroid graph that is the higher-modularity
+    /// answer (igraph splits it too).
     #[test]
     fn produces_multiple_communities_on_separated_blobs() {
         let n_per = 200;
         let data = make_two_blobs(n_per, 8, 15.0, 42);
-        let params = default_params();
         let resolutions: Vec<f32> = vec![1.0];
 
-        for run_snn in [false, true] {
+        for (run_snn, cell_mediated) in [(false, false), (true, false), (false, true)] {
+            let mut params = default_params();
+            params.cell_mediated = cell_mediated;
             let labels = unwrap_single(
                 fast_louvain_clusters(
                     data.as_ref(),
@@ -912,7 +1095,13 @@ mod tests {
             assert_eq!(labels[0].len(), 2 * n_per);
 
             let (blob_a, blob_b) = labels[0].split_at(n_per);
-            assert_ne!(majority(blob_a), majority(blob_b), "run_snn {}", run_snn);
+            assert_ne!(
+                majority(blob_a),
+                majority(blob_b),
+                "run_snn {} cell_mediated {}",
+                run_snn,
+                cell_mediated
+            );
 
             // every community is at least 90% one blob
             let n_labels = labels[0].iter().max().unwrap() + 1;
@@ -922,10 +1111,11 @@ mod tests {
                 let purity = in_a.max(in_b) as f32 / (in_a + in_b).max(1) as f32;
                 assert!(
                     purity > 0.9,
-                    "community {} purity {} (snn {})",
+                    "community {} purity {} (snn {}, cell_mediated {})",
                     l,
                     purity,
-                    run_snn
+                    run_snn,
+                    cell_mediated
                 );
             }
         }
@@ -1032,5 +1222,91 @@ mod tests {
             let maj_b = majority(blob_b);
             assert_ne!(maj_a, maj_b, "not the same majority for seed no {}", i);
         }
+    }
+
+    /// Adjacency of a graph as sorted `(u, v, w)` triplets, for exact comparison.
+    fn edge_list(g: &SparseGraph<f32>) -> Vec<(usize, usize, f32)> {
+        let mut out = Vec::new();
+        for u in 0..g.get_node_number() {
+            let (nbrs, w) = g.get_neighbours(u);
+            out.extend(nbrs.into_iter().zip(w).map(|(v, &x)| (u, v, x)));
+        }
+        out.sort_by_key(|e| (e.0, e.1));
+        out
+    }
+
+    /// One cell between two anchors gives a single edge of weight
+    /// `w1 w2 / (w1 + w2)`; the far third centroid stays isolated.
+    #[test]
+    fn cell_mediated_edge_weight_matches_hand_computation() {
+        let data = Mat::from_fn(1, 1, |_, _| 0.0f32);
+        let centroids = Mat::from_fn(3, 1, |i, _| [1.0f32, 3.0, 10.0][i]);
+
+        let g = cell_mediated_graph(data.as_ref(), centroids.as_ref(), 2, "euclidean");
+
+        // sigma = (1 + 3) / 2 = 2
+        let w1 = (-1.0f32 / 8.0).exp();
+        let w2 = (-9.0f32 / 8.0).exp();
+        let expected = w1 * w2 / (w1 + w2);
+
+        let edges = edge_list(&g);
+        assert_eq!(edges.len(), 2, "one undirected edge, stored both ways");
+        assert_eq!((edges[0].0, edges[0].1), (0, 1));
+        assert_eq!((edges[1].0, edges[1].1), (1, 0));
+        approx::assert_relative_eq!(edges[0].2, expected, max_relative = 1e-6);
+        assert_eq!(g.get_node_degree(2), 0);
+    }
+
+    /// Centroids are only linked through cells that sit near both, so two
+    /// blobs with no cells in between give no edge across the gap.
+    #[test]
+    fn cell_mediated_graph_has_no_edges_across_an_empty_gap() {
+        let n_per = 200;
+        let dim = 4;
+        let data = make_two_blobs(n_per, dim, 15.0, 42);
+        // two centroids per blob, nudged apart along the first axis
+        let centroids = Mat::from_fn(4, dim, |i, j| {
+            let centre = if i < 2 { 0.0 } else { 15.0 };
+            let nudge = if j == 0 {
+                [-0.1, 0.1, -0.1, 0.1][i]
+            } else {
+                0.0
+            };
+            centre + nudge
+        });
+
+        let g = cell_mediated_graph(data.as_ref(), centroids.as_ref(), 2, "euclidean");
+
+        for (u, v, w) in edge_list(&g) {
+            assert_eq!(u < 2, v < 2, "edge {u}-{v} crosses the gap");
+            assert!(w > 0.0);
+        }
+        // and within each blob the two centroids are linked
+        assert_eq!(g.get_neighbours(0).0, vec![1]);
+        assert_eq!(g.get_neighbours(2).0, vec![3]);
+    }
+
+    /// Several accumulation blocks summed on 1 and on 4 threads give the
+    /// bit-identical graph, so results do not depend on the thread count.
+    #[test]
+    fn cell_mediated_graph_independent_of_thread_count() {
+        let n = 2 * CELL_MEDIATED_BLOCK + 1000;
+        let dim = 4;
+        let mut rng = StdRng::seed_from_u64(7);
+        let data = Mat::from_fn(n, dim, |_, _| rng.random_range(-1.0f32..1.0));
+        let centroids = Mat::from_fn(20, dim, |i, j| data[(i * 997, j)]);
+
+        let build = |threads: usize| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+                .install(|| cell_mediated_graph(data.as_ref(), centroids.as_ref(), 5, "euclidean"))
+        };
+
+        let one = edge_list(&build(1));
+        let four = edge_list(&build(4));
+        assert!(!one.is_empty());
+        assert_eq!(one, four);
     }
 }
