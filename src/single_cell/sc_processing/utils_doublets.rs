@@ -229,6 +229,53 @@ pub fn resolve_target_size(explicit: Option<f32>, hvg_library_sizes: &[usize]) -
 // PCA //
 /////////
 
+/// Read raw HVG counts and normalise them against the HVG library sizes.
+///
+/// The normalised layer on disk was scaled against the full library, so the
+/// doublet PCA rebuilds it from raw counts. Done in `f32` on the fused batch,
+/// so no F16 rounding is involved.
+///
+/// ### Params
+///
+/// * `reader` - Reader over the gene-based store
+/// * `cell_set` - Cells to keep, in output row order
+/// * `gene_indices` - HVGs to read
+/// * `hvg_library_sizes` - Library size per output row, over the HVGs
+/// * `target_size` - Target library size
+/// * `log_transform` - Apply `ln_1p` after scaling
+///
+/// ### Returns
+///
+/// CSC of shape `(cells, genes)` with the normalised values in `data_2` and
+/// `data` empty, as [`DataLayerReturn::Norm`] lays it out.
+pub(crate) fn read_hvg_normalised<S: SingleCellReading>(
+    reader: &S,
+    cell_set: &IndexSet<u32>,
+    gene_indices: &[usize],
+    hvg_library_sizes: &[usize],
+    target_size: f32,
+    log_transform: bool,
+) -> Result<CompressedSparseData2<f32>, BixverseErrors> {
+    let mut csc: CompressedSparseData2<f32> =
+        reader.read_genes_sparse(gene_indices, Some(cell_set), &DataLayerReturn::Raw)?;
+
+    let mut values = std::mem::take(&mut csc.data);
+    values
+        .par_iter_mut()
+        .zip(csc.indices.par_iter())
+        .for_each(|(v, &row)| {
+            let scaled = *v / hvg_library_sizes[row as usize] as f32 * target_size;
+            *v = if log_transform {
+                scaled.ln_1p()
+            } else {
+                scaled
+            };
+        });
+    csc.data_2 = Some(values);
+
+    Ok(csc)
+}
+
 /// Type alias for Scrublet PCA results
 ///
 /// ### Fields
@@ -491,28 +538,19 @@ pub fn pca_observed<S: SingleCellReading>(
     let n_cells = cell_indices.len();
 
     let start_reading = Instant::now();
-    let mut gene_chunks: Vec<CscGeneChunk> =
-        reader.read_gene_parallel_filtered(gene_indices, &cell_set)?;
+    let csc = read_hvg_normalised(
+        reader,
+        &cell_set,
+        gene_indices,
+        hvg_library_sizes,
+        target_size,
+        log_transform,
+    )?;
     if verbosity.normal_verbosity() {
         println!("Loaded in data: {:.2?}", start_reading.elapsed());
     }
 
     let start_prep = Instant::now();
-
-    gene_chunks.par_iter_mut().for_each(|chunk| {
-        for (i, &pos) in chunk.indices.iter().enumerate() {
-            let raw_count = chunk.data_raw.get(i) as f32;
-            let lib_size = hvg_library_sizes[pos as usize] as f32;
-            let val = if log_transform {
-                ((raw_count / lib_size) * target_size).ln_1p()
-            } else {
-                (raw_count / lib_size) * target_size
-            };
-            chunk.data_norm[i] = F16::from(half::f16::from_f32(val.clamp(-65504.0, 65504.0)));
-        }
-    });
-
-    let csc = from_gene_chunks::<f32>(gene_chunks, &DataLayerReturn::Norm, n_cells)?;
 
     let col_means: Vec<f64> = sparse_csc_column_means(&csc, true, None)?;
     let col_stds: Vec<f64> = sparse_csc_column_stds(&csc, &col_means, true, None)?;

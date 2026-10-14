@@ -20,6 +20,8 @@
 //! default avoids. Worth it for metacells, which is what asks for it; do not
 //! reach for it on a raw-cell matrix.
 
+use indexmap::IndexSet;
+use num_traits::FromPrimitive;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
@@ -27,7 +29,7 @@ use crate::core::math::sparse::transpose_sparse;
 use crate::prelude::*;
 use crate::single_cell::sc_data::data_io::{
     CscGeneChunk, CsrCellChunk, DataLayerReturn, ParallelSparseReader, RawCounts,
-    SingleCellReading, SparseDataHeader,
+    SingleCellReading, SparseDataHeader, cell_row_map, read_fused,
 };
 use crate::single_cell::sc_traits::F16;
 
@@ -234,6 +236,50 @@ impl<'a> InMemorySparseReader<'a> {
     }
 }
 
+/// Copy a batch of runs out of an in-memory store into one sparse matrix.
+///
+/// The in-memory counterpart of the decompress-and-append fill in
+/// [`ParallelSparseReader`]: each run is a slice of `store`, appended through
+/// the same [`read_fused`] engine and filter.
+///
+/// ### Params
+///
+/// * `store` - The matrix whose major axis the runs index
+/// * `indices` - Runs to read, in output order
+/// * `row_map` - Optional dense `index -> output row` map
+/// * `data_layer` - Which layer(s) to materialise
+/// * `cs_type` - Layout of the output
+/// * `shape` - `(cells, genes)` of the output
+///
+/// ### Returns
+///
+/// The batch, or [`BixverseErrors::ChunkIndexNotFound`] for a run past the
+/// major axis.
+fn read_runs<T>(
+    store: &CompressedSparseData2<u32, f32>,
+    indices: &[usize],
+    row_map: Option<&[u32]>,
+    data_layer: &DataLayerReturn,
+    cs_type: CompressedSparseFormat,
+    shape: (usize, usize),
+) -> Result<CompressedSparseData2<T, f32>, BixverseErrors>
+where
+    T: BixverseNumeric + FromPrimitive,
+{
+    let norm = store.data_2.as_ref().expect("checked in `new`");
+    let n_runs = store.indptr.len() - 1;
+
+    read_fused(indices, data_layer, cs_type, shape, |run, _, fragment| {
+        if run >= n_runs {
+            return Err(BixverseErrors::ChunkIndexNotFound(run));
+        }
+        let lo = store.indptr[run] as usize;
+        let hi = store.indptr[run + 1] as usize;
+        let (idx, raw, nrm) = (&store.indices[lo..hi], &store.data[lo..hi], &norm[lo..hi]);
+        fragment.push_run(hi - lo, |i| idx[i], |i| raw[i], |i| nrm[i], row_map)
+    })
+}
+
 /// Total raw counts per cell of a gene-major matrix.
 ///
 /// A CSC matrix has no per-cell run to sum, so this is a scatter-add over every
@@ -385,6 +431,89 @@ impl SingleCellReading for InMemorySparseReader<'_> {
             .par_iter()
             .map(|&cell| self.cell_chunk(cell))
             .collect()
+    }
+
+    /// Read a batch of cells straight into CSR
+    ///
+    /// Slices the CSR twin directly, so no chunk is built and the normalised
+    /// layer stays `f32` rather than passing through the chunks' F16.
+    ///
+    /// ### Params
+    ///
+    /// * `indices` - Cell indices, in output row order
+    /// * `data_layer` - Which layer(s) to materialise
+    ///
+    /// ### Returns
+    ///
+    /// The batch as CSR, or [`BixverseErrors::ReaderModeMismatch`] in
+    /// gene-major mode.
+    fn read_cells_sparse<T>(
+        &self,
+        indices: &[usize],
+        data_layer: &DataLayerReturn,
+    ) -> Result<CompressedSparseData2<T, f32>, BixverseErrors>
+    where
+        T: BixverseNumeric + FromPrimitive,
+    {
+        let transposed = self
+            .transposed
+            .as_ref()
+            .ok_or(BixverseErrors::ReaderModeMismatch {
+                actual: "gene-based",
+                requested: "cell-based",
+            })?;
+
+        read_runs(
+            transposed,
+            indices,
+            None,
+            data_layer,
+            CompressedSparseFormat::Csr,
+            (indices.len(), self.matrix.shape.1),
+        )
+    }
+
+    /// Read a batch of genes straight into CSC, optionally filtering cells
+    ///
+    /// Slices the matrix directly, so no chunk is built and the normalised
+    /// layer stays `f32` rather than passing through the chunks' F16.
+    ///
+    /// ### Params
+    ///
+    /// * `indices` - Gene indices, in output column order
+    /// * `cells_to_keep` - Cells to keep, in output row order, or `None`
+    /// * `data_layer` - Which layer(s) to materialise
+    ///
+    /// ### Returns
+    ///
+    /// The batch as CSC, or [`BixverseErrors::ReaderModeMismatch`] in
+    /// cell-major mode.
+    fn read_genes_sparse<T>(
+        &self,
+        indices: &[usize],
+        cells_to_keep: Option<&IndexSet<u32>>,
+        data_layer: &DataLayerReturn,
+    ) -> Result<CompressedSparseData2<T, f32>, BixverseErrors>
+    where
+        T: BixverseNumeric + FromPrimitive,
+    {
+        if self.transposed.is_some() {
+            return Err(BixverseErrors::ReaderModeMismatch {
+                actual: "cell-based",
+                requested: "gene-based",
+            });
+        }
+
+        let (row_map, n_rows) = cell_row_map(cells_to_keep, self.matrix.shape.0);
+
+        read_runs(
+            self.matrix,
+            indices,
+            row_map.as_deref(),
+            data_layer,
+            CompressedSparseFormat::Csc,
+            (n_rows, indices.len()),
+        )
     }
 
     /// Read genes by index in a multi-threaded manner
@@ -618,6 +747,89 @@ mod tests {
         let reader = InMemorySparseReader::new_cell_major(&matrix, None).unwrap();
 
         assert!(reader.read_cells_parallel(&[4]).is_err());
+    }
+
+    /// Reading every gene in order hands back the matrix itself, norm layer
+    /// still `f32`.
+    #[test]
+    fn test_read_genes_sparse_is_the_matrix() {
+        let matrix = toy_csc();
+        let reader = InMemorySparseReader::new(&matrix, None).unwrap();
+
+        let csc = reader
+            .read_genes_sparse::<u32>(&[0, 1, 2], None, &DataLayerReturn::BothLayers)
+            .unwrap();
+
+        assert_eq!(csc.shape, matrix.shape);
+        assert_eq!(csc.indptr, matrix.indptr);
+        assert_eq!(csc.indices, matrix.indices);
+        assert_eq!(csc.data, matrix.data);
+        assert_eq!(csc.data_2, matrix.data_2);
+    }
+
+    /// A filtered read agrees with the chunk path: raw and pattern exactly,
+    /// norm once narrowed to the chunks' F16.
+    #[test]
+    fn test_read_genes_sparse_filtered_matches_chunk_path() {
+        let matrix = toy_csc();
+        let reader = InMemorySparseReader::new(&matrix, None).unwrap();
+        let genes = [2usize, 1, 0];
+        let keep: IndexSet<u32> = [3_u32, 0, 2].into_iter().collect();
+
+        let want = from_gene_chunks::<u32>(
+            reader.read_gene_parallel_filtered(&genes, &keep).unwrap(),
+            &DataLayerReturn::BothLayers,
+            keep.len(),
+        )
+        .unwrap();
+        let got = reader
+            .read_genes_sparse::<u32>(&genes, Some(&keep), &DataLayerReturn::BothLayers)
+            .unwrap();
+
+        assert_eq!(got.shape, want.shape);
+        assert_eq!(got.indptr, want.indptr);
+        assert_eq!(got.indices, want.indices);
+        assert_eq!(got.data, want.data);
+        let narrowed: Vec<f32> = got
+            .data_2
+            .unwrap()
+            .iter()
+            .map(|&v| F16::from_f32(v).to_f32())
+            .collect();
+        assert_eq!(narrowed, want.data_2.unwrap());
+    }
+
+    /// Reading every cell from the CSR twin is the twin itself; each mode
+    /// refuses the other axis and out-of-range runs error.
+    #[test]
+    fn test_read_sparse_modes_and_bounds() {
+        let matrix = toy_csc();
+        let gene_major = InMemorySparseReader::new(&matrix, None).unwrap();
+        let cell_major = InMemorySparseReader::new_cell_major(&matrix, None).unwrap();
+
+        let csr = cell_major
+            .read_cells_sparse::<u32>(&[0, 1, 2, 3], &DataLayerReturn::BothLayers)
+            .unwrap();
+        let twin = transpose_sparse(&matrix);
+        assert_eq!(csr.shape, twin.shape);
+        assert_eq!(csr.indptr, twin.indptr);
+        assert_eq!(csr.indices, twin.indices);
+        assert_eq!(csr.data, twin.data);
+        assert_eq!(csr.data_2, twin.data_2);
+
+        let layer = DataLayerReturn::Raw;
+        assert!(gene_major.read_cells_sparse::<u32>(&[0], &layer).is_err());
+        assert!(
+            cell_major
+                .read_genes_sparse::<u32>(&[0], None, &layer)
+                .is_err()
+        );
+        assert!(
+            gene_major
+                .read_genes_sparse::<u32>(&[3], None, &layer)
+                .is_err()
+        );
+        assert!(cell_major.read_cells_sparse::<u32>(&[4], &layer).is_err());
     }
 
     /////////////////

@@ -11,7 +11,6 @@ use crate::methods::nmf_hals::nmf_preprocessing::*;
 use crate::methods::nmf_hals::sparse::*;
 use crate::methods::nmf_hals::*;
 use crate::prelude::*;
-use crate::single_cell::sc_data::data_io::from_gene_chunks;
 
 /////////////
 // Workers //
@@ -303,7 +302,6 @@ pub fn nmf_single_run_sc<S: SingleCellReading>(
     verbose: usize,
 ) -> Result<NmfResult<f32>, BixverseErrors> {
     let verbosity = parse_verbosity_level(verbose);
-    let n_cells = cell_indices.len();
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
 
     let start_total = Instant::now();
@@ -317,9 +315,8 @@ pub fn nmf_single_run_sc<S: SingleCellReading>(
         DataLayerReturn::Raw
     };
 
-    let gene_chunks: Vec<CscGeneChunk> =
-        reader.read_gene_parallel_filtered(gene_indices, &cell_set)?;
-    let csc: CompressedSparseData2<f32> = from_gene_chunks::<f32>(gene_chunks, &layer, n_cells)?;
+    let csc: CompressedSparseData2<f32> =
+        reader.read_genes_sparse(gene_indices, Some(&cell_set), &layer)?;
 
     if verbosity.normal_verbosity() {
         println!(" ... done in {:.2?}", start_total.elapsed())
@@ -383,7 +380,6 @@ pub fn nmf_multiple_run_sc<S: SingleCellReading>(
     verbose: usize,
 ) -> Result<StabilisedNmfResult<f32>, BixverseErrors> {
     let verbosity = parse_verbosity_level(verbose);
-    let n_cells = cell_indices.len();
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
 
     let start_total = Instant::now();
@@ -397,9 +393,8 @@ pub fn nmf_multiple_run_sc<S: SingleCellReading>(
         DataLayerReturn::Raw
     };
 
-    let gene_chunks: Vec<CscGeneChunk> =
-        reader.read_gene_parallel_filtered(gene_indices, &cell_set)?;
-    let csc: CompressedSparseData2<f32> = from_gene_chunks::<f32>(gene_chunks, &layer, n_cells)?;
+    let csc: CompressedSparseData2<f32> =
+        reader.read_genes_sparse(gene_indices, Some(&cell_set), &layer)?;
 
     if verbosity.normal_verbosity() {
         println!(" ... done in {:.2?}", start_total.elapsed())
@@ -454,7 +449,6 @@ fn load_sc_matrix<S: SingleCellReading>(
     verbose: usize,
 ) -> Result<CompressedSparseData2<f32>, BixverseErrors> {
     let verbosity = parse_verbosity_level(verbose);
-    let n_cells = cell_indices.len();
     let cell_set: IndexSet<u32> = cell_indices.iter().map(|&x| x as u32).collect();
 
     let start = Instant::now();
@@ -468,9 +462,8 @@ fn load_sc_matrix<S: SingleCellReading>(
         DataLayerReturn::Raw
     };
 
-    let gene_chunks: Vec<CscGeneChunk> =
-        reader.read_gene_parallel_filtered(gene_indices, &cell_set)?;
-    let csc: CompressedSparseData2<f32> = from_gene_chunks::<f32>(gene_chunks, &layer, n_cells)?;
+    let csc: CompressedSparseData2<f32> =
+        reader.read_genes_sparse(gene_indices, Some(&cell_set), &layer)?;
 
     if verbosity.normal_verbosity() {
         println!(" ... done in {:.2?}", start.elapsed())

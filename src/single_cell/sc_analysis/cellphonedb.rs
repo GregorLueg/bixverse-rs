@@ -13,6 +13,7 @@
 //! pass over each gene's data.
 
 use faer::Mat;
+use indexmap::IndexSet;
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
@@ -259,39 +260,30 @@ fn prepare<S: SingleCellReading>(
             .collect(),
     };
 
-    let mut position = vec![u32::MAX; n_cells];
+    // Clustered cells in label order; a cell's position in the set is its
+    // row in the store.
+    let mut clustered: IndexSet<u32> = IndexSet::new();
     let mut labels: Vec<u16> = Vec::new();
     for (k, cells) in clusters.iter().enumerate() {
         for &c in cells {
             if c >= n_cells {
                 return Err(BixverseErrors::CpdbCellIndexOutOfRange { index: c, n_cells });
             }
-            if position[c] != u32::MAX {
+            if !clustered.insert(c as u32) {
                 return Err(BixverseErrors::CpdbClusterOverlap { cell: c });
             }
-            position[c] = labels.len() as u32;
             labels.push(k as u16);
         }
     }
     let sizes: Vec<usize> = clusters.iter().map(|c| c.len()).collect();
 
-    let chunks = reader.read_gene_parallel(&genes)?;
-    let mut store = LrStore {
-        indptr: Vec::with_capacity(genes.len() + 1),
-        cells: Vec::new(),
-        vals: Vec::new(),
+    let csc: CompressedSparseData2<f32, f32> =
+        reader.read_genes_sparse(&genes, Some(&clustered), &DataLayerReturn::Norm)?;
+    let store = LrStore {
+        indptr: csc.indptr.iter().map(|&p| p as usize).collect(),
+        cells: csc.indices,
+        vals: csc.data_2.expect("norm layer requested"),
     };
-    store.indptr.push(0);
-    for chunk in &chunks {
-        for (&c, v) in chunk.indices.iter().zip(chunk.data_norm.iter()) {
-            let pos = position[c as usize];
-            if pos != u32::MAX {
-                store.cells.push(pos);
-                store.vals.push(v.to_f32());
-            }
-        }
-        store.indptr.push(store.cells.len());
-    }
 
     Ok(CpdbSetup {
         genes,
@@ -702,7 +694,6 @@ pub fn cpdb_deg_gate<T>(
 mod tests {
     use super::*;
     use crate::single_cell::sc_data::in_memory_io::InMemorySparseReader;
-    use crate::single_cell::sc_traits::F16;
     use approx::assert_relative_eq;
     use rand::prelude::*;
 
@@ -758,10 +749,6 @@ mod tests {
                     .collect()
             })
             .collect()
-    }
-
-    fn q(v: f32) -> f64 {
-        F16::from_f32(v).to_f32() as f64
     }
 
     #[test]
@@ -913,7 +900,7 @@ mod tests {
         }];
         let obs = cellphonedb_observed::<f64, _>(&reader, &inter, &clusters, None, 0.1).unwrap();
         let mean = |g: usize, k: usize| {
-            clusters[k].iter().map(|&c| q(columns[g][c])).sum::<f64>() / sizes[k] as f64
+            clusters[k].iter().map(|&c| columns[g][c] as f64).sum::<f64>() / sizes[k] as f64
         };
         for (p, &(a, b)) in obs.pairs.iter().enumerate() {
             let x = mean(0, a).min(mean(1, a));

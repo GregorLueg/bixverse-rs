@@ -1794,11 +1794,12 @@ fn build_sample_csr<S: SingleCellReading>(
         .collect::<Vec<usize>>()
         .chunks(CELL_BATCH_SIZE)
     {
-        for chunk in reader.read_cells_parallel(batch)? {
-            data.extend(chunk.data_raw.iter().map(|c| c as f32));
-            indices.extend_from_slice(&chunk.indices);
-            indptr.push(indices.len());
-        }
+        let csr: CompressedSparseData2<f32, f32> =
+            reader.read_cells_sparse(batch, &DataLayerReturn::Raw)?;
+        let offset = indices.len();
+        indptr.extend(csr.indptr[1..].iter().map(|&p| offset + p as usize));
+        data.extend_from_slice(&csr.data);
+        indices.extend_from_slice(&csr.indices);
     }
 
     let mut gamma_idx = vec![usize::MAX; n_rows];

@@ -166,6 +166,11 @@ harness = false
 required-features = ["single-cell"]
 
 [[bench]]
+name = "sc_reader_bench"
+harness = false
+required-features = ["single-cell"]
+
+[[bench]]
 name = "hvg_bench"
 harness = false
 required-features = ["single-cell"]

@@ -18,7 +18,6 @@ use cubecl::prelude::*;
 use cubecl_utils_rs::prelude::*;
 use faer::{Mat, concat};
 use indexmap::IndexSet;
-use rayon::prelude::*;
 use std::time::Instant;
 
 use crate::core::math::pca_svd::compute_pc_scores;
@@ -254,28 +253,19 @@ where
     let n_genes = gene_indices.len();
 
     let start_reading = Instant::now();
-    let mut gene_chunks: Vec<CscGeneChunk> =
-        reader.read_gene_parallel_filtered(gene_indices, &cell_set)?;
+    let csc = read_hvg_normalised(
+        reader,
+        &cell_set,
+        gene_indices,
+        hvg_library_sizes,
+        target_size,
+        log_transform,
+    )?;
     if verbosity.normal_verbosity() {
         println!("Loaded in data: {:.2?}", start_reading.elapsed());
     }
 
     let start_prep = Instant::now();
-
-    gene_chunks.par_iter_mut().for_each(|chunk| {
-        for (i, &pos) in chunk.indices.iter().enumerate() {
-            let raw_count = chunk.data_raw.get(i) as f32;
-            let lib_size = hvg_library_sizes[pos as usize] as f32;
-            let val = if log_transform {
-                ((raw_count / lib_size) * target_size).ln_1p()
-            } else {
-                (raw_count / lib_size) * target_size
-            };
-            chunk.data_norm[i] = F16::from(half::f16::from_f32(val.clamp(-65504.0, 65504.0)));
-        }
-    });
-
-    let csc = from_gene_chunks::<f32>(gene_chunks, &DataLayerReturn::Norm, n_cells)?;
 
     let real_col_means: Vec<f64> = sparse_csc_column_means(&csc, true, None)?;
 

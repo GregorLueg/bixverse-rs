@@ -597,6 +597,41 @@ where
         self.data_2.clone().unwrap()
     }
 
+    /// Split into one owned [`SparseAxis`] per major-axis run.
+    ///
+    /// Columns of a CSC or rows of a CSR. A layer that is empty (not
+    /// populated) stays empty on every axis.
+    ///
+    /// ### Returns
+    ///
+    /// The axes in order, each sized to the minor dimension.
+    pub fn to_sparse_axes(&self) -> Vec<SparseAxis<T, U>> {
+        let len = if self.cs_type.is_csc() {
+            self.shape.0
+        } else {
+            self.shape.1
+        };
+        let has_data = self.data.len() == self.indices.len();
+
+        self.indptr
+            .par_windows(2)
+            .map(|w| {
+                let (lo, hi) = (w[0] as usize, w[1] as usize);
+                SparseAxis {
+                    indices: self.indices[lo..hi].iter().map(|&i| i as usize).collect(),
+                    data: if has_data {
+                        self.data[lo..hi].to_vec()
+                    } else {
+                        Vec::new()
+                    },
+                    data_2: self.data_2.as_ref().map(|d| d[lo..hi].to_vec()),
+                    cs_type: self.cs_type,
+                    len,
+                }
+            })
+            .collect()
+    }
+
     /////////////
     // Slicing //
     /////////////

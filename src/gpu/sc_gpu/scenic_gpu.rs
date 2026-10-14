@@ -4983,14 +4983,12 @@ where
     let mut all_sparse_cols: Vec<SparseAxis<u32, f32>> = Vec::with_capacity(n_genes);
 
     for (iter, chunk) in ordered_genes.chunks(SCENIC_GENE_CHUNK_SIZE).enumerate() {
-        let mut gene_chunks: Vec<CscGeneChunk> = setup.reader.read_gene_parallel(chunk)?;
-        gene_chunks.par_iter_mut().for_each(|c| {
-            c.filter_selected_cells(&setup.cell_set);
-        });
-
-        for gc in gene_chunks.iter() {
-            all_sparse_cols.push(gc.to_sparse_axis(setup.n_cells));
-        }
+        let csc: CompressedSparseData2<u32, f32> = setup.reader.read_genes_sparse(
+            chunk,
+            Some(&setup.cell_set),
+            &DataLayerReturn::BothLayers,
+        )?;
+        all_sparse_cols.extend(csc.to_sparse_axes());
 
         if verbosity.detailed_verbosity() {
             println!(
@@ -5171,16 +5169,13 @@ where
         let io_chunk: Vec<usize> = group.iter().flatten().copied().collect();
 
         let start_io = Instant::now();
-        let mut gene_chunks: Vec<CscGeneChunk> = setup.reader.read_gene_parallel(&io_chunk)?;
-        gene_chunks.par_iter_mut().for_each(|c| {
-            c.filter_selected_cells(&setup.cell_set);
-        });
-
-        let sparse_columns: Vec<SparseAxis<u32, f32>> = gene_chunks
-            .iter()
-            .map(|c| c.to_sparse_axis(setup.n_cells))
-            .collect();
-        drop(gene_chunks);
+        let csc: CompressedSparseData2<u32, f32> = setup.reader.read_genes_sparse(
+            &io_chunk,
+            Some(&setup.cell_set),
+            &DataLayerReturn::BothLayers,
+        )?;
+        let sparse_columns: Vec<SparseAxis<u32, f32>> = csc.to_sparse_axes();
+        drop(csc);
 
         if verbosity.normal_verbosity() {
             println!(
