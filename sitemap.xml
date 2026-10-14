@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+    <url>
+         <loc>https://gregorlueg.github.io/bixverse-rs/</loc>
+         <lastmod>2026-10-14</lastmod>
+    </url>
+    <url>
+         <loc>https://gregorlueg.github.io/bixverse-rs/quickstart/</loc>
+         <lastmod>2026-10-14</lastmod>
+    </url>
+    <url>
+         <loc>https://gregorlueg.github.io/bixverse-rs/scvi/</loc>
+         <lastmod>2026-10-14</lastmod>
+    </url>
+    <url>
+         <loc>https://gregorlueg.github.io/bixverse-rs/api/loader/</loc>
+         <lastmod>2026-10-14</lastmod>
+    </url>
+    <url>
+         <loc>https://gregorlueg.github.io/bixverse-rs/api/nn/</loc>
+         <lastmod>2026-10-14</lastmod>
+    </url>
+    <url>
+         <loc>https://gregorlueg.github.io/bixverse-rs/api/toplevel/</loc>
+         <lastmod>2026-10-14</lastmod>
+    </url>
+</urlset>
