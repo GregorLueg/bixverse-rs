@@ -18,7 +18,8 @@ use faer::{Mat, MatRef};
 
 use crate::core::math::pca_svd::SvdResults;
 use crate::methods::nmf_hals::consensus::{
-    ConsensusNmfResult, ConsensusParams, ConsensusTarget, consensus_from_restarts,
+    ConsensusNmfResult, ConsensusParams, ConsensusTarget, KSweepEntry, consensus_from_restarts,
+    median,
 };
 use crate::methods::nmf_hals::dense::DenseInput;
 use crate::methods::nmf_hals::nmf_preprocessing::{
@@ -1243,6 +1244,101 @@ pub fn nmf_consensus_mlx(
     })
 }
 
+/// Sweep k on MLX and report stability against error.
+///
+/// One row per rank, no refit and no factors retained. `V` is uploaded once
+/// for the whole sweep and the ranks run sequentially. Mirrors
+/// `gpu::methods_gpu::nmf_consensus_gpu::nmf_k_sweep_gpu`.
+///
+/// ### Params
+///
+/// * `v` - Device-resident `V`
+/// * `k_range` - Ranks to evaluate, non-empty, every entry at least two
+/// * `n_runs` - Restarts per rank, at least two
+/// * `base_seed` - Seed offset; each rank gets a disjoint block of seeds
+/// * `opts` - Solver options; the `init` field is ignored by the restarts
+/// * `params` - Optional [`ConsensusParams`], defaulted if `None`
+/// * `verbose` - `0` silent, `1` normal, `2` detailed
+///
+/// ### Returns
+///
+/// One [`KSweepEntry`] per entry of `k_range`, in the order given.
+///
+/// ### Errors
+///
+/// * `NmfKSweepEmptyRange` if `k_range` is empty.
+/// * `NmfConsensusTooFewRuns` if `n_runs < 2`, `NmfConsensusInvalidK` if any
+///   rank is below two.
+/// * Anything the solve or the consensus step raises, except too few surviving
+///   components, which is recorded as `consensus_failed`.
+pub fn nmf_k_sweep_mlx(
+    v: &impl MlxNmfData,
+    k_range: &[usize],
+    n_runs: usize,
+    base_seed: u64,
+    opts: &HalsOpts<f32>,
+    params: Option<ConsensusParams<f32>>,
+    verbose: usize,
+) -> Result<Vec<KSweepEntry<f32>>, BixverseErrors> {
+    if k_range.is_empty() {
+        return Err(BixverseErrors::NmfKSweepEmptyRange);
+    }
+    if n_runs < 2 {
+        return Err(BixverseErrors::NmfConsensusTooFewRuns { n_runs });
+    }
+    if let Some(&k) = k_range.iter().find(|&&k| k < 2) {
+        return Err(BixverseErrors::NmfConsensusInvalidK { k });
+    }
+
+    let params = params.unwrap_or_default();
+    let verbosity = parse_verbosity_level(verbose);
+    let inner_verbose = verbose.saturating_sub(1);
+    let sq_frob = v.sq_frob();
+    let denom = if sq_frob > 0.0 { sq_frob } else { 1.0 };
+
+    let mut out = Vec::with_capacity(k_range.len());
+    for (i, &k) in k_range.iter().enumerate() {
+        if verbosity.normal_verbosity() {
+            println!(
+                "Running MLX NMF k sweep: k = {} ({} of {})",
+                k,
+                i + 1,
+                k_range.len()
+            );
+        }
+
+        let seed = base_seed + (i * n_runs) as u64;
+        let restarts = stabilised_nmf_mlx(v, k, n_runs, seed, opts, inner_verbose)?;
+
+        let clusters = match consensus_from_restarts(&restarts, k, &params, inner_verbose) {
+            Ok(clusters) => Some(clusters),
+            Err(BixverseErrors::NmfConsensusTooFewComponents { n_surviving, .. }) => {
+                if verbosity.normal_verbosity() {
+                    println!(
+                        "  k = {}: only {} components survived the density filter (need {}); stability not scored",
+                        k, n_surviving, k
+                    );
+                }
+                None
+            }
+            Err(e) => return Err(e),
+        };
+
+        out.push(KSweepEntry {
+            k,
+            stability: clusters.as_ref().map(|c| c.stability).unwrap_or(f32::NAN),
+            best_error: restarts.losses[restarts.best_idx] / denom,
+            median_error: median(&restarts.losses) / denom,
+            consensus_failed: clusters.is_none(),
+            n_dropped: clusters.as_ref().map(|c| c.n_dropped).unwrap_or(k * n_runs),
+            n_empty_clusters: clusters.as_ref().map(|c| c.n_empty_clusters).unwrap_or(0),
+            n_converged: restarts.converged.iter().filter(|&&c| c).count(),
+        });
+    }
+
+    Ok(out)
+}
+
 //////////////////
 // Entry points //
 //////////////////
@@ -1439,6 +1535,85 @@ pub fn nmf_consensus_run_sparse_mlx(
     )
 }
 
+/// Run MLX NMF on a sparse matrix across random restarts.
+///
+/// ### Params
+///
+/// * `data` - Sparse `V`, samples x features
+/// * `k` - Number of components per run
+/// * `preprocessing` - Column-scaling mode, see [`parse_nmf_processing`]
+/// * `use_second_layer` - Use `data_2` (normalised counts) instead of `data`
+/// * `nmf_hals_params` - Optional [`HalsOpts`]; the `init` field is ignored
+/// * `n_runs` - Number of restarts, at least one
+/// * `base_seed` - Seed offset
+/// * `verbose` - `0` silent, `1` normal, `2` detailed
+///
+/// ### Returns
+///
+/// A [`StabilisedNmfResult`], or errors from validation or the device path.
+#[allow(clippy::too_many_arguments)]
+pub fn nmf_multiple_run_sparse_mlx(
+    data: CompressedSparseData2<f32>,
+    k: usize,
+    preprocessing: &str,
+    use_second_layer: bool,
+    nmf_hals_params: Option<HalsOpts<f32>>,
+    n_runs: usize,
+    base_seed: usize,
+    verbose: usize,
+) -> Result<StabilisedNmfResult<f32>, BixverseErrors> {
+    let opts = nmf_hals_params.unwrap_or_default();
+    let input = build_sparse_input(data, preprocessing, use_second_layer, verbose)?;
+    stabilised_nmf_mlx(&input, k, n_runs, base_seed as u64, &opts, verbose)
+}
+
+/// Sweep k with MLX consensus NMF on a sparse matrix.
+///
+/// `V` uploads once and serves all `k_range.len() * n_runs` solves.
+///
+/// ### Params
+///
+/// * `data` - Sparse `V`, samples x features
+/// * `k_range` - Ranks to evaluate, non-empty, every entry at least two
+/// * `preprocessing` - Column-scaling mode, see [`parse_nmf_processing`]
+/// * `use_second_layer` - Use `data_2` (normalised counts) instead of `data`
+/// * `nmf_hals_params` - Optional [`HalsOpts`]
+/// * `consensus_params` - Optional [`ConsensusParams`]
+/// * `n_runs` - Restarts per rank, at least two
+/// * `base_seed` - Seed offset
+/// * `verbose` - `0` silent, `1` normal, `2` detailed
+///
+/// ### Returns
+///
+/// One [`KSweepEntry`] per rank, or errors from validation or the device path.
+#[allow(clippy::too_many_arguments)]
+pub fn nmf_k_sweep_run_sparse_mlx(
+    data: CompressedSparseData2<f32>,
+    k_range: &[usize],
+    preprocessing: &str,
+    use_second_layer: bool,
+    nmf_hals_params: Option<HalsOpts<f32>>,
+    consensus_params: Option<ConsensusParams<f32>>,
+    n_runs: usize,
+    base_seed: usize,
+    verbose: usize,
+) -> Result<Vec<KSweepEntry<f32>>, BixverseErrors> {
+    if k_range.is_empty() {
+        return Err(BixverseErrors::NmfKSweepEmptyRange);
+    }
+    let opts = nmf_hals_params.unwrap_or_default();
+    let input = build_sparse_input(data, preprocessing, use_second_layer, verbose)?;
+    nmf_k_sweep_mlx(
+        &input,
+        k_range,
+        n_runs,
+        base_seed as u64,
+        &opts,
+        consensus_params,
+        verbose,
+    )
+}
+
 ///////////
 // Tests //
 ///////////
@@ -1449,6 +1624,7 @@ mod tests {
     use crate::methods::nmf_hals::{
         compute_objective, gram_h_ht, gram_wt_w, hals_sweep_cols, nmf_hals,
     };
+    use approx::assert_relative_eq;
 
     /// Deterministic non-negative `m x n` matrix with an exact rank-`k` core.
     fn build_v(m: usize, n: usize, k: usize) -> Mat<f32> {
@@ -1977,6 +2153,173 @@ mod tests {
                 res.error < 1e-4,
                 "consensus error {} is too high",
                 res.error
+            );
+        }
+    }
+
+    /// Run `i` of the multi-run entry point is the single run seeded
+    /// `base_seed + i`.
+    #[test]
+    fn test_sparse_multiple_run_matches_seeded_single_runs() {
+        let (m, n, k, n_runs, base_seed) = (25usize, 18usize, 2usize, 3usize, 7usize);
+        let v = sparse_rank_k(m, n, k);
+        let opts = HalsOpts::<f32>::new(50, 1e-7, 1e-10, 10, NmfInit::Nndsvd);
+        let res = nmf_multiple_run_sparse_mlx(
+            to_csr(&v),
+            k,
+            "none",
+            false,
+            Some(opts.clone()),
+            n_runs,
+            base_seed,
+            0,
+        )
+        .unwrap();
+        assert_eq!((res.w_all.nrows(), res.w_all.ncols()), (m, k * n_runs));
+        assert_eq!(res.h_per_run.len(), n_runs);
+        for i in 0..n_runs {
+            let opts_i = HalsOpts {
+                init: NmfInit::Random {
+                    seed: (base_seed + i) as u64,
+                },
+                ..opts.clone()
+            };
+            let single =
+                nmf_single_run_sparse_mlx(to_csr(&v), k, "none", false, Some(opts_i), 0).unwrap();
+            assert_relative_eq!(res.losses[i], single.final_loss, max_relative = 1e-5);
+        }
+    }
+
+    /// One row per rank in the order given, and the true rank fits.
+    #[test]
+    fn test_sparse_k_sweep_rows_and_errors() {
+        let (m, n, k, n_runs) = (25usize, 18usize, 2usize, 4usize);
+        let v = sparse_rank_k(m, n, k);
+        let opts = HalsOpts::<f32>::new(200, 1e-7, 1e-10, 10, NmfInit::Nndsvd);
+        let params = ConsensusParams::<f32>::new(ConsensusTarget::HRows, None, None, 100, 3, 42);
+        let rows = nmf_k_sweep_run_sparse_mlx(
+            to_csr(&v),
+            &[3, 2],
+            "none",
+            false,
+            Some(opts),
+            Some(params),
+            n_runs,
+            0,
+            0,
+        )
+        .unwrap();
+        assert_eq!(rows.iter().map(|r| r.k).collect::<Vec<_>>(), vec![3, 2]);
+        assert!(
+            rows[1].best_error < 1e-4,
+            "k = 2 error {}",
+            rows[1].best_error
+        );
+        assert!(rows.iter().all(|r| r.median_error >= r.best_error));
+    }
+
+    /// Bad sweep inputs are rejected before any solve.
+    #[test]
+    fn test_sparse_k_sweep_rejects_bad_ranges() {
+        let v = sparse_rank_k(10, 8, 2);
+        let sweep = |range: &[usize], n_runs: usize| {
+            nmf_k_sweep_run_sparse_mlx(to_csr(&v), range, "none", false, None, None, n_runs, 0, 0)
+        };
+        assert!(matches!(
+            sweep(&[], 3),
+            Err(BixverseErrors::NmfKSweepEmptyRange)
+        ));
+        assert!(matches!(
+            sweep(&[2, 1], 3),
+            Err(BixverseErrors::NmfConsensusInvalidK { k: 1 })
+        ));
+        assert!(matches!(
+            sweep(&[2], 1),
+            Err(BixverseErrors::NmfConsensusTooFewRuns { n_runs: 1 })
+        ));
+    }
+
+    /// Multi-run losses and sweep errors agree with wgpu under the same seeds.
+    /// The data is rank four and every fit is below that, so the losses stay
+    /// well away from zero and a relative comparison means something.
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn test_sparse_multiple_run_and_sweep_match_wgpu() {
+        use crate::gpu::methods_gpu::nmf_consensus_gpu::{
+            nmf_k_sweep_run_sparse_gpu, nmf_multiple_run_sparse_gpu,
+        };
+        use cubecl::wgpu::WgpuDevice;
+
+        let (m, n, k, n_runs) = (25usize, 18usize, 2usize, 4usize);
+        let v = sparse_rank_k(m, n, 4);
+        let opts = HalsOpts::<f32>::new(100, 1e-7, 1e-10, 10, NmfInit::Nndsvd);
+        let params = ConsensusParams::<f32>::new(ConsensusTarget::HRows, None, None, 100, 3, 42);
+
+        let mlx = nmf_multiple_run_sparse_mlx(
+            to_csr(&v),
+            k,
+            "none",
+            false,
+            Some(opts.clone()),
+            n_runs,
+            3,
+            0,
+        )
+        .unwrap();
+        let gpu = nmf_multiple_run_sparse_gpu(
+            to_csr(&v),
+            k,
+            "none",
+            false,
+            Some(opts.clone()),
+            n_runs,
+            3,
+            WgpuDevice::default().into(),
+            0,
+        )
+        .unwrap();
+        for (a, b) in mlx.losses.iter().zip(gpu.losses.iter()) {
+            assert_relative_eq!(*a, *b, max_relative = 1e-3, epsilon = 1e-6);
+        }
+
+        let mlx_rows = nmf_k_sweep_run_sparse_mlx(
+            to_csr(&v),
+            &[2, 3],
+            "none",
+            false,
+            Some(opts.clone()),
+            Some(params),
+            n_runs,
+            0,
+            0,
+        )
+        .unwrap();
+        let gpu_rows = nmf_k_sweep_run_sparse_gpu(
+            to_csr(&v),
+            &[2, 3],
+            "none",
+            false,
+            Some(opts),
+            Some(params),
+            n_runs,
+            0,
+            WgpuDevice::default().into(),
+            0,
+        )
+        .unwrap();
+        for (a, b) in mlx_rows.iter().zip(gpu_rows.iter()) {
+            assert_eq!(a.k, b.k);
+            assert_relative_eq!(
+                a.best_error,
+                b.best_error,
+                max_relative = 1e-3,
+                epsilon = 1e-6
+            );
+            assert_relative_eq!(
+                a.median_error,
+                b.median_error,
+                max_relative = 1e-3,
+                epsilon = 1e-6
             );
         }
     }
