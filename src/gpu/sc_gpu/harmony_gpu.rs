@@ -14,13 +14,16 @@ use std::time::Instant;
 use crate::gpu::linalg::spmm::launch_dense_column_sum;
 use crate::gpu::sc_gpu::kernels::harmony_kernels::*;
 use crate::gpu::{WORKGROUP_64, WORKGROUP_512};
+use crate::ml::clustering::k_means::KMeansParamsWrappers;
 use crate::prelude::*;
 use crate::single_cell::sc_batch_correction::harmony::{BatchInfo, create_batch_infos};
 use crate::single_cell::sc_batch_correction::harmony_core::{
     HARMONY_KMEANS_ITERS, RidgeSettings, normalise_rows_into, row_major_to_mat, solve_ridge,
     to_row_major,
 };
-use crate::single_cell::sc_batch_correction::harmony_v2::{check_convergence, expand_theta};
+use crate::single_cell::sc_batch_correction::harmony_v2::{
+    HarmonyParamsV2, check_convergence, expand_theta,
+};
 
 ////////////
 // Consts //
@@ -143,6 +146,39 @@ impl Default for HarmonyParamsV2Gpu {
                 true,
                 false,
             )),
+        }
+    }
+}
+
+/// Map the GPU parameters onto the CPU [`HarmonyParamsV2`], which is what the
+/// MLX port (`mlx::sc::harmony::harmony_v2_mlx`) takes.
+///
+/// `block_size` has no GPU counterpart and takes the CPU default; the MLX
+/// Jacobi update ignores it anyway. The k-means block keeps `iters`, `init`
+/// and `balanced`. `fixed` and `quantise_to_f16` have no CPU counterpart and
+/// are dropped. A `None` k-means block maps to [`KMeansGpuParams::default`],
+/// matching what the GPU path does with `None`.
+impl From<&HarmonyParamsV2Gpu> for HarmonyParamsV2 {
+    fn from(p: &HarmonyParamsV2Gpu) -> Self {
+        let km = p.kmeans_params.unwrap_or_default();
+        let kmeans_params =
+            KMeansParamsWrappers::new(km.iters, km.init, None).with_balancing(km.balanced);
+        Self {
+            k: p.k,
+            sigma: p.sigma.clone(),
+            theta: p.theta.clone(),
+            lambda: p.lambda.clone(),
+            max_iter_kmeans: p.max_iter_kmeans,
+            max_iter_harmony: p.max_iter_harmony,
+            epsilon_kmeans: p.epsilon_kmeans,
+            epsilon_harmony: p.epsilon_harmony,
+            window_size: p.window_size,
+            alpha: p.alpha,
+            tau: p.tau,
+            batch_proportion_cutoff: p.batch_proportion_cutoff,
+            use_dynamic_lambda: p.use_dynamic_lambda,
+            kmeans_params,
+            ..Self::default()
         }
     }
 }
@@ -699,6 +735,36 @@ mod tests_harmony_gpu {
         }))
         .ok()
         .map(|_| device)
+    }
+
+    /// The CPU parameters carry every shared field and the k-means block.
+    #[test]
+    fn test_harmony_params_gpu_into_cpu() {
+        let gpu = HarmonyParamsV2Gpu {
+            k: 7,
+            theta: vec![1.5],
+            max_iter_harmony: 3,
+            kmeans_params: Some(KMeansGpuParams::new(11, None, true, false).with_balancing(true)),
+            ..HarmonyParamsV2Gpu::default()
+        };
+        let cpu = HarmonyParamsV2::from(&gpu);
+        assert_eq!(cpu.k, 7);
+        assert_eq!(cpu.theta, vec![1.5]);
+        assert_eq!(cpu.max_iter_harmony, 3);
+        assert_eq!(cpu.sigma, gpu.sigma);
+        assert_eq!(cpu.block_size, HarmonyParamsV2::default().block_size);
+        let km = cpu.kmeans_params.get_data();
+        assert_eq!(km.iters, 11);
+        assert!(km.balanced);
+
+        let none = HarmonyParamsV2::from(&HarmonyParamsV2Gpu {
+            kmeans_params: None,
+            ..HarmonyParamsV2Gpu::default()
+        });
+        assert_eq!(
+            none.kmeans_params.get_data().iters,
+            KMeansGpuParams::default().iters
+        );
     }
 
     /// Sorting groups each level's cells contiguously and cuts runs at the
