@@ -22,6 +22,8 @@
   `gpu::sc_gpu::kernels::seacells_kernels`: `fw_argmin_b`,
   `launch_fw_argmin_b`, `b_argmin_workgroup`, `B_ARGMIN_WG_TIERS` and
   `B_ARGMIN_BLOCKS`. Use `launch_fw_argmin_b_tiled`.
+- `SingleCellReading` gains two required methods, `read_cells_sparse()` and
+  `read_genes_sparse()`. Implementations outside the crate need to add them.
 
 ### Feature
 
@@ -34,17 +36,26 @@
 - Fused CSR batch reader for cell-based files, `read_cells_csr()` returning a
   `CsrBatch`, which walks the decompressed chunks without a per-cell
   allocation.
+- Fused sparse batch readers on `SingleCellReading`: `read_cells_sparse()`
+  returns one CSR and `read_genes_sparse()` one CSC (optionally on a cell
+  subset), without a chunk per cell or gene in between. SCENIC, Scrublet,
+  NEBULA, CellPhoneDB, NMF, PCA, CellSweep, Bonsai, MetaCells2 and the doublet
+  helpers build their matrices through them.
 - Python bindings for the single cell streaming engine in `python/`, built
-  with maturin and without libR. These are leveraged in the `nn` module to
-  train in a first instance scVI (see
-  [Lopez et al.](https://www.nature.com/articles/s41592-018-0229-2)) on top of a
-  bixverse cell store.
+  with maturin and without libR. The first consumer is scVI in the `nn`
+  module (see [Lopez et al.](https://www.nature.com/articles/s41592-018-0229-2)),
+  trained straight off a bixverse cell store.
 - Experimental `mlx` feature: an MLX backend via `mlx-c` for Apple Silicon,
   f32 only and independent of `gpu`. Covers pairwise correlation, sparse
   randomised SVD, HALS NMF (dense and sparse, single, stabilised and
   consensus) and, with `single-cell`, Harmony and SEACells. It turns on
   `ann-search-rs/mlx`, which finds and links `libmlxc`; without the library
   the build warns and the module is absent.
+- MLX also does sparse single cell PCA (`pca_on_sc_sparse_mlx()`) and sparse
+  multi-run NMF with the k sweep (`nmf_multiple_run_sparse_mlx()`,
+  `nmf_k_sweep_mlx()`, `nmf_k_sweep_run_sparse_mlx()`). `HarmonyParamsV2Gpu`
+  converts into `HarmonyParamsV2`, so the GPU Harmony v2 params drive the MLX
+  path as well.
 - Small cell subsets can skip the gene-major sweep:
   `read_cell_subset_csc()` reads them from the cell-major file into a CSC
   matrix for `InMemorySparseReader`, and `prefer_cell_subset()` decides when
@@ -63,6 +74,16 @@
   per-gene hash map for a single walk over the gene's non-zeros. A filtered
   read of a 985k-cell store goes from 1.5 s to 0.6 s, and the scTransform fit
   on a small subset roughly halves.
+- Exact covariance PCA, dense and sparse, eigendecomposes the cell Gram instead
+  of the gene one when there are fewer cells than genes. Small cell subsets no
+  longer pay for an HVG-sized eigendecomposition.
+- The unfiltered fused read path copies each stored cell or gene out in bulk,
+  with a vectorised f16 to f32 widening, instead of entry by entry.
+
+### Fix
+
+- The GPU kNN parser accepts a bare `"nndescent"` and maps it to CAGRA, like
+  `"nndescent_gpu"` already did.
 
 ## 0.6.4
 
