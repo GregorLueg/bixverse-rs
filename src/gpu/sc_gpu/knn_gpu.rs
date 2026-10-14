@@ -61,7 +61,8 @@ pub enum KnnSearchGpu {
 /// ### Params
 ///
 /// * `s` - Method name, case-insensitive. `"exhaustive"`, `"ivf"` or
-///   `"cagra"`, each also accepted with a `_gpu` suffix.
+///   `"cagra"`, each also accepted with a `_gpu` suffix. `"nndescent"` and
+///   `"nndescent_gpu"` map to CAGRA, whose graph is built by NN-descent.
 ///
 /// ### Returns
 ///
@@ -70,7 +71,7 @@ pub fn parse_knn_method_gpu(s: &str) -> Option<KnnSearchGpu> {
     match s.to_lowercase().as_str() {
         "exhaustive" | "exhaustive_gpu" => Some(KnnSearchGpu::ExhaustiveGpu),
         "ivf" | "ivf_gpu" => Some(KnnSearchGpu::IvfGpu),
-        "cagra" | "cagra_gpu" | "nndescent_gpu" => Some(KnnSearchGpu::CagraGpu),
+        "cagra" | "cagra_gpu" | "nndescent" | "nndescent_gpu" => Some(KnnSearchGpu::CagraGpu),
         _ => None,
     }
 }
@@ -518,6 +519,10 @@ mod tests {
         assert_eq!(parse_knn_method_gpu("cagra"), Some(KnnSearchGpu::CagraGpu));
         assert_eq!(
             parse_knn_method_gpu("nndescent_gpu"),
+            Some(KnnSearchGpu::CagraGpu)
+        );
+        assert_eq!(
+            parse_knn_method_gpu("nndescent"),
             Some(KnnSearchGpu::CagraGpu)
         );
         assert_eq!(parse_knn_method_gpu("kmknn"), None);
