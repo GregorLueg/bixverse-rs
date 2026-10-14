@@ -28,7 +28,10 @@ fn _bixverse(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__core_version__", bixverse_rs::VERSION)?;
 
     m.add("BixverseError", m.py().get_type::<error::BixverseError>())?;
-    m.add("SparseFileError", m.py().get_type::<error::SparseFileError>())?;
+    m.add(
+        "SparseFileError",
+        m.py().get_type::<error::SparseFileError>(),
+    )?;
 
     m.add_class::<reader::PyCellReader>()?;
     m.add_class::<loader::PyCellLoader>()?;

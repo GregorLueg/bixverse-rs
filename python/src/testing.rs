@@ -83,5 +83,8 @@ pub fn write_synthetic_store<'py>(
 
     writer.finalise().map_err(BvErr)?;
 
-    Ok(dense.into_pyarray(py).reshape([n_cells, n_genes])?.into_any())
+    Ok(dense
+        .into_pyarray(py)
+        .reshape([n_cells, n_genes])?
+        .into_any())
 }

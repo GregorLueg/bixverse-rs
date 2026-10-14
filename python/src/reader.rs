@@ -42,7 +42,9 @@ impl PyCellReader {
     /// or of a different format version.
     #[new]
     fn new(py: Python<'_>, path: &str) -> PyResult<Self> {
-        let inner = py.detach(|| ParallelSparseReader::new(path)).map_err(BvErr)?;
+        let inner = py
+            .detach(|| ParallelSparseReader::new(path))
+            .map_err(BvErr)?;
         let header = inner.get_header();
 
         Ok(Self {
