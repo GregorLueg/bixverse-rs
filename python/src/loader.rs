@@ -26,7 +26,9 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 
-use crate::batch::{Layer, PreparedBatch, adopt_csr, prepare_dense};
+use crate::batch::{
+    GeneRemap, Layer, PreparedBatch, adopt_csr, gene_remap, prepare_dense, subset_csr,
+};
 use crate::error::BvErr;
 use crate::reader::PyCellReader;
 
@@ -59,7 +61,7 @@ type BatchMsg = Result<PreparedBatch, BixverseErrors>;
 /// Convert a materialised batch into the Python-facing tuple.
 ///
 /// The shape is fixed regardless of layer and layout:
-/// `(raw, norm, indices, indptr, (n_rows, n_cols))`, with the unrequested
+/// `(raw, norm, indices, indptr, (n_rows, n_cols), cell_ids)`, with the unrequested
 /// slots set to `None`. A uniform shape keeps the type stub honest and saves
 /// the caller from branching on what it asked for.
 ///
@@ -70,7 +72,7 @@ type BatchMsg = Result<PreparedBatch, BixverseErrors>;
 ///
 /// ### Returns
 ///
-/// The five-tuple described above.
+/// The six-tuple described above.
 fn batch_to_py(py: Python<'_>, batch: PreparedBatch) -> PyResult<Py<PyAny>> {
     let shape = (batch.n_rows, batch.n_cols);
     let dense = batch.indices.is_none();
@@ -91,8 +93,11 @@ fn batch_to_py(py: Python<'_>, batch: PreparedBatch) -> PyResult<Py<PyAny>> {
     let norm = to_values(batch.norm)?;
     let indices: Option<Py<PyAny>> = batch.indices.map(|v| v.into_pyarray(py).into());
     let indptr: Option<Py<PyAny>> = batch.indptr.map(|v| v.into_pyarray(py).into());
+    let cell_ids: Py<PyAny> = batch.cell_ids.into_pyarray(py).into();
 
-    Ok((raw, norm, indices, indptr, shape).into_pyobject(py)?.into())
+    Ok((raw, norm, indices, indptr, shape, cell_ids)
+        .into_pyobject(py)?
+        .into())
 }
 
 //////////////////
@@ -122,6 +127,8 @@ pub struct PyCellLoader {
     drop_last: bool,
     /// Total genes, cached so the feeder does not touch the header.
     n_genes: usize,
+    /// Gene subset to keep, shared with each feeder. `None` keeps every gene.
+    remap: Option<Arc<GeneRemap>>,
     /// Epochs started so far, mixed into the shuffle seed.
     epoch: AtomicU64,
 }
@@ -142,6 +149,8 @@ impl PyCellLoader {
     /// * `sparse` - CSR components when `true`, a dense buffer when `false`.
     /// * `prefetch` - Batches held in flight.
     /// * `drop_last` - Drop a trailing partial batch.
+    /// * `genes` - Optional store gene indices to keep, as a contiguous
+    ///   `uint32` array. Output columns follow its order.
     ///
     /// ### Returns
     ///
@@ -158,6 +167,7 @@ impl PyCellLoader {
         sparse = true,
         prefetch = DEFAULT_PREFETCH,
         drop_last = false,
+        genes = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -170,6 +180,7 @@ impl PyCellLoader {
         sparse: bool,
         prefetch: usize,
         drop_last: bool,
+        genes: Option<PyReadonlyArray1<'_, u32>>,
     ) -> PyResult<Self> {
         if !reader.cell_based {
             return Err(BvErr(BixverseErrors::ReaderModeMismatch {
@@ -195,6 +206,14 @@ impl PyCellLoader {
             )));
         }
 
+        let remap = genes
+            .map(|g| -> PyResult<Arc<GeneRemap>> {
+                let remap =
+                    gene_remap(g.as_slice()?, reader.total_genes).map_err(PyValueError::new_err)?;
+                Ok(Arc::new(remap))
+            })
+            .transpose()?;
+
         Ok(Self {
             reader: Arc::clone(&reader.inner),
             indices: slice.iter().map(|&i| i as usize).collect(),
@@ -206,6 +225,7 @@ impl PyCellLoader {
             prefetch,
             drop_last,
             n_genes: reader.total_genes,
+            remap,
             epoch: AtomicU64::new(0),
         })
     }
@@ -245,6 +265,7 @@ impl PyCellLoader {
         let reader = Arc::clone(&self.reader);
         let (batch_size, n_genes, layer, sparse) =
             (self.batch_size, self.n_genes, self.layer, self.sparse);
+        let remap = self.remap.clone();
 
         let handle = std::thread::spawn(move || {
             for batch in order.chunks(batch_size) {
@@ -254,12 +275,19 @@ impl PyCellLoader {
                 let msg = if sparse {
                     reader
                         .read_cells_csr(batch, &layer.as_data_layer())
-                        .map(adopt_csr)
+                        .map(|b| match remap.as_deref() {
+                            Some(r) => subset_csr(adopt_csr(b), r),
+                            None => adopt_csr(b),
+                        })
                 } else {
                     reader
                         .read_cells_parallel(batch)
-                        .map(|chunks| prepare_dense(&chunks, n_genes, layer))
+                        .map(|chunks| prepare_dense(&chunks, n_genes, remap.as_deref(), layer))
                 };
+                let msg = msg.map(|mut b| {
+                    b.cell_ids = batch.iter().map(|&i| i as u32).collect();
+                    b
+                });
                 let failed = msg.is_err();
                 // A send error means the consumer went away; stop quietly.
                 if sender.send(msg).is_err() || failed {
@@ -322,7 +350,8 @@ impl PyCellLoaderIter {
     ///
     /// ### Returns
     ///
-    /// `(raw, norm, indices, indptr, shape)`, or `None` once the epoch ends.
+    /// `(raw, norm, indices, indptr, shape, cell_ids)`, or `None` once the
+    /// epoch ends.
     fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         let Some(receiver) = self.receiver.as_ref() else {
             return Ok(None);

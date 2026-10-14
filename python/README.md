@@ -5,15 +5,18 @@ The crate does the work: this is a thin layer that opens a bixverse binary
 sparse store and streams minibatches out of it fast enough to keep a GPU
 training loop fed.
 
-The intended consumer is scVI-shaped: an `IterableDataset` that pulls cells
-straight off disk, shuffled, without ever materialising the experiment in
-memory. Decoding never leaves Rust, and the GIL is released while it happens.
+The first consumer is scVI, which ships in `bixverse.nn` (torch or MLX) and
+trains straight off the store, shuffled, without ever materialising the
+experiment in memory. Decoding never leaves Rust, and the GIL is released
+while it happens.
 
 ## Install
 
 ```bash
 uv pip install bixverse            # numpy only
 uv pip install "bixverse[sparse]"  # adds scipy, for Batch.scipy_csr
+uv pip install "bixverse[torch]"   # scVI on torch
+uv pip install "bixverse[mlx]"     # scVI on MLX, Apple Silicon
 ```
 
 ## Use
@@ -46,8 +49,10 @@ same seed means the same sequence of epochs, not the same epoch twice.
 
 ## Batches
 
-A `Batch` is a `NamedTuple` of `(raw, norm, indices, indptr, shape)`. The layer
-you didn't ask for is `None`.
+A `Batch` is a `NamedTuple` of `(raw, norm, indices, indptr, shape, cell_ids)`.
+The layer you didn't ask for is `None`. `cell_ids` is the store index of each
+row, which is how per-cell covariates get joined back on after the shuffle.
+`CellLoader(genes=...)` restricts and reorders the columns.
 
 | Field | Sparse | Dense |
 | --- | --- | --- |
@@ -57,6 +62,19 @@ you didn't ask for is `None`.
 
 `batch.values()` returns the single requested layer, `batch.scipy_csr()`
 rebuilds a `scipy.sparse.csr_matrix` sharing the same buffers.
+
+## scVI
+
+```python
+import bixverse.nn as bvnn
+
+fit = bvnn.train_scvi("counts.bin", cells, hvg, batch, backend="torch")
+latent = bvnn.scvi_latent(fit, "counts.bin", cells, batch)
+```
+
+scvi-tools 1.5.1's defaults, NB or ZINB, and a trained scvi-tools module loads
+into it and reproduces its loss. See the docs for the validation against
+scvi-tools.
 
 ## Sparse by default
 

@@ -35,7 +35,10 @@
   `CsrBatch`, which walks the decompressed chunks without a per-cell
   allocation.
 - Python bindings for the single cell streaming engine in `python/`, built
-  with maturin and without libR.
+  with maturin and without libR. These are leveraged in the `nn` module to
+  train in a first instance scVI (see
+  [Lopez et al.](https://www.nature.com/articles/s41592-018-0229-2)) on top of a
+  bixverse cell store.
 - Experimental `mlx` feature: an MLX backend via `mlx-c` for Apple Silicon,
   f32 only and independent of `gpu`. Covers pairwise correlation, sparse
   randomised SVD, HALS NMF (dense and sparse, single, stabilised and
@@ -46,10 +49,9 @@
 ### Performance
 
 - SEACells GPU B update uses a column-tiled shared-memory argmin: no ceiling
-  on the number of SEACells any more and no CPU fallback. 200k cells: 145.5 s
-  to 64.6 s on wgpu (55.1 s on MLX).
+  on the number of SEACells any more and no CPU fallback.
 - `sparse_add_csr` merges rows in parallel, which speeds up the SEACells B
-  update (MLX at 200k cells: 52.6 s to 37.9 s) and every other caller.
+  update and every other caller.
 - The parallel CSC/CSR transpose scatters in bands of rows.
 
 ## 0.6.4

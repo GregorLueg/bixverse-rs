@@ -31,3 +31,5 @@ jobs:
       # scipy arrives via `--all-extras`; the loader tests rebuild each batch
       # into a CSR matrix to check it against the store they were written from.
       extra-deps: 'scipy'
+      # CPU torch wheels: the default Linux resolution pulls multi-GB CUDA ones.
+      install-args: '--all-extras --torch-backend cpu'
